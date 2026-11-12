@@ -1,3 +1,16 @@
+#if defined(CS_ORG_BINDLESS)
+// The ORG build of the pixel stage (RenderGraph/Engine/ImageSpace, CS_ORG_IMAGESPACE): t0, t1, s0 and s1 from the heap, the
+// shared constants, and PerGeometry from the engine-constants capture through the pass's latch.
+#	define ORG_SHARED_CONSTANTS
+// FrameBuffer is the PerFrame the engine's draw had bound (captured with PerGeometry), not CS's shared snapshot.
+#	define ORG_SHARED_FRAMEBUFFER_AT PerGeometryAt
+#	include "Common/OrgEngineConstants.hlsli"
+#	include "Common/OrgResources.hlsli"
+#	define ISWORLDMAP_ORG_RESOURCES(X) X(SHARED, ConstantBuffer, Shared, 0) X(SRV, Texture2D<float4>, ImageTex, 0) X(SRV, Texture2D<float4>, DepthTex, 1) X(SAMPLER, SamplerState, ImageSampler, 0) X(SAMPLER, SamplerState, DepthSampler, 1) X(LATCH, OrgEngineConstantsAt, PerGeometryAt, 2)
+ORG_PUSH_BLOCK(ISWORLDMAP_ORG_RESOURCES(ORG_HANDLE))
+ISWORLDMAP_ORG_RESOURCES(ORG_RESOURCE)
+#endif
+
 #include "Common/DummyVSTexCoord.hlsl"
 #include "Common/FrameBuffer.hlsli"
 
@@ -9,6 +22,14 @@ struct PS_OUTPUT
 };
 
 #if defined(PSHADER)
+// The engine fills PerGeometry by name. The names are vanilla's, from the BSImagespaceShaderWorldMap constructor.
+// TexelSize xy: the blur step. CameraParams yzw: depth linearization. DepthParams x: focus distance, y: largest step,
+// z: step per distance, w: scale nearer than focus.
+#	if defined(CS_ORG_BINDLESS)
+static float4 TexelSize = OrgEngineRow(PerGeometryAt, 0);
+static float4 CameraParams = OrgEngineRow(PerGeometryAt, 1);
+static float4 DepthParams = OrgEngineRow(PerGeometryAt, 2);
+#	else
 SamplerState ImageSampler : register(s0);
 SamplerState DepthSampler : register(s1);
 
@@ -17,11 +38,11 @@ Texture2D<float4> DepthTex : register(t1);
 
 cbuffer PerGeometry : register(b2)
 {
-	// The engine fills these by name. The names are vanilla's, from the BSImagespaceShaderWorldMap constructor.
-	float4 TexelSize : packoffset(c0);     // xy: the blur step
-	float4 CameraParams : packoffset(c1);  // yzw: depth linearization
-	float4 DepthParams : packoffset(c2);   // x: focus distance, y: largest step, z: step per distance, w: scale nearer than focus
+	float4 TexelSize : packoffset(c0);
+	float4 CameraParams : packoffset(c1);
+	float4 DepthParams : packoffset(c2);
 };
+#	endif
 
 PS_OUTPUT main(PS_INPUT input)
 {
