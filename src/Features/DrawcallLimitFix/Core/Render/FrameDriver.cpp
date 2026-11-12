@@ -429,6 +429,7 @@ namespace DCLF
 		PassCapture::Get().SetOcclusionPhase(0);
 		const auto* epochs = Extensions::ShadowEpochs();
 		occlusionDrawn = epochs ? epochs->afterShadowMaps(wanted) : 0u;
+		occlusionEverDrawn |= occlusionDrawn;
 		Diagnostics::Notify(Diagnostics::OcclusionMapsDrawn{ occlusionDrawn });
 	}
 
@@ -502,6 +503,11 @@ namespace DCLF
 		if (needed && a_running && a_map < Extensions::kOcclusionMaps && Extensions::OcclusionOn(ActiveToggles(), a_map)) {
 			// Held: the map still renders at the engine's point, its camera set and DCLF's view of it taken (OcclusionView), but without the
 			// engine's cull (the shell skips SetupMask for a held map, OcclusionHeld): no occluder until DCLF takes it, behind the hold.
+			// Outside a hold, a map DCLF has drawn before but cannot draw now (after a coc its layout is new, and the selected shadow shape
+			// does not hold it yet: IndirectDraws::OcclusionReady): a re-entry. The engine renders the map every frame it shows, so DCLF
+			// takes it a frame or two later; meanwhile it is held, behind the held presents, and the engine never culls it.
+			if (!LoadHold::Active() && (occlusionEverDrawn & (1u << a_map)))
+				LoadHold::BeginReentry("an occlusion map DCLF drew before but cannot draw this frame (its layout is new)");
 			if (LoadHold::Active()) {
 				LoadHold::NoteHeld(LoadHold::View::Occlusion);
 				occlusionHeld |= 1u << a_map;

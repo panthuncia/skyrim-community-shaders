@@ -120,6 +120,7 @@ namespace DCLF
 		std::uint32_t occlusionHeld = 0;  // the maps OcclusionNeedsEngine held this frame (LoadHold.h)
 		std::uint32_t occlusionWanted = 0;  // the maps OcclusionReady took for the frame's shadow epoch, until AfterShadowMaps
 		std::uint32_t occlusionDrawn = 0;   // the maps the frame's shadow epoch drew (OcclusionNeedsEngine's answer)
+		std::uint32_t occlusionEverDrawn = 0;  // the maps a shadow epoch drew this session: one the engine would draw again is a re-entry
 		std::uint32_t captureFrame = ~0u;   // the frame whose main-pass bindings have been captured (Api::PrimaryViewContribution::beforeOpaque)
 	};
 }
