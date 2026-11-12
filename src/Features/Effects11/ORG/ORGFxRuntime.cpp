@@ -1049,7 +1049,6 @@ struct ORGFxRuntime::Impl
 		/** @brief The frame, in ExecuteEffects' order. Null with error set on failure. */
 		std::shared_ptr<Frame> Build()
 		{
-			auto* host = RenderGraphRuntime::Get().Host();
 			const auto& runs = inputs.runs;
 			auto run = [&](Fx a_fx) { return runs[static_cast<std::size_t>(a_fx)]; };
 			const std::uint32_t width = impl.resources->width;

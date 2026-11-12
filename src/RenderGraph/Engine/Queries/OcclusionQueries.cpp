@@ -177,7 +177,7 @@ namespace RenderGraph::Engine::OcclusionQueries
 		};
 
 		std::string name;
-		rhi::Device device;
+		mutable rhi::Device device;  // ChunkOf makes pools from a const ring
 		std::uint32_t perRun = 0;
 		std::uint64_t stride = 8;
 		// Grown by record time (any thread) and read by the render thread: guarded by chunkMutex. A chunk never moves.

@@ -127,9 +127,9 @@ namespace DCLF::Draws
 			const std::uint64_t region = at.offset;
 			constexpr std::uint64_t kWordBytes = sizeof(std::uint32_t);
 			for (const auto& copy : a_prepared.source.copies) {
-				const std::uint64_t at = std::uint64_t(copy.source) * CounterReadback::kSourceWords * kWordBytes;
-				commands.CopyBufferRegion(host, at, a_recording.Resolve(a_bindings.counts[copy.source]).GetHandle(), 0, kCountWords * kWordBytes);
-				commands.CopyBufferRegion(host, at + kCountWords * kWordBytes, latchBuffer, region + copy.latchOffset + offsetof(BuildDrawsLatch, visibilityStamp), kWordBytes);
+				const std::uint64_t hostAt = std::uint64_t(copy.source) * CounterReadback::kSourceWords * kWordBytes;
+				commands.CopyBufferRegion(host, hostAt, a_recording.Resolve(a_bindings.counts[copy.source]).GetHandle(), 0, kCountWords * kWordBytes);
+				commands.CopyBufferRegion(host, hostAt + kCountWords * kWordBytes, latchBuffer, region + copy.latchOffset + offsetof(BuildDrawsLatch, visibilityStamp), kWordBytes);
 			}
 		}
 

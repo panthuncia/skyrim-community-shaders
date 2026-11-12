@@ -1,6 +1,7 @@
 #include "Features/DrawcallLimitFix/Core/Extensions/CullInputs.h"
 #include "Features/DrawcallLimitFix/Core/Extensions/PassContext.h"
 #include "Features/DrawcallLimitFix/Core/Render/Main/Resources.h"
+#include "Features/DrawcallLimitFix/Core/Render/Payload/Latched.h"
 #include "Features/DrawcallLimitFix/Core/Render/Resources/Helpers.h"
 #include "Features/DrawcallLimitFix/Core/Render/Revision/Shapes.h"
 #include "Features/DrawcallLimitFix/Core/Scene/FrameView/FrameView.h"
@@ -105,7 +106,7 @@ namespace DCLF::Features::Portals
 				c.indices = index(a_bindings.indices);
 				c.tasks = index(a_bindings.tasks);
 				c.dispatch = index(a_bindings.dispatch);
-				SetLatchWords(c, *a_prepared.latch, a_recording.Run());
+				Draws::SetLatchWords(c, *a_prepared.latch, a_recording.Run());
 				const auto bind = [&](std::size_t stage) {
 					const auto& program = *batch.programs[stage];
 					commands.BindLayout(program.layout->GetHandle());
