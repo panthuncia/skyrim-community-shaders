@@ -613,7 +613,6 @@ namespace DCLF
 
 	void PassCapture::KeepForEngine(const RE::BSBatchRenderer* a_batch, const RE::BSRenderPass* a_pass) const
 	{
-		namespace Flush = RenderGraph::Engine::Flush;
 		// Counted for the log outside loads (LoadHold.h): what DCLF still hands the engine of its classes, with a sample by geometry: its
 		// view, its owner and whether it is hidden or skinned, read while the engine registers it.
 		if (a_pass && a_pass->geometry && !t_menuScenes && !bypassed.load(std::memory_order_acquire) && DclfClass(a_pass)) {
@@ -662,18 +661,8 @@ namespace DCLF
 			if (it != keptSamples.end())
 				++it->second.passes;
 		}
-		if (!Flush::Vouching() || !a_pass || !a_pass->geometry || !a_pass->shaderProperty || bypassed.load(std::memory_order_acquire))
-			return;
-		// DCLF's classes never reach the engine from here on purpose: members and waiting objects are withheld (WithholdMain, WithholdOwn,
-		// Withhold, the occlusion maps'), and so is everything of them during a load's hold. The sky's precipitation (a particle shader on the
-		// sky's geometry) has no port: the engine draws it, whatever view culls it. Water, other particles and the rest are other ports'.
-		if (!netimmerse_cast<const RE::BSParticleShaderProperty*>(a_pass->shaderProperty))
-			return;
-		static const Flush::Reason kPrecipitation{ "precipitation: no port" };
-		const auto* sky = RE::Sky::GetSingleton();
-		const auto* precipitation = sky ? sky->precip : nullptr;
-		if (precipitation && (a_pass->geometry == precipitation->currentPrecip.get() || a_pass->geometry == precipitation->lastPrecip.get()))
-			Flush::VouchPass(a_pass, kPrecipitation);
+		// Nothing is vouched for here: members and waiting objects are withheld (WithholdMain, WithholdOwn, Withhold, the occlusion maps'),
+		// and so is everything of them during a load's hold. The sky's precipitation is Features/Precipitation's (CS_ORG_PRECIPITATION).
 	}
 
 	namespace

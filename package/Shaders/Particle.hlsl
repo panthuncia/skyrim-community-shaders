@@ -1,6 +1,71 @@
 // SPDX-License-Identifier: MIT AND (LicenseRef-GPL-3.0-with-Modding-Exception WITH GPL-3.0-linking-source-exception)
 // Original code Copyright (c) 2022 Ilya Perapechka (MIT), modifications GPL-3.0 with Modding Exception (see EXCEPTIONS.md)
 
+#if defined(CS_ORG_BINDLESS)
+// The ORG build (Drawcall Limit Fix's precipitation family, Features/DrawcallLimitFix/Features/Precipitation): the ENVCUBE techniques
+// (rain, snow) drawn by the graph in the engine's place. One push block serves both stages, laid out as Water.hlsl's (the same headers
+// and the same latches): a draw's engine constants (VS PerTechnique and PerGeometry, PS PerGeometry), its descriptors, its textures' and
+// samplers' heap indices and its geometry are one latch region; Light Limit Fix's strict lights (PS b3) and the directional shadow record
+// (t98) follow it. The shared constants and the headers' other resources come from the heap through the push block.
+#	define ORG_SHARED_CONSTANTS
+#	define ORG_HEADER_RESOURCES
+// The permutation block is the draw's (ParticleOrgPermutation), not a shared buffer.
+#	define DCLF_PULLED_ROWS
+#	define SKYLIGHTING_PROBE_REGISTER t50
+#	include "Common/OrgResources.hlsli"
+
+// A draw's latched values, as the engine's SetupTechnique and SetupGeometry wrote its constant buffers (c rows in the D3D11 shaders'
+// layout). Matrices are rows: a latch is loaded with Load<T>, which does not keep row_major. 592 bytes.
+struct ParticleOrgDraw
+{
+	float4 VSTechnique[1];  // VS b0: ScaleAdjust
+	float4 VSGeometry[23];  // VS b2: WorldViewProj, WorldView, PrecipitationOcclusionWorldViewProj (ENVCUBE), fVars0-4, Color1-3, Velocity, Acceleration, Wind
+	float4 PSGeometry[2];   // PS b2: ColorScale, TextureSize
+	// What the vertex stage reads of CS's shared constants, copied here: DXC 1.9's SPIR-V for a vertex stage that pulls its vertices
+	// (vk::RawBufferLoad) and reads a shared view (a static ConstantBuffer) fails validation.
+	float4 Projection;         // FrameBuffer: CameraProj[0][0], CameraProj[1][1], DynamicResolutionParams1.xy
+	float4 BufferDim;          // SharedData
+	float4 RainRefraction[3];  // FeatureData: Rain Refraction's RainRefractionSettings
+	uint4 Descriptors;      // CS's permutation block: vertex, pixel, extra and extra feature descriptors
+	float EffectRadius;
+	uint VertexStride;
+	uint FirstIndex;
+	uint RaindropNormals;  // t80's heap index (Rain Refraction's raindrop normals)
+	uint4 Textures;        // t0-t3 heap indices
+	uint4 Samplers;        // s0-s3 sampler heap indices
+	uint2 VertexAddress;
+	uint2 IndexAddress;
+	uint2 VertexLayout;
+	uint2 Padding;
+};
+
+#	define PARTICLE_ORG_RESOURCES(X)                                                      \
+		X(SHARED, ConstantBuffer, Shared, 0)                                                 \
+		X(LATCH, ParticleOrgDraw, ParticleDraw, 2)                                           \
+		X(EXTERN_LATCH, StrictLightDataValues, StrictLightData, 3)                           \
+		X(EXTERN, Texture2D<float4>, DepthTexture, 17)                                       \
+		X(EXTERN, Texture2D<float2>, SharedShadowMap, 18)                                    \
+		X(EXTERN, Texture3D<float4>, ExponentialHeightFogIntegratedLightScattering, 19)      \
+		X(EXTERN, Texture3D<float4>, ExponentialHeightFogIntegratedLightScatteringFar, 22)   \
+		X(EXTERN, TextureCube<float>, CloudShadowsTexture, 25)                               \
+		X(EXTERN, TextureCube<float>, CloudSelfShadowTexture, 26)                            \
+		X(EXTERN, TextureCube<float3>, EnvReflectionsTexture, 30)                            \
+		X(EXTERN, TextureCube<float3>, EnvTexture, 31)                                       \
+		X(EXTERN, StructuredBuffer<Light>, lights, 35)                                       \
+		X(EXTERN, StructuredBuffer<uint>, lightList, 36)                                     \
+		X(EXTERN, StructuredBuffer<LightGrid>, lightGrid, 37)                                \
+		X(EXTERN, Texture3D<sh2>, SkylightingProbeArray, 50)                                 \
+		X(EXTERN, Texture2D<float2>, ShadowHeightTexture, 60)                                \
+		X(EXTERN, Texture2D<float4>, TexPrecipOcclusion, 70)                                 \
+		X(EXTERN, Texture2D<sh2>, EnvIBLTexture, 76)                                         \
+		X(EXTERN, Texture2D<sh2>, SkyIBLTexture, 77)                                         \
+		X(EXTERN_LATCH, DirectionalShadowLightData, DirectionalShadowLight, 98)              \
+		X(EXTERN, StructuredBuffer<LocalShadowData>, LocalShadows, 102)                      \
+		X(EXTERN, Texture2DArray<float>, LocalShadowMaps, 103)
+ORG_PUSH_BLOCK(PARTICLE_ORG_RESOURCES(ORG_HANDLE))
+PARTICLE_ORG_RESOURCES(ORG_RESOURCE)
+#endif
+
 #include "Common/ColorManagement.hlsli"
 #include "Common/FrameBuffer.hlsli"
 #include "Common/Game.hlsli"
@@ -49,6 +114,50 @@ struct VS_OUTPUT
 };
 
 #ifdef VSHADER
+#	if defined(CS_ORG_BINDLESS)
+static float2 ScaleAdjust = ParticleDraw.VSTechnique[0].xy;
+static float4x4 WorldViewProj = float4x4(ParticleDraw.VSGeometry[0], ParticleDraw.VSGeometry[1], ParticleDraw.VSGeometry[2], ParticleDraw.VSGeometry[3]);
+static float4x4 WorldView = float4x4(ParticleDraw.VSGeometry[4], ParticleDraw.VSGeometry[5], ParticleDraw.VSGeometry[6], ParticleDraw.VSGeometry[7]);
+#		if defined(ENVCUBE)
+static float4x4 PrecipitationOcclusionWorldViewProj =
+	float4x4(ParticleDraw.VSGeometry[8], ParticleDraw.VSGeometry[9], ParticleDraw.VSGeometry[10], ParticleDraw.VSGeometry[11]);
+// The rows after the matrices: four further down with ENVCUBE's occlusion matrix.
+#			define PARTICLE_ORG_ROW(N) ParticleDraw.VSGeometry[(N) + 12]
+#		else
+#			define PARTICLE_ORG_ROW(N) ParticleDraw.VSGeometry[(N) + 8]
+#		endif
+static float4 fVars0 = PARTICLE_ORG_ROW(0);
+static float4 fVars1 = PARTICLE_ORG_ROW(1);
+static float4 fVars2 = PARTICLE_ORG_ROW(2);
+static float4 fVars3 = PARTICLE_ORG_ROW(3);
+static float4 fVars4 = PARTICLE_ORG_ROW(4);
+static float4 Color1 = PARTICLE_ORG_ROW(5);
+static float4 Color2 = PARTICLE_ORG_ROW(6);
+static float4 Color3 = PARTICLE_ORG_ROW(7);
+static float4 Velocity = PARTICLE_ORG_ROW(8);
+static float4 Acceleration = PARTICLE_ORG_ROW(9);
+static float4 Wind = PARTICLE_ORG_ROW(10);
+
+/** @brief Rain Refraction's settings as the draw's latch holds them (ParticleOrgDraw.RainRefraction). */
+SharedData::RainRefractionSettings ParticleOrgRainRefraction()
+{
+	SharedData::RainRefractionSettings settings = (SharedData::RainRefractionSettings)0;
+	settings.Enable = asuint(ParticleDraw.RainRefraction[0].x);
+	settings.MotionStretch = ParticleDraw.RainRefraction[0].y;
+	settings.MotionTransparency = ParticleDraw.RainRefraction[0].z;
+	settings.TextureBounds = ParticleDraw.RainRefraction[1];
+	settings.TextureRadiusScale = ParticleDraw.RainRefraction[2].xy;
+	return settings;
+}
+static SharedData::RainRefractionSettings ParticleRainRefraction = ParticleOrgRainRefraction();
+static float4 ParticleBufferDim = ParticleDraw.BufferDim;
+static float2 ParticleProjectionScale = ParticleDraw.Projection.xy;
+static float2 ParticleDynamicResolution = ParticleDraw.Projection.zw;
+#	else
+#		define ParticleProjectionScale float2(FrameBuffer::CameraProj[0][0], FrameBuffer::CameraProj[1][1])
+#		define ParticleDynamicResolution FrameBuffer::DynamicResolutionParams1.xy
+#		define ParticleRainRefraction SharedData::rainRefractionSettings
+#		define ParticleBufferDim SharedData::BufferDim
 cbuffer PerTechnique : register(b0)
 {
 	float2 ScaleAdjust : packoffset(c0);
@@ -73,6 +182,7 @@ cbuffer PerGeometry : register(b2)
 	float4 Acceleration;  // 17, 25 ENVCUBE 21, 29
 	float4 Wind;          // 18, 26 ENVCUBE 22, 30
 }
+#	endif
 
 float2x2 GetRotationMatrix(float angle)
 {
@@ -82,7 +192,11 @@ float2x2 GetRotationMatrix(float angle)
 	return float2x2(float2(cosine, -sine), float2(sine, cosine));
 }
 
+#	if defined(CS_ORG_BINDLESS)
+VS_OUTPUT ParticleVertex(VS_INPUT input)
+#	else
 VS_OUTPUT main(VS_INPUT input)
+#	endif
 {
 	VS_OUTPUT vsout;
 
@@ -104,17 +218,17 @@ VS_OUTPUT main(VS_INPUT input)
 
 #		if defined(RAIN) && defined(RAIN_REFRACTION)
 	vsout.RaindropData.z = 1.0;
-	if (SharedData::rainRefractionSettings.Enable) {
+	if (ParticleRainRefraction.Enable) {
 		// Physically sized drop, centered on the vanilla streak and stretched along its motion
 		float2 corner = sign(input.TexCoord1.xy);
-		float3 motion = Velocity.xyz * abs(input.TexCoord1.y) * SharedData::rainRefractionSettings.MotionStretch;
+		float3 motion = Velocity.xyz * abs(input.TexCoord1.y) * ParticleRainRefraction.MotionStretch;
 		float4 center = msPosition - float4(Velocity.xyz * 0.5, 0);
 		float4 leading = mul(WorldViewProj, center + float4(motion * 0.5, 0));
 		float4 trailing = mul(WorldViewProj, center - float4(motion * 0.5, 0));
 		float4 dropPosition = lerp(trailing, leading, corner.y * 0.5 + 0.5);
 
-		float2 renderSize = SharedData::BufferDim.xy * FrameBuffer::DynamicResolutionParams1.xy;
-		float2 radiusClip = Raindrop::Radius * SharedData::rainRefractionSettings.TextureRadiusScale * abs(float2(FrameBuffer::CameraProj[0][0], FrameBuffer::CameraProj[1][1]));
+		float2 renderSize = ParticleBufferDim.xy * ParticleDynamicResolution;
+		float2 radiusClip = Raindrop::Radius * ParticleRainRefraction.TextureRadiusScale * abs(ParticleProjectionScale);
 		float2 radiusPixels = radiusClip * renderSize * 0.5 / max(abs(dropPosition.w), EPSILON_DIVISION);
 		float rasterScale = max(1.0, Raindrop::MinimumRadiusPixels / max(min(radiusPixels.x, radiusPixels.y), EPSILON_DIVISION));
 		float2 motionPixels = (leading.xy / max(abs(leading.w), EPSILON_DIVISION) - trailing.xy / max(abs(trailing.w), EPSILON_DIVISION)) * renderSize * 0.5;
@@ -232,11 +346,54 @@ VS_OUTPUT main(VS_INPUT input)
 
 #	if defined(ENVCUBE) && defined(RAIN) && defined(RAIN_REFRACTION)
 	// Corner offsets are +-particle size; their sign picks the corner of the drop's covered area in the raindrop texture, so one drop fills each particle
-	vsout.RaindropData.xy = lerp(SharedData::rainRefractionSettings.TextureBounds.xy, SharedData::rainRefractionSettings.TextureBounds.zw, step(0, input.TexCoord1.xy));
+	vsout.RaindropData.xy = lerp(ParticleRainRefraction.TextureBounds.xy, ParticleRainRefraction.TextureBounds.zw, step(0, input.TexCoord1.xy));
 #	endif
 
 	return vsout;
 }
+
+#	if defined(CS_ORG_BINDLESS)
+#		if defined(__spirv__)
+#			define DCLF_PULLED_VERTICES
+#			include "Common/DCLFVertexPull.hlsli"
+
+/** @brief The draw's vertex a_vertexID, pulled as the input assembler reads it: its 16-bit index, then its attributes. */
+VS_INPUT ParticlePullVertex(uint a_vertexID)
+{
+	DCLFDrawVertexLayout = ParticleDraw.VertexLayout;
+	const uint indexNumber = ParticleDraw.FirstIndex + a_vertexID;
+	const uint indexWord = vk::RawBufferLoad<uint>(DCLFAddress(ParticleDraw.IndexAddress) + uint64_t((indexNumber * 2) & ~3u));
+	const uint index = (indexNumber & 1) ? (indexWord >> 16) : (indexWord & 0xFFFF);
+	DCLFStream first = { DCLFAddress(ParticleDraw.VertexAddress), ParticleDraw.VertexStride };
+	DCLFStream second = { uint64_t(0), 0u };
+	DCLFStreamsAt(index, first, second);
+
+	VS_INPUT input = (VS_INPUT)0;
+	input.Position = DCLFPullPosition(first, second);
+	// TEXCOORD0 is R16G16 (the input assembler gives z 0 and w 1), TEXCOORD1 R16G16B16A16 (VertexInput.cpp, BuildVertexElements).
+	input.TexCoord0 = float4(DCLFPullHalf2(1, first, second), 0, 1);
+#				if defined(ENVCUBE)
+	input.TexCoord1 = DCLFPullHalf4(2, first, second);
+#				else
+	input.Normal = DCLFPullUnorm4(3, 0, first, second);
+	input.TexCoord1 = (int4)DCLFPullHalf4(2, first, second);
+#				endif
+	return input;
+}
+#		else
+// The D3D12 build has no vertex pulling yet: it compiles, and draws nothing.
+VS_INPUT ParticlePullVertex(uint a_vertexID)
+{
+	VS_INPUT input = (VS_INPUT)0;
+	return input;
+}
+#		endif
+
+VS_OUTPUT main(uint a_vertexID: SV_VertexID)
+{
+	return ParticleVertex(ParticlePullVertex(a_vertexID));
+}
+#	endif
 #endif
 
 typedef VS_OUTPUT PS_INPUT;
@@ -253,6 +410,31 @@ struct PS_OUTPUT
 #		include "LightLimitFix/LightLimitFix.hlsli"
 #	endif
 
+#	if defined(CS_ORG_BINDLESS)
+static SamplerState SampSourceTexture = SamplerDescriptorHeap[ParticleDraw.Samplers.x];
+#		if defined(GRAYSCALE_TO_COLOR) || defined(GRAYSCALE_TO_ALPHA)
+static SamplerState SampGrayscaleTexture = SamplerDescriptorHeap[ParticleDraw.Samplers.y];
+#		endif
+#		if defined(ENVCUBE)
+static SamplerState SampPrecipitationOcclusionTexture = SamplerDescriptorHeap[ParticleDraw.Samplers.z];
+static SamplerState SampUnderwaterMask = SamplerDescriptorHeap[ParticleDraw.Samplers.w];
+#		endif
+
+static Texture2D<float4> TexSourceTexture = ResourceDescriptorHeap[ParticleDraw.Textures.x];
+#		if defined(GRAYSCALE_TO_COLOR) || defined(GRAYSCALE_TO_ALPHA)
+static Texture2D<float4> TexGrayscaleTexture = ResourceDescriptorHeap[ParticleDraw.Textures.y];
+#		endif
+#		if defined(ENVCUBE)
+static Texture2D<float4> TexPrecipitationOcclusionTexture = ResourceDescriptorHeap[ParticleDraw.Textures.z];
+static Texture2D<float4> TexUnderwaterMask = ResourceDescriptorHeap[ParticleDraw.Textures.w];
+#		endif
+#		if defined(ENVCUBE) && defined(RAIN) && defined(RAIN_REFRACTION)
+static Texture2D<float4> TexRaindropNormals = ResourceDescriptorHeap[ParticleDraw.RaindropNormals];
+#		endif
+
+static float ColorScale = ParticleDraw.PSGeometry[0].x;
+static float3 TextureSize = ParticleDraw.PSGeometry[1].xyz;
+#	else
 SamplerState SampSourceTexture : register(s0);
 #	if defined(GRAYSCALE_TO_COLOR) || defined(GRAYSCALE_TO_ALPHA)
 SamplerState SampGrayscaleTexture : register(s1);
@@ -279,6 +461,7 @@ cbuffer PerGeometry : register(b2)
 	float ColorScale : packoffset(c0);
 	float3 TextureSize : packoffset(c1);
 };
+#	endif
 
 #	define LinearSampler SampSourceTexture
 #	include "Common/Permutation.hlsli"
@@ -286,6 +469,18 @@ cbuffer PerGeometry : register(b2)
 
 #	if defined(IBL)
 #		include "IBL/IBL.hlsli"
+#	endif
+
+#	if defined(CS_ORG_BINDLESS)
+/** @brief The draw's permutation block (Permutation.hlsli, DCLF_PULLED_ROWS), set by main before anything reads it. */
+void ParticleOrgPermutation()
+{
+	Permutation::VertexShaderDescriptor = ParticleDraw.Descriptors.x;
+	Permutation::PixelShaderDescriptor = ParticleDraw.Descriptors.y;
+	Permutation::ExtraShaderDescriptor = ParticleDraw.Descriptors.z;
+	Permutation::ExtraFeatureDescriptor = ParticleDraw.Descriptors.w;
+	Permutation::EffectRadius = ParticleDraw.EffectRadius;
+}
 #	endif
 
 #	if defined(DYNAMIC_CUBEMAPS)
@@ -381,7 +576,11 @@ void AddPointLighting(float3 positionWS, ParticleSurface surface, inout float3 l
 #	endif
 }
 
+#	if defined(CS_ORG_BINDLESS)
+PS_OUTPUT ParticlePixel(PS_INPUT input, bool frontFace)
+#	else
 PS_OUTPUT main(PS_INPUT input, bool frontFace : SV_IsFrontFace)
+#	endif
 {
 	PS_OUTPUT psout;
 
@@ -509,4 +708,11 @@ PS_OUTPUT main(PS_INPUT input, bool frontFace : SV_IsFrontFace)
 #	endif
 	return psout;
 }
+#	if defined(CS_ORG_BINDLESS)
+PS_OUTPUT main(PS_INPUT input, bool frontFace : SV_IsFrontFace)
+{
+	ParticleOrgPermutation();
+	return ParticlePixel(input, frontFace);
+}
+#	endif
 #endif
