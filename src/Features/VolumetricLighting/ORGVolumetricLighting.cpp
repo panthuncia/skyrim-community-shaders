@@ -615,10 +615,10 @@ struct ORGVolumetricLighting::Impl
 			return false;
 		}
 		registration = std::move(made);
-		std::string sizes;
+		std::string sizeList;
 		for (const auto& size : registration->sizes)
-			sizes += fmt::format("{}{}x{}x{}", sizes.empty() ? "" : ", ", size.width, size.height, size.depth);
-		logger::info("{}: registered with volumes {} (Terrain Shadows {}, Cloud Shadows {}); the anchor's graph holds it from its next build", kLogPrefix, sizes,
+			sizeList += fmt::format("{}{}x{}x{}", sizeList.empty() ? "" : ", ", size.width, size.height, size.depth);
+		logger::info("{}: registered with volumes {} (Terrain Shadows {}, Cloud Shadows {}); the anchor's graph holds it from its next build", kLogPrefix, sizeList,
 			registration->shadowHeights ? (registration->shadowHeights.published.empty() ? "imported" : "by its published id") : "off",
 			registration->cloudShadows ? (registration->cloudShadows.published.empty() ? "imported" : "by its published id") : "off");
 		return true;
