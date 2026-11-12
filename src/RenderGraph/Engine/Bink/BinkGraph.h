@@ -58,9 +58,10 @@ namespace RenderGraph::Engine::Bink
 		 * resize, HDR's textures made again) the client is refreshed, and with a_betweenFrames (a blocking movie's tick before it
 		 * begins its frame) the graph is built here, between two frames. The refusals left: the ring full this frame
 		 * (FrameAnchors::CanRun), a framebuffer that cannot be imported, and a target made again inside a frame. A frame queued
-		 * earlier that did not draw is logged as an error. False: the engine draws this tick.
+		 * earlier that did not draw is logged as an error. a_inFrame: a movie inside another frame (player mode 2), drawn at the
+		 * MovieTiles anchor. False: the graph does not draw this tick.
 		 */
-		bool Begin(bool a_betweenFrames);
+		bool Begin(bool a_betweenFrames, bool a_inFrame);
 
 		/**
 		 * @brief Render thread: the movie's tiles, their place in a staging buffer and in the movie texture's chunks (a_tileSize: the
@@ -80,7 +81,13 @@ namespace RenderGraph::Engine::Bink
 		 * with a_hdr (HDR Display redirected the framebuffer there). False when there is nothing the graph can draw: the engine's draw
 		 * runs.
 		 */
-		bool Queue(const std::shared_ptr<Movie>& a_movie, bool a_hdr);
+		bool Queue(const std::shared_ptr<Movie>& a_movie, bool a_hdr, bool a_inFrame);
+
+		/**
+		 * @brief Render thread, right after Queue of a movie inside another frame (player mode 2), at the tile draw's point: the
+		 * MovieTiles anchor runs the queued frame there, in the frame's order. False, logged as an error, when it did not draw.
+		 */
+		bool DrawInFrame();
 
 		/** @brief Render thread, at the end of every tick that called Begin: drops a staging buffer the tick took but did not queue. */
 		void EndTick(Movie& a_movie);

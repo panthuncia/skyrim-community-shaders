@@ -134,9 +134,7 @@ With `CS_ORG_BINK=1` the graph is the only path for the ticks it takes (primary-
 
 ### What stays the engine's
 
-- Movies in player mode 2 (drawn inside another frame), and ticks off the render owner (the logo without
-  `CS_ORG_LOADING_THREAD=1`). Mode 2 needs its draw at the `DrawTiles` point inside the caller's frame: an anchor there, which
-  is FrameAnchors work (a new anchor in its table and the frame's epoch order), not done in 5.5.9.
+- Ticks off the render owner (the logo without `CS_ORG_LOADING_THREAD=1`).
 - A movie larger than 4096x2304, and a tile set whose layout is not the expected one.
 - The framebuffer that cannot be imported, the Present anchor's ring full this frame, no staging block to take, and a target
   made again while a frame is open (a mode-1 tick always starts between frames, so in practice never).
@@ -163,7 +161,17 @@ With `CS_ORG_BINK=1` the graph is the only path for the ticks it takes (primary-
   the engine's for it.
 - **The logo's frame 1:** nothing changed; `loading-org1.env` showed 166 of 166 frames on the graph (org-full-port.md). Without
   `CS_ORG_LOADING_THREAD=1` the logo stays the engine's (5.5.11 makes the switch the default).
-- `bink: tick not taken` stays: mode 2 and the refusals above still reach the engine's `DrawTiles`.
+- **Mode 2** (a movie inside another frame, `MoviePlayer::TickInFrame`): its frame is queued for a new anchor, `MovieTiles`
+  (FrameAnchors, late, placed before Interface in the timeline), which the `DrawTiles` detour runs right there, so the tiles land
+  at the engine's point in the caller's frame. The client has a pass per target at each anchor (`cs.bink.tiles.in-frame` and
+  `.hdr`), each with its own `RunSlots`; a commit stores the pending frame only at the anchor it was queued for. A run that did
+  not draw is an error (`did not draw at the MovieTiles anchor`), not a fallback. No caller of `TickInFrame` was found in SE
+  (only its unwind data refers to it), so this path may never run.
+- **The startup logo** was the engine's in `1112-025115-p35-latch-census-short-integ2` (22 draws a frame in the startup window):
+  setup failed with `the framebuffer cannot be imported`, because the new `TextureOf` read kFRAMEBUFFER's RTV without unwrapping
+  the tripwire handle. It unwraps now, and `Update` logs which part failed.
+- **`bink: tick not taken` is deleted.** A tick the graph does not take (a refusal above, logged once with its reason) calls the
+  engine's `DrawTiles` without a flush scope, so with the latch on it is skipped and counted, and with the latch off it draws.
 
 ## Design
 

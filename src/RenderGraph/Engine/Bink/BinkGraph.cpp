@@ -69,6 +69,7 @@ namespace RenderGraph::Engine::Bink
 #	include "Features/HDRDisplay.h"
 #	include "Globals.h"
 #	include "RenderGraph/Engine/Bink/Bink.h"
+#	include "RenderGraph/Engine/Tripwire/Tripwire.h"
 #	include "RenderGraph/FrameAnchors.h"
 #	include "RenderGraph/FrameStaging.h"
 #	include "RenderGraph/GraphResources.h"
@@ -161,13 +162,16 @@ namespace RenderGraph::Engine::Bink::Graph
 			std::uint32_t width = 0, height = 0;
 		};
 
-		/** @brief A frame queued for the Present anchor's run. */
+		/** @brief A frame queued for the Present anchor's run, or for the MovieTiles anchor's (a movie inside another frame). */
 		struct Pending
 		{
 			std::shared_ptr<Movie> movie;
 			std::shared_ptr<org::LatchBlock> staging;
-			bool hdr = false;  // into HDR's UI texture (HDR Display redirected the framebuffer there for the movie)
+			bool hdr = false;      // into HDR's UI texture (HDR Display redirected the framebuffer there for the movie)
+			bool inFrame = false;  // player mode 2: drawn at the MovieTiles anchor, at the tile draw's point
 		};
+
+		FrameAnchors::Anchor AnchorFor(bool a_inFrame) { return a_inFrame ? FrameAnchors::Anchor::MovieTiles : FrameAnchors::Anchor::Present; }
 
 		/** @brief A texture the tiles are drawn onto: the framebuffer, or HDR's UI texture while HDR output is on. */
 		struct DrawTarget
@@ -177,7 +181,10 @@ namespace RenderGraph::Engine::Bink::Graph
 			winrt::com_ptr<ID3D11Texture2D> texture;  // DXVK's: the target's identity
 			std::uint32_t width = 0, height = 0;
 			rhi::Format format = rhi::Format::Unknown;  // of its RTV
-			std::shared_ptr<const RunSlots<Frame>> slots;
+			std::shared_ptr<const RunSlots<Frame>> slots;         // the Present anchor's pass
+			std::shared_ptr<const RunSlots<Frame>> inFrameSlots;  // the MovieTiles anchor's pass
+
+			const std::shared_ptr<const RunSlots<Frame>>& SlotsAt(bool a_inFrame) const { return a_inFrame ? inFrameSlots : slots; }
 		};
 
 		struct BinkState
@@ -358,31 +365,38 @@ namespace RenderGraph::Engine::Bink::Graph
 			auto& state = Get();
 			FrameAnchors::ClientDesc client{};
 			client.id = kClientId;
-			// First in the anchor: the movie frame is the image the other Present clients draw over.
-			const auto add = [&](const DrawTarget& a_target, const char* a_name, std::int32_t a_order) {
+			// First in the Present anchor: the movie frame is the image the other Present clients draw over. The MovieTiles anchor is
+			// Bink's alone.
+			const auto add = [&](const DrawTarget& a_target, bool a_inFrame, const char* a_name, std::int32_t a_order) {
 				if (!a_target.resource)
 					return;
 				client.passes.push_back({ .name = a_name,
-					.anchor = FrameAnchors::Anchor::Present,
+					.anchor = AnchorFor(a_inFrame),
 					.order = a_order,
 					.kind = FrameAnchors::PassKind::Render,
-					.make = [resource = a_target.resource, atlas = state.atlas->Graph(), slots = a_target.slots] {
+					.make = [resource = a_target.resource, atlas = state.atlas->Graph(), slots = a_target.SlotsAt(a_inFrame)] {
 						return std::make_shared<DrawPass>(resource, atlas, slots);
 					} });
 			};
-			add(state.framebuffer, "cs.bink.tiles", -1000);
-			add(state.hdrUi, "cs.bink.tiles.hdr", -999);
+			add(state.framebuffer, false, "cs.bink.tiles", -1000);
+			add(state.hdrUi, false, "cs.bink.tiles.hdr", -999);
+			if (FrameAnchors::HasEpoch(FrameAnchors::Anchor::MovieTiles)) {
+				add(state.framebuffer, true, "cs.bink.tiles.in-frame", 0);
+				add(state.hdrUi, true, "cs.bink.tiles.in-frame.hdr", 1);
+			}
 			client.registerResources = [](org::RenderGraph& a_graph) { Get().atlas->Register(a_graph); };
-			client.commit = [](const FrameAnchors::Point&) {
+			client.commit = [](const FrameAnchors::Point& a_point) {
 				auto& current = Get();
 				auto* host = RenderGraphRuntime::Get().Host();
 				if (!host)
 					return;
+				const bool inFrame = a_point.anchor == FrameAnchors::Anchor::MovieTiles;
 				const org::RunRef run = host->CurrentRun();
 				// Every target's entry for this run emptied first, so nothing older is left there.
-				current.framebuffer.slots->Store(run, nullptr);
-				current.hdrUi.slots->Store(run, nullptr);
-				if (!current.pending)
+				current.framebuffer.SlotsAt(inFrame)->Store(run, nullptr);
+				current.hdrUi.SlotsAt(inFrame)->Store(run, nullptr);
+				// A frame is drawn by the anchor it was queued for.
+				if (!current.pending || current.pending->inFrame != inFrame)
 					return;
 				auto pending = std::move(*current.pending);
 				current.pending.reset();
@@ -395,7 +409,7 @@ namespace RenderGraph::Engine::Bink::Graph
 				frame->samplerOwner = current.sampler.Owner();
 				frame->width = target.width;
 				frame->height = target.height;
-				target.slots->Store(run, std::move(frame));
+				target.SlotsAt(inFrame)->Store(run, std::move(frame));
 				current.committed = current.queued;
 			};
 			client.active = [] { return Get().pending.has_value(); };
@@ -413,6 +427,8 @@ namespace RenderGraph::Engine::Bink::Graph
 			a_format = DXGI_FORMAT_UNKNOWN;
 			if (!a_rtv)
 				return nullptr;
+			// The engine's tables hold tripwire handles with the guest device: DXVK's view is behind it.
+			a_rtv = Tripwire::Unwrap(a_rtv);
 			winrt::com_ptr<ID3D11Resource> resource;
 			a_rtv->GetResource(resource.put());
 			auto texture = resource.try_as<ID3D11Texture2D>();
@@ -459,6 +475,8 @@ namespace RenderGraph::Engine::Bink::Graph
 			}
 			const auto format = rhi::helpers::ToRHI(a_format);
 			if (!resource || format == rhi::Format::Unknown || !ProgramFor(format)) {
+				logger::warn("[ORG] Bink: {} cannot be drawn onto: {}", a_target.name,
+					!resource ? "it cannot be imported" : (format == rhi::Format::Unknown ? "its view's format has no RHI form" : "its tile program cannot be built"));
 				a_ok = false;
 				return false;
 			}
@@ -483,7 +501,12 @@ namespace RenderGraph::Engine::Bink::Graph
 		{
 			DXGI_FORMAT format{};
 			bool ok = true;
-			bool changed = Update(a_state.framebuffer, TextureOf(FramebufferRtv(), format), format, true, ok);
+			auto framebuffer = TextureOf(FramebufferRtv(), format);
+			if (!framebuffer) {
+				logger::warn("[ORG] Bink: kFRAMEBUFFER has no RTV of a 2D texture");
+				return false;
+			}
+			bool changed = Update(a_state.framebuffer, std::move(framebuffer), format, true, ok);
 			if (!ok || !a_state.framebuffer.resource)
 				return false;
 			const auto& hdr = globals::features::hdrDisplay;
@@ -587,8 +610,10 @@ namespace RenderGraph::Engine::Bink::Graph
 			// The Present anchor runs once a frame.
 			.runsPerFrame = 1,
 			.maxBlocks = kMaxStaging });
-		state.framebuffer.slots = std::make_shared<const RunSlots<Frame>>();
-		state.hdrUi.slots = std::make_shared<const RunSlots<Frame>>();
+		for (auto* target : { &state.framebuffer, &state.hdrUi }) {
+			target->slots = std::make_shared<const RunSlots<Frame>>();
+			target->inFrameSlots = std::make_shared<const RunSlots<Frame>>();
+		}
 		// The engine's PS sampler for this draw: address mode 0, filter mode 2 (CreateSamplerStates, SE 75831): trilinear, clamped, no
 		// bias, every LOD.
 		D3D11_SAMPLER_DESC sampler{};
@@ -618,7 +643,7 @@ namespace RenderGraph::Engine::Bink::Graph
 		logger::info("[ORG] Bink: on (CS_ORG_BINK); registered at the Present anchor for the session, joined at setup's build point");
 	}
 
-	bool Begin(bool a_betweenFrames)
+	bool Begin(bool a_betweenFrames, bool a_inFrame)
 	{
 		// Why a tick stays the engine's, logged once per reason.
 		const auto refuse = [](std::string_view a_reason) {
@@ -636,16 +661,19 @@ namespace RenderGraph::Engine::Bink::Graph
 		// next ticks draw on the graph as before.
 		if (state.executed < state.queued) {
 			state.lost += state.queued - state.executed;
-			logger::error("[ORG] Bink: a movie frame queued for the Present anchor did not draw ({} so far)", state.lost);
+			logger::error("[ORG] Bink: a movie frame queued for its anchor did not draw ({} so far)", state.lost);
 			state.executed = state.queued;
 		}
 		state.pending.reset();
 		if (!UpdateTargets(state, a_betweenFrames))
 			return refuse("the framebuffer cannot be imported, or its tile program cannot be made");
-		// The setup's build point put the client in the Present graph; a target made again inside a frame waits for the next build.
-		if (!FrameAnchors::CanRun(kClientId, FrameAnchors::Anchor::Present))
-			return refuse(FrameAnchors::InBuiltGraph(kClientId, FrameAnchors::Anchor::Present) ? "the Present anchor's ring is full this frame" :
-			                                                                                      "a target was made again inside a frame (until the Present graph is built with it)");
+		// The setup's build point put the client in its anchors' graphs; a target made again inside a frame waits for the next build.
+		const auto anchor = AnchorFor(a_inFrame);
+		if (a_inFrame && !FrameAnchors::HasEpoch(anchor))
+			return refuse("a movie inside another frame without the MovieTiles anchor");
+		if (!FrameAnchors::CanRun(kClientId, anchor))
+			return refuse(FrameAnchors::InBuiltGraph(kClientId, anchor) ? "its anchor's ring is full this frame" :
+			                                                              "a target was made again inside a frame (until the graph is built with it)");
 		return true;
 	}
 
@@ -697,7 +725,7 @@ namespace RenderGraph::Engine::Bink::Graph
 		return data;
 	}
 
-	bool Queue(const std::shared_ptr<Movie>& a_movie, bool a_hdr)
+	bool Queue(const std::shared_ptr<Movie>& a_movie, bool a_hdr, bool a_inFrame)
 	{
 		auto& state = Get();
 		if (state.failed || !state.setUp || !a_movie)
@@ -711,9 +739,25 @@ namespace RenderGraph::Engine::Bink::Graph
 			return false;
 		}
 		// A tick that decoded nothing draws the last decoded frame again.
-		state.pending = Pending{ a_movie, a_movie->last, a_hdr };
+		state.pending = Pending{ a_movie, a_movie->last, a_hdr, a_inFrame };
 		++state.queued;
 		return true;
+	}
+
+	bool DrawInFrame()
+	{
+		auto& state = Get();
+		if (!state.pending || !state.pending->inFrame)
+			return false;
+		const auto result = FrameAnchors::Run(FrameAnchors::Anchor::MovieTiles);
+		state.pending.reset();
+		if (result && state.executed == state.queued)
+			return true;
+		// A failure, not a fallback: logged, and the next ticks draw on the graph as before.
+		state.lost += state.queued - state.executed;
+		state.executed = state.queued;
+		logger::error("[ORG] Bink: a movie frame inside another frame did not draw at the MovieTiles anchor ({} so far)", state.lost);
+		return false;
 	}
 
 	void EndTick(Movie& a_movie)
@@ -743,10 +787,11 @@ namespace RenderGraph::Engine::Bink::Graph
 	class Movie
 	{};
 	void Setup() {}
-	bool Begin(bool) { return false; }
+	bool Begin(bool, bool) { return false; }
 	std::shared_ptr<Movie> CreateMovie(const Layout&, std::uint32_t) { return nullptr; }
 	std::byte* Lock(Movie&, std::uint32_t, std::uint32_t&) { return nullptr; }
-	bool Queue(const std::shared_ptr<Movie>&, bool) { return false; }
+	bool Queue(const std::shared_ptr<Movie>&, bool, bool) { return false; }
+	bool DrawInFrame() { return false; }
 	void EndTick(Movie&) {}
 	void MarkStale(Movie&) {}
 	void MovieEnded() {}

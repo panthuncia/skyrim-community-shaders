@@ -100,6 +100,10 @@ namespace FrameAnchors
 		// placed. Not EngineQueries: an inactive client's passes run in another client's runs, and their query reset and resolve would
 		// overwrite counts its own last run left unread.
 		DecalQueries,
+		// Out of frame order (appended): a Bink movie drawn inside another frame (player mode 2, MoviePlayer::TickInFrame), at the
+		// point of its tile draw (BSMovie::DrawTiles, SE 87907, AE 90279; RenderGraph/Engine/Bink). Such a tick does not present,
+		// so the Present anchor would draw it out of order.
+		MovieTiles,
 		Count
 	};
 
