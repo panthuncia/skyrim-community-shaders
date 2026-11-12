@@ -34,6 +34,7 @@
 #	include <bit>
 #	include <cmath>
 #	include <cstring>
+#	include <string>
 
 namespace RenderGraph::Engine::Scaleform::Passes
 {
@@ -111,13 +112,18 @@ namespace RenderGraph::Engine::Scaleform::Passes
 
 		using Slots = RunSlots<Frame>;
 
-		/** @brief The targets UI::DrawInterface binds for the displays: the only ones the graph draws onto. */
+		/**
+		 * @brief The targets UI::DrawInterface binds for the displays: the only ones the graph draws onto. The main menu and the
+		 * loading menu draw their movies into kMAIN (the 2026-11-12 latch census: most of the Scaleform draws left in load windows
+		 * and at the main menu), so kMAIN is a surface from setup too.
+		 */
 		enum class Role : std::uint8_t
 		{
 			Framebuffer,  // the back buffer (kFRAMEBUFFER's RTV, or HDR's saved one)
 			HdrUi,        // HDR's UI texture, while HDR redirects the interface into it
+			Main,         // kMAIN: the main menu's and the loading menu's movies
 		};
-		constexpr std::array<Role, 2> kRoles{ Role::Framebuffer, Role::HdrUi };
+		constexpr std::array<Role, 3> kRoles{ Role::Framebuffer, Role::HdrUi, Role::Main };
 
 		/**
 		 * @brief A target the displays draw onto, with kMAIN's depth-stencil for masks. It has two passes: one with the target alone,
@@ -631,6 +637,20 @@ namespace RenderGraph::Engine::Scaleform::Passes
 			return -1;
 		}
 
+		/** @brief The refusal for a display onto another target, naming the engine target when it is one (counted per name). */
+		const char* OtherTargetReason(ID3D11Texture2D* a_texture)
+		{
+			static const std::array<std::string, static_cast<std::size_t>(RE::RENDER_TARGET::kTOTAL)> s_engine = [] {
+				std::array<std::string, static_cast<std::size_t>(RE::RENDER_TARGET::kTOTAL)> names;
+				for (std::size_t i = 0; i < names.size(); ++i)
+					names[i] = fmt::format("a render target other than the framebuffer, HDR's UI texture and kMAIN (engine target {})", i);
+				return names;
+			}();
+			const auto target = EngineTargetOf(a_texture);
+			return target >= 0 ? s_engine[static_cast<std::size_t>(target)].c_str() :
+			                     "a render target other than the framebuffer, HDR's UI texture and kMAIN (not an engine target)";
+		}
+
 		/** @brief The engine depth-stencil target whose texture is a_texture (DXVK's), or -1. */
 		std::int32_t EngineDepthOf(ID3D11Texture2D* a_texture)
 		{
@@ -680,12 +700,27 @@ namespace RenderGraph::Engine::Scaleform::Passes
 		{
 			if (a_role == Role::Framebuffer)
 				return TextureOf(FramebufferRtv(), a_format);
+			if (a_role == Role::Main) {
+				auto* renderer = globals::game::renderer;
+				a_format = DXGI_FORMAT_UNKNOWN;
+				return renderer ? TextureOf(renderer->GetRuntimeData().renderTargets[static_cast<std::uint32_t>(RE::RENDER_TARGET::kMAIN)].RTV, a_format) : nullptr;
+			}
 			const auto& hdr = globals::features::hdrDisplay;
 			a_format = DXGI_FORMAT_UNKNOWN;
 			return hdr.loaded && hdr.uiTexture && hdr.uiTexture->rtv ? TextureOf(hdr.uiTexture->rtv.get(), a_format) : nullptr;
 		}
 
-		const char* RoleName(Role a_role) { return a_role == Role::Framebuffer ? "framebuffer" : "HDR UI"; }
+		const char* RoleName(Role a_role)
+		{
+			switch (a_role) {
+			case Role::Framebuffer:
+				return "framebuffer";
+			case Role::HdrUi:
+				return "HDR UI";
+			default:
+				return "kMAIN";
+			}
+		}
 
 		/** @brief kMAIN's depth-stencil texture (DXVK's), the one UI::DrawInterface binds; null without one. */
 		ID3D11Texture2D* MainDepth()
@@ -843,7 +878,7 @@ namespace RenderGraph::Engine::Scaleform::Passes
 				a_reason = "a surface made again (drawn once the Interface graph is built with it)";
 				return nullptr;
 			}
-			a_reason = "a render target other than the framebuffer and HDR's UI texture";
+			a_reason = OtherTargetReason(a_display.target);
 			return nullptr;
 		}
 
@@ -932,7 +967,7 @@ namespace RenderGraph::Engine::Scaleform::Passes
 			(void)DeclareSurface(state, role);
 		if (std::ranges::none_of(state.surfaces, [](const auto& a_surface) { return a_surface->Drawable(); })) {
 			state.failed = true;
-			logger::error("[ORG] Scaleform: neither the framebuffer nor HDR's UI texture can be imported; the D3D11 renderer draws");
+			logger::error("[ORG] Scaleform: none of the framebuffer, HDR's UI texture and kMAIN can be imported; the D3D11 renderer draws");
 			return;
 		}
 		if (!RegisterClient(state))

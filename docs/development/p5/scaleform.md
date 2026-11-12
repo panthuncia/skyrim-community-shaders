@@ -50,8 +50,10 @@ With `CS_ORG_SCALEFORM=1` the graph is the only path for what it draws (primary-
   draw with. `Engine::PostSetup` (from `State::Setup`, after the features' `SetupResources`) runs the setup's build point,
 `FrameAnchors::BuildPending`: every client registered so far is in its anchors' graphs before the first frame. Log:
 `[ORG] frame anchors: graphs built at CS's setup; every registered client is in its anchors' graphs`.
-- **Surfaces by role.** One surface per role: the framebuffer and HDR's UI texture (when HDR has one), each with kMAIN's
-  depth-stencil. A display onto any other target is an inherent refusal. When a role's texture was made again (a resize, HDR's
+- **Surfaces by role.** One surface per role: the framebuffer, HDR's UI texture (when HDR has one) and kMAIN, each with kMAIN's
+  depth-stencil. kMAIN is there because the main menu and the loading menu draw their movies into it: the 2026-11-12 latch
+  census (`1112-021322-p35-latch-census-short-p5-now`) found those displays the largest Scaleform residue (about 30 engine
+  draws a frame at the main menu, 12-22 in load windows, all `a render target other than the framebuffer`). A display onto any other target is an inherent refusal. When a role's texture was made again (a resize, HDR's
   textures made again) its surface is made again and the client registered again. That is the lane's one rebuild trigger: the
   next build point between frames builds it, and that role's displays go to D3D11 until then (`a surface made again`). CS keeps
   the window from resizing after its menu initialized, so in practice this happens only when HDR rebuilds its resources.
@@ -82,7 +84,8 @@ Inherent refusals, each counted in the census and logged once:
 
 - Whole displays: off the render owner (a loading screen without `CS_ORG_LOADING_THREAD=1`), without a video mode, into a
   render texture of GFx's (`kViewportRenderTexture`), with no render target bound in the shadow state, or after the path failed.
-- Segments: a render target other than the framebuffer and HDR's UI texture; a render target view in another format than its
+- Segments: a render target other than the framebuffer, HDR's UI texture and kMAIN (the reason names the engine target's index,
+  or says it is not an engine target); a render target view in another format than its
   surface's; masks on a depth-stencil other than kMAIN's, or one that cannot be imported; more commands than the run gate holds
   (1,024); the Interface anchor's ring full this frame.
 - D3D11 parts: 3D draws, 32-bit indices, gouraud fills of type 4 and 5, gouraud fills of vertices without colours, XY32f
@@ -112,8 +115,8 @@ Every 1000 displays, and the first time each reason comes up (`[ORG] Scaleform: 
   display ..."). Segment failures name the graph's reason (a new surface, a pipeline, a texture's view, the epoch).
 
 Expected on the primary path: no "a texture's view cannot be resolved", no "a whole display while the graph path is off", no
-pipeline reason, and "a surface made again" only after a resize or an HDR rebuild. "a render target other than the framebuffer
-and HDR's UI texture" counts the displays onto any other target. "the Interface anchor's ring is full this frame" means
+pipeline reason, and "a surface made again" only after a resize or an HDR rebuild. "a render target other than the framebuffer,
+HDR's UI texture and kMAIN (engine target N)" counts the displays onto any other target, by target. "the Interface anchor's ring is full this frame" means
 the anchor needs more runs a frame than it is sized for (below, "The ORG pass"). "a segment with more commands than the
 Interface gate holds" means kGateEntries (1024) is too small; `[ORG] Scaleform: the largest segment so far has N commands` logs
 each new power of two from 64.
@@ -487,7 +490,7 @@ may land after the load), the HUD, the inventory, the magic menu, the map and th
 2. No `a texture's view cannot be resolved`, no `[DCLF] Game texture view not supported: format 65`.
 3. The census lines; every `the D3D11 renderer draws: <reason>` line (each reason once) says what is left.
 4. No `[ORG] Scaleform programs: ... could not be built` (the filter pipelines are new: `FILTER` 23 and 24).
-5. `[ORG] Scaleform: registered with 2 surfaces (registration 1)` once (1 surface without HDR), and a further registration only
+5. `[ORG] Scaleform: registered with 3 surfaces (registration 1)` once (2 without HDR), and a further registration only
    for a target outside those (each with `a new surface: ...`). No `was released by the engine; dropped` in a run without a
    resize or an HDR toggle.
 6. No `[ORG] frame anchors: Interface ran N times in one frame`; the census counts no `the Interface anchor's ring is full this
