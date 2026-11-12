@@ -96,11 +96,11 @@ namespace
 	// One run's values, in its frame slot of the latch block: each shader's LATCH entry.
 	struct LatchData
 	{
-		Float4 noise;                     // ISPerlinNoiseCS's PerlinNoiseConstants: the noise volume's size
-		Float4 raymarch;                  // VolumetricLightingRaymarchConstants: the volume's size (StepIndex is never read)
-		std::array<std::int32_t, 4> blur;  // VolumetricLightingBlurConstants: VolumetricLighting::BlurData
-		Float4 applyIntensityTemporal;    // VolumetricLightingApplyConstants: g_IntensityX_TemporalY
-		Float4 applyRepartition;          // x: the repartition's exponent
+		Float4 noise;                                    // ISPerlinNoiseCS's PerlinNoiseConstants: the noise volume's size
+		Float4 raymarch;                                 // VolumetricLightingRaymarchConstants: the volume's size (StepIndex is never read)
+		std::array<std::int32_t, 4> blur;                // VolumetricLightingBlurConstants: VolumetricLighting::BlurData
+		Float4 applyIntensityTemporal;                   // VolumetricLightingApplyConstants: g_IntensityX_TemporalY
+		Float4 applyRepartition;                         // x: the repartition's exponent
 		std::array<Float4, kGenerateRows + 1> generate;  // VolumetricLightingGenerateConstants: the engine's block, then x the inverse exponent
 	};
 	static_assert(offsetof(LatchData, applyIntensityTemporal) % 16 == 0 && offsetof(LatchData, generate) % 16 == 0 && sizeof(LatchData) % 16 == 0);
@@ -426,8 +426,9 @@ struct ORGVolumetricLighting::Impl
 		auto made = std::make_shared<VLRegistration>();
 		made->sizes = a_sizes;
 		made->engineObjects = EngineObjects();
-		for (std::uint32_t i = 0; i < 3; ++i)
-			made->targets[i] = FrameAnchors::EngineTarget(i == 0 ? kVolumetricTarget : i == 1 ? kPreviousTarget : kSwapTarget);
+		constexpr std::array kTargets{ kVolumetricTarget, kPreviousTarget, kSwapTarget };
+		for (std::size_t i = 0; i < kTargets.size(); ++i)
+			made->targets[i] = FrameAnchors::EngineTarget(kTargets[i]);
 		made->motionVectors = FrameAnchors::EngineTarget(RenderTarget::kMOTION_VECTOR);
 		made->depth = FrameAnchors::EngineDepth(DepthTarget::kMAIN);
 		made->previousDepth = FrameAnchors::EngineDepth(DepthTarget::kMAIN_COPY);

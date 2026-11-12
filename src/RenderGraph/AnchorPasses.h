@@ -69,9 +69,9 @@ namespace RenderGraph::AnchorPasses
 
 		Kind kind = Kind::Handle;
 		std::shared_ptr<org::Resource> resource;
-		std::uint32_t value = 0;       // Handle: the descriptor index; Latch: the region's offset
-		std::uint32_t mip = kAllMips;  // Srv and Uav: the one mip the view covers, or the default view
-		std::string id;                // Srv without a resource: a published resource's id
+		std::uint32_t value = 0;             // Handle: the descriptor index; Latch: the region's offset
+		std::uint32_t mip = kAllMips;        // Srv and Uav: the one mip the view covers, or the default view
+		std::string id;                      // Srv without a resource: a published resource's id
 		std::uint32_t variant = UINT32_MAX;  // Srv: the view variant (org::SRVViewType), UINT32_MAX for the default view
 
 		static Bind Srv(std::shared_ptr<org::Resource> a_resource, std::uint32_t a_mip = kAllMips) { return { Kind::Srv, std::move(a_resource), 0, a_mip }; }
