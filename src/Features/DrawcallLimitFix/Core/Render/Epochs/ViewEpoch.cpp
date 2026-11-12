@@ -3,6 +3,7 @@
 // features' (Features/Reflection, Features/FirstPerson), on the view engine's calls (ViewEngine.cpp).
 
 #include "Features/DrawcallLimitFix/Core/Render/Internal.h"
+#include "Features/DrawcallLimitFix/Core/Gpu/NamedRefs.h"
 #include "Features/DrawcallLimitFix/Core/Render/Resources/FrameRecords.h"
 
 #include "Features/DrawcallLimitFix/Core/Shading/LightingDescriptors.h"
@@ -197,7 +198,7 @@ namespace DCLF
 			}
 			// Per face, the view's frame constants (its own or the colour segment's: the frame lighting at PS b13, the frame record) with VS and
 			// PS b12 its block.
-			const auto base = FramePushWords(a_in.frameConstantsAddress);
+			const auto base = FramePushWords(a_in.frameConstantsAddress, a_in.frameConstantsRef);
 			frame->push.assign(traits.faces, base);
 			for (std::uint32_t f = 0; f < traits.faces; ++f) {
 				const std::uint64_t block = a_resources.blocksAddress + std::uint64_t(f) * kViewBlockBytes;
@@ -404,7 +405,7 @@ namespace DCLF
 				auto& written = state.faces[d];
 				written.faceRow.resize(entry.contribution.faces.rowBytes);
 				written.faceHeader.resize(entry.contribution.faces.headerBytes);
-				Api::DrawFamilyFaceWrite write{ (*a_rows)[d], Adopted().Of(view->faceLists[d][f]).deviceAddress, face.drawn, written.faceRow, written.faceHeader };
+				Api::DrawFamilyFaceWrite write{ (*a_rows)[d], RefOf(Adopted().Of(view->faceLists[d][f])), face.drawn, written.faceRow, written.faceHeader };
 				entry.contribution.faces.face(write);
 				LatchWrite(latchBlock, labels.trees, latchRun, layout.FaceOffset(f) + entry.faceLayout.rowInFace, write.row);
 				LatchWrite(latchBlock, labels.trees, latchRun, layout.FaceOffset(f) + entry.faceLayout.headerInFace, write.header);
@@ -442,7 +443,7 @@ namespace DCLF
 			const std::uint32_t psMask = (1u << kPerFrameVertexRegister) | (shared.empty() ? 0u : 1u << kSharedDataRegister) | (feature.empty() ? 0u : 1u << kFeatureDataRegister);
 			auto& textures = GpuTextures::Get();
 			const std::uint32_t nullIndex = textures.NullIndex() != kInvalidIndex ? textures.NullIndex() : 0u;
-			const DrawBindings record = FrameRecordOf(own->frameConstantsAddress, *own->frameBlocks, vsMask, psMask, state.frameTextures, nullIndex, *InstalledPayload(),
+			const DrawBindings record = FrameRecordOf(own->frameConstantsAddress, own->frameConstantsRef, *own->frameBlocks, vsMask, psMask, state.frameTextures, nullIndex, *InstalledPayload(),
 				{ FrameValues::Get().PlacementsIndex(), FrameValues::Get().PalettesIndex(), FrameValues::Get().ShadingIndex() }, adopted, *scene, frameNumber);
 			frame(own->frameConstants, &record, sizeof(record), std::uint64_t(kFrameSlotRecord) * kFrameSlotBytes);
 			frame(own->frameConstants, shared.data(), shared.size(), FrameSlotOffset(true, kSharedDataRegister));

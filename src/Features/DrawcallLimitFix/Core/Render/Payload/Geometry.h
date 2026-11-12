@@ -127,11 +127,11 @@ namespace DCLF::Draws
 	inline void SetSequenceGeometry(DrawSequence& a_sequence, const GeometryBuffers& a_geometry, bool a_ownStream = false)
 	{
 		if (!a_ownStream) {
-			a_sequence.streamBufferAddress = a_geometry.vertexAddress;
+			a_sequence.streamBufferRef = a_geometry.vertexRef;
 			a_sequence.streamBufferSize = static_cast<std::uint32_t>(std::min<std::uint64_t>(a_geometry.vertexBytes, UINT32_MAX));
 			a_sequence.streamStride = a_geometry.vertexStride;
 		}
-		a_sequence.vertexBufferAddress = a_geometry.vertexAddress;
+		a_sequence.vertexBufferRef = a_geometry.vertexRef;
 		a_sequence.vertexBufferSize = static_cast<std::uint32_t>(std::min<std::uint64_t>(a_geometry.vertexBytes, UINT32_MAX));
 		a_sequence.vertexStride = a_geometry.vertexStride;
 		a_sequence.indexBufferAddress = a_geometry.indexAddress;
@@ -143,7 +143,7 @@ namespace DCLF::Draws
 	inline GeometryDraw PackGeometryDraw(const SceneTables& a_tables, std::uint32_t a_slot, std::size_t a_count)
 	{
 		const auto& geometry = a_tables.geometries[a_slot];
-		return { geometry.vertexAddress, static_cast<std::uint32_t>(std::min<std::uint64_t>(geometry.vertexBytes, UINT32_MAX)), geometry.vertexStride,
+		return { geometry.vertexRef, static_cast<std::uint32_t>(std::min<std::uint64_t>(geometry.vertexBytes, UINT32_MAX)), geometry.vertexStride,
 			geometry.indexAddress, static_cast<std::uint32_t>(std::min<std::uint64_t>(geometry.indexBytes, UINT32_MAX)), geometry.indexCount, geometry.firstIndex,
 			geometry.nextPartition < a_count ? geometry.nextPartition : kNoPartition };
 	}
@@ -182,7 +182,7 @@ namespace DCLF::Draws
 
 	// The GeometryDraw of object a_object's stream row, or ~0u: no row, or no stream buffer. AppendStreamRows writes them at these
 	// indices, after the slots (the geometry table holds both: RequireSceneTables).
-	inline std::uint32_t StreamGeometry(const SceneTables& a_tables, std::size_t a_object, std::uint64_t a_vertices)
+	inline std::uint32_t StreamGeometry(const SceneTables& a_tables, std::size_t a_object, RenderGraph::BufferRef a_vertices)
 	{
 		if (!a_vertices || a_object >= a_tables.streamRow.size() || a_tables.streamRow[a_object] == kNoStreamRow)
 			return ~0u;
@@ -196,7 +196,7 @@ namespace DCLF::Draws
 	}
 
 	// After PackGeometryDraws: the stream rows' GeometryDraws, in streamRows order.
-	inline void AppendStreamRows(const SceneTables& a_tables, std::uint64_t a_vertices, GeometryDrawsOut& a_geometries)
+	inline void AppendStreamRows(const SceneTables& a_tables, RenderGraph::BufferRef a_vertices, GeometryDrawsOut& a_geometries)
 	{
 		if (!a_vertices)
 			return;
@@ -209,7 +209,7 @@ namespace DCLF::Draws
 				a_out.push_back(draw);
 				continue;
 			}
-			draw.vertexBufferAddress = a_vertices + std::uint64_t(row.first) * kStreamVertexBytes;
+			draw.vertexBufferRef = a_vertices + std::uint64_t(row.first) * kStreamVertexBytes;
 			draw.vertexBufferSize = row.count * kStreamVertexBytes;
 			draw.vertexStride = kStreamVertexBytes;
 			draw.nextPartition = kNoPartition;
@@ -218,10 +218,10 @@ namespace DCLF::Draws
 	}
 
 	// The second stream of a stream object's draw template.
-	inline void SetSequenceStream(DrawSequence& a_sequence, const SceneTables& a_tables, std::size_t a_object, std::uint64_t a_vertices)
+	inline void SetSequenceStream(DrawSequence& a_sequence, const SceneTables& a_tables, std::size_t a_object, RenderGraph::BufferRef a_vertices)
 	{
 		const auto& row = a_tables.streamRows[a_tables.streamRow[a_object]];
-		a_sequence.streamBufferAddress = a_vertices + std::uint64_t(row.first) * kStreamVertexBytes;
+		a_sequence.streamBufferRef = a_vertices + std::uint64_t(row.first) * kStreamVertexBytes;
 		a_sequence.streamBufferSize = row.count * kStreamVertexBytes;
 		a_sequence.streamStride = kStreamVertexBytes;
 	}

@@ -5,8 +5,10 @@
 // layouts, or every image when DXVK pins them for an older client) is shared with simultaneous access; any other is used
 // exclusively, and the graph's external home states give it back in that layout after each execution.
 
+#include "RenderGraph/BufferRef.h"
 #include "RenderGraph/DxvkOrgInterop.h"
 
+#include <cstdint>
 #include <memory>
 #include <optional>
 
@@ -43,4 +45,13 @@ namespace RenderGraph
 	 */
 	std::shared_ptr<org::ExternalTextureResource> ImportDxvkTexture(rhi::Device a_device, const DxvkOrgInteropImageInfo& a_image,
 		org::TextureDescription a_desc, const char* a_name);
+
+	/**
+	 * @brief A buffer view ref into a described buffer range (DXVK's, or native mode's: Native::DescribeResource), for shaders that read
+	 * it (Common/DeviceRef.hlsli). a_buffer is the VkBuffer (D3D12: the ID3D12Resource in its place), a_offset and a_bytes the range in
+	 * it. The buffer is imported into BasicRHI once and shared by every range of it, so a DXVK chunk's buffers share one raw view pair;
+	 * on Vulkan a range past what the import covers imports it again, larger. a_keep holds the import, and with it the pair, for as long
+	 * as the caller reads the range. Null ref when the import fails. Any thread.
+	 */
+	BufferRef ImportBufferRef(rhi::Device a_device, std::uint64_t a_buffer, std::uint64_t a_offset, std::uint64_t a_bytes, std::shared_ptr<const void>& a_keep);
 }

@@ -1,5 +1,7 @@
 #pragma once
 
+#include "RenderGraph/BufferRef.h"
+
 #include "Features/DrawcallLimitFix/Api/FrameValues.h"
 #include "Features/DrawcallLimitFix/Core/Scene/FrameView/FrameView.h"
 #include <array>
@@ -177,6 +179,10 @@ namespace DCLF
 		std::uint32_t PoolIndex(Api::FrameValuePoolId a_pool) const;
 		/** @brief Render thread: the device address of that backing (deviceAddress pools; 0 otherwise, or as PoolIndex). */
 		std::uint64_t PoolAddress(Api::FrameValuePoolId a_pool) const;
+		/** @brief Render thread: the buffer view ref of that backing, which shaders read it through (null as PoolIndex). */
+		RenderGraph::BufferRef PoolRef(Api::FrameValuePoolId a_pool) const;
+		/** @brief Render thread: that backing's bytes (0 as PoolIndex). */
+		std::uint64_t PoolBytes(Api::FrameValuePoolId a_pool) const;
 		/** @brief Render thread (diagnostics): that backing (null as PoolIndex), held by the frame until EndFrame. */
 		std::shared_ptr<const org::services::Backing> PoolBacking(Api::FrameValuePoolId a_pool) const;
 		/**

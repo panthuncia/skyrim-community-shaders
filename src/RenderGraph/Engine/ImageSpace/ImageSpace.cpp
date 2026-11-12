@@ -2195,7 +2195,7 @@ namespace RenderGraph::Engine::ImageSpace
 		/**
 		 * @brief A geometry effect's draw (the ripple makers): its geometry (DrawTriShape's shape and index range) leased and written into
 		 * a_pending's PerFrame words, which such an effect does not read (ISWaterDisplacement.hlsl, PullRippleVertex): frameSrv and
-		 * frameOffset the vertex buffer's address, frameSize and source the index buffer's, padding the stride and the first index. The
+		 * frameOffset the vertex buffer's view ref, frameSize and source the index buffer's, padding the stride and the first index. The
 		 * gate opens it with its index count. False (refused) when the geometry cannot be read.
 		 */
 		bool LatchGeometry(Pending& a_pending, std::size_t a_effect)
@@ -2217,10 +2217,11 @@ namespace RenderGraph::Engine::ImageSpace
 				Refuse("its first index or stride does not fit the latch's 16-bit fields", a_effect);
 				return false;
 			}
-			a_pending.at.frameSrv = static_cast<std::uint32_t>(geometry.vertexAddress);
-			a_pending.at.frameOffset = static_cast<std::uint32_t>(geometry.vertexAddress >> 32);
-			a_pending.at.frameSize = static_cast<std::uint32_t>(geometry.indexAddress);
-			a_pending.at.source = static_cast<std::uint32_t>(geometry.indexAddress >> 32);
+			// The buffers' view refs, which ISWaterDisplacement's pulled vertex stage reads through.
+			a_pending.at.frameSrv = geometry.vertexRef.viewSlot;
+			a_pending.at.frameOffset = geometry.vertexRef.byteOffset;
+			a_pending.at.frameSize = geometry.indexRef.viewSlot;
+			a_pending.at.source = geometry.indexRef.byteOffset;
 			a_pending.at.padding = geometry.stride | (geometry.firstIndex << 16);
 			a_pending.vertices = geometry.indexCount;
 			a_pending.source = std::move(owners);

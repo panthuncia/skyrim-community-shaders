@@ -869,19 +869,25 @@ beside a DXVK game (`src/RenderGraph/Engine/D3D12SelfTest.cpp`).
 DCLF is forced off on D3D12, so the world's geometry is not drawn there. Here is what stands in the way, from a survey of
 the code, with the work for each piece. The pieces build on each other in this order.
 
-1. **Buffer addresses in shaders (the foundation).** 17 shaders and headers read DCLF's buffers through 64-bit device
-   addresses: 132 `vk::RawBufferLoad`/`Store` calls, through `DCLFAddress`, in `Common/DCLFObjects.hlsli`,
-   `DCLFVertexPull.hlsli`, Lighting, Effect, Utility, Sky, Water, Particle, DistantTree, RunGrass, BloodSplatter,
-   DecalOcclusion and five DCLF compute shaders. The CPU side forms about 200 such addresses. DXIL has no buffer pointers.
-   The plan is to emulate them, not to change DCLF's data model:
-   - D3D12 buffers have GPU virtual addresses, so the CPU side stays as it is (`GetBufferDeviceAddress` gives the GPU VA).
-   - A new `Common/DeviceAddress.hlsli` defines `DeviceLoad<T>(address)` and `DeviceStore<T>(address, value)`. On SPIR-V
-     they are `vk::RawBufferLoad` and `vk::RawBufferStore`, so the Vulkan build compiles to the same code. On DXIL they look
-     the address up in a table of buffer ranges (base, size, raw SRV and UAV heap indices; a binary search) and load from
-     that `ByteAddressBuffer` at `address - base`.
-   - Every buffer whose address is taken gets an entry. The cleanest owner is BasicRHI's D3D12 backend: it already knows
-     each buffer's GPU VA and heap. It would keep the table on the GPU and give its heap index, which every DCLF D3D12 layout
-     passes in one more root constant.
+1. **Buffers in shaders (the foundation): buffer view refs.** DXIL has no buffer pointers, so no shader reads a buffer
+   through a 64-bit device address, on either backend. It reads through a buffer view ref (`Common/DeviceRef.hlsli`):
+   two words, the heap slot of the buffer's raw SRV (its raw UAV is the slot after it) and a byte offset. `DeviceLoad(T, ref)`
+   is that `ByteAddressBuffer`'s `Load<T>` at the offset, `DeviceStore` the UAV's `Store`, `DeviceRefAdd` the offset math; the
+   same code on SPIR-V and DXIL. A ref takes an address's 8 bytes in every record, row and push block, so no layout moved.
+   - BasicRHI makes the views (`Device::GetBufferViewRef`, ABI in `rhi_shader_abi.h`, `BUFFER_VIEW_REF_*`): a buffer's raw
+     SRV/UAV pair goes into a reserved region of every shader-visible resource heap of the device's full capacity, past the slots
+     the client indexes, the first time its ref is asked for, and is freed with the buffer (deferred destruction). On Vulkan the
+     pair is two storage buffer descriptors over the buffer's address range, in VK_EXT_descriptor_heap's heap or the
+     descriptor-buffer model's universal set alike; the device reports that many fewer descriptors. View slot 0 is no buffer.
+   - Game buffers are not BasicRHI's: `GpuResources` imports a described buffer's VkBuffer (native D3D12: its ID3D12Resource)
+     once, shared by every range of it, and its leases hold the import (`RenderGraph::ImportBufferRef`).
+   - Words a pipeline layout or the GPU front end reads stay device addresses: the draw sequences' row and block addresses
+     (VK_EXT_descriptor_heap's push and indirect address mappings), the frame record's address and its block addresses, the shadow
+     views' pushed blocks, the refraction's LodFadeFrame word, every index buffer view. A stage that also reads through one of them
+     turns it into a ref with the frame record's backings (`DrawBindings::backings`: per buffer such an address points into, its
+     ref, address and bytes; `DCLFRefFromBacking`): the pipeline rows, the material rows or the frame's animated copy (told apart by
+     range), the shadow rows, the frame constants. The record's own ref is pushed beside its address (`kFramePushRecordRef`,
+     `kShadowPushFrameRecordRef`).
 2. **Bindings through records (`LayoutRangeSource::IndirectIndex`, `IndirectAddress`, `PushAddress`).** DCLF's colour draws
    use the engine's shaders with register bindings. On Vulkan, `VK_EXT_descriptor_heap` maps each register per draw to:
    - a heap slot named in the frame, pipeline or material row (textures t0-t15 and samplers from the material row);
@@ -907,10 +913,10 @@ the code, with the work for each piece. The pieces build on each other in this o
 6. **Texture imports** (`GpuTextures`: `rhi::vulkan::import_buffer` of buffer-backed views) use
    `rhi::dx12::import_resource` on the ID3D12Resource that native mode's descriptions already carry.
 
-**Item 1, first slice (2026-11-12):** BasicRHI's D3D12 backend keeps the device address table (`Dx12AddressTable`, the ABI in
-`rhi_shader_abi.h`), and `Common/DeviceAddress.hlsli` defines `DeviceLoad`/`DeviceStore`. `DCLFObjects.hlsli` and the five compute
-shaders below use them; their SPIR-V is byte-identical to before (checked with the Vulkan SDK's DXC), and they build to DXIL.
-`CS_ORG_D3D12_SELFTEST=1` checks the table end to end (`RenderGraph/D3D12DeviceAddressTest.hlsl`).
+**Item 1 (2026-11-12, lane `org-port/device-refs`):** buffer view refs replace the first slice's D3D12 device address table (a page
+table from addresses to raw views, looked up by every load). Every `DeviceLoad`/`DeviceStore` site reads through a ref on both
+backends, and no `vk::RawBufferLoad` is left. `CS_ORG_D3D12_SELFTEST=1` checks the view pairs end to end
+(`RenderGraph/D3D12DeviceRefTest.hlsl`).
 
 The first piece that can be built and run alone is item 1 on DCLF's compute shaders (BuildDraws, IndexPool, PixelRows,
 TextureTransforms, FoliageParity). Their layouts are CS's own, so the GPU cull and draw building could be checked on D3D12
@@ -920,8 +926,8 @@ before any colour draw.
 RDNA2 already draws on Vulkan without device-generated commands: pulled builds and plain counted draws, the Z-prepass's buckets and
 the colour pass's main, terrain and decal buckets (`CS_DCLF_MAIN_PLAIN` and the others). What it took:
 
-- **Shaders.** Every `vk::RawBufferLoad`/`Store` left goes through `DeviceLoad`/`DeviceStore` (SPIR-V byte-identical: 168 stages of
-  a stage dump, and BuildDrawsCS and ForwardSortCS). DXIL-only: `VS_PerFrame` is b12 in space 1 (DXIL refuses two blocks at b12;
+- **Shaders.** Every `vk::RawBufferLoad`/`Store` left went through `DeviceLoad`/`DeviceStore` (then the address table's; buffer view
+  refs since, item 1). DXIL-only: `VS_PerFrame` is b12 in space 1 (DXIL refuses two blocks at b12;
   FrameBuffer's PerFrame is one), and the pulled draws' instance (below).
 - **The pass's bindings (item 2's rest).** A D3D12 pulled build (`DCLF_D3D12_FRAME`) is preprocessed with
   `Common/DCLFFrameRecord.hlsli` first, then `FrameSource::Rewrite` turns every register declaration but the push blocks (b190,

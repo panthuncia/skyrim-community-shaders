@@ -174,6 +174,9 @@ namespace DCLF::Draws::detail
 			rows.pipelineRows = RowBases::AddressOf(*a_in.payload, PayloadPart::PipelineRows);
 			rows.materialRows = RowBases::AddressOf(*a_in.payload, PayloadPart::MaterialRows);
 			rows.shadowRows = RowBases::AddressOf(*a_in.payload, PayloadPart::ShadowRows);
+			rows.pipelineRowsRef = RowBases::RefOf(*a_in.payload, PayloadPart::PipelineRows);
+			rows.materialRowsRef = RowBases::RefOf(*a_in.payload, PayloadPart::MaterialRows);
+			rows.shadowRowsRef = RowBases::RefOf(*a_in.payload, PayloadPart::ShadowRows);
 			rows.slotKeys = a_in.lookups ? &a_in.lookups->shadowSlotKeys : nullptr;
 			return rows;
 		}
@@ -548,6 +551,9 @@ namespace DCLF::Draws::detail
 		set->pipelineRowsBase = rows.pipelineRows;
 		set->materialRowsBase = rows.materialRows;
 		set->shadowRowsBase = rows.shadowRows;
+		set->pipelineRowsRef = rows.pipelineRowsRef;
+		set->materialRowsRef = rows.materialRowsRef;
+		set->shadowRowsRef = rows.shadowRowsRef;
 		FillAnimatedRows(*set, a_in);
 		// The volatile lanes (their sequences after the store's), then each view's fresh lanes: the delta's live and the volatile.
 		for (auto& list : volatileScratch)
@@ -878,9 +884,9 @@ namespace DCLF::Draws::detail
 						text += fmt::format("{}{{object {} flags {:x} pipeline {} slot {} sequences {} ({:x}) sphere r {}", text.empty() ? "" : ", ", k.object, k.flags,
 							k.pipeline, k.slot, k.count, k.sequences, std::bit_cast<float>(k.sphere[3]));
 						if (const DrawSequence* q = k.count ? a_sequence(k.firstSequence) : nullptr)
-							text += fmt::format(" [{}: pipeline {:x} rows {:x} {:x} object {:x} vb {:x}/{}/{} stream {:x}/{}/{} ib {:x}/{} count {} first {}]", k.firstSequence,
-								q->pipelineIndex, q->pipelineRowAddress, q->materialRowAddress, q->objectIndex, q->vertexBufferAddress, q->vertexBufferSize, q->vertexStride,
-								q->streamBufferAddress, q->streamBufferSize, q->streamStride, q->indexBufferAddress, q->indexBufferSize, q->indexCount, q->firstIndex);
+							text += fmt::format(" [{}: pipeline {:x} rows {:x} {:x} object {:x} vb {}+{:x}/{}/{} stream {}+{:x}/{}/{} ib {:x}/{} count {} first {}]", k.firstSequence,
+								q->pipelineIndex, q->pipelineRowAddress, q->materialRowAddress, q->objectIndex, q->vertexBufferRef.viewSlot, q->vertexBufferRef.byteOffset,
+								q->vertexBufferSize, q->vertexStride, q->streamBufferRef.viewSlot, q->streamBufferRef.byteOffset, q->streamBufferSize, q->streamStride, q->indexBufferAddress, q->indexBufferSize, q->indexCount, q->firstIndex);
 						text += "}";
 					}
 					return text;

@@ -1,5 +1,7 @@
 #pragma once
 
+#include "RenderGraph/BufferRef.h"
+
 // The draw family contract's Core side (Api/DrawFamilies.h): each family's entry, resolved once at InstallFeatures (ResolveDrawFamilies)
 // from its registration (a family no feature takes has none: its passes and requirements are left out), the contexts its callbacks are
 // handed (their Core service: DrawFamilyFrame::Pipelines, Core/Render/DrawFamilies/FamilyDecisions.cpp), and the serve Core makes at the
@@ -76,12 +78,12 @@ namespace DCLF::Api
 		const Draws::SceneBuffers& scene;
 		const Draws::ViewResources* view;
 		std::span<org::ResourceBindingToken> arguments;
-		std::uint64_t row = 0;  // the main pass's (out): the draw row's address its records read, fixed with the family's tables
+		RenderGraph::BufferRef row;  // the main pass's (out): the draw row's buffer view ref its records read, fixed with the family's tables
 	};
 
 	/**
 	 * @brief A family's main draw for the CPU-driven pipeline (Api::DrawFamilyContribution::main.direct; render thread, at the depth
-	 * commit): the scene's tables and the frame's adopted set in, the draw row's address (DrawFamilyDeclare::row) and the arguments buffer
+	 * commit): the scene's tables and the frame's adopted set in, the draw row's buffer view ref (DrawFamilyDeclare::row) and the arguments buffer
 	 * (arguments[0]'s; of a versioned buffer, the version the set names) out. The caller holds the buffer with the frame.
 	 */
 	class DrawFamilyDirect
@@ -89,7 +91,7 @@ namespace DCLF::Api
 	public:
 		const Draws::SceneBuffers& scene;
 		const org::services::NamedVersions& adopted;
-		std::uint64_t row = 0;
+		RenderGraph::BufferRef row;
 		std::shared_ptr<org::Buffer> arguments;
 	};
 
@@ -115,7 +117,7 @@ namespace DCLF::Api
 
 	/**
 	 * @brief A family's draw (the pass's recording, inside its render pass): the commands, the execution, the slot's pipelines it draws
-	 * with (main), the draw row's address, the declared arguments resolved, and for a face the view's forward pipeline and the family's
+	 * with (main), the draw row's buffer view ref, the declared arguments resolved, and for a face the view's forward pipeline and the family's
 	 * draw signature.
 	 */
 	class DrawFamilyRecord
@@ -124,7 +126,7 @@ namespace DCLF::Api
 		rhi::CommandList& commands;
 		DrawFamilyPass pass;
 		const std::shared_ptr<const void>& drawn;
-		std::uint64_t row;
+		RenderGraph::BufferRef row;
 		rhi::ResourceHandle arguments;
 		rhi::PipelineHandle pipeline;
 		rhi::CommandSignatureHandle signature;
@@ -174,14 +176,14 @@ namespace DCLF::Api
 
 	/**
 	 * @brief A face of a trees view's epoch commit (render thread, per face): the commit's row (faces.row's, rowBytes), the face's list's
-	 * device address (its adopted version) and whether the face is drawn; out: the face's row (rowBytes) and its list's header
+	 * buffer view ref (its adopted version) and whether the face is drawn; out: the face's row (rowBytes) and its list's header
 	 * (headerBytes), which the face's latch values take.
 	 */
 	class DrawFamilyFaceWrite
 	{
 	public:
 		std::span<const std::byte> commitRow;
-		std::uint64_t listAddress = 0;
+		RenderGraph::BufferRef listRef;
 		bool drawn = false;
 		std::span<std::byte> row;
 		std::span<std::byte> header;

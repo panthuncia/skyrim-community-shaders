@@ -206,11 +206,11 @@ namespace DCLF::Scene
 		{
 			DrawSequence draw{};
 			draw.pipelineIndex = a_pipeline;
-			draw.vertexBufferAddress = a_geometry.vertexAddress;
+			draw.vertexBufferRef = a_geometry.vertexRef;
 			draw.vertexBufferSize = static_cast<std::uint32_t>(std::min<std::uint64_t>(a_geometry.vertexBytes, UINT32_MAX));
 			draw.vertexStride = a_geometry.vertexStride;
 			// The second stream repeats the first; the epochs replace it with a face shape's positions.
-			draw.streamBufferAddress = draw.vertexBufferAddress;
+			draw.streamBufferRef = draw.vertexBufferRef;
 			draw.streamBufferSize = draw.vertexBufferSize;
 			draw.streamStride = draw.vertexStride;
 			draw.indexBufferAddress = a_geometry.indexAddress;
@@ -1042,10 +1042,13 @@ namespace DCLF::Scene
 			record.vertexCount = a_source.vertexCount;
 			record.indexCount = a_source.indexCount;
 			record.firstIndex = a_source.firstIndex;
-			if (vertexLease && indexLease) {
+			// Both refs too: the vertex stages and the index pool read the buffers through them (no ref: unresolved, as no address).
+			if (vertexLease && indexLease && vertexLease->buffer.ref && indexLease->buffer.ref) {
 				record.vertexAddress = vertexLease->buffer.address;
+				record.vertexRef = vertexLease->buffer.ref;
 				record.vertexBytes = vertexLease->buffer.size;
 				record.indexAddress = indexLease->buffer.address;
+				record.indexRef = indexLease->buffer.ref;
 				record.indexBytes = indexLease->buffer.size;
 			}
 			const std::uint32_t slot = staleGeometry ? geometryIt->second : AllocateGeometrySlot();

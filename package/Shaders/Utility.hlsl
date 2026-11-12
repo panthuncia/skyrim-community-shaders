@@ -492,8 +492,8 @@ VS_OUTPUT main(VS_INPUT input)
 
 VS_OUTPUT DCLFShadowVertex(uint index, uint a_instance)
 {
-	const uint64_t sequence = DCLFDrawSequence(a_instance);
-	const uint4 rows = DCLFSequenceShadowRows(sequence);  // the draw's key slot's vertex layout, the material row's address
+	const DeviceRef sequence = DCLFDrawSequence(a_instance);
+	const uint4 rows = DCLFSequenceShadowRows(sequence);  // the draw's key slot's vertex layout, the material row's ref
 	DCLFObjectWord = DCLFSequenceObjectWord(sequence);
 	// The draw's own (BuildDrawsCS: a shadow view's slot layouts), so a bucket draws casters of every layout; the call's pushed one
 	// for a slot the latch's table did not hold yet.
@@ -503,14 +503,14 @@ VS_OUTPUT DCLFShadowVertex(uint index, uint a_instance)
 	const uint drawTechnique = DeviceLoad(uint, sequence);
 	const bool known = (drawTechnique & 0x80000000u) != 0;
 	DCLFDrawSkinned = !known || (drawTechnique & 0x4u) != 0;
-	const uint4 vertexBuffer = DeviceLoad(uint4, sequence + 24);  // address, size, stride
-	const uint4 streamBuffer = DeviceLoad(uint4, sequence + 40);
-	const uint64_t materialRow = DCLFAddress(rows.zw);
+	const uint4 vertexBuffer = DeviceLoad(uint4, DeviceRefAdd(sequence, 24));  // ref, size, stride
+	const uint4 streamBuffer = DeviceLoad(uint4, DeviceRefAdd(sequence, 40));
+	const DeviceRef materialRow = rows.zw;
 
 	DCLFStream first, second;
-	first.address = DCLFAddress(vertexBuffer.xy);
+	first.address = vertexBuffer.xy;
 	first.stride = vertexBuffer.w;
-	second.address = DCLFAddress(streamBuffer.xy);
+	second.address = streamBuffer.xy;
 	second.stride = streamBuffer.w;
 	DCLFStreamsAt(index, first, second);
 
@@ -538,10 +538,10 @@ VS_OUTPUT DCLFShadowVertex(uint index, uint a_instance)
 	input.BoneWeights = 0;
 	input.BoneIndices = 0;
 	[branch] if (DCLFDrawSkinned) {
-		const uint64_t skinning = DCLFAttribute(6, first, second);
+		const DeviceRef skinning = DCLFAttribute(6, first, second);
 		const uint2 weights = DeviceLoad(uint2, skinning);
 		input.BoneWeights = float4(DCLFHalf2(weights.x), DCLFHalf2(weights.y));
-		input.BoneIndices = DCLFUnorm4(DeviceLoad(uint, skinning + 8));
+		input.BoneIndices = DCLFUnorm4(DeviceLoad(uint, DeviceRefAdd(skinning, 8)));
 	}
 #		endif
 
@@ -570,7 +570,7 @@ VS_OUTPUT DCLFShadowVertex(uint index, uint a_instance)
 #		if defined(DCLF_EMPTY_PIXEL)
 	vsout.DCLFDraw = uint2(0, 0);
 #		else
-	vsout.DCLFDraw = uint2(DeviceLoad(uint, materialRow + 16), DCLFObjectWord);
+	vsout.DCLFDraw = uint2(DeviceLoad(uint, DeviceRefAdd(materialRow, 16)), DCLFObjectWord);
 #			if defined(DCLF_SHADOW_ALPHA)
 	vsout.DCLFAlphaRef = DCLFObjects[DCLFObjectIndex].AlphaTestRef;
 #			endif
@@ -604,22 +604,22 @@ VS_OUTPUT main(uint index : SV_VertexID, uint a_instance : SV_InstanceID)
 // camera as the Lighting draws compute their envmap fade (Lighting.hlsl, DCLFLodMetric); with RENDER_NORMAL_FALLOFF, EyePos.xyz is the
 // camera in the geometry's model space (BSUtilityShader::SetupGeometry: its world transform inverted). RefractionPower, a pixel
 // constant multiplying TexCoord0.w, is folded into TexCoord0.w here.
-float DCLFRefractionFloat(uint64_t a_frame, uint a_float) { return asfloat(DeviceLoad(uint, a_frame + 4u * a_float, 4)); }
+float DCLFRefractionFloat(DeviceRef a_frame, uint a_float) { return asfloat(DeviceLoad(uint, DeviceRefAdd(a_frame, 4u * a_float), 4)); }
 
 VS_OUTPUT DCLFRefractionVertex(uint index, uint a_instance)
 {
-	const uint64_t sequence = DCLFDrawSequence(a_instance);
-	const uint4 rows = DCLFSequenceRows(sequence);  // the pipeline row's address, the material row's
+	const DeviceRef sequence = DCLFDrawSequence(a_instance);
+	const uint4 rows = DCLFSequenceRows(sequence);  // the pipeline row's ref, the material row's
 	DCLFObjectWord = DCLFSequenceObjectWord(sequence);
-	DCLFPipelineRowAddress = DCLFAddress(rows.xy);
-	DCLFMaterialRowAddress = DCLFAddress(rows.zw);
+	DCLFPipelineRowAddress = rows.xy;
+	DCLFMaterialRowAddress = rows.zw;
 	DCLFDrawVertexLayout = DCLFPipelineVertexLayout();  // the draw's slot's (one pipeline draws every layout)
-	const uint4 vertexBuffer = DeviceLoad(uint4, sequence + 24);  // address, size, stride
-	const uint4 streamBuffer = DeviceLoad(uint4, sequence + 40);
+	const uint4 vertexBuffer = DeviceLoad(uint4, DeviceRefAdd(sequence, 24));  // ref, size, stride
+	const uint4 streamBuffer = DeviceLoad(uint4, DeviceRefAdd(sequence, 40));
 	DCLFStream first, second;
-	first.address = DCLFAddress(vertexBuffer.xy);
+	first.address = vertexBuffer.xy;
 	first.stride = vertexBuffer.w;
-	second.address = DCLFAddress(streamBuffer.xy);
+	second.address = streamBuffer.xy;
 	second.stride = streamBuffer.w;
 	DCLFStreamsAt(index, first, second);
 
@@ -630,7 +630,8 @@ VS_OUTPUT DCLFRefractionVertex(uint index, uint a_instance)
 
 	// The refraction LOD fade (EyePos.w): FUN_14147c470 at the fade node's metric, while the node's LOD fades apply (LodFadeNodeOf);
 	// else the property's, as it holds it (the shading row's MaterialData.x). Past the end the engine registers no pass: no draw.
-	const uint64_t lodFrame = DCLFAddress(DCLFMaterialRowsAddress);  // LodFadeFrame (LightingDescriptors.h)
+	// LodFadeFrame (LightingDescriptors.h), in the frame constants: the push word is the layout's device address.
+	const DeviceRef lodFrame = DCLFRefFromBacking(kDCLFBackingFrameConstants, DCLFMaterialRowsAddress);
 	const float4 fadeNode = DCLFPlacements[object].LodFadeNode;
 	float fade = DCLFShading[object].MaterialData.x;
 	const float3 eye = float3(DCLFRefractionFloat(lodFrame, 0), DCLFRefractionFloat(lodFrame, 1), DCLFRefractionFloat(lodFrame, 2));
@@ -680,10 +681,10 @@ VS_OUTPUT DCLFRefractionVertex(uint index, uint a_instance)
 	float3 normalVS;
 	float falloff = 1;
 	if (DCLFObjects[object].DCLFBoneRows != 0) {
-		const uint64_t skinning = DCLFAttribute(6, first, second);
+		const DeviceRef skinning = DCLFAttribute(6, first, second);
 		const uint2 weightWords = DeviceLoad(uint2, skinning);
 		const float4 boneWeights = float4(DCLFHalf2(weightWords.x), DCLFHalf2(weightWords.y));
-		precise int4 boneIndices = 765.01.xxxx * DCLFUnorm4(DeviceLoad(uint, skinning + 8));
+		precise int4 boneIndices = 765.01.xxxx * DCLFUnorm4(DeviceLoad(uint, DeviceRefAdd(skinning, 8)));
 		const uint boneOffset = DCLFObjects[object].DCLFBoneOffset;
 		// The rows are absolute: the pivot is the camera's posAdjust.
 		float3x4 worldMatrix = Skinned::GetBoneTransformMatrixBindless(boneOffset, boneIndices, FrameBuffer::CameraPosAdjust.xyz, boneWeights);
@@ -741,10 +742,10 @@ VS_OUTPUT main(uint a_vertexID: SV_VertexID)
 {
 	DCLFDrawVertexLayout = SceneDraw.VertexLayout;
 	const uint indexNumber = SceneDraw.FirstIndex + a_vertexID;
-	const uint indexWord = DeviceLoad(uint, DCLFAddress(SceneDraw.IndexAddress) + uint64_t((indexNumber * 2) & ~3u));
+	const uint indexWord = DeviceLoad(uint, DeviceRefAdd(SceneDraw.IndexAddress, (indexNumber * 2) & ~3u));
 	const uint index = (indexNumber & 1) ? (indexWord >> 16) : (indexWord & 0xFFFF);
-	DCLFStream first = { DCLFAddress(SceneDraw.VertexAddress), SceneDraw.VertexStride };
-	DCLFStream second = { uint64_t(0), 0u };
+	DCLFStream first = { SceneDraw.VertexAddress, SceneDraw.VertexStride };
+	DCLFStream second = { DeviceRef(0, 0), 0u };
 	DCLFStreamsAt(index, first, second);
 	VS_INPUT input;
 	input.PositionMS = float4(DCLFPullPosition(first, second).xyz, 1);
@@ -785,10 +786,10 @@ VS_OUTPUT main(uint a_vertexID: SV_VertexID)
 {
 	DCLFDrawVertexLayout = ShadowMaskDraw.VertexLayout;
 	const uint indexNumber = ShadowMaskDraw.FirstIndex + a_vertexID;
-	const uint indexWord = DeviceLoad(uint, DCLFAddress(ShadowMaskDraw.IndexAddress) + uint64_t((indexNumber * 2) & ~3u));
+	const uint indexWord = DeviceLoad(uint, DeviceRefAdd(ShadowMaskDraw.IndexAddress, (indexNumber * 2) & ~3u));
 	const uint index = (indexNumber & 1) ? (indexWord >> 16) : (indexWord & 0xFFFF);
-	DCLFStream first = { DCLFAddress(ShadowMaskDraw.VertexAddress), ShadowMaskDraw.VertexStride };
-	DCLFStream second = { uint64_t(0), 0u };
+	DCLFStream first = { ShadowMaskDraw.VertexAddress, ShadowMaskDraw.VertexStride };
+	DCLFStream second = { DeviceRef(0, 0), 0u };
 	DCLFStreamsAt(index, first, second);
 	VS_OUTPUT vsout;
 	vsout.PositionCS = float4(DCLFPullPosition(first, second).xy, 0, 1);

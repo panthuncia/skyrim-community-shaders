@@ -432,10 +432,10 @@ namespace DCLF::Draws
 		return latchWord ? latchWord() : 0u;
 	}
 
-	std::uint64_t PassAnimatedRows()
+	Api::FrameRows PassAnimatedRows()
 	{
 		const auto animatedRows = State().animatedRows;
-		return animatedRows ? animatedRows() : 0u;
+		return animatedRows ? animatedRows() : Api::FrameRows{};
 	}
 
 	Api::FrameRows PassFrameRows()

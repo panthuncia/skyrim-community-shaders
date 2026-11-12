@@ -36,7 +36,7 @@ namespace DCLF::Direct
 	{
 		std::uint32_t family = 0;  // Api::DrawFamily
 		std::uint32_t face = 0;
-		std::uint64_t row = 0;          // the face's row (ViewResources::faceRowsAddress)
+		RenderGraph::BufferRef row;     // the face's row (ViewResources::faceRowsRef)
 		rhi::ResourceHandle list{};     // the face's list, the adopted set's version (its cull is the site's pre-work)
 		rhi::PipelineHandle pipeline{};  // the shape's (ViewFrame::faces)
 		rhi::CommandSignatureHandle signature{};

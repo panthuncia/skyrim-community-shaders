@@ -20,13 +20,13 @@
 //   white).
 // With a still camera also: vanished (the frame before had an object here, and this frame has none of it here or beside) and
 // appeared (the reverse); a moving camera covers and uncovers, so these count edges then.
-#include "Common/DeviceAddress.hlsli"
+#include "Common/DeviceRef.hlsli"
 
 cbuffer FoliageParityConstants : register(b0)
 {
-	uint4 Ids;          // both frames' pairs, by the epoch's parity
+	uint4 Ids;          // both frames' pairs of buffer view refs, by the epoch's parity
 	uint4 Colours;
-	uint2 FrameBlock;   // the colour epoch's words (Lighting.hlsl, DCLFFoliageParity*): which pair is this frame's, and its tag
+	uint2 FrameBlock;   // the colour epoch's words, by buffer view ref (Lighting.hlsl, DCLFFoliageParity*): which pair is this frame's, and its tag
 	uint ResultsIndex;  // RWByteAddressBuffer: the counters, then the samples (GpuLayouts.h, FoliageCounter)
 	uint OwnersIndex;   // RWStructuredBuffer<uint64_t>: the Z-prepass's owner per pixel (64 bits), cleared here for the next frame
 	uint DepthIndex;    // Texture2D<float>: the main depth
@@ -55,14 +55,12 @@ static const float kMotionFar = 8.0;
 // The depth buffer's unit (D24): the owner's depth is the fragment's, the buffer's that depth rounded to it.
 static const float kDepthUnit = 1.0 / 16777215.0;
 
-uint64_t Address(uint2 a_words) { return (uint64_t(a_words.y) << 32) | uint64_t(a_words.x); }
-
 // The object at a pixel of a frame's buffer, 0 for none (not written that frame).
 uint ObjectAt(uint2 a_buffer, int2 a_pixel, uint a_tag)
 {
 	if (a_pixel.x < 0 || a_pixel.y < 0 || uint(a_pixel.x) >= Width || uint(a_pixel.y) >= Height)
 		return 0;
-	const uint word = DeviceLoad(uint, Address(a_buffer) + (uint64_t(a_pixel.y) * Width + uint(a_pixel.x)) * 4, 4);
+	const uint word = DeviceLoad(uint, DeviceRefAdd(a_buffer, (uint(a_pixel.y) * Width + uint(a_pixel.x)) * 4), 4);
 	return (word >> 24) == a_tag ? (word & 0x00FFFFFFu) : 0;
 }
 
@@ -105,7 +103,7 @@ void Sample(RWByteAddressBuffer a_results, uint a_counter, uint a_base, uint a_c
 	const uint position = uint(pixel.x) | (uint(pixel.y) << 16);
 	RWByteAddressBuffer results = ResourceDescriptorHeap[ResultsIndex];
 	{
-		const uint4 frameWords = DeviceLoad(uint4, Address(FrameBlock) + 16, 4);  // width, height, tag, owners
+		const uint4 frameWords = DeviceLoad(uint4, DeviceRefAdd(FrameBlock, 16), 4);  // width, height, tag, owners
 		Frame = frameWords.z;
 		const bool odd = (Frame & 1) != 0;
 		CurrentIds = odd ? Ids.zw : Ids.xy;
@@ -118,8 +116,8 @@ void Sample(RWByteAddressBuffer a_results, uint a_counter, uint a_base, uint a_c
 	const uint tag = Frame & 0xFF, previousTag = (Frame - 1) & 0xFF;
 	const uint object = ObjectAt(CurrentIds, pixel, tag);
 	const uint previous = ObjectAt(PreviousIds, pixel, previousTag);
-	const uint64_t index = uint64_t(pixel.y) * Width + uint(pixel.x);
-	const uint4 colours = object != 0 ? DeviceLoad(uint4, Address(CurrentColours) + index * kColourWords * 4, 4) : uint4(0, 0, 0, 0);
+	const uint index = uint(pixel.y) * Width + uint(pixel.x);
+	const uint4 colours = object != 0 ? DeviceLoad(uint4, DeviceRefAdd(CurrentColours, index * kColourWords * 4), 4) : uint4(0, 0, 0, 0);
 
 	// Within the frame: the owner of the pixel's depth, if an alpha-tested Z-prepass draw has it.
 	RWStructuredBuffer<uint64_t> owners = ResourceDescriptorHeap[OwnersIndex];
@@ -189,7 +187,7 @@ void Sample(RWByteAddressBuffer a_results, uint a_counter, uint a_base, uint a_c
 				const int2 at = then + int2(x, y);
 				if (ObjectAt(PreviousIds, at, previousTag) != object)
 					continue;
-				const uint4 earlier = DeviceLoad(uint4, Address(PreviousColours) + (uint64_t(at.y) * Width + uint(at.x)) * kColourWords * 4, 4);
+				const uint4 earlier = DeviceLoad(uint4, DeviceRefAdd(PreviousColours, (uint(at.y) * Width + uint(at.x)) * kColourWords * 4), 4);
 				const float3 albedoStep = abs(Unpack(colours.x).rgb - Unpack(earlier.x).rgb);
 				const float3 diffuseStep = abs(Unpack(colours.y).rgb - Unpack(earlier.y).rgb);
 				const float3 specularStep = abs(Unpack(colours.z).rgb - Unpack(earlier.z).rgb);

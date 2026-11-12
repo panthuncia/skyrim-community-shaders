@@ -511,7 +511,7 @@ namespace DCLF::Features::Grass
 				auto vertex = gpu.Acquire(mesh.source.vertexBuffer.get());
 				auto index = vertex ? gpu.Acquire(mesh.source.indexBuffer.get()) : std::nullopt;
 				if (vertex && index) {
-					mesh.row = { .vertexAddress = vertex->buffer.address, .indexAddress = index->buffer.address, .vertexDesc = mesh.source.vertexDesc,
+					mesh.row = { .vertexRef = vertex->buffer.ref, .indexRef = index->buffer.ref, .vertexDesc = mesh.source.vertexDesc,
 						.indexCount = mesh.source.indexCount, .vertexStride = static_cast<std::uint32_t>(mesh.source.vertexDesc & 0xF) * 4 };
 					mesh.vertexOwner = std::move(vertex->owner);
 					mesh.indexOwner = std::move(index->owner);

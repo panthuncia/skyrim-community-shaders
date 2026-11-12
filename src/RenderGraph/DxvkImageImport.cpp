@@ -4,9 +4,14 @@
 #include "RenderGraph/DxvkImageImport.h"
 
 #include "RenderGraph/Backend.h"
+#include "RenderGraph/BufferRefs.h"
 
 #include <Resources/ExternalTextureResource.h>
 #include <Resources/TextureDescription.h>
+
+#include <algorithm>
+#include <mutex>
+#include <unordered_map>
 
 // BasicRHI's D3D12 import (rhi_interop_dx12.h), declared here: that header brings DirectX-Headers' d3d12.h, which this translation
 // unit's Windows SDK headers would meet.
@@ -102,5 +107,73 @@ namespace RenderGraph
 		if (result)
 			result->SetName(a_name);
 		return result;
+	}
+
+	namespace
+	{
+		// A described buffer as BasicRHI sees it: one import per native buffer, which every range of it shares (BufferRefs: its raw view
+		// pair). The map holds them weakly: the leases' keep holds them.
+		struct ImportedBuffer
+		{
+			rhi::ResourcePtr resource;
+			std::uint64_t bytes = 0;  // what the import's views cover (Vulkan); D3D12 imports the whole resource
+		};
+		struct ImportedBuffers
+		{
+			std::mutex mutex;
+			std::unordered_map<std::uint64_t, std::weak_ptr<ImportedBuffer>> byBuffer;
+			std::size_t pruneAt = 64;
+		};
+		ImportedBuffers& Imports()
+		{
+			static ImportedBuffers imports;
+			return imports;
+		}
+	}
+
+	BufferRef ImportBufferRef(rhi::Device a_device, std::uint64_t a_buffer, std::uint64_t a_offset, std::uint64_t a_bytes, std::shared_ptr<const void>& a_keep)
+	{
+		a_keep.reset();
+		if (!a_device || !a_buffer || !a_bytes)
+			return {};
+		const std::uint64_t end = a_offset + a_bytes;
+		auto& imports = Imports();
+		std::shared_ptr<ImportedBuffer> imported;
+		{
+			const std::lock_guard lock(imports.mutex);
+			auto& slot = imports.byBuffer[a_buffer];
+			imported = slot.lock();
+			if (!imported || (!Backend::IsD3D12() && imported->bytes < end)) {
+				// A range past the import's views (or no import): import it again, covering every range seen so far. The older import
+				// stays while the leases that took it hold it.
+				auto fresh = std::make_shared<ImportedBuffer>();
+				if (Backend::IsD3D12()) {
+					fresh->resource = ImportD3D12Resource(a_device, reinterpret_cast<void*>(a_buffer), "CS described buffer");
+				} else {
+					rhi::vulkan::ImportedBufferDesc desc{};
+					desc.buffer = reinterpret_cast<VkBuffer>(a_buffer);
+					desc.size = (std::max)(end, imported ? imported->bytes : 0);
+					// A described buffer has a device address (its description's), which the views are written from.
+					desc.usage = VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
+					desc.concurrentSharing = true;
+					desc.debugName = "CS described buffer";
+					if (rhi::vulkan::import_buffer(a_device, desc, fresh->resource) != rhi::Result::Ok)
+						fresh->resource.Reset();
+					fresh->bytes = desc.size;
+				}
+				if (!fresh->resource)
+					return {};
+				imported = std::move(fresh);
+				slot = imported;
+			}
+			if (imports.byBuffer.size() >= imports.pruneAt) {
+				std::erase_if(imports.byBuffer, [](const auto& a_entry) { return a_entry.second.expired(); });
+				imports.pruneAt = (std::max<std::size_t>)(64, 2 * imports.byBuffer.size());
+			}
+		}
+		const BufferRef ref = ToBufferRef(a_device.GetBufferViewRef({ imported->resource->GetHandle(), a_offset }));
+		if (ref)
+			a_keep = std::move(imported);
+		return ref;
 	}
 }

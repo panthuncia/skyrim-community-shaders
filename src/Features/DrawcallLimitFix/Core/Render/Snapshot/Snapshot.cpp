@@ -4,6 +4,7 @@
 // (FitsScene) are the coordinator's.
 
 #include "Features/DrawcallLimitFix/Core/Render/Internal.h"
+#include "Features/DrawcallLimitFix/Core/Gpu/NamedRefs.h"
 #include "RenderGraph/Engine/Native/Native.h"
 #include "Features/DrawcallLimitFix/Diagnostics/Zones.h"
 #include "Features/DrawcallLimitFix/Core/Render/Direct/Sites.h"
@@ -205,7 +206,7 @@ namespace DCLF
 			Extensions::FrameBindingValuesOf(a_sealed, scene, a_frame, a_out.frameBindings, false);
 			// The vertex stream's buffer while its entry class's objects are DCLF's (Features/Faces' face positions: it takes the face shapes
 			// once its engine side is in).
-			a_out.streamBuffer = Extensions::VertexStreamTaken() ? a_sealed.Of(scene.vertexStream).deviceAddress : 0;
+			a_out.streamBuffer = Extensions::VertexStreamTaken() ? RefOf(a_sealed.Of(scene.vertexStream)) : RenderGraph::BufferRef{};
 			a_out.fit = SceneFitOf(a_sealed, scene, objects);
 		}
 

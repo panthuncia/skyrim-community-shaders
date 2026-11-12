@@ -6,6 +6,7 @@
 #include "Features/DrawcallLimitFix/Core/Render/Internal.h"
 #include "Features/DrawcallLimitFix/Core/Render/Snapshot/ViewBatches.h"
 #include "Features/DrawcallLimitFix/Core/Extensions/MainRanges.h"
+#include "RenderGraph/BufferRefs.h"
 
 #include <ORGModuleServices/VersionedBufferBuild.h>
 #include <tbb/concurrent_queue.h>
@@ -141,10 +142,10 @@ namespace DCLF::Draws::detail
 		{
 			DrawSequence s = a_rows;
 			const GeometryDraw& second = a_stream ? *a_stream : a_geometry;
-			s.vertexBufferAddress = a_geometry.vertexBufferAddress;
+			s.vertexBufferRef = a_geometry.vertexBufferRef;
 			s.vertexBufferSize = a_geometry.vertexBufferSize;
 			s.vertexStride = a_geometry.vertexStride;
-			s.streamBufferAddress = second.vertexBufferAddress;
+			s.streamBufferRef = second.vertexBufferRef;
 			s.streamBufferSize = second.vertexBufferSize;
 			s.streamStride = second.vertexStride;
 			s.blockPad = 0;
@@ -222,12 +223,18 @@ namespace DCLF::Draws::detail
 	struct RowBases
 	{
 		std::uint64_t pipelineRows = 0, materialRows = 0, shadowRows = 0;
+		RenderGraph::BufferRef pipelineRowsRef, materialRowsRef, shadowRowsRef;  // the same rows' buffer view refs (the direct draws' bases)
 		const std::vector<ShadowPipelineKey>* slotKeys = nullptr;
 
 		static std::uint64_t AddressOf(const ScenePayload& a_payload, PayloadPart a_part)
 		{
 			const auto& version = a_payload.versions[static_cast<std::size_t>(a_part)];
 			return version ? version->lease->address : 0;
+		}
+		static RenderGraph::BufferRef RefOf(const ScenePayload& a_payload, PayloadPart a_part)
+		{
+			const auto& version = a_payload.versions[static_cast<std::size_t>(a_part)];
+			return version && version->lease->buffer ? RenderGraph::BufferRefOf(*version->lease->buffer) : RenderGraph::BufferRef{};
 		}
 		/** @brief A main input's rows (BuildDrawsCS RowsOf: the installed rows; the draw resolves an animated row to the frame's copy, DCLFSequenceRows). */
 		DrawSequence Main(const DrawInput& a_input) const

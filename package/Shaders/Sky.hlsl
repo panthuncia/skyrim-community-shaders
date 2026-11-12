@@ -10,7 +10,7 @@
 #	define ORG_HEADER_RESOURCES
 #	include "Common/OrgResources.hlsli"
 
-// A draw's geometry: the engine's static vertex and index buffers by device address, which the vertex stage pulls (ORG draws have
+// A draw's geometry: the engine's static vertex and index buffers by buffer view ref, which the vertex stage pulls (ORG draws have
 // no input assembly). VertexLayout is the engine's input layout key (the vertex shader's mask and the geometry's VertexDesc).
 struct SkyOrgGeometry
 {
@@ -261,10 +261,10 @@ VS_INPUT SkyPullVertex(uint a_vertexID)
 {
 	DCLFDrawVertexLayout = SkyGeometry.VertexLayout;
 	const uint indexNumber = SkyGeometry.FirstIndex + a_vertexID;
-	const uint indexWord = DeviceLoad(uint, DCLFAddress(SkyGeometry.IndexAddress) + uint64_t((indexNumber * 2) & ~3u));
+	const uint indexWord = DeviceLoad(uint, DeviceRefAdd(SkyGeometry.IndexAddress, (indexNumber * 2) & ~3u));
 	const uint index = (indexNumber & 1) ? (indexWord >> 16) : (indexWord & 0xFFFF);
-	DCLFStream first = { DCLFAddress(SkyGeometry.VertexAddress), SkyGeometry.VertexStride };
-	DCLFStream second = { uint64_t(0), 0u };
+	DCLFStream first = { SkyGeometry.VertexAddress, SkyGeometry.VertexStride };
+	DCLFStream second = { DeviceRef(0, 0), 0u };
 	DCLFStreamsAt(index, first, second);
 
 	VS_INPUT input;

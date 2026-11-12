@@ -1,6 +1,7 @@
 // FrameValues (see the header): the render thread's Kick and the producers it dispatches onto the preparation pool, one at a time.
 
 #include "Features/DrawcallLimitFix/Core/Gpu/FrameValues.h"
+#include "RenderGraph/BufferRefs.h"
 #include "Features/DrawcallLimitFix/Diagnostics/Zones.h"
 #include "Features/DrawcallLimitFix/Core/Engine/EngineAccess.h"
 #include "Features/DrawcallLimitFix/Core/Engine/Walkers.h"
@@ -3063,6 +3064,18 @@ namespace DCLF
 	{
 		const auto backing = PoolBacking(a_pool);
 		return backing ? backing->address : 0;
+	}
+
+	RenderGraph::BufferRef FrameValues::PoolRef(Api::FrameValuePoolId a_pool) const
+	{
+		const auto backing = PoolBacking(a_pool);
+		return backing && backing->buffer ? RenderGraph::BufferRefOf(*backing->buffer) : RenderGraph::BufferRef{};
+	}
+
+	std::uint64_t FrameValues::PoolBytes(Api::FrameValuePoolId a_pool) const
+	{
+		const auto backing = PoolBacking(a_pool);
+		return backing ? backing->byteCapacity : 0;
 	}
 
 	std::shared_ptr<const org::services::Backing> FrameValues::PoolBacking(Api::FrameValuePoolId a_pool) const

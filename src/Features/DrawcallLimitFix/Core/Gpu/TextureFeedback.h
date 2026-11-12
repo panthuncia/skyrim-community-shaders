@@ -1,5 +1,7 @@
 #pragma once
 
+#include "RenderGraph/BufferRef.h"
+
 #include <cstdint>
 
 // Texture streaming's feedback buffer: one word per material slot, in host-visible memory the colour pass writes directly and the streaming
@@ -18,8 +20,8 @@ namespace DCLF::TextureFeedback
 	/** @brief Render thread: makes the buffer, once, when the render graph's host is up. */
 	void Ensure();
 
-	/** @brief Any thread: the buffer's device address (0 before Ensure, or if it could not be made). */
-	std::uint64_t Address();
+	/** @brief Any thread: the buffer's view ref, which the pixel stages write through (null before Ensure, or if it could not be made). */
+	RenderGraph::BufferRef Ref();
 
 	/** @brief Any thread: the mapped words, kWords of them (null: no buffer). */
 	volatile std::uint32_t* Words();

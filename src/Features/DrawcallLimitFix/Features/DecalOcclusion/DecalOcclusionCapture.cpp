@@ -123,10 +123,8 @@ namespace DCLF::Features::DecalOcclusion
 						sum += viewProj[k * 4 + i] * rows[k][j];
 					constants.clipRows[i * 4 + j] = sum;
 				}
-			constants.vertexAddress[0] = static_cast<std::uint32_t>(latched.vertexAddress);
-			constants.vertexAddress[1] = static_cast<std::uint32_t>(latched.vertexAddress >> 32);
-			constants.indexAddress[0] = static_cast<std::uint32_t>(latched.indexAddress);
-			constants.indexAddress[1] = static_cast<std::uint32_t>(latched.indexAddress >> 32);
+			constants.vertexRef = latched.vertexRef;
+			constants.indexRef = latched.indexRef;
 			constants.vertexLayout[0] = static_cast<std::uint32_t>(latched.layout);
 			constants.vertexLayout[1] = static_cast<std::uint32_t>(latched.layout >> 32);
 			constants.vertexStride = latched.stride;

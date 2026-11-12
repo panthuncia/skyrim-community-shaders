@@ -11,7 +11,7 @@
 // backing the pool handed it.
 
 // Must match TextureTransformsPass.cpp's Constants.
-#include "Common/DeviceAddress.hlsli"
+#include "Common/DeviceRef.hlsli"
 
 cbuffer TextureTransformsConstants : register(b0)
 {
@@ -31,11 +31,11 @@ struct TextureTransformRow
 	float4 Values;
 };
 
-// BuildDrawsLatch's words (GpuLayouts.h: materialRowsLo at 272, materialRowsHi at 276, stageWord at 300: the pool's rows, animatedRowsLo
-// at 348, animatedRowsHi at 352: the frame's copy).
-static const uint kLatchMaterialRows = 272;
+// BuildDrawsLatch's words (GpuLayouts.h: stageWord at 300; materialRowsRef at 384: the installed rows' buffer view ref, animatedRowsRef
+// at 392: the frame's copy's).
 static const uint kLatchStageWord = 300;
-static const uint kLatchAnimatedRows = 348;
+static const uint kLatchMaterialRowsRef = 384;
+static const uint kLatchAnimatedRowsRef = 392;
 // DrawPipelines.h: kMaterialRowBytes, kMaterialRowHeader (MaterialRowHeader::animatedRow its first word).
 static const uint kMaterialRowBytes = 1024;
 static const uint kMaterialRowHeader = 768;
@@ -49,11 +49,9 @@ static const uint kThreads = 64 * 32;
 	const uint transformsIndex = latch.Load(LatchOffset + kLatchStageWord);
 	if (transformsIndex == 0)
 		return;  // no producer this frame (and no copy: the draws read the installed rows)
-	const uint2 rows = latch.Load2(LatchOffset + kLatchMaterialRows);
-	const uint2 copyRows = latch.Load2(LatchOffset + kLatchAnimatedRows);
-	const uint64_t base = (uint64_t(rows.y) << 32) | uint64_t(rows.x);
-	const uint64_t copyBase = (uint64_t(copyRows.y) << 32) | uint64_t(copyRows.x);
-	if (base == 0 || copyBase == 0)
+	const DeviceRef base = latch.Load2(LatchOffset + kLatchMaterialRowsRef);
+	const DeviceRef copyBase = latch.Load2(LatchOffset + kLatchAnimatedRowsRef);
+	if (DeviceRefIsNull(base) || DeviceRefIsNull(copyBase))
 		return;
 	StructuredBuffer<TextureTransformRow> transforms = ResourceDescriptorHeap[transformsIndex];
 	const uint count = transforms[0].RowOffset;
@@ -67,7 +65,7 @@ static const uint kThreads = 64 * 32;
 			if (installed == kNoAnimatedRow)
 				continue;  // a free row: no header names it
 			const uint at = (w % kWords) * 16;
-			DeviceStore(uint4, copyBase + uint64_t(k) * kMaterialRowBytes + at, DeviceLoad(uint4, base + installed + at, 16), 16);
+			DeviceStore(uint4, DeviceRefAdd(copyBase, k * kMaterialRowBytes + at), DeviceLoad(uint4, DeviceRefAdd(base, installed + at), 16), 16);
 		}
 		return;
 	}
@@ -75,14 +73,14 @@ static const uint kThreads = 64 * 32;
 		const TextureTransformRow row = transforms[i + 1];
 		// The entry's row's copy (its installed header names it); a row with none is not listed (MainRows::AnimatedRows::Animated).
 		const uint rowBase = row.RowOffset / kMaterialRowBytes * kMaterialRowBytes;
-		const uint k = DeviceLoad(uint, base + rowBase + kMaterialRowHeader, 4);
+		const uint k = DeviceLoad(uint, DeviceRefAdd(base, rowBase + kMaterialRowHeader), 4);
 		// kNoAnimatedRow is past every count. One unsigned compare, no equality test: AMD's RDNA2 Windows compiler took
 		// `k == kNoAnimatedRow || k >= animated` as k == kNoAnimatedRow on the path past it, and stored every entry ~4 TB past the copy.
 		if (k >= animated)
 			continue;
-		const uint64_t at = copyBase + uint64_t(k) * kMaterialRowBytes + (row.RowOffset - rowBase);
+		const DeviceRef at = DeviceRefAdd(copyBase, k * kMaterialRowBytes + (row.RowOffset - rowBase));
 		[unroll] for (uint c = 0; c < 4; ++c)
 			if ((row.Mask >> c) & 1)
-				DeviceStore(uint, at + c * 4, asuint(row.Values[c]), 4);
+				DeviceStore(uint, DeviceRefAdd(at, c * 4), asuint(row.Values[c]), 4);
 	}
 }

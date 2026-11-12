@@ -1,5 +1,7 @@
 #pragma once
 
+#include "RenderGraph/BufferRef.h"
+
 // The menu scenes' engine draw family (docs/development/p5/menus.md, "The menu scenes as an engine draw family"): the engine's draws
 // of a menu scene latched and drawn by an ORG pass in the engine's place, as the water, the sky and the shadow masks are
 // (Core/Engine/Family). The engine's CPU code runs unchanged: it culls, registers and sets up every pass, and DrawTriShape latches
@@ -101,8 +103,8 @@ namespace DCLF::Features::MenuViews::Scenes
 		std::uint32_t padding;
 		std::uint32_t textures[kUtilitySlots];
 		std::uint32_t samplers[kUtilitySlots];
-		std::uint32_t vertexAddress[2];
-		std::uint32_t indexAddress[2];
+		RenderGraph::BufferRef vertexRef;  // the vertex buffer view ref the vertex stage pulls through
+		RenderGraph::BufferRef indexRef;   // the index buffer's
 		std::uint32_t vertexLayout[2];
 		std::uint32_t padding2[2];
 	};
@@ -138,8 +140,8 @@ namespace DCLF::Features::MenuViews::Scenes
 		std::uint32_t padding;
 		std::uint32_t textures[kLightingSlots];
 		std::uint32_t samplers[kLightingSlots];
-		std::uint32_t vertexAddress[2];
-		std::uint32_t indexAddress[2];
+		RenderGraph::BufferRef vertexRef;  // the vertex buffer view ref the vertex stage pulls through
+		RenderGraph::BufferRef indexRef;   // the index buffer's
 		std::uint32_t vertexLayout[2];
 		std::uint32_t padding2[2];
 	};
@@ -173,13 +175,13 @@ namespace DCLF::Features::MenuViews::Scenes
 		std::uint32_t vertexStride;
 		std::uint32_t firstIndex;
 		std::uint32_t nullTexture;
-		std::uint32_t streamStride;  // a DrawData copy's stream 1 (the dynamic ring), with streamAddress; 0 for a static draw
+		std::uint32_t streamStride;  // a DrawData copy's stream 1 (the dynamic ring), with streamRef; 0 for a static draw
 		std::uint32_t textures[kEffectSlots];
 		std::uint32_t samplers[kEffectSlots];
-		std::uint32_t vertexAddress[2];
-		std::uint32_t indexAddress[2];
+		RenderGraph::BufferRef vertexRef;  // the vertex buffer view ref the vertex stage pulls through
+		RenderGraph::BufferRef indexRef;   // the index buffer's
 		std::uint32_t vertexLayout[2];
-		std::uint32_t streamAddress[2];
+		RenderGraph::BufferRef streamRef;  // stream 1's (null for a static draw)
 	};
 	static_assert(sizeof(EffectSceneConstants) == 752 && sizeof(EffectSceneConstants) % 16 == 0, "EffectOrgDraw's layout");
 	/** @brief A TEXCOORD_INDEX draw's indexed texture coordinates (VS b11), latched right after its EffectSceneConstants. */

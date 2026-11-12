@@ -176,7 +176,7 @@ namespace DCLF::Features::TreeLod
 		// One instanced draw of the face's list, its row the face's (phase 1's arguments, its instances from the list's start).
 		void FacesRecord(const Api::DrawFamilyRecord& a_record)
 		{
-			std::uint32_t words[kDrawPushWords]{ static_cast<std::uint32_t>(a_record.row), static_cast<std::uint32_t>(a_record.row >> 32), 0u };
+			std::uint32_t words[kDrawPushWords]{ a_record.row.viewSlot, a_record.row.byteOffset, 0u };
 			a_record.commands.BindPipeline(a_record.pipeline);
 			a_record.commands.PushConstants(rhi::ShaderStage::AllGraphics, 0, kDrawPushBinding, 0, kDrawPushWords, words);
 			a_record.commands.ExecuteIndirect(a_record.signature, a_record.arguments, offsetof(TreeInstances::VisibleHeader, phaseOne), {}, 0, 1);
@@ -227,9 +227,9 @@ namespace DCLF::Features::TreeLod
 			TreeInstances::DrawRow commitRow{};
 			std::memcpy(&commitRow, a_face.commitRow.data(), sizeof(commitRow));
 			TreeInstances::DrawRow row = commitRow;
-			row.visible = a_face.listAddress + TreeInstances::kVisibleHeaderWords * sizeof(std::uint32_t);
+			row.visible = a_face.listRef + TreeInstances::kVisibleHeaderWords * sizeof(std::uint32_t);
 			row.shapeSlots = a_face.drawn ? commitRow.shapeSlots : 0u;
-			row.statsLow = row.statsHigh = 0;  // the main draws' stage stamps only
+			row.stats = {};  // the main draws' stage stamps only
 			std::memcpy(a_face.row.data(), &row, sizeof(row));
 			TreeInstances::VisibleHeader header{};
 			header.phaseOne[0] = header.phaseTwo[0] = header.colour[0] = std::max(row.maxIndices, 1u);

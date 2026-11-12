@@ -6,6 +6,7 @@
 
 // volk must precede every Vulkan header in this translation unit (Main/Resources.h first).
 #include "Features/DrawcallLimitFix/Core/Render/Main/Resources.h"
+#include "RenderGraph/BufferRef.h"
 #include "Features/DrawcallLimitFix/Api/Passes.h"
 #include "Features/DrawcallLimitFix/Core/Extensions/DrawFamilies.h"
 #include "Features/DrawcallLimitFix/Core/Gpu/GpuTextures.h"
@@ -202,6 +203,7 @@ namespace DCLF::Draws
 		// commit from this frame's sources. Null for a view drawing with the main resources' (first person's).
 		std::shared_ptr<org::Buffer> frameConstants;
 		std::uint64_t frameConstantsAddress = 0;
+		RenderGraph::BufferRef frameConstantsRef;
 		std::shared_ptr<const FrameBlockViews> frameBlocks;  // its pass-wide blocks' views (FrameBlockViews), which its record names
 		bool sharedLightZeroed = false;
 		// With them, its copies of the main pass's frame buffers (Resources::frameBuffers' shape: Deferred's sun cascades at t98), which its
@@ -218,7 +220,7 @@ namespace DCLF::Draws
 		// a draw row and a visible list for the scene's shape slots); named its rowName and listName with the face's index.
 		std::array<std::array<std::shared_ptr<org::Buffer>, kMaxViewFaces>, Extensions::kDrawFamilies> faceRows;
 		std::array<std::array<Versioned, kMaxViewFaces>, Extensions::kDrawFamilies> faceLists;
-		std::array<std::array<std::uint64_t, kMaxViewFaces>, Extensions::kDrawFamilies> faceRowsAddress{};
+		std::array<std::array<RenderGraph::BufferRef, kMaxViewFaces>, Extensions::kDrawFamilies> faceRowsRef{};  // what the faces' draws push
 		// The passes are to be declared again (new main resources): at the view's own import, never mid-frame.
 		bool rebuildPending = false;
 		std::shared_ptr<const ComputeProgram> buildDraws;
@@ -278,6 +280,7 @@ namespace DCLF::Draws
 		std::uint32_t sequenceDraws = 0;  // a face's range: the sequences' named units (the revision's set), at least plan.draws
 		const ViewLatches* latches = nullptr;
 		std::uint64_t frameConstantsAddress = 0;  // the view's own (OwnsFrameConstants) or the colour segment's, which the push data names
+		RenderGraph::BufferRef frameConstantsRef;  // likewise, the stages' (Common/DCLFFrameRecord.hlsli)
 		std::vector<LatchedCopy> frameCopies;     // a view's own frame values' latched copies (ViewFrame::kFrameList), at the latch layout's FrameOffset
 		std::uint32_t width = 0, height = 0;
 		float depthRange = 1.0f;

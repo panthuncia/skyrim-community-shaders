@@ -1,5 +1,7 @@
 #pragma once
 
+#include "RenderGraph/BufferRef.h"
+
 // Decal occlusion (CS_ORG_OCCLUSION_QUERIES, docs/development/p5/occlusion-queries.md): the engine's decal occlusion test drawn by the
 // render graph, with an ORG occlusion query that answers the engine's GetQueryData.
 //
@@ -41,14 +43,14 @@ namespace DCLF::Features::DecalOcclusion
 	struct DrawConstants
 	{
 		float clipRows[16];  // the decal camera's view-projection times the shape's world, as rows (clip = row . position)
-		std::uint32_t vertexAddress[2];
-		std::uint32_t indexAddress[2];
+		RenderGraph::BufferRef vertexRef;  // the vertex buffer view ref the vertex stage pulls through
+		RenderGraph::BufferRef indexRef;   // the index buffer's
 		std::uint32_t vertexLayout[2];
 		std::uint32_t vertexStride;
 		std::uint32_t firstIndex;
 	};
 	static_assert(sizeof(DrawConstants) == 96, "DecalOcclusionDraw's layout");
-	static_assert(offsetof(DrawConstants, vertexAddress) == 64 && offsetof(DrawConstants, vertexStride) == 88, "DecalOcclusionDraw's rows");
+	static_assert(offsetof(DrawConstants, vertexRef) == 64 && offsetof(DrawConstants, vertexStride) == 88, "DecalOcclusionDraw's rows");
 
 	/** @brief One latched draw. */
 	struct Draw

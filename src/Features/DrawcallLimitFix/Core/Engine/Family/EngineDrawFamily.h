@@ -12,6 +12,7 @@
 
 #include "Features/DrawcallLimitFix/Core/Engine/EngineAccess.h"
 #include "Features/DrawcallLimitFix/Core/Gpu/GpuTextures.h"
+#include "RenderGraph/BufferRef.h"
 
 #include "RenderGraph/Engine/Constants/EngineConstants.h"
 #include "RenderGraph/Engine/Flush/Flush.h"
@@ -212,14 +213,14 @@ namespace DCLF::Family
 	/** @brief Whether R1's geometry-type dispatcher draws a_pass through DrawTriShape (its geometry type and accumulation hint). */
 	bool DrawsThroughTriShape(const RE::BSRenderPass* a_pass);
 
-	/** @brief A latched draw's geometry, read by device address while its leases are held. */
+	/** @brief A latched draw's geometry, read through its buffer view refs while its leases are held. */
 	struct Geometry
 	{
-		std::uint64_t vertexAddress = 0, indexAddress = 0;
+		RenderGraph::BufferRef vertexRef, indexRef;
 		std::uint64_t layout = 0;  // the engine's input layout key: the vertex shader's mask and the geometry's VertexDesc
 		std::uint32_t stride = 0, firstIndex = 0, indexCount = 0;
-		// A dynamic draw's stream 1 (the dynamic ring at its offset, LatchDynamicGeometry): 0 for a static draw.
-		std::uint64_t streamAddress = 0;
+		// A dynamic draw's stream 1 (the dynamic ring at its offset, LatchDynamicGeometry): null for a static draw.
+		RenderGraph::BufferRef streamRef;
 		std::uint32_t streamStride = 0;
 	};
 

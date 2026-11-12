@@ -1948,8 +1948,10 @@ pass, so it was not kept.
 -   **Buffers**: `dxvkGetInteropResourceInfo` (`src/RenderGraph/DxvkOrgInterop.h`) returns the Vulkan handle and device address and
     marks the resource stable. Buffers the game can map are rejected (`Ineligible::UnstableBuffer`; `Coordinator::NoteUnstable`
     counts them by cause and logs the first 16, `[DCLF] unstable buffer:`; dclf-roadmap.md 4.7). A cleared slot's import leases
-    go to the next execution committed and are held until the GPU retires it: DCLF draws game buffers by device address, which DXVK
-    does not see (a released chunk's memory once went to the next streamed buffer while a submitted pass still drew it).
+    go to the next execution committed and are held until the GPU retires it: DCLF draws game buffers through buffer view refs over
+    their device addresses, which DXVK does not see (a released chunk's memory once went to the next streamed buffer while a submitted
+    pass still drew it). A lease's ref is a view pair of the VkBuffer's BasicRHI import (`RenderGraph::ImportBufferRef`), shared by the
+    chunk's buffers and held by the lease.
 -   **RenderDoc**: with `renderdoc.dll` loaded the device has no `VK_EXT_descriptor_heap`, so the render graph cannot start and DCLF
     is off for the session, with the reason logged.
 
@@ -2563,7 +2565,7 @@ keeps on the node. One hidden without a visible full tree leaves a hole.
     `allVisible` (`PackGroup`) and pushes it as an intended event, applied only where it changes the records. Events go through a
     lock-free queue; `Drain` applies them in push order on the render thread.
 -   **Tables** (`TreeLodTables.h`, layout `TreeInstancesLayout.h`): versioned shape rows (translation, mesh slot, record count, type
-    extent), 75 instance records per shape slot, mesh rows (vertex and index device addresses leased through `GpuResources`, stride,
+    extent), 75 instance records per shape slot, mesh rows (vertex and index buffer view refs leased through `GpuResources`, stride,
     index count, UV offset), a draw row, and the visible list. They grow by requirements posted with the revision's inputs; the depth
     commit uploads only changed slots and meshes (`UploadTreeLod`).
 -   **Cull** (`TreeLodCullCS.hlsl`): phase 1 one thread per record (skipped past the count or at scale 0; frustum by the sphere holding

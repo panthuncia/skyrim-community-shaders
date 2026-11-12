@@ -93,12 +93,12 @@ namespace DCLF::Draws
 		return std::make_shared<ForwardSortPass>(std::move(a_sequences), std::move(a_counts), std::move(a_source));
 	}
 
-	std::array<std::uint32_t, kFramePushWords> MainFramePushWords(std::uint64_t a_frameConstants)
+	std::array<std::uint32_t, kFramePushWords> MainFramePushWords(std::uint64_t a_frameConstants, RenderGraph::BufferRef a_frameConstantsRef)
 	{
-		return FramePushWords(a_frameConstants);
+		return FramePushWords(a_frameConstants, a_frameConstantsRef);
 	}
 
-	void MainShadowLayoutPush(std::uint64_t a_frameConstants, std::uint32_t (&a_out)[kShadowPushWords])
+	void MainShadowLayoutPush(std::uint64_t a_frameConstants, RenderGraph::BufferRef a_frameConstantsRef, std::uint32_t (&a_out)[kShadowPushWords])
 	{
 		auto split = [](std::uint32_t* a_words, std::uint64_t a_value) {
 			a_words[0] = static_cast<std::uint32_t>(a_value);
@@ -106,6 +106,9 @@ namespace DCLF::Draws
 		};
 		const std::uint64_t constants = a_frameConstants;
 		split(a_out + kShadowPushFrameRecord, constants + std::uint64_t(kFrameSlotRecord) * kFrameSlotBytes);
+		const RenderGraph::BufferRef recordRef = a_frameConstantsRef + std::uint64_t(kFrameSlotRecord) * kFrameSlotBytes;
+		a_out[kShadowPushFrameRecordRef] = recordRef.viewSlot;
+		a_out[kShadowPushFrameRecordRef + 1] = recordRef.byteOffset;
 		split(a_out + kShadowPushViewBlock, constants + FrameSlotOffset(false, 0));
 		split(a_out + kShadowPushPerFrame, constants + FrameSlotOffset(false, kPerFrameVertexRegister));
 		split(a_out + kShadowPushZeros, constants + std::uint64_t(kFrameSlotSharedLight) * kFrameSlotBytes);

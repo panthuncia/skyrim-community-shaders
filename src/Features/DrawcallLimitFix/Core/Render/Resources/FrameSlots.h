@@ -1,4 +1,5 @@
 #pragma once
+#include "RenderGraph/BufferRef.h"
 
 // The main pass's capture (render thread) and the layout of the per-frame constant blocks at their frame slots, with the frame push
 // words that name them. Part of IndirectDraws' implementation: included by Internal.h, in its order.
@@ -103,7 +104,8 @@ namespace DCLF::Draws
 	// the extras' pixel inputs (c16, ExtrasFrame::projectedGlobals).
 	constexpr std::uint64_t kExtrasPixelFrameOffset = std::uint64_t(kFrameSlotLighting) * kFrameSlotBytes + sizeof(FrameLighting) + sizeof(LodFadeFrame) + 32;
 	static_assert(sizeof(FrameLighting) + sizeof(LodFadeFrame) + 32 == 16 * 16);
-	// The frame record and every slot's block are pushed addresses (frame constants base + slot offsets), and the LOD fades' inputs
+	// The frame record and every slot's block are pushed addresses (frame constants base + slot offsets; the record's ref is pushed too,
+	// for the stages that read it themselves), and the LOD fades' inputs
 	// (lighting slot + sizeof(FrameLighting)) a draw's material row word: all read through 16-byte-aligned pointers on Vulkan's
 	// descriptor-buffer model (BasicRHI's SPIR-V lowering).
 	static_assert(kFrameSlotBytes % 256 == 0 && sizeof(FrameLighting) % 16 == 0);
@@ -153,7 +155,7 @@ namespace DCLF::Draws
 		}
 	}
 
-	inline std::array<std::uint32_t, kFramePushWords> FramePushWords(std::uint64_t a_frameConstants)
+	inline std::array<std::uint32_t, kFramePushWords> FramePushWords(std::uint64_t a_frameConstants, RenderGraph::BufferRef a_frameConstantsRef)
 	{
 		std::array<std::uint32_t, kFramePushWords> words{};
 		ForEachFrameBlock([&](bool a_pixel, std::uint32_t a_register, std::uint32_t a_block) {
@@ -164,6 +166,9 @@ namespace DCLF::Draws
 		const std::uint64_t record = a_frameConstants + std::uint64_t(kFrameSlotRecord) * kFrameSlotBytes;
 		words[kFramePushRecord] = static_cast<std::uint32_t>(record);
 		words[kFramePushRecord + 1] = static_cast<std::uint32_t>(record >> 32);
+		const RenderGraph::BufferRef recordRef = a_frameConstantsRef + std::uint64_t(kFrameSlotRecord) * kFrameSlotBytes;
+		words[kFramePushRecordRef] = recordRef.viewSlot;
+		words[kFramePushRecordRef + 1] = recordRef.byteOffset;
 		return words;
 	}
 

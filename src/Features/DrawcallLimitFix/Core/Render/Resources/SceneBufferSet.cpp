@@ -66,7 +66,7 @@ namespace DCLF::Draws
 		registration.shrink = PooledBackings::Shrink();
 		registration.contents = a_spec.contents;
 		registration.capture = std::move(a_spec.capture);
-		// Every entry carries its version's device address (the shaders read most of them by address).
+		// Every entry carries its version's device address (layouts and diagnostics read it; shaders read the version's buffer view ref).
 		registration.address = true;
 		(void)set.Register(std::move(registration));
 		return versioned;

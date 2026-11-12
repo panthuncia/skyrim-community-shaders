@@ -154,7 +154,7 @@ namespace DCLF
 			const auto& in = a_commit.in;
 			const auto& resources = *a_commit.resources;
 			const std::uint32_t nullIndex = a_commit.textures.NullIndex() != kInvalidIndex ? a_commit.textures.NullIndex() : 0u;
-			const DrawBindings frameRecord = FrameRecordOf(resources.frameConstantsAddress, *resources.frameBlocks, in.vsFrameMask, in.psFrameMask, a_frameTextures, nullIndex, a_commit.parts,
+			const DrawBindings frameRecord = FrameRecordOf(resources.frameConstantsAddress, resources.frameConstantsRef, *resources.frameBlocks, in.vsFrameMask, in.psFrameMask, a_frameTextures, nullIndex, a_commit.parts,
 				{ in.addresses.placementsIndex, in.addresses.palettesIndex, in.addresses.shadingIndex }, a_commit.adopted, *resources.scene, a_commit.frameNumber);
 			a_commit.latched(resources.frameConstants, &frameRecord, sizeof(frameRecord), std::uint64_t(kFrameSlotRecord) * kFrameSlotBytes);
 		}
@@ -180,9 +180,8 @@ namespace DCLF
 			// and size as the previous colour commit left them.
 			if (const auto& foliage = resources->foliage; foliage && !a_commit.depthOnly) {
 				const std::uint32_t epoch = ++foliage->epoch, h = epoch & 1;
-				const std::uint32_t words[8] = { static_cast<std::uint32_t>(foliage->idsAddress[h]), static_cast<std::uint32_t>(foliage->idsAddress[h] >> 32),
-					static_cast<std::uint32_t>(foliage->coloursAddress[h]), static_cast<std::uint32_t>(foliage->coloursAddress[h] >> 32), foliage->width, foliage->height,
-					epoch & 0xFFu, foliage->ownersIndex };
+				const std::uint32_t words[8] = { foliage->idsRef[h].viewSlot, foliage->idsRef[h].byteOffset, foliage->coloursRef[h].viewSlot,
+					foliage->coloursRef[h].byteOffset, foliage->width, foliage->height, epoch & 0xFFu, foliage->ownersIndex };
 				latched(resources->frameConstants, words, sizeof(words),
 					std::uint64_t(kFrameSlotLighting) * kFrameSlotBytes + sizeof(FrameLighting) + sizeof(LodFadeFrame));
 				static const std::array<std::uint32_t, kFoliageCounters> zeros{};

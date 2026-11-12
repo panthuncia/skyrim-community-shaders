@@ -18,6 +18,8 @@ namespace RenderGraph::Engine::Buffers
 // volk must precede every Vulkan header in this translation unit.
 #	include <rhi_interop_vulkan.h>
 
+#	include "RenderGraph/BufferRefs.h"
+
 #	include "RenderGraph/Engine/Buffers/BufferBacking.h"
 #	include "RenderGraph/Engine/Tripwire/GuestDevice.h"
 #	include "RenderGraph/Engine/Tripwire/Tripwire.h"
@@ -198,8 +200,10 @@ namespace RenderGraph::Engine::Buffers
 		Direct direct;
 		direct.vkBuffer = reinterpret_cast<std::uint64_t>(rhi::vulkan::from_native_void<VkBuffer>(info.resource));
 		direct.size = buffer->GetBufferSize();
-		if (auto* host = RenderGraphRuntime::Get().Host())
+		if (auto* host = RenderGraphRuntime::Get().Host()) {
 			direct.address = host->Device().GetBufferDeviceAddress({ api.GetHandle(), 0 });
+			direct.ref = BufferRefOf(host->Device(), api.GetHandle());
+		}
 		return direct;
 	}
 

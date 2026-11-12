@@ -1,5 +1,7 @@
 #pragma once
 
+#include "RenderGraph/BufferRef.h"
+
 // Water (CS_ORG_WATER, docs/development/p5/water.md): the engine's BSWaterShader draws of the main camera drawn by the render graph in
 // the engine's place: the water mask (the Stencil technique, which writes the water's normal mask, its motion vectors and its per-type
 // stencil bits) and the water itself (the surface, underwater, LOD and specular light techniques).
@@ -141,8 +143,8 @@ namespace DCLF::Features::Water
 		std::uint32_t padding;
 		std::uint32_t textures[kMaterialSlots];
 		std::uint32_t samplers[kMaterialSlots];
-		std::uint32_t vertexAddress[2];
-		std::uint32_t indexAddress[2];
+		RenderGraph::BufferRef vertexRef;  // the vertex buffer view ref the vertex stage pulls through
+		RenderGraph::BufferRef indexRef;   // the index buffer's
 		std::uint32_t vertexLayout[2];
 		std::uint32_t padding2[2];
 	};

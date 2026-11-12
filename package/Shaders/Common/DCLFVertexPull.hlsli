@@ -1,7 +1,7 @@
 #ifndef __DCLF_VERTEX_PULL_DEPENDENCY_HLSL__
 #define __DCLF_VERTEX_PULL_DEPENDENCY_HLSL__
 
-#include "Common/DeviceAddress.hlsli"
+#include "Common/DeviceRef.hlsli"
 
 // Drawcall Limit Fix's vertex pulling: no DCLF pipeline has input assembly, so every DCLF vertex stage loads its vertex's attributes
 // itself, decoded as the engine's input layout for the vertex layout has them (VertexInput.cpp, BuildVertexElements). Its own header,
@@ -15,21 +15,19 @@
 // instance's mesh row (RunGrass.hlsl).
 static uint2 DCLFDrawVertexLayout;
 
-uint64_t DCLFAddress(uint2 a_words) { return (uint64_t(a_words.y) << 32) | uint64_t(a_words.x); }
-
-// A stream of the geometry: the vertex buffer (stream 0) or a dynamic shape's positions (stream 1).
+// A stream of the geometry: the vertex buffer (stream 0) or a dynamic shape's positions (stream 1), by its buffer view ref.
 struct DCLFStream
 {
-	uint64_t address;
+	DeviceRef address;
 	uint stride;
 };
 
-// The streams at vertex a_index (DCLFAttribute's): each stream's address moved to the vertex once, so that an attribute adds only its
+// The streams at vertex a_index (DCLFAttribute's): each stream's ref moved to the vertex once, so that an attribute adds only its
 // offset. The product is 32-bit: a geometry's buffer is under 4 GB (its sequence's and push data's size words are 32-bit).
 void DCLFStreamsAt(uint a_index, inout DCLFStream a_first, inout DCLFStream a_second)
 {
-	a_first.address += uint64_t(a_index * a_first.stride);
-	a_second.address += uint64_t(a_index * a_second.stride);
+	a_first.address = DeviceRefAdd(a_first.address, a_index * a_first.stride);
+	a_second.address = DeviceRefAdd(a_second.address, a_index * a_second.stride);
 }
 
 // Whether the draw's vertex layout has attribute a_attribute (BSGraphics::Vertex::Attribute) in either stream (bit 44 + a or
@@ -37,18 +35,18 @@ void DCLFStreamsAt(uint a_index, inout DCLFStream a_first, inout DCLFStream a_se
 // element), so the decoders below return that without a load: nothing is read through a stream the attribute is not in.
 bool DCLFHasAttribute(uint a_attribute) { return ((DCLFDrawVertexLayout.y >> (12 + a_attribute)) & 0x401u) != 0; }
 
-// The address of attribute a_attribute (BSGraphics::Vertex::Attribute) of the streams' vertex (DCLFStreamsAt): its stream as the
+// The ref of attribute a_attribute (BSGraphics::Vertex::Attribute) of the streams' vertex (DCLFStreamsAt): its stream as the
 // layout flags it (bit 44 + a in stream 0, else bit 54 + a), and its offset the layout's nibble times four, except the position's (0).
 // As the engine's input layout for the vertex layout has them (VertexInput.cpp, BuildVertexElements). The nibble is bits 4a + 4 of the
 // 64-bit layout: from the land data's (7) on it is in the high word, and a 32-bit shift by 32 or more wraps (masked to five bits), which
 // read the land blend weights at the vertex size's nibble, the next vertex's position.
-uint64_t DCLFAttribute(uint a_attribute, DCLFStream a_first, DCLFStream a_second)
+DeviceRef DCLFAttribute(uint a_attribute, DCLFStream a_first, DCLFStream a_second)
 {
 	const bool first = ((DCLFDrawVertexLayout.y >> (12 + a_attribute)) & 1) != 0;
 	const uint shift = 4 * a_attribute + 4;
 	const uint nibble = shift < 32 ? (DCLFDrawVertexLayout.x >> shift) : (DCLFDrawVertexLayout.y >> (shift - 32));
 	const uint offset = a_attribute == 0 ? 0 : (nibble & 0xF) * 4;
-	return (first ? a_first.address : a_second.address) + offset;
+	return DeviceRefAdd(first ? a_first.address : a_second.address, offset);
 }
 
 // An 8-bit UNORM as the input assembler converts it (the engine's draws read the same attributes through one): c / 255 correctly
@@ -107,7 +105,7 @@ float4 DCLFPullUnorm4(uint a_attribute, uint a_offset, DCLFStream a_first, DCLFS
 {
 	if (!DCLFHasAttribute(a_attribute))
 		return float4(0, 0, 0, 1);
-	return DCLFUnorm4(DeviceLoad(uint, DCLFAttribute(a_attribute, a_first, a_second) + a_offset));
+	return DCLFUnorm4(DeviceLoad(uint, DeviceRefAdd(DCLFAttribute(a_attribute, a_first, a_second), a_offset)));
 }
 #endif  // DCLF_PULLED || DCLF_PULLED_VERTICES
 

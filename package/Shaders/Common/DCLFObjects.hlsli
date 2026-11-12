@@ -1,7 +1,7 @@
 #ifndef __DCLF_OBJECTS_DEPENDENCY_HLSL__
 #define __DCLF_OBJECTS_DEPENDENCY_HLSL__
 
-#include "Common/DeviceAddress.hlsli"
+#include "Common/DeviceRef.hlsli"
 
 // Drawcall Limit Fix draws its permutations indirectly, and the handful of values that differ between the
 // objects sharing one pipeline come from a GPU-resident table indexed by the draw's own object index
@@ -12,6 +12,9 @@
 // This lives in its own header rather than in Lighting.hlsl because Color.hlsli consumes the emissive
 // multiplier and is included before the point where the block used to sit.
 #if defined(DCLF_BINDLESS)
+
+// The frame record's backings, by which a stage turns a row's device address into a ref (DCLFRefFromBacking).
+#	include "Common/DCLFFrameRecord.hlsli"
 
 // The object's structure (LightingConstants.h, BindlessObject); its placement and its shading are rows of their own
 // (DCLFPlacement, DCLFShadingRow, below).
@@ -76,9 +79,9 @@ struct DCLFPlacement
 
 #	if defined(DCLF_PULLED)
 // A plain indirect draw's push data (DrawPipelines.h, kPulledPush*): pushed once per draw call, so nothing in it is a draw's
-// own. The draw's sequence (its first one's address here, indexed by the draw's instance) holds its object word, its rows'
-// addresses and its geometry's buffers, which the vertex stage reads (Utility.hlsl, the shadow views; Lighting.hlsl, the
-// Z-prepass). The second address is the layout's: the shadow views' material rows, the Z-prepass's pipeline row. The CPU-driven
+// own. The draw's sequence (its first one's buffer view ref here, indexed by the draw's instance) holds its object word, its rows'
+// device addresses and its geometry's buffers' refs, which the vertex stage reads (Utility.hlsl, the shadow views; Lighting.hlsl, the
+// Z-prepass). The second word pair is a device address the layout reads: the shadow views' material rows. The CPU-driven
 // pipeline's direct draws (DrawPipelines.h, kDirectDrawPush*: one draw a sequence) also push the draw's object word and a flag taking
 // it in place of the sequence's (DCLFSequenceObjectWord); the GPU path's draws push both 0.
 cbuffer DCLFPushData : register(b190)
@@ -88,9 +91,9 @@ cbuffer DCLFPushData : register(b190)
 	uint2 DCLFVertexLayout : packoffset(c1.x);
 	uint DCLFObjectWordOverride : packoffset(c1.z);
 	uint DCLFDirectFlags : packoffset(c1.w);  // bit 0: kDirectFlagObjectWord; bit 1: kDirectFlagRelativeRows; bit 2: kDirectFlagDrawRecords
-	uint4 DCLFRowBases : packoffset(c2);      // kDirectFlagRelativeRows: the rows' bases (xy: the pipeline rows', zw: the material rows')
-	uint2 DCLFAnimatedRows : packoffset(c3.x);  // kDirectFlagRelativeRows: the frame's copy of the animated material rows (0: none)
-	uint2 DCLFDrawRecords : packoffset(c3.z);   // kDirectFlagDrawRecords: the frame's draw buffer
+	uint4 DCLFRowBases : packoffset(c2);      // kDirectFlagRelativeRows: the rows' bases' refs (xy: the pipeline rows', zw: the material rows')
+	uint2 DCLFAnimatedRows : packoffset(c3.x);  // kDirectFlagRelativeRows: the frame's copy of the animated material rows' ref (null: none)
+	uint2 DCLFDrawRecords : packoffset(c3.z);   // kDirectFlagDrawRecords: the frame's draw buffer's ref
 #		if !defined(__spirv__)
 	// D3D12: SV_InstanceID does not count the draw's first instance. The plain draws' command signature writes the draw's instance
 	// into this word per draw instead (DrawPipelines, kDrawPushInstance; BuildDrawsCS stores it before the draw's arguments).
@@ -106,9 +109,9 @@ static uint DCLFObjectWord;
 #		define DCLFSunMiss ((DCLFObjectWord & 0x80000000u) != 0)
 #	else
 // The indirect draw's push data (DrawPipelines.h, kDrawPushWords): its sequence's bytes 4-99 (Records.h, DrawSequence), one
-// Constant argument. The first four words are its rows' addresses (the pipeline row's, then the material row's), which the
+// Constant argument. The first four words are its rows' device addresses (the pipeline row's, then the material row's), which the
 // pipeline layout consumes to resolve this draw's buffers and descriptors; then the object word and the geometry's two vertex
-// buffer views (address, size, stride: D3D12's layout), which the vertex stage pulls its attributes through (DCLF_PULLED_VERTICES:
+// buffer views (ref, size, stride), which the vertex stage pulls its attributes through (DCLF_PULLED_VERTICES:
 // no DCLF pipeline has input assembly). The words after them (a pad, the rows' other blocks' addresses) only the layout reads, so they
 // are not declared. No vector straddles a register, so every member sits where the words are.
 cbuffer DCLFPushData : register(b190)
@@ -116,7 +119,7 @@ cbuffer DCLFPushData : register(b190)
 	uint2 DCLFPipelineRowAddress : packoffset(c0.x);
 	uint2 DCLFMaterialRowAddress : packoffset(c0.z);
 	uint DCLFObjectWord : packoffset(c1.x);
-	uint3 DCLFVertexBuffer : packoffset(c1.y);  // address (low, high), size (unread)
+	uint3 DCLFVertexBuffer : packoffset(c1.y);  // buffer view ref, size (unread)
 	uint DCLFVertexStride : packoffset(c2.x);
 	uint3 DCLFStreamBuffer : packoffset(c2.y);  // slot 1: a face shape's positions, else slot 0 again
 	uint DCLFStreamStride : packoffset(c3.x);
@@ -163,62 +166,66 @@ static const uint kDCLFSequenceStride = 136;  // BuildDrawsCS's DrawSequence
 // An indirect run's draw (kDirectFlagDrawRecords; Direct/Recorder.h, IndirectDraw): its instance names its record in the frame's draw
 // buffer, which holds its sequence's index and its object word (DCLFSequenceObjectWord, after this).
 static uint DCLFDrawRecordWord;
-uint64_t DCLFDrawSequence(uint a_instance)
+DeviceRef DCLFDrawSequence(uint a_instance)
 {
 #		if !defined(__spirv__)
 	a_instance += DCLFInstanceWord;  // D3D12: the draw's instance from its push word (DCLFPushData)
 #		endif
 	if ((DCLFDirectFlags & 4u) != 0) {
-		const uint2 record = DeviceLoad(uint2, DCLFAddress(DCLFDrawRecords) + uint64_t(a_instance) * 28 + 20, 4);
+		const uint2 record = DeviceLoad(uint2, DeviceRefAdd(DCLFDrawRecords, a_instance * 28 + 20), 4);
 		DCLFDrawRecordWord = record.y;
-		return DCLFAddress(DCLFSequencesAddress) + uint64_t(record.x) * kDCLFSequenceStride;
+		return DeviceRefAdd(DCLFSequencesAddress, record.x * kDCLFSequenceStride);
 	}
-	return DCLFAddress(DCLFSequencesAddress) + uint64_t(a_instance) * kDCLFSequenceStride;
+	return DeviceRefAdd(DCLFSequencesAddress, a_instance * kDCLFSequenceStride);
 }
 // A pulled draw's object word (DrawSequence::objectIndex, byte 20): a direct draw's pushed one (its per-frame bits the CPU's; the
 // resident sequence's are 0), else its sequence's.
-uint DCLFSequenceObjectWord(uint64_t a_sequence)
+uint DCLFSequenceObjectWord(DeviceRef a_sequence)
 {
 	if ((DCLFDirectFlags & 4u) != 0)
 		return DCLFDrawRecordWord;
-	return (DCLFDirectFlags & 1u) != 0 ? DCLFObjectWordOverride : DeviceLoad(uint, a_sequence + 20);
+	return (DCLFDirectFlags & 1u) != 0 ? DCLFObjectWordOverride : DeviceLoad(uint, DeviceRefAdd(a_sequence, 20));
 }
 
-uint2 DCLFAddressWords(uint64_t a_address) { return uint2(uint(a_address), uint(a_address >> 32)); }
-
-// A pulled draw's rows (DrawSequence bytes 4-19: the pipeline row's address, then the material row's). A direct draw with
-// kDirectFlagRelativeRows holds offsets from the rows' bases its list pushes (DCLFRowBases): the CPU pipeline's resident sequences
-// then outlive the payload's row versions (Snapshot/SceneLists). The GPU path's draws push 0 and hold addresses.
-uint4 DCLFSequenceRows(uint64_t a_sequence)
+// A pulled draw's rows as refs (xy the pipeline row's, zw the material row's), from DrawSequence bytes 4-19: the pipeline row's device
+// address, then the material row's, which the frame record's backings turn into refs (DCLFRefFromBacking, DCLFMaterialRowRef). A
+// direct draw with kDirectFlagRelativeRows holds offsets from the rows' bases its list pushes (DCLFRowBases, refs): the CPU pipeline's
+// resident sequences then outlive the payload's row versions (Snapshot/SceneLists). The GPU path's draws push 0 and hold addresses.
+uint4 DCLFSequenceRows(DeviceRef a_sequence)
 {
-	uint4 rows = DeviceLoad(uint4, a_sequence + 4);
+	const uint4 rows = DeviceLoad(uint4, DeviceRefAdd(a_sequence, 4));
 	if ((DCLFDirectFlags & 2u) != 0) {
-		rows.xy = DCLFAddressWords(DCLFAddress(rows.xy) + DCLFAddress(DCLFRowBases.xy));
-		rows.zw = DCLFAddressWords(DCLFAddress(rows.zw) + DCLFAddress(DCLFRowBases.zw));
+		// An offset is under 4 GiB: its low word.
+		const DeviceRef pipelineRow = DeviceRefAdd(DCLFRowBases.xy, rows.x);
+		DeviceRef materialRow = DeviceRefAdd(DCLFRowBases.zw, rows.z);
 		// A row a frame patch writes (its header's animatedRow, MaterialRowHeader word 0 at byte 768) is drawn from its row of the
 		// frame's copy, as BuildDrawsCS's MaterialRowAddress points the GPU path's draws (kMaterialRowBytes 1024 a row).
-		if ((DCLFAnimatedRows.x | DCLFAnimatedRows.y) != 0) {
-			const uint animatedRow = DeviceLoad(uint, DCLFAddress(rows.zw) + 768, 4);
+		if (!DeviceRefIsNull(DCLFAnimatedRows)) {
+			const uint animatedRow = DeviceLoad(uint, DeviceRefAdd(materialRow, 768), 4);
 			if (animatedRow != 0xFFFFFFFFu)
-				rows.zw = DCLFAddressWords(DCLFAddress(DCLFAnimatedRows) + uint64_t(animatedRow) * 1024);
+				materialRow = DeviceRefAdd(DCLFAnimatedRows, animatedRow * 1024);
 		}
+		return uint4(pipelineRow, materialRow);
 	}
-	return rows;
+	return uint4(DCLFRefFromBacking(kDCLFBackingPipelineRows, rows.xy), DCLFMaterialRowRef(rows.zw));
 }
-// A shadow sequence's: its key slot's vertex layout (no address), then its material row's (relative as DCLFSequenceRows').
-uint4 DCLFSequenceShadowRows(uint64_t a_sequence)
+// A shadow sequence's: its key slot's vertex layout (no address), then its material row's ref (relative as DCLFSequenceRows', else a
+// device address into the shadow rows).
+uint4 DCLFSequenceShadowRows(DeviceRef a_sequence)
 {
-	uint4 rows = DeviceLoad(uint4, a_sequence + 4);
-	if ((DCLFDirectFlags & 2u) != 0)
-		rows.zw = DCLFAddressWords(DCLFAddress(rows.zw) + DCLFAddress(DCLFRowBases.zw));
-	return rows;
+	const uint4 rows = DeviceLoad(uint4, DeviceRefAdd(a_sequence, 4));
+	const DeviceRef materialRow = (DCLFDirectFlags & 2u) != 0 ? DeviceRefAdd(DCLFRowBases.zw, rows.z) : DCLFRefFromBacking(kDCLFBackingShadowRows, rows.zw);
+	return uint4(rows.xy, materialRow);
 }
 #		endif
 
 #		if defined(DCLF_PULLED_VERTICES)
 // The draw's vertex layout, from its pipeline row (DrawPipelines.h, PipelineRowHeader::vertexLayout, at kPipelineRowHeader + 56;
-// DCLFPipelineVertexLayout's read in a pulled build), whose address is the draw's push data's.
-uint2 DCLFPushedVertexLayout() { return DeviceLoad(uint2, DCLFAddress(DCLFPipelineRowAddress) + 1536 + 56, 8); }
+// DCLFPipelineVertexLayout's read in a pulled build), whose device address is the draw's push data's.
+uint2 DCLFPushedVertexLayout()
+{
+	return DeviceLoad(uint2, DeviceRefAdd(DCLFRefFromBacking(kDCLFBackingPipelineRows, DCLFPipelineRowAddress), 1536 + 56), 8);
+}
 #		endif
 #	endif  // DCLF_PULLED || DCLF_PULLED_VERTICES
 
@@ -228,8 +235,8 @@ uint2 DCLFPushedVertexLayout() { return DeviceLoad(uint2, DCLFAddress(DCLFPipeli
 // blocks and its shadow mask (t14, s14), which a device-generated draw's layout would map from the rows' addresses in the
 // draw's push data. A pulled build reads them itself, from the rows its sequence names (ShaderPrograms.cpp,
 // PulledLightingSource, which turns Lighting.hlsl's declarations of them into these reads; Permutation.hlsli, DCLF_PULLED_ROWS).
-static uint64_t DCLFMaterialRowAddress;
-static uint64_t DCLFPipelineRowAddress;
+static DeviceRef DCLFMaterialRowAddress;  // refs
+static DeviceRef DCLFPipelineRowAddress;
 static const uint kDCLFMaterialRowHeader = 768;
 static const uint kDCLFPipelineRowHeader = 1536;
 static const uint kDCLFPermutationBlock = 1280;  // one block, both stages
@@ -246,31 +253,31 @@ uint DCLFMaterialTextureIndex(uint a_register)
 {
 	// MaterialRowHeader: four words (the animated row, reserved), textures[16], samplers[16], features (t71, t74, then TruePBR's t80-t91: kFeatureMaterialRegisters).
 	const uint slot = a_register == 71 ? 32 : a_register == 74 ? 33 : a_register >= 80 ? 34 + (a_register - 80) : a_register;
-	return DeviceLoad(uint, DCLFMaterialRowAddress + kDCLFMaterialRowHeader + 16 + 4 * slot, 4);
+	return DeviceLoad(uint, DeviceRefAdd(DCLFMaterialRowAddress, kDCLFMaterialRowHeader + 16 + 4 * slot), 4);
 }
 uint DCLFMaterialSamplerIndex(uint a_register)
 {
-	return DeviceLoad(uint, DCLFMaterialRowAddress + kDCLFMaterialRowHeader + 80 + 4 * a_register, 4);
+	return DeviceLoad(uint, DeviceRefAdd(DCLFMaterialRowAddress, kDCLFMaterialRowHeader + 80 + 4 * a_register), 4);
 }
 // PipelineRowHeader: six reserved addresses, the shadow mask's texture and sampler, the vertex layout.
-uint DCLFPipelineTextureIndex() { return DeviceLoad(uint, DCLFPipelineRowAddress + kDCLFPipelineRowHeader + 48, 4); }
-uint DCLFPipelineSamplerIndex() { return DeviceLoad(uint, DCLFPipelineRowAddress + kDCLFPipelineRowHeader + 52, 4); }
-uint2 DCLFPipelineVertexLayout() { return DeviceLoad(uint2, DCLFPipelineRowAddress + kDCLFPipelineRowHeader + 56, 8); }
-float4 DCLFRowFloat4(uint64_t a_row, uint a_offset) { return asfloat(DeviceLoad(uint4, a_row + a_offset, 4)); }
-float3 DCLFRowFloat3(uint64_t a_row, uint a_offset) { return asfloat(DeviceLoad(uint3, a_row + a_offset, 4)); }
-float2 DCLFRowFloat2(uint64_t a_row, uint a_offset) { return asfloat(DeviceLoad(uint2, a_row + a_offset, 4)); }
-float DCLFRowFloat(uint64_t a_row, uint a_offset) { return asfloat(DeviceLoad(uint, a_row + a_offset, 4)); }
-uint DCLFRowUint(uint64_t a_row, uint a_offset) { return DeviceLoad(uint, a_row + a_offset, 4); }
+uint DCLFPipelineTextureIndex() { return DeviceLoad(uint, DeviceRefAdd(DCLFPipelineRowAddress, kDCLFPipelineRowHeader + 48), 4); }
+uint DCLFPipelineSamplerIndex() { return DeviceLoad(uint, DeviceRefAdd(DCLFPipelineRowAddress, kDCLFPipelineRowHeader + 52), 4); }
+uint2 DCLFPipelineVertexLayout() { return DeviceLoad(uint2, DeviceRefAdd(DCLFPipelineRowAddress, kDCLFPipelineRowHeader + 56), 8); }
+float4 DCLFRowFloat4(DeviceRef a_row, uint a_offset) { return asfloat(DeviceLoad(uint4, DeviceRefAdd(a_row, a_offset), 4)); }
+float3 DCLFRowFloat3(DeviceRef a_row, uint a_offset) { return asfloat(DeviceLoad(uint3, DeviceRefAdd(a_row, a_offset), 4)); }
+float2 DCLFRowFloat2(DeviceRef a_row, uint a_offset) { return asfloat(DeviceLoad(uint2, DeviceRefAdd(a_row, a_offset), 4)); }
+float DCLFRowFloat(DeviceRef a_row, uint a_offset) { return asfloat(DeviceLoad(uint, DeviceRefAdd(a_row, a_offset), 4)); }
+uint DCLFRowUint(DeviceRef a_row, uint a_offset) { return DeviceLoad(uint, DeviceRefAdd(a_row, a_offset), 4); }
 // A row_major matrix: a register per row.
-float3x4 DCLFRowFloat3x4(uint64_t a_row, uint a_offset)
+float3x4 DCLFRowFloat3x4(DeviceRef a_row, uint a_offset)
 {
 	return float3x4(DCLFRowFloat4(a_row, a_offset), DCLFRowFloat4(a_row, a_offset + 16), DCLFRowFloat4(a_row, a_offset + 32));
 }
-float4x4 DCLFRowFloat4x4(uint64_t a_row, uint a_offset)
+float4x4 DCLFRowFloat4x4(DeviceRef a_row, uint a_offset)
 {
 	return float4x4(DCLFRowFloat4(a_row, a_offset), DCLFRowFloat4(a_row, a_offset + 16), DCLFRowFloat4(a_row, a_offset + 32), DCLFRowFloat4(a_row, a_offset + 48));
 }
-float3x3 DCLFRowFloat3x3(uint64_t a_row, uint a_offset)
+float3x3 DCLFRowFloat3x3(DeviceRef a_row, uint a_offset)
 {
 	return float3x3(DCLFRowFloat3(a_row, a_offset), DCLFRowFloat3(a_row, a_offset + 16), DCLFRowFloat3(a_row, a_offset + 32));
 }

@@ -88,10 +88,10 @@ VS_INPUT BloodSplatterPullVertex(uint a_vertexID)
 {
 	DCLFDrawVertexLayout = BloodDraw.VertexLayout;
 	const uint indexNumber = BloodDraw.FirstIndex + a_vertexID;
-	const uint indexWord = DeviceLoad(uint, DCLFAddress(BloodDraw.IndexAddress) + uint64_t((indexNumber * 2) & ~3u));
+	const uint indexWord = DeviceLoad(uint, DeviceRefAdd(BloodDraw.IndexAddress, (indexNumber * 2) & ~3u));
 	const uint index = (indexNumber & 1) ? (indexWord >> 16) : (indexWord & 0xFFFF);
-	DCLFStream first = { DCLFAddress(BloodDraw.VertexAddress), BloodDraw.VertexStride };
-	DCLFStream second = { uint64_t(0), 0u };
+	DCLFStream first = { BloodDraw.VertexAddress, BloodDraw.VertexStride };
+	DCLFStream second = { DeviceRef(0, 0), 0u };
 	DCLFStreamsAt(index, first, second);
 
 	VS_INPUT input;

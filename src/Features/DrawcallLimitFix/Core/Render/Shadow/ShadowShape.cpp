@@ -112,7 +112,7 @@ namespace DCLF
 		}
 
 		/**
-		 * @brief Where a view draws: its slot, viewport in its target's slice, and push data (kShadowPushWords): the frame record,
+		 * @brief Where a view draws: its slot, viewport in its target's slice, and push data (kShadowPushWords): the frame record (and its ref),
 		 * its view blocks and the arena's fixed blocks (ShadowArenaBlocksOf).
 		 */
 		ShadowFrameView FrameViewOf(const ShadowViewLayout& a_view, std::uint32_t a_capacity, const ShadowResources& a_resources, const ShadowCapacity& a_sizing,
@@ -141,6 +141,9 @@ namespace DCLF
 				out.push[a_word + 1] = static_cast<std::uint32_t>(a_address >> 32);
 			};
 			push(kShadowPushFrameRecord, base + kShadowFrameRecordOffset);
+			const RenderGraph::BufferRef recordRef = a_resources.constantsRef + kShadowFrameRecordOffset;
+			out.push[kShadowPushFrameRecordRef] = recordRef.viewSlot;
+			out.push[kShadowPushFrameRecordRef + 1] = recordRef.byteOffset;
 			push(kShadowPushViewBlock, viewBlock);
 			push(kShadowPushPerFrame, viewBlock + kShadowPerFrameOffset);
 			const auto blocks = ShadowArenaBlocksOf();

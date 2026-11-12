@@ -4,6 +4,7 @@
 // recordings' resolves of buffers their set does not name (render thread).
 
 #include "DrawsState.h"
+#include "Features/DrawcallLimitFix/Core/Gpu/NamedRefs.h"
 #include "Features/DrawcallLimitFix/Core/Extensions/Registry.h"
 #include "Features/DrawcallLimitFix/Core/Extensions/VertexStreams.h"
 #include "Events.h"
@@ -68,7 +69,7 @@ namespace DCLF::Diagnostics
 			};
 			// The vertex stream's buffer (Features/Faces' "face positions").
 			if (a_embedded.streamBuffer || Extensions::VertexStreamTaken())
-				check(Extensions::VertexStream().name.c_str(), scene.vertexStream, a_embedded.streamBuffer, entry(scene.vertexStream).deviceAddress);
+				check(Extensions::VertexStream().name.c_str(), scene.vertexStream, a_embedded.streamBuffer.Bits(), RefOf(entry(scene.vertexStream)).Bits());
 			// The features' frame bindings (Api::FrameBinding), each read by the frame the context was posted at: the frame's buffer or the
 			// next one's (one alternating by frame: either parity's).
 			const auto bindings = Extensions::RegisteredFrameBindings();

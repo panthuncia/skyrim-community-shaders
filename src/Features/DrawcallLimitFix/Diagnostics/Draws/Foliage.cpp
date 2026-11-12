@@ -13,8 +13,8 @@ namespace DCLF::Diagnostics
 	struct FoliageParityConstants
 	{
 		// Both pairs (by the epoch's parity): which is this frame's is the frame block's, as the colour pass read it.
-		std::uint64_t ids[2]{}, colours[2]{};
-		std::uint64_t frameBlock = 0;    // the colour epoch's words in the frame lighting block (PS b13, c14: DCLFFoliageParity)
+		RenderGraph::BufferRef ids[2]{}, colours[2]{};  // buffer view refs
+		RenderGraph::BufferRef frameBlock;  // the colour epoch's words in the frame lighting block (PS b13, c14: DCLFFoliageParity)
 		std::uint32_t resultsIndex = 0;  // the results' UAV (RWByteAddressBuffer)
 		std::uint32_t ownersIndex = 0;   // the Z-prepass's owners (RWStructuredBuffer<uint64_t>), cleared as read
 		std::uint32_t depthIndex = 0;    // the main depth (SRV)
@@ -229,7 +229,7 @@ namespace DCLF::Diagnostics
 		FoliageParityBindings Declare(org::PassBuilder& a_builder)
 		{
 			a_builder.PreferQueue(org::QueueKind::Graphics);
-			const std::span<const org::SrvView> noViews{};  // read through their addresses
+			const std::span<const org::SrvView> noViews{};  // read through their buffer view refs
 			const auto& foliage = *resources->foliage;
 			for (std::uint32_t h = 0; h < 2; ++h) {
 				a_builder.ShaderResource(foliage.ids[h], noViews);
@@ -237,7 +237,7 @@ namespace DCLF::Diagnostics
 			}
 			FoliageParityBindings bindings{};
 			bindings.results = a_builder.UnorderedAccess(foliage.results).View();
-			a_builder.ShaderResource(resources->frameConstants, std::span<const org::SrvView>{});  // its frame block, by address
+			a_builder.ShaderResource(resources->frameConstants, std::span<const org::SrvView>{});  // its frame block, by buffer view ref
 			bindings.owners = a_builder.UnorderedAccess(foliage.owners).View();
 			bindings.depth = a_builder.ShaderResource(resources->nativeDepth).View();
 			return bindings;
@@ -252,10 +252,10 @@ namespace DCLF::Diagnostics
 			const auto& foliage = *resources->foliage;
 			auto& constants = prepared.constants;
 			for (std::uint32_t h = 0; h < 2; ++h) {
-				constants.ids[h] = foliage.idsAddress[h];
-				constants.colours[h] = foliage.coloursAddress[h];
+				constants.ids[h] = foliage.idsRef[h];
+				constants.colours[h] = foliage.coloursRef[h];
 			}
-			constants.frameBlock = resources->frameConstantsAddress + std::uint64_t(kFrameSlotLighting) * kFrameSlotBytes + sizeof(FrameLighting) + sizeof(LodFadeFrame);
+			constants.frameBlock = resources->frameConstantsRef + std::uint64_t(kFrameSlotLighting) * kFrameSlotBytes + sizeof(FrameLighting) + sizeof(LodFadeFrame);
 			constants.width = foliage.width;
 			constants.height = foliage.height;
 			prepared.program = foliage.program;
@@ -369,8 +369,7 @@ namespace DCLF::Diagnostics
 			foliage.readback.back()->SetName("cs.dclf.foliage-parity-readback");
 		}
 		foliage.readbackFrame.assign(a_made.slots, 0u);
-		if (!foliage.program || !foliage.resultsAddress || !foliage.idsAddress[0] || !foliage.idsAddress[1] || !foliage.coloursAddress[0] ||
-			!foliage.coloursAddress[1]) {
+		if (!foliage.program || !foliage.resultsRef || !foliage.idsRef[0] || !foliage.idsRef[1] || !foliage.coloursRef[0] || !foliage.coloursRef[1]) {
 			logger::warn("[DCLF] foliage parity: its program or buffers could not be created; off");
 			a_made.ready = false;
 		} else {

@@ -1,5 +1,7 @@
 #pragma once
 
+#include "RenderGraph/BufferRef.h"
+
 // Precipitation (CS_ORG_PRECIPITATION): the engine's rain and snow (BSParticleShader's ENVCUBE techniques, the sky's precipitation
 // geometry, Blackreach's spores among them) drawn by the render graph in the engine's place.
 //
@@ -73,8 +75,8 @@ namespace DCLF::Features::Precipitation
 		std::uint32_t raindropNormals;  // t80's heap index
 		std::uint32_t textures[kMaterialSlots];
 		std::uint32_t samplers[kMaterialSlots];
-		std::uint32_t vertexAddress[2];
-		std::uint32_t indexAddress[2];
+		RenderGraph::BufferRef vertexRef;  // the vertex buffer view ref the vertex stage pulls through
+		RenderGraph::BufferRef indexRef;   // the index buffer's
 		std::uint32_t vertexLayout[2];
 		std::uint32_t padding[2];
 	};

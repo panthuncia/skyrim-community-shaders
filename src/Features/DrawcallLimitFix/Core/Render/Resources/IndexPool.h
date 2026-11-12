@@ -1,5 +1,7 @@
 #pragma once
 
+#include "RenderGraph/BufferRef.h"
+
 // The index pool (IndexPool): every geometry slot's indices in one buffer, which every plain indexed draw binds. Self-contained (the
 // passes of the features that draw indexed include it); Internal.h includes it before the shadow frame's types.
 
@@ -29,15 +31,17 @@ namespace DCLF::Draws
 	struct IndexPool
 	{
 		static constexpr std::uint32_t kNoRange = ~0u;
-		// A slot's range: first index and count (even: 4-byte aligned), and the source buffer.
+		// A slot's range: first index and count (even: 4-byte aligned), and the source buffer (its address, which names it, and its buffer
+		// view ref, which the copy reads through).
 		struct Range
 		{
 			std::uint32_t first = kNoRange, count = 0;
 			std::uint64_t address = 0, bytes = 0;
+			RenderGraph::BufferRef ref;
 		};
 		Versioned indices;  // 16-bit
 		Versioned firsts;   // per geometry slot: its range's first index, kNoRange without one
-		Versioned copies;   // this commit's copies: source address (low, high), first index, words
+		Versioned copies;   // this commit's copies: source buffer view ref, first index, words
 		// The versions the last update filled: an indices version it did not lay out is laid out and every range copied again; a
 		// firsts version it did not fill is sent every slot's first index.
 		org::services::FilledVersion indicesFilled, firstsFilled;

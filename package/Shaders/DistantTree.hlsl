@@ -7,7 +7,7 @@
 #	define DCLF_PULLED_ROWS
 #endif
 #include "Common/ColorManagement.hlsli"
-#include "Common/DeviceAddress.hlsli"
+#include "Common/DeviceRef.hlsli"
 #include "Common/FrameBuffer.hlsli"
 #include "Common/GBuffer.hlsli"
 #include "Common/MotionBlur.hlsli"
@@ -21,8 +21,8 @@
 #if defined(DCLF_PULLED)
 // Drawcall Limit Fix's tree LOD draws (dclf-architecture.md, "Tree LOD: the draws"; Scene/TreeLod.h): one non-indexed instanced draw
 // per pass, whose instances are the culled list's records. The vertex stage fetches its record, its shape's row, its mesh's
-// index and vertex through the device addresses in the draw row; the pixel stages take the texture, the sampler and the
-// alpha reference from it. The draw's push data (DrawPipelines.h, kDrawPushBinding) holds the draw row's address, and whether
+// index and vertex through the buffer view refs in the draw row; the pixel stages take the texture, the sampler and the
+// alpha reference from it. The draw's push data (DrawPipelines.h, kDrawPushBinding) holds the draw row's ref, and whether
 // the draw is the Z-prepass's second phase, whose instances follow phase 1's in the list (TreeLodCullCS.hlsl).
 cbuffer DCLFTreePush : register(b190)
 {
@@ -31,10 +31,10 @@ cbuffer DCLFTreePush : register(b190)
 	uint DCLFTreeDebugTint : packoffset(c0.w);  // CS_DCLF_TREE_LOD_TINT: the colour draw writes solid magenta
 	uint2 DCLFTreePushUnused1 : packoffset(c1.x);
 };
-uint64_t DCLFTreeAddress(uint2 a_words) { return (uint64_t(a_words.y) << 32) | uint64_t(a_words.x); }
-uint64_t DCLFTreeDraw() { return DCLFTreeAddress(DCLFTreeDrawAddress); }
-// TreeLod::DrawRow
-uint64_t DCLFTreeTable(uint a_offset) { return DCLFTreeAddress(DeviceLoad(uint2, DCLFTreeDraw() + a_offset, 8)); }
+DeviceRef DCLFTreeDraw() { return DCLFTreeDrawAddress; }
+DeviceRef DCLFTreeDrawAt(uint a_offset) { return DeviceRefAdd(DCLFTreeDraw(), a_offset); }
+// TreeLod::DrawRow: its tables' refs.
+DeviceRef DCLFTreeTable(uint a_offset) { return DeviceLoad(uint2, DCLFTreeDrawAt(a_offset), 8); }
 static const uint kDCLFTreeInstances = 0, kDCLFTreeShapes = 8, kDCLFTreeMeshes = 16, kDCLFTreeVisible = 24;
 static const uint kDCLFTreeTexture = 32, kDCLFTreeSampler = 36, kDCLFTreeAlphaRef = 40;
 static const uint kDCLFTreeGroupInstances = 75;
@@ -46,18 +46,18 @@ static const uint kDCLFTreeStats = 52, kDCLFTreeFrame = 60;
 static const uint kDCLFStageDepthVS = 0, kDCLFStagePhaseTwoVS = 1, kDCLFStageDepthPS = 2, kDCLFStageColourVS = 3, kDCLFStageColourPS = 4,
 				  kDCLFStageColourSaw = 5, kDCLFStageDepthClip = 8, kDCLFStageColourClip = 12, kDCLFStageColourEntry = 16, kDCLFStageDepthEntry = 17,
 				  kDCLFStageColourProbe = 18, kDCLFStageDepthProbe = 25, kDCLFStageWords = 32;
-uint64_t DCLFTreeStageWord(uint a_word)
+DeviceRef DCLFTreeStageWord(uint a_word)
 {
-	const uint64_t stats = DCLFTreeAddress(DeviceLoad(uint2, DCLFTreeDraw() + kDCLFTreeStats, 4));
-	if (stats == 0)
-		return 0;
-	return stats + 4 * uint64_t((DeviceLoad(uint, DCLFTreeDraw() + kDCLFTreeFrame, 4) & 7u) * kDCLFStageWords + a_word);
+	const DeviceRef stats = DeviceLoad(uint2, DCLFTreeDrawAt(kDCLFTreeStats), 4);
+	if (DeviceRefIsNull(stats))
+		return stats;
+	return DeviceRefAdd(stats, 4 * ((DeviceLoad(uint, DCLFTreeDrawAt(kDCLFTreeFrame), 4) & 7u) * kDCLFStageWords + a_word));
 }
 void DCLFTreeStamp(uint a_stage)
 {
-	const uint64_t word = DCLFTreeStageWord(a_stage);
-	if (word != 0)
-		DeviceStore(uint, word, DeviceLoad(uint, DCLFTreeDraw() + kDCLFTreeFrame, 4), 4);
+	const DeviceRef word = DCLFTreeStageWord(a_stage);
+	if (!DeviceRefIsNull(word))
+		DeviceStore(uint, word, DeviceLoad(uint, DCLFTreeDrawAt(kDCLFTreeFrame), 4), 4);
 }
 #endif
 
@@ -95,41 +95,42 @@ struct VS_OUTPUT
 VS_OUTPUT main(uint a_vertex : SV_VertexID, uint a_instance : SV_InstanceID)
 {
 	VS_OUTPUT vsout = (VS_OUTPUT)0;
-	const uint64_t visible = DCLFTreeTable(kDCLFTreeVisible);
-	const uint first = DCLFTreePhaseTwo != 0 ? DeviceLoad(uint, visible - kDCLFTreeHeaderBytes + kDCLFTreePhaseOneInstances, 4) : 0;
+	const DeviceRef visible = DCLFTreeTable(kDCLFTreeVisible);
+	// The list header is before the visible list: a negative offset, in the ref's 32-bit offset.
+	const DeviceRef header = DeviceRefAdd(visible, 0u - kDCLFTreeHeaderBytes);
+	const uint first = DCLFTreePhaseTwo != 0 ? DeviceLoad(uint, DeviceRefAdd(header, kDCLFTreePhaseOneInstances), 4) : 0;
 #		if defined(RENDER_DEPTH)
 	DCLFTreeStamp(DCLFTreePhaseTwo != 0 ? kDCLFStagePhaseTwoVS : kDCLFStageDepthVS);
 #		else
 	DCLFTreeStamp(kDCLFStageColourVS);
 	if (a_instance == 0 && a_vertex == 0) {
-		const uint64_t saw = DCLFTreeStageWord(kDCLFStageColourSaw);
-		if (saw != 0) {
+		const DeviceRef saw = DCLFTreeStageWord(kDCLFStageColourSaw);
+		if (!DeviceRefIsNull(saw)) {
 			// The list header's phase 1, phase 2 and colour instance counts as this draw read them.
-			const uint64_t header = visible - kDCLFTreeHeaderBytes;
-			DeviceStore(uint3, saw, uint3(DeviceLoad(uint, header + 4, 4), DeviceLoad(uint, header + 20, 4), DeviceLoad(uint, header + 36, 4)), 4);
+			DeviceStore(uint3, saw, uint3(DeviceLoad(uint, DeviceRefAdd(header, 4), 4), DeviceLoad(uint, DeviceRefAdd(header, 20), 4), DeviceLoad(uint, DeviceRefAdd(header, 36), 4)), 4);
 		}
 	}
 #		endif
-	const uint index = DeviceLoad(uint, visible + 4 * uint64_t(first + a_instance), 4);
-	const uint64_t shape = DCLFTreeTable(kDCLFTreeShapes) + 32 * uint64_t(index / kDCLFTreeGroupInstances);
+	const uint index = DeviceLoad(uint, DeviceRefAdd(visible, 4 * (first + a_instance)), 4);
+	const DeviceRef shape = DeviceRefAdd(DCLFTreeTable(kDCLFTreeShapes), 32 * (index / kDCLFTreeGroupInstances));
 	const float3 translate = asfloat(DeviceLoad(uint3, shape, 4));
-	const uint meshSlot = DeviceLoad(uint, shape + 12, 4);
+	const uint meshSlot = DeviceLoad(uint, DeviceRefAdd(shape, 12), 4);
 	if (meshSlot == 0xFFFFFFFFu)
 		return vsout;
-	const uint64_t mesh = DCLFTreeTable(kDCLFTreeMeshes) + 32 * uint64_t(meshSlot);
-	const uint4 meshWords = DeviceLoad(uint4, mesh, 8);  // vertex address, index address
-	const uint3 meshLayout = DeviceLoad(uint3, mesh + 16, 4);  // stride, index count, texcoord offset
+	const DeviceRef mesh = DeviceRefAdd(DCLFTreeTable(kDCLFTreeMeshes), 32 * meshSlot);
+	const uint4 meshWords = DeviceLoad(uint4, mesh, 8);  // vertex ref, index ref
+	const uint3 meshLayout = DeviceLoad(uint3, DeviceRefAdd(mesh, 16), 4);  // stride, index count, texcoord offset
 	// Past the mesh's indices (the draw draws the largest mesh's count): a degenerate triangle.
 	if (a_vertex >= meshLayout.y)
 		return vsout;
-	const uint indexWord = DeviceLoad(uint, DCLFTreeAddress(meshWords.zw) + 4 * uint64_t(a_vertex / 2), 4);
+	const uint indexWord = DeviceLoad(uint, DeviceRefAdd(meshWords.zw, 4 * (a_vertex / 2)), 4);
 	const uint vertexIndex = (a_vertex & 1) ? (indexWord >> 16) : (indexWord & 0xFFFF);
-	const uint64_t vertex = DCLFTreeAddress(meshWords.xy) + uint64_t(vertexIndex) * meshLayout.x;
+	const DeviceRef vertex = DeviceRefAdd(meshWords.xy, vertexIndex * meshLayout.x);
 	VS_INPUT input = (VS_INPUT)0;
 	input.Position = asfloat(DeviceLoad(uint3, vertex, 4));
-	const uint texcoord = DeviceLoad(uint, vertex + meshLayout.z, 4);
+	const uint texcoord = DeviceLoad(uint, DeviceRefAdd(vertex, meshLayout.z), 4);
 	input.TexCoord0 = float2(f16tof32(texcoord), f16tof32(texcoord >> 16));
-	const uint4 record = DeviceLoad(uint4, DCLFTreeTable(kDCLFTreeInstances) + 32 * uint64_t(index), 16);
+	const uint4 record = DeviceLoad(uint4, DeviceRefAdd(DCLFTreeTable(kDCLFTreeInstances), 32 * index), 16);
 	input.InstanceData1 = float4(f16tof32(record.x), f16tof32(record.x >> 16), f16tof32(record.y), f16tof32(record.y >> 16));
 	input.InstanceData2 = float4(f16tof32(record.z), f16tof32(record.z >> 16), f16tof32(record.w), f16tof32(record.w >> 16));
 
@@ -157,11 +158,11 @@ VS_OUTPUT main(uint a_vertex : SV_VertexID, uint a_instance : SV_InstanceID)
 	// CS_DCLF_TREE_LOD_STAGES: the clip position of the list's first instance's first vertex, depth's (phase 1) and colour's.
 	if (DCLFTreePhaseTwo == 0 && a_instance == 0 && a_vertex == 0) {
 #		ifdef RENDER_DEPTH
-		const uint64_t clip = DCLFTreeStageWord(kDCLFStageDepthClip);
+		const DeviceRef clip = DCLFTreeStageWord(kDCLFStageDepthClip);
 #		else
-		const uint64_t clip = DCLFTreeStageWord(kDCLFStageColourClip);
+		const DeviceRef clip = DCLFTreeStageWord(kDCLFStageColourClip);
 #		endif
-		if (clip != 0)
+		if (!DeviceRefIsNull(clip))
 			DeviceStore(uint4, clip, asuint(viewPosition), 4);
 	}
 	vsout.TexCoord = float3(input.TexCoord0.xy, 0.0);
@@ -230,29 +231,29 @@ struct PS_OUTPUT
 #	if defined(DCLF_PULLED)
 SamplerState DCLFTreeSampler()
 {
-	SamplerState s = SamplerDescriptorHeap[DeviceLoad(uint, DCLFTreeDraw() + kDCLFTreeSampler, 4)];
+	SamplerState s = SamplerDescriptorHeap[DeviceLoad(uint, DCLFTreeDrawAt(kDCLFTreeSampler), 4)];
 	return s;
 }
 Texture2D<float4> DCLFTreeTexture()
 {
-	Texture2D<float4> t = ResourceDescriptorHeap[DeviceLoad(uint, DCLFTreeDraw() + kDCLFTreeTexture, 4)];
+	Texture2D<float4> t = ResourceDescriptorHeap[DeviceLoad(uint, DCLFTreeDrawAt(kDCLFTreeTexture), 4)];
 	return t;
 }
 #		define SampDiffuse DCLFTreeSampler()
 #		define TexDiffuse DCLFTreeTexture()
-#		define AlphaTestRefRS asfloat(DeviceLoad(uint, DCLFTreeDraw() + kDCLFTreeAlphaRef, 4))
+#		define AlphaTestRefRS asfloat(DeviceLoad(uint, DCLFTreeDrawAt(kDCLFTreeAlphaRef), 4))
 // CS_DCLF_TREE_LOD_STAGES: the stage's entry stamp and what its texture resolves to (TreeInstancesLayout.h, kStageProbeWords).
 void DCLFTreeProbe(uint a_entry, uint a_probe, float2 a_texCoord)
 {
 	DCLFTreeStamp(a_entry);
-	const uint64_t probe = DCLFTreeStageWord(a_probe);
-	if (probe == 0)
+	const DeviceRef probe = DCLFTreeStageWord(a_probe);
+	if (DeviceRefIsNull(probe))
 		return;
 	uint width, height, mips;
 	DCLFTreeTexture().GetDimensions(0, width, height, mips);
 	const float alpha = DCLFTreeTexture().SampleBias(DCLFTreeSampler(), a_texCoord, SharedData::MipBias).w;
-	DeviceStore(uint4, probe, uint4(DeviceLoad(uint, DCLFTreeDraw() + kDCLFTreeTexture, 4), DeviceLoad(uint, DCLFTreeDraw() + kDCLFTreeSampler, 4), width, height), 4);
-	DeviceStore(uint3, probe + 16, uint3(mips, DeviceLoad(uint, DCLFTreeDraw() + kDCLFTreeAlphaRef, 4), asuint(alpha)), 4);
+	DeviceStore(uint4, probe, uint4(DeviceLoad(uint, DCLFTreeDrawAt(kDCLFTreeTexture), 4), DeviceLoad(uint, DCLFTreeDrawAt(kDCLFTreeSampler), 4), width, height), 4);
+	DeviceStore(uint3, DeviceRefAdd(probe, 16), uint3(mips, DeviceLoad(uint, DCLFTreeDrawAt(kDCLFTreeAlphaRef), 4), asuint(alpha)), 4);
 }
 static const float4 DiffuseColor = 0.0;
 static const float4 AmbientColor = 0.0;

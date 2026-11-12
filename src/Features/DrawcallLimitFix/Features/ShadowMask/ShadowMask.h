@@ -1,5 +1,7 @@
 #pragma once
 
+#include "RenderGraph/BufferRef.h"
+
 // Shadow mask (CS_ORG_SHADOW_MASK, docs/development/p5/shadow-mask.md): the engine's shadow mask passes drawn by the render graph in the
 // engine's place. Each shadow-casting light of a scene is one BSUtilityShader pass over the screen quad (ImageSpaceManager's) into
 // kSHADOW_MASK, which reads the scene depth and the light's shadow maps: the world's at Main::Draw (AE 107141, SE 100423, after the depth
@@ -97,8 +99,8 @@ namespace DCLF::Features::ShadowMask
 		std::uint32_t padding;
 		std::uint32_t textures[kSlots];
 		std::uint32_t samplers[kSlots];
-		std::uint32_t vertexAddress[2];
-		std::uint32_t indexAddress[2];
+		RenderGraph::BufferRef vertexRef;  // the vertex buffer view ref the vertex stage pulls through
+		RenderGraph::BufferRef indexRef;   // the index buffer's
 		std::uint32_t vertexLayout[2];
 		std::uint32_t padding2[2];
 	};

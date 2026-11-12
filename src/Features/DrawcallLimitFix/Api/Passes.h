@@ -3,6 +3,7 @@
 // The pass contract (Api::InstallContext::RegisterPass): a graph pass the frame's schedule (Schedule/Frame.cpp) names by key, made at the
 // graph's build in the epoch the schedule puts it in.
 
+#include "RenderGraph/BufferRef.h"
 #include <cstdint>
 #include <memory>
 #include <string_view>
@@ -51,10 +52,10 @@ namespace DCLF::Api
 	 *   pass's shader reads from the latch. The latch has one such word: a second pass with one fails the install (grow BuildDrawsLatch,
 	 *   Core/Render/Resources/GpuLayouts.h, first), as does a key the schedule names anywhere but in main.depth before core.z.build-draws.
 	 * - animatedRows: render thread, at each latch of the main rows (PayloadLatch: the depth and colour segments', the views'): the device
-	 *   address of the frame's copy of the installed payload's animated material rows (MaterialRowHeader::animatedRow: row k at k *
+	 *   address, buffer view ref and rows of the frame's copy of the installed payload's animated material rows (MaterialRowHeader::animatedRow: row k at k *
 	 *   kMaterialRowBytes), BuildDrawsLatch::animatedRows, which the pass writes whole before any of the frame's draws and BuildDraws
 	 *   points those rows' draws at (0: none, the draws read the installed rows). One pass may have one, scheduled as latchWord's is.
-	 * - frameRows: render thread, at each latch of the main rows: the device address and row count of the frame's per-object rows the
+	 * - frameRows: render thread, at each latch of the main rows: the buffer view ref and row count of the frame's per-object rows the
 	 *   pass writes (BuildDrawsLatch::frameRows; Features/Fades' object rows, which the pixel stages read by a frame binding), so that a
 	 *   recording the graph keeps across frames finds the frame's backing. One pass may have one, scheduled as latchWord's is.
 	 * - cpuPipeline: the pass is in its epoch in the CPU-driven pipeline too (dclf:pipeline=cpu), whose graph has its epochs external
@@ -67,10 +68,14 @@ namespace DCLF::Api
 	 * - gpuLate (with recordAtExecution): the pass is in the GPU-driven graph too, where its make decides, recorded by its in-stream epoch's
 	 *   execution: the forward site's (GraphConditions::forwardDirect).
 	 */
-	/** @brief A pass's frame rows (PassDef::frameRows): its frame's backing's device address and rows (0: none this frame). */
+	/**
+	 * @brief A pass's frame rows (PassDef::frameRows, animatedRows): its frame's backing's device address, buffer view ref (what shaders read
+	 * through) and rows (0: none this frame).
+	 */
 	struct FrameRows
 	{
 		std::uint64_t address = 0;
+		RenderGraph::BufferRef ref;
 		std::uint32_t count = 0;
 	};
 
@@ -84,7 +89,7 @@ namespace DCLF::Api
 		void (*emit)(const PassContext& a_context, PassOut& a_out) = nullptr;
 		std::shared_ptr<const void> (*setup)(const PassSetup& a_setup) = nullptr;
 		std::uint32_t (*latchWord)() = nullptr;
-		std::uint64_t (*animatedRows)() = nullptr;
+		FrameRows (*animatedRows)() = nullptr;
 		FrameRows (*frameRows)() = nullptr;
 		bool cpuPipeline = false;
 		bool recordAtExecution = false;

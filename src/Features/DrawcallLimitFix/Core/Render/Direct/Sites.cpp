@@ -3,6 +3,7 @@
 
 // Main/Resources.h first: volk must precede every Vulkan header of the translation unit.
 #include "Features/DrawcallLimitFix/Core/Render/Main/Resources.h"
+#include "RenderGraph/BufferRefs.h"
 #include "Features/DrawcallLimitFix/Diagnostics/Zones.h"
 #include "Features/DrawcallLimitFix/Core/Render/Internal.h"
 #include "Features/DrawcallLimitFix/Core/Render/Direct/SiteFrame.h"
@@ -259,13 +260,15 @@ namespace DCLF::Direct::detail
 				a_holds.push_back(std::move(version));
 			}
 		b.poolFirsts = a_poolFirsts;
-		b.framePush = Draws::MainFramePushWords(a_inputs.resources->frameConstantsAddress);
+		b.framePush = Draws::MainFramePushWords(a_inputs.resources->frameConstantsAddress, a_inputs.resources->frameConstantsRef);
 		// The frame's copy of the animated rows, as the commit latched it (BuildDrawsCS's MaterialRowAddress reads the same).
-		if (const auto* latch = a_inputs.latch)
+		if (const auto* latch = a_inputs.latch) {
 			b.animatedRows = std::uint64_t(latch->animatedRowsLo) | (std::uint64_t(latch->animatedRowsHi) << 32);
+			b.animatedRowsRef = latch->animatedRowsRef;
+		}
 		a_run.refractionBindings = b;
 		std::uint32_t push[kShadowPushWords]{};
-		Draws::MainShadowLayoutPush(a_inputs.resources->frameConstantsAddress, push);
+		Draws::MainShadowLayoutPush(a_inputs.resources->frameConstantsAddress, a_inputs.resources->frameConstantsRef, push);
 		std::copy(std::begin(push), std::end(push), a_run.refractionBindings.shadowPush.begin());
 		a_run.refractionBindings.lodFadeFrame = Draws::LodFadeFrameAddress(a_inputs.resources->frameConstantsAddress);
 	}
@@ -1328,12 +1331,12 @@ namespace DCLF::Direct::detail
 			auto resource = a_slot.drawBuffer->GetAPIResource();
 			void* mapped = nullptr;
 			resource.Map(&mapped);
-			const std::uint64_t address = s.device.GetBufferDeviceAddress({ resource.GetHandle(), 0 });
-			if (!mapped || !address) {
-				logger::error("[DCLF] CPU pipeline: the indirect draws' buffer has no {}; its views draw directly", mapped ? "device address" : "mapping");
+			const RenderGraph::BufferRef ref = RenderGraph::BufferRefOf(s.device, resource.GetHandle());
+			if (!mapped || !ref) {
+				logger::error("[DCLF] CPU pipeline: the indirect draws' buffer has no {}; its views draw directly", mapped ? "buffer view ref" : "mapping");
 				return;
 			}
-			a_slot.indirect = { s.indirectSignature->GetHandle(), resource.GetHandle(), address, static_cast<IndirectDraw*>(mapped), capacity, &a_slot.drawCursor };
+			a_slot.indirect = { s.indirectSignature->GetHandle(), resource.GetHandle(), ref, static_cast<IndirectDraw*>(mapped), capacity, &a_slot.drawCursor };
 		}
 	}
 

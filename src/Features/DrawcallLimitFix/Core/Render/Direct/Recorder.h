@@ -61,7 +61,7 @@ namespace DCLF::Direct
 	{
 		rhi::CommandSignatureHandle signature{};
 		rhi::ResourceHandle buffer{};
-		std::uint64_t address = 0;
+		RenderGraph::BufferRef ref;  // the draws' buffer view ref, which the pulled stages read their records through
 		// The cull jobs': the mapped draws, the capacity, and the draws reserved so far (past capacity: those batches draw directly, and
 		// the next frame of the slot has a larger buffer).
 		IndirectDraw* mapped = nullptr;
@@ -82,12 +82,12 @@ namespace DCLF::Direct
 	/**
 	 * @brief A draw family's main draw this frame (Api::DrawFamilyContribution::main.record's inputs, outside ORG): its pipelines as the
 	 * frame's catalog has them (CatalogFamilyPipelines' payload, which the record callback reads as FamilyPipelines), its draw row's
-	 * address (DrawFamilyDeclare::row) and its arguments buffer (DrawFamilyDeclare::arguments[0], resolved). Null pipelines: not drawn.
+	 * buffer view ref (DrawFamilyDeclare::row) and its arguments buffer (DrawFamilyDeclare::arguments[0], resolved). Null pipelines: not drawn.
 	 */
 	struct FamilyDraw
 	{
 		std::shared_ptr<const void> pipelines;
-		std::uint64_t row = 0;
+		RenderGraph::BufferRef row;
 		rhi::ResourceHandle arguments{};
 	};
 
@@ -114,9 +114,11 @@ namespace DCLF::Direct
 		std::span<const std::uint32_t> shadowMapRow;
 		// The refraction draws' second address: the frame's LodFadeFrame (LodFadeFrameAddress), in the shadow layout's material rows' words.
 		std::uint64_t lodFadeFrame = 0;
-		// The frame's copy of the animated material rows (the latch's animatedRows, kDirectDrawPushAnimatedRows; 0: the installed rows).
-		// Per frame: a per-snapshot recording's bindings keep 0.
+		// The frame's copy of the animated material rows (the latch's animatedRows; 0: the installed rows): its device address, which a
+		// pushed colour draw's material row is (the layout reads it), and its ref (kDirectDrawPushAnimatedRows, which the pulled stages
+		// read). Per frame: a per-snapshot recording's bindings keep 0.
 		std::uint64_t animatedRows = 0;
+		RenderGraph::BufferRef animatedRowsRef;
 		// Terrain Blending's depth offset on every draw (kZDrawPushOffsetDepth: a terrain group 1 twin's recording).
 		bool offsetDepth = false;
 		// RecordForward: the frame's placement rows (FrameValues::RowsIfDone, by object) and the view's ViewProj (row major, clip = M * p),

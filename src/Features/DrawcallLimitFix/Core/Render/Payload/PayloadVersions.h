@@ -1,5 +1,7 @@
 #pragma once
 
+#include "RenderGraph/BufferRef.h"
+
 // The scene payload (D5): seven parts, each a chain of GPU-built versions (org::services::PublishedBufferVersion, SceneArtifact::PayloadPart
 // on DCLF's state graph). The snapshot builder makes each publication's PayloadSource (immutable) and posts the next version of every part
 // that changed for it: the part's journal's runs since its last version and its tails, uploaded once, the rest GPU-copied from that
@@ -45,6 +47,7 @@ namespace DCLF::Draws
 	{
 		std::uint32_t srvIndex = 0;  // its SRV slot (0: the part is absent)
 		std::uint64_t address = 0;   // its device address (the row parts; 0 for the others)
+		RenderGraph::BufferRef ref;  // its buffer view ref (the row parts: shaders read rows through it; null for the others)
 		std::uint64_t units = 0;     // the elements this payload holds (its rows: BindlessObject, extras row, GeometryDraw, DrawInput...)
 	};
 

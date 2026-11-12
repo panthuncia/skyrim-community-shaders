@@ -44,7 +44,7 @@ namespace DCLF
 		std::uint32_t PoolIndicesOf(const SceneTables& a_tables, std::uint32_t a_slot)
 		{
 			const auto& geometry = a_tables.geometries[a_slot];
-			if (!geometry.indexAddress || !geometry.indexBytes)
+			if (!geometry.indexAddress || !geometry.indexRef || !geometry.indexBytes)
 				return 0;
 			return static_cast<std::uint32_t>(std::min<std::uint64_t>((geometry.indexBytes + 3) / 4 * 2, UINT32_MAX & ~1u));
 		}
@@ -106,7 +106,7 @@ namespace DCLF
 
 				void CopyOf(const IndexPool::Range& a_range)
 				{
-					copies.push_back({ static_cast<std::uint32_t>(a_range.address), static_cast<std::uint32_t>(a_range.address >> 32), a_range.first,
+					copies.push_back({ a_range.ref.viewSlot, a_range.ref.byteOffset, a_range.first,
 						static_cast<std::uint32_t>((a_range.bytes + 3) / 4) });
 				}
 
@@ -152,7 +152,7 @@ namespace DCLF
 						return;
 					}
 					auto& range = p.slots[a_slot];
-					range = { first, slotIndices, geometry.indexAddress, geometry.indexBytes };
+					range = { first, slotIndices, geometry.indexAddress, geometry.indexBytes, geometry.indexRef };
 					p.slotFirst[a_slot] = first;
 					p.indicesHeld += slotIndices;
 					CopyOf(range);

@@ -22,7 +22,7 @@ struct ParticleOrgDraw
 	float4 VSGeometry[23];  // VS b2: WorldViewProj, WorldView, PrecipitationOcclusionWorldViewProj (ENVCUBE), fVars0-4, Color1-3, Velocity, Acceleration, Wind
 	float4 PSGeometry[2];   // PS b2: ColorScale, TextureSize
 	// What the vertex stage reads of CS's shared constants, copied here: DXC 1.9's SPIR-V for a vertex stage that pulls its vertices
-	// (vk::RawBufferLoad) and reads a shared view (a static ConstantBuffer) fails validation.
+	// (raw buffer loads) and reads a shared view (a static ConstantBuffer) fails validation.
 	float4 Projection;         // FrameBuffer: CameraProj[0][0], CameraProj[1][1], DynamicResolutionParams1.xy
 	float4 BufferDim;          // SharedData
 	float4 RainRefraction[3];  // FeatureData: Rain Refraction's RainRefractionSettings
@@ -362,10 +362,10 @@ VS_INPUT ParticlePullVertex(uint a_vertexID)
 {
 	DCLFDrawVertexLayout = ParticleDraw.VertexLayout;
 	const uint indexNumber = ParticleDraw.FirstIndex + a_vertexID;
-	const uint indexWord = DeviceLoad(uint, DCLFAddress(ParticleDraw.IndexAddress) + uint64_t((indexNumber * 2) & ~3u));
+	const uint indexWord = DeviceLoad(uint, DeviceRefAdd(ParticleDraw.IndexAddress, (indexNumber * 2) & ~3u));
 	const uint index = (indexNumber & 1) ? (indexWord >> 16) : (indexWord & 0xFFFF);
-	DCLFStream first = { DCLFAddress(ParticleDraw.VertexAddress), ParticleDraw.VertexStride };
-	DCLFStream second = { uint64_t(0), 0u };
+	DCLFStream first = { ParticleDraw.VertexAddress, ParticleDraw.VertexStride };
+	DCLFStream second = { DeviceRef(0, 0), 0u };
 	DCLFStreamsAt(index, first, second);
 
 	VS_INPUT input = (VS_INPUT)0;

@@ -2,6 +2,7 @@
 // SetupShadow, SetupView), each versioned buffer registered with the scene's set (its extent, growth policy and contents), the
 // scene's draw bound and the main latch the revision code keeps.
 #include "Features/DrawcallLimitFix/Core/Render/Internal.h"
+#include "RenderGraph/BufferRefs.h"
 
 #include "Features/DrawcallLimitFix/Core/Extensions/DepthPyramid.h"
 #include "Features/DrawcallLimitFix/Core/Extensions/MainRanges.h"
@@ -241,13 +242,13 @@ namespace DCLF::Draws
 			for (std::uint32_t h = 0; h < 2; ++h) {
 				foliage->ids[h] = CreateWords(pixels, true, fmt::format("cs.dclf.foliage-ids{}", h).c_str());
 				foliage->colours[h] = CreateWords(pixels * kFoliageColourWords, true, fmt::format("cs.dclf.foliage-colours{}", h).c_str());
-				foliage->idsAddress[h] = AddressOf(a_device, *foliage->ids[h]);
-				foliage->coloursAddress[h] = AddressOf(a_device, *foliage->colours[h]);
+				foliage->idsRef[h] = RenderGraph::BufferRefOf(a_device, foliage->ids[h]->GetAPIResource().GetHandle());
+				foliage->coloursRef[h] = RenderGraph::BufferRefOf(a_device, foliage->colours[h]->GetAPIResource().GetHandle());
 			}
 			foliage->results = CreateWords(kFoliageResultWords, true, "cs.dclf.foliage-results");
 			foliage->owners = CreateWords(pixels * 2, true, "cs.dclf.foliage-owners");
 			foliage->ownersIndex = foliage->owners->GetUAVShaderVisibleInfo(0).slot.index;
-			foliage->resultsAddress = AddressOf(a_device, *foliage->results);
+			foliage->resultsRef = RenderGraph::BufferRefOf(a_device, foliage->results->GetAPIResource().GetHandle());
 			// The record stands only with the observers' compare pass.
 			bool ready = false;
 			// A readback range per run lease index the colour epoch records at: its published copies.
@@ -474,9 +475,10 @@ namespace DCLF
 		a_state.countD3D11 = WrapWords(*a_state.count, kCountWords * sizeof(std::uint32_t));
 		a_state.frameConstants = DeviceBuffer(kFrameConstantBytes, "cs.dclf.frame-constants");
 		a_state.frameConstantsAddress = AddressOf(a_device, *a_state.frameConstants);
+		a_state.frameConstantsRef = RenderGraph::BufferRefOf(a_device, a_state.frameConstants->GetAPIResource().GetHandle());
 
-		if (!a_state.frameConstantsAddress) {
-			logger::error("[DCLF] Draw data buffers have no device address");
+		if (!a_state.frameConstantsAddress || !a_state.frameConstantsRef) {
+			logger::error("[DCLF] Draw data buffers have no device address or buffer view ref");
 			return false;
 		}
 		a_state.frameBlocks = FrameBlockViews::Create(a_device, a_state.frameConstants);
@@ -792,9 +794,10 @@ namespace DCLF
 			return ShadowNotReady(1, "the index pool's copy program could not be created");
 		}
 		state->constantsAddress = AddressOf(device, *state->constants);
-		if (!state->constantsAddress) {
+		state->constantsRef = RenderGraph::BufferRefOf(device, state->constants->GetAPIResource().GetHandle());
+		if (!state->constantsAddress || !state->constantsRef) {
 			shadowSetupFailed = true;
-			return ShadowNotReady(2, "no device address for the shadow buffers");
+			return ShadowNotReady(2, "no device address or buffer view ref for the shadow buffers");
 		}
 		shadow = state;
 		shadowHost.ShadowResourcesMade(state);
@@ -863,9 +866,9 @@ namespace DCLF
 			const std::uint32_t headerWords = faces.headerBytes / 4;
 			for (std::uint32_t f = 0; f < traits.faces; ++f) {
 				state->faceRows[d][f] = CreateWords(faces.rowBytes / 4, false, name(fmt::format("{}{}", entry.rowName, f)).c_str());
-				state->faceRowsAddress[d][f] = AddressOf(device, *state->faceRows[d][f]);
-				if (!state->faceRowsAddress[d][f])
-					return fail(fmt::format("{} rows have no device address", entry.label).c_str());
+				state->faceRowsRef[d][f] = RenderGraph::BufferRefOf(device, state->faceRows[d][f]->GetAPIResource().GetHandle());
+				if (!state->faceRowsRef[d][f])
+					return fail(fmt::format("{} rows have no buffer view ref", entry.label).c_str());
 				if (faces.lists && FamilySetUp(*scene, family)) {
 					Api::DrawFamilyLists lists{ *scene };
 					faces.lists(lists);
@@ -884,8 +887,9 @@ namespace DCLF
 		if (OwnsFrameConstants(traits)) {
 			state->frameConstants = DeviceBuffer(kFrameConstantBytes, name("frame-constants").c_str());
 			state->frameConstantsAddress = AddressOf(device, *state->frameConstants);
-			if (!state->frameConstantsAddress)
-				return fail("frame constants have no device address");
+			state->frameConstantsRef = RenderGraph::BufferRefOf(device, state->frameConstants->GetAPIResource().GetHandle());
+			if (!state->frameConstantsAddress || !state->frameConstantsRef)
+				return fail("frame constants have no device address or buffer view ref");
 			state->frameBlocks = FrameBlockViews::Create(device, state->frameConstants);
 			if (!state->frameBlocks)
 				return fail("the frame blocks' views could not be made");

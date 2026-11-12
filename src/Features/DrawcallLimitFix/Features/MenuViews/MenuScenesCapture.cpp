@@ -226,10 +226,8 @@ namespace DCLF::Features::MenuViews::Scenes
 			if (const auto result = Family::LatchGeometry(a_shape, a_start, a_triangles, vs->vertexDesc, engine.topology, geometry, owners, &a_detail);
 				result != Family::GeometryResult::Ok)
 				return Family::ReasonOf(result);
-			constants.vertexAddress[0] = static_cast<std::uint32_t>(geometry.vertexAddress);
-			constants.vertexAddress[1] = static_cast<std::uint32_t>(geometry.vertexAddress >> 32);
-			constants.indexAddress[0] = static_cast<std::uint32_t>(geometry.indexAddress);
-			constants.indexAddress[1] = static_cast<std::uint32_t>(geometry.indexAddress >> 32);
+			constants.vertexRef = geometry.vertexRef;
+			constants.indexRef = geometry.indexRef;
 			constants.vertexLayout[0] = static_cast<std::uint32_t>(geometry.layout);
 			constants.vertexLayout[1] = static_cast<std::uint32_t>(geometry.layout >> 32);
 			constants.vertexStride = geometry.stride;
@@ -337,10 +335,8 @@ namespace DCLF::Features::MenuViews::Scenes
 			if (const auto result = Family::LatchGeometry(a_shape, a_start, a_triangles, vs->vertexDesc, engine.topology, geometry, owners, &a_detail);
 				result != Family::GeometryResult::Ok)
 				return Family::ReasonOf(result);
-			constants.vertexAddress[0] = static_cast<std::uint32_t>(geometry.vertexAddress);
-			constants.vertexAddress[1] = static_cast<std::uint32_t>(geometry.vertexAddress >> 32);
-			constants.indexAddress[0] = static_cast<std::uint32_t>(geometry.indexAddress);
-			constants.indexAddress[1] = static_cast<std::uint32_t>(geometry.indexAddress >> 32);
+			constants.vertexRef = geometry.vertexRef;
+			constants.indexRef = geometry.indexRef;
 			constants.vertexLayout[0] = static_cast<std::uint32_t>(geometry.layout);
 			constants.vertexLayout[1] = static_cast<std::uint32_t>(geometry.layout >> 32);
 			constants.vertexStride = geometry.stride;
@@ -452,13 +448,10 @@ namespace DCLF::Features::MenuViews::Scenes
 			                         Family::LatchGeometry(a_shape, a_start, a_triangles, vs->vertexDesc, engine.topology, geometry, owners, &a_detail);
 			if (latched != Family::GeometryResult::Ok)
 				return Family::ReasonOf(latched);
-			constants.streamAddress[0] = static_cast<std::uint32_t>(geometry.streamAddress);
-			constants.streamAddress[1] = static_cast<std::uint32_t>(geometry.streamAddress >> 32);
+			constants.streamRef = geometry.streamRef;
 			constants.streamStride = geometry.streamStride;
-			constants.vertexAddress[0] = static_cast<std::uint32_t>(geometry.vertexAddress);
-			constants.vertexAddress[1] = static_cast<std::uint32_t>(geometry.vertexAddress >> 32);
-			constants.indexAddress[0] = static_cast<std::uint32_t>(geometry.indexAddress);
-			constants.indexAddress[1] = static_cast<std::uint32_t>(geometry.indexAddress >> 32);
+			constants.vertexRef = geometry.vertexRef;
+			constants.indexRef = geometry.indexRef;
 			constants.vertexLayout[0] = static_cast<std::uint32_t>(geometry.layout);
 			constants.vertexLayout[1] = static_cast<std::uint32_t>(geometry.layout >> 32);
 			constants.vertexStride = geometry.stride;

@@ -1222,6 +1222,7 @@ namespace DCLF
 			// The view's own frame constants (the faces': its commit's, from this frame's sources) or the colour segment's.
 			const auto& own = view.resources->frameConstants;
 			in.frameConstantsAddress = own ? view.resources->frameConstantsAddress : r.frameConstantsAddress;
+			in.frameConstantsRef = own ? view.resources->frameConstantsRef : r.frameConstantsRef;
 			if (own && viewLatches.latch && viewLatches.layout.frameBytes) {
 				const auto frameBuffers = view.resources->frameBuffers.load(std::memory_order_acquire);
 				in.frameCopies = ViewFrameLatched(own.get(), frameBuffers.get(), inputs.blockSizes[kDepthShape], viewLatches.layout.FrameOffset());

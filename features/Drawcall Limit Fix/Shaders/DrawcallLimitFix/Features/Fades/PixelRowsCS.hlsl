@@ -8,7 +8,7 @@
 // fade inputs from the frame constants (DCLFFrameLighting c6-c13). The backing and its rows are the latch's (BuildDrawsLatch::frameRows),
 // so a recording kept across frames writes each frame's.
 
-#include "Common/DeviceAddress.hlsli"
+#include "Common/DeviceRef.hlsli"
 
 #define DCLF_BINDLESS
 #include "Common/DCLFObjects.hlsli"
@@ -18,28 +18,26 @@ cbuffer PixelRowsConstants : register(b0)
 {
 	uint LatchIndex;       // ByteAddressBuffer: the segment's BuildDrawsLatch block
 	uint LatchOffset;      // its latch in this frame slot
-	uint2 RecordTextures;  // the frame record's texture registers (DrawBindings::textures): the draws' descriptors
-	uint2 LodFadeFrame;    // the frame's LodFadeFrame (DCLFLodFadeFrameData) in the frame constants
+	uint2 RecordTextures;  // the frame record's texture registers (DrawBindings::textures), by buffer view ref: the draws' descriptors
+	uint2 LodFadeFrame;    // the frame's LodFadeFrame (DCLFLodFadeFrameData) in the frame constants, by buffer view ref
 	uint2 Padding;
 }
 
-// BuildDrawsLatch's frameRowsLo, frameRowsHi, frameRowsCount (GpuLayouts.h).
+// BuildDrawsLatch's frameRowsRef (two words: the rows' buffer view ref) and frameRowsCount (GpuLayouts.h).
 static const uint kLatchFrameRows = 356;
 static const uint kPixelObjectRowBytes = 48;  // sizeof(DCLFPixelObjectRow)
 // Must match numthreads times FadePixelRows.cpp's kGroups: the threads stride over the rows.
 static const uint kThreads = 64 * 64;
 
-uint64_t Address(uint2 a_words) { return (uint64_t(a_words.y) << 32) | uint64_t(a_words.x); }
-
 // A texture register's descriptor in the frame record (DrawPipelines.h's registers).
-uint RecordTexture(uint a_register) { return DeviceLoad(uint, Address(RecordTextures) + 4u * a_register, 4); }
+uint RecordTexture(uint a_register) { return DeviceLoad(uint, DeviceRefAdd(RecordTextures, 4u * a_register), 4); }
 
 [numthreads(64, 1, 1)] void main(uint3 id : SV_DispatchThreadID)
 {
 	ByteAddressBuffer latch = ResourceDescriptorHeap[LatchIndex];
 	const uint3 rows = latch.Load3(LatchOffset + kLatchFrameRows);
-	const uint64_t base = Address(rows.xy);
-	if (base == 0)
+	const DeviceRef base = rows.xy;
+	if (DeviceRefIsNull(base))
 		return;
 	StructuredBuffer<DCLFObjectRecord> objects = ResourceDescriptorHeap[RecordTexture(127)];
 	StructuredBuffer<DCLFPlacement> placements = ResourceDescriptorHeap[RecordTexture(123)];
@@ -51,16 +49,16 @@ uint RecordTexture(uint a_register) { return DeviceLoad(uint, Address(RecordText
 	objects.GetDimensions(objectCount, stride);
 	placements.GetDimensions(placementCount, stride);
 	const uint known = min(objectCount, placementCount);
-	const DCLFLodFadeFrameData frame = DeviceLoad(DCLFLodFadeFrameData, Address(LodFadeFrame), 16);
+	const DCLFLodFadeFrameData frame = DeviceLoad(DCLFLodFadeFrameData, LodFadeFrame, 16);
 	[loop] for (uint object = id.x; object < rows.z; object += kThreads) {
 		// A slot past the payload's objects or the frame's placements is no draw's: its row is 0.
 		DCLFPixelObjectRow row = (DCLFPixelObjectRow)0;
 		if (object < known)
 			row = DCLFPixelObjectRowOf(objects, shading, placements, roots, states, seeds, frame, object);
 		// Three float4s, not the struct: AMD's legacy Windows driver (Polaris, 2.0.279) crashes compiling a struct store to an address.
-		const uint64_t at = base + uint64_t(object) * kPixelObjectRowBytes;
+		const DeviceRef at = DeviceRefAdd(base, object * kPixelObjectRowBytes);
 		DeviceStore(float4, at, row.MaterialData, 16);
-		DeviceStore(float4, at + 16, row.EmitColorSSR, 16);
-		DeviceStore(float4, at + 32, float4(row.CopyAlpha, row.AlphaTestRef, row.Padding), 16);
+		DeviceStore(float4, DeviceRefAdd(at, 16), row.EmitColorSSR, 16);
+		DeviceStore(float4, DeviceRefAdd(at, 32), float4(row.CopyAlpha, row.AlphaTestRef, row.Padding), 16);
 	}
 }

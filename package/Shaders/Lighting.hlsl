@@ -671,12 +671,12 @@ VS_INPUT DCLFPulledInput(uint a_index, DCLFStream a_first, DCLFStream a_second)
 // buffer, or push data, per draw. So this stage reads its draw's sequence (BuildDrawsCS: DrawSequence, at DCLFSequencesAddress
 // plus its instance's stride), and through it the draw's object word, material row and geometry, whose attributes it pulls
 // (DCLFPulledInput).
-// The draw's rows (its sequence's: the pipeline row's address, then the material row's), and the blocks the pulled source reads
+// The draw's rows (refs, from its sequence's: the pipeline row's, then the material row's), and the blocks the pulled source reads
 // from them (ShaderPrograms.cpp, PulledLightingSource), before anything reads them.
 void DCLFRowStatics(uint4 a_rows)
 {
-	DCLFPipelineRowAddress = DCLFAddress(a_rows.xy);
-	DCLFMaterialRowAddress = DCLFAddress(a_rows.zw);
+	DCLFPipelineRowAddress = a_rows.xy;
+	DCLFMaterialRowAddress = a_rows.zw;
 	DCLFPerTechniqueStatics();
 	DCLFPerMaterialStatics();
 	DCLFPerGeometryStatics();
@@ -685,16 +685,16 @@ void DCLFRowStatics(uint4 a_rows)
 
 VS_OUTPUT DCLFPulledVertex(uint index, uint a_instance)
 {
-	const uint64_t sequence = DCLFDrawSequence(a_instance);
+	const DeviceRef sequence = DCLFDrawSequence(a_instance);
 	DCLFObjectWord = DCLFSequenceObjectWord(sequence);
-	DCLFRowStatics(DCLFSequenceRows(sequence));  // the pipeline row's address, the material row's
+	DCLFRowStatics(DCLFSequenceRows(sequence));  // the pipeline row's ref, the material row's
 	DCLFDrawVertexLayout = DCLFPipelineVertexLayout();
-	const uint4 vertexBuffer = DeviceLoad(uint4, sequence + 24);  // address, size, stride
-	const uint4 streamBuffer = DeviceLoad(uint4, sequence + 40);
+	const uint4 vertexBuffer = DeviceLoad(uint4, DeviceRefAdd(sequence, 24));  // ref, size, stride
+	const uint4 streamBuffer = DeviceLoad(uint4, DeviceRefAdd(sequence, 40));
 	DCLFStream first, second;
-	first.address = DCLFAddress(vertexBuffer.xy);
+	first.address = vertexBuffer.xy;
 	first.stride = vertexBuffer.w;
-	second.address = DCLFAddress(streamBuffer.xy);
+	second.address = streamBuffer.xy;
 	second.stride = streamBuffer.w;
 	const VS_INPUT input = DCLFPulledInput(index, first, second);
 
@@ -743,9 +743,9 @@ VS_OUTPUT main(uint index : SV_VertexID)
 {
 	DCLFDrawVertexLayout = DCLFPushedVertexLayout();
 	DCLFStream first, second;
-	first.address = DCLFAddress(DCLFVertexBuffer.xy);
+	first.address = DCLFVertexBuffer.xy;
 	first.stride = DCLFVertexStride;
-	second.address = DCLFAddress(DCLFStreamBuffer.xy);
+	second.address = DCLFStreamBuffer.xy;
 	second.stride = DCLFStreamStride;
 	return DCLFShade(DCLFPulledInput(index, first, second));
 }
@@ -757,10 +757,10 @@ VS_OUTPUT main(uint a_vertexID : SV_VertexID)
 {
 	DCLFDrawVertexLayout = LightingDraw.VertexLayout;
 	const uint indexNumber = LightingDraw.FirstIndex + a_vertexID;
-	const uint indexWord = DeviceLoad(uint, DCLFAddress(LightingDraw.IndexAddress) + uint64_t((indexNumber * 2) & ~3u));
+	const uint indexWord = DeviceLoad(uint, DeviceRefAdd(LightingDraw.IndexAddress, (indexNumber * 2) & ~3u));
 	const uint index = (indexNumber & 1) ? (indexWord >> 16) : (indexWord & 0xFFFF);
-	DCLFStream first = { DCLFAddress(LightingDraw.VertexAddress), LightingDraw.VertexStride };
-	DCLFStream second = { uint64_t(0), 0u };
+	DCLFStream first = { LightingDraw.VertexAddress, LightingDraw.VertexStride };
+	DCLFStream second = { DeviceRef(0, 0), 0u };
 	return DCLFShade(DCLFPulledInput(index, first, second));
 }
 #		else
@@ -1389,7 +1389,7 @@ cbuffer DCLFFrameLighting : register(b13)
 #		define DCLF_OWNED_PARITY
 #	endif
 #	if defined(DCLF_FOLIAGE_PARITY)
-	// CS_DCLF_FOLIAGE_PARITY (IndirectDraws GpuLayouts.h, FoliageParityConstants): the frame's buffers' addresses (each pixel's
+	// CS_DCLF_FOLIAGE_PARITY (IndirectDraws GpuLayouts.h, FoliageParityConstants): the frame's buffers' refs (each pixel's
 	// object word; its albedo and diffuse), the render size, the frame's tag and the Z-prepass owners' UAV.
 	uint4 DCLFFoliageParityBuffers : packoffset(c14);
 	uint4 DCLFFoliageParityFrame : packoffset(c15);
@@ -1860,21 +1860,21 @@ void DCLFTextureFeedback(float2 a_uv, uint2 a_pixel)
 	const uint frame = SharedData::FrameCount;
 	if (((a_pixel.x + frame) & 7u) != 0u || ((a_pixel.y + (frame >> 3)) & 7u) != 0u)
 		return;
-	// MaterialRowHeader (DrawPipelines.h, at kMaterialRowHeader 768): the animated row, the slot, the buffer's address.
+	// MaterialRowHeader (DrawPipelines.h, at kMaterialRowHeader 768): the animated row, the slot, the buffer's ref.
 #		if defined(DCLF_PULLED)
-	const uint64_t row = DCLFMaterialRowAddress;
+	const DeviceRef row = DCLFMaterialRowAddress;
 #		else
-	const uint64_t row = (uint64_t(DCLFMaterialRowAddress.y) << 32) | uint64_t(DCLFMaterialRowAddress.x);
+	const DeviceRef row = DCLFMaterialRowRef(DCLFMaterialRowAddress);  // the push data's is the layout's device address
 #		endif
-	const uint3 feedback = DeviceLoad(uint3, row + 768 + 4, 4);
-	const uint64_t buffer = (uint64_t(feedback.z) << 32) | uint64_t(feedback.y);
-	if (buffer == 0 || DeviceLoad(uint, buffer, 4) == 0)
+	const uint3 feedback = DeviceLoad(uint3, DeviceRefAdd(row, 768 + 4), 4);
+	const DeviceRef buffer = feedback.yz;
+	if (DeviceRefIsNull(buffer) || DeviceLoad(uint, buffer, 4) == 0)
 		return;
 	const float major = max(dot(dx, dx), dot(dy, dy)), minor = min(dot(dx, dx), dot(dy, dy));
 	// Anisotropic filtering reads the mip of the minor axis, within its ratio (16).
 	const float footprint = 0.5 * log2(max(max(minor, major / 256.0), 1e-16)) + SharedData::MipBias;
 	const uint value = uint(max(footprint + 32.0, 0.0) * 256.0);
-	const uint64_t word = buffer + 4 * (uint64_t(feedback.x) + 1);
+	const DeviceRef word = DeviceRefAdd(buffer, 4 * (feedback.x + 1));
 	if (value < DeviceLoad(uint, word, 4))
 		DeviceStore(uint, word, value, 4);
 }
@@ -4376,15 +4376,15 @@ PS_OUTPUT main(PS_INPUT input, bool frontFace : SV_IsFrontFace)
 		const uint2 pixel = uint2(input.Position.xy);
 		if (pixel.x < DCLFFoliageParityFrame.x && pixel.y < DCLFFoliageParityFrame.y) {
 			const uint index = pixel.y * DCLFFoliageParityFrame.x + pixel.x;
-			const uint64_t ids = (uint64_t(DCLFFoliageParityBuffers.y) << 32) | uint64_t(DCLFFoliageParityBuffers.x);
-			const uint64_t colours = (uint64_t(DCLFFoliageParityBuffers.w) << 32) | uint64_t(DCLFFoliageParityBuffers.z);
+			const DeviceRef ids = DCLFFoliageParityBuffers.xy;
+			const DeviceRef colours = DCLFFoliageParityBuffers.zw;
 #			if defined(DEFERRED)
 			const uint4 albedo = uint4(round(saturate(psout.Albedo) * 255.0));
 #			else
 			const uint4 albedo = uint4(round(saturate(psout.Diffuse) * 255.0));
 #			endif
 			const uint4 diffuse = uint4(round(saturate(psout.Diffuse) * 255.0));
-			DeviceStore(uint, ids + uint64_t(index) * 4, (DCLFFoliageParityFrame.z << 24) | ((DCLFObjectIndex + 1) & 0x00FFFFFFu));
+			DeviceStore(uint, DeviceRefAdd(ids, index * 4), (DCLFFoliageParityFrame.z << 24) | ((DCLFObjectIndex + 1) & 0x00FFFFFFu));
 			// The motion vector against a static object's: the same point where the camera saw it the frame before (its absolute
 			// position, from this frame's eye, made relative to the frame before's). In pixels, with the motion vector itself.
 			float2 motionError = 0;
@@ -4401,7 +4401,7 @@ PS_OUTPUT main(PS_INPUT input, bool frontFace : SV_IsFrontFace)
 #			else
 			const uint4 specular = 0;
 #			endif
-			DeviceStore(uint4, colours + uint64_t(index) * 16,
+			DeviceStore(uint4, DeviceRefAdd(colours, index * 16),
 				uint4(albedo.x | (albedo.y << 8) | (albedo.z << 16) | (error << 24), diffuse.x | (diffuse.y << 8) | (diffuse.z << 16) | (diffuse.w << 24),
 					specular.x | (specular.y << 8) | (specular.z << 16) | (specular.w << 24), f32tof16(motion.x) | (f32tof16(motion.y) << 16)));
 		}
@@ -4411,12 +4411,12 @@ PS_OUTPUT main(PS_INPUT input, bool frontFace : SV_IsFrontFace)
 #	endif
 }
 #	if defined(DCLF_PULLED)
-// The draw's rows (its sequence's: the pipeline row's address, then the material row's), and the blocks the pulled source reads
+// The draw's rows (refs, from its sequence's: the pipeline row's, then the material row's), and the blocks the pulled source reads
 // from them (ShaderPrograms.cpp, PulledLightingSource), before anything reads them.
 void DCLFRowStatics(uint4 a_rows)
 {
-	DCLFPipelineRowAddress = DCLFAddress(a_rows.xy);
-	DCLFMaterialRowAddress = DCLFAddress(a_rows.zw);
+	DCLFPipelineRowAddress = a_rows.xy;
+	DCLFMaterialRowAddress = a_rows.zw;
 	DCLFPerTechniqueStatics();
 	DCLFPerMaterialStatics();
 	DCLFPerGeometryStatics();
@@ -4449,7 +4449,7 @@ void DCLFPixelObjectStatics()
 #		endif
 PS_OUTPUT main(PS_INPUT input, bool frontFace : SV_IsFrontFace)
 {
-	const uint64_t sequence = DCLFDrawSequence(input.DCLFDrawInstance);
+	const DeviceRef sequence = DCLFDrawSequence(input.DCLFDrawInstance);
 	DCLFObjectWord = DCLFSequenceObjectWord(sequence);
 	DCLFRowStatics(DCLFSequenceRows(sequence));
 	DCLFPixelObjectStatics();

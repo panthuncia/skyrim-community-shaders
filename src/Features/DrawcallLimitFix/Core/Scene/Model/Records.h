@@ -8,6 +8,7 @@
 #include <bit>
 #include <cstdint>
 #include <type_traits>
+#include "RenderGraph/BufferRef.h"
 
 struct ID3D11Buffer;
 
@@ -169,9 +170,12 @@ namespace DCLF
 		std::uint32_t vertexCount = 0;
 		std::uint32_t indexCount = 0;
 		std::uint32_t firstIndex = 0;
-		// The buffers' device addresses (GpuResources), 0 when the render graph is off.
+		// The buffers' device addresses (GpuResources), 0 when the render graph is off: the index buffer's is a draw's index buffer view.
 		std::uint64_t vertexAddress = 0;
 		std::uint64_t indexAddress = 0;
+		// Their buffer view refs, which the vertex stages and compute passes read through (Common/DeviceRef.hlsli).
+		RenderGraph::BufferRef vertexRef;
+		RenderGraph::BufferRef indexRef;
 		std::uint64_t vertexBytes = 0;
 		std::uint64_t indexBytes = 0;
 		// A skin partition's TriShape: the skin's next partition slot (whatever the frame's mask), else kNoPartition.
@@ -549,9 +553,11 @@ namespace DCLF
 
 	/**
 	 * @brief One indirect draw, in the command signature's argument order (BasicRHI packs arguments like D3D12, 4-byte aligned):
-	 * pipeline set index, push data (words 0-23: pipeline row and material row addresses, object word, two vertex buffer views in
-	 * D3D12's VBV layout, a pad, then the rows' other blocks' addresses: the pad puts them at even push words, as BasicRHI needs a
-	 * pushed address 8-byte aligned in the push data), index buffer view (D3D12's IBV layout), DrawIndexed.
+	 * pipeline set index, push data (words 0-23: pipeline row and material row addresses, object word, two vertex buffer views (a buffer
+	 * view ref, size, stride), a pad, then the rows' other blocks' addresses: the pad puts them at even push words, as BasicRHI needs a
+	 * pushed address 8-byte aligned in the push data), index buffer view (D3D12's IBV layout), DrawIndexed. The rows' and blocks'
+	 * addresses are device addresses the pipeline layout reads, and the index buffer view's the GPU's front end: both stay addresses. The
+	 * vertex buffer views only the vertex stages read, so they hold refs.
 	 *
 	 * The rows hold no addresses (a version's bytes are the same in any backing): BuildDrawsCS writes every block a draw's layout maps
 	 * (b0/b1/b2/b4, DrawPipelines.h MainLayoutRanges) as a pushed address, from the rows' addresses it resolves.
@@ -573,10 +579,10 @@ namespace DCLF
 		std::uint64_t pipelineRowAddress;
 		std::uint64_t materialRowAddress;
 		std::uint32_t objectIndex;
-		std::uint64_t vertexBufferAddress;  // GeometryBuffers::vertexAddress (0 without the render graph)
+		RenderGraph::BufferRef vertexBufferRef;  // GeometryBuffers::vertexRef (null without the render graph)
 		std::uint32_t vertexBufferSize;  // written; no draw reads it
 		std::uint32_t vertexStride;
-		std::uint64_t streamBufferAddress;  // slot 1: a face shape's positions, else the slot 0 view again
+		RenderGraph::BufferRef streamBufferRef;  // slot 1: a face shape's positions, else the slot 0 view again
 		std::uint32_t streamBufferSize;  // written; no draw reads it
 		std::uint32_t streamStride;
 		std::uint32_t blockPad;  // 0: the block addresses after it start at an even push word (BasicRHI: pushed addresses 8-aligned)
@@ -599,8 +605,8 @@ namespace DCLF
 	static_assert(offsetof(DrawSequence, pipelineRowAddress) == 4);
 	static_assert(offsetof(DrawSequence, materialRowAddress) == 12);
 	static_assert(offsetof(DrawSequence, objectIndex) == 20);
-	static_assert(offsetof(DrawSequence, vertexBufferAddress) == 24);
-	static_assert(offsetof(DrawSequence, streamBufferAddress) == 40);
+	static_assert(offsetof(DrawSequence, vertexBufferRef) == 24);
+	static_assert(offsetof(DrawSequence, streamBufferRef) == 40);
 	static_assert(offsetof(DrawSequence, blockPad) == 56);
 	static_assert(offsetof(DrawSequence, psTechniqueAddress) == 60);
 	static_assert(offsetof(DrawSequence, vsGeometryAddress) == 68);

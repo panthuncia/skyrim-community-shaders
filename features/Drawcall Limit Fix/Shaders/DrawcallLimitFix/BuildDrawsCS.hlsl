@@ -1,7 +1,7 @@
 // Drawcall Limit Fix: culls this frame's draw inputs and writes their indirect draw sequences (DrawSequence, Records.h) from the
 // inputs and the geometry table. Compiled to SPIR-V at runtime (ComputeProgram) with BasicRHI's descriptor-heap ABI.
 
-#include "Common/DeviceAddress.hlsli"
+#include "Common/DeviceRef.hlsli"
 
 #include "DrawcallLimitFix/CullEye.hlsli"
 #include "DrawcallLimitFix/HzbTest.hlsli"
@@ -282,6 +282,8 @@ static uint MaterialRowsLo;
 static uint MaterialRowsHi;
 static uint PipelineRowsLo;
 static uint PipelineRowsHi;
+// The installed material rows' buffer view ref (the latch's materialRowsRef at 384), for the reads of their headers.
+static uint2 MaterialRowsRef;
 float4 ObjectRow(uint a_object, uint a_row)
 {
 	StructuredBuffer<PlacementRows> placements = ResourceDescriptorHeap[PlacementsIndex];
@@ -340,6 +342,7 @@ void LoadViewLatch()
 	MaterialRowsHi = rows.y;
 	PipelineRowsLo = rows.z;
 	PipelineRowsHi = rows.w;
+	MaterialRowsRef = latch.Load2(LatchOffset + 384);
 }
 
 // The dispatch's one view: its outputs and latch from the push constants.
@@ -870,7 +873,7 @@ uint2 MaterialRowAddress(uint a_materialSlot)
 	const uint2 copyRows = latch.Load2(LatchOffset + 348);
 	if ((copyRows.x | copyRows.y) == 0)
 		return installed;
-	const uint animatedRow = DeviceLoad(uint, ((uint64_t(installed.y) << 32) | uint64_t(installed.x)) + 768, 4);
+	const uint animatedRow = DeviceLoad(uint, DeviceRefAdd(MaterialRowsRef, a_materialSlot * MaterialRowStride + 768), 4);
 	if (animatedRow == 0xFFFFFFFFu)
 		return installed;
 	return AddressOf(copyRows.x, copyRows.y, animatedRow * 1024);  // kMaterialRowBytes

@@ -4,6 +4,7 @@
 
 // Helpers.h first: volk must precede every Vulkan header of the translation unit.
 #include "Features/DrawcallLimitFix/Core/Render/Resources/Helpers.h"
+#include "Features/DrawcallLimitFix/Core/Gpu/NamedRefs.h"
 #include "Features/DrawcallLimitFix/Features/Grass/GrassTables.h"
 #include "Features/DrawcallLimitFix/Features/Grass/GrassMirror.h"
 #include "Features/DrawcallLimitFix/Core/Engine/EngineAccess.h"
@@ -267,13 +268,14 @@ namespace DCLF::Features::Grass
 			tables->draw = Draws::CreateWords(sizeof(DrawRow) / 4, false, "cs.dclf.grass-draw");
 			tables->draws = Draws::CreateWords(kDrawsBytes / 4, true, "cs.dclf.grass-draws");
 			auto device = a_setup.device;
-			auto address = [&](org::Buffer& a_buffer) { return device.GetBufferDeviceAddress({ a_buffer.GetAPIResource().GetHandle(), 0 }); };
-			tables->drawAddress = address(*tables->draw);
-			bool addressed = tables->drawAddress != 0;
+			// The vertex and pixel stages read every table through its buffer view ref (RunGrass.hlsl).
+			auto refOf = [&](org::Buffer& a_buffer) { return RenderGraph::BufferRefOf(device, a_buffer.GetAPIResource().GetHandle()); };
+			tables->drawRef = refOf(*tables->draw);
+			bool addressed = static_cast<bool>(tables->drawRef);
 			for (const auto* table : { &tables->instances, &tables->owners, &tables->frame, &tables->visible, &tables->shapes, &tables->buckets, &tables->meshes })
-				addressed = addressed && address(*(*table)->Get()) != 0;
+				addressed = addressed && static_cast<bool>(refOf(*(*table)->Get()));
 			if (!addressed) {
-				logger::warn("[DCLF] Grass's tables have no device address; grass stays native");
+				logger::warn("[DCLF] Grass's tables have no buffer view ref; grass stays native");
 				return nullptr;
 			}
 			if (auto* host = RenderGraphRuntime::Get().Host()) {
@@ -444,7 +446,7 @@ namespace DCLF::Features::Grass
 		}
 
 		/**
-		 * @brief The depth commit's draw row (the adopted versions' addresses, the engine's frame values, the cull's), the draws buffer's
+		 * @brief The depth commit's draw row (the adopted versions' refs, the engine's frame values, the cull's), the draws buffer's
 		 * zero header (and, once after the tables were made or grass became DCLF's, its zero counts: grass.args-colour zeroes them every
 		 * frame after). The cull walks the slots the tables hold (sent*Slots) only while a_draw and the frame's textures are bound.
 		 */
@@ -452,13 +454,13 @@ namespace DCLF::Features::Grass
 		{
 			OwnedRow<DrawRow> owned;
 			auto& row = owned.Plain();
-			row.instances = a_sealed.Of(*a_tables.instances).deviceAddress;
-			row.shapes = a_sealed.Of(*a_tables.shapes).deviceAddress;
-			row.buckets = a_sealed.Of(*a_tables.buckets).deviceAddress;
-			row.meshes = a_sealed.Of(*a_tables.meshes).deviceAddress;
-			row.owners = a_sealed.Of(*a_tables.owners).deviceAddress;
-			row.frame = a_sealed.Of(*a_tables.frame).deviceAddress;
-			row.visible = a_sealed.Of(*a_tables.visible).deviceAddress;
+			row.instances = DCLF::RefOf(a_sealed.Of(*a_tables.instances));
+			row.shapes = DCLF::RefOf(a_sealed.Of(*a_tables.shapes));
+			row.buckets = DCLF::RefOf(a_sealed.Of(*a_tables.buckets));
+			row.meshes = DCLF::RefOf(a_sealed.Of(*a_tables.meshes));
+			row.owners = DCLF::RefOf(a_sealed.Of(*a_tables.owners));
+			row.frame = DCLF::RefOf(a_sealed.Of(*a_tables.frame));
+			row.visible = DCLF::RefOf(a_sealed.Of(*a_tables.visible));
 			SampleWind(row.windVector);
 			row.timeBase = WindTimeBase();
 			row.prevTimeBase = std::exchange(a_tables.prevTimeBase, row.timeBase);
