@@ -504,8 +504,14 @@ namespace DCLF::Scene
 		// component's (Features/Faces). Without a snapshot it gets no record and waits for the component's publication, which writes it again.
 		Api::EntryWrite face{ *geometry, trackedEntry->sourceRef.get() };
 		trackedEntry->streamWaiting = r.entryTaken && !ComponentsResolve(face, trackedEntry->entryClass);
-		if (trackedEntry->streamWaiting)
+		// Waiting for the stream: withheld from the engine meanwhile (RefreshPending), as a bound object waiting for its pipeline is.
+		if (trackedEntry->streamWaiting) {
+			if (streamWaitingSince.try_emplace(geometry, sceneFrame).second)
+				setPendingDirty = true;
 			return false;
+		}
+		if (streamWaitingSince.erase(geometry))
+			setPendingDirty = true;
 		const std::uint32_t geometrySlot = ResolveWriteGeometry(geometry, g, r, timer, a_bucket);
 		if (geometrySlot == Tables::kSlotFree)
 			return false;
