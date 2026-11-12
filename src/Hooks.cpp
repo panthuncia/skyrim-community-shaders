@@ -2,6 +2,7 @@
 
 #include "GpuEventTimers.h"
 #include "HangWatchdog.h"
+#include "Testing/Testing.h"
 #include "GpuIdleTrace.h"
 #include "RenderGraph/Engine/Constants/EngineConstants.h"
 #include "RenderGraph/Engine/Engine.h"
@@ -624,6 +625,11 @@ struct IDXGISwapChain_Present
 
 		auto* dxvk = DXVKInterop::GetSingleton();
 		const bool presentSucceeded = SUCCEEDED(retval);
+		// A removed device (DXVK's or native D3D11's Present): the test run ends with device-lost.
+		if (retval == DXGI_ERROR_DEVICE_REMOVED || retval == DXGI_ERROR_DEVICE_RESET || retval == DXGI_ERROR_DEVICE_HUNG) {
+			const auto reason = globals::d3d::device ? static_cast<std::uint32_t>(globals::d3d::device->GetDeviceRemovedReason()) : 0u;
+			Testing::ReportDeviceLost(fmt::format("Present returned 0x{:08X}, removed reason 0x{:08X}", static_cast<std::uint32_t>(retval), reason), 0, {}, {});
+		}
 		{
 			ZoneScopedN("CS.Present.SurfaceState");
 			if (presentSucceeded)
@@ -684,6 +690,8 @@ struct IDXGISwapChain_Present
 			GpuEventTimers::PassSkipAfterPresent();
 			globals::state->Reset();
 		}
+		// The test runner: milestones, steps, the status file. Not a feature's: it runs with every feature off.
+		Testing::OnPresent();
 
 		GpuCounters::OnPresentEnd();
 

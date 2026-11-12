@@ -100,6 +100,16 @@ The harness writes this file. All keys are present; empty means none.
 - **`dclf_ini`** values are served by `Util::SwitchFile` as though they were in `CommunityShaders-DCLF.ini`.
 - **`steps[].wait`** (optional) holds the step until a condition is true: `"settled"`, `"shaders"`, `"reload"`, `"signal:<n>"`. **`steps[].wait_s`** overrides `timeouts.step_wait`. A wait that times out fails the run.
 - **Shots** are written to `<run_dir>\shots\<arg>.png`.
+- **A malformed configuration or an unknown name** ends the game at once with `config-error`, after the status file is written.
+- **`at`** anchors a step at the first time its milestone is reached at or after the previous step ran. So a step after a `load` waits for that load's `world-ready`. `"previous"` is the frame the previous step ran at.
+
+### Commands and waits
+
+`do` names a registered command and `arg` is its argument. An unregistered command fails the step (outcome `failed`).
+
+- **Generic** (`src/Testing/Commands.cpp`, any feature set): `shot`, `exit`, `console` (a console line), `menu` (`<menu name>=show|hide`), `cs-menu` (`open|close`), `save`, `load` (`<name>|recent`), `weather` (`<editor id or form id>|off`), `mark`, `vram-json`, `window`, `capture`, `telemetry`, `feature` (`<ShortName>=0|1`), `pov`, `draw`, `face-npc`, `face-female`, `morph-female`, `npc-alpha`, `cast`, `fg`, `pp`, `hdr`, `bink`, `signal`, `move` and `turn` (`<frames>:<amount per frame>`), `spill`, `demote`, `frame-window`, `ballast`.
+- **DCLF's** keep their old names, `dclf:<name>` (`dclf:cull` with arg `frustum`, `dclf:shadows` with arg `0` for a toggle). They exist only when DCLF installs.
+- **Waits:** `shaders` and `signal:<n>` always; `settled`, `reload` and `nvperf` only when DCLF installs. An unknown wait fails the step.
 
 ## `CommunityShaders-Test.status.json` (status)
 
@@ -138,6 +148,7 @@ The game rewrites this file about once a second and at every milestone and outco
 - **`t`** is seconds since the plugin loaded. **`frame`** counts every Present.
 - **`phase`** is one of `boot`, `compiling`, `menu`, `loading`, `world` and `exiting`.
 - **Milestones** are recorded the first time each is reached. A save loaded after the first world-ready records `load-start` and `world-ready` again, in a `loads` array of the same shape.
+- **`config.unchecked`** lists `CS_DCLF_*` names that may be DCLF feature switches but could not be checked, because DCLF did not install.
 - **world-ready** is recorded when all of these hold:
   - the loading menu is closed and no hold is active;
   - the player's parent cell is attached and their 3D is loaded;

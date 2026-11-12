@@ -1,5 +1,7 @@
 #include "RenderGraph/Switches.h"
 
+#include "Testing/SwitchRegistry.h"
+
 #include <cctype>
 #include <charconv>
 #include <map>
@@ -38,6 +40,7 @@ namespace Switches
 		if (const auto found = s_values.find(a_name); found != s_values.end())
 			return found->second;
 		std::string name(a_name);
+		Testing::SwitchRegistry::NoteRead(name);
 		auto value = ReadEnvironment(name);
 		s_values.emplace(std::move(name), value);
 		return value;

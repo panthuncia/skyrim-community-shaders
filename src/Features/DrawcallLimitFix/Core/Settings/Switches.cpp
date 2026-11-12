@@ -7,6 +7,7 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <deque>
 #include <string_view>
 #include <vector>
@@ -335,6 +336,37 @@ namespace DCLF
 		return { static_cast<std::uint32_t>(registered.size() - 1) };
 	}
 
+	namespace
+	{
+		std::atomic<bool> featureSwitchesRegistered{ false };
+
+		std::string_view KindName(Kind a_kind)
+		{
+			switch (a_kind) {
+			case Kind::Feature:
+				return "feature";
+			case Kind::Parity:
+				return "parity";
+			case Kind::Diagnostic:
+				return "diagnostic";
+			case Kind::Test:
+				return "test";
+			default:
+				return "other";
+			}
+		}
+	}
+
+	void ForEachSwitchRow(const std::function<void(std::string_view, std::string_view, std::string_view)>& a_row)
+	{
+		for (const auto& entry : kRegistry)
+			a_row(entry.name, KindName(entry.kind), entry.description);
+		for (const auto& entry : RegisteredSwitches())
+			a_row(entry.name, KindName(entry.kind), entry.description);
+	}
+
+	bool FeatureSwitchesRegistered() { return featureSwitchesRegistered.load(std::memory_order_acquire); }
+
 	void CheckSwitchAnchors()
 	{
 		// A row no Core row lists has an anchor that names no switch, or anchors that loop back to it.
@@ -351,6 +383,7 @@ namespace DCLF
 				stl::report_and_fail(fmt::format("Drawcall Limit Fix: the switch {} is listed {} {}, which no switch is (or its anchors loop)", entry.name,
 					entry.after.empty() ? "before" : "after", entry.after.empty() ? entry.before : entry.after));
 		}
+		featureSwitchesRegistered.store(true, std::memory_order_release);
 	}
 
 	bool AnyObserverSwitch()

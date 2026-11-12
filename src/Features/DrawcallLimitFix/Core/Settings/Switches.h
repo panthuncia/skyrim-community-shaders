@@ -4,6 +4,7 @@
 
 #include <cstdint>
 #include <filesystem>
+#include <functional>
 #include <string>
 #include <string_view>
 
@@ -151,6 +152,15 @@ namespace DCLF
 	 * outside the feature that has no id (Core's held fade node reads Features/Fades' CS_DCLF_EMPTY_FADE_NODE).
 	 */
 	const std::string& RegisteredSwitchValue(std::string_view a_name);
+
+	/**
+	 * @brief Every switch row: Core's, then the features' registered so far. a_row gets the name, the kind in lower case (feature,
+	 * parity, diagnostic, test, other) and the description. Main thread, or any thread once the features are installed.
+	 */
+	void ForEachSwitchRow(const std::function<void(std::string_view, std::string_view, std::string_view)>& a_row);
+
+	/** @brief Whether the features' switches are registered (CheckSwitchAnchors ran): the registry is complete. */
+	bool FeatureSwitchesRegistered();
 
 	/** @brief The directory the switches file lives in (the SKSE log directory), outside MO2's virtual file system. */
 	std::filesystem::path SwitchesDirectory();

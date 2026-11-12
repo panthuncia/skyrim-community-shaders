@@ -20,6 +20,7 @@
 #include "Utils/LogTee.h"
 #include "CrashDump.h"
 #include "HangWatchdog.h"
+#include "Testing/Testing.h"
 
 #define DLLEXPORT __declspec(dllexport)
 
@@ -55,46 +56,6 @@ void InitializeLog([[maybe_unused]] spdlog::level::level_enum a_level = spdlog::
 	spdlog::set_pattern("[%Y-%m-%d %H:%M:%S.%e] [%l] [%t] [%s:%#] %v");
 }
 
-/// Development switches (the CS_* environment variables) from `CommunityShaders.env` beside the log, one
-/// NAME=value per line, '#' for comments. A launcher such as an already-running MO2 does not pass a new
-/// environment to the game, so a test run sets its switches here instead. The real environment wins.
-void ApplyDevEnvironmentFile()
-{
-	auto path = logger::log_directory();
-	if (!path)
-		return;
-	*path /= std::format("{}.env"sv, Plugin::NAME);
-	std::ifstream file(*path);
-	if (!file)
-		return;
-
-	std::string line;
-	while (std::getline(file, line)) {
-		const auto first = line.find_first_not_of(" \t");
-		if (first == std::string::npos || line[first] == '#')
-			continue;
-		const auto equals = line.find('=', first);
-		if (equals == std::string::npos)
-			continue;
-		std::string name = line.substr(first, equals - first);
-		std::string value = line.substr(equals + 1);
-		while (!name.empty() && (name.back() == ' ' || name.back() == '\t'))
-			name.pop_back();
-		while (!value.empty() && (value.back() == '\r' || value.back() == ' ' || value.back() == '\t'))
-			value.pop_back();
-		if (name.empty())
-			continue;
-		if (GetEnvironmentVariableA(name.c_str(), nullptr, 0) != 0) {
-			logger::info("[DevEnv] {} is already set by the environment; ignoring the file's value", name);
-			continue;
-		}
-		SetEnvironmentVariableA(name.c_str(), value.c_str());
-		// std::getenv reads the C runtime's own copy, which SetEnvironmentVariable does not change.
-		_putenv_s(name.c_str(), value.c_str());
-		logger::info("[DevEnv] {}={} (from {})", name, value, path->filename().string());
-	}
-}
-
 extern "C" DLLEXPORT bool SKSEAPI SKSEPlugin_Load(const SKSE::LoadInterface* a_skse)
 {
 #ifndef NDEBUG
@@ -105,13 +66,15 @@ extern "C" DLLEXPORT bool SKSEAPI SKSEPlugin_Load(const SKSE::LoadInterface* a_s
 	FrameAnchors::LatchMainThread();
 	CrashDump::Start();
 	logger::info("Loaded {} {} (build {})", Plugin::NAME, Plugin::VERSION.string(), Plugin::BUILD_DESCRIBE);
-	ApplyDevEnvironmentFile();
+	// The test configuration (and the old CommunityShaders.env), before anything reads a switch.
+	Testing::LoadConfig();
 	// CS_ORG_NATIVE=1: the port switches native mode needs, before anything reads them.
 	RenderGraph::Engine::Native::ApplySwitches();
 	SKSE::Init(a_skse);
 	// SKSE::Init replaced the log with CommonLib's; its sinks go behind the fan-out sink, so a diagnostic capture can copy the lines
 	// it logs (Utils/LogTee.h).
 	Util::LogTee::Install();
+	Testing::InstallLogWatcher();
 	logger::info("Community Shaders {} | branch: {} | describe: {} | hash: {}{}",
 		Util::GetFormattedVersion(Plugin::VERSION),
 		Plugin::BUILD_BRANCH.empty() ? "(detached)" : Plugin::BUILD_BRANCH,
@@ -143,6 +106,9 @@ extern "C" DLLEXPORT bool SKSEAPI SKSEPlugin_Query(const SKSE::QueryInterface*, 
 
 void MessageHandler(SKSE::MessagingInterface::Message* message)
 {
+	// The test runner's milestones (kPostPostLoad's comes after the features').
+	if (message->type != SKSE::MessagingInterface::kPostPostLoad)
+		Testing::OnSkseMessage(message->type);
 	switch (message->type) {
 	case SKSE::MessagingInterface::kPostLoad:
 		{
@@ -171,6 +137,8 @@ void MessageHandler(SKSE::MessagingInterface::Message* message)
 
 				// Run feature PostPostLoad() first so features can disable themselves if needed
 				Feature::ForEachLoadedFeature("PostPostLoad", [](Feature* feature) { feature->PostPostLoad(); });
+				// The test runner, once DCLF's switches and commands are registered.
+				Testing::OnSkseMessage(message->type);
 
 				if (shaderCache->UseFileWatcher())
 					shaderCache->StartFileWatcher();

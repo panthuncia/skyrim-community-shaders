@@ -11,6 +11,7 @@
 #include "Features/DrawcallLimitFix/Core/Scene/FrameView/FrameView.h"
 #include "Features/DrawcallLimitFix/Core/Scene/Model/Publication.h"
 #include "RenderGraph/Engine/Native/Native.h"
+#include "Testing/Testing.h"
 #include "Utils/SwitchFile.h"
 
 #include <algorithm>
@@ -45,6 +46,22 @@ namespace DCLF::LoadHold
 
 		std::atomic<HoldState> state{ HoldState::Idle };
 		std::atomic<bool> withMenu{ false };
+
+		// The test runner sees any state but Idle as a hold: the world is not ready while it lasts (Testing::Holds).
+		void ReportHold(HoldState a_state) { Testing::Holds::Set("dclf:load-hold", a_state != HoldState::Idle); }
+
+		void StoreState(HoldState a_state)
+		{
+			state.store(a_state, std::memory_order_release);
+			ReportHold(a_state);
+		}
+
+		HoldState ExchangeState(HoldState a_state)
+		{
+			const auto previous = state.exchange(a_state, std::memory_order_acq_rel);
+			ReportHold(a_state);
+			return previous;
+		}
 		// Render thread: a re-entry ended at a stall or the cap; none starts again until a frame without the condition (reentryThisFrame).
 		bool reentryBlocked = false;
 		bool reentryThisFrame = false;
@@ -103,7 +120,7 @@ namespace DCLF::LoadHold
 			hold.start = hold.progress = std::chrono::steady_clock::now();
 			withMenu.store(menu, std::memory_order_relaxed);
 			// Without a menu the main thread renders next: the hold starts now, with the presents held.
-			state.store(menu ? HoldState::Closing : HoldState::Holding, std::memory_order_release);
+			StoreState(menu ? HoldState::Closing : HoldState::Holding);
 			logger::info("[DCLF] load hold: started ({})", menu ? "the loading menu kept open" : "no loading menu: the presents held, the last frame stays on screen");
 			return menu;
 		}
@@ -111,7 +128,7 @@ namespace DCLF::LoadHold
 		/** @brief Main thread, a loading screen's start: a load inside a hold ends it (the new load posts its own close). */
 		void OnLoadBegin()
 		{
-			if (state.exchange(HoldState::Idle, std::memory_order_acq_rel) != HoldState::Idle)
+			if (ExchangeState(HoldState::Idle) != HoldState::Idle)
 				logger::info("[DCLF] load hold: a load began during the hold, which ends ({} frames, {:.0f} ms)", hold.frames, MillisecondsSince(hold.start));
 		}
 
@@ -149,11 +166,11 @@ namespace DCLF::LoadHold
 				reentryBlocked = true;
 			if (menu && MenuOpen()) {
 				// The coordinator's close, posted now. The menu closes at the UI's next pass over its messages.
-				state.store(HoldState::Releasing, std::memory_order_release);
+				StoreState(HoldState::Releasing);
 				if (auto* queue = RE::UIMessageQueue::GetSingleton())
 					queue->AddMessage(RE::BSFixedString(RE::LoadingMenu::MENU_NAME), RE::UI_MESSAGE_TYPE::kHide, nullptr);
 			} else {
-				state.store(HoldState::Idle, std::memory_order_release);
+				StoreState(HoldState::Idle);
 			}
 			// The window after the hold starts here.
 			after = {};
@@ -363,7 +380,7 @@ namespace DCLF::LoadHold
 			hold.start = hold.progress = std::chrono::steady_clock::now();
 			hold.reentry = a_why;
 			withMenu.store(false, std::memory_order_relaxed);
-			state.store(HoldState::Holding, std::memory_order_release);
+			StoreState(HoldState::Holding);
 			logger::info("[DCLF] load hold: started (a re-entry: {}): the presents held, the last frame stays on screen", a_why);
 		}
 		NoteHeld(View::Shadow);
@@ -382,7 +399,7 @@ namespace DCLF::LoadHold
 		}
 		// The world's first frame under the kept menu: the load is done, and the tables are built from here (IsLoadingScreenUp: false).
 		if (now == HoldState::Closing) {
-			state.store(HoldState::Holding, std::memory_order_release);
+			StoreState(HoldState::Holding);
 			logger::info("[DCLF] load hold: the world's first frame under the kept loading menu, {:.0f} ms after the load's end", MillisecondsSince(hold.start));
 		}
 	}
@@ -393,7 +410,7 @@ namespace DCLF::LoadHold
 		const auto now = state.load(std::memory_order_acquire);
 		if (now == HoldState::Releasing) {
 			if (!MenuOpen())
-				state.store(HoldState::Idle, std::memory_order_release);
+				StoreState(HoldState::Idle);
 			return;
 		}
 		const bool reentry = std::exchange(reentryThisFrame, false);

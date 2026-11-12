@@ -29,6 +29,7 @@
 #	include "DrawcallLimitFix/Diagnostics/Policy.h"
 #	include "DrawcallLimitFix/Core/Shading/MaterialWrites.h"
 #	include "DrawcallLimitFix/Core/Shading/MaterialSources.h"
+#	include "DrawcallLimitFix/Diagnostics/TelemetryProfile.h"
 #	include "DrawcallLimitFix/Diagnostics/TestHarness.h"
 #	include "Features/DrawcallLimitFix/Core/Gpu/Pipelines/DrawPipelines.h"
 #	include "Features/DrawcallLimitFix/Core/Render/Epochs/GraphConditions.h"
@@ -206,6 +207,8 @@ void DrawcallLimitFix::PostPostLoad()
 	(void)DCLF::SceneScheduler::Graph();
 	Hooks::Install();
 	installed = true;
+	// DCLF's test commands and waits exist only when it installs.
+	DCLF::RegisterTestCommands();
 	// The menu's saved toggles, now that every toggle is seeded (their switches win where set).
 	ApplySavedSettings();
 	// The coordinator's pump, from here woken by its producers (the hooks above push from now on); its passes apply the events
@@ -278,9 +281,8 @@ void DrawcallLimitFix::BeforePresent()
 
 void DrawcallLimitFix::Reset()
 {
-	// The test commands run before the installed check, so a CS_DCLF=0 baseline reaches the same place at
-	// the same in-game hour as the run it is compared against.
-	DCLF::RunTestHarness(GetShortName());
+	// The telemetry profile's frame (with DCLF on or off).
+	DCLF::Diagnostics::TelemetryFrame();
 	// The diagnostic capture's steps (with DCLF on or off: a capture of a session it could not start is the most useful one).
 	DCLF::Capture::OnPresent();
 	// The frame's last target point, then Present's observers (with DCLF on or off).

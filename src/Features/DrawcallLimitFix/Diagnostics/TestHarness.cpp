@@ -1,8 +1,8 @@
-// The test harness: the CS_DCLF_TEST_* switches' scripted commands, toggles, turns, moves and exit, run every Present on the render
-// (main) thread, DCLF installed or not.
+// DCLF's test commands ("dclf:<name>=<arg>") and waits, registered with the test runner (src/Testing) when DCLF installs.
 #include "Features/DrawcallLimitFix/Core/Settings/Toggles.h"
 #include "Features/DrawcallLimitFix/Diagnostics/Zones.h"
 #include "TestHarness.h"
+#include "Testing/Testing.h"
 #include "RenderGraph/FrameAnchors.h"
 #include "RenderGraph/Engine/Bink/Bink.h"
 
@@ -115,20 +115,17 @@ namespace DCLF
 	namespace
 	{
 		/**
-		 * @brief What the commands' waits test (render thread, the Present the harness runs at): the last reload asked for, the last NvPerf
-		 * capture started, the signals a remote client sent (dclf:signal), the feature's short name; and, for any thread, the harness's
-		 * progress (TestHarnessStatus).
-		 */
+
+namespace DCLF
+{
+	namespace
+	{
+		/** @brief What DCLF's waits test: the last reload asked for and the last NvPerf capture started. Render thread. */
 		struct HarnessState
 		{
 			bool reloadAsked = false;
 			std::uint64_t reloadSerial = 0, reloadGeneration = 0;  // the registry's before the reload was asked
 			std::uint64_t nvperfCapture = 0;                         // 0: none started
-			std::set<std::string> signals;
-			std::string feature;
-
-			std::mutex statusMutex;
-			TestHarnessProgress status;
 		};
 		HarnessState& Harness()
 		{
@@ -137,1238 +134,415 @@ namespace DCLF
 		}
 
 		/**
-		 * @brief A command list's wait (dclf:wait=<condition>): the list holds until its condition holds, then the commands after it run as
-		 * many frames later as it held, so a list's gaps are frames of the condition's outcome, not of its latency.
-		 * - "reload": the last dclf:reload-shaders finished, and its rebuilt pipelines (if any) are swapped in.
-		 * - "settled": the frames draw under the requested toggles (the installed publication's set is the requested one) on the pipeline
-		 *   they choose (the graph built for it); at once with the feature off.
-		 * - "nvperf": the last dclf:nvperf capture done or failed.
-		 * - "signal:<name>": dclf:signal=<name> was run (a remote client's, through DevBench's communityshaders.dclf); consumed.
-		 * - "shaders": Community Shaders' compile queue is empty (a run that compiles on demand, CS_DISABLE_FEATURES: the shaders the
-		 *   frames asked for are built, so a shot after it draws everything in view).
-		 * Every wait has a limit: kWaitLimitFrames, or the frames after an '@' (dclf:wait=shaders@12000). A wait that reaches it logs
-		 * "test wait '<condition>' timed out" and the list goes on, so a condition that never holds cannot hold a run (or its
-		 * CS_DCLF_TEST_EXIT, which the waits move later) for ever.
+		 * @brief Runs one "dclf:" command (a_command is the whole line, "dclf:<name>=<arg>"). Returns false with a_error set for a
+		 * name DCLF does not know. A bad argument is logged and the command does nothing.
 		 */
-		struct Wait
+		bool RunDclfCommand(const std::string& a_command, std::string& a_error)
 		{
-			std::string condition;
-			std::uint32_t since = 0;  // the frame it started at
-			std::uint32_t limit = 0;  // the frames it may hold
-		};
-
-		// A wait's limit without an '@': 3000 frames, about a minute at 50 fps (a cold shader compile of a new variant takes longer:
-		// give that wait its own).
-		constexpr std::uint32_t kWaitLimitFrames = 3000;
-
-		/** @brief The wait a "dclf:wait=<condition>[@<frames>]" command's argument names, starting at a_frame. */
-		Wait ParseWait(std::string_view a_argument, std::uint32_t a_frame)
-		{
-			Wait wait{ std::string(a_argument), a_frame, kWaitLimitFrames };
-			if (const auto at = a_argument.rfind('@'); at != std::string_view::npos) {
-				wait.condition = std::string(a_argument.substr(0, at));
-				const std::string frames(a_argument.substr(at + 1));
-				char* end = nullptr;
-				const unsigned long limit = std::strtoul(frames.c_str(), &end, 10);
-				if (frames.empty() || *end != '\0' || limit == 0)
-					logger::warn("[DCLF] test wait '{}': '{}' is no frame count; its limit is {} frames", wait.condition, frames, kWaitLimitFrames);
-				else
-					wait.limit = static_cast<std::uint32_t>(std::min<unsigned long>(limit, UINT32_MAX));
+			const std::string& command = a_command;
+			// The command in a capture too: a timing run's phases are found in its Tracy capture by these zones.
+			DCLF_ZONE("CS.DCLF.TestCommand");
+			ZoneText(command.data(), command.size());
+			// "dclf:actor-probe=<label>": the next scene pass logs how DCLF binds each actor's geometry (Coordinator::RequestActorProbe).
+			if (command.rfind("dclf:actor-probe", 0) == 0) {
+				Scene::Coordinator::Get().RequestActorProbe(command.size() > 17 ? command.substr(17) : std::string{});
+				return true;
 			}
-			return wait;
-		}
-
-		bool WaitHolds(const Wait& a_wait)
-		{
-			auto& harness = Harness();
-			const auto& condition = a_wait.condition;
-			if (condition == "reload") {
-				const auto* registry = RenderGraphRuntime::PipelineRegistry();
-				if (!registry || !harness.reloadAsked)
-					return true;
-				const auto reload = registry->LastReload();
-				return reload.serial > harness.reloadSerial && (reload.rebuilt == 0 || registry->Generation() > harness.reloadGeneration);
+			// "dclf:kill-scene-pump": the scene pump stopped for good, as a pass throwing past its handler stops it, for the watchdog
+			// (DrawcallLimitFix::WatchScenePump) to hand the game back.
+			if (command == "dclf:kill-scene-pump") {
+				Scene::Coordinator::Get().ThrowNextScenePass();
+				return true;
 			}
-			if (condition == "settled") {
-				if (globals::state->IsFeatureDisabled(harness.feature))
-					return true;
-				const auto& requested = DCLF::Toggles::Get().Requested();
-				return DCLF::Toggles::Get().Frame() == requested &&
-				       DCLF::Draws::GraphBuiltForCpu() == DCLF::Draws::CpuPipelineForCell(requested, DCLF::Draws::CurrentGraphConditions().interior);
+			// "dclf:compat=0|1": the compatibility monitor off or on, as its menu checkbox; "dclf:compat-report": its report written.
+			if (command == "dclf:compat=0" || command == "dclf:compat=1") {
+				Diagnostics::PlayerParity::Request(command == "dclf:compat=1");
+				return true;
 			}
-			if (condition == "nvperf") {
-				if (!harness.nvperfCapture)
-					return true;
-				const auto latest = GpuCounters::LatestResult();
-				return latest && latest->id >= harness.nvperfCapture;
+			if (command == "dclf:compat-report") {
+				logger::info("[DCLF] test command: compatibility report {}", Diagnostics::PlayerParity::WriteReport());
+				return true;
 			}
-			if (condition.rfind("signal:", 0) == 0)
-				return harness.signals.erase(condition.substr(7)) != 0;
-			if (condition == "shaders")
-				return !SIE::ShaderCache::Instance().IsCompiling();
-			logger::warn("[DCLF] test wait: no condition '{}' (reload, settled, nvperf, signal:<name>, shaders); not waiting", condition);
-			return true;
-		}
-
-		/** @brief dclf:cast (TestCast, below): false when the command was it. */
-		bool TestCastCommand(const std::string& a_command);
-
-		/**
-		 * @brief The a_index-th nearest living female actor among the high-process ones (any cell: an exterior's stand in the cells around
-		 * the player's), or null. Main thread.
-		 */
-		RE::Actor* NearestFemale(std::size_t a_index)
-		{
-			auto* player = RE::PlayerCharacter::GetSingleton();
-			auto* lists = RE::ProcessLists::GetSingleton();
-			if (!player || !lists)
-				return nullptr;
-			std::vector<std::pair<float, RE::Actor*>> actors;
-			for (auto& handle : lists->highActorHandles) {
-				auto actor = handle.get();
-				auto* base = actor ? actor->GetActorBase() : nullptr;
-				if (base && actor.get() != player && !actor->IsDead() && base->IsFemale())
-					actors.emplace_back(actor->GetPosition().GetDistance(player->GetPosition()), actor.get());
-			}
-			std::sort(actors.begin(), actors.end(), [](const auto& a, const auto& b) { return a.first < b.first; });
-			return a_index < actors.size() ? actors[a_index].second : nullptr;
-		}
-
-		/**
-		 * @brief Test switch CS_DCLF_TEST_COMMANDS="<frame>:<console command>;...": runs each console command
-		 * once the main pass has run that many frames (loading screens do not count), on the main thread.
-		 * Used to take coverage runs to other cells from the auto-loaded save, e.g.
-		 * "600:coc WhiterunDragonsreach;1500:coc BleakFallsBarrow01".
-		 */
-		class TestCommands
-		{
-		public:
-			TestCommands()
-			{
-				// CS_DCLF_TEST_MOVE carries the player faster than it can survive (falls, collisions): god mode
-				// first, once, before anything else runs.
-				if (!DCLF::SwitchValue(DCLF::Switch::TestMove).empty())
-					commands.push_back({ 1, "tgm" });
-				const std::string commandList = DCLF::SwitchValue(DCLF::Switch::TestCommands);
-				std::string_view text = commandList;
-				if (text.empty())
-					return;
-				while (!text.empty()) {
-					const auto end = text.find(';');
-					const auto item = text.substr(0, end);
-					const auto colon = item.find(':');
-					if (colon != std::string_view::npos)
-						commands.push_back({ static_cast<std::uint32_t>(std::strtoul(std::string(item.substr(0, colon)).c_str(), nullptr, 10)), std::string(item.substr(colon + 1)) });
-					text = end == std::string_view::npos ? std::string_view{} : text.substr(end + 1);
-				}
-			}
-
-			/**
-			 * @brief Advances the counter and runs whatever is due.
-			 *
-			 * The counter lives here rather than being the scene's frame number, because the commands have to fire
-			 * at the same point in a run whether or not the feature is installed (a CS_DCLF=0 baseline included).
-			 * Loading screens do not count, so the two runs stay in step.
-			 */
-			/** @brief The frames the list's waits have held so far, the one in progress included: the exit frame moves by them too. */
-			std::uint32_t HeldFrames() const { return shift + (wait ? frame - wait->since : 0u); }
-
-			void OnFrame()
-			{
-				if (DCLF::Scene::FrameView::LoadShown())
-					return;
-				const std::uint32_t a_frame = ++frame;
-				if (wait) {
-					const bool held = WaitHolds(*wait);
-					const bool timedOut = !held && a_frame - wait->since >= wait->limit;
-					if (!held && !timedOut) {
-						Publish(a_frame);
-						return;
-					}
-					shift += a_frame - wait->since;
-					if (timedOut)
-						logger::warn("[DCLF] test wait '{}' timed out: held frames {}-{} ({} frames, its limit); the commands after it run {} frames later", wait->condition,
-							wait->since, a_frame, a_frame - wait->since, shift);
-					else
-						logger::info("[DCLF] test wait '{}' held frames {}-{} ({} frames); the commands after it run {} frames later", wait->condition, wait->since, a_frame,
-							a_frame - wait->since, shift);
-					wait.reset();
-				}
-				while (!wait && next < commands.size() && a_frame >= commands[next].frame + shift) {
-					const std::string& command = commands[next++].command;
-					if (command.rfind("dclf:wait=", 0) != 0) {
-						Run(command, a_frame);
-						continue;
-					}
-					logger::info("[DCLF] test command at frame {}: {}", a_frame, command);
-					wait = ParseWait(std::string_view(command).substr(10), a_frame);
-					if (WaitHolds(*wait)) {
-						logger::info("[DCLF] test wait '{}' held at once", wait->condition);
-						wait.reset();
-					}
-				}
-				Publish(a_frame);
-			}
-
-			/** @brief The progress a remote client reads (TestHarnessStatus). */
-			void Publish(std::uint32_t a_frame) const
-			{
-				auto& harness = Harness();
-				std::lock_guard lock(harness.statusMutex);
-				auto& status = harness.status;
-				status.frame = a_frame;
-				status.shift = shift;
-				status.next = static_cast<std::uint32_t>(next);
-				status.commands = static_cast<std::uint32_t>(commands.size());
-				status.nextFrame = next < commands.size() ? commands[next].frame + shift : 0;
-				status.nextCommand = next < commands.size() ? commands[next].command : std::string{};
-				status.waiting = wait ? wait->condition : std::string{};
-			}
-
-			/** @brief Runs one command: a "dclf:" command here, any other the console's, on the main thread. */
-			static void Run(std::string command, std::uint32_t a_frame)
-			{
-				{
-					logger::info("[DCLF] test command at frame {}: {}", a_frame, command);
-					if (Vram::SpillLab::Command(command))
-						return;
-					if (!TestCastCommand(command))
-						return;
-					// The command in a capture too: a timing run's phases are found in its Tracy capture by these zones.
-					DCLF_ZONE("CS.DCLF.TestCommand");
-					ZoneText(command.data(), command.size());
-					// "dclf:<toggle name>=<0|1>": a live toggle (Toggles.h, ToggleInfo::name), as the menu sets it, so one run can
-					// compare a class drawn by DCLF and by the engine from the same camera.
-					// "dclf:pov=first" / "dclf:pov=third": the camera switched as the POV key does (PlayerCamera::ForceFirstPerson/ForceThirdPerson,
-					// on the main thread); no console command switches it.
-					if (command == "dclf:pov=first" || command == "dclf:pov=third") {
-						if (auto* tasks = SKSE::GetTaskInterface())
-							tasks->AddTask([first = command == "dclf:pov=first"] {
-								auto* camera = RE::PlayerCamera::GetSingleton();
-								if (camera && first)
-									camera->ForceFirstPerson();
-								else if (camera)
-									camera->ForceThirdPerson();
-							});
-						return;
-					}
-					// "dclf:draw=1" / "dclf:draw=0": the player's weapons or magic hands drawn or sheathed (Actor::DrawWeaponMagicHands, on
-					// the main thread), so a scripted first-person run shows the arms (they are drawn only with a weapon or spell out).
-					if (command == "dclf:draw=1" || command == "dclf:draw=0") {
-						if (auto* tasks = SKSE::GetTaskInterface())
-							tasks->AddTask([draw = command == "dclf:draw=1"] {
-								if (auto* player = RE::PlayerCharacter::GetSingleton())
-									player->DrawWeaponMagicHands(draw);
-							});
-						return;
-					}
-					// "dclf:face-npc=<n>": the player placed 110 units in front of the n-th nearest loaded actor (0 the nearest), facing it,
-					// on the main thread, so a scripted run sees an NPC's face wherever a coc lands.
-					if (command.rfind("dclf:face-npc=", 0) == 0) {
-						// "=<n>,<distance>,<side>": that far in front, and that far to the NPC's right (a third-person camera sees past the player).
-						const std::string args = command.substr(14);
-						const auto index = static_cast<std::size_t>(std::strtoul(args.c_str(), nullptr, 10));
-						float distance = 110.0f, side = 0.0f;
-						if (const auto comma = args.find(','); comma != std::string::npos) {
-							distance = std::strtof(args.c_str() + comma + 1, nullptr);
-							if (const auto second = args.find(',', comma + 1); second != std::string::npos)
-								side = std::strtof(args.c_str() + second + 1, nullptr);
-						}
-						if (auto* tasks = SKSE::GetTaskInterface())
-							tasks->AddTask([index, distance, side] {
-								auto* player = RE::PlayerCharacter::GetSingleton();
-								auto* lists = RE::ProcessLists::GetSingleton();
-								if (!player || !lists)
-									return;
-								std::vector<std::pair<float, RE::Actor*>> actors;
-								for (auto& handle : lists->highActorHandles) {
-									auto actor = handle.get();
-									if (actor && actor.get() != player && !actor->IsDead() && actor->GetParentCell() == player->GetParentCell())
-										actors.emplace_back(actor->GetPosition().GetDistance(player->GetPosition()), actor.get());
-								}
-								std::sort(actors.begin(), actors.end(), [](const auto& a, const auto& b) { return a.first < b.first; });
-								if (index >= actors.size()) {
-									logger::info("[DCLF] face-npc: {} actors loaded, none at {}", actors.size(), index);
-									return;
-								}
-								auto* actor = actors[index].second;
-								const float heading = actor->GetAngleZ();
-								auto position = actor->GetPosition();
-								position.x += std::sin(heading) * distance + std::cos(heading) * side;
-								position.y += std::cos(heading) * distance - std::sin(heading) * side;
-								player->SetPosition(position, true);
-								player->SetHeading(heading + RE::NI_PI);
-								logger::info("[DCLF] face-npc: {} ({:08X}) at {} units, player placed at ({:.0f} {:.0f} {:.0f})", actor->GetDisplayFullName(), actor->GetFormID(),
-									actors[index].first, position.x, position.y, position.z);
-							});
-						return;
-					}
-					// "dclf:face-female=<n>,<distance>,<side>[,strip]": as face-npc, among the female actors only; "strip" unequips her worn
-					// armor too, so her body mesh (a replacer's, such as 3BA's, weighted to physics bones) is what draws and casts.
-					if (command.rfind("dclf:face-female=", 0) == 0) {
-						const std::string args = command.substr(17);
-						std::size_t index = 0;
-						float distance = 110.0f, side = 0.0f;
-						char flag[16]{};
-						std::sscanf(args.c_str(), "%zu,%f,%f,%15s", &index, &distance, &side, flag);
-						const bool strip = std::strcmp(flag, "strip") == 0;
-						if (auto* tasks = SKSE::GetTaskInterface())
-							tasks->AddTask([index, distance, side, strip] {
-								auto* player = RE::PlayerCharacter::GetSingleton();
-								auto* actor = NearestFemale(index);
-								if (!player || !actor) {
-									logger::info("[DCLF] face-female: no female actor at {}", index);
-									return;
-								}
-								std::uint32_t stripped = 0;
-								// UnequipObject queues the change and returns false, so this counts the worn pieces asked off.
-								if (strip) {
-									auto* equip = RE::ActorEquipManager::GetSingleton();
-									for (auto& [object, entry] : actor->GetInventory([](RE::TESBoundObject& a_object) { return a_object.IsArmor(); }))
-										if (entry.second && entry.second->IsWorn()) {
-											equip->UnequipObject(actor, object);
-											++stripped;
-										}
-								}
-								const float heading = actor->GetAngleZ();
-								auto position = actor->GetPosition();
-								position.x += std::sin(heading) * distance + std::cos(heading) * side;
-								position.y += std::cos(heading) * distance - std::sin(heading) * side;
-								player->SetPosition(position, true);
-								player->SetHeading(heading + RE::NI_PI);
-								logger::info("[DCLF] face-female: {} ({:08X}) at {} units, {} armor pieces unequipped, player placed at ({:.0f} {:.0f} {:.0f})",
-									actor->GetDisplayFullName(), actor->GetFormID(), actor->GetPosition().GetDistance(player->GetPosition()), stripped, position.x, position.y, position.z);
-							});
-						return;
-					}
-					// "dclf:morph-female=<n>,<morph>,<value>": a RaceMenu body morph on the n-th nearest female actor, as BodyGen or OBody sets
-					// one: NiOverride.SetBodyMorph(actor, morph, "DCLFTest", value), then NiOverride.UpdateModelWeight(actor), through the
-					// Papyrus VM (skee's own functions; nothing happens without RaceMenu). skee then morphs her body and every worn piece built
-					// with morphs (BODYTRI), each by a new skin partition.
-					if (command.rfind("dclf:morph-female=", 0) == 0) {
-						std::size_t index = 0;
-						char morph[64]{};
-						float value = 1.0f;
-						if (std::sscanf(command.c_str() + 18, "%zu,%63[^,],%f", &index, morph, &value) < 2) {
-							logger::warn("[DCLF] dclf:morph-female: '{}' is not <n>,<morph>[,<value>]", command);
-							return;
-						}
-						if (auto* tasks = SKSE::GetTaskInterface())
-							tasks->AddTask([index, morphName = std::string(morph), value] {
-								auto* actor = NearestFemale(index);
-								auto* vm = RE::BSScript::Internal::VirtualMachine::GetSingleton();
-								if (!actor || !vm) {
-									logger::info("[DCLF] morph-female: no female actor at {}", index);
-									return;
-								}
-								RE::BSTSmartPointer<RE::BSScript::IStackCallbackFunctor> none;
-								RE::TESObjectREFR* reference = actor;
-								const bool set = vm->DispatchStaticCall("NiOverride", "SetBodyMorph",
-									RE::MakeFunctionArguments(std::move(reference), RE::BSFixedString(morphName), RE::BSFixedString("DCLFTest"), float(value)), none);
-								reference = actor;
-								const bool update = vm->DispatchStaticCall("NiOverride", "UpdateModelWeight", RE::MakeFunctionArguments(std::move(reference)), none);
-								logger::info("[DCLF] morph-female: {} ({:08X}) {} = {}: SetBodyMorph {}, UpdateModelWeight {}", actor->GetDisplayFullName(), actor->GetFormID(),
-									morphName, value, set ? "queued" : "not found", update ? "queued" : "not found");
-							});
-						return;
-					}
-					// "dclf:npc-alpha=<n>,<alpha>": Actor::SetAlpha on the n-th nearest loaded actor (a fade, as an invisibility effect makes one).
-					if (command.rfind("dclf:npc-alpha=", 0) == 0) {
-						const std::string args = command.substr(15);
-						const auto index = static_cast<std::size_t>(std::strtoul(args.c_str(), nullptr, 10));
-						const auto comma = args.find(',');
-						const float alpha = comma == std::string::npos ? 1.0f : std::strtof(args.c_str() + comma + 1, nullptr);
-						if (auto* tasks = SKSE::GetTaskInterface())
-							tasks->AddTask([index, alpha] {
-								auto* player = RE::PlayerCharacter::GetSingleton();
-								auto* lists = RE::ProcessLists::GetSingleton();
-								if (!player || !lists)
-									return;
-								std::vector<std::pair<float, RE::Actor*>> actors;
-								for (auto& handle : lists->highActorHandles)
-									if (auto actor = handle.get(); actor && actor.get() != player && actor->GetParentCell() == player->GetParentCell())
-										actors.emplace_back(actor->GetPosition().GetDistance(player->GetPosition()), actor.get());
-								std::sort(actors.begin(), actors.end(), [](const auto& a, const auto& b) { return a.first < b.first; });
-								if (index < actors.size()) {
-									actors[index].second->SetAlpha(alpha);
-									logger::info("[DCLF] npc-alpha: {} ({:08X}) set to {}", actors[index].second->GetDisplayFullName(), actors[index].second->GetFormID(), alpha);
-								}
-							});
-						return;
-					}
-					// "dclf:window=minimize|restore|background|foreground|<W>x<H>": the game window as alt-tab and a window drag leave it, with no
-					// key press (a synthetic Alt reaches the game's input). All asynchronous: the window's thread handles them between frames.
-					if (command.rfind("dclf:window=", 0) == 0) {
-						const auto what = command.substr(12);
-						DXGI_SWAP_CHAIN_DESC desc{};
-						const HWND window = globals::d3d::swapChain && SUCCEEDED(globals::d3d::swapChain->GetDesc(&desc)) ? desc.OutputWindow : nullptr;
-						if (!window) {
-							logger::warn("[DCLF] dclf:window: the game has no swap chain window yet");
-							return;
-						}
-						unsigned width = 0, height = 0;
-						bool done = false;
-						if (what == "minimize" || what == "restore") {
-							done = ::PostMessageW(window, WM_SYSCOMMAND, what == "minimize" ? SC_MINIMIZE : SC_RESTORE, 0);
-						} else if (what == "background") {
-							done = ::SetForegroundWindow(::GetShellWindow());
-						} else if (what == "foreground") {
-							done = ::SetForegroundWindow(window);
-						} else if (std::sscanf(what.c_str(), "%ux%u", &width, &height) == 2 && width && height) {
-							// The client area at that size, the frame around it as the window's style draws it.
-							RECT rect{ 0, 0, static_cast<LONG>(width), static_cast<LONG>(height) };
-							::AdjustWindowRectEx(&rect, static_cast<DWORD>(::GetWindowLongPtrW(window, GWL_STYLE)), FALSE,
-								static_cast<DWORD>(::GetWindowLongPtrW(window, GWL_EXSTYLE)));
-							done = ::SetWindowPos(window, nullptr, 0, 0, rect.right - rect.left, rect.bottom - rect.top,
-								SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_ASYNCWINDOWPOS);
-						} else {
-							logger::warn("[DCLF] dclf:window: '{}' is not minimize, restore, background, foreground or <W>x<H>", what);
-							return;
-						}
-						logger::info("[DCLF] dclf:window={}: {}", what, done ? "sent" : "failed");
-						return;
-					}
-					// "dclf:cs-menu=open|close": Community Shaders' own menu (ImGui), as its key opens it.
-					if (command.rfind("dclf:cs-menu=", 0) == 0) {
-						if (command.substr(13) == "open")
-							Menu::GetSingleton()->Open();
-						else
-							Menu::GetSingleton()->Close();
-						return;
-					}
-					// "dclf:menu=<menu name>=show|hide": a menu opened or closed through the UI message queue (e.g. "Journal Menu", the
-					// system menu Escape opens), so a scripted run pauses the game as a player does.
-					if (command.rfind("dclf:menu=", 0) == 0) {
-						const auto rest = command.substr(10);
-						const auto equals = rest.rfind('=');
-						if (equals != std::string::npos)
-							if (auto* queue = RE::UIMessageQueue::GetSingleton())
-								queue->AddMessage(RE::BSFixedString(rest.substr(0, equals)),
-									rest.substr(equals + 1) == "show" ? RE::UI_MESSAGE_TYPE::kShow : RE::UI_MESSAGE_TYPE::kHide, nullptr);
-						return;
-					}
-					// "dclf:actor-probe=<label>": the next scene pass logs how DCLF binds each actor's geometry (Coordinator::RequestActorProbe).
-					if (command.rfind("dclf:actor-probe", 0) == 0) {
-						Scene::Coordinator::Get().RequestActorProbe(command.size() > 17 ? command.substr(17) : std::string{});
-						return;
-					}
-					// "dclf:kill-scene-pump": the scene pump stopped for good, as a pass throwing past its handler stops it, for the watchdog
-					// (DrawcallLimitFix::WatchScenePump) to hand the game back.
-					if (command == "dclf:kill-scene-pump") {
-						Scene::Coordinator::Get().ThrowNextScenePass();
-						return;
-					}
-					// "dclf:compat=0|1": the compatibility monitor off or on, as its menu checkbox; "dclf:compat-report": its report written.
-					if (command == "dclf:compat=0" || command == "dclf:compat=1") {
-						Diagnostics::PlayerParity::Request(command == "dclf:compat=1");
-						return;
-					}
-					if (command == "dclf:compat-report") {
-						logger::info("[DCLF] test command: compatibility report {}", Diagnostics::PlayerParity::WriteReport());
-						return;
-					}
-					// "dclf:foreign-write=<n>": a foreign plugin's write, for the monitor to find: on the main thread, the alpha threshold of
-					// the first alpha-tested geometry of up to n references near the player, stored straight into the property (no hook sees it).
-					if (command.rfind("dclf:foreign-write=", 0) == 0) {
-						const auto wanted = static_cast<std::uint32_t>(std::strtoul(command.c_str() + 19, nullptr, 10));
-						if (auto* tasks = SKSE::GetTaskInterface())
-							tasks->AddTask([wanted] {
-								auto* tes = RE::TES::GetSingleton();
-								auto* player = RE::PlayerCharacter::GetSingleton();
-								if (!tes || !player)
-									return;
-								std::uint32_t written = 0;
-								tes->ForEachReferenceInRange(player, 4096.0f, [&](RE::TESObjectREFR* a_reference) {
-									auto* root = a_reference && a_reference != player ? a_reference->Get3D() : nullptr;
-									if (!root)
-										return RE::BSContainer::ForEachResult::kContinue;
-									RE::BSVisit::TraverseScenegraphGeometries(root, [&](RE::BSGeometry* a_geometry) {
-										auto* alpha = a_geometry->GetGeometryRuntimeData().alphaProperty.get();
-										if (!alpha)
-											return RE::BSVisit::BSVisitControl::kContinue;
-										alpha->alphaThreshold = static_cast<std::uint8_t>(alpha->alphaThreshold ^ 1);
-										const auto* file = a_reference->GetFile(0);
-										logger::info("[DCLF] test command: foreign write, alpha threshold of '{}' under reference {:08X} ({}) now {}", a_geometry->name.c_str(),
-											a_reference->GetFormID(), file ? file->GetFilename() : "created in game", alpha->alphaThreshold);
-										++written;
-										return RE::BSVisit::BSVisitControl::kStop;
-									});
-									return written < wanted ? RE::BSContainer::ForEachResult::kContinue : RE::BSContainer::ForEachResult::kStop;
-								});
-							});
-						return;
-					}
-					// "dclf:rebuild": a graph rebuild requested (GraphHost::RequestRebuild, here at Present on the graph's owner
-					// thread), which the next frame's build point performs: every recording invalidated, so that frame waits at its start for
-					// a snapshot recorded on the new build (IndirectDraws::AdoptCurrentSnapshot; the strict epochs line counts the waits).
-					// "dclf:refresh=<client id>": FrameAnchors::Refresh of that anchor client, which rebuilds its anchors' epochs alone (the
-					// path a client changing its passes or resources takes), for stress runs.
-					if (command.rfind("dclf:refresh=", 0) == 0) {
-						FrameAnchors::Refresh(command.substr(13));
-						return;
-					}
-					if (command == "dclf:rebuild") {
-						if (auto* host = RenderGraphRuntime::Get().Host())
-							host->RequestRebuild("test harness command");
-						else
-							logger::warn("[DCLF] test command: no render graph host to rebuild");
-						return;
-					}
-					// Shader hot reload (dclf-hot-reload.md), served at the next present: "[ORG] shader reload: N of M pipelines rebuilt (K failed,
-					// U unchanged) in S s" marks the rebuilds done, "[ORG] shader reload: N pipelines swapped in at graph build B" the swap.
-					// "dclf:reload-shaders": every live pipeline, as the menu's button asks it (the unchanged ones stay). "=all": every one built
-					// and swapped even when unchanged (the swap exercised without an edit). "=<file>": those built from that shader file, as the
-					// shader watcher asks for an edit (an include: every one).
-					if (command == "dclf:reload-shaders" || command.rfind("dclf:reload-shaders=", 0) == 0) {
-						const std::string value = command.size() > 20 ? command.substr(20) : std::string{};
-						// dclf:wait=reload's baseline: the registry's before this reload.
-						if (const auto* registry = RenderGraphRuntime::PipelineRegistry()) {
-							auto& harness = Harness();
-							harness.reloadAsked = true;
-							harness.reloadSerial = registry->LastReload().serial;
-							harness.reloadGeneration = registry->Generation();
-						}
-						if (value == "all")
-							RenderGraphRuntime::RequestShaderReload({}, true);
-						else
-							RenderGraphRuntime::RequestShaderReload(value);
-						return;
-					}
-					if (command.rfind("dclf:wait=", 0) == 0) {
-						logger::warn("[DCLF] test command {}: a wait holds CS_DCLF_TEST_COMMANDS' list; sent alone it does nothing", command);
-						return;
-					}
-					// "dclf:save=<name>", "dclf:load=<name>|recent": a save and a load through the engine's save manager. The console's save
-					// and load do nothing when run as a compiled script.
-					if (command.rfind("dclf:save=", 0) == 0 || command.rfind("dclf:load=", 0) == 0) {
-						auto* manager = RE::BGSSaveLoadManager::GetSingleton();
-						const auto name = command.substr(10);
-						if (!manager || name.empty()) {
-							logger::warn("[DCLF] test command {}: no save manager or no name", command);
-							return;
-						}
-						// "dclf:load=recent": the most recent save, which every instance has.
-						if (command[5] == 's')
-							manager->Save(name.c_str());
-						else if (name == "recent")
-							manager->LoadMostRecentSaveGame();
-						else
-							manager->Load(name.c_str());
-						return;
-					}
-					// "dclf:weather=<form id or editor id>|off": the weather set at once and held with the CS editor's weather lock, which scripts
-					// and climate timers cannot move. The console's fw starts a transition whose end depends on frame timing, so two runs could
-					// differ.
-					if (command.rfind("dclf:weather=", 0) == 0) {
-						auto* editor = EditorWindow::GetSingleton();
-						const auto value = command.substr(13);
-						if (value == "off") {
-							editor->UnlockWeather();
-							return;
-						}
-						// A weather by editor id first, then by hex form id.
-						RE::TESWeather* weather = nullptr;
-						std::string known;
-						if (auto* data = RE::TESDataHandler::GetSingleton()) {
-							for (auto* candidate : data->GetFormArray<RE::TESWeather>()) {
-								if (!candidate)
-									continue;
-								const char* name = candidate->GetFormEditorID();
-								if (name && *name && _stricmp(name, value.c_str()) == 0)
-									weather = candidate;
-								known += fmt::format("{}{:08X} {}", known.empty() ? "" : ", ", candidate->GetFormID(), name && *name ? name : "?");
-							}
-						}
-						if (!weather) {
-							char* end = nullptr;
-							const auto id = static_cast<RE::FormID>(std::strtoul(value.c_str(), &end, 16));
-							if (end && *end == '\0')
-								weather = RE::TESForm::LookupByID<RE::TESWeather>(id);
-						}
-						if (!weather) {
-							logger::warn("[DCLF] test command {}: no such weather. Loaded weathers: {}", command, known);
-							return;
-						}
-						logger::info("[DCLF] test command {}: weather {:08X} {}", command, weather->GetFormID(),
-							weather->GetFormEditorID() ? weather->GetFormEditorID() : "?");
-						editor->LockWeatherForUser(weather);
-						return;
-					}
-					// "dclf:bink=<file>": a Bink movie from Data\Video played as the console's PlayBink plays it, on the main thread at its next
-					// frame-job wait (Bink::RequestPlay). The console's PlayBink does nothing as a compiled script, and SKSE tasks run on job
-					// threads.
-					if (command.rfind("dclf:bink=", 0) == 0) {
-						if (command.size() > 10)
-							RenderGraph::Engine::Bink::RequestPlay(command.substr(10));
-						return;
-					}
-					// "dclf:mark[=<label>]": nothing but this line in the log, a phase's boundary for the run's analysis.
-					if (command == "dclf:mark" || command.rfind("dclf:mark=", 0) == 0) {
-						MemProbe::Mark(command.size() > 10 ? std::string_view(command).substr(10) : std::string_view{}, a_frame);
-						return;
-					}
-					// "dclf:capture[=<seconds>]": the menu's diagnostic capture, started at the next Present (Diagnostics/Capture/Capture.h). Its
-					// telemetry phase replaces a running dclf:telemetry one.
-					if (command == "dclf:capture" || command.rfind("dclf:capture=", 0) == 0) {
-						Capture::Request(command.size() > 13 ? std::strtof(command.c_str() + 13, nullptr) : 10.0f, true);
-						return;
-					}
-					// "dclf:telemetry=<label>": a BasicTelemetry session for this phase, in place of the running one, whose files it writes. "=off": none.
-					if (command.rfind("dclf:telemetry=", 0) == 0) {
-						Diagnostics::TelemetryPhase(std::string_view(command).substr(15));
-						return;
-					}
-					// "dclf:shot=<label>": this frame's back buffer saved as <log directory>/dclf-shots/<label>.png (the Screenshot feature's
-					// format, at this Present), so a run's captures are tied to the frames its commands ran at; "Saved screenshot to" marks each
-					// written.
-					if (command.rfind("dclf:shot=", 0) == 0) {
-						const auto dir = logger::log_directory().value_or(std::filesystem::path{}) / "dclf-shots";
-						globals::features::screenshotFeature.RequestCapture(dir / (command.substr(10) + ".png"));
-						return;
-					}
-					// "dclf:fg=off|fsr|dlss": frame generation switched as the Upscaling menu's method stepper does (Upscaling::RequestFrameGenTest).
-					if (command.rfind("dclf:fg=", 0) == 0) {
-						const auto method = command.substr(8);
-						if (method == "off" || method == "fsr" || method == "dlss")
-							Upscaling::RequestFrameGenTest(method == "off" ? 0 : method == "fsr" ? 1 : 2);
-						else
-							logger::warn("[DCLF] dclf:fg: '{}' is not off, fsr or dlss", method);
-						return;
-					}
-					// "dclf:vram-json": VRAM attribution's snapshot (the menu's Memory dump) written to the log directory.
-					if (command == "dclf:vram-json") {
-						const auto path = Vram::WriteJson(logger::log_directory().value_or(std::filesystem::path{}));
-						logger::info("[DCLF] VRAM attribution written to {}", path.string());
-						return;
-					}
-					if (RunTextureStreamingCommand(command))
-						return;
-					// "dclf:pp=<sub-feature type>=0|1": a Post Processing effect's menu toggle (GetType(), e.g. "Depth of Field"), so a run
-					// can check that disabling an effect frees its textures and enabling it creates them again.
-					if (command.rfind("dclf:pp=", 0) == 0) {
-						const auto separator = command.rfind('=');
-						const auto type = command.substr(8, separator - 8);
-						bool found = false;
-						for (auto& pipe : globals::features::postProcessing.pipeline) {
-							if (pipe && pipe->GetType() == type) {
-								pipe->enabled = command.substr(separator + 1) != "0";
-								found = true;
-							}
-						}
-						if (!found)
-							logger::warn("[DCLF] dclf:pp: no Post Processing effect '{}'", type);
-						return;
-					}
-					// "dclf:hdr=0|1": HDR Display's Enable HDR, as its Advanced override sets it without an HDR display, from the next
-					// rendered frame. On an SDR display the frame is then PQ-encoded (it looks washed out), which still runs HDR's output path.
-					if (command == "dclf:hdr=0" || command == "dclf:hdr=1") {
-						auto& hdr = globals::features::hdrDisplay;
-						if (!hdr.loaded) {
-							logger::warn("[DCLF] dclf:hdr: HDR Display is not loaded");
-							return;
-						}
-						std::lock_guard lock(hdr.settingsMutex);
-						hdr.settings.enableHDR = command.back() == '1';
-						logger::info("[DCLF] dclf:hdr: Enable HDR {}", hdr.settings.enableHDR ? "on" : "off");
-						return;
-					}
-					// "dclf:feature=0|1": the feature's menu toggle (as CS_DCLF_TEST_TOGGLE flips it), for in-session on/off A/Bs.
-					if (command.rfind("dclf:feature=", 0) == 0) {
-						globals::state->SetFeatureDisabled(Harness().feature, command.substr(13) == "0");
-						return;
-					}
-					// "dclf:signal=<name>": releases a list's dclf:wait=signal:<name> (a remote client's; kept until a wait takes it).
-					if (command.rfind("dclf:signal=", 0) == 0) {
-						Harness().signals.insert(command.substr(12));
-						return;
-					}
-					// "dclf:define=<NAME>[=<value>],...": extra defines for every DCLF stage compiled from now on (empty: none), taken up by the
-					// next dclf:reload-shaders, so a shader A/B is an #if in the source, compared in one launch.
-					if (command.rfind("dclf:define=", 0) == 0) {
-						DCLF::ShaderPrograms::SetTestDefines(command.substr(12));
-						return;
-					}
-					// "dclf:gpu-window=<label>": the GPU event timers' frames from the next on are one window, logged as one block once read
-					// back ("[GpuEvents] window '<label>'"); "-" is not logged. Needs CS_GPU_EVENT_TIMERS.
-					if (command.rfind("dclf:gpu-window=", 0) == 0) {
-						if (!GpuEventTimers::Requested())
-							logger::warn("[DCLF] test command {}: the GPU event timers are off (CS_GPU_EVENT_TIMERS)", command);
-						GpuEventTimers::StartWindow(command.substr(16));
-						return;
-					}
-					// "dclf:nvperf=<range>|<range>...[#<samples>]": an NvPerf capture of those ranges (a trailing '*' a prefix) from the next
-					// frame, 3 samples by default; its rows are logged and appended to the CSV, and dclf:wait=nvperf waits for it.
-					if (command.rfind("dclf:nvperf=", 0) == 0) {
-						std::string value = command.substr(12);
-						GpuCounters::CaptureConfiguration configuration;
-						configuration.samples = 3;
-						// "@<metric>[:<kind>],...": those metrics instead of the defaults (GpuCounters::ParseMetric's form).
-						if (const auto at = value.rfind('@'); at != std::string::npos) {
-							std::stringstream list(value.substr(at + 1));
-							for (std::string metric; std::getline(list, metric, ',');) {
-								GpuCounters::MetricRequest request;
-								std::string error;
-								if (GpuCounters::ParseMetric(metric, request, error))
-									configuration.metrics.push_back(std::move(request));
-								else
-									logger::warn("[DCLF] test command: NvPerf metric '{}': {}", metric, error);
-							}
-							value.resize(at);
-						}
-						if (const auto hash = value.rfind('#'); hash != std::string::npos) {
-							configuration.samples = std::max(1u, static_cast<std::uint32_t>(std::strtoul(value.c_str() + hash + 1, nullptr, 10)));
-							value.resize(hash);
-						}
-						for (std::size_t start = 0; start <= value.size();) {
-							const auto bar = value.find('|', start);
-							auto range = value.substr(start, bar == std::string::npos ? std::string::npos : bar - start);
-							if (!range.empty())
-								configuration.ranges.push_back(std::move(range));
-							if (bar == std::string::npos)
-								break;
-							start = bar + 1;
-						}
-						std::uint64_t id = 0;
-						std::string error;
-						if (GpuCounters::RequestCapture(configuration, id, error)) {
-							Harness().nvperfCapture = id;
-							logger::info("[DCLF] test command: NvPerf capture {} of {} ranges, {} samples", id, configuration.ranges.size(), configuration.samples);
-						} else
-							logger::warn("[DCLF] test command {}: no capture: {}", command, error);
-						return;
-					}
-					// "dclf:ts-dump=<epochs>": the next <epochs> completed epochs log their graphics timestamp ranges in GPU order ("[TSDUMP]").
-					if (command.rfind("dclf:ts-dump=", 0) == 0) {
-						RenderGraphRuntime::RequestTimestampDump(static_cast<std::uint32_t>(std::max(0, std::atoi(command.c_str() + 13))));
-						return;
-					}
-					// "dclf:async-compute=0|1|default": the passes preferring async compute on the graphics queue (0), the compute queue (1)
-					// or as CS_DCLF_ASYNC_COMPUTE says, from a graph rebuild on (dclf:rebuild's), so one run compares the queues.
-					if (command.rfind("dclf:async-compute=", 0) == 0) {
-						const std::string value = command.substr(19);
-						DCLF::Draws::asyncComputeOverride.store(value == "default" ? -1 : value != "0", std::memory_order_relaxed);
-						if (auto* host = RenderGraphRuntime::Get().Host())
-							host->RequestRebuild("test harness command");
-						return;
-					}
-					// Cost attribution (diagnostics; a frozen camera, since a cut build leaves the draws reading an older frame's outputs):
-					// "dclf:cut=<prefixes>": the pass key prefixes the graph leaves out, comma-separated ("*" every pass, empty none), from a
-					// rebuild at the next build point (Draws::GraphConditions); "dclf:epochs=0|1": DCLF's epochs submitted or not (nothing they
-					// claim is drawn while not); "dclf:early-flush=0|1|default": the D3D11 flush before each epoch.
-					if (command.rfind("dclf:cut=", 0) == 0) {
-						DCLF::Draws::SetPassCuts(command.substr(9));
-						return;
-					}
-					if (command.rfind("dclf:epochs=", 0) == 0) {
-						// "dclf:epochs=flush|enqueue|signal": not submitted, each still closing DXVK's command list at its point, then
-						// enqueuing an empty submission, or one signalling a timeline (RenderGraphRuntime::SkipDclfEpochs).
-						const std::string value = command.substr(12);
-						const std::uint32_t boundary = value == "flush" ? 1u : value == "enqueue" ? 2u : value == "signal" ? 3u : value == "cmd" ? 4u :
-													   value == "cmd3" ? 5u : 0u;
-						RenderGraphRuntime::SkipDclfEpochs(value == "1" ? 0u : ~0u, boundary);
-						return;
-					}
-					// "dclf:submit-dump=<epochs>": the next epochs log their enqueued submissions' waits and signals ("[ORG] submission dump").
-					if (command.rfind("dclf:submit-dump=", 0) == 0) {
-						RenderGraphRuntime::RequestSubmissionDump(static_cast<std::uint32_t>(std::strtoul(command.c_str() + 17, nullptr, 10)));
-						return;
-					}
-					// "dclf:worker-spin=<us>" / "dclf:worker-sync=0|1": each skipped epoch loads DXVK's worker thread that long, and/or
-					// waits for it there (RenderGraphRuntime::SetSkippedEpochWorkerLoad).
-					if (command.rfind("dclf:worker-spin=", 0) == 0 || command.rfind("dclf:worker-sync=", 0) == 0) {
-						static std::uint32_t spinUs = 0;
-						static bool sync = false;
-						if (command[13] == 'p')
-							spinUs = static_cast<std::uint32_t>(std::strtoul(command.c_str() + 17, nullptr, 10));
-						else
-							sync = command.substr(17) == "1";
-						RenderGraphRuntime::SetSkippedEpochWorkerLoad(spinUs, sync);
-						return;
-					}
-					// "dclf:epoch-spin=<us>": each skipped epoch busy-waits that long on the render thread (0: none).
-					if (command.rfind("dclf:epoch-spin=", 0) == 0) {
-						RenderGraphRuntime::SetSkippedEpochSpin(static_cast<std::uint32_t>(std::strtoul(command.c_str() + 16, nullptr, 10)));
-						return;
-					}
-					// "dclf:pass-queries=0|1": the graph's lists recorded with their pass timestamp queries and Tracy GPU zones, or without.
-					if (command.rfind("dclf:pass-queries=", 0) == 0) {
-						org::diagnostics::DiagnosticSkipPassQueries().store(command.substr(18) == "0", std::memory_order_relaxed);
-						if (auto* host = RenderGraphRuntime::Get().Host())
-							host->RequestRebuild("test harness command");
-						return;
-					}
-					// "dclf:drop-lists=0|1": DCLF's epochs submit their signals alone (RenderGraphRuntime::DropDclfLists).
-					if (command.rfind("dclf:drop-lists=", 0) == 0) {
-						RenderGraphRuntime::DropDclfLists(command.substr(16) == "1");
-						return;
-					}
-					// "dclf:coalesce=0|1": each epoch's submissions as one (RenderGraphRuntime::CoalesceEpochSubmits; unsafe: empty epochs only).
-					if (command.rfind("dclf:coalesce=", 0) == 0) {
-						RenderGraphRuntime::CoalesceEpochSubmits(command.substr(14) == "1");
-						return;
-					}
-					// "dclf:split-enqueue=0|1": each epoch submission its own enqueue (DXVK's submission trace times each).
-					if (command.rfind("dclf:split-enqueue=", 0) == 0) {
-						RenderGraphRuntime::CoalesceEpochSubmits(false, command.substr(19) == "1");
-						return;
-					}
-					// "dclf:submitted-spin=<us>": each submitted DCLF epoch busy-waits that long on the render thread after its enqueue.
-					if (command.rfind("dclf:submitted-spin=", 0) == 0) {
-						RenderGraphRuntime::SetSkippedEpochSpin(static_cast<std::uint32_t>(std::strtoul(command.c_str() + 20, nullptr, 10)), true);
-						return;
-					}
-					// "dclf:hold=<shadow,z,colour,forward,fp>": those epochs' submissions go with the next epoch's enqueue (empty: none held).
-					if (command.rfind("dclf:hold=", 0) == 0) {
-						using Segment = RenderGraphRuntime::Segment;
-						const std::string list = "," + command.substr(10) + ",";
-						std::uint32_t mask = 0;
-						for (const auto& [name, segment] : { std::pair{ "shadow", Segment::ShadowView }, std::pair{ "z", Segment::ZPrepass },
-								 std::pair{ "colour", Segment::MainOpaque }, std::pair{ "forward", Segment::Forward }, std::pair{ "fp", Segment::FirstPerson } })
-							if (list.find(std::string(",") + name + ",") != std::string::npos)
-								mask |= 1u << static_cast<std::uint32_t>(segment);
-						RenderGraphRuntime::HoldDclfSubmissions(mask);
-						return;
-					}
-					// "dclf:heap-dedupe=0|1": BasicRHI's descriptor heap binds of the heaps a list already bound emit nothing, from a rebuild.
-					if (command.rfind("dclf:heap-dedupe=", 0) == 0) {
-						rhi::DiagnosticDedupeHeapBinds().store(command.substr(17) == "1", std::memory_order_relaxed);
-						if (auto* host = RenderGraphRuntime::Get().Host())
-							host->RequestRebuild("test harness command");
-						return;
-					}
-					// "dclf:skip-epochs=<shadow,z,colour,forward,fp>": those epochs alone not submitted (empty: every one submitted).
-					if (command.rfind("dclf:skip-epochs=", 0) == 0) {
-						using Segment = RenderGraphRuntime::Segment;
-						const std::string list = "," + command.substr(17) + ",";
-						std::uint32_t mask = 0;
-						for (const auto& [name, segment] : { std::pair{ "shadow", Segment::ShadowView }, std::pair{ "z", Segment::ZPrepass },
-								 std::pair{ "colour", Segment::MainOpaque }, std::pair{ "forward", Segment::Forward }, std::pair{ "fp", Segment::FirstPerson } })
-							if (list.find(std::string(",") + name + ",") != std::string::npos)
-								mask |= 1u << static_cast<std::uint32_t>(segment);
-						RenderGraphRuntime::SkipDclfEpochs(mask);
-						return;
-					}
-					// "dclf:list-heaps=0|1": recordings bind the descriptor heaps at each command list's start, or not (unsafe off: only
-					// passes binding their own heaps then work; timing an empty-epoch run only), from a rebuild.
-					if (command.rfind("dclf:list-heaps=", 0) == 0) {
-						org::diagnostics::DiagnosticSkipListHeapBinds().store(command.substr(16) == "0", std::memory_order_relaxed);
-						if (auto* host = RenderGraphRuntime::Get().Host())
-							host->RequestRebuild("test harness command");
-						return;
-					}
-					// "dclf:list-barriers=external|all|default": recordings leave out their full entry and exit barriers (the closed
-					// execution's too) or every barrier (unsafe: empty-epoch timing only), from a rebuild.
-					if (command.rfind("dclf:list-barriers=", 0) == 0) {
-						const std::string value = command.substr(19);
-						org::diagnostics::DiagnosticSkipListBarriers().store(value == "external" ? 1 : value == "all" ? 2 : 0, std::memory_order_relaxed);
-						if (auto* host = RenderGraphRuntime::Get().Host())
-							host->RequestRebuild("test harness command");
-						return;
-					}
-					// "dclf:rhi-globals=0|1": BasicRHI records global barriers or none (the upload lists' too; unsafe off: empty-epoch
-					// timing only), recordings from a rebuild.
-					if (command.rfind("dclf:rhi-globals=", 0) == 0) {
-						rhi::DiagnosticSkipGlobalBarriers().store(command.substr(17) == "0", std::memory_order_relaxed);
-						if (auto* host = RenderGraphRuntime::Get().Host())
-							host->RequestRebuild("test harness command");
-						return;
-					}
-					// "dclf:queue-boundary=0|1": the graph's external entry and exit barriers (unsafe off: timing only), from a rebuild.
-					if (command.rfind("dclf:queue-boundary=", 0) == 0) {
-						const bool on = command.substr(20) != "0";
-						if (auto* host = RenderGraphRuntime::Get().Host())
-							host->SetQueueBoundary({ .entry = on, .exit = on });
-						return;
-					}
-					if (command.rfind("dclf:early-flush=", 0) == 0) {
-						const std::string value = command.substr(17);
-						RenderGraphRuntime::SetEarlyFlush(value == "default" ? -1 : value != "0");
-						return;
-					}
-					// "dclf:shadow-min-texels=<texels>": the sun cascades' size cull (0: off), from the next shadow commit.
-					if (command.rfind("dclf:shadow-min-texels=", 0) == 0) {
-						DCLF::Draws::shadowMinTexels.store(std::strtof(command.c_str() + 23, nullptr), std::memory_order_relaxed);
-						return;
-					}
-					// "dclf:shadow-probe=<label>": the sun views' size probe, the readback pinned to that shadow view label; -1 off.
-					if (command.rfind("dclf:shadow-probe=", 0) == 0) {
-						DCLF::Draws::shadowSizeProbe.store(std::atoi(command.c_str() + 18), std::memory_order_relaxed);
-						return;
-					}
-					// "dclf:cull=off|frustum|occlusion": the GPU culling's mode (CS_DCLF_CULL's live value).
-					if (command.rfind("dclf:cull=", 0) == 0) {
-						const std::string value = command.substr(10);
-						DCLF::Toggles::Get().Requested().cullMode = value == "occlusion" ? 2 : value == "frustum" ? 1 : 0;
-						return;
-					}
-					// The CPU-driven pipeline's toggles (CS_DCLF_PIPELINE's, CS_DCLF_CPU_RECORD's and CS_DCLF_CPU_CADENCE's live values):
-					// "dclf:pipeline=auto|manual|gpu|cpu" (ApplyPipeline; from the next build point: it changes the graph's conditions),
-					// "dclf:pipeline-interior=gpu|cpu" and "dclf:pipeline-exterior=gpu|cpu" (Manual's), "dclf:cpu-record=indirect|serial|parallel",
-					// "dclf:cpu-cadence-<view>=frame|snapshot" ("dclf:cpu-cadence=frame|snapshot": every view but main), "dclf:cpu-batch=<lanes>"
-					// (CS_DCLF_CPU_BATCH's: from the next snapshot).
-					if (command.rfind("dclf:pipeline=", 0) == 0) {
-						if (!DCLF::ApplyPipeline(DCLF::Toggles::Get().Requested(), command.substr(14)))
-							logger::warn("[DCLF] test command {}: not a pipeline (auto, manual, gpu, cpu)", command);
-						return;
-					}
-					if (command.rfind("dclf:pipeline-interior=", 0) == 0 || command.rfind("dclf:pipeline-exterior=", 0) == 0) {
-						auto& requested = DCLF::Toggles::Get().Requested();
-						const bool cpu = command.substr(command.find('=') + 1) == "cpu";
-						(command[14] == 'i' ? requested.interiorCpu : requested.exteriorCpu) = cpu;
-						return;
-					}
-					if (command.rfind("dclf:cpu-batch=", 0) == 0) {
-						DCLF::Draws::SetBatchLanes(static_cast<std::uint32_t>(std::strtoul(command.c_str() + 15, nullptr, 10)));
-						return;
-					}
-					// "dclf:cpu-exp=<bits>": the CPU pipeline's performance A/B bits (Direct::Experiment), decimal or 0x hex.
-					if (command.rfind("dclf:cpu-exp=", 0) == 0) {
-						DCLF::Direct::ExperimentBits().store(static_cast<std::uint32_t>(std::strtoul(command.c_str() + 13, nullptr, 0)), std::memory_order_relaxed);
-						return;
-					}
-					if (command.rfind("dclf:cpu-record=", 0) == 0) {
-						const auto record = command.substr(16);
-						DCLF::Toggles::Get().Requested().cpuRecord = record == "parallel" ? 1 : record == "serial" ? 0 : 2;
-						return;
-					}
-					if (command.rfind("dclf:cpu-cadence", 0) == 0) {
-						const auto equals = command.find('=');
-						const std::string view = command.size() > 16 && command[16] == '-' ? command.substr(17, equals == std::string::npos ? std::string::npos : equals - 17) : std::string();
-						const std::string value = equals == std::string::npos ? std::string() : command.substr(equals + 1);
-						if (!DCLF::ApplyCpuCadence(DCLF::Toggles::Get().Requested(), view.empty() ? value : view + "=" + value))
-							logger::warn("[DCLF] test command: '{}' names an unknown view or cadence", command);
-						return;
-					}
-					if (command.rfind("dclf:", 0) == 0) {
-						const auto equals = command.find('=');
-						const auto name = command.substr(5, equals == std::string::npos ? std::string::npos : equals - 5);
-						const bool on = equals != std::string::npos && command.substr(equals + 1) != "0";
-						bool found = false;
-						for (const auto& info : DCLF::ToggleTable())
-							if (info.name == name) {
-								DCLF::SetToggleValue(DCLF::Toggles::Get().Requested(), info, on);
-								found = true;
-							}
-						if (!found)
-							logger::warn("[DCLF] test command: no toggle named '{}'", name);
-						return;
-					}
-					if (auto* tasks = SKSE::GetTaskInterface()) {
-						tasks->AddTask([command] {
-							const auto factory = RE::IFormFactory::GetConcreteFormFactoryByType<RE::Script>();
-							if (auto* script = factory ? static_cast<RE::Script*>(factory->Create()) : nullptr) {
-								script->SetCommand(command);
-								script->CompileAndRun(nullptr);
-								delete script;
-							}
-						});
-					}
-				}
-			}
-
-		private:
-			struct Command
-			{
-				std::uint32_t frame;
-				std::string command;
-			};
-			std::vector<Command> commands;
-			std::size_t next = 0;
-			std::uint32_t frame = 0;
-			std::uint32_t shift = 0;  // frames the list's waits held: every later command runs that much later
-			std::optional<Wait> wait;
-		};
-
-		/**
-		 * @brief Test switch CS_DCLF_TEST_TOGGLE="<off frame>:<on frame>[:<off frame>:<on frame>...]": flips the
-		 * feature's menu toggle (the same disabled flag the feature list writes) at those frames, loading screens not
-		 * counted, to exercise switching DCLF off and back on in a running session: off at the first, on at the
-		 * second, and so on alternately.
-		 */
-		class TestToggle
-		{
-		public:
-			TestToggle()
-			{
-				const std::string value = DCLF::SwitchValue(DCLF::Switch::TestToggle);
-				std::size_t start = 0;
-				while (start < value.size()) {
-					const auto colon = value.find(':', start);
-					const auto part = value.substr(start, colon == std::string::npos ? std::string::npos : colon - start);
-					if (const auto f = static_cast<std::uint32_t>(std::strtoul(part.c_str(), nullptr, 10)))
-						frames.push_back(f);
-					if (colon == std::string::npos)
-						break;
-					start = colon + 1;
-				}
-			}
-
-			void OnFrame(const std::string& a_feature)
-			{
-				if (frames.empty() || DCLF::Scene::FrameView::LoadShown())
-					return;
-				++frame;
-				for (std::size_t i = 0; i < frames.size(); ++i) {
-					if (frame != frames[i])
-						continue;
-					const bool off = (i % 2) == 0;
-					logger::info("[DCLF] test toggle at frame {}: {}", frame, off ? "off" : "on");
-					globals::state->SetFeatureDisabled(a_feature, off);
-				}
-			}
-
-		private:
-			std::vector<std::uint32_t> frames;
-			std::uint32_t frame = 0;
-		};
-
-		/**
-		 * @brief Test switch CS_DCLF_TEST_TURN="<start frame>:<end frame>:<degrees per frame>": turns the player's
-		 * heading every frame between the two (loading screens not counted), so a scripted run has steady camera
-		 * motion. Several ranges may be given, separated by ';'.
-		 */
-		class TestTurn
-		{
-		public:
-			TestTurn()
-			{
-				Parse(DCLF::SwitchValue(DCLF::Switch::TestTurn), ranges);
-				Parse(DCLF::SwitchValue(DCLF::Switch::TestMove), moves);
-			}
-
-			void OnFrame()
-			{
-				if ((ranges.empty() && moves.empty()) || DCLF::Scene::FrameView::LoadShown())
-					return;
-				++frame;
-				// CS_DCLF_TEST_MOVE: the player carried forward along its heading, that many units a frame, so that
-				// objects cross their fade distances in view (a turn alone never fades anything).
-				for (const auto& move : moves) {
-					if (frame < move.start || frame >= move.end)
-						continue;
-					if (auto* tasks = SKSE::GetTaskInterface()) {
-						tasks->AddTask([units = move.degrees] {
-							if (auto* player = RE::PlayerCharacter::GetSingleton()) {
-								auto position = player->GetPosition();
-								const float heading = player->GetAngleZ();
-								position.x += std::sin(heading) * units;
-								position.y += std::cos(heading) * units;
-								player->SetPosition(position, true);
-							}
-						});
-					}
-				}
-				for (const auto& range : ranges) {
-					if (frame < range.start || frame >= range.end)
-						continue;
-					const float radians = range.degrees * 0.017453292f;
-					if (auto* tasks = SKSE::GetTaskInterface()) {
-						tasks->AddTask([radians] {
-							if (auto* player = RE::PlayerCharacter::GetSingleton())
-								player->SetHeading(player->GetAngleZ() + radians);
-						});
-					}
-				}
-			}
-
-		private:
-			struct Range
-			{
-				std::uint32_t start = 0, end = 0;
-				float degrees = 0.0f;
-			};
-			static void Parse(const std::string& a_value, std::vector<Range>& a_out)
-			{
-				std::string_view text = a_value;
-				while (!text.empty()) {
-					const auto end = text.find(';');
-					const std::string item(text.substr(0, end));
-					Range range;
-					if (std::sscanf(item.c_str(), "%u:%u:%f", &range.start, &range.end, &range.degrees) == 3)
-						a_out.push_back(range);
-					text = end == std::string_view::npos ? std::string_view{} : text.substr(end + 1);
-				}
-			}
-			std::vector<Range> ranges;
-			std::vector<Range> moves;  // CS_DCLF_TEST_MOVE="start:end:units per frame;..."
-			std::uint32_t frame = 0;
-		};
-
-		/**
-		 * @brief "dclf:cast=<spell form ID>,<left|right>,<hold seconds>": the player casts a spell from a hand as a player does. The spell
-		 * is equipped to the hand and the hands drawn. A second and a half later (the draw animation) the hand's attack button is pressed,
-		 * held for that long and released, sent through the input device manager as the mouse's events. So the hand's charge, its casting
-		 * art and light and the release all run, which player.cast (an instant caster, no hand) skips. One cast at a time; a new one
-		 * replaces it.
-		 */
-		class TestCast
-		{
-		public:
-			static bool Command(const std::string& a_command)
-			{
-				if (a_command.rfind("dclf:cast=", 0) != 0)
-					return true;
-				char hand[16]{};
-				unsigned formId = 0;
-				float hold = 1.0f;
-				if (std::sscanf(a_command.c_str() + 10, "%x,%15[a-z],%f", &formId, hand, &hold) < 2 || (std::strcmp(hand, "left") && std::strcmp(hand, "right"))) {
-					logger::warn("[DCLF] dclf:cast: '{}' is not <spell form ID>,<left|right>[,<hold seconds>]", a_command);
-					return false;
-				}
-				auto& cast = State();
-				cast = { formId, std::strcmp(hand, "left") == 0, hold, std::chrono::steady_clock::now(), Phase::Equip };
-				return false;
-			}
-
-			static void OnFrame()
-			{
-				auto& cast = State();
-				if (cast.phase == Phase::Idle)
-					return;
-				auto* tasks = SKSE::GetTaskInterface();
-				if (!tasks)
-					return;
-				const float since = std::chrono::duration<float>(std::chrono::steady_clock::now() - cast.start).count();
-				switch (cast.phase) {
-				case Phase::Equip:
-					tasks->AddTask([formId = cast.formId, left = cast.left] {
+			// "dclf:foreign-write=<n>": a foreign plugin's write, for the monitor to find: on the main thread, the alpha threshold of
+			// the first alpha-tested geometry of up to n references near the player, stored straight into the property (no hook sees it).
+			if (command.rfind("dclf:foreign-write=", 0) == 0) {
+				const auto wanted = static_cast<std::uint32_t>(std::strtoul(command.c_str() + 19, nullptr, 10));
+				if (auto* tasks = SKSE::GetTaskInterface())
+					tasks->AddTask([wanted] {
+						auto* tes = RE::TES::GetSingleton();
 						auto* player = RE::PlayerCharacter::GetSingleton();
-						auto* spell = RE::TESForm::LookupByID<RE::SpellItem>(formId);
-						// Skyrim.esm's LeftHand and RightHand equip slots.
-						const auto* slot = RE::TESForm::LookupByID<RE::BGSEquipSlot>(left ? 0x13F43 : 0x13F42);
-						if (!player || !spell || !slot) {
-							logger::warn("[DCLF] dclf:cast: no spell {:08X}", formId);
+						if (!tes || !player)
 							return;
-						}
-						RE::ActorEquipManager::GetSingleton()->EquipSpell(player, spell, slot);
-						player->DrawWeaponMagicHands(true);
+						std::uint32_t written = 0;
+						tes->ForEachReferenceInRange(player, 4096.0f, [&](RE::TESObjectREFR* a_reference) {
+							auto* root = a_reference && a_reference != player ? a_reference->Get3D() : nullptr;
+							if (!root)
+								return RE::BSContainer::ForEachResult::kContinue;
+							RE::BSVisit::TraverseScenegraphGeometries(root, [&](RE::BSGeometry* a_geometry) {
+								auto* alpha = a_geometry->GetGeometryRuntimeData().alphaProperty.get();
+								if (!alpha)
+									return RE::BSVisit::BSVisitControl::kContinue;
+								alpha->alphaThreshold = static_cast<std::uint8_t>(alpha->alphaThreshold ^ 1);
+								const auto* file = a_reference->GetFile(0);
+								logger::info("[DCLF] test command: foreign write, alpha threshold of '{}' under reference {:08X} ({}) now {}", a_geometry->name.c_str(),
+									a_reference->GetFormID(), file ? file->GetFilename() : "created in game", alpha->alphaThreshold);
+								++written;
+								return RE::BSVisit::BSVisitControl::kStop;
+							});
+							return written < wanted ? RE::BSContainer::ForEachResult::kContinue : RE::BSContainer::ForEachResult::kStop;
+						});
 					});
-					cast.phase = Phase::Draw;
-					return;
-				case Phase::Draw:
-					if (since < kDrawSeconds)
-						return;
-					Send(cast.left, 1.0f, 0.0f);
-					cast.phase = Phase::Hold;
-					return;
-				case Phase::Hold:
-					{
-						const float held = since - kDrawSeconds;
-						if (held < cast.hold) {
-							Send(cast.left, 1.0f, held);
-							return;
-						}
-						Send(cast.left, 0.0f, held);
-						logger::info("[DCLF] dclf:cast: {:08X} released after {:.2f} s", cast.formId, held);
-						cast.phase = Phase::Idle;
-						return;
-					}
-				default:
-					return;
+				return true;
+			}
+			// "dclf:rebuild": a graph rebuild requested (GraphHost::RequestRebuild, here at Present on the graph's owner
+			// thread), which the next frame's build point performs: every recording invalidated, so that frame waits at its start for
+			// a snapshot recorded on the new build (IndirectDraws::AdoptCurrentSnapshot; the strict epochs line counts the waits).
+			// "dclf:refresh=<client id>": FrameAnchors::Refresh of that anchor client, which rebuilds its anchors' epochs alone (the
+			// path a client changing its passes or resources takes), for stress runs.
+			if (command.rfind("dclf:refresh=", 0) == 0) {
+				FrameAnchors::Refresh(command.substr(13));
+				return true;
+			}
+			if (command == "dclf:rebuild") {
+				if (auto* host = RenderGraphRuntime::Get().Host())
+					host->RequestRebuild("test harness command");
+				else
+					logger::warn("[DCLF] test command: no render graph host to rebuild");
+				return true;
+			}
+			// Shader hot reload (dclf-hot-reload.md), served at the next present: "[ORG] shader reload: N of M pipelines rebuilt (K failed,
+			// U unchanged) in S s" marks the rebuilds done, "[ORG] shader reload: N pipelines swapped in at graph build B" the swap.
+			// "dclf:reload-shaders": every live pipeline, as the menu's button asks it (the unchanged ones stay). "=all": every one built
+			// and swapped even when unchanged (the swap exercised without an edit). "=<file>": those built from that shader file, as the
+			// shader watcher asks for an edit (an include: every one).
+			if (command == "dclf:reload-shaders" || command.rfind("dclf:reload-shaders=", 0) == 0) {
+				const std::string value = command.size() > 20 ? command.substr(20) : std::string{};
+				// dclf:wait=reload's baseline: the registry's before this reload.
+				if (const auto* registry = RenderGraphRuntime::PipelineRegistry()) {
+					auto& harness = Harness();
+					harness.reloadAsked = true;
+					harness.reloadSerial = registry->LastReload().serial;
+					harness.reloadGeneration = registry->Generation();
 				}
+				if (value == "all")
+					RenderGraphRuntime::RequestShaderReload({}, true);
+				else
+					RenderGraphRuntime::RequestShaderReload(value);
+				return true;
 			}
-
-		private:
-			enum class Phase
-			{
-				Idle,
-				Equip,
-				Draw,
-				Hold
-			};
-			struct Cast
-			{
-				std::uint32_t formId = 0;
-				bool left = false;
-				float hold = 0.0f;
-				std::chrono::steady_clock::time_point start;
-				Phase phase = Phase::Idle;
-			};
-			static constexpr float kDrawSeconds = 1.5f;
-
-			static Cast& State()
-			{
-				static Cast cast;
-				return cast;
+			// "dclf:define=<NAME>[=<value>],...": extra defines for every DCLF stage compiled from now on (empty: none), taken up by the
+			// next dclf:reload-shaders, so a shader A/B is an #if in the source, compared in one launch.
+			if (command.rfind("dclf:define=", 0) == 0) {
+				DCLF::ShaderPrograms::SetTestDefines(command.substr(12));
+				return true;
 			}
-
-			/** @brief One mouse button event for the hand's attack (the left button is the left hand's), on the main thread. */
-			static void Send(bool a_left, float a_value, float a_held)
-			{
-				SKSE::GetTaskInterface()->AddTask([a_left, a_value, a_held] {
-					auto* events = RE::UserEvents::GetSingleton();
-					auto* devices = RE::BSInputDeviceManager::GetSingleton();
-					if (!events || !devices)
-						return;
-					// The engine's event memory: the input queue owns its events and reuses them, so this one is left to the heap.
-					RE::InputEvent* event = RE::ButtonEvent::Create(RE::INPUT_DEVICE::kMouse, a_left ? events->leftAttack : events->rightAttack, a_left ? 0u : 1u, a_value, a_held);
-					if (event)
-						devices->SendEvent(&event);
-				});
+			// "dclf:gpu-window=<label>": the GPU event timers' frames from the next on are one window, logged as one block once read
+			// back ("[GpuEvents] window '<label>'"); "-" is not logged. Needs CS_GPU_EVENT_TIMERS.
+			if (command.rfind("dclf:gpu-window=", 0) == 0) {
+				if (!GpuEventTimers::Requested())
+					logger::warn("[DCLF] test command {}: the GPU event timers are off (CS_GPU_EVENT_TIMERS)", command);
+				GpuEventTimers::StartWindow(command.substr(16));
+				return true;
 			}
-		};
-
-		bool TestCastCommand(const std::string& a_command) { return TestCast::Command(a_command); }
-	}
-
-	namespace
-	{
-		std::mutex queuedMutex;
-		std::vector<std::string> queuedCommands;
-	}
-
-	void QueueTestCommand(std::string a_command)
-	{
-		std::lock_guard lock(queuedMutex);
-		queuedCommands.push_back(std::move(a_command));
-	}
-
-	void RunTestHarness(std::string_view a_feature)
-	{
-		Diagnostics::TelemetryFrame();
-		// Once: the log directory is a known-folder query and a path built, about 60 us in Dev-Fast, which every Present paid while the
-		// probe itself starts only once.
-		static const bool memProbeStarted = (MemProbe::Start(logger::log_directory().value_or(std::filesystem::path{})), true);
-		(void)memProbeStarted;
-		Vram::SpillLab::OnPresent();
-		if (Harness().feature.empty())
-			Harness().feature = a_feature;
-		{
-			std::vector<std::string> queued;
-			{
-				std::lock_guard lock(queuedMutex);
-				queued.swap(queuedCommands);
+			// "dclf:nvperf=<range>|<range>...[#<samples>]": an NvPerf capture of those ranges (a trailing '*' a prefix) from the next
+			// frame, 3 samples by default; its rows are logged and appended to the CSV, and dclf:wait=nvperf waits for it.
+			if (command.rfind("dclf:nvperf=", 0) == 0) {
+				std::string value = command.substr(12);
+				GpuCounters::CaptureConfiguration configuration;
+				configuration.samples = 3;
+				// "@<metric>[:<kind>],...": those metrics instead of the defaults (GpuCounters::ParseMetric's form).
+				if (const auto at = value.rfind('@'); at != std::string::npos) {
+					std::stringstream list(value.substr(at + 1));
+					for (std::string metric; std::getline(list, metric, ',');) {
+						GpuCounters::MetricRequest request;
+						std::string error;
+						if (GpuCounters::ParseMetric(metric, request, error))
+							configuration.metrics.push_back(std::move(request));
+						else
+							logger::warn("[DCLF] test command: NvPerf metric '{}': {}", metric, error);
+					}
+					value.resize(at);
+				}
+				if (const auto hash = value.rfind('#'); hash != std::string::npos) {
+					configuration.samples = std::max(1u, static_cast<std::uint32_t>(std::strtoul(value.c_str() + hash + 1, nullptr, 10)));
+					value.resize(hash);
+				}
+				for (std::size_t start = 0; start <= value.size();) {
+					const auto bar = value.find('|', start);
+					auto range = value.substr(start, bar == std::string::npos ? std::string::npos : bar - start);
+					if (!range.empty())
+						configuration.ranges.push_back(std::move(range));
+					if (bar == std::string::npos)
+						break;
+					start = bar + 1;
+				}
+				std::uint64_t id = 0;
+				std::string error;
+				if (GpuCounters::RequestCapture(configuration, id, error)) {
+					Harness().nvperfCapture = id;
+					logger::info("[DCLF] test command: NvPerf capture {} of {} ranges, {} samples", id, configuration.ranges.size(), configuration.samples);
+				} else
+					logger::warn("[DCLF] test command {}: no capture: {}", command, error);
+				return true;
 			}
-			for (auto& command : queued)
-				TestCommands::Run(std::move(command), 0);
+			// "dclf:ts-dump=<epochs>": the next <epochs> completed epochs log their graphics timestamp ranges in GPU order ("[TSDUMP]").
+			if (command.rfind("dclf:ts-dump=", 0) == 0) {
+				RenderGraphRuntime::RequestTimestampDump(static_cast<std::uint32_t>(std::max(0, std::atoi(command.c_str() + 13))));
+				return true;
+			}
+			// "dclf:async-compute=0|1|default": the passes preferring async compute on the graphics queue (0), the compute queue (1)
+			// or as CS_DCLF_ASYNC_COMPUTE says, from a graph rebuild on (dclf:rebuild's), so one run compares the queues.
+			if (command.rfind("dclf:async-compute=", 0) == 0) {
+				const std::string value = command.substr(19);
+				DCLF::Draws::asyncComputeOverride.store(value == "default" ? -1 : value != "0", std::memory_order_relaxed);
+				if (auto* host = RenderGraphRuntime::Get().Host())
+					host->RequestRebuild("test harness command");
+				return true;
+			}
+			// Cost attribution (diagnostics; a frozen camera, since a cut build leaves the draws reading an older frame's outputs):
+			// "dclf:cut=<prefixes>": the pass key prefixes the graph leaves out, comma-separated ("*" every pass, empty none), from a
+			// rebuild at the next build point (Draws::GraphConditions); "dclf:epochs=0|1": DCLF's epochs submitted or not (nothing they
+			// claim is drawn while not); "dclf:early-flush=0|1|default": the D3D11 flush before each epoch.
+			if (command.rfind("dclf:cut=", 0) == 0) {
+				DCLF::Draws::SetPassCuts(command.substr(9));
+				return true;
+			}
+			if (command.rfind("dclf:epochs=", 0) == 0) {
+				// "dclf:epochs=flush|enqueue|signal": not submitted, each still closing DXVK's command list at its point, then
+				// enqueuing an empty submission, or one signalling a timeline (RenderGraphRuntime::SkipDclfEpochs).
+				const std::string value = command.substr(12);
+				const std::uint32_t boundary = value == "flush" ? 1u : value == "enqueue" ? 2u : value == "signal" ? 3u : value == "cmd" ? 4u :
+											   value == "cmd3" ? 5u : 0u;
+				RenderGraphRuntime::SkipDclfEpochs(value == "1" ? 0u : ~0u, boundary);
+				return true;
+			}
+			// "dclf:submit-dump=<epochs>": the next epochs log their enqueued submissions' waits and signals ("[ORG] submission dump").
+			if (command.rfind("dclf:submit-dump=", 0) == 0) {
+				RenderGraphRuntime::RequestSubmissionDump(static_cast<std::uint32_t>(std::strtoul(command.c_str() + 17, nullptr, 10)));
+				return true;
+			}
+			// "dclf:worker-spin=<us>" / "dclf:worker-sync=0|1": each skipped epoch loads DXVK's worker thread that long, and/or
+			// waits for it there (RenderGraphRuntime::SetSkippedEpochWorkerLoad).
+			if (command.rfind("dclf:worker-spin=", 0) == 0 || command.rfind("dclf:worker-sync=", 0) == 0) {
+				static std::uint32_t spinUs = 0;
+				static bool sync = false;
+				if (command[13] == 'p')
+					spinUs = static_cast<std::uint32_t>(std::strtoul(command.c_str() + 17, nullptr, 10));
+				else
+					sync = command.substr(17) == "1";
+				RenderGraphRuntime::SetSkippedEpochWorkerLoad(spinUs, sync);
+				return true;
+			}
+			// "dclf:epoch-spin=<us>": each skipped epoch busy-waits that long on the render thread (0: none).
+			if (command.rfind("dclf:epoch-spin=", 0) == 0) {
+				RenderGraphRuntime::SetSkippedEpochSpin(static_cast<std::uint32_t>(std::strtoul(command.c_str() + 16, nullptr, 10)));
+				return true;
+			}
+			// "dclf:pass-queries=0|1": the graph's lists recorded with their pass timestamp queries and Tracy GPU zones, or without.
+			if (command.rfind("dclf:pass-queries=", 0) == 0) {
+				org::diagnostics::DiagnosticSkipPassQueries().store(command.substr(18) == "0", std::memory_order_relaxed);
+				if (auto* host = RenderGraphRuntime::Get().Host())
+					host->RequestRebuild("test harness command");
+				return true;
+			}
+			// "dclf:drop-lists=0|1": DCLF's epochs submit their signals alone (RenderGraphRuntime::DropDclfLists).
+			if (command.rfind("dclf:drop-lists=", 0) == 0) {
+				RenderGraphRuntime::DropDclfLists(command.substr(16) == "1");
+				return true;
+			}
+			// "dclf:coalesce=0|1": each epoch's submissions as one (RenderGraphRuntime::CoalesceEpochSubmits; unsafe: empty epochs only).
+			if (command.rfind("dclf:coalesce=", 0) == 0) {
+				RenderGraphRuntime::CoalesceEpochSubmits(command.substr(14) == "1");
+				return true;
+			}
+			// "dclf:split-enqueue=0|1": each epoch submission its own enqueue (DXVK's submission trace times each).
+			if (command.rfind("dclf:split-enqueue=", 0) == 0) {
+				RenderGraphRuntime::CoalesceEpochSubmits(false, command.substr(19) == "1");
+				return true;
+			}
+			// "dclf:submitted-spin=<us>": each submitted DCLF epoch busy-waits that long on the render thread after its enqueue.
+			if (command.rfind("dclf:submitted-spin=", 0) == 0) {
+				RenderGraphRuntime::SetSkippedEpochSpin(static_cast<std::uint32_t>(std::strtoul(command.c_str() + 20, nullptr, 10)), true);
+				return true;
+			}
+			// "dclf:hold=<shadow,z,colour,forward,fp>": those epochs' submissions go with the next epoch's enqueue (empty: none held).
+			if (command.rfind("dclf:hold=", 0) == 0) {
+				using Segment = RenderGraphRuntime::Segment;
+				const std::string list = "," + command.substr(10) + ",";
+				std::uint32_t mask = 0;
+				for (const auto& [name, segment] : { std::pair{ "shadow", Segment::ShadowView }, std::pair{ "z", Segment::ZPrepass },
+						 std::pair{ "colour", Segment::MainOpaque }, std::pair{ "forward", Segment::Forward }, std::pair{ "fp", Segment::FirstPerson } })
+					if (list.find(std::string(",") + name + ",") != std::string::npos)
+						mask |= 1u << static_cast<std::uint32_t>(segment);
+				RenderGraphRuntime::HoldDclfSubmissions(mask);
+				return true;
+			}
+			// "dclf:heap-dedupe=0|1": BasicRHI's descriptor heap binds of the heaps a list already bound emit nothing, from a rebuild.
+			if (command.rfind("dclf:heap-dedupe=", 0) == 0) {
+				rhi::DiagnosticDedupeHeapBinds().store(command.substr(17) == "1", std::memory_order_relaxed);
+				if (auto* host = RenderGraphRuntime::Get().Host())
+					host->RequestRebuild("test harness command");
+				return true;
+			}
+			// "dclf:skip-epochs=<shadow,z,colour,forward,fp>": those epochs alone not submitted (empty: every one submitted).
+			if (command.rfind("dclf:skip-epochs=", 0) == 0) {
+				using Segment = RenderGraphRuntime::Segment;
+				const std::string list = "," + command.substr(17) + ",";
+				std::uint32_t mask = 0;
+				for (const auto& [name, segment] : { std::pair{ "shadow", Segment::ShadowView }, std::pair{ "z", Segment::ZPrepass },
+						 std::pair{ "colour", Segment::MainOpaque }, std::pair{ "forward", Segment::Forward }, std::pair{ "fp", Segment::FirstPerson } })
+					if (list.find(std::string(",") + name + ",") != std::string::npos)
+						mask |= 1u << static_cast<std::uint32_t>(segment);
+				RenderGraphRuntime::SkipDclfEpochs(mask);
+				return true;
+			}
+			// "dclf:list-heaps=0|1": recordings bind the descriptor heaps at each command list's start, or not (unsafe off: only
+			// passes binding their own heaps then work; timing an empty-epoch run only), from a rebuild.
+			if (command.rfind("dclf:list-heaps=", 0) == 0) {
+				org::diagnostics::DiagnosticSkipListHeapBinds().store(command.substr(16) == "0", std::memory_order_relaxed);
+				if (auto* host = RenderGraphRuntime::Get().Host())
+					host->RequestRebuild("test harness command");
+				return true;
+			}
+			// "dclf:list-barriers=external|all|default": recordings leave out their full entry and exit barriers (the closed
+			// execution's too) or every barrier (unsafe: empty-epoch timing only), from a rebuild.
+			if (command.rfind("dclf:list-barriers=", 0) == 0) {
+				const std::string value = command.substr(19);
+				org::diagnostics::DiagnosticSkipListBarriers().store(value == "external" ? 1 : value == "all" ? 2 : 0, std::memory_order_relaxed);
+				if (auto* host = RenderGraphRuntime::Get().Host())
+					host->RequestRebuild("test harness command");
+				return true;
+			}
+			// "dclf:rhi-globals=0|1": BasicRHI records global barriers or none (the upload lists' too; unsafe off: empty-epoch
+			// timing only), recordings from a rebuild.
+			if (command.rfind("dclf:rhi-globals=", 0) == 0) {
+				rhi::DiagnosticSkipGlobalBarriers().store(command.substr(17) == "0", std::memory_order_relaxed);
+				if (auto* host = RenderGraphRuntime::Get().Host())
+					host->RequestRebuild("test harness command");
+				return true;
+			}
+			// "dclf:queue-boundary=0|1": the graph's external entry and exit barriers (unsafe off: timing only), from a rebuild.
+			if (command.rfind("dclf:queue-boundary=", 0) == 0) {
+				const bool on = command.substr(20) != "0";
+				if (auto* host = RenderGraphRuntime::Get().Host())
+					host->SetQueueBoundary({ .entry = on, .exit = on });
+				return true;
+			}
+			if (command.rfind("dclf:early-flush=", 0) == 0) {
+				const std::string value = command.substr(17);
+				RenderGraphRuntime::SetEarlyFlush(value == "default" ? -1 : value != "0");
+				return true;
+			}
+			// "dclf:shadow-min-texels=<texels>": the sun cascades' size cull (0: off), from the next shadow commit.
+			if (command.rfind("dclf:shadow-min-texels=", 0) == 0) {
+				DCLF::Draws::shadowMinTexels.store(std::strtof(command.c_str() + 23, nullptr), std::memory_order_relaxed);
+				return true;
+			}
+			// "dclf:shadow-probe=<label>": the sun views' size probe, the readback pinned to that shadow view label; -1 off.
+			if (command.rfind("dclf:shadow-probe=", 0) == 0) {
+				DCLF::Draws::shadowSizeProbe.store(std::atoi(command.c_str() + 18), std::memory_order_relaxed);
+				return true;
+			}
+			// "dclf:cull=off|frustum|occlusion": the GPU culling's mode (CS_DCLF_CULL's live value).
+			if (command.rfind("dclf:cull=", 0) == 0) {
+				const std::string value = command.substr(10);
+				DCLF::Toggles::Get().Requested().cullMode = value == "occlusion" ? 2 : value == "frustum" ? 1 : 0;
+				return true;
+			}
+			// The CPU-driven pipeline's toggles (CS_DCLF_PIPELINE's, CS_DCLF_CPU_RECORD's and CS_DCLF_CPU_CADENCE's live values):
+			// "dclf:pipeline=auto|manual|gpu|cpu" (ApplyPipeline; from the next build point: it changes the graph's conditions),
+			// "dclf:pipeline-interior=gpu|cpu" and "dclf:pipeline-exterior=gpu|cpu" (Manual's), "dclf:cpu-record=indirect|serial|parallel",
+			// "dclf:cpu-cadence-<view>=frame|snapshot" ("dclf:cpu-cadence=frame|snapshot": every view but main), "dclf:cpu-batch=<lanes>"
+			// (CS_DCLF_CPU_BATCH's: from the next snapshot).
+			if (command.rfind("dclf:pipeline=", 0) == 0) {
+				if (!DCLF::ApplyPipeline(DCLF::Toggles::Get().Requested(), command.substr(14)))
+					logger::warn("[DCLF] test command {}: not a pipeline (auto, manual, gpu, cpu)", command);
+				return true;
+			}
+			if (command.rfind("dclf:pipeline-interior=", 0) == 0 || command.rfind("dclf:pipeline-exterior=", 0) == 0) {
+				auto& requested = DCLF::Toggles::Get().Requested();
+				const bool cpu = command.substr(command.find('=') + 1) == "cpu";
+				(command[14] == 'i' ? requested.interiorCpu : requested.exteriorCpu) = cpu;
+				return true;
+			}
+			if (command.rfind("dclf:cpu-batch=", 0) == 0) {
+				DCLF::Draws::SetBatchLanes(static_cast<std::uint32_t>(std::strtoul(command.c_str() + 15, nullptr, 10)));
+				return true;
+			}
+			// "dclf:cpu-exp=<bits>": the CPU pipeline's performance A/B bits (Direct::Experiment), decimal or 0x hex.
+			if (command.rfind("dclf:cpu-exp=", 0) == 0) {
+				DCLF::Direct::ExperimentBits().store(static_cast<std::uint32_t>(std::strtoul(command.c_str() + 13, nullptr, 0)), std::memory_order_relaxed);
+				return true;
+			}
+			if (command.rfind("dclf:cpu-record=", 0) == 0) {
+				const auto record = command.substr(16);
+				DCLF::Toggles::Get().Requested().cpuRecord = record == "parallel" ? 1 : record == "serial" ? 0 : 2;
+				return true;
+			}
+			if (command.rfind("dclf:cpu-cadence", 0) == 0) {
+				const auto equals = command.find('=');
+				const std::string view = command.size() > 16 && command[16] == '-' ? command.substr(17, equals == std::string::npos ? std::string::npos : equals - 17) : std::string();
+				const std::string value = equals == std::string::npos ? std::string() : command.substr(equals + 1);
+				if (!DCLF::ApplyCpuCadence(DCLF::Toggles::Get().Requested(), view.empty() ? value : view + "=" + value))
+					logger::warn("[DCLF] test command: '{}' names an unknown view or cadence", command);
+				return true;
+			}
+			if (RunTextureStreamingCommand(command))
+				return true;
+			// "dclf:<toggle name>=<0|1>": a live toggle (Toggles.h, ToggleInfo::name), as the menu sets it, so one run can
+			// compare a class drawn by DCLF and by the engine from the same camera.
+			if (command.rfind("dclf:", 0) == 0) {
+				const auto equals = command.find('=');
+				const auto name = command.substr(5, equals == std::string::npos ? std::string::npos : equals - 5);
+				const bool on = equals != std::string::npos && command.substr(equals + 1) != "0";
+				bool found = false;
+				for (const auto& info : DCLF::ToggleTable())
+					if (info.name == name) {
+						DCLF::SetToggleValue(DCLF::Toggles::Get().Requested(), info, on);
+						found = true;
+					}
+				if (!found)
+					a_error = fmt::format("no DCLF command or toggle named '{}'", name);
+				return found;
+			}
+			a_error = fmt::format("'{}' is not a DCLF command", command);
+			return false;
 		}
-		// CS_DCLF_TEST_EXIT=<frame>: a startup loop's run ends here, loading screens not counted. The log is flushed, then the
-		// process ends without the engine's shutdown, which is slow and not what such a run tests.
-		// The frames the command list's waits held move it later, as they move the commands after them; each wait holds at most its
-		// limit (kWaitLimitFrames, or its '@' frames), so the exit comes however the waits end.
-		static TestCommands testCommands;
-		static const std::uint32_t exitFrame = static_cast<std::uint32_t>(std::strtoul(DCLF::SwitchValue(DCLF::Switch::TestExit).c_str(), nullptr, 10));
-		static std::uint32_t exitCount = 0;
-		if (exitFrame && !DCLF::Scene::FrameView::LoadShown() && ++exitCount >= exitFrame + testCommands.HeldFrames()) {
-			logger::info("[DCLF] test exit at frame {}", exitCount);
+	}
+
+	void RegisterTestCommands()
+	{
+		Testing::RegisterCommandPrefix("dclf:", [](const std::string& a_name, const std::string& a_arg, std::string& a_error) {
+			return RunDclfCommand(a_arg.empty() ? a_name : a_name + "=" + a_arg, a_error);
+		});
+		// "reload": the last dclf:reload-shaders finished, and its rebuilt pipelines (if any) are swapped in.
+		Testing::RegisterWait("reload", [] {
+			auto& harness = Harness();
+			const auto* registry = RenderGraphRuntime::PipelineRegistry();
+			if (!registry || !harness.reloadAsked)
+				return true;
+			const auto reload = registry->LastReload();
+			return reload.serial > harness.reloadSerial && (reload.rebuilt == 0 || registry->Generation() > harness.reloadGeneration);
+		});
+		// "settled": the frames draw under the requested toggles on the pipeline they choose; at once with the feature off.
+		Testing::RegisterWait("settled", [] {
+			if (globals::state->IsFeatureDisabled("DrawcallLimitFix"))
+				return true;
+			const auto& requested = DCLF::Toggles::Get().Requested();
+			return DCLF::Toggles::Get().Frame() == requested &&
+			       DCLF::Draws::GraphBuiltForCpu() == DCLF::Draws::CpuPipelineForCell(requested, DCLF::Draws::CurrentGraphConditions().interior);
+		});
+		// "nvperf": the last dclf:nvperf capture done or failed.
+		Testing::RegisterWait("nvperf", [] {
+			auto& harness = Harness();
+			if (!harness.nvperfCapture)
+				return true;
+			const auto latest = GpuCounters::LatestResult();
+			return latest && latest->id >= harness.nvperfCapture;
+		});
+		Testing::RegisterExitReport([] {
 			const auto moves = DCLF::Extensions::TransformMoveStats();
 			logger::info("[DCLF] transform moves at exit: {} spilled (allocated past the queue), {} dropped while no build drained", moves.spilled, moves.dropped);
-			RenderGraph::Engine::Tripwire::Report("exit");
-			spdlog::apply_all([](const std::shared_ptr<spdlog::logger>& a_logger) { a_logger->flush(); });
-			::TerminateProcess(::GetCurrentProcess(), 0);
-		}
-		testCommands.OnFrame();
-		static TestToggle testToggle;
-		testToggle.OnFrame(std::string(a_feature));
-		static TestTurn testTurn;
-		testTurn.OnFrame();
-		TestCast::OnFrame();
-	}
-
-	TestHarnessProgress TestHarnessStatus()
-	{
-		auto& harness = Harness();
-		std::lock_guard lock(harness.statusMutex);
-		return harness.status;
+		});
 	}
 }
