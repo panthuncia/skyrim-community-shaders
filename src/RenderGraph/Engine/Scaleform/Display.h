@@ -28,11 +28,12 @@ namespace RenderGraph::Engine::Scaleform
 	/** @brief A draw's pipeline, apart from the surface's formats. */
 	struct DrawState
 	{
-		std::uint8_t vertexKind = 1;  // FillVS.hlsl's VS_KIND (0 for a filter draw)
+		std::uint8_t vertexKind = 1;  // the renderer's vertex shader index: FillVS.hlsl's VS_KIND, plus 6 for its VS_3D twin (0 for a filter draw)
 		std::uint8_t pixelKind = 1;   // FillPS.hlsl's PS_KIND (0 for a filter draw)
 		std::uint8_t blend = 1;       // the renderer's blend state index: 1 to 7, or 9 to 15 for the filters' array (8 + index)
 		Stencil stencil = Stencil::Off;
 		std::uint8_t filter = 0;  // FilterPS.hlsl's FILTER for a filter draw (FilterVS.hlsl, a FilterRecord), 0 for a fill draw
+		std::uint8_t lines = 0;   // 1: a line strip (DrawLineStrip), 0: a triangle list
 
 		auto operator<=>(const DrawState&) const = default;
 	};
@@ -52,6 +53,7 @@ namespace RenderGraph::Engine::Scaleform
 		std::uint32_t vertexCount = 0;  // vertices the draw makes (triangles times three)
 		std::int32_t textures[2] = { -1, -1 };  // indices into Display::textures, stages 0 and 1
 		std::uint8_t samplers[2] = { 0, 0 };    // the renderer's sampler index (wrap * 2 + sample), stages 0 and 1
+		bool noColour = false;  // a null pixel shader (a bitmap fill without a texture): the draw writes the stencil only
 	};
 
 	/** @brief ScaleformFillDraw in Scaleform/Fill.hlsli: the D3D11 constants and where the draw's vertices are. */

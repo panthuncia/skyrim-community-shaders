@@ -27,7 +27,7 @@ shaders `package/Shaders/Scaleform/`, behind `CS_ORG_SCALEFORM=1` (default off).
   or render-texture display appeared at all; the census line says how often they occur now.
 - **Shaders:** all 53 embedded sources are transcribed and checked (below, "Shaders"); `FILTER` 23/24 now have a C++ user.
 - **Run in game:** in the last P5.10 run 3,996 of 4,000 displays were drawn on the graph. No menu in the test runs makes a
-  D3D11 part on its own, so `CS_ORG_SCALEFORM_D3D11_PARTS=N` forces every Nth draw into one (scenario
+  D3D11 part on its own, so `CS_ORG_SCALEFORM_D3D11_PARTS=N` (removed in 5.5.8) forced every Nth draw into one (scenario
   `scaleform-org1-parts.env`). That path has run: in `1111-061333-p35-scaleform-org1-parts-f5`, of 11,000 displays 6,835
   were drawn on the graph with D3D11 parts, 4,151 on the graph alone and 14 on D3D11. With every port on
   (`1111-063518-p35-p5-all-r1`), 10,982 of 11,000 displays were drawn on the graph, none with a D3D11 part.
@@ -88,9 +88,8 @@ Inherent refusals, each counted in the census and logged once:
   or says it is not an engine target); a render target view in another format than its
   surface's; masks on a depth-stencil other than kMAIN's, or one that cannot be imported; more commands than the run gate holds
   (1,024); the Interface anchor's ring full this frame.
-- D3D11 parts: 3D draws, 32-bit indices, gouraud fills of type 4 and 5, gouraud fills of vertices without colours, XY32f
-  triangles, line strips, the fill off, a bitmap fill without a texture, video (YUV) and lost textures, non-`GTextureD3D1x`
-  fills, render to a texture (`PushRenderTarget`, `PushTempRenderTarget`), the blur family (`DrawBlurRect`),
+- D3D11 parts: video (YUV) and lost textures, non-`GTextureD3D1x` fills, a two-texture gouraud fill without its second
+  texture, render to a texture (`PushRenderTarget`, `PushTempRenderTarget`), the blur family (`DrawBlurRect`),
   `SetDisplayRenderTarget` inside a display, and the rest of a display after 8 parts or when another target is bound after one.
 
 **The census's `DrawBitmaps` (AE 84956) and AE 84961 classes.** AE 84961 sits between `DrawLineStrip` (84960) and `EndDisplay`
@@ -98,6 +97,31 @@ Inherent refusals, each counted in the census and logged once:
 (0x141049690). AE 84956 is `DrawBitmaps` itself. So both classes are the D3D11 renderer drawing glyphs and triangle lists. Its
 callers were the readiness refusals this change deletes: the displays before the first build, `a pipeline is being built`,
 and the new-surface displays. What remains is the inherent list above, now inside `Flush::EngineDraws` scopes.
+
+### Draws added in 5.5.8 (2026-11-12, `org-port/ui-movies`)
+
+Each was a D3D11 part of one call before. They follow what the D3D11 renderer does (SE 82838 `DrawIndexedTriList`, 82839
+`DrawLineStrip`, 82835 `DrawBitmaps`, 82817 `ApplyMatrix`; AE 84959, 84960, 84956, 84940):
+
+- **3D draws** (a world matrix set): the vertex kind's 3D twin (`VS_3D`, the renderer's index + 6, as its `SetVertexShader`
+  SE 82931 adds). The matrix is the renderer's own `ApplyMatrix`, called on the renderer: in 3D it reads only the 3D fields
+  (+0x554 dirty, +0x558 projection, +0x598 view, +0x5D8 their product, +0x618 world) and the user matrix, and writes the
+  vertex constants' CPU copy (+0x1C0, 16 floats, no D3D11 call), which the record copies. `DrawBitmaps` and the colour matrix
+  filter use it too. 3D pipelines are not enumerated: each is built at its first draw (logged).
+- **32-bit indices:** the record's index size is 4 (`Fill.hlsli` reads either).
+- **XY32f triangles:** vertex shader 1 with the input layout of format 1, as D3D11 binds them: the position is read as
+  R16G16_SINT whatever the data.
+- **Gouraud fills of type 4 and 5:** vertex kind 4 (type 3 alone takes 5) with pixel kind 14; the pixel stage's second
+  coordinate is the vertex stage's zero, as D3D11 links them.
+- **A gouraud fill of vertices without colours:** `DrawIndexedTriList` sets no vertex shader then; the one bound stays
+  (`boundVertexKind`, the last draw's of the display).
+- **The fill off:** `ApplyFillStyle` sets nothing; the pixel kind, textures, samplers and constants of the display's last
+  fill are reused (`boundFill`). Before any fill of the display the draw is dropped (logged once).
+- **A bitmap fill without a texture:** `ApplyFillStyle` binds a null pixel shader, so the draw writes no colour. It draws with
+  blend state 7 (no colour write), its stencil state as set.
+- **Line strips:** a `LineStrip` pipeline (`RasterProgram::Desc::topology`), vertex kind 1, the line style through the same
+  fill code, `lines + 1` vertices from the base vertex, no indices. Enumerated with pixel kind 1 and every blend.
+- The solid fill (pixel kind 1) is enumerated with every blend: Multiply and Darken keep kind 1 for it.
 
 ## Census
 
@@ -496,8 +520,8 @@ may land after the load), the HUD, the inventory, the magic menu, the map and th
 6. No `[ORG] frame anchors: Interface ran N times in one frame`; the census counts no `the Interface anchor's ring is full this
    frame` and no `a segment with more commands than the Interface gate holds`.
 
-`scaleform-org1-parts.env` is the same tour with `CS_ORG_SCALEFORM_D3D11_PARTS=5`: the census should count `a draw made a D3D11
-part by CS_ORG_SCALEFORM_D3D11_PARTS` and `too many D3D11 parts in one display`, and the shots should still match.
+`CS_ORG_SCALEFORM_D3D11_PARTS` and its scenario `scaleform-org1-parts.env` were removed in 5.5.8: the draws they forced into
+D3D11 parts are graph draws now.
 
 What a build must confirm first: no `[E]` from the anchor epoch, glyphs (now A8 on the graph), masks (the compass, the map's
 frame), blend modes, and any menu with a D3D11 part look as on D3D11.

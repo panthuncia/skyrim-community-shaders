@@ -96,6 +96,7 @@ namespace RenderGraph::Engine::Scaleform::Passes
 			Command::Kind kind = Command::Kind::Draw;
 			const RasterProgram* program = nullptr;
 			std::uint32_t stencilRef = 0;
+			bool lines = false;  // a line strip
 			FillBlock block{};
 		};
 
@@ -282,8 +283,14 @@ namespace RenderGraph::Engine::Scaleform::Passes
 			} else {
 				desc.vertexSource = kVertexShader;
 				desc.pixelSource = kPixelShader;
-				desc.defines = { { L"VS_KIND", std::to_wstring(a_key.state.vertexKind) }, { L"PS_KIND", std::to_wstring(a_key.state.pixelKind) } };
+				// The renderer's vertex shader index: 1 to 5, and 7 to 11 for the same kinds in 3D (a world matrix set).
+				const bool threeD = a_key.state.vertexKind > 6;
+				desc.defines = { { L"VS_KIND", std::to_wstring(threeD ? a_key.state.vertexKind - 6 : a_key.state.vertexKind) },
+					{ L"PS_KIND", std::to_wstring(a_key.state.pixelKind) } };
+				if (threeD)
+					desc.defines.emplace_back(L"VS_3D", L"1");
 			}
+			desc.topology = a_key.state.lines ? rhi::PrimitiveTopology::LineStrip : rhi::PrimitiveTopology::TriangleList;
 			RasterProgram::Target target{ .format = a_key.colour };
 			target.blend = BlendOf(a_key.state.blend);
 			desc.targets = { target };
@@ -296,10 +303,12 @@ namespace RenderGraph::Engine::Scaleform::Passes
 		 * @brief Every draw state the capture can make (Renderer.cpp: the background, ApplyFill, DrawIndexedTriList's vertex kinds,
 		 * DrawBitmaps, the colour matrix filter), for the pass with the depth-stencil or the one without. The set is finite:
 		 * - vertex and pixel kinds: 1 with 1-3 (solid, bitmap), 2 with 4-6 (bitmaps), 3 with 12-14 and 16-18 (XY16iC32 gouraud),
-		 *   4 with 11, 13, 14, 15, 17, 18 (XY16iCF32 gouraud), 5 with 11, 14, 15, 18 (gouraud type 3); filters 23 and 24;
+		 *   4 with 11, 13, 14, 15, 17, 18 (XY16iCF32 gouraud), 5 with 11, 14, 15, 18 (gouraud type 3); filters 23 and 24; line strips
+		 *   of kind 1 with 1 (the line style's colour);
 		 * - blends: the Multiply and Darken kinds (3, 6, 15-18, filter 24) only with the multiply and darken states (4, 6), the other
-		 *   kinds with 1, 2, 3, 5, the glyph kind (4) with any, the filters from the filters' array (8 + the index); every kind with 7
-		 *   (a mask being drawn, the Alpha and Erase modes);
+		 *   kinds with 1, 2, 3, 5, the solid and glyph kinds (1, 4) with any, the filters from the filters' array (8 + the index);
+		 *   every kind with 7 (a mask being drawn, the Alpha and Erase modes, a bitmap fill without a texture);
+		 * - 3D draws (a world matrix set: vertex kinds 7-11) are not enumerated: they are built at their first draw (logged).
 		 * - stencils: off in the pass without masks; off and test with any blend, clear, increment and decrement only with 7 (inside
 		 *   BeginSubmitMask) in the pass with them.
 		 */
@@ -334,11 +343,13 @@ namespace RenderGraph::Engine::Scaleform::Passes
 			};
 			for (const auto& kinds : fills)
 				for (const auto pixel : kinds.pixels) {
-					const std::vector<std::uint8_t> blends = pixel == 4 ? std::vector<std::uint8_t>{ 1, 2, 3, 4, 5, 6, 7 } :
+					// A solid fill in Multiply or Darken keeps kind 1 (its colour is moved towards white instead).
+					const std::vector<std::uint8_t> blends = pixel == 4 || pixel == 1 ? std::vector<std::uint8_t>{ 1, 2, 3, 4, 5, 6, 7 } :
 					                                         multiply(pixel) ? std::vector<std::uint8_t>{ 4, 6, 7 } :
 					                                                           std::vector<std::uint8_t>{ 1, 2, 3, 5, 7 };
 					add({ .vertexKind = kinds.vertex, .pixelKind = pixel }, blends);
 				}
+			add({ .vertexKind = 1, .pixelKind = 1, .lines = 1 }, { 1, 2, 3, 4, 5, 6, 7 });
 			add({ .vertexKind = 0, .pixelKind = 0, .filter = 23 }, { 9, 10, 11, 13, 15, 7 });
 			add({ .vertexKind = 0, .pixelKind = 0, .filter = 24 }, { 12, 14, 7 });
 			return states;
@@ -426,6 +437,7 @@ namespace RenderGraph::Engine::Scaleform::Passes
 				const std::uint64_t latchOffset = region.offset;
 				const RasterProgram* bound = nullptr;
 				std::uint32_t reference = 0;
+				bool lines = false;
 				for (std::uint32_t i = 0; i < frame->commands.size(); ++i) {
 					const auto& command = frame->commands[i];
 					if (command.kind == Command::Kind::ClearStencil) {
@@ -440,6 +452,10 @@ namespace RenderGraph::Engine::Scaleform::Passes
 						commands.BindLayout(command.program->layout->GetHandle());
 						commands.BindPipeline(command.program->Pipeline());
 						bound = command.program;
+					}
+					if (command.lines != lines) {
+						commands.SetPrimitiveTopology(command.lines ? rhi::PrimitiveTopology::LineStrip : rhi::PrimitiveTopology::TriangleList);
+						lines = command.lines;
 					}
 					if (command.stencilRef != reference) {
 						commands.SetStencilRef(command.stencilRef);
@@ -518,6 +534,7 @@ namespace RenderGraph::Engine::Scaleform::Passes
 					continue;
 				out.program = state.pendingPrograms[i].get();
 				out.stencilRef = command.stencilRef;
+				out.lines = command.state.lines != 0;
 				const auto textureOf = [&](std::uint32_t a_stage) {
 					const std::int32_t texture = command.textures[a_stage];
 					return texture >= 0 ? textures[static_cast<std::size_t>(texture)] : 0u;
