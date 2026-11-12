@@ -1717,3 +1717,22 @@ looked it up (`RequestRebuildFor`). Building the replacement graph on a worker a
 would remove the remaining synchronous builds; it needs those shared services to accept a build that runs beside the host's
 thread's preparations.
 - **Found by:** the rebuild-storm investigation (2026-11-11), 31.6 s of synchronous rebuilds in a four-minute tour.
+
+### 1D textures and engine 3D targets as imports
+
+- **Need:** read an engine `Texture1D` (Volumetric Lighting's repartition, 4096 texels the engine rewrites with Map) and an engine
+  3D render target (`texture3DRenderTargets`) from a pass. `FrameAnchors`' imports describe `ID3D11Texture2D`s only, and ORG's
+  descriptor manager makes no `Texture1D` views (BasicRHI has `SrvDim::Texture1D`).
+- **Who:** the Volumetric Lighting port (p5/volumetric-lighting.md). It avoids both: it owns its volumes as graph textures and
+  computes the repartition's samples in the shader from the exponent.
+- **Where it fits:** an `is1D` view kind beside `is3D` in `DescriptorHeapManager`'s texture views (`ExternalTextureResource` setting it
+  from `TextureDescription::type`), and an import that takes `ID3D11Resource` and describes 1D and 3D images from DXVK's info.
+- **Found by:** P5.5.3 (2026-11-11).
+
+### Binding a published resource or an array view through AnchorPasses
+
+`AnchorPasses::Bind` could name only a resource object and a mip. A port reading another feature's output by its published id, or a
+`Texture2DArray` (whose default view is its first slice), wrote a pass class of its own. `Bind::Published(id)` and `Bind::SrvArray`
+now cover both (P5.5.3). A published id that is not declarable at a build still has to be checked by the caller's `make`
+(`PublishedResources::IsDeclarable`), which leaves the pass out of that build.
+
