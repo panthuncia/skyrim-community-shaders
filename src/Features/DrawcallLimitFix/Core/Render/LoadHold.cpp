@@ -354,7 +354,10 @@ namespace DCLF::LoadHold
 	{
 		reentryThisFrame = true;
 		const auto now = state.load(std::memory_order_acquire);
-		if (now == HoldState::Idle && !reentryBlocked && ShellState::Running() && !Scene::FrameView::Get().NotDrawingYet() &&
+		// Releasing too: a load's hold that just settled, its loading menu closing. The first world frames after it can still need a
+		// re-entry (the graph rebuilds for a target the load made again, and the shadow views and occlusion maps are not DCLF's for a
+		// frame): held as one, with the presents, while the menu goes.
+		if ((now == HoldState::Idle || now == HoldState::Releasing) && !reentryBlocked && ShellState::Running() && !Scene::FrameView::Get().NotDrawingYet() &&
 			!Scene::FrameView::LoadShown()) {
 			hold = {};
 			hold.start = hold.progress = std::chrono::steady_clock::now();
