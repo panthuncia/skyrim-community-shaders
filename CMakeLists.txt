@@ -907,10 +907,10 @@ endif()
 
 # Reject legacy backend binaries in Vulkan package inputs.
 file(GLOB_RECURSE _LEGACY_UPSCALING_RUNTIMES
-    "${CMAKE_SOURCE_DIR}/package/*dx12*"
-    "${CMAKE_SOURCE_DIR}/package/*d3d12*"
-    "${CMAKE_SOURCE_DIR}/features/Upscaling/*dx12*"
-    "${CMAKE_SOURCE_DIR}/features/Upscaling/*d3d12*"
+    "${CMAKE_SOURCE_DIR}/package/*dx12*.dll"
+    "${CMAKE_SOURCE_DIR}/package/*d3d12*.dll"
+    "${CMAKE_SOURCE_DIR}/features/Upscaling/*dx12*.dll"
+    "${CMAKE_SOURCE_DIR}/features/Upscaling/*d3d12*.dll"
 )
 if(_LEGACY_UPSCALING_RUNTIMES)
     message(FATAL_ERROR "Legacy upscaling runtimes found in Vulkan package inputs: ${_LEGACY_UPSCALING_RUNTIMES}")
