@@ -390,7 +390,10 @@ struct ORGSubsurfaceScattering::Impl
 		if (!next->pointSampler)
 			fail("its point sampler");
 		// Written before they are read and read only within the frame: transient, so aliasable.
-		next->diffuseNoAlbedo = std::make_unique<GraphResources::Texture2D>(a_desc, "SSS::DiffuseNoAlbedo");
+		// CS_ORG_SSGI_DEBUG=16 keeps it out of the alias pool, to test whether it overwrites SSGI's memory.
+		const bool keepApart = Switches::Number("CS_ORG_SSGI_DEBUG", 0) == 16;
+		next->diffuseNoAlbedo = std::make_unique<GraphResources::Texture2D>(a_desc, "SSS::DiffuseNoAlbedo",
+			GraphResources::Options{ .lifetime = keepApart ? GraphResources::Lifetime::History : GraphResources::Lifetime::Transient });
 		if (!*next->diffuseNoAlbedo)
 			fail("its albedo-free texture");
 		next->blurTemp = std::make_unique<GraphResources::Texture2D>(a_desc, "SSS::BlurHorizontalTemp");

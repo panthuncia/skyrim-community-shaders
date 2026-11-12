@@ -2,6 +2,7 @@
 
 #include <d3d11.h>
 #include <cstdint>
+#include <optional>
 #include <memory>
 #include <string>
 #include <winrt/base.h>
@@ -70,6 +71,9 @@ namespace GraphResources
 	{
 		Lifetime lifetime = Lifetime::Transient;
 		Export d3d11 = Export::None;
+		// A transient's own alias pool (ORG's manual pool id): aliased only with the resources that name the same pool, never with
+		// another graph's. Unset: the shared automatic pool. A diagnostic (CS_ORG_SSGI_DEBUG=17).
+		std::optional<std::uint64_t> aliasPool;
 	};
 
 	/**
