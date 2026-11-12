@@ -98,6 +98,7 @@ namespace DCLF::Scene
 			SceneCapture::LeafView leaf;
 			Ineligible reason = Ineligible::None;  // its bucket
 			bool shadowOnly = false;
+			bool focusOnly = false;  // with shadowOnly: a hidden actor part, drawn only by focus views (kObjectFocusOnly)
 			bool entryTaken = false;       // a taken entry class's: its snapshot is the merge's (ComponentsResolve)
 			bool referenceReason = false;  // the dense walk's: reason into referenceReasons
 			// Slot-free record inputs.

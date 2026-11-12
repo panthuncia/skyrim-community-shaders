@@ -1074,6 +1074,24 @@ namespace DCLF::Scene
 		a_descriptors.decalWriteMode = 0;
 	}
 
+	bool Coordinator::HiddenFocusCaster(const Tracked& a_tracked, Ineligible a_reason, const SceneCapture::LeafView& a_leaf) const
+	{
+		if (a_reason != Ineligible::Hidden || !a_leaf || !Extensions::ParentAdmits(ActiveToggles(), Api::EngineParent::Actor, Api::ParentLeaves::AllLeaves))
+			return false;
+		// A caster at all: what the focus registration builds passes for (the shadow-map pass list), not a volumetric-only one.
+		if (ShadowCasterReject(a_leaf) != ShadowReject::None)
+			return false;
+		const void* key = a_tracked.geometry.get();
+		std::uint32_t depth = 0;
+		for (const auto* record = mirror.Node(key); record && depth < 256; key = record->parent, record = key ? mirror.Node(key) : nullptr, ++depth) {
+			if (record->userData && record->actor)
+				return true;
+			if (key == a_tracked.categoryNode)
+				break;
+		}
+		return false;
+	}
+
 	Ineligible Coordinator::ClassifyFrame(const Tracked& a_tracked) const
 	{
 		// The leaves under switch nodes are the parent contribution's (Features/SwitchNodes: CS_DCLF_SWITCH_NODES and its toggle).

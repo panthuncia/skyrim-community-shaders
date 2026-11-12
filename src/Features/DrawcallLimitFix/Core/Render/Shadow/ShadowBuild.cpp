@@ -51,7 +51,9 @@ namespace DCLF::Draws
 			std::uint32_t occlusionKey[kOcclusionViews];
 			for (std::uint32_t v = 0; v < kOcclusionViews; ++v)
 				occlusionKey[v] = ((a_modes >> OcclusionModeOf(v)) & 1) ? KeySlotOf(a_tables, a_lookups, a_object, BaseTechnique(a_tables, OcclusionModeOf(v), a_object)) : ~0u;
-			return { casterKey == ~0u ? 0u : casterKey, a_record, object.geometryIndex, (object.flags & ~(kObjectDecal | kObjectForward)) | kInputDrawable,
+			// A focus-only caster keeps its marker (kObjectFocusOnly's kObjectDecal): the views read it to drop it outside the focus shadows.
+			const std::uint32_t kept = ObjectFocusOnly(object.flags) ? kObjectFocusOnly : 0u;
+			return { casterKey == ~0u ? 0u : casterKey, a_record, object.geometryIndex, (object.flags & ~(kObjectDecal | kObjectForward)) | kept | kInputDrawable,
 				{ mask, casterKey, { occlusionKey[0], occlusionKey[1] } }, a_object, 0, PartitionsOf(a_tables, a_object), a_stream, FadeRootOf(a_tables, a_object),
 				a_record, LodPartitionsOf(a_tables, a_object) };
 		}

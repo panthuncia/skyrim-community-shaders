@@ -113,7 +113,7 @@ namespace DCLF::Draws
 	{
 		a_input.pipelineIndex = a_input.recordIndex = a_input.decalOrdinal = a_input.shadowRow = 0;
 		a_input.fadeDistance = 0.0f;
-		a_input.flags &= ~(kInputDrawable | kObjectDecal | kObjectForward);
+		a_input.flags &= ~(kInputDrawable | (ObjectFocusOnly(a_input.flags) ? 0u : kObjectDecal) | kObjectForward);
 		a_input.view.mask &= ~MainSideBits();
 		return a_input;
 	}

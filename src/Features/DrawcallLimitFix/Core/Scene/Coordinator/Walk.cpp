@@ -306,7 +306,8 @@ namespace DCLF::Scene
 		}
 		++c.ineligible[static_cast<std::size_t>(reason)];
 		a_out.reason = reason;
-		shadowOnly = reason != Ineligible::None && !Eligibility::DeferredToAccumulate(reason) && Eligibility::ShadowOnlyCaster(reason, leaf);
+		a_out.focusOnly = HiddenFocusCaster(entry, reason, leaf);
+		shadowOnly = reason != Ineligible::None && !Eligibility::DeferredToAccumulate(reason) && (Eligibility::ShadowOnlyCaster(reason, leaf) || a_out.focusOnly);
 		a_out.shadowOnly = shadowOnly;
 		if (reason != Ineligible::None && !Eligibility::DeferredToAccumulate(reason) && !shadowOnly) {
 			a_out.write = EvalResult::Write::Rejected;
@@ -367,7 +368,8 @@ namespace DCLF::Scene
 		a_out.reason = reason;
 		if (reason == Ineligible::Technique)
 			++c.techniqueRejects[descriptors.rejectedTechnique & 63];
-		shadowOnly = reason != Ineligible::None && !Eligibility::DeferredToAccumulate(reason) && Eligibility::ShadowOnlyCaster(reason, leaf);
+		a_out.focusOnly = HiddenFocusCaster(entry, reason, leaf);
+		shadowOnly = reason != Ineligible::None && !Eligibility::DeferredToAccumulate(reason) && (Eligibility::ShadowOnlyCaster(reason, leaf) || a_out.focusOnly);
 		a_out.shadowOnly = shadowOnly;
 		if (reason != Ineligible::None && !Eligibility::DeferredToAccumulate(reason) && !shadowOnly) {
 			a_out.write = EvalResult::Write::Rejected;
@@ -643,7 +645,7 @@ namespace DCLF::Scene
 		// The accumulator's half is patched by BuildAccumulatePhase; BuildDrawsCS rejects kObjectNoBindings before reading the indices.
 		object.materialIndex = 0;
 		object.pipelineIndex = 0;
-		object.flags = kObjectNoBindings | (shadowOnly ? kObjectShadowOnly : 0u);
+		object.flags = kObjectNoBindings | (shadowOnly ? (r.focusOnly ? kObjectFocusOnly : kObjectShadowOnly) : 0u);
 		// Two-sidedness and the alpha test are set here, not by the accumulate phase: the shadow epochs key pipelines on them and read
 		// the alpha reference (Utility.hlsl, DCLFAlphaTestRef) before that phase runs.
 		using PropertyFlag = RE::BSShaderProperty::EShaderPropertyFlag;

@@ -53,6 +53,9 @@ namespace DCLF
 
 		// The shadow-map registration this thread runs now (ShadowRegistration): its accumulator's render mode is a shadow view's.
 		thread_local bool t_shadowRegistration = false;
+		// The accumulator the shadow modes' registration on this thread registers into, and its render mode (~0u: none).
+		thread_local const void* t_registrationAccumulator = nullptr;
+		thread_local std::uint32_t t_registrationMode = ~0u;
 		// The menu scenes' renders this thread is inside (MenuSceneScope).
 		thread_local std::uint32_t t_menuScenes = 0;
 
@@ -443,13 +446,29 @@ namespace DCLF
 		std::atomic_store(&focusRenderers, std::move(a_renderers));
 	}
 
+	void PassCapture::SetShadowAccumulators(std::shared_ptr<const ShadowAccumulatorMap> a_accumulators)
+	{
+		std::atomic_store(&shadowAccumulators, std::move(a_accumulators));
+	}
+
 	bool PassCapture::ShadowModeOfBatch(const RE::BSBatchRenderer* a_batch, std::uint32_t& a_mode) const
 	{
 		const auto renderers = std::atomic_load(&shadowRenderers);
 		if (!renderers)
 			return false;
-		const auto it = renderers->find(a_batch);
-		if (it == renderers->end() || it->second >= kShadowModes)
+		if (const auto it = renderers->find(a_batch); it != renderers->end()) {
+			if (it->second >= kShadowModes)
+				return false;
+			a_mode = it->second;
+			return true;
+		}
+		// A renderer of no published set during the shadow modes' registration: a geometry group's the engine made for this pass. It is
+		// the registering accumulator's view's (covered views only: ShadowViews::PublishRenderers).
+		if (!t_shadowRegistration || !t_registrationAccumulator)
+			return false;
+		const auto accumulators = std::atomic_load(&shadowAccumulators);
+		const auto it = accumulators ? accumulators->find(t_registrationAccumulator) : ShadowAccumulatorMap::const_iterator{};
+		if (!accumulators || it == accumulators->end() || it->second >= kShadowModes)
 			return false;
 		a_mode = it->second;
 		return true;
@@ -520,8 +539,12 @@ namespace DCLF
 				const auto mode = data ? static_cast<std::uint32_t>(data->renderMode) : 0u;
 				const bool previous = std::exchange(t_shadowRegistration,
 					mode >= PassCapture::kFirstShadowMode && mode < PassCapture::kFirstShadowMode + PassCapture::kShadowModes);
+				const auto previousAccumulator = std::exchange(t_registrationAccumulator, static_cast<const void*>(a_accumulator));
+				const auto previousMode = std::exchange(t_registrationMode, data ? mode : ~0u);
 				const auto result = func(a_accumulator, a_geometry, a_property);
 				t_shadowRegistration = previous;
+				t_registrationAccumulator = previousAccumulator;
+				t_registrationMode = previousMode;
 				return result;
 			}
 			static inline REL::Relocation<decltype(thunk)> func;
@@ -603,10 +626,27 @@ namespace DCLF
 				sample.name = geometry->name.c_str() ? geometry->name.c_str() : "";
 				sample.owner = OwnerOf(geometry);
 				std::uint32_t mode = 0;
+				sample.renderMode = t_registrationMode;
 				sample.where = ShadowModeOfBatch(a_batch, mode)                         ? fmt::format("a covered shadow view (mode {})", mode) :
 				               t_shadowRegistration                                       ? std::string("a shadow view DCLF does not cover") :
 				               IsMainRenderer(a_batch) || MainRendererNow(a_batch)        ? std::string("the main views") :
 				                                                                            std::string("another view");
+				// Another view: an OwnRenderers view's renderer (its name, and whether it withholds now), else one DCLF knows nothing of.
+				if (sample.where == "another view") {
+					const auto& views = Extensions::Views();
+					for (std::uint32_t i = 0; i < views.ownRendererCount; ++i) {
+						const auto v = static_cast<std::size_t>(views.ownRendererViews[i]);
+						const auto renderers = std::atomic_load(&viewRenderers[v].renderers);
+						if (renderers && renderers->contains(a_batch)) {
+							sample.where = fmt::format("the {} view's renderers ({}withholding, {}covered)", views.views[v].name,
+								viewRenderers[v].withholdActive.load(std::memory_order_acquire) ? "" : "not ",
+								ViewCovered(views.ownRendererViews[i]) ? "" : "not ");
+							break;
+						}
+					}
+					if (sample.where == "another view")
+						sample.where = "a renderer of no view DCLF knows (not the main, shadow or own-renderer views)";
+				}
 				const auto* shader = a_pass->shader;
 				sample.shader = fmt::format("{} technique {:08X} hint {}", shader ? static_cast<std::uint32_t>(shader->shaderType.get()) : 99u, a_pass->passEnum,
 					static_cast<std::uint32_t>(a_pass->accumulationHint));

@@ -156,6 +156,8 @@ namespace DCLF::Direct
 		// Main's cull-only candidates (no bindings, or outside the set): culled for their verdicts (kAccumulated), no sequences (sequenceCount 0),
 		// after every drawn lane of the list.
 		kLaneCullOnly = 1u << 11,
+		// A focus-only caster (kObjectFocusOnly): only a focus view (CullView::focusRoot set) takes it.
+		kLaneFocusOnly = 1u << 12,
 	};
 
 	/**

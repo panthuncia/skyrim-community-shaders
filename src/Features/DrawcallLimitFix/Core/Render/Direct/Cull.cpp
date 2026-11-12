@@ -999,6 +999,9 @@ namespace DCLF::Direct
 			// A focus view's casters: its target's members alone (an input's root word against the latch's root + 1).
 			if (a_view.focusRoot != 0 && lane.root != a_view.focusRoot - 1)
 				return;
+			// A focus-only caster (a hidden actor part): the focus views' alone.
+			if (a_view.focusRoot == 0 && (lane.flags & kLaneFocusOnly))
+				return;
 			laneLap(CullProfile::kGather);
 			const bool keep = mainCamera ? MainCameraKept(a_view, a_frame, lane, pass[i] != 0, a_live, portalBatch ? &portalRejected[i] : nullptr) :
 			                               ViewKept(a_view, a_frame, lane, pass[i] != 0, parabolicDecided);
