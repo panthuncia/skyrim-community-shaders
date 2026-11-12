@@ -77,6 +77,19 @@ namespace RenderGraph::Engine::Tripwire
 			fmt::ptr(device), fmt::ptr(context));
 	}
 
+	void InstallNativeDevice(ID3D11Device* a_device, ID3D11DeviceContext* a_context)
+	{
+		auto& guest = GetGuest();
+		if (!a_device || !a_context || guest.context.load(std::memory_order_acquire))
+			return;
+		// The engine holds its own references; the ones taken here are never dropped, as the guest's are not.
+		a_device->AddRef();
+		a_context->AddRef();
+		guest.device.store(a_device, std::memory_order_release);
+		guest.context.store(a_context, std::memory_order_release);
+		logger::info("[ORG] tripwire: the engine's device and immediate context are native handles ({} / {})", fmt::ptr(a_device), fmt::ptr(a_context));
+	}
+
 	bool GuestContextInstalled()
 	{
 		return GetGuest().context.load(std::memory_order_acquire) != nullptr;
