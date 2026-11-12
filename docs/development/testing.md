@@ -11,6 +11,7 @@ They talk through two JSON files in the SKSE log folder (`Documents\My Games\Sky
 |---|---|---|
 | `CommunityShaders-Test.json` | the harness, before launch | the game, in `SKSEPlugin_Load` |
 | `CommunityShaders-Test.status.json` | the game, about once a second and at every milestone | the harness |
+| `CommunityShaders-Switches.json` | the game, with `CS_TEST_LIST_SWITCHES=1` | `cs-test check-schema` |
 
 The test runner does not depend on any feature. It works with Drawcall Limit Fix (DCLF) disabled at boot. Features add their own commands and load holds through `Testing::RegisterCommand` and `Testing::Holds`.
 
@@ -153,8 +154,27 @@ The game rewrites this file about once a second and at every milestone and outco
 | `never-loaded` | game or harness | a phase timeout ran out; `reason` names the last milestone reached |
 | `device-lost` | game | the GPU device was lost; `fault` holds the fault address and crash markers. The game exits two seconds later. |
 | `crashed` | game or harness | an unhandled exception, or the process ended without an outcome |
-| `hang` | game | the hang watchdog fired |
+| `hang` | game or harness | the hang watchdog fired, or the status file was not rewritten for `run.stall_s` (harness) |
 | `never-launched` | harness | no status file within `timeouts.launch` |
 | `timeout` | harness | `run.timeout_s` ran out with no other outcome |
 
 The harness writes the final `result.json` in the run folder. It holds the outcome, the reason, the milestones, the stage manifest, the resolved configuration, the shots, the first error and the error counts by message kind.
+
+## `CommunityShaders-Switches.json` (switch dump)
+
+With `CS_TEST_LIST_SWITCHES=1` the game writes every switch it knows and exits. `cs-test check-schema` compares it with `tools/cs-test/schema.toml`.
+
+```json
+{
+  "version": 1,
+  "switches": [
+    { "name": "CS_DCLF_SHADOWS", "kind": "feature", "description": "0: DCLF does not draw the shadow views (live toggle's seed)", "family": "dclf" }
+  ]
+}
+```
+
+- **`kind`** is DCLF's kind in lower case (`feature`, `parity`, `diagnostic`, `test`, `other`); `other` for switches outside DCLF's registry.
+- **`family`** is the owner: `dclf` (DCLF's registry and its features' `RegisterSwitch` rows, `CS_ORG_EPOCHS` among them), `org` (other `CS_ORG_*`), `cs` (other `CS_*`), `basicrhi`, `dxvk`, `vk`.
+- **`description`** is the registry's text, or empty.
+- DCLF's features register their switches only when DCLF installs, so dump with DCLF on.
+
