@@ -17,7 +17,8 @@
 //   family's batch, between the two.
 //
 // Programs: Utility.hlsl's ORG build (UTILITY_ORG_SCENE: the base texture, the fog of war, depth and the shadow maps, skinned or
-// not). A draw of a shader with no ORG build yet (Lighting, Effect) ends its batch's latched part; the engine draws the rest.
+// not) and Lighting.hlsl's (LIGHTING_ORG: the world's CS features off). A draw of a shader with no ORG build yet (Effect, tree LOD)
+// ends its batch's latched part; the engine draws the rest.
 
 #include "Features/DrawcallLimitFix/Api/Feature.h"
 #include "Features/DrawcallLimitFix/Core/Engine/EngineAccess.h"
@@ -107,6 +108,43 @@ namespace DCLF::Features::MenuViews::Scenes
 	};
 	static_assert(sizeof(UtilitySceneConstants) == 384 && sizeof(UtilitySceneConstants) % 16 == 0, "UtilityOrgSceneDraw's layout");
 
+	/** @brief The rows of each constant group the Lighting latch takes (Lighting.hlsl's packoffsets). */
+	inline constexpr std::uint32_t kLightingVSTechniqueRows = 4;
+	inline constexpr std::uint32_t kLightingVSMaterialRows = 3;
+	inline constexpr std::uint32_t kLightingVSGeometryRows = 15;
+	inline constexpr std::uint32_t kLightingPSTechniqueRows = 3;
+	inline constexpr std::uint32_t kLightingPSMaterialRows = 18;
+	inline constexpr std::uint32_t kLightingPSGeometryRows = 30;
+	/** @brief The texture and sampler slots a Lighting draw's latch holds (t0-t15, s0-s15). */
+	inline constexpr std::uint32_t kLightingSlots = 16;
+
+	/** @brief LightingOrgDraw in Lighting.hlsl: a Lighting draw's latched values, 1376 bytes. */
+	struct LightingSceneConstants
+	{
+		float vsTechnique[kLightingVSTechniqueRows][4];
+		float vsMaterial[kLightingVSMaterialRows][4];
+		float vsGeometry[kLightingVSGeometryRows][4];
+		float psTechnique[kLightingPSTechniqueRows][4];
+		float psMaterial[kLightingPSMaterialRows][4];
+		float psGeometry[kLightingPSGeometryRows][4];
+		std::uint32_t descriptors[4];  // CS's permutation block: vertex, pixel, extra and extra feature descriptors
+		float effectRadius;
+		std::uint32_t baseTextureIsWorking;
+		std::uint32_t renderToUI;
+		float alphaTestRef;
+		std::uint32_t vertexStride;
+		std::uint32_t firstIndex;
+		std::uint32_t nullTexture;
+		std::uint32_t padding;
+		std::uint32_t textures[kLightingSlots];
+		std::uint32_t samplers[kLightingSlots];
+		std::uint32_t vertexAddress[2];
+		std::uint32_t indexAddress[2];
+		std::uint32_t vertexLayout[2];
+		std::uint32_t padding2[2];
+	};
+	static_assert(sizeof(LightingSceneConstants) == 1376 && sizeof(LightingSceneConstants) % 16 == 0, "LightingOrgDraw's layout");
+
 	/** @brief A skinned draw's palettes as Common/Skinned.hlsli's ORG_LATCHED_BONES reads them: the previous frame's (VS b9), then this one's (b10). */
 	inline constexpr std::uint32_t kPaletteRows = 240;
 	inline constexpr std::uint32_t kBonesBytes = 2 * kPaletteRows * 16;
@@ -119,6 +157,7 @@ namespace DCLF::Features::MenuViews::Scenes
 	enum class Shader : std::uint8_t
 	{
 		Utility,
+		Lighting,
 	};
 
 	/** @brief One latched draw: its program, targets and the offsets of its values in its run's latch. */
@@ -183,6 +222,8 @@ namespace DCLF::Features::MenuViews::Scenes
 		Family::InputResult ReadPublished(View a_view, std::string_view a_id, std::uint32_t& a_index);
 		/** @brief The Utility program for a key: null when it cannot be built. */
 		std::shared_ptr<const void> UtilityProgram(const Family::ProgramKey& a_key, const RE::BSShader& a_shader);
+		/** @brief The Lighting program for a key: null when it cannot be built. */
+		std::shared_ptr<const void> LightingProgram(const Family::ProgramKey& a_key, const RE::BSShader& a_shader);
 		/** @brief The format of a_view's import a_index (rhi::Format value; 0 without one), and of its depth. */
 		std::uint32_t ColourFormat(View a_view, std::uint32_t a_index);
 		std::uint32_t DepthFormat(View a_view);

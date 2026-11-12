@@ -3,6 +3,112 @@
 
 #define LIGHTING
 
+#if defined(CS_ORG_BINDLESS) && !defined(DCLF_BINDLESS)
+// The ORG build of the engine's Lighting draws, drawn by Drawcall Limit Fix's menu scenes family
+// (Features/DrawcallLimitFix/Features/MenuViews): a menu model's colour pass. A draw's engine constants (both stages' PerTechnique,
+// PerMaterial and PerGeometry, the alpha test reference), CS's permutation block, its textures' and samplers' heap indices and its
+// geometry are one latch region; a skinned draw's palettes are another (Common/Skinned.hlsli, ORG_LATCHED_BONES). FrameBuffer
+// (the engine's VS_PerFrame), SharedData and FeatureData are the shared constants, written at the anchor's run right after the
+// engine's batch, so they hold the camera the engine's draw would have read.
+// The world's CS features are off in this build: a menu scene has none of their frame inputs (light clusters, skylighting, the
+// cubemaps, the world's shadows, fog, wetness), so it shades as the vanilla shader with CS's material path.
+#	define LIGHTING_ORG
+#	undef LIGHT_LIMIT_FIX
+#	undef SKYLIGHTING
+#	undef IBL
+#	undef DYNAMIC_CUBEMAPS
+#	undef CLOUD_SHADOWS
+#	undef TERRAIN_SHADOWS
+#	undef VOLUMETRIC_SHADOWS
+#	undef SCREEN_SPACE_SHADOWS
+#	undef SCREEN_SPACE_GI
+#	undef WETNESS_EFFECTS
+#	undef WATER_EFFECTS
+#	undef WATER_BLENDING
+#	undef TERRAIN_BLENDING
+#	undef TERRAIN_VARIATION
+#	undef EXTENDED_MATERIALS
+#	undef EXTENDED_TRANSLUCENCY
+#	undef EXP_HEIGHT_FOG
+#	undef SSS
+#	undef CS_SKIN
+#	undef CS_SKIN_SHADING
+#	undef CS_HAIR_SHADING
+#	undef LANDSCAPE_SEAMS
+#	undef GLINT
+#	undef LLFDEBUG
+#	undef ENABLE_LL
+#	define ORG_SHARED_CONSTANTS
+#	define ORG_HEADER_RESOURCES
+#	define ORG_LATCHED_BONES
+#	define ORG_LATCHED_PERMUTATION LightingDraw
+#	include "Common/OrgResources.hlsli"
+
+// A draw's latched values (LightingSceneConstants in Features/DrawcallLimitFix/Features/MenuViews/MenuScenes.h): the rows of the
+// engine's constant buffers as SetupTechnique, SetupMaterial and SetupGeometry wrote them (row_major matrices: their rows are the
+// registers).
+struct LightingOrgDraw
+{
+	float4 VSTechnique[4];  // VS b0: HighDetailRange, FogParam, FogNearColor, FogFarColor
+	float4 VSMaterial[3];   // VS b1: LeftEyeCenter, RightEyeCenter, TexcoordOffset
+	float4 VSGeometry[15];  // VS b2: World, PreviousWorld, EyePosition, LandBlendParams, TreeParams, WindTimers, TextureProj, IndexScale, WorldMapOverlayParameters
+	float4 PSTechnique[3];  // PS b0: FogColor, ColourOutputClamp, VPOSOffset
+	float4 PSMaterial[18];  // PS b1
+	float4 PSGeometry[30];  // PS b2
+	uint4 Descriptors;      // CS's permutation block: vertex, pixel, extra and extra feature descriptors
+	float EffectRadius;
+	uint BaseTextureIsWorking;
+	uint RenderToUI;
+	float AlphaTestRefRS;  // b11
+	uint VertexStride;
+	uint FirstIndex;
+	uint NullTexture;  // a null 2D view: what a register CS binds past t15 reads in this build
+	uint Padding;
+	uint4 Textures[4];  // t0-t15 heap indices
+	uint4 Samplers[4];  // s0-s15 sampler heap indices
+	uint2 VertexAddress;
+	uint2 IndexAddress;
+	uint2 VertexLayout;
+	uint2 Padding2;
+};
+
+// The draw's palettes (Common/Skinned.hlsli): previous frame's 240 rows, then this frame's. Read by row, never loaded whole.
+struct LightingOrgBones
+{
+	float4 Rows[480];
+};
+
+#	define LIGHTING_ORG_RESOURCES(X)                \
+		X(SHARED, ConstantBuffer, Shared, 0)         \
+		X(LATCH, LightingOrgDraw, LightingDraw, 2)   \
+		X(EXTERN_LATCH, LightingOrgBones, Bones, 9)  \
+		X(UNREAD, Texture2D<float4>, DepthTexture, 17) \
+		X(UNREAD_LATCH, DirectionalShadowLightData, DirectionalShadowLight, 98)
+ORG_PUSH_BLOCK(LIGHTING_ORG_RESOURCES(ORG_HANDLE))
+LIGHTING_ORG_RESOURCES(ORG_RESOURCE)
+
+static ByteAddressBuffer OrgBonesBuffer = ResourceDescriptorHeap[OrgHandle_Bones];
+/** @brief Row a_row of palette a_palette (0 previous, 1 current) of the draw's latched bones. */
+float4 OrgBoneRow(uint a_palette, uint a_row)
+{
+	return asfloat(OrgBonesBuffer.Load4(OrgOffset_Bones + (a_palette * 240 + a_row) * 16));
+}
+
+/** @brief The heap index of texture register a_register: the latched slot below t16, else the null view (CS's registers, read only by the features this build turns off). */
+uint LightingOrgTexture(uint a_register)
+{
+	return a_register < 16 ? LightingDraw.Textures[a_register >> 2][a_register & 3] : LightingDraw.NullTexture;
+}
+
+#	define LIGHTING_SRV(T, N, R) static T N = ResourceDescriptorHeap[LightingOrgTexture(R)];
+#	define LIGHTING_SAMPLER(T, N, R) static T N = SamplerDescriptorHeap[LightingDraw.Samplers[(R) >> 2][(R) & 3]];
+
+// The vertex pulling helpers (DCLFStream, DCLFAttribute): the ORG vertex stage reads its draw's vertex as the DCLF pulled stages do.
+#	define DCLF_PULLED_VERTICES
+#	include "Common/DCLFVertexPull.hlsli"
+#	undef DCLF_PULLED_VERTICES
+#endif
+
 #if defined(LANDSCAPE) && defined(DCLF_BINDLESS_DRAW) && !defined(LANDSCAPE_SEAMS)
 // Seam resources vary per quad; a zero descriptor row preserves ordinary terrain without splitting batches.
 #	define LANDSCAPE_SEAMS
@@ -151,6 +257,29 @@ struct VS_OUTPUT
 };
 #ifdef VSHADER
 
+#	if defined(LIGHTING_ORG)
+// The vertex stage's constants, from the draw's latch (LightingOrgDraw) and the shared FrameBuffer (VS_PerFrame is the engine's b12).
+static float4 HighDetailRange = LightingDraw.VSTechnique[0];
+static float4 FogParam = LightingDraw.VSTechnique[1];
+static float4 FogNearColor = LightingDraw.VSTechnique[2];
+static float4 FogFarColor = LightingDraw.VSTechnique[3];
+static float4 LeftEyeCenter = LightingDraw.VSMaterial[0];
+static float4 RightEyeCenter = LightingDraw.VSMaterial[1];
+static float4 TexcoordOffset = LightingDraw.VSMaterial[2];
+static row_major float3x4 World = float3x4(LightingDraw.VSGeometry[0], LightingDraw.VSGeometry[1], LightingDraw.VSGeometry[2]);
+static row_major float3x4 PreviousWorld = float3x4(LightingDraw.VSGeometry[3], LightingDraw.VSGeometry[4], LightingDraw.VSGeometry[5]);
+static float4 EyePosition = LightingDraw.VSGeometry[6];
+static float4 LandBlendParams = LightingDraw.VSGeometry[7];
+static float4 TreeParams = LightingDraw.VSGeometry[8];
+static float2 WindTimers = LightingDraw.VSGeometry[9].xy;
+static row_major float3x4 TextureProj = float3x4(LightingDraw.VSGeometry[10], LightingDraw.VSGeometry[11], LightingDraw.VSGeometry[12]);
+static float IndexScale = LightingDraw.VSGeometry[13].x;
+static float4 WorldMapOverlayParameters = LightingDraw.VSGeometry[14];
+static row_major float3x3 ScreenProj = (float3x3)FrameBuffer::CameraView;
+static row_major float4x4 ViewProj = FrameBuffer::CameraViewProj;
+static float3 BonesPivot = FrameBuffer::CameraPosAdjust.xyz;
+static float3 PreviousBonesPivot = FrameBuffer::CameraPreviousPosAdjust.xyz;
+#	else
 cbuffer PerTechnique : register(b0)
 {
 	float4 HighDetailRange : packoffset(c0);  // loaded cells center in xy, size in zw
@@ -211,6 +340,7 @@ cbuffer VS_PerFrame : register(b12)
 	float3 PreviousBonesPivot : packoffset(c41);
 #	endif  // SKINNED || DCLF_BINDLESS
 };
+#	endif  // LIGHTING_ORG
 
 #if defined(DCLF_BINDLESS)
 // The placement holds World and PreviousWorld absolute, so one row serves every epoch and every camera;
@@ -303,7 +433,7 @@ float2 GetTreeShiftVector(float4 position, float4 color)
 }
 #	endif  // TREE_ANIM
 
-#	if defined(DCLF_PULLED) || defined(DCLF_PULLED_VERTICES)
+#	if defined(DCLF_PULLED) || defined(DCLF_PULLED_VERTICES) || defined(LIGHTING_ORG)
 VS_OUTPUT DCLFShade(VS_INPUT input)
 #	else
 VS_OUTPUT main(VS_INPUT input)
@@ -475,7 +605,7 @@ VS_OUTPUT main(VS_INPUT input)
 	return vsout;
 }
 
-#	if defined(DCLF_PULLED) || defined(DCLF_PULLED_VERTICES)
+#	if defined(DCLF_PULLED) || defined(DCLF_PULLED_VERTICES) || defined(LIGHTING_ORG)
 // Drawcall Limit Fix's draws have no input assembly: every vertex stage loads its vertex's attributes itself, decoded as the
 // engine's input layout for the draw's vertex layout has them (VertexInput.cpp, BuildVertexElements; DCLFDrawVertexLayout, set
 // first), then shades them as the input assembler's (DCLFShade). One function for the Z-prepass's build and the colour pass's, so
@@ -594,7 +724,30 @@ VS_OUTPUT main(uint index : SV_VertexID)
 	second.stride = DCLFStreamStride;
 	return DCLFShade(DCLFPulledInput(index, first, second));
 }
-#	endif  // DCLF_PULLED, DCLF_PULLED_VERTICES
+#	elif defined(LIGHTING_ORG)
+#		if defined(__spirv__)
+// The ORG build's vertex stage: the draw's vertex pulled as the input assembler reads it (its 16-bit index, then its attributes as
+// the engine's input layout for the draw's vertex layout decodes them), then the engine's stage (DCLFShade).
+VS_OUTPUT main(uint a_vertexID : SV_VertexID)
+{
+	DCLFDrawVertexLayout = LightingDraw.VertexLayout;
+	const uint indexNumber = LightingDraw.FirstIndex + a_vertexID;
+	const uint indexWord = vk::RawBufferLoad<uint>(DCLFAddress(LightingDraw.IndexAddress) + uint64_t((indexNumber * 2) & ~3u));
+	const uint index = (indexNumber & 1) ? (indexWord >> 16) : (indexWord & 0xFFFF);
+	DCLFStream first = { DCLFAddress(LightingDraw.VertexAddress), LightingDraw.VertexStride };
+	DCLFStream second = { uint64_t(0), 0u };
+	return DCLFShade(DCLFPulledInput(index, first, second));
+}
+#		else
+// The D3D12 build has no vertex pulling yet: it compiles, and draws nothing.
+VS_OUTPUT main(uint a_vertexID : SV_VertexID)
+{
+	VS_OUTPUT vsout = (VS_OUTPUT)0;
+	vsout.Position = float4(0, 0, (float)LightingDraw.FirstIndex, 1);
+	return vsout;
+}
+#		endif
+#	endif  // DCLF_PULLED, DCLF_PULLED_VERTICES, LIGHTING_ORG
 #endif  // VSHADER
 
 typedef VS_OUTPUT PS_INPUT;
@@ -636,6 +789,208 @@ static const bool PBRTextures = true;
 static const bool PBRTextures = false;
 #	endif
 
+#	if defined(LIGHTING_ORG)
+// The ORG build reads the same slots from the heap (LIGHTING_SRV, LIGHTING_SAMPLER). The register declarations stay as they are
+// below: Drawcall Limit Fix rewrites those lines for its own builds (PulledSource.cpp).
+LIGHTING_SAMPLER(SamplerState, SampTerrainParallaxSampler, 1)
+
+#	if defined(LANDSCAPE)
+
+LIGHTING_SAMPLER(SamplerState, SampColorSampler, 0)
+
+#		define SampLandColor2Sampler SampColorSampler
+#		define SampLandColor3Sampler SampColorSampler
+#		define SampLandColor4Sampler SampColorSampler
+#		define SampLandColor5Sampler SampColorSampler
+#		define SampLandColor6Sampler SampColorSampler
+#		define SampNormalSampler SampColorSampler
+#		define SampLandNormal2Sampler SampColorSampler
+#		define SampLandNormal3Sampler SampColorSampler
+#		define SampLandNormal4Sampler SampColorSampler
+#		define SampLandNormal5Sampler SampColorSampler
+#		define SampLandNormal6Sampler SampColorSampler
+#		define SampRMAOSSampler SampColorSampler
+#		define SampLandRMAOS2Sampler SampColorSampler
+#		define SampLandRMAOS3Sampler SampColorSampler
+#		define SampLandRMAOS4Sampler SampColorSampler
+#		define SampLandRMAOS5Sampler SampColorSampler
+#		define SampLandRMAOS6Sampler SampColorSampler
+
+#	else
+
+LIGHTING_SAMPLER(SamplerState, SampColorSampler, 0)
+
+#		define SampNormalSampler SampColorSampler
+
+#		if defined(MODELSPACENORMALS) && !defined(LODLANDNOISE)
+LIGHTING_SAMPLER(SamplerState, SampSpecularSampler, 2)
+#		endif
+#		if defined(FACEGEN)
+LIGHTING_SAMPLER(SamplerState, SampTintSampler, 3)
+LIGHTING_SAMPLER(SamplerState, SampDetailSampler, 4)
+#		elif defined(PARALLAX)
+LIGHTING_SAMPLER(SamplerState, SampParallaxSampler, 3)
+#		elif defined(PROJECTED_UV) && !defined(SPARKLE)
+LIGHTING_SAMPLER(SamplerState, SampProjDiffuseSampler, 3)
+#		endif
+
+#		if (defined(ENVMAP) || defined(MULTI_LAYER_PARALLAX) || defined(SNOW_FLAG) || defined(EYE)) && !defined(FACEGEN)
+LIGHTING_SAMPLER(SamplerState, SampEnvSampler, 4)
+LIGHTING_SAMPLER(SamplerState, SampEnvMaskSampler, 5)
+#		endif
+
+#		if defined(TRUE_PBR) && !defined(FACEGEN)
+LIGHTING_SAMPLER(SamplerState, SampParallaxSampler, 4)
+#		endif
+#		if defined(TRUE_PBR)
+LIGHTING_SAMPLER(SamplerState, SampRMAOSSampler, 5)
+#		endif
+
+LIGHTING_SAMPLER(SamplerState, SampGlowSampler, 6)
+
+#		if defined(MULTI_LAYER_PARALLAX)
+LIGHTING_SAMPLER(SamplerState, SampLayerSampler, 8)
+#		elif defined(PROJECTED_UV) && !defined(SPARKLE)
+LIGHTING_SAMPLER(SamplerState, SampProjNormalSampler, 8)
+#		endif
+
+LIGHTING_SAMPLER(SamplerState, SampBackLightSampler, 9)
+
+#		if defined(PROJECTED_UV)
+LIGHTING_SAMPLER(SamplerState, SampProjDetailSampler, 10)
+#		endif
+
+LIGHTING_SAMPLER(SamplerState, SampCharacterLightProjNoiseSampler, 11)
+LIGHTING_SAMPLER(SamplerState, SampRimSoftLightWorldMapOverlaySampler, 12)
+
+#		if defined(WORLD_MAP) && (defined(LODLANDSCAPE) || defined(LODLANDNOISE))
+LIGHTING_SAMPLER(SamplerState, SampWorldMapOverlaySnowSampler, 13)
+#		endif
+
+#	endif
+
+#	if defined(LOD_LAND_BLEND)
+LIGHTING_SAMPLER(SamplerState, SampLandLodBlend1Sampler, 13)
+LIGHTING_SAMPLER(SamplerState, SampLandLodBlend2Sampler, 15)
+#	elif defined(LODLANDNOISE)
+LIGHTING_SAMPLER(SamplerState, SampLandLodNoiseSampler, 15)
+#	endif
+
+LIGHTING_SAMPLER(SamplerState, SampShadowMaskSampler, 14)
+
+#	if defined(LANDSCAPE)
+
+LIGHTING_SRV(Texture2D<float4>, TexColorSampler, 0)
+LIGHTING_SRV(Texture2D<float4>, TexLandColor2Sampler, 1)
+LIGHTING_SRV(Texture2D<float4>, TexLandColor3Sampler, 2)
+LIGHTING_SRV(Texture2D<float4>, TexLandColor4Sampler, 3)
+LIGHTING_SRV(Texture2D<float4>, TexLandColor5Sampler, 4)
+LIGHTING_SRV(Texture2D<float4>, TexLandColor6Sampler, 5)
+LIGHTING_SRV(Texture2D<float4>, TexNormalSampler, 7)
+LIGHTING_SRV(Texture2D<float4>, TexLandNormal2Sampler, 8)
+LIGHTING_SRV(Texture2D<float4>, TexLandNormal3Sampler, 9)
+LIGHTING_SRV(Texture2D<float4>, TexLandNormal4Sampler, 10)
+LIGHTING_SRV(Texture2D<float4>, TexLandNormal5Sampler, 11)
+LIGHTING_SRV(Texture2D<float4>, TexLandNormal6Sampler, 12)
+
+LIGHTING_SRV(Texture2D<float4>, TexLandTHDisp0Sampler, 92)
+LIGHTING_SRV(Texture2D<float4>, TexLandTHDisp1Sampler, 93)
+LIGHTING_SRV(Texture2D<float4>, TexLandTHDisp2Sampler, 94)
+LIGHTING_SRV(Texture2D<float4>, TexLandTHDisp3Sampler, 95)
+LIGHTING_SRV(Texture2D<float4>, TexLandTHDisp4Sampler, 96)
+LIGHTING_SRV(Texture2D<float4>, TexLandTHDisp5Sampler, 97)
+
+#		if defined(TRUE_PBR)
+
+LIGHTING_SRV(Texture2D<float4>, TexLandDisplacement0Sampler, 80)
+LIGHTING_SRV(Texture2D<float4>, TexLandDisplacement1Sampler, 81)
+LIGHTING_SRV(Texture2D<float4>, TexLandDisplacement2Sampler, 82)
+LIGHTING_SRV(Texture2D<float4>, TexLandDisplacement3Sampler, 83)
+LIGHTING_SRV(Texture2D<float4>, TexLandDisplacement4Sampler, 84)
+LIGHTING_SRV(Texture2D<float4>, TexLandDisplacement5Sampler, 85)
+
+LIGHTING_SRV(Texture2D<float4>, TexRMAOSSampler, 86)
+LIGHTING_SRV(Texture2D<float4>, TexLandRMAOS2Sampler, 87)
+LIGHTING_SRV(Texture2D<float4>, TexLandRMAOS3Sampler, 88)
+LIGHTING_SRV(Texture2D<float4>, TexLandRMAOS4Sampler, 89)
+LIGHTING_SRV(Texture2D<float4>, TexLandRMAOS5Sampler, 90)
+LIGHTING_SRV(Texture2D<float4>, TexLandRMAOS6Sampler, 91)
+
+#		endif
+
+#	else
+
+LIGHTING_SRV(Texture2D<float4>, TexColorSampler, 0)
+LIGHTING_SRV(Texture2D<float4>, TexNormalSampler, 1)  // normal in xyz, glossiness in w if not modelspacenormal
+
+#		if defined(MODELSPACENORMALS) && !defined(LODLANDNOISE)
+LIGHTING_SRV(Texture2D<float4>, TexSpecularSampler, 2)
+#		endif
+#		if defined(FACEGEN)
+LIGHTING_SRV(Texture2D<float4>, TexTintSampler, 3)
+LIGHTING_SRV(Texture2D<float4>, TexDetailSampler, 4)
+#		elif defined(PARALLAX)
+LIGHTING_SRV(Texture2D<float4>, TexParallaxSampler, 3)
+#		elif defined(PROJECTED_UV) && !defined(SPARKLE)
+LIGHTING_SRV(Texture2D<float4>, TexProjDiffuseSampler, 3)
+#		endif
+
+#		if (defined(ENVMAP) || defined(MULTI_LAYER_PARALLAX) || defined(SNOW_FLAG) || defined(EYE)) && !defined(FACEGEN)
+LIGHTING_SRV(TextureCube<float4>, TexEnvSampler, 4)
+LIGHTING_SRV(Texture2D<float4>, TexEnvMaskSampler, 5)
+#		endif
+
+#		if defined(TRUE_PBR) && !defined(FACEGEN)
+LIGHTING_SRV(Texture2D<float4>, TexParallaxSampler, 4)
+#		endif
+#		if defined(TRUE_PBR)
+LIGHTING_SRV(Texture2D<float4>, TexRMAOSSampler, 5)
+#		endif
+
+LIGHTING_SRV(Texture2D<float4>, TexGlowSampler, 6)
+
+#		if defined(MULTI_LAYER_PARALLAX)
+LIGHTING_SRV(Texture2D<float4>, TexLayerSampler, 8)
+#		elif defined(PROJECTED_UV) && !defined(SPARKLE)
+LIGHTING_SRV(Texture2D<float4>, TexProjNormalSampler, 8)
+#		endif
+
+LIGHTING_SRV(Texture2D<float4>, TexBackLightSampler, 9)
+
+#		if defined(PROJECTED_UV)
+LIGHTING_SRV(Texture2D<float4>, TexProjDetail, 10)
+#		endif
+
+LIGHTING_SRV(Texture2D<float4>, TexCharacterLightProjNoiseSampler, 11)
+#		if defined(DCLF_BINDLESS)
+// The character light's noise under DCLF (DrawPipelines.h: kCharacterLightRegister). The engine binds it at t11, but it is a
+// render target that alternates every frame: the frame record gives it, not the material row. A character-light pass reads it
+// here for both of t11's uses.
+LIGHTING_SRV(Texture2D<float4>, DCLFCharacterLightNoise, 125)
+#		endif
+LIGHTING_SRV(Texture2D<float4>, TexRimSoftLightWorldMapOverlaySampler, 12)
+
+#		if defined(WORLD_MAP) && (defined(LODLANDSCAPE) || defined(LODLANDNOISE))
+LIGHTING_SRV(Texture2D<float4>, TexWorldMapOverlaySnowSampler, 13)
+#		endif
+
+#	endif
+
+#	if defined(LOD_LAND_BLEND)
+LIGHTING_SRV(Texture2D<float4>, TexLandLodBlend1Sampler, 13)
+LIGHTING_SRV(Texture2D<float4>, TexLandLodBlend2Sampler, 15)
+#	elif defined(LODLANDNOISE)
+LIGHTING_SRV(Texture2D<float4>, TexLandLodNoiseSampler, 15)
+#	endif
+
+LIGHTING_SRV(Texture2D<float4>, TexShadowMaskSampler, 14)
+
+#	if defined(SKIN) && defined(CS_SKIN)
+LIGHTING_SRV(Texture2D<float4>, TexSkinExtraSampler, 71)
+LIGHTING_SRV(Texture2D<float4>, TexSkinWetnessSampler, 74)
+LIGHTING_SRV(Texture2D<float4>, TexSkinWetnessNormalSampler, 75)
+#	endif
+#	else
 SamplerState SampTerrainParallaxSampler : register(s1);
 
 #	if defined(LANDSCAPE)
@@ -834,7 +1189,71 @@ Texture2D<float4> TexSkinExtraSampler : register(t71);
 Texture2D<float4> TexSkinWetnessSampler : register(t74);
 Texture2D<float4> TexSkinWetnessNormalSampler : register(t75);
 #	endif
+#	endif  // LIGHTING_ORG
 
+#	if defined(LIGHTING_ORG)
+// The pixel stage's constants, from the draw's latch (LightingOrgDraw).
+static float4 FogColor = LightingDraw.PSTechnique[0];
+static float4 ColourOutputClamp = LightingDraw.PSTechnique[1];
+static float4 VPOSOffset = LightingDraw.PSTechnique[2];
+
+static float4 LODTexParams = LightingDraw.PSMaterial[0];
+#		if !(defined(LANDSCAPE) && defined(TRUE_PBR))
+static float4 TintColor = LightingDraw.PSMaterial[1];
+static float4 EnvmapData = LightingDraw.PSMaterial[2];
+static float4 ParallaxOccData = LightingDraw.PSMaterial[3];
+static float4 SpecularColor = LightingDraw.PSMaterial[4];
+static float4 SparkleParams = LightingDraw.PSMaterial[5];
+static float4 MultiLayerParallaxData = LightingDraw.PSMaterial[6];
+#		else
+static float4 LandscapeTexture1GlintParameters = LightingDraw.PSMaterial[1];
+static float4 LandscapeTexture2GlintParameters = LightingDraw.PSMaterial[2];
+static float4 LandscapeTexture3GlintParameters = LightingDraw.PSMaterial[3];
+static float4 LandscapeTexture4GlintParameters = LightingDraw.PSMaterial[4];
+static float4 LandscapeTexture5GlintParameters = LightingDraw.PSMaterial[5];
+static float4 LandscapeTexture6GlintParameters = LightingDraw.PSMaterial[6];
+#		endif
+static float4 LightingEffectParams = LightingDraw.PSMaterial[7];
+static float4 IBLParams = LightingDraw.PSMaterial[8];
+#		if !defined(TRUE_PBR)
+static float4 LandscapeTexture1to4IsSnow = LightingDraw.PSMaterial[9];
+static float4 LandscapeTexture5to6IsSnow = LightingDraw.PSMaterial[10];
+static float4 LandscapeTexture1to4IsSpecPower = LightingDraw.PSMaterial[11];
+static float4 LandscapeTexture5to6IsSpecPower = LightingDraw.PSMaterial[12];
+static float4 SnowRimLightParameters = LightingDraw.PSMaterial[13];
+#		endif
+#		if defined(TRUE_PBR) && defined(LANDSCAPE)
+static float3 LandscapeTexture2PBRParams = LightingDraw.PSMaterial[9].xyz;
+static float3 LandscapeTexture3PBRParams = LightingDraw.PSMaterial[10].xyz;
+static float3 LandscapeTexture4PBRParams = LightingDraw.PSMaterial[11].xyz;
+static float3 LandscapeTexture5PBRParams = LightingDraw.PSMaterial[12].xyz;
+static float3 LandscapeTexture6PBRParams = LightingDraw.PSMaterial[13].xyz;
+#		endif
+static float4 CharacterLightParams = LightingDraw.PSMaterial[14];
+static uint PBRFlags = asuint(LightingDraw.PSMaterial[15].x);
+static float3 PBRParams1 = LightingDraw.PSMaterial[15].yzw;
+static float4 PBRParams2 = LightingDraw.PSMaterial[16];
+static float3 MaterialObjectRGBScale = LightingDraw.PSMaterial[17].xyz;
+
+static float3 DirLightDirection = LightingDraw.PSGeometry[0].xyz;
+static float3 DirLightColor = LightingDraw.PSGeometry[1].xyz;
+static float4 ShadowLightMaskSelect = LightingDraw.PSGeometry[2];
+static float4 MaterialData = LightingDraw.PSGeometry[3];
+static float AlphaTestRef = LightingDraw.PSGeometry[4].x;
+static float3 EmitColor = LightingDraw.PSGeometry[4].yzw;
+static float4 ProjectedUVParams = LightingDraw.PSGeometry[6];
+static float4 SSRParams = LightingDraw.PSGeometry[7];
+static float4 WorldMapOverlayParametersPS = LightingDraw.PSGeometry[8];
+static float4 ProjectedUVParams2 = LightingDraw.PSGeometry[9];
+static float4 ProjectedUVParams3 = LightingDraw.PSGeometry[10];
+static row_major float3x4 DirectionalAmbient = float3x4(LightingDraw.PSGeometry[11], LightingDraw.PSGeometry[12], LightingDraw.PSGeometry[13]);
+static float4 AmbientSpecularTintAndFresnelPower = LightingDraw.PSGeometry[14];
+static float4 PointLightPosition[7] = { LightingDraw.PSGeometry[15], LightingDraw.PSGeometry[16], LightingDraw.PSGeometry[17], LightingDraw.PSGeometry[18],
+	LightingDraw.PSGeometry[19], LightingDraw.PSGeometry[20], LightingDraw.PSGeometry[21] };
+static float4 PointLightColor[7] = { LightingDraw.PSGeometry[22], LightingDraw.PSGeometry[23], LightingDraw.PSGeometry[24], LightingDraw.PSGeometry[25],
+	LightingDraw.PSGeometry[26], LightingDraw.PSGeometry[27], LightingDraw.PSGeometry[28] };
+static float2 NumLightNumShadowLight = LightingDraw.PSGeometry[29].xy;
+#	else
 cbuffer PerTechnique : register(b0)
 {
 	float4 FogColor : packoffset(c0);           // Color in xyz, invFrameBufferRange in w
@@ -919,6 +1338,7 @@ cbuffer PerGeometry : register(b2)
 	float4 PointLightColor[7] : packoffset(c22);
 	float2 NumLightNumShadowLight : packoffset(c29);
 };
+#	endif  // LIGHTING_ORG
 
 #if defined(DCLF_BINDLESS)
 // The frame's lighting: the same in every pipeline's PerGeometry block, so Drawcall Limit Fix keeps it in one block
@@ -996,6 +1416,8 @@ static float AlphaTestRefRS;  // DCLFPixelObjectStatics
 #	else
 static const float AlphaTestRefRS = DCLFPixelRow.AlphaTestRef;
 #	endif
+#elif defined(LIGHTING_ORG)
+static float AlphaTestRefRS = LightingDraw.AlphaTestRefRS;
 #else
 cbuffer AlphaTestRefBuffer : register(b11)
 {
