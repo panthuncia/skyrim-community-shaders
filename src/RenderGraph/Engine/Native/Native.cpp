@@ -59,6 +59,7 @@ namespace RenderGraph::Engine::Native
 			"CS_ORG_VOLUMETRIC_LIGHTING",
 			"CS_ORG_WATER",
 			"CS_ORG_BLOOD_SPLATTER",
+			"CS_ORG_PRECIPITATION",
 			"CS_ORG_IMAGESPACE",
 			"CS_ORG_MENU3D",
 			"CS_ORG_MAP",
