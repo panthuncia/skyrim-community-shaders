@@ -1,6 +1,6 @@
 // The menu scenes family's render graph side: a client per batch at the EngineDraws anchor, made once at setup, whose pass draws a
 // batch's latched draws into the view's imported targets with kMAIN's depth, in the engine's order, with CS's shaders built for ORG
-// (Utility.hlsl's UTILITY_ORG_SCENE).
+// (Utility.hlsl's UTILITY_ORG_SCENE, Lighting.hlsl's LIGHTING_ORG).
 
 // volk must precede every Vulkan header in this translation unit.
 #include <rhi_interop_vulkan.h>
@@ -43,7 +43,10 @@ namespace DCLF::Features::MenuViews::Scenes::SceneDraws
 		constexpr std::size_t kViews = static_cast<std::size_t>(View::Count);
 		constexpr std::size_t kMaxImports = 4;
 
-		/** @brief Utility.hlsl's push block (UTILITY_ORG_RESOURCES under UTILITY_ORG_SCENE), in list order. */
+		/**
+		 * @brief The push block of both builds, in list order: Utility.hlsl's (UTILITY_ORG_RESOURCES under UTILITY_ORG_SCENE) and
+		 * Lighting.hlsl's (LIGHTING_ORG_RESOURCES: its UNREAD entries take no words).
+		 */
 		struct UtilityBlock
 		{
 			SharedConstants::Handles shared;
@@ -196,6 +199,11 @@ namespace DCLF::Features::MenuViews::Scenes::SceneDraws
 																			 .constantWords = ShaderBindings::Words<UtilityBlock>(),
 																			 .shaderType = static_cast<std::uint32_t>(RE::BSShader::Type::Utility),
 																			 .stagesOf = &UtilityStagesOf } };
+			// Lighting's programs are not precompiled per descriptor (CS loads thousands): a key is built at its first draw, then
+			// prebuilt from the manifest in the next session.
+			Family::EngineDrawPrograms lighting{ "menu scenes (Lighting)", { .source = "Lighting.hlsl",
+																			   .constantWords = ShaderBindings::Words<UtilityBlock>(),
+																			   .shaderType = static_cast<std::uint32_t>(RE::BSShader::Type::Lighting) } };
 			bool reserved = false;
 			bool setUp = false;
 			bool failed = false;
@@ -240,12 +248,13 @@ namespace DCLF::Features::MenuViews::Scenes::SceneDraws
 		}
 
 		/**
-		 * @brief Every published id a batch's draws can read: the base textures are material textures (imports), so only what a ported
-		 * feature may have bound at a slot in a menu scene. None is known; an export of an id not listed here is an inherent refusal,
-		 * logged once with the id: add the id here.
+		 * @brief Every published id a batch's draws can read: the material textures are imports, so only the engine targets a slot may
+		 * hold: the shadow mask a Lighting draw reads at t14 (drawn by the shadow mask family's graph pass). An export of an id not listed
+		 * here is an inherent refusal, logged once with the id: add the id here.
 		 */
-		void ListInputs(Family::PublishedInputs&)
+		void ListInputs(Family::PublishedInputs& a_inputs)
 		{
+			a_inputs.AddEngine(RE::RENDER_TARGET::kSHADOW_MASK);
 		}
 
 		/** @brief The client of a_view, registered with the anchor. Null, logged, when a target cannot be imported. */
@@ -374,6 +383,7 @@ namespace DCLF::Features::MenuViews::Scenes::SceneDraws
 		state.setUp = true;
 		Family::StartStagePrecompile();
 		state.utility.Prebuild();
+		state.lighting.Prebuild();
 		if (!::RenderGraph::Engine::Constants::Requested()) {
 			logger::warn("[DCLF] menu scenes: needs the engine constants capture (CS_ORG_ENGINE_CONSTANTS=1); the menu scenes stay the engine's");
 			return true;
@@ -421,6 +431,11 @@ namespace DCLF::Features::MenuViews::Scenes::SceneDraws
 		return GetState().utility.Get(a_key, a_shader);
 	}
 
+	std::shared_ptr<const void> LightingProgram(const Family::ProgramKey& a_key, const RE::BSShader& a_shader)
+	{
+		return GetState().lighting.Get(a_key, a_shader);
+	}
+
 	std::uint32_t ColourFormat(View a_view, std::uint32_t a_index)
 	{
 		const auto client = ClientOf(a_view);
@@ -465,6 +480,7 @@ namespace DCLF::Features::MenuViews::Scenes::SceneDraws
 		for (const auto& client : state.clients)
 			if (client)
 				executed += client->executed.load(std::memory_order_relaxed);
-		return fmt::format("{} runs ({} drawn), {} draws, {} Utility programs", state.runs, executed, state.draws, state.utility.Built());
+		return fmt::format("{} runs ({} drawn), {} draws, {} Utility and {} Lighting programs", state.runs, executed, state.draws, state.utility.Built(),
+			state.lighting.Built());
 	}
 }

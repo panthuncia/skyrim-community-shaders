@@ -100,7 +100,18 @@ namespace Permutation
 		static const int TVMeshVariation = (1 << 10);
 	}
 
-#if defined(DCLF_PULLED_ROWS)
+#if defined(ORG_LATCHED_PERMUTATION)
+	// An engine draw family's ORG build (Lighting.hlsl): the block is the draw's, latched with it. ORG_LATCHED_PERMUTATION names the
+	// latch, which the shader declares before it includes this.
+	static uint VertexShaderDescriptor = ORG_LATCHED_PERMUTATION.Descriptors.x;
+	static uint PixelShaderDescriptor = ORG_LATCHED_PERMUTATION.Descriptors.y;
+	static uint ExtraShaderDescriptor = ORG_LATCHED_PERMUTATION.Descriptors.z;
+	static uint ExtraFeatureDescriptor = ORG_LATCHED_PERMUTATION.Descriptors.w;
+	static float EffectRadius = ORG_LATCHED_PERMUTATION.EffectRadius;
+	static uint BaseTextureIsWorking = ORG_LATCHED_PERMUTATION.BaseTextureIsWorking;
+	static uint RenderToUI = ORG_LATCHED_PERMUTATION.RenderToUI;
+	static float GrassCanopyHeight = 0;
+#elif defined(DCLF_PULLED_ROWS)
 	// Drawcall Limit Fix's pulled Lighting stages (DCLF_PULLED_ROWS): the block is the draw's pipeline row's, which a plain draw
 	// cannot bind per draw, so the stage's main assigns these from the row (Lighting.hlsl, DCLFPermutationStatics) before
 	// anything reads them.

@@ -240,6 +240,118 @@ namespace DCLF::Features::MenuViews::Scenes
 			return nullptr;
 		}
 
+		/**
+		 * @brief A Lighting draw, latched: the shadow state SetDirtyStates would apply, both stages' constants as the Lighting shader's
+		 * Setup functions wrote them, CS's permutation block for the draw (State's SetupGeometry hooks filled it), the palettes of a
+		 * skinned one, t0-t15 and s0-s15 as the shadow state holds them, the geometry. Null when latched; otherwise why not.
+		 */
+		const char* TryLatchLighting(Capture& a_capture, const Family::TriShape* a_shape, std::uint32_t a_start, std::uint32_t a_triangles, std::string& a_detail)
+		{
+			auto& run = *a_capture.run;
+			const auto& rss = RE::BSGraphics::RendererShadowState::GetSingleton()->GetRuntimeData();
+			const auto* vs = rss.currentVertexShader;
+			const auto* state = globals::state;
+			const auto engine = Pipeline::EngineDrawState::Latch();
+			Draw draw{};
+			draw.shader = Shader::Lighting;
+			// The pixel descriptor CS looks its shader up by: it holds the vertex descriptor's bits (the technique, VC, SKINNED,
+			// MODELSPACENORMALS) and the pixel stage's flags, so its defines serve both stages.
+			draw.key.descriptor = state->modifiedPixelDescriptor;
+			draw.key.defineStage = Family::DefineStage::Pixel;
+			// The forward stage writes three targets (the colour, the motion vectors, the normals and masks); the deferred one more, which
+			// a menu scene does not bind.
+			if (const char* why = MapTargets(a_capture.view, kMaxColours, draw))
+				return why;
+			if (!Family::DescribeStates(draw.key, Pipeline::EngineBlendState(engine.blendMode, engine.alphaToCoverage, engine.writeMode, engine.blendExtra),
+					Pipeline::EngineDepthStencilState(engine.depthMode, engine.stencilMode), Pipeline::EngineRasterState(engine.fill, engine.cull, engine.depthBias, engine.scissor)))
+				return "a depth-stencil, blend or rasterizer state with no description";
+			draw.stencilRef = engine.stencilRef;
+
+			LightingSceneConstants constants{};
+			const auto use = Family::CaptureConstants();
+			if (!use.Valid())
+				return "the engine constants capture is not active";
+			if (!Family::ConstantBytes(use, Stage::Vertex, 2))
+				return "no vertex PerGeometry";
+			Family::CopyRows(use, Stage::Vertex, 0, constants.vsTechnique, kLightingVSTechniqueRows);
+			Family::CopyRows(use, Stage::Vertex, 1, constants.vsMaterial, kLightingVSMaterialRows);
+			Family::CopyRows(use, Stage::Vertex, 2, constants.vsGeometry, kLightingVSGeometryRows);
+			Family::CopyRows(use, Stage::Pixel, 0, constants.psTechnique, kLightingPSTechniqueRows);
+			Family::CopyRows(use, Stage::Pixel, 1, constants.psMaterial, kLightingPSMaterialRows);
+			Family::CopyRows(use, Stage::Pixel, 2, constants.psGeometry, kLightingPSGeometryRows);
+			constants.alphaTestRef = rss.alphaTestEnabled ? rss.alphaTestRef : 0.0f;
+			const auto& permutation = state->permutationData;
+			constants.descriptors[0] = permutation.VertexShaderDescriptor;
+			constants.descriptors[1] = permutation.PixelShaderDescriptor;
+			constants.descriptors[2] = permutation.ExtraShaderDescriptor;
+			constants.descriptors[3] = permutation.ExtraFeatureDescriptor;
+			constants.effectRadius = permutation.EffectRadius;
+			constants.baseTextureIsWorking = permutation.BaseTextureIsWorking;
+			constants.renderToUI = permutation.RenderToUI;
+			// Lighting's vertex flag 1 << 1: SKINNED (Permutation::LightingFlags::Skinned).
+			if ((state->modifiedVertexDescriptor & 0x2u) && !LatchBones(use, run, draw.bonesOffset))
+				return "more palettes than the batch's latch holds";
+
+			draw.program = SceneDraws::LightingProgram(draw.key, *state->currentShader);
+			if (!draw.program)
+				return "its ORG program cannot be built";
+
+			Family::Owners owners;
+			Family::Geometry geometry;
+			if (const auto result = Family::LatchGeometry(a_shape, a_start, a_triangles, vs->vertexDesc, engine.topology, geometry, owners, &a_detail);
+				result != Family::GeometryResult::Ok)
+				return Family::ReasonOf(result);
+			constants.vertexAddress[0] = static_cast<std::uint32_t>(geometry.vertexAddress);
+			constants.vertexAddress[1] = static_cast<std::uint32_t>(geometry.vertexAddress >> 32);
+			constants.indexAddress[0] = static_cast<std::uint32_t>(geometry.indexAddress);
+			constants.indexAddress[1] = static_cast<std::uint32_t>(geometry.indexAddress >> 32);
+			constants.vertexLayout[0] = static_cast<std::uint32_t>(geometry.layout);
+			constants.vertexLayout[1] = static_cast<std::uint32_t>(geometry.layout >> 32);
+			constants.vertexStride = geometry.stride;
+			constants.firstIndex = geometry.firstIndex;
+			draw.indexCount = geometry.indexCount;
+
+			// The null 2D view: what the build reads at a register past t15 (the features it turns off).
+			auto null = GpuTextures::Get().NullOf(Kind::Texture2D);
+			if (null.index == GpuTextures::kInvalid)
+				return "no null view";
+			constants.nullTexture = null.index;
+			if (null.owner)
+				owners.push_back(std::move(null.owner));
+			// Every slot as the shadow state holds it (a bound view's import, in its own dimension; an empty slot a null 2D view) and
+			// its sampler.
+			for (std::uint32_t t = 0; t < kLightingSlots; ++t) {
+				auto* view = Unwrap(rss.PSTexture[t]);
+				GpuTextures::ResolveFailure failure = GpuTextures::ResolveFailure::None;
+				const auto slot = Family::SlotTexture(view, Kind::Texture2D, GpuTextures::Tag(GpuTextures::Source::FrameSlot, t), constants.textures[t], owners, &failure);
+				if (slot == Family::SlotResult::Published) {
+					const auto id = PublishedResources::ExportedId(view);
+					const auto result = SceneDraws::ReadPublished(a_capture.view, id, constants.textures[t]);
+					if (result != Family::InputResult::Graph) {
+						a_detail = std::format("t{} holds '{}': {}", t, id, Family::ReasonOf(result));
+						return "a slot holds a published texture its client does not read";
+					}
+				} else if (slot != Family::SlotResult::Ok) {
+					a_detail = GpuTextures::DescribeFailure(view, t, failure);
+					return "a texture it samples could not be imported";
+				}
+				constants.samplers[t] = Family::SlotSampler(rss.PSTextureAddressMode[t].underlying(), rss.PSTextureFilterMode[t].underlying(), owners);
+				if (constants.samplers[t] == GpuTextures::kInvalid)
+					return "its sampler modes have no graph sampler";
+			}
+
+			draw.latchOffset = run.Append(std::as_bytes(std::span<const LightingSceneConstants, 1>(&constants, 1)));
+			if (draw.latchOffset == ~0u)
+				return "more constants than the batch's latch holds";
+			draw.viewport = Family::LatchViewport(engine.depthBias);
+
+			for (auto& owner : owners)
+				if (owner)
+					run.owners.push_back(std::move(owner));
+			run.draws.push_back(std::move(draw));
+			return nullptr;
+		}
+
 		/** @brief The draw the engine is about to make, latched by its shader's kind. Null when latched; otherwise why not. */
 		const char* TryLatchDraw(Capture& a_capture, const Family::TriShape* a_shape, std::uint32_t a_start, std::uint32_t a_triangles, std::string& a_detail)
 		{
@@ -252,6 +364,8 @@ namespace DCLF::Features::MenuViews::Scenes
 			switch (state->currentShader->shaderType.get()) {
 			case RE::BSShader::Type::Utility:
 				return TryLatchUtility(a_capture, a_shape, a_start, a_triangles, a_detail);
+			case RE::BSShader::Type::Lighting:
+				return TryLatchLighting(a_capture, a_shape, a_start, a_triangles, a_detail);
 			default:
 				return "a shader the family has no program for";
 			}
@@ -322,14 +436,14 @@ namespace DCLF::Features::MenuViews::Scenes
 		}
 
 		/**
-		 * @brief After the SetupGeometry of a shader the family has no program for (Lighting and Effect: the land's and a menu model's
-		 * colour; tree LOD): the latched part ends before the engine draws the pass, so the rest of the batch is the engine's in order.
+		 * @brief After the SetupGeometry of a shader the family has no program for (Effect: a menu model's glow, the main menu's mist;
+		 * tree LOD): the latched part ends before the engine draws the pass, so the rest of the batch is the engine's in order.
 		 */
 		void OnOtherSetup(RE::BSRenderPass*)
 		{
 			auto& capture = GetCapture();
 			if (capture.active && !capture.failed)
-				Refuse(capture, "a pass of a shader the family has no program for (Lighting, Effect or DistantTree)");
+				Refuse(capture, "a pass of a shader the family has no program for (Effect or DistantTree)");
 		}
 
 		bool LocalMapKnown() { return Address::kLocalMapSubmit.Known() && Address::kLocalMapWaterSubmit.Known(); }
@@ -413,7 +527,7 @@ namespace DCLF::Features::MenuViews::Scenes
 				logger::warn("[DCLF] menu scenes: this runtime has no address for a menu model's batches; the menu models stay the engine's");
 		}
 		Family::WatchSetupGeometry<RE::BSShader::Type::Utility>(RE::VTABLE_BSUtilityShader[0], &OnProgramSetup);
-		Family::WatchSetupGeometry<RE::BSShader::Type::Lighting>(RE::VTABLE_BSLightingShader[0], &OnOtherSetup);
+		Family::WatchSetupGeometry<RE::BSShader::Type::Lighting>(RE::VTABLE_BSLightingShader[0], &OnProgramSetup);
 		Family::WatchSetupGeometry<RE::BSShader::Type::Effect>(RE::VTABLE_BSEffectShader[0], &OnOtherSetup);
 		Family::WatchSetupGeometry<RE::BSShader::Type::DistantTree>(RE::VTABLE_BSDistantTreeShader[0], &OnOtherSetup);
 		// The clients are made on the main thread once the graph runs (the main menu), before any world frame.
