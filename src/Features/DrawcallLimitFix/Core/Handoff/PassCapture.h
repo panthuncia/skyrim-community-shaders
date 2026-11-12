@@ -219,6 +219,9 @@ namespace DCLF
 			bool dclf = false;    // of DCLF's classes (KeepForEngine counts these)
 			std::uint32_t withheld = 0, kept = 0;  // into the main views
 			std::uint32_t otherWithheld = 0, otherKept = 0;  // into any other renderer
+			// Why a pass of DCLF's classes was kept: no frame set; not in it; in it without the main phase; in it with the main phase.
+			std::uint32_t noSet = 0, notMember = 0, notMain = 0, mainNotDrawn = 0;
+			std::uint32_t underLodRoot = 0;  // its geometry under TES::lodLandRoot (the world's LOD root DCLF tracks)
 		};
 		/**
 		 * @brief The map census (LoadHold.cpp, while the map menu is open): every pass the registration hooks see, by class, withheld

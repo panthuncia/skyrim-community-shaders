@@ -273,8 +273,12 @@ namespace DCLF::LoadHold
 				a_why, RenderGraph::Engine::Native::Active() ? "native" : "guest", a_frames, classes.size());
 			for (std::size_t i = 0; i < classes.size() && i < kMapCensusClasses; ++i) {
 				const auto& c = classes[i];
-				logger::info("[DCLF] map census: {} ('{}', {}): main withheld {} kept {}, other withheld {} kept {}", c.shader, c.sample,
-					c.dclf ? "DCLF's class" : "not DCLF's class", c.withheld, c.kept, c.otherWithheld, c.otherKept);
+				logger::info("[DCLF] map census: {} ('{}', {}): main withheld {} kept {}, other withheld {} kept {}{}", c.shader, c.sample,
+					c.dclf ? "DCLF's class" : "not DCLF's class", c.withheld, c.kept, c.otherWithheld, c.otherKept,
+					c.dclf && (c.kept || c.otherKept) ?
+						fmt::format("; kept because: no set {}, not in the set {}, in it without the main phase {}, with the main phase {}; under the LOD root {}",
+							c.noSet, c.notMember, c.notMain, c.mainNotDrawn, c.underLodRoot) :
+						std::string());
 			}
 		}
 
