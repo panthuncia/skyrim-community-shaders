@@ -14,7 +14,6 @@
 #include "Features/DrawcallLimitFix/Core/Handoff/PassCapture.h"
 
 #include "RE/B/BSShadowLight.h"
-#include "RenderGraph/Engine/Flush/Flush.h"
 
 namespace DCLF
 {
@@ -190,37 +189,6 @@ namespace DCLF
 		Clear();
 		drawable = true;
 		PublishRenderers();
-		if (RenderGraph::Engine::Flush::Vouching()) {
-			engineRenderers.clear();
-			PassCapture::Get().SetEngineShadowRenderers(nullptr);
-		}
-	}
-
-	void ShadowViews::NoteEngineLight(const RE::BSShadowLight& a_light)
-	{
-		// Every shadow light the engine keeps, DCLF's selection or not: what it registers into these renderers and DCLF does not withhold
-		// (a view DCLF does not cover, a frame with no selection yet) is the engine's to draw (PassCapture::KeepForEngine). With the flush
-		// latch only: nothing else reads them.
-		auto& data = const_cast<RE::BSShadowLight&>(a_light).GetRuntimeData();
-		const auto add = [&](const RE::BSShadowLight::ShadowmapDescriptor& a_descriptor) {
-			auto* accumulator = a_descriptor.shaderAccumulator.get();
-			auto* accumulatorData = accumulator ? accumulator->GetRuntimeData() : nullptr;
-			const auto* batch = accumulatorData ? accumulatorData->batchRenderer : nullptr;
-			if (!batch)
-				return;
-			engineRenderers.insert(batch);
-			for (auto* group : batch->geometryGroups)
-				if (group && group->batchRenderer)
-					engineRenderers.insert(group->batchRenderer);
-			if (batch->alphaGroup && batch->alphaGroup->batchRenderer)
-				engineRenderers.insert(batch->alphaGroup->batchRenderer);
-		};
-		for (const auto& descriptor : data.shadowmapDescriptors)
-			add(descriptor);
-		if (data.drawFocusShadows)
-			for (const auto& descriptor : data.focusShadowmapDescriptors)
-				add(descriptor);
-		PassCapture::Get().SetEngineShadowRenderers(std::make_shared<const EngineRenderers>(engineRenderers));
 	}
 
 	void ShadowViews::AddCaster(const RE::BSShadowLight* a_light, std::uint32_t a_firstSlot, std::uint32_t a_slots)
@@ -230,8 +198,6 @@ namespace DCLF
 		// the first's), are covered and their renderers published before any of its registrations. Not before the selection has published
 		// once (LightSlotFrame::published): without it Rebuild lists no view, so nothing may be withheld.
 		auto* light = const_cast<RE::BSShadowLight*>(a_light);
-		if (light && RenderGraph::Engine::Flush::Vouching())
-			NoteEngineLight(*light);
 		if (!light || !LightSlots().published)
 			return;
 		const std::size_t first = views.size();

@@ -249,6 +249,39 @@ world's attaches track what comes. There is no rescan. The tables are not writte
 the first category capture after it is forced: the cells that came are walked from it, the ones that went are dropped. A load
 screen's frames are claims-less whatever their snapshot.
 
+**The hold** (`Core/Render/LoadHold.{h,cpp}`, 5.5.1). The loading screen stays up after every load until DCLF draws the load's
+objects, so the engine draws none of them and nothing pops in. No frame is black and none is handed to the engine.
+-   **The menu is kept open.** The load coordinator (SE 13214 / AE 13363) ends a load by posting the loading menu's close
+    (+0x211: `UIMessageQueue::AddMessage("Loading Menu", kHide)`, before `SetLoadingScreenActive(false)` at +0x401). The hold keeps that
+    message and posts it itself when it ends. The menu keeps presenting through the engine's own path (the main thread's frames draw
+    it over the world, as during its fade-out), and it pauses the game (its flags 0x20803: kPausesGame, no kFreezeFrameBackground, so
+    `Main::Draw` still renders the world under it: AE `FUN_140643c00` takes the freeze-frame branch only for flag 0x20).
+-   **The world's frames run under it.** From the world's first frame start under the kept menu (`LoadHold::OnFrameStart`), the load
+    is done: `FrameView::IsLoadingScreenUp` answers false (`LoadHold::MenuHeld`), so those frames build the tables, the coordinator
+    walks the load's cells, the culls' membership joins and the claims are published and installed as in any frame. The loading
+    screen's own iterations (the serving thread's) still read as a load until then.
+-   **Withheld meanwhile.** Every pass of DCLF's classes (Lighting, grass included, Effect, DistantTree, and their Utility depth and
+    shadow passes) into a view DCLF draws is withheld at registration (`PassCapture::HeldByLoad`: the main views and a group renderer made
+    this frame, any shadow-map caster pass, the reflection faces, the occlusion maps), member or not; grass's passes with them, so Grass
+    Optimizations' `DrawVanilla` is never reached. The sun's whole skip and the occlusion maps without the engine's cull are kept
+    (`NoteHeld`), as the startup hold did.
+-   **Settled** (`LoadHold::OnFrameEnd`, two world frames in a row): the installed publication is built and was committed two frames
+    after the world's first one (its pass joined the first frame's culls; a load that changed nothing counts after eight frames); none
+    of its slots waits on a transient reason (`ScenePublication::TransientWaiting`, `kSetTransientWaits`: pipeline, material, shadow
+    mask, shared lookups, geometry, shadow pipelines, constants, the scene buffers' growth, a shadow diffuse); the claims are installed
+    and the same as the last frame's; no draw family waits for its pipelines or recording (`IndirectDraws::DrawFamiliesWaiting`); no view
+    was held. Then the close is posted (the menu fades out at the UI's next pass), and the frames from there draw the adopted snapshot
+    that carried it. The reasons left out (decal slot, layer partner, the reflection's forward pipeline, the refraction pipeline) wait
+    on what a load does not bring.
+-   **Bounded.** A hold whose waiting does not shrink for 5 s, or one that lasts 60 s, ends too, and logs what still waits by reason
+    (`[DCLF] load hold: released after ...`). It hands nothing back: what is not ready is withheld until it is (below).
+-   **A load with no loading menu** (the coordinator showed none: TES +0x137/+0x138) holds the presents instead: the frame before the
+    load stays on screen, the frame's work flushed as a present would send it (`DrawcallLimitFix::LoadHoldsPresents`, `Hooks.cpp`);
+    not with frame generation or the owned frame. A loading screen that starts during a hold ends it
+    (`SetLoadingScreenActive(true)`, +0x11A): the new load posts its own close.
+-   One line a load: `[DCLF] load hold: N frames, T ms (the loading menu kept open), settled; ...`. The test harness's frame counts
+    skip the hold (`FrameView::LoadShown`), so a run and its `CS_DCLF=0` baseline stay in step.
+
 ## Threads
 
 ### The design
@@ -676,8 +709,13 @@ phase (`Core/Scene/Model/SceneSet.h`, `Core/Scene/Coordinator/SceneSet.cpp`).
 -   **The claims** (`SetSnapshot`, published to the hooks through `PassCapture::PublishSet` and to DCLF's readers as
     `FrameView::FrameClaims`) are installed with the revision from the same publication, so a frame draws exactly the set its
     claims name.
--   **A member DCLF cannot draw this frame is the engine's.** The stand-in hands the registration any bound member not in the
-    frame's set (`PrimaryCull::MemberDrawable`), so a pipeline still compiling delays a draw and never makes a hole.
+-   **An object DCLF cannot draw yet is nobody's.** A bound, eligible object that waits (`setWaiting`: a pipeline compiling, a texture
+    importing, a buffer to grow) is published with the claims as pending (`SetSnapshot::pending`, `Coordinator::FillPending`), with the
+    phases it takes part in. The stand-in hands it to the registration (`PrimaryCull::MemberDrawable`), and the registration hooks
+    withhold it there as they withhold a member (`SetSnapshot::WithheldPhasesOf`), so it shows the frame DCLF draws it: a delay, never
+    an engine draw. A draw family that waits for its pipelines is withheld the same way (`PassCapture::SetFamilyWithheld`). Until 5.5.1
+    the engine drew such an object, vouched under the flush latch (`dclf: not claimed (...)`, deleted). What the engine still gets of
+    DCLF's classes: an object DCLF refuses, and one not bound yet (attached since the last publication).
 -   **A claim follows what the CPU submitted, not what the GPU rasterised.** An occluded member stays a member, and the engine
     still does not draw it.
 
@@ -1424,8 +1462,11 @@ reaches the batch renderer, so the native loop has nothing to draw. Not calling 
     cross-fade. It also withholds tree LOD's passes while the `TreeInstances` family is DCLF's.
 -   Registration is concurrent (the scene lists build on `gJobList_SceneListAccumCulling`); captured entries go into a buffer with
     an atomic cursor, drained once a frame by the render thread, for observers only: DCLF draws nothing from registrations.
--   The engine draws a member for one frame when DCLF first draws it, because the claim is published after the colour epoch: the
-    same pixels twice, not a hole.
+-   A load's hold withholds every pass of DCLF's classes into these views, member or not ([Load screens](#load-screens)), and a waiting
+    object's passes are withheld as a member's ([The DCLF set](#the-dclf-set)): the engine draws none of DCLF's objects before DCLF does.
+-   **Group renderers made mid-frame.** The engine makes a geometry group's renderer at the group's first pass, during the
+    registrations, after `RefreshMainRenderers`; `WithholdMain` reads the main accumulators' groups live for a renderer the set does not
+    hold (`MainRendererNow`).
 
 The shadow views' claims are the same, per shadow render mode, from the shadow build's claim sets; the sun's registrations and
 culls are below ([The sun's cascades without DCLF's objects](#the-suns-cascades-without-dclfs-objects)).
@@ -2712,11 +2753,11 @@ passes (render modes `0x10`/`0x11`, `GetRenderPasses_ShadowMapOrMask`) are not w
         reason (`EngineOnlyCull::NoteWholeCull`; warned once each, and a `<- WHOLE ENGINE CULL` line in the primary cull's report). A light
         whose views DCLF has not made yet casts no shadow until they exist, and point lights cull empty on frames without a current
         exclusion (a cell change), so neither falls back.
-    -   **The startup hold** (`Core/Render/StartupHold.{h,cpp}`). After the session's first load, DCLF's sun cascades and occlusion maps
-        are not covered for a few dozen frames (its views come from frames that draw the world). The hold keeps the sun's whole skip
-        and renders those maps without the engine's cull (`OcclusionHeld`), while the CS overlay draws the screen black
-        (`DrawcallLimitFix::StartupBlackout`); it ends after two covered frames (measured: 27 frames) or at 600. Left: the main
-        camera's one frame before DCLF's first snapshot, which the engine draws whole.
+    -   **A load's hold** (`Core/Render/LoadHold.{h,cpp}`, [Load screens](#load-screens)). After every load, DCLF's sun cascades and
+        occlusion maps are not covered for a few dozen frames (its views come from frames that draw the world). While the hold lasts it
+        keeps the sun's whole skip and renders those maps without the engine's cull (`OcclusionHeld`), behind the loading menu it keeps
+        open; a frame with a view held is not settled. Until 5.5.1 this was the startup hold, for the session's first load only, under a
+        black screen drawn by the CS overlay.
     -   Test runs: `CS_DCLF_TEST_REFUSE=<name>,...` refuses geometry by node name as an unstable buffer, so any class can be engine-only.
     -   Without the subset such a caster had no shadow at all: on test2, a RaceMenu-morphed body or BodySlide outfit (a dynamic vertex
         buffer, before `MorphedPartitionCopy`) drew natively in the main view and cast nothing. The first few are logged (`shadow

@@ -129,11 +129,11 @@ struct DrawcallLimitFix : Feature
 	 */
 	bool OcclusionEngineOnlyMask(RE::Precipitation* a_precip);
 	/**
-	 * @brief Whether the CS overlay draws the screen black this frame: the session's first DCLF frames, held until DCLF covers its views
-	 * (DrawcallLimitFix/Core/Render/StartupHold.h).
+	 * @brief Render thread, at Present: whether this frame's present is skipped, so the previous frame stays on screen: a load without a
+	 * loading menu, held until DCLF draws its objects (DrawcallLimitFix/Core/Render/LoadHold.h).
 	 */
-	bool StartupBlackout() const;
-	/** @brief After OcclusionNeedsEngine: the map is held by the startup hold, rendered without the engine's cull (SetupMask skipped). */
+	bool LoadHoldsPresents() const;
+	/** @brief After OcclusionNeedsEngine: the map is held by a load's hold, rendered without the engine's cull (SetupMask skipped). */
 	bool OcclusionHeld(OcclusionMap a_map) const;
 	void OcclusionReferenceRendered(OcclusionMap a_map);
 	/**

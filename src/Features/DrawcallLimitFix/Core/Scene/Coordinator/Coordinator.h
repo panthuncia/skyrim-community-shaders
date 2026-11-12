@@ -1510,6 +1510,8 @@ namespace DCLF
 		std::size_t TakeClaimsEntry();
 		/** @brief PublishScene, after ApplySet: publicationClaims brought up to setBuilding (or the last shared when it did not change). */
 		void PublishClaims();
+		/** @brief PublishClaims: the pending map made again from the waiting slots when one was decided (SetSnapshot::pending). */
+		void RefreshPending();
 		void QueueSet(std::uint32_t a_slot);
 		/**
 		 * @brief Takes a slot out of the applied set's phases after its commit (rebound by the joins): out of the commit's

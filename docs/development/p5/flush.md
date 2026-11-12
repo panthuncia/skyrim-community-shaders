@@ -125,12 +125,12 @@ path beyond the four detours' flag test: the pass marks table and the `RenderPas
 
 ### Allowed engine draws
 
-Some engine draws reach D3D11 on purpose and will for a while: DCLF's objects not yet claimed in load windows ("DCLF's share"
-below) and each port's inherent refusals (primary-path.md rule 4). The code that leaves a draw to the engine vouches for it, and
+Some engine draws reach D3D11 on purpose and will for a while: each port's inherent refusals (primary-path.md rule 4). DCLF's
+objects not yet claimed are no longer among them (5.5.1, below). The code that leaves a draw to the engine vouches for it, and
 the latch lets exactly those through (`Flush.h`):
 
 - `Flush::Reason`: one per reason, made once (a function-local `static const`), its name starting with the owner
-  (`"dclf: not claimed (main views)"`, `"sky: batch handed back"`). At most 31 names; more share "more reasons".
+  (`"sky: batch handed back"`, `"precipitation: no port"`). At most 31 names; more share "more reasons".
 - `Flush::EngineDraws scope(reason)`: for a synchronous call of the engine's draw, batch or flush (a family handing a batch back,
   a port calling the engine's Render, Bink's tiles). Opened just before the call, closed right after. Thread-local, nests (the
   innermost reason counts). Inside it, `SetDirtyStates` pays the owed bits and shaders and runs unlatched (its D3D11 binds go
@@ -143,22 +143,26 @@ the latch lets exactly those through (`Flush.h`):
   A collision or a reused pass reads as unvouched: skipped and logged, never let through by mistake. `Flush::Vouching()` says
   whether marks are kept (the latch is on), for callers whose decision costs anything.
 
-**DCLF** vouches at its registration hooks (`Core/Handoff/PassCapture.cpp`, `PassCapture::KeepForEngine`): every pass it hands on
-(not withheld, not bypassed) whose property is a `BSLightingShaderProperty` (grass included; its depth and shadow passes are
-Utility on the same property), `BSEffectShaderProperty` or `BSDistantTreeShaderProperty`, into a renderer DCLF withholds from:
-the main views and the first person's (`dclf: not claimed (main views)`), the shadow views (`... (shadow views)`), the reflection
-faces (`... (reflection faces)`) and the occlusion maps (`... (occlusion maps)`). Three cases the renderer sets alone missed:
+**DCLF** vouches for none of its own classes (5.5.1, org-port/p55-load-windows). Its registration hooks (`Core/Handoff/PassCapture.cpp`)
+withhold, rather than hand on, every pass of a `BSLightingShaderProperty` (grass included; its depth and shadow passes are Utility on
+the same property), `BSEffectShaderProperty` or `BSDistantTreeShaderProperty` that DCLF draws or waits to draw:
+- **A member** of the frame's set, as before.
+- **A waiting object** (`SetSnapshot::pending`: bound and eligible, a pipeline compiling, a texture importing, a buffer to grow): withheld
+  until it joins, the way `WaitsForBaseMips` withholds a lit object whose base mips are not in. It shows when DCLF draws it.
+- **A draw family waiting** for its pipelines or its recording (grass, tree LOD): its engine shapes' passes withheld
+  (`SetFamilyWithheld`).
+- **During a load's hold** (`Core/Render/LoadHold.h`, dclf-architecture.md "Load screens"): every pass of those classes into a view DCLF
+  draws, member or not: the main views and the first person's, any shadow-map caster pass (the shadow modes' registration,
+  `FUN_1414b2a60`, SE 99932 / AE 106576, detoured always now: `t_shadowRegistration`), the reflection faces and the occlusion maps.
 - **A group renderer made this frame.** The engine makes a geometry group's batch renderer at the group's first pass
-  (`FUN_1414f17f0`), during the registrations, after `RefreshMainRenderers` made the main views' set; it joins the set the next frame
-  (the log's `[DCLF] the main camera's views: N batch renderers` grows). `MainRendererNow` reads the Z-prepass, main and first-person
-  accumulators' groups live when the set does not hold the renderer.
-- **A shadow view DCLF does not cover.** The withholding map holds the covered views only, and nothing before the selection has
-  published. With the latch on, `ShadowViews::AddCaster` also publishes every kept light's renderers (`SetEngineShadowRenderers`),
-  whatever the coverage; `BeginCasters` drops them. That missed the interior lights' casters (below), so the shadow modes'
-  registration (`FUN_1414b2a60`, SE 99932 / AE 106576: the one function that builds a caster's shadow-map passes) is detoured under
-  the latch: while it runs for an accumulator in render mode 0xD-0xF, every pass its hooks hand on is `... (shadow views)`.
-- **An occlusion map DCLF does not draw** (phase 0, `occlusion map not taken`): every occluder is the engine's, vouched as
-  `... (occlusion maps)`.
+  (`FUN_1414f17f0`), during the registrations, after `RefreshMainRenderers` made the main views' set; it joins the set the next frame.
+  `MainRendererNow` reads the Z-prepass, main and first-person accumulators' groups live, and `WithholdMain` withholds into it as into
+  any main view's renderer.
+
+The reasons `dclf: not claimed (main views)`, `(shadow views)`, `(reflection faces)` and `(occlusion maps)` are deleted, with
+`SetEngineShadowRenderers` and the kept lights' renderer set behind them. What DCLF still hands the engine of its classes: an object it
+refuses (ineligible) and one not bound yet (attached since the last publication, before the culls' membership reaches the coordinator).
+Under the latch those are skipped and logged like any unvouched draw, so the census names them.
 
 The sky's precipitation (a `BSParticleShaderProperty` pass on `Sky::precip`'s current or last geometry) has no port; the same hook
 vouches it as `precipitation: no port`. Nothing else: water, other particles, the shadow mask, ImageSpace, Bink and Scaleform are
@@ -293,9 +297,9 @@ window" is the next.
 
 | Class (residue census) | Per frame | Why the engine draws it | State |
 | --- | --- | --- | --- |
-| Lighting (RT `kMAIN`), Utility depth (DS `kMAIN`, vs `0x2000`, `0x209b`, `0x400209b`), shadow casters (DS `kSHADOWMAPS`), Effect in the grouped alphas (AE 107673), through `RenderBatches` | 15-45 in load windows, 0 settled | Objects not yet members: the engine draws an object until the publication that claims it is installed (dclf-architecture.md, "Load screens" and "Pass capture") | By design. What would shorten it: claims for a load's objects in the first frame their draws are ready. Measure the delay with `CS_DCLF_STATS` (`[DCLF] event to adoption`) in `p5-all-census-dclf.env` |
-| Instanced DistantTree (dispatcher +0x650, via CS's tree LOD hook) | 4-7 in the first world window only | Tree LOD before its gates and family are ready after the first load | By design, as above |
-| The alternate index buffer (77264, dispatcher +0x41E) | 0.2, one load window | A multi-index shape's layer pass (hint 12) before its base is a member (`CS_DCLF_LAYERS`) | By design, as above |
+| Lighting (RT `kMAIN`), Utility depth (DS `kMAIN`, vs `0x2000`, `0x209b`, `0x400209b`), shadow casters (DS `kSHADOWMAPS`), Effect in the grouped alphas (AE 107673), through `RenderBatches` | 15-45 in load windows, 0 settled | Objects not yet members: the engine drew an object until the publication that claims it was installed | 5.5.1: a load's hold keeps the loading menu up until the claims settle, withholding DCLF's classes meanwhile, and a waiting object is withheld after it (dclf-architecture.md, "Load screens" and "The DCLF set"). Should be 0 in `load-hold-census.env` |
+| Instanced DistantTree (dispatcher +0x650, via CS's tree LOD hook) | 4-7 in the first world window only | Tree LOD before its gates and family are ready after the first load | 5.5.1, as above: the hold, then the family withheld while it waits |
+| The alternate index buffer (77264, dispatcher +0x41E) | 0.2, one load window | A multi-index shape's layer pass (hint 12) before its base is a member (`CS_DCLF_LAYERS`) | 5.5.1, as above |
 | Effect through the particle draw (+0x101) | about 3 settled (Whiterun) | The master particle systems (`MPS*`: chimney smoke, candles, torches): `effect: untracked, eligible` in DCLF's census | Built behind `CS_DCLF_MASTER_PARTICLES=1` (default off, dclf-roadmap.md 1.4: needs the unheld roots diff run before it is the default) |
 | Effect through the skin path (AE 71150: vs `0x44b`, `0x55b`, `0x4a`) | 3 (dog eyes), 7.5-13.7 and 1.2-2.8 in Blackreach | `effect-variant (skinned)`: the Effect port read Skinned from the renderer data's vertex description, which a skinned shape's is not | Fixed on `org-port/w3-dclf` (`GeometryRecord::shapeVertexDesc`, BSGeometry +0x148 as `FUN_1414bde90` reads it). Should be 0 in `p5-all-census-dclf.env` |
 | Effect on a rigid skin (a skin instance, no Skinned bit in the pass) | not seen in this run | `effect-variant (skinned)` | Built behind `CS_DCLF_EFFECT_RIGID_SKINS=1` (default off until its shots are checked) |

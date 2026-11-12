@@ -598,6 +598,14 @@ struct IDXGISwapChain_Present
 						ZoneScopedN("CS.Present.NativeWait");
 						GpuEventTimers::BeginEvent("mark before native present");
 						GpuEventTimers::EndEvent();
+						// A load without a loading menu, held until Drawcall Limit Fix draws its objects: the previous frame stays on screen.
+						// The frame's work is sent on as a present would send it. Not with frame generation or the owned frame, which present
+						// themselves.
+						if (globals::features::drawcallLimitFix.loaded && globals::features::drawcallLimitFix.LoadHoldsPresents() &&
+							!RenderGraph::Engine::OwnedFrame::Active() && !globals::features::upscaling.IsFrameGenerationActive()) {
+							globals::d3d::context->Flush();
+							return S_OK;
+						}
 						// The owned frame: DXVK's headless Present ends the guest frame, ORG presents behind it.
 						const auto presented = RenderGraph::Engine::OwnedFrame::Active() ?
 						                           RenderGraph::Engine::OwnedFrame::Get().Present(sc, si, f, [](IDXGISwapChain* a_sc, unsigned a_si, unsigned a_f) { return func(a_sc, a_si, a_f); }) :

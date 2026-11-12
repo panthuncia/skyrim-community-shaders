@@ -3,6 +3,8 @@
 
 #include "Features/DrawcallLimitFix/Features/MenuViews/MenuViews.h"
 
+#include "Features/DrawcallLimitFix/Core/Handoff/PassCapture.h"
+
 #include "RenderGraph/Engine/Flush/Flush.h"
 #include "RenderGraph/Switches.h"
 
@@ -21,14 +23,18 @@ namespace DCLF::Features::MenuViews
 
 		/**
 		 * @brief UI3DSceneManager::Render (SE 51855, AE 52727): a menu's model (the inventory's, the loading screen's on its serving thread),
-		 * its depth, shadow maps, shadow masks and colour. No view takes it yet (menus.md, stage 2), so under the flush latch every draw in
-		 * it is the engine's on purpose (p5/flush.md, "Allowed engine draws"). Installed with the latch only.
+		 * its depth, shadow maps, shadow masks and colour. Its registrations are no world view's, so a load's hold leaves them to the engine
+		 * (PassCapture::MenuSceneScope: the loading menu's model under the hold). No view takes it yet (menus.md, stage 2), so under the flush
+		 * latch every draw in it is the engine's on purpose (p5/flush.md, "Allowed engine draws").
 		 */
 		struct Menu3DRender
 		{
 			static DWORD thunk(RE::UI3DSceneManager* a_manager, int a_scheme, RE::NiCamera* a_camera, bool a_arg4)
 			{
 				static const Flush::Reason reason{ "menu views: menu 3D left to the engine" };
+				PassCapture::MenuSceneScope menuScene;
+				if (!Flush::LatchRequested())
+					return func(a_manager, a_scheme, a_camera, a_arg4);
 				Flush::EngineDraws scope(reason);
 				return func(a_manager, a_scheme, a_camera, a_arg4);
 			}
@@ -41,29 +47,34 @@ namespace DCLF::Features::MenuViews
 			static void thunk(void* a_renderer)
 			{
 				static const Flush::Reason reason{ "menu views: local map left to the engine" };
+				PassCapture::MenuSceneScope menuScene;
+				if (!Flush::LatchRequested()) {
+					func(a_renderer);
+					return;
+				}
 				Flush::EngineDraws scope(reason);
 				func(a_renderer);
 			}
 			static inline REL::Relocation<decltype(thunk)> func;
 		};
 
-		/** @brief The menu scenes vouched for under the flush latch, whatever CS_ORG_MENU3D and CS_ORG_MAP say. */
-		void InstallLatchHooks()
+		/** @brief The menu scenes' scopes: a load's hold's (always) and the flush latch's vouches, whatever CS_ORG_MENU3D and CS_ORG_MAP say. */
+		void InstallSceneHooks()
 		{
-			if (!Flush::LatchRequested())
-				return;
 			stl::detour_thunk<Menu3DRender>(REL::RelocationID(51855, 52727));
 			stl::detour_thunk<LocalMapRender>(REL::RelocationID(16094, 16335));
 			if (!Menu3DRender::func.address() || !LocalMapRender::func.address())
-				logger::warn("[DCLF] menu views: a menu scene detour did not attach (menu 3D {}, local map {}); the flush latch skips that scene's draws",
+				logger::warn(
+					"[DCLF] menu views: a menu scene detour did not attach (menu 3D {}, local map {}); a load's hold withholds that scene's "
+					"world-class passes, and the flush latch skips its draws",
 					Menu3DRender::func.address() != 0, LocalMapRender::func.address() != 0);
-			else
+			else if (Flush::LatchRequested())
 				logger::info("[DCLF] menu views: the menu scenes are the engine's under the flush latch (UI3DSceneManager::Render, LocalMapRenderer::Render)");
 		}
 
 		void Install(Api::InstallContext& a_context)
 		{
-			InstallLatchHooks();
+			InstallSceneHooks();
 			if (!Menu3DEnabled() && !MapEnabled())
 				return;
 			InstallHooks();

@@ -2,7 +2,7 @@
 
 #include "Features/DrawcallLimitFix/Core/Render/FrameDriver.h"
 #include "Features/DrawcallLimitFix/Core/Handoff/EngineOnlyCull.h"
-#include "Features/DrawcallLimitFix/Core/Render/StartupHold.h"
+#include "Features/DrawcallLimitFix/Core/Render/LoadHold.h"
 #include "Features/DrawcallLimitFix/Diagnostics/Zones.h"
 
 #include "Deferred.h"
@@ -63,6 +63,10 @@ namespace DCLF
 
 	bool FrameDriver::BeginFrame(bool a_running, bool a_installed)
 	{
+		// A load's hold (LoadHold.h): the world's first frame under the kept loading menu starts it, before anything reads whether a load
+		// is up (FrameView::IsLoadingScreenUp: not for the hold's frames).
+		if (a_installed)
+			LoadHold::OnFrameStart(a_running);
 		Diagnostics::Notify(Diagnostics::FrameBegin{ a_running });
 		// The occlusion maps the last frame took and drew are its own.
 		occlusionWanted = occlusionDrawn = 0;
@@ -315,8 +319,8 @@ namespace DCLF
 
 	void FrameDriver::EndFrame(bool a_running)
 	{
-		// The session's first frames' hold (StartupHold.h): advanced, and released once DCLF covers its views.
-		StartupHold::OnFrameEnd(a_running);
+		// A load's hold (LoadHold.h): judged, and ended once the load's objects are DCLF's.
+		LoadHold::OnFrameEnd(a_running);
 		// The engine's next update follows Present: no worker may be inside its memory from here (EngineReadWindow).
 		{
 			RenderThreadBudget::Part boundary(RenderThreadBudget::Bucket::EngineBoundary);
@@ -478,12 +482,12 @@ namespace DCLF
 		if (a_map < Extensions::kOcclusionMaps)
 			occlusionFrames.engine[a_map] += needed ? 1 : 0;
 		// A map DCLF draws in normal play (on, not its parity's reference) that the engine would render whole: a view DCLF does not cover
-		// yet. Held in the session's first frames (StartupHold.h: black, the map not rendered), else counted.
+		// yet. Held during a load's hold (LoadHold.h: off the screen, the map not culled by the engine), else counted.
 		if (needed && a_running && a_map < Extensions::kOcclusionMaps && Extensions::OcclusionOn(ActiveToggles(), a_map)) {
 			// Held: the map still renders at the engine's point, its camera set and DCLF's view of it taken (OcclusionView), but without the
-			// engine's cull (the shell skips SetupMask for a held map, OcclusionHeld): no occluder until DCLF takes it, under the blackout.
-			if (StartupHold::Active()) {
-				StartupHold::NoteHeld(StartupHold::View::Occlusion);
+			// engine's cull (the shell skips SetupMask for a held map, OcclusionHeld): no occluder until DCLF takes it, behind the hold.
+			if (LoadHold::Active()) {
+				LoadHold::NoteHeld(LoadHold::View::Occlusion);
 				occlusionHeld |= 1u << a_map;
 				return needed;
 			}

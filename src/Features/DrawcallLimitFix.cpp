@@ -50,7 +50,7 @@
 #	include "DrawcallLimitFix/Core/Scene/Coordinator/Coordinator.h"
 #	include "Features/DrawcallLimitFix/Core/Scene/FrameView/FrameView.h"
 #	include "Features/DrawcallLimitFix/Core/Handoff/EngineOnlyCull.h"
-#	include "Features/DrawcallLimitFix/Core/Render/StartupHold.h"
+#	include "Features/DrawcallLimitFix/Core/Render/LoadHold.h"
 #	include "Features/DrawcallLimitFix/Core/Scene/EngineCasters.h"
 #	include "DrawcallLimitFix/Core/Shading/LightingDescriptors.h"
 #	include "DrawcallLimitFix/Core/Engine/Capture/SceneTracker.h"
@@ -162,6 +162,8 @@ void DrawcallLimitFix::PostPostLoad()
 	DCLF::Scene::InstallSceneEvents();
 	// Capture at registration: where the set's members' passes are withheld from the views DCLF draws.
 	DCLF::PassCapture::Get().Install();
+	// The hold after every load: the loading menu stays up until DCLF draws the load's objects (Core/Render/LoadHold.h).
+	DCLF::LoadHold::Install();
 	// Whether DCLF runs, for the engine hooks outside the shell (the features' own thunks), before any of them is installed.
 	DCLF::ShellState::InstallRunningQuery([] { return globals::features::drawcallLimitFix.Running(); });
 	// The features' engine hooks that must precede DCLF's own engine side (Features/Portals: Main::Update's portal walk, first, the call
@@ -441,9 +443,9 @@ bool DrawcallLimitFix::OcclusionHeld(OcclusionMap a_map) const
 	return installed && DCLF::FrameDriver::Get().OcclusionHeld(a_map);
 }
 
-bool DrawcallLimitFix::StartupBlackout() const
+bool DrawcallLimitFix::LoadHoldsPresents() const
 {
-	return installed && Running() && DCLF::StartupHold::Active() && !DCLF::Scene::FrameView::IsLoadingScreenUp();
+	return installed && DCLF::LoadHold::PresentsHeld();
 }
 
 bool DrawcallLimitFix::OcclusionEngineOnlyMask(RE::Precipitation* a_precip)
@@ -509,7 +511,7 @@ void DrawcallLimitFix::RenderPrecipitationMask(RE::Precipitation* a_precip, RE::
 	// shadow epoch, so the engine's cull and registration (SetupMask) are skipped and RenderMask only sets the camera and clears the mask.
 	// Otherwise, or on a frame DCLF did not draw it, the engine does.
 	const bool reference = a_dclf && OcclusionReferenceFrame(kPrecipitationOcclusion);
-	// Held by the startup hold: the engine's point renders it without its cull, as DCLF's own variant does.
+	// Held by a load's hold (Core/Render/LoadHold.h): the engine's point renders it without its cull, as DCLF's own variant does.
 	const bool held = !a_dclf && OcclusionHeld(kPrecipitationOcclusion);
 	if ((!a_dclf && !held) || reference) {
 		a_precip->SetupMask();
@@ -1124,7 +1126,7 @@ bool DrawcallLimitFix::OcclusionNeedsEngine(OcclusionMap) { return true; }
 void DrawcallLimitFix::OcclusionView(OcclusionMap) {}
 bool DrawcallLimitFix::OcclusionReferenceFrame(OcclusionMap) { return false; }
 bool DrawcallLimitFix::OcclusionEngineOnlyMask(RE::Precipitation*) { return false; }
-bool DrawcallLimitFix::StartupBlackout() const { return false; }
+bool DrawcallLimitFix::LoadHoldsPresents() const { return false; }
 bool DrawcallLimitFix::OcclusionHeld(OcclusionMap) const { return false; }
 void DrawcallLimitFix::OcclusionReferenceRendered(OcclusionMap) {}
 void DrawcallLimitFix::RenderPrecipitationMask(RE::Precipitation* a_precip, RE::BSGeometry* a_precipObject, bool)

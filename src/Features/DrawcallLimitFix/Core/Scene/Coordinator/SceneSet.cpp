@@ -194,6 +194,34 @@ namespace DCLF::Scene
 		return claimsPool.size() - 1;
 	}
 
+	void Coordinator::RefreshPending()
+	{
+		// The waiting slots (bound, eligible, not ready yet) by base geometry, with the phases they take part in: the hooks withhold them
+		// from the engine until they join (SetSnapshot::pending). Made whole when a waiting slot was decided, and a change only when it
+		// differs: a slot that waits on, requeued by its sources, changes nothing. The waiting slots are few once a load has settled.
+		if (!std::exchange(setPendingDirty, false))
+			return;
+		PendingMap next;
+		if (sceneBuilt) {
+			const std::uint32_t drawn = setPhaseMask;
+			for (const std::uint32_t slot : setWaiting) {
+				if (slot >= setWaitingMark.size() || !setWaitingMark[slot] || slot >= tables.objects.size() || tables.IsLayer(slot))
+					continue;
+				const auto* geometry = tables.objectGeometry[slot];
+				if (const std::uint8_t phases = geometry ? SetParticipation(slot, drawn) : std::uint8_t{ 0 })
+					next.insert_or_assign(geometry, phases);
+			}
+		}
+		const bool same = next.size() == setPending.size() && std::ranges::all_of(next, [&](const auto& a_entry) {
+			const auto it = setPending.find(a_entry.first);
+			return it != setPending.end() && it->second == a_entry.second;
+		});
+		if (same)
+			return;
+		setPending = std::move(next);
+		setPendingChanged = true;
+	}
+
 	void Coordinator::PublishClaims()
 	{
 		DCLF_ZONE("CS.DCLF.Scene.PublishClaims");
@@ -203,6 +231,7 @@ namespace DCLF::Scene
 		auto& pace = paceStats;
 		const std::uint8_t drawn = static_cast<std::uint8_t>(setPhaseMask);
 		claimsFresh = false;
+		RefreshPending();
 		// The paced parity's reference: the claims made whole, as an every-pass publication's were.
 		if (pacedCheckDue) {
 			// setBuilding's phases only: its frame and drawn are never set (the published claims take them here).
@@ -211,7 +240,7 @@ namespace DCLF::Scene
 			claimsReference->drawn = drawn;
 		}
 		// Nothing changed since the last claims (setBuilding unwritten, no edit of the last): shared again.
-		if (claimsPublished < claimsPool.size() && publicationClaims == claimsPool[claimsPublished].snapshot && !setSnapshotDirty) {
+		if (claimsPublished < claimsPool.size() && publicationClaims == claimsPool[claimsPublished].snapshot && !setSnapshotDirty && !setPendingChanged) {
 			const auto& last = claimsPool[claimsPublished];
 			if (last.edited.empty() && last.cursor.Continues(setPhaseLog, 0) && last.cursor.position == setPhaseLog.End() && last.snapshot->drawn == drawn) {
 				++pace.claimsShared;
@@ -246,6 +275,8 @@ namespace DCLF::Scene
 		entry.cursor.Advance(setPhaseLog);
 		entry.snapshot->frame = sceneFrame;
 		entry.snapshot->drawn = drawn;
+		entry.snapshot->pending = setPending;
+		setPendingChanged = false;
 		publicationClaims = entry.snapshot;
 		claimsPublished = index;
 		claimsFresh = true;
@@ -530,6 +561,9 @@ namespace DCLF::Scene
 			if (a_wait)
 				setWaiting.push_back(a_slot);  // compacted below
 		}
+		// The claims' pending map names the waiting slots' geometry and phases: made again at the next publication.
+		if (a_wait || a_commit.waitingMoved)
+			setPendingDirty = true;
 		const std::uint8_t before = setPhases[a_slot];
 		if (before == a_phases)
 			return;
@@ -886,6 +920,13 @@ namespace DCLF::Scene
 		publication->retirementHold = publishedRetirement;
 		publication->claims = publicationClaims ? publicationClaims : std::make_shared<const SetSnapshot>();
 		publication->lackingCount = setLackingCount;
+		// The waiting slots by reason, and whether the scene was built: a load's hold waits for a built scene whose objects wait on nothing
+		// transient (Core/Render/LoadHold.h).
+		static_assert(std::tuple_size_v<decltype(SetStats::waitingBy)> == kSetWaitReasons, "the published waiting reasons are SetStats::waitingBy's");
+		publication->built = sceneBuilt;
+		for (const std::uint32_t slot : setWaiting)
+			if (slot < setWaitingMark.size() && setWaitingMark[slot] && slot < setWaitWhy.size())
+				++publication->waiting[(std::min<std::size_t>)(setWaitWhy[slot], kSetWaitReasons - 1)];
 		publication->lookups = publishedLookups;
 		{
 			std::scoped_lock lock(LatestSceneMutex());

@@ -76,6 +76,12 @@ namespace DCLF::Scene
 		std::size_t claimsPublished = ~std::size_t(0);  // publicationClaims' entry
 		bool claimsFresh = false;                       // made by this publication (else shared from the last: held, never written)
 		bool setSnapshotDirty = true;  // setBuilding changed since the last published claims
+		// The waiting slots' geometry and phases (SetSnapshot::pending), as RefreshPending last made them: made again when a waiting slot
+		// was decided (dirty), a change of the published claims only when it differs (changed).
+		using PendingMap = ankerl::unordered_dense::map<const RE::BSGeometry*, std::uint8_t>;
+		PendingMap setPending;
+		bool setPendingDirty = true;
+		bool setPendingChanged = false;
 		/** @brief One slot's decision: phases, whether and why it waits, and the observers' notes of a CategoryRoot view's slot (first person's). */
 		struct SlotDecision
 		{

@@ -10,6 +10,7 @@
 #include "Features/DrawcallLimitFix/Core/Engine/EngineAccess.h"
 #include "Features/DrawcallLimitFix/Core/Engine/HookSites.h"
 #include "Features/DrawcallLimitFix/Core/Extensions/DrawFamilies.h"
+#include "Features/DrawcallLimitFix/Core/Render/LoadHold.h"
 
 #include <span>
 #include "Features/DrawcallLimitFix/Diagnostics/Engine/Events.h"
@@ -47,6 +48,22 @@ namespace DCLF
 		{
 			const auto root = Extensions::DrawFamilies()[a_family].contribution.faces.root;
 			return root < Api::ViewRoot::Count ? Api::ViewRootBit(root) : 0u;
+		}
+
+		// The shadow-map registration this thread runs now (ShadowRegistration): its accumulator's render mode is a shadow view's.
+		thread_local bool t_shadowRegistration = false;
+		// The menu scenes' renders this thread is inside (MenuSceneScope).
+		thread_local std::uint32_t t_menuScenes = 0;
+
+		/**
+		 * @brief Whether a_pass is of DCLF's classes: a Lighting object's (grass included; its depth and shadow passes are Utility on the
+		 * same property), an effect's or tree LOD's.
+		 */
+		bool DclfClass(const RE::BSRenderPass* a_pass)
+		{
+			const auto* property = a_pass->shaderProperty;
+			return property && (netimmerse_cast<const RE::BSLightingShaderProperty*>(property) || netimmerse_cast<const RE::BSEffectShaderProperty*>(property) ||
+								   netimmerse_cast<const RE::BSDistantTreeShaderProperty*>(property));
 		}
 	}
 
@@ -123,6 +140,7 @@ namespace DCLF
 				stats.viewFamilyWithheld[v][f] = viewRenderers[v].ownFamilyWithheld[f].exchange(0, std::memory_order_relaxed);
 		}
 		stats.occlusionWithheld = occlusionWithheld.exchange(0, std::memory_order_relaxed);
+		stats.holdWithheld = holdWithheld.exchange(0, std::memory_order_relaxed);
 		lastDrain = { entries.data(), count };
 		return lastDrain;
 	}
@@ -200,20 +218,42 @@ namespace DCLF
 		std::atomic_store(&mainRenderers, std::shared_ptr<const RendererSet>(std::move(renderers)));
 	}
 
+	PassCapture::MenuSceneScope::MenuSceneScope() { ++t_menuScenes; }
+	PassCapture::MenuSceneScope::~MenuSceneScope() { --t_menuScenes; }
+
+	bool PassCapture::HeldByLoad(const RE::BSRenderPass* a_pass)
+	{
+		// A load's hold (Core/Render/LoadHold.h): the world's frames run off the screen, and every pass of DCLF's classes into a view DCLF
+		// draws is withheld, member or not, so the engine draws none of the load's objects while their claims settle. A menu scene's are
+		// not the world's (the loading menu's model and its shadow casters draw).
+		if (!LoadHold::Active() || t_menuScenes || !Policy::WithholdFromEngine() || !DclfClass(a_pass))
+			return false;
+		holdWithheld.fetch_add(1, std::memory_order_relaxed);
+		return true;
+	}
+
 	bool PassCapture::WithholdMain(const RE::BSBatchRenderer* a_batch, const RE::BSRenderPass* a_pass)
 	{
-		if (!a_pass || !a_pass->geometry || !Policy::WithholdFromEngine() || !IsMainRenderer(a_batch))
+		if (!a_pass || !a_pass->geometry || !Policy::WithholdFromEngine())
 			return false;
+		// The main views' renderers, and a geometry group's renderer the engine made during this frame's registrations (in no set until the
+		// next frame's RefreshMainRenderers: MainRendererNow). A shadow-map registration is never the main views'.
+		if (!IsMainRenderer(a_batch) && (t_shadowRegistration || !MainRendererNow(a_batch)))
+			return false;
+		if (HeldByLoad(a_pass))
+			return true;
 		// Tree LOD (dclf-architecture.md, "Tree LOD: the draws"): DCLF draws every instance the mirror holds this frame, so the engine's
 		// passes of every tree LOD shape (its Z-prepass's, hint 7 into group 1 through the shadow modes' registration; its colour
-		// pass's, hint 7 into group 1) are withheld. So for every draw family DCLF draws this frame: its engine shapes' passes.
+		// pass's, hint 7 into group 1) are withheld. So for every draw family DCLF draws this frame, or waits to draw (its pipelines not
+		// ready yet): its engine shapes' passes.
 		for (std::size_t f = 0; f < Extensions::kDrawFamilies; ++f)
-			if (familyOwned[f].load(std::memory_order_acquire) && Engine::VtableIs(ShaderPropertyOf(a_pass->geometry), Extensions::DrawFamilies()[f].engineShapeVtable)) {
+			if (familyHeld[f].load(std::memory_order_acquire) && Engine::VtableIs(ShaderPropertyOf(a_pass->geometry), Extensions::DrawFamilies()[f].engineShapeVtable)) {
 				familyWithheld[f].fetch_add(1, std::memory_order_relaxed);
 				return true;
 			}
+		// A member's phases, or a waiting object's (SetSnapshot::pending): the engine draws neither.
 		const auto set = std::atomic_load(&frameSet);
-		const std::uint8_t phases = set ? set->PhasesOf(a_pass->geometry) : std::uint8_t{ 0 };
+		const std::uint8_t phases = set ? set->WithheldPhasesOf(a_pass->geometry) : std::uint8_t{ 0 };
 		const auto& views = Extensions::Views();
 		for (std::uint32_t i = 0; i < views.mainRendererCount; ++i)
 			if (IsViewRenderer(views.mainRendererViews[i], a_batch))
@@ -292,10 +332,16 @@ namespace DCLF
 		for (std::uint32_t i = 0; i < views.ownRendererCount; ++i) {
 			const auto v = static_cast<std::size_t>(views.ownRendererViews[i]);
 			auto& view = viewRenderers[v];
-			if (!view.withholdActive.load(std::memory_order_acquire) || !ViewCovered(views.ownRendererViews[i]))
+			// The view's own gates, or a load's hold (every view DCLF draws), before its renderers are read.
+			const bool withholding = view.withholdActive.load(std::memory_order_acquire) && ViewCovered(views.ownRendererViews[i]);
+			if (!withholding && !LoadHold::Active())
 				continue;
 			const auto renderers = std::atomic_load(&view.renderers);
 			if (!renderers || !renderers->contains(a_batch))
+				continue;
+			if (HeldByLoad(a_pass))
+				return true;
+			if (!withholding)
 				continue;
 			// A draw family's engine shape (tree LOD's), withheld while the view's faces draw the family. One of a family without faces
 			// (grass) is never a view's: the view's own renderers draw it, and it is no residue of the view's roots.
@@ -309,7 +355,7 @@ namespace DCLF
 			}
 			const auto set = std::atomic_load(&frameSet);
 			const std::uint8_t phase = views.views[v].phase;
-			if (!set || !(set->drawn & phase) || !(set->PhasesOf(a_pass->geometry) & phase)) {
+			if (!set || !(set->drawn & phase) || !(set->WithheldPhasesOf(a_pass->geometry) & phase)) {
 				// The residue watch: a draw family's engine shape under its faces' root, anything else but the sky under the view root
 				// contributions' roots (the LOD land and objects').
 				if (const auto watch = view.residueWatch.load(std::memory_order_acquire); watch & (treeLod ? FacesRootBit(family) : views.rootBits))
@@ -372,11 +418,6 @@ namespace DCLF
 		std::atomic_store(&shadowRenderers, std::move(a_renderers));
 	}
 
-	void PassCapture::SetEngineShadowRenderers(std::shared_ptr<const RendererSet> a_renderers)
-	{
-		std::atomic_store(&engineShadowRenderers, std::move(a_renderers));
-	}
-
 	void PassCapture::SetFocusBatchRenderers(std::shared_ptr<const ShadowRendererMap> a_renderers)
 	{
 		std::atomic_store(&focusRenderers, std::move(a_renderers));
@@ -424,8 +465,11 @@ namespace DCLF
 				if (const auto it = focus->find(a_batch); it != focus->end())
 					Diagnostics::Notify(Diagnostics::FocusRegistration{ it->second, a_pass->geometry });
 		std::uint32_t mode = 0;
+		// Any shadow-map caster pass during a load's hold, whatever renderer it goes to.
+		if ((t_shadowRegistration || ShadowModeOfBatch(a_batch, mode)) && HeldByLoad(a_pass))
+			return true;
 		std::uint8_t phase = 0;
-		if (const auto set = CastersForBatch(a_batch, &phase); set && ShadowModeOfBatch(a_batch, mode) && (set->PhasesOf(a_pass->geometry) & phase)) {
+		if (const auto set = CastersForBatch(a_batch, &phase); set && ShadowModeOfBatch(a_batch, mode) && (set->WithheldPhasesOf(a_pass->geometry) & phase)) {
 			shadowWithheld[mode].fetch_add(1, std::memory_order_relaxed);
 			return true;
 		}
@@ -442,14 +486,11 @@ namespace DCLF
 
 	namespace
 	{
-		// The shadow-map registration this thread runs now (ShadowRegistration): its accumulator's render mode is a shadow view's.
-		thread_local bool t_shadowRegistration = false;
-
 		/**
 		 * @brief The shadow modes' registration (FUN_1414b2a60, SE 99932 / AE 106576; the Z-prepass's 0xC too): the one function that builds
 		 * a caster's shadow-map passes (the property's GetRenderPasses_ShadowMapOrMask, vtable +0x158) and hands them to the accumulator's
 		 * renderers. Every hook it reaches (RegisterPass, its direct group insertions) runs inside it on this thread, so the accumulator's
-		 * render mode says the pass is a shadow view's, whatever renderer sets DCLF published. Installed with the flush latch only.
+		 * render mode says the pass is a shadow view's, whatever renderer sets DCLF published (a load's hold withholds by it).
 		 */
 		struct ShadowRegistration
 		{
@@ -485,53 +526,21 @@ namespace DCLF
 		return false;
 	}
 
-	void PassCapture::KeepForEngine(const RE::BSBatchRenderer* a_batch, const RE::BSRenderPass* a_pass, bool a_occlusion) const
+	void PassCapture::KeepForEngine(const RE::BSRenderPass* a_pass) const
 	{
 		namespace Flush = RenderGraph::Engine::Flush;
 		if (!Flush::Vouching() || !a_pass || !a_pass->geometry || !a_pass->shaderProperty || bypassed.load(std::memory_order_acquire))
 			return;
-		// DCLF's classes: Lighting objects (their depth and shadow passes are Utility on the same property), effects, tree LOD. The
-		// sky's precipitation (a particle shader on the sky's geometry) has no port: the engine draws it, whatever view culls it.
-		// Water, other particles and the rest are other ports' to vouch for.
-		const auto* property = a_pass->shaderProperty;
-		if (netimmerse_cast<const RE::BSParticleShaderProperty*>(property)) {
-			static const Flush::Reason kPrecipitation{ "precipitation: no port" };
-			const auto* sky = RE::Sky::GetSingleton();
-			const auto* precipitation = sky ? sky->precip : nullptr;
-			if (precipitation && (a_pass->geometry == precipitation->currentPrecip.get() || a_pass->geometry == precipitation->lastPrecip.get()))
-				Flush::VouchPass(a_pass, kPrecipitation);
+		// DCLF's classes never reach the engine from here on purpose: members and waiting objects are withheld (WithholdMain, WithholdOwn,
+		// Withhold, the occlusion maps'), and so is everything of them during a load's hold. The sky's precipitation (a particle shader on the
+		// sky's geometry) has no port: the engine draws it, whatever view culls it. Water, other particles and the rest are other ports'.
+		if (!netimmerse_cast<const RE::BSParticleShaderProperty*>(a_pass->shaderProperty))
 			return;
-		}
-		if (!netimmerse_cast<const RE::BSLightingShaderProperty*>(property) && !netimmerse_cast<const RE::BSEffectShaderProperty*>(property) &&
-			!netimmerse_cast<const RE::BSDistantTreeShaderProperty*>(property))
-			return;
-		static const Flush::Reason kMain{ "dclf: not claimed (main views)" };
-		static const Flush::Reason kShadow{ "dclf: not claimed (shadow views)" };
-		static const Flush::Reason kFaces{ "dclf: not claimed (reflection faces)" };
-		static const Flush::Reason kOcclusion{ "dclf: not claimed (occlusion maps)" };
-		const Flush::Reason* reason = nullptr;
-		std::uint32_t mode = 0;
-		if (a_occlusion)
-			reason = &kOcclusion;
-		else if (IsMainRenderer(a_batch))
-			reason = &kMain;
-		else if (ShadowModeOfBatch(a_batch, mode))
-			reason = &kShadow;
-		else if (const auto engineShadows = std::atomic_load(&engineShadowRenderers); engineShadows && engineShadows->contains(a_batch))
-			reason = &kShadow;  // a shadow view DCLF does not cover this frame: the engine draws it whole
-		else if (t_shadowRegistration)
-			reason = &kShadow;  // a shadow-map caster pass into a renderer no set holds (an interior light's view, a group made this frame)
-		else {
-			const auto& views = Extensions::Views();
-			for (std::uint32_t i = 0; i < views.ownRendererCount && !reason; ++i)
-				if (IsViewRenderer(views.ownRendererViews[i], a_batch))
-					reason = &kFaces;
-			// A main view's geometry group renderer the engine made during this frame's registrations: in no set until the next frame's.
-			if (!reason && MainRendererNow(a_batch))
-				reason = &kMain;
-		}
-		if (reason)
-			Flush::VouchPass(a_pass, *reason);
+		static const Flush::Reason kPrecipitation{ "precipitation: no port" };
+		const auto* sky = RE::Sky::GetSingleton();
+		const auto* precipitation = sky ? sky->precip : nullptr;
+		if (precipitation && (a_pass->geometry == precipitation->currentPrecip.get() || a_pass->geometry == precipitation->lastPrecip.get()))
+			Flush::VouchPass(a_pass, kPrecipitation);
 	}
 
 	namespace
@@ -593,7 +602,7 @@ namespace DCLF
 				return;
 			if (Diagnostics::Armed<Diagnostics::PassKept>())
 				capture.NoteKept(a_this, a_pass, Census(RegistrationCensus::Site::RegisterPass));
-			capture.KeepForEngine(a_this, a_pass);
+			capture.KeepForEngine(a_pass);
 			func(a_this, a_pass, a_techniqueID);
 		}
 		static inline REL::Relocation<decltype(thunk)> func;
@@ -609,9 +618,12 @@ namespace DCLF
 	{
 		if (!a_pass || !a_pass->geometry || bypassed.load(std::memory_order_acquire))
 			return false;
+		std::uint32_t mode = 0;
+		if ((t_shadowRegistration || ShadowModeOfBatch(a_batch, mode)) && HeldByLoad(a_pass))
+			return true;
 		std::uint8_t phase = 0;
 		const auto set = CastersForBatch(a_batch, &phase);
-		const bool member = set && (set->PhasesOf(a_pass->geometry) & phase);
+		const bool member = set && (set->WithheldPhasesOf(a_pass->geometry) & phase);
 		if (member)
 			a_counter.fetch_add(1, std::memory_order_relaxed);
 		return member;
@@ -630,7 +642,7 @@ namespace DCLF
 				return;
 			if (Diagnostics::Armed<Diagnostics::PassKept>() && !capture.bypassed.load(std::memory_order_acquire))
 				capture.NoteKept(a_batch, a_pass, Census(RegistrationCensus::Site::Volumetric));
-			capture.KeepForEngine(a_batch, a_pass);
+			capture.KeepForEngine(a_pass);
 			func(a_batch, a_pass, a_group, a_arg);
 		}
 		static inline REL::Relocation<decltype(thunk)> func;
@@ -656,7 +668,7 @@ namespace DCLF
 				return;
 			if (Diagnostics::Armed<Diagnostics::PassKept>() && !capture.bypassed.load(std::memory_order_acquire))
 				capture.NoteKept(a_batch, a_pass, Census(RegistrationCensus::Site::ShadowDirect));
-			capture.KeepForEngine(a_batch, a_pass);
+			capture.KeepForEngine(a_pass);
 			func(a_batch, a_pass, a_group, a_arg);
 		}
 		static inline REL::Relocation<decltype(thunk)> func;
@@ -685,7 +697,7 @@ namespace DCLF
 				return;
 			if (Diagnostics::Armed<Diagnostics::PassKept>() && !capture.bypassed.load(std::memory_order_acquire))
 				capture.NoteKept(a_batch, a_pass, Census(RegistrationCensus::Site::MainGroup));
-			capture.KeepForEngine(a_batch, a_pass);
+			capture.KeepForEngine(a_pass);
 			func(a_batch, a_pass, a_group, a_arg);
 		}
 		static inline REL::Relocation<decltype(thunk)> func;
@@ -706,7 +718,7 @@ namespace DCLF
 				return;
 			if (Diagnostics::Armed<Diagnostics::PassKept>() && !capture.bypassed.load(std::memory_order_acquire))
 				capture.NoteKept(a_batch, a_pass, Census(RegistrationCensus::Site::MainList));
-			capture.KeepForEngine(a_batch, a_pass);
+			capture.KeepForEngine(a_pass);
 			func(a_batch, a_pass, a_list);
 		}
 		static inline REL::Relocation<decltype(thunk)> func;
@@ -724,15 +736,19 @@ namespace DCLF
 			++passesOnThisThread;
 			auto& capture = PassCapture::Get();
 			const std::uint8_t phase = capture.occlusionPhase.load(std::memory_order_acquire);
-			if (phase && a_pass && a_pass->geometry && !!Policy::WithholdFromEngine() && !capture.bypassed.load(std::memory_order_acquire))
-				if (const auto set = std::atomic_load(&capture.frameSet); set && (set->drawn & phase) && (set->PhasesOf(a_pass->geometry) & phase)) {
+			const bool live = a_pass && a_pass->geometry && !capture.bypassed.load(std::memory_order_acquire);
+			if (live && capture.HeldByLoad(a_pass))
+				return;
+			if (phase && live && !!Policy::WithholdFromEngine())
+				if (const auto set = std::atomic_load(&capture.frameSet); set && (set->drawn & phase) && (set->WithheldPhasesOf(a_pass->geometry) & phase)) {
 					capture.occlusionWithheld.fetch_add(1, std::memory_order_relaxed);
 					return;
 				}
 			if (Diagnostics::Armed<Diagnostics::PassKept>() && !capture.bypassed.load(std::memory_order_acquire))
 				capture.NoteKept(a_batch, a_pass, Census(RegistrationCensus::Site::Occlusion), phase);
-			// Every occluder DCLF does not draw into the map: all of them while the map is not DCLF's (phase 0, the engine draws it whole).
-			capture.KeepForEngine(a_batch, a_pass, true);
+			// Every occluder DCLF does not draw into the map and does not wait to: all of them while the map is not DCLF's (phase 0, the
+			// engine draws it whole).
+			capture.KeepForEngine(a_pass);
 			func(a_batch, a_pass, a_group, a_arg);
 		}
 		static inline REL::Relocation<decltype(thunk)> func;
@@ -816,11 +832,10 @@ namespace DCLF
 		InstallMainGroup<MainGroupHook<2>>(13);
 		InstallMainGroup<MainListHook>(14);
 		InstallMainGroup<OcclusionGroupHook>(15);
-		if (RenderGraph::Engine::Flush::LatchRequested()) {
-			stl::detour_thunk<ShadowRegistration>(REL::RelocationID(99932, 106576));
-			if (!ShadowRegistration::func.address())
-				logger::warn("[DCLF] pass capture: the shadow registration's detour did not attach; the flush latch skips shadow casters no set holds");
-		}
+		// The shadow registration's scope (a caster's passes into any shadow view's renderer): what a load's hold withholds by.
+		stl::detour_thunk<ShadowRegistration>(REL::RelocationID(99932, 106576));
+		if (!ShadowRegistration::func.address())
+			logger::warn("[DCLF] pass capture: the shadow registration's detour did not attach; a load's hold withholds only the shadow views DCLF published");
 		installed = true;
 		logger::info("[DCLF] pass capture installed on BSBatchRenderer::RegisterPass");
 	}

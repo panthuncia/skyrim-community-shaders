@@ -11,6 +11,7 @@
 #include "Features/DrawcallLimitFix/Core/Gpu/Pipelines/DrawPipelines.h"
 #include "Features/DrawcallLimitFix/Core/Handoff/PassCapture.h"
 #include "Features/DrawcallLimitFix/Core/Handoff/PrimaryCull.h"
+#include "Features/DrawcallLimitFix/Core/Render/LoadHold.h"
 #include "Features/DrawcallLimitFix/Core/Engine/Capture/SceneCapture.h"
 #include "Features/DrawcallLimitFix/Core/Extensions/ShadowViews.h"
 #include "Features/DrawcallLimitFix/Core/Shading/FrameGlobals.h"
@@ -258,7 +259,13 @@ namespace DCLF::Scene
 	bool FrameView::IsLoadingScreenUp()
 	{
 		auto* ui = RE::UI::GetSingleton();
-		return ui && ui->IsMenuOpen(RE::LoadingMenu::MENU_NAME);
+		return ui && ui->IsMenuOpen(RE::LoadingMenu::MENU_NAME) && !LoadHold::MenuHeld();
+	}
+
+	bool FrameView::LoadShown()
+	{
+		// The kept menu shows until it closes, its fade-out included (LoadHold::MenuHeld), as a loading menu does without a hold.
+		return IsLoadingScreenUp() || LoadHold::Active() || LoadHold::MenuHeld();
 	}
 
 	bool FrameView::NoteLoadingScreen()

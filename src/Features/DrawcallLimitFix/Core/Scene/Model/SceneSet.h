@@ -49,10 +49,17 @@ namespace DCLF
 		return a_mode < 2 ? kSetCaster : kSetCasterPoint;
 	}
 
-	/** @brief The set for one frame, by geometry: each member's phases. Immutable once published. */
+	/**
+	 * @brief The set for one frame, by geometry: each member's phases. Immutable once published.
+	 *
+	 * pending holds the objects that wait to join (bound and eligible, not ready yet: a pipeline compiling, a texture importing), with
+	 * the phases they take part in. DCLF does not draw them yet, and the engine does not draw them either: the registration hooks
+	 * withhold them as they withhold members (PassCapture), so an object shows once DCLF draws it. Only the hooks read pending.
+	 */
 	struct SetSnapshot
 	{
 		ankerl::unordered_dense::map<const RE::BSGeometry*, std::uint8_t> phases;
+		ankerl::unordered_dense::map<const RE::BSGeometry*, std::uint8_t> pending;
 		std::uint32_t frame = 0;
 		std::uint8_t drawn = 0;  // the phases DCLF draws this frame (a member's phases are within them)
 
@@ -60,6 +67,12 @@ namespace DCLF
 		{
 			const auto it = phases.find(a_geometry);
 			return it != phases.end() ? it->second : std::uint8_t{ 0 };
+		}
+		/** @brief The phases the engine must not draw a_geometry in: a member's, or a waiting object's (pending). */
+		std::uint8_t WithheldPhasesOf(const RE::BSGeometry* a_geometry) const
+		{
+			const auto it = pending.find(a_geometry);
+			return static_cast<std::uint8_t>(PhasesOf(a_geometry) | (it != pending.end() ? it->second : std::uint8_t{ 0 }));
 		}
 	};
 }

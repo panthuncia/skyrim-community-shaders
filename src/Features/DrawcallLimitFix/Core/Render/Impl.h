@@ -170,6 +170,8 @@ namespace DCLF
 		std::shared_ptr<SceneBuffers> scene;
 		// The frame's draw family decisions (DecideDrawFamilies, by family), which the depth commit and a trees view's faces draw on.
 		std::array<bool, Extensions::kDrawFamilies> familyOwned{};
+		// By family: its last decision waited for what it draws with (DrawFamilyFrame::Pipelines), so its passes are withheld undrawn.
+		std::array<bool, Extensions::kDrawFamilies> familyWaiting{};
 		// The views' frame state: Impl/Views.h (ImplViews).
 		/** @brief A view's graph resources, created once its targets are known (render thread). */
 		bool SetupView(ViewKind a_kind);
