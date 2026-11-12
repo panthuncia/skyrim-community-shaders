@@ -149,8 +149,9 @@ namespace DCLF::Features::Precipitation
 					Refusals().Report(std::format("first colour target {}", target), "not kMAIN, the one first target the client imports");
 					return "a colour target its client does not import";
 				}
-				// A second target the grouped alphas left bound that the client does not import (after an interior, the rain's second
-				// target is another): the draw writes kMAIN alone, as Particle.hlsl's colour is what shows. Its normal output goes nowhere.
+				// A second target the grouped alphas left bound that the client does not import (none seen since the water's temporal
+				// masks were added to kTargets): the draw writes kMAIN alone, as Particle.hlsl's colour is what shows. Its normal output
+				// goes nowhere.
 				if (found == kTargets.end()) {
 					Refusals().Report(std::format("second colour target {} left bound", target), "drawn into kMAIN alone, its normal output dropped");
 					break;

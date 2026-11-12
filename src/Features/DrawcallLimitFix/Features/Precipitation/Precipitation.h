@@ -38,9 +38,11 @@ namespace DCLF::Features::Precipitation
 
 	/**
 	 * @brief The engine targets a draw may name, imported once by the client: kMAIN, and the second targets the grouped alphas may leave
-	 * bound (kNORMAL_TAAMASK_SSRMASK, its swap, kMOTION_VECTOR). A draw naming another stays the engine's.
+	 * bound (kNORMAL_TAAMASK_SSRMASK, its swap, kMOTION_VECTOR, and kTEMPORAL_AA_WATER_1 and _2: the water drawn before the rain in the
+	 * same grouped alphas leaves its temporal mask bound, and the engine's rain then writes its normal output there, which the water's
+	 * temporal blend reads). A draw naming another second target draws into kMAIN alone (PrecipitationCapture.cpp).
 	 */
-	inline constexpr std::array<std::int32_t, 4> kTargets{ 1, 4, 5, 7 };
+	inline constexpr std::array<std::int32_t, 6> kTargets{ 1, 4, 5, 7, 85, 86 };
 	/** @brief The colour targets Particle.hlsl's pixel stage writes (PS_OUTPUT: Color, Normal). */
 	inline constexpr std::uint32_t kMaxColours = 2;
 
