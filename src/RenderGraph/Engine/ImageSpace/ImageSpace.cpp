@@ -195,6 +195,16 @@ namespace RenderGraph::Engine::ImageSpace
 			{ Effects::ISCopyGrayScale, "ISCopyGrayScale", "iscopy", "ISCopy.hlsl", 1, 0b1, 1, 0, false, true },
 			// The get-hit effect's last draw (end-of-frame chain slot 7): t0 the image, t1 its blurred copy (kGETHIT_BUFFER's blur).
 			{ Effects::ISDoubleVision, "ISDoubleVision", "gethit", "ISDoubleVision.hlsl", 2, 0b11, 2, 0, false, true },
+			// The water's displacement simulation (the WaterDisplacement effect, slot 31, from the water system's update: ScopeKind::Water)
+			// into kWATER_DISPLACEMENT and its swap. The ripple makers draw their own geometry (one quad per ripple), which the graph's
+			// fullscreen triangle cannot: not covered.
+			{ Effects::ISWaterDisplacementClearSimulation, "ISWaterDisplacementClearSimulation", "waterdisplacement", "ISWaterDisplacement.hlsl", 0, 0, 0 },
+			{ Effects::ISWaterDisplacementTexOffset, "ISWaterDisplacementTexOffset", "waterdisplacement", "ISWaterDisplacement.hlsl", 1, 0b1, 1 },
+			{ Effects::ISWaterWadingHeightmap, "ISWaterWadingHeightmap", "waterdisplacement", "ISWaterDisplacement.hlsl", 1, 0b1, 1 },
+			{ Effects::ISWaterRainHeightmap, "ISWaterRainHeightmap", "waterdisplacement", "ISWaterDisplacement.hlsl", 1, 0b1, 1 },
+			{ Effects::ISWaterBlendHeightmaps, "ISWaterBlendHeightmaps", "waterdisplacement", "ISWaterDisplacement.hlsl", 2, 0b11, 2 },
+			{ Effects::ISWaterSmoothHeightmap, "ISWaterSmoothHeightmap", "waterdisplacement", "ISWaterDisplacement.hlsl", 1, 0b1, 1 },
+			{ Effects::ISWaterDisplacementNormals, "ISWaterDisplacementNormals", "waterdisplacement", "ISWaterDisplacement.hlsl", 1, 0b1, 1 },
 			{ Effects::ISCompositeVolumetricLighting, "ISCompositeVolumetricLighting", "composite", "ISCompositeLensFlareVolumetricLighting.hlsl", 2, 0b01, 2 },
 			{ Effects::ISCompositeLensFlare, "ISCompositeLensFlare", "composite", "ISCompositeLensFlareVolumetricLighting.hlsl", 2, 0b10, 2 },
 			{ Effects::ISCompositeLensFlareVolumetricLighting, "ISCompositeLensFlareVolumetricLighting", "composite", "ISCompositeLensFlareVolumetricLighting.hlsl", 2, 0b11, 2 },
@@ -344,6 +354,7 @@ namespace RenderGraph::Engine::ImageSpace
 			Reflections,  // the screen-space reflections pass (100428 / 107146)
 			Effect,       // one call of an effect drawn outside every other scope (EffectInfo::ownScope)
 			FlowMap,      // one of Main::RenderWaterEffects' copies into the water's flow map (an own-scope ISCopySubRegionCS call)
+			Water,        // the water system's displacement update (31385 / 32176): the WaterDisplacement effect's simulation draws
 			Count
 		};
 
@@ -354,9 +365,10 @@ namespace RenderGraph::Engine::ImageSpace
 		 * does not take. Effect scopes have one run per call: the depth-of-field (or distant blur) draw, its two compute blurs,
 		 * refraction, the radial blur, the snow copy, the water blend, the LDR downsample and the copies outside every scope (the
 		 * main frame's, the menus' and the end-of-frame chain's), and there the blur composites' and the get-hit effect's draws. The
-		 * water's flow copies have a share of their own (one run per copy: a cell load queues a few).
+		 * water's flow copies have a share of their own (one run per copy: a cell load queues a few). The water's displacement update
+		 * has two (a second for a batch cut short by a ripple, which the graph does not take).
 		 */
-		constexpr std::array<std::uint32_t, static_cast<std::size_t>(ScopeKind::Count)> kScopeRuns{ 2, 2, 2, 2, 24, 4 };
+		constexpr std::array<std::uint32_t, static_cast<std::size_t>(ScopeKind::Count)> kScopeRuns{ 2, 2, 2, 2, 24, 4, 2 };
 
 		constexpr std::uint32_t ScopeRunsTotal()
 		{
@@ -428,14 +440,16 @@ namespace RenderGraph::Engine::ImageSpace
 			bool executed = false;
 			// The engine's ImageSpace calls in progress (Render, the explicit-target Render, DispatchComputeShader). No draw or dispatch
 			// inside one is vouched for: one the port leaves to the engine (an effect it does not cover, a refusal, a failure) is skipped
-			// by the flush latch and counted by the census. Those of effects it does not cover are named once in a while (LogNotCovered).
+			// by the flush latch and counted by the census. Those of effects it does not cover are named once in a while (LogEngineDraws).
 			std::uint32_t engineCalls = 0;
 			// The shaders of the engine calls in progress, innermost last: the effect a draw left to the engine belongs to.
 			std::vector<const RE::BSImagespaceShader*> callShaders;
-			// Engine draws and dispatches of effects the port does not cover, by effect and target, since the last summary
-			// (LogNotCovered, every kNotCoveredFrames frames).
-			std::map<std::string, std::uint64_t> notCovered;
-			std::uint32_t notCoveredSince = 0;
+			// ImageSpace draws and dispatches left to D3D11, by shader, target and why, since the last summary (LogEngineDraws, every
+			// kEngineDrawFrames frames).
+			std::map<std::string, std::uint64_t> engineDraws;
+			std::uint32_t engineDrawsSince = 0;
+			// The last reason a covered effect's draw was refused or failed: the summary's why for that draw.
+			std::string lastRefusal;
 			// Counters.
 			std::uint64_t taken = 0, engineDrawn = 0, batches = 0, lost = 0;
 			// Why each effect's draws stayed with the engine, logged once per reason and effect: refusals (cases the port does not
@@ -469,6 +483,7 @@ namespace RenderGraph::Engine::ImageSpace
 		{
 			auto& state = IS();
 			++state.engineDrawn;
+			state.lastRefusal = a_reason;
 			if (auto& log = state.fallbacks[a_effect])
 				log->Report(a_reason, a_detail);
 		}
@@ -478,6 +493,7 @@ namespace RenderGraph::Engine::ImageSpace
 		{
 			auto& state = IS();
 			++state.engineDrawn;
+			state.lastRefusal = fmt::format("failed: {}", a_reason);
 			if (auto& log = state.failures[a_effect])
 				log->Report(a_reason);
 		}
@@ -1886,39 +1902,58 @@ namespace RenderGraph::Engine::ImageSpace
 		}
 
 		/**
-		 * @brief Counts an engine draw or dispatch of an effect the port does not cover, by the effect of the innermost engine call
-		 * and the shadow state's first target and depth target. LogNotCovered writes the counts.
+		 * @brief Counts an ImageSpace draw or dispatch the engine makes on D3D11: one inside an engine ImageSpace call (named by the
+		 * innermost call's shader), or one outside them whose technique is an ImageSpace shader (State::currentShader: an effect drawn
+		 * through another path, such as BSBatchRenderer). Other draws are not counted. a_context says why the port did not look at
+		 * it (empty when it did). LogEngineDraws writes the counts.
 		 */
-		void NoteNotCovered(bool a_compute)
+		void NoteEngineDraw(bool a_compute, std::string_view a_context)
 		{
 			auto& state = IS();
-			const auto* shader = state.callShaders.empty() ? nullptr : state.callShaders.back();
-			const char* name = shader && shader->name ? shader->name : "an unnamed effect";
+			const char* name = nullptr;
+			std::string why;
+			if (!state.callShaders.empty()) {
+				const auto* shader = state.callShaders.back();
+				name = shader && shader->name ? shader->name : "an unnamed effect";
+				if (state.current && state.current->covered)
+					why = fmt::format("covered, {}", state.lastRefusal.empty() ? std::string("refused") : state.lastRefusal);
+				else
+					why = "not covered";
+			} else {
+				const auto* current = globals::state ? globals::state->currentShader : nullptr;
+				if (!current || current->shaderType.get() != RE::BSShader::Type::ImageSpace)
+					return;
+				const auto* shader = static_cast<const RE::BSImagespaceShader*>(current);
+				name = shader->name ? shader->name : "an unnamed effect";
+				why = "outside the hooked ImageSpace calls";
+			}
+			if (!a_context.empty())
+				why = fmt::format("{}, {}", why, a_context);
 			const auto& shadow = RE::BSGraphics::RendererShadowState::GetSingleton()->GetRuntimeData();
 			std::string key;
 			if (a_compute)
-				key = fmt::format("{} (dispatch)", name);
+				key = fmt::format("{} dispatch ({})", name, why);
 			else
-				key = fmt::format("{} into rt{} depth {}", name, static_cast<std::int32_t>(shadow.renderTargets[0]),
-					shadow.depthStencil == UINT32_MAX ? std::string("none") : fmt::format("{}", shadow.depthStencil));
-			++state.notCovered[key];
+				key = fmt::format("{} into rt{} depth {} ({})", name, static_cast<std::int32_t>(shadow.renderTargets[0]),
+					shadow.depthStencil == UINT32_MAX ? std::string("none") : fmt::format("{}", shadow.depthStencil), why);
+			++state.engineDraws[key];
 		}
 
-		/** @brief Once every kNotCoveredFrames frames: the counts NoteNotCovered made since the last summary, as one line. */
-		void LogNotCovered()
+		/** @brief Once every kEngineDrawFrames frames: the counts NoteEngineDraw made since the last summary, as one line. */
+		void LogEngineDraws()
 		{
-			constexpr std::uint32_t kNotCoveredFrames = 300;
+			constexpr std::uint32_t kEngineDrawFrames = 300;
 			auto& state = IS();
-			if (state.frame - state.notCoveredSince < kNotCoveredFrames)
+			if (state.frame - state.engineDrawsSince < kEngineDrawFrames)
 				return;
-			if (!state.notCovered.empty()) {
+			if (!state.engineDraws.empty()) {
 				std::string list;
-				for (const auto& [key, count] : state.notCovered)
+				for (const auto& [key, count] : state.engineDraws)
 					list += fmt::format("{}{}: {}", list.empty() ? "" : ", ", key, count);
-				logger::info("[ORG] ImageSpace: effects the port does not cover drew on D3D11 in {} frames: {}", state.frame - state.notCoveredSince, list);
-				state.notCovered.clear();
+				logger::info("[ORG] ImageSpace: draws and dispatches left to D3D11 in {} frames: {}", state.frame - state.engineDrawsSince, list);
+				state.engineDraws.clear();
 			}
-			state.notCoveredSince = state.frame;
+			state.engineDrawsSince = state.frame;
 		}
 
 		/** @brief Once a frame, on the first ImageSpace call of the render owner: the frame's runs, a resize, the programs, the manifest. */
@@ -1936,7 +1971,7 @@ namespace RenderGraph::Engine::ImageSpace
 			CheckImports();
 			RetryBuild();
 			MaybeWriteManifest();
-			LogNotCovered();
+			LogEngineDraws();
 		}
 
 		/**
@@ -2128,8 +2163,8 @@ namespace RenderGraph::Engine::ImageSpace
 			return true;
 		}
 
-		/** @brief Why an effect's Render cannot have its draw taken, or empty. */
-		std::string_view Ineligible()
+		/** @brief Why an effect's Render of a_geometry cannot have its draw taken, or empty. */
+		std::string_view Ineligible(const void* a_geometry)
 		{
 			if (!Constants::Active())
 				return "the engine-constants capture is not active (CS_ORG_ENGINE_CONSTANTS=1)";
@@ -2150,6 +2185,11 @@ namespace RenderGraph::Engine::ImageSpace
 			// instead of the full one (+0x48) when it is set (SE 0x141297b40, AE 0x141481ff0).
 			if (manager->GetRuntimeData().unk58)
 				return "dynamic resolution";
+			// Render draws its geometry argument (AE 0x1414f88b0): the manager's quad (+0x48, +0x50 for dynamic resolution) for an
+			// effect, or the ripple makers' own quads in the water's displacement update. The graph's fullscreen triangle is the first.
+			const auto* base = reinterpret_cast<const std::byte*>(manager);
+			if (a_geometry != *reinterpret_cast<void* const*>(base + 0x48) && a_geometry != *reinterpret_cast<void* const*>(base + 0x50))
+				return "a geometry other than the full-screen quad";
 			return {};
 		}
 
@@ -2262,7 +2302,7 @@ namespace RenderGraph::Engine::ImageSpace
 
 		/**
 		 * @brief a_call (the engine's ImageSpace function) counted as an engine ImageSpace call, with its shader: a draw or dispatch
-		 * inside it that the port does not take is named by that shader (NoteNotCovered).
+		 * inside it that the port does not take is named by that shader (NoteEngineDraw).
 		 */
 		template <class Call>
 		void EngineCall(const RE::BSImagespaceShader* a_shader, Call&& a_call)
@@ -2277,15 +2317,13 @@ namespace RenderGraph::Engine::ImageSpace
 
 		/**
 		 * @brief The engine's draw or dispatch, which ImageSpace leaves to it, unvouched: the flush latch skips it and the census
-		 * counts it. Inside an engine ImageSpace call of an effect the port does not cover it is named (NoteNotCovered); a covered
-		 * effect's (refused or failed) has its reason logged once.
+		 * counts it. Named in the summary when it is an ImageSpace draw (NoteEngineDraw); a covered effect's refusal or failure also
+		 * has its reason logged once.
 		 */
 		template <class Call>
-		void EngineDraw(bool a_compute, Call&& a_call)
+		void EngineDraw(bool a_compute, std::string_view a_context, Call&& a_call)
 		{
-			auto& state = IS();
-			if (state.engineCalls > 0 && !(state.current && state.current->covered))
-				NoteNotCovered(a_compute);
+			NoteEngineDraw(a_compute, a_context);
 			a_call();
 		}
 
@@ -2304,7 +2342,7 @@ namespace RenderGraph::Engine::ImageSpace
 				const bool covered = EffectOf(shader) >= 0;
 				EngineCall(shader, [&] {
 					const bool scoped = InScope(shader, [&] {
-						WithEffect(shader, false, covered ? Ineligible() : std::string_view{}, [&] { func(a_effect, a_quad, a_param); });
+						WithEffect(shader, false, covered ? Ineligible(a_quad) : std::string_view{}, [&] { func(a_effect, a_quad, a_param); });
 					});
 					if (!scoped)
 						func(a_effect, a_quad, a_param);
@@ -2414,6 +2452,21 @@ namespace RenderGraph::Engine::ImageSpace
 			static inline REL::Relocation<decltype(thunk)> func;
 		};
 
+		/**
+		 * @brief The water system's displacement update (31385 / 32176; its this is the water system): the WaterDisplacement effect
+		 * (slot 31) through RenderEffect, its simulation draws into kWATER_DISPLACEMENT and its swap.
+		 */
+		struct WaterDisplacement
+		{
+			static void thunk(void* a_system)
+			{
+				EnterScope(ScopeKind::Water);
+				func(a_system);
+				LeaveScope();
+			}
+			static inline REL::Relocation<decltype(thunk)> func;
+		};
+
 		/** @brief BSGraphics::Renderer::DrawTriShape (75477 / 77263): the current effect's draw is taken; any other runs the batch first. */
 		struct DrawTriShape
 		{
@@ -2426,7 +2479,11 @@ namespace RenderGraph::Engine::ImageSpace
 							return;
 					} else
 						Flush();
-					EngineDraw(false, [&] { func(a_renderer, a_shape, a_start, a_triangles); });
+					EngineDraw(false, {}, [&] { func(a_renderer, a_shape, a_start, a_triangles); });
+					return;
+				}
+				if (state.on) {
+					EngineDraw(false, state.flushing ? "during a batch's run" : "not the render owner", [&] { func(a_renderer, a_shape, a_start, a_triangles); });
 					return;
 				}
 				func(a_renderer, a_shape, a_start, a_triangles);
@@ -2449,7 +2506,11 @@ namespace RenderGraph::Engine::ImageSpace
 							return;
 					} else
 						Flush();
-					EngineDraw(true, [&] { func(a_renderer, a_shader, a_x, a_y, a_z); });
+					EngineDraw(true, {}, [&] { func(a_renderer, a_shader, a_x, a_y, a_z); });
+					return;
+				}
+				if (state.on) {
+					EngineDraw(true, state.flushing ? "during a batch's run" : "not the render owner", [&] { func(a_renderer, a_shader, a_x, a_y, a_z); });
 					return;
 				}
 				func(a_renderer, a_shader, a_x, a_y, a_z);
@@ -2469,16 +2530,18 @@ namespace RenderGraph::Engine::ImageSpace
 		stl::detour_thunk<DispatchComputeShader>(REL::RelocationID(100952, 107734));
 		stl::detour_thunk<RenderSSAO>(REL::RelocationID(100520, 107245));
 		stl::detour_thunk<RenderReflections>(REL::RelocationID(100428, 107146));
+		stl::detour_thunk<WaterDisplacement>(REL::RelocationID(31385, 32176));
 		stl::detour_thunk<DrawTriShape>(REL::RelocationID(75477, 77263));
 		stl::detour_thunk<DispatchCSShader>(REL::RelocationID(75532, 77329));
 		auto& state = IS();
 		state.installed = ShaderRender::func.address() && HDRRender::func.address() && PreTonemapComposites::func.address() && ExplicitRender::func.address() &&
-		                  DispatchComputeShader::func.address() && RenderSSAO::func.address() && RenderReflections::func.address() && DrawTriShape::func.address() &&
+		                  DispatchComputeShader::func.address() && RenderSSAO::func.address() && RenderReflections::func.address() && WaterDisplacement::func.address() &&
+		                  DrawTriShape::func.address() &&
 		                  DispatchCSShader::func.address();
 		if (state.installed)
 			logger::info(
 				"[ORG] ImageSpace: hooks installed (BSImagespaceShader::Render and its explicit-target form, DispatchComputeShader, the HDR effect, the pre-tonemap "
-				"composites, RenderSSAO, the reflections pass, DrawTriShape, DispatchCSShader)");
+				"composites, RenderSSAO, the reflections pass, the water's displacement update, DrawTriShape, DispatchCSShader)");
 		else
 			logger::error("[ORG] ImageSpace: a hook could not be installed; the ImageSpace chain stays on D3D11");
 	}
