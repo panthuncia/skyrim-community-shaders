@@ -984,6 +984,9 @@ void ScreenshotFeature::ScreenshotWorkerLoop()
 				ShowInGameNotification(std::format("Screenshot saved: {}",
 					screenshot.outputPath.filename().string()));
 		}
+		// A scripted capture is done (saved or failed): the file is whole or absent.
+		if (!screenshot.notify && scriptedInFlight.load(std::memory_order_acquire) != 0)
+			scriptedInFlight.fetch_sub(1, std::memory_order_acq_rel);
 	}
 	CoUninitialize();
 }
@@ -1120,5 +1123,6 @@ void ScreenshotFeature::RequestCapture(std::filesystem::path a_outputPath)
 {
 	std::lock_guard lock(requestedPathsMutex);
 	requestedPaths.push(std::move(a_outputPath));
+	scriptedInFlight.fetch_add(1, std::memory_order_acq_rel);
 }
 #undef I18N_KEY_PREFIX

@@ -145,6 +145,9 @@ namespace Testing
 	/** @brief The exit command's work: checks the expectations, runs the exit reports, writes the outcome and ends the process. */
 	void ExitRun();
 
+	/** @brief The exit command: ExitRun at a later Present, once the requested shots are saved (at most 10 s later). */
+	void RequestExit();
+
 	/** @brief Validates and applies the environment, features and DCLF ini of a parsed configuration (Config.cpp). */
 	void ApplySwitches(const nlohmann::json& a_config);
 

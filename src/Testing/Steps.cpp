@@ -1,6 +1,7 @@
 // The step runner, the exit, and the old CS_DCLF_TEST_* command list, driven from Present.
 #include "Testing/Internal.h"
 
+#include "Features/ScreenshotFeature.h"
 #include "Globals.h"
 #include "State.h"
 #include "Utils/SwitchFile.h"
@@ -260,6 +261,17 @@ namespace Testing
 		queuedLines.push_back(std::move(a_line));
 	}
 
+	namespace
+	{
+		std::optional<std::chrono::steady_clock::time_point> exitRequested;  // render thread: the exit command's time
+	}
+
+	void RequestExit()
+	{
+		if (!exitRequested)
+			exitRequested = std::chrono::steady_clock::now();
+	}
+
 	void OnPresent()
 	{
 		static std::uint32_t frame = 0;
@@ -287,5 +299,15 @@ namespace Testing
 		RunSteps(frame);
 		RunLegacy(frame);
 		TickCommands();
+		// The exit waits for the shots still being read back or encoded: a process ended mid-write leaves a broken PNG.
+		if (exitRequested) {
+			const bool pending = globals::features::screenshotFeature.ScriptedCapturesPending();
+			const bool late = std::chrono::steady_clock::now() - *exitRequested > std::chrono::seconds(10);
+			if (!pending || late) {
+				if (pending)
+					logger::warn("[TEST] exit: a shot was still being saved after 10 s");
+				ExitRun();
+			}
+		}
 	}
 }

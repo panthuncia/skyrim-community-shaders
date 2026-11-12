@@ -51,6 +51,8 @@ struct ScreenshotFeature : public Feature
 	 * runs that must tie a capture to a frame (DCLF's test harness, dclf:shot=).
 	 */
 	void RequestCapture(std::filesystem::path a_outputPath);
+	/** @brief Any thread: whether a RequestCapture capture is still to be saved (requested, read back or being encoded). */
+	bool ScriptedCapturesPending() const { return scriptedInFlight.load(std::memory_order_acquire) != 0; }
 	bool applyCropToScreenshot = true;
 
 	// Settings
@@ -66,6 +68,8 @@ struct ScreenshotFeature : public Feature
 	bool disableVanillaScreenshot = true;
 
 	std::atomic<bool> captureRequested{ false };
+	// RequestCapture's captures not yet saved (or failed): the test runner's exit waits for them.
+	std::atomic<std::uint32_t> scriptedInFlight{ 0 };
 
 private:
 	struct PendingScreenshot

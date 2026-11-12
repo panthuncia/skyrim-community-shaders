@@ -325,7 +325,7 @@ namespace Testing
 		{
 			RegisterCommand("console", ConsoleCommand);
 			RegisterCommand("exit", [](const std::string&, std::string&) {
-				ExitRun();
+				RequestExit();
 				return true;
 			});
 			RegisterCommand("shot", Shot);
