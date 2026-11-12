@@ -1038,9 +1038,9 @@ struct RenderGraphRuntime::Impl
 			logger::info("[ORG] Async epochs: {} submitted, {} waited for their ticket, {} prepared again after the feature's inputs changed, {} carried uploads ({} lists recorded ahead by their producers; "
 						 "{} copies recorded on the queue that first uses them, {} other-queue batches spared the graphics uploads' wait); "
 						 "{} completions left to the host's next GPU wake-up instead of a signal; {} tickets stale only by a new version; {} epoch graphs built again; "
-						 "recordings: {} made ({} kept), {} tickets took a kept one, {} stale tickets adopted one; admissions: {} predicted, {} planned",
+						 "recordings: {} made ({} kept), {} tickets took a kept one, {} stale tickets adopted one, {} held ({} packets); admissions: {} predicted, {} planned",
 				async.submitted, async.waited, async.stale, async.uploads, async.recordedUploadLists, async.queueUploadCopies, async.sparedUploadWaits,
-				async.wakesSkipped, async.staleBacking, async.rebuilds, async.recorded, async.kept, async.reused, async.adopted, async.predicted, async.planned);
+				async.wakesSkipped, async.staleBacking, async.rebuilds, async.recorded, async.kept, async.reused, async.adopted, async.held, async.heldPackets, async.predicted, async.planned);
 		}
 		FrameAnchors::LogRunStats();
 		epochCount = 0;
@@ -1757,6 +1757,9 @@ bool RenderGraphRuntime::Initialize()
 		// shape instead of being prepared again (a render-thread wait). Kept recordings carry no Tracy GPU zones: turn it off
 		// to profile the epochs' passes on the GPU with Tracy.
 		desc.reuseRecordings = !Switches::Equals("CS_ORG_REUSE_RECORDINGS", "0");
+		// CS_ORG_KEEP_LIVE_RECORDINGS=0: no live epoch (the anchors, light culling) keeps its recordings; each run records fresh.
+		// Revision-driven epochs and the async host are unaffected, unlike CS_ORG_REUSE_RECORDINGS=0, which loses both.
+		desc.keepLiveRecordings = !Switches::Equals("CS_ORG_KEEP_LIVE_RECORDINGS", "0");
 		// CS_ORG_QUEUE_UPLOADS (default on, =0 off): an async epoch's staged uploads whose destination it first uses on the compute
 		// queue are recorded there, just ahead of its first compute batch, and a compute batch waits for the graphics queue's
 		// uploads only when it uses what they write. Off: every upload on the graphics queue and every compute batch waits for them.
