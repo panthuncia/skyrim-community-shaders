@@ -145,8 +145,16 @@ namespace DCLF::Features::Precipitation
 				if (target < 0)
 					break;
 				const auto found = std::ranges::find(kTargets, target);
-				if (found == kTargets.end() || (i == 0 && target != kTargets[0]))
+				if (i == 0 && target != kTargets[0]) {
+					Refusals().Report(std::format("first colour target {}", target), "not kMAIN, the one first target the client imports");
 					return "a colour target its client does not import";
+				}
+				// A second target the grouped alphas left bound that the client does not import (after an interior, the rain's second
+				// target is another): the draw writes kMAIN alone, as Particle.hlsl's colour is what shows. Its normal output goes nowhere.
+				if (found == kTargets.end()) {
+					Refusals().Report(std::format("second colour target {} left bound", target), "drawn into kMAIN alone, its normal output dropped");
+					break;
+				}
 				draw.colours[i] = static_cast<std::uint8_t>(found - kTargets.begin());
 				draw.key.colourFormats[i] = FormatOf(engineTargets[target].RTV);
 				if (!draw.key.colourFormats[i])
@@ -155,7 +163,7 @@ namespace DCLF::Features::Precipitation
 			}
 			if (draw.colourCount == 0)
 				return "no colour target";
-			if (static_cast<std::int32_t>(rss.renderTargets[kMaxColours]) >= 0)
+			if (draw.colourCount == kMaxColours && static_cast<std::int32_t>(rss.renderTargets[kMaxColours]) >= 0)
 				return "more colour targets than the pixel stage writes";
 			const auto& depths = globals::game::renderer->GetDepthStencilData().depthStencils;
 			draw.key.depthFormat = FormatOf(depths[main].views[0]);
