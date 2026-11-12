@@ -12,6 +12,7 @@ bool RenderGraph::Engine::ImageSpace::Requested()
 // volk must precede every Vulkan header in this translation unit.
 #	include <rhi_interop_vulkan.h>
 
+#	include "Features/DrawcallLimitFix/Core/Engine/Family/EngineDrawFamily.h"
 #	include "Features/DrawcallLimitFix/Core/Gpu/GpuTextures.h"
 #	include "Features/DynamicCubemaps/ORGDynamicCubemaps.h"
 #	include "Features/ExponentialHeightFog/ORGExponentialHeightFog.h"
@@ -141,6 +142,9 @@ namespace RenderGraph::Engine::ImageSpace
 			// An effect that keeps its own viewport (ImageSpaceEffect::unk88): the viewport is what the effect before it left, so each
 			// of its shapes implies the whole-target one (ISRefraction into kMAIN_COPY at the full size).
 			bool keepsViewport = false;
+			// Drawn from its own geometry, not the manager's quad (the ripple makers): its vertex stage is its source's, which pulls the
+			// geometry by device address from the latch's PerFrame words (TakeDraw); the gate opens it with the draw's index count.
+			bool geometry = false;
 		};
 
 		/** @brief The push words of an effect's feature handles (EffectInfo::features): s9, then the five headers' resources. */
@@ -197,8 +201,8 @@ namespace RenderGraph::Engine::ImageSpace
 			// The get-hit effect's last draw (end-of-frame chain slot 7): t0 the image, t1 its blurred copy (kGETHIT_BUFFER's blur).
 			{ Effects::ISDoubleVision, "ISDoubleVision", "gethit", "ISDoubleVision.hlsl", 2, 0b11, 2, 0, false, true },
 			// The water's displacement simulation (the WaterDisplacement effect, slot 31, from the water system's update: ScopeKind::Water)
-			// into kWATER_DISPLACEMENT and its swap. The ripple makers draw their own geometry (one quad per ripple), which the graph's
-			// fullscreen triangle cannot: not covered.
+			// into kWATER_DISPLACEMENT and its swap. The ripple makers draw their own geometry (one quad per ripple), pulled by its
+			// vertex stage (EffectInfo::geometry).
 			{ Effects::ISWaterDisplacementClearSimulation, "ISWaterDisplacementClearSimulation", "waterdisplacement", "ISWaterDisplacement.hlsl", 0, 0, 0 },
 			{ Effects::ISWaterDisplacementTexOffset, "ISWaterDisplacementTexOffset", "waterdisplacement", "ISWaterDisplacement.hlsl", 1, 0b1, 1 },
 			{ Effects::ISWaterWadingHeightmap, "ISWaterWadingHeightmap", "waterdisplacement", "ISWaterDisplacement.hlsl", 1, 0b1, 1 },
@@ -206,6 +210,10 @@ namespace RenderGraph::Engine::ImageSpace
 			{ Effects::ISWaterBlendHeightmaps, "ISWaterBlendHeightmaps", "waterdisplacement", "ISWaterDisplacement.hlsl", 2, 0b11, 2 },
 			{ Effects::ISWaterSmoothHeightmap, "ISWaterSmoothHeightmap", "waterdisplacement", "ISWaterDisplacement.hlsl", 1, 0b1, 1 },
 			{ Effects::ISWaterDisplacementNormals, "ISWaterDisplacementNormals", "waterdisplacement", "ISWaterDisplacement.hlsl", 1, 0b1, 1 },
+			{ Effects::ISWaterDisplacementWadingRipple, "ISWaterDisplacementWadingRipple", "waterdisplacement", "ISWaterDisplacement.hlsl", 0, 0, 0, 0, false, false, 1, false,
+				false, true },
+			{ Effects::ISWaterDisplacementRainRipple, "ISWaterDisplacementRainRipple", "waterdisplacement", "ISWaterDisplacement.hlsl", 0, 0, 0, 0, false, false, 1, false,
+				false, true },
 			{ Effects::ISCompositeVolumetricLighting, "ISCompositeVolumetricLighting", "composite", "ISCompositeLensFlareVolumetricLighting.hlsl", 2, 0b01, 2 },
 			{ Effects::ISCompositeLensFlare, "ISCompositeLensFlare", "composite", "ISCompositeLensFlareVolumetricLighting.hlsl", 2, 0b10, 2 },
 			{ Effects::ISCompositeLensFlareVolumetricLighting, "ISCompositeLensFlareVolumetricLighting", "composite", "ISCompositeLensFlareVolumetricLighting.hlsl", 2, 0b11, 2 },
@@ -340,6 +348,7 @@ namespace RenderGraph::Engine::ImageSpace
 			bool compute = false;
 			std::array<std::uint32_t, 3> groups{};
 			std::shared_ptr<const void> source;  // the descriptor and texture behind at.source, held until the run's GPU work retires
+			std::uint32_t vertices = 3;          // a draw's vertex count: the fullscreen triangle's, or a geometry effect's indices
 		};
 
 		/** @brief The BSImagespaceShader::Render (or DispatchComputeShader) call in progress. */
@@ -408,6 +417,9 @@ namespace RenderGraph::Engine::ImageSpace
 			bool on = false;  // set up; off again for the session after a failure
 			bool flushing = false;
 			bool logShapes = false;
+			// The draw DrawTriShape is about to make, for a geometry effect's TakeDraw: the shape's renderer data and its index range.
+			const void* drawShape = nullptr;
+			std::uint32_t drawStart = 0, drawTriangles = 0;
 			std::array<bool, kEffects.size()> enabled{};
 			std::unordered_map<const void*, std::int32_t> effectOf;  // engine shader -> kEffects index (filled from the manager's effects)
 			std::shared_ptr<RunGate> gate;
@@ -1329,6 +1341,9 @@ namespace RenderGraph::Engine::ImageSpace
 			BlendFor(blendBits, effect.targets, blend, error);
 			RasterProgram::Desc desc{};
 			desc.pixelSource = effect.source;
+			// A geometry effect's vertex stage is its source's ORG build, which pulls the geometry (TakeDraw writes where it is).
+			if (effect.geometry)
+				desc.vertexSource = effect.source;
 			// FXC-era sources (vector conditions in ?:).
 			desc.languageVersion = L"2018";
 			// Shared (4 words), the SRVs, the samplers, the feature handles, the latch (2).
@@ -1718,7 +1733,7 @@ namespace RenderGraph::Engine::ImageSpace
 					if (pending.compute)
 						current.gate->OpenDispatch(pending.entry, pending.groups[0], pending.groups[1], pending.groups[2]);
 					else
-						current.gate->OpenDraw(pending.entry);
+						current.gate->OpenDraw(pending.entry, pending.vertices);
 				}
 			};
 			client.executed = [](const FrameAnchors::Point&) { IS().executed = true; };
@@ -2178,6 +2193,41 @@ namespace RenderGraph::Engine::ImageSpace
 		}
 
 		/**
+		 * @brief A geometry effect's draw (the ripple makers): its geometry (DrawTriShape's shape and index range) leased and written into
+		 * a_pending's PerFrame words, which such an effect does not read (ISWaterDisplacement.hlsl, PullRippleVertex): frameSrv and
+		 * frameOffset the vertex buffer's address, frameSize and source the index buffer's, padding the stride and the first index. The
+		 * gate opens it with its index count. False (refused) when the geometry cannot be read.
+		 */
+		bool LatchGeometry(Pending& a_pending, std::size_t a_effect)
+		{
+			auto& state = IS();
+			const auto& shadow = RE::BSGraphics::RendererShadowState::GetSingleton()->GetRuntimeData();
+			DCLF::Family::Geometry geometry;
+			auto owners = std::make_shared<DCLF::Family::Owners>();
+			std::string detail;
+			const auto result = DCLF::Family::LatchGeometry(static_cast<const DCLF::Family::TriShape*>(state.drawShape), state.drawStart, state.drawTriangles, ~std::uint64_t(0),
+				static_cast<std::uint32_t>(shadow.topology), geometry, *owners, &detail);
+			if (result != DCLF::Family::GeometryResult::Ok) {
+				Flush();
+				Refuse(DCLF::Family::ReasonOf(result), a_effect, detail);
+				return false;
+			}
+			if (geometry.firstIndex > 0xFFFF || geometry.stride > 0xFFFF) {
+				Flush();
+				Refuse("its first index or stride does not fit the latch's 16-bit fields", a_effect);
+				return false;
+			}
+			a_pending.at.frameSrv = static_cast<std::uint32_t>(geometry.vertexAddress);
+			a_pending.at.frameOffset = static_cast<std::uint32_t>(geometry.vertexAddress >> 32);
+			a_pending.at.frameSize = static_cast<std::uint32_t>(geometry.indexAddress);
+			a_pending.at.source = static_cast<std::uint32_t>(geometry.indexAddress >> 32);
+			a_pending.at.padding = geometry.stride | (geometry.firstIndex << 16);
+			a_pending.vertices = geometry.indexCount;
+			a_pending.source = std::move(owners);
+			return true;
+		}
+
+		/**
 		 * @brief The engine's draw of the current effect: taken into the batch (true; the caller skips the engine's draw) or left to the
 		 * engine (false, after running any pending batch so the engine's order holds).
 		 */
@@ -2236,7 +2286,10 @@ namespace RenderGraph::Engine::ImageSpace
 				return false;
 			}
 			const std::array blocks{ at.block, frameAt.block };
-			AddToBatch(*spec, { .at = { .srv = at.srvIndex, .offset = at.offset, .frameSrv = frameAt.srvIndex, .frameOffset = frameAt.offset, .size = size, .frameSize = frameAt.size } }, blocks);
+			Pending pending{ .at = { .srv = at.srvIndex, .offset = at.offset, .frameSrv = frameAt.srvIndex, .frameOffset = frameAt.offset, .size = size, .frameSize = frameAt.size } };
+			if (effect.geometry && !LatchGeometry(pending, scope.effect))
+				return false;
+			AddToBatch(*spec, std::move(pending), blocks);
 			if (state.logShapes && state.loggedConstants.insert(key).second)
 				logger::info("[ORG] ImageSpace: {} into {} taken with {} bytes of PerGeometry ({}) and {} of PerFrame", effect.effectName, NameForLog(key.output), size,
 					!slot ? "none bound" : slot->group == Constants::Group::PSGeometry ? "PS geometry pool" : "custom", frameAt.size);
@@ -2318,7 +2371,7 @@ namespace RenderGraph::Engine::ImageSpace
 		}
 
 		/** @brief Why an effect's Render of a_geometry cannot have its draw taken, or empty. */
-		std::string_view Ineligible(const void* a_geometry)
+		std::string_view Ineligible(const void* a_geometry, bool a_geometryEffect)
 		{
 			if (!Constants::Active())
 				return "the engine-constants capture is not active (CS_ORG_ENGINE_CONSTANTS=1)";
@@ -2337,6 +2390,9 @@ namespace RenderGraph::Engine::ImageSpace
 				return "a sub-rectangle of its target";
 			// +0x58 (RUNTIME_DATA::unk58, SE and AE; VR's layout differs): RenderEffect draws the dynamic-resolution quad (+0x50)
 			// instead of the full one (+0x48) when it is set (SE 0x141297b40, AE 0x141481ff0).
+			// A geometry effect (the ripple makers) draws its own shape, whatever quad the manager would use.
+			if (a_geometryEffect)
+				return {};
 			if (manager->GetRuntimeData().unk58)
 				return "dynamic resolution";
 			// Render draws its geometry argument (AE 0x1414f88b0): the manager's quad (+0x48, +0x50 for dynamic resolution) for an
@@ -2496,7 +2552,7 @@ namespace RenderGraph::Engine::ImageSpace
 				const bool covered = EffectOf(shader) >= 0;
 				EngineCall(shader, [&] {
 					const bool scoped = InScope(shader, [&] {
-						WithEffect(shader, false, covered ? Ineligible(a_quad) : std::string_view{}, [&] { func(a_effect, a_quad, a_param); });
+						WithEffect(shader, false, covered ? Ineligible(a_quad, kEffects[static_cast<std::size_t>(EffectOf(shader))].geometry) : std::string_view{}, [&] { func(a_effect, a_quad, a_param); });
 					});
 					if (!scoped)
 						func(a_effect, a_quad, a_param);
@@ -2639,7 +2695,12 @@ namespace RenderGraph::Engine::ImageSpace
 						return geometry ? geometry->GetGeometryRuntimeData().rendererData : nullptr;
 					};
 					const bool quad = a_shape && (a_shape == rendererDataOf(0x48) || a_shape == rendererDataOf(0x50));
-					if (quad && state.scopeDepth > 0 && state.current && state.current->eligible && !state.current->compute && !state.current->drew) {
+					// A geometry effect (the ripple makers) draws its own shape, which its vertex stage pulls (LatchGeometry).
+					const bool geometry = a_shape && state.current && kEffects[state.current->effect].geometry;
+					state.drawShape = a_shape;
+					state.drawStart = a_start;
+					state.drawTriangles = a_triangles;
+					if ((quad || geometry) && state.scopeDepth > 0 && state.current && state.current->eligible && !state.current->compute && !state.current->drew) {
 						// TakeDraw applies the engine's state (SetDirtyStates) before the engine's DrawTriShape would have: give the
 						// shadow state this shape's vertex description first, as DrawTriShape does. Otherwise the input layout is
 						// built from the previous draw's description and the effect's vertex shader.

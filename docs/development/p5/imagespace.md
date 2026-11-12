@@ -75,7 +75,7 @@ mechanism below unless the row says otherwise.
 | FXAA (2) | 99023 slot 2 | | | Next (transcribed source; with the game's FXAA setting only) |
 | World map (0: 43/44), Map (8: 42) | 99023 slot 0, the map menu | | | Next; the map camera is p5-menus'. ISMap's vanilla VS has no SV_Position (imagespace-shaders.md): decide whether the pass draws |
 | Local map (98) | 16094 | `kLOCAL_MAP_SWAP` | `kLOCAL_MAP` | Next: one draw, src to dst, outside the end-of-frame chain: a scope detour on 16094 and the same mechanism |
-| Water displacement (31: 86-94) | 31385 / 32176, the water system's displacement update | its own simulation targets | `kWATER_DISPLACEMENT*` | **Built** (5.5.4): 31385 / 32176 is a scope (`ScopeKind::Water`, two runs), ISWaterDisplacement.hlsl dual-target (the heightmaps' four neighbour coordinates made in the pixel shader). The ripple makers (88, 89) draw their own quads and are refused (`a geometry other than the full-screen quad`; Render now checks its geometry is the manager's quad). |
+| Water displacement (31: 86-94) | 31385 / 32176, the water system's displacement update | its own simulation targets | `kWATER_DISPLACEMENT*` | **Built** (5.5.4): 31385 / 32176 is a scope (`ScopeKind::Water`, two runs), ISWaterDisplacement.hlsl dual-target (the heightmaps' four neighbour coordinates made in the pixel shader). The ripple makers (88, 89) draw their own quads: their vertex stage (ISWaterDisplacement.hlsl's ORG build, `PullRippleVertex`) pulls the shape DrawTriShape gets by device address (`EffectInfo::geometry`, TakeDraw's `LatchGeometry`: the addresses ride the latch's PerFrame words, which they do not read), and the gate opens the draw with its index count. A ripple each run: more than the scope's runs in a frame are refused. |
 | Water blend (155), underwater mask (156) | +0x200, +0x208 | | | Next (155 is active CS HLSL) |
 | Snow SSS (150), CopySubRegionCS (117) | RenderWorld, Main::RenderWaterEffects | | the snow swap; the water's flow map | 117 **built**: the snow copy (w3-slots: the compute form, its own scope) and the water's flow copies (5.5.4: the source by heap index in the latch); 150 Next |
 | TAA (151-153) | +0x1f0 | | | Upscaling's (its TAA replacement); stays |
@@ -468,7 +468,7 @@ that call's shader, with `not covered` or `covered, <the refusal or failure>`; o
 from `kFRAMEBUFFER` (no SRV: the main frame's screenshot copies); ISSimpleColor and the menu 3D chain (the menu views lane, a
 manager rectangle); ISMap and ISLocalMap (the map views, p5-menus; ISWorldMap and ISWorldMapNoSkyBlur are covered, each call a scope of its own); ISAlphaBlend (the race menu's tint masks, loaded
 textures, not engine targets); the lens flares, IB lens flares, SIL composite, FXAA, noise, snow SSS, TAA forms, the
-dynamic-resolution upsample, ISUnderwaterMask and the water displacement's ripple makers until the 300-frame line names them in play.
+dynamic-resolution upsample, ISUnderwaterMask until the 300-frame line names them in play.
 
 **Rebuilds.** None during play from this work. A feature id the composite declares that is published after the graph's first build
 builds every graph once (`PublishedResources::IsDeclarable`), at that publish (in the main menu for the ported features).

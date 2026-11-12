@@ -5,10 +5,14 @@
 #if defined(CS_ORG_BINDLESS)
 // The ORG build of the pixel stage (RenderGraph/Engine/ImageSpace, CS_ORG_IMAGESPACE): the slots each form reads from the heap, the
 // shared constants, and PerGeometry from the engine-constants capture through the pass's latch. The vertex stage is the graph's
-// fullscreen triangle: the heightmaps' four neighbour coordinates are made here instead, and the ripple makers (which draw their own
-// geometry) have no ORG build.
+// fullscreen triangle: the heightmaps' four neighbour coordinates are made here instead. The ripple makers draw their own geometry:
+// their ORG vertex stage below pulls it by device address, which the port writes into the latch's PerFrame words (a ripple maker
+// reads no PerFrame).
 #	define ORG_SHARED_CONSTANTS
-#	define ORG_SHARED_FRAMEBUFFER_AT PerGeometryAt
+// A ripple maker's PerFrame words hold its geometry's addresses instead (its vertex stage, below).
+#	if !defined(RIPPLE_MAKER_WADING) && !defined(RIPPLE_MAKER_RAIN)
+#		define ORG_SHARED_FRAMEBUFFER_AT PerGeometryAt
+#	endif
 #	include "Common/OrgEngineConstants.hlsli"
 #	include "Common/OrgResources.hlsli"
 #	if defined(BLEND_HEIGHTMAPS)
@@ -44,7 +48,52 @@ struct VS_OUTPUT
 #endif
 };
 
-#ifdef VSHADER
+#if defined(VSHADER) && defined(CS_ORG_BINDLESS)
+#	if defined(RIPPLE_MAKER_WADING)
+// The two rows of a 2D affine transform that places the ripple quad (PerGeometry c1, c2).
+static float4 TranslationMatrix0 = OrgEngineRow(PerGeometryAt, 1);
+static float4 TranslationMatrix1 = OrgEngineRow(PerGeometryAt, 2);
+#	endif
+
+#	if defined(__spirv__)
+// The ripple's geometry (ImageSpace.cpp, TakeDraw): FrameSrv and FrameOffset the vertex buffer's address, FrameSize and Source the
+// 16-bit index buffer's, Padding the vertex stride (low 16 bits) and the first index (high 16 bits). The position is the vertex's
+// first attribute, four floats.
+VS_INPUT PullRippleVertex(uint a_vertexID)
+{
+	const uint64_t vertices = (uint64_t(PerGeometryAt.FrameOffset) << 32) | uint64_t(PerGeometryAt.FrameSrv);
+	const uint64_t indices = (uint64_t(PerGeometryAt.Source) << 32) | uint64_t(PerGeometryAt.FrameSize);
+	const uint stride = PerGeometryAt.Padding & 0xFFFF;
+	const uint indexNumber = (PerGeometryAt.Padding >> 16) + a_vertexID;
+	const uint indexWord = vk::RawBufferLoad<uint>(indices + uint64_t((indexNumber * 2) & ~3u));
+	const uint index = (indexNumber & 1) ? (indexWord >> 16) : (indexWord & 0xFFFF);
+	VS_INPUT input;
+	input.Position = asfloat(vk::RawBufferLoad<uint4>(vertices + uint64_t(index * stride)));
+	input.TexCoord = 0.0.xx;
+	return input;
+}
+#	else
+// The D3D12 build has no vertex pulling yet: it compiles, and draws nothing.
+VS_INPUT PullRippleVertex(uint a_vertexID)
+{
+	VS_INPUT input = (VS_INPUT)0;
+	return input;
+}
+#	endif
+
+VS_OUTPUT main(uint a_vertexID: SV_VertexID)
+{
+	const VS_INPUT input = PullRippleVertex(a_vertexID);
+	VS_OUTPUT vsout;
+	vsout.Position = float4(input.Position.xyz, 1);
+#	if defined(RIPPLE_MAKER_WADING)
+	vsout.Position.x = dot(float3(input.Position.xy, 1), TranslationMatrix0.xyz);
+	vsout.Position.y = dot(float3(input.Position.xy, 1), TranslationMatrix1.xyz);
+#	endif
+	vsout.TexCoord = input.TexCoord.xy;
+	return vsout;
+}
+#elif defined(VSHADER)
 #	if defined(RIPPLE_MAKER_WADING)
 cbuffer PerGeometry : register(b2)
 {
