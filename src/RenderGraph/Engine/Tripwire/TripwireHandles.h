@@ -545,6 +545,13 @@ namespace RenderGraph::Engine::Tripwire
 		void STDMETHODCALLTYPE PSGetShader(ID3D11PixelShader** a_out, ID3D11ClassInstance** a_instances, UINT* a_instanceCount) override;
 		void STDMETHODCALLTYPE CSSetShader(ID3D11ComputeShader* a_shader, ID3D11ClassInstance* const* a_instances, UINT a_instanceCount) override;
 		void STDMETHODCALLTYPE CSGetShader(ID3D11ComputeShader** a_out, ID3D11ClassInstance** a_instances, UINT* a_instanceCount) override;
+		// Geometry, hull and domain shaders: the engine binds none, but state backups (the menu's) save and restore them.
+		void STDMETHODCALLTYPE GSSetShader(ID3D11GeometryShader* a_shader, ID3D11ClassInstance* const* a_instances, UINT a_instanceCount) override;
+		void STDMETHODCALLTYPE GSGetShader(ID3D11GeometryShader** a_out, ID3D11ClassInstance** a_instances, UINT* a_instanceCount) override;
+		void STDMETHODCALLTYPE HSSetShader(ID3D11HullShader* a_shader, ID3D11ClassInstance* const* a_instances, UINT a_instanceCount) override;
+		void STDMETHODCALLTYPE HSGetShader(ID3D11HullShader** a_out, ID3D11ClassInstance** a_instances, UINT* a_instanceCount) override;
+		void STDMETHODCALLTYPE DSSetShader(ID3D11DomainShader* a_shader, ID3D11ClassInstance* const* a_instances, UINT a_instanceCount) override;
+		void STDMETHODCALLTYPE DSGetShader(ID3D11DomainShader** a_out, ID3D11ClassInstance** a_instances, UINT* a_instanceCount) override;
 		void STDMETHODCALLTYPE CSSetUnorderedAccessViews(UINT a_start, UINT a_count, ID3D11UnorderedAccessView* const* a_views, const UINT* a_initialCounts) override;
 		void STDMETHODCALLTYPE CSGetUnorderedAccessViews(UINT a_start, UINT a_count, ID3D11UnorderedAccessView** a_out) override;
 		void STDMETHODCALLTYPE OMSetRenderTargets(UINT a_count, ID3D11RenderTargetView* const* a_views, ID3D11DepthStencilView* a_depth) override;
@@ -593,6 +600,9 @@ namespace RenderGraph::Engine::Tripwire
 			winrt::com_ptr<ID3D11VertexShader> vsShader;
 			winrt::com_ptr<ID3D11PixelShader> psShader;
 			winrt::com_ptr<ID3D11ComputeShader> csShader;
+			winrt::com_ptr<ID3D11GeometryShader> gsShader;
+			winrt::com_ptr<ID3D11HullShader> hsShader;
+			winrt::com_ptr<ID3D11DomainShader> dsShader;
 			std::array<winrt::com_ptr<ID3D11UnorderedAccessView>, D3D11_1_UAV_SLOT_COUNT> csUavs;
 			std::array<winrt::com_ptr<ID3D11RenderTargetView>, D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT> rtvs;
 			winrt::com_ptr<ID3D11DepthStencilView> dsv;

@@ -1984,6 +1984,108 @@ namespace RenderGraph::Engine::Tripwire
 		Detail::Zero(a_instanceCount);
 	}
 
+	void STDMETHODCALLTYPE DeviceContextHandle::GSSetShader(ID3D11GeometryShader* a_shader, ID3D11ClassInstance* const* a_instances, UINT a_instanceCount)
+	{
+		TW_CONTEXT_SITE(GSSetShader);
+		if (twNative) {
+			if (NativeBindAllowed(static_cast<std::uint16_t>(Slot::GSSetShader), twCaller)) {
+				std::lock_guard guard(bindings.lock);
+				bindings.gsShader.copy_from(a_shader);
+			}
+			return;
+		}
+		TW_CONTEXT_FORWARD(GSSetShader, Detail::UnwrapAt(a_shader, twSite), Detail::UnwrapArray(a_instances, a_instanceCount, &twSite), a_instanceCount);
+	}
+
+	void STDMETHODCALLTYPE DeviceContextHandle::GSGetShader(ID3D11GeometryShader** a_out, ID3D11ClassInstance** a_instances, UINT* a_instanceCount)
+	{
+		TW_CONTEXT_SITE(GSGetShader);
+		if (twNative) {
+			// Native mode has no class linkage: no instances.
+			if (a_instances && a_instanceCount)
+				Detail::ZeroN(a_instances, *a_instanceCount);
+			Detail::Zero(a_instanceCount);
+			std::lock_guard guard(bindings.lock);
+			if (a_out)
+				*a_out = nullptr;
+			if (a_out && bindings.gsShader)
+				bindings.gsShader.copy_to(a_out);
+			return;
+		}
+		TW_CONTEXT_FORWARD(GSGetShader, a_out, a_instances, a_instanceCount);
+		Detail::ZeroAt(a_instances, a_instanceCount);
+		Detail::Zero(a_out);
+		Detail::Zero(a_instanceCount);
+	}
+
+	void STDMETHODCALLTYPE DeviceContextHandle::HSSetShader(ID3D11HullShader* a_shader, ID3D11ClassInstance* const* a_instances, UINT a_instanceCount)
+	{
+		TW_CONTEXT_SITE(HSSetShader);
+		if (twNative) {
+			if (NativeBindAllowed(static_cast<std::uint16_t>(Slot::HSSetShader), twCaller)) {
+				std::lock_guard guard(bindings.lock);
+				bindings.hsShader.copy_from(a_shader);
+			}
+			return;
+		}
+		TW_CONTEXT_FORWARD(HSSetShader, Detail::UnwrapAt(a_shader, twSite), Detail::UnwrapArray(a_instances, a_instanceCount, &twSite), a_instanceCount);
+	}
+
+	void STDMETHODCALLTYPE DeviceContextHandle::HSGetShader(ID3D11HullShader** a_out, ID3D11ClassInstance** a_instances, UINT* a_instanceCount)
+	{
+		TW_CONTEXT_SITE(HSGetShader);
+		if (twNative) {
+			// Native mode has no class linkage: no instances.
+			if (a_instances && a_instanceCount)
+				Detail::ZeroN(a_instances, *a_instanceCount);
+			Detail::Zero(a_instanceCount);
+			std::lock_guard guard(bindings.lock);
+			if (a_out)
+				*a_out = nullptr;
+			if (a_out && bindings.hsShader)
+				bindings.hsShader.copy_to(a_out);
+			return;
+		}
+		TW_CONTEXT_FORWARD(HSGetShader, a_out, a_instances, a_instanceCount);
+		Detail::ZeroAt(a_instances, a_instanceCount);
+		Detail::Zero(a_out);
+		Detail::Zero(a_instanceCount);
+	}
+
+	void STDMETHODCALLTYPE DeviceContextHandle::DSSetShader(ID3D11DomainShader* a_shader, ID3D11ClassInstance* const* a_instances, UINT a_instanceCount)
+	{
+		TW_CONTEXT_SITE(DSSetShader);
+		if (twNative) {
+			if (NativeBindAllowed(static_cast<std::uint16_t>(Slot::DSSetShader), twCaller)) {
+				std::lock_guard guard(bindings.lock);
+				bindings.dsShader.copy_from(a_shader);
+			}
+			return;
+		}
+		TW_CONTEXT_FORWARD(DSSetShader, Detail::UnwrapAt(a_shader, twSite), Detail::UnwrapArray(a_instances, a_instanceCount, &twSite), a_instanceCount);
+	}
+
+	void STDMETHODCALLTYPE DeviceContextHandle::DSGetShader(ID3D11DomainShader** a_out, ID3D11ClassInstance** a_instances, UINT* a_instanceCount)
+	{
+		TW_CONTEXT_SITE(DSGetShader);
+		if (twNative) {
+			// Native mode has no class linkage: no instances.
+			if (a_instances && a_instanceCount)
+				Detail::ZeroN(a_instances, *a_instanceCount);
+			Detail::Zero(a_instanceCount);
+			std::lock_guard guard(bindings.lock);
+			if (a_out)
+				*a_out = nullptr;
+			if (a_out && bindings.dsShader)
+				bindings.dsShader.copy_to(a_out);
+			return;
+		}
+		TW_CONTEXT_FORWARD(DSGetShader, a_out, a_instances, a_instanceCount);
+		Detail::ZeroAt(a_instances, a_instanceCount);
+		Detail::Zero(a_out);
+		Detail::Zero(a_instanceCount);
+	}
+
 	void STDMETHODCALLTYPE DeviceContextHandle::CSSetUnorderedAccessViews(UINT a_start, UINT a_count, ID3D11UnorderedAccessView* const* a_views,
 		const UINT* a_initialCounts)
 	{
@@ -2364,6 +2466,9 @@ namespace RenderGraph::Engine::Tripwire
 		vsShader = nullptr;
 		psShader = nullptr;
 		csShader = nullptr;
+		gsShader = nullptr;
+		hsShader = nullptr;
+		dsShader = nullptr;
 		for (auto& view : csUavs)
 			view = nullptr;
 		for (auto& view : rtvs)
