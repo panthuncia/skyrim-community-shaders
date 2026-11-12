@@ -1,0 +1,62 @@
+# Converted from tools/cs-ab/scenarios/vram-all.env. Old frame N became world-ready + (N - 100) for the first
+# command, then each command at 'previous' plus the old gap.
+# VRAM attribution in settled Whiterun with every port on, with CS_VRAM_DEBUG's ledger of the graph's device memory.
+# Two dumps: dclf:vram-json writes the previous snapshot, so the second is the one at 1500. Against vram-notex.env and vram-d3d11.env.
+extends = ["guest"]
+
+[cs]
+vram_debug = true
+
+[org]
+ports = "all"
+precipitation = false    # vram-all.env had every port but this one
+census = true
+
+[[steps]]
+at = "world-ready"
+frames = 500
+do = "console"
+arg = "set timescale to 0"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "console"
+arg = "set gamehour to 13"
+
+[[steps]]
+at = "previous"
+frames = 99
+do = "console"
+arg = "coc Whiterun"
+
+[[steps]]
+at = "previous"
+frames = 600
+do = "weather"
+arg = "SkyrimClear_A"
+
+[[steps]]
+at = "previous"
+frames = 100
+do = "shot"
+arg = "whiterun"
+
+[[steps]]
+at = "previous"
+frames = 100
+do = "vram-json"
+
+[[steps]]
+at = "previous"
+frames = 60
+do = "vram-json"
+
+[[steps]]
+at = "previous"
+frames = 40
+do = "exit"
+
+[expect]
+reach = "world-ready"
+shots = ["whiterun"]

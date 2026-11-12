@@ -1,0 +1,182 @@
+# Converted from tools/cs-ab/scenarios/sky-river-org1.env. Old frame N became world-ready + (N - 100) for the first
+# command, then each command at 'previous' plus the old gap.
+# The sky family on (CS_ORG_SKY=1) with its cloud layers, against sky-river-org0.env: the main pass's and the reflection faces'
+# sky and clouds drawn at the Sky and SkyReflections anchors, the faces' clouds writing Cloud Shadows' graph faces, which its
+# copy (CS_ORG_CLOUD_SHADOWS=1) reads per face. Riverwood's river in cloudy weather (12f2d) at 13:00 and 22:00: a shot down
+# at the river (the reflection of the sky and its clouds) and one up at the sky each time, then Dragonsreach.
+extends = ["guest"]
+
+[org]
+sky = true
+cloud_shadows = true
+
+[[steps]]
+at = "world-ready"
+frames = 500
+do = "console"
+arg = "set timescale to 0"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "console"
+arg = "set gamehour to 13"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "weather"
+arg = "SkyrimCloudy_A"
+
+[[steps]]
+at = "previous"
+frames = 98
+do = "console"
+arg = "coc Riverwood"
+
+[[steps]]
+at = "previous"
+frames = 1100
+do = "console"
+arg = "set timescale to 20"
+
+[[steps]]
+at = "previous"
+frames = 10
+do = "weather"
+arg = "SkyrimCloudy_A"
+
+[[steps]]
+at = "previous"
+frames = 70
+do = "console"
+arg = "set timescale to 0"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "console"
+arg = "set gamehour to 13"
+
+[[steps]]
+at = "previous"
+frames = 19
+do = "console"
+arg = "player.setpos x 19300"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "console"
+arg = "player.setpos y -45300"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "console"
+arg = "player.setpos z -80"
+
+[[steps]]
+at = "previous"
+frames = 8
+do = "console"
+arg = "player.setangle x 12"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "console"
+arg = "player.setangle z 0"
+
+[[steps]]
+at = "previous"
+frames = 389
+do = "shot"
+arg = "river-noon"
+
+[[steps]]
+at = "previous"
+frames = 10
+do = "console"
+arg = "player.setangle x -60"
+
+[[steps]]
+at = "previous"
+frames = 290
+do = "shot"
+arg = "river-sky-noon"
+
+[[steps]]
+at = "previous"
+frames = 10
+do = "console"
+arg = "player.setangle x 12"
+
+[[steps]]
+at = "previous"
+frames = 10
+do = "console"
+arg = "set timescale to 20"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "console"
+arg = "set gamehour to 22"
+
+[[steps]]
+at = "previous"
+frames = 9
+do = "weather"
+arg = "SkyrimCloudy_A"
+
+[[steps]]
+at = "previous"
+frames = 70
+do = "console"
+arg = "set timescale to 0"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "console"
+arg = "set gamehour to 22"
+
+[[steps]]
+at = "previous"
+frames = 299
+do = "shot"
+arg = "river-night"
+
+[[steps]]
+at = "previous"
+frames = 10
+do = "console"
+arg = "player.setangle x -60"
+
+[[steps]]
+at = "previous"
+frames = 290
+do = "shot"
+arg = "river-sky-night"
+
+[[steps]]
+at = "previous"
+frames = 10
+do = "console"
+arg = "coc WhiterunDragonsreach"
+
+[[steps]]
+at = "previous"
+frames = 990
+do = "shot"
+arg = "dragonsreach"
+
+[[steps]]
+at = "previous"
+frames = 100
+do = "exit"
+
+[expect]
+reach = "world-ready"
+shots = ["river-noon", "river-sky-noon", "river-night", "river-sky-night", "dragonsreach"]

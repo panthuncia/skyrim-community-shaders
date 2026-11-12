@@ -1,0 +1,22 @@
+{
+  "version": 1,
+  "run_id": "R1",
+  "pid": 12345,
+  "updated": "2026-11-12T15:18:08.000",
+  "phase": "compiling",
+  "frame": 3,
+  "fps": 0.5,
+  "milestones": {
+    "plugin": { "t": 0.0, "frame": 0 },
+    "data-loaded": { "t": 6.1, "frame": 0 }
+  },
+  "config": { "applied": 4, "features_off": [], "unknown": [] },
+  "step": { "index": 0, "do": "shot", "state": "waiting" },
+  "compile": { "done": 210, "total": 1560 },
+  "holds": [],
+  "last_error": "",
+  "outcome": "",
+  "reason": "",
+  "fault": { "address": "", "markers": "" },
+  "shots": []
+}

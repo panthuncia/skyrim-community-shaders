@@ -1,0 +1,13 @@
+# Native mode on Vulkan (render-graph.md, "Native mode"): no DXVK, BasicRHI's device, ORG presents.
+# Native mode turns on every port switch itself. Upscaling needs DXVK, so it is off.
+# ImprovedCameraSE draws through D3D11 itself (org-extension-api-notes.md, "Improved Camera SE"): off for native runs.
+extends = ["base"]
+
+[game]
+mods_off = ["Skyrim Engine Telemetry", "ImprovedCameraSE"]
+
+[org]
+native = true
+
+[features]
+Upscaling = false

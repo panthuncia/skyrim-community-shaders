@@ -1,0 +1,19 @@
+# Converted from tools/cs-ab/scenarios/rx6600-sweep.env. Old frame N became world-ready + (N - 100) for the first
+# command, then each command at 'previous' plus the old gap.
+# RX 6600: a camera sweep at the newest save to provoke device losses (hang markers on). No exit of its own: the sweep driver
+# moves the mouse side to side for a set time after tgm, then ends the game. tgm first: a wolf attacks the player at the newest
+# save.
+# No exit step: the sweep driver ends the game, so a run without it ends at run.timeout_s.
+extends = ["guest"]
+
+[dxvk]
+filter_device_name = "AMD Radeon RX 6600"
+
+[[steps]]
+at = "world-ready"
+frames = 0
+do = "console"
+arg = "tgm"
+
+[expect]
+reach = "world-ready"

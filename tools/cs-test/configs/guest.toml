@@ -1,0 +1,2 @@
+# DXVK guest mode: DXVK runs the game on Vulkan and the render graph shares its device. The default; base as it is.
+extends = ["base"]
