@@ -1,6 +1,9 @@
-// The water family's engine side: the two water batches' hooks, which let the engine's batch run with its draws latched and hand them
-// to the anchor's pass; the family's DrawTriShape taker, which latches a water draw in place of drawing it; and its
-// BSWaterShader::SetupGeometry watcher, which counts a batch's passes. Render thread.
+// The water family's engine side: the water batches' hooks (the mask, geometry group 10 and the surface), which let the engine's batch
+// run with its draws latched and hand them to the anchor's pass; the family's DrawTriShape taker, which latches a water draw in place of
+// drawing it; and its BSWaterShader::SetupGeometry watcher, which counts a batch's passes. Render thread.
+//
+// A batch the family cannot take, or the rest of one after a refused draw, is drawn by the engine with nobody vouching for it: under the
+// flush latch it is skipped and the residue census counts it, since every such case is a defect of the family.
 
 // volk must precede every Vulkan header in this translation unit.
 #include <rhi_interop_vulkan.h>
@@ -49,13 +52,6 @@ namespace DCLF::Features::Water
 			return log;
 		}
 
-		/** @brief What the family leaves to the engine on purpose (Flush::EngineDraws): a batch or its rest. */
-		const Family::Flush::Reason& EngineReason()
-		{
-			static const Family::Flush::Reason reason{ "water: left to the engine" };
-			return reason;
-		}
-
 		/** @brief The batch being latched (render thread). */
 		struct Capture
 		{
@@ -63,12 +59,13 @@ namespace DCLF::Features::Water
 			bool failed = false;  // a draw was refused: the latched part ran, the rest of the batch is the engine's
 			View view = View::Surface;
 			std::shared_ptr<Run> run;
+			// The batch's header indices (CurrentShape), for a run begun again after another shader's draw (Interrupt).
+			std::array<std::uint32_t, kHeaderRegisters.size()> headerIndices{};
 			std::uint32_t depthFormat = 0;
 			Family::Passes passes;
 			std::uint32_t lastTechnique = 0;  // the last pass's technique (State::currentPixelDescriptor >> 11 & 0xF)
 			// Deferred's directional shadow record as last uploaded: the frames with no sun shadow light keep it, as t98 keeps its buffer.
 			Deferred::DirectionalShadowLightData directionalShadow{};
-			Family::EngineRest engineRest;  // the rest of a refused batch, vouched for until the batch returns
 		};
 
 		Capture& GetCapture()
@@ -116,8 +113,21 @@ namespace DCLF::Features::Water
 			a_capture.failed = true;
 			Refusals().Report(std::format("a {} draw of technique {}: {}", NameOf(a_capture.view), a_technique, a_reason));
 			FlushLatched(a_capture);
-			if (!a_capture.engineRest)
-				a_capture.engineRest.emplace(EngineReason());
+		}
+
+		/**
+		 * @brief A draw of another shader inside a latched batch: not the family's. Geometry group 10 holds the Lighting cross-fade copies
+		 * as well as water, and DCLF draws those or vouches for them. The water latched so far runs first, so the engine's order holds,
+		 * and the water draws after it go into a new run with the batch's headers.
+		 */
+		void Interrupt(Capture& a_capture)
+		{
+			if (!a_capture.run || a_capture.run->draws.empty())
+				return;
+			FlushLatched(a_capture);
+			a_capture.run = std::make_shared<Run>();
+			a_capture.run->view = a_capture.view;
+			a_capture.run->headerIndices = a_capture.headerIndices;
 		}
 
 		/**
@@ -195,8 +205,8 @@ namespace DCLF::Features::Water
 			const auto* vs = rss.currentVertexShader;
 			const auto* ps = rss.currentPixelShader;
 			const auto* state = globals::state;
-			if (!vs || !ps || !state || !state->currentShader || state->currentShader->shaderType.get() != RE::BSShader::Type::Water)
-				return "the bound shader is not BSWaterShader";
+			if (!vs || !ps || !state || !state->currentShader)
+				return "no bound shader";
 
 			const auto engine = Pipeline::EngineDrawState::Latch();
 			Draw draw{};
@@ -316,27 +326,19 @@ namespace DCLF::Features::Water
 
 		/**
 		 * @brief A water batch: for the main camera's accumulator, the batch runs with its draws latched, then the anchor's pass draws them
-		 * at this point.
+		 * at this point. kSite tells the hooked calls apart (each keeps its own original): the mask, the surface, and geometry group 10's
+		 * batch just before the surface's, whose water passes (hint 10: a water shape's fade, drawn into kRAW_WATER or kMAIN) are the
+		 * surface view's too.
 		 */
-		template <View kView>
+		template <View kView, std::uint32_t kSite>
 		struct WaterBatch
 		{
 			static void thunk(void* a_accumulator, std::uint32_t a_first, std::uint32_t a_last, std::uint32_t a_flags, std::int32_t a_group)
 			{
 				auto& capture = GetCapture();
-				// A batch inside a latched one: its draws reach TakeDraw as the outer batch's.
-				if (capture.active) {
-					func(a_accumulator, a_first, a_last, a_flags, a_group);
-					return;
-				}
-				// A view CS_ORG_WATER_PARTS leaves out: the engine's on purpose.
-				if (!TakesView(kView)) {
-					Family::Flush::EngineDraws scope(EngineReason());
-					func(a_accumulator, a_first, a_last, a_flags, a_group);
-					return;
-				}
-				if (!ShellState::Running() || !FrameAnchors::IsRenderOwner() || !WaterDraws::Available()) {
-					Family::Flush::EngineDraws scope(EngineReason());
+				// A batch inside a latched one: its draws reach TakeDraw as the outer batch's. A view CS_ORG_WATER_PARTS leaves out, or a
+				// frame the family cannot run: the engine draws the batch.
+				if (capture.active || !TakesView(kView) || !ShellState::Running() || !FrameAnchors::IsRenderOwner() || !WaterDraws::Available()) {
 					func(a_accumulator, a_first, a_last, a_flags, a_group);
 					return;
 				}
@@ -346,11 +348,11 @@ namespace DCLF::Features::Water
 				// The view's client and an anchor that can run now, then the batch's shape: otherwise the engine draws it (logged once each).
 				if (!WaterDraws::CanTake(kView) || !CurrentShape(a_accumulator, kView, *run, capture)) {
 					WaterDraws::Keep(std::move(run->owners));
-					Family::Flush::EngineDraws scope(EngineReason());
 					func(a_accumulator, a_first, a_last, a_flags, a_group);
 					return;
 				}
 				capture.view = kView;
+				capture.headerIndices = run->headerIndices;
 				capture.run = std::move(run);
 				capture.failed = false;
 				capture.passes.Begin();
@@ -360,24 +362,16 @@ namespace DCLF::Features::Water
 				if (!capture.passes.End())
 					Refusals().Report(capture.passes.Describe(std::format("{} water", NameOf(kView))));
 				FlushLatched(capture);
-				capture.engineRest.reset();
 			}
 			static inline REL::Relocation<decltype(thunk)> func;
 		};
 
-		/**
-		 * @brief Geometry group 10's batch before the water batch: the engine's on purpose, so under the flush latch its draws (water into
-		 * kRAW_WATER among them) are vouched for, and run with the state they bind.
-		 */
-		struct Group10Batch
+		/** @brief The hooked RenderBatches calls, in the frame's order. */
+		enum Site : std::uint32_t
 		{
-			static void thunk(void* a_accumulator, std::uint32_t a_first, std::uint32_t a_last, std::uint32_t a_flags, std::int32_t a_group)
-			{
-				static const Family::Flush::Reason reason{ "water: geometry group 10 batch" };
-				Family::Flush::EngineDraws scope(reason);
-				func(a_accumulator, a_first, a_last, a_flags, a_group);
-			}
-			static inline REL::Relocation<decltype(thunk)> func;
+			kMaskSite,
+			kGroup10Site,
+			kSurfaceSite,
 		};
 
 		/** @brief The family's DrawTriShape taker: during a latched water batch, the draw is latched instead. */
@@ -386,6 +380,11 @@ namespace DCLF::Features::Water
 			auto& capture = GetCapture();
 			if (!capture.active)
 				return false;
+			const auto* bound = globals::state ? globals::state->currentShader : nullptr;
+			if (!bound || bound->shaderType.get() != RE::BSShader::Type::Water) {
+				Interrupt(capture);
+				return false;
+			}
 			capture.passes.OnDraw();
 			if (capture.failed || !capture.run)
 				return false;
@@ -434,13 +433,13 @@ namespace DCLF::Features::Water
 			logger::warn("[DCLF] water: this runtime has no address for the water batches; the water stays the engine's");
 			return;
 		}
-		stl::write_thunk_call<WaterBatch<View::Mask>>(REL::Offset(Address::kMaskBatch).address());
-		stl::write_thunk_call<WaterBatch<View::Surface>>(REL::Offset(Address::kSurfaceBatch).address());
-		if (Address::kGroup10Batch.Known() && Family::Flush::LatchRequested())
-			stl::write_thunk_call<Group10Batch>(REL::Offset(Address::kGroup10Batch).address());
+		stl::write_thunk_call<WaterBatch<View::Mask, kMaskSite>>(REL::Offset(Address::kMaskBatch).address());
+		stl::write_thunk_call<WaterBatch<View::Surface, kSurfaceSite>>(REL::Offset(Address::kSurfaceBatch).address());
+		if (Address::kGroup10Batch.Known())
+			stl::write_thunk_call<WaterBatch<View::Surface, kGroup10Site>>(REL::Offset(Address::kGroup10Batch).address());
 		Family::WatchSetupGeometry<RE::BSShader::Type::Water>(RE::VTABLE_BSWaterShader[0], &OnSetupGeometry);
 		// Both views' clients are made on the main thread once the graph runs (the main menu), before any world frame.
 		Family::AddSetup("water", [] { return WaterDraws::Setup(); });
-		logger::info("[DCLF] water: hooks installed (the water mask and water batches, BSWaterShader::SetupGeometry)");
+		logger::info("[DCLF] water: hooks installed (the water mask, geometry group 10 and water batches, BSWaterShader::SetupGeometry)");
 	}
 }
