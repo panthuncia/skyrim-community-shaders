@@ -126,4 +126,5 @@ The client's registration at setup. Nothing in play registers again.
   run no `was not prebuilt` line. Each such line names a key the enumeration or the manifest missed.
 - `[DCLF] <family>: the engine draws: ...` lines name inherent refusals (once each); `[E]` `latched draws were not drawn this frame`
   and `the engine draws a batch: ... its anchor cannot run now` are errors.
-- With the latch on, the census's `allowed engine draws` show `<family>: left to the engine` (and `sky: cloud layers`).
+- With the latch on, a batch the family did not take, or the rest of one, reaches D3D11 unvouched: an `[E] [ORG] flush latch: engine
+  ... nobody vouched for it` line, counted by the residue census. The `<family>: left to the engine` reasons are deleted.
