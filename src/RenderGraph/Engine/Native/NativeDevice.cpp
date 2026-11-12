@@ -955,6 +955,11 @@ namespace RenderGraph::Engine::Native
 			PFN_vkWaitSemaphores wait = nullptr;
 		};
 
+		bool RecordCopy(const Immediate::Vulkan& a_vk, VkCommandBuffer a_commands, const NativeResource& a_destination, uint32_t a_destinationSub, VkOffset3D a_at,
+			const NativeResource& a_source, uint32_t a_sourceSub, const D3D11_BOX* a_box);
+		bool RecordCopyRhi(rhi::CommandList& a_list, const NativeResource& a_destination, uint32_t a_destinationSub, uint32_t a_x, uint32_t a_y, uint32_t a_z,
+			const NativeResource& a_source, uint32_t a_sourceSub, const D3D11_BOX* a_box);
+
 		struct NativeState;
 		NativeState* g_device = nullptr;
 
@@ -988,15 +993,16 @@ namespace RenderGraph::Engine::Native
 			uint64_t presentValue = 0;
 			uint64_t presents = 0;
 			bool resizeRequested = false;
-			// CS_ORG_NATIVE_PRESENT_PROBE=1: about once a second a present also copies the back buffer into a readback buffer, and a
-			// later present logs its mean colour, so "nothing was drawn" and "the capture is broken" can be told apart.
+			// CS_ORG_NATIVE_PRESENT_PROBE=1: about once a second, right after a present's copy is submitted, the context copies the back
+			// buffer into a staging texture of its own, as a D3D11 capture does (CopyResource into STAGING, then Map), and a later
+			// present logs its mean colour. It reads through the capture path, on the same queue after the frame's work.
 			struct Probe
 			{
-				rhi::ResourcePtr readback;
-				rhi::CopyableFootprint footprint{};
-				uint64_t value = 0;  // the present timeline value its copy signals, 0 when none is pending
+				std::shared_ptr<NativeResource> staging;
+				uint64_t value = 0;  // the context work that copies it, 0 when none is pending
 				std::chrono::steady_clock::time_point last{};
 			} probe;
+			std::shared_ptr<NativeResource> backBufferRecord;  // the back buffer's record, for the probe's copy
 			std::atomic<bool> lost = false;
 			std::mutex presentLock;
 
@@ -1448,6 +1454,7 @@ namespace RenderGraph::Engine::Native
 				if (FAILED(MakeTexture(request, record)))
 					return false;
 				backBufferImage = record->resource->GetHandle();
+				backBufferRecord = record;
 				D3D11_TEXTURE2D_DESC desc{ width, height, 1, 1, format, { 1, 0 }, D3D11_USAGE_DEFAULT, request.bindFlags, 0, 0 };
 				Tripwire::Options options;
 				options.name = request.name;
@@ -1569,8 +1576,6 @@ namespace RenderGraph::Engine::Native
 				from.width = width;
 				from.height = height;
 				list->CopyTextureRegion(to, from);
-				if (probeEnabled)
-					RecordProbe(list.Get());
 				std::array<rhi::TextureBarrier, 2> after = before;
 				after[0].beforeSync = rhi::ResourceSyncState::Copy;
 				after[0].afterSync = rhi::ResourceSyncState::All;
@@ -1600,6 +1605,8 @@ namespace RenderGraph::Engine::Native
 				}
 				slotValues[slot] = presentValue;
 				++presents;
+				if (probeEnabled)
+					RecordProbe();
 
 				rhi::PresentSyncDesc sync{};
 				sync.queue = graphics;
@@ -1624,73 +1631,65 @@ namespace RenderGraph::Engine::Native
 				return S_OK;
 			}
 
-			/** @brief With the back buffer in CopySource: copies it into the probe's readback buffer, about once a second. */
-			void RecordProbe(rhi::CommandList& a_list)
+			/** @brief About once a second: the context copies the back buffer into the probe's staging texture (the capture path). */
+			void RecordProbe()
 			{
 				const auto now = std::chrono::steady_clock::now();
-				if (probe.value || now - probe.last < std::chrono::seconds(1))
+				if (probe.value || !backBufferRecord || now - probe.last < std::chrono::seconds(1))
 					return;
 				probe.last = now;
-				rhi::FootprintRangeDesc range{};
-				range.texture = backBufferImage;
-				rhi::CopyableFootprint footprint{};
-				const auto placed = Rhi().GetCopyableFootprints(range, &footprint, 1);
-				if (placed.count != 1)
-					return;
-				if (!probe.readback || probe.footprint.rowPitch != footprint.rowPitch || probe.footprint.height != footprint.height) {
-					probe.readback = {};
-					rhi::ResourceDesc desc{};
-					desc.type = rhi::ResourceType::Buffer;
-					desc.heapType = rhi::HeapType::Readback;
-					desc.debugName = "CS native present probe";
-					desc.buffer.sizeBytes = (std::max)(placed.totalBytes, uint64_t(4));
-					if (Rhi().CreateCommittedResource(desc, probe.readback) != rhi::Result::Ok || !probe.readback) {
-						logger::warn("[ORG native] present probe: its readback buffer could not be made");
+				if (!probe.staging || probe.staging->shape.width != width || probe.staging->shape.height != height) {
+					TextureRequest request;
+					request.width = width;
+					request.height = height;
+					request.format = format;
+					request.usage = D3D11_USAGE_STAGING;
+					request.cpuAccess = D3D11_CPU_ACCESS_READ;
+					request.name = "Native::PresentProbe";
+					probe.staging.reset();
+					if (FAILED(MakeStaging(request, false, probe.staging)) || !probe.staging)
 						return;
-					}
 				}
-				probe.footprint = footprint;
-				rhi::BufferBarrier toCopy{};
-				toCopy.buffer = probe.readback->GetHandle();
-				toCopy.beforeSync = rhi::ResourceSyncState::All;
-				toCopy.afterSync = rhi::ResourceSyncState::Copy;
-				toCopy.beforeAccess = rhi::ResourceAccessType::Common;
-				toCopy.afterAccess = rhi::ResourceAccessType::CopyDest;
-				a_list.Barriers({ {}, { &toCopy, 1 }, {} });
-				rhi::BufferTextureCopyFootprint copy{};
-				copy.texture = backBufferImage;
-				copy.buffer = probe.readback->GetHandle();
-				copy.mip = 0;
-				copy.arraySlice = 0;
-				copy.footprint = footprint;
-				a_list.CopyTextureToBuffer(copy);
-				rhi::BufferBarrier toHost = toCopy;
-				toHost.beforeSync = rhi::ResourceSyncState::Copy;
-				toHost.afterSync = rhi::ResourceSyncState::All;
-				toHost.beforeAccess = rhi::ResourceAccessType::CopyDest;
-				toHost.afterAccess = rhi::ResourceAccessType::Common;
-				a_list.Barriers({ {}, { &toHost, 1 }, {} });
-				probe.value = presentValue + 1;  // this present's signal
+				const auto source = backBufferRecord;
+				const auto staging = probe.staging;
+				bool recorded = false;
+				if (RhiContext()) {
+					probe.value = immediate.RunRhi("present probe",
+						[&](rhi::CommandList& a_list, const Immediate::Descriptors&) { recorded = RecordCopyRhi(a_list, *staging, 0, 0, 0, 0, *source, 0, nullptr); },
+						{ source, staging }, { source.get(), staging.get() });
+				} else {
+					probe.value = immediate.Run("present probe",
+						[&](const Immediate::Vulkan& a_vk, VkCommandBuffer a_commands) { recorded = RecordCopy(a_vk, a_commands, *staging, 0, {}, *source, 0, nullptr); },
+						{ source, staging }, { source.get(), staging.get() });
+				}
+				if (!recorded) {
+					probe.value = 0;
+					static std::atomic_flag logged;
+					if (!logged.test_and_set())
+						logger::warn("[ORG native] present probe: the context could not copy the back buffer into staging memory (logged once)");
+				}
 			}
 
-			/** @brief Once the probe's copy is done on the GPU: logs the back buffer's mean colour and how much of it is not black. */
+			/** @brief Once the probe's copy is done: logs the back buffer's mean colour and how much of it is not black. */
 			void ReadProbe()
 			{
-				if (!probe.value || presentTimeline->GetCompletedValue() < probe.value || !probe.readback)
+				if (!probe.value || !immediate.Done(probe.value) || !probe.staging)
 					return;
 				probe.value = 0;
 				void* mapped = nullptr;
-				probe.readback->Map(&mapped);
+				probe.staging->resource->Map(&mapped);
 				if (!mapped)
 					return;
-				const auto* bytes = static_cast<const uint8_t*>(mapped) + probe.footprint.offset;
+				const auto& entry = probe.staging->layout[0];
+				const auto* bytes = static_cast<const uint8_t*>(mapped) + entry.offset;
 				const bool packed10 = format == DXGI_FORMAT_R10G10B10A2_UNORM;
 				const bool bgra = format == DXGI_FORMAT_B8G8R8A8_UNORM;
 				double sum[3]{};
 				uint64_t lit = 0, pixels = 0;
-				for (uint32_t y = 0; y < probe.footprint.height; y += 2) {
-					const auto* row = reinterpret_cast<const uint32_t*>(bytes + uint64_t(y) * probe.footprint.rowPitch);
-					for (uint32_t x = 0; x < probe.footprint.width; x += 2) {
+				const uint32_t probeWidth = probe.staging->shape.width, probeHeight = probe.staging->shape.height;
+				for (uint32_t y = 0; y < probeHeight; y += 2) {
+					const auto* row = reinterpret_cast<const uint32_t*>(bytes + uint64_t(y) * entry.rowPitch);
+					for (uint32_t x = 0; x < probeWidth; x += 2) {
 						const uint32_t texel = row[x];
 						double r, g, b;
 						if (packed10) {
@@ -1710,12 +1709,11 @@ namespace RenderGraph::Engine::Native
 						++pixels;
 					}
 				}
-				probe.readback->Unmap(0, 0);
+				probe.staging->resource->Unmap(0, 0);
 				if (!pixels)
 					return;
 				logger::info("[ORG native] present probe after {} presents: back buffer {}x{} (DXGI format {}), mean RGB {:.4f} {:.4f} {:.4f}, {:.1f}% of pixels not black",
-					presents, probe.footprint.width, probe.footprint.height, static_cast<int>(format), sum[0] / pixels, sum[1] / pixels, sum[2] / pixels,
-					100.0 * double(lit) / double(pixels));
+					presents, probeWidth, probeHeight, static_cast<int>(format), sum[0] / pixels, sum[1] / pixels, sum[2] / pixels, 100.0 * double(lit) / double(pixels));
 			}
 
 			void FillDesc(DXGI_SWAP_CHAIN_DESC& a_out) const
@@ -2318,7 +2316,9 @@ namespace RenderGraph::Engine::Native
 				return true;
 			}
 			if (a_source.kind == Kind::Image && a_destination.kind == Kind::Staging) {
-				if (a_box || a_x || a_y || a_z || sourceShape.aspects != VK_IMAGE_ASPECT_COLOR_BIT)
+				// Into the staging subresource's start (a placed footprint starts at an aligned offset), from any region of the image: the
+				// texture side's offset is the box's origin, and the footprint's extent the box's (BasicRHI's buffer-texture copies).
+				if (a_x || a_y || a_z || sourceShape.aspects != VK_IMAGE_ASPECT_COLOR_BIT)
 					return false;
 				rhi::BufferTextureCopyFootprint copy{};
 				copy.texture = a_source.resource->GetHandle();
@@ -2326,13 +2326,22 @@ namespace RenderGraph::Engine::Native
 				copy.mip = sourceMip;
 				copy.arraySlice = sourceLayer;
 				copy.footprint = StagingFootprint(a_destination, a_destinationSub);
+				if (a_box) {
+					copy.x = a_box->left;
+					copy.y = a_box->top;
+					copy.z = a_box->front;
+					copy.footprint.width = FootprintExtent(sourceShape, a_box->right - a_box->left);
+					copy.footprint.height = FootprintExtent(sourceShape, a_box->bottom - a_box->top);
+					copy.footprint.depth = a_box->back - a_box->front;
+				}
 				Transition(a_list, { CopySource(a_source, sourceRange), CopyDest(a_destination, {}) }, false);
 				a_list.CopyTextureToBuffer(copy);
 				Transition(a_list, { CopySource(a_source, sourceRange), CopyDest(a_destination, {}) }, true);
 				return true;
 			}
 			if (a_source.kind == Kind::Staging && a_destination.kind == Kind::Image) {
-				if (a_box || destinationShape.aspects != VK_IMAGE_ASPECT_COLOR_BIT)
+				// From the staging subresource's start only (a region elsewhere would start the footprint at an unaligned offset).
+				if ((a_box && (a_box->left || a_box->top || a_box->front)) || destinationShape.aspects != VK_IMAGE_ASPECT_COLOR_BIT)
 					return false;
 				rhi::BufferTextureCopyFootprint copy{};
 				copy.texture = a_destination.resource->GetHandle();
@@ -2343,6 +2352,11 @@ namespace RenderGraph::Engine::Native
 				copy.y = a_y;
 				copy.z = a_z;
 				copy.footprint = StagingFootprint(a_source, a_sourceSub);
+				if (a_box) {
+					copy.footprint.width = FootprintExtent(a_source.shape, a_box->right);
+					copy.footprint.height = FootprintExtent(a_source.shape, a_box->bottom);
+					copy.footprint.depth = a_box->back;
+				}
 				Transition(a_list, { CopySource(a_source, {}), CopyDest(a_destination, destinationRange) }, false);
 				a_list.CopyBufferToTexture(copy);
 				Transition(a_list, { CopySource(a_source, {}), CopyDest(a_destination, destinationRange) }, true);
