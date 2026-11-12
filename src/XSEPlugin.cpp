@@ -11,6 +11,7 @@
 #include "Menu.h"
 #include "Menu/ThemeManager.h"
 #include "NativeMenu/NativeMenu.h"
+#include "RenderGraph/Engine/D3D12SelfTest.h"
 #include "RenderGraph/Engine/Tripwire/Tripwire.h"
 #include "RenderGraph/FrameAnchors.h"
 #include "ShaderCache.h"
@@ -152,6 +153,8 @@ void MessageHandler(SKSE::MessagingInterface::Message* message)
 			if (errors.empty()) {
 				// Tripwire handles: self-test and report only (CS_ORG_TRIPWIRE_SELFTEST, CS_ORG_TRIPWIRE_LOG); no engine hooks.
 				RenderGraph::Engine::Tripwire::Start();
+				// CS_ORG_D3D12_SELFTEST=1: the D3D12 backend on a device of its own, beside the game.
+				RenderGraph::Engine::D3D12SelfTest::Start();
 				Deferred::Hooks::Install();
 				Hooks::Install();
 				EngineFix::InstallOnPostPostLoadFixes();

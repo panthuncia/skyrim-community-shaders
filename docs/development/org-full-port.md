@@ -850,6 +850,10 @@ no D3D12 device to share with it. Select it with `CS_ORG_BACKEND=d3d12`.
   object. `Engine::ConfigureSwapchain` applies them on either backend. DRED is on with the debug layer or with crash
   markers (BasicRHI `enableCrashMarkers` on D3D12, set from hang mode as on Vulkan).
 
+**How to test now:** `CS_ORG_D3D12_SELFTEST=1` (optionally `CS_ORG_D3D12_DEBUG=1`, `CS_ORG_D3D12_SELFTEST_HDR=1`) runs
+device creation, the DXIL build, a dispatch and 120 presents on a D3D12 device beside the game
+(`src/RenderGraph/Engine/D3D12SelfTest.cpp`). The full path waits for the native mode to call `CreateD3D12Device`.
+
 Named off on D3D12 until ported:
 
 - Drawcall Limit Fix's draw pipelines: their layouts bind through `VK_EXT_descriptor_heap` record mappings
