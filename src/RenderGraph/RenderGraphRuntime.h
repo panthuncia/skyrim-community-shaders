@@ -114,6 +114,7 @@ public:
 		AnchorEngineQueries,
 		AnchorVolumetricLighting,
 		AnchorDecalQueries,
+		AnchorMovieTiles,
 		Count
 	};
 

@@ -4,7 +4,6 @@
 #include "Features/ScreenshotFeature.h"
 #include "Globals.h"
 #include "RenderGraph/Engine/Bink/BinkGraph.h"
-#include "RenderGraph/Engine/Flush/Flush.h"
 #include "RenderGraph/Engine/LoadingScreen/LoadingScreen.h"
 #include "RenderGraph/Engine/MainTick.h"
 #include "RenderGraph/FrameAnchors.h"
@@ -34,6 +33,7 @@ namespace RenderGraph::Engine::Bink
 		// Mode 1: the blocking play loop (BSMoviePlayer::PlayBlocking), whose ticks present themselves. Mode 2 draws inside another
 		// frame (MoviePlayer::TickInFrame) and does not present.
 		constexpr std::uint32_t kModeBlocking = 1;
+		constexpr std::uint32_t kModeInFrame = 2;
 
 		// The tile set BSMovie::CreateTileTextures returns (0x70 bytes, then the texture pointers).
 		constexpr std::size_t kSetTileCount = 0x18;
@@ -112,6 +112,7 @@ namespace RenderGraph::Engine::Bink
 			const void* set = nullptr;
 			std::shared_ptr<Graph::Movie> movie;  // null: the engine's path this tick
 			std::vector<const void*> blocks;
+			bool inFrame = false;  // player mode 2: drawn at the MovieTiles anchor, at the tile draw's point
 			bool locked = false;
 
 			std::uint32_t TileOf(const void* a_block) const
@@ -181,8 +182,9 @@ namespace RenderGraph::Engine::Bink
 		{
 			if (!Requested() || !a_player || !a_set)
 				return false;
-			if (Read<std::uint32_t>(reinterpret_cast<const void*>(a_player), kPlayerMode) != kModeBlocking) {
-				EngineKeeps("it plays inside another frame (player mode 2), not in the blocking loop");
+			const auto mode = Read<std::uint32_t>(reinterpret_cast<const void*>(a_player), kPlayerMode);
+			if (mode != kModeBlocking && mode != kModeInFrame) {
+				EngineKeeps("its player is in neither mode 1 nor mode 2");
 				return false;
 			}
 			if (!FrameAnchors::IsRenderOwner()) {
@@ -252,8 +254,9 @@ namespace RenderGraph::Engine::Bink
 				tick.player = a_player;
 				tick.set = a_player ? Read<const void*>(reinterpret_cast<const void*>(a_player), kPlayerTiles) : nullptr;
 				ClaimForBlockingTick(a_player);
-				// Eligible ticks are blocking ones: without a frame open the tick is between two frames.
-				if (Eligible(a_player, tick.set) && Graph::Begin(!InFrame()))
+				// A blocking tick without a frame open is between two frames. A mode-2 tick draws inside the caller's frame.
+				tick.inFrame = a_player && Read<std::uint32_t>(reinterpret_cast<const void*>(a_player), kPlayerMode) == kModeInFrame;
+				if (Eligible(a_player, tick.set) && Graph::Begin(!tick.inFrame && !InFrame(), tick.inFrame))
 					StartGraphTick(tick);
 				auto* const outer = std::exchange(t_tick, &tick);
 				const auto result = func(a_player, a_arg2, a_arg3, a_arg4);
@@ -328,7 +331,10 @@ namespace RenderGraph::Engine::Bink
 						const auto* framebuffer = globals::game::renderer->GetRuntimeData().renderTargets[RE::RENDER_TARGET::kFRAMEBUFFER].RTV;
 						intoUi = hdr.uiTexture && hdr.uiTexture->rtv && reinterpret_cast<const void*>(framebuffer) == static_cast<const void*>(hdr.uiTexture->rtv.get());
 					}
-					graph = Graph::Queue(tick->movie, intoUi);
+					graph = Graph::Queue(tick->movie, intoUi, tick->inFrame);
+					// Inside another frame the anchor runs here, in the frame's order; a blocking tick's frame is drawn at its Present.
+					if (graph && tick->inFrame)
+						graph = Graph::DrawInFrame();
 				}
 				RequestShot(tick ? tick->player : 0, graph);
 				if (graph) {
@@ -336,10 +342,8 @@ namespace RenderGraph::Engine::Bink
 					return;
 				}
 				EngineDrew(a_set);
-				// The engine's draw on purpose (a tick the graph does not take): the flush latch lets it through (flush.md, "Allowed
-				// engine draws").
-				static const Flush::Reason kReason{ "bink: tick not taken" };
-				const Flush::EngineDraws scope(kReason);
+				// A tick the graph does not take: the engine's draw, which the flush latch skips when it is on. Every such case is logged
+				// once with its reason ("[ORG] Bink: the engine draws ...").
 				func(a_set);
 			}
 			static inline REL::Relocation<decltype(thunk)> func;
@@ -521,6 +525,8 @@ namespace RenderGraph::Engine::Bink
 			return;
 		if (Requested() && !FrameAnchors::Reserve(FrameAnchors::Anchor::Present))
 			logger::warn("[ORG] Bink: CS_ORG_BINK=1, but the Present anchor could not be reserved; the engine draws Bink");
+		if (Requested() && !FrameAnchors::Reserve(FrameAnchors::Anchor::MovieTiles))
+			logger::warn("[ORG] Bink: CS_ORG_BINK=1, but the MovieTiles anchor could not be reserved; movies inside another frame stay the engine's");
 		logger::info("Hooking the Bink movie player ({})", Requested() ? "CS_ORG_BINK" : "CS_ORG_BINK_SHOT");
 		stl::detour_thunk<PlayerTick>(REL::RelocationID(87890, 90259));
 		stl::detour_thunk<LockTexture>(REL::RelocationID(75514, 77306));

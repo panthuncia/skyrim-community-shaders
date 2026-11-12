@@ -37,7 +37,7 @@ namespace FrameAnchors
 		using Segment = RenderGraphRuntime::Segment;
 
 		constexpr std::uint32_t kAnchors = static_cast<std::uint32_t>(Anchor::Count);
-		static_assert(static_cast<std::uint32_t>(Segment::AnchorDecalQueries) - static_cast<std::uint32_t>(Segment::AnchorReflectionsPrepass) + 1 == kAnchors,
+		static_assert(static_cast<std::uint32_t>(Segment::AnchorMovieTiles) - static_cast<std::uint32_t>(Segment::AnchorReflectionsPrepass) + 1 == kAnchors,
 			"one segment per anchor, in the anchors' order");
 		static_assert(static_cast<std::uint32_t>(Segment::Count) <= 64, "TakeSubmittedSegments holds one bit per segment");
 
@@ -95,6 +95,8 @@ namespace FrameAnchors
 			{ "VolumetricLighting", { "CS anchor: volumetric lighting", "CS anchor: volumetric lighting inputs", "FrameAnchors::VolumetricLighting / ", "cs.anchor.volumetric-lighting" }, false },
 			// Runs a frame: one per decal occlusion test (the decals the engine places this frame; none in most frames)
 			{ "DecalQueries", { "CS anchor: decal queries", "CS anchor: decal queries inputs", "FrameAnchors::DecalQueries / ", "cs.anchor.decal-queries" }, false },
+			// Runs a frame: one per Bink tick inside another frame (player mode 2; none in most frames)
+			{ "MovieTiles", { "CS anchor: movie tiles", "CS anchor: movie tiles inputs", "FrameAnchors::MovieTiles / ", "cs.anchor.movie-tiles" }, true },
 		} };
 
 		// Where each segment runs in a frame: AddToFrame puts an anchor before the first epoch of the order that runs after it. A
@@ -132,6 +134,7 @@ namespace FrameAnchors
 			Segment::AnchorImageSpace,       // the ImageSpace chain's batches (pre-tonemap composites, the HDR effect), a few times a frame
 			Segment::AnchorTonemap,          // in the ImageSpace chain after it
 			Segment::AnchorFrameGeneration,  // after the ImageSpace chain, before frame generation
+			Segment::AnchorMovieTiles,       // a Bink movie inside another frame, at its tile draw (nominally here: the frame's UI time)
 			Segment::AnchorInterface,        // Scaleform's displays (UI::DrawInterface), several times a frame
 			Segment::AnchorPresent,
 			Segment::AnchorOverlay,    // the overlay's ImGui draw, inside HDRDisplay's present chain
