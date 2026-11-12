@@ -266,14 +266,7 @@ namespace
 	{
 		static void thunk(void* a_movie)
 		{
-			auto& hdr = globals::features::hdrDisplay;
-			if (hdr.IsHDREnabledForFrame() && !hdr.framebufferRedirected && hdr.hdrTexture && hdr.hdrTexture->rtv) {
-				const float clearColor[4]{};
-				globals::d3d::context->ClearRenderTargetView(hdr.hdrTexture->rtv.get(), clearColor);
-				hdr.movieDrawnFrame = globals::state->frameCount;
-				hdr.SetUIBuffer();
-			}
-
+			globals::features::hdrDisplay.PrepareMovieDraw();
 			func(a_movie);
 		}
 		static inline REL::Relocation<decltype(thunk)> func;
@@ -862,6 +855,16 @@ void HDRDisplay::SetUIBuffer()
 
 	fb.RTV = uiTexture->rtv.get();
 	globals::d3d::context->OMSetRenderTargets(1, &fb.RTV, nullptr);
+}
+
+void HDRDisplay::PrepareMovieDraw()
+{
+	if (IsHDREnabledForFrame() && !framebufferRedirected && hdrTexture && hdrTexture->rtv) {
+		const float clearColor[4]{};
+		globals::d3d::context->ClearRenderTargetView(hdrTexture->rtv.get(), clearColor);
+		movieDrawnFrame = globals::state->frameCount;
+		SetUIBuffer();
+	}
 }
 
 bool HDRDisplay::UsesDeferredPresentComposite() const

@@ -12,6 +12,7 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <cstring>
 #include <map>
 #include <mutex>
@@ -251,7 +252,19 @@ namespace RenderGraph::Engine::Scaleform
 			bool inFilter = false;
 			std::uint32_t d3d11Parts = 0;
 			std::uint32_t graphSegments = 0;
-			std::uint64_t draws = 0;  // the display's draws so far (CS_ORG_SCALEFORM_D3D11_PARTS)
+			// The pixel stage the renderer has bound, for a draw with the fill off (ApplyFillStyle sets nothing then): its kind,
+			// its textures and samplers, and its constants. pixelKind 0: none known yet; nullShader: a bitmap fill without a texture
+			// bound a null pixel shader.
+			struct BoundFill
+			{
+				std::uint8_t pixelKind = 0;
+				bool nullShader = false;
+				RE::GTexture* textures[2] = { nullptr, nullptr };
+				std::uint8_t samplers[2] = { 0, 0 };
+				float cxmul[4]{};
+				float cxadd[4]{};
+			} boundFill;
+			std::uint8_t boundVertexKind = 1;  // the vertex shader the renderer has bound (DrawIndexedTriList keeps it for some draws)
 		};
 
 		Capture& Current()
@@ -686,16 +699,6 @@ namespace RenderGraph::Engine::Scaleform
 			return false;
 		}
 
-		/**
-		 * @brief CS_ORG_SCALEFORM_D3D11_PARTS=N (diagnostics, docs/development/render-graph.md): every Nth draw of a display is a D3D11
-		 * part, so the D3D11 part path (D3D11Ready, SyncD3D11, a replay's state, ResumeAfterD3D11) runs on ordinary menus. 0: off.
-		 */
-		bool ForcedPart()
-		{
-			static const std::uint64_t every = Switches::Number("CS_ORG_SCALEFORM_D3D11_PARTS", 0);
-			return every && ++Current().draws % every == 0;
-		}
-
 		bool VideoModeSet(void* a_renderer)
 		{
 			return Field<std::uint8_t>(a_renderer, Layout::kVideoModeSet) != 0;
@@ -796,7 +799,50 @@ namespace RenderGraph::Engine::Scaleform
 			return true;
 		}
 
-		/** @brief ApplyFillStyle: the pixel shader, its constants and textures. False, aborted, for what the graph path does not draw. */
+		/** @brief The pixel stage a draw set, kept for a later draw with the fill off. */
+		void NoteBoundFill(const FillStyle& a_fill, const Command& a_command, const DrawRecord& a_record)
+		{
+			auto& bound = Current().boundFill;
+			bound.pixelKind = a_command.state.pixelKind;
+			bound.nullShader = a_command.noColour;
+			for (std::uint32_t stage = 0; stage < 2; ++stage) {
+				bound.textures[stage] = a_command.textures[stage] >= 0 ? a_fill.textures[stage].texture : nullptr;
+				bound.samplers[stage] = a_command.samplers[stage];
+			}
+			std::memcpy(bound.cxmul, a_record.cxmul, sizeof(bound.cxmul));
+			std::memcpy(bound.cxadd, a_record.cxadd, sizeof(bound.cxadd));
+		}
+
+		/**
+		 * @brief A draw with the fill off: ApplyFillStyle sets nothing, so the pixel shader, its textures and its constants are the
+		 * ones the renderer's last draw bound in this display. False (nothing drawn, logged once) when no draw of the display bound one.
+		 */
+		bool ReuseBoundFill(void* a_renderer, Command& a_command, DrawRecord& a_record)
+		{
+			const auto bound = Current().boundFill;
+			if (bound.pixelKind == 0) {
+				static std::atomic_flag logged;
+				if (!logged.test_and_set())
+					logger::warn("[ORG] Scaleform: a draw with the fill off before any fill of its display; it draws nothing");
+				return false;
+			}
+			a_command.state.pixelKind = bound.pixelKind;
+			a_command.noColour = bound.nullShader;
+			for (std::uint32_t stage = 0; stage < 2; ++stage) {
+				if (!bound.textures[stage])
+					continue;
+				const auto index = TextureIndex(a_renderer, bound.textures[stage]);
+				if (index < 0)
+					return false;
+				a_command.textures[stage] = index;
+				a_command.samplers[stage] = bound.samplers[stage];
+			}
+			std::memcpy(a_record.cxmul, bound.cxmul, sizeof(a_record.cxmul));
+			std::memcpy(a_record.cxadd, bound.cxadd, sizeof(a_record.cxadd));
+			return true;
+		}
+
+		/** @brief ApplyFillStyle: the pixel shader, its constants and textures. False when nothing is drawn (aborted, or logged). */
 		bool ApplyFill(void* a_renderer, const FillStyle& a_fill, std::int32_t a_vertexFormat, Command& a_command, DrawRecord& a_record)
 		{
 			switch (a_fill.mode) {
@@ -805,8 +851,12 @@ namespace RenderGraph::Engine::Scaleform
 				ColorConstant(a_fill.color, a_record.cxmul);
 				break;
 			case 2:
-				if (!a_fill.textures[0].texture)
-					return Abort(a_renderer, "a bitmap fill without a texture");
+				if (!a_fill.textures[0].texture) {
+					// ApplyFillStyle binds a null pixel shader: the draw writes no colour, its stencil still applies.
+					a_command.state.pixelKind = 1;
+					a_command.noColour = true;
+					break;
+				}
 				if (!BindTexture(a_renderer, a_fill.textures[0], 0, a_command))
 					return false;
 				a_command.state.pixelKind = Multiply() ? 3 : 2;
@@ -833,9 +883,38 @@ namespace RenderGraph::Engine::Scaleform
 					break;
 				}
 			default:
-				return Abort(a_renderer, "a draw with the fill off");
+				return ReuseBoundFill(a_renderer, a_command, a_record);
 			}
+			NoteBoundFill(a_fill, a_command, a_record);
 			return true;
+		}
+
+		/**
+		 * @brief The vertex shader the draw binds: in 3D (a world matrix set) the 3D twin of its kind (the renderer's index + 6), and
+		 * noted as the one bound.
+		 */
+		void FinishVertexKind(void* a_renderer, Command& a_command)
+		{
+			Current().boundVertexKind = a_command.state.vertexKind;
+			if (Field<const float*>(a_renderer, Layout::kWorld3D))
+				a_command.state.vertexKind = static_cast<std::uint8_t>(a_command.state.vertexKind + 6);
+		}
+
+		/**
+		 * @brief ApplyMatrix (SE 82817, AE 84940) for a_matrix: in 2D from the view the capture computed (BeginDisplay's, which the
+		 * D3D11 renderer did not run); in 3D the renderer's own, which reads only the 3D fields and the user matrix and writes the
+		 * vertex constants' CPU copy (no D3D11 call), read back from there.
+		 */
+		void DrawMatrix(void* a_renderer, const float* a_matrix, DrawRecord& a_record)
+		{
+			if (!Field<const float*>(a_renderer, Layout::kWorld3D)) {
+				MatrixConstants(*reinterpret_cast<const float (*)[6]>(a_matrix), a_record);
+				return;
+			}
+			using ApplyMatrixFn = void (*)(void*, const float*);
+			static REL::Relocation<ApplyMatrixFn> applyMatrix{ REL::RelocationID(82817, 84940) };
+			applyMatrix(a_renderer, a_matrix);
+			std::memcpy(a_record.mvp, &Field<float>(a_renderer, Layout::kVertexConstants), sizeof(a_record.mvp));
 		}
 
 		/**
@@ -870,7 +949,7 @@ namespace RenderGraph::Engine::Scaleform
 		{
 			auto& capture = Current();
 			a_command.kind = Command::Kind::Draw;
-			a_command.state.blend = BlendState();
+			a_command.state.blend = a_command.noColour ? 7 : BlendState();
 			a_command.state.stencil = capture.stencil;
 			a_command.stencilRef = capture.stencilRef;
 			a_command.record = capture.display.Append(&a_record, sizeof(a_record), 16);
@@ -1070,7 +1149,6 @@ namespace RenderGraph::Engine::Scaleform
 			capture.retargeted = false;
 			capture.d3d11Parts = 0;
 			capture.graphSegments = 0;
-			capture.draws = 0;
 			const std::uint32_t background = *a_background;
 			const Viewport viewport = *a_viewport;
 			capture.viewport = viewport;
@@ -1090,6 +1168,9 @@ namespace RenderGraph::Engine::Scaleform
 			capture.stencil = Stencil::Off;
 			capture.stencilRef = 0;
 			capture.segmentStart = MirroredState();
+			// A fill-off draw reuses only what this display bound: an older display's textures may be gone.
+			capture.boundFill = {};
+			capture.boundVertexKind = 1;
 			Field<const float*>(a_renderer, Layout::kWorld3D) = nullptr;
 			std::memcpy(capture.texgen, &Field<float>(a_renderer, Layout::kTexgen), sizeof(capture.texgen));
 			ComputeView(a_renderer, viewport, a_x0, a_x1, a_y0, a_y1);
@@ -1116,6 +1197,8 @@ namespace RenderGraph::Engine::Scaleform
 				command.state.vertexKind = 1;
 				command.state.pixelKind = 1;
 				command.vertexCount = 6;
+				capture.boundFill.pixelKind = 1;
+				std::memcpy(capture.boundFill.cxmul, record.cxmul, sizeof(record.cxmul));
 				Emit(command, record);
 			}
 		}
@@ -1251,7 +1334,7 @@ namespace RenderGraph::Engine::Scaleform
 			for (int i = 0; i < 6; ++i)
 				std::memcpy(record.vertices[i], corners[kOrder[i]], sizeof(record.vertices[i]));
 			DrawRecord matrixRecord{};
-			MatrixConstants(Field<float[6]>(a_renderer, Layout::kMatrix), matrixRecord);
+			DrawMatrix(a_renderer, &Field<float>(a_renderer, Layout::kMatrix), matrixRecord);
 			std::memcpy(record.mvp, matrixRecord.mvp, sizeof(record.mvp));
 			std::memcpy(record.cxmul, matrix, sizeof(record.cxmul));
 			std::memcpy(record.cxadd, matrix + 16, sizeof(record.cxadd));
@@ -1397,49 +1480,35 @@ namespace RenderGraph::Engine::Scaleform
 			if (!VideoModeSet(a_renderer) || !Field<const void*>(a_renderer, Layout::kVertexData) || !Field<const void*>(a_renderer, Layout::kIndexData) ||
 				!Field<std::uint32_t>(a_renderer, Layout::kIndexFormat) || a_triangles <= 0)
 				return;
-			if (ForcedPart()) {
-				Abort(a_renderer, "a draw made a D3D11 part by CS_ORG_SCALEFORM_D3D11_PARTS");
-				return;
-			}
-			if (Field<const float*>(a_renderer, Layout::kWorld3D)) {
-				Abort(a_renderer, "a 3D draw");
-				return;
-			}
-			if (Field<std::uint32_t>(a_renderer, Layout::kIndexFormat) != DXGI_FORMAT_R16_UINT) {
-				Abort(a_renderer, "32-bit indices");
-				return;
-			}
 			const auto& fill = Field<FillStyle>(a_renderer, Layout::kFillStyle);
 			const std::int32_t format = Field<std::int32_t>(a_renderer, Layout::kVertexFormat);
+			auto& capture = Current();
 			Command command{};
+			// DrawIndexedTriList's vertex shader (SE 82838): gouraud fills by the vertex format (5 for type 3 of XY16iCF32), every
+			// other fill 1, which reads the position as R16G16_SINT whatever the format (XY32f too). A gouraud fill of another
+			// format sets nothing: the shader bound before stays.
 			if (fill.mode == 3) {
-				if (fill.gouraudType == 4 || fill.gouraudType == 5) {
-					Abort(a_renderer, "a gouraud fill of type 4 or 5");
-					return;
-				}
 				if (format == Layout::kVertexXY16iC32)
 					command.state.vertexKind = 3;
 				else if (format == Layout::kVertexXY16iCF32)
 					command.state.vertexKind = fill.gouraudType == 3 ? 5 : 4;
-				else {
-					Abort(a_renderer, "a gouraud fill of vertices without colours");
-					return;
-				}
-			} else if (format != Layout::kVertexXY16i && format != Layout::kVertexXY16iC32 && format != Layout::kVertexXY16iCF32) {
-				Abort(a_renderer, "triangles of XY32f vertices");
-				return;
+				else
+					command.state.vertexKind = capture.boundVertexKind;
+			} else {
+				command.state.vertexKind = 1;
 			}
 			DrawRecord record{};
 			if (!ApplyFill(a_renderer, fill, format, command, record))
 				return;
-			auto& capture = Current();
-			MatrixConstants(Field<float[6]>(a_renderer, Layout::kMatrix), record);
+			FinishVertexKind(a_renderer, command);
+			DrawMatrix(a_renderer, &Field<float>(a_renderer, Layout::kMatrix), record);
 			std::memcpy(record.texgen, capture.texgen, sizeof(record.texgen));
 			// The draws read the arrays from the segment's staging bytes, copied at their first draw there.
+			const std::uint32_t indexSize = IndexSize(Field<std::uint32_t>(a_renderer, Layout::kIndexFormat));
 			record.vertexOffset = StageVertices(a_renderer);
 			record.vertexStride = Field<std::uint32_t>(a_renderer, Layout::kVertexStride);
-			record.indexOffset = StageIndices(a_renderer) + static_cast<std::uint32_t>(a_start) * 2;
-			record.indexSize = 2;
+			record.indexOffset = StageIndices(a_renderer) + static_cast<std::uint32_t>(a_start) * indexSize;
+			record.indexSize = indexSize;
 			record.baseVertex = a_base;
 			command.vertexCount = static_cast<std::uint32_t>(a_triangles) * 3;
 			Emit(command, record);
@@ -1452,9 +1521,26 @@ namespace RenderGraph::Engine::Scaleform
 				return Original<DrawLinesFn>(kDrawLineStrip)(a_renderer, a_base, a_lines);
 			}
 			Keep({ .slot = kDrawLineStrip, .args = { a_base, a_lines } });
-			if (!VideoModeSet(a_renderer) || !Field<const void*>(a_renderer, Layout::kVertexData))
+			if (!VideoModeSet(a_renderer) || !Field<const void*>(a_renderer, Layout::kVertexData) || a_lines <= 0)
 				return;
-			Abort(a_renderer, "a line strip");
+			// DrawLineStrip (SE 82839): vertex shader 1 (7 in 3D), the line style through ApplyFillStyle, the current matrix, and a
+			// strip of the lines + 1 vertices from a_base.
+			auto& capture = Current();
+			Command command{};
+			command.state.vertexKind = 1;
+			command.state.lines = 1;
+			DrawRecord record{};
+			if (!ApplyFill(a_renderer, Field<FillStyle>(a_renderer, Layout::kLineStyle), Field<std::int32_t>(a_renderer, Layout::kVertexFormat), command, record))
+				return;
+			FinishVertexKind(a_renderer, command);
+			DrawMatrix(a_renderer, &Field<float>(a_renderer, Layout::kMatrix), record);
+			std::memcpy(record.texgen, capture.texgen, sizeof(record.texgen));
+			record.vertexOffset = StageVertices(a_renderer);
+			record.vertexStride = Field<std::uint32_t>(a_renderer, Layout::kVertexStride);
+			record.indexSize = 0;
+			record.baseVertex = a_base;
+			command.vertexCount = static_cast<std::uint32_t>(a_lines) + 1;
+			Emit(command, record);
 		}
 
 		void DrawBitmaps(void* a_renderer, const BitmapDesc* a_bitmaps, std::int32_t a_listSize, std::int32_t a_start, std::int32_t a_count, RE::GTexture* a_texture,
@@ -1471,10 +1557,6 @@ namespace RenderGraph::Engine::Scaleform
 			const auto* bitmaps = a_bitmaps + a_start;
 			const std::uint32_t bitmapBytes = KeepBytes(bitmaps, sizeof(BitmapDesc) * static_cast<std::size_t>(a_count));
 			Keep({ .slot = kDrawBitmaps, .bytes = matrixBytes, .args = { a_count, static_cast<std::int32_t>(bitmapBytes) }, .object = a_texture });
-			if (ForcedPart()) {
-				Abort(a_renderer, "a draw made a D3D11 part by CS_ORG_SCALEFORM_D3D11_PARTS");
-				return;
-			}
 			if (!IsPlainTexture(a_texture)) {
 				Abort(a_renderer, "bitmaps of a texture that is not a plain GTextureD3D1x (video)");
 				return;
@@ -1485,6 +1567,7 @@ namespace RenderGraph::Engine::Scaleform
 			}
 			Command command{};
 			command.state.vertexKind = 2;
+			FinishVertexKind(a_renderer, command);
 			command.state.pixelKind = Field<std::uint32_t>(a_texture, Layout::kTextureFormat) == DXGI_FORMAT_A8_UNORM ? 4 : (Multiply() ? 6 : 5);
 			const auto index = TextureIndex(a_renderer, a_texture);
 			if (index < 0)
@@ -1494,7 +1577,7 @@ namespace RenderGraph::Engine::Scaleform
 
 			auto& capture = Current();
 			DrawRecord record{};
-			MatrixConstants(*reinterpret_cast<const float (*)[6]>(a_matrix), record);
+			DrawMatrix(a_renderer, a_matrix, record);
 			CxformConstants(Field<float[8]>(a_renderer, Layout::kCxform), record);
 			std::memcpy(record.texgen, capture.texgen, sizeof(record.texgen));
 			// Six vertices a bitmap (x, y, u, v, colour): left-top, right-top, left-bottom, then left-bottom, right-top, right-bottom.

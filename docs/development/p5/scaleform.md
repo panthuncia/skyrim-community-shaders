@@ -27,7 +27,7 @@ shaders `package/Shaders/Scaleform/`, behind `CS_ORG_SCALEFORM=1` (default off).
   or render-texture display appeared at all; the census line says how often they occur now.
 - **Shaders:** all 53 embedded sources are transcribed and checked (below, "Shaders"); `FILTER` 23/24 now have a C++ user.
 - **Run in game:** in the last P5.10 run 3,996 of 4,000 displays were drawn on the graph. No menu in the test runs makes a
-  D3D11 part on its own, so `CS_ORG_SCALEFORM_D3D11_PARTS=N` forces every Nth draw into one (scenario
+  D3D11 part on its own, so `CS_ORG_SCALEFORM_D3D11_PARTS=N` (removed in 5.5.8) forced every Nth draw into one (scenario
   `scaleform-org1-parts.env`). That path has run: in `1111-061333-p35-scaleform-org1-parts-f5`, of 11,000 displays 6,835
   were drawn on the graph with D3D11 parts, 4,151 on the graph alone and 14 on D3D11. With every port on
   (`1111-063518-p35-p5-all-r1`), 10,982 of 11,000 displays were drawn on the graph, none with a D3D11 part.
@@ -88,9 +88,8 @@ Inherent refusals, each counted in the census and logged once:
   or says it is not an engine target); a render target view in another format than its
   surface's; masks on a depth-stencil other than kMAIN's, or one that cannot be imported; more commands than the run gate holds
   (1,024); the Interface anchor's ring full this frame.
-- D3D11 parts: 3D draws, 32-bit indices, gouraud fills of type 4 and 5, gouraud fills of vertices without colours, XY32f
-  triangles, line strips, the fill off, a bitmap fill without a texture, video (YUV) and lost textures, non-`GTextureD3D1x`
-  fills, render to a texture (`PushRenderTarget`, `PushTempRenderTarget`), the blur family (`DrawBlurRect`),
+- D3D11 parts: video (YUV) and lost textures, non-`GTextureD3D1x` fills, a two-texture gouraud fill without its second
+  texture, render to a texture (`PushRenderTarget`, `PushTempRenderTarget`), the blur family (`DrawBlurRect`),
   `SetDisplayRenderTarget` inside a display, and the rest of a display after 8 parts or when another target is bound after one.
 
 **The census's `DrawBitmaps` (AE 84956) and AE 84961 classes.** AE 84961 sits between `DrawLineStrip` (84960) and `EndDisplay`
@@ -98,6 +97,31 @@ Inherent refusals, each counted in the census and logged once:
 (0x141049690). AE 84956 is `DrawBitmaps` itself. So both classes are the D3D11 renderer drawing glyphs and triangle lists. Its
 callers were the readiness refusals this change deletes: the displays before the first build, `a pipeline is being built`,
 and the new-surface displays. What remains is the inherent list above, now inside `Flush::EngineDraws` scopes.
+
+### Draws added in 5.5.8 (2026-11-12, `org-port/ui-movies`)
+
+Each was a D3D11 part of one call before. They follow what the D3D11 renderer does (SE 82838 `DrawIndexedTriList`, 82839
+`DrawLineStrip`, 82835 `DrawBitmaps`, 82817 `ApplyMatrix`; AE 84959, 84960, 84956, 84940):
+
+- **3D draws** (a world matrix set): the vertex kind's 3D twin (`VS_3D`, the renderer's index + 6, as its `SetVertexShader`
+  SE 82931 adds). The matrix is the renderer's own `ApplyMatrix`, called on the renderer: in 3D it reads only the 3D fields
+  (+0x554 dirty, +0x558 projection, +0x598 view, +0x5D8 their product, +0x618 world) and the user matrix, and writes the
+  vertex constants' CPU copy (+0x1C0, 16 floats, no D3D11 call), which the record copies. `DrawBitmaps` and the colour matrix
+  filter use it too. 3D pipelines are not enumerated: each is built at its first draw (logged).
+- **32-bit indices:** the record's index size is 4 (`Fill.hlsli` reads either).
+- **XY32f triangles:** vertex shader 1 with the input layout of format 1, as D3D11 binds them: the position is read as
+  R16G16_SINT whatever the data.
+- **Gouraud fills of type 4 and 5:** vertex kind 4 (type 3 alone takes 5) with pixel kind 14; the pixel stage's second
+  coordinate is the vertex stage's zero, as D3D11 links them.
+- **A gouraud fill of vertices without colours:** `DrawIndexedTriList` sets no vertex shader then; the one bound stays
+  (`boundVertexKind`, the last draw's of the display).
+- **The fill off:** `ApplyFillStyle` sets nothing; the pixel kind, textures, samplers and constants of the display's last
+  fill are reused (`boundFill`). Before any fill of the display the draw is dropped (logged once).
+- **A bitmap fill without a texture:** `ApplyFillStyle` binds a null pixel shader, so the draw writes no colour. It draws with
+  blend state 7 (no colour write), its stencil state as set.
+- **Line strips:** a `LineStrip` pipeline (`RasterProgram::Desc::topology`), vertex kind 1, the line style through the same
+  fill code, `lines + 1` vertices from the base vertex, no indices. Enumerated with pixel kind 1 and every blend.
+- The solid fill (pixel kind 1) is enumerated with every blend: Multiply and Darken keep kind 1 for it.
 
 ## Census
 
@@ -301,18 +325,68 @@ The filters' blend array (SE 0x1417c2588) is the first one with source colour fa
 | 6 darken | SrcAlpha, One, Min | One, One, Min |
 | 7 none | no colour write | the same |
 
-### The blur family (not on the graph yet)
+### The blur family (RE done 2026-11-12; not on the graph yet)
 
-`DrawBlurRect` (SE 0x140f5db10) runs `passes` passes (params +0xC, doubled when the box is larger than a threshold; flag 0x20000
-skips to the last). Each pass but the last pushes a temp target (`PushTempRenderTarget(frame, w, h, false)`, vtable +0x50),
-draws the previous pass's texture through PS-B 21/22 (one- or two-dimensional blur), pops it and releases the previous texture;
-the last pass draws onto the current target with the current matrix and the filter's own pixel shader (inner/outer shadow,
-highlight, knockout, shadow only, chosen from the flags at +0 bits 1, 2, 6, 8, 10; +2 for Multiply and Darken), reading the
-original source as `srctex` (t1). Its constants come from a per-shader offset table at SE 0x141e0ac70 (the reflection's offsets
-of cxadd, cxmul, fsize, offset, scolor, scolor2, srctexscale, texscale, and the sampler slot). Putting it on the graph needs
-GFx's temp targets as graph resources that one display's passes write and read in turn (render passes on ORG images with
-barriers between them inside the Interface pass, or a pass per filter pass), and that table transcribed. Until then the census
-shows how often it runs.
+`DrawBlurRect(source, srcRect, destRect, params)` is SE 82836 (0x140f5db10), slot 44. Read in Ghidra (SE; the AE slot is the
+same function). Still a D3D11 part.
+
+**Params** (`BlurFilterParams`, 17 dwords): +0x00 mode flags, +0x04 BlurX, +0x08 BlurY (floats), +0x0C passes, +0x10/+0x14
+offset x/y (floats), +0x18 colour (bytes B, G, R, A), +0x1C colour 2 (same order), +0x20 strength (unused here), +0x24..+0x40 the
+colour transform (rMul, rAdd, gMul, gAdd, bMul, bAdd, aMul, aAdd).
+
+**Shaders (PS-B slots).** Passes before the last use 22 (two-dimensional blur), the last one 22 too, or 24 for Multiply and
+Darken. With flag 0x2 (a shadow filter) the last one is: without 0x400, `(~(flags >> 6) & 8) | 1` (9 outer, 1 inner with 0x40),
++4 for knockout (0x100), +1 for highlight (0x4); with 0x400 (shadow only), 17, 18 with highlight; +2 for Multiply and Darken.
+When `BlurX * BlurY > 32.0` the pass count doubles, every pass blurs one axis (pass 0: BlurY = 1; pass 1 and the last: BlurX = 1),
+the blur slots become 21 (one-pass blur; 23 for Multiply and Darken), and the shadow slots stay. Pass `i` uses the parameters
+of pass 2 when it is the last, else of pass `i & 1`. Flag 0x20000 starts at the last pass. PS-B slot to `FilterPS.hlsl`'s
+`FILTER`: 1→1, 2→2, 3→4, 4→5, 5→3, 6→2, 7→6, 8→5, 9→7, 10→8, 11→11, 12→12, 13→10, 14→9, 15→14, 16→13, 17→15, 18→15, 19→17,
+20→17, 21→19, 22→21, 23→20, 24→22, 25→23, 26→24.
+
+**Targets.** Each pass but the last calls `PushTempRenderTarget({-1,-1,1,1}, ceil(srcRect width), ceil(srcRect height), false)`
+(slot 10, SE 82888 0x140f61c70): a pooled target whose texture is at least that size (a new one is the next power of two each
+way), its viewport the size asked for, the whole texture cleared (`PushRenderTarget`, SE 82887 0x140f61830). The pass draws with the
+identity matrix (0x141e09d00) onto `{-1,-1,1,1}`, then `PopRenderTarget` and the previous pass's texture released; the target's
+texture is the next pass's source. The last pass draws onto the current target with `ApplyMatrix(current matrix)` and
+`destRect`.
+
+**Draw.** VS-B 1 (the input layout of format 5), a strip of four vertices `(x, y, u, v)`: (x0, y0, u0, v0), (x1, y0, u1, v0),
+(x0, y1, u0, v1), (x1, y1, u1, v1), with `u = srcRect.x / source width`, `v = srcRect.y / source height` (+0x38/+0x3C of the
+pass's source texture; srcRect itself is the same every pass). The pass's source is bound with `Bind(table[8], clamp, linear)`,
+the original source, for the shaders that read it, with `Bind(table[6], clamp, linear)`. Blend: passes before the last the
+filters' array's normal state (+0x420), the last one the filters' array for the blend mode (+0x418 + 8 · table[mode]), neither
+while a mask is drawn (the mask's no-colour state stays); after the filter the first array's state for the mode (+0x3D8 + 8 ·
+table[mode]).
+
+**The offset table** (SE 0x141e0ac70, a pointer per PS-B slot to ten ints, -1 for none): the float index in `PSConstants` of
+cxadd, cxmul, fsize, offset, scolor, scolor2, then `srctex`'s stage, srctexscale's index, `tex`'s stage, texscale's index.
+
+| PS-B slots | cxadd | cxmul | fsize | offset | scolor | scolor2 | srctex | srctexscale | tex | texscale |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| 1-16 | 0 | 4 | 8 | 12 | 16 | 20 | t0 | 24 | t1 | 26 |
+| 17-20 | 0 | 4 | 8 | 12 | 16 | - | - | - (see below) | t0 | 20 |
+| 21-24 | 0 | 4 | 8 | - | - | - | - | - | t0 | 12 |
+| 25-26 | 0 | 4 | - | - | - | - | - | - | t0 | - |
+
+They match `FilterPS.hlsl`'s constant blocks A to D in cbuffer packing.
+
+**Constants** (128 bytes, written in this order):
+
+- cxmul and cxadd: the last pass `(rMul·aMul, gMul·aMul, bMul·aMul, aMul)` and `(rAdd·aMul, gAdd·aMul, bAdd·aMul, aAdd)` over 255;
+  the others `(1, 1, 1, 1)` and 0.
+- fsize: `sx = float(uint(BlurX - 1)) · 0.5`, `sy` the same from BlurY, `w = 1 / ((2 sy + 1)(2 sx + 1))`. For slots 21 and 23,
+  `(BlurX > 1 ? sx : sy, 0, 0, w)` and texscale `(BlurX > 1 ? 1 / width : 0, BlurY > 1 ? 1 / height : 0)`; otherwise `(sx, sy, 0,
+  w)` and texscale `(1 / width, 1 / height)`, of the pass's source.
+- offset (when the slot has one): `(-offset x, -offset y)`; then srctexscale `(source width / original width, source height /
+  original height)` at the srctexscale index. For slots 17-20 that index is -1, so the game writes the width ratio before the
+  buffer and the height ratio over cxadd.r: shadow-only filters get `cxadd.r` = that ratio. A port must do the same.
+- scolor: `(R, G, B, A) / 255` from colour; scolor2 the same from colour 2.
+
+**On the graph** this needs, inside a display's Interface pass: scratch colour textures of the surface's size (cleared whole when
+pushed, as GFx clears its pooled targets), each declared as a shader resource and moved to a render target and back by the pass
+around the commands that draw into it (as Bink's pass does with its movie texture), and render passes split at each push and
+pop. GFx's own `PushRenderTarget` targets (render to a texture) need the same, plus a mapping from the GFx texture to its scratch
+image for the draws that read it later. In the runs so far no display used either; the census counts them.
 
 The background rectangle `BeginDisplay` draws is one of the display's draws.
 
@@ -496,8 +570,8 @@ may land after the load), the HUD, the inventory, the magic menu, the map and th
 6. No `[ORG] frame anchors: Interface ran N times in one frame`; the census counts no `the Interface anchor's ring is full this
    frame` and no `a segment with more commands than the Interface gate holds`.
 
-`scaleform-org1-parts.env` is the same tour with `CS_ORG_SCALEFORM_D3D11_PARTS=5`: the census should count `a draw made a D3D11
-part by CS_ORG_SCALEFORM_D3D11_PARTS` and `too many D3D11 parts in one display`, and the shots should still match.
+`CS_ORG_SCALEFORM_D3D11_PARTS` and its scenario `scaleform-org1-parts.env` were removed in 5.5.8: the draws they forced into
+D3D11 parts are graph draws now.
 
 What a build must confirm first: no `[E]` from the anchor epoch, glyphs (now A8 on the graph), masks (the compass, the map's
 frame), blend modes, and any menu with a D3D11 part look as on D3D11.

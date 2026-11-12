@@ -37,6 +37,7 @@ namespace
 		rhi::BlendState blend{};
 		rhi::RenderTargets targets{};
 		rhi::Format depthFormat = rhi::Format::Unknown;
+		rhi::PrimitiveTopology topology = rhi::PrimitiveTopology::TriangleList;
 	};
 
 	PipelineState StateOf(const RasterProgram::Desc& a_desc)
@@ -45,6 +46,7 @@ namespace
 		state.raster = a_desc.raster;
 		state.depth = a_desc.depth;
 		state.depthFormat = a_desc.depthFormat;
+		state.topology = a_desc.topology;
 		state.blend.alphaToCoverage = a_desc.alphaToCoverage;
 		state.blend.numAttachments = static_cast<std::uint32_t>(a_desc.targets.size());
 		state.targets.count = static_cast<std::uint32_t>(a_desc.targets.size());
@@ -74,7 +76,7 @@ namespace
 		const rhi::SubobjBlend blend{ a_state.blend };
 		const rhi::SubobjRTVs targets{ a_state.targets };
 		const rhi::SubobjDSV depthFormat{ a_state.depthFormat };
-		const rhi::SubobjPrimitiveTopology topology{ rhi::PrimitiveTopology::TriangleList };
+		const rhi::SubobjPrimitiveTopology topology{ a_state.topology };
 		const rhi::SubobjInputLayout input{};  // no vertex buffers: the vertex stage makes its positions from SV_VertexID
 		const rhi::PipelineStreamItem items[] = {
 			rhi::Make(layout),

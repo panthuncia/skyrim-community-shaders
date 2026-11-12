@@ -46,21 +46,27 @@ namespace RenderGraph::Engine::Bink
 		class Movie;
 
 		/**
-		 * @brief State::Setup, once the graph is up: the movie texture, the staging pool and the sampler, and the Present anchor's client,
-		 * registered once for the session. Nothing when CS_ORG_BINK is off; logged and off when anything cannot be made.
+		 * @brief State::Setup, once the graph is up: the movie texture, the staging pool and the sampler, the targets (the framebuffer,
+		 * and HDR's UI texture while HDR has one) with their tile programs, and the Present anchor's client, registered once for the
+		 * session. Nothing when CS_ORG_BINK is off; logged and off when anything cannot be made, naming the part.
 		 */
 		void Setup();
 
 		/**
 		 * @brief Render thread, at the start of a tick that could draw on the graph: whether this tick may. The client joined the
-		 * Present anchor's graph at setup's build point and the tile program was built at setup, so the only refusals are the ring
-		 * being full this frame (FrameAnchors::CanRun), a framebuffer that cannot be imported, and the ticks between a resize and the
-		 * next build. A frame queued earlier that did not draw is logged as an error. False: the engine draws this tick.
+		 * Present anchor's graph at setup's build point and the tile programs were built at setup. When a target was made again (a
+		 * resize, HDR's textures made again) the client is refreshed, and with a_betweenFrames (a blocking movie's tick before it
+		 * begins its frame) the graph is built here, between two frames. The refusals left: the ring full this frame
+		 * (FrameAnchors::CanRun), a framebuffer that cannot be imported, and a target made again inside a frame. A frame queued
+		 * earlier that did not draw is logged as an error. False: the engine draws this tick.
 		 */
-		bool Begin();
+		bool Begin(bool a_betweenFrames);
 
-		/** @brief Render thread: the movie's tiles and their place in a staging buffer; null, logged, when the graph path cannot draw it. */
-		std::shared_ptr<Movie> CreateMovie(const Layout& a_layout);
+		/**
+		 * @brief Render thread: the movie's tiles, their place in a staging buffer and in the movie texture's chunks (a_tileSize: the
+		 * whole tiles' edge); null, logged, when the graph path cannot draw it (a movie over 4096x2304).
+		 */
+		std::shared_ptr<Movie> CreateMovie(const Layout& a_layout, std::uint32_t a_tileSize);
 
 		/**
 		 * @brief Render thread, from the renderer's texture lock: where the decoder writes tile a_tile of this tick's frame, and its row
@@ -70,10 +76,11 @@ namespace RenderGraph::Engine::Bink
 
 		/**
 		 * @brief Render thread, in place of the engine's tile draw: the movie's frame queued for the Present anchor's run (this tick's
-		 * staging buffer, uploaded first, or the last frame uploaded when this tick decoded nothing). False when there is nothing the
-		 * graph can draw: the engine's draw runs.
+		 * staging buffer, or the last decoded one when this tick decoded nothing), drawn onto the framebuffer, or onto HDR's UI texture
+		 * with a_hdr (HDR Display redirected the framebuffer there). False when there is nothing the graph can draw: the engine's draw
+		 * runs.
 		 */
-		bool Queue(const std::shared_ptr<Movie>& a_movie);
+		bool Queue(const std::shared_ptr<Movie>& a_movie, bool a_hdr);
 
 		/** @brief Render thread, at the end of every tick that called Begin: drops a staging buffer the tick took but did not queue. */
 		void EndTick(Movie& a_movie);

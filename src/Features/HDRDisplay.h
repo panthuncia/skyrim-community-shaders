@@ -97,6 +97,13 @@ public:
 
 	/** @brief Redirects kFRAMEBUFFER.RTV to the UI texture for vanilla UI capture. */
 	void SetUIBuffer();
+
+	/**
+	 * @brief Before a Bink movie's tiles draw (BSMovie::DrawTiles) with HDR output on: clears the scene and points kFRAMEBUFFER at the
+	 * UI texture, so the movie goes through the composite. Nothing with HDR output off. The tile draw's detour calls it, and so does
+	 * Bink's render-graph path for the ticks whose draw it withholds.
+	 */
+	void PrepareMovieDraw();
 	/** @brief Clears the UI texture and restores the original kFRAMEBUFFER.RTV. */
 	void ClearUIBuffer();
 	/** @brief Returns true when HDR deferred compositing is active (composite after Present-hook mods). */

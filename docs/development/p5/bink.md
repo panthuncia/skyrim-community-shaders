@@ -135,11 +135,35 @@ With `CS_ORG_BINK=1` the graph is the only path for the ticks it takes (primary-
 ### What stays the engine's
 
 - Movies in player mode 2 (drawn inside another frame), and ticks off the render owner (the logo without
-  `CS_ORG_LOADING_THREAD=1`).
-- HDR output on for the frame (the movie goes to HDR's UI texture).
-- A movie larger than the 2048x1152 movie texture, and a tile set whose layout is not the expected one.
-- The framebuffer that cannot be imported, the Present anchor's ring full this frame, no staging block to take, and the ticks
-  between a resize and the next build.
+  `CS_ORG_LOADING_THREAD=1`). Mode 2 needs its draw at the `DrawTiles` point inside the caller's frame: an anchor there, which
+  is FrameAnchors work (a new anchor in its table and the frame's epoch order), not done in 5.5.9.
+- A movie larger than 4096x2304, and a tile set whose layout is not the expected one.
+- The framebuffer that cannot be imported, the Present anchor's ring full this frame, no staging block to take, and a target
+  made again while a frame is open (a mode-1 tick always starts between frames, so in practice never).
+
+### 5.5.9 (2026-11-12, `org-port/ui-movies`)
+
+- **HDR output:** a graph tick no longer refuses HDR. At `DrawTiles` it calls `HDRDisplay::PrepareMovieDraw` (what HDR
+  Display's own detour of `DrawTiles` does: the scene cleared, kFRAMEBUFFER pointed at the UI texture) and queues the frame for
+  HDR's UI texture when kFRAMEBUFFER's RTV is the UI texture's. The UI texture is imported as `hdr.ui`, ORGHDRDisplay's name,
+  with every view (ORGHDRDisplay now passes its RTV too: a name's first import decides its views), so both are one graph
+  resource. The Present anchor runs before `HandleSwapChainPresent`, whose `ApplyHDR` composites the UI texture.
+- **Any movie up to 4096x2304:** the movie texture stays 2048x1152. A movie is split into chunks, each a band of whole tile
+  columns and rows that fits it (`MakeChunks`); a 1920x1080 movie is one chunk, a 3840x2160 one six. One pass per target
+  copies a chunk's tiles from the staging buffer and draws them, chunk after chunk. The movie texture is declared as a shader
+  resource; the pass moves it to a copy destination and back around each chunk's copies (its own barriers, so the graph finds
+  it as declared). The upload pass is gone.
+- **Seams as the engine's:** the pixel stage clamps each tile's coordinate to its region's edge texels, as the engine's
+  separate clamped textures sample. The atlas's seamless edges are gone, so shots should now match the engine's at the
+  256-pixel steps too.
+- **Paused frames:** the last decoded staging block is kept (`Movie::last`) and drawn again by a tick that decodes nothing; the
+  pool holds one block more for it.
+- **A target made again:** the framebuffer or HDR's UI texture made again refreshes the client, and a blocking tick with no frame
+  open (`BGSMoviePlayer` vfunc +0x58) builds the graph at once with `FrameAnchors::BuildPending`, between two frames. No tick is
+  the engine's for it.
+- **The logo's frame 1:** nothing changed; `loading-org1.env` showed 166 of 166 frames on the graph (org-full-port.md). Without
+  `CS_ORG_LOADING_THREAD=1` the logo stays the engine's (5.5.11 makes the switch the default).
+- `bink: tick not taken` stays: mode 2 and the refusals above still reach the engine's `DrawTiles`.
 
 ## Design
 
@@ -160,29 +184,27 @@ The seam is one call in `Hooks::Install` (`src/Hooks.cpp`): `RenderGraph::Engine
 the Present anchor. With the switch off and no `CS_ORG_BINK_SHOT`, nothing is hooked.
 
 A tick is a graph tick when the switch is on, the player is in mode 1, the tick runs on the render owner
-(`FrameAnchors::IsRenderOwner`), HDR output is off for the frame, the anchor can run this frame (`FrameAnchors::CanRun`: the
-client is in the Present graph since setup's build point, and the ring has room), the framebuffer is imported, and the movie fits
-the movie texture.
+(`FrameAnchors::IsRenderOwner`), the anchor can run this frame (`FrameAnchors::CanRun`: the
+client is in the Present graph since setup's build point, and the ring has room), the framebuffer is imported, and the movie is at
+most 4096x2304.
 
 The ORG side (`BinkGraph.cpp`), the same shape as ImGui's backend (`ImGuiBasicRHI.cpp`):
 
 - **One client for the session**, registered at `State::Setup` (`Bink::Setup`, from `Engine::Setup`): a movie never registers,
   unregisters or refreshes anything. The framebuffer is `FrameAnchors::EngineTarget(kFRAMEBUFFER)`; a new back buffer (a
   resize) refreshes the client once, and ticks are the engine's until the next build point has built it.
-- **The movie texture:** one persistent graph texture (`Bink::Movie`, 2048x1152 R8G8B8A8_UNORM, 9 MB) that holds the whole
-  video, each tile at its place in it. A 1920x1080 movie's tiles reach 1920x1088; a larger movie keeps the engine's path. The
-  graph orders its uses (no hand-written barriers). Linear filtering at a tile's edge now reads the neighbouring tile's
-  texels, where the engine's separate textures clamp: the seams the engine shows at 256-pixel steps are gone.
-- **The upload ring:** `RenderGraph::FrameStaging` (at most four blocks), one frame each, every tile's rows at a 256-byte pitch
+- **The movie texture:** one persistent graph texture (`Bink::Movie`, 2048x1152 R8G8B8A8_UNORM, 9 MB) that holds a chunk of the
+  video at a time (5.5.9 above), each tile at its place in its chunk. A 1920x1080 movie's tiles reach 1920x1088: one chunk.
+- **The upload ring:** `RenderGraph::FrameStaging` (frames in flight plus two blocks), one frame each, every tile's rows at a 256-byte pitch
   and 512-byte placement. With none free, the tick decodes on the engine's path. No D3D11 `Map` is involved on a graph tick. The
   edge tiles' parts beyond the video are zeroed, as the engine's zero-filled textures hold.
-- **The passes:** client `cs.bink` at the Present anchor, before any other Present client: `cs.bink.upload` (order -1001, a
-  copy pass: the staging buffer's tiles into the movie texture) and `cs.bink.tiles` (order -1000, one render pass with load
-  op Load onto the framebuffer, one 6-vertex draw per tile, its rectangle and its region of the movie texture in the push
-  block; blending off, no depth, no culling). The commit stores the queued frame for both in `RenderGraph::RunSlots`; each
+- **The passes:** client `cs.bink` at the Present anchor, before any other Present client: `cs.bink.tiles` (order -1000, onto
+  the framebuffer) and `cs.bink.tiles.hdr` (order -999, onto HDR's UI texture, while HDR has one). Each copies a chunk's tiles
+  into the movie texture and draws them in a render pass with load op Load, one 6-vertex draw per tile, its rectangle and its
+  region of the movie texture in the push block; blending off, no depth, no culling. The commit stores the queued frame for both in `RenderGraph::RunSlots`; each
   pass takes its slot's frame and records nothing when there is none, so they are recorded every run (no revision) and never
   repeat an older run's frame.
-- **Paused frames:** a tick that decoded nothing draws the movie texture as it is, when the newest frame of this movie is in it.
+- **Paused frames:** a tick that decoded nothing draws the last decoded frame again, from its kept staging block.
 
 The anchor runs at `IDXGISwapChain::Present`, which the tick's `Renderer::End` reaches right after `DrawTiles`, so the graph's
 draw lands in the frame that Present shows, under CS's overlay and HDR output.
@@ -225,8 +247,8 @@ once and draw through the engine (FrameAnchors logs its own one-time line about 
 ### HDR output
 
 With HDR on for the frame, HDR Display's own `DrawTiles` detour clears its UI texture and redirects the framebuffer there, so
-the movie goes through its composite. The graph's pass draws the framebuffer, so such ticks stay the engine's. Drawing the
-tiles into HDR's UI texture (imported as ImGui imports it) is the follow-up.
+the movie goes through its composite. A graph tick makes the same preparation (`HDRDisplay::PrepareMovieDraw`) and draws into
+the UI texture (5.5.9 above).
 
 ## Switches
 

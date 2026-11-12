@@ -85,6 +85,8 @@ struct RasterProgram
 		// The stencil reference is the draw's (DrawDesc::stencilReference, 0 by default).
 		rhi::DepthStencilState depth{ .depthEnable = false, .depthWrite = false, .depthFunc = rhi::CompareOp::Always };
 		rhi::RasterState raster{ .cull = rhi::CullMode::None };
+		// The pipeline's primitive type: a draw sets the same one (SetPrimitiveTopology) before it draws.
+		rhi::PrimitiveTopology topology = rhi::PrimitiveTopology::TriangleList;
 		bool alphaToCoverage = false;
 		// Also the defines the D3D11 build of each stage gets (ProgramBuild::WithCommonDefines: VSHADER, PSHADER, CS's common
 		// defines), so a dual-target shader compiles the same permutation on both paths. Off for generated stages (the FX
