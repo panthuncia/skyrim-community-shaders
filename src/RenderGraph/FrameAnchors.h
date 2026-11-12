@@ -92,6 +92,9 @@ namespace FrameAnchors
 		// draw between its BeginQuery and EndQuery (Drawcall Limit Fix's sky family), at Sun::SubmitOcclusionQuery's call, up to three
 		// times a frame (the engine's three sun queries). A client of its own, so every run's queries are that client's.
 		EngineQueries,
+		// Out of frame order (appended): Volumetric Lighting's GPU work (Features/VolumetricLighting/ORGVolumetricLighting,
+		// CS_ORG_VOLUMETRIC_LIGHTING), once a frame where the engine's VL blur would dispatch, inside RenderWorldPostProcess.
+		VolumetricLighting,
 		Count
 	};
 

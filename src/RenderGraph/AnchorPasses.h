@@ -53,7 +53,8 @@ namespace RenderGraph::AnchorPasses
 	 * @brief One entry of a pass's push block, in the shader's resource list order (ShaderBindings.h): Srv and Uav are declared
 	 * resources (the whole texture or one mip), Published a read of a published resource by its id (PublishedResources.h: the
 	 * default view, ordered after its producer's writes in any epoch), Handle a sampler or another descriptor index, Latch a LATCH
-	 * entry's two words (an offset into the builder's latch), Shared a SHARED entry's four words (SharedConstants.h).
+	 * entry's two words (an offset into the builder's latch), Shared a SHARED entry's four words (SharedConstants.h). An Srv or a
+	 * Published read may ask for a view variant (a texture array's whole-array view: its default view is its first slice).
 	 */
 	struct Bind
 	{
@@ -69,13 +70,20 @@ namespace RenderGraph::AnchorPasses
 
 		Kind kind = Kind::Handle;
 		std::shared_ptr<org::Resource> resource;
-		std::uint32_t value = 0;       // Handle: the descriptor index; Latch: the region's offset
-		std::uint32_t mip = kAllMips;  // Srv and Uav: the one mip the view covers, or the default view
-		std::string id;                // Published: the id (PublishedResources::IsDeclarable at the build)
+		std::uint32_t value = 0;             // Handle: the descriptor index; Latch: the region's offset
+		std::uint32_t mip = kAllMips;        // Srv and Uav: the one mip the view covers, or the default view
+		std::string id;                      // Published: the id (PublishedResources::IsDeclarable at the build)
+		std::uint32_t variant = UINT32_MAX;  // Srv and Published: the view variant (org::SRVViewType), UINT32_MAX for the default view
 
 		static Bind Srv(std::shared_ptr<org::Resource> a_resource, std::uint32_t a_mip = kAllMips) { return { Kind::Srv, std::move(a_resource), 0, a_mip }; }
+		/** @brief An Srv of a texture array's whole-array view (Texture2DArrayFull), for a shader that declares Texture2DArray. */
+		static Bind SrvArray(std::shared_ptr<org::Resource> a_resource);
+		/** @brief An Srv of another client's published resource, declared by its id: the graph orders the read after its producer. */
 		static Bind Uav(std::shared_ptr<org::Resource> a_resource, std::uint32_t a_mip = kAllMips) { return { Kind::Uav, std::move(a_resource), 0, a_mip }; }
-		static Bind Published(std::string_view a_id) { return { Kind::Published, nullptr, 0, kAllMips, std::string(a_id) }; }
+		static Bind Published(std::string_view a_id, std::uint32_t a_variant = UINT32_MAX)
+		{
+			return { Kind::Published, nullptr, 0, kAllMips, std::string(a_id), a_variant };
+		}
 		static Bind Handle(std::uint32_t a_index) { return { Kind::Handle, nullptr, a_index }; }
 		static Bind Unused() { return Handle(0); }
 		static Bind Latch(std::uint32_t a_offset) { return { Kind::Latch, nullptr, a_offset }; }

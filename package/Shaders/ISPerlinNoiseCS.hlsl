@@ -4,7 +4,29 @@
 // constant layout are vanilla's. Temporaries hold raw bits (uint4), as DXBC registers do; integer work goes
 // through asint/asuint and float work through asfloat. Checked against the vanilla shader on random inputs.
 
+#if defined(CS_ORG_BINDLESS)
+// The ORG build of the 3D form (Features/VolumetricLighting/ORGVolumetricLighting, the volumetric lighting's noise volume): the
+// output from the heap, and PerTechnique (the volume's size) from the port's latch.
+#	include "Common/OrgResources.hlsli"
+
+struct PerlinNoiseConstants
+{
+	float4 Size;
+};
+
+#	if defined(TEXTURE2D)
+#		define PERLIN_NOISE_RESOURCES(X)           			X(UAV, RWTexture2D<float4>, Output0, 0) 			X(LATCH, PerlinNoiseConstants, PerTechnique, 0)
+#	else
+#		define PERLIN_NOISE_RESOURCES(X)           			X(UAV, RWTexture3D<float4>, Output0, 0) 			X(LATCH, PerlinNoiseConstants, PerTechnique, 0)
+#	endif
+ORG_PUSH_BLOCK(PERLIN_NOISE_RESOURCES(ORG_HANDLE))
+PERLIN_NOISE_RESOURCES(ORG_RESOURCE)
+
+static float4 cb0[1] = { PerTechnique.Size };
+#endif
+
 #if defined(TEXTURE2D)
+#	if !defined(CS_ORG_BINDLESS)
 RWTexture2D<float4> Output0 : register(u0);
 
 // The engine uploads this block whole (SetComputeShaderConstants); its constant list is
@@ -13,6 +35,7 @@ cbuffer PerTechnique : register(b0)
 {
 	float4 cb0[1];
 };
+#	endif
 
 [numthreads(32, 32, 1)] void main(uint3 dispatchID : SV_DispatchThreadID) {
 	uint4 r0 = 0, r1 = 0, r2 = 0, r3 = 0, r4 = 0, r5 = 0, r6 = 0, r7 = 0, r8 = 0, r9 = 0, r10 = 0;
@@ -122,6 +145,7 @@ cbuffer PerTechnique : register(b0)
 	Output0[uint2(dispatchID.x, dispatchID.y)] = float4(asfloat(r0.x), asfloat(r0.x), asfloat(r0.x), asfloat(r0.x));
 }
 #else
+#	if !defined(CS_ORG_BINDLESS)
 RWTexture3D<float4> Output0 : register(u0);
 
 // The engine uploads this block whole (SetComputeShaderConstants); its constant list is
@@ -130,6 +154,7 @@ cbuffer PerTechnique : register(b0)
 {
 	float4 cb0[1];
 };
+#	endif
 
 [numthreads(32, 32, 1)] void main(uint3 dispatchID : SV_DispatchThreadID) {
 	uint4 r0 = 0, r1 = 0, r2 = 0, r3 = 0, r4 = 0, r5 = 0, r6 = 0, r7 = 0, r8 = 0, r9 = 0, r10 = 0;

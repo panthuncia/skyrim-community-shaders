@@ -17,6 +17,7 @@
 #	include <RenderPasses/Base/TypedRenderGraphPass.h>
 #	include <Resources/Buffers/Buffer.h>
 #	include <Resources/ResourceIdentifier.h>
+#	include <Resources/GloballyIndexedResource.h>
 
 #	include <algorithm>
 #	include <format>
@@ -68,14 +69,18 @@ namespace RenderGraph::AnchorPasses
 			for (std::size_t i = 0; i < a_bindings.size(); ++i) {
 				const auto& bind = a_bindings[i];
 				const bool whole = bind.mip == kAllMips;
-				if (bind.kind == Bind::Kind::Srv)
+				if (bind.kind == Bind::Kind::Srv && bind.variant != UINT32_MAX)
+					declared.views[i] = a_builder.ShaderResource(bind.resource, org::SrvView{ .variant = bind.variant }).View();
+				else if (bind.kind == Bind::Kind::Srv)
 					declared.views[i] = whole ? a_builder.ShaderResource(bind.resource).View() :
 					                            a_builder.ShaderResource(MipOf(bind.resource, bind.mip), org::SrvView{ .mip = bind.mip }).View();
 				else if (bind.kind == Bind::Kind::Uav)
 					declared.views[i] = whole ? a_builder.UnorderedAccess(bind.resource).View() :
 					                            a_builder.UnorderedAccess(MipOf(bind.resource, bind.mip), org::UavView{ .mip = bind.mip }).View();
 				else if (bind.kind == Bind::Kind::Published)
-					declared.views[i] = a_builder.ShaderResource(org::ResourceIdentifier(bind.id)).View();
+					declared.views[i] = bind.variant != UINT32_MAX ?
+					                         a_builder.ShaderResource(org::ResourceIdentifier(bind.id), org::SrvView{ .variant = bind.variant }).View() :
+					                         a_builder.ShaderResource(org::ResourceIdentifier(bind.id)).View();
 			}
 			if (ReadsShared(a_bindings))
 				declared.shared = SharedConstants::Declare(a_builder);
@@ -291,6 +296,13 @@ namespace RenderGraph::AnchorPasses
 		private:
 			std::shared_ptr<const Spec<Upload>> spec;
 		};
+	}
+
+	Bind Bind::SrvArray(std::shared_ptr<org::Resource> a_resource)
+	{
+		Bind bind = Srv(std::move(a_resource));
+		bind.variant = static_cast<std::uint32_t>(org::SRVViewType::Texture2DArrayFull);
+		return bind;
 	}
 
 	Builder::Builder(FrameAnchors::Anchor a_anchor, std::string a_prefix, std::int32_t a_orderBase, std::shared_ptr<const org::LatchBlock> a_latch,

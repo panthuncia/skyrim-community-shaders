@@ -288,11 +288,11 @@ own, which is what the capture does already.
 - Per shape, at Setup: an import that fails, a viewport outside this resolution's target, a sampler or blend without an ORG form
   (blend factor, dual source): `<effect> into <target> has no pass this session (<reason>)`. A program that does not build leaves
   its pass out of the graph (error).
-- Under the flush latch (flush.md, "Allowed engine draws") only the effects this port does not cover run in an `EngineDraws` scope:
-  `imagespace: effect not on the graph` (the volumetric lighting's apply and blurs, the tonemap, the effects marked Next) and
-  `imagespace: volumetric lighting compute`. Both go with Volumetric Lighting's port (5.5.3) and the remaining items. A covered
-  effect's draw the engine still makes (any refusal or failure above) is vouched for by nothing: the latch skips it with its `[E]`
-  line and the census counts it. 5.5.4 deleted `shape refused`, `shape not in the manifest` and `failed on the graph`.
+- Under the flush latch (flush.md, "Allowed engine draws") only the effects this port does not cover run in an `EngineDraws` scope,
+  under `imagespace: effect not on the graph` (the tonemap and the effects marked Next). Volumetric Lighting's render, apply and
+  blurs are its own port's (5.5.3). A covered effect's draw the engine still makes (any refusal or failure above) is vouched for by
+  nothing: the latch skips it with its `[E]` line and the census counts it. 5.5.3 deleted `imagespace: volumetric lighting
+  compute`; 5.5.4 deleted `shape refused`, `shape not in the manifest` and `failed on the graph`.
 - A failed anchor epoch (`onFailed`) returns every effect to the engine for the session. A batch that does not draw after `CanRun`
   allowed it loses those draws for that frame (counted as `missed`, logged as an error).
 
@@ -351,7 +351,7 @@ technique, the target), with what wave 3 does about each:
 | 107734 <- 107217 <- RenderWorld: ISCopySubRegionCS (snow) | 1 | Graph (w3-slots: own scope, the compute form) |
 | 107734 <- RenderWaterEffects: ISCopySubRegionCS (BGSAutoWater's queue) | 0-1 | Graph since 5.5.4 (the flow map imported, the source by heap index) |
 | 107733 <- RenderSSAO and the reflection pass, with Upscaling | (the SAO and SSR rows) | Graph since fix-imagespace-tail: the dynamic-resolution viewport is the pass's render area, and the camera-Z levels are mips of one import. |
-| 107023 <- Main::Draw: the volumetric lighting compute (VolumetricLighting's CS) | 2-3 | D3D11 (below) |
+| 107023 <- Main::Draw: the volumetric lighting compute (VolumetricLighting's CS) | 2-3 | Volumetric Lighting's port (volumetric-lighting.md) |
 
 So with `CS_ORG_IMAGESPACE=1` the census classes that should drop to zero are: the `ImageSpace` draws in DrawTriShape whose frames
 are `107637 <- 107644 <- 107733` and whose target is a `kSAO_CAMERAZ_MIP_LEVEL_*`, `kSAO_RAWAO*`, `kSAO_TEMP_BLUR`, `kSAO`,
@@ -376,9 +376,9 @@ are passes from Setup. By class:
 | ISWaterBlend into kMAIN and the water history | Taken: two-target passes (`AnchorPasses::Draw::extraTargets`), ISWaterBlend.hlsl dual-target, own scope through the explicit-target Render. |
 | Refraction's late shape (ISRefraction into kMAIN_COPY at the full output size) | Taken from Setup (5.5.4): every ISRefraction (and ISDistantBlur) shape implies its whole-target shape, sized from the target table. |
 | ISSAOCompositeFog / SAO / SAOFog into kMAIN | Taken (5.5.4): ISSAOComposite.hlsl dual-target, the feature inputs by published id. |
-| ISApplyVolumetricLighting (two raster draws into `kIMAGESPACE_VOLUMETRIC_LIGHTING` / `_PREVIOUS`) | **Stays.** It reads the VL volume (t2, a `Texture3D` from `texture3DRenderTargets`), the repartition texture (t3, a `Texture1D` the VL helper made) and the noise gradient (t4, a loaded texture). FrameAnchors imports 2D render targets, depth and cube targets only; importing a 3D target and a 1D texture is a FrameAnchors addition, and the VL volume is written by the dispatches below, which stay the engine's. Reason `imagespace: effect not on the graph`. |
-| The VL blur (ISVolumetricLightingBlurHCS / VCS through 107206 -> 107209/107210 -> 107734) | **Stays.** With the VolumetricLighting feature loaded, `CSShadersSupport::Renderer_DispatchCSShader` swaps in CS's own shaders (`GetOrCreateBlurHCS/VCS`), binds its own CS b1 (`SetDimensionsCB`, a CS buffer the capture does not see) and rewrites the group counts. Taking it needs those two sources dual-target with the VL data in the latch, and the effect's input (written by ISApplyVolumetricLighting, above) is the engine's anyway. Reason `imagespace: effect not on the graph`. |
-| The VL dispatches from AE 107023 (+0x31C generate, +0x48B raymarch; SE 100309) | **Stays.** They call `DispatchCSShader` directly with CS's ISVolumetricLightingGenerateCS / RaymarchCS: the shadow cascades as `Texture2DArray` (both shadow maps), the inverse repartition `Texture1D`, the noise `Texture3D`, Terrain and Cloud Shadows' inputs through `ShadowSampling.hlsli`, and a `RWTexture3D` density volume, with CS b0 from the engine's PerTechnique. None of those is an import FrameAnchors makes today, and the feature inputs belong to their ports. This is a Phase 3 style port of VolumetricLighting (`ORGVolumetricLighting.*`). The function is detoured (AE `0x1414c4f40`, called from Main::Draw AE 36559) and runs in an `EngineDraws` scope: `imagespace: volumetric lighting compute`. A return-address test inside the DispatchCSShader detour did not see 107023 (Hooks.cpp's detour of the same function sits outside it). |
+| ISApplyVolumetricLighting (two raster draws into `kIMAGESPACE_VOLUMETRIC_LIGHTING` / `_PREVIOUS`) | **Volumetric Lighting's port** (`CS_ORG_VOLUMETRIC_LIGHTING`, [volumetric-lighting.md](./volumetric-lighting.md)): ApplyVL (SE 100475, AE 107193) is detoured and drawn at the VolumetricLighting anchor, reading the port's graph volume; the repartition texture is computed in the shader. Not this port's: its inputs are the VL port's. |
+| The VL blur (ISVolumetricLightingBlurHCS / VCS through 107206 -> 107209/107210 -> 107734) | **Volumetric Lighting's port**: 107206 (SE 100486) is detoured and its two dispatches are graph passes with the VL data in the port's latch. |
+| The VL dispatches from AE 107023 (SE 100306) | **Volumetric Lighting's port**: the VL render is detoured, its dispatches withheld at Hooks.cpp's DispatchCSShader seam, and the generate and raymarch run at the VolumetricLighting anchor with the engine's PerTechnique latched. This port's 107023 detour and the reason `imagespace: volumetric lighting compute` are deleted. |
 | ISCopySubRegionCS from `Main::RenderWaterEffects` (BGSAutoWater's queue) | Taken (5.5.4): the flow map is an import made at Setup, and each copy's loaded texture is read by its heap index from the latch. |
 | The tonemap (55, 56) | Stays: CS's tonemap owners (Effects11, Post Processing, HDR Display). |
 | A fractional viewport, the dynamic-resolution quad (`unk58`), a manager rectangle (menu 3D) | Stay, as before (inherent refusals). |

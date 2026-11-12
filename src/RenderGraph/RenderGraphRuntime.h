@@ -112,6 +112,7 @@ public:
 		AnchorImageSpace,
 		AnchorEngineDraws,
 		AnchorEngineQueries,
+		AnchorVolumetricLighting,
 		Count
 	};
 

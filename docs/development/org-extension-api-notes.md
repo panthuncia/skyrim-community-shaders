@@ -1739,3 +1739,22 @@ at the cost of the graph not ordering that write.
   read may wait only for sealed work (in the guest phase the run may sit in DXVK's stream behind the current frame). An API would
   give a client "count this draw, hand me the count when it retires" without the bookkeeping (`RenderGraph/Engine/Queries`).
 - **Found by:** Phase 5.5.5 (2026-11-11), the sun occlusion query.
+
+### 1D textures and engine 3D targets as imports
+
+- **Need:** read an engine `Texture1D` (Volumetric Lighting's repartition, 4096 texels the engine rewrites with Map) and an engine
+  3D render target (`texture3DRenderTargets`) from a pass. `FrameAnchors`' imports describe `ID3D11Texture2D`s only, and ORG's
+  descriptor manager makes no `Texture1D` views (BasicRHI has `SrvDim::Texture1D`).
+- **Who:** the Volumetric Lighting port (p5/volumetric-lighting.md). It avoids both: it owns its volumes as graph textures and
+  computes the repartition's samples in the shader from the exponent.
+- **Where it fits:** an `is1D` view kind beside `is3D` in `DescriptorHeapManager`'s texture views (`ExternalTextureResource` setting it
+  from `TextureDescription::type`), and an import that takes `ID3D11Resource` and describes 1D and 3D images from DXVK's info.
+- **Found by:** P5.5.3 (2026-11-11).
+
+### Binding a published resource or an array view through AnchorPasses
+
+`AnchorPasses::Bind` could name only a resource object and a mip. A port reading another feature's output by its published id, or a
+`Texture2DArray` (whose default view is its first slice), wrote a pass class of its own. `Bind::Published(id[, variant])` and
+`Bind::SrvArray` now cover both (5.5.3 and 5.5.4 added one each; merged into one kind). `Builder::Check` refuses a published id that
+is not declarable at the build (`PublishedResources::IsDeclarable`), so the caller's `make` leaves that pass out.
+
