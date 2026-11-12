@@ -23,6 +23,9 @@ namespace DCLF::Scene
 		// The material records' frame components are the scene work's (RefreshMaterialSignatures); the frame keeps the
 		// character light's view, from its sample.
 		RefreshCharacterLightView();
+		// The projected textures, every frame: a ProjectedUV object waits for them, and once it waits the engine draws none, so they
+		// cannot come from a native draw alone.
+		NoteProjectedTextures();
 		Diagnostics::Notify<Diagnostics::ScenePoint::PrepassConstantsBegin>();
 		if (!EngineShaders::Lighting())
 			return;
@@ -133,10 +136,21 @@ namespace DCLF::Scene
 
 	void FrameView::NoteProjectedTextures()
 	{
-		auto& state = globals::game::shadowState->GetRuntimeData();
+		// What BSLightingShader::SetupGeometry binds for a ProjectedUV pass (SE 0x1412f2bb0, AE 0x1414dd040), read from where it reads
+		// them: the four textures at the start of BSGraphics::State (SE 0x14302c890, AE 0x14328cc20), each an NiSourceTexture whose
+		// renderer texture holds the view. +0x00 goes to t11, +0x08 to t3, +0x10 to t8, +0x18 to t10. SetupGeometry binds the last
+		// three only while projected normals are on; DCLF takes all four, as its pipelines name them.
+		static_assert(ProjectedTextures::kSlots[0] == 3 && ProjectedTextures::kSlots[1] == 8 && ProjectedTextures::kSlots[2] == 10 && ProjectedTextures::kSlots[3] == 11);
+		const auto* engineState = reinterpret_cast<RE::NiSourceTexture* const*>(RE::BSGraphics::State::GetSingleton());
+		if (!engineState)
+			return;
+		// By kSlots' index (t3, t8, t10, t11): the state's pointer it comes from.
+		constexpr std::array<std::size_t, 4> kStateIndex{ 1, 2, 3, 0 };
 		ProjectedTextures seen{};
 		for (std::size_t i = 0; i < ProjectedTextures::kSlots.size(); ++i) {
-			seen.views[i] = reinterpret_cast<ID3D11ShaderResourceView*>(state.PSTexture[ProjectedTextures::kSlots[i]]);
+			const auto* texture = engineState[kStateIndex[i]];
+			const auto* renderer = texture ? texture->rendererTexture : nullptr;
+			seen.views[i] = renderer ? reinterpret_cast<ID3D11ShaderResourceView*>(renderer->resourceView) : nullptr;
 			if (!seen.views[i])
 				return;
 		}
