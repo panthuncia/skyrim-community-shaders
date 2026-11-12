@@ -6,6 +6,7 @@
 #include <filesystem>
 #include <cstdint>
 #include <memory>
+#include <string>
 #include <string_view>
 
 #include <winrt/base.h>
@@ -61,6 +62,12 @@ namespace RenderGraph::Engine::Native
 	 * native mode needs (in the process environment), and fails on a switch that conflicts. Does nothing without CS_ORG_NATIVE=1.
 	 */
 	void ApplySwitches();
+
+	/**
+	 * @brief On D3D12 (CS_ORG_NATIVE_BACKEND=d3d12), the Drawcall Limit Fix switches ApplySwitches set for what has no D3D12 port yet, as
+	 * "NAME=value (why)" items for DCLF's log line; those the environment set already are named as kept. Empty otherwise.
+	 */
+	std::string D3D12DclfOff();
 
 	/** @brief Stage 2, in Hooks::InstallEarlyHooks after the features' boot state is known: fails on what still needs DXVK. */
 	void CheckStartup();

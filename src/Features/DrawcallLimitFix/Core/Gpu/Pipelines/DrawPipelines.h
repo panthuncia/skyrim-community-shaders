@@ -69,6 +69,10 @@ namespace DCLF
 				  offsetof(DrawSequence, psGeometryAddress) == 4 + 4 * kDrawPushGeometryPS && offsetof(DrawSequence, permutationAddress) == 4 + 4 * kDrawPushPermutation &&
 				  offsetof(DrawSequence, psMaterialAddress) == 4 + 4 * kDrawPushMaterialPS &&
 				  offsetof(DrawSequence, indexBufferAddress) == 4 + 4 * kDrawPushArgumentWords);
+	// D3D12's plain draws: the draw push word the command signature writes per draw with the draw's instance (DCLFObjects.hlsli,
+	// DCLFInstanceWord), as D3D12's SV_InstanceID does not count the first instance. Read from the sequence's word before its arguments.
+	inline constexpr std::uint32_t kDrawPushInstance = 23;
+	static_assert(kDrawPushInstance < kDrawPushWords);
 	// Z-prepass plain draws' push word, per call: the first sequence's address. A call draws every pipeline slot sharing its depth
 	// pipeline (ZPipelineKey), so rows and vertex layout are read per draw through its sequence (Lighting.hlsl, DCLF_PULLED).
 	inline constexpr std::uint32_t kZDrawPushSequences = 0;

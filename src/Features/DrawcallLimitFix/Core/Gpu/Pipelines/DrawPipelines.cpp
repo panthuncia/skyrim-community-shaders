@@ -131,15 +131,10 @@ namespace DCLF
 			return false;
 		attempted = true;
 		device = RenderGraphRuntime::Get().Host()->Device();
-		// The draw layouts bind through record-addressed ranges (VK_EXT_descriptor_heap mappings), and the pipelines read their stages'
-		// SPIR-V reflection (SpirvReflection). Neither exists on D3D12 yet, so the indirect pipelines are off there, by name.
-		if (const auto reason = ::RenderGraph::Backend::UnsupportedReason("Drawcall Limit Fix's draw pipelines",
-				"their layouts bind through VK_EXT_descriptor_heap record mappings and they reflect SPIR-V stages; neither has a D3D12 port yet");
-			!reason.empty()) {
-			supported = false;
-			logger::error("[DCLF] {}", reason);
-			return false;
-		}
+		// D3D12 (native mode): no record-addressed ranges. Every layout is its root constants alone, and the stages read the rest
+		// themselves: the pulled builds' rows (PulledSource) and the pass's frame record (FrameSource, DxilStages). Only the plain
+		// indirect draws exist there (no pipeline sets): the Z-prepass's and the colour buckets' (CS_DCLF_MAIN_PLAIN and the others).
+		d3d12 = ::RenderGraph::Backend::IsD3D12();
 
 		// No vertex buffer arguments: the vertex stages pull their attributes through the buffers' views in the draw's push data
 		// (kDrawPushWords).
@@ -148,11 +143,15 @@ namespace DCLF
 		// counted draw per pipeline bucket, as its depth and shadow views always do. Without counted draws every cell draws CPU-driven
 		// (CpuPipelineForced), whose draws bind each key's pipeline themselves.
 		::IndirectCommandsFeatureInfo indirect{};
-		supported = device.QueryFeatureInfo(&indirect.header) == rhi::Result::Ok && indirect.indirectBindings;
+		supported = device.QueryFeatureInfo(&indirect.header) == rhi::Result::Ok && (d3d12 ? indirect.countedDraws : indirect.indirectBindings);
 		if (!supported) {
-			logger::warn("[DCLF] Indirect pipelines unavailable: indirect bindings {}", indirect.indirectBindings);
+			logger::warn("[DCLF] Indirect pipelines unavailable: indirect bindings {}, counted draws {} ({})", indirect.indirectBindings, indirect.countedDraws,
+				d3d12 ? "D3D12 needs counted draws" : "Vulkan needs indirect bindings");
 			return false;
 		}
+		if (d3d12)
+			logger::info("[DCLF] D3D12: layouts of root constants alone; the pulled stages read their rows and the pass's frame record "
+						 "themselves, and only plain indirect draws are recorded");
 		deviceGenerated = indirect.pipelineSets && indirect.indexBufferArguments && indirect.maxPipelineSetCount >= kMaxPipelines;
 		gpuDriven = indirect.countedDraws;
 		// A shadow view whose rasterizer state turns depth clipping off draws with depth clamped (ShadowRasterStateId).
@@ -190,8 +189,10 @@ namespace DCLF
 		pushConstants[1].set = 0;
 		pushConstants[1].binding = kFramePushBinding;
 
-		const auto mainRanges = MainLayoutRanges(false);
-		const auto zRanges = MainLayoutRanges(true);
+		// D3D12: no ranges (the stages read their bindings). The main layout is the Z-prepass's there: nothing draws with the
+		// unpulled builds, whose DXIL is only reflected.
+		const auto mainRanges = d3d12 ? std::vector<rhi::LayoutBindingRange>{} : MainLayoutRanges(false);
+		const auto zRanges = d3d12 ? std::vector<rhi::LayoutBindingRange>{} : MainLayoutRanges(true);
 		// No input assembler: every vertex stage pulls its attributes (DCLF_PULLED_VERTICES).
 		const rhi::PipelineLayoutDesc desc{ .ranges = rhi::Span<rhi::LayoutBindingRange>{ mainRanges.data(), static_cast<std::uint32_t>(mainRanges.size()) },
 			.pushConstants = { pushConstants, 2u }, .staticSamplers = {}, .flags = rhi::PF_None };
@@ -212,7 +213,7 @@ namespace DCLF
 		// The shadow views (kShadowPushWords): the draw's words name its material row (pipeline row words unused), the view's the rest.
 		rhi::PushConstantRangeDesc shadowPush[2] = { drawPush, pushConstants[1] };
 		shadowPush[1].num32BitValues = kShadowPushWords;
-		const auto shadowRanges = ShadowLayoutRanges();
+		const auto shadowRanges = d3d12 ? std::vector<rhi::LayoutBindingRange>{} : ShadowLayoutRanges();
 		const rhi::PipelineLayoutDesc shadowDesc{ .ranges = rhi::Span<rhi::LayoutBindingRange>{ shadowRanges.data(), static_cast<std::uint32_t>(shadowRanges.size()) },
 			.pushConstants = { shadowPush, 2u }, .staticSamplers = {}, .flags = rhi::PF_None };
 		if (device.CreatePipelineLayout(shadowDesc, shadowLayout) != rhi::Result::Ok) {
@@ -242,7 +243,17 @@ namespace DCLF
 			logger::error("[DCLF] Could not create the shadow views' draw signature");
 			return false;
 		}
-		if (device.CreateCommandSignature(drawDesc, zLayout->GetHandle(), zDrawSignature) != rhi::Result::Ok) {
+		// D3D12: SV_InstanceID does not count the first instance, so each plain draw also writes it into the draw push word the pulled
+		// stages add (kDrawPushInstance; DCLFObjects.hlsli, DCLFInstanceWord): the sequence's word before its arguments, which BuildDrawsCS
+		// fills (RecordBucketDraw starts the arguments there, PlainDrawArgumentsOffset).
+		rhi::IndirectArg instanceDraw[2]{};
+		instanceDraw[0].kind = rhi::IndirectArgKind::Constant;
+		instanceDraw[0].u.rootConstants = { 0, kDrawPushInstance, 1 };
+		instanceDraw[1].kind = rhi::IndirectArgKind::DrawIndexed;
+		rhi::CommandSignatureDesc zDrawDesc = drawDesc;
+		if (d3d12)
+			zDrawDesc.args = { instanceDraw, 2 };
+		if (device.CreateCommandSignature(zDrawDesc, zLayout->GetHandle(), zDrawSignature) != rhi::Result::Ok) {
 			supported = false;
 			logger::error("[DCLF] Could not create the Z-prepass's draw signature");
 			return false;

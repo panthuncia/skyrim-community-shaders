@@ -26,6 +26,7 @@
 #include "Features/DrawcallLimitFix/Core/Settings/Switches.h"
 
 #include "RenderGraph/RenderGraphRuntime.h"
+#include "Features/DrawcallLimitFix/Core/Gpu/Pipelines/DxilStages.h"
 #include "Features/DrawcallLimitFix/Core/Gpu/Pipelines/SpirvReflection.h"
 #include "Features/DrawcallLimitFix/Core/Shading/LightingConstants.h"
 #include "Features/DrawcallLimitFix/Core/Shading/EngineShaders.h"
@@ -61,6 +62,8 @@ namespace DCLF
 		 */
 		inline bool FragmentDefersDepth(std::span<const std::byte> a_spirv)
 		{
+			if (DxilStages::IsDxil(a_spirv))
+				return DxilStages::Fragment(a_spirv).defersDepth;
 			const std::size_t words = a_spirv.size() / 4;
 			if (words < 5)
 				return true;
@@ -94,6 +97,12 @@ namespace DCLF
 		inline void FragmentExports(std::span<const std::byte> a_spirv, bool& a_depth, bool& a_sampleMask)
 		{
 			a_depth = a_sampleMask = false;
+			if (DxilStages::IsDxil(a_spirv)) {
+				const auto facts = DxilStages::Fragment(a_spirv);
+				a_depth = facts.exportsDepth;
+				a_sampleMask = facts.exportsSampleMask;
+				return;
+			}
 			const std::size_t words = a_spirv.size() / 4;
 			auto word = [&](std::size_t i) {
 				std::uint32_t w;
@@ -592,6 +601,7 @@ namespace DCLF
 		// The shadow views' draws: their arguments alone (kShadowDrawBytes), the rest being their caster rows.
 		rhi::CommandSignaturePtr shadowViewDrawSignature;
 		bool supported = false;
+		bool d3d12 = false;            // the device is D3D12's: layouts of root constants alone, plain draws only (Initialize)
 		bool deviceGenerated = false;  // DrawPipelines::DeviceGenerated: the classes' execution sets and signatures are made
 		bool gpuDriven = false;        // DrawPipelines::GpuDriven: counted indirect draws, so the GPU path's buckets draw
 		bool depthClipDisable = false;  // FixedFunctionFeatureInfo::depthClipDisable: a pipeline can turn depth clipping off

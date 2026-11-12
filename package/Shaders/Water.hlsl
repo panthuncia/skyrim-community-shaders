@@ -417,7 +417,7 @@ VS_INPUT WaterPullVertex(uint a_vertexID)
 {
 	DCLFDrawVertexLayout = WaterDraw.VertexLayout;
 	const uint indexNumber = WaterDraw.FirstIndex + a_vertexID;
-	const uint indexWord = vk::RawBufferLoad<uint>(DCLFAddress(WaterDraw.IndexAddress) + uint64_t((indexNumber * 2) & ~3u));
+	const uint indexWord = DeviceLoad(uint, DCLFAddress(WaterDraw.IndexAddress) + uint64_t((indexNumber * 2) & ~3u));
 	const uint index = (indexNumber & 1) ? (indexWord >> 16) : (indexWord & 0xFFFF);
 	DCLFStream first = { DCLFAddress(WaterDraw.VertexAddress), WaterDraw.VertexStride };
 	DCLFStream second = { uint64_t(0), 0u };

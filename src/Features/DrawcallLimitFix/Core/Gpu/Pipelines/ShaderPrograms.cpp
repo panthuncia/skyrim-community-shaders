@@ -1,6 +1,7 @@
 // ShaderPrograms: the stage cache, the compile requests and the pipeline lane's entries (see the header).
 
 #include "Features/DrawcallLimitFix/Core/Gpu/Pipelines/ShaderPrograms.h"
+#include "Features/DrawcallLimitFix/Core/Gpu/Pipelines/DxilStages.h"
 #include "Features/DrawcallLimitFix/Diagnostics/Zones.h"
 #include "Features/DrawcallLimitFix/Core/Gpu/Pipelines/PulledSource.h"
 #include "Features/DrawcallLimitFix/Core/Render/Resources/GpuLayouts.h"
@@ -537,6 +538,10 @@ namespace DCLF
 			// other inputs (PulledLightingSource).
 			if (a_pulled && (a_sourceName == kSourcePath || a_family))
 				request.defines.push_back({ L"DCLF_PULLED_ROWS", L"1" });
+			// D3D12: such a build also reads the pass's bindings itself (DxilStages::PrepareFrameSource rewrites it before it compiles). The
+			// other builds keep their registers: the unpulled ones are only reflected there (no D3D12 pipeline has their layout).
+			if (a_pulled && (a_sourceName == kSourcePath || a_family) && !::RenderGraph::ShaderTarget::IsSpirv())
+				request.defines.push_back({ DxilStages::kFrameDefine, L"1" });
 			// The device-generated draws' vertex stages (Program::vertex, both variants'; a program family's) pull their attributes
 			// through the geometry's buffers in the draw's push data (Lighting.hlsl, Effect.hlsl): no DCLF pipeline has input assembly,
 			// whose vertex input state an execution set's pipelines would have to share. The stage cache's key needs no bit for it:
@@ -587,11 +592,44 @@ namespace DCLF
 			return request;
 		}
 
+		/**
+		 * @brief Compiles a_request, a_done called with its artifact. A D3D12 pulled build (DxilStages::NeedsFrameSource) is preprocessed and
+		 * rewritten first, on the build executor (BuildExecutor.h): that takes as long as a small compile. Its failure is a failed artifact.
+		 */
+		void CompileStage(org::services::ShaderCompiler& a_compiler, org::services::ShaderCompileRequest a_request, org::services::ShaderCompiler::CompletionCallback a_done)
+		{
+			if (!DxilStages::NeedsFrameSource(a_request)) {
+				(void)a_compiler.CompileAsync(std::move(a_request), std::move(a_done));
+				return;
+			}
+			// The source is the caller's (a sources generation's): copied, as the task may run after it is gone.
+			auto source = std::make_shared<std::string>(reinterpret_cast<const char*>(a_request.source.data()), a_request.source.size());
+			a_request.source = std::as_bytes(std::span(source->data(), source->size()));
+			auto task = [request = std::move(a_request), source, done = std::move(a_done)]() mutable {
+				(void)source;  // holds the request's source until the rewrite replaces it
+				std::string storage, error;
+				auto* compiler = RenderGraphRuntime::Get().ShaderCompiler();
+				if (!compiler)
+					error = "no runtime shader compiler";
+				else if (DxilStages::PrepareFrameSource(request, storage, error)) {
+					// The compiler copies the rewritten source before this returns.
+					(void)compiler->CompileAsync(std::move(request), std::move(done));
+					return;
+				}
+				org::services::ShaderArtifact failed{};
+				failed.format = org::services::ShaderBinaryFormat::Dxil;
+				failed.diagnostics = std::move(error);
+				done(failed);
+			};
+			if (!BuildSubmitter()(std::function<void()>(std::move(task))))
+				logger::error("[DCLF] the build executor refused a D3D12 stage's preparation");
+		}
+
 		// Requests a_stage's compile; the completion callback fills it and pushes its key to StageCompletions.
 		void RequestStage(org::services::ShaderCompiler& a_compiler, const StagePtr& a_stage, org::services::ShaderCompileRequest a_request)
 		{
 			// The future is not kept: the stage holds the artifact, and nothing waits on the compile but Precompile (on the stage).
-			(void)a_compiler.CompileAsync(std::move(a_request), [a_stage](const org::services::ShaderArtifact& a_artifact) {
+			CompileStage(a_compiler, std::move(a_request), [a_stage](const org::services::ShaderArtifact& a_artifact) {
 				a_stage->artifact = std::make_shared<const org::services::ShaderArtifact>(a_artifact);
 				a_stage->done.store(true, std::memory_order_release);
 				a_stage->done.notify_all();
@@ -1280,7 +1318,7 @@ namespace DCLF
 		}
 		for (std::size_t i = 0; i < N; ++i) {
 			// The compiler copies the source (the request's span is current's, held until here). A memory-cache hit completes on this thread.
-			(void)compiler->CompileAsync(std::move(requests[i]), [compiles, i](const org::services::ShaderArtifact& a_artifact) {
+			CompileStage(*compiler, std::move(requests[i]), [compiles, i](const org::services::ShaderArtifact& a_artifact) {
 				compiles->artifacts[i] = std::make_shared<const org::services::ShaderArtifact>(a_artifact);
 				if (compiles->remaining.fetch_sub(1, std::memory_order_acq_rel) != 1)
 					return;

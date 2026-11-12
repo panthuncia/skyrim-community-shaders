@@ -80,6 +80,18 @@ uint DeviceAddressOffset(uint64_t a_address)
 	return uint(a_address - ((uint64_t(base.y) << 32) | uint64_t(base.x)));
 }
 
+// The raw view and the offset of a_address in its buffer, from one lookup: for a block read many times (DCLF's frame record).
+uint2 DeviceAddressSpan(uint64_t a_address)
+{
+	ByteAddressBuffer entries = ResourceDescriptorHeap[kDeviceAddressTableSlot];
+	const uint entry = DeviceAddressEntry(a_address);
+	if (entry == 0xFFFFFFFFu)
+		return uint2(0, 0);
+	const uint2 base = entries.Load2(entry * kDeviceAddressEntryBytes);
+	const uint view = entries.Load(entry * kDeviceAddressEntryBytes + 16);
+	return uint2(view, uint(a_address - ((uint64_t(base.y) << 32) | uint64_t(base.x))));
+}
+
 ByteAddressBuffer DeviceAddressBuffer(uint64_t a_address)
 {
 	return ResourceDescriptorHeap[NonUniformResourceIndex(DeviceAddressViews(a_address).x)];

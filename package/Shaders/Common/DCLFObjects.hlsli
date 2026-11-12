@@ -91,6 +91,11 @@ cbuffer DCLFPushData : register(b190)
 	uint4 DCLFRowBases : packoffset(c2);      // kDirectFlagRelativeRows: the rows' bases (xy: the pipeline rows', zw: the material rows')
 	uint2 DCLFAnimatedRows : packoffset(c3.x);  // kDirectFlagRelativeRows: the frame's copy of the animated material rows (0: none)
 	uint2 DCLFDrawRecords : packoffset(c3.z);   // kDirectFlagDrawRecords: the frame's draw buffer
+#		if !defined(__spirv__)
+	// D3D12: SV_InstanceID does not count the draw's first instance. The plain draws' command signature writes the draw's instance
+	// into this word per draw instead (DrawPipelines, kDrawPushInstance; BuildDrawsCS stores it before the draw's arguments).
+	uint DCLFInstanceWord : packoffset(c5.w);
+#		endif
 };
 
 // The object word (below), set by the stage's main from the draw's sequence (the vertex stage) or its vertex stage's output
@@ -160,6 +165,9 @@ static const uint kDCLFSequenceStride = 136;  // BuildDrawsCS's DrawSequence
 static uint DCLFDrawRecordWord;
 uint64_t DCLFDrawSequence(uint a_instance)
 {
+#		if !defined(__spirv__)
+	a_instance += DCLFInstanceWord;  // D3D12: the draw's instance from its push word (DCLFPushData)
+#		endif
 	if ((DCLFDirectFlags & 4u) != 0) {
 		const uint2 record = DeviceLoad(uint2, DCLFAddress(DCLFDrawRecords) + uint64_t(a_instance) * 28 + 20, 4);
 		DCLFDrawRecordWord = record.y;

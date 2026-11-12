@@ -1,6 +1,8 @@
 #ifndef __DCLF_VERTEX_PULL_DEPENDENCY_HLSL__
 #define __DCLF_VERTEX_PULL_DEPENDENCY_HLSL__
 
+#include "Common/DeviceAddress.hlsli"
+
 // Drawcall Limit Fix's vertex pulling: no DCLF pipeline has input assembly, so every DCLF vertex stage loads its vertex's attributes
 // itself, decoded as the engine's input layout for the vertex layout has them (VertexInput.cpp, BuildVertexElements). Its own header,
 // apart from the object rows (DCLFObjects.hlsli, which includes it), so that a draw family's stage that binds none of those rows and
@@ -72,7 +74,7 @@ float4 DCLFPullFloat4(uint a_attribute, DCLFStream a_first, DCLFStream a_second)
 {
 	if (!DCLFHasAttribute(a_attribute))
 		return float4(0, 0, 0, 1);
-	return asfloat(vk::RawBufferLoad<uint4>(DCLFAttribute(a_attribute, a_first, a_second)));
+	return asfloat(DeviceLoad(uint4, DCLFAttribute(a_attribute, a_first, a_second)));
 }
 // The position (attribute 0, R32G32B32A32_FLOAT), loaded whatever the layout says: every drawable geometry has one. AMD's driver
 // culls a vertex stage's triangles before rasterization (its primitive shader: back faces, small and off-screen triangles) only
@@ -80,32 +82,32 @@ float4 DCLFPullFloat4(uint a_attribute, DCLFStream a_first, DCLFStream a_second)
 // to the rasterizer (rx6600-dxvk-overhead.md).
 float4 DCLFPullPosition(DCLFStream a_first, DCLFStream a_second)
 {
-	return asfloat(vk::RawBufferLoad<uint4>(DCLFAttribute(0, a_first, a_second)));
+	return asfloat(DeviceLoad(uint4, DCLFAttribute(0, a_first, a_second)));
 }
 float DCLFPullFloat(uint a_attribute, DCLFStream a_first, DCLFStream a_second)  // R32_FLOAT
 {
 	if (!DCLFHasAttribute(a_attribute))
 		return 0;
-	return asfloat(vk::RawBufferLoad<uint>(DCLFAttribute(a_attribute, a_first, a_second)));
+	return asfloat(DeviceLoad(uint, DCLFAttribute(a_attribute, a_first, a_second)));
 }
 float2 DCLFPullHalf2(uint a_attribute, DCLFStream a_first, DCLFStream a_second)  // R16G16_FLOAT
 {
 	if (!DCLFHasAttribute(a_attribute))
 		return float2(0, 0);
-	return DCLFHalf2(vk::RawBufferLoad<uint>(DCLFAttribute(a_attribute, a_first, a_second)));
+	return DCLFHalf2(DeviceLoad(uint, DCLFAttribute(a_attribute, a_first, a_second)));
 }
 float4 DCLFPullHalf4(uint a_attribute, DCLFStream a_first, DCLFStream a_second)  // R16G16B16A16_FLOAT
 {
 	if (!DCLFHasAttribute(a_attribute))
 		return float4(0, 0, 0, 1);
-	const uint2 words = vk::RawBufferLoad<uint2>(DCLFAttribute(a_attribute, a_first, a_second));
+	const uint2 words = DeviceLoad(uint2, DCLFAttribute(a_attribute, a_first, a_second));
 	return float4(DCLFHalf2(words.x), DCLFHalf2(words.y));
 }
 float4 DCLFPullUnorm4(uint a_attribute, uint a_offset, DCLFStream a_first, DCLFStream a_second)  // R8G8B8A8_UNORM
 {
 	if (!DCLFHasAttribute(a_attribute))
 		return float4(0, 0, 0, 1);
-	return DCLFUnorm4(vk::RawBufferLoad<uint>(DCLFAttribute(a_attribute, a_first, a_second) + a_offset));
+	return DCLFUnorm4(DeviceLoad(uint, DCLFAttribute(a_attribute, a_first, a_second) + a_offset));
 }
 #endif  // DCLF_PULLED || DCLF_PULLED_VERTICES
 

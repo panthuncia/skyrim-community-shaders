@@ -29,9 +29,9 @@ cbuffer DCLFGrassPush : register(b190)
 #	include "Common/DCLFVertexPull.hlsli"
 uint64_t DCLFGrassDraw() { return DCLFAddress(DCLFGrassDrawAddress); }
 // GrassInstances::DrawRow: the tables' addresses, then the frame's values.
-uint64_t DCLFGrassTable(uint a_offset) { return DCLFAddress(vk::RawBufferLoad<uint2>(DCLFGrassDraw() + a_offset, 8)); }
-uint DCLFGrassDrawUint(uint a_offset) { return vk::RawBufferLoad<uint>(DCLFGrassDraw() + a_offset, 4); }
-float4 DCLFGrassDrawFloat4(uint a_offset) { return asfloat(vk::RawBufferLoad<uint4>(DCLFGrassDraw() + a_offset, 4)); }
+uint64_t DCLFGrassTable(uint a_offset) { return DCLFAddress(DeviceLoad(uint2, DCLFGrassDraw() + a_offset, 8)); }
+uint DCLFGrassDrawUint(uint a_offset) { return DeviceLoad(uint, DCLFGrassDraw() + a_offset, 4); }
+float4 DCLFGrassDrawFloat4(uint a_offset) { return asfloat(DeviceLoad(uint4, DCLFGrassDraw() + a_offset, 4)); }
 static const uint kDCLFGrassInstances = 0, kDCLFGrassShapes = 8, kDCLFGrassBuckets = 16, kDCLFGrassMeshes = 24, kDCLFGrassOwners = 32,
 				  kDCLFGrassFrame = 40, kDCLFGrassVisible = 48;
 static const uint kDCLFGrassWindVector = 64, kDCLFGrassTimeBase = 80, kDCLFGrassDirLightDirection = 96, kDCLFGrassDirLightColor = 112,
@@ -157,9 +157,9 @@ static uint64_t DCLFGrassBucketRow;
 void DCLFGrassStatics(uint a_bucket)
 {
 	DCLFGrassBucketRow = DCLFGrassTable(kDCLFGrassBuckets) + uint64_t(a_bucket) * kDCLFGrassBucketStride;
-	WindVector = float3(asfloat(vk::RawBufferLoad<uint2>(DCLFGrassBucketRow + kDCLFGrassBucketWindDirection, 4)), DCLFGrassDrawFloat4(kDCLFGrassWindVector).z);
-	const float2 timeBase = asfloat(vk::RawBufferLoad<uint2>(DCLFGrassDraw() + kDCLFGrassTimeBase, 4));  // timeBase, prevTimeBase
-	const float wavePeriod = asfloat(vk::RawBufferLoad<uint>(DCLFGrassBucketRow + kDCLFGrassBucketWavePeriod, 4));
+	WindVector = float3(asfloat(DeviceLoad(uint2, DCLFGrassBucketRow + kDCLFGrassBucketWindDirection, 4)), DCLFGrassDrawFloat4(kDCLFGrassWindVector).z);
+	const float2 timeBase = asfloat(DeviceLoad(uint2, DCLFGrassDraw() + kDCLFGrassTimeBase, 4));  // timeBase, prevTimeBase
+	const float wavePeriod = asfloat(DeviceLoad(uint, DCLFGrassBucketRow + kDCLFGrassBucketWavePeriod, 4));
 	WindTimer = timeBase.x * wavePeriod;
 	PreviousWindTimer = timeBase.y * wavePeriod;
 	const float4 dirLightDirection = DCLFGrassDrawFloat4(kDCLFGrassDirLightDirection);  // w ShadowClampValue
@@ -169,12 +169,12 @@ void DCLFGrassStatics(uint a_bucket)
 	DirLightColor = dirLightColor.xyz;
 	FogNearColor = float4(0, 0, 0, dirLightColor.w);
 	AmbientColor = DCLFGrassDrawFloat4(kDCLFGrassAmbientColor).xyz;
-	const float2 alphaParams = asfloat(vk::RawBufferLoad<uint2>(DCLFGrassDraw() + kDCLFGrassAlphaParams, 4));
+	const float2 alphaParams = asfloat(DeviceLoad(uint2, DCLFGrassDraw() + kDCLFGrassAlphaParams, 4));
 	AlphaParam1 = alphaParams.x;
 	AlphaParam2 = alphaParams.y;
-	ScaleMask = asfloat(vk::RawBufferLoad<uint3>(DCLFGrassBucketRow + kDCLFGrassBucketScaleMask, 4));
+	ScaleMask = asfloat(DeviceLoad(uint3, DCLFGrassBucketRow + kDCLFGrassBucketScaleMask, 4));
 	// What CS's SetupGeometry hook puts in the permutation block for a sphere-normal property (Hooks.cpp, GrassSphereNormal).
-	const uint flags = vk::RawBufferLoad<uint>(DCLFGrassBucketRow + kDCLFGrassBucketFlags, 4);
+	const uint flags = DeviceLoad(uint, DCLFGrassBucketRow + kDCLFGrassBucketFlags, 4);
 	Permutation::ExtraShaderDescriptor = (flags & kDCLFGrassBucketSphereNormal) ? Permutation::ExtraFlags::GrassSphereNormal : 0;
 }
 #else
@@ -215,14 +215,14 @@ Texture2D<float4> GrassCollisionTexture()
 void DCLFGrassCollisionStatics()
 {
 	const uint64_t block = DCLFGrassDraw() + kDCLFGrassCollisionPerFrame;
-	const uint4 first = vk::RawBufferLoad<uint4>(block, 4);
-	const uint4 second = vk::RawBufferLoad<uint4>(block + 16, 4);
+	const uint4 first = DeviceLoad(uint4, block, 4);
+	const uint4 second = DeviceLoad(uint4, block + 16, 4);
 	GrassCollision::PosOffset = asfloat(first.xy);
 	GrassCollision::ArrayOrigin = first.zw;
 	GrassCollision::ValidMargin = asint(second.xy);
 	GrassCollision::TimeDelta = asfloat(second.z);
 	GrassCollision::BoundingBoxCount = second.w;
-	GrassCollision::CameraHeightDelta = asfloat(vk::RawBufferLoad<uint>(block + 32, 4));
+	GrassCollision::CameraHeightDelta = asfloat(DeviceLoad(uint, block + 32, 4));
 }
 #		endif
 #	endif  // GRASS_COLLISION
@@ -450,7 +450,7 @@ VS_OUTPUT DCLFGrassVertex(VS_INPUT input, float3 a_origin, uint4 a_frame, uint a
 #			ifdef GRASS_LIGHTING
 	float3x3 world3x3 = float3x3(input.InstanceData2.xyz, input.InstanceData3.xyz, float3(input.InstanceData4.x, input.InstanceData2.w, input.InstanceData3.w));
 	vsout.VertexNormal.xyz = mul(world3x3, input.Normal.xyz * 2.0 - 1.0);
-	const float canopyHeight = asfloat(vk::RawBufferLoad<uint>(DCLFGrassBucketRow + kDCLFGrassBucketCanopyHeight + 4 * (a_frame.w & kDCLFGrassTierMask), 4));
+	const float canopyHeight = asfloat(DeviceLoad(uint, DCLFGrassBucketRow + kDCLFGrassBucketCanopyHeight + 4 * (a_frame.w & kDCLFGrassTierMask), 4));
 	vsout.VertexNormal.w = GetCanopyHeight(input, canopyHeight);
 	vsout.ClumpNormal = GetClumpNormal(input, world3x3, canopyHeight);
 #			endif
@@ -464,26 +464,26 @@ VS_OUTPUT DCLFGrassVertex(VS_INPUT input, float3 a_origin, uint4 a_frame, uint a
 // indices, attributes as the engine's input layout for the mesh's vertex layout has them (one stream).
 VS_OUTPUT main(uint a_vertex : SV_VertexID, uint a_instance : SV_InstanceID)
 {
-	const uint index = vk::RawBufferLoad<uint>(DCLFGrassTable(kDCLFGrassVisible) + 4 * uint64_t(a_instance), 4);
-	const uint shapeSlot = vk::RawBufferLoad<uint>(DCLFGrassTable(kDCLFGrassOwners) + 4 * uint64_t(index), 4);
+	const uint index = DeviceLoad(uint, DCLFGrassTable(kDCLFGrassVisible) + 4 * uint64_t(a_instance), 4);
+	const uint shapeSlot = DeviceLoad(uint, DCLFGrassTable(kDCLFGrassOwners) + 4 * uint64_t(index), 4);
 	const uint64_t shape = DCLFGrassTable(kDCLFGrassShapes) + 32 * uint64_t(shapeSlot);
-	const float3 origin = asfloat(vk::RawBufferLoad<uint3>(shape, 4));
-	const uint bucket = vk::RawBufferLoad<uint>(shape + 12, 4);
+	const float3 origin = asfloat(DeviceLoad(uint3, shape, 4));
+	const uint bucket = DeviceLoad(uint, shape + 12, 4);
 	DCLFGrassStatics(bucket);
-	const uint2 packedFrame = vk::RawBufferLoad<uint2>(DCLFGrassTable(kDCLFGrassFrame) + kDCLFGrassFrameStride * uint64_t(index), 8);
+	const uint2 packedFrame = DeviceLoad(uint2, DCLFGrassTable(kDCLFGrassFrame) + kDCLFGrassFrameStride * uint64_t(index), 8);
 	const uint4 frame = uint4(asuint(f16tof32(packedFrame.x)), asuint(f16tof32(packedFrame.x >> 16)), asuint(float(packedFrame.y & 0xFFFFu) / 65535.0), packedFrame.y >> 16);
-	const uint meshSlot = vk::RawBufferLoad<uint>(DCLFGrassBucketRow + 4 * (frame.w & kDCLFGrassTierMask), 4);
+	const uint meshSlot = DeviceLoad(uint, DCLFGrassBucketRow + 4 * (frame.w & kDCLFGrassTierMask), 4);
 	if (meshSlot == kDCLFGrassNone)
 		return (VS_OUTPUT)0;
 	// GrassInstances::MeshRow: vertex address, index address, vertex layout, index count, vertex stride.
 	const uint64_t mesh = DCLFGrassTable(kDCLFGrassMeshes) + 32 * uint64_t(meshSlot);
-	const uint4 meshAddresses = vk::RawBufferLoad<uint4>(mesh, 8);
-	DCLFDrawVertexLayout = vk::RawBufferLoad<uint2>(mesh + 16, 8);
-	const uint indexWord = vk::RawBufferLoad<uint>(DCLFAddress(meshAddresses.zw) + 4 * uint64_t(a_vertex / 2), 4);
+	const uint4 meshAddresses = DeviceLoad(uint4, mesh, 8);
+	DCLFDrawVertexLayout = DeviceLoad(uint2, mesh + 16, 8);
+	const uint indexWord = DeviceLoad(uint, DCLFAddress(meshAddresses.zw) + 4 * uint64_t(a_vertex / 2), 4);
 	const uint vertexIndex = (a_vertex & 1) ? (indexWord >> 16) : (indexWord & 0xFFFF);
 	DCLFStream first, second;
 	first.address = DCLFAddress(meshAddresses.xy);
-	first.stride = vk::RawBufferLoad<uint>(mesh + 28, 4);
+	first.stride = DeviceLoad(uint, mesh + 28, 4);
 	second.address = 0;
 	second.stride = 0;
 	DCLFStreamsAt(vertexIndex, first, second);
@@ -495,8 +495,8 @@ VS_OUTPUT main(uint a_vertex : SV_VertexID, uint a_instance : SV_InstanceID)
 	input.Color = DCLFPullUnorm4(5, 0, first, second);
 	// The engine's instance record (TEXCOORD4-7, R16G16B16A16_FLOAT each).
 	const uint64_t record = DCLFGrassTable(kDCLFGrassInstances) + 32 * uint64_t(index);
-	const uint4 low = vk::RawBufferLoad<uint4>(record, 16);
-	const uint4 high = vk::RawBufferLoad<uint4>(record + 16, 16);
+	const uint4 low = DeviceLoad(uint4, record, 16);
+	const uint4 high = DeviceLoad(uint4, record + 16, 16);
 	input.InstanceData1 = float4(DCLFHalf2(low.x), DCLFHalf2(low.y));
 	input.InstanceData2 = float4(DCLFHalf2(low.z), DCLFHalf2(low.w));
 	input.InstanceData3 = float4(DCLFHalf2(high.x), DCLFHalf2(high.y));
@@ -671,7 +671,7 @@ static uint DCLFGrassNormal, DCLFGrassRmaos, DCLFGrassFeatures, DCLFGrassFuzz, D
 void DCLFGrassPixelStatics(uint a_bucket)
 {
 	DCLFGrassStatics(a_bucket);
-	const uint4 textures = vk::RawBufferLoad<uint4>(DCLFGrassBucketRow + kDCLFGrassBucketTextures, 4);  // diffuse, samplers, alpha ref
+	const uint4 textures = DeviceLoad(uint4, DCLFGrassBucketRow + kDCLFGrassBucketTextures, 4);  // diffuse, samplers, alpha ref
 	DCLFGrassDiffuse = textures.x;
 #		if defined(RENDER_DEPTH)
 	DCLFGrassSampler = textures.y;
@@ -682,17 +682,17 @@ void DCLFGrassPixelStatics(uint a_bucket)
 	AlphaTestRefRS = asfloat(textures.w);
 	DCLFGrassShadowMask = DCLFGrassDrawUint(kDCLFGrassShadowMaskIndex);
 #		if defined(GRASS_LIGHTING) && defined(TRUE_PBR)
-	PBRFlags = vk::RawBufferLoad<uint>(DCLFGrassBucketRow + kDCLFGrassBucketPbrFlags, 4);
-	const uint4 pbrTextures = vk::RawBufferLoad<uint4>(DCLFGrassBucketRow + kDCLFGrassBucketPbrTextures, 4);
+	PBRFlags = DeviceLoad(uint, DCLFGrassBucketRow + kDCLFGrassBucketPbrFlags, 4);
+	const uint4 pbrTextures = DeviceLoad(uint4, DCLFGrassBucketRow + kDCLFGrassBucketPbrTextures, 4);
 	DCLFGrassNormal = pbrTextures.x;
 	DCLFGrassRmaos = pbrTextures.y;
 	DCLFGrassFeatures = pbrTextures.z;
 	DCLFGrassPbrSampler = pbrTextures.w;
-	PBRParams1 = asfloat(vk::RawBufferLoad<uint3>(DCLFGrassBucketRow + kDCLFGrassBucketPbrParams1, 4));
-	PBRParams2 = asfloat(vk::RawBufferLoad<uint4>(DCLFGrassBucketRow + kDCLFGrassBucketPbrParams2, 4));
-	PBRParams3 = asfloat(vk::RawBufferLoad<uint4>(DCLFGrassBucketRow + kDCLFGrassBucketPbrParams3, 4));
-	PBRParams4 = asfloat(vk::RawBufferLoad<uint4>(DCLFGrassBucketRow + kDCLFGrassBucketPbrParams4, 4));
-	const uint2 fuzzEmissive = vk::RawBufferLoad<uint2>(DCLFGrassBucketRow + kDCLFGrassBucketFuzzEmissive, 4);
+	PBRParams1 = asfloat(DeviceLoad(uint3, DCLFGrassBucketRow + kDCLFGrassBucketPbrParams1, 4));
+	PBRParams2 = asfloat(DeviceLoad(uint4, DCLFGrassBucketRow + kDCLFGrassBucketPbrParams2, 4));
+	PBRParams3 = asfloat(DeviceLoad(uint4, DCLFGrassBucketRow + kDCLFGrassBucketPbrParams3, 4));
+	PBRParams4 = asfloat(DeviceLoad(uint4, DCLFGrassBucketRow + kDCLFGrassBucketPbrParams4, 4));
+	const uint2 fuzzEmissive = DeviceLoad(uint2, DCLFGrassBucketRow + kDCLFGrassBucketFuzzEmissive, 4);
 	DCLFGrassFuzz = fuzzEmissive.x;
 	DCLFGrassEmissive = fuzzEmissive.y;
 #		endif

@@ -137,7 +137,12 @@ groupshared uint sharedFirst[kTile];
 	const uint target = (StagingBase + Capacity + rank) * SequenceStride;
 	const uint firstInstance = (Options & kSortRankInstance) != 0 ? rank : 0u;
 	[loop] for (uint word = 0; word + 4 <= SequenceStride; word += 4) {
+#if defined(__spirv__)
 		const uint value = word == kInstanceCountOffset ? 1u : word == kVertexOffsetOffset ? 0u : word == kFirstInstanceOffset ? firstInstance : sequences.Load(source + word);
+#else
+		// D3D12: the word before the draw's arguments carries the first instance too (BuildDrawsCS, StoreShadowSequence).
+		const uint value = word == kInstanceCountOffset ? 1u : word == kVertexOffsetOffset ? 0u : (word == kFirstInstanceOffset || word == kInstanceCountOffset - 8) ? firstInstance : sequences.Load(source + word);
+#endif
 		sequences.Store(target + word, value);
 	}
 }

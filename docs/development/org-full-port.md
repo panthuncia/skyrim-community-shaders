@@ -910,17 +910,46 @@ the code, with the work for each piece. The pieces build on each other in this o
 **Item 1, first slice (2026-11-12):** BasicRHI's D3D12 backend keeps the device address table (`Dx12AddressTable`, the ABI in
 `rhi_shader_abi.h`), and `Common/DeviceAddress.hlsli` defines `DeviceLoad`/`DeviceStore`. `DCLFObjects.hlsli` and the five compute
 shaders below use them; their SPIR-V is byte-identical to before (checked with the Vulkan SDK's DXC), and they build to DXIL.
-`CS_ORG_D3D12_SELFTEST=1` checks the table end to end (`RenderGraph/D3D12DeviceAddressTest.hlsl`). DCLF itself stays off.
+`CS_ORG_D3D12_SELFTEST=1` checks the table end to end (`RenderGraph/D3D12DeviceAddressTest.hlsl`).
 
 The first piece that can be built and run alone is item 1 on DCLF's compute shaders (BuildDraws, IndexPool, PixelRows,
 TextureTransforms, FoliageParity). Their layouts are CS's own, so the GPU cull and draw building could be checked on D3D12
 before any colour draw.
 
+**Slice 1, the main view's Lighting (2026-11-12, lane `org-port/dclf-d3d12`).** DCLF is on in native D3D12. It draws only the way
+RDNA2 already draws on Vulkan without device-generated commands: pulled builds and plain counted draws, the Z-prepass's buckets and
+the colour pass's main, terrain and decal buckets (`CS_DCLF_MAIN_PLAIN` and the others). What it took:
+
+- **Shaders.** Every `vk::RawBufferLoad`/`Store` left goes through `DeviceLoad`/`DeviceStore` (SPIR-V byte-identical: 168 stages of
+  a stage dump, and BuildDrawsCS and ForwardSortCS). DXIL-only: `VS_PerFrame` is b12 in space 1 (DXIL refuses two blocks at b12;
+  FrameBuffer's PerFrame is one), and the pulled draws' instance (below).
+- **The pass's bindings (item 2's rest).** A D3D12 pulled build (`DCLF_D3D12_FRAME`) is preprocessed with
+  `Common/DCLFFrameRecord.hlsli` first, then `FrameSource::Rewrite` turns every register declaration but the push blocks (b190,
+  b191) into reads of the pass's frame record: textures and samplers from the heap at the record's index, constant buffers as the
+  pass's view of the block (`frameBlocks`), each member a static of its own name. `DxilStages::PrepareFrameSource` does it on the build
+  executor before the compile. All 538 pulled Lighting stages of a stage dump build to DXIL binding only b190 and b191
+  (`tools/shader-compare/dclf-shadertool d3d12`).
+- **Reflection (item 3).** `SpirvReflection::Parse` reads a DXIL container through DXC's reflection (`DxilStages::Reflect`), in the
+  SPIR-V builds' binding numbers; `FragmentDefersDepth`/`FragmentExports` read the disassembly and output signature. The unpulled
+  builds still compile on D3D12, only for their reflection (constant tables, register usage): no D3D12 pipeline is made of them.
+- **Layouts and draws (item 4).** On D3D12 every DCLF layout is its root constants (b190: 24 words, b191: the pass's). D3D12's
+  `SV_InstanceID` does not count the first instance, so the plain draws' signature is Constant (draw push word 23,
+  `kDrawPushInstance`) then DrawIndexed, starting one word early: BuildDrawsCS and ForwardSortCS store the instance in the
+  sequence's word before its arguments (the index buffer view's format, which no D3D12 draw reads), and the pulled stages add it
+  (`DCLFInstanceWord`).
+- **What stays off on D3D12**, by its own switch, which native mode's stage 1 sets (`Native::ApplySwitches`, logged as `[ORG
+  native] D3D12: Drawcall Limit Fix switches set`, and in DCLF's `[DCLF] D3D12: on` line): the CPU pipeline
+  (`CS_DCLF_PIPELINE=gpu`, `CS_DCLF_FORWARD_DIRECT=0`), the shadow views (Utility's builds read pushed addresses), the forward
+  epoch, refraction, the Effect family, particles, grass, tree LOD, first person, water reflections, Skylighting's and the
+  precipitation's occlusion views. A value set in the environment is kept.
+
+Next slices, each on what slice 1 leaves: the shadow views (Utility's pulled builds through a rewrite of their pushed blocks, and
+the shadow draws' instance: their 20-byte draw records have no word before the arguments), then the forward epoch, then the
+families (Effect's pulled builds already take the frame rewrite; DistantTree and RunGrass read their own tables).
+
 Named off on D3D12 until ported:
 
-- Drawcall Limit Fix as a whole (`DrawcallLimitFix::SetupResources` forces it off). Its draw pipelines' layouts bind through `VK_EXT_descriptor_heap` record mappings
-  (`LayoutRangeSource::IndirectIndex`/`IndirectAddress`/`PushAddress`), which BasicRHI's D3D12 backend refuses, and they
-  reflect SPIR-V (`SpirvReflection`). A D3D12 port reads the record indices in the shader and reflects DXIL.
+- Drawcall Limit Fix's parts above.
 - Drawcall Limit Fix's direct sites (secondary lists with viewports): D3D12 bundles cannot set viewports or scissors
   (`FixedFunctionFeatureInfo::secondaryViewportScissor` is false).
 - Everything that talks to DXVK or raw Vulkan: the adoption path in `RenderGraphRuntime::Initialize`, the owned frame,

@@ -7,6 +7,7 @@
 #	define DCLF_PULLED_ROWS
 #endif
 #include "Common/ColorManagement.hlsli"
+#include "Common/DeviceAddress.hlsli"
 #include "Common/FrameBuffer.hlsli"
 #include "Common/GBuffer.hlsli"
 #include "Common/MotionBlur.hlsli"
@@ -33,7 +34,7 @@ cbuffer DCLFTreePush : register(b190)
 uint64_t DCLFTreeAddress(uint2 a_words) { return (uint64_t(a_words.y) << 32) | uint64_t(a_words.x); }
 uint64_t DCLFTreeDraw() { return DCLFTreeAddress(DCLFTreeDrawAddress); }
 // TreeLod::DrawRow
-uint64_t DCLFTreeTable(uint a_offset) { return DCLFTreeAddress(vk::RawBufferLoad<uint2>(DCLFTreeDraw() + a_offset, 8)); }
+uint64_t DCLFTreeTable(uint a_offset) { return DCLFTreeAddress(DeviceLoad(uint2, DCLFTreeDraw() + a_offset, 8)); }
 static const uint kDCLFTreeInstances = 0, kDCLFTreeShapes = 8, kDCLFTreeMeshes = 16, kDCLFTreeVisible = 24;
 static const uint kDCLFTreeTexture = 32, kDCLFTreeSampler = 36, kDCLFTreeAlphaRef = 40;
 static const uint kDCLFTreeGroupInstances = 75;
@@ -47,16 +48,16 @@ static const uint kDCLFStageDepthVS = 0, kDCLFStagePhaseTwoVS = 1, kDCLFStageDep
 				  kDCLFStageColourProbe = 18, kDCLFStageDepthProbe = 25, kDCLFStageWords = 32;
 uint64_t DCLFTreeStageWord(uint a_word)
 {
-	const uint64_t stats = DCLFTreeAddress(vk::RawBufferLoad<uint2>(DCLFTreeDraw() + kDCLFTreeStats, 4));
+	const uint64_t stats = DCLFTreeAddress(DeviceLoad(uint2, DCLFTreeDraw() + kDCLFTreeStats, 4));
 	if (stats == 0)
 		return 0;
-	return stats + 4 * uint64_t((vk::RawBufferLoad<uint>(DCLFTreeDraw() + kDCLFTreeFrame, 4) & 7u) * kDCLFStageWords + a_word);
+	return stats + 4 * uint64_t((DeviceLoad(uint, DCLFTreeDraw() + kDCLFTreeFrame, 4) & 7u) * kDCLFStageWords + a_word);
 }
 void DCLFTreeStamp(uint a_stage)
 {
 	const uint64_t word = DCLFTreeStageWord(a_stage);
 	if (word != 0)
-		vk::RawBufferStore<uint>(word, vk::RawBufferLoad<uint>(DCLFTreeDraw() + kDCLFTreeFrame, 4), 4);
+		DeviceStore(uint, word, DeviceLoad(uint, DCLFTreeDraw() + kDCLFTreeFrame, 4), 4);
 }
 #endif
 
@@ -95,7 +96,7 @@ VS_OUTPUT main(uint a_vertex : SV_VertexID, uint a_instance : SV_InstanceID)
 {
 	VS_OUTPUT vsout = (VS_OUTPUT)0;
 	const uint64_t visible = DCLFTreeTable(kDCLFTreeVisible);
-	const uint first = DCLFTreePhaseTwo != 0 ? vk::RawBufferLoad<uint>(visible - kDCLFTreeHeaderBytes + kDCLFTreePhaseOneInstances, 4) : 0;
+	const uint first = DCLFTreePhaseTwo != 0 ? DeviceLoad(uint, visible - kDCLFTreeHeaderBytes + kDCLFTreePhaseOneInstances, 4) : 0;
 #		if defined(RENDER_DEPTH)
 	DCLFTreeStamp(DCLFTreePhaseTwo != 0 ? kDCLFStagePhaseTwoVS : kDCLFStageDepthVS);
 #		else
@@ -105,30 +106,30 @@ VS_OUTPUT main(uint a_vertex : SV_VertexID, uint a_instance : SV_InstanceID)
 		if (saw != 0) {
 			// The list header's phase 1, phase 2 and colour instance counts as this draw read them.
 			const uint64_t header = visible - kDCLFTreeHeaderBytes;
-			vk::RawBufferStore<uint3>(saw, uint3(vk::RawBufferLoad<uint>(header + 4, 4), vk::RawBufferLoad<uint>(header + 20, 4), vk::RawBufferLoad<uint>(header + 36, 4)), 4);
+			DeviceStore(uint3, saw, uint3(DeviceLoad(uint, header + 4, 4), DeviceLoad(uint, header + 20, 4), DeviceLoad(uint, header + 36, 4)), 4);
 		}
 	}
 #		endif
-	const uint index = vk::RawBufferLoad<uint>(visible + 4 * uint64_t(first + a_instance), 4);
+	const uint index = DeviceLoad(uint, visible + 4 * uint64_t(first + a_instance), 4);
 	const uint64_t shape = DCLFTreeTable(kDCLFTreeShapes) + 32 * uint64_t(index / kDCLFTreeGroupInstances);
-	const float3 translate = asfloat(vk::RawBufferLoad<uint3>(shape, 4));
-	const uint meshSlot = vk::RawBufferLoad<uint>(shape + 12, 4);
+	const float3 translate = asfloat(DeviceLoad(uint3, shape, 4));
+	const uint meshSlot = DeviceLoad(uint, shape + 12, 4);
 	if (meshSlot == 0xFFFFFFFFu)
 		return vsout;
 	const uint64_t mesh = DCLFTreeTable(kDCLFTreeMeshes) + 32 * uint64_t(meshSlot);
-	const uint4 meshWords = vk::RawBufferLoad<uint4>(mesh, 8);  // vertex address, index address
-	const uint3 meshLayout = vk::RawBufferLoad<uint3>(mesh + 16, 4);  // stride, index count, texcoord offset
+	const uint4 meshWords = DeviceLoad(uint4, mesh, 8);  // vertex address, index address
+	const uint3 meshLayout = DeviceLoad(uint3, mesh + 16, 4);  // stride, index count, texcoord offset
 	// Past the mesh's indices (the draw draws the largest mesh's count): a degenerate triangle.
 	if (a_vertex >= meshLayout.y)
 		return vsout;
-	const uint indexWord = vk::RawBufferLoad<uint>(DCLFTreeAddress(meshWords.zw) + 4 * uint64_t(a_vertex / 2), 4);
+	const uint indexWord = DeviceLoad(uint, DCLFTreeAddress(meshWords.zw) + 4 * uint64_t(a_vertex / 2), 4);
 	const uint vertexIndex = (a_vertex & 1) ? (indexWord >> 16) : (indexWord & 0xFFFF);
 	const uint64_t vertex = DCLFTreeAddress(meshWords.xy) + uint64_t(vertexIndex) * meshLayout.x;
 	VS_INPUT input = (VS_INPUT)0;
-	input.Position = asfloat(vk::RawBufferLoad<uint3>(vertex, 4));
-	const uint texcoord = vk::RawBufferLoad<uint>(vertex + meshLayout.z, 4);
+	input.Position = asfloat(DeviceLoad(uint3, vertex, 4));
+	const uint texcoord = DeviceLoad(uint, vertex + meshLayout.z, 4);
 	input.TexCoord0 = float2(f16tof32(texcoord), f16tof32(texcoord >> 16));
-	const uint4 record = vk::RawBufferLoad<uint4>(DCLFTreeTable(kDCLFTreeInstances) + 32 * uint64_t(index), 16);
+	const uint4 record = DeviceLoad(uint4, DCLFTreeTable(kDCLFTreeInstances) + 32 * uint64_t(index), 16);
 	input.InstanceData1 = float4(f16tof32(record.x), f16tof32(record.x >> 16), f16tof32(record.y), f16tof32(record.y >> 16));
 	input.InstanceData2 = float4(f16tof32(record.z), f16tof32(record.z >> 16), f16tof32(record.w), f16tof32(record.w >> 16));
 
@@ -161,7 +162,7 @@ VS_OUTPUT main(uint a_vertex : SV_VertexID, uint a_instance : SV_InstanceID)
 		const uint64_t clip = DCLFTreeStageWord(kDCLFStageColourClip);
 #		endif
 		if (clip != 0)
-			vk::RawBufferStore<uint4>(clip, asuint(viewPosition), 4);
+			DeviceStore(uint4, clip, asuint(viewPosition), 4);
 	}
 	vsout.TexCoord = float3(input.TexCoord0.xy, 0.0);
 
@@ -229,17 +230,17 @@ struct PS_OUTPUT
 #	if defined(DCLF_PULLED)
 SamplerState DCLFTreeSampler()
 {
-	SamplerState s = SamplerDescriptorHeap[vk::RawBufferLoad<uint>(DCLFTreeDraw() + kDCLFTreeSampler, 4)];
+	SamplerState s = SamplerDescriptorHeap[DeviceLoad(uint, DCLFTreeDraw() + kDCLFTreeSampler, 4)];
 	return s;
 }
 Texture2D<float4> DCLFTreeTexture()
 {
-	Texture2D<float4> t = ResourceDescriptorHeap[vk::RawBufferLoad<uint>(DCLFTreeDraw() + kDCLFTreeTexture, 4)];
+	Texture2D<float4> t = ResourceDescriptorHeap[DeviceLoad(uint, DCLFTreeDraw() + kDCLFTreeTexture, 4)];
 	return t;
 }
 #		define SampDiffuse DCLFTreeSampler()
 #		define TexDiffuse DCLFTreeTexture()
-#		define AlphaTestRefRS asfloat(vk::RawBufferLoad<uint>(DCLFTreeDraw() + kDCLFTreeAlphaRef, 4))
+#		define AlphaTestRefRS asfloat(DeviceLoad(uint, DCLFTreeDraw() + kDCLFTreeAlphaRef, 4))
 // CS_DCLF_TREE_LOD_STAGES: the stage's entry stamp and what its texture resolves to (TreeInstancesLayout.h, kStageProbeWords).
 void DCLFTreeProbe(uint a_entry, uint a_probe, float2 a_texCoord)
 {
@@ -250,8 +251,8 @@ void DCLFTreeProbe(uint a_entry, uint a_probe, float2 a_texCoord)
 	uint width, height, mips;
 	DCLFTreeTexture().GetDimensions(0, width, height, mips);
 	const float alpha = DCLFTreeTexture().SampleBias(DCLFTreeSampler(), a_texCoord, SharedData::MipBias).w;
-	vk::RawBufferStore<uint4>(probe, uint4(vk::RawBufferLoad<uint>(DCLFTreeDraw() + kDCLFTreeTexture, 4), vk::RawBufferLoad<uint>(DCLFTreeDraw() + kDCLFTreeSampler, 4), width, height), 4);
-	vk::RawBufferStore<uint3>(probe + 16, uint3(mips, vk::RawBufferLoad<uint>(DCLFTreeDraw() + kDCLFTreeAlphaRef, 4), asuint(alpha)), 4);
+	DeviceStore(uint4, probe, uint4(DeviceLoad(uint, DCLFTreeDraw() + kDCLFTreeTexture, 4), DeviceLoad(uint, DCLFTreeDraw() + kDCLFTreeSampler, 4), width, height), 4);
+	DeviceStore(uint3, probe + 16, uint3(mips, DeviceLoad(uint, DCLFTreeDraw() + kDCLFTreeAlphaRef, 4), asuint(alpha)), 4);
 }
 static const float4 DiffuseColor = 0.0;
 static const float4 AmbientColor = 0.0;

@@ -1209,10 +1209,12 @@ shaders build to DXIL. The rest of native mode is the same code, except:
 -   **Present** waits on the swap chain's frame-latency waitable object first: D3D12's Present does not block for it.
 -   **External commands** (Vulkan command buffers: DCLF's CPU sites and frame signal) are refused with an error line.
     Without the queue lock they needed, BasicRHI's queue sharing hooks are not installed.
--   **Drawcall Limit Fix is off** (`[DCLF] Forced off`): its layouts, its SPIR-V reflection and its CPU sites are
-    Vulkan's. The world's geometry is therefore not drawn. Shaders that read buffer device addresses
-    (`vk::RawBufferLoad`: Sky, Water, Effect, Particle, BloodSplatter, DistantTree, RunGrass, Utility and Lighting through
-    `Common/DCLFObjects.hlsli`) do not build to DXIL; each logs its DXIL build error.
+-   **Drawcall Limit Fix** draws the main view's Lighting geometry (Z-prepass and colour) with its pulled builds and plain
+    counted draws only. Its layouts are root constants alone; a pulled build reads the pass's frame record itself (preprocessed,
+    then `FrameSource::Rewrite`), and its stages are reflected from DXIL (`DxilStages`). Stage 1 sets the switches of what has no
+    D3D12 port yet (the CPU pipeline, the shadow views, the forward epoch, the families, ...; `[ORG native] D3D12: Drawcall Limit
+    Fix switches set`). Shaders that read buffer device addresses go through `DeviceLoad` (`Common/DeviceAddress.hlsli`), so they
+    build to DXIL. [org-full-port.md](./org-full-port.md), "DCLF on D3D12".
 
 Scenarios: `tools/cs-ab/scenarios/native-d3d12.env`, and `native-d3d12-validation.env` with the debug layer and GPU-based
 validation.

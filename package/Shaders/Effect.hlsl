@@ -227,7 +227,13 @@ static float4 TexcoordOffsetMembrane = EffectDraw.VSGeometry[14];
 // The indexed texture coordinates (b11) follow the draw's latched values: main loads the row its vertex names.
 static float4 IndexedTexCoord[128];
 #	else
+#	if defined(__hlsl_dx_compiler) && !defined(__spirv__)
+// DXIL refuses two blocks at one register, and FrameBuffer's PerFrame is b12 too (SPIR-V lets both read the frame's VS b12). Space 1
+// keeps it apart; DCLF's D3D12 builds read both as VS b12 (DrawcallLimitFix FrameSource, DxilReflection).
+cbuffer VS_PerFrame : register(b12, space1)
+#	else
 cbuffer VS_PerFrame : register(b12)
+#	endif
 {
 	row_major float4x4 ScreenProj : packoffset(c0);
 	row_major float4x4 ViewProj : packoffset(c8);
@@ -718,8 +724,8 @@ VS_OUTPUT DCLFPulledVertex(uint index, uint a_instance)
 	VS_OUTPUT vsout = DCLFShade(DCLFParticleInput(index));
 #			else
 	DCLFDrawVertexLayout = DCLFPipelineVertexLayout();
-	const uint4 vertexBuffer = vk::RawBufferLoad<uint4>(sequence + 24);  // address, size, stride
-	const uint4 streamBuffer = vk::RawBufferLoad<uint4>(sequence + 40);
+	const uint4 vertexBuffer = DeviceLoad(uint4, sequence + 24);  // address, size, stride
+	const uint4 streamBuffer = DeviceLoad(uint4, sequence + 40);
 	DCLFStream first, second;
 	first.address = DCLFAddress(vertexBuffer.xy);
 	first.stride = vertexBuffer.w;
@@ -753,7 +759,7 @@ VS_OUTPUT main(uint a_vertexID : SV_VertexID)
 {
 	DCLFDrawVertexLayout = EffectDraw.VertexLayout;
 	const uint indexNumber = EffectDraw.FirstIndex + a_vertexID;
-	const uint indexWord = vk::RawBufferLoad<uint>(DCLFAddress(EffectDraw.IndexAddress) + uint64_t((indexNumber * 2) & ~3u));
+	const uint indexWord = DeviceLoad(uint, DCLFAddress(EffectDraw.IndexAddress) + uint64_t((indexNumber * 2) & ~3u));
 	const uint index = (indexNumber & 1) ? (indexWord >> 16) : (indexWord & 0xFFFF);
 	DCLFStream first = { DCLFAddress(EffectDraw.VertexAddress), EffectDraw.VertexStride };
 	DCLFStream second = { DCLFAddress(EffectDraw.StreamAddress), EffectDraw.StreamStride };

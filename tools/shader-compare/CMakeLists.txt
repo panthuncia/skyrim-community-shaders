@@ -9,7 +9,8 @@ set(CS_ROOT ${CMAKE_CURRENT_SOURCE_DIR}/../..)
 
 add_executable(dclf-shadertool
 	dclf-shadertool.cpp
-	${CS_ROOT}/src/Features/DrawcallLimitFix/Core/Gpu/Pipelines/PulledSource.cpp)
+	${CS_ROOT}/src/Features/DrawcallLimitFix/Core/Gpu/Pipelines/PulledSource.cpp
+	${CS_ROOT}/src/Features/DrawcallLimitFix/Core/Gpu/Pipelines/FrameSource.cpp)
 target_include_directories(dclf-shadertool PRIVATE ${CS_ROOT}/src)
 if(MSVC)
 	target_compile_options(dclf-shadertool PRIVATE /utf-8 /W4)
