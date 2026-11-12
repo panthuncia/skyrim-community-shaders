@@ -55,3 +55,10 @@ AI-based training, scraping, and other automated or human reuse do not waive the
 **Key Focus**: Performance impact awareness, runtime compatibility (SE/AE), complete working solutions, DirectX/HLSL best practices.
 
 For detailed explanations, examples, and comprehensive guidance, refer to `.claude/CLAUDE.md`.
+
+### Known Driver Bug: AMD RDNA2 Shader Compiler
+
+AMD's Windows shader compiler for RDNA2 (seen on the RX 6600) miscompiles an early `return` or `continue` guarded by an `||` of equality tests. Past the guard it treats the equality as true and folds the value to the constant. Examples: `if (a == 0 || b == 0) return;` made `a` read as 0 below it; `k == kNone || k >= count` made `k` read as `kNone`. It has broken DCLF shaders three times (portal programs, texture transforms twice). The symptom looks like bad data or missing synchronization, so it is easy to misdiagnose.
+
+- Write null and sentinel guards branch-free (zero the loop counts with a select), or as one unsigned relational compare.
+- To confirm, dump the driver's ISA with `BASICRHI_VK_DUMP_ISA=<dir>` and look for a constant where a loaded value should be, for example a descriptor load from heap offset `null` (slot 0).
