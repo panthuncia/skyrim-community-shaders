@@ -12,6 +12,7 @@
 #include "Features/DrawcallLimitFix/Core/Extensions/DrawFamilies.h"
 #include "Features/DrawcallLimitFix/Core/Render/LoadHold.h"
 
+#include <algorithm>
 #include <span>
 #include "Features/DrawcallLimitFix/Diagnostics/Engine/Events.h"
 #include "Features/DrawcallLimitFix/Diagnostics/Hooks.h"
@@ -545,12 +546,82 @@ namespace DCLF
 		return false;
 	}
 
-	void PassCapture::KeepForEngine(const RE::BSRenderPass* a_pass) const
+	namespace
+	{
+		/** @brief The nearest ancestor of a_object with a reference: its form ID and base object's name, or empty. */
+		std::string OwnerOf(const RE::NiAVObject* a_object)
+		{
+			std::uint32_t depth = 0;
+			for (const auto* node = a_object; node && depth < 64; node = node->parent, ++depth)
+				if (const auto* ref = node->GetUserData()) {
+					const auto* base = ref->GetBaseObject();
+					const char* name = base ? base->GetName() : nullptr;
+					return fmt::format("{:08X} '{}'", ref->GetFormID(), name ? name : "");
+				}
+			return {};
+		}
+
+		/** @brief Whether a_object or an ancestor is app-culled (kHidden). */
+		bool HiddenChain(const RE::NiAVObject* a_object)
+		{
+			std::uint32_t depth = 0;
+			for (const auto* node = a_object; node && depth < 64; node = node->parent, ++depth)
+				if (node->GetFlags().any(RE::NiAVObject::Flag::kHidden))
+					return true;
+			return false;
+		}
+	}
+
+	std::vector<PassCapture::KeptSample> PassCapture::TakeKeptSamples(std::size_t a_max)
+	{
+		std::vector<KeptSample> samples;
+		{
+			std::scoped_lock lock(keptLock);
+			samples.reserve(keptSamples.size());
+			for (auto& [geometry, sample] : keptSamples)
+				samples.push_back(std::move(sample));
+			keptSamples.clear();
+		}
+		std::ranges::sort(samples, [](const KeptSample& a_left, const KeptSample& a_right) { return a_left.passes > a_right.passes; });
+		if (samples.size() > a_max)
+			samples.resize(a_max);
+		return samples;
+	}
+
+	void PassCapture::KeepForEngine(const RE::BSBatchRenderer* a_batch, const RE::BSRenderPass* a_pass) const
 	{
 		namespace Flush = RenderGraph::Engine::Flush;
-		// Counted for the log after a load's hold (LoadHold.h): what DCLF still hands the engine of its classes.
-		if (a_pass && a_pass->geometry && !t_menuScenes && !bypassed.load(std::memory_order_acquire) && DclfClass(a_pass))
+		// Counted for the log outside loads (LoadHold.h): what DCLF still hands the engine of its classes, with a sample by geometry: its
+		// view, its owner and whether it is hidden or skinned, read while the engine registers it.
+		if (a_pass && a_pass->geometry && !t_menuScenes && !bypassed.load(std::memory_order_acquire) && DclfClass(a_pass)) {
 			dclfKept.fetch_add(1, std::memory_order_relaxed);
+			std::scoped_lock lock(keptLock);
+			auto it = keptSamples.find(a_pass->geometry);
+			if (it == keptSamples.end() && keptSamples.size() < kKeptSamples) {
+				KeptSample sample;
+				const auto* geometry = a_pass->geometry;
+				sample.name = geometry->name.c_str() ? geometry->name.c_str() : "";
+				sample.owner = OwnerOf(geometry);
+				std::uint32_t mode = 0;
+				sample.where = ShadowModeOfBatch(a_batch, mode)                         ? fmt::format("a covered shadow view (mode {})", mode) :
+				               t_shadowRegistration                                       ? std::string("a shadow view DCLF does not cover") :
+				               IsMainRenderer(a_batch) || MainRendererNow(a_batch)        ? std::string("the main views") :
+				                                                                            std::string("another view");
+				const auto* shader = a_pass->shader;
+				sample.shader = fmt::format("{} technique {:08X} hint {}", shader ? static_cast<std::uint32_t>(shader->shaderType.get()) : 99u, a_pass->passEnum,
+					static_cast<std::uint32_t>(a_pass->accumulationHint));
+				if (const auto set = std::atomic_load(&frameSet)) {
+					sample.phases = set->PhasesOf(geometry);
+					const auto p = set->pending.find(geometry);
+					sample.pending = p != set->pending.end() ? p->second : std::uint8_t{ 0 };
+				}
+				sample.hidden = HiddenChain(geometry);
+				sample.skinned = geometry->GetGeometryRuntimeData().skinInstance.get() != nullptr;
+				it = keptSamples.emplace(geometry, std::move(sample)).first;
+			}
+			if (it != keptSamples.end())
+				++it->second.passes;
+		}
 		if (!Flush::Vouching() || !a_pass || !a_pass->geometry || !a_pass->shaderProperty || bypassed.load(std::memory_order_acquire))
 			return;
 		// DCLF's classes never reach the engine from here on purpose: members and waiting objects are withheld (WithholdMain, WithholdOwn,
@@ -628,7 +699,7 @@ namespace DCLF
 				return;
 			if (Diagnostics::Armed<Diagnostics::PassKept>())
 				capture.NoteKept(a_this, a_pass, Census(RegistrationCensus::Site::RegisterPass));
-			capture.KeepForEngine(a_pass);
+			capture.KeepForEngine(a_this, a_pass);
 			func(a_this, a_pass, a_techniqueID);
 		}
 		static inline REL::Relocation<decltype(thunk)> func;
@@ -668,7 +739,7 @@ namespace DCLF
 				return;
 			if (Diagnostics::Armed<Diagnostics::PassKept>() && !capture.bypassed.load(std::memory_order_acquire))
 				capture.NoteKept(a_batch, a_pass, Census(RegistrationCensus::Site::Volumetric));
-			capture.KeepForEngine(a_pass);
+			capture.KeepForEngine(a_batch, a_pass);
 			func(a_batch, a_pass, a_group, a_arg);
 		}
 		static inline REL::Relocation<decltype(thunk)> func;
@@ -694,7 +765,7 @@ namespace DCLF
 				return;
 			if (Diagnostics::Armed<Diagnostics::PassKept>() && !capture.bypassed.load(std::memory_order_acquire))
 				capture.NoteKept(a_batch, a_pass, Census(RegistrationCensus::Site::ShadowDirect));
-			capture.KeepForEngine(a_pass);
+			capture.KeepForEngine(a_batch, a_pass);
 			func(a_batch, a_pass, a_group, a_arg);
 		}
 		static inline REL::Relocation<decltype(thunk)> func;
@@ -723,7 +794,7 @@ namespace DCLF
 				return;
 			if (Diagnostics::Armed<Diagnostics::PassKept>() && !capture.bypassed.load(std::memory_order_acquire))
 				capture.NoteKept(a_batch, a_pass, Census(RegistrationCensus::Site::MainGroup));
-			capture.KeepForEngine(a_pass);
+			capture.KeepForEngine(a_batch, a_pass);
 			func(a_batch, a_pass, a_group, a_arg);
 		}
 		static inline REL::Relocation<decltype(thunk)> func;
@@ -744,7 +815,7 @@ namespace DCLF
 				return;
 			if (Diagnostics::Armed<Diagnostics::PassKept>() && !capture.bypassed.load(std::memory_order_acquire))
 				capture.NoteKept(a_batch, a_pass, Census(RegistrationCensus::Site::MainList));
-			capture.KeepForEngine(a_pass);
+			capture.KeepForEngine(a_batch, a_pass);
 			func(a_batch, a_pass, a_list);
 		}
 		static inline REL::Relocation<decltype(thunk)> func;
@@ -774,7 +845,7 @@ namespace DCLF
 				capture.NoteKept(a_batch, a_pass, Census(RegistrationCensus::Site::Occlusion), phase);
 			// Every occluder DCLF does not draw into the map and does not wait to: all of them while the map is not DCLF's (phase 0, the
 			// engine draws it whole).
-			capture.KeepForEngine(a_pass);
+			capture.KeepForEngine(a_batch, a_pass);
 			func(a_batch, a_pass, a_group, a_arg);
 		}
 		static inline REL::Relocation<decltype(thunk)> func;

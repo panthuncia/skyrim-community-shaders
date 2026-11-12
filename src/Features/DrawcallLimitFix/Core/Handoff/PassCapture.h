@@ -194,6 +194,22 @@ namespace DCLF
 		 */
 		void PublishSet(std::shared_ptr<const SetSnapshot> a_set) { std::atomic_store(&frameSet, std::move(a_set)); }
 		std::shared_ptr<const SetSnapshot> CurrentSet() const { return std::atomic_load(&frameSet); }
+
+		/** @brief One geometry of DCLF's classes whose passes went to the engine (KeepForEngine), as first seen in the window. */
+		struct KeptSample
+		{
+			std::string name;        // the geometry's
+			std::string owner;       // the nearest ancestor with a reference: its form ID and base object's name
+			std::string where;       // the view the pass went to
+			std::string shader;      // the pass's shader type and technique
+			std::uint32_t passes = 0;
+			std::uint8_t phases = 0;   // its member phases in the frame's set
+			std::uint8_t pending = 0;  // its waiting phases
+			bool hidden = false;       // app-culled, itself or an ancestor
+			bool skinned = false;      // it has a skin instance
+		};
+		/** @brief Render thread: the geometries of DCLF's classes handed to the engine since the last call, most passes first. */
+		std::vector<KeptSample> TakeKeptSamples(std::size_t a_max);
 		/**
 		 * @brief The main views' batch renderers: the Z-prepass accumulator (render mode 0xC, *0x14338c828) and the main one
 		 * (*0x14338c830), with their geometry groups'. Render thread, before registrations; rebuilt only when an accumulator changes.
@@ -272,6 +288,10 @@ namespace DCLF
 		std::atomic<std::uint32_t> mainWithheld{ 0 }, occlusionWithheld{ 0 }, holdWithheld{ 0 };
 		std::atomic<std::uint32_t> pendingWithheld{ 0 }, baseMipsWithheld{ 0 };
 		mutable std::atomic<std::uint32_t> dclfKept{ 0 };
+		// The kept passes by geometry (KeepForEngine), at most kKeptSamples geometries a window.
+		static constexpr std::size_t kKeptSamples = 256;
+		mutable std::mutex keptLock;
+		mutable ankerl::unordered_dense::map<const RE::BSGeometry*, KeptSample> keptSamples;
 		std::array<std::atomic<std::uint32_t>, static_cast<std::size_t>(Api::DrawFamily::Count)> familyWithheld{};
 		std::array<std::atomic<bool>, static_cast<std::size_t>(Api::DrawFamily::Count)> familyHeld{};
 		static_assert(static_cast<std::size_t>(Api::DrawFamily::Count) <= 32, "ViewRenderers::familyOwned is a 32-bit mask by family");
@@ -355,7 +375,7 @@ namespace DCLF
 		 * sky's precipitation, which nothing ports, is vouched for (RenderGraph::Engine::Flush::VouchPass), so the engine still draws it.
 		 * DCLF vouches for nothing of its own classes: what it does not draw yet is withheld. Nothing while bypassed or with the latch off.
 		 */
-		void KeepForEngine(const RE::BSRenderPass* a_pass) const;
+		void KeepForEngine(const RE::BSBatchRenderer* a_batch, const RE::BSRenderPass* a_pass) const;
 		/**
 		 * @brief WithholdMain's test when the published sets do not hold a_batch: whether it is one of the main views' batch renderers now
 		 * (the accumulators' geometry and alpha groups read live). The engine makes a group's renderer at the group's first pass, during
