@@ -338,7 +338,9 @@ namespace DCLF::RegistrationCensus
 			const bool particlesTaken = Extensions::ParentAdmits(toggles, Api::EngineParent::Billboard, Api::ParentLeaves::ParticleSystems) &&
 			                            ParticleGeometryType(leaf.view.Type());
 			const auto* port = SceneCapture::LeafView::Port(leaf.view.property);
-			const bool billboardTaken = Extensions::BillboardTurnedLeaf(toggles, port ? port->port : std::uint8_t{ 0 }, leaf.view.Type(), leaf.view.Skinned());
+			const std::uint8_t kind = port ? port->port : std::uint8_t{ 0 };
+			const bool billboardTaken = Extensions::BillboardTurnedLeaf(toggles, kind, leaf.view.Type(), leaf.view.Skinned()) ||
+			                            Extensions::BillboardTurnedRefraction(toggles, kind, lighting ? lighting->flags : 0u, leaf.view.Type(), leaf.view.Skinned());
 			std::uint32_t billboards = 0;
 			for (const RE::NiNode* node = a_geometry.parent; node; node = node->parent) {
 				if (Scene::FrameView::Get().IsCategoryNode(node)) {

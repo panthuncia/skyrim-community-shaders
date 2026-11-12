@@ -301,6 +301,10 @@ namespace DCLF
 		// vertex stage turns the leaf to its view's camera (DCLFBillboardWorld); the record carries the mode (FamilyRecordFlagsOf). The
 		// Effect family's spare key bits (ProgramFamilySlots.h; Extensions::FamilyRules' turnedKeyBits).
 		kRasterEffectBillboardShift = kRasterLightingSpareShift,
+		// Refraction keys only, same 3 bits: billboard mode + 1 of a Lighting refraction leaf under an NiBillboardNode, else 0. Its
+		// Lighting pipeline is never drawn; the refraction stage turns the leaf (the record's kRecordRefractionBillboard, the mode from its
+		// placement row: BillboardRow.h).
+		kRasterRefractionBillboardShift = kRasterLightingSpareShift,
 		// 2 bits, ObjectTerrainGroup. Group 1: blend and write modes 1 and 1, LESS_EQUAL with depth writes; group 2: write mode 1,
 		// no blending, EQUAL. No depth bias.
 		kRasterTerrainGroupShift = 24,

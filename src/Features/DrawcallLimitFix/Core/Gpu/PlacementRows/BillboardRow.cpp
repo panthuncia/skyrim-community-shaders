@@ -18,8 +18,14 @@ namespace DCLF::PlacementRows
 	bool SampleBillboardRow(const RE::BSGeometry& a_geometry, BindlessPlacement& a_out)
 	{
 		static const REL::Relocation<const RE::NiRTTI*> effectRtti{ RE::BSEffectShaderProperty::Ni_RTTI };
+		static const REL::Relocation<const RE::NiRTTI*> lightingRtti{ RE::BSLightingShaderProperty::Ni_RTTI };
 		const auto* property = a_geometry.GetGeometryRuntimeData().shaderProperty.get();
-		if (!property || property->GetRTTI() != effectRtti.get())
+		if (!property)
+			return false;
+		// An effect leaf, or a Lighting refraction leaf (heat haze cards: their one draw is the refraction normals, which turns them too).
+		using Flag = RE::BSShaderProperty::EShaderPropertyFlag;
+		const bool refraction = property->GetRTTI() == lightingRtti.get() && property->flags.any(Flag::kRefraction, Flag::kTempRefraction);
+		if (property->GetRTTI() != effectRtti.get() && !refraction)
 			return false;
 		// The leaf relative to the nearest billboard node: the locals between them, composed as the children's world updates compose them
 		// (NiAVObject's world = the parent's world * the local).
@@ -49,6 +55,8 @@ namespace DCLF::PlacementRows
 			a_out.previousWorld[row * 4 + 2] = base.rotate.entry[row][2];
 			a_out.previousWorld[row * 4 + 3] = 0.0f;
 		}
+		// The node's face mode, for a draw whose record has no room for it (the refraction stage: Utility.hlsl, DCLFRefractionVertex).
+		a_out.previousWorld[7] = static_cast<float>(BillboardFaceMode(node));
 		// The leaf's bound: its model bound by the unturned world (its centre's distance from the pivot does not change as the node turns).
 		const auto& model = a_geometry.GetModelData().modelBound;
 		float offset = 0.0f;

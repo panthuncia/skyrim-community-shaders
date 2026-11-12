@@ -259,10 +259,16 @@ render thread at its first draw`). Constants come from the engine constants capt
 - A batch of another accumulator than the main camera's, a cube face, or with a depth target other than kMAIN's.
 - A header that is a D3D11 buffer (Light Limit Fix on D3D11) or cannot be imported; a published header or slot not listed, or first
   published during play (an error).
-- Per draw: not BSWaterShader, a colour target its view's client does not import, a state with no description or no ORG form,
+- Per draw: a colour target its view's client does not import, a state with no description or no ORG form,
   geometry that is not a static triangle-list TriShape within its buffers, a texture that cannot be imported, sampler modes with no
   graph sampler, more than 64 draws, an inactive engine constants capture.
-- The water displacement simulation (ImageSpace's, P5.6) and the raw-water and refraction-normal passes DCLF does not claim.
+- The water displacement simulation (ImageSpace's, P5.6).
+
+None of these is vouched for under the flush latch: a batch or the rest of one the family does not take is skipped there and counted by
+the residue census, as a defect to fix. A draw of another shader inside a latched batch is not the family's: geometry group 10 (hint 10,
+`RenderBatches(1 .. 0x5C006074, group 10)` at AE 106584 `+0x143` / SE 99939 `+0x146`, just before the surface batch) holds Lighting
+cross-fade copies beside the water's fade passes. The surface view latches group 10's water, runs what it latched before such a draw,
+and begins a new run after it (WaterCapture.cpp, `Interrupt`).
 
 Changed with the primary path: the program's descriptor is CS's lookup (`State::modifiedVertexDescriptor`, which drops the
 Reflections, Cubemap and Interior bits as CS's own D3D11 shader does), so the startup enumeration and the draw agree. The directional
@@ -280,4 +286,5 @@ The two clients' registrations at setup. Nothing in play registers again.
   run no `was not prebuilt` line. Each such line names a key the enumeration or the manifest missed.
 - `[DCLF] <family>: the engine draws: ...` lines name inherent refusals (once each); `[E]` `latched draws were not drawn this frame`
   and `the engine draws a batch: ... its anchor cannot run now` are errors.
-- With the latch on, the census's `allowed engine draws` show `<family>: left to the engine` (and `sky: cloud layers`).
+- With the latch on, a water batch the family did not take is an `[E] [ORG] flush latch: engine ... nobody vouched for it` line, and
+  the residue census's Water classes count it.

@@ -1029,9 +1029,13 @@ namespace DCLF::Scene
 		// space throughout (c0-c2 the camera rotation, c40 the eye at GetFirstPersonNodePosition), sampled before the shift.
 		// The turned shapes (the census's rule too): the parent contribution admits them (Features/Billboards: the billboards toggle), a
 		// skinless BSTriShape with the property of a port the billboards turn (the Effect port's).
+		// A Lighting refraction leaf too (Extensions::BillboardTurnedRefraction): the refraction stage turns it.
 		const auto leaf = mirror.Leaf(a_tracked.geometry.get());
 		const auto* port = leaf ? SceneCapture::LeafView::Port(leaf.property) : nullptr;
-		if (!leaf || !Extensions::BillboardTurnedLeaf(ActiveToggles(), port ? port->port : std::uint8_t{ 0 }, leaf.Type(), leaf.Skinned()))
+		const std::uint8_t kind = port ? port->port : std::uint8_t{ 0 };
+		const auto* lighting = leaf ? SceneCapture::LeafView::Lighting(leaf.property) : nullptr;
+		if (!leaf || (!Extensions::BillboardTurnedLeaf(ActiveToggles(), kind, leaf.Type(), leaf.Skinned()) &&
+						 !Extensions::BillboardTurnedRefraction(ActiveToggles(), kind, lighting ? lighting->flags : 0u, leaf.Type(), leaf.Skinned())))
 			return -1;
 		std::int32_t mode = -1;
 		std::uint32_t billboards = 0;

@@ -4,8 +4,8 @@
 // the engine's place: the water mask (the Stencil technique, which writes the water's normal mask, its motion vectors and its per-type
 // stencil bits) and the water itself (the surface, underwater, LOD and specular light techniques).
 //
-// The engine's CPU code runs unchanged. At the engine's two water batches (FinishAccumulating's RenderBatches of the Stencil technique,
-// FinishAccumulatingPostResolveDepth's RenderBatches of the water techniques: WaterCapture.cpp) the family lets the batch run with its
+// The engine's CPU code runs unchanged. At the engine's water batches (FinishAccumulating's RenderBatches of the Stencil technique,
+// FinishAccumulatingPostResolveDepth's RenderBatches of geometry group 10 and of the water techniques: WaterCapture.cpp) the family lets the batch run with its
 // draw choke point latched: every water pass goes through the engine's own BeginPass, SetupTechnique, SetupMaterial, SetupGeometry and
 // render state (Unified Water's, Light Limit Fix's and the cubemap fix's hooks with them), and DrawTriShape (the engine draw families'
 // one detour, Core/Engine/Family) records the draw instead of drawing it (the shadow state with its stencil mode and reference, the six
@@ -44,8 +44,9 @@ namespace DCLF::Features::Water
 		inline constexpr Engine::Offset kMaskBatch{ { 106583, 0x492 }, { 99938, 0x4A6 } };
 		// FinishAccumulatingPostResolveDepth's RenderBatches(accumulator, 0x5C000071, 0x5C006071, flags, -1): the water (SE 99939, AE 106584).
 		inline constexpr Engine::Offset kSurfaceBatch{ { 106584, 0x161 }, { 99939, 0x164 } };
-		// The same function's RenderBatches(accumulator, 1, 0x5C006074, flags, 10) just before it: geometry group 10, whose passes
-		// include water drawn into kRAW_WATER (SE 99939 +0x146, AE 106584 +0x143). The family does not take it; the engine draws it.
+		// The same function's RenderBatches(accumulator, 1, 0x5C006074, flags, 10) just before it: geometry group 10 (accumulation hint
+		// 10: fades and LOD cross-fades), whose water passes the surface view takes (SE 99939 +0x146, AE 106584 +0x143). Its other passes
+		// are Lighting cross-fade copies, which DCLF draws or vouches for.
 		inline constexpr Engine::Offset kGroup10Batch{ { 106584, 0x143 }, { 99939, 0x146 } };
 	}
 

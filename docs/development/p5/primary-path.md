@@ -148,8 +148,8 @@ each family doc has a "Primary path" section with its own "What stays the engine
   batch is the engine's, logged as an error. Constants come from the engine constants capture (`Family::CaptureConstants`; the
   families need `CS_ORG_ENGINE_CONSTANTS=1`), which tracks every buffer from startup; ConstantMirror is no longer used by them.
 - **Refusals keep the engine's order.** A draw a family cannot take runs the latched part at that point (`FlushLatched`) and leaves
-  the rest of the batch to the engine, vouched for under the flush latch (`Flush::EngineDraws`, reasons `sky: left to the engine`,
-  `sky: cloud layers`, `water: left to the engine`, `shadow mask: left to the engine`, `blood splatter: left to the engine`). A pass the
+  the rest of the batch to the engine. That rest is not vouched for under the flush latch (the families' `left to the engine`
+  reasons and `Family::EngineRest` are deleted): the latch skips it and the census counts it, as a defect of the family. A pass the
   geometry-type dispatcher draws through another function (`Family::DrawsThroughTriShape`: types 3, 5, 8 and 9, and 6 and 7 unless
   the pass's accumulation hint is 12, from Ghidra of AE 107637) is refused at its SetupGeometry, before its draw. (The first version
   took TriShape alone and refused the water's sub-index land shapes, type 9 at the dispatcher's +0x430/+0x4CE: 12 water draws a frame.) A run that does not submit is an error, logged

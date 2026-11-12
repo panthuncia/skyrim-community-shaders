@@ -78,6 +78,9 @@ static const uint kDCLFRefractionClamp = 1u << 4;
 static const uint kDCLFRefractionNoNormals = 1u << 5;
 static const uint kDCLFRefractionVertexColors = 1u << 6;
 static const uint kDCLFRefractionTwoSided = 1u << 7;
+// A leaf under an NiBillboardNode (LightingConstants.h, kRecordRefractionBillboard): turned to the camera here, with the face mode its
+// placement row holds in PreviousWorld[1].w (BillboardRow.h).
+static const uint kDCLFRefractionBillboard = 1u << 8;
 #endif
 
 #if defined(VSHADER)
@@ -582,6 +585,14 @@ VS_OUTPUT DCLFRefractionVertex(uint index, uint a_instance)
 		DCLFPlacements[object].World[1] - float4(0, 0, 0, FrameBuffer::CameraPosAdjust.y),
 		DCLFPlacements[object].World[2] - float4(0, 0, 0, FrameBuffer::CameraPosAdjust.z),
 		float4(0, 0, 0, 1));
+	// A billboard leaf turned to this camera, as NiBillboardNode::OnVisible turns its node for the culling camera: the camera's axes are
+	// CameraView's rows (right, up, forward), its eye the posAdjust the world is made relative to (Effect.hlsl does the same).
+	if ((flags & kDCLFRefractionBillboard) != 0) {
+		const uint mode = (uint)DCLFPlacements[object].PreviousWorld[1].w & 7u;
+		const float3x4 turned = DCLFBillboardWorldOfMode(object, mode, FrameBuffer::CameraView[2].xyz, FrameBuffer::CameraView[1].xyz, FrameBuffer::CameraView[0].xyz,
+			FrameBuffer::CameraPosAdjust.xyz);
+		World = float4x4(turned[0], turned[1], turned[2], float4(0, 0, 0, 1));
+	}
 	// EyePos.xyz with RENDER_NORMAL_FALLOFF: the camera in model space (the world transform's inverse; NiTransform's scale is uniform).
 	const float3x3 rotateScale = (float3x3)World;
 	const float3 eyeRelative = eye - FrameBuffer::CameraPosAdjust.xyz - float3(World[0].w, World[1].w, World[2].w);

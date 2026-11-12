@@ -99,7 +99,7 @@ is in the window after a load. Scenarios: `p5-all-census-dclf.env`, `-take.env`,
     drawn by DCLF's particle path. Blood impact particles are master particle systems too (4.3).
 -   **Why.** They are among the engine's remaining main passes, and DCLF's blended draws go before every remaining engine
     blended pass, so they are drawn in the wrong order where they lie behind a DCLF surface (dclf-open-defects.md).
--   **State.** Built behind `CS_DCLF_MASTER_PARTICLES` (default off) and run in game (scenarios
+-   **State.** On by default since Phase 5.5.6 (`CS_DCLF_MASTER_PARTICLES=0` turns it off) and run in game (scenarios
     `tools/cs-ab/scenarios/master-particles-0.env` and `-1.env`): the shots match the switch off, and the idle masters held with
     three references are the engine's (an emitter's value node names them: `<- MASTER REFS` counts them apart from DCLF's pins).
     What exists:
@@ -142,9 +142,9 @@ is in the window after a load. Scenarios: `p5-all-census-dclf.env`, `-take.env`,
     first). A master has no fade node. The removal hook is one more trampoline call (the plugin allocates 4 KB).
 -   **Residue.** They are the steady Effect draws in the residue census (Whiterun, about 3 a frame: `DrawDynamicTriShape (DrawData
     copy)` from the dispatcher's +0x101, geometry type 1). `p5-all-census-dclf-take.env` runs the tour with the switch on.
--   **Needs.** Before it is on by default: a run of the unheld roots diff (its count, "unheld roots diffs", is in the C2 parity
-    line with `CS_DCLF_PERSISTENT_PARITY`), and the test that no master stays listed after its torches are gone (`master
-    particles ... listed`).
+-   **Checks with it on by default:** the unheld roots diff (its count, "unheld roots diffs", is in the C2 parity line with
+    `CS_DCLF_PERSISTENT_PARITY`) reads 0, and no master stays listed after its torches are gone (`master particles ...
+    listed`).
 
 ### 1.5 The remaining residue classes: grass, water, sky
 

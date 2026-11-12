@@ -2,6 +2,9 @@
 // and hands them to the anchor's pass; the family's DrawTriShape taker, which latches a splatter draw in place of drawing it; its
 // BSBloodSplatterShader::SetupGeometry watcher, which counts the batch's passes; and the setup where the client is made once. Render
 // thread.
+//
+// A batch the family cannot take, or the rest of one after a refused draw, is drawn by the engine with nobody vouching for it: under the
+// flush latch it is skipped and the residue census counts it, since every such case is a defect of the family.
 
 // volk must precede every Vulkan header in this translation unit.
 #include <rhi_interop_vulkan.h>
@@ -44,13 +47,6 @@ namespace DCLF::Features::BloodSplatter
 			return log;
 		}
 
-		/** @brief What the family leaves to the engine on purpose (Flush::EngineDraws): a batch or its rest. */
-		const Family::Flush::Reason& EngineReason()
-		{
-			static const Family::Flush::Reason reason{ "blood splatter: left to the engine" };
-			return reason;
-		}
-
 		/** @brief The batch being latched (render thread). */
 		struct Capture
 		{
@@ -58,7 +54,6 @@ namespace DCLF::Features::BloodSplatter
 			bool failed = false;  // a draw was refused: the latched part ran, the rest of the batch is the engine's
 			std::shared_ptr<Run> run;
 			Family::Passes passes;
-			Family::EngineRest engineRest;  // the rest of a refused batch, vouched for until the batch returns
 		};
 
 		Capture& GetCapture()
@@ -86,8 +81,6 @@ namespace DCLF::Features::BloodSplatter
 			a_capture.failed = true;
 			Refusals().Report(std::format("a draw of technique {}: {}", a_technique, a_reason));
 			FlushLatched(a_capture);
-			if (!a_capture.engineRest)
-				a_capture.engineRest.emplace(EngineReason());
 		}
 
 		/** @brief A splatter draw latched (null); the reason when it cannot be (the engine draws it then). */
@@ -197,7 +190,6 @@ namespace DCLF::Features::BloodSplatter
 				}
 				// The client's back buffer, and an anchor that can run now: otherwise the engine draws the batch (logged once each).
 				if (!ShellState::Running() || !FrameAnchors::IsRenderOwner() || !BloodSplatterDraws::Available() || (Family::BeginBatch(), !BloodSplatterDraws::CanTake())) {
-					Family::Flush::EngineDraws scope(EngineReason());
 					func(a_accumulator, a_first, a_last, a_flags, a_group);
 					return;
 				}
@@ -210,7 +202,6 @@ namespace DCLF::Features::BloodSplatter
 				if (!capture.passes.End())
 					Refusals().Report(capture.passes.Describe("screen blood"));
 				FlushLatched(capture);
-				capture.engineRest.reset();
 			}
 			static inline REL::Relocation<decltype(thunk)> func;
 		};

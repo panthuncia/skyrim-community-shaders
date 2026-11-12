@@ -497,7 +497,7 @@ namespace DCLF::Scene
 			permutation.extraShaderDescriptor |= static_cast<std::uint32_t>(State::ExtraShaderDescriptors::AdditiveLighting);
 		// The Lighting key bits' feature word, as their claimant's SetupGeometry hook sets it (the key carries the bits;
 		// Integrations/ExtendedTranslucency's material model).
-		permutation.extraFeatureDescriptor = Extensions::LightingKeyPermutation(RasterLightingSpare(key.rasterFlags));
+		permutation.extraFeatureDescriptor = RasterRefraction(key.rasterFlags) ? 0u : Extensions::LightingKeyPermutation(RasterLightingSpare(key.rasterFlags));
 		// A raw-permutation port's pass, as BSShader_BeginTechnique sets it (the Effect port's): raw vertex descriptor (Effect.hlsl
 		// tests SkyObject), the raw pixel bits the lookup dropped (GrayscaleToColor/ToAlpha, IgnoreTexAlpha), InWorld, no feature bits.
 		if (rules.rawPermutation) {
@@ -1001,8 +1001,13 @@ namespace DCLF::Scene
 			rasterFlags |= ((decalBiasMode[descriptors.forwardDecalGroup & 3] & 15u) << kRasterDepthBiasShift) | kRasterDecalNudge;
 		if (descriptors.refraction)
 			rasterFlags |= PackRefractionRasterFlags(descriptors.refractionFalloff, descriptors.refractionClamp);
-		// The Lighting key bits' claimant's (Integrations/ExtendedTranslucency's material model; 0 while it isn't loaded).
-		if (!descriptors.port)
+		// The Lighting key bits' claimant's (Integrations/ExtendedTranslucency's material model; 0 while it isn't loaded). A refraction key
+		// never draws its Lighting pipeline, so its spare bits hold a billboard leaf's mode + 1 instead (kRasterRefractionBillboardShift).
+		if (!descriptors.port && descriptors.refraction) {
+			if (entry.parentReason == Ineligible::Billboard)
+				if (const std::int32_t mode = BillboardModeOf(entry); mode >= 0)
+					rasterFlags |= static_cast<std::uint32_t>(mode + 1) << kRasterRefractionBillboardShift;
+		} else if (!descriptors.port)
 			rasterFlags |= Extensions::LightingKeyBitsOf(view) << kRasterLightingSpareShift;
 		// A port's key carries its program family's key bit (the Effect port's kRasterEffect; none for Lighting's).
 		const auto& family = Extensions::FamilyRulesOfKind(descriptors.port);

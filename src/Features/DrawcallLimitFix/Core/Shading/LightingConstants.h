@@ -255,6 +255,10 @@ namespace DCLF
 	inline constexpr std::uint32_t kRecordRefractionNoNormals = 1u << 5;
 	inline constexpr std::uint32_t kRecordRefractionVertexColors = 1u << 6;
 	inline constexpr std::uint32_t kRecordRefractionTwoSided = 1u << 7;
+	// A refraction leaf under an NiBillboardNode (the key's kRasterRefractionBillboardShift bits): the refraction stage turns it to the
+	// camera, with the face mode its placement row holds (BillboardRow.h). Shares bit 8 with kRecordDecalNudge, which a refraction key
+	// never has (a refraction object is in no decal group).
+	inline constexpr std::uint32_t kRecordRefractionBillboard = 1u << 8;
 	/** @brief The kRecordRefraction* bits of an object drawn with a_key: none unless it is a refraction key (kRasterRefraction). */
 	inline constexpr std::uint32_t RefractionRecordFlagsOf(const PipelineKey& a_key)
 	{
@@ -264,7 +268,8 @@ namespace DCLF
 		       ((a_key.rasterFlags & kRasterRefractionClamp) ? kRecordRefractionClamp : 0u) |
 		       ((a_key.passDescriptor & (1u << 2)) ? kRecordRefractionNoNormals : 0u) |     // the pass's ModelSpaceNormals
 		       ((a_key.passDescriptor & (1u << 0)) ? kRecordRefractionVertexColors : 0u) |  // its VC
-		       ((a_key.rasterFlags & kRasterTwoSided) ? kRecordRefractionTwoSided : 0u);
+		       ((a_key.rasterFlags & kRasterTwoSided) ? kRecordRefractionTwoSided : 0u) |
+		       (RasterLightingSpare(a_key.rasterFlags) ? kRecordRefractionBillboard : 0u);
 	}
 	// A program family's record bits (Api::ProgramFamilyContribution::records) share bits 3-7 with refraction: a family's record never has
 	// kRecordRefraction (Features/Effects/EffectConstants.h: the Effect family's suppress, billboard and mode bits).

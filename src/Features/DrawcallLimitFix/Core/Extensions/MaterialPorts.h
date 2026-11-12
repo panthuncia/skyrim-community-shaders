@@ -235,6 +235,19 @@ namespace DCLF::Extensions
 		return ParentAdmits(a_toggles, Api::EngineParent::Billboard, Api::ParentLeaves::TurnedEffectShapes) && a_kind != 0 &&
 		       MaterialPorts()[a_kind].rules.turnedByBillboards && a_type == static_cast<std::uint8_t>(RE::BSGeometry::Type::kTriShape) && !a_skinned;
 	}
+	/**
+	 * @brief Whether a Lighting leaf (port 0) with shader property flags a_flags, of geometry type a_type, skinned or not, is a refraction
+	 * shape the billboards turn under a_toggles: the parent contribution admits the turned shapes, the refraction class is on, its
+	 * property has kRefraction or kTempRefraction, and it is a skinless BSTriShape. Its one draw is the refraction normals, whose stage
+	 * turns it (Utility.hlsl, DCLFRefractionVertex). Heat haze cards under fires and forges are such leaves.
+	 */
+	inline bool BillboardTurnedRefraction(const ToggleSet& a_toggles, std::uint8_t a_kind, std::uint64_t a_flags, std::uint8_t a_type, bool a_skinned)
+	{
+		using Flag = RE::BSShaderProperty::EShaderPropertyFlag;
+		constexpr std::uint64_t kRefractionFlags = static_cast<std::uint64_t>(Flag::kRefraction) | static_cast<std::uint64_t>(Flag::kTempRefraction);
+		return ParentAdmits(a_toggles, Api::EngineParent::Billboard, Api::ParentLeaves::TurnedEffectShapes) && ObjectClassOn(a_toggles, Api::ObjectClass::Refraction) &&
+		       a_kind == 0 && (a_flags & kRefractionFlags) != 0 && a_type == static_cast<std::uint8_t>(RE::BSGeometry::Type::kTriShape) && !a_skinned;
+	}
 	/** @brief Kind a_kind's rules (0: Lighting's). */
 	inline const Api::MaterialPortRules& PortRules(std::uint8_t a_kind) { return MaterialPorts()[a_kind].rules; }
 	/** @brief Kind a_kind's constant space (0: Lighting's): a record's of that kind (MaterialRecord::kind), a key's of that shader. */

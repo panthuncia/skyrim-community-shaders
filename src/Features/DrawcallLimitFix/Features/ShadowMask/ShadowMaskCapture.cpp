@@ -1,6 +1,9 @@
 // The shadow mask family's engine side: the two shadow mask calls' hooks (the world's and a menu scene's), which let the engine's
 // function run with its draws latched and hand them to the anchor's pass; the family's DrawTriShape taker, which latches a shadow mask
 // draw in place of drawing it; and its BSUtilityShader::SetupGeometry watcher, which counts a batch's passes. Render thread.
+//
+// A call the family cannot take, or the rest of one after a refused draw, is drawn by the engine with nobody vouching for it: under the
+// flush latch it is skipped and the residue census counts it, since every such case is a defect of the family.
 
 // volk must precede every Vulkan header in this translation unit.
 #include <rhi_interop_vulkan.h>
@@ -44,13 +47,6 @@ namespace DCLF::Features::ShadowMask
 			return log;
 		}
 
-		/** @brief What the family leaves to the engine on purpose (Flush::EngineDraws): a batch or its rest. */
-		const Family::Flush::Reason& EngineReason()
-		{
-			static const Family::Flush::Reason reason{ "shadow mask: left to the engine" };
-			return reason;
-		}
-
 		/** @brief The batch being latched (render thread). */
 		struct Capture
 		{
@@ -59,7 +55,6 @@ namespace DCLF::Features::ShadowMask
 			View view = View::World;
 			std::shared_ptr<Run> run;
 			Family::Passes passes;
-			Family::EngineRest engineRest;  // the rest of a refused batch, vouched for until the batch returns
 		};
 
 		Capture& GetCapture()
@@ -96,8 +91,6 @@ namespace DCLF::Features::ShadowMask
 			a_capture.failed = true;
 			Refusals().Report(std::format("a {} draw: {}", NameOf(a_capture.view), a_reason), a_detail);
 			FlushLatched(a_capture);
-			if (!a_capture.engineRest)
-				a_capture.engineRest.emplace(EngineReason());
 		}
 
 		/**
@@ -218,7 +211,6 @@ namespace DCLF::Features::ShadowMask
 					return;
 				}
 				if (!ShellState::Running() || !FrameAnchors::IsRenderOwner() || !ShadowMaskDraws::Available() || !ShadowMaskDraws::CanTake(kView)) {
-					Family::Flush::EngineDraws scope(EngineReason());
 					func(a_arg1, a_arg2, a_arg3, a_arg4);
 					return;
 				}
@@ -235,7 +227,6 @@ namespace DCLF::Features::ShadowMask
 					Refusals().Report(capture.passes.Describe(std::format("{} shadow mask", NameOf(kView))));
 				// A batch whose draws all stayed the engine's (no light cast this frame) has nothing to run.
 				FlushLatched(capture);
-				capture.engineRest.reset();
 			}
 			static inline REL::Relocation<decltype(thunk)> func;
 		};

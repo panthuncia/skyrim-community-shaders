@@ -255,7 +255,7 @@ namespace DCLF::Features::Particles::MasterParticles
 	{
 		// Before the features' installs, so before the switch is registered: read from the same environment or switches file the
 		// registry reads it from at Install (masterSwitch).
-		if (!Util::SwitchFile::Enabled("CS_DCLF_MASTER_PARTICLES"))
+		if (Util::SwitchFile::Value("CS_DCLF_MASTER_PARTICLES") == "0")
 			return;
 		HookSites::RequireKnown("the particle manager's master removal", SitesKnown());
 		if (SitesKnown())
@@ -264,8 +264,8 @@ namespace DCLF::Features::Particles::MasterParticles
 
 	void Install(Api::InstallContext& a_context)
 	{
-		masterSwitch = a_context.RegisterSwitch({ .name = "CS_DCLF_MASTER_PARTICLES", .kind = Api::SwitchKind::Feature, .reduced = Api::SwitchReduced::Never, .description = "1: the particle manager's master particle systems (torches, candles, street mist) tracked as DCLF's unheld roots, their particle systems drawn by DCLF's particle path (dclf-roadmap.md 1.4; needs CS_DCLF_PARTICLES); 0 (default) they stay the engine's", .after = "CS_DCLF_PARTICLES" });
-		if (!SwitchEnabled(masterSwitch) || installed)
+		masterSwitch = a_context.RegisterSwitch({ .name = "CS_DCLF_MASTER_PARTICLES", .kind = Api::SwitchKind::Feature, .reduced = Api::SwitchReduced::Zero, .description = "default on: the particle manager's master particle systems (torches, candles, street mist, blood impacts) tracked as DCLF's unheld roots, their particle systems drawn by DCLF's particle path (dclf-roadmap.md 1.4; needs CS_DCLF_PARTICLES); 0 they stay the engine's", .after = "CS_DCLF_PARTICLES" });
+		if (SwitchValue(masterSwitch) == "0" || installed)
 			return;
 		observing = Diagnostics::Observe().stats;
 		if (!SitesKnown()) {
@@ -293,7 +293,7 @@ namespace DCLF::Features::Particles::MasterParticles
 		installed = true;
 		const auto reset = REL::Offset(kResetRemoveAll).address();
 		logger::info(
-			"[DCLF] master particles: on (CS_DCLF_MASTER_PARTICLES=1): the particle manager's masters are unheld category roots; removal hooked at {:#x}; "
+			"[DCLF] master particles: on (CS_DCLF_MASTER_PARTICLES, default on): the particle manager's masters are unheld category roots; removal hooked at {:#x}; "
 			"the world reset's remove-all at {:#x} {}",
 			removal, reset, Engine::CallsTo(reset, REL::Offset(kRemoveAll).address()) ? "is the engine's (SceneWriterFramework's detour fires its detaches)" : "is not a call to the remove-all <- FLAG");
 	}
