@@ -320,7 +320,7 @@ namespace DCLF::Features::MenuViews
 			const auto renders = state.renders[s].exchange(0, std::memory_order_relaxed);
 			const auto without = state.withoutWorldFrame[s].exchange(0, std::memory_order_relaxed);
 			if (renders)
-				text += std::format("menu views: {} rendered {} times ({} without a DCLF frame); the engine drew them\n", NameOf(static_cast<MenuScene>(s)), renders, without);
+				text += std::format("menu views: {} rendered {} times ({} without a DCLF frame)\n", NameOf(static_cast<MenuScene>(s)), renders, without);
 		}
 		if (const auto off = state.offThread.exchange(0, std::memory_order_relaxed))
 			text += std::format("menu views: {} menu scene renders off the main thread (the loading screen's), the engine's\n", off);

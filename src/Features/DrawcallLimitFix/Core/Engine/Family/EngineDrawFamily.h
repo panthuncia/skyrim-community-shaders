@@ -79,32 +79,48 @@ namespace DCLF::Family
 
 	namespace Detail
 	{
+		/** @brief The most watchers one shader type takes (the families that watch it). */
+		inline constexpr std::size_t kSetupWatchers = 4;
+
 		template <RE::BSShader::Type kType>
 		struct SetupGeometry
 		{
 			static void thunk(RE::BSShader* a_this, RE::BSRenderPass* a_pass, std::uint32_t a_flags)
 			{
 				func(a_this, a_pass, a_flags);
-				if (watcher)
+				for (const auto watcher : watchers) {
+					if (!watcher)
+						break;
 					watcher(a_pass);
+				}
 			}
 			static inline REL::Relocation<decltype(thunk)> func;
-			static inline SetupWatcher watcher = nullptr;
+			static inline std::array<SetupWatcher, kSetupWatchers> watchers{};
 		};
 	}
 
 	/**
 	 * @brief Watches a shader's SetupGeometry (vtable slot 6 of a_vtable, the shader type's BSShader vtable): a_watcher runs after it,
-	 * where the draw's constants are written. One watcher per shader type; install time (main thread).
+	 * where the draw's constants are written. Up to Detail::kSetupWatchers watchers per shader type, run in the order added; the first
+	 * writes the hook. Install time (main thread). False, logged, when the type has no room left.
 	 */
 	template <RE::BSShader::Type kType>
-	void WatchSetupGeometry(REL::VariantID a_vtable, SetupWatcher a_watcher)
+	bool WatchSetupGeometry(REL::VariantID a_vtable, SetupWatcher a_watcher)
 	{
 		using Thunk = Detail::SetupGeometry<kType>;
-		if (Thunk::watcher)
-			return;
-		Thunk::watcher = a_watcher;
-		stl::write_vfunc<0x6, Thunk>(a_vtable);
+		for (auto& watcher : Thunk::watchers) {
+			if (watcher == a_watcher)
+				return true;
+			if (watcher)
+				continue;
+			const bool first = &watcher == Thunk::watchers.data();
+			watcher = a_watcher;
+			if (first)
+				stl::write_vfunc<0x6, Thunk>(a_vtable);
+			return true;
+		}
+		logger::warn("[DCLF] engine draw families: shader type {} has no room for another SetupGeometry watcher", static_cast<std::uint32_t>(kType));
+		return false;
 	}
 
 	/**

@@ -1,16 +1,47 @@
 #if defined(CS_ORG_BINDLESS) && !defined(DCLF_BINDLESS)
-// The ORG build: the engine's shadow masks (Drawcall Limit Fix's shadow mask family, Features/DrawcallLimitFix/Features/ShadowMask),
-// each shadow-casting light's pass over the screen quad into kSHADOW_MASK: RENDER_SHADOWMASK* with RENDER_DEPTH. A draw's engine
-// constants (PS PerTechnique and PerGeometry, the alpha test reference), its textures' and samplers' heap indices and its geometry are
-// one latch region. FrameBuffer and SharedData are the shared constants, written at the anchor's run right after the engine's batch,
-// so they hold the camera the engine's draw would have read (the menu's in a menu scene).
-#	if !defined(RENDER_DEPTH) || !(defined(RENDER_SHADOWMASK) || defined(RENDER_SHADOWMASKSPOT) || defined(RENDER_SHADOWMASKPB) || defined(RENDER_SHADOWMASKDPB))
-#		error "Utility.hlsl's ORG build draws the shadow masks (RENDER_SHADOWMASK* with RENDER_DEPTH) only"
+// The ORG builds of the engine's Utility draws, drawn by Drawcall Limit Fix's engine draw families:
+// - the shadow masks (Features/DrawcallLimitFix/Features/ShadowMask): each shadow-casting light's pass over the screen quad into
+//   kSHADOW_MASK, RENDER_SHADOWMASK* with RENDER_DEPTH;
+// - the local map's scene draws (Features/DrawcallLimitFix/Features/MenuViews, UTILITY_ORG_SCENE): its objects' base textures
+//   (RENDER_BASE_TEXTURE) and the fog of war (LOCALMAP_FOGOFWAR) into kLOCAL_MAP_SWAP.
+// A draw's engine constants, its textures' and samplers' heap indices and its geometry are one latch region. FrameBuffer and
+// SharedData are the shared constants, written at the anchor's run right after the engine's batch, so they hold the camera the
+// engine's draw would have read (the menu's in a menu scene, the local map's in the local map).
+#	if defined(RENDER_DEPTH) && (defined(RENDER_SHADOWMASK) || defined(RENDER_SHADOWMASKSPOT) || defined(RENDER_SHADOWMASKPB) || defined(RENDER_SHADOWMASKDPB))
+#	elif (defined(RENDER_BASE_TEXTURE) || defined(LOCALMAP_FOGOFWAR)) && !defined(SKINNED) && !defined(RENDER_DEPTH) && !defined(RENDER_SHADOWMAP)
+#		define UTILITY_ORG_SCENE
+#	else
+#		error "Utility.hlsl's ORG build draws the shadow masks (RENDER_SHADOWMASK* with RENDER_DEPTH) and the local map (RENDER_BASE_TEXTURE, LOCALMAP_FOGOFWAR) only"
 #	endif
 #	define UTILITY_ORG
 #	define ORG_SHARED_CONSTANTS
 #	include "Common/OrgResources.hlsli"
 
+#	if defined(UTILITY_ORG_SCENE)
+// A local map draw's latched values (SceneDrawConstants in Features/DrawcallLimitFix/Features/MenuViews/MenuScenes.h): the rows of
+// the engine's constant buffers as SetupTechnique, SetupMaterial and SetupGeometry wrote them. World is row_major in the D3D11
+// shader, so its rows are the registers.
+struct UtilityOrgSceneDraw
+{
+	float4 VSTechnique[1];  // VS b0: HighDetailRange
+	float4 VSMaterial[1];   // VS b1: TexcoordOffset
+	float4 VSGeometry[8];   // VS b2: ShadowFadeParam, World (c1-c4), EyePos, WaterParams, TreeParams
+	float4 PSMaterial[2];   // PS b1: RefractionPower, BaseColor
+	float4 PSGeometry[4];   // PS b2: DebugColor, PropertyColor, AlphaTestRef, ShadowLightParam
+	float AlphaTestRefRS;   // b11
+	uint VertexStride;
+	uint FirstIndex;
+	uint Padding;
+	uint4 Textures[2];  // t0-t7 heap indices
+	uint4 Samplers[2];  // s0-s7 sampler heap indices
+	uint2 VertexAddress;
+	uint2 IndexAddress;
+	uint2 VertexLayout;
+	uint2 Padding2;
+};
+
+#		define UTILITY_ORG_RESOURCES(X)         			X(SHARED, ConstantBuffer, Shared, 0) 			X(LATCH, UtilityOrgSceneDraw, SceneDraw, 2)
+#	else
 // A shadow mask draw's latched values (DrawConstants in Features/DrawcallLimitFix/Features/ShadowMask/ShadowMask.h). The engine's
 // rows as its constant buffers hold them: a matrix is its column registers (column_major packing), rebuilt below.
 struct UtilityOrgShadowMaskDraw
@@ -29,9 +60,8 @@ struct UtilityOrgShadowMaskDraw
 	uint2 Padding2;
 };
 
-#	define UTILITY_ORG_RESOURCES(X)         \
-		X(SHARED, ConstantBuffer, Shared, 0) \
-		X(LATCH, UtilityOrgShadowMaskDraw, ShadowMaskDraw, 2)
+#		define UTILITY_ORG_RESOURCES(X)         			X(SHARED, ConstantBuffer, Shared, 0) 			X(LATCH, UtilityOrgShadowMaskDraw, ShadowMaskDraw, 2)
+#	endif
 ORG_PUSH_BLOCK(UTILITY_ORG_RESOURCES(ORG_HANDLE))
 UTILITY_ORG_RESOURCES(ORG_RESOURCE)
 #endif
@@ -161,7 +191,18 @@ struct VS_OUTPUT
 #endif
 };
 
-#if defined(VSHADER) && !defined(UTILITY_ORG)
+#if defined(VSHADER) && (!defined(UTILITY_ORG) || defined(UTILITY_ORG_SCENE))
+#	if defined(UTILITY_ORG_SCENE)
+// The ORG build's constants, from the draw's latch (UtilityOrgSceneDraw).
+static float4 HighDetailRange = SceneDraw.VSTechnique[0];
+static float2 ParabolaParam = float2(0, 0);  // RENDER_SHADOWMAP_PB's only, which this build does not draw
+static float4 TexcoordOffset = SceneDraw.VSMaterial[0];
+static float4 ShadowFadeParam = SceneDraw.VSGeometry[0];
+static row_major float4x4 World = float4x4(SceneDraw.VSGeometry[1], SceneDraw.VSGeometry[2], SceneDraw.VSGeometry[3], SceneDraw.VSGeometry[4]);
+static float4 EyePos = SceneDraw.VSGeometry[5];
+static float4 WaterParams = SceneDraw.VSGeometry[6];
+static float4 TreeParams = SceneDraw.VSGeometry[7];
+#	else
 cbuffer PerTechnique : register(b0)
 {
 	float4 HighDetailRange : packoffset(c0);  // loaded cells center in xy, size in zw
@@ -199,6 +240,7 @@ cbuffer PerGeometry : register(b2)
 	float4 TreeParams : packoffset(c7);
 #	endif
 };
+#	endif  // UTILITY_ORG_SCENE
 
 #if defined(DCLF_PULLED)
 // Set by main from the draw's object (DCLF_PULLED, below), as the DCLF_BINDLESS build's statics.
@@ -228,6 +270,8 @@ float2 SmoothSaturate(float2 value)
 
 #	if defined(DCLF_PULLED)
 VS_OUTPUT DCLFShade(VS_INPUT input)
+#	elif defined(UTILITY_ORG_SCENE)
+VS_OUTPUT UtilityOrgSceneShade(VS_INPUT input)
 #	else
 VS_OUTPUT main(VS_INPUT input)
 #	endif
@@ -641,7 +685,46 @@ VS_OUTPUT main(uint index : SV_VertexID, uint a_instance : SV_InstanceID)
 #	endif
 #endif
 
-#if defined(VSHADER) && defined(UTILITY_ORG)
+#if defined(VSHADER) && defined(UTILITY_ORG_SCENE)
+#	if defined(__spirv__)
+#		define DCLF_PULLED_VERTICES
+#		include "Common/DCLFVertexPull.hlsli"
+
+// The local map build's vertex stage: the draw's vertex pulled as the input assembler reads it (its 16-bit index, then its
+// attributes as the engine's input layout for the draw's vertex layout decodes them), then the engine's stage (UtilityOrgSceneShade).
+VS_OUTPUT main(uint a_vertexID: SV_VertexID)
+{
+	DCLFDrawVertexLayout = SceneDraw.VertexLayout;
+	const uint indexNumber = SceneDraw.FirstIndex + a_vertexID;
+	const uint indexWord = vk::RawBufferLoad<uint>(DCLFAddress(SceneDraw.IndexAddress) + uint64_t((indexNumber * 2) & ~3u));
+	const uint index = (indexNumber & 1) ? (indexWord >> 16) : (indexWord & 0xFFFF);
+	DCLFStream first = { DCLFAddress(SceneDraw.VertexAddress), SceneDraw.VertexStride };
+	DCLFStream second = { uint64_t(0), 0u };
+	DCLFStreamsAt(index, first, second);
+	VS_INPUT input;
+	input.PositionMS = float4(DCLFPullPosition(first, second).xyz, 1);
+#		if defined(TEXTURE)
+	input.TexCoord = DCLFPullHalf2(1, first, second);
+#		endif
+#		if defined(NORMALS)
+	input.Normal = DCLFPullUnorm4(3, 0, first, second);
+	input.Bitangent = DCLFPullUnorm4(4, 0, first, second);
+#		endif
+#		if defined(VC)
+	input.Color = DCLFPullUnorm4(5, 0, first, second);
+#		endif
+	return UtilityOrgSceneShade(input);
+}
+#	else
+// The D3D12 build has no vertex pulling yet: it compiles, and draws nothing.
+VS_OUTPUT main(uint a_vertexID: SV_VertexID)
+{
+	VS_OUTPUT vsout = (VS_OUTPUT)0;
+	vsout.PositionCS = float4(0, 0, (float)SceneDraw.FirstIndex, 1);
+	return vsout;
+}
+#	endif
+#elif defined(VSHADER) && defined(UTILITY_ORG)
 #	if defined(__spirv__)
 #		define DCLF_PULLED_VERTICES
 #		include "Common/DCLFVertexPull.hlsli"
@@ -682,7 +765,26 @@ struct PS_OUTPUT
 
 #ifdef PSHADER
 
-#	if defined(UTILITY_ORG)
+#	if defined(UTILITY_ORG_SCENE)
+// The local map build's resources, from the draw's latch: the slots' heap indices and the engine's constant rows.
+static SamplerState SampBaseSampler = SamplerDescriptorHeap[SceneDraw.Samplers[0].x];
+static SamplerState SampNormalSampler = SamplerDescriptorHeap[SceneDraw.Samplers[0].y];
+static SamplerState SampGrayscaleSampler = SamplerDescriptorHeap[SceneDraw.Samplers[1].w];
+
+static Texture2D<float4> TexBaseSampler = ResourceDescriptorHeap[SceneDraw.Textures[0].x];
+static Texture2D<float4> TexNormalSampler = ResourceDescriptorHeap[SceneDraw.Textures[0].y];
+static Texture2D<float4> TexGrayscaleSampler = ResourceDescriptorHeap[SceneDraw.Textures[1].w];
+
+static float RefractionPower = SceneDraw.PSMaterial[0].x;
+static float4 BaseColor = SceneDraw.PSMaterial[1];
+
+static float4 DebugColor = SceneDraw.PSGeometry[0];
+static float4 PropertyColor = SceneDraw.PSGeometry[1];
+static float4 AlphaTestRef = SceneDraw.PSGeometry[2];
+static float4 ShadowLightParam = SceneDraw.PSGeometry[3];
+
+static float AlphaTestRefRS = SceneDraw.AlphaTestRefRS;
+#	elif defined(UTILITY_ORG)
 // The ORG build's resources, from the draw's latch: the slots' heap indices and the engine's constant rows.
 static SamplerState SampBaseSampler = SamplerDescriptorHeap[ShadowMaskDraw.Samplers[0].x];
 static SamplerState SampDepthSampler = SamplerDescriptorHeap[ShadowMaskDraw.Samplers[0].z];
