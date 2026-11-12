@@ -1043,6 +1043,12 @@ namespace DCLF::Scene
 			record.indexCount = a_source.indexCount;
 			record.firstIndex = a_source.firstIndex;
 			// Both refs too: the vertex stages and the index pool read the buffers through them (no ref: unresolved, as no address).
+			if (vertexLease && indexLease && (!vertexLease->buffer.ref || !indexLease->buffer.ref)) {
+				static std::atomic<bool> logged{ false };
+				if (!logged.exchange(true))
+					logger::warn("[DCLF] a geometry's buffers resolved without a buffer view ref (vertex slot {}, index slot {}): its objects are not drawn",
+						vertexLease->buffer.ref.viewSlot, indexLease->buffer.ref.viewSlot);
+			}
 			if (vertexLease && indexLease && vertexLease->buffer.ref && indexLease->buffer.ref) {
 				record.vertexAddress = vertexLease->buffer.address;
 				record.vertexRef = vertexLease->buffer.ref;
