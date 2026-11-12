@@ -60,17 +60,17 @@ mechanism below unless the row says otherwise.
 | Effect (slots) | Where | Inputs | Outputs | ORG |
 | --- | --- | --- | --- | --- |
 | HDR downsample, luminance, adaptation (57-64) | HDR Render, inside 99023's tonemap call | source, levels, `DAT_141e0eb48` | `kHDR_DOWNSAMPLE0..13` | **Built** (ISHDR) |
-| Bright-pass bloom (23-29 / 79-85) | HDR Render | downsample0, swap, luminance | `kHDR_BLURSWAP`, `kHDR_BLOOM` | **Built** (ISBlur) |
-| Tonemap (55, 56) | HDR Render | bloom, source, luminance | the HDR output | Stays: CS's Tonemap hook, Effects11 (replaces the whole HDR effect when on), Post Processing (its own ORG chain at the Tonemap anchor; ISHDR's passthrough). Next: the vanilla tonemap only when neither feature owns it, through this mechanism (ISHDR is already dual-target for `BLEND`). |
+| Bright-pass bloom (23-29: 79-85, then 65-71) | HDR Render | downsample0, swap, luminance | `kHDR_BLURSWAP`, `kHDR_BLOOM` | **Built** (ISBlur): the bright-pass draw into the swap and, since 5.5.4, the plain blur's draw into `kHDR_BLOOM` |
+| Tonemap (55, 56) | HDR Render | bloom, source, luminance | the HDR output (`kIMAGESPACE_TEMP_COPY` when TAA or an upscaler follows, else the destination) | **Built** (5.5.4, ISHDR's `BLEND` build): the draw the engine makes when Effects11 does not replace the HDR effect, with Post Processing's passthrough or the vanilla tonemap. The fade form implies the plain one's shapes and back. |
 | VL / lens flare composite (114-116) | 99024 (+0x190 helper, 100493) | VL target, lens flare target | the pre-tonemap source | **Built** (ISCompositeLensFlareVolumetricLighting) |
 | SIL composite (146 / 147) | 99024 (+0x1d8, 100528) | | | Next: ISSILComposite, ISSILRawInd sources exist; same mechanism |
 | IB lens flares (105, 119-122, 124) | 99024 (+0x180, 100481) | | `kIBLENSFLARES_*` | Next: raster ones through this mechanism; 121/122 are compute (below) |
-| ISCopy back to dst (34) | 99024, 99023, and the callers in R4's table | | | Next: ISCopy is a plain copy; a graph Copy where formats match, else the shader. Menu 3D's and the framebuffer copies need the frame's present path (P5.8, p5-menus) |
+| ISCopy (34, 35, 37, 38) | 99024, 99023, and the callers in R4's table | an engine target | an engine target | **Built** (5.5.4, ISCopy.hlsl dual-target): inside a scope as part of it, else each call a scope of its own. A copy from `kFRAMEBUFFER` (no SRV) is refused. ISCopyScaleBias (36) and ISCopyTextureMask (41) move the coordinates in their vertex shader, which the graph's triangle cannot: not taken. |
 | VL apply (103) and the VL CS blur (106/107 via +0x188) | RenderWorldPostProcess (100430) | depth, shadow maps | `kVOLUMETRIC_LIGHTING_*` | Next. 106/107 and CS's own `ISVolumetricLightingGenerateCS` / `RaymarchCS` / `BlurHCS` / `BlurVCS` are compute: `DispatchCSShader` (75532 / 77329) with CS's replacement chosen in `CSShadersSupport::Renderer_DispatchCSShader` (Hooks.cpp). The compute form of this mechanism latches the dispatch there: CS b0 from the capture (`Find(Current(), Compute, 0)` after `OnDispatch`), the CS SRVs/UAVs from the shadow state's CS slots, group counts into a gate entry (`OpenDispatch`). |
 | SSAO (SAO 132-145, `RenderSSAO` 100520 / 107245; compute set 134/135/137/145 via 100526) | RenderWorld | depth, normals, motion vectors, last frame's AO | SAO targets, then composite into kMAIN | **Built** (wave 3): CameraZ, Minify, MinifyContrast, RawAO, RawAONoTemporal, BlurH, BlurV through the explicit-target Render. The composites 138-140 since 5.5.4 (below, "5.5.4: the remainder"): the feature inputs CS's headers read are bound by published id. The compute set is not used by a vanilla frame (the census saw none) and is not taken. |
 | Reflections (130 ray march, 120 mask downsample, 108/109 the compute blur) | the reflection pass 100428 / 107146 | normals mask, colour, depth, alpha, the reflection cubemap (CS, t4) | `kSSR_RAW`, the blurred pair | **Built** (wave 3): the downsample and the ray march through the explicit-target Render, the blur H/V through the compute form. The compute downsample (122) is taken by the same form when the game picks it. |
 | DOF (3: 58, 11 or the CS blur 112/113, 45-47) and the distant blur (49-51) | 99023 slot 3 | downsample, swap, depth, underwater mask | the chain's target | **Built** (w3-slots): ISDepthOfField*/ISDistantBlur* and the compute blur 112/113 (ISBlurCS's DOF build), each call a scope of its own. The downsample (58) and the raster blur (11) are Next. |
-| Radial blur (5: 52-54), full-screen blur (6), get hit (7: 34, 10, 40) | 99023 slots 5-7 | | | Radial blur **built** (w3-slots, its own scope); the rest Next: same mechanism; menu blur is FullScreenBlur (the journal) |
+| Radial blur (5: 52-54), full-screen blur (6), get hit (7: 34, 10, 40) | 99023 slots 5-7 | | | **Built**: the radial blur (w3-slots), and since 5.5.4 the blur composites' draws (ISBlur 65-71, ISNonHDRBlur 72-78), ISCopy and ISDoubleVision (dual-target), each draw outside a scope a scope of its own |
 | Refraction (1: 39) | 99023 slot 1 | src, `kREFRACTION_NORMALS` | the chain's target | **Built** (w3-slots, its own scope) |
 | FXAA (2) | 99023 slot 2 | | | Next (transcribed source; with the game's FXAA setting only) |
 | World map (0: 43/44), Map (8: 42) | 99023 slot 0, the map menu | | | Next; the map camera is p5-menus'. ISMap's vanilla VS has no SV_Position (imagespace-shaders.md): decide whether the pass draws |
@@ -288,11 +288,12 @@ own, which is what the capture does already.
 - Per shape, at Setup: an import that fails, a viewport outside this resolution's target, a sampler or blend without an ORG form
   (blend factor, dual source): `<effect> into <target> has no pass this session (<reason>)`. A program that does not build leaves
   its pass out of the graph (error).
-- Under the flush latch (flush.md, "Allowed engine draws") only the effects this port does not cover run in an `EngineDraws` scope,
-  under `imagespace: effect not on the graph` (the tonemap and the effects marked Next). Volumetric Lighting's render, apply and
-  blurs are its own port's (5.5.3). A covered effect's draw the engine still makes (any refusal or failure above) is vouched for by
-  nothing: the latch skips it with its `[E]` line and the census counts it. 5.5.3 deleted `imagespace: volumetric lighting
-  compute`; 5.5.4 deleted `shape refused`, `shape not in the manifest` and `failed on the graph`.
+- Under the flush latch (flush.md) no ImageSpace draw is vouched for: a draw the engine still makes (an effect the port does not
+  cover, any refusal or failure above) is skipped with its `[E]` line and counted by the census. Draws of effects the port does not
+  cover are named every 300 frames (`effects the port does not cover drew on D3D11 in <n> frames: <shader> into rt<i> depth <d>:
+  <count>, ...`). Volumetric Lighting's render, apply and blurs are its own port's (5.5.3). 5.5.3 deleted `imagespace: volumetric
+  lighting compute`; 5.5.4 deleted `shape refused`, `shape not in the manifest`, `failed on the graph` and `effect not on the
+  graph`.
 - A failed anchor epoch (`onFailed`) returns every effect to the engine for the session. A batch that does not draw after `CanRun`
   allowed it loses those draws for that frame (counted as `missed`, logged as an error).
 
@@ -301,11 +302,13 @@ own, which is what the capture does already.
 | Switch | Effect |
 | --- | --- |
 | `CS_ORG_IMAGESPACE=1` | Installs the hooks, registers the manifest's shapes at Setup and takes their draws. Needs `CS_ORG_ENGINE_CONSTANTS=1`. |
-| `CS_ORG_IMAGESPACE_EFFECTS=<list>` | A diagnostic for bisecting an effect. Comma list of engine names, effect names or groups (`hdr`, `bloom`, `composite`, `sao`, `ssr`, `dof`, `refraction`, `radialblur`, `copy`, `waterblend`), any case. Unset or `all`: every covered effect. |
+| `CS_ORG_IMAGESPACE_EFFECTS=<list>` | A diagnostic for bisecting an effect. Comma list of engine names, effect names or groups (`hdr`, `bloom`, `blur`, `nonhdrblur`, `tonemap`, `iscopy`, `gethit`, `composite`, `sao`, `ssr`, `dof`, `refraction`, `radialblur`, `copy`, `waterblend`), any case. Unset or `all`: every covered effect. |
 | `CS_ORG_IMAGESPACE_LOG=1` | A diagnostic: logs each shape new to the manifest (with its viewport), and each shape's constant sizes once when its first draw is taken. |
 
 Covered effect names: the HDR group (ISHDRDownSample16, ISHDRDownSample4 (also into kLDR_DOWNSAMPLE0 outside the HDR effect, a scope of
-its own), the Lum, LumClamp, RGB2Lum and LightAdapt forms), ISBrightPassBlur3 to 15, the three composites, the SAO chain with its
+its own), the Lum, LumClamp, RGB2Lum and LightAdapt forms), ISBrightPassBlur3 to 15, ISBlur3 to 15 and ISNonHDRBlur3 to 15, the tonemap
+(ISHDRTonemapBlendCinematic and its Fade form), ISCopy, ISCopyDynamicFetchDisabled, ISCopyCustomViewport, ISCopyGrayScale, ISDoubleVision,
+the three composites, the SAO chain with its
 composite (ISSAOCompositeSAO, ISSAOCompositeFog, ISSAOCompositeSAOFog), the reflection pass, the depth of field and distant blur
 (into kFRAMEBUFFER too) with their compute blur, ISRefraction, the radial blurs, ISCopySubRegionCS (the snow pass's and the water's
 flow copies) and ISWaterBlend (two targets: kMAIN and the water history).
@@ -425,9 +428,26 @@ pass from the first session that saw any ISRefraction shape.
 **The distant blur** into kFRAMEBUFFER is a shape like any other (`ResolveOutput`'s kFRAMEBUFFER case, `EngineTarget(0)` importing
 the RTV's texture); no reason covers it, and its whole-target shape is implied too.
 
-**Reasons.** `shape refused`, `shape not in the manifest` and `failed on the graph` are deleted. A covered effect's draw that still
-reaches the engine runs outside any `EngineDraws` scope: the latch skips it and the census counts it. `effect not on the graph` stays
-for the effects the port does not cover (the volumetric lighting's apply and blurs among them; 5.5.3's lane removes it).
+**The rest of the chain.** The census after the first 5.5.4 merge (`1112-021322-p35-latch-census-short-p5-now`) still showed 3-6
+ImageSpace draws a frame under `effect not on the graph` in every window, into `kMAIN`, `kHDR_BLOOM`, `kIMAGESPACE_TEMP_COPY` and
+`kFRAMEBUFFER`. By the RE: the bloom's second draw is the plain blur (ISBlur 65-71) into `kHDR_BLOOM`; the tonemap writes
+`kIMAGESPACE_TEMP_COPY` when TAA or an upscaler follows, else the destination; the copies go back into `kMAIN` and to the frame
+buffer. So the plain and non-HDR blurs, the tonemap and its fade form (ISHDR's `BLEND` build was already dual-target), ISCopy's
+pass-through forms and the get-hit double vision are covered now: ISCopy.hlsl and ISDoubleVision.hlsl got ORG builds (the D3D11
+builds are unchanged, all ORG code is under `CS_ORG_BINDLESS`). The blurs and the tonemap's two forms imply each other's shapes
+(`SharesShapes`); the copies and the tonemap make no swap pair (one source into several targets by caller, `PingPongs`). The copies,
+the blurs and the double vision called outside every scope are scopes of their own (24 runs a frame for those, two for the
+pre-tonemap composites).
+
+**Reasons.** `shape refused`, `shape not in the manifest`, `failed on the graph` and `effect not on the graph` are deleted. Any
+ImageSpace draw that still reaches the engine is skipped by the latch and counted by the census, and an effect the port does not
+cover is named in the 300-frame line (Fallbacks and failure).
+
+**Left with the engine, by reason:** ISCopyScaleBias and ISCopyTextureMask (their vertex shaders move the coordinates); a copy
+from `kFRAMEBUFFER` (no SRV: the main frame's screenshot copies); ISSimpleColor and the menu 3D chain (the menu views lane, a
+manager rectangle); ISMap, ISWorldMap, ISLocalMap (the map views, p5-menus); ISAlphaBlend (the race menu's tint masks, loaded
+textures, not engine targets); the lens flares, IB lens flares, SIL composite, FXAA, noise, snow SSS, TAA forms, the
+dynamic-resolution upsample, ISUnderwaterMask and the water displacement (p5-water) until the 300-frame line names them in play.
 
 **Rebuilds.** None during play from this work. A feature id the composite declares that is published after the graph's first build
 builds every graph once (`PublishedResources::IsDeclarable`), at that publish (in the main menu for the ported features).

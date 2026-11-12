@@ -20,7 +20,6 @@ bool RenderGraph::Engine::ImageSpace::Requested()
 #	include "RenderGraph/AnchorPasses.h"
 #	include "RenderGraph/ComputeProgram.h"
 #	include "RenderGraph/Engine/Constants/EngineConstants.h"
-#	include "RenderGraph/Engine/Flush/Flush.h"
 #	include "RenderGraph/Engine/Pipeline/Descriptions.h"
 #	include "RenderGraph/Engine/Pipeline/StateConversion.h"
 #	include "RenderGraph/Engine/Tripwire/Tripwire.h"
@@ -66,8 +65,6 @@ namespace RenderGraph::Engine::ImageSpace
 		using FrameAnchors::Anchor;
 		namespace Constants = RenderGraph::Engine::Constants;
 		namespace Pipeline = RenderGraph::Engine::Pipeline;
-		// The flush latch's allowed engine draws (Flush.h). Named Latch here: Flush is this file's batch run.
-		namespace Latch = ::RenderGraph::Engine::Flush;
 		using Effects = RE::ImageSpaceManager;
 
 		constexpr const char* kClientId = "cs.engine.imagespace";
@@ -167,6 +164,37 @@ namespace RenderGraph::Engine::ImageSpace
 			{ Effects::ISBrightPassBlur11, "ISBrightPassBlur11", "bloom", "ISBlur.hlsl", 2, 0b11, 2 },
 			{ Effects::ISBrightPassBlur13, "ISBrightPassBlur13", "bloom", "ISBlur.hlsl", 2, 0b11, 2 },
 			{ Effects::ISBrightPassBlur15, "ISBrightPassBlur15", "bloom", "ISBlur.hlsl", 2, 0b11, 2 },
+			// The blur composites' draws (the bright-pass composite's vertical draw into kHDR_BLOOM, the full-screen, depth-of-field and
+			// get-hit blurs): t0 only, without BRIGHTPASS. One shader per radius, as the bright-pass blurs. Outside every scope (the
+			// end-of-frame chain's composites) each draw is a scope of its own.
+			{ Effects::ISBlur3, "ISBlur3", "blur", "ISBlur.hlsl", 2, 0b01, 2, 0, false, true },
+			{ Effects::ISBlur5, "ISBlur5", "blur", "ISBlur.hlsl", 2, 0b01, 2, 0, false, true },
+			{ Effects::ISBlur7, "ISBlur7", "blur", "ISBlur.hlsl", 2, 0b01, 2, 0, false, true },
+			{ Effects::ISBlur9, "ISBlur9", "blur", "ISBlur.hlsl", 2, 0b01, 2, 0, false, true },
+			{ Effects::ISBlur11, "ISBlur11", "blur", "ISBlur.hlsl", 2, 0b01, 2, 0, false, true },
+			{ Effects::ISBlur13, "ISBlur13", "blur", "ISBlur.hlsl", 2, 0b01, 2, 0, false, true },
+			{ Effects::ISBlur15, "ISBlur15", "blur", "ISBlur.hlsl", 2, 0b01, 2, 0, false, true },
+			{ Effects::ISNonHDRBlur3, "ISNonHDRBlur3", "nonhdrblur", "ISBlur.hlsl", 2, 0b01, 2, 0, false, true },
+			{ Effects::ISNonHDRBlur5, "ISNonHDRBlur5", "nonhdrblur", "ISBlur.hlsl", 2, 0b01, 2, 0, false, true },
+			{ Effects::ISNonHDRBlur7, "ISNonHDRBlur7", "nonhdrblur", "ISBlur.hlsl", 2, 0b01, 2, 0, false, true },
+			{ Effects::ISNonHDRBlur9, "ISNonHDRBlur9", "nonhdrblur", "ISBlur.hlsl", 2, 0b01, 2, 0, false, true },
+			{ Effects::ISNonHDRBlur11, "ISNonHDRBlur11", "nonhdrblur", "ISBlur.hlsl", 2, 0b01, 2, 0, false, true },
+			{ Effects::ISNonHDRBlur13, "ISNonHDRBlur13", "nonhdrblur", "ISBlur.hlsl", 2, 0b01, 2, 0, false, true },
+			{ Effects::ISNonHDRBlur15, "ISNonHDRBlur15", "nonhdrblur", "ISBlur.hlsl", 2, 0b01, 2, 0, false, true },
+			// The HDR effect's tonemap (step 5 of its Render): t0 the bloom, t1 the scene, t2 the luminance. With Post Processing on it is
+			// ISHDR's passthrough (POSTPROCESS); with Effects11 owning the tonemap the engine never calls it. The fade form when the
+			// manager's fade is above 0.
+			{ Effects::ISHDRTonemapBlendCinematic, "ISHDRTonemapBlendCinematic", "tonemap", "ISHDR.hlsl", 3, 0b111, 3 },
+			{ Effects::ISHDRTonemapBlendCinematicFade, "ISHDRTonemapBlendCinematicFade", "tonemap", "ISHDR.hlsl", 3, 0b111, 3 },
+			// The copies whose vertex shader passes the coordinates through (ISCopyScaleBias and ISCopyTextureMask move them in theirs,
+			// which the graph's fullscreen triangle cannot): back to the chain's destination in the pre-tonemap composites, and the main
+			// frame's, the menus' and the end-of-frame chain's copies outside every scope (each call a scope of its own).
+			{ Effects::ISCopy, "ISCopy", "iscopy", "ISCopy.hlsl", 1, 0b1, 1, 0, false, true },
+			{ Effects::ISCopyDynamicFetchDisabled, "ISCopyDynamicFetchDisabled", "iscopy", "ISCopy.hlsl", 1, 0b1, 1, 0, false, true },
+			{ Effects::ISCopyCustomViewport, "ISCopyCustomViewport", "iscopy", "ISCopy.hlsl", 1, 0b1, 1, 0, false, true },
+			{ Effects::ISCopyGrayScale, "ISCopyGrayScale", "iscopy", "ISCopy.hlsl", 1, 0b1, 1, 0, false, true },
+			// The get-hit effect's last draw (end-of-frame chain slot 7): t0 the image, t1 its blurred copy (kGETHIT_BUFFER's blur).
+			{ Effects::ISDoubleVision, "ISDoubleVision", "gethit", "ISDoubleVision.hlsl", 2, 0b11, 2, 0, false, true },
 			{ Effects::ISCompositeVolumetricLighting, "ISCompositeVolumetricLighting", "composite", "ISCompositeLensFlareVolumetricLighting.hlsl", 2, 0b01, 2 },
 			{ Effects::ISCompositeLensFlare, "ISCompositeLensFlare", "composite", "ISCompositeLensFlareVolumetricLighting.hlsl", 2, 0b10, 2 },
 			{ Effects::ISCompositeLensFlareVolumetricLighting, "ISCompositeLensFlareVolumetricLighting", "composite", "ISCompositeLensFlareVolumetricLighting.hlsl", 2, 0b11, 2 },
@@ -321,13 +349,14 @@ namespace RenderGraph::Engine::ImageSpace
 
 		/**
 		 * @brief How many batches each kind of scope may start in a frame: its share of the anchor's runs a frame. Each kind has a
-		 * share of its own, so the scopes early in the frame never use up the runs of the ones after them. The SAO and reflection
-		 * passes and the HDR effect have a second run for a batch cut short by a draw the graph does not take. Effect scopes have
-		 * one run per call: the depth-of-field (or distant blur) draw, its two compute blurs, refraction, the radial blur, the
-		 * snow copy, the water blend and the LDR downsample. The water's flow copies have a share of their own (one run per copy: a
-		 * cell load queues a few). The anchor is sized for the sum (FrameAnchors.cpp, kInfo); Setup checks it.
+		 * share of its own, so the scopes early in the frame never use up the runs of the ones after them. The pre-tonemap
+		 * composites, the SAO and reflection passes and the HDR effect have a second run for a batch cut short by a draw the graph
+		 * does not take. Effect scopes have one run per call: the depth-of-field (or distant blur) draw, its two compute blurs,
+		 * refraction, the radial blur, the snow copy, the water blend, the LDR downsample and the copies outside every scope (the
+		 * main frame's, the menus' and the end-of-frame chain's), and there the blur composites' and the get-hit effect's draws. The
+		 * water's flow copies have a share of their own (one run per copy: a cell load queues a few).
 		 */
-		constexpr std::array<std::uint32_t, static_cast<std::size_t>(ScopeKind::Count)> kScopeRuns{ 1, 2, 2, 2, 8, 4 };
+		constexpr std::array<std::uint32_t, static_cast<std::size_t>(ScopeKind::Count)> kScopeRuns{ 2, 2, 2, 2, 24, 4 };
 
 		constexpr std::uint32_t ScopeRunsTotal()
 		{
@@ -397,9 +426,9 @@ namespace RenderGraph::Engine::ImageSpace
 			std::vector<std::shared_ptr<const org::LatchBlock>> keepAlive;  // the batch's constant chunks, until its run
 			std::uint32_t lastEntry = 0;
 			bool executed = false;
-			// The engine's ImageSpace calls in progress (Render, the explicit-target Render, DispatchComputeShader). A draw or dispatch
-			// inside one of an effect the port does not cover is vouched for (NotPortedReason). A covered effect's draw the engine still
-			// makes (a refusal or a failure) is not: the flush latch skips it and the census counts it.
+			// The engine's ImageSpace calls in progress (Render, the explicit-target Render, DispatchComputeShader). No draw or dispatch
+			// inside one is vouched for: one the port leaves to the engine (an effect it does not cover, a refusal, a failure) is skipped
+			// by the flush latch and counted by the census. Those of effects it does not cover are named once in a while (LogNotCovered).
 			std::uint32_t engineCalls = 0;
 			// The shaders of the engine calls in progress, innermost last: the effect a draw left to the engine belongs to.
 			std::vector<const RE::BSImagespaceShader*> callShaders;
@@ -419,18 +448,6 @@ namespace RenderGraph::Engine::ImageSpace
 		{
 			static ImageSpaceState state;
 			return state;
-		}
-
-		/**
-		 * @brief Why ImageSpace leaves a draw or dispatch to the engine on purpose, for the flush latch (Latch::EngineDraws around the
-		 * engine's call): an effect the port does not cover or did not select. A covered effect's refused or failed draw has no
-		 * reason: it reaches D3D11 unvouched, so the census counts it. The volumetric lighting's render, apply and blur are
-		 * Features/VolumetricLighting/ORGVolumetricLighting's (CS_ORG_VOLUMETRIC_LIGHTING).
-		 */
-		const Latch::Reason& NotPortedReason()
-		{
-			static const Latch::Reason reason{ "imagespace: effect not on the graph" };
-			return reason;
 		}
 
 		/** @brief The effects' raster programs, by value key. Queued at Setup; a pass made at a graph build takes its own with GetNow. */
@@ -1396,8 +1413,22 @@ namespace RenderGraph::Engine::ImageSpace
 			return a_key.output == a_target || a_key.output1 == a_target || std::ranges::find(a_key.inputs, a_target) != a_key.inputs.end();
 		}
 
-		/** @brief Whether a kEffects index is one of the bright-pass blurs (one per bloom radius). */
-		bool IsBloom(std::size_t a_effect) { return kEffects[a_effect].group == "bloom"; }
+		/**
+		 * @brief Whether a kEffects index belongs to a family whose members share shapes: the blurs of one kind (one shader per radius;
+		 * the bloom radius and the blur composites pick one), and the tonemap with its fade form (the manager's fade picks one).
+		 */
+		bool SharesShapes(std::size_t a_effect)
+		{
+			const auto group = kEffects[a_effect].group;
+			return group == "bloom" || group == "blur" || group == "nonhdrblur" || group == "tonemap";
+		}
+
+		/** @brief Whether two outputs of a_effect from the same inputs are a pair it alternates between (AddImpliedShapes). */
+		bool PingPongs(std::size_t a_effect)
+		{
+			const auto group = kEffects[a_effect].group;
+			return group != "iscopy" && group != "tonemap";
+		}
 
 		/**
 		 * @brief The shapes the RE says the manifest's shapes imply, so they are passes before the engine first draws them:
@@ -1405,7 +1436,8 @@ namespace RenderGraph::Engine::ImageSpace
 		 * - the luminance chain's last level alternates by frame (+2 on odd frames, skeleton of HDR's Render in imagespace.md): two
 		 *   outputs of one effect with the same inputs are such a pair, and every shape mentioning one gets the other;
 		 * - the bloom radius picks one of seven bright-pass blur shaders (slot 79 + radius) with the same targets: a bloom shape
-		 *   implies the other six;
+		 *   implies the other six, and so for the plain and non-HDR blurs (SharesShapes);
+		 * - the manager's fade picks the tonemap or its fade form with the same targets: each implies the other;
 		 * - an effect that keeps the viewport the effect before it left (EffectInfo::keepsViewport: refraction, the distant blur) draws
 		 *   into a part of its target or the whole of it, by which effects ran before it: each shape implies the whole-target one, its
 		 *   size from the engine's target table (with the swap, ISRefraction into kMAIN_COPY at the full size).
@@ -1438,7 +1470,9 @@ namespace RenderGraph::Engine::ImageSpace
 				for (std::size_t j = i + 1; j < a_keys.size(); ++j) {
 					const auto& a = a_keys[i];
 					const auto& b = a_keys[j];
-					if (a.effect == b.effect && a.inputs == b.inputs && a.address == b.address && a.filter == b.filter && a.blend == b.blend && a.output != b.output)
+					// The copies and the tonemap write one source into several targets by caller, not by frame: no swap pair.
+					if (a.effect == b.effect && PingPongs(a.effect) && a.inputs == b.inputs && a.address == b.address && a.filter == b.filter && a.blend == b.blend &&
+						a.output != b.output)
 						swaps.insert(std::minmax(a.output, b.output));
 				}
 			swaps.insert({ static_cast<std::int32_t>(RE::RENDER_TARGET::kMAIN), static_cast<std::int32_t>(RE::RENDER_TARGET::kMAIN_COPY) });
@@ -1456,10 +1490,10 @@ namespace RenderGraph::Engine::ImageSpace
 						add(Swapped(a_keys[i], pair), a_keys[i]);
 			const auto withSwaps = a_keys.size();
 			for (std::size_t i = 0; i < withSwaps; ++i) {
-				if (!IsBloom(a_keys[i].effect))
+				if (!SharesShapes(a_keys[i].effect))
 					continue;
 				for (std::size_t other = 0; other < kEffects.size(); ++other) {
-					if (!IsBloom(other) || !state.enabled[other] || other == a_keys[i].effect)
+					if (kEffects[other].group != kEffects[a_keys[i].effect].group || !state.enabled[other] || other == a_keys[i].effect)
 						continue;
 					ShapeKey partner = a_keys[i];
 					partner.effect = static_cast<std::uint32_t>(other);
@@ -2227,8 +2261,8 @@ namespace RenderGraph::Engine::ImageSpace
 		}
 
 		/**
-		 * @brief a_call (the engine's ImageSpace function) counted as an engine ImageSpace call: a draw or dispatch inside it that the
-		 * port does not take is the engine's on purpose (DrawTriShape and DispatchCSShader open the latch's scope for it).
+		 * @brief a_call (the engine's ImageSpace function) counted as an engine ImageSpace call, with its shader: a draw or dispatch
+		 * inside it that the port does not take is named by that shader (NoteNotCovered).
 		 */
 		template <class Call>
 		void EngineCall(const RE::BSImagespaceShader* a_shader, Call&& a_call)
@@ -2242,20 +2276,16 @@ namespace RenderGraph::Engine::ImageSpace
 		}
 
 		/**
-		 * @brief The engine's draw or dispatch, which ImageSpace leaves to it. Inside an engine ImageSpace call of an effect the port
-		 * does not cover, in the flush latch's EngineDraws scope (NotPortedReason). A covered effect's draw (refused or failed, logged
-		 * once per reason) runs unvouched: no reason covers it.
+		 * @brief The engine's draw or dispatch, which ImageSpace leaves to it, unvouched: the flush latch skips it and the census
+		 * counts it. Inside an engine ImageSpace call of an effect the port does not cover it is named (NoteNotCovered); a covered
+		 * effect's (refused or failed) has its reason logged once.
 		 */
 		template <class Call>
 		void EngineDraw(bool a_compute, Call&& a_call)
 		{
 			auto& state = IS();
-			if (state.engineCalls == 0 || (state.current && state.current->covered)) {
-				a_call();
-				return;
-			}
-			NoteNotCovered(a_compute);
-			Latch::EngineDraws scope(NotPortedReason());
+			if (state.engineCalls > 0 && !(state.current && state.current->covered))
+				NoteNotCovered(a_compute);
 			a_call();
 		}
 

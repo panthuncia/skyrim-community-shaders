@@ -1,3 +1,17 @@
+#if defined(CS_ORG_BINDLESS)
+// The ORG build of the pixel stage (RenderGraph/Engine/ImageSpace, CS_ORG_IMAGESPACE): t0 and s0 from the heap, the shared
+// constants, and PerGeometry from the engine-constants capture through the pass's latch. Only the copies whose vertex shader
+// passes the coordinates through have an ORG build: the graph's fullscreen triangle is their vertex stage.
+#	define ORG_SHARED_CONSTANTS
+// FrameBuffer is the PerFrame the engine's draw had bound (captured with PerGeometry), not CS's shared snapshot.
+#	define ORG_SHARED_FRAMEBUFFER_AT PerGeometryAt
+#	include "Common/OrgEngineConstants.hlsli"
+#	include "Common/OrgResources.hlsli"
+#	define ISCOPY_ORG_RESOURCES(X) X(SHARED, ConstantBuffer, Shared, 0) X(SRV, Texture2D<float4>, ImageTex, 0) X(SAMPLER, SamplerState, ImageSampler, 0) X(LATCH, OrgEngineConstantsAt, PerGeometryAt, 2)
+ORG_PUSH_BLOCK(ISCOPY_ORG_RESOURCES(ORG_HANDLE))
+ISCOPY_ORG_RESOURCES(ORG_RESOURCE)
+#endif
+
 // ISCopyScaleBias and ISCopyTextureMask move the texture coordinates in their vertex shader, as vanilla's do. The other
 // copies pass them through.
 #if defined(VSHADER) && (defined(SCALE_BIAS) || defined(MASK))
@@ -53,6 +67,11 @@ struct PS_OUTPUT
 };
 
 #if defined(PSHADER)
+#	if defined(CS_ORG_BINDLESS)
+static float4 RotationMatrix = OrgEngineRow(PerGeometryAt, 0);
+static float4 ColorSelect = OrgEngineRow(PerGeometryAt, 1);
+static float4 ScaleBias = OrgEngineRow(PerGeometryAt, 2);
+#	else
 SamplerState ImageSampler : register(s0);
 
 Texture2D<float4> ImageTex : register(t0);
@@ -63,6 +82,7 @@ cbuffer PerGeometry : register(b2)
 	float4 ColorSelect : packoffset(c1);
 	float4 ScaleBias : packoffset(c2);
 };
+#	endif
 
 PS_OUTPUT main(PS_INPUT input)
 {

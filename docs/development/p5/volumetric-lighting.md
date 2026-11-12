@@ -2,7 +2,7 @@
 
 Plan items 5.5.3 and 5.5.4's VL apply ([org-full-port.md](../org-full-port.md), Phase 5.5). Volumetric Lighting's GPU work runs on
 ORG, so no VL dispatch or draw reaches D3D11. This deletes the census reason `imagespace: volumetric lighting compute`, and the VL
-apply and VL blur leave `imagespace: effect not on the graph`.
+apply and VL blur never reach ImageSpace's hooks (that reason, `imagespace: effect not on the graph`, is deleted since).
 
 Code: `src/Features/VolumetricLighting/ORGVolumetricLighting.{h,cpp}`. Switch: `CS_ORG_VOLUMETRIC_LIGHTING=1` (default off). It
 does not need `CS_ORG_IMAGESPACE` or `CS_ORG_ENGINE_CONSTANTS`.
