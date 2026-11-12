@@ -2,6 +2,7 @@
 // points forward to Draws/FrameDriver on the render thread. The one file that decides whether DCLF is built (CS_HAS_DCLF).
 #include "DrawcallLimitFix.h"
 #include "DrawcallLimitFix/Diagnostics/Capture/Capture.h"
+#include "DrawcallLimitFix/Diagnostics/RefTrace.h"
 
 #if defined(CS_HAS_DCLF)
 
@@ -280,6 +281,9 @@ void DrawcallLimitFix::BeforePresent()
 {
 	if (installed)
 		DCLF::FrameDriver::Get().BeforePresent();
+	// CS_DCLF_REF_TRACE: the table made once the graph is up, and its entries logged once a second.
+	DCLF::Diagnostics::RefTrace::Ensure();
+	DCLF::Diagnostics::RefTrace::Report();
 }
 
 void DrawcallLimitFix::Reset()

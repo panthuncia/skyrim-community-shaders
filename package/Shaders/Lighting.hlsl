@@ -726,6 +726,9 @@ struct DCLF_DEPTH_VS_OUTPUT
 // per draw is the draw's (scalar), not each lane's. One pass unless a wave mixes draws.
 DCLF_PULLED_VS_OUTPUT main(uint index : SV_VertexID, uint a_instance : SV_InstanceID)
 {
+#			if defined(DEVICE_REF_TRACE)
+	DEVICE_REF_TRACE_SAMPLE(index);  // CS_DCLF_REF_TRACE: a vertex in 64
+#			endif
 	DCLF_PULLED_VS_OUTPUT vsout;
 #		if defined(DCLF_DEPTH_ONLY)
 	vsout.Position = DCLFPulledVertex(index, a_instance).Position;
@@ -741,6 +744,9 @@ DCLF_PULLED_VS_OUTPUT main(uint index : SV_VertexID, uint a_instance : SV_Instan
 // address, whose row holds the layout; the object statics above keep their initialisers (the object word is pushed too).
 VS_OUTPUT main(uint index : SV_VertexID)
 {
+#		if defined(DEVICE_REF_TRACE)
+	DEVICE_REF_TRACE_SAMPLE(index);  // CS_DCLF_REF_TRACE: a vertex in 64
+#		endif
 	DCLFDrawVertexLayout = DCLFPushedVertexLayout();
 	DCLFStream first, second;
 	first.address = DCLFVertexBuffer.xy;
@@ -1892,6 +1898,9 @@ PS_OUTPUT DCLFShadePS(PS_INPUT input, bool frontFace)
 PS_OUTPUT main(PS_INPUT input, bool frontFace : SV_IsFrontFace)
 #	endif
 {
+#	if defined(DEVICE_REF_TRACE)
+	DEVICE_REF_TRACE_SAMPLE((uint(input.Position.x) & 7u) | ((uint(input.Position.y) & 7u) << 3));  // CS_DCLF_REF_TRACE: a pixel in 64
+#	endif
 	PS_OUTPUT psout;
 
 	float3 viewPosition = mul(FrameBuffer::CameraView, float4(input.WorldPosition.xyz, 1)).xyz;
@@ -4449,6 +4458,9 @@ void DCLFPixelObjectStatics()
 #		endif
 PS_OUTPUT main(PS_INPUT input, bool frontFace : SV_IsFrontFace)
 {
+#		if defined(DEVICE_REF_TRACE)
+	DEVICE_REF_TRACE_SAMPLE((uint(input.Position.x) & 7u) | ((uint(input.Position.y) & 7u) << 3));  // CS_DCLF_REF_TRACE: a pixel in 64
+#		endif
 	const DeviceRef sequence = DCLFDrawSequence(input.DCLFDrawInstance);
 	DCLFObjectWord = DCLFSequenceObjectWord(sequence);
 	DCLFRowStatics(DCLFSequenceRows(sequence));

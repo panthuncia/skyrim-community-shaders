@@ -163,6 +163,9 @@ namespace DCLF
 				"1: every buffer view ref checked as it is made and where DCLF records one (its slot in BasicRHI's region, its pair live and its buffer's, "
 				"the address it reads at, the bytes inside the view, the heaps' bytes for the pair), and every described buffer's import against the "
 				"buffer's address now; the first mismatches are logged as \"ref check:\" lines (open defect: the RX 6600 device fault)" },
+			{ RefTrace, "CS_DCLF_REF_TRACE", D, N, false,
+				"1: Vulkan: the DCLF stages record the buffer view refs each load and store site uses (a pixel or vertex in 64), logged once a second "
+				"as \"ref trace:\" lines by site line, with null and odd refs counted (open defect: black DCLF objects)" },
 
 			{ TestCommands, "CS_DCLF_TEST_COMMANDS", T, N, false, "<frame>:<console command>;...: console commands at given frames" },
 			{ TestMove, "CS_DCLF_TEST_MOVE", T, N, false, "<start>:<end>:<units per frame>;...: carries the player forward" },
