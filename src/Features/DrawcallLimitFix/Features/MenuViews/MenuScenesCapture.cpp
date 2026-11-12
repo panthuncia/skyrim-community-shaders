@@ -516,8 +516,11 @@ namespace DCLF::Features::MenuViews::Scenes
 				return "more draws than the batch latches";
 			const auto& rss = RE::BSGraphics::RendererShadowState::GetSingleton()->GetRuntimeData();
 			const auto* state = globals::state;
-			if (!rss.currentVertexShader || !rss.currentPixelShader || !state || !state->currentShader)
+			if (!rss.currentVertexShader || !state || !state->currentShader)
 				return "no shader bound";
+			// A depth-only Utility draw (the menu model's depth batch) binds no pixel shader: its scene build draws the depth alone.
+			if (!rss.currentPixelShader && state->currentShader->shaderType.get() != RE::BSShader::Type::Utility)
+				return "no pixel shader bound";
 			if (a_capture.dynamic && state->currentShader->shaderType.get() != RE::BSShader::Type::Effect)
 				return "a DrawData copy's draw of a shader whose scene build pulls one stream";
 			switch (state->currentShader->shaderType.get()) {
