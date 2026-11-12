@@ -492,7 +492,13 @@ namespace RenderGraph::Engine::Native
 				PFN_vkCmdFillBuffer fillBuffer = nullptr;
 			};
 
-			/** @brief The descriptors of a slot, for the BasicRHI clears. */
+			/** @brief UAV descriptors per slot: one per clear an operation records (a mip each), since D3D12 reads a UAV clear's at execution. */
+			static constexpr uint32_t kUavsPerSlot = 16;
+
+			/**
+			 * @brief The descriptors of a slot, for the BasicRHI clears. RTV and DSV are read when a clear is recorded, so one is reused;
+			 * the UAVs are kUavsPerSlot in a row from uavShaderVisible and uavCpu, the same index in each heap.
+			 */
 			struct Descriptors
 			{
 				rhi::DescriptorSlot rtv, dsv, uavShaderVisible, uavCpu;
@@ -518,13 +524,16 @@ namespace RenderGraph::Engine::Native
 					     resolve(vk.clearDepthStencilImage, "vkCmdClearDepthStencilImage") && resolve(vk.fillBuffer, "vkCmdFillBuffer");
 				}
 				if (ok && RhiContext()) {
+					const auto heapOf = [&](rhi::DescriptorHeapType a_type, uint32_t a_capacity, bool a_shaderVisible, const char* a_name, rhi::DescriptorHeapPtr& a_out) {
+						return device.CreateDescriptorHeap(rhi::DescriptorHeapDesc{ a_type, a_capacity, a_shaderVisible, a_name }, a_out) == rhi::Result::Ok && a_out;
+					};
 					const auto heap = [&](rhi::DescriptorHeapType a_type, bool a_shaderVisible, const char* a_name, rhi::DescriptorHeapPtr& a_out) {
-						return device.CreateDescriptorHeap(rhi::DescriptorHeapDesc{ a_type, kSlots, a_shaderVisible, a_name }, a_out) == rhi::Result::Ok && a_out;
+						return heapOf(a_type, kSlots, a_shaderVisible, a_name, a_out);
 					};
 					ok = heap(rhi::DescriptorHeapType::RTV, false, "CS native immediate RTVs", rtvHeap) &&
 					     heap(rhi::DescriptorHeapType::DSV, false, "CS native immediate DSVs", dsvHeap) &&
-					     heap(rhi::DescriptorHeapType::CbvSrvUav, true, "CS native immediate UAVs", uavHeap) &&
-					     heap(rhi::DescriptorHeapType::CbvSrvUav, false, "CS native immediate UAVs (CPU)", uavCpuHeap);
+					     heapOf(rhi::DescriptorHeapType::CbvSrvUav, kSlots * kUavsPerSlot, true, "CS native immediate UAVs", uavHeap) &&
+					     heapOf(rhi::DescriptorHeapType::CbvSrvUav, kSlots * kUavsPerSlot, false, "CS native immediate UAVs (CPU)", uavCpuHeap);
 				}
 				for (uint32_t i = 0; i < kSlots; ++i) {
 					auto& slot = slots[i];
@@ -572,8 +581,8 @@ namespace RenderGraph::Engine::Native
 						if (rtvHeap) {
 							descriptors.rtv = { rtvHeap->GetHandle(), a_index };
 							descriptors.dsv = { dsvHeap->GetHandle(), a_index };
-							descriptors.uavShaderVisible = { uavHeap->GetHandle(), a_index };
-							descriptors.uavCpu = { uavCpuHeap->GetHandle(), a_index };
+							descriptors.uavShaderVisible = { uavHeap->GetHandle(), a_index * kUavsPerSlot };
+							descriptors.uavCpu = { uavCpuHeap->GetHandle(), a_index * kUavsPerSlot };
 							a_slot.list->SetDescriptorHeaps(uavHeap->GetHandle(), std::nullopt);
 						}
 						a_record(a_slot.list.Get(), descriptors);
@@ -1295,7 +1304,10 @@ namespace RenderGraph::Engine::Native
 			bool Initialize(rhi::ResourceHandle a_texture, const TextureRequest& a_request, rhi::Format a_format, uint32_t a_mips, uint32_t a_layers, uint32_t a_depth)
 			{
 				const rhi::ResourceHandle texture = a_texture;
-				const rhi::TextureSubresourceRange all{ 0, a_mips, 0, a_layers };
+				// D3D12 lays a depth-stencil texture's stencil out as a second plane, with a layout of its own: both start defined.
+				const bool twoPlanes = OnD3D12() && (a_format == rhi::Format::D24_UNorm_S8_UInt || a_format == rhi::Format::R24G8_Typeless ||
+														a_format == rhi::Format::D32_Float_S8X24_UInt || a_format == rhi::Format::R32G8X24_Typeless);
+				const rhi::TextureSubresourceRange all{ 0, a_mips, 0, a_layers, 0, twoPlanes ? 2u : 1u };
 				rhi::ResourcePtr upload;
 				struct Copy
 				{
@@ -2290,14 +2302,26 @@ namespace RenderGraph::Engine::Native
 		{
 			const bool image = a_record.kind == NativeResource::Kind::Image;
 			const auto handle = a_record.resource->GetHandle();
+			// Each clear its own pair of descriptors (the same index in the shader-visible and the CPU heap): D3D12 reads a UAV clear's
+			// descriptor when the list executes, so a later clear of this operation must not overwrite it.
+			uint32_t next = 0;
 			const auto clear = [&](const rhi::UavDesc& a_desc, const rhi::TextureSubresourceRange& a_subresources) {
-				if (g_device->Rhi().CreateUnorderedAccessView(a_descriptors.uavShaderVisible, handle, a_desc) != rhi::Result::Ok ||
-					g_device->Rhi().CreateUnorderedAccessView(a_descriptors.uavCpu, handle, a_desc) != rhi::Result::Ok)
+				if (next >= Immediate::kUavsPerSlot) {
+					static std::atomic_flag logged;
+					if (!logged.test_and_set())
+						logger::warn("[ORG native] a UAV clear of \"{}\" covers more than {} mips; the rest are not cleared (logged once)", a_record.name, Immediate::kUavsPerSlot);
+					return;
+				}
+				const rhi::DescriptorSlot shaderVisible{ a_descriptors.uavShaderVisible.heap, a_descriptors.uavShaderVisible.index + next };
+				const rhi::DescriptorSlot cpu{ a_descriptors.uavCpu.heap, a_descriptors.uavCpu.index + next };
+				++next;
+				if (g_device->Rhi().CreateUnorderedAccessView(shaderVisible, handle, a_desc) != rhi::Result::Ok ||
+					g_device->Rhi().CreateUnorderedAccessView(cpu, handle, a_desc) != rhi::Result::Ok)
 					return;
 				const Use use{ &a_record, a_subresources, rhi::ResourceLayout::UnorderedAccess, rhi::ResourceAccessType::UnorderedAccess,
 					rhi::ResourceSyncState::ClearUnorderedAccessView };
 				Transition(a_list, { use }, false);
-				const rhi::UavClearInfo info{ a_descriptors.uavShaderVisible, a_descriptors.uavCpu, a_record.resource.Get() };
+				const rhi::UavClearInfo info{ shaderVisible, cpu, a_record.resource.Get() };
 				if (a_floats) {
 					rhi::UavClearFloat value{};
 					std::memcpy(value.v, a_floats, sizeof(value.v));
@@ -2331,9 +2355,12 @@ namespace RenderGraph::Engine::Native
 					desc.texture2DArray.mipSlice = mip;
 					desc.texture2DArray.firstArraySlice = a_range.baseLayer;
 					desc.texture2DArray.arraySize = a_range.layerCount;
+					// The union's first member is the buffer's: the texture members' other fields are not zeroed by desc{}.
+					desc.texture2DArray.planeSlice = 0;
 				} else {
 					desc.dimension = rhi::UavDim::Texture2D;
 					desc.texture2D.mipSlice = mip;
+					desc.texture2D.planeSlice = 0;
 				}
 				clear(desc, { mip, 1, a_range.baseLayer, a_range.layerCount });
 			}
