@@ -13,7 +13,8 @@
 // DXIL (D3D12) has no buffer pointers. BasicRHI's D3D12 backend keeps a table of the buffers whose addresses were asked for
 // (rhi_shader_abi.h, D3D12_DEVICE_ADDRESS_*): a page table from 64 KiB address pages to entries, and per entry the buffer's
 // base, size and raw views. A load or store finds the entry that holds the address and reads or writes its raw view at
-// address - base. An address in no buffer reads the heap's first descriptor; the alignment argument is ignored.
+// address - base. An address in no buffer reads zeros through a null view (a store to it is dropped); the alignment argument is
+// ignored.
 // FXC (the D3D11 builds) sees neither: only DXC builds load through addresses.
 // The macros may evaluate the address more than once: pass expressions without side effects.
 
@@ -30,6 +31,8 @@ static const uint kDeviceAddressEntryBytes = 32;
 static const uint kDeviceAddressPageBits = 16;
 static const uint kDeviceAddressPageSlots = 1u << 18;
 static const uint kDeviceAddressProbes = 64;
+// D3D12_DEVICE_ADDRESS_NULL_SLOT: the null raw SRV, then the null raw UAV.
+static const uint kDeviceAddressNullViews = kDeviceAddressTableSlot + 2 + 2 * 16384;
 
 // The page table's first slot for a page: BasicRHI's Dx12AddressPageSlot.
 uint DeviceAddressPageSlot(uint64_t a_page)
@@ -67,7 +70,7 @@ uint2 DeviceAddressViews(uint64_t a_address)
 {
 	ByteAddressBuffer entries = ResourceDescriptorHeap[kDeviceAddressTableSlot];
 	const uint entry = DeviceAddressEntry(a_address);
-	return entry != 0xFFFFFFFFu ? entries.Load2(entry * kDeviceAddressEntryBytes + 16) : uint2(0, 0);
+	return entry != 0xFFFFFFFFu ? entries.Load2(entry * kDeviceAddressEntryBytes + 16) : uint2(kDeviceAddressNullViews, kDeviceAddressNullViews + 1);
 }
 
 uint DeviceAddressOffset(uint64_t a_address)
@@ -86,7 +89,7 @@ uint2 DeviceAddressSpan(uint64_t a_address)
 	ByteAddressBuffer entries = ResourceDescriptorHeap[kDeviceAddressTableSlot];
 	const uint entry = DeviceAddressEntry(a_address);
 	if (entry == 0xFFFFFFFFu)
-		return uint2(0, 0);
+		return uint2(kDeviceAddressNullViews, 0);
 	const uint2 base = entries.Load2(entry * kDeviceAddressEntryBytes);
 	const uint view = entries.Load(entry * kDeviceAddressEntryBytes + 16);
 	return uint2(view, uint(a_address - ((uint64_t(base.y) << 32) | uint64_t(base.x))));
