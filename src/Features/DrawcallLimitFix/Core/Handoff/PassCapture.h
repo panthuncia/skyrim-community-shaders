@@ -383,9 +383,8 @@ namespace DCLF
 		void NoteKept(const RE::BSBatchRenderer* a_batch, const RE::BSRenderPass* a_pass, std::uint8_t a_site, std::uint8_t a_occlusionPhase = 0) const;
 		bool Withhold(const RE::BSBatchRenderer* a_batch, const RE::BSRenderPass* a_pass);
 		/**
-		 * @brief A pass handed on to the engine (not withheld): with the flush latch on (P5.13, p5/flush.md "Allowed engine draws"), the
-		 * sky's precipitation, which nothing ports, is vouched for (RenderGraph::Engine::Flush::VouchPass), so the engine still draws it.
-		 * DCLF vouches for nothing of its own classes: what it does not draw yet is withheld. Nothing while bypassed or with the latch off.
+		 * @brief A pass handed on to the engine (not withheld): counted for the log outside loads, with a sample by geometry. Nothing is
+		 * vouched for under the flush latch: DCLF withholds what it does not draw yet, and the precipitation is Features/Precipitation's.
 		 */
 		void KeepForEngine(const RE::BSBatchRenderer* a_batch, const RE::BSRenderPass* a_pass) const;
 		/**
