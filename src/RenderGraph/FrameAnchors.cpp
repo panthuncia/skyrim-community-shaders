@@ -15,6 +15,7 @@
 #	include "RenderGraph/RenderGraphRuntime.h"
 #	include "RenderGraph/RunGate.h"
 #	include "RenderGraph/SharedConstants.h"
+#	include "RenderGraph/Switches.h"
 
 #	include <OpenRenderGraph/GraphHost.h>
 #	include <Render/RenderGraph/RenderGraph.h>
@@ -444,6 +445,9 @@ namespace FrameAnchors
 						desc.PreferQueue(org::QueueKind::Compute);
 					else if (pass.kind != PassKind::Render)
 						desc.PreferQueue(org::QueueKind::Graphics);
+					// Recorded in DXVK's stream after the run's commit, on the graphics queue only (PassDesc::atExecution).
+					if (pass.atExecution && pass.queue == PassQueue::Default && a_graph.PassEpochInHostStream())
+						desc.RecordAtExecution();
 					a_out.push_back(std::move(desc.Epoch(epoch)));
 				}
 			}
@@ -1205,6 +1209,18 @@ namespace FrameAnchors
 		}
 	}
 
+	void SetTicketsAhead(org::GraphHost& a_host)
+	{
+		auto& state = Anchors();
+		if (!RenderGraphRuntime::EpochsEnabled())
+			return;
+		// An anchor that runs ten times a frame back to back would otherwise wait for a preparation at each run.
+		const auto most = static_cast<std::uint32_t>((std::min)(Switches::Number("CS_ORG_TICKETS_AHEAD", 16), std::uint64_t{ 64 }));
+		for (std::uint32_t i = 0; i < kAnchors; ++i)
+			if (state.reserved[i])
+				a_host.SetEpochTicketsAhead(EpochOfAnchor(static_cast<Anchor>(i)), most);
+	}
+
 	void Attach(org::GraphHost& a_host)
 	{
 		auto& state = Anchors();
@@ -1262,6 +1278,7 @@ namespace FrameAnchors
 	const SegmentNames* NamesOf(std::uint32_t) { return nullptr; }
 	void OnEpochFailed(std::uint32_t, const std::string&, bool) {}
 	void AddToFrame(std::vector<std::uint32_t>&) {}
+	void SetTicketsAhead(org::GraphHost&) {}
 	void Attach(org::GraphHost&) {}
 }
 

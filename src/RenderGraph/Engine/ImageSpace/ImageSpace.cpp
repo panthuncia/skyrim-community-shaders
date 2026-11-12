@@ -1541,7 +1541,9 @@ namespace RenderGraph::Engine::ImageSpace
 					.kind = spec->key.compute ? FrameAnchors::PassKind::Compute : FrameAnchors::PassKind::Render,
 					.make = [spec, latch = std::shared_ptr<const org::LatchBlock>(state.latch), gate = std::shared_ptr<const RunGate>(state.gate)] {
 						return MakeNotedPass(spec, latch, gate);
-					} });
+					},
+					// A run opens a few of the shapes' gate entries: recorded after the commit, the closed ones record nothing.
+					.atExecution = true });
 			}
 			FrameAnchors::ClientDesc client{};
 			client.id = kClientId;

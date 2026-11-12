@@ -139,6 +139,11 @@ namespace FrameAnchors
 	 * - once: a one-shot pass (a clear, an upload, a fill). It is in the anchor's graph until one run with it was submitted, then
 	 *   the graph is built again without it; Rearm puts it back. The anchor runs while the pass is pending, active client or not.
 	 *   Its work must give the same result if it ran twice.
+	 * - atExecution: when the anchor's epoch runs in DXVK's stream, the pass is recorded there, after the run's commit, instead of
+	 *   ahead on the graph host's thread (ExternalPassDesc::RecordAtExecution). A pass whose work this run is known by then may skip
+	 *   the run (TypedRenderGraphPass's SkipsAtExecution: AnchorPasses' gated draws and dispatches whose gate entry is closed). For
+	 *   anchors that run many gated passes of which a few are open each run. Ignored for a pass on the compute queue, and when
+	 *   the epoch is not in the stream.
 	 */
 	struct PassDesc
 	{
@@ -149,6 +154,7 @@ namespace FrameAnchors
 		PassQueue queue = PassQueue::Default;
 		std::function<std::shared_ptr<org::RenderPass>()> make;
 		bool once = false;
+		bool atExecution = false;
 	};
 
 	/**
@@ -398,6 +404,14 @@ namespace FrameAnchors
 	 * reservations.
 	 */
 	void AddToFrame(std::vector<std::uint32_t>& a_epochs);
+
+	/**
+	 * @brief Initialize, after Attach and before the host's async epochs start: every reserved anchor's epoch keeps several tickets
+	 * prepared (GraphHost::SetEpochTicketsAhead), as many as it ran the frame before, so an anchor that runs many times a frame
+	 * back to back finds each run's ticket ready. Safe because an anchor's passes read only what they were made with or what a
+	 * commit wrote into a LatchBlock, never what a commit changes. CS_ORG_TICKETS_AHEAD sets the most (16; 1 turns it off).
+	 */
+	void SetTicketsAhead(org::GraphHost& a_host);
 
 	/**
 	 * @brief Render thread (RenderGraphRuntime::PollEpochFailures): an anchor's epoch failed to build or prepare. Every client with
