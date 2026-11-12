@@ -259,14 +259,13 @@ own binds always reach the driver. Details: "Hazard: bindings the driver keeps a
 
 - ORG's alias planner sized a texture with an authored mip chain as one mip, so placements overlapped (SSGI's working
   depth ran into its radiance). Placement now sizes textures from the description the backing creates them with.
-- Green streaks on near geometry (Whiterun bridge railings at noon) came from the SSGI graph path at half resolution.
-  `CS_ORG_SSGI_DEBUG=<n>` (render-graph.md, "Switches") isolated them: gone with no aliasing (1) or full resolution
-  (8), or with the CoCg output cleared (4), so aliased memory gave chroma without luma. The cause was in ORG and
-  BasicRHI: an aliased texture's first use entered from Undefined with sync None. Vulkan then got a discard barrier
-  from TOP_OF_PIPE, which waits for nothing, and placement orderings only order recording. A pass whose only new
-  barrier was that one could run alongside the previous occupant of its memory. Prefilter normals is such a pass: it
-  reads an engine target and writes only its own aliased chain. The exact pair is not yet confirmed from a log.
-  The entry now names sync All, and a Vulkan discard with a before sync waits for it.
+- Green streaks on near geometry (Whiterun bridge railings at noon) came from transients of different epochs sharing
+  alias memory. `CS_ORG_SSGI_DEBUG=<n>` (render-graph.md, "Switches") narrowed it down: gone with no aliasing (1), at
+  full resolution (8), and with SSGI in a pool of its own (17). Every epoch's graph packed its transients from offset 0
+  of one shared arena, and Volumetric Lighting's volume (epoch 34) covered SSGI's working depth, radiance and normals
+  (epoch 15). Nothing orders two epochs' GPU work against each other: the alias ledger adds no wait on the same queue.
+  Each epoch now has pools of its own (ORG). Also fixed on the way: an aliased texture's first-use barrier waited for
+  nothing (TOP_OF_PIPE; now sync All, and a Vulkan discard keeps a before sync).
 - ORG's descriptor manager made 2D views of 3D textures, so Skylighting's probe update wrote almost nothing readers saw.
   3D textures now get Texture3D views.
 - A texture array's default view is its first slice: ports that read `Texture2DArray` (Skylighting's cascades, LLF's
