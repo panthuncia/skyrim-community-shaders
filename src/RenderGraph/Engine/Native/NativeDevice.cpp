@@ -320,6 +320,8 @@ namespace RenderGraph::Engine::Native
 			// Every aspect of the format, and the one a buffer copy takes (depth for a depth-stencil format).
 			VkImageAspectFlags aspects = VK_IMAGE_ASPECT_COLOR_BIT;
 			VkImageAspectFlags copyAspect = VK_IMAGE_ASPECT_COLOR_BIT;
+			// The format the context's views take: format itself, except a D3D12 typeless depth image's depth format (its DSV).
+			rhi::Format viewFormat = rhi::Format::Unknown;
 
 			uint32_t Width(uint32_t a_mip) const { return (std::max)(width >> a_mip, 1u); }
 			uint32_t Height(uint32_t a_mip) const { return (std::max)(height >> a_mip, 1u); }
@@ -668,6 +670,28 @@ namespace RenderGraph::Engine::Native
 				logger::error("[ORG native] {}: {}; resources like it are not made (logged once)", a_name, a_why);
 		}
 
+		/** @brief A typeless depth format's shader resource twin (R24_UNORM_X8 for R24G8, ...), or the format itself. */
+		DXGI_FORMAT DepthSrvFormat(DXGI_FORMAT a_format)
+		{
+			switch (a_format) {
+			case DXGI_FORMAT_R24G8_TYPELESS:
+				return DXGI_FORMAT_R24_UNORM_X8_TYPELESS;
+			case DXGI_FORMAT_R32G8X24_TYPELESS:
+				return DXGI_FORMAT_R32_FLOAT_X8X24_TYPELESS;
+			case DXGI_FORMAT_R32_TYPELESS:
+				return DXGI_FORMAT_R32_FLOAT;
+			case DXGI_FORMAT_R16_TYPELESS:
+				return DXGI_FORMAT_R16_UNORM;
+			default:
+				return a_format;
+			}
+		}
+
+		struct TextureRequest;
+
+		/** @brief A texture native mode refused to make, with the whole request: the first 32 are logged, each with its reason. */
+		void LogRefused(const TextureRequest& a_request, std::string_view a_why);
+
 		/** @brief A typeless format as the native image is made: the depth format a depth-stencil binding implies, else the UNORM one. */
 		DXGI_FORMAT ResolveTypeless(DXGI_FORMAT a_format, UINT a_bindFlags)
 		{
@@ -761,6 +785,22 @@ namespace RenderGraph::Engine::Native
 			const D3D11_SUBRESOURCE_DATA* data = nullptr;
 			std::string name;
 		};
+
+		void LogRefused(const TextureRequest& a_request, std::string_view a_why)
+		{
+			static std::atomic<uint32_t> logged{ 0 };
+			const uint32_t count = logged.fetch_add(1, std::memory_order_relaxed);
+			if (count >= 32) {
+				if (count == 32)
+					logger::error("[ORG native] more textures were refused; only the first 32 are logged");
+				return;
+			}
+			logger::error("[ORG native] {} refused: {}. Request: dimension {}, {}x{}, depth or array {}, mips {}, samples {}, DXGI format {}, usage {}, bind {:#x}, "
+						  "CPU access {:#x}, misc {:#x}{}",
+				a_request.name, a_why, static_cast<int>(a_request.dimension), a_request.width, a_request.height, a_request.depthOrArraySize, a_request.mipLevels,
+				a_request.sampleCount, static_cast<int>(a_request.format), static_cast<int>(a_request.usage), a_request.bindFlags, a_request.cpuAccess,
+				a_request.miscFlags, a_request.data ? ", with data" : "");
+		}
 
 		// ---- Queue access and external commands -------------------------------------------------------------------------------
 
@@ -962,16 +1002,45 @@ namespace RenderGraph::Engine::Native
 					return E_NOTIMPL;
 				}
 				const DXGI_FORMAT dxgiFormat = ResolveTypeless(a_request.format, a_request.bindFlags);
-				const rhi::Format format = rhi::helpers::ToRHI(dxgiFormat);
+				// D3D12: a depth texture made typeless (D3D11's way to give it a depth view and a shader resource view) stays typeless, as
+				// D3D11 makes it. A typed D24/D32 resource cannot have an SRV there; its DSVs and SRVs name their own formats instead.
+				// Vulkan resolves it to the depth format (its views reinterpret the aspect).
+				const bool typelessDepth = OnD3D12() && (a_request.bindFlags & D3D11_BIND_DEPTH_STENCIL) && dxgiFormat != a_request.format;
+				const rhi::Format format = rhi::helpers::ToRHI(typelessDepth ? a_request.format : dxgiFormat);
+				const rhi::Format viewFormat = rhi::helpers::ToRHI(dxgiFormat);
 				rhi::FormatSupport support{};
-				uint32_t needed = 0;
-				if (!(a_request.bindFlags & D3D11_BIND_DEPTH_STENCIL) || (a_request.bindFlags & D3D11_BIND_SHADER_RESOURCE))
-					needed |= rhi::FU_ShaderResource;
-				if (a_request.bindFlags & D3D11_BIND_UNORDERED_ACCESS)
-					needed |= rhi::FU_UnorderedAccess;
-				if (format == rhi::Format::Unknown || Rhi().QueryFormatSupport(format, support) != rhi::Result::Ok || (support.usage & needed) != needed) {
-					LogOnce(loggedFormat, a_request.name, fmt::format("the device cannot use DXGI format {} as asked (bind flags {:#x})", static_cast<int>(a_request.format),
-															  a_request.bindFlags));
+				std::string refused;
+				if (typelessDepth) {
+					// The depth view's format must be a depth format, and the SRV's colour twin readable.
+					rhi::FormatSupport depthSupport{}, srvSupport{};
+					const rhi::Format srvFormat = rhi::helpers::ToRHI(DepthSrvFormat(a_request.format));
+					if (format == rhi::Format::Unknown || viewFormat == rhi::Format::Unknown || Rhi().QueryFormatSupport(viewFormat, depthSupport) != rhi::Result::Ok ||
+						!(depthSupport.usage & rhi::FU_DepthStencil))
+						refused = fmt::format("its depth format {} cannot be a depth-stencil view", static_cast<int>(dxgiFormat));
+					else if ((a_request.bindFlags & D3D11_BIND_SHADER_RESOURCE) &&
+							 (srvFormat == rhi::Format::Unknown || Rhi().QueryFormatSupport(srvFormat, srvSupport) != rhi::Result::Ok || !(srvSupport.usage & rhi::FU_ShaderResource)))
+						refused = fmt::format("its shader resource format {} cannot be read", static_cast<int>(DepthSrvFormat(a_request.format)));
+					support = srvSupport;
+				} else {
+					uint32_t needed = 0;
+					if (!(a_request.bindFlags & D3D11_BIND_DEPTH_STENCIL) || (a_request.bindFlags & D3D11_BIND_SHADER_RESOURCE))
+						needed |= rhi::FU_ShaderResource;
+					if (a_request.bindFlags & D3D11_BIND_UNORDERED_ACCESS)
+						needed |= rhi::FU_UnorderedAccess;
+					// D3D12 checks every binding, as its resource creation does. Vulkan keeps the checks it had.
+					if (OnD3D12() && (a_request.bindFlags & D3D11_BIND_RENDER_TARGET))
+						needed |= rhi::FU_RenderTarget;
+					if (OnD3D12() && (a_request.bindFlags & D3D11_BIND_DEPTH_STENCIL))
+						needed |= rhi::FU_DepthStencil;
+					if (format == rhi::Format::Unknown)
+						refused = fmt::format("DXGI format {} has no BasicRHI format", static_cast<int>(dxgiFormat));
+					else if (Rhi().QueryFormatSupport(format, support) != rhi::Result::Ok || (support.usage & needed) != needed)
+						refused = fmt::format("the device's support for DXGI format {} is {:#x}, and the bind flags need {:#x} (1 shader resource, 2 render target, "
+											  "4 depth-stencil, 8 unordered access)",
+							static_cast<int>(dxgiFormat), support.usage, needed);
+				}
+				if (!refused.empty()) {
+					LogRefused(a_request, refused);
 					return E_INVALIDARG;
 				}
 
@@ -1006,14 +1075,15 @@ namespace RenderGraph::Engine::Native
 				auto record = std::make_shared<NativeResource>();
 				record->name = a_request.name;
 				if (Rhi().CreateCommittedResource(desc, record->resource) != rhi::Result::Ok || !record->resource) {
-					LogOnce(loggedCreate, a_request.name, "BasicRHI could not create the image");
+					LogRefused(a_request, fmt::format("BasicRHI could not create the image (resource format {}, flags {:#x})", static_cast<int>(format), flags));
 					return E_OUTOFMEMORY;
 				}
 
 				if (!FillImage(*record, record->resource.Get(), a_request, dxgiFormat, format, support, mips, layers, depth)) {
-					LogOnce(loggedCreate, a_request.name, "BasicRHI did not describe the image it made");
+					LogRefused(a_request, "BasicRHI did not describe the image it made");
 					return E_FAIL;
 				}
+				record->shape.viewFormat = viewFormat;
 
 				if (!Initialize(record->resource->GetHandle(), a_request, format, mips, layers, depth)) {
 					LogOnce(loggedUpload, a_request.name, "its initial layout or contents could not be written");
@@ -1086,6 +1156,7 @@ namespace RenderGraph::Engine::Native
 				shape.depth = a_depth;
 				shape.mips = a_mips;
 				shape.layers = a_layers;
+				shape.viewFormat = a_format;
 				shape.blocks = rhi::helpers::IsBlockCompressed(a_format);
 				shape.blockBytes = (std::max)(rhi::helpers::BytesPerBlock(a_format), 1u);
 				switch (a_dxgiFormat) {
@@ -1193,7 +1264,8 @@ namespace RenderGraph::Engine::Native
 					if (!resource)
 						return false;
 					a_record.vkBuffer = reinterpret_cast<VkBuffer>(resource);
-					a_record.address = static_cast<VkDeviceAddress>(D3D12AddressOf(resource));
+					// Through BasicRHI, so the buffer joins its device address table and shaders can load through the address.
+					a_record.address = static_cast<VkDeviceAddress>(g_device ? g_device->Rhi().GetBufferDeviceAddress({ a_buffer.GetHandle(), 0 }) : D3D12AddressOf(resource));
 					a_record.usage = 0;
 					return true;
 				}
@@ -2184,6 +2256,7 @@ namespace RenderGraph::Engine::Native
 					rhi::DsvDesc desc{};
 					desc.dimension = layered ? rhi::DsvDim::Texture2DArray : rhi::DsvDim::Texture2D;
 					desc.range = range;
+					desc.formatOverride = shape.viewFormat;
 					// Each mip's view overwrites the slot's DSV: D3D12 and Vulkan both read it when the clear is recorded.
 					if (g_device->Rhi().CreateDepthStencilView(a_descriptors.dsv, handle, desc) != rhi::Result::Ok)
 						continue;
@@ -2201,7 +2274,7 @@ namespace RenderGraph::Engine::Native
 						continue;
 					rhi::ClearValue value{};
 					value.type = rhi::ClearValueType::Color;
-					value.format = shape.format;
+					value.format = shape.viewFormat;
 					std::memcpy(value.rgba, a_color, sizeof(value.rgba));
 					const Use use{ &a_record, range, rhi::ResourceLayout::RenderTarget, rhi::ResourceAccessType::RenderTarget, rhi::ResourceSyncState::RenderTarget };
 					Transition(a_list, { use }, false);

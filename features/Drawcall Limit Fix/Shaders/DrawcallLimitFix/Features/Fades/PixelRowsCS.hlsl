@@ -8,6 +8,8 @@
 // fade inputs from the frame constants (DCLFFrameLighting c6-c13). The backing and its rows are the latch's (BuildDrawsLatch::frameRows),
 // so a recording kept across frames writes each frame's.
 
+#include "Common/DeviceAddress.hlsli"
+
 #define DCLF_BINDLESS
 #include "Common/DCLFObjects.hlsli"
 
@@ -30,7 +32,7 @@ static const uint kThreads = 64 * 64;
 uint64_t Address(uint2 a_words) { return (uint64_t(a_words.y) << 32) | uint64_t(a_words.x); }
 
 // A texture register's descriptor in the frame record (DrawPipelines.h's registers).
-uint RecordTexture(uint a_register) { return vk::RawBufferLoad<uint>(Address(RecordTextures) + 4u * a_register, 4); }
+uint RecordTexture(uint a_register) { return DeviceLoad(uint, Address(RecordTextures) + 4u * a_register, 4); }
 
 [numthreads(64, 1, 1)] void main(uint3 id : SV_DispatchThreadID)
 {
@@ -49,7 +51,7 @@ uint RecordTexture(uint a_register) { return vk::RawBufferLoad<uint>(Address(Rec
 	objects.GetDimensions(objectCount, stride);
 	placements.GetDimensions(placementCount, stride);
 	const uint known = min(objectCount, placementCount);
-	const DCLFLodFadeFrameData frame = vk::RawBufferLoad<DCLFLodFadeFrameData>(Address(LodFadeFrame), 16);
+	const DCLFLodFadeFrameData frame = DeviceLoad(DCLFLodFadeFrameData, Address(LodFadeFrame), 16);
 	[loop] for (uint object = id.x; object < rows.z; object += kThreads) {
 		// A slot past the payload's objects or the frame's placements is no draw's: its row is 0.
 		DCLFPixelObjectRow row = (DCLFPixelObjectRow)0;
@@ -57,8 +59,8 @@ uint RecordTexture(uint a_register) { return vk::RawBufferLoad<uint>(Address(Rec
 			row = DCLFPixelObjectRowOf(objects, shading, placements, roots, states, seeds, frame, object);
 		// Three float4s, not the struct: AMD's legacy Windows driver (Polaris, 2.0.279) crashes compiling a struct store to an address.
 		const uint64_t at = base + uint64_t(object) * kPixelObjectRowBytes;
-		vk::RawBufferStore<float4>(at, row.MaterialData, 16);
-		vk::RawBufferStore<float4>(at + 16, row.EmitColorSSR, 16);
-		vk::RawBufferStore<float4>(at + 32, float4(row.CopyAlpha, row.AlphaTestRef, row.Padding), 16);
+		DeviceStore(float4, at, row.MaterialData, 16);
+		DeviceStore(float4, at + 16, row.EmitColorSSR, 16);
+		DeviceStore(float4, at + 32, float4(row.CopyAlpha, row.AlphaTestRef, row.Padding), 16);
 	}
 }

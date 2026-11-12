@@ -38,10 +38,10 @@ namespace RenderGraph::Engine::D3D12SelfTest
 			return false;
 		}
 
-		/** @brief Step 1: the self-test shader as DXIL, from the DXC CS ships beside the DXVK DLLs. Empty on failure. */
-		std::vector<std::byte> CompileDxil(std::string& a_failure)
+		/** @brief Step 1: a self-test shader (a_source under Data/Shaders) as DXIL, from the DXC CS ships beside the DXVK DLLs. Empty on failure. */
+		std::vector<std::byte> CompileDxil(std::string& a_failure, const char* a_source = kSource)
 		{
-			const std::filesystem::path path = std::filesystem::path(RenderGraphRuntime::kShaderDirectory) / kSource;
+			const std::filesystem::path path = std::filesystem::path(RenderGraphRuntime::kShaderDirectory) / a_source;
 			std::ifstream file(path, std::ios::binary);
 			const std::vector<char> chars((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
 			if (chars.empty()) {
@@ -70,10 +70,10 @@ namespace RenderGraph::Engine::D3D12SelfTest
 			request.defines.push_back({ L"CS_ORG_BINDLESS", L"1" });
 			const auto artifact = compiler.Compile(std::move(request));
 			if (!artifact) {
-				a_failure = fmt::format("the DXIL build of {} failed:\n{}", kSource, artifact.diagnostics.substr(0, 2000));
+				a_failure = fmt::format("the DXIL build of {} failed:\n{}", a_source, artifact.diagnostics.substr(0, 2000));
 				return {};
 			}
-			logger::info("[ORG] D3D12 self-test: {} built to DXIL ({} bytes)", kSource, artifact.binary.size());
+			logger::info("[ORG] D3D12 self-test: {} built to DXIL ({} bytes)", a_source, artifact.binary.size());
 			return artifact.binary;
 		}
 
@@ -181,6 +181,128 @@ namespace RenderGraph::Engine::D3D12SelfTest
 				}
 			}
 			logger::info("[ORG] D3D12 self-test: the DXIL dispatch wrote all {} words through ResourceDescriptorHeap and root constants", kThreads);
+			return true;
+		}
+
+		/**
+		 * @brief Step 3: emulated device addresses (BasicRHI's device address table, Common/DeviceAddress.hlsli). A dispatch reads each
+		 * word of a source buffer through its device address and writes word * 7 + 1 through the destination's; the readback must
+		 * match. The heap has the device's full capacity, so it holds the table's region.
+		 */
+		bool DeviceAddresses(rhi::DevicePtr& a_device, const std::vector<std::byte>& a_dxil, std::string& a_failure)
+		{
+			constexpr std::uint32_t kWords = 256;
+			constexpr std::uint32_t kAddressPushWords = 8;
+			constexpr std::uint64_t kBytes = kWords * sizeof(std::uint32_t);
+			rhi::Device device = a_device.Get();
+			rhi::Queue queue = device.GetQueue(rhi::QueueKind::Graphics);
+
+			rhi::PushConstantRangeDesc constants{};
+			constants.visibility = rhi::ShaderStage::Compute;
+			constants.num32BitValues = kAddressPushWords;
+			rhi::PipelineLayoutPtr layout;
+			rhi::PipelinePtr pipeline;
+			const rhi::SubobjShader shader{ rhi::ShaderStage::Compute, { a_dxil.data(), static_cast<std::uint32_t>(a_dxil.size()) }, "main" };
+			if (!Ok(device.CreatePipelineLayout(rhi::PipelineLayoutDesc{ .pushConstants = { &constants, 1 }, .flags = rhi::PF_None }, layout), "CreatePipelineLayout",
+					a_failure))
+				return false;
+			const rhi::SubobjLayout subobjLayout{ layout->GetHandle() };
+			const rhi::PipelineStreamItem items[] = { rhi::Make(subobjLayout), rhi::Make(shader) };
+			if (!Ok(device.CreatePipeline(items, 2, pipeline), "CreatePipeline (device address test)", a_failure))
+				return false;
+
+			rhi::ResourcePtr source, destination, readback;
+			if (!Ok(device.CreateCommittedResource(rhi::helpers::ResourceDesc::Buffer(kBytes, rhi::HeapType::Upload, {}, "CS D3D12 self-test address source"), source),
+					"CreateCommittedResource (source)", a_failure) ||
+				!Ok(device.CreateCommittedResource(rhi::helpers::ResourceDesc::Buffer(kBytes, rhi::HeapType::DeviceLocal, rhi::RF_AllowUnorderedAccess,
+								"CS D3D12 self-test address destination"),
+							destination),
+					"CreateCommittedResource (destination)", a_failure) ||
+				!Ok(device.CreateCommittedResource(rhi::helpers::ResourceDesc::Buffer(kBytes, rhi::HeapType::Readback, {}, "CS D3D12 self-test address readback"),
+							readback),
+					"CreateCommittedResource (readback)", a_failure))
+				return false;
+			void* mapped = nullptr;
+			source->Map(&mapped, 0, kBytes);
+			if (!mapped) {
+				a_failure = "the source buffer could not be mapped";
+				return false;
+			}
+			for (std::uint32_t i = 0; i < kWords; ++i)
+				static_cast<std::uint32_t*>(mapped)[i] = 0x1000u + i * 3u;
+			source->Unmap(0, kBytes);
+
+			// The addresses join the device address table here (GetBufferDeviceAddress).
+			const std::uint64_t from = device.GetBufferDeviceAddress({ source->GetHandle(), 0 });
+			const std::uint64_t to = device.GetBufferDeviceAddress({ destination->GetHandle(), 0 });
+			if (!from || !to) {
+				a_failure = "GetBufferDeviceAddress gave no address";
+				return false;
+			}
+
+			// The device's full capacity (rhi_shader_abi.h): only such a heap holds the table's region.
+			rhi::DescriptorHeapPtr heap;
+			if (!Ok(device.CreateDescriptorHeap(rhi::DescriptorHeapDesc{ rhi::DescriptorHeapType::CbvSrvUav, rhi::D3D12_DEVICE_ADDRESS_TABLE_SLOT, true,
+											   "CS D3D12 self-test full heap" },
+						heap),
+					"CreateDescriptorHeap (full capacity)", a_failure))
+				return false;
+
+			rhi::CommandAllocatorPtr allocator;
+			rhi::CommandListPtr list;
+			rhi::TimelinePtr timeline;
+			if (!Ok(device.CreateCommandAllocator(rhi::QueueKind::Graphics, allocator), "CreateCommandAllocator", a_failure) ||
+				!Ok(device.CreateCommandList(rhi::QueueKind::Graphics, allocator.Get(), list), "CreateCommandList", a_failure) ||
+				!Ok(device.CreateTimeline(timeline, 0, "CS D3D12 self-test addresses"), "CreateTimeline", a_failure))
+				return false;
+			list->SetDescriptorHeaps(heap->GetHandle(), std::nullopt);
+			rhi::BufferBarrier toWrite{};
+			toWrite.buffer = destination->GetHandle();
+			toWrite.beforeSync = rhi::ResourceSyncState::None;
+			toWrite.afterSync = rhi::ResourceSyncState::ComputeShading;
+			toWrite.beforeAccess = rhi::ResourceAccessType::None;
+			toWrite.afterAccess = rhi::ResourceAccessType::UnorderedAccess;
+			list->Barriers(rhi::BarrierBatch{ .buffers = { &toWrite, 1 } });
+			list->BindLayout(layout->GetHandle());
+			list->BindPipeline(pipeline->GetHandle());
+			const std::uint32_t words[kAddressPushWords] = { static_cast<std::uint32_t>(from), static_cast<std::uint32_t>(from >> 32), static_cast<std::uint32_t>(to),
+				static_cast<std::uint32_t>(to >> 32), kWords, 0, 0, 0 };
+			list->PushConstants(rhi::ShaderStage::Compute, 0, 0, 0, kAddressPushWords, words);
+			list->Dispatch(kWords / 64, 1, 1);
+			rhi::BufferBarrier toCopy = toWrite;
+			toCopy.beforeSync = rhi::ResourceSyncState::ComputeShading;
+			toCopy.afterSync = rhi::ResourceSyncState::Copy;
+			toCopy.beforeAccess = rhi::ResourceAccessType::UnorderedAccess;
+			toCopy.afterAccess = rhi::ResourceAccessType::CopySource;
+			list->Barriers(rhi::BarrierBatch{ .buffers = { &toCopy, 1 } });
+			list->CopyBufferRegion(readback->GetHandle(), 0, destination->GetHandle(), 0, kBytes);
+			list->End();
+			const rhi::TimelinePoint signal{ timeline->GetHandle(), 1 };
+			const rhi::CommandList lists[] = { list.Get() };
+			rhi::SubmitDesc submit{};
+			submit.signals = { &signal, 1 };
+			if (!Ok(queue.Submit(lists, submit), "Queue::Submit", a_failure) || !Ok(timeline->HostWait(1, 5000), "Timeline::HostWait", a_failure))
+				return false;
+			queue.CheckDebugMessages();
+
+			mapped = nullptr;
+			readback->Map(&mapped, 0, kBytes);
+			if (!mapped) {
+				a_failure = "the readback buffer could not be mapped";
+				return false;
+			}
+			std::vector<std::uint32_t> values(kWords);
+			std::memcpy(values.data(), mapped, kBytes);
+			readback->Unmap(0, 0);
+			for (std::uint32_t i = 0; i < kWords; ++i) {
+				const std::uint32_t expected = (0x1000u + i * 3u) * 7u + 1u;
+				if (values[i] != expected) {
+					a_failure = fmt::format("word {} read {:#x} through the device address table, expected {:#x} (source {:#x}, destination {:#x})", i, values[i],
+						expected, from, to);
+					return false;
+				}
+			}
+			logger::info("[ORG] D3D12 self-test: {} words loaded and stored through emulated device addresses ({:#x} -> {:#x})", kWords, from, to);
 			return true;
 		}
 
@@ -344,13 +466,20 @@ namespace RenderGraph::Engine::D3D12SelfTest
 				step = "dispatch";
 				if (!Dispatch(*device, dxil, failure))
 					break;
+				step = "device address build";
+				const auto addressDxil = CompileDxil(failure, "RenderGraph/D3D12DeviceAddressTest.hlsl");
+				if (addressDxil.empty())
+					break;
+				step = "device addresses";
+				if (!DeviceAddresses(*device, addressDxil, failure))
+					break;
 				step = "present";
 				if (!Present(*device, failure))
 					break;
 				passed = true;
 			} while (false);
 			if (passed)
-				logger::info("[ORG] D3D12 self-test: passed (device, DXIL build, dispatch, present)");
+				logger::info("[ORG] D3D12 self-test: passed (device, DXIL build, dispatch, device addresses, present)");
 			else
 				logger::error("[ORG] D3D12 self-test: FAILED at the {} step: {}", step, failure);
 		}

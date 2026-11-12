@@ -3,6 +3,8 @@
 // The shadow views' plain indexed draws then bind the pool alone (ShadowViewPass).
 
 // Must match IndexPoolConstants (Draws/IndirectDraws/Core/GpuLayouts.h).
+#include "Common/DeviceAddress.hlsli"
+
 cbuffer IndexPoolConstants : register(b0)
 {
 	uint LatchIndex;   // ByteAddressBuffer: the shadow latch block
@@ -26,5 +28,5 @@ static const uint kGroupsX = 65535;  // the dispatch's x limit: a copy past it i
 	// A range starts at an even index (4-byte aligned); the source's last word may hold two bytes past its indices, which
 	// land in the range's own padding.
 	[loop] for (uint word = thread; word < job.w; word += 64)
-		pool.Store(job.z * 2 + word * 4, vk::RawBufferLoad<uint>(source + uint64_t(word) * 4));
+		pool.Store(job.z * 2 + word * 4, DeviceLoad(uint, source + uint64_t(word) * 4));
 }
