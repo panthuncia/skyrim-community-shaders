@@ -64,6 +64,79 @@ namespace HangWatchdog
 				std::filesystem::remove(reports[i].path(), error);
 		}
 
+		/** @brief dxvk_d3d11's DxvkViewTraceEntry (d3d11_view_srv.cpp, DXVK_VIEW_TRACE=1). */
+		struct DestroyedView
+		{
+			std::uintptr_t view, viewEnd, stream, streamEnd;
+			std::uint32_t kind, thread;
+			std::uint64_t tick;
+			std::uint32_t frameCount;
+			void* frames[24];
+		};
+
+		std::string ModuleOffset(const void* a_address)
+		{
+			HMODULE module = nullptr;
+			if (!GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT, static_cast<LPCSTR>(a_address), &module))
+				return fmt::format("{}", a_address);
+			char path[MAX_PATH]{};
+			GetModuleFileNameA(module, path, MAX_PATH);
+			return fmt::format("{}+{:#x}", std::filesystem::path(path).filename().string(), reinterpret_cast<std::uintptr_t>(a_address) - reinterpret_cast<std::uintptr_t>(module));
+		}
+
+		/**
+		 * @brief With DXVK_VIEW_TRACE=1: logs the views freed while the stuck thread's registers point into them, with the stacks that
+		 * released and destroyed them. A thread spinning on a freed view's lock names who freed the view.
+		 */
+		void LogFreedViews(std::uint32_t a_thread)
+		{
+			const auto dxvk = GetModuleHandleW(L"dxvk_d3d11.dll");
+			using Find = std::uint32_t(__stdcall*)(std::uintptr_t, DestroyedView*, std::uint32_t);
+			const auto find = dxvk ? reinterpret_cast<Find>(GetProcAddress(dxvk, "dxvkFindDestroyedView")) : nullptr;
+			if (!find)
+				return;
+			const HANDLE thread = OpenThread(THREAD_SUSPEND_RESUME | THREAD_GET_CONTEXT, FALSE, a_thread);
+			if (!thread)
+				return;
+			CONTEXT context{};
+			context.ContextFlags = CONTEXT_INTEGER | CONTEXT_CONTROL;
+			bool read = false;
+			if (SuspendThread(thread) != static_cast<DWORD>(-1)) {
+				read = GetThreadContext(thread, &context) != FALSE;
+				ResumeThread(thread);
+			}
+			CloseHandle(thread);
+			if (!read)
+				return;
+			// The registers, then the stack: a thread that sleeps in a spin keeps its caller's registers saved on the stack.
+			std::vector<std::pair<std::string, std::uintptr_t>> values = { { "rax", context.Rax }, { "rbx", context.Rbx }, { "rcx", context.Rcx },
+				{ "rdx", context.Rdx }, { "rsi", context.Rsi }, { "rdi", context.Rdi }, { "rbp", context.Rbp }, { "r8", context.R8 }, { "r9", context.R9 },
+				{ "r10", context.R10 }, { "r11", context.R11 }, { "r12", context.R12 }, { "r13", context.R13 }, { "r14", context.R14 }, { "r15", context.R15 } };
+			MEMORY_BASIC_INFORMATION region{};
+			if (VirtualQuery(reinterpret_cast<const void*>(context.Rsp), &region, sizeof(region)) && region.State == MEM_COMMIT) {
+				const auto end = (std::min)(reinterpret_cast<std::uintptr_t>(region.BaseAddress) + region.RegionSize, static_cast<std::uintptr_t>(context.Rsp) + 0x10000);
+				for (auto at = static_cast<std::uintptr_t>(context.Rsp) & ~std::uintptr_t(7); at + 8 <= end; at += 8)
+					values.emplace_back(fmt::format("[rsp+{:#x}]", at - context.Rsp), *reinterpret_cast<const std::uintptr_t*>(at));
+			}
+			std::unordered_set<std::uintptr_t> reported;
+			for (const auto& [name, value] : values) {
+				DestroyedView entries[4]{};
+				const auto count = find(value, entries, 4);
+				for (std::uint32_t i = 0; i < count; ++i) {
+					const auto& e = entries[i];
+					if (!reported.insert(e.view ^ (std::uintptr_t(e.kind) << 63)).second)
+						continue;
+					std::string stack;
+					for (std::uint32_t f = 0; f < e.frameCount && f < 24; ++f)
+						stack += fmt::format("\n    {}", ModuleOffset(e.frames[f]));
+					logger::critical("[HANG] {} = {:#x} is in a freed view {:#x} (stream state {:#x}); its {} on thread {}, {} ms ago:{}", name, value, e.view, e.stream,
+						e.kind ? "destruction" : "last public Release", e.thread, GetTickCount64() - e.tick, stack);
+				}
+			}
+			if (reported.empty())
+				logger::info("[HANG] no register or stack value of the stuck thread points into a recently freed shader resource view");
+		}
+
 		void Report(std::uint64_t a_stalledMs)
 		{
 			const auto dir = logger::log_directory();
@@ -74,6 +147,7 @@ namespace HangWatchdog
 			const auto thread = renderThread.load(std::memory_order_relaxed);
 			logger::critical("[HANG] the render thread (thread {}) has not presented for {:.1f} s; writing every thread's stack to {}", thread,
 				a_stalledMs / 1000.0, text.filename().string());
+			LogFreedViews(thread);
 			spdlog::default_logger()->flush();
 			PruneReports(*dir);
 			const auto begin = GetTickCount64();

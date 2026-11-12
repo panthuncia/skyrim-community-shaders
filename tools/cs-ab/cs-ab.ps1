@@ -16,6 +16,8 @@
                                               "use", one game run of the scenario, then collects its files. -DumpAtFrame takes a
                                               full process dump once the scenario's command at that frame has run (dump\*.py read it).
                                               -DisableMod turns those MO2 mods off for this run only.
+                                              A run stops as soon as CS's hang watchdog writes its report (stop=hang);
+                                              the report and its dump are moved into the run folder.
 
     Scenarios are scenarios\*.env beside this script: the CommunityShaders.env for the run. A scenario line
     "# cs-ab: disable-mod=<mod name>" turns that mod off for the run, like -DisableMod. Only that mod's line in modlist.txt
@@ -221,6 +223,8 @@ switch ($Action) {
         $startUtc = $start.ToUniversalTime()
         $disabled = Disable-Mods ($modsOff | Select-Object -Unique)
         try {
+            # The log checks below must not match the previous run's log before the game rewrites it.
+            Move-Item (Join-Path $skse 'CommunityShaders.log') (Join-Path $skse 'CommunityShaders.previous.log') -Force -ErrorAction SilentlyContinue
             Start-Process -FilePath (Join-Path $Mo2 'ModOrganizer.exe') -ArgumentList '-p', $Profile2, '"moshortcut://:SKSE"' -WorkingDirectory $Mo2 | Out-Null
             $seen = $false; $stop = 'timeout'; $focused = $false; $dumped = $false
             # The displays must stay on: with them off, Present throttles to a few frames a second.
@@ -237,7 +241,10 @@ switch ($Action) {
                     & $Procdump -accepteula -ma $game.Id $DumpPath | Select-Object -Last 2
                     $dumped = $true
                 }
-                if ($Until -and $seen -and (Get-Content (Join-Path $skse 'CommunityShaders.log') -ErrorAction SilentlyContinue | Select-String -Pattern $Until -Quiet)) { $stop = 'until'; Start-Sleep -Seconds 3; break }
+                $log = if ($seen) { Get-Content (Join-Path $skse 'CommunityShaders.log') -ErrorAction SilentlyContinue } else { $null }
+                if ($Until -and $log -and ($log | Select-String -Pattern $Until -Quiet)) { $stop = 'until'; Start-Sleep -Seconds 3; break }
+                # The hang watchdog has written its report (stacks and dump): the run is over.
+                if ($log -and ($log | Select-String -Pattern '\[HANG\] wrote CommunityShaders-Hang-' -Quiet)) { $stop = 'hang'; break }
             }
             [void][CsAb.Native]::SetThreadExecutionState([uint32]2147483648)
             Get-Process SkyrimSE -ErrorAction SilentlyContinue | Stop-Process -Force
@@ -257,8 +264,8 @@ switch ($Action) {
         # dclf:shot's screenshots of this run (<log directory>\dclf-shots), into the run folder's shots.
         $shots = Get-ChildItem (Join-Path $skse 'dclf-shots') -File -ErrorAction SilentlyContinue | Where-Object { $_.LastWriteTimeUtc -ge $startUtc }
         if ($shots) { $shotDir = Join-Path $out 'shots'; New-Item -ItemType Directory -Force $shotDir | Out-Null; $shots | Copy-Item -Destination $shotDir }
-        Get-ChildItem $skse -File | Where-Object { $_.LastWriteTimeUtc -ge $startUtc -and $_.Name -match '^(CS-AB-memory\.csv|CommunityShaders-VRAM-\d+\.json)$' } | ForEach-Object {
-            if ($_.Name -like '*.json') { Move-Item $_.FullName $out } else { Copy-Item $_.FullName $out }
+        Get-ChildItem $skse -File | Where-Object { $_.LastWriteTimeUtc -ge $startUtc -and $_.Name -match '^(CS-AB-memory\.csv|CommunityShaders-VRAM-\d+\.json|CommunityShaders-Hang-[\d-]+\.(txt|dmp))$' } | ForEach-Object {
+            if ($_.Name -match '\.(json|txt|dmp)$') { Move-Item $_.FullName $out } else { Copy-Item $_.FullName $out }
         }
         @{ variant = $Name; scenario = $Argument; label = $Label; env = $Env; modsOff = $disabled; stop = $stop; seconds = [int]((Get-Date) - $start).TotalSeconds } | ConvertTo-Json | Set-Content (Join-Path $out 'run.json') -Encoding utf8
         "$id stop=$stop"
