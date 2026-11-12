@@ -186,6 +186,9 @@ namespace DCLF::Family
 		std::uint32_t drawn = 0;          // DrawTriShape calls
 		std::uint32_t pendingType = kNone;  // the last pass's geometry type while its draw has not reached DrawTriShape
 		std::uint32_t otherTypes = 0;       // the geometry types of passes that drew elsewhere, a bit each
+		// The family takes the DrawData copy's draws too (AddDynamicDrawTaker): a particles pass (type 1, R1's dispatcher +0x101) draws
+		// through its taker, so it is no shortfall. Set after Begin.
+		bool dynamicDraws = false;
 
 		void Begin() { *this = {}; }
 		/**

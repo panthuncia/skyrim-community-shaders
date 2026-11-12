@@ -210,6 +210,8 @@ namespace DCLF::Family
 		if (pendingType != kNone)
 			otherTypes |= 1u << (pendingType & 31);
 		pendingType = a_pass && a_pass->geometry ? static_cast<std::uint32_t>(a_pass->geometry->GetType().underlying()) : 0xFE;
+		if (dynamicDraws && pendingType == static_cast<std::uint32_t>(RE::BSGeometry::Type::kParticles))
+			return true;
 		return DrawsThroughTriShape(a_pass);
 	}
 

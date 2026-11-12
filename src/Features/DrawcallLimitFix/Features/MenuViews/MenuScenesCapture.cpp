@@ -47,6 +47,13 @@ namespace DCLF::Features::MenuViews::Scenes
 			return log;
 		}
 
+		/** @brief Whether the DrawData copy's taker is installed (InstallHooks): the particles' passes are then the family's too. */
+		bool& DynamicTakerInstalled()
+		{
+			static bool installed = false;
+			return installed;
+		}
+
 		/** @brief The batch being latched (render thread). */
 		struct Capture
 		{
@@ -547,6 +554,7 @@ namespace DCLF::Features::MenuViews::Scenes
 				capture.run->view = kView;
 				capture.failed = false;
 				capture.passes.Begin();
+				capture.passes.dynamicDraws = DynamicTakerInstalled();
 				capture.active = true;
 				func(a_camera, a_accumulator, a_flags);
 				capture.active = false;
@@ -679,7 +687,7 @@ namespace DCLF::Features::MenuViews::Scenes
 			return;
 		}
 		// The particles (a loading-screen model's) draw through the DrawData copy; without it they stay the engine's.
-		Family::AddDynamicDrawTaker("menu scenes", &TakeDynamicDraw);
+		DynamicTakerInstalled() = Family::AddDynamicDrawTaker("menu scenes", &TakeDynamicDraw);
 		if (MapEnabled()) {
 			if (LocalMapKnown()) {
 				stl::write_thunk_call<SceneBatch<View::LocalMap>>(REL::Offset(Address::kLocalMapSubmit).address());
