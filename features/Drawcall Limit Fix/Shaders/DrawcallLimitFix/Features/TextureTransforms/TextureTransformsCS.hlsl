@@ -53,11 +53,14 @@ static const uint kThreads = 64 * 32;
 		return;  // no producer this frame (and no copy: the draws read the installed rows)
 	const DeviceRef base = latch.Load2(LatchOffset + kLatchMaterialRowsRef);
 	const DeviceRef copyBase = latch.Load2(LatchOffset + kLatchAnimatedRowsRef);
-	if (DeviceRefIsNull(base) || DeviceRefIsNull(copyBase))
-		return;
 	StructuredBuffer<TextureTransformRow> transforms = ResourceDescriptorHeap[transformsIndex];
-	const uint count = transforms[0].RowOffset;
-	const uint animated = transforms[0].Mask;
+	// Null refs (no rows or no copy) leave nothing to do: the counts become 0, with no early return. AMD's RDNA2 Windows compiler took
+	// `if (DeviceRefIsNull(base) || DeviceRefIsNull(copyBase)) return;` as base.x == 0 on the path past it: every load read heap
+	// slot 0 (a null view: every copy zeros, every animated draw black; before slot 0 was kept null, another buffer's 1.0f values, which
+	// the draws then read as a descriptor index: a device fault) and every store wrote slot 1.
+	const bool rowsValid = !DeviceRefIsNull(base) && !DeviceRefIsNull(copyBase);
+	const uint count = rowsValid ? transforms[0].RowOffset : 0;
+	const uint animated = rowsValid ? transforms[0].Mask : 0;
 	// CS_DCLF_REF_TRACE: the entries and animated rows the header counts.
 	DEVICE_REF_TRACE_VALUE(uint2(count, animated));
 	if (Phase == 0) {
