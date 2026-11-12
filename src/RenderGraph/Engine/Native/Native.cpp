@@ -83,7 +83,49 @@ namespace RenderGraph::Engine::Native
 			Conflict{ "CS_ORG_SCALEFORM_D3D11_PARTS", "1", "it draws Scaleform's remaining parts through D3D11" },
 		};
 
+		/**
+		 * @brief Drawcall Limit Fix on D3D12: what has no D3D12 port yet, kept off, and the plain draws D3D12 needs kept on. DCLF's D3D12
+		 * port draws only with its pulled builds and plain indirect draws (DrawPipelines, DxilStages). A value the environment sets
+		 * already is kept, so a run can try a part.
+		 */
+		struct DclfSwitch
+		{
+			const char* name;
+			const char* value;
+			const char* why;
+		};
+		constexpr std::array kD3D12DclfSwitches{
+			DclfSwitch{ "CS_DCLF_PIPELINE", "gpu", "the CPU pipeline records Vulkan command buffers through external commands" },
+			DclfSwitch{ "CS_DCLF_FORWARD_DIRECT", "0", "the forward family's CPU sites record Vulkan command buffers" },
+			DclfSwitch{ "CS_DCLF_MAIN_PLAIN", "1", "D3D12 draws colour with plain draws only" },
+			DclfSwitch{ "CS_DCLF_TERRAIN_PLAIN", "1", "D3D12 draws colour with plain draws only" },
+			DclfSwitch{ "CS_DCLF_DECAL_PLAIN", "1", "D3D12 draws colour with plain draws only" },
+			DclfSwitch{ "CS_DCLF_FORWARD_PLAIN", "1", "D3D12 draws colour with plain draws only" },
+			DclfSwitch{ "CS_DCLF_SHADOWS", "0", "the shadow views' Utility builds read pushed addresses, not ported" },
+			DclfSwitch{ "CS_DCLF_FORWARD", "0", "the forward epoch is not checked on D3D12 yet" },
+			DclfSwitch{ "CS_DCLF_REFRACTION", "0", "the refraction draw uses the shadow views' layout" },
+			DclfSwitch{ "CS_DCLF_EFFECTS", "0", "the Effect program family's builds are not ported" },
+			DclfSwitch{ "CS_DCLF_OPAQUE_EFFECTS", "0", "the Effect program family's builds are not ported" },
+			DclfSwitch{ "CS_DCLF_BILLBOARDS", "0", "the Effect program family's builds are not ported" },
+			DclfSwitch{ "CS_DCLF_PARTICLES", "0", "the particle path is not ported" },
+			DclfSwitch{ "CS_DCLF_MASTER_PARTICLES", "0", "the particle path is not ported" },
+			DclfSwitch{ "CS_DCLF_BILLBOARD_PARTICLES", "0", "the particle path is not ported" },
+			DclfSwitch{ "CS_DCLF_GRASS", "0", "the grass draw family (RunGrass) is not ported" },
+			DclfSwitch{ "CS_DCLF_LOD_TREES", "0", "the tree LOD draw family (DistantTree) is not ported" },
+			DclfSwitch{ "CS_DCLF_FIRST_PERSON", "0", "first person's sites are not checked on D3D12 yet" },
+			DclfSwitch{ "CS_DCLF_REFLECTIONS", "0", "the water reflection's views are not ported" },
+			DclfSwitch{ "CS_DCLF_SKYLIGHT", "0", "Skylighting's occlusion view uses the Utility builds" },
+			DclfSwitch{ "CS_DCLF_PRECIPITATION", "0", "the precipitation occlusion view uses the Utility builds" },
+		};
+
+		std::string g_d3d12DclfOff;
+
 		std::atomic<int> g_stage{ 0 };
+	}
+
+	std::string D3D12DclfOff()
+	{
+		return g_d3d12DclfOff;
 	}
 
 	bool Requested()
@@ -140,6 +182,28 @@ namespace RenderGraph::Engine::Native
 				Fail(name, "it was read before native mode could turn it on");
 		}
 		Stage("switches", turnedOn.empty() ? std::string("every port switch was set already") : fmt::format("turned on {}", turnedOn));
+		// D3D12: Drawcall Limit Fix's parts without a D3D12 port, by their own switches (read later, at DCLF's install).
+		char backend[16]{};
+		const DWORD backendLength = ::GetEnvironmentVariableA("CS_ORG_NATIVE_BACKEND", backend, sizeof(backend));
+		if (backendLength == 0 || backendLength >= sizeof(backend) || _stricmp(backend, "d3d12") != 0)
+			return;
+		std::string set, kept;
+		for (const auto& entry : kD3D12DclfSwitches) {
+			char value[32]{};
+			const DWORD length = ::GetEnvironmentVariableA(entry.name, value, sizeof(value));
+			if (length != 0 && length < sizeof(value)) {
+				if (std::string_view(value) != entry.value)
+					kept += fmt::format("{}{}={} (D3D12 wants {}: {})", kept.empty() ? "" : ", ", entry.name, value, entry.value, entry.why);
+				continue;
+			}
+			::SetEnvironmentVariableA(entry.name, entry.value);
+			_putenv_s(entry.name, entry.value);
+			set += fmt::format("{}{}={} ({})", set.empty() ? "" : ", ", entry.name, entry.value, entry.why);
+		}
+		g_d3d12DclfOff = set.empty() ? std::string("nothing") : set;
+		if (!kept.empty())
+			g_d3d12DclfOff += fmt::format("; kept from the environment: {}", kept);
+		logger::info("[ORG native] D3D12: Drawcall Limit Fix switches set: {}", g_d3d12DclfOff);
 	}
 
 	void CheckStartup()

@@ -2,6 +2,8 @@
 
 #include "Features/DrawcallLimitFix/Core/Gpu/Pipelines/SpirvReflection.h"
 
+#include "Features/DrawcallLimitFix/Core/Gpu/Pipelines/DxilStages.h"
+
 #include <cstring>
 #include <string_view>
 
@@ -263,6 +265,9 @@ namespace DCLF
 
 	bool SpirvReflection::Parse(std::span<const std::byte> a_spirv)
 	{
+		// D3D12's stages are DXIL: DXC's reflection of them, in the same terms.
+		if (DxilStages::IsDxil(a_spirv))
+			return DxilStages::Reflect(a_spirv, *this);
 		inputs.clear();
 		bindings.clear();
 		blockMembers.clear();

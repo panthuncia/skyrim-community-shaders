@@ -12,6 +12,7 @@
 #include "Features/DrawcallLimitFix/Core/Render/Payload/Latched.h"
 #include "Features/DrawcallLimitFix/Core/Render/Resources/GpuLayouts.h"
 #include "Features/DrawcallLimitFix/Core/Scene/Model/Records.h"
+#include "RenderGraph/Backend.h"
 
 #include <Render/LatchBlock.h>
 #include <RenderPasses/Base/TypedRenderGraphPass.h>
@@ -130,6 +131,12 @@ namespace DCLF::Draws
 	 * fetches each draw's vertices and rows through the sequence its instance names, as a plain draw binds no vertex buffer or push
 	 * data of its own.
 	 */
+	/**
+	 * @brief Where a plain draw's arguments start in its sequence: its DrawIndexed arguments, or on D3D12 the word before them, the draw's
+	 * instance, which the Z-prepass's signature writes into kDrawPushInstance first (DrawPipelines::Impl::CreateDrawSignatures).
+	 */
+	inline std::uint64_t PlainDrawArgumentsOffset() { return ::RenderGraph::Backend::IsD3D12() ? kSequenceDrawOffset - 4 : kSequenceDrawOffset; }
+
 	inline void RecordBucketDraw(rhi::CommandList& a_commands, rhi::CommandSignatureHandle a_signature, rhi::ResourceHandle a_sequences, std::uint64_t a_sequencesAddress,
 		std::uint64_t a_first, rhi::PipelineHandle a_pipeline, rhi::ResourceHandle a_counts, std::uint32_t a_bucket, std::uint32_t a_capacity, bool a_offsetDepth = false)
 	{
@@ -140,7 +147,7 @@ namespace DCLF::Draws
 		words[kZDrawPushOffsetDepth] = a_offsetDepth ? 1u : 0u;
 		a_commands.BindPipeline(a_pipeline);
 		a_commands.PushConstants(rhi::ShaderStage::AllGraphics, 0, kDrawPushBinding, 0, kDrawPushWords, words);
-		a_commands.ExecuteIndirect(a_signature, a_sequences, first + kSequenceDrawOffset, a_counts, std::uint64_t(a_bucket) * sizeof(std::uint32_t), a_capacity);
+		a_commands.ExecuteIndirect(a_signature, a_sequences, first + PlainDrawArgumentsOffset(), a_counts, std::uint64_t(a_bucket) * sizeof(std::uint32_t), a_capacity);
 	}
 
 	/** @brief A pass's colour attachments, loaded and stored: a_count of the declared render target views a_tokens, each with its resource. */

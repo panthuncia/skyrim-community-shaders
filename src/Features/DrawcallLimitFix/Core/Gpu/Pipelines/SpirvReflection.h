@@ -54,7 +54,7 @@ namespace DCLF
 		// The stage outputs' locations, a bit each (a pixel stage's: the colour attachments it writes; DXC's "out.var.SV_Target<n>").
 		std::uint32_t outputLocations = 0;
 
-		/** @brief Parses a module; false if it is not SPIR-V. */
+		/** @brief Parses a module; false if it is not SPIR-V. A DXIL container (D3D12) is read through DXC's reflection (DxilStages::Reflect). */
 		bool Parse(std::span<const std::byte> a_spirv);
 	};
 }

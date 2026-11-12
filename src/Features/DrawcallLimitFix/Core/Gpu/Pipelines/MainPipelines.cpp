@@ -691,7 +691,9 @@ namespace DCLF
 				}
 			}
 			built->stateClass.variants[variant] = desc.State(pixel);
-			desc.Create(a_device, built->pipelines[variant], fmt::format("{} {}", a_keyName, depthOnly ? "depth" : "color"));
+			// D3D12: only the pulled pipelines (as Build's).
+			if (!DrawPipelines::Get().impl->d3d12)
+				desc.Create(a_device, built->pipelines[variant], fmt::format("{} {}", a_keyName, depthOnly ? "depth" : "color"));
 			if (!depthOnly)
 				BuildPulledColour(a_device, a_zLayout, a_program->pulledVertex, a_program->pulledPixel, desc, a_keyName, *built);
 			else if (decalGroup == 1)
@@ -779,7 +781,9 @@ namespace DCLF
 			}
 			built->stateClass.variants[variant] = desc.State(depthOnly ? depthPixel : pixel);
 			const std::string keyName = fmt::format("vs {:08X} ps {:08X} flags {:08X}", a_key.vertexDescriptor, a_key.pixelDescriptor, a_key.rasterFlags);
-			desc.Create(a_device, built->pipelines[variant], fmt::format("{} {}", keyName, depthOnly ? "depth" : "color"));
+			// D3D12: the unpulled stages keep their registers, which no D3D12 layout maps; only the pulled pipelines below are made.
+			if (!DrawPipelines::Get().impl->d3d12)
+				desc.Create(a_device, built->pipelines[variant], fmt::format("{} {}", keyName, depthOnly ? "depth" : "color"));
 			if (!depthOnly) {
 				// The plain colour draws' pipeline: a forward key's (the forward buckets), a main key's (the main buckets), a terrain group's
 				// (the terrain buckets) and a decal group's (the decal buckets).

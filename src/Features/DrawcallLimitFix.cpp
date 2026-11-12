@@ -7,6 +7,7 @@
 
 #	include "Deferred.h"
 #	include "RenderGraph/Backend.h"
+#	include "RenderGraph/Engine/Native/Native.h"
 #	include "RenderGraph/Engine/Tripwire/Tripwire.h"
 #	include "Features/DrawcallLimitFix/Api/MaterialWrites.h"
 #	include "Features/DrawcallLimitFix/Core/Engine/EngineReadWindow.h"
@@ -228,11 +229,11 @@ void DrawcallLimitFix::PostPostLoad()
 
 void DrawcallLimitFix::SetupResources()
 {
-	// D3D12 (native mode, CS_ORG_NATIVE_BACKEND=d3d12): DCLF's draw layouts bind through VK_EXT_descriptor_heap record mappings, its
-	// pipelines reflect SPIR-V, and its CPU sites record Vulkan command buffers. None of it has a D3D12 port yet, so DCLF is off there
-	// and its thousands of Lighting builds are not compiled.
+	// D3D12 (native mode, CS_ORG_NATIVE_BACKEND=d3d12): DCLF draws with its pulled builds and plain indirect draws only, the stages
+	// reading their bindings themselves (DrawPipelines, DxilStages). What has no D3D12 port yet is off by the switches native mode sets
+	// (Native::ApplySwitches: the CPU pipeline, the shadow views, the draw and program families), each named in its log line.
 	const bool d3d12 = ::RenderGraph::Backend::IsD3D12();
-	if (installed && !d3d12 && RenderGraphRuntime::Get().IsActive() && RenderGraphRuntime::EpochsEnabled())
+	if (installed && RenderGraphRuntime::Get().IsActive() && RenderGraphRuntime::EpochsEnabled())
 		DCLF::ShaderPrograms::Get().StartPrecompile();
 	// Runs right after the render graph tried to adopt DXVK's device (State::SetupResources). The hooks went in at PostPostLoad,
 	// before any device existed; without the graph (or its epochs: CS_ORG_EPOCHS, async: CS_ORG_ASYNC_EPOCHS) or the device's
@@ -241,10 +242,7 @@ void DrawcallLimitFix::SetupResources()
 	if (!installed)
 		return;
 	auto& graph = RenderGraphRuntime::Get();
-	if (d3d12)
-		unavailableReason = "DCLF is not ported to D3D12 yet (CS_ORG_NATIVE_BACKEND=d3d12): its draw layouts use VK_EXT_descriptor_heap record "
-		                    "mappings, its pipelines reflect SPIR-V and its CPU sites record Vulkan command buffers; the world's geometry is not drawn";
-	else if (!graph.IsActive())
+	if (!graph.IsActive())
 		unavailableReason = graph.GetDisabledReason();
 	else if (!RenderGraphRuntime::EpochsEnabled())
 		unavailableReason = "the render graph runs without epochs (CS_ORG_EPOCHS=0)";
@@ -252,8 +250,12 @@ void DrawcallLimitFix::SetupResources()
 		unavailableReason = "the render graph runs without async epochs (CS_ORG_ASYNC_EPOCHS=0)";
 	else if (!DCLF::DrawPipelines::Get().Enabled())
 		unavailableReason = "the GPU or driver lacks the indirect pipelines DCLF draws with (see the [DCLF] Indirect pipelines line)";
-	else
+	else {
+		if (d3d12)
+			logger::info("[DCLF] D3D12: on, the main view's Lighting draws in the Z-prepass and the colour pass's plain buckets; still off there: {}",
+				::RenderGraph::Engine::Native::D3D12DclfOff());
 		return;
+	}
 	ForceOff();
 }
 
