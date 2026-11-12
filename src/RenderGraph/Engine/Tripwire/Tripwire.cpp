@@ -909,57 +909,127 @@ namespace RenderGraph::Engine::Tripwire
 
 	namespace
 	{
-		/** @brief The description of a 2D texture behind a_resource, false when it is something else. */
-		bool Texture2DOf(ID3D11Resource* a_resource, D3D11_TEXTURE2D_DESC& a_out)
+		/** @brief What a null view description defaults from: the texture's dimension, format, mips, array size and depth. */
+		struct ViewSource
 		{
 			D3D11_RESOURCE_DIMENSION dimension = D3D11_RESOURCE_DIMENSION_UNKNOWN;
-			a_resource->GetType(&dimension);
-			if (dimension != D3D11_RESOURCE_DIMENSION_TEXTURE2D)
+			DXGI_FORMAT format = DXGI_FORMAT_UNKNOWN;
+			UINT mips = 1, arraySize = 1, depth = 1, samples = 1;
+			bool cube = false;
+		};
+
+		/** @brief The texture behind a_resource as a ViewSource, false for a buffer or an unknown resource. */
+		bool ViewSourceOf(ID3D11Resource* a_resource, ViewSource& a_out)
+		{
+			a_resource->GetType(&a_out.dimension);
+			switch (a_out.dimension) {
+			case D3D11_RESOURCE_DIMENSION_TEXTURE1D:
+				{
+					D3D11_TEXTURE1D_DESC desc{};
+					static_cast<ID3D11Texture1D*>(a_resource)->GetDesc(&desc);
+					a_out.format = desc.Format;
+					a_out.mips = desc.MipLevels ? desc.MipLevels : UINT(-1);  // 0 made the whole chain; -1 views all of it
+					a_out.arraySize = desc.ArraySize;
+					return true;
+				}
+			case D3D11_RESOURCE_DIMENSION_TEXTURE2D:
+				{
+					D3D11_TEXTURE2D_DESC desc{};
+					static_cast<ID3D11Texture2D*>(a_resource)->GetDesc(&desc);
+					a_out.format = desc.Format;
+					a_out.mips = desc.MipLevels ? desc.MipLevels : UINT(-1);  // 0 made the whole chain; -1 views all of it
+					a_out.arraySize = desc.ArraySize;
+					a_out.samples = desc.SampleDesc.Count;
+					a_out.cube = (desc.MiscFlags & D3D11_RESOURCE_MISC_TEXTURECUBE) != 0;
+					return true;
+				}
+			case D3D11_RESOURCE_DIMENSION_TEXTURE3D:
+				{
+					D3D11_TEXTURE3D_DESC desc{};
+					static_cast<ID3D11Texture3D*>(a_resource)->GetDesc(&desc);
+					a_out.format = desc.Format;
+					a_out.mips = desc.MipLevels ? desc.MipLevels : UINT(-1);  // 0 made the whole chain; -1 views all of it
+					a_out.depth = desc.Depth;
+					return true;
+				}
+			default:
 				return false;
-			static_cast<ID3D11Texture2D*>(a_resource)->GetDesc(&a_out);
-			return true;
+			}
 		}
 
-		/** @name A view of a_resource with a null description: the whole 2D texture in its own format, as D3D11 makes it. */
+		/** @name A view of a_resource with a null description: the whole texture in its own format, as D3D11 makes it. */
 		/** @{ */
 		bool DefaultViewDesc(ID3D11Resource* a_resource, D3D11_SHADER_RESOURCE_VIEW_DESC& a_out)
 		{
-			D3D11_TEXTURE2D_DESC texture{};
-			if (!Texture2DOf(a_resource, texture))
+			ViewSource source;
+			if (!ViewSourceOf(a_resource, source))
 				return false;
 			a_out = {};
-			a_out.Format = texture.Format;
-			const bool multisampled = texture.SampleDesc.Count > 1;
-			if (texture.MiscFlags & D3D11_RESOURCE_MISC_TEXTURECUBE) {
-				a_out.ViewDimension = texture.ArraySize > 6 ? D3D11_SRV_DIMENSION_TEXTURECUBEARRAY : D3D11_SRV_DIMENSION_TEXTURECUBE;
-				a_out.TextureCubeArray = { 0, texture.MipLevels, 0, texture.ArraySize / 6 };
-			} else if (texture.ArraySize > 1) {
+			a_out.Format = source.format;
+			const bool multisampled = source.samples > 1;
+			switch (source.dimension) {
+			case D3D11_RESOURCE_DIMENSION_TEXTURE1D:
+				if (source.arraySize > 1) {
+					a_out.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE1DARRAY;
+					a_out.Texture1DArray = { 0, source.mips, 0, source.arraySize };
+				} else {
+					a_out.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE1D;
+					a_out.Texture1D = { 0, source.mips };
+				}
+				return true;
+			case D3D11_RESOURCE_DIMENSION_TEXTURE3D:
+				a_out.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE3D;
+				a_out.Texture3D = { 0, source.mips };
+				return true;
+			default:
+				break;
+			}
+			if (source.cube) {
+				a_out.ViewDimension = source.arraySize > 6 ? D3D11_SRV_DIMENSION_TEXTURECUBEARRAY : D3D11_SRV_DIMENSION_TEXTURECUBE;
+				a_out.TextureCubeArray = { 0, source.mips, 0, source.arraySize / 6 };
+			} else if (source.arraySize > 1) {
 				a_out.ViewDimension = multisampled ? D3D11_SRV_DIMENSION_TEXTURE2DMSARRAY : D3D11_SRV_DIMENSION_TEXTURE2DARRAY;
 				if (multisampled)
-					a_out.Texture2DMSArray = { 0, texture.ArraySize };
+					a_out.Texture2DMSArray = { 0, source.arraySize };
 				else
-					a_out.Texture2DArray = { 0, texture.MipLevels, 0, texture.ArraySize };
+					a_out.Texture2DArray = { 0, source.mips, 0, source.arraySize };
 			} else {
 				a_out.ViewDimension = multisampled ? D3D11_SRV_DIMENSION_TEXTURE2DMS : D3D11_SRV_DIMENSION_TEXTURE2D;
-				a_out.Texture2D = { 0, texture.MipLevels };
+				a_out.Texture2D = { 0, source.mips };
 			}
 			return true;
 		}
 
 		bool DefaultViewDesc(ID3D11Resource* a_resource, D3D11_RENDER_TARGET_VIEW_DESC& a_out)
 		{
-			D3D11_TEXTURE2D_DESC texture{};
-			if (!Texture2DOf(a_resource, texture))
+			ViewSource source;
+			if (!ViewSourceOf(a_resource, source))
 				return false;
 			a_out = {};
-			a_out.Format = texture.Format;
-			const bool multisampled = texture.SampleDesc.Count > 1;
-			if (texture.ArraySize > 1) {
+			a_out.Format = source.format;
+			const bool multisampled = source.samples > 1;
+			switch (source.dimension) {
+			case D3D11_RESOURCE_DIMENSION_TEXTURE1D:
+				if (source.arraySize > 1) {
+					a_out.ViewDimension = D3D11_RTV_DIMENSION_TEXTURE1DARRAY;
+					a_out.Texture1DArray = { 0, 0, source.arraySize };
+				} else {
+					a_out.ViewDimension = D3D11_RTV_DIMENSION_TEXTURE1D;
+				}
+				return true;
+			case D3D11_RESOURCE_DIMENSION_TEXTURE3D:
+				a_out.ViewDimension = D3D11_RTV_DIMENSION_TEXTURE3D;
+				a_out.Texture3D = { 0, 0, source.depth };
+				return true;
+			default:
+				break;
+			}
+			if (source.arraySize > 1) {
 				a_out.ViewDimension = multisampled ? D3D11_RTV_DIMENSION_TEXTURE2DMSARRAY : D3D11_RTV_DIMENSION_TEXTURE2DARRAY;
 				if (multisampled)
-					a_out.Texture2DMSArray = { 0, texture.ArraySize };
+					a_out.Texture2DMSArray = { 0, source.arraySize };
 				else
-					a_out.Texture2DArray = { 0, 0, texture.ArraySize };
+					a_out.Texture2DArray = { 0, 0, source.arraySize };
 			} else {
 				a_out.ViewDimension = multisampled ? D3D11_RTV_DIMENSION_TEXTURE2DMS : D3D11_RTV_DIMENSION_TEXTURE2D;
 			}
@@ -968,18 +1038,27 @@ namespace RenderGraph::Engine::Tripwire
 
 		bool DefaultViewDesc(ID3D11Resource* a_resource, D3D11_DEPTH_STENCIL_VIEW_DESC& a_out)
 		{
-			D3D11_TEXTURE2D_DESC texture{};
-			if (!Texture2DOf(a_resource, texture))
+			ViewSource source;
+			if (!ViewSourceOf(a_resource, source) || source.dimension == D3D11_RESOURCE_DIMENSION_TEXTURE3D)
 				return false;
 			a_out = {};
-			a_out.Format = texture.Format;
-			const bool multisampled = texture.SampleDesc.Count > 1;
-			if (texture.ArraySize > 1) {
+			a_out.Format = source.format;
+			const bool multisampled = source.samples > 1;
+			if (source.dimension == D3D11_RESOURCE_DIMENSION_TEXTURE1D) {
+				if (source.arraySize > 1) {
+					a_out.ViewDimension = D3D11_DSV_DIMENSION_TEXTURE1DARRAY;
+					a_out.Texture1DArray = { 0, 0, source.arraySize };
+				} else {
+					a_out.ViewDimension = D3D11_DSV_DIMENSION_TEXTURE1D;
+				}
+				return true;
+			}
+			if (source.arraySize > 1) {
 				a_out.ViewDimension = multisampled ? D3D11_DSV_DIMENSION_TEXTURE2DMSARRAY : D3D11_DSV_DIMENSION_TEXTURE2DARRAY;
 				if (multisampled)
-					a_out.Texture2DMSArray = { 0, texture.ArraySize };
+					a_out.Texture2DMSArray = { 0, source.arraySize };
 				else
-					a_out.Texture2DArray = { 0, 0, texture.ArraySize };
+					a_out.Texture2DArray = { 0, 0, source.arraySize };
 			} else {
 				a_out.ViewDimension = multisampled ? D3D11_DSV_DIMENSION_TEXTURE2DMS : D3D11_DSV_DIMENSION_TEXTURE2D;
 			}
@@ -988,14 +1067,30 @@ namespace RenderGraph::Engine::Tripwire
 
 		bool DefaultViewDesc(ID3D11Resource* a_resource, D3D11_UNORDERED_ACCESS_VIEW_DESC& a_out)
 		{
-			D3D11_TEXTURE2D_DESC texture{};
-			if (!Texture2DOf(a_resource, texture))
+			ViewSource source;
+			if (!ViewSourceOf(a_resource, source) || source.samples > 1)
 				return false;
 			a_out = {};
-			a_out.Format = texture.Format;
-			if (texture.ArraySize > 1) {
+			a_out.Format = source.format;
+			switch (source.dimension) {
+			case D3D11_RESOURCE_DIMENSION_TEXTURE1D:
+				if (source.arraySize > 1) {
+					a_out.ViewDimension = D3D11_UAV_DIMENSION_TEXTURE1DARRAY;
+					a_out.Texture1DArray = { 0, 0, source.arraySize };
+				} else {
+					a_out.ViewDimension = D3D11_UAV_DIMENSION_TEXTURE1D;
+				}
+				return true;
+			case D3D11_RESOURCE_DIMENSION_TEXTURE3D:
+				a_out.ViewDimension = D3D11_UAV_DIMENSION_TEXTURE3D;
+				a_out.Texture3D = { 0, 0, source.depth };
+				return true;
+			default:
+				break;
+			}
+			if (source.arraySize > 1) {
 				a_out.ViewDimension = D3D11_UAV_DIMENSION_TEXTURE2DARRAY;
-				a_out.Texture2DArray = { 0, 0, texture.ArraySize };
+				a_out.Texture2DArray = { 0, 0, source.arraySize };
 			} else {
 				a_out.ViewDimension = D3D11_UAV_DIMENSION_TEXTURE2D;
 			}
