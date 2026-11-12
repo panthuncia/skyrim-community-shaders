@@ -430,6 +430,9 @@ namespace DCLF
 		const auto* epochs = Extensions::ShadowEpochs();
 		occlusionDrawn = epochs ? epochs->afterShadowMaps(wanted) : 0u;
 		occlusionEverDrawn |= occlusionDrawn;
+		for (std::uint32_t map = 0; map < occlusionNeedStreak.size(); ++map)
+			if (occlusionDrawn & (1u << map))
+				occlusionNeedStreak[map] = 0;
 		Diagnostics::Notify(Diagnostics::OcclusionMapsDrawn{ occlusionDrawn });
 	}
 
@@ -503,11 +506,12 @@ namespace DCLF
 		if (needed && a_running && a_map < Extensions::kOcclusionMaps && Extensions::OcclusionOn(ActiveToggles(), a_map)) {
 			// Held: the map still renders at the engine's point, its camera set and DCLF's view of it taken (OcclusionView), but without the
 			// engine's cull (the shell skips SetupMask for a held map, OcclusionHeld): no occluder until DCLF takes it, behind the hold.
-			// Outside a hold, a map DCLF has drawn before but cannot draw now (after a coc its layout is new, and the selected shadow shape
-			// does not hold it yet: IndirectDraws::OcclusionReady): a re-entry. The engine renders the map every frame it shows, so DCLF
-			// takes it a frame or two later; meanwhile it is held, behind the held presents, and the engine never culls it.
-			if (!LoadHold::Active() && (occlusionEverDrawn & (1u << a_map)))
-				LoadHold::BeginReentry("an occlusion map DCLF drew before but cannot draw this frame (its layout is new)");
+			// Outside a hold, a map DCLF has drawn before, or has not drawn for long, but cannot draw now (after a coc its layout is new,
+			// after the first load the graph rebuilds: IndirectDraws::OcclusionReady): a re-entry. The engine renders the map every frame
+			// it shows, so DCLF takes it a few frames later; meanwhile it is held, behind the held presents, and the engine never culls it.
+			const std::uint32_t streak = ++occlusionNeedStreak[a_map];
+			if (!LoadHold::Active() && ((occlusionEverDrawn & (1u << a_map)) || streak <= kOcclusionReentryFrames))
+				LoadHold::BeginReentry("an occlusion map DCLF cannot draw this frame (its layout is new, or the graph rebuilds)");
 			if (LoadHold::Active()) {
 				LoadHold::NoteHeld(LoadHold::View::Occlusion);
 				occlusionHeld |= 1u << a_map;
