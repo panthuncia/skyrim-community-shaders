@@ -452,11 +452,27 @@ namespace RenderGraph::Engine::Tripwire
 	namespace Detail
 	{
 		std::atomic<ContextFilter> contextFilter{ nullptr };
+		std::atomic<const NativeServices*> nativeServices{ nullptr };
 	}
 
 	void SetContextFilter(ContextFilter a_filter)
 	{
 		Detail::contextFilter.store(a_filter, std::memory_order_release);
+	}
+
+	void SetNativeServices(const NativeServices& a_services)
+	{
+		// Kept for the process: handles read it from any thread without a lock.
+		static NativeServices s_services;
+		if (Detail::nativeServices.load(std::memory_order_acquire))
+			return;
+		s_services = a_services;
+		Detail::nativeServices.store(&s_services, std::memory_order_release);
+	}
+
+	bool NativeServicesInstalled()
+	{
+		return Detail::nativeServices.load(std::memory_order_acquire) != nullptr;
 	}
 
 	bool IsOwnCode(const void* a_address)
@@ -562,6 +578,15 @@ namespace RenderGraph::Engine::Tripwire
 				logger::info("{}", message);
 			else
 				logger::warn("{}", message);
+			// Native mode (P6.3): another plugin's D3D11 call has nothing behind it. Named as an error, with the module, once per call
+			// site. CS's own calls and the game's are the census's business; the warning above names them.
+			if (!a_forwarded && !sites.selfTest && NativeServicesInstalled() && !IsOwnCode(a_caller) && !IsGameCode(a_caller)) {
+				const HMODULE module = ModuleAt(a_caller);
+				logger::error("[ORG native] {} calls {}::{} ({}): native mode (CS_ORG_NATIVE=1) has no D3D11, so the call failed and this "
+							  "plugin's rendering does not work. Disable the plugin for native runs, or run on DXVK. Recorded in "
+							  "docs/development/org-extension-api-notes.md.",
+					module ? ModuleName(module) : std::string("code outside any module"), InterfaceName(a_core.kind), a_method, entry->second.where);
+			}
 		}
 	}
 
@@ -747,6 +772,21 @@ namespace RenderGraph::Engine::Tripwire
 		return info;
 	}
 
+	namespace
+	{
+		/** @brief The native services for a native handle (nothing wrapped), null for a guest handle or before native mode set them. */
+		const NativeServices* NativeOf(const HandleCore& a_core)
+		{
+			return a_core.wrapped ? nullptr : Detail::nativeServices.load(std::memory_order_acquire);
+		}
+	}
+
+	std::shared_ptr<const void> OwnerOf(const void* a_object)
+	{
+		const auto* core = Detail::CoreOf(a_object);
+		return core ? core->owner : nullptr;
+	}
+
 	DeviceHandle::~DeviceHandle()
 	{
 		// The context may outlive this device: it must not answer GetDevice with it any more.
@@ -791,11 +831,465 @@ namespace RenderGraph::Engine::Tripwire
 			if (hook(*a_desc, a_data, a_out))
 				return S_OK;
 		}
+		if (const auto* native = NativeOf(core); native && native->createTexture2D && a_desc && a_out)
+			return native->createTexture2D(*a_desc, a_data, a_out);
 		if (core.Enter(static_cast<std::uint16_t>(Slot::CreateTexture2D), "CreateTexture2D", _ReturnAddress()))
 			return static_cast<ID3D11Device*>(core.wrapped)->CreateTexture2D(a_desc, a_data, a_out);
 		Detail::Zero(a_out);
 		return Detail::Failure<HRESULT>();
 	}
+
+	namespace
+	{
+		/** @brief The description of a 2D texture behind a_resource, false when it is something else. */
+		bool Texture2DOf(ID3D11Resource* a_resource, D3D11_TEXTURE2D_DESC& a_out)
+		{
+			D3D11_RESOURCE_DIMENSION dimension = D3D11_RESOURCE_DIMENSION_UNKNOWN;
+			a_resource->GetType(&dimension);
+			if (dimension != D3D11_RESOURCE_DIMENSION_TEXTURE2D)
+				return false;
+			static_cast<ID3D11Texture2D*>(a_resource)->GetDesc(&a_out);
+			return true;
+		}
+
+		/** @name A view of a_resource with a null description: the whole 2D texture in its own format, as D3D11 makes it. */
+		/** @{ */
+		bool DefaultViewDesc(ID3D11Resource* a_resource, D3D11_SHADER_RESOURCE_VIEW_DESC& a_out)
+		{
+			D3D11_TEXTURE2D_DESC texture{};
+			if (!Texture2DOf(a_resource, texture))
+				return false;
+			a_out = {};
+			a_out.Format = texture.Format;
+			const bool multisampled = texture.SampleDesc.Count > 1;
+			if (texture.MiscFlags & D3D11_RESOURCE_MISC_TEXTURECUBE) {
+				a_out.ViewDimension = texture.ArraySize > 6 ? D3D11_SRV_DIMENSION_TEXTURECUBEARRAY : D3D11_SRV_DIMENSION_TEXTURECUBE;
+				a_out.TextureCubeArray = { 0, texture.MipLevels, 0, texture.ArraySize / 6 };
+			} else if (texture.ArraySize > 1) {
+				a_out.ViewDimension = multisampled ? D3D11_SRV_DIMENSION_TEXTURE2DMSARRAY : D3D11_SRV_DIMENSION_TEXTURE2DARRAY;
+				if (multisampled)
+					a_out.Texture2DMSArray = { 0, texture.ArraySize };
+				else
+					a_out.Texture2DArray = { 0, texture.MipLevels, 0, texture.ArraySize };
+			} else {
+				a_out.ViewDimension = multisampled ? D3D11_SRV_DIMENSION_TEXTURE2DMS : D3D11_SRV_DIMENSION_TEXTURE2D;
+				a_out.Texture2D = { 0, texture.MipLevels };
+			}
+			return true;
+		}
+
+		bool DefaultViewDesc(ID3D11Resource* a_resource, D3D11_RENDER_TARGET_VIEW_DESC& a_out)
+		{
+			D3D11_TEXTURE2D_DESC texture{};
+			if (!Texture2DOf(a_resource, texture))
+				return false;
+			a_out = {};
+			a_out.Format = texture.Format;
+			const bool multisampled = texture.SampleDesc.Count > 1;
+			if (texture.ArraySize > 1) {
+				a_out.ViewDimension = multisampled ? D3D11_RTV_DIMENSION_TEXTURE2DMSARRAY : D3D11_RTV_DIMENSION_TEXTURE2DARRAY;
+				if (multisampled)
+					a_out.Texture2DMSArray = { 0, texture.ArraySize };
+				else
+					a_out.Texture2DArray = { 0, 0, texture.ArraySize };
+			} else {
+				a_out.ViewDimension = multisampled ? D3D11_RTV_DIMENSION_TEXTURE2DMS : D3D11_RTV_DIMENSION_TEXTURE2D;
+			}
+			return true;
+		}
+
+		bool DefaultViewDesc(ID3D11Resource* a_resource, D3D11_DEPTH_STENCIL_VIEW_DESC& a_out)
+		{
+			D3D11_TEXTURE2D_DESC texture{};
+			if (!Texture2DOf(a_resource, texture))
+				return false;
+			a_out = {};
+			a_out.Format = texture.Format;
+			const bool multisampled = texture.SampleDesc.Count > 1;
+			if (texture.ArraySize > 1) {
+				a_out.ViewDimension = multisampled ? D3D11_DSV_DIMENSION_TEXTURE2DMSARRAY : D3D11_DSV_DIMENSION_TEXTURE2DARRAY;
+				if (multisampled)
+					a_out.Texture2DMSArray = { 0, texture.ArraySize };
+				else
+					a_out.Texture2DArray = { 0, 0, texture.ArraySize };
+			} else {
+				a_out.ViewDimension = multisampled ? D3D11_DSV_DIMENSION_TEXTURE2DMS : D3D11_DSV_DIMENSION_TEXTURE2D;
+			}
+			return true;
+		}
+
+		bool DefaultViewDesc(ID3D11Resource* a_resource, D3D11_UNORDERED_ACCESS_VIEW_DESC& a_out)
+		{
+			D3D11_TEXTURE2D_DESC texture{};
+			if (!Texture2DOf(a_resource, texture))
+				return false;
+			a_out = {};
+			a_out.Format = texture.Format;
+			if (texture.ArraySize > 1) {
+				a_out.ViewDimension = D3D11_UAV_DIMENSION_TEXTURE2DARRAY;
+				a_out.Texture2DArray = { 0, 0, texture.ArraySize };
+			} else {
+				a_out.ViewDimension = D3D11_UAV_DIMENSION_TEXTURE2D;
+			}
+			return true;
+		}
+		/** @} */
+
+		/** @brief What a native view is made with: its resource's ORG resource and owner, so lookups through the view find them. */
+		Options NativeViewOptions(const char* a_kind, ID3D11Resource* a_resource)
+		{
+			Options options;
+			const auto* resource = Detail::CoreOf(a_resource);
+			options.name = resource ? fmt::format("{} {}", resource->Name(), a_kind) : fmt::format("Native::{}", a_kind);
+			options.graph = GraphResourceOf(a_resource);
+			options.owner = OwnerOf(a_resource);
+			return options;
+		}
+
+		/**
+		 * @brief A native view: a_make with the description given, or D3D11's default for the resource. E_INVALIDARG for a null
+		 * resource, or a null description on a resource that has no default here (a buffer, a 1D or 3D texture).
+		 */
+		template <class ViewDesc, class View, class Make>
+		HRESULT MakeNativeView(ID3D11Resource* a_resource, const ViewDesc* a_desc, View** a_out, const char* a_kind, Make&& a_make)
+		{
+			if (!a_out || !a_resource)
+				return E_INVALIDARG;
+			*a_out = nullptr;
+			ViewDesc desc{};
+			if (a_desc)
+				desc = *a_desc;
+			else if (!DefaultViewDesc(a_resource, desc))
+				return E_INVALIDARG;
+			*a_out = a_make(a_resource, desc, NativeViewOptions(a_kind, a_resource)).detach();
+			return S_OK;
+		}
+
+		/** @brief The options of a native object other than a view: a name, which the engine's debug name replaces later. */
+		Options NativeOptions(const char* a_kind)
+		{
+			Options options;
+			options.name = fmt::format("Native::{}", a_kind);
+			return options;
+		}
+
+		std::span<const std::uint8_t> Bytes(const void* a_data, SIZE_T a_length)
+		{
+			return { static_cast<const std::uint8_t*>(a_data), a_data ? static_cast<std::size_t>(a_length) : 0 };
+		}
+	}
+
+	// The device's creation methods in both modes. TW_DEVICE_SITE starts one: the caller, the call site a guest handle unwraps its
+	// arguments at, and the native services (null for a guest handle). TW_FORWARD_OR_FAIL ends one: a guest handle forwards the
+	// call, and a native handle without a service records it at its caller and fails it, as every tripwire does.
+#define TW_DEVICE_SITE(Name)                                                                                                     \
+	void* const twCaller = _ReturnAddress();                                                                                     \
+	[[maybe_unused]] const Detail::CallSite twSite{ &core, static_cast<std::uint16_t>(Slot::Name), #Name, twCaller };           \
+	const NativeServices* const twNative = NativeOf(core)
+#define TW_FORWARD_OR_FAIL(Name, Out, ...)                                         \
+	if (core.Enter(static_cast<std::uint16_t>(Slot::Name), #Name, twCaller))      \
+		return static_cast<ID3D11Device*>(core.wrapped)->Name(__VA_ARGS__);        \
+	Detail::Zero(Out);                                                             \
+	return E_FAIL
+
+	HRESULT STDMETHODCALLTYPE DeviceHandle::QueryInterface(REFIID a_riid, void** a_out)
+	{
+		if (const auto* native = NativeOf(core); native && native->queryDxgiDevice && a_out &&
+												 (a_riid == __uuidof(IDXGIDevice) || a_riid == __uuidof(IDXGIDevice1)))
+			return native->queryDxgiDevice(a_riid, a_out);
+		return Detail::QueryInterface(core, static_cast<ID3D11Device*>(this), kIids, a_riid, a_out, _ReturnAddress());
+	}
+
+	HRESULT STDMETHODCALLTYPE DeviceHandle::CreateBuffer(const D3D11_BUFFER_DESC* a_desc, const D3D11_SUBRESOURCE_DATA* a_data, ID3D11Buffer** a_out)
+	{
+		TW_DEVICE_SITE(CreateBuffer);
+		if (twNative && twNative->createBuffer && a_desc && a_out)
+			return twNative->createBuffer(*a_desc, a_data, a_out);
+		TW_FORWARD_OR_FAIL(CreateBuffer, a_out, a_desc, a_data, a_out);
+	}
+
+	HRESULT STDMETHODCALLTYPE DeviceHandle::CreateTexture1D(const D3D11_TEXTURE1D_DESC* a_desc, const D3D11_SUBRESOURCE_DATA* a_data, ID3D11Texture1D** a_out)
+	{
+		TW_DEVICE_SITE(CreateTexture1D);
+		if (twNative && twNative->createTexture1D && a_desc && a_out)
+			return twNative->createTexture1D(*a_desc, a_data, a_out);
+		TW_FORWARD_OR_FAIL(CreateTexture1D, a_out, a_desc, a_data, a_out);
+	}
+
+	HRESULT STDMETHODCALLTYPE DeviceHandle::CreateTexture3D(const D3D11_TEXTURE3D_DESC* a_desc, const D3D11_SUBRESOURCE_DATA* a_data, ID3D11Texture3D** a_out)
+	{
+		TW_DEVICE_SITE(CreateTexture3D);
+		if (twNative && twNative->createTexture3D && a_desc && a_out)
+			return twNative->createTexture3D(*a_desc, a_data, a_out);
+		TW_FORWARD_OR_FAIL(CreateTexture3D, a_out, a_desc, a_data, a_out);
+	}
+
+	HRESULT STDMETHODCALLTYPE DeviceHandle::CreateShaderResourceView(ID3D11Resource* a_resource, const D3D11_SHADER_RESOURCE_VIEW_DESC* a_desc,
+		ID3D11ShaderResourceView** a_out)
+	{
+		TW_DEVICE_SITE(CreateShaderResourceView);
+		if (twNative && IsHandle(a_resource))
+			return MakeNativeView(a_resource, a_desc, a_out, "SRV", [](ID3D11Resource* r, const D3D11_SHADER_RESOURCE_VIEW_DESC& d, Options&& o) {
+				return ::RenderGraph::Engine::Tripwire::CreateShaderResourceView(r, d, std::move(o));
+			});
+		TW_FORWARD_OR_FAIL(CreateShaderResourceView, a_out, Detail::UnwrapAt(a_resource, twSite), a_desc, a_out);
+	}
+
+	HRESULT STDMETHODCALLTYPE DeviceHandle::CreateUnorderedAccessView(ID3D11Resource* a_resource, const D3D11_UNORDERED_ACCESS_VIEW_DESC* a_desc,
+		ID3D11UnorderedAccessView** a_out)
+	{
+		TW_DEVICE_SITE(CreateUnorderedAccessView);
+		if (twNative && IsHandle(a_resource))
+			return MakeNativeView(a_resource, a_desc, a_out, "UAV", [](ID3D11Resource* r, const D3D11_UNORDERED_ACCESS_VIEW_DESC& d, Options&& o) {
+				return ::RenderGraph::Engine::Tripwire::CreateUnorderedAccessView(r, d, std::move(o));
+			});
+		TW_FORWARD_OR_FAIL(CreateUnorderedAccessView, a_out, Detail::UnwrapAt(a_resource, twSite), a_desc, a_out);
+	}
+
+	HRESULT STDMETHODCALLTYPE DeviceHandle::CreateRenderTargetView(ID3D11Resource* a_resource, const D3D11_RENDER_TARGET_VIEW_DESC* a_desc,
+		ID3D11RenderTargetView** a_out)
+	{
+		TW_DEVICE_SITE(CreateRenderTargetView);
+		if (twNative && IsHandle(a_resource))
+			return MakeNativeView(a_resource, a_desc, a_out, "RTV", [](ID3D11Resource* r, const D3D11_RENDER_TARGET_VIEW_DESC& d, Options&& o) {
+				return ::RenderGraph::Engine::Tripwire::CreateRenderTargetView(r, d, std::move(o));
+			});
+		TW_FORWARD_OR_FAIL(CreateRenderTargetView, a_out, Detail::UnwrapAt(a_resource, twSite), a_desc, a_out);
+	}
+
+	HRESULT STDMETHODCALLTYPE DeviceHandle::CreateDepthStencilView(ID3D11Resource* a_resource, const D3D11_DEPTH_STENCIL_VIEW_DESC* a_desc,
+		ID3D11DepthStencilView** a_out)
+	{
+		TW_DEVICE_SITE(CreateDepthStencilView);
+		if (twNative && IsHandle(a_resource))
+			return MakeNativeView(a_resource, a_desc, a_out, "DSV", [](ID3D11Resource* r, const D3D11_DEPTH_STENCIL_VIEW_DESC& d, Options&& o) {
+				return ::RenderGraph::Engine::Tripwire::CreateDepthStencilView(r, d, std::move(o));
+			});
+		TW_FORWARD_OR_FAIL(CreateDepthStencilView, a_out, Detail::UnwrapAt(a_resource, twSite), a_desc, a_out);
+	}
+
+	HRESULT STDMETHODCALLTYPE DeviceHandle::CreateInputLayout(const D3D11_INPUT_ELEMENT_DESC* a_elements, UINT a_count, const void* a_bytecode,
+		SIZE_T a_length, ID3D11InputLayout** a_out)
+	{
+		TW_DEVICE_SITE(CreateInputLayout);
+		if (twNative && a_out && (a_elements || !a_count)) {
+			*a_out = ::RenderGraph::Engine::Tripwire::CreateInputLayout(std::span<const D3D11_INPUT_ELEMENT_DESC>(a_elements, a_count), Bytes(a_bytecode, a_length),
+				NativeOptions("InputLayout"))
+			             .detach();
+			return S_OK;
+		}
+		TW_FORWARD_OR_FAIL(CreateInputLayout, a_out, a_elements, a_count, a_bytecode, a_length, a_out);
+	}
+
+	HRESULT STDMETHODCALLTYPE DeviceHandle::CreateVertexShader(const void* a_bytecode, SIZE_T a_length, ID3D11ClassLinkage* a_linkage, ID3D11VertexShader** a_out)
+	{
+		TW_DEVICE_SITE(CreateVertexShader);
+		if (twNative && a_out && a_bytecode) {
+			*a_out = ::RenderGraph::Engine::Tripwire::CreateVertexShader(Bytes(a_bytecode, a_length), NativeOptions("VertexShader")).detach();
+			return S_OK;
+		}
+		TW_FORWARD_OR_FAIL(CreateVertexShader, a_out, a_bytecode, a_length, Detail::UnwrapAt(a_linkage, twSite), a_out);
+	}
+
+	HRESULT STDMETHODCALLTYPE DeviceHandle::CreatePixelShader(const void* a_bytecode, SIZE_T a_length, ID3D11ClassLinkage* a_linkage, ID3D11PixelShader** a_out)
+	{
+		TW_DEVICE_SITE(CreatePixelShader);
+		if (twNative && a_out && a_bytecode) {
+			*a_out = ::RenderGraph::Engine::Tripwire::CreatePixelShader(Bytes(a_bytecode, a_length), NativeOptions("PixelShader")).detach();
+			return S_OK;
+		}
+		TW_FORWARD_OR_FAIL(CreatePixelShader, a_out, a_bytecode, a_length, Detail::UnwrapAt(a_linkage, twSite), a_out);
+	}
+
+	HRESULT STDMETHODCALLTYPE DeviceHandle::CreateComputeShader(const void* a_bytecode, SIZE_T a_length, ID3D11ClassLinkage* a_linkage, ID3D11ComputeShader** a_out)
+	{
+		TW_DEVICE_SITE(CreateComputeShader);
+		if (twNative && a_out && a_bytecode) {
+			*a_out = ::RenderGraph::Engine::Tripwire::CreateComputeShader(Bytes(a_bytecode, a_length), NativeOptions("ComputeShader")).detach();
+			return S_OK;
+		}
+		TW_FORWARD_OR_FAIL(CreateComputeShader, a_out, a_bytecode, a_length, Detail::UnwrapAt(a_linkage, twSite), a_out);
+	}
+
+	HRESULT STDMETHODCALLTYPE DeviceHandle::CreateBlendState(const D3D11_BLEND_DESC* a_desc, ID3D11BlendState** a_out)
+	{
+		TW_DEVICE_SITE(CreateBlendState);
+		if (twNative && a_out && a_desc) {
+			*a_out = ::RenderGraph::Engine::Tripwire::CreateBlendState(*a_desc, NativeOptions("BlendState")).detach();
+			return S_OK;
+		}
+		TW_FORWARD_OR_FAIL(CreateBlendState, a_out, a_desc, a_out);
+	}
+
+	HRESULT STDMETHODCALLTYPE DeviceHandle::CreateDepthStencilState(const D3D11_DEPTH_STENCIL_DESC* a_desc, ID3D11DepthStencilState** a_out)
+	{
+		TW_DEVICE_SITE(CreateDepthStencilState);
+		if (twNative && a_out && a_desc) {
+			*a_out = ::RenderGraph::Engine::Tripwire::CreateDepthStencilState(*a_desc, NativeOptions("DepthStencilState")).detach();
+			return S_OK;
+		}
+		TW_FORWARD_OR_FAIL(CreateDepthStencilState, a_out, a_desc, a_out);
+	}
+
+	HRESULT STDMETHODCALLTYPE DeviceHandle::CreateRasterizerState(const D3D11_RASTERIZER_DESC* a_desc, ID3D11RasterizerState** a_out)
+	{
+		TW_DEVICE_SITE(CreateRasterizerState);
+		if (twNative && a_out && a_desc) {
+			*a_out = ::RenderGraph::Engine::Tripwire::CreateRasterizerState(*a_desc, NativeOptions("RasterizerState")).detach();
+			return S_OK;
+		}
+		TW_FORWARD_OR_FAIL(CreateRasterizerState, a_out, a_desc, a_out);
+	}
+
+	HRESULT STDMETHODCALLTYPE DeviceHandle::CreateSamplerState(const D3D11_SAMPLER_DESC* a_desc, ID3D11SamplerState** a_out)
+	{
+		TW_DEVICE_SITE(CreateSamplerState);
+		if (twNative && a_out && a_desc) {
+			*a_out = ::RenderGraph::Engine::Tripwire::CreateSamplerState(*a_desc, NativeOptions("SamplerState")).detach();
+			return S_OK;
+		}
+		TW_FORWARD_OR_FAIL(CreateSamplerState, a_out, a_desc, a_out);
+	}
+
+	HRESULT STDMETHODCALLTYPE DeviceHandle::CreateQuery(const D3D11_QUERY_DESC* a_desc, ID3D11Query** a_out)
+	{
+		TW_DEVICE_SITE(CreateQuery);
+		if (twNative && a_out && a_desc) {
+			*a_out = ::RenderGraph::Engine::Tripwire::CreateQuery(*a_desc, NativeOptions("Query")).detach();
+			return S_OK;
+		}
+		TW_FORWARD_OR_FAIL(CreateQuery, a_out, a_desc, a_out);
+	}
+
+#undef TW_FORWARD_OR_FAIL
+
+	D3D_FEATURE_LEVEL STDMETHODCALLTYPE DeviceHandle::GetFeatureLevel()
+	{
+		TW_DEVICE_SITE(GetFeatureLevel);
+		// The level native mode's device creation reported.
+		if (twNative)
+			return D3D_FEATURE_LEVEL_11_1;
+		if (core.Enter(static_cast<std::uint16_t>(Slot::GetFeatureLevel), "GetFeatureLevel", twCaller))
+			return static_cast<ID3D11Device*>(core.wrapped)->GetFeatureLevel();
+		return D3D_FEATURE_LEVEL{};
+	}
+
+	UINT STDMETHODCALLTYPE DeviceHandle::GetCreationFlags()
+	{
+		TW_DEVICE_SITE(GetCreationFlags);
+		if (twNative)
+			return 0;
+		if (core.Enter(static_cast<std::uint16_t>(Slot::GetCreationFlags), "GetCreationFlags", twCaller))
+			return static_cast<ID3D11Device*>(core.wrapped)->GetCreationFlags();
+		return 0;
+	}
+
+	HRESULT STDMETHODCALLTYPE DeviceHandle::GetDeviceRemovedReason()
+	{
+		TW_DEVICE_SITE(GetDeviceRemovedReason);
+		// A lost Vulkan device shows in BasicRHI's device-loss report and the graph's stop, not here.
+		if (twNative)
+			return S_OK;
+		if (core.Enter(static_cast<std::uint16_t>(Slot::GetDeviceRemovedReason), "GetDeviceRemovedReason", twCaller))
+			return static_cast<ID3D11Device*>(core.wrapped)->GetDeviceRemovedReason();
+		return E_FAIL;
+	}
+
+#undef TW_DEVICE_SITE
+
+	// The swap chain: native mode's services, else a tripwire (the forwarding branch serves a wrapping swap chain handle).
+#define TW_SWAP_CHAIN_SITE(Name)                       \
+	void* const twCaller = _ReturnAddress();           \
+	const NativeServices* const twNative = NativeOf(core); \
+	constexpr auto twSlot = static_cast<std::uint16_t>(Slot::Name)
+
+	HRESULT STDMETHODCALLTYPE SwapChainHandle::GetDesc(DXGI_SWAP_CHAIN_DESC* a_out)
+	{
+		if (!a_out)
+			return E_INVALIDARG;
+		// After a resize the native swap chain's size and format are the current ones.
+		if (const auto* native = NativeOf(core); native && native->getDesc)
+			return native->getDesc(a_out);
+		*a_out = desc;
+		return S_OK;
+	}
+
+	HRESULT STDMETHODCALLTYPE SwapChainHandle::Present(UINT a_syncInterval, UINT a_flags)
+	{
+		TW_SWAP_CHAIN_SITE(Present);
+		if (twNative && twNative->present)
+			return twNative->present(a_syncInterval, a_flags);
+		if (core.Enter(twSlot, "Present", twCaller))
+			return static_cast<IDXGISwapChain*>(core.wrapped)->Present(a_syncInterval, a_flags);
+		return E_FAIL;
+	}
+
+	HRESULT STDMETHODCALLTYPE SwapChainHandle::GetBuffer(UINT a_buffer, REFIID a_riid, void** a_out)
+	{
+		TW_SWAP_CHAIN_SITE(GetBuffer);
+		if (twNative && twNative->getBuffer)
+			return twNative->getBuffer(a_buffer, a_riid, a_out);
+		if (core.Enter(twSlot, "GetBuffer", twCaller))
+			return static_cast<IDXGISwapChain*>(core.wrapped)->GetBuffer(a_buffer, a_riid, a_out);
+		Detail::Zero(a_out);
+		return E_FAIL;
+	}
+
+	HRESULT STDMETHODCALLTYPE SwapChainHandle::ResizeBuffers(UINT a_count, UINT a_width, UINT a_height, DXGI_FORMAT a_format, UINT a_flags)
+	{
+		TW_SWAP_CHAIN_SITE(ResizeBuffers);
+		if (twNative && twNative->resizeBuffers)
+			return twNative->resizeBuffers(a_count, a_width, a_height, a_format, a_flags);
+		if (core.Enter(twSlot, "ResizeBuffers", twCaller))
+			return static_cast<IDXGISwapChain*>(core.wrapped)->ResizeBuffers(a_count, a_width, a_height, a_format, a_flags);
+		return E_FAIL;
+	}
+
+	HRESULT STDMETHODCALLTYPE SwapChainHandle::GetFullscreenState(BOOL* a_fullscreen, IDXGIOutput** a_target)
+	{
+		TW_SWAP_CHAIN_SITE(GetFullscreenState);
+		// Native mode presents to a borderless window only. Never exclusive fullscreen, so the engine does not try to enter it.
+		if (twNative) {
+			if (a_fullscreen)
+				*a_fullscreen = FALSE;
+			Detail::Zero(a_target);
+			return S_OK;
+		}
+		if (core.Enter(twSlot, "GetFullscreenState", twCaller))
+			return static_cast<IDXGISwapChain*>(core.wrapped)->GetFullscreenState(a_fullscreen, a_target);
+		Detail::Zero(a_fullscreen);
+		Detail::Zero(a_target);
+		return E_FAIL;
+	}
+
+	HRESULT STDMETHODCALLTYPE SwapChainHandle::SetFullscreenState(BOOL a_fullscreen, IDXGIOutput* a_target)
+	{
+		TW_SWAP_CHAIN_SITE(SetFullscreenState);
+		if (twNative) {
+			if (a_fullscreen) {
+				static std::atomic_flag logged;
+				if (!logged.test_and_set())
+					logger::info("[ORG native] the engine asked for exclusive fullscreen; native mode stays in the borderless window");
+			}
+			return S_OK;
+		}
+		if (core.Enter(twSlot, "SetFullscreenState", twCaller))
+			return static_cast<IDXGISwapChain*>(core.wrapped)->SetFullscreenState(a_fullscreen, Unwrap(a_target));
+		return E_FAIL;
+	}
+
+	HRESULT STDMETHODCALLTYPE SwapChainHandle::ResizeTarget(const DXGI_MODE_DESC* a_parameters)
+	{
+		TW_SWAP_CHAIN_SITE(ResizeTarget);
+		// The window keeps its size. The engine's next resize follows the window (WM_WINDOWPOSCHANGED), as with fake fullscreen.
+		if (twNative)
+			return S_OK;
+		if (core.Enter(twSlot, "ResizeTarget", twCaller))
+			return static_cast<IDXGISwapChain*>(core.wrapped)->ResizeTarget(a_parameters);
+		return E_FAIL;
+	}
+
+#undef TW_SWAP_CHAIN_SITE
 
 	void STDMETHODCALLTYPE DeviceContextHandle::GetDevice(ID3D11Device** a_out)
 	{

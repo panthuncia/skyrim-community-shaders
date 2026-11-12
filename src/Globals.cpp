@@ -1,6 +1,7 @@
 #include "Globals.h"
 #include "GpuEventTimers.h"
 #include "RenderGraph/Engine/Constants/EngineConstants.h"
+#include "RenderGraph/Engine/Native/Native.h"
 #include "RenderGraph/Engine/Tripwire/Tripwire.h"
 
 #include "CSEditor/SceneManager/SceneManager.h"
@@ -244,9 +245,16 @@ namespace globals
 			BSMultiStreamInstanceTriShapeRTTI = { RE::BSMultiStreamInstanceTriShape::Ni_RTTI };
 		}
 
-		// DXVK's own objects, also when the engine's pointers hold the guest handles (CS_ORG_TRIPWIRE_GUEST, P4.1).
-		d3d::device = RenderGraph::Engine::Tripwire::Unwrap(reinterpret_cast<ID3D11Device*>(game::renderer->GetRuntimeData().forwarder));
-		d3d::context = RenderGraph::Engine::Tripwire::Unwrap(reinterpret_cast<ID3D11DeviceContext*>(game::renderer->GetRuntimeData().context));
+		// DXVK's own objects, also when the engine's pointers hold the guest handles (CS_ORG_TRIPWIRE_GUEST, P4.1). In native mode
+		// (CS_ORG_NATIVE=1) there is nothing under the handles: CS uses the native handles, so each of its D3D11 calls is a native
+		// service or a tripwire that names its call site.
+		if (RenderGraph::Engine::Native::Requested()) {
+			d3d::device = reinterpret_cast<ID3D11Device*>(game::renderer->GetRuntimeData().forwarder);
+			d3d::context = reinterpret_cast<ID3D11DeviceContext*>(game::renderer->GetRuntimeData().context);
+		} else {
+			d3d::device = RenderGraph::Engine::Tripwire::Unwrap(reinterpret_cast<ID3D11Device*>(game::renderer->GetRuntimeData().forwarder));
+			d3d::context = RenderGraph::Engine::Tripwire::Unwrap(reinterpret_cast<ID3D11DeviceContext*>(game::renderer->GetRuntimeData().context));
+		}
 		d3d::swapChain = reinterpret_cast<IDXGISwapChain*>(game::renderer->GetRuntimeData().renderWindows->swapChain);
 	}
 
@@ -270,6 +278,7 @@ namespace globals
 	{
 		game::quitGame = true;
 		RenderGraph::Engine::Tripwire::Stop();
+		RenderGraph::Engine::Native::Shutdown();
 		if (shaderCache)
 			shaderCache->StopCompilation();
 	}

@@ -1,5 +1,6 @@
 #include "RenderGraph/Engine/Pipeline/EngineHooks.h"
 
+#include "RenderGraph/Engine/Native/Native.h"
 #include "RenderGraph/Engine/Pipeline/Descriptions.h"
 
 #include "RenderGraph/Engine/Tripwire/Tripwire.h"
@@ -325,7 +326,9 @@ namespace RenderGraph::Engine::Pipeline
 	void InstallDeviceHooks(ID3D11Device* a_device)
 	{
 		// DXVK's device, not a guest handle around it: CS's own creations call DXVK directly, and a handle's methods are shared code.
-		a_device = Tripwire::Unwrap(a_device);
+		// Native mode has nothing under its handle: the detours go on the native device handle's methods.
+		if (!Native::Requested())
+			a_device = Tripwire::Unwrap(a_device);
 		if (!a_device)
 			return;
 		stl::detour_vfunc<23, ID3D11Device_CreateSamplerState>(a_device);

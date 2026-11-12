@@ -22,6 +22,7 @@
 #include "Aftermath.h"
 #include "D3DX9MathUpgrade.h"
 #include "DxvkLoader.h"
+#include "RenderGraph/Engine/Native/Native.h"
 #include "EngineFix.h"
 #include "Feature.h"
 #include "Globals.h"
@@ -737,6 +738,10 @@ HRESULT WINAPI hk_D3D11CreateDeviceAndSwapChain(
 		logger::info("[HDR] Upgraded swap chain: R10G10B10A2_UNORM + FLIP_DISCARD");
 	}
 
+	// CS_ORG_NATIVE=1: no D3D11 device. BasicRHI's device and ORG's swap chain, with tripwire handles for the engine.
+	if (RenderGraph::Engine::Native::Requested())
+		return RenderGraph::Engine::Native::CreateDeviceAndSwapChain(pAdapter, &modifiedDesc, ppSwapChain, ppDevice, pFeatureLevel, ppImmediateContext);
+
 	auto ret = ptrD3D11CreateDeviceAndSwapChain(pAdapter,
 		DriverType,
 		Software,
@@ -929,6 +934,8 @@ namespace Hooks
 
 			func();
 
+			// Native mode: the engine's fields hold the native handles (a startup error names any that does not).
+			RenderGraph::Engine::Native::AfterInitD3D();
 			RenderGraph::Engine::Tripwire::InstallGuestDevice();
 
 			logger::info("Accessing render device information");
@@ -1616,8 +1623,12 @@ namespace Hooks
 
 		// Load DXVK before the game creates its D3D11 device.
 		const bool nativeMode = DxvkLoader::NativeModeRequested();
+		// CS_ORG_NATIVE=1 loads no DXVK either; its checks fail the start on anything that still needs it.
+		const bool orgNative = RenderGraph::Engine::Native::Requested();
 		const bool dxvkLoaded = DxvkLoader::Load();
-		if (!nativeMode && !dxvkLoaded) {
+		if (orgNative)
+			RenderGraph::Engine::Native::CheckStartup();
+		if (!nativeMode && !orgNative && !dxvkLoaded) {
 			stl::report_and_fail(
 				"Community Shaders could not load its bundled DXVK renderer (dxvk_d3d11.dll / dxvk_dxgi.dll) "
 				"from Data/SKSE/Plugins/CommunityShaders/bin. Reinstall Community Shaders or verify the files exist."sv);

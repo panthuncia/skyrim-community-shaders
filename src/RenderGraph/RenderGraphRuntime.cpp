@@ -15,6 +15,7 @@
 #include "RenderGraph/FrameAnchors.h"
 #include "RenderGraph/GraphResources.h"
 #include "RenderGraph/Engine/GuestDevice.h"
+#include "RenderGraph/Engine/Native/Native.h"
 #include "RenderGraph/Engine/OwnedFrame.h"
 #include "RenderGraph/Engine/Targets/EngineTargets.h"
 #include "RenderGraph/Engine/Tripwire/Tripwire.h"
@@ -52,6 +53,16 @@
 #include <semaphore>
 
 #include <tbb/concurrent_queue.h>
+
+namespace
+{
+	// The loader BasicRHI's volk loaded, for the native device's instance-level entry points (CS does not use volk's globals).
+	PFN_vkGetInstanceProcAddr LoaderProcAddr()
+	{
+		static const auto s_proc = reinterpret_cast<PFN_vkGetInstanceProcAddr>(::GetProcAddress(::LoadLibraryW(L"vulkan-1.dll"), "vkGetInstanceProcAddr"));
+		return s_proc;
+	}
+}
 #include <map>
 #include <mutex>
 #include <chrono>
@@ -266,6 +277,16 @@ struct RenderGraphRuntime::Impl
 		std::shared_ptr<const void> owner;
 	};
 	std::deque<D3D11Release> d3d11Releases;
+	// Native mode (CS_ORG_NATIVE=1): BasicRHI's own device, no DXVK. Releases then wait for the graph's submissions instead of a
+	// D3D11 event query: an owner is freed once every graph submission made before its release is complete on the GPU.
+	bool native = false;
+	struct NativeRelease
+	{
+		std::uint64_t submissions = 0;
+		std::shared_ptr<const void> owner;
+	};
+	std::deque<NativeRelease> nativeReleases;
+	std::atomic<std::uint64_t> retiredSubmissions{ 0 };
 	PFN_dxvkSetDeviceTeardownCallback setTeardownCallback = nullptr;
 	PFN_dxvkEnqueueInteropSubmission enqueueSubmission = nullptr;
 	// Optional (newer DXVK): an epoch's submissions go to DXVK as one enqueue (CS_ORG_BATCH_SUBMIT=0 turns it off).
@@ -1952,204 +1973,223 @@ bool RenderGraphRuntime::Initialize()
 		return disable("CS_ORG=0");
 	if (EnvFeaturesOnly())
 		return disable("CS_ORG=features (device features requested, graph not created)");
-	if (!DxvkLoader::IsLoaded())
+	// CS_ORG_NATIVE=1: the device native mode made, no DXVK. Its epochs submit to the device's queues directly: no stream, no
+	// queue boundaries, no external epochs.
+	const bool native = RenderGraph::Engine::Native::Active();
+	if (!native && !DxvkLoader::IsLoaded())
 		return disable("DXVK is not loaded (native D3D11)");
 
-	HMODULE d3d11 = ::GetModuleHandleW(L"dxvk_d3d11.dll");
-	auto getInfo = ResolveExport<PFN_dxvkGetInteropDeviceInfo>(d3d11, "dxvkGetInteropDeviceInfo");
+	HMODULE d3d11 = native ? nullptr : ::GetModuleHandleW(L"dxvk_d3d11.dll");
 	auto state = std::make_unique<Impl>();
-	state->createBufferFromVkBuffer = ResolveExport<PFN_dxvkCreateBufferFromVkBuffer>(d3d11, "dxvkCreateBufferFromVkBuffer");
-	state->setTeardownCallback = ResolveExport<PFN_dxvkSetDeviceTeardownCallback>(d3d11, "dxvkSetDeviceTeardownCallback");
-	// Optional: graph textures that D3D11 still reads (GraphResources' exports).
-	state->createTextureFromVkImage = ResolveExport<PFN_dxvkCreateTextureFromVkImage>(d3d11, "dxvkCreateTextureFromVkImage");
-	// Optional: engine textures created on graph images with their contents (Engine/Textures).
-	state->createTextureFromVkImageWithData = ResolveExport<PFN_dxvkCreateTextureFromVkImageWithData>(d3d11, "dxvkCreateTextureFromVkImageWithData");
-	if (!getInfo || !state->createBufferFromVkBuffer || !state->setTeardownCallback)
-		return disable("the DXVK build lacks the render graph interop exports");
-	// Optional: game resources for the graph (Drawcall Limit Fix).
-	state->getResourceInfo = ResolveExport<PFN_dxvkGetInteropResourceInfo>(d3d11, "dxvkGetInteropResourceInfo");
-	state->getResourceInfos = ResolveExport<PFN_dxvkGetInteropResourceInfos>(d3d11, "dxvkGetInteropResourceInfos");
-	if (!Switches::Equals("CS_ORG_PINNED_IMPORTS", "1")) {
-		state->trackResources = ResolveExport<PFN_dxvkTrackInteropResources>(d3d11, "dxvkTrackInteropResources");
-		state->untrackResources = ResolveExport<PFN_dxvkUntrackInteropResources>(d3d11, "dxvkUntrackInteropResources");
-		state->pollRelocations = ResolveExport<PFN_dxvkPollInteropRelocations>(d3d11, "dxvkPollInteropRelocations");
-		state->releaseStorage = ResolveExport<PFN_dxvkReleaseInteropStorage>(d3d11, "dxvkReleaseInteropStorage");
-		if (!state->trackResources || !state->untrackResources || !state->pollRelocations || !state->releaseStorage) {
-			state->trackResources = nullptr;
-			state->untrackResources = nullptr;
-			state->pollRelocations = nullptr;
-			state->releaseStorage = nullptr;
-		}
-	}
-	state->emitCommandBufferCallback = ResolveExport<PFN_dxvkEmitCommandBufferCallback>(d3d11, "dxvkEmitCommandBufferCallback");
-	// Optional: recordings into DXVK's own command buffer (Drawcall Limit Fix's CPU-driven pipeline).
-	state->emitExternalCommands = ResolveExport<PFN_dxvkEmitExternalCommands>(d3d11, "dxvkEmitExternalCommands");
-	// Optional: without it, each epoch flushes and waits for DXVK's command stream instead.
-	state->enqueueSubmission = ResolveExport<PFN_dxvkEnqueueInteropSubmission>(d3d11, "dxvkEnqueueInteropSubmission");
-	if (Switches::Equals("CS_ORG_SUBMIT", "flush"))
-		state->enqueueSubmission = nullptr;
-	if (state->enqueueSubmission && !Switches::Equals("CS_ORG_BATCH_SUBMIT", "0"))
-		state->enqueueSubmissions = ResolveExport<PFN_dxvkEnqueueInteropSubmissions>(d3d11, "dxvkEnqueueInteropSubmissions");
-	state->epochStats = Switches::Equals("CS_ORG_EPOCH_STATS", "1");
-	state->earlyFlush = Switches::Equals("CS_ORG_EARLY_FLUSH", "1");
-
-	auto d3dDevice = globals::d3d::device;
-	if (!d3dDevice || FAILED(d3dDevice->QueryInterface(__uuidof(IDXGIVkInteropDevice), state->interop.put_void())))
-		return disable("IDXGIVkInteropDevice is unavailable");
-
-	// Resting layouts (RenderGraph/DxvkImageImport.h): imported images stay in DXVK's own layouts instead of GENERAL, which keeps
-	// their compression on AMD's Windows driver. The graph gives each one back in that layout through external home states, so
-	// both must be on. CS_ORG_RESTING_LAYOUTS=0 keeps DXVK pinning them in GENERAL.
-	if (!Switches::Equals("CS_ORG_RESTING_LAYOUTS", "0") && !Switches::Equals("CS_ORG_EXTERNAL_HOME", "0")) {
-		const auto setOptions = ResolveExport<PFN_dxvkSetInteropOptions>(d3d11, "dxvkSetInteropOptions");
-		const bool resting = setOptions && SUCCEEDED(setOptions(d3dDevice, DXVK_ORG_INTEROP_RESTING_LAYOUTS));
-		logger::info("[ORG] imported images {}", resting ? "rest in DXVK's layouts" : "rest in GENERAL (this DXVK build has no dxvkSetInteropOptions)");
-	} else {
-		logger::info("[ORG] imported images rest in GENERAL (CS_ORG_RESTING_LAYOUTS=0 or CS_ORG_EXTERNAL_HOME=0)");
-	}
-
 	DxvkOrgInteropDeviceInfo info{};
 	info.version = DXVK_ORG_INTEROP_VERSION;
-	if (FAILED(getInfo(d3dDevice, &info)))
-		return disable("DXVK could not describe its Vulkan device");
-	// The device, once, ahead of any reason the graph is disabled: a report from another machine is read against it.
-	if (const auto getProperties = reinterpret_cast<PFN_vkGetPhysicalDeviceProperties>(info.getInstanceProcAddr(info.instance, "vkGetPhysicalDeviceProperties"))) {
-		VkPhysicalDeviceProperties properties{};
-		getProperties(info.physicalDevice, &properties);
-		adoptedVendorId.store(properties.vendorID, std::memory_order_relaxed);
-		const auto driver = properties.driverVersion;
-		// NVIDIA packs its driver version 10.8.8.6; the others use Vulkan's packing.
-		const auto driverText = properties.vendorID == 0x10DE ? fmt::format("{}.{:02}", driver >> 22, (driver >> 14) & 0xFF) :
-		                                                        std::format("{}.{}.{}", VK_API_VERSION_MAJOR(driver), VK_API_VERSION_MINOR(driver), VK_API_VERSION_PATCH(driver));
-		logger::info("[RenderGraph] Vulkan device: {} (vendor {:#06x}, device {:#06x}), driver {}, Vulkan {}.{}.{}, {} extensions enabled", properties.deviceName,
-			properties.vendorID, properties.deviceID, driverText, VK_API_VERSION_MAJOR(properties.apiVersion), VK_API_VERSION_MINOR(properties.apiVersion),
-			VK_API_VERSION_PATCH(properties.apiVersion), info.enabledExtensionCount);
-	}
-	// BasicRHI runs on the model DXVK granted, which is DXVK's own (negotiated in NegotiateBindingModel): descriptor buffers with
-	// mutable descriptors. DXVK grants nothing on legacy descriptor sets, and is never asked for heaps.
-	const auto* bufferFeatures = FindFeatures<VkPhysicalDeviceDescriptorBufferFeaturesEXT>(info.enabledFeatures, VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DESCRIPTOR_BUFFER_FEATURES_EXT);
-	const auto* mutableFeatures = FindFeatures<VkPhysicalDeviceMutableDescriptorTypeFeaturesEXT>(info.enabledFeatures, VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MUTABLE_DESCRIPTOR_TYPE_FEATURES_EXT);
-	const bool onBuffers = HasExtension(info, VK_EXT_DESCRIPTOR_BUFFER_EXTENSION_NAME) && HasExtension(info, VK_EXT_MUTABLE_DESCRIPTOR_TYPE_EXTENSION_NAME) &&
-	                       bufferFeatures && bufferFeatures->descriptorBuffer && mutableFeatures && mutableFeatures->mutableDescriptorType;
-	if (!onBuffers) {
-		// The one cause seen in practice, named so the menu does not leave it to be guessed.
-		if (::GetModuleHandleW(L"renderdoc.dll"))
-			return disable("DXVK runs on legacy descriptor sets: RenderDoc is loaded, and its DXVK capture config turns off descriptor buffers, which the "
-						   "render graph needs. Turn off RenderDoc capture to use the render graph.");
-		return disable("DXVK did not grant descriptor buffers with mutable descriptors: it runs on legacy descriptor sets, or on a model BasicRHI cannot "
-					   "use on this device (see the binding model negotiation above and DXVK's 'Binding model' and 'Interop feature denied' log lines)");
-	}
-	logger::info("[ORG] Binding model: descriptor buffer (VK_EXT_descriptor_buffer + VK_EXT_mutable_descriptor_type)");
-
-	rhi::vulkan::AdoptedVulkanDeviceInfo adopt{};
-	// Under CS_VRAM_DEBUG, the graph's vkAllocateMemory/vkFreeMemory go through VRAM attribution's ledger.
-	adopt.getInstanceProcAddr = Vram::Debug::OrgProcAddr(info.getInstanceProcAddr, info.instance, info.physicalDevice);
-	adopt.instance = info.instance;
-	adopt.instanceApiVersion = info.instanceApiVersion;
-	adopt.physicalDevice = info.physicalDevice;
-	adopt.device = info.device;
-	adopt.enabledDeviceExtensions = info.enabledExtensions;
-	adopt.enabledDeviceExtensionCount = info.enabledExtensionCount;
-	{
-		bool budget = false;
-		for (std::uint32_t i = 0; i < info.enabledExtensionCount; ++i)
-			budget = budget || std::string_view(info.enabledExtensions[i]) == VK_EXT_MEMORY_BUDGET_EXTENSION_NAME;
-		logger::info("[ORG] adopted device: {} extensions, VK_EXT_memory_budget {}", info.enabledExtensionCount, budget ? "on" : "off");
-	}
-	adopt.diagnostics.registerMarker = &Aftermath::RegisterOrgCheckpoint;
-	adopt.diagnostics.detailedCommands = Switches::Equals("CS_ORG_DETAILED_CHECKPOINTS", "1");
-	// Whether VK_EXT_debug_utils is on, so that BasicRHI names objects and labels passes only then.
-	adopt.enabledInstanceExtensions = info.enabledInstanceExtensions;
-	adopt.enabledInstanceExtensionCount = info.enabledInstanceExtensionCount;
-	adopt.enabledFeatureChain = info.enabledFeatures;
-	// Exactly what the negotiation evaluated (GraphBindingRequirements).
-	adopt.bindingRequirements = GraphBindingRequirements(info.getInstanceProcAddr, info.instance, info.physicalDevice);
-	adopt.queues[0] = { info.graphicsQueue, info.graphicsQueueFamily, info.graphicsQueueIndex };
-	adopt.submissionHooks = { state.get(), &Impl::LockQueue, &Impl::UnlockQueue, nullptr };
-	if (state->enqueueSubmission) {
-		auto getDeviceProcAddr = reinterpret_cast<PFN_vkGetDeviceProcAddr>(info.getInstanceProcAddr(info.instance, "vkGetDeviceProcAddr"));
-		state->queueSubmit2 = getDeviceProcAddr ? reinterpret_cast<PFN_vkQueueSubmit2>(getDeviceProcAddr(info.device, "vkQueueSubmit2")) : nullptr;
-		state->deviceProcAddr = getDeviceProcAddr;
-		state->adoptedDevice = info.device;
-		state->graphicsFamily = info.graphicsQueueFamily;
-		if (state->queueSubmit2) {
-			adopt.submissionHooks.submit = &Impl::Submit;
-			state->streamThread = ::GetCurrentThreadId();
-		} else {
+	if (native) {
+		state->native = true;
+		state->device = RenderGraph::Engine::Native::Device();
+		if (!state->device || !*state->device)
+			return disable("native mode (CS_ORG_NATIVE=1) has no BasicRHI device");
+		if (const auto getProperties = reinterpret_cast<PFN_vkGetPhysicalDeviceProperties>(
+				LoaderProcAddr()(rhi::vulkan::get_instance(state->device->Get()), "vkGetPhysicalDeviceProperties"))) {
+			VkPhysicalDeviceProperties properties{};
+			getProperties(rhi::vulkan::get_physical_device(state->device->Get()), &properties);
+			adoptedVendorId.store(properties.vendorID, std::memory_order_relaxed);
+			logger::info("[RenderGraph] Vulkan device (native mode): {} (vendor {:#06x}, device {:#06x}), Vulkan {}.{}.{}", properties.deviceName, properties.vendorID,
+				properties.deviceID, VK_API_VERSION_MAJOR(properties.apiVersion), VK_API_VERSION_MINOR(properties.apiVersion), VK_API_VERSION_PATCH(properties.apiVersion));
+		}
+		RenderGraph::Engine::Native::Stage("render graph", "the graph host runs natively on BasicRHI's device (epochs submit directly)");
+	} else {
+		auto getInfo = ResolveExport<PFN_dxvkGetInteropDeviceInfo>(d3d11, "dxvkGetInteropDeviceInfo");
+		state->createBufferFromVkBuffer = ResolveExport<PFN_dxvkCreateBufferFromVkBuffer>(d3d11, "dxvkCreateBufferFromVkBuffer");
+		state->setTeardownCallback = ResolveExport<PFN_dxvkSetDeviceTeardownCallback>(d3d11, "dxvkSetDeviceTeardownCallback");
+		// Optional: graph textures that D3D11 still reads (GraphResources' exports).
+		state->createTextureFromVkImage = ResolveExport<PFN_dxvkCreateTextureFromVkImage>(d3d11, "dxvkCreateTextureFromVkImage");
+		// Optional: engine textures created on graph images with their contents (Engine/Textures).
+		state->createTextureFromVkImageWithData = ResolveExport<PFN_dxvkCreateTextureFromVkImageWithData>(d3d11, "dxvkCreateTextureFromVkImageWithData");
+		if (!getInfo || !state->createBufferFromVkBuffer || !state->setTeardownCallback)
+			return disable("the DXVK build lacks the render graph interop exports");
+		// Optional: game resources for the graph (Drawcall Limit Fix).
+		state->getResourceInfo = ResolveExport<PFN_dxvkGetInteropResourceInfo>(d3d11, "dxvkGetInteropResourceInfo");
+		state->getResourceInfos = ResolveExport<PFN_dxvkGetInteropResourceInfos>(d3d11, "dxvkGetInteropResourceInfos");
+		if (!Switches::Equals("CS_ORG_PINNED_IMPORTS", "1")) {
+			state->trackResources = ResolveExport<PFN_dxvkTrackInteropResources>(d3d11, "dxvkTrackInteropResources");
+			state->untrackResources = ResolveExport<PFN_dxvkUntrackInteropResources>(d3d11, "dxvkUntrackInteropResources");
+			state->pollRelocations = ResolveExport<PFN_dxvkPollInteropRelocations>(d3d11, "dxvkPollInteropRelocations");
+			state->releaseStorage = ResolveExport<PFN_dxvkReleaseInteropStorage>(d3d11, "dxvkReleaseInteropStorage");
+			if (!state->trackResources || !state->untrackResources || !state->pollRelocations || !state->releaseStorage) {
+				state->trackResources = nullptr;
+				state->untrackResources = nullptr;
+				state->pollRelocations = nullptr;
+				state->releaseStorage = nullptr;
+			}
+		}
+		state->emitCommandBufferCallback = ResolveExport<PFN_dxvkEmitCommandBufferCallback>(d3d11, "dxvkEmitCommandBufferCallback");
+		// Optional: recordings into DXVK's own command buffer (Drawcall Limit Fix's CPU-driven pipeline).
+		state->emitExternalCommands = ResolveExport<PFN_dxvkEmitExternalCommands>(d3d11, "dxvkEmitExternalCommands");
+		// Optional: without it, each epoch flushes and waits for DXVK's command stream instead.
+		state->enqueueSubmission = ResolveExport<PFN_dxvkEnqueueInteropSubmission>(d3d11, "dxvkEnqueueInteropSubmission");
+		if (Switches::Equals("CS_ORG_SUBMIT", "flush"))
 			state->enqueueSubmission = nullptr;
+		if (state->enqueueSubmission && !Switches::Equals("CS_ORG_BATCH_SUBMIT", "0"))
+			state->enqueueSubmissions = ResolveExport<PFN_dxvkEnqueueInteropSubmissions>(d3d11, "dxvkEnqueueInteropSubmissions");
+		state->epochStats = Switches::Equals("CS_ORG_EPOCH_STATS", "1");
+		state->earlyFlush = Switches::Equals("CS_ORG_EARLY_FLUSH", "1");
+
+		auto d3dDevice = globals::d3d::device;
+		if (!d3dDevice || FAILED(d3dDevice->QueryInterface(__uuidof(IDXGIVkInteropDevice), state->interop.put_void())))
+			return disable("IDXGIVkInteropDevice is unavailable");
+
+		// Resting layouts (RenderGraph/DxvkImageImport.h): imported images stay in DXVK's own layouts instead of GENERAL, which keeps
+		// their compression on AMD's Windows driver. The graph gives each one back in that layout through external home states, so
+		// both must be on. CS_ORG_RESTING_LAYOUTS=0 keeps DXVK pinning them in GENERAL.
+		if (!Switches::Equals("CS_ORG_RESTING_LAYOUTS", "0") && !Switches::Equals("CS_ORG_EXTERNAL_HOME", "0")) {
+			const auto setOptions = ResolveExport<PFN_dxvkSetInteropOptions>(d3d11, "dxvkSetInteropOptions");
+			const bool resting = setOptions && SUCCEEDED(setOptions(d3dDevice, DXVK_ORG_INTEROP_RESTING_LAYOUTS));
+			logger::info("[ORG] imported images {}", resting ? "rest in DXVK's layouts" : "rest in GENERAL (this DXVK build has no dxvkSetInteropOptions)");
+		} else {
+			logger::info("[ORG] imported images rest in GENERAL (CS_ORG_RESTING_LAYOUTS=0 or CS_ORG_EXTERNAL_HOME=0)");
 		}
-		// The frame-pace timeline (SignalFramePace): signalled from DXVK's stream, so it needs the stream.
-		if (state->enqueueSubmission && getDeviceProcAddr) {
-			if (Switches::IsSet("CS_FRAME_LATENCY"))
-				state->frameLatency = static_cast<uint32_t>(std::clamp<std::uint64_t>(Switches::Number("CS_FRAME_LATENCY", 0), 0, kGameFramesInFlight));
-			const auto createSemaphore = reinterpret_cast<PFN_vkCreateSemaphore>(getDeviceProcAddr(info.device, "vkCreateSemaphore"));
-			state->destroySemaphore = reinterpret_cast<PFN_vkDestroySemaphore>(getDeviceProcAddr(info.device, "vkDestroySemaphore"));
-			state->waitSemaphores = reinterpret_cast<PFN_vkWaitSemaphores>(getDeviceProcAddr(info.device, "vkWaitSemaphores"));
-			VkSemaphoreTypeCreateInfo type{ VK_STRUCTURE_TYPE_SEMAPHORE_TYPE_CREATE_INFO };
-			type.semaphoreType = VK_SEMAPHORE_TYPE_TIMELINE;
-			VkSemaphoreCreateInfo create{ VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO };
-			create.pNext = &type;
-			if (state->frameLatency && createSemaphore && state->destroySemaphore && state->waitSemaphores &&
-				createSemaphore(info.device, &create, nullptr, &state->framePace) == VK_SUCCESS)
-				state->vkDevice = info.device;
-			logger::info("[ORG] frame pacing: {}", state->framePace ? std::format("the GPU at most {} frames behind the render thread (CS_FRAME_LATENCY)", state->frameLatency - 1) : std::string("off"));
+
+		if (FAILED(getInfo(d3dDevice, &info)))
+			return disable("DXVK could not describe its Vulkan device");
+		// The device, once, ahead of any reason the graph is disabled: a report from another machine is read against it.
+		if (const auto getProperties = reinterpret_cast<PFN_vkGetPhysicalDeviceProperties>(info.getInstanceProcAddr(info.instance, "vkGetPhysicalDeviceProperties"))) {
+			VkPhysicalDeviceProperties properties{};
+			getProperties(info.physicalDevice, &properties);
+			adoptedVendorId.store(properties.vendorID, std::memory_order_relaxed);
+			const auto driver = properties.driverVersion;
+			// NVIDIA packs its driver version 10.8.8.6; the others use Vulkan's packing.
+			const auto driverText = properties.vendorID == 0x10DE ? fmt::format("{}.{:02}", driver >> 22, (driver >> 14) & 0xFF) :
+			                                                        std::format("{}.{}.{}", VK_API_VERSION_MAJOR(driver), VK_API_VERSION_MINOR(driver), VK_API_VERSION_PATCH(driver));
+			logger::info("[RenderGraph] Vulkan device: {} (vendor {:#06x}, device {:#06x}), driver {}, Vulkan {}.{}.{}, {} extensions enabled", properties.deviceName,
+				properties.vendorID, properties.deviceID, driverText, VK_API_VERSION_MAJOR(properties.apiVersion), VK_API_VERSION_MINOR(properties.apiVersion),
+				VK_API_VERSION_PATCH(properties.apiVersion), info.enabledExtensionCount);
 		}
-		// DXVK's compute-only queue, ordered against the stream by the host (EnqueueStreamPoint, CloseComputeEpoch), which
-		// needs the stream. CS_ORG_COMPUTE_QUEUE=0 leaves BasicRHI's compute queue aliasing the graphics one.
-		if (state->enqueueSubmission && info.computeQueue && !Switches::Equals("CS_ORG_COMPUTE_QUEUE", "0") && getDeviceProcAddr) {
-			const auto createSemaphore = reinterpret_cast<PFN_vkCreateSemaphore>(getDeviceProcAddr(info.device, "vkCreateSemaphore"));
-			state->destroySemaphore = reinterpret_cast<PFN_vkDestroySemaphore>(getDeviceProcAddr(info.device, "vkDestroySemaphore"));
-			state->waitSemaphores = reinterpret_cast<PFN_vkWaitSemaphores>(getDeviceProcAddr(info.device, "vkWaitSemaphores"));
-			VkSemaphoreTypeCreateInfo type{ VK_STRUCTURE_TYPE_SEMAPHORE_TYPE_CREATE_INFO };
-			type.semaphoreType = VK_SEMAPHORE_TYPE_TIMELINE;
-			VkSemaphoreCreateInfo create{ VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO };
-			create.pNext = &type;
-			if (createSemaphore && state->destroySemaphore && state->waitSemaphores &&
-				createSemaphore(info.device, &create, nullptr, &state->streamPoint) == VK_SUCCESS &&
-				createSemaphore(info.device, &create, nullptr, &state->computeExit) == VK_SUCCESS) {
-				state->vkDevice = info.device;
-				state->computeQueue = info.computeQueue;
-				state->computeSubmitter.Start(*state, L"CS ORG compute submit", false);
-				adopt.queues[1] = { info.computeQueue, info.computeQueueFamily, info.computeQueueIndex };
-				// CS_ORG_COPY_QUEUE (default on, =0 off): a queue of the transfer-only family, so the graph's copy passes leave DXVK's
-				// stream as its compute passes do (a pass that touches a resource only DXVK's families may use stays there): DXVK's spare
-				// one, else the uploader's, shared (see copyQueue). Off, or with neither: the copy queue aliases the graphics one. Never
-				// the compute queue: a copy there waits behind a running dispatch.
-				const bool uploadOffered = adopt.submissionHooks.submit && info.uploadQueue && !Switches::Equals("CS_ORG_UPLOAD_QUEUE", "0");
-				const bool shared = !info.copyQueue && uploadOffered;
-				if ((info.copyQueue || shared) && !Switches::Equals("CS_ORG_COPY_QUEUE", "0") &&
-					createSemaphore(info.device, &create, nullptr, &state->copyExit) == VK_SUCCESS) {
-					state->copyQueue = shared ? info.uploadQueue : info.copyQueue;
-					adopt.queues[2] = shared ? rhi::vulkan::AdoptedQueue{ info.uploadQueue, info.uploadQueueFamily, info.uploadQueueIndex } :
-					                           rhi::vulkan::AdoptedQueue{ info.copyQueue, info.copyQueueFamily, info.copyQueueIndex };
-					state->copySubmitter.Start(*state, L"CS ORG copy submit", shared);
+		// BasicRHI runs on the model DXVK granted, which is DXVK's own (negotiated in NegotiateBindingModel): descriptor buffers with
+		// mutable descriptors. DXVK grants nothing on legacy descriptor sets, and is never asked for heaps.
+		const auto* bufferFeatures = FindFeatures<VkPhysicalDeviceDescriptorBufferFeaturesEXT>(info.enabledFeatures, VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DESCRIPTOR_BUFFER_FEATURES_EXT);
+		const auto* mutableFeatures = FindFeatures<VkPhysicalDeviceMutableDescriptorTypeFeaturesEXT>(info.enabledFeatures, VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MUTABLE_DESCRIPTOR_TYPE_FEATURES_EXT);
+		const bool onBuffers = HasExtension(info, VK_EXT_DESCRIPTOR_BUFFER_EXTENSION_NAME) && HasExtension(info, VK_EXT_MUTABLE_DESCRIPTOR_TYPE_EXTENSION_NAME) &&
+		                       bufferFeatures && bufferFeatures->descriptorBuffer && mutableFeatures && mutableFeatures->mutableDescriptorType;
+		if (!onBuffers) {
+			// The one cause seen in practice, named so the menu does not leave it to be guessed.
+			if (::GetModuleHandleW(L"renderdoc.dll"))
+				return disable("DXVK runs on legacy descriptor sets: RenderDoc is loaded, and its DXVK capture config turns off descriptor buffers, which the "
+							   "render graph needs. Turn off RenderDoc capture to use the render graph.");
+			return disable("DXVK did not grant descriptor buffers with mutable descriptors: it runs on legacy descriptor sets, or on a model BasicRHI cannot "
+						   "use on this device (see the binding model negotiation above and DXVK's 'Binding model' and 'Interop feature denied' log lines)");
+		}
+		logger::info("[ORG] Binding model: descriptor buffer (VK_EXT_descriptor_buffer + VK_EXT_mutable_descriptor_type)");
+
+		rhi::vulkan::AdoptedVulkanDeviceInfo adopt{};
+		// Under CS_VRAM_DEBUG, the graph's vkAllocateMemory/vkFreeMemory go through VRAM attribution's ledger.
+		adopt.getInstanceProcAddr = Vram::Debug::OrgProcAddr(info.getInstanceProcAddr, info.instance, info.physicalDevice);
+		adopt.instance = info.instance;
+		adopt.instanceApiVersion = info.instanceApiVersion;
+		adopt.physicalDevice = info.physicalDevice;
+		adopt.device = info.device;
+		adopt.enabledDeviceExtensions = info.enabledExtensions;
+		adopt.enabledDeviceExtensionCount = info.enabledExtensionCount;
+		{
+			bool budget = false;
+			for (std::uint32_t i = 0; i < info.enabledExtensionCount; ++i)
+				budget = budget || std::string_view(info.enabledExtensions[i]) == VK_EXT_MEMORY_BUDGET_EXTENSION_NAME;
+			logger::info("[ORG] adopted device: {} extensions, VK_EXT_memory_budget {}", info.enabledExtensionCount, budget ? "on" : "off");
+		}
+		adopt.diagnostics.registerMarker = &Aftermath::RegisterOrgCheckpoint;
+		adopt.diagnostics.detailedCommands = Switches::Equals("CS_ORG_DETAILED_CHECKPOINTS", "1");
+		// Whether VK_EXT_debug_utils is on, so that BasicRHI names objects and labels passes only then.
+		adopt.enabledInstanceExtensions = info.enabledInstanceExtensions;
+		adopt.enabledInstanceExtensionCount = info.enabledInstanceExtensionCount;
+		adopt.enabledFeatureChain = info.enabledFeatures;
+		// Exactly what the negotiation evaluated (GraphBindingRequirements).
+		adopt.bindingRequirements = GraphBindingRequirements(info.getInstanceProcAddr, info.instance, info.physicalDevice);
+		adopt.queues[0] = { info.graphicsQueue, info.graphicsQueueFamily, info.graphicsQueueIndex };
+		adopt.submissionHooks = { state.get(), &Impl::LockQueue, &Impl::UnlockQueue, nullptr };
+		if (state->enqueueSubmission) {
+			auto getDeviceProcAddr = reinterpret_cast<PFN_vkGetDeviceProcAddr>(info.getInstanceProcAddr(info.instance, "vkGetDeviceProcAddr"));
+			state->queueSubmit2 = getDeviceProcAddr ? reinterpret_cast<PFN_vkQueueSubmit2>(getDeviceProcAddr(info.device, "vkQueueSubmit2")) : nullptr;
+			state->deviceProcAddr = getDeviceProcAddr;
+			state->adoptedDevice = info.device;
+			state->graphicsFamily = info.graphicsQueueFamily;
+			if (state->queueSubmit2) {
+				adopt.submissionHooks.submit = &Impl::Submit;
+				state->streamThread = ::GetCurrentThreadId();
+			} else {
+				state->enqueueSubmission = nullptr;
+			}
+			// The frame-pace timeline (SignalFramePace): signalled from DXVK's stream, so it needs the stream.
+			if (state->enqueueSubmission && getDeviceProcAddr) {
+				if (Switches::IsSet("CS_FRAME_LATENCY"))
+					state->frameLatency = static_cast<uint32_t>(std::clamp<std::uint64_t>(Switches::Number("CS_FRAME_LATENCY", 0), 0, kGameFramesInFlight));
+				const auto createSemaphore = reinterpret_cast<PFN_vkCreateSemaphore>(getDeviceProcAddr(info.device, "vkCreateSemaphore"));
+				state->destroySemaphore = reinterpret_cast<PFN_vkDestroySemaphore>(getDeviceProcAddr(info.device, "vkDestroySemaphore"));
+				state->waitSemaphores = reinterpret_cast<PFN_vkWaitSemaphores>(getDeviceProcAddr(info.device, "vkWaitSemaphores"));
+				VkSemaphoreTypeCreateInfo type{ VK_STRUCTURE_TYPE_SEMAPHORE_TYPE_CREATE_INFO };
+				type.semaphoreType = VK_SEMAPHORE_TYPE_TIMELINE;
+				VkSemaphoreCreateInfo create{ VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO };
+				create.pNext = &type;
+				if (state->frameLatency && createSemaphore && state->destroySemaphore && state->waitSemaphores &&
+					createSemaphore(info.device, &create, nullptr, &state->framePace) == VK_SUCCESS)
+					state->vkDevice = info.device;
+				logger::info("[ORG] frame pacing: {}", state->framePace ? std::format("the GPU at most {} frames behind the render thread (CS_FRAME_LATENCY)", state->frameLatency - 1) : std::string("off"));
+			}
+			// DXVK's compute-only queue, ordered against the stream by the host (EnqueueStreamPoint, CloseComputeEpoch), which
+			// needs the stream. CS_ORG_COMPUTE_QUEUE=0 leaves BasicRHI's compute queue aliasing the graphics one.
+			if (state->enqueueSubmission && info.computeQueue && !Switches::Equals("CS_ORG_COMPUTE_QUEUE", "0") && getDeviceProcAddr) {
+				const auto createSemaphore = reinterpret_cast<PFN_vkCreateSemaphore>(getDeviceProcAddr(info.device, "vkCreateSemaphore"));
+				state->destroySemaphore = reinterpret_cast<PFN_vkDestroySemaphore>(getDeviceProcAddr(info.device, "vkDestroySemaphore"));
+				state->waitSemaphores = reinterpret_cast<PFN_vkWaitSemaphores>(getDeviceProcAddr(info.device, "vkWaitSemaphores"));
+				VkSemaphoreTypeCreateInfo type{ VK_STRUCTURE_TYPE_SEMAPHORE_TYPE_CREATE_INFO };
+				type.semaphoreType = VK_SEMAPHORE_TYPE_TIMELINE;
+				VkSemaphoreCreateInfo create{ VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO };
+				create.pNext = &type;
+				if (createSemaphore && state->destroySemaphore && state->waitSemaphores &&
+					createSemaphore(info.device, &create, nullptr, &state->streamPoint) == VK_SUCCESS &&
+					createSemaphore(info.device, &create, nullptr, &state->computeExit) == VK_SUCCESS) {
+					state->vkDevice = info.device;
+					state->computeQueue = info.computeQueue;
+					state->computeSubmitter.Start(*state, L"CS ORG compute submit", false);
+					adopt.queues[1] = { info.computeQueue, info.computeQueueFamily, info.computeQueueIndex };
+					// CS_ORG_COPY_QUEUE (default on, =0 off): a queue of the transfer-only family, so the graph's copy passes leave DXVK's
+					// stream as its compute passes do (a pass that touches a resource only DXVK's families may use stays there): DXVK's spare
+					// one, else the uploader's, shared (see copyQueue). Off, or with neither: the copy queue aliases the graphics one. Never
+					// the compute queue: a copy there waits behind a running dispatch.
+					const bool uploadOffered = adopt.submissionHooks.submit && info.uploadQueue && !Switches::Equals("CS_ORG_UPLOAD_QUEUE", "0");
+					const bool shared = !info.copyQueue && uploadOffered;
+					if ((info.copyQueue || shared) && !Switches::Equals("CS_ORG_COPY_QUEUE", "0") &&
+						createSemaphore(info.device, &create, nullptr, &state->copyExit) == VK_SUCCESS) {
+						state->copyQueue = shared ? info.uploadQueue : info.copyQueue;
+						adopt.queues[2] = shared ? rhi::vulkan::AdoptedQueue{ info.uploadQueue, info.uploadQueueFamily, info.uploadQueueIndex } :
+						                           rhi::vulkan::AdoptedQueue{ info.copyQueue, info.copyQueueFamily, info.copyQueueIndex };
+						state->copySubmitter.Start(*state, L"CS ORG copy submit", shared);
+					}
 				}
 			}
 		}
+		// The upload queue, offered to BasicRHI as a spare queue (CreateQueue hands it to ORG's copy-queue uploader). Its submissions are
+		// direct, under the lock (Submit). CS_ORG_UPLOAD_QUEUE=0 offers none.
+		rhi::vulkan::AdoptedQueue uploadSpare{};
+		if (adopt.submissionHooks.submit && info.uploadQueue && !Switches::Equals("CS_ORG_UPLOAD_QUEUE", "0")) {
+			state->uploadQueue = info.uploadQueue;
+			uploadSpare = { info.uploadQueue, info.uploadQueueFamily, info.uploadQueueIndex };
+			adopt.spareQueues = &uploadSpare;
+			adopt.spareQueueCount = 1;
+		}
+		logger::info("[ORG] Queues: graphics {}:{}, compute {}, upload {}, copy {}", info.graphicsQueueFamily, info.graphicsQueueIndex,
+			state->computeQueue ? fmt::format("{}:{}", info.computeQueueFamily, info.computeQueueIndex) : std::string("shared with graphics"),
+			state->uploadQueue ? fmt::format("{}:{}", info.uploadQueueFamily, info.uploadQueueIndex) : std::string("none"),
+			!state->copyQueue ? std::string("shared with graphics") : state->copyQueue == state->uploadQueue ? std::string("shared with upload") : fmt::format("{}:{}", info.copyQueueFamily, info.copyQueueIndex));
+		if (auto& guest = RenderGraph::Engine::GuestDevice::Get(); guest.Active()) {
+			// The owned frame: BasicRHI created the device and DXVK is its guest. The graph shares that device, with the same hooks an
+			// adoption takes; the queue lock skips the owned frame's present, which runs inside DXVK's own lock.
+			state->device = guest.Device();
+			adopt.submissionHooks.lock = &RenderGraph::Engine::GuestDevice::LockQueue;
+			adopt.submissionHooks.unlock = &RenderGraph::Engine::GuestDevice::UnlockQueue;
+			if (rhi::vulkan::ShareVulkanDevice(state->device->Get(), adopt.submissionHooks) != rhi::Result::Ok)
+				return disable("BasicRHI could not share its Vulkan device with the render graph's hooks");
+		} else if (rhi::vulkan::AdoptVulkanDevice(adopt, *state->device) != rhi::Result::Ok || !*state->device)
+			return disable("BasicRHI could not adopt DXVK's Vulkan device");
 	}
-	// The upload queue, offered to BasicRHI as a spare queue (CreateQueue hands it to ORG's copy-queue uploader). Its submissions are
-	// direct, under the lock (Submit). CS_ORG_UPLOAD_QUEUE=0 offers none.
-	rhi::vulkan::AdoptedQueue uploadSpare{};
-	if (adopt.submissionHooks.submit && info.uploadQueue && !Switches::Equals("CS_ORG_UPLOAD_QUEUE", "0")) {
-		state->uploadQueue = info.uploadQueue;
-		uploadSpare = { info.uploadQueue, info.uploadQueueFamily, info.uploadQueueIndex };
-		adopt.spareQueues = &uploadSpare;
-		adopt.spareQueueCount = 1;
-	}
-	logger::info("[ORG] Queues: graphics {}:{}, compute {}, upload {}, copy {}", info.graphicsQueueFamily, info.graphicsQueueIndex,
-		state->computeQueue ? fmt::format("{}:{}", info.computeQueueFamily, info.computeQueueIndex) : std::string("shared with graphics"),
-		state->uploadQueue ? fmt::format("{}:{}", info.uploadQueueFamily, info.uploadQueueIndex) : std::string("none"),
-		!state->copyQueue ? std::string("shared with graphics") : state->copyQueue == state->uploadQueue ? std::string("shared with upload") : fmt::format("{}:{}", info.copyQueueFamily, info.copyQueueIndex));
-	if (auto& guest = RenderGraph::Engine::GuestDevice::Get(); guest.Active()) {
-		// The owned frame: BasicRHI created the device and DXVK is its guest. The graph shares that device, with the same hooks an
-		// adoption takes; the queue lock skips the owned frame's present, which runs inside DXVK's own lock.
-		state->device = guest.Device();
-		adopt.submissionHooks.lock = &RenderGraph::Engine::GuestDevice::LockQueue;
-		adopt.submissionHooks.unlock = &RenderGraph::Engine::GuestDevice::UnlockQueue;
-		if (rhi::vulkan::ShareVulkanDevice(state->device->Get(), adopt.submissionHooks) != rhi::Result::Ok)
-			return disable("BasicRHI could not share its Vulkan device with the render graph's hooks");
-	} else if (rhi::vulkan::AdoptVulkanDevice(adopt, *state->device) != rhi::Result::Ok || !*state->device)
-		return disable("BasicRHI could not adopt DXVK's Vulkan device");
 	if ((*state->device)->CreateTimeline(state->nativeTimelines, 0, "CS native timeline lookup") != rhi::Result::Ok || !state->nativeTimelines)
 		return disable("BasicRHI could not create a timeline on DXVK's Vulkan device");
 
@@ -2157,7 +2197,7 @@ bool RenderGraphRuntime::Initialize()
 		org::GraphHost::Desc desc{};
 		// Everything DXVK submitted before an epoch and everything it submits after
 		// is ordered against the graph by these barriers (same queue, submission order).
-		desc.queueBoundary = { .entry = true, .exit = true };
+		desc.queueBoundary = { .entry = !state->native, .exit = !state->native };
 		// Game frames in flight: what the host's frame pacing and a revision-driven epoch's published copies follow. Every run takes a
 		// run lease of its own, whichever epoch or anchor it is.
 		desc.framesInFlight = kGameFramesInFlight;
@@ -2229,7 +2269,8 @@ bool RenderGraphRuntime::Initialize()
 		return disable(std::string("graph host creation failed: ") + e.what());
 	}
 
-	state->setTeardownCallback(&Impl::OnDxvkTeardown, nullptr);
+	if (state->setTeardownCallback)
+		state->setTeardownCallback(&Impl::OnDxvkTeardown, nullptr);
 	// CS_ORG_RECORDING_TIMESTAMPS=1: the recordings kept across frames are timed too (the others always are), as a timestamp trace
 	// turns them on (NvPerf timestamps).
 	if (Switches::Equals("CS_ORG_RECORDING_TIMESTAMPS", "1"))
@@ -2239,7 +2280,8 @@ bool RenderGraphRuntime::Initialize()
 	});
 	// Every submission up to a_submissions is complete on the GPU: DCLF's pooled versions bound up to it may be reused, and the pipelines
 	// a shader reload replaced up to it released (on this thread: the host's, with async epochs).
-	state->host->SetRetiredCallback([](std::uint64_t a_submissions) {
+	state->host->SetRetiredCallback([self = state.get()](std::uint64_t a_submissions) {
+		self->retiredSubmissions.store(a_submissions, std::memory_order_release);
 		DrawcallLimitFix::OnGraphSubmissionsRetired(a_submissions);
 #if defined(CS_HAS_ORG_MODULE_SERVICES)
 		PipelineRegistry()->Retire(a_submissions);
@@ -2312,18 +2354,25 @@ bool RenderGraphRuntime::Initialize()
 	}
 	impl = std::move(state);
 	disabledReason.clear();
-	// Nsight Perf's Vulkan backend: its captures run on DXVK's graphics queue, with the graph's passes as ranges.
-	GpuCounters::RegisterVulkanDevice(info, d3d11, *impl->host);
-	logger::info("[ORG] Render graph adopted DXVK's Vulkan device (queue family {}, index {}); submissions {}",
-		info.graphicsQueueFamily, info.graphicsQueueIndex,
-		impl->enqueueSubmission ? "go through DXVK's command stream" : "flush DXVK each epoch");
+	if (impl->native) {
+		logger::info("[ORG] Render graph runs natively on BasicRHI's Vulkan device; submissions go to its queues directly");
+	} else {
+		// Nsight Perf's Vulkan backend: its captures run on DXVK's graphics queue, with the graph's passes as ranges.
+		GpuCounters::RegisterVulkanDevice(info, d3d11, *impl->host);
+		logger::info("[ORG] Render graph adopted DXVK's Vulkan device (queue family {}, index {}); submissions {}",
+			info.graphicsQueueFamily, info.graphicsQueueIndex,
+			impl->enqueueSubmission ? "go through DXVK's command stream" : "flush DXVK each epoch");
+	}
 #if defined(CS_HAS_ORG_MODULE_SERVICES) && defined(ORG_MODULE_SERVICES_HAS_DXC)
 	{
 		// DXC ships beside the DXVK DLLs; load it from there, not by name (another dxcompiler.dll,
 		// without SPIR-V support, may already be in the process).
 		wchar_t dxvkPath[MAX_PATH]{};
 		std::filesystem::path compilerDirectory;
-		if (::GetModuleFileNameW(d3d11, dxvkPath, MAX_PATH))
+		// Native mode: the same directory, CS's runtime DLLs, without DXVK in it.
+		if (impl->native)
+			compilerDirectory = RenderGraph::Engine::Native::RuntimeDirectory();
+		else if (::GetModuleFileNameW(d3d11, dxvkPath, MAX_PATH))
 			compilerDirectory = std::filesystem::path(dxvkPath).parent_path();
 		impl->shaderCompiler = std::make_unique<org::services::ShaderCompiler>(std::filesystem::path{}, compilerDirectory, Util::SharedShaderStore());
 		// A reload means files may have changed, so the store must read them again. This listener also runs after a publish, which changes no files.
@@ -2898,7 +2947,7 @@ RenderGraphRuntime::EpochResult RenderGraphRuntime::TryExecuteEpoch(Segment a_se
 			globals::d3d::context->Flush();
 			impl->NoteStreamClosed("early flush", Impl::SegmentLabel(a_segment));
 		}
-	} else {
+	} else if (impl->interop) {
 		// Older DXVK (or CS_ORG_SUBMIT=flush): submit and wait for every D3D11 command recorded
 		// so far, then submit the graph directly under DXVK's queue lock.
 		impl->interop->FlushRenderingCommands();
@@ -3190,6 +3239,9 @@ const std::vector<std::filesystem::path>& RenderGraphRuntime::ShaderSourceFiles(
 
 bool RenderGraphRuntime::DescribeResource(IUnknown* a_object, DxvkOrgInteropResourceInfo& a_info)
 {
+	// Native mode: the images its device made (the back buffer, the native textures), described as DXVK would describe its own.
+	if (impl && impl->native)
+		return RenderGraph::Engine::Native::DescribeResource(a_object, a_info);
 	// An engine field may hold a tripwire handle (CS_ORG_ENGINE_TARGET_HANDLES): DXVK describes the object it wraps.
 	a_object = RenderGraph::Engine::Tripwire::UnwrapObject(a_object);
 	if (!impl || !impl->getResourceInfo || !a_object)
@@ -3224,6 +3276,14 @@ namespace
 
 bool RenderGraphRuntime::DescribeResources(std::span<IUnknown* const> a_objects, std::span<DxvkOrgInteropResourceInfo> a_infos, std::span<HRESULT> a_results)
 {
+	// Native mode: one at a time, from native mode's own records (no DXVK to ask).
+	if (impl && impl->native) {
+		if (a_infos.size() != a_objects.size() || a_results.size() != a_objects.size())
+			return false;
+		for (std::size_t i = 0; i < a_objects.size(); ++i)
+			a_results[i] = RenderGraph::Engine::Native::DescribeResource(a_objects[i], a_infos[i]) ? S_OK : E_INVALIDARG;
+		return true;
+	}
 	std::vector<IUnknown*> scratch;
 	a_objects = UnwrapBatch(a_objects, scratch);
 	if (!impl || !impl->getResourceInfos || a_infos.size() != a_objects.size() || a_results.size() != a_objects.size())
@@ -3347,6 +3407,13 @@ winrt::com_ptr<ID3D11Buffer> RenderGraphRuntime::WrapBuffer(org::Resource& a_buf
 	winrt::com_ptr<ID3D11Buffer> result;
 	if (!IsActive())
 		return result;
+	// Native mode: no DXVK to make a D3D11 buffer on the graph's. The caller's failure path runs, as when DXVK rejects one.
+	if (impl->native || !impl->createBufferFromVkBuffer) {
+		static std::atomic_flag logged;
+		if (!logged.test_and_set())
+			logger::warn("[ORG] WrapBuffer: '{}' has no D3D11 buffer, there is no DXVK to make one (logged once)", a_buffer.GetName());
+		return result;
+	}
 	rhi::VulkanResourceInfo info{};
 	const auto api = a_buffer.GetAPIResource();
 	if (!rhi::vulkan::get_resource_info(api, info) || !info.resource) {
@@ -3430,6 +3497,11 @@ void RenderGraphRuntime::ReleaseAfterD3D11(std::shared_ptr<const void> a_owner)
 		return;
 	if (!impl)
 		return;  // shut down: DXVK's device is gone or going, and nothing of the graph's runs any more
+	if (impl->native) {
+		impl->nativeReleases.push_back({ impl->host ? impl->host->SubmissionsMade() : 0, std::move(a_owner) });
+		ServiceD3D11Releases();
+		return;
+	}
 	// Parked without a query when D3D11 cannot make one now: ServiceD3D11Releases issues it at a later frame, which is later in
 	// the stream than the release, so the owner still outlives every D3D11 command issued until then. Nothing waits.
 	impl->d3d11Releases.push_back({ IssueReleaseQuery(), std::move(a_owner) });
@@ -3440,6 +3512,12 @@ void RenderGraphRuntime::ServiceD3D11Releases()
 {
 	if (!impl)
 		return;
+	if (impl->native) {
+		const std::uint64_t retired = impl->retiredSubmissions.load(std::memory_order_acquire);
+		while (!impl->nativeReleases.empty() && impl->nativeReleases.front().submissions <= retired)
+			impl->nativeReleases.pop_front();
+		return;
+	}
 	auto& releases = impl->d3d11Releases;
 	// Owners parked without a query get one now, in order: each covers its release and everything issued since.
 	for (auto& release : releases) {

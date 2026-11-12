@@ -18,6 +18,9 @@ namespace RenderGraph::Engine::Tripwire
 	{
 		/** @brief The guest context's filter (SetContextFilter), null when none. */
 		extern std::atomic<ContextFilter> contextFilter;
+
+		/** @brief The native services (SetNativeServices), null before they are installed. */
+		extern std::atomic<const NativeServices*> nativeServices;
 	}
 
 	/** @brief The state every handle has, whatever its interface. */
@@ -434,6 +437,35 @@ namespace RenderGraph::Engine::Tripwire
 		void STDMETHODCALLTYPE GetImmediateContext(ID3D11DeviceContext** a_out) override;
 		HRESULT STDMETHODCALLTYPE CreateTexture2D(const D3D11_TEXTURE2D_DESC* a_desc, const D3D11_SUBRESOURCE_DATA* a_data, ID3D11Texture2D** a_out) override;
 
+		/** @name Native mode (NativeServices): answered by a native handle, forwarded by a guest one, tripwires otherwise. */
+		/** @{ */
+		HRESULT STDMETHODCALLTYPE QueryInterface(REFIID a_riid, void** a_out) override;
+		HRESULT STDMETHODCALLTYPE CreateBuffer(const D3D11_BUFFER_DESC* a_desc, const D3D11_SUBRESOURCE_DATA* a_data, ID3D11Buffer** a_out) override;
+		HRESULT STDMETHODCALLTYPE CreateTexture1D(const D3D11_TEXTURE1D_DESC* a_desc, const D3D11_SUBRESOURCE_DATA* a_data, ID3D11Texture1D** a_out) override;
+		HRESULT STDMETHODCALLTYPE CreateTexture3D(const D3D11_TEXTURE3D_DESC* a_desc, const D3D11_SUBRESOURCE_DATA* a_data, ID3D11Texture3D** a_out) override;
+		HRESULT STDMETHODCALLTYPE CreateShaderResourceView(ID3D11Resource* a_resource, const D3D11_SHADER_RESOURCE_VIEW_DESC* a_desc,
+			ID3D11ShaderResourceView** a_out) override;
+		HRESULT STDMETHODCALLTYPE CreateUnorderedAccessView(ID3D11Resource* a_resource, const D3D11_UNORDERED_ACCESS_VIEW_DESC* a_desc,
+			ID3D11UnorderedAccessView** a_out) override;
+		HRESULT STDMETHODCALLTYPE CreateRenderTargetView(ID3D11Resource* a_resource, const D3D11_RENDER_TARGET_VIEW_DESC* a_desc,
+			ID3D11RenderTargetView** a_out) override;
+		HRESULT STDMETHODCALLTYPE CreateDepthStencilView(ID3D11Resource* a_resource, const D3D11_DEPTH_STENCIL_VIEW_DESC* a_desc,
+			ID3D11DepthStencilView** a_out) override;
+		HRESULT STDMETHODCALLTYPE CreateInputLayout(const D3D11_INPUT_ELEMENT_DESC* a_elements, UINT a_count, const void* a_bytecode, SIZE_T a_length,
+			ID3D11InputLayout** a_out) override;
+		HRESULT STDMETHODCALLTYPE CreateVertexShader(const void* a_bytecode, SIZE_T a_length, ID3D11ClassLinkage* a_linkage, ID3D11VertexShader** a_out) override;
+		HRESULT STDMETHODCALLTYPE CreatePixelShader(const void* a_bytecode, SIZE_T a_length, ID3D11ClassLinkage* a_linkage, ID3D11PixelShader** a_out) override;
+		HRESULT STDMETHODCALLTYPE CreateComputeShader(const void* a_bytecode, SIZE_T a_length, ID3D11ClassLinkage* a_linkage, ID3D11ComputeShader** a_out) override;
+		HRESULT STDMETHODCALLTYPE CreateBlendState(const D3D11_BLEND_DESC* a_desc, ID3D11BlendState** a_out) override;
+		HRESULT STDMETHODCALLTYPE CreateDepthStencilState(const D3D11_DEPTH_STENCIL_DESC* a_desc, ID3D11DepthStencilState** a_out) override;
+		HRESULT STDMETHODCALLTYPE CreateRasterizerState(const D3D11_RASTERIZER_DESC* a_desc, ID3D11RasterizerState** a_out) override;
+		HRESULT STDMETHODCALLTYPE CreateSamplerState(const D3D11_SAMPLER_DESC* a_desc, ID3D11SamplerState** a_out) override;
+		HRESULT STDMETHODCALLTYPE CreateQuery(const D3D11_QUERY_DESC* a_desc, ID3D11Query** a_out) override;
+		D3D_FEATURE_LEVEL STDMETHODCALLTYPE GetFeatureLevel() override;
+		UINT STDMETHODCALLTYPE GetCreationFlags() override;
+		HRESULT STDMETHODCALLTYPE GetDeviceRemovedReason() override;
+		/** @} */
+
 		/** @brief The paired context (a reference held), set once by PairDeviceAndContext. */
 		winrt::com_ptr<ID3D11DeviceContext> immediate;
 	};
@@ -451,19 +483,22 @@ namespace RenderGraph::Engine::Tripwire
 		std::atomic<ID3D11Device*> device{ nullptr };
 	};
 
-	/** @brief The swap chain: GetDesc answered. */
+	/**
+	 * @brief The swap chain: GetDesc answered. In native mode (NativeServices) Present, GetBuffer and ResizeBuffers go to ORG's swap
+	 * chain, and the fullscreen calls succeed without changing anything (the window stays borderless, as fake fullscreen does).
+	 */
 	class SwapChainHandle final : public Handle<SwapChainHandle, IDXGISwapChainTrips, Kind::SwapChain>
 	{
 	public:
 		explicit SwapChainHandle(const DXGI_SWAP_CHAIN_DESC& a_desc) :
 			desc(a_desc) {}
-		HRESULT STDMETHODCALLTYPE GetDesc(DXGI_SWAP_CHAIN_DESC* a_out) override
-		{
-			if (!a_out)
-				return E_INVALIDARG;
-			*a_out = desc;
-			return S_OK;
-		}
+		HRESULT STDMETHODCALLTYPE GetDesc(DXGI_SWAP_CHAIN_DESC* a_out) override;
+		HRESULT STDMETHODCALLTYPE Present(UINT a_syncInterval, UINT a_flags) override;
+		HRESULT STDMETHODCALLTYPE GetBuffer(UINT a_buffer, REFIID a_riid, void** a_out) override;
+		HRESULT STDMETHODCALLTYPE ResizeBuffers(UINT a_count, UINT a_width, UINT a_height, DXGI_FORMAT a_format, UINT a_flags) override;
+		HRESULT STDMETHODCALLTYPE GetFullscreenState(BOOL* a_fullscreen, IDXGIOutput** a_target) override;
+		HRESULT STDMETHODCALLTYPE SetFullscreenState(BOOL a_fullscreen, IDXGIOutput* a_target) override;
+		HRESULT STDMETHODCALLTYPE ResizeTarget(const DXGI_MODE_DESC* a_parameters) override;
 
 		const DXGI_SWAP_CHAIN_DESC desc;
 	};

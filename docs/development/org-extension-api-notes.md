@@ -1642,6 +1642,18 @@ Two needs a menu scene's view brings that the graph API does not cover yet:
   with its count. Each module found that way gets its own entry here with the calls it made, and maps to one of the
   other needs (overlay pass, texture upload, render to texture, named targets).
 - **Found by:** P4.1 (2026-11-09).
+- **Done (P6.3, 2026-11-12):** with `CS_ORG_NATIVE=1` such a call is also an error line that names the module:
+  `[ORG native] <Module.dll> calls <Interface>::<Method> (<Module>+0x<offset> ...): native mode (CS_ORG_NATIVE=1) has no
+  D3D11, so the call failed and this plugin's rendering does not work`. Only calls from outside CS and the game get it,
+  once per call site, and only when the handle has nothing behind it. A native device handle makes the objects the
+  engine asks for itself (views, shaders, input layouts, states, queries, BasicRHI textures and buffers), so a plugin's
+  creation calls succeed; its draws, binds, Map and copies on the context fail. Plugins found so far in native runs:
+  none yet (no native run before this entry).
+- **Known without a run:** `zz_SkyrimEngineTelemetry` only passes the engine's calls through, so it adds no D3D11 use of
+  its own; it stays disabled in census and native tours, so that the logged sites are the engine's own. Plugins that
+  find the swap chain's Present by making a dummy device with the system `d3d11.dll` (most ImGui menu plugins) hook the
+  system DXGI vtable, which native mode never calls: they get no tripwire line and silently draw nothing. They need the
+  overlay pass ("An overlay pass after the UI").
 
 ### Passing engine resources to a plugin's own D3D11 code
 

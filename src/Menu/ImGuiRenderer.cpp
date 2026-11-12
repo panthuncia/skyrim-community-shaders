@@ -8,6 +8,7 @@
 #include "Globals.h"
 #include "Menu/IconLoader.h"
 #include "RenderGraph/FrameAnchors.h"
+#include "RenderGraph/Engine/Native/Native.h"
 #include "RenderGraph/ImGuiBasicRHI.h"
 #include "RenderGraph/Switches.h"
 
@@ -196,6 +197,9 @@ namespace ImGuiRenderer
 			if (!framebufferRTV || !ImGuiBasicRHI::Prepare(static_cast<std::uint32_t>(rhi::helpers::ToRHI(viewDesc.Format))) ||
 				!FrameAnchors::Register(MakeClient())) {
 				a_state.failed = true;
+				// Native mode has no D3D11 to fall back to.
+				if (RenderGraph::Engine::Native::Requested())
+					RenderGraph::Engine::Native::Fail("the menu's ImGui", "the render graph's ImGui backend could not start, and imgui_impl_dx11 draws through D3D11");
 				logger::error("[ORG] ImGui: the render graph's backend could not start; imgui_impl_dx11 stays");
 				return;
 			}
@@ -208,6 +212,8 @@ namespace ImGuiRenderer
 		/** @brief Back to the D3D11 backend, for good. */
 		void FallBack(State& a_state)
 		{
+			if (RenderGraph::Engine::Native::Requested())
+				RenderGraph::Engine::Native::Fail("the menu's ImGui", "the render graph's ImGui backend failed, and imgui_impl_dx11 draws through D3D11");
 			FrameAnchors::Unregister(kClientId);
 			ImGuiBasicRHI::Shutdown();
 			a_state.org = false;
