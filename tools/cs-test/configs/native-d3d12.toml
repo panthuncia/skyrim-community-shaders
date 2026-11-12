@@ -1,0 +1,5 @@
+# Native mode on BasicRHI's D3D12 backend (org-full-port.md, "Phase 7 status"). DXVK_DEBUG=hang (base) turns DRED on.
+extends = ["native-vulkan"]
+
+[org]
+backend = "d3d12"

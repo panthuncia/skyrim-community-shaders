@@ -1,0 +1,51 @@
+# Converted from tools/cs-ab/scenarios/native-d3d12.env. Old frame N became world-ready + (N - 100) for the first
+# command, then each command at 'previous' plus the old gap.
+# native.env on BasicRHI's D3D12 backend (CS_ORG_NATIVE_BACKEND=d3d12, org-full-port.md "Phase 7 status"). Read the
+# "[ORG native] stage" lines (stage 3 names the D3D12 device), "[ORG] Render graph backend: D3D12", "[ORG] D3D12 device:" for its
+# features, "[ORG] DXIL build of" for shaders that do not build to DXIL, and "[DCLF] Forced off" (DCLF is not ported to D3D12, so
+# the world's geometry is not drawn). DXVK_DEBUG=hang turns DRED on (its report is logged on device removal).
+extends = ["native-d3d12"]
+
+[org]
+tripwire_log = true
+tripwire_log_interval = 20
+residue_census = true
+
+[[steps]]
+at = "world-ready"
+frames = 400
+do = "shot"
+arg = "start"
+
+[[steps]]
+at = "previous"
+frames = 200
+do = "console"
+arg = "coc Whiterun"
+
+[[steps]]
+at = "previous"
+frames = 1200
+do = "shot"
+arg = "whiterun"
+
+[[steps]]
+at = "previous"
+frames = 400
+do = "console"
+arg = "coc WhiterunDragonsreach"
+
+[[steps]]
+at = "previous"
+frames = 1100
+do = "shot"
+arg = "dragonsreach"
+
+[[steps]]
+at = "previous"
+frames = 200
+do = "exit"
+
+[expect]
+reach = "world-ready"
+shots = ["start", "whiterun", "dragonsreach"]

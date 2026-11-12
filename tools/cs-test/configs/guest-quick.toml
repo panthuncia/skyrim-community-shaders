@@ -1,0 +1,2 @@
+# guest-quick.env: DXVK guest mode, the autoloaded save, one shot, exit.
+extends = ["guest", "quick"]

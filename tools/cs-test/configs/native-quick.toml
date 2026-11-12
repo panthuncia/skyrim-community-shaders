@@ -1,0 +1,2 @@
+# native-quick.env: native Vulkan, the autoloaded save, one shot, exit. About a minute with a warm shader cache.
+extends = ["native-vulkan", "quick"]

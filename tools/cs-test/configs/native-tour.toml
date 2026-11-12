@@ -1,0 +1,52 @@
+# Converted from tools/cs-ab/scenarios/native.env. Old frame N became world-ready + (N - 100) for the first
+# command, then each command at 'previous' plus the old gap.
+# Native mode (CS_ORG_NATIVE=1, render-graph.md "Native mode"): no DXVK, BasicRHI's device, ORG presents. Native mode turns on
+# every port switch itself. Upscaling needs DXVK, so it is disabled for the run. Read the "[ORG native] stage" lines for how far
+# the start got, and "[ORG native] ... calls" and "[ORG] tripwire:" lines for what still calls D3D11. A main menu shot, then
+# Whiterun and Dragonsreach.
+# ImprovedCameraSE draws through D3D11 itself (org-extension-api-notes.md, "Improved Camera SE"): off for native runs.
+extends = ["native-vulkan"]
+
+[org]
+tripwire_log = true
+tripwire_log_interval = 20
+residue_census = true
+
+[[steps]]
+at = "world-ready"
+frames = 400
+do = "shot"
+arg = "start"
+
+[[steps]]
+at = "previous"
+frames = 200
+do = "console"
+arg = "coc Whiterun"
+
+[[steps]]
+at = "previous"
+frames = 1200
+do = "shot"
+arg = "whiterun"
+
+[[steps]]
+at = "previous"
+frames = 400
+do = "console"
+arg = "coc WhiterunDragonsreach"
+
+[[steps]]
+at = "previous"
+frames = 1100
+do = "shot"
+arg = "dragonsreach"
+
+[[steps]]
+at = "previous"
+frames = 200
+do = "exit"
+
+[expect]
+reach = "world-ready"
+shots = ["start", "whiterun", "dragonsreach"]

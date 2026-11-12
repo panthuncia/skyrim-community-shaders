@@ -1,0 +1,20 @@
+# Fast iteration: the autoloaded save, one shot a second after world-ready, then exit. Compose it: guest+quick, native-vulkan+quick.
+extends = ["base"]
+
+[run]
+timeout_s = 300
+
+[[steps]]
+at = "world-ready"
+frames = 60
+do = "shot"
+arg = "start"
+
+[[steps]]
+at = "previous"
+frames = 10
+do = "exit"
+
+[expect]
+reach = "world-ready"
+shots = ["start"]

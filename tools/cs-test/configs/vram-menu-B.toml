@@ -1,0 +1,25 @@
+# Converted from tools/cs-ab/scenarios/vram-menu-B.env. Old frame N became world-ready + (N - 100) for the first
+# command, then each command at 'previous' plus the old gap.
+# VRAM bisect, group B of vram-all.env's CS_ORG switches only (A engine resources, B engine passes, C feature ports).
+# No tour: read CS-AB-memory.csv's kernel VRAM over the first 40 s (cs-ab -TimeoutSeconds 45).
+# No exit step: the run ends at run.timeout_s, so its outcome is timeout by design.
+extends = ["guest"]
+
+[run]
+timeout_s = 45
+
+[org]
+census = true
+shadow_mask = true
+engine_constants = true
+engine_skeleton = true
+sky = true
+occlusion_queries = true
+water = true
+blood_splatter = true
+imagespace = true
+menu3d = true
+map = true
+scaleform = true
+bink = true
+loading_thread = true

@@ -1,0 +1,19 @@
+# What every run shares. Each config extends it; --set wins over all of them.
+# No build.stage here: name the build with --stage (or build.stage in a config), so a run never tests a build by accident.
+
+[run]
+timeout_s = 900              # the whole run, as a last resort (above the compile timeout, for cold caches)
+stall_s = 90                 # the status file not rewritten for this long: hang (the harness's backstop)
+
+[build]
+shader_cache = "warm"
+
+[game]
+save = "autoload"
+mods_off = ["Skyrim Engine Telemetry"]
+
+[dxvk]
+debug = "hang"               # DXVK's hang markers (DRED on D3D12); on for every run, timing runs too
+
+[vk]
+loader_layers_disable = "*nsight*"   # a stale Nsight implicit layer crashes Vulkan runs
