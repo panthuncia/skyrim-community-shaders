@@ -85,6 +85,7 @@ namespace RenderGraph::Engine::Bink
 		struct Record
 		{
 			Layout layout;
+			std::uint32_t tileSize = 0;
 			std::vector<const void*> blocks;
 			std::shared_ptr<Graph::Movie> movie;
 			bool movieFailed = false;
@@ -160,6 +161,21 @@ namespace RenderGraph::Engine::Bink
 			s_log.Report(a_reason);
 		}
 
+		/**
+		 * @brief Whether the engine has a frame open (BGSMoviePlayer vfunc +0x58, the flag Renderer::Begin sets): a blocking tick that
+		 * finds none begins its own, so it starts between two frames.
+		 */
+		bool InFrame()
+		{
+			static REL::Relocation<void**> player{ REL::RelocationID(525733, 412214) };
+			void* object = *player;
+			if (!object)
+				return true;
+			using InFrameFn = bool (*)(void*);
+			const auto* vtable = *static_cast<void* const* const*>(object);
+			return reinterpret_cast<InFrameFn>(vtable[0x58 / sizeof(void*)])(object);
+		}
+
 		/** @brief Whether this tick may draw on the graph, before Graph::Begin: the engine's path in every case the port does not cover. */
 		bool Eligible(std::uintptr_t a_player, const void* a_set)
 		{
@@ -174,11 +190,6 @@ namespace RenderGraph::Engine::Bink
 				if (!logged.test_and_set())
 					logger::info("[ORG] Bink: a movie plays on thread {}, not the render thread (the startup sequence without CS_ORG_LOADING_THREAD=1): the engine draws it",
 						::GetCurrentThreadId());
-				return false;
-			}
-			// HDR output routes the movie into its UI texture (HDRDisplay's DrawTiles hook); the graph's pass draws the framebuffer.
-			if (globals::features::hdrDisplay.loaded && globals::features::hdrDisplay.IsHDREnabledForFrame()) {
-				EngineKeeps("HDR output is on");
 				return false;
 			}
 			return true;
@@ -196,7 +207,7 @@ namespace RenderGraph::Engine::Bink
 			}
 			auto& record = found->second;
 			if (!record.movie && !record.movieFailed) {
-				record.movie = Graph::CreateMovie(record.layout);
+				record.movie = Graph::CreateMovie(record.layout, record.tileSize);
 				record.movieFailed = !record.movie;
 			}
 			if (!record.movie) {
@@ -241,7 +252,8 @@ namespace RenderGraph::Engine::Bink
 				tick.player = a_player;
 				tick.set = a_player ? Read<const void*>(reinterpret_cast<const void*>(a_player), kPlayerTiles) : nullptr;
 				ClaimForBlockingTick(a_player);
-				if (Eligible(a_player, tick.set) && Graph::Begin())
+				// Eligible ticks are blocking ones: without a frame open the tick is between two frames.
+				if (Eligible(a_player, tick.set) && Graph::Begin(!InFrame()))
 					StartGraphTick(tick);
 				auto* const outer = std::exchange(t_tick, &tick);
 				const auto result = func(a_player, a_arg2, a_arg3, a_arg4);
@@ -304,7 +316,20 @@ namespace RenderGraph::Engine::Bink
 			static void thunk(const void* a_set)
 			{
 				auto* tick = t_tick;
-				const bool graph = tick && tick->movie && a_set == tick->set && Graph::Queue(tick->movie);
+				bool graph = false;
+				if (tick && tick->movie && a_set == tick->set) {
+					// HDR output: HDR Display's own preparation (the scene cleared, kFRAMEBUFFER pointed at its UI texture), which its detour
+					// of this function makes, is made here too, because a graph tick does not call through. The tiles then go into the UI
+					// texture, which the composite reads.
+					auto& hdr = globals::features::hdrDisplay;
+					bool intoUi = false;
+					if (hdr.loaded) {
+						hdr.PrepareMovieDraw();
+						const auto* framebuffer = globals::game::renderer->GetRuntimeData().renderTargets[RE::RENDER_TARGET::kFRAMEBUFFER].RTV;
+						intoUi = hdr.uiTexture && hdr.uiTexture->rtv && reinterpret_cast<const void*>(framebuffer) == static_cast<const void*>(hdr.uiTexture->rtv.get());
+					}
+					graph = Graph::Queue(tick->movie, intoUi);
+				}
 				RequestShot(tick ? tick->player : 0, graph);
 				if (graph) {
 					GraphDrew(a_set);
@@ -333,6 +358,7 @@ namespace RenderGraph::Engine::Bink
 					return set;
 				const auto [screenWidth, screenHeight] = RE::BSGraphics::Renderer::GetScreenSize();
 				Record record;
+				record.tileSize = Read<std::uint32_t>(set, kSetTileSize);
 				record.layout = MakeLayout(a_width, a_height, Read<std::uint32_t>(set, kSetTileSize), Read<std::uint32_t>(set, kSetColumns), Read<std::uint32_t>(set, kSetRows),
 					Read<std::uint32_t>(set, kSetEdgeWidth), Read<std::uint32_t>(set, kSetEdgeHeight), a_scale, a_x, a_y, screenWidth, screenHeight);
 				const auto count = Read<std::uint32_t>(set, kSetTileCount);

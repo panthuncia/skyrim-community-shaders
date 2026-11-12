@@ -19,8 +19,8 @@
  *
  * Everything else keeps the engine's path: a tick on another thread (without CS_ORG_LOADING_THREAD=1, the startup logo, which
  * plays on the MoviePlayer sequence thread under Renderer::Lock, where no anchor runs then), a movie drawn inside another frame
- * (player mode 2), a movie larger than the movie texture, every tick before the client is in the Present anchor's built graph,
- * the rest of a movie one of whose frames did not draw, and every tick after the graph path failed.
+ * (player mode 2), a movie over 4096x2304, and every tick after the graph path failed. With HDR output on, the tiles go into
+ * HDR Display's UI texture, as the engine's draw does.
  */
 namespace RenderGraph::Engine::Bink
 {

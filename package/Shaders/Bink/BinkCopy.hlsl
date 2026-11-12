@@ -10,7 +10,8 @@
 // The ORG build (CS_ORG_BINDLESS, src/RenderGraph/Engine/Bink/BinkGraph.cpp) has no vertex buffer. The vertex stage makes the
 // engine's quad from the tile's rectangle in the push block. Its corners are top left, bottom left, bottom right, top right, as
 // BSMovie::CreateTileQuad (SE 0x1410a2720) builds them, drawn as triangles 0-1-2 and 0-2-3. Every tile is one region of a
-// single movie texture there, so the push block also gives the tile's texture coordinates in it.
+// single movie texture there, so the push block also gives the tile's texture coordinates in it, and the pixel stage clamps to
+// that region.
 
 #include "Common/OrgResources.hlsli"
 
@@ -63,5 +64,15 @@ VS_OUTPUT VSMain(VS_INPUT input)
 
 float4 PSMain(VS_OUTPUT input) : SV_Target0
 {
+#if defined(CS_ORG_BINDLESS)
+	// Each engine tile is a texture of its own, sampled clamped. Here the tile is a region of the movie texture, so the coordinate
+	// is clamped to the region's edge texels: filtering at the tile's edge reads the tile alone, as the engine's does.
+	float2 size;
+	TexBase.GetDimensions(size.x, size.y);
+	const float2 inset = 0.5 / size;
+	const float2 texCoord = clamp(input.TexCoord, Quad.UV.xy + inset, Quad.UV.zw - inset);
+	return TexBase.Sample(SampBase, texCoord).zyxw;
+#else
 	return TexBase.Sample(SampBase, input.TexCoord).zyxw;
+#endif
 }

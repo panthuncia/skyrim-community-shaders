@@ -235,7 +235,9 @@ ORGHDRDisplay::Composed ORGHDRDisplay::Compose(const HDRDisplay::HDRDataCB& a_co
 	auto scene = hdrScene ? FrameAnchors::D3D11Texture(kSceneName, hdr.hdrTexture->resource.get(), hdr.hdrTexture->srv.get(), nullptr) :
 	                        FrameAnchors::EngineTarget(static_cast<std::uint32_t>(RE::RENDER_TARGET::kFRAMEBUFFER));
 	auto output = FrameAnchors::D3D11Texture(kOutputName, hdr.outputTexture->resource.get(), hdr.outputTexture->srv.get(), hdr.outputTexture->uav.get());
-	auto ui = FrameAnchors::D3D11Texture(kUiName, hdr.uiTexture->resource.get(), hdr.uiTexture->srv.get(), hdr.uiTexture->uav.get());
+	// With its RTV: Bink's render-graph path draws movies into it through the same import ("hdr.ui"), and a name's first import
+	// decides its views.
+	auto ui = FrameAnchors::D3D11Texture(kUiName, hdr.uiTexture->resource.get(), hdr.uiTexture->srv.get(), hdr.uiTexture->uav.get(), hdr.uiTexture->rtv.get());
 	if (!scene || !output || !ui) {
 		Fail(!ui ? "the UI texture cannot be imported" : !scene ? "the scene cannot be imported" :
 																"the output texture cannot be imported");
