@@ -201,9 +201,18 @@ namespace DCLF
 		if (!light || !LightSlots().published)
 			return;
 		const std::size_t first = views.size();
-		const std::uint32_t focusCount = std::min<std::uint32_t>(Engine::Global<std::uint32_t>(Engine::Address::kFocusTargetCount), 4u);
+		// A focus host's focus views: up to the engine's target count, and every focus descriptor with an accumulator past it. A spot
+		// light host's focus accumulation registers in its Accumulate, right after this, before the focus cameras set the count for the
+		// frame (the count can still be 0 here), and Rebuild lists the views only once the selection is done. Listing a descriptor the
+		// engine does not render withholds nothing it draws; Rebuild makes the frame's list again from the selection.
+		auto& lightData = light->GetRuntimeData();
+		std::uint32_t focusCount = std::min<std::uint32_t>(Engine::Global<std::uint32_t>(Engine::Address::kFocusTargetCount), 4u);
+		if (lightData.drawFocusShadows)
+			for (std::uint32_t d = focusCount; d < std::size(lightData.focusShadowmapDescriptors); ++d)
+				if (lightData.focusShadowmapDescriptors[d].shaderAccumulator)
+					focusCount = d + 1;
 		for (std::uint32_t s = 0; s < a_slots; ++s)
-			AddLightViews(*light, a_firstSlot + s, s == 0 && light->GetRuntimeData().drawFocusShadows ? focusCount : 0u);
+			AddLightViews(*light, a_firstSlot + s, s == 0 && lightData.drawFocusShadows ? focusCount : 0u);
 		if (CoverFrom(first))
 			PublishRenderers();
 	}

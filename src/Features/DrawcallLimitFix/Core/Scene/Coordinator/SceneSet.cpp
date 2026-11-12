@@ -199,9 +199,24 @@ namespace DCLF::Scene
 		// The waiting slots (bound, eligible, not ready yet) by base geometry, with the phases they take part in: the hooks withhold them
 		// from the engine until they join (SetSnapshot::pending). Made whole when a waiting slot was decided, and a change only when it
 		// differs: a slot that waits on, requeued by its sources, changes nothing. The waiting slots are few once a load has settled.
+		// The stream waits age out by frame: looked at every publication while there are any.
+		if (!streamWaitingSince.empty())
+			setPendingDirty = true;
 		if (!std::exchange(setPendingDirty, false))
 			return;
 		PendingMap next;
+		// A face shape waiting for its head's snapshot (no slot yet): its core phases, while it has waited less than kStreamWaitFrames.
+		for (auto it = streamWaitingSince.begin(); it != streamWaitingSince.end();) {
+			const auto found = tracked.find(const_cast<RE::BSGeometry*>(it->first));
+			if (found == tracked.end() || !found->second.streamWaiting) {
+				it = streamWaitingSince.erase(it);
+				continue;
+			}
+			if (sceneBuilt && sceneFrame - it->second <= kStreamWaitFrames)
+				if (const std::uint8_t phases = static_cast<std::uint8_t>(kCoreSetPhases & setPhaseMask))
+					next.try_emplace(it->first, phases);
+			++it;
+		}
 		if (sceneBuilt) {
 			const std::uint32_t drawn = setPhaseMask;
 			for (const std::uint32_t slot : setWaiting) {

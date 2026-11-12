@@ -81,6 +81,11 @@ namespace DCLF::Scene
 		using PendingMap = ankerl::unordered_dense::map<const RE::BSGeometry*, std::uint8_t>;
 		PendingMap setPending;
 		bool setPendingDirty = true;
+		// A taken entry class's geometry waiting for its second vertex stream (a face shape before its head's snapshot: Tracked::streamWaiting),
+		// by the scene frame it began waiting: pending too, for at most kStreamWaitFrames, so the engine does not draw a head between two
+		// of its snapshots. One that waits longer is the engine's again.
+		static constexpr std::uint32_t kStreamWaitFrames = 120;
+		ankerl::unordered_dense::map<const RE::BSGeometry*, std::uint32_t> streamWaitingSince;
 		bool setPendingChanged = false;
 		/** @brief One slot's decision: phases, whether and why it waits, and the observers' notes of a CategoryRoot view's slot (first person's). */
 		struct SlotDecision
