@@ -211,6 +211,22 @@ namespace DCLF
 		};
 		/** @brief Render thread: the geometries of DCLF's classes handed to the engine since the last call, most passes first. */
 		std::vector<KeptSample> TakeKeptSamples(std::size_t a_max);
+		/** @brief One class of pass the map census saw (SetMapCensus): its shader, technique and hint, withheld or handed to the engine. */
+		struct MapClass
+		{
+			std::string shader;   // the pass's shader type, technique and hint
+			std::string sample;   // the first geometry's name
+			bool dclf = false;    // of DCLF's classes (KeepForEngine counts these)
+			std::uint32_t withheld = 0, kept = 0;  // into the main views
+			std::uint32_t otherWithheld = 0, otherKept = 0;  // into any other renderer
+		};
+		/**
+		 * @brief The map census (LoadHold.cpp, while the map menu is open): every pass the registration hooks see, by class, withheld
+		 * (DCLF draws it or waits to) or handed to the engine. Render thread.
+		 */
+		void SetMapCensus(bool a_on) { mapCensus.store(a_on, std::memory_order_release); }
+		/** @brief Render thread: the map census's classes since the last call, most passes first. */
+		std::vector<MapClass> TakeMapCensus();
 		/** @brief Render thread: the accumulators of shadow views DCLF does not cover that kept passes went to, since the last call. */
 		std::vector<const void*> TakeUncoveredAccumulators();
 		/**
@@ -310,6 +326,11 @@ namespace DCLF
 		mutable std::mutex keptLock;
 		mutable ankerl::unordered_dense::map<const RE::BSGeometry*, KeptSample> keptSamples;
 		mutable ankerl::unordered_dense::set<const void*> uncoveredAccumulators;  // under keptLock, at most kKeptSamples
+		// The map census (SetMapCensus): its classes by shader type, hint and technique, under mapLock.
+		std::atomic<bool> mapCensus{ false };
+		mutable std::mutex mapLock;
+		mutable ankerl::unordered_dense::map<std::uint64_t, MapClass> mapClasses;
+		void NoteMapPass(const RE::BSBatchRenderer* a_batch, const RE::BSRenderPass* a_pass, bool a_withheld) const;
 		std::array<std::atomic<std::uint32_t>, static_cast<std::size_t>(Api::DrawFamily::Count)> familyWithheld{};
 		std::array<std::atomic<bool>, static_cast<std::size_t>(Api::DrawFamily::Count)> familyHeld{};
 		static_assert(static_cast<std::size_t>(Api::DrawFamily::Count) <= 32, "ViewRenderers::familyOwned is a 32-bit mask by family");

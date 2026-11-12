@@ -10,6 +10,7 @@
 #include "Features/DrawcallLimitFix/Core/Render/IndirectDraws.h"
 #include "Features/DrawcallLimitFix/Core/Scene/FrameView/FrameView.h"
 #include "Features/DrawcallLimitFix/Core/Scene/Model/Publication.h"
+#include "RenderGraph/Engine/Native/Native.h"
 
 #include <algorithm>
 #include <array>
@@ -258,6 +259,53 @@ namespace DCLF::LoadHold
 		}
 	}
 
+	namespace
+	{
+		// The map census's window: a line set every this many frames while the map menu is open, and one at its close.
+		constexpr std::uint32_t kMapCensusFrames = 120;
+		constexpr std::size_t kMapCensusClasses = 24;
+
+		void LogMapCensus(std::uint32_t a_frames, const char* a_why)
+		{
+			const auto classes = PassCapture::Get().TakeMapCensus();
+			logger::info("[DCLF] map census ({}, {} mode): {} frames, {} classes of passes registered (main: the main views' renderers; other: any other, "
+						 "the Z-prepass's registration among them)",
+				a_why, RenderGraph::Engine::Native::Active() ? "native" : "guest", a_frames, classes.size());
+			for (std::size_t i = 0; i < classes.size() && i < kMapCensusClasses; ++i) {
+				const auto& c = classes[i];
+				logger::info("[DCLF] map census: {} ('{}', {}): main withheld {} kept {}, other withheld {} kept {}", c.shader, c.sample,
+					c.dclf ? "DCLF's class" : "not DCLF's class", c.withheld, c.kept, c.otherWithheld, c.otherKept);
+			}
+		}
+
+		/**
+		 * @brief Render thread, every frame: while the map menu is open, counts the passes the registration hooks see by class, withheld or
+		 * handed to the engine (PassCapture::SetMapCensus), and logs them every kMapCensusFrames frames and at the menu's close.
+		 */
+		void WatchMap()
+		{
+			static bool open = false;
+			static std::uint32_t frames = 0;
+			auto* ui = RE::UI::GetSingleton();
+			const bool now = ui && ui->IsMenuOpen(RE::MapMenu::MENU_NAME);
+			if (now != open) {
+				open = now;
+				if (now) {
+					PassCapture::Get().TakeMapCensus();
+					PassCapture::Get().SetMapCensus(true);
+					frames = 0;
+				} else {
+					PassCapture::Get().SetMapCensus(false);
+					LogMapCensus(frames, "the map closed");
+				}
+			}
+			if (open && ++frames >= kMapCensusFrames) {
+				LogMapCensus(frames, "the map open");
+				frames = 0;
+			}
+		}
+	}
+
 	bool Active() { return state.load(std::memory_order_acquire) == HoldState::Holding; }
 
 	bool MenuHeld()
@@ -312,6 +360,7 @@ namespace DCLF::LoadHold
 
 	void OnFrameEnd(bool a_running)
 	{
+		WatchMap();
 		const auto now = state.load(std::memory_order_acquire);
 		if (now == HoldState::Releasing) {
 			if (!MenuOpen())

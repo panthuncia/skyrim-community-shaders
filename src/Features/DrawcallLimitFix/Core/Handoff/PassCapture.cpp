@@ -621,6 +621,40 @@ namespace DCLF
 		return samples;
 	}
 
+	void PassCapture::NoteMapPass(const RE::BSBatchRenderer* a_batch, const RE::BSRenderPass* a_pass, bool a_withheld) const
+	{
+		if (!mapCensus.load(std::memory_order_acquire) || !a_pass || !a_pass->geometry || t_menuScenes)
+			return;
+		const auto* shader = a_pass->shader;
+		const std::uint64_t type = shader ? static_cast<std::uint64_t>(shader->shaderType.get()) : 99u;
+		const std::uint64_t key = (type << 48) | (static_cast<std::uint64_t>(a_pass->accumulationHint) << 32) | a_pass->passEnum;
+		const bool main = !t_shadowRegistration && (IsMainRenderer(a_batch) || MainRendererNow(a_batch));
+		std::scoped_lock lock(mapLock);
+		auto [it, added] = mapClasses.try_emplace(key);
+		auto& entry = it->second;
+		if (added) {
+			entry.shader = fmt::format("shader {} technique {:08X} hint {}", type, a_pass->passEnum, static_cast<std::uint32_t>(a_pass->accumulationHint));
+			entry.sample = a_pass->geometry->name.c_str() ? a_pass->geometry->name.c_str() : "";
+			entry.dclf = DclfClass(a_pass);
+		}
+		++(main ? (a_withheld ? entry.withheld : entry.kept) : (a_withheld ? entry.otherWithheld : entry.otherKept));
+	}
+
+	std::vector<PassCapture::MapClass> PassCapture::TakeMapCensus()
+	{
+		std::vector<MapClass> classes;
+		{
+			std::scoped_lock lock(mapLock);
+			classes.reserve(mapClasses.size());
+			for (auto& [key, entry] : mapClasses)
+				classes.push_back(std::move(entry));
+			mapClasses.clear();
+		}
+		const auto total = [](const MapClass& a_class) { return a_class.withheld + a_class.kept + a_class.otherWithheld + a_class.otherKept; };
+		std::ranges::sort(classes, [&](const MapClass& a_left, const MapClass& a_right) { return total(a_left) > total(a_right); });
+		return classes;
+	}
+
 	std::vector<const void*> PassCapture::TakeUncoveredAccumulators()
 	{
 		std::scoped_lock lock(keptLock);
@@ -743,6 +777,7 @@ namespace DCLF
 				withheld = true;
 			}
 			capture.Record(a_this, a_pass, a_techniqueID, withheld);
+			capture.NoteMapPass(a_this, a_pass, withheld);
 			Diagnostics::Notify(Diagnostics::PointLightPass{ a_this, a_pass, withheld, 0 });
 			if (withheld)
 				return;
@@ -835,12 +870,16 @@ namespace DCLF
 			++passesOnThisThread;
 			auto& capture = PassCapture::Get();
 			if (!capture.bypassed.load(std::memory_order_acquire) && capture.WithholdMain(a_batch, a_pass)) {
+				capture.NoteMapPass(a_batch, a_pass, true);
 				if constexpr (Group == 5)
 					Diagnostics::Notify(Diagnostics::MemberGroup5PassWithheld{ a_pass });
 				return;
 			}
-			if (!capture.bypassed.load(std::memory_order_acquire) && capture.WithholdOwn(a_batch, a_pass))
+			if (!capture.bypassed.load(std::memory_order_acquire) && capture.WithholdOwn(a_batch, a_pass)) {
+				capture.NoteMapPass(a_batch, a_pass, true);
 				return;
+			}
+			capture.NoteMapPass(a_batch, a_pass, false);
 			if (Diagnostics::Armed<Diagnostics::PassKept>() && !capture.bypassed.load(std::memory_order_acquire))
 				capture.NoteKept(a_batch, a_pass, Census(RegistrationCensus::Site::MainGroup));
 			capture.KeepForEngine(a_batch, a_pass);
@@ -857,11 +896,15 @@ namespace DCLF
 			++passesOnThisThread;
 			auto& capture = PassCapture::Get();
 			if (!capture.bypassed.load(std::memory_order_acquire) && capture.WithholdMain(a_batch, a_pass)) {
+				capture.NoteMapPass(a_batch, a_pass, true);
 				Diagnostics::Notify(Diagnostics::MemberListPassWithheld{ a_pass });
 				return;
 			}
-			if (!capture.bypassed.load(std::memory_order_acquire) && capture.WithholdOwn(a_batch, a_pass))
+			if (!capture.bypassed.load(std::memory_order_acquire) && capture.WithholdOwn(a_batch, a_pass)) {
+				capture.NoteMapPass(a_batch, a_pass, true);
 				return;
+			}
+			capture.NoteMapPass(a_batch, a_pass, false);
 			if (Diagnostics::Armed<Diagnostics::PassKept>() && !capture.bypassed.load(std::memory_order_acquire))
 				capture.NoteKept(a_batch, a_pass, Census(RegistrationCensus::Site::MainList));
 			capture.KeepForEngine(a_batch, a_pass);
