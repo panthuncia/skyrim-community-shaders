@@ -33,9 +33,16 @@ namespace DCLF::Features::TreeLod
 		// DistantTree shader as input; until the frame's catalog has them the engine draws tree LOD), the atlas it draws with.
 		bool Decide(const Api::DrawFamilyFrame& a_frame)
 		{
-			if (!a_frame.scene || !TablesOf(*a_frame.scene) || !RenderMirror().Size())
+			// Nothing to draw: the engine's, which has nothing either.
+			if (!RenderMirror().Size())
 				return false;
-			return a_frame.Pipelines(TreeLodAtlasReady());
+			// Something to draw, not ready yet (the tables, the engine's atlas): the family waits, its engine shapes' passes withheld, as
+			// while its pipelines build. Then nobody draws tree LOD for those frames, and a load's hold waits for it.
+			const bool ready = a_frame.scene && TablesOf(*a_frame.scene) && TreeLodAtlasReady();
+			const bool owned = a_frame.Pipelines(ready);
+			if (!ready && a_frame.waits)
+				*a_frame.waits = true;
+			return owned;
 		}
 
 		const void* ProgramSource()

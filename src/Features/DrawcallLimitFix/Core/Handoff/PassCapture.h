@@ -211,6 +211,8 @@ namespace DCLF
 		};
 		/** @brief Render thread: the geometries of DCLF's classes handed to the engine since the last call, most passes first. */
 		std::vector<KeptSample> TakeKeptSamples(std::size_t a_max);
+		/** @brief Render thread: the accumulators of shadow views DCLF does not cover that kept passes went to, since the last call. */
+		std::vector<const void*> TakeUncoveredAccumulators();
 		/**
 		 * @brief The main views' batch renderers: the Z-prepass accumulator (render mode 0xC, *0x14338c828) and the main one
 		 * (*0x14338c830), with their geometry groups'. Render thread, before registrations; rebuilt only when an accumulator changes.
@@ -301,6 +303,7 @@ namespace DCLF
 		static constexpr std::size_t kKeptSamples = 256;
 		mutable std::mutex keptLock;
 		mutable ankerl::unordered_dense::map<const RE::BSGeometry*, KeptSample> keptSamples;
+		mutable ankerl::unordered_dense::set<const void*> uncoveredAccumulators;  // under keptLock, at most kKeptSamples
 		std::array<std::atomic<std::uint32_t>, static_cast<std::size_t>(Api::DrawFamily::Count)> familyWithheld{};
 		std::array<std::atomic<bool>, static_cast<std::size_t>(Api::DrawFamily::Count)> familyHeld{};
 		static_assert(static_cast<std::size_t>(Api::DrawFamily::Count) <= 32, "ViewRenderers::familyOwned is a 32-bit mask by family");

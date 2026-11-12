@@ -2,6 +2,7 @@
 
 #include <cstdint>
 #include <span>
+#include <string>
 #include <vector>
 
 #include <ankerl/unordered_dense.h>
@@ -268,6 +269,11 @@ namespace DCLF
 		void AddCaster(const RE::BSShadowLight* a_light, std::uint32_t a_firstSlot, std::uint32_t a_slots);
 		/** @brief Rebuilds the list from DCLF's selection and publishes its renderers; call once the engine's selection is done. */
 		void Rebuild();
+		/**
+		 * @brief Render thread, for the log: which shadow light's descriptor (or focus descriptor) holds a_accumulator, read from the
+		 * scene node's lights (the sun's, the active and the accumulated ones), and whether this frame's list has it.
+		 */
+		std::string DescribeAccumulator(const void* a_accumulator) const;
 		/** @brief Drops the list (the frame's shadow draws are over, or the feature is off). */
 		void Clear();
 		/** @brief The frame's list has views DCLF would draw, but not this frame (SetDrawable): the engine draws them (the report's count). */
