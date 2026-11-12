@@ -267,6 +267,13 @@ namespace DCLF
 		 * the renderers published with them, before its registrations.
 		 */
 		void AddCaster(const RE::BSShadowLight* a_light, std::uint32_t a_firstSlot, std::uint32_t a_slots);
+		/**
+		 * @brief The engine is about to register a_light's focus targets into its focus views (the focus accumulation; for a spot light host
+		 * before the light is kept): those views listed (up to the engine's target count, which the focus cameras just set), covered and their
+		 * renderers published, unless already listed (the sun's, at its keep). AddCaster then adds the light's other views. Whether any of its
+		 * focus views is covered.
+		 */
+		bool AddFocusHost(const RE::BSShadowLight* a_light);
 		/** @brief Rebuilds the list from DCLF's selection and publishes its renderers; call once the engine's selection is done. */
 		void Rebuild();
 		/**
@@ -299,7 +306,7 @@ namespace DCLF
 		std::vector<std::uint32_t> captures;  // by view, this frame
 		void PredictTargets();
 		/** @brief Appends a_light's views at a_lightIndex: its descriptors', then a_focusCount focus views. */
-		void AddLightViews(RE::BSShadowLight& a_light, std::uint32_t a_lightIndex, std::uint32_t a_focusCount);
+		void AddLightViews(RE::BSShadowLight& a_light, std::uint32_t a_lightIndex, std::uint32_t a_focusCount, bool a_focusOnly = false);
 		/** @brief Decides the coverage of the views from a_first on, continuing the candidates' count; whether one is covered. */
 		bool CoverFrom(std::size_t a_first);
 		/** @brief The covered views' renderers to PassCapture (the registration hook's withholding), whole. */

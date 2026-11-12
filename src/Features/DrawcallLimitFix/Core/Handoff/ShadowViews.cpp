@@ -7,6 +7,7 @@
 #include "Features/DrawcallLimitFix/Core/Shading/FrameGlobals.h"
 #include "Features/DrawcallLimitFix/Core/Scene/FrameView/FrameView.h"
 
+#include <algorithm>
 #include <bit>
 #include <cstring>
 
@@ -211,13 +212,42 @@ namespace DCLF
 			for (std::uint32_t d = focusCount; d < std::size(lightData.focusShadowmapDescriptors); ++d)
 				if (lightData.focusShadowmapDescriptors[d].shaderAccumulator)
 					focusCount = d + 1;
+		// Its focus views listed already (AddFocusHost, before the focus accumulation): not twice.
+		if (std::ranges::any_of(views, [&](const View& a_view) { return a_view.light == light && a_view.focus; }))
+			focusCount = 0;
 		for (std::uint32_t s = 0; s < a_slots; ++s)
 			AddLightViews(*light, a_firstSlot + s, s == 0 && lightData.drawFocusShadows ? focusCount : 0u);
 		if (CoverFrom(first))
 			PublishRenderers();
 	}
 
-	void ShadowViews::AddLightViews(RE::BSShadowLight& a_light, std::uint32_t a_lightIndex, std::uint32_t a_focusCount)
+	bool ShadowViews::AddFocusHost(const RE::BSShadowLight* a_light)
+	{
+		auto* light = const_cast<RE::BSShadowLight*>(a_light);
+		if (!light || !LightSlots().published)
+			return false;
+		bool listed = false, covered = false;
+		for (const auto& view : views)
+			if (view.light == light && view.focus) {
+				listed = true;
+				covered = covered || view.covered;
+			}
+		if (listed)
+			return covered;
+		const std::uint32_t count = std::min<std::uint32_t>(Engine::Global<std::uint32_t>(Engine::Address::kFocusTargetCount), 4u);
+		if (!count)
+			return false;
+		// The light's slot is not known before it is kept: 0 here. Rebuild lists the frame's views again with their slots.
+		const std::size_t first = views.size();
+		AddLightViews(*light, 0, count, true);
+		if (CoverFrom(first))
+			PublishRenderers();
+		for (std::size_t i = first; i < views.size(); ++i)
+			covered = covered || views[i].covered;
+		return covered;
+	}
+
+	void ShadowViews::AddLightViews(RE::BSShadowLight& a_light, std::uint32_t a_lightIndex, std::uint32_t a_focusCount, bool a_focusOnly)
 	{
 		auto* light = &a_light;
 		const std::uint32_t lightIndex = a_lightIndex;
@@ -258,7 +288,7 @@ namespace DCLF
 			}
 			views.push_back(view);
 		};
-		for (std::uint32_t d = 0; d < data.shadowmapDescriptors.size(); ++d)
+		for (std::uint32_t d = 0; !a_focusOnly && d < data.shadowmapDescriptors.size(); ++d)
 			add(data.shadowmapDescriptors[d], d, false);
 		// A focus host's focus views (Render draws descriptors 0..count-1).
 		for (std::uint32_t d = 0; d < a_focusCount; ++d)

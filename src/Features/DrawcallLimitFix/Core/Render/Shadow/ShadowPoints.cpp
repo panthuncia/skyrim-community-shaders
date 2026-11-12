@@ -3,6 +3,7 @@
 
 #include "Features/DrawcallLimitFix/Core/Render/Shadow/ShadowPoints.h"
 
+#include "Features/DrawcallLimitFix/Core/Handoff/PassCapture.h"
 #include "Features/DrawcallLimitFix/Core/Handoff/ShadowViews.h"
 #include "Features/DrawcallLimitFix/Core/Render/IndirectDraws.h"
 #include "Features/DrawcallLimitFix/Core/Settings/Toggles.h"
@@ -21,6 +22,15 @@ namespace DCLF::Draws
 	void ShadowLightKept(const RE::BSShadowLight* a_light, std::uint32_t a_firstSlot, std::uint32_t a_slots)
 	{
 		ShadowViews::Get().AddCaster(a_light, a_firstSlot, a_slots);
+	}
+
+	void ShadowFocusAccumulating(const RE::BSShadowLight* a_light, bool a_begin)
+	{
+		if (!a_begin) {
+			PassCapture::SetFocusAccumulation(false);
+			return;
+		}
+		PassCapture::SetFocusAccumulation(ShadowViews::Get().AddFocusHost(a_light));
 	}
 
 	void ListShadowViews()
