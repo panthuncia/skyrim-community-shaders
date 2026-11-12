@@ -1,4 +1,8 @@
 # Upstream vcpkg stops at 1.619.4. Drop this overlay once a port carries these headers.
+#
+# Header-only: the headers are copied, with a CMake config of our own. Upstream's CMake build also compiles the
+# DirectX-Guids library, and in vcpkg's deep build tree that compile failed on path length (C1083). Nothing here needs the
+# library: BasicRHI links the Windows SDK's dxguid.
 vcpkg_from_github(
     OUT_SOURCE_PATH SOURCE_PATH
     REPO Microsoft/DirectX-Headers
@@ -7,16 +11,10 @@ vcpkg_from_github(
     HEAD_REF main
 )
 
-vcpkg_cmake_configure(
-    SOURCE_PATH ${SOURCE_PATH}
-    OPTIONS -DDXHEADERS_INSTALL=ON -DDXHEADERS_BUILD_TEST=OFF -DDXHEADERS_BUILD_GOOGLE_TEST=OFF
-)
+set(VCPKG_BUILD_TYPE release)
+set(VCPKG_POLICY_SKIP_CRT_LINKAGE_CHECK enabled)
 
-vcpkg_cmake_install()
-vcpkg_fixup_pkgconfig()
-vcpkg_cmake_config_fixup(CONFIG_PATH share/directx-headers/cmake)
-
-file(REMOVE_RECURSE "${CURRENT_PACKAGES_DIR}/debug/include")
-
+file(INSTALL "${SOURCE_PATH}/include/" DESTINATION "${CURRENT_PACKAGES_DIR}/include")
+file(INSTALL "${CMAKE_CURRENT_LIST_DIR}/directx-headers-config.cmake" DESTINATION "${CURRENT_PACKAGES_DIR}/share/${PORT}")
 file(INSTALL "${CMAKE_CURRENT_LIST_DIR}/usage" DESTINATION "${CURRENT_PACKAGES_DIR}/share/${PORT}")
 vcpkg_install_copyright(FILE_LIST "${SOURCE_PATH}/LICENSE")
