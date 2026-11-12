@@ -49,6 +49,13 @@ namespace DCLF::Family
 	{
 		// BSGraphics::Renderer::DrawTriShape(renderer, TriShape*, startIndex, triangleCount): a static TriShape's draw (R1).
 		inline constexpr Engine::Offset kDrawTriShape{ { 77263 }, { 75477 } };
+		// BSGraphics::Renderer::DrawDynamicTriShape's DrawData copy (renderer, DynamicDrawData*, unused, startIndex, triangleCount): a
+		// dynamic shape's draw from a copy of its draw data, the particles' (NiParticles) among them. SE 75488 calls 75489; AE 77275
+		// draws itself (0x140e46f20): stream 0 the static buffer, stream 1 the dynamic ring at the data's offset, 16-bit indices.
+		inline constexpr Engine::Offset kDrawDynamicDrawData{ { 77275 }, { 75488 } };
+		// The engine's dynamic ring: its three buffers and the current one (RenderGraph/Engine/Buffers/DynamicRing.cpp's).
+		inline constexpr Engine::Offset kDynamicRing{ { 411350 }, { 524731 } };
+		inline constexpr Engine::Offset kDynamicRingCurrent{ { 411351 }, { 524732 } };
 	}
 
 	/** @brief BSGraphics::TriShape's head (R1): the static vertex and index buffers and the VertexDesc. */
@@ -64,6 +71,27 @@ namespace DCLF::Family
 	 * DrawTriShape on the render owner's thread; a taker whose family has no batch open returns false at once.
 	 */
 	using DrawTaker = bool (*)(const TriShape* a_shape, std::uint32_t a_start, std::uint32_t a_triangles);
+
+	/**
+	 * @brief The draw data DrawDynamicTriShape's DrawData copy draws (R1, AE 0x140e46f20): TriShape's head (the static vertex buffer,
+	 * stream 0, the index buffer, the VertexDesc), then the offset of its stream 1 in the engine's dynamic ring's current buffer.
+	 */
+	struct DynamicDrawData
+	{
+		ID3D11Buffer* vertexBuffer;
+		ID3D11Buffer* indexBuffer;
+		std::uint64_t vertexDesc;
+		std::uint32_t streamOffset;
+	};
+
+	/**
+	 * @brief A family's DrawDynamicTriShape (DrawData copy) taker, as DrawTaker: true when it took the draw. The detour has set the shadow
+	 * state's VertexDesc and topology as the engine's function does, before the takers run.
+	 */
+	using DynamicDrawTaker = bool (*)(const DynamicDrawData* a_data, std::uint32_t a_start, std::uint32_t a_triangles);
+
+	/** @brief AddDrawTaker for the DrawData copy's detour (kDrawDynamicDrawData), which the first call installs. */
+	bool AddDynamicDrawTaker(std::string_view a_family, DynamicDrawTaker a_taker);
 
 	/**
 	 * @brief Adds a_taker to the one DrawTriShape detour, which the first call installs. Takers are asked in the order added; the first
@@ -187,6 +215,9 @@ namespace DCLF::Family
 		std::uint64_t vertexAddress = 0, indexAddress = 0;
 		std::uint64_t layout = 0;  // the engine's input layout key: the vertex shader's mask and the geometry's VertexDesc
 		std::uint32_t stride = 0, firstIndex = 0, indexCount = 0;
+		// A dynamic draw's stream 1 (the dynamic ring at its offset, LatchDynamicGeometry): 0 for a static draw.
+		std::uint64_t streamAddress = 0;
+		std::uint32_t streamStride = 0;
 	};
 
 	enum class GeometryResult : std::uint8_t
@@ -207,6 +238,14 @@ namespace DCLF::Family
 	 * the buffers' bytes, the stride and the vertex count) for its log line.
 	 */
 	GeometryResult LatchGeometry(const TriShape* a_shape, std::uint32_t a_start, std::uint32_t a_triangles, std::uint64_t a_shaderVertexDesc,
+		std::uint32_t a_topology, Geometry& a_out, Owners& a_owners, std::string* a_detail = nullptr);
+
+	/**
+	 * @brief LatchGeometry for a DrawData copy's draw: stream 0 the static buffer (none when its stride is 0), stream 1 the engine's dynamic
+	 * ring's current buffer at the data's offset, which holds the position (VertexDesc bit 54: DCLFAttribute's second stream), all leased.
+	 * Render thread, at the draw (the ring's current buffer is the one the engine would bind).
+	 */
+	GeometryResult LatchDynamicGeometry(const DynamicDrawData* a_data, std::uint32_t a_start, std::uint32_t a_triangles, std::uint64_t a_shaderVertexDesc,
 		std::uint32_t a_topology, Geometry& a_out, Owners& a_owners, std::string* a_detail = nullptr);
 
 	/** @brief The viewport SetDirtyStates would set, and its depth range. */

@@ -54,6 +54,47 @@ namespace DCLF::Family
 			static inline REL::Relocation<decltype(thunk)> func;
 		};
 
+		struct DynamicTaker
+		{
+			std::string family;
+			DynamicDrawTaker take = nullptr;
+		};
+
+		// As Takers(): filled at install, read by the detour afterwards.
+		std::vector<DynamicTaker>& DynamicTakers()
+		{
+			static std::vector<DynamicTaker> takers;
+			return takers;
+		}
+
+		/**
+		 * @brief DrawDynamicTriShape's DrawData copy (SE 75488, AE 77275): a family's open batch takes the draw instead. The shadow state
+		 * gets the data's VertexDesc and a triangle list first, as the engine's function sets them before its SetDirtyStates.
+		 */
+		struct DrawDynamicDrawData
+		{
+			static void thunk(void* a_renderer, DynamicDrawData* a_data, void* a_arg3, std::uint32_t a_start, std::uint32_t a_triangles)
+			{
+				if (a_data) {
+					using Flags = RE::BSGraphics::ShaderFlags;
+					auto& shadow = RE::BSGraphics::RendererShadowState::GetSingleton()->GetRuntimeData();
+					if (shadow.vertexDesc != a_data->vertexDesc) {
+						shadow.vertexDesc = a_data->vertexDesc;
+						shadow.stateUpdateFlags.set(Flags::DIRTY_VERTEX_DESC);
+					}
+					if (shadow.topology != D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST) {
+						shadow.topology = D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST;
+						shadow.stateUpdateFlags.set(Flags::DIRTY_PRIMITIVE_TOPO);
+					}
+					for (const auto& taker : DynamicTakers())
+						if (taker.take(a_data, a_start, a_triangles))
+							return;
+				}
+				func(a_renderer, a_data, a_arg3, a_start, a_triangles);
+			}
+			static inline REL::Relocation<decltype(thunk)> func;
+		};
+
 		// The depth bias viewport offsets (BSGraphics::CreateDepthBiasViewportOffsets, SE 0x141794530, AE 0x1419db270): a bias mode takes
 		// its entry off the viewport's maximum depth.
 		constexpr std::array<float, 12> kBiasViewportOffsets{ 0.0f, 1.5e-5f, 0.0f, 0.0f, 0.0f, 0.0f, 2.6e-5f, 1.5e-5f, 2.8e-5f, 1.7e-5f, 3e-5f, 1.9e-5f };
@@ -79,6 +120,23 @@ namespace DCLF::Family
 		}
 		takers.push_back({ std::string(a_family), a_taker });
 		logger::info("[DCLF] {}: takes its draws at the engine draw families' DrawTriShape detour ({} families)", a_family, takers.size());
+		return true;
+	}
+
+	bool AddDynamicDrawTaker(std::string_view a_family, DynamicDrawTaker a_taker)
+	{
+		if (!Address::kDrawDynamicDrawData.Known() || !Address::kDynamicRing.Known() || !Address::kDynamicRingCurrent.Known()) {
+			logger::warn("[DCLF] {}: this runtime has no address for DrawDynamicTriShape's DrawData copy or the dynamic ring; its dynamic draws stay the engine's",
+				a_family);
+			return false;
+		}
+		auto& takers = DynamicTakers();
+		if (takers.empty()) {
+			stl::detour_thunk<DrawDynamicDrawData>(REL::Offset(Address::kDrawDynamicDrawData).address());
+			HookSites::NoteDetour("BSGraphics::Renderer::DrawDynamicTriShape (DrawData copy, the engine draw families)", DrawDynamicDrawData::func.address());
+		}
+		takers.push_back({ std::string(a_family), a_taker });
+		logger::info("[DCLF] {}: takes its dynamic draws at the DrawDynamicTriShape (DrawData copy) detour ({} families)", a_family, takers.size());
 		return true;
 	}
 
@@ -247,6 +305,58 @@ namespace DCLF::Family
 		a_out.indexCount = a_triangles * 3;
 		a_owners.push_back(std::move(vertices->owner));
 		a_owners.push_back(std::move(indices->owner));
+		return GeometryResult::Ok;
+	}
+
+	GeometryResult LatchDynamicGeometry(const DynamicDrawData* a_data, std::uint32_t a_start, std::uint32_t a_triangles, std::uint64_t a_shaderVertexDesc,
+		std::uint32_t a_topology, Geometry& a_out, Owners& a_owners, std::string* a_detail)
+	{
+		if (!a_data || !a_data->indexBuffer)
+			return GeometryResult::Missing;
+		if (a_topology != D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST) {
+			if (a_detail)
+				*a_detail = std::format("topology {}", a_topology);
+			return GeometryResult::Topology;
+		}
+		// The ring's current buffer, as the engine binds it for this draw (stream 1).
+		auto* const* ring = reinterpret_cast<ID3D11Buffer* const*>(REL::Offset(Address::kDynamicRing).address());
+		const auto current = *reinterpret_cast<const std::uint32_t*>(REL::Offset(Address::kDynamicRingCurrent).address());
+		ID3D11Buffer* streamBuffer = current < 3 ? ring[current] : nullptr;
+		if (!streamBuffer)
+			return GeometryResult::Missing;
+		// The strides as the engine's function sets them: stream 0's from the VertexDesc's low nibble, stream 1's from the next.
+		const std::uint32_t stride = static_cast<std::uint32_t>(a_data->vertexDesc * 4) & 0x3C;
+		const std::uint32_t streamStride = static_cast<std::uint32_t>(a_data->vertexDesc >> 2) & 0x3C;
+		auto& buffers = GpuResources::Frame();
+		auto indices = buffers.Acquire(a_data->indexBuffer);
+		auto stream = buffers.Acquire(streamBuffer);
+		std::optional<GpuResources::LeasedBuffer> vertices;
+		if (stride && a_data->vertexBuffer)
+			vertices = buffers.Acquire(a_data->vertexBuffer);
+		if (!indices || !stream || !indices->buffer.address || !stream->buffer.address || (stride && a_data->vertexBuffer && (!vertices || !vertices->buffer.address)))
+			return GeometryResult::Buffers;
+		// The index range as LatchGeometry checks it; the position (four floats) must fit in a stream-1 vertex at the offset.
+		const std::uint64_t endIndexByte = (std::uint64_t(a_start) + std::uint64_t(a_triangles) * 3) * 2;
+		if (!a_triangles || streamStride < 16 || endIndexByte > indices->buffer.size || std::uint64_t(a_data->streamOffset) + streamStride > stream->buffer.size) {
+			if (a_detail)
+				*a_detail = std::format("first index {}, {} indices ({} bytes to its end) of a {}-byte index buffer; stream 1 stride {} at offset {} of a {}-byte ring "
+										"buffer (VertexDesc {:#x})",
+					a_start, std::uint64_t(a_triangles) * 3, endIndexByte, indices->buffer.size, streamStride, a_data->streamOffset, stream->buffer.size,
+					a_data->vertexDesc);
+			return GeometryResult::Bounds;
+		}
+		a_out.vertexAddress = vertices ? vertices->buffer.address : 0;
+		a_out.indexAddress = indices->buffer.address;
+		a_out.layout = a_shaderVertexDesc & a_data->vertexDesc;
+		a_out.stride = vertices ? stride : 0;
+		a_out.firstIndex = a_start;
+		a_out.indexCount = a_triangles * 3;
+		a_out.streamAddress = stream->buffer.address + a_data->streamOffset;
+		a_out.streamStride = streamStride;
+		if (vertices)
+			a_owners.push_back(std::move(vertices->owner));
+		a_owners.push_back(std::move(indices->owner));
+		a_owners.push_back(std::move(stream->owner));
 		return GeometryResult::Ok;
 	}
 
