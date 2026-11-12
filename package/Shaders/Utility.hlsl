@@ -2,28 +2,30 @@
 // The ORG builds of the engine's Utility draws, drawn by Drawcall Limit Fix's engine draw families:
 // - the shadow masks (Features/DrawcallLimitFix/Features/ShadowMask): each shadow-casting light's pass over the screen quad into
 //   kSHADOW_MASK, RENDER_SHADOWMASK* with RENDER_DEPTH;
-// - the local map's scene draws (Features/DrawcallLimitFix/Features/MenuViews, UTILITY_ORG_SCENE): its objects' base textures
-//   (RENDER_BASE_TEXTURE) and the fog of war (LOCALMAP_FOGOFWAR) into kLOCAL_MAP_SWAP.
+// - the menu scenes' draws (Features/DrawcallLimitFix/Features/MenuViews, UTILITY_ORG_SCENE): the local map's base textures
+//   (RENDER_BASE_TEXTURE) and fog of war (LOCALMAP_FOGOFWAR) into kLOCAL_MAP_SWAP, and a menu model's depth (RENDER_DEPTH) and its
+//   menu lights' shadow maps (RENDER_SHADOWMAP*), skinned or not.
 // A draw's engine constants, its textures' and samplers' heap indices and its geometry are one latch region. FrameBuffer and
 // SharedData are the shared constants, written at the anchor's run right after the engine's batch, so they hold the camera the
 // engine's draw would have read (the menu's in a menu scene, the local map's in the local map).
 #	if defined(RENDER_DEPTH) && (defined(RENDER_SHADOWMASK) || defined(RENDER_SHADOWMASKSPOT) || defined(RENDER_SHADOWMASKPB) || defined(RENDER_SHADOWMASKDPB))
-#	elif (defined(RENDER_BASE_TEXTURE) || defined(LOCALMAP_FOGOFWAR)) && !defined(SKINNED) && !defined(RENDER_DEPTH) && !defined(RENDER_SHADOWMAP)
+#	elif defined(RENDER_BASE_TEXTURE) || defined(LOCALMAP_FOGOFWAR) || defined(RENDER_DEPTH) || defined(RENDER_SHADOWMAP) || defined(RENDER_SHADOWMAP_PB)
 #		define UTILITY_ORG_SCENE
+#		define ORG_LATCHED_BONES
 #	else
-#		error "Utility.hlsl's ORG build draws the shadow masks (RENDER_SHADOWMASK* with RENDER_DEPTH) and the local map (RENDER_BASE_TEXTURE, LOCALMAP_FOGOFWAR) only"
+#		error "Utility.hlsl's ORG build draws the shadow masks, the local map, depth and the shadow maps only"
 #	endif
 #	define UTILITY_ORG
 #	define ORG_SHARED_CONSTANTS
 #	include "Common/OrgResources.hlsli"
 
 #	if defined(UTILITY_ORG_SCENE)
-// A local map draw's latched values (SceneDrawConstants in Features/DrawcallLimitFix/Features/MenuViews/MenuScenes.h): the rows of
-// the engine's constant buffers as SetupTechnique, SetupMaterial and SetupGeometry wrote them. World is row_major in the D3D11
-// shader, so its rows are the registers.
+// A menu scene draw's latched values (UtilitySceneConstants in Features/DrawcallLimitFix/Features/MenuViews/MenuScenes.h): the
+// rows of the engine's constant buffers as SetupTechnique, SetupMaterial and SetupGeometry wrote them. World is row_major in the
+// D3D11 shader, so its rows are the registers. A skinned draw's palettes are the Bones latch (Common/Skinned.hlsli, OrgBoneRow).
 struct UtilityOrgSceneDraw
 {
-	float4 VSTechnique[1];  // VS b0: HighDetailRange
+	float4 VSTechnique[2];  // VS b0: HighDetailRange, ParabolaParam
 	float4 VSMaterial[1];   // VS b1: TexcoordOffset
 	float4 VSGeometry[8];   // VS b2: ShadowFadeParam, World (c1-c4), EyePos, WaterParams, TreeParams
 	float4 PSMaterial[2];   // PS b1: RefractionPower, BaseColor
@@ -40,7 +42,13 @@ struct UtilityOrgSceneDraw
 	uint2 Padding2;
 };
 
-#		define UTILITY_ORG_RESOURCES(X)         			X(SHARED, ConstantBuffer, Shared, 0) 			X(LATCH, UtilityOrgSceneDraw, SceneDraw, 2)
+// The draw's palettes (Common/Skinned.hlsli): previous frame's 240 rows, then this frame's. Read by row, never loaded whole.
+struct UtilityOrgBones
+{
+	float4 Rows[480];
+};
+
+#		define UTILITY_ORG_RESOURCES(X)                  			X(SHARED, ConstantBuffer, Shared, 0)          			X(LATCH, UtilityOrgSceneDraw, SceneDraw, 2) 			X(EXTERN_LATCH, UtilityOrgBones, Bones, 9)
 #	else
 // A shadow mask draw's latched values (DrawConstants in Features/DrawcallLimitFix/Features/ShadowMask/ShadowMask.h). The engine's
 // rows as its constant buffers hold them: a matrix is its column registers (column_major packing), rebuilt below.
@@ -64,6 +72,14 @@ struct UtilityOrgShadowMaskDraw
 #	endif
 ORG_PUSH_BLOCK(UTILITY_ORG_RESOURCES(ORG_HANDLE))
 UTILITY_ORG_RESOURCES(ORG_RESOURCE)
+#	if defined(UTILITY_ORG_SCENE)
+static ByteAddressBuffer OrgBonesBuffer = ResourceDescriptorHeap[OrgHandle_Bones];
+/** @brief Row a_row of palette a_palette (0 previous, 1 current) of the draw's latched bones. */
+float4 OrgBoneRow(uint a_palette, uint a_row)
+{
+	return asfloat(OrgBonesBuffer.Load4(OrgOffset_Bones + (a_palette * 240 + a_row) * 16));
+}
+#	endif
 #endif
 
 #include "Common/Color.hlsli"
@@ -198,7 +214,7 @@ struct VS_OUTPUT
 #	if defined(UTILITY_ORG_SCENE)
 // The ORG build's constants, from the draw's latch (UtilityOrgSceneDraw).
 static float4 HighDetailRange = SceneDraw.VSTechnique[0];
-static float2 ParabolaParam = float2(0, 0);  // RENDER_SHADOWMAP_PB's only, which this build does not draw
+static float2 ParabolaParam = SceneDraw.VSTechnique[1].xy;
 static float4 TexcoordOffset = SceneDraw.VSMaterial[0];
 static float4 ShadowFadeParam = SceneDraw.VSGeometry[0];
 static row_major float4x4 World = float4x4(SceneDraw.VSGeometry[1], SceneDraw.VSGeometry[2], SceneDraw.VSGeometry[3], SceneDraw.VSGeometry[4]);
@@ -701,7 +717,7 @@ VS_OUTPUT main(uint index : SV_VertexID, uint a_instance : SV_InstanceID)
 #		define DCLF_PULLED_VERTICES
 #		include "Common/DCLFVertexPull.hlsli"
 
-// The local map build's vertex stage: the draw's vertex pulled as the input assembler reads it (its 16-bit index, then its
+// The scene build's vertex stage: the draw's vertex pulled as the input assembler reads it (its 16-bit index, then its
 // attributes as the engine's input layout for the draw's vertex layout decodes them), then the engine's stage (UtilityOrgSceneShade).
 VS_OUTPUT main(uint a_vertexID: SV_VertexID)
 {
@@ -723,6 +739,10 @@ VS_OUTPUT main(uint a_vertexID: SV_VertexID)
 #		endif
 #		if defined(VC)
 	input.Color = DCLFPullUnorm4(5, 0, first, second);
+#		endif
+#		if defined(SKINNED)
+	input.BoneWeights = DCLFPullHalf4(6, first, second);
+	input.BoneIndices = DCLFPullUnorm4(6, 8, first, second);
 #		endif
 	return UtilityOrgSceneShade(input);
 }

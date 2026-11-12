@@ -1,7 +1,7 @@
-// The menu scenes family's engine side: the local map's two SubmitAccumulator calls, which run with their draws latched and hand
-// them to the anchor's pass; the family's DrawTriShape taker, which latches a scene draw in place of drawing it; and its
-// SetupGeometry watchers, which count a batch's Utility passes and end the latched part at a pass of a shader the family has no
-// program for. Render thread.
+// The menu scenes family's engine side: the batches' calls (the local map's two SubmitAccumulator calls, a menu model's depth
+// StartAccumulating and colour SubmitAccumulator), which run with their draws latched and hand them to the anchor's pass; the
+// family's DrawTriShape taker, which latches a scene draw in place of drawing it; and its SetupGeometry watchers, which count a
+// batch's passes and end the latched part at a pass of a shader the family has no program for. Render thread.
 
 // volk must precede every Vulkan header in this translation unit.
 #include <rhi_interop_vulkan.h>
@@ -21,6 +21,7 @@
 #include "State.h"
 #include "Utils/Logging.h"
 
+#include <algorithm>
 #include <format>
 #include <string>
 
@@ -32,6 +33,9 @@ namespace DCLF::Features::MenuViews::Scenes
 		using ::RenderGraph::Engine::Tripwire::Unwrap;
 		using Stage = Family::Constants::Stage;
 		using Flags = SIE::ShaderCache::UtilityShaderFlags;
+
+		constexpr std::array<std::int32_t, 1> kLocalMapTargets{ kLocalMapSwapTarget };
+		constexpr std::array<std::int32_t, 4> kMenuTargets{ kMainTarget, kMotionVectorTarget, kNormalTaaMaskTarget, kNormalTaaMaskSwapTarget };
 
 		/** @brief The inherent refusals, each logged once per reason. */
 		Util::ReasonLog& Refusals()
@@ -59,11 +63,13 @@ namespace DCLF::Features::MenuViews::Scenes
 		/** @brief Whether a Utility vertex descriptor is one of UTILITY_ORG_SCENE's techniques (Utility.hlsl's #error). */
 		bool SceneTechnique(std::uint32_t a_descriptor)
 		{
-			constexpr auto kScene = static_cast<std::uint32_t>(Flags::RenderBaseTexture) | static_cast<std::uint32_t>(Flags::LocalMapFogOfWar);
-			constexpr auto kNot = static_cast<std::uint32_t>(Flags::Skinned) | static_cast<std::uint32_t>(Flags::RenderDepth) |
-			                      static_cast<std::uint32_t>(Flags::RenderShadowmap) | static_cast<std::uint32_t>(Flags::RenderShadowmask) |
-			                      static_cast<std::uint32_t>(Flags::RenderShadowmaskSpot) | static_cast<std::uint32_t>(Flags::RenderShadowmaskPb) |
-			                      static_cast<std::uint32_t>(Flags::RenderShadowmaskDpb);
+			constexpr auto kScene = static_cast<std::uint32_t>(Flags::RenderBaseTexture) | static_cast<std::uint32_t>(Flags::LocalMapFogOfWar) |
+			                        static_cast<std::uint32_t>(Flags::RenderDepth) | static_cast<std::uint32_t>(Flags::RenderShadowmap) |
+			                        static_cast<std::uint32_t>(Flags::RenderShadowmapPb);
+			constexpr auto kNot = static_cast<std::uint32_t>(Flags::RenderShadowmask) | static_cast<std::uint32_t>(Flags::RenderShadowmaskSpot) |
+			                      static_cast<std::uint32_t>(Flags::RenderShadowmaskPb) | static_cast<std::uint32_t>(Flags::RenderShadowmaskDpb) |
+			                      static_cast<std::uint32_t>(Flags::RenderNormal) | static_cast<std::uint32_t>(Flags::RenderNormalClear) |
+			                      static_cast<std::uint32_t>(Flags::DebugShadowSplit) | static_cast<std::uint32_t>(Flags::DebugColor);
 			return (a_descriptor & kScene) && !(a_descriptor & kNot);
 		}
 
@@ -89,48 +95,79 @@ namespace DCLF::Features::MenuViews::Scenes
 		}
 
 		/**
-		 * @brief The draw the engine is about to make, latched: the shadow state SetDirtyStates would apply, the constants the Utility
-		 * shader's Setup functions wrote (the engine constants capture), the slots' textures and samplers, the geometry. Null when latched;
-		 * otherwise why the graph cannot draw it (a_detail: what it was about), and the engine draws it.
+		 * @brief The draw's colour targets as SetDirtyStates would bind them, looked up in the view's imports: the first a_outputs render
+		 * targets the pixel stage writes, up to the first unbound one. Null when mapped, else why not.
 		 */
-		const char* TryLatchDraw(Capture& a_capture, const Family::TriShape* a_shape, std::uint32_t a_start, std::uint32_t a_triangles, std::string& a_detail)
+		const char* MapTargets(View a_view, std::uint32_t a_outputs, Draw& a_draw)
+		{
+			const auto& rss = RE::BSGraphics::RendererShadowState::GetSingleton()->GetRuntimeData();
+			if (rss.cubeMapRenderTarget != static_cast<std::uint32_t>(-1))
+				return "a cube face is bound";
+			if (rss.depthStencil != static_cast<std::uint32_t>(RE::RENDER_TARGETS_DEPTHSTENCIL::kMAIN))
+				return "its depth target is not kMAIN's";
+			const auto imports = TargetsOf(a_view);
+			a_draw.colourCount = 0;
+			for (std::uint32_t i = 0; i < std::min(a_outputs, kMaxColours); ++i) {
+				const auto target = static_cast<std::int32_t>(rss.renderTargets[i]);
+				if (target < 0)
+					break;
+				const auto found = std::ranges::find(imports, target);
+				if (found == imports.end())
+					return "a colour target its view's client does not import";
+				const auto index = static_cast<std::uint32_t>(found - imports.begin());
+				a_draw.colours[i] = static_cast<std::uint8_t>(index);
+				a_draw.key.colourFormats[i] = SceneDraws::ColourFormat(a_view, index);
+				if (!a_draw.key.colourFormats[i])
+					return "a colour target with no format";
+				++a_draw.colourCount;
+			}
+			a_draw.key.depthFormat = SceneDraws::DepthFormat(a_view);
+			return a_draw.key.depthFormat ? nullptr : "no depth import";
+		}
+
+		/** @brief A skinned draw's palettes (VS b9, b10) appended to the run's latch; its offset in a_offset. False when they do not fit. */
+		bool LatchBones(Family::Constants::UseId a_use, Run& a_run, std::uint32_t& a_offset)
+		{
+			std::array<std::byte, kBonesBytes> bones{};
+			const std::span<std::byte> all(bones);
+			Family::CopyConstants(a_use, Stage::Vertex, 9, all.subspan(0, kBonesBytes / 2));
+			Family::CopyConstants(a_use, Stage::Vertex, 10, all.subspan(kBonesBytes / 2));
+			a_offset = a_run.Append(bones);
+			return a_offset != ~0u;
+		}
+
+		/**
+		 * @brief A Utility draw, latched: the shadow state SetDirtyStates would apply, the constants the Utility shader's Setup functions
+		 * wrote (the engine constants capture), the palettes of a skinned one, the slots' textures and samplers, the geometry. Null when
+		 * latched; otherwise why the graph cannot draw it (a_detail: what it was about), and the engine draws it.
+		 */
+		const char* TryLatchUtility(Capture& a_capture, const Family::TriShape* a_shape, std::uint32_t a_start, std::uint32_t a_triangles, std::string& a_detail)
 		{
 			auto& run = *a_capture.run;
-			if (run.draws.size() >= kMaxDraws)
-				return "more draws than the batch latches";
 			const auto& rss = RE::BSGraphics::RendererShadowState::GetSingleton()->GetRuntimeData();
 			const auto* vs = rss.currentVertexShader;
-			const auto* ps = rss.currentPixelShader;
 			const auto* state = globals::state;
-			if (!vs || !ps || !state || !state->currentShader || state->currentShader->shaderType.get() != RE::BSShader::Type::Utility)
-				return "the bound shader is not BSUtilityShader (the family has no program for it)";
-			if (!SceneTechnique(state->modifiedVertexDescriptor)) {
-				a_detail = std::format("vertex descriptor {:#x}", state->modifiedVertexDescriptor);
-				return "a Utility technique other than the base texture and the fog of war";
+			const std::uint32_t descriptor = state->modifiedVertexDescriptor;
+			if (!SceneTechnique(descriptor)) {
+				a_detail = std::format("vertex descriptor {:#x}", descriptor);
+				return "a Utility technique the scene build does not draw";
 			}
-			// LocalMapRenderer::Render binds kLOCAL_MAP_SWAP as RT0 and kMAIN's depth for both batches. A target the frame left bound at RT1
-			// or later is not written: the pixel stage has one output.
-			if (static_cast<std::uint32_t>(rss.renderTargets[0]) != kLocalMapSwapTarget ||
-				rss.depthStencil != static_cast<std::uint32_t>(RE::RENDER_TARGETS_DEPTHSTENCIL::kMAIN) || rss.cubeMapRenderTarget != static_cast<std::uint32_t>(-1))
-				return "its targets are not kLOCAL_MAP_SWAP and kMAIN's depth";
-
 			const auto engine = Pipeline::EngineDrawState::Latch();
 			Draw draw{};
-			// The vertex descriptor CS looks its shader up by (State::ModifyShaderLookup): it holds the technique's bits and the geometry's
-			// (TEXTURE, VC, NORMALS, LOD_LANDSCAPE, TREE_ANIM), and its defines serve both stages.
-			draw.key.descriptor = state->modifiedVertexDescriptor;
+			draw.shader = Shader::Utility;
+			// The vertex descriptor CS looks its shader up by (State::ModifyShaderLookup): it holds the technique's bits and the
+			// geometry's (TEXTURE, VC, NORMALS, SKINNED, LOD_LANDSCAPE, TREE_ANIM), and its defines serve both stages.
+			draw.key.descriptor = descriptor;
 			draw.key.defineStage = Family::DefineStage::Vertex;
+			if (const char* why = MapTargets(a_capture.view, 1, draw))
+				return why;
 			if (!Family::DescribeStates(draw.key, Pipeline::EngineBlendState(engine.blendMode, engine.alphaToCoverage, engine.writeMode, engine.blendExtra),
 					Pipeline::EngineDepthStencilState(engine.depthMode, engine.stencilMode), Pipeline::EngineRasterState(engine.fill, engine.cull, engine.depthBias, engine.scissor)))
 				return "a depth-stencil, blend or rasterizer state with no description";
-			draw.key.colourFormats[0] = SceneDraws::ColourFormat(a_capture.view);
-			draw.key.depthFormat = SceneDraws::DepthFormat(a_capture.view);
-			if (!draw.key.colourFormats[0] || !draw.key.depthFormat)
-				return "no imported target";
 			draw.stencilRef = engine.stencilRef;
 
 			// The constant groups as the Setup functions wrote them, and the alpha test reference SetDirtyStates would write into b11.
-			auto& constants = draw.constants;
+			UtilitySceneConstants constants{};
 			const auto use = Family::CaptureConstants();
 			if (!use.Valid())
 				return "the engine constants capture is not active";
@@ -142,8 +179,10 @@ namespace DCLF::Features::MenuViews::Scenes
 			Family::CopyRows(use, Stage::Pixel, 1, constants.psMaterial, kPSMaterialRows);
 			Family::CopyRows(use, Stage::Pixel, 2, constants.psGeometry, kPSGeometryRows);
 			constants.alphaTestRef = rss.alphaTestEnabled ? rss.alphaTestRef : 0.0f;
+			if ((descriptor & static_cast<std::uint32_t>(Flags::Skinned)) && !LatchBones(use, run, draw.bonesOffset))
+				return "more palettes than the batch's latch holds";
 
-			draw.program = SceneDraws::Program(draw.key, *state->currentShader);
+			draw.program = SceneDraws::UtilityProgram(draw.key, *state->currentShader);
 			if (!draw.program)
 				return "its ORG program cannot be built";
 
@@ -165,11 +204,11 @@ namespace DCLF::Features::MenuViews::Scenes
 
 			// The slots the build reads as the shadow state holds them (an empty slot reads a null view of its declared kind) and their
 			// samplers. Every other slot reads a null view and the first sampler, whatever is bound there.
-			for (std::uint32_t t = 0; t < kSlots; ++t) {
-				const bool read = SlotRead(t);
+			for (std::uint32_t t = 0; t < kUtilitySlots; ++t) {
+				const bool read = UtilitySlotRead(t);
 				auto* view = read ? Unwrap(rss.PSTexture[t]) : nullptr;
 				GpuTextures::ResolveFailure failure = GpuTextures::ResolveFailure::None;
-				const auto slot = Family::SlotTexture(view, SlotKind(t), GpuTextures::Tag(GpuTextures::Source::FrameSlot, t), constants.textures[t], owners, &failure);
+				const auto slot = Family::SlotTexture(view, UtilitySlotKind(t), GpuTextures::Tag(GpuTextures::Source::FrameSlot, t), constants.textures[t], owners, &failure);
 				if (slot == Family::SlotResult::Published) {
 					const auto id = PublishedResources::ExportedId(view);
 					const auto result = SceneDraws::ReadPublished(a_capture.view, id, constants.textures[t]);
@@ -187,6 +226,10 @@ namespace DCLF::Features::MenuViews::Scenes
 					return "its sampler modes have no graph sampler";
 			}
 
+			draw.latchOffset = run.Append(std::as_bytes(std::span<const UtilitySceneConstants, 1>(&constants, 1)));
+			if (draw.latchOffset == ~0u)
+				return "more constants than the batch's latch holds";
+
 			// The viewport SetDirtyStates would set, with the depth bias mode's offset taken off its maximum depth.
 			draw.viewport = Family::LatchViewport(engine.depthBias);
 
@@ -197,21 +240,36 @@ namespace DCLF::Features::MenuViews::Scenes
 			return nullptr;
 		}
 
+		/** @brief The draw the engine is about to make, latched by its shader's kind. Null when latched; otherwise why not. */
+		const char* TryLatchDraw(Capture& a_capture, const Family::TriShape* a_shape, std::uint32_t a_start, std::uint32_t a_triangles, std::string& a_detail)
+		{
+			if (a_capture.run->draws.size() >= kMaxDraws)
+				return "more draws than the batch latches";
+			const auto& rss = RE::BSGraphics::RendererShadowState::GetSingleton()->GetRuntimeData();
+			const auto* state = globals::state;
+			if (!rss.currentVertexShader || !rss.currentPixelShader || !state || !state->currentShader)
+				return "no shader bound";
+			switch (state->currentShader->shaderType.get()) {
+			case RE::BSShader::Type::Utility:
+				return TryLatchUtility(a_capture, a_shape, a_start, a_triangles, a_detail);
+			default:
+				return "a shader the family has no program for";
+			}
+		}
+
 		/**
-		 * @brief One of the local map's SubmitAccumulator calls: with the family on, the batch runs with its draws latched, then the
-		 * anchor's pass draws them at this point. Otherwise, or when the batch cannot be taken now, the engine draws it, vouched for.
+		 * @brief One batch's engine call (SubmitAccumulator or StartAccumulating, the same arguments): with the view's switch on, the batch
+		 * runs with its draws latched, then the anchor's pass draws them at this point. Otherwise, or when the batch cannot be taken now,
+		 * the engine draws it.
 		 */
 		template <View kView>
-		struct SceneSubmit
+		struct SceneBatch
 		{
 			static void thunk(RE::NiCamera* a_camera, RE::BSShaderAccumulator* a_accumulator, std::uint32_t a_flags)
 			{
 				auto& capture = GetCapture();
-				if (capture.active) {
-					func(a_camera, a_accumulator, a_flags);
-					return;
-				}
-				if (!Enabled() || !ShellState::Running() || !FrameAnchors::IsRenderOwner() || !SceneDraws::Available() || !SceneDraws::CanTake(kView)) {
+				if (capture.active || !ViewEnabled(kView) || !ShellState::Running() || !FrameAnchors::IsRenderOwner() || !SceneDraws::Available() ||
+					!SceneDraws::CanTake(kView)) {
 					func(a_camera, a_accumulator, a_flags);
 					return;
 				}
@@ -232,9 +290,9 @@ namespace DCLF::Features::MenuViews::Scenes
 		};
 
 		/**
-		 * @brief The family's DrawTriShape taker: during a latched batch, the draw is latched instead. A taken draw then applies the engine's
-		 * pending state as the draw function's own SetDirtyStates would: the clears of kLOCAL_MAP_SWAP and kMAIN's depth the render asked
-		 * for land before the anchor's run, and the dirty bits are consumed as before.
+		 * @brief The family's DrawTriShape taker: during a latched batch, the draw is latched instead. A taken draw then applies the
+		 * engine's pending state as the draw function's own SetDirtyStates would: the clears the batch's setup asked for land before the
+		 * anchor's run, and the dirty bits are consumed as before.
 		 */
 		bool TakeDraw(const Family::TriShape* a_shape, std::uint32_t a_start, std::uint32_t a_triangles)
 		{
@@ -253,8 +311,8 @@ namespace DCLF::Features::MenuViews::Scenes
 			return true;
 		}
 
-		/** @brief After BSUtilityShader::SetupGeometry: counts the pass; one that will not reach DrawTriShape ends the latched part. */
-		void OnUtilitySetup(RE::BSRenderPass* a_pass)
+		/** @brief After the SetupGeometry of a shader the family draws: counts the pass; one that will not reach DrawTriShape ends the latched part. */
+		void OnProgramSetup(RE::BSRenderPass* a_pass)
 		{
 			auto& capture = GetCapture();
 			if (!capture.active)
@@ -264,8 +322,8 @@ namespace DCLF::Features::MenuViews::Scenes
 		}
 
 		/**
-		 * @brief After the SetupGeometry of a shader the family has no program for (Lighting: the landscape's passes; the effects; tree
-		 * LOD): the latched part ends before the engine draws the pass, so the rest of the batch is the engine's in order.
+		 * @brief After the SetupGeometry of a shader the family has no program for (Lighting and Effect: the land's and a menu model's
+		 * colour; tree LOD): the latched part ends before the engine draws the pass, so the rest of the batch is the engine's in order.
 		 */
 		void OnOtherSetup(RE::BSRenderPass*)
 		{
@@ -273,11 +331,32 @@ namespace DCLF::Features::MenuViews::Scenes
 			if (capture.active && !capture.failed)
 				Refuse(capture, "a pass of a shader the family has no program for (Lighting, Effect or DistantTree)");
 		}
+
+		bool LocalMapKnown() { return Address::kLocalMapSubmit.Known() && Address::kLocalMapWaterSubmit.Known(); }
+		bool MenuKnown() { return Address::kMenu3DSubmit.Known() && Address::kMenu3DDepthSubmit.Known(); }
 	}
 
 	const char* NameOf(View a_view)
 	{
-		return a_view == View::LocalMapFog ? "local-map-fog" : "local-map";
+		switch (a_view) {
+		case View::LocalMap:
+			return "local-map";
+		case View::LocalMapFog:
+			return "local-map-fog";
+		case View::MenuDepth:
+			return "menu-depth";
+		case View::MenuColour:
+			return "menu-colour";
+		default:
+			return "?";
+		}
+	}
+
+	std::span<const std::int32_t> TargetsOf(View a_view)
+	{
+		if (a_view == View::LocalMap || a_view == View::LocalMapFog)
+			return kLocalMapTargets;
+		return kMenuTargets;
 	}
 
 	bool Enabled()
@@ -285,41 +364,60 @@ namespace DCLF::Features::MenuViews::Scenes
 		return MapEnabled();
 	}
 
+	bool ViewEnabled(View a_view)
+	{
+		return a_view == View::LocalMap || a_view == View::LocalMapFog ? MapEnabled() : Menu3DEnabled();
+	}
+
+	bool AnyEnabled()
+	{
+		return MapEnabled() || Menu3DEnabled();
+	}
+
 	void PreflightHooks()
 	{
-		if (!Enabled() && !Family::Flush::LatchRequested())
+		if (!AnyEnabled())
 			return;
-		const bool known = Address::kLocalMapSubmit.Known() && Address::kLocalMapWaterSubmit.Known() && Family::Address::kDrawTriShape.Known();
-		HookSites::RequireKnown("the local map's batches", known);
-		if (!known)
-			return;
-		HookSites::RequireCall("the local map's land and objects (LocalMapRenderer::Render's first SubmitAccumulator)", REL::Offset(Address::kLocalMapSubmit).address());
-		HookSites::RequireCall("the local map's fog of war (LocalMapRenderer::Render's second SubmitAccumulator)", REL::Offset(Address::kLocalMapWaterSubmit).address());
+		HookSites::RequireKnown("the menu scenes' batches",
+			Family::Address::kDrawTriShape.Known() && (!MapEnabled() || LocalMapKnown()) && (!Menu3DEnabled() || MenuKnown()));
+		if (MapEnabled() && LocalMapKnown()) {
+			HookSites::RequireCall("the local map's land and objects (LocalMapRenderer::Render's first SubmitAccumulator)", REL::Offset(Address::kLocalMapSubmit).address());
+			HookSites::RequireCall("the local map's fog of war (LocalMapRenderer::Render's second SubmitAccumulator)", REL::Offset(Address::kLocalMapWaterSubmit).address());
+		}
+		if (Menu3DEnabled() && MenuKnown()) {
+			HookSites::RequireCall("a menu model's depth pass (UI3DSceneManager::Render's StartAccumulating)", REL::Offset(Address::kMenu3DDepthSubmit).address());
+			HookSites::RequireCall("a menu model's colour pass (UI3DSceneManager::Render's SubmitAccumulator)", REL::Offset(Address::kMenu3DSubmit).address());
+		}
 	}
 
 	void InstallHooks()
 	{
-		// Under the flush latch the batches are installed whatever CS_ORG_MAP says: off, they are the engine's, vouched for.
-		if (!Enabled() && !Family::Flush::LatchRequested())
+		if (!AnyEnabled())
 			return;
-		if (!Address::kLocalMapSubmit.Known() || !Address::kLocalMapWaterSubmit.Known()) {
-			logger::warn("[DCLF] menu scenes: this runtime has no address for the local map's batches; the local map stays the engine's");
-			return;
-		}
-		if (Enabled() && !Family::AddDrawTaker("menu scenes", &TakeDraw)) {
-			logger::warn("[DCLF] menu scenes: no DrawTriShape detour; the local map stays the engine's");
+		if (!Family::AddDrawTaker("menu scenes", &TakeDraw)) {
+			logger::warn("[DCLF] menu scenes: no DrawTriShape detour; the menu scenes stay the engine's");
 			return;
 		}
-		stl::write_thunk_call<SceneSubmit<View::LocalMap>>(REL::Offset(Address::kLocalMapSubmit).address());
-		stl::write_thunk_call<SceneSubmit<View::LocalMapFog>>(REL::Offset(Address::kLocalMapWaterSubmit).address());
-		if (!Enabled())
-			return;
-		Family::WatchSetupGeometry<RE::BSShader::Type::Utility>(RE::VTABLE_BSUtilityShader[0], &OnUtilitySetup);
+		if (MapEnabled()) {
+			if (LocalMapKnown()) {
+				stl::write_thunk_call<SceneBatch<View::LocalMap>>(REL::Offset(Address::kLocalMapSubmit).address());
+				stl::write_thunk_call<SceneBatch<View::LocalMapFog>>(REL::Offset(Address::kLocalMapWaterSubmit).address());
+			} else
+				logger::warn("[DCLF] menu scenes: this runtime has no address for the local map's batches; the local map stays the engine's");
+		}
+		if (Menu3DEnabled()) {
+			if (MenuKnown()) {
+				stl::write_thunk_call<SceneBatch<View::MenuDepth>>(REL::Offset(Address::kMenu3DDepthSubmit).address());
+				stl::write_thunk_call<SceneBatch<View::MenuColour>>(REL::Offset(Address::kMenu3DSubmit).address());
+			} else
+				logger::warn("[DCLF] menu scenes: this runtime has no address for a menu model's batches; the menu models stay the engine's");
+		}
+		Family::WatchSetupGeometry<RE::BSShader::Type::Utility>(RE::VTABLE_BSUtilityShader[0], &OnProgramSetup);
 		Family::WatchSetupGeometry<RE::BSShader::Type::Lighting>(RE::VTABLE_BSLightingShader[0], &OnOtherSetup);
 		Family::WatchSetupGeometry<RE::BSShader::Type::Effect>(RE::VTABLE_BSEffectShader[0], &OnOtherSetup);
 		Family::WatchSetupGeometry<RE::BSShader::Type::DistantTree>(RE::VTABLE_BSDistantTreeShader[0], &OnOtherSetup);
-		// Both clients are made on the main thread once the graph runs (the main menu), before any world frame.
+		// The clients are made on the main thread once the graph runs (the main menu), before any world frame.
 		Family::AddSetup("menu scenes", [] { return SceneDraws::Setup(); });
-		logger::info("[DCLF] menu scenes: hooks installed (the local map's land and objects and its fog of war)");
+		logger::info("[DCLF] menu scenes: hooks installed (local map {}, menu models {})", MapEnabled() ? "on" : "off", Menu3DEnabled() ? "on" : "off");
 	}
 }
