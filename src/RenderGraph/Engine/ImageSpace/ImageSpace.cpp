@@ -401,6 +401,12 @@ namespace RenderGraph::Engine::ImageSpace
 			// inside one of an effect the port does not cover is vouched for (NotPortedReason). A covered effect's draw the engine still
 			// makes (a refusal or a failure) is not: the flush latch skips it and the census counts it.
 			std::uint32_t engineCalls = 0;
+			// The shaders of the engine calls in progress, innermost last: the effect a draw left to the engine belongs to.
+			std::vector<const RE::BSImagespaceShader*> callShaders;
+			// Engine draws and dispatches of effects the port does not cover, by effect and target, since the last summary
+			// (LogNotCovered, every kNotCoveredFrames frames).
+			std::map<std::string, std::uint64_t> notCovered;
+			std::uint32_t notCoveredSince = 0;
 			// Counters.
 			std::uint64_t taken = 0, engineDrawn = 0, batches = 0, lost = 0;
 			// Why each effect's draws stayed with the engine, logged once per reason and effect: refusals (cases the port does not
@@ -1845,6 +1851,42 @@ namespace RenderGraph::Engine::ImageSpace
 				logger::info("[ORG] ImageSpace: the first batch ({} draws) ran on the graph", count);
 		}
 
+		/**
+		 * @brief Counts an engine draw or dispatch of an effect the port does not cover, by the effect of the innermost engine call
+		 * and the shadow state's first target and depth target. LogNotCovered writes the counts.
+		 */
+		void NoteNotCovered(bool a_compute)
+		{
+			auto& state = IS();
+			const auto* shader = state.callShaders.empty() ? nullptr : state.callShaders.back();
+			const char* name = shader && shader->name ? shader->name : "an unnamed effect";
+			const auto& shadow = RE::BSGraphics::RendererShadowState::GetSingleton()->GetRuntimeData();
+			std::string key;
+			if (a_compute)
+				key = fmt::format("{} (dispatch)", name);
+			else
+				key = fmt::format("{} into rt{} depth {}", name, static_cast<std::int32_t>(shadow.renderTargets[0]),
+					shadow.depthStencil == UINT32_MAX ? std::string("none") : fmt::format("{}", shadow.depthStencil));
+			++state.notCovered[key];
+		}
+
+		/** @brief Once every kNotCoveredFrames frames: the counts NoteNotCovered made since the last summary, as one line. */
+		void LogNotCovered()
+		{
+			constexpr std::uint32_t kNotCoveredFrames = 300;
+			auto& state = IS();
+			if (state.frame - state.notCoveredSince < kNotCoveredFrames)
+				return;
+			if (!state.notCovered.empty()) {
+				std::string list;
+				for (const auto& [key, count] : state.notCovered)
+					list += fmt::format("{}{}: {}", list.empty() ? "" : ", ", key, count);
+				logger::info("[ORG] ImageSpace: effects the port does not cover drew on D3D11 in {} frames: {}", state.frame - state.notCoveredSince, list);
+				state.notCovered.clear();
+			}
+			state.notCoveredSince = state.frame;
+		}
+
 		/** @brief Once a frame, on the first ImageSpace call of the render owner: the frame's runs, a resize, the programs, the manifest. */
 		void BeginFrame()
 		{
@@ -1860,6 +1902,7 @@ namespace RenderGraph::Engine::ImageSpace
 			CheckImports();
 			RetryBuild();
 			MaybeWriteManifest();
+			LogNotCovered();
 		}
 
 		/**
@@ -2188,11 +2231,13 @@ namespace RenderGraph::Engine::ImageSpace
 		 * port does not take is the engine's on purpose (DrawTriShape and DispatchCSShader open the latch's scope for it).
 		 */
 		template <class Call>
-		void EngineCall(Call&& a_call)
+		void EngineCall(const RE::BSImagespaceShader* a_shader, Call&& a_call)
 		{
 			auto& state = IS();
 			++state.engineCalls;
+			state.callShaders.push_back(a_shader);
 			a_call();
+			state.callShaders.pop_back();
 			--state.engineCalls;
 		}
 
@@ -2202,13 +2247,14 @@ namespace RenderGraph::Engine::ImageSpace
 		 * once per reason) runs unvouched: no reason covers it.
 		 */
 		template <class Call>
-		void EngineDraw(Call&& a_call)
+		void EngineDraw(bool a_compute, Call&& a_call)
 		{
 			auto& state = IS();
 			if (state.engineCalls == 0 || (state.current && state.current->covered)) {
 				a_call();
 				return;
 			}
+			NoteNotCovered(a_compute);
 			Latch::EngineDraws scope(NotPortedReason());
 			a_call();
 		}
@@ -2226,7 +2272,7 @@ namespace RenderGraph::Engine::ImageSpace
 				const auto* effect = static_cast<const RE::ImageSpaceEffect*>(a_effect);
 				const auto* shader = static_cast<const RE::BSImagespaceShader*>(effect);
 				const bool covered = EffectOf(shader) >= 0;
-				EngineCall([&] {
+				EngineCall(shader, [&] {
 					const bool scoped = InScope(shader, [&] {
 						WithEffect(shader, false, covered ? Ineligible() : std::string_view{}, [&] { func(a_effect, a_quad, a_param); });
 					});
@@ -2251,7 +2297,7 @@ namespace RenderGraph::Engine::ImageSpace
 					return;
 				}
 				const bool covered = EffectOf(a_shader) >= 0;
-				EngineCall([&] {
+				EngineCall(a_shader, [&] {
 					const bool scoped = InScope(a_shader, [&] {
 						WithEffect(a_shader, false, covered ? IneligibleExplicit(a_geometry) : std::string_view{}, [&] { func(a_shader, a_geometry); });
 					});
@@ -2274,7 +2320,7 @@ namespace RenderGraph::Engine::ImageSpace
 					func(a_shader, a_x, a_y, a_z);
 					return;
 				}
-				EngineCall([&] {
+				EngineCall(a_shader, [&] {
 					const bool scoped = InScope(a_shader, [&] { WithEffect(a_shader, true, IneligibleDispatch(), [&] { func(a_shader, a_x, a_y, a_z); }); });
 					if (!scoped)
 						func(a_shader, a_x, a_y, a_z);
@@ -2350,7 +2396,7 @@ namespace RenderGraph::Engine::ImageSpace
 							return;
 					} else
 						Flush();
-					EngineDraw([&] { func(a_renderer, a_shape, a_start, a_triangles); });
+					EngineDraw(false, [&] { func(a_renderer, a_shape, a_start, a_triangles); });
 					return;
 				}
 				func(a_renderer, a_shape, a_start, a_triangles);
@@ -2373,7 +2419,7 @@ namespace RenderGraph::Engine::ImageSpace
 							return;
 					} else
 						Flush();
-					EngineDraw([&] { func(a_renderer, a_shader, a_x, a_y, a_z); });
+					EngineDraw(true, [&] { func(a_renderer, a_shader, a_x, a_y, a_z); });
 					return;
 				}
 				func(a_renderer, a_shader, a_x, a_y, a_z);
