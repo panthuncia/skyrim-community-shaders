@@ -1,6 +1,82 @@
 // SPDX-License-Identifier: MIT AND (LicenseRef-GPL-3.0-with-Modding-Exception WITH GPL-3.0-linking-source-exception)
 // Original code Copyright (c) 2022 Ilya Perapechka (MIT), modifications GPL-3.0 with Modding Exception (see EXCEPTIONS.md)
 
+#if defined(CS_ORG_BINDLESS) && !defined(DCLF_BINDLESS)
+// The ORG build of the engine's Effect draws, drawn by Drawcall Limit Fix's menu scenes family
+// (Features/DrawcallLimitFix/Features/MenuViews): a menu model's glow and the main menu's mist. A draw's engine constants (both
+// stages' PerTechnique, PerMaterial and PerGeometry, the alpha test reference), CS's permutation block, its textures' and samplers'
+// heap indices and its geometry are one latch region; a skinned draw's palettes are another (Common/Skinned.hlsli). FrameBuffer
+// (the engine's VS_PerFrame), SharedData and FeatureData are the shared constants. The world's CS features are off, as in
+// Lighting.hlsl's ORG build.
+#	define EFFECT_ORG
+#	undef LIGHT_LIMIT_FIX
+#	undef SKYLIGHTING
+#	undef IBL
+#	undef DYNAMIC_CUBEMAPS
+#	undef CLOUD_SHADOWS
+#	undef TERRAIN_SHADOWS
+#	undef VOLUMETRIC_SHADOWS
+#	undef SCREEN_SPACE_SHADOWS
+#	undef EXP_HEIGHT_FOG
+#	undef WETNESS_EFFECTS
+#	define ORG_SHARED_CONSTANTS
+#	define ORG_HEADER_RESOURCES
+#	define ORG_LATCHED_BONES
+#	define ORG_LATCHED_PERMUTATION EffectDraw
+#	include "Common/OrgResources.hlsli"
+
+// A draw's latched values (EffectSceneConstants in Features/DrawcallLimitFix/Features/MenuViews/MenuScenes.h).
+struct EffectOrgDraw
+{
+	float4 VSTechnique[3];  // VS b0: FogParam, FogNearColor, FogFarColor
+	float4 VSMaterial[3];   // VS b1: TexcoordOffset, SoftMateralVSParams, FalloffData
+	float4 VSGeometry[15];  // VS b2: World, PreviousWorld, MatProj, EyePosition (c12), PosAdjust, TexcoordOffsetMembrane
+	float4 PSTechnique[2];  // PS b0: CameraDataEffect, VPOSOffset and FilteringParam
+	float4 PSMaterial[3];   // PS b1: BaseColor, BaseColorScale, LightingInfluence
+	float4 PSGeometry[12];  // PS b2
+	uint4 Descriptors;      // CS's permutation block: vertex, pixel, extra and extra feature descriptors
+	float EffectRadius;
+	uint BaseTextureIsWorking;
+	uint RenderToUI;
+	float AlphaTestRefRS;  // b11
+	uint VertexStride;
+	uint FirstIndex;
+	uint NullTexture;
+	uint Padding;
+	uint4 Textures[2];  // t0-t7 heap indices
+	uint4 Samplers[2];  // s0-s7 sampler heap indices
+	uint2 VertexAddress;
+	uint2 IndexAddress;
+	uint2 VertexLayout;
+	uint2 Padding2;
+};
+
+struct EffectOrgBones
+{
+	float4 Rows[480];
+};
+
+#	define EFFECT_ORG_RESOURCES(X)                    \
+		X(SHARED, ConstantBuffer, Shared, 0)           \
+		X(LATCH, EffectOrgDraw, EffectDraw, 2)         \
+		X(EXTERN_LATCH, EffectOrgBones, Bones, 9)      \
+		X(UNREAD, Texture2D<float4>, DepthTexture, 17) \
+		X(UNREAD_LATCH, DirectionalShadowLightData, DirectionalShadowLight, 98)
+ORG_PUSH_BLOCK(EFFECT_ORG_RESOURCES(ORG_HANDLE))
+EFFECT_ORG_RESOURCES(ORG_RESOURCE)
+
+static ByteAddressBuffer OrgBonesBuffer = ResourceDescriptorHeap[OrgHandle_Bones];
+/** @brief Row a_row of palette a_palette (0 previous, 1 current) of the draw's latched bones. */
+float4 OrgBoneRow(uint a_palette, uint a_row)
+{
+	return asfloat(OrgBonesBuffer.Load4(OrgOffset_Bones + (a_palette * 240 + a_row) * 16));
+}
+
+#	define DCLF_PULLED_VERTICES
+#	include "Common/DCLFVertexPull.hlsli"
+#	undef DCLF_PULLED_VERTICES
+#endif
+
 #include "Common/ColorManagement.hlsli"
 #include "Common/DCLFObjects.hlsli"
 #include "Common/FrameBuffer.hlsli"
@@ -108,6 +184,27 @@ struct VS_OUTPUT
 };
 
 #ifdef VSHADER
+#	if defined(EFFECT_ORG)
+// The vertex stage's constants, from the draw's latch (EffectOrgDraw) and the shared FrameBuffer (VS_PerFrame is the engine's b12).
+static row_major float4x4 ScreenProj = FrameBuffer::CameraView;
+static row_major float4x4 ViewProj = FrameBuffer::CameraViewProj;
+static float3 BonesPivot = FrameBuffer::CameraPosAdjust.xyz;
+static float3 PreviousBonesPivot = FrameBuffer::CameraPreviousPosAdjust.xyz;
+static float4 FogParam = EffectDraw.VSTechnique[0];
+static float4 FogNearColor = EffectDraw.VSTechnique[1];
+static float4 FogFarColor = EffectDraw.VSTechnique[2];
+static float4 TexcoordOffset = EffectDraw.VSMaterial[0];
+static float4 SoftMateralVSParams = EffectDraw.VSMaterial[1];
+static float4 FalloffData = EffectDraw.VSMaterial[2];
+static row_major float3x4 World = float3x4(EffectDraw.VSGeometry[0], EffectDraw.VSGeometry[1], EffectDraw.VSGeometry[2]);
+static row_major float3x4 PreviousWorld = float3x4(EffectDraw.VSGeometry[3], EffectDraw.VSGeometry[4], EffectDraw.VSGeometry[5]);
+static float4 MatProj[3] = { EffectDraw.VSGeometry[6], EffectDraw.VSGeometry[7], EffectDraw.VSGeometry[8] };
+static float4 EyePosition = EffectDraw.VSGeometry[12];
+static float4 PosAdjust = EffectDraw.VSGeometry[13];
+static float4 TexcoordOffsetMembrane = EffectDraw.VSGeometry[14];
+// The indexed texture coordinates (b11) are not latched: the family refuses a TEXCOORD_INDEX draw.
+static float4 IndexedTexCoord[128];
+#	else
 cbuffer VS_PerFrame : register(b12)
 {
 	row_major float4x4 ScreenProj : packoffset(c0);
@@ -166,6 +263,7 @@ cbuffer IndexedTexcoordBuffer : register(b11)
 	float4 IndexedTexCoord[128] : packoffset(c0);
 }
 #	endif  // !DCLF_PARTICLE_PULL
+#	endif  // EFFECT_ORG
 
 #	if defined(DCLF_BINDLESS)
 // World and PreviousWorld are the object's placement row's (absolute), made relative to this draw's eye and previous eye, the
@@ -302,7 +400,7 @@ VS_INPUT DCLFParticleInput(uint a_vertex)
 
 // Drawcall Limit Fix's builds have no input assembly: main pulls the vertex (DCLFParticleInput; DCLFPulledInput, below) and shades
 // it here.
-#	if defined(DCLF_PARTICLE_PULL) || defined(DCLF_PULLED_VERTICES) || defined(DCLF_PULLED)
+#	if defined(DCLF_PARTICLE_PULL) || defined(DCLF_PULLED_VERTICES) || defined(DCLF_PULLED) || defined(EFFECT_ORG)
 VS_OUTPUT DCLFShade(VS_INPUT input)
 #	else
 VS_OUTPUT main(VS_INPUT input)
@@ -532,7 +630,7 @@ VS_OUTPUT main(VS_PARTICLE_INPUT particleInput)
 {
 	return DCLFShade(DCLFParticleInput(particleInput.VertexID));
 }
-#	elif defined(DCLF_PULLED_VERTICES) || defined(DCLF_PULLED)
+#	elif defined(DCLF_PULLED_VERTICES) || defined(DCLF_PULLED) || defined(EFFECT_ORG)
 // Drawcall Limit Fix's device-generated draws (Lighting.hlsl's DCLF_PULLED_VERTICES main): the vertex's attributes loaded from the
 // geometry's buffers in the draw's push data, decoded as the engine's input layout for the draw's vertex layout has them
 // (VertexInput.cpp, BuildVertexElements), the input assembler's defaults where it lacks one.
@@ -625,6 +723,29 @@ VS_OUTPUT main(uint index : SV_VertexID, uint a_instance : SV_InstanceID)
 	}
 	return vsout;
 }
+#		elif defined(EFFECT_ORG)
+#			if defined(__spirv__)
+// The ORG build's vertex stage: the draw's vertex pulled as the input assembler reads it (its 16-bit index, then its attributes),
+// then the engine's stage (DCLFShade).
+VS_OUTPUT main(uint a_vertexID : SV_VertexID)
+{
+	DCLFDrawVertexLayout = EffectDraw.VertexLayout;
+	const uint indexNumber = EffectDraw.FirstIndex + a_vertexID;
+	const uint indexWord = vk::RawBufferLoad<uint>(DCLFAddress(EffectDraw.IndexAddress) + uint64_t((indexNumber * 2) & ~3u));
+	const uint index = (indexNumber & 1) ? (indexWord >> 16) : (indexWord & 0xFFFF);
+	DCLFStream first = { DCLFAddress(EffectDraw.VertexAddress), EffectDraw.VertexStride };
+	DCLFStream second = { uint64_t(0), 0u };
+	return DCLFShade(DCLFPulledInput(index, first, second));
+}
+#			else
+// The D3D12 build has no vertex pulling yet: it compiles, and draws nothing.
+VS_OUTPUT main(uint a_vertexID : SV_VertexID)
+{
+	VS_OUTPUT vsout = (VS_OUTPUT)0;
+	vsout.Position = float4(0, 0, (float)EffectDraw.FirstIndex, 1);
+	return vsout;
+}
+#			endif
 #		else
 VS_OUTPUT main(uint index : SV_VertexID)
 {
@@ -641,6 +762,21 @@ VS_OUTPUT main(uint index : SV_VertexID)
 #endif
 
 typedef VS_OUTPUT PS_INPUT;
+#if defined(EFFECT_ORG)
+// The ORG build reads the same slots from the heap. The register declarations stay as they are below: Drawcall Limit Fix rewrites
+// those lines for its own builds (PulledSource.cpp).
+static SamplerState SampBaseSampler = SamplerDescriptorHeap[EffectDraw.Samplers[0].x];
+static SamplerState SampNormalSampler = SamplerDescriptorHeap[EffectDraw.Samplers[0].y];
+static SamplerState SampNoiseSampler = SamplerDescriptorHeap[EffectDraw.Samplers[0].z];
+static SamplerState SampDepthSampler = SamplerDescriptorHeap[EffectDraw.Samplers[0].w];
+static SamplerState SampGrayscaleSampler = SamplerDescriptorHeap[EffectDraw.Samplers[1].x];
+
+static Texture2D<float4> TexBaseSampler = ResourceDescriptorHeap[EffectDraw.Textures[0].x];
+static Texture2D<float4> TexNormalSampler = ResourceDescriptorHeap[EffectDraw.Textures[0].y];
+static Texture2D<float4> TexNoiseSampler = ResourceDescriptorHeap[EffectDraw.Textures[0].z];
+static Texture2D<float4> TexDepthSamplerEffect = ResourceDescriptorHeap[EffectDraw.Textures[0].w];
+static Texture2D<float4> TexGrayscaleSampler = ResourceDescriptorHeap[EffectDraw.Textures[1].x];
+#else
 SamplerState SampBaseSampler : register(s0);
 SamplerState SampNormalSampler : register(s1);
 SamplerState SampNoiseSampler : register(s2);
@@ -652,6 +788,7 @@ Texture2D<float4> TexNormalSampler : register(t1);
 Texture2D<float4> TexNoiseSampler : register(t2);
 Texture2D<float4> TexDepthSamplerEffect : register(t3);
 Texture2D<float4> TexGrayscaleSampler : register(t4);
+#endif
 
 #if defined(DEFERRED)
 struct PS_OUTPUT
@@ -689,6 +826,8 @@ static float AlphaTestRefRS;  // the pulled main's
 #	elif defined(DCLF_BINDLESS_DRAW)
 // Drawcall Limit Fix: the alpha test reference is the object record's (as Lighting.hlsl's), not a buffer of its own.
 static const float AlphaTestRefRS = DCLFObjects[DCLFObjectIndex].AlphaTestRef;
+#	elif defined(EFFECT_ORG)
+static float AlphaTestRefRS = EffectDraw.AlphaTestRefRS;
 #	else
 cbuffer AlphaTestRefCB : register(b11)
 {
@@ -717,6 +856,11 @@ static const float4 CameraDataEffect = DCLFEffectCamera;
 // The soft depth (Soft: SetupTechnique binds the depth copy, kPOST_ZPREPASS_COPY, to t3): the frame record's, by name (DrawPipelines.h,
 // kEffectSoftDepthRegister), so a material row does not hold a render target.
 Texture2D<float4> DCLFEffectSoftDepth : register(t118);
+#	elif defined(EFFECT_ORG)
+// The pixel stage's constants, from the draw's latch (EffectOrgDraw).
+static float4 CameraDataEffect = EffectDraw.PSTechnique[0];
+static float2 VPOSOffset = EffectDraw.PSTechnique[1].xy;
+static float2 FilteringParam = EffectDraw.PSTechnique[1].zw;
 #	else
 cbuffer PerTechnique : register(b0)
 {
@@ -726,6 +870,24 @@ cbuffer PerTechnique : register(b0)
 };
 #	endif  // DCLF_BINDLESS
 
+#	if defined(EFFECT_ORG)
+static float4 BaseColor = EffectDraw.PSMaterial[0];
+static float4 BaseColorScale = EffectDraw.PSMaterial[1];
+static float4 LightingInfluence = EffectDraw.PSMaterial[2];
+
+static float4 PLightPositionX[1] = { EffectDraw.PSGeometry[0] };
+static float4 PLightPositionY[1] = { EffectDraw.PSGeometry[1] };
+static float4 PLightPositionZ[1] = { EffectDraw.PSGeometry[2] };
+static float4 PLightingRadiusInverseSquared = EffectDraw.PSGeometry[3];
+static float4 PLightColorR = EffectDraw.PSGeometry[4];
+static float4 PLightColorG = EffectDraw.PSGeometry[5];
+static float4 PLightColorB = EffectDraw.PSGeometry[6];
+static float4 DLightColor = EffectDraw.PSGeometry[7];
+static float4 PropertyColor = EffectDraw.PSGeometry[8];
+static float4 AlphaTestRef = EffectDraw.PSGeometry[9];
+static float4 MembraneRimColor = EffectDraw.PSGeometry[10];
+static float4 MembraneVars = EffectDraw.PSGeometry[11];
+#	else
 cbuffer PerMaterial : register(b1)
 {
 	float4 BaseColor : packoffset(c0);
@@ -750,6 +912,7 @@ cbuffer PerGeometry : register(b2)
 	float4 MembraneRimColor : packoffset(c10);
 	float4 MembraneVars : packoffset(c11);
 };
+#	endif  // EFFECT_ORG
 
 #	if defined(DCLF_BINDLESS)
 // Drawcall Limit Fix (T7d's Effect port): PropertyColor is the object's (SetupGeometry: its property's emittance colour, white without

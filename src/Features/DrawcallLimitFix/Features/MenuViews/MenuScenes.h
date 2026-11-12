@@ -17,8 +17,8 @@
 //   family's batch, between the two.
 //
 // Programs: Utility.hlsl's ORG build (UTILITY_ORG_SCENE: the base texture, the fog of war, depth and the shadow maps, skinned or
-// not) and Lighting.hlsl's (LIGHTING_ORG: the world's CS features off). A draw of a shader with no ORG build yet (Effect, tree LOD)
-// ends its batch's latched part; the engine draws the rest.
+// not), Lighting.hlsl's (LIGHTING_ORG) and Effect.hlsl's (EFFECT_ORG), both with the world's CS features off. A draw of a shader
+// with no ORG build (tree LOD), a particle draw or one the family refuses ends its batch's latched part; the engine draws the rest.
 
 #include "Features/DrawcallLimitFix/Api/Feature.h"
 #include "Features/DrawcallLimitFix/Core/Engine/EngineAccess.h"
@@ -145,6 +145,44 @@ namespace DCLF::Features::MenuViews::Scenes
 	};
 	static_assert(sizeof(LightingSceneConstants) == 1376 && sizeof(LightingSceneConstants) % 16 == 0, "LightingOrgDraw's layout");
 
+	/** @brief The rows of each constant group the Effect latch takes (Effect.hlsl's packoffsets), and its slots (t0-t7, s0-s7). */
+	inline constexpr std::uint32_t kEffectVSTechniqueRows = 3;
+	inline constexpr std::uint32_t kEffectVSMaterialRows = 3;
+	inline constexpr std::uint32_t kEffectVSGeometryRows = 15;
+	inline constexpr std::uint32_t kEffectPSTechniqueRows = 2;
+	inline constexpr std::uint32_t kEffectPSMaterialRows = 3;
+	inline constexpr std::uint32_t kEffectPSGeometryRows = 12;
+	inline constexpr std::uint32_t kEffectSlots = 8;
+	/** @brief The slots Effect.hlsl declares (t0-t4, s0-s4); the rest are latched as null views. */
+	inline constexpr std::uint32_t kEffectSlotsRead = 5;
+
+	/** @brief EffectOrgDraw in Effect.hlsl: an Effect draw's latched values, 752 bytes. */
+	struct EffectSceneConstants
+	{
+		float vsTechnique[kEffectVSTechniqueRows][4];
+		float vsMaterial[kEffectVSMaterialRows][4];
+		float vsGeometry[kEffectVSGeometryRows][4];
+		float psTechnique[kEffectPSTechniqueRows][4];
+		float psMaterial[kEffectPSMaterialRows][4];
+		float psGeometry[kEffectPSGeometryRows][4];
+		std::uint32_t descriptors[4];
+		float effectRadius;
+		std::uint32_t baseTextureIsWorking;
+		std::uint32_t renderToUI;
+		float alphaTestRef;
+		std::uint32_t vertexStride;
+		std::uint32_t firstIndex;
+		std::uint32_t nullTexture;
+		std::uint32_t padding;
+		std::uint32_t textures[kEffectSlots];
+		std::uint32_t samplers[kEffectSlots];
+		std::uint32_t vertexAddress[2];
+		std::uint32_t indexAddress[2];
+		std::uint32_t vertexLayout[2];
+		std::uint32_t padding2[2];
+	};
+	static_assert(sizeof(EffectSceneConstants) == 752 && sizeof(EffectSceneConstants) % 16 == 0, "EffectOrgDraw's layout");
+
 	/** @brief A skinned draw's palettes as Common/Skinned.hlsli's ORG_LATCHED_BONES reads them: the previous frame's (VS b9), then this one's (b10). */
 	inline constexpr std::uint32_t kPaletteRows = 240;
 	inline constexpr std::uint32_t kBonesBytes = 2 * kPaletteRows * 16;
@@ -158,6 +196,7 @@ namespace DCLF::Features::MenuViews::Scenes
 	{
 		Utility,
 		Lighting,
+		Effect,
 	};
 
 	/** @brief One latched draw: its program, targets and the offsets of its values in its run's latch. */
@@ -224,6 +263,8 @@ namespace DCLF::Features::MenuViews::Scenes
 		std::shared_ptr<const void> UtilityProgram(const Family::ProgramKey& a_key, const RE::BSShader& a_shader);
 		/** @brief The Lighting program for a key: null when it cannot be built. */
 		std::shared_ptr<const void> LightingProgram(const Family::ProgramKey& a_key, const RE::BSShader& a_shader);
+		/** @brief The Effect program for a key: null when it cannot be built. */
+		std::shared_ptr<const void> EffectProgram(const Family::ProgramKey& a_key, const RE::BSShader& a_shader);
 		/** @brief The format of a_view's import a_index (rhi::Format value; 0 without one), and of its depth. */
 		std::uint32_t ColourFormat(View a_view, std::uint32_t a_index);
 		std::uint32_t DepthFormat(View a_view);
