@@ -12,7 +12,8 @@
 // query: the BeginQuery and EndQuery inside it go nowhere, the port draws the bracket's draw on the graph with an ORG occlusion query
 // (RasterProgram::DrawDesc's), and its QueryRing resolves the count into a readback buffer. GetQueryData answers from it once that run's
 // GPU work is done, and returns not-ready until then, as D3D11 does. A query begun outside any bracket is the engine's on D3D11, as
-// before. Nothing about a bracket's query reaches D3D11.
+// before. Nothing about a bracket's query reaches D3D11. The ports: the sky family's sun client and the decal occlusion family
+// (Features/DrawcallLimitFix/Features/DecalOcclusion).
 //
 // Header free of ORG and Vulkan includes, except BasicRHI's rhi.h for the record-time helpers.
 
@@ -48,15 +49,19 @@ namespace RenderGraph::Engine::OcclusionQueries
 	void Install();
 
 	/**
-	 * @brief A render-thread scope around an engine call that begins a query, draws and ends it (Sun::SubmitOcclusionQuery's draw). The
-	 * engine's first BeginQuery inside it takes its ring slot for the graph: that BeginQuery and its EndQuery go nowhere, and GetQueryData
-	 * answers the slot from the graph. The port then commits the slot with its run (QueryRing::Commit), or skips it (Skip): a skipped slot
-	 * answers the last count it had, at once. At the scope's end a slot that was neither, or whose run was not submitted, is skipped.
+	 * @brief A render-thread scope around an engine call that begins a query, draws and ends it (Sun::SubmitOcclusionQuery's draw, the
+	 * decal occlusion test). The engine's first BeginQuery inside it takes its ring slot for the graph: that BeginQuery and its EndQuery
+	 * go nowhere, and GetQueryData answers the slot from the graph. The port then commits the slot with its run (QueryRing::Commit), or
+	 * skips it (Skip): a skipped slot answers at once, with its last count, or with the bracket's skip answer when it has one. At the
+	 * scope's end a slot that was neither, or whose run was not submitted, is skipped.
 	 */
 	class Bracket
 	{
 	public:
+		/** @brief A skipped slot answers its last count (the sun: its glare holds while a draw is skipped). */
 		Bracket();
+		/** @brief A skipped slot answers a_skipAnswer (the decal test: a count of 1 places the decal as a visible one). */
+		explicit Bracket(std::uint32_t a_skipAnswer);
 		~Bracket();
 		Bracket(const Bracket&) = delete;
 		Bracket& operator=(const Bracket&) = delete;
@@ -64,13 +69,18 @@ namespace RenderGraph::Engine::OcclusionQueries
 		/** @brief The ring slot the engine began inside the scope, or kNoSlot. */
 		std::int32_t Slot() const { return slot; }
 
-		/** @brief The slot's draw is not drawn: it answers its last count (logged once per reason). */
+		/** @brief The slot's draw is not drawn: it answers its skip answer (logged once per reason). */
 		void Skip(std::string_view a_why);
+
+		/** @brief The slot answers a_count at once, with no run: the bracket drew nothing, so nothing passed (the decal test's empty cull). */
+		void Answer(std::uint32_t a_count);
 
 	private:
 		friend struct Hooks;
 		Bracket* outer = nullptr;
 		std::int32_t slot = kNoSlot;
+		bool hasSkipAnswer = false;
+		std::uint32_t skipAnswer = 0;
 	};
 
 #if defined(CS_HAS_RENDER_GRAPH)
@@ -109,7 +119,8 @@ namespace RenderGraph::Engine::OcclusionQueries
 
 		/**
 		 * @brief The client's commit (render thread, the host's CurrentRun): the run counts engine ring slot a_slots[i] with query i
-		 * (kNoSlot: none). Reads the counts of its lease index's last run first.
+		 * (kNoSlot: none). A slot named by several queries answers their sum (the decal test's draws). Reads the counts of its lease
+		 * index's last run first.
 		 */
 		void Commit(const org::RunRef& a_run, std::span<const std::int32_t> a_slots);
 		/** @brief The client's executed callback (render thread): the run last committed was submitted. */

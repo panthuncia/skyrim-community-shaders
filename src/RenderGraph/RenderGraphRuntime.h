@@ -113,6 +113,7 @@ public:
 		AnchorEngineDraws,
 		AnchorEngineQueries,
 		AnchorVolumetricLighting,
+		AnchorDecalQueries,
 		Count
 	};
 

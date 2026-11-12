@@ -36,7 +36,7 @@ namespace FrameAnchors
 		using Segment = RenderGraphRuntime::Segment;
 
 		constexpr std::uint32_t kAnchors = static_cast<std::uint32_t>(Anchor::Count);
-		static_assert(static_cast<std::uint32_t>(Segment::AnchorVolumetricLighting) - static_cast<std::uint32_t>(Segment::AnchorReflectionsPrepass) + 1 == kAnchors,
+		static_assert(static_cast<std::uint32_t>(Segment::AnchorDecalQueries) - static_cast<std::uint32_t>(Segment::AnchorReflectionsPrepass) + 1 == kAnchors,
 			"one segment per anchor, in the anchors' order");
 		static_assert(static_cast<std::uint32_t>(Segment::Count) <= 64, "TakeSubmittedSegments holds one bit per segment");
 
@@ -92,12 +92,15 @@ namespace FrameAnchors
 			{ "EngineQueries", { "CS anchor: engine queries", "CS anchor: engine queries inputs", "FrameAnchors::EngineQueries / ", "cs.anchor.engine-queries" }, false },
 			// Runs a frame: one, at the VL blur's call in RenderWorldPostProcess (the generate, the raymarch, the apply and the blurs)
 			{ "VolumetricLighting", { "CS anchor: volumetric lighting", "CS anchor: volumetric lighting inputs", "FrameAnchors::VolumetricLighting / ", "cs.anchor.volumetric-lighting" }, false },
+			// Runs a frame: one per decal occlusion test (the decals the engine places this frame; none in most frames)
+			{ "DecalQueries", { "CS anchor: decal queries", "CS anchor: decal queries inputs", "FrameAnchors::DecalQueries / ", "cs.anchor.decal-queries" }, false },
 		} };
 
 		// Where each segment runs in a frame: AddToFrame puts an anchor before the first epoch of the order that runs after it. A
 		// segment's place only has to be right against the anchors next to it; the order names the frame,
 		// while the ledgers order the work whatever runs.
 		constexpr std::array<Segment, static_cast<std::size_t>(Segment::Count)> kTimeline{
+			Segment::AnchorDecalQueries,       // the decal occlusion tests, at the frame's start before Main::Draw
 			Segment::AnchorEngineShadowClear,  // each shadow map slice's clear, before its draws (nominally here)
 			Segment::ShadowView,
 			Segment::SkyOcclusion,

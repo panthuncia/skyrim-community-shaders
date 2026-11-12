@@ -6,6 +6,7 @@
 #include "Features/DrawcallLimitFix/Features/Actors/Actors.h"
 #include "Features/DrawcallLimitFix/Features/Billboards/Billboards.h"
 #include "Features/DrawcallLimitFix/Features/BloodSplatter/BloodSplatter.h"
+#include "Features/DrawcallLimitFix/Features/DecalOcclusion/DecalOcclusion.h"
 #include "Features/DrawcallLimitFix/Features/Decals/Decals.h"
 #include "Features/DrawcallLimitFix/Features/Effects/Effects.h"
 #include "Features/DrawcallLimitFix/Features/Fades/Fades.h"
@@ -56,6 +57,7 @@ namespace DCLF::Features
 		// - Tree LOD's table uploads run after tree wind's, and Grass's scene resources and commit hook run after Tree LOD's.
 		// - Faces' coordinator component runs after the others', except Fades'. Both act on the slot tables' reset.
 		// - Sky registers nothing with Core (its hooks and its anchors' clients are its own), so its place sets no order; it is before Fades.
+		//   Decal occlusion is the same kind, listed after it.
 		// - Menu views registers only report lines (its probe's hooks are its own), so its place sets no order either; it is before Fades.
 		// - Water, Blood splatter and Shadow mask are the same kind (the EngineDraws anchor's clients); they are listed after Menu views.
 		// - Fades is last. Its pool, scene resources, commit hook, pass setups, coordinator component and stand-in observer run after every
@@ -91,6 +93,7 @@ namespace DCLF::Features
 			Faces::Feature(),
 			FirstPerson::Feature(),
 			Sky::Feature(),
+			DecalOcclusion::Feature(),
 			MenuViews::Feature(),
 			Water::Feature(),
 			BloodSplatter::Feature(),
