@@ -45,6 +45,9 @@ $modList = Join-Path $Mo2 "profiles\$Profile2\modlist.txt"
 $overwrite = Join-Path $Mo2 'overwrite'
 $skse = Join-Path ([Environment]::GetFolderPath('MyDocuments')) 'My Games\Skyrim Special Edition\SKSE'
 $statePath = Join-Path $Root 'state.json'
+# The mods a run turned off, until it turns them back on: a run killed before its finally leaves them here for the next run or
+# restore to put back.
+$modsOffPath = Join-Path $Root 'mods-off.txt'
 # What a build writes that the other build must not see: moved, not copied, so a swap is instant. Settings stay shared,
 # so every variant runs the same ones (what a build does not know, it ignores).
 $liveState = @(
@@ -115,7 +118,10 @@ function Disable-Mods([string[]]$mods) {
         }
     }
     foreach ($mod in $mods) { if ($changed -notcontains $mod) { Write-Warning "No enabled mod '$mod' in $modList" } }
-    if ($changed) { Set-Content $modList $lines -Encoding utf8 }
+    if ($changed) {
+        Set-Content $modList $lines -Encoding utf8
+        Add-Content $modsOffPath $changed -Encoding utf8
+    }
     return $changed
 }
 # Turns each named mod's "-name" line back into "+name".
@@ -126,6 +132,15 @@ function Set-ModsEnabled([string[]]$mods) {
         if ($lines[$i].StartsWith('-') -and $mods -contains $lines[$i].Substring(1)) { $lines[$i] = '+' + $lines[$i].Substring(1) }
     }
     Set-Content $modList $lines -Encoding utf8
+    Remove-Item $modsOffPath -ErrorAction SilentlyContinue
+}
+# Turns back on what an earlier run turned off and never restored (it was killed).
+function Restore-LeftoverMods {
+    if (Test-Path $modsOffPath) {
+        $left = @(Get-Content $modsOffPath | Where-Object { $_ } | Select-Object -Unique)
+        Write-Warning "Turning back on mods an earlier run left off: $($left -join ', ')"
+        Set-ModsEnabled $left
+    }
 }
 function Enabled-CsMod {
     Get-Content $modList | Where-Object { $_ -match '^\+(CS AB .+|CommunityShaders_AIO|CommunityShaders_AIO_native|CommunityShaders_ORG_Staging|Community Shaders DXVK ORG|CS ORG DXVK Optimized)$' } | ForEach-Object { $_.Substring(1) } | Select-Object -First 1
@@ -172,6 +187,7 @@ switch ($Action) {
     'use' { Use-Variant $Name; "Live: $Name" }
     'restore' {
         Assert-NotRunning
+        Restore-LeftoverMods
         $state = Get-State
         if (-not $state.originalMod) { 'Nothing to restore'; return }
         if ($state.live -ne '_original') {
@@ -191,6 +207,7 @@ switch ($Action) {
     }
     'run' {
         Use-Variant $Name
+        Restore-LeftoverMods
         $scenario = Join-Path $PSScriptRoot "scenarios\$Argument.env"
         if (-not (Test-Path $scenario)) { throw "No scenario $scenario" }
         if ($DumpAtFrame -and (-not $DumpPath -or (Test-Path $DumpPath))) { throw "-DumpAtFrame needs a -DumpPath that does not exist yet" }
