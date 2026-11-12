@@ -1874,7 +1874,10 @@ void DCLFTextureFeedback(float2 a_uv, uint2 a_pixel)
 #		endif
 	const uint3 feedback = DeviceLoad(uint3, DeviceRefAdd(row, 768 + 4), 4);
 	const DeviceRef buffer = feedback.yz;
-	if (DeviceRefIsNull(buffer) || DeviceLoad(uint, buffer, 4) == 0)
+	// Two tests: HLSL 2018's || does not short-circuit, so one condition would load through the null ref.
+	if (DeviceRefIsNull(buffer))
+		return;
+	if (DeviceLoad(uint, buffer, 4) == 0)
 		return;
 	const float major = max(dot(dx, dx), dot(dy, dy)), minor = min(dot(dx, dx), dot(dy, dy));
 	// Anisotropic filtering reads the mip of the minor axis, within its ratio (16).
