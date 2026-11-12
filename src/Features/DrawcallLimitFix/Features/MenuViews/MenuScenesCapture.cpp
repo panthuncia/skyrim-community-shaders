@@ -24,6 +24,7 @@
 #include <algorithm>
 #include <format>
 #include <string>
+#include <utility>
 
 namespace DCLF::Features::MenuViews::Scenes
 {
@@ -64,8 +65,7 @@ namespace DCLF::Features::MenuViews::Scenes
 		bool SceneTechnique(std::uint32_t a_descriptor)
 		{
 			constexpr auto kScene = static_cast<std::uint32_t>(Flags::RenderBaseTexture) | static_cast<std::uint32_t>(Flags::LocalMapFogOfWar) |
-			                        static_cast<std::uint32_t>(Flags::RenderDepth) | static_cast<std::uint32_t>(Flags::RenderShadowmap) |
-			                        static_cast<std::uint32_t>(Flags::RenderShadowmapPb);
+			                        static_cast<std::uint32_t>(Flags::RenderDepth) | static_cast<std::uint32_t>(Flags::RenderShadowmap);
 			constexpr auto kNot = static_cast<std::uint32_t>(Flags::RenderShadowmask) | static_cast<std::uint32_t>(Flags::RenderShadowmaskSpot) |
 			                      static_cast<std::uint32_t>(Flags::RenderShadowmaskPb) | static_cast<std::uint32_t>(Flags::RenderShadowmaskDpb) |
 			                      static_cast<std::uint32_t>(Flags::RenderNormal) | static_cast<std::uint32_t>(Flags::RenderNormalClear) |
@@ -137,6 +137,27 @@ namespace DCLF::Features::MenuViews::Scenes
 		}
 
 		/**
+		 * @brief The draw's FrameBuffer (b12: the camera SetCameraData wrote for it) appended to the run's latch, its matrices transposed
+		 * (kFrameMatrices); its offset in a_offset. False when it is not bound or does not fit.
+		 */
+		bool LatchFrame(Family::Constants::UseId a_use, Run& a_run, std::uint32_t& a_offset)
+		{
+			const auto stage = Family::ConstantBytes(a_use, Stage::Vertex, 12) ? Stage::Vertex : Stage::Pixel;
+			if (!Family::ConstantBytes(a_use, stage, 12))
+				return false;
+			float rows[kFrameRows][4]{};
+			Family::CopyRows(a_use, stage, 12, rows, kFrameRows);
+			for (std::uint32_t m = 0; m < kFrameMatrices; ++m) {
+				float(*matrix)[4] = rows + m * 4;
+				for (std::uint32_t r = 0; r < 4; ++r)
+					for (std::uint32_t c = r + 1; c < 4; ++c)
+						std::swap(matrix[r][c], matrix[c][r]);
+			}
+			a_offset = a_run.Append(std::as_bytes(std::span<const float[4]>(rows, kFrameRows)));
+			return a_offset != ~0u;
+		}
+
+		/**
 		 * @brief A Utility draw, latched: the shadow state SetDirtyStates would apply, the constants the Utility shader's Setup functions
 		 * wrote (the engine constants capture), the palettes of a skinned one, the slots' textures and samplers, the geometry. Null when
 		 * latched; otherwise why the graph cannot draw it (a_detail: what it was about), and the engine draws it.
@@ -181,6 +202,8 @@ namespace DCLF::Features::MenuViews::Scenes
 			constants.alphaTestRef = rss.alphaTestEnabled ? rss.alphaTestRef : 0.0f;
 			if ((descriptor & static_cast<std::uint32_t>(Flags::Skinned)) && !LatchBones(use, run, draw.bonesOffset))
 				return "more palettes than the batch's latch holds";
+			if (!LatchFrame(use, run, draw.frameOffset))
+				return "no FrameBuffer bound, or more than the batch's latch holds";
 
 			draw.program = SceneDraws::UtilityProgram(draw.key, *state->currentShader);
 			if (!draw.program)
@@ -291,6 +314,8 @@ namespace DCLF::Features::MenuViews::Scenes
 			// Lighting's vertex flag 1 << 1: SKINNED (Permutation::LightingFlags::Skinned).
 			if ((state->modifiedVertexDescriptor & 0x2u) && !LatchBones(use, run, draw.bonesOffset))
 				return "more palettes than the batch's latch holds";
+			if (!LatchFrame(use, run, draw.frameOffset))
+				return "no FrameBuffer bound, or more than the batch's latch holds";
 
 			draw.program = SceneDraws::LightingProgram(draw.key, *state->currentShader);
 			if (!draw.program)
@@ -402,6 +427,8 @@ namespace DCLF::Features::MenuViews::Scenes
 			constants.renderToUI = permutation.RenderToUI;
 			if ((state->modifiedVertexDescriptor & static_cast<std::uint32_t>(EffectFlags::Skinned)) && !LatchBones(use, run, draw.bonesOffset))
 				return "more palettes than the batch's latch holds";
+			if (!LatchFrame(use, run, draw.frameOffset))
+				return "no FrameBuffer bound, or more than the batch's latch holds";
 
 			draw.program = SceneDraws::EffectProgram(draw.key, *state->currentShader);
 			if (!draw.program)

@@ -19,6 +19,8 @@
 #	undef SCREEN_SPACE_SHADOWS
 #	undef EXP_HEIGHT_FOG
 #	undef WETNESS_EFFECTS
+#	undef CS_HAIR
+#	undef CS_SKIN
 #	define ORG_SHARED_CONSTANTS
 #	define ORG_HEADER_RESOURCES
 #	define ORG_LATCHED_BONES
@@ -51,6 +53,12 @@ struct EffectOrgDraw
 	uint2 Padding2;
 };
 
+// The draw's FrameBuffer rows (b12, c0-c44), its matrices transposed (OrgSceneFrame, below).
+struct OrgSceneFrameRows
+{
+	float4 Rows[45];
+};
+
 struct EffectOrgBones
 {
 	float4 Rows[480];
@@ -59,11 +67,23 @@ struct EffectOrgBones
 #	define EFFECT_ORG_RESOURCES(X)                    \
 		X(SHARED, ConstantBuffer, Shared, 0)           \
 		X(LATCH, EffectOrgDraw, EffectDraw, 2)         \
-		X(EXTERN_LATCH, EffectOrgBones, Bones, 9)      \
+		X(EXTERN_LATCH, EffectOrgBones, Bones, 9) \
+		X(EXTERN_LATCH, OrgSceneFrameRows, Frame, 12)      \
 		X(UNREAD, Texture2D<float4>, DepthTexture, 17) \
 		X(UNREAD_LATCH, DirectionalShadowLightData, DirectionalShadowLight, 98)
 ORG_PUSH_BLOCK(EFFECT_ORG_RESOURCES(ORG_HANDLE))
 EFFECT_ORG_RESOURCES(ORG_RESOURCE)
+
+// FrameBuffer (the engine's VS_PerFrame, b12) as the draw had it bound, latched with it, its matrices stored transposed: the shared
+// FrameBuffer's ConstantBuffer view, read in this build's vertex stage, made DXC emit invalid SPIR-V (a Function-storage
+// ConstantBuffer). Common/NamespacedCBuffer.hlsli loads it raw from here instead (ORG_SHARED_FRAMEBUFFER_AT).
+struct OrgSceneFrameAt
+{
+	uint FrameSrv;
+	uint FrameOffset;
+};
+static OrgSceneFrameAt OrgSceneFrame = { OrgHandle_Frame, OrgOffset_Frame };
+#	define ORG_SHARED_FRAMEBUFFER_AT OrgSceneFrame
 
 static ByteAddressBuffer OrgBonesBuffer = ResourceDescriptorHeap[OrgHandle_Bones];
 /** @brief Row a_row of palette a_palette (0 previous, 1 current) of the draw's latched bones. */
