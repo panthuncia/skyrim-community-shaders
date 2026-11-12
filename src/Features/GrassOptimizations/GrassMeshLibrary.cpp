@@ -1,4 +1,5 @@
 #include "GrassMeshLibrary.h"
+#include "RenderGraph/Engine/Tripwire/Tripwire.h"
 #include "TruePBR/BSLightingShaderMaterialPBR.h"
 
 GrassMeshLibrary::~GrassMeshLibrary()
@@ -104,7 +105,8 @@ ID3D11ShaderResourceView* GrassMeshLibrary::GetComplexGrass(RE::NiSourceTexture*
 
 	auto& entry = found->second;
 	auto* rt = tex ? tex->rendererTexture : nullptr;
-	auto* resourceView = rt ? rt->resourceView : nullptr;
+	// The engine's view may be a tripwire handle: this dispatch goes to the raw DXVK context.
+	auto* resourceView = rt ? RenderGraph::Engine::Tripwire::Unwrap(rt->resourceView) : nullptr;
 	if (entry.normalLength && entry.resourceView == resourceView) {
 		return entry.normalLength->srv.get();
 	}
