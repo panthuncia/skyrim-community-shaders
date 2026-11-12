@@ -1124,6 +1124,12 @@ A native device handle answers through the native services instead of failing:
     BasicRHI image or buffer (the image moved into GENERAL, uploaded or zeroed), so `GraphResources::ExportTexture`, the
     engine targets, textures, buffers and texture streaming work as they do on DXVK. A port's handle that wraps a native
     handle reaches the same record.
+-   **Texture streaming**: the native device makes the streamer's shells (`Native::CreateStreamShell`, a texture handle
+    without storage and its SRV) and answers the `dxvkStream*` calls (`Native::StreamEnableView` and the rest).
+    `DescribeResource` reads a shell through its window. The gone callback runs when the shell's SRV is released. Engine
+    draws do not read shells natively, so binds stay 0 and the missing callback never runs: DCLF schedules every window.
+-   **Format swizzles**: a format BasicRHI stores as another (A8 as R8, the 16-bit packed formats) is described with the
+    swizzle its views add, so graph imports read the channels the format names.
 -   **External commands**: `RenderGraphRuntime::EmitExternalCommands` (DCLF's CPU pipeline sites and its frame signal) records
     the client's commands into a command buffer of native mode's own and submits it on the graphics queue at the call, with
     the client's waits and signals, between full memory barriers. BasicRHI's queue accesses share one lock with it
