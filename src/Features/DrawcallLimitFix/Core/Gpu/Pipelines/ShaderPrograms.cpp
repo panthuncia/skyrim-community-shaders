@@ -606,6 +606,7 @@ namespace DCLF
 			auto source = std::make_shared<std::string>(reinterpret_cast<const char*>(a_request.source.data()), a_request.source.size());
 			a_request.source = std::as_bytes(std::span(source->data(), source->size()));
 			auto task = [request = std::move(a_request), source, done = std::move(a_done)]() mutable {
+				(void)source;  // holds the request's source until the rewrite replaces it
 				std::string storage, error;
 				auto* compiler = RenderGraphRuntime::Get().ShaderCompiler();
 				if (!compiler)
