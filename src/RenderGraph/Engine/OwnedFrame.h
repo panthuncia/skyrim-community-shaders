@@ -57,6 +57,13 @@ namespace RenderGraph::Engine
 			const std::function<long(IDXGISwapChain*, unsigned, unsigned)>& a_guestPresent);
 
 		/**
+		 * @brief The game's Present when the frame is not shown (a load's hold with the presents held, DCLF's LoadHold): the guest frame
+		 * ends, nothing is queued behind it, and the swap chain keeps the last frame shown. Same thread and lock as Present.
+		 */
+		long EndGuestFrame(IDXGISwapChain* a_swapChain, unsigned a_syncInterval, unsigned a_flags,
+			const std::function<long(IDXGISwapChain*, unsigned, unsigned)>& a_guestPresent);
+
+		/**
 		 * @brief The texture the next Present shows instead of the guest back buffer: HDRDisplay's output, which then needs no copy
 		 * into the back buffer. For that Present only. Same thread as Present (the immediate context's, under the engine's lock).
 		 * @param a_texture A texture DXVK made (not mappable); null shows the back buffer.

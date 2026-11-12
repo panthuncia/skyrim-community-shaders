@@ -605,6 +605,18 @@ namespace RenderGraph::Engine
 		return result;
 	}
 
+	long OwnedFrame::EndGuestFrame(IDXGISwapChain* a_swapChain, unsigned a_syncInterval, unsigned a_flags,
+		const std::function<long(IDXGISwapChain*, unsigned, unsigned)>& a_guestPresent)
+	{
+		if (!state)
+			return a_guestPresent(a_swapChain, a_syncInterval, a_flags);
+		auto& s = *state;
+		std::lock_guard lock(s.presentMutex);
+		// HDRDisplay's source was for this frame's Present only.
+		s.frameSource = nullptr;
+		return a_guestPresent(a_swapChain, a_syncInterval, a_flags);
+	}
+
 	void OwnedFrame::Shutdown()
 	{
 		if (!state)
@@ -675,6 +687,11 @@ namespace RenderGraph::Engine
 	bool OwnedFrame::Initialize(IDXGISwapChain*, ID3D11Device*) { return false; }
 	void OwnedFrame::Shutdown() {}
 	long OwnedFrame::Present(IDXGISwapChain* a_swapChain, unsigned a_syncInterval, unsigned a_flags,
+		const std::function<long(IDXGISwapChain*, unsigned, unsigned)>& a_guestPresent)
+	{
+		return a_guestPresent(a_swapChain, a_syncInterval, a_flags);
+	}
+	long OwnedFrame::EndGuestFrame(IDXGISwapChain* a_swapChain, unsigned a_syncInterval, unsigned a_flags,
 		const std::function<long(IDXGISwapChain*, unsigned, unsigned)>& a_guestPresent)
 	{
 		return a_guestPresent(a_swapChain, a_syncInterval, a_flags);
