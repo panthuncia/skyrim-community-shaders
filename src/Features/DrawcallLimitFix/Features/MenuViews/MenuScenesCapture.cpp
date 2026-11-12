@@ -22,9 +22,11 @@
 #include "Utils/Logging.h"
 
 #include <algorithm>
+#include <cstring>
 #include <format>
 #include <string>
 #include <utility>
+#include <vector>
 
 namespace DCLF::Features::MenuViews::Scenes
 {
@@ -53,6 +55,8 @@ namespace DCLF::Features::MenuViews::Scenes
 			View view = View::LocalMap;
 			std::shared_ptr<Run> run;
 			Family::Passes passes;
+			// The DrawData copy's draw being latched (TakeDynamicDraw): its geometry is two streams. Null for a DrawTriShape draw.
+			const Family::DynamicDrawData* dynamic = nullptr;
 		};
 
 		Capture& GetCapture()
@@ -212,9 +216,15 @@ namespace DCLF::Features::MenuViews::Scenes
 			// The geometry, read by device address while its leases are held (the run keeps them until the GPU is done).
 			Family::Owners owners;
 			Family::Geometry geometry;
-			if (const auto result = Family::LatchGeometry(a_shape, a_start, a_triangles, vs->vertexDesc, engine.topology, geometry, owners, &a_detail);
-				result != Family::GeometryResult::Ok)
+			// A DrawData copy's draw (the particles) pulls its position from stream 1, the dynamic ring.
+			const auto result = a_capture.dynamic ?
+			                        Family::LatchDynamicGeometry(a_capture.dynamic, a_start, a_triangles, vs->vertexDesc, engine.topology, geometry, owners, &a_detail) :
+			                        Family::LatchGeometry(a_shape, a_start, a_triangles, vs->vertexDesc, engine.topology, geometry, owners, &a_detail);
+			if (result != Family::GeometryResult::Ok)
 				return Family::ReasonOf(result);
+			constants.streamAddress[0] = static_cast<std::uint32_t>(geometry.streamAddress);
+			constants.streamAddress[1] = static_cast<std::uint32_t>(geometry.streamAddress >> 32);
+			constants.streamStride = geometry.streamStride;
 			constants.vertexAddress[0] = static_cast<std::uint32_t>(geometry.vertexAddress);
 			constants.vertexAddress[1] = static_cast<std::uint32_t>(geometry.vertexAddress >> 32);
 			constants.indexAddress[0] = static_cast<std::uint32_t>(geometry.indexAddress);
@@ -389,8 +399,7 @@ namespace DCLF::Features::MenuViews::Scenes
 			const auto* vs = rss.currentVertexShader;
 			const auto* state = globals::state;
 			using EffectFlags = SIE::ShaderCache::EffectShaderFlags;
-			if (state->modifiedVertexDescriptor & static_cast<std::uint32_t>(EffectFlags::TexCoordIndex))
-				return "an Effect draw with indexed texture coordinates";
+			const bool texCoordIndex = (state->modifiedVertexDescriptor & static_cast<std::uint32_t>(EffectFlags::TexCoordIndex)) != 0;
 			const auto engine = Pipeline::EngineDrawState::Latch();
 			Draw draw{};
 			draw.shader = Shader::Effect;
@@ -471,7 +480,17 @@ namespace DCLF::Features::MenuViews::Scenes
 					return "its sampler modes have no graph sampler";
 			}
 
-			draw.latchOffset = run.Append(std::as_bytes(std::span<const EffectSceneConstants, 1>(&constants, 1)));
+			// A particle draw's indexed texture coordinates (VS b11: each particle's subtexture rectangle) follow its constants in the latch
+			// (Effect.hlsl's ORG build reads the row a vertex names).
+			std::vector<std::byte> bytes(sizeof(EffectSceneConstants) + (texCoordIndex ? kEffectIndexedTexCoordBytes : 0));
+			std::memcpy(bytes.data(), &constants, sizeof(EffectSceneConstants));
+			if (texCoordIndex) {
+				float rows[kEffectIndexedTexCoordRows][4]{};
+				if (!Family::CopyRows(use, Stage::Vertex, 11, rows, kEffectIndexedTexCoordRows))
+					return "its indexed texture coordinates (VS b11) could not be read";
+				std::memcpy(bytes.data() + sizeof(EffectSceneConstants), rows, kEffectIndexedTexCoordBytes);
+			}
+			draw.latchOffset = run.Append(bytes);
 			if (draw.latchOffset == ~0u)
 				return "more constants than the batch's latch holds";
 			draw.viewport = Family::LatchViewport(engine.depthBias);
@@ -492,6 +511,8 @@ namespace DCLF::Features::MenuViews::Scenes
 			const auto* state = globals::state;
 			if (!rss.currentVertexShader || !rss.currentPixelShader || !state || !state->currentShader)
 				return "no shader bound";
+			if (a_capture.dynamic && state->currentShader->shaderType.get() != RE::BSShader::Type::Effect)
+				return "a DrawData copy's draw of a shader whose scene build pulls one stream";
 			switch (state->currentShader->shaderType.get()) {
 			case RE::BSShader::Type::Utility:
 				return TryLatchUtility(a_capture, a_shape, a_start, a_triangles, a_detail);
@@ -556,6 +577,18 @@ namespace DCLF::Features::MenuViews::Scenes
 			}
 			Engine::ApplyPendingState();
 			return true;
+		}
+
+		/** @brief TakeDraw for DrawDynamicTriShape's DrawData copy (the particles): latched as a two-stream draw. */
+		bool TakeDynamicDraw(const Family::DynamicDrawData* a_data, std::uint32_t a_start, std::uint32_t a_triangles)
+		{
+			auto& capture = GetCapture();
+			if (!capture.active)
+				return false;
+			capture.dynamic = a_data;
+			const bool taken = TakeDraw(reinterpret_cast<const Family::TriShape*>(a_data), a_start, a_triangles);
+			capture.dynamic = nullptr;
+			return taken;
 		}
 
 		/** @brief After the SetupGeometry of a shader the family draws: counts the pass; one that will not reach DrawTriShape ends the latched part. */
@@ -645,6 +678,8 @@ namespace DCLF::Features::MenuViews::Scenes
 			logger::warn("[DCLF] menu scenes: no DrawTriShape detour; the menu scenes stay the engine's");
 			return;
 		}
+		// The particles (a loading-screen model's) draw through the DrawData copy; without it they stay the engine's.
+		Family::AddDynamicDrawTaker("menu scenes", &TakeDynamicDraw);
 		if (MapEnabled()) {
 			if (LocalMapKnown()) {
 				stl::write_thunk_call<SceneBatch<View::LocalMap>>(REL::Offset(Address::kLocalMapSubmit).address());

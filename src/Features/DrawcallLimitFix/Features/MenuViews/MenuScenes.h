@@ -173,15 +173,18 @@ namespace DCLF::Features::MenuViews::Scenes
 		std::uint32_t vertexStride;
 		std::uint32_t firstIndex;
 		std::uint32_t nullTexture;
-		std::uint32_t padding;
+		std::uint32_t streamStride;  // a DrawData copy's stream 1 (the dynamic ring), with streamAddress; 0 for a static draw
 		std::uint32_t textures[kEffectSlots];
 		std::uint32_t samplers[kEffectSlots];
 		std::uint32_t vertexAddress[2];
 		std::uint32_t indexAddress[2];
 		std::uint32_t vertexLayout[2];
-		std::uint32_t padding2[2];
+		std::uint32_t streamAddress[2];
 	};
 	static_assert(sizeof(EffectSceneConstants) == 752 && sizeof(EffectSceneConstants) % 16 == 0, "EffectOrgDraw's layout");
+	/** @brief A TEXCOORD_INDEX draw's indexed texture coordinates (VS b11), latched right after its EffectSceneConstants. */
+	inline constexpr std::uint32_t kEffectIndexedTexCoordRows = 128;
+	inline constexpr std::uint32_t kEffectIndexedTexCoordBytes = kEffectIndexedTexCoordRows * 16;
 
 	/** @brief FrameBuffer (b12) as a draw had it bound, c0-c44 (OrgSceneFrameRows in the ORG builds), latched with the draw. */
 	inline constexpr std::uint32_t kFrameRows = 45;

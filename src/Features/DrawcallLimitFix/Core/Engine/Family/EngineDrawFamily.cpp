@@ -347,7 +347,9 @@ namespace DCLF::Family
 		}
 		a_out.vertexAddress = vertices ? vertices->buffer.address : 0;
 		a_out.indexAddress = indices->buffer.address;
-		a_out.layout = a_shaderVertexDesc & a_data->vertexDesc;
+		// The attributes stream 1 holds (VertexDesc bits 54 and up: DCLFAttribute's second stream) are kept whatever the shader's mask.
+		constexpr std::uint64_t kStreamOneBits = ~((std::uint64_t{ 1 } << 54) - 1);
+		a_out.layout = (a_shaderVertexDesc & a_data->vertexDesc) | (a_data->vertexDesc & kStreamOneBits);
 		a_out.stride = vertices ? stride : 0;
 		a_out.firstIndex = a_start;
 		a_out.indexCount = a_triangles * 3;

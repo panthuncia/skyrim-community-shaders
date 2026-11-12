@@ -44,14 +44,16 @@ struct EffectOrgDraw
 	uint VertexStride;
 	uint FirstIndex;
 	uint NullTexture;
-	uint Padding;
+	uint StreamStride;  // a DrawData copy's stream 1 (the dynamic ring), with StreamAddress; 0 for a static draw
 	uint4 Textures[2];  // t0-t7 heap indices
 	uint4 Samplers[2];  // s0-s7 sampler heap indices
 	uint2 VertexAddress;
 	uint2 IndexAddress;
 	uint2 VertexLayout;
-	uint2 Padding2;
+	uint2 StreamAddress;
 };
+// A TEXCOORD_INDEX draw's indexed texture coordinates (b11, 128 rows) follow its EffectOrgDraw (752 bytes) in the latch.
+#	define EFFECT_ORG_INDEXED_TEXCOORDS 752
 
 // The draw's FrameBuffer rows (b12, c0-c44), its matrices transposed (OrgSceneFrame, below).
 struct OrgSceneFrameRows
@@ -222,7 +224,7 @@ static float4 MatProj[3] = { EffectDraw.VSGeometry[6], EffectDraw.VSGeometry[7],
 static float4 EyePosition = EffectDraw.VSGeometry[12];
 static float4 PosAdjust = EffectDraw.VSGeometry[13];
 static float4 TexcoordOffsetMembrane = EffectDraw.VSGeometry[14];
-// The indexed texture coordinates (b11) are not latched: the family refuses a TEXCOORD_INDEX draw.
+// The indexed texture coordinates (b11) follow the draw's latched values: main loads the row its vertex names.
 static float4 IndexedTexCoord[128];
 #	else
 cbuffer VS_PerFrame : register(b12)
@@ -754,8 +756,17 @@ VS_OUTPUT main(uint a_vertexID : SV_VertexID)
 	const uint indexWord = vk::RawBufferLoad<uint>(DCLFAddress(EffectDraw.IndexAddress) + uint64_t((indexNumber * 2) & ~3u));
 	const uint index = (indexNumber & 1) ? (indexWord >> 16) : (indexWord & 0xFFFF);
 	DCLFStream first = { DCLFAddress(EffectDraw.VertexAddress), EffectDraw.VertexStride };
-	DCLFStream second = { uint64_t(0), 0u };
-	return DCLFShade(DCLFPulledInput(index, first, second));
+	DCLFStream second = { DCLFAddress(EffectDraw.StreamAddress), EffectDraw.StreamStride };
+	const VS_INPUT input = DCLFPulledInput(index, first, second);
+#				if defined(TEXCOORD_INDEX)
+#					if defined(NORMALS)
+	const uint texCoordIndex = min((uint)input.TexCoord0.z, 127u);
+#					else
+	const uint texCoordIndex = min((uint)input.Position.w, 127u);
+#					endif
+	IndexedTexCoord[texCoordIndex] = asfloat(OrgLatch_EffectDraw.Load4(OrgOffset_EffectDraw + EFFECT_ORG_INDEXED_TEXCOORDS + texCoordIndex * 16));
+#				endif
+	return DCLFShade(input);
 }
 #			else
 // The D3D12 build has no vertex pulling yet: it compiles, and draws nothing.
