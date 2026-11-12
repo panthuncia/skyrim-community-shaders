@@ -2925,6 +2925,9 @@ namespace DCLF
 					return state == org::TrackedUploadTicketState::Queued || state == org::TrackedUploadTicketState::Claimed;
 				};
 				if (pending()) {
+					// The copy batch may wait for graph work whose entry point is still in DXVK's stream, which DXVK submits only once
+					// this thread moves on: push it out before waiting, or the wait never ends (copy-queue-sealed-stall).
+					RenderGraphRuntime::Get().FlushPendingStreamWork();
 					auto changes = std::make_shared<std::atomic<std::uint32_t>>(0u);
 					ticket->SetChangeCallback([changes] {
 						changes->fetch_add(1, std::memory_order_release);

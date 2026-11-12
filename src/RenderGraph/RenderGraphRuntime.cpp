@@ -423,6 +423,8 @@ struct RenderGraphRuntime::Impl
 		if (named) {
 			logger::error("[ORG] A shared copy queue submission has waited 0.5 s for {}", DescribeUnsealed(semaphores, values));
 			// What the host had submitted and what each run waits for: the stall's other side (copy-queue-sealed-stall).
+			logger::error("[ORG] DXVK stream at the copy queue's wait: {} graph submissions enqueued, {} submitted", streamEnqueued.load(std::memory_order_acquire),
+				streamSubmitted.load(std::memory_order_acquire));
 			if (host)
 				logger::error("[ORG] host state at the copy queue's wait: {}", host->DescribeAsyncState());
 		}
@@ -2087,6 +2089,23 @@ org::GraphHost* RenderGraphRuntime::Host()
 	return IsActive() ? impl->host.get() : nullptr;
 }
 
+std::uint64_t RenderGraphRuntime::FlushPendingStreamWork()
+{
+	if (!IsActive())
+		return 0;
+	const uint64_t enqueued = impl->streamEnqueued.load(std::memory_order_acquire);
+	const uint64_t submitted = impl->streamSubmitted.load(std::memory_order_acquire);
+	if (enqueued <= submitted)
+		return 0;
+	if (auto* context = globals::d3d::context)
+		context->Flush();
+	static std::atomic<uint32_t> logged = 0;
+	if (logged.fetch_add(1, std::memory_order_relaxed) < 8)
+		logger::info("[ORG] flushed DXVK's stream before a render-thread wait: {} graph submissions were still in it (enqueued {}, submitted {})",
+			enqueued - submitted, enqueued, submitted);
+	return enqueued - submitted;
+}
+
 std::shared_ptr<rhi::TimelinePtr> RenderGraphRuntime::FrameWaitTimeline() const
 {
 	return IsActive() ? impl->frameWaitTimeline : nullptr;
@@ -3001,6 +3020,7 @@ RenderGraphRuntime::~RenderGraphRuntime() = default;
 bool RenderGraphRuntime::IsActive() const { return false; }
 const std::string& RenderGraphRuntime::GetDisabledReason() const { return disabledReason; }
 org::GraphHost* RenderGraphRuntime::Host() { return nullptr; }
+std::uint64_t RenderGraphRuntime::FlushPendingStreamWork() { return 0; }
 std::shared_ptr<rhi::TimelinePtr> RenderGraphRuntime::FrameWaitTimeline() const { return nullptr; }
 std::shared_ptr<const void> RenderGraphRuntime::DeviceOwner() const { return {}; }
 bool RenderGraphRuntime::ExecuteEpoch(Segment, const std::function<void(org::RenderGraph&)>&,

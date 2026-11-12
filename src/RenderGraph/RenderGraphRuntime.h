@@ -182,6 +182,14 @@ public:
 
 	/** @brief The persistent graph host; null when inactive. */
 	org::GraphHost* Host();
+
+	/**
+	 * @brief Render thread, before it blocks on GPU work: when graph work handed to DXVK's stream (a compute or copy queue's entry
+	 * point, an in-stream epoch's signals) has not been submitted yet, flushes the immediate context so DXVK submits it. Without
+	 * this, a wait whose work waits on that entry point never ends: DXVK submits the stream only when this thread moves on.
+	 * @return The stream submissions that were still pending (0: nothing flushed).
+	 */
+	std::uint64_t FlushPendingStreamWork();
 	/**
 	 * @brief The host's frame-wait timeline (GraphHost::SetFrameWaitTimeline): signalled from the dedicated upload queue by a
 	 * producer of per-frame values after their copies, and waited for by every batch submitted while its value is set. The producer's
