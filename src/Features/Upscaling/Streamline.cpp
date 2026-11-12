@@ -425,7 +425,7 @@ bool Streamline::Initialize()
 #if defined(CS_HAS_RENDER_GRAPH)
 	// Asked before the device exists (slInit precedes it), so it reads the requested backend.
 	if (RenderGraph::Backend::Requested() == rhi::Backend::D3D12) {
-		logger::error("[Streamline] off on D3D12 (CS_ORG_BACKEND=d3d12): CS hands Streamline DXVK's Vulkan device and Vulkan resources "
+		logger::error("[Streamline] off on D3D12 (CS_ORG_NATIVE_BACKEND=d3d12): CS hands Streamline DXVK's Vulkan device and Vulkan resources "
 					  "(DXVKInterop). On D3D12 it needs slSetD3DDevice on the native device and D3D12 resource tags, which are not wired yet. "
 					  "CS's sl.fsr, sl.fsr_g and sl.xess plugins are Vulkan-only and turn themselves off on D3D12.");
 		MarkUnavailable();

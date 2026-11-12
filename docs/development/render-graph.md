@@ -1185,6 +1185,32 @@ submissions made before its release have retired (the host's retired callback). 
 ORG resources for D3D11 take their failure paths. At the window's close presents stop; the device and the graph are
 left to the process exit (no DXVK teardown callback).
 
+### Native mode on D3D12
+
+`CS_ORG_NATIVE_BACKEND=d3d12` makes the native device with BasicRHI's D3D12 backend (`CreateBasicRhiDevice` calls
+`Engine::CreateD3D12Device` on the game's adapter) and records it (`RenderGraph::Backend::SetActive`), so the runtime
+shaders build to DXIL. The rest of native mode is the same code, except:
+
+-   **The context's work** is BasicRHI's commands (`CopyBufferRegion`, `CopyTextureRegion`, `CopyBufferToTexture`,
+    `CopyTextureToBuffer`, render target, depth and UAV clears). Each resource moves from Common into the layout its command
+    needs and back, which orders the work with the epochs. Each of the 32 context slots has an RTV, a DSV and a UAV of its
+    own. `GenerateMips` does nothing (no blit; logged once). Copies between staging memory and an image take whole colour
+    subresources only.
+-   **Descriptions for imports**: `DescribeResource` puts the `ID3D12Resource` where the `VkImage` or `VkBuffer` goes, with
+    a buffer's GPU virtual address and no Vulkan format. `ImportDxvkImage` imports it with `rhi::dx12::import_resource`.
+    D3D12's Common layout cannot be a render target, depth or UAV, so a texture resting in Common is imported for
+    exclusive use (the graph moves it into each pass's layout and back), not Common-only.
+-   **Present** waits on the swap chain's frame-latency waitable object first: D3D12's Present does not block for it.
+-   **External commands** (Vulkan command buffers: DCLF's CPU sites and frame signal) are refused with an error line.
+    Without the queue lock they needed, BasicRHI's queue sharing hooks are not installed.
+-   **Drawcall Limit Fix is off** (`[DCLF] Forced off`): its layouts, its SPIR-V reflection and its CPU sites are
+    Vulkan's. The world's geometry is therefore not drawn. Shaders that read buffer device addresses
+    (`vk::RawBufferLoad`: Sky, Water, Effect, Particle, BloodSplatter, DistantTree, RunGrass, Utility and Lighting through
+    `Common/DCLFObjects.hlsli`) do not build to DXIL; each logs its DXIL build error.
+
+Scenarios: `tools/cs-ab/scenarios/native-d3d12.env`, and `native-d3d12-validation.env` with the debug layer and GPU-based
+validation.
+
 ### Known gaps
 
 -   **The ports' D3D11 sides.** Every P4 port makes DXVK objects of ORG resources (`WrapTexture`, `WrapBuffer`,
@@ -1259,10 +1285,11 @@ commas) is read with `Switches::List`: each item trimmed, empty items left out, 
 | `CS_ORG_OWNED_FRAME=1` | BasicRHI creates the device, DXVK runs as its guest, ORG presents ("Owned frame"). Frame generation is unavailable. |
 | `CS_ORG_NATIVE=1` | No DXVK: CS creates a BasicRHI Vulkan device, the engine's device, context and swap chain are tripwire handles over it, the graph runs natively and ORG presents ("Native mode"). Turns on every port switch it needs; a conflicting switch or a feature that needs DXVK stops the start with a message that names it. Logs `[ORG native] stage <n>: ...` per startup stage. |
 | `CS_ORG_NATIVE_VALIDATION=1` | With `CS_ORG_NATIVE=1`, BasicRHI creates the device with Vulkan validation (P6.4). |
-| `CS_ORG_BACKEND=d3d12` | The render graph's backend: `vulkan` (default) or `d3d12`. D3D12 needs `CS_ORG_NATIVE=1` and a build with `CS_ORG_D3D12` (default on); without either the graph is off with that reason. See org-full-port.md, "Phase 7 status". |
+| `CS_ORG_NATIVE_BACKEND=d3d12` | Native mode's device: `vulkan` (default) or `d3d12` ("Native mode on D3D12"). It needs `CS_ORG_NATIVE=1` and a build with `CS_ORG_D3D12` (default on); without either the graph is off with that reason. With `CS_ORG_NATIVE_VALIDATION=1` the D3D12 debug layer is on, and `SARP_D3D12_GPU_VALIDATION=1` adds GPU-based validation. |
+| `CS_ORG_NATIVE_RHI_CONTEXT=1` | Native mode on Vulkan: the context's copies, clears and fills are recorded with BasicRHI's commands, as on D3D12, instead of Vulkan's own. For comparing the two paths on one device. |
 | `CS_ORG_D3D12_SELFTEST=1` | Beside the game, on a D3D12 device of its own: builds `RenderGraph/D3D12SelfTest.hlsl` to DXIL, runs one dispatch through the descriptor heap and root constants and checks the readback, then presents 120 frames to a small window. Logs `[ORG] D3D12 self-test: passed` or the step that failed. `CS_ORG_D3D12_SELFTEST_HDR=1` asks the window for HDR10. Needs no native mode. |
 | `CS_ORG_D3D12_DEBUG=1` | The D3D12 debug layer on the self-test's device (and DRED with it). |
-| `CS_ORG_D3D12_SDK=<version>` | With `CS_ORG_BACKEND=d3d12`: load the Agility SDK of that `D3D12SDKVersion` through a device factory. Its `D3D12Core.dll` comes from `CS_ORG_D3D12_SDK_PATH`, else `Data/SKSE/Plugins/CommunityShaders/D3D12`. Unset: the system's D3D12 runtime. |
+| `CS_ORG_D3D12_SDK=<version>` | With `CS_ORG_NATIVE_BACKEND=d3d12`: load the Agility SDK of that `D3D12SDKVersion` through a device factory. Its `D3D12Core.dll` comes from `CS_ORG_D3D12_SDK_PATH`, else `Data/SKSE/Plugins/CommunityShaders/D3D12`. Unset: the system's D3D12 runtime. |
 | `CS_ORG_CRASH_MARKERS=0` | With the owned frame, BasicRHI's crash markers off even in hang mode. They cost about a third of the frame rate in Dragonsreach on the RX 6600 (43 against 60 fps, Dev-Fast). |
 | `BASICRHI_VK_CRASH_MARKERS=1` | BasicRHI's native crash markers and fault reports (`VK_AMD_buffer_marker`, `VK_NV_device_diagnostic_checkpoints`, `VK_EXT_device_fault`, whichever the device has) on any BasicRHI device, also the one adopted from DXVK, where `DeviceCreateInfo::enableCrashMarkers` is not set. Read by BasicRHI (`rhi.h`). They mark BasicRHI's own lists; DXVK's markers (`DXVK_DEBUG=hang`, which also enables `VK_AMD_buffer_marker`) cover only DXVK's commands. On device loss the first timeline that reads `UINT64_MAX` dumps them. A test run adds it with `-Env BASICRHI_VK_CRASH_MARKERS=1`. |
 | `CS_ORG=features` | Request the device features but never create the graph (isolates device-configuration side effects). |

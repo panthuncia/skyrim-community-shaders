@@ -20,10 +20,12 @@ namespace RenderGraph::Engine
 		// DRED breadcrumbs and page-fault reports, logged on device removal (DXVK_DEBUG=hang, CS_ORG_CRASH_MARKERS).
 		bool crashMarkers = false;
 		std::uint32_t framesInFlight = 3;
+		// The adapter to create the device on (its LUID, LowPart and HighPart as one 64-bit pattern). 0 lets BasicRHI choose.
+		std::uint64_t adapterLuid = 0;
 	};
 
 	/**
-	 * @brief CS_ORG_NATIVE=1 with CS_ORG_BACKEND=d3d12: creates the render graph's D3D12 device through BasicRHI.
+	 * @brief CS_ORG_NATIVE=1 with CS_ORG_NATIVE_BACKEND=d3d12: creates the render graph's D3D12 device through BasicRHI.
 	 *
 	 * The device has a graphics, a compute and a copy queue, and shader-visible heaps the size of the Vulkan descriptor buffer's:
 	 * 1,000,000 CBV/SRV/UAV descriptors and 2048 samplers. CS shaders bind through SM 6.6 ResourceDescriptorHeap and

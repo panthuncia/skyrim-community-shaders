@@ -6,6 +6,7 @@
 #if defined(CS_HAS_DCLF)
 
 #	include "Deferred.h"
+#	include "RenderGraph/Backend.h"
 #	include "RenderGraph/Engine/Tripwire/Tripwire.h"
 #	include "Features/DrawcallLimitFix/Api/MaterialWrites.h"
 #	include "Features/DrawcallLimitFix/Core/Engine/EngineReadWindow.h"
@@ -227,7 +228,11 @@ void DrawcallLimitFix::PostPostLoad()
 
 void DrawcallLimitFix::SetupResources()
 {
-	if (installed && RenderGraphRuntime::Get().IsActive() && RenderGraphRuntime::EpochsEnabled())
+	// D3D12 (native mode, CS_ORG_NATIVE_BACKEND=d3d12): DCLF's draw layouts bind through VK_EXT_descriptor_heap record mappings, its
+	// pipelines reflect SPIR-V, and its CPU sites record Vulkan command buffers. None of it has a D3D12 port yet, so DCLF is off there
+	// and its thousands of Lighting builds are not compiled.
+	const bool d3d12 = ::RenderGraph::Backend::IsD3D12();
+	if (installed && !d3d12 && RenderGraphRuntime::Get().IsActive() && RenderGraphRuntime::EpochsEnabled())
 		DCLF::ShaderPrograms::Get().StartPrecompile();
 	// Runs right after the render graph tried to adopt DXVK's device (State::SetupResources). The hooks went in at PostPostLoad,
 	// before any device existed; without the graph (or its epochs: CS_ORG_EPOCHS, async: CS_ORG_ASYNC_EPOCHS) or the device's
@@ -236,7 +241,10 @@ void DrawcallLimitFix::SetupResources()
 	if (!installed)
 		return;
 	auto& graph = RenderGraphRuntime::Get();
-	if (!graph.IsActive())
+	if (d3d12)
+		unavailableReason = "DCLF is not ported to D3D12 yet (CS_ORG_NATIVE_BACKEND=d3d12): its draw layouts use VK_EXT_descriptor_heap record "
+		                    "mappings, its pipelines reflect SPIR-V and its CPU sites record Vulkan command buffers; the world's geometry is not drawn";
+	else if (!graph.IsActive())
 		unavailableReason = graph.GetDisabledReason();
 	else if (!RenderGraphRuntime::EpochsEnabled())
 		unavailableReason = "the render graph runs without epochs (CS_ORG_EPOCHS=0)";

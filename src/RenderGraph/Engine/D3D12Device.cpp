@@ -167,6 +167,10 @@ namespace RenderGraph::Engine
 		ci.enableDebug = a_options.debug;
 		ci.enableCrashMarkers = a_options.crashMarkers;
 		ci.d3d12DeviceFactory = factory.get();
+		if (a_options.adapterLuid) {
+			ci.adapterLuid = a_options.adapterLuid;
+			ci.requireAdapterLuid = true;
+		}
 
 		// Streamline's interposer stays off: CS loads Streamline itself (Features/Upscaling/Streamline).
 		a_device = std::make_shared<rhi::DevicePtr>();

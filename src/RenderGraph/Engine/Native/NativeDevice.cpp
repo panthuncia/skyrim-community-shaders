@@ -17,8 +17,14 @@
 #	include "RenderGraph/DxvkOrgInterop.h"
 #	include "RenderGraph/Engine/Tripwire/GuestDevice.h"
 #	include "RenderGraph/Engine/Tripwire/Tripwire.h"
+#	include "RenderGraph/Backend.h"
+#	include "RenderGraph/Engine/D3D12Device.h"
 #	include "RenderGraph/RenderGraphRuntime.h"
 #	include "RenderGraph/Switches.h"
+
+#	if defined(CS_ORG_HAS_D3D12)
+#		include <d3d12.h>
+#	endif
 
 #	include <algorithm>
 #	include <array>
@@ -41,6 +47,43 @@ namespace RenderGraph::Engine::Native
 		{
 			static const auto s_proc = reinterpret_cast<PFN_vkGetInstanceProcAddr>(::GetProcAddress(::LoadLibraryW(L"vulkan-1.dll"), "vkGetInstanceProcAddr"));
 			return s_proc;
+		}
+
+		/** @brief Whether the native device is D3D12 (CS_ORG_NATIVE_BACKEND=d3d12). */
+		bool OnD3D12()
+		{
+			return ::RenderGraph::Backend::IsD3D12();
+		}
+
+		/**
+		 * @brief Whether the context's work is recorded with BasicRHI commands (copies, clears, fills) instead of Vulkan's own.
+		 * Always on D3D12. On Vulkan only with CS_ORG_NATIVE_RHI_CONTEXT=1, to compare the two paths on one device.
+		 */
+		bool RhiContext()
+		{
+			static const bool vulkanOptIn = Switches::On("CS_ORG_NATIVE_RHI_CONTEXT");
+			return OnD3D12() || vulkanOptIn;
+		}
+
+		/** @brief The ID3D12Resource behind a BasicRHI resource of the D3D12 device, or null. */
+		void* D3D12ResourceOf(const rhi::Resource& a_resource)
+		{
+			rhi::D3D12ResourceInfo info{};
+			return rhi::QueryNativeResource(a_resource, rhi::RHI_IID_D3D12_RESOURCE, &info, sizeof(info)) ? info.resource : nullptr;
+		}
+
+		/** @brief A D3D12 buffer's GPU virtual address (0 for a texture, or without the D3D12 backend). */
+		uint64_t D3D12AddressOf(void* a_resource)
+		{
+#	if defined(CS_ORG_HAS_D3D12)
+			if (!a_resource)
+				return 0;
+			auto* resource = static_cast<ID3D12Resource*>(a_resource);
+			return resource->GetDesc().Dimension == D3D12_RESOURCE_DIMENSION_BUFFER ? resource->GetGPUVirtualAddress() : 0;
+#	else
+			(void)a_resource;
+			return 0;
+#	endif
 		}
 
 		VkBaseOutStructure* FindStruct(const void* a_chain, VkStructureType a_type)
@@ -199,6 +242,25 @@ namespace RenderGraph::Engine::Native
 		 */
 		bool CreateBasicRhiDevice(IDXGIAdapter* a_adapter, std::shared_ptr<rhi::DevicePtr>& a_out, std::string& a_reason)
 		{
+			// CS_ORG_NATIVE_BACKEND=d3d12: BasicRHI's D3D12 device on the same adapter. Everything after this point is the same
+			// code, except where a function asks OnD3D12().
+			if (::RenderGraph::Backend::Requested() == rhi::Backend::D3D12) {
+				D3D12DeviceOptions options{};
+				// CS_ORG_NATIVE_VALIDATION=1: the D3D12 debug layer (SARP_D3D12_GPU_VALIDATION=1 adds GPU-based validation).
+				options.debug = Switches::On("CS_ORG_NATIVE_VALIDATION");
+				options.crashMarkers = (Switches::Equals("DXVK_DEBUG", "hang") || Aftermath::WantsCrashAnalysis()) && !Switches::Off("CS_ORG_CRASH_MARKERS");
+				options.framesInFlight = RenderGraphRuntime::kGameFramesInFlight;
+				DXGI_ADAPTER_DESC adapter{};
+				if (a_adapter && SUCCEEDED(a_adapter->GetDesc(&adapter)))
+					options.adapterLuid = (static_cast<uint64_t>(static_cast<uint32_t>(adapter.AdapterLuid.HighPart)) << 32) | adapter.AdapterLuid.LowPart;
+				if (!Engine::CreateD3D12Device(options, a_out, a_reason))
+					return false;
+				::RenderGraph::Backend::SetActive(rhi::Backend::D3D12);
+				Stage("device", fmt::format("BasicRHI D3D12 device on '{}' (debug layer {}, GPU-based validation {}, DRED {})",
+									stl::utf16_to_utf8(adapter.Description).value_or("?"), options.debug,
+									options.debug && Switches::On("SARP_D3D12_GPU_VALIDATION"), options.debug || options.crashMarkers));
+				return true;
+			}
 			FeatureHook hook;
 			rhi::DeviceCreateInfo::VulkanCreateHooks hooks{ &hook, nullptr, &FeatureHook::OnDevice };
 			rhi::DeviceCreateInfo ci{};
@@ -225,6 +287,7 @@ namespace RenderGraph::Engine::Native
 				a_out.reset();
 				return false;
 			}
+			::RenderGraph::Backend::SetActive(rhi::Backend::Vulkan);
 			const bool debugUtils = ci.enableDebug;
 			Stage("device", fmt::format("BasicRHI Vulkan device on '{}' ({}; validation {}, crash markers {})", stl::utf16_to_utf8(adapter.Description).value_or("?"),
 								hook.summary.empty() ? std::string("BasicRHI's own feature set") : hook.summary, debugUtils, ci.enableCrashMarkers));
@@ -353,8 +416,11 @@ namespace RenderGraph::Engine::Native
 				const bool ok = device.CreateCommandAllocator(rhi::QueueKind::Graphics, allocator) == rhi::Result::Ok && allocator &&
 				                device.CreateCommandList(rhi::QueueKind::Graphics, allocator.Get(), list) == rhi::Result::Ok && list &&
 				                device.CreateTimeline(timeline, 0, "CS native one-shot") == rhi::Result::Ok && timeline;
-				if (ok)
+				if (ok) {
 					list->SetName("CS native creation");
+					// A list is made recording; it begins again at its first use (D3D12 resets only a closed list).
+					list->End();
+				}
 				return ok;
 			}
 
@@ -391,12 +457,17 @@ namespace RenderGraph::Engine::Native
 		/**
 		 * @brief The immediate context's work: one command list per operation (a copy, a clear, a mip chain), submitted on the graphics
 		 * queue when the call is made. Calls reach it in the order D3D11 code makes them, and the graph's epochs submit on the same queue
-		 * at their points, so each operation lands between the epochs before and after it. A full memory barrier before and after each
-		 * one orders it with that work. Every image rests in GENERAL, so the commands use it there and leave it there.
+		 * at their points, so each operation lands between the epochs before and after it. Every image rests in Common (GENERAL on
+		 * Vulkan) between operations.
 		 *
-		 * The commands are Vulkan's own (vkCmdCopyImage, vkCmdClearColorImage, ...) inside a BasicRHI command list. Nothing waits
-		 * unless a caller asks (Map of a resource the GPU still uses). A list is reused once the timeline has passed it, and what an
-		 * operation keeps alive (its upload buffer) is released then.
+		 * Two ways to record. On Vulkan (the default there) the commands are Vulkan's own (vkCmdCopyImage, vkCmdClearColorImage, ...)
+		 * inside a BasicRHI command list, between full memory barriers, on images left in GENERAL. With RhiContext() (D3D12, or
+		 * CS_ORG_NATIVE_RHI_CONTEXT=1 on Vulkan) they are BasicRHI commands, and each resource moves from Common into the layout and
+		 * access its command needs and back, which orders it with the work before and after. Each slot has descriptors of its own
+		 * for the clears (an RTV, a DSV and a UAV in a shader-visible and a CPU heap), reused with the slot.
+		 *
+		 * Nothing waits unless a caller asks (Map of a resource the GPU still uses). A list is reused once the timeline has passed it,
+		 * and what an operation keeps alive (its upload buffer) is released then.
 		 */
 		class Immediate
 		{
@@ -414,70 +485,93 @@ namespace RenderGraph::Engine::Native
 				PFN_vkCmdFillBuffer fillBuffer = nullptr;
 			};
 
+			/** @brief The descriptors of a slot, for the BasicRHI clears. */
+			struct Descriptors
+			{
+				rhi::DescriptorSlot rtv, dsv, uavShaderVisible, uavCpu;
+			};
+
 			bool Init(rhi::Device a_device)
 			{
 				device = a_device;
 				queue = device.GetQueue(rhi::QueueKind::Graphics);
-				const VkDevice vkDevice = rhi::vulkan::get_device(device);
-				const auto getDeviceProcAddr = reinterpret_cast<PFN_vkGetDeviceProcAddr>(LoaderProc()(rhi::vulkan::get_instance(device), "vkGetDeviceProcAddr"));
-				if (!getDeviceProcAddr)
-					return false;
-				const auto resolve = [&](auto& a_into, const char* a_name) {
-					a_into = reinterpret_cast<std::remove_reference_t<decltype(a_into)>>(getDeviceProcAddr(vkDevice, a_name));
-					return a_into != nullptr;
-				};
-				bool ok = resolve(vk.barrier, "vkCmdPipelineBarrier2") && resolve(vk.copyBuffer, "vkCmdCopyBuffer") && resolve(vk.copyImage, "vkCmdCopyImage") &&
-				          resolve(vk.copyBufferToImage, "vkCmdCopyBufferToImage") && resolve(vk.copyImageToBuffer, "vkCmdCopyImageToBuffer") &&
-				          resolve(vk.blitImage, "vkCmdBlitImage") && resolve(vk.clearColorImage, "vkCmdClearColorImage") &&
-				          resolve(vk.clearDepthStencilImage, "vkCmdClearDepthStencilImage") && resolve(vk.fillBuffer, "vkCmdFillBuffer");
+				bool ok = true;
+				if (!OnD3D12()) {
+					const VkDevice vkDevice = rhi::vulkan::get_device(device);
+					const auto getDeviceProcAddr = reinterpret_cast<PFN_vkGetDeviceProcAddr>(LoaderProc()(rhi::vulkan::get_instance(device), "vkGetDeviceProcAddr"));
+					if (!getDeviceProcAddr)
+						return false;
+					const auto resolve = [&](auto& a_into, const char* a_name) {
+						a_into = reinterpret_cast<std::remove_reference_t<decltype(a_into)>>(getDeviceProcAddr(vkDevice, a_name));
+						return a_into != nullptr;
+					};
+					ok = resolve(vk.barrier, "vkCmdPipelineBarrier2") && resolve(vk.copyBuffer, "vkCmdCopyBuffer") && resolve(vk.copyImage, "vkCmdCopyImage") &&
+					     resolve(vk.copyBufferToImage, "vkCmdCopyBufferToImage") && resolve(vk.copyImageToBuffer, "vkCmdCopyImageToBuffer") &&
+					     resolve(vk.blitImage, "vkCmdBlitImage") && resolve(vk.clearColorImage, "vkCmdClearColorImage") &&
+					     resolve(vk.clearDepthStencilImage, "vkCmdClearDepthStencilImage") && resolve(vk.fillBuffer, "vkCmdFillBuffer");
+				}
+				if (ok && RhiContext()) {
+					const auto heap = [&](rhi::DescriptorHeapType a_type, bool a_shaderVisible, const char* a_name, rhi::DescriptorHeapPtr& a_out) {
+						return device.CreateDescriptorHeap(rhi::DescriptorHeapDesc{ a_type, kSlots, a_shaderVisible, a_name }, a_out) == rhi::Result::Ok && a_out;
+					};
+					ok = heap(rhi::DescriptorHeapType::RTV, false, "CS native immediate RTVs", rtvHeap) &&
+					     heap(rhi::DescriptorHeapType::DSV, false, "CS native immediate DSVs", dsvHeap) &&
+					     heap(rhi::DescriptorHeapType::CbvSrvUav, true, "CS native immediate UAVs", uavHeap) &&
+					     heap(rhi::DescriptorHeapType::CbvSrvUav, false, "CS native immediate UAVs (CPU)", uavCpuHeap);
+				}
 				for (uint32_t i = 0; i < kSlots; ++i) {
 					auto& slot = slots[i];
 					ok = ok && device.CreateCommandAllocator(rhi::QueueKind::Graphics, slot.allocator) == rhi::Result::Ok && slot.allocator &&
 					     device.CreateCommandList(rhi::QueueKind::Graphics, slot.allocator.Get(), slot.list) == rhi::Result::Ok && slot.list;
-					if (ok)
+					if (ok) {
 						slot.list->SetName(fmt::format("CS native immediate {}", i).c_str());
+						// A list is made recording; it begins again at its first use.
+						slot.list->End();
+					}
 				}
 				return ok && device.CreateTimeline(timeline, 0, "CS native immediate context") == rhi::Result::Ok && timeline;
 			}
 
 			/**
-			 * @brief Records a_record and submits it. a_keep lives until the work is done; each of a_used gets the work's value as its
-			 * last use. Returns that value, 0 when the submission failed (logged). Any thread, one at a time.
+			 * @brief Records a_record with Vulkan's own commands and submits it (the Vulkan path). a_keep lives until the work is done;
+			 * each of a_used gets the work's value as its last use. Returns that value, 0 when the submission failed (logged). Any
+			 * thread, one at a time.
 			 */
 			uint64_t Run(const std::string& a_label, const std::function<void(const Vulkan&, VkCommandBuffer)>& a_record,
 				std::vector<std::shared_ptr<const void>> a_keep, std::initializer_list<NativeResource*> a_used)
 			{
-				std::lock_guard guard(lock);
-				auto& slot = slots[next++ % kSlots];
-				if (slot.value && timeline->GetCompletedValue() < slot.value)
-					(void)timeline->HostWait(slot.value);
-				slot.keep.clear();
-				slot.allocator->Recycle();
-				slot.list->Recycle(slot.allocator.Get());
-				const VkCommandBuffer commands = rhi::vulkan::get_cmd_list(slot.list.Get());
-				// The operation's name and its resource, so a device fault's crash markers name the work that ran.
-				BeginLabel(slot.list.Get(), a_label);
-				FullBarrier(commands);
-				a_record(vk, commands);
-				FullBarrier(commands);
-				EndLabel(slot.list.Get());
-				slot.list->End();
-				rhi::CommandList lists[] = { slot.list.Get() };
-				const rhi::TimelinePoint signal{ timeline->GetHandle(), value + 1 };
-				rhi::SubmitDesc submit{};
-				submit.signals = { &signal, 1 };
-				if (queue.Submit({ lists, 1 }, submit) != rhi::Result::Ok) {
-					static std::atomic_flag logged;
-					if (!logged.test_and_set())
-						logger::error("[ORG native] an immediate context operation could not be submitted; such operations are lost");
-					return 0;
-				}
-				slot.value = ++value;
-				slot.keep = std::move(a_keep);
-				for (auto* used : a_used)
-					if (used)
-						used->lastUse.store(value, std::memory_order_release);
-				return value;
+				return Submit(
+					a_label,
+					[&](Slot& a_slot, uint32_t) {
+						const VkCommandBuffer commands = rhi::vulkan::get_cmd_list(a_slot.list.Get());
+						FullBarrier(commands);
+						a_record(vk, commands);
+						FullBarrier(commands);
+					},
+					std::move(a_keep), a_used);
+			}
+
+			/**
+			 * @brief As Run, with BasicRHI commands (RhiContext()): a_record gets the list and the slot's descriptors. Its own barriers
+			 * order it with the work before and after.
+			 */
+			uint64_t RunRhi(const std::string& a_label, const std::function<void(rhi::CommandList&, const Descriptors&)>& a_record,
+				std::vector<std::shared_ptr<const void>> a_keep, std::initializer_list<NativeResource*> a_used)
+			{
+				return Submit(
+					a_label,
+					[&](Slot& a_slot, uint32_t a_index) {
+						Descriptors descriptors{};
+						if (rtvHeap) {
+							descriptors.rtv = { rtvHeap->GetHandle(), a_index };
+							descriptors.dsv = { dsvHeap->GetHandle(), a_index };
+							descriptors.uavShaderVisible = { uavHeap->GetHandle(), a_index };
+							descriptors.uavCpu = { uavCpuHeap->GetHandle(), a_index };
+							a_slot.list->SetDescriptorHeaps(uavHeap->GetHandle(), std::nullopt);
+						}
+						a_record(a_slot.list.Get(), descriptors);
+					},
+					std::move(a_keep), a_used);
 			}
 
 			/** @brief The value of the last work submitted (0 before any). */
@@ -504,6 +598,40 @@ namespace RenderGraph::Engine::Native
 				std::vector<std::shared_ptr<const void>> keep;
 			};
 
+			template <class Body>
+			uint64_t Submit(const std::string& a_label, Body&& a_body, std::vector<std::shared_ptr<const void>> a_keep, std::initializer_list<NativeResource*> a_used)
+			{
+				std::lock_guard guard(lock);
+				const uint32_t index = static_cast<uint32_t>(next++ % kSlots);
+				auto& slot = slots[index];
+				if (slot.value && timeline->GetCompletedValue() < slot.value)
+					(void)timeline->HostWait(slot.value);
+				slot.keep.clear();
+				slot.allocator->Recycle();
+				slot.list->Recycle(slot.allocator.Get());
+				// The operation's name and its resource, so a device fault's crash markers name the work that ran.
+				BeginLabel(slot.list.Get(), a_label);
+				a_body(slot, index);
+				EndLabel(slot.list.Get());
+				slot.list->End();
+				rhi::CommandList lists[] = { slot.list.Get() };
+				const rhi::TimelinePoint signal{ timeline->GetHandle(), value + 1 };
+				rhi::SubmitDesc submit{};
+				submit.signals = { &signal, 1 };
+				if (queue.Submit({ lists, 1 }, submit) != rhi::Result::Ok) {
+					static std::atomic_flag logged;
+					if (!logged.test_and_set())
+						logger::error("[ORG native] an immediate context operation could not be submitted; such operations are lost");
+					return 0;
+				}
+				slot.value = ++value;
+				slot.keep = std::move(a_keep);
+				for (auto* used : a_used)
+					if (used)
+						used->lastUse.store(value, std::memory_order_release);
+				return value;
+			}
+
 			void FullBarrier(VkCommandBuffer a_commands) const
 			{
 				VkMemoryBarrier2 memory{ VK_STRUCTURE_TYPE_MEMORY_BARRIER_2 };
@@ -521,12 +649,12 @@ namespace RenderGraph::Engine::Native
 			rhi::Device device;
 			rhi::Queue queue;
 			Vulkan vk;
+			rhi::DescriptorHeapPtr rtvHeap, dsvHeap, uavHeap, uavCpuHeap;
 			std::array<Slot, kSlots> slots;
 			uint64_t next = 0;
 			rhi::TimelinePtr timeline;
 			uint64_t value = 0;
 		};
-
 
 		/** @brief Logs a failure kind once, with the first resource's name. */
 		void LogOnce(std::atomic<bool>& a_logged, std::string_view a_name, std::string_view a_why)
@@ -871,12 +999,20 @@ namespace RenderGraph::Engine::Native
 			static bool FillImage(NativeResource& a_record, const rhi::Resource& a_resource, const TextureRequest& a_request, DXGI_FORMAT a_dxgiFormat, rhi::Format a_format,
 				uint32_t mips, uint32_t layers, uint32_t depth)
 			{
+				// On D3D12 the description carries the ID3D12Resource where the VkImage goes (RenderGraph::ImportDxvkImage imports it
+				// with rhi::dx12::import_resource), and no Vulkan format, flags or usage.
 				rhi::VulkanResourceInfo info{};
-				if (!rhi::vulkan::get_resource_info(a_resource, info) || !info.resource)
+				void* d3d12 = nullptr;
+				if (OnD3D12()) {
+					d3d12 = D3D12ResourceOf(a_resource);
+					if (!d3d12)
+						return false;
+				} else if (!rhi::vulkan::get_resource_info(a_resource, info) || !info.resource) {
 					return false;
+				}
 				const bool cube = (a_request.miscFlags & D3D11_RESOURCE_MISC_TEXTURECUBE) != 0;
 				auto& image = a_record.image;
-				image.image = rhi::vulkan::from_native_void<VkImage>(info.resource);
+				image.image = d3d12 ? reinterpret_cast<VkImage>(d3d12) : rhi::vulkan::from_native_void<VkImage>(info.resource);
 				image.type = a_request.dimension == D3D11_RESOURCE_DIMENSION_TEXTURE3D ? VK_IMAGE_TYPE_3D :
 				             a_request.dimension == D3D11_RESOURCE_DIMENSION_TEXTURE1D ? VK_IMAGE_TYPE_1D :
 				                                                                        VK_IMAGE_TYPE_2D;
@@ -999,17 +1135,36 @@ namespace RenderGraph::Engine::Native
 				desc.resourceFlags = a_unorderedAccess ? rhi::RF_AllowUnorderedAccess : rhi::RF_None;
 				desc.debugName = a_record.name.c_str();
 				desc.buffer.sizeBytes = a_size;
-				rhi::VulkanResourceInfo info{};
-				if (Rhi().CreateCommittedResource(desc, a_record.resource) != rhi::Result::Ok || !a_record.resource ||
-					!rhi::vulkan::get_resource_info(a_record.resource.Get(), info) || !info.resource) {
+				if (Rhi().CreateCommittedResource(desc, a_record.resource) != rhi::Result::Ok || !a_record.resource || !DescribeBuffer(a_record, a_record.resource.Get())) {
 					LogOnce(loggedCreate, a_record.name, "BasicRHI could not create the buffer");
 					return false;
 				}
+				a_record.size = a_size;
+				a_record.hostVisible = a_heap != rhi::HeapType::DeviceLocal;
+				return true;
+			}
+
+			/**
+			 * @brief A buffer record's native handle and address, as DescribeResource hands them out: the VkBuffer and its device
+			 * address on Vulkan; on D3D12 the ID3D12Resource in the VkBuffer's place and its GPU virtual address.
+			 */
+			static bool DescribeBuffer(NativeResource& a_record, const rhi::Resource& a_buffer)
+			{
+				if (OnD3D12()) {
+					void* resource = D3D12ResourceOf(a_buffer);
+					if (!resource)
+						return false;
+					a_record.vkBuffer = reinterpret_cast<VkBuffer>(resource);
+					a_record.address = static_cast<VkDeviceAddress>(D3D12AddressOf(resource));
+					a_record.usage = 0;
+					return true;
+				}
+				rhi::VulkanResourceInfo info{};
+				if (!rhi::vulkan::get_resource_info(a_buffer, info) || !info.resource)
+					return false;
 				a_record.vkBuffer = rhi::vulkan::from_native_void<VkBuffer>(info.resource);
 				a_record.address = static_cast<VkDeviceAddress>(info.deviceAddress);
 				a_record.usage = static_cast<VkBufferUsageFlags>(info.usage);
-				a_record.size = a_size;
-				a_record.hostVisible = a_heap != rhi::HeapType::DeviceLocal;
 				return true;
 			}
 
@@ -1176,6 +1331,7 @@ namespace RenderGraph::Engine::Native
 						Rhi().CreateCommandList(rhi::QueueKind::Graphics, allocators[i].Get(), lists[i]) != rhi::Result::Ok || !lists[i])
 						return false;
 					lists[i]->SetName(fmt::format("CS native present {}", i).c_str());
+					lists[i]->End();
 				}
 				return Rhi().CreateTimeline(presentTimeline, 0, "CS native present") == rhi::Result::Ok && presentTimeline;
 			}
@@ -1238,6 +1394,16 @@ namespace RenderGraph::Engine::Native
 				allocators[slot]->Recycle();
 				list->Recycle(allocators[slot].Get());
 
+				// D3D12: Present does not block for the frame latency, so the frame paces on the swap chain's waitable object here.
+				// Vulkan's Present blocks by itself.
+				if (OnD3D12()) {
+					const auto paced = swapchain->WaitForFrameLatency(1'000'000'000ull);
+					if (paced != rhi::Result::Ok && paced != rhi::Result::Unsupported) {
+						static std::atomic_flag logged;
+						if (!logged.test_and_set())
+							logger::warn("[ORG native] the swap chain's frame latency wait returned {} (logged once)", static_cast<int>(paced));
+					}
+				}
 				const uint32_t index = swapchain->CurrentImageIndex();
 				const rhi::ResourceHandle target = swapchain->Image(index);
 				// The graph gives the back buffer back in its home state, Common (GENERAL), on the graphics queue, so this copy is
@@ -1765,6 +1931,303 @@ namespace RenderGraph::Engine::Native
 			return true;
 		}
 
+		// ---- The context's work as BasicRHI commands (RhiContext()) ------------------------------------------------------------
+
+		/** @brief One resource an operation uses: the subresources, and the layout, access and stages its command needs. */
+		struct Use
+		{
+			const NativeResource* record = nullptr;
+			rhi::TextureSubresourceRange range{};
+			rhi::ResourceLayout layout = rhi::ResourceLayout::Common;
+			rhi::ResourceAccessType access = rhi::ResourceAccessType::Common;
+			rhi::ResourceSyncState sync = rhi::ResourceSyncState::All;
+		};
+
+		/** @brief A depth-stencil image's two planes (D3D12 transitions each plane), else one. */
+		uint32_t PlanesOf(const NativeResource& a_record)
+		{
+			return (a_record.shape.aspects & VK_IMAGE_ASPECT_STENCIL_BIT) ? 2u : 1u;
+		}
+
+		/** @brief Every subresource of an image record. */
+		rhi::TextureSubresourceRange AllOf(const NativeResource& a_record)
+		{
+			return { 0, a_record.shape.mips, 0, a_record.shape.layers, 0, PlanesOf(a_record) };
+		}
+
+		/** @brief One subresource (D3D11's index: mip + layer * mips) of an image record. */
+		rhi::TextureSubresourceRange SubresourceOf(const NativeResource& a_record, uint32_t a_sub)
+		{
+			return { a_sub % a_record.shape.mips, 1, a_sub / a_record.shape.mips, 1, 0, PlanesOf(a_record) };
+		}
+
+		/**
+		 * @brief Moves each resource from Common into its use (a_leave false), or back into Common (a_leave true). Entering waits for
+		 * all earlier work on it and leaving makes the operation's writes visible to all later work, so these barriers order the
+		 * operation with the graph's epochs as the full barriers of the Vulkan path do.
+		 */
+		void Transition(rhi::CommandList& a_list, std::initializer_list<Use> a_uses, bool a_leave)
+		{
+			std::array<rhi::TextureBarrier, 4> textures{};
+			std::array<rhi::BufferBarrier, 4> buffers{};
+			uint32_t textureCount = 0, bufferCount = 0;
+			for (const auto& use : a_uses) {
+				if (!use.record || !use.record->resource)
+					continue;
+				const auto before = a_leave ? use : Use{ use.record, use.range };
+				const auto after = a_leave ? Use{ use.record, use.range } : use;
+				if (use.record->kind == NativeResource::Kind::Image && textureCount < textures.size()) {
+					auto& barrier = textures[textureCount++];
+					barrier.texture = use.record->resource->GetHandle();
+					barrier.range = use.range;
+					barrier.beforeSync = before.sync;
+					barrier.afterSync = after.sync;
+					barrier.beforeAccess = before.access;
+					barrier.afterAccess = after.access;
+					barrier.beforeLayout = before.layout;
+					barrier.afterLayout = after.layout;
+				} else if (use.record->kind != NativeResource::Kind::Image && bufferCount < buffers.size()) {
+					auto& barrier = buffers[bufferCount++];
+					barrier.buffer = use.record->resource->GetHandle();
+					barrier.beforeSync = before.sync;
+					barrier.afterSync = after.sync;
+					barrier.beforeAccess = before.access;
+					barrier.afterAccess = after.access;
+				}
+			}
+			a_list.Barriers({ { textures.data(), textureCount }, { buffers.data(), bufferCount }, {} });
+		}
+
+		/** @brief A source and a destination of a copy. */
+		Use CopySource(const NativeResource& a_record, const rhi::TextureSubresourceRange& a_range)
+		{
+			return { &a_record, a_range, rhi::ResourceLayout::CopySource, rhi::ResourceAccessType::CopySource, rhi::ResourceSyncState::Copy };
+		}
+
+		Use CopyDest(const NativeResource& a_record, const rhi::TextureSubresourceRange& a_range)
+		{
+			return { &a_record, a_range, rhi::ResourceLayout::CopyDest, rhi::ResourceAccessType::CopyDest, rhi::ResourceSyncState::Copy };
+		}
+
+		/** @brief A footprint's extent: block-compressed widths and heights in whole blocks, as a placed footprint takes them. */
+		uint32_t FootprintExtent(const Shape& a_shape, uint32_t a_texels)
+		{
+			return a_shape.blocks ? (a_texels + 3u) & ~3u : a_texels;
+		}
+
+		/** @brief The placed footprint of one subresource of a staging record (its own layout entry, the whole subresource). */
+		rhi::CopyableFootprint StagingFootprint(const NativeResource& a_staging, uint32_t a_sub)
+		{
+			const auto& shape = a_staging.shape;
+			const auto& entry = a_staging.layout[a_sub];
+			const uint32_t mip = a_sub % shape.mips;
+			return { entry.offset, entry.rowPitch, FootprintExtent(shape, shape.Width(mip)), FootprintExtent(shape, shape.Height(mip)), shape.Depth(mip) };
+		}
+
+		/**
+		 * @brief RecordCopy with BasicRHI commands. Staging copies take whole subresources only (a box is refused, logged by the
+		 * caller), since a placed footprint must start at an aligned offset; a staging copy of a depth-stencil image is refused too.
+		 */
+		bool RecordCopyRhi(rhi::CommandList& a_list, const NativeResource& a_destination, uint32_t a_destinationSub, uint32_t a_x, uint32_t a_y, uint32_t a_z,
+			const NativeResource& a_source, uint32_t a_sourceSub, const D3D11_BOX* a_box)
+		{
+			using Kind = NativeResource::Kind;
+			const bool sourceBuffer = a_source.kind == Kind::Buffer;
+			const bool destinationBuffer = a_destination.kind == Kind::Buffer;
+			if (sourceBuffer || destinationBuffer) {
+				if (!sourceBuffer || !destinationBuffer)
+					return false;
+				const uint64_t from = a_box ? a_box->left : 0;
+				const uint64_t size = a_box ? a_box->right - a_box->left : (std::min)(a_source.size, a_destination.size);
+				if (from + size > a_source.size || a_x + size > a_destination.size)
+					return false;
+				Transition(a_list, { CopySource(a_source, {}), CopyDest(a_destination, {}) }, false);
+				a_list.CopyBufferRegion(a_destination.resource->GetHandle(), a_x, a_source.resource->GetHandle(), from, size);
+				Transition(a_list, { CopySource(a_source, {}), CopyDest(a_destination, {}) }, true);
+				return true;
+			}
+			const Shape& sourceShape = a_source.shape;
+			const Shape& destinationShape = a_destination.shape;
+			if (a_sourceSub >= sourceShape.Subresources() || a_destinationSub >= destinationShape.Subresources())
+				return false;
+			const uint32_t sourceMip = a_sourceSub % sourceShape.mips;
+			const uint32_t sourceLayer = a_sourceSub / sourceShape.mips;
+			const uint32_t destinationMip = a_destinationSub % destinationShape.mips;
+			const uint32_t destinationLayer = a_destinationSub / destinationShape.mips;
+			const auto sourceRange = SubresourceOf(a_source, a_sourceSub);
+			const auto destinationRange = SubresourceOf(a_destination, a_destinationSub);
+			if (a_source.kind == Kind::Image && a_destination.kind == Kind::Image) {
+				rhi::TextureCopyRegion from{};
+				from.texture = a_source.resource->GetHandle();
+				from.mip = sourceMip;
+				from.arraySlice = sourceLayer;
+				from.x = a_box ? a_box->left : 0;
+				from.y = a_box ? a_box->top : 0;
+				from.z = a_box ? a_box->front : 0;
+				from.width = a_box ? a_box->right - a_box->left : sourceShape.Width(sourceMip);
+				from.height = a_box ? a_box->bottom - a_box->top : sourceShape.Height(sourceMip);
+				from.depth = a_box ? a_box->back - a_box->front : sourceShape.Depth(sourceMip);
+				rhi::TextureCopyRegion to = from;
+				to.texture = a_destination.resource->GetHandle();
+				to.mip = destinationMip;
+				to.arraySlice = destinationLayer;
+				to.x = a_x;
+				to.y = a_y;
+				to.z = a_z;
+				Transition(a_list, { CopySource(a_source, sourceRange), CopyDest(a_destination, destinationRange) }, false);
+				a_list.CopyTextureRegion(to, from);
+				Transition(a_list, { CopySource(a_source, sourceRange), CopyDest(a_destination, destinationRange) }, true);
+				return true;
+			}
+			if (a_source.kind == Kind::Image && a_destination.kind == Kind::Staging) {
+				if (a_box || a_x || a_y || a_z || sourceShape.aspects != VK_IMAGE_ASPECT_COLOR_BIT)
+					return false;
+				rhi::BufferTextureCopyFootprint copy{};
+				copy.texture = a_source.resource->GetHandle();
+				copy.buffer = a_destination.resource->GetHandle();
+				copy.mip = sourceMip;
+				copy.arraySlice = sourceLayer;
+				copy.footprint = StagingFootprint(a_destination, a_destinationSub);
+				Transition(a_list, { CopySource(a_source, sourceRange), CopyDest(a_destination, {}) }, false);
+				a_list.CopyTextureToBuffer(copy);
+				Transition(a_list, { CopySource(a_source, sourceRange), CopyDest(a_destination, {}) }, true);
+				return true;
+			}
+			if (a_source.kind == Kind::Staging && a_destination.kind == Kind::Image) {
+				if (a_box || destinationShape.aspects != VK_IMAGE_ASPECT_COLOR_BIT)
+					return false;
+				rhi::BufferTextureCopyFootprint copy{};
+				copy.texture = a_destination.resource->GetHandle();
+				copy.buffer = a_source.resource->GetHandle();
+				copy.mip = destinationMip;
+				copy.arraySlice = destinationLayer;
+				copy.x = a_x;
+				copy.y = a_y;
+				copy.z = a_z;
+				copy.footprint = StagingFootprint(a_source, a_sourceSub);
+				Transition(a_list, { CopySource(a_source, {}), CopyDest(a_destination, destinationRange) }, false);
+				a_list.CopyBufferToTexture(copy);
+				Transition(a_list, { CopySource(a_source, {}), CopyDest(a_destination, destinationRange) }, true);
+				return true;
+			}
+			// Staging to staging: the whole subresource as one buffer range.
+			if (a_box || a_x || a_y || a_z)
+				return false;
+			const auto& sourceEntry = a_source.layout[a_sourceSub];
+			const auto& destinationEntry = a_destination.layout[a_destinationSub];
+			if (sourceEntry.rowPitch != destinationEntry.rowPitch || sourceEntry.depthPitch != destinationEntry.depthPitch)
+				return false;
+			Transition(a_list, { CopySource(a_source, {}), CopyDest(a_destination, {}) }, false);
+			a_list.CopyBufferRegion(a_destination.resource->GetHandle(), destinationEntry.offset, a_source.resource->GetHandle(), sourceEntry.offset,
+				uint64_t(sourceEntry.depthPitch) * sourceShape.Depth(sourceMip));
+			Transition(a_list, { CopySource(a_source, {}), CopyDest(a_destination, {}) }, true);
+			return true;
+		}
+
+		/** @brief Clears image subresources through a render target view (colour) or a depth-stencil view. */
+		void ClearImageRhi(rhi::CommandList& a_list, const Immediate::Descriptors& a_descriptors, const NativeResource& a_record,
+			const rhi::TextureSubresourceRange& a_range, const float a_color[4], bool a_depth, bool a_clearDepth, bool a_clearStencil, float a_depthValue,
+			uint8_t a_stencil)
+		{
+			const auto& shape = a_record.shape;
+			const auto handle = a_record.resource->GetHandle();
+			const bool layered = shape.layers > 1;
+			// One mip at a time: a view names one mip.
+			for (uint32_t mip = a_range.baseMip; mip < a_range.baseMip + a_range.mipCount; ++mip) {
+				const rhi::TextureSubresourceRange range{ mip, 1, a_range.baseLayer, a_range.layerCount, 0, PlanesOf(a_record) };
+				if (a_depth) {
+					rhi::DsvDesc desc{};
+					desc.dimension = layered ? rhi::DsvDim::Texture2DArray : rhi::DsvDim::Texture2D;
+					desc.range = range;
+					// Each mip's view overwrites the slot's DSV: D3D12 and Vulkan both read it when the clear is recorded.
+					if (g_device->Rhi().CreateDepthStencilView(a_descriptors.dsv, handle, desc) != rhi::Result::Ok)
+						continue;
+					const Use use{ &a_record, range, rhi::ResourceLayout::DepthReadWrite, rhi::ResourceAccessType::DepthReadWrite, rhi::ResourceSyncState::DepthStencil };
+					Transition(a_list, { use }, false);
+					a_list.ClearDepthStencilView(a_descriptors.dsv, a_clearDepth, a_clearStencil, a_depthValue, a_stencil);
+					Transition(a_list, { use }, true);
+				} else {
+					rhi::RtvDesc desc{};
+					desc.dimension = shape.dimension == D3D11_RESOURCE_DIMENSION_TEXTURE3D ? rhi::RtvDim::Texture3D :
+					                 layered                                               ? rhi::RtvDim::Texture2DArray :
+					                                                                         rhi::RtvDim::Texture2D;
+					desc.range = range;
+					if (g_device->Rhi().CreateRenderTargetView(a_descriptors.rtv, handle, desc) != rhi::Result::Ok)
+						continue;
+					rhi::ClearValue value{};
+					value.type = rhi::ClearValueType::Color;
+					value.format = shape.format;
+					std::memcpy(value.rgba, a_color, sizeof(value.rgba));
+					const Use use{ &a_record, range, rhi::ResourceLayout::RenderTarget, rhi::ResourceAccessType::RenderTarget, rhi::ResourceSyncState::RenderTarget };
+					Transition(a_list, { use }, false);
+					a_list.ClearRenderTargetView(a_descriptors.rtv, value);
+					Transition(a_list, { use }, true);
+				}
+			}
+		}
+
+		/** @brief Clears image subresources or a buffer range through an unordered access view, with float or uint values. */
+		void ClearUnorderedRhi(rhi::CommandList& a_list, const Immediate::Descriptors& a_descriptors, const NativeResource& a_record,
+			const rhi::TextureSubresourceRange& a_range, uint64_t a_offset, uint64_t a_size, const uint32_t a_uints[4], const float a_floats[4])
+		{
+			const bool image = a_record.kind == NativeResource::Kind::Image;
+			const auto handle = a_record.resource->GetHandle();
+			const auto clear = [&](const rhi::UavDesc& a_desc, const rhi::TextureSubresourceRange& a_subresources) {
+				if (g_device->Rhi().CreateUnorderedAccessView(a_descriptors.uavShaderVisible, handle, a_desc) != rhi::Result::Ok ||
+					g_device->Rhi().CreateUnorderedAccessView(a_descriptors.uavCpu, handle, a_desc) != rhi::Result::Ok)
+					return;
+				const Use use{ &a_record, a_subresources, rhi::ResourceLayout::UnorderedAccess, rhi::ResourceAccessType::UnorderedAccess,
+					rhi::ResourceSyncState::ClearUnorderedAccessView };
+				Transition(a_list, { use }, false);
+				const rhi::UavClearInfo info{ a_descriptors.uavShaderVisible, a_descriptors.uavCpu, a_record.resource.Get() };
+				if (a_floats) {
+					rhi::UavClearFloat value{};
+					std::memcpy(value.v, a_floats, sizeof(value.v));
+					a_list.ClearUavFloat(info, value);
+				} else {
+					rhi::UavClearUint value{};
+					std::memcpy(value.v, a_uints, sizeof(value.v));
+					a_list.ClearUavUint(info, value);
+				}
+				Transition(a_list, { use }, true);
+			};
+			if (!image) {
+				rhi::UavDesc desc{};
+				desc.dimension = rhi::UavDim::Buffer;
+				desc.buffer.kind = rhi::BufferViewKind::Raw;
+				desc.buffer.firstElement = a_offset / 4;
+				desc.buffer.numElements = static_cast<uint32_t>(a_size / 4);
+				clear(desc, {});
+				return;
+			}
+			const auto& shape = a_record.shape;
+			for (uint32_t mip = a_range.baseMip; mip < a_range.baseMip + a_range.mipCount; ++mip) {
+				rhi::UavDesc desc{};
+				if (shape.dimension == D3D11_RESOURCE_DIMENSION_TEXTURE3D) {
+					desc.dimension = rhi::UavDim::Texture3D;
+					desc.texture3D.mipSlice = mip;
+					desc.texture3D.firstWSlice = 0;
+					desc.texture3D.wSize = shape.Depth(mip);
+				} else if (shape.layers > 1) {
+					desc.dimension = rhi::UavDim::Texture2DArray;
+					desc.texture2DArray.mipSlice = mip;
+					desc.texture2DArray.firstArraySlice = a_range.baseLayer;
+					desc.texture2DArray.arraySize = a_range.layerCount;
+				} else {
+					desc.dimension = rhi::UavDim::Texture2D;
+					desc.texture2D.mipSlice = mip;
+				}
+				clear(desc, { mip, 1, a_range.baseLayer, a_range.layerCount });
+			}
+		}
+
+		/** @brief A Vulkan subresource range (ViewRange's) as BasicRHI's, with both planes of a depth-stencil range. */
+		rhi::TextureSubresourceRange ToRhiRange(const VkImageSubresourceRange& a_range)
+		{
+			const uint32_t planes = (a_range.aspectMask & VK_IMAGE_ASPECT_STENCIL_BIT) && (a_range.aspectMask & VK_IMAGE_ASPECT_DEPTH_BIT) ? 2u : 1u;
+			return { a_range.baseMipLevel, a_range.levelCount, a_range.baseArrayLayer, a_range.layerCount, 0, planes };
+		}
+
 		/** @brief The memory Map hands out for a record: its own (a buffer, a staging texture), or a DYNAMIC image's upload side. */
 		NativeResource* CpuSide(NativeResource& a_record)
 		{
@@ -1833,6 +2296,14 @@ namespace RenderGraph::Engine::Native
 			if (record->kind == NativeResource::Kind::Image && record->upload && a_subresource < record->shape.Subresources()) {
 				const auto image = record;
 				const auto upload = record->upload;
+				if (RhiContext()) {
+					g_device->immediate.RunRhi("unmap (dynamic upload) " + image->name,
+						[&](rhi::CommandList& a_list, const Immediate::Descriptors&) {
+							(void)RecordCopyRhi(a_list, *image, a_subresource, 0, 0, 0, *upload, a_subresource, nullptr);
+						},
+						{ image, upload }, { image.get(), upload.get() });
+					return;
+				}
 				g_device->immediate.Run("unmap (dynamic upload) " + image->name,
 					[&](const Immediate::Vulkan& a_vk, VkCommandBuffer a_commands) {
 						(void)RecordCopy(a_vk, a_commands, *image, a_subresource, {}, *upload, a_subresource, nullptr);
@@ -1875,6 +2346,16 @@ namespace RenderGraph::Engine::Native
 					return;
 				std::memcpy(data, a_data, size);
 				upload->resource->Unmap(0, size);
+				if (RhiContext()) {
+					g_device->immediate.RunRhi("update buffer " + record->name,
+						[&](rhi::CommandList& a_list, const Immediate::Descriptors&) {
+							Transition(a_list, { CopySource(*upload, {}), CopyDest(*record, {}) }, false);
+							a_list.CopyBufferRegion(record->resource->GetHandle(), from, upload->resource->GetHandle(), 0, size);
+							Transition(a_list, { CopySource(*upload, {}), CopyDest(*record, {}) }, true);
+						},
+						{ upload, record }, { record.get() });
+					return;
+				}
 				g_device->immediate.Run("update buffer " + record->name,
 					[&](const Immediate::Vulkan& a_vk, VkCommandBuffer a_commands) {
 						const VkBufferCopy copy{ 0, from, size };
@@ -1930,6 +2411,32 @@ namespace RenderGraph::Engine::Native
 				return;
 			writeRows(static_cast<std::byte*>(data));
 			upload->resource->Unmap(0, upload->size);
+			if (RhiContext()) {
+				if (shape.aspects != VK_IMAGE_ASPECT_COLOR_BIT) {
+					static std::atomic_flag logged;
+					if (!logged.test_and_set())
+						logger::warn("[ORG native] UpdateSubresource of the depth-stencil image \"{}\" is not made with BasicRHI's commands (logged once)", record->name);
+					return;
+				}
+				g_device->immediate.RunRhi("update texture " + record->name,
+					[&](rhi::CommandList& a_list, const Immediate::Descriptors&) {
+						rhi::BufferTextureCopyFootprint copy{};
+						copy.texture = record->resource->GetHandle();
+						copy.buffer = upload->resource->GetHandle();
+						copy.mip = mip;
+						copy.arraySlice = a_subresource / shape.mips;
+						copy.x = static_cast<uint32_t>(at.x);
+						copy.y = static_cast<uint32_t>(at.y);
+						copy.z = static_cast<uint32_t>(at.z);
+						copy.footprint = { 0, rowPitch, FootprintExtent(shape, extent.width), FootprintExtent(shape, extent.height), extent.depth };
+						const auto range = SubresourceOf(*record, a_subresource);
+						Transition(a_list, { CopySource(*upload, {}), CopyDest(*record, range) }, false);
+						a_list.CopyBufferToTexture(copy);
+						Transition(a_list, { CopySource(*upload, {}), CopyDest(*record, range) }, true);
+					},
+					{ upload, record }, { record.get() });
+				return;
+			}
 			g_device->immediate.Run("update texture " + record->name,
 				[&](const Immediate::Vulkan& a_vk, VkCommandBuffer a_commands) {
 					VkBufferImageCopy copy{};
@@ -1954,12 +2461,20 @@ namespace RenderGraph::Engine::Native
 				return;
 			}
 			bool recorded = false;
-			g_device->immediate.Run("copy region " + source->name + " to " + destination->name,
-				[&](const Immediate::Vulkan& a_vk, VkCommandBuffer a_commands) {
-					recorded = RecordCopy(a_vk, a_commands, *destination, a_destinationSub,
-						{ static_cast<int32_t>(a_x), static_cast<int32_t>(a_y), static_cast<int32_t>(a_z) }, *source, a_sourceSub, a_box);
-				},
-				{ destination, source }, { destination.get(), source.get() });
+			if (RhiContext()) {
+				g_device->immediate.RunRhi("copy region " + source->name + " to " + destination->name,
+					[&](rhi::CommandList& a_list, const Immediate::Descriptors&) {
+						recorded = RecordCopyRhi(a_list, *destination, a_destinationSub, a_x, a_y, a_z, *source, a_sourceSub, a_box);
+					},
+					{ destination, source }, { destination.get(), source.get() });
+			} else {
+				g_device->immediate.Run("copy region " + source->name + " to " + destination->name,
+					[&](const Immediate::Vulkan& a_vk, VkCommandBuffer a_commands) {
+						recorded = RecordCopy(a_vk, a_commands, *destination, a_destinationSub,
+							{ static_cast<int32_t>(a_x), static_cast<int32_t>(a_y), static_cast<int32_t>(a_z) }, *source, a_sourceSub, a_box);
+					},
+					{ destination, source }, { destination.get(), source.get() });
+			}
 			if (!recorded) {
 				static std::atomic_flag logged;
 				if (!logged.test_and_set())
@@ -1977,17 +2492,31 @@ namespace RenderGraph::Engine::Native
 				return;
 			}
 			bool recorded = true;
-			g_device->immediate.Run("copy " + source->name + " to " + destination->name,
-				[&](const Immediate::Vulkan& a_vk, VkCommandBuffer a_commands) {
-					if (destination->kind == NativeResource::Kind::Buffer || source->kind == NativeResource::Kind::Buffer) {
-						recorded = RecordCopy(a_vk, a_commands, *destination, 0, {}, *source, 0, nullptr);
-						return;
-					}
-					const uint32_t count = (std::min)(destination->shape.Subresources(), source->shape.Subresources());
-					for (uint32_t sub = 0; sub < count; ++sub)
-						recorded = RecordCopy(a_vk, a_commands, *destination, sub, {}, *source, sub, nullptr) && recorded;
-				},
-				{ destination, source }, { destination.get(), source.get() });
+			if (RhiContext()) {
+				g_device->immediate.RunRhi("copy " + source->name + " to " + destination->name,
+					[&](rhi::CommandList& a_list, const Immediate::Descriptors&) {
+						if (destination->kind == NativeResource::Kind::Buffer || source->kind == NativeResource::Kind::Buffer) {
+							recorded = RecordCopyRhi(a_list, *destination, 0, 0, 0, 0, *source, 0, nullptr);
+							return;
+						}
+						const uint32_t count = (std::min)(destination->shape.Subresources(), source->shape.Subresources());
+						for (uint32_t sub = 0; sub < count; ++sub)
+							recorded = RecordCopyRhi(a_list, *destination, sub, 0, 0, 0, *source, sub, nullptr) && recorded;
+					},
+					{ destination, source }, { destination.get(), source.get() });
+			} else {
+				g_device->immediate.Run("copy " + source->name + " to " + destination->name,
+					[&](const Immediate::Vulkan& a_vk, VkCommandBuffer a_commands) {
+						if (destination->kind == NativeResource::Kind::Buffer || source->kind == NativeResource::Kind::Buffer) {
+							recorded = RecordCopy(a_vk, a_commands, *destination, 0, {}, *source, 0, nullptr);
+							return;
+						}
+						const uint32_t count = (std::min)(destination->shape.Subresources(), source->shape.Subresources());
+						for (uint32_t sub = 0; sub < count; ++sub)
+							recorded = RecordCopy(a_vk, a_commands, *destination, sub, {}, *source, sub, nullptr) && recorded;
+					},
+					{ destination, source }, { destination.get(), source.get() });
+			}
 			if (!recorded) {
 				static std::atomic_flag logged;
 				if (!logged.test_and_set())
@@ -2006,6 +2535,15 @@ namespace RenderGraph::Engine::Native
 			const Shape& shape = record->shape;
 			if (shape.mips < 2 || shape.aspects != VK_IMAGE_ASPECT_COLOR_BIT)
 				return;
+			// BasicRHI has no blit: the mips stay as they are. The engine asks this of few textures (logged once with the first).
+			if (RhiContext()) {
+				static std::atomic_flag logged;
+				if (!logged.test_and_set())
+					logger::warn("[ORG native] GenerateMips on \"{}\": BasicRHI's commands have no blit, so native mode on D3D12 (or "
+								 "CS_ORG_NATIVE_RHI_CONTEXT=1) leaves the mips as they are (logged once)",
+						record->name);
+				return;
+			}
 			g_device->immediate.Run("generate mips " + record->name,
 				[&](const Immediate::Vulkan& a_vk, VkCommandBuffer a_commands) {
 					// Each mip from the one above it, linearly filtered; a barrier between, since each level reads the last one written.
@@ -2085,6 +2623,16 @@ namespace RenderGraph::Engine::Native
 			}
 			D3D11_RENDER_TARGET_VIEW_DESC desc{};
 			a_view->GetDesc(&desc);
+			if (RhiContext()) {
+				const auto range = ToRhiRange(ViewRange(desc, record->shape, VK_IMAGE_ASPECT_COLOR_BIT));
+				std::array<float, 4> color{ a_color[0], a_color[1], a_color[2], a_color[3] };
+				g_device->immediate.RunRhi("clear " + record->name,
+					[&](rhi::CommandList& a_list, const Immediate::Descriptors& a_descriptors) {
+						ClearImageRhi(a_list, a_descriptors, *record, range, color.data(), false, false, false, 0.0f, 0);
+					},
+					{ record }, { record.get() });
+				return;
+			}
 			VkClearColorValue value{};
 			std::memcpy(value.float32, a_color, sizeof(value.float32));
 			ClearColor(record, ViewRange(desc, record->shape, VK_IMAGE_ASPECT_COLOR_BIT), value);
@@ -2108,8 +2656,11 @@ namespace RenderGraph::Engine::Native
 			return a_size != 0;
 		}
 
-		/** @brief A UAV clear: an image's subresources with a_value, or a buffer's range filled with a_word (vkCmdFillBuffer's one word). */
-		void ClearUnorderedAccess(ID3D11UnorderedAccessView* a_view, const VkClearColorValue& a_value, uint32_t a_word, const char* a_operation)
+		/**
+		 * @brief A UAV clear: an image's subresources with a_value, or a buffer's range filled with a_word (vkCmdFillBuffer's one word).
+		 * With RhiContext() it is a UAV clear of the view's subresources or range, with a_value's four words (a_float: as floats).
+		 */
+		void ClearUnorderedAccess(ID3D11UnorderedAccessView* a_view, const VkClearColorValue& a_value, uint32_t a_word, const char* a_operation, bool a_float)
 		{
 			const auto record = Resolve(a_view);
 			if (!record) {
@@ -2119,6 +2670,20 @@ namespace RenderGraph::Engine::Native
 			}
 			D3D11_UNORDERED_ACCESS_VIEW_DESC desc{};
 			a_view->GetDesc(&desc);
+			if (RhiContext()) {
+				rhi::TextureSubresourceRange range{};
+				VkDeviceSize offset = 0, size = 0;
+				if (record->kind == NativeResource::Kind::Image)
+					range = ToRhiRange(ViewRange(desc, record->shape, VK_IMAGE_ASPECT_COLOR_BIT));
+				else if (record->kind != NativeResource::Kind::Buffer || !UavBytes(*record, desc, offset, size))
+					return;
+				g_device->immediate.RunRhi(std::string(a_float ? "clear (float) " : "clear (uint) ") + record->name,
+					[&](rhi::CommandList& a_list, const Immediate::Descriptors& a_descriptors) {
+						ClearUnorderedRhi(a_list, a_descriptors, *record, range, offset, size, a_value.uint32, a_float ? a_value.float32 : nullptr);
+					},
+					{ record }, { record.get() });
+				return;
+			}
 			if (record->kind == NativeResource::Kind::Image) {
 				ClearColor(record, ViewRange(desc, record->shape, VK_IMAGE_ASPECT_COLOR_BIT), a_value);
 				return;
@@ -2137,7 +2702,7 @@ namespace RenderGraph::Engine::Native
 				return;
 			VkClearColorValue value{};
 			std::memcpy(value.uint32, a_values, sizeof(value.uint32));
-			ClearUnorderedAccess(a_view, value, a_values[0], "ClearUnorderedAccessViewUint");
+			ClearUnorderedAccess(a_view, value, a_values[0], "ClearUnorderedAccessViewUint", false);
 		}
 
 		void ContextClearUnorderedAccessViewFloat(ID3D11UnorderedAccessView* a_view, const FLOAT a_values[4])
@@ -2148,7 +2713,7 @@ namespace RenderGraph::Engine::Native
 			std::memcpy(value.float32, a_values, sizeof(value.float32));
 			uint32_t word = 0;
 			std::memcpy(&word, &a_values[0], sizeof(word));
-			ClearUnorderedAccess(a_view, value, word, "ClearUnorderedAccessViewFloat");
+			ClearUnorderedAccess(a_view, value, word, "ClearUnorderedAccessViewFloat", true);
 		}
 
 		void ContextClearDepthStencilView(ID3D11DepthStencilView* a_view, UINT a_flags, FLOAT a_depth, UINT8 a_stencil)
@@ -2170,6 +2735,16 @@ namespace RenderGraph::Engine::Native
 			D3D11_DEPTH_STENCIL_VIEW_DESC desc{};
 			a_view->GetDesc(&desc);
 			const VkImageSubresourceRange range = ViewRange(desc, record->shape, aspects);
+			if (RhiContext()) {
+				const auto rhiRange = ToRhiRange(range);
+				const bool depth = (aspects & VK_IMAGE_ASPECT_DEPTH_BIT) != 0, stencil = (aspects & VK_IMAGE_ASPECT_STENCIL_BIT) != 0;
+				g_device->immediate.RunRhi("clear depth " + record->name,
+					[&](rhi::CommandList& a_list, const Immediate::Descriptors& a_descriptors) {
+						ClearImageRhi(a_list, a_descriptors, *record, rhiRange, nullptr, true, depth, stencil, a_depth, a_stencil);
+					},
+					{ record }, { record.get() });
+				return;
+			}
 			const VkClearDepthStencilValue value{ a_depth, a_stencil };
 			g_device->immediate.Run("clear depth " + record->name,
 				[&](const Immediate::Vulkan& a_vk, VkCommandBuffer a_commands) {
@@ -2334,11 +2909,13 @@ namespace RenderGraph::Engine::Native
 		if (!CreateBasicRhiDevice(a_adapter, state->device, reason))
 			Fail("the native device", reason);
 		state->graphics = state->Rhi().GetQueue(rhi::QueueKind::Graphics);
-		// BasicRHI's queue accesses take the lock External takes around its own submissions.
-		if (rhi::vulkan::ShareVulkanDevice(state->Rhi(), rhi::vulkan::QueueSubmissionHooks{ nullptr, &LockQueue, &UnlockQueue, nullptr }) != rhi::Result::Ok)
-			Fail("the native device", "BasicRHI could not take the queue lock hooks external commands share with it");
-		if (!state->external.Init(state->Rhi()))
-			Fail("the native device", "the external commands' command pool, timeline or Vulkan entry points could not be made");
+		if (!OnD3D12()) {
+			// BasicRHI's queue accesses take the lock External takes around its own submissions.
+			if (rhi::vulkan::ShareVulkanDevice(state->Rhi(), rhi::vulkan::QueueSubmissionHooks{ nullptr, &LockQueue, &UnlockQueue, nullptr }) != rhi::Result::Ok)
+				Fail("the native device", "BasicRHI could not take the queue lock hooks external commands share with it");
+			if (!state->external.Init(state->Rhi()))
+				Fail("the native device", "the external commands' command pool, timeline or Vulkan entry points could not be made");
+		}
 		if (!state->oneShot.Init(state->Rhi()))
 			Fail("the native device", "its command lists or timeline for resource creation could not be made");
 		if (!state->immediate.Init(state->Rhi()))
@@ -2368,7 +2945,7 @@ namespace RenderGraph::Engine::Native
 		if (!state->MakeBackBuffer())
 			Fail("the native back buffer", "BasicRHI could not make it (see the [ORG native] line above)");
 		const auto caps = state->swapchain->Caps();
-		Stage("swap chain", fmt::format("{}x{} DXGI format {}, {} images, tearing {}, HDR10 {}; the game asked for {} ({})", state->width, state->height,
+		Stage("swap chain", fmt::format("{} {}x{} DXGI format {}, {} images, tearing {}, HDR10 {}; the game asked for {} ({})", ::RenderGraph::Backend::Name(::RenderGraph::Backend::Active()), state->width, state->height,
 								static_cast<int>(state->format), state->swapchain->ImageCount(), caps.tearing,
 								state->swapchain->IsColorSpaceSupported(rhi::SwapchainColorSpace::Hdr10St2084), a_desc->Windowed ? "windowed" : "fullscreen",
 								static_cast<int>(a_desc->BufferDesc.Format)));
@@ -2477,6 +3054,15 @@ namespace RenderGraph::Engine::Native
 	{
 		if (!g_device)
 			return false;
+		// External commands are Vulkan command buffers with Vulkan semaphores (DCLF's CPU pipeline sites and frame signal). D3D12 has
+		// neither, and DCLF is off there (DrawcallLimitFix::SetupResources), so a call is refused by name.
+		if (OnD3D12()) {
+			static std::atomic_flag logged;
+			if (!logged.test_and_set())
+				logger::error("[ORG native] external commands (Vulkan command buffers, RenderGraphRuntime::EmitExternalCommands) are not available on D3D12; "
+							  "the caller's work is not done (logged once)");
+			return false;
+		}
 		return g_device->external.Run(a_record, a_user, { a_waits, a_waitCount }, { a_signals, a_signalCount });
 	}
 
@@ -2506,7 +3092,27 @@ namespace RenderGraph::Engine::Native
 		}
 		// vkCmdClearColorImage cannot write a block-compressed image (DynamicCubemaps' BC6H cubemaps): those are left as made, which
 		// their owners write before reading.
-		if (!a_data && !record->shape.blocks) {
+		if (!a_data && !record->shape.blocks && RhiContext()) {
+			// Zeroed through whatever view its bind flags allow; an image with none of them is left as made, as above.
+			const bool renderTarget = (request.bindFlags & D3D11_BIND_RENDER_TARGET) != 0;
+			const bool depthStencil = (request.bindFlags & D3D11_BIND_DEPTH_STENCIL) != 0;
+			const bool unordered = (request.bindFlags & D3D11_BIND_UNORDERED_ACCESS) != 0;
+			if (renderTarget || depthStencil || unordered) {
+				const auto range = AllOf(*record);
+				g_device->immediate.RunRhi("zero " + record->name,
+					[&](rhi::CommandList& a_list, const Immediate::Descriptors& a_descriptors) {
+						static constexpr float kZero[4]{};
+						static constexpr uint32_t kZeroWords[4]{};
+						if (depthStencil)
+							ClearImageRhi(a_list, a_descriptors, *record, range, nullptr, true, true, (record->shape.aspects & VK_IMAGE_ASPECT_STENCIL_BIT) != 0, 0.0f, 0);
+						else if (renderTarget)
+							ClearImageRhi(a_list, a_descriptors, *record, range, kZero, false, false, false, 0.0f, 0);
+						else
+							ClearUnorderedRhi(a_list, a_descriptors, *record, range, 0, 0, kZeroWords, nullptr);
+					},
+					{ record }, { record.get() });
+			}
+		} else if (!a_data && !record->shape.blocks) {
 			const VkImageSubresourceRange all{ record->shape.aspects, 0, request.mipLevels, 0, layers };
 			g_device->immediate.Run("zero " + record->name,
 				[&](const Immediate::Vulkan& a_vk, VkCommandBuffer a_commands) {
@@ -2558,17 +3164,13 @@ namespace RenderGraph::Engine::Native
 	{
 		if (!g_device)
 			return nullptr;
-		rhi::VulkanResourceInfo info{};
-		if (!rhi::vulkan::get_resource_info(a_buffer, info) || !info.resource) {
+		auto record = MakeWrapRecord(a_name);
+		record->kind = NativeResource::Kind::Buffer;
+		if (!NativeState::DescribeBuffer(*record, a_buffer)) {
 			static std::atomic<bool> logged = false;
 			LogOnce(logged, a_name ? a_name : "a buffer", "BasicRHI did not describe the buffer to wrap");
 			return nullptr;
 		}
-		auto record = MakeWrapRecord(a_name);
-		record->kind = NativeResource::Kind::Buffer;
-		record->vkBuffer = rhi::vulkan::from_native_void<VkBuffer>(info.resource);
-		record->address = static_cast<VkDeviceAddress>(info.deviceAddress);
-		record->usage = static_cast<VkBufferUsageFlags>(info.usage);
 		record->size = a_desc.ByteWidth;
 		record->bufferDesc = a_desc;
 		Tripwire::Options options;

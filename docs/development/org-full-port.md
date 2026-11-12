@@ -369,7 +369,7 @@ Switch names (suggested):
 
 - `CS_ORG_OWNED_FRAME`: the inversion.
 - `CS_ORG_NATIVE`: no DXVK, Vulkan.
-- `CS_ORG_BACKEND=vulkan|d3d12`.
+- `CS_ORG_NATIVE_BACKEND=vulkan|d3d12`.
 
 The default stays DXVK as host until the user says otherwise.
 
@@ -826,7 +826,7 @@ cold-cache run reaches the world without a DCLF watchdog failure.
 
 | #    | Task                                                                                                                                                                                                                                                                                                                                             |
 | ---- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| P7.1 | Turn on `BASICRHI_ENABLE_D3D12` in `cmake/RenderGraph.cmake`; add `CS_ORG_BACKEND=d3d12` device creation (BasicRenderer's `DeviceManager` pattern).                                                                                                                                                                                              |
+| P7.1 | Turn on `BASICRHI_ENABLE_D3D12` in `cmake/RenderGraph.cmake`; add `CS_ORG_NATIVE_BACKEND=d3d12` device creation (BasicRenderer's `DeviceManager` pattern).                                                                                                                                                                                              |
 | P7.2 | DXIL targets in the shader store with the D3D12 binding ABI (SM6.6 `ResourceDescriptorHeap`, root constants instead of push constants); `ShaderCache`'s reflection reads DXIL.                                                                                                                                                                   |
 | P7.3 | Streamline on D3D12: DLSS/DLSS-G/Reflex natively; D3D12 builds of CS's `sl.fsr`, `sl.fsr_g`, `sl.xess` plugins (`extern/Streamline/source/plugins`, which are Vulkan-only today: `fsrEntry.cpp:291`, `xessEntry.cpp:275`, `fsrGEntry.cpp:910`); FSR-FG with a DXGI swap chain. BasicRenderer's `UpscalingManager`/`FfxBackendDX12` show the way. |
 | P7.4 | HDR (`SetColorSpace1`), latency (waitable object), DRED.                                                                                                                                                                                                                                                                                         |
@@ -835,11 +835,11 @@ cold-cache run reaches the world without a DCLF watchdog failure.
 ## Phase 7 status (2026-11-12, branch `org-port/dx12`)
 
 D3D12 runs only in the native mode (`CS_ORG_NATIVE=1`, Phase 6): DXVK translates the game's D3D11 into Vulkan, so there is
-no D3D12 device to share with it. Select it with `CS_ORG_BACKEND=d3d12`.
+no D3D12 device to share with it. Select it with `CS_ORG_NATIVE_BACKEND=d3d12`.
 
 - **P7.1:** `CS_ORG_D3D12` (default on) builds BasicRHI's D3D12 backend, with the DirectX-Headers 1.722 overlay port
   (`cmake/ports/directx-headers`, as BasicRHI pins). `RenderGraph::Backend` (`src/RenderGraph/Backend.h`) reads
-  `CS_ORG_BACKEND` and records the active backend. `RenderGraph::Engine::CreateD3D12Device`
+  `CS_ORG_NATIVE_BACKEND` and records the active backend. `RenderGraph::Engine::CreateD3D12Device`
   (`src/RenderGraph/Engine/D3D12Device.h`) is what the native mode's device creation calls for D3D12. It creates the
   graphics, compute and copy queues and shader-visible heaps of 1,000,000 resources and 2048 samplers. It loads an Agility
   SDK through `ID3D12SDKConfiguration1::CreateDeviceFactory` when `CS_ORG_D3D12_SDK` names one, since only an executable
@@ -858,13 +858,15 @@ no D3D12 device to share with it. Select it with `CS_ORG_BACKEND=d3d12`.
   object. `Engine::ConfigureSwapchain` applies them on either backend. DRED is on with the debug layer or with crash
   markers (BasicRHI `enableCrashMarkers` on D3D12, set from hang mode as on Vulkan).
 
-**How to test now:** `CS_ORG_D3D12_SELFTEST=1` (optionally `CS_ORG_D3D12_DEBUG=1`, `CS_ORG_D3D12_SELFTEST_HDR=1`) runs
-device creation, the DXIL build, a dispatch and 120 presents on a D3D12 device beside the game
-(`src/RenderGraph/Engine/D3D12SelfTest.cpp`). The full path waits for the native mode to call `CreateD3D12Device`.
+**Native mode on D3D12** (2026-11-12): `CS_ORG_NATIVE=1 CS_ORG_NATIVE_BACKEND=d3d12`, scenario
+`tools/cs-ab/scenarios/native-d3d12.env` (and `native-d3d12-validation.env`). What differs from native Vulkan is in
+render-graph.md, "Native mode on D3D12". `CS_ORG_D3D12_SELFTEST=1` (optionally `CS_ORG_D3D12_DEBUG=1`,
+`CS_ORG_D3D12_SELFTEST_HDR=1`) still runs device creation, the DXIL build, a dispatch and 120 presents on a D3D12 device
+beside a DXVK game (`src/RenderGraph/Engine/D3D12SelfTest.cpp`).
 
 Named off on D3D12 until ported:
 
-- Drawcall Limit Fix's draw pipelines: their layouts bind through `VK_EXT_descriptor_heap` record mappings
+- Drawcall Limit Fix as a whole (`DrawcallLimitFix::SetupResources` forces it off). Its draw pipelines' layouts bind through `VK_EXT_descriptor_heap` record mappings
   (`LayoutRangeSource::IndirectIndex`/`IndirectAddress`/`PushAddress`), which BasicRHI's D3D12 backend refuses, and they
   reflect SPIR-V (`SpirvReflection`). A D3D12 port reads the record indices in the shader and reflects DXIL.
 - Drawcall Limit Fix's direct sites (secondary lists with viewports): D3D12 bundles cannot set viewports or scissors

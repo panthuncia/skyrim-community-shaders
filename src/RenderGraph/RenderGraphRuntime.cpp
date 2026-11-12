@@ -1974,7 +1974,7 @@ bool RenderGraphRuntime::Initialize()
 		return disable("CS_ORG=0");
 	if (EnvFeaturesOnly())
 		return disable("CS_ORG=features (device features requested, graph not created)");
-	// CS_ORG_BACKEND=d3d12 without what it needs (the native mode, a build with the D3D12 backend) is named, never run on Vulkan instead.
+	// CS_ORG_NATIVE_BACKEND=d3d12 without what it needs (the native mode, a build with the D3D12 backend) is named, never run on Vulkan instead.
 	if (auto backendError = RenderGraph::Backend::RequestError(); !backendError.empty()) {
 		logger::critical("[ORG] {}", backendError);
 		return disable(std::move(backendError));
@@ -1994,8 +1994,15 @@ bool RenderGraphRuntime::Initialize()
 		state->device = RenderGraph::Engine::Native::Device();
 		if (!state->device || !*state->device)
 			return disable("native mode (CS_ORG_NATIVE=1) has no BasicRHI device");
-		if (const auto getProperties = reinterpret_cast<PFN_vkGetPhysicalDeviceProperties>(
-				LoaderProcAddr()(rhi::vulkan::get_instance(state->device->Get()), "vkGetPhysicalDeviceProperties"))) {
+		if (RenderGraph::Backend::IsD3D12()) {
+			// The vendor, for the shaders' workarounds (CS_GPU_AMD) and the reports, from BasicRHI's adapter description.
+			AdapterFeatureInfo adapter{};
+			if ((*state->device)->QueryFeatureInfo(&adapter.header) == rhi::Result::Ok) {
+				adoptedVendorId.store(adapter.vendorId, std::memory_order_relaxed);
+				logger::info("[RenderGraph] D3D12 device (native mode): {} (vendor {:#06x}, device {:#06x})", adapter.name, adapter.vendorId, adapter.deviceId);
+			}
+		} else if (const auto getProperties = reinterpret_cast<PFN_vkGetPhysicalDeviceProperties>(
+					   LoaderProcAddr()(rhi::vulkan::get_instance(state->device->Get()), "vkGetPhysicalDeviceProperties"))) {
 			VkPhysicalDeviceProperties properties{};
 			getProperties(rhi::vulkan::get_physical_device(state->device->Get()), &properties);
 			adoptedVendorId.store(properties.vendorID, std::memory_order_relaxed);
@@ -2362,7 +2369,8 @@ bool RenderGraphRuntime::Initialize()
 	impl = std::move(state);
 	disabledReason.clear();
 	if (impl->native) {
-		logger::info("[ORG] Render graph runs natively on BasicRHI's Vulkan device; submissions go to its queues directly");
+		logger::info("[ORG] Render graph runs natively on BasicRHI's {} device; submissions go to its queues directly",
+			RenderGraph::Backend::Name(RenderGraph::Backend::Active()));
 	} else {
 		// Nsight Perf's Vulkan backend: its captures run on DXVK's graphics queue, with the graph's passes as ranges.
 		GpuCounters::RegisterVulkanDevice(info, d3d11, *impl->host);

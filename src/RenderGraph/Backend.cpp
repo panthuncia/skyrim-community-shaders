@@ -16,12 +16,12 @@ namespace RenderGraph::Backend
 	rhi::Backend Requested()
 	{
 		static const rhi::Backend requested = [] {
-			const auto value = Switches::Value("CS_ORG_BACKEND");
-			if (value.empty() || Switches::EqualsNoCase("CS_ORG_BACKEND", "vulkan"))
+			const auto value = Switches::Value("CS_ORG_NATIVE_BACKEND");
+			if (value.empty() || Switches::EqualsNoCase("CS_ORG_NATIVE_BACKEND", "vulkan"))
 				return rhi::Backend::Vulkan;
-			if (Switches::EqualsNoCase("CS_ORG_BACKEND", "d3d12"))
+			if (Switches::EqualsNoCase("CS_ORG_NATIVE_BACKEND", "d3d12"))
 				return rhi::Backend::D3D12;
-			logger::error("[ORG] CS_ORG_BACKEND={} is not a backend (vulkan or d3d12); the render graph stays on Vulkan", value);
+			logger::error("[ORG] CS_ORG_NATIVE_BACKEND={} is not a backend (vulkan or d3d12); the render graph stays on Vulkan", value);
 			return rhi::Backend::Vulkan;
 		}();
 		return requested;
@@ -57,9 +57,9 @@ namespace RenderGraph::Backend
 		if (Requested() != rhi::Backend::D3D12)
 			return {};
 		if (!D3D12Built())
-			return "CS_ORG_BACKEND=d3d12, but this build has no D3D12 backend (built with CS_ORG_D3D12=OFF)";
+			return "CS_ORG_NATIVE_BACKEND=d3d12, but this build has no D3D12 backend (built with CS_ORG_D3D12=OFF)";
 		if (!Switches::On("CS_ORG_NATIVE"))
-			return "CS_ORG_BACKEND=d3d12 needs CS_ORG_NATIVE=1: DXVK runs the game on Vulkan, so the render graph cannot share a D3D12 device with it";
+			return "CS_ORG_NATIVE_BACKEND=d3d12 needs CS_ORG_NATIVE=1: DXVK runs the game on Vulkan, so the render graph cannot share a D3D12 device with it";
 		return {};
 	}
 
@@ -67,7 +67,7 @@ namespace RenderGraph::Backend
 	{
 		if (!IsD3D12())
 			return {};
-		return fmt::format("{} is not available on D3D12 (CS_ORG_BACKEND=d3d12): {}", a_what, a_why);
+		return fmt::format("{} is not available on D3D12 (CS_ORG_NATIVE_BACKEND=d3d12): {}", a_what, a_why);
 	}
 }
 
