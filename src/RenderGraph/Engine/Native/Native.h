@@ -112,6 +112,22 @@ namespace RenderGraph::Engine::Native
 	bool EmitExternalCommands(void (*a_record)(void*, VkCommandBuffer_T*), void* a_user, const VkSemaphoreSubmitInfo* a_waits, std::uint32_t a_waitCount,
 		const VkSemaphoreSubmitInfo* a_signals, std::uint32_t a_signalCount);
 
+	/**
+	 * @name Texture streaming's shells (TextureStreaming/Streamer.cpp), what DXVK's dxvkStream* exports do. A shell is a texture
+	 * handle without storage and its SRV. The streamer sets a window (an SRV of a texture with the resident mips) on it, and
+	 * DescribeResource answers the window's image for the shell. Engine draws do not read shells in native mode, so no bind
+	 * counts and no missing-window callback: the streamer's scheduler (DCLF) decides every window. The gone callback runs when
+	 * the shell's SRV is destroyed, as DXVK runs it in the view's destructor.
+	 */
+	/** @{ */
+	bool CreateStreamShell(const D3D11_TEXTURE2D_DESC& a_desc, ID3D11Texture2D** a_texture, ID3D11ShaderResourceView** a_view);
+	HRESULT __stdcall StreamEnableView(ID3D11ShaderResourceView* a_shell, void(__stdcall* a_missing)(std::uint64_t), void(__stdcall* a_gone)(std::uint64_t),
+		const D3D11_SUBRESOURCE_DATA*(__stdcall* a_fill)(std::uint64_t, BOOL), std::uint64_t a_user);
+	void __stdcall StreamSetWindow(ID3D11ShaderResourceView* a_shell, ID3D11ShaderResourceView* a_window);
+	ID3D11ShaderResourceView* __stdcall StreamGetWindow(ID3D11ShaderResourceView* a_shell);
+	std::uint64_t __stdcall StreamGetBinds(ID3D11ShaderResourceView* a_shell);
+	/** @} */
+
 	/** @brief Teardown, at the game window's close: waits for the last present and destroys the swap chain and the back buffer. */
 	void Shutdown();
 }

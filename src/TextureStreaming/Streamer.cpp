@@ -4,6 +4,7 @@
 #include "Globals.h"
 #include "Policy.h"
 #include "RenderGraph/DxvkOrgInterop.h"
+#include "RenderGraph/Engine/Native/Native.h"
 #include "TextureStreaming/ORGWindows.h"
 #include "Utils/SwitchFile.h"
 #include "Vram/Debug.h"
@@ -63,6 +64,12 @@ namespace TextureStreaming
 
 		const Exports& Dxvk()
 		{
+			// Native mode: the native device's shells, which work as DXVK's (Native.h, "Texture streaming's shells").
+			if (RenderGraph::Engine::Native::Active()) {
+				static const Exports native{ &RenderGraph::Engine::Native::StreamEnableView, &RenderGraph::Engine::Native::StreamSetWindow,
+					&RenderGraph::Engine::Native::StreamGetWindow, &RenderGraph::Engine::Native::StreamGetBinds };
+				return native;
+			}
 			static const Exports exports = [] {
 				Exports result;
 				if (HMODULE module = ::GetModuleHandleW(L"dxvk_d3d11.dll")) {
@@ -630,7 +637,11 @@ namespace TextureStreaming
 
 			winrt::com_ptr<ID3D11Texture2D> texture;
 			winrt::com_ptr<ID3D11ShaderResourceView> view;
-			if (FAILED(a_device->CreateTexture2D(&entry->desc, nullptr, texture.put())) || FAILED(a_device->CreateShaderResourceView(texture.get(), nullptr, view.put())))
+			// Native mode makes the shell without storage itself; DXVK defers a texture's storage until a bind needs it.
+			if (RenderGraph::Engine::Native::Active()) {
+				if (!RenderGraph::Engine::Native::CreateStreamShell(entry->desc, texture.put(), view.put()))
+					return nullptr;
+			} else if (FAILED(a_device->CreateTexture2D(&entry->desc, nullptr, texture.put())) || FAILED(a_device->CreateShaderResourceView(texture.get(), nullptr, view.put())))
 				return nullptr;
 			entry->id = g_nextId.fetch_add(1, std::memory_order_relaxed);
 			if (FAILED(Dxvk().enable(view.get(), OnMissing, OnGone, OnFill, entry->id)))

@@ -274,6 +274,7 @@ namespace RenderGraph::Engine::Native
 				Buffer,   // a buffer
 				Image,    // a texture the GPU uses (DEFAULT, IMMUTABLE, DYNAMIC)
 				Staging,  // a STAGING texture: a buffer laid out by subresource
+				Shell,    // a streamed texture's shell: no storage, read through its window (CreateStreamShell)
 			};
 			Kind kind = Kind::Buffer;
 			rhi::ResourcePtr resource;
@@ -294,6 +295,10 @@ namespace RenderGraph::Engine::Native
 			std::shared_ptr<NativeResource> upload;
 			// The value of the last immediate work that read or wrote it (Immediate), so Map waits only for that.
 			std::atomic<uint64_t> lastUse{ 0 };
+			// A shell's window (StreamSetWindow), and whether the streamer enabled it (StreamEnableView).
+			std::mutex windowLock;
+			winrt::com_ptr<ID3D11ShaderResourceView> window;
+			bool streamEnabled = false;
 
 			NativeResource();
 			~NativeResource();
@@ -2470,6 +2475,15 @@ namespace RenderGraph::Engine::Native
 		const auto record = Resolve(a_object);
 		if (!record)
 			return false;
+		// A streamed texture's shell is read through its window, as DXVK's binds read it; without one there is nothing to describe.
+		if (record->kind == NativeResource::Kind::Shell) {
+			winrt::com_ptr<ID3D11ShaderResourceView> window;
+			{
+				std::lock_guard guard(record->windowLock);
+				window = record->window;
+			}
+			return window && DescribeResource(window.get(), a_info);
+		}
 		a_info = {};
 		a_info.version = DXVK_ORG_INTEROP_VERSION;
 		if (record->kind == NativeResource::Kind::Buffer) {
@@ -2623,6 +2637,117 @@ namespace RenderGraph::Engine::Native
 		return Tripwire::CreateBuffer(a_desc, std::move(options));
 	}
 
+	namespace
+	{
+		// {7D1E2C44-9B3A-4F61-8E25-3C6A0B9D4F12}: the private-data slot of a shell SRV's gone tag.
+		constexpr GUID kStreamGoneGuid = { 0x7d1e2c44, 0x9b3a, 0x4f61, { 0x8e, 0x25, 0x3c, 0x6a, 0x0b, 0x9d, 0x4f, 0x12 } };
+
+		/** @brief Held by a shell SRV (its private data): released with the view, it runs the streamer's gone callback then. */
+		class StreamGoneTag final : public IUnknown
+		{
+		public:
+			StreamGoneTag(void(__stdcall* a_gone)(std::uint64_t), std::uint64_t a_user) :
+				gone(a_gone), user(a_user) {}
+			~StreamGoneTag()
+			{
+				if (gone)
+					gone(user);
+			}
+			HRESULT STDMETHODCALLTYPE QueryInterface(REFIID a_riid, void** a_out) override
+			{
+				if (!a_out)
+					return E_POINTER;
+				if (a_riid == __uuidof(IUnknown)) {
+					AddRef();
+					*a_out = static_cast<IUnknown*>(this);
+					return S_OK;
+				}
+				*a_out = nullptr;
+				return E_NOINTERFACE;
+			}
+			ULONG STDMETHODCALLTYPE AddRef() override { return ++refs; }
+			ULONG STDMETHODCALLTYPE Release() override
+			{
+				const ULONG left = --refs;
+				if (!left)
+					delete this;
+				return left;
+			}
+
+		private:
+			std::atomic<ULONG> refs{ 1 };
+			void(__stdcall* gone)(std::uint64_t) = nullptr;
+			std::uint64_t user = 0;
+		};
+	}
+
+	bool CreateStreamShell(const D3D11_TEXTURE2D_DESC& a_desc, ID3D11Texture2D** a_texture, ID3D11ShaderResourceView** a_view)
+	{
+		if (!g_device || !g_device->deviceHandle || !a_texture || !a_view)
+			return false;
+		*a_texture = nullptr;
+		*a_view = nullptr;
+		auto record = std::make_shared<NativeResource>();
+		record->kind = NativeResource::Kind::Shell;
+		record->name = "Native::StreamShell";
+		D3D11_TEXTURE2D_DESC desc = a_desc;
+		if (!desc.MipLevels)
+			desc.MipLevels = FullMipCount(desc.Width, desc.Height, 1);
+		Tripwire::Options options;
+		options.name = record->name;
+		options.owner = std::move(record);
+		auto texture = Tripwire::CreateTexture2D(desc, std::move(options));
+		// The view through the native device (D3D11's default view of the texture); it shares the texture's record.
+		winrt::com_ptr<ID3D11ShaderResourceView> view;
+		if (!texture || FAILED(g_device->deviceHandle->CreateShaderResourceView(texture.get(), nullptr, view.put())) || !view)
+			return false;
+		*a_texture = texture.detach();
+		*a_view = view.detach();
+		return true;
+	}
+
+	HRESULT __stdcall StreamEnableView(ID3D11ShaderResourceView* a_shell, void(__stdcall*)(std::uint64_t), void(__stdcall* a_gone)(std::uint64_t),
+		const D3D11_SUBRESOURCE_DATA*(__stdcall*)(std::uint64_t, BOOL), std::uint64_t a_user)
+	{
+		const auto record = Resolve(a_shell);
+		if (!record || record->kind != NativeResource::Kind::Shell)
+			return E_FAIL;
+		{
+			std::lock_guard guard(record->windowLock);
+			if (std::exchange(record->streamEnabled, true))
+				return E_FAIL;  // a shell already, as DXVK refuses a second enable
+		}
+		// The gone callback with the view's last reference (its private data goes with it), before anything could name it again.
+		winrt::com_ptr<IUnknown> tag;
+		tag.attach(new StreamGoneTag(a_gone, a_user));
+		return a_shell->SetPrivateDataInterface(kStreamGoneGuid, tag.get());
+	}
+
+	void __stdcall StreamSetWindow(ID3D11ShaderResourceView* a_shell, ID3D11ShaderResourceView* a_window)
+	{
+		if (const auto record = Resolve(a_shell); record && record->kind == NativeResource::Kind::Shell) {
+			std::lock_guard guard(record->windowLock);
+			record->window.copy_from(a_window);
+		}
+	}
+
+	ID3D11ShaderResourceView* __stdcall StreamGetWindow(ID3D11ShaderResourceView* a_shell)
+	{
+		const auto record = Resolve(a_shell);
+		if (!record || record->kind != NativeResource::Kind::Shell)
+			return nullptr;
+		std::lock_guard guard(record->windowLock);
+		ID3D11ShaderResourceView* window = nullptr;
+		if (record->window)
+			record->window.copy_to(&window);
+		return window;
+	}
+
+	std::uint64_t __stdcall StreamGetBinds(ID3D11ShaderResourceView*)
+	{
+		// Engine draws do not read shells in native mode (they are ported or skipped), so none counts as a native bind.
+		return 0;
+	}
 
 	void Shutdown()
 	{
@@ -2657,6 +2782,15 @@ namespace RenderGraph::Engine::Native
 	}
 	winrt::com_ptr<ID3D11Buffer> WrapBuffer(const rhi::Resource&, const D3D11_BUFFER_DESC&, const char*) { return nullptr; }
 	void Shutdown() {}
+	bool CreateStreamShell(const D3D11_TEXTURE2D_DESC&, ID3D11Texture2D**, ID3D11ShaderResourceView**) { return false; }
+	HRESULT __stdcall StreamEnableView(ID3D11ShaderResourceView*, void(__stdcall*)(std::uint64_t), void(__stdcall*)(std::uint64_t),
+		const D3D11_SUBRESOURCE_DATA*(__stdcall*)(std::uint64_t, BOOL), std::uint64_t)
+	{
+		return E_NOTIMPL;
+	}
+	void __stdcall StreamSetWindow(ID3D11ShaderResourceView*, ID3D11ShaderResourceView*) {}
+	ID3D11ShaderResourceView* __stdcall StreamGetWindow(ID3D11ShaderResourceView*) { return nullptr; }
+	std::uint64_t __stdcall StreamGetBinds(ID3D11ShaderResourceView*) { return 0; }
 }
 
 #endif
