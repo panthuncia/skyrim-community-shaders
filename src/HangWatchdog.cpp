@@ -1,6 +1,7 @@
 #include "HangWatchdog.h"
 
 #include "CrashDump.h"
+#include "Testing/Testing.h"
 #ifdef CS_HAS_RENDER_GRAPH
 #	include "RenderGraph/RenderGraphRuntime.h"
 #	include <OpenRenderGraph/GraphHost.h>
@@ -24,6 +25,21 @@ namespace HangWatchdog
 		std::atomic<std::uint64_t> beats{ 0 };
 		std::atomic<std::uint32_t> renderThread{ 0 };  // the thread of the last Present
 		std::uint64_t thresholdMs = kDefaultSeconds * 1000;
+		std::atomic<std::uint64_t> progressEvents{ 0 };  // loading progress: cells attached, NoteProgress calls
+
+		/** @brief Cells attaching while a load runs: progress, even when nothing presents. */
+		class CellAttachSink final : public RE::BSTEventSink<RE::TESCellAttachDetachEvent>
+		{
+		public:
+			RE::BSEventNotifyControl ProcessEvent(const RE::TESCellAttachDetachEvent*, RE::BSTEventSource<RE::TESCellAttachDetachEvent>*) override
+			{
+				progressEvents.fetch_add(1, std::memory_order_relaxed);
+				return RE::BSEventNotifyControl::kContinue;
+			}
+		};
+
+		/** @brief The progress count: shaders compiled and loading events. A change is a beat. */
+		std::uint64_t Progress() { return progressEvents.load(std::memory_order_relaxed) + Testing::GetCompileProgress().done; }
 
 		// CS_TEST_HANG=<seconds> (a development switch): the render thread sleeps past the threshold once, that long after the watch
 		// starts, to exercise the watchdog and the helper end to end.
@@ -188,10 +204,17 @@ namespace HangWatchdog
 			bool stalled = false;  // the current stall was reported (or found, past the report limit)
 			bool rendersUnfocused = false;
 			std::uint64_t lastBeats = 0, lastMinuteLogged = 0;
+			std::uint64_t lastProgress = Progress(), lastProgressTick = 0;
 			for (;;) {
 				std::this_thread::sleep_for(std::chrono::seconds(1));
-				const auto beat = lastBeat.load(std::memory_order_acquire);
-				if (beat == 0)
+				// Shader compiles and loading progress count as beats: a cold shader cache or a long load is not a hang. A load that
+				// makes no progress and does not present still is.
+				if (const auto progress = Progress(); progress != lastProgress) {
+					lastProgress = progress;
+					lastProgressTick = GetTickCount64();
+				}
+				const auto beat = (std::max)(lastBeat.load(std::memory_order_acquire), lastProgressTick);
+				if (lastBeat.load(std::memory_order_acquire) == 0)
 					continue;
 				const auto count = beats.load(std::memory_order_relaxed);
 				const bool foreground = GameHasForeground();
@@ -228,6 +251,8 @@ namespace HangWatchdog
 				}
 				++reports;
 				Report(stalledMs);
+				// A test run ends here with the outcome hang.
+				Testing::ReportHang(stalledMs / 1000.0);
 			}
 		}
 	}
@@ -246,6 +271,10 @@ namespace HangWatchdog
 			return;
 		}
 		thresholdMs = seconds * 1000;
+		if (auto* events = RE::ScriptEventSourceHolder::GetSingleton()) {
+			static CellAttachSink sink;
+			events->AddEventSink<RE::TESCellAttachDetachEvent>(&sink);
+		}
 		testHangAt = ReadSeconds("CS_TEST_HANG", 0);
 		logger::info("[HANG] the render thread watchdog reports a Present stall of {} s or more", seconds);
 		if (testHangAt)

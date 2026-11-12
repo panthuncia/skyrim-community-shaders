@@ -5,6 +5,9 @@
 // thread's stack, the render thread's first, as text, plus a minidump. Both go beside the log as CommunityShaders-Hang-<time>.txt
 // and .dmp.
 //
+// Shader compiles and loading progress (cells attaching) count as beats, so a cold shader cache does not trip it. A loading screen
+// that neither presents nor makes progress still does. In a test run a hang ends the run with the outcome hang (src/Testing).
+//
 // A game that stops rendering because it lost focus is not a hang: the watchdog waits only while the game has the foreground, or
 // once it has seen the game keep presenting without it (bAlwaysActive, or test runs on another monitor). It also waits while a
 // debugger is attached. One report is written per stall, at most three a session; a stall that ends is logged with its length.

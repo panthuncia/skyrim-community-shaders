@@ -1,5 +1,6 @@
 #include "CrashDump.h"
 #include "CrashDumpShared.h"
+#include "Testing/Testing.h"
 
 // The dumps are written out of process, by CommunityShadersCrashDump.exe beside this DLL (tools/crash-dump-helper). MiniDumpWriteDump
 // suspends every other thread and then allocates from the process heap and takes loader locks: called in here, a thread suspended
@@ -132,6 +133,8 @@ namespace CrashDump
 					logger::critical("[CRASH] unhandled stack overflow on thread {}", GetCurrentThreadId());
 					spdlog::default_logger()->flush();
 				} else {
+					// A test run's status first (best effort): the dump can take a while, and the harness may end the process.
+					Testing::ReportCrash(static_cast<std::uint32_t>(record.ExceptionCode), record.ExceptionAddress);
 					logger::critical("[CRASH] unhandled exception {}. {}", Describe(record),
 						helper.shared ? "Writing CommunityShaders.dmp" : "No dump: the helper is not running");
 					spdlog::default_logger()->flush();
