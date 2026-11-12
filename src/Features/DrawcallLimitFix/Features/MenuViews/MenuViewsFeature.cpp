@@ -2,6 +2,7 @@
 // and its report lines; the rest is MenuViewsProbe.cpp.
 
 #include "Features/DrawcallLimitFix/Features/MenuViews/MenuViews.h"
+#include "Features/DrawcallLimitFix/Features/MenuViews/MenuScenes.h"
 
 #include "Features/DrawcallLimitFix/Core/Handoff/PassCapture.h"
 
@@ -41,18 +42,16 @@ namespace DCLF::Features::MenuViews
 			static inline REL::Relocation<decltype(thunk)> func;
 		};
 
-		/** @brief LocalMapRenderer::Render (SE 16094, AE 16335): the local map's land, objects and water, the engine's as above. */
+		/**
+		 * @brief LocalMapRenderer::Render (SE 16094, AE 16335): the local map's land and objects and its fog of war. Its two batches are the
+		 * menu scenes family's (MenuScenes.h: drawn by the graph with CS_ORG_MAP=1, the engine's and vouched for by the family otherwise);
+		 * its ImageSpace effect (0x62, kLOCAL_MAP_SWAP into kLOCAL_MAP) is the ImageSpace port's.
+		 */
 		struct LocalMapRender
 		{
 			static void thunk(void* a_renderer)
 			{
-				static const Flush::Reason reason{ "menu views: local map left to the engine" };
 				PassCapture::MenuSceneScope menuScene;
-				if (!Flush::LatchRequested()) {
-					func(a_renderer);
-					return;
-				}
-				Flush::EngineDraws scope(reason);
 				func(a_renderer);
 			}
 			static inline REL::Relocation<decltype(thunk)> func;
@@ -69,18 +68,39 @@ namespace DCLF::Features::MenuViews
 					"world-class passes, and the flush latch skips its draws",
 					Menu3DRender::func.address() != 0, LocalMapRender::func.address() != 0);
 			else if (Flush::LatchRequested())
-				logger::info("[DCLF] menu views: the menu scenes are the engine's under the flush latch (UI3DSceneManager::Render, LocalMapRenderer::Render)");
+				logger::info("[DCLF] menu views: the menu 3D models are the engine's under the flush latch (UI3DSceneManager::Render)");
 		}
 
 		void Install(Api::InstallContext& a_context)
 		{
 			InstallSceneHooks();
-			if (!Menu3DEnabled() && !MapEnabled())
+			// At PostPostLoad, before the render graph initializes: the anchors' epochs are fixed then.
+			if (Scenes::Enabled())
+				Scenes::SceneDraws::Reserve();
+			if (!Menu3DEnabled() && !MapEnabled()) {
+				Scenes::InstallHooks();
 				return;
+			}
 			InstallHooks();
+			// After the probe's: the family's thunks chain onto the probe's at the same calls.
+			Scenes::InstallHooks();
 			a_context.RegisterReportLines({ .name = "menu views", .point = Api::ReportPoint::AsyncWork, .text = &Lines });
-			logger::info("[DCLF] menu views: probe on (CS_ORG_MENU3D={}, CS_ORG_MAP={}); the engine still draws every menu scene", Menu3DEnabled() ? 1 : 0,
+			logger::info("[DCLF] menu views: probe on (CS_ORG_MENU3D={}, CS_ORG_MAP={}); the local map's batches are the menu scenes family's with CS_ORG_MAP", Menu3DEnabled() ? 1 : 0,
 				MapEnabled() ? 1 : 0);
+		}
+	}
+
+	namespace
+	{
+		void Preflight()
+		{
+			PreflightHooks();
+			Scenes::PreflightHooks();
+		}
+
+		std::string Status()
+		{
+			return std::string("local map: ") + Scenes::SceneDraws::Status();
 		}
 	}
 
@@ -98,6 +118,6 @@ namespace DCLF::Features::MenuViews
 
 	Api::Feature Feature()
 	{
-		return { .name = "menu views", .install = &Install, .preflight = &PreflightHooks };
+		return { .name = "menu views", .install = &Install, .preflight = &Preflight, .status = &Status };
 	}
 }
