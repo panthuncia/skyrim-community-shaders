@@ -2341,7 +2341,12 @@ bool RenderGraphRuntime::Initialize()
 			// those there.
 			// Native mode runs them too: EmitExternalCommands puts each segment on the graphics queue in the call's order (the
 			// stream's order on DXVK), so DCLF's direct forward and first-person families have their in-stream epochs.
-			if ((state->emitExternalCommands || state->native) && !Switches::Equals("CS_ORG_IN_STREAM", "0")) {
+			// Not on D3D12: an in-stream epoch's segments are secondaries recorded outside rendering, and a D3D12 bundle can hold no
+			// copies or barriers (BeginSecondary refuses). Its epochs submit directly instead.
+			const bool nativeInStream = state->native && !RenderGraph::Backend::IsD3D12();
+			if (state->native && RenderGraph::Backend::IsD3D12())
+				logger::info("[ORG] in-stream epochs: none on D3D12 (bundles cannot hold an epoch's copies and barriers); every epoch submits directly");
+			if ((state->emitExternalCommands || nativeInStream) && !Switches::Equals("CS_ORG_IN_STREAM", "0")) {
 				state->inStreamEpochs = epochs;
 				const auto list = Switches::Value("CS_ORG_IN_STREAM");
 				if (list.find(',') != std::string::npos) {
