@@ -20,15 +20,15 @@ namespace rhi
  * device's queues, no DXVK stream), and ORG presents. A development option: the DXVK build stays the default.
  *
  * Startup, in order (each stage logs one "[ORG native] stage" line, so a failed bring-up shows how far it got):
- * 1. Switches (SKSEPlugin_Load, after CommunityShaders.env): the port switches native mode needs are turned on. One set to 0, or a
- *    switch that conflicts (CS_NATIVE_D3D11, CS_ORG_OWNED_FRAME, CS_ORG=0), is a startup error that names it.
- * 2. Checks (Hooks::InstallEarlyHooks): DXVK is not loaded; a feature that still needs DXVK is a startup error that names it.
- * 3. Device (the game's D3D11CreateDeviceAndSwapChain, SE 75589 / AE 77396): BasicRHI's device, ORG's swap chain on the game's
- *    window, the back buffer, and the device, context and swap chain handles the engine stores (RendererData +0x38/+0x40, window 0's
- *    swap chain, and the device and context globals SE 524729/524771, AE 411348/411391).
- * 4. Engine init (the InitD3D hook): the engine's fields are checked to hold the handles.
- * 5. Render graph (State::Setup, RenderGraphRuntime::Initialize): the graph host runs natively on BasicRHI's device.
- * 6. First present: the back buffer is copied into the swap chain image and presented.
+ * 1. switches (SKSEPlugin_Load, after CommunityShaders.env): the port switches native mode needs are turned on. One set to 0, or
+ *    a switch that conflicts (CS_NATIVE_D3D11, CS_ORG_OWNED_FRAME, CS_ORG=0), is a startup error that names it.
+ * 2. checks (Hooks::InstallEarlyHooks): DXVK is not loaded; a feature that still needs DXVK is a startup error that names it.
+ * 3. device, 4. swap chain, 5. handles (the game's D3D11CreateDeviceAndSwapChain, SE 75589 / AE 77396): BasicRHI's device, ORG's
+ *    swap chain on the game's window with the back buffer, and the device, context and swap chain handles the engine stores
+ *    (RendererData +0x38/+0x40, window 0's swap chain, and the device and context globals SE 524729/524771, AE 411348/411391).
+ * 6. engine init (the InitD3D hook): the engine's fields are checked to hold the handles.
+ * 7. render graph (State::Setup, RenderGraphRuntime::Initialize): the graph host runs natively on BasicRHI's device.
+ * 8. first present: the back buffer is copied into the swap chain image and presented.
  *
  * What still needs DXVK fails at its first use with a message that names it, never by falling back to DXVK.
  */

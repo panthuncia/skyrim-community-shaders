@@ -1057,6 +1057,91 @@ for now. As later phases move work out of DXVK:
 -   **The binding model negotiation** (`dxvkSetBindingModelCallback`) and `dxvkRequestDeviceFeatures` are already unused in the owned
     frame: the host decides.
 
+## Native mode
+
+`CS_ORG_NATIVE=1` runs without DXVK ([org-full-port.md](./org-full-port.md), Phase 6). CS creates a BasicRHI Vulkan device
+itself, the engine's device, immediate context and swap chain are tripwire handles over it, the graph host runs natively,
+and ORG presents. A development option: the DXVK build stays the default. The code is in `src/RenderGraph/Engine/Native/`.
+
+### Startup
+
+Each stage logs one `[ORG native] stage <n>: <name>: ...` line, so a start that stops shows how far it got:
+
+1.  **switches** (`SKSEPlugin_Load`, right after `CommunityShaders.env`): every port switch native mode needs is turned on
+    in the process environment (the set of `latch-census-short.env`, without its diagnostics, and the flush latch). A port
+    switch set to `0`, or a conflicting one (`CS_NATIVE_D3D11=1`, `CS_ORG_OWNED_FRAME=1`, `CS_ORG=0`, `CS_ORG=features`,
+    `CS_ORG_SCALEFORM_D3D11_PARTS=1`), is a startup error. So is a switch something read before this point.
+2.  **checks** (`Hooks::InstallEarlyHooks`): DXVK is not loaded (`DxvkLoader::Load` skips it), no DXVK DLL is in the
+    process, and the RenderDoc and Upscaling features are off (Upscaling's upscalers and frame generation take DXVK's
+    images; add it to `CS_DISABLE_FEATURES`).
+3.  **device** (the game's `D3D11CreateDeviceAndSwapChain`, SE 75589 / AE 77396, through CS's hook): `rhi::CreateVulkanDevice`
+    on the adapter the game enumerated (its LUID), on descriptor buffers, with every supported core feature but
+    robustBufferAccess and sparse binding, robustness2's null descriptors, and the Vulkan 1.2 features the graph asks
+    DXVK for (memory model device scope, separate depth/stencil layouts, variable descriptor counts). This is the one place
+    a D3D12 device would be made (`CreateBasicRhiDevice`).
+4.  **swap chain**: a BasicRHI swap chain on the game's window, borderless only, and the back buffer.
+5.  **handles**: the native services are installed (`Tripwire::SetNativeServices`) and the engine gets a device, a context
+    and a swap chain handle. The engine writes them into `RendererData` +0x38/+0x40, window 0's swap chain (+0x60 from
+    `RendererData`'s window table) and the device and context globals (SE 524729 / 524771, AE 411348 / 411391) itself.
+6.  **engine init** (CS's InitD3D hook): those fields are checked to hold the handles.
+7.  **render graph** (`State::Setup`, `RenderGraphRuntime::Initialize`): the host runs on BasicRHI's device.
+8.  **first present**.
+
+### What the handles do
+
+A native device handle answers through the native services instead of failing:
+
+-   **Textures** (1D, 2D, 3D): a BasicRHI image, its initial data uploaded through a one-shot copy on the graphics queue, and
+    left in GENERAL (the graph's Common home state). Typeless formats are made in the format their binding implies.
+    STAGING, DYNAMIC, CPU-access and multisampled textures are not built: logged once, `E_NOTIMPL`.
+-   **Buffers**: a BasicRHI buffer, in upload memory when it has contents or CPU access, else device-local.
+-   **Views, shaders, input layouts, states, queries**: native handles that keep their description (and resource), which is
+    what the ports read. A null view description gets D3D11's default for a 2D texture.
+-   **`IDXGIDevice1`**: `SetMaximumFrameLatency` goes to the swap chain; `GetAdapter` and `GetParent` answer the adapter
+    the game chose.
+-   **The swap chain**: `GetBuffer(0)` is the back buffer (a native texture); `ResizeBuffers` resizes the swap chain and
+    makes a new back buffer; `GetFullscreenState` says windowed, and `SetFullscreenState` and `ResizeTarget` change nothing.
+
+Everything else on the device, and every context method, is a tripwire: logged once per call site, failed. A call from
+another plugin is an `[ORG native] <module> calls ...` error line ("Calling D3D11 in the DXVK-free build" in
+[org-extension-api-notes.md](./org-extension-api-notes.md)). `globals::d3d::device` and `context` are the native handles,
+so CS's own remaining D3D11 calls show up the same way, with CS's module offset.
+
+The graph imports a native texture as it imports a DXVK image: `RenderGraphRuntime::DescribeResource` answers from native
+mode's records (`Native::DescribeResource`), and `FrameAnchors`' engine imports do not unwrap native handles.
+
+### Present
+
+`Native::Present`, on the swap chain handle's Present (the end of CS's Present chain), on the presenting thread under the
+engine's lock: wait until the slot's last copy is done, record a copy of the back buffer into the acquired swap chain image
+(Common to CopySource and back, Undefined to CopyDest to Present), submit it on the graphics queue with a timeline signal,
+and `rhi::Swapchain::Present` on that point. The graph gives the back buffer back in Common on the graphics queue, so the
+copy is ordered after the frame's last write by submission order. No DXVK queue is involved: there is no queue callback
+and no submission thread, so the owned frame's lost wake (P6.0) cannot happen here.
+
+### The host
+
+In native mode `RenderGraphRuntime::Initialize` takes `Native::Device()` and resolves no DXVK export. The host has no queue
+boundaries, no in-stream or external epochs and no stream points, and its submissions go to BasicRHI's queues directly
+(BasicRHI's queue lock orders them against the present's). `ReleaseAfterD3D11` keeps an owner until the graph's
+submissions made before its release have retired (the host's retired callback). DXC loads from CS's runtime directory
+(`Native::RuntimeDirectory`, `CommunityShaders/bin`). `WrapTexture` and `WrapBuffer` make nothing, so the ports that wrap
+ORG resources for D3D11 take their failure paths. At the window's close presents stop; the device and the graph are
+left to the process exit (no DXVK teardown callback).
+
+### Known gaps
+
+-   **The ports' D3D11 sides.** Every P4 port makes DXVK objects of ORG resources (`WrapTexture`, `WrapBuffer`,
+    `GraphResources::ExportTexture`) and installs tripwire handles that wrap them. In native mode those calls fail, so the
+    engine's targets, file textures and geometry buffers are native textures and buffers instead (the native services),
+    which the graph imports by their records. What reads them through the context (Map, UpdateSubresource, CopyResource,
+    the binds the latch keeps) gets nothing.
+-   **Context work.** Map/Unmap of dynamic buffers outside the dynamic ring port, `UpdateSubresource`, `CopyResource` and
+    every draw and dispatch still in the census do nothing.
+-   **HDR**: HDR Display's output is not shown through the swap chain (no `SetFrameSource` in native mode), and the colour
+    space is not switched.
+-   **Upscaling and frame generation**: off (stage 2).
+
 ## Tripwire handles
 
 Phase 4 of [org-full-port.md](./org-full-port.md) puts these in the engine's `ID3D11*` and `IDXGISwapChain` fields once ORG
@@ -1115,6 +1200,8 @@ commas) is read with `Switches::List`: each item trimmed, empty items left out, 
 | --- | --- |
 | `CS_ORG=0` | No feature request and no graph: every feature stays on D3D11. |
 | `CS_ORG_OWNED_FRAME=1` | BasicRHI creates the device, DXVK runs as its guest, ORG presents ("Owned frame"). Frame generation is unavailable. |
+| `CS_ORG_NATIVE=1` | No DXVK: CS creates a BasicRHI Vulkan device, the engine's device, context and swap chain are tripwire handles over it, the graph runs natively and ORG presents ("Native mode"). Turns on every port switch it needs; a conflicting switch or a feature that needs DXVK stops the start with a message that names it. Logs `[ORG native] stage <n>: ...` per startup stage. |
+| `CS_ORG_NATIVE_VALIDATION=1` | With `CS_ORG_NATIVE=1`, BasicRHI creates the device with Vulkan validation (P6.4). |
 | `CS_ORG_CRASH_MARKERS=0` | With the owned frame, BasicRHI's crash markers off even in hang mode. They cost about a third of the frame rate in Dragonsreach on the RX 6600 (43 against 60 fps, Dev-Fast). |
 | `BASICRHI_VK_CRASH_MARKERS=1` | BasicRHI's native crash markers and fault reports (`VK_AMD_buffer_marker`, `VK_NV_device_diagnostic_checkpoints`, `VK_EXT_device_fault`, whichever the device has) on any BasicRHI device, also the one adopted from DXVK, where `DeviceCreateInfo::enableCrashMarkers` is not set. Read by BasicRHI (`rhi.h`). They mark BasicRHI's own lists; DXVK's markers (`DXVK_DEBUG=hang`, which also enables `VK_AMD_buffer_marker`) cover only DXVK's commands. On device loss the first timeline that reads `UINT64_MAX` dumps them. A test run adds it with `-Env BASICRHI_VK_CRASH_MARKERS=1`. |
 | `CS_ORG=features` | Request the device features but never create the graph (isolates device-configuration side effects). |

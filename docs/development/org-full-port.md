@@ -53,6 +53,7 @@ pinned submodule commits exist only locally, so a fresh clone cannot fetch them.
 | P5 primary path: ports precompile at load, pipelines before use, no readiness fallback; latch allowed draws         | Merged and run (2026-11-11); census 40/frame settled; latch shots match with it off  | CS `org-port/p5`, ORG `org-port/fix-retire-2` (b6fb82a)  |
 | Phase 5.5 (no engine fall-through): the gate before Phase 6                                                        | Started 2026-11-11; 5.5.0's compile-stall fixes merged                              | CS `org-port/p5`                                         |
 | Guest frames without slots: shared command pools, run leases, one frame arena, only published recordings kept    | Shared pools merged (4.30 GB settled, from 9.75); leases and the arena built, not run yet | CS `org-port/frame-contexts`, ORG and BasicRHI `org-port/frame-contexts` |
+| P6.0-P6.3: native mode (`CS_ORG_NATIVE=1`): BasicRHI device, native handles, native host, ORG present, startup errors | Built, not run (render-graph.md, "Native mode"; `native.env`) | CS `org-port/native-vk` |
 
 **Root cause worth knowing:** a BasicRHI-created Vulkan device failed on AMD because the driver rejects acceleration
 structures in a mutable descriptor list at any count. DXVK never enables acceleration structures, so the adopted device
