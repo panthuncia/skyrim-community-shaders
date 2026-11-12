@@ -273,6 +273,12 @@ namespace RenderGraph::Engine::ImageSpace
 		}
 
 		/**
+		 * @brief The description of a packed engine blend state: read from the engine's table when it has the entry (and kept), else
+		 * the one kept from an earlier read this session or from the manifest. False when neither has it.
+		 */
+		bool BlendDescOf(std::uint32_t a_blend, D3D11_BLEND_DESC& a_out);
+
+		/**
 		 * @brief What one pass is made for, by value (the shape manifest stores it): the effect, its outputs and inputs, its samplers,
 		 * its blend state and its viewport. A compute shape's output is the render target behind its UAV (u0); it has no blend state and
 		 * no viewport.
@@ -450,6 +456,9 @@ namespace RenderGraph::Engine::ImageSpace
 			std::uint32_t engineDrawsSince = 0;
 			// The last reason a covered effect's draw was refused or failed: the summary's why for that draw.
 			std::string lastRefusal;
+			// Each packed engine blend state's description, as last read from the engine's table (BlendDescOf) or the manifest: a pass
+			// made at a build when the table entry is empty takes it from here.
+			std::map<std::uint32_t, D3D11_BLEND_DESC> blendDescs;
 			// Counters.
 			std::uint64_t taken = 0, engineDrawn = 0, batches = 0, lost = 0;
 			// Why each effect's draws stayed with the engine, logged once per reason and effect: refusals (cases the port does not
@@ -573,13 +582,19 @@ namespace RenderGraph::Engine::ImageSpace
 		std::int32_t EffectOf(const RE::BSImagespaceShader* a_shader)
 		{
 			auto& state = IS();
-			// Filled until the manager has made every covered effect.
-			if (state.effectOf.size() < kEffects.size())
-				for (std::size_t i = 0; i < kEffects.size(); ++i)
-					if (const auto* shader = ShaderOf(i))
-						state.effectOf.emplace(shader, static_cast<std::int32_t>(i));
-			const auto it = state.effectOf.find(a_shader);
-			return it != state.effectOf.end() ? it->second : -1;
+			// An entry is checked against the manager's effects now: the engine can free an effect and make another at the same
+			// address, so a kept entry may name another effect.
+			if (const auto it = state.effectOf.find(a_shader); it != state.effectOf.end()) {
+				if (ShaderOf(static_cast<std::size_t>(it->second)) == a_shader)
+					return it->second;
+				state.effectOf.erase(it);
+			}
+			for (std::size_t i = 0; i < kEffects.size(); ++i)
+				if (ShaderOf(i) == a_shader) {
+					state.effectOf.emplace(a_shader, static_cast<std::int32_t>(i));
+					return static_cast<std::int32_t>(i);
+				}
+			return -1;
 		}
 
 		/** @brief A kEffects index by its name (the manifest's), or -1. */
@@ -1060,7 +1075,7 @@ namespace RenderGraph::Engine::ImageSpace
 				return false;
 			const auto draw = Pipeline::EngineDrawState::Latch();
 			a_out.blend = PackBlend(draw.blendMode, draw.alphaToCoverage, draw.writeMode, draw.blendExtra);
-			if (!BlendStateOf(a_out.blend)) {
+			if (D3D11_BLEND_DESC desc{}; !BlendDescOf(a_out.blend, desc)) {
 				a_refusal = "a blend state outside the engine's table";
 				return false;
 			}
@@ -1084,16 +1099,71 @@ namespace RenderGraph::Engine::ImageSpace
 			return binding ? binding.Index() : UINT32_MAX;
 		}
 
+		bool BlendDescOf(std::uint32_t a_blend, D3D11_BLEND_DESC& a_out)
+		{
+			auto& state = IS();
+			if (auto* object = BlendStateOf(a_blend)) {
+				object->GetDesc(&a_out);
+				state.blendDescs[a_blend] = a_out;
+				return true;
+			}
+			const auto kept = state.blendDescs.find(a_blend);
+			if (kept == state.blendDescs.end())
+				return false;
+			a_out = kept->second;
+			return true;
+		}
+
+		/** @brief A blend description as the manifest keeps it: the two flags, then each target's eight fields. */
+		json BlendToJson(const D3D11_BLEND_DESC& a_desc)
+		{
+			json out = json::array({ static_cast<std::int64_t>(a_desc.AlphaToCoverageEnable), static_cast<std::int64_t>(a_desc.IndependentBlendEnable) });
+			for (const auto& target : a_desc.RenderTarget) {
+				out.push_back(static_cast<std::int64_t>(target.BlendEnable));
+				out.push_back(static_cast<std::int64_t>(target.SrcBlend));
+				out.push_back(static_cast<std::int64_t>(target.DestBlend));
+				out.push_back(static_cast<std::int64_t>(target.BlendOp));
+				out.push_back(static_cast<std::int64_t>(target.SrcBlendAlpha));
+				out.push_back(static_cast<std::int64_t>(target.DestBlendAlpha));
+				out.push_back(static_cast<std::int64_t>(target.BlendOpAlpha));
+				out.push_back(static_cast<std::int64_t>(target.RenderTargetWriteMask));
+			}
+			return out;
+		}
+
+		/** @brief The manifest's form of a blend description read back; false for a malformed one. */
+		bool BlendFromJson(const json& a_item, D3D11_BLEND_DESC& a_out)
+		{
+			if (!a_item.is_array() || a_item.size() != 2 + 8 * std::size(a_out.RenderTarget))
+				return false;
+			try {
+				a_out.AlphaToCoverageEnable = a_item[0].get<std::int64_t>() != 0;
+				a_out.IndependentBlendEnable = a_item[1].get<std::int64_t>() != 0;
+				std::size_t at = 2;
+				for (auto& target : a_out.RenderTarget) {
+					target.BlendEnable = a_item[at++].get<std::int64_t>() != 0;
+					target.SrcBlend = static_cast<D3D11_BLEND>(a_item[at++].get<std::int64_t>());
+					target.DestBlend = static_cast<D3D11_BLEND>(a_item[at++].get<std::int64_t>());
+					target.BlendOp = static_cast<D3D11_BLEND_OP>(a_item[at++].get<std::int64_t>());
+					target.SrcBlendAlpha = static_cast<D3D11_BLEND>(a_item[at++].get<std::int64_t>());
+					target.DestBlendAlpha = static_cast<D3D11_BLEND>(a_item[at++].get<std::int64_t>());
+					target.BlendOpAlpha = static_cast<D3D11_BLEND_OP>(a_item[at++].get<std::int64_t>());
+					target.RenderTargetWriteMask = static_cast<UINT8>(a_item[at++].get<std::int64_t>());
+				}
+			} catch (const std::exception&) {
+				return false;
+			}
+			return true;
+		}
+
 		/** @brief The ORG form of a packed engine blend state for a_targets attachments: false with a reason when it has none. */
 		bool BlendFor(std::uint32_t a_blend, std::uint32_t a_targets, std::array<rhi::BlendAttachment, 2>& a_out, std::string& a_error)
 		{
-			auto* object = BlendStateOf(a_blend);
-			if (!object) {
+			D3D11_BLEND_DESC desc{};
+			if (!BlendDescOf(a_blend, desc)) {
 				a_error = "no engine blend state";
 				return false;
 			}
-			D3D11_BLEND_DESC desc{};
-			object->GetDesc(&desc);
 			rhi::BlendState blend{};
 			if (!Pipeline::BlendFromD3D11(desc, blend, a_error) || Pipeline::ReadsBlendFactor(desc) || Pipeline::UsesDualSource(desc)) {
 				if (a_error.empty())
@@ -1267,7 +1337,7 @@ namespace RenderGraph::Engine::ImageSpace
 				std::array<rhi::BlendAttachment, 2> blend{};
 				std::string error;
 				if (!BlendFor(spec.key.blend, effect.targets, blend, error)) {
-					if (!BlendStateOf(spec.key.blend))
+					if (D3D11_BLEND_DESC desc{}; !BlendDescOf(spec.key.blend, desc))
 						state.retryBuild = true;
 					logger::info("[ORG] ImageSpace: {}: its blend state has no ORG form at the graph's build ({}); its pass is left out", spec.name, error);
 					return nullptr;
@@ -1688,6 +1758,14 @@ namespace RenderGraph::Engine::ImageSpace
 					}
 					state.manifest.insert_or_assign(shape->first, shape->second);
 				}
+				for (const auto& [key, item] : root.value("blends", json::object()).items()) {
+					D3D11_BLEND_DESC desc{};
+					try {
+						if (BlendFromJson(item, desc))
+							state.blendDescs.emplace(static_cast<std::uint32_t>(std::stoul(key)), desc);
+					} catch (const std::exception&) {
+					}
+				}
 				for (const auto& [name, defines] : root.value("defines", json::object()).items()) {
 					const auto effect = EffectNamed(name);
 					if (effect >= 0 && defines.is_array())
@@ -1725,7 +1803,13 @@ namespace RenderGraph::Engine::ImageSpace
 			json defines = json::object();
 			for (const auto& [effect, list] : state.savedDefines)
 				defines[std::string(kEffects[effect].effectName)] = list;
-			const json root{ { "version", kManifestVersion }, { "session", state.session }, { "shapes", std::move(items) }, { "defines", std::move(defines) } };
+			// The blend descriptions the shapes use, so a build before the engine fills its blend table makes their passes.
+			json blends = json::object();
+			for (const auto& [key, entry] : shapes)
+				if (const auto kept = state.blendDescs.find(key.blend); !key.compute && kept != state.blendDescs.end())
+					blends[std::to_string(key.blend)] = BlendToJson(kept->second);
+			const json root{ { "version", kManifestVersion }, { "session", state.session }, { "shapes", std::move(items) }, { "defines", std::move(defines) },
+				{ "blends", std::move(blends) } };
 			std::error_code error;
 			const auto path = ManifestPath();
 			std::filesystem::create_directories(path.parent_path(), error);
@@ -1851,7 +1935,7 @@ namespace RenderGraph::Engine::ImageSpace
 				return;
 			}
 			for (const auto& spec : state.specs) {
-				if (!spec->key.compute && !BlendStateOf(spec->key.blend))
+				if (D3D11_BLEND_DESC desc{}; !spec->key.compute && !BlendDescOf(spec->key.blend, desc))
 					return;
 				const auto& effect = kEffects[spec->key.effect];
 				for (std::uint32_t slot = 0; slot < effect.samplers; ++slot)

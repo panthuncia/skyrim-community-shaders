@@ -442,6 +442,13 @@ pre-tonemap composites).
 ImageSpace draw that still reaches the engine is skipped by the latch and counted by the census, and an effect the port does not
 cover is named in the 300-frame line (Fallbacks and failure).
 
+**Two fixes from the census of 2026-11-12 (`1112-040336-p35-latch-census-nomap-shaders2`).** `EffectOf` kept a shader-to-effect
+map filled once; an entry is now checked against the manager's effects at each use, and a miss scans them, since an address can name
+another effect later (ISWaterBlend read as not covered). And a pass whose engine blend table entry is empty at a build (the SAO
+composite's, at the rebuild Exponential Height Fog's publish asks for in the first world frame) takes the blend description the
+session read at a draw, or the manifest's (`blends`, written with the shapes): the table is read at draws and builds and kept
+(`BlendDescOf`).
+
 **The summary line.** `[ORG] ImageSpace: draws and dispatches left to D3D11 in <n> frames: <shader> into rt<i> depth <d> (<why>):
 <count>, ...`, every 300 frames. It counts every ImageSpace draw the engine makes on D3D11: inside a hooked ImageSpace call, named by
 that call's shader, with `not covered` or `covered, <the refusal or failure>`; outside them, when the technique is an ImageSpace shader
