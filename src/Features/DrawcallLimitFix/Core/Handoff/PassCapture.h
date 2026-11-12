@@ -227,9 +227,14 @@ namespace DCLF
 		 * @brief The map census (LoadHold.cpp, while the map menu is open): every pass the registration hooks see, by class, withheld
 		 * (DCLF draws it or waits to) or handed to the engine. Render thread.
 		 */
-		void SetMapCensus(bool a_on) { mapCensus.store(a_on, std::memory_order_release); }
+		void SetMapCensus(bool a_on);
 		/** @brief Render thread: the map census's classes since the last call, most passes first. */
 		std::vector<MapClass> TakeMapCensus();
+		/**
+		 * @brief Render thread: of the geometries under the LOD root whose passes were kept since the map census began, how many there are
+		 * (a_kept), how many the frame's set holds with the main phase now (the return), and how many wait in it (a_waiting).
+		 */
+		std::size_t MapKeptMembersNow(std::size_t& a_kept, std::size_t& a_waiting) const;
 		/** @brief Render thread: the accumulators of shadow views DCLF does not cover that kept passes went to, since the last call. */
 		std::vector<const void*> TakeUncoveredAccumulators();
 		/**
@@ -333,6 +338,8 @@ namespace DCLF
 		std::atomic<bool> mapCensus{ false };
 		mutable std::mutex mapLock;
 		mutable ankerl::unordered_dense::map<std::uint64_t, MapClass> mapClasses;
+		// The geometries under the LOD root whose passes the census saw kept (compared by address only), under mapLock.
+		mutable ankerl::unordered_dense::set<const RE::BSGeometry*> mapKept;
 		void NoteMapPass(const RE::BSBatchRenderer* a_batch, const RE::BSRenderPass* a_pass, bool a_withheld) const;
 		std::array<std::atomic<std::uint32_t>, static_cast<std::size_t>(Api::DrawFamily::Count)> familyWithheld{};
 		std::array<std::atomic<bool>, static_cast<std::size_t>(Api::DrawFamily::Count)> familyHeld{};

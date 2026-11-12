@@ -11,6 +11,7 @@
 #include "Features/DrawcallLimitFix/Core/Scene/FrameView/FrameView.h"
 #include "Features/DrawcallLimitFix/Core/Scene/Model/Publication.h"
 #include "RenderGraph/Engine/Native/Native.h"
+#include "Utils/SwitchFile.h"
 
 #include <algorithm>
 #include <array>
@@ -268,9 +269,12 @@ namespace DCLF::LoadHold
 		void LogMapCensus(std::uint32_t a_frames, const char* a_why)
 		{
 			const auto classes = PassCapture::Get().TakeMapCensus();
+			std::size_t kept = 0, waiting = 0;
+			const std::size_t members = PassCapture::Get().MapKeptMembersNow(kept, waiting);
 			logger::info("[DCLF] map census ({}, {} mode): {} frames, {} classes of passes registered (main: the main views' renderers; other: any other, "
-						 "the Z-prepass's registration among them)",
-				a_why, RenderGraph::Engine::Native::Active() ? "native" : "guest", a_frames, classes.size());
+						 "the Z-prepass's registration among them); of the {} geometries under the LOD root kept since the map opened, {} are main members "
+						 "of the frame's set now and {} wait in it",
+				a_why, RenderGraph::Engine::Native::Active() ? "native" : "guest", a_frames, classes.size(), kept, members, waiting);
 			for (std::size_t i = 0; i < classes.size() && i < kMapCensusClasses; ++i) {
 				const auto& c = classes[i];
 				logger::info("[DCLF] map census: {} ('{}', {}): main withheld {} kept {}, other withheld {} kept {}{}", c.shader, c.sample,
@@ -282,30 +286,41 @@ namespace DCLF::LoadHold
 			}
 		}
 
+		bool mapOpen = false;
+		std::uint32_t mapFrames = 0;
+
 		/**
-		 * @brief Render thread, every frame: while the map menu is open, counts the passes the registration hooks see by class, withheld or
-		 * handed to the engine (PassCapture::SetMapCensus), and logs them every kMapCensusFrames frames and at the menu's close.
+		 * @brief Render thread, at a frame's start: the map menu opening is a camera cut. The engine's map registers the LOD land, objects
+		 * and clouds under TES::lodLandRoot in its first frames only, and DCLF's set, culled with the world camera, does not hold them yet.
+		 * So the frame is held as a re-entry (BeginReentry): DCLF's classes are withheld from the engine and the last frame stays on screen
+		 * until the set made with the map camera is installed and settled; DCLF then draws them. CS_DCLF_MAP_HOLD=0 turns the hold off.
+		 * The map census starts here too (PassCapture::SetMapCensus).
 		 */
-		void WatchMap()
+		void WatchMapStart()
 		{
-			static bool open = false;
-			static std::uint32_t frames = 0;
 			auto* ui = RE::UI::GetSingleton();
 			const bool now = ui && ui->IsMenuOpen(RE::MapMenu::MENU_NAME);
-			if (now != open) {
-				open = now;
-				if (now) {
-					PassCapture::Get().TakeMapCensus();
-					PassCapture::Get().SetMapCensus(true);
-					frames = 0;
-				} else {
-					PassCapture::Get().SetMapCensus(false);
-					LogMapCensus(frames, "the map closed");
-				}
+			if (now == mapOpen)
+				return;
+			mapOpen = now;
+			mapFrames = 0;
+			if (!now) {
+				PassCapture::Get().SetMapCensus(false);
+				LogMapCensus(mapFrames, "the map closed");
+				return;
 			}
-			if (open && ++frames >= kMapCensusFrames) {
-				LogMapCensus(frames, "the map open");
-				frames = 0;
+			PassCapture::Get().SetMapCensus(true);
+			static const bool hold = Util::SwitchFile::Value("CS_DCLF_MAP_HOLD") != "0";
+			if (hold)
+				BeginReentry("the map menu opened (a camera cut: the map's LOD is not in the set culled with the world camera)");
+		}
+
+		/** @brief Render thread, at a frame's end: the map census's line every kMapCensusFrames frames while the map is open. */
+		void WatchMap()
+		{
+			if (mapOpen && ++mapFrames >= kMapCensusFrames) {
+				LogMapCensus(mapFrames, "the map open");
+				mapFrames = 0;
 			}
 		}
 	}
@@ -348,6 +363,8 @@ namespace DCLF::LoadHold
 
 	void OnFrameStart(bool a_running)
 	{
+		if (a_running)
+			WatchMapStart();
 		const auto now = state.load(std::memory_order_acquire);
 		if (now == HoldState::Idle || now == HoldState::Releasing)
 			return;

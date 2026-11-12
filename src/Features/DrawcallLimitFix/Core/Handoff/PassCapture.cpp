@@ -649,8 +649,35 @@ namespace DCLF
 		for (const RE::NiAVObject* node = a_pass->geometry; root && node && depth < 64; node = node->parent, ++depth)
 			if (node == root) {
 				++entry.underLodRoot;
+				if (mapKept.size() < 4096)
+					mapKept.insert(a_pass->geometry);
 				break;
 			}
+	}
+
+	void PassCapture::SetMapCensus(bool a_on)
+	{
+		if (a_on) {
+			std::scoped_lock lock(mapLock);
+			mapClasses.clear();
+			mapKept.clear();
+		}
+		mapCensus.store(a_on, std::memory_order_release);
+	}
+
+	std::size_t PassCapture::MapKeptMembersNow(std::size_t& a_kept, std::size_t& a_waiting) const
+	{
+		const auto set = std::atomic_load(&frameSet);
+		std::scoped_lock lock(mapLock);
+		a_kept = mapKept.size();
+		a_waiting = 0;
+		std::size_t members = 0;
+		if (set)
+			for (const auto* geometry : mapKept) {
+				members += (set->PhasesOf(geometry) & kSetMain) ? 1u : 0u;
+				a_waiting += set->pending.contains(geometry) ? 1u : 0u;
+			}
+		return members;
 	}
 
 	std::vector<PassCapture::MapClass> PassCapture::TakeMapCensus()
