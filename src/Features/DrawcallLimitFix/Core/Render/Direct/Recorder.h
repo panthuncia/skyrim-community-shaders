@@ -144,6 +144,9 @@ namespace DCLF::Direct
 		// Indirect mode's list (set before BeginList): the batches' runs drawn from this buffer, and every direct draw of the list with
 		// the pulled pipelines, as the runs' are. Null: direct draws, as RecordBatch says.
 		const IndirectBuffer* indirect = nullptr;
+		// Whether the rendering has every main target, the pushed pipelines' formats. First person's colour pass has two: its draws keep
+		// their view pipelines (VUID-vkCmdDrawIndexed-colorAttachmentCount-06179).
+		bool mainTargets = true;
 
 		// Set by BeginList; RecordBatch's.
 		RecordPass pass = RecordPass::Colour;

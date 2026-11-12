@@ -301,7 +301,7 @@ own, which is what the capture does already.
 | Switch | Effect |
 | --- | --- |
 | `CS_ORG_IMAGESPACE=1` | Installs the hooks, registers the manifest's shapes at Setup and takes their draws. Needs `CS_ORG_ENGINE_CONSTANTS=1`. |
-| `CS_ORG_IMAGESPACE_EFFECTS=<list>` | A diagnostic for bisecting an effect. Comma list of engine names, effect names or groups (`hdr`, `bloom`, `blur`, `nonhdrblur`, `tonemap`, `iscopy`, `gethit`, `composite`, `sao`, `ssr`, `dof`, `refraction`, `radialblur`, `copy`, `waterblend`), any case. Unset or `all`: every covered effect. |
+| `CS_ORG_IMAGESPACE_EFFECTS=<list>` | A diagnostic for bisecting an effect. Comma list of engine names, effect names or groups (`hdr`, `bloom`, `blur`, `nonhdrblur`, `tonemap`, `iscopy`, `gethit`, `composite`, `sao`, `ssr`, `dof`, `refraction`, `radialblur`, `worldmap`, `copy`, `waterblend`), any case. Unset or `all`: every covered effect. |
 | `CS_ORG_IMAGESPACE_LOG=1` | A diagnostic: logs each shape new to the manifest (with its viewport), and each shape's constant sizes once when its first draw is taken. |
 
 Covered effect names: the HDR group (ISHDRDownSample16, ISHDRDownSample4 (also into kLDR_DOWNSAMPLE0 outside the HDR effect, a scope of
@@ -466,7 +466,7 @@ that call's shader, with `not covered` or `covered, <the refusal or failure>`; o
 
 **Left with the engine, by reason:** ISCopyScaleBias and ISCopyTextureMask (their vertex shaders move the coordinates); a copy
 from `kFRAMEBUFFER` (no SRV: the main frame's screenshot copies); ISSimpleColor and the menu 3D chain (the menu views lane, a
-manager rectangle); ISMap, ISWorldMap, ISLocalMap (the map views, p5-menus); ISAlphaBlend (the race menu's tint masks, loaded
+manager rectangle); ISMap and ISLocalMap (the map views, p5-menus; ISWorldMap and ISWorldMapNoSkyBlur are covered, each call a scope of its own); ISAlphaBlend (the race menu's tint masks, loaded
 textures, not engine targets); the lens flares, IB lens flares, SIL composite, FXAA, noise, snow SSS, TAA forms, the
 dynamic-resolution upsample, ISUnderwaterMask and the water displacement's ripple makers until the 300-frame line names them in play.
 

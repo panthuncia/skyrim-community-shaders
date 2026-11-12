@@ -11,6 +11,7 @@
 #	include "Globals.h"
 #	include "RenderGraph/DxvkImageImport.h"
 #	include "RenderGraph/DxvkOrgInterop.h"
+#	include "RenderGraph/Engine/Native/Native.h"
 #	include "RenderGraph/FrameAnchors.h"
 #	include "RenderGraph/RenderGraphRuntime.h"
 #	include "Utils/D3D.h"
@@ -265,7 +266,8 @@ namespace TextureStreaming::ORG
 		if (up != state.ready.load(std::memory_order_acquire)) {
 			state.ready.store(up, std::memory_order_release);
 			if (up)
-				logger::info("[TextureStreaming] windows are made on the render graph: created with their mips in DXVK's stream, read by index");
+				logger::info("[TextureStreaming] windows are made on the render graph: created with their mips in {}, read by index",
+					RenderGraph::Engine::Native::Active() ? "the native device's uploads (native shells)" : "DXVK's stream");
 		}
 		std::vector<std::shared_ptr<Staged>> staged;
 		{

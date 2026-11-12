@@ -2505,6 +2505,9 @@ namespace RenderGraph::Engine::Native
 				Unknown(logged, "CopySubresourceRegion", destination ? static_cast<const void*>(a_source) : a_destination);
 				return;
 			}
+			// A subresource onto itself: D3D11's runtime drops the call, and Vulkan's copies must not overlap.
+			if (destination == source && a_destinationSub == a_sourceSub)
+				return;
 			bool recorded = false;
 			if (RhiContext()) {
 				g_device->immediate.RunRhi("copy region " + source->name + " to " + destination->name,
@@ -2536,6 +2539,9 @@ namespace RenderGraph::Engine::Native
 				Unknown(logged, "CopyResource", destination ? static_cast<const void*>(a_source) : a_destination);
 				return;
 			}
+			// A resource onto itself: D3D11's runtime drops the call.
+			if (destination == source)
+				return;
 			bool recorded = true;
 			if (RhiContext()) {
 				g_device->immediate.RunRhi("copy " + source->name + " to " + destination->name,
