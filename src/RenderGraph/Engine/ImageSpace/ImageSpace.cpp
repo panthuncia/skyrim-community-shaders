@@ -582,7 +582,9 @@ namespace RenderGraph::Engine::ImageSpace
 		{
 			auto* manager = RE::ImageSpaceManager::GetSingleton();
 			const std::uint32_t index = RE::ImageSpaceManager::GetCurrentIndex(kEffects[a_effect].id);
-			if (!manager || index >= manager->effects.size())
+			// NiTArray::size() counts the non-null entries; free_idx() is one past the highest set index (the engine's setter, AE
+			// 0x141481a30). With the empty slots below it, size() cut off the last effects (ISWaterBlend at 155).
+			if (!manager || index >= manager->effects.free_idx() || index >= manager->effects.capacity())
 				return nullptr;
 			return static_cast<const RE::BSImagespaceShader*>(manager->effects[static_cast<decltype(manager->effects)::size_type>(index)]);
 		}
@@ -590,8 +592,8 @@ namespace RenderGraph::Engine::ImageSpace
 		std::int32_t EffectOf(const RE::BSImagespaceShader* a_shader)
 		{
 			auto& state = IS();
-			// An entry is checked against the manager's effects now: the engine can free an effect and make another at the same
-			// address, so a kept entry may name another effect.
+			// An entry is checked against the manager's effects now, and a miss scans them: the manager makes some effects after the
+			// first lookups.
 			if (const auto it = state.effectOf.find(a_shader); it != state.effectOf.end()) {
 				if (ShaderOf(static_cast<std::size_t>(it->second)) == a_shader)
 					return it->second;
