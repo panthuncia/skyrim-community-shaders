@@ -725,8 +725,56 @@ namespace RenderGraph::Engine::Tripwire
 			return E_FAIL;
 		}
 
+		HRESULT SetPrivateDataInterface(HandleCore& a_core, std::uint16_t a_slot, REFGUID a_guid, const IUnknown* a_data, void* a_caller)
+		{
+			if (a_core.wrapped || !NativeServicesInstalled()) {
+				if (a_core.Enter(a_slot, "SetPrivateDataInterface", a_caller))
+					return OnWrapped(a_core, [&](auto* a_object) { return a_object->SetPrivateDataInterface(a_guid, a_data); });
+				return E_FAIL;
+			}
+			// A native handle keeps it, as D3D11 does: replaced by a later set of the GUID, released with the handle.
+			winrt::com_ptr<IUnknown> held;
+			held.copy_from(const_cast<IUnknown*>(a_data));
+			std::lock_guard guard(a_core.privateLock);
+			auto& entries = a_core.privateInterfaces;
+			const auto found = std::find_if(entries.begin(), entries.end(), [&](const auto& a_entry) { return a_entry.first == a_guid; });
+			if (found != entries.end()) {
+				if (held)
+					found->second = std::move(held);
+				else
+					entries.erase(found);
+			} else if (held) {
+				entries.emplace_back(a_guid, std::move(held));
+			}
+			return S_OK;
+		}
+
 		HRESULT GetPrivateData(HandleCore& a_core, std::uint16_t a_slot, REFGUID a_guid, UINT* a_size, void* a_data, void* a_caller)
 		{
+			if (!a_core.wrapped && a_size && NativeServicesInstalled()) {
+				// A native handle's private-data interface: the pointer, with a reference for the caller.
+				std::lock_guard guard(a_core.privateLock);
+				const auto& entries = a_core.privateInterfaces;
+				const auto found = std::find_if(entries.begin(), entries.end(), [&](const auto& a_entry) { return a_entry.first == a_guid; });
+				if (found != entries.end()) {
+					if (!a_data) {
+						*a_size = sizeof(IUnknown*);
+						return S_OK;
+					}
+					if (*a_size < sizeof(IUnknown*)) {
+						*a_size = sizeof(IUnknown*);
+						return DXGI_ERROR_MORE_DATA;
+					}
+					found->second.copy_to(static_cast<IUnknown**>(a_data));
+					*a_size = sizeof(IUnknown*);
+					return S_OK;
+				}
+				// Not set: in native mode an answer, not a tripwire (GraphResourceOf and the descriptions ask every object).
+				if (!IsDebugName(a_guid)) {
+					*a_size = 0;
+					return DXGI_ERROR_NOT_FOUND;
+				}
+			}
 			if (IsDebugName(a_guid)) {
 				if (!a_size)
 					return E_INVALIDARG;
@@ -1447,6 +1495,33 @@ namespace RenderGraph::Engine::Tripwire
 		TW_CONTEXT_FORWARD(ClearDepthStencilView, Detail::UnwrapAt(a_view, twSite), a_flags, a_depth, a_stencil);
 	}
 
+	void STDMETHODCALLTYPE DeviceContextHandle::Begin(ID3D11Asynchronous* a_query)
+	{
+		TW_CONTEXT_SITE(Begin);
+		// Native mode: a query's interval is not measured, so Begin has nothing to record.
+		if (twNative && twNative->end)
+			return;
+		TW_CONTEXT_FORWARD(Begin, Detail::UnwrapAt(a_query, twSite));
+	}
+
+	void STDMETHODCALLTYPE DeviceContextHandle::End(ID3D11Asynchronous* a_query)
+	{
+		TW_CONTEXT_SITE(End);
+		if (twNative && twNative->end)
+			return twNative->end(a_query);
+		TW_CONTEXT_FORWARD(End, Detail::UnwrapAt(a_query, twSite));
+	}
+
+	HRESULT STDMETHODCALLTYPE DeviceContextHandle::GetData(ID3D11Asynchronous* a_query, void* a_data, UINT a_size, UINT a_flags)
+	{
+		TW_CONTEXT_SITE(GetData);
+		if (twNative && twNative->getData)
+			return twNative->getData(a_query, a_data, a_size, a_flags);
+		TW_CONTEXT_FORWARD(GetData, Detail::UnwrapAt(a_query, twSite), a_data, a_size, a_flags);
+		Detail::ZeroBytes(a_data, a_size);
+		return E_FAIL;
+	}
+
 	void STDMETHODCALLTYPE DeviceContextHandle::Flush()
 	{
 		TW_CONTEXT_SITE(Flush);
@@ -1489,7 +1564,8 @@ namespace RenderGraph::Engine::Tripwire
 	{
 		if (!a_object)
 			return {};
-		if (const auto* core = Detail::CoreOf(a_object))
+		// A native handle without its own resource may carry one AttachGraphResource tied to it (its private data, below).
+		if (const auto* core = Detail::CoreOf(a_object); core && (core->graph || core->wrapped || !NativeServicesInstalled()))
 			return core->graph;
 		const auto child = AsDeviceChild(a_object);
 		if (!child)

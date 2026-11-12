@@ -2,6 +2,7 @@
 
 #include "Globals.h"
 #include "RenderGraph/Engine/MainTick.h"
+#include "RenderGraph/Engine/Native/Native.h"
 #include "RenderGraph/Engine/Tripwire/GuestDevice.h"
 #include "RenderGraph/Engine/Tripwire/Tripwire.h"
 #include "RenderGraph/Switches.h"
@@ -913,7 +914,8 @@ namespace RenderGraph::Engine::Flush
 		config.latch = LatchRequested();
 		if (!config.census && !config.latch)
 			return;
-		if (!Tripwire::GuestRequested()) {
+		// Native mode sees the engine's calls on the native context, whose calls the filter gets too.
+		if (!Tripwire::GuestRequested() && !Native::Requested()) {
 			logger::error(
 				"[ORG] engine flush: CS_ORG_RESIDUE_CENSUS and CS_ORG_ENGINE_FLUSH_LATCH need CS_ORG_TRIPWIRE_GUEST=1 (the guest context sees "
 				"the engine's D3D11 calls); both stay off");

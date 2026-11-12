@@ -1120,6 +1120,16 @@ A native device handle answers through the native services instead of failing:
     the first value on a buffer). Each is its own command list on the graphics queue, submitted when the call is made, with a
     full memory barrier before and after: it lands between the graph epochs submitted before and after it, in the order D3D11
     code calls them. Nothing waits for the GPU unless Map needs the memory. `Flush` does nothing.
+-   **Wrapped port resources**: `RenderGraphRuntime::WrapTexture` and `WrapBuffer` make native handles over the port's own
+    BasicRHI image or buffer (the image moved into GENERAL, uploaded or zeroed), so `GraphResources::ExportTexture`, the
+    engine targets, textures, buffers and texture streaming work as they do on DXVK. A port's handle that wraps a native
+    handle reaches the same record.
+-   **Private data**: a native handle keeps `SetPrivateDataInterface` objects and answers `GetPrivateData` for them, so
+    `AttachGraphResource` and the pipeline descriptions' tokens work; other GUIDs answer `DXGI_ERROR_NOT_FOUND`.
+-   **Context queries**: `End` marks the context's work submitted so far, and `GetData` answers `S_FALSE` until it is done on
+    the GPU. Nothing is measured: events are done, occlusion counts 0 samples, timestamps are 0 and disjoint.
+-   **The flush latch and the residue census** run without the guest: the context filter sees the native context's calls,
+    so latched binds and skipped engine draws are dropped silently and counted as on the guest.
 -   **Queries**: `CheckFormatSupport` and `CheckFeatureSupport` (threading, doubles, format support 1 and 2, the D3D10.x,
     D3D11 and D3D9 options, architecture, min precision) answer from BasicRHI's format support. The context answers
     `ID3DUserDefinedAnnotation` with an object that reports no capture tool. The later device, context and swap chain

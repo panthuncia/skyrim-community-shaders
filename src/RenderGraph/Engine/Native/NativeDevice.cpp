@@ -25,6 +25,7 @@
 #	include <atomic>
 #	include <cstring>
 #	include <mutex>
+#	include <unordered_map>
 #	include <unordered_set>
 #	include <vector>
 
@@ -408,6 +409,13 @@ namespace RenderGraph::Engine::Native
 				return value;
 			}
 
+			/** @brief The value of the last work submitted (0 before any). */
+			uint64_t Submitted()
+			{
+				std::lock_guard guard(lock);
+				return value;
+			}
+
 			/** @brief Whether the work of value a_value is done on the GPU (0 is). */
 			bool Done(uint64_t a_value) { return !a_value || timeline->GetCompletedValue() >= a_value; }
 
@@ -624,13 +632,36 @@ namespace RenderGraph::Engine::Native
 					return E_OUTOFMEMORY;
 				}
 
-				// The image as the graph imports it (DescribeResource): GENERAL, which is the graph's Common home state.
-				rhi::VulkanResourceInfo info{};
-				if (!rhi::vulkan::get_resource_info(record->resource.Get(), info) || !info.resource) {
+				if (!FillImage(*record, record->resource.Get(), a_request, dxgiFormat, format, mips, layers, depth)) {
 					LogOnce(loggedCreate, a_request.name, "BasicRHI did not describe the image it made");
 					return E_FAIL;
 				}
-				auto& image = record->image;
+
+				if (!Initialize(record->resource->GetHandle(), a_request, format, mips, layers, depth)) {
+					LogOnce(loggedUpload, a_request.name, "its initial layout or contents could not be written");
+					return E_FAIL;
+				}
+				// A DYNAMIC texture's CPU side, which Map hands out and Unmap copies in.
+				if (a_request.usage == D3D11_USAGE_DYNAMIC) {
+					TextureRequest cpu = a_request;
+					cpu.data = nullptr;
+					cpu.name = a_request.name + " (upload)";
+					if (const HRESULT hr = MakeStaging(cpu, true, record->upload); FAILED(hr))
+						return hr;
+				}
+				a_out = std::move(record);
+				return S_OK;
+			}
+
+			/** @brief An image record's description as the graph imports it (DescribeResource): GENERAL, the graph's Common home state. */
+			static bool FillImage(NativeResource& a_record, const rhi::Resource& a_resource, const TextureRequest& a_request, DXGI_FORMAT a_dxgiFormat, rhi::Format a_format,
+				uint32_t mips, uint32_t layers, uint32_t depth)
+			{
+				rhi::VulkanResourceInfo info{};
+				if (!rhi::vulkan::get_resource_info(a_resource, info) || !info.resource)
+					return false;
+				const bool cube = (a_request.miscFlags & D3D11_RESOURCE_MISC_TEXTURECUBE) != 0;
+				auto& image = a_record.image;
 				image.image = rhi::vulkan::from_native_void<VkImage>(info.resource);
 				image.type = a_request.dimension == D3D11_RESOURCE_DIMENSION_TEXTURE3D ? VK_IMAGE_TYPE_3D :
 				             a_request.dimension == D3D11_RESOURCE_DIMENSION_TEXTURE1D ? VK_IMAGE_TYPE_1D :
@@ -651,23 +682,9 @@ namespace RenderGraph::Engine::Native
 				image.components = { VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY };
 				const bool depthFormat = (a_request.bindFlags & D3D11_BIND_DEPTH_STENCIL) != 0;
 				image.subresourceRange = { static_cast<VkImageAspectFlags>(depthFormat ? VK_IMAGE_ASPECT_DEPTH_BIT : VK_IMAGE_ASPECT_COLOR_BIT), 0, mips, 0, layers };
-				record->kind = NativeResource::Kind::Image;
-				record->shape = ShapeOf(a_request, dxgiFormat, format, mips, layers, depth);
-
-				if (!Initialize(*record, a_request, format, mips, layers, depth)) {
-					LogOnce(loggedUpload, a_request.name, "its initial layout or contents could not be written");
-					return E_FAIL;
-				}
-				// A DYNAMIC texture's CPU side, which Map hands out and Unmap copies in.
-				if (a_request.usage == D3D11_USAGE_DYNAMIC) {
-					TextureRequest cpu = a_request;
-					cpu.data = nullptr;
-					cpu.name = a_request.name + " (upload)";
-					if (const HRESULT hr = MakeStaging(cpu, true, record->upload); FAILED(hr))
-						return hr;
-				}
-				a_out = std::move(record);
-				return S_OK;
+				a_record.kind = NativeResource::Kind::Image;
+				a_record.shape = ShapeOf(a_request, a_dxgiFormat, a_format, mips, layers, depth);
+				return true;
 			}
 
 			/** @brief The shape of a texture request, in its resolved format. */
@@ -794,9 +811,9 @@ namespace RenderGraph::Engine::Native
 			 * @brief Moves a new image into GENERAL, writing its initial data on the way: an upload buffer, one copy per subresource
 			 * (D3D11's order: mips of slice 0, then slice 1, ...). Waits for the GPU, so the image is ready when the handle exists.
 			 */
-			bool Initialize(NativeResource& a_record, const TextureRequest& a_request, rhi::Format a_format, uint32_t a_mips, uint32_t a_layers, uint32_t a_depth)
+			bool Initialize(rhi::ResourceHandle a_texture, const TextureRequest& a_request, rhi::Format a_format, uint32_t a_mips, uint32_t a_layers, uint32_t a_depth)
 			{
-				const rhi::ResourceHandle texture = a_record.resource->GetHandle();
+				const rhi::ResourceHandle texture = a_texture;
 				const rhi::TextureSubresourceRange all{ 0, a_mips, 0, a_layers };
 				rhi::ResourcePtr upload;
 				struct Copy
@@ -1425,16 +1442,15 @@ namespace RenderGraph::Engine::Native
 		/** @brief The native record behind a resource or view handle (a view's is its resource's), or null. */
 		std::shared_ptr<NativeResource> Resolve(const void* a_object)
 		{
-			auto owner = Tripwire::OwnerOf(a_object);
-			if (!owner)
-				return nullptr;
-			{
+			if (auto owner = Tripwire::OwnerOf(a_object)) {
 				auto& registry = GetRegistry();
 				std::lock_guard guard(registry.lock);
-				if (!registry.live.contains(owner.get()))
-					return nullptr;
+				if (registry.live.contains(owner.get()))
+					return std::const_pointer_cast<NativeResource>(std::static_pointer_cast<const NativeResource>(owner));
 			}
-			return std::const_pointer_cast<NativeResource>(std::static_pointer_cast<const NativeResource>(owner));
+			// A port's handle around a native one (its fields hold handles that wrap the object the native device made).
+			const auto info = Tripwire::Describe(a_object);
+			return info.wrapped && info.wrapped != a_object && Tripwire::IsHandle(info.wrapped) ? Resolve(info.wrapped) : nullptr;
 		}
 
 		/** @brief An operation on something the native device did not make: logged once per operation. */
@@ -1982,6 +1998,89 @@ namespace RenderGraph::Engine::Native
 			std::atomic<INT> depth{ 0 };
 		};
 
+		// ---- Queries ---------------------------------------------------------------------------------------------------------
+
+		/**
+		 * @brief What End marked on each query: the context's work submitted so far. Keyed by the query handle; an entry is replaced
+		 * by the next End of the same query and left when the query goes (a few bytes per query the engine ever made).
+		 */
+		struct Queries
+		{
+			std::mutex lock;
+			std::unordered_map<const void*, uint64_t> ended;
+		};
+
+		Queries& GetQueries()
+		{
+			static Queries queries;
+			return queries;
+		}
+
+		void ContextEnd(ID3D11Asynchronous* a_query)
+		{
+			if (!a_query)
+				return;
+			auto& queries = GetQueries();
+			std::lock_guard guard(queries.lock);
+			queries.ended[a_query] = g_device->immediate.Submitted();
+		}
+
+		/**
+		 * @brief A query's answer once the context's work up to its End is done on the GPU (S_FALSE until then; the engine polls).
+		 * Native mode measures nothing: an event is done, an occlusion query counts no samples and its predicate says hidden,
+		 * timestamps are 0 and marked disjoint (so readers drop them), statistics are 0.
+		 */
+		HRESULT ContextGetData(ID3D11Asynchronous* a_query, void* a_data, UINT a_size, UINT)
+		{
+			if (!a_query)
+				return E_INVALIDARG;
+			uint64_t ended = 0;
+			{
+				auto& queries = GetQueries();
+				std::lock_guard guard(queries.lock);
+				const auto found = queries.ended.find(a_query);
+				if (found == queries.ended.end())
+					return S_FALSE;  // never ended
+				ended = found->second;
+			}
+			if (!g_device->immediate.Done(ended))
+				return S_FALSE;
+			if (!a_data || !a_size)
+				return S_OK;
+			std::memset(a_data, 0, a_size);
+			winrt::com_ptr<ID3D11Query> query;
+			if (FAILED(a_query->QueryInterface(IID_PPV_ARGS(query.put()))) || !query)
+				return S_OK;
+			D3D11_QUERY_DESC desc{};
+			query->GetDesc(&desc);
+			switch (desc.Query) {
+			case D3D11_QUERY_EVENT:
+				if (a_size >= sizeof(BOOL))
+					*static_cast<BOOL*>(a_data) = TRUE;
+				break;
+			case D3D11_QUERY_TIMESTAMP_DISJOINT:
+				if (a_size >= sizeof(D3D11_QUERY_DATA_TIMESTAMP_DISJOINT)) {
+					auto* disjoint = static_cast<D3D11_QUERY_DATA_TIMESTAMP_DISJOINT*>(a_data);
+					disjoint->Frequency = 1'000'000'000ull;
+					disjoint->Disjoint = TRUE;
+				}
+				break;
+			default:
+				break;  // occlusion (0 samples), predicates (FALSE), timestamps and statistics (0)
+			}
+			return S_OK;
+		}
+
+		// ---- Wrapping a port's BasicRHI resources ----------------------------------------------------------------------------
+
+		/** @brief A record that only describes an image or buffer someone else owns (the port keeps it alive past the handle). */
+		std::shared_ptr<NativeResource> MakeWrapRecord(const char* a_name)
+		{
+			auto record = std::make_shared<NativeResource>();
+			record->name = a_name ? a_name : "Native::Wrapped";
+			return record;
+		}
+
 		HRESULT ContextQueryInterface(REFIID a_riid, void** a_out)
 		{
 			if (!a_out)
@@ -2077,6 +2176,8 @@ namespace RenderGraph::Engine::Native
 		services.clearUnorderedAccessViewFloat = &ContextClearUnorderedAccessViewFloat;
 		services.clearDepthStencilView = &ContextClearDepthStencilView;
 		services.queryContext = &ContextQueryInterface;
+		services.end = &ContextEnd;
+		services.getData = &ContextGetData;
 		Tripwire::SetNativeServices(services);
 		state->dxgiDevice.attach(new DxgiDevice());
 
@@ -2100,17 +2201,8 @@ namespace RenderGraph::Engine::Native
 
 	bool DescribeResource(const IUnknown* a_object, DxvkOrgInteropResourceInfo& a_info)
 	{
-		const auto owner = Tripwire::OwnerOf(a_object);
-		if (!owner)
-			return false;
-		{
-			auto& registry = GetRegistry();
-			std::lock_guard guard(registry.lock);
-			if (!registry.live.contains(owner.get()))
-				return false;
-		}
-		const auto* record = static_cast<const NativeResource*>(owner.get());
-		if (record->kind != NativeResource::Kind::Image)
+		const auto record = Resolve(a_object);
+		if (!record || record->kind != NativeResource::Kind::Image)
 			return false;
 		a_info = {};
 		a_info.version = DXVK_ORG_INTEROP_VERSION;
@@ -2123,6 +2215,100 @@ namespace RenderGraph::Engine::Native
 	{
 		return g_device ? g_device->Present(a_syncInterval, a_flags) : E_FAIL;
 	}
+
+	winrt::com_ptr<ID3D11Resource> WrapTexture(const rhi::Resource& a_image, const DxvkOrgInteropTextureWrap& a_wrap, DxvkOrgInteropResourceInfo& a_info,
+		const char* a_name, const D3D11_SUBRESOURCE_DATA* a_data)
+	{
+		if (!g_device)
+			return nullptr;
+		const auto dimension = static_cast<D3D11_RESOURCE_DIMENSION>(a_wrap.dimension);
+		TextureRequest request{ dimension, a_wrap.width, a_wrap.height, (std::max)(a_wrap.depthOrArraySize, 1u), (std::max)(a_wrap.mipLevels, 1u),
+			(std::max)(a_wrap.sampleCount, 1u), static_cast<DXGI_FORMAT>(a_wrap.format), D3D11_USAGE_DEFAULT, a_wrap.bindFlags, 0, a_wrap.miscFlags, a_data,
+			a_name ? a_name : "Native::Wrapped" };
+		const DXGI_FORMAT dxgiFormat = ResolveTypeless(request.format, request.bindFlags);
+		const rhi::Format format = rhi::helpers::ToRHI(dxgiFormat);
+		const uint32_t depth = dimension == D3D11_RESOURCE_DIMENSION_TEXTURE3D ? request.depthOrArraySize : 1;
+		const uint32_t layers = dimension == D3D11_RESOURCE_DIMENSION_TEXTURE3D ? 1 : request.depthOrArraySize;
+		auto record = MakeWrapRecord(a_name);
+		static std::atomic<bool> loggedDescribe = false, loggedInitialize = false;
+		if (!NativeState::FillImage(*record, a_image, request, dxgiFormat, format, request.mipLevels, layers, depth)) {
+			LogOnce(loggedDescribe, request.name, "BasicRHI did not describe the image to wrap");
+			return nullptr;
+		}
+		// Into GENERAL with its contents, or zeroed as DXVK's wrap zeroes it.
+		if (!g_device->Initialize(a_image.GetHandle(), request, format, request.mipLevels, layers, depth)) {
+			LogOnce(loggedInitialize, request.name, "the image to wrap could not be moved into GENERAL or given its contents");
+			return nullptr;
+		}
+		if (!a_data) {
+			const VkImageSubresourceRange all{ record->shape.aspects, 0, request.mipLevels, 0, layers };
+			g_device->immediate.Run(
+				[&](const Immediate::Vulkan& a_vk, VkCommandBuffer a_commands) {
+					if (record->shape.aspects == VK_IMAGE_ASPECT_COLOR_BIT) {
+						const VkClearColorValue zero{};
+						a_vk.clearColorImage(a_commands, record->image.image, VK_IMAGE_LAYOUT_GENERAL, &zero, 1, &all);
+					} else {
+						const VkClearDepthStencilValue zero{};
+						a_vk.clearDepthStencilImage(a_commands, record->image.image, VK_IMAGE_LAYOUT_GENERAL, &zero, 1, &all);
+					}
+				},
+				{ record }, { record.get() });
+		}
+		a_info = {};
+		a_info.version = DXVK_ORG_INTEROP_VERSION;
+		a_info.kind = DXVK_ORG_INTEROP_RESOURCE_IMAGE;
+		a_info.image = record->image;
+
+		Tripwire::Options options;
+		options.name = request.name;
+		options.owner = record;
+		const auto format11 = static_cast<DXGI_FORMAT>(a_wrap.format);
+		winrt::com_ptr<ID3D11Resource> result;
+		switch (dimension) {
+		case D3D11_RESOURCE_DIMENSION_TEXTURE3D:
+			{
+				const D3D11_TEXTURE3D_DESC desc{ request.width, request.height, depth, request.mipLevels, format11, D3D11_USAGE_DEFAULT, request.bindFlags, 0, request.miscFlags };
+				result.copy_from(Tripwire::CreateTexture3D(desc, std::move(options)).get());
+				break;
+			}
+		case D3D11_RESOURCE_DIMENSION_TEXTURE1D:
+			{
+				const D3D11_TEXTURE1D_DESC desc{ request.width, request.mipLevels, layers, format11, D3D11_USAGE_DEFAULT, request.bindFlags, 0, request.miscFlags };
+				result.copy_from(Tripwire::CreateTexture1D(desc, std::move(options)).get());
+				break;
+			}
+		default:
+			{
+				const D3D11_TEXTURE2D_DESC desc{ request.width, request.height, request.mipLevels, layers, format11, { request.sampleCount, 0 }, D3D11_USAGE_DEFAULT,
+					request.bindFlags, 0, request.miscFlags };
+				result.copy_from(Tripwire::CreateTexture2D(desc, std::move(options)).get());
+				break;
+			}
+		}
+		return result;
+	}
+
+	winrt::com_ptr<ID3D11Buffer> WrapBuffer(const rhi::Resource& a_buffer, const D3D11_BUFFER_DESC& a_desc, const char* a_name)
+	{
+		if (!g_device)
+			return nullptr;
+		rhi::VulkanResourceInfo info{};
+		if (!rhi::vulkan::get_resource_info(a_buffer, info) || !info.resource) {
+			static std::atomic<bool> logged = false;
+			LogOnce(logged, a_name ? a_name : "a buffer", "BasicRHI did not describe the buffer to wrap");
+			return nullptr;
+		}
+		auto record = MakeWrapRecord(a_name);
+		record->kind = NativeResource::Kind::Buffer;
+		record->vkBuffer = rhi::vulkan::from_native_void<VkBuffer>(info.resource);
+		record->size = a_desc.ByteWidth;
+		record->bufferDesc = a_desc;
+		Tripwire::Options options;
+		options.name = record->name;
+		options.owner = record;
+		return Tripwire::CreateBuffer(a_desc, std::move(options));
+	}
+
 
 	void Shutdown()
 	{
@@ -2147,6 +2333,11 @@ namespace RenderGraph::Engine::Native
 	}
 	bool DescribeResource(const IUnknown*, DxvkOrgInteropResourceInfo&) { return false; }
 	HRESULT Present(UINT, UINT) { return E_FAIL; }
+	winrt::com_ptr<ID3D11Resource> WrapTexture(const rhi::Resource&, const DxvkOrgInteropTextureWrap&, DxvkOrgInteropResourceInfo&, const char*, const D3D11_SUBRESOURCE_DATA*)
+	{
+		return nullptr;
+	}
+	winrt::com_ptr<ID3D11Buffer> WrapBuffer(const rhi::Resource&, const D3D11_BUFFER_DESC&, const char*) { return nullptr; }
 	void Shutdown() {}
 }
 

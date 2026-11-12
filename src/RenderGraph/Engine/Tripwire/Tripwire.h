@@ -337,6 +337,9 @@ namespace RenderGraph::Engine::Tripwire
 		void (*clearUnorderedAccessViewUint)(ID3D11UnorderedAccessView* a_view, const UINT a_values[4]) = nullptr;
 		void (*clearUnorderedAccessViewFloat)(ID3D11UnorderedAccessView* a_view, const FLOAT a_values[4]) = nullptr;
 		void (*clearDepthStencilView)(ID3D11DepthStencilView* a_view, UINT a_flags, FLOAT a_depth, UINT8 a_stencil) = nullptr;
+		/** @brief Queries: End marks the context's work so far; GetData answers once it is done. Begin needs nothing. */
+		void (*end)(ID3D11Asynchronous* a_query) = nullptr;
+		HRESULT (*getData)(ID3D11Asynchronous* a_query, void* a_data, UINT a_size, UINT a_flags) = nullptr;
 		/** @brief The context's QueryInterface for ID3DUserDefinedAnnotation. */
 		HRESULT (*queryContext)(REFIID a_riid, void** a_out) = nullptr;
 		/** @} */

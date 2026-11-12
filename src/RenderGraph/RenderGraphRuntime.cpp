@@ -3407,8 +3407,10 @@ winrt::com_ptr<ID3D11Buffer> RenderGraphRuntime::WrapBuffer(org::Resource& a_buf
 	winrt::com_ptr<ID3D11Buffer> result;
 	if (!IsActive())
 		return result;
-	// Native mode: no DXVK to make a D3D11 buffer on the graph's. The caller's failure path runs, as when DXVK rejects one.
-	if (impl->native || !impl->createBufferFromVkBuffer) {
+	// Native mode: a native buffer handle over the graph's buffer.
+	if (impl->native)
+		return RenderGraph::Engine::Native::WrapBuffer(a_buffer.GetAPIResource(), a_desc, a_buffer.GetName().c_str());
+	if (!impl->createBufferFromVkBuffer) {
 		static std::atomic_flag logged;
 		if (!logged.test_and_set())
 			logger::warn("[ORG] WrapBuffer: '{}' has no D3D11 buffer, there is no DXVK to make one (logged once)", a_buffer.GetName());
@@ -3435,6 +3437,9 @@ winrt::com_ptr<ID3D11Resource> RenderGraphRuntime::WrapTexture(const rhi::Resour
 	DxvkOrgInteropResourceInfo& a_info, const char* a_name, const D3D11_SUBRESOURCE_DATA* a_initialData)
 {
 	winrt::com_ptr<ID3D11Resource> result;
+	// Native mode: a native texture handle over the port's image.
+	if (IsActive() && impl->native)
+		return RenderGraph::Engine::Native::WrapTexture(a_image, a_wrap, a_info, a_name, a_initialData);
 	if (!IsActive() || !impl->createTextureFromVkImage || (a_initialData && !impl->createTextureFromVkImageWithData))
 		return result;
 	rhi::VulkanResourceInfo info{};
@@ -3465,12 +3470,12 @@ winrt::com_ptr<ID3D11Resource> RenderGraphRuntime::WrapTexture(const rhi::Resour
 
 bool RenderGraphRuntime::CanWrapTextures() const
 {
-	return IsActive() && impl->createTextureFromVkImage;
+	return IsActive() && (impl->native || impl->createTextureFromVkImage);
 }
 
 bool RenderGraphRuntime::CanWrapTexturesWithData() const
 {
-	return CanWrapTextures() && impl->createTextureFromVkImageWithData;
+	return CanWrapTextures() && (impl->native || impl->createTextureFromVkImageWithData);
 }
 
 namespace
