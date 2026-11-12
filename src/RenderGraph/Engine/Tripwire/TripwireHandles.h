@@ -464,6 +464,8 @@ namespace RenderGraph::Engine::Tripwire
 		D3D_FEATURE_LEVEL STDMETHODCALLTYPE GetFeatureLevel() override;
 		UINT STDMETHODCALLTYPE GetCreationFlags() override;
 		HRESULT STDMETHODCALLTYPE GetDeviceRemovedReason() override;
+		HRESULT STDMETHODCALLTYPE CheckFeatureSupport(D3D11_FEATURE a_feature, void* a_data, UINT a_size) override;
+		HRESULT STDMETHODCALLTYPE CheckFormatSupport(DXGI_FORMAT a_format, UINT* a_support) override;
 		/** @} */
 
 		/** @brief The paired context (a reference held), set once by PairDeviceAndContext. */
@@ -478,6 +480,25 @@ namespace RenderGraph::Engine::Tripwire
 	{
 	public:
 		void STDMETHODCALLTYPE GetDevice(ID3D11Device** a_out) override;
+
+		/** @name Native mode (NativeServices): answered by a native handle, forwarded by a guest one (through its filter), tripwires otherwise. */
+		/** @{ */
+		HRESULT STDMETHODCALLTYPE QueryInterface(REFIID a_riid, void** a_out) override;
+		HRESULT STDMETHODCALLTYPE Map(ID3D11Resource* a_resource, UINT a_subresource, D3D11_MAP a_type, UINT a_flags, D3D11_MAPPED_SUBRESOURCE* a_out) override;
+		void STDMETHODCALLTYPE Unmap(ID3D11Resource* a_resource, UINT a_subresource) override;
+		void STDMETHODCALLTYPE UpdateSubresource(ID3D11Resource* a_resource, UINT a_subresource, const D3D11_BOX* a_box, const void* a_data, UINT a_rowPitch,
+			UINT a_depthPitch) override;
+		void STDMETHODCALLTYPE CopyResource(ID3D11Resource* a_destination, ID3D11Resource* a_source) override;
+		void STDMETHODCALLTYPE CopySubresourceRegion(ID3D11Resource* a_destination, UINT a_destinationSubresource, UINT a_x, UINT a_y, UINT a_z,
+			ID3D11Resource* a_source, UINT a_sourceSubresource, const D3D11_BOX* a_box) override;
+		void STDMETHODCALLTYPE GenerateMips(ID3D11ShaderResourceView* a_view) override;
+		void STDMETHODCALLTYPE ClearRenderTargetView(ID3D11RenderTargetView* a_view, const FLOAT a_color[4]) override;
+		void STDMETHODCALLTYPE ClearUnorderedAccessViewUint(ID3D11UnorderedAccessView* a_view, const UINT a_values[4]) override;
+		void STDMETHODCALLTYPE ClearUnorderedAccessViewFloat(ID3D11UnorderedAccessView* a_view, const FLOAT a_values[4]) override;
+		void STDMETHODCALLTYPE ClearDepthStencilView(ID3D11DepthStencilView* a_view, UINT a_flags, FLOAT a_depth, UINT8 a_stencil) override;
+		/** @brief Native mode: nothing to send on (every native operation is submitted when it is made), so it succeeds silently. */
+		void STDMETHODCALLTYPE Flush() override;
+		/** @} */
 
 		/** @brief The paired device, no reference held (the device holds this context): cleared by the device's destructor. */
 		std::atomic<ID3D11Device*> device{ nullptr };
@@ -499,6 +520,7 @@ namespace RenderGraph::Engine::Tripwire
 		HRESULT STDMETHODCALLTYPE GetFullscreenState(BOOL* a_fullscreen, IDXGIOutput** a_target) override;
 		HRESULT STDMETHODCALLTYPE SetFullscreenState(BOOL a_fullscreen, IDXGIOutput* a_target) override;
 		HRESULT STDMETHODCALLTYPE ResizeTarget(const DXGI_MODE_DESC* a_parameters) override;
+		HRESULT STDMETHODCALLTYPE GetContainingOutput(IDXGIOutput** a_out) override;
 
 		const DXGI_SWAP_CHAIN_DESC desc;
 	};

@@ -10,6 +10,9 @@
 
 #	include <rhi_helpers.h>
 
+#	include <d3d11_1.h>
+#	include <functional>
+
 #	include "Aftermath.h"
 #	include "RenderGraph/DxvkOrgInterop.h"
 #	include "RenderGraph/Engine/Tripwire/GuestDevice.h"
@@ -190,12 +193,60 @@ namespace RenderGraph::Engine::Native
 		 * imports it with. Its handle keeps it (Options::owner), and a released handle's owner goes through ServiceRetired, so the
 		 * memory outlives the graph's last use.
 		 */
+		/** @brief Where one D3D11 subresource lies in a CPU-side copy of a texture (a STAGING texture, a DYNAMIC texture's upload side). */
+		struct SubresourceLayout
+		{
+			uint64_t offset = 0;
+			uint32_t rowPitch = 0;
+			uint32_t depthPitch = 0;
+		};
+
+		/** @brief A texture's shape, as the context's operations need it. Rows and row bytes count blocks for compressed formats. */
+		struct Shape
+		{
+			D3D11_RESOURCE_DIMENSION dimension = D3D11_RESOURCE_DIMENSION_TEXTURE2D;
+			rhi::Format format = rhi::Format::Unknown;
+			uint32_t width = 1, height = 1, depth = 1, mips = 1, layers = 1;
+			bool blocks = false;
+			uint32_t blockBytes = 4;
+			// Every aspect of the format, and the one a buffer copy takes (depth for a depth-stencil format).
+			VkImageAspectFlags aspects = VK_IMAGE_ASPECT_COLOR_BIT;
+			VkImageAspectFlags copyAspect = VK_IMAGE_ASPECT_COLOR_BIT;
+
+			uint32_t Width(uint32_t a_mip) const { return (std::max)(width >> a_mip, 1u); }
+			uint32_t Height(uint32_t a_mip) const { return (std::max)(height >> a_mip, 1u); }
+			uint32_t Depth(uint32_t a_mip) const { return (std::max)(depth >> a_mip, 1u); }
+			uint32_t Subresources() const { return mips * layers; }
+			uint32_t BlockSize() const { return blocks ? 4u : 1u; }
+			uint32_t Rows(uint32_t a_height) const { return (a_height + BlockSize() - 1) / BlockSize(); }
+			uint32_t RowBytes(uint32_t a_width) const { return (a_width + BlockSize() - 1) / BlockSize() * blockBytes; }
+		};
+
 		struct NativeResource
 		{
+			enum class Kind : uint8_t
+			{
+				Buffer,   // a buffer
+				Image,    // a texture the GPU uses (DEFAULT, IMMUTABLE, DYNAMIC)
+				Staging,  // a STAGING texture: a buffer laid out by subresource
+			};
+			Kind kind = Kind::Buffer;
 			rhi::ResourcePtr resource;
-			DxvkOrgInteropImageInfo image{};
-			bool isImage = false;
 			std::string name;
+			// Buffers and staging textures: the Vulkan buffer, its size, and whether the CPU can map it (upload or readback memory).
+			VkBuffer vkBuffer = VK_NULL_HANDLE;
+			uint64_t size = 0;
+			bool hostVisible = false;
+			bool readback = false;
+			D3D11_BUFFER_DESC bufferDesc{};
+			// Images: how the graph imports it. Images and staging textures: the shape; staging textures: the subresources' layout.
+			DxvkOrgInteropImageInfo image{};
+			Shape shape;
+			std::vector<SubresourceLayout> layout;
+			// A DYNAMIC texture's CPU side: Map writes it, Unmap copies it into the image.
+			std::shared_ptr<NativeResource> upload;
+			// The value of the last immediate work that read or wrote it (Immediate), so Map waits only for that.
+			std::atomic<uint64_t> lastUse{ 0 };
 
 			NativeResource();
 			~NativeResource();
@@ -270,6 +321,133 @@ namespace RenderGraph::Engine::Native
 			rhi::TimelinePtr timeline;
 			uint64_t value = 0;
 		};
+
+		/**
+		 * @brief The immediate context's work: one command list per operation (a copy, a clear, a mip chain), submitted on the graphics
+		 * queue when the call is made. Calls reach it in the order D3D11 code makes them, and the graph's epochs submit on the same queue
+		 * at their points, so each operation lands between the epochs before and after it. A full memory barrier before and after each
+		 * one orders it with that work. Every image rests in GENERAL, so the commands use it there and leave it there.
+		 *
+		 * The commands are Vulkan's own (vkCmdCopyImage, vkCmdClearColorImage, ...) inside a BasicRHI command list. Nothing waits
+		 * unless a caller asks (Map of a resource the GPU still uses). A list is reused once the timeline has passed it, and what an
+		 * operation keeps alive (its upload buffer) is released then.
+		 */
+		class Immediate
+		{
+		public:
+			struct Vulkan
+			{
+				PFN_vkCmdPipelineBarrier2 barrier = nullptr;
+				PFN_vkCmdCopyBuffer copyBuffer = nullptr;
+				PFN_vkCmdCopyImage copyImage = nullptr;
+				PFN_vkCmdCopyBufferToImage copyBufferToImage = nullptr;
+				PFN_vkCmdCopyImageToBuffer copyImageToBuffer = nullptr;
+				PFN_vkCmdBlitImage blitImage = nullptr;
+				PFN_vkCmdClearColorImage clearColorImage = nullptr;
+				PFN_vkCmdClearDepthStencilImage clearDepthStencilImage = nullptr;
+				PFN_vkCmdFillBuffer fillBuffer = nullptr;
+			};
+
+			bool Init(rhi::Device a_device)
+			{
+				device = a_device;
+				queue = device.GetQueue(rhi::QueueKind::Graphics);
+				const VkDevice vkDevice = rhi::vulkan::get_device(device);
+				const auto getDeviceProcAddr = reinterpret_cast<PFN_vkGetDeviceProcAddr>(LoaderProc()(rhi::vulkan::get_instance(device), "vkGetDeviceProcAddr"));
+				if (!getDeviceProcAddr)
+					return false;
+				const auto resolve = [&](auto& a_into, const char* a_name) {
+					a_into = reinterpret_cast<std::remove_reference_t<decltype(a_into)>>(getDeviceProcAddr(vkDevice, a_name));
+					return a_into != nullptr;
+				};
+				bool ok = resolve(vk.barrier, "vkCmdPipelineBarrier2") && resolve(vk.copyBuffer, "vkCmdCopyBuffer") && resolve(vk.copyImage, "vkCmdCopyImage") &&
+				          resolve(vk.copyBufferToImage, "vkCmdCopyBufferToImage") && resolve(vk.copyImageToBuffer, "vkCmdCopyImageToBuffer") &&
+				          resolve(vk.blitImage, "vkCmdBlitImage") && resolve(vk.clearColorImage, "vkCmdClearColorImage") &&
+				          resolve(vk.clearDepthStencilImage, "vkCmdClearDepthStencilImage") && resolve(vk.fillBuffer, "vkCmdFillBuffer");
+				for (auto& slot : slots) {
+					ok = ok && device.CreateCommandAllocator(rhi::QueueKind::Graphics, slot.allocator) == rhi::Result::Ok && slot.allocator &&
+					     device.CreateCommandList(rhi::QueueKind::Graphics, slot.allocator.Get(), slot.list) == rhi::Result::Ok && slot.list;
+				}
+				return ok && device.CreateTimeline(timeline, 0, "CS native immediate context") == rhi::Result::Ok && timeline;
+			}
+
+			/**
+			 * @brief Records a_record and submits it. a_keep lives until the work is done; each of a_used gets the work's value as its
+			 * last use. Returns that value, 0 when the submission failed (logged). Any thread, one at a time.
+			 */
+			uint64_t Run(const std::function<void(const Vulkan&, VkCommandBuffer)>& a_record, std::vector<std::shared_ptr<const void>> a_keep,
+				std::initializer_list<NativeResource*> a_used)
+			{
+				std::lock_guard guard(lock);
+				auto& slot = slots[next++ % kSlots];
+				if (slot.value && timeline->GetCompletedValue() < slot.value)
+					(void)timeline->HostWait(slot.value);
+				slot.keep.clear();
+				slot.allocator->Recycle();
+				slot.list->Recycle(slot.allocator.Get());
+				const VkCommandBuffer commands = rhi::vulkan::get_cmd_list(slot.list.Get());
+				FullBarrier(commands);
+				a_record(vk, commands);
+				FullBarrier(commands);
+				slot.list->End();
+				rhi::CommandList lists[] = { slot.list.Get() };
+				const rhi::TimelinePoint signal{ timeline->GetHandle(), value + 1 };
+				rhi::SubmitDesc submit{};
+				submit.signals = { &signal, 1 };
+				if (queue.Submit({ lists, 1 }, submit) != rhi::Result::Ok) {
+					static std::atomic_flag logged;
+					if (!logged.test_and_set())
+						logger::error("[ORG native] an immediate context operation could not be submitted; such operations are lost");
+					return 0;
+				}
+				slot.value = ++value;
+				slot.keep = std::move(a_keep);
+				for (auto* used : a_used)
+					if (used)
+						used->lastUse.store(value, std::memory_order_release);
+				return value;
+			}
+
+			/** @brief Whether the work of value a_value is done on the GPU (0 is). */
+			bool Done(uint64_t a_value) { return !a_value || timeline->GetCompletedValue() >= a_value; }
+
+			/** @brief Waits for the work of value a_value on the CPU. */
+			bool Wait(uint64_t a_value) { return Done(a_value) || timeline->HostWait(a_value) == rhi::Result::Ok; }
+
+		private:
+			static constexpr uint32_t kSlots = 32;
+
+			struct Slot
+			{
+				rhi::CommandAllocatorPtr allocator;
+				rhi::CommandListPtr list;
+				uint64_t value = 0;
+				std::vector<std::shared_ptr<const void>> keep;
+			};
+
+			void FullBarrier(VkCommandBuffer a_commands) const
+			{
+				VkMemoryBarrier2 memory{ VK_STRUCTURE_TYPE_MEMORY_BARRIER_2 };
+				memory.srcStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
+				memory.srcAccessMask = VK_ACCESS_2_MEMORY_WRITE_BIT;
+				memory.dstStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
+				memory.dstAccessMask = VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT;
+				VkDependencyInfo dependency{ VK_STRUCTURE_TYPE_DEPENDENCY_INFO };
+				dependency.memoryBarrierCount = 1;
+				dependency.pMemoryBarriers = &memory;
+				vk.barrier(a_commands, &dependency);
+			}
+
+			std::mutex lock;
+			rhi::Device device;
+			rhi::Queue queue;
+			Vulkan vk;
+			std::array<Slot, kSlots> slots;
+			uint64_t next = 0;
+			rhi::TimelinePtr timeline;
+			uint64_t value = 0;
+		};
+
 
 		/** @brief Logs a failure kind once, with the first resource's name. */
 		void LogOnce(std::atomic<bool>& a_logged, std::string_view a_name, std::string_view a_why)
@@ -356,6 +534,7 @@ namespace RenderGraph::Engine::Native
 			std::shared_ptr<rhi::DevicePtr> device;
 			rhi::Queue graphics;
 			OneShot oneShot;
+			Immediate immediate;
 
 			// The swap chain on the game's window, and the back buffer the engine draws into (through the graph's passes).
 			rhi::SwapchainPtr swapchain;
@@ -390,10 +569,8 @@ namespace RenderGraph::Engine::Native
 			/** @brief The texture: a BasicRHI image in GENERAL (the graph's Common home state), its initial data uploaded. */
 			HRESULT MakeTexture(const TextureRequest& a_request, std::shared_ptr<NativeResource>& a_out)
 			{
-				if (a_request.usage == D3D11_USAGE_STAGING || a_request.usage == D3D11_USAGE_DYNAMIC || a_request.cpuAccess) {
-					LogOnce(loggedCpuAccess, a_request.name, "native textures with CPU access (STAGING, DYNAMIC) are not built: their Map has nothing behind it");
-					return E_NOTIMPL;
-				}
+				if (a_request.usage == D3D11_USAGE_STAGING)
+					return MakeStaging(a_request, false, a_out);
 				if (a_request.sampleCount > 1) {
 					LogOnce(loggedMultisample, a_request.name, "native multisampled textures are not built");
 					return E_NOTIMPL;
@@ -474,14 +651,143 @@ namespace RenderGraph::Engine::Native
 				image.components = { VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY };
 				const bool depthFormat = (a_request.bindFlags & D3D11_BIND_DEPTH_STENCIL) != 0;
 				image.subresourceRange = { static_cast<VkImageAspectFlags>(depthFormat ? VK_IMAGE_ASPECT_DEPTH_BIT : VK_IMAGE_ASPECT_COLOR_BIT), 0, mips, 0, layers };
-				record->isImage = true;
+				record->kind = NativeResource::Kind::Image;
+				record->shape = ShapeOf(a_request, dxgiFormat, format, mips, layers, depth);
 
 				if (!Initialize(*record, a_request, format, mips, layers, depth)) {
 					LogOnce(loggedUpload, a_request.name, "its initial layout or contents could not be written");
 					return E_FAIL;
 				}
+				// A DYNAMIC texture's CPU side, which Map hands out and Unmap copies in.
+				if (a_request.usage == D3D11_USAGE_DYNAMIC) {
+					TextureRequest cpu = a_request;
+					cpu.data = nullptr;
+					cpu.name = a_request.name + " (upload)";
+					if (const HRESULT hr = MakeStaging(cpu, true, record->upload); FAILED(hr))
+						return hr;
+				}
 				a_out = std::move(record);
 				return S_OK;
+			}
+
+			/** @brief The shape of a texture request, in its resolved format. */
+			static Shape ShapeOf(const TextureRequest& a_request, DXGI_FORMAT a_dxgiFormat, rhi::Format a_format, uint32_t a_mips, uint32_t a_layers, uint32_t a_depth)
+			{
+				Shape shape;
+				shape.dimension = a_request.dimension;
+				shape.format = a_format;
+				shape.width = a_request.width;
+				shape.height = a_request.height;
+				shape.depth = a_depth;
+				shape.mips = a_mips;
+				shape.layers = a_layers;
+				shape.blocks = rhi::helpers::IsBlockCompressed(a_format);
+				shape.blockBytes = (std::max)(rhi::helpers::BytesPerBlock(a_format), 1u);
+				switch (a_dxgiFormat) {
+				case DXGI_FORMAT_D24_UNORM_S8_UINT:
+				case DXGI_FORMAT_D32_FLOAT_S8X24_UINT:
+					shape.aspects = VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT;
+					shape.copyAspect = VK_IMAGE_ASPECT_DEPTH_BIT;
+					break;
+				case DXGI_FORMAT_D32_FLOAT:
+				case DXGI_FORMAT_D16_UNORM:
+					shape.aspects = shape.copyAspect = VK_IMAGE_ASPECT_DEPTH_BIT;
+					break;
+				default:
+					break;
+				}
+				return shape;
+			}
+
+			/**
+			 * @brief A STAGING texture (or a DYNAMIC texture's CPU side, a_upload): a buffer in readback or upload memory, each
+			 * subresource at a 512-byte offset with 256-byte rows, the rules every backend's buffer-texture copies accept.
+			 */
+			HRESULT MakeStaging(const TextureRequest& a_request, bool a_upload, std::shared_ptr<NativeResource>& a_out)
+			{
+				const DXGI_FORMAT dxgiFormat = ResolveTypeless(a_request.format, a_request.bindFlags);
+				const rhi::Format format = rhi::helpers::ToRHI(dxgiFormat);
+				if (format == rhi::Format::Unknown) {
+					LogOnce(loggedFormat, a_request.name, fmt::format("native staging textures of DXGI format {} are not built", static_cast<int>(a_request.format)));
+					return E_INVALIDARG;
+				}
+				const uint32_t depth = a_request.dimension == D3D11_RESOURCE_DIMENSION_TEXTURE3D ? a_request.depthOrArraySize : 1;
+				const uint32_t layers = a_request.dimension == D3D11_RESOURCE_DIMENSION_TEXTURE3D ? 1 : a_request.depthOrArraySize;
+				const uint32_t mips = a_request.mipLevels ? a_request.mipLevels : FullMipCount(a_request.width, a_request.height, depth);
+				auto record = std::make_shared<NativeResource>();
+				record->kind = NativeResource::Kind::Staging;
+				record->name = a_request.name;
+				record->shape = ShapeOf(a_request, dxgiFormat, format, mips, layers, depth);
+				const auto& shape = record->shape;
+				record->layout.resize(shape.Subresources());
+				uint64_t offset = 0;
+				for (uint32_t slice = 0; slice < layers; ++slice) {
+					for (uint32_t mip = 0; mip < mips; ++mip) {
+						auto& entry = record->layout[mip + slice * mips];
+						entry.offset = offset;
+						entry.rowPitch = (shape.RowBytes(shape.Width(mip)) + 255u) & ~255u;
+						entry.depthPitch = entry.rowPitch * shape.Rows(shape.Height(mip));
+						offset = (offset + uint64_t(entry.depthPitch) * shape.Depth(mip) + 511) & ~uint64_t(511);
+					}
+				}
+				record->readback = !a_upload && (a_request.cpuAccess & D3D11_CPU_ACCESS_READ);
+				if (!MakeBufferResource(*record, (std::max)(offset, uint64_t(1)), record->readback ? rhi::HeapType::Readback : rhi::HeapType::Upload, false))
+					return E_OUTOFMEMORY;
+				if (a_request.data) {
+					void* mapped = nullptr;
+					record->resource->Map(&mapped);
+					if (!mapped)
+						return E_FAIL;
+					for (uint32_t sub = 0; sub < shape.Subresources(); ++sub)
+						WriteSubresource(static_cast<std::byte*>(mapped), record->layout[sub], shape, sub % mips, a_request.data[sub]);
+					record->resource->Unmap(0, record->size);
+				}
+				a_out = std::move(record);
+				return S_OK;
+			}
+
+			/** @brief Copies one subresource's D3D11 data (its own pitches) into a layout entry. */
+			static void WriteSubresource(std::byte* a_base, const SubresourceLayout& a_entry, const Shape& a_shape, uint32_t a_mip, const D3D11_SUBRESOURCE_DATA& a_data)
+			{
+				if (!a_data.pSysMem)
+					return;
+				const uint32_t rows = a_shape.Rows(a_shape.Height(a_mip));
+				const uint32_t rowBytes = (std::min)(a_shape.RowBytes(a_shape.Width(a_mip)), a_entry.rowPitch);
+				for (uint32_t z = 0; z < a_shape.Depth(a_mip); ++z)
+					for (uint32_t row = 0; row < rows; ++row)
+						std::memcpy(a_base + a_entry.offset + uint64_t(z) * a_entry.depthPitch + uint64_t(row) * a_entry.rowPitch,
+							static_cast<const std::byte*>(a_data.pSysMem) + size_t(z) * a_data.SysMemSlicePitch + size_t(row) * a_data.SysMemPitch, rowBytes);
+			}
+
+			/** @brief The buffer behind a buffer or staging record: BasicRHI's resource and its Vulkan handle. */
+			bool MakeBufferResource(NativeResource& a_record, uint64_t a_size, rhi::HeapType a_heap, bool a_unorderedAccess)
+			{
+				rhi::ResourceDesc desc{};
+				desc.type = rhi::ResourceType::Buffer;
+				desc.heapType = a_heap;
+				desc.resourceFlags = a_unorderedAccess ? rhi::RF_AllowUnorderedAccess : rhi::RF_None;
+				desc.debugName = a_record.name.c_str();
+				desc.buffer.sizeBytes = a_size;
+				rhi::VulkanResourceInfo info{};
+				if (Rhi().CreateCommittedResource(desc, a_record.resource) != rhi::Result::Ok || !a_record.resource ||
+					!rhi::vulkan::get_resource_info(a_record.resource.Get(), info) || !info.resource) {
+					LogOnce(loggedCreate, a_record.name, "BasicRHI could not create the buffer");
+					return false;
+				}
+				a_record.vkBuffer = rhi::vulkan::from_native_void<VkBuffer>(info.resource);
+				a_record.size = a_size;
+				a_record.hostVisible = a_heap != rhi::HeapType::DeviceLocal;
+				return true;
+			}
+
+			/** @brief A short-lived upload buffer for one context operation, kept until that operation's work is done. */
+			std::shared_ptr<NativeResource> MakeUpload(uint64_t a_size)
+			{
+				auto record = std::make_shared<NativeResource>();
+				record->name = "Native::Upload";
+				if (!MakeBufferResource(*record, (std::max)(a_size, uint64_t(1)), rhi::HeapType::Upload, false))
+					return nullptr;
+				return record;
 			}
 
 			/**
@@ -588,18 +894,13 @@ namespace RenderGraph::Engine::Native
 			HRESULT MakeBuffer(const D3D11_BUFFER_DESC& a_desc, const D3D11_SUBRESOURCE_DATA* a_data, std::shared_ptr<NativeResource>& a_out)
 			{
 				const bool hostVisible = a_desc.Usage != D3D11_USAGE_DEFAULT || a_desc.CPUAccessFlags || (a_data && a_data->pSysMem);
-				rhi::ResourceDesc desc{};
-				desc.type = rhi::ResourceType::Buffer;
-				desc.heapType = (a_desc.CPUAccessFlags & D3D11_CPU_ACCESS_READ) ? rhi::HeapType::Readback : hostVisible ? rhi::HeapType::Upload : rhi::HeapType::DeviceLocal;
-				desc.resourceFlags = (a_desc.BindFlags & D3D11_BIND_UNORDERED_ACCESS) ? rhi::RF_AllowUnorderedAccess : rhi::RF_None;
-				desc.debugName = "CS native buffer";
-				desc.buffer.sizeBytes = (std::max)(a_desc.ByteWidth, 1u);
 				auto record = std::make_shared<NativeResource>();
 				record->name = "Native::Buffer";
-				if (Rhi().CreateCommittedResource(desc, record->resource) != rhi::Result::Ok || !record->resource) {
-					LogOnce(loggedCreate, record->name, "BasicRHI could not create the buffer");
+				record->bufferDesc = a_desc;
+				record->readback = (a_desc.CPUAccessFlags & D3D11_CPU_ACCESS_READ) != 0;
+				const auto heap = record->readback ? rhi::HeapType::Readback : hostVisible ? rhi::HeapType::Upload : rhi::HeapType::DeviceLocal;
+				if (!MakeBufferResource(*record, (std::max)(a_desc.ByteWidth, 1u), heap, (a_desc.BindFlags & D3D11_BIND_UNORDERED_ACCESS) != 0))
 					return E_OUTOFMEMORY;
-				}
 				if (a_data && a_data->pSysMem && hostVisible) {
 					void* mapped = nullptr;
 					record->resource->Map(&mapped);
@@ -1002,6 +1303,695 @@ namespace RenderGraph::Engine::Native
 			g_device->FillDesc(*a_out);
 			return S_OK;
 		}
+
+		HRESULT SwapChainGetContainingOutput(IDXGIOutput** a_out)
+		{
+			if (!a_out)
+				return E_POINTER;
+			*a_out = nullptr;
+			if (!g_device->adapter)
+				return DXGI_ERROR_NOT_FOUND;
+			// The output of the game's adapter whose monitor holds most of the window, else its first output.
+			const HMONITOR monitor = ::MonitorFromWindow(g_device->window, MONITOR_DEFAULTTONEAREST);
+			winrt::com_ptr<IDXGIOutput> first;
+			for (UINT i = 0;; ++i) {
+				winrt::com_ptr<IDXGIOutput> output;
+				if (FAILED(g_device->adapter->EnumOutputs(i, output.put())))
+					break;
+				DXGI_OUTPUT_DESC desc{};
+				if (SUCCEEDED(output->GetDesc(&desc)) && desc.Monitor == monitor) {
+					*a_out = output.detach();
+					return S_OK;
+				}
+				if (!first)
+					first = output;
+			}
+			if (!first)
+				return DXGI_ERROR_NOT_FOUND;
+			*a_out = first.detach();
+			return S_OK;
+		}
+
+		// ---- The device's queries --------------------------------------------------------------------------------------------
+
+		/** @brief D3D11_FORMAT_SUPPORT bits from what BasicRHI's device can do with a format. Zero when it can do nothing. */
+		UINT FormatSupportOf(DXGI_FORMAT a_format)
+		{
+			const rhi::Format format = rhi::helpers::ToRHI(ResolveTypeless(a_format, 0));
+			rhi::FormatSupport support{};
+			if (format == rhi::Format::Unknown || g_device->Rhi().QueryFormatSupport(format, support) != rhi::Result::Ok)
+				return 0;
+			UINT bits = 0;
+			if (support.usage & rhi::FU_ShaderResource)
+				bits |= D3D11_FORMAT_SUPPORT_BUFFER | D3D11_FORMAT_SUPPORT_TEXTURE1D | D3D11_FORMAT_SUPPORT_TEXTURE2D | D3D11_FORMAT_SUPPORT_TEXTURE3D |
+				        D3D11_FORMAT_SUPPORT_TEXTURECUBE | D3D11_FORMAT_SUPPORT_SHADER_LOAD | D3D11_FORMAT_SUPPORT_SHADER_SAMPLE | D3D11_FORMAT_SUPPORT_MIP |
+				        D3D11_FORMAT_SUPPORT_CPU_LOCKABLE | D3D11_FORMAT_SUPPORT_SHADER_GATHER | D3D11_FORMAT_SUPPORT_CAST_WITHIN_BIT_LAYOUT;
+			if (support.usage & rhi::FU_RenderTarget)
+				bits |= D3D11_FORMAT_SUPPORT_RENDER_TARGET | D3D11_FORMAT_SUPPORT_BLENDABLE | D3D11_FORMAT_SUPPORT_MIP_AUTOGEN | D3D11_FORMAT_SUPPORT_DISPLAY;
+			if (support.usage & rhi::FU_DepthStencil)
+				bits |= D3D11_FORMAT_SUPPORT_DEPTH_STENCIL | D3D11_FORMAT_SUPPORT_SHADER_SAMPLE_COMPARISON;
+			if (support.usage & rhi::FU_UnorderedAccess)
+				bits |= D3D11_FORMAT_SUPPORT_TYPED_UNORDERED_ACCESS_VIEW;
+			return bits;
+		}
+
+		HRESULT CheckFormatSupport(DXGI_FORMAT a_format, UINT* a_support)
+		{
+			if (!a_support)
+				return E_POINTER;
+			*a_support = FormatSupportOf(a_format);
+			return *a_support ? S_OK : E_FAIL;
+		}
+
+		/**
+		 * @brief The D3D11 features native mode answers, as a feature level 11.1 device on BasicRHI's would: typed UAV loads where
+		 * the format can be stored to, no command lists, the rest of the optional caps off. Another feature is refused (logged once).
+		 */
+		HRESULT CheckFeatureSupport(D3D11_FEATURE a_feature, void* a_data, UINT a_size)
+		{
+			if (!a_data)
+				return E_INVALIDARG;
+			const auto answer = [&](auto a_value) {
+				if (a_size != sizeof(a_value))
+					return E_INVALIDARG;
+				std::memcpy(a_data, &a_value, sizeof(a_value));
+				return S_OK;
+			};
+			switch (a_feature) {
+			case D3D11_FEATURE_THREADING:
+				return answer(D3D11_FEATURE_DATA_THREADING{ TRUE, FALSE });
+			case D3D11_FEATURE_DOUBLES:
+				return answer(D3D11_FEATURE_DATA_DOUBLES{ FALSE });
+			case D3D11_FEATURE_FORMAT_SUPPORT:
+				{
+					if (a_size != sizeof(D3D11_FEATURE_DATA_FORMAT_SUPPORT))
+						return E_INVALIDARG;
+					auto* data = static_cast<D3D11_FEATURE_DATA_FORMAT_SUPPORT*>(a_data);
+					data->OutFormatSupport = FormatSupportOf(data->InFormat);
+					return S_OK;
+				}
+			case D3D11_FEATURE_FORMAT_SUPPORT2:
+				{
+					if (a_size != sizeof(D3D11_FEATURE_DATA_FORMAT_SUPPORT2))
+						return E_INVALIDARG;
+					auto* data = static_cast<D3D11_FEATURE_DATA_FORMAT_SUPPORT2*>(a_data);
+					data->OutFormatSupport2 = (FormatSupportOf(data->InFormat) & D3D11_FORMAT_SUPPORT_TYPED_UNORDERED_ACCESS_VIEW) ?
+					                              D3D11_FORMAT_SUPPORT2_UAV_TYPED_LOAD | D3D11_FORMAT_SUPPORT2_UAV_TYPED_STORE :
+					                              0;
+					return S_OK;
+				}
+			case D3D11_FEATURE_D3D10_X_HARDWARE_OPTIONS:
+				return answer(D3D11_FEATURE_DATA_D3D10_X_HARDWARE_OPTIONS{ TRUE });
+			case D3D11_FEATURE_D3D11_OPTIONS:
+				return answer(D3D11_FEATURE_DATA_D3D11_OPTIONS{});
+			case D3D11_FEATURE_ARCHITECTURE_INFO:
+				return answer(D3D11_FEATURE_DATA_ARCHITECTURE_INFO{ FALSE });
+			case D3D11_FEATURE_D3D9_OPTIONS:
+				return answer(D3D11_FEATURE_DATA_D3D9_OPTIONS{ TRUE });
+			case D3D11_FEATURE_SHADER_MIN_PRECISION_SUPPORT:
+				return answer(D3D11_FEATURE_DATA_SHADER_MIN_PRECISION_SUPPORT{});
+			default:
+				{
+					static std::atomic_flag logged;
+					if (!logged.test_and_set())
+						logger::warn("[ORG native] CheckFeatureSupport({}) has no native answer; refused", static_cast<int>(a_feature));
+					return E_INVALIDARG;
+				}
+			}
+		}
+
+		// ---- The immediate context -------------------------------------------------------------------------------------------
+
+		/** @brief The native record behind a resource or view handle (a view's is its resource's), or null. */
+		std::shared_ptr<NativeResource> Resolve(const void* a_object)
+		{
+			auto owner = Tripwire::OwnerOf(a_object);
+			if (!owner)
+				return nullptr;
+			{
+				auto& registry = GetRegistry();
+				std::lock_guard guard(registry.lock);
+				if (!registry.live.contains(owner.get()))
+					return nullptr;
+			}
+			return std::const_pointer_cast<NativeResource>(std::static_pointer_cast<const NativeResource>(owner));
+		}
+
+		/** @brief An operation on something the native device did not make: logged once per operation. */
+		void Unknown(std::atomic_flag& a_logged, const char* a_operation, const void* a_object)
+		{
+			if (!a_logged.test_and_set())
+				logger::warn("[ORG native] {} on \"{}\", which native mode did not make; nothing happens (logged once)", a_operation,
+					a_object ? Tripwire::Describe(a_object).name : std::string("null"));
+		}
+
+		/** @brief Where subresource a_sub of a staging record lies for a Vulkan buffer-image copy, with a region inside it. */
+		VkBufferImageCopy StagingRegion(const NativeResource& a_staging, uint32_t a_sub, VkOffset3D a_offset, VkExtent3D a_extent, uint32_t a_imageLayer,
+			VkOffset3D a_imageOffset, VkImageAspectFlags a_aspect)
+		{
+			const auto& shape = a_staging.shape;
+			const auto& entry = a_staging.layout[a_sub];
+			const uint32_t block = shape.BlockSize();
+			VkBufferImageCopy copy{};
+			copy.bufferOffset = entry.offset + uint64_t(a_offset.z) * entry.depthPitch + uint64_t(a_offset.y / block) * entry.rowPitch +
+			                    uint64_t(a_offset.x / block) * shape.blockBytes;
+			copy.bufferRowLength = entry.rowPitch / shape.blockBytes * block;
+			copy.bufferImageHeight = entry.depthPitch / entry.rowPitch * block;
+			copy.imageSubresource = { a_aspect, a_sub % shape.mips, a_imageLayer, 1 };
+			copy.imageOffset = a_imageOffset;
+			copy.imageExtent = a_extent;
+			return copy;
+		}
+
+		/** @brief The whole extent of a subresource's mip. */
+		VkExtent3D MipExtent(const Shape& a_shape, uint32_t a_mip)
+		{
+			return { a_shape.Width(a_mip), a_shape.Height(a_mip), a_shape.Depth(a_mip) };
+		}
+
+		/**
+		 * @brief One subresource region from a_source to a_destination, whatever each is (a buffer, an image, a staging texture). a_box
+		 * null is the whole subresource (the whole buffer). Records into a_commands; false when the pair cannot be copied.
+		 */
+		bool RecordCopy(const Immediate::Vulkan& a_vk, VkCommandBuffer a_commands, const NativeResource& a_destination, uint32_t a_destinationSub, VkOffset3D a_at,
+			const NativeResource& a_source, uint32_t a_sourceSub, const D3D11_BOX* a_box)
+		{
+			using Kind = NativeResource::Kind;
+			const bool sourceBuffer = a_source.kind == Kind::Buffer;
+			const bool destinationBuffer = a_destination.kind == Kind::Buffer;
+			if (sourceBuffer || destinationBuffer) {
+				if (!sourceBuffer || !destinationBuffer)
+					return false;
+				const uint64_t from = a_box ? a_box->left : 0;
+				const uint64_t size = a_box ? a_box->right - a_box->left : (std::min)(a_source.size, a_destination.size);
+				if (from + size > a_source.size || a_at.x + size > a_destination.size)
+					return false;
+				const VkBufferCopy copy{ from, static_cast<VkDeviceSize>(a_at.x), size };
+				a_vk.copyBuffer(a_commands, a_source.vkBuffer, a_destination.vkBuffer, 1, &copy);
+				return true;
+			}
+			const Shape& sourceShape = a_source.shape;
+			if (a_sourceSub >= sourceShape.Subresources() || a_destinationSub >= a_destination.shape.Subresources())
+				return false;
+			const uint32_t sourceMip = a_sourceSub % sourceShape.mips;
+			const VkOffset3D from = a_box ? VkOffset3D{ static_cast<int32_t>(a_box->left), static_cast<int32_t>(a_box->top), static_cast<int32_t>(a_box->front) } :
+			                                VkOffset3D{ 0, 0, 0 };
+			const VkExtent3D extent = a_box ? VkExtent3D{ a_box->right - a_box->left, a_box->bottom - a_box->top, a_box->back - a_box->front } :
+			                                  MipExtent(sourceShape, sourceMip);
+			const uint32_t sourceLayer = a_sourceSub / sourceShape.mips;
+			const uint32_t destinationLayer = a_destinationSub / a_destination.shape.mips;
+			if (a_source.kind == Kind::Image && a_destination.kind == Kind::Image) {
+				VkImageCopy copy{};
+				copy.srcSubresource = { sourceShape.aspects, sourceMip, sourceLayer, 1 };
+				copy.srcOffset = from;
+				copy.dstSubresource = { a_destination.shape.aspects, a_destinationSub % a_destination.shape.mips, destinationLayer, 1 };
+				copy.dstOffset = a_at;
+				copy.extent = extent;
+				a_vk.copyImage(a_commands, a_source.image.image, VK_IMAGE_LAYOUT_GENERAL, a_destination.image.image, VK_IMAGE_LAYOUT_GENERAL, 1, &copy);
+				return true;
+			}
+			if (a_source.kind == Kind::Image && a_destination.kind == Kind::Staging) {
+				const auto copy = StagingRegion(a_destination, a_destinationSub, a_at, extent, sourceLayer, from, sourceShape.copyAspect);
+				a_vk.copyImageToBuffer(a_commands, a_source.image.image, VK_IMAGE_LAYOUT_GENERAL, a_destination.vkBuffer, 1, &copy);
+				return true;
+			}
+			if (a_source.kind == Kind::Staging && a_destination.kind == Kind::Image) {
+				const auto copy = StagingRegion(a_source, a_sourceSub, from, extent, destinationLayer, a_at, a_destination.shape.copyAspect);
+				a_vk.copyBufferToImage(a_commands, a_source.vkBuffer, a_destination.image.image, VK_IMAGE_LAYOUT_GENERAL, 1, &copy);
+				return true;
+			}
+			// Staging to staging: row by row would be needed for a region; the whole subresource is one buffer range.
+			if (a_box || a_at.x || a_at.y || a_at.z)
+				return false;
+			const auto& sourceEntry = a_source.layout[a_sourceSub];
+			const auto& destinationEntry = a_destination.layout[a_destinationSub];
+			if (sourceEntry.rowPitch != destinationEntry.rowPitch || sourceEntry.depthPitch != destinationEntry.depthPitch)
+				return false;
+			const VkBufferCopy copy{ sourceEntry.offset, destinationEntry.offset, uint64_t(sourceEntry.depthPitch) * sourceShape.Depth(sourceMip) };
+			a_vk.copyBuffer(a_commands, a_source.vkBuffer, a_destination.vkBuffer, 1, &copy);
+			return true;
+		}
+
+		/** @brief The memory Map hands out for a record: its own (a buffer, a staging texture), or a DYNAMIC image's upload side. */
+		NativeResource* CpuSide(NativeResource& a_record)
+		{
+			NativeResource* cpu = a_record.kind == NativeResource::Kind::Image ? a_record.upload.get() : &a_record;
+			return cpu && cpu->hostVisible ? cpu : nullptr;
+		}
+
+		HRESULT ContextMap(ID3D11Resource* a_resource, UINT a_subresource, D3D11_MAP a_type, UINT a_flags, D3D11_MAPPED_SUBRESOURCE* a_out)
+		{
+			if (!a_out)
+				return E_INVALIDARG;
+			*a_out = {};
+			const auto record = Resolve(a_resource);
+			if (!record) {
+				static std::atomic_flag logged;
+				Unknown(logged, "Map", a_resource);
+				return E_INVALIDARG;
+			}
+			NativeResource* cpu = CpuSide(*record);
+			if (!cpu) {
+				static std::atomic_flag logged;
+				if (!logged.test_and_set())
+					logger::warn("[ORG native] Map on \"{}\", which has no CPU access (DEFAULT usage); refused as D3D11 does (logged once)", record->name);
+				return E_INVALIDARG;
+			}
+			if (cpu->kind == NativeResource::Kind::Staging && a_subresource >= cpu->layout.size())
+				return E_INVALIDARG;
+			// The GPU may still use the memory: a read waits for its writes, a write for its reads. NO_OVERWRITE promises not to touch
+			// what is in use. A DYNAMIC buffer is not renamed: no native GPU work reads a buffer except the context's own copies.
+			if (a_type != D3D11_MAP_WRITE_NO_OVERWRITE) {
+				const uint64_t use = cpu->lastUse.load(std::memory_order_acquire);
+				if (!g_device->immediate.Done(use)) {
+					if (a_flags & D3D11_MAP_FLAG_DO_NOT_WAIT)
+						return DXGI_ERROR_WAS_STILL_DRAWING;
+					if (!g_device->immediate.Wait(use))
+						return DXGI_ERROR_DEVICE_REMOVED;
+				}
+			}
+			void* data = nullptr;
+			cpu->resource->Map(&data);
+			if (!data)
+				return E_FAIL;
+			if (cpu->kind == NativeResource::Kind::Staging) {
+				const auto& entry = cpu->layout[a_subresource];
+				a_out->pData = static_cast<std::byte*>(data) + entry.offset;
+				a_out->RowPitch = entry.rowPitch;
+				a_out->DepthPitch = entry.depthPitch;
+			} else {
+				a_out->pData = data;
+				a_out->RowPitch = a_out->DepthPitch = static_cast<UINT>(cpu->size);
+			}
+			return S_OK;
+		}
+
+		void ContextUnmap(ID3D11Resource* a_resource, UINT a_subresource)
+		{
+			const auto record = Resolve(a_resource);
+			if (!record)
+				return;
+			NativeResource* cpu = CpuSide(*record);
+			if (!cpu)
+				return;
+			// Readback memory flushes nothing back; upload memory flushes what the CPU wrote.
+			cpu->resource->Unmap(0, cpu->readback ? 0 : cpu->size);
+			// A DYNAMIC texture: the subresource just written goes to the image now, in the context's order.
+			if (record->kind == NativeResource::Kind::Image && record->upload && a_subresource < record->shape.Subresources()) {
+				const auto image = record;
+				const auto upload = record->upload;
+				g_device->immediate.Run(
+					[&](const Immediate::Vulkan& a_vk, VkCommandBuffer a_commands) {
+						(void)RecordCopy(a_vk, a_commands, *image, a_subresource, {}, *upload, a_subresource, nullptr);
+					},
+					{ image, upload }, { image.get(), upload.get() });
+			}
+		}
+
+		void ContextUpdateSubresource(ID3D11Resource* a_resource, UINT a_subresource, const D3D11_BOX* a_box, const void* a_data, UINT a_rowPitch, UINT a_depthPitch)
+		{
+			if (!a_data)
+				return;
+			const auto record = Resolve(a_resource);
+			if (!record) {
+				static std::atomic_flag logged;
+				Unknown(logged, "UpdateSubresource", a_resource);
+				return;
+			}
+			if (record->kind == NativeResource::Kind::Buffer) {
+				const uint64_t from = a_box ? a_box->left : 0;
+				const uint64_t size = a_box ? a_box->right - a_box->left : record->size;
+				if (!size || from + size > record->size)
+					return;
+				// Written by the CPU when the GPU is done with the buffer, else through an upload buffer in the context's order.
+				if (record->hostVisible && !record->readback && g_device->immediate.Done(record->lastUse.load(std::memory_order_acquire))) {
+					void* data = nullptr;
+					record->resource->Map(&data);
+					if (data) {
+						std::memcpy(static_cast<std::byte*>(data) + from, a_data, size);
+						record->resource->Unmap(from, size);
+					}
+					return;
+				}
+				auto upload = g_device->MakeUpload(size);
+				if (!upload)
+					return;
+				void* data = nullptr;
+				upload->resource->Map(&data);
+				if (!data)
+					return;
+				std::memcpy(data, a_data, size);
+				upload->resource->Unmap(0, size);
+				g_device->immediate.Run(
+					[&](const Immediate::Vulkan& a_vk, VkCommandBuffer a_commands) {
+						const VkBufferCopy copy{ 0, from, size };
+						a_vk.copyBuffer(a_commands, upload->vkBuffer, record->vkBuffer, 1, &copy);
+					},
+					{ upload, record }, { record.get() });
+				return;
+			}
+
+			// A texture: the region's rows into an upload buffer laid out as a one-subresource staging texture, then copied in.
+			const Shape& shape = record->shape;
+			if (a_subresource >= shape.Subresources())
+				return;
+			const uint32_t mip = a_subresource % shape.mips;
+			const VkOffset3D at = a_box ? VkOffset3D{ static_cast<int32_t>(a_box->left), static_cast<int32_t>(a_box->top), static_cast<int32_t>(a_box->front) } :
+			                              VkOffset3D{ 0, 0, 0 };
+			const VkExtent3D extent = a_box ? VkExtent3D{ a_box->right - a_box->left, a_box->bottom - a_box->top, a_box->back - a_box->front } : MipExtent(shape, mip);
+			if (!extent.width || !extent.height || !extent.depth)
+				return;
+			const uint32_t rows = shape.Rows(extent.height);
+			const uint32_t rowBytes = shape.RowBytes(extent.width);
+			const uint32_t rowPitch = (rowBytes + 255u) & ~255u;
+			const auto writeRows = [&](std::byte* a_base) {
+				for (uint32_t z = 0; z < extent.depth; ++z)
+					for (uint32_t row = 0; row < rows; ++row)
+						std::memcpy(a_base + (uint64_t(z) * rows + row) * rowPitch, static_cast<const std::byte*>(a_data) + size_t(z) * a_depthPitch + size_t(row) * a_rowPitch,
+							rowBytes);
+			};
+			if (record->kind == NativeResource::Kind::Staging) {
+				// The CPU writes the staging memory itself, row by row at the region's place.
+				if (!g_device->immediate.Wait(record->lastUse.load(std::memory_order_acquire)))
+					return;
+				void* data = nullptr;
+				record->resource->Map(&data);
+				if (!data)
+					return;
+				const auto& entry = record->layout[a_subresource];
+				const uint32_t block = shape.BlockSize();
+				for (uint32_t z = 0; z < extent.depth; ++z)
+					for (uint32_t row = 0; row < rows; ++row)
+						std::memcpy(static_cast<std::byte*>(data) + entry.offset + uint64_t(at.z + z) * entry.depthPitch + uint64_t(at.y / block + row) * entry.rowPitch +
+										uint64_t(at.x / block) * shape.blockBytes,
+							static_cast<const std::byte*>(a_data) + size_t(z) * a_depthPitch + size_t(row) * a_rowPitch, rowBytes);
+				record->resource->Unmap(0, record->size);
+				return;
+			}
+			auto upload = g_device->MakeUpload(uint64_t(rowPitch) * rows * extent.depth);
+			if (!upload)
+				return;
+			void* data = nullptr;
+			upload->resource->Map(&data);
+			if (!data)
+				return;
+			writeRows(static_cast<std::byte*>(data));
+			upload->resource->Unmap(0, upload->size);
+			g_device->immediate.Run(
+				[&](const Immediate::Vulkan& a_vk, VkCommandBuffer a_commands) {
+					VkBufferImageCopy copy{};
+					copy.bufferRowLength = rowPitch / shape.blockBytes * shape.BlockSize();
+					copy.bufferImageHeight = rows * shape.BlockSize();
+					copy.imageSubresource = { shape.copyAspect, mip, a_subresource / shape.mips, 1 };
+					copy.imageOffset = at;
+					copy.imageExtent = extent;
+					a_vk.copyBufferToImage(a_commands, upload->vkBuffer, record->image.image, VK_IMAGE_LAYOUT_GENERAL, 1, &copy);
+				},
+				{ upload, record }, { record.get() });
+		}
+
+		void ContextCopySubresourceRegion(ID3D11Resource* a_destination, UINT a_destinationSub, UINT a_x, UINT a_y, UINT a_z, ID3D11Resource* a_source,
+			UINT a_sourceSub, const D3D11_BOX* a_box)
+		{
+			const auto destination = Resolve(a_destination);
+			const auto source = Resolve(a_source);
+			if (!destination || !source) {
+				static std::atomic_flag logged;
+				Unknown(logged, "CopySubresourceRegion", destination ? static_cast<const void*>(a_source) : a_destination);
+				return;
+			}
+			bool recorded = false;
+			g_device->immediate.Run(
+				[&](const Immediate::Vulkan& a_vk, VkCommandBuffer a_commands) {
+					recorded = RecordCopy(a_vk, a_commands, *destination, a_destinationSub,
+						{ static_cast<int32_t>(a_x), static_cast<int32_t>(a_y), static_cast<int32_t>(a_z) }, *source, a_sourceSub, a_box);
+				},
+				{ destination, source }, { destination.get(), source.get() });
+			if (!recorded) {
+				static std::atomic_flag logged;
+				if (!logged.test_and_set())
+					logger::warn("[ORG native] CopySubresourceRegion from \"{}\" to \"{}\" is not a copy native mode makes (logged once)", source->name, destination->name);
+			}
+		}
+
+		void ContextCopyResource(ID3D11Resource* a_destination, ID3D11Resource* a_source)
+		{
+			const auto destination = Resolve(a_destination);
+			const auto source = Resolve(a_source);
+			if (!destination || !source) {
+				static std::atomic_flag logged;
+				Unknown(logged, "CopyResource", destination ? static_cast<const void*>(a_source) : a_destination);
+				return;
+			}
+			bool recorded = true;
+			g_device->immediate.Run(
+				[&](const Immediate::Vulkan& a_vk, VkCommandBuffer a_commands) {
+					if (destination->kind == NativeResource::Kind::Buffer || source->kind == NativeResource::Kind::Buffer) {
+						recorded = RecordCopy(a_vk, a_commands, *destination, 0, {}, *source, 0, nullptr);
+						return;
+					}
+					const uint32_t count = (std::min)(destination->shape.Subresources(), source->shape.Subresources());
+					for (uint32_t sub = 0; sub < count; ++sub)
+						recorded = RecordCopy(a_vk, a_commands, *destination, sub, {}, *source, sub, nullptr) && recorded;
+				},
+				{ destination, source }, { destination.get(), source.get() });
+			if (!recorded) {
+				static std::atomic_flag logged;
+				if (!logged.test_and_set())
+					logger::warn("[ORG native] CopyResource from \"{}\" to \"{}\" is not a copy native mode makes (logged once)", source->name, destination->name);
+			}
+		}
+
+		void ContextGenerateMips(ID3D11ShaderResourceView* a_view)
+		{
+			const auto record = Resolve(a_view);
+			if (!record || record->kind != NativeResource::Kind::Image) {
+				static std::atomic_flag logged;
+				Unknown(logged, "GenerateMips", a_view);
+				return;
+			}
+			const Shape& shape = record->shape;
+			if (shape.mips < 2 || shape.aspects != VK_IMAGE_ASPECT_COLOR_BIT)
+				return;
+			g_device->immediate.Run(
+				[&](const Immediate::Vulkan& a_vk, VkCommandBuffer a_commands) {
+					// Each mip from the one above it, linearly filtered; a barrier between, since each level reads the last one written.
+					for (uint32_t mip = 1; mip < shape.mips; ++mip) {
+						VkImageBlit blit{};
+						blit.srcSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, mip - 1, 0, shape.layers };
+						blit.srcOffsets[1] = { static_cast<int32_t>(shape.Width(mip - 1)), static_cast<int32_t>(shape.Height(mip - 1)), static_cast<int32_t>(shape.Depth(mip - 1)) };
+						blit.dstSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, mip, 0, shape.layers };
+						blit.dstOffsets[1] = { static_cast<int32_t>(shape.Width(mip)), static_cast<int32_t>(shape.Height(mip)), static_cast<int32_t>(shape.Depth(mip)) };
+						a_vk.blitImage(a_commands, record->image.image, VK_IMAGE_LAYOUT_GENERAL, record->image.image, VK_IMAGE_LAYOUT_GENERAL, 1, &blit, VK_FILTER_LINEAR);
+						VkMemoryBarrier2 memory{ VK_STRUCTURE_TYPE_MEMORY_BARRIER_2 };
+						memory.srcStageMask = VK_PIPELINE_STAGE_2_BLIT_BIT;
+						memory.srcAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT;
+						memory.dstStageMask = VK_PIPELINE_STAGE_2_BLIT_BIT;
+						memory.dstAccessMask = VK_ACCESS_2_TRANSFER_READ_BIT;
+						VkDependencyInfo dependency{ VK_STRUCTURE_TYPE_DEPENDENCY_INFO };
+						dependency.memoryBarrierCount = 1;
+						dependency.pMemoryBarriers = &memory;
+						a_vk.barrier(a_commands, &dependency);
+					}
+				},
+				{ record }, { record.get() });
+		}
+
+		/** @brief The image subresources a render target, depth-stencil or unordered access view covers. */
+		template <class ViewDesc>
+		VkImageSubresourceRange ViewRange(const ViewDesc& a_desc, const Shape& a_shape, VkImageAspectFlags a_aspects)
+		{
+			VkImageSubresourceRange range{ a_aspects, 0, 1, 0, a_shape.layers };
+			// Render target and unordered access views number BUFFER 1 and the textures from 2; depth-stencil views have no buffer.
+			// Shifted, all three number TEXTURE1D 1, TEXTURE1DARRAY 2, TEXTURE2D 3, TEXTURE2DARRAY 4.
+			int dimension = static_cast<int>(a_desc.ViewDimension);
+			if constexpr (!std::is_same_v<ViewDesc, D3D11_DEPTH_STENCIL_VIEW_DESC>)
+				--dimension;
+			switch (dimension) {
+			case 1:  // TEXTURE1D
+				range.baseMipLevel = a_desc.Texture1D.MipSlice;
+				range.layerCount = 1;
+				break;
+			case 2:  // TEXTURE1DARRAY
+				range.baseMipLevel = a_desc.Texture1DArray.MipSlice;
+				range.baseArrayLayer = a_desc.Texture1DArray.FirstArraySlice;
+				range.layerCount = a_desc.Texture1DArray.ArraySize;
+				break;
+			case 3:  // TEXTURE2D
+				range.baseMipLevel = a_desc.Texture2D.MipSlice;
+				range.layerCount = 1;
+				break;
+			case 4:  // TEXTURE2DARRAY
+				range.baseMipLevel = a_desc.Texture2DArray.MipSlice;
+				range.baseArrayLayer = a_desc.Texture2DArray.FirstArraySlice;
+				range.layerCount = a_desc.Texture2DArray.ArraySize;
+				break;
+			default:  // a 3D view, or one native mode does not narrow: the whole first mip
+				break;
+			}
+			range.layerCount = (std::min)(range.layerCount, a_shape.layers - (std::min)(range.baseArrayLayer, a_shape.layers));
+			return range;
+		}
+
+		void ClearColor(const std::shared_ptr<NativeResource>& a_record, const VkImageSubresourceRange& a_range, const VkClearColorValue& a_value)
+		{
+			g_device->immediate.Run(
+				[&](const Immediate::Vulkan& a_vk, VkCommandBuffer a_commands) {
+					a_vk.clearColorImage(a_commands, a_record->image.image, VK_IMAGE_LAYOUT_GENERAL, &a_value, 1, &a_range);
+				},
+				{ a_record }, { a_record.get() });
+		}
+
+		void ContextClearRenderTargetView(ID3D11RenderTargetView* a_view, const FLOAT a_color[4])
+		{
+			const auto record = Resolve(a_view);
+			if (!record || record->kind != NativeResource::Kind::Image || !a_color) {
+				static std::atomic_flag logged;
+				Unknown(logged, "ClearRenderTargetView", a_view);
+				return;
+			}
+			D3D11_RENDER_TARGET_VIEW_DESC desc{};
+			a_view->GetDesc(&desc);
+			VkClearColorValue value{};
+			std::memcpy(value.float32, a_color, sizeof(value.float32));
+			ClearColor(record, ViewRange(desc, record->shape, VK_IMAGE_ASPECT_COLOR_BIT), value);
+		}
+
+		/** @brief A buffer UAV's byte range: its elements times their size (structured stride, 4 for raw, the format's for typed). */
+		bool UavBytes(const NativeResource& a_record, const D3D11_UNORDERED_ACCESS_VIEW_DESC& a_desc, VkDeviceSize& a_offset, VkDeviceSize& a_size)
+		{
+			if (a_desc.ViewDimension != D3D11_UAV_DIMENSION_BUFFER)
+				return false;
+			uint32_t element = 4;
+			if (a_desc.Format == DXGI_FORMAT_UNKNOWN)
+				element = (std::max)(a_record.bufferDesc.StructureByteStride, 4u);
+			else if (!(a_desc.Buffer.Flags & D3D11_BUFFER_UAV_FLAG_RAW))
+				element = (std::max)(rhi::helpers::BytesPerBlock(rhi::helpers::ToRHI(a_desc.Format)), 4u);
+			a_offset = VkDeviceSize(a_desc.Buffer.FirstElement) * element;
+			a_size = VkDeviceSize(a_desc.Buffer.NumElements) * element;
+			if (a_offset >= a_record.size)
+				return false;
+			a_size = (std::min)(a_size, a_record.size - a_offset) & ~VkDeviceSize(3);
+			return a_size != 0;
+		}
+
+		/** @brief A UAV clear: an image's subresources with a_value, or a buffer's range filled with a_word (vkCmdFillBuffer's one word). */
+		void ClearUnorderedAccess(ID3D11UnorderedAccessView* a_view, const VkClearColorValue& a_value, uint32_t a_word, const char* a_operation)
+		{
+			const auto record = Resolve(a_view);
+			if (!record) {
+				static std::atomic_flag logged;
+				Unknown(logged, a_operation, a_view);
+				return;
+			}
+			D3D11_UNORDERED_ACCESS_VIEW_DESC desc{};
+			a_view->GetDesc(&desc);
+			if (record->kind == NativeResource::Kind::Image) {
+				ClearColor(record, ViewRange(desc, record->shape, VK_IMAGE_ASPECT_COLOR_BIT), a_value);
+				return;
+			}
+			VkDeviceSize offset = 0, size = 0;
+			if (record->kind != NativeResource::Kind::Buffer || !UavBytes(*record, desc, offset, size))
+				return;
+			g_device->immediate.Run(
+				[&](const Immediate::Vulkan& a_vk, VkCommandBuffer a_commands) { a_vk.fillBuffer(a_commands, record->vkBuffer, offset, size, a_word); },
+				{ record }, { record.get() });
+		}
+
+		void ContextClearUnorderedAccessViewUint(ID3D11UnorderedAccessView* a_view, const UINT a_values[4])
+		{
+			if (!a_values)
+				return;
+			VkClearColorValue value{};
+			std::memcpy(value.uint32, a_values, sizeof(value.uint32));
+			ClearUnorderedAccess(a_view, value, a_values[0], "ClearUnorderedAccessViewUint");
+		}
+
+		void ContextClearUnorderedAccessViewFloat(ID3D11UnorderedAccessView* a_view, const FLOAT a_values[4])
+		{
+			if (!a_values)
+				return;
+			VkClearColorValue value{};
+			std::memcpy(value.float32, a_values, sizeof(value.float32));
+			uint32_t word = 0;
+			std::memcpy(&word, &a_values[0], sizeof(word));
+			ClearUnorderedAccess(a_view, value, word, "ClearUnorderedAccessViewFloat");
+		}
+
+		void ContextClearDepthStencilView(ID3D11DepthStencilView* a_view, UINT a_flags, FLOAT a_depth, UINT8 a_stencil)
+		{
+			const auto record = Resolve(a_view);
+			if (!record || record->kind != NativeResource::Kind::Image) {
+				static std::atomic_flag logged;
+				Unknown(logged, "ClearDepthStencilView", a_view);
+				return;
+			}
+			VkImageAspectFlags aspects = 0;
+			if (a_flags & D3D11_CLEAR_DEPTH)
+				aspects |= VK_IMAGE_ASPECT_DEPTH_BIT;
+			if (a_flags & D3D11_CLEAR_STENCIL)
+				aspects |= VK_IMAGE_ASPECT_STENCIL_BIT;
+			aspects &= record->shape.aspects;
+			if (!aspects)
+				return;
+			D3D11_DEPTH_STENCIL_VIEW_DESC desc{};
+			a_view->GetDesc(&desc);
+			const VkImageSubresourceRange range = ViewRange(desc, record->shape, aspects);
+			const VkClearDepthStencilValue value{ a_depth, a_stencil };
+			g_device->immediate.Run(
+				[&](const Immediate::Vulkan& a_vk, VkCommandBuffer a_commands) {
+					a_vk.clearDepthStencilImage(a_commands, record->image.image, VK_IMAGE_LAYOUT_GENERAL, &value, 1, &range);
+				},
+				{ record }, { record.get() });
+		}
+
+		/**
+		 * @brief The context's ID3DUserDefinedAnnotation: State's debugger events. Native mode has no D3D11 capture to show them in,
+		 * so it reports no tool attached and records nothing (the graph labels its own passes).
+		 */
+		class Annotation final : public ID3DUserDefinedAnnotation
+		{
+		public:
+			HRESULT STDMETHODCALLTYPE QueryInterface(REFIID a_riid, void** a_out) override
+			{
+				if (!a_out)
+					return E_POINTER;
+				if (a_riid == __uuidof(IUnknown) || a_riid == __uuidof(ID3DUserDefinedAnnotation)) {
+					AddRef();
+					*a_out = static_cast<ID3DUserDefinedAnnotation*>(this);
+					return S_OK;
+				}
+				*a_out = nullptr;
+				return E_NOINTERFACE;
+			}
+			ULONG STDMETHODCALLTYPE AddRef() override { return ++refs; }
+			ULONG STDMETHODCALLTYPE Release() override
+			{
+				const ULONG left = --refs;
+				if (!left)
+					delete this;
+				return left;
+			}
+			INT STDMETHODCALLTYPE BeginEvent(LPCWSTR) override { return ++depth; }
+			INT STDMETHODCALLTYPE EndEvent() override { return depth > 0 ? --depth : -1; }
+			void STDMETHODCALLTYPE SetMarker(LPCWSTR) override {}
+			BOOL STDMETHODCALLTYPE GetStatus() override { return FALSE; }
+
+		private:
+			std::atomic<ULONG> refs{ 1 };
+			std::atomic<INT> depth{ 0 };
+		};
+
+		HRESULT ContextQueryInterface(REFIID a_riid, void** a_out)
+		{
+			if (!a_out)
+				return E_POINTER;
+			*a_out = nullptr;
+			if (a_riid != __uuidof(ID3DUserDefinedAnnotation))
+				return E_NOINTERFACE;
+			static Annotation* s_annotation = new Annotation();  // kept for the process, as the context is
+			return s_annotation->QueryInterface(a_riid, a_out);
+		}
 	}
 
 	bool Active()
@@ -1030,6 +2020,8 @@ namespace RenderGraph::Engine::Native
 		state->graphics = state->Rhi().GetQueue(rhi::QueueKind::Graphics);
 		if (!state->oneShot.Init(state->Rhi()))
 			Fail("the native device", "its command lists or timeline for resource creation could not be made");
+		if (!state->immediate.Init(state->Rhi()))
+			Fail("the native device", "the context's command lists, timeline or Vulkan entry points could not be made");
 
 		// The swap chain on the game's window. Native mode never takes exclusive fullscreen.
 		state->window = a_desc->OutputWindow;
@@ -1071,6 +2063,20 @@ namespace RenderGraph::Engine::Native
 		services.getBuffer = &SwapChainGetBuffer;
 		services.resizeBuffers = &SwapChainResizeBuffers;
 		services.getDesc = &SwapChainGetDesc;
+		services.getContainingOutput = &SwapChainGetContainingOutput;
+		services.checkFeatureSupport = &CheckFeatureSupport;
+		services.checkFormatSupport = &CheckFormatSupport;
+		services.map = &ContextMap;
+		services.unmap = &ContextUnmap;
+		services.updateSubresource = &ContextUpdateSubresource;
+		services.copyResource = &ContextCopyResource;
+		services.copySubresourceRegion = &ContextCopySubresourceRegion;
+		services.generateMips = &ContextGenerateMips;
+		services.clearRenderTargetView = &ContextClearRenderTargetView;
+		services.clearUnorderedAccessViewUint = &ContextClearUnorderedAccessViewUint;
+		services.clearUnorderedAccessViewFloat = &ContextClearUnorderedAccessViewFloat;
+		services.clearDepthStencilView = &ContextClearDepthStencilView;
+		services.queryContext = &ContextQueryInterface;
 		Tripwire::SetNativeServices(services);
 		state->dxgiDevice.attach(new DxgiDevice());
 
@@ -1104,7 +2110,7 @@ namespace RenderGraph::Engine::Native
 				return false;
 		}
 		const auto* record = static_cast<const NativeResource*>(owner.get());
-		if (!record->isImage)
+		if (record->kind != NativeResource::Kind::Image)
 			return false;
 		a_info = {};
 		a_info.version = DXVK_ORG_INTEROP_VERSION;

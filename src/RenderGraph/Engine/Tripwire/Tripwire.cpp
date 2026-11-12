@@ -1,8 +1,12 @@
 #include "RenderGraph/Engine/Tripwire/TripwireHandles.h"
 
+#include <d3d11_4.h>
+#include <dxgi1_6.h>
+
 #include "RenderGraph/Engine/Tripwire/TripwireSelfTest.h"
 #include "RenderGraph/Switches.h"
 #include "Utils/D3D.h"
+#include "RenderGraph/Engine/Native/Native.h"
 
 #if defined(CS_HAS_RENDER_GRAPH)
 #	include "RenderGraph/RenderGraphRuntime.h"
@@ -449,6 +453,22 @@ namespace RenderGraph::Engine::Tripwire
 		return set;
 	}
 
+	namespace
+	{
+		/**
+		 * @brief Later versions of the device, context and swap chain interfaces. A native handle implements only the first version,
+		 * and every caller CS has checks for a refusal (GrassOptimizations, EngineConstants, HDRDisplay), so native mode refuses them
+		 * without a tripwire line.
+		 */
+		bool IsNativeUpgradeIid(REFIID a_riid)
+		{
+			static const IID kIids[] = { __uuidof(ID3D11Device1), __uuidof(ID3D11Device2), __uuidof(ID3D11Device3), __uuidof(ID3D11Device4),
+				__uuidof(ID3D11Device5), __uuidof(ID3D11DeviceContext1), __uuidof(ID3D11DeviceContext2), __uuidof(ID3D11DeviceContext3),
+				__uuidof(ID3D11DeviceContext4), __uuidof(IDXGISwapChain1), __uuidof(IDXGISwapChain2), __uuidof(IDXGISwapChain3), __uuidof(IDXGISwapChain4) };
+			return std::find(std::begin(kIids), std::end(kIids), a_riid) != std::end(kIids);
+		}
+	}
+
 	namespace Detail
 	{
 		std::atomic<ContextFilter> contextFilter{ nullptr };
@@ -665,7 +685,7 @@ namespace RenderGraph::Engine::Tripwire
 			}
 			// Another D3D11 object interface: the real object refuses it too, so this is no tripwire. (The engine's texture save
 			// helper asks GetType first, then for the matching texture interface.)
-			if (IsOtherObjectIid(a_riid)) {
+			if (IsOtherObjectIid(a_riid) || (!a_core.wrapped && NativeServicesInstalled() && IsNativeUpgradeIid(a_riid))) {
 				*a_out = nullptr;
 				return E_NOINTERFACE;
 			}
@@ -1289,7 +1309,154 @@ namespace RenderGraph::Engine::Tripwire
 		return E_FAIL;
 	}
 
+	HRESULT STDMETHODCALLTYPE SwapChainHandle::GetContainingOutput(IDXGIOutput** a_out)
+	{
+		TW_SWAP_CHAIN_SITE(GetContainingOutput);
+		if (twNative && twNative->getContainingOutput)
+			return twNative->getContainingOutput(a_out);
+		if (core.Enter(twSlot, "GetContainingOutput", twCaller))
+			return static_cast<IDXGISwapChain*>(core.wrapped)->GetContainingOutput(a_out);
+		Detail::Zero(a_out);
+		return E_FAIL;
+	}
+
 #undef TW_SWAP_CHAIN_SITE
+
+	HRESULT STDMETHODCALLTYPE DeviceHandle::CheckFeatureSupport(D3D11_FEATURE a_feature, void* a_data, UINT a_size)
+	{
+		void* const twCaller = _ReturnAddress();
+		if (const auto* native = NativeOf(core); native && native->checkFeatureSupport)
+			return native->checkFeatureSupport(a_feature, a_data, a_size);
+		if (core.Enter(static_cast<std::uint16_t>(Slot::CheckFeatureSupport), "CheckFeatureSupport", twCaller))
+			return static_cast<ID3D11Device*>(core.wrapped)->CheckFeatureSupport(a_feature, a_data, a_size);
+		Detail::ZeroBytes(a_data, a_size);
+		return E_FAIL;
+	}
+
+	HRESULT STDMETHODCALLTYPE DeviceHandle::CheckFormatSupport(DXGI_FORMAT a_format, UINT* a_support)
+	{
+		void* const twCaller = _ReturnAddress();
+		if (const auto* native = NativeOf(core); native && native->checkFormatSupport)
+			return native->checkFormatSupport(a_format, a_support);
+		if (core.Enter(static_cast<std::uint16_t>(Slot::CheckFormatSupport), "CheckFormatSupport", twCaller))
+			return static_cast<ID3D11Device*>(core.wrapped)->CheckFormatSupport(a_format, a_support);
+		Detail::Zero(a_support);
+		return E_FAIL;
+	}
+
+	// The context's resource methods in both modes. TW_CONTEXT_SITE starts one like TW_DEVICE_SITE. A guest handle forwards
+	// through Enter, so its filter sees the real caller as with every generated method.
+#define TW_CONTEXT_SITE(Name)                                                                                                    \
+	void* const twCaller = _ReturnAddress();                                                                                     \
+	[[maybe_unused]] const Detail::CallSite twSite{ &core, static_cast<std::uint16_t>(Slot::Name), #Name, twCaller };           \
+	const NativeServices* const twNative = NativeOf(core)
+#define TW_CONTEXT_FORWARD(Name, ...)                                                    \
+	if (core.Enter(static_cast<std::uint16_t>(Slot::Name), #Name, twCaller))            \
+		return static_cast<ID3D11DeviceContext*>(core.wrapped)->Name(__VA_ARGS__)
+
+	HRESULT STDMETHODCALLTYPE DeviceContextHandle::QueryInterface(REFIID a_riid, void** a_out)
+	{
+		if (const auto* native = NativeOf(core); native && native->queryContext && a_out && a_riid == __uuidof(ID3DUserDefinedAnnotation))
+			return native->queryContext(a_riid, a_out);
+		return Detail::QueryInterface(core, static_cast<ID3D11DeviceContext*>(this), kIids, a_riid, a_out, _ReturnAddress());
+	}
+
+	HRESULT STDMETHODCALLTYPE DeviceContextHandle::Map(ID3D11Resource* a_resource, UINT a_subresource, D3D11_MAP a_type, UINT a_flags,
+		D3D11_MAPPED_SUBRESOURCE* a_out)
+	{
+		TW_CONTEXT_SITE(Map);
+		if (twNative && twNative->map)
+			return twNative->map(a_resource, a_subresource, a_type, a_flags, a_out);
+		TW_CONTEXT_FORWARD(Map, Detail::UnwrapAt(a_resource, twSite), a_subresource, a_type, a_flags, a_out);
+		Detail::Zero(a_out);
+		return E_FAIL;
+	}
+
+	void STDMETHODCALLTYPE DeviceContextHandle::Unmap(ID3D11Resource* a_resource, UINT a_subresource)
+	{
+		TW_CONTEXT_SITE(Unmap);
+		if (twNative && twNative->unmap)
+			return twNative->unmap(a_resource, a_subresource);
+		TW_CONTEXT_FORWARD(Unmap, Detail::UnwrapAt(a_resource, twSite), a_subresource);
+	}
+
+	void STDMETHODCALLTYPE DeviceContextHandle::UpdateSubresource(ID3D11Resource* a_resource, UINT a_subresource, const D3D11_BOX* a_box, const void* a_data,
+		UINT a_rowPitch, UINT a_depthPitch)
+	{
+		TW_CONTEXT_SITE(UpdateSubresource);
+		if (twNative && twNative->updateSubresource)
+			return twNative->updateSubresource(a_resource, a_subresource, a_box, a_data, a_rowPitch, a_depthPitch);
+		TW_CONTEXT_FORWARD(UpdateSubresource, Detail::UnwrapAt(a_resource, twSite), a_subresource, a_box, a_data, a_rowPitch, a_depthPitch);
+	}
+
+	void STDMETHODCALLTYPE DeviceContextHandle::CopyResource(ID3D11Resource* a_destination, ID3D11Resource* a_source)
+	{
+		TW_CONTEXT_SITE(CopyResource);
+		if (twNative && twNative->copyResource)
+			return twNative->copyResource(a_destination, a_source);
+		TW_CONTEXT_FORWARD(CopyResource, Detail::UnwrapAt(a_destination, twSite), Detail::UnwrapAt(a_source, twSite));
+	}
+
+	void STDMETHODCALLTYPE DeviceContextHandle::CopySubresourceRegion(ID3D11Resource* a_destination, UINT a_destinationSubresource, UINT a_x, UINT a_y, UINT a_z,
+		ID3D11Resource* a_source, UINT a_sourceSubresource, const D3D11_BOX* a_box)
+	{
+		TW_CONTEXT_SITE(CopySubresourceRegion);
+		if (twNative && twNative->copySubresourceRegion)
+			return twNative->copySubresourceRegion(a_destination, a_destinationSubresource, a_x, a_y, a_z, a_source, a_sourceSubresource, a_box);
+		TW_CONTEXT_FORWARD(CopySubresourceRegion, Detail::UnwrapAt(a_destination, twSite), a_destinationSubresource, a_x, a_y, a_z,
+			Detail::UnwrapAt(a_source, twSite), a_sourceSubresource, a_box);
+	}
+
+	void STDMETHODCALLTYPE DeviceContextHandle::GenerateMips(ID3D11ShaderResourceView* a_view)
+	{
+		TW_CONTEXT_SITE(GenerateMips);
+		if (twNative && twNative->generateMips)
+			return twNative->generateMips(a_view);
+		TW_CONTEXT_FORWARD(GenerateMips, Detail::UnwrapAt(a_view, twSite));
+	}
+
+	void STDMETHODCALLTYPE DeviceContextHandle::ClearRenderTargetView(ID3D11RenderTargetView* a_view, const FLOAT a_color[4])
+	{
+		TW_CONTEXT_SITE(ClearRenderTargetView);
+		if (twNative && twNative->clearRenderTargetView)
+			return twNative->clearRenderTargetView(a_view, a_color);
+		TW_CONTEXT_FORWARD(ClearRenderTargetView, Detail::UnwrapAt(a_view, twSite), a_color);
+	}
+
+	void STDMETHODCALLTYPE DeviceContextHandle::ClearUnorderedAccessViewUint(ID3D11UnorderedAccessView* a_view, const UINT a_values[4])
+	{
+		TW_CONTEXT_SITE(ClearUnorderedAccessViewUint);
+		if (twNative && twNative->clearUnorderedAccessViewUint)
+			return twNative->clearUnorderedAccessViewUint(a_view, a_values);
+		TW_CONTEXT_FORWARD(ClearUnorderedAccessViewUint, Detail::UnwrapAt(a_view, twSite), a_values);
+	}
+
+	void STDMETHODCALLTYPE DeviceContextHandle::ClearUnorderedAccessViewFloat(ID3D11UnorderedAccessView* a_view, const FLOAT a_values[4])
+	{
+		TW_CONTEXT_SITE(ClearUnorderedAccessViewFloat);
+		if (twNative && twNative->clearUnorderedAccessViewFloat)
+			return twNative->clearUnorderedAccessViewFloat(a_view, a_values);
+		TW_CONTEXT_FORWARD(ClearUnorderedAccessViewFloat, Detail::UnwrapAt(a_view, twSite), a_values);
+	}
+
+	void STDMETHODCALLTYPE DeviceContextHandle::ClearDepthStencilView(ID3D11DepthStencilView* a_view, UINT a_flags, FLOAT a_depth, UINT8 a_stencil)
+	{
+		TW_CONTEXT_SITE(ClearDepthStencilView);
+		if (twNative && twNative->clearDepthStencilView)
+			return twNative->clearDepthStencilView(a_view, a_flags, a_depth, a_stencil);
+		TW_CONTEXT_FORWARD(ClearDepthStencilView, Detail::UnwrapAt(a_view, twSite), a_flags, a_depth, a_stencil);
+	}
+
+	void STDMETHODCALLTYPE DeviceContextHandle::Flush()
+	{
+		TW_CONTEXT_SITE(Flush);
+		if (twNative)
+			return;
+		TW_CONTEXT_FORWARD(Flush);
+	}
+
+#undef TW_CONTEXT_FORWARD
+#undef TW_CONTEXT_SITE
 
 	void STDMETHODCALLTYPE DeviceContextHandle::GetDevice(ID3D11Device** a_out)
 	{
@@ -1390,6 +1557,9 @@ namespace RenderGraph::Engine::Tripwire
 		if (!core)
 			return a_object;
 		if (!core->wrapped) {
+			// Native mode has no D3D11 below the handles: the handle is the object every caller talks to.
+			if (Native::Active())
+				return a_object;
 			// A native handle handed to D3D11: D3D11 gets null rather than an object it would cast to its own class.
 			static std::array<std::atomic<bool>, kKinds> warned{};
 			if (!warned[static_cast<std::size_t>(core->kind)].exchange(true))

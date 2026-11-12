@@ -312,6 +312,33 @@ namespace RenderGraph::Engine::Tripwire
 		HRESULT (*getBuffer)(UINT a_buffer, REFIID a_riid, void** a_out) = nullptr;
 		HRESULT (*resizeBuffers)(UINT a_count, UINT a_width, UINT a_height, DXGI_FORMAT a_format, UINT a_flags) = nullptr;
 		HRESULT (*getDesc)(DXGI_SWAP_CHAIN_DESC* a_out) = nullptr;
+		HRESULT (*getContainingOutput)(IDXGIOutput** a_out) = nullptr;
+		/** @} */
+		/** @name The device's queries. */
+		/** @{ */
+		HRESULT (*checkFeatureSupport)(D3D11_FEATURE a_feature, void* a_data, UINT a_size) = nullptr;
+		HRESULT (*checkFormatSupport)(DXGI_FORMAT a_format, UINT* a_support) = nullptr;
+		/** @} */
+		/**
+		 * @name The immediate context: the work D3D11 code does on resources outside draws. Each runs as its own command work on the
+		 * graphics queue, in the order the calls are made, between the graph's epochs. A resource the native device did not make is
+		 * logged and left alone.
+		 */
+		/** @{ */
+		HRESULT (*map)(ID3D11Resource* a_resource, UINT a_subresource, D3D11_MAP a_type, UINT a_flags, D3D11_MAPPED_SUBRESOURCE* a_out) = nullptr;
+		void (*unmap)(ID3D11Resource* a_resource, UINT a_subresource) = nullptr;
+		void (*updateSubresource)(ID3D11Resource* a_resource, UINT a_subresource, const D3D11_BOX* a_box, const void* a_data, UINT a_rowPitch,
+			UINT a_depthPitch) = nullptr;
+		void (*copyResource)(ID3D11Resource* a_destination, ID3D11Resource* a_source) = nullptr;
+		void (*copySubresourceRegion)(ID3D11Resource* a_destination, UINT a_destinationSubresource, UINT a_x, UINT a_y, UINT a_z, ID3D11Resource* a_source,
+			UINT a_sourceSubresource, const D3D11_BOX* a_box) = nullptr;
+		void (*generateMips)(ID3D11ShaderResourceView* a_view) = nullptr;
+		void (*clearRenderTargetView)(ID3D11RenderTargetView* a_view, const FLOAT a_color[4]) = nullptr;
+		void (*clearUnorderedAccessViewUint)(ID3D11UnorderedAccessView* a_view, const UINT a_values[4]) = nullptr;
+		void (*clearUnorderedAccessViewFloat)(ID3D11UnorderedAccessView* a_view, const FLOAT a_values[4]) = nullptr;
+		void (*clearDepthStencilView)(ID3D11DepthStencilView* a_view, UINT a_flags, FLOAT a_depth, UINT8 a_stencil) = nullptr;
+		/** @brief The context's QueryInterface for ID3DUserDefinedAnnotation. */
+		HRESULT (*queryContext)(REFIID a_riid, void** a_out) = nullptr;
 		/** @} */
 	};
 
