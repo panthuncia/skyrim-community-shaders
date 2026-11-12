@@ -1124,6 +1124,15 @@ A native device handle answers through the native services instead of failing:
     BasicRHI image or buffer (the image moved into GENERAL, uploaded or zeroed), so `GraphResources::ExportTexture`, the
     engine targets, textures, buffers and texture streaming work as they do on DXVK. A port's handle that wraps a native
     handle reaches the same record.
+-   **Binds**: the native context stores what D3D11 code binds (shaders, shader resources, constant buffers, samplers, compute
+    UAVs, render targets and depth, blend, depth-stencil and rasterizer states, viewports, scissors, input layout, topology,
+    vertex and index buffers) and its getters answer it, so readers such as DCLF's main-pass capture (`OMGetRenderTargets`)
+    work. A bind the flush latch drops is not stored, as it never reaches DXVK in guest mode. `ClearState` clears them.
+-   **State descriptions** are stored as D3D11 and DXVK store them: blend targets copied from the first without independent
+    blending and given the default factors when blending is off, depth and stencil defaults when those are off, valid sampler
+    addresses and anisotropy. GetDesc then answers what the pipeline conversions expect.
+-   **Buffers in imports**: `DescribeResource` describes a native buffer as DXVK would (its Vulkan buffer, size and device
+    address), and a shader resource view of a native image with its own mips, slices and depth aspect.
 -   **Private data**: a native handle keeps `SetPrivateDataInterface` objects and answers `GetPrivateData` for them, so
     `AttachGraphResource` and the pipeline descriptions' tokens work; other GUIDs answer `DXGI_ERROR_NOT_FOUND`.
 -   **Context queries**: `End` marks the context's work submitted so far, and `GetData` answers `S_FALSE` until it is done on

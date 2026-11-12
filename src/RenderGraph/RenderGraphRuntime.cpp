@@ -2680,6 +2680,12 @@ void RenderGraphRuntime::SealPresented()
 {
 	if (impl && impl->host)
 		impl->host->SealSubmitted();
+	// Native mode, while it is brought up: the host's runs in flight every 600 presents, so a run that never retires shows early.
+	if (impl && impl->native && impl->host) {
+		static std::uint64_t s_presents = 0;
+		if (++s_presents % 600 == 0)
+			logger::info("[ORG native] host state after {} presents: {}", s_presents, impl->host->DescribeAsyncState());
+	}
 	// The build point of the frames Drawcall Limit Fix does not run: a client waiting to join an anchor's graph is built here.
 	FrameAnchors::OnFrameEnd();
 }
@@ -3063,6 +3069,9 @@ RenderGraphRuntime::EpochResult RenderGraphRuntime::TryExecuteEpoch(Segment a_se
 			(void)impl->FlushPendingSubmits(Impl::SegmentLabel(a_segment));
 		// A failed graph must not take the game down: callers fall back to D3D11.
 		logger::error("[ORG] Render graph epoch failed, disabling the graph: {}", e.what());
+		// What the host held when it failed: its runs in flight, what each waits for, and the timelines (read racily, for the report).
+		if (impl->host)
+			logger::error("[ORG] host state at the failure: {}", impl->host->DescribeAsyncState());
 		impl->faulted = true;
 		disabledReason = e.what();
 		return EpochResult::Stopped;

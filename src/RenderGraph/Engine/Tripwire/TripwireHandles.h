@@ -517,12 +517,135 @@ namespace RenderGraph::Engine::Tripwire
 		void STDMETHODCALLTYPE Begin(ID3D11Asynchronous* a_query) override;
 		void STDMETHODCALLTYPE End(ID3D11Asynchronous* a_query) override;
 		HRESULT STDMETHODCALLTYPE GetData(ID3D11Asynchronous* a_query, void* a_data, UINT a_size, UINT a_flags) override;
+		/** @name Binds: in native mode a setter stores what it binds (unless the flush latch drops it) and a getter answers it. */
+		/** @{ */
+		void STDMETHODCALLTYPE VSSetShaderResources(UINT a_start, UINT a_count, ID3D11ShaderResourceView* const* a_items) override;
+		void STDMETHODCALLTYPE VSGetShaderResources(UINT a_start, UINT a_count, ID3D11ShaderResourceView** a_out) override;
+		void STDMETHODCALLTYPE PSSetShaderResources(UINT a_start, UINT a_count, ID3D11ShaderResourceView* const* a_items) override;
+		void STDMETHODCALLTYPE PSGetShaderResources(UINT a_start, UINT a_count, ID3D11ShaderResourceView** a_out) override;
+		void STDMETHODCALLTYPE CSSetShaderResources(UINT a_start, UINT a_count, ID3D11ShaderResourceView* const* a_items) override;
+		void STDMETHODCALLTYPE CSGetShaderResources(UINT a_start, UINT a_count, ID3D11ShaderResourceView** a_out) override;
+		void STDMETHODCALLTYPE VSSetConstantBuffers(UINT a_start, UINT a_count, ID3D11Buffer* const* a_items) override;
+		void STDMETHODCALLTYPE VSGetConstantBuffers(UINT a_start, UINT a_count, ID3D11Buffer** a_out) override;
+		void STDMETHODCALLTYPE PSSetConstantBuffers(UINT a_start, UINT a_count, ID3D11Buffer* const* a_items) override;
+		void STDMETHODCALLTYPE PSGetConstantBuffers(UINT a_start, UINT a_count, ID3D11Buffer** a_out) override;
+		void STDMETHODCALLTYPE CSSetConstantBuffers(UINT a_start, UINT a_count, ID3D11Buffer* const* a_items) override;
+		void STDMETHODCALLTYPE CSGetConstantBuffers(UINT a_start, UINT a_count, ID3D11Buffer** a_out) override;
+		void STDMETHODCALLTYPE VSSetSamplers(UINT a_start, UINT a_count, ID3D11SamplerState* const* a_items) override;
+		void STDMETHODCALLTYPE VSGetSamplers(UINT a_start, UINT a_count, ID3D11SamplerState** a_out) override;
+		void STDMETHODCALLTYPE PSSetSamplers(UINT a_start, UINT a_count, ID3D11SamplerState* const* a_items) override;
+		void STDMETHODCALLTYPE PSGetSamplers(UINT a_start, UINT a_count, ID3D11SamplerState** a_out) override;
+		void STDMETHODCALLTYPE CSSetSamplers(UINT a_start, UINT a_count, ID3D11SamplerState* const* a_items) override;
+		void STDMETHODCALLTYPE CSGetSamplers(UINT a_start, UINT a_count, ID3D11SamplerState** a_out) override;
+		void STDMETHODCALLTYPE VSSetShader(ID3D11VertexShader* a_shader, ID3D11ClassInstance* const* a_instances, UINT a_instanceCount) override;
+		void STDMETHODCALLTYPE VSGetShader(ID3D11VertexShader** a_out, ID3D11ClassInstance** a_instances, UINT* a_instanceCount) override;
+		void STDMETHODCALLTYPE PSSetShader(ID3D11PixelShader* a_shader, ID3D11ClassInstance* const* a_instances, UINT a_instanceCount) override;
+		void STDMETHODCALLTYPE PSGetShader(ID3D11PixelShader** a_out, ID3D11ClassInstance** a_instances, UINT* a_instanceCount) override;
+		void STDMETHODCALLTYPE CSSetShader(ID3D11ComputeShader* a_shader, ID3D11ClassInstance* const* a_instances, UINT a_instanceCount) override;
+		void STDMETHODCALLTYPE CSGetShader(ID3D11ComputeShader** a_out, ID3D11ClassInstance** a_instances, UINT* a_instanceCount) override;
+		void STDMETHODCALLTYPE CSSetUnorderedAccessViews(UINT a_start, UINT a_count, ID3D11UnorderedAccessView* const* a_views, const UINT* a_initialCounts) override;
+		void STDMETHODCALLTYPE CSGetUnorderedAccessViews(UINT a_start, UINT a_count, ID3D11UnorderedAccessView** a_out) override;
+		void STDMETHODCALLTYPE OMSetRenderTargets(UINT a_count, ID3D11RenderTargetView* const* a_views, ID3D11DepthStencilView* a_depth) override;
+		void STDMETHODCALLTYPE OMGetRenderTargets(UINT a_count, ID3D11RenderTargetView** a_views, ID3D11DepthStencilView** a_depth) override;
+		void STDMETHODCALLTYPE OMSetBlendState(ID3D11BlendState* a_state, const FLOAT a_factor[4], UINT a_sampleMask) override;
+		void STDMETHODCALLTYPE OMGetBlendState(ID3D11BlendState** a_state, FLOAT a_factor[4], UINT* a_sampleMask) override;
+		void STDMETHODCALLTYPE OMSetDepthStencilState(ID3D11DepthStencilState* a_state, UINT a_stencilRef) override;
+		void STDMETHODCALLTYPE OMGetDepthStencilState(ID3D11DepthStencilState** a_state, UINT* a_stencilRef) override;
+		void STDMETHODCALLTYPE RSSetState(ID3D11RasterizerState* a_state) override;
+		void STDMETHODCALLTYPE RSGetState(ID3D11RasterizerState** a_state) override;
+		void STDMETHODCALLTYPE RSSetViewports(UINT a_count, const D3D11_VIEWPORT* a_viewports) override;
+		void STDMETHODCALLTYPE RSGetViewports(UINT* a_count, D3D11_VIEWPORT* a_viewports) override;
+		void STDMETHODCALLTYPE RSSetScissorRects(UINT a_count, const D3D11_RECT* a_rects) override;
+		void STDMETHODCALLTYPE RSGetScissorRects(UINT* a_count, D3D11_RECT* a_rects) override;
+		void STDMETHODCALLTYPE IASetInputLayout(ID3D11InputLayout* a_layout) override;
+		void STDMETHODCALLTYPE IAGetInputLayout(ID3D11InputLayout** a_layout) override;
+		void STDMETHODCALLTYPE IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY a_topology) override;
+		void STDMETHODCALLTYPE IAGetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY* a_topology) override;
+		void STDMETHODCALLTYPE IASetVertexBuffers(UINT a_start, UINT a_count, ID3D11Buffer* const* a_buffers, const UINT* a_strides, const UINT* a_offsets) override;
+		void STDMETHODCALLTYPE IAGetVertexBuffers(UINT a_start, UINT a_count, ID3D11Buffer** a_buffers, UINT* a_strides, UINT* a_offsets) override;
+		void STDMETHODCALLTYPE IASetIndexBuffer(ID3D11Buffer* a_buffer, DXGI_FORMAT a_format, UINT a_offset) override;
+		void STDMETHODCALLTYPE IAGetIndexBuffer(ID3D11Buffer** a_buffer, DXGI_FORMAT* a_format, UINT* a_offset) override;
+		void STDMETHODCALLTYPE ClearState() override;
+		/** @} */
 		/** @brief Native mode: nothing to send on (every native operation is submitted when it is made), so it succeeds silently. */
 		void STDMETHODCALLTYPE Flush() override;
 		/** @} */
 
 		/** @brief The paired device, no reference held (the device holds this context): cleared by the device's destructor. */
 		std::atomic<ID3D11Device*> device{ nullptr };
+
+		/**
+		 * @brief Native mode: what D3D11 code bound, for the readers that ask the context (DCLF's main-pass capture, the ports that
+		 * save and restore state). Nothing draws with it: the ports read the engine's state from the shadow state and these.
+		 */
+		struct NativeBindings
+		{
+			struct Stage
+			{
+				std::array<winrt::com_ptr<ID3D11ShaderResourceView>, D3D11_COMMONSHADER_INPUT_RESOURCE_SLOT_COUNT> srvs;
+				std::array<winrt::com_ptr<ID3D11Buffer>, D3D11_COMMONSHADER_CONSTANT_BUFFER_API_SLOT_COUNT> cbs;
+				std::array<winrt::com_ptr<ID3D11SamplerState>, D3D11_COMMONSHADER_SAMPLER_SLOT_COUNT> samplers;
+			};
+			std::mutex lock;
+			Stage vs, ps, cs;
+			winrt::com_ptr<ID3D11VertexShader> vsShader;
+			winrt::com_ptr<ID3D11PixelShader> psShader;
+			winrt::com_ptr<ID3D11ComputeShader> csShader;
+			std::array<winrt::com_ptr<ID3D11UnorderedAccessView>, D3D11_1_UAV_SLOT_COUNT> csUavs;
+			std::array<winrt::com_ptr<ID3D11RenderTargetView>, D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT> rtvs;
+			winrt::com_ptr<ID3D11DepthStencilView> dsv;
+			winrt::com_ptr<ID3D11BlendState> blend;
+			std::array<FLOAT, 4> blendFactor{ 1.0f, 1.0f, 1.0f, 1.0f };
+			UINT sampleMask = 0xffffffffu;
+			winrt::com_ptr<ID3D11DepthStencilState> depthStencil;
+			UINT stencilRef = 0;
+			winrt::com_ptr<ID3D11RasterizerState> rasterizer;
+			std::array<D3D11_VIEWPORT, D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE> viewports{};
+			UINT viewportCount = 0;
+			std::array<D3D11_RECT, D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE> scissors{};
+			UINT scissorCount = 0;
+			winrt::com_ptr<ID3D11InputLayout> inputLayout;
+			D3D11_PRIMITIVE_TOPOLOGY topology = D3D11_PRIMITIVE_TOPOLOGY_UNDEFINED;
+			std::array<winrt::com_ptr<ID3D11Buffer>, D3D11_IA_VERTEX_INPUT_RESOURCE_SLOT_COUNT> vertexBuffers;
+			std::array<UINT, D3D11_IA_VERTEX_INPUT_RESOURCE_SLOT_COUNT> strides{};
+			std::array<UINT, D3D11_IA_VERTEX_INPUT_RESOURCE_SLOT_COUNT> offsets{};
+			winrt::com_ptr<ID3D11Buffer> indexBuffer;
+			DXGI_FORMAT indexFormat = DXGI_FORMAT_UNKNOWN;
+			UINT indexOffset = 0;
+
+			/** @brief ClearState: nothing bound, the default states. */
+			void Reset();
+		};
+		NativeBindings bindings;
+
+	private:
+		/** @brief A native setter's bind is kept unless the flush latch drops it (the context filter, as for the guest context). */
+		static bool NativeBindAllowed(std::uint16_t a_slot, void* a_caller)
+		{
+			const auto filter = Detail::contextFilter.load(std::memory_order_acquire);
+			return !filter || filter(a_slot, a_caller);
+		}
+
+		template <class T, std::size_t N>
+		void Store(std::array<winrt::com_ptr<T>, N>& a_slots, UINT a_start, UINT a_count, T* const* a_items)
+		{
+			std::lock_guard guard(bindings.lock);
+			for (UINT i = 0; i < a_count && a_start + i < N; ++i)
+				a_slots[a_start + i].copy_from(a_items ? a_items[i] : nullptr);
+		}
+
+		template <class T, std::size_t N>
+		void Load(const std::array<winrt::com_ptr<T>, N>& a_slots, UINT a_start, UINT a_count, T** a_out)
+		{
+			if (!a_out)
+				return;
+			std::lock_guard guard(bindings.lock);
+			for (UINT i = 0; i < a_count; ++i) {
+				a_out[i] = nullptr;
+				if (a_start + i < N && a_slots[a_start + i])
+					a_slots[a_start + i].copy_to(&a_out[i]);
+			}
+		}
 	};
 
 	/**
