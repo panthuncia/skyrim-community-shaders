@@ -2,6 +2,7 @@
 // SetupShadow, SetupView), each versioned buffer registered with the scene's set (its extent, growth policy and contents), the
 // scene's draw bound and the main latch the revision code keeps.
 #include "Features/DrawcallLimitFix/Core/Render/Internal.h"
+#include "Features/DrawcallLimitFix/Diagnostics/RefTrace.h"
 #include "RenderGraph/BufferRefs.h"
 
 #include "Features/DrawcallLimitFix/Core/Extensions/DepthPyramid.h"
@@ -442,7 +443,8 @@ namespace DCLF
 		a_state.preprocessMain = PreprocessStates::Create(a_device, "the main segment");
 		// The forward epoch records in its own epoch, so it needs its own state lists.
 		a_state.preprocessForward = PreprocessStates::Create(a_device, "the forward epoch");
-		a_state.buildDraws = ComputeProgram::Load(a_device, { .source = kBuildDrawsShader, .constantWords = kBuildDrawsConstantWords });
+		// CS_DCLF_REF_TRACE: the main build records its refs too.
+		a_state.buildDraws = ComputeProgram::Load(a_device, { .source = kBuildDrawsShader, .constantWords = kBuildDrawsConstantWords, .defines = ::DCLF::Diagnostics::RefTrace::ComputeDefines(2) });
 		if (!a_state.buildDraws)
 			return NotReady(7, "the BuildDraws program could not be created");
 		a_state.clearPortalQueries = ComputeProgram::Load(a_device, { .source = kBuildDrawsShader, .entry = L"ClearPortalQueries", .constantWords = kBuildDrawsConstantWords });

@@ -15,6 +15,7 @@
 #include <fstream>
 #include <map>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <vector>
 
@@ -60,7 +61,8 @@ namespace DCLF::Diagnostics::RefTrace
 				std::ifstream file(it->path());
 				std::string text;
 				for (std::uint32_t line = 1; std::getline(file, text); ++line) {
-					if ((text.find("DeviceLoad(") == std::string::npos && text.find("DeviceStore(") == std::string::npos && text.find("DEVICE_REF_TRACE_ZERO_INDEX(") == std::string::npos) ||
+					if ((text.find("DeviceLoad(") == std::string::npos && text.find("DeviceStore(") == std::string::npos && text.find("DEVICE_REF_TRACE_ZERO_INDEX(") == std::string::npos &&
+							text.find("DEVICE_REF_TRACE_VALUE(") == std::string::npos) ||
 						text.find("#") != std::string::npos)
 						continue;
 					auto& entry = sites[line];
@@ -69,10 +71,13 @@ namespace DCLF::Diagnostics::RefTrace
 			}
 		}
 
-		const char* StageName(std::uint32_t a_stage) { return a_stage == 0 ? "VS" : a_stage == 1 ? "PS" : "other stage"; }
+		const char* StageName(std::uint32_t a_stage)
+		{
+			return a_stage == 0 ? "VS" : a_stage == 1 ? "PS" : a_stage == 2 ? "BuildDrawsCS" : "TextureTransformsCS";
+		}
 		const char* KindName(std::uint32_t a_kind)
 		{
-			return a_kind == 1 ? "NULL ref" : a_kind == 2 ? "ODD slot" : a_kind == 3 ? "ZERO descriptor index (register, row offset)" : "ref";
+			return a_kind == 1 ? "NULL ref" : a_kind == 2 ? "ODD slot" : a_kind == 3 ? "ZERO descriptor index (register, row offset)" : a_kind == 4 ? "value" : "ref";
 		}
 	}
 
@@ -157,5 +162,35 @@ namespace DCLF::Diagnostics::RefTrace
 			return;
 		logger::info("[DCLF] ref trace: {} sites, {} of them null or odd ({} hits); stage requests traced {}, untraced (before the table) {}", entries, nullEntries,
 			nullHits, traced.load(std::memory_order_relaxed), untraced.load(std::memory_order_relaxed));
+	}
+
+	std::vector<std::pair<std::wstring, std::wstring>> ComputeDefines(std::uint32_t a_stage)
+	{
+		if (!On())
+			return {};
+		Ensure();
+		const std::uint32_t traceSlot = Slot();
+		NoteRequest(traceSlot != 0);
+		if (traceSlot == 0)
+			return {};
+		return { { L"DEVICE_REF_TRACE", std::to_wstring(traceSlot) }, { L"DEVICE_REF_TRACE_STAGE", std::to_wstring(a_stage) } };
+	}
+
+	void NoteChanged(std::string_view a_what, std::string a_text)
+	{
+		if (!On())
+			return;
+		static std::mutex mutex;
+		static std::map<std::string, std::pair<std::string, std::uint32_t>, std::less<>> last;
+		const std::scoped_lock lock(mutex);
+		auto it = last.find(a_what);
+		if (it == last.end())
+			it = last.emplace(std::string(a_what), std::pair<std::string, std::uint32_t>{}).first;
+		auto& [text, times] = it->second;
+		if (text == a_text || times >= 16)
+			return;
+		++times;
+		logger::info("[DCLF] ref trace: {} ({} of 16): {}", a_what, times, a_text);
+		text = std::move(a_text);
 	}
 }

@@ -47,6 +47,8 @@ static const uint kThreads = 64 * 32;
 {
 	ByteAddressBuffer latch = ResourceDescriptorHeap[LatchIndex];
 	const uint transformsIndex = latch.Load(LatchOffset + kLatchStageWord);
+	// CS_DCLF_REF_TRACE: the pass ran, with this stage word, in this phase.
+	DEVICE_REF_TRACE_VALUE(uint2(transformsIndex, Phase));
 	if (transformsIndex == 0)
 		return;  // no producer this frame (and no copy: the draws read the installed rows)
 	const DeviceRef base = latch.Load2(LatchOffset + kLatchMaterialRowsRef);
@@ -56,6 +58,8 @@ static const uint kThreads = 64 * 32;
 	StructuredBuffer<TextureTransformRow> transforms = ResourceDescriptorHeap[transformsIndex];
 	const uint count = transforms[0].RowOffset;
 	const uint animated = transforms[0].Mask;
+	// CS_DCLF_REF_TRACE: the entries and animated rows the header counts.
+	DEVICE_REF_TRACE_VALUE(uint2(count, animated));
 	if (Phase == 0) {
 		// Each animated row whole, a 16-byte word a thread.
 		const uint kWords = kMaterialRowBytes / 16;

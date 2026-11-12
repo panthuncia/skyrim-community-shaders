@@ -3,6 +3,8 @@
 #include "Features/DrawcallLimitFix/Core/Render/Internal.h"
 #include "Features/DrawcallLimitFix/Core/Render/Resources/FrameRecords.h"
 #include "RenderGraph/BufferRefs.h"
+#include "Features/DrawcallLimitFix/Core/Settings/Switches.h"
+#include "Features/DrawcallLimitFix/Diagnostics/RefTrace.h"
 #include "RenderGraph/Engine/Flush/Flush.h"
 
 #include "Features/DrawcallLimitFix/Core/Extensions/Commits.h"
@@ -114,6 +116,17 @@ namespace DCLF::Draws
 		const auto animatedRows = PassAnimatedRows();
 		backing(kBackingAnimatedRows, animatedRows.ref, animatedRows.address, std::uint64_t(animatedRows.count) * kMaterialRowBytes);
 		backing(kBackingShadowRows, shadowRows.ref, shadowRows.address, shadowRows.units * sizeof(ShadowMaterialRow));
+		// CS_DCLF_REF_TRACE: which buffer each backing slot is, logged when it changes.
+		if (materialRows.ref && SwitchEnabled(Switch::RefTrace)) {
+			static constexpr const char* kNames[kRecordBackings] = { "frame constants", "pipeline rows", "material rows", "animated copy", "shadow rows" };
+			std::string text;
+			for (std::uint32_t i = 0; i < kRecordBackings; ++i) {
+				const auto& entry = a_record.backings[i];
+				text += fmt::format("{}{} slot {} offset {} VA 0x{:x} bytes {}", i ? "; " : "", kNames[i], entry.ref.viewSlot, entry.ref.byteOffset, entry.address, entry.bytes);
+			}
+			// Keyed by the constants' buffer: the main and shadow records each change on their own.
+			::DCLF::Diagnostics::RefTrace::NoteChanged(fmt::format("record backings (constants slot {})", a_constantsRef.viewSlot), std::move(text));
+		}
 	}
 
 	void ZeroSharedLightOnce(CommitUploads& a_uploads, const std::shared_ptr<org::Buffer>& a_target, bool& a_zeroed)

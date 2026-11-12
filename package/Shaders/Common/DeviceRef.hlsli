@@ -46,7 +46,8 @@ RWByteAddressBuffer DeviceRefRWBuffer(DeviceRef a_ref)
 // CS_DCLF_REF_TRACE (DCLF's RefTrace.cpp): DEVICE_REF_TRACE is the trace buffer's view slot. Each load or store site (its line) records
 // the refs it uses into the buffer's table, which the CPU logs as "ref trace:" lines. An entry is four words: the key (the line, the
 // stage, the kind), the first ref seen (two words), the hit count. The kinds: 0 a ref with a slot, 1 a null ref, 2 an odd slot (a UAV
-// slot read as a ref), 3 a descriptor index of 0 read from a row (DEVICE_REF_TRACE_ZERO_INDEX).
+// slot read as a ref), 3 a descriptor index of 0 read from a row (DEVICE_REF_TRACE_ZERO_INDEX), 4 two words a site notes
+// (DEVICE_REF_TRACE_VALUE). A compute program gives its stage with DEVICE_REF_TRACE_STAGE (2 BuildDraws, 3 the texture transforms).
 // Only sampled lanes record, one a wave: a stage's main sets DeviceRefTraceLane (DEVICE_REF_TRACE_SAMPLE).
 static const uint kDeviceRefTraceEntries = 1024;
 static bool DeviceRefTraceLane = true;
@@ -54,6 +55,8 @@ static bool DeviceRefTraceLane = true;
 static const uint kDeviceRefTraceStage = 1;
 #		elif defined(VSHADER)
 static const uint kDeviceRefTraceStage = 0;
+#		elif defined(DEVICE_REF_TRACE_STAGE)
+static const uint kDeviceRefTraceStage = DEVICE_REF_TRACE_STAGE;
 #		else
 static const uint kDeviceRefTraceStage = 2;
 #		endif
@@ -84,11 +87,14 @@ DeviceRef DeviceRefTraced(DeviceRef a_ref, uint a_line, uint a_store)
 }
 // A descriptor index read from a row that is 0 (kind 3: no texture or sampler), with what names it (a register, an offset).
 #		define DEVICE_REF_TRACE_ZERO_INDEX(a_index, a_what) 			if ((a_index) == 0u)                             			DeviceRefTraceNote(a_what, __LINE__, 0, 3)
+// Two words the site notes (kind 4), the first seen kept.
+#		define DEVICE_REF_TRACE_VALUE(a_words) DeviceRefTraceNote(a_words, __LINE__, 0, 4)
 #		define DEVICE_REF_TRACE_SAMPLE(a_value) DeviceRefTraceLane = ((a_value) & 63u) == 0u
 #		define DeviceLoad(T, a_ref, ...) DeviceRefBuffer(DeviceRefTraced(a_ref, __LINE__, 0)).Load<T>((a_ref).y)
 #		define DeviceStore(T, a_ref, a_value, ...) DeviceRefRWBuffer(DeviceRefTraced(a_ref, __LINE__, 1)).Store<T>((a_ref).y, a_value)
 #	else
 #		define DEVICE_REF_TRACE_SAMPLE(a_value)
+#		define DEVICE_REF_TRACE_VALUE(a_words)
 #		define DEVICE_REF_TRACE_ZERO_INDEX(a_index, a_what)
 #		define DeviceLoad(T, a_ref, ...) DeviceRefBuffer(a_ref).Load<T>((a_ref).y)
 #		define DeviceStore(T, a_ref, a_value, ...) DeviceRefRWBuffer(a_ref).Store<T>((a_ref).y, a_value)

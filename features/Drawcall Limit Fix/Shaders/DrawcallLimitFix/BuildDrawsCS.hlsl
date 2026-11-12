@@ -871,9 +871,13 @@ uint2 MaterialRowAddress(uint a_materialSlot)
 	// (a shadow or occlusion view's rows, whose header is not a material row's, or a frame without one): the installed row.
 	ByteAddressBuffer latch = ResourceDescriptorHeap[LatchIndex];
 	const uint2 copyRows = latch.Load2(LatchOffset + 348);
+	// CS_DCLF_REF_TRACE: the copy's address (low word) and the installed rows' ref slot.
+	DEVICE_REF_TRACE_VALUE(uint2(copyRows.x, MaterialRowsRef.x));
 	if ((copyRows.x | copyRows.y) == 0)
 		return installed;
 	const uint animatedRow = DeviceLoad(uint, DeviceRefAdd(MaterialRowsRef, a_materialSlot * MaterialRowStride + 768), 4);
+	// CS_DCLF_REF_TRACE: a slot and the copy's row its header names.
+	DEVICE_REF_TRACE_VALUE(uint2(a_materialSlot, animatedRow));
 	if (animatedRow == 0xFFFFFFFFu)
 		return installed;
 	return AddressOf(copyRows.x, copyRows.y, animatedRow * 1024);  // kMaterialRowBytes

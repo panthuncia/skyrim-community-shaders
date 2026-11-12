@@ -8,6 +8,7 @@
 #include "Features/DrawcallLimitFix/Core/Extensions/PassContext.h"
 #include "Features/DrawcallLimitFix/Core/Render/Epochs/GraphConditions.h"
 #include "Features/DrawcallLimitFix/Core/Render/Revision/Shapes.h"
+#include "Features/DrawcallLimitFix/Diagnostics/RefTrace.h"
 
 #include "RenderGraph/ComputeProgram.h"
 #include "RenderGraph/RenderGraphRuntime.h"
@@ -86,6 +87,10 @@ namespace DCLF::Draws
 			TextureTransformsPrepared prepared{};
 			// Where the depth build runs: its commit wrote the latch (the payload's rows, the pool's entries) in the frame slot.
 			const auto frame = CurrentFrame(a_preparation, segment);
+			// CS_DCLF_REF_TRACE: whether the pass records, and why not.
+			::DCLF::Diagnostics::RefTrace::NoteChanged("texture transforms pass",
+				fmt::format("program {}, frame {}, latch {}, builds draws {}, outer barriers {}", program != nullptr, frame != nullptr, frame && frame->latch,
+					BuildsDraws(a_preparation, *resources, segment), outerBarriers));
 			if (!program || !frame || !frame->latch || !BuildsDraws(a_preparation, *resources, segment))
 				return prepared;
 			prepared.program = program;
@@ -137,7 +142,7 @@ namespace DCLF::Features::TextureTransforms
 		// The scene's GPU setup: the program (the scene lane no longer writes the transforms into records).
 		std::shared_ptr<const void> Setup(const Api::PassSetup& a_setup)
 		{
-			auto program = ComputeProgram::Load(a_setup.device, { .source = Draws::kShader, .constantWords = Draws::kConstantWords });
+			auto program = ComputeProgram::Load(a_setup.device, { .source = Draws::kShader, .constantWords = Draws::kConstantWords, .defines = ::DCLF::Diagnostics::RefTrace::ComputeDefines(3) });
 			if (!program)
 				logger::warn("[DCLF] The texture transforms program could not be created; DCLF's draws keep their materials' captured TexcoordOffset");
 			// Without it nothing writes the frame's copy: no latch names it (the draws read the installed rows).
