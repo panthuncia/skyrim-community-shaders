@@ -1,6 +1,6 @@
 #pragma once
 
-// The master particle systems (CS_DCLF_MASTER_PARTICLES, default off; dclf-roadmap.md 1.4): torches, candles and street mist
+// The master particle systems (CS_DCLF_MASTER_PARTICLES, default on; dclf-roadmap.md 1.4): torches, candles and street mist
 // (MPSTorchFire01.nif, MPSCandleFlame01.nif, MPSMistStreet01.nif, ...) drawn by DCLF's particle path. The particle manager
 // (BSParticleSystemManager, ShadowSceneNode child 5) holds each BSMasterParticleSystem in its child array without being its parent.
 // The masters are DCLF's unheld roots (Api::UnheldRootsContribution): category roots filed under themselves, held by key alone,

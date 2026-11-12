@@ -35,7 +35,7 @@ namespace DCLF::Features::Particles
 			ParticleSnapshots::Get().Install(a_context);
 			// Their palette rows: the members' blocks and placements, from the snapshots, every frame.
 			RegisterRows(a_context);
-			// The particle manager's master particle systems (CS_DCLF_MASTER_PARTICLES, default off): its unheld roots, their particle
+			// The particle manager's master particle systems (CS_DCLF_MASTER_PARTICLES, default on): its unheld roots, their particle
 			// systems this feature's like any other.
 			MasterParticles::Install(a_context);
 			RegisterReport(a_context);
