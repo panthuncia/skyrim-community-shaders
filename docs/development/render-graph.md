@@ -1107,15 +1107,30 @@ Each stage logs one `[ORG native] stage <n>: <name>: ...` line, so a start that 
 A native device handle answers through the native services instead of failing:
 
 -   **Textures** (1D, 2D, 3D): a BasicRHI image, its initial data uploaded through a one-shot copy on the graphics queue, and
-    left in GENERAL (the graph's Common home state). Typeless formats are made in the format their binding implies.
-    STAGING, DYNAMIC, CPU-access and multisampled textures are not built: logged once, `E_NOTIMPL`.
--   **Buffers**: a BasicRHI buffer, in upload memory when it has contents or CPU access, else device-local.
+    left in GENERAL (the graph's Common home state). Typeless formats are made in the format their binding implies. A
+    STAGING texture is a buffer in readback or upload memory, each subresource at a 512-byte offset with 256-byte rows. A
+    DYNAMIC texture is an image plus such an upload buffer, which Map hands out and Unmap copies in. Multisampled textures
+    are not built (logged once, `E_NOTIMPL`).
+-   **Buffers**: a BasicRHI buffer, in readback memory with CPU read access, in upload memory when it has contents or other
+    CPU access, else device-local.
+-   **The context's resource work**: `Map`/`Unmap` (buffers and staging textures in host memory; a read or a write waits only
+    for the context's own GPU work that last used the memory, `DO_NOT_WAIT` returns `DXGI_ERROR_WAS_STILL_DRAWING`,
+    `WRITE_NO_OVERWRITE` never waits), `UpdateSubresource`, `CopyResource`, `CopySubresourceRegion`, `GenerateMips` (a blit
+    chain), `ClearRenderTargetView`, `ClearDepthStencilView` and both UAV clears (an image clear, or `vkCmdFillBuffer` with
+    the first value on a buffer). Each is its own command list on the graphics queue, submitted when the call is made, with a
+    full memory barrier before and after: it lands between the graph epochs submitted before and after it, in the order D3D11
+    code calls them. Nothing waits for the GPU unless Map needs the memory. `Flush` does nothing.
+-   **Queries**: `CheckFormatSupport` and `CheckFeatureSupport` (threading, doubles, format support 1 and 2, the D3D10.x,
+    D3D11 and D3D9 options, architecture, min precision) answer from BasicRHI's format support. The context answers
+    `ID3DUserDefinedAnnotation` with an object that reports no capture tool. The later device, context and swap chain
+    interfaces (`ID3D11DeviceContext1`, `IDXGISwapChain3`, ...) are refused without a tripwire line; CS's callers check.
 -   **Views, shaders, input layouts, states, queries**: native handles that keep their description (and resource), which is
     what the ports read. A null view description gets D3D11's default for a 2D texture.
 -   **`IDXGIDevice1`**: `SetMaximumFrameLatency` goes to the swap chain; `GetAdapter` and `GetParent` answer the adapter
     the game chose.
 -   **The swap chain**: `GetBuffer(0)` is the back buffer (a native texture); `ResizeBuffers` resizes the swap chain and
     makes a new back buffer; `GetFullscreenState` says windowed, and `SetFullscreenState` and `ResizeTarget` change nothing.
+    `GetContainingOutput` is the game adapter's output on the window's monitor.
 
 Everything else on the device, and every context method, is a tripwire: logged once per call site, failed. A call from
 another plugin is an `[ORG native] <module> calls ...` error line ("Calling D3D11 in the DXVK-free build" in
@@ -1151,8 +1166,9 @@ left to the process exit (no DXVK teardown callback).
     engine's targets, file textures and geometry buffers are native textures and buffers instead (the native services),
     which the graph imports by their records. What reads them through the context (Map, UpdateSubresource, CopyResource,
     the binds the latch keeps) gets nothing.
--   **Context work.** Map/Unmap of dynamic buffers outside the dynamic ring port, `UpdateSubresource`, `CopyResource` and
-    every draw and dispatch still in the census do nothing.
+-   **Context work.** Draws, dispatches and binds still in the census do nothing. A DYNAMIC buffer is not renamed on
+    `WRITE_DISCARD`, because no native GPU work reads a buffer except the context's own copies; the graph does not import
+    native buffers yet. Copies of a depth-stencil image through staging memory carry the depth aspect only.
 -   **HDR**: HDR Display's output is not shown through the swap chain (no `SetFrameSource` in native mode), and the colour
     space is not switched.
 -   **Upscaling and frame generation**: off (stage 2).
