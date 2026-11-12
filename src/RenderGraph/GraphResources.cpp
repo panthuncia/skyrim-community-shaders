@@ -6,6 +6,7 @@
 #	include "RenderGraph/GraphResources.h"
 
 #	include "Globals.h"
+#	include "RenderGraph/Backend.h"
 #	include "RenderGraph/DxvkImageImport.h"
 #	include "RenderGraph/DxvkOrgInterop.h"
 #	include "RenderGraph/RenderGraphRuntime.h"
@@ -265,8 +266,29 @@ namespace GraphResources
 			graphDesc.hasDSV = a_desc.dsv != DXGI_FORMAT_UNKNOWN;
 			graphDesc.dsvFormat = imageFormat;
 			graphDesc.initialLayout = *home;
-			auto texture = org::ExternalTextureResource::CreateShared(std::move(image), graphDesc, *home == rhi::ResourceLayout::Common);
-			texture->SetName(a_name);
+			std::shared_ptr<org::ExternalTextureResource> texture;
+			if (*home == rhi::ResourceLayout::Common && !Backend::IsD3D12()) {
+				// Resting in GENERAL (native mode): the graph reads and renders it in GENERAL alone. That takes an import with
+				// simultaneous access, since BasicRHI renders its own images in the attachment layouts. The import does not own the
+				// image, so the graph texture keeps it: the import goes first, then the image.
+				struct Kept
+				{
+					rhi::ResourcePtr image;
+					std::shared_ptr<org::ExternalTextureResource> texture;
+				};
+				auto imported = RenderGraph::ImportDxvkTexture(runtime.Host()->Device(), info.image, graphDesc, a_name.c_str());
+				if (!imported) {
+					logger::error("[ORG] {}: not exported, the graph could not import it in GENERAL", a_name);
+					exported.d3d11 = nullptr;
+					runtime.ReleaseAfterD3D11(std::make_shared<rhi::ResourcePtr>(std::move(image)));
+					return {};
+				}
+				auto kept = std::make_shared<Kept>(Kept{ std::move(image), std::move(imported) });
+				texture = std::shared_ptr<org::ExternalTextureResource>(kept, kept->texture.get());
+			} else {
+				texture = org::ExternalTextureResource::CreateShared(std::move(image), graphDesc, *home == rhi::ResourceLayout::Common);
+				texture->SetName(a_name);
+			}
 			exported.graph = std::move(texture);
 			exported.image = reinterpret_cast<std::uint64_t>(info.image.image);
 			return exported;
