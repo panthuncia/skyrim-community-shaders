@@ -259,6 +259,10 @@ own binds always reach the driver. Details: "Hazard: bindings the driver keeps a
 
 - ORG's alias planner sized a texture with an authored mip chain as one mip, so placements overlapped (SSGI's working
   depth ran into its radiance). Placement now sizes textures from the description the backing creates them with.
+- Green streaks on near geometry (Whiterun bridge railings at noon) come from the SSGI graph path alone: with
+  `CS_ORG_SCREEN_SPACE_GI=1` off they are gone, every other port on. Not pinned statically. Green there is chroma
+  without luma: GI fades Y by depth but not CoCg, so wrong depth or a lost Y gives green. `CS_ORG_SSGI_DEBUG=<n>`
+  (render-graph.md, "Switches") isolates the part with one run per mode.
 - ORG's descriptor manager made 2D views of 3D textures, so Skylighting's probe update wrote almost nothing readers saw.
   3D textures now get Texture3D views.
 - A texture array's default view is its first slice: ports that read `Texture2DArray` (Skylighting's cascades, LLF's

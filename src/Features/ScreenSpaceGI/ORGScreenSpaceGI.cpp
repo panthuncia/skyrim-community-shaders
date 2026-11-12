@@ -78,6 +78,38 @@ namespace
 
 	static_assert(sizeof(ScreenSpaceGI::SSGICB) % 16 == 0);
 
+	/**
+	 * @brief CS_ORG_SSGI_DEBUG=<n>: a diagnostic that changes one thing about the graph path, to find which part of it goes wrong
+	 * with one run per mode. Unset or 0: off. Read once, logged at setup.
+	 */
+	enum class Debug : std::uint32_t
+	{
+		Off,
+		NoAliasing,    // 1: every transient texture is made a history one, so nothing is aliased
+		NoOutputs,     // 2: the chain runs, but the composite gets no SSGI (null inputs)
+		NoChain,       // 3: no dispatch runs (gates stay closed) and the outputs are cleared each run
+		ClearCoCg,     // 4: the CoCg output is cleared each run, after the chain (luma only)
+		ClearHistory,  // 5: every history texture is cleared each run, before the chain (no temporal reuse)
+		NoBlur,        // 6: the blur is off, whatever the setting
+		NoTemporal,    // 7: the temporal denoiser is off, whatever the setting
+		FullRes,       // 8: full resolution, whatever the setting (no upsample)
+		MainDepth,     // 9: the depth input is the engine's kMAIN, not the final depth copy
+		Count
+	};
+
+	constexpr std::array<const char*, static_cast<std::size_t>(Debug::Count)> kDebugNames{ "off", "no aliasing", "no outputs to the composite",
+		"no dispatches, outputs cleared", "CoCg output cleared", "history cleared each run", "blur off", "temporal denoiser off",
+		"full resolution", "depth from kMAIN" };
+
+	Debug DebugMode()
+	{
+		static const Debug mode = [] {
+			const auto value = Switches::Number("CS_ORG_SSGI_DEBUG", 0);
+			return value < static_cast<std::uint64_t>(Debug::Count) ? static_cast<Debug>(value) : Debug::Off;
+		}();
+		return mode;
+	}
+
 	/** @brief The settings the programs and the textures are made from: a change makes them again. */
 	struct Config
 	{
@@ -97,8 +129,23 @@ namespace
 		static Config Current()
 		{
 			const auto& settings = globals::features::screenSpaceGI.settings;
-			return { settings.ResolutionMode, settings.Enabled, settings.EnableGI, settings.EnableExperimentalSpecularGI,
+			Config config{ settings.ResolutionMode, settings.Enabled, settings.EnableGI, settings.EnableExperimentalSpecularGI,
 				settings.EnableTemporalDenoiser, settings.EnableBlur };
+			// CS_ORG_SSGI_DEBUG's setting overrides.
+			switch (DebugMode()) {
+			case Debug::NoBlur:
+				config.blur = false;
+				break;
+			case Debug::NoTemporal:
+				config.temporal = false;
+				break;
+			case Debug::FullRes:
+				config.resolutionMode = 0;
+				break;
+			default:
+				break;
+			}
+			return config;
 		}
 	};
 
@@ -260,7 +307,8 @@ namespace
 		auto& feature = globals::features::screenSpaceGI;
 		Inputs inputs;
 		// At DeferredPasses the D3D11 path reads Util::GetCurrentSceneDepthSRV(), which is the final depth copy by then.
-		inputs.depth = FrameAnchors::EngineDepth(RE::RENDER_TARGETS_DEPTHSTENCIL::kPOST_ZPREPASS_COPY);
+		inputs.depth = FrameAnchors::EngineDepth(DebugMode() == Debug::MainDepth ? RE::RENDER_TARGETS_DEPTHSTENCIL::kMAIN :
+		                                                                           RE::RENDER_TARGETS_DEPTHSTENCIL::kPOST_ZPREPASS_COPY);
 		if (globals::deferred)
 			inputs.main = FrameAnchors::EngineTarget(static_cast<std::uint32_t>(globals::deferred->forwardRenderTargets[0]));
 		inputs.normalRoughness = FrameAnchors::EngineTarget(static_cast<std::uint32_t>(NORMALROUGHNESS));
@@ -293,6 +341,8 @@ struct ORGScreenSpaceGI::Impl
 	/** @brief A texture of the chain, the size of the main target. */
 	Texture MakeTexture(DXGI_FORMAT a_format, UINT a_mips, const char* a_name, GraphResources::Lifetime a_lifetime, bool a_exported) const
 	{
+		if (DebugMode() == Debug::NoAliasing && a_lifetime == GraphResources::Lifetime::Transient)
+			a_lifetime = GraphResources::Lifetime::History;
 		D3D11_TEXTURE2D_DESC desc{
 			.Width = main.Width,
 			.Height = main.Height,
@@ -427,6 +477,19 @@ struct ORGScreenSpaceGI::Impl
 	bool RegisterChain()
 	{
 		AnchorPasses::Builder builder(FrameAnchors::Anchor::DeferredPasses, kClientId, kOrderFirstStep, latch, gate);
+		// CS_ORG_SSGI_DEBUG's clears: every run, not one-shot.
+		const auto clearEachRun = [&](const char* a_name, const Texture& a_texture) {
+			if (a_texture)
+				builder.Add(AnchorPasses::Clear{ .name = a_name, .target = a_texture->Graph() }, false);
+		};
+		if (DebugMode() == Debug::ClearHistory) {
+			clearEachRun("debug-clear-accum", state->accum);
+			clearEachRun("debug-clear-ao", state->ao);
+			clearEachRun("debug-clear-y", state->y);
+			clearEachRun("debug-clear-cocg", state->coCg);
+			clearEachRun("debug-clear-spec", state->spec);
+			clearEachRun("debug-clear-prev-geo", state->prevGeo);
+		}
 		for (std::uint32_t step = 0; step < kSteps; ++step) {
 			if (!state->programs[step])
 				continue;
@@ -442,6 +505,14 @@ struct ORGScreenSpaceGI::Impl
 				.target = state->accum->Graph(),
 				.width = state->accum->Desc().Width,
 				.height = state->accum->Desc().Height });
+		if (DebugMode() == Debug::NoChain) {
+			clearEachRun("debug-clear-out-ao", state->OutAo());
+			clearEachRun("debug-clear-out-y", state->OutY());
+			clearEachRun("debug-clear-out-cocg", state->OutCoCg());
+			clearEachRun("debug-clear-out-spec", state->OutSpec());
+		}
+		if (DebugMode() == Debug::ClearCoCg)
+			clearEachRun("debug-clear-out-cocg", state->OutCoCg());
 		if (builder.Failed()) {
 			logger::error("[ORG] Screen Space GI: {}", builder.Failure());
 			return false;
@@ -487,18 +558,24 @@ struct ORGScreenSpaceGI::Impl
 		auto& feature = globals::features::screenSpaceGI;
 		const auto constants = feature.BuildConstants({ static_cast<float>(state->ao->Desc().Width), static_cast<float>(state->ao->Desc().Height) });
 		latch->WriteValue(RenderGraphRuntime::Get().Host()->CurrentRun(), 0, constants);
-		const auto sizes = feature.GetDispatchSizes();
+		if (DebugMode() == Debug::NoChain)
+			return;
+		// The internal size from the built state's resolution mode, which the programs were made for (and the debug switch may
+		// override), as GetDispatchSizes gives it from the setting.
+		const auto full = feature.GetDispatchSizes().full;
+		const auto shift = static_cast<uint>(state->config.resolutionMode);
+		const std::array<uint, 2> internal{ full[0] >> shift, full[1] >> shift };
 		const auto open = [&](Step a_step, const std::array<uint, 2>& a_size, uint a_tile) {
 			if (state->programs[a_step])
 				gate->OpenDispatch(a_step, (a_size[0] + a_tile - 1) / a_tile, (a_size[1] + a_tile - 1) / a_tile);
 		};
-		open(kPrefilterDepths, sizes.full, 16);
-		open(kRadianceDisocc, sizes.internal, 8);
-		open(kPrefilterRadiance, sizes.internal, 16);
-		open(kPrefilterNormal, sizes.internal, 16);
-		open(kGi, sizes.internal, 8);
-		open(kBlur, sizes.internal, 8);
-		open(kUpsample, sizes.full, 8);
+		open(kPrefilterDepths, full, 16);
+		open(kRadianceDisocc, internal, 8);
+		open(kPrefilterRadiance, internal, 16);
+		open(kPrefilterNormal, internal, 16);
+		open(kGi, internal, 8);
+		open(kBlur, internal, 8);
+		open(kUpsample, full, 8);
 	}
 
 	/** @brief Takes both clients out of the anchor's graph. */
@@ -573,6 +650,9 @@ bool ORGScreenSpaceGI::Setup(const D3D11_TEXTURE2D_DESC& a_main, std::function<v
 		impl = std::move(next);
 		logger::info("[ORG] Screen Space GI runs on the render graph ({}x{}, resolution mode {}, blur {})", a_main.Width, a_main.Height,
 			impl->state->config.resolutionMode, impl->state->config.blur);
+		if (const auto mode = DebugMode(); mode != Debug::Off)
+			logger::warn("[ORG] Screen Space GI debug: CS_ORG_SSGI_DEBUG={} ({}); temporal {}, GI {}, specular {}", static_cast<std::uint32_t>(mode),
+				kDebugNames[static_cast<std::size_t>(mode)], impl->state->config.temporal, impl->state->config.gi, impl->state->config.specular);
 		return true;
 	} catch (const std::exception& e) {
 		logger::error("[ORG] Screen Space GI setup failed, staying on D3D11: {}", e.what());
@@ -652,7 +732,7 @@ bool ORGScreenSpaceGI::IsActive() const
 
 ORGScreenSpaceGI::Outputs ORGScreenSpaceGI::GetOutputs() const
 {
-	if (!IsActive() || !impl->state->config.enabled)
+	if (!IsActive() || !impl->state->config.enabled || DebugMode() == Debug::NoOutputs)
 		return {};
 	const auto& state = *impl->state;
 	const auto srv = [](const Texture& a_texture) { return a_texture ? a_texture->SRV() : nullptr; };
