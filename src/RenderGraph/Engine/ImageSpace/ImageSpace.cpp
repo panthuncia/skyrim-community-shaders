@@ -353,8 +353,8 @@ namespace RenderGraph::Engine::ImageSpace
 		 * composites, the SAO and reflection passes and the HDR effect have a second run for a batch cut short by a draw the graph
 		 * does not take. Effect scopes have one run per call: the depth-of-field (or distant blur) draw, its two compute blurs,
 		 * refraction, the radial blur, the snow copy, the water blend, the LDR downsample and the copies outside every scope (the
-		 * main frame's, the menus' and the end-of-frame chain's). The water's flow copies have a share of their own (one run per
-		 * copy: a cell load queues a few).
+		 * main frame's, the menus' and the end-of-frame chain's), and there the blur composites' and the get-hit effect's draws. The
+		 * water's flow copies have a share of their own (one run per copy: a cell load queues a few).
 		 */
 		constexpr std::array<std::uint32_t, static_cast<std::size_t>(ScopeKind::Count)> kScopeRuns{ 2, 2, 2, 2, 24, 4 };
 
