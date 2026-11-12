@@ -53,6 +53,19 @@ namespace DCLF
 	};
 	PublishedScene LatestPublishedScene();
 
+	/**
+	 * @brief Why a bound object waits to join the set (Coordinator::DecideSlot; SetStats::waitingBy's index), with a name for the logs.
+	 * kSetTransientWaits marks the reasons a load's objects settle from by themselves (a pipeline compiled, a texture imported, a buffer
+	 * grown): what a load's hold waits on (Core/Render/LoadHold.h). The rest wait on what a load does not bring: a decal's order, a layer's
+	 * partner, the reflection's last-commit rule, the refraction pipeline.
+	 */
+	inline constexpr std::size_t kSetWaitReasons = 14;
+	inline constexpr std::array<const char*, kSetWaitReasons> kSetWaitReasonNames{ "pipeline", "material", "shadow mask", "shared lookups", "geometry",
+		"decal slot", "layer partner", "shadow pipelines", "reflection pipeline", "constants", "scene buffers' growth", "refraction pipeline",
+		"past the scene buffers (shadow)", "shadow diffuse" };
+	inline constexpr std::uint32_t kSetTransientWaits = (1u << 0) | (1u << 1) | (1u << 2) | (1u << 3) | (1u << 4) | (1u << 7) | (1u << 9) | (1u << 10) |
+	                                                    (1u << 12) | (1u << 13);
+
 	struct ScenePublication
 	{
 		std::uint64_t sequence = 0;
@@ -68,6 +81,19 @@ namespace DCLF
 		std::shared_ptr<const void> retirementHold;
 		std::shared_ptr<const SetSnapshot> claims;
 		std::array<std::uint32_t, 3> lackingCount{};
+		// The waiting slots by the first reason of their wait (kSetWaitReasons), and whether its pass built the scene (no load was up):
+		// what a load's hold reads (Core/Render/LoadHold.h).
+		std::array<std::uint32_t, kSetWaitReasons> waiting{};
+		bool built = false;
+
+		/** @brief The waiting slots whose reason is transient (kSetTransientWaits). */
+		std::uint32_t TransientWaiting() const
+		{
+			std::uint32_t count = 0;
+			for (std::size_t why = 0; why < kSetWaitReasons; ++why)
+				count += (kSetTransientWaits >> why) & 1u ? waiting[why] : 0u;
+			return count;
+		}
 		// The lookups the draws were built with, parallel to the tables, and the catalog they were resolved from, whose
 		// set versions the frames that install it bind (DrawPipelines::HoldCatalog; a revision names its request's explicitly).
 		std::shared_ptr<const Lookups> lookups;
