@@ -7,6 +7,7 @@
 
 #	include "Deferred.h"
 #	include "RenderGraph/Backend.h"
+#	include "RenderGraph/BufferRefs.h"
 #	include "RenderGraph/Engine/Native/Native.h"
 #	include "RenderGraph/Engine/Tripwire/Tripwire.h"
 #	include "Features/DrawcallLimitFix/Api/MaterialWrites.h"
@@ -180,6 +181,8 @@ void DrawcallLimitFix::PostPostLoad()
 	// this run's switches ask for, and the engine hooks only they use (before DCLF's threads start).
 	DCLF::Extensions::InstallEarlyHooks(DCLF::Features::List());
 	DCLF::Diagnostics::Install();
+	// CS_DCLF_REF_CHECK: every buffer view ref checked against BasicRHI's region as it is made and recorded.
+	RenderGraph::SetBufferRefChecks(DCLF::SwitchEnabled(DCLF::Switch::RefCheck));
 	DCLF::MaterialWrites::Install();
 	// The frame-sourced float positions built now, off the render thread's first frame.
 	(void)DCLF::MaterialSources::FramePSFloats();

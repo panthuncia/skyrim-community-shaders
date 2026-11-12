@@ -586,6 +586,8 @@ namespace DCLF::Draws
 				a_out.parts[k] = { backing->srvIndex, kPools[k].deviceAddress ? backing->address : 0,
 					kPools[k].deviceAddress && backing->buffer ? RenderGraph::BufferRefOf(*backing->buffer) : RenderGraph::BufferRef{}, payload.units[k] };
 				a_out.backings[k] = backing.Get();
+				// CS_DCLF_REF_CHECK: the row parts' refs against their addresses.
+				RenderGraph::CheckBufferRef(a_out.parts[k].ref, a_out.parts[k].address, backing->byteCapacity, "payload part");
 				if (!a_out.parts[k].srvIndex)
 					return false;
 			}

@@ -144,6 +144,7 @@ namespace DCLF
 			const RenderGraph::BufferRef recordRef = a_resources.constantsRef + kShadowFrameRecordOffset;
 			out.push[kShadowPushFrameRecordRef] = recordRef.viewSlot;
 			out.push[kShadowPushFrameRecordRef + 1] = recordRef.byteOffset;
+			RenderGraph::CheckBufferRef(recordRef, base + kShadowFrameRecordOffset, 0, "shadow frame record (shadow push words 2-3)");
 			push(kShadowPushViewBlock, viewBlock);
 			push(kShadowPushPerFrame, viewBlock + kShadowPerFrameOffset);
 			const auto blocks = ShadowArenaBlocksOf();

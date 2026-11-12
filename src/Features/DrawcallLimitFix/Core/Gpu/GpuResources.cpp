@@ -201,7 +201,7 @@ namespace DCLF
 		// A described buffer's ref: a view of its BasicRHI import, which the lease's owner holds (an ORG buffer has its own).
 		if (!entry.buffer.ref)
 			if (auto* host = RenderGraphRuntime::Get().Host())
-				entry.buffer.ref = RenderGraph::ImportBufferRef(host->Device(), entry.buffer.vkBuffer, entry.buffer.offset, entry.buffer.size, held->refKeep);
+				entry.buffer.ref = RenderGraph::ImportBufferRef(host->Device(), entry.buffer.vkBuffer, entry.buffer.offset, entry.buffer.size, entry.buffer.address, held->refKeep);
 		std::shared_ptr<Held> owner(held, [released = released, key = a_buffer](Held* a_held) {
 			delete a_held;
 			released->Push(key);

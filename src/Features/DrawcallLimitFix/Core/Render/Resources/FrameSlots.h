@@ -1,5 +1,8 @@
 #pragma once
 #include "RenderGraph/BufferRef.h"
+#if defined(CS_HAS_RENDER_GRAPH)
+#	include "RenderGraph/BufferRefs.h"
+#endif
 
 // The main pass's capture (render thread) and the layout of the per-frame constant blocks at their frame slots, with the frame push
 // words that name them. Part of IndirectDraws' implementation: included by Internal.h, in its order.
@@ -169,6 +172,10 @@ namespace DCLF::Draws
 		const RenderGraph::BufferRef recordRef = a_frameConstantsRef + std::uint64_t(kFrameSlotRecord) * kFrameSlotBytes;
 		words[kFramePushRecordRef] = recordRef.viewSlot;
 		words[kFramePushRecordRef + 1] = recordRef.byteOffset;
+#if defined(CS_HAS_RENDER_GRAPH)
+		// CS_DCLF_REF_CHECK: the stages read the record, and through its backings every row, from these two words.
+		RenderGraph::CheckBufferRef(recordRef, record, kFrameSlotBytes, "frame record (frame push words 2-3)");
+#endif
 		return words;
 	}
 

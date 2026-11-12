@@ -10,6 +10,8 @@
 #include <Resources/TextureDescription.h>
 
 #include <algorithm>
+#include <atomic>
+#include <filesystem>
 #include <mutex>
 #include <unordered_map>
 
@@ -117,6 +119,8 @@ namespace RenderGraph
 		{
 			rhi::ResourcePtr resource;
 			std::uint64_t bytes = 0;  // what the import's views cover (Vulkan); D3D12 imports the whole resource
+			std::uint64_t base = 0;       // the import's device address (Vulkan), which its views are written from
+			std::uint64_t described = 0;  // the buffer's start as the description gave it when imported: a reused handle value's differs
 		};
 		struct ImportedBuffers
 		{
@@ -129,9 +133,16 @@ namespace RenderGraph
 			static ImportedBuffers imports;
 			return imports;
 		}
+		// The ref check's import lines: the first 32.
+		bool LogImportMismatch()
+		{
+			static std::atomic<std::uint32_t> logged{ 0 };
+			return logged.fetch_add(1, std::memory_order_relaxed) < 32;
+		}
 	}
 
-	BufferRef ImportBufferRef(rhi::Device a_device, std::uint64_t a_buffer, std::uint64_t a_offset, std::uint64_t a_bytes, std::shared_ptr<const void>& a_keep)
+	BufferRef ImportBufferRef(rhi::Device a_device, std::uint64_t a_buffer, std::uint64_t a_offset, std::uint64_t a_bytes, std::uint64_t a_address,
+		std::shared_ptr<const void>& a_keep, std::source_location a_where)
 	{
 		a_keep.reset();
 		if (!a_device || !a_buffer || !a_bytes)
@@ -143,6 +154,16 @@ namespace RenderGraph
 			const std::lock_guard lock(imports.mutex);
 			auto& slot = imports.byBuffer[a_buffer];
 			imported = slot.lock();
+			// The description's address names the buffer: a cached import of another buffer whose handle value this one reuses
+			// would read the old buffer's memory. Imported again.
+			const std::uint64_t base = a_address >= a_offset ? a_address - a_offset : 0;
+			if (imported && !Backend::IsD3D12() && a_address && imported->described && imported->described != base) {
+				if (BufferRefChecksOn() && LogImportMismatch())
+					logger::error("[ORG] ref check: the cached import of VkBuffer 0x{:x} was of a buffer at 0x{:x}, but the buffer described now starts at 0x{:x} "
+								  "(offset {}, address 0x{:x}) from {}:{}: a reused handle; imported again",
+						a_buffer, imported->described, base, a_offset, a_address, std::filesystem::path(a_where.file_name()).filename().string(), a_where.line());
+				imported.reset();
+			}
 			if (!imported || (!Backend::IsD3D12() && imported->bytes < end)) {
 				// A range past the import's views (or no import): import it again, covering every range seen so far. The older import
 				// stays while the leases that took it hold it.
@@ -160,6 +181,14 @@ namespace RenderGraph
 					if (rhi::vulkan::import_buffer(a_device, desc, fresh->resource) != rhi::Result::Ok)
 						fresh->resource.Reset();
 					fresh->bytes = desc.size;
+					rhi::VulkanResourceInfo info{};
+					if (fresh->resource && rhi::vulkan::get_resource_info(fresh->resource.Get(), info))
+						fresh->base = info.deviceAddress;
+					fresh->described = a_address ? base : 0;
+					// The import's address is what its views are written from: it must be the description's.
+					if (fresh->resource && a_address && fresh->base != base && BufferRefChecksOn() && LogImportMismatch())
+						logger::error("[ORG] ref check: VkBuffer 0x{:x} imported at 0x{:x}, but described at 0x{:x} (offset {}, address 0x{:x})", a_buffer,
+							fresh->base, base, a_offset, a_address);
 				}
 				if (!fresh->resource)
 					return {};
@@ -172,6 +201,14 @@ namespace RenderGraph
 			}
 		}
 		const BufferRef ref = ToBufferRef(a_device.GetBufferViewRef({ imported->resource->GetHandle(), a_offset }));
+		if (ref && BufferRefChecksOn() && !Backend::IsD3D12()) {
+			// The handle's address now, from the driver: the import must still be this buffer's.
+			const std::uint64_t now = rhi::vulkan::get_vk_buffer_device_address(a_device, reinterpret_cast<VkBuffer>(a_buffer));
+			if (now != imported->base && LogImportMismatch())
+				logger::error("[ORG] ref check: VkBuffer 0x{:x} is at 0x{:x} now, its import at 0x{:x} (offset {}, {} bytes, described address 0x{:x}) from {}:{}",
+					a_buffer, now, imported->base, a_offset, a_bytes, a_address, std::filesystem::path(a_where.file_name()).filename().string(), a_where.line());
+			CheckBufferRef(a_device, ref, imported->resource->GetHandle(), a_address, a_bytes, "ImportBufferRef", a_where);
+		}
 		if (ref)
 			a_keep = std::move(imported);
 		return ref;

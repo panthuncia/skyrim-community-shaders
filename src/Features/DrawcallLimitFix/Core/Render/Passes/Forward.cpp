@@ -109,6 +109,7 @@ namespace DCLF::Draws
 		const RenderGraph::BufferRef recordRef = a_frameConstantsRef + std::uint64_t(kFrameSlotRecord) * kFrameSlotBytes;
 		a_out[kShadowPushFrameRecordRef] = recordRef.viewSlot;
 		a_out[kShadowPushFrameRecordRef + 1] = recordRef.byteOffset;
+		RenderGraph::CheckBufferRef(recordRef, constants + std::uint64_t(kFrameSlotRecord) * kFrameSlotBytes, kFrameSlotBytes, "main shadow layout frame record");
 		split(a_out + kShadowPushViewBlock, constants + FrameSlotOffset(false, 0));
 		split(a_out + kShadowPushPerFrame, constants + FrameSlotOffset(false, kPerFrameVertexRegister));
 		split(a_out + kShadowPushZeros, constants + std::uint64_t(kFrameSlotSharedLight) * kFrameSlotBytes);

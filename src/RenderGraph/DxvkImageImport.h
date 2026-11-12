@@ -11,6 +11,7 @@
 #include <cstdint>
 #include <memory>
 #include <optional>
+#include <source_location>
 
 #include <rhi.h>
 
@@ -51,7 +52,10 @@ namespace RenderGraph
 	 * it (Common/DeviceRef.hlsli). a_buffer is the VkBuffer (D3D12: the ID3D12Resource in its place), a_offset and a_bytes the range in
 	 * it. The buffer is imported into BasicRHI once and shared by every range of it, so a DXVK chunk's buffers share one raw view pair;
 	 * on Vulkan a range past what the import covers imports it again, larger. a_keep holds the import, and with it the pair, for as long
-	 * as the caller reads the range. Null ref when the import fails. Any thread.
+	 * as the caller reads the range. a_address is the range's device address from the description (0: unknown): a cached import whose
+	 * buffer starts elsewhere is another buffer's, whose handle value this one reuses, and is imported again. Null ref when the import
+	 * fails. Any thread.
 	 */
-	BufferRef ImportBufferRef(rhi::Device a_device, std::uint64_t a_buffer, std::uint64_t a_offset, std::uint64_t a_bytes, std::shared_ptr<const void>& a_keep);
+	BufferRef ImportBufferRef(rhi::Device a_device, std::uint64_t a_buffer, std::uint64_t a_offset, std::uint64_t a_bytes, std::uint64_t a_address,
+		std::shared_ptr<const void>& a_keep, std::source_location a_where = std::source_location::current());
 }

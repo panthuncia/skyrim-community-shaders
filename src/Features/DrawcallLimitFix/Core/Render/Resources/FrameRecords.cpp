@@ -2,6 +2,7 @@
 // frame's sources (render thread).
 #include "Features/DrawcallLimitFix/Core/Render/Internal.h"
 #include "Features/DrawcallLimitFix/Core/Render/Resources/FrameRecords.h"
+#include "RenderGraph/BufferRefs.h"
 #include "RenderGraph/Engine/Flush/Flush.h"
 
 #include "Features/DrawcallLimitFix/Core/Extensions/Commits.h"
@@ -101,6 +102,8 @@ namespace DCLF::Draws
 			entry.ref = a_ref;
 			entry.address = a_ref ? a_address : 0;
 			entry.bytes = a_ref ? static_cast<std::uint32_t>(std::min<std::uint64_t>(a_bytes, UINT32_MAX)) : 0u;
+			// CS_DCLF_REF_CHECK: the stages turn addresses in the backing into refs from this pair; it must start at the address.
+			RenderGraph::CheckBufferRef(a_ref, a_address, a_bytes, "record backing");
 		};
 		backing(kBackingFrameConstants, a_constantsRef, a_constants, a_constantsBytes);
 		const auto& pipelineRows = a_parts[PayloadPart::PipelineRows];

@@ -11,6 +11,9 @@
 #include "Features/DrawcallLimitFix/Core/Engine/SkinPalettes.h"
 #include "Features/DrawcallLimitFix/Core/Engine/SkinPartitions.h"
 #include "Features/DrawcallLimitFix/Core/Runtime/SceneScheduler.h"
+#if defined(CS_HAS_RENDER_GRAPH)
+#	include "RenderGraph/BufferRefs.h"
+#endif
 
 #include <atomic>
 #include <cassert>
@@ -1056,6 +1059,11 @@ namespace DCLF::Scene
 				record.indexAddress = indexLease->buffer.address;
 				record.indexRef = indexLease->buffer.ref;
 				record.indexBytes = indexLease->buffer.size;
+#if defined(CS_HAS_RENDER_GRAPH)
+				// CS_DCLF_REF_CHECK: the vertex stages and the index pool read the buffers through these.
+				RenderGraph::CheckBufferRef(record.vertexRef, record.vertexAddress, record.vertexBytes, "geometry vertices");
+				RenderGraph::CheckBufferRef(record.indexRef, record.indexAddress, record.indexBytes, "geometry indices");
+#endif
 			}
 			const std::uint32_t slot = staleGeometry ? geometryIt->second : AllocateGeometrySlot();
 			// Other objects' draws copied the old record: the delta walk re-evaluates the ones it kept.

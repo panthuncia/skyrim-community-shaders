@@ -159,6 +159,10 @@ namespace DCLF
 			{ ScheduleDump, "CS_DCLF_SCHEDULE_DUMP", D, N, false, "1: each epoch's passes as gathered, logged whenever a list changes (tools/dclf-schedule-diff.py)" },
 			{ FrameTrace, "CS_DCLF_FRAME_TRACE", D, N, false,
 				"1: every frame's adoption, epoch coverage, main epoch outcomes, colour culling counts and retirement point, and F10 as a marker, for finding corrupt frames (tools/dclf-corrupt-frames.py)" },
+			{ RefCheck, "CS_DCLF_REF_CHECK", D, N, false,
+				"1: every buffer view ref checked as it is made and where DCLF records one (its slot in BasicRHI's region, its pair live and its buffer's, "
+				"the address it reads at, the bytes inside the view, the heaps' bytes for the pair), and every described buffer's import against the "
+				"buffer's address now; the first mismatches are logged as \"ref check:\" lines (open defect: the RX 6600 device fault)" },
 
 			{ TestCommands, "CS_DCLF_TEST_COMMANDS", T, N, false, "<frame>:<console command>;...: console commands at given frames" },
 			{ TestMove, "CS_DCLF_TEST_MOVE", T, N, false, "<start>:<end>:<units per frame>;...: carries the player forward" },
