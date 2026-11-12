@@ -75,7 +75,7 @@ namespace DCLF::Features::MenuViews
 		{
 			InstallSceneHooks();
 			// At PostPostLoad, before the render graph initializes: the anchors' epochs are fixed then.
-			if (Scenes::Enabled())
+			if (Scenes::AnyEnabled())
 				Scenes::SceneDraws::Reserve();
 			if (!Menu3DEnabled() && !MapEnabled()) {
 				Scenes::InstallHooks();
@@ -85,7 +85,7 @@ namespace DCLF::Features::MenuViews
 			// After the probe's: the family's thunks chain onto the probe's at the same calls.
 			Scenes::InstallHooks();
 			a_context.RegisterReportLines({ .name = "menu views", .point = Api::ReportPoint::AsyncWork, .text = &Lines });
-			logger::info("[DCLF] menu views: probe on (CS_ORG_MENU3D={}, CS_ORG_MAP={}); the local map's batches are the menu scenes family's with CS_ORG_MAP", Menu3DEnabled() ? 1 : 0,
+			logger::info("[DCLF] menu views: probe on (CS_ORG_MENU3D={}, CS_ORG_MAP={}); the switched-on scenes' batches are the menu scenes family's", Menu3DEnabled() ? 1 : 0,
 				MapEnabled() ? 1 : 0);
 		}
 	}
@@ -100,7 +100,7 @@ namespace DCLF::Features::MenuViews
 
 		std::string Status()
 		{
-			return std::string("local map: ") + Scenes::SceneDraws::Status();
+			return std::string("menu scenes: ") + Scenes::SceneDraws::Status();
 		}
 	}
 

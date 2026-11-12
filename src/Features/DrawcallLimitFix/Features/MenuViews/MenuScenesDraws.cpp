@@ -1,6 +1,6 @@
 // The menu scenes family's render graph side: a client per batch at the EngineDraws anchor, made once at setup, whose pass draws a
-// batch's latched draws into kLOCAL_MAP_SWAP with kMAIN's depth, in the engine's order, with CS's Utility.hlsl built for ORG
-// (UTILITY_ORG_SCENE: the base texture and the fog of war techniques).
+// batch's latched draws into the view's imported targets with kMAIN's depth, in the engine's order, with CS's shaders built for ORG
+// (Utility.hlsl's UTILITY_ORG_SCENE).
 
 // volk must precede every Vulkan header in this translation unit.
 #include <rhi_interop_vulkan.h>
@@ -40,17 +40,17 @@ namespace DCLF::Features::MenuViews::Scenes::SceneDraws
 	{
 		using ::RenderGraph::Engine::Tripwire::Unwrap;
 
-		constexpr const char* kShader = "Utility.hlsl";
-		constexpr std::uint32_t kDrawStride = static_cast<std::uint32_t>(sizeof(SceneDrawConstants));
 		constexpr std::size_t kViews = static_cast<std::size_t>(View::Count);
+		constexpr std::size_t kMaxImports = 4;
 
 		/** @brief Utility.hlsl's push block (UTILITY_ORG_RESOURCES under UTILITY_ORG_SCENE), in list order. */
-		struct SceneBlock
+		struct UtilityBlock
 		{
 			SharedConstants::Handles shared;
 			ShaderBindings::Latch draw;
+			ShaderBindings::Latch bones;
 		};
-		static_assert(sizeof(SceneBlock) == 24, "Utility.hlsl's scene push block is 24 bytes");
+		static_assert(sizeof(UtilityBlock) == 32, "Utility.hlsl's scene push block is 32 bytes");
 
 		/** @brief A client's state, which its pass shares. */
 		struct Client
@@ -60,9 +60,12 @@ namespace DCLF::Features::MenuViews::Scenes::SceneDraws
 			std::shared_ptr<org::LatchBlock> latch;
 			// One draw entry per latched draw. The anchor closes it at every run, and only this client's commit opens it.
 			std::shared_ptr<::RenderGraph::RunGate> gate;
-			// kLOCAL_MAP_SWAP and kMAIN's depth, as imported at the registration, and their formats.
-			std::shared_ptr<org::ExternalTextureResource> colour, depth;
-			std::uint32_t colourFormat = 0, depthFormat = 0;
+			// The view's colour targets (TargetsOf) and kMAIN's depth, as imported at the registration, and their formats.
+			std::array<std::shared_ptr<org::ExternalTextureResource>, kMaxImports> colours;
+			std::array<std::uint32_t, kMaxImports> colourFormats{};
+			std::uint32_t colourCount = 0;
+			std::shared_ptr<org::ExternalTextureResource> depth;
+			std::uint32_t depthFormat = 0;
 			// Every published id the batch's draws can read, fixed here (ListInputs). Each build declares the registered ones.
 			Family::PublishedInputs inputs;
 			// Render thread writes, the host's thread reads.
@@ -75,7 +78,8 @@ namespace DCLF::Features::MenuViews::Scenes::SceneDraws
 		struct Bindings
 		{
 			SharedConstants::Bindings shared;
-			org::DeclaredViewToken colour{}, depth{};
+			std::array<org::DeclaredViewToken, kMaxImports> colours{};
+			org::DeclaredViewToken depth{};
 		};
 
 		struct Frame
@@ -83,6 +87,20 @@ namespace DCLF::Features::MenuViews::Scenes::SceneDraws
 			std::shared_ptr<const Run> run;
 			std::shared_ptr<const Client> client;
 		};
+
+		const char* DebugName(View a_view)
+		{
+			switch (a_view) {
+			case View::LocalMap:
+				return "LocalMap";
+			case View::LocalMapFog:
+				return "LocalMapFog";
+			case View::MenuDepth:
+				return "MenuDepth";
+			default:
+				return "MenuColour";
+			}
+		}
 
 		/** @brief A run's draws, recorded in the engine's order: a render pass and a draw each (RasterProgram::Draw). */
 		class ScenePass final : public org::TypedRenderGraphPass<ScenePass, Frame, Bindings>
@@ -95,13 +113,14 @@ namespace DCLF::Features::MenuViews::Scenes::SceneDraws
 			{
 				Bindings bindings{};
 				bindings.shared = SharedConstants::Declare(a_builder);
-				bindings.colour = a_builder.RenderTarget(client->colour).View();
+				for (std::uint32_t i = 0; i < client->colourCount; ++i)
+					bindings.colours[i] = a_builder.RenderTarget(client->colours[i]).View();
 				bindings.depth = a_builder.DepthReadWrite(client->depth).View();
 				client->inputs.Declare(a_builder);
 				return bindings;
 			}
 
-			// The run's draws (their programs, stencil references and viewports).
+			// The run's draws (their programs, targets, stencil references and viewports).
 			void Revision(std::vector<std::uint64_t>& a_out) const
 			{
 				const auto run = std::atomic_load(&client->run);
@@ -117,21 +136,28 @@ namespace DCLF::Features::MenuViews::Scenes::SceneDraws
 				const auto& c = *a_frame.client;
 				const auto shared = SharedConstants::Index(a_recording, a_bindings.shared);
 				const org::RunRef latchRun = a_recording.Run();
-				const RasterProgram::Colour colour{ .view = &a_bindings.colour };
 				const RasterProgram::Depth depth{ .view = &a_bindings.depth, .readOnly = false };
-				const char* name = c.view == View::LocalMapFog ? "LocalMapFog" : "LocalMap";
 				for (std::uint32_t i = 0; i < a_frame.run->draws.size(); ++i) {
 					const auto& draw = a_frame.run->draws[i];
 					if (!draw.program)
 						continue;
 					const auto& program = *static_cast<const RasterProgram*>(draw.program.get());
-					const SceneBlock block{ shared, ShaderBindings::LatchOf(*c.latch, latchRun, i * kDrawStride) };
-					program.Draw(a_recording, { .colours = std::span<const RasterProgram::Colour>(&colour, 1),
+					std::array<RasterProgram::Colour, kMaxColours> colours{};
+					bool targetsOk = true;
+					for (std::uint32_t k = 0; k < draw.colourCount; ++k) {
+						targetsOk = targetsOk && draw.colours[k] < c.colourCount;
+						if (targetsOk)
+							colours[k] = { .view = &a_bindings.colours[draw.colours[k]] };
+					}
+					if (!targetsOk)
+						continue;
+					const UtilityBlock block{ shared, ShaderBindings::LatchOf(*c.latch, latchRun, draw.latchOffset), ShaderBindings::LatchOf(*c.latch, latchRun, draw.bonesOffset) };
+					program.Draw(a_recording, { .colours = std::span<const RasterProgram::Colour>(colours.data(), draw.colourCount),
 												  .depth = &depth,
 												  .viewport = { .x = draw.viewport.rect[0], .y = draw.viewport.rect[1], .width = draw.viewport.rect[2], .height = draw.viewport.rect[3],
 													  .minDepth = draw.viewport.depthRange[0], .maxDepth = draw.viewport.depthRange[1] },
 												  .constants = ShaderBindings::Data(block),
-												  .debugName = name,
+												  .debugName = DebugName(c.view),
 												  .stencilReference = draw.stencilRef,
 												  // The counts come from the draw's gate entry, which the client's commit opens for this run only.
 												  .indirect = &c.gate->Latch(),
@@ -144,18 +170,20 @@ namespace DCLF::Features::MenuViews::Scenes::SceneDraws
 		};
 
 		/**
-		 * @brief The programs a Utility vertex descriptor CS loads can be drawn with: the base texture and the fog of war techniques,
-		 * not skinned (Utility.hlsl's UTILITY_ORG_SCENE). The family keys its programs by the vertex descriptor (both stages take its
+		 * @brief The programs a Utility vertex descriptor CS loads can be drawn with: the base texture, the fog of war, depth and the
+		 * shadow maps (Utility.hlsl's UTILITY_ORG_SCENE). The family keys its programs by the vertex descriptor (both stages take its
 		 * defines), as the water family does.
 		 */
-		void StagesOf(bool a_pixel, std::uint32_t a_descriptor, std::vector<Family::StageRequest>& a_out)
+		void UtilityStagesOf(bool a_pixel, std::uint32_t a_descriptor, std::vector<Family::StageRequest>& a_out)
 		{
 			using Flags = SIE::ShaderCache::UtilityShaderFlags;
-			constexpr auto kScene = static_cast<std::uint32_t>(Flags::RenderBaseTexture) | static_cast<std::uint32_t>(Flags::LocalMapFogOfWar);
-			constexpr auto kNot = static_cast<std::uint32_t>(Flags::Skinned) | static_cast<std::uint32_t>(Flags::RenderDepth) |
-			                      static_cast<std::uint32_t>(Flags::RenderShadowmap) | static_cast<std::uint32_t>(Flags::RenderShadowmask) |
-			                      static_cast<std::uint32_t>(Flags::RenderShadowmaskSpot) | static_cast<std::uint32_t>(Flags::RenderShadowmaskPb) |
-			                      static_cast<std::uint32_t>(Flags::RenderShadowmaskDpb);
+			constexpr auto kScene = static_cast<std::uint32_t>(Flags::RenderBaseTexture) | static_cast<std::uint32_t>(Flags::LocalMapFogOfWar) |
+			                        static_cast<std::uint32_t>(Flags::RenderDepth) | static_cast<std::uint32_t>(Flags::RenderShadowmap) |
+			                        static_cast<std::uint32_t>(Flags::RenderShadowmapPb);
+			constexpr auto kNot = static_cast<std::uint32_t>(Flags::RenderShadowmask) | static_cast<std::uint32_t>(Flags::RenderShadowmaskSpot) |
+			                      static_cast<std::uint32_t>(Flags::RenderShadowmaskPb) | static_cast<std::uint32_t>(Flags::RenderShadowmaskDpb) |
+			                      static_cast<std::uint32_t>(Flags::RenderNormal) | static_cast<std::uint32_t>(Flags::RenderNormalClear) |
+			                      static_cast<std::uint32_t>(Flags::DebugShadowSplit) | static_cast<std::uint32_t>(Flags::DebugColor);
 			if (!a_pixel && (a_descriptor & kScene) && !(a_descriptor & kNot))
 				a_out.push_back({ .descriptor = a_descriptor, .stage = Family::DefineStage::Vertex });
 		}
@@ -164,10 +192,10 @@ namespace DCLF::Features::MenuViews::Scenes::SceneDraws
 		struct DrawsState
 		{
 			std::array<std::shared_ptr<Client>, kViews> clients;
-			Family::EngineDrawPrograms programs{ "menu scenes", { .source = kShader,
-																	.constantWords = ShaderBindings::Words<SceneBlock>(),
-																	.shaderType = static_cast<std::uint32_t>(RE::BSShader::Type::Utility),
-																	.stagesOf = &StagesOf } };
+			Family::EngineDrawPrograms utility{ "menu scenes (Utility)", { .source = "Utility.hlsl",
+																			 .constantWords = ShaderBindings::Words<UtilityBlock>(),
+																			 .shaderType = static_cast<std::uint32_t>(RE::BSShader::Type::Utility),
+																			 .stagesOf = &UtilityStagesOf } };
 			bool reserved = false;
 			bool setUp = false;
 			bool failed = false;
@@ -213,7 +241,7 @@ namespace DCLF::Features::MenuViews::Scenes::SceneDraws
 
 		/**
 		 * @brief Every published id a batch's draws can read: the base textures are material textures (imports), so only what a ported
-		 * feature may have bound at t0 or t7 in a menu scene. None is known; an export of an id not listed here is an inherent refusal,
+		 * feature may have bound at a slot in a menu scene. None is known; an export of an id not listed here is an inherent refusal,
 		 * logged once with the id: add the id here.
 		 */
 		void ListInputs(Family::PublishedInputs&)
@@ -224,27 +252,34 @@ namespace DCLF::Features::MenuViews::Scenes::SceneDraws
 		std::shared_ptr<Client> MakeClient(View a_view)
 		{
 			auto* host = RenderGraphRuntime::Get().Host();
-			if (!host)
+			auto* renderer = globals::game::renderer;
+			if (!host || !renderer)
 				return nullptr;
 			auto client = std::make_shared<Client>();
 			client->view = a_view;
 			client->id = std::string("cs.menu-scenes.") + NameOf(a_view);
-			client->latch = std::make_shared<org::LatchBlock>(client->id + ".latch", kMaxDraws * kDrawStride);
+			client->latch = std::make_shared<org::LatchBlock>(client->id + ".latch", kLatchBytes);
 			client->gate = ::RenderGraph::RunGate::Create(client->id + ".gate", kMaxDraws);
 			if (!client->gate) {
 				logger::warn("[DCLF] menu scenes: the {} run gate could not be made; that batch stays the engine's", client->id);
 				return nullptr;
 			}
-			const auto mainDepth = static_cast<std::uint32_t>(RE::RENDER_TARGETS_DEPTHSTENCIL::kMAIN);
-			client->colour = FrameAnchors::EngineTarget(kLocalMapSwapTarget);
-			client->depth = FrameAnchors::EngineDepth(mainDepth);
-			auto* renderer = globals::game::renderer;
-			if (renderer) {
-				client->colourFormat = FormatOf(renderer->GetRuntimeData().renderTargets[kLocalMapSwapTarget].RTV);
-				client->depthFormat = FormatOf(renderer->GetDepthStencilData().depthStencils[mainDepth].views[0]);
+			for (const auto target : TargetsOf(a_view)) {
+				if (client->colourCount >= kMaxImports)
+					break;
+				const auto index = client->colourCount++;
+				client->colours[index] = FrameAnchors::EngineTarget(static_cast<std::uint32_t>(target));
+				client->colourFormats[index] = FormatOf(renderer->GetRuntimeData().renderTargets[target].RTV);
+				if (!client->colours[index] || !client->colourFormats[index]) {
+					logger::warn("[DCLF] menu scenes: render target {} cannot be imported; the {} batch stays the engine's", target, client->id);
+					return nullptr;
+				}
 			}
-			if (!client->colour || !client->depth || !client->colourFormat || !client->depthFormat) {
-				logger::warn("[DCLF] menu scenes: kLOCAL_MAP_SWAP or kMAIN's depth cannot be imported; the {} batch stays the engine's", client->id);
+			const auto mainDepth = static_cast<std::uint32_t>(RE::RENDER_TARGETS_DEPTHSTENCIL::kMAIN);
+			client->depth = FrameAnchors::EngineDepth(mainDepth);
+			client->depthFormat = FormatOf(renderer->GetDepthStencilData().depthStencils[mainDepth].views[0]);
+			if (!client->depth || !client->depthFormat) {
+				logger::warn("[DCLF] menu scenes: kMAIN's depth cannot be imported; the {} batch stays the engine's", client->id);
 				return nullptr;
 			}
 			ListInputs(client->inputs);
@@ -255,7 +290,7 @@ namespace DCLF::Features::MenuViews::Scenes::SceneDraws
 			desc.gates = { client->gate };
 			desc.passes.push_back({ .name = client->id + ".draws",
 				.anchor = FrameAnchors::Anchor::EngineDraws,
-				.order = a_view == View::LocalMap ? 5 : 6,
+				.order = 5 + static_cast<int>(a_view),
 				.kind = FrameAnchors::PassKind::Render,
 				.make = [client]() -> std::shared_ptr<org::RenderPass> { return std::make_shared<ScenePass>(client); } });
 			desc.commit = [client](const FrameAnchors::Point&) {
@@ -264,12 +299,11 @@ namespace DCLF::Features::MenuViews::Scenes::SceneDraws
 				if (!run || !host)
 					return;
 				const org::RunRef latchRun = host->CurrentRun();
-				for (std::uint32_t i = 0; i < run->draws.size(); ++i) {
-					const auto& draw = run->draws[i];
-					client->latch->WriteValue(latchRun, i * kDrawStride, draw.constants);
-					if (draw.program)
-						client->gate->OpenDraw(i, draw.indexCount, 1);
-				}
+				if (!run->latch.empty())
+					client->latch->Write(latchRun, 0, std::span<const std::byte>(run->latch));
+				for (std::uint32_t i = 0; i < run->draws.size(); ++i)
+					if (run->draws[i].program)
+						client->gate->OpenDraw(i, run->draws[i].indexCount, 1);
 			};
 			desc.executed = [client](const FrameAnchors::Point&) {
 				if (client->executed.fetch_add(1, std::memory_order_relaxed) == 0)
@@ -287,7 +321,7 @@ namespace DCLF::Features::MenuViews::Scenes::SceneDraws
 			return client;
 		}
 
-		/** @brief What a run's recording depends on: its draws' programs, stencil references and viewports. */
+		/** @brief What a run's recording depends on: its draws' programs, targets, stencil references, offsets and viewports. */
 		std::uint64_t RevisionOf(const Run& a_run)
 		{
 			std::uint64_t hash = 1469598103934665603ull;
@@ -297,6 +331,10 @@ namespace DCLF::Features::MenuViews::Scenes::SceneDraws
 			for (const auto& draw : a_run.draws) {
 				mix(reinterpret_cast<std::uintptr_t>(draw.program.get()));
 				mix(draw.stencilRef);
+				mix((std::uint64_t(draw.latchOffset) << 32) | draw.bonesOffset);
+				mix(draw.colourCount);
+				for (std::uint32_t k = 0; k < draw.colourCount; ++k)
+					mix(draw.colours[k]);
 				for (const auto v : draw.viewport.rect)
 					mix(v);
 				std::uint32_t range[2];
@@ -304,6 +342,11 @@ namespace DCLF::Features::MenuViews::Scenes::SceneDraws
 				mix((std::uint64_t(range[0]) << 32) | range[1]);
 			}
 			return hash;
+		}
+
+		std::shared_ptr<Client> ClientOf(View a_view)
+		{
+			return a_view < View::Count ? GetState().clients[static_cast<std::size_t>(a_view)] : nullptr;
 		}
 	}
 
@@ -330,29 +373,33 @@ namespace DCLF::Features::MenuViews::Scenes::SceneDraws
 			return false;
 		state.setUp = true;
 		Family::StartStagePrecompile();
-		state.programs.Prebuild();
+		state.utility.Prebuild();
 		if (!::RenderGraph::Engine::Constants::Requested()) {
 			logger::warn("[DCLF] menu scenes: needs the engine constants capture (CS_ORG_ENGINE_CONSTANTS=1); the menu scenes stay the engine's");
 			return true;
 		}
-		for (const auto view : { View::LocalMap, View::LocalMapFog })
-			state.clients[static_cast<std::size_t>(view)] = MakeClient(view);
+		for (std::size_t v = 0; v < kViews; ++v)
+			if (ViewEnabled(static_cast<View>(v)))
+				state.clients[v] = MakeClient(static_cast<View>(v));
 		return true;
 	}
 
 	bool CanTake(View a_view)
 	{
 		auto& state = GetState();
-		if (state.failed || a_view >= View::Count)
+		if (state.failed)
 			return false;
-		const auto& client = state.clients[static_cast<std::size_t>(a_view)];
+		const auto client = ClientOf(a_view);
 		if (!client)
 			return false;
 		// A target made again (a resolution change) is another import: the batch stays the engine's until the next start.
-		if (FrameAnchors::EngineTarget(kLocalMapSwapTarget) != client->colour ||
-			FrameAnchors::EngineDepth(static_cast<std::uint32_t>(RE::RENDER_TARGETS_DEPTHSTENCIL::kMAIN)) != client->depth) {
+		bool same = FrameAnchors::EngineDepth(static_cast<std::uint32_t>(RE::RENDER_TARGETS_DEPTHSTENCIL::kMAIN)) == client->depth;
+		const auto targets = TargetsOf(a_view);
+		for (std::uint32_t i = 0; i < client->colourCount && same; ++i)
+			same = FrameAnchors::EngineTarget(static_cast<std::uint32_t>(targets[i])) == client->colours[i];
+		if (!same) {
 			if (!std::exchange(client->targetLogged, true))
-				logger::warn("[DCLF] menu scenes: kLOCAL_MAP_SWAP or kMAIN's depth changed since the {} client registered; that batch stays the engine's", client->id);
+				logger::warn("[DCLF] menu scenes: a target changed since the {} client registered; that batch stays the engine's", client->id);
 			return false;
 		}
 		if (!FrameAnchors::CanRun(client->id, FrameAnchors::Anchor::EngineDraws)) {
@@ -365,26 +412,24 @@ namespace DCLF::Features::MenuViews::Scenes::SceneDraws
 
 	Family::InputResult ReadPublished(View a_view, std::string_view a_id, std::uint32_t& a_index)
 	{
-		if (a_view >= View::Count)
-			return Family::InputResult::NotListed;
-		const auto& client = GetState().clients[static_cast<std::size_t>(a_view)];
+		const auto client = ClientOf(a_view);
 		return client ? client->inputs.Resolve(a_id, a_index) : Family::InputResult::NotListed;
 	}
 
-	std::shared_ptr<const void> Program(const Family::ProgramKey& a_key, const RE::BSShader& a_shader)
+	std::shared_ptr<const void> UtilityProgram(const Family::ProgramKey& a_key, const RE::BSShader& a_shader)
 	{
-		return GetState().programs.Get(a_key, a_shader);
+		return GetState().utility.Get(a_key, a_shader);
 	}
 
-	std::uint32_t ColourFormat(View a_view)
+	std::uint32_t ColourFormat(View a_view, std::uint32_t a_index)
 	{
-		const auto& client = a_view < View::Count ? GetState().clients[static_cast<std::size_t>(a_view)] : nullptr;
-		return client ? client->colourFormat : 0;
+		const auto client = ClientOf(a_view);
+		return client && a_index < client->colourCount ? client->colourFormats[a_index] : 0;
 	}
 
 	std::uint32_t DepthFormat(View a_view)
 	{
-		const auto& client = a_view < View::Count ? GetState().clients[static_cast<std::size_t>(a_view)] : nullptr;
+		const auto client = ClientOf(a_view);
 		return client ? client->depthFormat : 0;
 	}
 
@@ -398,7 +443,7 @@ namespace DCLF::Features::MenuViews::Scenes::SceneDraws
 		auto& state = GetState();
 		if (!a_run || state.failed)
 			return false;
-		const auto& client = state.clients[static_cast<std::size_t>(a_run->view)];
+		const auto client = ClientOf(a_run->view);
 		if (!client)
 			return false;
 		a_run->revision = RevisionOf(*a_run);
@@ -412,14 +457,14 @@ namespace DCLF::Features::MenuViews::Scenes::SceneDraws
 	std::string Status()
 	{
 		const auto& state = GetState();
-		if (!Enabled())
-			return "off (CS_ORG_MAP)";
+		if (!AnyEnabled())
+			return "off (CS_ORG_MAP, CS_ORG_MENU3D)";
 		if (state.failed)
 			return "failed: the engine draws the menu scenes";
 		std::uint64_t executed = 0;
 		for (const auto& client : state.clients)
 			if (client)
 				executed += client->executed.load(std::memory_order_relaxed);
-		return fmt::format("{} runs ({} drawn), {} draws, {} programs", state.runs, executed, state.draws, state.programs.Built());
+		return fmt::format("{} runs ({} drawn), {} draws, {} Utility programs", state.runs, executed, state.draws, state.utility.Built());
 	}
 }
