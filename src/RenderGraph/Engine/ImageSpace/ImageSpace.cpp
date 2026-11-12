@@ -2476,7 +2476,12 @@ namespace RenderGraph::Engine::ImageSpace
 			{
 				auto& state = IS();
 				if (state.on && !state.flushing && FrameAnchors::IsRenderOwner()) {
-					if (state.scopeDepth > 0 && state.current && state.current->eligible && !state.current->compute && !state.current->drew) {
+					// Only the manager's quad is an effect's draw. An effect may draw other shapes inside its scope (a batch's passes
+					// through RenderPassImmediately): those go to the engine, and must not reach SetDirtyStates through TakeDraw first.
+					const auto* manager = RE::ImageSpaceManager::GetSingleton();
+					const auto* base = reinterpret_cast<const std::byte*>(manager);
+					const bool quad = manager && (a_shape == *reinterpret_cast<void* const*>(base + 0x48) || a_shape == *reinterpret_cast<void* const*>(base + 0x50));
+					if (quad && state.scopeDepth > 0 && state.current && state.current->eligible && !state.current->compute && !state.current->drew) {
 						if (TakeDraw())
 							return;
 					} else
