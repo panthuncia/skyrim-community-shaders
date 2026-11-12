@@ -237,6 +237,12 @@ namespace DCLF::LoadHold
 					"frames with a draw family waiting; handed to the engine: {} passes of DCLF's classes (refused, or not bound yet); last {:.0f} ms",
 					after.pending, peaks.empty() ? "none" : peaks, after.baseMips, after.familyFrames, after.frames, after.kept, ms);
 			}
+			// The geometries behind the passes handed to the engine, most first: what DCLF does not draw of its classes, and where.
+			for (const auto& sample : PassCapture::Get().TakeKeptSamples(after.kept ? 12 : 0))
+				logger::info(
+					"[DCLF] handed to the engine: '{}' ({}{}{}), {} passes into {}, shader {}; set phases {:#x}, waiting phases {:#x}", sample.name,
+					sample.owner.empty() ? "no reference" : sample.owner, sample.hidden ? ", hidden" : "", sample.skinned ? ", skinned" : "", sample.passes,
+					sample.where, sample.shader, sample.phases, sample.pending);
 			after = {};
 			after.logged = any;
 			after.since = std::chrono::steady_clock::now();
