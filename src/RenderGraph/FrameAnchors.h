@@ -95,6 +95,11 @@ namespace FrameAnchors
 		// Out of frame order (appended): Volumetric Lighting's GPU work (Features/VolumetricLighting/ORGVolumetricLighting,
 		// CS_ORG_VOLUMETRIC_LIGHTING), once a frame where the engine's VL blur would dispatch, inside RenderWorldPostProcess.
 		VolumetricLighting,
+		// Out of frame order (appended): the decal occlusion tests (Drawcall Limit Fix's decal occlusion family, CS_ORG_OCCLUSION_QUERIES),
+		// one per decal the engine tests at the frame's start (SE 35563, AE 36562, before Main::Draw), only while decals wait to be
+		// placed. Not EngineQueries: an inactive client's passes run in another client's runs, and their query reset and resolve would
+		// overwrite counts its own last run left unread.
+		DecalQueries,
 		Count
 	};
 

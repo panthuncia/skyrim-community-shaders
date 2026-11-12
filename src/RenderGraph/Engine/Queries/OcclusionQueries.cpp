@@ -28,6 +28,7 @@ namespace RenderGraph::Engine::OcclusionQueries
 	{
 		// GetQueryData's not-ready answer, as the engine returns it.
 		constexpr std::uint32_t kNotReady = 0xFFFFFFFF;
+		static_assert(kRingSlots <= 64, "Harvest keeps one bit per ring slot");
 		// The first answers logged one by one, then one summary per ring slot every kSummaryReads answers.
 		constexpr std::uint32_t kLoggedAnswers = 12;
 		constexpr std::uint32_t kSummaryReads = 100;
@@ -47,6 +48,9 @@ namespace RenderGraph::Engine::OcclusionQueries
 			bool ready = false;  // value answers GetQueryData
 			std::uint32_t value = 0;
 			std::uint32_t last = 0;  // the last count it answered or was given
+			// What a skip answers instead of last: its bracket's skip answer (Bracket(a_skipAnswer)), set at its BeginQuery.
+			bool hasSkipAnswer = false;
+			std::uint32_t skipAnswer = 0;
 			// The run that counts it, once committed: the ring, its range (the run's lease index) and that commit's generation, and
 			// the query index.
 			std::shared_ptr<Ring> ring;
@@ -137,10 +141,10 @@ namespace RenderGraph::Engine::OcclusionQueries
 			}
 		}
 
-		/** @brief Skips a graph slot (mutex held): it answers its last count. */
+		/** @brief Skips a graph slot (mutex held): it answers its last count, or its bracket's skip answer. */
 		void SkipSlot(Globals& a_globals, Slot& a_slot, std::string_view a_why)
 		{
-			Deliver(a_slot, a_slot.last);
+			Deliver(a_slot, a_slot.hasSkipAnswer ? a_slot.skipAnswer : a_slot.last);
 			a_globals.counters.skipped.fetch_add(1, std::memory_order_relaxed);
 			Skips().Report(a_why);
 		}
@@ -252,14 +256,25 @@ namespace RenderGraph::Engine::OcclusionQueries
 			if (chunk)
 				chunk->readback->GetAPIResource().Map(&mapped);
 			const auto* counts = static_cast<const std::uint64_t*>(mapped);
+			// A slot several queries count (the decal test's draws) answers their sum.
+			std::array<std::uint64_t, kRingSlots> sums{};
+			std::uint64_t named = 0;
 			for (std::uint32_t i = 0; i < run.slots.size(); ++i) {
-				auto* slot = bound(run.slots[i]);
-				if (!slot)
+				const auto index = run.slots[i];
+				if (!bound(index))
 					continue;
+				named |= std::uint64_t{ 1 } << index;
 				if (counts)
-					Deliver(*slot, Answer(counts[(std::uint64_t(a_ring.First(a_range)) + i) * a_ring.stride / sizeof(std::uint64_t)]));
+					sums[index] += counts[(std::uint64_t(a_ring.First(a_range)) + i) * a_ring.stride / sizeof(std::uint64_t)];
+			}
+			for (std::uint32_t index = 0; index < kRingSlots; ++index) {
+				if (!(named & (std::uint64_t{ 1 } << index)))
+					continue;
+				auto& slot = a_globals.slots[index];
+				if (counts)
+					Deliver(slot, Answer(sums[index]));
 				else
-					SkipSlot(a_globals, *slot, "its readback could not be mapped");
+					SkipSlot(a_globals, slot, "its readback could not be mapped");
 			}
 			if (mapped)
 				chunk->readback->GetAPIResource().Unmap(0, 0);
@@ -403,6 +418,8 @@ namespace RenderGraph::Engine::OcclusionQueries
 						slot.graph = true;
 						slot.begun = true;
 						slot.ready = false;
+						slot.hasSkipAnswer = current->hasSkipAnswer;
+						slot.skipAnswer = current->skipAnswer;
 						slot.ring.reset();
 						return;
 					}
@@ -410,6 +427,7 @@ namespace RenderGraph::Engine::OcclusionQueries
 						Skips().Report("a second query begun inside one bracket is the engine's");
 					slot.graph = false;
 					slot.begun = false;
+					slot.hasSkipAnswer = false;
 					slot.ring.reset();
 				}
 				func(a_renderer, a_entry);
@@ -534,6 +552,13 @@ namespace RenderGraph::Engine::OcclusionQueries
 		current = this;
 	}
 
+	Bracket::Bracket(std::uint32_t a_skipAnswer) :
+		Bracket()
+	{
+		hasSkipAnswer = true;
+		skipAnswer = a_skipAnswer;
+	}
+
 	Bracket::~Bracket()
 	{
 		current = outer;
@@ -565,6 +590,18 @@ namespace RenderGraph::Engine::OcclusionQueries
 		auto& entry = globals.slots[slot];
 		if (entry.graph && !entry.ready)
 			SkipSlot(globals, entry, a_why);
+	}
+
+	void Bracket::Answer(std::uint32_t a_count)
+	{
+		if (slot == kNoSlot)
+			return;
+		auto& globals = Get();
+		const std::scoped_lock lock(globals.mutex);
+		auto& entry = globals.slots[slot];
+		// Never the not-ready value (the member hides the file's Answer helper).
+		if (entry.graph && !entry.ready)
+			Deliver(entry, (std::min)(a_count, kNotReady - 1));
 	}
 
 	std::string Status()

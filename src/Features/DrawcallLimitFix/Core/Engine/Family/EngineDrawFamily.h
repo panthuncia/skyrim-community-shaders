@@ -74,37 +74,55 @@ namespace DCLF::Family
 	/** @brief Whether the DrawTriShape detour is installed (AddDrawTaker succeeded once). */
 	bool DrawTakersInstalled();
 
-	/** @brief A family's SetupGeometry watcher: after the shader's own SetupGeometry (and the hooks chained before this one). */
+	/**
+	 * @brief A family's SetupGeometry watcher: after the shader's own SetupGeometry (and the hooks chained before this one). A watcher
+	 * whose family has no batch open returns at once.
+	 */
 	using SetupWatcher = void (*)(RE::BSRenderPass* a_pass);
 
 	namespace Detail
 	{
+		/** @brief The most watchers one shader type takes (the shadow masks and the decal occlusion test share Utility's). */
+		inline constexpr std::size_t kSetupWatchers = 4;
+
 		template <RE::BSShader::Type kType>
 		struct SetupGeometry
 		{
 			static void thunk(RE::BSShader* a_this, RE::BSRenderPass* a_pass, std::uint32_t a_flags)
 			{
 				func(a_this, a_pass, a_flags);
-				if (watcher)
-					watcher(a_pass);
+				for (const auto watcher : watchers)
+					if (watcher)
+						watcher(a_pass);
 			}
 			static inline REL::Relocation<decltype(thunk)> func;
-			static inline SetupWatcher watcher = nullptr;
+			static inline std::array<SetupWatcher, kSetupWatchers> watchers{};
 		};
 	}
 
 	/**
 	 * @brief Watches a shader's SetupGeometry (vtable slot 6 of a_vtable, the shader type's BSShader vtable): a_watcher runs after it,
-	 * where the draw's constants are written. One watcher per shader type; install time (main thread).
+	 * where the draw's constants are written. The first watcher of a shader type installs the hook; later ones run after it, in the
+	 * order added (up to Detail::kSetupWatchers; false past that, or for a watcher already added). Install time (main thread).
 	 */
 	template <RE::BSShader::Type kType>
-	void WatchSetupGeometry(REL::VariantID a_vtable, SetupWatcher a_watcher)
+	bool WatchSetupGeometry(REL::VariantID a_vtable, SetupWatcher a_watcher)
 	{
 		using Thunk = Detail::SetupGeometry<kType>;
-		if (Thunk::watcher)
-			return;
-		Thunk::watcher = a_watcher;
-		stl::write_vfunc<0x6, Thunk>(a_vtable);
+		if (!a_watcher)
+			return false;
+		const bool installed = Thunk::watchers[0] != nullptr;
+		for (auto& slot : Thunk::watchers) {
+			if (slot == a_watcher)
+				return false;
+			if (slot)
+				continue;
+			slot = a_watcher;
+			if (!installed)
+				stl::write_vfunc<0x6, Thunk>(a_vtable);
+			return true;
+		}
+		return false;
 	}
 
 	/**
