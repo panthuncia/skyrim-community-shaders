@@ -927,6 +927,7 @@ namespace DCLF::Scene
 		for (const std::uint32_t slot : setWaiting)
 			if (slot < setWaitingMark.size() && setWaitingMark[slot] && slot < setWaitWhy.size())
 				++publication->waiting[(std::min<std::size_t>)(setWaitWhy[slot], kSetWaitReasons - 1)];
+		publication->settled = sceneBuilt && !publication->TransientWaiting();
 		publication->lookups = publishedLookups;
 		{
 			std::scoped_lock lock(LatestSceneMutex());

@@ -64,6 +64,12 @@ namespace DCLF
 			std::uint32_t mainWithheld = 0;
 			std::uint32_t occlusionWithheld = 0;
 			std::uint32_t holdWithheld = 0;  // passes of DCLF's classes a load's hold withheld (HeldByLoad)
+			// Passes of objects waiting to join (SetSnapshot::pending, no member phase there) that the hooks withheld.
+			std::uint32_t pendingWithheld = 0;
+			// Passes of lit objects withheld until their base mips are in (WaitsForBaseMips).
+			std::uint32_t baseMipsWithheld = 0;
+			// Passes of DCLF's classes handed to the engine (KeepForEngine): refused objects and ones not bound yet. Menu scenes not counted.
+			std::uint32_t dclfKept = 0;
 			// By draw family: its engine shapes' passes into the main views while DCLF draws the family (tree LOD's).
 			std::array<std::uint32_t, static_cast<std::size_t>(Api::DrawFamily::Count)> familyWithheld{};
 			// By view, an OwnRenderers view's (the water reflection's faces): its members' passes, and by draw family its engine shapes'
@@ -264,6 +270,8 @@ namespace DCLF
 		std::atomic<std::uint32_t> volumetricWithheld{ 0 };
 		std::atomic<std::uint32_t> directWithheld{ 0 };
 		std::atomic<std::uint32_t> mainWithheld{ 0 }, occlusionWithheld{ 0 }, holdWithheld{ 0 };
+		std::atomic<std::uint32_t> pendingWithheld{ 0 }, baseMipsWithheld{ 0 };
+		mutable std::atomic<std::uint32_t> dclfKept{ 0 };
 		std::array<std::atomic<std::uint32_t>, static_cast<std::size_t>(Api::DrawFamily::Count)> familyWithheld{};
 		std::array<std::atomic<bool>, static_cast<std::size_t>(Api::DrawFamily::Count)> familyHeld{};
 		static_assert(static_cast<std::size_t>(Api::DrawFamily::Count) <= 32, "ViewRenderers::familyOwned is a 32-bit mask by family");
@@ -314,6 +322,13 @@ namespace DCLF
 		 * (LoadHold::Active) and a_pass is of DCLF's classes (a Lighting, Effect or DistantTree property's).
 		 */
 		bool HeldByLoad(const RE::BSRenderPass* a_pass);
+		/**
+		 * @brief Whether the engine must not draw a_geometry in a_phase (a member's or a waiting object's phase, SetSnapshot::WithheldPhasesOf).
+		 * A pass withheld only because its object waits is counted (Stats::pendingWithheld).
+		 */
+		bool HeldPhase(const SetSnapshot& a_set, const RE::BSGeometry* a_geometry, std::uint8_t a_phase);
+		/** @brief Counts a withheld pass in a_phases as a waiting object's when no member phase of a_geometry is among them. */
+		void NotePending(const SetSnapshot& a_set, const RE::BSGeometry* a_geometry, std::uint8_t a_phases);
 		template <std::uint32_t Group>
 		struct MainGroupHook;
 		template <std::uint32_t Group>

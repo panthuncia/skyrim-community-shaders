@@ -9,6 +9,8 @@
 #include "Features/DrawcallLimitFix/Core/Scene/FrameView/FrameView.h"
 #include "Features/DrawcallLimitFix/Core/Scene/Model/Publication.h"
 
+#include <algorithm>
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <string>
@@ -39,21 +41,41 @@ namespace DCLF::LoadHold
 
 		std::atomic<HoldState> state{ HoldState::Idle };
 		std::atomic<bool> withMenu{ false };
+		// Render thread: a re-entry ended at a stall or the cap; none starts again until a frame without the condition (reentryThisFrame).
+		bool reentryBlocked = false;
+		bool reentryThisFrame = false;
 
 		// One hold's counts. The main thread writes them in Begin, before it publishes the state; the render thread reads them after.
 		struct Hold
 		{
 			std::chrono::steady_clock::time_point start, progress;
 			std::uint32_t firstFrame = 0, lastScene = 0, frames = 0, settled = 0;
-			std::uint32_t held = 0, heldSun = 0, heldOcclusion = 0;
+			std::uint32_t held = 0, heldSun = 0, heldOcclusion = 0, heldShadow = 0;
+			const char* reentry = nullptr;  // a re-entry's condition (BeginReentry), null for a load's hold
 			std::uint32_t best = ~0u;  // the least that waited so far: less than it is progress
 			// The last frame's claims, by object and publication frame (the pool reuses the objects).
 			const void* claims = nullptr;
 			std::uint32_t claimsFrame = 0;
 			std::uint64_t withheld = 0;  // passes of DCLF's classes withheld (PassCapture::HeldByLoad), as the frames' drains counted them
 			bool heldThisFrame = false;
+			// What the hold waited for: the world frames each condition was not met in, and the most objects that waited by reason.
+			std::uint32_t waitedPublication = 0, waitedObjects = 0, waitedClaims = 0, waitedFamilies = 0, waitedViews = 0;
+			std::array<std::uint32_t, kSetWaitReasons> peakWaiting{};
 		};
 		Hold hold;
+
+		// After a hold: what of DCLF's classes is still withheld because it is not ready, or handed to the engine, logged at most every
+		// kAfterLogMs. Render thread.
+		constexpr double kAfterLogMs = 10000.0;
+		struct After
+		{
+			std::chrono::steady_clock::time_point since{};
+			std::uint64_t pending = 0, baseMips = 0, kept = 0;
+			std::uint32_t frames = 0, familyFrames = 0;
+			std::array<std::uint32_t, kSetWaitReasons> peakWaiting{};
+			bool logged = false;  // the last window logged a line: the next one logs even when quiet, to say so
+		};
+		After after;
 
 		double MillisecondsSince(std::chrono::steady_clock::time_point a_start)
 		{
@@ -77,6 +99,7 @@ namespace DCLF::LoadHold
 			withMenu.store(menu, std::memory_order_relaxed);
 			// Without a menu the main thread renders next: the hold starts now, with the presents held.
 			state.store(menu ? HoldState::Closing : HoldState::Holding, std::memory_order_release);
+			logger::info("[DCLF] load hold: started ({})", menu ? "the loading menu kept open" : "no loading menu: the presents held, the last frame stays on screen");
 			return menu;
 		}
 
@@ -98,12 +121,27 @@ namespace DCLF::LoadHold
 			return text.empty() ? "none" : text;
 		}
 
+		/** @brief What the hold waited for, as frames per condition and the most objects that waited by reason (for the log). */
+		std::string WaitedText()
+		{
+			std::string peaks;
+			for (std::size_t why = 0; why < kSetWaitReasons; ++why)
+				if (hold.peakWaiting[why])
+					peaks += fmt::format("{}{} {}", peaks.empty() ? "" : ", ", kSetWaitReasonNames[why], hold.peakWaiting[why]);
+			return fmt::format(
+				"the load's publication {} frames, waiting objects {} frames (at most: {}), claims changing {} frames, draw families {} frames, a view not "
+				"covered {} frames",
+				hold.waitedPublication, hold.waitedObjects, peaks.empty() ? "none" : peaks, hold.waitedClaims, hold.waitedFamilies, hold.waitedViews);
+		}
+
 		/** @brief Render thread: the hold ends (a_why: what ended it; a_warn: a stall or the cap, logged with what still waits). */
 		void Release(const char* a_why, bool a_warn)
 		{
 			const double ms = MillisecondsSince(hold.start);
 			const bool menu = withMenu.load(std::memory_order_relaxed);
-			const char* mode = menu ? "the loading menu kept open" : "the presents held (no loading menu)";
+			const char* mode = menu ? "the loading menu kept open" : hold.reentry ? "a re-entry, the presents held" : "the presents held (no loading menu)";
+			if (hold.reentry && a_warn)
+				reentryBlocked = true;
 			if (menu && MenuOpen()) {
 				// The coordinator's close, posted now. The menu closes at the UI's next pass over its messages.
 				state.store(HoldState::Releasing, std::memory_order_release);
@@ -112,11 +150,15 @@ namespace DCLF::LoadHold
 			} else {
 				state.store(HoldState::Idle, std::memory_order_release);
 			}
+			// The window after the hold starts here.
+			after = {};
+			after.since = std::chrono::steady_clock::now();
 			if (!a_warn) {
 				logger::info(
 					"[DCLF] load hold: {} frames, {:.0f} ms ({}), {}; {} passes of DCLF's classes withheld; {} frames with a view DCLF did not cover yet "
-					"(its engine cull skipped: {} sun, {} occlusion maps)",
-					hold.frames, ms, mode, a_why, hold.withheld, hold.held, hold.heldSun, hold.heldOcclusion);
+					"(its engine cull skipped: {} sun, {} occlusion maps; {} frames with no shadow view DCLF's{}{}); waited for: {}",
+					hold.frames, ms, mode, a_why, hold.withheld, hold.held, hold.heldSun, hold.heldOcclusion, hold.heldShadow, hold.reentry ? ": " : "",
+					hold.reentry ? hold.reentry : "", WaitedText());
 				return;
 			}
 			const auto& view = Scene::FrameView::Get();
@@ -125,10 +167,10 @@ namespace DCLF::LoadHold
 			logger::warn(
 				"[DCLF] load hold: released after {} frames, {:.0f} ms ({}), {}; {} passes of DCLF's classes withheld. Still waiting: objects by reason: {}; "
 				"draw families {}; claims {}; the installed publication {} (built {}, committed at frame {}, the world's first frame {}); a view held this frame: "
-				"{}. What is not ready stays withheld until it is",
+				"{}; waited for: {}. What is not ready stays withheld until it is",
 				hold.frames, ms, mode, a_why, hold.withheld, WaitingText(publication), IndirectDraws::Get().DrawFamiliesWaiting(),
 				claims ? (hold.settled ? "installed, unchanged" : "installed, changing") : "not installed", publication ? publication->sequence : 0ull,
-				publication && publication->built, publication ? publication->commitFrame : 0u, hold.firstFrame, hold.heldThisFrame ? "yes" : "no");
+				publication && publication->built, publication ? publication->commitFrame : 0u, hold.firstFrame, hold.heldThisFrame ? "yes" : "no", WaitedText());
 		}
 
 		/** @brief Render thread, one world frame of a hold: whether it is settled (LoadHold.h); a_waits: what still waits, as one count. */
@@ -138,16 +180,66 @@ namespace DCLF::LoadHold
 			const bool fresh = publication && publication->built &&
 			                   (publication->commitFrame >= hold.firstFrame + kJoinFrames || hold.frames >= kQuietFrames);
 			const std::uint32_t transient = publication ? publication->TransientWaiting() : 0u;
+			// The coordinator's signal (ScenePublication::settled: built, nothing waiting on a transient reason).
+			const bool objectsSettled = publication && publication->settled;
 			const auto claims = PassCapture::Get().CurrentSet();
 			const bool stable = claims && claims.get() == hold.claims && claims->frame == hold.claimsFrame;
 			hold.claims = claims.get();
 			hold.claimsFrame = claims ? claims->frame : 0u;
 			const std::uint32_t families = IndirectDraws::Get().DrawFamiliesWaiting();
 			a_waits = transient + families + (hold.heldThisFrame ? 1u : 0u);
+			hold.waitedPublication += fresh ? 0u : 1u;
+			hold.waitedObjects += fresh && !objectsSettled ? 1u : 0u;
+			hold.waitedClaims += stable ? 0u : 1u;
+			hold.waitedFamilies += families ? 1u : 0u;
+			hold.waitedViews += hold.heldThisFrame ? 1u : 0u;
+			if (fresh)
+				for (std::size_t why = 0; why < kSetWaitReasons; ++why)
+					if ((kSetTransientWaits >> why) & 1u)
+						hold.peakWaiting[why] = (std::max)(hold.peakWaiting[why], publication->waiting[why]);
 			// Not fresh yet: the load's objects are not in the tables, so nothing counts as progress or stall.
 			if (!fresh)
 				a_waits = ~0u;
-			return fresh && !transient && stable && !families && !hold.heldThisFrame;
+			return fresh && objectsSettled && stable && !families && !hold.heldThisFrame;
+		}
+	}
+
+	namespace
+	{
+		/**
+		 * @brief Render thread, the end of a frame DCLF drew outside a load: what of DCLF's classes was withheld because it was not ready
+		 * (a waiting object, base mips, a waiting draw family) or handed to the engine, logged by reason at most every kAfterLogMs.
+		 */
+		void WatchAfterHold()
+		{
+			const auto& stats = PassCapture::Get().GetStats();
+			if (after.since == std::chrono::steady_clock::time_point{})
+				after.since = std::chrono::steady_clock::now();
+			after.pending += stats.pendingWithheld;
+			after.baseMips += stats.baseMipsWithheld;
+			after.kept += stats.dclfKept;
+			++after.frames;
+			after.familyFrames += IndirectDraws::Get().DrawFamiliesWaiting() ? 1u : 0u;
+			if (const auto* publication = Scene::FrameView::Get().InstalledPublication())
+				for (std::size_t why = 0; why < kSetWaitReasons; ++why)
+					after.peakWaiting[why] = (std::max)(after.peakWaiting[why], publication->waiting[why]);
+			const double ms = MillisecondsSince(after.since);
+			if (ms < kAfterLogMs)
+				return;
+			const bool any = after.pending || after.baseMips || after.kept || after.familyFrames;
+			if (any || after.logged) {
+				std::string peaks;
+				for (std::size_t why = 0; why < kSetWaitReasons; ++why)
+					if (after.peakWaiting[why])
+						peaks += fmt::format("{}{} {}", peaks.empty() ? "" : ", ", kSetWaitReasonNames[why], after.peakWaiting[why]);
+				logger::info(
+					"[DCLF] not ready, withheld: {} passes of waiting objects (objects waiting, at most: {}), {} passes waiting for base mips, {} of {} "
+					"frames with a draw family waiting; handed to the engine: {} passes of DCLF's classes (refused, or not bound yet); last {:.0f} ms",
+					after.pending, peaks.empty() ? "none" : peaks, after.baseMips, after.familyFrames, after.frames, after.kept, ms);
+			}
+			after = {};
+			after.logged = any;
+			after.since = std::chrono::steady_clock::now();
 		}
 	}
 
@@ -165,10 +257,26 @@ namespace DCLF::LoadHold
 	{
 		if (!Active())
 			return;
-		++(a_view == View::Sun ? hold.heldSun : hold.heldOcclusion);
+		++(a_view == View::Sun ? hold.heldSun : a_view == View::Occlusion ? hold.heldOcclusion : hold.heldShadow);
 		if (!hold.heldThisFrame)
 			++hold.held;
 		hold.heldThisFrame = true;
+	}
+
+	void BeginReentry(const char* a_why)
+	{
+		reentryThisFrame = true;
+		const auto now = state.load(std::memory_order_acquire);
+		if (now == HoldState::Idle && !reentryBlocked && ShellState::Running() && !Scene::FrameView::Get().NotDrawingYet() &&
+			!Scene::FrameView::LoadShown()) {
+			hold = {};
+			hold.start = hold.progress = std::chrono::steady_clock::now();
+			hold.reentry = a_why;
+			withMenu.store(false, std::memory_order_relaxed);
+			state.store(HoldState::Holding, std::memory_order_release);
+			logger::info("[DCLF] load hold: started (a re-entry: {}): the presents held, the last frame stays on screen", a_why);
+		}
+		NoteHeld(View::Shadow);
 	}
 
 	void OnFrameStart(bool a_running)
@@ -181,8 +289,10 @@ namespace DCLF::LoadHold
 			return;
 		}
 		// The world's first frame under the kept menu: the load is done, and the tables are built from here (IsLoadingScreenUp: false).
-		if (now == HoldState::Closing)
+		if (now == HoldState::Closing) {
 			state.store(HoldState::Holding, std::memory_order_release);
+			logger::info("[DCLF] load hold: the world's first frame under the kept loading menu, {:.0f} ms after the load's end", MillisecondsSince(hold.start));
+		}
 	}
 
 	void OnFrameEnd(bool a_running)
@@ -193,8 +303,15 @@ namespace DCLF::LoadHold
 				state.store(HoldState::Idle, std::memory_order_release);
 			return;
 		}
-		if (now != HoldState::Holding)
+		const bool reentry = std::exchange(reentryThisFrame, false);
+		if (!reentry)
+			reentryBlocked = false;
+		if (now != HoldState::Holding) {
+			// Outside a load: what is not ready yet is withheld, never handed to the engine; logged by reason.
+			if (now == HoldState::Idle && a_running && !Scene::FrameView::LoadShown())
+				WatchAfterHold();
 			return;
+		}
 		if (!a_running) {
 			Release("Drawcall Limit Fix does not run", false);
 			return;
