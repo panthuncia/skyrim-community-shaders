@@ -402,8 +402,8 @@ identical (`verify-shader-refactor.ps1`). `EffectInfo::features` marks the effec
 default sampler for s9 and, for each header the program's defines include (`IBL`; `EXP_HEIGHT_FOG` with `APPLY_FOG`; with
 `DYNAMIC_CUBEMAPS`), `AnchorPasses::Bind::Published(id)` for `IBL::EnvIBL`, `IBL::SkyIBL`,
 `ExponentialHeightFog::IntegratedLightScattering` / `FarIntegratedLightScattering` and `DynamicCubemaps::EnvTextureBC6H`. The pass
-declares those reads, so ORG orders it after the features' Prepass writes. A feature on D3D11 (its ORG switch off) leaves the pass
-out, logged, and the composite's draws are refused. The shader's own settings checks (IBL enabled, volumetric fog on, interiors with
+declares those reads, so ORG orders it after the features' Prepass writes. An IBL or Dynamic Cubemaps id not published leaves the pass
+out, logged, and the composite's draws are refused; a fog volume not published is read as the no-fog volume (below). The shader's own settings checks (IBL enabled, volumetric fog on, interiors with
 Dynamic Cubemaps) decide what is read, as on D3D11, where the slots hold null in the scenes those checks skip.
 
 **The water's flow copies.** `Main::RenderWaterEffects` (SE `0x1405b2300`) pops BGSAutoWater's queue and, per queued flow texture,
@@ -448,6 +448,14 @@ another effect later (ISWaterBlend read as not covered). And a pass whose engine
 composite's, at the rebuild Exponential Height Fog's publish asks for in the first world frame) takes the blend description the
 session read at a draw, or the manifest's (`blends`, written with the shapes): the table is read at draws and builds and kept
 (`BlendDescOf`).
+
+**From the census `1112-041507-p35-latch-census-nomap-menus2`.** Exponential Height Fog publishes its integrated volumes at its first
+graph frame, and never while its volumetric fog is off (that run's settings), so the composite's pass was left out for the whole
+session. A fog volume not published yet is now read as a 1x1x1 volume of (0, 0, 0, 1) by heap index (`NoFogVolume`): no in-scatter,
+full transmittance, what the header's sample of D3D11's null view gives. The fog's later publish builds the graphs again
+(`IsDeclarable` notes the id) and the pass then reads the real volume. IBL's and Dynamic Cubemaps' ids still leave the pass out
+until published. A draw without PerGeometry constants bound (ISCopy into kFRAMEBUFFER) is taken with an empty constant window
+(reads 0, as D3D11 does) instead of failing.
 
 **The summary line.** `[ORG] ImageSpace: draws and dispatches left to D3D11 in <n> frames: <shader> into rt<i> depth <d> (<why>):
 <count>, ...`, every 300 frames. It counts every ImageSpace draw the engine makes on D3D11: inside a hooked ImageSpace call, named by

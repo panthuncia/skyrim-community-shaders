@@ -32,6 +32,7 @@ bool RenderGraph::Engine::ImageSpace::Requested()
 #	include "RenderGraph/ShaderBindings.h"
 #	include "ShaderCache.h"
 #	include "State.h"
+#	include "Utils/D3D.h"
 #	include "Utils/Logging.h"
 #	include "Utils/SharedShaderStore.h"
 
@@ -407,6 +408,13 @@ namespace RenderGraph::Engine::ImageSpace
 			std::shared_ptr<org::LatchBlock> latch;
 			std::map<std::pair<std::uint32_t, std::uint32_t>, org::OwnedDescriptorBinding> samplers;  // (address, filter)
 			org::OwnedDescriptorBinding defaultSampler;  // D3D11's default sampler: the SAO composite's s9 (FeatureBinds)
+			// A 1x1x1 volume of (0, 0, 0, 1), no in-scatter and full transmittance, by heap index: what the SAO composite reads for Exponential
+			// Height Fog's volumes before the fog publishes them (D3D11 binds none then, and the header's sample of a null volume gives the
+			// same). Made at the first build that needs it.
+			winrt::com_ptr<ID3D11ShaderResourceView> noFogView;
+			std::uint32_t noFogIndex = UINT32_MAX;
+			std::shared_ptr<const void> noFogOwner;
+			bool noFogTried = false;
 			// By run lease index: the sources a run's latched draws read by heap index (Pending::source), held until the next run of
 			// the index commits (the lease's last run retired before the index was opened again). Grown with the host's lease indices.
 			std::vector<std::vector<std::shared_ptr<const void>>> heldSources;
@@ -1213,6 +1221,46 @@ namespace RenderGraph::Engine::ImageSpace
 		std::vector<std::pair<std::wstring, std::wstring>> DefinesOf(std::size_t a_effect) { return AnchorPasses::Defines(NarrowDefinesOf(a_effect)); }
 
 		/**
+		 * @brief The heap index of the no-fog volume (ImageSpaceState::noFogView), made on first use; UINT32_MAX when it could not be
+		 * made. Render thread, at a graph build.
+		 */
+		std::uint32_t NoFogVolume()
+		{
+			auto& state = IS();
+			if (state.noFogTried)
+				return state.noFogIndex;
+			state.noFogTried = true;
+			auto* device = globals::d3d::device;
+			if (!device)
+				return UINT32_MAX;
+			D3D11_TEXTURE3D_DESC desc{};
+			desc.Width = desc.Height = desc.Depth = 1;
+			desc.MipLevels = 1;
+			desc.Format = DXGI_FORMAT_R32G32B32A32_FLOAT;
+			desc.Usage = D3D11_USAGE_IMMUTABLE;
+			desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+			const std::array<float, 4> texel{ 0.0f, 0.0f, 0.0f, 1.0f };
+			D3D11_SUBRESOURCE_DATA data{ .pSysMem = texel.data(), .SysMemPitch = sizeof(texel), .SysMemSlicePitch = sizeof(texel) };
+			winrt::com_ptr<ID3D11Texture3D> texture;
+			if (FAILED(device->CreateTexture3D(&desc, &data, texture.put())) ||
+				FAILED(device->CreateShaderResourceView(texture.get(), nullptr, state.noFogView.put()))) {
+				logger::warn("[ORG] ImageSpace: the no-fog volume could not be made");
+				return UINT32_MAX;
+			}
+			Util::SetResourceName(texture.get(), "ImageSpace::NoFogVolume");
+			Util::SetResourceName(state.noFogView.get(), "ImageSpace::NoFogVolume SRV");
+			constexpr std::uint32_t kSourceTag = DCLF::GpuTextures::Tag(DCLF::GpuTextures::Source::FrameSlot, 0);
+			auto binding = DCLF::GpuTextures::Get().ResolveBinding(state.noFogView.get(), kSourceTag);
+			if (binding.index == DCLF::GpuTextures::kInvalid) {
+				logger::warn("[ORG] ImageSpace: the no-fog volume has no heap index");
+				return UINT32_MAX;
+			}
+			state.noFogIndex = binding.index;
+			state.noFogOwner = std::move(binding.owner);
+			return state.noFogIndex;
+		}
+
+		/**
 		 * @brief The feature handles of an effect that reads CS's feature headers (EffectInfo::features), in its resource list's order
 		 * after its samplers: s9, IBL's environment and sky SH, Exponential Height Fog's near and far volumes, Dynamic Cubemaps'
 		 * environment. A header the program's defines do not include is unread (handle 0). An included one reads its feature's
@@ -1238,20 +1286,29 @@ namespace RenderGraph::Engine::ImageSpace
 				state.defaultSampler = ShaderBindings::CreateSamplerFromD3D11(desc);
 			}
 			a_out.push_back(fog && state.defaultSampler ? AnchorPasses::Bind::Handle(state.defaultSampler.Index()) : AnchorPasses::Bind::Unused());
-			const auto read = [&](bool a_included, std::string_view a_id) {
+			const auto read = [&](bool a_included, std::string_view a_id, bool a_fogVolume) {
 				if (!a_included) {
 					a_out.push_back(AnchorPasses::Bind::Unused());
 					return true;
 				}
-				if (!PublishedResources::IsDeclarable(a_id)) {
-					a_missing = std::string(a_id);
-					return false;
+				// IsDeclarable notes an id it says no to: the id's publish builds every graph again, and this pass then reads it.
+				if (PublishedResources::IsDeclarable(a_id)) {
+					a_out.push_back(AnchorPasses::Bind::Published(a_id));
+					return true;
 				}
-				a_out.push_back(AnchorPasses::Bind::Published(a_id));
-				return true;
+				// The fog publishes its volumes at its first graph frame, and never while its volumetric fog is off: until then the pass
+				// reads the no-fog volume, as D3D11 reads a null view.
+				if (a_fogVolume) {
+					if (const auto index = NoFogVolume(); index != UINT32_MAX) {
+						a_out.push_back(AnchorPasses::Bind::Handle(index));
+						return true;
+					}
+				}
+				a_missing = std::string(a_id);
+				return false;
 			};
-			return read(has("IBL"), ORGIBL::kEnvId) && read(has("IBL"), ORGIBL::kSkyId) && read(fog, ORGExponentialHeightFog::kNearIntegratedId) &&
-			       read(fog, ORGExponentialHeightFog::kFarIntegratedId) && read(fog && has("DYNAMIC_CUBEMAPS"), ORGDynamicCubemaps::kEnvBC6HId);
+			return read(has("IBL"), ORGIBL::kEnvId, false) && read(has("IBL"), ORGIBL::kSkyId, false) && read(fog, ORGExponentialHeightFog::kNearIntegratedId, true) &&
+			       read(fog, ORGExponentialHeightFog::kFarIntegratedId, true) && read(fog && has("DYNAMIC_CUBEMAPS"), ORGDynamicCubemaps::kEnvBC6HId, false);
 		}
 
 		/** @brief The raster program's description for a key (the blend was checked by BlendFor). Needs the engine's effect object. */
@@ -1379,7 +1436,7 @@ namespace RenderGraph::Engine::ImageSpace
 			if (effect.features) {
 				std::string missing;
 				if (!FeatureBinds(spec.key.effect, bindings, missing)) {
-					logger::info("[ORG] ImageSpace: {}: {} is not on the graph (its feature's ORG switch is off); its pass is left out", spec.name, missing);
+					logger::info("[ORG] ImageSpace: {}: {} is not published (its feature's ORG path is off or has not run yet); its pass is left out until it is", spec.name, missing);
 					return nullptr;
 				}
 			}
@@ -2146,30 +2203,33 @@ namespace RenderGraph::Engine::ImageSpace
 			const auto use = Constants::Capture(Constants::kDrawStages);
 			const auto* slot = use.Valid() ? Constants::Find(use, Constants::Stage::Pixel, 2) : nullptr;
 			// The ImageSpace setups write PerGeometry into the PS b2 size-class pool (PSGeometry); a custom mapper's ring is accepted too.
-			if (!slot || (slot->group != Constants::Group::PSGeometry && slot->group != Constants::Group::Custom)) {
+			// None bound is a shader without PerGeometry constants (ISCopy's): D3D11 reads 0 there, and so does the latch's empty window.
+			if (slot && slot->group != Constants::Group::PSGeometry && slot->group != Constants::Group::Custom) {
 				Flush();
-				Failure("the capture holds no PerGeometry constants for its draw", scope.effect);
+				Failure("the capture holds PerGeometry constants outside the geometry and custom pools for its draw", scope.effect);
 				return false;
 			}
 			// FrameBuffer as the draw had it bound (PS b12, the engine's per-frame buffer), not CS's shared snapshot.
-			const auto* frameSlot = Constants::Find(use, Constants::Stage::Pixel, 12);
+			const auto* frameSlot = use.Valid() ? Constants::Find(use, Constants::Stage::Pixel, 12) : nullptr;
 			if (!frameSlot) {
 				Flush();
 				Failure("the capture holds no PerFrame constants for its draw", scope.effect);
 				return false;
 			}
-			const auto at = Constants::Where(*slot);
 			const auto frameAt = Constants::Where(*frameSlot);
+			// No PerGeometry: an empty window into the PerFrame chunk, so the row reads stay in a valid buffer and read 0.
+			const auto at = slot ? Constants::Where(*slot) : frameAt;
+			const std::uint32_t size = slot ? at.size : 0u;
 			if (!at.block || !frameAt.block) {
 				Flush();
 				Failure("its captured constants have no ring chunk", scope.effect);
 				return false;
 			}
 			const std::array blocks{ at.block, frameAt.block };
-			AddToBatch(*spec, { .at = { .srv = at.srvIndex, .offset = at.offset, .frameSrv = frameAt.srvIndex, .frameOffset = frameAt.offset, .size = at.size, .frameSize = frameAt.size } }, blocks);
+			AddToBatch(*spec, { .at = { .srv = at.srvIndex, .offset = at.offset, .frameSrv = frameAt.srvIndex, .frameOffset = frameAt.offset, .size = size, .frameSize = frameAt.size } }, blocks);
 			if (state.logShapes && state.loggedConstants.insert(key).second)
-				logger::info("[ORG] ImageSpace: {} into {} taken with {} bytes of PerGeometry ({}) and {} of PerFrame", effect.effectName, NameForLog(key.output), at.size,
-					slot->group == Constants::Group::PSGeometry ? "PS geometry pool" : "custom", frameAt.size);
+				logger::info("[ORG] ImageSpace: {} into {} taken with {} bytes of PerGeometry ({}) and {} of PerFrame", effect.effectName, NameForLog(key.output), size,
+					!slot ? "none bound" : slot->group == Constants::Group::PSGeometry ? "PS geometry pool" : "custom", frameAt.size);
 			return true;
 		}
 
