@@ -2,6 +2,7 @@
 // frame's sources (render thread).
 #include "Features/DrawcallLimitFix/Core/Render/Internal.h"
 #include "Features/DrawcallLimitFix/Core/Render/Resources/FrameRecords.h"
+#include "RenderGraph/Engine/Flush/Flush.h"
 
 #include "Features/DrawcallLimitFix/Core/Extensions/Commits.h"
 #include "Features/DrawcallLimitFix/Core/Extensions/LightVolumes.h"
@@ -163,6 +164,7 @@ namespace DCLF::Draws
 	{
 		winrt::com_ptr<ID3D11ShaderResourceView> view;
 		globals::d3d::context->PSGetShaderResources(a_register, 1, view.put());
+		RenderGraph::Engine::Flush::NoteRead("DCLF BoundPixelBuffer", a_register, view.get());
 		if (!view)
 			return nullptr;
 		D3D11_SHADER_RESOURCE_VIEW_DESC desc{};

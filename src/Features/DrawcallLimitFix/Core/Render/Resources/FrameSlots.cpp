@@ -2,6 +2,8 @@
 // names of the frame-constants buffer's parts.
 #include "Features/DrawcallLimitFix/Core/Render/Internal.h"
 
+#include "RenderGraph/Engine/Flush/Flush.h"
+
 namespace DCLF::Draws
 {
 	std::shared_ptr<const FrameBlockViews> FrameBlockViews::Create(rhi::Device a_device, const std::shared_ptr<org::Buffer>& a_frameConstants)
@@ -73,6 +75,9 @@ namespace DCLF::Draws
 		context->VSGetConstantBuffers(0, kConstantBufferRegisters, capture.vsBuffers.data());
 		context->PSGetConstantBuffers(0, kConstantBufferRegisters, capture.psBuffers.data());
 		context->PSGetShaderResources(0, kTextureRegisters, capture.psViews.data());
+		// CS's own registers: a null where CS bound a view DXVK dropped is logged by the state readers' trace (flush.md).
+		for (std::uint32_t t = kPixelTextureSlots; t < kTextureRegisters; ++t)
+			RenderGraph::Engine::Flush::NoteRead("DCLF CaptureBindings", t, capture.psViews[t]);
 		ID3D11RenderTargetView* views[kColorTargets] = {};
 		ID3D11DepthStencilView* depth = nullptr;
 		context->OMGetRenderTargets(kColorTargets, views, &depth);

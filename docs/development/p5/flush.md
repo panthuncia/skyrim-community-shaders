@@ -188,24 +188,62 @@ What the other lanes call, at each place they leave a draw to the engine:
 CS code that asks D3D11 what the engine bound reads stale state under the latch unless a real flush (one CS asked for, or one in an
 `EngineDraws` scope) has just run. Such readers read the shadow state (`RSS.PSTexture[]` +0x140, `RSS.renderTargets[]` and the cube
 target with the renderer's view tables, `RSS.viewPort` +0x70) or a published graph resource. Every D3D11 context `Get*` call in
-`src/` (grep on 2026-11-11, `org-port/latch`), classified:
+`src/` (grep on 2026-11-11, `org-port/latch`; checked again on 2026-11-12 for 5.5.10, `org-port/state-readers`), classified:
 
 | Reader | Reads | Class | State |
 | --- | --- | --- | --- |
 | `State::Draw` shadow-mask path (`Skylighting::CaptureShadowCascadeSRV`, `VolumetricShadows::CopyShadowLightData`, `ExponentialHeightFog::CaptureDirectionalShadowMap`) | PS t4 | engine state | Fixed: `RSS.PSTexture[4]`, unwrapped, as ShadowMaskCapture.cpp |
 | `CloudShadows::SkyShaderHacks` | `OMGetRenderTargets` | engine state | Fixed: the shadow state's cube target (`kREFLECTIONS`) and face; SetDirtyStates binds that face alone in cube mode (RE: AE 77386) |
-| DCLF `Core/Render/Resources/FrameSlots.cpp` `CaptureBindings` from `CaptureMainPass` and `CaptureDepthPass` | VS/PS b0.., PS t0.., `OMGetRenderTargets`, `RSGetViewports` | after a real flush | Fine: both run right after `Engine::ApplyPendingState` (FrameDriver::BeforeOpaquePass, MainEpochs CaptureDepthPass), a flush from CS code. The constant buffers are bound by the engine outside the flush, t16 and up by CS |
+| DCLF `Core/Render/Resources/FrameSlots.cpp` `CaptureBindings` from `CaptureMainPass` and `CaptureDepthPass` | VS/PS b0.., PS t0.., `OMGetRenderTargets`, `RSGetViewports` | after a real flush | Fine: both run right after `Engine::ApplyPendingState` (FrameDriver::BeforeOpaquePass, MainEpochs CaptureDepthPass), a flush from CS code; the trace's check after each flush (below) shows when DXVK is off the shadow state there. The constant buffers are bound by the engine outside the flush. t16 and up are CS's binds, which DXVK can drop under the latch (below): each is traced (`NoteRead "DCLF CaptureBindings"`) |
 | DCLF `Features/MainView/MainViewPoints.cpp` `CurrentTargetFormats` | `OMGetRenderTargets` | after a real flush | Fine: only from `BeforeOpaque`, inside `FrameDriver::BeforeOpaquePass` after `ApplyPendingState` |
-| DCLF `Core/Render/Resources/FrameRecords.cpp` `BoundPixelBuffer` | PS t16.. (frame buffers) | CS's own binds | Fine: registers past the engine's 16 are bound by CS on DXVK's context (Deferred's cascades at t98), never by the flush |
-| `Effects11/ORGSunRays.cpp` `BoundPixelView` | PS t17, t25 | CS's own binds | Fine (CS binds both) |
+| DCLF `Core/Render/Resources/FrameRecords.cpp` `BoundPixelBuffer` | PS t16.. (frame buffers) | CS's own binds | Fine: registers past the engine's 16 are bound by CS on DXVK's context (Deferred's cascades at t98), never by the flush. Buffers are never outputs, so DXVK does not drop them; traced anyway |
+| `Effects11/ORGSunRays.cpp` `BoundPixelView` | PS t17, t25 | CS's own binds | CS binds both, but t17 (the scene depth) can be dropped while a stale depth target holds it: traced (`NoteRead "Effects11 sun rays"`) |
 | `Menu/ImGuiRenderer.cpp` `UpdateTarget` | `OMGetRenderTargets` | CS's own binds | Fine: HDRDisplay binds the UI or frame target before the overlay |
-| DCLF `Core/Engine/Family/EngineDrawFamily.cpp` `ResolveHeader` | PS t(register) | engine state | Other lane (families): read `RSS.PSTexture[]` |
-| DCLF `Features/Water/WaterCapture.cpp` | PS directional shadow register | engine state | Other lane (water) |
-| `RenderGraph/Engine/ImageSpace/ImageSpace.cpp` `ReadViewport` | `RSGetViewports` | after ImageSpace's own flush | Other lane (ImageSpace): fine while its `SetDirtyStates` call is CS's; the shadow state's `viewPort` would not depend on it |
-| `RenderGraph/Engine/Scaleform/Renderer.cpp` (two) | `OMGetRenderTargets` | engine or Scaleform state | Other lane (Scaleform) |
-| DCLF `Diagnostics/Draws/CapturePoint.cpp` (`CaptureBindings`), `Diagnostics/Scene/CaptureParity.cpp`, `Diagnostics/Feature/FeatureInstall.cpp` (blend and t55 log), `OpenDefectProbes.cpp`, `TargetDump.cpp`, `Features/Reflection/Diagnostics/FaceCameraParity.cpp`, `Integrations/*/Diagnostics/TextureParity.cpp`; `Globals.cpp` `TraceNativeDraw`; `GpuEventTimers.cpp` op details | bindings at a native draw | diagnostics, off by default | Stale under the latch for unvouched draws; correct inside an `EngineDraws` scope. Not fixed: read their results with the latch off |
+| DCLF `Core/Engine/Family/EngineDrawFamily.cpp` `ResolveHeader` | PS t(register) | CS's own binds | Fixed: t0-t15 are not read here (the families read `RSS.PSTexture[]` through `SlotTexture`); t16 and up are CS's binds (sky t30, t31, t76, t77; water's and precipitation's headers), traced (`NoteRead "engine draw family ResolveHeader"`) |
+| DCLF `Features/Water/WaterCapture.cpp` | PS directional shadow register | engine state | Fixed: `RSS.PSTexture[]`, unwrapped |
+| `RenderGraph/Engine/ImageSpace/ImageSpace.cpp` `ReadViewport` | the viewport | engine state | Fixed: `RSS.viewPort` |
+| `RenderGraph/Engine/Scaleform/Renderer.cpp` `ReadTargets` | render target 0 and depth stencil | engine state | Fixed: `RSS.renderTargets[0]` and the renderer's tables |
+| DCLF `Diagnostics/Draws/CapturePoint.cpp` (`CaptureBindings`), `Diagnostics/Scene/CaptureParity.cpp`, `Diagnostics/Feature/FeatureInstall.cpp` (blend and t55 log), `OpenDefectProbes.cpp`, `TargetDump.cpp`, `Features/Reflection/Diagnostics/FaceCameraParity.cpp`, `Integrations/*/Diagnostics/TextureParity.cpp`; `Globals.cpp` `TraceNativeDraw`; `GpuEventTimers.cpp` op details | bindings at a native draw | diagnostics, off by default | DXVK-only diagnostics: stale under the latch for unvouched draws, correct inside an `EngineDraws` scope. Read their results with the latch off |
+| `Hooks.cpp` `BSGraphics_SetDirtyStates` (`State::Draw`: Terrain Helper, Skin, True PBR, Cloud Shadows, Rain Refraction; `VanillaBinding::BindDrawResources`) | the shadow state | CS's own binds after every flush, latched or not | Not a reader of D3D11: they bind on DXVK's context, which the latch does not filter. Their binds are what DXVK can drop under the latch |
+| `GrassOptimizations.cpp` (`RSS.PSTexture[]` batched, then `SetDirtyStates` from CS), `LinearLighting.cpp` and `EngineFixes/WaterReflectionCubemapFix.cpp` (`RSS.PSTexture[3]`) | the shadow state | engine state | Fine |
 | Effects11 `D3D11StateBackup.h`, PostProcessing `RasterPass.cpp`, `ScreenshotFeature.cpp`, `TruePBR.cpp` (glints noise), `GrassOptimizations/HiZPyramid.cpp`, `HDRDisplay.cpp` (viewport at Present), `GpuEventTimers.cpp` (load pass) | whatever is bound | state backup around CS's own pass | Fine: saved and restored, no engine state needed |
 | `RenderGraph/Engine/Tripwire/TripwireInterfaces.inl`, `TripwireSelfTest.cpp` | the forwarding wrappers and the self-test | not a reader | Fine |
+
+### DXVK's hazard rules under the latch (5.5.10)
+
+The latch drops the engine's binds, but CS's binds on DXVK's context still go through, and DXVK keeps D3D11's hazard rules
+(`d3d11_context.cpp`): a shader resource bind of a view whose resource is bound as a render target, depth stencil or OM UAV binds
+null instead (`TestSrvHazards`), and a target bind unbinds every shader resource of its resource (`ResolveOmSrvHazards`). With the latch
+off, the engine's flushes move DXVK's targets along with the frame. With it on, DXVK keeps the targets of the last real flush (DCLF's
+`ApplyPendingState`, ImageSpace's taken draws) or of a CS pass that left its own bound (Cloud Shadows' layer targets after a sky draw)
+until the next real flush. A CS bind of a view of such a stale target, at t16 and up, is then dropped, and a reader of DXVK's bindings
+(DCLF's `CaptureBindings`, the families' headers) reads null where the latch-off frame read the view. Nothing is skipped and nothing
+logs. This is a likely cause of the green streaks on the near geometry in `latch-census*.env`'s Whiterun shot: a frame texture DCLF's
+lighting reads from its capture, null under the latch.
+
+The trace (`StateTrace.cpp`, on with `CS_ORG_RESIDUE_CENSUS=1`, so in both `latch-census.env` and `latch-census-off.env`) detours DXVK's
+`VSSetShaderResources`, `PSSetShaderResources`, `CSSetShaderResources`, `OMSetRenderTargets` and
+`OMSetRenderTargetsAndUnorderedAccessViews`, and logs, once per site:
+
+```text
+[W] [ORG] state readers: DXVK dropped a PS t<n> bind of <resource> (the view's resource is bound as render target <i> | depth stencil 0; the engine's shadow state has moved off it (a stale bind: the latch dropped the engine's target bind) | still targets it) at <callers>; latch on, the engine's shadow state: RT .. DS .. cube ..
+[I] [ORG] state readers: PS t<n> (<resource>) was unbound by a target bind at <callers>; latch .., the engine's shadow state: ..
+[W] [ORG] state readers: <reader> read PS t<n> as null: DXVK dropped its PS t<n> bind of <resource> ... at <callers>; latch on
+[W] [ORG] state readers: after a flush from <caller> (latch ..): PS t<n> on DXVK is <a>, the shadow state holds <b> | the viewport on DXVK is .. | render target 0 on DXVK is ..
+[I] [ORG] state readers: 300 frames: .. shader resource binds a frame dropped by DXVK (the view's resource bound as an output), .. PS views a frame unbound by target binds, .. reads a frame found such a view null; .. flushes a frame bound their state, .. of their slots a frame differ from the shadow state (latch ..)
+```
+
+The readers report through `Flush::NoteRead`: `DCLF CaptureBindings` (t16 and up of the main and depth captures), `engine draw family
+ResolveHeader`, `DCLF BoundPixelBuffer`, `Effects11 sun rays`. The check after a flush runs after every flush that bound its state (all of
+them with the latch off, the real ones with it on) and compares DXVK's PS t0-t15, render target 0 (outside the cube mode) and viewport with
+the shadow state, skipping what CS dirtied again after the flush. With the latch off it is the baseline: the same lines in both runs are
+not the latch's.
+
+`CS_ORG_ENGINE_FLUSH_LATCH_UNBIND=1` (scenario `latch-census-short-unbind.env`): a latched flush that consumed the target bit, or after
+which CS asked the engine to rebind its targets, unbinds DXVK's targets. DXVK then holds no stale target, and the next real flush binds the
+owed ones. Nothing draws through the engine's state in between (its draws are skipped or vouched, and a vouched draw's flush is real).
+Off by default until a run shows the shots match `latch-census-off.env`; the trace says whether it is the fix: with it on, the dropped
+binds with "has moved off it" should be gone.
 
 ## What reaching zero needs
 

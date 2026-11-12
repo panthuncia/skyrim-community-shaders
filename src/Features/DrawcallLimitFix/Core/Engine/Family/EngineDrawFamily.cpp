@@ -12,6 +12,7 @@
 
 #include "Globals.h"
 #include "RenderGraph/Engine/MainTick.h"
+#include "RenderGraph/Engine/Flush/Flush.h"
 #include "RenderGraph/PublishedResources.h"
 #include "RenderGraph/RenderGraphRuntime.h"
 #include "RenderGraph/Engine/Tripwire/Tripwire.h"
@@ -443,6 +444,7 @@ namespace DCLF::Family
 			return HeaderResult::Texture;
 		ID3D11ShaderResourceView* view = nullptr;
 		globals::d3d::context->PSGetShaderResources(a_register, 1, &view);
+		RenderGraph::Engine::Flush::NoteRead("engine draw family ResolveHeader", a_register, view);
 		if (a_view)
 			*a_view = view;
 		if (!view) {
