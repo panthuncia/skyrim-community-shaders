@@ -850,7 +850,8 @@ namespace RenderGraph::Engine::Native
 				PFN_vkCreateSemaphore createSemaphore = nullptr;
 				if (!resolve(createPool, "vkCreateCommandPool") || !resolve(allocate, "vkAllocateCommandBuffers") || !resolve(createSemaphore, "vkCreateSemaphore") ||
 					!resolve(reset, "vkResetCommandBuffer") || !resolve(begin, "vkBeginCommandBuffer") || !resolve(end, "vkEndCommandBuffer") ||
-					!resolve(submit, "vkQueueSubmit2") || !resolve(barrier, "vkCmdPipelineBarrier2") || !resolve(wait, "vkWaitSemaphores"))
+					!resolve(submit, "vkQueueSubmit2") || !resolve(barrier, "vkCmdPipelineBarrier2") || !resolve(wait, "vkWaitSemaphores") ||
+					!resolve(signalSemaphore, "vkSignalSemaphore"))
 					return false;
 				VkCommandPoolCreateInfo poolInfo{ VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO };
 				poolInfo.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
@@ -870,6 +871,12 @@ namespace RenderGraph::Engine::Native
 				return createSemaphore(device, &semaphoreInfo, nullptr, &timeline) == VK_SUCCESS;
 			}
 
+			/**
+			 * @brief The caller's contract (RenderGraphRuntime::EmitExternalCommands, as DXVK's): a_record runs exactly once when this
+			 * returns true, and never when it returns false, so the caller still owns a_user then (EmitExecution frees its segment). Once
+			 * a_record has run this returns true whatever follows: a failed submit (a lost device) signals the client's points from the
+			 * host instead, so nothing waits on work that never ran.
+			 */
 			bool Run(void (*a_record)(void*, VkCommandBuffer), void* a_user, std::span<const VkSemaphoreSubmitInfo> a_waits,
 				std::span<const VkSemaphoreSubmitInfo> a_signals)
 			{
@@ -914,8 +921,17 @@ namespace RenderGraph::Engine::Native
 				if (result != VK_SUCCESS) {
 					static std::atomic_flag logged;
 					if (!logged.test_and_set())
-						logger::error("[ORG native] external commands could not be submitted ({}); such work is lost", static_cast<int>(result));
-					return false;
+						logger::error("[ORG native] external commands could not be submitted ({}); such work is lost, its signals given from the host", static_cast<int>(result));
+					// The recording ran (a_record owned a_user): taken, as the contract says. Its timeline points are signalled here.
+					for (const auto& point : a_signals) {
+						VkSemaphoreSignalInfo signalInfo{ VK_STRUCTURE_TYPE_SEMAPHORE_SIGNAL_INFO };
+						signalInfo.semaphore = point.semaphore;
+						signalInfo.value = point.value;
+						(void)signalSemaphore(device, &signalInfo);
+					}
+					// The slot's buffer was never submitted: reusable without a wait.
+					values[slot] = 0;
+					return true;
 				}
 				values[slot] = ++value;
 				return true;
@@ -953,6 +969,7 @@ namespace RenderGraph::Engine::Native
 			PFN_vkQueueSubmit2 submit = nullptr;
 			PFN_vkCmdPipelineBarrier2 barrier = nullptr;
 			PFN_vkWaitSemaphores wait = nullptr;
+			PFN_vkSignalSemaphore signalSemaphore = nullptr;
 		};
 
 		bool RecordCopy(const Immediate::Vulkan& a_vk, VkCommandBuffer a_commands, const NativeResource& a_destination, uint32_t a_destinationSub, VkOffset3D a_at,
