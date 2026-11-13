@@ -1,5 +1,6 @@
 #include "Deferred.h"
 #include "Features/DrawcallLimitFix.h"
+#include "Features/GraphicsAPI.h"
 #include "Features/RenderDoc.h"
 #include "Features/Upscaling.h"
 #include "Features/RemoteControl/GpuCountersTrace.h"
@@ -68,6 +69,8 @@ extern "C" DLLEXPORT bool SKSEAPI SKSEPlugin_Load(const SKSE::LoadInterface* a_s
 	logger::info("Loaded {} {} (build {})", Plugin::NAME, Plugin::VERSION.string(), Plugin::BUILD_DESCRIBE);
 	// The test configuration (and the old CommunityShaders.env), before anything reads a switch.
 	Testing::LoadConfig();
+	// The graphics API (DXVK Vulkan, native Vulkan or native D3D12): sets CS_ORG_NATIVE and CS_ORG_NATIVE_BACKEND for it.
+	GraphicsAPI::ApplyAtBoot();
 	// CS_ORG_NATIVE=1: the port switches native mode needs, before anything reads them.
 	RenderGraph::Engine::Native::ApplySwitches();
 	SKSE::Init(a_skse);

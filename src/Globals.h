@@ -50,6 +50,7 @@ class State;
 class Deferred;
 struct TruePBR;
 struct DeveloperTools;
+struct GraphicsAPI;
 class RenderDoc;
 class RemoteControl;
 class Menu;
@@ -134,6 +135,7 @@ namespace globals
 		extern HDRDisplay hdrDisplay;
 		extern Effects11 effects11;
 		extern DeveloperTools developerTools;
+		extern GraphicsAPI graphicsAPI;
 		// Developer Tools components, not features: driven by developerTools.
 		extern RenderDoc renderDoc;
 		extern RemoteControl remoteControl;

@@ -6,6 +6,7 @@
 #include "Features/CSEditor.h"
 #include "Features/CloudShadows.h"
 #include "Features/DeveloperTools.h"
+#include "Features/GraphicsAPI.h"
 #include "Features/DynamicCubemaps.h"
 #include "Features/Effects11.h"
 #include "Features/ExponentialHeightFog.h"
@@ -230,6 +231,7 @@ const std::vector<Feature*>& Feature::GetFeatureList()
 		&globals::features::extendedTranslucency,
 		&globals::features::upscaling,
 		&globals::features::developerTools,
+		&globals::features::graphicsAPI,
 		&globals::features::csEditor,
 		&globals::features::sceneManager,
 		&globals::features::screenshotFeature,

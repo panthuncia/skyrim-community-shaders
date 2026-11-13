@@ -11,6 +11,7 @@
 #include "Features/CSEditor.h"
 #include "Features/CloudShadows.h"
 #include "Features/DeveloperTools.h"
+#include "Features/GraphicsAPI.h"
 #include "Features/DynamicCubemaps.h"
 #include "Features/Effects11.h"
 #include "Features/ExponentialHeightFog.h"
@@ -113,6 +114,7 @@ namespace globals
 		HDRDisplay hdrDisplay{};
 		Effects11 effects11{};
 		DeveloperTools developerTools{};
+		GraphicsAPI graphicsAPI{};
 		RenderDoc renderDoc{};
 		RemoteControl remoteControl{};
 		ScreenshotFeature screenshotFeature{};
