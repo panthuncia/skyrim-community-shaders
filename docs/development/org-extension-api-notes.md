@@ -1853,3 +1853,15 @@ is not declarable at the build (`PublishedResources::IsDeclarable`), so the call
 - **Not checked:** whether a host-owned external image with a home layout behaves the same as a version in the persistent graph's
   frame rebindings in guest mode.
 - **Found by:** native frame graph Phase 2, versioned identities lane (2026-11-13).
+
+## Rebuild request count and reasons on `GraphHost`
+
+- **Need:** an application driving `BuildEpochGraph`/`AttachEpochGraph` must tell whether a request arrived after a build was handed
+  out (to drop it), must not retry a failed build until someone asks again, and wants the reasons for its log line. `RebuildRequested`
+  is a bool, and the reasons were private.
+- **Added** (ORG branch `org-native/p4-build-manager`): `GraphHost::RebuildRequests(epoch)` (monotonic count) and
+  `RebuildReasons(epoch)` (the pending reasons, joined as the build log joins them).
+- **Wanted next:** a way to publish the pipeline registry at a held-host point without a whole synchronous rebuild (shader reload is
+  the last structural build CS still makes on the render thread outside DCLF), and failures of `BuildEpochGraph` reported through
+  `PollEpochFailures` or not, by option (CS calls its owners itself now).
+- **Found by:** native frame graph Phase 4, build manager lane (2026-11-13).

@@ -22,14 +22,12 @@ namespace DCLF
 			failed = true;
 		}
 		auto& rv = impl->revisions;
-		// Explicit while scene revisions draw: an extension added or removed during a frame waits for this point, so the graph a
-		// frame's revision was recorded on runs through that frame (a build invalidates every recording: the frame waits at its start for
-		// a snapshot recorded on the new build, AdoptCurrentSnapshot). Failed, the graph builds at its next submission.
-		const bool explicitBuilds = !failed;
-		if (rv.explicitBuilds != explicitBuilds) {
-			rv.explicitBuilds = explicitBuilds;
-			host->SetExplicitBuilds(explicitBuilds);
-		}
+		// The host always builds explicitly (the build manager: RenderGraphRuntime::BuildIfRequested). While scene revisions draw, this
+		// point is the frame's build point: an extension added or removed during a frame waits for it, so the graph a frame's revision
+		// was recorded on runs through that frame (a build invalidates every recording: the frame waits at its start for a snapshot
+		// recorded on the new build, AdoptCurrentSnapshot). DCLF's epochs are built here, on this thread; the others' builds that
+		// finished off the render thread are attached here. Failed, the frame's end is the build point (RenderGraphRuntime::SealPresented).
+		rv.explicitBuilds = !failed;
 		// The passes this frame needs (an interior's, the cull mode's): a change rebuilds the graph here, before anything records on it.
 		Draws::RefreshGraphConditions(*host);
 		impl->BuildIfAsked();
@@ -40,13 +38,26 @@ namespace DCLF
 		impl->ReleaseTicketsForRecordings(*host, RenderGraphRuntime::Get().TakeSubmittedSegments());
 	}
 
-	void IndirectDraws::Impl::BuildIfAsked()
+	std::uint64_t IndirectDraws::Impl::GraphBuildGeneration(const org::GraphHost& a_host)
+	{
+		std::uint64_t builds = 0;
+		for (std::uint32_t segment = 0; segment < static_cast<std::uint32_t>(RenderGraphRuntime::Segment::Count); ++segment)
+			if (RenderGraphRuntime::IsDclfSegment(static_cast<RenderGraphRuntime::Segment>(segment)))
+				builds += a_host.BuildGeneration(RenderGraphRuntime::EpochOf(static_cast<RenderGraphRuntime::Segment>(segment)));
+		return builds;
+	}
+
+	void IndirectDraws::Impl::BuildIfAsked(bool a_ownEpochsOnly)
 	{
 		// What the revision code asked of the owner thread (shadow view slots: their buffers and the extension declaring them), built
 		// here with the rest.
 		ServeRevisionRequests();
 		// Through the runtime: a host that failed (a lost device) stops the graph there instead of throwing into the frame.
-		if (revisions.explicitBuilds && RenderGraphRuntime::Get().BuildIfRequested())
+		// a_ownEpochsOnly (a frame's wait for its snapshot): DCLF's epochs alone. Attaching another epoch's build there would move the
+		// host's build generation again and make the snapshot being waited for stale (StaleKindOf); those wait for the next build point.
+		if (revisions.explicitBuilds &&
+			(a_ownEpochsOnly ? RenderGraphRuntime::Get().BuildOwnerEpochsNow("Drawcall Limit Fix's wait for a snapshot") :
+								RenderGraphRuntime::Get().BuildIfRequested("Drawcall Limit Fix's build point")))
 			++revisions.builds;
 		// The graph's build and its heaps, the pipelines' generations, the toggles: revision inputs, posted when they moved.
 		PostRevisionInputs();
@@ -100,7 +111,7 @@ namespace DCLF
 			participant->PostInputs(next);
 		next.scene = scene;
 		if (auto* host = RenderGraphRuntime::Get().Host()) {
-			next.buildGeneration = host->BuildGeneration();
+			next.buildGeneration = GraphBuildGeneration(*host);
 			for (std::size_t segment = 0; segment < next.epochBuilds.size(); ++segment)
 				next.epochBuilds[segment] = host->BuildGeneration(RenderGraphRuntime::EpochOf(static_cast<RenderGraphRuntime::Segment>(segment)));
 			if (auto* descriptors = host->Descriptors()) {
@@ -185,7 +196,7 @@ namespace DCLF
 		return fmt::format("adopted snapshot serial {} (revision {}, draws complete {}, stale kind {} of {}, build generation {} against {}, main generation {} against {}), "
 						   "newest taken stale {}, payload {}, adopted set {}; epochs: {}",
 			adopted ? adopted->serial : 0, adopted && adopted->revision, adopted && adopted->drawsComplete, adopted ? s.StaleKindOf(*adopted) : static_cast<std::size_t>(Impl::kStaleKinds),
-			static_cast<std::size_t>(Impl::kStaleKinds), adopted ? adopted->buildGeneration : 0, host ? host->BuildGeneration() : 0,
+			static_cast<std::size_t>(Impl::kStaleKinds), adopted ? adopted->buildGeneration : 0, host ? Impl::GraphBuildGeneration(*host) : 0,
 			adopted ? adopted->mainGeneration : 0, s.postedInputs.mainGeneration, s.snapshotStale, !payload ? "none" : FrameValues::Get().Available() ? "installed" : "installed, NO FRAME VALUES",
 			s.adoptedSet ? "named" : "none", epochs);
 	}

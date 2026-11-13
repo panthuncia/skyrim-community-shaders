@@ -7,6 +7,7 @@
 
 #	include "Globals.h"
 #	include "RenderGraph/Backend.h"
+#	include "RenderGraph/BuildManager.h"
 #	include "RenderGraph/DxvkImageImport.h"
 #	include "RenderGraph/DxvkOrgInterop.h"
 #	include "RenderGraph/RenderGraphRuntime.h"
@@ -26,6 +27,7 @@
 #	include <algorithm>
 #	include <atomic>
 #	include <bit>
+#	include <shared_mutex>
 #	include <vector>
 
 namespace GraphResources
@@ -501,23 +503,33 @@ namespace GraphResources
 	{
 		std::atomic<std::uint64_t> resizeGeneration{ 0 };
 		std::atomic<std::uint64_t> structuralRebuilds{ 0 };
+
+		/**
+		 * @brief Register (a graph build, possibly on the build manager's thread) reads a twin's resource and slot while a Resize (the
+		 * render thread) replaces them. Register holds it shared, Resize exclusively: a resize waits only for a registration in progress.
+		 */
+		std::shared_mutex& RegisterMutex()
+		{
+			static std::shared_mutex s_mutex;
+			return s_mutex;
+		}
 	}
 
 	void RequestStructuralRebuild(std::string_view a_reason, std::span<const std::uint32_t> a_epochs)
 	{
-		auto* host = RenderGraphRuntime::Get().Host();
-		if (!host)
+		// Built off the render thread by the build manager, attached at a frame boundary.
+		if (!RenderGraphRuntime::Get().Host())
 			return;
 		const auto count = structuralRebuilds.fetch_add(1, std::memory_order_relaxed) + 1;
 		const auto reason = fmt::format("structural: {}", a_reason);
 		if (a_epochs.empty()) {
 			logger::info("[ORG] structural rebuild {} (every epoch): {}", count, a_reason);
-			host->RequestRebuild(reason);
+			RenderGraph::Builds::RequestAll(reason);
 			return;
 		}
 		logger::info("[ORG] structural rebuild {} ({} epochs): {}", count, a_epochs.size(), a_reason);
 		for (const auto epoch : a_epochs)
-			host->RequestRebuild(epoch, reason);
+			RenderGraph::Builds::Request(epoch, reason);
 	}
 
 	std::uint64_t StructuralRebuilds()
@@ -563,6 +575,7 @@ namespace GraphResources
 
 	void Resource::Register(org::RenderGraph& a_graph) const
 	{
+		std::shared_lock lock(RegisterMutex());
 		if (slot) {
 			// PublishedResources may have registered the same slot under the same id already: a graph takes one resolver an id.
 			const org::ResourceIdentifier id(name);
@@ -653,6 +666,7 @@ namespace GraphResources
 	{
 		if (a_width == desc.Width && a_height == desc.Height)
 			return false;
+		std::unique_lock lock(RegisterMutex());
 		const UINT mips = MipsOf(desc);
 		auto previous = slot;
 		Reset();
@@ -702,6 +716,7 @@ namespace GraphResources
 	{
 		if (a_width == desc.Width && a_height == desc.Height && a_depth == desc.Depth)
 			return false;
+		std::unique_lock lock(RegisterMutex());
 		const auto mipsOf = [](const D3D11_TEXTURE3D_DESC& a_desc) {
 			return a_desc.MipLevels ? a_desc.MipLevels : static_cast<UINT>(std::bit_width((std::max)({ a_desc.Width, a_desc.Height, a_desc.Depth, 1u })));
 		};

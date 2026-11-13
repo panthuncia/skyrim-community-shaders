@@ -6,6 +6,7 @@
 #	include "Features/RemoteControl/Gpa.h"
 
 #	include "Globals.h"
+#	include "RenderGraph/BuildManager.h"
 #	include "RenderGraph/DxvkOrgInterop.h"
 
 #	include <OpenRenderGraph/GraphHost.h>
@@ -238,7 +239,7 @@ namespace GpuCounters::detail
 						}
 						g_session.store(session, std::memory_order_release);
 						g_recording.store(true, std::memory_order_release);
-						host->RequestRebuild("GPA profiling");
+						RenderGraph::Builds::RequestAll("GPA profiling");
 						armGeneration = host->BuildGeneration();
 						phaseFrame = frame;
 						phase = Phase::Arming;
@@ -258,7 +259,7 @@ namespace GpuCounters::detail
 				case Phase::Measuring:
 					// PresentBegin closed the measured frame: no more samples are recorded.
 					g_recording.store(false, std::memory_order_release);
-					host->RequestRebuild("GPA profiling");
+					RenderGraph::Builds::RequestAll("GPA profiling");
 					disarmGeneration = host->BuildGeneration();
 					drainFrame = 0;
 					phase = Phase::Draining;
@@ -319,7 +320,7 @@ namespace GpuCounters::detail
 				SetRangesActive(false);
 				CloseEngineRanges();
 				if (g_recording.exchange(false))
-					host->RequestRebuild("GPA profiling");
+					RenderGraph::Builds::RequestAll("GPA profiling");
 				// The session's command buffers may still execute: it is released once they cannot (Advance is not called
 				// without a capture, so the next capture's Begin waits for Idle and this drains on its own frames).
 				ReleaseSession();
@@ -491,7 +492,7 @@ namespace GpuCounters::detail
 				SetRangesActive(false);
 				CloseEngineRanges();
 				if (g_recording.exchange(false))
-					host->RequestRebuild("GPA profiling");
+					RenderGraph::Builds::RequestAll("GPA profiling");
 				ReleaseSession();
 				return Finished(std::move(a_error));
 			}

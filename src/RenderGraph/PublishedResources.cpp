@@ -5,6 +5,7 @@
 
 #	include "RenderGraph/PublishedResources.h"
 
+#	include "RenderGraph/BuildManager.h"
 #	include "RenderGraph/Engine/LoadingScreen/LoadingScreen.h"
 #	include "RenderGraph/FrameAnchors.h"
 #	include "RenderGraph/GraphResources.h"
@@ -18,6 +19,7 @@
 
 #	include <algorithm>
 #	include <atomic>
+#	include <mutex>
 #	include <optional>
 #	include <string>
 #	include <vector>
@@ -57,12 +59,18 @@ namespace PublishedResources
 		struct State
 		{
 			std::vector<Entry> entries;
-			// Ids a build skipped before they were published (IsDeclarable): their publish builds every graph again.
+			// Ids a build skipped before they were published (IsDeclarable): their publish builds every graph again. Under skippedMutex:
+			// builds run on the build manager's thread.
 			std::vector<std::string> skipped;
+			std::mutex skippedMutex;
 			// Stays atomic although every call is on the render thread: it is cheap, and an extension made off that thread (a build
 			// on another owner thread) would still read a whole snapshot.
 			std::atomic<std::shared_ptr<const Snapshot>> snapshot;
 		};
+
+		// The snapshot the graph being built on this thread registers (PublishedExtension::PrepareForBuild, before any pass declares): what
+		// IsDeclarable answers from during a build. Weak, so a thread's last build pins nothing.
+		thread_local std::weak_ptr<const Snapshot> t_building;
 
 		State& Published()
 		{
@@ -108,6 +116,7 @@ namespace PublishedResources
 
 			void PrepareForBuild(org::RenderGraph& a_graph) override
 			{
+				t_building = snapshot;
 				if (!snapshot)
 					return;
 				for (const auto& entry : snapshot->resources) {
@@ -151,10 +160,15 @@ namespace PublishedResources
 				return;
 			}
 			const auto& added = a_state.entries.back().id;
-			if (a_change == Change::Added && std::erase(a_state.skipped, added))
-				a_host.RequestRebuild(fmt::format("published resource {} added, which a build skipped", a_what));
+			bool wasSkipped = false;
+			if (a_change == Change::Added) {
+				std::scoped_lock lock(a_state.skippedMutex);
+				wasSkipped = std::erase(a_state.skipped, added) != 0;
+			}
+			if (wasSkipped)
+				RenderGraph::Builds::RequestAll(fmt::format("published resource {} added, which a build skipped", a_what));
 			else if (a_change == Change::Added)
-				a_host.RequestRebuildFor(org::ResourceIdentifier(added), fmt::format("published resource {} added", a_what));
+				RenderGraph::Builds::RequestFor(added, fmt::format("published resource {} added", a_what));
 			else
 				GraphResources::RequestStructuralRebuild(fmt::format("published resource {} replaced by a new resource", a_what));
 		}
@@ -347,9 +361,15 @@ namespace PublishedResources
 
 	bool IsDeclarable(std::string_view a_id)
 	{
+		// Called by passes as a graph is built, which may be on the build manager's thread: it reads the snapshot that graph registers
+		// (the latest published one outside a build), never the entries the render thread changes.
 		auto& state = Published();
-		if (Find(state, a_id))
+		auto snapshot = t_building.lock();
+		if (!snapshot)
+			snapshot = state.snapshot.load(std::memory_order_acquire);
+		if (snapshot && std::ranges::any_of(snapshot->resources, [&](const Snapshot::Registered& a_entry) { return a_entry.id == a_id; }))
 			return RenderGraphRuntime::Get().IsActive();
+		std::scoped_lock lock(state.skippedMutex);
 		if (std::ranges::find(state.skipped, a_id) == state.skipped.end())
 			state.skipped.emplace_back(a_id);
 		return false;
