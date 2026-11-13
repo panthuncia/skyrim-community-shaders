@@ -189,7 +189,9 @@ namespace DCLF::Features::Fades
 
 	void RegisterPixelRows(Api::InstallContext& a_context)
 	{
-		pixelRowsPool = a_context.RegisterFrameValuePool({ .name = "pixel-rows", .stride = Draws::kPixelObjectRowBytes, .deviceAddress = true, .kick = &PixelRowsKick,
+		pixelRowsPool = a_context.RegisterFrameValuePool({ .name = "pixel-rows", .stride = Draws::kPixelObjectRowBytes, .deviceAddress = true,
+			.unorderedAccess = true,  // PixelRowsCS stores the rows: on D3D12 a buffer view ref's UAV is a null view without it
+			.kick = &PixelRowsKick,
 			.sample = &PixelRowsSample, .send = &PixelRowsSend });
 		a_context.RegisterFrameBinding({ .name = "object rows SRV", .textureRegister = kPixelObjectsRegister, .select = &SelectPixelRowsBinding });
 		a_context.RegisterPass({ .key = "fades.pixel-rows", .passName = "cs.dclf.z.pixel-rows", .make = &MakePixelRows, .setup = &PixelRowsSetup,
