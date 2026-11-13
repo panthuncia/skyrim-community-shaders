@@ -188,7 +188,9 @@ namespace RenderGraph
 			latch->Set({});
 			return {};
 		}
-		buffer->PublishLate(a_backing, std::move(a_owner));
+		// The same backing again (a frame reading the version the last one did) keeps its version.
+		if (buffer->Get() != a_backing)
+			buffer->PublishLate(a_backing, std::move(a_owner));
 		const BufferRef ref = MakeBufferRef(host->Device(), a_backing->GetAPIResource().GetHandle(), 0, std::source_location::current());
 		latch->Set(a_used ? a_used : ref);
 		return ref;

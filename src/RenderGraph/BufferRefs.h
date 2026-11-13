@@ -141,7 +141,7 @@ namespace RenderGraph
 		/**
 		 * @brief The frame's adoption (render thread): a_backing becomes the current version, kept alive with a_owner. The latch takes
 		 * a_used, the ref the readers' tables carry (made earlier, from the backing they were built for), or a_backing's own ref when
-		 * a_used is null. A null backing publishes nothing and clears the latch.
+		 * a_used is null. The current backing again keeps its version. A null backing publishes nothing and clears the latch.
 		 * @return a_backing's ref at byte 0 (null without a backing or a graph host). Not a raw ref: readers declare the buffer.
 		 */
 		BufferRef Publish(const std::shared_ptr<org::Buffer>& a_backing, std::shared_ptr<const void> a_owner, BufferRef a_used = {});
