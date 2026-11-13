@@ -970,7 +970,7 @@ namespace DCLF
 			// payload version may wait for a backing the last frames read or hold.
 			s.ServeRevisionRequests();
 			if (s.revisions.explicitBuilds && host->RebuildRequested())
-				s.BuildIfAsked();
+				s.BuildIfAsked(true);
 			// The graph stopped (its host failed: a lost device): no snapshot will come. The frame start reports it (FrameDriver).
 			if (!RenderGraphRuntime::Get().IsActive()) {
 				s.frameWaiting.store(false, std::memory_order_release);

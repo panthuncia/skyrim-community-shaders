@@ -38,13 +38,17 @@ namespace DCLF
 		impl->ReleaseTicketsForRecordings(*host, RenderGraphRuntime::Get().TakeSubmittedSegments());
 	}
 
-	void IndirectDraws::Impl::BuildIfAsked()
+	void IndirectDraws::Impl::BuildIfAsked(bool a_ownEpochsOnly)
 	{
 		// What the revision code asked of the owner thread (shadow view slots: their buffers and the extension declaring them), built
 		// here with the rest.
 		ServeRevisionRequests();
 		// Through the runtime: a host that failed (a lost device) stops the graph there instead of throwing into the frame.
-		if (revisions.explicitBuilds && RenderGraphRuntime::Get().BuildIfRequested("Drawcall Limit Fix's build point"))
+		// a_ownEpochsOnly (a frame's wait for its snapshot): DCLF's epochs alone. Attaching another epoch's build there would move the
+		// host's build generation again and make the snapshot being waited for stale (StaleKindOf); those wait for the next build point.
+		if (revisions.explicitBuilds &&
+			(a_ownEpochsOnly ? RenderGraphRuntime::Get().BuildOwnerEpochsNow("Drawcall Limit Fix's wait for a snapshot") :
+								RenderGraphRuntime::Get().BuildIfRequested("Drawcall Limit Fix's build point")))
 			++revisions.builds;
 		// The graph's build and its heaps, the pipelines' generations, the toggles: revision inputs, posted when they moved.
 		PostRevisionInputs();

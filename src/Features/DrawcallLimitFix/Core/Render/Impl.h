@@ -324,8 +324,9 @@ namespace DCLF
 		/**
 		 * @brief Render thread (the build point, and a frame's wait for a current snapshot): the revision code's requests served, the
 		 * graph built when an extension was added or removed (explicit builds), and the revision inputs posted when they moved.
+		 * a_ownEpochsOnly: only DCLF's epochs are built (BuildOwnerEpochsNow); the other epochs' finished builds are not attached.
 		 */
-		void BuildIfAsked();
+		void BuildIfAsked(bool a_ownEpochsOnly = false);
 		/** @brief Render thread: while recordings are outstanding, every epoch's ready ticket outside a_submitted (segment bits) given back. */
 		void ReleaseTicketsForRecordings(org::GraphHost& a_host, std::uint64_t a_submitted);
 		/** @brief Render thread: posts the revision inputs when anything moved. Called where each value is captured (and ShadowHost's). */
