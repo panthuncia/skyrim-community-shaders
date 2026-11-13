@@ -13,8 +13,14 @@ struct LayerRow
 };
 
 #if defined(LAYER_GATHER)
+// The layer's faces one view each: a single cube has no whole-array SRV, only a one-slice array view per face.
 #	define LAYER_OPS_RESOURCES(X)                  \
-		X(SRV, Texture2DArray<float>, Layer, 0)     \
+		X(SRV, Texture2DArray<float>, Face0, 0)     \
+		X(SRV, Texture2DArray<float>, Face1, 1)     \
+		X(SRV, Texture2DArray<float>, Face2, 2)     \
+		X(SRV, Texture2DArray<float>, Face3, 3)     \
+		X(SRV, Texture2DArray<float>, Face4, 4)     \
+		X(SRV, Texture2DArray<float>, Face5, 5)     \
 		X(UAV, RWTexture2DArray<float>, Scratch, 0) \
 		X(LATCH, LayerRow, Row, 0)
 #else
@@ -35,16 +41,41 @@ uint FaceWord(uint face)
 	return face < 4 ? Row.Faces0123[face] : Row.Faces45[face - 4];
 }
 
+#if defined(LAYER_GATHER)
+float LoadFace(uint face, int4 texel)
+{
+	// Each face view holds its face as its first slice.
+	switch (face) {
+	case 0:
+		return Face0.Load(texel);
+	case 1:
+		return Face1.Load(texel);
+	case 2:
+		return Face2.Load(texel);
+	case 3:
+		return Face3.Load(texel);
+	case 4:
+		return Face4.Load(texel);
+	default:
+		return Face5.Load(texel);
+	}
+}
+#endif
+
 [numthreads(8, 8, 1)] void main(uint3 dispatchThreadID : SV_DispatchThreadID) {
 	const uint word = FaceWord(dispatchThreadID.z);
 	if (word == kNone)
 		return;
-	uint width, height, faces;
-	Layer.GetDimensions(width, height, faces);
+	uint width, height, slices;
+#if defined(LAYER_GATHER)
+	Face0.GetDimensions(width, height, slices);
+#else
+	Layer.GetDimensions(width, height, slices);
+#endif
 	if (dispatchThreadID.x >= width || dispatchThreadID.y >= height)
 		return;
 #if defined(LAYER_GATHER)
-	Scratch[uint3(dispatchThreadID.xy, word)] = Layer.Load(int4(dispatchThreadID.xy, dispatchThreadID.z, 0));
+	Scratch[uint3(dispatchThreadID.xy, word)] = LoadFace(dispatchThreadID.z, int4(dispatchThreadID.xy, 0, 0));
 #else
 	Layer[dispatchThreadID] = word == kZero ? 0.0f : Scratch.Load(int4(dispatchThreadID.xy, word, 0));
 #endif

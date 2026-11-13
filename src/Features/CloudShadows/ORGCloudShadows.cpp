@@ -390,10 +390,18 @@ namespace
 	constexpr std::uint8_t kUntouched = 0xFF;
 	constexpr std::uint8_t kZero = 0xFE;
 
-	/** @brief LayerOpsCS's push block (LAYER_OPS_RESOURCES): the input's view, the output's view, the layer's row. */
-	struct LayerOpsBlock
+	/** @brief LayerOpsCS's gather push block (LAYER_OPS_RESOURCES with LAYER_GATHER): the layer's six faces, the scratch, the row. */
+	struct LayerGatherBlock
 	{
-		ShaderBindings::Handle input, output;
+		std::array<ShaderBindings::Handle, kFaces> faces;
+		ShaderBindings::Handle scratch;
+		ShaderBindings::Latch row;
+	};
+
+	/** @brief LayerOpsCS's scatter push block: the scratch, the layer's face array, the row. */
+	struct LayerScatterBlock
+	{
+		ShaderBindings::Handle scratch, layer;
 		ShaderBindings::Latch row;
 	};
 
@@ -449,7 +457,8 @@ namespace
 
 	struct LayerBindings
 	{
-		std::array<org::DeclaredViewToken, kLayers> layers;  // each layer's face array (mip 0)
+		std::array<org::DeclaredViewToken, kLayers> layers;                       // scatter: each layer's face array (mip 0)
+		std::array<std::array<org::DeclaredViewToken, kFaces>, kLayers> faces{};  // gather: each layer's faces, one view each (mip 0)
 		org::DeclaredViewToken scratch;
 	};
 
@@ -472,13 +481,24 @@ namespace
 		LayerBindings Declare(org::PassBuilder& a_builder)
 		{
 			a_builder.PreferQueue(org::QueueKind::Graphics);
-			// Every face of mip 0, as an array (the layers are cubes; the shader reads and writes a face as its slice).
-			const org::SrvView srv{ .variant = static_cast<std::uint32_t>(org::SRVViewType::Texture2DArrayFull) };
-			const org::UavView uav{ .variant = static_cast<std::uint32_t>(org::UAVViewType::Texture2DArrayFull) };
+			// The views ORG makes of a single cube: TextureCube, one Texture2DArray view per face (as the occlusion copy reads), and a
+			// Texture2DArrayFull UAV; no Texture2DArrayFull SRV, which only a 2D array has (the scratch). So the gather reads a layer's
+			// faces one view each, and the scatter writes its faces through the whole-array UAV.
+			const org::SrvView arraySrv{ .variant = static_cast<std::uint32_t>(org::SRVViewType::Texture2DArrayFull) };
+			const org::UavView arrayUav{ .variant = static_cast<std::uint32_t>(org::UAVViewType::Texture2DArrayFull) };
+			std::array<org::SrvView, kFaces> faceViews;
+			for (std::uint32_t f = 0; f < kFaces; ++f)
+				faceViews[f] = { .variant = static_cast<std::uint32_t>(org::SRVViewType::Texture2DArray), .mip = 0, .slice = f };
 			LayerBindings bindings;
-			for (std::uint32_t l = 0; l < kLayers; ++l)
-				bindings.layers[l] = scatter ? a_builder.UnorderedAccess(ops->layers[l], uav).View() : a_builder.ShaderResource(ops->layers[l], srv).View();
-			bindings.scratch = scatter ? a_builder.ShaderResource(scratch, srv).View() : a_builder.UnorderedAccess(scratch, uav).View();
+			for (std::uint32_t l = 0; l < kLayers; ++l) {
+				if (scatter) {
+					bindings.layers[l] = a_builder.UnorderedAccess(ops->layers[l], arrayUav).View();
+					continue;
+				}
+				const auto views = a_builder.ShaderResource(ops->layers[l], std::span<const org::SrvView>(faceViews)).views;
+				std::copy_n(views.begin(), kFaces, bindings.faces[l].begin());
+			}
+			bindings.scratch = scatter ? a_builder.ShaderResource(scratch, arraySrv).View() : a_builder.UnorderedAccess(scratch, arrayUav).View();
 			return bindings;
 		}
 
@@ -496,12 +516,19 @@ namespace
 			const auto& program = a_frame.scatter ? *ops.scatter : *ops.gather;
 			const std::uint32_t scratch = a_recording.Index(a_bindings.scratch);
 			for (std::uint32_t l = 0; l < kLayers; ++l) {
-				const std::uint32_t layer = a_recording.Index(a_bindings.layers[l]);
-				LayerOpsBlock block{};
-				block.input = a_frame.scatter ? scratch : layer;
-				block.output = a_frame.scatter ? layer : scratch;
-				block.row = ShaderBindings::LatchOf(*ops.latch, a_recording.Run(), (a_frame.scatter ? kScatterRows : 0) + l * kRowBytes);
-				ops.gate->Dispatch(a_recording, program, ShaderBindings::Data(block), (a_frame.scatter ? kLayers : 0) + l);
+				if (a_frame.scatter) {
+					const LayerScatterBlock block{ .scratch = scratch,
+						.layer = a_recording.Index(a_bindings.layers[l]),
+						.row = ShaderBindings::LatchOf(*ops.latch, a_recording.Run(), kScatterRows + l * kRowBytes) };
+					ops.gate->Dispatch(a_recording, program, ShaderBindings::Data(block), kLayers + l);
+					continue;
+				}
+				LayerGatherBlock block{};
+				for (std::uint32_t f = 0; f < kFaces; ++f)
+					block.faces[f] = a_recording.Index(a_bindings.faces[l][f]);
+				block.scratch = scratch;
+				block.row = ShaderBindings::LatchOf(*ops.latch, a_recording.Run(), l * kRowBytes);
+				ops.gate->Dispatch(a_recording, program, ShaderBindings::Data(block), l);
 			}
 		}
 
@@ -581,9 +608,9 @@ bool ORGCloudShadows::SetupLayerOps()
 	next->width = layerDesc.Width;
 	next->height = layerDesc.Height;
 
-	const auto words = ShaderBindings::Words<LayerOpsBlock>();
-	next->gather = ComputeProgram::Load(host->Device(), { .source = kLayerShader, .constantWords = words, .defines = { { L"LAYER_GATHER", L"" } } });
-	next->scatter = ComputeProgram::Load(host->Device(), { .source = kLayerShader, .constantWords = words });
+	next->gather = ComputeProgram::Load(host->Device(),
+		{ .source = kLayerShader, .constantWords = ShaderBindings::Words<LayerGatherBlock>(), .defines = { { L"LAYER_GATHER", L"" } } });
+	next->scatter = ComputeProgram::Load(host->Device(), { .source = kLayerShader, .constantWords = ShaderBindings::Words<LayerScatterBlock>() });
 	next->gate = RenderGraph::RunGate::Create("CloudShadows::LayerOpsGate", 2 * kLayers);
 	next->latch = std::make_shared<org::LatchBlock>(std::string(kLayersClientId) + ".latch", kLatchBytes);
 	if (!next->gather || !next->scatter || !next->gate) {
