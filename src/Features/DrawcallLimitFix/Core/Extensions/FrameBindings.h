@@ -152,6 +152,9 @@ namespace DCLF::Extensions
 	 */
 	DeclaredReads DeclareGraphTextures(org::RenderPassBuilder& a_builder, std::span<const std::string_view> a_ids);
 
+	/** @brief DeclareGraphTextures, adding the declared reads to a_out. */
+	void DeclareGraphTextures(org::RenderPassBuilder& a_builder, std::span<const std::string_view> a_ids, DeclaredReads& a_out);
+
 	/**
 	 * @brief Render thread (a commit): the one rule for reading a published texture. When a_view is the export of one of a_ids that a
 	 * graph build declared, writes that id's bindless index into a_index and returns true. Otherwise returns false, and the caller

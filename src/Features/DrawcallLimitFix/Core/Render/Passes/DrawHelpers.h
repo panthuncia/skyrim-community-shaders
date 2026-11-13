@@ -9,6 +9,7 @@
 #include "Features/DrawcallLimitFix/Core/Render/Main/Resources.h"
 #include "RenderGraph/BufferRef.h"
 #include "Features/DrawcallLimitFix/Api/Passes.h"
+#include "Features/DrawcallLimitFix/Core/Extensions/FrameBindings.h"
 #include "Features/DrawcallLimitFix/Core/Gpu/Pipelines/DrawPipelines.h"
 #include "Features/DrawcallLimitFix/Core/Render/Payload/Latched.h"
 #include "Features/DrawcallLimitFix/Core/Render/Resources/GpuLayouts.h"
@@ -79,10 +80,11 @@ namespace DCLF::Draws
 	std::shared_ptr<org::RenderPass> MakeShadowIndexPoolPass(const std::shared_ptr<ShadowResources>& a_resources);
 
 	/**
-	 * @brief A pass's frame buffers (t16 and up), Light Limit Fix's lights (t35-t37) and the frame textures' published ids
-	 * (Extensions::DeclareGraphTextures) declared as read, through no view.
+	 * @brief A pass's frame buffers (t16 and up) declared as read through no view, and Light Limit Fix's lights (t35-t37) and the frame
+	 * textures' published ids (Extensions::DeclareGraphTextures) declared with the views whose indices the commit latches.
+	 * @return Those published reads, for Extensions::CheckDeclaredReads in the pass's Prepare.
 	 */
-	void DeclareFrameBuffers(org::PassBuilder& a_builder, const Resources& a_resources, bool a_lights = true);
+	Extensions::DeclaredReads DeclareFrameBuffers(org::PassBuilder& a_builder, const Resources& a_resources, bool a_lights = true);
 
 	/**
 	 * @brief One device-generated call of a draw pass: its signature (a state class's: each call draws one class's sub-range of a range),

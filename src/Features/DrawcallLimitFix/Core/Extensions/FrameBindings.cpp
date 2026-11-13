@@ -159,18 +159,24 @@ namespace DCLF::Extensions
 	DeclaredReads DeclareGraphTextures(org::RenderPassBuilder& a_builder, std::span<const std::string_view> a_ids)
 	{
 		DeclaredReads reads;
+		DeclareGraphTextures(a_builder, a_ids, reads);
+		return reads;
+	}
+
+	void DeclareGraphTextures(org::RenderPassBuilder& a_builder, std::span<const std::string_view> a_ids, DeclaredReads& a_out)
+	{
 		const auto declared = s_declared.load(std::memory_order_acquire);
 		std::vector<std::string_view> added;
 		for (const auto id : a_ids) {
 			// Only ids every graph registers: declaring another would fail the build. One skipped is built in once published.
 			if (!PublishedResources::IsDeclarable(id))
 				continue;
-			DeclarePublishedRead(a_builder, id, reads);
+			DeclarePublishedRead(a_builder, id, a_out);
 			if (!declared || std::ranges::find(*declared, id) == declared->end())
 				added.push_back(id);
 		}
 		if (added.empty())
-			return reads;
+			return;
 		auto next = std::make_shared<std::vector<std::string_view>>();
 		if (declared)
 			*next = *declared;
@@ -178,7 +184,6 @@ namespace DCLF::Extensions
 			if (std::ranges::find(*next, id) == next->end())
 				next->push_back(id);
 		s_declared.store(std::move(next), std::memory_order_release);
-		return reads;
 	}
 
 	bool GraphTextureIndex(GraphTextureReader a_reader, std::uint32_t a_register, std::string_view a_name, const ID3D11ShaderResourceView* a_view,
