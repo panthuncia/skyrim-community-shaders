@@ -726,7 +726,8 @@ namespace ImGuiBasicRHI
 
 	Binding BindingOf(const std::shared_ptr<Texture>& a_texture, int a_mip)
 	{
-		if (!a_texture || a_texture->views.empty())
+		// An exempt texture is read through its own views; ImGui's are read through the passes' declarations.
+		if (!a_texture || (a_texture->exempt && a_texture->views.empty()))
 			return {};
 		return { kNoIndex, a_texture, a_texture, a_mip };
 	}
