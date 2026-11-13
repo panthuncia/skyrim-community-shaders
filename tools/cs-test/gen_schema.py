@@ -40,6 +40,36 @@ SPECIAL = {
         "use_instead": "[features] <ShortName> = false",
         "description": "comma-separated feature short names disabled at boot (write [features] instead)",
     },
+    "CS_ORG_EPOCH_STATS": {
+        "key": "org.epoch_stats", "type": "bool", "default": False,
+        "description": "true: render-thread CPU time per epoch, each anchor's peak runs a frame, and the run shapes per window "
+                       "(\"[ORG] run shapes\")",
+    },
+    "CS_ORG_NATIVE_OP_CENSUS": {
+        "key": "org.native_op_census", "type": "bool", "default": False,
+        "description": "true: native mode's immediate-context operations per frame by kind, target and frame position "
+                       "(\"[ORG native] op census\")",
+    },
+    "CS_ORG_NATIVE_WRITE_CENSUS": {
+        "key": "org.native_write_census", "type": "bool", "default": False,
+        "description": "true: native SRV-only textures and VB/IB-only buffers written after creation (\"[ORG native] write census\")",
+    },
+    "CS_ORG_VALIDATE_UNDECLARED": {
+        "key": "org.validate_undeclared", "type": "bool", "default": False,
+        "description": "true: log raw bindless indices and buffer refs of resources that are not exempt (\"[ORG] undeclared access\")",
+    },
+    "CS_ORG_VALIDATE_UNDECLARED_LOG": {
+        "key": "org.validate_undeclared_log", "type": "int",
+        "description": "how many first-access lines the undeclared-access validator logs (default 256)",
+    },
+    "CS_ORG_CENSUS_FRAMES": {
+        "key": "org.census_frames", "type": "int",
+        "description": "frames per window report of the native censuses, run shapes and validator (default 600)",
+    },
+    "CS_ORG_CENSUS_TOP": {
+        "key": "org.census_top", "type": "int",
+        "description": "entries each of those window reports lists (default 25)",
+    },
     "CS_HANG_WATCHDOG": {
         "key": "cs.hang_watchdog", "type": "int",
         "description": "seconds without progress before the hang watchdog writes its report (default 15)",

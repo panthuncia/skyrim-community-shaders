@@ -1,0 +1,27 @@
+# Native frame graph plan, Phase 0: native Vulkan with every diagnostic on, the autoloaded save, a short stay in the world, exit.
+# Read the "[ORG native] op census", "[ORG native] write census", "[ORG] run shapes" and "[ORG] undeclared access" lines. Each
+# window (menu, loading screen, world) reports every 300 frames in it and when the game leaves it, so the menu and the load get
+# their own lines before the world's. The world reports twice before the exit.
+extends = ["native-vulkan", "quick"]
+
+[org]
+native_op_census = true
+native_write_census = true
+epoch_stats = true
+validate_undeclared = true
+census_frames = 300
+
+[[steps]]
+at = "world-ready"
+frames = 640
+do = "shot"
+arg = "census"
+
+[[steps]]
+at = "previous"
+frames = 10
+do = "exit"
+
+[expect]
+reach = "world-ready"
+shots = ["census"]
