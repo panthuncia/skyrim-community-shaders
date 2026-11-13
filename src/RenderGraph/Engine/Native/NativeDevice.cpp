@@ -22,6 +22,8 @@
 #	include "RenderGraph/DxvkImageImport.h"
 #	include "RenderGraph/Engine/D3D12Device.h"
 #	include "RenderGraph/Engine/Native/OpCensus.h"
+#	include "RenderGraph/Engine/Skeleton/SkeletonSites.h"
+#	include "RenderGraph/ExternalWork.h"
 #	include "RenderGraph/RenderGraphRuntime.h"
 #	include "RenderGraph/Switches.h"
 
@@ -2465,6 +2467,66 @@ namespace RenderGraph::Engine::Native
 		}
 
 		/**
+		 * @brief An operation that did not run on the immediate context's own path: a static graph pass took it, or ORG's external
+		 * client (org-native-frame-graph.md, Phase 3). Counted apart by the op census, and a write still marks its resource
+		 * (DescribeForCensus).
+		 */
+		void NoteRouted(OpCensus::Op a_op, NativeResource& a_record, OpCensus::Route a_route)
+		{
+			if (!OpCensus::Flags())
+				return;
+			if (OpCensus::IsWrite(a_op))
+				a_record.written.store(true, std::memory_order_relaxed);
+			OpCensus::RecordRouted(a_op, a_route);
+		}
+
+		/**
+		 * @brief An operation the immediate context records on its own path (Immediate: Vulkan's commands in GENERAL, or BasicRHI's
+		 * with Common transitions), outside every graph pass and the ledgers. Logged once per (operation, resource) while the render
+		 * graph is active, up to 64 lines, so a run shows what still takes this path (Phase 3). The op census counts every one.
+		 */
+		void NoteRaw(OpCensus::Op a_op, const NativeResource& a_record)
+		{
+			if (!RenderGraphRuntime::Get().IsActive())
+				return;
+			static std::mutex lock;
+			static std::unordered_set<std::uint64_t> logged;
+			constexpr std::size_t kMaxLines = 64;
+			std::lock_guard guard(lock);
+			if (logged.size() > kMaxLines)
+				return;
+			if (!logged.insert(a_record.serial * static_cast<std::uint64_t>(OpCensus::Op::Count) + static_cast<std::uint64_t>(a_op)).second)
+				return;
+			if (logged.size() > kMaxLines) {
+				logger::info("[ORG native] more operations take the immediate context's own path; only the first {} are logged", kMaxLines);
+				return;
+			}
+			logger::info("[ORG native] {} on \"{}\" runs on the immediate context's own path (not a graph pass or external work; logged once per "
+						 "operation and resource)",
+				OpCensus::Name(a_op), a_record.name);
+		}
+
+		/**
+		 * @brief The graph resource whose ledger an operation on a_record follows through ORG's external client (ExternalWork): a
+		 * tracked texture's PixelBuffer, or an exempt texture a write promoted once it is graph-managed (its home is the shader-read
+		 * state). Null for anything else: host-made images (the anchors import them), buffers, staging textures, and exempt textures
+		 * that are not promoted or not graph-managed yet. The work records on this resource's own handle, the one its barriers name.
+		 */
+		std::shared_ptr<org::Resource> LedgerResourceOf(NativeResource& a_record)
+		{
+			if (a_record.kind != NativeResource::Kind::Image)
+				return nullptr;
+			if (a_record.ownership == NativeResource::Ownership::Tracked)
+				return a_record.graphOwned;
+			if (a_record.ownership != NativeResource::Ownership::Exempt || !a_record.promoted.load(std::memory_order_acquire))
+				return nullptr;
+			std::lock_guard guard(a_record.graphLock);
+			if (a_record.exemptResource && a_record.exemptResource->IsRenderGraphManaged())
+				return a_record.exemptResource;
+			return nullptr;
+		}
+
+		/**
 		 * @brief The context is about to write a_record. An exempt texture is promoted to tracked, once: the context keeps moving it
 		 * out of the shader-read state and back around its own work (Immediate::LeaveShaderRead), which orders the write with the
 		 * graph's work on the graphics queue, and the graph resource made for it (ImmutableTextureOf) becomes graph-managed through the
@@ -2694,6 +2756,36 @@ namespace RenderGraph::Engine::Native
 		}
 
 		/**
+		 * @brief The destination and source regions of one subresource copy between two images, on the handles given (a record's own
+		 * import, or its graph resource's). a_box null is the whole source subresource. The subresources must exist.
+		 */
+		std::pair<rhi::TextureCopyRegion, rhi::TextureCopyRegion> ImageCopyRegions(const NativeResource& a_destination, rhi::ResourceHandle a_destinationHandle,
+			uint32_t a_destinationSub, uint32_t a_x, uint32_t a_y, uint32_t a_z, const NativeResource& a_source, rhi::ResourceHandle a_sourceHandle,
+			uint32_t a_sourceSub, const D3D11_BOX* a_box)
+		{
+			const Shape& sourceShape = a_source.shape;
+			const uint32_t sourceMip = a_sourceSub % sourceShape.mips;
+			rhi::TextureCopyRegion from{};
+			from.texture = a_sourceHandle;
+			from.mip = sourceMip;
+			from.arraySlice = a_sourceSub / sourceShape.mips;
+			from.x = a_box ? a_box->left : 0;
+			from.y = a_box ? a_box->top : 0;
+			from.z = a_box ? a_box->front : 0;
+			from.width = a_box ? a_box->right - a_box->left : sourceShape.Width(sourceMip);
+			from.height = a_box ? a_box->bottom - a_box->top : sourceShape.Height(sourceMip);
+			from.depth = a_box ? a_box->back - a_box->front : sourceShape.Depth(sourceMip);
+			rhi::TextureCopyRegion to = from;
+			to.texture = a_destinationHandle;
+			to.mip = a_destinationSub % a_destination.shape.mips;
+			to.arraySlice = a_destinationSub / a_destination.shape.mips;
+			to.x = a_x;
+			to.y = a_y;
+			to.z = a_z;
+			return { to, from };
+		}
+
+		/**
 		 * @brief RecordCopy with BasicRHI commands. Staging copies take whole subresources only (a box is refused, logged by the
 		 * caller), since a placed footprint must start at an aligned offset; a staging copy of a depth-stencil image is refused too.
 		 */
@@ -2726,23 +2818,8 @@ namespace RenderGraph::Engine::Native
 			const auto sourceRange = SubresourceOf(a_source, a_sourceSub);
 			const auto destinationRange = SubresourceOf(a_destination, a_destinationSub);
 			if (a_source.kind == Kind::Image && a_destination.kind == Kind::Image) {
-				rhi::TextureCopyRegion from{};
-				from.texture = a_source.resource->GetHandle();
-				from.mip = sourceMip;
-				from.arraySlice = sourceLayer;
-				from.x = a_box ? a_box->left : 0;
-				from.y = a_box ? a_box->top : 0;
-				from.z = a_box ? a_box->front : 0;
-				from.width = a_box ? a_box->right - a_box->left : sourceShape.Width(sourceMip);
-				from.height = a_box ? a_box->bottom - a_box->top : sourceShape.Height(sourceMip);
-				from.depth = a_box ? a_box->back - a_box->front : sourceShape.Depth(sourceMip);
-				rhi::TextureCopyRegion to = from;
-				to.texture = a_destination.resource->GetHandle();
-				to.mip = destinationMip;
-				to.arraySlice = destinationLayer;
-				to.x = a_x;
-				to.y = a_y;
-				to.z = a_z;
+				const auto [to, from] = ImageCopyRegions(a_destination, a_destination.resource->GetHandle(), a_destinationSub, a_x, a_y, a_z, a_source,
+					a_source.resource->GetHandle(), a_sourceSub, a_box);
 				Transition(a_list, { CopySource(a_source, sourceRange), CopyDest(a_destination, destinationRange) }, false);
 				a_list.CopyTextureRegion(to, from);
 				Transition(a_list, { CopySource(a_source, sourceRange), CopyDest(a_destination, destinationRange) }, true);
@@ -3053,6 +3130,7 @@ namespace RenderGraph::Engine::Native
 				const auto upload = record->upload;
 				if (OpCensus::Flags())
 					NoteOp(OpCensus::Op::UnmapUpload, *image, a_resource);
+				NoteRaw(OpCensus::Op::UnmapUpload, *image);
 				if (RhiContext()) {
 					g_device->immediate.RunRhi("unmap (dynamic upload) " + image->name,
 						[&](rhi::CommandList& a_list, const Immediate::Descriptors&) {
@@ -3069,6 +3147,38 @@ namespace RenderGraph::Engine::Native
 			}
 		}
 
+		/**
+		 * @brief Copies between two images the graph tracks through ORG's external client (ExternalWork): their ledgers give the
+		 * barriers, so no graph changes and the copy lands here in the stream. a_subresources lists (destination, source) subresource
+		 * pairs; with a_box, one region of the first pair to (a_x, a_y, a_z). False, with nothing done, when either image is not
+		 * tracked, a subresource does not exist, or the submission failed: the caller records the copy itself.
+		 */
+		bool CopyExternally(const std::shared_ptr<NativeResource>& a_destination, const std::shared_ptr<NativeResource>& a_source,
+			std::span<const std::pair<uint32_t, uint32_t>> a_subresources, uint32_t a_x, uint32_t a_y, uint32_t a_z, const D3D11_BOX* a_box)
+		{
+			if (a_destination->kind != NativeResource::Kind::Image || a_source->kind != NativeResource::Kind::Image || a_subresources.empty())
+				return false;
+			const auto to = LedgerResourceOf(*a_destination);
+			const auto from = LedgerResourceOf(*a_source);
+			if (!to || !from)
+				return false;
+			for (const auto& [destinationSub, sourceSub] : a_subresources)
+				if (destinationSub >= a_destination->shape.Subresources() || sourceSub >= a_source->shape.Subresources())
+					return false;
+			const auto toHandle = to->GetAPIResource().GetHandle();
+			const auto fromHandle = from->GetAPIResource().GetHandle();
+			const std::array accesses{ ::RenderGraph::ExternalWork::CopyDestination(*to), ::RenderGraph::ExternalWork::CopySource(*from) };
+			return ::RenderGraph::ExternalWork::Submit(
+				"native context copy", accesses,
+				[&](rhi::CommandList& a_list) {
+					for (const auto& [destinationSub, sourceSub] : a_subresources) {
+						const auto [region, source] = ImageCopyRegions(*a_destination, toHandle, destinationSub, a_x, a_y, a_z, *a_source, fromHandle, sourceSub, a_box);
+						a_list.CopyTextureRegion(region, source);
+					}
+				},
+				std::make_shared<std::pair<std::shared_ptr<NativeResource>, std::shared_ptr<NativeResource>>>(a_destination, a_source));
+		}
+
 		void ContextUpdateSubresource(ID3D11Resource* a_resource, UINT a_subresource, const D3D11_BOX* a_box, const void* a_data, UINT a_rowPitch, UINT a_depthPitch)
 		{
 			if (!a_data)
@@ -3079,8 +3189,12 @@ namespace RenderGraph::Engine::Native
 				Unknown(logged, "UpdateSubresource", a_resource);
 				return;
 			}
-			if (OpCensus::Flags())
-				NoteOp(record->kind == NativeResource::Kind::Buffer ? OpCensus::Op::UpdateBuffer : OpCensus::Op::UpdateTexture, *record, a_resource);
+			const auto op = record->kind == NativeResource::Kind::Buffer ? OpCensus::Op::UpdateBuffer : OpCensus::Op::UpdateTexture;
+			// A tracked texture's update goes through ORG's external client below; everything else is counted here.
+			const bool external = record->kind == NativeResource::Kind::Image && record->shape.aspects == VK_IMAGE_ASPECT_COLOR_BIT &&
+			                      a_subresource < record->shape.Subresources() && LedgerResourceOf(*record);
+			if (OpCensus::Flags() && !external)
+				NoteOp(op, *record, a_resource);
 			if (record->kind == NativeResource::Kind::Buffer) {
 				const uint64_t from = a_box ? a_box->left : 0;
 				const uint64_t size = a_box ? a_box->right - a_box->left : record->size;
@@ -3098,6 +3212,7 @@ namespace RenderGraph::Engine::Native
 					}
 					return;
 				}
+				NoteRaw(OpCensus::Op::UpdateBuffer, *record);
 				auto upload = g_device->MakeUpload(size);
 				if (!upload)
 					return;
@@ -3173,6 +3288,34 @@ namespace RenderGraph::Engine::Native
 				return;
 			writeRows(static_cast<std::byte*>(data));
 			upload->resource->Unmap(0, upload->size);
+			// A texture the graph tracks: the upload's copy through ORG's external client, its barriers from the ledgers.
+			if (const auto ledger = external ? LedgerResourceOf(*record) : nullptr) {
+				const auto handle = ledger->GetAPIResource().GetHandle();
+				const std::array accesses{ ::RenderGraph::ExternalWork::CopyDestination(*ledger) };
+				const bool submitted = ::RenderGraph::ExternalWork::Submit(
+					"native context texture update", accesses,
+					[&](rhi::CommandList& a_list) {
+						rhi::BufferTextureCopyFootprint copy{};
+						copy.texture = handle;
+						copy.buffer = upload->resource->GetHandle();
+						copy.mip = mip;
+						copy.arraySlice = a_subresource / shape.mips;
+						copy.x = static_cast<uint32_t>(at.x);
+						copy.y = static_cast<uint32_t>(at.y);
+						copy.z = static_cast<uint32_t>(at.z);
+						copy.footprint = { 0, rowPitch, FootprintExtent(shape, extent.width), FootprintExtent(shape, extent.height), extent.depth };
+						a_list.CopyBufferToTexture(copy);
+					},
+					std::make_shared<std::pair<std::shared_ptr<NativeResource>, std::shared_ptr<NativeResource>>>(upload, record));
+				if (submitted) {
+					NoteRouted(op, *record, OpCensus::Route::ExternalWork);
+					return;
+				}
+				// Not submitted: the context's own path below, counted there.
+				if (OpCensus::Flags())
+					NoteOp(op, *record, a_resource);
+			}
+			NoteRaw(op, *record);
 			if (RhiContext()) {
 				if (shape.aspects != VK_IMAGE_ASPECT_COLOR_BIT) {
 					static std::atomic_flag logged;
@@ -3226,10 +3369,18 @@ namespace RenderGraph::Engine::Native
 			if (destination == source && a_destinationSub == a_sourceSub)
 				return;
 			NoteWrite(*destination);
+			// Two textures the graph tracks: through ORG's external client.
+			if (const std::pair<uint32_t, uint32_t> pair{ a_destinationSub, a_sourceSub };
+				CopyExternally(destination, source, { &pair, 1 }, a_x, a_y, a_z, a_box)) {
+				NoteRouted(OpCensus::Op::CopyRegion, *destination, OpCensus::Route::ExternalWork);
+				NoteRouted(OpCensus::Op::CopyRegionSource, *source, OpCensus::Route::ExternalWork);
+				return;
+			}
 			if (OpCensus::Flags()) {
 				NoteOp(OpCensus::Op::CopyRegion, *destination, a_destination);
 				NoteOp(OpCensus::Op::CopyRegionSource, *source, a_source);
 			}
+			NoteRaw(OpCensus::Op::CopyRegion, *destination);
 			bool recorded = false;
 			if (RhiContext()) {
 				g_device->immediate.RunRhi("copy region " + source->name + " to " + destination->name,
@@ -3265,10 +3416,30 @@ namespace RenderGraph::Engine::Native
 			if (destination == source)
 				return;
 			NoteWrite(*destination);
+			// The engine skeleton's static copy pass (kMAIN into its copy texture, the main depth into kPOST_ZPREPASS_COPY): on the graph
+			// now, at its own anchor.
+			if (Skeleton::Sites::TakeContextCopy(a_destination, a_source)) {
+				NoteRouted(OpCensus::Op::Copy, *destination, OpCensus::Route::GraphPass);
+				NoteRouted(OpCensus::Op::CopySource, *source, OpCensus::Route::GraphPass);
+				return;
+			}
+			// Two textures the graph tracks: every subresource through ORG's external client.
+			if (destination->kind == NativeResource::Kind::Image && source->kind == NativeResource::Kind::Image) {
+				std::vector<std::pair<uint32_t, uint32_t>> subresources;
+				const uint32_t count = (std::min)(destination->shape.Subresources(), source->shape.Subresources());
+				for (uint32_t sub = 0; sub < count; ++sub)
+					subresources.emplace_back(sub, sub);
+				if (CopyExternally(destination, source, subresources, 0, 0, 0, nullptr)) {
+					NoteRouted(OpCensus::Op::Copy, *destination, OpCensus::Route::ExternalWork);
+					NoteRouted(OpCensus::Op::CopySource, *source, OpCensus::Route::ExternalWork);
+					return;
+				}
+			}
 			if (OpCensus::Flags()) {
 				NoteOp(OpCensus::Op::Copy, *destination, a_destination);
 				NoteOp(OpCensus::Op::CopySource, *source, a_source);
 			}
+			NoteRaw(OpCensus::Op::Copy, *destination);
 			bool recorded = true;
 			if (RhiContext()) {
 				g_device->immediate.RunRhi("copy " + source->name + " to " + destination->name,
@@ -3313,6 +3484,7 @@ namespace RenderGraph::Engine::Native
 			NoteWrite(*record);
 			if (OpCensus::Flags())
 				NoteOp(OpCensus::Op::GenerateMips, *record, nullptr, a_view);
+			NoteRaw(OpCensus::Op::GenerateMips, *record);
 			const Shape& shape = record->shape;
 			if (shape.mips < 2 || shape.aspects != VK_IMAGE_ASPECT_COLOR_BIT)
 				return;
@@ -3402,8 +3574,15 @@ namespace RenderGraph::Engine::Native
 				Unknown(logged, "ClearRenderTargetView", a_view);
 				return;
 			}
+			// The engine skeleton's static clear pass for the view (the TAA mask, the water targets and the skeleton's own views): on the
+			// graph now, opened by its run gate.
+			if (Skeleton::Sites::TakeContextColourClear(a_view, a_color)) {
+				NoteRouted(OpCensus::Op::ClearRenderTarget, *record, OpCensus::Route::GraphPass);
+				return;
+			}
 			if (OpCensus::Flags())
 				NoteOp(OpCensus::Op::ClearRenderTarget, *record, nullptr, a_view);
+			NoteRaw(OpCensus::Op::ClearRenderTarget, *record);
 			D3D11_RENDER_TARGET_VIEW_DESC desc{};
 			a_view->GetDesc(&desc);
 			if (RhiContext()) {
@@ -3453,6 +3632,7 @@ namespace RenderGraph::Engine::Native
 			}
 			if (OpCensus::Flags())
 				NoteOp(a_float ? OpCensus::Op::ClearUavFloat : OpCensus::Op::ClearUavUint, *record, nullptr, a_view);
+			NoteRaw(a_float ? OpCensus::Op::ClearUavFloat : OpCensus::Op::ClearUavUint, *record);
 			D3D11_UNORDERED_ACCESS_VIEW_DESC desc{};
 			a_view->GetDesc(&desc);
 			if (RhiContext()) {
@@ -3509,8 +3689,14 @@ namespace RenderGraph::Engine::Native
 				Unknown(logged, "ClearDepthStencilView", a_view);
 				return;
 			}
+			// The engine skeleton's static clear pass for the view: on the graph now.
+			if (Skeleton::Sites::TakeContextDepthClear(a_view, a_flags, a_depth, a_stencil)) {
+				NoteRouted(OpCensus::Op::ClearDepthStencil, *record, OpCensus::Route::GraphPass);
+				return;
+			}
 			if (OpCensus::Flags())
 				NoteOp(OpCensus::Op::ClearDepthStencil, *record, nullptr, a_view);
+			NoteRaw(OpCensus::Op::ClearDepthStencil, *record);
 			VkImageAspectFlags aspects = 0;
 			if (a_flags & D3D11_CLEAR_DEPTH)
 				aspects |= VK_IMAGE_ASPECT_DEPTH_BIT;
