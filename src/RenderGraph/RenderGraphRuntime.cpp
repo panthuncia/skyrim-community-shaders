@@ -22,6 +22,7 @@
 #include "RenderGraph/Engine/Tripwire/Tripwire.h"
 #include "RenderGraph/GpuTimingSource.h"
 #include "RenderGraph/ProgramCache.h"
+#include "RenderGraph/RunShapes.h"
 #include "RenderGraph/Switches.h"
 #include "Features/RemoteControl/GpuTimestamps.h"
 #include "Features/RemoteControl/GpuCounters.h"
@@ -2713,6 +2714,8 @@ void RenderGraphRuntime::SignalFramePace(bool a_active)
 
 void RenderGraphRuntime::SealPresented()
 {
+	// The native frame graph diagnostics close their frame (cheap when their switches are off).
+	RenderGraph::RunShapes::EndFrame();
 	if (impl && impl->host)
 		impl->host->SealSubmitted();
 	// Native mode, while it is brought up: the host's runs in flight every 600 presents, so a run that never retires shows early.
