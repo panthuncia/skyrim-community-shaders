@@ -4,6 +4,12 @@
 // is imported in the layout DXVK rests it in. One resting in GENERAL (a storage image, or any image on a device with unified
 // layouts, or every image when DXVK pins them for an older client) is shared with simultaneous access; any other is used
 // exclusively, and the graph's external home states give it back in that layout after each execution.
+//
+// Native mode (with CS_ORG_NATIVE_OWNED) imports every image for the graph exclusively, whatever it rests in: the graph moves it into
+// each pass's layout and gives it back in its home. That needs one graph resource per image (FrameAnchors' imports find an image's
+// slot before making one), since two resources would each track the image's layout. CS_ORG_NATIVE_EXCLUSIVE_IMPORTS=0 keeps them
+// shared. Raw imports (ImportDxvkImage: the native context's own, Drawcall Limit Fix's bindless views) stay shared in GENERAL, where
+// the context and the raw views use the image between graph executions.
 
 #include "RenderGraph/BufferRef.h"
 #include "RenderGraph/DxvkOrgInterop.h"
@@ -12,12 +18,14 @@
 #include <memory>
 #include <optional>
 #include <source_location>
+#include <string_view>
 
 #include <rhi.h>
 
 namespace org
 {
 	class ExternalTextureResource;
+	class Resource;
 	struct TextureDescription;
 }
 
@@ -41,8 +49,8 @@ namespace RenderGraph
 	/**
 	 * @brief Imports a DXVK image as a graph texture whose home state is the layout it rests in.
 	 *
-	 * Sets a_desc.initialLayout from the image. A texture resting in GENERAL is Common-only; any other uses the layouts its passes
-	 * declare.
+	 * Sets a_desc.initialLayout from the image. A texture resting in GENERAL is Common-only (except in native mode, see above); any
+	 * other uses the layouts its passes declare. Noted for the duplicate check (NoteImageResource).
 	 */
 	std::shared_ptr<org::ExternalTextureResource> ImportDxvkTexture(rhi::Device a_device, const DxvkOrgInteropImageInfo& a_image,
 		org::TextureDescription a_desc, const char* a_name);
@@ -56,6 +64,20 @@ namespace RenderGraph
 	 * buffer starts elsewhere is another buffer's, whose handle value this one reuses, and is imported again. Null ref when the import
 	 * fails. Any thread.
 	 */
+	/**
+	 * @brief The duplicate-image check (CS_ORG_IMAGE_DUPLICATE_CHECK=1): notes that a_resource is a graph resource of a_image (a
+	 * VkImage, or the ID3D12Resource on D3D12) and logs when another live graph resource of the same image was noted and not retired.
+	 * Two such resources track the image's state apart, and their layout moves race. ImportDxvkTexture notes its imports; native mode
+	 * notes the textures it makes. Noting a retired resource again makes it current again. Cheap when off. Any thread.
+	 */
+	void NoteImageResource(std::uint64_t a_image, const std::shared_ptr<org::Resource>& a_resource, std::string_view a_name);
+
+	/**
+	 * @brief The duplicate-image check: a_resource is no longer its image's graph resource (a slot replaced it by a version of the same
+	 * image, or an import stands for it), though frames may still finish with it. Any thread.
+	 */
+	void RetireImageResource(const org::Resource* a_resource);
+
 	BufferRef ImportBufferRef(rhi::Device a_device, std::uint64_t a_buffer, std::uint64_t a_offset, std::uint64_t a_bytes, std::uint64_t a_address,
 		std::shared_ptr<const void>& a_keep, std::source_location a_where = std::source_location::current());
 }

@@ -10,6 +10,7 @@
 #	include "Features/HDRDisplay/ORGHDRDisplay.h"
 #	include "Globals.h"
 #	include "RenderGraph/DxvkImageImport.h"
+#	include "RenderGraph/Engine/Native/Native.h"
 #	include "RenderGraph/Engine/Scaleform/Display.h"
 #	include "RenderGraph/Engine/Tripwire/Tripwire.h"
 #	include "RenderGraph/FrameAnchors.h"
@@ -34,6 +35,7 @@
 #	include <array>
 #	include <bit>
 #	include <cmath>
+#	include <cstddef>
 #	include <cstring>
 #	include <string>
 
@@ -97,9 +99,27 @@ namespace RenderGraph::Engine::Scaleform::Passes
 			Command::Kind kind = Command::Kind::Draw;
 			const RasterProgram* program = nullptr;
 			std::uint32_t stencilRef = 0;
-			bool lines = false;  // a line strip
+			bool lines = false;   // a line strip
+			bool filter = false;  // the block is a FilterBlock
+			// Per texture stage: the declared read (FrameAnchors::Texture::Key) whose view the pass binds in place of the block's raw
+			// index, or null (an exempt texture, read untracked).
+			std::array<const void*, 2> reads{};
 			FillBlock block{};
 		};
+
+		/** @brief Native mode: a tracked texture the displays read, which the passes declare (PathState::reads). */
+		struct Read
+		{
+			winrt::com_ptr<ID3D11ShaderResourceView> view;  // the display's view: its identity, kept while it is declared
+			FrameAnchors::Texture texture;
+			std::uint64_t lastCommit = 0;
+		};
+
+		/** @brief The tracked textures one build's passes declare. */
+		using Reads = std::vector<FrameAnchors::Texture>;
+
+		// A declared read no commit used for this many commits is dropped the next time the client registers.
+		constexpr std::uint64_t kReadIdleCommits = 600;
 
 		/** @brief What one run of a surface's pass records: immutable once the commit stored it. */
 		struct Frame
@@ -139,7 +159,7 @@ namespace RenderGraph::Engine::Scaleform::Passes
 			winrt::com_ptr<ID3D11Texture2D> depthTexture;
 			FrameAnchors::Texture colour;  // an engine target's slot, or this client's own import
 			FrameAnchors::Texture depth;
-			std::string ownId;  // set when this client registers colour (not an engine target)
+			std::string ownId;  // set when this client registers colour itself (HDR's twin; imports are the anchors')
 			rhi::Format colourFormat = rhi::Format::Unknown;
 			rhi::Format depthFormat = rhi::Format::Unknown;
 			std::uint32_t width = 0, height = 0;
@@ -165,7 +185,11 @@ namespace RenderGraph::Engine::Scaleform::Passes
 			bool setUp = false;
 			std::array<org::OwnedDescriptorBinding, 4> samplers;  // the renderer's, by wrap * 2 + sample
 			std::vector<std::shared_ptr<Surface>> surfaces;       // one per role that has a texture
-			std::uint32_t ownImports = 0;
+			// Native mode: the tracked textures the displays read (graph-owned, or exempt ones the context wrote since). The passes
+			// declare each, and a draw binds its declared view. A new one registers the client again after the run (readsChanged).
+			std::vector<Read> reads;
+			bool readsChanged = false;
+			std::uint64_t commits = 0;
 			std::uint32_t registrations = 0;
 			std::uint32_t largestSegment = 0;
 			ProgramCache<RasterProgram, ProgramKey> programs{ "Scaleform" };
@@ -361,6 +385,7 @@ namespace RenderGraph::Engine::Scaleform::Passes
 			org::DeclaredViewToken colour;
 			org::DeclaredViewToken depth;
 			bool hasDepth = false;
+			std::vector<std::pair<const void*, org::DeclaredViewToken>> reads;  // by FrameAnchors::Texture::Key
 		};
 
 		struct PassFrame
@@ -380,8 +405,9 @@ namespace RenderGraph::Engine::Scaleform::Passes
 		class DisplayPass final : public org::TypedRenderGraphPass<DisplayPass, PassFrame, PassBindings>
 		{
 		public:
-			DisplayPass(std::shared_ptr<const Surface> a_surface, std::shared_ptr<const Slots> a_slots, std::shared_ptr<const RunGate> a_gate, bool a_withDepth) :
-				surface(std::move(a_surface)), slots(std::move(a_slots)), gate(std::move(a_gate)), withDepth(a_withDepth) {}
+			DisplayPass(std::shared_ptr<const Surface> a_surface, std::shared_ptr<const Slots> a_slots, std::shared_ptr<const RunGate> a_gate, bool a_withDepth,
+				std::shared_ptr<const Reads> a_reads) :
+				surface(std::move(a_surface)), slots(std::move(a_slots)), gate(std::move(a_gate)), withDepth(a_withDepth), reads(std::move(a_reads)) {}
 
 			PassBindings Declare(org::PassBuilder& a_builder)
 			{
@@ -390,6 +416,12 @@ namespace RenderGraph::Engine::Scaleform::Passes
 					bindings.depth = a_builder.DepthReadWrite(surface->depth).View();
 					bindings.hasDepth = true;
 				}
+				// The tracked textures the displays read: declared, so the graph orders the reads after the context's writes and moves
+				// the images into the shader-read layout. The pass's own targets are left out.
+				if (reads)
+					for (const auto& read : *reads)
+						if (read && read.Key() != surface->colour.Key() && (!withDepth || read.Key() != surface->depth.Key()))
+							bindings.reads.emplace_back(read.Key(), a_builder.ShaderResource(read).View());
 				return bindings;
 			}
 
@@ -462,7 +494,20 @@ namespace RenderGraph::Engine::Scaleform::Passes
 						commands.SetStencilRef(command.stencilRef);
 						reference = command.stencilRef;
 					}
-					commands.PushConstants(rhi::ShaderStage::AllGraphics, 0, 0, 0, kConstantWords, reinterpret_cast<const std::uint32_t*>(&command.block));
+					// A tracked texture's index comes from its declared view. A read this build does not declare yet (new since its build)
+					// keeps the raw index until the build with it is attached.
+					std::uint32_t words[sizeof(FillBlock) / 4];
+					std::memcpy(words, &command.block, sizeof(words));
+					// The stages' texture words: FillBlock::textures, or FilterBlock::source and second.
+					const std::size_t first = (command.filter ? offsetof(FilterBlock, source) : offsetof(FillBlock, textures)) / 4;
+					for (std::uint32_t stage = 0; stage < 2; ++stage) {
+						if (!command.reads[stage])
+							continue;
+						const auto declared = std::ranges::find(a_bindings.reads, command.reads[stage], &std::pair<const void*, org::DeclaredViewToken>::first);
+						if (declared != a_bindings.reads.end())
+							words[first + stage] = a_recording.Index(declared->second);
+					}
+					commands.PushConstants(rhi::ShaderStage::AllGraphics, 0, 0, 0, kConstantWords, words);
 					// The vertex count is the gate entry's: zero unless this run's commit opened it.
 					commands.ExecuteIndirect(command.program->drawSignature->GetHandle(), latchBuffer, latchOffset + a_pass.gate->Offset(i), {}, 0, 1);
 				}
@@ -474,7 +519,53 @@ namespace RenderGraph::Engine::Scaleform::Passes
 			std::shared_ptr<const Slots> slots;
 			std::shared_ptr<const RunGate> gate;
 			bool withDepth = false;
+			std::shared_ptr<const Reads> reads;
 		};
+
+		/**
+		 * @brief Native mode: the declared read of the display texture a_view, or null for one read untracked (exempt, or not native's).
+		 * A tracked texture seen for the first time is added to the reads (its image's one graph resource, through
+		 * FrameAnchors::ShareImage, or the promoted exempt texture's own), and the client registers again after the run, so the next
+		 * build declares it.
+		 */
+		const void* DeclaredRead(PathState& a_state, ID3D11ShaderResourceView* a_view)
+		{
+			if (!a_view || !Engine::Native::OwnedResources())
+				return nullptr;
+			for (auto& read : a_state.reads)
+				if (read.view.get() == a_view) {
+					read.lastCommit = a_state.commits;
+					return read.texture.Key();
+				}
+			FrameAnchors::Texture texture;
+			if (Engine::Native::GraphTextureOf(a_view)) {
+				winrt::com_ptr<ID3D11Resource> resource;
+				a_view->GetResource(resource.put());
+				const auto texture2D = resource.try_as<ID3D11Texture2D>();
+				DxvkOrgInteropResourceInfo info{};
+				if (!texture2D || !RenderGraphRuntime::Get().DescribeResource(texture2D.get(), info) || info.kind != DXVK_ORG_INTEROP_RESOURCE_IMAGE)
+					return nullptr;
+				D3D11_SHADER_RESOURCE_VIEW_DESC viewDesc{};
+				a_view->GetDesc(&viewDesc);
+				org::TextureDescription desc{};
+				desc.format = rhi::helpers::ToRHI(viewDesc.Format);
+				desc.channels = 4;
+				desc.hasSRV = true;
+				desc.srvFormat = desc.format;
+				texture = FrameAnchors::ShareImage(texture2D.get(), info.image, desc, "cs.scaleform.read");
+			} else if (auto promoted = Engine::Native::PromotedTextureOf(a_view)) {
+				texture = FrameAnchors::Texture(std::move(promoted));
+			}
+			if (!texture)
+				return nullptr;
+			Read read;
+			read.view.copy_from(a_view);
+			read.texture = texture;
+			read.lastCommit = a_state.commits;
+			a_state.reads.push_back(std::move(read));
+			a_state.readsChanged = true;
+			return texture.Key();
+		}
 
 		/**
 		 * @brief Inside the epoch: the pending display's frame, stored for this run in the slots of the pass that draws it, with its
@@ -502,15 +593,19 @@ namespace RenderGraph::Engine::Scaleform::Passes
 				return;
 			auto frame = std::make_shared<Frame>();
 
+			++state.commits;
 			std::vector<std::uint32_t> textures(display.textures.size(), 0);
+			std::vector<const void*> reads(display.textures.size(), nullptr);
 			for (std::size_t i = 0; i < display.textures.size(); ++i) {
 				auto* view = display.textures[i];
+				// The raw index: what an exempt texture is read through, and a tracked one until a build declares it.
 				auto binding = DCLF::GpuTextures::Get().ResolveBinding(view, kSourceTag);
 				if (binding.index == DCLF::GpuTextures::kInvalid) {
 					state.commitReason = "a texture's view cannot be resolved";
 					return;
 				}
 				textures[i] = binding.index;
+				reads[i] = DeclaredRead(state, view);
 				frame->owners.push_back(std::move(binding.owner));
 				// The view itself too, until the recording's GPU work retires: EndDisplay's queued releases may drop GFx's.
 				view->AddRef();
@@ -540,6 +635,9 @@ namespace RenderGraph::Engine::Scaleform::Passes
 					const std::int32_t texture = command.textures[a_stage];
 					return texture >= 0 ? textures[static_cast<std::size_t>(texture)] : 0u;
 				};
+				for (std::uint32_t stage = 0; stage < 2; ++stage)
+					out.reads[stage] = command.textures[stage] >= 0 ? reads[static_cast<std::size_t>(command.textures[stage])] : nullptr;
+				out.filter = command.state.filter != 0;
 				if (command.state.filter) {
 					FilterBlock filter{};
 					filter.geometry = frame->staging->SrvIndex();
@@ -585,11 +683,17 @@ namespace RenderGraph::Engine::Scaleform::Passes
 			state.committed = true;
 		}
 
+		void RegisterReads(PathState& a_state);
+
 		FrameAnchors::ClientDesc MakeClient(const PathState& a_state)
 		{
 			FrameAnchors::ClientDesc client{};
 			client.id = kClientId;
 			std::shared_ptr<const RunGate> gate = a_state.gate;
+			auto declared = std::make_shared<Reads>();
+			for (const auto& read : a_state.reads)
+				declared->push_back(read.texture);
+			std::shared_ptr<const Reads> reads = std::move(declared);
 			for (std::size_t i = 0; i < a_state.surfaces.size(); ++i) {
 				std::shared_ptr<const Surface> surface = a_state.surfaces[i];
 				if (!surface->Drawable())
@@ -599,7 +703,7 @@ namespace RenderGraph::Engine::Scaleform::Passes
 						.anchor = Anchor::Interface,
 						.order = a_order,
 						.kind = FrameAnchors::PassKind::Render,
-						.make = [surface, a_slots, gate, a_withDepth] { return std::make_shared<DisplayPass>(surface, a_slots, gate, a_withDepth); } });
+						.make = [surface, a_slots, gate, a_withDepth, reads] { return std::make_shared<DisplayPass>(surface, a_slots, gate, a_withDepth, reads); } });
 				};
 				add(surface->colourSlots, false, "", 100 + 2 * static_cast<std::int32_t>(i));
 				if (surface->depthSlots)
@@ -607,15 +711,18 @@ namespace RenderGraph::Engine::Scaleform::Passes
 			}
 			client.registerResources = [](org::RenderGraph& a_graph) {
 				for (const auto& surface : Path().surfaces)
-					if (!surface->ownId.empty() && surface->colour)
+					if (!surface->ownId.empty() && surface->colour.Plain())
 						a_graph.RegisterResource(org::ResourceIdentifier(surface->ownId), surface->colour.Plain());
 			};
 			client.commit = [](const FrameAnchors::Point&) { Commit(); };
 			client.active = [] { return Path().pending != nullptr; };
 			client.gates = { a_state.gate };
 			client.executed = [](const FrameAnchors::Point&) {
-				if (Path().pending)
-					Path().executed = true;
+				auto& state = Path();
+				if (state.pending)
+					state.executed = true;
+				if (state.readsChanged)
+					RegisterReads(state);
 			};
 			client.onFailed = [] {
 				Path().failed = true;
@@ -640,6 +747,19 @@ namespace RenderGraph::Engine::Scaleform::Passes
 			const auto drawable = std::ranges::count_if(a_state.surfaces, [](const auto& a_surface) { return a_surface->Drawable(); });
 			logger::info("[ORG] Scaleform: registered with {} surfaces (registration {})", drawable, a_state.registrations);
 			return true;
+		}
+
+		/**
+		 * @brief Native mode: registers the client again with the reads as they are now, after a run that found a new tracked texture.
+		 * Reads no commit used for kReadIdleCommits are dropped first. The Interface graph is built again off the render thread; until
+		 * it is attached, displays are replayed as after a surface was made again.
+		 */
+		void RegisterReads(PathState& a_state)
+		{
+			a_state.readsChanged = false;
+			std::erase_if(a_state.reads, [&](const Read& a_read) { return a_read.lastCommit + kReadIdleCommits < a_state.commits; });
+			logger::info("[ORG] Scaleform: {} tracked textures read by the displays; the Interface graph is built again to declare them", a_state.reads.size());
+			RegisterClient(a_state);
 		}
 
 		/** @brief The engine render target whose texture is a_texture (DXVK's), or -1. */
@@ -750,20 +870,25 @@ namespace RenderGraph::Engine::Scaleform::Passes
 			return depth.texture ? Tripwire::Unwrap(depth.texture) : nullptr;
 		}
 
-		/** @brief a_texture (DXVK's), not an engine target, imported as a render target of this client's: HDR's UI texture. */
-		std::shared_ptr<org::ExternalTextureResource> ImportTarget(ID3D11Texture2D* a_texture, DXGI_FORMAT a_format, const std::string& a_id)
+		/**
+		 * @brief a_texture (DXVK's), not an engine target, as a graph texture through the anchors' imports, so the image is one graph
+		 * resource whoever else imports it. HDR's UI texture by the name and views Bink imports it with ("hdr.ui"), any other as a render
+		 * target in a_format under a_id.
+		 */
+		FrameAnchors::Texture ImportTarget(ID3D11Texture2D* a_texture, DXGI_FORMAT a_format, const std::string& a_id)
 		{
-			auto& runtime = RenderGraphRuntime::Get();
-			DxvkOrgInteropResourceInfo info{};
-			if (!runtime.Host() || !runtime.DescribeResource(a_texture, info) || info.kind != DXVK_ORG_INTEROP_RESOURCE_IMAGE)
-				return nullptr;
+			const auto& hdr = globals::features::hdrDisplay;
+			if (hdr.uiTexture && hdr.uiTexture->resource &&
+				(hdr.uiTexture->resource.get() == a_texture || Tripwire::Unwrap(hdr.uiTexture->resource.get()) == a_texture)) {
+				const auto& ui = *hdr.uiTexture;
+				return FrameAnchors::D3D11Texture("hdr.ui", ui.resource.get(), ui.srv.get(), ui.uav.get(), ui.rtv.get());
+			}
 			org::TextureDescription desc{};
 			desc.format = rhi::helpers::ToRHI(a_format);
 			desc.channels = 4;
 			desc.hasRTV = true;
 			desc.rtvFormat = desc.format;
-			desc.imageDimensions = { { info.image.extent.width, info.image.extent.height, 0, 0 } };
-			return RenderGraph::ImportDxvkTexture(runtime.Host()->Device(), info.image, desc, a_id.c_str());
+			return FrameAnchors::ImportTexture(a_id, a_texture, desc);
 		}
 
 		/** @brief The role's surface for a_colour with a_depth (DXVK's), imported; without passes when the target cannot be imported. */
@@ -785,8 +910,8 @@ namespace RenderGraph::Engine::Scaleform::Passes
 				surface->ownId = "cs.scaleform.hdr-ui";
 				surface->colour = std::move(owned);
 			} else {
-				surface->ownId = fmt::format("cs.scaleform.target.{}", a_state.ownImports++);
-				surface->colour = ImportTarget(a_colour, a_format, surface->ownId);
+				// One id per role: a texture made again for the role is that import's next version or a new slot, never one more id.
+				surface->colour = ImportTarget(a_colour, a_format, fmt::format("cs.scaleform.target.{}", static_cast<int>(a_role)));
 			}
 			if (a_depth) {
 				if (const auto depth = EngineDepthOf(a_depth); depth >= 0)
@@ -800,7 +925,7 @@ namespace RenderGraph::Engine::Scaleform::Passes
 				}
 			}
 			logger::info("[ORG] Scaleform: the {} surface: {} ({}x{}, DXGI format {}), depth {}", RoleName(a_role),
-				surface->ownId.empty() ? "an engine target" : surface->ownId, colourDesc.Width, colourDesc.Height, static_cast<int>(a_format),
+				!surface->ownId.empty() ? surface->ownId : (surface->colour.Id().empty() ? std::string("an engine target") : surface->colour.Id()), colourDesc.Width, colourDesc.Height, static_cast<int>(a_format),
 				surface->depth ? "an engine depth-stencil" : (a_depth ? "not importable" : "none"));
 			if (surface->colour && surface->colourFormat != rhi::Format::Unknown) {
 				surface->colourSlots = std::make_shared<const Slots>();

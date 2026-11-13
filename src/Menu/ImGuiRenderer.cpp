@@ -17,6 +17,7 @@
 
 #if defined(CS_HAS_RENDER_GRAPH)
 #	include "Features/DrawcallLimitFix/Core/Gpu/GpuTextures.h"
+#	include "Features/HDRDisplay.h"
 #	include "RenderGraph/DxvkImageImport.h"
 #	include "RenderGraph/RenderGraphRuntime.h"
 
@@ -44,7 +45,7 @@ namespace ImGuiRenderer
 			// What ImGui draws onto: the texture behind the bound render target and its graph import.
 			winrt::com_ptr<ID3D11Texture2D> targetTexture;
 			FrameAnchors::Texture target;
-			bool ownImport = false;  // registered by this client (not an engine target the anchors register)
+			bool ownImport = false;  // not the framebuffer: imported for this client (the anchors register it)
 			ImGuiBasicRHI::Target targetInfo;
 			ImDrawData* pending = nullptr;  // the frame RenderDrawData is drawing, for the commit
 #endif
@@ -107,18 +108,21 @@ namespace ImGuiRenderer
 			if (renderer && renderer->GetRuntimeData().renderTargets[RE::RENDER_TARGET::kFRAMEBUFFER].texture == texture.get()) {
 				target = FrameAnchors::EngineTarget(static_cast<std::uint32_t>(RE::RENDER_TARGET::kFRAMEBUFFER));
 			} else {
-				auto& runtime = RenderGraphRuntime::Get();
-				DxvkOrgInteropResourceInfo info{};
-				if (runtime.DescribeResource(texture.get(), info) && info.kind == DXVK_ORG_INTEROP_RESOURCE_IMAGE) {
+				// Through the anchors' imports, so the image is one graph resource whoever else imports it: HDR's UI texture by the name and
+				// views Bink and Scaleform import it with, any other as a render target in the view's format.
+				const auto& hdr = globals::features::hdrDisplay;
+				if (hdr.uiTexture && hdr.uiTexture->resource && hdr.uiTexture->resource.get() == texture.get()) {
+					const auto& ui = *hdr.uiTexture;
+					target = FrameAnchors::D3D11Texture("hdr.ui", ui.resource.get(), ui.srv.get(), ui.uav.get(), ui.rtv.get());
+				} else {
 					org::TextureDescription desc{};
 					desc.format = format;
 					desc.channels = 4;
 					desc.hasRTV = true;
 					desc.rtvFormat = format;
-					desc.imageDimensions = { { info.image.extent.width, info.image.extent.height, 0, 0 } };
-					target = RenderGraph::ImportDxvkTexture(runtime.Host()->Device(), info.image, desc, kTargetId);
-					own = true;
+					target = FrameAnchors::ImportTexture(kTargetId, texture.get(), desc);
 				}
+				own = true;
 			}
 			a_state.targetTexture = texture;
 			a_state.target = target;
@@ -161,7 +165,8 @@ namespace ImGuiRenderer
 				.make = [] { return ImGuiBasicRHI::MakePass(Renderer().target); } });
 			client.registerResources = [](org::RenderGraph& a_graph) {
 				auto& state = Renderer();
-				if (state.ownImport && state.target)
+				// The anchors register their imports; only a plain resource is this client's to register.
+				if (state.ownImport && state.target.Plain())
 					a_graph.RegisterResource(org::ResourceIdentifier(kTargetId), state.target.Plain());
 			};
 			client.commit = [](const FrameAnchors::Point&) {

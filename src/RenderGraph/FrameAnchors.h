@@ -12,6 +12,7 @@ struct ID3D11RenderTargetView;
 struct ID3D11ShaderResourceView;
 struct ID3D11Texture2D;
 struct ID3D11UnorderedAccessView;
+struct DxvkOrgInteropImageInfo;
 
 namespace org
 {
@@ -23,6 +24,7 @@ namespace org
 	class RenderPass;
 	class Resource;
 	class VersionedTexture;
+	struct TextureDescription;
 }
 
 namespace rhi
@@ -413,9 +415,14 @@ namespace FrameAnchors
 	 * same format, mip count and slice count is the slot's next version, with no graph build; another shape class is a new slot, built
 	 * in off the render thread. Its views follow the engine's (SRV, RTV, UAV where the engine made one). Registered with every graph as
 	 * "cs.engine.target.<index>". Render thread (it synchronizes with DXVK's worker the first time). Null when the target does not
-	 * exist or cannot be imported. Every mip and slice is described (a cube's views are cube views). A separate graph resource from Drawcall Limit Fix's import of the same image, which is safe because
-	 * no anchor epoch is one of DCLF's. When ORG owns the target (CS_ORG_ENGINE_TARGETS, RenderGraph/Engine/Targets), this and every
-	 * other import here return its published texture ("Engine::kMAIN" and the like) instead, the one resource DCLF reads too.
+	 * exist or cannot be imported. Every mip and slice is described (a cube's views are cube views). When ORG owns the target
+	 * (CS_ORG_ENGINE_TARGETS, RenderGraph/Engine/Targets), this and every other import here return its published texture
+	 * ("Engine::kMAIN" and the like) instead, the one resource DCLF reads too.
+	 *
+	 * One image, one graph resource: every import here and ShareImage find an image's existing slot before making one. A second id
+	 * for an image already imported shares its slot; an importer that needs a view the slot lacks makes a new version of the same
+	 * image with both sets of views. In native mode the image's graph-owned texture (Engine::Native::GraphTextureOf) is the backing
+	 * when it has every view asked for.
 	 */
 	Texture EngineTarget(std::uint32_t a_target);
 
@@ -455,11 +462,22 @@ namespace FrameAnchors
 	Texture ImportDepth(const RE::BSGraphics::DepthStencilData& a_target, const std::string& a_id);
 
 	/**
-	 * @brief The anchors' import whose current version is a_image (the VkImage dxvkGetInteropResourceInfo reports for its texture), or
-	 * empty. Drawcall Limit Fix's ImportImage takes this slot instead of importing the image again, so the image is one graph resource
-	 * with one state tracker. Render thread.
+	 * @brief EngineTarget for any other D3D11 texture, with the views a_views names (its format, view flags and view formats; the
+	 * subresources come from the image): "a_id". For a target a client draws onto that is neither an engine target nor a feature
+	 * texture with D3D11 views (Scaleform's and ImGui's other targets). Registered with every graph as a_id.
 	 */
-	Texture ImportOfImage(std::uint64_t a_image);
+	Texture ImportTexture(std::string_view a_id, ID3D11Texture2D* a_texture, const org::TextureDescription& a_views);
+
+	/**
+	 * @brief The one graph resource of an image that a graph outside the anchors (Drawcall Limit Fix's epochs) uses: the engine
+	 * target's slot when ORG owns it, else the slot any importer already made for the image (an id here, or an earlier ShareImage),
+	 * else a new slot. a_texture is the image's D3D11 texture: the slot keeps it alive, so the image handle is never reused while the
+	 * slot lives. a_desc names the views the caller needs; a slot that lacks one gets a new version of the same image with both
+	 * sets of views. A slot made here is not registered under an id and lives while its holders hold it; an id import of the same
+	 * image later takes it over. Native mode: the image's graph-owned texture is the backing when it has the views. Render thread.
+	 * Empty when the render graph is not active or the image cannot be imported.
+	 */
+	Texture ShareImage(ID3D11Texture2D* a_texture, const DxvkOrgInteropImageInfo& a_image, const org::TextureDescription& a_desc, std::string_view a_name);
 
 	/**
 	 * @brief Drops an import by its graph id ("cs.d3d11.<name>" for D3D11Texture, a_id for ImportDepth): the D3D11 texture is

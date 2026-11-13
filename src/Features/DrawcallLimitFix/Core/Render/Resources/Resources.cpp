@@ -280,7 +280,7 @@ namespace DCLF::Draws
 					normalsDesc.channels = 4;
 					normalsDesc.hasRTV = true;
 					normalsDesc.rtvFormat = normalsDesc.format;
-					a_state.refractionNormals = ImportImage(a_device, normalsInfo.image, normalsDesc, "DCLF refraction normals");
+					a_state.refractionNormals = ImportImage(a_device, normals.texture, normalsInfo.image, normalsDesc, "DCLF refraction normals");
 					a_state.refractionFormat = a_state.refractionNormals ? rtvDesc.Format : DXGI_FORMAT_UNKNOWN;
 				}
 				if (!a_state.refractionNormals)
@@ -315,7 +315,7 @@ namespace DCLF::Draws
 			// The colour draws read it through the engine's view (their rows' t14); declared for the barrier after the engine's mask draws.
 			maskDesc.hasSRV = true;
 			maskDesc.srvFormat = maskDesc.format;
-			a_state.shadowMask = ImportImage(a_device, info.image, maskDesc, "DCLF shadow mask");
+			a_state.shadowMask = ImportImage(a_device, mask.texture, info.image, maskDesc, "DCLF shadow mask");
 		}
 
 		/**
@@ -507,7 +507,7 @@ namespace DCLF
 			desc.channels = 4;
 			desc.hasRTV = true;
 			desc.rtvFormat = desc.format;
-			a_state.native[i] = ImportImage(a_device, info.image, desc, "DCLF native target");
+			a_state.native[i] = ImportImage(a_device, a_capture.targets[i].get(), info.image, desc, "DCLF native target");
 			if (!a_state.native[i])
 				return NotReady(6, "a main-pass target could not be imported");
 		}
@@ -524,7 +524,7 @@ namespace DCLF
 		depthDesc.dsvFormat = depthDesc.format;
 		depthDesc.hasSRV = true;
 		depthDesc.srvFormat = DepthReadFormat(depthDesc.format);
-		a_state.nativeDepth = ImportImage(a_device, info.image, depthDesc, "DCLF native depth");
+		a_state.nativeDepth = ImportImage(a_device, a_capture.depth.get(), info.image, depthDesc, "DCLF native depth");
 		if (!a_state.nativeDepth)
 			return NotReady(11, "the main-pass depth could not be imported");
 		// The near twin's target (Api::NearTwinContribution: Integrations/TerrainBlending's terrain depth) shares the main depth's
@@ -537,7 +537,7 @@ namespace DCLF
 			DxvkOrgInteropResourceInfo terrainInfo{};
 			if (!RenderGraphRuntime::Get().DescribeResource(twinTarget, terrainInfo) || terrainInfo.kind != DXVK_ORG_INTEROP_RESOURCE_IMAGE)
 				return NotReady(12, nearTwin.cannotDescribe.c_str());
-			a_state.terrainDepth = ImportImage(a_device, terrainInfo.image, depthDesc, nearTwin.debugName.c_str());
+			a_state.terrainDepth = ImportImage(a_device, twinTarget, terrainInfo.image, depthDesc, nearTwin.debugName.c_str());
 			if (!a_state.terrainDepth)
 				return NotReady(12, nearTwin.cannotImport.c_str());
 		}
@@ -937,7 +937,7 @@ namespace DCLF
 		desc.channels = 4;
 		desc.hasRTV = true;
 		desc.rtvFormat = desc.format;
-		auto cube = ImportImage(host->Device(), info.image, desc, fmt::format("DCLF {} {}", traits.name, traits.target).c_str());
+		auto cube = ImportImage(host->Device(), a_texture, info.image, desc, fmt::format("DCLF {} {}", traits.name, traits.target).c_str());
 		if (!cube) {
 			static std::uint32_t logged = 0;
 			if (logged++ < 4)
@@ -992,7 +992,7 @@ namespace DCLF
 			desc.hasDSV = true;
 			desc.dsvFormat = desc.format;
 			const auto& traits = TraitsOf(a_kind);
-			auto imported = ImportImage(host->Device(), info.image, desc, fmt::format("DCLF {} depth (kPOST_ZPREPASS_COPY)", traits.name).c_str());
+			auto imported = ImportImage(host->Device(), copy.texture, info.image, desc, fmt::format("DCLF {} depth (kPOST_ZPREPASS_COPY)", traits.name).c_str());
 			if (!imported) {
 				static std::uint32_t logged = 0;
 				if (logged++ < 4)
@@ -1058,7 +1058,7 @@ namespace DCLF
 		// The shadow maps', then each occlusion map's (its entry's target label).
 		static constexpr const char* kNames[kFirstOcclusionTarget] = { "DCLF shadow maps (ESRAM)", "DCLF shadow maps", "DCLF volumetric shadow maps (ESRAM)" };
 		const char* name = IsOcclusionTarget(a_index) ? Extensions::OcclusionMapOf(a_index - kFirstOcclusionTarget).targetName.c_str() : kNames[a_index];
-		auto imported = ImportImage(host->Device(), info.image, desc, name);
+		auto imported = ImportImage(host->Device(), a_texture, info.image, desc, name);
 		if (!imported)
 			return ShadowNotReady(5, "the shadow map could not be imported (not in the general layout?)");
 		adopt(std::move(imported), info.image.arrayLayers);

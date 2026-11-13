@@ -10,8 +10,6 @@
 #include "Features/DrawcallLimitFix/Core/Gpu/FrameValues.h"
 #include "Features/RemoteControl/GpuCounters.h"
 #include "RenderGraph/DxvkImageImport.h"
-#include "RenderGraph/Engine/Native/Native.h"
-#include "RenderGraph/Engine/Targets/EngineTargets.h"
 #include "RenderGraph/Switches.h"
 
 #include <Resources/ExternalTextureResource.h>
@@ -37,20 +35,16 @@ namespace DCLF::Draws
 		FoldCullEye(a_viewProj.data(), eye, a_out);
 	}
 
-	FrameAnchors::Texture ImportImage(rhi::Device a_device, const DxvkOrgInteropImageInfo& a_image, org::TextureDescription a_desc,
+	FrameAnchors::Texture ImportImage(rhi::Device a_device, ID3D11Texture2D* a_texture, const DxvkOrgInteropImageInfo& a_image, org::TextureDescription a_desc,
 		const char* a_name)
 	{
-		// An engine target ORG owns (CS_ORG_ENGINE_TARGETS): its published slot, the one the anchors' passes use, so the graph orders
-		// DCLF's uses with theirs, and a target made again in the same shape class is the slot's next version. CS_ORG_ENGINE_TARGETS_DCLF=0 keeps DCLF's own import of the image.
+		// The image's one graph resource (FrameAnchors::ShareImage): an engine target ORG owns gives its published slot, any image an
+		// importer already has gives that slot, and otherwise a new slot is made that later importers share. So the graph orders DCLF's
+		// uses with every other importer's, and one tracker follows the image's layout. CS_ORG_ENGINE_TARGETS_DCLF=0 keeps DCLF's own
+		// import of the image (a bisecting aid; in native mode that is a second resource of the image).
 		static const bool shareOwned = !Switches::Off("CS_ORG_ENGINE_TARGETS_DCLF");
-		if (shareOwned) {
-			if (auto owned = RenderGraph::Engine::Targets::FindImage(reinterpret_cast<std::uint64_t>(a_image.image)))
-				return owned;
-			// The anchors' import of the same image (an engine target ORG does not own): its slot, so the image is one graph resource
-			// whose state one tracker follows, not two whose layout moves race.
-			if (auto shared = FrameAnchors::ImportOfImage(reinterpret_cast<std::uint64_t>(a_image.image)))
-				return shared;
-		}
+		if (shareOwned)
+			return FrameAnchors::ShareImage(a_texture, a_image, a_desc, a_name ? a_name : "DCLF image");
 		a_desc.imageDimensions.clear();
 		a_desc.imageDimensions.push_back({ a_image.extent.width, a_image.extent.height, 0, 0 });
 		// ORG builds a DSV per slice for arrays, so a shadow view attaches its own slice.
