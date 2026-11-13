@@ -65,6 +65,9 @@ namespace DCLF::Api
 		// Its backings report their device address (FrameValues::PoolAddress): rows that hold their own address, or a pass that reads them
 		// by address.
 		bool deviceAddress = false;
+		// Its backings take writes from the GPU (a pass that stores into the rows). D3D12 needs it for the buffer's UAV: without it the
+		// buffer view ref's UAV is a null view, and every store through it is dropped.
+		bool unorderedAccess = false;
 		void (*frameStart)(const FrameValuePoolFrameStart& a_start) = nullptr;
 		FrameValueInput (*kick)(const FrameValuePoolKick& a_kick) = nullptr;
 		void (*sample)(FrameValuePoolProducer& a_producer) = nullptr;

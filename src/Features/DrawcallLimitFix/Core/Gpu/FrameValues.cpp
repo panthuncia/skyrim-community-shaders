@@ -796,7 +796,7 @@ namespace DCLF
 			BindFrameLeases(late.frameLeases, noRegistered, boundPoints);
 		}
 		// Returns the point the lease's copy is still bound to (BackingPool::AcquireInfo::writeAfter; 0: reusable now).
-		std::uint64_t LeasePool(Pool& a_pool, std::string_view a_name, std::uint32_t a_stride, bool a_deviceAddress, std::uint64_t a_needed, org::services::BackingLease& a_frameLease,
+		std::uint64_t LeasePool(Pool& a_pool, std::string_view a_name, std::uint32_t a_stride, org::services::BackingFlags a_flags, std::uint64_t a_needed, org::services::BackingLease& a_frameLease,
 			org::services::BackingLease& a_jobLease, std::optional<std::uint64_t>& a_oldestContentEpoch);
 		void MakeRegistered();
 		void KickRegistered(Job& a_job, const FrameGlobals* a_globals);
@@ -2608,15 +2608,15 @@ namespace DCLF
 			for (const std::size_t part : { kPlacements, kPalettes })
 				if (parts[part]) {
 					std::optional<std::uint64_t> floor;
-					writeAfter = std::max(writeAfter, LeasePool(pools[part], kPartNames[part], kStrides[part], false, needed[part], late.frameLeases[part], late.jobLeases[part], floor));
+					writeAfter = std::max(writeAfter, LeasePool(pools[part], kPartNames[part], kStrides[part], {}, needed[part], late.frameLeases[part], late.jobLeases[part], floor));
 				}
 		}
 		for (std::size_t part = 0; part < kBuiltInPools; ++part)
-			writeAfter = std::max(writeAfter, LeasePool(pools[part], kPartNames[part], kStrides[part], false, needed[part], frameLeases[part], a_job.leases[part], a_job.oldestContentEpochs[part]));
+			writeAfter = std::max(writeAfter, LeasePool(pools[part], kPartNames[part], kStrides[part], {}, needed[part], frameLeases[part], a_job.leases[part], a_job.oldestContentEpochs[part]));
 		for (std::size_t i = 0; i < a_job.registered.size(); ++i) {
 			auto& entry = registered[i];
 			auto& part = a_job.registered[i];
-			writeAfter = std::max(writeAfter, LeasePool(entry.pool, entry.entry->name, entry.entry->stride, entry.entry->deviceAddress, entry.needed, registeredFrameLeases[i], part.lease,
+			writeAfter = std::max(writeAfter, LeasePool(entry.pool, entry.entry->name, entry.entry->stride, { .unorderedAccess = entry.entry->unorderedAccess, .deviceAddress = entry.entry->deviceAddress }, entry.needed, registeredFrameLeases[i], part.lease,
 													 part.oldestContentEpoch));
 		}
 		ReusedCopyPoint(writeAfter, a_job);
@@ -2644,7 +2644,7 @@ namespace DCLF
 		}
 	}
 
-	std::uint64_t FrameValues::Impl::LeasePool(Pool& a_pool, std::string_view a_name, std::uint32_t a_stride, bool a_deviceAddress, std::uint64_t a_needed, org::services::BackingLease& a_frameLease,
+	std::uint64_t FrameValues::Impl::LeasePool(Pool& a_pool, std::string_view a_name, std::uint32_t a_stride, org::services::BackingFlags a_flags, std::uint64_t a_needed, org::services::BackingLease& a_frameLease,
 		org::services::BackingLease& a_jobLease, std::optional<std::uint64_t>& a_oldestContentEpoch)
 	{
 		// The class follows the rows asked both ways: a smaller one once they stayed much smaller (a fresh backing, written whole: its
@@ -2653,7 +2653,7 @@ namespace DCLF
 		if (a_pool.backingName.empty())
 			a_pool.backingName = fmt::format("cs.dclf.frame-values.{}", a_name);
 		org::services::BackingPool::AcquireInfo info;
-		auto lease = a_pool.pool->Acquire({ .capacityClass = a_pool.capacity, .stride = a_stride, .flags = { .deviceAddress = a_deviceAddress }, .name = a_pool.backingName },
+		auto lease = a_pool.pool->Acquire({ .capacityClass = a_pool.capacity, .stride = a_stride, .flags = a_flags, .name = a_pool.backingName },
 			a_pool.newestContentEpoch.load(std::memory_order_acquire), &info);
 		if (!lease)
 			stl::report_and_fail(fmt::format("Drawcall Limit Fix: the frame values' {} pool returned no backing", a_name));

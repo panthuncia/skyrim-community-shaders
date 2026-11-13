@@ -588,7 +588,7 @@ namespace DCLF::Extensions
 			{
 				if (a_pool.name.empty() || !a_pool.stride || !a_pool.kick || !a_pool.sample || !a_pool.send)
 					stl::report_and_fail(fmt::format("Drawcall Limit Fix: {} registered an incomplete frame-value pool", feature));
-				lists.pools.push_back({ std::string(a_pool.name), a_pool.stride, a_pool.deviceAddress, a_pool.frameStart, a_pool.kick, a_pool.sample, a_pool.send });
+				lists.pools.push_back({ std::string(a_pool.name), a_pool.stride, a_pool.deviceAddress, a_pool.unorderedAccess, a_pool.frameStart, a_pool.kick, a_pool.sample, a_pool.send });
 				return { static_cast<std::uint32_t>(lists.pools.size() - 1) };
 			}
 

@@ -949,6 +949,18 @@ the colour pass's main, terrain and decal buckets (`CS_DCLF_MAIN_PLAIN` and the 
   epoch, refraction, the Effect family, particles, grass, tree LOD, first person, water reflections, Skylighting's and the
   precipitation's occlusion views. A value set in the environment is kept.
 
+**Slice 1 draws (2026-11-12, `test/refs-sweep`, RX 6600).** Native D3D12 draws the main view's Lighting, textured and lit, like
+Vulkan. Three fixes got it there:
+- **Index buffer views.** BasicRHI's D3D12 index and vertex buffer views of size 0 were empty, so the plain draws read every
+  index as 0 and every triangle was degenerate (vertex stages ran, nothing rasterized). A view of size 0 now covers the rest of
+  the buffer, as Vulkan's does.
+- **The texture transforms' copy.** Its pool (`animated-material-rows`) now has UAV access (`Api::FrameValuePool::unorderedAccess`).
+  Without it, the buffer view ref's UAV is a null view on D3D12, so every store was dropped and every animated draw read zeros
+  (black objects).
+- **The AMD early-return miscompile** in TextureTransformsCS (see AGENTS.md), which broke the copy on Vulkan and D3D12 alike.
+
+The ref trace (`CS_DCLF_REF_TRACE`) works on D3D12 too: its table is a committed buffer in host-cached system memory.
+
 Next slices, each on what slice 1 leaves: the shadow views (Utility's pulled builds through a rewrite of their pushed blocks, and
 the shadow draws' instance: their 20-byte draw records have no word before the arguments), then the forward epoch, then the
 families (Effect's pulled builds already take the frame rewrite; DistantTree and RunGrass read their own tables).

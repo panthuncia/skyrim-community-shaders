@@ -166,7 +166,7 @@ namespace DCLF::Features::TextureTransforms
 	{
 		pool = a_context.RegisterFrameValuePool({ .name = "texture-transforms", .stride = sizeof(TextureTransformRow), .kick = &Kick, .sample = &Sample, .send = &Send });
 		copyPool = a_context.RegisterFrameValuePool(
-			{ .name = "animated-material-rows", .stride = kMaterialRowBytes, .deviceAddress = true, .kick = &KickCopy, .sample = &SampleCopy, .send = &SendCopy });
+			{ .name = "animated-material-rows", .stride = kMaterialRowBytes, .deviceAddress = true, .unorderedAccess = true, .kick = &KickCopy, .sample = &SampleCopy, .send = &SendCopy });
 	}
 
 	// Render thread, when a payload is installed (before Kick): the main material rows that carry TexcoordOffset (null: none). From the next
