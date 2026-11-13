@@ -59,6 +59,8 @@ namespace DCLF::Direct
 				// And the view batch set's sequences, through the ref every draw's push words carry (ViewBatchSet::sequencesRef).
 				SiteBindings bindings{ site };
 				Draws::DeclareViewBatchReads(a_builder, bindings.sequences);
+				// The set's sequences' rows are offsets from the payload's row parts (ViewBatchSet::pipelineRowsRef...).
+				Draws::DeclarePayloadReads(a_builder);
 				return bindings;
 			}
 

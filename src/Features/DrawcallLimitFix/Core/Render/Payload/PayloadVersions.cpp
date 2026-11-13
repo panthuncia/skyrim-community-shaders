@@ -37,6 +37,18 @@ namespace DCLF::Draws
 			{ "geometries", 4, false }, { "material-rows", kMaterialRowBytes, true }, { "pipeline-rows", kPipelineRowBytes, true }, { "inputs", 4, false },
 			{ "shadow-rows", sizeof(ShadowMaterialRow), true } } };
 
+		/** @brief Part a_part's late-bound buffer (cs.dclf.payload.<name>.late): its readers declare it, MakeFramePayload publishes its version. */
+		RenderGraph::LateRefBuffer& PartLate(std::size_t a_part)
+		{
+			static const auto parts = [] {
+				std::array<std::unique_ptr<RenderGraph::LateRefBuffer>, kPayloadParts> made;
+				for (std::size_t k = 0; k < kPayloadParts; ++k)
+					made[k] = std::make_unique<RenderGraph::LateRefBuffer>(fmt::format("cs.dclf.payload.{}.late", kPools[k].name));
+				return made;
+			}();
+			return *parts[a_part];
+		}
+
 		// A class's backings at most: one a game frame in flight may still bind, the newest version and the one being built. A build that
 		// finds none free suspends until one is (the frames meanwhile draw the snapshot they have).
 		constexpr std::uint32_t kBackingsPerClass = RenderGraphRuntime::kGameFramesInFlight + 2;
@@ -570,6 +582,13 @@ namespace DCLF::Draws
 			Parts().installed = std::move(a_payload);
 		}
 
+		void DeclareReads(org::RenderPassBuilder& a_builder)
+		{
+			RenderGraph::DeclaredRefs unchecked;  // MakeFramePayload's refs are the published versions' own
+			for (std::size_t k = 0; k < kPayloadParts; ++k)
+				PartLate(k).Declare(a_builder, RenderGraph::RefAccess::Read, unchecked);
+		}
+
 		bool MakeFramePayload(PayloadVersions& a_out)
 		{
 			a_out = {};
@@ -582,9 +601,11 @@ namespace DCLF::Draws
 				if (!version)
 					continue;
 				const auto& backing = version->lease;
+				// The part's late-bound buffer, which its readers declare, takes this version (the ref is not a raw one).
+				const RenderGraph::BufferRef published = PartLate(k).Publish(backing->buffer, version);
 				// The row parts' refs too: the shaders read rows through them, the layouts through the addresses.
 				a_out.parts[k] = { backing->srvIndex, kPools[k].deviceAddress ? backing->address : 0,
-					kPools[k].deviceAddress && backing->buffer ? RenderGraph::BufferRefOf(*backing->buffer) : RenderGraph::BufferRef{}, payload.units[k] };
+					kPools[k].deviceAddress ? published : RenderGraph::BufferRef{}, payload.units[k] };
 				a_out.backings[k] = backing.Get();
 				// CS_DCLF_REF_CHECK: the row parts' refs against their addresses.
 				RenderGraph::CheckBufferRef(a_out.parts[k].ref, a_out.parts[k].address, backing->byteCapacity, "payload part");

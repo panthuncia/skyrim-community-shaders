@@ -9,6 +9,7 @@
 #include "RenderGraph/BufferRefs.h"
 
 #include <ORGModuleServices/VersionedBufferBuild.h>
+#include <Resources/Buffers/Buffer.h>
 #include <tbb/concurrent_queue.h>
 
 #include <algorithm>
@@ -231,10 +232,14 @@ namespace DCLF::Draws::detail
 			const auto& version = a_payload.versions[static_cast<std::size_t>(a_part)];
 			return version ? version->lease->address : 0;
 		}
+		/** @brief Not a raw ref: the payload's readers declare its parts (PayloadPools::DeclareReads). */
 		static RenderGraph::BufferRef RefOf(const ScenePayload& a_payload, PayloadPart a_part)
 		{
 			const auto& version = a_payload.versions[static_cast<std::size_t>(a_part)];
-			return version && version->lease->buffer ? RenderGraph::BufferRefOf(*version->lease->buffer) : RenderGraph::BufferRef{};
+			auto* host = RenderGraphRuntime::Get().Host();
+			return host && version && version->lease->buffer ?
+			           RenderGraph::MakeBufferRef(host->Device(), version->lease->buffer->GetAPIResource().GetHandle(), 0, std::source_location::current()) :
+			           RenderGraph::BufferRef{};
 		}
 		/** @brief A main input's rows (BuildDrawsCS RowsOf: the installed rows; the draw resolves an animated row to the frame's copy, DCLFSequenceRows). */
 		DrawSequence Main(const DrawInput& a_input) const

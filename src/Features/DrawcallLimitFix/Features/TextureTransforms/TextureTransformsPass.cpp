@@ -8,6 +8,7 @@
 #include "Features/DrawcallLimitFix/Core/Extensions/PassContext.h"
 #include "Features/DrawcallLimitFix/Core/Gpu/FrameValues.h"
 #include "Features/DrawcallLimitFix/Core/Render/Epochs/GraphConditions.h"
+#include "Features/DrawcallLimitFix/Core/Render/Passes/DrawHelpers.h"
 #include "Features/DrawcallLimitFix/Core/Render/Revision/Shapes.h"
 #include "Features/DrawcallLimitFix/Diagnostics/RefTrace.h"
 
@@ -83,6 +84,8 @@ namespace DCLF::Draws
 			// buffer view ref (animatedRows).
 			TextureTransformsBindings bindings;
 			FrameValues::Get().DeclarePoolWrite(a_builder, ::DCLF::Features::TextureTransforms::CopyPool(), FrameValues::kReadPools, bindings.copy);
+			// The installed payload's material rows it copies from (materialRowsLo/Hi in the latch).
+			DeclarePayloadReads(a_builder);
 			return bindings;
 		}
 

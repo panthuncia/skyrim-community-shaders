@@ -59,8 +59,9 @@ namespace DCLF
 					bindings.poolFirsts = a_builder.ShaderResource(*main.scene->pool->firsts).View();
 					for (std::uint32_t f = 0; f < resources->traits->faces; ++f)
 						bindings.bucketCounts[f] = a_builder.UnorderedAccess(*resources->bucketCounts[f]).View();
-					// BuildDrawsCS reads the frame's placements and the fade seeds pool through each face's latch.
+					// BuildDrawsCS reads the frame's placements and the fade seeds pool through each face's latch, and the payload's parts.
 					FrameValues::Get().DeclareReads(a_builder, FrameValues::kReadPlacements | FrameValues::kReadPools);
+					DeclarePayloadReads(a_builder);
 					return bindings;
 				}
 
@@ -186,8 +187,9 @@ namespace DCLF
 						a_builder.ShaderResource(*scene.vertexStream, noViews);
 					a_builder.ShaderResource(resources->blocks, noViews);
 					// Every mode draws through a frame record (the view's own or the colour segment's), whose shaders read the frame's
-					// placements, palettes, shading and fade seeds (t117, t121-t123).
+					// placements, palettes, shading and fade seeds (t117, t121-t123), and the payload's rows.
 					FrameValues::Get().DeclareReads(a_builder);
+					DeclarePayloadReads(a_builder);
 					if (mode == DrawMode::Colour)
 						DeclareFrameBuffers(a_builder, main);
 					// The faces read the published textures their frame textures' views export (ResolveViewFrameTextures). Only

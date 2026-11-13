@@ -91,6 +91,13 @@ namespace DCLF::Draws
 	Extensions::DeclaredReads DeclareFrameBuffers(org::PassBuilder& a_builder, const Resources& a_resources, bool a_lights = true);
 
 	/**
+	 * @brief Graph build: the pass reads the installed payload's parts (the scene list, geometry table, objects, extras and rows) through
+	 * the indices, addresses or refs its latch, frame record or view batch set carries. Declares each part's late-bound buffer
+	 * (PayloadPools::DeclareReads), whose version the frame's payload publishes. DeclareFrameBuffers does this too.
+	 */
+	void DeclarePayloadReads(org::PassBuilder& a_builder);
+
+	/**
 	 * @brief One device-generated call of a draw pass: its signature (a state class's: each call draws one class's sub-range of a range),
 	 * where its sequences start in the arguments, its count word and its max count.
 	 */

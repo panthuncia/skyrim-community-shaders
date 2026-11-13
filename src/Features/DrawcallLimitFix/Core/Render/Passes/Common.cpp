@@ -197,9 +197,15 @@ namespace DCLF::Draws
 		// The frame textures' published ids, so the graph orders these reads after the producers' writes.
 		Extensions::DeclareGraphTextures(a_builder, Extensions::ColourGraphTextureIds(), reads);
 		// Every caller draws with the frame record bound. Its shaders read the frame's placements, palettes and shading (t121-t123)
-		// and the fade seeds pool (t117).
+		// and the fade seeds pool (t117), and its sequences name the payload's rows.
 		FrameValues::Get().DeclareReads(a_builder);
+		DeclarePayloadReads(a_builder);
 		return reads;
+	}
+
+	void DeclarePayloadReads(org::PassBuilder& a_builder)
+	{
+		PayloadPools::DeclareReads(a_builder);
 	}
 
 	void RecordPreprocessedDraws(org::PassRecordContext& a_recording, PreprocessStates& a_preprocess, const rhi::PassBeginInfo& a_begin, rhi::DescriptorHeapHandle a_resourceHeap,
