@@ -21,13 +21,19 @@ ORGDeferredComposite& ORGDeferredComposite::Get()
 #	include "Deferred.h"
 #	include "Features/DrawcallLimitFix/Core/Gpu/GpuTextures.h"
 #	include "Features/DynamicCubemaps.h"
+#	include "Features/DynamicCubemaps/ORGDynamicCubemaps.h"
 #	include "Features/IBL.h"
+#	include "Features/IBL/ORGIBL.h"
 #	include "Features/ScreenSpaceGI.h"
+#	include "Features/ScreenSpaceGI/ORGScreenSpaceGI.h"
 #	include "Features/Skylighting.h"
+#	include "Features/Skylighting/ORGSkylighting.h"
 #	include "Features/TerrainBlending.h"
 #	include "Globals.h"
 #	include "RenderGraph/ComputeProgram.h"
+#	include "RenderGraph/Engine/Native/Native.h"
 #	include "RenderGraph/FrameAnchors.h"
+#	include "RenderGraph/PublishedResources.h"
 #	include "RenderGraph/RenderGraphRuntime.h"
 #	include "RenderGraph/ShaderBindings.h"
 #	include "RenderGraph/SharedConstants.h"
@@ -64,8 +70,40 @@ namespace
 	};
 	static_assert(sizeof(CompositeBlock) == 96, "matches the shader's push block (check-dual-target-shaders reports 96 bytes)");
 
-	// The D3D11 composite's slots of what D3D11 features produce: read through descriptors over their images.
+	// The D3D11 composite's slots of what other features produce.
 	constexpr std::array<std::uint32_t, 9> kViewSlots{ 6, 7, 8, 10, 11, 12, 13, 14, 15 };
+
+	/** @brief The ids a slot's producer publishes its texture under, and whether the shader reads a cube. kViewSlots order. */
+	struct SlotSource
+	{
+		std::array<std::string_view, 2> ids;
+		bool cube = false;
+	};
+	constexpr std::array<SlotSource, kViewSlots.size()> kSlotSources{ {
+		{ { ORGDynamicCubemaps::kEnvId, ORGDynamicCubemaps::kEnvBC6HId }, true },
+		{ { ORGDynamicCubemaps::kEnvReflectionsId, ORGDynamicCubemaps::kEnvReflectionsBC6HId }, true },
+		{ { ORGSkylighting::kProbeArrayId, {} }, false },
+		{ { ORGScreenSpaceGI::kAoId, {} }, false },
+		{ { ORGScreenSpaceGI::kYId, {} }, false },
+		{ { ORGScreenSpaceGI::kCoCgId, {} }, false },
+		{ { ORGScreenSpaceGI::kSpecularId, {} }, false },
+		{ { ORGIBL::kEnvId, {} }, false },
+		{ { ORGIBL::kSkyId, {} }, false },
+	} };
+
+	/**
+	 * @brief What the composite reads at one of kViewSlots: the producer's published resource by its id (ordered after its writes
+	 * in any epoch), or in guest mode the D3D11 texture of a producer that is on D3D11, imported and declared. Neither: the null
+	 * descriptor, as D3D11 binds nothing there.
+	 */
+	struct SlotInput
+	{
+		std::string_view published;
+		bool cube = false;
+		std::shared_ptr<org::ExternalTextureResource> imported;
+
+		bool operator==(const SlotInput&) const = default;
+	};
 
 	// The engine swaps the normals target with its twin every frame (forwardRenderTargets[2] alternates): both are imported and
 	// declared, and each frame's execution picks one.
@@ -78,24 +116,24 @@ namespace
 		std::shared_ptr<org::ExternalTextureResource> specular, albedo, normalRoughness, masks, masks2, reflectance, depth;
 		std::shared_ptr<org::ExternalTextureResource> main, motionVectors;
 		std::array<std::shared_ptr<org::ExternalTextureResource>, 2> normals;  // kNormalsTargets
+		std::array<SlotInput, kViewSlots.size()> inputs;
 
 		bool operator==(const Targets&) const = default;
 	};
 
 	/**
-	 * @brief One frame's inputs that are not declared views: immutable once published, replaced only when they change. The
-	 * recordings that read one keep it, with its descriptors, until their GPU work retires (RecordingContext::Retain).
+	 * @brief One frame's values that are not declared views: immutable once published, replaced only when they change. The
+	 * recordings that read one keep it, with its null descriptor, until their GPU work retires (RecordingContext::Retain).
 	 */
 	struct Execution
 	{
 		std::uint64_t serial = 0;  // the pass's revision: a new one for every execution made
 		std::shared_ptr<const ComputeProgram> program;
 		std::uint32_t groupsX = 0, groupsY = 0;
-		std::uint32_t normals = 0;       // which of kNormalsTargets the composite writes
-		std::array<Handle, 16> views{};  // by D3D11 slot; the null descriptor where D3D11 binds nothing
+		std::uint32_t normals = 0;  // which of kNormalsTargets the composite writes
+		Handle null = 0;            // the null descriptor, for a slot with no input
 		Handle sampler = 0;
-		std::array<ID3D11ShaderResourceView*, 16> keys{};  // the D3D11 views they came from (identities)
-		std::vector<std::shared_ptr<const void>> owners;   // the descriptors' ownership, through GPU completion
+		std::shared_ptr<const void> nullOwner;  // the null descriptor's ownership, through GPU completion
 	};
 
 	/** @brief What the passes share with the render thread. */
@@ -111,6 +149,8 @@ namespace
 		org::DeclaredViewToken specular, albedo, normalRoughness, masks, masks2, reflectance, depth;
 		org::DeclaredViewToken main, motionVectors;
 		std::array<org::DeclaredViewToken, 2> normals;
+		std::array<org::DeclaredViewToken, kViewSlots.size()> inputs;  // where declared is set
+		std::array<bool, kViewSlots.size()> declared{};
 	};
 
 	struct CompositeFrame
@@ -144,6 +184,18 @@ namespace
 			for (std::size_t i = 0; i < t.normals.size(); ++i)
 				bindings.normals[i] = a_builder.UnorderedAccess(t.normals[i]).View();
 			bindings.motionVectors = a_builder.UnorderedAccess(t.motionVectors).View();
+			for (std::size_t i = 0; i < t.inputs.size(); ++i) {
+				const auto& input = t.inputs[i];
+				if (input.imported) {
+					// An import's default view follows its D3D11 SRV (a cube's TextureCube view).
+					bindings.inputs[i] = a_builder.ShaderResource(input.imported).View();
+					bindings.declared[i] = true;
+				} else if (!input.published.empty() && PublishedResources::IsDeclarable(input.published)) {
+					const org::SrvView view{ .variant = input.cube ? static_cast<std::uint32_t>(org::SRVViewType::TextureCube) : UINT32_MAX };
+					bindings.inputs[i] = a_builder.ShaderResource(org::ResourceIdentifier(input.published), view).View();
+					bindings.declared[i] = true;
+				}
+			}
 			return bindings;
 		}
 
@@ -167,8 +219,11 @@ namespace
 				return;
 			// The descriptors it names live as long as any submission of this recording.
 			a_recording.Retain(a_frame.execution);
-			const auto& views = execution->views;
-			const Handle null = views[0];  // slot 0 is always imported: its entry holds the null descriptor
+			const Handle null = execution->null;
+			// Each input's index comes from the view its declaration returned (kViewSlots order).
+			std::array<Handle, kViewSlots.size()> inputs{};
+			for (std::size_t i = 0; i < inputs.size(); ++i)
+				inputs[i] = a_bindings.declared[i] ? a_recording.Index(a_bindings.inputs[i]) : null;
 			CompositeBlock block{};
 			block.shared = SharedConstants::Index(a_recording, a_bindings.shared);
 			block.specular = a_recording.Index(a_bindings.specular);
@@ -181,16 +236,16 @@ namespace
 			block.motionVectorsRW = a_recording.Index(a_bindings.motionVectors);
 			block.depth = a_frame.depth ? a_recording.Index(a_bindings.depth) : null;
 			block.reflectance = a_frame.reflectance ? a_recording.Index(a_bindings.reflectance) : null;
-			block.env = views[6];
-			block.envReflections = views[7];
+			block.env = inputs[0];
+			block.envReflections = inputs[1];
 			block.linearSampler = execution->sampler;
-			block.skylightingProbes = views[8];
-			block.ssgiAo = views[10];
-			block.ssgiY = views[11];
-			block.ssgiCoCg = views[12];
-			block.ssgiSpecular = views[13];
-			block.envIBL = views[14];
-			block.skyIBL = views[15];
+			block.skylightingProbes = inputs[2];
+			block.ssgiAo = inputs[3];
+			block.ssgiY = inputs[4];
+			block.ssgiCoCg = inputs[5];
+			block.ssgiSpecular = inputs[6];
+			block.envIBL = inputs[7];
+			block.skyIBL = inputs[8];
 			execution->program->Dispatch(a_recording, ShaderBindings::Data(block), execution->groupsX, execution->groupsY, 1);
 		}
 
@@ -266,7 +321,43 @@ struct ORGDeferredComposite::Impl
 		}
 		if (!t.specular || !t.albedo || !t.normalRoughness || !t.masks || !t.masks2 || !t.main || !t.normals[0] || !t.normals[1] || !t.motionVectors)
 			return std::nullopt;
+		for (std::size_t i = 0; i < kViewSlots.size(); ++i) {
+			const auto input = InputOf(i, a_frame.views[kViewSlots[i]]);
+			if (!input)
+				return std::nullopt;
+			t.inputs[i] = *input;
+		}
 		return t;
+	}
+
+	/**
+	 * @brief The input of kViewSlots[a_slot] for a_view, the view the D3D11 composite binds there: its producer's published id
+	 * while a_view is that id's export. Otherwise the producer is on D3D11: guest mode imports its texture under the id, and native
+	 * mode, which needs the producers on the graph, binds the null descriptor. Nothing when guest mode cannot import it (a 3D
+	 * texture: Skylighting's probes on D3D11): Deferred composites with D3D11 that frame.
+	 */
+	static std::optional<SlotInput> InputOf(std::size_t a_slot, ID3D11ShaderResourceView* a_view)
+	{
+		const auto& source = kSlotSources[a_slot];
+		SlotInput input{ .cube = source.cube };
+		if (!a_view)
+			return input;
+		for (const auto id : source.ids)
+			if (!id.empty() && PublishedResources::IsExportOf(a_view, id)) {
+				input.published = id;
+				return input;
+			}
+		if (RenderGraph::Engine::Native::Active())
+			return input;
+		winrt::com_ptr<ID3D11Resource> resource;
+		a_view->GetResource(resource.put());
+		auto texture = resource.try_as<ID3D11Texture2D>();
+		if (!texture)
+			return std::nullopt;
+		input.imported = FrameAnchors::D3D11Texture(source.ids[0], texture.get(), a_view, nullptr);
+		if (!input.imported)
+			return std::nullopt;
+		return input;
 	}
 
 	bool Register(const Targets& a_targets)
@@ -323,8 +414,7 @@ struct ORGDeferredComposite::Impl
 		}
 		const auto& program = frame.interior ? interior : exterior;
 		auto& cached = byNormals[normals];
-		if (cached && cached->program == program && cached->groupsX == frame.groupsX && cached->groupsY == frame.groupsY &&
-			cached->keys == frame.views) {
+		if (cached && cached->program == program && cached->groupsX == frame.groupsX && cached->groupsY == frame.groupsY) {
 			shared->execution.store(cached, std::memory_order_release);
 			composited = true;
 			return;
@@ -335,28 +425,13 @@ struct ORGDeferredComposite::Impl
 		next->groupsX = frame.groupsX;
 		next->groupsY = frame.groupsY;
 		next->normals = normals;
-		next->keys = frame.views;
-		next->views.fill(null.index);
+		next->null = null.index;
 		next->sampler = sampler.Index();
-		next->owners.push_back(null.owner);
-		bool resolved = true;
-		for (const std::uint32_t slot : kViewSlots) {
-			auto* view = frame.views[slot];
-			if (!view)
-				continue;
-			const auto binding = DCLF::GpuTextures::Get().ResolveBinding(view);
-			if (binding.index == DCLF::GpuTextures::kInvalid) {
-				resolved = false;
-				break;
-			}
-			next->views[slot] = binding.index;
-			next->owners.push_back(binding.owner);
-		}
-		// A view that cannot be read this frame: no dispatch, and Deferred composites with D3D11.
-		std::shared_ptr<const Execution> published = resolved ? std::shared_ptr<const Execution>(std::move(next)) : nullptr;
+		next->nullOwner = null.owner;
+		std::shared_ptr<const Execution> published = std::move(next);
 		shared->execution.store(published, std::memory_order_release);
 		cached = published;
-		composited = resolved;
+		composited = true;
 	}
 };
 

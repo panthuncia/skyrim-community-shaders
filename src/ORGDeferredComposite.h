@@ -12,9 +12,9 @@ struct ID3D11ShaderResourceView;
  *
  * It runs on the DeferredComposite frame anchor, where the D3D11 composite runs: after the D3D11 SSGI, SSS and cubemap update. The
  * GBuffer, the main target, the normals, the motion vectors and the final depth copy are engine targets imported once
- * (FrameAnchors::EngineTarget / EngineDepth) and tracked by the graph. What D3D11 features produce (SSGI's outputs, the cubemaps, the
- * skylighting probes, the IBL SH) is read in place through descriptors over their DXVK images (DCLF::GpuTextures::ResolveBinding),
- * read only. The shared constant buffers come from SharedConstants. The shader is the same DeferredCompositeCS.hlsl, built by DXC
+ * (FrameAnchors::EngineTarget / EngineDepth) and tracked by the graph. What other features produce (SSGI's outputs, the cubemaps,
+ * the skylighting probes, the IBL SH) is declared by its published id when the producer runs on the graph, so the read is ordered
+ * after its writes. A producer on D3D11 is imported (FrameAnchors::D3D11Texture) and declared in guest mode; native mode binds null. The shared constant buffers come from SharedConstants. The shader is the same DeferredCompositeCS.hlsl, built by DXC
  * with the defines Util::CompileShader would give it.
  *
  * When the ORG path cannot run a frame (an input it cannot import, a failed graph), Deferred runs the D3D11 composite instead. A
