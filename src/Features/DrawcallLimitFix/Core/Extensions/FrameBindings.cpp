@@ -7,6 +7,7 @@
 #include "RenderGraph/PublishedResources.h"
 
 #include <Render/PassBuilders.h>
+#include <Render/PreparedPass.h>
 
 #include <algorithm>
 #include <atomic>
@@ -114,21 +115,62 @@ namespace DCLF::Extensions
 		return s_ids;
 	}
 
-	void DeclareGraphTextures(org::RenderPassBuilder& a_builder, std::span<const std::string_view> a_ids)
+	struct DeclaredReads::Entry
 	{
-		const std::span<const org::SrvView> noViews{};
+		std::string id;
+		org::DeclaredViewToken view;
+		std::uint32_t latched = UINT32_MAX;  // ShaderResourceIndex at the build; UINT32_MAX: withdrawn then, nothing to compare
+		std::unique_ptr<std::atomic<bool>> reported = std::make_unique<std::atomic<bool>>(false);
+	};
+
+	void DeclarePublishedRead(org::RenderPassBuilder& a_builder, std::string_view a_id, DeclaredReads& a_out)
+	{
+		const org::SrvView view{ .variant = PublishedResources::ShaderResourceVariant(a_id) };
+		DeclaredReads::Entry entry{ .id = std::string(a_id), .view = a_builder.ShaderResource(org::ResourceIdentifier(a_id), view).View() };
+		if (!PublishedResources::ShaderResourceIndex(a_id, entry.latched))
+			entry.latched = UINT32_MAX;
+		if (!a_out.entries)
+			a_out.entries = std::make_shared<std::vector<DeclaredReads::Entry>>();
+		a_out.entries->push_back(std::move(entry));
+	}
+
+	void CheckDeclaredReads(const DeclaredReads& a_reads, const org::FramePreparationContext& a_preparation, std::string_view a_site)
+	{
+		if (!a_reads.entries)
+			return;
+		for (const auto& entry : *a_reads.entries) {
+			if (entry.latched == UINT32_MAX || entry.reported->load(std::memory_order_relaxed))
+				continue;
+			std::uint32_t declared = UINT32_MAX;
+			try {
+				declared = a_preparation.Resolve(entry.view).index;
+			} catch (const std::exception& e) {
+				if (!entry.reported->exchange(true, std::memory_order_relaxed))
+					logger::warn("[ORG] declared view mismatch: {} reads '{}' (latched descriptor {}), and its declared view does not resolve: {}", a_site,
+						entry.id, entry.latched, e.what());
+				continue;
+			}
+			if (declared != entry.latched && !entry.reported->exchange(true, std::memory_order_relaxed))
+				logger::warn("[ORG] declared view mismatch: {} reads '{}' through descriptor {}, its declared view is descriptor {}", a_site, entry.id,
+					entry.latched, declared);
+		}
+	}
+
+	DeclaredReads DeclareGraphTextures(org::RenderPassBuilder& a_builder, std::span<const std::string_view> a_ids)
+	{
+		DeclaredReads reads;
 		const auto declared = s_declared.load(std::memory_order_acquire);
 		std::vector<std::string_view> added;
 		for (const auto id : a_ids) {
 			// Only ids every graph registers: declaring another would fail the build. One skipped is built in once published.
 			if (!PublishedResources::IsDeclarable(id))
 				continue;
-			a_builder.ShaderResource(org::ResourceIdentifier(id), noViews);
+			DeclarePublishedRead(a_builder, id, reads);
 			if (!declared || std::ranges::find(*declared, id) == declared->end())
 				added.push_back(id);
 		}
 		if (added.empty())
-			return;
+			return reads;
 		auto next = std::make_shared<std::vector<std::string_view>>();
 		if (declared)
 			*next = *declared;
@@ -136,6 +178,7 @@ namespace DCLF::Extensions
 			if (std::ranges::find(*next, id) == next->end())
 				next->push_back(id);
 		s_declared.store(std::move(next), std::memory_order_release);
+		return reads;
 	}
 
 	bool GraphTextureIndex(GraphTextureReader a_reader, std::uint32_t a_register, std::string_view a_name, const ID3D11ShaderResourceView* a_view,

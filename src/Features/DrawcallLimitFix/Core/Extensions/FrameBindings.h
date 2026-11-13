@@ -17,11 +17,13 @@
 #include <string>
 #include <string_view>
 #include <tuple>
+#include <vector>
 
 struct ID3D11ShaderResourceView;
 
 namespace org
 {
+	struct FramePreparationContext;
 	class RenderPassBuilder;
 	class VersionedBuffer;
 	namespace services
@@ -117,11 +119,38 @@ namespace DCLF::Extensions
 	std::span<const std::string_view> FacesGraphTextureIds();
 
 	/**
-	 * @brief Graph build (render thread): declares a read, through no view, of each of a_ids that every graph registers
-	 * (PublishedResources::IsRegistered), and records it as declared. An id stays registered once published, so every later build
-	 * declares it too. The set grows only on a first Publish, which rebuilds every graph anyway.
+	 * @brief The reads a pass declared of published ids whose bindless indices DCLF writes into latches and tables at commit, before
+	 * the graph prepares (DeclareGraphTextures, Family::PublishedInputs::Declare). Each keeps its declared view and the index
+	 * PublishedResources::ShaderResourceIndex gave at the build, which is what the commit latches. CheckDeclaredReads compares the
+	 * two in the pass's Prepare. Phase 4 of the native frame graph moves these tables into Prepare (org::PreparedTablePublisher), and
+	 * the declared view's index is then used directly. Cheap to copy.
 	 */
-	void DeclareGraphTextures(org::RenderPassBuilder& a_builder, std::span<const std::string_view> a_ids);
+	struct DeclaredReads
+	{
+		struct Entry;
+		std::shared_ptr<std::vector<Entry>> entries;
+	};
+
+	/**
+	 * @brief Graph build (render thread): declares a read of a_id with the view PublishedResources::ShaderResourceIndex hands out
+	 * (PublishedResources::ShaderResourceVariant), so the declaration covers the descriptor the commit latches, and adds it to a_out.
+	 * The caller checks PublishedResources::IsDeclarable first.
+	 */
+	void DeclarePublishedRead(org::RenderPassBuilder& a_builder, std::string_view a_id, DeclaredReads& a_out);
+
+	/**
+	 * @brief A pass's Prepare (the host's thread): logs "[ORG] declared view mismatch" once per declared read whose index at the build
+	 * (the one the commit latches) is not its declared view's index this frame. a_site names the pass.
+	 */
+	void CheckDeclaredReads(const DeclaredReads& a_reads, const org::FramePreparationContext& a_preparation, std::string_view a_site);
+
+	/**
+	 * @brief Graph build (render thread): declares a read of each of a_ids that every graph registers (PublishedResources::IsDeclarable),
+	 * with the view whose index GraphTextureIndex latches (DeclarePublishedRead), and records it as declared. An id stays registered
+	 * once published, so every later build declares it too. The set grows only on a first Publish, which rebuilds every graph anyway.
+	 * @return The declared reads, for CheckDeclaredReads in the pass's Prepare.
+	 */
+	DeclaredReads DeclareGraphTextures(org::RenderPassBuilder& a_builder, std::span<const std::string_view> a_ids);
 
 	/**
 	 * @brief Render thread (a commit): the one rule for reading a published texture. When a_view is the export of one of a_ids that a
