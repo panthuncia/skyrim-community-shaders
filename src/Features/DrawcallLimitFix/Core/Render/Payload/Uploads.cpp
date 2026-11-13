@@ -438,6 +438,14 @@ namespace DCLF
 				a_frameTextures[t] = graphIndex;
 				continue;
 			}
+			// Wetness Effects' precipitation occlusion (t70) is the engine's depth target: its published slot, which the colour passes
+			// declare (Draws::DeclareFrameBuffers).
+			if (t == Extensions::kPrecipitationOcclusionRegister &&
+				Extensions::PrecipitationOcclusionTextureIndex(Extensions::GraphTextureReader::Colour, t, view, graphIndex)) {
+				HoldFrameTexture(held.view, held.binding, nullptr, t, 0u, a_commit.bindingOwners);
+				a_frameTextures[t] = graphIndex;
+				continue;
+			}
 			if (view && view != held.view)
 				NoteExportRead(t, view);
 			a_frameTextures[t] = HoldFrameTexture(held.view, held.binding, view, t, view ? 0u : textures.NullIndex(), a_commit.bindingOwners);

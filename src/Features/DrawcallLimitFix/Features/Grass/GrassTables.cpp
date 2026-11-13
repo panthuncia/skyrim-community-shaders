@@ -268,8 +268,11 @@ namespace DCLF::Features::Grass
 			tables->draw = Draws::CreateWords(sizeof(DrawRow) / 4, false, "cs.dclf.grass-draw");
 			tables->draws = Draws::CreateWords(kDrawsBytes / 4, true, "cs.dclf.grass-draws");
 			auto device = a_setup.device;
-			// The vertex and pixel stages read every table through its buffer view ref (RunGrass.hlsl).
-			auto refOf = [&](org::Buffer& a_buffer) { return RenderGraph::BufferRefOf(device, a_buffer.GetAPIResource().GetHandle()); };
+			// The vertex and pixel stages read every table through its buffer view ref (RunGrass.hlsl). The draw row's ref is pushed to the
+			// main passes, which declare the row (GrassDraws' MainDeclare; the cull and arguments passes declare it too). The versioned
+			// tables' refs are only made here to check that a ref can be made: the draw row carries each sealed version's ref
+			// (DCLF::RefOf), and the same passes declare the tables.
+			auto refOf = [&](org::Buffer& a_buffer) { return RenderGraph::DeclaredRefOf(device, a_buffer); };
 			tables->drawRef = refOf(*tables->draw);
 			bool addressed = static_cast<bool>(tables->drawRef);
 			for (const auto* table : { &tables->instances, &tables->owners, &tables->frame, &tables->visible, &tables->shapes, &tables->buckets, &tables->meshes })

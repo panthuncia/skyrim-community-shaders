@@ -56,10 +56,12 @@ namespace DCLF::Features::TreeLod
 		std::uint32_t MeshWords(std::uint32_t a_slots) { return a_slots * static_cast<std::uint32_t>(sizeof(MeshRow) / 4); }
 		std::uint32_t VisibleWords(std::uint32_t a_slots) { return kVisibleHeaderWords + 2 * a_slots * kMaxGroupInstances; }
 
-		// The vertex stage reads every table through its buffer view ref (DistantTree.hlsl).
+		// The vertex stage reads every table through its buffer view ref (DistantTree.hlsl). The draw row's ref is pushed to the main
+		// passes, which declare the row and the tables (TreeLodDraws' MainDeclare). The versioned tables' refs are only made here to
+		// check that a ref can be made: the draw row carries each sealed version's ref (DCLF::RefOf).
 		RenderGraph::BufferRef RefOf(rhi::Device a_device, org::Buffer& a_buffer)
 		{
-			return RenderGraph::BufferRefOf(a_device, a_buffer.GetAPIResource().GetHandle());
+			return RenderGraph::DeclaredRefOf(a_device, a_buffer);
 		}
 
 		// The scene's tables are made (the first frame with a device): the cull program, then the tables, after the face positions.
@@ -91,7 +93,8 @@ namespace DCLF::Features::TreeLod
 			}
 			if (debugStages) {
 				tables->stages = Draws::CreateWords(kStageSlots * kStageWords, false, "cs.dclf.tree-lod-stages");
-				tables->stagesRef = RefOf(device, *tables->stages);
+				// CS_DCLF_TREE_LOD_STAGES only: a debug ring the vertex stage stamps and no pass declares, so its ref stays a raw one.
+				tables->stagesRef = RenderGraph::BufferRefOf(device, tables->stages->GetAPIResource().GetHandle());
 			}
 			if (auto* host = RenderGraphRuntime::Get().Host()) {
 				auto counts = std::make_shared<TreeLodCounts>();

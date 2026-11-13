@@ -31,7 +31,11 @@ namespace DCLF::TextureFeedback
 		auto resource = buffer->GetAPIResource();
 		void* mapped = nullptr;
 		resource.Map(&mapped);
-		const RenderGraph::BufferRef made = RenderGraph::BufferRefOf(host->Device(), resource.GetHandle());
+		// The colour pass writes the words with no order between draws, and only the streaming worker reads them, from the mapping. No
+		// GPU pass reads the buffer, so no pass declares it: the validator counts its ref as host feedback.
+		if (RenderGraph::UndeclaredAccess::On())
+			RenderGraph::UndeclaredAccess::NoteHostFeedback(buffer);
+		const RenderGraph::BufferRef made = RenderGraph::BufferRefOf(*buffer);
 		if (!mapped || !made) {
 			logger::warn("[DCLF] Texture streaming's feedback buffer has no {}: no feedback", mapped ? "buffer view ref" : "mapping");
 			return;

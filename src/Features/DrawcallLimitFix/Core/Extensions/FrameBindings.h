@@ -180,6 +180,23 @@ namespace DCLF::Extensions
 	bool EngineTargetTextureIndex(GraphTextureReader a_reader, std::uint32_t a_register, std::string_view a_name, ID3D11ShaderResourceView* a_view,
 		std::span<const std::string_view> a_ids, std::uint32_t& a_index);
 
+	/** @brief The register Wetness Effects binds the engine's precipitation occlusion map at, for every colour draw (its Prepass). */
+	inline constexpr std::uint32_t kPrecipitationOcclusionRegister = 70;
+
+	/**
+	 * @brief The published id of the engine's precipitation occlusion map (kPRECIPITATION_OCCLUSION_MAP, a depth target):
+	 * "Engine::Depth::kPRECIPITATION_OCCLUSION_MAP". The colour passes declare it (only once published).
+	 */
+	std::span<const std::string_view> PrecipitationOcclusionGraphTextureIds();
+
+	/**
+	 * @brief Render thread (a colour commit): GraphTextureIndex for the view at kPrecipitationOcclusionRegister, when it is the engine's
+	 * precipitation occlusion map. On a miss with a new view, imports the depth target through FrameAnchors::EngineDepth. ORG's own
+	 * target is published by Engine::Targets; any other import is published here under the same id, with a_view as its export, so
+	 * the next build of the colour passes declares it. Another view bound there is left to the caller's import.
+	 */
+	bool PrecipitationOcclusionTextureIndex(GraphTextureReader a_reader, std::uint32_t a_register, ID3D11ShaderResourceView* a_view, std::uint32_t& a_index);
+
 	/**
 	 * @brief The most frame graph buffers registrations there may be (a commit keeps each one's indices in a fixed array), and each one's
 	 * registers (Api::FrameGraphBuffers::resources). One past them fails the install: grow this first.

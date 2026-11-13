@@ -101,7 +101,10 @@ namespace DCLF
 	{
 		if (!a_buffer)
 			return std::nullopt;
-		if (RenderGraph::UndeclaredAccess::On())
+		// An engine buffer the ORG owns is judged where Resolve makes its ref: a ring chunk's readers declare the ring
+		// (Engine::Buffers::DeclareRingRead), and a static buffer's ref is noted by its ORG buffer, which is immutable. Noting the
+		// handle here as well would report the ring's chunks as undeclared.
+		if (RenderGraph::UndeclaredAccess::On() && !RenderGraph::Engine::Buffers::Owns(a_buffer))
 			RenderGraph::UndeclaredAccess::NoteBuffer(a_buffer, "GpuResources::Acquire", a_where);
 		if (const auto it = entries.find(a_buffer); it != entries.end()) {
 			if (auto owner = it->second.owner.lock())

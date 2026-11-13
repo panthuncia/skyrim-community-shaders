@@ -72,6 +72,7 @@ namespace RenderGraph::UndeclaredAccess
 			Report,     // undeclared: counted by site
 			Exempt,     // immutable by its description or ORG's ownership
 			Immutable,  // an ORG resource its creator noted immutable after creation (NoteImmutable)
+			Feedback,   // a host feedback buffer (NoteHostFeedback): written without order, read only by the CPU
 			Unknown,    // nothing could describe it
 		};
 
@@ -81,39 +82,59 @@ namespace RenderGraph::UndeclaredAccess
 			std::uint64_t exempt = 0;                                // exempt accesses skipped (Immutable ones too)
 			std::uint64_t immutable = 0;                             // of those, ORG resources noted immutable after creation
 			std::uint64_t unknown = 0;                               // accesses to a resource nothing could describe (skipped)
+			std::uint64_t feedback = 0;                              // refs of host feedback buffers (skipped)
 			std::unordered_map<std::string, std::uint64_t> interim;  // declared (interim index) lookups, by published id
 			std::uint64_t interimCount = 0;
 		};
 
 		/**
-		 * @brief The ORG resources noted immutable after creation (NoteImmutable), weakly: an entry whose resource is gone answers no,
-		 * so a new resource at the same address is not taken for it. Pruned of gone entries when it doubles.
+		 * @brief ORG resources noted by their creators (NoteImmutable, NoteHostFeedback), weakly: an entry whose resource is gone answers
+		 * no, so a new resource at the same address is not taken for it. Pruned of gone entries when it doubles.
 		 */
-		struct ImmutableRegistry
+		struct NotedRegistry
 		{
 			std::mutex lock;
 			std::unordered_map<const org::Resource*, std::weak_ptr<org::Resource>> resources;
 			std::size_t pruneAt = 1024;
 		};
 
-		ImmutableRegistry& Immutables()
+		NotedRegistry& Immutables()
 		{
-			static ImmutableRegistry registry;
+			static NotedRegistry registry;
 			return registry;
 		}
 
-		bool NotedImmutable(const org::Resource* a_resource)
+		NotedRegistry& Feedbacks()
 		{
-			auto& registry = Immutables();
-			std::lock_guard guard(registry.lock);
-			const auto found = registry.resources.find(a_resource);
-			if (found == registry.resources.end())
+			static NotedRegistry registry;
+			return registry;
+		}
+
+		bool Noted(NotedRegistry& a_registry, const org::Resource* a_resource)
+		{
+			std::lock_guard guard(a_registry.lock);
+			const auto found = a_registry.resources.find(a_resource);
+			if (found == a_registry.resources.end())
 				return false;
 			const auto alive = found->second.lock();
 			if (alive.get() == a_resource)
 				return true;
-			registry.resources.erase(found);
+			a_registry.resources.erase(found);
 			return false;
+		}
+
+		bool NotedImmutable(const org::Resource* a_resource) { return Noted(Immutables(), a_resource); }
+
+		void Note(NotedRegistry& a_registry, const std::shared_ptr<org::Resource>& a_resource)
+		{
+			if (!a_resource)
+				return;
+			std::lock_guard guard(a_registry.lock);
+			a_registry.resources[a_resource.get()] = a_resource;
+			if (a_registry.resources.size() >= a_registry.pruneAt) {
+				std::erase_if(a_registry.resources, [](const auto& a_entry) { return a_entry.second.expired(); });
+				a_registry.pruneAt = (std::max<std::size_t>)(1024, a_registry.resources.size() * 2);
+			}
 		}
 
 		/** @brief Whether native mode's write census saw the immediate context write the resource behind a_object since it was made. */
@@ -280,6 +301,8 @@ namespace RenderGraph::UndeclaredAccess
 			if (a_outcome != Outcome::Report || !a_subject) {
 				if (a_outcome == Outcome::Unknown) {
 					++window.unknown;
+				} else if (a_outcome == Outcome::Feedback) {
+					++window.feedback;
 				} else {
 					++window.exempt;
 					window.immutable += a_outcome == Outcome::Immutable ? 1 : 0;
@@ -326,10 +349,10 @@ namespace RenderGraph::UndeclaredAccess
 			logger::info(
 				"[ORG] undeclared access ({}, {} frames): {:.2f} raw accesses a frame from {} sites to {} resources ({} graph-managed, {} mutable D3D11, {} "
 				"published twins, {} BasicRHI buffers by handle); declared (interim index): {:.2f} a frame to {} published ids; skipped: {:.2f} exempt (of "
-				"which {:.2f} noted immutable at creation) and {:.2f} undescribed a frame",
+				"which {:.2f} noted immutable at creation), {:.2f} host feedback and {:.2f} undescribed a frame",
 				window, a_frames, static_cast<double>(total) / frames, a_data.sites.size(), resources.size(), byClass[0], byClass[1], byClass[2], byClass[3],
 				static_cast<double>(a_data.interimCount) / frames, a_data.interim.size(), static_cast<double>(a_data.exempt) / frames,
-				static_cast<double>(a_data.immutable) / frames, static_cast<double>(a_data.unknown) / frames);
+				static_cast<double>(a_data.immutable) / frames, static_cast<double>(a_data.feedback) / frames, static_cast<double>(a_data.unknown) / frames);
 			std::vector<const std::pair<const std::string, Site>*> sorted;
 			for (const auto& entry : a_data.sites)
 				sorted.push_back(&entry);
@@ -387,6 +410,11 @@ namespace RenderGraph::UndeclaredAccess
 			Count(a_where, a_what, nullptr, Outcome::Immutable);
 			return;
 		}
+		// Written without order and read only by the CPU: no GPU pass reads it, so there is nothing for a declaration to order.
+		if (Noted(Feedbacks(), &a_resource)) {
+			Count(a_where, a_what, nullptr, Outcome::Feedback);
+			return;
+		}
 		Subject subject;
 		subject.key = reinterpret_cast<std::uintptr_t>(&a_resource);
 		subject.type = Class::Graph;
@@ -426,15 +454,12 @@ namespace RenderGraph::UndeclaredAccess
 
 	void NoteImmutable(const std::shared_ptr<org::Resource>& a_resource)
 	{
-		if (!a_resource)
-			return;
-		auto& registry = Immutables();
-		std::lock_guard guard(registry.lock);
-		registry.resources[a_resource.get()] = a_resource;
-		if (registry.resources.size() >= registry.pruneAt) {
-			std::erase_if(registry.resources, [](const auto& a_entry) { return a_entry.second.expired(); });
-			registry.pruneAt = (std::max<std::size_t>)(1024, registry.resources.size() * 2);
-		}
+		Note(Immutables(), a_resource);
+	}
+
+	void NoteHostFeedback(const std::shared_ptr<org::Resource>& a_resource)
+	{
+		Note(Feedbacks(), a_resource);
 	}
 
 	DeclaredIndexScope::DeclaredIndexScope() :
@@ -479,6 +504,7 @@ namespace RenderGraph::UndeclaredAccess
 	void NotePublished(std::string_view, std::source_location) {}
 	void NoteRhiBuffer(std::uint32_t, std::uint32_t, std::source_location) {}
 	void NoteImmutable(const std::shared_ptr<org::Resource>&) {}
+	void NoteHostFeedback(const std::shared_ptr<org::Resource>&) {}
 	DeclaredIndexScope::DeclaredIndexScope() {}
 	DeclaredIndexScope::~DeclaredIndexScope() {}
 	EpochScope::EpochScope(const char*) {}
