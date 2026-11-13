@@ -60,7 +60,8 @@ namespace DCLF::Features::Faces
 			state->positions = Draws::MakeVersioned(DeviceBuffer(std::uint64_t(a_setup.smallStart ? 1024u : kInitialFaceVertices) * Draws::kStreamVertexBytes,
 														"cs.dclf.face-positions"),
 				{ .extent = { 0, Draws::kStreamVertexBytes, 0 } });
-			if (!RenderGraph::BufferRefOf(a_setup.device, state->positions->Get()->GetAPIResource().GetHandle()))
+			// Only a check that a ref can be made: readers take each sealed version's ref (DCLF::RefOf) and declare the positions.
+			if (!RenderGraph::DeclaredRefOf(a_setup.device, *state->positions->Get()))
 				return nullptr;
 			return state;
 		}
