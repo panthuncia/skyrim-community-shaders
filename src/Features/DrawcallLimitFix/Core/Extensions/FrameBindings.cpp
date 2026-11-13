@@ -5,6 +5,7 @@
 #include "Features/DrawcallLimitFix/Core/Extensions/FrameBindings.h"
 #include "Features/DrawcallLimitFix/Core/Extensions/Registry.h"
 #include "RenderGraph/PublishedResources.h"
+#include "RenderGraph/UndeclaredAccess.h"
 
 #include <Render/PassBuilders.h>
 #include <Render/PreparedPass.h>
@@ -61,6 +62,9 @@ namespace DCLF::Extensions
 		if (a_buffers >= registered.size())
 			return false;
 		const auto& buffers = registered[a_buffers];
+		// Only whether the indices exist: the caller drops them, and the colour passes that read them declare their ids
+		// (Draws::DeclareFrameBuffers).
+		RenderGraph::UndeclaredAccess::DeclaredIndexScope declared;
 		return buffers.indices(a_out.first(buffers.count));
 	}
 
@@ -127,6 +131,8 @@ namespace DCLF::Extensions
 	{
 		const org::SrvView view{ .variant = PublishedResources::ShaderResourceVariant(a_id) };
 		DeclaredReads::Entry entry{ .id = std::string(a_id), .view = a_builder.ShaderResource(org::ResourceIdentifier(a_id), view).View() };
+		// The index of the view just declared, which the commit latches.
+		RenderGraph::UndeclaredAccess::DeclaredIndexScope declared;
 		if (!PublishedResources::ShaderResourceIndex(a_id, entry.latched))
 			entry.latched = UINT32_MAX;
 		if (!a_out.entries)
@@ -197,6 +203,8 @@ namespace DCLF::Extensions
 		for (const auto id : a_ids) {
 			if (id.empty() || !declared || std::ranges::find(*declared, id) == declared->end())
 				continue;
+			// A graph build declared the id (DeclareGraphTextures): the read is ordered, only its index is the build's.
+			RenderGraph::UndeclaredAccess::DeclaredIndexScope declaredIndex;
 			if (PublishedResources::IsExportOf(a_view, id) && PublishedResources::ShaderResourceIndex(id, a_index)) {
 				read = id;
 				break;

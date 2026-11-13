@@ -22,6 +22,7 @@
 #include "Features/DrawcallLimitFix/Diagnostics/Reports/Draws.h"
 
 #include "RenderGraph/PublishedResources.h"
+#include "RenderGraph/UndeclaredAccess.h"
 
 #include <array>
 #include <string>
@@ -415,7 +416,10 @@ namespace DCLF
 			a_frameTextures[t] = HoldFrameTexture(held.view, held.binding, view, t, view ? 0u : textures.NullIndex(), a_commit.bindingOwners);
 		}
 		// The frame graph buffers on the graph (Api::FrameGraphBuffers: Integrations/LightLimitFix's, t35-t37), their indices at their registers.
+		// The epoch's colour passes declared each registration whose bit is set (Draws::DeclareFrameBuffers): the reads are ordered, only
+		// the indices are this commit's.
 		const auto graphBuffers = Extensions::RegisteredFrameGraphBuffers();
+		RenderGraph::UndeclaredAccess::DeclaredIndexScope declaredIndices;
 		for (std::size_t b = 0; b < graphBuffers.size() && !depthOnly; ++b)
 			if ((epochResources->graphBuffers >> b) & 1)
 				graphBuffers[b].indices(std::span(a_frameTextures).subspan(graphBuffers[b].firstRegister, graphBuffers[b].count));

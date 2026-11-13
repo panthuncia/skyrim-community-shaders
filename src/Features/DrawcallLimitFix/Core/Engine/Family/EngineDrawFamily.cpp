@@ -16,6 +16,7 @@
 #include "RenderGraph/PublishedResources.h"
 #include "RenderGraph/RenderGraphRuntime.h"
 #include "RenderGraph/Engine/Tripwire/Tripwire.h"
+#include "RenderGraph/UndeclaredAccess.h"
 #include "Utils/Logging.h"
 
 #include <Render/PassBuilders.h>
@@ -522,6 +523,8 @@ namespace DCLF::Family
 		const auto known = declared.load(std::memory_order_acquire);
 		if (!known || !known->contains(a_id))
 			return InputResult::PublishedLate;
+		// The client's pass declared it (Declare): the read is ordered, only its index is the build's.
+		RenderGraph::UndeclaredAccess::DeclaredIndexScope declaredIndex;
 		return PublishedResources::ShaderResourceIndex(a_id, a_index) ? InputResult::Graph : InputResult::NoView;
 	}
 
