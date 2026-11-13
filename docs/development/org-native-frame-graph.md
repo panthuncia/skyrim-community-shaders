@@ -784,3 +784,97 @@ state tracking on the same images: the native context's raw operations in GENERA
 descriptors. Phase 4 turns home states off and replaces the context's raw operations with passes and `ExternalClient`; exclusive
 imports become the default there, and only once `CS_ORG_NATIVE_VALIDATION=1` and a normal-speed run both show no layout race.
 Shared imports (Common-only, simultaneous access) are the default until then.
+
+## Phase 4 item 4 lane: DCLF's epochs off the render thread (`org-native/p4-dclf-async`)
+
+DCLF's epoch graphs are no longer built on the render thread. The scene worker builds them from an immutable **build state**, and the build
+manager attaches them at a frame's end. `CS_DCLF_ASYNC_BUILDS=0` restores the old path (built on the render thread at the build point).
+
+**The build state** (`Core/Render/Epochs/BuildState.{h,cpp}`).
+- One immutable value holds everything an epoch build reads that the render thread changes:
+  - the requested graph conditions (all of them, not just the three bits the revision inputs carried);
+  - the main resources and the views drawing from them (`Resources::views`);
+  - each view's resources, target, DCLF depth, size and main resources (`ViewBuild`);
+  - the shadow resources and `ShadowSlotBuffers`, which now also hold the slot owners, the count buffers and the shadow maps with their
+    layer counts;
+  - the pass setup states.
+- The render thread makes it (`Impl::CurrentBuildState`) and compares it with the last value. A new value gets a new **serial**. It is
+  posted with the revision inputs (`RevisionInputs::build`).
+- The factories take it with `BuildingState()`. They no longer capture live resources, so `AddExtension` keeps working only as the rebuild
+  request.
+- The makes read it through `PassContext::build`. The view passes (`ViewEpochRecord.cpp`), the shadow passes (`ShadowEpochPasses.cpp`,
+  `Shadow.cpp`), the sites (`SitePasses.cpp`), the hosted views and pass states in `GatherScheduled`, and tree LOD's faces all read the
+  build's targets, slots and main resources. They never read the live vectors and pointers the render thread replaces.
+- Per-frame fields stay on the live resources: latched targets, labels, frame buffers. Only preparation and recording read them.
+- `BuildScope` is an RAII guard that sets the calling thread's build state. A build without a scope logs:
+  - on the render thread (the host's first build of an epoch at its first submission) it is an info line, and the build uses the newest
+    value;
+  - anywhere else it is an error, and the build uses the attached value.
+
+**Conditions.** `RefreshGraphConditions` sets the *requested* conditions. The frame keeps the *attached* ones until the builds attach
+(`PublishAttachedBuildState`). Outside a build, `CurrentGraphConditions` returns the attached conditions, so the frame's mode
+(`GraphBuiltForCpu`), the preparations and the revision inputs follow the graph that runs. Inside a `BuildScope` it returns the build's
+conditions. Every attached value is kept alive, so the reference stays valid while another thread swaps it.
+
+**The builds** (`Core/Render/Epochs/GraphBuilds.cpp`, `BuildManager::ExternalBuilder`).
+- DCLF's epochs are the build manager's *external* epochs. At each poll, the manager hands those that were asked for to the "DCLF graph
+  builds" lane on the scene worker's preparation pool. Each build runs inside a `BuildScope` holding the build state made at that poll.
+- Policy stays with the manager:
+  - one group per poll;
+  - a request made since a build was handed out supersedes it;
+  - an `AddExtension` since then rejects it at the attach (the epoch's configuration moved);
+  - a failure keeps the old graph;
+  - the per-attach line: `[ORG] build manager: <epoch> attached: built in X ms off the render thread, attached in Y ms ...`.
+- External groups attach only at `Attach::All` (`SealPresented`, every frame's end, after DCLF's epochs were submitted), or at
+  `Attach::External` (DCLF's own wait for a snapshot at a frame's start, before it submits anything).
+- After each such poll, DCLF settles (`SettleBuildState`). If none of its epochs is asked for or in flight (`BuildManager::Settled`), the
+  newest build state becomes the attached one. The revision inputs are then posted again and the snapshot builder is woken.
+- Every build the manager makes on the render thread (shader reload, setup, `BuildOwnerEpochsNow`) holds a scope with the render thread's
+  newest value (`ExternalBuilder::ownerScope`).
+
+**Recordings.** Recordings are made after the attach. A detached graph cannot be recorded:
+- `RequestEpochRecording` records the instance's attached graph on the host's thread, with its copies and tickets.
+- Its alias placement waits for the first prepare after the attach (ORG c8c5086).
+- The transient resource objects are shared by every graph of an epoch, because the extensions register the same objects each build. So
+  giving a detached graph its own arena range would still re-materialize objects the running graph binds. Separate per-graph transients
+  would be a deep ORG change, and none was made.
+
+So:
+- `MakeRevision` makes nothing while its inputs' build serial is newer than the attached one. A snapshot made from a newer serial is stale
+  (`StaleKindOf`: `kStaleBuild`). Frames keep the old snapshot and graphs meanwhile.
+- The attach at the frame's end moves DCLF's build generation, as a synchronous build did. The host's thread places and records the new
+  graphs while the engine updates the next frame.
+- The next frame's start adopts the new snapshot through the existing staleness wait. Each such frame logs one of:
+  - `[DCLF] frame N waited X ms at its start for the recordings of the graphs attached at the last frame's end`;
+  - `... adopted a snapshot of the graphs attached at the last frame's end without waiting`.
+
+**Still synchronous.**
+- **Main resources made again under claims** (`MainEpochs.cpp`): the frame's colour epoch draws its own preparation with them, so DCLF's
+  epochs are still built there (logged as synchronous). A scene-worker build of them that is in flight is rejected at its attach. This is
+  rare: a resize, or the frame buffers' shape changing.
+- **Shader reload** builds every graph on the owner thread with the host's thread held (`RequestAllSynchronous`). The pipeline registry's
+  publish needs that safe point, and a managed build never publishes. Moving it off needs an ORG hook that publishes inside the attach's
+  hold. DCLF's epochs there build from the render thread's newest build state.
+
+**What to check.**
+- A native tour logs 0 `graph built on the render thread` warnings, and DCLF shots are unchanged in native and guest.
+- One `attached: built in X ms off the render thread` line per DCLF epoch at each cell change.
+- The `waited X ms ... for the recordings of the graphs attached` lines, which give the worst case.
+- `[DCLF] graph builds: on the scene worker` once, and `[ORG] build manager: external builder set`.
+- No `a graph build without a build scope off the render thread` error lines.
+
+**Risks.**
+- **What the makes still read live:**
+  - the main `Resources` object's fields (made before it is published, then only `depthCommitted` and the `views` weak pointers change,
+    and the build reads the views from its own state);
+  - the features' registries (`Extensions::RegisteredFrameGraphBuffers`, `DeclareGraphTextures` id lists, the draw families);
+  - `Diagnostics::ScheduleDumped`.
+
+  The anchor builds already read these off the render thread, so they are assumed safe.
+- **The scene worker's pool.** A build blocks its worker while ORG compiles pipelines on the runtime's task service. This is fine unless
+  the preparation pool has a single worker that a pass declaration waits on.
+- **`buildMutex` waits.** It is held around every managed build. A render-thread `Change`, shader reload or setup build waits for a
+  scene-worker build in progress (3-8 ms).
+- **Attached values that run ahead of their graph.** The attached value is the newest build state once nothing is asked for. A change
+  that asks for no rebuild (the slot owners shared, a view set up, which never re-added the main extension before either) moves the
+  serial without a graph. The graphs then run as built, as before this lane.
