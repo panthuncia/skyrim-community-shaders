@@ -355,8 +355,10 @@ namespace FrameAnchors
 	/**
 	 * @brief A texture loaded once from a file and only read by shaders after (a noise or LUT texture, a bokeh shape, a default
 	 * cubemap, an effect's file texture), with its SRV: "cs.d3d11.<name>", as D3D11Texture imports it. The one place such textures
-	 * enter the graph, so native mode can give them the exempt ownership (org::Resource::GraphOwnership::
-	 * ExternalImmutableShaderResource) here. They import as D3D11Texture does for now: ORG's graphs refuse an exempt resource.
+	 * enter the graph. In native mode a texture made with its contents and only read is exempt (org::Resource::GraphOwnership::
+	 * ExternalImmutableShaderResource, RenderGraph::Engine::Native::ImmutableTextureOf): one graph resource per texture, uploaded and
+	 * left in the shader-read state before any graph reads it, which passes may only read and graphs do not track. It is not
+	 * registered under the name. Anything else (and every texture in guest mode) imports as D3D11Texture does.
 	 */
 	std::shared_ptr<org::ExternalTextureResource> ImmutableTexture(std::string_view a_name, ID3D11Texture2D* a_texture, ID3D11ShaderResourceView* a_srv);
 

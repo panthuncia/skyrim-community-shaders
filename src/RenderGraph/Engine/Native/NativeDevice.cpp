@@ -18,6 +18,8 @@
 #	include "RenderGraph/Engine/Tripwire/GuestDevice.h"
 #	include "RenderGraph/Engine/Tripwire/Tripwire.h"
 #	include "RenderGraph/Backend.h"
+#	include "RenderGraph/BuildManager.h"
+#	include "RenderGraph/DxvkImageImport.h"
 #	include "RenderGraph/Engine/D3D12Device.h"
 #	include "RenderGraph/Engine/Native/OpCensus.h"
 #	include "RenderGraph/RenderGraphRuntime.h"
@@ -26,6 +28,10 @@
 #	if defined(CS_ORG_HAS_D3D12)
 #		include <d3d12.h>
 #	endif
+
+#	include <Resources/ExternalTextureResource.h>
+#	include <Resources/PixelBuffer.h>
+#	include <Resources/TextureDescription.h>
 
 #	include <algorithm>
 #	include <array>
@@ -334,7 +340,7 @@ namespace RenderGraph::Engine::Native
 			uint32_t RowBytes(uint32_t a_width) const { return (a_width + BlockSize() - 1) / BlockSize() * blockBytes; }
 		};
 
-		struct NativeResource
+		struct NativeResource : std::enable_shared_from_this<NativeResource>
 		{
 			enum class Kind : uint8_t
 			{
@@ -343,7 +349,24 @@ namespace RenderGraph::Engine::Native
 				Staging,  // a STAGING texture: a buffer laid out by subresource
 				Shell,    // a streamed texture's shell: no storage, read through its window (CreateStreamShell)
 			};
+			/**
+			 * @brief Who keeps an image's state (org-native-frame-graph.md, Phase 2).
+			 * - Host: the native device made it with BasicRHI, and the graph imports it (textures made before the graph was up, ones
+			 *   ORG cannot describe, wrapped images, and every texture with CS_ORG_NATIVE_OWNED=0).
+			 * - Tracked: ORG made it (graphOwned, a persistent PixelBuffer that is never aliased) and its graphs track it.
+			 * - Exempt: made with its contents and only read since. It rests in the shader-read state and graphs read it untracked
+			 *   (org::Resource::GraphOwnership::ExternalImmutableShaderResource).
+			 */
+			enum class Ownership : uint8_t
+			{
+				Host,
+				Tracked,
+				Exempt,
+			};
 			Kind kind = Kind::Buffer;
+			Ownership ownership = Ownership::Host;
+			// A tracked texture's ORG resource, which owns the image. Declared before resource, so the import below goes first.
+			std::shared_ptr<org::PixelBuffer> graphOwned;
 			rhi::ResourcePtr resource;
 			std::string name;
 			// Buffers and staging textures: the Vulkan buffer, its size, and whether the CPU can map it (upload or readback memory).
@@ -375,6 +398,14 @@ namespace RenderGraph::Engine::Native
 			bool initialData = false;
 			std::atomic<bool> written{ false };
 			const uint64_t serial;  // unique for the session: the censuses' key
+			// An exempt texture: whether it rests in the shader-read state (the immediate context moves it out and back around its
+			// own work), the immediate value its contents were uploaded at (its readiness), whether a write promoted it to tracked,
+			// and the graph resource made for it on the first lookup (ImmutableTextureOf).
+			std::atomic<bool> restsShaderRead{ false };
+			uint64_t readyValue = 0;
+			std::atomic<bool> promoted{ false };
+			std::mutex graphLock;
+			std::shared_ptr<org::ExternalTextureResource> exemptResource;
 
 			NativeResource();
 			~NativeResource();
@@ -393,6 +424,8 @@ namespace RenderGraph::Engine::Native
 		{
 			std::mutex lock;
 			std::unordered_set<const void*> live;
+			// Tracked and exempt images by their VkImage (ID3D12Resource on D3D12), for GraphTextureOfImage.
+			std::unordered_map<std::uint64_t, NativeResource*> byImage;
 		};
 
 		Registry& GetRegistry()
@@ -414,6 +447,24 @@ namespace RenderGraph::Engine::Native
 			auto& registry = GetRegistry();
 			std::lock_guard guard(registry.lock);
 			registry.live.erase(this);
+			if (ownership != Ownership::Host)
+				if (const auto found = registry.byImage.find(reinterpret_cast<std::uint64_t>(image.image)); found != registry.byImage.end() && found->second == this)
+					registry.byImage.erase(found);
+		}
+
+		/** @brief Lists a tracked or exempt image under its image handle (GraphTextureOfImage). */
+		void NoteOwnedImage(NativeResource& a_record)
+		{
+			auto& registry = GetRegistry();
+			std::lock_guard guard(registry.lock);
+			registry.byImage[reinterpret_cast<std::uint64_t>(a_record.image.image)] = &a_record;
+		}
+
+		/** @brief Whether native mode makes graph-owned and exempt textures (CS_ORG_NATIVE_OWNED, on unless set to 0). */
+		bool OwnedOn()
+		{
+			static const bool on = !Switches::Off("CS_ORG_NATIVE_OWNED");
+			return on;
 		}
 
 		/** @brief A debug label on a BasicRHI list: its crash markers then name the work (labels are no-ops where unsupported). */
@@ -645,7 +696,11 @@ namespace RenderGraph::Engine::Native
 				slot.list->Recycle(slot.allocator.Get());
 				// The operation's name and its resource, so a device fault's crash markers name the work that ran.
 				BeginLabel(slot.list.Get(), a_label);
+				// An exempt texture rests in the shader-read state, and the operations expect Common (GENERAL on Vulkan): it goes there
+				// for the operation and back after it. Same queue, barriers on all work, so the graph's reads before and after are ordered.
+				LeaveShaderRead(slot.list.Get(), a_used, false);
 				a_body(slot, index);
+				LeaveShaderRead(slot.list.Get(), a_used, true);
 				EndLabel(slot.list.Get());
 				slot.list->End();
 				rhi::CommandList lists[] = { slot.list.Get() };
@@ -677,6 +732,31 @@ namespace RenderGraph::Engine::Native
 				dependency.memoryBarrierCount = 1;
 				dependency.pMemoryBarriers = &memory;
 				vk.barrier(a_commands, &dependency);
+			}
+
+			/**
+			 * @brief Moves every exempt image of a_used from the shader-read state into Common (a_back false), or back (a_back true).
+			 * Images still being uploaded (restsShaderRead false) are left alone.
+			 */
+			static void LeaveShaderRead(rhi::CommandList& a_list, std::initializer_list<NativeResource*> a_used, bool a_back)
+			{
+				std::array<rhi::TextureBarrier, 4> barriers{};
+				uint32_t count = 0;
+				for (auto* used : a_used) {
+					if (!used || used->kind != NativeResource::Kind::Image || !used->resource || !used->restsShaderRead.load(std::memory_order_acquire) ||
+						count == barriers.size())
+						continue;
+					auto& barrier = barriers[count++];
+					barrier.texture = used->resource->GetHandle();
+					barrier.range = { 0, used->shape.mips, 0, used->shape.layers, 0, 1 };
+					barrier.beforeSync = barrier.afterSync = rhi::ResourceSyncState::All;
+					barrier.beforeAccess = a_back ? rhi::ResourceAccessType::Common : rhi::ResourceAccessType::ShaderResource;
+					barrier.afterAccess = a_back ? rhi::ResourceAccessType::ShaderResource : rhi::ResourceAccessType::Common;
+					barrier.beforeLayout = a_back ? rhi::ResourceLayout::Common : rhi::ResourceLayout::ShaderResource;
+					barrier.afterLayout = a_back ? rhi::ResourceLayout::ShaderResource : rhi::ResourceLayout::Common;
+				}
+				if (count)
+					a_list.Barriers({ { barriers.data(), count }, {}, {} });
 			}
 
 			std::mutex lock;
@@ -820,6 +900,28 @@ namespace RenderGraph::Engine::Native
 			a_record.d3dUsage = a_request.usage;
 			a_record.dimension = a_request.dimension;
 			a_record.initialData = a_request.data && a_request.data->pSysMem;
+		}
+
+		/**
+		 * @brief Whether a texture is exempt from tracking: only a shader resource (no render target, depth or UAV binding), not
+		 * DYNAMIC and without CPU access, and made with its contents. The write census found one such texture written after creation
+		 * in a whole session (the loading screen's), which NoteWrite promotes.
+		 */
+		bool IsExemptRequest(const TextureRequest& a_request)
+		{
+			return (a_request.bindFlags & ~UINT(D3D11_BIND_SHADER_RESOURCE)) == 0 && (a_request.bindFlags & D3D11_BIND_SHADER_RESOURCE) &&
+			       a_request.usage != D3D11_USAGE_DYNAMIC && a_request.usage != D3D11_USAGE_STAGING && !a_request.cpuAccess && a_request.sampleCount <= 1 &&
+			       a_request.data && a_request.data->pSysMem;
+		}
+
+		/** @brief A tracked texture kept host-made for a_why: logged once per reason, with the first texture's name. */
+		void LogHostMade(std::string_view a_why, std::string_view a_name)
+		{
+			static std::mutex lock;
+			static std::unordered_set<std::string> logged;
+			std::lock_guard guard(lock);
+			if (logged.emplace(a_why).second)
+				logger::info("[ORG native] {}: kept host-made, not graph-owned: {} (logged once per reason)", a_name, a_why);
 		}
 
 		void LogRefused(const TextureRequest& a_request, std::string_view a_why)
@@ -1060,7 +1162,13 @@ namespace RenderGraph::Engine::Native
 
 			rhi::Device Rhi() { return device->Get(); }
 
-			/** @brief The texture: a BasicRHI image in GENERAL (the graph's Common home state), its initial data uploaded. */
+			/**
+			 * @brief The texture. With CS_ORG_NATIVE_OWNED on (the default), by class:
+			 * - exempt (IsExemptRequest): a BasicRHI image whose contents go in through InitializeShaderRead, resting in the shader-read
+			 *   state from then on;
+			 * - tracked: a persistent ORG texture (MakeGraphOwned) once the render graph is up, resting in Common between executions;
+			 * - otherwise (before the graph, or a texture ORG cannot describe): a BasicRHI image in Common, its initial data uploaded.
+			 */
 			HRESULT MakeTexture(const TextureRequest& a_request, std::shared_ptr<NativeResource>& a_out)
 			{
 				if (a_request.usage == D3D11_USAGE_STAGING)
@@ -1116,6 +1224,14 @@ namespace RenderGraph::Engine::Native
 				const uint32_t depth = a_request.dimension == D3D11_RESOURCE_DIMENSION_TEXTURE3D ? a_request.depthOrArraySize : 1;
 				const uint32_t layers = a_request.dimension == D3D11_RESOURCE_DIMENSION_TEXTURE3D ? 1 : a_request.depthOrArraySize;
 				const uint32_t mips = a_request.mipLevels ? a_request.mipLevels : FullMipCount(a_request.width, a_request.height, depth);
+				const bool exempt = OwnedOn() && IsExemptRequest(a_request);
+				if (OwnedOn() && !exempt) {
+					std::shared_ptr<NativeResource> owned;
+					if (MakeGraphOwned(a_request, dxgiFormat, format, viewFormat, support, typelessDepth, cube, mips, layers, depth, owned)) {
+						a_out = std::move(owned);
+						return S_OK;
+					}
+				}
 
 				rhi::ResourceDesc desc{};
 				desc.type = a_request.dimension == D3D11_RESOURCE_DIMENSION_TEXTURE3D ? rhi::ResourceType::Texture3D :
@@ -1148,12 +1264,26 @@ namespace RenderGraph::Engine::Native
 					return E_OUTOFMEMORY;
 				}
 
-				if (!FillImage(*record, record->resource.Get(), a_request, dxgiFormat, format, support, mips, layers, depth)) {
+				// An exempt image is described in the shader-read state it rests in; any other rests in Common (GENERAL).
+				if (!FillImage(*record, record->resource.Get(), a_request, dxgiFormat, format, support, mips, layers, depth,
+						exempt ? VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL : VK_IMAGE_LAYOUT_GENERAL)) {
 					LogRefused(a_request, "BasicRHI did not describe the image it made");
 					return E_FAIL;
 				}
 				record->shape.viewFormat = viewFormat;
 
+				if (exempt) {
+					record->readyValue = InitializeShaderRead(*record, a_request, format, mips, layers, depth);
+					if (!record->readyValue) {
+						LogOnce(loggedUpload, a_request.name, "its contents could not be transferred");
+						return E_FAIL;
+					}
+					record->ownership = NativeResource::Ownership::Exempt;
+					record->restsShaderRead.store(true, std::memory_order_release);
+					NoteOwnedImage(*record);
+					a_out = std::move(record);
+					return S_OK;
+				}
 				if (!Initialize(record->resource->GetHandle(), a_request, format, mips, layers, depth)) {
 					LogOnce(loggedUpload, a_request.name, "its initial layout or contents could not be written");
 					return E_FAIL;
@@ -1170,9 +1300,117 @@ namespace RenderGraph::Engine::Native
 				return S_OK;
 			}
 
-			/** @brief An image record's description as the graph imports it (DescribeResource): GENERAL, the graph's Common home state. */
+			/**
+			 * @brief A tracked texture made by ORG (Phase 2 of org-native-frame-graph.md): a persistent PixelBuffer, materialized and never
+			 * aliased, named by a stable id ("cs.native.texture.<serial>"). The record imports its image for the context's operations and
+			 * the D3D11 views. Until Phase 4 turns external home states off, the context's raw operations still expect the image in Common,
+			 * so it is moved there (with its contents) at creation, its tracker says so, and it has a host home (org::Resource::SetHostHome):
+			 * each execution gives it back in Common. False, with nothing made, when ORG cannot make it as D3D11 asked (logged once per
+			 * reason): the caller makes it with BasicRHI instead.
+			 */
+			bool MakeGraphOwned(const TextureRequest& a_request, DXGI_FORMAT a_dxgiFormat, rhi::Format a_format, rhi::Format a_viewFormat, const rhi::FormatSupport& a_support,
+				bool a_typelessDepth, bool a_cube, uint32_t a_mips, uint32_t a_layers, uint32_t a_depth, std::shared_ptr<NativeResource>& a_out)
+			{
+				// The ORG runtime exists once the render graph is up; the engine's startup textures come before it.
+				if (!RenderGraphRuntime::Get().IsActive())
+					return false;
+				const bool depthStencil = (a_request.bindFlags & D3D11_BIND_DEPTH_STENCIL) != 0;
+				const bool renderTarget = (a_request.bindFlags & D3D11_BIND_RENDER_TARGET) != 0;
+				const bool unordered = (a_request.bindFlags & D3D11_BIND_UNORDERED_ACCESS) != 0;
+				const bool volume = a_request.dimension == D3D11_RESOURCE_DIMENSION_TEXTURE3D;
+				const char* kept = nullptr;
+				if (a_request.dimension == D3D11_RESOURCE_DIMENSION_TEXTURE1D)
+					kept = "a 1D texture";
+				else if (a_request.miscFlags & ~UINT(D3D11_RESOURCE_MISC_TEXTURECUBE))
+					kept = "misc flags other than a cube";
+				else if (a_support.srvSwizzle)
+					kept = "a format BasicRHI stores as another (read through a swizzle)";
+				else if (a_typelessDepth)
+					kept = "a typeless D3D12 depth texture";
+				else if (depthStencil && (volume || a_layers > 1 || renderTarget || unordered))
+					kept = "a depth texture that is not one 2D slice without RTVs or UAVs";
+				else if (unordered && rhi::helpers::IsSRGB(a_format))
+					kept = "an sRGB texture with a UAV";
+				if (kept) {
+					LogHostMade(kept, a_request.name);
+					return false;
+				}
+
+				org::TextureDescription desc{};
+				desc.type = volume ? rhi::ResourceType::Texture3D : rhi::ResourceType::Texture2D;
+				desc.format = a_format;
+				desc.isCubemap = a_cube;
+				desc.arraySize = a_cube ? (std::max)(a_layers / 6, 1u) : a_layers;
+				desc.isArray = a_layers > (a_cube ? 6u : 1u);
+				desc.depth = a_depth;
+				desc.hasSRV = true;
+				// A depth texture is read in its colour twin (R24_UNORM_X8 for R24G8, as GraphResources' depth textures are).
+				const rhi::Format depthSrv = depthStencil ? rhi::helpers::ToRHI(DepthSrvFormat(a_request.format)) : rhi::Format::Unknown;
+				desc.srvFormat = depthStencil && depthSrv != rhi::Format::Unknown && depthSrv != a_format ? depthSrv : a_format;
+				desc.hasUAV = unordered;
+				desc.uavFormat = a_format;
+				desc.hasNonShaderVisibleUAV = unordered;
+				desc.hasRTV = renderTarget;
+				desc.rtvFormat = a_format;
+				desc.hasDSV = depthStencil;
+				desc.dsvFormat = a_format;
+				desc.channels = depthStencil ? 1 : 4;
+				desc.allowAlias = false;
+				// One entry per slice and mip, slice-major, as a PixelBuffer reads them.
+				for (uint32_t slice = 0; slice < a_layers; ++slice)
+					for (uint32_t mip = 0; mip < a_mips; ++mip)
+						desc.imageDimensions.push_back({ (std::max)(a_request.width >> mip, 1u), (std::max)(a_request.height >> mip, 1u), 0, 0 });
+
+				auto record = std::make_shared<NativeResource>();
+				record->name = a_request.name;
+				NoteRequest(*record, a_request);
+				try {
+					auto texture = org::PixelBuffer::CreateShared(desc);
+					texture->SetName(fmt::format("cs.native.texture.{}", record->serial));
+					texture->SetHostHome(true);
+					if (!FillImage(*record, texture->GetAPIResource(), a_request, a_dxgiFormat, a_format, a_support, a_mips, a_layers, a_depth, VK_IMAGE_LAYOUT_GENERAL)) {
+						LogHostMade("BasicRHI did not describe the image ORG made", a_request.name);
+						return false;
+					}
+					record->shape.viewFormat = a_viewFormat;
+					record->resource = ::RenderGraph::ImportDxvkImage(Rhi(), record->image, a_request.name.c_str());
+					if (!record->resource) {
+						LogHostMade("the image ORG made could not be imported for the context", a_request.name);
+						return false;
+					}
+					record->graphOwned = std::move(texture);
+				} catch (const std::exception& e) {
+					LogHostMade(fmt::format("ORG could not make it ({})", e.what()), a_request.name);
+					return false;
+				}
+				// ORG made it Undefined: into Common with its contents, as the context and the graph's home states expect until Phase 4.
+				if (!Initialize(record->resource->GetHandle(), a_request, a_format, a_mips, a_layers, a_depth)) {
+					LogOnce(loggedUpload, a_request.name, "its initial layout or contents could not be written");
+					return false;
+				}
+				if (auto* tracker = record->graphOwned->GetStateTracker())
+					*tracker = org::SymbolicTracker();  // the whole texture in Common
+				record->ownership = NativeResource::Ownership::Tracked;
+				NoteOwnedImage(*record);
+				// A DYNAMIC texture's CPU side, which Map hands out and Unmap copies in.
+				if (a_request.usage == D3D11_USAGE_DYNAMIC) {
+					TextureRequest cpu = a_request;
+					cpu.data = nullptr;
+					cpu.name = a_request.name + " (upload)";
+					if (FAILED(MakeStaging(cpu, true, record->upload)))
+						return false;
+				}
+				a_out = std::move(record);
+				return true;
+			}
+
+			/**
+			 * @brief An image record's description as importers read it (DescribeResource), in the layout the image rests in
+			 * (a_resting): the shader-read layout for an exempt texture, GENERAL (Common, the home every execution gives it back in
+			 * while external home states are on) for any other.
+			 */
 			static bool FillImage(NativeResource& a_record, const rhi::Resource& a_resource, const TextureRequest& a_request, DXGI_FORMAT a_dxgiFormat, rhi::Format a_format,
-				const rhi::FormatSupport& a_support, uint32_t mips, uint32_t layers, uint32_t depth)
+				const rhi::FormatSupport& a_support, uint32_t mips, uint32_t layers, uint32_t depth, VkImageLayout a_resting)
 			{
 				// On D3D12 the description carries the ID3D12Resource where the VkImage goes (RenderGraph::ImportDxvkImage imports it
 				// with rhi::dx12::import_resource), and no Vulkan format, flags or usage.
@@ -1198,7 +1436,7 @@ namespace RenderGraph::Engine::Native
 				image.arrayLayers = layers;
 				image.samples = VK_SAMPLE_COUNT_1_BIT;
 				image.usage = static_cast<VkImageUsageFlags>(info.usage);
-				image.layout = VK_IMAGE_LAYOUT_GENERAL;
+				image.layout = a_resting;
 				image.viewType = image.type == VK_IMAGE_TYPE_3D ? VK_IMAGE_VIEW_TYPE_3D :
 				                 cube                           ? (layers > 6 ? VK_IMAGE_VIEW_TYPE_CUBE_ARRAY : VK_IMAGE_VIEW_TYPE_CUBE) :
 				                 image.type == VK_IMAGE_TYPE_1D ? (layers > 1 ? VK_IMAGE_VIEW_TYPE_1D_ARRAY : VK_IMAGE_VIEW_TYPE_1D) :
@@ -1358,24 +1596,26 @@ namespace RenderGraph::Engine::Native
 				return record;
 			}
 
+			/** @brief One subresource of a new image's initial data in its upload buffer (D3D11's order: mips of slice 0, then slice 1, ...). */
+			struct InitialCopy
+			{
+				uint32_t mip, slice;
+				rhi::CopyableFootprint footprint;
+			};
+
 			/**
-			 * @brief Moves a new image into GENERAL, writing its initial data on the way: an upload buffer, one copy per subresource
-			 * (D3D11's order: mips of slice 0, then slice 1, ...). Waits for the GPU, so the image is ready when the handle exists.
+			 * @brief A new image's initial data in an upload buffer (a_upload, none without data), one footprint per subresource, and the
+			 * range its first barrier covers (a_all: both planes of a D3D12 depth-stencil texture). False when it cannot be staged.
 			 */
-			bool Initialize(rhi::ResourceHandle a_texture, const TextureRequest& a_request, rhi::Format a_format, uint32_t a_mips, uint32_t a_layers, uint32_t a_depth)
+			bool StageInitialData(rhi::ResourceHandle a_texture, const TextureRequest& a_request, rhi::Format a_format, uint32_t a_mips, uint32_t a_layers,
+				uint32_t a_depth, rhi::ResourcePtr& a_upload, std::vector<InitialCopy>& a_copies, rhi::TextureSubresourceRange& a_all)
 			{
 				const rhi::ResourceHandle texture = a_texture;
+				a_copies.clear();
 				// D3D12 lays a depth-stencil texture's stencil out as a second plane, with a layout of its own: both start defined.
 				const bool twoPlanes = OnD3D12() && (a_format == rhi::Format::D24_UNorm_S8_UInt || a_format == rhi::Format::R24G8_Typeless ||
 														a_format == rhi::Format::D32_Float_S8X24_UInt || a_format == rhi::Format::R32G8X24_Typeless);
-				const rhi::TextureSubresourceRange all{ 0, a_mips, 0, a_layers, 0, twoPlanes ? 2u : 1u };
-				rhi::ResourcePtr upload;
-				struct Copy
-				{
-					uint32_t mip, slice;
-					rhi::CopyableFootprint footprint;
-				};
-				std::vector<Copy> copies;
+				a_all = { 0, a_mips, 0, a_layers, 0, twoPlanes ? 2u : 1u };
 				if (a_request.data) {
 					uint64_t offset = 0;
 					for (uint32_t slice = 0; slice < a_layers; ++slice) {
@@ -1389,7 +1629,7 @@ namespace RenderGraph::Engine::Native
 							const auto placed = Rhi().GetCopyableFootprints(range, &footprint, 1);
 							if (placed.count != 1)
 								return false;
-							copies.push_back({ mip, slice, footprint });
+							a_copies.push_back({ mip, slice, footprint });
 							// The next subresource starts at D3D12's placement alignment, which every backend accepts.
 							offset = (placed.totalBytes + range.baseOffset + 511) & ~uint64_t(511);
 						}
@@ -1400,15 +1640,15 @@ namespace RenderGraph::Engine::Native
 					desc.resourceFlags = rhi::RF_None;
 					desc.debugName = "CS native texture upload";
 					desc.buffer.sizeBytes = (std::max)(offset, uint64_t(1));
-					if (Rhi().CreateCommittedResource(desc, upload) != rhi::Result::Ok || !upload)
+					if (Rhi().CreateCommittedResource(desc, a_upload) != rhi::Result::Ok || !a_upload)
 						return false;
 					void* mapped = nullptr;
-					upload->Map(&mapped);
+					a_upload->Map(&mapped);
 					if (!mapped)
 						return false;
 					const bool blocks = rhi::helpers::IsBlockCompressed(a_format);
 					const uint32_t blockBytes = rhi::helpers::BytesPerBlock(a_format);
-					for (const auto& copy : copies) {
+					for (const auto& copy : a_copies) {
 						const auto& source = a_request.data[copy.mip + copy.slice * a_mips];
 						if (!source.pSysMem)
 							return false;
@@ -1426,39 +1666,88 @@ namespace RenderGraph::Engine::Native
 							}
 						}
 					}
-					upload->Unmap(0, desc.buffer.sizeBytes);
+					a_upload->Unmap(0, desc.buffer.sizeBytes);
 				}
 
-				return oneShot.Run((copies.empty() ? "initial layout " : "initial contents ") + a_request.name, [&](rhi::CommandList a_list) {
-					rhi::TextureBarrier toCopy{};
-					toCopy.texture = texture;
-					toCopy.range = all;
-					toCopy.beforeLayout = rhi::ResourceLayout::Undefined;
-					toCopy.discard = true;
-					if (!copies.empty()) {
-						toCopy.afterSync = rhi::ResourceSyncState::Copy;
-						toCopy.afterAccess = rhi::ResourceAccessType::CopyDest;
-						toCopy.afterLayout = rhi::ResourceLayout::CopyDest;
-						a_list.Barriers({ { &toCopy, 1 }, {}, {} });
-						for (const auto& copy : copies) {
-							rhi::BufferTextureCopyFootprint region{};
-							region.texture = texture;
-							region.buffer = upload->GetHandle();
-							region.mip = copy.mip;
-							region.arraySlice = copy.slice;
-							region.footprint = copy.footprint;
-							a_list.CopyBufferToTexture(region);
-						}
-						toCopy.beforeSync = rhi::ResourceSyncState::Copy;
-						toCopy.beforeAccess = rhi::ResourceAccessType::CopyDest;
-						toCopy.beforeLayout = rhi::ResourceLayout::CopyDest;
-						toCopy.discard = false;
-					}
-					toCopy.afterSync = rhi::ResourceSyncState::All;
-					toCopy.afterAccess = rhi::ResourceAccessType::Common;
-					toCopy.afterLayout = rhi::ResourceLayout::Common;
+				return true;
+			}
+
+			/**
+			 * @brief Records a new image's first barrier from Undefined, its initial data's copies, and the move into a_layout (with
+			 * access a_access), whose barrier makes the copies visible to all later work on the queue.
+			 */
+			static void RecordInitialize(rhi::CommandList& a_list, rhi::ResourceHandle a_texture, const rhi::TextureSubresourceRange& a_all,
+				const rhi::ResourcePtr& a_upload, const std::vector<InitialCopy>& a_copies, rhi::ResourceLayout a_layout, rhi::ResourceAccessType a_access)
+			{
+				rhi::TextureBarrier toCopy{};
+				toCopy.texture = a_texture;
+				toCopy.range = a_all;
+				toCopy.beforeLayout = rhi::ResourceLayout::Undefined;
+				toCopy.discard = true;
+				if (!a_copies.empty()) {
+					toCopy.afterSync = rhi::ResourceSyncState::Copy;
+					toCopy.afterAccess = rhi::ResourceAccessType::CopyDest;
+					toCopy.afterLayout = rhi::ResourceLayout::CopyDest;
 					a_list.Barriers({ { &toCopy, 1 }, {}, {} });
+					for (const auto& copy : a_copies) {
+						rhi::BufferTextureCopyFootprint region{};
+						region.texture = a_texture;
+						region.buffer = a_upload->GetHandle();
+						region.mip = copy.mip;
+						region.arraySlice = copy.slice;
+						region.footprint = copy.footprint;
+						a_list.CopyBufferToTexture(region);
+					}
+					toCopy.beforeSync = rhi::ResourceSyncState::Copy;
+					toCopy.beforeAccess = rhi::ResourceAccessType::CopyDest;
+					toCopy.beforeLayout = rhi::ResourceLayout::CopyDest;
+					toCopy.discard = false;
+				}
+				toCopy.afterSync = rhi::ResourceSyncState::All;
+				toCopy.afterAccess = a_access;
+				toCopy.afterLayout = a_layout;
+				a_list.Barriers({ { &toCopy, 1 }, {}, {} });
+			}
+
+			/**
+			 * @brief Moves a new image into Common (GENERAL on Vulkan), writing its initial data on the way. Waits for the GPU, so the
+			 * image is ready when the handle exists. Common is the home every graph execution gives a host-made or tracked texture back
+			 * in until Phase 4 turns external home states off, and the layout the immediate context's raw operations expect.
+			 */
+			bool Initialize(rhi::ResourceHandle a_texture, const TextureRequest& a_request, rhi::Format a_format, uint32_t a_mips, uint32_t a_layers, uint32_t a_depth)
+			{
+				rhi::ResourcePtr upload;
+				std::vector<InitialCopy> copies;
+				rhi::TextureSubresourceRange all{};
+				if (!StageInitialData(a_texture, a_request, a_format, a_mips, a_layers, a_depth, upload, copies, all))
+					return false;
+				return oneShot.Run((copies.empty() ? "initial layout " : "initial contents ") + a_request.name, [&](rhi::CommandList a_list) {
+					RecordInitialize(a_list, a_texture, all, upload, copies, rhi::ResourceLayout::Common, rhi::ResourceAccessType::Common);
 				});
+			}
+
+			/**
+			 * @brief The transfer of an exempt texture (BasicRenderer's MaterialTextureTransferService): its contents are copied in and it
+			 * ends in the shader-read state, where it rests from then on. Submitted on the graphics queue without a wait; the image is
+			 * ready once the immediate context's timeline reaches the returned value (0 on failure). The graph's work on that queue is
+			 * submitted after it, so it is ordered by the transfer's last barrier; ImmutableTextureOf waits for the value before it hands
+			 * the texture to a graph.
+			 */
+			uint64_t InitializeShaderRead(NativeResource& a_record, const TextureRequest& a_request, rhi::Format a_format, uint32_t a_mips, uint32_t a_layers,
+				uint32_t a_depth)
+			{
+				const rhi::ResourceHandle texture = a_record.resource->GetHandle();
+				auto upload = std::make_shared<rhi::ResourcePtr>();
+				std::vector<InitialCopy> copies;
+				rhi::TextureSubresourceRange all{};
+				if (!StageInitialData(texture, a_request, a_format, a_mips, a_layers, a_depth, *upload, copies, all) || copies.empty())
+					return 0;
+				return immediate.RunRhi(
+					"exempt transfer " + a_request.name,
+					[&](rhi::CommandList& a_list, const Immediate::Descriptors&) {
+						RecordInitialize(a_list, texture, all, *upload, copies, rhi::ResourceLayout::ShaderResource, rhi::ResourceAccessType::ShaderResource);
+					},
+					{ upload }, { &a_record });
 			}
 
 			/** @brief A buffer: device-local without CPU access or contents, else in upload memory with its contents written. */
@@ -2163,6 +2452,30 @@ namespace RenderGraph::Engine::Native
 									   a_record.initialData });
 		}
 
+		/**
+		 * @brief The context is about to write a_record. An exempt texture is promoted to tracked, once: the context keeps moving it
+		 * out of the shader-read state and back around its own work (Immediate::LeaveShaderRead), which orders the write with the
+		 * graph's work on the graphics queue, and the graph resource made for it (ImmutableTextureOf) becomes graph-managed through the
+		 * build manager, so graphs built from then on track it. Never synchronously: the change waits for the next poll, with no build
+		 * running. Logged once per texture.
+		 */
+		void NoteWrite(NativeResource& a_record)
+		{
+			if (a_record.ownership != NativeResource::Ownership::Exempt || a_record.promoted.exchange(true, std::memory_order_acq_rel))
+				return;
+			std::shared_ptr<org::ExternalTextureResource> resource;
+			{
+				std::lock_guard guard(a_record.graphLock);
+				resource = a_record.exemptResource;
+			}
+			logger::info("[ORG native] {}: an exempt texture written after creation; promoted to tracked{}", a_record.name,
+				resource ? ", graphs built again" : " (no graph read it yet)");
+			if (!resource)
+				return;
+			::RenderGraph::Builds::Change([resource] { resource->SetGraphOwnership(org::Resource::GraphOwnership::GraphManaged); },
+				fmt::format("native texture '{}' written after creation", a_record.name));
+		}
+
 		/** @brief Map's census kind for a D3D11 map type. */
 		OpCensus::Op MapOp(D3D11_MAP a_type)
 		{
@@ -2784,6 +3097,7 @@ namespace RenderGraph::Engine::Native
 				record->resource->Unmap(0, record->size);
 				return;
 			}
+			NoteWrite(*record);
 			auto upload = g_device->MakeUpload(uint64_t(rowPitch) * rows * extent.depth);
 			if (!upload)
 				return;
@@ -2845,6 +3159,7 @@ namespace RenderGraph::Engine::Native
 			// A subresource onto itself: D3D11's runtime drops the call, and Vulkan's copies must not overlap.
 			if (destination == source && a_destinationSub == a_sourceSub)
 				return;
+			NoteWrite(*destination);
 			if (OpCensus::Flags()) {
 				NoteOp(OpCensus::Op::CopyRegion, *destination, a_destination);
 				NoteOp(OpCensus::Op::CopyRegionSource, *source, a_source);
@@ -2883,6 +3198,7 @@ namespace RenderGraph::Engine::Native
 			// A resource onto itself: D3D11's runtime drops the call.
 			if (destination == source)
 				return;
+			NoteWrite(*destination);
 			if (OpCensus::Flags()) {
 				NoteOp(OpCensus::Op::Copy, *destination, a_destination);
 				NoteOp(OpCensus::Op::CopySource, *source, a_source);
@@ -2928,6 +3244,7 @@ namespace RenderGraph::Engine::Native
 				Unknown(logged, "GenerateMips", a_view);
 				return;
 			}
+			NoteWrite(*record);
 			if (OpCensus::Flags())
 				NoteOp(OpCensus::Op::GenerateMips, *record, nullptr, a_view);
 			const Shape& shape = record->shape;
@@ -3299,6 +3616,106 @@ namespace RenderGraph::Engine::Native
 		return g_device ? g_device->device : nullptr;
 	}
 
+	bool OwnedResources()
+	{
+		return g_device && OwnedOn();
+	}
+
+	namespace
+	{
+		/** @brief The image record behind a_object: a streamed texture's shell gives its window's, as importers read the shell. */
+		std::shared_ptr<NativeResource> ImageRecordOf(const void* a_object)
+		{
+			auto record = a_object ? Resolve(a_object) : nullptr;
+			if (record && record->kind == NativeResource::Kind::Shell) {
+				winrt::com_ptr<ID3D11ShaderResourceView> window;
+				{
+					std::lock_guard guard(record->windowLock);
+					window = record->window;
+				}
+				record = window ? Resolve(window.get()) : nullptr;
+			}
+			return record && record->kind == NativeResource::Kind::Image ? record : nullptr;
+		}
+
+		/** @brief The tracked record's ORG texture, else null. */
+		std::shared_ptr<org::GloballyIndexedResource> TrackedOf(const std::shared_ptr<NativeResource>& a_record)
+		{
+			return a_record && a_record->ownership == NativeResource::Ownership::Tracked ? a_record->graphOwned : nullptr;
+		}
+	}
+
+	std::shared_ptr<org::GloballyIndexedResource> GraphTextureOf(const IUnknown* a_object)
+	{
+		return g_device ? TrackedOf(ImageRecordOf(a_object)) : nullptr;
+	}
+
+	std::shared_ptr<org::GloballyIndexedResource> GraphTextureOfImage(std::uint64_t a_image)
+	{
+		if (!g_device || !a_image)
+			return nullptr;
+		std::shared_ptr<NativeResource> record;
+		{
+			auto& registry = GetRegistry();
+			std::lock_guard guard(registry.lock);
+			if (const auto found = registry.byImage.find(a_image); found != registry.byImage.end())
+				record = found->second->weak_from_this().lock();
+		}
+		return TrackedOf(record);
+	}
+
+	std::shared_ptr<org::ExternalTextureResource> ImmutableTextureOf(const IUnknown* a_texture, DXGI_FORMAT a_srvFormat)
+	{
+		const auto record = g_device ? ImageRecordOf(a_texture) : nullptr;
+		if (!record || record->ownership != NativeResource::Ownership::Exempt)
+			return nullptr;
+		std::lock_guard guard(record->graphLock);
+		if (record->exemptResource)
+			return record->exemptResource;
+		// Readiness: no graph reads it before its transfer is done.
+		if (!g_device->immediate.Wait(record->readyValue)) {
+			logger::warn("[ORG native] {}: its transfer did not finish; not handed to the graph", record->name);
+			return nullptr;
+		}
+		const auto& shape = record->shape;
+		const bool cube = record->image.viewType == VK_IMAGE_VIEW_TYPE_CUBE || record->image.viewType == VK_IMAGE_VIEW_TYPE_CUBE_ARRAY;
+		org::TextureDescription desc{};
+		desc.type = shape.dimension == D3D11_RESOURCE_DIMENSION_TEXTURE3D ? rhi::ResourceType::Texture3D : rhi::ResourceType::Texture2D;
+		desc.format = shape.viewFormat;
+		desc.hasSRV = true;
+		const rhi::Format srvFormat = a_srvFormat != DXGI_FORMAT_UNKNOWN ? rhi::helpers::ToRHI(a_srvFormat) : rhi::Format::Unknown;
+		desc.srvFormat = srvFormat != rhi::Format::Unknown ? srvFormat : shape.viewFormat;
+		desc.format = desc.srvFormat;
+		desc.channels = 4;
+		desc.depth = shape.depth;
+		desc.isCubemap = cube && shape.layers % 6 == 0;
+		const std::uint32_t slices = desc.isCubemap ? shape.layers / 6 : shape.layers;
+		desc.isArray = slices > 1;
+		desc.arraySize = slices;
+		// One entry per mip, as an external texture reads them.
+		for (std::uint32_t mip = 0; mip < shape.mips; ++mip)
+			desc.imageDimensions.push_back({ shape.Width(mip), shape.Height(mip), 0, 0 });
+		desc.initialLayout = rhi::ResourceLayout::ShaderResource;
+		const std::string id = fmt::format("cs.native.texture.{}", record->serial);
+		auto image = ::RenderGraph::ImportDxvkImage(g_device->Rhi(), record->image, id.c_str());
+		if (!image) {
+			logger::warn("[ORG native] {}: could not be imported as an exempt graph texture", record->name);
+			return nullptr;
+		}
+		try {
+			auto resource = org::ExternalTextureResource::CreateShared(std::move(image), desc, false);
+			resource->SetName(id);
+			// A texture a write promoted already is tracked from the start (home: the shader-read state it rests in).
+			if (!record->promoted.load(std::memory_order_acquire))
+				resource->SetGraphOwnership(org::Resource::GraphOwnership::ExternalImmutableShaderResource);
+			record->exemptResource = std::move(resource);
+		} catch (const std::exception& e) {
+			logger::warn("[ORG native] {}: could not be made an exempt graph texture: {}", record->name, e.what());
+			return nullptr;
+		}
+		return record->exemptResource;
+	}
+
 	bool DescribeForCensus(const void* a_object, ResourceFacts& a_out)
 	{
 		auto record = a_object ? Resolve(a_object) : nullptr;
@@ -3527,7 +3944,7 @@ namespace RenderGraph::Engine::Native
 		static std::atomic<bool> loggedDescribe = false, loggedInitialize = false;
 		rhi::FormatSupport support{};
 		(void)g_device->Rhi().QueryFormatSupport(format, support);
-		if (!NativeState::FillImage(*record, a_image, request, dxgiFormat, format, support, request.mipLevels, layers, depth)) {
+		if (!NativeState::FillImage(*record, a_image, request, dxgiFormat, format, support, request.mipLevels, layers, depth, VK_IMAGE_LAYOUT_GENERAL)) {
 			LogOnce(loggedDescribe, request.name, "BasicRHI did not describe the image to wrap");
 			return nullptr;
 		}
@@ -3764,6 +4181,10 @@ namespace RenderGraph::Engine::Native
 	}
 	bool DescribeResource(const IUnknown*, DxvkOrgInteropResourceInfo&) { return false; }
 	bool DescribeForCensus(const void*, ResourceFacts&) { return false; }
+	bool OwnedResources() { return false; }
+	std::shared_ptr<org::GloballyIndexedResource> GraphTextureOf(const IUnknown*) { return nullptr; }
+	std::shared_ptr<org::GloballyIndexedResource> GraphTextureOfImage(std::uint64_t) { return nullptr; }
+	std::shared_ptr<org::ExternalTextureResource> ImmutableTextureOf(const IUnknown*, DXGI_FORMAT) { return nullptr; }
 	HRESULT Present(UINT, UINT) { return E_FAIL; }
 	bool EmitExternalCommands(void (*)(void*, VkCommandBuffer_T*), void*, const VkSemaphoreSubmitInfo*, std::uint32_t, const VkSemaphoreSubmitInfo*, std::uint32_t)
 	{

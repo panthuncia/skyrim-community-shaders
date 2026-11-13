@@ -609,8 +609,13 @@ namespace FrameAnchors
 			for (const auto& [id, other] : state.imports)
 				if (id != a_id && other.texture.get() == a_texture)
 					logger::warn("[ORG] frame anchors: {} imports the image {} already imports; their uses are not ordered with each other", a_id, id);
+			// Native mode: the graph-owned texture behind the handle (RenderGraph::Engine::Native::GraphTextureOf), when it is one the
+			// import can hold; anything else is imported from its description below.
+			std::shared_ptr<org::ExternalTextureResource> resource;
+			if (RenderGraph::Engine::Native::Active())
+				resource = std::dynamic_pointer_cast<org::ExternalTextureResource>(RenderGraph::Engine::Native::GraphTextureOf(a_texture));
 			DxvkOrgInteropResourceInfo info{};
-			if (!runtime.DescribeResource(a_texture, info) || info.kind != DXVK_ORG_INTEROP_RESOURCE_IMAGE) {
+			if (!resource && (!runtime.DescribeResource(a_texture, info) || info.kind != DXVK_ORG_INTEROP_RESOURCE_IMAGE)) {
 				logger::warn("[ORG] frame anchors: {} cannot be described", a_id);
 				return nullptr;
 			}
@@ -627,7 +632,8 @@ namespace FrameAnchors
 			const std::uint32_t slices = desc.isCubemap ? layers / 6 : layers;
 			desc.isArray = slices > 1;
 			desc.arraySize = slices;
-			auto resource = RenderGraph::ImportDxvkTexture(runtime.Host()->Device(), info.image, desc, a_id.c_str());
+			if (!resource)
+				resource = RenderGraph::ImportDxvkTexture(runtime.Host()->Device(), info.image, desc, a_id.c_str());
 			if (!resource) {
 				logger::warn("[ORG] frame anchors: {} could not be imported", a_id);
 				return nullptr;
@@ -1183,6 +1189,14 @@ namespace FrameAnchors
 
 	std::shared_ptr<org::ExternalTextureResource> ImmutableTexture(std::string_view a_name, ID3D11Texture2D* a_texture, ID3D11ShaderResourceView* a_srv)
 	{
+		// Native mode: an exempt texture is one graph resource, read untracked, the same pointer on every call (no rebuild).
+		if (RenderGraph::Engine::Native::Active() && a_texture && RenderGraphRuntime::Get().IsActive()) {
+			D3D11_SHADER_RESOURCE_VIEW_DESC view{};
+			if (a_srv)
+				a_srv->GetDesc(&view);
+			if (auto exempt = RenderGraph::Engine::Native::ImmutableTextureOf(a_texture, a_srv ? view.Format : DXGI_FORMAT_UNKNOWN))
+				return exempt;
+		}
 		return D3D11Texture(a_name, a_texture, a_srv, nullptr);
 	}
 
