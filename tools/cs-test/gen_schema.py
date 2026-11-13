@@ -86,7 +86,7 @@ def join_strings(text):
 
 
 def family_of(name):
-    for prefix, family in (("CS_DCLF", "dclf"), ("CS_ORG", "org"), ("BASICRHI_", "basicrhi"), ("DXVK_", "dxvk"),
+    for prefix, family in (("CS_DCLF", "dclf"), ("CS_ORG", "org"), ("ORG_", "org"), ("BASICRHI_", "basicrhi"), ("DXVK_", "dxvk"),
                            ("VK_", "vk"), ("SARP_", "sarp"), ("CS_", "cs")):
         if name.startswith(prefix):
             return family
@@ -96,7 +96,7 @@ def family_of(name):
 def key_of(name):
     if name in SPECIAL:
         return SPECIAL[name]["key"]
-    for prefix, table in (("CS_DCLF_", "dclf"), ("CS_ORG_", "org"), ("BASICRHI_", "basicrhi"), ("DXVK_", "dxvk"),
+    for prefix, table in (("CS_DCLF_", "dclf"), ("CS_ORG_", "org"), ("ORG_", "orglib"), ("BASICRHI_", "basicrhi"), ("DXVK_", "dxvk"),
                           ("VK_", "vk"), ("SARP_", "sarp"), ("CS_", "cs")):
         if name.startswith(prefix):
             return f"{table}.{name[len(prefix):].lower()}"
@@ -146,6 +146,10 @@ def source_names(root):
                     names.add(name)
             names -= defines
             excluded |= defines
+    # The render graph library's own switches (ORG_*), read inside the submodule.
+    for path in (root / "extern/OpenRenderGraph").glob("*/**/*"):
+        if path.suffix in (".cpp", ".h", ".hpp") and "tests" not in path.parts:
+            names.update(re.findall(r'(?<![A-Za-z])"(ORG_[A-Z0-9_]*[A-Z0-9])"', path.read_text(encoding="utf-8", errors="replace")))
     return names - excluded - NOT_SWITCHES
 
 
