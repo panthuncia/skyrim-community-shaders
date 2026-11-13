@@ -269,3 +269,36 @@ Every other anchor runs once a frame.
 
 **Known effect:** DCLF's `DeclarePublishedRead` latches the index at the build. After a versioned resize it may log
 `[ORG] declared view mismatch` once per id until Phase 4 writes the index from the declaration.
+
+## Phase 4 item 4 lane: the build manager (`org-native/p4-build-manager`)
+
+**What it does** (`src/RenderGraph/BuildManager.{h,cpp}`, owned by `RenderGraphRuntime`):
+- The host runs with explicit builds (`SetExplicitBuilds(true)`) and `Desc::reportStaleAliasPlacements`. A rebuild request only marks
+  the epoch.
+- **Requests** go through `RenderGraph::Builds::Request/RequestAll/RequestFor` (any thread; off the owner thread they are applied
+  at the next poll). Requests ORG makes itself (an extension added or removed, the contributors' `Poll`, `SetExternalEpochs`) are
+  picked up the same way, from `GraphHost::RebuildRequested`.
+- **The poll** (`RenderGraphRuntime::BuildIfRequested`) runs at a frame boundary: DCLF's build point at the frame's start, or
+  `SealPresented` in a frame without one (menus, loading screens, DCLF off). It attaches finished builds
+  (`AttachEpochGraph`), asks again for epochs whose alias placements went stale, and hands every other epoch asked for to the
+  manager's own thread (`BuildEpochGraph`). It never uses the runtime task pool: a build waits for pipelines compiled there.
+- **Policy.** One build per epoch in flight. The epochs handed out at one poll attach together, once all are built. A request made
+  after a build was handed out drops it and builds again (three times in a row at most, then it is attached and built again after).
+  A rejected attach asks again; four in a row count as a failure. A failure keeps the old graph, is logged once, and is not retried
+  until a new request (`GraphHost::RebuildRequests`).
+- **Deferred effects** (`Builds::Defer`). An extension's build-time effect waits for the attach: the frame anchors record the snapshot
+  a graph was built from only then, and a failed build drops that snapshot's clients.
+
+**Still on the render thread, and why:**
+- **DCLF's epochs** are owner-built at its build point (and mid-frame when its main resources are made again). Its extensions read
+  state the render thread changes in place: view and shadow resources (`r.target`, `shadow->depth[i]`, `AddShadowViewSlots`) and
+  the graph conditions, and `GraphBuiltForCpu` flips at the request. Moving them off-thread needs copy-on-write DCLF state.
+- **Shader reload** builds every graph on the owner thread with the host's thread held (`RequestAllSynchronous`): the pipeline
+  registry's publish needs that safe point. Managed builds never publish.
+- **Startup builds:** an epoch with no graph is built at its first submission, and `FrameAnchors::BuildPending` builds at setup.
+  After the first world frame `BuildPending` hands its builds to the manager.
+
+**Logs.** `[ORG] build manager: <epoch> attached: built in X ms off the render thread, attached in Y ms ...; why: ...` per attach.
+`[ORG] build manager: graph built on the render thread after the first world frame (...)` for each synchronous build, naming the
+caller. A statistics line every 3000 frames. DCLF's snapshots are keyed on its own epochs' build generations, so an anchor attach
+no longer makes DCLF wait for new recordings.
