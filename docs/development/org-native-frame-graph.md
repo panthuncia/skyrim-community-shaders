@@ -784,3 +784,75 @@ state tracking on the same images: the native context's raw operations in GENERA
 descriptors. Phase 4 turns home states off and replaces the context's raw operations with passes and `ExternalClient`; exclusive
 imports become the default there, and only once `CS_ORG_NATIVE_VALIDATION=1` and a normal-speed run both show no layout race.
 Shared imports (Common-only, simultaneous access) are the default until then.
+
+## Phase 3 lane: the engine's leftover operations (`org-native/p3-static-ops`)
+
+The native op census's world window had four kinds of GPU work left on the immediate context, besides the CPU-only constant
+buffer maps: the clears of `kTEMPORAL_AA_MASK`, `kWATER_1` and `kWATER_2`, and the copy of `kMAIN` into "kMAIN Copy" (its
+`textureCopy`). Loading screens add uploads into one texture and a few copies.
+
+**Static passes in the engine skeleton.** The skeleton already has one gated clear pass per engine view and a copy at an anchor
+of its own. Native mode now adds:
+- Three views to the frame group, in native mode only: `kTEMPORAL_AA_MASK`, `kWATER_1` and `kWATER_2`. Each is one pass at
+  EngineFrameClear, opened by the group's run gate with its colour latched, like the skeleton's other clears.
+- A second copy beside the depth copy: `kMAIN` into its copy texture, at a new anchor, **EngineCopy** (native mode only). Like the
+  depth copy it has no gate: a copy has no indirect form, and the anchor only ever runs for that copy. The copy texture is the
+  published `Engine::kMAIN Copy` slot (`Targets::Find`), so a resize is a new version.
+- If these clears reach the skeleton's patched sites (`ApplyState`, `SetDirtyStates`), the sites now take them. If they reach the
+  native context directly, the context hands them over.
+
+**The native context asks first.** `ContextClearRenderTargetView`, `ContextClearDepthStencilView` and `ContextCopyResource` call
+`Skeleton::Sites::TakeContextColourClear`, `TakeContextDepthClear` and `TakeContextCopy`.
+- A taken operation runs on the graph at once (the group's anchor, or EngineCopy), at its place in the stream.
+- A run that fails replays the clears through the engine's context. The skeleton is marked as flushing then, so the native context
+  records them itself instead of handing them back.
+- Never inside an anchor's run: `FrameAnchors::InRun()` is new for that.
+
+**Rare work through ORG's external client.** `RenderGraph::ExternalWork` wraps one `org::ExternalClient` on the host's runtime,
+with the graphs' queue slots. It is made on first use.
+- Native `UpdateSubresource` (textures), `CopyResource` and `CopySubresourceRegion` between images the graph tracks go through it,
+  with their accesses declared (copy destination, copy source; whole resources). The barriers come from the same ledgers, and no
+  graph changes.
+- "Tracked" means a graph-owned `PixelBuffer`, or an exempt texture a write promoted once it is graph-managed. The loading
+  screen's texture is the second kind, so its updates go through the client once the build manager has attached its promotion.
+  Before that they keep the raw path, as before.
+- The work records on the graph resource's own handle, the one its barriers name, not on the context's import of the image.
+- While home states are on, the client's submissions are closed: a full barrier at entry, and every texture back in its home
+  state at exit (Common for graph-owned textures, shader-read for promoted ones). That is the contract the raw path still relies
+  on. Phase 4 turns it off with home states.
+
+**Fallback stays.** Everything else keeps the context's own path: host-made images, buffers, staging textures, DYNAMIC uploads
+(their upload memory is waited for by the context's own timeline), mip generation, UAV clears, and anything a static pass or the
+client refuses.
+- Each such operation is logged once per (operation, resource) while the render graph is active, up to 64 lines:
+  `[ORG native] <operation> on "<name>" runs on the immediate context's own path ...`.
+- `Immediate`'s raw GENERAL path and the RHI path's Common transitions are not deleted. The loading screen, uploads into
+  host-made images and the CPU-side staging work still reach them.
+
+**Op census.** Routed operations are no longer counted as immediate operations. A new line per window counts them apart:
+`[ORG native] op census (<window>): not on the immediate context (a frame): graph passes: ...; external work: ...`.
+
+**For the main session** (native census run, `tools/cs-test/configs/native-census.toml`):
+- World window: the by-kind line should show only `Map write (discard)` (about 240 a frame). The new line should show
+  `graph passes: ClearRenderTargetView ~3, CopyResource into ~1, CopyResource from ~1`, or fewer if the skeleton's sites took the
+  clears before the context saw them.
+- No `[ORG native] ClearRenderTargetView on "Engine::kTEMPORAL_AA_MASK" ... own path` line (nor for the water targets or
+  `kMAIN Copy`) after the first world frame.
+- `[ORG] engine skeleton: the frame clears registered at the EngineFrameClear anchor (N views ...)`: N is three more than in guest.
+- `[ORG] engine skeleton: the kMAIN copy (kMAIN into kMAIN Copy) runs on the graph (EngineCopy anchor)`.
+- Loading screen window: `external work: UpdateSubresource texture ...` once the texture's promotion is attached, and
+  `[ORG] external work: ORG's external client is ready (closed submissions ...)`.
+- Warnings to watch: `the kMAIN copy ...: the textures differ in size or format` (the copy stays raw), `stays on D3D11 (an integer
+  format)` for the TAA mask, `external work: '...' could not be submitted`.
+- Guest: unchanged. The skeleton's extra views and EngineCopy exist only with `CS_ORG_NATIVE=1`; its flush code was only split
+  per group.
+- Shots: the TAA (the mask) and water must look the same; a wrong copy shows as stale refraction in water.
+
+**Risks.**
+- The clears now run as graph draws inside an anchor run that starts from the native context's call. That is new: until now, every
+  anchor run started from an engine or CS hook. A D3D11 call made inside another graph epoch's body (not through
+  `FrameAnchors::Run`) is not guarded.
+- ExternalClient's closed submissions are a full barrier each. That is fine for rare work. If the census shows many external
+  submissions a frame in the world, they should become passes.
+- A promoted exempt texture changes to graph-managed through the build manager on the render thread, while the loading thread may
+  read the flag. The race is benign: either answer picks a working path.

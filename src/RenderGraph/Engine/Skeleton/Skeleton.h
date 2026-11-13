@@ -23,6 +23,10 @@
  * value other than the engine's (depth 1, stencil 0), a caller that is not the render owner, a registration not in its
  * anchor's built graph yet, a full ring, or a run that did not submit. Each of those gets the engine's own D3D11 call.
  *
+ * Native mode (CS_ORG_NATIVE=1; org-native-frame-graph.md, Phase 3) adds what reaches its immediate context instead of a patched
+ * site: the clears of kTEMPORAL_AA_MASK, kWATER_1 and kWATER_2 (three more views in the frame group), and the copy of kMAIN into its
+ * copy texture at an anchor of its own (EngineCopy). The context hands each to the skeleton (SkeletonSites.h), which runs it now.
+ *
  * Default off: nothing is installed, and the engine's calls are unchanged.
  */
 namespace RenderGraph::Engine::Skeleton

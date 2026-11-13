@@ -16,6 +16,8 @@ bool RenderGraph::Engine::Skeleton::Requested()
 
 #	include "Globals.h"
 #	include "RenderGraph/AnchorPasses.h"
+#	include "RenderGraph/Engine/Native/Native.h"
+#	include "RenderGraph/Engine/Targets/EngineTargets.h"
 #	include "RenderGraph/FrameAnchors.h"
 #	include "RenderGraph/RasterProgram.h"
 #	include "RenderGraph/RenderGraphRuntime.h"
@@ -57,6 +59,10 @@ namespace RenderGraph::Engine::Skeleton
 		constexpr std::array<std::uint32_t, 8> kColourTargets{ ColourTarget::kMAIN, ColourTarget::kMAIN_COPY, ColourTarget::kMAIN_ONLY_ALPHA,
 			ColourTarget::kNORMAL_TAAMASK_SSRMASK, ColourTarget::kNORMAL_TAAMASK_SSRMASK_SWAP, ColourTarget::kNORMAL_TAAMASK_SSRMASK_DOWNSAMPLED,
 			ColourTarget::kMOTION_VECTOR, ColourTarget::kSHADOW_MASK };
+		// Native mode only: colour views the engine clears that the RE list above leaves out. Their clears reach the native immediate
+		// context, which hands them here (Sites::TakeContextColourClear; org-native-frame-graph.md, Phase 3): the TAA mask in the
+		// ImageSpace chain and the two water targets at the water's draws. Guest mode keeps the engine's clears of them.
+		constexpr std::array<std::uint32_t, 3> kNativeColourTargets{ ColourTarget::kTEMPORAL_AA_MASK, ColourTarget::kWATER_1, ColourTarget::kWATER_2 };
 		// Depth: the main depth, the shadow maps' slices and the reflection faces' depth.
 		constexpr std::array<std::uint32_t, 6> kDepthTargets{ DepthTarget::kMAIN, DepthTarget::kSHADOWMAPS_ESRAM, DepthTarget::kVOLUMETRIC_LIGHTING_SHADOWMAPS_ESRAM,
 			DepthTarget::kSHADOWMAPS, DepthTarget::kPRECIPITATION_OCCLUSION_MAP, DepthTarget::kCUBEMAP_REFLECTIONS };
@@ -75,7 +81,22 @@ namespace RenderGraph::Engine::Skeleton
 		constexpr std::array<Anchor, kGroups> kGroupAnchors{ Anchor::EngineShadowClear, Anchor::EngineCubeClear, Anchor::EngineFrameClear };
 		constexpr std::array<const char*, kGroups> kGroupIds{ "cs.engine.skeleton.shadow", "cs.engine.skeleton.cube", "cs.engine.skeleton.frame" };
 		constexpr std::array<const char*, kGroups> kGroupNames{ "shadow", "cube", "frame" };
-		constexpr const char* kCopyId = "cs.engine.skeleton.depth-copy";
+
+		/**
+		 * @brief The engine copies the skeleton runs. Each has an anchor of its own and no run gate: a copy has no indirect form, so a
+		 * run of its anchor is only ever made for that copy (an inactive client submits nothing).
+		 */
+		enum class CopyKind : std::uint8_t
+		{
+			Depth,  // the main depth into kPOST_ZPREPASS_COPY (Main::RenderDepth, FinishAccumulating, Deferred::DeferredPasses)
+			Main,   // native mode only: kMAIN into its copy texture ("kMAIN Copy"), at the native immediate context's CopyResource
+			Count
+		};
+		constexpr std::size_t kCopies = static_cast<std::size_t>(CopyKind::Count);
+		constexpr std::array<Anchor, kCopies> kCopyAnchors{ Anchor::EngineDepthCopy, Anchor::EngineCopy };
+		constexpr std::array<const char*, kCopies> kCopyIds{ "cs.engine.skeleton.depth-copy", "cs.engine.skeleton.main-copy" };
+		constexpr std::array<const char*, kCopies> kCopySteps{ "post-zprepass", "main" };
+		constexpr std::array<const char*, kCopies> kCopyNames{ "the depth copy (kMAIN into kPOST_ZPREPASS_COPY)", "the kMAIN copy (kMAIN into kMAIN Copy)" };
 
 		/** @brief Which engine table a view comes from. */
 		enum class Kind : std::uint8_t
@@ -254,7 +275,7 @@ namespace RenderGraph::Engine::Skeleton
 			bool setUp = false;
 			bool flushing = false;
 			std::array<GroupState, kGroups> groups;
-			CopyState copy;
+			std::array<CopyState, kCopies> copies;
 			// Programs by (format, depth flags; 0 for colour), made when a registration is (Setup, or after a target was made again).
 			std::map<std::pair<rhi::Format, std::uint32_t>, std::shared_ptr<const RasterProgram>> programs;
 			std::set<Target> refused;  // views left to the engine (logged once each)
@@ -267,6 +288,8 @@ namespace RenderGraph::Engine::Skeleton
 		}
 
 		GroupState& GroupOf(Group a_group) { return Skel().groups[static_cast<std::size_t>(a_group)]; }
+
+		CopyState& CopyOf(CopyKind a_kind) { return Skel().copies[static_cast<std::size_t>(a_kind)]; }
 
 		std::size_t IndexOf(Group a_group) { return static_cast<std::size_t>(a_group); }
 
@@ -516,6 +539,9 @@ namespace RenderGraph::Engine::Skeleton
 				return targets;
 			for (const auto index : kColourTargets)
 				targets.push_back({ Kind::Colour, index, 0 });
+			if (Native::Requested())
+				for (const auto index : kNativeColourTargets)
+					targets.push_back({ Kind::Colour, index, 0 });
 			const auto& depths = renderer->GetDepthStencilData().depthStencils;
 			for (const auto index : kDepthTargets) {
 				for (std::uint32_t slice = 0; slice < kDepthSlices; ++slice) {
@@ -729,86 +755,176 @@ namespace RenderGraph::Engine::Skeleton
 			}
 		}
 
-		/**
-		 * @brief The copy's client registered for the engine's kMAIN and kPOST_ZPREPASS_COPY as they are now. Setup, and again only
-		 * when the engine made either again (a resize).
-		 *
-		 * The copy has no run gate: a copy has no indirect form, and a raster copy cannot write the stencil the engine's
-		 * CopyResource copies. It needs none: EngineDepthCopy is the skeleton's own anchor, nothing else registers there, and the
-		 * anchor runs only from RunCopy, whose run always wants the copy (an inactive client submits nothing).
-		 */
-		void RegisterCopy()
+		/** @brief A copy's engine textures now: its source and its target (D3D11 handles, compared to see a target made again). */
+		std::pair<const void*, const void*> EngineTexturesOf(CopyKind a_kind)
 		{
-			auto& copy = Skel().copy;
 			auto* renderer = globals::game::renderer;
-			if (!renderer)
+			if (a_kind == CopyKind::Depth) {
+				const auto& depths = renderer->GetDepthStencilData().depthStencils;
+				return { depths[DepthTarget::kMAIN].texture, depths[DepthTarget::kPOST_ZPREPASS_COPY].texture };
+			}
+			const auto& main = renderer->GetRuntimeData().renderTargets[ColourTarget::kMAIN];
+			return { main.texture, main.textureCopy };
+		}
+
+		/**
+		 * @brief A copy's graph textures: the engine targets' slots. kMAIN's copy texture is the published "Engine::kMAIN Copy" while
+		 * ORG owns kMAIN (Engine::Targets), else an import of the D3D11 texture.
+		 */
+		std::pair<FrameAnchors::Texture, FrameAnchors::Texture> GraphTexturesOf(CopyKind a_kind)
+		{
+			if (a_kind == CopyKind::Depth)
+				return { FrameAnchors::EngineDepth(DepthTarget::kMAIN), FrameAnchors::EngineDepth(DepthTarget::kPOST_ZPREPASS_COPY) };
+			const auto& main = globals::game::renderer->GetRuntimeData().renderTargets[ColourTarget::kMAIN];
+			auto copy = Targets::Find(reinterpret_cast<const ID3D11Resource*>(main.textureCopy));
+			if (!copy && main.textureCopy)
+				copy = FrameAnchors::D3D11Texture("engine.kMAIN.copy", main.textureCopy, main.SRVCopy, nullptr);
+			return { FrameAnchors::EngineTarget(ColourTarget::kMAIN), std::move(copy) };
+		}
+
+		/**
+		 * @brief A copy's client registered for the engine's textures as they are now. Setup, and again only when the engine made
+		 * either texture again (a resize).
+		 *
+		 * The copy has no run gate: a copy has no indirect form, and a raster copy can write neither the stencil the engine's
+		 * CopyResource copies nor a copy texture (it has no render target view). It needs none: its anchor is the skeleton's own,
+		 * nothing else registers there, and the anchor runs only from RunCopy, whose run always wants the copy (an inactive client
+		 * submits nothing).
+		 */
+		void RegisterCopy(CopyKind a_kind)
+		{
+			const auto index = static_cast<std::size_t>(a_kind);
+			auto& copy = CopyOf(a_kind);
+			if (!globals::game::renderer)
 				return;
-			const auto& depths = renderer->GetDepthStencilData().depthStencils;
-			copy.sourceTexture = depths[DepthTarget::kMAIN].texture;
-			copy.targetTexture = depths[DepthTarget::kPOST_ZPREPASS_COPY].texture;
-			copy.source = FrameAnchors::EngineDepth(DepthTarget::kMAIN);
-			copy.target = FrameAnchors::EngineDepth(DepthTarget::kPOST_ZPREPASS_COPY);
+			std::tie(copy.sourceTexture, copy.targetTexture) = EngineTexturesOf(a_kind);
+			std::tie(copy.source, copy.target) = GraphTexturesOf(a_kind);
 			if (!copy.source || !copy.target) {
 				if (std::exchange(copy.registered, false))
-					FrameAnchors::Unregister(kCopyId);
-				logger::info("[ORG] engine skeleton: kMAIN or kPOST_ZPREPASS_COPY has no graph texture; the depth copy stays on D3D11");
+					FrameAnchors::Unregister(kCopyIds[index]);
+				logger::info("[ORG] engine skeleton: {}: a texture has no graph texture; it stays on D3D11", kCopyNames[index]);
 				return;
 			}
 			if (copy.source.Width() != copy.target.Width() || copy.source.Height() != copy.target.Height() || copy.source.Format() != copy.target.Format()) {
 				copy.failed = true;
-				logger::warn("[ORG] engine skeleton: kMAIN and kPOST_ZPREPASS_COPY differ in size or format; the depth copy stays on D3D11");
+				logger::warn("[ORG] engine skeleton: {}: the textures differ in size or format; it stays on D3D11", kCopyNames[index]);
 				return;
 			}
-			AnchorPasses::Builder builder(Anchor::EngineDepthCopy, kCopyId, 0);
-			builder.Add(AnchorPasses::Copy{ .name = "post-zprepass", .source = copy.source, .target = copy.target, .width = copy.source.Width(), .height = copy.source.Height() });
+			AnchorPasses::Builder builder(kCopyAnchors[index], kCopyIds[index], 0);
+			builder.Add(AnchorPasses::Copy{
+				.name = kCopySteps[index],
+				.source = copy.source,
+				.target = copy.target,
+				.width = copy.source.Width(),
+				.height = copy.source.Height() });
 			FrameAnchors::ClientDesc client{};
-			client.id = kCopyId;
+			client.id = kCopyIds[index];
 			client.passes = builder.Take();
-			client.active = [] { return Skel().copy.wanted; };
-			client.executed = [](const FrameAnchors::Point&) { Skel().copy.executed = true; };
-			client.onFailed = [] {
-				auto& state = Skel().copy;
+			client.active = [a_kind] { return CopyOf(a_kind).wanted; };
+			client.executed = [a_kind](const FrameAnchors::Point&) { CopyOf(a_kind).executed = true; };
+			client.onFailed = [a_kind] {
+				const auto failed = static_cast<std::size_t>(a_kind);
+				auto& state = CopyOf(a_kind);
 				state.failed = true;
 				state.registered = false;
-				logger::error("[ORG] engine skeleton: the EngineDepthCopy anchor failed; the depth copy returns to D3D11");
+				logger::error("[ORG] engine skeleton: the {} anchor failed; {} returns to D3D11", FrameAnchors::Name(kCopyAnchors[failed]), kCopyNames[failed]);
 			};
 			copy.registered = FrameAnchors::Register(std::move(client));
 			if (!copy.registered) {
 				copy.failed = true;
-				logger::warn("[ORG] engine skeleton: the EngineDepthCopy anchor refused the copy; it stays on D3D11");
+				logger::warn("[ORG] engine skeleton: the {} anchor refused {}; it stays on D3D11", FrameAnchors::Name(kCopyAnchors[index]), kCopyNames[index]);
 			}
 		}
 
 		/** @brief The copy on the graph at this point; false when it did not run (the caller copies). */
-		bool RunCopy()
+		bool RunCopy(CopyKind a_kind)
 		{
-			auto& copy = Skel().copy;
+			const auto index = static_cast<std::size_t>(a_kind);
+			auto& copy = CopyOf(a_kind);
 			if (copy.failed || !Usable())
 				return false;
-			const auto& depths = globals::game::renderer->GetDepthStencilData().depthStencils;
-			if (depths[DepthTarget::kMAIN].texture != copy.sourceTexture || depths[DepthTarget::kPOST_ZPREPASS_COPY].texture != copy.targetTexture) {
-				logger::info("[ORG] engine skeleton: kMAIN or kPOST_ZPREPASS_COPY was made again; the depth copy registers again");
-				RegisterCopy();
+			if (EngineTexturesOf(a_kind) != std::pair{ copy.sourceTexture, copy.targetTexture }) {
+				logger::info("[ORG] engine skeleton: {}: a texture was made again; it registers again", kCopyNames[index]);
+				RegisterCopy(a_kind);
 				return false;
 			}
 			if (!copy.registered)
 				return false;
-			if (!FrameAnchors::CanRun(kCopyId, Anchor::EngineDepthCopy))
+			if (!FrameAnchors::CanRun(kCopyIds[index], kCopyAnchors[index]))
 				return false;
 			copy.wanted = true;
 			copy.executed = false;
 			auto& state = Skel();
 			state.flushing = true;
-			const auto result = FrameAnchors::Run(Anchor::EngineDepthCopy);
+			const auto result = FrameAnchors::Run(kCopyAnchors[index]);
 			state.flushing = false;
 			copy.wanted = false;
 			// Drawn only when the run submitted with this registration's pass in its graph (the executed signal).
 			const bool done = result && copy.executed;
 			if (done && !std::exchange(copy.announced, true))
-				logger::info("[ORG] engine skeleton: the main depth is copied into kPOST_ZPREPASS_COPY on the graph");
+				logger::info("[ORG] engine skeleton: {} runs on the graph ({} anchor)", kCopyNames[index], FrameAnchors::Name(kCopyAnchors[index]));
 			if (!done)
-				FailedRun("the depth copy", result.status);
+				FailedRun(kCopyNames[index], result.status);
 			return done;
+		}
+
+		/**
+		 * @brief One group's clears taken so far, on the graph now. When its run did not draw them, the engine's D3D11 calls are made
+		 * in order through a_context. Then the group registers again if one of its targets was made again.
+		 */
+		void FlushGroup(ID3D11DeviceContext* a_context, std::size_t a_index)
+		{
+			auto& state = Skel();
+			auto& group = state.groups[a_index];
+			if (!group.pending.empty()) {
+				bool done = false;
+				auto status = FrameAnchors::RunStatus::Failed;
+				if (!group.failed) {
+					group.executed = false;
+					state.flushing = true;
+					const auto result = FrameAnchors::Run(kGroupAnchors[a_index]);
+					state.flushing = false;
+					status = result.status;
+					// The executed signal says the run's graph held this registration's passes. Without it the run failed (an error,
+					// logged): the engine's clears are made here, in their order, so the frame stays whole.
+					done = result && group.executed;
+				}
+				if (done) {
+					group.taken += group.pending.size();
+					if (!std::exchange(group.announced, true))
+						logger::info("[ORG] engine skeleton: the first {} clears ran on the graph ({} anchor)", kGroupNames[a_index], FrameAnchors::Name(kGroupAnchors[a_index]));
+				} else {
+					group.replayed += group.pending.size();
+					FailedRun(kGroupNames[a_index], status);
+					// Still flushing while the calls are made. In native mode they reach the immediate context, which must not hand
+					// them back here.
+					state.flushing = true;
+					Replay(a_context, group.pending);
+					state.flushing = false;
+				}
+				group.pending.clear();
+			}
+			// The engine made one of the group's targets again (a resize): its passes are made again, once, with nothing pending.
+			if (group.stale && !group.failed)
+				Build(static_cast<Group>(a_index));
+		}
+
+		/** @brief The engine's immediate context (native mode's handle there). */
+		ID3D11DeviceContext* EngineContext()
+		{
+			return reinterpret_cast<ID3D11DeviceContext*>(globals::game::renderer->GetRuntimeData().context);
+		}
+
+		/**
+		 * @brief A clear the native immediate context was asked for outside the patched sites. It is taken and run on the graph now,
+		 * at its place in the stream. False when the skeleton does not take it: the context records it itself.
+		 */
+		bool TakeNow(const Target& a_target, ID3D11View* a_view, std::uint32_t a_flags, const Pending& a_pending)
+		{
+			if (FrameAnchors::InRun() || !Take(a_target, a_view, a_flags, a_pending))
+				return false;
+			FlushGroup(EngineContext(), IndexOf(GroupFor(a_target)));
+			return true;
 		}
 	}
 
@@ -819,6 +935,9 @@ namespace RenderGraph::Engine::Skeleton
 		bool reserved = true;
 		for (const auto anchor : { Anchor::EngineShadowClear, Anchor::EngineCubeClear, Anchor::EngineFrameClear, Anchor::EngineDepthCopy })
 			reserved = FrameAnchors::Reserve(anchor) && reserved;
+		// The kMAIN copy reaches the skeleton only from native mode's immediate context.
+		if (Native::Requested())
+			reserved = FrameAnchors::Reserve(Anchor::EngineCopy) && reserved;
 		if (!reserved)
 			logger::warn("[ORG] engine skeleton: CS_ORG_ENGINE_SKELETON=1, but not every anchor could be reserved; those clears stay on D3D11");
 	}
@@ -844,16 +963,20 @@ namespace RenderGraph::Engine::Skeleton
 			}
 			Build(static_cast<Group>(i));
 		}
-		state.copy.failed = !FrameAnchors::HasEpoch(Anchor::EngineDepthCopy);
-		if (!state.copy.failed)
-			RegisterCopy();
+		for (std::size_t i = 0; i < kCopies; ++i) {
+			const auto kind = static_cast<CopyKind>(i);
+			auto& copy = state.copies[i];
+			copy.failed = !FrameAnchors::HasEpoch(kCopyAnchors[i]) || (kind == CopyKind::Main && !Native::Requested());
+			if (!copy.failed)
+				RegisterCopy(kind);
+		}
 		state.setUp = true;
 		logger::info("[ORG] engine skeleton: on (CS_ORG_ENGINE_SKELETON); the engine's clears and its main depth copy are registered with the graph");
 	}
 
 	bool CopyPostZPrepassDepth()
 	{
-		return Requested() && RunCopy();
+		return Requested() && RunCopy(CopyKind::Depth);
 	}
 
 	void MarkInstalled()
@@ -899,36 +1022,8 @@ namespace RenderGraph::Engine::Skeleton
 			// Clears are taken on the render owner only (FrameAnchors::IsRenderOwner); another thread has none to flush.
 			if (!state.setUp || state.flushing || !FrameAnchors::IsRenderOwner())
 				return;
-			for (std::size_t i = 0; i < kGroups; ++i) {
-				auto& group = state.groups[i];
-				if (!group.pending.empty()) {
-					bool done = false;
-					auto status = FrameAnchors::RunStatus::Failed;
-					if (!group.failed) {
-						group.executed = false;
-						state.flushing = true;
-						const auto result = FrameAnchors::Run(kGroupAnchors[i]);
-						state.flushing = false;
-						status = result.status;
-						// The executed signal says the run's graph held this registration's passes. Without it the run failed (an error,
-						// logged): the engine's clears are made here, in their order, so the frame stays whole.
-						done = result && group.executed;
-					}
-					if (done) {
-						group.taken += group.pending.size();
-						if (!std::exchange(group.announced, true))
-							logger::info("[ORG] engine skeleton: the first {} clears ran on the graph ({} anchor)", kGroupNames[i], FrameAnchors::Name(kGroupAnchors[i]));
-					} else {
-						group.replayed += group.pending.size();
-						FailedRun(kGroupNames[i], status);
-						Replay(a_context, group.pending);
-					}
-					group.pending.clear();
-				}
-				// The engine made one of the group's targets again (a resize): its passes are made again, once, with nothing pending.
-				if (group.stale && !group.failed)
-					Build(static_cast<Group>(i));
-			}
+			for (std::size_t i = 0; i < kGroups; ++i)
+				FlushGroup(a_context, i);
 		}
 
 		bool TakeDepthCopy(ID3D11Resource* a_destination, ID3D11Resource* a_source)
@@ -939,7 +1034,48 @@ namespace RenderGraph::Engine::Skeleton
 			const auto& depths = renderer->GetDepthStencilData().depthStencils;
 			if (a_destination != depths[DepthTarget::kPOST_ZPREPASS_COPY].texture || a_source != depths[DepthTarget::kMAIN].texture)
 				return false;
-			return RunCopy();
+			return RunCopy(CopyKind::Depth);
+		}
+
+		bool TakeContextColourClear(ID3D11RenderTargetView* a_view, const FLOAT a_colour[4])
+		{
+			if (!Usable() || !a_colour)
+				return false;
+			const auto target = FindColour(a_view);
+			if (!target)
+				return false;
+			Pending pending{ .depth = false, .view = a_view };
+			std::memcpy(pending.colour.data(), a_colour, sizeof(pending.colour));
+			return TakeNow(*target, a_view, 0, pending);
+		}
+
+		bool TakeContextDepthClear(ID3D11DepthStencilView* a_view, UINT a_flags, FLOAT a_depth, UINT8 a_stencil)
+		{
+			// As TakeDepthClear: the clear programs write depth 1 and stencil 0.
+			if (!Usable() || ((a_flags & D3D11_CLEAR_DEPTH) && a_depth != 1.0f) || ((a_flags & D3D11_CLEAR_STENCIL) && a_stencil != 0))
+				return false;
+			const auto target = FindDepth(a_view);
+			if (!target)
+				return false;
+			std::uint32_t flags = a_flags & (D3D11_CLEAR_DEPTH | D3D11_CLEAR_STENCIL);
+			const auto& specs = GroupOf(GroupFor(*target)).specs;
+			if (const auto found = specs.find(*target); found != specs.end() && found->second->draws.size() == 1 && found->second->draws.front().flags == D3D11_CLEAR_DEPTH)
+				flags &= D3D11_CLEAR_DEPTH;
+			if (flags == 0)
+				return false;
+			return TakeNow(*target, a_view, flags, Pending{ .depth = true, .view = a_view, .flags = a_flags, .depthValue = a_depth, .stencil = a_stencil });
+		}
+
+		bool TakeContextCopy(ID3D11Resource* a_destination, ID3D11Resource* a_source)
+		{
+			if (!Requested() || !globals::game::renderer || !a_destination || FrameAnchors::InRun())
+				return false;
+			for (std::size_t i = 0; i < kCopies; ++i) {
+				const auto kind = static_cast<CopyKind>(i);
+				if (EngineTexturesOf(kind) == std::pair<const void*, const void*>{ a_source, a_destination })
+					return RunCopy(kind);
+			}
+			return false;
 		}
 	}
 }
@@ -961,6 +1097,9 @@ namespace RenderGraph::Engine::Skeleton
 		bool TakeDepthClear(ID3D11DeviceContext*, ID3D11DepthStencilView*, UINT, FLOAT, UINT8) { return false; }
 		void Flush(ID3D11DeviceContext*) {}
 		bool TakeDepthCopy(ID3D11Resource*, ID3D11Resource*) { return false; }
+		bool TakeContextColourClear(ID3D11RenderTargetView*, const FLOAT[4]) { return false; }
+		bool TakeContextDepthClear(ID3D11DepthStencilView*, UINT, FLOAT, UINT8) { return false; }
+		bool TakeContextCopy(ID3D11Resource*, ID3D11Resource*) { return false; }
 	}
 }
 

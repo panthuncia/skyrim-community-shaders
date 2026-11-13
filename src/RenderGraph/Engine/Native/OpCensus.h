@@ -79,6 +79,25 @@ namespace RenderGraph::Engine::Native::OpCensus
 	/** @brief Counts one operation on a_target. Call only when Flags() is non-zero. Any thread. */
 	void Record(Op a_op, const Target& a_target);
 
+	/** @brief The operation's name as the reports give it ("ClearRenderTargetView"). */
+	const char* Name(Op a_op);
+
+	/**
+	 * @brief Where an operation went instead of the immediate context's own path (org-native-frame-graph.md, Phase 3): a static
+	 * graph pass (the engine skeleton's clears and copies), or ORG's external client (RenderGraph::ExternalWork).
+	 */
+	enum class Route : std::uint8_t
+	{
+		GraphPass,
+		ExternalWork,
+	};
+
+	/**
+	 * @brief Counts one operation that did not run on the immediate context's own path; Record counts only those that did. The op
+	 * census reports both, per window. Call only when Flags() has kOps. Any thread.
+	 */
+	void RecordRouted(Op a_op, Route a_route);
+
 	/**
 	 * @brief A graph epoch was submitted (RenderGraphRuntime::TryExecuteEpoch): the operations after it fall after a_label. Render
 	 * thread; nothing when the census is off.

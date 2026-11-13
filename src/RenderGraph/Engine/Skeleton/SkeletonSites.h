@@ -25,4 +25,24 @@ namespace RenderGraph::Engine::Skeleton::Sites
 
 	/** @brief CopyResource(kPOST_ZPREPASS_COPY, kMAIN) on the graph: true when it ran, false when the caller must copy. */
 	bool TakeDepthCopy(ID3D11Resource* a_destination, ID3D11Resource* a_source);
+
+	// What native mode's immediate context asks of the skeleton (org-native-frame-graph.md, Phase 3): the engine's clears and copies
+	// that reach the context outside the patched sites. Each runs on the graph now, at its place in the stream. False when the
+	// skeleton does not take the operation: the context records it itself. Render owner; never inside an anchor's run
+	// (FrameAnchors::InRun).
+
+	/**
+	 * @brief A colour clear of a view the skeleton has a pass for (the RE list, and in native mode the TAA mask and the water
+	 * targets). True when it is done: on the graph, or after a failed run through the engine's context, which then records it.
+	 */
+	bool TakeContextColourClear(ID3D11RenderTargetView* a_view, const FLOAT a_colour[4]);
+
+	/** @brief A depth-stencil clear, as TakeContextColourClear. */
+	bool TakeContextDepthClear(ID3D11DepthStencilView* a_view, UINT a_flags, FLOAT a_depth, UINT8 a_stencil);
+
+	/**
+	 * @brief A CopyResource the skeleton has a pass for: the main depth into kPOST_ZPREPASS_COPY, or (native mode) kMAIN into its copy
+	 * texture at the EngineCopy anchor. True when the graph copied.
+	 */
+	bool TakeContextCopy(ID3D11Resource* a_destination, ID3D11Resource* a_source);
 }

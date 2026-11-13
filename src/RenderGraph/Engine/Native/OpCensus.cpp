@@ -55,6 +55,8 @@ namespace RenderGraph::Engine::Native::OpCensus
 			std::array<std::uint64_t, kOpCount> byKind{};
 			std::map<std::pair<std::uint8_t, std::uint64_t>, TargetStats> targets;  // by (kind, resource)
 			std::unordered_map<std::string, PositionStats> positions;
+			// Operations that went to a static graph pass or to ORG's external client instead (RecordRouted).
+			std::array<std::uint64_t, kOpCount> graphPasses{}, externalWork{};
 		};
 
 		/** @brief A resource the write census caught: made SRV-only or VB/IB-only, written after creation. */
@@ -170,6 +172,8 @@ namespace RenderGraph::Engine::Native::OpCensus
 				total += count;
 			logger::info("[ORG native] op census ({}, {} frames): {:.2f} operations a frame; by kind (a frame): {}", window, a_frames, PerFrame(total, a_frames),
 				KindList(a_data.byKind, a_frames));
+			logger::info("[ORG native] op census ({}): not on the immediate context (a frame): graph passes: {}; external work: {}", window,
+				KindList(a_data.graphPasses, a_frames), KindList(a_data.externalWork, a_frames));
 			if (!total)
 				return;
 			const std::size_t top = CensusWindow::ReportTop();
@@ -311,6 +315,23 @@ namespace RenderGraph::Engine::Native::OpCensus
 			++written.byKind[kind];
 			++written.count;
 		}
+	}
+
+	const char* Name(Op a_op)
+	{
+		const auto kind = static_cast<std::size_t>(a_op);
+		return kind < kOpCount ? kOpNames[kind] : "unknown";
+	}
+
+	void RecordRouted(Op a_op, Route a_route)
+	{
+		const auto kind = static_cast<std::size_t>(a_op);
+		if (!(Flags() & kOps) || kind >= kOpCount)
+			return;
+		auto& census = Get();
+		std::lock_guard guard(census.lock);
+		auto& window = census.ops.Active();
+		++(a_route == Route::GraphPass ? window.graphPasses : window.externalWork)[kind];
 	}
 
 	void NoteEpoch(const char* a_label)
