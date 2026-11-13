@@ -21,6 +21,12 @@ namespace org
 	class LatchBlock;
 	class RenderPass;
 	class Resource;
+	class VersionedTexture;
+}
+
+namespace GraphResources
+{
+	class Resource;
 }
 
 struct ComputeProgram;
@@ -74,6 +80,8 @@ namespace RenderGraph::AnchorPasses
 		std::uint32_t mip = kAllMips;        // Srv and Uav: the one mip the view covers, or the default view
 		std::string id;                      // Published: the id (PublishedResources::IsDeclarable at the build)
 		std::uint32_t variant = UINT32_MAX;  // Srv and Published: the view variant (org::SRVViewType), UINT32_MAX for the default view
+		// Srv and Uav of a versioned twin: its slot, declared in place of resource, so a resize is a new version (GraphResources.h).
+		std::shared_ptr<org::VersionedTexture> slot;
 
 		static Bind Srv(std::shared_ptr<org::Resource> a_resource, std::uint32_t a_mip = kAllMips) { return { Kind::Srv, std::move(a_resource), 0, a_mip }; }
 		/** @brief An Srv of a texture array's whole-array view (Texture2DArrayFull), for a shader that declares Texture2DArray. */
@@ -84,6 +92,12 @@ namespace RenderGraph::AnchorPasses
 		{
 			return { Kind::Published, nullptr, 0, kAllMips, std::string(a_id), a_variant };
 		}
+		/**
+		 * @brief An Srv or Uav of a graph twin: its slot when it is versioned (GraphResources::Options::versioned), else its graph
+		 * resource. A versioned twin's passes declare it this way, never through Graph().
+		 */
+		static Bind Srv(const GraphResources::Resource& a_twin, std::uint32_t a_mip = kAllMips);
+		static Bind Uav(const GraphResources::Resource& a_twin, std::uint32_t a_mip = kAllMips);
 		static Bind Handle(std::uint32_t a_index) { return { Kind::Handle, nullptr, a_index }; }
 		static Bind Unused() { return Handle(0); }
 		static Bind Latch(std::uint32_t a_offset) { return { Kind::Latch, nullptr, a_offset }; }
