@@ -107,6 +107,9 @@ Each anchor's rule:
   skeleton (`CS_ORG_ENGINE_SKELETON=1`, `p5/skeleton.md`) and the self-test.
 - **EngineDepthCopy.** Where the main depth is copied into `kPOST_ZPREPASS_COPY`: `Main::RenderDepth`'s end, FinishAccumulating's
   copy, and `Deferred::DeferredPasses` before the DeferredPasses anchor. Reserved only by the engine skeleton and the self-test.
+- **EngineCopy.** Native mode only: where the engine copies `kMAIN` into its copy texture ("kMAIN Copy"), at the native
+  immediate context's `CopyResource`, inside the ImageSpace chain. Reserved only by the engine skeleton with `CS_ORG_NATIVE=1`.
+  A late anchor, as ImageSpace is.
 - **Interface.** At each Scaleform display's `EndDisplay` that the graph draws (`RenderGraph/Engine/Scaleform`, P5.10), on the
   main thread, inside `UI::DrawInterface`: after FrameGeneration's hudless capture, before Present. It runs once per display
   (the HUD, each menu, the cursor), so several times a frame, and only with `CS_ORG_SCALEFORM=1`. Its passes draw onto the
@@ -142,7 +145,7 @@ Keys used so far:
   depth-stencil, one with it for masks); one draws per run, through the client's run gate.
 - The Screenshot feature (`CS_ORG_SCREENSHOT`): 100 (the readback copy) at Capture.
 - The engine skeleton (`CS_ORG_ENGINE_SKELETON`): its gate entry (0 to 127) at EngineShadowClear, EngineCubeClear and
-  EngineFrameClear; 0 (the copy) at EngineDepthCopy.
+  EngineFrameClear; 0 (the copy) at EngineDepthCopy and EngineCopy.
 - HDR Display (`CS_ORG_HDR_DISPLAY`): 100 (the output composite), 101 (the copy into the back buffer, not in the owned frame)
   and 102 (the UI texture's clear) at HDROutput.
 - Upscaling (`CS_ORG_UPSCALING`): 100 (the upscaled colour into `kMAIN`), 200 to 204 (the depth and refraction normal copies,
@@ -918,6 +921,17 @@ Keys used so far:
   would let the propagation move: a copy pass that declares subresource ranges per frame (or takes a copy list from the
   latch), and a way to copy within one texture between faces in one pass.
 - **Found by:** P3 CloudShadows (2026-11-09).
+
+### GPU work outside any graph on resources the graph tracks
+
+- **Need:** a copy or an upload into a texture the graph tracks, at a point no anchor covers and too rare to be worth a pass
+  (a loading screen's texture updates, an odd copy between tracked textures).
+- **Who:** native mode's immediate context (`NativeDevice.cpp`): the engine's and plugins' `UpdateSubresource`, `CopyResource`
+  and `CopySubresourceRegion` on graph-owned textures and promoted exempt ones.
+- **Where it fits:** `RenderGraph::ExternalWork` (CS's one `org::ExternalClient`). A submission lists its accesses, and its barriers
+  come from the runtime's ledgers, so no graph changes. While home states are on, the client's submissions are closed (full
+  barrier at entry, home state at exit). A plugin could be given the same call with its own resources.
+- **Found by:** org-native-frame-graph.md Phase 3 (2026-11-13).
 
 ### A copy between draws of one pass, and reading an image another epoch wrote by heap index (the sky's cloud layers)
 
