@@ -192,8 +192,11 @@ namespace DCLF
 						DeclareFrameBuffers(a_builder, main);
 					// The faces read the published textures their frame textures' views export (ResolveViewFrameTextures). Only
 					// a frame texture with a view can be read there.
-					else if (mode == DrawMode::Faces)
+					else if (mode == DrawMode::Faces) {
 						Extensions::DeclareGraphTextures(a_builder, Extensions::FacesGraphTextureIds());
+						// And the character light's noise, an HDR downsample level (ResolveViewFrameTextures).
+						Extensions::DeclareGraphTextures(a_builder, Extensions::CharacterLightGraphTextureIds());
+					}
 					// The faces' draw families (tree LOD's tables, the faces' rows and lists).
 					for (std::size_t d = 0; d < Extensions::kDrawFamilies && mode == DrawMode::Faces; ++d)
 						if (const auto& family = Extensions::DrawFamilies()[d].contribution.faces; Extensions::DrawFamilyHasFaces(static_cast<Api::DrawFamily>(d))) {

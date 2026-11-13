@@ -194,6 +194,8 @@ namespace DCLF::Draws
 					Extensions::DeclarePublishedRead(a_builder, graphBuffers[b].resources[r], reads);
 		// The frame textures' published ids, so the graph orders these reads after the producers' writes.
 		Extensions::DeclareGraphTextures(a_builder, Extensions::ColourGraphTextureIds(), reads);
+		// The character light's noise (kCharacterLightRegister): whichever HDR downsample level the engine names this frame.
+		Extensions::DeclareGraphTextures(a_builder, Extensions::CharacterLightGraphTextureIds(), reads);
 		// Every caller draws with the frame record bound. Its shaders read the frame's placements, palettes and shading (t121-t123)
 		// and the fade seeds pool (t117).
 		FrameValues::Get().DeclareReads(a_builder);
