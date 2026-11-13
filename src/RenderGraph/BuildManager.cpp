@@ -393,6 +393,16 @@ namespace RenderGraph
 			}
 		}
 
+		/** @brief A build on the render thread after the first world frame, logged (rate-limited). */
+		void WarnSynchronous(std::string_view a_what, std::string_view a_caller)
+		{
+			if (!worldStarted)
+				return;
+			if (++warnings <= 50 || warnings % 100 == 0)
+				logger::warn("[ORG] build manager: graph built on the render thread after the first world frame ({}): {}; caller: {}", warnings, a_what,
+					a_caller);
+		}
+
 		bool BuildOwnerEpochs(std::string_view a_caller)
 		{
 			auto& host = *desc.host;
@@ -567,12 +577,7 @@ namespace RenderGraph
 
 	void BuildManager::WarnSynchronous(std::string_view a_what, std::string_view a_caller)
 	{
-		auto& m = *impl;
-		if (!m.worldStarted)
-			return;
-		if (++m.warnings <= 50 || m.warnings % 100 == 0)
-			logger::warn("[ORG] build manager: graph built on the render thread after the first world frame ({}): {}; caller: {}", m.warnings, a_what,
-				a_caller);
+		impl->WarnSynchronous(a_what, a_caller);
 	}
 
 	namespace Builds
