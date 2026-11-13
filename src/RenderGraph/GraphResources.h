@@ -60,6 +60,7 @@ namespace GraphResources
 		SRV = 1 << 0,
 		UAV = 1 << 1,
 		RTV = 1 << 2,  // textures only
+		DSV = 1 << 3,  // 2D depth textures only (see Texture2D)
 	};
 
 	constexpr Export operator|(Export a_left, Export a_right) { return static_cast<Export>(static_cast<std::uint8_t>(a_left) | static_cast<std::uint8_t>(a_right)); }
@@ -145,6 +146,7 @@ namespace GraphResources
 		/** @brief The exported D3D11 views of the whole resource; null when not exported. */
 		ID3D11ShaderResourceView* SRV() const { return srv.get(); }
 		ID3D11UnorderedAccessView* UAV() const { return uav.get(); }
+		ID3D11DepthStencilView* DSV() const { return dsv.get(); }
 
 		explicit operator bool() const { return graph != nullptr; }
 
@@ -180,6 +182,7 @@ namespace GraphResources
 		winrt::com_ptr<ID3D11ShaderResourceView> srv;
 		winrt::com_ptr<ID3D11UnorderedAccessView> uav;
 		winrt::com_ptr<ID3D11RenderTargetView> rtv;
+		winrt::com_ptr<ID3D11DepthStencilView> dsv;
 	};
 
 	/**
@@ -188,6 +191,11 @@ namespace GraphResources
 	 * The D3D11 description says what the graph texture is: its size, mips, array size, typed format, and views (SRV always, UAV, RTV,
 	 * DSV from the bind flags; D3D11_RESOURCE_MISC_TEXTURECUBE for a cube). Usage must be DEFAULT, without CPU access. An exported
 	 * texture's D3D11 views are the whole texture in its own format.
+	 *
+	 * A depth texture (D3D11_BIND_DEPTH_STENCIL) is a single 2D texture with one sample, in a typeless format as the engine's depth
+	 * targets are: R16, R24G8, R32 or R32G8X24_TYPELESS. The graph image and the DSV take the depth format (D16_UNORM, D24_UNORM_S8_UINT,
+	 * D32_FLOAT, D32_FLOAT_S8X24_UINT), the SRV the format that reads the depth (R16_UNORM, R24_UNORM_X8_TYPELESS, R32_FLOAT,
+	 * R32_FLOAT_X8X24_TYPELESS). It has no RTV or UAV. Export::DSV exports its depth-stencil view, for D3D11 draws into it.
 	 */
 	class Texture2D : public Resource
 	{

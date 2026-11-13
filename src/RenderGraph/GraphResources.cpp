@@ -51,6 +51,35 @@ namespace GraphResources
 
 		bool Is3D(const Shape& a_shape) { return a_shape.dimension == D3D11_RESOURCE_DIMENSION_TEXTURE3D; }
 
+		bool IsDepth(const Shape& a_shape) { return (a_shape.bindFlags & D3D11_BIND_DEPTH_STENCIL) != 0; }
+
+		/** @brief The formats of a texture's image and views: its own for each, or a typeless depth texture's (Texture2D's rule). */
+		struct Formats
+		{
+			DXGI_FORMAT image = DXGI_FORMAT_UNKNOWN;
+			DXGI_FORMAT srv = DXGI_FORMAT_UNKNOWN;
+			DXGI_FORMAT dsv = DXGI_FORMAT_UNKNOWN;  // depth textures only
+		};
+
+		/** @brief a_shape's formats; all unknown for a depth texture whose format is not one of the typeless depth formats. */
+		Formats FormatsOf(const Shape& a_shape)
+		{
+			if (!IsDepth(a_shape))
+				return { a_shape.format, a_shape.format, DXGI_FORMAT_UNKNOWN };
+			switch (a_shape.format) {
+			case DXGI_FORMAT_R16_TYPELESS:
+				return { DXGI_FORMAT_D16_UNORM, DXGI_FORMAT_R16_UNORM, DXGI_FORMAT_D16_UNORM };
+			case DXGI_FORMAT_R24G8_TYPELESS:
+				return { DXGI_FORMAT_D24_UNORM_S8_UINT, DXGI_FORMAT_R24_UNORM_X8_TYPELESS, DXGI_FORMAT_D24_UNORM_S8_UINT };
+			case DXGI_FORMAT_R32_TYPELESS:
+				return { DXGI_FORMAT_D32_FLOAT, DXGI_FORMAT_R32_FLOAT, DXGI_FORMAT_D32_FLOAT };
+			case DXGI_FORMAT_R32G8X24_TYPELESS:
+				return { DXGI_FORMAT_D32_FLOAT_S8X24_UINT, DXGI_FORMAT_R32_FLOAT_X8X24_TYPELESS, DXGI_FORMAT_D32_FLOAT_S8X24_UINT };
+			default:
+				return {};
+			}
+		}
+
 		UINT MipCount(const Shape& a_shape)
 		{
 			if (a_shape.mips)
@@ -68,7 +97,8 @@ namespace GraphResources
 			const bool cube = (a_shape.miscFlags & D3D11_RESOURCE_MISC_TEXTURECUBE) != 0;
 			const UINT slices = Is3D(a_shape) ? 1u : (std::max)(a_shape.depthOrArraySize, 1u);
 			const UINT mips = MipCount(a_shape);
-			const auto format = rhi::helpers::ToRHI(a_shape.format);
+			const auto formats = FormatsOf(a_shape);
+			const auto format = rhi::helpers::ToRHI(formats.image);
 			org::TextureDescription desc{};
 			desc.type = Is3D(a_shape) ? rhi::ResourceType::Texture3D : rhi::ResourceType::Texture2D;
 			desc.format = format;
@@ -78,15 +108,17 @@ namespace GraphResources
 			desc.depth = Is3D(a_shape) ? a_shape.depthOrArraySize : 1u;
 			desc.sampleCount = static_cast<std::uint8_t>((std::max)(a_shape.samples, 1u));
 			desc.hasSRV = true;
-			desc.srvFormat = format;
+			desc.srvFormat = rhi::helpers::ToRHI(formats.srv);
 			desc.hasUAV = (a_shape.bindFlags & D3D11_BIND_UNORDERED_ACCESS) != 0;
 			desc.uavFormat = format;
 			// A CPU-side UAV too, so a pass can clear it (PassBuilder::UnorderedAccessClear), as D3D11 clears its UAVs.
 			desc.hasNonShaderVisibleUAV = desc.hasUAV;
 			desc.hasRTV = (a_shape.bindFlags & D3D11_BIND_RENDER_TARGET) != 0;
 			desc.rtvFormat = format;
-			desc.hasDSV = (a_shape.bindFlags & D3D11_BIND_DEPTH_STENCIL) != 0;
+			desc.hasDSV = IsDepth(a_shape);
 			desc.dsvFormat = format;
+			if (desc.hasDSV)
+				desc.channels = 1;
 			for (UINT slice = 0; slice < (a_external ? 1u : slices); ++slice)
 				for (UINT mip = 0; mip < mips; ++mip)
 					desc.imageDimensions.push_back({ (std::max)(a_shape.width >> mip, 1u), (std::max)(a_shape.height >> mip, 1u), 0, 0 });
@@ -109,6 +141,7 @@ namespace GraphResources
 		/** @brief An exported twin texture: every view in the texture's own format, the SRV always (Describe's rule). */
 		Created CreateExportedTexture(const Shape& a_shape, const std::string& a_name)
 		{
+			const auto formats = FormatsOf(a_shape);
 			ExportDesc desc{};
 			desc.dimension = a_shape.dimension;
 			desc.width = a_shape.width;
@@ -119,10 +152,10 @@ namespace GraphResources
 			desc.format = a_shape.format;
 			desc.bindFlags = a_shape.bindFlags;
 			desc.miscFlags = a_shape.miscFlags;
-			desc.srv = a_shape.format;
+			desc.srv = formats.srv;
 			desc.rtv = (a_shape.bindFlags & D3D11_BIND_RENDER_TARGET) ? a_shape.format : DXGI_FORMAT_UNKNOWN;
 			desc.uav = (a_shape.bindFlags & D3D11_BIND_UNORDERED_ACCESS) ? a_shape.format : DXGI_FORMAT_UNKNOWN;
-			desc.dsv = (a_shape.bindFlags & D3D11_BIND_DEPTH_STENCIL) ? a_shape.format : DXGI_FORMAT_UNKNOWN;
+			desc.dsv = formats.dsv;
 			auto exported = ExportTexture(desc, a_name);
 			return { std::move(exported.graph), std::move(exported.d3d11) };
 		}
@@ -134,8 +167,13 @@ namespace GraphResources
 				return {};
 			}
 			if (a_shape.usage != D3D11_USAGE_DEFAULT || a_shape.cpuAccess || (a_shape.miscFlags & ~UINT(D3D11_RESOURCE_MISC_TEXTURECUBE)) ||
-				rhi::helpers::ToRHI(a_shape.format) == rhi::Format::Unknown) {
+				rhi::helpers::ToRHI(FormatsOf(a_shape).image) == rhi::Format::Unknown) {
 				logger::error("[ORG] {}: not created: graph textures are DEFAULT usage, without CPU access, typed, and only cube misc flags", a_name);
+				return {};
+			}
+			if (IsDepth(a_shape) && (Is3D(a_shape) || a_shape.depthOrArraySize > 1 || a_shape.samples > 1 || a_shape.miscFlags ||
+										(a_shape.bindFlags & (D3D11_BIND_RENDER_TARGET | D3D11_BIND_UNORDERED_ACCESS)))) {
+				logger::error("[ORG] {}: not created: a graph depth texture is one 2D texture with one sample, without RTVs or UAVs", a_name);
 				return {};
 			}
 			try {
@@ -148,11 +186,30 @@ namespace GraphResources
 			}
 		}
 
-		/** @brief The exported texture's views of the whole texture; false when D3D11 refuses one. */
+		/**
+		 * @brief The exported texture's views of the whole texture; false when D3D11 refuses one. A depth texture's (a_depth: its
+		 * Formats) are 2D views in its read and depth formats, which a typeless texture cannot default to. Only a depth texture
+		 * exports a DSV.
+		 */
 		bool CreateTextureViews(ID3D11Resource* a_texture, Export a_export, winrt::com_ptr<ID3D11ShaderResourceView>& a_srv,
-			winrt::com_ptr<ID3D11UnorderedAccessView>& a_uav, winrt::com_ptr<ID3D11RenderTargetView>& a_rtv)
+			winrt::com_ptr<ID3D11UnorderedAccessView>& a_uav, winrt::com_ptr<ID3D11RenderTargetView>& a_rtv, winrt::com_ptr<ID3D11DepthStencilView>& a_dsv,
+			const Formats* a_depth = nullptr)
 		{
 			auto* device = globals::d3d::device;
+			if (a_depth) {
+				D3D11_SHADER_RESOURCE_VIEW_DESC srvDesc{};
+				srvDesc.Format = a_depth->srv;
+				srvDesc.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
+				srvDesc.Texture2D.MipLevels = static_cast<UINT>(-1);
+				if (Has(a_export, Export::SRV) && FAILED(device->CreateShaderResourceView(a_texture, &srvDesc, a_srv.put())))
+					return false;
+				D3D11_DEPTH_STENCIL_VIEW_DESC dsvDesc{};
+				dsvDesc.Format = a_depth->dsv;
+				dsvDesc.ViewDimension = D3D11_DSV_DIMENSION_TEXTURE2D;
+				return !Has(a_export, Export::DSV) || SUCCEEDED(device->CreateDepthStencilView(a_texture, &dsvDesc, a_dsv.put()));
+			}
+			if (Has(a_export, Export::DSV))
+				return false;
 			if (Has(a_export, Export::SRV) && FAILED(device->CreateShaderResourceView(a_texture, nullptr, a_srv.put())))
 				return false;
 			if (Has(a_export, Export::UAV) && FAILED(device->CreateUnorderedAccessView(a_texture, nullptr, a_uav.put())))
@@ -328,6 +385,7 @@ namespace GraphResources
 		srv = nullptr;
 		uav = nullptr;
 		rtv = nullptr;
+		dsv = nullptr;
 		const bool exported = d3d11 != nullptr;
 		d3d11 = nullptr;
 		if (exported && graph)
@@ -343,6 +401,8 @@ namespace GraphResources
 			Util::SetResourceName(uav.get(), "%s UAV", name.c_str());
 		if (rtv)
 			Util::SetResourceName(rtv.get(), "%s RTV", name.c_str());
+		if (dsv)
+			Util::SetResourceName(dsv.get(), "%s DSV", name.c_str());
 	}
 
 	Texture2D::Texture2D(const D3D11_TEXTURE2D_DESC& a_desc, std::string a_name, Options a_options) :
@@ -358,7 +418,9 @@ namespace GraphResources
 		auto created = CreateTexture(shape, name, options);
 		graph = std::move(created.graph);
 		d3d11 = std::move(created.d3d11);
-		if (d3d11 && (!d3d11.try_as<ID3D11Texture2D>() || !CreateTextureViews(d3d11.get(), options.d3d11, srv, uav, rtv))) {
+		const auto formats = FormatsOf(shape);
+		const Formats* depth = IsDepth(shape) ? &formats : nullptr;
+		if (d3d11 && (!d3d11.try_as<ID3D11Texture2D>() || !CreateTextureViews(d3d11.get(), options.d3d11, srv, uav, rtv, dsv, depth))) {
 			logger::error("[ORG] {}: D3D11 refused a view of the exported texture", name);
 			Reset();
 			return;
@@ -395,7 +457,7 @@ namespace GraphResources
 		auto created = CreateTexture(shape, name, options);
 		graph = std::move(created.graph);
 		d3d11 = std::move(created.d3d11);
-		if (d3d11 && (!d3d11.try_as<ID3D11Texture3D>() || !CreateTextureViews(d3d11.get(), options.d3d11, srv, uav, rtv))) {
+		if (d3d11 && (!d3d11.try_as<ID3D11Texture3D>() || !CreateTextureViews(d3d11.get(), options.d3d11, srv, uav, rtv, dsv))) {
 			logger::error("[ORG] {}: D3D11 refused a view of the exported texture", name);
 			Reset();
 			return;
