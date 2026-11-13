@@ -432,10 +432,20 @@ namespace DCLF::Features::Grass
 		{
 			static auto* shadowsOnGrass = RE::GetINISetting("bShadowsOnGrass:Display");
 			ID3D11ShaderResourceView* mask = DefaultView(false);
-			if ((!shadowsOnGrass || shadowsOnGrass->GetBool()) && globals::game::renderer)
+			bool engineMask = false;
+			if ((!shadowsOnGrass || shadowsOnGrass->GetBool()) && globals::game::renderer) {
 				mask = reinterpret_cast<ID3D11ShaderResourceView*>(globals::game::renderer->GetRuntimeData().renderTargets[RE::RENDER_TARGETS::kSHADOW_MASK].SRV);
-			if (!Bind(a_row, &DrawRow::shadowMaskIndex, mask))
+				engineMask = true;
+			}
+			// The engine's mask is a render target the frame writes: its published texture, which the main passes declare (MainDeclare).
+			std::uint32_t maskIndex = 0;
+			if (engineMask && Extensions::EngineTargetTextureIndex(Extensions::GraphTextureReader::Grass, 1, "grass shadow mask", mask,
+								  Extensions::ShadowMaskGraphTextureIds(), maskIndex)) {
+				if (!a_row.Bind(&DrawRow::shadowMaskIndex, GpuTextures::Binding{ .index = maskIndex }))
+					return false;
+			} else if (!Bind(a_row, &DrawRow::shadowMaskIndex, mask)) {
 				return false;
+			}
 			// The collision of the frames DCLF owns grass (its stood-down update, from the decision): none without Grass Collision.
 			GrassShared::Collision collision;
 			if (GrassShared::LatestCollision(collision) && BindCollision(a_row, collision))

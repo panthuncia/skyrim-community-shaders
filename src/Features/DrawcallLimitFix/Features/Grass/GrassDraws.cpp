@@ -148,6 +148,8 @@ namespace DCLF::Features::Grass
 			builder.ShaderResource(tables->draw, noViews);
 			static constexpr std::string_view kCollisionIds[] = { GrassShared::kCollisionGraphId };
 			Extensions::DeclareGraphTextures(builder, kCollisionIds);
+			// The engine's shadow mask, which the draw row names by its published texture's descriptor (BindFrameTextures).
+			Extensions::DeclareGraphTextures(builder, Extensions::ShadowMaskGraphTextureIds());
 		}
 
 		// The CPU pipeline's main draw (main.direct): MainDeclare's draws buffer (a plain buffer, fixed with the tables) and
