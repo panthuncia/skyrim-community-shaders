@@ -73,6 +73,9 @@ public:
 
 	ID3D11BlendState* cloudShadowBlendState = nullptr;
 
+public:
+	using LayerOpPoint = ORGCloudShadows::LayerOpPoint;
+
 private:
 	Util::FrameChecker frameChecker;
 	Util::FrameChecker frame_checker[6];
@@ -96,8 +99,6 @@ public:
 	virtual void RestoreDefaultSettings() override;
 
 	Settings GetCommonBufferData();
-
-	using LayerOpPoint = ORGCloudShadows::LayerOpPoint;
 
 	/**
 	 * @brief Clears the cloud occlusion render target for a given cubemap face if not yet cleared this frame.
