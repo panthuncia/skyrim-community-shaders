@@ -160,15 +160,23 @@ namespace FrameAnchors
 		std::uint32_t EpochOfAnchor(Anchor a_anchor) { return RenderGraphRuntime::EpochOf(static_cast<Segment>(SegmentOf(a_anchor))); }
 
 		/**
-		 * @brief A texture imported for the anchors' passes. Its slot lasts as long as the id: a new D3D11 texture of the same shape class
-		 * is the slot's next version.
+		 * @brief An image's one graph resource: its slot. Two kinds:
+		 * - an id import (State::imports): the slot lasts as long as an id names it; a new D3D11 texture of the same shape class is
+		 *   the slot's next version. Several ids of one image share one entry.
+		 * - a loose one (State::loose, ShareImage before any id import of the image): the slot lives while its holders hold it. Each
+		 *   of its versions keeps this entry, and with it the D3D11 texture, as its owner; the state only watches it.
 		 */
 		struct EngineImport
 		{
 			winrt::com_ptr<ID3D11Texture2D> texture;  // the current version's D3D11 texture
-			std::shared_ptr<org::VersionedTexture> slot;
-			std::string id;
-			std::uint64_t image = 0;  // the current version's VkImage (ImportOfImage)
+			std::shared_ptr<org::VersionedTexture> slot;  // an id import's
+			std::weak_ptr<org::VersionedTexture> looseSlot;  // a loose one's
+			std::string id;  // the id (or the loose holder's name) it was made under, for the logs
+			std::uint64_t image = 0;  // the current version's VkImage (ID3D12Resource on D3D12)
+			DxvkOrgInteropImageInfo info{};  // the current version's image, to import it again with more views
+			org::TextureDescription views;  // the views the current version has: what a new importer's are compared with
+
+			std::shared_ptr<org::VersionedTexture> Slot() const { return slot ? slot : looseSlot.lock(); }
 		};
 
 		/** @brief One pass of the build: its client (which owns its desc) and the desc. */
@@ -217,7 +225,8 @@ namespace FrameAnchors
 			bool frozen = false;  // AddToFrame ran: the reservations are the frame's epochs
 			org::GraphHost* host = nullptr;
 			std::vector<Client> clients;
-			std::map<std::string, EngineImport, std::less<>> imports;  // by graph id
+			std::map<std::string, std::shared_ptr<EngineImport>, std::less<>> imports;  // by graph id; the ids of one image share one
+			std::vector<std::weak_ptr<EngineImport>> loose;  // ShareImage's slots no id names
 			std::uint64_t serial = 0;                                  // bumped by every Publish
 			std::uint64_t resizeGeneration = 0;                        // GraphResources' last seen
 			std::function<void()> lateHook;
@@ -318,8 +327,8 @@ namespace FrameAnchors
 					return a.pass->anchor < b.pass->anchor;
 				return a.pass->order < b.pass->order;
 			});
-			for (const auto& [key, import] : a_state.imports)
-				snapshot->imports.emplace_back(import.id, import.slot);
+			for (const auto& [id, import] : a_state.imports)
+				snapshot->imports.emplace_back(id, import->slot);
 			a_state.snapshot.store(std::move(snapshot), std::memory_order_release);
 		}
 
@@ -621,36 +630,117 @@ namespace FrameAnchors
 			return rhi::Format::Unknown;
 		}
 
+		/** @brief A view's format as the backing makes it: an unnamed one is the description's own format. */
+		rhi::Format ViewFormat(rhi::Format a_view, const org::TextureDescription& a_desc)
+		{
+			return a_view != rhi::Format::Unknown ? a_view : a_desc.format;
+		}
+
+		/** @brief Whether a backing with a_have's view serves one that asks for a_want's (an unnamed format asks for any). */
+		bool HasView(bool a_have, rhi::Format a_haveFormat, bool a_want, rhi::Format a_wantFormat)
+		{
+			return !a_want || (a_have && (a_wantFormat == rhi::Format::Unknown || a_haveFormat == a_wantFormat));
+		}
+
+		/** @brief Whether a backing described by a_have has every view a_want asks for, in its format. */
+		bool Covers(const org::TextureDescription& a_have, const org::TextureDescription& a_want)
+		{
+			return HasView(a_have.hasSRV, ViewFormat(a_have.srvFormat, a_have), a_want.hasSRV, a_want.srvFormat) &&
+			       HasView(a_have.hasRTV, ViewFormat(a_have.rtvFormat, a_have), a_want.hasRTV, a_want.rtvFormat) &&
+			       HasView(a_have.hasDSV, ViewFormat(a_have.dsvFormat, a_have), a_want.hasDSV, a_want.dsvFormat) &&
+			       HasView(a_have.hasUAV, ViewFormat(a_have.uavFormat, a_have), a_want.hasUAV, a_want.uavFormat) &&
+			       (!a_want.hasNonShaderVisibleUAV || a_have.hasNonShaderVisibleUAV) && (!a_want.isCubemap || a_have.isCubemap);
+		}
+
 		/**
-		 * @brief The graph backing of a D3D11 texture to import: its image, described with the views its owner made. The one place an
-		 * import finds its backing, so native mode can look up a texture the graph owns here instead. Null, logged, on failure.
+		 * @brief a_have with the views of a_want it lacks. Its format stays a_have's, so the result is the same shape class. A view both
+		 * have in different formats keeps a_have's: a_conflict names it then.
 		 */
-		std::shared_ptr<org::GloballyIndexedResource> ImportBacking(ID3D11Texture2D* a_texture, const std::string& a_id,
-			const std::function<org::TextureDescription(const D3D11_TEXTURE2D_DESC&)>& a_describe, std::uint64_t& a_image)
+		org::TextureDescription MergeViews(const org::TextureDescription& a_have, const org::TextureDescription& a_want, std::string& a_conflict)
+		{
+			auto merged = a_have;
+			const auto add = [&](bool& a_mergedHas, rhi::Format& a_mergedFormat, bool a_wantHas, rhi::Format a_wantFormat, const char* a_name) {
+				if (!a_wantHas)
+					return;
+				if (!a_mergedHas) {
+					a_mergedHas = true;
+					a_mergedFormat = a_wantFormat;
+				} else if (a_wantFormat != rhi::Format::Unknown && ViewFormat(a_mergedFormat, merged) != a_wantFormat) {
+					a_conflict = fmt::format("{}{}{} (format {} asked, {} kept)", a_conflict, a_conflict.empty() ? "" : ", ", a_name, static_cast<int>(a_wantFormat),
+						static_cast<int>(ViewFormat(a_mergedFormat, merged)));
+				}
+			};
+			add(merged.hasSRV, merged.srvFormat, a_want.hasSRV, a_want.srvFormat, "SRV");
+			add(merged.hasRTV, merged.rtvFormat, a_want.hasRTV, a_want.rtvFormat, "RTV");
+			add(merged.hasDSV, merged.dsvFormat, a_want.hasDSV, a_want.dsvFormat, "DSV");
+			add(merged.hasUAV, merged.uavFormat, a_want.hasUAV, a_want.uavFormat, "UAV");
+			merged.hasNonShaderVisibleUAV = merged.hasNonShaderVisibleUAV || a_want.hasNonShaderVisibleUAV;
+			merged.isCubemap = merged.isCubemap || a_want.isCubemap;
+			if (merged.channels == 0)
+				merged.channels = a_want.channels;
+			return merged;
+		}
+
+		/**
+		 * @brief a_desc's subresources from the image itself, the same for every importer: one entry per mip, and its slices (in cubes
+		 * when a_desc asks for a cube and the slices make whole cubes).
+		 */
+		void DescribeSubresources(org::TextureDescription& a_desc, const DxvkOrgInteropImageInfo& a_image)
+		{
+			a_desc.imageDimensions.clear();
+			const std::uint32_t mips = (std::max)(a_image.mipLevels, 1u);
+			for (std::uint32_t mip = 0; mip < mips; ++mip)
+				a_desc.imageDimensions.push_back({ (std::max)(a_image.extent.width >> mip, 1u), (std::max)(a_image.extent.height >> mip, 1u), 0, 0 });
+			const std::uint32_t layers = (std::max)(a_image.arrayLayers, 1u);
+			a_desc.isCubemap = a_desc.isCubemap && layers % 6 == 0;
+			const std::uint32_t slices = a_desc.isCubemap ? layers / 6 : layers;
+			a_desc.isArray = slices > 1;
+			a_desc.arraySize = slices;
+		}
+
+		/** @brief The first 16 of each kind of import line: these repeat for a texture made again. */
+		bool LogImportLine(std::atomic<std::uint32_t>& a_count)
+		{
+			return a_count.fetch_add(1, std::memory_order_relaxed) < 16;
+		}
+
+		/**
+		 * @brief The backing of a new slot for a_image with a_desc's views (a_desc gets the views the backing has). Native mode: the
+		 * image's graph-owned texture (Engine::Native::GraphTextureOf; a_texture may be null, then it is looked up by image) when it has
+		 * every view asked for. Otherwise the image imported, with the graph-owned texture's views added when there is one, so a later
+		 * importer that asks for those finds them. The one place an image becomes a graph resource for the anchors and DCLF. Null,
+		 * logged, on failure.
+		 */
+		std::shared_ptr<org::GloballyIndexedResource> MakeBacking(ID3D11Texture2D* a_texture, const DxvkOrgInteropImageInfo& a_image,
+			org::TextureDescription& a_desc, const std::string& a_id)
 		{
 			auto& runtime = RenderGraphRuntime::Get();
-			DxvkOrgInteropResourceInfo info{};
-			if (!runtime.DescribeResource(a_texture, info) || info.kind != DXVK_ORG_INTEROP_RESOURCE_IMAGE) {
-				logger::warn("[ORG] frame anchors: {} cannot be described", a_id);
-				return nullptr;
+			const auto image = reinterpret_cast<std::uint64_t>(a_image.image);
+			if (RenderGraph::Engine::Native::Active()) {
+				auto owned = a_texture ? RenderGraph::Engine::Native::GraphTextureOf(a_texture) : RenderGraph::Engine::Native::GraphTextureOfImage(image);
+				if (const auto* texture = dynamic_cast<const org::PixelBuffer*>(owned.get())) {
+					const auto& made = texture->GetDescription();
+					if (Covers(made, a_desc)) {
+						a_desc = made;
+						DescribeSubresources(a_desc, a_image);
+						// It may have been set aside for an import of its image before: it is the image's graph resource again.
+						RenderGraph::NoteImageResource(image, owned, a_id);
+						return owned;
+					}
+					std::string conflict;
+					a_desc = MergeViews(made, a_desc, conflict);
+					static std::atomic<std::uint32_t> logged{ 0 };
+					if (LogImportLine(logged))
+						logger::warn("[ORG] frame anchors: {}: the graph-owned texture lacks a view asked for{}{}; its image is imported with both sets of views instead",
+							a_id, conflict.empty() ? "" : ": ", conflict);
+					// Never handed to a graph while this import stands for its image.
+					RenderGraph::RetireImageResource(owned.get());
+				}
 			}
-			D3D11_TEXTURE2D_DESC textureDesc{};
-			a_texture->GetDesc(&textureDesc);
-			auto desc = a_describe(textureDesc);
-			// One entry per mip: the graph's views and barriers then cover the whole image.
-			const std::uint32_t mips = (std::max)(info.image.mipLevels, 1u);
-			for (std::uint32_t mip = 0; mip < mips; ++mip)
-				desc.imageDimensions.push_back({ (std::max)(info.image.extent.width >> mip, 1u), (std::max)(info.image.extent.height >> mip, 1u), 0, 0 });
-			// A cube (the engine's cubemap targets): its SRV is a cube view, and arraySize counts cubes.
-			const std::uint32_t layers = (std::max)(info.image.arrayLayers, 1u);
-			desc.isCubemap = (textureDesc.MiscFlags & D3D11_RESOURCE_MISC_TEXTURECUBE) && layers % 6 == 0;
-			const std::uint32_t slices = desc.isCubemap ? layers / 6 : layers;
-			desc.isArray = slices > 1;
-			desc.arraySize = slices;
-			auto resource = RenderGraph::ImportDxvkTexture(runtime.Host()->Device(), info.image, desc, a_id.c_str());
+			DescribeSubresources(a_desc, a_image);
+			auto resource = RenderGraph::ImportDxvkTexture(runtime.Host()->Device(), a_image, a_desc, a_id.c_str());
 			if (!resource)
 				logger::warn("[ORG] frame anchors: {} could not be imported", a_id);
-			a_image = reinterpret_cast<std::uint64_t>(info.image.image);
 			return resource;
 		}
 
@@ -663,21 +753,95 @@ namespace FrameAnchors
 		};
 
 		/**
-		 * @brief Publishes a_next as a_slot's next version when it has the slot's shape class. Tickets prepared for the old version are
-		 * prepared again (NoteNewVersions). Render thread.
+		 * @brief Publishes a_next as a_slot's next version when it has the slot's shape class, kept alive with a_owner. Tickets prepared
+		 * for the old version are prepared again (NoteNewVersions). Render thread.
 		 */
-		Joined JoinSlot(org::VersionedTexture& a_slot, std::shared_ptr<org::GloballyIndexedResource> a_next)
+		Joined JoinSlot(org::VersionedTexture& a_slot, std::shared_ptr<org::GloballyIndexedResource> a_next, std::shared_ptr<const void> a_owner = {})
 		{
 			const auto previous = a_slot.CurrentResource();
 			const bool sameSize = previous && WidthOf(previous.get()) == WidthOf(a_next.get()) && HeightOf(previous.get()) == HeightOf(a_next.get());
 			try {
-				a_slot.PublishImage(std::move(a_next));
+				a_slot.PublishImage(std::move(a_next), std::move(a_owner));
 			} catch (const std::exception&) {
 				return Joined::NewShape;
 			}
 			if (auto* host = RenderGraphRuntime::Get().Host())
 				host->NoteNewVersions();
 			return sameSize ? Joined::Version : Joined::Resized;
+		}
+
+		/** @brief The entry whose current version is a_image: an id import, else a loose slot still held. Null when there is none. */
+		std::shared_ptr<EngineImport> FindImage(State& a_state, std::uint64_t a_image)
+		{
+			if (!a_image)
+				return nullptr;
+			for (const auto& [id, import] : a_state.imports)
+				if (import->image == a_image)
+					return import;
+			std::erase_if(a_state.loose, [](const std::weak_ptr<EngineImport>& a_entry) {
+				const auto entry = a_entry.lock();
+				return !entry || entry->looseSlot.expired();
+			});
+			for (const auto& weak : a_state.loose)
+				if (auto entry = weak.lock(); entry && entry->image == a_image)
+					return entry;
+			return nullptr;
+		}
+
+		/** @brief Whether an id other than a_except names a_import. */
+		bool NamedElsewhere(const State& a_state, const std::shared_ptr<EngineImport>& a_import, std::string_view a_except)
+		{
+			return std::ranges::any_of(a_state.imports, [&](const auto& a_entry) { return a_entry.first != a_except && a_entry.second == a_import; });
+		}
+
+		/**
+		 * @brief Makes a_import's slot serve a_want's views too: when its current version lacks one, the slot's next version is the same
+		 * image imported again with both sets. Passes keep declaring the slot, so nothing is built again. A view both name in different
+		 * formats keeps the slot's (logged). Render thread.
+		 */
+		void EnsureViews(const std::shared_ptr<EngineImport>& a_import, const org::TextureDescription& a_want, std::string_view a_by)
+		{
+			if (Covers(a_import->views, a_want))
+				return;
+			auto slot = a_import->Slot();
+			if (!slot)
+				return;
+			std::string conflict;
+			auto merged = MergeViews(a_import->views, a_want, conflict);
+			if (!conflict.empty()) {
+				static std::atomic<std::uint32_t> logged{ 0 };
+				if (LogImportLine(logged))
+					logger::warn("[ORG] frame anchors: {} asks for a view of {}'s image in another format: {}; it gets the slot's", a_by, a_import->id, conflict);
+			}
+			if (Covers(a_import->views, merged))
+				return;
+			DescribeSubresources(merged, a_import->info);
+			auto& runtime = RenderGraphRuntime::Get();
+			const auto old = slot->CurrentResource();
+			// The old version stops being the image's resource here: frames already prepared with it finish with it.
+			RenderGraph::RetireImageResource(old.get());
+			auto next = RenderGraph::ImportDxvkTexture(runtime.Host()->Device(), a_import->info, merged, a_import->id.c_str());
+			// A loose slot's versions keep its entry, and with it the D3D11 texture.
+			std::shared_ptr<const void> owner;
+			if (!a_import->slot)
+				owner = a_import;
+			if (!next || JoinSlot(*slot, next, owner) == Joined::NewShape) {
+				logger::warn("[ORG] frame anchors: {}'s image could not be imported again with the views {} asks for; it keeps the slot's views", a_import->id, a_by);
+				if (old)
+					RenderGraph::NoteImageResource(a_import->image, old, a_import->id);
+				return;
+			}
+			a_import->views = std::move(merged);
+			static std::atomic<std::uint32_t> logged{ 0 };
+			if (LogImportLine(logged))
+				logger::info("[ORG] frame anchors: {}'s slot has the views {} asks for now: a version of the same image", a_import->id, a_by);
+		}
+
+		/** @brief Drops a_import once nothing names it: its D3D11 texture goes once D3D11's last use is done. */
+		void ReleaseUnnamed(State& a_state, std::shared_ptr<EngineImport> a_import)
+		{
+			if (a_import && !NamedElsewhere(a_state, a_import, {}))
+				RenderGraphRuntime::Get().ReleaseAfterD3D11(std::move(a_import));
 		}
 
 		Texture Import(ID3D11Texture2D* a_texture, const std::string& a_id,
@@ -696,48 +860,91 @@ namespace FrameAnchors
 			// handles: its own records describe the handle itself.
 			if (!RenderGraph::Engine::Native::Active())
 				a_texture = RenderGraph::Engine::Tripwire::Unwrap(a_texture);
-			const auto previous = state.imports.find(a_id);
-			if (previous != state.imports.end() && previous->second.texture.get() == a_texture)
-				return Texture(a_id, previous->second.slot);
-			// The same image under another id is a second graph resource: the graph orders neither's uses after the other's writes.
-			for (const auto& [id, other] : state.imports)
-				if (id != a_id && other.texture.get() == a_texture)
-					logger::warn("[ORG] frame anchors: {} imports the image {} already imports; their uses are not ordered with each other", a_id, id);
-			std::uint64_t image = 0;
-			auto backing = ImportBacking(a_texture, a_id, a_describe, image);
+			const auto found = state.imports.find(a_id);
+			const std::shared_ptr<EngineImport> previous = found != state.imports.end() ? found->second : nullptr;
+			if (previous && previous->texture.get() == a_texture)
+				return Texture(a_id, previous->slot);
+
+			DxvkOrgInteropResourceInfo info{};
+			if (!runtime.DescribeResource(a_texture, info) || info.kind != DXVK_ORG_INTEROP_RESOURCE_IMAGE) {
+				logger::warn("[ORG] frame anchors: {} cannot be described", a_id);
+				return {};
+			}
+			D3D11_TEXTURE2D_DESC textureDesc{};
+			a_texture->GetDesc(&textureDesc);
+			auto desc = a_describe(textureDesc);
+			// A cube (the engine's cubemap targets): its SRV is a cube view, and arraySize counts cubes.
+			desc.isCubemap = (textureDesc.MiscFlags & D3D11_RESOURCE_MISC_TEXTURECUBE) != 0;
+			DescribeSubresources(desc, info.image);
+			const auto image = reinterpret_cast<std::uint64_t>(info.image.image);
+
+			// One image, one graph resource: an image some importer already has keeps its slot, whoever came first. Two graph resources
+			// of one image would each track its state, and their layout moves would race.
+			if (auto shared = FindImage(state, image)) {
+				EnsureViews(shared, desc, a_id);
+				if (shared == previous) {
+					// The same image under another handle (a port's handle around it).
+					shared->texture.copy_from(a_texture);
+					return Texture(a_id, shared->slot);
+				}
+				if (!shared->slot) {
+					// A loose slot (ShareImage's) becomes this id's: the state holds it from now on, through an entry of its own. The loose
+					// entry stays its versions' owner (they hold it, so it cannot hold the slot).
+					auto taken = std::make_shared<EngineImport>(*shared);
+					taken->slot = shared->looseSlot.lock();
+					taken->looseSlot.reset();
+					std::erase_if(state.loose, [&](const std::weak_ptr<EngineImport>& a_entry) { return a_entry.lock() == shared; });
+					shared = std::move(taken);
+				}
+				if (!shared->texture)
+					shared->texture.copy_from(a_texture);
+				logger::info("[ORG] frame anchors: {} is the image {} has already; it shares that slot", a_id, shared->id);
+				state.imports[a_id] = shared;
+				Publish(state);
+				if (previous) {
+					ReleaseUnnamed(state, previous);
+					StructuralRebuild(state, ~0u, fmt::format("import '{}' now shares the slot of '{}'", a_id, shared->id));
+				} else if (state.host) {
+					RenderGraph::Builds::RequestFor(a_id, fmt::format("frame anchors: import '{}' added", a_id));
+				}
+				return Texture(a_id, shared->slot);
+			}
+
+			auto backing = MakeBacking(a_texture, info.image, desc, a_id);
 			if (!backing)
 				return {};
-			const bool replacing = previous != state.imports.end();
-			if (replacing) {
-				auto& import = previous->second;
-				const auto joined = JoinSlot(*import.slot, backing);
+			// A new texture for an id that alone names its slot: the slot's next version. A slot another id shares stays that id's; this
+			// one gets a slot of its own.
+			if (previous && !NamedElsewhere(state, previous, a_id)) {
+				const auto joined = JoinSlot(*previous->slot, backing);
 				if (joined != Joined::NewShape) {
 					// The old D3D11 texture goes once D3D11's last use is done. The slot's old version keeps its graph resource while a
 					// frame or a prepared ticket holds it.
-					auto old = std::make_shared<EngineImport>();
-					old->texture = std::move(import.texture);
-					import.texture.copy_from(a_texture);
-					import.image = image;
-					runtime.ReleaseAfterD3D11(std::move(old));
+					runtime.ReleaseAfterD3D11(std::make_shared<winrt::com_ptr<ID3D11Texture2D>>(std::move(previous->texture)));
+					previous->texture.copy_from(a_texture);
+					previous->image = image;
+					previous->info = info.image;
+					previous->views = desc;
 					if (joined == Joined::Resized)
 						Rebuild(state, ~0u, fmt::format("import '{}' resized: passes that took its size are made again", a_id));
-					return Texture(a_id, import.slot);
+					return Texture(a_id, previous->slot);
 				}
 			}
-			EngineImport import;
-			import.texture.copy_from(a_texture);
-			import.slot = org::VersionedTexture::CreateImage(std::move(backing));
-			import.id = a_id;
-			import.image = image;
-			if (replacing)
-				runtime.ReleaseAfterD3D11(std::make_shared<EngineImport>(std::move(previous->second)));
-			auto slot = import.slot;
+			auto import = std::make_shared<EngineImport>();
+			import->texture.copy_from(a_texture);
+			import->slot = org::VersionedTexture::CreateImage(std::move(backing));
+			import->id = a_id;
+			import->image = image;
+			import->info = info.image;
+			import->views = desc;
+			auto slot = import->slot;
 			state.imports[a_id] = std::move(import);
+			ReleaseUnnamed(state, previous);
 			Publish(state);
 			// The imports are registered with every anchor graph. A new one is built into the graphs that looked its id up (a client
 			// registering with it builds its own anchors again). One of another shape class is a new slot: every graph holding the
 			// old one is built again, off the render thread (the build manager).
-			if (replacing)
+			if (previous)
 				StructuralRebuild(state, ~0u, fmt::format("import '{}' replaced by another shape class", a_id));
 			else if (state.host)
 				RenderGraph::Builds::RequestFor(a_id, fmt::format("frame anchors: import '{}' added", a_id));
@@ -1317,15 +1524,47 @@ namespace FrameAnchors
 		return Import(a_target.texture, a_id, [&](const D3D11_TEXTURE2D_DESC& a_desc) { return DescribeDepth(a_target, a_desc); });
 	}
 
-	Texture ImportOfImage(std::uint64_t a_image)
+	Texture ImportTexture(std::string_view a_id, ID3D11Texture2D* a_texture, const org::TextureDescription& a_views)
+	{
+		if (a_id.empty())
+			return {};
+		return Import(a_texture, std::string(a_id), [&](const D3D11_TEXTURE2D_DESC&) { return a_views; });
+	}
+
+	Texture ShareImage(ID3D11Texture2D* a_texture, const DxvkOrgInteropImageInfo& a_image, const org::TextureDescription& a_desc, std::string_view a_name)
 	{
 		auto lock = Guard();
-		if (!a_image)
+		auto& state = Anchors();
+		auto& runtime = RenderGraphRuntime::Get();
+		const auto image = reinterpret_cast<std::uint64_t>(a_image.image);
+		if (!image || !runtime.IsActive() || !runtime.Host())
 			return {};
-		for (const auto& [id, import] : Anchors().imports)
-			if (import.image == a_image)
-				return Texture(import.id, import.slot);
-		return {};
+		// An engine target ORG owns (CS_ORG_ENGINE_TARGETS): its published slot, the one the anchors' passes use.
+		if (auto owned = RenderGraph::Engine::Targets::FindImage(image))
+			return owned;
+		auto desc = a_desc;
+		DescribeSubresources(desc, a_image);
+		const std::string name(a_name);
+		// The slot an importer already made for the image, with the caller's views added when it lacks one.
+		if (auto shared = FindImage(state, image)) {
+			EnsureViews(shared, desc, name);
+			if (auto slot = shared->Slot())
+				return Texture(shared->id, std::move(slot));
+		}
+		auto entry = std::make_shared<EngineImport>();
+		entry->texture.copy_from(a_texture);
+		entry->id = name;
+		entry->image = image;
+		entry->info = a_image;
+		auto backing = MakeBacking(a_texture, a_image, desc, name);
+		if (!backing)
+			return {};
+		entry->views = desc;
+		// The version keeps the entry, and with it the D3D11 texture: the image lives, and its handle is not reused, while the slot does.
+		auto slot = org::VersionedTexture::CreateImage(std::move(backing), entry);
+		entry->looseSlot = slot;
+		state.loose.push_back(entry);
+		return Texture(name, std::move(slot));
 	}
 
 	void ReleaseImport(std::string_view a_id)
@@ -1336,12 +1575,12 @@ namespace FrameAnchors
 		if (found == state.imports.end())
 			return;
 		// The graph resource views DXVK's image, whose memory the D3D11 texture owns: both go once the GPU is past every use,
-		// which the graph's in-stream epochs and their compute joins precede.
-		auto owner = std::make_shared<EngineImport>(std::move(found->second));
+		// which the graph's in-stream epochs and their compute joins precede. Another id of the same image keeps both.
+		auto owner = std::move(found->second);
 		state.imports.erase(found);
 		Publish(state);
 		StructuralRebuild(state, ~0u, fmt::format("import '{}' released", a_id));
-		RenderGraphRuntime::Get().ReleaseAfterD3D11(std::move(owner));
+		ReleaseUnnamed(state, std::move(owner));
 	}
 
 	void OnEpochFailed(std::uint32_t a_epoch, const std::string& a_error, bool a_keptGraph)
@@ -1451,7 +1690,8 @@ namespace FrameAnchors
 	Texture D3D11Texture(std::string_view, ID3D11Texture2D*, ID3D11ShaderResourceView*, ID3D11UnorderedAccessView*, ID3D11RenderTargetView*) { return {}; }
 	Texture ImmutableTexture(std::string_view, ID3D11Texture2D*, ID3D11ShaderResourceView*) { return {}; }
 	Texture ImportDepth(const RE::BSGraphics::DepthStencilData&, const std::string&) { return {}; }
-	Texture ImportOfImage(std::uint64_t) { return {}; }
+	Texture ImportTexture(std::string_view, ID3D11Texture2D*, const org::TextureDescription&) { return {}; }
+	Texture ShareImage(ID3D11Texture2D*, const DxvkOrgInteropImageInfo&, const org::TextureDescription&, std::string_view) { return {}; }
 	void ReleaseImport(std::string_view) {}
 	bool InBuiltGraph(std::string_view, Anchor) { return false; }
 	void Rearm(std::string_view) {}

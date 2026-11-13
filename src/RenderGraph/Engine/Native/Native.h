@@ -130,6 +130,13 @@ namespace RenderGraph::Engine::Native
 	 * may only read it. Null when the texture is not exempt; the caller imports it as before then. Any thread.
 	 */
 	std::shared_ptr<org::ExternalTextureResource> ImmutableTextureOf(const IUnknown* a_texture, DXGI_FORMAT a_srvFormat);
+
+	/**
+	 * @brief The graph resource of an exempt texture the context wrote after creation (promoted to tracked), which passes that read
+	 * it must declare: ImmutableTextureOf's, made here when nothing asked for it before. a_object may be a view. Null for any other
+	 * texture. Any thread.
+	 */
+	std::shared_ptr<org::ExternalTextureResource> PromotedTextureOf(const IUnknown* a_object);
 	/** @} */
 
 	/** @brief What native mode knows of a resource it made, from its D3D11 description (DescribeForCensus). */

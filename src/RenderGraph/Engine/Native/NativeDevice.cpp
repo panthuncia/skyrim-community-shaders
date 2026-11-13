@@ -1398,6 +1398,8 @@ namespace RenderGraph::Engine::Native
 					*tracker = org::SymbolicTracker();  // the whole texture in Common
 				record->ownership = NativeResource::Ownership::Tracked;
 				NoteOwnedImage(*record);
+				// The image's one graph resource, for the duplicate check (imports find it through GraphTextureOf).
+				::RenderGraph::NoteImageResource(reinterpret_cast<std::uint64_t>(record->image.image), record->graphOwned, fmt::format("cs.native.texture.{}", record->serial));
 				// A DYNAMIC texture's CPU side, which Map hands out and Unmap copies in.
 				if (a_request.usage == D3D11_USAGE_DYNAMIC) {
 					TextureRequest cpu = a_request;
@@ -3773,7 +3775,16 @@ namespace RenderGraph::Engine::Native
 			logger::warn("[ORG native] {}: could not be made an exempt graph texture: {}", record->name, e.what());
 			return nullptr;
 		}
+		::RenderGraph::NoteImageResource(reinterpret_cast<std::uint64_t>(record->image.image), record->exemptResource, id);
 		return record->exemptResource;
+	}
+
+	std::shared_ptr<org::ExternalTextureResource> PromotedTextureOf(const IUnknown* a_object)
+	{
+		const auto record = g_device ? ImageRecordOf(a_object) : nullptr;
+		if (!record || record->ownership != NativeResource::Ownership::Exempt || !record->promoted.load(std::memory_order_acquire))
+			return nullptr;
+		return ImmutableTextureOf(a_object, DXGI_FORMAT_UNKNOWN);
 	}
 
 	bool DescribeForCensus(const void* a_object, ResourceFacts& a_out)
@@ -4247,6 +4258,7 @@ namespace RenderGraph::Engine::Native
 	std::shared_ptr<org::GloballyIndexedResource> GraphTextureOf(const IUnknown*) { return nullptr; }
 	std::shared_ptr<org::GloballyIndexedResource> GraphTextureOfImage(std::uint64_t) { return nullptr; }
 	std::shared_ptr<org::ExternalTextureResource> ImmutableTextureOf(const IUnknown*, DXGI_FORMAT) { return nullptr; }
+	std::shared_ptr<org::ExternalTextureResource> PromotedTextureOf(const IUnknown*) { return nullptr; }
 	HRESULT Present(UINT, UINT) { return E_FAIL; }
 	bool EmitExternalCommands(void (*)(void*, VkCommandBuffer_T*), void*, const VkSemaphoreSubmitInfo*, std::uint32_t, const VkSemaphoreSubmitInfo*, std::uint32_t)
 	{

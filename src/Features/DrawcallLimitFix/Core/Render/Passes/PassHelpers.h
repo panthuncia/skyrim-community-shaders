@@ -47,9 +47,10 @@ namespace DCLF::Draws
 	constexpr std::uint8_t kObjectStateDecal = 0xF1;
 	constexpr std::uint8_t kObjectStateAbsent = 0xFF;
 
-	// A DXVK image the graph uses in place, imported without ownership in the layout DXVK rests it in, which is its home state
-	// (RenderGraph::ImportDxvkTexture). Fills the description's dimensions and array shape from the image.
-	FrameAnchors::Texture ImportImage(rhi::Device a_device, const DxvkOrgInteropImageInfo& a_image, org::TextureDescription a_desc,
+	// A DXVK image the graph uses in place, in the layout DXVK rests it in, which is its home state: the image's one graph resource,
+	// shared with every other importer of it (FrameAnchors::ShareImage). a_texture is the image's D3D11 texture, which the slot keeps
+	// alive. Fills the description's dimensions and array shape from the image; a_desc names the views DCLF needs.
+	FrameAnchors::Texture ImportImage(rhi::Device a_device, ID3D11Texture2D* a_texture, const DxvkOrgInteropImageInfo& a_image, org::TextureDescription a_desc,
 		const char* a_name);
 
 	/**

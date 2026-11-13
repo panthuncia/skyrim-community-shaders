@@ -5,6 +5,8 @@
 
 #include "RenderGraph/Backend.h"
 #include "RenderGraph/BufferRefs.h"
+#include "RenderGraph/Engine/Native/Native.h"
+#include "RenderGraph/Switches.h"
 
 #include <Resources/ExternalTextureResource.h>
 #include <Resources/TextureDescription.h>
@@ -13,7 +15,9 @@
 #include <atomic>
 #include <filesystem>
 #include <mutex>
+#include <string>
 #include <unordered_map>
+#include <vector>
 
 // BasicRHI's D3D12 import (rhi_interop_dx12.h), declared here: that header brings DirectX-Headers' d3d12.h, which this translation
 // unit's Windows SDK headers would meet.
@@ -43,43 +47,51 @@ namespace RenderGraph
 		}
 	}
 
-	rhi::ResourcePtr ImportDxvkImage(rhi::Device a_device, const DxvkOrgInteropImageInfo& a_image, const char* a_name)
+	namespace
 	{
-		if (!HomeLayoutOf(a_image.layout))
-			return {};
-		// D3D12 (native mode): the description carries the ID3D12Resource where the VkImage goes (Native::DescribeResource).
-		if (Backend::IsD3D12()) {
-			rhi::ResourcePtr resource;
-			if (rhi::dx12::import_resource(a_device, reinterpret_cast<ID3D12Resource*>(a_image.image), resource) != rhi::Result::Ok)
+		rhi::ResourcePtr ImportImage(rhi::Device a_device, const DxvkOrgInteropImageInfo& a_image, const char* a_name, bool a_exclusive)
+		{
+			if (!HomeLayoutOf(a_image.layout))
 				return {};
-			if (a_name)
-				resource->SetName(a_name);
+			// D3D12 (native mode): the description carries the ID3D12Resource where the VkImage goes (Native::DescribeResource).
+			if (Backend::IsD3D12()) {
+				rhi::ResourcePtr resource;
+				if (rhi::dx12::import_resource(a_device, reinterpret_cast<ID3D12Resource*>(a_image.image), resource) != rhi::Result::Ok)
+					return {};
+				if (a_name)
+					resource->SetName(a_name);
+				return resource;
+			}
+			rhi::vulkan::ImportedImageDesc import{};
+			import.image = a_image.image;
+			import.createInfo.flags = a_image.flags;
+			import.createInfo.imageType = a_image.type;
+			import.createInfo.format = a_image.format;
+			import.createInfo.extent = a_image.extent;
+			import.createInfo.mipLevels = a_image.mipLevels;
+			import.createInfo.arrayLayers = a_image.arrayLayers;
+			import.createInfo.samples = a_image.samples;
+			import.createInfo.tiling = VK_IMAGE_TILING_OPTIMAL;
+			import.createInfo.usage = a_image.usage;
+			import.createInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+			import.createInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+			import.currentLayout = a_image.layout;
+			// In GENERAL, DXVK and the graph share the image with memory barriers alone. In any other layout the graph uses it
+			// exclusively and moves it between layouts, starting from and returning to this one. An exclusive import of an image in
+			// GENERAL (native mode's graph imports) does the same from GENERAL.
+			import.simultaneousAccess = a_image.layout == VK_IMAGE_LAYOUT_GENERAL && !a_exclusive;
+			import.debugName = a_name;
+			rhi::ResourcePtr resource;
+			if (rhi::vulkan::import_image(a_device, import, resource) != rhi::Result::Ok)
+				return {};
 			return resource;
 		}
-		rhi::vulkan::ImportedImageDesc import{};
-		import.image = a_image.image;
-		import.createInfo.flags = a_image.flags;
-		import.createInfo.imageType = a_image.type;
-		import.createInfo.format = a_image.format;
-		import.createInfo.extent = a_image.extent;
-		import.createInfo.mipLevels = a_image.mipLevels;
-		import.createInfo.arrayLayers = a_image.arrayLayers;
-		import.createInfo.samples = a_image.samples;
-		import.createInfo.tiling = VK_IMAGE_TILING_OPTIMAL;
-		import.createInfo.usage = a_image.usage;
-		import.createInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
-		import.createInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-		import.currentLayout = a_image.layout;
-		// In GENERAL, DXVK and the graph share the image with memory barriers alone. In any other layout the graph uses it
-		// exclusively and moves it between layouts, starting from and returning to this one. Native mode keeps this too: until
-		// imports share one resource per image (org-native-frame-graph.md, Phase 2), the anchors and DCLF each import the same
-		// image with their own state, and exclusive layout moves from both raced (flashing post-processing).
-		import.simultaneousAccess = a_image.layout == VK_IMAGE_LAYOUT_GENERAL;
-		import.debugName = a_name;
-		rhi::ResourcePtr resource;
-		if (rhi::vulkan::import_image(a_device, import, resource) != rhi::Result::Ok)
-			return {};
-		return resource;
+	}
+
+	rhi::ResourcePtr ImportDxvkImage(rhi::Device a_device, const DxvkOrgInteropImageInfo& a_image, const char* a_name)
+	{
+		// A raw import: the native context and raw views use it between graph executions, where the image rests in its home.
+		return ImportImage(a_device, a_image, a_name, false);
 	}
 
 	rhi::ResourcePtr ImportD3D12Resource(rhi::Device a_device, void* a_resource, const char* a_name)
@@ -98,19 +110,122 @@ namespace RenderGraph
 		const auto home = HomeLayoutOf(a_image.layout);
 		if (!home)
 			return nullptr;
-		auto resource = ImportDxvkImage(a_device, a_image, a_name);
+		auto resource = ImportImage(a_device, a_image, a_name, false);
 		if (!resource)
 			return nullptr;
 		// The home state: the graph finds the image in it and gives it back in it (external home states).
 		a_desc.initialLayout = *home;
 		// Common-only (simultaneous access, every pass in GENERAL) exists on Vulkan alone. D3D12's COMMON layout cannot be a render
 		// target, depth or UAV, so there an image resting in Common is used exclusively: the graph moves it into each pass's layout
-		// and gives it back in Common. Native Vulkan stays Common-only until each image is one graph resource (see above).
+		// and gives it back in Common. Native Vulkan stays Common-only until each image is one graph resource.
 		const bool commonOnly = *home == rhi::ResourceLayout::Common && !Backend::IsD3D12();
 		auto result = org::ExternalTextureResource::CreateShared(std::move(resource), a_desc, commonOnly);
-		if (result)
+		if (result) {
 			result->SetName(a_name);
+			NoteImageResource(reinterpret_cast<std::uint64_t>(a_image.image), result, a_name ? a_name : "");
+		}
 		return result;
+	}
+
+	namespace
+	{
+		/** @brief One graph resource of an image, as the duplicate check knows it. */
+		struct ImageResource
+		{
+			std::weak_ptr<org::Resource> resource;
+			const org::Resource* key = nullptr;
+			std::string name;
+			bool retired = false;
+		};
+		struct ImageResources
+		{
+			std::mutex mutex;
+			std::unordered_map<std::uint64_t, std::vector<ImageResource>> byImage;
+			std::unordered_map<const org::Resource*, std::uint64_t> imageOf;
+			std::size_t pruneAt = 256;
+			std::uint32_t logged = 0;
+			std::uint64_t found = 0;
+		};
+		ImageResources& Images()
+		{
+			static ImageResources images;
+			return images;
+		}
+		bool DuplicateCheckOn()
+		{
+			static const bool on = Switches::On("CS_ORG_IMAGE_DUPLICATE_CHECK");
+			return on;
+		}
+		/** @brief Drops the entries of resources that are gone. */
+		void Prune(ImageResources& a_images, std::vector<ImageResource>& a_entries)
+		{
+			std::erase_if(a_entries, [&](const ImageResource& a_entry) {
+				if (!a_entry.resource.expired())
+					return false;
+				a_images.imageOf.erase(a_entry.key);
+				return true;
+			});
+		}
+		void PruneAll(ImageResources& a_images)
+		{
+			for (auto it = a_images.byImage.begin(); it != a_images.byImage.end();) {
+				Prune(a_images, it->second);
+				it = it->second.empty() ? a_images.byImage.erase(it) : std::next(it);
+			}
+			a_images.pruneAt = (std::max<std::size_t>)(256, 2 * a_images.imageOf.size());
+		}
+	}
+
+	void NoteImageResource(std::uint64_t a_image, const std::shared_ptr<org::Resource>& a_resource, std::string_view a_name)
+	{
+		if (!DuplicateCheckOn() || !a_image || !a_resource)
+			return;
+		auto& images = Images();
+		const std::lock_guard lock(images.mutex);
+		if (images.imageOf.size() >= images.pruneAt)
+			PruneAll(images);
+		auto& entries = images.byImage[a_image];
+		Prune(images, entries);
+		std::string other;
+		bool duplicate = false;
+		bool known = false;
+		for (auto& entry : entries) {
+			if (entry.key == a_resource.get()) {
+				entry.retired = false;
+				known = true;
+			} else if (!entry.retired) {
+				other = entry.name;
+				duplicate = true;
+			}
+		}
+		if (!known) {
+			entries.push_back({ a_resource, a_resource.get(), std::string(a_name), false });
+			images.imageOf[a_resource.get()] = a_image;
+		}
+		if (!duplicate)
+			return;
+		++images.found;
+		if (images.logged++ < 32)
+			logger::warn("[ORG] duplicate image: '{}' and '{}' are two live graph resources of image 0x{:x}; each tracks its layout, and their moves "
+						 "are not ordered with each other ({} found so far)",
+				a_name, other, a_image, images.found);
+	}
+
+	void RetireImageResource(const org::Resource* a_resource)
+	{
+		if (!DuplicateCheckOn() || !a_resource)
+			return;
+		auto& images = Images();
+		const std::lock_guard lock(images.mutex);
+		const auto image = images.imageOf.find(a_resource);
+		if (image == images.imageOf.end())
+			return;
+		const auto entries = images.byImage.find(image->second);
+		if (entries == images.byImage.end())
+			return;
+		for (auto& entry : entries->second)
+			if (entry.key == a_resource)
+				entry.retired = true;
 	}
 
 	namespace
