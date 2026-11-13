@@ -722,3 +722,52 @@ when a second live one appears. A slot's replaced version is retired first, so v
   elsewhere is the likely one.
 - `frame anchors: ... slot has the views ... asks for now` and `... in another format` lines, and the Scaleform `tracked textures read by the displays` line.
 - `CS_ORG_NATIVE_EXCLUSIVE_IMPORTS=0` against the default: the frame-rate change from exclusive imports.
+
+## Phase 2 items 1-2 lane: no duplicate images (`org-native/p2-duplicates`)
+
+**What the three duplicates were.** None was the native `PixelBuffer`. Native mode forces `CS_ORG_ENGINE_TEXTURES` on, so:
+- The flow map (`Engine::Texture2D 320x320`, made by ImageSpace through `Renderer::CreateTexture2D`) and VL's noise gradient
+  (`Engine::Texture2D 8x8`) are engine textures. `Engine::Textures::Create` wraps a BasicRHI image and imports it as a graph resource.
+  The anchors then imported the same image again. The noise gradient already went through `ImmutableTexture`, but a wrapped image is
+  not native's exempt class, so it fell through to `D3D11Texture`.
+- `cs.engine.depth.10` held Skylighting's twin export while Skylighting swaps it into the engine's field (DCLF's engine draws import
+  the field then).
+
+**Made images.** `RenderGraph::RegisterMadeImage` (in `DxvkImageImport`) maps an image ORG made to its one graph resource and the
+views it has:
+- `GraphResources::ExportTexture`: every twin export and engine target. A versioned twin also registers its slot (`AdoptSlot`).
+- `Engine::Textures::Create`, texture streaming windows, and native exempt textures (`ImmutableTextureOf`).
+
+`FrameAnchors::Import` (every id import) and `ShareImage` (DCLF, Scaleform) ask `MadeImageOf` before anything else but ORG's engine
+targets. A hit returns the twin's slot, or the resource as a plain `FrameAnchors::Texture`. The id is not registered for it. A made
+resource that lacks a view the importer asks for falls back to an import, logged as
+`frame anchors: ... asks for a view '...' lacks`. A read-only native import calls `ImmutableTextureOf` first, so an exempt texture
+keeps its one resource whoever asks first. Makers whose import does not own the image (engine textures, windows, native records)
+call `ForgetMadeImage` before the image can go.
+
+**Graph-owned textures are always the backing.** `MakeBacking` no longer re-imports a graph-owned image when an importer asks for a
+view it lacks. The `PixelBuffer` has every view its bind flags allow, so the only possible mismatch is a format, and a re-import kept
+the `PixelBuffer`'s formats anyway. `EnsureViews` leaves a `PixelBuffer` slot alone. Logged as `the graph-owned texture has the views
+asked for in other formats`.
+
+**The t70 site** skips a twin export in the precipitation map's field. Published under the engine's id, the twin would replace the
+engine map's slot each time the two took turns.
+
+**Scaleform's loading-screen site.** The census's `Native::Texture2D` was a host-made native texture: neither graph-owned nor a
+promoted exempt one. `DeclaredRead` now declares every tracked texture (`Native::IsTrackedTexture`: graph-owned, host-made or
+wrapped) through `ShareImage`. The raw `ResolveBinding` for a read declared before the commit runs in a new
+`UndeclaredAccess::DeclaredViewScope`, which counts it as "declared (interim index)". Native textures with `GENERATE_MIPS` can be
+graph-owned now. `MakeSurface`'s unused state parameter fed a counter the previous lane removed; it is gone.
+
+**Duplicate check.** `ExportTexture`'s non-GENERAL branch (guest mode, D3D12) now notes its resource too.
+
+**Exclusive native imports are the default again** (a separate last commit, which the main session can drop).
+
+**For the main session:**
+- Native quick run with `CS_ORG_IMAGE_DUPLICATE_CHECK=1`: no `duplicate image` lines. A `frame anchors: ... is the image of '...',
+  which ORG made` line for the flow map, the noise gradient and the occlusion twin.
+- Haze and fog in the native frame with exclusive imports (the regression that made shared the default).
+- Native census, loading screen: no `Passes.cpp` Scaleform site; its reads show in the summary's interim count.
+- Guest with `CS_ORG_ENGINE_TEXTURES=1`: the same `is the image of` lines, shots unchanged (water flow, VL, Skylighting).
+- Watch for `asks for a view ... lacks` and `graph-owned texture lacks a view` warnings: each names an importer the registry did not
+  fit.
