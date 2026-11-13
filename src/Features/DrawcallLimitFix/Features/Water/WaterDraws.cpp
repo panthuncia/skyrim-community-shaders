@@ -9,6 +9,7 @@
 
 #include "Globals.h"
 #include "RenderGraph/Engine/Constants/EngineConstants.h"
+#include "RenderGraph/Engine/ImageSpace/ImageSpace.h"
 #include "Utils/Logging.h"
 #include "RenderGraph/FrameAnchors.h"
 #include "RenderGraph/RasterProgram.h"
@@ -208,7 +209,8 @@ namespace DCLF::Features::Water::WaterDraws
 		 * publish at the headers' registers (DCLF's registry), the engine depths CS binds at a header (the scene depth at t17, Wetness
 		 * Effects' precipitation occlusion at t70), and the engine targets the surface's material slots hold (water.md, "The shader": the
 		 * refraction copy at t1, the displacement at t2, the reflection cubemap at t3, the depth copy at t7, the flow at t8, the SSR
-		 * targets at t10 and t11), imported now so the first build declares them. The mask reads no header and no slot (HeadersRead,
+		 * targets at t10 and t11), imported now so the first build declares them, and the flow map at t8 (the ImageSpace port's
+		 * published import). The mask reads no header and no slot (HeadersRead,
 		 * SlotRead). An export of an id not listed here is an inherent refusal, logged once with the id: add the id here.
 		 */
 		void ListInputs(View a_view, Family::PublishedInputs& a_inputs)
@@ -226,6 +228,8 @@ namespace DCLF::Features::Water::WaterDraws
 			a_inputs.AddEngine(RE::RENDER_TARGET_CUBEMAP::kREFLECTIONS);
 			// The refraction at t1: kMAIN's copy texture, which the engine fills from kMAIN before the water draws.
 			a_inputs.AddEngineCopy(Colour::kMAIN);
+			// The flow map at t8, which the ImageSpace port's flow copies write (published at its Setup; not without the port).
+			a_inputs.Add(::RenderGraph::Engine::ImageSpace::kFlowMapId);
 		}
 
 		DrawsState& GetState()

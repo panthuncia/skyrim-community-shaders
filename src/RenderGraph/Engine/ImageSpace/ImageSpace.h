@@ -1,6 +1,7 @@
 #pragma once
 
 #include <string>
+#include <string_view>
 
 /**
  * @brief The engine's ImageSpace draws on the render graph (org-full-port.md P5.6; design and RE in docs/development/p5/imagespace.md).
@@ -53,6 +54,13 @@
  */
 namespace RenderGraph::Engine::ImageSpace
 {
+	/**
+	 * @brief The water's flow map's published id: the flow copies' import of it (FrameAnchors::D3D11Texture "engine.flow-map"), published
+	 * at Setup (PublishedResources::PublishImport) so the water's draws declare the texture the copies write and read it by id. Not
+	 * published without the port or without the flow copy among its effects.
+	 */
+	inline constexpr std::string_view kFlowMapId = "cs.d3d11.engine.flow-map";
+
 	/** @brief Whether CS_ORG_IMAGESPACE=1 is set. Any thread. */
 	bool Requested();
 
