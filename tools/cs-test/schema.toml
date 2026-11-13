@@ -824,6 +824,15 @@ sweep = true
 owner = "Forward"
 description = "1: blended Lighting geometry drawn by DCLF's forward epoch (T7d: a GPU depth sort, back to front, before the engine's blended draws); 0 it stays native (live toggle's seed)"
 
+[key."dclf.async_builds"]
+env = "CS_DCLF_ASYNC_BUILDS"
+type = "bool"
+default = true
+family = "dclf"
+kind = "feature"
+owner = "core"
+description = "0: DCLF's epoch graphs are built on the render thread at its build point, instead of on the scene worker and attached at a frame's end"
+
 [key."dclf.forward_direct"]
 env = "CS_DCLF_FORWARD_DIRECT"
 type = "bool"
