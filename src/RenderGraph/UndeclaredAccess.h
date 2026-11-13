@@ -30,6 +30,9 @@ namespace org
  *   bound SRV-only, a static engine vertex or index buffer filled at creation. In native mode the write census promotes it back: one
  *   the immediate context wrote since is reported. ORG's graphs refuse an exempt ownership, so these keep GraphManaged until Phase 2;
  *   the note is the validator's only;
+ * - a host feedback buffer (NoteHostFeedback): host-visible memory that shaders write without order and only the CPU reads, such as
+ *   texture streaming's feedback words. No pass reads it on the GPU and a lost write is harmless, so there is nothing to order;
+ *   declaring it would only add barriers between its writers;
  * - a D3D11 resource made IMMUTABLE, whatever its binding (D3D11 refuses every write to it: CS's IMMUTABLE structured buffers, such as
  *   the landscape seam fix's quad data);
  * - a texture made with shader-resource binding only, and a buffer made with vertex or index binding only, that in native mode was
@@ -79,6 +82,14 @@ namespace RenderGraph::UndeclaredAccess
 	 * buffer bound VB/IB-only), and written by nothing after. Its creator calls it, only while On(). Any thread.
 	 */
 	void NoteImmutable(const std::shared_ptr<org::Resource>& a_resource);
+
+	/**
+	 * @brief Notes that a_resource is a host feedback buffer: a buffer in host-visible memory that shaders write, with no order between
+	 * the writes, and that only the CPU reads, straight from its mapping. No GPU pass reads it, so the graph has nothing to order, and
+	 * its refs are counted as "host feedback", not as undeclared. Only for a buffer made for that use (DCLF::TextureFeedback). Its
+	 * creator calls it, only while On(). Any thread.
+	 */
+	void NoteHostFeedback(const std::shared_ptr<org::Resource>& a_resource);
 
 	/**
 	 * @brief For the scope, ShaderResourceIndex lookups on this thread are reads the reader declared (it checked its own declared ids
