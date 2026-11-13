@@ -88,7 +88,12 @@ def alive(pid):
 
 def kill(pid):
     if IS_WINDOWS and pid:
-        subprocess.run(["taskkill", "/F", "/T", "/PID", str(pid)], capture_output=True, timeout=30)
+        # A game stuck in a GPU teardown can take longer than this to die: the kill is still requested, and the caller's
+        # wait for the process to go is what decides.
+        try:
+            subprocess.run(["taskkill", "/F", "/T", "/PID", str(pid)], capture_output=True, timeout=30)
+        except subprocess.TimeoutExpired:
+            print(f"taskkill of {pid} did not return in 30 s; carrying on", flush=True)
 
 
 def windows_of(pid):

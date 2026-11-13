@@ -17,4 +17,4 @@ mods_off = ["Skyrim Engine Telemetry"]
 debug = "hang"               # DXVK's hang markers (DRED on D3D12); on for every run, timing runs too
 
 [vk]
-loader_layers_disable = "*nsight*"   # a stale Nsight implicit layer crashes Vulkan runs
+loader_layers_disable = "*nsight*,*fossilize*"   # a stale Nsight implicit layer crashes Vulkan runs; Steam's fossilize layer crashes vkCreateDevice when DXVK enables its debug extensions (DXVK_DEBUG=hang with crash markers, the ISA dump)
