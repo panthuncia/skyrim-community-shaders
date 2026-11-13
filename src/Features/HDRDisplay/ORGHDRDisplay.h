@@ -18,12 +18,15 @@ namespace org
  * - ApplyHDR's composite (HDROutputCS: the scene and the UI texture into the output texture), the copy of the output into the
  *   swap chain's back buffer, and the UI texture's clear after the composite (ClearUIBuffer's) are passes at the HDROutput anchor,
  *   which ApplyHDR runs (RenderGraph::AnchorPasses: a dispatch, a copy and a UAV clear, order keys from 100 up). Only Compose runs
- *   the anchor, so every pass runs at every run: no run gate.
+ *   the anchor, so these run at every run; only the scene clear below goes through the client's run gate.
  * - The owned frame (CS_ORG_OWNED_FRAME=1) presents the output itself (OwnedFrame::SetFrameSource): no copy pass then.
- * - These stay on D3D11: the UI texture's clear and redirect when the engine starts its interface draw (SetUIBuffer), and the
- *   scene's clear before a Bink movie draws, because they sit inside the engine's own D3D11 UI and movie draws (Phase 5); the
- *   clean composite for screenshots and frame generation's hudless colour (ComposeCleanCapture), which Screenshot's and
- *   Upscaling's ports take; the copy of the framebuffer when HDROutputCS is missing.
+ * - A Bink movie frame's scene clear (PrepareMovieDraw) is a gated dispatch before the composite at the same anchor (ClearSceneCS,
+ *   through the client's run gate): Bink draws into the UI texture, so the scene is untouched until the composite reads it.
+ * - The UI texture's clear when the engine starts its interface draw (SetUIBuffer) is skipped while the texture is still clean from
+ *   the graph's UI clear after the last composite: it clears on D3D11 only after a redirect this frame already drew into it.
+ * - These stay on D3D11: the redirect itself (SetUIBuffer), inside the engine's own D3D11 UI draws; the clean composite for
+ *   screenshots and frame generation's hudless colour (ComposeCleanCapture), which runs at Screenshot's and Upscaling's points with
+ *   no HDR anchor there; the copy of the framebuffer when HDROutputCS is missing.
  *
  * Resources: HDR's float scene texture, the output texture and the UI texture are graph-owned twins (MakeTexture, "HDR::HdrTexture",
  * "HDR::OutputTexture", "HDR::UiTexture"), persistent and published, exported to D3D11, where HDR Display makes its views of them for
@@ -103,11 +106,19 @@ public:
 	 * and again when a texture or the screen size changed. Composed::None while not IsActive.
 	 * @param a_constants This frame's HDROutputCS constants (HDRDisplay::BuildHDRData).
 	 * @param a_backBuffer The back buffer to copy the output into, or null (the owned frame presents the output itself).
+	 * @param a_clearScene Clear HDR's scene to black before the composite (a movie frame's clear). With Composed::None the caller
+	 * clears it with D3D11 before composing there.
 	 */
-	Composed Compose(const HDRDisplay::HDRDataCB& a_constants, ID3D11Texture2D* a_backBuffer);
+	Composed Compose(const HDRDisplay::HDRDataCB& a_constants, ID3D11Texture2D* a_backBuffer, bool a_clearScene = false);
 
 	/** @brief Whether the last Compose cleared the UI texture, which ClearUIBuffer then leaves alone. Resets the answer. */
 	bool TakeUIClear();
+
+	/**
+	 * @brief Whether Compose can clear HDR's scene on the graph before the composite (its twin and the clear program exist): a movie
+	 * frame's clear (HDRDisplay::PrepareMovieDraw) then waits for Compose instead of clearing with D3D11.
+	 */
+	bool CanClearScene() const;
 
 	/** @brief The program is built again from its file at the next Compose (HDRDisplay::ClearShaderCache). */
 	void ClearShaderCache();
