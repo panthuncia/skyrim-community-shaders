@@ -14,6 +14,7 @@
 
 #	include <OpenRenderGraph/GraphHost.h>
 #	include <Render/RenderGraph/RenderGraph.h>
+#	include <Render/Runtime/IUploadService.h>
 #	include <Resources/Buffers/Buffer.h>
 #	include <Resources/ExternalTextureResource.h>
 #	include <Resources/PixelBuffer.h>
@@ -23,6 +24,7 @@
 #	include <algorithm>
 #	include <atomic>
 #	include <bit>
+#	include <vector>
 
 namespace GraphResources
 {
@@ -180,6 +182,34 @@ namespace GraphResources
 			}
 			if (a_desc.Usage != D3D11_USAGE_DEFAULT || a_desc.CPUAccessFlags || !a_desc.ByteWidth) {
 				logger::error("[ORG] {}: not created: graph buffers are DEFAULT usage, without CPU access, and not empty", a_name);
+				return false;
+			}
+			return true;
+		}
+
+		/**
+		 * @brief Hands a texture's subresources to the graph's upload service (GraphHost::Uploads). Slice-major entries, as
+		 * rhi::helpers::PlanTextureUploadSubresources reads them. False, logged, without a texture or a graph.
+		 */
+		bool PostUpload(const std::shared_ptr<org::Resource>& a_texture, const std::string& a_name, DXGI_FORMAT a_format, UINT a_width,
+			UINT a_height, UINT a_depth, UINT a_mips, UINT a_arraySize, std::span<const SubresourceData> a_subresources)
+		{
+			auto* host = RenderGraphRuntime::Get().Host();
+			auto* uploads = host ? host->Uploads() : nullptr;
+			if (!a_texture || !uploads || a_subresources.empty()) {
+				logger::warn("[ORG] {}: not uploaded: {}", a_name, !a_texture ? "the texture was not created" : "the render graph has no upload service");
+				return false;
+			}
+			auto subresources = std::make_shared<std::vector<rhi::helpers::SubresourceData>>();
+			subresources->reserve(a_subresources.size());
+			for (const auto& subresource : a_subresources)
+				subresources->push_back({ subresource.data, subresource.rowPitch, subresource.slicePitch });
+			try {
+				// Staged before the call returns, on the owner thread or into its mailbox from any other.
+				uploads->PostTextureSubresources(org::runtime::UploadTarget::FromShared(a_texture), rhi::helpers::ToRHI(a_format), a_width, a_height,
+					a_depth, a_mips, a_arraySize, std::move(subresources), nullptr, __FILE__, __LINE__);
+			} catch (const std::exception& e) {
+				logger::error("[ORG] {}: not uploaded: {}", a_name, e.what());
 				return false;
 			}
 			return true;
@@ -366,6 +396,29 @@ namespace GraphResources
 		NameViews();
 	}
 
+	bool Texture2D::Upload(std::span<const SubresourceData> a_subresources) const
+	{
+		const Shape shape{ D3D11_RESOURCE_DIMENSION_TEXTURE2D, desc.Width, desc.Height, desc.ArraySize, desc.MipLevels, desc.Format };
+		return PostUpload(graph, name, desc.Format, desc.Width, desc.Height, 1, MipCount(shape), desc.ArraySize, a_subresources);
+	}
+
+	bool Texture2D::UploadZeros() const
+	{
+		const auto format = rhi::helpers::ToRHI(desc.Format);
+		const bool blocks = rhi::helpers::IsBlockCompressed(format);
+		const UINT bytes = rhi::helpers::BytesPerBlock(format);
+		// One buffer of zeros as large as mip 0: every subresource reads it with its own row pitch.
+		const auto rowBytes = [&](UINT a_mip) { const UINT width = (std::max)(desc.Width >> a_mip, 1u); return (blocks ? (width + 3) / 4 : width) * bytes; };
+		const auto rows = [&](UINT a_mip) { const UINT height = (std::max)(desc.Height >> a_mip, 1u); return blocks ? (height + 3) / 4 : height; };
+		const std::vector<std::uint8_t> zeros(static_cast<std::size_t>(rowBytes(0)) * rows(0), 0);
+		const Shape shape{ D3D11_RESOURCE_DIMENSION_TEXTURE2D, desc.Width, desc.Height, desc.ArraySize, desc.MipLevels, desc.Format };
+		std::vector<SubresourceData> subresources;
+		for (UINT slice = 0; slice < desc.ArraySize; ++slice)
+			for (UINT mip = 0; mip < MipCount(shape); ++mip)
+				subresources.push_back({ zeros.data(), rowBytes(mip), rowBytes(mip) * rows(mip) });
+		return Upload(subresources);
+	}
+
 	bool Texture2D::Resize(UINT a_width, UINT a_height)
 	{
 		if (a_width == desc.Width && a_height == desc.Height)
@@ -401,6 +454,11 @@ namespace GraphResources
 			return;
 		}
 		NameViews();
+	}
+
+	bool Texture3D::Upload(std::span<const SubresourceData> a_depthSlices) const
+	{
+		return PostUpload(graph, name, desc.Format, desc.Width, desc.Height, desc.Depth, 1, 1, a_depthSlices);
 	}
 
 	bool Texture3D::Resize(UINT a_width, UINT a_height, UINT a_depth)
@@ -524,10 +582,13 @@ namespace GraphResources
 	Texture2D::Texture2D(const D3D11_TEXTURE2D_DESC& a_desc, std::string a_name, Options a_options) :
 		Resource(std::move(a_name), a_options), desc(a_desc) {}
 	void Texture2D::Create() {}
+	bool Texture2D::Upload(std::span<const SubresourceData>) const { return false; }
+	bool Texture2D::UploadZeros() const { return false; }
 	bool Texture2D::Resize(UINT, UINT) { return false; }
 	Texture3D::Texture3D(const D3D11_TEXTURE3D_DESC& a_desc, std::string a_name, Options a_options) :
 		Resource(std::move(a_name), a_options), desc(a_desc) {}
 	void Texture3D::Create() {}
+	bool Texture3D::Upload(std::span<const SubresourceData>) const { return false; }
 	bool Texture3D::Resize(UINT, UINT, UINT) { return false; }
 	StructuredBuffer::StructuredBuffer(const D3D11_BUFFER_DESC&, UINT a_count, std::string a_name, Options a_options) :
 		Resource(std::move(a_name), a_options), count(a_count) {}
