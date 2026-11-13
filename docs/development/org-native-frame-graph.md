@@ -337,3 +337,28 @@ were the race between frames in flight.
 `[ORG] build manager: graph built on the render thread after the first world frame (...)` for each synchronous build, naming the
 caller. A statistics line every 3000 frames. DCLF's snapshots are keyed on its own epochs' build generations, so an anchor attach
 no longer makes DCLF wait for new recordings.
+
+## Build manager (2026-11-13, `org-native/p4-build-manager`, ORG 5db9d6c)
+
+Every epoch rebuild goes through `RenderGraph::Builds`. A dedicated thread builds the graph with `BuildEpochGraph`, and it is
+attached at the frame boundary with `AttachEpochGraph`.
+
+**Results.**
+- Toggling a feature (SSGI) or HDR rebuilds the anchors off the render thread in about 1 ms. In the world, an attach costs
+  0.1-0.4 ms (median 0.25 ms native, 0.08 ms guest).
+- Guest and native quick shots match their baselines.
+
+**Fixed on integration: a native load failure.** A load failed with `Binding replacement requires a structural alias edit`. A
+detached build placed its transients in the shared alias pool, which moved the backings of resources the running graph of the
+same epoch still used. Alias placement now waits for the new graph's first prepare after the attach, which runs on ORG's host
+thread.
+
+**Left.**
+- **DCLF's epochs still build on the render thread**, 3-8 ms each, 13 warnings in a native load. Their extensions read state the
+  render thread changes in place; the fix is copy-on-write DCLF state.
+- **Shader reload is still synchronous.**
+- **Attaches during loading reach 14-19 ms.** The render thread waits for the host thread to stop for the swap. The host thread
+  now stops between tickets and recordings; the rest is the statistics heap sizing and one preparation. In-world attaches are
+  under 1 ms.
+- **A new graph's first prepare now includes alias placement and one validated build**, on the host thread. A ticket asked for
+  right after an attach may wait for it; watch `WaitTicket`.
