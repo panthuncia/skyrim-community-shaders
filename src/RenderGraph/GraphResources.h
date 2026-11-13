@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <optional>
 #include <memory>
+#include <span>
 #include <string>
 #include <winrt/base.h>
 
@@ -119,6 +120,14 @@ namespace GraphResources
 	 */
 	ExportedTexture ExportTexture(const ExportDesc& a_desc, const std::string& a_name);
 
+	/** @brief One subresource's bytes for an upload (Texture2D::Upload, Texture3D::Upload): rows of texels, or of 4x4 blocks. */
+	struct SubresourceData
+	{
+		const void* data = nullptr;
+		UINT rowPitch = 0;    // bytes from one row to the next in data
+		UINT slicePitch = 0;  // rowPitch times the rows
+	};
+
 	/** @brief What every twin shares: the graph resource, its name and its exported views. */
 	class Resource
 	{
@@ -209,6 +218,20 @@ namespace GraphResources
 		ID3D11RenderTargetView* RTV() const { return rtv.get(); }
 
 		/**
+		 * @brief Writes the texture's contents through the render graph's upload service, in place of a D3D11 UpdateSubresource or
+		 * CopyResource. The copies run in the graph's upload pass at its next execution: the pass declares the texture a copy
+		 * destination, so the graph orders them before the passes that read it and tracks its state, in guest and native mode.
+		 *
+		 * One entry per subresource, slice-major (D3D11CalcSubresource's order: slice * mips + mip); an entry without data is left
+		 * as it is. a_width and a_height are mip 0's extent the entries hold, written at the top-left corner (each mip's halves);
+		 * 0 takes the texture's. The bytes need to live only for the call: the service stages them before it returns. Any thread. False, logged, without a graph or when the texture could not be created.
+		 */
+		bool Upload(std::span<const SubresourceData> a_subresources, UINT a_width = 0, UINT a_height = 0) const;
+
+		/** @brief Upload of zeros into every subresource: texels or blocks of zero bytes, as DXVK's new images hold. */
+		bool UploadZeros() const;
+
+		/**
 		 * @brief Recreates the texture at a new size (a resolution change), the export first released. Then call FrameAnchors::Refresh.
 		 * @return Whether it was recreated; false, with nothing changed, when the size is the same.
 		 */
@@ -228,6 +251,11 @@ namespace GraphResources
 
 		const D3D11_TEXTURE3D_DESC& Desc() const { return desc; }
 		ID3D11Texture3D* D3D11() const { return static_cast<ID3D11Texture3D*>(d3d11.get()); }
+		/**
+		 * @brief Texture2D::Upload for mip 0 only: one entry per depth slice, in order. Mips past the first are left as they are
+		 * (the upload service plans a 3D texture's slices at mip 0's depth).
+		 */
+		bool Upload(std::span<const SubresourceData> a_depthSlices) const;
 
 		/** @brief Texture2D::Resize with a depth. */
 		bool Resize(UINT a_width, UINT a_height, UINT a_depth);

@@ -22,10 +22,16 @@
 #include <span>
 #include <string>
 #include <string_view>
+#include <vector>
 
 #if defined(CS_HAS_RENDER_GRAPH)
 #	include <Render/RunRef.h>
 #	include <rhi.h>
+
+namespace org
+{
+	class Resource;
+}
 #endif
 
 namespace RenderGraph::Engine::OcclusionQueries
@@ -87,12 +93,16 @@ namespace RenderGraph::Engine::OcclusionQueries
 	/**
 	 * @brief The ORG queries of one client's runs: a range of PerRun() occlusion queries per run, and a readback of their counts. A
 	 * run's range is its lease index's (org::RunRef::lease). The ranges come in chunks of kRunsPerChunk lease indices, each a query
-	 * pool and a readback buffer of its own, made when a run first needs one, so they grow with the host's runs in flight and never
-	 * move. Every recording of the client's pass resets its run's range, counts each draw with one query (Pool and Index;
+	 * pool and a readback buffer of its own, made when a run's commit first needs one, so they grow with the host's runs in flight and
+	 * never move. Every recording of the client's pass resets its run's range, counts each draw with one query (Pool and Index;
 	 * RasterProgram::DrawDesc::occlusionPool), and resolves the range (Resolve). The commit names the engine slots its run counts
 	 * (Commit); the executed callback marks the run submitted (Executed). A range's counts are read when the next run of its lease
 	 * index commits (the lease's last run retired before the index was opened again), or earlier when GetQueryData finds that work
 	 * done.
+	 *
+	 * The readback buffers are graph resources: the client's pass declares each as a copy destination (Readbacks), so the graph
+	 * orders and tracks the resolve that writes them. The pool stays the pass's own. A chunk made after the pass's build is declared
+	 * from the next build (the commit that made it says so); until then its runs' counts are not resolved, and their slots are skipped.
 	 */
 	class QueryRing
 	{
@@ -105,7 +115,13 @@ namespace RenderGraph::Engine::OcclusionQueries
 		/** @brief The lease indices one query pool and readback serve. */
 		static constexpr std::uint32_t kRunsPerChunk = 64;
 
-		/** @brief Record time (any thread): the pool that holds a_run's range (invalid when its chunk could not be made). */
+		/**
+		 * @brief The readback buffers made so far, in chunk order: what the client's pass declares as copy destinations at its build.
+		 * Any thread.
+		 */
+		std::vector<std::shared_ptr<org::Resource>> Readbacks() const;
+
+		/** @brief Record time (any thread): the pool that holds a_run's range (invalid when its chunk was not made). */
 		rhi::QueryPoolHandle Pool(const org::RunRef& a_run) const;
 		/** @brief Record time: query a_query of a_run's range, in Pool(a_run). */
 		std::uint32_t Index(const org::RunRef& a_run, std::uint32_t a_query) const;
@@ -113,16 +129,19 @@ namespace RenderGraph::Engine::OcclusionQueries
 		void Reset(rhi::CommandList& a_commands, const org::RunRef& a_run) const;
 		/**
 		 * @brief Record time, outside any render pass, after the range's draws: each query not in a_begun (a bit per query) begun and
-		 * ended with nothing in it, so all are available, then the range resolved into its chunk's readback.
+		 * ended with nothing in it, so all are available, then the range resolved into its chunk's readback. a_declared is how many
+		 * readbacks the recording's pass declared (Readbacks().size() at its build): a range whose readback is not among them is not
+		 * resolved, and its run's slots are skipped.
 		 */
-		void Resolve(rhi::CommandList& a_commands, const org::RunRef& a_run, std::uint32_t a_begun) const;
+		void Resolve(rhi::CommandList& a_commands, const org::RunRef& a_run, std::uint32_t a_begun, std::size_t a_declared) const;
 
 		/**
 		 * @brief The client's commit (render thread, the host's CurrentRun): the run counts engine ring slot a_slots[i] with query i
 		 * (kNoSlot: none). A slot named by several queries answers their sum (the decal test's draws). Reads the counts of its lease
-		 * index's last run first.
+		 * index's last run first. Makes the range's chunk when it is new.
+		 * @return Whether a chunk was made: the client's passes declare its readback from their next build (FrameAnchors::Refresh).
 		 */
-		void Commit(const org::RunRef& a_run, std::span<const std::int32_t> a_slots);
+		bool Commit(const org::RunRef& a_run, std::span<const std::int32_t> a_slots);
 		/** @brief The client's executed callback (render thread): the run last committed was submitted. */
 		void Executed();
 

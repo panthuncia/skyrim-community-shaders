@@ -1809,4 +1809,16 @@ is not declarable at the build (`PublishedResources::IsDeclarable`), so the call
 - **Native blockers left:** the D3D11 writes into these exports outside passes: Skylighting's clear before DCLF's shadow epoch (no
   anchor there; DCLF's occlusion pass could clear on load instead), Cloud Shadows' per-face clears and copies inside the engine's sky
   draws, HDR's UI and scene clears, the clean-scene copies, and the engine's own draws into them (Phase 5.5 work).
+
+### Upload service rectangles and an immutable-texture handoff
+
+- **Need:** write a rectangle of a graph texture (ImGui's atlas updates) through the graph's upload service, and finish a one-off
+  upload in the shader-read state. `IUploadService::UploadTextureSubresources` writes whole subresources from (0, 0) only, though
+  `UploadInstance::TextureUpdate` carries an x, y offset; and the upload pass leaves its destinations in the copy state.
+- **Who:** Phase 1's outside-writes lane (native frame graph). `GraphResources::Texture2D::Upload` takes a mip 0 extent for
+  top-left writes (Terrain Shadows' heightmap corner). ImGui keeps a declared upload pass of its own, copying rectangles from its
+  staging block, and makes MakeTexture's icons exempt (`ExternalImmutableShaderResource`) after a draw pass declared them a shader
+  resource once.
+- **Where it fits:** an offset (and extent) in `UploadTextureSubresources`, and a "finish in state" flag (shader-read) that the upload
+  pass turns into a trailing declaration, as BasicRenderer's `MipHandoffPass` does for its textures.
 - **Found by:** native frame graph Phase 1 (2026-11-13).
