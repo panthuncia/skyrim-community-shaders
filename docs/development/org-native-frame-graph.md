@@ -129,6 +129,21 @@ reads with an interim index, and 1,263 a frame are skipped as exempt.
 | NamedRefs.h:15                         | 20      | DCLF's named buffers (face positions, grass shapes)                                      |
 | FrameRecords.cpp:242                   | 1       | `Deferred::DirectionalShadowLights`, a D3D11 buffer                                      |
 
+**With `org-native/p1-native-writers` merged:** Cloud Shadows' layer clears and copies run as graph compute passes at
+SkyReflections, EarlyPrepass and ReflectionsPrepass. HDR's scene and UI clears and Skylighting's occlusion clear are passes too.
+Native shots match the baseline.
+
+Immediate operations, world: 250 a frame. 240 of them are DYNAMIC constant-buffer discard maps. A native Map is a CPU write into
+upload memory with no GPU work, because no native GPU work reads those buffers; draws take their constants from their captures.
+So these need nothing from the graph. The rest a frame:
+
+| Operation                                              | Where                       | Owner                    |
+|--------------------------------------------------------|-----------------------------|--------------------------|
+| ClearRenderTargetView on the six `Deferred::*` targets | after Prepass               | CS (Deferred), Phase 1   |
+| ClearRenderTargetView on `kTEMPORAL_AA_MASK`           | after ImageSpace run 5      | engine, Phase 3          |
+| ClearRenderTargetView on `kWATER_1`/`kWATER_2`         | after EngineDraws run 3     | engine, Phase 3          |
+| CopyResource `kMAIN` into `kMAIN Copy`                 | after ImageSpace run 4      | engine, Phase 3          |
+
 **Open: `[ORG] declared view mismatch`.** One line each for `cs.dclf.z.pixel-rows` (frame value pool 5) and
 `cs.dclf.z.texture-transforms` (pool 2), in guest and in the census run. Each is logged once, so how often it happens is not
 known yet. It may be a preparation made ahead of the frame seeing the next frame's backing; that has to be checked.
