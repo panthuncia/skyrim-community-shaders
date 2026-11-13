@@ -447,6 +447,8 @@ namespace DCLF
 		// (DeclareReads). Made once, whole (LateBuffers), on whichever thread first needs them: a pass's declaration may run on the
 		// graph host's thread.
 		std::vector<std::shared_ptr<org::VersionedBuffer>> lateBuffers;
+		// By registered pool: the ref PoolRef last handed out, which DeclarePoolWrite's passes check in Prepare. Made with lateBuffers.
+		std::vector<std::shared_ptr<RenderGraph::RefLatch>> poolRefLatches;
 		std::once_flag lateBuffersMade;
 
 		const std::vector<std::shared_ptr<org::VersionedBuffer>>& LateBuffers()
@@ -459,6 +461,8 @@ namespace DCLF
 					standIn->Materialize();
 					lateBuffers.push_back(org::VersionedBuffer::CreateLateBound(std::move(standIn), org::VersionedBuffer::LateReady::FrameWait));
 				}
+				for (std::size_t i = kBuiltInPools; i < count; ++i)
+					poolRefLatches.push_back(std::make_shared<RenderGraph::RefLatch>());
 			});
 			return lateBuffers;
 		}
@@ -2927,9 +2931,26 @@ namespace DCLF
 
 	void FrameValues::DeclareReads(org::RenderPassBuilder& a_builder, std::uint32_t a_sets)
 	{
+		DeclareReadsExcept(a_builder, a_sets, ~std::size_t(0));
+	}
+
+	void FrameValues::DeclarePoolWrite(org::RenderPassBuilder& a_builder, Api::FrameValuePoolId a_pool, std::uint32_t a_sets, RenderGraph::DeclaredRefs& a_out)
+	{
+		const auto& buffers = impl->LateBuffers();
+		const std::size_t set = a_pool ? kBuiltInPools + a_pool.index : ~std::size_t(0);
+		// A pass declares a buffer for one access: the written pool is not also declared read.
+		DeclareReadsExcept(a_builder, a_sets, set);
+		if (set >= buffers.size())
+			return;
+		RenderGraph::DeclareRef(a_builder, *buffers[set], RenderGraph::RefAccess::Write, fmt::format("frame value pool {}", a_pool.index),
+			impl->poolRefLatches[a_pool.index], a_out);
+	}
+
+	void FrameValues::DeclareReadsExcept(org::RenderPassBuilder& a_builder, std::uint32_t a_sets, std::size_t a_skip)
+	{
 		const auto& buffers = impl->LateBuffers();
 		const auto declare = [&](std::size_t a_set) {
-			if (a_set < buffers.size())
+			if (a_set < buffers.size() && a_set != a_skip)
 				a_builder.ShaderResource(*buffers[a_set]);
 		};
 		if (a_sets & kReadPlacements)
@@ -3126,7 +3147,16 @@ namespace DCLF
 	RenderGraph::BufferRef FrameValues::PoolRef(Api::FrameValuePoolId a_pool) const
 	{
 		const auto backing = PoolBacking(a_pool);
-		return backing && backing->buffer ? RenderGraph::BufferRefOf(*backing->buffer) : RenderGraph::BufferRef{};
+		auto* host = RenderGraphRuntime::Get().Host();
+		if (!backing || !backing->buffer || !host)
+			return {};
+		// Not a raw ref: the passes that write through it declare the pool (DeclarePoolWrite), and the draws read it (DeclareReads).
+		const RenderGraph::BufferRef ref = RenderGraph::MakeBufferRef(host->Device(), backing->buffer->GetAPIResource().GetHandle(), 0, std::source_location::current());
+		// What the latch carries: DeclarePoolWrite's passes compare it with the version bound at their Prepare.
+		(void)impl->LateBuffers();  // makes the latches
+		if (a_pool.index < impl->poolRefLatches.size())
+			impl->poolRefLatches[a_pool.index]->Set(ref);
+		return ref;
 	}
 
 	std::uint64_t FrameValues::PoolBytes(Api::FrameValuePoolId a_pool) const

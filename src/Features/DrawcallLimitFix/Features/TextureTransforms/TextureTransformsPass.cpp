@@ -11,6 +11,7 @@
 #include "Features/DrawcallLimitFix/Core/Render/Revision/Shapes.h"
 #include "Features/DrawcallLimitFix/Diagnostics/RefTrace.h"
 
+#include "RenderGraph/BufferRefs.h"
 #include "RenderGraph/ComputeProgram.h"
 #include "RenderGraph/RenderGraphRuntime.h"
 #include <Render/LatchBlock.h>
@@ -43,7 +44,9 @@ namespace DCLF::Draws
 	}
 
 	struct TextureTransformsBindings
-	{};
+	{
+		RenderGraph::DeclaredRefs copy;  // the frame's copy it writes, with the ref the main-rows latches carry (animatedRows)
+	};
 
 	struct TextureTransformsPrepared
 	{
@@ -76,16 +79,18 @@ namespace DCLF::Draws
 			a_builder.PreferQueue(org::QueueKind::Graphics);
 			const std::span<const org::UavView> noViews{};
 			(void)a_builder.UnorderedAccess(*resources->sequences, noViews);
-			// The pools: the texture transforms' entries (the latch's stage word) and the frame's copy it writes (animatedRows).
-			FrameValues::Get().DeclareReads(a_builder, FrameValues::kReadPools);
-			return {};
+			// The pools: the texture transforms' entries (the latch's stage word) read, and the frame's copy it writes through the latch's
+			// buffer view ref (animatedRows).
+			TextureTransformsBindings bindings;
+			FrameValues::Get().DeclarePoolWrite(a_builder, ::DCLF::Features::TextureTransforms::CopyPool(), FrameValues::kReadPools, bindings.copy);
+			return bindings;
 		}
 
 		// The recording depends on the depth shape (its latch: the revision's, the ticket's host data); the rows, the entries and their
 		// count are the latch's and the entries'.
 		void Revision(std::vector<std::uint64_t>&) const {}
 
-		TextureTransformsPrepared Prepare(const TextureTransformsBindings&, [[maybe_unused]] const org::PassPrepareContext& a_preparation) const
+		TextureTransformsPrepared Prepare(const TextureTransformsBindings& a_bindings, [[maybe_unused]] const org::PassPrepareContext& a_preparation) const
 		{
 			TextureTransformsPrepared prepared{};
 			// Where the depth build runs: its commit wrote the latch (the payload's rows, the pool's entries) in the frame slot.
@@ -96,6 +101,8 @@ namespace DCLF::Draws
 					BuildsDraws(a_preparation, *resources, segment), outerBarriers));
 			if (!program || !frame || !frame->latch || !BuildsDraws(a_preparation, *resources, segment))
 				return prepared;
+			// The commit latched the copy's ref (AnimatedRowsAddress). Phase 4 writes animatedRows here from the declaration instead.
+			RenderGraph::CheckDeclaredRefs(a_bindings.copy, a_preparation, "cs.dclf.z.texture-transforms");
 			prepared.program = program;
 			prepared.latch = frame->latch;
 			prepared.outerBarriers = outerBarriers;

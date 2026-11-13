@@ -198,6 +198,11 @@ namespace DCLF::Features::TextureTransforms
 		return { values.PoolAddress(copyPool), values.PoolRef(copyPool), static_cast<std::uint32_t>(values.PoolBytes(copyPool) / kMaterialRowBytes) };
 	}
 
+	Api::FrameValuePoolId CopyPool()
+	{
+		return copyPool;
+	}
+
 	void SetCopyAvailable(bool a_available)
 	{
 		copyAvailable = a_available;

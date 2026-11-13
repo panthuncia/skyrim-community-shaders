@@ -26,6 +26,11 @@ namespace org::services
 	struct Backing;
 }
 
+namespace RenderGraph
+{
+	struct DeclaredRefs;
+}
+
 namespace DCLF
 {
 	struct FrameGlobals;
@@ -189,6 +194,13 @@ namespace DCLF
 		 * declare them wait for the frame's values, so every pass that reads one must declare it.
 		 */
 		void DeclareReads(org::RenderPassBuilder& a_builder, std::uint32_t a_sets = kReadAll);
+		/**
+		 * @brief Any thread, a pass's declaration: the pass writes registered pool a_pool's frame backing through PoolRef (a latch's frame
+		 * rows: Api::PassDef::frameRows) and reads a_sets. DeclareReads without a_pool, then a_pool's late-bound buffer declared written
+		 * (unordered access, no view), added to a_out with the ref PoolRef last handed out, for RenderGraph::CheckDeclaredRefs in the
+		 * pass's Prepare.
+		 */
+		void DeclarePoolWrite(org::RenderPassBuilder& a_builder, Api::FrameValuePoolId a_pool, std::uint32_t a_sets, RenderGraph::DeclaredRefs& a_out);
 		/** @brief Render thread: the descriptor of the placement buffer the current frame's draws read (0 before the first frame). */
 		std::uint32_t PlacementsIndex() const { return frameIndex; }
 		/** @brief Render thread: the descriptor of the palette buffer the current frame's draws read (0 before the first frame). */
@@ -202,7 +214,10 @@ namespace DCLF
 		std::uint32_t PoolIndex(Api::FrameValuePoolId a_pool) const;
 		/** @brief Render thread: the device address of that backing (deviceAddress pools; 0 otherwise, or as PoolIndex). */
 		std::uint64_t PoolAddress(Api::FrameValuePoolId a_pool) const;
-		/** @brief Render thread: the buffer view ref of that backing, which shaders read it through (null as PoolIndex). */
+		/**
+		 * @brief Render thread: the buffer view ref of that backing, which shaders read it through (null as PoolIndex). A pass that writes
+		 * through it declares the pool with DeclarePoolWrite, which checks this ref against the version bound at its Prepare.
+		 */
 		RenderGraph::BufferRef PoolRef(Api::FrameValuePoolId a_pool) const;
 		/** @brief Render thread: that backing's bytes (0 as PoolIndex). */
 		std::uint64_t PoolBytes(Api::FrameValuePoolId a_pool) const;
@@ -271,6 +286,8 @@ namespace DCLF
 	private:
 		FrameValues();
 		~FrameValues();
+		/** @brief DeclareReads without row set a_skip (a written pool's, which DeclarePoolWrite declares). */
+		void DeclareReadsExcept(org::RenderPassBuilder& a_builder, std::uint32_t a_sets, std::size_t a_skip);
 		struct Impl;
 		std::unique_ptr<Impl> impl;
 		std::uint32_t frameIndex = 0, paletteIndex = 0, shadingIndex = 0;
