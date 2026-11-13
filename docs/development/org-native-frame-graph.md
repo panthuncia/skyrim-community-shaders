@@ -626,3 +626,36 @@ Guest and native quick shots match the earlier runs. The native tour passes. No 
 - Make the five engine targets in their final format from the start.
 - Find the twin behind "graph resources resized".
 - Declare the loading-screen sites.
+
+## Phase 2 lane: loading-screen declarations (`org-native/p2-loading-decl`)
+
+The native census's loading-screen window listed 11 sites. Most were refs and bindings made once and then reused. The validator
+counts a ref when it is made, not each time a shader reads it. So a ref made during a load shows only in the loading-screen window,
+and the world window reads 0 even when nothing declares the read. Each site, with its verdict:
+
+| Site                                                          | Verdict                                                                                                                                                                                                           |
+|---------------------------------------------------------------|-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| EngineDrawFamily.cpp:336 (`GpuResources::Acquire`, the ring)  | False positive. The menu scenes' pass declares the ring (`DeclareRingRead`). `Acquire` no longer notes an ORG-owned buffer by handle; `Engine::Buffers::Resolve` judges it where it makes the ref.                  |
+| GrassTables.cpp:272, TreeLodTables.cpp:62                     | Declared already. The draw rows are declared by the main, cull and arguments passes. The refs come from `DeclaredRefOf` now. The versioned tables' refs there only check that a ref can be made.                   |
+| FacePositions.cpp:63                                          | Only a check that a ref can be made; readers use `DCLF::RefOf`. `DeclaredRefOf` now.                                                                                                                              |
+| Resources.cpp:480, 802, 874, 895                              | Declared already: the main and view frame constants, the shadow constants, the faces' rows (passes named beside each call). `DeclaredRefOf` now; the foliage record's refs too.                                     |
+| TextureFeedback.cpp:34                                        | Not a graph access. Host-visible feedback words that the colour pass writes with no order and only the CPU reads. A new validator rule, `NoteHostFeedback`, counts its refs as "host feedback".                       |
+| FrameRecords.cpp:242 (t70, `kPRECIPITATION_OCCLUSION_MAP`)    | Real. Wetness Effects binds the engine's map at t70 for every colour draw, and the commit imported it again. The colour passes now declare `Engine::Depth::kPRECIPITATION_OCCLUSION_MAP`, and the commit reads its index. |
+
+**The t70 path** (`Extensions::PrecipitationOcclusionTextureIndex`):
+- It takes the target through `FrameAnchors::EngineDepth`.
+- If ORG owns the target, `Engine::Targets` publishes the id when the import asks for it.
+- Otherwise the anchors' import is published under the same id, with the bound view as its export.
+- The first publish builds every graph again, once, through the build manager. Until then the read stays the D3D11 import.
+- Another view bound at t70 is imported as before.
+
+`DeclaredRefOf` has a device overload for setups that have the device before the graph host. Tree LOD's debug stamps
+(`CS_DCLF_TREE_LOD_STAGES`) keep a raw ref: the buffer has no UAV flag, and no pass declares it.
+
+**For the main session:**
+- Native census: the loading-screen window should list no site but Scaleform's `Passes.cpp:508`. The summary line has a new
+  "host feedback" count.
+- Look for `[DCLF] frame texture precipitation occlusion (t70) reads the graph resource 'Engine::Depth::kPRECIPITATION_OCCLUSION_MAP'`.
+  `... reads its D3D11 view` that lasts past the first world frame means the export did not match the bound view.
+- Guest: the same line, with `[ORG] 'Engine::Depth::kPRECIPITATION_OCCLUSION_MAP' published to every epoch's graph` when engine
+  targets are off. Wetness Effects' puddles and rain occlusion should look unchanged in shots.
