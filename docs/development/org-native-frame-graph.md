@@ -668,5 +668,5 @@ when a second live one appears. A slot's replaced version is retired first, so v
   (GraphResources twins whose D3D11 export is imported again, engine textures, streaming windows).
 - `CS_ORG_NATIVE_VALIDATION=1`: no new layout errors. A raw bindless view (GENERAL) read inside an execution that moved the image
   elsewhere is the likely one.
-- `frame anchors: ... views added` and `... another format` lines, and the Scaleform `tracked textures read by the displays` line.
+- `frame anchors: ... slot has the views ... asks for now` and `... in another format` lines, and the Scaleform `tracked textures read by the displays` line.
 - `CS_ORG_NATIVE_EXCLUSIVE_IMPORTS=0` against the default: the frame-rate change from exclusive imports.
