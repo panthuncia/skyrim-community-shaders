@@ -108,6 +108,31 @@ Left for later phases:
   visible tables were not checked: Grass is another lane's.
 - **Phase 4** writes these refs into the tables in Prepare from the declarations (`DeclaredBufferRef`) and drops the latches.
 
+## Wave 2 results (2026-11-13, with `org-native/p1-validator-gaps` merged)
+
+The validator lane does three things:
+- It notes the resources made immutable: SRV-only engine textures made with data, and static TriShape buffers.
+- It counts reads whose published id the reader declared as "declared (interim index)".
+- It declares the three raw texture reads: kMAIN Copy for water, kHDR_DOWNSAMPLE4 for the character light, kSHADOW_MASK for grass.
+  It also drops LLF's D3D11 export imports.
+
+Guest and native quick shots match their baselines.
+
+**Undeclared accesses, world, native:** from about 1,100 a frame to 183 a frame, at 5 sites. Another 161 a frame are declared
+reads with an interim index, and 1,263 a frame are skipped as exempt.
+
+| Site                                   | A frame | What                                                                                    |
+|----------------------------------------|---------|-----------------------------------------------------------------------------------------|
+| LandscapeSeams.cpp:104                 | 100     | `LandscapeSeamsFix::QuadData`, D3D11 resources of CS's own                               |
+| EngineDrawFamily.cpp:411 (frame slot)  | 32      | a 320x320 engine texture made without data; Cloud Shadows' layers through D3D11 views     |
+| EngineBuffers.cpp:211                  | 30      | the engine's dynamic ring (Phase 2)                                                      |
+| NamedRefs.h:15                         | 20      | DCLF's named buffers (face positions, grass shapes)                                      |
+| FrameRecords.cpp:242                   | 1       | `Deferred::DirectionalShadowLights`, a D3D11 buffer                                      |
+
+**Open: `[ORG] declared view mismatch`.** One line each for `cs.dclf.z.pixel-rows` (frame value pool 5) and
+`cs.dclf.z.texture-transforms` (pool 2), in guest and in the census run. Each is logged once, so how often it happens is not
+known yet. It may be a preparation made ahead of the frame seeing the next frame's backing; that has to be checked.
+
 ## Census results (autoload save, native Vulkan, RX 6600)
 
 **Immediate operations, world, about 283 a frame:**
