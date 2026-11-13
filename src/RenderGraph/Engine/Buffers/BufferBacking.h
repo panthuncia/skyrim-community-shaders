@@ -13,6 +13,7 @@
 namespace org
 {
 	class Buffer;
+	class VersionedBuffer;
 }
 
 namespace RenderGraph::Engine::Buffers::detail
@@ -52,4 +53,13 @@ namespace RenderGraph::Engine::Buffers::detail
 
 	/** @brief InstallGameHooks' part for the ring: the map (75484) and the three unmaps. */
 	void InstallRingHooks();
+
+	/**
+	 * @brief The ring's late-bound buffer: its readers declare it, and each chunk is published as its version when it becomes the
+	 * current one. Made at the first call. Null when it could not be made (logged once). Any thread.
+	 */
+	const std::shared_ptr<org::VersionedBuffer>& RingVersions();
+
+	/** @brief Whether a_buffer is one of the ring's chunks. Any thread. */
+	bool IsRingChunk(const org::Buffer* a_buffer);
 }

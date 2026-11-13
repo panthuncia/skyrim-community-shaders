@@ -28,6 +28,7 @@ namespace RenderGraph::Engine::Buffers
 
 #	include <OpenRenderGraph/GraphHost.h>
 #	include <Resources/Buffers/Buffer.h>
+#	include <Resources/Buffers/VersionedBuffer.h>
 #	include <rhi.h>
 
 #	include <cstring>
@@ -139,7 +140,8 @@ namespace RenderGraph::Engine::Buffers
 			auto backing = detail::MakeBacking(a_desc, name);
 			if (!backing)
 				return nullptr;
-			// The writes are done before the engine can draw the buffer, and a queue submission makes host writes visible.
+			// The contents are written here, before the handle exists: no lease can be taken before they are. There is no GPU copy,
+			// so there is no copy value to wait for: the memory is host-visible, and the next queue submission makes the writes visible.
 			std::memcpy(backing->data, a_contents, a_desc.ByteWidth);
 			auto view = detail::EngineView(a_desc, *backing, name);
 			if (view) {
@@ -190,6 +192,23 @@ namespace RenderGraph::Engine::Buffers
 		stl::detour_vfunc<3, Device_CreateBuffer>(a_device);
 	}
 
+	bool Owns(ID3D11Buffer* a_buffer)
+	{
+		return a_buffer && Requested() && std::dynamic_pointer_cast<org::Buffer>(Tripwire::GraphResourceOf(a_buffer)) != nullptr;
+	}
+
+	void DeclareRingRead(org::RenderPassBuilder& a_builder)
+	{
+		if (!Requested())
+			return;
+		const auto& ring = detail::RingVersions();
+		if (!ring)
+			return;
+		// No latch: a frame reads several chunks, so a pass's refs are not one version's.
+		DeclaredRefs unchecked;
+		(void)DeclareLateRef(a_builder, ring, RefAccess::Read, "Engine::DynamicRing", nullptr, unchecked);
+	}
+
 	std::optional<Direct> Resolve(ID3D11Buffer* a_buffer)
 	{
 		if (!a_buffer || !Requested())
@@ -206,9 +225,14 @@ namespace RenderGraph::Engine::Buffers
 		direct.size = buffer->GetBufferSize();
 		if (auto* host = RenderGraphRuntime::Get().Host()) {
 			direct.address = host->Device().GetBufferDeviceAddress({ api.GetHandle(), 0 });
-			// Still a raw ref: the dynamic ring's chunks are not graph resources, and a frame reads several of them. Phase 2 of the
-			// native frame graph registers them (docs/development/org-native-frame-graph.md); static geometry stays exempt.
-			direct.ref = BufferRefOf(host->Device(), api.GetHandle());
+			if (detail::IsRingChunk(buffer.get())) {
+				// A chunk is a version of the ring's late-bound buffer. Every pass that reads a ring ref declares the ring
+				// (DeclareRingRead): the menu scenes' passes, the only readers of a dynamic draw's stream (LatchDynamicGeometry).
+				direct.ref = DeclaredRefOf(*buffer);
+			} else {
+				// Static geometry, noted immutable at creation: the exempt class. The validator judges it by the ORG buffer.
+				direct.ref = BufferRefOf(*buffer);
+			}
 		}
 		return direct;
 	}
@@ -238,6 +262,8 @@ namespace RenderGraph::Engine::Buffers
 	}
 	void InstallDeviceHooks(ID3D11Device*) {}
 	std::optional<Direct> Resolve(ID3D11Buffer*) { return std::nullopt; }
+	bool Owns(ID3D11Buffer*) { return false; }
+	void DeclareRingRead(org::RenderPassBuilder&) {}
 	Stats GetStats() { return {}; }
 }
 

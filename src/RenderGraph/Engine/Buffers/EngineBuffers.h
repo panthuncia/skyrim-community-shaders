@@ -8,6 +8,11 @@
 struct ID3D11Buffer;
 struct ID3D11Device;
 
+namespace org
+{
+	class RenderPassBuilder;
+}
+
 /**
  * @brief The engine's vertex and index buffers as ORG buffers (org-full-port.md P4.5, docs/development/p4/p4.5-buffers.md).
  *
@@ -17,7 +22,10 @@ struct ID3D11Device;
  *   filled through their mapping. The engine's TriShape fields get a guest DXVK buffer made from each, or a tripwire handle
  *   wrapping it when P4.1's wrapping context is installed. Releases come from any thread and go through the tripwire retirement.
  * - The dynamic ring (75484): an ORG upload ring of persistently mapped chunks behind the engine's map contract. A full chunk is
- *   retired through RenderGraphRuntime::ReleaseAfterD3D11 instead of the engine's event query, so nothing spins.
+ *   retired through RenderGraphRuntime::ReleaseAfterD3D11 instead of the engine's event query, so nothing spins. In native mode a full
+ *   chunk is retired at the end of the frame it filled in, so every graph execution that reads it was submitted first.
+ * - The ring is a late-bound org::VersionedBuffer: each chunk is a version, published when it becomes the current one. Every pass that
+ *   reads the ring declares it (DeclareRingRead). The CPU writes into upload memory, so a read needs no barrier.
  *
  * Anything that fails falls back to the engine's D3D11 path for that buffer, or for the ring as a whole.
  */
@@ -46,6 +54,15 @@ namespace RenderGraph::Engine::Buffers
 	 * Nullopt when it is a plain D3D11 buffer or the switch is off. a_buffer stays alive during the call. Any thread.
 	 */
 	std::optional<Direct> Resolve(ID3D11Buffer* a_buffer);
+
+	/** @brief Whether the ORG owns a_buffer (Resolve would answer), without making a ref. Any thread. */
+	bool Owns(ID3D11Buffer* a_buffer);
+
+	/**
+	 * @brief Graph build: declares a read of the dynamic ring (a late-bound buffer whose versions are its chunks), with no views. Every
+	 * pass that reads a ring ref Resolve handed out calls this. Nothing when the switch is off or the ring could not be made.
+	 */
+	void DeclareRingRead(org::RenderPassBuilder& a_builder);
 
 	/** @brief Since the start. Any thread. */
 	struct Stats
