@@ -422,9 +422,18 @@ namespace DCLF::Features::Sky
 				auto* layerTexture = layer >= 0 && layer < CloudShadows::kMaxCloudLayers ? cloudShadows.texCloudShadowLayers[layer] : nullptr;
 				if (!layerTexture || !layerTexture->srv)
 					return "its cloud layer has no occlusion texture";
-				if (Family::SlotTexture(layerTexture->srv.get(), GpuTextures::ViewKind::Cube, GpuTextures::Tag(GpuTextures::Source::FrameSlot, 26), constants.textures[3],
-						owners) != Family::SlotResult::Ok)
+				// A layer twin is read by its published id, which the main client declares (MakeClient): the graph orders the read after
+				// the layer's clears, copies and face draws. Only a D3D11 layer (no twin) is imported.
+				if (const auto id = ORGCloudShadows::PublishedLayerId(layer); !id.empty()) {
+					const auto result = SkyDraws::ReadPublished(View::Main, id, constants.textures[3]);
+					if (result != Family::InputResult::Graph) {
+						Refusals().Report(std::format("a main cloud draw whose t26 holds '{}'", id), Family::ReasonOf(result));
+						return "its cloud layer's occlusion is a published graph texture its client cannot read";
+					}
+				} else if (Family::SlotTexture(layerTexture->srv.get(), GpuTextures::ViewKind::Cube, GpuTextures::Tag(GpuTextures::Source::FrameSlot, 26),
+							   constants.textures[3], owners) != Family::SlotResult::Ok) {
 					return "its cloud layer's occlusion could not be imported";
+				}
 			}
 
 			// The alpha test reference SetDirtyStates would write (PS b11: the reference while the test is on, else 0) and CS's extra

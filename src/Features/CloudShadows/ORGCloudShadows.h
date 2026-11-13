@@ -4,6 +4,7 @@
 #include <d3d11.h>
 #include <functional>
 #include <memory>
+#include <string>
 #include <string_view>
 #include <vector>
 
@@ -83,6 +84,12 @@ public:
 	 * resource serves them all. Null when the feature has no layers or the runtime is not active.
 	 */
 	static std::shared_ptr<org::ExternalTextureResource> ImportLayer(int a_layer);
+
+	/**
+	 * @brief Layer a_layer's published id (its twin's name, "CloudShadows::Layer[<layer>]"), for a reader that declares the twin by id
+	 * and reads it by that id's index. Empty when the layer has no twin (a D3D11 layer) or the runtime is not active.
+	 */
+	static std::string PublishedLayerId(int a_layer);
 
 	/**
 	 * @brief At SetupResources, when requested and the runtime is active: makes layer a_layer as a graph-owned cube twin of a_desc

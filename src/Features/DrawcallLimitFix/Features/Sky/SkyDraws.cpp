@@ -434,6 +434,10 @@ namespace DCLF::Features::Sky::SkyDraws
 			}
 			if (a_shape.view != View::Sun)
 				ListInputs(client->inputs);
+			// The main view's cloud self shadowing (t26) reads the layer its draw names: each layer twin, by its published id.
+			if (a_shape.view == View::Main && a_shape.cloudShadows)
+				for (std::uint32_t l = 0; l < kCloudLayers; ++l)
+					client->inputs.Add(ORGCloudShadows::PublishedLayerId(static_cast<int>(l)));
 			client->depth = a_shape.depth >= 0 ? FrameAnchors::EngineDepth(static_cast<std::uint32_t>(a_shape.depth)) : nullptr;
 			if (!client->depth) {
 				logger::warn("[DCLF] sky: the depth target {} cannot be imported; the sky stays the engine's", a_shape.depth);

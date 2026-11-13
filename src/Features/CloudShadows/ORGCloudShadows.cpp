@@ -229,6 +229,13 @@ Texture2D* ORGCloudShadows::MakeLayer(int a_layer, const D3D11_TEXTURE2D_DESC& a
 	return wrapper;
 }
 
+std::string ORGCloudShadows::PublishedLayerId(int a_layer)
+{
+	if (a_layer < 0 || a_layer >= CloudShadows::kMaxCloudLayers || !LayerTwins()[a_layer] || !RenderGraphRuntime::Get().IsActive())
+		return {};
+	return LayerTwins()[a_layer]->Name();
+}
+
 std::shared_ptr<org::ExternalTextureResource> ORGCloudShadows::ImportLayer(int a_layer)
 {
 	auto& cloudShadows = globals::features::cloudShadows;
@@ -732,6 +739,7 @@ struct ORGCloudShadows::LayerOps
 {};
 
 void ORGCloudShadows::Reserve() {}
+std::string ORGCloudShadows::PublishedLayerId(int) { return {}; }
 std::shared_ptr<org::ExternalTextureResource> ORGCloudShadows::ImportLayer(int) { return nullptr; }
 Texture2D* ORGCloudShadows::MakeLayer(int, const D3D11_TEXTURE2D_DESC&, const D3D11_SHADER_RESOURCE_VIEW_DESC&, const char*) { return nullptr; }
 bool ORGCloudShadows::Setup(std::function<void()>) { return false; }
