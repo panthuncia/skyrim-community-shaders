@@ -269,3 +269,33 @@ Every other anchor runs once a frame.
 
 **Known effect:** DCLF's `DeclarePublishedRead` latches the index at the build. After a versioned resize it may log
 `[ORG] declared view mismatch` once per id until Phase 4 writes the index from the declaration.
+
+## Wave 3 results (2026-11-13)
+
+Merged: `org-native/p1-residue`, `org-native/p1-imgui-static`, `org-native/p2-versioned-ids` and `org-native/org-async-builds`. The
+merged ORG commit is 5c53686, which holds the versioned image textures and `BuildEpochGraph`/`AttachEpochGraph`.
+
+Guest and native quick shots match their baselines: 1.6% and 0.9% of pixels differ by more than 16. No graph or epoch failed.
+
+**Phase 1 is complete.** In the native census, the world window has one undeclared site left: the engine's dynamic ring at
+`EngineBuffers.cpp:211`, about 30 accesses a frame. Phase 2 handles it.
+
+**Declared-ref mismatch check.** The check is now tied to the frame. It found 0 mismatches in about 600 checks, so the earlier lines
+were the race between frames in flight.
+
+**Op census, world.**
+- Left: the three engine operations Phase 3 covers (`kTEMPORAL_AA_MASK`, `kWATER_1`/`kWATER_2`, `kMAIN` into `kMAIN Copy`).
+- Gone: the six `Deferred::*` clears, now a clear pass at Prepass (`CS_ORG_DEFERRED_CLEARS`).
+
+**ImGui.**
+- Fonts are 4 versioned atlas pages and icons are the exempt class. No dynamic declarations are left.
+- With `CS_ORG_IMGUI=1` the CS menu draws with fonts and icons in guest and native.
+
+**Versioned identities.**
+- Terrain Blending's outputs resize as versions.
+- Every other twin, import and engine target still rebuilds, because its passes declare the backing directly. That is about 210
+  `Graph()` sites and 117 import sites.
+- Those rebuilds are logged as `[ORG] structural rebuild N (...)`. A native load logs 6: five engine targets replaced, and one
+  resize.
+
+**Not run:** ORG's own tests. CS builds ORG with its tests off; SARP's build turns them on for BasicRenderer's copy.
