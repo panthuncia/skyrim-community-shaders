@@ -1516,6 +1516,15 @@ namespace FrameAnchors
 
 	Texture ImmutableTexture(std::string_view a_name, ID3D11Texture2D* a_texture, ID3D11ShaderResourceView* a_srv)
 	{
+		// Native mode: an exempt texture is one graph resource, read untracked, the same pointer on every call (no build). It is a
+		// plain resource, declared as itself.
+		if (RenderGraph::Engine::Native::Active() && a_texture && RenderGraphRuntime::Get().IsActive()) {
+			D3D11_SHADER_RESOURCE_VIEW_DESC view{};
+			if (a_srv)
+				a_srv->GetDesc(&view);
+			if (auto exempt = RenderGraph::Engine::Native::ImmutableTextureOf(a_texture, a_srv ? view.Format : DXGI_FORMAT_UNKNOWN))
+				return Texture(std::move(exempt));
+		}
 		return D3D11Texture(a_name, a_texture, a_srv, nullptr);
 	}
 
