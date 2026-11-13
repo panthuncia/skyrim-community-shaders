@@ -231,7 +231,7 @@ namespace DCLF
 					auto& commands = a_recording.Commands();
 					commands.SetDescriptorHeaps(frame.resourceHeap, frame.samplerHeap);
 					const auto sequences = a_recording.Resolve(a_bindings.sequences).GetHandle();
-					const RenderGraph::BufferRef sequencesRef = DCLF::Draws::RecordingBufferRef(sequences);
+					const RenderGraph::BufferRef sequencesRef = DCLF::Draws::RecordingBufferRef(a_recording, a_bindings.sequences);
 					const rhi::IndexBufferView pool{ a_recording.Resolve(a_bindings.pool).GetHandle(), 0, 0, rhi::Format::R16_UInt };
 					const auto& families = Extensions::DrawFamilies();
 					static const std::shared_ptr<const void> kNothing;  // a face's draw has no prepared state: its pipeline is the shape's

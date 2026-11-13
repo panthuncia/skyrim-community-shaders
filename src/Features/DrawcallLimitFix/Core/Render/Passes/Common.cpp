@@ -21,9 +21,11 @@ namespace DCLF::Draws
 		return host ? host->Device().GetBufferDeviceAddress({ a_buffer, 0 }) : 0;
 	}
 
-	RenderGraph::BufferRef RecordingBufferRef(rhi::ResourceHandle a_buffer)
+	RenderGraph::BufferRef RecordingBufferRef(const org::RecordingContext& a_recording, const org::ResourceBindingToken& a_binding)
 	{
-		return RenderGraph::BufferRefOf(a_buffer);
+		auto* host = RenderGraphRuntime::Get().Host();
+		return host ? RenderGraph::MakeBufferRef(host->Device(), a_recording.Resolve(a_binding).GetHandle(), 0, std::source_location::current()) :
+		              RenderGraph::BufferRef{};
 	}
 
 	void FoldEyeIntoViewProj(const std::array<float, 16>& a_viewProj, const RE::NiPoint3& a_eye, float (&a_out)[16])
