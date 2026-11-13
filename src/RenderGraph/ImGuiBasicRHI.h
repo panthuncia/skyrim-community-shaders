@@ -21,12 +21,20 @@ namespace org
  * the backend's own (IsOwnTexture); any other ImTextureID a draw names goes to the caller's resolver, which turns it into a
  * descriptor-heap index.
  *
- * Each frame, inside the epoch that runs the pass (its client's commit), Commit copies the draw data's vertices and indices, and
- * the texture uploads, into one host-visible staging buffer, and stores what the pass needs for the execution's run. The
- * pass (MakePass) then records the uploads (copies with their barriers; the graph does not track these textures) and one draw per
- * ImDrawCmd onto its target, each with its scissor, with ImGui's blending. The vertex stage pulls the vertices from the staging
- * buffer (package/Shaders/RenderGraph/ImGui.hlsl). The recording keeps the frame's staging buffer, textures and descriptors alive
- * until its GPU work retires.
+ * Each frame, inside the epoch that runs the passes (their client's commit), Commit copies the draw data's vertices and indices,
+ * and the texture uploads, into one host-visible staging buffer, and stores what the passes need for the execution's run. The
+ * upload pass (MakeUploadPass) records the uploads' copies; the draw pass (MakePass) records one draw per ImDrawCmd onto its
+ * target, each with its scissor, with ImGui's blending. The vertex stage pulls the vertices from the staging buffer
+ * (package/Shaders/RenderGraph/ImGui.hlsl). The recordings keep the frame's staging buffer, textures and descriptors alive until
+ * their GPU work retires.
+ *
+ * The textures are graph textures, so the graph makes every barrier. ImGui's textures, which it rewrites by rectangle (the
+ * font atlas pages), are declared by both passes on every frame: a copy destination in the upload pass and a shader resource in
+ * the draw pass. MakeTexture's textures never change: both passes declare them only until their contents were uploaded and a
+ * draw pass read them; then they are the exempt immutable class (GraphOwnership::ExternalImmutableShaderResource), resting in
+ * the shader-read state and read through their own descriptors. The passes' declarations follow the set of textures
+ * (IDynamicDeclaredResources): a texture is drawn and updated only by an execution whose passes declare it, and its whole
+ * contents are staged on every frame until one of them copied them.
  *
  * Threads: Init, Shutdown, InvalidateTextures and Commit on the render thread (Commit inside the epoch). The pass's Prepare and
  * Record run where the graph runs them, and read only the frame Commit stored for their run.
@@ -38,11 +46,19 @@ namespace ImGuiBasicRHI
 {
 	inline constexpr std::uint32_t kNoIndex = 0xFFFFFFFFu;
 
-	/** @brief A descriptor-heap index and what keeps the descriptor and its resource alive (until the frame's GPU work retires). */
+	/** @brief A texture made by MakeTexture: a full mip chain, a view of all of it and one per level. */
+	class Texture;
+
+	/**
+	 * @brief What a draw samples: a descriptor-heap index (a texture the graph does not track) or one of this backend's textures at a
+	 * level, and what keeps the descriptor and its resource alive (until the frame's GPU work retires).
+	 */
 	struct Binding
 	{
 		std::uint32_t index = kNoIndex;
 		std::shared_ptr<const void> owner;
+		std::shared_ptr<Texture> texture;  // set: one of this backend's textures, read through the passes' declarations
+		int mip = -1;                      // with texture: the level, or -1 for the whole chain
 	};
 
 	/** @brief Turns an ImTextureID the backend does not own into a binding; kNoIndex skips the draws that use it. */
@@ -74,9 +90,6 @@ namespace ImGuiBasicRHI
 	/** @brief Whether an ImTextureID is one of this backend's textures (ImGui's, or MakeTexture's). */
 	bool IsOwnTexture(std::uint64_t a_texture);
 
-	/** @brief A texture made by MakeTexture: a full mip chain, a view of all of it and one per level. */
-	class Texture;
-
 	/**
 	 * @brief An RGBA8 texture from CPU pixels (one span per mip level, tightly packed rows), uploaded with the next frame's Commit.
 	 * Render thread, inside an epoch (or with the graph built). Null, logged, when the device or a view cannot be made.
@@ -84,7 +97,7 @@ namespace ImGuiBasicRHI
 	std::shared_ptr<Texture> MakeTexture(std::uint32_t a_width, std::uint32_t a_height, std::span<const std::span<const std::byte>> a_levels,
 		const char* a_name);
 
-	/** @brief A texture's binding: a_mip = -1 for the whole chain (sampled at its top level), else that level alone. */
+	/** @brief A texture's binding (Binding::texture): a_mip = -1 for the whole chain (sampled at its top level), else that level alone. */
 	Binding BindingOf(const std::shared_ptr<Texture>& a_texture, int a_mip);
 
 	/**
@@ -101,8 +114,14 @@ namespace ImGuiBasicRHI
 	bool Commit(ImDrawData* a_drawData, const Target& a_target, const Resolver& a_resolve);
 
 	/**
-	 * @brief A new instance of the pass, drawing onto a_target (declared as its render target), for a graph build. It records what
-	 * Commit stored for its run, and nothing in an execution Commit did not run for.
+	 * @brief A new instance of the draw pass, drawing onto a_target (declared as its render target), for a graph build. It records
+	 * what Commit stored for its run, and nothing in an execution Commit did not run for.
 	 */
 	std::shared_ptr<org::RenderPass> MakePass(std::shared_ptr<org::ExternalTextureResource> a_target);
+
+	/**
+	 * @brief A new instance of the upload pass, for a graph build: the texture copies Commit stored for its run, into the textures it
+	 * declares as copy destinations. Ordered before the draw pass.
+	 */
+	std::shared_ptr<org::RenderPass> MakeUploadPass();
 }

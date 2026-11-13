@@ -68,7 +68,8 @@ namespace ImGuiRenderer
 			auto* view = reinterpret_cast<ID3D11ShaderResourceView*>(static_cast<std::uintptr_t>(a_texture));
 			if (!view)
 				return {};
-			if (auto icon = Util::IconLoader::OrgBinding(view); icon.index != ImGuiBasicRHI::kNoIndex)
+			// An icon's ORG copy is one of the backend's textures, read through its passes' declarations.
+			if (auto icon = Util::IconLoader::OrgBinding(view); icon.texture)
 				return icon;
 			auto binding = DCLF::GpuTextures::Get().ResolveBinding(view, kSourceTag);
 			if (binding.index == DCLF::GpuTextures::kInvalid)
@@ -147,7 +148,12 @@ namespace ImGuiRenderer
 		{
 			FrameAnchors::ClientDesc client{};
 			client.id = kClientId;
-			// Last in the anchor: over anything else an overlay client draws.
+			// The texture copies, then the draws. Last in the anchor: over anything else an overlay client draws.
+			client.passes.push_back({ .name = "cs.imgui.upload",
+				.anchor = FrameAnchors::Anchor::Overlay,
+				.order = 999,
+				.kind = FrameAnchors::PassKind::Copy,
+				.make = [] { return ImGuiBasicRHI::MakeUploadPass(); } });
 			client.passes.push_back({ .name = "cs.imgui.draw",
 				.anchor = FrameAnchors::Anchor::Overlay,
 				.order = 1000,
