@@ -1528,6 +1528,20 @@ namespace RenderGraph::Engine::Native
 				return S_OK;
 			}
 
+			/**
+			 * @brief Makes the swap chain again at the back buffer's size, after Present reported a changed mode or a failure.
+			 * The back buffer stays: the engine did not ask for this, so it keeps drawing through its views of the current one.
+			 * (Making a new back buffer here left the engine drawing into the old one, and every present copied the new, black one.)
+			 */
+			void RecreateSwapchain()
+			{
+				WaitPresents();
+				if (swapchain->ResizeBuffers(bufferCount, width, height, swapchainFormat, 0) != rhi::Result::Ok)
+					logger::error("[ORG native] the swap chain could not be made again at {}x{}", width, height);
+				else
+					logger::info("[ORG native] swap chain made again at {}x{} (the back buffer is kept)", width, height);
+			}
+
 			HRESULT Present(UINT a_syncInterval, UINT a_flags)
 			{
 				std::lock_guard guard(presentLock);
@@ -1536,7 +1550,7 @@ namespace RenderGraph::Engine::Native
 				if (lost.load(std::memory_order_relaxed))
 					return S_OK;  // the device-loss report and the graph's stop already named it; the game's frame still ends
 				if (std::exchange(resizeRequested, false))
-					(void)Resize(0, width, height, DXGI_FORMAT_UNKNOWN);
+					RecreateSwapchain();
 				if (!backBuffer)
 					return S_OK;
 				static const bool probeEnabled = Switches::On("CS_ORG_NATIVE_PRESENT_PROBE");
