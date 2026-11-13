@@ -137,6 +137,8 @@ namespace RenderGraph::AnchorPasses
 		std::string name;
 		std::shared_ptr<org::Resource> source, target;
 		std::uint32_t width = 0, height = 0;
+		// A versioned twin's slot, declared in place of source or target (CopyOf sets them).
+		std::shared_ptr<org::VersionedTexture> sourceSlot, targetSlot;
 	};
 
 	/** @brief A clear of a whole texture through its UAV (UnorderedAccessClear) to a float or uint value. */
@@ -146,7 +148,22 @@ namespace RenderGraph::AnchorPasses
 		std::shared_ptr<org::Resource> target;
 		std::array<float, 4> value{};
 		std::optional<std::array<std::uint32_t, 4>> uintValue;  // set: a uint clear instead (integer formats)
+		// A versioned twin's slot, cleared in place of target (ClearOf sets it).
+		std::shared_ptr<org::VersionedTexture> slot;
 	};
+
+	/**
+	 * @brief A Clear of a graph twin: its slot when it is versioned (GraphResources::Options::versioned), else its graph resource.
+	 * The caller sets the value. A versioned twin's clears are made this way, never with Graph().
+	 */
+	Clear ClearOf(std::string a_name, const GraphResources::Resource& a_twin);
+
+	/**
+	 * @brief A Copy between two graph twins, each declared as its slot when it is versioned. The size is baked into the pass: a
+	 * resize of either twin needs the client registered again.
+	 */
+	Copy CopyOf(std::string a_name, const GraphResources::Resource& a_source, const GraphResources::Resource& a_target, std::uint32_t a_width,
+		std::uint32_t a_height);
 
 	/**
 	 * @brief A copy from a host-written staging buffer into one subresource of a texture, laid out by a_footprint (rows at the
