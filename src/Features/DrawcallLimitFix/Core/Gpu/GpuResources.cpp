@@ -284,8 +284,8 @@ namespace DCLF
 				continue;
 			if (const auto it = entries.find(buffer); it != entries.end() && !it->second.owner.expired())
 				continue;
-			// The ORG's own buffers need no description (Acquire reads them directly).
-			if (RenderGraph::Engine::Buffers::Resolve(buffer))
+			// The ORG's own buffers need no description (Acquire reads them directly). Asked without making a ref.
+			if (RenderGraph::Engine::Buffers::Owns(buffer))
 				continue;
 			if (!batch)
 				batch = std::make_shared<Batch>();

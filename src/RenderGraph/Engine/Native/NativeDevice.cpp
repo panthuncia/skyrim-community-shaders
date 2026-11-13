@@ -23,6 +23,8 @@
 #	include "RenderGraph/RenderGraphRuntime.h"
 #	include "RenderGraph/Switches.h"
 
+#	include <OpenRenderGraph/GraphHost.h>
+
 #	if defined(CS_ORG_HAS_D3D12)
 #		include <d3d12.h>
 #	endif
@@ -30,6 +32,7 @@
 #	include <algorithm>
 #	include <array>
 #	include <atomic>
+#	include <bit>
 #	include <cstring>
 #	include <chrono>
 #	include <mutex>
@@ -353,6 +356,9 @@ namespace RenderGraph::Engine::Native
 			uint64_t size = 0;
 			bool hostVisible = false;
 			bool readback = false;
+			// A buffer the graph imported (DescribeResource): a graph execution may read it, so the CPU waits for the graph's work
+			// before it writes or reads the memory (WaitGraphReaders).
+			std::atomic<bool> graphShared{ false };
 			D3D11_BUFFER_DESC bufferDesc{};
 			// Images: how the graph imports it. Images and staging textures: the shape; staging textures: the subresources' layout.
 			DxvkOrgInteropImageInfo image{};
@@ -2611,6 +2617,55 @@ namespace RenderGraph::Engine::Native
 			return cpu && cpu->hostVisible ? cpu : nullptr;
 		}
 
+		/** @brief The waits WaitGraphReaders made, for its log lines. */
+		struct GraphWaits
+		{
+			std::atomic<uint64_t> count{ 0 };
+			std::atomic<uint64_t> microseconds{ 0 };
+		};
+
+		GraphWaits& GetGraphWaits()
+		{
+			static GraphWaits waits;
+			return waits;
+		}
+
+		/**
+		 * @brief Before the CPU writes or reads a buffer the graph imported (graphShared): waits for the graph's work up to the last frame
+		 * boundary (GraphHost::SealedPoint), on the graph's own timelines. A buffer the graph never imported needs nothing: the DYNAMIC
+		 * constant buffers the engine maps each frame have no GPU reader in native mode (draws take their constants from captures).
+		 *
+		 * The current frame's executions are not waited for. A mid-frame wait names only sealed work: later work of the frame may be
+		 * queued behind this thread. A buffer mapped once a frame before its readers run is covered: its readers of earlier frames are
+		 * sealed, and this frame's run after the write.
+		 * @return S_OK; DXGI_ERROR_WAS_STILL_DRAWING when a_doNotWait and the work is not done; DXGI_ERROR_DEVICE_REMOVED on a failed wait.
+		 */
+		HRESULT WaitGraphReaders(const NativeResource& a_record, bool a_doNotWait)
+		{
+			if (a_record.kind != NativeResource::Kind::Buffer || !a_record.graphShared.load(std::memory_order_acquire))
+				return S_OK;
+			auto* host = RenderGraphRuntime::Get().Host();
+			if (!host)
+				return S_OK;
+			const auto sealed = host->SealedPoint();
+			if (sealed.Reached())
+				return S_OK;
+			if (a_doNotWait)
+				return DXGI_ERROR_WAS_STILL_DRAWING;
+			const auto start = std::chrono::steady_clock::now();
+			if (!sealed.Wait())
+				return DXGI_ERROR_DEVICE_REMOVED;
+			const auto us = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - start).count());
+			auto& waits = GetGraphWaits();
+			const uint64_t count = waits.count.fetch_add(1, std::memory_order_relaxed) + 1;
+			const uint64_t total = waits.microseconds.fetch_add(us, std::memory_order_relaxed) + us;
+			// The first few, then a running total now and then: enough to see what waits and what it costs.
+			if (count <= 8 || std::has_single_bit(count))
+				logger::info("[ORG native] CPU access waited {:.3f} ms for graph readers of a buffer (bind {:#x}, usage {}, {} bytes); {} waits so far, {:.1f} ms in all",
+					us / 1000.0, a_record.bindFlags, static_cast<uint32_t>(a_record.d3dUsage), a_record.size, count, total / 1000.0);
+			return S_OK;
+		}
+
 		HRESULT ContextMap(ID3D11Resource* a_resource, UINT a_subresource, D3D11_MAP a_type, UINT a_flags, D3D11_MAPPED_SUBRESOURCE* a_out)
 		{
 			if (!a_out)
@@ -2634,7 +2689,8 @@ namespace RenderGraph::Engine::Native
 			if (OpCensus::Flags())
 				NoteOp(MapOp(a_type), *record, a_resource);
 			// The GPU may still use the memory: a read waits for its writes, a write for its reads. NO_OVERWRITE promises not to touch
-			// what is in use. A DYNAMIC buffer is not renamed: no native GPU work reads a buffer except the context's own copies.
+			// what is in use. A DYNAMIC buffer is not renamed. The context's own copies are waited for by their value; a buffer the
+			// graph imported waits for the graph's work too (WaitGraphReaders). Any other buffer has no GPU reader.
 			if (a_type != D3D11_MAP_WRITE_NO_OVERWRITE) {
 				const uint64_t use = cpu->lastUse.load(std::memory_order_acquire);
 				if (!g_device->immediate.Done(use)) {
@@ -2643,6 +2699,8 @@ namespace RenderGraph::Engine::Native
 					if (!g_device->immediate.Wait(use))
 						return DXGI_ERROR_DEVICE_REMOVED;
 				}
+				if (const HRESULT graph = WaitGraphReaders(*cpu, (a_flags & D3D11_MAP_FLAG_DO_NOT_WAIT) != 0); FAILED(graph))
+					return graph;
 			}
 			void* data = nullptr;
 			cpu->resource->Map(&data);
@@ -2709,8 +2767,10 @@ namespace RenderGraph::Engine::Native
 				const uint64_t size = a_box ? a_box->right - a_box->left : record->size;
 				if (!size || from + size > record->size)
 					return;
-				// Written by the CPU when the GPU is done with the buffer, else through an upload buffer in the context's order.
-				if (record->hostVisible && !record->readback && g_device->immediate.Done(record->lastUse.load(std::memory_order_acquire))) {
+				// Written by the CPU when the GPU is done with the buffer (the graph's readers waited for, as Map does), else through an
+				// upload buffer in the context's order.
+				if (record->hostVisible && !record->readback && g_device->immediate.Done(record->lastUse.load(std::memory_order_acquire)) &&
+					WaitGraphReaders(*record, false) == S_OK) {
 					void* data = nullptr;
 					record->resource->Map(&data);
 					if (data) {
@@ -3448,6 +3508,8 @@ namespace RenderGraph::Engine::Native
 		a_info = {};
 		a_info.version = DXVK_ORG_INTEROP_VERSION;
 		if (record->kind == NativeResource::Kind::Buffer) {
+			// The graph imports it from here, so a CPU access waits for the graph's work from now on (WaitGraphReaders).
+			record->graphShared.store(true, std::memory_order_release);
 			// As DXVK describes a buffer: its range of the Vulkan buffer, with the device address DCLF draws from.
 			a_info.kind = DXVK_ORG_INTEROP_RESOURCE_BUFFER;
 			a_info.buffer = { record->vkBuffer, 0, record->size, record->address, record->usage };

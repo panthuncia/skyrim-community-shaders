@@ -8,6 +8,7 @@
 #include "Features/DrawcallLimitFix/Features/MenuViews/MenuScenes.h"
 
 #include "Globals.h"
+#include "RenderGraph/Engine/Buffers/EngineBuffers.h"
 #include "RenderGraph/Engine/Constants/EngineConstants.h"
 #include "RenderGraph/Engine/Tripwire/Tripwire.h"
 #include "RenderGraph/FrameAnchors.h"
@@ -123,6 +124,8 @@ namespace DCLF::Features::MenuViews::Scenes::SceneDraws
 				bindings.depth = a_builder.DepthReadWrite(client->depth).View();
 				// The published inputs, each with the view whose index the draws' latches carry.
 				bindings.inputs = client->inputs.Declare(a_builder);
+				// A particles draw pulls its positions from the engine's dynamic ring (EffectSceneConstants::streamRef).
+				::RenderGraph::Engine::Buffers::DeclareRingRead(a_builder);
 				return bindings;
 			}
 

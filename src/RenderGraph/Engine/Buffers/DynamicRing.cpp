@@ -2,14 +2,22 @@
 
 #if defined(CS_HAS_RENDER_GRAPH)
 
+#	include "RenderGraph/BufferRefs.h"
 #	include "RenderGraph/Engine/Buffers/BufferBacking.h"
 #	include "RenderGraph/Engine/Buffers/EngineBuffers.h"
+#	include "RenderGraph/Engine/Native/Native.h"
 #	include "RenderGraph/RenderGraphRuntime.h"
+
+#	include <Resources/Buffers/Buffer.h>
+#	include <Resources/Buffers/VersionedBuffer.h>
 
 #	include <algorithm>
 #	include <bit>
+#	include <exception>
 #	include <memory>
 #	include <mutex>
+#	include <shared_mutex>
+#	include <unordered_set>
 #	include <utility>
 #	include <vector>
 
@@ -37,6 +45,18 @@ namespace RenderGraph::Engine::Buffers::detail
 		{
 			static REL::Relocation<std::uint32_t*> offset{ REL::RelocationID(524733, 411352) };
 			return *offset;
+		}
+
+		/** @brief Every chunk's ORG buffer, for IsRingChunk. Chunks are kept for the process, so an entry never goes stale. */
+		struct ChunkSet
+		{
+			std::shared_mutex lock;
+			std::unordered_set<const org::Buffer*> buffers;
+		};
+		ChunkSet& Chunks()
+		{
+			static ChunkSet* set = new ChunkSet;  // never destroyed, as the ring
+			return *set;
 		}
 
 		/** @brief One piece of the ring: an upload backing and what the engine's slot holds for it. */
@@ -104,6 +124,7 @@ namespace RenderGraph::Engine::Buffers::detail
 				}
 				current = first;
 				offset = 0;
+				PublishVersion(*first);
 				active.store(true, std::memory_order_release);
 				GetCounters().ringActive.store(true, std::memory_order_relaxed);
 				logger::info("[ORG] engine buffers: the dynamic ring runs on ORG upload chunks of {} KiB", kChunkBytes / 1024);
@@ -116,6 +137,7 @@ namespace RenderGraph::Engine::Buffers::detail
 			 */
 			bool Advance(std::uint32_t a_size)
 			{
+				ReleaseParked();
 				if (current)
 					Retire(*std::exchange(current, nullptr));
 				Chunk* next = Take(a_size);
@@ -126,17 +148,60 @@ namespace RenderGraph::Engine::Buffers::detail
 				Publish(slot, *next);
 				current = next;
 				offset = 0;
+				PublishVersion(*next);
 				return true;
 			}
 
-			/** @brief Hands a_chunk back to the free list once the GPU is past every D3D11 command issued until now. */
+			/**
+			 * @brief A full chunk. In guest mode it goes back to the free list once the GPU is past every D3D11 command issued until now.
+			 * In native mode the graph reads it: draws latched from it run in executions submitted later in the same frame. So it is
+			 * parked until the frame ends (ReleaseParked), and then waits for the graph's submissions up to that point.
+			 */
 			void Retire(Chunk& a_chunk)
+			{
+				if (Engine::Native::Active()) {
+					parked.push_back({ &a_chunk, RenderGraph::RefFrame() });
+					return;
+				}
+				ReleaseAfterWork(a_chunk);
+			}
+
+			/** @brief Hands a_chunk back to the free list once the GPU is past the work submitted until now (ReleaseAfterD3D11). */
+			void ReleaseAfterWork(Chunk& a_chunk)
 			{
 				std::shared_ptr<const void> token(static_cast<const void*>(&a_chunk), [this](const void* a_retired) {
 					std::scoped_lock lock(freeMutex);
 					freeChunks.push_back(const_cast<Chunk*>(static_cast<const Chunk*>(a_retired)));
 				});
 				RenderGraphRuntime::Get().ReleaseAfterD3D11(std::move(token));
+			}
+
+			/**
+			 * @brief Native mode: the parked chunks of frames that have ended. A frame ends at its present (SealPresented advances
+			 * RefFrame), after every graph execution of that frame was submitted. So the native release, which waits for the graph's
+			 * submissions made until now to retire, covers every execution that may read the chunk.
+			 */
+			void ReleaseParked()
+			{
+				if (parked.empty())
+					return;
+				const std::uint64_t frame = RenderGraph::RefFrame();
+				std::erase_if(parked, [&](const Parked& a_parked) {
+					if (a_parked.frame >= frame)
+						return false;
+					ReleaseAfterWork(*a_parked.chunk);
+					return true;
+				});
+			}
+
+			/**
+			 * @brief a_chunk becomes the ring's current version. Its readers declare the ring, so the graph knows them; the chunk's
+			 * lifetime is the ring's (Retire), so the version needs no owner.
+			 */
+			void PublishVersion(Chunk& a_chunk)
+			{
+				if (const auto& versions = RingVersions())
+					versions->PublishLate(a_chunk.backing.buffer);
 			}
 
 			/** @brief A free chunk of at least a_size bytes, or a new one; null when none can be made. */
@@ -166,6 +231,11 @@ namespace RenderGraph::Engine::Buffers::detail
 				chunk->backing = std::move(*backing);
 				chunk->engine = std::move(engine);
 				chunk->size = size;
+				{
+					auto& set = Chunks();
+					std::unique_lock lock(set.lock);
+					set.buffers.insert(chunk->backing.buffer.get());
+				}
 				chunks.push_back(std::move(chunk));
 				const auto made = GetCounters().ringChunks.fetch_add(1, std::memory_order_relaxed) + 1;
 				if (made > 8 && std::has_single_bit(made))
@@ -201,10 +271,18 @@ namespace RenderGraph::Engine::Buffers::detail
 				logger::error("[ORG] engine buffers: a dynamic ring chunk could not be made; the engine's own ring is back");
 			}
 
-			std::mutex mutex;  // Map's (the engine's globals and the current chunk)
+			/** @brief A full chunk waiting for the end of the frame it filled in (native mode), with that frame (RefFrame). */
+			struct Parked
+			{
+				Chunk* chunk;
+				std::uint64_t frame;
+			};
+
+			std::mutex mutex;  // Map's (the engine's globals, the current chunk and the parked ones)
 			std::mutex freeMutex;
 			std::vector<std::unique_ptr<Chunk>> chunks;  // every chunk made, kept for the process
 			std::vector<Chunk*> freeChunks;
+			std::vector<Parked> parked;
 			Chunk* current = nullptr;
 			std::uint32_t offset = 0;
 			std::atomic<bool> active{ false };
@@ -235,6 +313,32 @@ namespace RenderGraph::Engine::Buffers::detail
 			}
 			static inline REL::Relocation<decltype(thunk)> func;
 		};
+	}
+
+	const std::shared_ptr<org::VersionedBuffer>& RingVersions()
+	{
+		static std::once_flag once;
+		// Never destroyed, as the ring: its versions are the chunks, which may still be read during shutdown.
+		static auto* versions = new std::shared_ptr<org::VersionedBuffer>;
+		std::call_once(once, [] {
+			try {
+				// A small stand-in, which the readers' declarations resolve to; it never changes, so a new chunk costs no graph edit.
+				auto standIn = org::Buffer::CreateUnmaterializedStructuredBuffer(1, 4, false);
+				standIn->SetName("Engine::DynamicRing.stand-in");
+				standIn->Materialize();
+				*versions = org::VersionedBuffer::CreateLateBound(std::move(standIn));
+			} catch (const std::exception& e) {
+				logger::warn("[ORG] engine buffers: the dynamic ring's late-bound buffer could not be made ({}); its readers declare nothing", e.what());
+			}
+		});
+		return *versions;
+	}
+
+	bool IsRingChunk(const org::Buffer* a_buffer)
+	{
+		auto& set = Chunks();
+		std::shared_lock lock(set.lock);
+		return set.buffers.contains(a_buffer);
 	}
 
 	void InstallRingHooks()
