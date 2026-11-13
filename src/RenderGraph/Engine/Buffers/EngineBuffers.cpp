@@ -27,6 +27,7 @@ namespace RenderGraph::Engine::Buffers
 #	include "RenderGraph/UndeclaredAccess.h"
 
 #	include <OpenRenderGraph/GraphHost.h>
+#	include <Render/ResourceUseDeclaration.h>
 #	include <Resources/Buffers/Buffer.h>
 #	include <Resources/Buffers/VersionedBuffer.h>
 #	include <rhi.h>
