@@ -26,9 +26,24 @@ frame back to that state.
 |-------|---------------------------------------------------------------------------------------------------------------|----------------|
 | 0     | Censuses: native immediate operations, writes after creation, anchor run shapes, undeclared accesses           | Done (wave 1)  |
 | 1     | Every port declares what it reads and writes, in both modes                                                   | Wave 1 merged  |
-| 2     | Native resources owned by the graph; exempt class for immutable textures and static buffers                   |                |
-| 3     | The engine's immediate operations become graph work                                                            |                |
-| 4     | One frame graph: hooks only capture; one prepare and submit at Present; BasicRenderer's present tail          |                |
+| 2     | Native resources owned by the graph; versioned identities in place of rebuilds; exempt class                  |                |
+| 3     | The engine's leftover GPU operations as static gated passes; rare ones through `ExternalClient`                |                |
+| 4     | Six live region subgraphs plus DCLF's own epochs; home states off; async structural builds                    |                |
+
+**Revised 2026-11-13.** Three rules shape the work:
+1. No structural recompile on the hot path; a subgraph that must recompile does it asynchronously and is swapped in.
+2. Large regions of work are subgraphs, so one recompiling or re-recording (DCLF) leaves the others alone.
+3. Static passes first, then swapped backings (versioned resources), and no dynamic declarations.
+
+The regions, in engine order:
+1. shadows;
+2. pre-main;
+3. deferred;
+4. engine draws and water;
+5. post;
+6. UI and present.
+
+DCLF's revision-driven epochs stay separate.
 | 5     | The same on D3D12                                                                                              |                |
 | 6     | Cleanup                                                                                                        |                |
 
