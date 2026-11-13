@@ -6,6 +6,8 @@
 #include <memory>
 #include <string_view>
 
+class Texture2D;
+
 namespace GraphResources
 {
 	class Texture2D;
@@ -39,8 +41,10 @@ namespace org
  * - The occlusion cubemap: a graph texture named "CloudShadows::Occlusion", kept across frames. It exports a D3D11 SRV, which the
  *   feature binds at t25 (engine pixel shaders, D3D11 compute) and t26 (a face's cloud self shadowing), and which Drawcall Limit Fix
  *   reads as its frame texture, until those readers are ported. Graph readers (Exponential Height Fog, the sky family) read it by name.
- * - The layers: Cloud Shadows' D3D11 textures, imported with their SRV and the RTV of their first face (ImportLayer), so the copy and
- *   the sky family share one graph resource per layer.
+ * - The layers: graph-owned cube twins ("CloudShadows::Layer[<layer>]", MakeLayer), persistent and published, exported to D3D11:
+ *   Cloud Shadows makes its SRV and per-face RTVs on the export for the engine's cloud draws and its own clears and copies, and the
+ *   copy and the sky family declare the twin itself (ImportLayer). When a twin cannot be made, the layer is a D3D11 texture,
+ *   imported with its SRV and the RTV of its first face.
  *
  * On any failure it stops for good and IsActive() turns false: the feature then copies on D3D11 again.
  *
@@ -61,11 +65,20 @@ public:
 	static ORGCloudShadows& Get();
 
 	/**
-	 * @brief Cloud Shadows' layer a_layer (0 to 31) as a graph resource ("cs.d3d11.CloudShadows::Layer[<layer>]"): its SRV and its faces'
-	 * RTVs. Every graph user imports a layer through this, so one import serves them all. Null when the feature has no layers or the
-	 * runtime is not active.
+	 * @brief Cloud Shadows' layer a_layer (0 to 31) as a graph resource: its twin (MakeLayer), else its D3D11 texture imported
+	 * ("cs.d3d11.CloudShadows::Layer[<layer>]") with its SRV and its faces' RTVs. Every graph user takes a layer through this, so one
+	 * resource serves them all. Null when the feature has no layers or the runtime is not active.
 	 */
 	static std::shared_ptr<org::ExternalTextureResource> ImportLayer(int a_layer);
+
+	/**
+	 * @brief At SetupResources, when requested and the runtime is active: makes layer a_layer as a graph-owned cube twin of a_desc
+	 * (the layers' description: the reflections cubemap's shape in R8), persistent, exported and published under a_name. It lives as
+	 * long as the game, whatever happens to the copy, since D3D11 keeps drawing into its export.
+	 * @return A Buffer.h wrapper of the export with an SRV made from a_srvDesc, for Cloud Shadows' texCloudShadowLayers (which makes
+	 * the faces' RTVs on it); null: make a D3D11 texture.
+	 */
+	static Texture2D* MakeLayer(int a_layer, const D3D11_TEXTURE2D_DESC& a_desc, const D3D11_SHADER_RESOURCE_VIEW_DESC& a_srvDesc, const char* a_name);
 
 	/**
 	 * @brief At SetupResources, after Cloud Shadows made its layers, with the runtime active: makes the program and the occlusion

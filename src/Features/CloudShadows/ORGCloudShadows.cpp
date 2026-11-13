@@ -169,16 +169,69 @@ void ORGCloudShadows::Reserve()
 		logger::warn("[ORG] Cloud Shadows stays on D3D11: the ReflectionsPrepass anchor could not be reserved");
 }
 
+namespace
+{
+	/** @brief The layers' twins (ORGCloudShadows::MakeLayer); a null entry is a D3D11 layer. */
+	std::array<std::unique_ptr<GraphResources::Texture2D>, CloudShadows::kMaxCloudLayers>& LayerTwins()
+	{
+		static std::array<std::unique_ptr<GraphResources::Texture2D>, CloudShadows::kMaxCloudLayers> s_twins;
+		return s_twins;
+	}
+}
+
+Texture2D* ORGCloudShadows::MakeLayer(int a_layer, const D3D11_TEXTURE2D_DESC& a_desc, const D3D11_SHADER_RESOURCE_VIEW_DESC& a_srvDesc, const char* a_name)
+{
+	if (a_layer < 0 || a_layer >= CloudShadows::kMaxCloudLayers || !Requested() || !RenderGraphRuntime::Get().IsActive())
+		return nullptr;
+	auto& twin = LayerTwins()[a_layer];
+	if (twin)
+		return nullptr;
+	// Drawn and copied by D3D11 (the engine's cloud draws, Cloud Shadows' clears and copies) and sampled by the engine's draws:
+	// exported, never aliased. A face keeps its clouds until the next frame draws it.
+	D3D11_TEXTURE2D_DESC desc = a_desc;
+	desc.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
+	desc.MiscFlags = a_desc.MiscFlags & D3D11_RESOURCE_MISC_TEXTURECUBE;
+	desc.CPUAccessFlags = 0;
+	desc.Usage = D3D11_USAGE_DEFAULT;
+	auto texture = std::make_unique<GraphResources::Texture2D>(desc, std::string(a_name),
+		GraphResources::Options{ .lifetime = GraphResources::Lifetime::Persistent, .d3d11 = GraphResources::Export::SRV });
+	if (!*texture || !texture->D3D11() || !std::dynamic_pointer_cast<org::ExternalTextureResource>(texture->Graph())) {
+		logger::warn("[ORG] Cloud Shadows: {} could not be made on the render graph; it is a D3D11 texture", a_name);
+		return nullptr;
+	}
+	// The occlusion copy and the sky family's face draws declare it in their graphs: one resource in every graph.
+	if (!PublishedResources::Publish(*texture)) {
+		logger::warn("[ORG] Cloud Shadows: {} could not be published; it is a D3D11 texture", a_name);
+		return nullptr;
+	}
+	// The wrapper holds a reference of its own: the twin keeps the image, the wrapper the D3D11 texture and its views.
+	auto* d3d11 = texture->D3D11();
+	d3d11->AddRef();
+	auto* wrapper = new Texture2D(d3d11, a_name);
+	try {
+		wrapper->CreateSRV(a_srvDesc);
+	} catch (const std::exception& e) {
+		logger::warn("[ORG] Cloud Shadows: {}'s SRV could not be made on the export ({}); it is a D3D11 texture", a_name, e.what());
+		delete wrapper;
+		return nullptr;
+	}
+	twin = std::move(texture);
+	if (a_layer == 0)
+		logger::info("[ORG] Cloud Shadows: the cloud layers are graph textures ({}x{}, {} mips), published by name", desc.Width, desc.Height, desc.MipLevels);
+	return wrapper;
+}
+
 std::shared_ptr<org::ExternalTextureResource> ORGCloudShadows::ImportLayer(int a_layer)
 {
 	auto& cloudShadows = globals::features::cloudShadows;
 	if (a_layer < 0 || a_layer >= CloudShadows::kMaxCloudLayers)
 		return nullptr;
+	if (const auto& twin = LayerTwins()[a_layer]; twin && RenderGraphRuntime::Get().IsActive())
+		return std::dynamic_pointer_cast<org::ExternalTextureResource>(twin->Graph());
 	auto* layer = cloudShadows.texCloudShadowLayers[a_layer];
 	if (!layer || !layer->resource || !layer->srv || !cloudShadows.cloudShadowLayerRTVs[a_layer][0])
 		return nullptr;
-	// Engine draws, the sky family's draws and D3D11 copies write the layers, so they stay D3D11 textures. Each lives as long as the
-	// feature.
+	// A D3D11 layer (its twin could not be made): imported. Each lives as long as the feature.
 	return FrameAnchors::D3D11Texture(fmt::format("CloudShadows::Layer[{}]", a_layer), layer->resource.get(), layer->srv.get(), nullptr,
 		cloudShadows.cloudShadowLayerRTVs[a_layer][0]);
 }
@@ -314,6 +367,7 @@ struct ORGCloudShadows::Impl
 
 void ORGCloudShadows::Reserve() {}
 std::shared_ptr<org::ExternalTextureResource> ORGCloudShadows::ImportLayer(int) { return nullptr; }
+Texture2D* ORGCloudShadows::MakeLayer(int, const D3D11_TEXTURE2D_DESC&, const D3D11_SHADER_RESOURCE_VIEW_DESC&, const char*) { return nullptr; }
 bool ORGCloudShadows::Setup(std::function<void()>) { return false; }
 bool ORGCloudShadows::IsActive() const { return false; }
 ID3D11ShaderResourceView* ORGCloudShadows::OcclusionSRV() const { return nullptr; }
