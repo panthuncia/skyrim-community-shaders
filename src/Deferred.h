@@ -35,6 +35,12 @@ public:
 	/** @brief Creates render targets, samplers, and the directional shadow structured buffer. */
 	void SetupResources();
 
+	/**
+	 * @brief With CS_ORG_ENGINE_TARGETS, tells the engine targets which of the engine's render targets SetupResources remakes,
+	 * and how, so ORG makes them that way from the start. Called once at hook install, before the render graph exists.
+	 */
+	static void PlanTargets();
+
 	/** @brief Runs feature reflection prepasses with render targets unbound. */
 	void ReflectionsPrepasses();
 
@@ -179,6 +185,8 @@ public:
 			stl::write_thunk_call<Main_RenderFirstPersonView>(REL::RelocationID(35560, 36559).address() + Util::VersionedRelocation::Select(0x944, 0x954, 0x971));
 
 			stl::detour_thunk<Renderer_ResetState>(REL::RelocationID(75570, 77371));
+
+			PlanTargets();
 
 			logger::info("[Deferred] Installed hooks");
 		}

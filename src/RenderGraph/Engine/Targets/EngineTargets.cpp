@@ -21,6 +21,7 @@
 #	include <array>
 #	include <atomic>
 #	include <mutex>
+#	include <optional>
 #	include <string>
 #	include <vector>
 
@@ -141,7 +142,7 @@ namespace RenderGraph::Engine::Targets
 			std::uint64_t Image() const { return image; }
 
 			/** @brief The resize generation moves once: the anchors build again and republish what changed. */
-			static void BumpGeneration() { BumpResizeGeneration(); }
+			static void BumpGeneration(std::string_view a_who) { BumpResizeGeneration(a_who); }
 
 		private:
 			std::shared_ptr<org::ExternalTextureResource> external;
@@ -149,10 +150,31 @@ namespace RenderGraph::Engine::Targets
 			bool served = false;  // a reader was handed the current image (Serve)
 		};
 
+		/** @brief A render target's shape: the engine's properties, a plan, or Recreate's description. */
+		struct ColourShape
+		{
+			UINT width = 0;
+			UINT height = 0;
+			DXGI_FORMAT format = DXGI_FORMAT_UNKNOWN;
+			bool srv = true;
+			bool rtv = true;
+			bool uav = false;
+			bool copy = false;
+			DXGI_FORMAT copyFormat = DXGI_FORMAT_UNKNOWN;  // the copy texture's format; UNKNOWN is format
+
+			/** @brief Whether a_other makes the same texture (the copy aside). */
+			bool SameTexture(const ColourShape& a_other) const
+			{
+				return width == a_other.width && height == a_other.height && format == a_other.format && srv == a_other.srv && rtv == a_other.rtv &&
+				       uav == a_other.uav;
+			}
+		};
+
 		struct Colour
 		{
 			RenderTargetProperties props{};  // the engine's last creation of the target
 			bool known = false;
+			ColourShape shape{};  // what ORG made last
 			std::unique_ptr<EngineTexture> texture;
 			std::unique_ptr<EngineTexture> copy;
 			// The UAV given to the engine. WindowSizeChanged releases a target's texture, views and copy but never its UAV.
@@ -181,6 +203,8 @@ namespace RenderGraph::Engine::Targets
 		struct State
 		{
 			std::array<Colour, kColourSlots> colours;
+			// Features' plans for render targets (PlanTarget), set before the graph exists.
+			std::array<std::optional<Plan>, kColourSlots> plans;
 			std::array<Depth, kDepthSlots> depths;
 			std::array<Cube, kCubeSlots> cubes;
 			std::array<Volume, kVolumeSlots> volumes;
@@ -232,7 +256,7 @@ namespace RenderGraph::Engine::Targets
 			auto& state = Targets();
 			if (std::exchange(state.heldReplaced, false)) {
 				state.heldResized = false;
-				EngineTexture::BumpGeneration();
+				EngineTexture::BumpGeneration(fmt::format("engine targets ({})", a_what));
 				logger::info("[ORG] engine targets: {} made again in another shape class while a reader held its old image; the anchors build again", a_what);
 				return true;
 			}
@@ -438,21 +462,39 @@ namespace RenderGraph::Engine::Targets
 
 		// --- Render targets (75467 / 77253) ---
 
-		/** @brief A render target's shape: the engine's properties, or Recreate's description. */
-		struct ColourShape
-		{
-			UINT width = 0;
-			UINT height = 0;
-			DXGI_FORMAT format = DXGI_FORMAT_UNKNOWN;
-			bool srv = true;
-			bool rtv = true;
-			bool uav = false;
-			bool copy = false;
-		};
-
 		ColourShape ShapeOf(const RenderTargetProperties& a_props)
 		{
 			return { a_props.width, a_props.height, static_cast<DXGI_FORMAT>(a_props.format.underlying()), true, true, a_props.supportUnorderedAccess, a_props.copyable };
+		}
+
+		/**
+		 * @brief The shape ORG makes render target a_index in: the engine's properties with the target's plan on top. A feature that
+		 * remakes the target then finds it in the shape it wants, so its first version already has its final shape class.
+		 */
+		ColourShape PlannedShape(std::uint32_t a_index, const RenderTargetProperties& a_props)
+		{
+			auto shape = ShapeOf(a_props);
+			const auto& plan = Targets().plans[a_index];
+			if (!plan)
+				return shape;
+			if (plan->format != DXGI_FORMAT_UNKNOWN) {
+				// The copy stays in the engine's format: HDR's upgrade replaces only the texture and its views.
+				shape.copyFormat = shape.format;
+				shape.format = plan->format;
+			}
+			if (plan->bindFlags) {
+				shape.srv = (plan->bindFlags & D3D11_BIND_SHADER_RESOURCE) != 0;
+				shape.rtv = (plan->bindFlags & D3D11_BIND_RENDER_TARGET) != 0;
+				shape.uav = (plan->bindFlags & D3D11_BIND_UNORDERED_ACCESS) != 0;
+			}
+			// kMAIN's last creation. Within a set the engine makes kMAIN early, so its properties are normally the new ones.
+			if (const auto& main = Targets().colours[RE::RENDER_TARGET::kMAIN]; plan->mainSize && main.known) {
+				shape.width = main.props.width;
+				shape.height = main.props.height;
+			}
+			if (plan->dropCopy)
+				shape.copy = false;
+			return shape;
 		}
 
 		/**
@@ -525,9 +567,11 @@ namespace RenderGraph::Engine::Targets
 			winrt::com_ptr<ID3D11ShaderResourceView> copySrv;
 			const bool makeCopy = a_shape.copy && a_fields != Fields::KeepCopy;
 			if (makeCopy) {
+				const auto copyFormat = a_shape.copyFormat != DXGI_FORMAT_UNKNOWN ? a_shape.copyFormat : a_shape.format;
 				auto copyDesc = desc;
+				copyDesc.format = copyFormat;
 				copyDesc.bindFlags = D3D11_BIND_SHADER_RESOURCE;
-				copyDesc.srv = a_shape.format;
+				copyDesc.srv = copyFormat;
 				copyDesc.rtv = DXGI_FORMAT_UNKNOWN;
 				copyDesc.uav = DXGI_FORMAT_UNKNOWN;
 				copy = Export(copyDesc, name + " Copy");
@@ -568,6 +612,7 @@ namespace RenderGraph::Engine::Targets
 				data.SRVCopy = Give(std::move(copySrv), data.textureCopy, name + " Copy SRV", copy.graph, handles);
 			}
 			a_record.uav = data.UAV;
+			a_record.shape = a_shape;
 			Targets().changed = true;
 			return true;
 		}
@@ -583,7 +628,7 @@ namespace RenderGraph::Engine::Targets
 				auto& record = Targets().colours[a_target];
 				record.props = *a_properties;
 				record.known = true;
-				if (CanOwnColour(a_target, *a_properties) && Active() && MakeColour(a_target, record, ShapeOf(*a_properties), Fields::Released)) {
+				if (CanOwnColour(a_target, *a_properties) && Active() && MakeColour(a_target, record, PlannedShape(a_target, *a_properties), Fields::Released)) {
 					// Outside the set (a target the engine makes later): its own move.
 					if (!Targets().inSet)
 						Move(record.texture);
@@ -1023,10 +1068,14 @@ namespace RenderGraph::Engine::Targets
 			auto& record = state.colours[i];
 			if (!record.known || (record.texture && record.texture->Graph()) || !CanOwnColour(i, record.props))
 				continue;
-			if (MakeColour(i, record, ShapeOf(record.props), Fields::Replace))
+			if (MakeColour(i, record, PlannedShape(i, record.props), Fields::Replace)) {
 				++taken;
-			else
+				if (const auto& plan = state.plans[i]; plan && record.shape.format != static_cast<DXGI_FORMAT>(record.props.format.underlying()))
+					logger::info("[ORG] {}: made in format {} from the start, as {} remakes it (the engine asks for {})", record.texture->Name(),
+						static_cast<int>(record.shape.format), plan->owner, static_cast<int>(record.props.format.underlying()));
+			} else {
 				++kept;
+			}
 		}
 		// Targets that view a mip of another (mipLevel, textureTarget): their views are made again on the owner's new texture by
 		// the engine's own function, as its next Create would.
@@ -1141,6 +1190,13 @@ namespace RenderGraph::Engine::Targets
 		logger::info("[ORG] engine targets: tripwire handles installed in the fields of {} targets ({} objects wrapped, the same DXVK objects)", targets, objects);
 	}
 
+	void PlanTarget(std::uint32_t a_target, const Plan& a_plan)
+	{
+		if (!Enabled() || a_target >= kColourSlots)
+			return;
+		Targets().plans[a_target] = a_plan;
+	}
+
 	bool Owns(std::uint32_t a_target)
 	{
 		if (!Enabled() || a_target >= kColourSlots)
@@ -1159,6 +1215,12 @@ namespace RenderGraph::Engine::Targets
 		auto& record = Targets().colours[a_target];
 		ColourShape shape{ a_desc.Width, a_desc.Height, a_desc.Format, (a_desc.BindFlags & D3D11_BIND_SHADER_RESOURCE) != 0,
 			(a_desc.BindFlags & D3D11_BIND_RENDER_TARGET) != 0, (a_desc.BindFlags & D3D11_BIND_UNORDERED_ACCESS) != 0, false };
+		// A planned target already has this shape: nothing to make, and no new version for the graphs to follow.
+		if (record.shape.SameTexture(shape) && (a_keepCopy || !Owned(record.copy))) {
+			logger::info("[ORG] {}: already made as {} wants it ({}x{}, format {})", record.texture->Name(), a_name ? a_name : "?", a_desc.Width, a_desc.Height,
+				static_cast<int>(a_desc.Format));
+			return true;
+		}
 		if (!MakeColour(a_target, record, shape, a_keepCopy ? Fields::KeepCopy : Fields::Replace))
 			return false;
 		Targets().changed = false;
@@ -1172,8 +1234,11 @@ namespace RenderGraph::Engine::Targets
 		if (!Owns(a_target) || !Active())
 			return false;
 		auto& record = Targets().colours[a_target];
-		auto shape = ShapeOf(record.props);
+		auto shape = PlannedShape(a_target, record.props);
 		shape.copy = false;
+		// Already in that shape (a planned target never left it): nothing to make.
+		if (record.shape.SameTexture(shape))
+			return true;
 		if (!MakeColour(a_target, record, shape, Fields::KeepCopy))
 			return false;
 		Targets().changed = false;
@@ -1234,6 +1299,7 @@ namespace RenderGraph::Engine::Targets
 	void EndSet() {}
 	void TakeOver() {}
 	void InstallHandles() {}
+	void PlanTarget(std::uint32_t, const Plan&) {}
 	bool Owns(std::uint32_t) { return false; }
 	bool Recreate(std::uint32_t, const D3D11_TEXTURE2D_DESC&, const char*, bool) { return false; }
 	bool Restore(std::uint32_t) { return false; }

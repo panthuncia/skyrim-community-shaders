@@ -42,6 +42,33 @@ struct BlendStates
 	}
 };
 
+namespace
+{
+	/** @brief An engine render target Deferred remakes for itself, at kMAIN's size, with an RTV and an SRV. */
+	struct DeferredTarget
+	{
+		RE::RENDER_TARGET target;
+		const char* name;
+		DXGI_FORMAT format;
+	};
+
+	constexpr UINT kDeferredTargetBinds = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
+
+	// One table for SetupResources and for the engine targets' plans, so both make the same shapes.
+	constexpr DeferredTarget kDeferredTargets[] = {
+		{ ALBEDO, "Deferred::Albedo", DXGI_FORMAT_R10G10B10A2_UNORM },
+		{ SPECULAR, "Deferred::Specular", DXGI_FORMAT_R11G11B10_FLOAT },
+		{ REFLECTANCE, "Deferred::Reflectance", DXGI_FORMAT_R11G11B10_FLOAT },
+		{ NORMALROUGHNESS, "Deferred::NormalRoughness", DXGI_FORMAT_R10G10B10A2_UNORM },
+		{ MASKS, "Deferred::Masks", DXGI_FORMAT_R11G11B10_FLOAT },
+		// Masks2 holds vertexAO; fp16 to allow blending.
+		{ MASKS2, "Deferred::Masks2", DXGI_FORMAT_R16_UNORM },
+		// TAA water history buffers need RGBA16: alpha stores premultiplied coverage for ISWaterBlend.
+		{ RE::RENDER_TARGETS::kWATER_1, "Deferred::Water1", DXGI_FORMAT_R16G16B16A16_FLOAT },
+		{ RE::RENDER_TARGETS::kWATER_2, "Deferred::Water2", DXGI_FORMAT_R16G16B16A16_FLOAT },
+	};
+}
+
 void SetupRenderTarget(RE::RENDER_TARGET target, const char* name, D3D11_TEXTURE2D_DESC texDesc, D3D11_SHADER_RESOURCE_VIEW_DESC srvDesc, D3D11_RENDER_TARGET_VIEW_DESC rtvDesc, D3D11_UNORDERED_ACCESS_VIEW_DESC uavDesc, DXGI_FORMAT format, uint bindFlags)
 {
 	auto renderer = globals::game::renderer;
@@ -143,22 +170,9 @@ void Deferred::SetupResources()
 		// TEMPORAL_AA_WATER_1
 		// TEMPORAL_AA_WATER_2
 
-		// Albedo
-		SetupRenderTarget(ALBEDO, "Deferred::Albedo", texDesc, srvDesc, rtvDesc, uavDesc, DXGI_FORMAT_R10G10B10A2_UNORM, D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE);
-		// Specular
-		SetupRenderTarget(SPECULAR, "Deferred::Specular", texDesc, srvDesc, rtvDesc, uavDesc, DXGI_FORMAT_R11G11B10_FLOAT, D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE);
-		// Reflectance
-		SetupRenderTarget(REFLECTANCE, "Deferred::Reflectance", texDesc, srvDesc, rtvDesc, uavDesc, DXGI_FORMAT_R11G11B10_FLOAT, D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE);
-		// Normal + Roughness
-		SetupRenderTarget(NORMALROUGHNESS, "Deferred::NormalRoughness", texDesc, srvDesc, rtvDesc, uavDesc, DXGI_FORMAT_R10G10B10A2_UNORM, D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE);
-		// Masks
-		SetupRenderTarget(MASKS, "Deferred::Masks", texDesc, srvDesc, rtvDesc, uavDesc, DXGI_FORMAT_R11G11B10_FLOAT, D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE);
-		// Masks2 (vertexAO; fp16 to allow blending)
-		SetupRenderTarget(MASKS2, "Deferred::Masks2", texDesc, srvDesc, rtvDesc, uavDesc, DXGI_FORMAT_R16_UNORM, D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE);
-
-		// TAA water history buffers need RGBA16: alpha stores premultiplied coverage for ISWaterBlend
-		SetupRenderTarget(RE::RENDER_TARGETS::kWATER_1, "Deferred::Water1", texDesc, srvDesc, rtvDesc, uavDesc, DXGI_FORMAT_R16G16B16A16_FLOAT, D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE);
-		SetupRenderTarget(RE::RENDER_TARGETS::kWATER_2, "Deferred::Water2", texDesc, srvDesc, rtvDesc, uavDesc, DXGI_FORMAT_R16G16B16A16_FLOAT, D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE);
+		// The GBuffer and the water targets. With CS_ORG_ENGINE_TARGETS, ORG made them in these shapes already (PlanTargets).
+		for (const auto& target : kDeferredTargets)
+			SetupRenderTarget(target.target, target.name, texDesc, srvDesc, rtvDesc, uavDesc, target.format, kDeferredTargetBinds);
 	}
 
 	{
@@ -206,6 +220,12 @@ void Deferred::SetupResources()
 	ORGDeferredComposite::Get().Setup();
 	// The GBuffer clears at the Prepass anchor, once the targets exist.
 	ORGDeferredClears::Setup();
+}
+
+void Deferred::PlanTargets()
+{
+	for (const auto& target : kDeferredTargets)
+		RenderGraph::Engine::Targets::PlanTarget(target.target, { .owner = target.name, .format = target.format, .bindFlags = kDeferredTargetBinds, .mainSize = true, .dropCopy = true });
 }
 
 void Deferred::ReflectionsPrepasses()

@@ -27,6 +27,8 @@
 #	include <algorithm>
 #	include <atomic>
 #	include <bit>
+#	include <deque>
+#	include <mutex>
 #	include <shared_mutex>
 #	include <vector>
 
@@ -502,6 +504,11 @@ namespace GraphResources
 	namespace
 	{
 		std::atomic<std::uint64_t> resizeGeneration{ 0 };
+
+		// The last bumps of the resize generation, with what made each: the anchors name them when they build again.
+		constexpr std::size_t kResizeCauses = 16;
+		std::mutex resizeCauseLock;
+		std::deque<std::pair<std::uint64_t, std::string>> resizeCauses;
 		std::atomic<std::uint64_t> structuralRebuilds{ 0 };
 
 		/**
@@ -568,9 +575,27 @@ namespace GraphResources
 		return resizeGeneration.load(std::memory_order_acquire);
 	}
 
-	void Resource::BumpResizeGeneration()
+	void Resource::BumpResizeGeneration(std::string_view a_who)
 	{
-		resizeGeneration.fetch_add(1, std::memory_order_acq_rel);
+		std::scoped_lock lock(resizeCauseLock);
+		const auto generation = resizeGeneration.fetch_add(1, std::memory_order_acq_rel) + 1;
+		resizeCauses.emplace_back(generation, std::string(a_who));
+		if (resizeCauses.size() > kResizeCauses)
+			resizeCauses.pop_front();
+	}
+
+	std::string Resource::ResizeCauses(std::uint64_t a_since)
+	{
+		std::scoped_lock lock(resizeCauseLock);
+		std::string causes;
+		for (const auto& [generation, who] : resizeCauses) {
+			if (generation <= a_since)
+				continue;
+			if (!causes.empty())
+				causes += ", ";
+			causes += who;
+		}
+		return causes.empty() ? std::string("unknown") : causes;
 	}
 
 	void Resource::Register(org::RenderGraph& a_graph) const
@@ -677,7 +702,7 @@ namespace GraphResources
 			logger::info("[ORG] {}: resized to {}x{} as a new version", name, a_width, a_height);
 			return true;
 		}
-		BumpResizeGeneration();
+		BumpResizeGeneration(name);
 		return true;
 	}
 
@@ -731,7 +756,7 @@ namespace GraphResources
 			logger::info("[ORG] {}: resized to {}x{}x{} as a new version", name, a_width, a_height, a_depth);
 			return true;
 		}
-		BumpResizeGeneration();
+		BumpResizeGeneration(name);
 		return true;
 	}
 
@@ -839,7 +864,8 @@ namespace GraphResources
 	std::uint64_t StructuralRebuilds() { return 0; }
 	bool Resource::AdoptSlot(std::shared_ptr<org::VersionedTexture>, bool) { return false; }
 	std::uint64_t Resource::ResizeGeneration() { return 0; }
-	void Resource::BumpResizeGeneration() {}
+	std::string Resource::ResizeCauses(std::uint64_t) { return {}; }
+	void Resource::BumpResizeGeneration(std::string_view) {}
 	void Resource::Register(org::RenderGraph&) const {}
 	void Resource::Reset() {}
 	void Resource::NameViews() const {}
