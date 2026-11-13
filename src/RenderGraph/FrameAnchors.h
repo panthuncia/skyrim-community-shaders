@@ -240,10 +240,11 @@ namespace FrameAnchors
 
 	/**
 	 * @brief The one way to join an anchor's graph: true once a_anchor's built graph holds this registration of a_id (InBuiltGraph);
-	 * false meanwhile, and the build that adds it is asked for. Render thread. Never builds on the caller's path: the graph is built
-	 * at the next build point, between frames (Drawcall Limit Fix's build point in a world frame, or the frame's end, OnFrameEnd,
-	 * in a frame that had none: a menu, a loading screen, a blocking movie). Register and Refresh ask for the same build, so a
-	 * client only polls this until it is true, and keeps the engine's or D3D11's path meanwhile. False for an unknown id.
+	 * false meanwhile, and the build that adds it is asked for. Render thread. Never builds on the caller's path: the build manager
+	 * builds the graph off the render thread and attaches it at a frame boundary (Drawcall Limit Fix's build point in a world frame,
+	 * or the frame's end, RenderGraphRuntime::SealPresented, in a frame that had none: a menu, a loading screen, a blocking movie).
+	 * Register and Refresh ask for the same build, so a client only polls this until it is true, and keeps the engine's or D3D11's
+	 * path meanwhile. False for an unknown id.
 	 */
 	bool RequestJoin(std::string_view a_id, Anchor a_anchor);
 
@@ -392,18 +393,12 @@ namespace FrameAnchors
 	const SegmentNames* NamesOf(std::uint32_t a_segment);
 
 	/**
-	 * @brief The frame's end, on the thread that presents (RenderGraphRuntime::SealPresented, after the host's seal). On the render
-	 * owner, when a client waits to join a graph (RequestJoin, Register, Refresh) and no build point ran during the frame (no
-	 * RenderGraphRuntime::BuildIfRequested since the last frame end), builds the graphs that were asked for: the build point of the
-	 * frames Drawcall Limit Fix does not run.
-	 */
-	void OnFrameEnd();
-
-	/**
 	 * @brief Setup's build point (the primary path, docs/development/p5/primary-path.md rule 3): on the render owner, between frames,
 	 * the graphs that registered clients wait to join are built now, so those clients are in their anchors' graphs before the first
 	 * frame that needs them and never poll RequestJoin. a_caller names the caller in the log. Returns whether every registered client
 	 * is in its anchors' built graphs afterwards; false (logged) off the render owner, with the runtime inactive, or when a build failed.
+	 * After the first world frame nothing is built here: the builds are handed to the build manager, the clients join when they are
+	 * attached, and this returns false.
 	 */
 	bool BuildPending(std::string_view a_caller);
 
