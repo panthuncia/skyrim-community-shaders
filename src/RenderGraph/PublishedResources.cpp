@@ -152,11 +152,46 @@ namespace PublishedResources
 			return a_desc.ArraySize > 1 ? std::optional(org::SRVViewType::Texture2DArrayFull) : std::optional(org::SRVViewType::Texture2D);
 		}
 
-		bool PublishAs(std::string_view a_id, const GraphResources::Resource& a_resource, std::optional<org::SRVViewType> a_view)
+		/** @brief What an entry is published from: a twin (Refresh follows its resizes) or a resource alone (an import). */
+		struct Source
+		{
+			std::string_view name;
+			std::shared_ptr<org::Resource> resource;
+			const ID3D11ShaderResourceView* srv = nullptr;
+			const GraphResources::Resource* twin = nullptr;
+			std::weak_ptr<const void> alive;
+		};
+
+		bool PublishEntry(std::string_view a_id, const Source& a_source, std::optional<org::SRVViewType> a_view)
 		{
 			auto& state = Published();
 			auto* host = RenderGraphRuntime::Get().Host();
-			if (!host || !RenderGraphRuntime::Get().IsActive()) {
+			auto* entry = Find(state, a_id);
+			if (entry && entry->resource == a_source.resource) {
+				entry->srv = a_source.srv;
+				entry->twin = a_source.twin;
+				entry->alive = a_source.alive;
+				if (!std::exchange(entry->published, true))
+					logger::info("[ORG] '{}' published again", a_id);
+				return true;
+			}
+			const auto change = entry ? Change::Replaced : Change::Added;
+			if (!entry)
+				entry = &state.entries.emplace_back(Entry{ .id = std::string(a_id) });
+			entry->resource = a_source.resource;
+			entry->view = a_view;
+			entry->published = true;
+			entry->srv = a_source.srv;
+			entry->twin = a_source.twin;
+			entry->alive = a_source.alive;
+			Store(state, *host, change, fmt::format("'{}'", a_id));
+			logger::info("[ORG] '{}' published to every epoch's graph ({})", a_id, a_source.name);
+			return true;
+		}
+
+		bool PublishAs(std::string_view a_id, const GraphResources::Resource& a_resource, std::optional<org::SRVViewType> a_view)
+		{
+			if (!RenderGraphRuntime::Get().Host() || !RenderGraphRuntime::Get().IsActive()) {
 				logger::warn("[ORG] {} not published as '{}': the render graph is not active", a_resource.Name(), a_id);
 				return false;
 			}
@@ -169,27 +204,27 @@ namespace PublishedResources
 					a_resource.Name(), a_id);
 				return false;
 			}
-			auto* entry = Find(state, a_id);
-			if (entry && entry->resource == a_resource.Graph()) {
-				entry->srv = a_resource.SRV();
-				entry->twin = &a_resource;
-				entry->alive = a_resource.Alive();
-				if (!std::exchange(entry->published, true))
-					logger::info("[ORG] '{}' published again", a_id);
-				return true;
+			return PublishEntry(a_id, { .name = a_resource.Name(), .resource = a_resource.Graph(), .srv = a_resource.SRV(), .twin = &a_resource, .alive = a_resource.Alive() },
+				a_view);
+		}
+
+		/** @brief The whole-resource view of a 2D texture's SRV (ShaderResourceIndex): its own dimension's. None for another dimension. */
+		std::optional<org::SRVViewType> WholeViewOf(const ID3D11ShaderResourceView* a_srv)
+		{
+			if (!a_srv)
+				return std::nullopt;
+			D3D11_SHADER_RESOURCE_VIEW_DESC desc{};
+			const_cast<ID3D11ShaderResourceView*>(a_srv)->GetDesc(&desc);
+			switch (desc.ViewDimension) {
+			case D3D11_SRV_DIMENSION_TEXTURE2D:
+				return org::SRVViewType::Texture2D;
+			case D3D11_SRV_DIMENSION_TEXTURE2DARRAY:
+				return org::SRVViewType::Texture2DArrayFull;
+			case D3D11_SRV_DIMENSION_TEXTURECUBE:
+				return org::SRVViewType::TextureCube;
+			default:
+				return std::nullopt;
 			}
-			const auto change = entry ? Change::Replaced : Change::Added;
-			if (!entry)
-				entry = &state.entries.emplace_back(Entry{ .id = std::string(a_id) });
-			entry->resource = a_resource.Graph();
-			entry->view = a_view;
-			entry->published = true;
-			entry->srv = a_resource.SRV();
-			entry->twin = &a_resource;
-			entry->alive = a_resource.Alive();
-			Store(state, *host, change, fmt::format("'{}'", a_id));
-			logger::info("[ORG] '{}' published to every epoch's graph ({})", a_id, a_resource.Name());
-			return true;
 		}
 	}
 
@@ -211,6 +246,20 @@ namespace PublishedResources
 	bool Publish(const GraphResources::Texture2D& a_texture)
 	{
 		return Publish(a_texture.Name(), a_texture);
+	}
+
+	bool PublishImport(std::string_view a_id, const std::shared_ptr<org::Resource>& a_import, const ID3D11ShaderResourceView* a_srv)
+	{
+		if (!RenderGraphRuntime::Get().Host() || !RenderGraphRuntime::Get().IsActive() || !a_import || a_id.empty()) {
+			logger::warn("[ORG] import '{}' not published: {}", a_id, a_import ? "the render graph is not active" : "it has no graph resource");
+			return false;
+		}
+		const auto view = WholeViewOf(a_srv);
+		if (!view) {
+			logger::error("[ORG] import '{}' not published: its view is not a 2D texture, a 2D array or a cube", a_id);
+			return false;
+		}
+		return PublishEntry(a_id, { .name = a_id, .resource = a_import, .srv = a_srv }, view);
 	}
 
 	void Refresh()
@@ -328,6 +377,7 @@ namespace PublishedResources
 	bool Publish(const GraphResources::Resource&) { return false; }
 	bool Publish(std::string_view, const GraphResources::Texture2D&) { return false; }
 	bool Publish(const GraphResources::Texture2D&) { return false; }
+	bool PublishImport(std::string_view, const std::shared_ptr<org::Resource>&, const ID3D11ShaderResourceView*) { return false; }
 	void Refresh() {}
 	void Withdraw(std::string_view) {}
 	bool IsPublished(std::string_view) { return false; }
