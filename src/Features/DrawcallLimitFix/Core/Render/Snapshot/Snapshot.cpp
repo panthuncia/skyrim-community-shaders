@@ -905,7 +905,7 @@ namespace DCLF
 			return kStaleKinds;
 		auto* host = RenderGraphRuntime::Get().Host();
 		const auto& drawPipelines = DrawPipelines::Get();
-		if (host && a_snapshot.buildGeneration != host->BuildGeneration())
+		if (host && a_snapshot.buildGeneration != GraphBuildGeneration(*host))
 			return kStaleBuild;
 		if (a_snapshot.targetsGeneration != drawPipelines.Generation())
 			return kStaleTargets;
@@ -1036,7 +1036,7 @@ namespace DCLF
 					"payload {} (failed {}, source in flight {}, parts in flight: {}), sealed sequence {}, assembler latest {} pending {} (sealed {}, published {}, "
 					"failed {}, superseded {}, abandoned {}), active {}; its pump: runner active {}, requested epoch {}, drained {}, notifications {}, passes {}, "
 					"rejected {}; retirement: {}. ORG's {}",
-					frame, std::chrono::duration_cast<std::chrono::seconds>(waited).count(), std::chrono::duration_cast<std::chrono::seconds>(idle).count(), host->BuildGeneration(), host->RebuildRequested(),
+					frame, std::chrono::duration_cast<std::chrono::seconds>(waited).count(), std::chrono::duration_cast<std::chrono::seconds>(idle).count(), Impl::GraphBuildGeneration(*host), host->RebuildRequested(),
 					s.postedInputs.mainGeneration, DrawPipelines::Get().Generation(), stale, seen, s.recordingsOutstanding.load(std::memory_order_acquire),
 					s.snapshotInputsMoved.load(std::memory_order_acquire), s.publicationGated.load(std::memory_order_acquire),
 					s.aheadRunning.load(std::memory_order_acquire), adopted ? adopted->serial : 0, adopted && adopted->revision, adopted && adopted->drawsComplete,
@@ -1061,7 +1061,7 @@ namespace DCLF
 		s.snapshotWaitMaxMs = std::max(s.snapshotWaitMaxMs, ms);
 		logger::info("[DCLF] frame {} waited {:.2f} ms at its start for a snapshot current for the graph as built (build generation {}, main resources "
 					 "generation {}): adopted serial {}",
-			frame, ms, host->BuildGeneration(), s.postedInputs.mainGeneration, s.adoptedSnapshot->serial);
+			frame, ms, Impl::GraphBuildGeneration(*host), s.postedInputs.mainGeneration, s.adoptedSnapshot->serial);
 		return publication;
 	}
 

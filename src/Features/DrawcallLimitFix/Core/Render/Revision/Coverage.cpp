@@ -38,6 +38,15 @@ namespace DCLF
 		impl->ReleaseTicketsForRecordings(*host, RenderGraphRuntime::Get().TakeSubmittedSegments());
 	}
 
+	std::uint64_t IndirectDraws::Impl::GraphBuildGeneration(const org::GraphHost& a_host)
+	{
+		std::uint64_t builds = 0;
+		for (std::uint32_t segment = 0; segment < static_cast<std::uint32_t>(RenderGraphRuntime::Segment::Count); ++segment)
+			if (RenderGraphRuntime::IsDclfSegment(static_cast<RenderGraphRuntime::Segment>(segment)))
+				builds += a_host.BuildGeneration(RenderGraphRuntime::EpochOf(static_cast<RenderGraphRuntime::Segment>(segment)));
+		return builds;
+	}
+
 	void IndirectDraws::Impl::BuildIfAsked(bool a_ownEpochsOnly)
 	{
 		// What the revision code asked of the owner thread (shadow view slots: their buffers and the extension declaring them), built
@@ -102,7 +111,7 @@ namespace DCLF
 			participant->PostInputs(next);
 		next.scene = scene;
 		if (auto* host = RenderGraphRuntime::Get().Host()) {
-			next.buildGeneration = host->BuildGeneration();
+			next.buildGeneration = GraphBuildGeneration(*host);
 			for (std::size_t segment = 0; segment < next.epochBuilds.size(); ++segment)
 				next.epochBuilds[segment] = host->BuildGeneration(RenderGraphRuntime::EpochOf(static_cast<RenderGraphRuntime::Segment>(segment)));
 			if (auto* descriptors = host->Descriptors()) {
@@ -187,7 +196,7 @@ namespace DCLF
 		return fmt::format("adopted snapshot serial {} (revision {}, draws complete {}, stale kind {} of {}, build generation {} against {}, main generation {} against {}), "
 						   "newest taken stale {}, payload {}, adopted set {}; epochs: {}",
 			adopted ? adopted->serial : 0, adopted && adopted->revision, adopted && adopted->drawsComplete, adopted ? s.StaleKindOf(*adopted) : static_cast<std::size_t>(Impl::kStaleKinds),
-			static_cast<std::size_t>(Impl::kStaleKinds), adopted ? adopted->buildGeneration : 0, host ? host->BuildGeneration() : 0,
+			static_cast<std::size_t>(Impl::kStaleKinds), adopted ? adopted->buildGeneration : 0, host ? Impl::GraphBuildGeneration(*host) : 0,
 			adopted ? adopted->mainGeneration : 0, s.postedInputs.mainGeneration, s.snapshotStale, !payload ? "none" : FrameValues::Get().Available() ? "installed" : "installed, NO FRAME VALUES",
 			s.adoptedSet ? "named" : "none", epochs);
 	}

@@ -327,6 +327,12 @@ namespace DCLF
 		 * a_ownEpochsOnly: only DCLF's epochs are built (BuildOwnerEpochsNow); the other epochs' finished builds are not attached.
 		 */
 		void BuildIfAsked(bool a_ownEpochsOnly = false);
+		/**
+		 * @brief Render thread: the builds of DCLF's own epochs' graphs (the sum of their GraphHost::BuildGeneration), which is what a
+		 * revision's recordings are of. Not the host's whole count: another epoch's build attached at a build point (the frame anchors',
+		 * built off the render thread) leaves every DCLF recording valid.
+		 */
+		static std::uint64_t GraphBuildGeneration(const org::GraphHost& a_host);
 		/** @brief Render thread: while recordings are outstanding, every epoch's ready ticket outside a_submitted (segment bits) given back. */
 		void ReleaseTicketsForRecordings(org::GraphHost& a_host, std::uint64_t a_submitted);
 		/** @brief Render thread: posts the revision inputs when anything moved. Called where each value is captured (and ShadowHost's). */
