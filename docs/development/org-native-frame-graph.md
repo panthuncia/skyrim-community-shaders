@@ -591,3 +591,38 @@ handle. These are the Skeleton's clears, ImageSpace's `EngineObjectOf`, Scalefor
 **What to check in a run:** `[ORG] structural rebuild` lines on a load (expect only the shape-class ones at setup), the
 `... resized` build-manager reasons on a resolution change, `[ORG] declared view mismatch` (the build-time latch in
 `DeclarePublishedRead` can log once per id after a version), and shots against the baselines.
+
+## Phase 2 results (2026-11-13, lanes p2-twins-a/b, p2-buffers, p2-native-owned, p2-imports merged)
+
+ORG is 48c5276: exempt resources accepted (a6310fd) merged with the `SelfDeclaringResource` hook (6f69e83).
+
+Guest and native quick shots match the earlier runs. The native tour passes. No graph or epoch failed.
+
+**Imports and twins.**
+- Imports, engine targets and DCLF's import of those images are `FrameAnchors::Texture` slots.
+- The twins lanes' clear and copy helpers build the same handle (`AnchorPasses::TextureOf`).
+- Converted twins: Screen Space Shadows, SSGI and Exponential Height Fog.
+  - The fog's per-frame volumes are no longer aliased: roughly 30-50 MB.
+- A native load still logs 6 structural rebuilds, all through the build manager, none on the render thread:
+  - Five are format changes of engine targets at setup: kLDR_DOWNSAMPLE0, kLDR_BLURSWAP, kIMAGESPACE_TEMP_COPY, kWATER_1 and kWATER_2. Their first version has another shape class.
+  - One is "graph resources resized" at the first world frame, from a twin that is not versioned. It rebuilds 25 epochs, attached 10 frames later.
+- The tour's loads, `coc` and menus add no structural rebuild.
+- The 19 graphs built on the render thread in the tour are all DCLF's epochs. They need copy-on-write DCLF state.
+
+**Buffers.**
+- The native census's world window reads 0 undeclared accesses.
+- The loading screen still has 11 sites, mostly DCLF table buffers referenced by handle at capture, plus Scaleform and one ring acquire.
+
+**Native ownership** (`CS_ORG_NATIVE_OWNED`, now registered with the test harness).
+- Exempt textures and graph-owned tracked textures are made.
+- The graph-owned lookup is not wired into imports yet. Imports still import the image.
+- **Exclusive native imports are off again** (d34e21c5f). The anchors and DCLF imported the same engine image as two graph resources, and their exclusive layout moves raced, which made post-processing flash. With p2-imports, most of these share one slot, but some images still have two resources:
+  - an image DCLF imports before any anchor client does;
+  - Scaleform's own import of HDR's UI texture, which Bink imports as `hdr.ui`;
+  - ImGui's import of a target that is not the framebuffer.
+
+**Next for Phase 2:**
+- Make every image one graph resource, then wire `Native::GraphTextureOf` into `ImportBacking` and turn exclusive native imports back on.
+- Make the five engine targets in their final format from the start.
+- Find the twin behind "graph resources resized".
+- Declare the loading-screen sites.
