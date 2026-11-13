@@ -12,6 +12,7 @@
 #include "Profiler.h"
 #include "RenderGraph/Backend.h"
 #include "RenderGraph/BufferRefs.h"
+#include "RenderGraph/BuildManager.h"
 #include "RenderGraph/DxvkOrgInterop.h"
 #include "RenderGraph/FrameAnchorSelfTest.h"
 #include "RenderGraph/FrameAnchors.h"
@@ -926,6 +927,9 @@ struct RenderGraphRuntime::Impl
 	// ORG's runtime on the adopted device: outlives the host and the contributors, goes before the device.
 	std::shared_ptr<org::Runtime> orgRuntime;
 	std::unique_ptr<org::GraphHost> host;
+	// The host's structural builds, off the render thread (BuildManager.h). After the host: destroyed first, its build thread stopped
+	// and its unattached graphs dropped while the host still exists.
+	std::unique_ptr<RenderGraph::BuildManager> builds;
 	// The contributor ABI's host (OpenRenderGraph/ContributorAPI.h): other modules' passes, in the epochs named after the segments.
 	std::unique_ptr<org::contributor::ContributorHost> contributors;
 	rhi::PipelineLayoutPtr contributorLayout;  // the pipeline service's layout: bindless, 16 root constants
@@ -2246,6 +2250,9 @@ bool RenderGraphRuntime::Initialize()
 		// CS_ORG_SCOPED_FRAME_WAIT (=1 on, default off): only the batches whose passes declare a read of Drawcall Limit Fix's frame
 		// values (DCLF::FrameValues::DeclareReads) wait for the frame wait. Off: every batch waits for it.
 		desc.scopedFrameWait = Switches::Equals("CS_ORG_SCOPED_FRAME_WAIT", "1");
+		// The build manager rebuilds graphs whose alias placements went stale (another graph's build grew their pool), off the render
+		// thread like every other rebuild, instead of the host doing it at a build point.
+		desc.reportStaleAliasPlacements = true;
 		// The segments in the order a frame runs them: Drawcall Limit Fix's schedule's (ConfigureFrame), else the built-in order - the
 		// shadow views at AfterShadowMaps, the Z-prepass at the depth pass, the water reflection's faces after it, Skylighting's map, Light
 		// Limit Fix's culling at Prepass, the colour pass where the main pass's opaque batches end, and the forward epoch (T7d) at the
@@ -2280,6 +2287,9 @@ bool RenderGraphRuntime::Initialize()
 		state->orgRuntime = org::Runtime::Create({ .device = state->device->Get(), .backend = RenderGraph::Backend::Active(), .slots = kRunCapacity });
 		desc.runtime = state->orgRuntime;
 		state->host = std::make_unique<org::GraphHost>(std::move(desc));
+		// Every rebuild waits for the build manager (BuildManager.h), which builds it off the render thread and attaches it at a frame
+		// boundary. An epoch with no graph is still built at its first submission: the startup builds.
+		state->host->SetExplicitBuilds(true);
 		// The frame-wait timeline, before anything builds the graph (its packets bind it when prepared): only with a queue of the
 		// uploader's own to signal it from. In native mode that queue is the one BasicRHI's device gives ORG's uploader (the copy
 		// family's second queue), so the timeline is made there too; DCLF's frame values need it (FrameValues::Available).
@@ -2328,7 +2338,11 @@ bool RenderGraphRuntime::Initialize()
 	// There the host's thread is stopped and the old graph's work waited for, so no recording or preparation reads a slot while it
 	// changes, and every recording after it is of the new build (each epoch, revision-driven or live, records again). The extension
 	// itself adds nothing to the graph.
+	// Only a build on the owner thread with the host's thread held publishes (GraphHost::BuildIfRequested, which the build manager runs
+	// for a shader reload: RequestAllSynchronous). A managed build runs while the old graphs record, so it leaves the staged pipelines.
 	state->host->AddExtension("cs.org.pipeline-registry", [self = state.get()]() -> std::unique_ptr<org::RenderGraph::IRenderGraphExtension> {
+		if (RenderGraph::Builds::InManagedBuild())
+			return {};
 		if (const auto published = PipelineRegistry()->Publish(self->host->SubmissionsMade()))
 			logger::info("[ORG] shader reload: {} pipelines swapped in at graph build {} (registry generation {})", published, self->host->BuildGeneration() + 1,
 				PipelineRegistry()->Generation());
@@ -2390,6 +2404,29 @@ bool RenderGraphRuntime::Initialize()
 			state->asyncEpochs = false;
 		}
 	}
+	{
+		// Drawcall Limit Fix's epochs are built on the render thread at its build point: its extensions read state the render thread
+		// changes in place (view and shadow resources, the graph conditions). Without epochs the one graph is everything's.
+		RenderGraph::BuildManager::Desc builds{};
+		builds.host = state->host.get();
+		if (!EpochsEnabled())
+			builds.ownerBuilt.push_back(EpochOf(Segment::LightCulling));
+		else
+			for (std::uint32_t index = 0; index < static_cast<std::uint32_t>(Segment::Count); ++index)
+				if (IsDclfSegment(static_cast<Segment>(index)))
+					builds.ownerBuilt.push_back(EpochOf(static_cast<Segment>(index)));
+		builds.label = [](std::uint32_t a_epoch) -> std::string {
+			return a_epoch < static_cast<std::uint32_t>(Segment::Count) ? std::string(Impl::SegmentLabel(static_cast<Segment>(a_epoch))) :
+			                                                              fmt::format("epoch {}", a_epoch);
+		};
+		// A failed build of an anchor's epoch is handled by the frame anchors' own handler (Builds::Defer); one without is only logged
+		// (the anchor still runs its previous graph). Any other epoch's owner hears of it as of any epoch failure.
+		builds.onFailed = [this](std::uint32_t a_epoch, bool a_kept, const std::string& a_error) {
+			if (!FrameAnchors::NamesOf(a_epoch))
+				OnEpochFailed(a_epoch, a_kept, a_error);
+		};
+		state->builds = std::make_unique<RenderGraph::BuildManager>(std::move(builds));
+	}
 	impl = std::move(state);
 	disabledReason.clear();
 	if (impl->native) {
@@ -2445,6 +2482,9 @@ void RenderGraphRuntime::Shutdown()
 	RenderGraph::StopProgramBuilds();
 	if (!impl)
 		return;
+	// The build thread finishes the build it is in, and every graph not attached is dropped, before anything of the host goes.
+	if (impl->builds)
+		impl->builds->Shutdown();
 	auto state = std::move(impl);
 	if (state->setTeardownCallback)
 		state->setTeardownCallback(nullptr, nullptr);
@@ -2562,6 +2602,11 @@ org::GraphHost* RenderGraphRuntime::Host()
 	return IsActive() ? impl->host.get() : nullptr;
 }
 
+RenderGraph::BuildManager* RenderGraphRuntime::Builds()
+{
+	return impl ? impl->builds.get() : nullptr;
+}
+
 std::uint64_t RenderGraphRuntime::FlushPendingStreamWork()
 {
 	if (!IsActive())
@@ -2635,13 +2680,10 @@ void RenderGraphRuntime::PollEpochFailures()
 	}
 }
 
-bool RenderGraphRuntime::BuildIfRequested()
+bool RenderGraphRuntime::GuardedBuild(const std::function<bool()>& a_build)
 {
-	if (!IsActive())
-		return false;
-	++buildPoints;
 	try {
-		return impl->host->BuildIfRequested();
+		return a_build();
 	} catch (const std::exception& e) {
 		// The host's thread failed (or a build threw): nothing of the graph runs from here, as when an epoch's submission throws.
 		logger::error("[ORG] Render graph build failed, disabling the graph: {}", e.what());
@@ -2649,6 +2691,29 @@ bool RenderGraphRuntime::BuildIfRequested()
 		disabledReason = e.what();
 		return false;
 	}
+}
+
+bool RenderGraphRuntime::BuildIfRequested(std::string_view a_caller)
+{
+	if (!IsActive())
+		return false;
+	++buildPoints;
+	return GuardedBuild([&] { return impl->builds->Poll(a_caller); });
+}
+
+bool RenderGraphRuntime::BuildOwnerEpochsNow(std::string_view a_caller)
+{
+	if (!IsActive())
+		return false;
+	return GuardedBuild([&] { return impl->builds->BuildOwnerEpochsNow(a_caller); });
+}
+
+bool RenderGraphRuntime::BuildSetupGraphs(std::string_view a_caller)
+{
+	if (!IsActive())
+		return false;
+	++buildPoints;
+	return GuardedBuild([&] { return impl->builds->BuildSetupGraphs(a_caller); });
 }
 
 void RenderGraphRuntime::OnEpochFailed(std::uint32_t a_epoch, bool a_keptGraph, const std::string& a_error)
@@ -2737,8 +2802,14 @@ void RenderGraphRuntime::SealPresented()
 		if (++s_presents % 600 == 0)
 			logger::info("[ORG native] host state after {} presents: {}", s_presents, impl->host->DescribeAsyncState());
 	}
-	// The build point of the frames Drawcall Limit Fix does not run: a client waiting to join an anchor's graph is built here.
-	FrameAnchors::OnFrameEnd();
+	// The build point of the frames Drawcall Limit Fix does not run (its own is at the frame's start): finished builds are attached here,
+	// and the requests made since are handed to the build thread. On the render owner only: a loading screen's thread presents too.
+	if (impl && impl->builds && IsActive() && FrameAnchors::IsRenderOwner()) {
+		if (buildPoints == buildPointsAtSeal)
+			(void)BuildIfRequested("frame end");
+		buildPointsAtSeal = buildPoints;
+		impl->builds->NoteFrameEnd();
+	}
 }
 
 void RenderGraphRuntime::MoveOwnerThread()
@@ -3025,8 +3096,13 @@ RenderGraphRuntime::EpochResult RenderGraphRuntime::TryExecuteEpoch(Segment a_se
 	if (!std::exchange(impl->holding, false))
 		impl->pendingCount = 0;
 	try {
-		if (impl->contributors)
+		// Not while a managed build runs: the contributors' compile (their extension's Gather, on the build thread) writes what Poll reads.
+		// Builds are handed out only by the manager's poll, on this thread, so none starts during this call.
+		if (impl->contributors && impl->builds->Idle())
 			impl->contributors->Poll(*impl->host);
+		// An epoch with no graph is built at its submission, on this thread: the startup builds. After the first world frame, logged.
+		if (!impl->host->Graph(EpochOf(a_segment)) && !impl->host->EpochFailed(EpochOf(a_segment)))
+			impl->builds->WarnSynchronous(fmt::format("{} has no graph and is built at its submission", Impl::SegmentLabel(a_segment)), "ExecuteEpoch");
 		std::function<void(org::RenderGraph&)> beforePrepare;
 		if (a_beforePrepare) {
 			beforePrepare = [&](org::RenderGraph& a_graph) {
@@ -3264,9 +3340,12 @@ void RenderGraphRuntime::ServicePipelineReload()
 	}
 	if (!result.staged)
 		return;
-	// Swapped in at the graph's next build (the "cs.org.pipeline-registry" extension's factory), where nothing records; with explicit
-	// builds that is the owner's build point (Drawcall Limit Fix's, at the next frame's start). With no graph nothing records: at once.
-	if (impl && impl->host) {
+	// Swapped in at the graph's next build on the owner thread (the "cs.org.pipeline-registry" extension's factory), where nothing
+	// records: the build manager's next poll builds every graph there, with the host's thread held (a developer action, logged as a
+	// synchronous build). With no graph nothing records: at once.
+	if (impl && impl->builds) {
+		impl->builds->RequestAllSynchronous("shader reload: pipelines staged");
+	} else if (impl && impl->host) {
 		impl->host->RequestRebuild("shader reload: pipelines staged");
 	} else if (registry.Publish(0)) {
 		registry.Retire(~0ull);
@@ -3675,7 +3754,10 @@ void RenderGraphRuntime::ServiceD3D11Releases() {}
 void RenderGraphRuntime::ReportGpuTimings(std::uint32_t, bool) {}
 std::uint64_t RenderGraphRuntime::TakeSubmittedSegments() { return 0; }
 void RenderGraphRuntime::PollEpochFailures() {}
-bool RenderGraphRuntime::BuildIfRequested() { return false; }
+bool RenderGraphRuntime::BuildIfRequested(std::string_view) { return false; }
+bool RenderGraphRuntime::BuildOwnerEpochsNow(std::string_view) { return false; }
+bool RenderGraphRuntime::BuildSetupGraphs(std::string_view) { return false; }
+RenderGraph::BuildManager* RenderGraphRuntime::Builds() { return nullptr; }
 void RenderGraphRuntime::SignalFramePace(bool) {}
 void RenderGraphRuntime::SealPresented() {}
 void RenderGraphRuntime::MoveOwnerThread() {}

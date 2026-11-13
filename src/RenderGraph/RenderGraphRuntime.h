@@ -39,6 +39,11 @@ namespace rhi
 	using TimelinePtr = ObjectPtr<Timeline>;
 }
 
+namespace RenderGraph
+{
+	class BuildManager;
+}
+
 namespace org
 {
 	class ExternalEpochExecution;
@@ -184,6 +189,12 @@ public:
 	org::GraphHost* Host();
 
 	/**
+	 * @brief The host's build manager (BuildManager.h): every structural rebuild goes through it, built off the render thread and attached
+	 * at a frame boundary. Null before the host exists. Request rebuilds through RenderGraph::Builds rather than through this.
+	 */
+	RenderGraph::BuildManager* Builds();
+
+	/**
 	 * @brief Render thread, before it blocks on GPU work: when graph work handed to DXVK's stream (a compute or copy queue's entry
 	 * point, an in-stream epoch's signals) has not been submitted yet, flushes the immediate context so DXVK submits it. Without
 	 * this, a wait whose work waits on that entry point never ends: DXVK submits the stream only when this thread moves on.
@@ -234,13 +245,27 @@ public:
 	void PollEpochFailures();
 
 	/**
-	 * @brief Owner thread: the host's builds that were asked for, made now (org::GraphHost::BuildIfRequested). Call this, never the
-	 * host's own, outside ExecuteEpoch: once the host's thread failed (a GPU completion timeline read UINT64_MAX, which is how
+	 * @brief Owner thread, at a frame boundary: the build manager's poll (BuildManager::Poll). Finished builds are attached, Drawcall Limit
+	 * Fix's epochs asked for are built, and every other epoch asked for is handed to the build thread. Call this, never the host's own
+	 * BuildIfRequested, outside ExecuteEpoch: once the host's thread failed (a GPU completion timeline read UINT64_MAX, which is how
 	 * Windows reports a removed device), every host call throws, and that is a whole-graph failure. It stops the graph here as
 	 * ExecuteEpoch's does (IsActive false, GetDisabledReason the error) instead of leaving the frame's thread with an exception.
-	 * @return Whether anything was built. False when inactive or when the graph stopped.
+	 * a_caller names the build point in the log.
+	 * @return Whether a graph was attached or built. False when inactive or when the graph stopped.
 	 */
-	bool BuildIfRequested();
+	bool BuildIfRequested(std::string_view a_caller = "build point");
+
+	/**
+	 * @brief Owner thread, mid-frame: the owner-built epochs (Drawcall Limit Fix's) asked for, built now on this thread. Logged as a
+	 * synchronous build after the first world frame. Does not count as a build point.
+	 */
+	bool BuildOwnerEpochsNow(std::string_view a_caller);
+
+	/**
+	 * @brief Owner thread, at setup: before the first world frame, every graph asked for is built now; after it, a build point
+	 * (BuildIfRequested). Returns whether the graphs were built now.
+	 */
+	bool BuildSetupGraphs(std::string_view a_caller);
 
 	/** @brief How many times BuildIfRequested was called (a build point ran), built or not. Render thread. */
 	std::uint64_t BuildPoints() const { return buildPoints; }
@@ -516,6 +541,8 @@ private:
 	void ServiceD3D11Releases();
 	/** @brief The host's epoch failure callback (PollEpochFailures): routes the failure to the epoch's owner. */
 	void OnEpochFailed(std::uint32_t a_epoch, bool a_keptGraph, const std::string& a_error);
+	/** @brief Runs a host build call; a throw stops the graph (IsActive false) and returns false, as BuildIfRequested documents. */
+	bool GuardedBuild(const std::function<bool()>& a_build);
 
 	struct Impl;
 	std::unique_ptr<Impl> impl;
@@ -523,6 +550,7 @@ private:
 	std::string gpuTimingSummary;
 	EpochCpuTotals epochTotals;
 	std::uint64_t buildPoints = 0;  // BuildIfRequested's calls
+	std::uint64_t buildPointsAtSeal = 0;  // buildPoints at the last SealPresented
 	Segment segment = Segment::LightCulling;
 	bool attempted = false;
 	FrameConfig frameConfig;  // ConfigureFrame's (frameConfigured)
