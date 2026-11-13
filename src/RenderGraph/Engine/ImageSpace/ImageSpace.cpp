@@ -1269,6 +1269,8 @@ namespace RenderGraph::Engine::ImageSpace
 			}
 			Util::SetResourceName(texture.get(), "ImageSpace::NoFogVolume");
 			Util::SetResourceName(state.noFogView.get(), "ImageSpace::NoFogVolume SRV");
+			// Immutable, made with its one texel and never written: the class the graph exempts from declarations, so a bindless index
+			// is its read.
 			constexpr std::uint32_t kSourceTag = DCLF::GpuTextures::Tag(DCLF::GpuTextures::Source::FrameSlot, 0);
 			auto binding = DCLF::GpuTextures::Get().ResolveBinding(state.noFogView.get(), kSourceTag);
 			if (binding.index == DCLF::GpuTextures::kInvalid) {
@@ -2327,6 +2329,8 @@ namespace RenderGraph::Engine::ImageSpace
 			if (!spec)
 				return false;
 			// A flow copy's source, a loaded texture (an ORG engine texture, or DXVK's imported), read by its heap index from the latch.
+			// It is a flow texture BGSAutoWater loaded from a file and never writes: the immutable class the graph exempts from
+			// declarations (org-native-frame-graph Phase 2), so a bindless index is its read.
 			DCLF::GpuTextures::Binding sourceBinding;
 			if (source) {
 				constexpr std::uint32_t kSourceTag = DCLF::GpuTextures::Tag(DCLF::GpuTextures::Source::FrameSlot, 0);
