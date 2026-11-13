@@ -247,7 +247,8 @@ namespace
 		explicit operator bool() const { return depth && main && normalRoughness && motionVectors && noise; }
 	};
 
-	using Texture = std::unique_ptr<GraphResources::Texture2D>;
+	// Shared, so a new state can keep a texture of the one before (Impl::MakeTexture) while the old clients still name it.
+	using Texture = std::shared_ptr<GraphResources::Texture2D>;
 
 	/** @brief What one configuration's passes are made from. Made on the render thread; a new one replaces it on a settings change. */
 	struct GiState
@@ -277,18 +278,22 @@ namespace
 		std::array<const Texture*, kHistoryTextures> History() const { return { &accum, &ao, &y, &coCg, &spec, &prevGeo }; }
 	};
 
-	std::shared_ptr<org::Resource> GraphOf(const Texture& a_texture) { return a_texture ? a_texture->Graph() : nullptr; }
-
-	/** @brief A shader resource entry, or handle 0 for a texture the permutation does not touch. */
+	/** @brief A shader resource entry of an input, or handle 0 for an input the permutation does not touch. */
 	Bind Srv(std::shared_ptr<org::Resource> a_resource) { return a_resource ? Bind::Srv(std::move(a_resource)) : Bind::Unused(); }
-	Bind Uav(std::shared_ptr<org::Resource> a_resource) { return a_resource ? Bind::Uav(std::move(a_resource)) : Bind::Unused(); }
+
+	/**
+	 * @brief An entry of one of the chain's textures (its slot when versioned, so a resize is a new version), or handle 0 for a
+	 * texture the permutation does not have.
+	 */
+	Bind Srv(const Texture& a_texture) { return a_texture ? Bind::Srv(*a_texture) : Bind::Unused(); }
+	Bind Uav(const Texture& a_texture) { return a_texture ? Bind::Uav(*a_texture) : Bind::Unused(); }
 
 	/** @brief A UAV entry for each of the kMips mips. */
-	std::vector<Bind> UavMips(const std::shared_ptr<org::Resource>& a_resource)
+	std::vector<Bind> UavMips(const Texture& a_texture)
 	{
 		std::vector<Bind> mips;
 		for (std::uint32_t mip = 0; mip < kMips; ++mip)
-			mips.push_back(a_resource ? Bind::Uav(a_resource, mip) : Bind::Unused());
+			mips.push_back(a_texture ? Bind::Uav(*a_texture, mip) : Bind::Unused());
 		return mips;
 	}
 
@@ -304,40 +309,51 @@ namespace
 		switch (a_step) {
 		case kPrefilterDepths:
 			add({ Srv(in.depth) });
-			add(UavMips(GraphOf(s.workingDepth)));
+			add(UavMips(s.workingDepth));
 			break;
 		case kRadianceDisocc:
-			add({ Srv(in.main), Srv(GraphOf(s.workingDepth)), Srv(in.normalRoughness), Srv(GraphOf(s.prevGeo)), Srv(in.motionVectors),
-				Srv(GraphOf(s.accum)), Srv(GraphOf(s.ao)), Srv(GraphOf(s.y)), Srv(GraphOf(s.coCg)), Srv(GraphOf(s.spec)),
-				Uav(GraphOf(s.radianceTemp)), Uav(GraphOf(s.accumScratch)), Uav(GraphOf(s.aoScratch)), Uav(GraphOf(s.yScratch)),
-				Uav(GraphOf(s.coCgScratch)), Uav(GraphOf(s.specScratch)) });
+			add({ Srv(in.main), Srv(s.workingDepth), Srv(in.normalRoughness), Srv(s.prevGeo), Srv(in.motionVectors),
+				Srv(s.accum), Srv(s.ao), Srv(s.y), Srv(s.coCg), Srv(s.spec),
+				Uav(s.radianceTemp), Uav(s.accumScratch), Uav(s.aoScratch), Uav(s.yScratch),
+				Uav(s.coCgScratch), Uav(s.specScratch) });
 			break;
 		case kPrefilterRadiance:
-			add({ Srv(GraphOf(s.radianceTemp)) });
-			add(UavMips(GraphOf(s.radiance)));
+			add({ Srv(s.radianceTemp) });
+			add(UavMips(s.radiance));
 			break;
 		case kPrefilterNormal:
 			add({ Srv(in.normalRoughness) });
-			add(UavMips(GraphOf(s.normal)));
+			add(UavMips(s.normal));
 			break;
 		case kGi:
-			add({ Srv(GraphOf(s.workingDepth)), Srv(in.normalRoughness), Srv(GraphOf(s.radiance)), Srv(in.noise), Srv(GraphOf(s.accumScratch)),
-				Srv(GraphOf(s.yScratch)), Srv(GraphOf(s.coCgScratch)), Srv(GraphOf(s.specScratch)), Srv(GraphOf(s.normal)), Srv(GraphOf(s.aoScratch)),
-				Uav(GraphOf(s.ao)), Uav(GraphOf(blur ? s.yBlurInput : s.y)), Uav(GraphOf(blur ? s.coCgBlurInput : s.coCg)), Uav(GraphOf(s.spec)),
-				Uav(GraphOf(s.prevGeo)) });
+			add({ Srv(s.workingDepth), Srv(in.normalRoughness), Srv(s.radiance), Srv(in.noise), Srv(s.accumScratch),
+				Srv(s.yScratch), Srv(s.coCgScratch), Srv(s.specScratch), Srv(s.normal), Srv(s.aoScratch),
+				Uav(s.ao), Uav(blur ? s.yBlurInput : s.y), Uav(blur ? s.coCgBlurInput : s.coCg), Uav(s.spec),
+				Uav(s.prevGeo) });
 			break;
 		case kBlur:
-			add({ Srv(GraphOf(s.workingDepth)), Srv(in.normalRoughness), Srv(GraphOf(s.accumScratch)), Srv(GraphOf(s.yBlurInput)),
-				Srv(GraphOf(s.coCgBlurInput)), Uav(GraphOf(s.accum)), Uav(GraphOf(s.y)), Uav(GraphOf(s.coCg)) });
+			add({ Srv(s.workingDepth), Srv(in.normalRoughness), Srv(s.accumScratch), Srv(s.yBlurInput),
+				Srv(s.coCgBlurInput), Uav(s.accum), Uav(s.y), Uav(s.coCg) });
 			break;
 		case kUpsample:
-			add({ Srv(GraphOf(s.workingDepth)), Srv(GraphOf(s.ao)), Srv(GraphOf(s.y)), Srv(GraphOf(s.coCg)), Srv(GraphOf(s.spec)),
-				Uav(GraphOf(s.aoScratch)), Uav(GraphOf(s.yScratch)), Uav(GraphOf(s.coCgScratch)), Uav(GraphOf(s.specScratch)) });
+			add({ Srv(s.workingDepth), Srv(s.ao), Srv(s.y), Srv(s.coCg), Srv(s.spec),
+				Uav(s.aoScratch), Uav(s.yScratch), Uav(s.coCgScratch), Uav(s.specScratch) });
 			break;
 		default:
 			break;
 		}
 		return binds;
+	}
+
+	/** @brief The main target's description now, which the chain's textures follow; false without it. */
+	bool MainDesc(D3D11_TEXTURE2D_DESC& a_desc)
+	{
+		auto* renderer = globals::game::renderer;
+		auto* main = renderer ? renderer->GetRuntimeData().renderTargets[RE::RENDER_TARGETS::kMAIN].texture : nullptr;
+		if (!main)
+			return false;
+		main->GetDesc(&a_desc);
+		return true;
 	}
 
 	/** @brief The inputs as they are now: the final depth copy, the main target, the GBuffer normals, motion vectors and noise. */
@@ -377,8 +393,13 @@ struct ORGScreenSpaceGI::Impl
 	bool frameReady = false;
 	bool failed = false;
 
-	/** @brief A texture of the chain, the size of the main target. */
-	Texture MakeTexture(DXGI_FORMAT a_format, UINT a_mips, const char* a_name, GraphResources::Lifetime a_lifetime, bool a_exported) const
+	/**
+	 * @brief A texture of the chain, the size of the main target. One the graph never aliases (history, or exported) is versioned,
+	 * so a resize is a new version of its slot. a_previous: the state being replaced, whose texture of the same name and shape
+	 * is kept, so a settings change keeps what it published and nothing outside the chain's anchor is built again.
+	 */
+	Texture MakeTexture(DXGI_FORMAT a_format, UINT a_mips, const char* a_name, GraphResources::Lifetime a_lifetime, bool a_exported,
+		const GiState* a_previous) const
 	{
 		if (a_lifetime == GraphResources::Lifetime::Transient && KeptApart(a_name))
 			a_lifetime = GraphResources::Lifetime::History;
@@ -395,9 +416,19 @@ struct ORGScreenSpaceGI::Impl
 			.MiscFlags = 0
 		};
 		GraphResources::Options options{ .lifetime = a_lifetime, .d3d11 = a_exported ? GraphResources::Export::SRV : GraphResources::Export::None };
+		options.versioned = a_lifetime != GraphResources::Lifetime::Transient || a_exported;
 		if (DebugMode() == Debug::PrivatePool)
 			options.aliasPool = kPrivatePool;
-		return std::make_unique<GraphResources::Texture2D>(desc, a_name, options);
+		if (a_previous) {
+			for (const auto* texture : a_previous->All()) {
+				const auto& kept = *texture;
+				if (kept && *kept && kept->Name() == a_name && kept->GetLifetime() == a_lifetime && kept->Exported() == a_exported &&
+					kept->Desc().Format == a_format && kept->Desc().MipLevels == a_mips && kept->Desc().Width == desc.Width &&
+					kept->Desc().Height == desc.Height)
+					return kept;
+			}
+		}
+		return std::make_shared<GraphResources::Texture2D>(desc, a_name, options);
 	}
 
 	/** @brief Queues every configuration's programs on the program build thread, except those already built. */
@@ -430,8 +461,11 @@ struct ORGScreenSpaceGI::Impl
 		return program;
 	}
 
-	/** @brief The programs and textures of a configuration; null, logged, when one cannot be made. a_expected: as ProgramFor. */
-	std::shared_ptr<GiState> Build(const Config& a_config, bool a_expected)
+	/**
+	 * @brief The programs and textures of a configuration; null, logged, when one cannot be made. a_expected: as ProgramFor.
+	 * a_previous: the state it replaces, whose matching textures it keeps (MakeTexture).
+	 */
+	std::shared_ptr<GiState> Build(const Config& a_config, bool a_expected, const GiState* a_previous = nullptr)
 	{
 		auto gi = std::make_shared<GiState>();
 		gi->config = a_config;
@@ -452,28 +486,28 @@ struct ORGScreenSpaceGI::Impl
 
 		using enum GraphResources::Lifetime;
 		const bool full = a_config.FullRes();
-		gi->workingDepth = MakeTexture(DXGI_FORMAT_R16_FLOAT, kMips, "SSGI::WorkingDepth", Transient, false);
-		gi->normal = MakeTexture(DXGI_FORMAT_R8G8_UNORM, kMips, "SSGI::Normal", Transient, false);
-		gi->radiance = MakeTexture(DXGI_FORMAT_R11G11B10_FLOAT, kMips, "SSGI::Radiance", Transient, false);
-		gi->radianceTemp = MakeTexture(DXGI_FORMAT_R11G11B10_FLOAT, 1, "SSGI::RadianceTemp", Transient, false);
-		gi->accumScratch = MakeTexture(DXGI_FORMAT_R8_UNORM, 1, "SSGI::AccumFramesScratch", Transient, false);
-		gi->accum = MakeTexture(DXGI_FORMAT_R8_UNORM, 1, "SSGI::AccumFrames", History, false);
+		gi->workingDepth = MakeTexture(DXGI_FORMAT_R16_FLOAT, kMips, "SSGI::WorkingDepth", Transient, false, a_previous);
+		gi->normal = MakeTexture(DXGI_FORMAT_R8G8_UNORM, kMips, "SSGI::Normal", Transient, false, a_previous);
+		gi->radiance = MakeTexture(DXGI_FORMAT_R11G11B10_FLOAT, kMips, "SSGI::Radiance", Transient, false, a_previous);
+		gi->radianceTemp = MakeTexture(DXGI_FORMAT_R11G11B10_FLOAT, 1, "SSGI::RadianceTemp", Transient, false, a_previous);
+		gi->accumScratch = MakeTexture(DXGI_FORMAT_R8_UNORM, 1, "SSGI::AccumFramesScratch", Transient, false, a_previous);
+		gi->accum = MakeTexture(DXGI_FORMAT_R8_UNORM, 1, "SSGI::AccumFrames", History, false, a_previous);
 		// 8-bit history stalls the temporal AO blend.
-		gi->ao = MakeTexture(DXGI_FORMAT_R16_UNORM, 1, "SSGI::AO", History, full);
-		gi->aoScratch = MakeTexture(DXGI_FORMAT_R16_UNORM, 1, "SSGI::AOScratch", Transient, !full);
-		gi->y = MakeTexture(DXGI_FORMAT_R16G16B16A16_FLOAT, 1, "SSGI::IlY", History, full);
-		gi->yScratch = MakeTexture(DXGI_FORMAT_R16G16B16A16_FLOAT, 1, "SSGI::IlYScratch", Transient, !full);
-		gi->coCg = MakeTexture(DXGI_FORMAT_R16G16_FLOAT, 1, "SSGI::IlCoCg", History, full);
-		gi->coCgScratch = MakeTexture(DXGI_FORMAT_R16G16_FLOAT, 1, "SSGI::IlCoCgScratch", Transient, !full);
+		gi->ao = MakeTexture(DXGI_FORMAT_R16_UNORM, 1, "SSGI::AO", History, full, a_previous);
+		gi->aoScratch = MakeTexture(DXGI_FORMAT_R16_UNORM, 1, "SSGI::AOScratch", Transient, !full, a_previous);
+		gi->y = MakeTexture(DXGI_FORMAT_R16G16B16A16_FLOAT, 1, "SSGI::IlY", History, full, a_previous);
+		gi->yScratch = MakeTexture(DXGI_FORMAT_R16G16B16A16_FLOAT, 1, "SSGI::IlYScratch", Transient, !full, a_previous);
+		gi->coCg = MakeTexture(DXGI_FORMAT_R16G16_FLOAT, 1, "SSGI::IlCoCg", History, full, a_previous);
+		gi->coCgScratch = MakeTexture(DXGI_FORMAT_R16G16_FLOAT, 1, "SSGI::IlCoCgScratch", Transient, !full, a_previous);
 		if (a_config.blur) {
-			gi->yBlurInput = MakeTexture(DXGI_FORMAT_R16G16B16A16_FLOAT, 1, "SSGI::IlYBlurInput", Transient, false);
-			gi->coCgBlurInput = MakeTexture(DXGI_FORMAT_R16G16_FLOAT, 1, "SSGI::IlCoCgBlurInput", Transient, false);
+			gi->yBlurInput = MakeTexture(DXGI_FORMAT_R16G16B16A16_FLOAT, 1, "SSGI::IlYBlurInput", Transient, false, a_previous);
+			gi->coCgBlurInput = MakeTexture(DXGI_FORMAT_R16G16_FLOAT, 1, "SSGI::IlCoCgBlurInput", Transient, false, a_previous);
 		}
 		if (a_config.SpecularTextures()) {
-			gi->spec = MakeTexture(DXGI_FORMAT_R16G16B16A16_FLOAT, 1, "SSGI::GiSpecular", History, full);
-			gi->specScratch = MakeTexture(DXGI_FORMAT_R16G16B16A16_FLOAT, 1, "SSGI::GiSpecularScratch", Transient, !full);
+			gi->spec = MakeTexture(DXGI_FORMAT_R16G16B16A16_FLOAT, 1, "SSGI::GiSpecular", History, full, a_previous);
+			gi->specScratch = MakeTexture(DXGI_FORMAT_R16G16B16A16_FLOAT, 1, "SSGI::GiSpecularScratch", Transient, !full, a_previous);
 		}
-		gi->prevGeo = MakeTexture(DXGI_FORMAT_R11G11B10_FLOAT, 1, "SSGI::PrevGeo", History, false);
+		gi->prevGeo = MakeTexture(DXGI_FORMAT_R11G11B10_FLOAT, 1, "SSGI::PrevGeo", History, false, a_previous);
 		for (const auto* texture : gi->All()) {
 			// Only the optional ones may be missing, and only when their option is off.
 			if (*texture && !**texture) {
@@ -521,7 +555,7 @@ struct ORGScreenSpaceGI::Impl
 		// CS_ORG_SSGI_DEBUG's clears: every run, not one-shot.
 		const auto clearEachRun = [&](const char* a_name, const Texture& a_texture) {
 			if (a_texture)
-				builder.Add(AnchorPasses::Clear{ .name = a_name, .target = a_texture->Graph() }, false);
+				builder.Add(AnchorPasses::ClearOf(a_name, *a_texture), false);
 		};
 		if (DebugMode() == Debug::ClearHistory) {
 			clearEachRun("debug-clear-accum", state->accum);
@@ -541,11 +575,7 @@ struct ORGScreenSpaceGI::Impl
 		}
 		// Without the blur, the next frame reads the counts the disocclusion pass wrote, which it cannot write in place.
 		if (!state->config.blur)
-			builder.Add(AnchorPasses::Copy{ .name = "keep-accumulation",
-				.source = state->accumScratch->Graph(),
-				.target = state->accum->Graph(),
-				.width = state->accum->Desc().Width,
-				.height = state->accum->Desc().Height });
+			builder.Add(AnchorPasses::CopyOf("keep-accumulation", *state->accumScratch, *state->accum, state->accum->Desc().Width, state->accum->Desc().Height));
 		if (DebugMode() == Debug::NoChain) {
 			clearEachRun("debug-clear-out-ao", state->OutAo());
 			clearEachRun("debug-clear-out-y", state->OutY());
@@ -581,7 +611,7 @@ struct ORGScreenSpaceGI::Impl
 		AnchorPasses::Builder builder(FrameAnchors::Anchor::DeferredPasses, kResetClientId, kOrderReset);
 		for (std::size_t i = 0; i < kHistoryTextures; ++i)
 			if (const auto& texture = *state->History()[i])
-				builder.Add(AnchorPasses::Clear{ .name = std::format("{}", i), .target = texture->Graph() });
+				builder.Add(AnchorPasses::ClearOf(std::format("{}", i), *texture));
 		FrameAnchors::ClientDesc client{};
 		client.id = kResetClientId;
 		client.passes = builder.Take();
@@ -757,7 +787,7 @@ void ORGScreenSpaceGI::Prepass()
 	const auto config = Config::Current();
 	if (newState || config != self.state->config) {
 		const bool reload = newState;
-		auto state = self.Build(config, reload);
+		auto state = self.Build(config, reload, self.state.get());
 		if (!state)
 			return fail("the new settings' programs or textures could not be made");
 		if (reload)
@@ -772,8 +802,27 @@ void ORGScreenSpaceGI::Prepass()
 		return;
 	}
 
+	// A resolution change: every texture follows the main target's new size. The versioned ones (history and exported) become
+	// new versions, which the composite's reads of the published ids follow with no build. The aliased ones are new resources,
+	// so the chain's anchor is built again (through the build manager), and the chain is registered again for its copy's size.
+	// The group counts come from each frame's dispatch sizes.
+	bool resized = false;
+	if (D3D11_TEXTURE2D_DESC main{}; MainDesc(main) && (main.Width != self.main.Width || main.Height != self.main.Height)) {
+		self.main.Width = main.Width;
+		self.main.Height = main.Height;
+		for (const auto* texture : self.state->All()) {
+			if (!*texture)
+				continue;
+			(*texture)->Resize(main.Width, main.Height);
+			if (!**texture || ((*texture)->Exported() && !(*texture)->SRV()))
+				return fail("a texture could not be resized");
+		}
+		logger::info("[ORG] Screen Space GI: its textures are now {}x{}", main.Width, main.Height);
+		resized = true;
+	}
+
 	// A new engine texture (a resolution change) or a new noise texture: the chain's passes are made again.
-	bool newInputs = false;
+	bool newInputs = resized;
 	if (auto inputs = CurrentInputs(); !(inputs == self.state->inputs)) {
 		if (!inputs)
 			return fail("an input could not be imported");
@@ -792,7 +841,8 @@ void ORGScreenSpaceGI::Prepass()
 	} else {
 		if (newInputs && !self.RegisterChain())
 			return fail("its anchor client could not be registered");
-		if (reset)
+		// A resize leaves the new versions' history undefined: cleared as a reset clears it.
+		if (reset || resized)
 			FrameAnchors::Rearm(kResetClientId);
 	}
 	self.frameReady = true;
