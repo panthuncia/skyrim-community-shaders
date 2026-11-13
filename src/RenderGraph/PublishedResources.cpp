@@ -297,7 +297,7 @@ namespace PublishedResources
 		return Publish(a_texture.Name(), a_texture);
 	}
 
-	bool PublishImport(std::string_view a_id, const std::shared_ptr<org::Resource>& a_import, const ID3D11ShaderResourceView* a_srv)
+	bool PublishImport(std::string_view a_id, const FrameAnchors::Texture& a_import, const ID3D11ShaderResourceView* a_srv)
 	{
 		if (!RenderGraphRuntime::Get().Host() || !RenderGraphRuntime::Get().IsActive() || !a_import || a_id.empty()) {
 			logger::warn("[ORG] import '{}' not published: {}", a_id, a_import ? "the render graph is not active" : "it has no graph resource");
@@ -308,7 +308,9 @@ namespace PublishedResources
 			logger::error("[ORG] import '{}' not published: its view is not a 2D texture, a 2D array or a cube", a_id);
 			return false;
 		}
-		return PublishEntry(a_id, { .name = a_id, .resource = a_import, .srv = a_srv }, view);
+		// A slot is the id's resolver in every graph, and ShaderResourceIndex follows its current version.
+		std::shared_ptr<org::Resource> resource = a_import.Slot() ? a_import.Slot()->CurrentResource() : a_import.Plain();
+		return PublishEntry(a_id, { .name = a_id, .resource = std::move(resource), .srv = a_srv, .slot = a_import.Slot() }, view);
 	}
 
 	void Refresh()
@@ -440,7 +442,7 @@ namespace PublishedResources
 	bool Publish(const GraphResources::Resource&) { return false; }
 	bool Publish(std::string_view, const GraphResources::Texture2D&) { return false; }
 	bool Publish(const GraphResources::Texture2D&) { return false; }
-	bool PublishImport(std::string_view, const std::shared_ptr<org::Resource>&, const ID3D11ShaderResourceView*) { return false; }
+	bool PublishImport(std::string_view, const FrameAnchors::Texture&, const ID3D11ShaderResourceView*) { return false; }
 	void Refresh() {}
 	void Withdraw(std::string_view) {}
 	bool IsPublished(std::string_view) { return false; }

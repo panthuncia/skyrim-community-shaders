@@ -49,7 +49,7 @@ namespace DCLF::Draws
 
 	// A DXVK image the graph uses in place, imported without ownership in the layout DXVK rests it in, which is its home state
 	// (RenderGraph::ImportDxvkTexture). Fills the description's dimensions and array shape from the image.
-	std::shared_ptr<org::ExternalTextureResource> ImportImage(rhi::Device a_device, const DxvkOrgInteropImageInfo& a_image, org::TextureDescription a_desc,
+	FrameAnchors::Texture ImportImage(rhi::Device a_device, const DxvkOrgInteropImageInfo& a_image, org::TextureDescription a_desc,
 		const char* a_name);
 
 	/**

@@ -24,7 +24,9 @@
 #	include <Render/RenderGraph/RenderGraph.h>
 
 #	include <Resources/ExternalTextureResource.h>
+#	include <Resources/PixelBuffer.h>
 #	include <Resources/TextureDescription.h>
+#	include <Resources/VersionedTexture.h>
 #	include <rhi_helpers.h>
 
 #	include <algorithm>
@@ -157,12 +159,16 @@ namespace FrameAnchors
 
 		std::uint32_t EpochOfAnchor(Anchor a_anchor) { return RenderGraphRuntime::EpochOf(static_cast<Segment>(SegmentOf(a_anchor))); }
 
-		/** @brief An engine target imported for the anchors' passes, kept while the engine's texture stays the same. */
+		/**
+		 * @brief A texture imported for the anchors' passes. Its slot lasts as long as the id: a new D3D11 texture of the same shape class
+		 * is the slot's next version.
+		 */
 		struct EngineImport
 		{
-			winrt::com_ptr<ID3D11Texture2D> texture;
-			std::shared_ptr<org::ExternalTextureResource> resource;
+			winrt::com_ptr<ID3D11Texture2D> texture;  // the current version's D3D11 texture
+			std::shared_ptr<org::VersionedTexture> slot;
 			std::string id;
+			std::uint64_t image = 0;  // the current version's VkImage (ImportOfImage)
 		};
 
 		/** @brief One pass of the build: its client (which owns its desc) and the desc. */
@@ -178,7 +184,7 @@ namespace FrameAnchors
 			std::uint64_t serial = 0;                                // State::serial when it was published
 			std::vector<std::shared_ptr<const ClientDesc>> clients;  // registration order, the ones in the graphs
 			std::vector<ScheduledPass> passes;                       // by anchor, then order key, then registration
-			std::vector<std::pair<std::string, std::shared_ptr<org::ExternalTextureResource>>> imports;
+			std::vector<std::pair<std::string, std::shared_ptr<org::VersionedTexture>>> imports;  // each id's slot
 		};
 
 		/** @brief A registered client and what the anchors keep about it. Render thread. */
@@ -313,7 +319,7 @@ namespace FrameAnchors
 				return a.pass->order < b.pass->order;
 			});
 			for (const auto& [key, import] : a_state.imports)
-				snapshot->imports.emplace_back(import.id, import.resource);
+				snapshot->imports.emplace_back(import.id, import.slot);
 			a_state.snapshot.store(std::move(snapshot), std::memory_order_release);
 		}
 
@@ -482,8 +488,10 @@ namespace FrameAnchors
 				};
 				if (!RenderGraph::Builds::Defer(commit, [index, failed = snapshot](const std::string& a_error) { DropFailedClients(index, failed, a_error); }))
 					commit();
-				for (const auto& [id, resource] : snapshot->imports)
-					a_graph.RegisterResource(org::ResourceIdentifier(id), resource);
+				// Each import's slot is the id's resolver, so a declaration by id follows its versions too.
+				for (const auto& [id, slot] : snapshot->imports)
+					if (const org::ResourceIdentifier key(id); !a_graph._resolverMap.contains(key))
+						a_graph.RegisterResolver(key, slot);
 				for (const auto& client : snapshot->clients)
 					if (client->registerResources)
 						client->registerResources(a_graph);
@@ -585,30 +593,42 @@ namespace FrameAnchors
 			return desc;
 		}
 
-		std::shared_ptr<org::ExternalTextureResource> Import(ID3D11Texture2D* a_texture, const std::string& a_id,
-			const std::function<org::TextureDescription(const D3D11_TEXTURE2D_DESC&)>& a_describe)
+		/** @brief Width, height and format of a version's backing: an import (ExternalTextureResource) or a texture ORG made (PixelBuffer). */
+		std::uint32_t WidthOf(const org::Resource* a_resource)
 		{
-			auto lock = Guard();
-			auto& state = Anchors();
+			if (const auto* external = dynamic_cast<const org::ExternalTextureResource*>(a_resource))
+				return external->GetWidth();
+			if (const auto* texture = dynamic_cast<const org::PixelBuffer*>(a_resource))
+				return texture->GetWidth();
+			return 0;
+		}
+
+		std::uint32_t HeightOf(const org::Resource* a_resource)
+		{
+			if (const auto* external = dynamic_cast<const org::ExternalTextureResource*>(a_resource))
+				return external->GetHeight();
+			if (const auto* texture = dynamic_cast<const org::PixelBuffer*>(a_resource))
+				return texture->GetHeight();
+			return 0;
+		}
+
+		rhi::Format FormatOf(const org::Resource* a_resource)
+		{
+			if (const auto* external = dynamic_cast<const org::ExternalTextureResource*>(a_resource))
+				return external->GetFormat();
+			if (const auto* texture = dynamic_cast<const org::PixelBuffer*>(a_resource))
+				return texture->GetFormat();
+			return rhi::Format::Unknown;
+		}
+
+		/**
+		 * @brief The graph backing of a D3D11 texture to import: its image, described with the views its owner made. The one place an
+		 * import finds its backing, so native mode can look up a texture the graph owns here instead. Null, logged, on failure.
+		 */
+		std::shared_ptr<org::GloballyIndexedResource> ImportBacking(ID3D11Texture2D* a_texture, const std::string& a_id,
+			const std::function<org::TextureDescription(const D3D11_TEXTURE2D_DESC&)>& a_describe, std::uint64_t& a_image)
+		{
 			auto& runtime = RenderGraphRuntime::Get();
-			if (!a_texture || !runtime.IsActive())
-				return nullptr;
-			// An engine target ORG owns (CS_ORG_ENGINE_TARGETS): its published texture, which every graph registers. Importing the
-			// image again would make a second resource whose uses the graph does not order with the owner's.
-			if (auto owned = RenderGraph::Engine::Targets::Find(a_texture))
-				return owned;
-			// Anything else is imported as DXVK's own texture, never as a tripwire handle. Native mode has no DXVK texture under its
-			// handles: its own records describe the handle itself.
-			if (!RenderGraph::Engine::Native::Active())
-				a_texture = RenderGraph::Engine::Tripwire::Unwrap(a_texture);
-			const auto previous = state.imports.find(a_id);
-			if (previous != state.imports.end() && previous->second.texture.get() == a_texture)
-				return previous->second.resource;
-			const bool replacing = previous != state.imports.end();
-			// The same image under another id is a second graph resource: the graph orders neither's uses after the other's writes.
-			for (const auto& [id, other] : state.imports)
-				if (id != a_id && other.texture.get() == a_texture)
-					logger::warn("[ORG] frame anchors: {} imports the image {} already imports; their uses are not ordered with each other", a_id, id);
 			DxvkOrgInteropResourceInfo info{};
 			if (!runtime.DescribeResource(a_texture, info) || info.kind != DXVK_ORG_INTEROP_RESOURCE_IMAGE) {
 				logger::warn("[ORG] frame anchors: {} cannot be described", a_id);
@@ -628,24 +648,130 @@ namespace FrameAnchors
 			desc.isArray = slices > 1;
 			desc.arraySize = slices;
 			auto resource = RenderGraph::ImportDxvkTexture(runtime.Host()->Device(), info.image, desc, a_id.c_str());
-			if (!resource) {
+			if (!resource)
 				logger::warn("[ORG] frame anchors: {} could not be imported", a_id);
-				return nullptr;
+			a_image = reinterpret_cast<std::uint64_t>(info.image.image);
+			return resource;
+		}
+
+		/** @brief How a new backing joined an import's slot. */
+		enum class Joined : std::uint8_t
+		{
+			Version,   // the slot's next version, the same size: nothing is built again
+			Resized,   // the slot's next version, another size: passes that took the size at their build are made again
+			NewShape,  // another format, mip count or slice count: a new slot, and graphs built with the old one are built again
+		};
+
+		/**
+		 * @brief Publishes a_next as a_slot's next version when it has the slot's shape class. Tickets prepared for the old version are
+		 * prepared again (NoteNewVersions). Render thread.
+		 */
+		Joined JoinSlot(org::VersionedTexture& a_slot, std::shared_ptr<org::GloballyIndexedResource> a_next)
+		{
+			const auto previous = a_slot.CurrentResource();
+			const bool sameSize = previous && WidthOf(previous.get()) == WidthOf(a_next.get()) && HeightOf(previous.get()) == HeightOf(a_next.get());
+			try {
+				a_slot.PublishImage(std::move(a_next));
+			} catch (const std::exception&) {
+				return Joined::NewShape;
+			}
+			if (auto* host = RenderGraphRuntime::Get().Host())
+				host->NoteNewVersions();
+			return sameSize ? Joined::Version : Joined::Resized;
+		}
+
+		Texture Import(ID3D11Texture2D* a_texture, const std::string& a_id,
+			const std::function<org::TextureDescription(const D3D11_TEXTURE2D_DESC&)>& a_describe)
+		{
+			auto lock = Guard();
+			auto& state = Anchors();
+			auto& runtime = RenderGraphRuntime::Get();
+			if (!a_texture || !runtime.IsActive())
+				return {};
+			// An engine target ORG owns (CS_ORG_ENGINE_TARGETS): its published slot, which every graph registers. Importing the image
+			// again would make a second resource whose uses the graph does not order with the owner's.
+			if (auto owned = RenderGraph::Engine::Targets::Find(a_texture))
+				return owned;
+			// Anything else is imported as DXVK's own texture, never as a tripwire handle. Native mode has no DXVK texture under its
+			// handles: its own records describe the handle itself.
+			if (!RenderGraph::Engine::Native::Active())
+				a_texture = RenderGraph::Engine::Tripwire::Unwrap(a_texture);
+			const auto previous = state.imports.find(a_id);
+			if (previous != state.imports.end() && previous->second.texture.get() == a_texture)
+				return Texture(a_id, previous->second.slot);
+			// The same image under another id is a second graph resource: the graph orders neither's uses after the other's writes.
+			for (const auto& [id, other] : state.imports)
+				if (id != a_id && other.texture.get() == a_texture)
+					logger::warn("[ORG] frame anchors: {} imports the image {} already imports; their uses are not ordered with each other", a_id, id);
+			std::uint64_t image = 0;
+			auto backing = ImportBacking(a_texture, a_id, a_describe, image);
+			if (!backing)
+				return {};
+			const bool replacing = previous != state.imports.end();
+			if (replacing) {
+				auto& import = previous->second;
+				const auto joined = JoinSlot(*import.slot, backing);
+				if (joined != Joined::NewShape) {
+					// The old D3D11 texture goes once D3D11's last use is done. The slot's old version keeps its graph resource while a
+					// frame or a prepared ticket holds it.
+					auto old = std::make_shared<EngineImport>();
+					old->texture = std::move(import.texture);
+					import.texture.copy_from(a_texture);
+					import.image = image;
+					runtime.ReleaseAfterD3D11(std::move(old));
+					if (joined == Joined::Resized)
+						Rebuild(state, ~0u, fmt::format("import '{}' resized: passes that took its size are made again", a_id));
+					return Texture(a_id, import.slot);
+				}
 			}
 			EngineImport import;
 			import.texture.copy_from(a_texture);
-			import.resource = resource;
+			import.slot = org::VersionedTexture::CreateImage(std::move(backing));
 			import.id = a_id;
+			import.image = image;
+			if (replacing)
+				runtime.ReleaseAfterD3D11(std::make_shared<EngineImport>(std::move(previous->second)));
+			auto slot = import.slot;
 			state.imports[a_id] = std::move(import);
 			Publish(state);
 			// The imports are registered with every anchor graph. A new one is built into the graphs that looked its id up (a client
-			// registering with it builds its own anchors again); one replaced is dropped, so every graph holding it is built again.
+			// registering with it builds its own anchors again). One of another shape class is a new slot: every graph holding the
+			// old one is built again, off the render thread (the build manager).
 			if (replacing)
-				StructuralRebuild(state, ~0u, fmt::format("import '{}' replaced", a_id));
+				StructuralRebuild(state, ~0u, fmt::format("import '{}' replaced by another shape class", a_id));
 			else if (state.host)
 				RenderGraph::Builds::RequestFor(a_id, fmt::format("frame anchors: import '{}' added", a_id));
-			return resource;
+			return Texture(a_id, std::move(slot));
 		}
+	}
+
+	Texture::Texture(std::string a_id, std::shared_ptr<org::VersionedTexture> a_slot) :
+		id(std::move(a_id)), slot(std::move(a_slot))
+	{}
+
+	std::shared_ptr<org::GloballyIndexedResource> Texture::Current() const
+	{
+		return std::dynamic_pointer_cast<org::GloballyIndexedResource>(slot ? slot->CurrentResource() : plain);
+	}
+
+	org::GloballyIndexedResource* Texture::operator->() const
+	{
+		// The slot keeps its current version alive until the render thread publishes the next one.
+		return Current().get();
+	}
+
+	std::uint32_t Texture::Width() const { return WidthOf(Current().get()); }
+	std::uint32_t Texture::Height() const { return HeightOf(Current().get()); }
+	rhi::Format Texture::Format() const { return FormatOf(Current().get()); }
+
+	bool Texture::SameBacking(const Texture& a_other) const
+	{
+		return Current() == a_other.Current();
+	}
+
+	const org::IResourceResolver* Texture::DeclaredResolver() const
+	{
+		return slot.get();
 	}
 
 	const char* Name(Anchor a_anchor)
@@ -1131,11 +1257,11 @@ namespace FrameAnchors
 			logger::info("[ORG] frame anchors, peak runs in one frame: {}", runs);
 	}
 
-	std::shared_ptr<org::ExternalTextureResource> EngineTarget(std::uint32_t a_target)
+	Texture EngineTarget(std::uint32_t a_target)
 	{
 		auto* renderer = globals::game::renderer;
 		if (!renderer || a_target >= static_cast<std::uint32_t>(RE::RENDER_TARGET::kTOTAL))
-			return nullptr;
+			return {};
 		const auto target = renderer->GetRuntimeData().renderTargets[a_target];
 		// kFRAMEBUFFER is the swap chain's back buffer: the engine keeps only its RTV, so the texture comes from the view.
 		auto* texture = target.texture;
@@ -1151,44 +1277,55 @@ namespace FrameAnchors
 			[&](const D3D11_TEXTURE2D_DESC& a_desc) { return DescribeColour(a_desc, target.SRV, target.RTV, target.UAV); });
 	}
 
-	std::shared_ptr<org::ExternalTextureResource> EngineDepth(std::uint32_t a_depthStencil)
+	Texture EngineDepth(std::uint32_t a_depthStencil)
 	{
 		auto* renderer = globals::game::renderer;
 		if (!renderer || a_depthStencil >= static_cast<std::uint32_t>(RE::RENDER_TARGETS_DEPTHSTENCIL::kTOTAL))
-			return nullptr;
+			return {};
 		const auto target = renderer->GetDepthStencilData().depthStencils[a_depthStencil];
 		return Import(target.texture, fmt::format("cs.engine.depth.{}", a_depthStencil),
 			[&](const D3D11_TEXTURE2D_DESC& a_desc) { return DescribeDepth(target, a_desc); });
 	}
 
-	std::shared_ptr<org::ExternalTextureResource> EngineCubemap(std::uint32_t a_cubemap)
+	Texture EngineCubemap(std::uint32_t a_cubemap)
 	{
 		auto* renderer = globals::game::renderer;
 		if (!renderer || a_cubemap >= static_cast<std::uint32_t>(RE::RENDER_TARGETS_CUBEMAP::kTOTAL))
-			return nullptr;
+			return {};
 		const auto target = renderer->GetRendererData().cubemapRenderTargets[a_cubemap];
 		// The faces' RTVs share one format; the graph makes its own views of each face.
 		return Import(target.texture, fmt::format("cs.engine.cubemap.{}", a_cubemap),
 			[&](const D3D11_TEXTURE2D_DESC& a_desc) { return DescribeColour(a_desc, target.SRV, target.cubeSideRTV[0], nullptr); });
 	}
 
-	std::shared_ptr<org::ExternalTextureResource> D3D11Texture(std::string_view a_name, ID3D11Texture2D* a_texture, ID3D11ShaderResourceView* a_srv,
+	Texture D3D11Texture(std::string_view a_name, ID3D11Texture2D* a_texture, ID3D11ShaderResourceView* a_srv,
 		ID3D11UnorderedAccessView* a_uav, ID3D11RenderTargetView* a_rtv)
 	{
 		if (a_name.empty())
-			return nullptr;
+			return {};
 		return Import(a_texture, fmt::format("cs.d3d11.{}", a_name),
 			[&](const D3D11_TEXTURE2D_DESC& a_desc) { return DescribeColour(a_desc, a_srv, a_rtv, a_uav); });
 	}
 
-	std::shared_ptr<org::ExternalTextureResource> ImmutableTexture(std::string_view a_name, ID3D11Texture2D* a_texture, ID3D11ShaderResourceView* a_srv)
+	Texture ImmutableTexture(std::string_view a_name, ID3D11Texture2D* a_texture, ID3D11ShaderResourceView* a_srv)
 	{
 		return D3D11Texture(a_name, a_texture, a_srv, nullptr);
 	}
 
-	std::shared_ptr<org::ExternalTextureResource> ImportDepth(const RE::BSGraphics::DepthStencilData& a_target, const std::string& a_id)
+	Texture ImportDepth(const RE::BSGraphics::DepthStencilData& a_target, const std::string& a_id)
 	{
 		return Import(a_target.texture, a_id, [&](const D3D11_TEXTURE2D_DESC& a_desc) { return DescribeDepth(a_target, a_desc); });
+	}
+
+	Texture ImportOfImage(std::uint64_t a_image)
+	{
+		auto lock = Guard();
+		if (!a_image)
+			return {};
+		for (const auto& [id, import] : Anchors().imports)
+			if (import.image == a_image)
+				return Texture(import.id, import.slot);
+		return {};
 	}
 
 	void ReleaseImport(std::string_view a_id)
@@ -1299,12 +1436,22 @@ namespace FrameAnchors
 	bool BuildPending(std::string_view) { return false; }
 	void LogRunStats() {}
 	std::uint64_t RenderOwnerChanges() { return 0; }
-	std::shared_ptr<org::ExternalTextureResource> EngineTarget(std::uint32_t) { return nullptr; }
-	std::shared_ptr<org::ExternalTextureResource> EngineDepth(std::uint32_t) { return nullptr; }
-	std::shared_ptr<org::ExternalTextureResource> EngineCubemap(std::uint32_t) { return nullptr; }
-	std::shared_ptr<org::ExternalTextureResource> D3D11Texture(std::string_view, ID3D11Texture2D*, ID3D11ShaderResourceView*, ID3D11UnorderedAccessView*, ID3D11RenderTargetView*) { return nullptr; }
-	std::shared_ptr<org::ExternalTextureResource> ImmutableTexture(std::string_view, ID3D11Texture2D*, ID3D11ShaderResourceView*) { return nullptr; }
-	std::shared_ptr<org::ExternalTextureResource> ImportDepth(const RE::BSGraphics::DepthStencilData&, const std::string&) { return nullptr; }
+	Texture::Texture(std::string a_id, std::shared_ptr<org::VersionedTexture> a_slot) :
+		id(std::move(a_id)), slot(std::move(a_slot)) {}
+	std::shared_ptr<org::GloballyIndexedResource> Texture::Current() const { return nullptr; }
+	org::GloballyIndexedResource* Texture::operator->() const { return nullptr; }
+	std::uint32_t Texture::Width() const { return 0; }
+	std::uint32_t Texture::Height() const { return 0; }
+	rhi::Format Texture::Format() const { return rhi::Format{}; }
+	bool Texture::SameBacking(const Texture& a_other) const { return *this == a_other; }
+	const org::IResourceResolver* Texture::DeclaredResolver() const { return nullptr; }
+	Texture EngineTarget(std::uint32_t) { return {}; }
+	Texture EngineDepth(std::uint32_t) { return {}; }
+	Texture EngineCubemap(std::uint32_t) { return {}; }
+	Texture D3D11Texture(std::string_view, ID3D11Texture2D*, ID3D11ShaderResourceView*, ID3D11UnorderedAccessView*, ID3D11RenderTargetView*) { return {}; }
+	Texture ImmutableTexture(std::string_view, ID3D11Texture2D*, ID3D11ShaderResourceView*) { return {}; }
+	Texture ImportDepth(const RE::BSGraphics::DepthStencilData&, const std::string&) { return {}; }
+	Texture ImportOfImage(std::uint64_t) { return {}; }
 	void ReleaseImport(std::string_view) {}
 	bool InBuiltGraph(std::string_view, Anchor) { return false; }
 	void Rearm(std::string_view) {}

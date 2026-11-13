@@ -100,7 +100,7 @@ namespace
 	{
 		std::string_view published;
 		bool cube = false;
-		std::shared_ptr<org::ExternalTextureResource> imported;
+		FrameAnchors::Texture imported;
 
 		bool operator==(const SlotInput&) const = default;
 	};
@@ -113,9 +113,9 @@ namespace
 	/** @brief The engine targets the pass declares, imported once (FrameAnchors::EngineTarget). Null reflectance and depth: not read. */
 	struct Targets
 	{
-		std::shared_ptr<org::ExternalTextureResource> specular, albedo, normalRoughness, masks, masks2, reflectance, depth;
-		std::shared_ptr<org::ExternalTextureResource> main, motionVectors;
-		std::array<std::shared_ptr<org::ExternalTextureResource>, 2> normals;  // kNormalsTargets
+		FrameAnchors::Texture specular, albedo, normalRoughness, masks, masks2, reflectance, depth;
+		FrameAnchors::Texture main, motionVectors;
+		std::array<FrameAnchors::Texture, 2> normals;  // kNormalsTargets
 		std::array<SlotInput, kViewSlots.size()> inputs;
 
 		bool operator==(const Targets&) const = default;

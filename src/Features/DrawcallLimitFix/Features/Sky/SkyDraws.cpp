@@ -86,13 +86,13 @@ namespace DCLF::Features::Sky::SkyDraws
 			// A draw's index count, opened by the commit for its run only: a recording replayed for a run that did not commit draws nothing.
 			std::shared_ptr<::RenderGraph::RunGate> gate;
 			// The targets as imported at the registration (FrameAnchors keeps each while the engine's texture stays the same).
-			std::array<std::shared_ptr<org::ExternalTextureResource>, 3> colours;
-			std::shared_ptr<org::ExternalTextureResource> cubemap, depth, sceneDepth;
+			std::array<FrameAnchors::Texture, 3> colours;
+			FrameAnchors::Texture cubemap, depth, sceneDepth;
 			// View::Sun: kPOST_ZPREPASS_COPY as a depth target (the import sceneDepth holds), and the ORG queries of its runs.
-			std::shared_ptr<org::ExternalTextureResource> copyDepth;
+			FrameAnchors::Texture copyDepth;
 			std::shared_ptr<Queries::QueryRing> queries;
 			// Cloud Shadows' layers, which the faces' cloud draws write (ORGCloudShadows::ImportLayer).
-			std::array<std::shared_ptr<org::ExternalTextureResource>, kCloudLayers> layers;
+			std::array<FrameAnchors::Texture, kCloudLayers> layers;
 			// Null views of the dimensions the push block's handles declare, for an input the batch does not have.
 			std::uint32_t null2D = GpuTextures::kInvalid, nullCube = GpuTextures::kInvalid;
 			Family::Owners nullOwners;

@@ -70,7 +70,7 @@ namespace
 	/** @brief The depth the raymarch reads: an import, or Terrain Blending's published blended depth by its id. */
 	struct DepthSource
 	{
-		std::shared_ptr<org::Resource> resource;
+		FrameAnchors::Texture resource;
 		std::string_view published;
 		bool blendImport = false;  // the import of Terrain Blending's D3D11 blended depth
 
@@ -183,7 +183,7 @@ namespace
 			a_out.push_back(reinterpret_cast<std::uintptr_t>(program.get()));
 			a_out.push_back(reinterpret_cast<std::uintptr_t>(latch.get()));
 			a_out.push_back(reinterpret_cast<std::uintptr_t>(gate.get()));
-			a_out.push_back(reinterpret_cast<std::uintptr_t>(depth.resource.get()));
+			a_out.push_back(reinterpret_cast<std::uintptr_t>(depth.resource.Key()));
 			a_out.push_back(std::hash<std::string_view>{}(depth.published));
 			a_out.push_back(reinterpret_cast<std::uintptr_t>(output.get()));
 		}

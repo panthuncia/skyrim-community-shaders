@@ -73,7 +73,7 @@ namespace DCLF::Direct::detail
 		 */
 		struct ViewTargets
 		{
-			std::shared_ptr<org::ExternalTextureResource> target;  // the cube, or kPOST_ZPREPASS_COPY (held: the views are of it)
+			std::shared_ptr<org::GloballyIndexedResource> target;  // the cube, or kPOST_ZPREPASS_COPY, as current when the views were made (held: the views are of it)
 			rhi::ResourcePtr depth;                                 // the faces' own depth (the reflection's)
 			rhi::DescriptorHeapPtr rtvHeap, dsvHeap;
 			std::array<rhi::DescriptorSlot, Draws::kMaxViewFaces> colours{};
@@ -182,24 +182,24 @@ namespace DCLF::Direct::detail
 		{
 			static std::shared_ptr<const ViewTargets> current;
 			const rhi::Format depthFormat = a_view.depth ? a_view.depth->GetFormat() : rhi::Format::Unknown;
-			if (current && current->target == a_view.target && current->width == a_view.width && current->height == a_view.height &&
+			if (current && current->target == a_view.target.Current() && current->width == a_view.width && current->height == a_view.height &&
 				current->depthFormat == depthFormat)
 				return current;
 			if (current)
 				a_slot.holds.push_back(std::move(current));
 			auto& device = S().device;
 			auto targets = std::make_shared<ViewTargets>();
-			targets->target = a_view.target;
+			targets->target = a_view.target.Current();
 			targets->depthFormat = depthFormat;
 			targets->width = a_view.width;
 			targets->height = a_view.height;
 			targets->faces = std::min(a_view.traits ? a_view.traits->faces : 0u, Draws::kMaxViewFaces);
-			bool ok = a_view.target && depthFormat != rhi::Format::Unknown && targets->width && targets->height && targets->faces &&
+			bool ok = targets->target && depthFormat != rhi::Format::Unknown && targets->width && targets->height && targets->faces &&
 			          device.CreateDescriptorHeap({ rhi::DescriptorHeapType::RTV, targets->faces, false, "cs.dclf.direct.reflection.rtv" }, targets->rtvHeap) == rhi::Result::Ok &&
 			          device.CreateDescriptorHeap({ rhi::DescriptorHeapType::DSV, 1, false, "cs.dclf.direct.reflection.dsv" }, targets->dsvHeap) == rhi::Result::Ok;
 			if (ok) {
-				targets->targetResource = a_view.target->GetAPIResource().GetHandle();
-				targets->colourFormat = a_view.target->GetFormat();
+				targets->targetResource = targets->target->GetAPIResource().GetHandle();
+				targets->colourFormat = a_view.target.Format();
 			}
 			for (std::uint32_t f = 0; ok && f < targets->faces; ++f) {
 				targets->colours[f] = rhi::DescriptorSlot(targets->rtvHeap->GetHandle(), f);
@@ -241,17 +241,17 @@ namespace DCLF::Direct::detail
 		std::shared_ptr<const ViewTargets> FirstPersonTargets(FrameSlot& a_slot, const Draws::ViewResources& a_view)
 		{
 			static std::shared_ptr<const ViewTargets> current;
-			if (current && current->target == a_view.target)
+			if (current && current->target == a_view.target.Current())
 				return current;
 			if (current)
 				a_slot.holds.push_back(std::move(current));
 			auto& device = S().device;
 			auto targets = std::make_shared<ViewTargets>();
-			targets->target = a_view.target;
-			bool ok = a_view.target && device.CreateDescriptorHeap({ rhi::DescriptorHeapType::DSV, 1, false, "cs.dclf.direct.first-person.dsv" }, targets->dsvHeap) == rhi::Result::Ok;
+			targets->target = a_view.target.Current();
+			bool ok = targets->target && device.CreateDescriptorHeap({ rhi::DescriptorHeapType::DSV, 1, false, "cs.dclf.direct.first-person.dsv" }, targets->dsvHeap) == rhi::Result::Ok;
 			if (ok) {
-				targets->depthResource = a_view.target->GetAPIResource().GetHandle();
-				targets->depthFormat = a_view.target->GetFormat();
+				targets->depthResource = targets->target->GetAPIResource().GetHandle();
+				targets->depthFormat = a_view.target.Format();
 				targets->dsv = rhi::DescriptorSlot(targets->dsvHeap->GetHandle(), 0);
 				ok = device.CreateDepthStencilView(targets->dsv, targets->depthResource, rhi::DsvDesc{}) == rhi::Result::Ok;
 			}

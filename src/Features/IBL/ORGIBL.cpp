@@ -85,7 +85,7 @@ namespace
 	/** @brief A projection's source cubemap: an imported texture, or another feature's published graph texture by its id. */
 	struct Source
 	{
-		std::shared_ptr<org::Resource> resource;
+		FrameAnchors::Texture resource;
 		std::string_view published;
 
 		explicit operator bool() const { return resource || !published.empty(); }
@@ -111,7 +111,7 @@ namespace
 		void Revision(std::vector<std::uint64_t>& a_out) const
 		{
 			a_out.push_back(reinterpret_cast<std::uintptr_t>(program.get()));
-			a_out.push_back(reinterpret_cast<std::uintptr_t>(source.resource.get()));
+			a_out.push_back(reinterpret_cast<std::uintptr_t>(source.resource.Key()));
 			a_out.push_back(std::hash<std::string_view>{}(source.published));
 			a_out.push_back(reinterpret_cast<std::uintptr_t>(target.get()));
 		}

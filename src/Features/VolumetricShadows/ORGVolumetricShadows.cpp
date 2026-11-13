@@ -62,8 +62,8 @@ namespace
 		std::unique_ptr<GraphResources::Texture2D> shadowCopy;  // exported: engine draws and DCLF read it at t18
 		std::unique_ptr<GraphResources::Texture2D> blurTemp;    // transient, aliasable
 		// Render thread: the engine's maps as imported now, and the cascades' width. Read when a pass is made.
-		std::shared_ptr<org::ExternalTextureResource> cascades;
-		std::shared_ptr<org::ExternalTextureResource> volumetric;  // null: the cascades are read twice
+		FrameAnchors::Texture cascades;
+		FrameAnchors::Texture volumetric;  // null: the cascades are read twice
 		UINT sourceWidth = 0;
 	};
 
@@ -119,8 +119,8 @@ namespace
 			// Both cascades, as the D3D11 path's Texture2DArray view of the engine's map.
 			const org::SrvView wholeArray{ .variant = static_cast<std::uint32_t>(org::SRVViewType::Texture2DArrayFull) };
 			DownsampleBindings bindings{};
-			bindings.cascades = a_builder.ShaderResource(std::static_pointer_cast<org::Resource>(cascades), wholeArray).View();
-			bindings.volumetric = volumetric ? a_builder.ShaderResource(std::static_pointer_cast<org::Resource>(volumetric), wholeArray).View() : bindings.cascades;
+			bindings.cascades = a_builder.ShaderResource(cascades, wholeArray).View();
+			bindings.volumetric = volumetric ? a_builder.ShaderResource(volumetric, wholeArray).View() : bindings.cascades;
 			bindings.output = a_builder.UnorderedAccess(MipOf(output, mip), org::UavView{ .mip = mip }).View();
 			return bindings;
 		}
@@ -128,8 +128,8 @@ namespace
 		void Revision(std::vector<std::uint64_t>& a_out) const
 		{
 			a_out.push_back(reinterpret_cast<std::uintptr_t>(program.get()));
-			a_out.push_back(reinterpret_cast<std::uintptr_t>(cascades.get()));
-			a_out.push_back(reinterpret_cast<std::uintptr_t>(volumetric.get()));
+			a_out.push_back(reinterpret_cast<std::uintptr_t>(cascades.Key()));
+			a_out.push_back(reinterpret_cast<std::uintptr_t>(volumetric.Key()));
 			a_out.push_back(reinterpret_cast<std::uintptr_t>(output.get()));
 			a_out.push_back(groups);
 		}
@@ -151,8 +151,8 @@ namespace
 	private:
 		std::shared_ptr<Resources> resources;  // keeps the program and the sampler alive while the pass is
 		std::shared_ptr<const ComputeProgram> program;
-		std::shared_ptr<org::ExternalTextureResource> cascades;
-		std::shared_ptr<org::ExternalTextureResource> volumetric;
+		FrameAnchors::Texture cascades;
+		FrameAnchors::Texture volumetric;
 		std::shared_ptr<org::Resource> output;
 		std::uint32_t mip;
 		std::uint32_t groups = 0;
@@ -211,7 +211,7 @@ namespace
 	};
 
 	/** @brief The engine's depth map as a graph texture, when it exists with a depth SRV (what the passes read); else null. */
-	std::shared_ptr<org::ExternalTextureResource> ImportShadowMap(std::uint32_t a_depthStencil)
+	FrameAnchors::Texture ImportShadowMap(std::uint32_t a_depthStencil)
 	{
 		if (!globals::game::renderer->GetDepthStencilData().depthStencils[a_depthStencil].depthSRV)
 			return nullptr;

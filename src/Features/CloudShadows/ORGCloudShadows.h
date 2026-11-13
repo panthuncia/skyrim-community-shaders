@@ -20,6 +20,11 @@ namespace org
 	class ExternalTextureResource;
 }
 
+namespace FrameAnchors
+{
+	class Texture;
+}
+
 /**
  * @brief Cloud Shadows' occlusion copy as a render-graph pass (CS_ORG_CLOUD_SHADOWS=1).
  *
@@ -83,7 +88,7 @@ public:
 	 * ("cs.d3d11.CloudShadows::Layer[<layer>]") with its SRV and its faces' RTVs. Every graph user takes a layer through this, so one
 	 * resource serves them all. Null when the feature has no layers or the runtime is not active.
 	 */
-	static std::shared_ptr<org::ExternalTextureResource> ImportLayer(int a_layer);
+	static FrameAnchors::Texture ImportLayer(int a_layer);
 
 	/**
 	 * @brief Layer a_layer's published id (its twin's name, "CloudShadows::Layer[<layer>]"), for a reader that declares the twin by id

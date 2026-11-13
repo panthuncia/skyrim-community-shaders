@@ -102,11 +102,11 @@ namespace
 	/** @brief The engine targets the Upscale anchor's passes read and write, as graph textures. */
 	struct DepthInputs
 	{
-		std::shared_ptr<org::ExternalTextureResource> main;
+		FrameAnchors::Texture main;
 		rhi::Format mainFormat = rhi::Format::Unknown;  // kMAIN's view: the copy's target format
-		std::shared_ptr<org::ExternalTextureResource> depth, depthCopy;
-		std::shared_ptr<org::ExternalTextureResource> refraction, refractionCopy, saoCameraZ;
-		std::shared_ptr<org::ExternalTextureResource> underwater, underwaterCopy;
+		FrameAnchors::Texture depth, depthCopy;
+		FrameAnchors::Texture refraction, refractionCopy, saoCameraZ;
+		FrameAnchors::Texture underwater, underwaterCopy;
 		std::pair<std::uint32_t, std::uint32_t> depthSize, refractionSize, underwaterSize;  // the copies' sizes
 		std::uint32_t width = 0, height = 0;  // the screen: the depth upscale's render area
 
@@ -213,7 +213,7 @@ struct ORGUpscaling::Impl
 
 	std::unique_ptr<GraphResources::Texture2D> upscaled, hudless;
 	DepthInputs inputs;
-	std::shared_ptr<org::ExternalTextureResource> hudlessSource;
+	FrameAnchors::Texture hudlessSource;
 
 	// Render thread: this frame's queued work, and the depth upscale's constants.
 	std::uint32_t queued = 0;
@@ -720,7 +720,7 @@ bool ORGUpscaling::CopyHudless(ID3D11ShaderResourceView* a_source)
 	// The framebuffer is the engine's target (the overlay imports it too). HDR's clean composite is its output texture: the twin
 	// with CS_ORG_HDR_DISPLAY, ordered after the composite's writes, else a D3D11 texture imported.
 	auto& framebuffer = globals::game::renderer->GetRuntimeData().renderTargets[RE::RENDER_TARGETS::kFRAMEBUFFER];
-	std::shared_ptr<org::ExternalTextureResource> source;
+	FrameAnchors::Texture source;
 	if (framebuffer.texture == texture.get())
 		source = FrameAnchors::EngineTarget(static_cast<std::uint32_t>(RE::RENDER_TARGETS::kFRAMEBUFFER));
 	else if (!(source = ORGHDRDisplay::Get().GraphOf(texture.get())))

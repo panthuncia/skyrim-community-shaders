@@ -38,7 +38,7 @@ namespace DCLF::Direct
 		class SitePass final : public org::TypedRenderGraphPass<SitePass, org::EmptyPassFrameData, SiteBindings>
 		{
 		public:
-			using Textures = std::vector<std::shared_ptr<org::ExternalTextureResource>>;
+			using Textures = std::vector<FrameAnchors::Texture>;
 
 			// a_reads: in a GPU-driven graph, what its draws read: there the barriers are ORG's alone, an external epoch's being full.
 			using Reads = std::function<void(org::PassBuilder&)>;

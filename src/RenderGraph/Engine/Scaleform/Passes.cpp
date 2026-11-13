@@ -137,8 +137,8 @@ namespace RenderGraph::Engine::Scaleform::Passes
 			Role role = Role::Framebuffer;
 			winrt::com_ptr<ID3D11Texture2D> colourTexture;  // DXVK's: the surface's identity
 			winrt::com_ptr<ID3D11Texture2D> depthTexture;
-			std::shared_ptr<org::ExternalTextureResource> colour;
-			std::shared_ptr<org::ExternalTextureResource> depth;
+			FrameAnchors::Texture colour;  // an engine target's slot, or this client's own import
+			FrameAnchors::Texture depth;
 			std::string ownId;  // set when this client registers colour (not an engine target)
 			rhi::Format colourFormat = rhi::Format::Unknown;
 			rhi::Format depthFormat = rhi::Format::Unknown;
@@ -608,7 +608,7 @@ namespace RenderGraph::Engine::Scaleform::Passes
 			client.registerResources = [](org::RenderGraph& a_graph) {
 				for (const auto& surface : Path().surfaces)
 					if (!surface->ownId.empty() && surface->colour)
-						a_graph.RegisterResource(org::ResourceIdentifier(surface->ownId), surface->colour);
+						a_graph.RegisterResource(org::ResourceIdentifier(surface->ownId), surface->colour.Plain());
 			};
 			client.commit = [](const FrameAnchors::Point&) { Commit(); };
 			client.active = [] { return Path().pending != nullptr; };
@@ -796,7 +796,7 @@ namespace RenderGraph::Engine::Scaleform::Passes
 					a_depth->GetDesc(&depthDesc);
 					surface->width = std::min(surface->width, depthDesc.Width);
 					surface->height = std::min(surface->height, depthDesc.Height);
-					surface->depthFormat = surface->depth->GetFormat();
+					surface->depthFormat = surface->depth.Format();
 				}
 			}
 			logger::info("[ORG] Scaleform: the {} surface: {} ({}x{}, DXGI format {}), depth {}", RoleName(a_role),

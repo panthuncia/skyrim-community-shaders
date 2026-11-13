@@ -16,9 +16,18 @@ struct ID3D11UnorderedAccessView;
 namespace org
 {
 	class ExternalTextureResource;
+	class GloballyIndexedResource;
 	class GraphHost;
+	class IResourceResolver;
 	class RenderGraph;
 	class RenderPass;
+	class Resource;
+	class VersionedTexture;
+}
+
+namespace rhi
+{
+	enum class Format : std::uint32_t;
 }
 
 namespace RenderGraph
@@ -51,6 +60,80 @@ namespace RenderGraph
  */
 namespace FrameAnchors
 {
+	/**
+	 * @brief A graph texture as passes declare it. Two kinds:
+	 * - A slot: an import or an engine target ORG owns. It has one org::VersionedTexture for the id's life. A new D3D11 texture of the
+	 *   same shape class (format, mip count, slice count) is the slot's next version, so nothing is built again.
+	 * - A plain resource: anything else (a twin's Graph()), declared as itself.
+	 *
+	 * Passes hand it to the pass builder as they would a resource (`a_builder.ShaderResource(texture)`): ORG's SelfDeclaringResource
+	 * hook declares the slot, or the plain resource. Never declare Current(): that is one version's backing, not the slot.
+	 *
+	 * Two handles are equal when they name the same slot (or the same plain resource), whatever version is current. So a client that
+	 * compares its inputs to decide whether to register again does not register again for a new version.
+	 *
+	 * ORG-free: the out-of-line members live in FrameAnchors.cpp.
+	 */
+	class Texture
+	{
+	public:
+		Texture() = default;
+		Texture(std::nullptr_t) {}
+
+		/** @brief A plain resource (a twin's Graph(), Drawcall Limit Fix's own import), declared as itself. */
+		template <class T>
+		Texture(std::shared_ptr<T> a_resource) :
+			plain(std::move(a_resource))
+		{}
+
+		/** @brief A slot, named a_id in the logs. */
+		Texture(std::string a_id, std::shared_ptr<org::VersionedTexture> a_slot);
+
+		explicit operator bool() const { return slot || plain; }
+
+		friend bool operator==(const Texture& a_left, const Texture& a_right) { return a_left.slot == a_right.slot && a_left.plain == a_right.plain; }
+
+		/** @brief The slot; null for a plain resource. */
+		const std::shared_ptr<org::VersionedTexture>& Slot() const { return slot; }
+
+		/** @brief The plain resource; null for a slot. */
+		const std::shared_ptr<org::Resource>& Plain() const { return plain; }
+
+		/** @brief What stays the same across versions: the slot, or the plain resource. For a pass's Revision. */
+		const void* Key() const { return slot ? static_cast<const void*>(slot.get()) : static_cast<const void*>(plain.get()); }
+
+		/** @brief The import's graph id ("cs.engine.target.1", "Engine::kMAIN"); empty for a plain resource. */
+		const std::string& Id() const { return id; }
+
+		/**
+		 * @brief The backing as it is now: the slot's current version, or the plain resource. For shape queries and raw handles outside the
+		 * graph only. It changes with each version, so never declare it and never keep it across frames.
+		 */
+		std::shared_ptr<org::GloballyIndexedResource> Current() const;
+
+		/** @brief Current(), for one call (`texture->GetAPIResource()`). */
+		org::GloballyIndexedResource* operator->() const;
+
+		/** @brief The current version's size and format (an ExternalTextureResource's or a PixelBuffer's); 0 or Unknown when there is none. */
+		std::uint32_t Width() const;
+		std::uint32_t Height() const;
+		rhi::Format Format() const;
+
+		/** @brief Whether both handles have the same current backing: a holder of raw handles of one version compares with this. */
+		bool SameBacking(const Texture& a_other) const;
+
+		/** @brief ORG's SelfDeclaringResource hook: the slot, or null for a plain resource. */
+		const org::IResourceResolver* DeclaredResolver() const;
+
+		/** @brief ORG's SelfDeclaringResource hook: the plain resource. */
+		std::shared_ptr<org::Resource> DeclaredResource() const { return plain; }
+
+	private:
+		std::string id;
+		std::shared_ptr<org::VersionedTexture> slot;
+		std::shared_ptr<org::Resource> plain;
+	};
+
 	/** @brief The anchors, in the order a frame reaches them. */
 	enum class Anchor : std::uint32_t
 	{
@@ -326,30 +409,32 @@ namespace FrameAnchors
 	void LatchMainThread();
 
 	/**
-	 * @brief The engine's render target (RE::RENDER_TARGET) as a graph texture, imported once and kept while the engine's texture
-	 * stays the same. Its views follow the engine's (SRV, RTV, UAV where the engine made one). Registered with every graph as
+	 * @brief The engine's render target (RE::RENDER_TARGET) as a graph texture: one slot for the id's life. A new engine texture of the
+	 * same format, mip count and slice count is the slot's next version, with no graph build; another shape class is a new slot, built
+	 * in off the render thread. Its views follow the engine's (SRV, RTV, UAV where the engine made one). Registered with every graph as
 	 * "cs.engine.target.<index>". Render thread (it synchronizes with DXVK's worker the first time). Null when the target does not
 	 * exist or cannot be imported. Every mip and slice is described (a cube's views are cube views). A separate graph resource from Drawcall Limit Fix's import of the same image, which is safe because
 	 * no anchor epoch is one of DCLF's. When ORG owns the target (CS_ORG_ENGINE_TARGETS, RenderGraph/Engine/Targets), this and every
 	 * other import here return its published texture ("Engine::kMAIN" and the like) instead, the one resource DCLF reads too.
 	 */
-	std::shared_ptr<org::ExternalTextureResource> EngineTarget(std::uint32_t a_target);
+	Texture EngineTarget(std::uint32_t a_target);
 
 	/** @brief EngineTarget for a depth-stencil target (RE::RENDER_TARGETS_DEPTHSTENCIL), with its DSV and depth SRV: "cs.engine.depth.<index>". */
-	std::shared_ptr<org::ExternalTextureResource> EngineDepth(std::uint32_t a_depthStencil);
+	Texture EngineDepth(std::uint32_t a_depthStencil);
 
 	/**
 	 * @brief EngineTarget for a cubemap target (RE::RENDER_TARGETS_CUBEMAP): a cube texture whose default SRV is a cube view, with its
 	 * faces' RTVs: "cs.engine.cubemap.<index>".
 	 */
-	std::shared_ptr<org::ExternalTextureResource> EngineCubemap(std::uint32_t a_cubemap);
+	Texture EngineCubemap(std::uint32_t a_cubemap);
 
 	/**
 	 * @brief EngineTarget for a texture a feature still owns in D3D11 (one not ported yet), with the views given (any may be null; an
-	 * RTV makes it a render target the graph can draw into): "cs.d3d11.<name>". Imported again when a_texture changes. A cube texture
+	 * RTV makes it a render target the graph can draw into): "cs.d3d11.<name>". A new a_texture of the same shape class is the slot's
+	 * next version. A cube texture
 	 * (D3D11_RESOURCE_MISC_TEXTURECUBE) gets cube views. The first import of a name decides its views: import it the same way everywhere.
 	 */
-	std::shared_ptr<org::ExternalTextureResource> D3D11Texture(std::string_view a_name, ID3D11Texture2D* a_texture, ID3D11ShaderResourceView* a_srv,
+	Texture D3D11Texture(std::string_view a_name, ID3D11Texture2D* a_texture, ID3D11ShaderResourceView* a_srv,
 		ID3D11UnorderedAccessView* a_uav, ID3D11RenderTargetView* a_rtv = nullptr);
 
 	/**
@@ -358,18 +443,26 @@ namespace FrameAnchors
 	 * enter the graph, so native mode can give them the exempt ownership (org::Resource::GraphOwnership::
 	 * ExternalImmutableShaderResource) here. They import as D3D11Texture does for now: ORG's graphs refuse an exempt resource.
 	 */
-	std::shared_ptr<org::ExternalTextureResource> ImmutableTexture(std::string_view a_name, ID3D11Texture2D* a_texture, ID3D11ShaderResourceView* a_srv);
+	Texture ImmutableTexture(std::string_view a_name, ID3D11Texture2D* a_texture, ID3D11ShaderResourceView* a_srv);
 
 	/**
 	 * @brief EngineDepth for a depth texture outside the engine's table (a feature's own map, or one only a view of reaches the
 	 * feature): a_target's texture with its DSV and depth SRV, either of which may be null. Registered with every graph as a_id, and
 	 * kept while a_target's texture stays the same. Null when the texture cannot be imported.
 	 */
-	std::shared_ptr<org::ExternalTextureResource> ImportDepth(const RE::BSGraphics::DepthStencilData& a_target, const std::string& a_id);
+	Texture ImportDepth(const RE::BSGraphics::DepthStencilData& a_target, const std::string& a_id);
+
+	/**
+	 * @brief The anchors' import whose current version is a_image (the VkImage dxvkGetInteropResourceInfo reports for its texture), or
+	 * empty. Drawcall Limit Fix's ImportImage takes this slot instead of importing the image again, so the image is one graph resource
+	 * with one state tracker. Render thread.
+	 */
+	Texture ImportOfImage(std::uint64_t a_image);
 
 	/**
 	 * @brief Drops an import by its graph id ("cs.d3d11.<name>" for D3D11Texture, a_id for ImportDepth): the D3D11 texture is
-	 * released once D3D11's last use is done (ReleaseAfterD3D11) and every anchor graph is built again without it. For a feature
+	 * released once D3D11's last use is done (ReleaseAfterD3D11) and every anchor graph is built again without it (a structural
+	 * build, off the render thread). For a feature
 	 * texture that is destroyed or replaced under another name. Render thread. Nothing when the id is unknown.
 	 */
 	void ReleaseImport(std::string_view a_id);

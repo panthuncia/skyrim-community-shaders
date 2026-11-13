@@ -119,7 +119,7 @@ namespace
 	/** @brief The engine targets the passes read and write, imported once (FrameAnchors::EngineTarget). */
 	struct Targets
 	{
-		std::shared_ptr<org::ExternalTextureResource> main, mask, albedo, normal, depth;
+		FrameAnchors::Texture main, mask, albedo, normal, depth;
 
 		bool operator==(const Targets&) const = default;
 		explicit operator bool() const { return main && mask && albedo && normal && depth; }
@@ -224,7 +224,7 @@ namespace
 	class BlurPass final : public org::TypedRenderGraphPass<BlurPass, PassFrame, BlurBindings>
 	{
 	public:
-		BlurPass(const ScatterState& a_state, const Program& a_program, std::shared_ptr<org::Resource> a_color, std::shared_ptr<org::Resource> a_output) :
+		BlurPass(const ScatterState& a_state, const Program& a_program, FrameAnchors::Texture a_color, FrameAnchors::Texture a_output) :
 			programs(a_state.programs),
 			program(a_program.get()),
 			latch(a_state.latch),
@@ -275,8 +275,8 @@ namespace
 		std::shared_ptr<const org::LatchBlock> latch;
 		std::shared_ptr<const RenderGraph::RunGate> gate;
 		std::uint32_t pointSampler;
-		std::shared_ptr<org::Resource> color;
-		std::shared_ptr<org::Resource> output;
+		FrameAnchors::Texture color;  // the albedo-free copy or the temporary
+		FrameAnchors::Texture output;  // the temporary, or the engine's main target (its slot)
 		Targets targets;
 	};
 
@@ -308,7 +308,7 @@ struct ORGSubsurfaceScattering::Impl
 	 */
 	static FrameAnchors::ClientDesc MakeClient(const std::shared_ptr<ScatterState>& state)
 	{
-		const auto main = [](const ScatterState& a_state) { return std::static_pointer_cast<org::Resource>(a_state.targets.main); };
+		const auto main = [](const ScatterState& a_state) { return a_state.targets.main; };
 		FrameAnchors::ClientDesc client{};
 		client.id = kClientId;
 		client.sharedConstants = true;

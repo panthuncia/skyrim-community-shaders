@@ -78,7 +78,7 @@ namespace
 	class ClearPass final : public org::TypedRenderGraphPass<ClearPass, ClearFrame, ClearBindings>
 	{
 	public:
-		ClearPass(std::array<std::shared_ptr<org::ExternalTextureResource>, kTargets.size()> a_targets, std::uint32_t a_width, std::uint32_t a_height) :
+		ClearPass(std::array<FrameAnchors::Texture, kTargets.size()> a_targets, std::uint32_t a_width, std::uint32_t a_height) :
 			targets(std::move(a_targets)), width(a_width), height(a_height) {}
 
 		ClearBindings Declare(org::PassBuilder& a_builder)
@@ -121,7 +121,7 @@ namespace
 		}
 
 	private:
-		std::array<std::shared_ptr<org::ExternalTextureResource>, kTargets.size()> targets;
+		std::array<FrameAnchors::Texture, kTargets.size()> targets;
 		std::uint32_t width = 0, height = 0;
 	};
 }
@@ -151,19 +151,19 @@ namespace ORGDeferredClears
 			.kind = FrameAnchors::PassKind::Render,
 			.make = []() -> std::shared_ptr<org::RenderPass> {
 				// The targets as they are at this build: a resize makes new imports, which build the graph again.
-				std::array<std::shared_ptr<org::ExternalTextureResource>, kTargets.size()> targets;
+				std::array<FrameAnchors::Texture, kTargets.size()> targets;
 				for (std::size_t i = 0; i < kTargets.size(); ++i) {
 					targets[i] = FrameAnchors::EngineTarget(static_cast<std::uint32_t>(kTargets[i]));
 					if (!targets[i]) {
 						logger::warn("[ORG] Deferred clears: GBuffer target {} cannot be imported; the engine clears the GBuffer", static_cast<std::uint32_t>(kTargets[i]));
 						return nullptr;
 					}
-					if (targets[i]->GetWidth() != targets[0]->GetWidth() || targets[i]->GetHeight() != targets[0]->GetHeight()) {
+					if (targets[i].Width() != targets[0].Width() || targets[i].Height() != targets[0].Height()) {
 						logger::warn("[ORG] Deferred clears: the GBuffer targets differ in size; the engine clears the GBuffer");
 						return nullptr;
 					}
 				}
-				const std::uint32_t width = targets[0]->GetWidth(), height = targets[0]->GetHeight();
+				const std::uint32_t width = targets[0].Width(), height = targets[0].Height();
 				return std::make_shared<ClearPass>(std::move(targets), width, height);
 			} });
 		client.commit = [](const FrameAnchors::Point&) {

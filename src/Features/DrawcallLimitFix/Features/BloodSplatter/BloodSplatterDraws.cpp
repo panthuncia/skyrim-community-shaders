@@ -46,7 +46,7 @@ namespace DCLF::Features::BloodSplatter::BloodSplatterDraws
 			// One draw entry per latched draw. The anchor closes it at every run, and only this client's commit opens it, so a run of
 			// the anchor that another client keeps draws nothing of this client's older run.
 			std::shared_ptr<::RenderGraph::RunGate> gate;
-			std::shared_ptr<org::ExternalTextureResource> target;  // the back buffer, as imported at the registration
+			FrameAnchors::Texture target;  // the back buffer, as imported at the registration
 			std::shared_ptr<const Run> run;
 			bool pending = false;
 			bool targetLogged = false;

@@ -57,7 +57,7 @@ namespace DCLF::Features::DecalOcclusion::DecalDraws
 			std::shared_ptr<org::LatchBlock> latch;
 			// A draw's index count, opened by the commit for its run only.
 			std::shared_ptr<::RenderGraph::RunGate> gate;
-			std::shared_ptr<org::ExternalTextureResource> depth;  // kDECAL_OCCLUSION, imported at the registration
+			FrameAnchors::Texture depth;  // kDECAL_OCCLUSION, imported at the registration
 			std::uint32_t width = 0, height = 0;                  // its size: a draw's render area is clamped to it
 			std::shared_ptr<Queries::QueryRing> queries;
 			// Render thread writes, the host's thread reads.

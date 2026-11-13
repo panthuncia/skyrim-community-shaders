@@ -6,7 +6,9 @@
 #	include "RenderGraph/Engine/Targets/EngineTargets.h"
 
 #	include "Globals.h"
+#	include "RenderGraph/BuildManager.h"
 #	include "RenderGraph/Engine/Tripwire/Tripwire.h"
+#	include "RenderGraph/FrameAnchors.h"
 #	include "RenderGraph/GraphResources.h"
 #	include "RenderGraph/PublishedResources.h"
 #	include "RenderGraph/RenderGraphRuntime.h"
@@ -14,6 +16,7 @@
 #	include "Utils/D3D.h"
 
 #	include <Resources/ExternalTextureResource.h>
+#	include <Resources/VersionedTexture.h>
 
 #	include <array>
 #	include <atomic>
@@ -90,18 +93,20 @@ namespace RenderGraph::Engine::Targets
 		};
 
 		/**
-		 * @brief An engine target's graph texture: a GraphResources twin whose D3D11 side is made by its owner, so PublishedResources
-		 * publishes it by id and the anchors see its replacement through the resize generation.
+		 * @brief An engine target's graph texture: a versioned GraphResources twin whose D3D11 side is made by its owner. Its slot
+		 * (Versioned()) lasts while the target keeps its shape class: a target made again with the same format, mips and slices is the
+		 * slot's next version, so no graph is built again. PublishedResources publishes the slot by id.
 		 */
 		class EngineTexture final : public GraphResources::Resource
 		{
 		public:
 			explicit EngineTexture(std::string a_name) :
-				Resource(std::move(a_name), { GraphResources::Lifetime::Persistent, GraphResources::Export::SRV }) {}
+				Resource(std::move(a_name), { .lifetime = GraphResources::Lifetime::Persistent, .d3d11 = GraphResources::Export::SRV, .versioned = true }) {}
 
 			/**
-			 * @brief Takes a new image and its SRV; the old one goes (its image lives while its D3D11 texture does). Notes in the state
-			 * whether the old image had been handed to a reader (Serve): a graph may hold that one, so it must be built again.
+			 * @brief Takes a new image and its SRV; the old one goes (its image lives while its D3D11 texture does, and the slot's old
+			 * version while a frame holds it). Of the same shape class, the image is the slot's next version. Otherwise it is a new slot,
+			 * and when the old image had been handed to a reader (Serve) the state notes that graphs holding it must be built again.
 			 */
 			void Adopt(const GraphResources::ExportedTexture& a_image, ID3D11ShaderResourceView* a_srv);
 
@@ -130,6 +135,8 @@ namespace RenderGraph::Engine::Targets
 			}
 
 			const std::shared_ptr<org::ExternalTextureResource>& External() const { return external; }
+			/** @brief The handle readers declare: the slot, by the target's id. */
+			FrameAnchors::Texture Handle() const { return Versioned() ? FrameAnchors::Texture(Name(), Versioned()) : FrameAnchors::Texture(); }
 			const ID3D11Resource* D3D11Texture() const { return d3d11.get(); }
 			std::uint64_t Image() const { return image; }
 
@@ -182,6 +189,9 @@ namespace RenderGraph::Engine::Targets
 			// the move bumps the resize generation (every anchor builds again). A target made for the first time, or one no reader asked
 			// for yet, only publishes: no graph holds it.
 			bool heldReplaced = false;
+			// An image a reader had been handed became a version of another size. No graph needs a new resource, but passes that took
+			// the size when they were made are made again, once, off the render thread.
+			bool heldResized = false;
 			bool inSet = false;  // between BeginSet and EndSet: the set's move is EndSet's
 			// Images whose texture refused the retire token: kept for the session rather than freed under DXVK.
 			std::vector<std::shared_ptr<const void>> pinned;
@@ -197,9 +207,40 @@ namespace RenderGraph::Engine::Targets
 
 		void EngineTexture::Adopt(const GraphResources::ExportedTexture& a_image, ID3D11ShaderResourceView* a_srv)
 		{
-			if (std::exchange(served, false) && Graph())
-				Targets().heldReplaced = true;
+			const bool held = std::exchange(served, false) && Graph();
+			auto previous = Versioned();
+			const auto* old = external.get();
+			const bool sameSize = old && a_image.graph && old->GetWidth() == a_image.graph->GetWidth() && old->GetHeight() == a_image.graph->GetHeight();
 			AdoptImage(a_image, a_srv);
+			if (AdoptSlot(std::move(previous), true)) {
+				// The same slot: readers keep declaring it, and every graph follows the new version.
+				served = held;
+				if (held && !sameSize)
+					Targets().heldResized = true;
+				return;
+			}
+			if (held)
+				Targets().heldReplaced = true;
+		}
+
+		/**
+		 * @brief After a move: the anchors build again once when a held image was replaced by a new slot (the resize generation), or
+		 * every graph is made again off the render thread when held images only changed size. Returns whether it asked for builds.
+		 */
+		bool Settle(std::string_view a_what)
+		{
+			auto& state = Targets();
+			if (std::exchange(state.heldReplaced, false)) {
+				state.heldResized = false;
+				EngineTexture::BumpGeneration();
+				logger::info("[ORG] engine targets: {} made again in another shape class while a reader held its old image; the anchors build again", a_what);
+				return true;
+			}
+			if (std::exchange(state.heldResized, false)) {
+				RenderGraph::Builds::RequestAll(fmt::format("engine targets: {} resized; passes that took a size are made again", a_what));
+				return true;
+			}
+			return false;
 		}
 
 		/**
@@ -378,26 +419,21 @@ namespace RenderGraph::Engine::Targets
 				PublishedResources::Publish(a_texture->Name(), *a_texture);
 		}
 
-		/** @brief The graph texture of a_texture, published on the first request. */
-		std::shared_ptr<org::ExternalTextureResource> Serve(const std::unique_ptr<EngineTexture>& a_texture)
+		/** @brief The slot of a_texture, published on the first request. */
+		FrameAnchors::Texture Serve(const std::unique_ptr<EngineTexture>& a_texture)
 		{
-			if (!a_texture || !a_texture->External())
-				return nullptr;
+			if (!a_texture || !a_texture->External() || !a_texture->Versioned())
+				return {};
 			if (!PublishedResources::Publish(a_texture->Name(), *a_texture))
-				return nullptr;
+				return {};
 			a_texture->MarkServed();
-			return a_texture->External();
+			return a_texture->Handle();
 		}
 
 		bool Move(const std::unique_ptr<EngineTexture>& a_texture)
 		{
-			auto& state = Targets();
 			Republish(a_texture);
-			if (!std::exchange(state.heldReplaced, false))
-				return false;
-			EngineTexture::BumpGeneration();
-			logger::info("[ORG] engine targets: {} made again while a reader held its old image; the anchors build again", a_texture ? a_texture->Name() : "?");
-			return true;
+			return Settle(a_texture ? a_texture->Name() : std::string("?"));
 		}
 
 		// --- Render targets (75467 / 77253) ---
@@ -969,8 +1005,7 @@ namespace RenderGraph::Engine::Targets
 		// One move for the whole set: PublishedResources publishes every replaced id again, and the anchors build again once when an
 		// image a reader held was replaced.
 		ForEachTexture([](const std::unique_ptr<EngineTexture>& a_texture) { Republish(a_texture); });
-		if (std::exchange(state.heldReplaced, false))
-			EngineTexture::BumpGeneration();
+		Settle("the set");
 		logger::info("[ORG] engine targets: the set was made again on the render graph ({} render targets, {} depth-stencil targets)", colours, depths);
 	}
 
@@ -1028,8 +1063,7 @@ namespace RenderGraph::Engine::Targets
 		}
 		state.changed = false;
 		ForEachTexture([](const std::unique_ptr<EngineTexture>& a_texture) { Republish(a_texture); });
-		if (std::exchange(state.heldReplaced, false))
-			EngineTexture::BumpGeneration();
+		Settle("the startup set");
 		logger::info("[ORG] engine targets: {} targets now on the render graph, {} mip views made again on them, {} kept on D3D11 after a failure", taken, mipViews, kept);
 	}
 
@@ -1147,14 +1181,14 @@ namespace RenderGraph::Engine::Targets
 		return true;
 	}
 
-	std::shared_ptr<org::ExternalTextureResource> Find(const ID3D11Resource* a_texture)
+	FrameAnchors::Texture Find(const ID3D11Resource* a_texture)
 	{
 		if (!a_texture || !Enabled())
-			return nullptr;
+			return {};
 		const auto* texture = Tripwire::Unwrap(const_cast<ID3D11Resource*>(a_texture));
 		if (!texture)
-			return nullptr;
-		std::shared_ptr<org::ExternalTextureResource> found;
+			return {};
+		FrameAnchors::Texture found;
 		ForEachTexture([&](const std::unique_ptr<EngineTexture>& a_record) {
 			if (!found && a_record && a_record->D3D11Texture() == texture)
 				found = Serve(a_record);
@@ -1162,11 +1196,11 @@ namespace RenderGraph::Engine::Targets
 		return found;
 	}
 
-	std::shared_ptr<org::ExternalTextureResource> FindImage(std::uint64_t a_image)
+	FrameAnchors::Texture FindImage(std::uint64_t a_image)
 	{
 		if (!a_image || !Enabled())
-			return nullptr;
-		std::shared_ptr<org::ExternalTextureResource> found;
+			return {};
+		FrameAnchors::Texture found;
 		ForEachTexture([&](const std::unique_ptr<EngineTexture>& a_record) {
 			if (!found && a_record && a_record->Image() == a_image)
 				found = Serve(a_record);
@@ -1203,8 +1237,8 @@ namespace RenderGraph::Engine::Targets
 	bool Owns(std::uint32_t) { return false; }
 	bool Recreate(std::uint32_t, const D3D11_TEXTURE2D_DESC&, const char*, bool) { return false; }
 	bool Restore(std::uint32_t) { return false; }
-	std::shared_ptr<org::ExternalTextureResource> Find(const ID3D11Resource*) { return nullptr; }
-	std::shared_ptr<org::ExternalTextureResource> FindImage(std::uint64_t) { return nullptr; }
+	FrameAnchors::Texture Find(const ID3D11Resource*) { return {}; }
+	FrameAnchors::Texture FindImage(std::uint64_t) { return {}; }
 	void ServiceRetired() {}
 }
 

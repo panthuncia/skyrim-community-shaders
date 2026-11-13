@@ -147,39 +147,45 @@ namespace DCLF::Direct::detail
 	std::shared_ptr<const TargetViews> TargetsOf(std::vector<std::shared_ptr<const void>>& a_holds, const Draws::Resources& a_resources)
 	{
 		auto& s = S();
-		if (s.targets && s.targets->count == a_resources.targetCount && s.targets->native == a_resources.native &&
-			s.targets->nativeDepth == a_resources.nativeDepth && s.targets->refractionNormals == a_resources.refractionNormals)
+		// The views are of the current backings: a new version of an engine target's slot is a new image, so new views.
+		std::array<std::shared_ptr<org::GloballyIndexedResource>, Draws::kColorTargets> native{};
+		for (std::size_t i = 0; i < native.size(); ++i)
+			native[i] = a_resources.native[i].Current();
+		const auto nativeDepth = a_resources.nativeDepth.Current();
+		const auto refractionNormals = a_resources.refractionNormals.Current();
+		if (s.targets && s.targets->count == a_resources.targetCount && s.targets->native == native && s.targets->nativeDepth == nativeDepth &&
+			s.targets->refractionNormals == refractionNormals)
 			return s.targets;
 		if (s.targets)
 			a_holds.push_back(std::move(s.targets));
 		auto views = std::make_shared<TargetViews>();
-		views->native = a_resources.native;
-		views->nativeDepth = a_resources.nativeDepth;
-		views->refractionNormals = a_resources.refractionNormals;
+		views->native = native;
+		views->nativeDepth = nativeDepth;
+		views->refractionNormals = refractionNormals;
 		views->count = a_resources.targetCount;
 		const std::uint32_t rtvs = a_resources.targetCount + 1;
 		bool ok = s.device.CreateDescriptorHeap({ rhi::DescriptorHeapType::RTV, rtvs, false, "cs.dclf.direct.rtv" }, views->rtvHeap) == rhi::Result::Ok &&
 		          s.device.CreateDescriptorHeap({ rhi::DescriptorHeapType::DSV, 1, false, "cs.dclf.direct.dsv" }, views->dsvHeap) == rhi::Result::Ok;
 		for (std::uint32_t i = 0; ok && i < a_resources.targetCount; ++i) {
-			const auto& target = a_resources.native[i];
+			const auto& target = native[i];
 			ok = target != nullptr;
 			if (!ok)
 				break;
 			views->colourResources[i] = target->GetAPIResource().GetHandle();
-			views->formats[i] = target->GetFormat();
+			views->formats[i] = a_resources.native[i].Format();
 			views->colours[i] = rhi::DescriptorSlot(views->rtvHeap->GetHandle(), i);
 			ok = s.device.CreateRenderTargetView(views->colours[i], views->colourResources[i], rhi::RtvDesc{}) == rhi::Result::Ok;
 		}
-		if (ok && a_resources.nativeDepth) {
-			views->depthFormat = a_resources.nativeDepth->GetFormat();
+		if (ok && nativeDepth) {
+			views->depthFormat = a_resources.nativeDepth.Format();
 			views->depth = rhi::DescriptorSlot(views->dsvHeap->GetHandle(), 0);
-			ok = s.device.CreateDepthStencilView(views->depth, a_resources.nativeDepth->GetAPIResource().GetHandle(), rhi::DsvDesc{}) == rhi::Result::Ok;
+			ok = s.device.CreateDepthStencilView(views->depth, nativeDepth->GetAPIResource().GetHandle(), rhi::DsvDesc{}) == rhi::Result::Ok;
 		} else {
 			ok = false;
 		}
-		if (ok && a_resources.refractionNormals) {
-			views->refractionResource = a_resources.refractionNormals->GetAPIResource().GetHandle();
-			views->refractionFormat = a_resources.refractionNormals->GetFormat();
+		if (ok && refractionNormals) {
+			views->refractionResource = refractionNormals->GetAPIResource().GetHandle();
+			views->refractionFormat = a_resources.refractionNormals.Format();
 			views->refraction = rhi::DescriptorSlot(views->rtvHeap->GetHandle(), a_resources.targetCount);
 			if (s.device.CreateRenderTargetView(views->refraction, views->refractionResource, rhi::RtvDesc{}) != rhi::Result::Ok)
 				views->refractionResource = {};

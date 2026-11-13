@@ -30,10 +30,10 @@ namespace
 	class UavClearPass final : public org::TypedRenderGraphPass<UavClearPass, ClearFrame, ClearBindings>
 	{
 	public:
-		UavClearPass(std::shared_ptr<org::Resource> a_texture, std::array<float, 4> a_value) :
+		UavClearPass(FrameAnchors::Texture a_texture, std::array<float, 4> a_value) :
 			texture(std::move(a_texture)), value(a_value) {}
 
-		UavClearPass(std::shared_ptr<org::Resource> a_texture, std::array<std::uint32_t, 4> a_value) :
+		UavClearPass(FrameAnchors::Texture a_texture, std::array<std::uint32_t, 4> a_value) :
 			texture(std::move(a_texture)), uintValue(a_value), asUint(true) {}
 
 		ClearBindings Declare(org::PassBuilder& a_builder)
@@ -45,7 +45,7 @@ namespace
 
 		void Revision(std::vector<std::uint64_t>& a_out) const
 		{
-			a_out.push_back(reinterpret_cast<std::uintptr_t>(texture.get()));
+			a_out.push_back(reinterpret_cast<std::uintptr_t>(texture.Key()));
 			for (const float component : value) {
 				std::uint32_t bits = 0;
 				std::memcpy(&bits, &component, sizeof(bits));
@@ -71,7 +71,7 @@ namespace
 		}
 
 	private:
-		std::shared_ptr<org::Resource> texture;
+		FrameAnchors::Texture texture;
 		std::array<float, 4> value{};
 		std::array<std::uint32_t, 4> uintValue{};
 		bool asUint = false;
@@ -80,12 +80,12 @@ namespace
 
 namespace GraphPasses
 {
-	std::shared_ptr<org::RenderPass> MakeUavClear(std::shared_ptr<org::Resource> a_texture, std::array<float, 4> a_value)
+	std::shared_ptr<org::RenderPass> MakeUavClear(FrameAnchors::Texture a_texture, std::array<float, 4> a_value)
 	{
 		return std::make_shared<UavClearPass>(std::move(a_texture), a_value);
 	}
 
-	std::shared_ptr<org::RenderPass> MakeUavClearUint(std::shared_ptr<org::Resource> a_texture, std::array<std::uint32_t, 4> a_value)
+	std::shared_ptr<org::RenderPass> MakeUavClearUint(FrameAnchors::Texture a_texture, std::array<std::uint32_t, 4> a_value)
 	{
 		return std::make_shared<UavClearPass>(std::move(a_texture), a_value);
 	}

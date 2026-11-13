@@ -174,8 +174,10 @@ namespace RenderGraph::AnchorPasses
 			DrawBindings Declare(org::PassBuilder& a_builder)
 			{
 				const auto& draw = spec->step;
+				// An import's slot is declared as the slot (one mip of it through its range), a plain resource as itself.
 				auto view = draw.mip == kAllMips ? a_builder.RenderTarget(draw.target).View() :
-				                                   a_builder.RenderTarget(MipOf(draw.target, draw.mip), org::RtvView{ .mip = draw.mip }).View();
+				            draw.target.Slot()   ? a_builder.RenderTarget(SlotOf(*draw.target.Slot(), draw.mip), org::RtvView{ .mip = draw.mip }).View() :
+				                                   a_builder.RenderTarget(MipOf(draw.target.Plain(), draw.mip), org::RtvView{ .mip = draw.mip }).View();
 				std::vector<org::DeclaredViewToken> extra;
 				for (const auto& target : draw.extraTargets)
 					extra.push_back(a_builder.RenderTarget(target).View());
@@ -337,21 +339,21 @@ namespace RenderGraph::AnchorPasses
 
 	Bind Bind::Srv(const GraphResources::Resource& a_twin, std::uint32_t a_mip)
 	{
-		Bind bind = Srv(a_twin.Versioned() ? nullptr : a_twin.Graph(), a_mip);
+		Bind bind = Srv(a_twin.Versioned() ? std::shared_ptr<org::Resource>() : a_twin.Graph(), a_mip);
 		bind.slot = a_twin.Versioned();
 		return bind;
 	}
 
 	Bind Bind::Uav(const GraphResources::Resource& a_twin, std::uint32_t a_mip)
 	{
-		Bind bind = Uav(a_twin.Versioned() ? nullptr : a_twin.Graph(), a_mip);
+		Bind bind = Uav(a_twin.Versioned() ? std::shared_ptr<org::Resource>() : a_twin.Graph(), a_mip);
 		bind.slot = a_twin.Versioned();
 		return bind;
 	}
 
-	Bind Bind::SrvArray(std::shared_ptr<org::Resource> a_resource)
+	Bind Bind::SrvArray(const FrameAnchors::Texture& a_texture)
 	{
-		Bind bind = Srv(std::move(a_resource));
+		Bind bind = Srv(a_texture);
 		bind.variant = static_cast<std::uint32_t>(org::SRVViewType::Texture2DArrayFull);
 		return bind;
 	}

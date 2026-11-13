@@ -95,7 +95,7 @@ namespace
 		std::vector<std::pair<std::shared_ptr<Request>, org::ReadbackCaptureResult>> done;  // guarded: finished readbacks
 		std::shared_ptr<org::runtime::IReadbackService> service;
 		// Render thread: what the next build's pass copies, and for which capture (builds run on the render thread).
-		std::shared_ptr<org::ExternalTextureResource> source;
+		FrameAnchors::Texture source;
 		std::shared_ptr<Request> armed;
 	};
 
@@ -114,12 +114,12 @@ namespace
 	{
 	public:
 		// At the build, on the render thread: the source and the request as they are now.
-		CapturePass(std::shared_ptr<Shared> a_shared, std::shared_ptr<org::Resource> a_source, std::shared_ptr<Request> a_request) :
+		CapturePass(std::shared_ptr<Shared> a_shared, FrameAnchors::Texture a_source, std::shared_ptr<Request> a_request) :
 			shared(std::move(a_shared)), source(std::move(a_source)), request(std::move(a_request)) {}
 
 		void Declare(org::PassBuilder& a_builder)
 		{
-			a_builder.CopySource(source);
+			binding = a_builder.CopySource(source);
 			a_builder.PreferQueue(org::QueueKind::Graphics);
 		}
 
@@ -128,7 +128,11 @@ namespace
 			if (!request || request->closed.load(std::memory_order_acquire) || !shared->service)
 				return {};
 			CaptureFrame data{};
-			data.source = a_preparation.CaptureResource(source->GetGlobalResourceID());
+			// The version this preparation binds: captured by the declaration's binding, so a slot's current version is the one read.
+			const auto current = source.Current();
+			if (!current)
+				return {};
+			data.source = a_preparation.CaptureResource(binding);
 			// The readback service's thread (any submitting or host thread): Poll hands it on.
 			org::ReadbackCaptureCallback onDone = [weak = std::weak_ptr<Shared>(shared), request = request](org::ReadbackCaptureResult&& a_result) {
 				if (request->withdrawn.load(std::memory_order_acquire) || request->delivered.exchange(true, std::memory_order_acq_rel))
@@ -138,7 +142,7 @@ namespace
 					owner->done.emplace_back(request, std::move(a_result));
 				}
 			};
-			data.plan = org::runtime::PlanReadbackCapture(a_preparation.device, shared->service, *source, a_preparation.ResolveCapturedResource(data.source),
+			data.plan = org::runtime::PlanReadbackCapture(a_preparation.device, shared->service, *current, a_preparation.ResolveCapturedResource(data.source),
 				{}, std::move(onDone), org::QueueKind::Graphics, "cs.screenshot.readback");
 			if (!data.plan)
 				return {};
@@ -161,11 +165,12 @@ namespace
 
 	private:
 		std::shared_ptr<Shared> shared;
-		std::shared_ptr<org::Resource> source;
+		FrameAnchors::Texture source;
+		org::ResourceBindingToken binding;  // the source's declaration
 		std::shared_ptr<Request> request;
 	};
 
-	std::shared_ptr<org::ExternalTextureResource> Import(const ORGScreenshot::Source& a_source)
+	FrameAnchors::Texture Import(const ORGScreenshot::Source& a_source)
 	{
 		if (a_source.engineTarget >= 0) {
 			auto* renderer = globals::game::renderer;

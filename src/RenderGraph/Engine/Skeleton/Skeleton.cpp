@@ -28,6 +28,7 @@ bool RenderGraph::Engine::Skeleton::Requested()
 #	include <Render/RenderGraph/RenderGraph.h>
 #	include <RenderPasses/Base/TypedRenderGraphPass.h>
 #	include <Resources/ExternalTextureResource.h>
+#	include <Resources/VersionedTexture.h>
 #	include <rhi_helpers.h>
 
 #	include <algorithm>
@@ -111,7 +112,7 @@ namespace RenderGraph::Engine::Skeleton
 		{
 			std::string name;
 			Target target;
-			std::shared_ptr<org::ExternalTextureResource> resource;
+			FrameAnchors::Texture resource;  // the target's slot
 			const void* view = nullptr;     // the engine's view the pass was made for
 			const void* texture = nullptr;  // the engine's texture then: another one there means the target was made again
 			std::uint32_t slice = 0;
@@ -148,10 +149,19 @@ namespace RenderGraph::Engine::Skeleton
 
 			ClearBindings Declare(org::PassBuilder& a_builder)
 			{
-				const auto range = org::Subresources(spec->resource, org::Mip(0, 1), org::Slice(spec->slice, 1));
-				if (spec->depth)
-					return { a_builder.DepthReadWrite(range, org::DsvView{ .slice = spec->slice }).View() };
-				return { a_builder.RenderTarget(range, org::RtvView{ .slice = spec->slice }).View() };
+				const auto declare = [&](const auto& a_range) -> ClearBindings {
+					if (spec->depth)
+						return { a_builder.DepthReadWrite(a_range, org::DsvView{ .slice = spec->slice }).View() };
+					return { a_builder.RenderTarget(a_range, org::RtvView{ .slice = spec->slice }).View() };
+				};
+				// The slot of an engine target, so a new version of it needs no new pass; its slice and mip 0 through the range.
+				const auto& texture = spec->resource;
+				if (const auto& slot = texture.Slot()) {
+					org::ResourceResolverAndRange range(*slot);
+					range.range = org::Subresources(texture.Current(), org::Mip(0, 1), org::Slice(spec->slice, 1)).range;
+					return declare(range);
+				}
+				return declare(org::Subresources(texture.Plain(), org::Mip(0, 1), org::Slice(spec->slice, 1)));
 			}
 
 			// The recording depends only on what the pass was made with (its registration and its first gate entry); the gate decides
@@ -228,7 +238,7 @@ namespace RenderGraph::Engine::Skeleton
 
 		struct CopyState
 		{
-			std::shared_ptr<org::ExternalTextureResource> source, target;
+			FrameAnchors::Texture source, target;
 			const void* sourceTexture = nullptr;
 			const void* targetTexture = nullptr;
 			bool registered = false;
@@ -332,7 +342,7 @@ namespace RenderGraph::Engine::Skeleton
 		}
 
 		/** @brief The graph texture of a target now (the published one when ORG owns it, else the anchors' import). */
-		std::shared_ptr<org::ExternalTextureResource> ResourceOf(const Target& a_target)
+		FrameAnchors::Texture ResourceOf(const Target& a_target)
 		{
 			switch (a_target.kind) {
 			case Kind::Colour:
@@ -744,14 +754,13 @@ namespace RenderGraph::Engine::Skeleton
 				logger::info("[ORG] engine skeleton: kMAIN or kPOST_ZPREPASS_COPY has no graph texture; the depth copy stays on D3D11");
 				return;
 			}
-			if (copy.source->GetWidth() != copy.target->GetWidth() || copy.source->GetHeight() != copy.target->GetHeight() ||
-				copy.source->GetFormat() != copy.target->GetFormat()) {
+			if (copy.source.Width() != copy.target.Width() || copy.source.Height() != copy.target.Height() || copy.source.Format() != copy.target.Format()) {
 				copy.failed = true;
 				logger::warn("[ORG] engine skeleton: kMAIN and kPOST_ZPREPASS_COPY differ in size or format; the depth copy stays on D3D11");
 				return;
 			}
 			AnchorPasses::Builder builder(Anchor::EngineDepthCopy, kCopyId, 0);
-			builder.Add(AnchorPasses::Copy{ .name = "post-zprepass", .source = copy.source, .target = copy.target, .width = copy.source->GetWidth(), .height = copy.source->GetHeight() });
+			builder.Add(AnchorPasses::Copy{ .name = "post-zprepass", .source = copy.source, .target = copy.target, .width = copy.source.Width(), .height = copy.source.Height() });
 			FrameAnchors::ClientDesc client{};
 			client.id = kCopyId;
 			client.passes = builder.Take();

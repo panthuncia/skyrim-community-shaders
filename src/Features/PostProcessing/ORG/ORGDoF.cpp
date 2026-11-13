@@ -93,7 +93,7 @@ namespace ORGPostChain
 				if (!frame.run)
 					return "Target Focus has no target";
 
-				shape.reset();
+				shape = {};
 				if (frame.constants.BokehMode == 1) {
 					const auto& texture = dof.owner->bokehResources.texBokehShapes[frame.customShapeIndex];
 					shape = texture ? FrameAnchors::ImmutableTexture(std::format("PostProcessing::BokehShape{}", frame.customShapeIndex),
@@ -105,7 +105,7 @@ namespace ORGPostChain
 
 				for (const std::uint64_t word : { std::uint64_t(frame.adaptiveGather), std::uint64_t(frame.gatherQuality),
 						 std::uint64_t(frame.postSmoothing), std::uint64_t(frame.constants.BokehMode),
-						 std::uint64_t(reinterpret_cast<std::uintptr_t>(shape.get())), std::uint64_t(reinterpret_cast<std::uintptr_t>(depth.get())) })
+						 std::uint64_t(reinterpret_cast<std::uintptr_t>(shape.Key())), std::uint64_t(reinterpret_cast<std::uintptr_t>(depth.Key())) })
 					a_key.push_back(word);
 				return nullptr;
 			}
@@ -278,7 +278,7 @@ namespace ORGPostChain
 			}
 
 		private:
-			std::shared_ptr<org::Resource> depth, shape;
+			FrameAnchors::Texture depth, shape;
 			std::unique_ptr<GraphResources::Texture2D> focus;  // the focus distance in km, read and updated each frame
 			org::OwnedDescriptorBinding sampler;
 			DoF::Frame frame;

@@ -186,7 +186,7 @@ namespace DCLF::Draws
 		// dispatchSignature.
 		std::shared_ptr<const ComputeProgram> buildDraws;
 		// The engine's shadow map arrays, imported once each (again when the engine recreates them), a DSV per slice.
-		std::array<std::shared_ptr<org::ExternalTextureResource>, kShadowDepthTargets> depth;
+		std::array<FrameAnchors::Texture, kShadowDepthTargets> depth;
 		std::array<ID3D11Texture2D*, kShadowDepthTargets> depthTexture{};
 		std::array<std::uint32_t, kShadowDepthTargets> depthLayers{};
 		// The latch blocks are the revision's set's (NamedVersions::Latch). Targets the latched-copies pass declared:

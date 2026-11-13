@@ -241,7 +241,7 @@ namespace
 	/** @brief The engine and feature textures the chain reads, as graph textures. */
 	struct Inputs
 	{
-		std::shared_ptr<org::ExternalTextureResource> depth, main, normalRoughness, motionVectors, noise;
+		FrameAnchors::Texture depth, main, normalRoughness, motionVectors, noise;
 
 		bool operator==(const Inputs&) const = default;
 		explicit operator bool() const { return depth && main && normalRoughness && motionVectors && noise; }

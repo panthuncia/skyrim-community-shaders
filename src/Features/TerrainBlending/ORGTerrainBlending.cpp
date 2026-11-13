@@ -66,8 +66,8 @@ struct ORGTerrainBlending::Impl
 	std::unique_ptr<GraphResources::Texture2D> blendedDepth16;
 	std::unique_ptr<GraphResources::Texture2D> mask;
 	// The engine's main depth and Terrain Blending's terrain depth, both D3D11 textures (imports), taken at the first depth pass.
-	std::shared_ptr<org::Resource> mainDepth;
-	std::shared_ptr<org::Resource> terrainDepth;
+	FrameAnchors::Texture mainDepth;
+	FrameAnchors::Texture terrainDepth;
 	// Whether the client is registered with the textures and imports as they are now.
 	bool registered = false;
 
@@ -84,7 +84,7 @@ namespace
 	using RenderGraph::AnchorPasses::Bind;
 
 	/** @brief The engine's main depth, as a graph texture. Called before the depth table points its SRV at the blended depth. */
-	std::shared_ptr<org::Resource> MainDepth()
+	FrameAnchors::Texture MainDepth()
 	{
 		return FrameAnchors::EngineDepth(RE::RENDER_TARGETS_DEPTHSTENCIL::kMAIN);
 	}
@@ -104,7 +104,7 @@ namespace
 	}
 
 	/** @brief Terrain Blending's terrain depth: the twin, or its D3D11 texture imported. */
-	std::shared_ptr<org::Resource> TerrainDepth()
+	FrameAnchors::Texture TerrainDepth()
 	{
 		if (auto owned = ORGTerrainBlending::Get().TerrainDepthGraph())
 			return owned;
