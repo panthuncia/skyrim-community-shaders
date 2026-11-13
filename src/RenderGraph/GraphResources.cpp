@@ -187,6 +187,12 @@ namespace GraphResources
 			return true;
 		}
 
+		/** @brief A 2D texture's mip count: 0 in the description is the whole chain, as in D3D11. */
+		UINT MipsOf(const D3D11_TEXTURE2D_DESC& a_desc)
+		{
+			return a_desc.MipLevels ? a_desc.MipLevels : static_cast<UINT>(std::bit_width((std::max)({ a_desc.Width, a_desc.Height, 1u })));
+		}
+
 		/**
 		 * @brief Hands a texture's subresources to the graph's upload service (GraphHost::Uploads). Slice-major entries, as
 		 * rhi::helpers::PlanTextureUploadSubresources reads them. False, logged, without a texture or a graph.
@@ -398,10 +404,9 @@ namespace GraphResources
 
 	bool Texture2D::Upload(std::span<const SubresourceData> a_subresources, UINT a_width, UINT a_height) const
 	{
-		const Shape shape{ D3D11_RESOURCE_DIMENSION_TEXTURE2D, desc.Width, desc.Height, desc.ArraySize, desc.MipLevels, desc.Format };
 		const UINT width = a_width ? (std::min)(a_width, desc.Width) : desc.Width;
 		const UINT height = a_height ? (std::min)(a_height, desc.Height) : desc.Height;
-		return PostUpload(graph, name, desc.Format, width, height, 1, MipCount(shape), desc.ArraySize, a_subresources);
+		return PostUpload(graph, name, desc.Format, width, height, 1, MipsOf(desc), desc.ArraySize, a_subresources);
 	}
 
 	bool Texture2D::UploadZeros() const
@@ -413,10 +418,9 @@ namespace GraphResources
 		const auto rowBytes = [&](UINT a_mip) { const UINT width = (std::max)(desc.Width >> a_mip, 1u); return (blocks ? (width + 3) / 4 : width) * bytes; };
 		const auto rows = [&](UINT a_mip) { const UINT height = (std::max)(desc.Height >> a_mip, 1u); return blocks ? (height + 3) / 4 : height; };
 		const std::vector<std::uint8_t> zeros(static_cast<std::size_t>(rowBytes(0)) * rows(0), 0);
-		const Shape shape{ D3D11_RESOURCE_DIMENSION_TEXTURE2D, desc.Width, desc.Height, desc.ArraySize, desc.MipLevels, desc.Format };
 		std::vector<SubresourceData> subresources;
 		for (UINT slice = 0; slice < desc.ArraySize; ++slice)
-			for (UINT mip = 0; mip < MipCount(shape); ++mip)
+			for (UINT mip = 0; mip < MipsOf(desc); ++mip)
 				subresources.push_back({ zeros.data(), rowBytes(mip), rowBytes(mip) * rows(mip) });
 		return Upload(subresources);
 	}

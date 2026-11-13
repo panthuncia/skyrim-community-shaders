@@ -341,7 +341,7 @@ bool ORGTerrainShadows::SetHeightmap(const DirectX::Image& a_image)
 	// Into the texture's top-left corner, through the graph's upload pass at its next execution: in queue order, so a later
 	// heightmap's copy lands after an earlier one's.
 	const GraphResources::SubresourceData bytes{ image->pixels, static_cast<UINT>(image->rowPitch), static_cast<UINT>(image->slicePitch) };
-	if (!textures.heightMap->Upload({ &bytes, 1 }, static_cast<UINT>(image->width), static_cast<UINT>(image->height))) {
+	if (!textures.heightMap->Upload(std::span<const GraphResources::SubresourceData>(&bytes, 1), static_cast<UINT>(image->width), static_cast<UINT>(image->height))) {
 		logger::error("[ORG] Terrain Shadows: the heightmap could not be handed to the graph's uploads; back to D3D11");
 		Stop();
 		return false;
