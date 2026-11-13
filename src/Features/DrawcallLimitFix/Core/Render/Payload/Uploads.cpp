@@ -402,6 +402,12 @@ namespace DCLF
 				for (std::uint32_t r = 0; r < graphBuffers[b].count; ++r)
 					if (graphBuffers[b].firstRegister + r < kTextureRegisters)
 						onGraph[graphBuffers[b].firstRegister + r] = true;
+		// The registers the frame buffers' copies name (Deferred's sun cascades at t98): the copy is the graph buffer the colour passes
+		// declare (Draws::DeclareFrameBuffers), so the D3D11 buffer captured there is never imported.
+		std::array<bool, kTextureRegisters> copied{};
+		for (const auto& frameBuffer : depthOnly ? decltype(epochResources->frameBuffers){} : epochResources->frameBuffers)
+			if (frameBuffer.textureRegister < kTextureRegisters)
+				copied[frameBuffer.textureRegister] = true;
 		for (std::uint32_t t = kPixelTextureSlots; t < kTextureRegisters && !depthOnly; ++t) {
 			auto& held = frameTextureBindings[t];
 			const auto at = frameTextureAt[t];
@@ -414,7 +420,7 @@ namespace DCLF
 			// The view is a published export the colour passes declared: the published texture's own descriptor. No import to hold,
 			// the graph registers it.
 			std::uint32_t graphIndex = 0;
-			if (onGraph[t]) {
+			if (onGraph[t] || copied[t]) {
 				HoldFrameTexture(held.view, held.binding, nullptr, t, 0u, a_commit.bindingOwners);
 				continue;
 			}
@@ -461,11 +467,10 @@ namespace DCLF
 			auto* buffer = BufferOf(capture.psViews[frameBuffer.textureRegister]);
 			mirror.Watch(buffer);
 			const auto contents = mirror.Contents(buffer);
-			if (!LatchFrameBuffer(a_commit.latched, frameBuffer, contents)) {
-				// Unfillable: its copy reads zero (still written, as the shape's latched copies name it).
+			// Unfillable: its copy reads zero (still written, as the shape's latched copies name it). The register names the copy either
+			// way: the D3D11 buffer is not declared by any pass.
+			if (!LatchFrameBuffer(a_commit.latched, frameBuffer, contents))
 				Diagnostics::Notify(Diagnostics::FrameBufferUnfilled{ frameBuffer.textureRegister, frameBuffer.elements, frameBuffer.stride, contents.size() });
-				continue;  // not written since it is watched
-			}
 			a_frameTextures[frameBuffer.textureRegister] = frameBuffer.copy->GetSRVInfo(0).slot.index;
 		}
 	}
