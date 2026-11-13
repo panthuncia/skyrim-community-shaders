@@ -1824,3 +1824,12 @@ is not declarable at the build (`PublishedResources::IsDeclarable`), so the call
 - **Where it fits:** an offset (and extent) in `UploadTextureSubresources`, and a "finish in state" flag (shader-read) that the upload
   pass turns into a trailing declaration, as BasicRenderer's `MipHandoffPass` does for its textures.
 - **Found by:** native frame graph Phase 1 (2026-11-13).
+
+### Late-bound buffers: the version a preparation reads
+
+- **Need:** a pass that reads a late-bound buffer (`VersionedBuffer::CreateLateBound`) through a value it wrote at commit (a buffer
+  view ref) wants to check, or later write in Prepare, the value of the version the frame reads.
+- **Today:** the declaration always resolves to the stand-in, so `FramePreparationContext` gives no way to reach the published
+  version. CS reads `VersionedBuffer::Get()` at Prepare instead (`RenderGraph::CheckDeclaredRefs`).
+- **Where it fits:** a `FramePreparationContext` call that returns a declared late-bound buffer's version for this preparation.
+- **Found by:** native frame graph Phase 1, buffer refs lane (2026-11-13).
