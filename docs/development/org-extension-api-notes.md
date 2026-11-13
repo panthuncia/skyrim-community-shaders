@@ -1833,3 +1833,14 @@ is not declarable at the build (`PublishedResources::IsDeclarable`), so the call
   version. CS reads `VersionedBuffer::Get()` at Prepare instead (`RenderGraph::CheckDeclaredRefs`).
 - **Where it fits:** a `FramePreparationContext` call that returns a declared late-bound buffer's version for this preparation.
 - **Found by:** native frame graph Phase 1, buffer refs lane (2026-11-13).
+
+### The run a preparation is for
+
+- **Need:** a check in Prepare that compares a value a commit wrote (a latched buffer view ref) with the version the preparation
+  binds needs to know which commit, and so which frame, the preparation is for.
+- **Today:** `FramePreparationContext` has the graph's execution index and ring slot, but not the `RunRef` the commit wrote its
+  latches at (`GraphHost::CurrentRun`). CS keys its checks to a frame counter of its own (`RenderGraph::RefFrame`) and skips a check
+  made while another frame's values are being written.
+- **Where it fits:** the preparation's `RunRef` in `FramePreparationContext`, so a latch can be keyed by run and read for exactly the
+  run being prepared.
+- **Found by:** native frame graph Phase 1, residue lane (2026-11-13).
