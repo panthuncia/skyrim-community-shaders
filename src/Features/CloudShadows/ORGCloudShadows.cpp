@@ -70,7 +70,7 @@ struct ORGCloudShadows::Impl
 	std::shared_ptr<const ComputeProgram> program;
 	std::shared_ptr<RenderGraph::RunGate> gate;
 	std::unique_ptr<GraphResources::Texture2D> occlusion;
-	std::shared_ptr<org::Resource> lastLayer;
+	FrameAnchors::Texture lastLayer;
 	UINT width = 0;
 	UINT height = 0;
 	UINT mips = 0;
@@ -149,7 +149,7 @@ namespace
 
 	private:
 		std::shared_ptr<const Impl> impl;
-		std::shared_ptr<org::Resource> from;
+		FrameAnchors::Texture from;
 		std::shared_ptr<org::Resource> to;
 	};
 
@@ -236,7 +236,7 @@ std::string ORGCloudShadows::PublishedLayerId(int a_layer)
 	return LayerTwins()[a_layer]->Name();
 }
 
-std::shared_ptr<org::ExternalTextureResource> ORGCloudShadows::ImportLayer(int a_layer)
+FrameAnchors::Texture ORGCloudShadows::ImportLayer(int a_layer)
 {
 	auto& cloudShadows = globals::features::cloudShadows;
 	if (a_layer < 0 || a_layer >= CloudShadows::kMaxCloudLayers)
@@ -435,7 +435,7 @@ struct ORGCloudShadows::LayerOps
 	std::shared_ptr<RenderGraph::RunGate> gate;  // entries 0-31: the gather of layer l; 32-63: the scatter into layer l
 	std::shared_ptr<org::LatchBlock> latch;
 	std::unique_ptr<GraphResources::Texture2D> scratch;
-	std::array<std::shared_ptr<org::Resource>, kLayers> layers;
+	std::array<FrameAnchors::Texture, kLayers> layers;
 	UINT width = 0;
 	UINT height = 0;
 
@@ -740,7 +740,7 @@ struct ORGCloudShadows::LayerOps
 
 void ORGCloudShadows::Reserve() {}
 std::string ORGCloudShadows::PublishedLayerId(int) { return {}; }
-std::shared_ptr<org::ExternalTextureResource> ORGCloudShadows::ImportLayer(int) { return nullptr; }
+FrameAnchors::Texture ORGCloudShadows::ImportLayer(int) { return nullptr; }
 Texture2D* ORGCloudShadows::MakeLayer(int, const D3D11_TEXTURE2D_DESC&, const D3D11_SHADER_RESOURCE_VIEW_DESC&, const char*) { return nullptr; }
 bool ORGCloudShadows::Setup(std::function<void()>) { return false; }
 bool ORGCloudShadows::IsActive() const { return false; }

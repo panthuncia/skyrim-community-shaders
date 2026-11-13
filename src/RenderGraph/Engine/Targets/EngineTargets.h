@@ -5,10 +5,7 @@
 #include <cstdint>
 #include <memory>
 
-namespace org
-{
-	class ExternalTextureResource;
-}
+#include "RenderGraph/FrameAnchors.h"
 
 /**
  * @brief The engine's render targets as ORG resources (org-full-port.md P4.2; RE in docs/development/p4/render-targets.md).
@@ -22,7 +19,7 @@ namespace org
  * device and context installed, the fields hold tripwire handles that wrap those objects instead. The startup set is made before
  * the guests exist, so InstallHandles wraps it later; targets made after that get their handles at creation.
  *
- * Each target is published to every epoch's graph by id: "Engine::kMAIN", "Engine::kMAIN Copy", "Engine::Depth::kMAIN",
+ * Each target is a versioned slot, published to every epoch's graph by id: "Engine::kMAIN", "Engine::kMAIN Copy", "Engine::Depth::kMAIN",
  * "Engine::Cubemap::kREFLECTIONS", "Engine::3D::VOLUMETRIC_LIGHTING_ACCUMULATION". FrameAnchors' engine imports and Drawcall
  * Limit Fix's imports return the published resource for an image ORG owns, so the graph orders their uses with each other.
  *
@@ -89,13 +86,14 @@ namespace RenderGraph::Engine::Targets
 	bool Restore(std::uint32_t a_target);
 
 	/**
-	 * @brief The published graph texture whose D3D11 texture is a_texture (an engine target's texture or copy, a depth, cube or 3D
-	 * target's texture; a tripwire handle of one too), or null.
+	 * @brief The published slot whose current D3D11 texture is a_texture (an engine target's texture or copy, a depth, cube or 3D
+	 * target's texture; a tripwire handle of one too), or empty. The slot lasts while the target keeps its shape class: a target made
+	 * again (a resize, Recreate of the same format) is its next version.
 	 */
-	std::shared_ptr<org::ExternalTextureResource> Find(const ID3D11Resource* a_texture);
+	FrameAnchors::Texture Find(const ID3D11Resource* a_texture);
 
-	/** @brief Find for the VkImage DXVK reports for a texture (dxvkGetInteropResourceInfo's image), or null. */
-	std::shared_ptr<org::ExternalTextureResource> FindImage(std::uint64_t a_image);
+	/** @brief Find for the VkImage DXVK reports for a texture (dxvkGetInteropResourceInfo's image), or empty. */
+	FrameAnchors::Texture FindImage(std::uint64_t a_image);
 
 	/** @brief Render thread, each frame (the frame pace point): the images of destroyed D3D11 textures go to ReleaseAfterD3D11. */
 	void ServiceRetired();

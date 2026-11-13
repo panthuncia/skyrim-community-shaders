@@ -57,7 +57,7 @@ namespace ORGPostChain
 					if (!source)
 						return "the LUT texture cannot be imported";
 				}
-				a_key.push_back(reinterpret_cast<std::uintptr_t>(source.get()));
+				a_key.push_back(reinterpret_cast<std::uintptr_t>(source.Key()));
 				return nullptr;
 			}
 
@@ -147,7 +147,7 @@ namespace ORGPostChain
 			std::unique_ptr<GraphResources::Texture3D> copy;
 			std::shared_ptr<const GraphResources::StagedUpload> staged;  // copy's contents, for the upload pass
 			winrt::com_ptr<ID3D11Texture3D> copiedFrom;  // held, so a new LUT never takes the old one's address
-			std::shared_ptr<org::Resource> source;
+			FrameAnchors::Texture source;
 			LatchRegion<LUT::LUTCB> constants;
 			int lutType = kNoLut;
 		};

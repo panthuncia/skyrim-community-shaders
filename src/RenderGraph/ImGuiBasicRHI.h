@@ -10,7 +10,11 @@ struct ImDrawData;
 namespace org
 {
 	class RenderPass;
-	class ExternalTextureResource;
+}
+
+namespace FrameAnchors
+{
+	class Texture;
 }
 
 /**
@@ -123,7 +127,7 @@ namespace ImGuiBasicRHI
 	 * for a graph build. It records what Commit stored for its run, and nothing in an execution Commit did not run for. Null when
 	 * the atlas pages cannot be made.
 	 */
-	std::shared_ptr<org::RenderPass> MakePass(std::shared_ptr<org::ExternalTextureResource> a_target);
+	std::shared_ptr<org::RenderPass> MakePass(FrameAnchors::Texture a_target);
 
 	/**
 	 * @brief A new instance of the upload pass, for a graph build: the texture copies Commit stored for its run, into the atlas pages

@@ -262,7 +262,7 @@ namespace
 	/** @brief A graph resource a pass reads: an import, or a published id. */
 	struct VLSource
 	{
-		std::shared_ptr<org::Resource> resource;
+		FrameAnchors::Texture resource;
 		std::string published;
 
 		explicit operator bool() const { return resource || !published.empty(); }
@@ -274,8 +274,8 @@ namespace
 	{
 		std::vector<VolumeSize> sizes;
 		std::vector<std::unique_ptr<GraphResources::Texture3D>> volumes;
-		std::shared_ptr<org::ExternalTextureResource> targets[3];  // kVolumetricTarget, kPreviousTarget, kSwapTarget
-		std::shared_ptr<org::ExternalTextureResource> motionVectors, depth, previousDepth, shadowmap, shadowmapVL, noiseGradient;
+		FrameAnchors::Texture targets[3];  // kVolumetricTarget, kPreviousTarget, kSwapTarget
+		FrameAnchors::Texture motionVectors, depth, previousDepth, shadowmap, shadowmapVL, noiseGradient;
 		VLSource shadowHeights, cloudShadows;
 		// The engine objects the imports were made from: one that changes was made again (a resize), and the client registers again.
 		std::vector<const void*> engineObjects;
@@ -562,7 +562,7 @@ struct ORGVolumetricLighting::Impl
 							AnchorPasses::Bind::Latch(offsetof(LatchData, applyIntensityTemporal)) };
 						draw.target = output;
 						// The whole target: the shader keeps the engine's dynamic-resolution part (ISApplyVolumetricLighting.hlsl).
-						draw.viewport = { .x = 0, .y = 0, .width = output->GetWidth(), .height = output->GetHeight() };
+						draw.viewport = { .x = 0, .y = 0, .width = output.Width(), .height = output.Height() };
 						draw.load = rhi::LoadOp::Load;
 						draw.gate = ApplyEntry(v, o);
 						a_builder.Add(std::move(draw));
@@ -596,8 +596,8 @@ struct ORGVolumetricLighting::Impl
 				a_builder.Add(AnchorPasses::Copy{ .name = "depth-copy",
 					.source = shared->depth,
 					.target = shared->previousDepth,
-					.width = shared->depth->GetWidth(),
-					.height = shared->depth->GetHeight() });
+					.width = shared->depth.Width(),
+					.height = shared->depth.Height() });
 			});
 		});
 		client.registerResources = [shared, fixedState = fixed](org::RenderGraph& a_graph) {

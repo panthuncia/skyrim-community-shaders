@@ -35,8 +35,8 @@ namespace ORGPostChain
 				motion = FrameAnchors::EngineTarget(static_cast<std::uint32_t>(RE::RENDER_TARGETS::kMOTION_VECTOR));
 				if (!depth || !motion)
 					return "the main depth or the motion vectors cannot be imported";
-				a_key.push_back(reinterpret_cast<std::uintptr_t>(depth.get()));
-				a_key.push_back(reinterpret_cast<std::uintptr_t>(motion.get()));
+				a_key.push_back(reinterpret_cast<std::uintptr_t>(depth.Key()));
+				a_key.push_back(reinterpret_cast<std::uintptr_t>(motion.Key()));
 				return nullptr;
 			}
 
@@ -60,7 +60,7 @@ namespace ORGPostChain
 			}
 
 		private:
-			std::shared_ptr<org::Resource> depth, motion;
+			FrameAnchors::Texture depth, motion;
 			LatchRegion<Border::BorderCB> constants;
 			float2 size;
 		};

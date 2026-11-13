@@ -11,6 +11,11 @@ namespace org
 	class ExternalTextureResource;
 }
 
+namespace FrameAnchors
+{
+	class Texture;
+}
+
 /**
  * @brief HDR Display's output on the render graph (CS_ORG_HDR_DISPLAY=1).
  *
@@ -128,7 +133,7 @@ public:
 	 * null when they write no such texture. Another anchor's pass reading that texture uses this import: a second import of the same
 	 * image would be a graph resource of its own, which nothing orders after these writes (ORGScreenshot's capture).
 	 */
-	std::shared_ptr<org::ExternalTextureResource> ImportOf(ID3D11Texture2D* a_texture) const;
+	FrameAnchors::Texture ImportOf(ID3D11Texture2D* a_texture) const;
 
 	~ORGHDRDisplay();
 

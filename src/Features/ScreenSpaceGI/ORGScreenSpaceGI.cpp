@@ -241,7 +241,7 @@ namespace
 	/** @brief The engine and feature textures the chain reads, as graph textures. */
 	struct Inputs
 	{
-		std::shared_ptr<org::ExternalTextureResource> depth, main, normalRoughness, motionVectors, noise;
+		FrameAnchors::Texture depth, main, normalRoughness, motionVectors, noise;
 
 		bool operator==(const Inputs&) const = default;
 		explicit operator bool() const { return depth && main && normalRoughness && motionVectors && noise; }
@@ -279,7 +279,7 @@ namespace
 	};
 
 	/** @brief A shader resource entry of an input, or handle 0 for an input the permutation does not touch. */
-	Bind Srv(std::shared_ptr<org::Resource> a_resource) { return a_resource ? Bind::Srv(std::move(a_resource)) : Bind::Unused(); }
+	Bind Srv(const FrameAnchors::Texture& a_texture) { return a_texture ? Bind::Srv(a_texture) : Bind::Unused(); }
 
 	/**
 	 * @brief An entry of one of the chain's textures (its slot when versioned, so a resize is a new version), or handle 0 for a

@@ -31,7 +31,7 @@ namespace org
 
 namespace org
 {
-	class ExternalTextureResource;
+	class GloballyIndexedResource;
 }
 
 namespace DCLF::Direct::detail
@@ -82,8 +82,9 @@ namespace DCLF::Direct::detail
 	{
 		// The images the views are of, held as long as the views (and keyed by: a Resources' address can be reused by the next one, and
 		// its targets change with new main resources; views of a released image drew into freed memory DXVK had reused).
-		std::array<std::shared_ptr<org::ExternalTextureResource>, Draws::kColorTargets> native{};
-		std::shared_ptr<org::ExternalTextureResource> nativeDepth, refractionNormals;
+		// The backings current when the views were made (a slot's version, or DCLF's own import).
+		std::array<std::shared_ptr<org::GloballyIndexedResource>, Draws::kColorTargets> native{};
+		std::shared_ptr<org::GloballyIndexedResource> nativeDepth, refractionNormals;
 		rhi::DescriptorHeapPtr rtvHeap, dsvHeap;
 		std::uint32_t count = 0;
 		std::array<rhi::DescriptorSlot, Draws::kColorTargets> colours{};

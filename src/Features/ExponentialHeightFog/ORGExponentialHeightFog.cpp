@@ -126,7 +126,7 @@ namespace
 	/** @brief A graph resource a pass reads: one the client holds or imported, or one another client publishes by name. */
 	struct Source
 	{
-		std::shared_ptr<org::Resource> resource;
+		FrameAnchors::Texture resource;
 		std::string name;
 		// A texture array the shaders read whole (Texture2DArray): its whole-array view, not the default first slice.
 		bool wholeArray = false;

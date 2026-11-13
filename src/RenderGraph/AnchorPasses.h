@@ -61,6 +61,8 @@ namespace RenderGraph::AnchorPasses
 	 * default view, ordered after its producer's writes in any epoch), Handle a sampler or another descriptor index, Latch a LATCH
 	 * entry's two words (an offset into the builder's latch), Shared a SHARED entry's four words (SharedConstants.h). An Srv or a
 	 * Published read may ask for a view variant (a texture array's whole-array view: its default view is its first slice).
+	 * Srv and Uav take a FrameAnchors::Texture: an import's slot (declared as the slot, so a new version needs no build) or any graph
+	 * resource (a shared_ptr converts to a plain one).
 	 */
 	struct Bind
 	{
@@ -83,11 +85,11 @@ namespace RenderGraph::AnchorPasses
 		// Srv and Uav of a versioned twin: its slot, declared in place of resource, so a resize is a new version (GraphResources.h).
 		std::shared_ptr<org::VersionedTexture> slot;
 
-		static Bind Srv(std::shared_ptr<org::Resource> a_resource, std::uint32_t a_mip = kAllMips) { return { Kind::Srv, std::move(a_resource), 0, a_mip }; }
+		static Bind Srv(const FrameAnchors::Texture& a_texture, std::uint32_t a_mip = kAllMips) { return Of(Kind::Srv, a_texture, a_mip); }
 		/** @brief An Srv of a texture array's whole-array view (Texture2DArrayFull), for a shader that declares Texture2DArray. */
-		static Bind SrvArray(std::shared_ptr<org::Resource> a_resource);
+		static Bind SrvArray(const FrameAnchors::Texture& a_texture);
+		static Bind Uav(const FrameAnchors::Texture& a_texture, std::uint32_t a_mip = kAllMips) { return Of(Kind::Uav, a_texture, a_mip); }
 		/** @brief An Srv of another client's published resource, declared by its id: the graph orders the read after its producer. */
-		static Bind Uav(std::shared_ptr<org::Resource> a_resource, std::uint32_t a_mip = kAllMips) { return { Kind::Uav, std::move(a_resource), 0, a_mip }; }
 		static Bind Published(std::string_view a_id, std::uint32_t a_variant = UINT32_MAX)
 		{
 			return { Kind::Published, nullptr, 0, kAllMips, std::string(a_id), a_variant };
@@ -102,6 +104,15 @@ namespace RenderGraph::AnchorPasses
 		static Bind Unused() { return Handle(0); }
 		static Bind Latch(std::uint32_t a_offset) { return { Kind::Latch, nullptr, a_offset }; }
 		static Bind Shared() { return { Kind::Shared, nullptr, 0 }; }
+
+	private:
+		/** @brief An Srv or Uav of a handle: its slot, or its plain resource. */
+		static Bind Of(Kind a_kind, const FrameAnchors::Texture& a_texture, std::uint32_t a_mip)
+		{
+			Bind bind{ a_kind, a_texture.Plain(), 0, a_mip };
+			bind.slot = a_texture.Slot();
+			return bind;
+		}
 	};
 
 	/** @brief A fullscreen raster pass: a_program's pixel stage over the viewport, into one target (or one mip of it). */
@@ -110,10 +121,10 @@ namespace RenderGraph::AnchorPasses
 		std::string name;  // the step: the pass is "<prefix>.<name>"
 		std::shared_ptr<const RasterProgram> program;
 		std::vector<Bind> bindings;
-		std::shared_ptr<org::Resource> target;
+		FrameAnchors::Texture target;  // an import's slot, or any graph resource
 		std::uint32_t mip = kAllMips;
 		// SV_Target1 and up (whole textures, the same load op): for a program with several targets.
-		std::vector<std::shared_ptr<org::Resource>> extraTargets;
+		std::vector<FrameAnchors::Texture> extraTargets;
 		RasterProgram::Viewport viewport;  // the render area (required): the target's (or the mip's) size, or a part of it
 		rhi::LoadOp load = rhi::LoadOp::Load;
 		std::array<float, 4> clear{};  // with LoadOp::Clear
@@ -135,22 +146,21 @@ namespace RenderGraph::AnchorPasses
 	struct Copy
 	{
 		std::string name;
-		std::shared_ptr<org::Resource> source, target;
+		FrameAnchors::Texture source, target;
 		std::uint32_t width = 0, height = 0;
-		// A versioned twin's slot, declared in place of source or target (CopyOf sets them).
-		std::shared_ptr<org::VersionedTexture> sourceSlot, targetSlot;
 	};
 
 	/** @brief A clear of a whole texture through its UAV (UnorderedAccessClear) to a float or uint value. */
 	struct Clear
 	{
 		std::string name;
-		std::shared_ptr<org::Resource> target;
+		FrameAnchors::Texture target;
 		std::array<float, 4> value{};
 		std::optional<std::array<std::uint32_t, 4>> uintValue;  // set: a uint clear instead (integer formats)
-		// A versioned twin's slot, cleared in place of target (ClearOf sets it).
-		std::shared_ptr<org::VersionedTexture> slot;
 	};
+
+	/** @brief A graph twin as a handle: its slot when it is versioned (GraphResources::Options::versioned), else its graph resource. */
+	FrameAnchors::Texture TextureOf(const GraphResources::Resource& a_twin);
 
 	/**
 	 * @brief A Clear of a graph twin: its slot when it is versioned (GraphResources::Options::versioned), else its graph resource.
@@ -174,7 +184,7 @@ namespace RenderGraph::AnchorPasses
 	{
 		std::string name;
 		std::shared_ptr<org::Buffer> staging;
-		std::shared_ptr<org::Resource> target;
+		FrameAnchors::Texture target;
 		rhi::CopyableFootprint footprint{};
 		std::uint32_t mip = 0, slice = 0;
 	};

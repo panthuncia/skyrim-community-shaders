@@ -73,7 +73,7 @@ namespace FrameAnchors::SelfTest
 			std::array<std::shared_ptr<org::PixelBuffer>, kAnchors> textures;
 			std::shared_ptr<org::Buffer> output;                 // uint[kOutputWords]
 			std::shared_ptr<org::Buffer> readback;               // host copy of output
-			std::shared_ptr<org::ExternalTextureResource> main;  // the engine's kMAIN, or null
+			Texture main;  // the engine's kMAIN, or null
 			// CS_ORG_ANCHOR_SELFTEST_FAIL: a texture with a shader UAV and no CPU-side UAV, which a UAV clear needs. Its clear fails
 			// to prepare, as the HDR output anchor's import once did.
 			std::shared_ptr<org::PixelBuffer> failTexture;

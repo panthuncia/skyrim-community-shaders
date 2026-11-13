@@ -69,7 +69,8 @@ namespace
 	// The lowered passes' push blocks must fit the push words a draw records.
 	static_assert(OrgFx::kMaxPushWords == ShaderBindings::kMaxPushWords, "OrgFx::kMaxPushWords must match ShaderBindings::kMaxPushWords");
 
-	using Res = std::shared_ptr<org::Resource>;
+	// A graph texture as passes declare it: an engine target's slot, a file texture or a twin's resource.
+	using Res = FrameAnchors::Texture;
 	using Lifetime = GraphResources::Lifetime;
 	namespace AP = RenderGraph::AnchorPasses;
 
@@ -1180,9 +1181,9 @@ struct ORGFxRuntime::Impl
 	/** @brief The shape the plan follows; a change registers a new plan. */
 	std::string ShapeKey(const Inputs& a_inputs)
 	{
-		std::string key = fmt::format("{}x{} {} {}{} {} {}", resources->width, resources->height, reinterpret_cast<std::uintptr_t>(a_inputs.input.get()),
-			a_inputs.inputCopies ? 'c' : 'd', reinterpret_cast<std::uintptr_t>(a_inputs.main.get()), static_cast<std::uint32_t>(a_inputs.mainFormat), a_inputs.mainWidth);
-		key += fmt::format(" {} {} {} {}", reinterpret_cast<std::uintptr_t>(a_inputs.depth.get()), reinterpret_cast<std::uintptr_t>(a_inputs.output.get()),
+		std::string key = fmt::format("{}x{} {} {}{} {} {}", resources->width, resources->height, reinterpret_cast<std::uintptr_t>(a_inputs.input.Key()),
+			a_inputs.inputCopies ? 'c' : 'd', reinterpret_cast<std::uintptr_t>(a_inputs.main.Key()), static_cast<std::uint32_t>(a_inputs.mainFormat), a_inputs.mainWidth);
+		key += fmt::format(" {} {} {} {}", reinterpret_cast<std::uintptr_t>(a_inputs.depth.Key()), reinterpret_cast<std::uintptr_t>(a_inputs.output.Key()),
 			static_cast<std::uint32_t>(a_inputs.outputFormat), a_inputs.outputWidth);
 		for (std::size_t i = 0; i < kEffects; ++i) {
 			if (!a_inputs.runs[i]) {

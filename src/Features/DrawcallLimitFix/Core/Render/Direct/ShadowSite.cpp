@@ -37,7 +37,7 @@ namespace DCLF::Direct::detail
 		struct ShadowTargets
 		{
 			// The images the views are of, held as long as the views (and keyed by: an import's address can be reused by the next one).
-			std::array<std::shared_ptr<org::ExternalTextureResource>, Draws::kShadowDepthTargets> depth{};
+			std::array<std::shared_ptr<org::GloballyIndexedResource>, Draws::kShadowDepthTargets> depth{};  // the backings current when the views were made
 			std::array<std::uint32_t, Draws::kShadowDepthTargets> layers{};
 			std::array<std::uint32_t, Draws::kShadowDepthTargets> first{};  // its slice 0's DSV in the heap
 			std::array<rhi::Format, Draws::kShadowDepthTargets> formats{};
@@ -88,13 +88,17 @@ namespace DCLF::Direct::detail
 		std::shared_ptr<const ShadowTargets> ShadowTargetsOf(FrameSlot& a_slot, const Draws::ShadowResources& a_resources)
 		{
 			auto& own = Own();
-			if (own.targets && own.targets->depth == a_resources.depth && own.targets->layers == a_resources.depthLayers)
+			// The views are of the current backings: a new version of an engine target's slot is a new image, so new views.
+			std::array<std::shared_ptr<org::GloballyIndexedResource>, Draws::kShadowDepthTargets> depths{};
+			for (std::size_t t = 0; t < depths.size(); ++t)
+				depths[t] = a_resources.depth[t].Current();
+			if (own.targets && own.targets->depth == depths && own.targets->layers == a_resources.depthLayers)
 				return own.targets;
 			if (own.targets)
 				a_slot.holds.push_back(std::move(own.targets));
 			auto& device = S().device;
 			auto targets = std::make_shared<ShadowTargets>();
-			targets->depth = a_resources.depth;
+			targets->depth = depths;
 			targets->layers = a_resources.depthLayers;
 			std::uint32_t dsvs = 0;
 			for (std::uint32_t t = 0; t < Draws::kShadowDepthTargets; ++t)
@@ -108,7 +112,7 @@ namespace DCLF::Direct::detail
 				const auto& depth = targets->depth[t];
 				if (!depth)
 					continue;
-				targets->formats[t] = depth->GetFormat();
+				targets->formats[t] = a_resources.depth[t].Format();
 				targets->resources[t] = depth->GetAPIResource().GetHandle();
 				// A slice each, as the graph's declared views (DepthReadWrite of org::DsvView{ ..., slice }): an array's by its layer.
 				const std::uint32_t layers = std::max(1u, targets->layers[t]);

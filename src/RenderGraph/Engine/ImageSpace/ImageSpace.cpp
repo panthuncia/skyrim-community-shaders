@@ -319,9 +319,9 @@ namespace RenderGraph::Engine::ImageSpace
 			ShapeKey key;
 			std::uint32_t entry = 0;  // gate entry, latch region (entry * 32) and order key
 			std::string name;
-			std::shared_ptr<org::ExternalTextureResource> output;
-			std::shared_ptr<org::ExternalTextureResource> output1;
-			std::array<std::shared_ptr<org::ExternalTextureResource>, kMaxSlots> inputs;
+			FrameAnchors::Texture output;
+			FrameAnchors::Texture output1;
+			std::array<FrameAnchors::Texture, kMaxSlots> inputs;
 			rhi::Format format = rhi::Format::Unknown;        // the outputs' render target view formats
 			rhi::Format format1 = rhi::Format::Unknown;
 		};
@@ -776,7 +776,7 @@ namespace RenderGraph::Engine::ImageSpace
 		}
 
 		/** @brief The flow map's import (kFlowMapId), or null without a flow map. */
-		std::shared_ptr<org::ExternalTextureResource> FlowMapImport()
+		FrameAnchors::Texture FlowMapImport()
 		{
 			auto* map = FlowMap();
 			static_assert(kFlowMapId == "cs.d3d11.engine.flow-map", "kFlowMapId is FrameAnchors::D3D11Texture's id for engine.flow-map");
@@ -796,7 +796,7 @@ namespace RenderGraph::Engine::ImageSpace
 		}
 
 		/** @brief The graph's import of a target as ShapeKey names it (a render target, a depth target, a cubemap or the flow map; any mip is its texture's). */
-		std::shared_ptr<org::ExternalTextureResource> ImportOf(std::int32_t a_name)
+		FrameAnchors::Texture ImportOf(std::int32_t a_name)
 		{
 			if (a_name < 0 || (a_name & kLatchSourceInput))
 				return nullptr;
@@ -833,7 +833,7 @@ namespace RenderGraph::Engine::ImageSpace
 		}
 
 		/** @brief The format of an output's render target view (the program's target format), from the target or the texture it is a mip of. */
-		rhi::Format RtvFormatOf(std::int32_t a_name, const std::shared_ptr<org::ExternalTextureResource>& a_import)
+		rhi::Format RtvFormatOf(std::int32_t a_name, const FrameAnchors::Texture& a_import)
 		{
 			const auto& targets = globals::game::renderer->GetRuntimeData().renderTargets;
 			if (auto* rtv = targets[IndexOfName(a_name)].RTV) {
@@ -841,7 +841,7 @@ namespace RenderGraph::Engine::ImageSpace
 				rtv->GetDesc(&view);
 				return rhi::helpers::ToRHI(view.Format);
 			}
-			return a_import ? a_import->GetFormat() : rhi::Format::Unknown;
+			return a_import ? a_import.Format() : rhi::Format::Unknown;
 		}
 
 		/**
@@ -1548,8 +1548,8 @@ namespace RenderGraph::Engine::ImageSpace
 				// The viewport was read against the target's size when the shape was seen; this session's import must hold it.
 				const auto mip = MipOfName(a_key.output);
 				const auto shift = mip == AnchorPasses::kAllMips ? 0u : mip;
-				const auto width = (std::max)(spec->output->GetWidth() >> shift, 1u);
-				const auto height = (std::max)(spec->output->GetHeight() >> shift, 1u);
+				const auto width = (std::max)(spec->output.Width() >> shift, 1u);
+				const auto height = (std::max)(spec->output.Height() >> shift, 1u);
 				if (a_key.viewport[0] + a_key.viewport[2] > width || a_key.viewport[1] + a_key.viewport[3] > height)
 					refusal = "its viewport is outside its imported output (another resolution)";
 				spec->format = RtvFormatOf(a_key.output, spec->output);

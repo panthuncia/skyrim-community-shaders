@@ -121,14 +121,14 @@ namespace ORGPostChain
 	/** @brief The run gate entries one build may use: the draws' entry, one per distinct fixed dispatch size, and the effects' own. */
 	inline constexpr std::uint32_t kGateEntries = 128;
 
-	/** @brief A texture of the chain: the graph resource and its format, or one mip of it (Mip). */
+	/** @brief A texture of the chain: the graph resource (or an engine target's slot) and its format, or one mip of it (Mip). */
 	struct Image
 	{
-		std::shared_ptr<org::Resource> graph;
+		FrameAnchors::Texture graph;
 		DXGI_FORMAT format = DXGI_FORMAT_UNKNOWN;
 		std::uint32_t mip = kAllMips;  // kAllMips: the whole texture; else a pass reads or writes only this mip
 
-		explicit operator bool() const { return graph != nullptr; }
+		explicit operator bool() const { return static_cast<bool>(graph); }
 
 		/** @brief The same texture, one mip only: a draw targets that mip, a Bind::Srv reads a view of that mip alone. */
 		Image Mip(std::uint32_t a_mip) const
@@ -203,9 +203,9 @@ namespace ORGPostChain
 	{
 		using Base = RenderGraph::AnchorPasses::Bind;
 
-		static Bind Srv(std::shared_ptr<org::Resource> a_resource) { return { Base::Srv(std::move(a_resource)) }; }
+		static Bind Srv(const FrameAnchors::Texture& a_texture) { return { Base::Srv(a_texture) }; }
 		static Bind Srv(const Image& a_image) { return { Base::Srv(a_image.graph, a_image.mip) }; }
-		static Bind Uav(std::shared_ptr<org::Resource> a_resource) { return { Base::Uav(std::move(a_resource)) }; }
+		static Bind Uav(const FrameAnchors::Texture& a_texture) { return { Base::Uav(a_texture) }; }
 		static Bind Uav(const Image& a_image) { return { Base::Uav(a_image.graph, a_image.mip) }; }
 		static Bind Handle(std::uint32_t a_index) { return { Base::Handle(a_index) }; }
 		static Bind Unused() { return { Base::Unused() }; }

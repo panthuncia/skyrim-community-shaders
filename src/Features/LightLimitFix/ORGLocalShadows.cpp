@@ -102,7 +102,7 @@ namespace
 	{
 	public:
 		// At the build, on the render thread: the resources as they are now (GraphResources' rule).
-		ShadowCopyPass(const Resources& a_resources, std::shared_ptr<org::Resource> a_source) :
+		ShadowCopyPass(const Resources& a_resources, FrameAnchors::Texture a_source) :
 			program(a_resources.program), latch(a_resources.latch), gate(a_resources.gate), source(std::move(a_source)), cache(a_resources.cache->Graph()) {}
 
 		CopyBindings Declare(org::PassBuilder& a_builder)
@@ -139,7 +139,7 @@ namespace
 		std::shared_ptr<const ComputeProgram> program;
 		std::shared_ptr<const org::LatchBlock> latch;
 		std::shared_ptr<const RenderGraph::RunGate> gate;
-		std::shared_ptr<org::Resource> source;
+		FrameAnchors::Texture source;  // the engine's shadow maps (their slot)
 		std::shared_ptr<org::Resource> cache;
 	};
 

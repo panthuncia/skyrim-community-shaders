@@ -43,7 +43,7 @@ namespace ImGuiRenderer
 #if defined(CS_HAS_RENDER_GRAPH)
 			// What ImGui draws onto: the texture behind the bound render target and its graph import.
 			winrt::com_ptr<ID3D11Texture2D> targetTexture;
-			std::shared_ptr<org::ExternalTextureResource> target;
+			FrameAnchors::Texture target;
 			bool ownImport = false;  // registered by this client (not an engine target the anchors register)
 			ImGuiBasicRHI::Target targetInfo;
 			ImDrawData* pending = nullptr;  // the frame RenderDrawData is drawing, for the commit
@@ -101,7 +101,7 @@ namespace ImGuiRenderer
 			D3D11_TEXTURE2D_DESC textureDesc{};
 			texture->GetDesc(&textureDesc);
 			const auto format = rhi::helpers::ToRHI(viewDesc.Format);
-			std::shared_ptr<org::ExternalTextureResource> target;
+			FrameAnchors::Texture target;
 			bool own = false;
 			auto* renderer = globals::game::renderer;
 			if (renderer && renderer->GetRuntimeData().renderTargets[RE::RENDER_TARGET::kFRAMEBUFFER].texture == texture.get()) {
@@ -162,7 +162,7 @@ namespace ImGuiRenderer
 			client.registerResources = [](org::RenderGraph& a_graph) {
 				auto& state = Renderer();
 				if (state.ownImport && state.target)
-					a_graph.RegisterResource(org::ResourceIdentifier(kTargetId), state.target);
+					a_graph.RegisterResource(org::ResourceIdentifier(kTargetId), state.target.Plain());
 			};
 			client.commit = [](const FrameAnchors::Point&) {
 				auto& state = Renderer();
@@ -223,7 +223,7 @@ namespace ImGuiRenderer
 			FrameAnchors::Unregister(kClientId);
 			ImGuiBasicRHI::Shutdown();
 			a_state.org = false;
-			a_state.target.reset();
+			a_state.target = {};
 			a_state.targetTexture = nullptr;
 			ImGui_ImplDX11_Init(a_state.device, a_state.context);
 			a_state.dx11 = true;

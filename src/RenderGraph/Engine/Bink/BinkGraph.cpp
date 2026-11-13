@@ -178,7 +178,7 @@ namespace RenderGraph::Engine::Bink::Graph
 		struct DrawTarget
 		{
 			const char* name = "";
-			std::shared_ptr<org::ExternalTextureResource> resource;
+			FrameAnchors::Texture resource;
 			winrt::com_ptr<ID3D11Texture2D> texture;  // DXVK's: the target's identity
 			std::uint32_t width = 0, height = 0;
 			rhi::Format format = rhi::Format::Unknown;  // of its RTV
@@ -288,7 +288,7 @@ namespace RenderGraph::Engine::Bink::Graph
 		class DrawPass final : public org::TypedRenderGraphPass<DrawPass, PassFrame, DrawBindings>
 		{
 		public:
-			DrawPass(std::shared_ptr<org::ExternalTextureResource> a_target, std::shared_ptr<org::Resource> a_atlas, std::shared_ptr<const RunSlots<Frame>> a_slots) :
+			DrawPass(FrameAnchors::Texture a_target, std::shared_ptr<org::Resource> a_atlas, std::shared_ptr<const RunSlots<Frame>> a_slots) :
 				target(std::move(a_target)), atlas(std::move(a_atlas)), slots(std::move(a_slots)) {}
 
 			DrawBindings Declare(org::PassBuilder& a_builder) { return { a_builder.RenderTarget(target).View(), a_builder.ShaderResource(atlas).View() }; }
@@ -356,7 +356,7 @@ namespace RenderGraph::Engine::Bink::Graph
 			}
 
 		private:
-			std::shared_ptr<org::ExternalTextureResource> target;
+			FrameAnchors::Texture target;
 			std::shared_ptr<org::Resource> atlas;
 			std::shared_ptr<const RunSlots<Frame>> slots;
 		};
@@ -460,14 +460,14 @@ namespace RenderGraph::Engine::Bink::Graph
 		{
 			a_ok = true;
 			if (!a_texture) {
-				const bool had = a_target.resource != nullptr;
-				a_target.resource.reset();
+				const bool had = static_cast<bool>(a_target.resource);
+				a_target.resource = {};
 				a_target.texture = nullptr;
 				return had;
 			}
 			if (a_texture == a_target.texture)
 				return false;
-			std::shared_ptr<org::ExternalTextureResource> resource;
+			FrameAnchors::Texture resource;
 			if (a_isFramebuffer) {
 				resource = FrameAnchors::EngineTarget(static_cast<std::uint32_t>(RE::RENDER_TARGET::kFRAMEBUFFER));
 			} else {
@@ -486,13 +486,17 @@ namespace RenderGraph::Engine::Bink::Graph
 			}
 			D3D11_TEXTURE2D_DESC desc{};
 			a_texture->GetDesc(&desc);
+			// A new texture of the same import is the slot's next version: the passes keep declaring the slot, and each frame takes the
+			// size from here. Only another slot or format changes the passes.
+			const bool changed = resource != a_target.resource || format != a_target.format;
 			a_target.resource = std::move(resource);
 			a_target.texture = std::move(a_texture);
 			a_target.width = desc.Width;
 			a_target.height = desc.Height;
 			a_target.format = format;
-			logger::info("[ORG] Bink: drawing onto {} ({}x{}, DXGI format {})", a_target.name, desc.Width, desc.Height, static_cast<int>(a_format));
-			return true;
+			logger::info("[ORG] Bink: drawing onto {} ({}x{}, DXGI format {}{})", a_target.name, desc.Width, desc.Height, static_cast<int>(a_format),
+				changed ? "" : ", a new version of the same target");
+			return changed;
 		}
 
 		/**

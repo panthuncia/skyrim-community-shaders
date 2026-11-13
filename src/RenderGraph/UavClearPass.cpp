@@ -5,11 +5,11 @@
 
 #	include "RenderGraph/UavClearPass.h"
 
+#	include "RenderGraph/AnchorPasses.h"
 #	include "RenderGraph/GraphResources.h"
 
 #	include <Render/PassBuilders.h>
 #	include <RenderPasses/Base/TypedRenderGraphPass.h>
-#	include <Resources/VersionedTexture.h>
 
 #	include <cstdint>
 #	include <cstring>
@@ -33,29 +33,22 @@ namespace
 	class UavClearPass final : public org::TypedRenderGraphPass<UavClearPass, ClearFrame, ClearBindings>
 	{
 	public:
-		UavClearPass(std::shared_ptr<org::Resource> a_texture, std::array<float, 4> a_value) :
+		UavClearPass(FrameAnchors::Texture a_texture, std::array<float, 4> a_value) :
 			texture(std::move(a_texture)), value(a_value) {}
 
-		UavClearPass(std::shared_ptr<org::Resource> a_texture, std::array<std::uint32_t, 4> a_value) :
+		UavClearPass(FrameAnchors::Texture a_texture, std::array<std::uint32_t, 4> a_value) :
 			texture(std::move(a_texture)), uintValue(a_value), asUint(true) {}
-
-		UavClearPass(std::shared_ptr<org::VersionedTexture> a_slot, std::array<float, 4> a_value) :
-			slot(std::move(a_slot)), value(a_value) {}
-
-		UavClearPass(std::shared_ptr<org::VersionedTexture> a_slot, std::array<std::uint32_t, 4> a_value) :
-			slot(std::move(a_slot)), uintValue(a_value), asUint(true) {}
 
 		ClearBindings Declare(org::PassBuilder& a_builder)
 		{
 			a_builder.PreferQueue(org::QueueKind::Graphics);
-			// A slot is declared as itself, so a new version is cleared with no graph build.
-			const auto use = slot ? a_builder.UnorderedAccessClear(org::ResourceResolverAndRange(*slot)) : a_builder.UnorderedAccessClear(texture);
+			const auto use = a_builder.UnorderedAccessClear(texture);
 			return { use.resources.front(), use.views[0], use.views[1] };
 		}
 
 		void Revision(std::vector<std::uint64_t>& a_out) const
 		{
-			a_out.push_back(reinterpret_cast<std::uintptr_t>(slot ? static_cast<const void*>(slot.get()) : static_cast<const void*>(texture.get())));
+			a_out.push_back(reinterpret_cast<std::uintptr_t>(texture.Key()));
 			for (const float component : value) {
 				std::uint32_t bits = 0;
 				std::memcpy(&bits, &component, sizeof(bits));
@@ -81,8 +74,7 @@ namespace
 		}
 
 	private:
-		std::shared_ptr<org::Resource> texture;
-		std::shared_ptr<org::VersionedTexture> slot;  // in place of texture, for a versioned twin
+		FrameAnchors::Texture texture;
 		std::array<float, 4> value{};
 		std::array<std::uint32_t, 4> uintValue{};
 		bool asUint = false;
@@ -91,31 +83,19 @@ namespace
 
 namespace GraphPasses
 {
-	std::shared_ptr<org::RenderPass> MakeUavClear(std::shared_ptr<org::Resource> a_texture, std::array<float, 4> a_value)
+	std::shared_ptr<org::RenderPass> MakeUavClear(FrameAnchors::Texture a_texture, std::array<float, 4> a_value)
 	{
 		return std::make_shared<UavClearPass>(std::move(a_texture), a_value);
 	}
 
-	std::shared_ptr<org::RenderPass> MakeUavClearUint(std::shared_ptr<org::Resource> a_texture, std::array<std::uint32_t, 4> a_value)
+	std::shared_ptr<org::RenderPass> MakeUavClearUint(FrameAnchors::Texture a_texture, std::array<std::uint32_t, 4> a_value)
 	{
 		return std::make_shared<UavClearPass>(std::move(a_texture), a_value);
-	}
-
-	std::shared_ptr<org::RenderPass> MakeUavClear(std::shared_ptr<org::VersionedTexture> a_slot, std::array<float, 4> a_value)
-	{
-		return std::make_shared<UavClearPass>(std::move(a_slot), a_value);
-	}
-
-	std::shared_ptr<org::RenderPass> MakeUavClearUint(std::shared_ptr<org::VersionedTexture> a_slot, std::array<std::uint32_t, 4> a_value)
-	{
-		return std::make_shared<UavClearPass>(std::move(a_slot), a_value);
 	}
 
 	std::shared_ptr<org::RenderPass> MakeUavClear(const GraphResources::Resource& a_twin, std::array<float, 4> a_value)
 	{
-		if (const auto& slot = a_twin.Versioned())
-			return MakeUavClear(slot, a_value);
-		return MakeUavClear(a_twin.Graph(), a_value);
+		return MakeUavClear(RenderGraph::AnchorPasses::TextureOf(a_twin), a_value);
 	}
 }
 

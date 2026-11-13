@@ -90,11 +90,11 @@ namespace
 	struct Inputs
 	{
 		std::shared_ptr<const ComputeProgram> program;
-		std::shared_ptr<org::ExternalTextureResource> scene, ui, output;
-		std::shared_ptr<org::ExternalTextureResource> backBuffer;  // null: no copy pass
+		FrameAnchors::Texture scene, ui, output;
+		FrameAnchors::Texture backBuffer;  // null: no copy pass
 		// HDR's float scene twin and its clear program; null: no scene clear pass (PrepareMovieDraw clears on D3D11).
 		std::shared_ptr<const ComputeProgram> clearProgram;
-		std::shared_ptr<org::ExternalTextureResource> clearTarget;
+		FrameAnchors::Texture clearTarget;
 		std::uint32_t groupsX = 0, groupsY = 0;
 		std::uint32_t width = 0, height = 0;  // the output's size: the copy's extent
 
@@ -169,7 +169,7 @@ struct ORGHDRDisplay::Impl
 
 	// The last back buffer asked about, and whether the graph copies into it (CanCopyInto and the import).
 	winrt::com_ptr<ID3D11Texture2D> backBufferTexture;
-	std::shared_ptr<org::ExternalTextureResource> backBuffer;
+	FrameAnchors::Texture backBuffer;
 
 	// What the registered passes were made from; null before the first registration.
 	std::shared_ptr<const Inputs> registered;
@@ -284,7 +284,7 @@ std::shared_ptr<org::ExternalTextureResource> ORGHDRDisplay::GraphOf(ID3D11Textu
 	return nullptr;
 }
 
-std::shared_ptr<org::ExternalTextureResource> ORGHDRDisplay::ImportOf(ID3D11Texture2D* a_texture) const
+FrameAnchors::Texture ORGHDRDisplay::ImportOf(ID3D11Texture2D* a_texture) const
 {
 	if (!impl || !impl->registered || !a_texture)
 		return nullptr;
@@ -331,15 +331,15 @@ ORGHDRDisplay::Composed ORGHDRDisplay::Compose(const HDRDisplay::HDRDataCB& a_co
 	// The scene as ApplyHDR picks it: HDR's float texture, else the framebuffer. HDR's own textures are the twins (GraphOf); a D3D11
 	// one is imported.
 	const bool hdrScene = hdr.IsHDREnabledForFrame() && hdr.hdrTexture && hdr.hdrTexture->srv;
-	auto scene = !hdrScene ? FrameAnchors::EngineTarget(static_cast<std::uint32_t>(RE::RENDER_TARGET::kFRAMEBUFFER)) : GraphOf(hdr.hdrTexture->resource.get());
+	FrameAnchors::Texture scene = !hdrScene ? FrameAnchors::EngineTarget(static_cast<std::uint32_t>(RE::RENDER_TARGET::kFRAMEBUFFER)) : FrameAnchors::Texture(GraphOf(hdr.hdrTexture->resource.get()));
 	if (hdrScene && !scene)
 		scene = FrameAnchors::D3D11Texture(kSceneName, hdr.hdrTexture->resource.get(), hdr.hdrTexture->srv.get(), nullptr);
-	auto output = GraphOf(hdr.outputTexture->resource.get());
+	FrameAnchors::Texture output = GraphOf(hdr.outputTexture->resource.get());
 	if (!output)
 		output = FrameAnchors::D3D11Texture(kOutputName, hdr.outputTexture->resource.get(), hdr.outputTexture->srv.get(), hdr.outputTexture->uav.get());
 	// A D3D11 one with its RTV: Bink's render-graph path draws movies into it through the same import ("hdr.ui"), and a name's first
 	// import decides its views.
-	auto ui = GraphOf(hdr.uiTexture->resource.get());
+	FrameAnchors::Texture ui = GraphOf(hdr.uiTexture->resource.get());
 	if (!ui)
 		ui = FrameAnchors::D3D11Texture(kUiName, hdr.uiTexture->resource.get(), hdr.uiTexture->srv.get(), hdr.uiTexture->uav.get(), hdr.uiTexture->rtv.get());
 	if (!scene || !output || !ui) {
@@ -435,7 +435,7 @@ void ORGHDRDisplay::Reserve() {}
 bool ORGHDRDisplay::Setup(std::function<void()>) { return false; }
 void ORGHDRDisplay::Fail(const char*) {}
 void ORGHDRDisplay::ClearShaderCache() {}
-std::shared_ptr<org::ExternalTextureResource> ORGHDRDisplay::ImportOf(ID3D11Texture2D*) const { return nullptr; }
+FrameAnchors::Texture ORGHDRDisplay::ImportOf(ID3D11Texture2D*) const { return nullptr; }
 Texture2D* ORGHDRDisplay::MakeTexture(Texture, const D3D11_TEXTURE2D_DESC&, const char*) { return nullptr; }
 void ORGHDRDisplay::ReleaseTextures() {}
 std::shared_ptr<org::ExternalTextureResource> ORGHDRDisplay::GraphOf(ID3D11Texture2D*) const { return nullptr; }

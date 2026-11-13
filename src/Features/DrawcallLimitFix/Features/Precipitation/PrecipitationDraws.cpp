@@ -60,8 +60,8 @@ namespace DCLF::Features::Precipitation::PrecipitationDraws
 			// the anchor that another client keeps draws nothing of this client's older run.
 			std::shared_ptr<::RenderGraph::RunGate> gate;
 			// The targets as imported at the registration (kTargets; null where a second target could not be imported).
-			std::array<std::shared_ptr<org::ExternalTextureResource>, kTargets.size()> colours;
-			std::shared_ptr<org::ExternalTextureResource> depth;
+			std::array<FrameAnchors::Texture, kTargets.size()> colours;
+			FrameAnchors::Texture depth;
 			// Every published id the draws can read, fixed here (ListInputs). Each build declares the registered ones.
 			Family::PublishedInputs inputs;
 			// Render thread writes, the host's thread reads.

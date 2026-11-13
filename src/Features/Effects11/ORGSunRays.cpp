@@ -133,7 +133,7 @@ namespace
 	/** @brief A graph resource a pass reads: one imported, or one another client registers by name. */
 	struct Source
 	{
-		std::shared_ptr<org::Resource> resource;
+		FrameAnchors::Texture resource;
 		std::string name;
 
 		explicit operator bool() const { return resource || !name.empty(); }
@@ -155,7 +155,7 @@ namespace
 	{
 		ORGSunRays::Sizes sizes;
 		rhi::Format mainFormat = rhi::Format::Unknown;
-		std::shared_ptr<org::Resource> main;
+		FrameAnchors::Texture main;
 		Source depth, shadowHeights, cloudShadows;
 
 		bool operator==(const Shape& a_other) const

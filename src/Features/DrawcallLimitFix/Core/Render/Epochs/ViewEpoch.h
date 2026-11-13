@@ -213,7 +213,7 @@ namespace DCLF::Draws
 		// The reflection's: DCLF's depth for the faces (cleared per face) and the engine's cube target. First person's: the colour
 		// epoch's depth, the engine's kPOST_ZPREPASS_COPY (FUN_1414cb6d0 binds it as the first-person pass's depth).
 		std::shared_ptr<org::PixelBuffer> depth;
-		std::shared_ptr<org::ExternalTextureResource> target;
+		FrameAnchors::Texture target;
 		ID3D11Texture2D* targetTexture = nullptr;
 		std::uint32_t width = 0, height = 0;
 		// Per draw family with faces (a trees view's), per face a row (its list the face's) and a list, for the family's units (tree LOD's:

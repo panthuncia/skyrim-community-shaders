@@ -730,7 +730,7 @@ void ORGPostProcessing::BeforeTonemap(bool a_readsMainCopy)
 	const bool colorGraded = std::ranges::find(order, Index::ColorGrading) != order.end();
 	const auto conversion = pp.OutputConversion(colorGraded);
 	for (const std::uint64_t word : { std::uint64_t(shape.width), std::uint64_t(shape.height), Bits(shape.dynamicWidth), Bits(shape.dynamicHeight),
-			 std::uint64_t(shape.mainFormat), std::uint64_t(shape.mainCopyFormat), std::uint64_t(linear), reinterpret_cast<std::uintptr_t>(mainTarget.get()), reinterpret_cast<std::uintptr_t>(mainCopyTarget.get()) })
+			 std::uint64_t(shape.mainFormat), std::uint64_t(shape.mainCopyFormat), std::uint64_t(linear), reinterpret_cast<std::uintptr_t>(mainTarget.Key()), reinterpret_cast<std::uintptr_t>(mainCopyTarget.Key()) })
 		key.push_back(word);
 
 	if (key != s.key || !s.build) {

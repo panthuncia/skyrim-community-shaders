@@ -155,7 +155,7 @@ namespace
 		std::shared_ptr<org::LatchBlock> latch;
 		std::shared_ptr<RenderGraph::RunGate> gate;
 		// The imported inputs, null until the first frame that updates; replaced (and the client refreshed) when D3D11 gives others.
-		std::shared_ptr<org::ExternalTextureResource> occlusion, shadowCascades, esramShadows;
+		FrameAnchors::Texture occlusion, shadowCascades, esramShadows;
 		// The occlusion map's clear (the twin's only; null keeps the D3D11 clear).
 		std::shared_ptr<const RasterProgram> clearProgram;
 	};
@@ -246,7 +246,7 @@ namespace
 		}
 
 	private:
-		std::shared_ptr<org::Resource> occlusion, shadowCascades, esramShadows;
+		FrameAnchors::Texture occlusion, shadowCascades, esramShadows;
 		std::array<std::shared_ptr<org::Resource>, kVolumes> volumes;
 		ProbeFrame frame;
 	};
@@ -310,7 +310,7 @@ namespace
 	};
 
 	/** @brief A shadow map's texture behind a_srv: the engine's depth-stencil import when it is one of the engine's, else its own. */
-	std::shared_ptr<org::ExternalTextureResource> ImportShadowMap(ID3D11ShaderResourceView* a_srv, const char* a_id)
+	FrameAnchors::Texture ImportShadowMap(ID3D11ShaderResourceView* a_srv, const char* a_id)
 	{
 		if (!a_srv)
 			return nullptr;
@@ -356,7 +356,7 @@ struct ORGSkylighting::Impl
 	 */
 	bool ResolveInputs(const Inputs& a_inputs)
 	{
-		auto occlusion = ORGSkylighting::Get().OcclusionMap();
+		FrameAnchors::Texture occlusion = ORGSkylighting::Get().OcclusionMap();
 		if (!occlusion) {
 			RE::BSGraphics::DepthStencilData occlusionTarget{};
 			occlusionTarget.texture = a_inputs.occlusion;

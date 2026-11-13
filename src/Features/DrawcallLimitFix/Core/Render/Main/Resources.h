@@ -21,6 +21,7 @@
 #include "Features/DrawcallLimitFix/Diagnostics/Reports/Schedule.h"
 
 #include "RenderGraph/ComputeProgram.h"
+#include "RenderGraph/FrameAnchors.h"
 #include <ORGModuleServices/ElasticCapacity.h>
 #include <Render/LatchBlock.h>
 #include <RenderPasses/Base/TypedRenderGraphPass.h>
@@ -153,15 +154,16 @@ namespace DCLF::Draws
 		bool sharedLightZeroed = false;
 		// The main pass's imported targets and depth.
 		std::uint32_t targetCount = 0;
-		std::array<std::shared_ptr<org::ExternalTextureResource>, kColorTargets> native;
-		std::shared_ptr<org::ExternalTextureResource> nativeDepth;
+		// Each an engine target's slot when ORG owns it (FrameAnchors::Texture), else DCLF's own import.
+		std::array<FrameAnchors::Texture, kColorTargets> native;
+		FrameAnchors::Texture nativeDepth;
 		// Terrain Blending's terrain depth, which the Z-prepass draws near terrain into. Null without that feature.
-		std::shared_ptr<org::ExternalTextureResource> terrainDepth;
+		FrameAnchors::Texture terrainDepth;
 		// The engine's refraction normals (kREFRACTION_NORMALS), for RefractionDrawPass. Null without the target.
-		std::shared_ptr<org::ExternalTextureResource> refractionNormals;
+		FrameAnchors::Texture refractionNormals;
 		DXGI_FORMAT refractionFormat = DXGI_FORMAT_UNKNOWN;
 		// The engine's screen-space shadow mask (kSHADOW_MASK), which the colour draws read; null without it.
-		std::shared_ptr<org::ExternalTextureResource> shadowMask;
+		FrameAnchors::Texture shadowMask;
 		// The shadow engine's resources (their shadow map imports, which the masks sample), once both exist (Impl::ShadowResourcesMade).
 		std::shared_ptr<ShadowResources> shadow;
 		Versioned visibility;  // per-object verdict, published by the depth segment

@@ -9,9 +9,11 @@
 #include "Features/DrawcallLimitFix/Core/Render/Revision/Epochs.h"
 
 #include "RenderGraph/ComputeProgram.h"
+#include "RenderGraph/FrameAnchors.h"
 #include "RenderGraph/RenderGraphRuntime.h"
 #include <Render/RenderGraph/RenderGraph.h>
 #include <Resources/Buffers/VersionedBuffer.h>
+#include <Resources/VersionedTexture.h>
 #include <rhi.h>
 
 #include <cassert>
@@ -148,6 +150,20 @@ namespace DCLF::Draws
 		if constexpr (!std::is_same_v<T, org::VersionedBuffer>)
 			if (a_resource)
 				a_graph.RegisterResource(std::move(a_id), a_resource);
+	}
+
+	/**
+	 * @brief Register for an import handle: an engine target's slot is the id's resolver, so the id follows the slot's versions; a plain
+	 * resource (DCLF's own import) is registered as above.
+	 */
+	inline void Register(org::RenderGraph& a_graph, org::ResourceIdentifier a_id, const FrameAnchors::Texture& a_texture)
+	{
+		if (const auto& slot = a_texture.Slot()) {
+			if (!a_graph._resolverMap.contains(a_id))
+				a_graph.RegisterResolver(std::move(a_id), slot);
+		} else if (a_texture.Plain()) {
+			a_graph.RegisterResource(std::move(a_id), a_texture.Plain());
+		}
 	}
 
 	/** @brief One compute dispatch of a_program with its push constants. */

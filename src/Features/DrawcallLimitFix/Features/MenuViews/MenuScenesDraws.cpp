@@ -66,10 +66,10 @@ namespace DCLF::Features::MenuViews::Scenes::SceneDraws
 			// One draw entry per latched draw. The anchor closes it at every run, and only this client's commit opens it.
 			std::shared_ptr<::RenderGraph::RunGate> gate;
 			// The view's colour targets (TargetsOf) and kMAIN's depth, as imported at the registration, and their formats.
-			std::array<std::shared_ptr<org::ExternalTextureResource>, kMaxImports> colours;
+			std::array<FrameAnchors::Texture, kMaxImports> colours;
 			std::array<std::uint32_t, kMaxImports> colourFormats{};
 			std::uint32_t colourCount = 0;
-			std::shared_ptr<org::ExternalTextureResource> depth;
+			FrameAnchors::Texture depth;
 			std::uint32_t depthFormat = 0;
 			// Every published id the batch's draws can read, fixed here (ListInputs). Each build declares the registered ones.
 			Family::PublishedInputs inputs;

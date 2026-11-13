@@ -192,7 +192,7 @@ namespace
 	/** @brief One resource a gated pass declares, with its views in order. */
 	struct Use
 	{
-		std::shared_ptr<org::Resource> resource;
+		FrameAnchors::Texture resource;  // an import's slot, or a twin's resource
 		bool write = false;
 		std::vector<ViewDesc> views{ ViewDesc{} };
 	};
@@ -404,7 +404,7 @@ namespace
 	/** @brief The engine's and the feature's textures the passes read, imported (FrameAnchors). */
 	struct Imports
 	{
-		std::shared_ptr<org::ExternalTextureResource> depth, main, reflections, defaultCubemap;
+		FrameAnchors::Texture depth, main, reflections, defaultCubemap;
 
 		bool operator==(const Imports&) const = default;
 		explicit operator bool() const { return depth && main && reflections && defaultCubemap; }

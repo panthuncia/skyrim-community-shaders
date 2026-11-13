@@ -1022,7 +1022,7 @@ namespace DCLF
 			return ShadowNotReady(3, "the shadow map has no texture");
 		if (shadow->depth[a_index] && shadow->depthTexture[a_index] == a_texture)
 			return true;
-		const auto adopt = [&](std::shared_ptr<org::ExternalTextureResource> a_resource, std::uint32_t a_layers) {
+		const auto adopt = [&](FrameAnchors::Texture a_resource, std::uint32_t a_layers) {
 			shadow->depth[a_index] = std::move(a_resource);
 			shadow->depthTexture[a_index] = a_texture;
 			shadow->depthLayers[a_index] = a_layers;

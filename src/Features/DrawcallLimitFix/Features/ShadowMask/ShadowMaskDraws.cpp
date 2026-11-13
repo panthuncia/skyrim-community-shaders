@@ -57,7 +57,7 @@ namespace DCLF::Features::ShadowMask::ShadowMaskDraws
 			// One draw entry per latched draw. The anchor closes it at every run, and only this client's commit opens it, so a run of
 			// the anchor that another client keeps draws nothing of this client's older run.
 			std::shared_ptr<::RenderGraph::RunGate> gate;
-			std::shared_ptr<org::ExternalTextureResource> target;  // kSHADOW_MASK, as imported at the registration
+			FrameAnchors::Texture target;  // kSHADOW_MASK, as imported at the registration
 			// Every published id the view's draws can read, fixed here (ListInputs). Each build declares the registered ones.
 			Family::PublishedInputs inputs;
 			// Render thread writes, the host's thread reads.

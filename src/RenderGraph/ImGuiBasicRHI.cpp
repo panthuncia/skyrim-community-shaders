@@ -4,6 +4,7 @@
 #	include <rhi_interop_vulkan.h>
 
 #	include "RenderGraph/ImGuiBasicRHI.h"
+#	include "RenderGraph/FrameAnchors.h"
 #	include "RenderGraph/FrameStaging.h"
 
 #	include "RenderGraph/GraphResources.h"
@@ -598,7 +599,7 @@ namespace ImGuiBasicRHI
 		class OverlayPass final : public org::TypedRenderGraphPass<OverlayPass, PassFrame, DrawBindings>
 		{
 		public:
-			OverlayPass(std::shared_ptr<org::ExternalTextureResource> a_target, std::shared_ptr<const Shared> a_shared, std::shared_ptr<const Atlas> a_atlas) :
+			OverlayPass(FrameAnchors::Texture a_target, std::shared_ptr<const Shared> a_shared, std::shared_ptr<const Atlas> a_atlas) :
 				target(std::move(a_target)), shared(std::move(a_shared)), atlas(std::move(a_atlas)) {}
 
 			DrawBindings Declare(org::PassBuilder& a_builder)
@@ -671,7 +672,7 @@ namespace ImGuiBasicRHI
 			}
 
 		private:
-			std::shared_ptr<org::ExternalTextureResource> target;
+			FrameAnchors::Texture target;
 			std::shared_ptr<const Shared> shared;
 			std::shared_ptr<const Atlas> atlas;
 		};
@@ -916,7 +917,7 @@ namespace ImGuiBasicRHI
 		return true;
 	}
 
-	std::shared_ptr<org::RenderPass> MakePass(std::shared_ptr<org::ExternalTextureResource> a_target)
+	std::shared_ptr<org::RenderPass> MakePass(FrameAnchors::Texture a_target)
 	{
 		auto& state = Backend();
 		if (!a_target || !RenderGraphRuntime::Get().Host() || !EnsureAtlas(state))
@@ -936,6 +937,7 @@ namespace ImGuiBasicRHI
 #else  // !CS_HAS_RENDER_GRAPH
 
 #	include "RenderGraph/ImGuiBasicRHI.h"
+#	include "RenderGraph/FrameAnchors.h"
 
 namespace ImGuiBasicRHI
 {
@@ -950,7 +952,7 @@ namespace ImGuiBasicRHI
 	Binding BindingOf(const std::shared_ptr<Texture>&, int) { return {}; }
 	bool Prepare(std::uint32_t) { return false; }
 	bool Commit(ImDrawData*, const Target&, const Resolver&) { return false; }
-	std::shared_ptr<org::RenderPass> MakePass(std::shared_ptr<org::ExternalTextureResource>) { return nullptr; }
+	std::shared_ptr<org::RenderPass> MakePass(FrameAnchors::Texture) { return nullptr; }
 	std::shared_ptr<org::RenderPass> MakeUploadPass() { return nullptr; }
 }
 

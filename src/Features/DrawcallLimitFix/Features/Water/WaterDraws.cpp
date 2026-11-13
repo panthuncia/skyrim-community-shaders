@@ -64,8 +64,8 @@ namespace DCLF::Features::Water::WaterDraws
 			// the anchor that another client keeps draws nothing of this client's older run.
 			std::shared_ptr<::RenderGraph::RunGate> gate;
 			// The targets as imported at the registration (FrameAnchors keeps each while the engine's texture stays the same).
-			std::array<std::shared_ptr<org::ExternalTextureResource>, 3> colours;
-			std::shared_ptr<org::ExternalTextureResource> depth;
+			std::array<FrameAnchors::Texture, 3> colours;
+			FrameAnchors::Texture depth;
 			// Every published id the view's draws can read, fixed here (ListInputs). Each build declares the registered ones.
 			Family::PublishedInputs inputs;
 			// Render thread writes, the host's thread reads.
