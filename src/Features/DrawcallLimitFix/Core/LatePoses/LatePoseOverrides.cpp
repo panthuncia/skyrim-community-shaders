@@ -4,6 +4,7 @@
 
 #include "Features/DrawcallLimitFix/Core/Engine/SkinPalettes.h"
 #include "Features/DrawcallLimitFix/Core/Extensions/LatePoses.h"
+#include "Features/DrawcallLimitFix/Core/Scene/FrameView/FrameView.h"
 
 #include <algorithm>
 #include <cstddef>
@@ -205,6 +206,11 @@ namespace DCLF::LatePoses
 		Search SearchRoots()
 		{
 			Search search;
+			// No walk while a load shows (FrameView::LoadShown). A load rebuilds the actors' 3D, the player's too, so a walk can read a freed
+			// child (a crash in the player's skeleton at world frame 11 of a load, 2026-11-13). The player sees none of those frames, so
+			// there is nothing to hide.
+			if (Scene::FrameView::LoadShown())
+				return search;
 			for (const auto& pose : Extensions::LatePoses())
 				if (const void* root = pose.root ? pose.root() : nullptr) {
 					search.rooted = true;
