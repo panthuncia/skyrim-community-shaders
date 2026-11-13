@@ -31,6 +31,8 @@ bool ORGHDRDisplay::IsActive() const
 #	include "RenderGraph/AnchorPasses.h"
 #	include "RenderGraph/ComputeProgram.h"
 #	include "RenderGraph/FrameAnchors.h"
+#	include "RenderGraph/GraphResources.h"
+#	include "RenderGraph/PublishedResources.h"
 #	include "RenderGraph/ShaderBindings.h"
 #	include "RenderGraph/SharedConstants.h"
 #	include "Util.h"
@@ -39,10 +41,18 @@ bool ORGHDRDisplay::IsActive() const
 #	include <Render/LatchBlock.h>
 #	include <Resources/ExternalTextureResource.h>
 
+#	include <array>
 #	include <utility>
 
 namespace
 {
+	/** @brief HDR Display's twins (ORGHDRDisplay::MakeTexture), by ORGHDRDisplay::Texture; a null entry is a D3D11 texture. */
+	std::array<std::unique_ptr<GraphResources::Texture2D>, static_cast<std::size_t>(ORGHDRDisplay::Texture::Count)>& Twins()
+	{
+		static std::array<std::unique_ptr<GraphResources::Texture2D>, static_cast<std::size_t>(ORGHDRDisplay::Texture::Count)> s_twins;
+		return s_twins;
+	}
+
 	constexpr const char* kClientId = "cs.hdr";
 	constexpr const char* kShader = "HDRDisplay/HDROutputCS.hlsl";
 	constexpr const char* kSceneName = "hdr.scene";
@@ -192,6 +202,51 @@ void ORGHDRDisplay::ClearShaderCache()
 		impl->programDirty = true;
 }
 
+Texture2D* ORGHDRDisplay::MakeTexture(Texture a_texture, const D3D11_TEXTURE2D_DESC& a_desc, const char* a_name)
+{
+	if (a_texture >= Texture::Count || !Requested() || !RenderGraphRuntime::Get().IsActive())
+		return nullptr;
+	auto& twin = Twins()[static_cast<std::size_t>(a_texture)];
+	if (twin)
+		return nullptr;
+	// Written and read by D3D11 too (the engine's tonemap and interface draws, HDR Display's clears and fallbacks, screenshots):
+	// exported, never aliased. HDR Display makes its own views of the export.
+	auto texture = std::make_unique<GraphResources::Texture2D>(a_desc, std::string(a_name),
+		GraphResources::Options{ .lifetime = GraphResources::Lifetime::Persistent, .d3d11 = GraphResources::Export::SRV });
+	if (!*texture || !texture->D3D11() || !std::dynamic_pointer_cast<org::ExternalTextureResource>(texture->Graph())) {
+		logger::warn("[ORG] HDR Display: {} could not be made on the render graph; it is a D3D11 texture", a_name);
+		return nullptr;
+	}
+	// The composite (HDROutput), Bink (Present), Scaleform (Interface) and Upscaling's hudless copy declare it in their graphs.
+	if (!PublishedResources::Publish(*texture)) {
+		logger::warn("[ORG] HDR Display: {} could not be published; it is a D3D11 texture", a_name);
+		return nullptr;
+	}
+	// The wrapper holds a reference of its own: the twin keeps the image, the wrapper the D3D11 texture and its views.
+	auto* d3d11 = texture->D3D11();
+	d3d11->AddRef();
+	auto* wrapper = new Texture2D(d3d11, a_name);
+	logger::info("[ORG] HDR Display: {} is a graph texture ({}x{}, DXGI format {})", a_name, a_desc.Width, a_desc.Height, static_cast<int>(a_desc.Format));
+	twin = std::move(texture);
+	return wrapper;
+}
+
+void ORGHDRDisplay::ReleaseTextures()
+{
+	for (auto& twin : Twins())
+		twin.reset();
+}
+
+std::shared_ptr<org::ExternalTextureResource> ORGHDRDisplay::GraphOf(ID3D11Texture2D* a_texture) const
+{
+	if (!a_texture || !RenderGraphRuntime::Get().IsActive())
+		return nullptr;
+	for (const auto& twin : Twins())
+		if (twin && twin->D3D11() == a_texture)
+			return std::dynamic_pointer_cast<org::ExternalTextureResource>(twin->Graph());
+	return nullptr;
+}
+
 std::shared_ptr<org::ExternalTextureResource> ORGHDRDisplay::ImportOf(ID3D11Texture2D* a_texture) const
 {
 	if (!impl || !impl->registered || !a_texture)
@@ -230,14 +285,20 @@ ORGHDRDisplay::Composed ORGHDRDisplay::Compose(const HDRDisplay::HDRDataCB& a_co
 			logger::warn("[ORG] HDR Display: HDROutputCS failed to build again; the graph keeps the last program");
 	}
 
-	// The scene as ApplyHDR picks it: HDR's float texture, else the framebuffer.
+	// The scene as ApplyHDR picks it: HDR's float texture, else the framebuffer. HDR's own textures are the twins (GraphOf); a D3D11
+	// one is imported.
 	const bool hdrScene = hdr.IsHDREnabledForFrame() && hdr.hdrTexture && hdr.hdrTexture->srv;
-	auto scene = hdrScene ? FrameAnchors::D3D11Texture(kSceneName, hdr.hdrTexture->resource.get(), hdr.hdrTexture->srv.get(), nullptr) :
-	                        FrameAnchors::EngineTarget(static_cast<std::uint32_t>(RE::RENDER_TARGET::kFRAMEBUFFER));
-	auto output = FrameAnchors::D3D11Texture(kOutputName, hdr.outputTexture->resource.get(), hdr.outputTexture->srv.get(), hdr.outputTexture->uav.get());
-	// With its RTV: Bink's render-graph path draws movies into it through the same import ("hdr.ui"), and a name's first import
-	// decides its views.
-	auto ui = FrameAnchors::D3D11Texture(kUiName, hdr.uiTexture->resource.get(), hdr.uiTexture->srv.get(), hdr.uiTexture->uav.get(), hdr.uiTexture->rtv.get());
+	auto scene = !hdrScene ? FrameAnchors::EngineTarget(static_cast<std::uint32_t>(RE::RENDER_TARGET::kFRAMEBUFFER)) : GraphOf(hdr.hdrTexture->resource.get());
+	if (hdrScene && !scene)
+		scene = FrameAnchors::D3D11Texture(kSceneName, hdr.hdrTexture->resource.get(), hdr.hdrTexture->srv.get(), nullptr);
+	auto output = GraphOf(hdr.outputTexture->resource.get());
+	if (!output)
+		output = FrameAnchors::D3D11Texture(kOutputName, hdr.outputTexture->resource.get(), hdr.outputTexture->srv.get(), hdr.outputTexture->uav.get());
+	// A D3D11 one with its RTV: Bink's render-graph path draws movies into it through the same import ("hdr.ui"), and a name's first
+	// import decides its views.
+	auto ui = GraphOf(hdr.uiTexture->resource.get());
+	if (!ui)
+		ui = FrameAnchors::D3D11Texture(kUiName, hdr.uiTexture->resource.get(), hdr.uiTexture->srv.get(), hdr.uiTexture->uav.get(), hdr.uiTexture->rtv.get());
 	if (!scene || !output || !ui) {
 		Fail(!ui ? "the UI texture cannot be imported" : !scene ? "the scene cannot be imported" :
 																"the output texture cannot be imported");
@@ -315,6 +376,9 @@ bool ORGHDRDisplay::Setup(std::function<void()>) { return false; }
 void ORGHDRDisplay::Fail(const char*) {}
 void ORGHDRDisplay::ClearShaderCache() {}
 std::shared_ptr<org::ExternalTextureResource> ORGHDRDisplay::ImportOf(ID3D11Texture2D*) const { return nullptr; }
+Texture2D* ORGHDRDisplay::MakeTexture(Texture, const D3D11_TEXTURE2D_DESC&, const char*) { return nullptr; }
+void ORGHDRDisplay::ReleaseTextures() {}
+std::shared_ptr<org::ExternalTextureResource> ORGHDRDisplay::GraphOf(ID3D11Texture2D*) const { return nullptr; }
 bool ORGHDRDisplay::TakeUIClear() { return false; }
 ORGHDRDisplay::Composed ORGHDRDisplay::Compose(const HDRDisplay::HDRDataCB&, ID3D11Texture2D*) { return Composed::None; }
 

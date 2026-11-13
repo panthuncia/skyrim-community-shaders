@@ -7,6 +7,7 @@
 
 #	include "Features/DrawcallLimitFix/Core/Gpu/GpuTextures.h"
 #	include "Features/HDRDisplay.h"
+#	include "Features/HDRDisplay/ORGHDRDisplay.h"
 #	include "Globals.h"
 #	include "RenderGraph/DxvkImageImport.h"
 #	include "RenderGraph/Engine/Scaleform/Display.h"
@@ -779,6 +780,10 @@ namespace RenderGraph::Engine::Scaleform::Passes
 			surface->colourFormat = rhi::helpers::ToRHI(a_format);
 			if (const auto target = EngineTargetOf(a_colour); target >= 0) {
 				surface->colour = FrameAnchors::EngineTarget(static_cast<std::uint32_t>(target));
+			} else if (auto owned = ORGHDRDisplay::Get().GraphOf(a_colour)) {
+				// HDR's UI texture as the graph owns it (CS_ORG_HDR_DISPLAY): the twin, which the composite reads.
+				surface->ownId = "cs.scaleform.hdr-ui";
+				surface->colour = std::move(owned);
 			} else {
 				surface->ownId = fmt::format("cs.scaleform.target.{}", a_state.ownImports++);
 				surface->colour = ImportTarget(a_colour, a_format, surface->ownId);
