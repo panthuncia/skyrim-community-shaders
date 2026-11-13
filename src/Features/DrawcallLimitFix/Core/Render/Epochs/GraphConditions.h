@@ -3,6 +3,7 @@
 // The frame facts the graph's passes are added by (PassContext::Interior, PassContext::PhaseTwo): what a frame needs decides which
 // passes exist, not a pass that runs and finds nothing to do (each pass costs its dispatch and its barriers whether it has work or not).
 
+#include <memory>
 #include <string>
 #include <string_view>
 
@@ -55,9 +56,19 @@ namespace DCLF::Draws
 
 	/**
 	 * @brief Render thread, at the frame's build point before it builds (IndirectDraws::BuildPoint): this frame's conditions. A change
-	 * from the ones the graph was built for requests its rebuild, which that build point makes, so a frame's passes are its conditions'.
+	 * from the ones last asked for becomes the requested conditions (the next build states' value) and requests the rebuild of Drawcall
+	 * Limit Fix's epochs. The frame keeps the attached conditions until those builds attach (PublishAttachedBuildState).
 	 */
 	void RefreshGraphConditions(org::GraphHost& a_host);
+
+	/** @brief Render thread: the conditions the next builds are for (the newest RefreshGraphConditions made). Immutable. */
+	std::shared_ptr<const GraphConditions> RequestedGraphConditions();
+
+	/**
+	 * @brief Render thread: the conditions the attached graphs were built for are a_conditions (PublishAttachedBuildState). CurrentGraphConditions
+	 * outside a build, GraphBuiltForCpu and LatchedRecordCut follow it.
+	 */
+	void AttachGraphConditions(std::shared_ptr<const GraphConditions> a_conditions);
 
 	/** @brief Any thread (diagnostics, dclf:cut=): the pass key prefixes the next build point leaves out; empty: none. */
 	void SetPassCuts(std::string a_cuts);
@@ -73,11 +84,14 @@ namespace DCLF::Draws
 
 	/**
 	 * @brief Any thread: whether the graph as built is the CPU pipeline's (GraphConditions::cpuPipeline), which decides the frame's
-	 * pipeline: the direct sites draw while it holds, the epochs otherwise (the frame's mode, Direct::FrameMode). Set at the build point.
+	 * pipeline: the direct sites draw while it holds, the epochs otherwise (the frame's mode, Direct::FrameMode). Set when the builds attach.
 	 */
 	bool GraphBuiltForCpu();
 
-	/** @brief The conditions the graph is built for (render thread: the passes' makes and preparations). */
+	/**
+	 * @brief Any thread. Inside a graph build (a BuildScope: the makes, the extensions, the passes' declarations): the conditions it builds for.
+	 * Elsewhere (the frame, the preparations, the revisions): the conditions the attached graphs were built for. The reference stays valid.
+	 */
 	const GraphConditions& CurrentGraphConditions();
 
 	/**

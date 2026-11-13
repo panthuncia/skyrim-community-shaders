@@ -11,6 +11,7 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <string>
 
 namespace DCLF::Draws
@@ -562,6 +563,14 @@ namespace DCLF::Draws
 		std::vector<org::RenderGraph::ExternalPassDesc>& a_out)
 	{
 		const auto& state = State();
+		// The build state the graph is built from: the views and the pass states as it has them, never the live resources'.
+		const auto* build = a_base.build ? a_base.build : ScopedBuildState();
+		if (!build) {
+			static std::atomic<bool> logged{ false };
+			if (!logged.exchange(true))
+				logger::error("[DCLF] a graph build gathered its passes without a build state; its epochs get no passes");
+			return;
+		}
 		// The CPU pipeline's graph (GraphConditions::cpuPipeline): the direct sites draw at their triggers, and an epoch keeps its passes
 		// in the CPU pipeline (Api::PassDef::cpuPipeline), made by their makes, every one on the graphics queue (an external epoch's: its
 		// site executes them in DXVK's buffer).
@@ -574,6 +583,7 @@ namespace DCLF::Draws
 			if (a_shape == Api::EpochShape::View && (epoch.view != a_view || (!firstPerson && epoch.view == Api::EngineView::FirstPerson)))
 				continue;
 			auto context = a_base;
+			context.build = build;
 			context.epochId = epoch.id;
 			context.segment = epoch.segment;
 			context.epoch = RenderGraphRuntime::EpochOf(epoch.segment);
@@ -593,8 +603,9 @@ namespace DCLF::Draws
 				const auto view = state.traits[row].index;
 				if (!firstPerson && view == kFirstPersonIndex)
 					continue;
-				auto resources = context.Main()->views[view].lock();
-				if (resources && ViewPassesReady(*resources, *context.Main()))
+				auto resources = build->mainViews[view];
+				const auto* viewBuild = resources ? build->ViewOf(resources.get()) : nullptr;
+				if (viewBuild && ViewPassesReady(*viewBuild, *context.Main()))
 					hosted.push_back(hostedViews[view] = std::move(resources));
 			}
 			context.hosted = hosted;
@@ -626,7 +637,7 @@ namespace DCLF::Draws
 				// A pass with a setup only with its state (SetUpPassStates); the others get none.
 				context.state = nullptr;
 				if (entry.setup) {
-					const auto& states = context.Main()->scene->passStates;
+					const auto& states = build->passStates;
 					if (index >= states.size() || !states[index])
 						continue;
 					context.state = states[index];

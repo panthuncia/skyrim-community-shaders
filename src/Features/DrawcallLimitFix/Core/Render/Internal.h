@@ -116,6 +116,7 @@
 #include "Features/DrawcallLimitFix/Core/Render/Payload/Uploads.h"
 #include "Features/DrawcallLimitFix/Core/Render/Passes/PassHelpers.h"
 #include "Features/DrawcallLimitFix/Core/Render/Epochs/ViewEpoch.h"
+#include "Features/DrawcallLimitFix/Core/Render/Epochs/BuildState.h"
 #include "Features/DrawcallLimitFix/Core/Render/Revision/Revision.h"
 #include "Features/DrawcallLimitFix/Core/Render/Impl.h"
 #include "Features/DrawcallLimitFix/Core/Render/Views/ViewSlots.h"

@@ -40,7 +40,7 @@ namespace DCLF::Draws
 				[resources = resources, hosted = std::move(hosted)] {
 					auto targets = MainLatchedTargets(*resources);
 					for (const auto& view : hosted) {
-						const auto viewTargets = ViewLatchedTargets(*view);
+						const auto viewTargets = ViewLatchedTargets(*view, *resources->scene);
 						targets.insert(targets.end(), viewTargets.begin(), viewTargets.end());
 					}
 					return targets;

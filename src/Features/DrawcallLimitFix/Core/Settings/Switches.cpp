@@ -61,6 +61,8 @@ namespace DCLF
 				"0: the forward epoch draws its range device-generated, a call per state class, instead of a plain draw per pipeline" },
 			{ ForwardDirect, "CS_DCLF_FORWARD_DIRECT", F, Reduced::Zero, false,
 				"0: the GPU-driven graph keeps its forward family (blended, refraction, first person's forward part) on the GPU, sorted per pipeline, instead of the CPU pipeline" },
+			{ AsyncGraphBuilds, "CS_DCLF_ASYNC_BUILDS", F, Reduced::Zero, false,
+				"0: DCLF's epoch graphs are built on the render thread at its build point, instead of on the scene worker and attached at a frame's end" },
 			{ MainPlain, "CS_DCLF_MAIN_PLAIN", F, Reduced::Zero, false,
 				"0: the colour pass draws its main range device-generated, a call per state class, instead of a plain draw per pipeline" },
 			{ TerrainPlain, "CS_DCLF_TERRAIN_PLAIN", F, Reduced::Zero, false,

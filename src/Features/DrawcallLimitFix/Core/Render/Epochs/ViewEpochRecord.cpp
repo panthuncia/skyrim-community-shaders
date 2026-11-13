@@ -21,6 +21,21 @@ namespace DCLF
 				return nullptr;
 			}
 
+			/**
+			 * @brief The build state's part of the view a pass is made for (its target, depth and main resources as the build has them). Empty
+			 * (no main, no target) when the build has no such view: the make then adds no pass.
+			 */
+			ViewBuild ViewBuildOf(const Api::PassContext& a_context)
+			{
+				if (a_context.build)
+					if (const auto* view = a_context.build->ViewOf(a_context.View().get()))
+						return *view;
+				static std::atomic<bool> logged{ false };
+				if (!logged.exchange(true))
+					logger::error("[DCLF] a view pass was made without its view in the build state; it is left out");
+				return {};
+			}
+
 			struct BuildBindings
 			{
 				org::DeclaredViewToken sequences, count, visibility, poolFirsts;
@@ -44,13 +59,13 @@ namespace DCLF
 			class BuildDrawsPass final : public org::TypedRenderGraphPass<BuildDrawsPass, BuildPrepared, BuildBindings>
 			{
 			public:
-				explicit BuildDrawsPass(std::shared_ptr<ViewResources> a_resources) :
-					resources(std::move(a_resources)) {}
+				BuildDrawsPass(std::shared_ptr<ViewResources> a_resources, std::shared_ptr<Resources> a_main) :
+					resources(std::move(a_resources)), mainResources(std::move(a_main)) {}
 
 				BuildBindings Declare(org::PassBuilder& a_builder)
 				{
 					a_builder.PreferQueue(org::QueueKind::Graphics);
-					const auto& main = *resources->main;
+					const auto& main = *mainResources;
 					BuildBindings bindings{};
 					bindings.sequences = a_builder.UnorderedAccess(*resources->sequences).View();
 					bindings.count = a_builder.UnorderedAccess(resources->count).View();
@@ -107,6 +122,7 @@ namespace DCLF
 
 			private:
 				std::shared_ptr<ViewResources> resources;
+				std::shared_ptr<Resources> mainResources;  // the build state's (ViewBuild::main)
 			};
 
 			/** @brief What a view's draw pass draws into: the reflection's faces, first person's main depth, first person's colour. */
@@ -148,25 +164,25 @@ namespace DCLF
 			class DrawPass final : public org::TypedRenderGraphPass<DrawPass, DrawPrepared, DrawBindings>
 			{
 			public:
-				DrawPass(std::shared_ptr<ViewResources> a_resources, DrawMode a_mode) :
-					resources(std::move(a_resources)), mode(a_mode) {}
+				DrawPass(ViewBuild a_view, DrawMode a_mode) :
+					resources(a_view.resources), view(std::move(a_view)), mode(a_mode) {}
 
 				DrawBindings Declare(org::PassBuilder& a_builder)
 				{
 					a_builder.PreferQueue(org::QueueKind::Graphics);
 					const std::span<const org::SrvView> noViews{};
-					const auto& main = *resources->main;
+					const auto& main = *view.main;
 					const auto& scene = *main.scene;
 					const std::uint32_t faces = resources->traits->faces;
 					DrawBindings bindings{};
 					if (mode == DrawMode::Faces) {
 						for (std::uint32_t f = 0; f < faces; ++f)
-							bindings.colours[f] = a_builder.RenderTarget(resources->target, org::RtvView{ UINT32_MAX, 0, f }).View();
-						bindings.depth = a_builder.DepthReadWrite(resources->depth).View();
+							bindings.colours[f] = a_builder.RenderTarget(view.target, org::RtvView{ UINT32_MAX, 0, f }).View();
+						bindings.depth = a_builder.DepthReadWrite(view.depth).View();
 					} else if (mode == DrawMode::Colour) {
 						for (std::uint32_t i = 0; i < 2; ++i)
 							bindings.colours[i] = a_builder.RenderTarget(main.native[i]).View();
-						bindings.depth = a_builder.DepthReadWrite(resources->target).View();
+						bindings.depth = a_builder.DepthReadWrite(view.target).View();
 					} else {
 						bindings.depth = a_builder.DepthReadWrite(main.nativeDepth).View();
 					}
@@ -303,6 +319,7 @@ namespace DCLF
 
 			private:
 				std::shared_ptr<ViewResources> resources;
+				ViewBuild view;  // the build state's part of the view: its target, depth and main resources
 				DrawMode mode;
 			};
 
@@ -330,19 +347,19 @@ namespace DCLF
 			class ForwardPass final : public org::TypedRenderGraphPass<ForwardPass, ForwardPrepared, ForwardBindings>
 			{
 			public:
-				explicit ForwardPass(std::shared_ptr<ViewResources> a_resources) :
-					resources(std::move(a_resources)) {}
+				explicit ForwardPass(ViewBuild a_view) :
+					resources(a_view.resources), view(std::move(a_view)) {}
 
 				ForwardBindings Declare(org::PassBuilder& a_builder)
 				{
 					a_builder.PreferQueue(org::QueueKind::Graphics);
 					const std::span<const org::SrvView> noViews{};
-					const auto& main = *resources->main;
+					const auto& main = *view.main;
 					const auto& scene = *main.scene;
 					ForwardBindings bindings{};
 					for (std::uint32_t i = 0; i < main.targetCount; ++i)
 						bindings.targets[i] = a_builder.RenderTarget(main.native[i]).View();
-					bindings.depth = a_builder.DepthReadWrite(resources->target).View();
+					bindings.depth = a_builder.DepthReadWrite(view.target).View();
 					bindings.sequences = a_builder.IndirectArguments(*resources->sequences).Resource();
 					bindings.counts = a_builder.IndirectArguments(*resources->bucketCounts[0]).Resource();
 					// The face shapes' second vertex stream, pulled by address (DCLF_PULLED_VERTICES).
@@ -362,10 +379,10 @@ namespace DCLF
 					ForwardPrepared prepared{};
 					auto frame = CurrentViewFrame(a_preparation, resources->traits->kind);
 					if (!frame || frame->forwardRanges.empty() || !frame->indirect.valid || !frame->width || !frame->height || !resources->preprocessForward ||
-						!resources->main->forwardSort)
+						!view.main->forwardSort)
 						return prepared;
 					prepared.preprocess = resources->preprocessForward.get();
-					prepared.targetCount = resources->main->targetCount;
+					prepared.targetCount = view.main->targetCount;
 					prepared.frame = std::move(frame);
 					return prepared;
 				}
@@ -400,18 +417,19 @@ namespace DCLF
 
 			private:
 				std::shared_ptr<ViewResources> resources;
+				ViewBuild view;  // the build state's part of the view: its target and main resources
 			};
 
 			class ViewExtension final : public org::RenderGraph::IRenderGraphExtension
 			{
 			public:
-				explicit ViewExtension(std::shared_ptr<ViewResources> a_resources) :
-					resources(std::move(a_resources)) {}
+				ViewExtension(std::shared_ptr<const BuildState> a_build, ViewBuild a_view) :
+					build(std::move(a_build)), view(std::move(a_view)), resources(view.resources) {}
 
 				void PrepareForBuild(org::RenderGraph& a_graph) override
 				{
 					// The main pass's, under the main extension's identifiers (the same registration again).
-					const auto& main = *resources->main;
+					const auto& main = *view.main;
 					Register(a_graph, org::ResourceIdentifier("cs.dclf.visibility"), main.visibility);
 					RegisterSceneBuffers(a_graph, *main.scene);
 					// Its own.
@@ -424,9 +442,9 @@ namespace DCLF
 					if (const auto frameBuffers = resources->frameBuffers.load(std::memory_order_acquire))
 						for (const auto& frameBuffer : *frameBuffers)
 							Register(a_graph, id(fmt::format("frame-buffer.t{}", frameBuffer.textureRegister)), frameBuffer.copy);
-					if (resources->depth)
-						Register(a_graph, id("depth"), resources->depth);
-					Register(a_graph, id(traits.target), resources->target);
+					if (view.depth)
+						Register(a_graph, id("depth"), view.depth);
+					Register(a_graph, id(traits.target), view.target);
 					for (std::size_t d = 0; d < Extensions::kDrawFamilies && traits.trees; ++d)
 						if (Extensions::DrawFamilyHasFaces(static_cast<Api::DrawFamily>(d)))
 							for (std::uint32_t f = 0; f < traits.faces; ++f)
@@ -435,23 +453,26 @@ namespace DCLF
 
 				void GatherStructuralPasses(org::RenderGraph& a_graph, std::vector<org::RenderGraph::ExternalPassDesc>& a_out) override
 				{
-					if (!resources->main || !ViewPassesReady(*resources, *resources->main))
+					if (!view.main || !ViewPassesReady(view, *view.main))
 						return;
 					// The view's epochs' passes (Schedule/Frame.cpp; none for a hosted epoch: its host's extension adds them).
 					Api::PassContext context{};
-					context.main = &resources->main;
+					context.main = &view.main;
 					context.view = &resources;
+					context.build = build.get();
 					GatherScheduled(Api::EpochShape::View, resources->traits->kind, context, a_graph.PassEpochFilter(), a_out);
 				}
 
 			private:
+				std::shared_ptr<const BuildState> build;  // what the graph is built from; held for the build
+				ViewBuild view;
 				std::shared_ptr<ViewResources> resources;
 			};
 
 			std::shared_ptr<org::RenderPass> LatchedCopies(const Api::PassContext& a_context)
 			{
 				const auto& resources = a_context.View();
-				return MakeLatchedCopiesPass([resources] { return ViewLatchedTargets(*resources); }, [kind = resources->traits->kind](const org::PassPrepareContext& a_preparation) {
+				return MakeLatchedCopiesPass([resources, scene = a_context.Main()->scene] { return ViewLatchedTargets(*resources, *scene); }, [kind = resources->traits->kind](const org::PassPrepareContext& a_preparation) {
 					const auto frame = CurrentViewFrame(a_preparation, kind);
 					return frame ? LatchedSource{ frame, frame->latched } : LatchedSource{};
 				});
@@ -459,7 +480,8 @@ namespace DCLF
 
 			std::shared_ptr<org::RenderPass> BuildDraws(const Api::PassContext& a_context)
 			{
-				return std::make_shared<BuildDrawsPass>(a_context.View());
+				auto view = ViewBuildOf(a_context);
+				return view.main ? std::make_shared<BuildDrawsPass>(a_context.View(), std::move(view.main)) : nullptr;
 			}
 
 			// A view without a depth pass draws its faces in its one epoch (the reflection's: hosted by the depth epoch); one with a depth
@@ -468,13 +490,15 @@ namespace DCLF
 			std::shared_ptr<org::RenderPass> FacesDraw(const Api::PassContext& a_context)
 			{
 				const auto& resources = a_context.View();
-				return !resources->traits->depthPass ? std::make_shared<DrawPass>(resources, DrawMode::Faces) : nullptr;
+				auto view = ViewBuildOf(a_context);
+				return !resources->traits->depthPass && view.main ? std::make_shared<DrawPass>(std::move(view), DrawMode::Faces) : nullptr;
 			}
 
 			std::shared_ptr<org::RenderPass> DepthDraw(const Api::PassContext& a_context)
 			{
 				const auto& resources = a_context.View();
-				return resources->traits->depthPass ? std::make_shared<DrawPass>(resources, DrawMode::Depth) : nullptr;
+				auto view = ViewBuildOf(a_context);
+				return resources->traits->depthPass && view.main ? std::make_shared<DrawPass>(std::move(view), DrawMode::Depth) : nullptr;
 			}
 
 			// The forward range sorted with the depth epoch (after its BuildDraws), drawn in the colour epoch after the bucket draws.
@@ -482,14 +506,15 @@ namespace DCLF
 			{
 				const auto& resources = a_context.View();
 				const auto& traits = *resources->traits;
-				if (!traits.depthPass || !traits.forwardPart || !resources->main->forwardSort || CurrentGraphConditions().firstPersonForwardDirect)
+				const auto main = ViewBuildOf(a_context).main;
+				if (!traits.depthPass || !traits.forwardPart || !main || !main->forwardSort || CurrentGraphConditions().firstPersonForwardDirect)
 					return nullptr;
-				return MakeForwardSortPass(resources->sequences, { nullptr, resources->bucketCounts[0] }, [view = resources](const org::PassPrepareContext& a_preparation) {
-					const auto frame = CurrentViewFrame(a_preparation, view->traits->kind);
+				return MakeForwardSortPass(resources->sequences, { nullptr, resources->bucketCounts[0] }, [kind = traits.kind, main](const org::PassPrepareContext& a_preparation) {
+					const auto frame = CurrentViewFrame(a_preparation, kind);
 					if (!frame || !frame->latch)
 						return ForwardSortSource{};
 					// Each state class's forward pair, its count its entry's bucket count word, after the buckets'.
-					ForwardSortSource source{ view->main->forwardSort };
+					ForwardSortSource source{ main->forwardSort };
 					for (std::uint32_t c = 0; c < frame->forwardRanges.size(); ++c)
 						if (const auto& range = frame->forwardRanges[c]; range.capacity)
 							source.ranges.push_back({ range.first, range.capacity, (frame->forwardEntry + c) * static_cast<std::uint32_t>(sizeof(std::uint32_t)) });
@@ -500,15 +525,17 @@ namespace DCLF
 			std::shared_ptr<org::RenderPass> ColourDraw(const Api::PassContext& a_context)
 			{
 				const auto& resources = a_context.View();
-				return resources->traits->depthPass ? std::make_shared<DrawPass>(resources, DrawMode::Colour) : nullptr;
+				auto view = ViewBuildOf(a_context);
+				return resources->traits->depthPass && view.main ? std::make_shared<DrawPass>(std::move(view), DrawMode::Colour) : nullptr;
 			}
 
 			std::shared_ptr<org::RenderPass> ForwardDraw(const Api::PassContext& a_context)
 			{
 				const auto& resources = a_context.View();
 				const auto& traits = *resources->traits;
-				return traits.depthPass && traits.forwardPart && resources->main->forwardSort && resources->preprocessForward && !CurrentGraphConditions().firstPersonForwardDirect ?
-				           std::make_shared<ForwardPass>(resources) :
+				auto view = ViewBuildOf(a_context);
+				return traits.depthPass && traits.forwardPart && view.main && view.main->forwardSort && resources->preprocessForward && !CurrentGraphConditions().firstPersonForwardDirect ?
+				           std::make_shared<ForwardPass>(std::move(view)) :
 				           nullptr;
 			}
 
@@ -529,13 +556,13 @@ namespace DCLF
 			return kViewPasses;
 		}
 
-		bool ViewPassesReady(const ViewResources& a_view, const Resources& a_main)
+		bool ViewPassesReady(const ViewBuild& a_view, const Resources& a_main)
 		{
-			return a_view.main.get() == &a_main && a_main.scene && a_main.scene->pool && a_view.target &&
-			       (!a_view.traits->depthPass || (a_main.nativeDepth && a_main.native[0] && a_main.native[1]));
+			return a_view.resources && a_view.main.get() == &a_main && a_main.scene && a_main.scene->pool && a_view.target &&
+			       (!a_view.resources->traits->depthPass || (a_main.nativeDepth && a_main.native[0] && a_main.native[1]));
 		}
 
-		std::vector<LatchedTarget> ViewLatchedTargets(const ViewResources& a_view)
+		std::vector<LatchedTarget> ViewLatchedTargets(const ViewResources& a_view, const SceneBuffers& a_scene)
 		{
 			std::vector<LatchedTarget> out{ { a_view.count, nullptr }, { a_view.blocks, nullptr } };
 			if (a_view.frameConstants)
@@ -545,7 +572,7 @@ namespace DCLF
 					out.push_back({ frameBuffer.copy, nullptr });
 			std::array<bool, Extensions::kDrawFamilies> families{};
 			for (std::size_t d = 0; d < Extensions::kDrawFamilies; ++d)
-				families[d] = FamilySetUp(*a_view.main->scene, static_cast<Api::DrawFamily>(d)) && a_view.faceLists[d][0];
+				families[d] = FamilySetUp(a_scene, static_cast<Api::DrawFamily>(d)) && a_view.faceLists[d][0];
 			for (std::uint32_t f = 0; f < a_view.traits->faces; ++f) {
 				out.push_back({ nullptr, a_view.bucketCounts[f] });
 				for (std::size_t d = 0; d < Extensions::kDrawFamilies; ++d)
@@ -557,9 +584,14 @@ namespace DCLF
 			return out;
 		}
 
-		std::unique_ptr<org::RenderGraph::IRenderGraphExtension> MakeViewExtension(std::shared_ptr<ViewResources> a_resources)
+		std::unique_ptr<org::RenderGraph::IRenderGraphExtension> MakeViewExtension(std::shared_ptr<const BuildState> a_build, ViewKind a_kind)
 		{
-			return std::make_unique<ViewExtension>(std::move(a_resources));
+			if (!a_build)
+				return nullptr;
+			auto view = a_build->View(a_kind);
+			if (!view.resources)
+				return nullptr;
+			return std::make_unique<ViewExtension>(std::move(a_build), std::move(view));
 		}
 	}
 }

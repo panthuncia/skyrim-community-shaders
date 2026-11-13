@@ -38,8 +38,8 @@ namespace DCLF::Draws
 	class MainOpaqueExtension final : public org::RenderGraph::IRenderGraphExtension
 	{
 	public:
-		explicit MainOpaqueExtension(std::shared_ptr<Resources> a_resources) :
-			resources(std::move(a_resources)) {}
+		explicit MainOpaqueExtension(std::shared_ptr<const BuildState> a_build) :
+			build(std::move(a_build)), resources(build->main) {}
 
 		void PrepareForBuild(org::RenderGraph& a_graph) override
 		{
@@ -93,16 +93,20 @@ namespace DCLF::Draws
 		{
 			// The depth, colour and forward epochs' passes (Schedule/Frame.cpp; Passes/CorePasses.cpp makes them): the graph's epoch's.
 			Api::PassContext context{};
-			context.main = &resources;
+			context.main = &build->main;
+			context.build = build.get();
 			GatherScheduled(Api::EpochShape::Main, {}, context, a_graph.PassEpochFilter(), a_out);
 		}
 
 	private:
+		std::shared_ptr<const BuildState> build;  // what the graph is built from; held for the build
 		std::shared_ptr<Resources> resources;
 	};
 
-	std::unique_ptr<org::RenderGraph::IRenderGraphExtension> MakeMainOpaqueExtension(std::shared_ptr<Resources> a_resources)
+	std::unique_ptr<org::RenderGraph::IRenderGraphExtension> MakeMainOpaqueExtension(std::shared_ptr<const BuildState> a_build)
 	{
-		return std::make_unique<MainOpaqueExtension>(std::move(a_resources));
+		if (!a_build || !a_build->main)
+			return nullptr;
+		return std::make_unique<MainOpaqueExtension>(std::move(a_build));
 	}
 }

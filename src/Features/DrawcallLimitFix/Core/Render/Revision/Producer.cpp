@@ -918,6 +918,10 @@ namespace DCLF
 		buffers.SetUploads(producer.inputs.uploads);
 		const auto& inputs = producer.inputs;
 		auto* host = RenderGraphRuntime::Get().Host();
+		// Inputs of a build state newer than the attached graphs': their recordings would be of the old graphs. Nothing is made until the
+		// builds attach (a frame's end), which posts the inputs again and wakes the builder (SettleBuildState).
+		if (inputs.build && inputs.build->serial > AttachedBuildSerial())
+			return;
 		if (!inputs.claims || !inputs.main || !inputs.main->scene || !host || !a_publication.tables) {
 			reuse.valid = false;
 			return;

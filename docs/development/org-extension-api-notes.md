@@ -1900,3 +1900,17 @@ is not declarable at the build (`PublishedResources::IsDeclarable`), so the call
 - **Worked around:** CS's made-image registry (`RenderGraph::RegisterMadeImage`) stores the description beside the resource.
 - **Wanted:** `ExternalTextureResource::GetDescription()`, as `PixelBuffer` has.
 - **Found by:** native frame graph Phase 2, duplicate images lane (2026-11-13).
+
+## Recording a detached epoch graph
+
+- **Need:** DCLF builds its epoch graphs on its scene worker (`BuildEpochGraph`). It would like to record them there too, so the snapshot
+  and its graph swap in at the same frame boundary.
+- **Blocked by:**
+  - `RequestEpochRecording` records only the attached instance graph, on the host's thread, with its copies and tickets.
+  - A detached graph places its aliases at its first prepare after the attach (c8c5086). Its transient resource objects are the ones every
+    graph of the epoch registers, so placing them before the attach moves backings under the running graph, whatever arena range is used.
+- **Worked around:** DCLF attaches at a frame's end and records after the attach. The next frame's start waits for those recordings if
+  they are not done (logged).
+- **Wanted, if the wait shows:** per-graph transient resource objects (a build clones its transients), plus a detached prepare and record
+  path whose recordings carry the build generation the attach gives them.
+- **Found by:** native frame graph Phase 4, DCLF async builds lane (2026-11-13).

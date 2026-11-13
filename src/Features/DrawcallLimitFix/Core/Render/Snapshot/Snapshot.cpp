@@ -763,6 +763,7 @@ namespace DCLF
 		// The generations it was built for (its last make's inputs), which the adoption compares.
 		snapshot->buildGeneration = inputs.buildGeneration;
 		snapshot->mainGeneration = inputs.mainGeneration;
+		snapshot->buildSerial = inputs.build ? inputs.build->serial : 0;
 		// The targets' generation its pipeline sets are actually for: its publication's catalog's. A make for new targets before the pipeline
 		// lane built their catalog has no indirect state (RequireRevisionSet) and draws nothing, so it stays stale for them, and the frame
 		// waits for the new catalog's snapshot rather than adopting one that cannot draw (open defect: frames with no epoch after a target
@@ -907,6 +908,9 @@ namespace DCLF
 		const auto& drawPipelines = DrawPipelines::Get();
 		if (host && a_snapshot.buildGeneration != GraphBuildGeneration(*host))
 			return kStaleBuild;
+		// Made from a build state newer than the attached graphs': its graphs are still being built or wait for a frame's end to attach.
+		if (a_snapshot.buildSerial > AttachedBuildSerial())
+			return kStaleBuild;
 		if (a_snapshot.targetsGeneration != drawPipelines.Generation())
 			return kStaleTargets;
 		if (a_snapshot.shadowFormat != drawPipelines.ShadowFormat())
@@ -930,8 +934,15 @@ namespace DCLF
 		const std::uint64_t postedBefore = impl ? impl->snapshotsPosted.load(std::memory_order_acquire) : 0;
 		auto publication = AdoptSnapshot();
 		auto* host = RenderGraphRuntime::Get().Host();
-		if (!a_wait || !impl || failed || !host || impl->AdoptedCurrent())
+		// The first frame after DCLF's graphs attached at a frame's end: its start needs the new graphs' recordings. Logged with the
+		// wait (or none), so the worst case of the frame-end attach shows.
+		const bool afterAttach = impl && impl->graphsAttachedFrame != ~0u && Scene::FrameView::Get().GetFrame() == impl->graphsAttachedFrame + 1;
+		if (!a_wait || !impl || failed || !host || impl->AdoptedCurrent()) {
+			if (afterAttach && impl->AdoptedCurrent() && (++impl->graphsAttachWaitLogs <= 50 || impl->graphsAttachWaitLogs % 100 == 0))
+				logger::info("[DCLF] frame {} adopted a snapshot of the graphs attached at the last frame's end without waiting",
+					Scene::FrameView::Get().GetFrame());
 			return publication;
+		}
 		DCLF_ZONE("CS.DCLF.WaitCurrentSnapshot");
 		auto& s = *impl;
 		using Clock = std::chrono::steady_clock;
@@ -969,7 +980,7 @@ namespace DCLF
 			// retirement clock advanced (the host's submissions and the CPU frames' timeline are otherwise polled only as frames go on): a
 			// payload version may wait for a backing the last frames read or hold.
 			s.ServeRevisionRequests();
-			if (s.revisions.explicitBuilds && host->RebuildRequested())
+			if (s.revisions.explicitBuilds && (host->RebuildRequested() || !RenderGraphRuntime::Get().DclfBuildsSettled()))
 				s.BuildIfAsked(true);
 			// The graph stopped (its host failed: a lost device): no snapshot will come. The frame start reports it (FrameDriver).
 			if (!RenderGraphRuntime::Get().IsActive()) {
@@ -1062,6 +1073,8 @@ namespace DCLF
 		logger::info("[DCLF] frame {} waited {:.2f} ms at its start for a snapshot current for the graph as built (build generation {}, main resources "
 					 "generation {}): adopted serial {}",
 			frame, ms, Impl::GraphBuildGeneration(*host), s.postedInputs.mainGeneration, s.adoptedSnapshot->serial);
+		if (afterAttach && (++s.graphsAttachWaitLogs <= 50 || s.graphsAttachWaitLogs % 100 == 0))
+			logger::info("[DCLF] frame {} waited {:.2f} ms at its start for the recordings of the graphs attached at the last frame's end", frame, ms);
 		return publication;
 	}
 

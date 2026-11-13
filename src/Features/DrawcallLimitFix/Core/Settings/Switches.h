@@ -23,6 +23,7 @@ namespace DCLF
 		AsyncCompute,
 		ForwardPlain,
 		ForwardDirect,
+		AsyncGraphBuilds,
 		MainPlain,
 		TerrainPlain,
 		DecalPlain,

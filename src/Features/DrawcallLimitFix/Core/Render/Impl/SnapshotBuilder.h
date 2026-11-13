@@ -100,6 +100,8 @@ namespace DCLF
 			// The graph build its recordings are of, the targets and shadow format its pipeline sets are for, the main resources'
 			// generation. Its toggles are its publication's (the frame's once installed: never stale).
 			std::uint64_t buildGeneration = 0, mainGeneration = 0;
+			// The build state its inputs carried (RevisionInputs::build's serial): stale while it is newer than the attached one.
+			std::uint64_t buildSerial = 0;
 			std::uint32_t targetsGeneration = 0;
 			DXGI_FORMAT shadowFormat = DXGI_FORMAT_UNKNOWN;
 			// The CPU pipeline's view batches of its draws (Snapshot/ViewBatches.h), made while its revision inputs' graph is the CPU
