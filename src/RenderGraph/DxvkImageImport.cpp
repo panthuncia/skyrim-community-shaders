@@ -5,7 +5,6 @@
 
 #include "RenderGraph/Backend.h"
 #include "RenderGraph/BufferRefs.h"
-#include "RenderGraph/Engine/Native/Native.h"
 
 #include <Resources/ExternalTextureResource.h>
 #include <Resources/TextureDescription.h>
@@ -72,10 +71,10 @@ namespace RenderGraph
 		import.createInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
 		import.currentLayout = a_image.layout;
 		// In GENERAL, DXVK and the graph share the image with memory barriers alone. In any other layout the graph uses it
-		// exclusively and moves it between layouts, starting from and returning to this one. Native mode's images (with
-		// CS_ORG_NATIVE_OWNED) are used exclusively whatever they rest in: the graph moves them into each pass's layout and gives them
-		// back in their home (Common for the context's raw operations, until Phase 4).
-		import.simultaneousAccess = a_image.layout == VK_IMAGE_LAYOUT_GENERAL && !Engine::Native::OwnedResources();
+		// exclusively and moves it between layouts, starting from and returning to this one. Native mode keeps this too: until
+		// imports share one resource per image (org-native-frame-graph.md, Phase 2), the anchors and DCLF each import the same
+		// image with their own state, and exclusive layout moves from both raced (flashing post-processing).
+		import.simultaneousAccess = a_image.layout == VK_IMAGE_LAYOUT_GENERAL;
 		import.debugName = a_name;
 		rhi::ResourcePtr resource;
 		if (rhi::vulkan::import_image(a_device, import, resource) != rhi::Result::Ok)
@@ -106,8 +105,8 @@ namespace RenderGraph
 		a_desc.initialLayout = *home;
 		// Common-only (simultaneous access, every pass in GENERAL) exists on Vulkan alone. D3D12's COMMON layout cannot be a render
 		// target, depth or UAV, so there an image resting in Common is used exclusively: the graph moves it into each pass's layout
-		// and gives it back in Common. Native mode on Vulkan does the same (CS_ORG_NATIVE_OWNED): no pass runs in GENERAL.
-		const bool commonOnly = *home == rhi::ResourceLayout::Common && !Backend::IsD3D12() && !Engine::Native::OwnedResources();
+		// and gives it back in Common. Native Vulkan stays Common-only until each image is one graph resource (see above).
+		const bool commonOnly = *home == rhi::ResourceLayout::Common && !Backend::IsD3D12();
 		auto result = org::ExternalTextureResource::CreateShared(std::move(resource), a_desc, commonOnly);
 		if (result)
 			result->SetName(a_name);

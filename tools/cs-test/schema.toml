@@ -3204,3 +3204,11 @@ type = "string"
 family = "vk"
 kind = "other"
 description = ""
+
+[key."org.native_owned"]
+env = "CS_ORG_NATIVE_OWNED"
+type = "bool"
+default = true
+family = "org"
+kind = "other"
+description = "native: engine textures are graph-owned and immutable ones exempt (false restores host-made textures)"
