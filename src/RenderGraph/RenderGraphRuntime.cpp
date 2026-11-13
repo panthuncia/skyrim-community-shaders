@@ -14,6 +14,7 @@
 #include "RenderGraph/BufferRefs.h"
 #include "RenderGraph/BuildManager.h"
 #include "RenderGraph/DxvkOrgInterop.h"
+#include "RenderGraph/ExternalWork.h"
 #include "RenderGraph/FrameAnchorSelfTest.h"
 #include "RenderGraph/FrameAnchors.h"
 #include "RenderGraph/GraphResources.h"
@@ -2485,6 +2486,8 @@ void RenderGraphRuntime::Shutdown()
 	// The build thread finishes the build it is in, and every graph not attached is dropped, before anything of the host goes.
 	if (impl->builds)
 		impl->builds->Shutdown();
+	// CS's external client waits for its submissions while the runtime it shares with the host is whole.
+	RenderGraph::ExternalWork::Shutdown();
 	auto state = std::move(impl);
 	if (state->setTeardownCallback)
 		state->setTeardownCallback(nullptr, nullptr);
