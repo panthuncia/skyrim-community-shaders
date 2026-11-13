@@ -362,3 +362,49 @@ thread.
   under 1 ms.
 - **A new graph's first prepare now includes alias placement and one validated build**, on the host thread. A ticket asked for
   right after an attach may wait for it; watch `WaitTicket`.
+
+## Phase 2 item 2 lane: imports and engine targets as versioned slots (`org-native/p2-imports`)
+
+**What versions now:**
+- **Imports.** `FrameAnchors::EngineTarget/EngineDepth/EngineCubemap/D3D11Texture/ImmutableTexture/ImportDepth` return a
+  `FrameAnchors::Texture`. It holds one `org::VersionedTexture` slot per import id, for the id's life.
+  - A new D3D11 texture with the same format, mip count and slice count is published as the slot's next version, with
+    `NoteNewVersions` and no build.
+  - The old D3D11 texture goes through `ReleaseAfterD3D11`. The old version keeps its graph resource while a frame holds it.
+  - Each anchor graph registers the slot as the id's resolver.
+- **Engine targets** (`CS_ORG_ENGINE_TARGETS`). `EngineTexture` is a versioned twin, so a target made again in the same shape
+  class (a resize, `Recreate` of the same format) is a version. "Engine::kMAIN" and the other ids are published as the slot.
+  `Targets::Find/FindImage` return the slot.
+- **Drawcall Limit Fix.** `ImportImage` returns the engine target's slot when ORG owns the image. Otherwise it returns the anchors'
+  import of the same image (`FrameAnchors::ImportOfImage`). Only when neither exists does it import the image itself.
+  - Its passes declare the slot, and `Register` registers the slot as the id's resolver.
+  - The direct sites keep the backing current when their views were made (`Texture::Current()`). A new version therefore makes new
+    views, and the old image lives as long as its views do.
+- **One handle for passes.** `FrameAnchors::Texture` goes straight to the pass builder (`a_builder.ShaderResource(texture)`). ORG's
+  new `SelfDeclaringResource` hook (ORG `org-native/p2-imports`, 6f69e83) then declares the slot. A plain `shared_ptr` resource
+  converts to a plain handle, which declares itself. `AnchorPasses::Bind::Srv/Uav`, `Draw::target`, `Copy`, `Clear`, `Upload` and
+  `GraphPasses::MakeUavClear` take the handle.
+  - Shape queries go through `Width()/Height()/Format()`.
+  - Raw handles outside the graph come from `Current()`, which must never be declared.
+- **Bindless indices** come from the declared view (`a_recording.Index(token)`), which resolves the version the preparation binds.
+  `PublishedResources::ShaderResourceIndex` reads the slot's current version.
+
+**Size changes.** A version of another size is still a version, but it also asks the build manager for one async pass rebuild:
+anchor epochs for an import, every epoch for engine targets (`frame anchors: import '...' resized`, `engine targets: ... resized`).
+This is not a structural rebuild. It remakes passes that read a size when they were made (Deferred clears, the Skeleton's copy,
+Volumetric Lighting's viewport). Until the attach, those passes run with the old size on the new version.
+
+**Still structural, and why** (all through `GraphResources::RequestStructuralRebuild`, so through the build manager, off the render
+thread):
+- **A change of shape class.** These are HDR's LDR target upgrades and Deferred's water targets: a format change, five at setup in
+  the last native run. Each makes a new slot. The anchors also see the resize generation once.
+- **A brand new import id** (`RequestFor`, only the graphs that looked it up).
+- **`ReleaseImport`.**
+
+**Clients that still rebuild on their own** (pass rebuilds, not structural): clients that compare the D3D11 texture rather than the
+handle. These are the Skeleton's clears, ImageSpace's `EngineObjectOf`, Scaleform's surfaces and DCLF's own image check
+(`targetTexture`). Bink now refreshes only when the slot or format changes.
+
+**What to check in a run:** `[ORG] structural rebuild` lines on a load (expect only the shape-class ones at setup), the
+`... resized` build-manager reasons on a resolution change, `[ORG] declared view mismatch` (the build-time latch in
+`DeclarePublishedRead` can log once per id after a version), and shots against the baselines.
