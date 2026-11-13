@@ -206,6 +206,8 @@ namespace DCLF::Draws
 		Extensions::DeclareGraphTextures(a_builder, Extensions::ColourGraphTextureIds(), reads);
 		// The character light's noise (kCharacterLightRegister): whichever HDR downsample level the engine names this frame.
 		Extensions::DeclareGraphTextures(a_builder, Extensions::CharacterLightGraphTextureIds(), reads);
+		// Wetness Effects' precipitation occlusion (t70): the engine's depth target, once published (PrecipitationOcclusionTextureIndex).
+		Extensions::DeclareGraphTextures(a_builder, Extensions::PrecipitationOcclusionGraphTextureIds(), reads);
 		// Every caller draws with the frame record bound. Its shaders read the frame's placements, palettes and shading (t121-t123)
 		// and the fade seeds pool (t117), and its sequences name the payload's rows.
 		FrameValues::Get().DeclareReads(a_builder);

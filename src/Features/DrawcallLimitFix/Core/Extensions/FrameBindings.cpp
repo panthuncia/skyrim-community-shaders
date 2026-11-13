@@ -6,6 +6,7 @@
 #include "Features/DrawcallLimitFix/Core/Extensions/Registry.h"
 #include "RenderGraph/Engine/Targets/EngineTargets.h"
 #include "RenderGraph/Engine/Tripwire/Tripwire.h"
+#include "RenderGraph/FrameAnchors.h"
 #include "RenderGraph/PublishedResources.h"
 #include "RenderGraph/UndeclaredAccess.h"
 
@@ -283,6 +284,54 @@ namespace DCLF::Extensions
 			view->GetResource(resource.put());
 			RenderGraph::Engine::Targets::Find(resource.get());
 		}
+		return false;
+	}
+
+	std::span<const std::string_view> PrecipitationOcclusionGraphTextureIds()
+	{
+		// Engine::Targets' id for the depth target (Draws::EngineTargetId).
+		static constexpr std::array<std::string_view, 1> s_ids{ "Engine::Depth::kPRECIPITATION_OCCLUSION_MAP" };
+		return s_ids;
+	}
+
+	bool PrecipitationOcclusionTextureIndex(GraphTextureReader a_reader, std::uint32_t a_register, ID3D11ShaderResourceView* a_view, std::uint32_t& a_index)
+	{
+		if (!a_view)
+			return false;
+		// Matched as the D3D11 view a handle wraps; a native handle wraps none and is the view itself (as EngineTargetTextureIndex).
+		auto* view = RenderGraph::Engine::Tripwire::Unwrap(a_view);
+		if (!view)
+			view = a_view;
+		const auto ids = PrecipitationOcclusionGraphTextureIds();
+		if (GraphTextureIndex(a_reader, a_register, "precipitation occlusion", view, ids, a_index))
+			return true;
+		// Only the engine's own map. Skylighting swaps its own map into the field while it draws, but Wetness Effects binds the
+		// engine's after that.
+		auto* renderer = globals::game::renderer;
+		if (!renderer)
+			return false;
+		constexpr auto target = RE::RENDER_TARGETS_DEPTHSTENCIL::kPRECIPITATION_OCCLUSION_MAP;
+		ID3D11ShaderResourceView* field = renderer->GetDepthStencilData().depthStencils[target].depthSRV;
+		ID3D11ShaderResourceView* engineView = RenderGraph::Engine::Tripwire::Unwrap(field);
+		if (!engineView)
+			engineView = field;
+		if (!engineView || view != engineView)
+			return false;
+		// Once per new view: the first publish builds every graph again (off the render thread), and the next build declares the id.
+		static std::array<const void*, static_cast<std::size_t>(GraphTextureReader::Count)> s_served{};
+		static bool s_publishedHere = false;
+		auto& served = s_served[static_cast<std::size_t>(a_reader)];
+		if (served == view)
+			return false;
+		served = view;
+		const auto import = FrameAnchors::EngineDepth(static_cast<std::uint32_t>(target));
+		if (!import)
+			return false;
+		// ORG's own target is published by Engine::Targets under this id; leave it to them. Otherwise the anchors' import is published
+		// here, and again with each new view (a new version of the slot needs no build).
+		if (PublishedResources::IsPublished(ids[0]) && !s_publishedHere)
+			return false;
+		s_publishedHere = PublishedResources::PublishImport(ids[0], import, view) || s_publishedHere;
 		return false;
 	}
 }
