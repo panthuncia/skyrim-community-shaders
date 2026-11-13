@@ -845,14 +845,14 @@ namespace ImGuiBasicRHI
 		const auto span = frame->staging->Bytes();
 		std::byte* const base = span.data();
 		for (auto& upload : pending) {
-			Upload staged{ upload.texture, upload.whole, {} };
+			Upload copy{ upload.texture, upload.whole, {} };
 			for (const auto& region : upload.regions) {
 				const std::size_t rowBytes = std::size_t(region.region.width) * 4;
 				for (std::uint32_t row = 0; row < region.region.height; ++row)
 					std::memcpy(base + region.region.offset + std::size_t(row) * region.region.rowPitch, region.source + std::size_t(row) * region.sourcePitch, rowBytes);
-				staged.regions.push_back(region.region);
+				copy.regions.push_back(region.region);
 			}
-			frame->uploads.push_back(std::move(staged));
+			frame->uploads.push_back(std::move(copy));
 		}
 
 		const ImVec2 position = a_drawData->DisplayPos;
