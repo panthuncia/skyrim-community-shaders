@@ -3,6 +3,7 @@
 #include "RenderGraph/Switches.h"
 
 #include <cstdint>
+#include <memory>
 #include <source_location>
 #include <string_view>
 
@@ -25,11 +26,19 @@ namespace org
  *
  * Exempt (not reported), as BasicRenderer's GraphOwnership::ExternalImmutableShaderResource, approximately:
  * - an ORG resource marked ExternalImmutableShaderResource (org::RequireUndeclaredShaderRead's rule, without its throw);
+ * - an ORG resource its creator noted immutable after creation (NoteImmutable): an engine DDS texture made with its contents and
+ *   bound SRV-only, a static engine vertex or index buffer filled at creation. In native mode the write census promotes it back: one
+ *   the immediate context wrote since is reported. ORG's graphs refuse an exempt ownership, so these keep GraphManaged until Phase 2;
+ *   the note is the validator's only;
  * - a texture made with shader-resource binding only, and a buffer made with vertex or index binding only, that is IMMUTABLE, or in
- *   native mode was made with initial data and never written since (Native::ResourceFacts), or in guest mode (where the initial data
- *   is not known) is DEFAULT.
+ *   native mode was made with initial data and never written since (Native::ResourceFacts; a streaming shell is its window's), or in
+ *   guest mode (where the initial data is not known) is DEFAULT.
  * Everything else is reported: ORG resources (graph-managed), other engine resources (the dynamic ring, render targets, written
  * textures), published twins and CS buffers by handle.
+ *
+ * Interim declared reads: a ShaderResourceIndex lookup made inside a DeclaredIndexScope (the reader checked that its own pass declared
+ * the id: DCLF's DeclarePublishedRead and the readers of its declared-reads registries) is counted apart, as "declared (interim
+ * index)": the graph orders the read, only the index does not come from the declared view yet (Phase 4 moves the tables into Prepare).
  *
  * Attribution: these sites resolve outside pass recording, mostly at capture. Each access is attributed to the graph epoch running on
  * the thread at the time (EpochScope: an anchor run's commit or a DCLF segment's inputs), else to capture on the render thread, else
@@ -62,6 +71,28 @@ namespace RenderGraph::UndeclaredAccess
 
 	/** @brief A raw ref of a BasicRHI buffer by its handle (a CS buffer; the graph's resource is not known here), at a_where. Any thread. */
 	void NoteRhiBuffer(std::uint32_t a_index, std::uint32_t a_generation, std::source_location a_where);
+
+	/**
+	 * @brief Notes that a_resource is immutable after creation: made with its contents, readable only (a texture bound SRV-only, a
+	 * buffer bound VB/IB-only), and written by nothing after. Its creator calls it, only while On(). Any thread.
+	 */
+	void NoteImmutable(const std::shared_ptr<org::Resource>& a_resource);
+
+	/**
+	 * @brief For the scope, ShaderResourceIndex lookups on this thread are reads the reader declared (it checked its own declared ids
+	 * first): they count as "declared (interim index)", not as undeclared. Cheap: one thread-local flag.
+	 */
+	class DeclaredIndexScope
+	{
+	public:
+		DeclaredIndexScope();
+		~DeclaredIndexScope();
+		DeclaredIndexScope(const DeclaredIndexScope&) = delete;
+		DeclaredIndexScope& operator=(const DeclaredIndexScope&) = delete;
+
+	private:
+		bool previous = false;
+	};
 
 	/** @brief The epoch a_label runs on this thread for the scope (RenderGraphRuntime::TryExecuteEpoch): accesses meanwhile are its. */
 	class EpochScope

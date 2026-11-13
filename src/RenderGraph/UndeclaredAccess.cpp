@@ -17,6 +17,7 @@
 #	include <filesystem>
 #	include <functional>
 #	include <map>
+#	include <memory>
 #	include <mutex>
 #	include <set>
 #	include <string>
@@ -28,6 +29,7 @@ namespace RenderGraph::UndeclaredAccess
 	namespace
 	{
 		thread_local const char* t_epoch = nullptr;
+		thread_local bool t_declaredIndex = false;  // DeclaredIndexScope
 
 		/** @brief Why an access is reported. */
 		enum class Class : std::uint8_t
@@ -64,12 +66,64 @@ namespace RenderGraph::UndeclaredAccess
 			std::unordered_map<std::uint64_t, SiteResource> resources;
 		};
 
+		/** @brief Why an access was skipped, or that it is reported. */
+		enum class Outcome : std::uint8_t
+		{
+			Report,     // undeclared: counted by site
+			Exempt,     // immutable by its description or ORG's ownership
+			Immutable,  // an ORG resource its creator noted immutable after creation (NoteImmutable)
+			Unknown,    // nothing could describe it
+		};
+
 		struct Window
 		{
-			std::map<std::string, Site> sites;  // by source location
-			std::uint64_t exempt = 0;           // exempt accesses skipped
-			std::uint64_t unknown = 0;          // accesses to a resource nothing could describe (skipped)
+			std::map<std::string, Site> sites;                       // by source location
+			std::uint64_t exempt = 0;                                // exempt accesses skipped (Immutable ones too)
+			std::uint64_t immutable = 0;                             // of those, ORG resources noted immutable after creation
+			std::uint64_t unknown = 0;                               // accesses to a resource nothing could describe (skipped)
+			std::unordered_map<std::string, std::uint64_t> interim;  // declared (interim index) lookups, by published id
+			std::uint64_t interimCount = 0;
 		};
+
+		/**
+		 * @brief The ORG resources noted immutable after creation (NoteImmutable), weakly: an entry whose resource is gone answers no,
+		 * so a new resource at the same address is not taken for it. Pruned of gone entries when it doubles.
+		 */
+		struct ImmutableRegistry
+		{
+			std::mutex lock;
+			std::unordered_map<const org::Resource*, std::weak_ptr<org::Resource>> resources;
+			std::size_t pruneAt = 1024;
+		};
+
+		ImmutableRegistry& Immutables()
+		{
+			static ImmutableRegistry registry;
+			return registry;
+		}
+
+		bool NotedImmutable(const org::Resource* a_resource)
+		{
+			auto& registry = Immutables();
+			std::lock_guard guard(registry.lock);
+			const auto found = registry.resources.find(a_resource);
+			if (found == registry.resources.end())
+				return false;
+			const auto alive = found->second.lock();
+			if (alive.get() == a_resource)
+				return true;
+			registry.resources.erase(found);
+			return false;
+		}
+
+		/** @brief Whether native mode's write census saw the immediate context write the resource behind a_object since it was made. */
+		bool WrittenSince(const void* a_object)
+		{
+			if (!a_object || !Engine::Native::Active())
+				return false;
+			Engine::Native::ResourceFacts facts;
+			return Engine::Native::DescribeForCensus(a_object, facts) && facts.written;
+		}
 
 		struct State
 		{
@@ -165,35 +219,35 @@ namespace RenderGraph::UndeclaredAccess
 		}
 
 		/**
-		 * @brief The subject of an access to a D3D11 resource (a_object: the handle the site passed, a view or the resource), or false
-		 * when it is exempt. a_unknown is set when nothing could describe it.
+		 * @brief The subject of an access to a D3D11 resource (a_object: the handle the site passed, a view or the resource), or why it is
+		 * skipped.
 		 */
-		bool SubjectOf(ID3D11Resource* a_resource, const void* a_object, Subject& a_out, bool& a_unknown)
+		Outcome SubjectOf(ID3D11Resource* a_resource, const void* a_object, Subject& a_out)
 		{
-			a_unknown = false;
-			// An ORG resource behind the handle: the graph's own rule.
+			// An ORG resource behind the handle: the graph's own rule, then its creator's note, which the write census overrides.
 			for (const void* object : { a_object, static_cast<const void*>(a_resource) }) {
 				if (const auto graph = object ? Engine::Tripwire::GraphResourceOf(object) : nullptr) {
 					if (!graph->IsRenderGraphManaged())
-						return false;
+						return Outcome::Exempt;
+					const bool written = WrittenSince(a_object) || (a_resource != a_object && WrittenSince(a_resource));
+					if (!written && NotedImmutable(graph.get()))
+						return Outcome::Immutable;
 					a_out.key = reinterpret_cast<std::uintptr_t>(graph.get());
 					a_out.type = Class::Graph;
 					a_out.name = graph->GetName();
-					a_out.detail = "an ORG resource the graph manages";
-					return true;
+					a_out.detail = written ? "an ORG resource the graph manages, written since it was made" : "an ORG resource the graph manages";
+					return Outcome::Report;
 				}
 			}
 			std::uint32_t bind = 0, usage = 0, dimension = 0;
 			if (Engine::Native::Active()) {
 				Engine::Native::ResourceFacts facts;
-				if (!Engine::Native::DescribeForCensus(a_object, facts)) {
-					a_unknown = true;
-					return false;
-				}
+				if (!Engine::Native::DescribeForCensus(a_object, facts))
+					return Outcome::Unknown;
 				if (facts.usage == D3D11_USAGE_IMMUTABLE && ShapeExempt(facts.bindFlags, facts.dimension))
-					return false;
+					return Outcome::Exempt;
 				if (facts.initialData && !facts.written && ShapeExempt(facts.bindFlags, facts.dimension))
-					return false;
+					return Outcome::Exempt;
 				a_out.key = facts.serial;
 				bind = facts.bindFlags;
 				usage = facts.usage;
@@ -201,13 +255,11 @@ namespace RenderGraph::UndeclaredAccess
 				a_out.detail = fmt::format("bind {:#x}, usage {}, dimension {}, {}{}", bind, usage, dimension, facts.initialData ? "made with data" : "made without data",
 					facts.written ? ", written since" : "");
 			} else {
-				if (!a_resource || !DescriptionOf(a_resource, bind, usage, dimension)) {
-					a_unknown = true;
-					return false;
-				}
+				if (!a_resource || !DescriptionOf(a_resource, bind, usage, dimension))
+					return Outcome::Unknown;
 				// Guest mode does not know the initial data: an SRV-only or VB/IB-only DEFAULT or IMMUTABLE resource is taken as immutable.
 				if ((usage == D3D11_USAGE_IMMUTABLE || usage == D3D11_USAGE_DEFAULT) && ShapeExempt(bind, dimension))
-					return false;
+					return Outcome::Exempt;
 				a_out.key = reinterpret_cast<std::uintptr_t>(a_resource);
 				a_out.detail = fmt::format("bind {:#x}, usage {}, dimension {}", bind, usage, dimension);
 			}
@@ -215,16 +267,21 @@ namespace RenderGraph::UndeclaredAccess
 			a_out.name = NameOf(a_resource);
 			if (a_out.name.empty())
 				a_out.name = "(unnamed)";
-			return true;
+			return Outcome::Report;
 		}
 
-		void Count(const std::source_location& a_where, std::string_view a_what, const Subject* a_subject, bool a_unknown)
+		void Count(const std::source_location& a_where, std::string_view a_what, const Subject* a_subject, Outcome a_outcome)
 		{
 			auto& state = Get();
 			std::lock_guard guard(state.lock);
 			auto& window = state.windows.Active();
-			if (!a_subject) {
-				++(a_unknown ? window.unknown : window.exempt);
+			if (a_outcome != Outcome::Report || !a_subject) {
+				if (a_outcome == Outcome::Unknown) {
+					++window.unknown;
+				} else {
+					++window.exempt;
+					window.immutable += a_outcome == Outcome::Immutable ? 1 : 0;
+				}
 				return;
 			}
 			const std::string site = SiteOf(a_where);
@@ -266,9 +323,11 @@ namespace RenderGraph::UndeclaredAccess
 			}
 			logger::info(
 				"[ORG] undeclared access ({}, {} frames): {:.2f} raw accesses a frame from {} sites to {} resources ({} graph-managed, {} mutable D3D11, {} "
-				"published twins, {} BasicRHI buffers by handle); skipped: {:.2f} exempt and {:.2f} undescribed a frame",
+				"published twins, {} BasicRHI buffers by handle); declared (interim index): {:.2f} a frame to {} published ids; skipped: {:.2f} exempt (of "
+				"which {:.2f} noted immutable at creation) and {:.2f} undescribed a frame",
 				window, a_frames, static_cast<double>(total) / frames, a_data.sites.size(), resources.size(), byClass[0], byClass[1], byClass[2], byClass[3],
-				static_cast<double>(a_data.exempt) / frames, static_cast<double>(a_data.unknown) / frames);
+				static_cast<double>(a_data.interimCount) / frames, a_data.interim.size(), static_cast<double>(a_data.exempt) / frames,
+				static_cast<double>(a_data.immutable) / frames, static_cast<double>(a_data.unknown) / frames);
 			std::vector<const std::pair<const std::string, Site>*> sorted;
 			for (const auto& entry : a_data.sites)
 				sorted.push_back(&entry);
@@ -303,9 +362,8 @@ namespace RenderGraph::UndeclaredAccess
 		// A native view keeps its resource (no tripwire call); DXVK's answers it as D3D11 does.
 		a_view->GetResource(resource.put());
 		Subject subject;
-		bool unknown = false;
-		const bool report = SubjectOf(resource.get(), a_view, subject, unknown);
-		Count(a_where, a_what, report ? &subject : nullptr, unknown);
+		const auto outcome = SubjectOf(resource.get(), a_view, subject);
+		Count(a_where, a_what, &subject, outcome);
 	}
 
 	void NoteBuffer(ID3D11Buffer* a_buffer, std::string_view a_what, std::source_location a_where)
@@ -313,15 +371,18 @@ namespace RenderGraph::UndeclaredAccess
 		if (!a_buffer)
 			return;
 		Subject subject;
-		bool unknown = false;
-		const bool report = SubjectOf(a_buffer, a_buffer, subject, unknown);
-		Count(a_where, a_what, report ? &subject : nullptr, unknown);
+		const auto outcome = SubjectOf(a_buffer, a_buffer, subject);
+		Count(a_where, a_what, &subject, outcome);
 	}
 
 	void NoteResource(const org::Resource& a_resource, std::string_view a_what, std::source_location a_where)
 	{
 		if (!a_resource.IsRenderGraphManaged()) {
-			Count(a_where, a_what, nullptr, false);
+			Count(a_where, a_what, nullptr, Outcome::Exempt);
+			return;
+		}
+		if (NotedImmutable(&a_resource)) {
+			Count(a_where, a_what, nullptr, Outcome::Immutable);
 			return;
 		}
 		Subject subject;
@@ -329,17 +390,26 @@ namespace RenderGraph::UndeclaredAccess
 		subject.type = Class::Graph;
 		subject.name = a_resource.GetName();
 		subject.detail = "an ORG resource the graph manages";
-		Count(a_where, a_what, &subject, false);
+		Count(a_where, a_what, &subject, Outcome::Report);
 	}
 
 	void NotePublished(std::string_view a_id, std::source_location a_where)
 	{
+		if (t_declaredIndex) {
+			// The reader declared the id: the graph orders the read; only the index is not the declared view's yet.
+			auto& state = Get();
+			std::lock_guard guard(state.lock);
+			auto& window = state.windows.Active();
+			++window.interimCount;
+			++window.interim[std::string(a_id)];
+			return;
+		}
 		Subject subject;
 		subject.key = std::hash<std::string_view>{}(a_id);
 		subject.type = Class::Published;
 		subject.name = a_id;
 		subject.detail = "its index from ShaderResourceIndex, not from a declared view";
-		Count(a_where, "ShaderResourceIndex", &subject, false);
+		Count(a_where, "ShaderResourceIndex", &subject, Outcome::Report);
 	}
 
 	void NoteRhiBuffer(std::uint32_t a_index, std::uint32_t a_generation, std::source_location a_where)
@@ -349,7 +419,31 @@ namespace RenderGraph::UndeclaredAccess
 		subject.type = Class::RhiBuffer;
 		subject.name = fmt::format("BasicRHI buffer {}.{}", a_index, a_generation);
 		subject.detail = "a ref by handle; the graph cannot tell which resource or pass it belongs to";
-		Count(a_where, "BufferRefOf", &subject, false);
+		Count(a_where, "BufferRefOf", &subject, Outcome::Report);
+	}
+
+	void NoteImmutable(const std::shared_ptr<org::Resource>& a_resource)
+	{
+		if (!a_resource)
+			return;
+		auto& registry = Immutables();
+		std::lock_guard guard(registry.lock);
+		registry.resources[a_resource.get()] = a_resource;
+		if (registry.resources.size() >= registry.pruneAt) {
+			std::erase_if(registry.resources, [](const auto& a_entry) { return a_entry.second.expired(); });
+			registry.pruneAt = (std::max<std::size_t>)(1024, registry.resources.size() * 2);
+		}
+	}
+
+	DeclaredIndexScope::DeclaredIndexScope() :
+		previous(t_declaredIndex)
+	{
+		t_declaredIndex = true;
+	}
+
+	DeclaredIndexScope::~DeclaredIndexScope()
+	{
+		t_declaredIndex = previous;
 	}
 
 	EpochScope::EpochScope(const char* a_label) :
@@ -382,6 +476,9 @@ namespace RenderGraph::UndeclaredAccess
 	void NoteResource(const org::Resource&, std::string_view, std::source_location) {}
 	void NotePublished(std::string_view, std::source_location) {}
 	void NoteRhiBuffer(std::uint32_t, std::uint32_t, std::source_location) {}
+	void NoteImmutable(const std::shared_ptr<org::Resource>&) {}
+	DeclaredIndexScope::DeclaredIndexScope() {}
+	DeclaredIndexScope::~DeclaredIndexScope() {}
 	EpochScope::EpochScope(const char*) {}
 	EpochScope::~EpochScope() {}
 	void EndFrame() {}
