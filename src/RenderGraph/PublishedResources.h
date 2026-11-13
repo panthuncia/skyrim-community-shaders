@@ -1,11 +1,17 @@
 #pragma once
 
 #include <cstdint>
+#include <memory>
 #include <source_location>
 #include <string>
 #include <string_view>
 
 struct ID3D11ShaderResourceView;
+
+namespace org
+{
+	class Resource;
+}
 
 namespace GraphResources
 {
@@ -54,6 +60,14 @@ namespace PublishedResources
 	/** @brief Publish under the twin's own name. */
 	bool Publish(const GraphResources::Resource& a_resource);
 	bool Publish(const GraphResources::Texture2D& a_texture);
+
+	/**
+	 * @brief Publishes a_import, a FrameAnchors import of a D3D11 texture (FrameAnchors::D3D11Texture, never aliased), under a_id, its
+	 * import's id ("cs.d3d11.<name>"), so every epoch's readers declare the resource its writers' passes use. a_srv is the view readers
+	 * find bound, for ExportedId (as unwrapped as they unwrap theirs); its dimension picks the whole-resource view (a 2D texture, a 2D
+	 * array or a cube). Import it again on a resize and publish again. False, logged, without an active runtime or such a view.
+	 */
+	bool PublishImport(std::string_view a_id, const std::shared_ptr<org::Resource>& a_import, const ID3D11ShaderResourceView* a_srv);
 
 	/**
 	 * @brief Publishes again every published twin whose graph resource changed since (a Resize), while the twin lives. Render thread;

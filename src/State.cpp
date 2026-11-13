@@ -38,6 +38,7 @@
 #include "Features/VolumetricShadows.h"
 #include "Menu.h"
 #include "Menu/ImGuiRenderer.h"
+#include "ORGDeferredClears.h"
 #include "ORGDeferredComposite.h"
 #include "PostProcessingMode.h"
 #include "Presets/UnifiedPresetCatalog.h"
@@ -414,6 +415,7 @@ void State::Setup()
 	GpuLoadPass::ReserveAnchor();
 	// Anchors are reserved before the graph initializes: the frame's epochs are fixed then.
 	ORGDeferredComposite::Reserve();
+	ORGDeferredClears::Reserve();
 	ImGuiRenderer::ReserveAnchor();
 	RenderGraph::Engine::Reserve();
 	RenderGraphRuntime::Get().Initialize();

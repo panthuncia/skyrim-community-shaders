@@ -30,9 +30,11 @@ namespace org
  *   bound SRV-only, a static engine vertex or index buffer filled at creation. In native mode the write census promotes it back: one
  *   the immediate context wrote since is reported. ORG's graphs refuse an exempt ownership, so these keep GraphManaged until Phase 2;
  *   the note is the validator's only;
- * - a texture made with shader-resource binding only, and a buffer made with vertex or index binding only, that is IMMUTABLE, or in
- *   native mode was made with initial data and never written since (Native::ResourceFacts; a streaming shell is its window's), or in
- *   guest mode (where the initial data is not known) is DEFAULT.
+ * - a D3D11 resource made IMMUTABLE, whatever its binding (D3D11 refuses every write to it: CS's IMMUTABLE structured buffers, such as
+ *   the landscape seam fix's quad data);
+ * - a texture made with shader-resource binding only, and a buffer made with vertex or index binding only, that in native mode was
+ *   made with initial data and never written since (Native::ResourceFacts; a streaming shell is its window's), or in guest mode (where
+ *   the initial data is not known) is DEFAULT.
  * Everything else is reported: ORG resources (graph-managed), other engine resources (the dynamic ring, render targets, written
  * textures), published twins and CS buffers by handle.
  *

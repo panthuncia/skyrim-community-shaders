@@ -99,6 +99,8 @@ namespace DCLF::Features::Landscape
 			std::array<std::uint32_t, LandscapeSeamsFix::NumPSTextures> indices{};
 			std::vector<std::shared_ptr<const void>> owners;
 			bool valid = views[0] && views[1];
+			// The seam fix's weights and quad data are D3D11 IMMUTABLE resources made with their contents (CreateResources), and the
+			// borrowed layers are file textures: all exempt from graph tracking, so an import per view is enough.
 			for (std::size_t t = 0; t < views.size(); ++t) {
 				auto& binding = previous.bindings[t];
 				binding = textures.ResolveBinding(views[t], GpuTextures::Tag(GpuTextures::Source::FrameSlot, LandscapeSeamsFix::FirstPSTexture + static_cast<std::uint32_t>(t)));

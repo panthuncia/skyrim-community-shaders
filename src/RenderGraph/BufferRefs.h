@@ -8,8 +8,10 @@
 
 #include <rhi.h>
 
+#include <array>
 #include <atomic>
 #include <memory>
+#include <mutex>
 #include <source_location>
 #include <string>
 #include <string_view>
@@ -69,27 +71,71 @@ namespace RenderGraph
 	BufferRef BufferRefOf(rhi::ResourceHandle a_buffer, std::uint64_t a_offset = 0, std::source_location a_where = std::source_location::current());
 	BufferRef BufferRefOf(const org::Buffer& a_buffer, std::uint64_t a_offset = 0, std::source_location a_where = std::source_location::current());
 
+	/**
+	 * @brief a_buffer's ref at a_offset on the graph host's device, for a buffer every pass reading the ref declares (no views): the
+	 * undeclared-access validator does not note it. The caller names those passes beside the call. Null without a host. Any thread.
+	 */
+	BufferRef DeclaredRefOf(const org::Buffer& a_buffer, std::uint64_t a_offset = 0, std::source_location a_where = std::source_location::current());
+
 	/** @brief CheckBufferRef on the graph host's device; nothing without a host or with the checks off. */
 	void CheckBufferRef(BufferRef a_ref, std::uint64_t a_address, std::uint64_t a_bytes, std::string_view a_what,
 		std::source_location a_where = std::source_location::current());
 
 	/**
-	 * @brief The ref a site last wrote into a latch or a table for a buffer, at commit (render thread). A declaring pass holds the same
-	 * latch and compares it with its declaration in Prepare (CheckDeclaredRefs). Set it to the buffer's ref at byte 0: the check compares
-	 * view slots, since sites add their own offsets. Any thread.
+	 * @brief The render thread's frame for the latch checks: advanced once a frame, at its end (RenderGraphRuntime::SealPresented). A
+	 * latch remembers the frame it was set in, so a check made while another frame's values are being written can tell. Any thread.
+	 */
+	inline std::atomic<std::uint64_t> g_refFrame{ 1 };
+	inline std::uint64_t RefFrame() { return g_refFrame.load(std::memory_order_acquire); }
+	/** @brief The frame's end (render thread). */
+	inline void AdvanceRefFrame() { g_refFrame.fetch_add(1, std::memory_order_acq_rel); }
+
+	/**
+	 * @brief The ref a site last wrote into a latch or a table for a buffer, at commit (render thread), with the frame it was written in
+	 * (RefFrame) and the last few before it. A declaring pass holds the same latch and compares it with its declaration in Prepare
+	 * (CheckDeclaredRefs). Set it to the buffer's ref at byte 0: the check compares view slots, since sites add their own offsets. Any
+	 * thread.
 	 */
 	class RefLatch
 	{
 	public:
-		void Set(BufferRef a_ref) noexcept { bits.store(a_ref.Bits(), std::memory_order_relaxed); }
+		/** @brief The refs kept: the latest and the ones before it, for the frames in flight a preparation may be for. */
+		static constexpr std::size_t kHistory = 4;
+
+		/** @brief What the latch holds at one moment: the latest ref and its frame, and the refs before it (newest first). */
+		struct Snapshot
+		{
+			BufferRef ref;
+			std::uint64_t frame = 0;
+			std::array<BufferRef, kHistory> history{};
+		};
+
+		void Set(BufferRef a_ref) noexcept
+		{
+			const auto frame = RefFrame();
+			std::lock_guard guard(lock);
+			if (latest.ref.Bits() != a_ref.Bits()) {
+				for (std::size_t i = kHistory - 1; i > 0; --i)
+					latest.history[i] = latest.history[i - 1];
+				latest.history[0] = latest.ref;
+			}
+			latest.ref = a_ref;
+			latest.frame = frame;
+		}
 		BufferRef Get() const noexcept
 		{
-			const auto value = bits.load(std::memory_order_relaxed);
-			return { static_cast<std::uint32_t>(value), static_cast<std::uint32_t>(value >> 32) };
+			std::lock_guard guard(lock);
+			return latest.ref;
+		}
+		Snapshot Take() const noexcept
+		{
+			std::lock_guard guard(lock);
+			return latest;
 		}
 
 	private:
-		std::atomic<std::uint64_t> bits{ 0 };
+		mutable std::mutex lock;
+		Snapshot latest;
 	};
 
 	/**
@@ -162,9 +208,14 @@ namespace RenderGraph
 	BufferRef DeclaredBufferRef(const org::FramePreparationContext& a_preparation, const org::ResourceBindingToken& a_binding, std::uint64_t a_offset = 0);
 
 	/**
-	 * @brief A pass's Prepare (the host's thread): logs "[ORG] declared view mismatch" once per entry whose latched ref (when the site set
-	 * one) is not a ref of the declared buffer's backing bound to this preparation (a late-bound buffer's current version). a_site names
-	 * the pass.
+	 * @brief A pass's Prepare (the host's thread): checks each entry's latched ref (when the site set one) against the declared buffer's
+	 * backing, keyed to the frame, so a preparation made while another frame's values are written is not taken for a mismatch:
+	 * - a late-bound buffer: its current version, only while the latch and that version are the same frame's (RefFrame unchanged
+	 *   across the check, and the latch set in it); otherwise the check is skipped and counted as such;
+	 * - a versioned buffer: the version bound to this preparation, which may be an earlier frame's: a mismatch only when none of the
+	 *   latch's recent refs (RefLatch::kHistory) is that version's.
+	 * Each site and buffer counts its checks, mismatches and skips: the first mismatch is logged as "[ORG] declared view mismatch", and
+	 * a summary of every site with mismatches or skips every 10 seconds while they grow. a_site names the pass.
 	 */
 	void CheckDeclaredRefs(const DeclaredRefs& a_refs, const org::FramePreparationContext& a_preparation, std::string_view a_site);
 }

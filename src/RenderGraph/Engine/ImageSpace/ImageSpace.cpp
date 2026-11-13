@@ -775,15 +775,33 @@ namespace RenderGraph::Engine::ImageSpace
 			return map && map->texture ? static_cast<ID3D11Texture2D*>(map->texture) : nullptr;
 		}
 
+		/** @brief The flow map's import (kFlowMapId), or null without a flow map. */
+		std::shared_ptr<org::ExternalTextureResource> FlowMapImport()
+		{
+			auto* map = FlowMap();
+			static_assert(kFlowMapId == "cs.d3d11.engine.flow-map", "kFlowMapId is FrameAnchors::D3D11Texture's id for engine.flow-map");
+			return map ? FrameAnchors::D3D11Texture("engine.flow-map", FlowMapTexture(), map->resourceView, map->UAV) : nullptr;
+		}
+
+		/**
+		 * @brief Publishes the flow map's import under its id, with the view the water's draws find bound at t8 as they unwrap it, so they
+		 * declare the copies' resource and read it by id (WaterDraws' inputs). Main thread, at Setup.
+		 */
+		void PublishFlowMap()
+		{
+			auto* map = FlowMap();
+			const auto import = FlowMapImport();
+			if (!map || !import || !PublishedResources::PublishImport(kFlowMapId, import, Tripwire::Unwrap(map->resourceView)))
+				logger::warn("[ORG] ImageSpace: the flow map is not published; the water's draws import its view");
+		}
+
 		/** @brief The graph's import of a target as ShapeKey names it (a render target, a depth target, a cubemap or the flow map; any mip is its texture's). */
 		std::shared_ptr<org::ExternalTextureResource> ImportOf(std::int32_t a_name)
 		{
 			if (a_name < 0 || (a_name & kLatchSourceInput))
 				return nullptr;
-			if (a_name & kFlowMapOutput) {
-				auto* map = FlowMap();
-				return map ? FrameAnchors::D3D11Texture("engine.flow-map", FlowMapTexture(), map->resourceView, map->UAV) : nullptr;
-			}
+			if (a_name & kFlowMapOutput)
+				return FlowMapImport();
 			const auto index = IndexOfName(a_name);
 			if (a_name & kDepthInput)
 				return FrameAnchors::EngineDepth(index);
@@ -2832,8 +2850,10 @@ namespace RenderGraph::Engine::ImageSpace
 		logger::info("[ORG] ImageSpace: on (CS_ORG_IMAGESPACE); effects {}", selected.empty() ? "none" : selected);
 		// The water's flow map, made now if the engine has not yet (it does at the first cell with flowing water), so the flow copies'
 		// pass names it from this registration.
-		if (const auto copy = EffectNamed("ISCopySubRegionCS"); copy >= 0 && state.enabled[static_cast<std::size_t>(copy)])
+		if (const auto copy = EffectNamed("ISCopySubRegionCS"); copy >= 0 && state.enabled[static_cast<std::size_t>(copy)]) {
 			MakeFlowMap();
+			PublishFlowMap();
+		}
 		// The session's shapes, registered once: the manifest's, the flow copy's and the shapes they imply. Their programs are queued
 		// now when the engine's effects exist (else at the first ImageSpace call); each pass takes its own at the graph's first build.
 		ReadManifest();

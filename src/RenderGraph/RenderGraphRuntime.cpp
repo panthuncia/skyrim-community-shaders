@@ -11,6 +11,7 @@
 #include "Globals.h"
 #include "Profiler.h"
 #include "RenderGraph/Backend.h"
+#include "RenderGraph/BufferRefs.h"
 #include "RenderGraph/DxvkOrgInterop.h"
 #include "RenderGraph/FrameAnchorSelfTest.h"
 #include "RenderGraph/FrameAnchors.h"
@@ -2720,6 +2721,8 @@ void RenderGraphRuntime::SealPresented()
 	RenderGraph::Engine::Native::OpCensus::EndFrame();
 	RenderGraph::RunShapes::EndFrame();
 	RenderGraph::UndeclaredAccess::EndFrame();
+	// The latch checks' frame (CheckDeclaredRefs): what a site latches from here is the next frame's.
+	RenderGraph::AdvanceRefFrame();
 	if (impl && impl->host)
 		impl->host->SealSubmitted();
 	// Native mode, while it is brought up: the host's runs in flight every 600 presents, so a run that never retires shows early.
