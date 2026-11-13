@@ -106,6 +106,9 @@ namespace Testing
 	 */
 	void ReportDeviceLost(std::string_view a_where, std::uint64_t a_faultAddress, std::string_view a_faultKind, std::string_view a_markers);
 
+	/** @brief Any thread: BasicRHI reported a lost device (a fault, or a timeline that read UINT64_MAX), in any run. */
+	bool DeviceLossSeen();
+
 	/** @brief The unhandled exception filter: writes the outcome crashed. Best effort; it does not allocate much. */
 	void ReportCrash(std::uint32_t a_code, const void* a_address);
 

@@ -9,6 +9,7 @@
 #include "Deferred.h"
 #include "Globals.h"
 #include "RenderGraph/RenderGraphRuntime.h"
+#include "Testing/Testing.h"
 #include "Features/DrawcallLimitFix/Diagnostics/Hooks.h"
 #include "Features/DrawcallLimitFix/Diagnostics/Policy.h"
 #include "Features/DrawcallLimitFix/Diagnostics/Reports/Scene.h"
@@ -179,6 +180,19 @@ namespace DCLF
 				// The graph itself stopped (its host's thread failed, or a submission threw): no snapshot can cover a frame any more, and the
 				// frame did not wait for one (AdoptCurrentSnapshot has no host). Its reason is the defect, not the coverage. "GPU completion
 				// timeline failed" is a timeline that read UINT64_MAX: Windows sets a removed device's fences to that value.
+				// A lost device (a TDR, a page fault) is the cause whenever BasicRHI or D3D11 reports one: no frame can be covered again, so
+				// the game ends here with that reason logged. A fatal message box would sit behind the full-screen window with the game frozen.
+				const HRESULT removed = globals::d3d::device ? globals::d3d::device->GetDeviceRemovedReason() : S_OK;
+				if (removed != S_OK || Testing::DeviceLossSeen()) {
+					const auto reason = fmt::format("Drawcall Limit Fix: the GPU device was lost (D3D11's removed reason {:#x}, BasicRHI saw it {}) before frame {}; "
+													"the game ends. The GPU work it was running is in the log above (crash markers with DXVK_DEBUG=hang, or the hang "
+													"report's stream order)",
+						static_cast<std::uint32_t>(removed), Testing::DeviceLossSeen(), view.GetFrame());
+					logger::critical("{}", reason);
+					Testing::ReportDeviceLost("D3D11 device removed at DCLF's frame start", 0, "", "");
+					spdlog::default_logger()->flush();
+					::TerminateProcess(::GetCurrentProcess(), 0xDEAD0007u);
+				}
 				if (auto& runtime = RenderGraphRuntime::Get(); !runtime.IsActive())
 					stl::report_and_fail(fmt::format("Drawcall Limit Fix: the render graph stopped before frame {} ({}), and DCLF draws only through it once it "
 													 "draws. D3D11's device removed reason: {:#x}",

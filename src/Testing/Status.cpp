@@ -22,6 +22,7 @@ namespace Testing
 	{
 		std::atomic<bool> finished{ false };
 		std::atomic<bool> crashing{ false };
+		std::atomic<bool> deviceLossSeen{ false };  // BasicRHI's loss callback ran, in any run
 		std::atomic<bool> dirty{ false };
 
 		/**
@@ -317,6 +318,7 @@ namespace Testing
 #if defined(CS_HAS_RENDER_GRAPH)
 		// BasicRHI's lost devices (Vulkan's device fault and crash markers, D3D12's DRED report) end a test run.
 		rhi::SetDeviceLossCallback([](const rhi::DeviceLossInfo& a_info) {
+			deviceLossSeen.store(true, std::memory_order_release);
 			ReportDeviceLost(fmt::format("{}: {}", a_info.backend, a_info.where), a_info.faultAddress, a_info.faultKind ? a_info.faultKind : "",
 				a_info.markers ? a_info.markers : "");
 		});
@@ -339,6 +341,11 @@ namespace Testing
 			progress.compiling = cache->IsCompiling();
 		}
 		return progress;
+	}
+
+	bool DeviceLossSeen()
+	{
+		return deviceLossSeen.load(std::memory_order_acquire);
 	}
 
 	void ReportDeviceLost(std::string_view a_where, std::uint64_t a_faultAddress, std::string_view a_faultKind, std::string_view a_markers)

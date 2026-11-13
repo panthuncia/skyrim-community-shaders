@@ -5,6 +5,7 @@
 #ifdef CS_HAS_RENDER_GRAPH
 #	include "RenderGraph/RenderGraphRuntime.h"
 #	include <OpenRenderGraph/GraphHost.h>
+#	include <rhi_interop_vulkan.h>
 #endif
 
 #include <ctime>
@@ -175,6 +176,14 @@ namespace HangWatchdog
 			// The order of the graph's work in DXVK's stream and on the compute and copy queues: a GPU wait cycle shows here.
 			if (RenderGraphRuntime::Get().Host())
 				logger::critical("[HANG] render graph stream order: {}", RenderGraphRuntime::Get().DescribeStreamOrder());
+			// BasicRHI's crash markers (DXVK_DEBUG=hang; DXVK's adopted device also needs BASICRHI_VK_CRASH_MARKERS=1): each command
+			// list's last begun and finished marker. A begun marker is written at the top of the pipe, so a list "in flight" at a
+			// pass's begin can still be draining the pass before it (Radeon GPU Detective tells the two apart). No lines on D3D12
+			// or with the markers off.
+			if (auto* host = RenderGraphRuntime::Get().Host()) {
+				const auto lines = rhi::vulkan::DumpCrashDiagnostics(host->Device(), false);
+				logger::critical("[HANG] render graph crash markers: {} lines logged above", lines);
+			}
 #endif
 			spdlog::default_logger()->flush();
 			PruneReports(*dir);
