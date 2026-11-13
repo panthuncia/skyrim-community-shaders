@@ -118,7 +118,12 @@ Every other anchor runs once a frame.
 - **Interim declarations.** `ShaderResourceIndex` at EngineDrawFamily.cpp:525, FrameBindings.cpp:130/200 and
   ORGLightCulling.cpp:544-545: these reads are declared now, but the index still comes from the published table.
 - **Buffer view refs read without a declaration** (`BufferRefOf`): FrameValues.cpp:3129, NamedRefs.h:15, PayloadVersions.cpp:587,
-  ViewBatches*, Common.cpp:26 and EngineBuffers.cpp:205. ORG has no declaration that hands out a buffer view ref.
+  ViewBatches*, Common.cpp:26 and EngineBuffers.cpp:205.
+  - ORG already declares buffer access: `ShaderResource`/`UnorderedAccess` on a buffer, with or without a view. A buffer's ref
+    lasts as long as the buffer, so a ref worked out at commit stays right.
+  - The work is declaring these buffers on their passes, and registering the ones the graph does not know (the engine's dynamic
+    ring).
+  - For versioned buffers, the ref written at commit must be the bound version's; Prepare checks that.
 - **Raw texture indices that remain:**
   - EngineDrawFamily.cpp:409, `kMAIN` copy in a frame slot;
   - FrameRecords.cpp:242, `kHDR_DOWNSAMPLE4` and LLF's D3D11 exports;
