@@ -137,6 +137,14 @@ namespace RenderGraph::Engine::Native
 	 * texture. Any thread.
 	 */
 	std::shared_ptr<org::ExternalTextureResource> PromotedTextureOf(const IUnknown* a_object);
+
+	/**
+	 * @brief Whether a_object (a texture or view handle, or a streamed texture's shell) is a texture native mode made that graphs must
+	 * track when they read it: graph-owned (GraphTextureOf), or host-made (made before the graph was up, kept host-made, or a wrapped
+	 * image). False for an exempt texture, promoted or not (PromotedTextureOf answers those), and for anything native mode did not
+	 * make. Any thread.
+	 */
+	bool IsTrackedTexture(const IUnknown* a_object);
 	/** @} */
 
 	/** @brief What native mode knows of a resource it made, from its D3D11 description (DescribeForCensus). */

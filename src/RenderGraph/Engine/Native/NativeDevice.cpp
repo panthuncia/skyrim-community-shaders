@@ -1330,8 +1330,9 @@ namespace RenderGraph::Engine::Native
 				const char* kept = nullptr;
 				if (a_request.dimension == D3D11_RESOURCE_DIMENSION_TEXTURE1D)
 					kept = "a 1D texture";
-				else if (a_request.miscFlags & ~UINT(D3D11_RESOURCE_MISC_TEXTURECUBE))
-					kept = "misc flags other than a cube";
+				// GENERATE_MIPS only asks the context for mip generation, which blits within the image whoever made it.
+				else if (a_request.miscFlags & ~UINT(D3D11_RESOURCE_MISC_TEXTURECUBE | D3D11_RESOURCE_MISC_GENERATE_MIPS))
+					kept = "misc flags other than a cube or mip generation";
 				else if (a_support.srvSwizzle)
 					kept = "a format BasicRHI stores as another (read through a swizzle)";
 				else if (a_typelessDepth)
@@ -3792,6 +3793,12 @@ namespace RenderGraph::Engine::Native
 		return ImmutableTextureOf(a_object, DXGI_FORMAT_UNKNOWN);
 	}
 
+	bool IsTrackedTexture(const IUnknown* a_object)
+	{
+		const auto record = g_device ? ImageRecordOf(a_object) : nullptr;
+		return record && record->ownership != NativeResource::Ownership::Exempt;
+	}
+
 	bool DescribeForCensus(const void* a_object, ResourceFacts& a_out)
 	{
 		auto record = a_object ? Resolve(a_object) : nullptr;
@@ -4264,6 +4271,7 @@ namespace RenderGraph::Engine::Native
 	std::shared_ptr<org::GloballyIndexedResource> GraphTextureOfImage(std::uint64_t) { return nullptr; }
 	std::shared_ptr<org::ExternalTextureResource> ImmutableTextureOf(const IUnknown*, DXGI_FORMAT) { return nullptr; }
 	std::shared_ptr<org::ExternalTextureResource> PromotedTextureOf(const IUnknown*) { return nullptr; }
+	bool IsTrackedTexture(const IUnknown*) { return false; }
 	HRESULT Present(UINT, UINT) { return E_FAIL; }
 	bool EmitExternalCommands(void (*)(void*, VkCommandBuffer_T*), void*, const VkSemaphoreSubmitInfo*, std::uint32_t, const VkSemaphoreSubmitInfo*, std::uint32_t)
 	{

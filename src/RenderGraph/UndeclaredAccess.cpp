@@ -30,6 +30,7 @@ namespace RenderGraph::UndeclaredAccess
 	{
 		thread_local const char* t_epoch = nullptr;
 		thread_local bool t_declaredIndex = false;  // DeclaredIndexScope
+		thread_local bool t_declaredView = false;   // DeclaredViewScope
 
 		/** @brief Why an access is reported. */
 		enum class Class : std::uint8_t
@@ -83,7 +84,7 @@ namespace RenderGraph::UndeclaredAccess
 			std::uint64_t immutable = 0;                             // of those, ORG resources noted immutable after creation
 			std::uint64_t unknown = 0;                               // accesses to a resource nothing could describe (skipped)
 			std::uint64_t feedback = 0;                              // refs of host feedback buffers (skipped)
-			std::unordered_map<std::string, std::uint64_t> interim;  // declared (interim index) lookups, by published id
+			std::unordered_map<std::string, std::uint64_t> interim;  // declared (interim index) lookups, by published id (or raw view source)
 			std::uint64_t interimCount = 0;
 		};
 
@@ -383,6 +384,15 @@ namespace RenderGraph::UndeclaredAccess
 	{
 		if (!a_view)
 			return;
+		if (t_declaredView) {
+			// The caller's pass declares the read and binds its declared view; the raw index is only the fallback until that build is attached.
+			auto& state = Get();
+			std::lock_guard guard(state.lock);
+			auto& window = state.windows.Active();
+			++window.interimCount;
+			++window.interim[std::string(a_what)];
+			return;
+		}
 		winrt::com_ptr<ID3D11Resource> resource;
 		// A native view keeps its resource (no tripwire call); DXVK's answers it as D3D11 does.
 		a_view->GetResource(resource.put());
@@ -473,6 +483,17 @@ namespace RenderGraph::UndeclaredAccess
 		t_declaredIndex = previous;
 	}
 
+	DeclaredViewScope::DeclaredViewScope() :
+		previous(t_declaredView)
+	{
+		t_declaredView = true;
+	}
+
+	DeclaredViewScope::~DeclaredViewScope()
+	{
+		t_declaredView = previous;
+	}
+
 	EpochScope::EpochScope(const char* a_label) :
 		previous(t_epoch)
 	{
@@ -507,6 +528,8 @@ namespace RenderGraph::UndeclaredAccess
 	void NoteHostFeedback(const std::shared_ptr<org::Resource>&) {}
 	DeclaredIndexScope::DeclaredIndexScope() {}
 	DeclaredIndexScope::~DeclaredIndexScope() {}
+	DeclaredViewScope::DeclaredViewScope() {}
+	DeclaredViewScope::~DeclaredViewScope() {}
 	EpochScope::EpochScope(const char*) {}
 	EpochScope::~EpochScope() {}
 	void EndFrame() {}

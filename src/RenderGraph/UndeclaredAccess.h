@@ -107,6 +107,24 @@ namespace RenderGraph::UndeclaredAccess
 		bool previous = false;
 	};
 
+	/**
+	 * @brief For the scope, raw views noted on this thread (NoteView, from DCLF::GpuTextures::ResolveBinding) are reads the caller's
+	 * pass declares: the pass binds the declared view's index, and the raw index is only its fallback until the build that declares
+	 * the read is attached (Scaleform's display reads). They count as "declared (interim index)", not as undeclared. Only for a caller
+	 * that declared the read itself; one thread-local flag, apart from DeclaredIndexScope.
+	 */
+	class DeclaredViewScope
+	{
+	public:
+		DeclaredViewScope();
+		~DeclaredViewScope();
+		DeclaredViewScope(const DeclaredViewScope&) = delete;
+		DeclaredViewScope& operator=(const DeclaredViewScope&) = delete;
+
+	private:
+		bool previous = false;
+	};
+
 	/** @brief The epoch a_label runs on this thread for the scope (RenderGraphRuntime::TryExecuteEpoch): accesses meanwhile are its. */
 	class EpochScope
 	{
