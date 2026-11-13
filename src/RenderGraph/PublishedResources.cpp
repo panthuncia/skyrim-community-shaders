@@ -14,6 +14,7 @@
 #	include <OpenRenderGraph/GraphHost.h>
 #	include <Render/RenderGraph/RenderGraph.h>
 #	include <Resources/GloballyIndexedResource.h>
+#	include <Resources/VersionedTexture.h>
 
 #	include <algorithm>
 #	include <atomic>
@@ -31,6 +32,9 @@ namespace PublishedResources
 		{
 			std::string id;
 			std::shared_ptr<org::Resource> resource;
+			// A versioned twin's slot (GraphResources::Options::versioned): every graph registers it as the id's resolver, and a
+			// resize of the twin is a new version of it, not a new resource.
+			std::shared_ptr<org::VersionedTexture> slot;
 			std::optional<org::SRVViewType> view;  // none: the resource's primary view
 			bool published = false;                // false: withdrawn, still registered
 			const ID3D11ShaderResourceView* srv = nullptr;  // the twin's D3D11 export while published; compared, never used
@@ -41,7 +45,13 @@ namespace PublishedResources
 		/** @brief What every graph build registers. Immutable once stored. */
 		struct Snapshot
 		{
-			std::vector<std::pair<std::string, std::shared_ptr<org::Resource>>> resources;
+			struct Registered
+			{
+				std::string id;
+				std::shared_ptr<org::Resource> resource;
+				std::shared_ptr<org::VersionedTexture> slot;  // registered as the id's resolver in place of resource
+			};
+			std::vector<Registered> resources;
 		};
 
 		struct State
@@ -100,8 +110,13 @@ namespace PublishedResources
 			{
 				if (!snapshot)
 					return;
-				for (const auto& [id, resource] : snapshot->resources)
-					a_graph.RegisterResource(org::ResourceIdentifier(id), resource);
+				for (const auto& entry : snapshot->resources) {
+					const org::ResourceIdentifier id(entry.id);
+					if (!entry.slot)
+						a_graph.RegisterResource(id, entry.resource);
+					else if (!a_graph._resolverMap.contains(id))  // the producer's own registration may have come first
+						a_graph.RegisterResolver(id, entry.slot);
+				}
 			}
 
 			void GatherStructuralPasses(org::RenderGraph&, std::vector<org::RenderGraph::ExternalPassDesc>&) override {}
@@ -127,7 +142,7 @@ namespace PublishedResources
 		{
 			auto snapshot = std::make_shared<Snapshot>();
 			for (const auto& entry : a_state.entries)
-				snapshot->resources.emplace_back(entry.id, entry.resource);
+				snapshot->resources.push_back({ entry.id, entry.resource, entry.slot });
 			a_state.snapshot.store(std::move(snapshot), std::memory_order_release);
 			if (!a_host.HasExtension(kExtensionId)) {
 				a_host.AddExtension(kExtensionId, [&a_state]() -> std::unique_ptr<org::RenderGraph::IRenderGraphExtension> {
@@ -141,7 +156,23 @@ namespace PublishedResources
 			else if (a_change == Change::Added)
 				a_host.RequestRebuildFor(org::ResourceIdentifier(added), fmt::format("published resource {} added", a_what));
 			else
-				a_host.RequestRebuild(fmt::format("published resource {} replaced", a_what));
+				GraphResources::RequestStructuralRebuild(fmt::format("published resource {} replaced by a new resource", a_what));
+		}
+
+		/** @brief The D3D11 export of an entry's twin: a versioned twin's current one (a resize makes it again), else the one stored. */
+		const ID3D11ShaderResourceView* ExportOf(const Entry& a_entry)
+		{
+			if (!a_entry.published)
+				return nullptr;
+			if (a_entry.slot && a_entry.twin && !a_entry.alive.expired() && a_entry.twin->Versioned() == a_entry.slot)
+				return a_entry.twin->SRV();
+			return a_entry.srv;
+		}
+
+		/** @brief The resource an entry stands for now: its slot's current version, or the resource stored. */
+		std::shared_ptr<org::Resource> CurrentOf(const Entry& a_entry)
+		{
+			return a_entry.slot ? a_entry.slot->CurrentResource() : a_entry.resource;
 		}
 
 		/** @brief The view a whole-resource read takes of a 2D texture: a cube's TextureCube, a 2D array's full array, else Texture2D. */
@@ -170,7 +201,9 @@ namespace PublishedResources
 				return false;
 			}
 			auto* entry = Find(state, a_id);
-			if (entry && entry->resource == a_resource.Graph()) {
+			// The same resource, or a new version of the same slot (a versioned twin's resize): nothing to build.
+			if (entry && (entry->resource == a_resource.Graph() || (entry->slot && entry->slot == a_resource.Versioned()))) {
+				entry->resource = a_resource.Graph();
 				entry->srv = a_resource.SRV();
 				entry->twin = &a_resource;
 				entry->alive = a_resource.Alive();
@@ -182,6 +215,7 @@ namespace PublishedResources
 			if (!entry)
 				entry = &state.entries.emplace_back(Entry{ .id = std::string(a_id) });
 			entry->resource = a_resource.Graph();
+			entry->slot = a_resource.Versioned();
 			entry->view = a_view;
 			entry->published = true;
 			entry->srv = a_resource.SRV();
@@ -223,6 +257,13 @@ namespace PublishedResources
 		for (auto& entry : state.entries) {
 			if (!entry.twin || entry.alive.expired() || !*entry.twin || entry.twin->Graph() == entry.resource)
 				continue;
+			if (entry.slot && entry.twin->Versioned() == entry.slot) {
+				// A new version of the same slot: every graph already resolves it.
+				entry.resource = entry.twin->Graph();
+				entry.srv = entry.published ? entry.twin->SRV() : nullptr;
+				continue;
+			}
+			entry.slot = entry.twin->Versioned();
 			entry.resource = entry.twin->Graph();
 			entry.srv = entry.published ? entry.twin->SRV() : nullptr;  // a withdrawn id has no export to match
 			changed += fmt::format("{}'{}'", changed.empty() ? "" : ", ", entry.id);
@@ -269,7 +310,7 @@ namespace PublishedResources
 		if (!a_view)
 			return false;
 		const auto* entry = Find(Published(), a_id);
-		return entry && entry->published && entry->srv == a_view;
+		return entry && ExportOf(*entry) == a_view;
 	}
 
 	bool ShaderResourceIndex(std::string_view a_id, std::uint32_t& a_index, std::source_location a_where)
@@ -279,7 +320,8 @@ namespace PublishedResources
 			return false;
 		if (RenderGraph::UndeclaredAccess::On())
 			RenderGraph::UndeclaredAccess::NotePublished(a_id, a_where);
-		const auto* indexed = dynamic_cast<const org::GloballyIndexedResource*>(entry->resource.get());
+		const auto current = CurrentOf(*entry);
+		const auto* indexed = dynamic_cast<const org::GloballyIndexedResource*>(current.get());
 		if (!indexed)
 			return false;
 		try {
@@ -311,7 +353,7 @@ namespace PublishedResources
 			return {};
 		CheckThread();
 		for (const auto& entry : Published().entries)
-			if (entry.published && entry.srv == a_view)
+			if (ExportOf(entry) == a_view)
 				return entry.id;
 		return {};
 	}

@@ -28,8 +28,12 @@ namespace GraphResources
  *   An aliased transient keeps no contents across executions, and another epoch's read is another execution.
  * - A reader in an epoch earlier in the frame than the producer's reads the previous frame's contents.
  * - The id is the twin's name ("Feature::Name") unless the producer gives another. Readers name the same id.
- * - Publishing a new resource under an id (the first time, or after a Resize) rebuilds every graph, once. A twin's Resize is published
- *   again by Refresh, which the frame anchors call when the resize generation moves: the producer need not publish it again.
+ * - A versioned twin (GraphResources::Options::versioned) is published as its slot: every graph registers the slot as the id's resolver,
+ *   so a Resize of the twin is a new version that readers declaring the id follow, with no graph build. Its export and its
+ *   ShaderResourceIndex follow the current version.
+ * - Publishing a new resource under an id (the first time, a new twin, or a Resize of a twin that is not versioned) rebuilds every
+ *   graph, once (a replacement through GraphResources::RequestStructuralRebuild). A twin's Resize is published again by Refresh, which
+ *   the frame anchors call when the resize generation moves: the producer need not publish it again.
  * - Withdraw marks the resource as no longer written: ShaderResourceIndex answers false and readers return to their D3D11 view. It
  *   stays registered, because a graph built earlier may still declare it, until the producer publishes again under that id.
  * - An id stays registered once published (IsRegistered), so a reader may declare it in every build from then on.
