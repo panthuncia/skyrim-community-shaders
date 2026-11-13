@@ -91,6 +91,13 @@ namespace PublishedResources
 	bool ShaderResourceIndex(std::string_view a_id, std::uint32_t& a_index);
 
 	/**
+	 * @brief The view variant (org::SRVViewType) of the view ShaderResourceIndex hands out for a_id, for a pass that declares its read
+	 * with that view (org::SrvView::variant), so the declaration covers the descriptor it reads. UINT32_MAX for the resource's
+	 * primary view (a buffer's), and for an id never published. Render thread (a graph build).
+	 */
+	std::uint32_t ShaderResourceVariant(std::string_view a_id);
+
+	/**
 	 * @brief The id whose twin exports a_view as its D3D11 SRV, while that id is published; empty otherwise. A diagnostic for readers
 	 * that import D3D11 views: a graph pass reading the export through an import of its own is not ordered after the producer's
 	 * writes, so it should read the id instead. Allocates: use IsExportOf on hot paths.
