@@ -50,13 +50,14 @@ namespace RenderGraph
 	namespace
 	{
 		/**
-		 * @brief Whether the graph's imports are exclusive in native mode (CS_ORG_NATIVE_OWNED, and CS_ORG_NATIVE_EXCLUSIVE_IMPORTS not 0):
-		 * the graph moves the image into each pass's layout and gives it back in its home, as D3D12 already does.
+		 * @brief Whether the graph's imports are exclusive in native mode (CS_ORG_NATIVE_OWNED, and CS_ORG_NATIVE_EXCLUSIVE_IMPORTS=1):
+		 * the graph moves the image into each pass's layout and gives it back in its home, as D3D12 already does. Off by default
+		 * until CS_ORG_IMAGE_DUPLICATE_CHECK reads no line: two graph resources of one image race when both move its layout.
 		 */
 		bool ExclusiveGraphImports()
 		{
-			static const bool kept = Switches::Off("CS_ORG_NATIVE_EXCLUSIVE_IMPORTS");
-			return !kept && Engine::Native::OwnedResources();
+			static const bool on = Switches::On("CS_ORG_NATIVE_EXCLUSIVE_IMPORTS");
+			return on && Engine::Native::OwnedResources();
 		}
 
 		rhi::ResourcePtr ImportImage(rhi::Device a_device, const DxvkOrgInteropImageInfo& a_image, const char* a_name, bool a_exclusive)

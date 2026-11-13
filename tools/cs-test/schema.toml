@@ -3224,7 +3224,7 @@ description = "log when two live graph resources wrap one image (any importer)"
 [key."org.native_exclusive_imports"]
 env = "CS_ORG_NATIVE_EXCLUSIVE_IMPORTS"
 type = "bool"
-default = true
+default = false
 family = "org"
 kind = "other"
-description = "native: graph imports are exclusive, moved into each pass layout (false keeps them shared, Common-only)"
+description = "native: graph imports are exclusive, moved into each pass layout (default false: shared, Common-only, until the duplicate image check is clean)"

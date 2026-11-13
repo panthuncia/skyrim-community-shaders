@@ -5,10 +5,10 @@
 // layouts, or every image when DXVK pins them for an older client) is shared with simultaneous access; any other is used
 // exclusively, and the graph's external home states give it back in that layout after each execution.
 //
-// Native mode (with CS_ORG_NATIVE_OWNED) imports every image for the graph exclusively, whatever it rests in: the graph moves it into
+// With CS_ORG_NATIVE_EXCLUSIVE_IMPORTS=1, native mode (with CS_ORG_NATIVE_OWNED) imports every image for the graph exclusively: the graph moves it into
 // each pass's layout and gives it back in its home. That needs one graph resource per image (FrameAnchors' imports find an image's
-// slot before making one), since two resources would each track the image's layout. CS_ORG_NATIVE_EXCLUSIVE_IMPORTS=0 keeps them
-// shared. Raw imports (ImportDxvkImage: the native context's own, Drawcall Limit Fix's bindless views) stay shared in GENERAL, where
+// slot before making one), since two resources would each track the image's layout. Shared imports stay the default
+// until the duplicate image check (CS_ORG_IMAGE_DUPLICATE_CHECK) is clean. Raw imports (ImportDxvkImage: the native context's own, Drawcall Limit Fix's bindless views) stay shared in GENERAL, where
 // the context and the raw views use the image between graph executions.
 
 #include "RenderGraph/BufferRef.h"
