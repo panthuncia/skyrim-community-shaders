@@ -121,8 +121,9 @@ namespace DCLF::Draws
 				// late-bound buffers, so the copies that fill them are ordered before this pass whatever queue it runs on.
 				Extensions::DeclareCullBindingPublications(a_builder, *resources->scene,
 					{ Api::CullBindingSlot::Programs, Api::CullBindingSlot::LightContexts, Api::CullBindingSlot::StrictGates });
-				// PreparePortalQueries reads each object's bound from the frame's placements, through the latch.
+				// PreparePortalQueries reads each object's bound from the frame's placements, through the latch, and the payload's parts.
 				FrameValues::Get().DeclareReads(a_builder, FrameValues::kReadPlacements);
+				DeclarePayloadReads(a_builder);
 				return bindings;
 			}
 			// The view latch's strict-light publications (LoadViewLatch: the context atlas and the gates' verdicts), through their late-bound buffers.
@@ -132,7 +133,9 @@ namespace DCLF::Draws
 			if (const auto& results = Extensions::CullBindingBuffer(Api::CullBindingSlot::MemberResults, *resources->scene); results && segment == RenderGraphRuntime::Segment::ZPrepass && fixedPhase != 2)
 				bindings.memberResults = a_builder.ShaderResource(*results).View();
 
-			// The scene list, the geometry table and the rows are the installed payload's (the latch names them): no recording binds them.
+			// The scene list, the geometry table and the rows are the installed payload's (the latch names them): no recording binds them,
+			// so they are declared through their late-bound buffers.
+			DeclarePayloadReads(a_builder);
 			bindings.sequences = a_builder.UnorderedAccess(*resources->sequences).View();
 			bindings.count = a_builder.UnorderedAccess(resources->count).View();
 			bindings.visibility = a_builder.UnorderedAccess(*resources->visibility).View();

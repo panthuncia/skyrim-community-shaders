@@ -100,6 +100,8 @@ namespace DCLF::Features::TextureTransforms
 	 * main-rows latch's animatedRows.
 	 */
 	Api::FrameRows AnimatedRowsAddress();
+	/** @brief Any thread after install: the animated-material-rows pool (the frame's copy), which the pass declares written. */
+	Api::FrameValuePoolId CopyPool();
 	/** @brief Render thread, the pass's setup: whether its program was made (without it nothing writes the copy, and no draw is pointed at it). */
 	void SetCopyAvailable(bool a_available);
 	// TextureTransformsList.cpp: the payload product.

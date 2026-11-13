@@ -21,9 +21,11 @@ namespace DCLF::Draws
 		return host ? host->Device().GetBufferDeviceAddress({ a_buffer, 0 }) : 0;
 	}
 
-	RenderGraph::BufferRef RecordingBufferRef(rhi::ResourceHandle a_buffer)
+	RenderGraph::BufferRef RecordingBufferRef(const org::RecordingContext& a_recording, const org::ResourceBindingToken& a_binding)
 	{
-		return RenderGraph::BufferRefOf(a_buffer);
+		auto* host = RenderGraphRuntime::Get().Host();
+		return host ? RenderGraph::MakeBufferRef(host->Device(), a_recording.Resolve(a_binding).GetHandle(), 0, std::source_location::current()) :
+		              RenderGraph::BufferRef{};
 	}
 
 	void FoldEyeIntoViewProj(const std::array<float, 16>& a_viewProj, const RE::NiPoint3& a_eye, float (&a_out)[16])
@@ -197,9 +199,15 @@ namespace DCLF::Draws
 		// The character light's noise (kCharacterLightRegister): whichever HDR downsample level the engine names this frame.
 		Extensions::DeclareGraphTextures(a_builder, Extensions::CharacterLightGraphTextureIds(), reads);
 		// Every caller draws with the frame record bound. Its shaders read the frame's placements, palettes and shading (t121-t123)
-		// and the fade seeds pool (t117).
+		// and the fade seeds pool (t117), and its sequences name the payload's rows.
 		FrameValues::Get().DeclareReads(a_builder);
+		DeclarePayloadReads(a_builder);
 		return reads;
+	}
+
+	void DeclarePayloadReads(org::PassBuilder& a_builder)
+	{
+		PayloadPools::DeclareReads(a_builder);
 	}
 
 	void RecordPreprocessedDraws(org::PassRecordContext& a_recording, PreprocessStates& a_preprocess, const rhi::PassBeginInfo& a_begin, rhi::DescriptorHeapHandle a_resourceHeap,

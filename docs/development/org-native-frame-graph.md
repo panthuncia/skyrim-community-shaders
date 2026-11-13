@@ -79,6 +79,35 @@ Fixed during integration:
 Checks: guest and native quick runs match their baselines (native: 4% of pixels differ by more than 16, the same as two baseline
 runs).
 
+## Wave 2 lane: buffer view refs (`org-native/p1-buffer-refs`)
+
+A buffer view ref is BasicRHI's raw SRV/UAV pair, made once per buffer, so no ORG view is needed: a pass declares the buffer
+without views (`ShaderResource`/`UnorderedAccess` with an empty span), and the ref stays the buffer's for its life.
+
+- **Helpers** (`RenderGraph/BufferRefs.h`):
+  - `DeclareRef` / `DeclareLateRef` declare a buffer read or written through its ref.
+  - `RefLatch` holds the ref a site latched at commit. `CheckDeclaredRefs` logs `[ORG] declared view mismatch` once in Prepare when
+    it is not the ref of the backing bound to the preparation. A late-bound buffer's declaration resolves to its stand-in, so it is
+    checked against its current published version.
+  - `LateRefBuffer` makes a buffer the graph does not own declarable: a late-bound `VersionedBuffer` whose version the host
+    publishes when the frame adopts it. Publishing costs no graph build.
+- **Frame value pools:** the pixel rows and texture transforms passes wrote their pool through the latch's ref but declared it read.
+  `FrameValues::DeclarePoolWrite` declares it written; both passes check `PoolRef`'s ref.
+- **Installed payload parts:** each part is a `LateRefBuffer`, published by `MakeFramePayload`. The build, draw, shadow, view,
+  texture transforms and CPU site passes declare them (`DeclarePayloadReads`; `DeclareFrameBuffers` includes it).
+- **CPU view batch sequences:** a `LateRefBuffer`, published when a frame's slot takes the set. Every CPU site declares it and checks
+  the set's ref.
+- **CPU sites:** the shadow site declares the shadow constants, view blocks and index pool; the depth site declares its hosted
+  views' blocks and frame constants.
+- **Recording refs:** `RecordingBufferRef` resolves the pass's declaration instead of taking a raw handle.
+
+Left for later phases:
+- **The engine's dynamic ring** (`EngineBuffers.cpp`): its chunks are not graph resources and a frame reads several of them. Phase 2
+  registers them; the refs stay raw until then.
+- **Named versions** (`NamedRefs.h`): the readers declare the versioned buffers (vertex stream, tree LOD, faces). Grass's frame and
+  visible tables were not checked: Grass is another lane's.
+- **Phase 4** writes these refs into the tables in Prepare from the declarations (`DeclaredBufferRef`) and drops the latches.
+
 ## Census results (autoload save, native Vulkan, RX 6600)
 
 **Immediate operations, world, about 283 a frame:**

@@ -26,6 +26,11 @@ namespace org::services
 	struct PublishedBufferVersion;
 }
 
+namespace org
+{
+	class RenderPassBuilder;
+}
+
 namespace DCLF::Draws
 {
 	/** @brief The payload's buffers: one version chain each (PayloadPools, its own backing pool). */
@@ -143,8 +148,17 @@ namespace DCLF::Draws
 		std::shared_ptr<const ScenePayload> Finish(const PayloadSource& a_source);
 		/** @brief Render thread, at the frame's adoption: the payload the frames read (null: none, the parts left empty). */
 		void Install(std::shared_ptr<const ScenePayload> a_payload);
-		/** @brief Render thread: the frame's payload, from the installed one's versions; false without one. */
+		/**
+		 * @brief Render thread: the frame's payload, from the installed one's versions; false without one. Each part's version becomes
+		 * the current version of its late-bound buffer (DeclareReads), so the refs and indices it hands out are of declared buffers.
+		 */
 		bool MakeFramePayload(PayloadVersions& a_out);
+		/**
+		 * @brief Graph build: the pass reads the frame's payload parts (their SRVs, addresses or refs, which latches, frame records and
+		 * the CPU sets carry): declares each part's late-bound buffer, whose version MakeFramePayload publishes. No graph build when it
+		 * changes.
+		 */
+		void DeclareReads(org::RenderPassBuilder& a_builder);
 		/**
 		 * @brief Render thread: the installed versions' backings are not reused before a_point (SubmittedRetirementPoint): at EndFrame,
 		 * and for the one an adoption replaces (a frame whose EndFrame did not come read it).

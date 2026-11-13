@@ -171,8 +171,10 @@ namespace DCLF::Draws
 				bindings.fadeRoots = a_builder.ShaderResource(*roots).View();
 			if (const auto& gates = Extensions::CullBindingBuffer(Api::CullBindingSlot::ObjectGates, *resources->scene))
 				bindings.objectGates = a_builder.ShaderResource(*gates).View();
-			// BuildDrawsCS (ShadowViews) reads the frame's placements and the fade seeds pool through each view's latch.
+			// BuildDrawsCS (ShadowViews) reads the frame's placements and the fade seeds pool through each view's latch, and the payload's
+			// scene list, geometry table and shadow rows.
 			FrameValues::Get().DeclareReads(a_builder, FrameValues::kReadPlacements | FrameValues::kReadPools);
+			Draws::DeclarePayloadReads(a_builder);
 			return bindings;
 		}
 
@@ -313,8 +315,10 @@ namespace DCLF::Draws
 			if (resources->scene->vertexStream)
 				a_builder.ShaderResource(*resources->scene->vertexStream, noViews);
 			bindings.pool = a_builder.IndexBuffer(*resources->pool->indices);
-			// The draws read the frame's placements, palettes, shading and fade seeds through the shadow frame record (t117, t121-t123).
+			// The draws read the frame's placements, palettes, shading and fade seeds through the shadow frame record (t117, t121-t123), and
+			// the payload's shadow rows.
 			FrameValues::Get().DeclareReads(a_builder);
+			Draws::DeclarePayloadReads(a_builder);
 			return bindings;
 		}
 
@@ -376,7 +380,7 @@ namespace DCLF::Draws
 			// Per view: a plain indexed indirect draw per bucket over its range of the slot's draw arguments, counted by its count word.
 			// A plain draw cannot bind its own vertex buffer, so the vertex stage fetches through its first instance's caster row, laid out
 			// as a DrawSequence (Utility.hlsl, DCLF_PULLED).
-			const RenderGraph::BufferRef casterRowsRef = DCLF::Draws::RecordingBufferRef(a_recording.Resolve(a_bindings.casterRows).GetHandle());
+			const RenderGraph::BufferRef casterRowsRef = DCLF::Draws::RecordingBufferRef(a_recording, a_bindings.casterRows);
 			auto split = [](std::uint32_t* a_words, std::uint64_t a_value) {
 				a_words[0] = static_cast<std::uint32_t>(a_value);
 				a_words[1] = static_cast<std::uint32_t>(a_value >> 32);

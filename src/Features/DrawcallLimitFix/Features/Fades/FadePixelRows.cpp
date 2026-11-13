@@ -18,6 +18,7 @@
 #include "Features/DrawcallLimitFix/Core/Gpu/Pipelines/DrawPipelines.h"
 #include "Features/DrawcallLimitFix/Core/Render/Passes/DrawHelpers.h"
 #include "Features/DrawcallLimitFix/Core/Render/Revision/Shapes.h"
+#include "RenderGraph/BufferRefs.h"
 #include "RenderGraph/ComputeProgram.h"
 #include "RenderGraph/RenderGraphRuntime.h"
 
@@ -51,7 +52,9 @@ namespace DCLF::Draws
 	}
 
 	struct PixelRowsBindings
-	{};
+	{
+		RenderGraph::DeclaredRefs rows;  // the pixel rows pool it writes, with the ref its latch's frame rows carry
+	};
 
 	struct PixelRowsPrepared
 	{
@@ -65,16 +68,19 @@ namespace DCLF::Draws
 
 	/**
 	 * @brief The frame's object rows (PixelRowsCS.hlsl), first in the depth segment after the latched copies: every row of the latch's
-	 * backing written before any of the frame's draws reads it. The backing is read through a frame binding no pass declares, so the
-	 * pass orders itself as the texture transforms' does: full memory barriers before (the earlier frames' draws reading a backing the
-	 * pool hands this frame again) and after (this frame's draws), on the graphics queue the draws run on; it reads the frame constants
+	 * backing written before any of the frame's draws reads it. It declares the pool written (FrameValues::DeclarePoolWrite) and the
+	 * draws declare it read; it still orders itself as the texture transforms' does, for guest mode's epochs: full memory barriers
+	 * before (the earlier frames' draws reading a backing the pool hands this frame again) and after (this frame's draws), on the
+	 * graphics queue the draws run on; it reads the frame constants
 	 * (after the latched copies) and declares the sequences as written (no view), which keeps it before the depth build and its draws.
 	 */
 	class PixelRowsPass final : public org::TypedRenderGraphPass<PixelRowsPass, PixelRowsPrepared, PixelRowsBindings>
 	{
 	public:
-		PixelRowsPass(std::shared_ptr<Resources> a_resources, std::shared_ptr<const ComputeProgram> a_program, RenderGraphRuntime::Segment a_segment) :
-			resources(std::move(a_resources)), program(std::move(a_program)), segment(a_segment),
+		// a_pool: the pixel rows' frame value pool, which the latch's frame rows name (PixelFrameRows).
+		PixelRowsPass(std::shared_ptr<Resources> a_resources, std::shared_ptr<const ComputeProgram> a_program, RenderGraphRuntime::Segment a_segment,
+			Api::FrameValuePoolId a_pool) :
+			resources(std::move(a_resources)), program(std::move(a_program)), segment(a_segment), pool(a_pool),
 			outerBarriers(!CurrentGraphConditions().cpuPipeline) {}
 
 		PixelRowsBindings Declare(org::PassBuilder& a_builder)
@@ -85,19 +91,22 @@ namespace DCLF::Draws
 			(void)a_builder.ShaderResource(resources->frameConstants, noReads);
 			(void)a_builder.UnorderedAccess(*resources->sequences, noViews);
 			// The frame record's placements (t123), shading rows (t121) and pools: the fade seeds (t117), the CPU fade states (t120 in a
-			// CPU-pipeline frame) and the pixel rows it writes.
-			FrameValues::Get().DeclareReads(a_builder, FrameValues::kReadPlacements | FrameValues::kReadShading | FrameValues::kReadPools);
-			return {};
+			// CPU-pipeline frame) read, and the pixel rows it writes through the latch's frame rows (a buffer view ref).
+			PixelRowsBindings bindings;
+			FrameValues::Get().DeclarePoolWrite(a_builder, pool, FrameValues::kReadPlacements | FrameValues::kReadShading | FrameValues::kReadPools, bindings.rows);
+			return bindings;
 		}
 
 		// The shape (and whether it builds draws) is the revision's (the ticket's host data).
 		void Revision(std::vector<std::uint64_t>& a_out) const { a_out.push_back(resources->frameConstantsAddress); }
 
-		PixelRowsPrepared Prepare(const PixelRowsBindings&, [[maybe_unused]] const org::PassPrepareContext& a_preparation) const
+		PixelRowsPrepared Prepare(const PixelRowsBindings& a_bindings, [[maybe_unused]] const org::PassPrepareContext& a_preparation) const
 		{
 			const auto frame = CurrentFrame(a_preparation, segment);
 			if (!program || !frame || !frame->latch || !BuildsDraws(a_preparation, *resources, segment))
 				return {};
+			// The commit latched the pool's ref (PixelFrameRows). Phase 4 writes the frame rows here from the declaration instead.
+			RenderGraph::CheckDeclaredRefs(a_bindings.rows, a_preparation, "cs.dclf.z.pixel-rows");
 			return { program, frame->latch, resources->frameConstantsRef, outerBarriers };
 		}
 
@@ -135,6 +144,7 @@ namespace DCLF::Draws
 		std::shared_ptr<Resources> resources;
 		std::shared_ptr<const ComputeProgram> program;
 		RenderGraphRuntime::Segment segment;
+		Api::FrameValuePoolId pool;
 		bool outerBarriers = true;  // the graph's conditions at its build
 	};
 }
@@ -183,7 +193,7 @@ namespace DCLF::Features::Fades
 
 		std::shared_ptr<org::RenderPass> MakePixelRows(const Api::PassContext& a_context)
 		{
-			return std::make_shared<Draws::PixelRowsPass>(a_context.Main(), a_context.State<ComputeProgram>(), a_context.segment);
+			return std::make_shared<Draws::PixelRowsPass>(a_context.Main(), a_context.State<ComputeProgram>(), a_context.segment, pixelRowsPool);
 		}
 	}
 

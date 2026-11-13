@@ -9,11 +9,15 @@
 #	include "RenderGraph/RenderGraphRuntime.h"
 
 #	include <OpenRenderGraph/GraphHost.h>
+#	include <Render/PassBuilders.h>
+#	include <Render/PreparedPass.h>
 #	include <Resources/Buffers/Buffer.h>
+#	include <Resources/Buffers/VersionedBuffer.h>
 
 #	include <chrono>
 #	include <filesystem>
 #	include <format>
+#	include <span>
 #	include <string>
 
 namespace RenderGraph
@@ -122,6 +126,122 @@ namespace RenderGraph
 					a_ref.viewSlot, a_ref.byteOffset, check.pair, check.descriptorAddress, check.descriptorRange, a_address, a_bytes, Caller(a_where), problems);
 		}
 		Summarize(counts);
+	}
+
+	struct DeclaredRefs::Entry
+	{
+		std::string what;
+		org::ResourceBindingToken binding;
+		std::shared_ptr<const RefLatch> latch;
+		std::shared_ptr<org::VersionedBuffer> late;  // a late-bound buffer: checked against its current version
+		std::unique_ptr<std::atomic<bool>> reported = std::make_unique<std::atomic<bool>>(false);
+	};
+
+	namespace
+	{
+		template <class T>
+		org::ResourceBindingToken Declare(org::RenderPassBuilder& a_builder, T& a_buffer, RefAccess a_access, std::string_view a_what,
+			std::shared_ptr<const RefLatch> a_latch, DeclaredRefs& a_out, std::shared_ptr<org::VersionedBuffer> a_late = nullptr)
+		{
+			const auto binding = a_access == RefAccess::Write ? a_builder.UnorderedAccess(a_buffer, std::span<const org::UavView>{}).Resource() :
+			                                                    a_builder.ShaderResource(a_buffer, std::span<const org::SrvView>{}).Resource();
+			if (a_latch) {
+				if (!a_out.entries)
+					a_out.entries = std::make_shared<std::vector<DeclaredRefs::Entry>>();
+				a_out.entries->push_back({ .what = std::string(a_what), .binding = binding, .latch = std::move(a_latch), .late = std::move(a_late) });
+			}
+			return binding;
+		}
+	}
+
+	org::ResourceBindingToken DeclareRef(org::RenderPassBuilder& a_builder, const std::shared_ptr<org::Buffer>& a_buffer, RefAccess a_access, std::string_view a_what,
+		std::shared_ptr<const RefLatch> a_latch, DeclaredRefs& a_out)
+	{
+		return Declare(a_builder, a_buffer, a_access, a_what, std::move(a_latch), a_out);
+	}
+
+	org::ResourceBindingToken DeclareRef(org::RenderPassBuilder& a_builder, org::VersionedBuffer& a_buffer, RefAccess a_access, std::string_view a_what,
+		std::shared_ptr<const RefLatch> a_latch, DeclaredRefs& a_out)
+	{
+		return Declare(a_builder, a_buffer, a_access, a_what, std::move(a_latch), a_out);
+	}
+
+	org::ResourceBindingToken DeclareLateRef(org::RenderPassBuilder& a_builder, const std::shared_ptr<org::VersionedBuffer>& a_buffer, RefAccess a_access,
+		std::string_view a_what, std::shared_ptr<const RefLatch> a_latch, DeclaredRefs& a_out)
+	{
+		return Declare(a_builder, *a_buffer, a_access, a_what, std::move(a_latch), a_out, a_buffer);
+	}
+
+	LateRefBuffer::LateRefBuffer(std::string_view a_name) :
+		name(a_name)
+	{
+		auto standIn = org::Buffer::CreateUnmaterializedStructuredBuffer(1, 4, false);
+		standIn->SetName(std::format("{}.stand-in", a_name));
+		standIn->Materialize();
+		buffer = org::VersionedBuffer::CreateLateBound(std::move(standIn));
+	}
+
+	BufferRef LateRefBuffer::Publish(const std::shared_ptr<org::Buffer>& a_backing, std::shared_ptr<const void> a_owner, BufferRef a_used)
+	{
+		auto* host = RenderGraphRuntime::Get().Host();
+		if (!a_backing || !host) {
+			latch->Set({});
+			return {};
+		}
+		// The same backing again (a frame reading the version the last one did) keeps its version.
+		if (buffer->Get() != a_backing)
+			buffer->PublishLate(a_backing, std::move(a_owner));
+		const BufferRef ref = MakeBufferRef(host->Device(), a_backing->GetAPIResource().GetHandle(), 0, std::source_location::current());
+		latch->Set(a_used ? a_used : ref);
+		return ref;
+	}
+
+	void LateRefBuffer::Declare(org::RenderPassBuilder& a_builder, RefAccess a_access, DeclaredRefs& a_out) const
+	{
+		DeclareLateRef(a_builder, buffer, a_access, name, latch, a_out);
+	}
+
+	BufferRef DeclaredBufferRef(const org::FramePreparationContext& a_preparation, const org::ResourceBindingToken& a_binding, std::uint64_t a_offset)
+	{
+		// The preparation's bindings hold the version a versioned buffer binds this frame, at the slot its declaration captured.
+		const auto resource = a_preparation.ResolveCapturedResource(a_preparation.CaptureResource(a_binding));
+		rhi::Device device = a_preparation.device;
+		if (!device)
+			if (auto* host = RenderGraphRuntime::Get().Host())
+				device = host->Device();
+		return MakeBufferRef(device, resource.GetHandle(), a_offset, std::source_location::current());
+	}
+
+	void CheckDeclaredRefs(const DeclaredRefs& a_refs, const org::FramePreparationContext& a_preparation, std::string_view a_site)
+	{
+		if (!a_refs.entries)
+			return;
+		for (const auto& entry : *a_refs.entries) {
+			const BufferRef latched = entry.latch->Get();
+			if (!latched || entry.reported->load(std::memory_order_relaxed))
+				continue;
+			BufferRef declared{};
+			try {
+				if (entry.late) {
+					// No version published yet: nothing the latch could carry.
+					const auto current = entry.late->Get();
+					auto* host = RenderGraphRuntime::Get().Host();
+					if (!current || !host)
+						continue;
+					declared = MakeBufferRef(host->Device(), current->GetAPIResource().GetHandle(), 0, std::source_location::current());
+				} else {
+					declared = DeclaredBufferRef(a_preparation, entry.binding);
+				}
+			} catch (const std::exception& e) {
+				if (!entry.reported->exchange(true, std::memory_order_relaxed))
+					logger::warn("[ORG] declared view mismatch: {} reads '{}' through buffer view ref {{slot {}}}, and its declaration does not resolve: {}", a_site,
+						entry.what, latched.viewSlot, e.what());
+				continue;
+			}
+			if (declared.viewSlot != latched.viewSlot && !entry.reported->exchange(true, std::memory_order_relaxed))
+				logger::warn("[ORG] declared view mismatch: {} reads '{}' through buffer view ref {{slot {}}}, the declared buffer's bound backing is slot {}",
+					a_site, entry.what, latched.viewSlot, declared.viewSlot);
+		}
 	}
 
 	void CheckBufferRef(BufferRef a_ref, std::uint64_t a_address, std::uint64_t a_bytes, std::string_view a_what, std::source_location a_where)

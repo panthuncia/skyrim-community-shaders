@@ -206,6 +206,8 @@ namespace RenderGraph::Engine::Buffers
 		direct.size = buffer->GetBufferSize();
 		if (auto* host = RenderGraphRuntime::Get().Host()) {
 			direct.address = host->Device().GetBufferDeviceAddress({ api.GetHandle(), 0 });
+			// Still a raw ref: the dynamic ring's chunks are not graph resources, and a frame reads several of them. Phase 2 of the
+			// native frame graph registers them (docs/development/org-native-frame-graph.md); static geometry stays exempt.
 			direct.ref = BufferRefOf(host->Device(), api.GetHandle());
 		}
 		return direct;

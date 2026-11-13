@@ -9,12 +9,19 @@
 #include <rhi.h>
 
 #include <atomic>
+#include <memory>
 #include <source_location>
+#include <string>
 #include <string_view>
+#include <vector>
 
 namespace org
 {
 	class Buffer;
+	class VersionedBuffer;
+	class RenderPassBuilder;
+	struct FramePreparationContext;
+	struct ResourceBindingToken;
 }
 
 namespace RenderGraph
@@ -65,4 +72,99 @@ namespace RenderGraph
 	/** @brief CheckBufferRef on the graph host's device; nothing without a host or with the checks off. */
 	void CheckBufferRef(BufferRef a_ref, std::uint64_t a_address, std::uint64_t a_bytes, std::string_view a_what,
 		std::source_location a_where = std::source_location::current());
+
+	/**
+	 * @brief The ref a site last wrote into a latch or a table for a buffer, at commit (render thread). A declaring pass holds the same
+	 * latch and compares it with its declaration in Prepare (CheckDeclaredRefs). Set it to the buffer's ref at byte 0: the check compares
+	 * view slots, since sites add their own offsets. Any thread.
+	 */
+	class RefLatch
+	{
+	public:
+		void Set(BufferRef a_ref) noexcept { bits.store(a_ref.Bits(), std::memory_order_relaxed); }
+		BufferRef Get() const noexcept
+		{
+			const auto value = bits.load(std::memory_order_relaxed);
+			return { static_cast<std::uint32_t>(value), static_cast<std::uint32_t>(value >> 32) };
+		}
+
+	private:
+		std::atomic<std::uint64_t> bits{ 0 };
+	};
+
+	/**
+	 * @brief The buffers a pass reads or writes through buffer view refs that a site latched at commit, before the graph prepares. Each
+	 * entry keeps the declaration's binding and the site's RefLatch; CheckDeclaredRefs compares the two in the pass's Prepare. This is the
+	 * interim form, like DeclaredReads for texture indices: Phase 4 of the native frame graph writes these refs in Prepare from the
+	 * declaration (DeclaredBufferRef) and drops the latch. Cheap to copy.
+	 */
+	struct DeclaredRefs
+	{
+		struct Entry;
+		std::shared_ptr<std::vector<Entry>> entries;
+	};
+
+	/** @brief How a pass uses a buffer through its ref: Read declares a shader resource, Write an unordered access (no views either way). */
+	enum class RefAccess
+	{
+		Read,
+		Write
+	};
+
+	/**
+	 * @brief Graph build: declares a_buffer for a_access without views (a buffer view ref is BasicRHI's own raw pair, not an ORG view),
+	 * and adds it to a_out with a_latch when one is given. a_what names the buffer in the mismatch log.
+	 * @return The declaration's binding, for DeclaredBufferRef.
+	 */
+	org::ResourceBindingToken DeclareRef(org::RenderPassBuilder& a_builder, const std::shared_ptr<org::Buffer>& a_buffer, RefAccess a_access, std::string_view a_what,
+		std::shared_ptr<const RefLatch> a_latch, DeclaredRefs& a_out);
+	/** @brief DeclareRef for a versioned buffer: the check uses the version bound to the preparation. Not for a late-bound one. */
+	org::ResourceBindingToken DeclareRef(org::RenderPassBuilder& a_builder, org::VersionedBuffer& a_buffer, RefAccess a_access, std::string_view a_what,
+		std::shared_ptr<const RefLatch> a_latch, DeclaredRefs& a_out);
+	/**
+	 * @brief DeclareRef for a late-bound buffer (org::VersionedBuffer::CreateLateBound). Its declaration always resolves to its stand-in,
+	 * and its readers read the version the host published (PublishLate), so the check uses that current version at Prepare.
+	 */
+	org::ResourceBindingToken DeclareLateRef(org::RenderPassBuilder& a_builder, const std::shared_ptr<org::VersionedBuffer>& a_buffer, RefAccess a_access,
+		std::string_view a_what, std::shared_ptr<const RefLatch> a_latch, DeclaredRefs& a_out);
+
+	/**
+	 * @brief A buffer outside the graph that a host replaces per frame or per snapshot (a pooled version built on the upload queue), made
+	 * declarable: a late-bound org::VersionedBuffer whose version the host publishes when the frame adopts it, and the ref it latched
+	 * then. Readers declare it (Declare) and check the ref in Prepare (CheckDeclaredRefs). Publish costs no graph build.
+	 */
+	class LateRefBuffer
+	{
+	public:
+		/** @brief Any thread: the late-bound buffer, its stand-in named a_name. */
+		explicit LateRefBuffer(std::string_view a_name);
+		/**
+		 * @brief The frame's adoption (render thread): a_backing becomes the current version, kept alive with a_owner. The latch takes
+		 * a_used, the ref the readers' tables carry (made earlier, from the backing they were built for), or a_backing's own ref when
+		 * a_used is null. The current backing again keeps its version. A null backing publishes nothing and clears the latch.
+		 * @return a_backing's ref at byte 0 (null without a backing or a graph host). Not a raw ref: readers declare the buffer.
+		 */
+		BufferRef Publish(const std::shared_ptr<org::Buffer>& a_backing, std::shared_ptr<const void> a_owner, BufferRef a_used = {});
+		/** @brief Graph build: declares the buffer for a_access (no views) with the latch, into a_out. */
+		void Declare(org::RenderPassBuilder& a_builder, RefAccess a_access, DeclaredRefs& a_out) const;
+
+	private:
+		std::string name;
+		std::shared_ptr<org::VersionedBuffer> buffer;
+		std::shared_ptr<RefLatch> latch = std::make_shared<RefLatch>();
+	};
+
+	/**
+	 * @brief A pass's Prepare (the host's thread): the ref of the declared buffer's backing bound to this preparation (a versioned
+	 * buffer's version for this frame), at a_offset; null when it cannot be resolved. Not a raw ref: the pass declared the buffer. A
+	 * late-bound buffer's declaration resolves to its stand-in: its readers take the published version's ref instead.
+	 */
+	BufferRef DeclaredBufferRef(const org::FramePreparationContext& a_preparation, const org::ResourceBindingToken& a_binding, std::uint64_t a_offset = 0);
+
+	/**
+	 * @brief A pass's Prepare (the host's thread): logs "[ORG] declared view mismatch" once per entry whose latched ref (when the site set
+	 * one) is not a ref of the declared buffer's backing bound to this preparation (a late-bound buffer's current version). a_site names
+	 * the pass.
+	 */
+	void CheckDeclaredRefs(const DeclaredRefs& a_refs, const org::FramePreparationContext& a_preparation, std::string_view a_site);
 }

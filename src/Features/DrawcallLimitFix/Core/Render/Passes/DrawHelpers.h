@@ -36,8 +36,12 @@ namespace DCLF::Draws
 	 * lost, or turned off): a worker may still be recording then, and what it records is never submitted.
 	 */
 	std::uint64_t RecordingBufferAddress(rhi::ResourceHandle a_buffer);
-	/** @brief A recording's buffer's view ref (the graph host's device; null without one): what a pulled stage's push words name. */
-	RenderGraph::BufferRef RecordingBufferRef(rhi::ResourceHandle a_buffer);
+	/**
+	 * @brief A declared buffer's view ref at recording (the graph host's device; null without one): what a pulled stage's push words
+	 * name. a_binding is the pass's declaration of the buffer, resolved to this frame's backing, so the ref is not a raw one: the pass
+	 * declares the buffer for the shader read too.
+	 */
+	RenderGraph::BufferRef RecordingBufferRef(const org::RecordingContext& a_recording, const org::ResourceBindingToken& a_binding);
 
 	struct ShadowResources;
 
@@ -85,6 +89,13 @@ namespace DCLF::Draws
 	 * @return Those published reads, for Extensions::CheckDeclaredReads in the pass's Prepare.
 	 */
 	Extensions::DeclaredReads DeclareFrameBuffers(org::PassBuilder& a_builder, const Resources& a_resources, bool a_lights = true);
+
+	/**
+	 * @brief Graph build: the pass reads the installed payload's parts (the scene list, geometry table, objects, extras and rows) through
+	 * the indices, addresses or refs its latch, frame record or view batch set carries. Declares each part's late-bound buffer
+	 * (PayloadPools::DeclareReads), whose version the frame's payload publishes. DeclareFrameBuffers does this too.
+	 */
+	void DeclarePayloadReads(org::PassBuilder& a_builder);
 
 	/**
 	 * @brief One device-generated call of a draw pass: its signature (a state class's: each call draws one class's sub-range of a range),

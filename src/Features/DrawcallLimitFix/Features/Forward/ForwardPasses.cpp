@@ -114,7 +114,7 @@ namespace DCLF::Draws
 				commands.BindLayout(frame.indirect.zLayout);
 				commands.PushConstants(rhi::ShaderStage::AllGraphics, 0, kFramePushBinding, 0, kFramePushWords, a_prepared.framePushWords.data());
 				commands.SetIndexBuffer(rhi::IndexBufferView{ a_recording.Resolve(a_bindings.pool).GetHandle(), 0, 0, rhi::Format::R16_UInt });
-				const RenderGraph::BufferRef sequencesRef = DCLF::Draws::RecordingBufferRef(sequences);
+				const RenderGraph::BufferRef sequencesRef = DCLF::Draws::RecordingBufferRef(a_recording, a_bindings.sequences);
 				for (std::size_t b = 0; b < plan.forward.size(); ++b) {
 					const auto& bucket = plan.forward[b];
 					RecordBucketDraw(commands, frame.indirect.zDrawSignature, sequences, sequencesRef, std::uint64_t(bucket.first) + bucket.capacity,
@@ -258,7 +258,7 @@ namespace DCLF::Draws
 			// Call words: the range's first sequence, and the frame's LodFadeFrame (after FrameLighting in the lighting slot) in the
 			// material rows' words, which the refraction stage reads instead.
 			std::uint32_t words[kDrawPushWords]{};
-			const RenderGraph::BufferRef sequence = DCLF::Draws::RecordingBufferRef(sequences) + first;
+			const RenderGraph::BufferRef sequence = DCLF::Draws::RecordingBufferRef(a_recording, a_bindings.sequences) + first;
 			words[kShadowDrawPushSequences] = sequence.viewSlot;
 			words[kShadowDrawPushSequences + 1] = sequence.byteOffset;
 			split(words + kShadowDrawPushMaterialRows, LodFadeFrameAddress(constants));

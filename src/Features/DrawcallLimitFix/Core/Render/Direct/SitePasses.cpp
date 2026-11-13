@@ -14,6 +14,8 @@
 #include "Features/DrawcallLimitFix/Core/Render/Passes/DrawHelpers.h"
 #include "Features/DrawcallLimitFix/Core/Render/Resources/IndexPool.h"
 #include "Features/DrawcallLimitFix/Core/Render/Shadow/ShadowFrame.h"
+#include "Features/DrawcallLimitFix/Core/Render/Snapshot/ViewBatches.h"
+#include "RenderGraph/BufferRefs.h"
 
 #include <RenderPasses/Base/TypedRenderGraphPass.h>
 
@@ -29,6 +31,7 @@ namespace DCLF::Direct
 		struct SiteBindings
 		{
 			Site site = Site::Depth;
+			RenderGraph::DeclaredRefs sequences;  // the view batch sequences, which the recorder pushes refs into
 		};
 
 		/** @brief A draw site's late pass: its targets declared, its recording the executing run's draws. */
@@ -53,7 +56,19 @@ namespace DCLF::Direct
 					reads(a_builder);
 				// The site's draws read the frame's placements, palettes, shading and fade seeds through the frame record (t117, t121-t123).
 				FrameValues::Get().DeclareReads(a_builder);
-				return { site };
+				// And the view batch set's sequences, through the ref every draw's push words carry (ViewBatchSet::sequencesRef).
+				SiteBindings bindings{ site };
+				Draws::DeclareViewBatchReads(a_builder, bindings.sequences);
+				// The set's sequences' rows are offsets from the payload's row parts (ViewBatchSet::pipelineRowsRef...).
+				Draws::DeclarePayloadReads(a_builder);
+				return bindings;
+			}
+
+			org::EmptyPassFrameData Prepare(const SiteBindings& a_bindings, const org::PassPrepareContext& a_preparation) const
+			{
+				// The set's ref is latched when the frame takes it (PublishViewBatches). Phase 4 records with the declaration's.
+				RenderGraph::CheckDeclaredRefs(a_bindings.sequences, a_preparation, "a CPU draw site");
+				return {};
 			}
 
 			void Revision(std::vector<std::uint64_t>& a_out) const
@@ -125,8 +140,20 @@ namespace DCLF::Direct
 		std::shared_ptr<org::RenderPass> DepthSite(const Api::PassContext& a_context)
 		{
 			const auto& main = *a_context.Main();
+			std::vector<std::shared_ptr<Draws::ViewResources>> hosted(a_context.hosted.begin(), a_context.hosted.end());
 			return MakeSitePass(Site::Depth, {}, { main.nativeDepth },
-				[resources = a_context.Main()](org::PassBuilder& a_builder) { DeclareFrameReads(a_builder, *resources, true); });
+				[resources = a_context.Main(), hosted = std::move(hosted)](org::PassBuilder& a_builder) {
+					DeclareFrameReads(a_builder, *resources, true);
+					// The hosted views' draws (RecordHostedDepthViews) read each view's blocks, and its own frame constants when it has
+					// them, through the view's push words. Their latched copies are this epoch's, so the graph has them registered.
+					const std::span<const org::SrvView> noViews{};
+					for (const auto& view : hosted) {
+						if (view->frameConstants)
+							a_builder.ShaderResource(view->frameConstants, noViews);
+						if (view->blocks)
+							a_builder.ShaderResource(view->blocks, noViews);
+					}
+				});
 		}
 
 		// main.colour: main colour, the decals, the families' colour, the second pass.
@@ -156,11 +183,29 @@ namespace DCLF::Direct
 			return MakeSitePass(Site::Forward, std::move(colours), { main.nativeDepth }, std::move(reads));
 		}
 
+		/**
+		 * @brief What the shadow site's draws read, declared in every graph: the shadow constants (the views' frame record) and the view
+		 * blocks, by the addresses and refs in each view's push words (ShadowFrameView::push), and the index pool's indices (the adopted
+		 * version, bound as the index buffer), as the GPU-driven shadow views pass declares them. An external
+		 * epoch's full barriers cover them too; the declarations order them, and Phase 4's in-pass recording needs them.
+		 */
+		void DeclareShadowReads(org::PassBuilder& a_builder, const Draws::ShadowResources& a_shadow)
+		{
+			const std::span<const org::SrvView> noViews{};
+			if (a_shadow.constants)
+				a_builder.ShaderResource(a_shadow.constants, noViews);
+			if (a_shadow.viewBlocks.buffer)
+				a_builder.ShaderResource(*a_shadow.viewBlocks.buffer, noViews);
+			if (a_shadow.pool && a_shadow.pool->indices)
+				(void)a_builder.IndexBuffer(*a_shadow.pool->indices);
+		}
+
 		// shadow: every shadow view and the occlusion maps, into the imported maps.
 		std::shared_ptr<org::RenderPass> ShadowSite(const Api::PassContext& a_context)
 		{
 			const auto& shadow = *a_context.Shadow();
-			return MakeSitePass(Site::Shadow, {}, { shadow.depth.begin(), shadow.depth.end() });
+			return MakeSitePass(Site::Shadow, {}, { shadow.depth.begin(), shadow.depth.end() },
+				[resources = a_context.Shadow()](org::PassBuilder& a_builder) { DeclareShadowReads(a_builder, *resources); });
 		}
 
 		// fp.colour: first person's colour and forward part, into the main targets against its depth (kPOST_ZPREPASS_COPY).

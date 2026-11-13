@@ -15,6 +15,16 @@ namespace org::runtime
 	class IUploadService;
 }
 
+namespace org
+{
+	class RenderPassBuilder;
+}
+
+namespace RenderGraph
+{
+	struct DeclaredRefs;
+}
+
 namespace DCLF
 {
 	struct SceneTables;
@@ -116,4 +126,17 @@ namespace DCLF::Draws
 	 * payload's are bound (PayloadPools::BindInstalled), for the set the frame drew with.
 	 */
 	void BindViewBatches(const Direct::ViewBatchSet& a_set, std::uint64_t a_point);
+
+	/**
+	 * @brief Render thread, when a frame's slot takes a_set (null: none): its sequences' version becomes the current version of the
+	 * late-bound buffer the CPU sites declare (DeclareViewBatchReads), and the ref their push words carry (sequencesRef) is latched for
+	 * their Prepare's check. No graph build.
+	 */
+	void PublishViewBatches(const Direct::ViewBatchSet* a_set);
+
+	/**
+	 * @brief Graph build: the pass reads the view batch sequences through their buffer view ref (the CPU sites' recorder); declares them
+	 * into a_out, for RenderGraph::CheckDeclaredRefs in its Prepare.
+	 */
+	void DeclareViewBatchReads(org::RenderPassBuilder& a_builder, RenderGraph::DeclaredRefs& a_out);
 }
