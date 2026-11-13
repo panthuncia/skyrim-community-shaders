@@ -244,7 +244,8 @@ namespace RenderGraph::UndeclaredAccess
 				Engine::Native::ResourceFacts facts;
 				if (!Engine::Native::DescribeForCensus(a_object, facts))
 					return Outcome::Unknown;
-				if (facts.usage == D3D11_USAGE_IMMUTABLE && ShapeExempt(facts.bindFlags, facts.dimension))
+				// D3D11 refuses every write to an IMMUTABLE resource, whatever its binding (a structured buffer too).
+				if (facts.usage == D3D11_USAGE_IMMUTABLE)
 					return Outcome::Exempt;
 				if (facts.initialData && !facts.written && ShapeExempt(facts.bindFlags, facts.dimension))
 					return Outcome::Exempt;
@@ -257,8 +258,9 @@ namespace RenderGraph::UndeclaredAccess
 			} else {
 				if (!a_resource || !DescriptionOf(a_resource, bind, usage, dimension))
 					return Outcome::Unknown;
-				// Guest mode does not know the initial data: an SRV-only or VB/IB-only DEFAULT or IMMUTABLE resource is taken as immutable.
-				if ((usage == D3D11_USAGE_IMMUTABLE || usage == D3D11_USAGE_DEFAULT) && ShapeExempt(bind, dimension))
+				// Guest mode does not know the initial data: an SRV-only or VB/IB-only DEFAULT resource is taken as immutable. An IMMUTABLE
+				// one is, whatever its binding: D3D11 refuses every write to it.
+				if (usage == D3D11_USAGE_IMMUTABLE || (usage == D3D11_USAGE_DEFAULT && ShapeExempt(bind, dimension)))
 					return Outcome::Exempt;
 				a_out.key = reinterpret_cast<std::uintptr_t>(a_resource);
 				a_out.detail = fmt::format("bind {:#x}, usage {}, dimension {}", bind, usage, dimension);
