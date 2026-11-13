@@ -3522,6 +3522,8 @@ namespace RenderGraph::Engine::Native
 		const uint32_t depth = dimension == D3D11_RESOURCE_DIMENSION_TEXTURE3D ? request.depthOrArraySize : 1;
 		const uint32_t layers = dimension == D3D11_RESOURCE_DIMENSION_TEXTURE3D ? 1 : request.depthOrArraySize;
 		auto record = MakeWrapRecord(a_name);
+		// The censuses and the undeclared-access validator read the wrap's description, as they read a texture made here.
+		NoteRequest(*record, request);
 		static std::atomic<bool> loggedDescribe = false, loggedInitialize = false;
 		rhi::FormatSupport support{};
 		(void)g_device->Rhi().QueryFormatSupport(format, support);
@@ -3617,6 +3619,10 @@ namespace RenderGraph::Engine::Native
 		}
 		record->size = a_desc.ByteWidth;
 		record->bufferDesc = a_desc;
+		// The censuses' description. Its owner fills it through a mapping, which no census sees, so it counts as made without data.
+		record->bindFlags = a_desc.BindFlags;
+		record->d3dUsage = a_desc.Usage;
+		record->dimension = D3D11_RESOURCE_DIMENSION_BUFFER;
 		Tripwire::Options options;
 		options.name = record->name;
 		options.owner = record;
