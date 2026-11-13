@@ -159,6 +159,39 @@ namespace FrameAnchors
 
 		std::uint32_t EpochOfAnchor(Anchor a_anchor) { return RenderGraphRuntime::EpochOf(static_cast<Segment>(SegmentOf(a_anchor))); }
 
+		/** @brief D3D11 textures the imports let go of on any thread, released on the render thread (ServiceRetiredTextures). */
+		struct RetiredTextures
+		{
+			std::mutex mutex;
+			std::vector<winrt::com_ptr<ID3D11Texture2D>> textures;
+			std::atomic<bool> any{ false };
+		};
+
+		RetiredTextures& Retired()
+		{
+			// Never destroyed: entries let go of their textures during static destruction too.
+			static auto* retired = new RetiredTextures;
+			return *retired;
+		}
+
+		/**
+		 * @brief Render thread: the D3D11 textures let go of since the last call go once D3D11's last use is done. A loose slot's last
+		 * version may be dropped on any thread (a graph build, the host), and D3D11 releases belong on the render thread.
+		 */
+		void ServiceRetiredTextures()
+		{
+			auto& retired = Retired();
+			if (!retired.any.load(std::memory_order_acquire))
+				return;
+			auto textures = std::make_shared<std::vector<winrt::com_ptr<ID3D11Texture2D>>>();
+			{
+				const std::lock_guard lock(retired.mutex);
+				textures->swap(retired.textures);
+				retired.any.store(false, std::memory_order_release);
+			}
+			RenderGraphRuntime::Get().ReleaseAfterD3D11(std::move(textures));
+		}
+
 		/**
 		 * @brief An image's one graph resource: its slot. Two kinds:
 		 * - an id import (State::imports): the slot lasts as long as an id names it; a new D3D11 texture of the same shape class is
@@ -177,6 +210,21 @@ namespace FrameAnchors
 			org::TextureDescription views;  // the views the current version has: what a new importer's are compared with
 
 			std::shared_ptr<org::VersionedTexture> Slot() const { return slot ? slot : looseSlot.lock(); }
+
+			EngineImport() = default;
+			EngineImport(const EngineImport&) = default;
+			EngineImport& operator=(const EngineImport&) = default;
+
+			/** @brief The D3D11 texture goes to the render thread: this may be the last version's owner, dropped on any thread. */
+			~EngineImport()
+			{
+				if (!texture)
+					return;
+				auto& retired = Retired();
+				const std::lock_guard lock(retired.mutex);
+				retired.textures.push_back(std::move(texture));
+				retired.any.store(true, std::memory_order_release);
+			}
 		};
 
 		/** @brief One pass of the build: its client (which owns its desc) and the desc. */
@@ -1279,6 +1327,7 @@ namespace FrameAnchors
 		auto& runtime = RenderGraphRuntime::Get();
 		if (!runtime.IsActive())
 			return { RunStatus::Refused };
+		ServiceRetiredTextures();
 		// Before the clients are read: an anchor whose epoch failed drops its clients here (OnEpochFailed), not in the middle of a run.
 		runtime.PollEpochFailures();
 		if (!runtime.IsActive())
