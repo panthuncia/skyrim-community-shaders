@@ -362,3 +362,52 @@ thread.
   under 1 ms.
 - **A new graph's first prepare now includes alias placement and one validated build**, on the host thread. A ticket asked for
   right after an attach may wait for it; watch `WaitTicket`.
+
+## Phase 2 item 4 lane: native buffers (`org-native/p2-buffers`)
+
+**The dynamic ring** (`Engine/Buffers/DynamicRing.cpp`, `CS_ORG_ENGINE_BUFFERS=1`, on in native mode):
+- The ring is a late-bound `org::VersionedBuffer` ("Engine::DynamicRing", `detail::RingVersions`). Each chunk is published as its
+  version (`PublishLate`) when it becomes the current one. The readers' declarations resolve to a fixed stand-in, so a new chunk costs
+  no graph edit.
+- Readers declare it with `Engine::Buffers::DeclareRingRead`. The only reader is the menu scenes' pass: a particles draw pulls its
+  positions from stream 1 (`LatchDynamicGeometry`, `EffectSceneConstants::streamRef`). No other family takes dynamic draws, and DCLF's
+  scene geometry is TriShape buffers, never ring chunks.
+- There is no ref latch: a frame reads several chunks, so a pass's refs are not one version's.
+- The CPU writes the chunks in upload memory, so a read needs no barrier, and no upload goes into them, so the upload planner waits for
+  nothing.
+- **Lifetime.** In native mode a full chunk is parked until the frame it filled in ends (`RefFrame` moves at `SealPresented`). It then
+  goes to `ReleaseAfterD3D11`, which in native mode waits for the graph's submissions made until then to retire. Before, a chunk was
+  released with the submission count at the moment it filled. A draw latched from it earlier in the frame runs in an execution
+  submitted later, so the chunk could be reused under it. Guest mode is unchanged: it still uses the D3D11 query.
+
+**What the validator saw at `EngineBuffers.cpp:211`.** `Resolve` made every ref by handle (`BufferRefOf(device, handle)`), which the
+validator always reports, so it counted static TriShape buffers as well as ring chunks. Now:
+- a ring chunk's ref is `DeclaredRefOf` (its readers declare the ring);
+- a static buffer's ref is `BufferRefOf(org::Buffer)`, which the validator judges by the ORG buffer: noted immutable at creation, so
+  exempt;
+- DCLF's prefetch asks `Buffers::Owns`, which makes no ref.
+
+**Static vertex and index buffers** stay exempt. Their leases need no wait: there is no GPU copy. `MakeStatic` (engine buffers) and
+`NativeDevice::MakeBuffer` write the contents into host-visible memory before the D3D11 handle exists, so no lease can be taken
+before they are written, and the next queue submission makes the writes visible.
+
+**`Map` in native mode** (`NativeDevice` `ContextMap`):
+- A buffer the graph imported (`Native::DescribeResource`, which DCLF's leases, imports and copies go through) is marked
+  `graphShared`.
+- A Map other than NO_OVERWRITE, or `UpdateSubresource`'s CPU path, on such a buffer waits for the graph's work up to the last frame
+  boundary (`GraphHost::SealedPoint`). `DO_NOT_WAIT` returns `DXGI_ERROR_WAS_STILL_DRAWING`.
+- The current frame's executions are not waited for: a mid-frame wait names only sealed work. A buffer mapped once a frame before its
+  readers run is covered.
+- The DYNAMIC constant buffers (240 maps a frame) are never imported, so they stay free.
+- Textures need nothing: Map writes a DYNAMIC texture's upload side or a staging texture, which only the context's own copies read,
+  and those are waited for by their value as before.
+- Each wait is logged at first, then at powers of two: `[ORG native] CPU access waited X ms for graph readers of a buffer (...)`.
+
+**For the main session.**
+- Native census (`native-census`): the undeclared validator should list no site in the world window. `EngineBuffers.cpp` should not
+  appear; static buffers count as exempt.
+- Look for `[ORG native] CPU access waited` lines. A few in a load are expected. Many a frame in the world would cost frame time;
+  the line names the buffer's bind flags, usage and size.
+- The ring's chunk count (`[ORG] engine buffers: the dynamic ring has N chunks`) may rise a little in native mode, since full chunks
+  wait for the frame's end.
+- Guest quick shots: unchanged. The menu scenes' pass also declares the ring in guest mode (a stand-in read).
