@@ -7,6 +7,7 @@
 // Main/Resources.h first: volk must precede every Vulkan header of the translation unit.
 #include "Features/DrawcallLimitFix/Core/Render/Main/Resources.h"
 #include "Features/DrawcallLimitFix/Core/Extensions/PassContext.h"
+#include "Features/DrawcallLimitFix/Core/Gpu/FrameValues.h"
 #include "Features/DrawcallLimitFix/Core/Render/Direct/SiteFrame.h"
 #include "Features/DrawcallLimitFix/Core/Render/Epochs/GraphConditions.h"
 #include "Features/DrawcallLimitFix/Core/Render/Epochs/ViewEpoch.h"
@@ -50,6 +51,8 @@ namespace DCLF::Direct
 					(void)a_builder.DepthReadWrite(depth);
 				if (reads)
 					reads(a_builder);
+				// The site's draws read the frame's placements, palettes, shading and fade seeds through the frame record (t117, t121-t123).
+				FrameValues::Get().DeclareReads(a_builder);
 				return { site };
 			}
 

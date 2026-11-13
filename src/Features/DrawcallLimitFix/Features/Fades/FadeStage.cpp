@@ -3,6 +3,7 @@
 
 #include "Features/DrawcallLimitFix/Core/Extensions/CullInputs.h"
 #include "Features/DrawcallLimitFix/Core/Extensions/PassContext.h"
+#include "Features/DrawcallLimitFix/Core/Gpu/FrameValues.h"
 #include "Features/DrawcallLimitFix/Core/Render/Main/Resources.h"
 #include "Features/DrawcallLimitFix/Core/Render/Readback/Readbacks.h"  // MakeEventReadbackPass
 #include "Features/DrawcallLimitFix/Core/Render/Resources/Helpers.h"
@@ -74,6 +75,9 @@ namespace DCLF::Draws
 				bindings.events = a_builder.UnorderedAccess(*scene.fadeEvents).View();
 				bindings.reported = a_builder.UnorderedAccess(*scene.fadeReported).View();
 			}
+			// FadeStateCS reads the latch's placementsIndex (each root's fade node row) and fadeSeedsIndex (the fade seeds' pool), in
+			// both stages.
+			FrameValues::Get().DeclareReads(a_builder, FrameValues::kReadPlacements | FrameValues::kReadPools);
 			return bindings;
 		}
 

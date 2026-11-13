@@ -8,6 +8,7 @@
 #include "Features/DrawcallLimitFix/Features/Shadows/Engine/Engine.h"
 #include "Features/DrawcallLimitFix/Core/Extensions/CullInputs.h"
 #include "Features/DrawcallLimitFix/Core/Extensions/PassContext.h"
+#include "Features/DrawcallLimitFix/Core/Gpu/FrameValues.h"
 #include "Features/DrawcallLimitFix/Core/Gpu/Pipelines/DrawPipelines.h"
 #include "Features/DrawcallLimitFix/Core/Gpu/Pipelines/DrawPipelinesRhi.h"
 #include "Features/DrawcallLimitFix/Core/Render/Epochs/GraphConditions.h"
@@ -170,6 +171,8 @@ namespace DCLF::Draws
 				bindings.fadeRoots = a_builder.ShaderResource(*roots).View();
 			if (const auto& gates = Extensions::CullBindingBuffer(Api::CullBindingSlot::ObjectGates, *resources->scene))
 				bindings.objectGates = a_builder.ShaderResource(*gates).View();
+			// BuildDrawsCS (ShadowViews) reads the frame's placements and the fade seeds pool through each view's latch.
+			FrameValues::Get().DeclareReads(a_builder, FrameValues::kReadPlacements | FrameValues::kReadPools);
 			return bindings;
 		}
 
@@ -310,6 +313,8 @@ namespace DCLF::Draws
 			if (resources->scene->vertexStream)
 				a_builder.ShaderResource(*resources->scene->vertexStream, noViews);
 			bindings.pool = a_builder.IndexBuffer(*resources->pool->indices);
+			// The draws read the frame's placements, palettes, shading and fade seeds through the shadow frame record (t117, t121-t123).
+			FrameValues::Get().DeclareReads(a_builder);
 			return bindings;
 		}
 

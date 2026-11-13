@@ -3,6 +3,7 @@
 #include "Features/DrawcallLimitFix/Core/Render/Internal.h"
 #include "Features/DrawcallLimitFix/Core/Render/Passes/PassesInternal.h"
 #include "Features/DrawcallLimitFix/Core/Render/Epochs/GraphConditions.h"
+#include "Features/DrawcallLimitFix/Core/Gpu/FrameValues.h"
 
 #include <array>
 #include <cstddef>
@@ -120,10 +121,14 @@ namespace DCLF::Draws
 				// late-bound buffers, so the copies that fill them are ordered before this pass whatever queue it runs on.
 				Extensions::DeclareCullBindingPublications(a_builder, *resources->scene,
 					{ Api::CullBindingSlot::Programs, Api::CullBindingSlot::LightContexts, Api::CullBindingSlot::StrictGates });
+				// PreparePortalQueries reads each object's bound from the frame's placements, through the latch.
+				FrameValues::Get().DeclareReads(a_builder, FrameValues::kReadPlacements);
 				return bindings;
 			}
 			// The view latch's strict-light publications (LoadViewLatch: the context atlas and the gates' verdicts), through their late-bound buffers.
 			Extensions::DeclareCullBindingPublications(a_builder, *resources->scene, { Api::CullBindingSlot::LightContexts, Api::CullBindingSlot::StrictGates });
+			// BuildDrawsCS reads the frame's placements and the fade seeds pool (SeedState), through the latch.
+			FrameValues::Get().DeclareReads(a_builder, FrameValues::kReadPlacements | FrameValues::kReadPools);
 			if (const auto& results = Extensions::CullBindingBuffer(Api::CullBindingSlot::MemberResults, *resources->scene); results && segment == RenderGraphRuntime::Segment::ZPrepass && fixedPhase != 2)
 				bindings.memberResults = a_builder.ShaderResource(*results).View();
 

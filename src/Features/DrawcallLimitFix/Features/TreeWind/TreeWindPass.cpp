@@ -5,6 +5,7 @@
 #include "Features/DrawcallLimitFix/Core/Render/Revision/Shapes.h"
 #include "Features/DrawcallLimitFix/Features/TreeWind/TreeWindScene.h"
 #include "Features/DrawcallLimitFix/Core/Extensions/PassContext.h"
+#include "Features/DrawcallLimitFix/Core/Gpu/FrameValues.h"
 #include "Features/DrawcallLimitFix/Core/Render/Resources/Helpers.h"
 
 #include "RenderGraph/ComputeProgram.h"
@@ -52,6 +53,8 @@ namespace DCLF::Draws
 			bindings.clocks = a_builder.UnorderedAccess(*scene->treeClocks).View();
 			for (std::uint32_t h = 0; h < 2; ++h)
 				bindings.wind[h] = a_builder.UnorderedAccess(*scene->treeWindRows[h]).View();
+			// The pools: the tree seeds (the frame row's treeSeedsIndex).
+			FrameValues::Get().DeclareReads(a_builder, FrameValues::kReadPools);
 			return bindings;
 		}
 

@@ -7,6 +7,7 @@
 #include "Features/DrawcallLimitFix/Core/Extensions/SceneResources.h"
 #include "Features/DrawcallLimitFix/Core/Render/Epochs/GraphConditions.h"
 #include "Features/DrawcallLimitFix/Core/Extensions/PassContext.h"
+#include "Features/DrawcallLimitFix/Core/Gpu/FrameValues.h"
 #include "Features/RemoteControl/GpuCounters.h"
 #include "RenderGraph/DxvkImageImport.h"
 #include "RenderGraph/Engine/Targets/EngineTargets.h"
@@ -191,6 +192,9 @@ namespace DCLF::Draws
 					a_builder.ShaderResource(org::ResourceIdentifier(graphBuffers[b].resources[r].c_str()), noViews);
 		// The frame textures' published ids, so the graph orders these reads after the producers' writes.
 		Extensions::DeclareGraphTextures(a_builder, Extensions::ColourGraphTextureIds());
+		// Every caller draws with the frame record bound. Its shaders read the frame's placements, palettes and shading (t121-t123)
+		// and the fade seeds pool (t117).
+		FrameValues::Get().DeclareReads(a_builder);
 	}
 
 	void RecordPreprocessedDraws(org::PassRecordContext& a_recording, PreprocessStates& a_preprocess, const rhi::PassBeginInfo& a_begin, rhi::DescriptorHeapHandle a_resourceHeap,

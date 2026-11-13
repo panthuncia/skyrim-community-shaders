@@ -6,6 +6,7 @@
 #include "Features/DrawcallLimitFix/Core/Render/Main/Resources.h"
 #include "Features/DrawcallLimitFix/Features/TextureTransforms/TextureTransforms.h"
 #include "Features/DrawcallLimitFix/Core/Extensions/PassContext.h"
+#include "Features/DrawcallLimitFix/Core/Gpu/FrameValues.h"
 #include "Features/DrawcallLimitFix/Core/Render/Epochs/GraphConditions.h"
 #include "Features/DrawcallLimitFix/Core/Render/Revision/Shapes.h"
 #include "Features/DrawcallLimitFix/Diagnostics/RefTrace.h"
@@ -75,6 +76,8 @@ namespace DCLF::Draws
 			a_builder.PreferQueue(org::QueueKind::Graphics);
 			const std::span<const org::UavView> noViews{};
 			(void)a_builder.UnorderedAccess(*resources->sequences, noViews);
+			// The pools: the texture transforms' entries (the latch's stage word) and the frame's copy it writes (animatedRows).
+			FrameValues::Get().DeclareReads(a_builder, FrameValues::kReadPools);
 			return {};
 		}
 

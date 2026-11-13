@@ -6,6 +6,7 @@
 #include "Features/DrawcallLimitFix/Core/Render/Epochs/GraphConditions.h"
 #include "Features/DrawcallLimitFix/Core/Render/Epochs/ScheduleExecutor.h"
 #include "Features/DrawcallLimitFix/Core/Extensions/PassContext.h"
+#include "Features/DrawcallLimitFix/Core/Gpu/FrameValues.h"
 
 namespace DCLF
 {
@@ -58,6 +59,8 @@ namespace DCLF
 					bindings.poolFirsts = a_builder.ShaderResource(*main.scene->pool->firsts).View();
 					for (std::uint32_t f = 0; f < resources->traits->faces; ++f)
 						bindings.bucketCounts[f] = a_builder.UnorderedAccess(*resources->bucketCounts[f]).View();
+					// BuildDrawsCS reads the frame's placements and the fade seeds pool through each face's latch.
+					FrameValues::Get().DeclareReads(a_builder, FrameValues::kReadPlacements | FrameValues::kReadPools);
 					return bindings;
 				}
 
@@ -182,6 +185,9 @@ namespace DCLF
 					if (scene.vertexStream)
 						a_builder.ShaderResource(*scene.vertexStream, noViews);
 					a_builder.ShaderResource(resources->blocks, noViews);
+					// Every mode draws through a frame record (the view's own or the colour segment's), whose shaders read the frame's
+					// placements, palettes, shading and fade seeds (t117, t121-t123).
+					FrameValues::Get().DeclareReads(a_builder);
 					if (mode == DrawMode::Colour)
 						DeclareFrameBuffers(a_builder, main);
 					// The faces read the published textures their frame textures' views export (ResolveViewFrameTextures). Only

@@ -84,6 +84,9 @@ namespace DCLF::Draws
 			const std::span<const org::UavView> noViews{};
 			(void)a_builder.ShaderResource(resources->frameConstants, noReads);
 			(void)a_builder.UnorderedAccess(*resources->sequences, noViews);
+			// The frame record's placements (t123), shading rows (t121) and pools: the fade seeds (t117), the CPU fade states (t120 in a
+			// CPU-pipeline frame) and the pixel rows it writes.
+			FrameValues::Get().DeclareReads(a_builder, FrameValues::kReadPlacements | FrameValues::kReadShading | FrameValues::kReadPools);
 			return {};
 		}
 
