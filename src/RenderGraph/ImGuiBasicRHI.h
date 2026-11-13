@@ -28,11 +28,15 @@ namespace org
  * (package/Shaders/RenderGraph/ImGui.hlsl). The recordings keep the frame's staging buffer, textures and descriptors alive until
  * their GPU work retires.
  *
- * The textures are graph textures, so the graph makes every barrier. ImGui's textures, which it rewrites by rectangle (the
- * font atlas pages), are declared by both passes on every frame: a copy destination in the upload pass and a shader resource in
- * the draw pass. The passes' declarations follow the set of those textures (IDynamicDeclaredResources): a texture is drawn and
- * updated only by an execution whose passes declare it, and its whole contents are staged on every frame until one of them
- * copied them. MakeTexture's textures never change: they are the exempt immutable class
+ * Both passes are static: they declare the same resources at every build. ImGui's textures, which it rewrites by rectangle
+ * (the font atlas pages), are versions of a fixed number of atlas pages (org::VersionedTexture, RGBA8, one level). Both passes
+ * declare every page: a copy destination in the upload pass and a shader resource in the draw pass, so the graph makes their
+ * barriers and orders the draws after the copies. A texture ImGui creates (a new page, a resize, a font reload) takes a free
+ * page as its next version, and a destroyed one gives its page back to the page's 1x1 placeholder. The next preparation binds
+ * the new version, with no graph build. A texture's whole contents are staged on every frame until a recorded upload pass
+ * copied them into the version its run bound, and the draws read it from that run on, so new glyphs are drawn the frame ImGui
+ * bakes them. A texture past the last page is not drawn (logged once). MakeTexture's textures never change: they are the exempt
+ * immutable class
  * (GraphOwnership::ExternalImmutableShaderResource) from creation and never declared. The upload pass copies their contents
  * between its own transfer barriers, after which they rest in the shader-read state and are read through their own
  * descriptors; a draw reads one only from the run that uploads it on.
@@ -115,14 +119,16 @@ namespace ImGuiBasicRHI
 	bool Commit(ImDrawData* a_drawData, const Target& a_target, const Resolver& a_resolve);
 
 	/**
-	 * @brief A new instance of the draw pass, drawing onto a_target (declared as its render target), for a graph build. It records
-	 * what Commit stored for its run, and nothing in an execution Commit did not run for.
+	 * @brief A new instance of the draw pass, drawing onto a_target (declared as its render target) and reading every atlas page,
+	 * for a graph build. It records what Commit stored for its run, and nothing in an execution Commit did not run for. Null when
+	 * the atlas pages cannot be made.
 	 */
 	std::shared_ptr<org::RenderPass> MakePass(std::shared_ptr<org::ExternalTextureResource> a_target);
 
 	/**
-	 * @brief A new instance of the upload pass, for a graph build: the texture copies Commit stored for its run, into the textures it
-	 * declares as copy destinations. Ordered before the draw pass.
+	 * @brief A new instance of the upload pass, for a graph build: the texture copies Commit stored for its run, into the atlas pages
+	 * it declares as copy destinations and into exempt textures. Ordered before the draw pass; records nothing on a run with
+	 * nothing to upload. Null when the atlas pages cannot be made.
 	 */
 	std::shared_ptr<org::RenderPass> MakeUploadPass();
 }
