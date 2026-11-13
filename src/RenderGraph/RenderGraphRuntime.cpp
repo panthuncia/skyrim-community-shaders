@@ -2405,16 +2405,22 @@ bool RenderGraphRuntime::Initialize()
 		}
 	}
 	{
-		// Drawcall Limit Fix's epochs are built on the render thread at its build point: its extensions read state the render thread
-		// changes in place (view and shadow resources, the graph conditions). Without epochs the one graph is everything's.
+		// Drawcall Limit Fix's epochs are built by its own builder: on its scene worker from its immutable build state, attached at a
+		// frame's end (DCLF::Draws::BuildState; BuildManager::ExternalBuilder). Until it registers, and with CS_DCLF_ASYNC_BUILDS=0, they
+		// are built on the render thread at its build point. Without epochs the one graph is everything's.
 		RenderGraph::BuildManager::Desc builds{};
 		builds.host = state->host.get();
+		const bool dclfAsync = !Switches::Equals("CS_DCLF_ASYNC_BUILDS", "0");
 		if (!EpochsEnabled())
 			builds.ownerBuilt.push_back(EpochOf(Segment::LightCulling));
 		else
 			for (std::uint32_t index = 0; index < static_cast<std::uint32_t>(Segment::Count); ++index)
-				if (IsDclfSegment(static_cast<Segment>(index)))
-					builds.ownerBuilt.push_back(EpochOf(static_cast<Segment>(index)));
+				if (IsDclfSegment(static_cast<Segment>(index))) {
+					const auto epoch = EpochOf(static_cast<Segment>(index));
+					auto& list = dclfAsync ? builds.external : builds.ownerBuilt;
+					if (std::ranges::find(list, epoch) == list.end())
+						list.push_back(epoch);
+				}
 		builds.label = [](std::uint32_t a_epoch) -> std::string {
 			return a_epoch < static_cast<std::uint32_t>(Segment::Count) ? std::string(Impl::SegmentLabel(static_cast<Segment>(a_epoch))) :
 			                                                              fmt::format("epoch {}", a_epoch);
@@ -2708,6 +2714,18 @@ bool RenderGraphRuntime::BuildOwnerEpochsNow(std::string_view a_caller)
 	return GuardedBuild([&] { return impl->builds->BuildOwnerEpochsNow(a_caller); });
 }
 
+bool RenderGraphRuntime::AttachDclfBuilds(std::string_view a_caller)
+{
+	if (!IsActive())
+		return false;
+	return GuardedBuild([&] { return impl->builds->Poll(a_caller, RenderGraph::BuildManager::Attach::External); });
+}
+
+bool RenderGraphRuntime::DclfBuildsSettled() const
+{
+	return !impl || !impl->builds || impl->builds->Settled();
+}
+
 bool RenderGraphRuntime::BuildSetupGraphs(std::string_view a_caller)
 {
 	if (!IsActive())
@@ -2804,9 +2822,12 @@ void RenderGraphRuntime::SealPresented()
 	}
 	// The build point of the frames Drawcall Limit Fix does not run (its own is at the frame's start): finished builds are attached here,
 	// and the requests made since are handed to the build thread. On the render owner only: a loading screen's thread presents too.
+	// Every frame's end is also where Drawcall Limit Fix's finished builds attach (BuildManager::Attach::All): its epochs were submitted
+	// by now, and the host's thread records the new graphs during the next frame's engine update.
 	if (impl && impl->builds && IsActive() && FrameAnchors::IsRenderOwner()) {
 		if (buildPoints == buildPointsAtSeal)
-			(void)BuildIfRequested("frame end");
+			++buildPoints;
+		(void)GuardedBuild([&] { return impl->builds->Poll("frame end", RenderGraph::BuildManager::Attach::All); });
 		buildPointsAtSeal = buildPoints;
 		impl->builds->NoteFrameEnd();
 	}
@@ -3756,6 +3777,8 @@ std::uint64_t RenderGraphRuntime::TakeSubmittedSegments() { return 0; }
 void RenderGraphRuntime::PollEpochFailures() {}
 bool RenderGraphRuntime::BuildIfRequested(std::string_view) { return false; }
 bool RenderGraphRuntime::BuildOwnerEpochsNow(std::string_view) { return false; }
+bool RenderGraphRuntime::AttachDclfBuilds(std::string_view) { return false; }
+bool RenderGraphRuntime::DclfBuildsSettled() const { return true; }
 bool RenderGraphRuntime::BuildSetupGraphs(std::string_view) { return false; }
 RenderGraph::BuildManager* RenderGraphRuntime::Builds() { return nullptr; }
 void RenderGraphRuntime::SignalFramePace(bool) {}

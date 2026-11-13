@@ -8,6 +8,10 @@
 // (RenderGraphRuntime::BuildIfRequested). The poll attaches the builds that finished (GraphHost::AttachEpochGraph) and hands every
 // epoch still asked for to the manager's own build thread (GraphHost::BuildEpochGraph). The old graph runs until the new one is
 // attached.
+//
+// An epoch owner can build its epochs on a worker of its own (ExternalBuilder: Drawcall Limit Fix builds on its scene worker from an
+// immutable build state). The manager still decides what is built, supersedes, logs, and keeps the old graph on a failure; those builds
+// attach only at a frame's end (Attach::All) or at the owner's own wait (Attach::External).
 
 #include <cstdint>
 #include <functional>
@@ -26,12 +30,38 @@ namespace RenderGraph
 	class BuildManager
 	{
 	public:
+		/** @brief Which finished builds a poll attaches. */
+		enum class Attach
+		{
+			Live,      // every epoch's but the external builder's (a frame's start)
+			All,       // every epoch's (a frame's end)
+			External,  // the external builder's alone (its owner's wait at a frame's start)
+		};
+
+		/**
+		 * @brief An epoch owner that builds its epochs' graphs on a worker of its own (Drawcall Limit Fix: its scene worker, from its
+		 * immutable build state). The manager keeps the policy: what is built, supersede, attach at a frame's end, failure, the logs.
+		 */
+		struct ExternalBuilder
+		{
+			// Owner thread, at a poll: runs a_build (one epoch's build) on the builder's worker. False: refused; that epoch is built on the
+			// owner thread at this poll instead. Null: every external epoch is built on the owner thread.
+			std::function<bool(std::function<void()> a_build)> post;
+			// Owner thread: held around every build the manager makes on the owner thread (an owner-built or synchronous one), so the
+			// owner's extensions read a consistent state there too. Null: nothing held.
+			std::function<std::shared_ptr<void>()> ownerScope;
+			// Owner thread, after each poll that may attach the external epochs (Attach::All and Attach::External); a_attached: one was.
+			std::function<void(bool a_attached)> boundary;
+		};
+
 		struct Desc
 		{
 			org::GraphHost* host = nullptr;
-			// Epochs built on the render thread at the poll, not on the build thread (Drawcall Limit Fix's: its extensions read state the
-			// render thread changes in place). Each such build is logged as synchronous after the first world frame.
+			// Epochs built on the render thread at the poll, not on the build thread (Drawcall Limit Fix's with CS_DCLF_ASYNC_BUILDS=0).
+			// Each such build is logged as synchronous after the first world frame.
 			std::vector<std::uint32_t> ownerBuilt;
+			// Epochs the external builder builds (Drawcall Limit Fix's), attached only at Attach::All and Attach::External polls.
+			std::vector<std::uint32_t> external;
 			// An epoch's name in the log lines.
 			std::function<std::string(std::uint32_t)> label;
 			// A build that failed and whose extensions left no handler of their own (Builds::Defer): the epoch's owner hears of it as of
@@ -65,13 +95,25 @@ namespace RenderGraph
 		 */
 		void Change(std::function<void()> a_change, std::string_view a_reason);
 
+		/** @brief Owner thread: the external epochs' builder (replaces the last one). */
+		void SetExternalBuilder(ExternalBuilder a_builder);
+
 		/**
-		 * @brief Owner thread, at a frame boundary: attaches the finished builds, builds the owner-built epochs that were asked for, and
-		 * hands every other epoch asked for to the build thread. a_point names the caller. Returns whether a graph was attached or built.
+		 * @brief Owner thread, at a frame boundary: attaches the finished builds a_attach names, builds the owner-built epochs that were
+		 * asked for, and hands every other epoch asked for to the build thread (the external ones to their builder). a_point names the
+		 * caller. Returns whether a graph was attached or built.
 		 */
-		bool Poll(std::string_view a_point);
-		/** @brief Owner thread: the owner-built epochs that were asked for, built now (mid-frame). Logged as synchronous. */
+		bool Poll(std::string_view a_point, Attach a_attach = Attach::Live);
+		/**
+		 * @brief Owner thread: the owner-built and external epochs that were asked for, built now on this thread (mid-frame), even one
+		 * being built elsewhere (that build is then rejected at its attach). Logged as synchronous.
+		 */
 		bool BuildOwnerEpochsNow(std::string_view a_caller);
+		/**
+		 * @brief Owner thread: none of the owner-built or external epochs is asked for (with a graph to replace, and not known to fail as
+		 * asked), being built, or built and waiting for its attach.
+		 */
+		bool Settled() const;
 		/**
 		 * @brief Owner thread, at setup: before the first world frame every graph asked for is built now (GraphHost::BuildIfRequested);
 		 * after it, the same as Poll. Returns whether the builds were made now.

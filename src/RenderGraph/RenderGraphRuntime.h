@@ -245,8 +245,9 @@ public:
 	void PollEpochFailures();
 
 	/**
-	 * @brief Owner thread, at a frame boundary: the build manager's poll (BuildManager::Poll). Finished builds are attached, Drawcall Limit
-	 * Fix's epochs asked for are built, and every other epoch asked for is handed to the build thread. Call this, never the host's own
+	 * @brief Owner thread, at a frame boundary: the build manager's poll (BuildManager::Poll). Finished builds are attached (Drawcall Limit
+	 * Fix's only at a frame's end, SealPresented), and every epoch asked for is handed to the build thread (Drawcall Limit Fix's to its
+	 * scene worker; with CS_DCLF_ASYNC_BUILDS=0 they are built here). Call this, never the host's own
 	 * BuildIfRequested, outside ExecuteEpoch: once the host's thread failed (a GPU completion timeline read UINT64_MAX, which is how
 	 * Windows reports a removed device), every host call throws, and that is a whole-graph failure. It stops the graph here as
 	 * ExecuteEpoch's does (IsActive false, GetDisabledReason the error) instead of leaving the frame's thread with an exception.
@@ -260,6 +261,18 @@ public:
 	 * synchronous build after the first world frame. Does not count as a build point.
 	 */
 	bool BuildOwnerEpochsNow(std::string_view a_caller);
+
+	/**
+	 * @brief Owner thread, at a frame's start before Drawcall Limit Fix submits (its wait for a current snapshot): the build manager's
+	 * poll attaching only Drawcall Limit Fix's finished builds (BuildManager::Attach::External). Does not count as a build point.
+	 */
+	bool AttachDclfBuilds(std::string_view a_caller);
+
+	/**
+	 * @brief Owner thread: none of Drawcall Limit Fix's epochs is asked for, being built, or waiting for its attach
+	 * (BuildManager::Settled). True while the graph is inactive.
+	 */
+	bool DclfBuildsSettled() const;
 
 	/**
 	 * @brief Owner thread, at setup: before the first world frame, every graph asked for is built now; after it, a build point

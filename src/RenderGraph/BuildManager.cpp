@@ -107,11 +107,24 @@ namespace RenderGraph
 		struct Group
 		{
 			std::size_t remaining = 0;
+			bool external = false;  // the external builder's epochs: attached only at Attach::All and Attach::External polls
 			std::vector<std::unique_ptr<Done>> done;
+		};
+
+		/** @brief What a build posted to the external builder checks before it runs: the manager may be gone by then. */
+		struct ExternalLife
+		{
+			std::mutex mutex;
+			std::condition_variable idle;
+			bool stopped = false;
+			std::uint32_t running = 0;
 		};
 
 		Desc desc;
 		std::unordered_set<std::uint32_t> ownerBuilt;
+		std::unordered_set<std::uint32_t> external;
+		ExternalBuilder externalBuilder;  // owner thread
+		std::shared_ptr<ExternalLife> externalLife = std::make_shared<ExternalLife>();
 
 		// Build thread.
 		std::thread thread;
@@ -144,7 +157,7 @@ namespace RenderGraph
 		std::vector<PendingRequest> pending;
 
 		explicit Impl(Desc a_desc) :
-			desc(std::move(a_desc)), ownerBuilt(desc.ownerBuilt.begin(), desc.ownerBuilt.end())
+			desc(std::move(a_desc)), ownerBuilt(desc.ownerBuilt.begin(), desc.ownerBuilt.end()), external(desc.external.begin(), desc.external.end())
 		{
 			thread = std::thread([this] { Run(); });
 		}
@@ -189,6 +202,18 @@ namespace RenderGraph
 				done->error = "unknown exception";
 			}
 			return done;
+		}
+
+		/** @brief What the external builder holds around a build on the owner thread (null: nothing). */
+		std::shared_ptr<void> OwnerScope() const
+		{
+			return externalBuilder.ownerScope ? externalBuilder.ownerScope() : nullptr;
+		}
+
+		/** @brief Whether the owner thread builds a_epoch at the poll: an owner-built epoch, or an external one with no builder to post to. */
+		bool BuiltOnOwner(std::uint32_t a_epoch) const
+		{
+			return ownerBuilt.contains(a_epoch) || (external.contains(a_epoch) && !externalBuilder.post);
 		}
 
 		void Apply(const PendingRequest& a_request)
@@ -374,19 +399,23 @@ namespace RenderGraph
 			return true;
 		}
 
-		/** @brief Attaches every group whose builds have all finished. */
-		bool AttachFinished()
+		/** @brief Attaches every group whose builds have all finished and that a_attach names. a_external: an external group was attached. */
+		bool AttachFinished(Attach a_attach, bool* a_external = nullptr)
 		{
 			Collect();
 			bool attached = false;
 			for (auto it = groups.begin(); it != groups.end();) {
-				if (it->second.remaining) {
+				const bool named = it->second.external ? a_attach != Attach::Live : a_attach != Attach::External;
+				if (it->second.remaining || !named) {
 					++it;
 					continue;
 				}
 				for (auto& done : it->second.done) {
 					inFlight.erase(done->job.epoch);
-					attached = Finish(*done, false) || attached;
+					const bool one = Finish(*done, false);
+					attached = one || attached;
+					if (one && it->second.external && a_external)
+						*a_external = true;
 				}
 				it = groups.erase(it);
 			}
@@ -415,30 +444,115 @@ namespace RenderGraph
 					a_caller);
 		}
 
-		bool BuildOwnerEpochs(std::string_view a_caller)
+		/**
+		 * @brief The epochs the owner thread builds at a poll (BuiltOnOwner), built now. a_all: every owner-built and external epoch asked
+		 * for, even one being built elsewhere (its build is rejected at its attach: this one started later).
+		 */
+		bool BuildOwnerEpochs(std::string_view a_caller, bool a_all = false)
 		{
 			auto& host = *desc.host;
 			bool built = false;
+			std::shared_ptr<void> scope;
 			for (std::size_t i = 0; i < host.GraphCount(); ++i) {
 				const auto epoch = host.EpochAt(i);
-				if (!ownerBuilt.contains(epoch) || !Due(epoch))
+				const bool chosen = a_all ? (ownerBuilt.contains(epoch) || external.contains(epoch)) : BuiltOnOwner(epoch);
+				if (!chosen)
+					continue;
+				if (a_all ? !host.RebuildRequested(epoch) || !host.Graph(epoch) : !Due(epoch))
 					continue;
 				WarnSynchronous(Label(epoch), a_caller);
 				++window.synchronous;
+				if (!scope)
+					scope = OwnerScope();
 				auto done = Build(MakeJob(epoch, 0));
 				built = Finish(*done, true) || built;
 			}
 			return built;
 		}
 
-		void Dispatch()
+		/** @brief Hands a_jobs (one group's external epochs) to the external builder. Returns the jobs it refused. */
+		std::vector<Job> PostExternal(std::vector<Job> a_jobs)
+		{
+			std::vector<Job> refused;
+			for (auto& job : a_jobs) {
+				auto life = externalLife;
+				auto run = [this, life, job]() mutable {
+					{
+						std::scoped_lock lock(life->mutex);
+						if (life->stopped)
+							return;
+						++life->running;
+					}
+					auto done = Build(std::move(job));
+					{
+						std::scoped_lock lock(mutex);
+						finished.push_back(std::move(done));
+					}
+					std::scoped_lock lock(life->mutex);
+					--life->running;
+					life->idle.notify_all();
+				};
+				if (!externalBuilder.post(std::move(run)))
+					refused.push_back(job);
+			}
+			return refused;
+		}
+
+		bool Settled() const
 		{
 			auto& host = *desc.host;
+			for (std::size_t i = 0; i < host.GraphCount(); ++i) {
+				const auto epoch = host.EpochAt(i);
+				if (!ownerBuilt.contains(epoch) && !external.contains(epoch))
+					continue;
+				if (inFlight.contains(epoch))
+					return false;
+				if (!host.Graph(epoch) || !host.RebuildRequested(epoch))
+					continue;
+				const auto failed = failedAt.find(epoch);
+				if (failed == failedAt.end() || failed->second != host.RebuildRequests(epoch))
+					return false;
+			}
+			return true;
+		}
+
+		void Dispatch(std::string_view a_point)
+		{
+			auto& host = *desc.host;
+			// The external builder's epochs first, a group of their own (attached at a frame's end).
+			if (externalBuilder.post) {
+				std::vector<Job> posted;
+				const auto group = ++groupSerial;
+				for (std::size_t i = 0; i < host.GraphCount(); ++i) {
+					const auto epoch = host.EpochAt(i);
+					if (!external.contains(epoch) || !Due(epoch))
+						continue;
+					posted.push_back(MakeJob(epoch, group));
+					inFlight.insert(epoch);
+				}
+				if (!posted.empty()) {
+					auto& entry = groups[group];
+					entry.external = true;
+					entry.remaining = posted.size();
+					// Refused: built here instead, on the owner thread, and attached with the group.
+					auto refused = PostExternal(std::move(posted));
+					if (!refused.empty()) {
+						auto scope = OwnerScope();
+						for (auto& job : refused) {
+							WarnSynchronous(Label(job.epoch), fmt::format("{} (the external builder refused it)", a_point));
+							++window.synchronous;
+							auto done = Build(std::move(job));
+							std::scoped_lock lock(mutex);
+							finished.push_back(std::move(done));
+						}
+					}
+				}
+			}
 			std::vector<Job> jobs;
 			const auto group = ++groupSerial;
 			for (std::size_t i = 0; i < host.GraphCount(); ++i) {
 				const auto epoch = host.EpochAt(i);
-				if (ownerBuilt.contains(epoch) || !Due(epoch))
+				if (ownerBuilt.contains(epoch) || external.contains(epoch) || !Due(epoch))
 					continue;
 				jobs.push_back(MakeJob(epoch, group));
 				inFlight.insert(epoch);
@@ -478,6 +592,12 @@ namespace RenderGraph
 			wake.notify_all();
 			if (thread.joinable())
 				thread.join();
+			// Builds posted to the external builder: ones not started return at once, running ones are waited for.
+			{
+				std::unique_lock lock(externalLife->mutex);
+				externalLife->stopped = true;
+				externalLife->idle.wait(lock, [&] { return externalLife->running == 0; });
+			}
 			// Never attached, so never run: dropped here, on the owner thread.
 			finished.clear();
 			groups.clear();
@@ -488,8 +608,10 @@ namespace RenderGraph
 	BuildManager::BuildManager(Desc a_desc) :
 		impl(std::make_unique<Impl>(std::move(a_desc)))
 	{
-		logger::info("[ORG] build manager: structural builds run on a thread of their own and are attached at frame boundaries; {} owner-built epochs",
-			impl->ownerBuilt.size());
+		logger::info(
+			"[ORG] build manager: structural builds run on a thread of their own and are attached at frame boundaries; {} owner-built epochs, "
+			"{} built by an external builder and attached at a frame's end",
+			impl->ownerBuilt.size(), impl->external.size());
 	}
 
 	BuildManager::~BuildManager()
@@ -530,7 +652,14 @@ namespace RenderGraph
 		impl->Submit(std::move(request));
 	}
 
-	bool BuildManager::Poll(std::string_view a_point)
+	void BuildManager::SetExternalBuilder(ExternalBuilder a_builder)
+	{
+		impl->externalBuilder = std::move(a_builder);
+		logger::info("[ORG] build manager: external builder set ({} epochs; {})", impl->external.size(),
+			impl->externalBuilder.post ? "built on its worker, attached at a frame's end" : "built on the render thread");
+	}
+
+	bool BuildManager::Poll(std::string_view a_point, Attach a_attach)
 	{
 		auto& m = *impl;
 		m.owner.store(std::this_thread::get_id(), std::memory_order_release);
@@ -541,21 +670,31 @@ namespace RenderGraph
 		if (std::exchange(m.synchronousAll, false)) {
 			WarnSynchronous(fmt::format("every graph asked for ({})", m.synchronousReason), a_point);
 			++m.window.synchronous;
+			auto scope = m.OwnerScope();
 			std::scoped_lock lock(m.buildMutex);
 			changed = m.desc.host->BuildIfRequested() || changed;
 		}
-		changed = m.AttachFinished() || changed;
+		bool externalAttached = false;
+		changed = m.AttachFinished(a_attach, &externalAttached) || changed;
 		m.RequestStale();
 		changed = m.BuildOwnerEpochs(a_point) || changed;
-		m.Dispatch();
+		m.Dispatch(a_point);
+		// The external builder hears of every boundary that may attach its epochs, attached or not (it settles its state there).
+		if (a_attach != Attach::Live && m.externalBuilder.boundary)
+			m.externalBuilder.boundary(externalAttached);
 		return changed;
+	}
+
+	bool BuildManager::Settled() const
+	{
+		return impl->Settled();
 	}
 
 	bool BuildManager::BuildOwnerEpochsNow(std::string_view a_caller)
 	{
 		impl->owner.store(std::this_thread::get_id(), std::memory_order_release);
 		impl->ApplyPending();
-		return impl->BuildOwnerEpochs(a_caller);
+		return impl->BuildOwnerEpochs(a_caller, true);
 	}
 
 	bool BuildManager::BuildSetupGraphs(std::string_view a_caller)
@@ -567,6 +706,7 @@ namespace RenderGraph
 		}
 		m.owner.store(std::this_thread::get_id(), std::memory_order_release);
 		m.ApplyPending();
+		auto scope = m.OwnerScope();
 		std::scoped_lock lock(m.buildMutex);
 		(void)m.desc.host->BuildIfRequested();
 		return true;
