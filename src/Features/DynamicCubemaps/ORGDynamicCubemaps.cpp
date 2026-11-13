@@ -439,28 +439,6 @@ namespace
 		desc.MiscFlags = a_cube ? D3D11_RESOURCE_MISC_TEXTURECUBE : 0u;
 		return desc;
 	}
-
-	/**
-	 * @brief Zeros every subresource of an exported texture through D3D11, once, before the graph first uses it: what the D3D11 path's
-	 * clears give its readers before the first publish (DXVK's new images are zero). R11G11B10 texels or BC6H blocks.
-	 */
-	void ZeroTexture(ID3D11Texture2D* a_texture)
-	{
-		D3D11_TEXTURE2D_DESC desc{};
-		a_texture->GetDesc(&desc);
-		const bool blocks = desc.Format == DXGI_FORMAT_BC6H_UF16;
-		const UINT bytes = blocks ? 16u : 4u;
-		std::vector<std::uint8_t> zeros;
-		for (UINT mip = 0; mip < desc.MipLevels; ++mip) {
-			const UINT width = (std::max)(desc.Width >> mip, 1u);
-			const UINT height = (std::max)(desc.Height >> mip, 1u);
-			const UINT columns = blocks ? (width + 3) / 4 : width;
-			const UINT rows = blocks ? (height + 3) / 4 : height;
-			zeros.assign(static_cast<std::size_t>(columns) * bytes * rows, 0);
-			for (UINT slice = 0; slice < desc.ArraySize; ++slice)
-				globals::d3d::context->UpdateSubresource(a_texture, D3D11CalcSubresource(mip, slice, desc.MipLevels), nullptr, zeros.data(), columns * bytes, 0);
-		}
-	}
 }
 
 struct ORGDynamicCubemaps::Impl
@@ -781,11 +759,13 @@ bool ORGDynamicCubemaps::Setup(std::function<void()> a_onFailed)
 				state->imports.depth != nullptr, state->imports.main != nullptr, state->imports.reflections != nullptr, state->imports.defaultCubemap != nullptr);
 			return false;
 		}
-		// Black until the first publish, as the D3D11 path's cubemaps are.
-		for (std::uint32_t i = 0; i < 2; ++i) {
-			ZeroTexture(state->env[i]->D3D11());
-			ZeroTexture(state->bc6h[i]->D3D11());
-		}
+		// Black until the first publish, as the D3D11 path's cubemaps are (DXVK's new images are zero). The graph's upload pass
+		// writes them at its next execution: a declared copy, so the graph orders it before the readers and tracks the state.
+		for (std::uint32_t i = 0; i < 2; ++i)
+			if (!state->env[i]->UploadZeros() || !state->bc6h[i]->UploadZeros()) {
+				logger::warn("[ORG] Dynamic Cubemaps: the cubemaps could not be cleared through the graph's uploads; they stay on D3D11");
+				return false;
+			}
 		state->onFailed = std::move(a_onFailed);
 		impl = std::move(state);
 		// The client may register before CS's first constant upload: the anchors hold it until the shared constants exist. The
