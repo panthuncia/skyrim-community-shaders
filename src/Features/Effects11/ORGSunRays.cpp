@@ -1,6 +1,5 @@
 #include "ORGSunRays.h"
 
-#include "RenderGraph/Engine/Flush/Flush.h"
 #include "RenderGraph/Switches.h"
 
 bool ORGSunRays::Requested()
@@ -29,6 +28,7 @@ ORGSunRays& ORGSunRays::Get()
 #	include "RenderGraph/AnchorPasses.h"
 #	include "RenderGraph/ComputeProgram.h"
 #	include "RenderGraph/FrameAnchors.h"
+#	include "RenderGraph/Engine/Native/Native.h"
 #	include "RenderGraph/Engine/Tripwire/Tripwire.h"
 #	include "RenderGraph/GraphResources.h"
 #	include "RenderGraph/RasterProgram.h"
@@ -38,6 +38,7 @@ ORGSunRays& ORGSunRays::Get()
 #	include "RenderGraph/SharedConstants.h"
 #	include "State.h"
 #	include "Utils/D3D.h"
+#	include "VanillaBinding.h"
 
 #	include <OpenRenderGraph/GraphHost.h>
 #	include <Render/LatchBlock.h>
@@ -403,10 +404,14 @@ namespace
 	// Inputs and programs
 	// - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
 
-	/** @brief A D3D11 feature's 2D texture behind a_view, imported (FrameAnchors::D3D11Texture). Empty without one. */
+	/**
+	 * @brief A D3D11 feature's 2D texture behind a_view, imported (FrameAnchors::D3D11Texture). Empty without one, and always empty in
+	 * native mode: nothing orders the import after its producer there, so only published ids are read. Guest keeps it for
+	 * producers on D3D11.
+	 */
 	Source ImportView(std::string_view a_name, ID3D11ShaderResourceView* a_view)
 	{
-		if (!a_view)
+		if (!a_view || RenderGraph::Engine::Native::Active())
 			return {};
 		winrt::com_ptr<ID3D11Resource> resource;
 		a_view->GetResource(resource.put());
@@ -416,7 +421,10 @@ namespace
 		return { FrameAnchors::D3D11Texture(a_name, texture.get(), a_view, nullptr), {} };
 	}
 
-	/** @brief The scene depth the D3D11 passes read at PS t17: the engine's depth-stencil import when it is one of the engine's. */
+	/**
+	 * @brief The scene depth the D3D11 passes read at PS t17 (VanillaBinding::LastSceneDepth): the engine's depth-stencil import when
+	 * it is one of the engine's, else Terrain Blending's published blended depth.
+	 */
 	Source SceneDepth(ID3D11ShaderResourceView* a_view)
 	{
 		if (!a_view || !globals::game::renderer)
@@ -436,15 +444,6 @@ namespace
 		if (a_view == graphBlending.BlendedDepthSRV(true))
 			return { nullptr, std::string(ORGTerrainBlending::kBlendedDepth16Id) };
 		return ImportView("Effects11::SceneDepth", a_view);
-	}
-
-	/** @brief A PS slot's bound view, which the D3D11 passes read. */
-	winrt::com_ptr<ID3D11ShaderResourceView> BoundPixelView(UINT a_slot)
-	{
-		winrt::com_ptr<ID3D11ShaderResourceView> view;
-		globals::d3d::context->PSGetShaderResources(a_slot, 1, view.put());
-		RenderGraph::Engine::Flush::NoteRead("Effects11 sun rays", a_slot, view.get());
-		return view;
 	}
 
 	/** @brief A program's own defines, each without a value. The programs add the D3D11 build's common defines themselves. */
@@ -779,7 +778,8 @@ bool ORGSunRays::PrepareFrame(const Sizes& a_sizes)
 	if (!shape.main || shape.mainFormat == rhi::Format::Unknown)
 		return fallback("kMAIN cannot be imported");
 
-	shape.depth = SceneDepth(BoundPixelView(17).get());
+	// What CS bound at t17 for the frame, resolved here rather than read back from the D3D11 context.
+	shape.depth = SceneDepth(VanillaBinding::LastSceneDepth());
 	if (!shape.depth)
 		return fallback("the scene depth at t17 is missing or cannot be imported");
 
@@ -797,13 +797,14 @@ bool ORGSunRays::PrepareFrame(const Sizes& a_sizes)
 	}
 
 	if (globals::features::cloudShadows.loaded) {
-		// The view Cloud Shadows leaves bound at PS t25, which the D3D11 passes read: the graph's own cubemap when it is that one.
-		const auto view = BoundPixelView(25);
+		// The occlusion cubemap Cloud Shadows binds at PS t25 for the frame, which the D3D11 passes read: the graph's own cubemap
+		// when it is that one.
+		auto* view = globals::features::cloudShadows.OcclusionSRV();
 		const auto& graphClouds = ORGCloudShadows::Get();
-		if (view && graphClouds.IsActive() && view.get() == graphClouds.OcclusionSRV())
+		if (view && graphClouds.IsActive() && view == graphClouds.OcclusionSRV())
 			shape.cloudShadows = { nullptr, std::string(ORGCloudShadows::kOcclusionId) };
 		else
-			shape.cloudShadows = ImportView(ORGCloudShadows::kOcclusionId, view.get());
+			shape.cloudShadows = ImportView(ORGCloudShadows::kOcclusionId, view);
 		if (!shape.cloudShadows)
 			return fallback("Cloud Shadows' texture is missing");
 	}
