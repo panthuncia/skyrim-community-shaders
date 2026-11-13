@@ -26,10 +26,13 @@
 #	include <Render/RenderGraph/RenderGraph.h>
 #	include <RenderPasses/Base/TypedRenderGraphPass.h>
 #	include <Resources/ExternalTextureResource.h>
+#	include <Resources/VersionedTexture.h>
 
 #	include <cstddef>
 #	include <map>
+#	include <optional>
 #	include <set>
+#	include <utility>
 
 namespace
 {
@@ -168,14 +171,16 @@ namespace
 	public:
 		// At the build, on the render thread: the state as it is now.
 		explicit RaymarchPass(const ShadowState& a_state) :
-			program(a_state.program), latch(a_state.latch), gate(a_state.gate), sampler(a_state.sampler.Index()), depth(a_state.depth), output(a_state.output->Graph()) {}
+			program(a_state.program), latch(a_state.latch), gate(a_state.gate), sampler(a_state.sampler.Index()), depth(a_state.depth), output(a_state.output->Versioned())
+		{}
 
 		RaymarchBindings Declare(org::PassBuilder& a_builder)
 		{
 			a_builder.PreferQueue(org::QueueKind::Graphics);
 			const auto in = depth.resource ? a_builder.ShaderResource(depth.resource).View() :
 			                                 a_builder.ShaderResource(org::ResourceIdentifier(depth.published)).View();
-			return { in, a_builder.UnorderedAccess(output).View() };
+			// The output's slot: a resize is a new version, which the pass writes with no build.
+			return { in, a_builder.UnorderedAccess(org::ResourceResolverAndRange(*output)).View() };
 		}
 
 		void Revision(std::vector<std::uint64_t>& a_out) const
@@ -210,7 +215,7 @@ namespace
 		std::shared_ptr<const RenderGraph::RunGate> gate;
 		std::uint32_t sampler;
 		DepthSource depth;
-		std::shared_ptr<org::Resource> output;
+		std::shared_ptr<org::VersionedTexture> output;
 	};
 
 	/** @brief a_sampleCount's program: from the set built at setup, else built now (logged) and kept. Null when it fails. */
@@ -223,6 +228,18 @@ namespace
 		if (program)
 			a_state.programs.emplace(a_sampleCount, program);
 		return program;
+	}
+
+	/** @brief The engine's shadow mask size, which the output follows (ScreenSpaceShadows::SetupResources); none without the mask. */
+	std::optional<std::pair<UINT, UINT>> ShadowMaskSize()
+	{
+		auto* renderer = globals::game::renderer;
+		auto* texture = renderer ? renderer->GetRuntimeData().renderTargets[RE::RENDER_TARGET::kSHADOW_MASK].texture : nullptr;
+		if (!texture)
+			return std::nullopt;
+		D3D11_TEXTURE2D_DESC desc{};
+		texture->GetDesc(&desc);
+		return std::pair{ desc.Width, desc.Height };
 	}
 
 	/** @brief Drops the import of Terrain Blending's D3D11 blended depth when the raymarch stops reading it. */
@@ -291,14 +308,15 @@ bool ORGScreenSpaceShadows::Setup(const D3D11_TEXTURE2D_DESC& a_desc, std::funct
 			.addressV = rhi::AddressMode::Border,
 			.addressW = rhi::AddressMode::Border,
 			.borderPreset = rhi::BorderPreset::OpaqueWhite });
-		// Written in full every frame, but the engine's draws read it through D3D11: exported, so never aliased.
+		// Written in full every frame, but the engine's draws read it through D3D11: exported, so never aliased. Versioned: the
+		// passes declare its slot, so a resolution change resizes it as a new version with no graph build (Prepass).
 		state->output = std::make_unique<GraphResources::Texture2D>(a_desc, std::string(kTextureName),
-			GraphResources::Options{ .lifetime = GraphResources::Lifetime::Transient, .d3d11 = GraphResources::Export::SRV });
+			GraphResources::Options{ .lifetime = GraphResources::Lifetime::Transient, .d3d11 = GraphResources::Export::SRV, .versioned = true });
 		state->latch = std::make_shared<org::LatchBlock>("cs.screen-space-shadows.latch", static_cast<std::uint32_t>(sizeof(RaymarchLatchData)));
 		// One entry per dispatch of Bend's list: the commit opens those this frame uses.
 		state->gate = RenderGraph::RunGate::Create("cs.screen-space-shadows.dispatches", kMaxDispatches);
 		state->depth = CurrentDepth();
-		if (!state->program || !state->sampler || !*state->output || !state->output->SRV() || !state->gate || !state->depth) {
+		if (!state->program || !state->sampler || !*state->output || !state->output->SRV() || !state->output->Versioned() || !state->gate || !state->depth) {
 			logger::warn("[ORG] Screen Space Shadows stays on D3D11: its program, sampler, texture, gate or depth input could not be made");
 			ReleaseBlendImport(state->depth, {});
 			return false;
@@ -311,7 +329,7 @@ bool ORGScreenSpaceShadows::Setup(const D3D11_TEXTURE2D_DESC& a_desc, std::funct
 			.order = 100,
 			.kind = FrameAnchors::PassKind::Compute,
 			// The clear to white (no shadow), as the D3D11 path clears before its dispatches.
-			.make = [state] { return GraphPasses::MakeUavClear(state->output->Graph(), { 1.0f, 1.0f, 1.0f, 1.0f }); } });
+			.make = [state] { return GraphPasses::MakeUavClear(*state->output, { 1.0f, 1.0f, 1.0f, 1.0f }); } });
 		client.passes.push_back({ .name = "cs.screen-space-shadows.raymarch",
 			.anchor = FrameAnchors::Anchor::Prepass,
 			.order = 101,
@@ -383,6 +401,16 @@ ID3D11ShaderResourceView* ORGScreenSpaceShadows::Prepass()
 	if (!IsActive())
 		return nullptr;
 	auto& state = *impl->state;
+	// A resolution change: the shadow mask was made again at another size. The output follows it as a new version of its slot,
+	// with no graph build; the group counts come from each frame's dispatch list.
+	if (const auto size = ShadowMaskSize(); size && (size->first != state.output->Desc().Width || size->second != state.output->Desc().Height)) {
+		if (!state.output->Resize(size->first, size->second) || !*state.output || !state.output->SRV() || !state.output->Versioned()) {
+			logger::error("[ORG] Screen Space Shadows returns to D3D11: its texture could not be resized to {}x{}", size->first, size->second);
+			Stop();
+			return nullptr;
+		}
+		logger::info("[ORG] Screen Space Shadows: the shadow texture is now {}x{}", size->first, size->second);
+	}
 	bool changed = false;
 	// The sample count follows the settings and the render size (as GetComputeRaymarch's recompile does). The passes are made
 	// again with the new program: a graph rebuild, only when the count changes.

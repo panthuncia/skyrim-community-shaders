@@ -278,7 +278,11 @@ namespace RenderGraph::AnchorPasses
 			CopyBindings Declare(org::PassBuilder& a_builder)
 			{
 				a_builder.PreferQueue(org::QueueKind::Graphics);
-				return { a_builder.CopySource(spec->step.source), a_builder.CopyDestination(spec->step.target) };
+				const auto& copy = spec->step;
+				// A versioned twin is declared as its slot, so each copy reads and writes the current versions.
+				const auto source = copy.sourceSlot ? a_builder.CopySource(SlotOf(*copy.sourceSlot, kAllMips)) : a_builder.CopySource(copy.source);
+				const auto target = copy.targetSlot ? a_builder.CopyDestination(SlotOf(*copy.targetSlot, kAllMips)) : a_builder.CopyDestination(copy.target);
+				return { source, target };
 			}
 
 			void Revision(std::vector<std::uint64_t>& a_out) const { a_out.push_back(reinterpret_cast<std::uintptr_t>(spec.get())); }
@@ -347,6 +351,28 @@ namespace RenderGraph::AnchorPasses
 		Bind bind = Uav(a_twin.Versioned() ? nullptr : a_twin.Graph(), a_mip);
 		bind.slot = a_twin.Versioned();
 		return bind;
+	}
+
+	Clear ClearOf(std::string a_name, const GraphResources::Resource& a_twin)
+	{
+		Clear clear{ .name = std::move(a_name) };
+		clear.slot = a_twin.Versioned();
+		if (!clear.slot)
+			clear.target = a_twin.Graph();
+		return clear;
+	}
+
+	Copy CopyOf(std::string a_name, const GraphResources::Resource& a_source, const GraphResources::Resource& a_target, std::uint32_t a_width,
+		std::uint32_t a_height)
+	{
+		Copy copy{ .name = std::move(a_name), .width = a_width, .height = a_height };
+		copy.sourceSlot = a_source.Versioned();
+		copy.targetSlot = a_target.Versioned();
+		if (!copy.sourceSlot)
+			copy.source = a_source.Graph();
+		if (!copy.targetSlot)
+			copy.target = a_target.Graph();
+		return copy;
 	}
 
 	Bind Bind::SrvArray(std::shared_ptr<org::Resource> a_resource)
@@ -432,7 +458,7 @@ namespace RenderGraph::AnchorPasses
 
 	void Builder::Add(Copy a_copy)
 	{
-		if (!a_copy.source || !a_copy.target || !a_copy.width || !a_copy.height) {
+		if ((!a_copy.source && !a_copy.sourceSlot) || (!a_copy.target && !a_copy.targetSlot) || !a_copy.width || !a_copy.height) {
 			Fail(std::format("{}: the copy's textures or size are missing", a_copy.name));
 			return;
 		}
@@ -443,15 +469,18 @@ namespace RenderGraph::AnchorPasses
 
 	void Builder::Add(Clear a_clear, bool a_once)
 	{
-		if (!a_clear.target) {
+		if (!a_clear.target && !a_clear.slot) {
 			Fail(std::format("{}: the texture to clear is missing", a_clear.name));
 			return;
 		}
 		const std::string step = a_clear.name;
 		auto target = a_clear.target;
+		auto slot = a_clear.slot;
 		const auto value = a_clear.value;
 		const auto uintValue = a_clear.uintValue;
-		Push(step, FrameAnchors::PassKind::Compute, [target, value, uintValue]() {
+		Push(step, FrameAnchors::PassKind::Compute, [target, slot, value, uintValue]() {
+			if (slot)
+				return uintValue ? GraphPasses::MakeUavClearUint(slot, *uintValue) : GraphPasses::MakeUavClear(slot, value);
 			return uintValue ? GraphPasses::MakeUavClearUint(target, *uintValue) : GraphPasses::MakeUavClear(target, value);
 		}, a_once);
 	}
