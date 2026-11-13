@@ -215,9 +215,10 @@ namespace GraphResources
 		 * destination, so the graph orders them before the passes that read it and tracks its state, in guest and native mode.
 		 *
 		 * One entry per subresource, slice-major (D3D11CalcSubresource's order: slice * mips + mip); an entry without data is left
-		 * as it is. The bytes need to live only for the call: the service stages them before it returns. Any thread. False, logged, without a graph or when the texture could not be created.
+		 * as it is. a_width and a_height are mip 0's extent the entries hold, written at the top-left corner (each mip's halves);
+		 * 0 takes the texture's. The bytes need to live only for the call: the service stages them before it returns. Any thread. False, logged, without a graph or when the texture could not be created.
 		 */
-		bool Upload(std::span<const SubresourceData> a_subresources) const;
+		bool Upload(std::span<const SubresourceData> a_subresources, UINT a_width = 0, UINT a_height = 0) const;
 
 		/** @brief Upload of zeros into every subresource: texels or blocks of zero bytes, as DXVK's new images hold. */
 		bool UploadZeros() const;

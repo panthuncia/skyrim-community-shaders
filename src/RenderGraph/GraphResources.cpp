@@ -396,10 +396,12 @@ namespace GraphResources
 		NameViews();
 	}
 
-	bool Texture2D::Upload(std::span<const SubresourceData> a_subresources) const
+	bool Texture2D::Upload(std::span<const SubresourceData> a_subresources, UINT a_width, UINT a_height) const
 	{
 		const Shape shape{ D3D11_RESOURCE_DIMENSION_TEXTURE2D, desc.Width, desc.Height, desc.ArraySize, desc.MipLevels, desc.Format };
-		return PostUpload(graph, name, desc.Format, desc.Width, desc.Height, 1, MipCount(shape), desc.ArraySize, a_subresources);
+		const UINT width = a_width ? (std::min)(a_width, desc.Width) : desc.Width;
+		const UINT height = a_height ? (std::min)(a_height, desc.Height) : desc.Height;
+		return PostUpload(graph, name, desc.Format, width, height, 1, MipCount(shape), desc.ArraySize, a_subresources);
 	}
 
 	bool Texture2D::UploadZeros() const
@@ -582,7 +584,7 @@ namespace GraphResources
 	Texture2D::Texture2D(const D3D11_TEXTURE2D_DESC& a_desc, std::string a_name, Options a_options) :
 		Resource(std::move(a_name), a_options), desc(a_desc) {}
 	void Texture2D::Create() {}
-	bool Texture2D::Upload(std::span<const SubresourceData>) const { return false; }
+	bool Texture2D::Upload(std::span<const SubresourceData>, UINT, UINT) const { return false; }
 	bool Texture2D::UploadZeros() const { return false; }
 	bool Texture2D::Resize(UINT, UINT) { return false; }
 	Texture3D::Texture3D(const D3D11_TEXTURE3D_DESC& a_desc, std::string a_name, Options a_options) :

@@ -24,7 +24,6 @@ ORGTerrainShadows& ORGTerrainShadows::Get()
 #	include "RenderGraph/AnchorPasses.h"
 #	include "RenderGraph/ComputeProgram.h"
 #	include "RenderGraph/FrameAnchors.h"
-#	include "RenderGraph/FrameStaging.h"
 #	include "RenderGraph/GraphResources.h"
 #	include "RenderGraph/PublishedResources.h"
 #	include "RenderGraph/RenderGraphRuntime.h"
@@ -36,11 +35,8 @@ ORGTerrainShadows& ORGTerrainShadows::Get()
 #	include <Render/LatchBlock.h>
 #	include <Render/RenderGraph/RenderGraph.h>
 #	include <RenderPasses/Base/TypedRenderGraphPass.h>
-#	include <Resources/Buffers/Buffer.h>
-#	include <rhi_helpers.h>
 
 #	include <algorithm>
-#	include <cstring>
 #	include <vector>
 
 namespace
@@ -74,14 +70,6 @@ namespace
 		std::uint32_t width = 0, height = 0;
 		std::uint32_t maxDispatches = 0;
 	};
-
-	/** @brief A heightmap's mip 0 in an upload buffer, rows at the copy's pitch. Immutable once made. */
-	struct HeightUpload
-	{
-		std::uint64_t serial = 0;
-		std::shared_ptr<org::Buffer> staging;
-		rhi::CopyableFootprint footprint{};
-	};
 }
 
 struct ORGTerrainShadows::Impl
@@ -90,14 +78,9 @@ struct ORGTerrainShadows::Impl
 	std::shared_ptr<org::LatchBlock> latch;
 	std::shared_ptr<RenderGraph::RunGate> gate;
 	std::shared_ptr<const Textures> textures;
-	// The upload each run's copy pass records, by run.
-	std::shared_ptr<const RenderGraph::RunSlots<HeightUpload>> uploads;
 	std::function<void()> onFailed;
 
-	// Render thread: the heightmap to copy, until a run that stored it reached submission (the client's executed callback).
-	std::shared_ptr<const HeightUpload> upload;
-	std::uint64_t uploadSerial = 0;
-	std::uint64_t storedSerial = 0;
+	// Render thread: a heightmap went to the graph's upload service.
 	bool hasHeightmap = false;
 
 	// Render thread: this frame's constants and groups, until the commit latches them.
@@ -108,53 +91,6 @@ struct ORGTerrainShadows::Impl
 namespace
 {
 	using Impl = ORGTerrainShadows::Impl;
-
-	struct UploadBindings
-	{
-		org::ResourceBindingToken heightMap;
-	};
-
-	struct UploadFrame
-	{
-		std::shared_ptr<const RenderGraph::RunSlots<HeightUpload>> uploads;
-	};
-
-	/**
-	 * @brief The heightmap's bytes copied into the heightmap texture's corner, on the run whose commit stored them. Recorded every
-	 * run (no Revision): the run decides, and a run with no new heightmap records nothing (Bink's upload pass does the same).
-	 */
-	class HeightUploadPass final : public org::TypedRenderGraphPass<HeightUploadPass, UploadFrame, UploadBindings>
-	{
-	public:
-		HeightUploadPass(std::shared_ptr<org::Resource> a_heightMap, std::shared_ptr<const RenderGraph::RunSlots<HeightUpload>> a_uploads) :
-			heightMap(std::move(a_heightMap)), uploads(std::move(a_uploads)) {}
-
-		UploadBindings Declare(org::PassBuilder& a_builder)
-		{
-			a_builder.PreferQueue(org::QueueKind::Graphics);
-			return { a_builder.CopyDestination(heightMap) };
-		}
-
-		UploadFrame Prepare(const UploadBindings&, const org::PassPrepareContext&) const { return { uploads }; }
-
-		static void Record(const UploadBindings& a_bindings, const UploadFrame& a_frame, org::PassRecordContext& a_recording)
-		{
-			const auto upload = a_frame.uploads->Take(a_recording.Run());
-			if (!upload || !upload->staging)
-				return;
-			// The upload buffer stays until this recording's GPU work retires.
-			a_recording.Retain(upload);
-			rhi::BufferTextureCopyFootprint copy{};
-			copy.texture = a_recording.Resolve(a_bindings.heightMap).GetHandle();
-			copy.buffer = upload->staging->GetAPIResource().GetHandle();
-			copy.footprint = upload->footprint;
-			a_recording.Commands().CopyBufferToTexture(copy);
-		}
-
-	private:
-		std::shared_ptr<org::Resource> heightMap;
-		std::shared_ptr<const RenderGraph::RunSlots<HeightUpload>> uploads;
-	};
 
 	struct UpdateBindings
 	{
@@ -241,51 +177,12 @@ namespace
 		return true;
 	}
 
-	/** @brief a_image in a new upload buffer, rows at the copy's pitch. Null, logged, when the buffer cannot be made or mapped. */
-	std::shared_ptr<org::Buffer> StageHeightMap(const DirectX::Image& a_image, rhi::CopyableFootprint& a_footprint)
-	{
-		const auto format = rhi::helpers::ToRHI(a_image.format);
-		const rhi::helpers::SubresourceData source{ a_image.pixels, static_cast<std::uint32_t>(a_image.rowPitch), static_cast<std::uint32_t>(a_image.slicePitch) };
-		const auto plan = rhi::helpers::PlanTextureUploadSubresources(format, static_cast<std::uint32_t>(a_image.width), static_cast<std::uint32_t>(a_image.height), 1, 1, 1,
-			rhi::Span<const rhi::helpers::SubresourceData>{ &source, 1 });
-		if (plan.footprints.size() != 1 || !plan.totalSize) {
-			logger::error("[ORG] Terrain Shadows: no copy layout for the heightmap's format {}", static_cast<int>(a_image.format));
-			return nullptr;
-		}
-		const auto& fp = plan.footprints[0];
-		if (fp.rowSize > a_image.rowPitch || static_cast<std::size_t>(fp.rows) * a_image.rowPitch > a_image.slicePitch) {
-			logger::error("[ORG] Terrain Shadows: the heightmap's rows do not match its format");
-			return nullptr;
-		}
-		auto staging = org::Buffer::CreateShared(rhi::HeapType::Upload, plan.totalSize);
-		staging->SetName("TerrainShadows::HeightMapUpload");
-		auto resource = staging->GetAPIResource();
-		void* mapped = nullptr;
-		resource.Map(&mapped);
-		if (!mapped) {
-			logger::error("[ORG] Terrain Shadows: the heightmap's upload buffer could not be mapped");
-			return nullptr;
-		}
-		auto* destination = static_cast<std::byte*>(mapped) + fp.offset;
-		const auto* rows = reinterpret_cast<const std::byte*>(a_image.pixels);
-		for (std::uint32_t row = 0; row < fp.rows; ++row)
-			std::memcpy(destination + static_cast<std::size_t>(row) * fp.rowPitch, rows + static_cast<std::size_t>(row) * a_image.rowPitch, fp.rowSize);
-		resource.Unmap(0, plan.totalSize);
-		a_footprint = { fp.offset, fp.rowPitch, fp.width, fp.height, fp.depth };
-		return staging;
-	}
-
 	/**
-	 * @brief The client's commit: a heightmap not yet copied goes to this run's copy pass; this frame's constants into the run's
-	 * latch region, and a gate entry for each stripe.
+	 * @brief The client's commit: this frame's constants into the run's latch region, and a gate entry for each stripe.
 	 */
 	void Commit(Impl& a_impl)
 	{
 		const org::RunRef run = RenderGraphRuntime::Get().Host()->CurrentRun();
-		if (a_impl.upload) {
-			a_impl.uploads->Store(run, a_impl.upload);
-			a_impl.storedSerial = a_impl.upload->serial;
-		}
 		if (a_impl.pending.empty())
 			return;
 		a_impl.latch->Write(run, 0, std::as_bytes(std::span(a_impl.pending)));
@@ -364,17 +261,13 @@ bool ORGTerrainShadows::Setup(std::uint32_t a_maxWidth, std::uint32_t a_maxHeigh
 		return false;
 	}
 	next->textures = textures;
-	next->uploads = std::make_shared<const RenderGraph::RunSlots<HeightUpload>>();
 	next->pending.reserve(textures->maxDispatches);
 	next->onFailed = std::move(a_onFailed);
 
 	auto spec = std::make_shared<const UpdateSpec>(UpdateSpec{ next->program, next->latch, next->gate, textures });
-	// Keys 99 (the heightmap copy, on runs that store one) and 100 (the update, which reads the heightmap after it).
-	RenderGraph::AnchorPasses::Builder builder(FrameAnchors::Anchor::EarlyPrepass, kClientId, 99);
-	builder.Add("heightmap-upload", FrameAnchors::PassKind::Copy,
-		[heightMap = textures->heightMap->Graph(), uploads = next->uploads]() -> std::shared_ptr<org::RenderPass> {
-			return std::make_shared<HeightUploadPass>(heightMap, uploads);
-		});
+	// Key 100: the update. A heightmap reaches its texture through the graph's upload pass, which declares the texture a copy
+	// destination, so the graph orders the copy before the update that reads it.
+	RenderGraph::AnchorPasses::Builder builder(FrameAnchors::Anchor::EarlyPrepass, kClientId, 100);
 	builder.Add("update", FrameAnchors::PassKind::Compute, [spec]() -> std::shared_ptr<org::RenderPass> { return std::make_shared<ShadowUpdatePass>(spec); });
 	if (builder.Failed()) {
 		logger::error("[ORG] Terrain Shadows: {}; it stays on D3D11", builder.Failure());
@@ -389,12 +282,7 @@ bool ORGTerrainShadows::Setup(std::uint32_t a_maxWidth, std::uint32_t a_maxHeigh
 		textures->shadowHeights->Register(a_graph);
 	};
 	client.commit = [state = next](const FrameAnchors::Point&) { Commit(*state); };
-	client.active = [state = next] { return state->upload || !state->pending.empty(); };
-	client.executed = [state = next](const FrameAnchors::Point&) {
-		// The copy this run stored was submitted: the heightmap is in the texture for every later run.
-		if (state->upload && state->upload->serial == state->storedSerial)
-			state->upload.reset();
-	};
+	client.active = [state = next] { return !state->pending.empty(); };
 	client.gates = { next->gate };
 	client.onFailed = [] {
 		logger::error("[ORG] Terrain Shadows: the render graph failed; back to D3D11");
@@ -450,16 +338,14 @@ bool ORGTerrainShadows::SetHeightmap(const DirectX::Image& a_image)
 		Stop();
 		return false;
 	}
-	auto upload = std::make_shared<HeightUpload>();
-	upload->staging = StageHeightMap(*image, upload->footprint);
-	if (!upload->staging) {
+	// Into the texture's top-left corner, through the graph's upload pass at its next execution: in queue order, so a later
+	// heightmap's copy lands after an earlier one's.
+	const GraphResources::SubresourceData bytes{ image->pixels, static_cast<UINT>(image->rowPitch), static_cast<UINT>(image->slicePitch) };
+	if (!textures.heightMap->Upload({ &bytes, 1 }, static_cast<UINT>(image->width), static_cast<UINT>(image->height))) {
+		logger::error("[ORG] Terrain Shadows: the heightmap could not be handed to the graph's uploads; back to D3D11");
 		Stop();
 		return false;
 	}
-	upload->serial = ++impl->uploadSerial;
-	// A previous heightmap stored at a slot no run recorded yet must not be copied over this one.
-	impl->uploads->Clear();
-	impl->upload = std::move(upload);
 	impl->hasHeightmap = true;
 	impl->pending.clear();
 	logger::info("[ORG] Terrain Shadows: {}x{} heightmap queued for the render graph's {}x{} textures", a_image.width, a_image.height, textures.width,
