@@ -459,6 +459,8 @@ struct ORGDynamicCubemaps::Impl
 	std::array<std::array<std::unique_ptr<GraphResources::Texture2D>, kMips>, 2> scratch;
 	// Exported and published.
 	std::array<std::unique_ptr<GraphResources::Texture2D>, 2> env, bc6h;
+	// Their zeros, copied by a one-shot pass before the first capture.
+	std::vector<std::shared_ptr<const GraphResources::StagedUpload>> zeros;
 
 	// Each cubemap encoded since the programs were built; the BC6H copy in the graph (from the frame after its first encode).
 	std::array<bool, 2> encoded{};
@@ -759,13 +761,16 @@ bool ORGDynamicCubemaps::Setup(std::function<void()> a_onFailed)
 				state->imports.depth != nullptr, state->imports.main != nullptr, state->imports.reflections != nullptr, state->imports.defaultCubemap != nullptr);
 			return false;
 		}
-		// Black until the first publish, as the D3D11 path's cubemaps are (DXVK's new images are zero). The graph's upload pass
-		// writes them at its next execution: a declared copy, so the graph orders it before the readers and tracks the state.
-		for (std::uint32_t i = 0; i < 2; ++i)
-			if (!state->env[i]->UploadZeros() || !state->bc6h[i]->UploadZeros()) {
-				logger::warn("[ORG] Dynamic Cubemaps: the cubemaps could not be cleared through the graph's uploads; they stay on D3D11");
-				return false;
-			}
+		// Black until the first publish, as the D3D11 path's cubemaps are (DXVK's new images are zero): zeros staged here, copied by
+		// the client's one-shot pass, which declares the cubemaps as copy destinations.
+		for (std::uint32_t i = 0; i < 2; ++i) {
+			state->zeros.push_back(state->env[i]->StageZeros());
+			state->zeros.push_back(state->bc6h[i]->StageZeros());
+		}
+		if (std::ranges::any_of(state->zeros, [](const auto& a_zeros) { return !a_zeros; })) {
+			logger::warn("[ORG] Dynamic Cubemaps: the cubemaps' zeros could not be staged; they stay on D3D11");
+			return false;
+		}
 		state->onFailed = std::move(a_onFailed);
 		impl = std::move(state);
 		// The client may register before CS's first constant upload: the anchors hold it until the shared constants exist. The
@@ -829,6 +834,13 @@ bool ORGDynamicCubemaps::RegisterClient()
 		client.passes.push_back({ .name = a_name, .anchor = FrameAnchors::Anchor::DeferredPasses, .order = kOrder + a_order, .kind = a_kind, .make = std::move(a_make) });
 	};
 	using Kind = FrameAnchors::PassKind;
+	// Once, before everything else: the exported cubemaps' zeros.
+	client.passes.push_back({ .name = "cs.dyncubemaps.zero",
+		.anchor = FrameAnchors::Anchor::DeferredPasses,
+		.order = kOrder - 1,
+		.kind = Kind::Copy,
+		.make = [self]() -> std::shared_ptr<org::RenderPass> { return self->impl ? GraphResources::MakeUploadPass(self->impl->zeros) : nullptr; },
+		.once = true });
 	pass("cs.dyncubemaps.capture", 0, Kind::Compute, gated(&Impl::CapturePlan));
 	pass("cs.dyncubemaps.capture-mips", 1, Kind::Compute, mips(false, 0));
 	pass("cs.dyncubemaps.capture-mips-reflections", 2, Kind::Compute, mips(false, 1));

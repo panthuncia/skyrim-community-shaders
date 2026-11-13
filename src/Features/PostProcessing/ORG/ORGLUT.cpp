@@ -31,8 +31,8 @@ namespace ORGPostChain
 
 		/**
 		 * @brief LUT::Draw on the graph: one fullscreen draw over the dynamic-resolution area. The LUT stays a D3D11 texture loaded
-		 * by LUT::ReadTexture: a 2D one is imported (FrameAnchors::D3D11Texture), a 3D one is written once into a graph texture
-		 * through the graph's upload pass (the anchors import 2D textures only). No LUT loaded: nothing drawn, as on D3D11.
+		 * by LUT::ReadTexture: a 2D one is imported (FrameAnchors::D3D11Texture), a 3D one is copied into a graph texture by a
+		 * declared copy pass (the anchors import 2D textures only). No LUT loaded: nothing drawn, as on D3D11.
 		 */
 		class LUTEffect final : public Effect
 		{
@@ -71,8 +71,12 @@ namespace ORGPostChain
 				auto image = a_builder.CreateImage("PostProcessing::LUT::Output", format, D3D11_BIND_RENDER_TARGET);
 				constants = a_builder.Latch<LUT::LUTCB>();
 				const bool is3D = lutType == kLut3D;
-				if (is3D)
+				if (is3D) {
 					a_builder.Register(*copy);
+					// The chain has no one-shot pass, so the copy runs on every run: the LUT's whole contents (a few hundred KB),
+					// declared as a copy destination before the draw reads it.
+					a_builder.Add("upload", FrameAnchors::PassKind::Copy, [staged = staged]() { return GraphResources::MakeUploadPass({ staged }); });
+				}
 				// The shader reads only the LUT LutType names; the other handle is never read.
 				a_builder.Draw({ .name = "draw",
 					.program = a_builder.Raster("PostProcessing/LUT/lut.ps.hlsl", ShaderBindings::Words<LutBlock>(), { format }),
@@ -92,9 +96,9 @@ namespace ORGPostChain
 		private:
 			/**
 			 * @brief The 3D LUT's graph copy, made again when LUT::ReadTexture loaded another. The file's mip 0 (all the shader
-			 * loads) is read again on the CPU and written through the graph's upload pass, which declares the copy a copy
-			 * destination: the graph orders it before the draw and tracks the texture. A D3D11 CopyResource would write a graph
-			 * resource outside the graph. @return Null, or why it cannot be made.
+			 * loads) is read again on the CPU and staged for the chain's upload pass, which declares the texture a copy destination:
+			 * the graph orders it before the draw and tracks the texture. A D3D11 CopyResource would write a graph resource outside
+			 * the graph. @return Null, or why it cannot be made.
 			 */
 			const char* CopyLut3D(const LUT& a_lut)
 			{
@@ -102,6 +106,7 @@ namespace ORGPostChain
 				if (copy && copiedFrom == loaded)
 					return nullptr;
 				copy.reset();
+				staged.reset();
 				copiedFrom = nullptr;
 				// The file LUT::ReadTexture loaded: the same path, resolved the same way.
 				const auto path = UnifiedPresetCatalog::GetSingleton().ResolveActivePackPath(a_lut.attemptedPath);
@@ -131,14 +136,16 @@ namespace ORGPostChain
 						return "the 3D LUT file has a missing slice";
 					slices.push_back({ slice->pixels, static_cast<UINT>(slice->rowPitch), static_cast<UINT>(slice->slicePitch) });
 				}
-				if (!next->Upload(slices))
-					return "the 3D LUT cannot be uploaded into its graph texture";
+				staged = next->Stage(slices);
+				if (!staged)
+					return "the 3D LUT cannot be staged for its graph texture";
 				copy = std::move(next);
 				copiedFrom = loaded;
 				return nullptr;
 			}
 
 			std::unique_ptr<GraphResources::Texture3D> copy;
+			std::shared_ptr<const GraphResources::StagedUpload> staged;  // copy's contents, for the upload pass
 			winrt::com_ptr<ID3D11Texture3D> copiedFrom;  // held, so a new LUT never takes the old one's address
 			std::shared_ptr<org::Resource> source;
 			LatchRegion<LUT::LUTCB> constants;

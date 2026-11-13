@@ -80,7 +80,8 @@ struct ORGTerrainShadows::Impl
 	std::shared_ptr<const Textures> textures;
 	std::function<void()> onFailed;
 
-	// Render thread: a heightmap went to the graph's upload service.
+	// Render thread: the heightmap staged last, which the one-shot upload pass copies into the heightmap texture's corner.
+	std::shared_ptr<const GraphResources::StagedUpload> heightmap;
 	bool hasHeightmap = false;
 
 	// Render thread: this frame's constants and groups, until the commit latches them.
@@ -265,9 +266,16 @@ bool ORGTerrainShadows::Setup(std::uint32_t a_maxWidth, std::uint32_t a_maxHeigh
 	next->onFailed = std::move(a_onFailed);
 
 	auto spec = std::make_shared<const UpdateSpec>(UpdateSpec{ next->program, next->latch, next->gate, textures });
-	// Key 100: the update. A heightmap reaches its texture through the graph's upload pass, which declares the texture a copy
-	// destination, so the graph orders the copy before the update that reads it.
-	RenderGraph::AnchorPasses::Builder builder(FrameAnchors::Anchor::EarlyPrepass, kClientId, 100);
+	// Keys 99 (the heightmap copy, a one-shot pass armed again by each new heightmap) and 100 (the update, which reads the
+	// heightmap after it). The copy declares its staging buffer and the texture, so the graph orders and tracks it.
+	RenderGraph::AnchorPasses::Builder builder(FrameAnchors::Anchor::EarlyPrepass, kClientId, 99);
+	builder.Add(
+		"heightmap-upload", FrameAnchors::PassKind::Copy,
+		[state = std::weak_ptr<Impl>(next)]() -> std::shared_ptr<org::RenderPass> {
+			const auto current = state.lock();
+			return current ? GraphResources::MakeUploadPass({ current->heightmap }) : nullptr;
+		},
+		true);
 	builder.Add("update", FrameAnchors::PassKind::Compute, [spec]() -> std::shared_ptr<org::RenderPass> { return std::make_shared<ShadowUpdatePass>(spec); });
 	if (builder.Failed()) {
 		logger::error("[ORG] Terrain Shadows: {}; it stays on D3D11", builder.Failure());
@@ -338,14 +346,19 @@ bool ORGTerrainShadows::SetHeightmap(const DirectX::Image& a_image)
 		Stop();
 		return false;
 	}
-	// Into the texture's top-left corner, through the graph's upload pass at its next execution: in queue order, so a later
-	// heightmap's copy lands after an earlier one's.
+	// Into the texture's top-left corner, by the one-shot upload pass: armed again, and the graph built again with the new
+	// staging (a pass still armed from an earlier heightmap is made again with this one).
 	const GraphResources::SubresourceData bytes{ image->pixels, static_cast<UINT>(image->rowPitch), static_cast<UINT>(image->slicePitch) };
-	if (!textures.heightMap->Upload(std::span<const GraphResources::SubresourceData>(&bytes, 1), static_cast<UINT>(image->width), static_cast<UINT>(image->height))) {
-		logger::error("[ORG] Terrain Shadows: the heightmap could not be handed to the graph's uploads; back to D3D11");
+	auto staged = textures.heightMap->Stage(std::span<const GraphResources::SubresourceData>(&bytes, 1), static_cast<UINT>(image->width),
+		static_cast<UINT>(image->height));
+	if (!staged) {
+		logger::error("[ORG] Terrain Shadows: the heightmap could not be staged; back to D3D11");
 		Stop();
 		return false;
 	}
+	impl->heightmap = std::move(staged);
+	FrameAnchors::Rearm(kClientId);
+	FrameAnchors::Refresh(kClientId);
 	impl->hasHeightmap = true;
 	impl->pending.clear();
 	logger::info("[ORG] Terrain Shadows: {}x{} heightmap queued for the render graph's {}x{} textures", a_image.width, a_image.height, textures.width,
