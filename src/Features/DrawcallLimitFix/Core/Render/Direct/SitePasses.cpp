@@ -125,8 +125,20 @@ namespace DCLF::Direct
 		std::shared_ptr<org::RenderPass> DepthSite(const Api::PassContext& a_context)
 		{
 			const auto& main = *a_context.Main();
+			std::vector<std::shared_ptr<Draws::ViewResources>> hosted(a_context.hosted.begin(), a_context.hosted.end());
 			return MakeSitePass(Site::Depth, {}, { main.nativeDepth },
-				[resources = a_context.Main()](org::PassBuilder& a_builder) { DeclareFrameReads(a_builder, *resources, true); });
+				[resources = a_context.Main(), hosted = std::move(hosted)](org::PassBuilder& a_builder) {
+					DeclareFrameReads(a_builder, *resources, true);
+					// The hosted views' draws (RecordHostedDepthViews) read each view's blocks, and its own frame constants when it has
+					// them, through the view's push words. Their latched copies are this epoch's, so the graph has them registered.
+					const std::span<const org::SrvView> noViews{};
+					for (const auto& view : hosted) {
+						if (view->frameConstants)
+							a_builder.ShaderResource(view->frameConstants, noViews);
+						if (view->blocks)
+							a_builder.ShaderResource(view->blocks, noViews);
+					}
+				});
 		}
 
 		// main.colour: main colour, the decals, the families' colour, the second pass.
