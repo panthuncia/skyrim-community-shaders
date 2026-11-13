@@ -21,6 +21,11 @@
 struct ID3D11Texture2D;
 struct ID3D11DepthStencilView;
 
+namespace org
+{
+	class ExternalTextureResource;
+}
+
 namespace RE
 {
 	class BSShadowLight;
@@ -38,7 +43,8 @@ namespace DCLF::Api
 {
 	/**
 	 * @brief What an ImportedTexture map's importTarget is handed: the texture and depth view to import as its depth target, and whether
-	 * it supplied them (none: nothing is imported this time).
+	 * it supplied them (none: nothing is imported this time). A target the graph owns also gives its graph resource, which the shadow
+	 * epoch then declares instead of importing the texture again: one resource, which every graph orders.
 	 */
 	class OcclusionTargetImport
 	{
@@ -46,6 +52,7 @@ namespace DCLF::Api
 		bool supplied = false;
 		ID3D11Texture2D* texture = nullptr;
 		ID3D11DepthStencilView* view = nullptr;
+		std::shared_ptr<org::ExternalTextureResource> graph;
 	};
 
 	/**

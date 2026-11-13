@@ -13,6 +13,7 @@ bool ORGSkylighting::Requested()
 // volk must precede every Vulkan header in this translation unit.
 #	include <rhi_interop_vulkan.h>
 
+#	include "Buffer.h"
 #	include "Deferred.h"
 #	include "Features/Skylighting.h"
 #	include "Globals.h"
@@ -45,6 +46,13 @@ namespace
 	constexpr const char* kClientId = "cs.skylighting";
 	constexpr const char* kShader = "Skylighting/UpdateProbesCS.hlsl";
 	constexpr auto kVolumes = static_cast<std::size_t>(ORGSkylighting::Volume::Count);
+
+	/** @brief The sky occlusion map's twin (ORGSkylighting::MakeOcclusionMap); null when Skylighting made a D3D11 one. */
+	std::unique_ptr<GraphResources::Texture2D>& OcclusionTwin()
+	{
+		static std::unique_ptr<GraphResources::Texture2D> s_twin;
+		return s_twin;
+	}
 
 	/** @brief The graph no longer updates the probes: the published volumes' readers return to D3D11. */
 	void WithdrawVolumes()
@@ -262,14 +270,20 @@ struct ORGSkylighting::Impl
 	std::shared_ptr<Resources> resources;
 	std::shared_ptr<ClientState> state;
 
-	/** @brief The inputs' imports for this frame; false when one is missing. Refreshes the client when one changed. */
+	/**
+	 * @brief The inputs for this frame; false when one is missing. Refreshes the client when one changed. The occlusion map is the
+	 * graph's own (MakeOcclusionMap); a D3D11 one, when the twin could not be made, is imported.
+	 */
 	bool ResolveInputs(const Inputs& a_inputs)
 	{
-		RE::BSGraphics::DepthStencilData occlusionTarget{};
-		occlusionTarget.texture = a_inputs.occlusion;
-		occlusionTarget.views[0] = a_inputs.occlusionDSV;
-		occlusionTarget.depthSRV = a_inputs.occlusionSRV;
-		auto occlusion = FrameAnchors::ImportDepth(occlusionTarget, "cs.skylighting.occlusion");
+		auto occlusion = ORGSkylighting::Get().OcclusionMap();
+		if (!occlusion) {
+			RE::BSGraphics::DepthStencilData occlusionTarget{};
+			occlusionTarget.texture = a_inputs.occlusion;
+			occlusionTarget.views[0] = a_inputs.occlusionDSV;
+			occlusionTarget.depthSRV = a_inputs.occlusionSRV;
+			occlusion = FrameAnchors::ImportDepth(occlusionTarget, "cs.skylighting.occlusion");
+		}
 		auto shadowCascades = ImportShadowMap(a_inputs.shadowCascades, "cs.skylighting.shadow-cascades");
 		auto esramShadows = ImportShadowMap(a_inputs.esramShadows, "cs.skylighting.esram-shadows");
 		if (!occlusion || !shadowCascades || !esramShadows)
@@ -418,6 +432,58 @@ bool ORGSkylighting::Setup(const Skylighting& a_feature, std::function<void()> a
 	return true;
 }
 
+Texture2D* ORGSkylighting::MakeOcclusionMap(const D3D11_TEXTURE2D_DESC& a_desc, DXGI_FORMAT a_srvFormat, DXGI_FORMAT a_dsvFormat)
+{
+	auto& twin = OcclusionTwin();
+	if (twin || !Requested() || !RenderGraphRuntime::Get().IsActive())
+		return nullptr;
+	// Written by D3D11 (the engine's RenderMask draws, Skylighting's clear) and read by D3D11 (the probe update's D3D11 dispatch, the
+	// parity diagnostic): exported, never aliased. Its contents are read in the frame after a frame that renders no map.
+	D3D11_TEXTURE2D_DESC desc = a_desc;
+	desc.MipLevels = 1;
+	desc.ArraySize = 1;
+	desc.BindFlags = D3D11_BIND_DEPTH_STENCIL | D3D11_BIND_SHADER_RESOURCE;
+	desc.MiscFlags = 0;
+	auto texture = std::make_unique<GraphResources::Texture2D>(desc, std::string(kOcclusionId),
+		GraphResources::Options{ .lifetime = GraphResources::Lifetime::Persistent, .d3d11 = GraphResources::Export::SRV | GraphResources::Export::DSV });
+	if (!*texture || !texture->D3D11() || !texture->SRV() || !texture->DSV() ||
+		!std::dynamic_pointer_cast<org::ExternalTextureResource>(texture->Graph())) {
+		logger::warn("[ORG] Skylighting: the sky occlusion map could not be made on the render graph (format {}); it is a D3D11 texture",
+			static_cast<int>(a_desc.Format));
+		return nullptr;
+	}
+	// The engine's map draws and the precipitation shaders read it through views in the target's formats.
+	D3D11_SHADER_RESOURCE_VIEW_DESC srvDesc{};
+	D3D11_DEPTH_STENCIL_VIEW_DESC dsvDesc{};
+	texture->SRV()->GetDesc(&srvDesc);
+	texture->DSV()->GetDesc(&dsvDesc);
+	if (srvDesc.Format != a_srvFormat || dsvDesc.Format != a_dsvFormat) {
+		logger::warn("[ORG] Skylighting: the graph's sky occlusion map has views in formats {}/{}, the target's are {}/{}; it is a D3D11 texture",
+			static_cast<int>(srvDesc.Format), static_cast<int>(dsvDesc.Format), static_cast<int>(a_srvFormat), static_cast<int>(a_dsvFormat));
+		return nullptr;
+	}
+	// Drawcall Limit Fix's shadow epoch draws into it and the Prepass anchor's probe update reads it: one resource in every graph.
+	if (!PublishedResources::Publish(*texture)) {
+		logger::warn("[ORG] Skylighting: the sky occlusion map could not be published; it is a D3D11 texture");
+		return nullptr;
+	}
+	// The wrapper holds a reference of its own: the twin keeps the image, the wrapper the D3D11 texture and views of it.
+	auto* d3d11 = texture->D3D11();
+	d3d11->AddRef();
+	auto* wrapper = new Texture2D(d3d11, kOcclusionId.data());
+	wrapper->srv.copy_from(texture->SRV());
+	wrapper->dsv.copy_from(texture->DSV());
+	twin = std::move(texture);
+	logger::info("[ORG] Skylighting: the sky occlusion map is a graph texture ({}x{}), published as {}", desc.Width, desc.Height, kOcclusionId);
+	return wrapper;
+}
+
+std::shared_ptr<org::ExternalTextureResource> ORGSkylighting::OcclusionMap() const
+{
+	const auto& twin = OcclusionTwin();
+	return twin && RenderGraphRuntime::Get().IsActive() ? std::dynamic_pointer_cast<org::ExternalTextureResource>(twin->Graph()) : nullptr;
+}
+
 bool ORGSkylighting::Update(const Skylighting& a_feature)
 {
 	if (!IsActive())
@@ -462,6 +528,8 @@ ORGSkylighting& ORGSkylighting::Get()
 ORGSkylighting::~ORGSkylighting() = default;
 void ORGSkylighting::Reserve() {}
 bool ORGSkylighting::Setup(const Skylighting&, std::function<void()>) { return false; }
+Texture2D* ORGSkylighting::MakeOcclusionMap(const D3D11_TEXTURE2D_DESC&, DXGI_FORMAT, DXGI_FORMAT) { return nullptr; }
+std::shared_ptr<org::ExternalTextureResource> ORGSkylighting::OcclusionMap() const { return nullptr; }
 bool ORGSkylighting::Update(const Skylighting&) { return false; }
 bool ORGSkylighting::IsActive() const { return false; }
 ID3D11ShaderResourceView* ORGSkylighting::SRV(Volume) const { return nullptr; }

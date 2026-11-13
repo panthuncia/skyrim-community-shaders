@@ -6,6 +6,7 @@
 #include "Features/DrawcallLimitFix/Features/OcclusionMaps/OcclusionMaps.h"
 #include "Features/DrawcallLimitFix/Diagnostics/Observation.h"
 #include "Features/Skylighting.h"
+#include "Features/Skylighting/ORGSkylighting.h"
 
 namespace DCLF::Features::OcclusionMaps
 {
@@ -14,13 +15,15 @@ namespace DCLF::Features::OcclusionMaps
 		constexpr auto kSky = static_cast<std::uint32_t>(Api::OcclusionMap::Sky);
 		constexpr auto kPrecipitation = static_cast<std::uint32_t>(Api::OcclusionMap::Precipitation);
 
-		// The sky map's target: Skylighting's own occlusion texture, which it swaps in for the precipitation occlusion target.
+		// The sky map's target: Skylighting's own occlusion texture, which it swaps in for the precipitation occlusion target. With
+		// CS_ORG_SKYLIGHTING the texture is a graph twin's export, and the epoch draws into the twin itself.
 		void ImportSkyTarget(Api::OcclusionTargetImport& a_import)
 		{
 			if (auto* sky = globals::features::skylighting.texOcclusion) {
 				a_import.supplied = true;
 				a_import.texture = sky->resource.get();
 				a_import.view = sky->dsv.get();
+				a_import.graph = ORGSkylighting::Get().OcclusionMap();
 			}
 		}
 		bool SkyReferenceDue() { return ReferenceDue(kSky); }
