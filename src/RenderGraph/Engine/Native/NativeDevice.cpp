@@ -2501,8 +2501,9 @@ namespace RenderGraph::Engine::Native
 				logger::info("[ORG native] more operations take the immediate context's own path; only the first {} are logged", kMaxLines);
 				return;
 			}
-			logger::info("[ORG native] {} on \"{}\" runs on the immediate context's own path (not a graph pass or external work; logged once per "
-						 "operation and resource)",
+			logger::info(
+				"[ORG native] {} on \"{}\" runs on the immediate context's own path (not a graph pass or external work; logged once per "
+				"operation and resource)",
 				OpCensus::Name(a_op), a_record.name);
 		}
 

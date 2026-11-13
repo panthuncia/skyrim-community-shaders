@@ -812,7 +812,11 @@ namespace RenderGraph::Engine::Skeleton
 			}
 			AnchorPasses::Builder builder(kCopyAnchors[index], kCopyIds[index], 0);
 			builder.Add(AnchorPasses::Copy{
-				.name = kCopySteps[index], .source = copy.source, .target = copy.target, .width = copy.source.Width(), .height = copy.source.Height() });
+				.name = kCopySteps[index],
+				.source = copy.source,
+				.target = copy.target,
+				.width = copy.source.Width(),
+				.height = copy.source.Height() });
 			FrameAnchors::ClientDesc client{};
 			client.id = kCopyIds[index];
 			client.passes = builder.Take();

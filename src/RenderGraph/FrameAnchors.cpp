@@ -136,14 +136,14 @@ namespace FrameAnchors
 			Segment::AnchorEngineQueries,  // the sun's occlusion queries, after Main::RenderWorld's accumulator (nominally here: a second runs later in the frame)
 			Segment::FirstPerson,
 			Segment::AnchorVolumetricLighting,  // RenderWorldPostProcess's VL apply and blur, before the composites and Main_PostProcessing
-			Segment::AnchorPostProcessing,   // Main_PostProcessing, before the upscaler
-			Segment::AnchorUpscale,          // after the upscaler's evaluate
-			Segment::AnchorImageSpace,       // the ImageSpace chain's batches (pre-tonemap composites, the HDR effect), a few times a frame
-			Segment::AnchorEngineCopy,       // the engine's kMAIN copy, between the chain's batches (nominally here; native mode only)
-			Segment::AnchorTonemap,          // in the ImageSpace chain after it
-			Segment::AnchorFrameGeneration,  // after the ImageSpace chain, before frame generation
-			Segment::AnchorMovieTiles,       // a Bink movie inside another frame, at its tile draw (nominally here: the frame's UI time)
-			Segment::AnchorInterface,        // Scaleform's displays (UI::DrawInterface), several times a frame
+			Segment::AnchorPostProcessing,      // Main_PostProcessing, before the upscaler
+			Segment::AnchorUpscale,             // after the upscaler's evaluate
+			Segment::AnchorImageSpace,          // the ImageSpace chain's batches (pre-tonemap composites, the HDR effect), a few times a frame
+			Segment::AnchorEngineCopy,          // the engine's kMAIN copy, between the chain's batches (nominally here; native mode only)
+			Segment::AnchorTonemap,             // in the ImageSpace chain after it
+			Segment::AnchorFrameGeneration,     // after the ImageSpace chain, before frame generation
+			Segment::AnchorMovieTiles,          // a Bink movie inside another frame, at its tile draw (nominally here: the frame's UI time)
+			Segment::AnchorInterface,           // Scaleform's displays (UI::DrawInterface), several times a frame
 			Segment::AnchorPresent,
 			Segment::AnchorOverlay,    // the overlay's ImGui draw, inside HDRDisplay's present chain
 			Segment::AnchorHDROutput,  // HDRDisplay's output composite, after the overlay
