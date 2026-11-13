@@ -892,7 +892,7 @@ namespace RenderGraph::Engine::Scaleform::Passes
 		}
 
 		/** @brief The role's surface for a_colour with a_depth (DXVK's), imported; without passes when the target cannot be imported. */
-		std::shared_ptr<Surface> MakeSurface(PathState& a_state, Role a_role, ID3D11Texture2D* a_colour, DXGI_FORMAT a_format, ID3D11Texture2D* a_depth)
+		std::shared_ptr<Surface> MakeSurface([[maybe_unused]] PathState& a_state, Role a_role, ID3D11Texture2D* a_colour, DXGI_FORMAT a_format, ID3D11Texture2D* a_depth)
 		{
 			auto surface = std::make_shared<Surface>();
 			surface->role = a_role;
