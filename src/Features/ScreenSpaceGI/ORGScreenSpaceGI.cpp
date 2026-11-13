@@ -352,7 +352,7 @@ namespace
 		inputs.normalRoughness = FrameAnchors::EngineTarget(static_cast<std::uint32_t>(NORMALROUGHNESS));
 		inputs.motionVectors = FrameAnchors::EngineTarget(static_cast<std::uint32_t>(RE::RENDER_TARGET::kMOTION_VECTOR));
 		if (feature.texNoise)
-			inputs.noise = FrameAnchors::D3D11Texture(kNoiseName, feature.texNoise->resource.get(), feature.texNoise->srv.get(), nullptr);
+			inputs.noise = FrameAnchors::ImmutableTexture(kNoiseName, feature.texNoise->resource.get(), feature.texNoise->srv.get());
 		return inputs;
 	}
 }

@@ -352,6 +352,14 @@ namespace FrameAnchors
 		ID3D11UnorderedAccessView* a_uav, ID3D11RenderTargetView* a_rtv = nullptr);
 
 	/**
+	 * @brief A texture loaded once from a file and only read by shaders after (a noise or LUT texture, a bokeh shape, a default
+	 * cubemap, an effect's file texture), with its SRV: "cs.d3d11.<name>", as D3D11Texture imports it. The one place such textures
+	 * enter the graph, so native mode can give them the exempt ownership (org::Resource::GraphOwnership::
+	 * ExternalImmutableShaderResource) here. They import as D3D11Texture does for now: ORG's graphs refuse an exempt resource.
+	 */
+	std::shared_ptr<org::ExternalTextureResource> ImmutableTexture(std::string_view a_name, ID3D11Texture2D* a_texture, ID3D11ShaderResourceView* a_srv);
+
+	/**
 	 * @brief EngineDepth for a depth texture outside the engine's table (a feature's own map, or one only a view of reaches the
 	 * feature): a_target's texture with its DSV and depth SRV, either of which may be null. Registered with every graph as a_id, and
 	 * kept while a_target's texture stays the same. Null when the texture cannot be imported.

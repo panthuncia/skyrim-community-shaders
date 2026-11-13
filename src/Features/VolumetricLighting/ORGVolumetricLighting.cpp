@@ -447,7 +447,7 @@ struct ORGVolumetricLighting::Impl
 			winrt::com_ptr<ID3D11Resource> resource;
 			noiseGradient->GetResource(resource.put());
 			const auto texture = resource.try_as<ID3D11Texture2D>();
-			made->noiseGradient = texture ? FrameAnchors::D3D11Texture("volumetric-lighting.noise-gradient", texture.get(), noiseGradient, nullptr) : nullptr;
+			made->noiseGradient = texture ? FrameAnchors::ImmutableTexture("volumetric-lighting.noise-gradient", texture.get(), noiseGradient) : nullptr;
 			made->noiseGradientView = noiseGradient;
 		}
 		if (!made->noiseGradient) {
