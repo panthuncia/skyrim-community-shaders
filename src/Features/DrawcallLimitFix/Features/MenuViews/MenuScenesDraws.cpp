@@ -82,6 +82,7 @@ namespace DCLF::Features::MenuViews::Scenes::SceneDraws
 		struct Bindings
 		{
 			SharedConstants::Bindings shared;
+			Extensions::DeclaredReads inputs;  // the published inputs (Client::inputs)
 			std::array<org::DeclaredViewToken, kMaxImports> colours{};
 			org::DeclaredViewToken depth{};
 		};
@@ -120,7 +121,8 @@ namespace DCLF::Features::MenuViews::Scenes::SceneDraws
 				for (std::uint32_t i = 0; i < client->colourCount; ++i)
 					bindings.colours[i] = a_builder.RenderTarget(client->colours[i]).View();
 				bindings.depth = a_builder.DepthReadWrite(client->depth).View();
-				client->inputs.Declare(a_builder);
+				// The published inputs, each with the view whose index the draws' latches carry.
+				bindings.inputs = client->inputs.Declare(a_builder);
 				return bindings;
 			}
 
@@ -131,7 +133,11 @@ namespace DCLF::Features::MenuViews::Scenes::SceneDraws
 				a_out.push_back(run ? run->revision : 0);
 			}
 
-			Frame Prepare(const Bindings&, const org::PassPrepareContext&) const { return { std::atomic_load(&client->run), client }; }
+			Frame Prepare(const Bindings& a_bindings, const org::PassPrepareContext& a_preparation) const
+			{
+				Extensions::CheckDeclaredReads(a_bindings.inputs, a_preparation, client->id);
+				return { std::atomic_load(&client->run), client };
+			}
 
 			static void Record(const Bindings& a_bindings, const Frame& a_frame, org::PassRecordContext& a_recording)
 			{

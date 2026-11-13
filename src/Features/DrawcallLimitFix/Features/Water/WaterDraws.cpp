@@ -76,6 +76,7 @@ namespace DCLF::Features::Water::WaterDraws
 		struct Bindings
 		{
 			SharedConstants::Bindings shared;
+			Extensions::DeclaredReads inputs;  // the published inputs (Client::inputs)
 			std::array<org::DeclaredViewToken, 3> colours{};
 			std::array<bool, 3> hasColours{};
 			org::DeclaredViewToken depth{};
@@ -106,9 +107,9 @@ namespace DCLF::Features::Water::WaterDraws
 					bindings.hasColours[i] = true;
 				}
 				bindings.depth = a_builder.DepthReadWrite(c.depth).View();
-				// The published inputs, declared for their order only: the run's header indices and the draws' latches carry their
-				// indices. Every registered one is declared, read this frame or not, so a new Publish needs no new client.
-				client->inputs.Declare(a_builder);
+				// The published inputs, each with the view whose index the run's header indices and the draws' latches carry. Every
+				// registered one is declared, read this frame or not, so a new Publish needs no new client.
+				bindings.inputs = client->inputs.Declare(a_builder);
 				return bindings;
 			}
 
@@ -119,7 +120,11 @@ namespace DCLF::Features::Water::WaterDraws
 				a_out.push_back(run ? run->revision : 0);
 			}
 
-			Frame Prepare(const Bindings&, const org::PassPrepareContext&) const { return { std::atomic_load(&client->run), client }; }
+			Frame Prepare(const Bindings& a_bindings, const org::PassPrepareContext& a_preparation) const
+			{
+				Extensions::CheckDeclaredReads(a_bindings.inputs, a_preparation, client->id);
+				return { std::atomic_load(&client->run), client };
+			}
 
 			static void Record(const Bindings& a_bindings, const Frame& a_frame, org::PassRecordContext& a_recording)
 			{
