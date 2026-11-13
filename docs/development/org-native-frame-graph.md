@@ -950,3 +950,21 @@ So:
 - **Attached values that run ahead of their graph.** The attached value is the newest build state once nothing is asked for. A change
   that asks for no rebuild (the slot owners shared, a view set up, which never re-added the main extension before either) moves the
   serial without a graph. The graphs then run as built, as before this lane.
+
+## Phase 3 and DCLF async builds (2026-11-13, merged; tested on the RTX 5080)
+
+**Phase 3 is done.** The native census's world window reads only CPU-only constant-buffer maps (about 240 a frame).
+- The `kTEMPORAL_AA_MASK` and `kWATER_1`/`kWATER_2` clears are three more views in the engine skeleton's frame clears.
+- The `kMAIN` to `kMAIN Copy` copy runs at the EngineCopy anchor.
+- Rare work on tracked textures goes through `ExternalWork`.
+- The raw paths stay for host-made images, buffers, DYNAMIC uploads, GenerateMips and UAV clears. Each use is logged once.
+- Shots match in both modes.
+
+**DCLF's epoch graphs build on the scene worker** (`CS_DCLF_ASYNC_BUILDS`, on by default), from an immutable build state. They attach at a frame's end, and the next frame start adopts the snapshot.
+- A native tour logs no "graph built on the render thread" warning, down from 18-19 with the switch off.
+- It logs 16 DCLF attaches, each built in 0.4-4 ms off the render thread and attached in 0.1-0.9 ms.
+- Two frame starts waited for recordings after an attach: 50 ms just after the first load and 28 ms at a `coc` into an interior (graph conditions changed). Both are at load transitions, none in play.
+- Tour shots with the switch on and off match. Dragonsreach differs only where the NPCs stand.
+- Still on the render thread: a rebuild of the main resources under claims (rare) and shader reload.
+
+Test runs now use `CS_TEST_BACKGROUND=1`, so they never focus the game or move the mouse.
