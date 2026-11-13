@@ -9,6 +9,7 @@
 #	include <Resources/ResourceIdentifier.h>
 
 #	include <algorithm>
+#	include <atomic>
 #	include <chrono>
 #	include <condition_variable>
 #	include <deque>
@@ -122,7 +123,7 @@ namespace RenderGraph
 		std::mutex buildMutex;
 
 		// Owner thread.
-		std::thread::id owner = std::this_thread::get_id();
+		std::atomic<std::thread::id> owner{ std::this_thread::get_id() };  // the thread that polls; read by Submit on any thread
 		std::map<std::uint64_t, Group> groups;
 		std::unordered_set<std::uint32_t> inFlight;
 		std::unordered_map<std::uint32_t, std::uint64_t> failedAt;  // epoch -> the request count its last build failed at
@@ -151,7 +152,7 @@ namespace RenderGraph
 			return desc.label ? desc.label(a_epoch) : fmt::format("epoch {}", a_epoch);
 		}
 
-		bool OnOwner() const { return std::this_thread::get_id() == owner; }
+		bool OnOwner() const { return std::this_thread::get_id() == owner.load(std::memory_order_acquire); }
 
 		void Run()
 		{
@@ -503,7 +504,7 @@ namespace RenderGraph
 	bool BuildManager::Poll(std::string_view a_point)
 	{
 		auto& m = *impl;
-		m.owner = std::this_thread::get_id();
+		m.owner.store(std::this_thread::get_id(), std::memory_order_release);
 		m.ApplyPending();
 		bool changed = false;
 		// The host's safe point first (shader reload): every graph built here, with the host's thread held. Builds handed out before
@@ -523,7 +524,7 @@ namespace RenderGraph
 
 	bool BuildManager::BuildOwnerEpochsNow(std::string_view a_caller)
 	{
-		impl->owner = std::this_thread::get_id();
+		impl->owner.store(std::this_thread::get_id(), std::memory_order_release);
 		impl->ApplyPending();
 		return impl->BuildOwnerEpochs(a_caller);
 	}
@@ -535,7 +536,7 @@ namespace RenderGraph
 			(void)Poll(a_caller);
 			return false;
 		}
-		m.owner = std::this_thread::get_id();
+		m.owner.store(std::this_thread::get_id(), std::memory_order_release);
 		m.ApplyPending();
 		std::scoped_lock lock(m.buildMutex);
 		(void)m.desc.host->BuildIfRequested();
