@@ -1,5 +1,6 @@
 #pragma once
 
+#include "Features/CloudShadows/ORGCloudShadows.h"
 #include "Utils/Game.h"
 
 struct CloudShadows : Feature
@@ -76,6 +77,13 @@ private:
 	Util::FrameChecker frameChecker;
 	Util::FrameChecker frame_checker[6];
 
+	/** @brief Face a_face of layer a_layer cleared: queued for a_point's anchor, else on D3D11 after what is queued. */
+	void ClearLayerFace(int a_layer, int a_face, LayerOpPoint a_point);
+	/** @brief Face a_face of layer a_from copied into layer a_to: queued for a_point's anchor, else on D3D11 after what is queued. */
+	void CopyLayerFace(int a_to, int a_from, int a_face, LayerOpPoint a_point);
+	/** @brief Before a D3D11 use of the layers: what the graph has queued, done on D3D11 first. */
+	void FlushQueuedLayerOps();
+
 public:
 	/** @brief Creates cubemap textures, SRVs, RTVs, and blend state for cloud shadow rendering. */
 	virtual void SetupResources() override;
@@ -89,12 +97,23 @@ public:
 
 	Settings GetCommonBufferData();
 
+	using LayerOpPoint = ORGCloudShadows::LayerOpPoint;
+
 	/**
 	 * @brief Clears the cloud occlusion render target for a given cubemap face if not yet cleared this frame.
 	 * @param side Cubemap face index (0-5).
+	 * @param a_point Where its clears and copies go: the next run of that anchor (ORGCloudShadows::QueueLayerOp), or D3D11.
 	 */
-	void CheckResourcesSide(int side);
-	void PropagateToCompletion(int side);
+	void CheckResourcesSide(int side, LayerOpPoint a_point = LayerOpPoint::D3D11);
+	/**
+	 * @brief Copies a finished face's layers into the faces that have not drawn them, and its top layer into the last layer.
+	 * @param side Cubemap face index (0-5).
+	 * @param a_point Where its copies go, as for CheckResourcesSide.
+	 */
+	void PropagateToCompletion(int side, LayerOpPoint a_point = LayerOpPoint::D3D11);
+
+	/** @brief Layer operations done on D3D11, in order: the graph's queue taken back (ORGCloudShadows::TakeLayerOps). */
+	void ApplyLayerOps(const std::vector<ORGCloudShadows::LayerOp>& a_ops);
 	/**
 	 * @brief Checks if the current sky render pass is rendering clouds to the reflections cubemap and flags it for override.
 	 * @param Pass The BSRenderPass being set up for rendering.

@@ -5,6 +5,7 @@
 #include <functional>
 #include <memory>
 #include <string_view>
+#include <vector>
 
 class Texture2D;
 
@@ -26,10 +27,11 @@ namespace org
  *   render target the feature adds). Layer L of a face holds the occlusion of the face's layers up to L: the main pass's clouds read
  *   their own layer for self shadowing (t26). With Drawcall Limit Fix's sky family drawing the faces' clouds (CS_ORG_SKY), the
  *   graph writes the same layers through their imports (ImportLayer).
- * - Between those draws, Cloud Shadows clears and copies layer faces (CheckResourcesSide, SkyShaderHacks, and PropagateToCompletion
- *   when the next face starts). These run inside the engine's draw stream, where there is no anchor, so they stay on D3D11.
- * - At EarlyPrepass, PropagateToCompletion fills the faces the frame did not draw. Its copies change every frame, chain into each
- *   other, and read and write the same layer textures. They stay on D3D11 with the layers (see the API notes).
+ * - Between those draws, Cloud Shadows clears and copies layer faces (CheckResourcesSide, NoteGraphCloudLayer, and
+ *   PropagateToCompletion when the next face starts). For the faces the sky family draws on the graph, these are layer operations
+ *   (below) at the SkyReflections anchor, before the face's draws. For the faces the engine draws (SkyShaderHacks), they stay on
+ *   D3D11, inside the engine's draw stream, where there is no anchor.
+ * - At EarlyPrepass, PropagateToCompletion fills the faces the frame did not draw: layer operations at the EarlyPrepass anchor.
  * - At the reflections prepass, the last layer is copied into the occlusion cubemap that every reader samples. This copy is the
  *   graph pass here.
  *
@@ -45,6 +47,17 @@ namespace org
  *   Cloud Shadows makes its SRV and per-face RTVs on the export for the engine's cloud draws and its own clears and copies, and the
  *   copy and the sky family declare the twin itself (ImportLayer). When a twin cannot be made, the layer is a D3D11 texture,
  *   imported with its SRV and the RTV of its first face.
+ *
+ * Layer operations (client "cs.cloud-shadows.layers", when every layer is a twin):
+ * - Cloud Shadows queues each clear and copy of a layer face (QueueLayerOp) for the next run of the anchor that follows the call:
+ *   ReflectionsPrepass (the last layer cleared when there are no clouds), SkyReflections (a graph-drawn face's clears and the
+ *   previous face's propagation) or EarlyPrepass (the frame's last propagation).
+ * - The queue resolves chains as it goes. Each layer face ends up untouched, zero, or a copy of a face as it was before the run.
+ * - The run does two gated passes, each one dispatch per layer (LayerOpsCS). The gather copies the faces that are read into a
+ *   scratch array. The scatter writes every face that changes, from its scratch slot or as zero. All reads come before all writes,
+ *   so the D3D11 calls' order is kept, and each pass needs only one declaration.
+ * - Ops stay queued only until that run. Before any D3D11 use of the layers (an engine draw, a D3D11 copy), the feature takes
+ *   what is queued and does it on D3D11 first.
  *
  * On any failure it stops for good and IsActive() turns false: the feature then copies on D3D11 again.
  *
@@ -101,10 +114,42 @@ public:
 	/** @brief The occlusion cubemap's exported view (t25, t26); null when inactive. */
 	ID3D11ShaderResourceView* OcclusionSRV() const;
 
+	/** @brief Where a layer operation is called from: the anchor whose next run does it, or D3D11 (an engine-drawn face). */
+	enum class LayerOpPoint : std::uint8_t
+	{
+		D3D11,
+		ReflectionsPrepass,
+		SkyReflections,
+		EarlyPrepass,
+	};
+
+	/** @brief One layer operation: face `face` of layer `dst` cleared (src == kClearOp), or copied from the same face of layer `src`. */
+	struct LayerOp
+	{
+		std::uint8_t dst = 0;
+		std::uint8_t src = 0;
+		std::uint8_t face = 0;
+	};
+	static constexpr std::uint8_t kClearOp = 0xFF;
+
+	/**
+	 * @brief Queues a layer operation for the next run of a_point's anchor. Render thread.
+	 * @return False: the caller does it on D3D11, after taking and doing what is queued (TakeLayerOps). That happens when the layer
+	 * operations are not on the graph, a_point is D3D11, its anchor cannot run the client now, operations for another point are still
+	 * queued (their run did not happen), or the scratch array is full.
+	 */
+	bool QueueLayerOp(LayerOpPoint a_point, LayerOp a_op);
+
+	/** @brief The queued layer operations in call order, taken off the queue, for the caller to do on D3D11. Render thread. */
+	std::vector<LayerOp> TakeLayerOps();
+
 	~ORGCloudShadows();
 
 	/** @brief The resources and per-frame state the pass and the client share (ORGCloudShadows.cpp). */
 	struct Impl;
+
+	/** @brief The layer operations' resources and queue (ORGCloudShadows.cpp). */
+	struct LayerOps;
 
 private:
 	ORGCloudShadows() = default;
@@ -112,5 +157,9 @@ private:
 	/** @brief Stops the ORG path for good. */
 	void Stop();
 
+	/** @brief At Setup, with every layer a twin: the layer operations' programs, scratch array and client. False keeps them on D3D11. */
+	bool SetupLayerOps();
+
 	std::shared_ptr<Impl> impl;
+	std::shared_ptr<LayerOps> layerOps;
 };

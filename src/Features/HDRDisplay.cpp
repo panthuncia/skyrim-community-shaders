@@ -760,6 +760,8 @@ void HDRDisplay::SetupResources()
 		uiTexture = new Texture2D(uiTexDesc, "HDR::UiTexture");
 	uiTexture->CreateSRV(uiSrvDesc);
 	uiTexture->CreateUAV(uiUavDesc);
+	// A new texture's contents are undefined (a graph twin's natively): the first redirect clears it.
+	uiTextureClean = false;
 
 	D3D11_RENDER_TARGET_VIEW_DESC rtvDesc{};
 	rtvDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
@@ -858,8 +860,13 @@ void HDRDisplay::SetUIBuffer()
 		savedFramebufferRTV = fb.RTV;
 	}
 
-	float clearColor[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
-	globals::d3d::context->ClearRenderTargetView(uiTexture->rtv.get(), clearColor);
+	// Still clean from the last clear (natively the graph's, after the composite): nothing to clear. A second redirect in a frame
+	// clears what the first drew, as before.
+	if (!uiTextureClean) {
+		float clearColor[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
+		globals::d3d::context->ClearRenderTargetView(uiTexture->rtv.get(), clearColor);
+	}
+	uiTextureClean = false;
 
 	fb.RTV = uiTexture->rtv.get();
 	globals::d3d::context->OMSetRenderTargets(1, &fb.RTV, nullptr);
@@ -868,8 +875,14 @@ void HDRDisplay::SetUIBuffer()
 void HDRDisplay::PrepareMovieDraw()
 {
 	if (IsHDREnabledForFrame() && !framebufferRedirected && hdrTexture && hdrTexture->rtv) {
-		const float clearColor[4]{};
-		globals::d3d::context->ClearRenderTargetView(hdrTexture->rtv.get(), clearColor);
+		// On the graph the clear is a pass before the composite (ORGHDRDisplay::Compose): the movie draws into the UI texture, and
+		// nothing reads or writes the scene until the composite.
+		if (ORGHDRDisplay::Get().CanClearScene()) {
+			sceneClearFrame = globals::state->frameCount;
+		} else {
+			const float clearColor[4]{};
+			globals::d3d::context->ClearRenderTargetView(hdrTexture->rtv.get(), clearColor);
+		}
 		movieDrawnFrame = globals::state->frameCount;
 		SetUIBuffer();
 	}
@@ -889,6 +902,8 @@ void HDRDisplay::SyncFramebufferUIRedirect()
 	auto& fb = globals::game::renderer->GetRuntimeData().renderTargets[RE::RENDER_TARGET::kFRAMEBUFFER];
 	if (!savedFramebufferRTV && fb.RTV != uiTexture->rtv.get())
 		savedFramebufferRTV = fb.RTV;
+	// Engine draws go into it from here.
+	uiTextureClean = false;
 	fb.RTV = uiTexture->rtv.get();
 	globals::d3d::context->OMSetRenderTargets(1, &fb.RTV, nullptr);
 }
@@ -1132,9 +1147,12 @@ void HDRDisplay::ClearUIBuffer()
 {
 	auto* context = globals::d3d::context;
 	// The graph cleared it after this frame's composite (ORGHDRDisplay).
-	if (context && uiTexture && uiTexture->rtv && !ORGHDRDisplay::Get().TakeUIClear()) {
-		float clearColor[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
-		context->ClearRenderTargetView(uiTexture->rtv.get(), clearColor);
+	if (context && uiTexture && uiTexture->rtv) {
+		if (!ORGHDRDisplay::Get().TakeUIClear()) {
+			float clearColor[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
+			context->ClearRenderTargetView(uiTexture->rtv.get(), clearColor);
+		}
+		uiTextureClean = true;
 	}
 
 	if (savedFramebufferRTV) {
@@ -1161,6 +1179,10 @@ void HDRDisplay::ApplyHDR()
 	auto renderer = globals::game::renderer;
 
 	UpdateHDRData();
+
+	// A movie frame's scene clear the graph was to make before the composite (PrepareMovieDraw); one from an earlier frame whose
+	// composite never ran is dropped, since that frame's scene was never read.
+	const bool clearScene = std::exchange(sceneClearFrame, UINT32_MAX) == globals::state->frameCount;
 
 	state->BeginPerfEvent("HDR Processing");
 
@@ -1201,9 +1223,15 @@ void HDRDisplay::ApplyHDR()
 			globals::d3d::swapChain->GetBuffer(0, IID_PPV_ARGS(backBuffer.put()));
 
 		// CS_ORG_HDR_DISPLAY: the composite, and the copy when it can, on the render graph. Else D3D11.
-		const auto composed = ORGHDRDisplay::Get().Compose(BuildHDRData(), backBuffer.get());
-		if (composed == ORGHDRDisplay::Composed::None)
+		const auto composed = ORGHDRDisplay::Get().Compose(BuildHDRData(), backBuffer.get(), clearScene);
+		if (composed == ORGHDRDisplay::Composed::None) {
+			// The graph did not compose, so it did not clear the scene either.
+			if (clearScene && hdrTexture->rtv) {
+				const float clearColor[4]{};
+				context->ClearRenderTargetView(hdrTexture->rtv.get(), clearColor);
+			}
 			DispatchHDROutput(sceneSRV, uiSRV, outputTexture->uav.get());
+		}
 		if (backBuffer && composed != ORGHDRDisplay::Composed::OutputAndBackBuffer)
 			context->CopyResource(backBuffer.get(), outputTexture->resource.get());
 	}

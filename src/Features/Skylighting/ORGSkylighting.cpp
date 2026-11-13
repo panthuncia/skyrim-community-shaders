@@ -23,6 +23,7 @@ bool ORGSkylighting::Requested()
 #	include "RenderGraph/FrameAnchors.h"
 #	include "RenderGraph/GraphResources.h"
 #	include "RenderGraph/PublishedResources.h"
+#	include "RenderGraph/RasterProgram.h"
 #	include "RenderGraph/RenderGraphRuntime.h"
 #	include "RenderGraph/RunGate.h"
 #	include "RenderGraph/ShaderBindings.h"
@@ -33,6 +34,7 @@ bool ORGSkylighting::Requested()
 #	include <Render/RenderGraph/RenderGraph.h>
 #	include <RenderPasses/Base/TypedRenderGraphPass.h>
 #	include <Resources/ExternalTextureResource.h>
+#	include <rhi_helpers.h>
 
 #	include <array>
 #	include <cmath>
@@ -40,18 +42,31 @@ bool ORGSkylighting::Requested()
 #	include <numbers>
 #	include <optional>
 #	include <type_traits>
+#	include <utility>
 
 namespace
 {
 	constexpr const char* kClientId = "cs.skylighting";
 	constexpr const char* kShader = "Skylighting/UpdateProbesCS.hlsl";
+	// The occlusion map's clear, drawn: the engine skeleton's clear shader (depth 1.0 from the vertex stage, an Always test).
+	constexpr const char* kClearShader = "RenderGraph/EngineClear.hlsl";
 	constexpr auto kVolumes = static_cast<std::size_t>(ORGSkylighting::Volume::Count);
+	// The client's gate entries: the probe update, and the occlusion map's clear.
+	constexpr std::uint32_t kUpdateEntry = 0;
+	constexpr std::uint32_t kClearEntry = 1;
 
 	/** @brief The sky occlusion map's twin (ORGSkylighting::MakeOcclusionMap); null when Skylighting made a D3D11 one. */
 	std::unique_ptr<GraphResources::Texture2D>& OcclusionTwin()
 	{
 		static std::unique_ptr<GraphResources::Texture2D> s_twin;
 		return s_twin;
+	}
+
+	/** @brief The twin's DSV format (the target's), for the clear program. */
+	DXGI_FORMAT& OcclusionDsvFormat()
+	{
+		static DXGI_FORMAT s_format = DXGI_FORMAT_UNKNOWN;
+		return s_format;
 	}
 
 	/** @brief The graph no longer updates the probes: the published volumes' readers return to D3D11. */
@@ -141,6 +156,8 @@ namespace
 		std::shared_ptr<RenderGraph::RunGate> gate;
 		// The imported inputs, null until the first frame that updates; replaced (and the client refreshed) when D3D11 gives others.
 		std::shared_ptr<org::ExternalTextureResource> occlusion, shadowCascades, esramShadows;
+		// The occlusion map's clear (the twin's only; null keeps the D3D11 clear).
+		std::shared_ptr<const RasterProgram> clearProgram;
 	};
 
 	/** @brief What the render thread hands the anchor's commit: this frame's shadow data, on a frame that updates. */
@@ -148,6 +165,11 @@ namespace
 	{
 		std::optional<Shadows> pending;
 		bool failed = false;
+		// Render thread: Drawcall Limit Fix drew the occlusion map since its last clear on the graph (NoteOcclusionDrawn).
+		bool occlusionDrawn = false;
+		// The next run clears the map after the update read it (Update queued it); the commit opened that clear (TakeOcclusionCleared).
+		bool clearOcclusion = false;
+		bool occlusionCleared = false;
 	};
 
 	struct ProbeBindings
@@ -220,13 +242,71 @@ namespace
 				block.volumes[i] = a_recording.Index(a_bindings.volumes[i]);
 			block.comparisonSampler = a_frame.sampler;
 			block.shadows = ShaderBindings::LatchOf(*a_frame.latch, a_recording.Run());
-			a_frame.gate->Dispatch(a_recording, *a_frame.program, ShaderBindings::Data(block), 0);
+			a_frame.gate->Dispatch(a_recording, *a_frame.program, ShaderBindings::Data(block), kUpdateEntry);
 		}
 
 	private:
 		std::shared_ptr<org::Resource> occlusion, shadowCascades, esramShadows;
 		std::array<std::shared_ptr<org::Resource>, kVolumes> volumes;
 		ProbeFrame frame;
+	};
+
+	struct ClearBindings
+	{
+		org::DeclaredViewToken depth;
+	};
+
+	struct ClearFrame
+	{
+		std::shared_ptr<const RasterProgram> program;
+		std::shared_ptr<const RenderGraph::RunGate> gate;
+		std::uint32_t width = 0, height = 0;
+	};
+
+	/**
+	 * @brief The occlusion map cleared to 1.0 after the probe update read it, so Drawcall Limit Fix's next shadow epoch draws into an
+	 * empty map (D3D11 cleared it just before that epoch). A depth draw through the client's gate: the commit opens it on the runs
+	 * Update queued it for.
+	 */
+	class OcclusionClearPass final : public org::TypedRenderGraphPass<OcclusionClearPass, ClearFrame, ClearBindings>
+	{
+	public:
+		OcclusionClearPass(std::shared_ptr<org::ExternalTextureResource> a_map, const Resources& a_resources) :
+			map(std::move(a_map))
+		{
+			frame.program = a_resources.clearProgram;
+			frame.gate = a_resources.gate;
+			frame.width = static_cast<std::uint32_t>(map->GetWidth());
+			frame.height = static_cast<std::uint32_t>(map->GetHeight());
+		}
+
+		ClearBindings Declare(org::PassBuilder& a_builder) { return { a_builder.DepthReadWrite(map).View() }; }
+
+		void Revision(std::vector<std::uint64_t>& a_out) const
+		{
+			a_out.push_back(reinterpret_cast<std::uintptr_t>(frame.program.get()));
+			a_out.push_back(reinterpret_cast<std::uintptr_t>(frame.gate.get()));
+		}
+
+		ClearFrame Prepare(const ClearBindings&, const org::PassPrepareContext&) const { return frame; }
+
+		static void Record(const ClearBindings& a_bindings, const ClearFrame& a_frame, org::PassRecordContext& a_recording)
+		{
+			if (!a_frame.program || !a_frame.gate)
+				return;
+			const RasterProgram::Depth depth{ .view = &a_bindings.depth, .readOnly = false, .load = rhi::LoadOp::Load };
+			RasterProgram::DrawDesc draw{};
+			draw.depth = &depth;
+			draw.viewport = { .x = 0, .y = 0, .width = a_frame.width, .height = a_frame.height };
+			draw.debugName = "Skylighting::OcclusionClear";
+			draw.indirect = &a_frame.gate->Latch();
+			draw.indirectOffset = a_frame.gate->Offset(kClearEntry);
+			a_frame.program->Draw(a_recording, draw);
+		}
+
+	private:
+		std::shared_ptr<org::ExternalTextureResource> map;
+		ClearFrame frame;
 	};
 
 	/** @brief A shadow map's texture behind a_srv: the engine's depth-stencil import when it is one of the engine's, else its own. */
@@ -321,6 +401,13 @@ struct ORGSkylighting::Impl
 				return nullptr;
 			return std::make_shared<UpdateProbesPass>(*resources);
 		});
+		// After the update read the map: the twin cleared for Drawcall Limit Fix's next shadow epoch. Left out without a twin or program.
+		a_builder.Add("clear-occlusion", FrameAnchors::PassKind::Render, [resources = resources]() -> std::shared_ptr<org::RenderPass> {
+			auto map = ORGSkylighting::Get().OcclusionMap();
+			if (!map || !resources->clearProgram)
+				return nullptr;
+			return std::make_shared<OcclusionClearPass>(std::move(map), *resources);
+		});
 
 		FrameAnchors::ClientDesc client{};
 		client.id = kClientId;
@@ -331,13 +418,17 @@ struct ORGSkylighting::Impl
 			for (const auto& volume : resources->volumes)
 				volume->Register(a_graph);
 		};
-		// Active on frames that update; every run closes the gate first, so the others dispatch nothing.
-		client.active = [state = state] { return state->pending.has_value(); };
+		// Active on frames that update or clear the map; every run closes the gate first, so the others dispatch and draw nothing.
+		client.active = [state = state] { return state->pending.has_value() || state->clearOcclusion; };
 		client.commit = [state = state, resources = resources](const FrameAnchors::Point&) {
+			if (std::exchange(state->clearOcclusion, false)) {
+				resources->gate->OpenDraw(kClearEntry);
+				state->occlusionCleared = true;
+			}
 			if (!state->pending)
 				return;
 			resources->latch->WriteValue(RenderGraphRuntime::Get().Host()->CurrentRun(), 0, *state->pending);
-			resources->gate->OpenDispatch(0, resources->groups[0], resources->groups[1], resources->groups[2]);
+			resources->gate->OpenDispatch(kUpdateEntry, resources->groups[0], resources->groups[1], resources->groups[2]);
 			state->pending.reset();
 		};
 		client.onFailed = [state = state, onFailed = std::move(a_onFailed)] {
@@ -387,10 +478,20 @@ bool ORGSkylighting::Setup(const Skylighting& a_feature, std::function<void()> a
 	resources->program = ComputeProgram::Load(host->Device(), { .source = kShader, .constantWords = ShaderBindings::Words<UpdateProbesBlock>() });
 	resources->sampler = ShaderBindings::CreateSampler({ .compareEnable = true, .compareOp = rhi::CompareOp::LessEqual, .reduction = rhi::ReductionMode::Comparison });
 	resources->latch = std::make_shared<org::LatchBlock>("cs.skylighting.latch", static_cast<std::uint32_t>(sizeof(Shadows)));
-	resources->gate = RenderGraph::RunGate::Create("cs.skylighting.gate");
+	resources->gate = RenderGraph::RunGate::Create("cs.skylighting.gate", 2);
 	if (!resources->program || !resources->sampler || !resources->gate) {
 		logger::warn("[ORG] Skylighting: the probe update's program, sampler or gate could not be made; it stays on D3D11");
 		return false;
+	}
+	// The occlusion map's clear, for the twin only (a D3D11 map keeps Skylighting's D3D11 clear).
+	if (OcclusionTwin() && OcclusionDsvFormat() != DXGI_FORMAT_UNKNOWN) {
+		RasterProgram::Desc clearDesc{ .pixelSource = kClearShader, .vertexSource = kClearShader, .vertexEntry = L"VSMain", .commonDefines = false };
+		clearDesc.pixelEntry = L"PSDepth";
+		clearDesc.depthFormat = rhi::helpers::ToRHI(OcclusionDsvFormat());
+		clearDesc.depth = { .depthEnable = true, .depthWrite = true, .depthFunc = rhi::CompareOp::Always };
+		resources->clearProgram = RasterProgram::Load(host->Device(), clearDesc);
+		if (!resources->clearProgram)
+			logger::warn("[ORG] Skylighting: the occlusion map's clear program could not be made; the map is cleared on D3D11");
 	}
 	// Read by D3D11 (the engine's draws, the composite): exported SRV. ResetSkylighting clears them on the graph (QueueReset).
 	constexpr GraphResources::Options volumeOptions{ .lifetime = GraphResources::Lifetime::History, .d3d11 = GraphResources::Export::SRV };
@@ -410,7 +511,7 @@ bool ORGSkylighting::Setup(const Skylighting& a_feature, std::function<void()> a
 	}
 	next->resources = resources;
 
-	// The four reset clears, then the update at -1, before IBL (0 and 1).
+	// The four reset clears, then the update at -1, before IBL (0 and 1); the occlusion map's clear at 0 touches nothing IBL uses.
 	RenderGraph::AnchorPasses::Builder builder(FrameAnchors::Anchor::Prepass, kClientId, -5);
 	auto client = next->MakeClient(builder, std::move(a_onFailed));
 	if (builder.Failed()) {
@@ -474,6 +575,7 @@ Texture2D* ORGSkylighting::MakeOcclusionMap(const D3D11_TEXTURE2D_DESC& a_desc, 
 	wrapper->srv.copy_from(texture->SRV());
 	wrapper->dsv.copy_from(texture->DSV());
 	twin = std::move(texture);
+	OcclusionDsvFormat() = a_dsvFormat;
 	logger::info("[ORG] Skylighting: the sky occlusion map is a graph texture ({}x{}), published as {}", desc.Width, desc.Height, kOcclusionId);
 	return wrapper;
 }
@@ -491,7 +593,25 @@ bool ORGSkylighting::Update(const Skylighting& a_feature)
 	// Without an input the gate stays closed: the graph's volumes hold this frame as they are.
 	if (impl->ResolveInputs(MakeInputs(a_feature)))
 		impl->state->pending = MakeShadows(a_feature);
+	// The map Drawcall Limit Fix drew is read now: cleared after the update for its next draw, when the clear is in the built graph.
+	auto& state = *impl->state;
+	if (state.occlusionDrawn && impl->resources->clearProgram && FrameAnchors::CanRun(kClientId, FrameAnchors::Anchor::Prepass)) {
+		state.occlusionDrawn = false;
+		state.occlusionCleared = false;
+		state.clearOcclusion = true;
+	}
 	return true;
+}
+
+void ORGSkylighting::NoteOcclusionDrawn()
+{
+	if (IsActive())
+		impl->state->occlusionDrawn = true;
+}
+
+bool ORGSkylighting::TakeOcclusionCleared()
+{
+	return IsActive() && std::exchange(impl->state->occlusionCleared, false);
 }
 
 bool ORGSkylighting::IsActive() const
@@ -531,6 +651,8 @@ bool ORGSkylighting::Setup(const Skylighting&, std::function<void()>) { return f
 Texture2D* ORGSkylighting::MakeOcclusionMap(const D3D11_TEXTURE2D_DESC&, DXGI_FORMAT, DXGI_FORMAT) { return nullptr; }
 std::shared_ptr<org::ExternalTextureResource> ORGSkylighting::OcclusionMap() const { return nullptr; }
 bool ORGSkylighting::Update(const Skylighting&) { return false; }
+void ORGSkylighting::NoteOcclusionDrawn() {}
+bool ORGSkylighting::TakeOcclusionCleared() { return false; }
 bool ORGSkylighting::IsActive() const { return false; }
 ID3D11ShaderResourceView* ORGSkylighting::SRV(Volume) const { return nullptr; }
 bool ORGSkylighting::QueueReset() { return false; }

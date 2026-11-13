@@ -680,6 +680,8 @@ void Skylighting::RenderSkyOcclusionMap(RE::Precipitation* a_precip, bool a_dclf
 	// Held by a Drawcall Limit Fix load hold: rendered here without the engine's cull, as DCLF's own variant is.
 	const bool held = !a_dclf && dclf.OcclusionHeld(DrawcallLimitFix::kSkyOcclusion);
 	const bool engine = (!a_dclf && !held) || reference;
+	// Engine-only occluders: the engine draws them into DCLF's map at RenderMask.
+	bool engineOnly = false;
 	{
 		ZoneScopedN("Skylighting - Setup Projection");
 		// The engine positions the precipitation camera using its previous world
@@ -692,7 +694,7 @@ void Skylighting::RenderSkyOcclusionMap(RE::Precipitation* a_precip, bool a_dclf
 		_computeProjection(a_precip, a_precip->occlusionData.camera);
 		if (engine)
 			a_precip->SetupMask();
-		else if (dclf.OcclusionEngineOnlyMask(a_precip))
+		else if ((engineOnly = dclf.OcclusionEngineOnlyMask(a_precip)))
 			;  // DCLF's map, the engine's cull for its engine-only occluders alone (SetupMask set the camera)
 		else if (auto* accumulator = a_precip->occlusionData.accumulator.get())
 			accumulator->camera = a_precip->occlusionData.camera.get();  // what SetupMask sets
@@ -712,8 +714,17 @@ void Skylighting::RenderSkyOcclusionMap(RE::Precipitation* a_precip, bool a_dclf
 		// RenderMask defers its clear until the first engine draw. The DCLF
 		// accumulator may be empty, so explicitly discard the previous sky
 		// direction's depths before the shadow epoch draws into this map.
-		if (a_dclf)
-			globals::d3d::context->ClearDepthStencilView(texOcclusion->dsv.get(), D3D11_CLEAR_DEPTH, 1.0f, 0);
+		// On the ORG path the graph cleared the twin after the last probe
+		// update read it (ORGSkylighting::Update), unless the engine drew
+		// into the map since; then no D3D11 clear is needed. The reference
+		// and engine-only frames, whose engine draws come first, keep it.
+		auto& graph = ORGSkylighting::Get();
+		const bool clearedOnGraph = graph.TakeOcclusionCleared();
+		if (a_dclf) {
+			if (!clearedOnGraph || reference || engineOnly)
+				globals::d3d::context->ClearDepthStencilView(texOcclusion->dsv.get(), D3D11_CLEAR_DEPTH, 1.0f, 0);
+			graph.NoteOcclusionDrawn();
+		}
 		globals::profiler->EndPass();
 	}
 	inOcclusion = false;
