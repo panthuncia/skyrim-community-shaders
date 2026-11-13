@@ -46,7 +46,11 @@ groupshared float3 g_scratchRadiance[8][8];
 	// MIP 0
 	const uint2 baseCoord = dispatchThreadID;
 	const uint2 pixCoord = baseCoord * 2;
-	const float2 uv = (pixCoord + .5) * SsgiFrame.RcpFrameDim;
+	// The dispatch is rounded up to 16 pixels, so the last groups pass the frame (at 640x360, rows 360-367). The radiance pass
+	// wrote only the frame: past it the texture holds whatever its memory held last (on the render graph, another transient's
+	// data). Clamp the 2x2 gather to the frame; the mips past it repeat the edge.
+	const uint2 readCoord = min(pixCoord, max(uint2(OUT_FRAME_DIM), 2) - 2);
+	const float2 uv = (readCoord + .5) * SsgiFrame.RcpFrameDim;
 
 	float4 rad0 = srcRadiance.GatherRed(samplerPointClamp, uv * frameScale);
 	float4 rad1 = srcRadiance.GatherGreen(samplerPointClamp, uv * frameScale);
