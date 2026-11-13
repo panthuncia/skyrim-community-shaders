@@ -23,6 +23,7 @@ namespace RenderGraph::Engine::Textures
 #	include "RenderGraph/Engine/Tripwire/GuestDevice.h"
 #	include "RenderGraph/Engine/Tripwire/Tripwire.h"
 #	include "RenderGraph/RenderGraphRuntime.h"
+#	include "RenderGraph/UndeclaredAccess.h"
 #	include "Utils/D3D.h"
 
 #	include <OpenRenderGraph/GraphHost.h>
@@ -289,6 +290,10 @@ namespace RenderGraph::Engine::Textures
 			std::unique_lock lock(g_registryMutex);
 			g_registry[record->graph.get()] = record;
 		}
+		// Made with its contents and bound SRV-only: immutable from here (the undeclared-access validator's exempt class). A texture
+		// made zeroed is filled later by someone, so it is not.
+		if (RenderGraph::UndeclaredAccess::On() && a_info.initialData && a_info.initialData->pSysMem && a_info.bindFlags == D3D11_BIND_SHADER_RESOURCE)
+			RenderGraph::UndeclaredAccess::NoteImmutable(record->graph);
 		g_created.fetch_add(1, std::memory_order_relaxed);
 		if (viewHandle) {
 			a_out.texture = std::move(textureHandle);

@@ -24,6 +24,7 @@ namespace RenderGraph::Engine::Buffers
 #	include "RenderGraph/Engine/Tripwire/GuestDevice.h"
 #	include "RenderGraph/Engine/Tripwire/Tripwire.h"
 #	include "RenderGraph/RenderGraphRuntime.h"
+#	include "RenderGraph/UndeclaredAccess.h"
 
 #	include <OpenRenderGraph/GraphHost.h>
 #	include <Resources/Buffers/Buffer.h>
@@ -142,6 +143,9 @@ namespace RenderGraph::Engine::Buffers
 			std::memcpy(backing->data, a_contents, a_desc.ByteWidth);
 			auto view = detail::EngineView(a_desc, *backing, name);
 			if (view) {
+				// Filled once, here, and bound VB or IB only: immutable from here (the undeclared-access validator's exempt class).
+				if (RenderGraph::UndeclaredAccess::On())
+					RenderGraph::UndeclaredAccess::NoteImmutable(backing->buffer);
 				auto& counters = detail::GetCounters();
 				counters.created.fetch_add(1, std::memory_order_relaxed);
 				counters.createdBytes.fetch_add(a_desc.ByteWidth, std::memory_order_relaxed);
