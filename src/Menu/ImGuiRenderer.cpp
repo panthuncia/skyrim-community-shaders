@@ -68,7 +68,7 @@ namespace ImGuiRenderer
 			auto* view = reinterpret_cast<ID3D11ShaderResourceView*>(static_cast<std::uintptr_t>(a_texture));
 			if (!view)
 				return {};
-			// An icon's ORG copy is one of the backend's textures, read through its passes' declarations.
+			// An icon's ORG copy is one of the backend's exempt textures, read through its own views.
 			if (auto icon = Util::IconLoader::OrgBinding(view); icon.texture)
 				return icon;
 			auto binding = DCLF::GpuTextures::Get().ResolveBinding(view, kSourceTag);
