@@ -39,6 +39,12 @@ namespace RenderGraph
 		return host ? MakeBufferRef(host->Device(), const_cast<org::Buffer&>(a_buffer).GetAPIResource().GetHandle(), a_offset, a_where) : BufferRef{};
 	}
 
+	BufferRef DeclaredRefOf(const org::Buffer& a_buffer, std::uint64_t a_offset, std::source_location a_where)
+	{
+		auto* host = RenderGraphRuntime::Get().Host();
+		return host ? MakeBufferRef(host->Device(), const_cast<org::Buffer&>(a_buffer).GetAPIResource().GetHandle(), a_offset, a_where) : BufferRef{};
+	}
+
 	void SetBufferRefChecks(bool a_on)
 	{
 		g_bufferRefChecks.store(a_on, std::memory_order_relaxed);

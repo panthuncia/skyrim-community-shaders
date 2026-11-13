@@ -69,6 +69,12 @@ namespace RenderGraph
 	BufferRef BufferRefOf(rhi::ResourceHandle a_buffer, std::uint64_t a_offset = 0, std::source_location a_where = std::source_location::current());
 	BufferRef BufferRefOf(const org::Buffer& a_buffer, std::uint64_t a_offset = 0, std::source_location a_where = std::source_location::current());
 
+	/**
+	 * @brief a_buffer's ref at a_offset on the graph host's device, for a buffer every pass reading the ref declares (no views): the
+	 * undeclared-access validator does not note it. The caller names those passes beside the call. Null without a host. Any thread.
+	 */
+	BufferRef DeclaredRefOf(const org::Buffer& a_buffer, std::uint64_t a_offset = 0, std::source_location a_where = std::source_location::current());
+
 	/** @brief CheckBufferRef on the graph host's device; nothing without a host or with the checks off. */
 	void CheckBufferRef(BufferRef a_ref, std::uint64_t a_address, std::uint64_t a_bytes, std::string_view a_what,
 		std::source_location a_where = std::source_location::current());
