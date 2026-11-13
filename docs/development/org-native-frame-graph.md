@@ -212,3 +212,35 @@ Every other anchor runs once a frame.
   - EngineDrawFamily.cpp:409, `kMAIN` copy in a frame slot;
   - FrameRecords.cpp:242, `kHDR_DOWNSAMPLE4` and LLF's D3D11 exports;
   - GrassTables.cpp:168, `kSHADOW_MASK`.
+
+## Phase 2 item 2 lane: versioned identities (`org-native/p2-versioned-ids`)
+
+**What versions now:**
+- **Versioned twins.** A `GraphResources` texture made with `Options::versioned` keeps one `org::VersionedTexture` slot (`Versioned()`).
+  - Its passes declare the slot (`AnchorPasses::Bind::Srv/Uav` of the twin), and `Register` makes the slot the name's resolver.
+  - A `Resize` with the same mip count publishes the new texture as the next version and calls `NoteNewVersions`: no build.
+  - The D3D11 export is made again, so D3D11 readers fetch `SRV()` again.
+  - ORG's `VersionedTexture::CreateImage`/`PublishImage` take exported images (`ExternalTextureResource`).
+- **Published ids.** A versioned twin is published as its slot, registered as the id's resolver. Its export and `ShaderResourceIndex`
+  follow the current version.
+- **Converted:** Terrain Blending's blended depths and mask. Readers of their ids (SSS, EHF, sun rays, DCLF) no longer rebuild on a
+  resolution change. The blend's own anchor is still built again, because its group counts and engine depths change.
+
+**Structural rebuilds** go through `GraphResources::RequestStructuralRebuild` and log `[ORG] structural rebuild <n>`. That covers:
+- a replaced or released import;
+- a resize of a twin that is not versioned, or one with another mip count (the resize generation);
+- a published id replaced by a new resource.
+
+**Still rebuilding, and why:**
+- **Twins not converted.** Every other twin's passes declare `Graph()` directly, through about 210 sites. A version's backing must
+  not also be declared directly, so each owner has to move every declaration to the slot before setting `versioned`. Most owners
+  also make a whole new state and register their client again on a resolution change.
+- **Imports and engine targets** (`FrameAnchors::Import`, `EngineTargets`). About 117 import call sites hold and declare the
+  `ExternalTextureResource`. HDR's target upgrades change the format, which is a new shape class.
+- **Client registration, refresh, rearm and join** (`FrameAnchors.cpp` `Rebuild`). These are changes of passes, not of identities:
+  readback commits in SkyDraws and DecalOcclusion, Screenshot, Terrain Shadows' heightmap, and IBL sources.
+- **New ids** (`RequestRebuildFor` for an import or publication added) and builds that skipped an id.
+- **Shader reload, DCLF graph conditions, profiling and test harness:** program or graph-shape changes.
+
+**Known effect:** DCLF's `DeclarePublishedRead` latches the index at the build. After a versioned resize it may log
+`[ORG] declared view mismatch` once per id until Phase 4 writes the index from the declaration.
