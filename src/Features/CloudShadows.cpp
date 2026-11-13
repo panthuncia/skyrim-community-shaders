@@ -345,8 +345,12 @@ void CloudShadows::SetupResources()
 		for (int layer = 0; layer < kMaxCloudLayers; ++layer) {
 			char name[64];
 			snprintf(name, sizeof(name), "CloudShadows::Layer[%d]", layer);
-			texCloudShadowLayers[layer] = new Texture2D(texDesc, name);
-			texCloudShadowLayers[layer]->CreateSRV(srvDesc);
+			// CS_ORG_CLOUD_SHADOWS=1: a graph-owned layer exported to D3D11, else a D3D11 texture.
+			texCloudShadowLayers[layer] = ORGCloudShadows::MakeLayer(layer, texDesc, srvDesc, name);
+			if (!texCloudShadowLayers[layer]) {
+				texCloudShadowLayers[layer] = new Texture2D(texDesc, name);
+				texCloudShadowLayers[layer]->CreateSRV(srvDesc);
+			}
 
 			for (int face = 0; face < 6; ++face) {
 				reflections.cubeSideRTV[face]->GetDesc(&rtvDesc);

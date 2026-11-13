@@ -187,7 +187,7 @@ namespace DCLF
 								Api::OcclusionTargetImport request;
 								entry.importTarget(request);
 								if (request.supplied)
-									(void)i.ImportDepthTexture(OcclusionDepthTarget(v), request.texture, request.view, T::kPRECIPITATION_OCCLUSION_MAP);
+									(void)i.ImportDepthTexture(OcclusionDepthTarget(v), request.texture, request.view, T::kPRECIPITATION_OCCLUSION_MAP, request.graph);
 							}
 						}
 					i.NoteCapability(false, "the casters' and occlusion maps' modes and the catalog set up");

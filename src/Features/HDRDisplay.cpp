@@ -715,7 +715,11 @@ void HDRDisplay::SetupResources()
 	srvDesc.Format = texDesc.Format;
 	uavDesc.Format = texDesc.Format;
 
-	hdrTexture = new Texture2D(texDesc, "HDR::HdrTexture");
+	// CS_ORG_HDR_DISPLAY=1: HDR's textures are graph-owned, exported to D3D11 (ORGHDRDisplay::MakeTexture); else D3D11's.
+	auto& graphTextures = ORGHDRDisplay::Get();
+	hdrTexture = graphTextures.MakeTexture(ORGHDRDisplay::Texture::Scene, texDesc, "HDR::HdrTexture");
+	if (!hdrTexture)
+		hdrTexture = new Texture2D(texDesc, "HDR::HdrTexture");
 	hdrTexture->CreateSRV(srvDesc);
 	hdrTexture->CreateUAV(uavDesc);
 
@@ -732,7 +736,9 @@ void HDRDisplay::SetupResources()
 	srvDesc.Format = texDesc.Format;
 	uavDesc.Format = texDesc.Format;
 
-	outputTexture = new Texture2D(texDesc, "HDR::OutputTexture");
+	outputTexture = graphTextures.MakeTexture(ORGHDRDisplay::Texture::Output, texDesc, "HDR::OutputTexture");
+	if (!outputTexture)
+		outputTexture = new Texture2D(texDesc, "HDR::OutputTexture");
 	outputTexture->CreateSRV(srvDesc);
 	outputTexture->CreateUAV(uavDesc);
 
@@ -749,7 +755,9 @@ void HDRDisplay::SetupResources()
 	D3D11_UNORDERED_ACCESS_VIEW_DESC uiUavDesc = uavDesc;
 	uiUavDesc.Format = uiTexDesc.Format;
 
-	uiTexture = new Texture2D(uiTexDesc, "HDR::UiTexture");
+	uiTexture = graphTextures.MakeTexture(ORGHDRDisplay::Texture::Ui, uiTexDesc, "HDR::UiTexture");
+	if (!uiTexture)
+		uiTexture = new Texture2D(uiTexDesc, "HDR::UiTexture");
 	uiTexture->CreateSRV(uiSrvDesc);
 	uiTexture->CreateUAV(uiUavDesc);
 
@@ -1355,6 +1363,9 @@ void HDRDisplay::DestroyResources()
 		delete uiTexture;
 		uiTexture = nullptr;
 	}
+
+	// The graph-owned ones go once D3D11 is past them, now that nothing of D3D11 views them.
+	ORGHDRDisplay::Get().ReleaseTextures();
 
 	if (cleanSceneCapture) {
 		cleanSceneCapture->srv = nullptr;

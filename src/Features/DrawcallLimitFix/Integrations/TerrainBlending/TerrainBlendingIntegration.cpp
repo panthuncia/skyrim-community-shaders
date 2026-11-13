@@ -44,6 +44,12 @@ namespace DCLF::Integrations::TerrainBlending
 			return terrainBlending.loaded && terrainBlending.terrainDepth.texture ? terrainBlending.terrainDepth.texture : nullptr;
 		}
 
+		// Terrain Blending's terrain depth as the graph owns it (CS_ORG_TERRAIN_BLENDING); null: a D3D11 texture, imported.
+		std::shared_ptr<org::ExternalTextureResource> TerrainDepthGraph()
+		{
+			return globals::features::terrainBlending.loaded ? ::ORGTerrainBlending::Get().TerrainDepthGraph() : nullptr;
+		}
+
 		// Terrain Blending's near test with its depth-pass eye, for the terrain group 1 twin buckets (kBucketTerrainPair).
 		bool NearTest(float (&a_eyeDistance)[4])
 		{
@@ -90,7 +96,7 @@ namespace DCLF::Integrations::TerrainBlending
 				.graphResources = { ::ORGTerrainBlending::kBlendedDepth16Id } });
 			// Its near blocks drawn twice in the depth segment: into its terrain depth and, offset, into the main depth.
 			a_context.RegisterNearTwin({ .name = "Terrain Blending's terrain depth", .debugName = "DCLF terrain blending depth",
-				.resource = "cs.dclf.terrain-blending-depth", .target = &TerrainDepthTarget, .nearTest = &NearTest });
+				.resource = "cs.dclf.terrain-blending-depth", .target = &TerrainDepthTarget, .nearTest = &NearTest, .graph = &TerrainDepthGraph });
 		}
 	}
 

@@ -223,7 +223,7 @@ namespace DCLF::Extensions
 				stl::report_and_fail(fmt::format("Drawcall Limit Fix: {} registered near twin {}, which {} has", a_who, a_twin.name, a_lists.nearTwin.name));
 			const std::string name(a_twin.name);
 			a_lists.nearTwin = { name, std::string(a_twin.debugName), std::string(a_twin.resource), name + " cannot be described", name + " could not be imported",
-				a_twin.target, a_twin.nearTest };
+				a_twin.target, a_twin.nearTest, a_twin.graph };
 		}
 
 		/**

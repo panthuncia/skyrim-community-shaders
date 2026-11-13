@@ -111,9 +111,13 @@ void Skylighting::SetupResources()
 		precipitationOcclusion.depthSRV->GetDesc(&srvDesc);
 		precipitationOcclusion.views[0]->GetDesc(&dsvDesc);
 
-		texOcclusion = new Texture2D(texDesc, "Skylighting::Occlusion");
-		texOcclusion->CreateSRV(srvDesc);
-		texOcclusion->CreateDSV(dsvDesc);
+		// CS_ORG_SKYLIGHTING=1: a graph-owned map exported to D3D11, else a D3D11 texture.
+		texOcclusion = ORGSkylighting::Get().MakeOcclusionMap(texDesc, srvDesc.Format, dsvDesc.Format);
+		if (!texOcclusion) {
+			texOcclusion = new Texture2D(texDesc, "Skylighting::Occlusion");
+			texOcclusion->CreateSRV(srvDesc);
+			texOcclusion->CreateDSV(dsvDesc);
+		}
 	}
 
 	// CS_ORG_SKYLIGHTING=1: the render graph owns the volumes. If it fails later, the D3D11 ones are made and reset.

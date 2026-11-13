@@ -524,9 +524,12 @@ namespace DCLF
 		if (!a_state.nativeDepth)
 			return NotReady(11, "the main-pass depth could not be imported");
 		// The near twin's target (Api::NearTwinContribution: Integrations/TerrainBlending's terrain depth) shares the main depth's
-		// description; the Z-prepass draws Appended0's near objects into it as that feature's depth hook does.
+		// description; the Z-prepass draws Appended0's near objects into it as that feature's depth hook does. A target the graph owns
+		// (CS_ORG_TERRAIN_BLENDING) is declared as itself, so its clear and the blend are ordered with these draws.
 		const auto& nearTwin = Extensions::NearTwin();
-		if (auto* const twinTarget = static_cast<ID3D11Texture2D*>(nearTwin.target ? nearTwin.target() : nullptr)) {
+		if (auto owned = nearTwin.graph ? nearTwin.graph() : nullptr) {
+			a_state.terrainDepth = std::move(owned);
+		} else if (auto* const twinTarget = static_cast<ID3D11Texture2D*>(nearTwin.target ? nearTwin.target() : nullptr)) {
 			DxvkOrgInteropResourceInfo terrainInfo{};
 			if (!RenderGraphRuntime::Get().DescribeResource(twinTarget, terrainInfo) || terrainInfo.kind != DXVK_ORG_INTEROP_RESOURCE_IMAGE)
 				return NotReady(12, nearTwin.cannotDescribe.c_str());
@@ -1009,7 +1012,8 @@ namespace DCLF
 		return ImportDepthTexture(a_index, data.texture, data.views[0], a_target);
 	}
 
-	bool ShadowEngine::ImportDepthTexture(std::uint32_t a_index, ID3D11Texture2D* a_texture, ID3D11DepthStencilView* a_view, std::uint32_t a_label)
+	bool ShadowEngine::ImportDepthTexture(std::uint32_t a_index, ID3D11Texture2D* a_texture, ID3D11DepthStencilView* a_view, std::uint32_t a_label,
+		std::shared_ptr<org::ExternalTextureResource> a_graph)
 	{
 		auto* host = RenderGraphRuntime::Get().Host();
 		if (!host || !shadow || a_index >= kShadowDepthTargets)
@@ -1018,6 +1022,19 @@ namespace DCLF
 			return ShadowNotReady(3, "the shadow map has no texture");
 		if (shadow->depth[a_index] && shadow->depthTexture[a_index] == a_texture)
 			return true;
+		const auto adopt = [&](std::shared_ptr<org::ExternalTextureResource> a_resource, std::uint32_t a_layers) {
+			shadow->depth[a_index] = std::move(a_resource);
+			shadow->depthTexture[a_index] = a_texture;
+			shadow->depthLayers[a_index] = a_layers;
+			// A new resource for the passes to bind: the shadow epochs' graphs are rebuilt at their next build.
+			host->AddExtension(kShadowExtensionId, [state = shadow] { return Diagnostics::ScheduleDumped(kShadowExtensionId, MakeShadowExtension(state)); }, ExtensionEpochs(Api::EpochShape::Shadow));
+		};
+		// A graph-owned target (an occlusion map's twin): its resource, one 2D slice.
+		if (a_graph) {
+			adopt(std::move(a_graph), 1);
+			logger::info("[DCLF] shadow map {} is a graph texture: declared as itself, not imported", a_label);
+			return true;
+		}
 		DxvkOrgInteropResourceInfo info{};
 		if (!RenderGraphRuntime::Get().DescribeResource(a_texture, info) || info.kind != DXVK_ORG_INTEROP_RESOURCE_IMAGE)
 			return ShadowNotReady(4, "the shadow map cannot be described");
@@ -1037,11 +1054,7 @@ namespace DCLF
 		auto imported = ImportImage(host->Device(), info.image, desc, name);
 		if (!imported)
 			return ShadowNotReady(5, "the shadow map could not be imported (not in the general layout?)");
-		shadow->depth[a_index] = std::move(imported);
-		shadow->depthTexture[a_index] = a_texture;
-		shadow->depthLayers[a_index] = info.image.arrayLayers;
-		// A new resource for the passes to bind: the shadow epochs' graphs are rebuilt at their next build.
-		host->AddExtension(kShadowExtensionId, [state = shadow] { return Diagnostics::ScheduleDumped(kShadowExtensionId, MakeShadowExtension(state)); }, ExtensionEpochs(Api::EpochShape::Shadow));
+		adopt(std::move(imported), info.image.arrayLayers);
 		logger::info("[DCLF] shadow map {} imported: {}x{}, {} slices, format {}", a_label, info.image.extent.width, info.image.extent.height,
 			info.image.arrayLayers, static_cast<int>(dsvDesc.Format));
 		return true;

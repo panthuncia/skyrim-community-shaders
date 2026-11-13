@@ -67,6 +67,7 @@ namespace RenderGraph::Engine::Bink
 #	include <rhi_interop_vulkan.h>
 
 #	include "Features/HDRDisplay.h"
+#	include "Features/HDRDisplay/ORGHDRDisplay.h"
 #	include "Globals.h"
 #	include "RenderGraph/Engine/Bink/Bink.h"
 #	include "RenderGraph/Engine/Tripwire/Tripwire.h"
@@ -470,8 +471,11 @@ namespace RenderGraph::Engine::Bink::Graph
 			if (a_isFramebuffer) {
 				resource = FrameAnchors::EngineTarget(static_cast<std::uint32_t>(RE::RENDER_TARGET::kFRAMEBUFFER));
 			} else {
+				// HDR's UI texture: its twin (CS_ORG_HDR_DISPLAY), else its D3D11 texture imported.
 				const auto& ui = *globals::features::hdrDisplay.uiTexture;
-				resource = FrameAnchors::D3D11Texture(kHdrUiName, ui.resource.get(), ui.srv.get(), ui.uav.get(), ui.rtv.get());
+				resource = ORGHDRDisplay::Get().GraphOf(ui.resource.get());
+				if (!resource)
+					resource = FrameAnchors::D3D11Texture(kHdrUiName, ui.resource.get(), ui.srv.get(), ui.uav.get(), ui.rtv.get());
 			}
 			const auto format = rhi::helpers::ToRHI(a_format);
 			if (!resource || format == rhi::Format::Unknown || !ProgramFor(format)) {

@@ -8,17 +8,19 @@
 
 namespace org
 {
+	class ExternalTextureResource;
 	class Resource;
 }
 
 /**
  * @brief Terrain Blending's depth blend on the render graph (CS_ORG_TERRAIN_BLENDING=1).
  *
- * What stays on D3D11, and why:
- * - The terrain depth: the z-prepass draws near terrain blocks into it a second time, without the depth offset. Drawcall Limit Fix
- *   draws them there itself when it holds the terrain (Integrations/TerrainBlending's near twin, into its own import of the
- *   texture); otherwise the engine's draws do, re-issued by Terrain Blending's hook. The engine's draws need a D3D11 depth-stencil
- *   view, which graph textures do not export, so the texture and its clear stay D3D11's.
+ * The terrain depth ("TerrainBlending::TerrainDepth", MakeTerrainDepth) is a graph-owned depth twin, persistent and published,
+ * exported to D3D11 (SRV, DSV). The z-prepass draws near terrain blocks into it a second time, without the depth offset: Drawcall
+ * Limit Fix draws them there itself when it holds the terrain (Integrations/TerrainBlending's near twin, into the twin's own graph
+ * resource); otherwise the engine's draws do through the DSV export, re-issued by Terrain Blending's hook. Its clear before the depth
+ * pass is a graph pass at the EarlyPrepass anchor (TerrainDepthCleared); a frame whose anchor run did not have it clears through
+ * the export, as does the D3D11 blend's copy of the main depth into it.
  *
  * What runs on the graph: one compute pass at the DepthDone anchor, right after Main::RenderDepth returns. DepthBlend reads the
  * main depth (FrameAnchors::EngineDepth) and the terrain depth (FrameAnchors::ImportDepth) and writes three graph textures:
@@ -45,6 +47,8 @@ public:
 	static constexpr std::string_view kBlendedDepthId = "TerrainBlending::BlendedDepth";
 	static constexpr std::string_view kBlendedDepth16Id = "TerrainBlending::BlendedDepth16";
 	static constexpr std::string_view kMaskId = "TerrainBlending::Mask";
+	/** @brief The terrain depth twin's published id and name. */
+	static constexpr std::string_view kTerrainDepthId = "TerrainBlending::TerrainDepth";
 
 	/** @brief Whether CS_ORG_TERRAIN_BLENDING=1 is set. */
 	static bool Requested();
@@ -62,6 +66,21 @@ public:
 	 * @return Whether the blend is on the render graph; false keeps the D3D11 path.
 	 */
 	bool Setup(std::function<void()> a_onFailed = {});
+	/**
+	 * @brief At TerrainBlending::SetupResources, before Setup, when requested and the runtime is active: makes the terrain depth as a
+	 * graph-owned depth twin of a_desc (the main depth's description), exported (SRV, DSV, which must be in a_srvFormat and
+	 * a_dsvFormat) and published, fills a_target with its exports (one reference each, as D3D11's Create calls give), and registers
+	 * the client whose EarlyPrepass pass clears it. The twin lives as long as the game, whatever happens to the blend.
+	 * @return Whether a_target is filled; false: make a D3D11 texture.
+	 */
+	bool MakeTerrainDepth(RE::BSGraphics::DepthStencilData& a_target, const D3D11_TEXTURE2D_DESC& a_desc, DXGI_FORMAT a_srvFormat, DXGI_FORMAT a_dsvFormat);
+	/** @brief The terrain depth's graph resource (MakeTerrainDepth); null when Terrain Blending made a D3D11 one. */
+	std::shared_ptr<org::ExternalTextureResource> TerrainDepthGraph() const;
+	/**
+	 * @brief At TerrainBlending::ResetDepth: whether this frame's EarlyPrepass run had the terrain depth's clear pass, so the D3D11
+	 * clear is not needed.
+	 */
+	bool TerrainDepthCleared() const;
 
 	/**
 	 * @brief At Terrain Blending's depth hook, before it points the depth table at the blended depth: imports the depths, follows

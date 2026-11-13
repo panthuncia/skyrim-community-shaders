@@ -92,18 +92,22 @@ void TerrainBlending::SetupResources()
 
 		D3D11_TEXTURE2D_DESC texDesc;
 		mainDepth.texture->GetDesc(&texDesc);
-		DX::ThrowIfFailed(device->CreateTexture2D(&texDesc, NULL, &terrainDepth.texture));
-		Util::SetResourceName(terrainDepth.texture, "TerrainBlending::TerrainDepth");
-
 		D3D11_SHADER_RESOURCE_VIEW_DESC srvDesc;
 		mainDepth.depthSRV->GetDesc(&srvDesc);
-		DX::ThrowIfFailed(device->CreateShaderResourceView(terrainDepth.texture, &srvDesc, &terrainDepth.depthSRV));
-		Util::SetResourceName(terrainDepth.depthSRV, "TerrainBlending::TerrainDepth SRV");
-
 		D3D11_DEPTH_STENCIL_VIEW_DESC dsvDesc;
 		mainDepth.views[0]->GetDesc(&dsvDesc);
-		DX::ThrowIfFailed(device->CreateDepthStencilView(terrainDepth.texture, &dsvDesc, &terrainDepth.views[0]));
-		Util::SetResourceName(terrainDepth.views[0], "TerrainBlending::TerrainDepth DSV");
+
+		// CS_ORG_TERRAIN_BLENDING=1: a graph-owned depth exported to D3D11, else a D3D11 texture.
+		if (!ORGTerrainBlending::Get().MakeTerrainDepth(terrainDepth, texDesc, srvDesc.Format, dsvDesc.Format)) {
+			DX::ThrowIfFailed(device->CreateTexture2D(&texDesc, NULL, &terrainDepth.texture));
+			Util::SetResourceName(terrainDepth.texture, "TerrainBlending::TerrainDepth");
+
+			DX::ThrowIfFailed(device->CreateShaderResourceView(terrainDepth.texture, &srvDesc, &terrainDepth.depthSRV));
+			Util::SetResourceName(terrainDepth.depthSRV, "TerrainBlending::TerrainDepth SRV");
+
+			DX::ThrowIfFailed(device->CreateDepthStencilView(terrainDepth.texture, &dsvDesc, &terrainDepth.views[0]));
+			Util::SetResourceName(terrainDepth.views[0], "TerrainBlending::TerrainDepth DSV");
+		}
 	}
 
 	{
@@ -228,6 +232,9 @@ void TerrainBlending::TerrainShaderHacks()
 
 void TerrainBlending::ResetDepth()
 {
+	// The EarlyPrepass anchor's pass cleared it this frame (ORGTerrainBlending).
+	if (ORGTerrainBlending::Get().TerrainDepthCleared())
+		return;
 	TracyD3D11Zone(globals::state->tracyCtx, "Terrain Blending - Reset Depth");
 	auto context = globals::d3d::context;
 

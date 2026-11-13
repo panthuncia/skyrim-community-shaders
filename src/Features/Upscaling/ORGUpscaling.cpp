@@ -5,6 +5,7 @@
 
 #	include "ORGUpscaling.h"
 
+#	include "Features/HDRDisplay/ORGHDRDisplay.h"
 #	include "Features/Upscaling.h"
 #	include "Globals.h"
 #	include "RenderGraph/AnchorPasses.h"
@@ -716,10 +717,14 @@ bool ORGUpscaling::CopyHudless(ID3D11ShaderResourceView* a_source)
 	winrt::com_ptr<ID3D11Texture2D> texture;
 	if (!resource || FAILED(resource->QueryInterface(IID_PPV_ARGS(texture.put()))) || !texture)
 		return false;
-	// The framebuffer is the engine's target (the overlay imports it too); HDR's clean composite is a D3D11 texture of its own.
+	// The framebuffer is the engine's target (the overlay imports it too). HDR's clean composite is its output texture: the twin
+	// with CS_ORG_HDR_DISPLAY, ordered after the composite's writes, else a D3D11 texture imported.
 	auto& framebuffer = globals::game::renderer->GetRuntimeData().renderTargets[RE::RENDER_TARGETS::kFRAMEBUFFER];
-	auto source = framebuffer.texture == texture.get() ? FrameAnchors::EngineTarget(static_cast<std::uint32_t>(RE::RENDER_TARGETS::kFRAMEBUFFER)) :
-	                                                     FrameAnchors::D3D11Texture("Upscaling::HudlessSource", texture.get(), a_source, nullptr);
+	std::shared_ptr<org::ExternalTextureResource> source;
+	if (framebuffer.texture == texture.get())
+		source = FrameAnchors::EngineTarget(static_cast<std::uint32_t>(RE::RENDER_TARGETS::kFRAMEBUFFER));
+	else if (!(source = ORGHDRDisplay::Get().GraphOf(texture.get())))
+		source = FrameAnchors::D3D11Texture("Upscaling::HudlessSource", texture.get(), a_source, nullptr);
 	if (!source)
 		return false;
 	if (source != impl->hudlessSource) {

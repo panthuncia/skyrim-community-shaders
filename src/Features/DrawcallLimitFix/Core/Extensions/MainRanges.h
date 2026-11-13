@@ -62,6 +62,7 @@ namespace DCLF::Extensions
 		std::string cannotDescribe, cannotImport;  // "<name> cannot be described", "<name> could not be imported"
 		decltype(Api::NearTwinContribution::target) target = nullptr;
 		decltype(Api::NearTwinContribution::nearTest) nearTest = nullptr;
+		decltype(Api::NearTwinContribution::graph) graph = nullptr;
 	};
 	/** @brief Any thread, after InstallFeatures: the near twin (target null: none registered). */
 	const NearTwinEntry& NearTwin();

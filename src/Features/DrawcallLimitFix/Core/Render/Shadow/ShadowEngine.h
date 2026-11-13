@@ -210,8 +210,12 @@ namespace DCLF
 		}
 		bool SetupShadow();
 		bool ImportShadowDepth(std::uint32_t a_index, std::uint32_t a_target);
-		/** @brief Imports a_texture through a_view as depth target a_index (a_label: for the log). */
-		bool ImportDepthTexture(std::uint32_t a_index, ID3D11Texture2D* a_texture, ID3D11DepthStencilView* a_view, std::uint32_t a_label);
+		/**
+		 * @brief Imports a_texture through a_view as depth target a_index (a_label: for the log). With a_graph (a graph-owned target, its
+		 * D3D11 export a_texture), that resource is the target instead of a second import of the same image.
+		 */
+		bool ImportDepthTexture(std::uint32_t a_index, ID3D11Texture2D* a_texture, ID3D11DepthStencilView* a_view, std::uint32_t a_label,
+			std::shared_ptr<org::ExternalTextureResource> a_graph = nullptr);
 
 		ShadowKept shadowKept;  // the shadow epoch's inputs and records
 		ShadowKept* ShadowKeptState() { return &shadowKept; }

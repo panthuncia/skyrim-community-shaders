@@ -13,7 +13,13 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <memory>
 #include <string_view>
+
+namespace org
+{
+	class ExternalTextureResource;
+}
 
 namespace DCLF::Api
 {
@@ -91,6 +97,8 @@ namespace DCLF::Api
 	 *   description fits; null: no twin target (the feature not loaded).
 	 * - nearTest: render thread, per depth commit: the near test's eye (xyz) and distance (w) into a_eyeDistance; false (a_eyeDistance
 	 *   left as it is): no test this frame (w 0).
+	 * - graph (optional): the scene resources' setup (render thread): the target's own graph resource when the graph owns it (target is
+	 *   then its D3D11 export); the Z-prepass declares it instead of importing the texture again. Null: import target.
 	 */
 	struct NearTwinContribution
 	{
@@ -99,5 +107,6 @@ namespace DCLF::Api
 		std::string_view resource;
 		void* (*target)() = nullptr;
 		bool (*nearTest)(float (&a_eyeDistance)[4]) = nullptr;
+		std::shared_ptr<org::ExternalTextureResource> (*graph)() = nullptr;
 	};
 }
