@@ -13,6 +13,7 @@
 #include "RenderGraph/DxvkOrgInterop.h"
 #include "RenderGraph/Engine/Buffers/EngineBuffers.h"
 #include "RenderGraph/RenderGraphRuntime.h"
+#include "RenderGraph/UndeclaredAccess.h"
 
 #include <OpenRenderGraph/GraphHost.h>
 #include "Features/DrawcallLimitFix/Diagnostics/Observation.h"
@@ -96,10 +97,12 @@ namespace DCLF
 		return RenderGraphRuntime::Get().IsActive();
 	}
 
-	std::optional<GpuResources::LeasedBuffer> GpuResources::Acquire(ID3D11Buffer* a_buffer)
+	std::optional<GpuResources::LeasedBuffer> GpuResources::Acquire(ID3D11Buffer* a_buffer, std::source_location a_where)
 	{
 		if (!a_buffer)
 			return std::nullopt;
+		if (RenderGraph::UndeclaredAccess::On())
+			RenderGraph::UndeclaredAccess::NoteBuffer(a_buffer, "GpuResources::Acquire", a_where);
 		if (const auto it = entries.find(a_buffer); it != entries.end()) {
 			if (auto owner = it->second.owner.lock())
 				return LeasedBuffer{ it->second.buffer, it->second.generation, std::shared_ptr<const void>(std::move(owner)) };

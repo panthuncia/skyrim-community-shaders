@@ -24,6 +24,7 @@
 #include "RenderGraph/GpuTimingSource.h"
 #include "RenderGraph/ProgramCache.h"
 #include "RenderGraph/RunShapes.h"
+#include "RenderGraph/UndeclaredAccess.h"
 #include "RenderGraph/Switches.h"
 #include "Features/RemoteControl/GpuTimestamps.h"
 #include "Features/RemoteControl/GpuCounters.h"
@@ -2718,6 +2719,7 @@ void RenderGraphRuntime::SealPresented()
 	// The native frame graph diagnostics close their frame (cheap when their switches are off).
 	RenderGraph::Engine::Native::OpCensus::EndFrame();
 	RenderGraph::RunShapes::EndFrame();
+	RenderGraph::UndeclaredAccess::EndFrame();
 	if (impl && impl->host)
 		impl->host->SealSubmitted();
 	// Native mode, while it is brought up: the host's runs in flight every 600 presents, so a run that never retires shows early.
@@ -2813,6 +2815,7 @@ std::shared_ptr<org::ExternalEpochExecution> RenderGraphRuntime::ExecuteExternal
 		};
 	}
 	const char* label = Impl::SegmentLabel(a_segment);
+	RenderGraph::UndeclaredAccess::EpochScope undeclaredScope(label);
 	try {
 		impl->host->SubmitEpoch(EpochOf(a_segment), beforePrepare, std::move(a_resourceOwner));
 	} catch (...) {
@@ -2975,6 +2978,8 @@ RenderGraphRuntime::EpochResult RenderGraphRuntime::TryExecuteEpoch(Segment a_se
 	// Read by passes while the frame prepares and records, all before ExecuteFrame returns.
 	segment = a_segment;
 	ZoneText(Impl::SegmentLabel(a_segment), std::strlen(Impl::SegmentLabel(a_segment)));
+	// CS_ORG_VALIDATE_UNDECLARED: raw accesses made meanwhile on this thread (the commits, the inputs) are this epoch's.
+	RenderGraph::UndeclaredAccess::EpochScope undeclaredScope(Impl::SegmentLabel(a_segment));
 	// Where the epoch's submissions land in the D3D11 stream; the submissions themselves carry a queue
 	// label of the same name (Submit). The event spans the epoch's CPU side: the feature's inputs, the
 	// graph's preparation and recording, and the hand-off to DXVK.

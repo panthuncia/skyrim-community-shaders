@@ -9,6 +9,7 @@
 #	include "RenderGraph/FrameAnchors.h"
 #	include "RenderGraph/GraphResources.h"
 #	include "RenderGraph/RenderGraphRuntime.h"
+#	include "RenderGraph/UndeclaredAccess.h"
 
 #	include <OpenRenderGraph/GraphHost.h>
 #	include <Render/RenderGraph/RenderGraph.h>
@@ -271,11 +272,13 @@ namespace PublishedResources
 		return entry && entry->published && entry->srv == a_view;
 	}
 
-	bool ShaderResourceIndex(std::string_view a_id, std::uint32_t& a_index)
+	bool ShaderResourceIndex(std::string_view a_id, std::uint32_t& a_index, std::source_location a_where)
 	{
 		const auto* entry = Find(Published(), a_id);
 		if (!entry || !entry->published || !RenderGraphRuntime::Get().IsActive())
 			return false;
+		if (RenderGraph::UndeclaredAccess::On())
+			RenderGraph::UndeclaredAccess::NotePublished(a_id, a_where);
 		const auto* indexed = dynamic_cast<const org::GloballyIndexedResource*>(entry->resource.get());
 		if (!indexed)
 			return false;
@@ -325,7 +328,7 @@ namespace PublishedResources
 	bool IsRegistered(std::string_view) { return false; }
 	bool IsDeclarable(std::string_view) { return false; }
 	bool IsExportOf(const ID3D11ShaderResourceView*, std::string_view) { return false; }
-	bool ShaderResourceIndex(std::string_view, std::uint32_t&) { return false; }
+	bool ShaderResourceIndex(std::string_view, std::uint32_t&, std::source_location) { return false; }
 	std::string ExportedId(const ID3D11ShaderResourceView*) { return {}; }
 }
 

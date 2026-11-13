@@ -7,6 +7,7 @@
 #include <cstdint>
 #include <memory>
 #include <mutex>
+#include <source_location>
 #include <vector>
 
 #include <winrt/base.h>
@@ -96,9 +97,10 @@ namespace DCLF
 
 		/**
 		 * @brief A lease on the buffer's Vulkan view, resolving it when no lease on it is held; nullopt if it cannot be
-		 * made stable. The buffer stays resolved while the caller holds the lease.
+		 * made stable. The buffer stays resolved while the caller holds the lease. a_where names the caller for the undeclared-access
+		 * validator (CS_ORG_VALIDATE_UNDECLARED=1): the lease's ref is read raw, without a declaration.
 		 */
-		std::optional<LeasedBuffer> Acquire(ID3D11Buffer* a_buffer);
+		std::optional<LeasedBuffer> Acquire(ID3D11Buffer* a_buffer, std::source_location a_where = std::source_location::current());
 		/**
 		 * @brief Resolves the buffers no lease holds, all in one synchronization with DXVK's worker thread
 		 * (RenderGraphRuntime::DescribeResources), for the Acquire calls that follow: one per buffer otherwise. Returns at once:

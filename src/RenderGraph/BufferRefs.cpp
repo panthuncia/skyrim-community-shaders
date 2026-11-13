@@ -28,7 +28,11 @@ namespace RenderGraph
 
 	BufferRef BufferRefOf(const org::Buffer& a_buffer, std::uint64_t a_offset, std::source_location a_where)
 	{
-		return BufferRefOf(const_cast<org::Buffer&>(a_buffer).GetAPIResource().GetHandle(), a_offset, a_where);
+		// The ORG buffer is known here: the validator judges it by the graph's own rule, not as a handle.
+		if (UndeclaredAccess::On())
+			UndeclaredAccess::NoteResource(a_buffer, "BufferRefOf", a_where);
+		auto* host = RenderGraphRuntime::Get().Host();
+		return host ? MakeBufferRef(host->Device(), const_cast<org::Buffer&>(a_buffer).GetAPIResource().GetHandle(), a_offset, a_where) : BufferRef{};
 	}
 
 	void SetBufferRefChecks(bool a_on)

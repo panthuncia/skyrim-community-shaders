@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <source_location>
 #include <string>
 #include <string_view>
 
@@ -85,10 +86,11 @@ namespace PublishedResources
 
 	/**
 	 * @brief The bindless index of a_id's whole-resource shader resource view (every mip; a cube's TextureCube view, a 2D array's full
-	 * array view, a buffer's structured view), for a shader that reads it from the descriptor heap.
+	 * array view, a buffer's structured view), for a shader that reads it from the descriptor heap. The index is not a declaration:
+	 * the undeclared-access validator (CS_ORG_VALIDATE_UNDECLARED=1) logs each lookup with a_where, its caller.
 	 * @return False when a_id is not published, withdrawn, or has no such view.
 	 */
-	bool ShaderResourceIndex(std::string_view a_id, std::uint32_t& a_index);
+	bool ShaderResourceIndex(std::string_view a_id, std::uint32_t& a_index, std::source_location a_where = std::source_location::current());
 
 	/**
 	 * @brief The id whose twin exports a_view as its D3D11 SRV, while that id is published; empty otherwise. A diagnostic for readers

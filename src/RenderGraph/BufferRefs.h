@@ -4,6 +4,7 @@
 // time and frees it with the buffer.
 
 #include "RenderGraph/BufferRef.h"
+#include "RenderGraph/UndeclaredAccess.h"
 
 #include <rhi.h>
 
@@ -36,14 +37,25 @@ namespace RenderGraph
 	void CheckBufferRef(rhi::Device a_device, BufferRef a_ref, rhi::ResourceHandle a_buffer, std::uint64_t a_address, std::uint64_t a_bytes, std::string_view a_what,
 		std::source_location a_where = std::source_location::current());
 
-	/** @brief a_buffer's ref at a_offset on a_device; null when it has none. Any thread. */
-	inline BufferRef BufferRefOf(rhi::Device a_device, rhi::ResourceHandle a_buffer, std::uint64_t a_offset = 0,
-		std::source_location a_where = std::source_location::current())
+	/** @brief BufferRefOf's work, without the undeclared-access note. Any thread. */
+	inline BufferRef MakeBufferRef(rhi::Device a_device, rhi::ResourceHandle a_buffer, std::uint64_t a_offset, std::source_location a_where)
 	{
 		const BufferRef ref = a_device ? ToBufferRef(a_device.GetBufferViewRef({ a_buffer, a_offset })) : BufferRef{};
 		if (ref && BufferRefChecksOn())
 			CheckBufferRef(a_device, ref, a_buffer, 0, 0, "BufferRefOf", a_where);
 		return ref;
+	}
+
+	/**
+	 * @brief a_buffer's ref at a_offset on a_device; null when it has none. A raw ref by handle: the undeclared-access validator
+	 * (CS_ORG_VALIDATE_UNDECLARED=1) logs it with a_where. Any thread.
+	 */
+	inline BufferRef BufferRefOf(rhi::Device a_device, rhi::ResourceHandle a_buffer, std::uint64_t a_offset = 0,
+		std::source_location a_where = std::source_location::current())
+	{
+		if (UndeclaredAccess::On())
+			UndeclaredAccess::NoteRhiBuffer(a_buffer.index, a_buffer.generation, a_where);
+		return MakeBufferRef(a_device, a_buffer, a_offset, a_where);
 	}
 
 	/** @brief a_buffer's ref at a_offset on the graph host's device; null without a host. Any thread. */
