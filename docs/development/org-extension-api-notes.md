@@ -1792,3 +1792,21 @@ at the cost of the graph not ordering that write.
 `Bind::SrvArray` now cover both (5.5.3 and 5.5.4 added one each; merged into one kind). `Builder::Check` refuses a published id that
 is not declarable at the build (`PublishedResources::IsDeclarable`), so the caller's `make` leaves that pass out.
 
+
+### CS-owned textures as graph-owned twins exported to D3D11
+
+- **Need:** a texture CS creates for D3D11 (a feature's depth target, render target or composite) is drawn into by the engine's
+  D3D11 draws and read by graph passes. Imported through `FrameAnchors::D3D11Texture`/`ImportDepth`, each graph user makes its own
+  resource on the same image, which nothing orders, and native mode cannot track it.
+- **What exists now:** a persistent `GraphResources::Texture2D` exported to D3D11 and published. The feature wraps the export in a
+  Buffer.h `Texture2D` (`new Texture2D(twin->D3D11() /* AddRef'd */, name)`) and makes its own views on it, so its D3D11 code is
+  unchanged; graph users declare the twin. Depth twins take a typeless format and `Export::DSV` (Skylighting's occlusion map,
+  Terrain Blending's terrain depth). Used for Cloud Shadows' layers and HDR's scene, output and UI too (native-p1-cs-textures).
+- **Rule:** the twin outlives every D3D11 reference to its export. A feature that deletes its wrapper calls the owner's release
+  after it (`ORGHDRDisplay::ReleaseTextures`); twins whose D3D11 users live for the game are kept for the game.
+- **Still missing:** `FrameAnchors::Import` does not know twins. An engine-table import of a twin's export (HDR's scene while it is
+  kFRAMEBUFFER's redirect) is a second resource. A lookup of twins by their D3D11 texture in `Import` would close that.
+- **Native blockers left:** the D3D11 writes into these exports outside passes: Skylighting's clear before DCLF's shadow epoch (no
+  anchor there; DCLF's occlusion pass could clear on load instead), Cloud Shadows' per-face clears and copies inside the engine's sky
+  draws, HDR's UI and scene clears, the clean-scene copies, and the engine's own draws into them (Phase 5.5 work).
+- **Found by:** native frame graph Phase 1 (2026-11-13).
