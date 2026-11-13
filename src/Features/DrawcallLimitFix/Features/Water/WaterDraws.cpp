@@ -224,6 +224,8 @@ namespace DCLF::Features::Water::WaterDraws
 					 Colour::kWATER_FLOW, Colour::kSSR, Colour::kSSR_RAW, Colour::kSSR_BLURRED0 })
 				a_inputs.AddEngine(colour);
 			a_inputs.AddEngine(RE::RENDER_TARGET_CUBEMAP::kREFLECTIONS);
+			// The refraction at t1: kMAIN's copy texture, which the engine fills from kMAIN before the water draws.
+			a_inputs.AddEngineCopy(Colour::kMAIN);
 		}
 
 		DrawsState& GetState()

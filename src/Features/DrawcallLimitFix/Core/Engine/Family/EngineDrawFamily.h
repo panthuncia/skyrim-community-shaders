@@ -358,6 +358,12 @@ namespace DCLF::Family
 		void AddEngine(RE::RENDER_TARGET a_target);
 		void AddEngine(RE::RENDER_TARGET_DEPTHSTENCIL a_target);
 		void AddEngine(RE::RENDER_TARGET_CUBEMAP a_target);
+		/**
+		 * @brief Lists a render target's copy texture (RenderTargetData::textureCopy, "Engine::<target> Copy") and publishes it now when
+		 * ORG owns the target (render thread, at setup). The engine binds the copy where a pass reads the target it draws into (the
+		 * water's refraction reads kMAIN's).
+		 */
+		void AddEngineCopy(RE::RENDER_TARGET a_target);
 
 		/**
 		 * @brief Graph build: declares a read of each listed id every graph registers, with the view whose index Resolve hands out
