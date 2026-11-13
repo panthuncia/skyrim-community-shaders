@@ -30,11 +30,12 @@ namespace org
  *
  * The textures are graph textures, so the graph makes every barrier. ImGui's textures, which it rewrites by rectangle (the
  * font atlas pages), are declared by both passes on every frame: a copy destination in the upload pass and a shader resource in
- * the draw pass. MakeTexture's textures never change: both passes declare them only until their contents were uploaded and a
- * draw pass read them; then they are the exempt immutable class (GraphOwnership::ExternalImmutableShaderResource), resting in
- * the shader-read state and read through their own descriptors. The passes' declarations follow the set of textures
- * (IDynamicDeclaredResources): a texture is drawn and updated only by an execution whose passes declare it, and its whole
- * contents are staged on every frame until one of them copied them.
+ * the draw pass. The passes' declarations follow the set of those textures (IDynamicDeclaredResources): a texture is drawn and
+ * updated only by an execution whose passes declare it, and its whole contents are staged on every frame until one of them
+ * copied them. MakeTexture's textures never change: they are the exempt immutable class
+ * (GraphOwnership::ExternalImmutableShaderResource) from creation and never declared. The upload pass copies their contents
+ * between its own transfer barriers, after which they rest in the shader-read state and are read through their own
+ * descriptors; a draw reads one only from the run that uploads it on.
  *
  * Threads: Init, Shutdown, InvalidateTextures and Commit on the render thread (Commit inside the epoch). The pass's Prepare and
  * Record run where the graph runs them, and read only the frame Commit stored for their run.

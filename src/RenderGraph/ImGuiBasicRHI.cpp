@@ -10,6 +10,7 @@
 #	include "RenderGraph/RasterProgram.h"
 #	include "RenderGraph/RenderGraphRuntime.h"
 #	include "RenderGraph/ShaderBindings.h"
+#	include "RenderGraph/UndeclaredAccess.h"
 
 #	include <Interfaces/IDynamicDeclaredResources.h>
 #	include <OpenRenderGraph/GraphHost.h>
@@ -27,6 +28,7 @@
 #	include <map>
 #	include <mutex>
 #	include <unordered_map>
+#	include <unordered_set>
 #	include <vector>
 
 namespace ImGuiBasicRHI
@@ -70,13 +72,14 @@ namespace ImGuiBasicRHI
 	public:
 		std::unique_ptr<GraphResources::Texture2D> twin;  // the graph texture
 		std::shared_ptr<org::Resource> resource;          // twin's, kept by the views and the frames
+		std::shared_ptr<org::PixelBuffer> image;          // the same resource, as a texture
 		std::uint32_t width = 0, height = 0, mips = 1;
+		// MakeTexture's: the exempt immutable class, never declared. Set before the texture is shared.
+		bool exempt = false;
 		// The exempt class's reads: views[0] every level; views[1 + m] level m alone (with more than one level).
 		std::vector<org::OwnedDescriptorBinding> views;
 		std::vector<std::vector<std::byte>> pixels;  // render thread: MakeTexture's levels, until uploaded
 		std::atomic<bool> uploaded{ false };         // a recorded upload pass copied its whole contents
-		std::atomic<bool> read{ false };             // then a recorded draw pass declared it a shader resource
-		std::atomic<bool> exempt{ false };           // set on the render thread: read through views, never declared again
 	};
 
 	namespace
@@ -124,7 +127,7 @@ namespace ImGuiBasicRHI
 		/** @brief The frames Commit stored, one per run; each pass takes its run's from its own slots. */
 		using Slots = ::RenderGraph::RunSlots<Frame>;
 
-		/** @brief The textures the passes declare: ImGui's, and MakeTexture's until they are exempt. Immutable. */
+		/** @brief The textures the passes declare: ImGui's (MakeTexture's are exempt and never declared). Immutable. */
 		using TextureSet = std::vector<std::shared_ptr<Texture>>;
 
 		/**
@@ -180,7 +183,7 @@ namespace ImGuiBasicRHI
 			bool installed = false;
 			bool callbackLogged = false;
 			std::unordered_map<std::uint64_t, std::shared_ptr<Texture>> textures;    // ImGui's, by ImTextureID
-			std::vector<std::weak_ptr<Texture>> made;                                // MakeTexture's, until exempt
+			std::vector<std::weak_ptr<Texture>> made;                                // MakeTexture's, until uploaded
 			bool texturesChanged = true;                                             // the set the passes declare changed
 			std::map<std::uint32_t, std::shared_ptr<const RasterProgram>> programs;  // by target format
 			std::map<std::uint32_t, bool> failedPrograms;
@@ -235,8 +238,11 @@ namespace ImGuiBasicRHI
 			});
 		}
 
-		/** @brief A persistent RGBA8 graph texture (GraphResources' twin, graph-only), with the views the exempt class reads through. */
-		std::shared_ptr<Texture> CreateTexture(std::uint32_t a_width, std::uint32_t a_height, std::uint32_t a_mips, const std::string& a_name)
+		/**
+		 * @brief A persistent RGBA8 graph texture (GraphResources' twin, graph-only). a_views: with the views the exempt class reads
+		 * through.
+		 */
+		std::shared_ptr<Texture> CreateTexture(std::uint32_t a_width, std::uint32_t a_height, std::uint32_t a_mips, const std::string& a_name, bool a_views)
 		{
 			if (!a_width || !a_height)
 				return nullptr;
@@ -260,7 +266,8 @@ namespace ImGuiBasicRHI
 				return nullptr;
 			}
 			texture->resource = texture->twin->Graph();
-			const std::uint32_t viewCount = a_mips > 1 ? a_mips + 1 : 1;
+			texture->image = pixels;
+			const std::uint32_t viewCount = !a_views ? 0 : a_mips > 1 ? a_mips + 1 : 1;
 			for (std::uint32_t v = 0; v < viewCount; ++v) {
 				rhi::SrvDesc srv{};
 				srv.dimension = rhi::SrvDim::Texture2D;
@@ -307,7 +314,7 @@ namespace ImGuiBasicRHI
 					return;
 				}
 				auto texture = CreateTexture(static_cast<std::uint32_t>(a_texture.Width), static_cast<std::uint32_t>(a_texture.Height), 1,
-					fmt::format("ImGui::Texture {}", a_texture.UniqueID));
+					fmt::format("ImGui::Texture {}", a_texture.UniqueID), false);
 				if (!texture)
 					return;  // asked for again next frame
 				const auto id = IdOf(texture.get());
@@ -334,8 +341,7 @@ namespace ImGuiBasicRHI
 
 		/**
 		 * @brief The whole contents of every texture no recorded upload pass copied yet, staged again each frame until one did (only
-		 * an execution whose upload pass declares a texture copies into it). MakeTexture's textures that were then read by a draw
-		 * pass become exempt.
+		 * an execution whose upload pass declares a texture copies into it). MakeTexture's textures leave the list once uploaded.
 		 */
 		void StageWholeTextures(State& a_state, ImDrawData& a_drawData, std::vector<PendingUpload>& a_uploads)
 		{
@@ -352,21 +358,13 @@ namespace ImGuiBasicRHI
 				}
 			std::erase_if(a_state.made, [&](const std::weak_ptr<Texture>& a_weak) {
 				const auto texture = a_weak.lock();
-				if (!texture) {
-					a_state.texturesChanged = true;
+				if (!texture)
 					return true;
-				}
 				if (texture->uploaded.load(std::memory_order_acquire)) {
+					// In the shader-read state from now on, and never written again.
 					texture->pixels.clear();
 					texture->pixels.shrink_to_fit();
-					if (texture->read.load(std::memory_order_acquire)) {
-						// In the shader-read state from now on, and never written again: read through its own views.
-						texture->resource->SetGraphOwnership(org::Resource::GraphOwnership::ExternalImmutableShaderResource);
-						texture->exempt.store(true, std::memory_order_release);
-						a_state.texturesChanged = true;
-						return true;
-					}
-					return false;
+					return true;
 				}
 				PendingUpload upload{ texture, true };
 				for (std::uint32_t m = 0; m < texture->pixels.size(); ++m) {
@@ -384,12 +382,9 @@ namespace ImGuiBasicRHI
 			if (!std::exchange(a_state.texturesChanged, false))
 				return;
 			TextureSet set;
-			set.reserve(a_state.textures.size() + a_state.made.size());
+			set.reserve(a_state.textures.size());
 			for (const auto& entry : a_state.textures)
 				set.push_back(entry.second);
-			for (const auto& weak : a_state.made)
-				if (auto texture = weak.lock(); texture && !texture->exempt.load(std::memory_order_acquire))
-					set.push_back(std::move(texture));
 			a_state.shared->Publish(std::move(set));
 		}
 
@@ -441,6 +436,31 @@ namespace ImGuiBasicRHI
 			std::shared_ptr<const Slots> slots;
 		};
 
+		/**
+		 * @brief An exempt texture's transfer barrier: into a copy destination before its whole contents are copied (what it held
+		 * is dropped), or from there into the shader-read state it rests in after.
+		 */
+		rhi::TextureBarrier ExemptBarrier(const Texture& a_texture, bool a_toCopy)
+		{
+			rhi::TextureBarrier barrier{};
+			barrier.texture = a_texture.image->GetAPIResource().GetHandle();
+			barrier.range = { 0, a_texture.mips, 0, 1, 0, 1 };
+			if (a_toCopy) {
+				barrier.afterSync = rhi::ResourceSyncState::Copy;
+				barrier.afterAccess = rhi::ResourceAccessType::CopyDest;
+				barrier.afterLayout = rhi::ResourceLayout::CopyDest;
+				barrier.discard = true;
+			} else {
+				barrier.beforeSync = rhi::ResourceSyncState::Copy;
+				barrier.beforeAccess = rhi::ResourceAccessType::CopyDest;
+				barrier.beforeLayout = rhi::ResourceLayout::CopyDest;
+				barrier.afterSync = rhi::ResourceSyncState::All;
+				barrier.afterAccess = rhi::ResourceAccessType::ShaderResource;
+				barrier.afterLayout = rhi::ResourceLayout::ShaderResource;
+			}
+			return barrier;
+		}
+
 		struct UploadBindings
 		{
 			std::shared_ptr<const TextureSet> textures;
@@ -450,7 +470,9 @@ namespace ImGuiBasicRHI
 		/**
 		 * @brief The frame's texture copies from its staging buffer, into the textures the pass declares as copy destinations (the
 		 * graph makes the barriers). A copy into a texture this declaration does not hold yet is left out; Commit stages that
-		 * texture's whole contents again until a copy of them was recorded.
+		 * texture's whole contents again until a copy of them was recorded. An exempt texture is not declared: its whole contents
+		 * are copied between its own transfer barriers, and it rests in the shader-read state after. The graph orders the draw pass
+		 * after this one on the same queue, so a draw of the same run reads it after the barrier.
 		 */
 		class UploadPass final : public org::TypedRenderGraphPass<UploadPass, PassFrame, UploadBindings>, public org::IDynamicDeclaredResources
 		{
@@ -488,10 +510,18 @@ namespace ImGuiBasicRHI
 				auto& commands = a_recording.Commands();
 				const auto staging = frame->staging->Resource()->GetAPIResource().GetHandle();
 				for (const auto& upload : frame->uploads) {
-					const auto index = Find(*a_bindings.textures, upload.texture.get());
-					if (index >= a_bindings.targets.size())
-						continue;
-					const auto texture = a_recording.Resolve(a_bindings.targets[index]).GetHandle();
+					const bool exempt = upload.texture->exempt;
+					rhi::ResourceHandle texture{};
+					if (exempt) {
+						const auto barrier = ExemptBarrier(*upload.texture, true);
+						commands.Barriers(rhi::BarrierBatch{ { &barrier, 1 }, {}, {} });
+						texture = barrier.texture;
+					} else {
+						const auto index = Find(*a_bindings.textures, upload.texture.get());
+						if (index >= a_bindings.targets.size())
+							continue;
+						texture = a_recording.Resolve(a_bindings.targets[index]).GetHandle();
+					}
 					for (const auto& region : upload.regions) {
 						rhi::BufferTextureCopyFootprint copy{};
 						copy.texture = texture;
@@ -502,6 +532,10 @@ namespace ImGuiBasicRHI
 						copy.y = region.y;
 						copy.footprint = { region.offset, region.rowPitch, region.width, region.height, 1 };
 						commands.CopyBufferToTexture(copy);
+					}
+					if (exempt) {
+						const auto barrier = ExemptBarrier(*upload.texture, false);
+						commands.Barriers(rhi::BarrierBatch{ { &barrier, 1 }, {}, {} });
 					}
 					if (upload.whole)
 						upload.texture->uploaded.store(true, std::memory_order_release);
@@ -522,9 +556,9 @@ namespace ImGuiBasicRHI
 		};
 
 		/**
-		 * @brief The frame's draws onto the target. The backend's textures are read through this declaration's views (shader
-		 * resources, after the upload pass), or through their own views once exempt; a draw of a texture neither declared here nor
-		 * exempt is left out.
+		 * @brief The frame's draws onto the target. ImGui's textures are read through this declaration's views (shader resources,
+		 * after the upload pass); exempt textures through their own views (Commit draws one only once its upload was recorded, or in
+		 * the run that uploads it). A draw of a texture not declared here and not exempt is left out.
 		 */
 		class OverlayPass final : public org::TypedRenderGraphPass<OverlayPass, PassFrame, DrawBindings>, public org::IDynamicDeclaredResources
 		{
@@ -562,10 +596,6 @@ namespace ImGuiBasicRHI
 					return;
 				// The staging buffer, textures and descriptors stay until this recording's GPU work retires.
 				a_recording.Retain(frame);
-				// A texture copied before this execution's draws and declared here rests in the shader-read state after it.
-				for (const auto& texture : *a_bindings.textures)
-					if (texture->uploaded.load(std::memory_order_acquire))
-						texture->read.store(true, std::memory_order_release);
 				if (frame->draws.empty())
 					return;
 
@@ -592,19 +622,17 @@ namespace ImGuiBasicRHI
 				std::memcpy(constants.translate, frame->translate, sizeof(constants.translate));
 				for (const auto& draw : frame->draws) {
 					std::uint32_t textureIndex = draw.texture;
-					if (draw.own) {
+					if (draw.own && draw.own->exempt) {
+						const auto& views = draw.own->views;
+						const std::size_t view = draw.mip < 0 || views.size() == 1 ? 0 : std::min<std::size_t>(std::size_t(draw.mip) + 1, views.size() - 1);
+						textureIndex = views[view].Index();
+					} else if (draw.own) {
 						const auto index = Find(*a_bindings.textures, draw.own);
-						if (index < a_bindings.views.size()) {
-							const auto& views = a_bindings.views[index];
-							const std::size_t view = draw.mip < 0 ? 0 : std::min<std::size_t>(std::size_t(draw.mip), views.size() - 1);
-							textureIndex = a_recording.Index(views[view]);
-						} else if (draw.own->exempt.load(std::memory_order_acquire)) {
-							const auto& views = draw.own->views;
-							const std::size_t view = draw.mip < 0 || views.size() == 1 ? 0 : std::min<std::size_t>(std::size_t(draw.mip) + 1, views.size() - 1);
-							textureIndex = views[view].Index();
-						} else {
+						if (index >= a_bindings.views.size())
 							continue;
-						}
+						const auto& views = a_bindings.views[index];
+						const std::size_t view = draw.mip < 0 ? 0 : std::min<std::size_t>(std::size_t(draw.mip), views.size() - 1);
+						textureIndex = a_recording.Index(views[view]);
 					}
 					commands.SetScissors({ &draw.scissor, 1 });
 					constants.vertexOffset = draw.vertexOffset;
@@ -682,13 +710,17 @@ namespace ImGuiBasicRHI
 				return nullptr;
 			}
 		}
-		auto texture = CreateTexture(a_width, a_height, static_cast<std::uint32_t>(a_levels.size()), a_name);
+		auto texture = CreateTexture(a_width, a_height, static_cast<std::uint32_t>(a_levels.size()), a_name, true);
 		if (!texture)
 			return nullptr;
+		// Uploaded once by the upload pass between its own barriers, then only read: the exempt class, never declared.
+		texture->exempt = true;
+		texture->resource->SetGraphOwnership(org::Resource::GraphOwnership::ExternalImmutableShaderResource);
+		if (RenderGraph::UndeclaredAccess::On())
+			RenderGraph::UndeclaredAccess::NoteImmutable(texture->resource);
 		for (const auto& level : a_levels)
 			texture->pixels.emplace_back(level.begin(), level.end());
 		state.made.push_back(texture);
-		state.texturesChanged = true;
 		return texture;
 	}
 
@@ -756,6 +788,15 @@ namespace ImGuiBasicRHI
 		// The whole contents of the textures not copied yet (MakeTexture's included), then the set the passes declare.
 		StageWholeTextures(state, *a_drawData, pending);
 		PublishTextures(state);
+		// What the draws may read: a texture whose whole contents a recorded upload pass copied, or that this run's upload pass
+		// copies before them. Nothing reads a texture before its first upload.
+		std::unordered_set<const Texture*> staged;
+		for (const auto& upload : pending)
+			if (upload.whole)
+				staged.insert(upload.texture.get());
+		for (auto& entry : resolved)
+			if (const Texture* own = entry.second.own; own && !own->uploaded.load(std::memory_order_acquire) && !staged.contains(own))
+				entry.second = {};
 
 		// The staging buffer: vertices, indices, then the uploads' rows.
 		const std::uint64_t vertexBytes = std::uint64_t(a_drawData->TotalVtxCount) * sizeof(ImDrawVert);
