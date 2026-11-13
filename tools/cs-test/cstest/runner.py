@@ -5,6 +5,7 @@ import datetime
 import json
 import shutil
 import signal
+import os
 import subprocess
 import time
 from pathlib import Path
@@ -72,6 +73,11 @@ def launch(paths):
                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, creationflags=getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0))
 
 
+# CS_TEST_BACKGROUND=1: never focus the game or move the mouse, so someone can use the computer during a run. The game must be
+# set to keep running unfocused (bAlwaysActive=1 in Skyrim.ini).
+BACKGROUND = os.environ.get("CS_TEST_BACKGROUND") == "1"
+
+
 def watch(paths, contract, harness, log=print, clock=time.monotonic, sleep=time.sleep):
     """Watches the status file and the game until the run is over. Returns (Final, last status)."""
     watcher = Watcher(contract, harness)
@@ -87,7 +93,7 @@ def watch(paths, contract, harness, log=print, clock=time.monotonic, sleep=time.
         fresh = read_status(status_path, contract["run_id"])
         if fresh is not None:
             status = fresh
-        if games and not focused and procs.focus(games[0]):
+        if games and not focused and not BACKGROUND and procs.focus(games[0]):
             focused = True
         if status is not None and status.get("phase") != last_phase:
             last_phase = status.get("phase")
@@ -212,7 +218,8 @@ def run(paths, spec, sets=(), label=None, stage=None, dry_run=False, lock=None, 
         log(f"{run_id}: launching through MO2")
         launch(paths)
         procs.keep_display_awake(True)
-        procs.nudge_mouse()
+        if not BACKGROUND:
+            procs.nudge_mouse()
         final, status = watch(paths, contract, harness, log=log)
     except KeyboardInterrupt:
         final = Final("interrupted", "cs-test was interrupted", "harness")

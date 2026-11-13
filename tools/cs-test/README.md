@@ -79,7 +79,7 @@ It reads DCLF's registry and `RegisterSwitch` calls, every other `CS_*` switch n
    - the mods turned off;
    - a stray `CommunityShaders.env` moved aside;
    - `CommunityShaders-Test.json` written.
-4. Launches MO2 (`-p Default moshortcut://:SKSE`), keeps the displays on, nudges the mouse and focuses the game once.
+4. Launches MO2 (`-p Default moshortcut://:SKSE`), keeps the displays on, nudges the mouse and focuses the game once. With `CS_TEST_BACKGROUND=1` it does neither (the game needs `bAlwaysActive=1`), so the computer stays usable during a run.
 5. Watches `CommunityShaders-Test.status.json` until an outcome: the game's own, or `never-launched`, `crashed`, `never-loaded`, `hang` (a stalled status file) or `timeout`.
 6. Kills the game and closes MO2. Then it undoes the journal, editing single lines of `modlist.txt` only after MO2 has exited.
 7. Collects this run's files (logs by time, first and last 64 MB at most), checks the expectations, and writes `result.json`.
