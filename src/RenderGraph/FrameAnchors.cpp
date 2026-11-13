@@ -913,7 +913,7 @@ namespace FrameAnchors
 			result = runtime.TryExecuteEpoch(segment, [&](org::RenderGraph&) {
 				// The graph this run submits is built by now.
 				built = state.built[index].load(std::memory_order_acquire);
-				RunShapes::BeginRun();
+				RenderGraph::RunShapes::BeginRun();
 				if (sharedConstants)
 					SharedConstants::Commit();
 				// Every gate closed first: a run does work only where this run's commits open it. That includes the gates of
@@ -957,13 +957,13 @@ namespace FrameAnchors
 		++runs;
 		if (runs > state.peakRuns[index].load(std::memory_order_relaxed))
 			state.peakRuns[index].store(runs, std::memory_order_relaxed);
-		if (RunShapes::On()) {
+		if (RenderGraph::RunShapes::On()) {
 			// The run's shape (CS_ORG_EPOCH_STATS): its gate entries (noted as the commits opened them), targets and active clients.
 			std::uint64_t active = 0;
 			for (const auto& client : clients)
 				if (client.active)
 					active += reinterpret_cast<std::uintptr_t>(client.desc.get()) * 0x9E3779B97F4A7C15ull;
-			RunShapes::EndRun(index, kInfo[index].name, a_point.input, a_point.output, active);
+			RenderGraph::RunShapes::EndRun(index, kInfo[index].name, a_point.input, a_point.output, active);
 		}
 		// An epoch must not be the last GPU work before a third-party Vulkan consumer (render-graph.md, "Hazard: external Vulkan
 		// work directly after a graph epoch"). After the late anchors an upscaler, frame generation or the present may follow.
