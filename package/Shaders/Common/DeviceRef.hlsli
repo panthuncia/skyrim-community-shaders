@@ -32,9 +32,22 @@ DeviceRef DeviceRefFromVA(DeviceRef a_base, uint2 a_baseVA, uint2 a_va)
 	return all(a_va == 0) ? DeviceRef(0, 0) : DeviceRef(a_base.x, a_base.y + (a_va.x - a_baseVA.x));
 }
 
+// A ref may differ between the lanes of a wave (each draw's rows, when one wave holds pixels of several draws), so its buffer is
+// indexed as non-uniform. D3D12 on AMD compiles that index into a loop around every load, which made DCLF's colour pass four times
+// slower than the same SPIR-V; AMD's waves do not mix draws, so DCLF builds for D3D12 on AMD define DEVICE_REF_ASSUME_UNIFORM.
 ByteAddressBuffer DeviceRefBuffer(DeviceRef a_ref)
 {
+#	if defined(DEVICE_REF_ASSUME_UNIFORM)
+	return ResourceDescriptorHeap[a_ref.x];
+#	else
 	return ResourceDescriptorHeap[NonUniformResourceIndex(a_ref.x)];
+#	endif
+}
+
+// A ref the whole draw or pass shares (pushed, or read from such a ref): its buffer indexed as uniform on any GPU.
+ByteAddressBuffer DeviceRefUniformBuffer(DeviceRef a_ref)
+{
+	return ResourceDescriptorHeap[a_ref.x];
 }
 
 RWByteAddressBuffer DeviceRefRWBuffer(DeviceRef a_ref)
@@ -99,6 +112,8 @@ DeviceRef DeviceRefTraced(DeviceRef a_ref, uint a_line, uint a_store)
 #		define DeviceLoad(T, a_ref, ...) DeviceRefBuffer(a_ref).Load<T>((a_ref).y)
 #		define DeviceStore(T, a_ref, a_value, ...) DeviceRefRWBuffer(a_ref).Store<T>((a_ref).y, a_value)
 #	endif
+// DeviceLoad through a ref every lane shares (DeviceRefUniformBuffer). Not traced.
+#	define DeviceLoadUniform(T, a_ref) DeviceRefUniformBuffer(a_ref).Load<T>((a_ref).y)
 
 #endif
 

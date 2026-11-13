@@ -41,10 +41,11 @@ static const uint kDCLFBackingMaterialRows = 2;
 static const uint kDCLFBackingAnimatedRows = 3;
 static const uint kDCLFBackingShadowRows = 4;
 
-uint DCLFFrameRecordWord(uint a_byte) { return DeviceLoad(uint, DeviceRefAdd(DCLFFrameRecordRef, a_byte)); }
+// The record is the pass's (its ref pushed), the same for every lane: its loads are uniform (DeviceLoadUniform).
+uint DCLFFrameRecordWord(uint a_byte) { return DeviceLoadUniform(uint, DeviceRefAdd(DCLFFrameRecordRef, a_byte)); }
 
 // Backing a_backing's ref (xy) and device address (zw).
-uint4 DCLFRecordBacking(uint a_backing) { return DeviceLoad(uint4, DeviceRefAdd(DCLFFrameRecordRef, kDCLFRecordBackings + 32 * a_backing)); }
+uint4 DCLFRecordBacking(uint a_backing) { return DeviceLoadUniform(uint4, DeviceRefAdd(DCLFFrameRecordRef, kDCLFRecordBackings + 32 * a_backing)); }
 // A device address into backing a_backing as a ref (the null ref for 0).
 DeviceRef DCLFRefFromBacking(uint a_backing, uint2 a_address)
 {
@@ -83,7 +84,8 @@ DeviceRef DCLFFrameBlockSpan(bool a_pixel, uint a_register)
 }
 float4 DCLFSpanRegister(DeviceRef a_block, uint a_register)
 {
-	return asfloat(DeviceLoad(uint4, DeviceRefAdd(a_block, 16 * a_register)));
+	// A pass block's ref, from the record: uniform.
+	return asfloat(DeviceLoadUniform(uint4, DeviceRefAdd(a_block, 16 * a_register)));
 }
 
 // A block read register by register (its members placed with packoffset): the largest constant buffer.

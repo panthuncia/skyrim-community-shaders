@@ -220,7 +220,27 @@ namespace DCLF
 		};
 		TestDefines& GetTestDefines()
 		{
+			// CS_TEST_SHADER_DEFINES=<NAME>[=<value>],...: the defines from the start, as dclf:define sets them later (a probe needs no
+			// reload, which a D3D12 run does not survive yet).
 			static TestDefines defines;
+			static std::once_flag seeded;
+			std::call_once(seeded, [] {
+				char value[1024]{};
+				const DWORD length = ::GetEnvironmentVariableA("CS_TEST_SHADER_DEFINES", value, sizeof(value));
+				if (!length || length >= sizeof(value))
+					return;
+				const auto wide = [](std::string_view a_text) { return std::wstring(a_text.begin(), a_text.end()); };
+				std::string_view rest(value, length);
+				while (!rest.empty()) {
+					const auto comma = rest.find(',');
+					const auto item = rest.substr(0, comma);
+					rest = comma == std::string_view::npos ? std::string_view{} : rest.substr(comma + 1);
+					if (item.empty())
+						continue;
+					const auto equals = item.find('=');
+					defines.defines.emplace_back(wide(item.substr(0, equals)), equals == std::string_view::npos ? std::wstring{} : wide(item.substr(equals + 1)));
+				}
+			});
 			return defines;
 		}
 	}
@@ -550,6 +570,10 @@ namespace DCLF
 			// other builds keep their registers: the unpulled ones are only reflected there (no D3D12 pipeline has their layout).
 			if (a_pulled && (a_sourceName == kSourcePath || a_family) && !::RenderGraph::ShaderTarget::IsSpirv())
 				request.defines.push_back({ DxilStages::kFrameDefine, L"1" });
+			// D3D12 on AMD: device refs indexed as uniform (Common/DeviceRef.hlsli). The driver turns a non-uniform index into a loop around
+			// every load (the colour pass took 17 ms against 9), and its waves never mix draws, so the refs are uniform in a wave anyway.
+			if (!::RenderGraph::ShaderTarget::IsSpirv() && RenderGraphRuntime::VendorId() == 0x1002)
+				request.defines.push_back({ L"DEVICE_REF_ASSUME_UNIFORM", L"1" });
 			// The device-generated draws' vertex stages (Program::vertex, both variants'; a program family's) pull their attributes
 			// through the geometry's buffers in the draw's push data (Lighting.hlsl, Effect.hlsl): no DCLF pipeline has input assembly,
 			// whose vertex input state an execution set's pipelines would have to share. The stage cache's key needs no bit for it:
