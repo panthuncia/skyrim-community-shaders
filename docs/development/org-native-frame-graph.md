@@ -286,6 +286,11 @@ Every other anchor runs once a frame.
   after a build was handed out drops it and builds again (three times in a row at most, then it is attached and built again after).
   A rejected attach asks again; four in a row count as a failure. A failure keeps the old graph, is logged once, and is not retried
   until a new request (`GraphHost::RebuildRequests`).
+- **Alias placement** of an off-thread build waits for its first preparation after the attach (ORG
+  `PlaceDeferredPersistentAliases`, on the host's thread). Placing during the build moved the backings of transients the
+  epoch's running graph shares, and that graph's next preparation failed with "Binding replacement requires a structural alias
+  edit" (native, every load). The host's thread now also reads its mailbox between first tickets and between revision copies, so
+  an attach waits for one step of a load's backlog, not all of it.
 - **Deferred effects** (`Builds::Defer`). An extension's build-time effect waits for the attach: the frame anchors record the snapshot
   a graph was built from only then, and a failed build drops that snapshot's clients.
 
