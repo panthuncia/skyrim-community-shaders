@@ -370,7 +370,7 @@ namespace RenderGraph::Engine::Native
 			// flags, usage and dimension, whether it was made with data, and whether the context wrote it since (marked only while
 			// one of them is on).
 			UINT bindFlags = 0;
-			D3D11_USAGE usage = D3D11_USAGE_DEFAULT;
+			D3D11_USAGE d3dUsage = D3D11_USAGE_DEFAULT;
 			D3D11_RESOURCE_DIMENSION dimension = D3D11_RESOURCE_DIMENSION_UNKNOWN;
 			bool initialData = false;
 			std::atomic<bool> written{ false };
@@ -817,7 +817,7 @@ namespace RenderGraph::Engine::Native
 		void NoteRequest(NativeResource& a_record, const TextureRequest& a_request)
 		{
 			a_record.bindFlags = a_request.bindFlags;
-			a_record.usage = a_request.usage;
+			a_record.d3dUsage = a_request.usage;
 			a_record.dimension = a_request.dimension;
 			a_record.initialData = a_request.data && a_request.data->pSysMem;
 		}
@@ -1469,7 +1469,7 @@ namespace RenderGraph::Engine::Native
 				record->name = "Native::Buffer";
 				record->bufferDesc = a_desc;
 				record->bindFlags = a_desc.BindFlags;
-				record->usage = a_desc.Usage;
+				record->d3dUsage = a_desc.Usage;
 				record->dimension = D3D11_RESOURCE_DIMENSION_BUFFER;
 				record->initialData = a_data && a_data->pSysMem;
 				record->readback = (a_desc.CPUAccessFlags & D3D11_CPU_ACCESS_READ) != 0;
@@ -2159,7 +2159,7 @@ namespace RenderGraph::Engine::Native
 			if (!(OpCensus::Flags() & (OpCensus::kOps | OpCensus::kWrites)))
 				return;
 			const std::string name = CensusName(a_record, a_resource, a_view);
-			OpCensus::Record(a_op, { a_record.serial, name, a_record.bindFlags, static_cast<uint32_t>(a_record.usage), static_cast<uint32_t>(a_record.dimension),
+			OpCensus::Record(a_op, { a_record.serial, name, a_record.bindFlags, static_cast<uint32_t>(a_record.d3dUsage), static_cast<uint32_t>(a_record.dimension),
 									   a_record.initialData });
 		}
 
@@ -3315,7 +3315,7 @@ namespace RenderGraph::Engine::Native
 			return false;
 		a_out.serial = record->serial;
 		a_out.bindFlags = record->bindFlags;
-		a_out.usage = static_cast<std::uint32_t>(record->usage);
+		a_out.usage = static_cast<std::uint32_t>(record->d3dUsage);
 		a_out.dimension = static_cast<std::uint32_t>(record->dimension);
 		a_out.initialData = record->initialData;
 		a_out.written = record->written.load(std::memory_order_relaxed);
