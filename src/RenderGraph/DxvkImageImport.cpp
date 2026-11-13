@@ -49,6 +49,16 @@ namespace RenderGraph
 
 	namespace
 	{
+		/**
+		 * @brief Whether the graph's imports are exclusive in native mode (CS_ORG_NATIVE_OWNED, and CS_ORG_NATIVE_EXCLUSIVE_IMPORTS not 0):
+		 * the graph moves the image into each pass's layout and gives it back in its home, as D3D12 already does.
+		 */
+		bool ExclusiveGraphImports()
+		{
+			static const bool kept = Switches::Off("CS_ORG_NATIVE_EXCLUSIVE_IMPORTS");
+			return !kept && Engine::Native::OwnedResources();
+		}
+
 		rhi::ResourcePtr ImportImage(rhi::Device a_device, const DxvkOrgInteropImageInfo& a_image, const char* a_name, bool a_exclusive)
 		{
 			if (!HomeLayoutOf(a_image.layout))
@@ -110,15 +120,17 @@ namespace RenderGraph
 		const auto home = HomeLayoutOf(a_image.layout);
 		if (!home)
 			return nullptr;
-		auto resource = ImportImage(a_device, a_image, a_name, false);
+		const bool exclusive = ExclusiveGraphImports();
+		auto resource = ImportImage(a_device, a_image, a_name, exclusive);
 		if (!resource)
 			return nullptr;
 		// The home state: the graph finds the image in it and gives it back in it (external home states).
 		a_desc.initialLayout = *home;
 		// Common-only (simultaneous access, every pass in GENERAL) exists on Vulkan alone. D3D12's COMMON layout cannot be a render
 		// target, depth or UAV, so there an image resting in Common is used exclusively: the graph moves it into each pass's layout
-		// and gives it back in Common. Native Vulkan stays Common-only until each image is one graph resource.
-		const bool commonOnly = *home == rhi::ResourceLayout::Common && !Backend::IsD3D12();
+		// and gives it back in Common. Native Vulkan does the same: each image is one graph resource there (FrameAnchors' imports),
+		// so one tracker follows its layout.
+		const bool commonOnly = *home == rhi::ResourceLayout::Common && !Backend::IsD3D12() && !exclusive;
 		auto result = org::ExternalTextureResource::CreateShared(std::move(resource), a_desc, commonOnly);
 		if (result) {
 			result->SetName(a_name);

@@ -4,6 +4,12 @@
 // is imported in the layout DXVK rests it in. One resting in GENERAL (a storage image, or any image on a device with unified
 // layouts, or every image when DXVK pins them for an older client) is shared with simultaneous access; any other is used
 // exclusively, and the graph's external home states give it back in that layout after each execution.
+//
+// Native mode (with CS_ORG_NATIVE_OWNED) imports every image for the graph exclusively, whatever it rests in: the graph moves it into
+// each pass's layout and gives it back in its home. That needs one graph resource per image (FrameAnchors' imports find an image's
+// slot before making one), since two resources would each track the image's layout. CS_ORG_NATIVE_EXCLUSIVE_IMPORTS=0 keeps them
+// shared. Raw imports (ImportDxvkImage: the native context's own, Drawcall Limit Fix's bindless views) stay shared in GENERAL, where
+// the context and the raw views use the image between graph executions.
 
 #include "RenderGraph/BufferRef.h"
 #include "RenderGraph/DxvkOrgInterop.h"
@@ -43,8 +49,8 @@ namespace RenderGraph
 	/**
 	 * @brief Imports a DXVK image as a graph texture whose home state is the layout it rests in.
 	 *
-	 * Sets a_desc.initialLayout from the image. A texture resting in GENERAL is Common-only; any other uses the layouts its passes
-	 * declare. Noted for the duplicate check (NoteImageResource).
+	 * Sets a_desc.initialLayout from the image. A texture resting in GENERAL is Common-only (except in native mode, see above); any
+	 * other uses the layouts its passes declare. Noted for the duplicate check (NoteImageResource).
 	 */
 	std::shared_ptr<org::ExternalTextureResource> ImportDxvkTexture(rhi::Device a_device, const DxvkOrgInteropImageInfo& a_image,
 		org::TextureDescription a_desc, const char* a_name);
