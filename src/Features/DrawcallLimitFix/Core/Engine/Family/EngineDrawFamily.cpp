@@ -492,25 +492,26 @@ namespace DCLF::Family
 		Add(EngineTargetId(a_target));
 	}
 
-	void PublishedInputs::Declare(org::RenderPassBuilder& a_builder)
+	Extensions::DeclaredReads PublishedInputs::Declare(org::RenderPassBuilder& a_builder)
 	{
-		const std::span<const org::SrvView> noViews{};
+		Extensions::DeclaredReads reads;
 		const auto known = declared.load(std::memory_order_acquire);
 		std::vector<std::string_view> added;
 		for (const auto& id : ids) {
 			// Only ids every graph registers: declaring another would fail the build. One skipped is built in once published.
 			if (!PublishedResources::IsDeclarable(id))
 				continue;
-			a_builder.ShaderResource(org::ResourceIdentifier(id), noViews);
+			Extensions::DeclarePublishedRead(a_builder, id, reads);
 			if (!known || !known->contains(id))
 				added.push_back(id);
 		}
 		if (added.empty())
-			return;
+			return reads;
 		auto next = known ? std::make_shared<PublishedIds>(*known) : std::make_shared<PublishedIds>();
 		for (const auto id : added)
 			next->emplace(id);
 		declared.store(std::move(next), std::memory_order_release);
+		return reads;
 	}
 
 	InputResult PublishedInputs::Resolve(std::string_view a_id, std::uint32_t& a_index) const

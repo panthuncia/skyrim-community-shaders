@@ -70,6 +70,7 @@ namespace DCLF::Features::ShadowMask::ShadowMaskDraws
 		struct Bindings
 		{
 			SharedConstants::Bindings shared;
+			Extensions::DeclaredReads inputs;  // the published inputs (Client::inputs)
 			org::DeclaredViewToken target{};
 		};
 
@@ -91,9 +92,9 @@ namespace DCLF::Features::ShadowMask::ShadowMaskDraws
 				Bindings bindings{};
 				bindings.shared = SharedConstants::Declare(a_builder);
 				bindings.target = a_builder.RenderTarget(client->target).View();
-				// The published inputs, declared for their order only: the draws' latches carry their indices. Every registered one is
-				// declared, read this frame or not, so a new Publish needs no new client.
-				client->inputs.Declare(a_builder);
+				// The published inputs, each with the view whose index the draws' latches carry. Every registered one is declared, read
+				// this frame or not, so a new Publish needs no new client.
+				bindings.inputs = client->inputs.Declare(a_builder);
 				return bindings;
 			}
 
@@ -104,7 +105,11 @@ namespace DCLF::Features::ShadowMask::ShadowMaskDraws
 				a_out.push_back(run ? run->revision : 0);
 			}
 
-			Frame Prepare(const Bindings&, const org::PassPrepareContext&) const { return { std::atomic_load(&client->run), client }; }
+			Frame Prepare(const Bindings& a_bindings, const org::PassPrepareContext& a_preparation) const
+			{
+				Extensions::CheckDeclaredReads(a_bindings.inputs, a_preparation, client->id);
+				return { std::atomic_load(&client->run), client };
+			}
 
 			static void Record(const Bindings& a_bindings, const Frame& a_frame, org::PassRecordContext& a_recording)
 			{

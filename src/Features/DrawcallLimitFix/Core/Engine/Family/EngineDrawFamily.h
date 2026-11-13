@@ -11,6 +11,7 @@
 // Render thread (the render owner) unless a function says otherwise.
 
 #include "Features/DrawcallLimitFix/Core/Engine/EngineAccess.h"
+#include "Features/DrawcallLimitFix/Core/Extensions/FrameBindings.h"
 #include "Features/DrawcallLimitFix/Core/Gpu/GpuTextures.h"
 #include "RenderGraph/BufferRef.h"
 
@@ -358,8 +359,12 @@ namespace DCLF::Family
 		void AddEngine(RE::RENDER_TARGET_DEPTHSTENCIL a_target);
 		void AddEngine(RE::RENDER_TARGET_CUBEMAP a_target);
 
-		/** @brief Graph build: declares a read, through no view, of each listed id every graph registers, and records it as declared. */
-		void Declare(org::RenderPassBuilder& a_builder);
+		/**
+		 * @brief Graph build: declares a read of each listed id every graph registers, with the view whose index Resolve hands out
+		 * (Extensions::DeclarePublishedRead), and records it as declared.
+		 * @return The declared reads: the pass's Prepare checks them (Extensions::CheckDeclaredReads).
+		 */
+		Extensions::DeclaredReads Declare(org::RenderPassBuilder& a_builder);
 
 		/**
 		 * @brief Render thread (a batch): how the client reads a_id, the id a bound view exports (PublishedResources::ExportedId). On

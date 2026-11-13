@@ -3,6 +3,7 @@
 #include <d3d11.h>
 #include <functional>
 #include <memory>
+#include <string_view>
 
 /**
  * @brief Screen Space GI on the render graph (CS_ORG_SCREEN_SPACE_GI=1).
@@ -33,6 +34,16 @@ public:
 	static bool Requested();
 
 	static ORGScreenSpaceGI& Get();
+
+	/**
+	 * @brief The composite's inputs (t10-t13), published under these ids while the graph path runs and SSGI is enabled
+	 * (PublishedResources), so the ORG composite declares its reads of them. Each id names the history texture at full resolution
+	 * and the upsampled scratch texture otherwise; the specular id only with the specular textures.
+	 */
+	static constexpr std::string_view kAoId = "SSGI::CompositeAO";
+	static constexpr std::string_view kYId = "SSGI::CompositeIlY";
+	static constexpr std::string_view kCoCgId = "SSGI::CompositeIlCoCg";
+	static constexpr std::string_view kSpecularId = "SSGI::CompositeSpecular";
 
 	/** @brief Reserves the DeferredPasses anchor when requested (the feature's PostPostLoad, before the graph initializes). */
 	static void Reserve();

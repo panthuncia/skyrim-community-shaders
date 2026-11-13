@@ -179,22 +179,25 @@ namespace DCLF::Draws
 		return std::make_shared<LatchedCopiesPass>(std::move(a_targets), std::move(a_source), a_declared);
 	}
 
-	void DeclareFrameBuffers(org::PassBuilder& a_builder, const Resources& a_resources, bool a_lights)
+	Extensions::DeclaredReads DeclareFrameBuffers(org::PassBuilder& a_builder, const Resources& a_resources, bool a_lights)
 	{
 		const std::span<const org::SrvView> noViews{};
 		for (const auto& frameBuffer : a_resources.frameBuffers)
 			a_builder.ShaderResource(frameBuffer.copy, noViews);
-		// The frame graph buffers on the graph (Api::FrameGraphBuffers: Integrations/LightLimitFix's lights, light index list and grid).
+		// The frame graph buffers on the graph (Api::FrameGraphBuffers: Integrations/LightLimitFix's lights, light index list and grid),
+		// each with the view whose index the commit latches (FrameGraphBufferIndices: ORGLightCulling::GetShaderResourceIndices).
 		const auto graphBuffers = Extensions::RegisteredFrameGraphBuffers();
+		Extensions::DeclaredReads reads;
 		for (std::size_t b = 0; a_lights && b < graphBuffers.size(); ++b)
 			if ((a_resources.graphBuffers >> b) & 1)
 				for (std::uint32_t r = 0; r < graphBuffers[b].count; ++r)
-					a_builder.ShaderResource(org::ResourceIdentifier(graphBuffers[b].resources[r].c_str()), noViews);
+					Extensions::DeclarePublishedRead(a_builder, graphBuffers[b].resources[r], reads);
 		// The frame textures' published ids, so the graph orders these reads after the producers' writes.
-		Extensions::DeclareGraphTextures(a_builder, Extensions::ColourGraphTextureIds());
+		Extensions::DeclareGraphTextures(a_builder, Extensions::ColourGraphTextureIds(), reads);
 		// Every caller draws with the frame record bound. Its shaders read the frame's placements, palettes and shading (t121-t123)
 		// and the fade seeds pool (t117).
 		FrameValues::Get().DeclareReads(a_builder);
+		return reads;
 	}
 
 	void RecordPreprocessedDraws(org::PassRecordContext& a_recording, PreprocessStates& a_preprocess, const rhi::PassBeginInfo& a_begin, rhi::DescriptorHeapHandle a_resourceHeap,

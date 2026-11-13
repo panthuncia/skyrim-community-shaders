@@ -13,6 +13,7 @@
 #	include "RenderGraph/FrameAnchors.h"
 #	include "RenderGraph/GraphResources.h"
 #	include "RenderGraph/ProgramCache.h"
+#	include "RenderGraph/PublishedResources.h"
 #	include "RenderGraph/RenderGraphRuntime.h"
 #	include "RenderGraph/RunGate.h"
 #	include "RenderGraph/ShaderBindings.h"
@@ -618,10 +619,40 @@ struct ORGScreenSpaceGI::Impl
 		open(kUpsample, full, 8);
 	}
 
+	/** @brief The composite's inputs of the current state, by their published ids (null where the state has none). */
+	std::array<std::pair<std::string_view, const GraphResources::Texture2D*>, 4> CompositeInputs() const
+	{
+		return { { { ORGScreenSpaceGI::kAoId, state->OutAo().get() }, { ORGScreenSpaceGI::kYId, state->OutY().get() },
+			{ ORGScreenSpaceGI::kCoCgId, state->OutCoCg().get() }, { ORGScreenSpaceGI::kSpecularId, state->OutSpec().get() } } };
+	}
+
+	/**
+	 * @brief Publishes the current state's composite inputs, so the composite's reads are ordered after the chain's writes. An id
+	 * the state has no texture for is withdrawn. A new texture under an id (a settings change) rebuilds every graph once.
+	 */
+	bool PublishOutputs() const
+	{
+		for (const auto& [id, texture] : CompositeInputs()) {
+			if (!texture)
+				PublishedResources::Withdraw(id);
+			else if (!PublishedResources::Publish(id, *texture))
+				return false;
+		}
+		return true;
+	}
+
+	/** @brief The composite returns to the D3D11 views of these inputs (the chain no longer writes them). */
+	static void WithdrawOutputs()
+	{
+		for (const auto id : { ORGScreenSpaceGI::kAoId, ORGScreenSpaceGI::kYId, ORGScreenSpaceGI::kCoCgId, ORGScreenSpaceGI::kSpecularId })
+			PublishedResources::Withdraw(id);
+	}
+
 	/** @brief Takes both clients out of the anchor's graph. */
 	void Unregister()
 	{
 		registered = false;
+		WithdrawOutputs();
 		FrameAnchors::Unregister(kClientId);
 		FrameAnchors::Unregister(kResetClientId);
 	}
@@ -756,6 +787,8 @@ void ORGScreenSpaceGI::Prepass()
 		// them once, so a new state starts from a cleared history.
 		if (!self.RegisterReset() || !self.RegisterChain())
 			return fail("its anchor clients could not be registered");
+		if (!self.PublishOutputs())
+			return fail("the composite's inputs could not be published");
 	} else {
 		if (newInputs && !self.RegisterChain())
 			return fail("its anchor client could not be registered");

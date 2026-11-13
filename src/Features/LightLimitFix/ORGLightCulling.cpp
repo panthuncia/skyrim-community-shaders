@@ -539,6 +539,8 @@ ID3D11ShaderResourceView* ORGLightCulling::GetLightGridSRV() const
 
 bool ORGLightCulling::GetShaderResourceIndices(uint32_t& a_lights, uint32_t& a_lightIndexList, uint32_t& a_lightGrid) const
 {
+	// Each reader declares the same view by its published id (DCLF's colour passes: Extensions::DeclarePublishedRead), so the graph
+	// orders its reads after the culling's writes. The indices are latched at commit; Phase 4 takes them from the declared views.
 	return IsActive() && PublishedResources::ShaderResourceIndex(kLightsId, a_lights) &&
 	       PublishedResources::ShaderResourceIndex(kLightIndexListId, a_lightIndexList) && PublishedResources::ShaderResourceIndex(kLightGridId, a_lightGrid);
 }

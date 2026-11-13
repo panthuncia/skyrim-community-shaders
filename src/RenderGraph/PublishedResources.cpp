@@ -299,6 +299,12 @@ namespace PublishedResources
 		return true;
 	}
 
+	std::uint32_t ShaderResourceVariant(std::string_view a_id)
+	{
+		const auto* entry = Find(Published(), a_id);
+		return entry && entry->view ? static_cast<std::uint32_t>(*entry->view) : UINT32_MAX;
+	}
+
 	std::string ExportedId(const ID3D11ShaderResourceView* a_view)
 	{
 		if (!a_view)
@@ -329,6 +335,7 @@ namespace PublishedResources
 	bool IsDeclarable(std::string_view) { return false; }
 	bool IsExportOf(const ID3D11ShaderResourceView*, std::string_view) { return false; }
 	bool ShaderResourceIndex(std::string_view, std::uint32_t&, std::source_location) { return false; }
+	std::uint32_t ShaderResourceVariant(std::string_view) { return UINT32_MAX; }
 	std::string ExportedId(const ID3D11ShaderResourceView*) { return {}; }
 }
 
