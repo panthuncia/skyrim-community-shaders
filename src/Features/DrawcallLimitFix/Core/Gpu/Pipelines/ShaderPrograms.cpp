@@ -514,7 +514,7 @@ namespace DCLF
 			const std::size_t communityShadersDefines = request.defines.size();
 			request.defines.push_back({ L"DCLF_ORG", L"1" });
 			// CS_DCLF_REF_TRACE: the stage records the refs it loads and stores through into the trace table (Common/DeviceRef.hlsli).
-			if (SwitchEnabled(Switch::RefTrace) && ::RenderGraph::ShaderTarget::IsSpirv()) {
+			if (SwitchEnabled(Switch::RefTrace)) {
 				const std::uint32_t traceSlot = Diagnostics::RefTrace::Slot();
 				if (traceSlot != 0)
 					request.defines.push_back({ L"DEVICE_REF_TRACE", std::to_wstring(traceSlot) });

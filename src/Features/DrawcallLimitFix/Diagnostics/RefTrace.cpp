@@ -28,7 +28,8 @@ namespace DCLF::Diagnostics::RefTrace
 		constexpr std::uint32_t kEntryWords = 4;
 		constexpr std::uint32_t kLinesPerReport = 48;
 
-		std::shared_ptr<org::Buffer> buffer;  // the render thread's, kept for the process
+		std::shared_ptr<org::Buffer> buffer;  // the render thread's, kept for the process (Vulkan)
+		rhi::ResourcePtr committed;           // D3D12's: a committed buffer (the graph's allocator takes only the standard heaps)
 		std::atomic<std::uint32_t> slot{ 0 };
 		std::atomic<volatile std::uint32_t*> words{ nullptr };
 		std::atomic<std::uint64_t> traced{ 0 }, untraced{ 0 };
@@ -83,19 +84,33 @@ namespace DCLF::Diagnostics::RefTrace
 
 	void Ensure()
 	{
-		if (buffer || refused || !On())
+		if (buffer || committed || refused || !On())
 			return;
-		if (!::RenderGraph::ShaderTarget::IsSpirv()) {
-			refused = true;
-			logger::warn("[DCLF] ref trace (CS_DCLF_REF_TRACE): Vulkan only (a host-visible UAV buffer); off on D3D12");
-			return;
-		}
 		auto* host = RenderGraphRuntime::Get().Host();
 		if (!host || !host->Graph())
 			return;
-		buffer = org::Buffer::CreateShared(rhi::HeapType::HostVisibleCoherent, std::uint64_t(kEntries) * kEntryWords * sizeof(std::uint32_t), true);
-		buffer->SetName("cs.dclf.ref-trace");
-		auto resource = buffer->GetAPIResource();
+		// A mapped buffer the shaders write: host-coherent memory on Vulkan; on D3D12 a committed buffer in host-cached system memory
+		// (an UPLOAD buffer cannot have UAV access).
+		const std::uint64_t bytes = std::uint64_t(kEntries) * kEntryWords * sizeof(std::uint32_t);
+		rhi::Resource resource{};
+		if (::RenderGraph::ShaderTarget::IsSpirv()) {
+			buffer = org::Buffer::CreateShared(rhi::HeapType::HostVisibleCoherent, bytes, true);
+			buffer->SetName("cs.dclf.ref-trace");
+			resource = buffer->GetAPIResource();
+		} else {
+			rhi::ResourceDesc desc{};
+			desc.type = rhi::ResourceType::Buffer;
+			desc.heapType = rhi::HeapType::HostCached;
+			desc.resourceFlags = rhi::RF_AllowUnorderedAccess;
+			desc.debugName = "cs.dclf.ref-trace";
+			desc.buffer.sizeBytes = bytes;
+			if (host->Device().CreateCommittedResource(desc, committed) != rhi::Result::Ok || !committed) {
+				refused = true;
+				logger::warn("[DCLF] ref trace (CS_DCLF_REF_TRACE): the table could not be made; off");
+				return;
+			}
+			resource = committed.Get();
+		}
 		void* mapped = nullptr;
 		resource.Map(&mapped);
 		const RenderGraph::BufferRef made = RenderGraph::BufferRefOf(host->Device(), resource.GetHandle());
