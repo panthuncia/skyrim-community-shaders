@@ -12,7 +12,11 @@
 #include <dxcapi.h>
 
 #include <algorithm>
+#include <atomic>
 #include <cstring>
+#include <filesystem>
+#include <format>
+#include <fstream>
 #include <string_view>
 #include <vector>
 
@@ -226,6 +230,21 @@ namespace DCLF::DxilStages
 			return false;
 		}
 		a_storage = std::move(rewritten.source);
+		// CS_D3D12_SOURCE_DUMP=<dir>: the first rewritten sources, to compile and inspect offline.
+		static const std::string dumpDirectory = [] {
+			char value[MAX_PATH]{};
+			const DWORD length = ::GetEnvironmentVariableA("CS_D3D12_SOURCE_DUMP", value, sizeof(value));
+			return length && length < sizeof(value) ? std::string(value) : std::string{};
+		}();
+		if (!dumpDirectory.empty()) {
+			static std::atomic<std::uint32_t> dumped = 0;
+			const auto index = dumped.fetch_add(1);
+			if (index < 24) {
+				std::error_code error;
+				std::filesystem::create_directories(dumpDirectory, error);
+				std::ofstream(std::filesystem::path(dumpDirectory) / std::format("{:02}_{}.hlsl", index, options.pixel ? "ps" : "vs"), std::ios::binary) << a_storage;
+			}
+		}
 		// Every include and define has done its work: the compile reads this text alone. Its #line directives name the files.
 		a_request.source = std::as_bytes(std::span(a_storage.data(), a_storage.size()));
 		return true;
