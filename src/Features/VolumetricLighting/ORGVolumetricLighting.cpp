@@ -352,15 +352,18 @@ struct ORGVolumetricLighting::Impl
 	/**
 	 * @brief Terrain or Cloud Shadows' texture the generate reads through ShadowSampling: its published id on the feature's ORG path,
 	 * else the D3D11 texture behind the view the feature binds, imported. Empty when the feature is off, or its texture missing.
-	 * Native mode always reads the published id: an import is not ordered after its producer. Guest keeps the import for a
-	 * producer on D3D11.
+	 * Native mode reads only the published id: an import is not ordered after its producer. With nothing published there it is
+	 * empty, as for a feature that is off: an id nobody publishes would hold the generate back for good. Guest keeps the import
+	 * for a producer on D3D11.
 	 */
 	static VLSource FeatureInput(bool a_loaded, bool a_orgPath, std::string_view a_id, ID3D11ShaderResourceView* a_view, std::string_view a_importName, bool& a_missing)
 	{
 		if (!a_loaded)
 			return {};
-		if (a_orgPath || PublishedResources::IsRegistered(a_id) || RenderGraph::Engine::Native::Active())
+		if (a_orgPath || PublishedResources::IsRegistered(a_id))
 			return { nullptr, std::string(a_id) };
+		if (RenderGraph::Engine::Native::Active())
+			return {};
 		if (!a_view) {
 			a_missing = true;
 			return {};
