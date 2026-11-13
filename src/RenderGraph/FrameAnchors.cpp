@@ -337,6 +337,22 @@ namespace FrameAnchors
 					a_state.host->RequestRebuild(EpochOfAnchor(static_cast<Anchor>(i)), reason);
 		}
 
+		/**
+		 * @brief Rebuild for a resource identity change no version stands for (a replaced import, a resized twin that is not
+		 * versioned): the anchors' epochs, through GraphResources::RequestStructuralRebuild.
+		 */
+		void StructuralRebuild(State& a_state, std::uint32_t a_anchorMask, std::string_view a_reason)
+		{
+			if (!a_state.host)
+				return;
+			std::vector<std::uint32_t> epochs;
+			for (std::uint32_t i = 0; i < kAnchors; ++i)
+				if ((a_anchorMask >> i & 1u) && a_state.reserved[i])
+					epochs.push_back(EpochOfAnchor(static_cast<Anchor>(i)));
+			if (!epochs.empty())
+				GraphResources::RequestStructuralRebuild(fmt::format("frame anchors: {}", a_reason), epochs);
+		}
+
 		std::uint32_t AnchorMask(const ClientDesc& a_client, bool a_onceOnly = false)
 		{
 			std::uint32_t mask = 0;
@@ -574,7 +590,7 @@ namespace FrameAnchors
 			// The imports are registered with every anchor graph. A new one is built into the graphs that looked its id up (a client
 			// registering with it builds its own anchors again); one replaced is dropped, so every graph holding it is built again.
 			if (replacing)
-				Rebuild(state, ~0u, fmt::format("import '{}' replaced", a_id));
+				StructuralRebuild(state, ~0u, fmt::format("import '{}' replaced", a_id));
 			else if (state.host)
 				state.host->RequestRebuildFor(org::ResourceIdentifier(a_id), fmt::format("frame anchors: import '{}' added", a_id));
 			return resource;
@@ -787,7 +803,7 @@ namespace FrameAnchors
 				Publish(a_state);
 				for (auto& client : a_state.clients)
 					MarkCurrent(a_state, client);
-				Rebuild(a_state, ~0u, "graph resources resized");
+				StructuralRebuild(a_state, ~0u, "graph resources resized (a twin that is not versioned, or another shape class)");
 			}
 		}
 
