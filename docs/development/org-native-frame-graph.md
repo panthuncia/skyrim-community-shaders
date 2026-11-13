@@ -626,3 +626,22 @@ Guest and native quick shots match the earlier runs. The native tour passes. No 
 - Make the five engine targets in their final format from the start.
 - Find the twin behind "graph resources resized".
 - Declare the loading-screen sites.
+
+## Phase 2 item 2 lane: engine targets in their final format (`org-native/p2-target-formats`)
+
+**The six rebuilds on a load.** HDR Display's LDR upgrade and Deferred's water targets remade engine targets in another format
+after `EngineTargets::TakeOver` had made and published them. ImageSpace and the Skeleton had already looked those ids up, so each
+format change made a new slot:
+- `published resource ... replaced by a new resource` for kLDR_DOWNSAMPLE0, kLDR_BLURSWAP, kIMAGESPACE_TEMP_COPY, kWATER_1 and kWATER_2. kIMAGESPACE_TEMP_COPY2 and the two TAA UI targets changed format too, but no reader held them yet.
+- **Rebuild 6** came from the same five. `Settle` bumped the resize generation for each replaced held image. The anchors only see the generation at their first run, which is the first world frame, so they logged one "graph resources resized" rebuild there. No twin resized.
+
+**What changed:**
+- **Plans.** `Targets::PlanTarget(target, Plan)` is called before the graph exists:
+  - HDR's `PostPostLoad` plans its seven LDR targets as R16G16B16A16_FLOAT.
+  - `Deferred::PlanTargets` (from its hook install) plans the GBuffer and water targets from the same table `SetupResources` uses: format, RTV and SRV binds, kMAIN's size, no copy.
+- **TakeOver and every later engine Create** make a planned target in its planned shape (`PlannedShape`), so the first version already has its final shape class. It logs `made in format ... from the start, as <owner> remakes it`.
+- **The owners' upgrades find the right shape.** HDR's upgrade sees the HDR format and skips the target, so it saves nothing and has nothing to restore. Deferred's `Recreate` finds the same shape and does nothing (`already made as ... wants it`). `Restore` goes back to the planned shape.
+- **Off or on D3D11.** Without `CS_ORG_ENGINE_TARGETS`, without HDR loaded, or for a target the engine keeps on D3D11, plans do nothing and the old paths run. A `Recreate` to another shape at runtime is still a new slot, through the build manager.
+- **Named bumps.** `BumpResizeGeneration(who)` records what moved the generation. The anchors' line now reads `graph resources resized by <names> (...)`. EngineTargets' bump is named `engine targets (<target>)`; a twin's resize is named after the twin.
+
+**What to check in a run** (native and guest): no `[ORG] structural rebuild` on a load, and no `not a new version` warning for engine targets. Look for the `made in format 10 from the start` lines for the planned targets, and `already made as Deferred::Water1 wants it`. If a "graph resources resized" rebuild remains, its line names the cause. Compare shots against the baselines; post-processing and water should look the same, since the final formats are unchanged.
