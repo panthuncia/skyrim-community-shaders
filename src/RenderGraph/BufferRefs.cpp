@@ -15,8 +15,10 @@
 #	include <Resources/Buffers/VersionedBuffer.h>
 
 #	include <chrono>
+#	include <algorithm>
 #	include <filesystem>
 #	include <format>
+#	include <mutex>
 #	include <span>
 #	include <string>
 
@@ -134,13 +136,73 @@ namespace RenderGraph
 		Summarize(counts);
 	}
 
+	namespace
+	{
+		/** @brief One site's and buffer's latch checks (CheckDeclaredRefs), kept across graph builds. */
+		struct MismatchCounts
+		{
+			std::string site, what;
+			std::atomic<std::uint64_t> checked{ 0 }, mismatched{ 0 }, skipped{ 0 };
+			std::atomic<bool> logged{ false };
+			std::uint64_t reportedMismatched = 0, reportedSkipped = 0;  // at the last summary (under the registry's lock)
+		};
+
+		struct MismatchRegistry
+		{
+			std::mutex lock;
+			std::vector<std::unique_ptr<MismatchCounts>> entries;
+			std::atomic<std::int64_t> lastSummary{ 0 };
+		};
+
+		MismatchRegistry& Mismatches()
+		{
+			static MismatchRegistry registry;
+			return registry;
+		}
+
+		MismatchCounts& CountsOf(std::string_view a_site, std::string_view a_what)
+		{
+			auto& registry = Mismatches();
+			std::lock_guard guard(registry.lock);
+			for (const auto& entry : registry.entries)
+				if (entry->site == a_site && entry->what == a_what)
+					return *entry;
+			auto& made = registry.entries.emplace_back(std::make_unique<MismatchCounts>());
+			made->site = a_site;
+			made->what = a_what;
+			return *made;
+		}
+
+		// Every 10 seconds, the sites whose mismatches or skips grew since the last summary: a real mismatch grows every frame, a race
+		// between frames in flight shows as skips.
+		void SummarizeMismatches()
+		{
+			auto& registry = Mismatches();
+			const auto now = std::chrono::duration_cast<std::chrono::seconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
+			auto last = registry.lastSummary.load(std::memory_order_relaxed);
+			if (now - last < 10 || !registry.lastSummary.compare_exchange_strong(last, now))
+				return;
+			std::lock_guard guard(registry.lock);
+			for (const auto& entry : registry.entries) {
+				const auto mismatched = entry->mismatched.load(std::memory_order_relaxed);
+				const auto skipped = entry->skipped.load(std::memory_order_relaxed);
+				if (mismatched == entry->reportedMismatched && skipped == entry->reportedSkipped)
+					continue;
+				entry->reportedMismatched = mismatched;
+				entry->reportedSkipped = skipped;
+				logger::info("[ORG] declared view mismatch stats: {} reads '{}': {} mismatched of {} checked, {} skipped (the latch and the backing were "
+							 "different frames)",
+					entry->site, entry->what, mismatched, entry->checked.load(std::memory_order_relaxed), skipped);
+			}
+		}
+	}
+
 	struct DeclaredRefs::Entry
 	{
 		std::string what;
 		org::ResourceBindingToken binding;
 		std::shared_ptr<const RefLatch> latch;
 		std::shared_ptr<org::VersionedBuffer> late;  // a late-bound buffer: checked against its current version
-		std::unique_ptr<std::atomic<bool>> reported = std::make_unique<std::atomic<bool>>(false);
 	};
 
 	namespace
@@ -223,31 +285,53 @@ namespace RenderGraph
 		if (!a_refs.entries)
 			return;
 		for (const auto& entry : *a_refs.entries) {
-			const BufferRef latched = entry.latch->Get();
-			if (!latched || entry.reported->load(std::memory_order_relaxed))
+			// The frame before the latch is read: a frame that ends during the check makes it a skip.
+			const std::uint64_t frame = RefFrame();
+			const auto latched = entry.latch->Take();
+			if (!latched.ref)
 				continue;
+			// By site and buffer, across builds: a few entries a pass, so the lookup is cheap.
+			auto& counts = CountsOf(a_site, entry.what);
 			BufferRef declared{};
+			bool matched = false;
 			try {
 				if (entry.late) {
-					// No version published yet: nothing the latch could carry.
+					// Its current version and the latch must be this frame's: a version published for the next frame while the latch still
+					// holds this one's (or the other way round) is a race between frames in flight, not a mismatch.
 					const auto current = entry.late->Get();
 					auto* host = RenderGraphRuntime::Get().Host();
 					if (!current || !host)
-						continue;
+						continue;  // no version published yet: nothing the latch could carry
 					declared = MakeBufferRef(host->Device(), current->GetAPIResource().GetHandle(), 0, std::source_location::current());
+					if (latched.frame != frame || RefFrame() != frame) {
+						counts.skipped.fetch_add(1, std::memory_order_relaxed);
+						continue;
+					}
+					matched = declared.viewSlot == latched.ref.viewSlot;
 				} else {
+					// The version bound to this preparation, which may be an earlier frame's than the latch's latest.
 					declared = DeclaredBufferRef(a_preparation, entry.binding);
+					matched = declared.viewSlot == latched.ref.viewSlot ||
+					          std::ranges::any_of(latched.history, [&](const BufferRef& a_ref) { return a_ref && a_ref.viewSlot == declared.viewSlot; });
 				}
 			} catch (const std::exception& e) {
-				if (!entry.reported->exchange(true, std::memory_order_relaxed))
+				counts.checked.fetch_add(1, std::memory_order_relaxed);
+				counts.mismatched.fetch_add(1, std::memory_order_relaxed);
+				if (!counts.logged.exchange(true, std::memory_order_relaxed))
 					logger::warn("[ORG] declared view mismatch: {} reads '{}' through buffer view ref {{slot {}}}, and its declaration does not resolve: {}", a_site,
-						entry.what, latched.viewSlot, e.what());
+						entry.what, latched.ref.viewSlot, e.what());
 				continue;
 			}
-			if (declared.viewSlot != latched.viewSlot && !entry.reported->exchange(true, std::memory_order_relaxed))
-				logger::warn("[ORG] declared view mismatch: {} reads '{}' through buffer view ref {{slot {}}}, the declared buffer's bound backing is slot {}",
-					a_site, entry.what, latched.viewSlot, declared.viewSlot);
+			counts.checked.fetch_add(1, std::memory_order_relaxed);
+			if (matched)
+				continue;
+			counts.mismatched.fetch_add(1, std::memory_order_relaxed);
+			if (!counts.logged.exchange(true, std::memory_order_relaxed))
+				logger::warn("[ORG] declared view mismatch: {} reads '{}' through buffer view ref {{slot {}}} (latched in frame {}), the declared buffer's bound "
+							 "backing is slot {} (first; \"declared view mismatch stats\" lines count them)",
+					a_site, entry.what, latched.ref.viewSlot, latched.frame, declared.viewSlot);
 		}
+		SummarizeMismatches();
 	}
 
 	void CheckBufferRef(BufferRef a_ref, std::uint64_t a_address, std::uint64_t a_bytes, std::string_view a_what, std::source_location a_where)
