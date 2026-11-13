@@ -11,6 +11,7 @@
 #include <atomic>
 #include <memory>
 #include <source_location>
+#include <string>
 #include <string_view>
 #include <vector>
 
@@ -126,6 +127,32 @@ namespace RenderGraph
 	 */
 	org::ResourceBindingToken DeclareLateRef(org::RenderPassBuilder& a_builder, const std::shared_ptr<org::VersionedBuffer>& a_buffer, RefAccess a_access,
 		std::string_view a_what, std::shared_ptr<const RefLatch> a_latch, DeclaredRefs& a_out);
+
+	/**
+	 * @brief A buffer outside the graph that a host replaces per frame or per snapshot (a pooled version built on the upload queue), made
+	 * declarable: a late-bound org::VersionedBuffer whose version the host publishes when the frame adopts it, and the ref it latched
+	 * then. Readers declare it (Declare) and check the ref in Prepare (CheckDeclaredRefs). Publish costs no graph build.
+	 */
+	class LateRefBuffer
+	{
+	public:
+		/** @brief Any thread: the late-bound buffer, its stand-in named a_name. */
+		explicit LateRefBuffer(std::string_view a_name);
+		/**
+		 * @brief The frame's adoption (render thread): a_backing becomes the current version, kept alive with a_owner. The latch takes
+		 * a_used, the ref the readers' tables carry (made earlier, from the backing they were built for), or a_backing's own ref when
+		 * a_used is null. A null backing publishes nothing and clears the latch.
+		 * @return a_backing's ref at byte 0 (null without a backing or a graph host). Not a raw ref: readers declare the buffer.
+		 */
+		BufferRef Publish(const std::shared_ptr<org::Buffer>& a_backing, std::shared_ptr<const void> a_owner, BufferRef a_used = {});
+		/** @brief Graph build: declares the buffer for a_access (no views) with the latch, into a_out. */
+		void Declare(org::RenderPassBuilder& a_builder, RefAccess a_access, DeclaredRefs& a_out) const;
+
+	private:
+		std::string name;
+		std::shared_ptr<org::VersionedBuffer> buffer;
+		std::shared_ptr<RefLatch> latch = std::make_shared<RefLatch>();
+	};
 
 	/**
 	 * @brief A pass's Prepare (the host's thread): the ref of the declared buffer's backing bound to this preparation (a versioned

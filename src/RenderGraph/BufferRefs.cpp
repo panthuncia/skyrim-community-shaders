@@ -172,6 +172,33 @@ namespace RenderGraph
 		return Declare(a_builder, *a_buffer, a_access, a_what, std::move(a_latch), a_out, a_buffer);
 	}
 
+	LateRefBuffer::LateRefBuffer(std::string_view a_name) :
+		name(a_name)
+	{
+		auto standIn = org::Buffer::CreateUnmaterializedStructuredBuffer(1, 4, false);
+		standIn->SetName(std::format("{}.stand-in", a_name));
+		standIn->Materialize();
+		buffer = org::VersionedBuffer::CreateLateBound(std::move(standIn));
+	}
+
+	BufferRef LateRefBuffer::Publish(const std::shared_ptr<org::Buffer>& a_backing, std::shared_ptr<const void> a_owner, BufferRef a_used)
+	{
+		auto* host = RenderGraphRuntime::Get().Host();
+		if (!a_backing || !host) {
+			latch->Set({});
+			return {};
+		}
+		buffer->PublishLate(a_backing, std::move(a_owner));
+		const BufferRef ref = MakeBufferRef(host->Device(), a_backing->GetAPIResource().GetHandle(), 0, std::source_location::current());
+		latch->Set(a_used ? a_used : ref);
+		return ref;
+	}
+
+	void LateRefBuffer::Declare(org::RenderPassBuilder& a_builder, RefAccess a_access, DeclaredRefs& a_out) const
+	{
+		DeclareLateRef(a_builder, buffer, a_access, name, latch, a_out);
+	}
+
 	BufferRef DeclaredBufferRef(const org::FramePreparationContext& a_preparation, const org::ResourceBindingToken& a_binding, std::uint64_t a_offset)
 	{
 		// The preparation's bindings hold the version a versioned buffer binds this frame, at the slot its declaration captured.
