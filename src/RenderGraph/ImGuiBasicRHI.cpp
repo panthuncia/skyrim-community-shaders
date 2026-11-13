@@ -180,8 +180,8 @@ namespace ImGuiBasicRHI
 			bool installed = false;
 			bool callbackLogged = false;
 			std::unordered_map<std::uint64_t, std::shared_ptr<Texture>> textures;    // ImGui's, by ImTextureID
-			std::vector<std::weak_ptr<Texture>> made;                                 // MakeTexture's, until exempt
-			bool texturesChanged = true;                                              // the set the passes declare changed
+			std::vector<std::weak_ptr<Texture>> made;                                // MakeTexture's, until exempt
+			bool texturesChanged = true;                                             // the set the passes declare changed
 			std::map<std::uint32_t, std::shared_ptr<const RasterProgram>> programs;  // by target format
 			std::map<std::uint32_t, bool> failedPrograms;
 			org::OwnedDescriptorBinding sampler;

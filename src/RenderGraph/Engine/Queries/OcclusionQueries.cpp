@@ -169,7 +169,7 @@ namespace RenderGraph::Engine::OcclusionQueries
 			std::vector<std::int32_t> slots;  // the engine slot each query counts, kNoSlot for none
 			std::uint64_t generation = 0;
 			bool committed = false, submitted = false, harvested = false;
-			bool unresolved = false;  // its recording's pass did not declare its readback yet: nothing was resolved into it
+			bool unresolved = false;         // its recording's pass did not declare its readback yet: nothing was resolved into it
 			org::GraphHost::GpuPoint point;  // every queue past the run's submission
 			std::uint64_t seals = 0;          // GraphHost::Seals at its submission
 		};
