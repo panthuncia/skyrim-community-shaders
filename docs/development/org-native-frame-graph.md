@@ -362,3 +362,49 @@ thread.
   under 1 ms.
 - **A new graph's first prepare now includes alias placement and one validated build**, on the host thread. A ticket asked for
   right after an attach may wait for it; watch `WaitTicket`.
+
+## Phase 2 item 2 lane: versioned twins, part B (`org-native/p2-twins-b`)
+
+**Helpers** (additive):
+- `AnchorPasses::ClearOf(name, twin)` and `CopyOf(name, source, target, w, h)`. `Clear` and `Copy` take a slot (`slot`, `sourceSlot`,
+  `targetSlot`) in place of the resource.
+- `GraphPasses::MakeUavClear(twin, value)`, and `MakeUavClear`/`MakeUavClearUint` of a slot.
+- No slot form of `AnchorPasses::Draw::target` yet. A raster pass into a versioned twin declares the slot itself.
+
+**Converted:**
+- **Screen Space Shadows.** Its output is versioned. The clear and the raymarch declare the slot. When `kSHADOW_MASK` changes size,
+  `Prepass` resizes the output as a new version. Nothing is built, because the group counts already come from each frame's
+  dispatch list.
+- **SSGI.** The history textures and the exported outputs are versioned. Every step, clear and copy declares them through the twin.
+  - When `kMAIN` changes size, `Prepass` resizes every texture. The versioned ones become new versions, so the composite's reads
+    of the published ids are not built again.
+  - The aliased transients are new resources, so the chain's own anchor is built again, through the build manager. The chain
+    registers again, because its accumulation copy bakes its size. The history is cleared again.
+  - Before this, SSGI kept its setup size after a resolution change.
+  - A settings change keeps the textures of the old state that have the same name and shape. The published outputs stay the same
+    resources, so only DeferredPasses is built again. A change between full and half resolution still moves an output id to
+    another texture, which rebuilds every graph once.
+
+**Skipped, and why:**
+- **Never remade:** these keep one size for the session and are made once at setup:
+  - Volumetric Shadows' copy, IBL's SH textures, Skylighting's volumes and occlusion map;
+  - Cloud Shadows' occlusion, layers and scratch;
+  - Grass Collision's buffers and texture, Terrain Shadows' textures, the glints noise, and Bink's movie texture.
+
+  Their rebuilds are pass changes, not identity changes: import refreshes, Terrain Shadows' heightmap upload, IBL's sources, and the
+  glints shader reload.
+- **Aliased transients:** Subsurface Scattering's two textures and Volumetric Lighting's volumes. They are placed at each build, so
+  they cannot be versioned.
+  - Volumetric Lighting makes a set of passes for each volume size, so a new size is structural. It registers again through the
+    build manager.
+  - Subsurface Scattering's textures keep their setup size after a resolution change, as before.
+- **Bink's targets** are imports: the framebuffer through `EngineTarget` (the `p2-imports` lane), and HDR's UI twin, which stays
+  unversioned (`p2-twins-a`).
+- **Not twins:** the `Graph()` hits in DCLF's `GpuTextures.cpp` (the host's graph), `ScheduleWindow`, `GpuLoadPass` and
+  `PerformanceOverlay` (its frame-time history). `ImGuiBasicRHI`'s atlas pages are already versioned, and its other textures are
+  the exempt class.
+- **DCLF's Terrain Blending integration** reads `ORGTerrainBlending::TerrainDepthGraph()`. That terrain depth twin is Terrain
+  Blending's own and is not versioned.
+
+**Logs.** `[ORG] Screen Space Shadows: the shadow texture is now WxH`. `[ORG] Screen Space GI: its textures are now WxH`.
+`[ORG] SSGI::AO: resized to WxH as a new version` for each versioned texture.
