@@ -1844,3 +1844,12 @@ is not declarable at the build (`PublishedResources::IsDeclarable`), so the call
 - **Where it fits:** the preparation's `RunRef` in `FramePreparationContext`, so a latch can be keyed by run and read for exactly the
   run being prepared.
 - **Found by:** native frame graph Phase 1, residue lane (2026-11-13).
+
+## Image versions of `VersionedTexture`
+
+- **Need:** CS's exported twins and imported engine images are `ExternalTextureResource`s, which `VersionedTexture` did not accept.
+- **Added** (ORG branch `org-native/p2-versioned-ids`): `CreateImage`, `PublishImage` and `MakeImage` take any `GloballyIndexedResource`.
+  The version's `texture` is null for these, and `CurrentResource()` returns the version.
+- **Not checked:** whether a host-owned external image with a home layout behaves the same as a version in the persistent graph's
+  frame rebindings in guest mode.
+- **Found by:** native frame graph Phase 2, versioned identities lane (2026-11-13).

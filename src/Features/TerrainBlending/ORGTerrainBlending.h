@@ -113,9 +113,6 @@ public:
 	/** @brief The mask's exported view (t55); null when the graph does not hold this frame's blend (Holds). */
 	ID3D11ShaderResourceView* MaskSRV() const;
 
-	/** @brief The R32 blended depth's graph resource, published as kBlendedDepthId; null when the graph does not hold this frame's blend. */
-	std::shared_ptr<org::Resource> BlendedDepthGraph() const;
-
 	/**
 	 * @brief Whether this frame's blend is the graph's: the path is active, BeforeDepth chose the graph, and Blend has not fallen
 	 * back to D3D11 since. The one decision the views above and Terrain Blending's own write follow, so a frame whose anchor ran

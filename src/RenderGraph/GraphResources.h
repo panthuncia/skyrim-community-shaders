@@ -6,6 +6,7 @@
 #include <memory>
 #include <span>
 #include <string>
+#include <string_view>
 #include <vector>
 #include <winrt/base.h>
 
@@ -15,6 +16,7 @@ namespace org
 	class RenderGraph;
 	class RenderPass;
 	class Resource;
+	class VersionedTexture;
 }
 
 /**
@@ -35,8 +37,13 @@ namespace org
  *   that layout, as for DXVK's own images (DxvkImageImport).
  * - Teardown and Resize release the D3D11 views and texture first, then hand the graph resource to RenderGraphRuntime::ReleaseAfterD3D11,
  *   which frees it once the GPU is past every D3D11 command issued until then. Graph builds still holding it keep it alive themselves.
- * - A Resize bumps the resize generation (ResizeGeneration). At their next run the frame anchors see it and build their graphs again,
- *   and PublishedResources publishes the new resource under the twin's id: the owner calls nothing. Passes read Graph() when they
+ * - A versioned texture (Options::versioned) keeps one org::VersionedTexture, its slot (Versioned()), for its whole life. Its passes
+ *   declare the slot, never Graph(). A Resize of the same shape class (format, mip count, slice count) publishes the new texture as a
+ *   new version of the slot: nothing is built again, and the passes keep declaring the same slot. The D3D11 export is made again
+ *   with the texture, so a D3D11 reader takes SRV(), UAV() or D3D11() again after a Resize.
+ * - Any other Resize (a twin that is not versioned, an aliasable one, or another mip count) bumps the resize generation
+ *   (ResizeGeneration). At their next run the frame anchors see it and build their graphs again (RequestStructuralRebuild), and
+ *   PublishedResources publishes the new resource under the twin's id: the owner calls nothing. Passes read Graph() when they
  *   are made (ClientDesc's make), never keep one across builds.
  *
  * Everything here runs on the render thread. Constructors never throw: a twin that could not be created is false (logged), and the feature
@@ -78,7 +85,20 @@ namespace GraphResources
 		// A transient's own alias pool (ORG's manual pool id): aliased only with the resources that name the same pool, never with
 		// another graph's. Unset: the shared automatic pool. A diagnostic (CS_ORG_SSGI_DEBUG=17).
 		std::optional<std::uint64_t> aliasPool;
+		// A texture whose passes declare only its slot (Resource::Versioned) or its published id, never Graph(). A Resize of the same
+		// shape class is then a new version, not a graph build. Not for a transient: the graph places those at its builds.
+		bool versioned = false;
 	};
+
+	/**
+	 * @brief The one way a resource identity change asks for a structural graph build: a new resource, or a resource of another shape
+	 * class (format, mip count, slice count), that no version can stand for. Logged as "[ORG] structural rebuild". a_epochs empty:
+	 * every epoch. Render thread. Phase 4 moves these builds off the render thread; this is where that switch goes.
+	 */
+	void RequestStructuralRebuild(std::string_view a_reason, std::span<const std::uint32_t> a_epochs = {});
+
+	/** @brief How many structural rebuilds RequestStructuralRebuild asked for this session. */
+	std::uint64_t StructuralRebuilds();
 
 	/**
 	 * @brief What ExportTexture makes an image from: the D3D11 texture's shape and format, and the format of each view the graph
@@ -157,7 +177,16 @@ namespace GraphResources
 		/** @brief The graph resource passes declare; null when the twin could not be created. */
 		const std::shared_ptr<org::Resource>& Graph() const { return graph; }
 
-		/** @brief Registers the graph resource by name with a graph being built (ClientDesc::registerResources). */
+		/**
+		 * @brief The slot a versioned texture's passes declare (Options::versioned); null for any other twin, and when the twin could
+		 * not be created. The same object across every Resize of the same shape class.
+		 */
+		const std::shared_ptr<org::VersionedTexture>& Versioned() const { return slot; }
+
+		/**
+		 * @brief Registers the graph resource by name with a graph being built (ClientDesc::registerResources). A versioned texture
+		 * registers its slot as the name's resolver, so a declaration by name follows its versions.
+		 */
 		void Register(org::RenderGraph& a_graph) const;
 
 		Lifetime GetLifetime() const { return options.lifetime; }
@@ -198,10 +227,18 @@ namespace GraphResources
 		/** @brief Called by a Resize that made a new resource. */
 		static void BumpResizeGeneration();
 
+		/**
+		 * @brief After Create: the slot of a versioned texture. With a_previous (the slot before a Resize) and a_sameShape, the new
+		 * texture is published as its next version and true is returned: nothing needs a build. Otherwise a new slot is made (or none,
+		 * for a twin that is not versioned) and false is returned: the caller bumps the resize generation.
+		 */
+		bool AdoptSlot(std::shared_ptr<org::VersionedTexture> a_previous, bool a_sameShape);
+
 		std::string name;
 		Options options;
 		std::shared_ptr<const void> alive = std::make_shared<const int>(0);
 		std::shared_ptr<org::Resource> graph;
+		std::shared_ptr<org::VersionedTexture> slot;  // a versioned texture's (Options::versioned)
 		// The exported texture or buffer, as DXVK returned it: one COM object, so the derived twins' D3D11() casts it down.
 		winrt::com_ptr<ID3D11Resource> d3d11;
 		winrt::com_ptr<ID3D11ShaderResourceView> srv;
@@ -248,7 +285,8 @@ namespace GraphResources
 		std::shared_ptr<const StagedUpload> StageZeros() const;
 
 		/**
-		 * @brief Recreates the texture at a new size (a resolution change), the export first released. Then call FrameAnchors::Refresh.
+		 * @brief Recreates the texture at a new size (a resolution change), the export first released. A versioned texture of the same
+		 * mip count becomes the slot's next version: nothing else to call. Otherwise call FrameAnchors::Refresh.
 		 * @return Whether it was recreated; false, with nothing changed, when the size is the same.
 		 */
 		bool Resize(UINT a_width, UINT a_height);

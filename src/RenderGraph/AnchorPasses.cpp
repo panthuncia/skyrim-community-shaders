@@ -6,6 +6,7 @@
 #	include "RenderGraph/AnchorPasses.h"
 
 #	include "RenderGraph/ComputeProgram.h"
+#	include "RenderGraph/GraphResources.h"
 #	include "RenderGraph/PublishedResources.h"
 #	include "RenderGraph/RunGate.h"
 #	include "RenderGraph/ShaderBindings.h"
@@ -18,6 +19,7 @@
 #	include <Resources/Buffers/Buffer.h>
 #	include <Resources/ResourceIdentifier.h>
 #	include <Resources/GloballyIndexedResource.h>
+#	include <Resources/VersionedTexture.h>
 
 #	include <algorithm>
 #	include <format>
@@ -55,6 +57,17 @@ namespace RenderGraph::AnchorPasses
 			return org::Subresources(a_texture, org::Mip(a_mip, 1));
 		}
 
+		/** @brief A versioned twin's slot as a declaration: the whole texture, or one mip of it. */
+		org::ResourceResolverAndRange SlotOf(const org::VersionedTexture& a_slot, std::uint32_t a_mip)
+		{
+			org::ResourceResolverAndRange declared(a_slot);
+			if (a_mip != kAllMips) {
+				declared.range.mipLower = { org::BoundType::Exact, a_mip };
+				declared.range.mipUpper = { org::BoundType::Exact, a_mip };
+			}
+			return declared;
+		}
+
 		/** @brief A pass's declared entries: a view for each Srv and Uav entry (empty for the others), and the shared buffers. */
 		struct DeclaredBindings
 		{
@@ -69,7 +82,15 @@ namespace RenderGraph::AnchorPasses
 			for (std::size_t i = 0; i < a_bindings.size(); ++i) {
 				const auto& bind = a_bindings[i];
 				const bool whole = bind.mip == kAllMips;
-				if (bind.kind == Bind::Kind::Srv && bind.variant != UINT32_MAX)
+				if (bind.slot && bind.kind == Bind::Kind::Srv && bind.variant != UINT32_MAX)
+					declared.views[i] = a_builder.ShaderResource(SlotOf(*bind.slot, kAllMips), org::SrvView{ .variant = bind.variant }).View();
+				else if (bind.slot && bind.kind == Bind::Kind::Srv)
+					declared.views[i] = whole ? a_builder.ShaderResource(SlotOf(*bind.slot, kAllMips)).View() :
+					                            a_builder.ShaderResource(SlotOf(*bind.slot, bind.mip), org::SrvView{ .mip = bind.mip }).View();
+				else if (bind.slot && bind.kind == Bind::Kind::Uav)
+					declared.views[i] = whole ? a_builder.UnorderedAccess(SlotOf(*bind.slot, kAllMips)).View() :
+					                            a_builder.UnorderedAccess(SlotOf(*bind.slot, bind.mip), org::UavView{ .mip = bind.mip }).View();
+				else if (bind.kind == Bind::Kind::Srv && bind.variant != UINT32_MAX)
 					declared.views[i] = a_builder.ShaderResource(bind.resource, org::SrvView{ .variant = bind.variant }).View();
 				else if (bind.kind == Bind::Kind::Srv)
 					declared.views[i] = whole ? a_builder.ShaderResource(bind.resource).View() :
@@ -314,6 +335,20 @@ namespace RenderGraph::AnchorPasses
 		};
 	}
 
+	Bind Bind::Srv(const GraphResources::Resource& a_twin, std::uint32_t a_mip)
+	{
+		Bind bind = Srv(a_twin.Versioned() ? nullptr : a_twin.Graph(), a_mip);
+		bind.slot = a_twin.Versioned();
+		return bind;
+	}
+
+	Bind Bind::Uav(const GraphResources::Resource& a_twin, std::uint32_t a_mip)
+	{
+		Bind bind = Uav(a_twin.Versioned() ? nullptr : a_twin.Graph(), a_mip);
+		bind.slot = a_twin.Versioned();
+		return bind;
+	}
+
 	Bind Bind::SrvArray(std::shared_ptr<org::Resource> a_resource)
 	{
 		Bind bind = Srv(std::move(a_resource));
@@ -329,7 +364,7 @@ namespace RenderGraph::AnchorPasses
 	bool Builder::Check(std::string_view a_name, const std::vector<Bind>& a_bindings, std::uint32_t a_programWords, std::optional<std::uint32_t> a_gate)
 	{
 		for (const auto& bind : a_bindings) {
-			if ((bind.kind == Bind::Kind::Srv || bind.kind == Bind::Kind::Uav) && !bind.resource) {
+			if ((bind.kind == Bind::Kind::Srv || bind.kind == Bind::Kind::Uav) && !bind.resource && !bind.slot) {
 				Fail(std::format("{}: an input is missing", a_name));
 				return false;
 			}

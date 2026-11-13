@@ -11,7 +11,12 @@
  * runs of a frame with different hashes ran different passes or targets: one frame graph has to give such an anchor one pass per
  * shape, or a pass whose declarations change per run.
  *
- * Reported per window (CensusWindow) every CS_ORG_CENSUS_FRAMES frames in it and when the game leaves it, as "[ORG] run shapes" lines.
+ * Run order: for an anchor that runs more than once in a frame, the frame's run shapes in order are hashed into its sequence. The
+ * "[ORG] run order" line gives the frames with more than one run, how many distinct sequences they had, and the most common one's
+ * run count and share. One sequence in nearly every frame means static gated passes in a fixed order can match the engine's order.
+ *
+ * Reported per window (CensusWindow) every CS_ORG_CENSUS_FRAMES frames in it and when the game leaves it, as "[ORG] run shapes" and
+ * "[ORG] run order" lines.
  * FrameAnchors::LogRunStats's peak line stays as it was.
  */
 namespace RenderGraph::RunShapes

@@ -332,11 +332,6 @@ ID3D11ShaderResourceView* ORGTerrainBlending::MaskSRV() const
 	return Holds() ? impl->mask->SRV() : nullptr;
 }
 
-std::shared_ptr<org::Resource> ORGTerrainBlending::BlendedDepthGraph() const
-{
-	return Holds() ? impl->blendedDepth->Graph() : nullptr;
-}
-
 bool ORGTerrainBlending::RegisterClient()
 {
 	// One dispatch writes min(main depth, terrain depth) into both blended depths and the main depth into the mask, as the D3D11
@@ -346,7 +341,7 @@ bool ORGTerrainBlending::RegisterClient()
 	RenderGraph::AnchorPasses::Builder builder(FrameAnchors::Anchor::DepthDone, kClientId, 0);
 	builder.Add(RenderGraph::AnchorPasses::Dispatch{ .name = "depth-blend",
 		.program = impl->program,
-		.bindings = { Bind::Uav(impl->blendedDepth->Graph()), Bind::Uav(impl->blendedDepth16->Graph()), Bind::Uav(impl->mask->Graph()), Bind::Srv(impl->mainDepth),
+		.bindings = { Bind::Uav(*impl->blendedDepth), Bind::Uav(*impl->blendedDepth16), Bind::Uav(*impl->mask), Bind::Srv(impl->mainDepth),
 			Bind::Srv(impl->terrainDepth) },
 		.groups = { (desc.Width + kGroupSize - 1) / kGroupSize, (desc.Height + kGroupSize - 1) / kGroupSize, 1 } });
 	if (builder.Failed()) {
@@ -403,8 +398,9 @@ bool ORGTerrainBlending::Setup(std::function<void()> a_onFailed)
 		return false;
 	}
 	// Written in full by the blend every frame and read within it, but the engine's draws and the D3D11 features read them through
-	// their exports: exported, so never aliased.
-	const GraphResources::Options exported{ .lifetime = GraphResources::Lifetime::Transient, .d3d11 = GraphResources::Export::SRV };
+	// their exports: exported, so never aliased. Versioned: a resolution change resizes them as new versions, which every reader of
+	// their published ids follows without a graph build; the blend declares their slots (Bind::Uav of the twin).
+	const GraphResources::Options exported{ .lifetime = GraphResources::Lifetime::Transient, .d3d11 = GraphResources::Export::SRV, .versioned = true };
 	next->blendedDepth = std::make_unique<GraphResources::Texture2D>(OutputDesc(width, height, DXGI_FORMAT_R32_FLOAT), std::string(kBlendedDepthId), exported);
 	next->blendedDepth16 = std::make_unique<GraphResources::Texture2D>(OutputDesc(width, height, DXGI_FORMAT_R16_UNORM), std::string(kBlendedDepth16Id), exported);
 	next->mask = std::make_unique<GraphResources::Texture2D>(OutputDesc(width, height, DXGI_FORMAT_R32_FLOAT), std::string(kMaskId), exported);
@@ -434,8 +430,9 @@ bool ORGTerrainBlending::BeforeDepth()
 	if (!Active() || !FrameAnchors::HasEpoch(FrameAnchors::Anchor::DepthDone))
 		return false;
 	bool changed = !impl->registered;
-	// A resolution change: new engine depth textures, and the blended depths follow the main target's size. The anchors and
-	// PublishedResources follow the twins' resize; the pass is made again for the new textures and group counts.
+	// A resolution change: new engine depth textures, and the blended depths follow the main target's size. Each twin's resize is a
+	// new version of its slot, which the readers of the published ids follow with no build. The blend is made again for its group
+	// counts and the new engine depths (its own anchor only).
 	UINT width = 0, height = 0;
 	if (MainSize(width, height) && (width != impl->blendedDepth->Desc().Width || height != impl->blendedDepth->Desc().Height)) {
 		for (const auto& [id, texture] : impl->Outputs()) {
@@ -498,7 +495,6 @@ bool ORGTerrainBlending::Holds() const { return false; }
 void ORGTerrainBlending::ClearShaderCache() {}
 ID3D11ShaderResourceView* ORGTerrainBlending::BlendedDepthSRV(bool) const { return nullptr; }
 ID3D11ShaderResourceView* ORGTerrainBlending::MaskSRV() const { return nullptr; }
-std::shared_ptr<org::Resource> ORGTerrainBlending::BlendedDepthGraph() const { return nullptr; }
 void ORGTerrainBlending::Fail(const char*) {}
 bool ORGTerrainBlending::RegisterClient() { return false; }
 

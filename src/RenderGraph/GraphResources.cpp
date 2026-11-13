@@ -20,6 +20,7 @@
 #	include <Resources/ExternalTextureResource.h>
 #	include <Resources/PixelBuffer.h>
 #	include <Resources/TextureDescription.h>
+#	include <Resources/VersionedTexture.h>
 #	include <rhi_helpers.h>
 
 #	include <algorithm>
@@ -499,6 +500,55 @@ namespace GraphResources
 	namespace
 	{
 		std::atomic<std::uint64_t> resizeGeneration{ 0 };
+		std::atomic<std::uint64_t> structuralRebuilds{ 0 };
+	}
+
+	void RequestStructuralRebuild(std::string_view a_reason, std::span<const std::uint32_t> a_epochs)
+	{
+		auto* host = RenderGraphRuntime::Get().Host();
+		if (!host)
+			return;
+		const auto count = structuralRebuilds.fetch_add(1, std::memory_order_relaxed) + 1;
+		const auto reason = fmt::format("structural: {}", a_reason);
+		if (a_epochs.empty()) {
+			logger::info("[ORG] structural rebuild {} (every epoch): {}", count, a_reason);
+			host->RequestRebuild(reason);
+			return;
+		}
+		logger::info("[ORG] structural rebuild {} ({} epochs): {}", count, a_epochs.size(), a_reason);
+		for (const auto epoch : a_epochs)
+			host->RequestRebuild(epoch, reason);
+	}
+
+	std::uint64_t StructuralRebuilds()
+	{
+		return structuralRebuilds.load(std::memory_order_relaxed);
+	}
+
+	bool Resource::AdoptSlot(std::shared_ptr<org::VersionedTexture> a_previous, bool a_sameShape)
+	{
+		slot.reset();
+		auto image = std::dynamic_pointer_cast<org::GloballyIndexedResource>(graph);
+		if (!options.versioned || Aliasable() || !image)
+			return false;
+		try {
+			if (a_previous && a_sameShape) {
+				a_previous->PublishImage(std::move(image));
+				slot = std::move(a_previous);
+				// Tickets prepared before resolved the old version: they are prepared again.
+				if (auto* host = RenderGraphRuntime::Get().Host())
+					host->NoteNewVersions();
+				return true;
+			}
+			slot = org::VersionedTexture::CreateImage(std::move(image));
+		} catch (const std::exception& e) {
+			// Another shape class than the first version: a new slot, which the passes declare again after a build.
+			logger::warn("[ORG] {}: not a new version ({}); a new slot instead", name, e.what());
+			slot = org::VersionedTexture::CreateImage(std::dynamic_pointer_cast<org::GloballyIndexedResource>(graph));
+		}
+		if (a_previous)
+			logger::info("[ORG] {}: another shape class after a resize; a new slot, built again", name);
+		return false;
 	}
 
 	std::uint64_t Resource::ResizeGeneration()
@@ -513,6 +563,13 @@ namespace GraphResources
 
 	void Resource::Register(org::RenderGraph& a_graph) const
 	{
+		if (slot) {
+			// PublishedResources may have registered the same slot under the same id already: a graph takes one resolver an id.
+			const org::ResourceIdentifier id(name);
+			if (!a_graph._resolverMap.contains(id))
+				a_graph.RegisterResolver(id, slot);
+			return;
+		}
 		if (graph)
 			a_graph.RegisterResource(org::ResourceIdentifier(name), graph);
 	}
@@ -529,6 +586,8 @@ namespace GraphResources
 		if (exported && graph)
 			RenderGraphRuntime::Get().ReleaseAfterD3D11(std::move(graph));
 		graph.reset();
+		// The slot's versions keep their textures while a frame or a recording holds them.
+		slot.reset();
 	}
 
 	void Resource::NameViews() const
@@ -547,6 +606,7 @@ namespace GraphResources
 		Resource(std::move(a_name), a_options), desc(a_desc)
 	{
 		Create();
+		AdoptSlot(nullptr, false);
 	}
 
 	void Texture2D::Create()
@@ -593,10 +653,16 @@ namespace GraphResources
 	{
 		if (a_width == desc.Width && a_height == desc.Height)
 			return false;
+		const UINT mips = MipsOf(desc);
+		auto previous = slot;
 		Reset();
 		desc.Width = a_width;
 		desc.Height = a_height;
 		Create();
+		if (AdoptSlot(std::move(previous), MipsOf(desc) == mips)) {
+			logger::info("[ORG] {}: resized to {}x{} as a new version", name, a_width, a_height);
+			return true;
+		}
 		BumpResizeGeneration();
 		return true;
 	}
@@ -605,6 +671,7 @@ namespace GraphResources
 		Resource(std::move(a_name), a_options), desc(a_desc)
 	{
 		Create();
+		AdoptSlot(nullptr, false);
 	}
 
 	void Texture3D::Create()
@@ -635,11 +702,20 @@ namespace GraphResources
 	{
 		if (a_width == desc.Width && a_height == desc.Height && a_depth == desc.Depth)
 			return false;
+		const auto mipsOf = [](const D3D11_TEXTURE3D_DESC& a_desc) {
+			return a_desc.MipLevels ? a_desc.MipLevels : static_cast<UINT>(std::bit_width((std::max)({ a_desc.Width, a_desc.Height, a_desc.Depth, 1u })));
+		};
+		const UINT mips = mipsOf(desc);
+		auto previous = slot;
 		Reset();
 		desc.Width = a_width;
 		desc.Height = a_height;
 		desc.Depth = a_depth;
 		Create();
+		if (AdoptSlot(std::move(previous), mipsOf(desc) == mips)) {
+			logger::info("[ORG] {}: resized to {}x{}x{} as a new version", name, a_width, a_height, a_depth);
+			return true;
+		}
 		BumpResizeGeneration();
 		return true;
 	}
@@ -744,6 +820,9 @@ namespace GraphResources
 namespace GraphResources
 {
 	ExportedTexture ExportTexture(const ExportDesc&, const std::string&) { return {}; }
+	void RequestStructuralRebuild(std::string_view, std::span<const std::uint32_t>) {}
+	std::uint64_t StructuralRebuilds() { return 0; }
+	bool Resource::AdoptSlot(std::shared_ptr<org::VersionedTexture>, bool) { return false; }
 	std::uint64_t Resource::ResizeGeneration() { return 0; }
 	void Resource::BumpResizeGeneration() {}
 	void Resource::Register(org::RenderGraph&) const {}
