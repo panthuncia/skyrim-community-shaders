@@ -48,8 +48,8 @@ namespace DCLF::Features::Portals
 				bindings.queries = a_builder.ShaderResource(*b.queries).View();
 				bindings.results = a_builder.UnorderedAccess(*b.results).View();
 				// The programs are the frame's publication, named by the depth latch: an immutable pooled backing, declared through its
-				// channel (the pass may run on the compute queue, and the depth commit's upload fills the backing in this execution).
-				Extensions::DeclareCullBindingChannels(a_builder, *resources->scene, { Api::CullBindingSlot::Programs });
+				// late-bound buffer (the pass may run on the compute queue, and the depth commit's upload fills the backing in this execution).
+				Extensions::DeclareCullBindingPublications(a_builder, *resources->scene, { Api::CullBindingSlot::Programs });
 				if (evaluate && b.inlineEvaluation) {
 					// One Inline dispatch: the queries and the results alone, and the trace (into the task buffer) when asked.
 					if (b.trace)

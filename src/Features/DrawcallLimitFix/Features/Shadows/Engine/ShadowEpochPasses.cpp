@@ -151,8 +151,8 @@ namespace DCLF::Draws
 		{
 			a_builder.PreferQueue(org::QueueKind::Graphics);
 			ShadowBuildBindings bindings{};
-			// The views' strict-light publications (LoadViewLatch: the context atlas and the gates' verdicts), through their channels.
-			Extensions::DeclareCullBindingChannels(a_builder, *resources->scene, { Api::CullBindingSlot::LightContexts, Api::CullBindingSlot::StrictGates });
+			// The views' strict-light publications (LoadViewLatch: the context atlas and the gates' verdicts), through their late-bound buffers.
+			Extensions::DeclareCullBindingPublications(a_builder, *resources->scene, { Api::CullBindingSlot::LightContexts, Api::CullBindingSlot::StrictGates });
 			// The scene list, the geometry table and the shadow rows are the installed payload's (the latch names them). Every slot's
 			// outputs, written by the one dispatch.
 			bindings.casterRows = a_builder.UnorderedAccess(*resources->casterRows).View();

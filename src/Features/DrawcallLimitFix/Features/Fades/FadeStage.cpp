@@ -63,10 +63,10 @@ namespace DCLF::Draws
 				bindings.published[h] = a_builder.UnorderedAccess(*scene.fadeStatesOut[h]).View();
 			bindings.frame = a_builder.ShaderResource(scene.fadeFrameBuffer).View();
 			// The cull binding Programs is the depth latch's portalProgramsIndex (a per-frame publication; 0: none, the frustum alone),
-			// which the query stage reads: it declares the publication's channel, as the stage runs on the compute queue in the
+			// which the query stage reads: it declares the publication's late-bound buffer, as the stage runs on the compute queue in the
 			// execution whose upload fills the backing.
 			if (queryStage)
-				Extensions::DeclareCullBindingChannels(a_builder, *resources->scene, { Api::CullBindingSlot::Programs });
+				Extensions::DeclareCullBindingPublications(a_builder, *resources->scene, { Api::CullBindingSlot::Programs });
 			bindings.rootPrograms = a_builder.ShaderResource(*scene.fadeRootPrograms).View();
 			bindings.animated = a_builder.ShaderResource(*scene.fadeAnimated).View();
 			bindings.log = a_builder.UnorderedAccess(scene.fadeLog).View();

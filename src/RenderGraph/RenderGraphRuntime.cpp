@@ -1439,12 +1439,12 @@ struct RenderGraphRuntime::Impl
 			const auto async = host->TakeAsyncStats();
 			logger::info("[ORG] Async epochs: {} submitted, {} waited for their ticket, {} prepared again after the feature's inputs changed, {} carried uploads ({} lists recorded ahead by their producers; "
 						 "{} copies recorded on the queue that first uses them, {} other-queue batches spared the graphics uploads' wait; "
-						 "publication channels: {} uploads taken to a declaring batch's queue, {} waited for off the graphics queue; "
+						 "late-bound versions: {} uploads taken to a declaring batch's queue, {} waited for off the graphics queue; "
 						 "{} undeclared destinations made every other-queue batch wait); "
 						 "{} completions left to the host's next GPU wake-up instead of a signal; {} tickets stale only by a new version; {} epoch graphs built again; "
 						 "recordings: {} made, {} revision copies recorded, {} revision submissions ({} waited for a sealed copy, {} skipped with every copy busy); admissions: {} predicted, {} planned",
 				async.submitted, async.waited, async.stale, async.uploads, async.recordedUploadLists, async.queueUploadCopies, async.sparedUploadWaits,
-				async.channelRoutedUploads, async.channelUploadWaits, async.undeclaredUploads, async.wakesSkipped, async.staleBacking, async.rebuilds, async.recorded, async.revisionCopiesRecorded, async.revisionSubmissions, async.copyWaits,
+				async.lateRoutedUploads, async.lateUploadWaits, async.undeclaredUploads, async.wakesSkipped, async.staleBacking, async.rebuilds, async.recorded, async.revisionCopiesRecorded, async.revisionSubmissions, async.copyWaits,
 				async.copiesBusy, async.predicted, async.planned);
 		}
 		{
@@ -2234,7 +2234,8 @@ bool RenderGraphRuntime::Initialize()
 		// waits for them.
 		// A pass must declare everything an upload fills that it reads. DCLF's per-frame publications (the portal programs, the
 		// point-light context atlas and gate verdicts) are fresh pooled backings read through the latch's bindless indices, so their
-		// readers declare each publication's channel instead (org::runtime::PublicationChannels; Api::CullBindingSelect::Channel).
+		// readers declare a late-bound buffer whose versions they are instead (org::VersionedBuffer::CreateLateBound;
+		// Api::CullBindingSelect::Published).
 		// Without that, the Z-prepass epoch's compute batch read the portal programs before their upload landed and the
 		// interpreter looped on a garbage record count until Windows reset the GPU (RX 6600, camera sweeps, 2026-11-12).
 		desc.queueScopedUploads = !Switches::Equals("CS_ORG_QUEUE_UPLOADS", "0");

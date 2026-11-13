@@ -7,6 +7,7 @@
 
 #include <Render/PassBuilders.h>
 #include <Resources/Buffers/Buffer.h>
+#include <Resources/Buffers/VersionedBuffer.h>
 
 namespace DCLF::Extensions
 {
@@ -33,8 +34,8 @@ namespace DCLF::Extensions
 
 		// CullBindingBuffer's answer without a versioned one.
 		const std::shared_ptr<org::VersionedBuffer> kNoCullBuffer;
-		// CullBindingChannel's answer without a channel.
-		const std::shared_ptr<org::Buffer> kNoCullChannel;
+		// CullBindingPublished's answer without a publication.
+		const std::shared_ptr<org::VersionedBuffer> kNoCullPublished;
 	}
 
 	void ResolveMainCullInput(const Api::MainCullInputContribution& a_registered)
@@ -94,16 +95,16 @@ namespace DCLF::Extensions
 		return select.versioned ? *select.versioned : kNoCullBuffer;
 	}
 
-	const std::shared_ptr<org::Buffer>& CullBindingChannel(Api::CullBindingSlot a_slot, const Draws::SceneBuffers& a_scene)
+	const std::shared_ptr<org::VersionedBuffer>& CullBindingPublished(Api::CullBindingSlot a_slot, const Draws::SceneBuffers& a_scene)
 	{
 		const auto select = SelectCullBinding(a_slot, a_scene);
-		return select.channel ? *select.channel : kNoCullChannel;
+		return select.published ? *select.published : kNoCullPublished;
 	}
 
-	void DeclareCullBindingChannels(org::RenderPassBuilder& a_builder, const Draws::SceneBuffers& a_scene, std::initializer_list<Api::CullBindingSlot> a_slots)
+	void DeclareCullBindingPublications(org::RenderPassBuilder& a_builder, const Draws::SceneBuffers& a_scene, std::initializer_list<Api::CullBindingSlot> a_slots)
 	{
 		for (const auto slot : a_slots)
-			if (const auto& channel = CullBindingChannel(slot, a_scene))
-				a_builder.ShaderResource(channel);
+			if (const auto& published = CullBindingPublished(slot, a_scene))
+				a_builder.ShaderResource(*published);
 	}
 }

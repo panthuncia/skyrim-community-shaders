@@ -117,13 +117,13 @@ namespace DCLF::Draws
 				bindings.memberClaims = bind(Api::CullBindingSlot::MemberClaims, true);
 				bindings.rootPrograms = bind(Api::CullBindingSlot::RootPrograms, false);
 				// The frame's programs (the depth latch's index) and the view latch's strict-light publications: declared through their
-				// channels, so the copies that fill them are ordered before this pass whatever queue it runs on.
-				Extensions::DeclareCullBindingChannels(a_builder, *resources->scene,
+				// late-bound buffers, so the copies that fill them are ordered before this pass whatever queue it runs on.
+				Extensions::DeclareCullBindingPublications(a_builder, *resources->scene,
 					{ Api::CullBindingSlot::Programs, Api::CullBindingSlot::LightContexts, Api::CullBindingSlot::StrictGates });
 				return bindings;
 			}
-			// The view latch's strict-light publications (LoadViewLatch: the context atlas and the gates' verdicts), through their channels.
-			Extensions::DeclareCullBindingChannels(a_builder, *resources->scene, { Api::CullBindingSlot::LightContexts, Api::CullBindingSlot::StrictGates });
+			// The view latch's strict-light publications (LoadViewLatch: the context atlas and the gates' verdicts), through their late-bound buffers.
+			Extensions::DeclareCullBindingPublications(a_builder, *resources->scene, { Api::CullBindingSlot::LightContexts, Api::CullBindingSlot::StrictGates });
 			if (const auto& results = Extensions::CullBindingBuffer(Api::CullBindingSlot::MemberResults, *resources->scene); results && segment == RenderGraphRuntime::Segment::ZPrepass && fixedPhase != 2)
 				bindings.memberResults = a_builder.ShaderResource(*results).View();
 
