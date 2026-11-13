@@ -2226,10 +2226,16 @@ bool RenderGraphRuntime::Initialize()
 		// (their published copies are submitted again). A live epoch's recording is used once. Replayable recordings carry no Tracy GPU
 		// zones: turn it off to profile the epochs' passes on the GPU with Tracy (the revision-driven epochs then run synchronously).
 		desc.reuseRecordings = !Switches::Equals("CS_ORG_REUSE_RECORDINGS", "0");
-		// CS_ORG_QUEUE_UPLOADS (default on, =0 off): an async epoch's staged uploads whose destination it first uses on the compute
-		// queue are recorded there, just ahead of its first compute batch, and a compute batch waits for the graphics queue's
-		// uploads only when it uses what they write. Off: every upload on the graphics queue and every compute batch waits for them.
-		desc.queueScopedUploads = !Switches::Equals("CS_ORG_QUEUE_UPLOADS", "0");
+		// CS_ORG_QUEUE_UPLOADS (default off, =1 on): on, an async epoch's staged uploads whose destination it first uses on the
+		// compute queue are recorded there, just ahead of its first compute batch, and a compute batch waits for the graphics
+		// queue's uploads only when a pass in it declares what they write. Off: every upload on the graphics queue, and every
+		// compute batch waits for them.
+		// Off by default because DCLF's passes read per-frame publications through the latch's bindless indices, which no pass
+		// declares (the portal programs, the placements, the fade seeds). With it on, the Z-prepass epoch's compute batch could read
+		// the frame's portal programs before their upload landed: a pooled backing half old, half new, whose directory gave the
+		// interpreter a garbage record count. Its loop then ran for minutes and Windows reset the GPU (RX 6600, camera sweeps,
+		// 2026-11-12; Radeon GPU Detective named fade-portal-evaluate's waves).
+		desc.queueScopedUploads = Switches::Equals("CS_ORG_QUEUE_UPLOADS", "1");
 		// The segments in the order a frame runs them: Drawcall Limit Fix's schedule's (ConfigureFrame), else the built-in order - the
 		// shadow views at AfterShadowMaps, the Z-prepass at the depth pass, the water reflection's faces after it, Skylighting's map, Light
 		// Limit Fix's culling at Prepass, the colour pass where the main pass's opaque batches end, and the forward epoch (T7d) at the

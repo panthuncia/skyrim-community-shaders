@@ -102,9 +102,14 @@ bool PortalProgramRun(ByteAddressBuffer a_programs, uint4 a_entry, uint4 a_entry
 	const uint records = a_recordsBase + a_entry2.x * kPortalOpBytes;
 	const uint sets = a_setsBase + a_entry2.y * kPortalSetBytes;
 	uint op = a_entry.w;
+	// The loops never run past the records the encoding holds (its sets follow them): a buffer read before its upload landed, or
+	// torn, gives a wrong verdict for a frame, never a loop of billions of steps that hangs the GPU. Written with min, not a
+	// guard and an early return (AMD's equality-guard miscompile).
+	const uint available = (a_setsBase - a_recordsBase) / kPortalOpBytes;
+	const uint operators = min(a_entry.y, available - min(a_entry2.x, available));
 #ifdef DCLF_PORTAL_UNIFORM_SCAN
 	bool accepted = false;
-	[loop] for (uint i = 0; i < a_entry.y; ++i)
+	[loop] for (uint i = 0; i < operators; ++i)
 	{
 		const uint4 record = a_programs.Load4(records + i * kPortalOpBytes);
 		if (record.x == 2u || record.x == 3u) {
@@ -116,10 +121,11 @@ bool PortalProgramRun(ByteAddressBuffer a_programs, uint4 a_entry, uint4 a_entry
 	}
 	return accepted;
 #else
-	[loop] for (uint step = 0; step < a_entry2.w; ++step)
+	// A forward-only path visits each record at most once.
+	[loop] for (uint step = 0; step < min(a_entry2.w, operators); ++step)
 	{
 		// A producer invariant failure must never silently accept a bound.
-		if (op >= a_entry.y)
+		if (op >= operators)
 			return false;
 		const uint4 record = a_programs.Load4(records + op * kPortalOpBytes);
 		if (record.x == 2u || record.x == 3u)
