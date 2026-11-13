@@ -16,6 +16,8 @@
 #include <ORGModuleServices/BackingPool.h>
 #include <ORGModuleServices/GrowthPolicy.h>
 #include <ORGModuleServices/VersionedBufferBuild.h>
+#include <OpenRenderGraph/GraphHost.h>
+#include <Resources/Buffers/Buffer.h>
 #include <Render/Runtime/IUploadService.h>
 
 #include <algorithm>
@@ -30,6 +32,15 @@ namespace DCLF::Draws
 
 	namespace
 	{
+		/** @brief A built sequences version's ref at byte 0 (null without a backing or a graph host). */
+		RenderGraph::BufferRef SequencesRefOf(const org::services::PublishedBufferVersion& a_version)
+		{
+			auto* host = RenderGraphRuntime::Get().Host();
+			const auto& buffer = a_version.lease ? a_version.lease->buffer : nullptr;
+			return host && buffer ? RenderGraph::MakeBufferRef(host->Device(), buffer->GetAPIResource().GetHandle(), 0, std::source_location::current()) :
+			                        RenderGraph::BufferRef{};
+		}
+
 		/** @brief a_lanes rounded up to a multiple of 8, within [8, 65528] (a lane index is 16 bits). */
 		std::uint32_t RoundedLanes(unsigned long a_lanes)
 		{
@@ -342,7 +353,8 @@ namespace DCLF::Draws
 		}
 		building->sequencesVersion = done->version;
 		building->sequencesAddress = done->version->lease->address;
-		building->sequencesRef = done->version->lease->buffer ? RenderGraph::BufferRefOf(*done->version->lease->buffer) : RenderGraph::BufferRef{};
+		// Not a raw ref: the CPU sites declare the sequences (DeclareViewBatchReads), whose version the frame publishes (PublishViewBatches).
+		building->sequencesRef = SequencesRefOf(*done->version);
 		set = std::move(building);
 		return true;
 	}
@@ -389,5 +401,29 @@ namespace DCLF::Draws
 	{
 		if (a_set.sequencesVersion && a_point)
 			a_set.sequencesVersion->lease.Bind(a_point);
+	}
+
+	namespace
+	{
+		RenderGraph::LateRefBuffer& SequencesLate()
+		{
+			static RenderGraph::LateRefBuffer late("cs.dclf.cpu.sequences");
+			return late;
+		}
+	}
+
+	void PublishViewBatches(const Direct::ViewBatchSet* a_set)
+	{
+		const auto& version = a_set ? a_set->sequencesVersion : nullptr;
+		if (!version || !version->lease) {
+			SequencesLate().Publish(nullptr, nullptr);
+			return;
+		}
+		SequencesLate().Publish(version->lease->buffer, version, a_set->sequencesRef);
+	}
+
+	void DeclareViewBatchReads(org::RenderPassBuilder& a_builder, RenderGraph::DeclaredRefs& a_out)
+	{
+		SequencesLate().Declare(a_builder, RenderGraph::RefAccess::Read, a_out);
 	}
 }

@@ -14,6 +14,8 @@
 #include "Features/DrawcallLimitFix/Core/Render/Passes/DrawHelpers.h"
 #include "Features/DrawcallLimitFix/Core/Render/Resources/IndexPool.h"
 #include "Features/DrawcallLimitFix/Core/Render/Shadow/ShadowFrame.h"
+#include "Features/DrawcallLimitFix/Core/Render/Snapshot/ViewBatches.h"
+#include "RenderGraph/BufferRefs.h"
 
 #include <RenderPasses/Base/TypedRenderGraphPass.h>
 
@@ -29,6 +31,7 @@ namespace DCLF::Direct
 		struct SiteBindings
 		{
 			Site site = Site::Depth;
+			RenderGraph::DeclaredRefs sequences;  // the view batch sequences, which the recorder pushes refs into
 		};
 
 		/** @brief A draw site's late pass: its targets declared, its recording the executing run's draws. */
@@ -53,7 +56,17 @@ namespace DCLF::Direct
 					reads(a_builder);
 				// The site's draws read the frame's placements, palettes, shading and fade seeds through the frame record (t117, t121-t123).
 				FrameValues::Get().DeclareReads(a_builder);
-				return { site };
+				// And the view batch set's sequences, through the ref every draw's push words carry (ViewBatchSet::sequencesRef).
+				SiteBindings bindings{ site };
+				Draws::DeclareViewBatchReads(a_builder, bindings.sequences);
+				return bindings;
+			}
+
+			org::EmptyPassFrameData Prepare(const SiteBindings& a_bindings, const org::PassPrepareContext& a_preparation) const
+			{
+				// The set's ref is latched when the frame takes it (PublishViewBatches). Phase 4 records with the declaration's.
+				RenderGraph::CheckDeclaredRefs(a_bindings.sequences, a_preparation, "a CPU draw site");
+				return {};
 			}
 
 			void Revision(std::vector<std::uint64_t>& a_out) const

@@ -1508,6 +1508,8 @@ namespace DCLF::Direct
 				s.current = &slot;
 			}
 			FrameValues::Get().SetViewBatches(forward);
+			// The sites declare the sequences: their version is the set's this frame.
+			Draws::PublishViewBatches(forward.get());
 			KickCpuFrameState(std::move(forward), true);
 			return;
 		}
@@ -1534,6 +1536,8 @@ namespace DCLF::Direct
 		(void)host->BeginExternalRun(s.timeline, s.signalled + 1);
 		// Then, in this order before FrameValues::Kick: the movers' live spheres into this set, and the CPU frame state armed with it.
 		FrameValues::Get().SetViewBatches(a_set);
+		// The sites declare the sequences: their version is the set's this frame.
+		Draws::PublishViewBatches(a_set.get());
 		KickCpuFrameState(std::move(a_set));
 	}
 
