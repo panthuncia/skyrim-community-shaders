@@ -17,6 +17,7 @@
 #include "RenderGraph/GraphResources.h"
 #include "RenderGraph/Engine/GuestDevice.h"
 #include "RenderGraph/Engine/Native/Native.h"
+#include "RenderGraph/Engine/Native/OpCensus.h"
 #include "RenderGraph/Engine/OwnedFrame.h"
 #include "RenderGraph/Engine/Targets/EngineTargets.h"
 #include "RenderGraph/Engine/Tripwire/Tripwire.h"
@@ -2715,6 +2716,7 @@ void RenderGraphRuntime::SignalFramePace(bool a_active)
 void RenderGraphRuntime::SealPresented()
 {
 	// The native frame graph diagnostics close their frame (cheap when their switches are off).
+	RenderGraph::Engine::Native::OpCensus::EndFrame();
 	RenderGraph::RunShapes::EndFrame();
 	if (impl && impl->host)
 		impl->host->SealSubmitted();
@@ -2827,6 +2829,7 @@ std::shared_ptr<org::ExternalEpochExecution> RenderGraphRuntime::ExecuteExternal
 		throw;
 	}
 	impl->MarkEpoch(impl->host->LastHostFrame(), a_segment);
+	RenderGraph::Engine::Native::OpCensus::NoteEpoch(label);
 	auto execution = impl->host->TakeExternalExecution();
 	// Open until the caller emits the execution and calls CloseExternalEpoch.
 	impl->externalOpen = true;
@@ -3074,6 +3077,8 @@ RenderGraphRuntime::EpochResult RenderGraphRuntime::TryExecuteEpoch(Segment a_se
 		}
 		impl->submittedSegments |= std::uint64_t{ 1 } << static_cast<std::uint32_t>(a_segment);
 		impl->failedEpochsLogged &= ~(std::uint64_t{ 1 } << static_cast<std::uint32_t>(a_segment));
+		// CS_ORG_NATIVE_OP_CENSUS: the immediate context's operations from here on fall after this epoch.
+		RenderGraph::Engine::Native::OpCensus::NoteEpoch(Impl::SegmentLabel(a_segment));
 		return EpochResult::Submitted;
 	} catch (const org::GraphHost::EpochCopiesBusyError& e) {
 		// A revision-driven epoch ran more times since the last Present than it has published copies: nothing was submitted and

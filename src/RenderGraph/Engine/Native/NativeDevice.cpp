@@ -19,6 +19,7 @@
 #	include "RenderGraph/Engine/Tripwire/Tripwire.h"
 #	include "RenderGraph/Backend.h"
 #	include "RenderGraph/Engine/D3D12Device.h"
+#	include "RenderGraph/Engine/Native/OpCensus.h"
 #	include "RenderGraph/RenderGraphRuntime.h"
 #	include "RenderGraph/Switches.h"
 
@@ -365,12 +366,27 @@ namespace RenderGraph::Engine::Native
 			std::mutex windowLock;
 			winrt::com_ptr<ID3D11ShaderResourceView> window;
 			bool streamEnabled = false;
+			// What the censuses and the undeclared-access validator read (OpCensus, DescribeForCensus): the D3D11 description's bind
+			// flags, usage and dimension, whether it was made with data, and whether the context wrote it since (marked only while
+			// one of them is on).
+			UINT bindFlags = 0;
+			D3D11_USAGE usage = D3D11_USAGE_DEFAULT;
+			D3D11_RESOURCE_DIMENSION dimension = D3D11_RESOURCE_DIMENSION_UNKNOWN;
+			bool initialData = false;
+			std::atomic<bool> written{ false };
+			const uint64_t serial;  // unique for the session: the censuses' key
 
 			NativeResource();
 			~NativeResource();
 			NativeResource(const NativeResource&) = delete;
 			NativeResource& operator=(const NativeResource&) = delete;
 		};
+
+		uint64_t NextSerial()
+		{
+			static std::atomic<uint64_t> next{ 0 };
+			return ++next;
+		}
 
 		/** @brief The live NativeResource records, so DescribeResource can tell one from another owner. */
 		struct Registry
@@ -385,7 +401,8 @@ namespace RenderGraph::Engine::Native
 			return registry;
 		}
 
-		NativeResource::NativeResource()
+		NativeResource::NativeResource() :
+			serial(NextSerial())
 		{
 			auto& registry = GetRegistry();
 			std::lock_guard guard(registry.lock);
@@ -796,6 +813,15 @@ namespace RenderGraph::Engine::Native
 			std::string name;
 		};
 
+		/** @brief The request's description as the censuses read it (NativeResource::bindFlags and the rest). */
+		void NoteRequest(NativeResource& a_record, const TextureRequest& a_request)
+		{
+			a_record.bindFlags = a_request.bindFlags;
+			a_record.usage = a_request.usage;
+			a_record.dimension = a_request.dimension;
+			a_record.initialData = a_request.data && a_request.data->pSysMem;
+		}
+
 		void LogRefused(const TextureRequest& a_request, std::string_view a_why)
 		{
 			static std::atomic<uint32_t> logged{ 0 };
@@ -1116,6 +1142,7 @@ namespace RenderGraph::Engine::Native
 
 				auto record = std::make_shared<NativeResource>();
 				record->name = a_request.name;
+				NoteRequest(*record, a_request);
 				if (Rhi().CreateCommittedResource(desc, record->resource) != rhi::Result::Ok || !record->resource) {
 					LogRefused(a_request, fmt::format("BasicRHI could not create the image (resource format {}, flags {:#x})", static_cast<int>(format), flags));
 					return E_OUTOFMEMORY;
@@ -1235,6 +1262,7 @@ namespace RenderGraph::Engine::Native
 				auto record = std::make_shared<NativeResource>();
 				record->kind = NativeResource::Kind::Staging;
 				record->name = a_request.name;
+				NoteRequest(*record, a_request);
 				record->shape = ShapeOf(a_request, dxgiFormat, format, mips, layers, depth);
 				const auto& shape = record->shape;
 				record->layout.resize(shape.Subresources());
@@ -1440,6 +1468,10 @@ namespace RenderGraph::Engine::Native
 				auto record = std::make_shared<NativeResource>();
 				record->name = "Native::Buffer";
 				record->bufferDesc = a_desc;
+				record->bindFlags = a_desc.BindFlags;
+				record->usage = a_desc.Usage;
+				record->dimension = D3D11_RESOURCE_DIMENSION_BUFFER;
+				record->initialData = a_data && a_data->pSysMem;
 				record->readback = (a_desc.CPUAccessFlags & D3D11_CPU_ACCESS_READ) != 0;
 				const auto heap = record->readback ? rhi::HeapType::Readback : hostVisible ? rhi::HeapType::Upload : rhi::HeapType::DeviceLocal;
 				if (!MakeBufferResource(*record, (std::max)(a_desc.ByteWidth, 1u), heap, (a_desc.BindFlags & D3D11_BIND_UNORDERED_ACCESS) != 0))
@@ -2103,6 +2135,51 @@ namespace RenderGraph::Engine::Native
 			return info.wrapped && info.wrapped != a_object && Tripwire::IsHandle(info.wrapped) ? Resolve(info.wrapped) : nullptr;
 		}
 
+		/** @brief A census name: the resource handle's debug name (a view's: its resource's), else the record's own. */
+		std::string CensusName(const NativeResource& a_record, const void* a_resource, ID3D11View* a_view)
+		{
+			winrt::com_ptr<ID3D11Resource> viewed;
+			if (a_view) {
+				// A native view keeps its resource: GetResource answers it without a tripwire call.
+				a_view->GetResource(viewed.put());
+				a_resource = viewed.get();
+			}
+			auto name = a_resource ? Tripwire::Describe(a_resource).name : std::string();
+			return name.empty() ? a_record.name : name;
+		}
+
+		/**
+		 * @brief One immediate operation, for the censuses (OpCensus) and DescribeForCensus's written mark. a_resource is the resource
+		 * handle, or a_view the view the call named. Call only when OpCensus::Flags() is non-zero.
+		 */
+		void NoteOp(OpCensus::Op a_op, NativeResource& a_record, const void* a_resource, ID3D11View* a_view = nullptr)
+		{
+			if (OpCensus::IsWrite(a_op))
+				a_record.written.store(true, std::memory_order_relaxed);
+			if (!(OpCensus::Flags() & (OpCensus::kOps | OpCensus::kWrites)))
+				return;
+			const std::string name = CensusName(a_record, a_resource, a_view);
+			OpCensus::Record(a_op, { a_record.serial, name, a_record.bindFlags, static_cast<uint32_t>(a_record.usage), static_cast<uint32_t>(a_record.dimension),
+									   a_record.initialData });
+		}
+
+		/** @brief Map's census kind for a D3D11 map type. */
+		OpCensus::Op MapOp(D3D11_MAP a_type)
+		{
+			switch (a_type) {
+			case D3D11_MAP_READ:
+				return OpCensus::Op::MapRead;
+			case D3D11_MAP_READ_WRITE:
+				return OpCensus::Op::MapReadWrite;
+			case D3D11_MAP_WRITE_DISCARD:
+				return OpCensus::Op::MapWriteDiscard;
+			case D3D11_MAP_WRITE_NO_OVERWRITE:
+				return OpCensus::Op::MapWriteNoOverwrite;
+			default:
+				return OpCensus::Op::MapWrite;
+			}
+		}
+
 		/** @brief An operation on something the native device did not make: logged once per operation. */
 		void Unknown(std::atomic_flag& a_logged, const char* a_operation, const void* a_object)
 		{
@@ -2554,6 +2631,8 @@ namespace RenderGraph::Engine::Native
 			}
 			if (cpu->kind == NativeResource::Kind::Staging && a_subresource >= cpu->layout.size())
 				return E_INVALIDARG;
+			if (OpCensus::Flags())
+				NoteOp(MapOp(a_type), *record, a_resource);
 			// The GPU may still use the memory: a read waits for its writes, a write for its reads. NO_OVERWRITE promises not to touch
 			// what is in use. A DYNAMIC buffer is not renamed: no native GPU work reads a buffer except the context's own copies.
 			if (a_type != D3D11_MAP_WRITE_NO_OVERWRITE) {
@@ -2595,6 +2674,8 @@ namespace RenderGraph::Engine::Native
 			if (record->kind == NativeResource::Kind::Image && record->upload && a_subresource < record->shape.Subresources()) {
 				const auto image = record;
 				const auto upload = record->upload;
+				if (OpCensus::Flags())
+					NoteOp(OpCensus::Op::UnmapUpload, *image, a_resource);
 				if (RhiContext()) {
 					g_device->immediate.RunRhi("unmap (dynamic upload) " + image->name,
 						[&](rhi::CommandList& a_list, const Immediate::Descriptors&) {
@@ -2621,6 +2702,8 @@ namespace RenderGraph::Engine::Native
 				Unknown(logged, "UpdateSubresource", a_resource);
 				return;
 			}
+			if (OpCensus::Flags())
+				NoteOp(record->kind == NativeResource::Kind::Buffer ? OpCensus::Op::UpdateBuffer : OpCensus::Op::UpdateTexture, *record, a_resource);
 			if (record->kind == NativeResource::Kind::Buffer) {
 				const uint64_t from = a_box ? a_box->left : 0;
 				const uint64_t size = a_box ? a_box->right - a_box->left : record->size;
@@ -2762,6 +2845,10 @@ namespace RenderGraph::Engine::Native
 			// A subresource onto itself: D3D11's runtime drops the call, and Vulkan's copies must not overlap.
 			if (destination == source && a_destinationSub == a_sourceSub)
 				return;
+			if (OpCensus::Flags()) {
+				NoteOp(OpCensus::Op::CopyRegion, *destination, a_destination);
+				NoteOp(OpCensus::Op::CopyRegionSource, *source, a_source);
+			}
 			bool recorded = false;
 			if (RhiContext()) {
 				g_device->immediate.RunRhi("copy region " + source->name + " to " + destination->name,
@@ -2796,6 +2883,10 @@ namespace RenderGraph::Engine::Native
 			// A resource onto itself: D3D11's runtime drops the call.
 			if (destination == source)
 				return;
+			if (OpCensus::Flags()) {
+				NoteOp(OpCensus::Op::Copy, *destination, a_destination);
+				NoteOp(OpCensus::Op::CopySource, *source, a_source);
+			}
 			bool recorded = true;
 			if (RhiContext()) {
 				g_device->immediate.RunRhi("copy " + source->name + " to " + destination->name,
@@ -2837,6 +2928,8 @@ namespace RenderGraph::Engine::Native
 				Unknown(logged, "GenerateMips", a_view);
 				return;
 			}
+			if (OpCensus::Flags())
+				NoteOp(OpCensus::Op::GenerateMips, *record, nullptr, a_view);
 			const Shape& shape = record->shape;
 			if (shape.mips < 2 || shape.aspects != VK_IMAGE_ASPECT_COLOR_BIT)
 				return;
@@ -2926,6 +3019,8 @@ namespace RenderGraph::Engine::Native
 				Unknown(logged, "ClearRenderTargetView", a_view);
 				return;
 			}
+			if (OpCensus::Flags())
+				NoteOp(OpCensus::Op::ClearRenderTarget, *record, nullptr, a_view);
 			D3D11_RENDER_TARGET_VIEW_DESC desc{};
 			a_view->GetDesc(&desc);
 			if (RhiContext()) {
@@ -2973,6 +3068,8 @@ namespace RenderGraph::Engine::Native
 				Unknown(logged, a_operation, a_view);
 				return;
 			}
+			if (OpCensus::Flags())
+				NoteOp(a_float ? OpCensus::Op::ClearUavFloat : OpCensus::Op::ClearUavUint, *record, nullptr, a_view);
 			D3D11_UNORDERED_ACCESS_VIEW_DESC desc{};
 			a_view->GetDesc(&desc);
 			if (RhiContext()) {
@@ -3029,6 +3126,8 @@ namespace RenderGraph::Engine::Native
 				Unknown(logged, "ClearDepthStencilView", a_view);
 				return;
 			}
+			if (OpCensus::Flags())
+				NoteOp(OpCensus::Op::ClearDepthStencil, *record, nullptr, a_view);
 			VkImageAspectFlags aspects = 0;
 			if (a_flags & D3D11_CLEAR_DEPTH)
 				aspects |= VK_IMAGE_ASPECT_DEPTH_BIT;
@@ -3200,6 +3299,29 @@ namespace RenderGraph::Engine::Native
 		return g_device ? g_device->device : nullptr;
 	}
 
+	bool DescribeForCensus(const void* a_object, ResourceFacts& a_out)
+	{
+		auto record = a_object ? Resolve(a_object) : nullptr;
+		if (record && record->kind == NativeResource::Kind::Shell) {
+			// A streamed texture's shell has no storage: shaders read its window, so the window is what is described.
+			winrt::com_ptr<ID3D11ShaderResourceView> window;
+			{
+				std::lock_guard guard(record->windowLock);
+				window = record->window;
+			}
+			record = window ? Resolve(window.get()) : nullptr;
+		}
+		if (!record)
+			return false;
+		a_out.serial = record->serial;
+		a_out.bindFlags = record->bindFlags;
+		a_out.usage = static_cast<std::uint32_t>(record->usage);
+		a_out.dimension = static_cast<std::uint32_t>(record->dimension);
+		a_out.initialData = record->initialData;
+		a_out.written = record->written.load(std::memory_order_relaxed);
+		return true;
+	}
+
 	HRESULT CreateDeviceAndSwapChain(IDXGIAdapter* a_adapter, DXGI_SWAP_CHAIN_DESC* a_desc, IDXGISwapChain** a_swapChain, ID3D11Device** a_device,
 		D3D_FEATURE_LEVEL* a_featureLevel, ID3D11DeviceContext** a_context)
 	{
@@ -3210,6 +3332,8 @@ namespace RenderGraph::Engine::Native
 
 		auto* state = new NativeState();
 		state->adapter.copy_from(a_adapter);
+		// Before the first context call: the census switches (CS_ORG_NATIVE_OP_CENSUS, CS_ORG_NATIVE_WRITE_CENSUS).
+		OpCensus::Configure();
 		std::string reason;
 		if (!CreateBasicRhiDevice(a_adapter, state->device, reason))
 			Fail("the native device", reason);
@@ -3633,6 +3757,7 @@ namespace RenderGraph::Engine::Native
 		Fail("this build", "it was built without OpenRenderGraph");
 	}
 	bool DescribeResource(const IUnknown*, DxvkOrgInteropResourceInfo&) { return false; }
+	bool DescribeForCensus(const void*, ResourceFacts&) { return false; }
 	HRESULT Present(UINT, UINT) { return E_FAIL; }
 	bool EmitExternalCommands(void (*)(void*, VkCommandBuffer_T*), void*, const VkSemaphoreSubmitInfo*, std::uint32_t, const VkSemaphoreSubmitInfo*, std::uint32_t)
 	{

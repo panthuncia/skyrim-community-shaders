@@ -94,6 +94,23 @@ namespace RenderGraph::Engine::Native
 	 */
 	bool DescribeResource(const IUnknown* a_object, DxvkOrgInteropResourceInfo& a_info);
 
+	/** @brief What native mode knows of a resource it made, from its D3D11 description (DescribeForCensus). */
+	struct ResourceFacts
+	{
+		std::uint64_t serial = 0;     // unique for the session
+		std::uint32_t bindFlags = 0;  // D3D11_BIND_*
+		std::uint32_t usage = 0;      // D3D11_USAGE
+		std::uint32_t dimension = 0;  // D3D11_RESOURCE_DIMENSION
+		bool initialData = false;     // made with initial data
+		bool written = false;         // the immediate context wrote it since (only marked while a census or the validator is on)
+	};
+
+	/**
+	 * @brief The facts of the native resource behind a_object (a resource or view handle, or a port's handle around one). False when
+	 * native mode did not make it. For the undeclared-access validator's exemptions. Any thread.
+	 */
+	bool DescribeForCensus(const void* a_object, ResourceFacts& a_out);
+
 	/**
 	 * @brief Stage 6 and every frame after: the engine's Present on the swap chain handle. Copies the back buffer into the acquired
 	 * swap chain image on the graphics queue, after the frame's graph work, and presents it.
