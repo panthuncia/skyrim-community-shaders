@@ -4,6 +4,7 @@
 #include <atomic>
 #include <cstdint>
 #include <memory>
+#include <source_location>
 #include <span>
 #include <string>
 #include <vector>
@@ -147,9 +148,11 @@ namespace DCLF
 
 		/**
 		 * @brief Resolve with CPU ownership of this exact import and descriptor slot, importing inline if needed. a_sourceTag is diagnostic
-		 * only (Tag). a_failure, when given, says why the binding is kInvalid.
+		 * only (Tag). a_failure, when given, says why the binding is kInvalid. a_where names the caller for the undeclared-access
+		 * validator (CS_ORG_VALIDATE_UNDECLARED=1).
 		 */
-		Binding ResolveBinding(ID3D11ShaderResourceView* a_view, std::uint32_t a_sourceTag = ~0u, ResolveFailure* a_failure = nullptr);
+		Binding ResolveBinding(ID3D11ShaderResourceView* a_view, std::uint32_t a_sourceTag = ~0u, ResolveFailure* a_failure = nullptr,
+			std::source_location a_where = std::source_location::current());
 
 		/**
 		 * @brief An empty slot's binding: a view of a_kind that reads zero (1x1 RGBA32F D3D11 textures made on first use, imported once;
@@ -159,6 +162,9 @@ namespace DCLF
 
 		/** @brief One line for a refusal's log: a_view (slot a_slot) as D3D11 describes it, and a_failure in words. Reads nothing else. */
 		static std::string DescribeFailure(ID3D11ShaderResourceView* a_view, std::uint32_t a_slot, ResolveFailure a_failure);
+
+		/** @brief A source tag (Tag) in words, for logs: "ResolveBinding frame slot 17". */
+		static std::string SourceName(std::uint32_t a_tag);
 
 		/**
 		 * @brief Any thread: a_view's binding, answered as an event into a_replies (its one consumer drains it; it lives as long as the

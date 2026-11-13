@@ -7,6 +7,7 @@
 
 #	include "RenderGraph/ComputeProgram.h"
 #	include "RenderGraph/RenderGraphRuntime.h"
+#	include "RenderGraph/RunShapes.h"
 
 #	include <OpenRenderGraph/GraphHost.h>
 #	include <OpenRenderGraph/Runtime.h>
@@ -46,10 +47,12 @@ namespace RenderGraph
 			return;
 		auto& word = open[static_cast<std::size_t>(run.lease) * words + a_entry / 64];
 		const std::uint64_t bit = std::uint64_t{ 1 } << (a_entry % 64);
-		if (a_work)
+		if (a_work) {
 			word.fetch_or(bit, std::memory_order_release);
-		else
+			RunShapes::NoteOpen(this, a_entry);
+		} else {
 			word.fetch_and(~bit, std::memory_order_release);
+		}
 	}
 
 	void RunGate::Close() const

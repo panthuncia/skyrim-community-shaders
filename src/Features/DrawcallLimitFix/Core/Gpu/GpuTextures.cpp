@@ -20,6 +20,7 @@
 #include "RenderGraph/Engine/Tripwire/Tripwire.h"
 #include "RenderGraph/RenderGraphRuntime.h"
 #include "RenderGraph/ShaderBindings.h"
+#include "RenderGraph/UndeclaredAccess.h"
 #include "TextureStreaming/Census.h"
 #include "Features/DrawcallLimitFix/Core/Runtime/SceneScheduler.h"
 #include "Features/DrawcallLimitFix/Core/Gpu/TextureFeedback.h"
@@ -836,13 +837,31 @@ namespace DCLF
 
 	GpuTextures::~GpuTextures() = default;
 
+	std::string GpuTextures::SourceName(std::uint32_t a_tag)
+	{
+		// Highest first: a tag is its source's first value plus a slot.
+		static constexpr std::pair<Source, const char*> kSources[] = { { Source::Scaleform, "Scaleform" }, { Source::ImGui, "ImGui" },
+			{ Source::ShadowDiffuse, "shadow diffuse" }, { Source::FamilyNull, "family null view" }, { Source::FamilyHeader, "family header" },
+			{ Source::FrameSlot, "frame slot" }, { Source::Mask, "pipeline mask" }, { Source::Projected, "projected decal" },
+			{ Source::Feature, "material feature" }, { Source::Material, "material slot" } };
+		if (a_tag == ~0u)
+			return "ResolveBinding";
+		for (const auto& [source, name] : kSources) {
+			const auto first = static_cast<std::uint32_t>(source);
+			if (a_tag >= first)
+				return a_tag > first ? fmt::format("ResolveBinding {} {}", name, a_tag - first) : fmt::format("ResolveBinding {}", name);
+		}
+		return fmt::format("ResolveBinding tag {}", a_tag);
+	}
+
 	GpuTextures& GpuTextures::Get()
 	{
 		static GpuTextures textures;
 		return textures;
 	}
 
-	GpuTextures::Binding GpuTextures::ResolveBinding(ID3D11ShaderResourceView* a_view, std::uint32_t a_sourceTag, ResolveFailure* a_failure)
+	GpuTextures::Binding GpuTextures::ResolveBinding(ID3D11ShaderResourceView* a_view, std::uint32_t a_sourceTag, ResolveFailure* a_failure,
+		std::source_location a_where)
 	{
 		DCLF_ZONE("CS.DCLF.Texture.ResolveBinding");
 		ResolveFailure ignored = ResolveFailure::None;
@@ -850,6 +869,9 @@ namespace DCLF
 		failure = ResolveFailure::None;
 		if (!a_view)
 			return NullBinding();
+		// A second import of the view: no pass declares what the index reads (CS_ORG_VALIDATE_UNDECLARED=1 logs it).
+		if (RenderGraph::UndeclaredAccess::On())
+			RenderGraph::UndeclaredAccess::NoteView(a_view, SourceName(a_sourceTag), a_where);
 		// These holders keep their first import and do not follow a swap: the full window, and they ask again until it is there.
 		if (!TextureStreaming::PinFull(a_view)) {
 			failure = ResolveFailure::StreamedWindow;
