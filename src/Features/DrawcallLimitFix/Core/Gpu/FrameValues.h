@@ -15,6 +15,12 @@
 
 struct VkSemaphore_T;
 
+namespace org
+{
+	class VersionedBuffer;
+	class RenderPassBuilder;
+}
+
 namespace org::services
 {
 	struct Backing;
@@ -166,6 +172,23 @@ namespace DCLF
 		 * buffer: the next DXVK submission waits for it) takes it at its trigger, on the render thread: the next Kick moves it.
 		 */
 		FrameWait FrameWaitPoint() const;
+		/** @brief The row sets a pass reads (DeclareReads): bits. Pools: every registered pool (Api::FrameValuePool: Features/Fades' seeds...). */
+		enum ReadSets : std::uint32_t
+		{
+			kReadPlacements = 1u << 0,
+			kReadPalettes = 1u << 1,
+			kReadShading = 1u << 2,
+			kReadPools = 1u << 3,
+			kReadAll = kReadPlacements | kReadPalettes | kReadShading | kReadPools,
+		};
+		/**
+		 * @brief Any thread, a pass's declaration: the pass reads a_sets of the frame's values, through the indices or addresses a latch, a
+		 * frame record or an address block carries (PlacementsIndex, PalettesIndex, ShadingIndex, PoolIndex, PoolAddress). Declares each
+		 * row set's late-bound buffer (org::VersionedBuffer::CreateLateBound, ready at the frame wait), whose versions are the frame's
+		 * backings. With a scoped frame wait (GraphHost::Desc::scopedFrameWait, CS_ORG_SCOPED_FRAME_WAIT) only the batches whose passes
+		 * declare them wait for the frame's values, so every pass that reads one must declare it.
+		 */
+		void DeclareReads(org::RenderPassBuilder& a_builder, std::uint32_t a_sets = kReadAll);
 		/** @brief Render thread: the descriptor of the placement buffer the current frame's draws read (0 before the first frame). */
 		std::uint32_t PlacementsIndex() const { return frameIndex; }
 		/** @brief Render thread: the descriptor of the palette buffer the current frame's draws read (0 before the first frame). */

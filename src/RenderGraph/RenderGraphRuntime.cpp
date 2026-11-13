@@ -2239,6 +2239,9 @@ bool RenderGraphRuntime::Initialize()
 		// Without that, the Z-prepass epoch's compute batch read the portal programs before their upload landed and the
 		// interpreter looped on a garbage record count until Windows reset the GPU (RX 6600, camera sweeps, 2026-11-12).
 		desc.queueScopedUploads = !Switches::Equals("CS_ORG_QUEUE_UPLOADS", "0");
+		// CS_ORG_SCOPED_FRAME_WAIT (=1 on, default off): only the batches whose passes declare a read of Drawcall Limit Fix's frame
+		// values (DCLF::FrameValues::DeclareReads) wait for the frame wait. Off: every batch waits for it.
+		desc.scopedFrameWait = Switches::Equals("CS_ORG_SCOPED_FRAME_WAIT", "1");
 		// The segments in the order a frame runs them: Drawcall Limit Fix's schedule's (ConfigureFrame), else the built-in order - the
 		// shadow views at AfterShadowMaps, the Z-prepass at the depth pass, the water reflection's faces after it, Skylighting's map, Light
 		// Limit Fix's culling at Prepass, the colour pass where the main pass's opaque batches end, and the forward epoch (T7d) at the

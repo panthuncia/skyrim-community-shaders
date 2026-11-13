@@ -11,6 +11,8 @@
 #include "Features/DrawcallLimitFix/Core/Extensions/Registry.h"
 #include "Features/DrawcallLimitFix/Core/Extensions/Views.h"
 #include "Features/DrawcallLimitFix/Core/LatePoses/LatePoseOverrides.h"
+#include <Render/PassBuilders.h>
+#include <Resources/Buffers/VersionedBuffer.h>
 #include <Tracy/TracyC.h>
 
 #include "Features/DrawcallLimitFix/Core/Engine/EngineReleases.h"
@@ -441,6 +443,34 @@ namespace DCLF
 		std::atomic<std::size_t> registeredMade{ 0 };                     // their count, published once made (TakePoolStats reads it)
 		std::vector<org::services::BackingLease> registeredFrameLeases;  // the kicked frame's, by registered pool, bound at EndFrame
 		std::vector<std::uint32_t> registeredIndex;                       // the descriptor of each one's frame backing (PoolIndex)
+		// By row set (the built-in ones, then the registered pools): the late-bound buffer whose version is its frame backing
+		// (DeclareReads). Made once, whole (LateBuffers), on whichever thread first needs them: a pass's declaration may run on the
+		// graph host's thread.
+		std::vector<std::shared_ptr<org::VersionedBuffer>> lateBuffers;
+		std::once_flag lateBuffersMade;
+
+		const std::vector<std::shared_ptr<org::VersionedBuffer>>& LateBuffers()
+		{
+			std::call_once(lateBuffersMade, [this] {
+				const auto count = kBuiltInPools + Extensions::RegisteredPools().size();
+				for (std::size_t i = 0; i < count; ++i) {
+					auto standIn = org::Buffer::CreateUnmaterializedStructuredBuffer(1, 4, false);
+					standIn->SetName(fmt::format("cs.dclf.frame-values.{}.stand-in", i));
+					standIn->Materialize();
+					lateBuffers.push_back(org::VersionedBuffer::CreateLateBound(std::move(standIn), org::VersionedBuffer::LateReady::FrameWait));
+				}
+			});
+			return lateBuffers;
+		}
+
+		/** @brief Render thread: a_lease's backing as row set a_set's version. No owner: the frame's lease keeps the backing until
+		 *  EndFrame binds it, and a version holding a lease would keep the backing from its pool. */
+		void PublishFrameVersion(std::size_t a_set, const org::services::BackingLease& a_lease)
+		{
+			const auto& buffers = LateBuffers();
+			if (a_set < buffers.size() && a_lease && a_lease->buffer)
+				buffers[a_set]->PublishLate(a_lease->buffer);
+		}
 		std::shared_ptr<const Plan> plan;                              // the newest (its slots and palette capacity)
 		std::uint64_t planSerial = 0;                                  // bumped with every newest plan
 		// The kept set's root-view movers (the first person's; Kick's samples): every plan applied in order as Kick receives it, as the producers apply it.
@@ -2841,6 +2871,11 @@ namespace DCLF
 		shadingIndex = s.frameLeases[Impl::kShading]->srvIndex;
 		for (std::size_t i = 0; i < s.registeredIndex.size(); ++i)
 			s.registeredIndex[i] = s.registeredFrameLeases[i]->srvIndex;
+		// Each row set's frame backing is its late-bound buffer's version (LateBuffers).
+		for (std::size_t i = 0; i < s.frameLeases.size(); ++i)
+			s.PublishFrameVersion(i, s.frameLeases[i]);
+		for (std::size_t i = 0; i < s.registeredFrameLeases.size(); ++i)
+			s.PublishFrameVersion(s.frameLeases.size() + i, s.registeredFrameLeases[i]);
 		// Batches submitted from here wait for the frame's values; the producer always signals.
 		host->SetFrameWaitValue(seq);
 		s.kicked = true;
@@ -2880,10 +2915,32 @@ namespace DCLF
 		if (!s.kicked)
 			return;
 		// The batches recorded from here bind these (the frame's producer filled both copies; its signal covers them).
-		if (const auto& lease = s.late.frameLeases[Impl::kPlacements])
+		if (const auto& lease = s.late.frameLeases[Impl::kPlacements]) {
 			frameIndex = lease->srvIndex;
-		if (const auto& lease = s.late.frameLeases[Impl::kPalettes])
+			s.PublishFrameVersion(Impl::kPlacements, lease);
+		}
+		if (const auto& lease = s.late.frameLeases[Impl::kPalettes]) {
 			paletteIndex = lease->srvIndex;
+			s.PublishFrameVersion(Impl::kPalettes, lease);
+		}
+	}
+
+	void FrameValues::DeclareReads(org::RenderPassBuilder& a_builder, std::uint32_t a_sets)
+	{
+		const auto& buffers = impl->LateBuffers();
+		const auto declare = [&](std::size_t a_set) {
+			if (a_set < buffers.size())
+				a_builder.ShaderResource(*buffers[a_set]);
+		};
+		if (a_sets & kReadPlacements)
+			declare(Impl::kPlacements);
+		if (a_sets & kReadPalettes)
+			declare(Impl::kPalettes);
+		if (a_sets & kReadShading)
+			declare(Impl::kShading);
+		if (a_sets & kReadPools)
+			for (std::size_t i = kBuiltInPools; i < buffers.size(); ++i)
+				declare(i);
 	}
 
 	void FrameValues::Skip()
