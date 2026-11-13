@@ -362,3 +362,49 @@ thread.
   under 1 ms.
 - **A new graph's first prepare now includes alias placement and one validated build**, on the host thread. A ticket asked for
   right after an attach may wait for it; watch `WaitTicket`.
+
+## Phase 2 items 1 and 3 lane: graph-owned and exempt textures (`org-native/p2-native-owned`)
+
+Native mode only, behind `CS_ORG_NATIVE_OWNED` (on by default; `=0` keeps the old behaviour). `NativeDevice::MakeTexture` sorts
+every texture it makes:
+- **Exempt:** only a shader resource, made with its contents, not DYNAMIC and without CPU access.
+  - Its contents go in through a transfer on the graphics queue (`InitializeShaderRead`) that ends in the shader-read state, where
+    it rests. Nothing waits at creation; the transfer's immediate-context value is its readiness.
+  - Its description (`DescribeResource`) names the shader-read layout, so imports and DCLF's raw views read it there.
+  - The immediate context moves it to Common and back around its own operations (`Immediate::LeaveShaderRead`).
+  - `FrameAnchors::ImmutableTexture` returns it as one graph resource (`Native::ImmutableTextureOf`): an
+    `ExternalTextureResource` marked `ExternalImmutableShaderResource`, made on the first call after waiting for the transfer, the
+    same pointer on every call. It is not registered under the name.
+  - A write by the context (an update, a copy into it, mip generation) promotes it once. The context keeps ordering the write as
+    above, and the graph resource becomes graph-managed through `Builds::Change`, which runs the change at the next poll with no
+    build running and builds every epoch again. No graph change when nothing looked it up. Logged as
+    `[ORG native] <name>: an exempt texture written after creation; promoted to tracked`.
+- **Tracked:** everything else, once the render graph is up.
+  - A persistent `org::PixelBuffer` (materialized, never aliased), named `cs.native.texture.<serial>`. ORG makes it Undefined.
+  - The record imports its image for the context and the D3D11 views.
+  - Home states are still on, and the context's raw operations still expect Common. So the texture is moved to Common at creation
+    (with its contents), its tracker says Common, and `org::Resource::SetHostHome` makes each execution give it back in Common.
+  - Kept host-made (a BasicRHI image the graph imports, as before), logged once per reason as `kept host-made, not graph-owned`:
+    textures made before the graph is up, 1D textures, misc flags other than a cube, swizzled formats, D3D12 typeless depth, depth
+    textures that are not one 2D slice, and sRGB textures with a UAV.
+- **No Common-only imports in native mode.** `ImportDxvkImage`/`ImportDxvkTexture` no longer use simultaneous access for images
+  resting in GENERAL. The graph moves every native image into each pass's layout and back to its home, as D3D12 already did.
+
+**Lookup.** `Native::GraphTextureOf(object)` (and `GraphTextureOfImage(image)` for DCLF) returns the tracked texture's
+`PixelBuffer`, or null (exempt, host-made, or not native's). `FrameAnchors::Import` and DCLF's `ImportImage` call it first in native
+mode. Until the imports hold a `GloballyIndexedResource` (lane `p2-imports`: `NativeBacking` takes this lookup), a `PixelBuffer` does
+not fit their `ExternalTextureResource` type, so they still import the image from its description. That second resource is safe
+while home states are on: both rest in Common between executions.
+
+**ORG** (`org-native/p2-native-owned`, a6310fd):
+- `RenderGraph::AddResource` accepts an exempt resource.
+- Admission plans no barriers, seeds or commits for it, and keeps no ledger entry (`PreparedBackingState::exempt`).
+- A pass that declares a write to it is refused at declaration.
+- `Resource::SetHostHome`: a graph-owned resource that goes home under external home states.
+
+**Checks for a native run:**
+- `CS_ORG_NATIVE_VALIDATION=1`: no new layout errors. The likely ones are an exempt image used in GENERAL, or a tracked image read
+  by an undeclared raw view during an execution.
+- `CS_ORG_NATIVE_WRITE_CENSUS=1` with the promotion lines: the loading screen's texture should be the only one promoted.
+- The `kept host-made` lines: what stays host-made and why.
+- `CS_ORG_NATIVE_OWNED=0` against the default: the frame-rate change from dropping Common-only imports.

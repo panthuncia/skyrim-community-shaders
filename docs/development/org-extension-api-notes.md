@@ -1825,6 +1825,19 @@ is not declarable at the build (`PublishedResources::IsDeclarable`), so the call
   pass turns into a trailing declaration, as BasicRenderer's `MipHandoffPass` does for its textures.
 - **Found by:** native frame graph Phase 1 (2026-11-13).
 
+### Exempt resources in graphs, and a home for graph-owned resources (done in CS's ORG branch)
+
+- **Need:** graphs must read immutable textures untracked (BasicRenderer's `ExternalImmutableShaderResource`), and native mode's
+  graph-owned textures must still go home to Common after each execution while the context's raw operations expect it there.
+- **Done** on `org-native/p2-native-owned` (a6310fd):
+  - `RenderGraph::AddResource` accepts an exempt resource.
+  - Admission skips its state steps (no barriers, seeds, commits or ledger entry).
+  - A declared write to it throws.
+  - `Resource::SetHostHome(true)` gives a graph-managed resource a host-owned texture's home under external home states.
+- **Left:** a transfer service in ORG that ends uploads in the shader-read state with a readiness value (CS keeps its own in
+  `NativeDevice::InitializeShaderRead`), and queue-family ownership for exempt images read on async compute.
+- **Found by:** native frame graph Phase 2 (2026-11-13).
+
 ### Late-bound buffers: the version a preparation reads
 
 - **Need:** a pass that reads a late-bound buffer (`VersionedBuffer::CreateLateBound`) through a value it wrote at commit (a buffer
