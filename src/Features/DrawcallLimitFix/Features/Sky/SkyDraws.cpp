@@ -113,6 +113,7 @@ namespace DCLF::Features::Sky::SkyDraws
 			std::array<std::array<org::DeclaredViewToken, kFaces>, kCloudLayers> layers{};
 			org::DeclaredViewToken depth{}, sceneDepth{}, cloudShadows{};
 			bool hasDepth = false, hasSceneDepth = false, hasCloudShadows = false, hasLayers = false;
+			std::size_t queryReadbacks = 0;  // the sun's parts: the query ring's readbacks declared (QueryRing::Resolve)
 		};
 
 		struct Frame
@@ -143,6 +144,12 @@ namespace DCLF::Features::Sky::SkyDraws
 						bindings.sceneDepth = a_builder.ShaderResource(c.sceneDepth).View();
 						bindings.hasSceneDepth = true;
 					}
+					// The readbacks the sun's queries resolve into: copy destinations, so the graph orders and tracks the resolve.
+					if (c.queries)
+						for (const auto& readback : c.queries->Readbacks()) {
+							a_builder.CopyDestination(readback);
+							++bindings.queryReadbacks;
+						}
 					return bindings;
 				}
 				if (part == Part::Main) {
@@ -250,7 +257,7 @@ namespace DCLF::Features::Sky::SkyDraws
 						if (latched.program && draw(*static_cast<const RasterProgram*>(latched.program.get()), i, { &colour, 1 }, queries.Pool(latchRun), queries.Index(latchRun, i)))
 							begun |= 1u << i;
 					}
-					queries.Resolve(commands, latchRun, begun);
+					queries.Resolve(commands, latchRun, begun, a_bindings.queryReadbacks);
 					return;
 				}
 
@@ -477,9 +484,9 @@ namespace DCLF::Features::Sky::SkyDraws
 					if (draw.program)
 						client->gate->OpenDraw(i, draw.indexCount, 1);
 				}
-				// The engine ring slot the run's draw counts.
-				if (client->queries)
-					client->queries->Commit(latchRun, std::span<const std::int32_t>(&run->query, 1));
+				// The engine ring slot the run's draw counts. A new readback is declared from the next build.
+				if (client->queries && client->queries->Commit(latchRun, std::span<const std::int32_t>(&run->query, 1)))
+					FrameAnchors::Refresh(client->id);
 			};
 			desc.executed = [client](const FrameAnchors::Point&) {
 				if (client->queries)

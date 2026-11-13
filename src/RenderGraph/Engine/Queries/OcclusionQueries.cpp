@@ -169,11 +169,12 @@ namespace RenderGraph::Engine::OcclusionQueries
 			std::vector<std::int32_t> slots;  // the engine slot each query counts, kNoSlot for none
 			std::uint64_t generation = 0;
 			bool committed = false, submitted = false, harvested = false;
+			bool unresolved = false;  // its recording's pass did not declare its readback yet: nothing was resolved into it
 			org::GraphHost::GpuPoint point;  // every queue past the run's submission
 			std::uint64_t seals = 0;          // GraphHost::Seals at its submission
 		};
 
-		/** @brief The ranges of kRunsPerChunk lease indices: a query pool and its readback. */
+		/** @brief The ranges of kRunsPerChunk lease indices: a query pool and its readback (a graph resource the pass declares). */
 		struct Chunk
 		{
 			rhi::QueryPoolPtr pool;
@@ -184,7 +185,7 @@ namespace RenderGraph::Engine::OcclusionQueries
 		mutable rhi::Device device;  // ChunkOf makes pools from a const ring
 		std::uint32_t perRun = 0;
 		std::uint64_t stride = 8;
-		// Grown by record time (any thread) and read by the render thread: guarded by chunkMutex. A chunk never moves.
+		// Grown by the commit (render thread) and read at record time (any thread): guarded by chunkMutex. A chunk never moves.
 		mutable std::mutex chunkMutex;
 		mutable std::vector<std::unique_ptr<Chunk>> chunks;
 		mutable bool chunkFailed = false;
@@ -192,15 +193,24 @@ namespace RenderGraph::Engine::OcclusionQueries
 		std::uint32_t lastCommitted = ~0u;
 		std::uint64_t generations = 0;
 
-		/** @brief The chunk of a range, made on first use. Null, logged once, when its pool or readback cannot be made. */
-		Chunk* ChunkOf(std::uint32_t a_range) const
+		/** @brief The chunk index of a range. */
+		static std::uint32_t ChunkIndex(std::uint32_t a_range) { return a_range / QueryRing::kRunsPerChunk; }
+
+		/**
+		 * @brief The chunk of a range; with a_make (the commit, the render thread) made when it is new, a_made then set. Null when it
+		 * was not made, or (logged once) when its pool or readback cannot be made.
+		 */
+		Chunk* ChunkOf(std::uint32_t a_range, bool a_make = false, bool* a_made = nullptr) const
 		{
-			const std::uint32_t index = a_range / QueryRing::kRunsPerChunk;
+			const std::uint32_t index = ChunkIndex(a_range);
 			const std::scoped_lock lock(chunkMutex);
-			if (chunks.size() <= index)
+			if (chunks.size() <= index) {
+				if (!a_make)
+					return nullptr;
 				chunks.resize(static_cast<std::size_t>(index) + 1);
+			}
 			auto& chunk = chunks[index];
-			if (chunk)
+			if (chunk || !a_make)
 				return chunk.get();
 			auto made = std::make_unique<Chunk>();
 			rhi::QueryPoolDesc desc{};
@@ -218,6 +228,8 @@ namespace RenderGraph::Engine::OcclusionQueries
 				return nullptr;
 			}
 			chunk = std::move(made);
+			if (a_made)
+				*a_made = true;
 			return chunk.get();
 		}
 		/** @brief A range's first query in its chunk's pool. */
@@ -239,11 +251,12 @@ namespace RenderGraph::Engine::OcclusionQueries
 				auto& slot = a_globals.slots[a_index];
 				return slot.ring.get() == &a_ring && slot.range == a_range && slot.generation == run.generation ? &slot : nullptr;
 			};
-			if (!run.submitted) {
-				// Committed but never submitted (the run failed after its commit): nothing counted it.
+			if (!run.submitted || run.unresolved) {
+				// Committed but never submitted (the run failed after its commit), or recorded by a pass built before its readback
+				// existed: nothing counted it into the readback.
 				for (const auto index : run.slots)
 					if (auto* slot = bound(index))
-						SkipSlot(a_globals, *slot, "its run was committed but not submitted");
+						SkipSlot(a_globals, *slot, run.unresolved ? "its readback was not declared yet" : "its run was committed but not submitted");
 				run.harvested = true;
 				return true;
 			}
@@ -304,7 +317,7 @@ namespace RenderGraph::Engine::OcclusionQueries
 			}
 			state->stride = (std::max)(probe->GetQueryResultInfo().elementSize, 8u);
 		}
-		if (!state->ChunkOf(0))
+		if (!state->ChunkOf(0, true))
 			return nullptr;
 		logger::info("[ORG] occlusion queries: {}: {} queries a run, in pools of {} runs made as the host's runs in flight need them", state->name,
 			a_perRun, kRunsPerChunk);
@@ -312,6 +325,19 @@ namespace RenderGraph::Engine::OcclusionQueries
 	}
 
 	std::uint32_t QueryRing::PerRun() const { return state->perRun; }
+
+	std::vector<std::shared_ptr<org::Resource>> QueryRing::Readbacks() const
+	{
+		const std::scoped_lock lock(state->chunkMutex);
+		std::vector<std::shared_ptr<org::Resource>> readbacks;
+		// Chunks are made in order of their lease indices, so the made ones are a prefix.
+		for (const auto& chunk : state->chunks) {
+			if (!chunk)
+				break;
+			readbacks.push_back(chunk->readback);
+		}
+		return readbacks;
+	}
 
 	rhi::QueryPoolHandle QueryRing::Pool(const org::RunRef& a_run) const
 	{
@@ -330,11 +356,19 @@ namespace RenderGraph::Engine::OcclusionQueries
 			a_commands.ResetQueries(pool, Index(a_run, 0), state->perRun);
 	}
 
-	void QueryRing::Resolve(rhi::CommandList& a_commands, const org::RunRef& a_run, std::uint32_t a_begun) const
+	void QueryRing::Resolve(rhi::CommandList& a_commands, const org::RunRef& a_run, std::uint32_t a_begun, std::size_t a_declared) const
 	{
 		const auto* chunk = state->ChunkOf(a_run.lease);
 		if (!chunk)
 			return;
+		if (State::ChunkIndex(a_run.lease) >= a_declared) {
+			// The pass was built before the chunk was made: its readback is not declared, so nothing is written into it.
+			auto& globals = Get();
+			const std::scoped_lock lock(globals.mutex);
+			if (a_run.lease < state->runs.size())
+				state->runs[a_run.lease].unresolved = true;
+			return;
+		}
 		const auto pool = chunk->pool->GetHandle();
 		const auto first = Index(a_run, 0);
 		for (std::uint32_t i = 0; i < state->perRun; ++i) {
@@ -346,11 +380,16 @@ namespace RenderGraph::Engine::OcclusionQueries
 		a_commands.ResolveQueryData(pool, first, state->perRun, chunk->readback->GetAPIResource().GetHandle(), std::uint64_t(first) * state->stride);
 	}
 
-	void QueryRing::Commit(const org::RunRef& a_run, std::span<const std::int32_t> a_slots)
+	bool QueryRing::Commit(const org::RunRef& a_run, std::span<const std::int32_t> a_slots)
 	{
+		const std::uint32_t range = a_run.lease;
+		// The range's chunk, and any before it, before the recording needs it: record time never makes one, so every readback a
+		// pass writes is one it declared, and the made chunks stay a prefix (Readbacks).
+		bool made = false;
+		for (std::uint32_t chunk = 0; chunk <= State::ChunkIndex(range); ++chunk)
+			state->ChunkOf(chunk * kRunsPerChunk, true, &made);
 		auto& globals = Get();
 		const std::scoped_lock lock(globals.mutex);
-		const std::uint32_t range = a_run.lease;
 		if (state->runs.size() <= range)
 			state->runs.resize(static_cast<std::size_t>(range) + 1);
 		// The lease index's last run retired before the index was opened again: its counts are there.
@@ -373,6 +412,7 @@ namespace RenderGraph::Engine::OcclusionQueries
 			slot.query = i;
 		}
 		state->lastCommitted = range;
+		return made;
 	}
 
 	void QueryRing::Executed()

@@ -69,6 +69,7 @@ namespace DCLF::Features::DecalOcclusion::DecalDraws
 		struct Bindings
 		{
 			org::DeclaredViewToken depth{};
+			std::size_t readbacks = 0;  // the query ring's readbacks declared (QueryRing::Resolve)
 		};
 
 		struct Frame
@@ -91,6 +92,12 @@ namespace DCLF::Features::DecalOcclusion::DecalDraws
 			{
 				Bindings bindings{};
 				bindings.depth = a_builder.DepthReadWrite(client->depth).View();
+				// The readbacks the queries resolve into: copy destinations, so the graph orders and tracks the resolve.
+				if (client->queries)
+					for (const auto& readback : client->queries->Readbacks()) {
+						a_builder.CopyDestination(readback);
+						++bindings.readbacks;
+					}
 				return bindings;
 			}
 
@@ -147,7 +154,7 @@ namespace DCLF::Features::DecalOcclusion::DecalDraws
 					if (c.program->Draw(a_recording, draw))
 						begun |= 1u << i;
 				}
-				queries.Resolve(commands, latchRun, begun);
+				queries.Resolve(commands, latchRun, begun, a_bindings.readbacks);
 			}
 
 		private:
@@ -270,8 +277,9 @@ namespace DCLF::Features::DecalOcclusion::DecalDraws
 					client->gate->OpenDraw(i, draw.indexCount, 1);
 					slots.push_back(run->query);
 				}
-				// Every draw counts the test's ring slot, which answers their sum.
-				client->queries->Commit(latchRun, slots);
+				// Every draw counts the test's ring slot, which answers their sum. A new readback is declared from the next build.
+				if (client->queries->Commit(latchRun, slots))
+					FrameAnchors::Refresh(kClientId);
 			};
 			clientDesc.executed = [client](const FrameAnchors::Point&) {
 				client->queries->Executed();
