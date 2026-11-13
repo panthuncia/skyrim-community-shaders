@@ -73,6 +73,8 @@ namespace DCLF
 			std::vector<LatchedCopy> latched;
 		} revisionScratch;
 		std::shared_ptr<const ShadowSlotBuffers> postedShadowSlots;  // the render thread's: the slots' buffers as last posted (PostInputs)
+		/** @brief Render thread: the slots' buffers and shadow maps as they are now (made again when any changed); null without shadows. */
+		std::shared_ptr<const ShadowSlotBuffers> SlotBuffers();
 
 		// The shadow views (CS_DCLF_SHADOWS): their own resources, apart from the main epochs'.
 		std::shared_ptr<ShadowResources> shadow;

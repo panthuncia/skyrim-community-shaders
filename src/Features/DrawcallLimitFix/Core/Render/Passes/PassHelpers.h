@@ -68,9 +68,11 @@ namespace DCLF::Draws
 	std::uint32_t UpdateIndexPool(const NamedVersions& a_sealed, IndexPool& a_pool, const SceneTables& a_tables, std::uint32_t a_generation, const org::LatchBlock& a_latch,
 		const org::RunRef& a_latchRun, std::uint32_t a_poolOffset, CommitUploads& a_uploads);
 
-	// The graph extensions that add DCLF's passes (Passes/MainExtension.cpp, Passes/Shadow.cpp).
-	std::unique_ptr<org::RenderGraph::IRenderGraphExtension> MakeMainOpaqueExtension(std::shared_ptr<Resources> a_resources);
-	std::unique_ptr<org::RenderGraph::IRenderGraphExtension> MakeShadowExtension(std::shared_ptr<ShadowResources> a_resources);
+	// The graph extensions that add DCLF's passes (Passes/MainExtension.cpp, Passes/Shadow.cpp), made from a build state (Epochs/BuildState.h):
+	// its main resources, or its shadow resources and slots. Null when it has none.
+	struct BuildState;
+	std::unique_ptr<org::RenderGraph::IRenderGraphExtension> MakeMainOpaqueExtension(std::shared_ptr<const BuildState> a_build);
+	std::unique_ptr<org::RenderGraph::IRenderGraphExtension> MakeShadowExtension(std::shared_ptr<const BuildState> a_build);
 
 	/** @brief The scene tables, which every extension registers (the same identifiers: a second registration is an update). */
 	void RegisterSceneBuffers(org::RenderGraph& a_graph, const SceneBuffers& a_scene);

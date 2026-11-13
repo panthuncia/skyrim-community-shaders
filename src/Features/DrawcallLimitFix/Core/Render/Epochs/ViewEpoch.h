@@ -229,21 +229,26 @@ namespace DCLF::Draws
 		std::shared_ptr<PreprocessStates> preprocessForward;
 	};
 
-	std::unique_ptr<org::RenderGraph::IRenderGraphExtension> MakeViewExtension(std::shared_ptr<ViewResources> a_resources);
+	struct BuildState;
+	struct ViewBuild;
+	struct SceneBuffers;
+
+	/** @brief The graph extension of view a_kind, made from a_build (its view's part: BuildState::View). Null when the view is not made. */
+	std::unique_ptr<org::RenderGraph::IRenderGraphExtension> MakeViewExtension(std::shared_ptr<const BuildState> a_build, ViewKind a_kind);
 	/** @brief The views' epochs' passes (view.*: ViewEpochRecord.cpp), which Passes/CorePasses.cpp registers. */
 	std::span<const Api::PassDef> ViewPassDefs();
 	/**
-	 * @brief Render thread, at the graph's build: whether a_view's passes can be added, drawing from a_main (its main resources, with the
-	 * scene's index pool; its target imported; with a depth pass, the main depth and targets): its own extension's epochs, or a main
-	 * epoch hosting its epoch (Api::EpochDef::hostedBy).
+	 * @brief At the graph's build: whether a_view's passes can be added, drawing from a_main (its main resources, with the scene's index
+	 * pool; its target imported; with a depth pass, the main depth and targets): its own extension's epochs, or a main epoch hosting its
+	 * epoch (Api::EpochDef::hostedBy). a_view is the build state's part of the view.
 	 */
-	bool ViewPassesReady(const ViewResources& a_view, const Resources& a_main);
+	bool ViewPassesReady(const ViewBuild& a_view, const Resources& a_main);
 	/**
 	 * @brief The targets a view's latched copies write (ViewFrame::latched): the draw count, the blocks, a view's own frame constants and
 	 * frame buffers' copies, each face's bucket counts and draw families' rows and lists. Its own epoch's latched copies declare them, or
 	 * those of the main epoch hosting its epoch.
 	 */
-	std::vector<LatchedTarget> ViewLatchedTargets(const ViewResources& a_view);
+	std::vector<LatchedTarget> ViewLatchedTargets(const ViewResources& a_view, const SceneBuffers& a_scene);
 
 	/**
 	 * @brief A view's buckets: per pair of pipelines (the depth one only with a depth pass), the slots that draw with it, each slot's

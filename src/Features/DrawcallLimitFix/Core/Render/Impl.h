@@ -328,6 +328,26 @@ namespace DCLF
 		 */
 		void BuildIfAsked(bool a_ownEpochsOnly = false);
 		/**
+		 * @brief Render thread: what DCLF's epoch graphs are built from now (Epochs/BuildState.h), from the live resources, views, shadow
+		 * slots, requested conditions and pass states. The same value while none of it changed; a new one (its serial moved) otherwise.
+		 */
+		std::shared_ptr<const BuildState> CurrentBuildState();
+		std::shared_ptr<const BuildState> buildState;  // CurrentBuildState's last value
+		/**
+		 * @brief Render thread, at a frame boundary: when none of DCLF's epochs is asked for or being built (or none has a graph yet), the
+		 * newest build state becomes the attached one (PublishAttachedBuildState), and the snapshot builder makes a revision for it.
+		 */
+		void SettleBuildState();
+		/**
+		 * @brief Render thread, once the graph is up: DCLF's epochs are built on the scene worker ("DCLF graph builds" lane) from the newest
+		 * build state, and attached at a frame's end (RenderGraph::BuildManager::SetExternalBuilder).
+		 */
+		void RegisterGraphBuilds();
+		bool graphBuildsRegistered = false;
+		// The frame whose end attached DCLF graphs: the next frame's wait for a current snapshot is logged as a wait for their recordings.
+		std::uint32_t graphsAttachedFrame = ~0u;
+		std::uint64_t graphsAttachWaitLogs = 0;
+		/**
 		 * @brief Render thread: the builds of DCLF's own epochs' graphs (the sum of their GraphHost::BuildGeneration), which is what a
 		 * revision's recordings are of. Not the host's whole count: another epoch's build attached at a build point (the frame anchors',
 		 * built off the render thread) leaves every DCLF recording valid.

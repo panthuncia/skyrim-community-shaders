@@ -148,7 +148,7 @@ namespace DCLF::Features::TreeLod
 			constexpr std::size_t family = static_cast<std::size_t>(Api::DrawFamily::TreeInstances);
 			if (!resources->traits->trees || !resources->faceLists[family][0])
 				return nullptr;
-			auto tables = SharedTablesOf(*resources->main->scene);
+			auto tables = SharedTablesOf(*a_context.Main()->scene);  // the build state's main resources (the view's live main may be replaced)
 			if (!tables)
 				return nullptr;
 			return std::make_shared<Draws::TreeCullPass>(resources, std::move(tables));

@@ -9,6 +9,7 @@
 #include "Features/DrawcallLimitFix/Core/Extensions/PassContext.h"
 #include "Features/DrawcallLimitFix/Core/Gpu/FrameValues.h"
 #include "Features/DrawcallLimitFix/Core/Render/Direct/SiteFrame.h"
+#include "Features/DrawcallLimitFix/Core/Render/Epochs/BuildState.h"
 #include "Features/DrawcallLimitFix/Core/Render/Epochs/GraphConditions.h"
 #include "Features/DrawcallLimitFix/Core/Render/Epochs/ViewEpoch.h"
 #include "Features/DrawcallLimitFix/Core/Render/Passes/DrawHelpers.h"
@@ -203,8 +204,9 @@ namespace DCLF::Direct
 		// shadow: every shadow view and the occlusion maps, into the imported maps.
 		std::shared_ptr<org::RenderPass> ShadowSite(const Api::PassContext& a_context)
 		{
-			const auto& shadow = *a_context.Shadow();
-			return MakeSitePass(Site::Shadow, {}, { shadow.depth.begin(), shadow.depth.end() },
+			// The shadow maps as the build state has them (the render thread imports the live ones).
+			const auto& depth = a_context.Build().shadowSlots->depth;
+			return MakeSitePass(Site::Shadow, {}, { depth.begin(), depth.end() },
 				[resources = a_context.Shadow()](org::PassBuilder& a_builder) { DeclareShadowReads(a_builder, *resources); });
 		}
 
@@ -212,20 +214,21 @@ namespace DCLF::Direct
 		std::shared_ptr<org::RenderPass> FirstPersonSite(const Api::PassContext& a_context)
 		{
 			const auto& conditions = Draws::CurrentGraphConditions();
-			const auto& view = *a_context.View();
-			if (!view.main || (!conditions.cpuPipeline && (!conditions.firstPersonForwardDirect || !view.main->pool)))
+			// The view's target and main resources as the build state has them (the render thread imports the live ones).
+			const auto* view = a_context.Build().ViewOf(a_context.View().get());
+			if (!view || !view->main || (!conditions.cpuPipeline && (!conditions.firstPersonForwardDirect || !view->main->pool)))
 				return nullptr;
 			SitePass::Reads reads;
 			if (!conditions.cpuPipeline)
-				reads = [resources = a_context.View()](org::PassBuilder& a_builder) {
+				reads = [resources = a_context.View(), main = view->main](org::PassBuilder& a_builder) {
 					a_builder.ShaderResource(resources->blocks, std::span<const org::SrvView>{});
-					DeclareMainReads(a_builder, *resources->main);
+					DeclareMainReads(a_builder, *main);
 				};
 			else
-				reads = [resources = a_context.View()](org::PassBuilder& a_builder) {
-					a_builder.ShaderResource(resources->main->frameConstants, std::span<const org::SrvView>{});
+				reads = [main = view->main](org::PassBuilder& a_builder) {
+					a_builder.ShaderResource(main->frameConstants, std::span<const org::SrvView>{});
 				};
-			return MakeSitePass(Site::FirstPerson, MainColours(*view.main), { view.target }, std::move(reads));
+			return MakeSitePass(Site::FirstPerson, MainColours(*view->main), { view->target }, std::move(reads));
 		}
 
 		constexpr Api::PassDef kSitePasses[] = {

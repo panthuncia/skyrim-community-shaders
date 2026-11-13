@@ -413,7 +413,7 @@ namespace DCLF
 			}
 		PostRevisionInputs();
 		// The main epochs' graphs are rebuilt with the new resources at their next build; the other epochs' graphs never make this extension.
-		host->AddExtension(kExtensionId, [state] { return Diagnostics::ScheduleDumped(kExtensionId, MakeMainOpaqueExtension(state)); }, ExtensionEpochs(Api::EpochShape::Main));
+		host->AddExtension(kExtensionId, [] { return Diagnostics::ScheduleDumped(kExtensionId, MakeMainOpaqueExtension(BuildingState(kExtensionId))); }, ExtensionEpochs(Api::EpochShape::Main));
 		logger::info("[DCLF] Main-pass graph resources: {} targets {}x{}, depth format {}", targets.colorCount, width, height, static_cast<int>(targets.depth));
 		return true;
 	}
@@ -811,7 +811,7 @@ namespace DCLF
 		}
 		shadow = state;
 		shadowHost.ShadowResourcesMade(state);
-		host->AddExtension(kShadowExtensionId, [state] { return Diagnostics::ScheduleDumped(kShadowExtensionId, MakeShadowExtension(state)); }, ExtensionEpochs(Api::EpochShape::Shadow));
+		host->AddExtension(kShadowExtensionId, [] { return Diagnostics::ScheduleDumped(kShadowExtensionId, MakeShadowExtension(BuildingState(kShadowExtensionId))); }, ExtensionEpochs(Api::EpochShape::Shadow));
 		logger::info("[DCLF] shadow view graph resources created");
 		shadowHost.PostRevisionInputs();
 		return true;
@@ -824,7 +824,7 @@ namespace DCLF
 		auto& shadow = shadowEngine->shadow;
 		if (const auto request = shadowSlotsSlot.Take(); request && host && shadow && request->slots > shadow->drawArgs.size()) {
 			AddShadowViewSlots(*shadow, request->slots, request->sequenceDraws, request->bucketCountWords);
-			host->AddExtension(kShadowExtensionId, [state = shadow] { return Diagnostics::ScheduleDumped(kShadowExtensionId, MakeShadowExtension(state)); }, ExtensionEpochs(Api::EpochShape::Shadow));
+			host->AddExtension(kShadowExtensionId, [] { return Diagnostics::ScheduleDumped(kShadowExtensionId, MakeShadowExtension(BuildingState(kShadowExtensionId))); }, ExtensionEpochs(Api::EpochShape::Shadow));
 			PostRevisionInputs();
 		}
 	}
@@ -957,7 +957,7 @@ namespace DCLF
 		r.targetTexture = a_texture;
 		r.width = info.image.extent.width;
 		r.height = info.image.extent.height;
-		host->AddExtension(kViewSlots[ViewIndex(a_kind)].extensionId, [state = view.resources, id = kViewSlots[ViewIndex(a_kind)].extensionId] { return Diagnostics::ScheduleDumped(id, MakeViewExtension(state)); }, ExtensionEpochs(Api::EpochShape::View, a_kind));
+		host->AddExtension(kViewSlots[ViewIndex(a_kind)].extensionId, [kind = a_kind, id = kViewSlots[ViewIndex(a_kind)].extensionId] { return Diagnostics::ScheduleDumped(id, MakeViewExtension(BuildingState(id), kind)); }, ExtensionEpochs(Api::EpochShape::View, a_kind));
 		logger::info("[DCLF] {} {} imported: {}x{}, {} faces, format {}", traits.name, traits.target, r.width, r.height, info.image.arrayLayers, static_cast<int>(view.targets.colour));
 		PostRevisionInputs();
 		return true;
@@ -1005,7 +1005,7 @@ namespace DCLF
 			logger::info("[DCLF] {} depth imported: {}x{}, format {}", traits.name, info.image.extent.width, info.image.extent.height, static_cast<int>(dsvDesc.Format));
 		}
 		r.rebuildPending = false;
-		host->AddExtension(kViewSlots[ViewIndex(a_kind)].extensionId, [state = view.resources, id = kViewSlots[ViewIndex(a_kind)].extensionId] { return Diagnostics::ScheduleDumped(id, MakeViewExtension(state)); }, ExtensionEpochs(Api::EpochShape::View, a_kind));
+		host->AddExtension(kViewSlots[ViewIndex(a_kind)].extensionId, [kind = a_kind, id = kViewSlots[ViewIndex(a_kind)].extensionId] { return Diagnostics::ScheduleDumped(id, MakeViewExtension(BuildingState(id), kind)); }, ExtensionEpochs(Api::EpochShape::View, a_kind));
 		PostRevisionInputs();
 		return true;
 	}
@@ -1034,7 +1034,7 @@ namespace DCLF
 			shadow->depthTexture[a_index] = a_texture;
 			shadow->depthLayers[a_index] = a_layers;
 			// A new resource for the passes to bind: the shadow epochs' graphs are rebuilt at their next build.
-			host->AddExtension(kShadowExtensionId, [state = shadow] { return Diagnostics::ScheduleDumped(kShadowExtensionId, MakeShadowExtension(state)); }, ExtensionEpochs(Api::EpochShape::Shadow));
+			host->AddExtension(kShadowExtensionId, [] { return Diagnostics::ScheduleDumped(kShadowExtensionId, MakeShadowExtension(BuildingState(kShadowExtensionId))); }, ExtensionEpochs(Api::EpochShape::Shadow));
 		};
 		// A graph-owned target (an occlusion map's twin): its resource, one 2D slice.
 		if (a_graph) {

@@ -25,15 +25,21 @@ namespace DCLF
 		// The host always builds explicitly (the build manager: RenderGraphRuntime::BuildIfRequested). While scene revisions draw, this
 		// point is the frame's build point: an extension added or removed during a frame waits for it, so the graph a frame's revision
 		// was recorded on runs through that frame (a build invalidates every recording: the frame waits at its start for a snapshot
-		// recorded on the new build, AdoptCurrentSnapshot). DCLF's epochs are built here, on this thread; the others' builds that
-		// finished off the render thread are attached here. Failed, the frame's end is the build point (RenderGraphRuntime::SealPresented).
+		// recorded on the new build, AdoptCurrentSnapshot). The builds asked for are handed out here: DCLF's to its scene worker (they
+		// attach at a frame's end), the others' to the build manager's thread (their finished builds attach here). Failed, the frame's end
+		// is the build point (RenderGraphRuntime::SealPresented).
 		rv.explicitBuilds = !failed;
-		// The passes this frame needs (an interior's, the cull mode's): a change rebuilds the graph here, before anything records on it.
+		// DCLF's epochs are built on the scene worker from its build state and attached at a frame's end (Epochs/GraphBuilds.cpp).
+		impl->RegisterGraphBuilds();
+		// The passes this frame needs (an interior's, the cull mode's): a change asks for the epochs' builds here. The frame keeps the
+		// attached graphs and their conditions until the builds attach.
 		Draws::RefreshGraphConditions(*host);
 		impl->BuildIfAsked();
 		// A build that failed stops the graph (RenderGraphRuntime::BuildIfRequested on a host failure): nothing after it may run on it.
 		if (!RenderGraphRuntime::Get().IsActive())
 			return;
+		// Nothing asked for or in flight (or built here, CS_DCLF_ASYNC_BUILDS=0): the newest build state is the attached one.
+		impl->SettleBuildState();
 		// The epochs the last frame did not submit (no water in view) give their tickets back while a revision waits for recordings.
 		impl->ReleaseTicketsForRecordings(*host, RenderGraphRuntime::Get().TakeSubmittedSegments());
 	}
@@ -53,11 +59,15 @@ namespace DCLF
 		// here with the rest.
 		ServeRevisionRequests();
 		// Through the runtime: a host that failed (a lost device) stops the graph there instead of throwing into the frame.
-		// a_ownEpochsOnly (a frame's wait for its snapshot): DCLF's epochs alone. Attaching another epoch's build there would move the
-		// host's build generation again and make the snapshot being waited for stale (StaleKindOf); those wait for the next build point.
-		if (revisions.explicitBuilds &&
-			(a_ownEpochsOnly ? RenderGraphRuntime::Get().BuildOwnerEpochsNow("Drawcall Limit Fix's wait for a snapshot") :
-								RenderGraphRuntime::Get().BuildIfRequested("Drawcall Limit Fix's build point")))
+		// a_ownEpochsOnly (a frame's wait for its snapshot): DCLF's epochs alone. With builds on the scene worker, their finished builds
+		// are attached there (the frame has submitted none of its epochs yet), else a wait for a snapshot of a newer build state would
+		// never end; built on the render thread (CS_DCLF_ASYNC_BUILDS=0), they are built there. The other epochs wait for the next poll.
+		const auto ownEpochs = [] {
+			auto& runtime = RenderGraphRuntime::Get();
+			return Draws::AsyncGraphBuilds() ? runtime.AttachDclfBuilds("Drawcall Limit Fix's wait for a snapshot") :
+			                                   runtime.BuildOwnerEpochsNow("Drawcall Limit Fix's wait for a snapshot");
+		};
+		if (revisions.explicitBuilds && (a_ownEpochsOnly ? ownEpochs() : RenderGraphRuntime::Get().BuildIfRequested("Drawcall Limit Fix's build point")))
 			++revisions.builds;
 		// The graph's build and its heaps, the pipelines' generations, the toggles: revision inputs, posted when they moved.
 		PostRevisionInputs();
@@ -96,12 +106,14 @@ namespace DCLF
 			       a_next.blockSizes == a_previous.blockSizes &&
 			       a_next.resourceInputs == a_previous.resourceInputs &&
 			       a_next.shadowSlots == a_previous.shadowSlots && a_next.asyncEpochs == a_previous.asyncEpochs && a_next.cpuPipeline == a_previous.cpuPipeline && a_next.forwardDirect == a_previous.forwardDirect && a_next.firstPersonForwardDirect == a_previous.firstPersonForwardDirect &&
-			       !a_next.uploads.owner_before(a_previous.uploads) && !a_previous.uploads.owner_before(a_next.uploads);
+			       a_next.build == a_previous.build && !a_next.uploads.owner_before(a_previous.uploads) && !a_previous.uploads.owner_before(a_next.uploads);
 		}
 	}
 
 	void IndirectDraws::Impl::PostRevisionInputs()
 	{
+		// Before the first build state is read (a resource made before the first build point): the builds' source is registered.
+		RegisterGraphBuilds();
 		// Everything a revision reads of the frame, as the frame has it now (render thread).
 		RevisionInputs next;
 		next.main = resources;
@@ -142,6 +154,7 @@ namespace DCLF
 				target ? (view.resources ? view.resources->height : 0u) : mainEpochInputs.viewport[kColourShape].height, DepthRangeOf(slot.view) };
 		}
 		Extensions::PostSceneResourceInputs(next.resourceInputs);
+		next.build = CurrentBuildState();
 		const auto& previous = postedInputs;
 		next.mainGeneration = previous.mainGeneration + (next.main != previous.main ? 1u : 0u);
 		const bool same = SameRevisionInputs(next, previous);

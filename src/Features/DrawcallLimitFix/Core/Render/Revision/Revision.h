@@ -5,14 +5,8 @@
 
 namespace DCLF::Draws
 {
-	/**
-	 * @brief The shadow view slots' buffers the frame made (AddShadowViewSlots), as it last posted them (RevisionInputs::shadowSlots):
-	 * what the revision code grows and counts the slots by, never the frame's lists.
-	 */
-	struct ShadowSlotBuffers
-	{
-		std::vector<Versioned> drawArgs, bucketCounts;
-	};
+	// ShadowSlotBuffers (the shadow view slots' buffers and the shadow maps, as the frame last made them) is in Epochs/BuildState.h: a
+	// shadow epoch's build declares the same value.
 	/**
 	 * @brief The revision code's request for shadow view slots (ReserveShadowLatch): the frame makes their buffers at these sizes and
 	 * the graph's build that declares them (Impl::ServeRevisionRequests), latest wins (each holds every slot asked for).
@@ -82,6 +76,9 @@ namespace DCLF::Draws
 		// The GPU-driven graph's forward family is the CPU's (GraphConditions::forwardDirect): each snapshot has that family's view batches.
 		bool forwardDirect = false;
 		bool firstPersonForwardDirect = false;
+		// What the epochs' graphs are built from (Epochs/BuildState.h), as the frame last made it. A revision is made only while its serial
+		// is the attached one (AttachedBuildSerial): before that its graphs are not attached, and a recording would be of the old ones.
+		std::shared_ptr<const BuildState> build;
 	};
 
 	/** @brief A latch layout's key for the scene's set (GrowthBuild::Require of a latch): another layout, another block. */

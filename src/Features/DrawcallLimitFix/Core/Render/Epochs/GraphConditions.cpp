@@ -1,6 +1,7 @@
 // The graph's conditions (see the header).
 #include "Features/DrawcallLimitFix/Core/Render/Internal.h"
 #include "Features/DrawcallLimitFix/Core/Render/Epochs/GraphConditions.h"
+#include "Features/DrawcallLimitFix/Core/Render/Epochs/BuildState.h"
 #include "Features/DrawcallLimitFix/Core/Gpu/Pipelines/DrawPipelines.h"
 #include "Features/DrawcallLimitFix/Core/Render/Epochs/ScheduleExecutor.h"
 #include "Features/DrawcallLimitFix/Core/Settings/Switches.h"
@@ -9,17 +10,32 @@
 
 #include <algorithm>
 #include <atomic>
+#include <memory>
 #include <mutex>
+#include <vector>
 
 namespace DCLF::Draws
 {
 	namespace
 	{
-		GraphConditions current;  // render thread; the defaults until the first build point's (what an earlier build's makes saw)
+		// Render thread: the conditions the next builds are for (RefreshGraphConditions), the defaults until the first build point's.
+		std::shared_ptr<const GraphConditions> requested = std::make_shared<const GraphConditions>();
+		// The conditions the attached graphs were built for (AttachGraphConditions). Every value attached is kept, so a reference
+		// CurrentGraphConditions handed out stays valid while another thread swaps it.
+		std::mutex attachedMutex;
+		std::vector<std::shared_ptr<const GraphConditions>> attachedKept;  // attachedMutex
+		std::atomic<const GraphConditions*> attached{ nullptr };
 		std::mutex cutsMutex;
 		std::string requestedCuts;  // cutsMutex
 		std::atomic<bool> latchedRecordCut{ false };
 		std::atomic<bool> builtForCpu{ false };
+
+		const GraphConditions& AttachedConditions()
+		{
+			static const GraphConditions kDefaults;
+			const auto* conditions = attached.load(std::memory_order_acquire);
+			return conditions ? *conditions : kDefaults;
+		}
 	}
 
 	bool GraphBuiltForCpu()
@@ -40,7 +56,7 @@ namespace DCLF::Draws
 
 	bool PassCut(std::string_view a_key)
 	{
-		std::string_view cuts = current.cuts;
+		std::string_view cuts = CurrentGraphConditions().cuts;
 		while (!cuts.empty()) {
 			const auto comma = cuts.find(',');
 			const auto prefix = cuts.substr(0, comma);
@@ -92,15 +108,16 @@ namespace DCLF::Draws
 			std::lock_guard lock(cutsMutex);
 			next.cuts = requestedCuts;
 		}
-		if (next == current)
+		if (next == *requested)
 			return;
 		logger::info("[DCLF] graph conditions: {} cell, {}, {} pipeline{}{}{}{}; the graph is rebuilt", next.interior ? "interior" : "exterior",
 				next.twoPassOcclusion ? "two-pass occlusion" : "no occlusion pass (portal and frustum culling)", next.cpuPipeline ? "CPU" : "GPU",
 				next.forwardDirect ? ", forward draws on the CPU" : "", next.firstPerson ? "" : ", first person the engine's",
 				next.cuts.empty() ? "" : ", passes cut: ", next.cuts);
 		// The epochs the CPU pipeline's sites execute themselves (their passes before the draws), before the build the change requests,
-		// with the ones executed in DXVK's stream (RenderGraphRuntime::InStreamEpochs).
-		if (next.cpuPipeline != current.cpuPipeline) {
+		// with the ones executed in DXVK's stream (RenderGraphRuntime::InStreamEpochs). Only the builds read the host's list: the running
+		// graphs keep the one they were built with until the new ones attach.
+		if (next.cpuPipeline != requested->cpuPipeline) {
 			auto external = RenderGraphRuntime::Get().InStreamEpochs();
 			if (next.cpuPipeline)
 				for (const auto epoch : CpuPipelineEpochs())
@@ -109,9 +126,11 @@ namespace DCLF::Draws
 			std::ranges::sort(external);
 			a_host.SetExternalEpochs(std::move(external));
 		}
-		current = next;
-		builtForCpu.store(current.cpuPipeline, std::memory_order_release);
-		latchedRecordCut.store(("," + current.cuts + ",").find(",~latched-record,") != std::string::npos, std::memory_order_relaxed);
+		requested = std::make_shared<const GraphConditions>(std::move(next));
+		// Built on the render thread at this build point (CS_DCLF_ASYNC_BUILDS=0): the frame runs the new graphs, so their conditions are
+		// the attached ones now. Otherwise they become so when the builds attach (PublishAttachedBuildState).
+		if (!AsyncGraphBuilds())
+			AttachGraphConditions(requested);
 		// The conditions are Drawcall Limit Fix's: its epochs' graphs are built again, the others' (Light Limit Fix's light culling,
 		// the frame anchors') keep theirs. A hosted segment has no graph of its own (its host's carries its passes).
 		for (std::uint32_t segment = 0; segment < static_cast<std::uint32_t>(RenderGraphRuntime::Segment::Count); ++segment)
@@ -119,13 +138,38 @@ namespace DCLF::Draws
 				RenderGraph::Builds::Request(RenderGraphRuntime::EpochOf(static_cast<RenderGraphRuntime::Segment>(segment)), "Drawcall Limit Fix's graph conditions changed");
 	}
 
+	std::shared_ptr<const GraphConditions> RequestedGraphConditions()
+	{
+		return requested;
+	}
+
+	void AttachGraphConditions(std::shared_ptr<const GraphConditions> a_conditions)
+	{
+		if (!a_conditions)
+			return;
+		const auto* raw = a_conditions.get();
+		{
+			std::scoped_lock lock(attachedMutex);
+			if (attached.load(std::memory_order_relaxed) == raw)
+				return;
+			attachedKept.push_back(std::move(a_conditions));
+		}
+		attached.store(raw, std::memory_order_release);
+		builtForCpu.store(raw->cpuPipeline, std::memory_order_release);
+		latchedRecordCut.store(("," + raw->cuts + ",").find(",~latched-record,") != std::string::npos, std::memory_order_relaxed);
+	}
+
 	const GraphConditions& CurrentGraphConditions()
 	{
-		return current;
+		// Inside a graph build: the conditions it builds for. Elsewhere (the frame, the preparations, the revisions): the attached graphs'.
+		if (const auto* building = ScopedBuildState(); building && building->conditions)
+			return *building->conditions;
+		return AttachedConditions();
 	}
 
 	bool OcclusionTested(const Resources& a_resources, const PassFrame& a_frame)
 	{
+		const auto& current = CurrentGraphConditions();
 		return a_resources.hzb && current.twoPassOcclusion && !current.cpuPipeline && a_frame.cullMode >= 2 && a_frame.width && a_frame.height;
 	}
 }

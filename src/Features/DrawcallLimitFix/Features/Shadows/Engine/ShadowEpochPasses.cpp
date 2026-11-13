@@ -11,6 +11,7 @@
 #include "Features/DrawcallLimitFix/Core/Gpu/FrameValues.h"
 #include "Features/DrawcallLimitFix/Core/Gpu/Pipelines/DrawPipelines.h"
 #include "Features/DrawcallLimitFix/Core/Gpu/Pipelines/DrawPipelinesRhi.h"
+#include "Features/DrawcallLimitFix/Core/Render/Epochs/BuildState.h"
 #include "Features/DrawcallLimitFix/Core/Render/Epochs/GraphConditions.h"
 #include "Features/DrawcallLimitFix/Core/Render/Passes/DrawHelpers.h"
 #include "Features/DrawcallLimitFix/Core/Render/Readback/Readbacks.h"
@@ -145,8 +146,8 @@ namespace DCLF::Draws
 	class ShadowBuildDrawsPass final : public org::TypedRenderGraphPass<ShadowBuildDrawsPass, ShadowBuildPrepared, ShadowBuildBindings>
 	{
 	public:
-		explicit ShadowBuildDrawsPass(std::shared_ptr<ShadowResources> a_resources) :
-			resources(std::move(a_resources)), viewTable("cs.dclf.shadow.build-views") {}
+		ShadowBuildDrawsPass(std::shared_ptr<ShadowResources> a_resources, std::shared_ptr<const ShadowSlotBuffers> a_slots) :
+			resources(std::move(a_resources)), slots(std::move(a_slots)), viewTable("cs.dclf.shadow.build-views") {}
 
 		ShadowBuildBindings Declare(org::PassBuilder& a_builder)
 		{
@@ -158,10 +159,11 @@ namespace DCLF::Draws
 			// outputs, written by the one dispatch.
 			bindings.casterRows = a_builder.UnorderedAccess(*resources->casterRows).View();
 			bindings.casterFirsts = a_builder.ShaderResource(*resources->casterFirsts).View();
-			for (std::size_t s = 0; s < resources->drawArgs.size(); ++s) {
-				bindings.drawArgs.push_back(resources->OwnsDrawArgs(s) ? a_builder.UnorderedAccess(*resources->drawArgs[s]).View() : bindings.drawArgs[resources->drawArgsOwner[s]]);
-				bindings.count.push_back(a_builder.UnorderedAccess(resources->count[s]).View());
-				bindings.bucketCounts.push_back(a_builder.UnorderedAccess(*resources->bucketCounts[s]).View());
+			// The slots as the build state has them (the live vectors grow on the render thread).
+			for (std::size_t s = 0; s < slots->drawArgs.size(); ++s) {
+				bindings.drawArgs.push_back(slots->OwnsDrawArgs(s) ? a_builder.UnorderedAccess(*slots->drawArgs[s]).View() : bindings.drawArgs[slots->drawArgsOwner[s]]);
+				bindings.count.push_back(a_builder.UnorderedAccess(slots->count[s]).View());
+				bindings.bucketCounts.push_back(a_builder.UnorderedAccess(*slots->bucketCounts[s]).View());
 			}
 			bindings.visibility = a_builder.UnorderedAccess(*resources->visibility).View();
 			bindings.poolFirsts = a_builder.ShaderResource(*resources->pool->firsts).View();
@@ -255,6 +257,7 @@ namespace DCLF::Draws
 		bool FadeRows() const { return RootRowsCurrent(*resources->scene); }
 
 		std::shared_ptr<ShadowResources> resources;
+		std::shared_ptr<const ShadowSlotBuffers> slots;  // the build state's (BuildState::shadowSlots)
 		// The views' table (ShadowBuildView rows): an upload-heap buffer per distinct content, each kept by the packets naming it.
 		org::PreparedTablePublisher viewTable;
 	};
@@ -285,29 +288,30 @@ namespace DCLF::Draws
 	class ShadowViewPass final : public org::TypedRenderGraphPass<ShadowViewPass, ShadowPrepared, ShadowPassBindings>
 	{
 	public:
-		explicit ShadowViewPass(std::shared_ptr<ShadowResources> a_resources) :
-			resources(std::move(a_resources)) {}
+		ShadowViewPass(std::shared_ptr<ShadowResources> a_resources, std::shared_ptr<const ShadowSlotBuffers> a_slots) :
+			resources(std::move(a_resources)), slots(std::move(a_slots)) {}
 
 		ShadowPassBindings Declare(org::PassBuilder& a_builder)
 		{
 			a_builder.PreferQueue(org::QueueKind::Graphics);
 			const std::span<const org::SrvView> noViews{};
 			ShadowPassBindings bindings{};
+			// The shadow maps and slots as the build state has them (the render thread imports and grows the live ones).
 			for (std::uint32_t i = 0; i < kShadowDepthTargets; ++i) {
-				if (resources->depth[i]) {
-					bindings.depthViews[i].reserve(resources->depthLayers[i]);
-					for (std::uint32_t slice = 0; slice < resources->depthLayers[i]; ++slice)
-						bindings.depthViews[i].push_back(a_builder.DepthReadWrite(resources->depth[i], org::DsvView{ UINT32_MAX, 0, slice }).View());
+				if (slots->depth[i]) {
+					bindings.depthViews[i].reserve(slots->depthLayers[i]);
+					for (std::uint32_t slice = 0; slice < slots->depthLayers[i]; ++slice)
+						bindings.depthViews[i].push_back(a_builder.DepthReadWrite(slots->depth[i], org::DsvView{ UINT32_MAX, 0, slice }).View());
 				}
 			}
 			// A slot's draw arguments are arguments alone: what a draw reads by address is its caster row (DCLF_PULLED).
 			bindings.casterRows = a_builder.ShaderResource(*resources->casterRows, noViews).Resource();
-			for (std::size_t s = 0; s < resources->drawArgs.size(); ++s) {
-				if (resources->OwnsDrawArgs(s))
-					bindings.drawArgs.push_back(a_builder.IndirectArguments(*resources->drawArgs[s]).Resource());
+			for (std::size_t s = 0; s < slots->drawArgs.size(); ++s) {
+				if (slots->OwnsDrawArgs(s))
+					bindings.drawArgs.push_back(a_builder.IndirectArguments(*slots->drawArgs[s]).Resource());
 				else
-					bindings.drawArgs.push_back(bindings.drawArgs[resources->drawArgsOwner[s]]);
-				bindings.bucketCounts.push_back(a_builder.IndirectArguments(*resources->bucketCounts[s]).Resource());
+					bindings.drawArgs.push_back(bindings.drawArgs[slots->drawArgsOwner[s]]);
+				bindings.bucketCounts.push_back(a_builder.IndirectArguments(*slots->bucketCounts[s]).Resource());
 			}
 			bindings.constants = a_builder.ShaderResource(resources->constants, noViews).Resource();
 			bindings.viewBlocks = a_builder.ShaderResource(*resources->viewBlocks.buffer, noViews).Resource();
@@ -336,10 +340,10 @@ namespace DCLF::Draws
 				// A placement or occlusion map the variant's frames leave unused: its slot's latch is zero, nothing to draw or load.
 				if (i < 64 && !((frame->activeViews >> i) & 1))
 					continue;
-				if (!view.capacity || view.slot >= a_bindings.drawArgs.size() || view.target >= kShadowDepthTargets || !resources->depth[view.target])
+				if (!view.capacity || view.slot >= a_bindings.drawArgs.size() || view.target >= kShadowDepthTargets || !slots->depth[view.target])
 					continue;
 				// The declared slices, not the live target's: a target grown since has slices these bindings cannot name.
-				if (view.slice >= resources->depthLayers[view.target] || view.slice >= a_bindings.depthViews[view.target].size())
+				if (view.slice >= slots->depthLayers[view.target] || view.slice >= a_bindings.depthViews[view.target].size())
 					continue;
 				prepared.views.push_back({ i });
 			}
@@ -433,6 +437,7 @@ namespace DCLF::Draws
 
 	private:
 		std::shared_ptr<ShadowResources> resources;
+		std::shared_ptr<const ShadowSlotBuffers> slots;  // the build state's (BuildState::shadowSlots)
 	};
 }
 
@@ -445,15 +450,15 @@ namespace DCLF::Features::Shadows::Engine
 		 * they zero. A CPU pipeline's graph copies no zeroed lists (LatchedSource::zeros), so it declares no counter: declared, each would be
 		 * a barrier in every execution for nothing.
 		 */
-		std::vector<Draws::LatchedTarget> LatchedTargets(const Draws::ShadowResources& a_shadow)
+		std::vector<Draws::LatchedTarget> LatchedTargets(const Draws::ShadowResources& a_shadow, const Draws::ShadowSlotBuffers& a_slots, bool a_cpuPipeline)
 		{
 			std::vector<Draws::LatchedTarget> out{ { nullptr, a_shadow.viewBlocks.buffer }, { a_shadow.constants, nullptr } };
-			if (Draws::CurrentGraphConditions().cpuPipeline)
+			if (a_cpuPipeline)
 				return out;
 			out.push_back({ a_shadow.casterRowsUsed, nullptr });
-			for (std::size_t s = 0; s < a_shadow.count.size(); ++s) {
-				out.push_back({ a_shadow.count[s], nullptr });
-				out.push_back({ nullptr, a_shadow.bucketCounts[s] });
+			for (std::size_t s = 0; s < a_slots.count.size(); ++s) {
+				out.push_back({ a_slots.count[s], nullptr });
+				out.push_back({ nullptr, a_slots.bucketCounts[s] });
 			}
 			return out;
 		}
@@ -461,7 +466,10 @@ namespace DCLF::Features::Shadows::Engine
 		/** @brief The views' latched copies (the occlusion maps' too): blocks, counters, and the commit's values in the constants. */
 		std::shared_ptr<org::RenderPass> LatchedCopies(const Api::PassContext& a_context)
 		{
-			return Draws::MakeLatchedCopiesPass([shadow = a_context.Shadow()] { return LatchedTargets(*shadow); }, [](const org::PassPrepareContext& a_preparation) {
+			// The slots and the pipeline as the build has them: the targets are read when the pass is declared, maybe after the build.
+			return Draws::MakeLatchedCopiesPass([shadow = a_context.Shadow(), slots = a_context.Build().shadowSlots, cpu = Draws::CurrentGraphConditions().cpuPipeline] {
+				return LatchedTargets(*shadow, *slots, cpu);
+			}, [](const org::PassPrepareContext& a_preparation) {
 				const auto frame = Draws::CurrentShadowFrame(a_preparation);
 				return frame ? Draws::LatchedSource{ frame, frame->latched } : Draws::LatchedSource{};
 			});
@@ -480,12 +488,12 @@ namespace DCLF::Features::Shadows::Engine
 
 		std::shared_ptr<org::RenderPass> BuildDraws(const Api::PassContext& a_context)
 		{
-			return std::make_shared<Draws::ShadowBuildDrawsPass>(a_context.Shadow());
+			return std::make_shared<Draws::ShadowBuildDrawsPass>(a_context.Shadow(), a_context.Build().shadowSlots);
 		}
 
 		std::shared_ptr<org::RenderPass> ViewDraws(const Api::PassContext& a_context)
 		{
-			return std::make_shared<Draws::ShadowViewPass>(a_context.Shadow());
+			return std::make_shared<Draws::ShadowViewPass>(a_context.Shadow(), a_context.Build().shadowSlots);
 		}
 
 		// The views' culling counters, to the host (ShadowEngine::ReadShadowCullCounters), for the report's shadow culling line: only while

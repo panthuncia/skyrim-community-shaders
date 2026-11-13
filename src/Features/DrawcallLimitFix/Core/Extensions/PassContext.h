@@ -34,6 +34,7 @@ namespace org::services
 
 namespace DCLF::Draws
 {
+	struct BuildState;
 	struct Resources;
 	struct RevisionShapes;
 	struct SceneBuffers;
@@ -69,6 +70,9 @@ namespace DCLF::Api
 		// passes (its latched copies take the views' lists too); empty otherwise.
 		std::span<const std::shared_ptr<Draws::ViewResources>> hosted;
 		std::shared_ptr<const void> state;                                // the state its setup made (PassDef::setup); null: none
+		// The build state the graph is built from (Epochs/BuildState.h): what a make reads of the views and the shadow slots, never the
+		// live resources' fields the render thread changes.
+		const Draws::BuildState* build = nullptr;
 
 		const std::shared_ptr<Draws::Resources>& Main() const
 		{
@@ -84,6 +88,11 @@ namespace DCLF::Api
 		{
 			assert(view);
 			return *view;
+		}
+		const Draws::BuildState& Build() const
+		{
+			assert(build);
+			return *build;
 		}
 
 		/** @brief The setup's state as the pass's type. */

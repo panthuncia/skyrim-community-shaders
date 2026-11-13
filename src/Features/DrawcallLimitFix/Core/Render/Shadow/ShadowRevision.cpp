@@ -267,9 +267,18 @@ namespace DCLF
 		a_next.occlusionLayouts = PredictedOcclusion(nullptr);
 		a_next.shadowPlacements = shadowPlacements;
 		a_next.shadowActiveViews = lastActiveViews;
-		if (shadow && (!postedShadowSlots || postedShadowSlots->drawArgs.size() != shadow->drawArgs.size()))
-			postedShadowSlots = std::make_shared<const ShadowSlotBuffers>(ShadowSlotBuffers{ shadow->drawArgs, shadow->bucketCounts });
-		a_next.shadowSlots = shadow ? postedShadowSlots : nullptr;
+		a_next.shadowSlots = SlotBuffers();
+	}
+
+	std::shared_ptr<const ShadowSlotBuffers> ShadowEngine::SlotBuffers()
+	{
+		// Made again whenever any of it changed (a slot added or shared, a shadow map imported), so the revision code and the shadow
+		// epoch's build (BuildState::shadowSlots) see one value.
+		if (!shadow)
+			return nullptr;
+		if (!postedShadowSlots || !SameShadowSlotBuffers(*postedShadowSlots, *shadow))
+			postedShadowSlots = std::make_shared<const ShadowSlotBuffers>(MakeShadowSlotBuffers(*shadow));
+		return postedShadowSlots;
 	}
 
 	void ShadowEngine::PrepareAhead(ImplSnapshotBuilder::AheadContext& a_context)
