@@ -626,3 +626,47 @@ Guest and native quick shots match the earlier runs. The native tour passes. No 
 - Make the five engine targets in their final format from the start.
 - Find the twin behind "graph resources resized".
 - Declare the loading-screen sites.
+
+## Phase 2 items 1-2 lane: one graph resource per image (`org-native/p2-one-resource`)
+
+**One registry.** FrameAnchors' imports are the only way an engine or feature image becomes a graph resource for the anchors, DCLF,
+Scaleform and ImGui. Every import finds the image's slot (by its VkImage) before making one:
+- A second id of an image shares the first id's slot (logged `... is the image <id> has already; it shares that slot`). This replaces
+  the old warning about two ids on one image.
+- An importer that needs a view the slot lacks gets a new version of the same image with both sets of views. Passes keep declaring the
+  slot, so nothing is built again. A view both ask for in different formats keeps the slot's (logged once per kind).
+- `FrameAnchors::ShareImage` is DCLF's way in (`ImportImage` now takes the D3D11 texture). Before any id import of the image, it makes a
+  loose slot. The slot's versions keep the D3D11 texture alive, so the image handle is never reused while the slot lives. An id import
+  of the same image later takes the slot over. `ImportOfImage` is gone.
+- `FrameAnchors::ImportTexture(id, texture, views)` covers targets with no D3D11 views to describe them. Scaleform's and ImGui's own
+  imports use it; HDR's UI texture goes through `D3D11Texture("hdr.ui", ...)` with Bink's views, so all three share one slot.
+- Every importer describes subresources the same way (all mips, cube slices from the D3D11 flags), so the shape class matches.
+
+**Native lookup.** In native mode, `MakeBacking` takes the image's graph-owned `PixelBuffer` (`Native::GraphTextureOf`) as the slot's
+version when the texture has every view asked for. Otherwise it imports the image with the texture's views and the asked ones, and the
+`PixelBuffer` is never handed to a graph while that import stands. `VersionedTexture` image versions take any `GloballyIndexedResource`,
+and `Width/Height/Format` already read a `PixelBuffer`. The `PixelBuffer` keeps its host home (Common), as the imports do, so the
+context's raw GENERAL operations and the graph agree while home states are on. `ImmutableTexture`'s native exempt path, dropped by the
+p2-imports merge, is back.
+
+**Exclusive native imports.** `ImportDxvkTexture` imports exclusively in native mode again (with `CS_ORG_NATIVE_OWNED`). Raw imports
+(`ImportDxvkImage`: the native context's own import, DCLF's bindless views) stay shared in GENERAL, where they are used between
+executions. Guest mode is unchanged. `CS_ORG_NATIVE_EXCLUSIVE_IMPORTS=0` keeps native imports shared.
+
+**Scaleform's loading-screen reads.** In native mode, the tracked textures the displays read are declared by Scaleform's passes.
+These are graph-owned textures and exempt ones promoted after a write (`Native::PromotedTextureOf`). A draw binds the declared view's
+index in place of the raw one. A texture seen for the first time registers the client again after the run. Until that build is
+attached, it keeps the raw index, and the display is replayed as after a surface was made again.
+
+**Duplicate check.** `CS_ORG_IMAGE_DUPLICATE_CHECK=1` notes every graph resource of an image, from `ImportDxvkTexture` and from native
+mode's graph-owned and exempt textures. It logs `[ORG] duplicate image: '<a>' and '<b>' are two live graph resources of image 0x...`
+when a second live one appears. A slot's replaced version is retired first, so views added to a slot do not count.
+
+**Checks for a native run:**
+- The flashing test: a native quick shot against earlier runs, and watch post-processing for flashing.
+- `CS_ORG_IMAGE_DUPLICATE_CHECK=1`: expect no `duplicate image` lines. Lines that remain name what still imports an image on its own
+  (GraphResources twins whose D3D11 export is imported again, engine textures, streaming windows).
+- `CS_ORG_NATIVE_VALIDATION=1`: no new layout errors. A raw bindless view (GENERAL) read inside an execution that moved the image
+  elsewhere is the likely one.
+- `frame anchors: ... views added` and `... another format` lines, and the Scaleform `tracked textures read by the displays` line.
+- `CS_ORG_NATIVE_EXCLUSIVE_IMPORTS=0` against the default: the frame-rate change from exclusive imports.
