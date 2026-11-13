@@ -19,6 +19,7 @@
 #include "Features/Upscaling.h"
 
 #include "Hooks.h"
+#include "ORGDeferredClears.h"
 #include "ORGDeferredComposite.h"
 #include "RenderGraph/Engine/Skeleton/Skeleton.h"
 #include "RenderGraph/Engine/Targets/EngineTargets.h"
@@ -203,6 +204,8 @@ void Deferred::SetupResources()
 
 	// The composite on the render graph, when CS_ORG_COMPOSITE=1 reserved its anchor.
 	ORGDeferredComposite::Get().Setup();
+	// The GBuffer clears at the Prepass anchor, once the targets exist.
+	ORGDeferredClears::Setup();
 }
 
 void Deferred::ReflectionsPrepasses()
@@ -300,9 +303,12 @@ void Deferred::StartDeferred()
 		MASKS2
 	};
 
+	// Dirty from last frame: SRTM_CLEAR makes the engine's next state flush call ClearRenderTargetView once per target. On the render
+	// graph the Prepass anchor's pass clears them instead (ORGDeferredClears), so they are bound without a clear.
+	const auto mode = ORGDeferredClears::TakeClears() ? RE::BSGraphics::SetRenderTargetMode::SRTM_NO_CLEAR : RE::BSGraphics::SetRenderTargetMode::SRTM_CLEAR;
 	for (uint i = 2; i < 8; i++) {
-		renderTargets[i] = targets[i];                                             // We must use unused targets to be indexable
-		setRenderTargetMode[i] = RE::BSGraphics::SetRenderTargetMode::SRTM_CLEAR;  // Dirty from last frame, this calls ClearRenderTargetView once
+		renderTargets[i] = targets[i];  // We must use unused targets to be indexable
+		setRenderTargetMode[i] = mode;
 	}
 
 	stateUpdateFlags.set(RE::BSGraphics::ShaderFlags::DIRTY_RENDERTARGET);  // Run OMSetRenderTargets again
