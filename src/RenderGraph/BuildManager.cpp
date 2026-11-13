@@ -61,11 +61,13 @@ namespace RenderGraph
 				Epoch,
 				All,
 				For,
-				AllSynchronous
+				AllSynchronous,
+				Change
 			};
 			Kind kind = Kind::All;
 			std::uint32_t epoch = 0;
 			std::string id, reason;
+			std::function<void()> change;  // Kind::Change
 		};
 
 		/** @brief Running totals over one statistics window. */
@@ -207,12 +209,22 @@ namespace RenderGraph
 				synchronousAll = true;
 				synchronousReason = a_request.reason;
 				break;
+			case PendingRequest::Kind::Change:
+				// No build may capture what the change edits while it runs; a build handed out before sees the request below and
+				// is dropped at its attach, then built again.
+				if (a_request.change) {
+					std::scoped_lock lock(buildMutex);
+					a_request.change();
+				}
+				host.RequestRebuild(a_request.reason);
+				break;
 			}
 		}
 
 		void Submit(PendingRequest a_request)
 		{
-			if (OnOwner()) {
+			// A change always waits for the poll: run here it could meet a build this thread holds.
+			if (OnOwner() && a_request.kind != PendingRequest::Kind::Change) {
 				Apply(a_request);
 				return;
 			}
@@ -511,6 +523,13 @@ namespace RenderGraph
 		impl->Submit({ PendingRequest::Kind::AllSynchronous, 0, {}, std::string(a_reason) });
 	}
 
+	void BuildManager::Change(std::function<void()> a_change, std::string_view a_reason)
+	{
+		PendingRequest request{ PendingRequest::Kind::Change, 0, {}, std::string(a_reason) };
+		request.change = std::move(a_change);
+		impl->Submit(std::move(request));
+	}
+
 	bool BuildManager::Poll(std::string_view a_point)
 	{
 		auto& m = *impl;
@@ -609,6 +628,14 @@ namespace RenderGraph
 				manager->RequestFor(a_id, a_reason);
 		}
 
+		void Change(std::function<void()> a_change, std::string_view a_reason)
+		{
+			if (auto* manager = Manager())
+				manager->Change(std::move(a_change), a_reason);
+			else if (a_change)
+				a_change();
+		}
+
 		bool Defer(std::function<void()> a_attached, std::function<void(const std::string&)> a_failed)
 		{
 			if (!t_context)
@@ -636,6 +663,11 @@ namespace RenderGraph::Builds
 	void Request(std::uint32_t, std::string_view) {}
 	void RequestAll(std::string_view) {}
 	void RequestFor(std::string_view, std::string_view) {}
+	void Change(std::function<void()> a_change, std::string_view)
+	{
+		if (a_change)
+			a_change();
+	}
 	bool Defer(std::function<void()>, std::function<void(const std::string&)>) { return false; }
 	bool InManagedBuild() { return false; }
 }
