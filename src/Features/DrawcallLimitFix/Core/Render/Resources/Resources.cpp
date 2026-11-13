@@ -524,9 +524,12 @@ namespace DCLF
 		if (!a_state.nativeDepth)
 			return NotReady(11, "the main-pass depth could not be imported");
 		// The near twin's target (Api::NearTwinContribution: Integrations/TerrainBlending's terrain depth) shares the main depth's
-		// description; the Z-prepass draws Appended0's near objects into it as that feature's depth hook does.
+		// description; the Z-prepass draws Appended0's near objects into it as that feature's depth hook does. A target the graph owns
+		// (CS_ORG_TERRAIN_BLENDING) is declared as itself, so its clear and the blend are ordered with these draws.
 		const auto& nearTwin = Extensions::NearTwin();
-		if (auto* const twinTarget = static_cast<ID3D11Texture2D*>(nearTwin.target ? nearTwin.target() : nullptr)) {
+		if (auto owned = nearTwin.graph ? nearTwin.graph() : nullptr) {
+			a_state.terrainDepth = std::move(owned);
+		} else if (auto* const twinTarget = static_cast<ID3D11Texture2D*>(nearTwin.target ? nearTwin.target() : nullptr)) {
 			DxvkOrgInteropResourceInfo terrainInfo{};
 			if (!RenderGraphRuntime::Get().DescribeResource(twinTarget, terrainInfo) || terrainInfo.kind != DXVK_ORG_INTEROP_RESOURCE_IMAGE)
 				return NotReady(12, nearTwin.cannotDescribe.c_str());

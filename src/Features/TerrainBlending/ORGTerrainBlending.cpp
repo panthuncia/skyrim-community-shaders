@@ -32,9 +32,11 @@ ORGTerrainBlending::~ORGTerrainBlending() = default;
 #	include "RenderGraph/PublishedResources.h"
 #	include "RenderGraph/RenderGraphRuntime.h"
 #	include "RenderGraph/ShaderBindings.h"
+#	include "State.h"
 
 #	include <OpenRenderGraph/GraphHost.h>
 #	include <Render/RenderGraph/RenderGraph.h>
+#	include <RenderPasses/Base/TypedRenderGraphPass.h>
 #	include <Resources/ExternalTextureResource.h>
 
 #	include <array>
@@ -44,7 +46,9 @@ namespace
 {
 	constexpr const char* kClientId = "cs.terrain-blending";
 	constexpr const char* kShader = "TerrainBlending/DepthBlend.hlsl";
-	constexpr const char* kTerrainDepthId = "cs.terrain-blending.terrain-depth";
+	// The terrain depth's import, when Terrain Blending made a D3D11 one (the twin could not be made).
+	constexpr const char* kTerrainDepthImportId = "cs.terrain-blending.terrain-depth";
+	constexpr const char* kClearClientId = "cs.terrain-blending.terrain-depth-clear";
 	// DepthBlend.hlsl's numthreads.
 	constexpr std::uint32_t kGroupSize = 8;
 
@@ -85,13 +89,111 @@ namespace
 		return FrameAnchors::EngineDepth(RE::RENDER_TARGETS_DEPTHSTENCIL::kMAIN);
 	}
 
-	/** @brief Terrain Blending's terrain depth (its D3D11 texture, DSV and SRV), as a graph texture. */
+	/** @brief The terrain depth twin (MakeTerrainDepth); null when Terrain Blending made a D3D11 one. */
+	std::unique_ptr<GraphResources::Texture2D>& TerrainDepthTwin()
+	{
+		static std::unique_ptr<GraphResources::Texture2D> s_twin;
+		return s_twin;
+	}
+
+	/** @brief The frame (State::frameCount) whose EarlyPrepass run had the terrain depth's clear pass; render thread. */
+	std::uint64_t& ClearedFrame()
+	{
+		static std::uint64_t s_frame = UINT64_MAX;
+		return s_frame;
+	}
+
+	/** @brief Terrain Blending's terrain depth: the twin, or its D3D11 texture imported. */
 	std::shared_ptr<org::Resource> TerrainDepth()
 	{
+		if (auto owned = ORGTerrainBlending::Get().TerrainDepthGraph())
+			return owned;
 		const auto& terrainBlending = globals::features::terrainBlending;
 		if (!terrainBlending.terrainDepth.texture)
 			return nullptr;
-		return FrameAnchors::ImportDepth(terrainBlending.terrainDepth, kTerrainDepthId);
+		return FrameAnchors::ImportDepth(terrainBlending.terrainDepth, kTerrainDepthImportId);
+	}
+
+	struct DepthClearFrame
+	{
+		std::uint32_t width = 0, height = 0;
+		rhi::Format format = rhi::Format::Unknown;
+	};
+
+	struct DepthClearBindings
+	{
+		org::DeclaredViewToken depth;
+	};
+
+	/** @brief The terrain depth cleared to 1 (its stencil kept), as TerrainBlending::ResetDepth's D3D11 clear: an empty render pass. */
+	class TerrainDepthClearPass final : public org::TypedRenderGraphPass<TerrainDepthClearPass, DepthClearFrame, DepthClearBindings>
+	{
+	public:
+		TerrainDepthClearPass(std::shared_ptr<org::ExternalTextureResource> a_depth, std::uint32_t a_width, std::uint32_t a_height) :
+			depth(std::move(a_depth)), frame{ a_width, a_height, depth->GetFormat() } {}
+
+		DepthClearBindings Declare(org::PassBuilder& a_builder) { return { a_builder.DepthReadWrite(depth).View() }; }
+
+		void Revision(std::vector<std::uint64_t>& a_out) const
+		{
+			a_out.push_back(frame.width);
+			a_out.push_back(frame.height);
+			a_out.push_back(static_cast<std::uint64_t>(frame.format));
+		}
+
+		DepthClearFrame Prepare(const DepthClearBindings&, const org::PassPrepareContext&) const { return frame; }
+
+		static void Record(const DepthClearBindings& a_bindings, const DepthClearFrame& a_frame, org::PassRecordContext& a_recording)
+		{
+			rhi::DepthAttachment attachment{};
+			attachment.dsv = a_recording.View(a_bindings.depth);
+			attachment.resource = a_recording.Resolve(a_bindings.depth).GetHandle();
+			attachment.depthLoad = rhi::LoadOp::Clear;
+			attachment.depthStore = rhi::StoreOp::Store;
+			attachment.stencilLoad = rhi::LoadOp::Load;
+			attachment.stencilStore = rhi::StoreOp::Store;
+			attachment.clear.type = rhi::ClearValueType::DepthStencil;
+			attachment.clear.format = a_frame.format;
+			attachment.clear.depthStencil = { 1.0f, 0 };
+			rhi::PassBeginInfo begin{};
+			begin.depth = &attachment;
+			begin.width = a_frame.width;
+			begin.height = a_frame.height;
+			begin.debugName = "TerrainBlending::ClearDepth";
+			auto& commands = a_recording.Commands();
+			commands.BeginPass(begin);
+			commands.EndPass();
+		}
+
+	private:
+		std::shared_ptr<org::ExternalTextureResource> depth;
+		DepthClearFrame frame;
+	};
+
+	/**
+	 * @brief The terrain depth's clear at the EarlyPrepass anchor (Main::RenderShadowMaps returned, right before Main::RenderDepth):
+	 * a client of its own, active while Terrain Blending is. Its commit notes the frame when the run's graph holds the pass, which
+	 * TerrainBlending::ResetDepth reads to skip its D3D11 clear.
+	 */
+	bool RegisterTerrainDepthClear(std::shared_ptr<org::ExternalTextureResource> a_depth, std::uint32_t a_width, std::uint32_t a_height)
+	{
+		FrameAnchors::ClientDesc client{};
+		client.id = kClearClientId;
+		client.passes.push_back({ .name = kClearClientId,
+			.anchor = FrameAnchors::Anchor::EarlyPrepass,
+			.order = -100,
+			.kind = FrameAnchors::PassKind::Render,
+			.make = [a_depth, a_width, a_height]() -> std::shared_ptr<org::RenderPass> { return std::make_shared<TerrainDepthClearPass>(a_depth, a_width, a_height); } });
+		client.active = [] { return globals::features::terrainBlending.settings.Enabled != 0; };
+		client.commit = [](const FrameAnchors::Point&) {
+			if (FrameAnchors::InBuiltGraph(kClearClientId, FrameAnchors::Anchor::EarlyPrepass))
+				ClearedFrame() = globals::state->frameCount;
+		};
+		client.onFailed = [] {
+			logger::error("[ORG] Terrain Blending: the render graph failed; the terrain depth is cleared through its D3D11 export");
+			ClearedFrame() = UINT64_MAX;
+		};
+		return FrameAnchors::Register(std::move(client));
 	}
 
 	/** @brief The size the D3D11 path makes its blended depth (the main render target's). */
@@ -133,6 +235,69 @@ void ORGTerrainBlending::Reserve()
 {
 	if (Requested() && !FrameAnchors::Reserve(FrameAnchors::Anchor::DepthDone))
 		logger::warn("[ORG] Terrain Blending stays on D3D11: the DepthDone anchor could not be reserved");
+	if (Requested() && !FrameAnchors::Reserve(FrameAnchors::Anchor::EarlyPrepass))
+		logger::warn("[ORG] Terrain Blending: the EarlyPrepass anchor could not be reserved; the terrain depth is cleared through D3D11");
+}
+
+bool ORGTerrainBlending::MakeTerrainDepth(RE::BSGraphics::DepthStencilData& a_target, const D3D11_TEXTURE2D_DESC& a_desc, DXGI_FORMAT a_srvFormat,
+	DXGI_FORMAT a_dsvFormat)
+{
+	auto& twin = TerrainDepthTwin();
+	if (twin || !Requested() || !RenderGraphRuntime::Get().IsActive())
+		return false;
+	// Drawn by D3D11 (the engine's terrain draws through its DSV) and read by D3D11 (the D3D11 blend, its mask fallback):
+	// exported, never aliased.
+	D3D11_TEXTURE2D_DESC desc = a_desc;
+	desc.MipLevels = 1;
+	desc.ArraySize = 1;
+	desc.BindFlags = D3D11_BIND_DEPTH_STENCIL | D3D11_BIND_SHADER_RESOURCE;
+	desc.MiscFlags = 0;
+	auto texture = std::make_unique<GraphResources::Texture2D>(desc, std::string(kTerrainDepthId),
+		GraphResources::Options{ .lifetime = GraphResources::Lifetime::Persistent, .d3d11 = GraphResources::Export::SRV | GraphResources::Export::DSV });
+	auto graph = *texture ? std::dynamic_pointer_cast<org::ExternalTextureResource>(texture->Graph()) : nullptr;
+	if (!graph || !texture->D3D11() || !texture->SRV() || !texture->DSV()) {
+		logger::warn("[ORG] Terrain Blending: the terrain depth could not be made on the render graph (format {}); it is a D3D11 texture",
+			static_cast<int>(a_desc.Format));
+		return false;
+	}
+	// The engine's draws and the D3D11 blend use the views in the main depth's formats.
+	D3D11_SHADER_RESOURCE_VIEW_DESC srvDesc{};
+	D3D11_DEPTH_STENCIL_VIEW_DESC dsvDesc{};
+	texture->SRV()->GetDesc(&srvDesc);
+	texture->DSV()->GetDesc(&dsvDesc);
+	if (srvDesc.Format != a_srvFormat || dsvDesc.Format != a_dsvFormat) {
+		logger::warn("[ORG] Terrain Blending: the graph's terrain depth has views in formats {}/{}, the main depth's are {}/{}; it is a D3D11 texture",
+			static_cast<int>(srvDesc.Format), static_cast<int>(dsvDesc.Format), static_cast<int>(a_srvFormat), static_cast<int>(a_dsvFormat));
+		return false;
+	}
+	// The blend at DepthDone and Drawcall Limit Fix's Z-prepass declare it in their graphs: one resource in every graph.
+	if (!PublishedResources::Publish(*texture)) {
+		logger::warn("[ORG] Terrain Blending: the terrain depth could not be published; it is a D3D11 texture");
+		return false;
+	}
+	if (!FrameAnchors::HasEpoch(FrameAnchors::Anchor::EarlyPrepass) || !RegisterTerrainDepthClear(graph, desc.Width, desc.Height))
+		logger::warn("[ORG] Terrain Blending: the terrain depth's clear could not be put on the EarlyPrepass anchor; it is cleared through D3D11");
+	// One reference each, as the D3D11 path's Create calls leave in the fields.
+	a_target.texture = texture->D3D11();
+	a_target.texture->AddRef();
+	a_target.depthSRV = texture->SRV();
+	a_target.depthSRV->AddRef();
+	a_target.views[0] = texture->DSV();
+	a_target.views[0]->AddRef();
+	twin = std::move(texture);
+	logger::info("[ORG] Terrain Blending: the terrain depth is a graph texture ({}x{}), published as {}", desc.Width, desc.Height, kTerrainDepthId);
+	return true;
+}
+
+std::shared_ptr<org::ExternalTextureResource> ORGTerrainBlending::TerrainDepthGraph() const
+{
+	const auto& twin = TerrainDepthTwin();
+	return twin && RenderGraphRuntime::Get().IsActive() ? std::dynamic_pointer_cast<org::ExternalTextureResource>(twin->Graph()) : nullptr;
+}
+
+bool ORGTerrainBlending::TerrainDepthCleared() const
+{
+	return TerrainDepthTwin() && ClearedFrame() == globals::state->frameCount;
 }
 
 bool ORGTerrainBlending::Active() const
@@ -323,6 +488,9 @@ struct ORGTerrainBlending::Impl
 
 void ORGTerrainBlending::Reserve() {}
 bool ORGTerrainBlending::Setup(std::function<void()>) { return false; }
+bool ORGTerrainBlending::MakeTerrainDepth(RE::BSGraphics::DepthStencilData&, const D3D11_TEXTURE2D_DESC&, DXGI_FORMAT, DXGI_FORMAT) { return false; }
+std::shared_ptr<org::ExternalTextureResource> ORGTerrainBlending::TerrainDepthGraph() const { return nullptr; }
+bool ORGTerrainBlending::TerrainDepthCleared() const { return false; }
 bool ORGTerrainBlending::BeforeDepth() { return false; }
 bool ORGTerrainBlending::Blend() { return false; }
 bool ORGTerrainBlending::Active() const { return false; }
