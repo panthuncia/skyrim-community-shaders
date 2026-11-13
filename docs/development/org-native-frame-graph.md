@@ -771,3 +771,16 @@ graph-owned now. `MakeSurface`'s unused state parameter fed a counter the previo
 - Guest with `CS_ORG_ENGINE_TEXTURES=1`: the same `is the image of` lines, shots unchanged (water flow, VL, Skylighting).
 - Watch for `asks for a view ... lacks` and `graph-owned texture lacks a view` warnings: each names an importer the registry did not
   fit.
+
+## Phase 2 done (2026-11-13, integrate e02bd7995)
+
+All Phase 2 lanes are merged. Native and guest loads log 0 structural rebuilds and 0 duplicate images
+(`CS_ORG_IMAGE_DUPLICATE_CHECK=1`). The native census reads 0 undeclared accesses in the world; the loading screen has one Scaleform
+read in its first window. Shots match in both modes.
+
+**Exclusive native imports moved to Phase 4.** With every image one graph resource, exclusive imports
+(`CS_ORG_NATIVE_EXCLUSIVE_IMPORTS=1`) still flash post-processing and lose the haze. What is left must be work outside the graph's
+state tracking on the same images: the native context's raw operations in GENERAL, and DCLF's bindless views written as GENERAL
+descriptors. Phase 4 turns home states off and replaces the context's raw operations with passes and `ExternalClient`; exclusive
+imports become the default there, and only once `CS_ORG_NATIVE_VALIDATION=1` and a normal-speed run both show no layout race.
+Shared imports (Common-only, simultaneous access) are the default until then.
