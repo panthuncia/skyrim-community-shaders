@@ -1171,7 +1171,7 @@ namespace FrameAnchors
 		auto owner = std::make_shared<EngineImport>(std::move(found->second));
 		state.imports.erase(found);
 		Publish(state);
-		Rebuild(state, ~0u, fmt::format("import '{}' released", a_id));
+		StructuralRebuild(state, ~0u, fmt::format("import '{}' released", a_id));
 		RenderGraphRuntime::Get().ReleaseAfterD3D11(std::move(owner));
 	}
 
