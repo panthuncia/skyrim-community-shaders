@@ -68,6 +68,26 @@ namespace RenderGraph::Engine::Targets
 	 */
 	void InstallHandles();
 
+	/**
+	 * @brief How a CS feature remakes an engine render target (HDR Display's LDR upgrades, Deferred's GBuffer and water targets).
+	 * ORG makes the target this way from its first version, so the feature's Recreate later finds the shape it asks for.
+	 */
+	struct Plan
+	{
+		const char* owner = "?";                   // who asked, for the log
+		DXGI_FORMAT format = DXGI_FORMAT_UNKNOWN;  // the target's format; UNKNOWN keeps the engine's
+		UINT bindFlags = 0;                        // SRV, RTV and UAV bind flags; 0 keeps the engine's
+		bool mainSize = false;                     // kMAIN's size instead of the engine's own
+		bool dropCopy = false;                     // no copy texture; otherwise the copy keeps the engine's format, as HDR leaves it
+	};
+
+	/**
+	 * @brief Registers a_plan for render target a_target. Call before the render graph is set up (a feature's PostPostLoad, or
+	 * the hook install): TakeOver and every later engine Create make the target from the plan, and Restore goes back to it.
+	 * Has no effect on targets the engine keeps on D3D11. A later call for the same target replaces the plan.
+	 */
+	void PlanTarget(std::uint32_t a_target, const Plan& a_plan);
+
 	/** @brief Whether ORG owns render target a_target (RE::RENDER_TARGET) now. */
 	bool Owns(std::uint32_t a_target);
 
@@ -77,12 +97,13 @@ namespace RenderGraph::Engine::Targets
 	 * and a UAV, each in a_desc's format, as a_desc's bind flags ask). Until the engine's next Create.
 	 * @param a_keepCopy Keep the target's copy texture (HDR Display replaces only the texture and its views); otherwise the copy
 	 * goes, as Deferred's replacement releases it.
+	 * When the target already has a_desc's shape (a planned target, see PlanTarget), nothing is made again and true is returned.
 	 * @return False, with nothing changed, when ORG does not own a_target or a_desc is not a DEFAULT 2D texture of one slice and
 	 * one mip: the caller then uses its D3D11 path.
 	 */
 	bool Recreate(std::uint32_t a_target, const D3D11_TEXTURE2D_DESC& a_desc, const char* a_name, bool a_keepCopy = false);
 
-	/** @brief Makes a_target again from the engine's own properties, undoing Recreate. False when ORG does not own it. */
+	/** @brief Makes a_target again from the engine's own properties and its plan, undoing Recreate. False when ORG does not own it. */
 	bool Restore(std::uint32_t a_target);
 
 	/**

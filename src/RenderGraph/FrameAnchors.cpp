@@ -975,12 +975,14 @@ namespace FrameAnchors
 			}
 			const std::uint64_t generation = GraphResources::Resource::ResizeGeneration();
 			if (generation != a_state.resizeGeneration) {
+				// The log names what moved the generation since this state last looked.
+				const auto causes = GraphResources::Resource::ResizeCauses(a_state.resizeGeneration);
 				a_state.resizeGeneration = generation;
 				PublishedResources::Refresh();
 				Publish(a_state);
 				for (auto& client : a_state.clients)
 					MarkCurrent(a_state, client);
-				StructuralRebuild(a_state, ~0u, "graph resources resized (a twin that is not versioned, or another shape class)");
+				StructuralRebuild(a_state, ~0u, fmt::format("graph resources resized by {} (a twin that is not versioned, or another shape class)", causes));
 			}
 		}
 

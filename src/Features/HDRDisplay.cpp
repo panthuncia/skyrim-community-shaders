@@ -636,6 +636,20 @@ void HDRDisplay::DataLoaded()
 	}
 }
 
+namespace
+{
+	// The engine targets HDR upgrades to R16G16B16A16_FLOAT (UpgradeLDRRenderTargets), and plans for ORG (PostPostLoad).
+	constexpr RE::RENDER_TARGETS::RENDER_TARGET kLDRTargets[] = {
+		RE::RENDER_TARGETS::kLDR_DOWNSAMPLE0,
+		RE::RENDER_TARGETS::kLDR_BLURSWAP,
+		RE::RENDER_TARGETS::kBLURFULL_BUFFER,
+		RE::RENDER_TARGETS::kIMAGESPACE_TEMP_COPY,
+		RE::RENDER_TARGETS::kIMAGESPACE_TEMP_COPY2,
+		RE::RENDER_TARGETS::kTEMPORAL_AA_UI_ACCUMULATION_1,
+		RE::RENDER_TARGETS::kTEMPORAL_AA_UI_ACCUMULATION_2,
+	};
+}
+
 void HDRDisplay::PostPostLoad()
 {
 	// When Upscaling is loaded it installs equivalent hooks for these same addresses in its own
@@ -655,6 +669,10 @@ void HDRDisplay::PostPostLoad()
 
 	stl::detour_thunk<HDR_Movie_Draw>(REL::RelocationID(87907, 90279));
 	ORGHDRDisplay::Reserve();
+	// CS_ORG_ENGINE_TARGETS: ORG makes the LDR targets in the HDR format from the start. The upgrade then finds them done and
+	// skips them, so no graph is built again for a new format at setup.
+	for (auto targetId : kLDRTargets)
+		RenderGraph::Engine::Targets::PlanTarget(targetId, { .owner = "HDR Display", .format = DXGI_FORMAT_R16G16B16A16_FLOAT });
 }
 
 void HDRDisplay::SetupResources()
@@ -1416,17 +1434,7 @@ void HDRDisplay::UpgradeLDRRenderTargets()
 	auto renderer = globals::game::renderer;
 	auto device = globals::d3d::device;
 
-	static const RE::RENDER_TARGETS::RENDER_TARGET ldrTargets[] = {
-		RE::RENDER_TARGETS::kLDR_DOWNSAMPLE0,
-		RE::RENDER_TARGETS::kLDR_BLURSWAP,
-		RE::RENDER_TARGETS::kBLURFULL_BUFFER,
-		RE::RENDER_TARGETS::kIMAGESPACE_TEMP_COPY,
-		RE::RENDER_TARGETS::kIMAGESPACE_TEMP_COPY2,
-		RE::RENDER_TARGETS::kTEMPORAL_AA_UI_ACCUMULATION_1,
-		RE::RENDER_TARGETS::kTEMPORAL_AA_UI_ACCUMULATION_2,
-	};
-
-	for (auto targetId : ldrTargets) {
+	for (auto targetId : kLDRTargets) {
 		auto& rt = renderer->GetRuntimeData().renderTargets[targetId];
 		if (!rt.texture)
 			continue;

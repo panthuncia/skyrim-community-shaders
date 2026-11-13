@@ -216,6 +216,12 @@ namespace GraphResources
 		/** @brief Bumped by every Resize of any twin: what the anchors and PublishedResources compare to notice one. */
 		static std::uint64_t ResizeGeneration();
 
+		/**
+		 * @brief The names of what bumped the resize generation past a_since, joined with commas, for the anchors' log line.
+		 * Only the last few bumps are kept. "unknown" when none of them is newer than a_since.
+		 */
+		static std::string ResizeCauses(std::uint64_t a_since);
+
 	protected:
 		Resource(std::string a_name, Options a_options) :
 			name(std::move(a_name)), options(a_options) {}
@@ -224,8 +230,8 @@ namespace GraphResources
 		/** @brief The views' names, as Buffer.h's detail::SetD3DName gives them. */
 		void NameViews() const;
 
-		/** @brief Called by a Resize that made a new resource. */
-		static void BumpResizeGeneration();
+		/** @brief Called by a Resize that made a new resource. a_who names it in the anchors' log line (ResizeCauses). */
+		static void BumpResizeGeneration(std::string_view a_who);
 
 		/**
 		 * @brief After Create: the slot of a versioned texture. With a_previous (the slot before a Resize) and a_sameShape, the new
