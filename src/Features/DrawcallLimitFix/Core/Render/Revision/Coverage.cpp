@@ -22,14 +22,12 @@ namespace DCLF
 			failed = true;
 		}
 		auto& rv = impl->revisions;
-		// Explicit while scene revisions draw: an extension added or removed during a frame waits for this point, so the graph a
-		// frame's revision was recorded on runs through that frame (a build invalidates every recording: the frame waits at its start for
-		// a snapshot recorded on the new build, AdoptCurrentSnapshot). Failed, the graph builds at its next submission.
-		const bool explicitBuilds = !failed;
-		if (rv.explicitBuilds != explicitBuilds) {
-			rv.explicitBuilds = explicitBuilds;
-			host->SetExplicitBuilds(explicitBuilds);
-		}
+		// The host always builds explicitly (the build manager: RenderGraphRuntime::BuildIfRequested). While scene revisions draw, this
+		// point is the frame's build point: an extension added or removed during a frame waits for it, so the graph a frame's revision
+		// was recorded on runs through that frame (a build invalidates every recording: the frame waits at its start for a snapshot
+		// recorded on the new build, AdoptCurrentSnapshot). DCLF's epochs are built here, on this thread; the others' builds that
+		// finished off the render thread are attached here. Failed, the frame's end is the build point (RenderGraphRuntime::SealPresented).
+		rv.explicitBuilds = !failed;
 		// The passes this frame needs (an interior's, the cull mode's): a change rebuilds the graph here, before anything records on it.
 		Draws::RefreshGraphConditions(*host);
 		impl->BuildIfAsked();
@@ -46,7 +44,7 @@ namespace DCLF
 		// here with the rest.
 		ServeRevisionRequests();
 		// Through the runtime: a host that failed (a lost device) stops the graph there instead of throwing into the frame.
-		if (revisions.explicitBuilds && RenderGraphRuntime::Get().BuildIfRequested())
+		if (revisions.explicitBuilds && RenderGraphRuntime::Get().BuildIfRequested("Drawcall Limit Fix's build point"))
 			++revisions.builds;
 		// The graph's build and its heaps, the pipelines' generations, the toggles: revision inputs, posted when they moved.
 		PostRevisionInputs();

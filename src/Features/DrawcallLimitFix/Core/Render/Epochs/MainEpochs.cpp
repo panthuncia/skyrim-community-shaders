@@ -209,8 +209,10 @@ namespace DCLF
 			// next build point - the colour epoch, the frame's last, draws its own preparation with them; the next frame's revision
 			// recordings are then of the build before, and that frame waits at its start for a snapshot made for them
 			// (AdoptCurrentSnapshot; their context is posted for the builder below, PostResourcesAhead).
+			// Only DCLF's epochs are built here (on this thread, logged as a synchronous build after the first world frame); the others'
+			// requests wait for the build manager's next poll.
 			if (ready && impl->resources != resourcesBefore && resourcesBefore)
-				(void)RenderGraphRuntime::Get().BuildIfRequested();
+				(void)RenderGraphRuntime::Get().BuildOwnerEpochsNow("Drawcall Limit Fix: main resources made again under claims");
 		} catch (const std::exception& e) {
 			// Never retried: the feature stays on the native path.
 			logger::error("[DCLF] Main-pass graph resources could not be created: {}", e.what());
