@@ -92,6 +92,9 @@ namespace DCLF::Draws
 		BuildScope(const BuildScope&) = delete;
 		BuildScope& operator=(const BuildScope&) = delete;
 
+		/** @brief The state this scope builds from. */
+		const std::shared_ptr<const BuildState>& State() const { return state; }
+
 	private:
 		std::shared_ptr<const BuildState> state;
 		const BuildScope* previous = nullptr;

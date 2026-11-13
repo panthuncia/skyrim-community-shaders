@@ -77,7 +77,7 @@ namespace DCLF::Draws
 	std::shared_ptr<const BuildState> BuildingState(const char* a_who)
 	{
 		if (t_scope)
-			return t_scope->state ? t_scope->state : nullptr;
+			return t_scope->State();
 		// No scope: a build nobody set one for. The host's build at an epoch's first submission runs on the render thread, whose newest
 		// value is consistent there; anywhere else it is a defect (the build reads a value the render thread may be replacing).
 		const bool renderThread = std::this_thread::get_id() == sourceThread.load(std::memory_order_acquire);

@@ -73,7 +73,7 @@ namespace DCLF
 		}
 
 		/** @brief Whether any of Drawcall Limit Fix's epochs has a graph (before that, the host builds each at its first submission). */
-		bool AnyDclfGraph(const org::GraphHost& a_host)
+		bool AnyDclfGraph(org::GraphHost& a_host)
 		{
 			for (std::uint32_t segment = 0; segment < static_cast<std::uint32_t>(RenderGraphRuntime::Segment::Count); ++segment)
 				if (RenderGraphRuntime::IsDclfSegment(static_cast<RenderGraphRuntime::Segment>(segment)) &&
