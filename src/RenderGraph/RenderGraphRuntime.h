@@ -120,6 +120,7 @@ public:
 		AnchorVolumetricLighting,
 		AnchorDecalQueries,
 		AnchorMovieTiles,
+		AnchorEngineCopy,
 		Count
 	};
 

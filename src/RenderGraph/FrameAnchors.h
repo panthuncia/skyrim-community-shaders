@@ -189,6 +189,9 @@ namespace FrameAnchors
 		// point of its tile draw (BSMovie::DrawTiles, SE 87907, AE 90279; RenderGraph/Engine/Bink). Such a tick does not present,
 		// so the Present anchor would draw it out of order.
 		MovieTiles,
+		// Out of frame order (appended): native mode only (RenderGraph/Engine/Skeleton). The engine's copy of kMAIN into its copy
+		// texture ("kMAIN Copy"), at the native immediate context's CopyResource, inside the ImageSpace chain. Once or twice a frame.
+		EngineCopy,
 		Count
 	};
 
@@ -380,6 +383,13 @@ namespace FrameAnchors
 
 	/** @brief Run for a hook without engine targets. */
 	inline RunResult Run(Anchor a_anchor) { return Run(Point{ .anchor = a_anchor }); }
+
+	/**
+	 * @brief Whether the calling thread is inside Run (an anchor's epoch, its commits or its executed callbacks). Work that would run
+	 * an anchor itself (native mode's immediate context taking an operation as a graph pass) checks this first: a run never starts
+	 * another. Any thread.
+	 */
+	bool InRun();
 
 	/** @brief The most runs the anchor submitted between two Presents so far this session (LogRunStats). Any thread. */
 	std::uint32_t PeakRunsPerFrame(Anchor a_anchor);

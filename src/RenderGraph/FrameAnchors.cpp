@@ -42,7 +42,7 @@ namespace FrameAnchors
 		using Segment = RenderGraphRuntime::Segment;
 
 		constexpr std::uint32_t kAnchors = static_cast<std::uint32_t>(Anchor::Count);
-		static_assert(static_cast<std::uint32_t>(Segment::AnchorMovieTiles) - static_cast<std::uint32_t>(Segment::AnchorReflectionsPrepass) + 1 == kAnchors,
+		static_assert(static_cast<std::uint32_t>(Segment::AnchorEngineCopy) - static_cast<std::uint32_t>(Segment::AnchorReflectionsPrepass) + 1 == kAnchors,
 			"one segment per anchor, in the anchors' order");
 		static_assert(static_cast<std::uint32_t>(Segment::Count) <= 64, "TakeSubmittedSegments holds one bit per segment");
 
@@ -102,6 +102,8 @@ namespace FrameAnchors
 			{ "DecalQueries", { "CS anchor: decal queries", "CS anchor: decal queries inputs", "FrameAnchors::DecalQueries / ", "cs.anchor.decal-queries" }, false },
 			// Runs a frame: one per Bink tick inside another frame (player mode 2; none in most frames)
 			{ "MovieTiles", { "CS anchor: movie tiles", "CS anchor: movie tiles inputs", "FrameAnchors::MovieTiles / ", "cs.anchor.movie-tiles" }, true },
+			// Runs a frame: one per copy of kMAIN into its copy texture the engine makes (native mode only)
+			{ "EngineCopy", { "CS anchor: engine copy", "CS anchor: engine copy inputs", "FrameAnchors::EngineCopy / ", "cs.anchor.engine-copy" }, true },
 		} };
 
 		// Where each segment runs in a frame: AddToFrame puts an anchor before the first epoch of the order that runs after it. A
@@ -137,6 +139,7 @@ namespace FrameAnchors
 			Segment::AnchorPostProcessing,   // Main_PostProcessing, before the upscaler
 			Segment::AnchorUpscale,          // after the upscaler's evaluate
 			Segment::AnchorImageSpace,       // the ImageSpace chain's batches (pre-tonemap composites, the HDR effect), a few times a frame
+			Segment::AnchorEngineCopy,       // the engine's kMAIN copy, between the chain's batches (nominally here; native mode only)
 			Segment::AnchorTonemap,          // in the ImageSpace chain after it
 			Segment::AnchorFrameGeneration,  // after the ImageSpace chain, before frame generation
 			Segment::AnchorMovieTiles,       // a Bink movie inside another frame, at its tile draw (nominally here: the frame's UI time)
@@ -1356,8 +1359,29 @@ namespace FrameAnchors
 		return ownerChanges.load(std::memory_order_acquire);
 	}
 
+	namespace
+	{
+		/** @brief How deep the calling thread is in Run (InRun). */
+		thread_local std::uint32_t t_runDepth = 0;
+
+		/** @brief Counts the calling thread into Run for the scope. */
+		struct RunDepthScope
+		{
+			RunDepthScope() { ++t_runDepth; }
+			~RunDepthScope() { --t_runDepth; }
+			RunDepthScope(const RunDepthScope&) = delete;
+			RunDepthScope& operator=(const RunDepthScope&) = delete;
+		};
+	}
+
+	bool InRun()
+	{
+		return t_runDepth != 0;
+	}
+
 	RunResult Run(const Point& a_point)
 	{
+		const RunDepthScope depth;
 		auto& state = Anchors();
 		const std::uint32_t index = IndexOf(a_point.anchor);
 		if (index >= kAnchors || !state.reserved[index] || !state.host)
@@ -1769,6 +1793,7 @@ namespace FrameAnchors
 	void Unregister(std::string_view) {}
 	void Refresh(std::string_view) {}
 	RunResult Run(const Point&) { return {}; }
+	bool InRun() { return false; }
 	void LatchMainThread() {}
 	bool IsRenderOwner() { return true; }
 	void ClaimRenderOwnership() {}
