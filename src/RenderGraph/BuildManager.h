@@ -58,6 +58,12 @@ namespace RenderGraph
 		 * host's thread held. For a change that needs the host's safe point (shader reload's pipeline swap), not for structure.
 		 */
 		void RequestAllSynchronous(std::string_view a_reason);
+		/**
+		 * @brief Any thread: a_change runs on the owner thread at the next poll, while no build runs on either thread, and then every
+		 * epoch's graph is built again off the render thread. For a change of what a graph captures at its build (a resource's
+		 * ownership) that must not race a build in progress.
+		 */
+		void Change(std::function<void()> a_change, std::string_view a_reason);
 
 		/**
 		 * @brief Owner thread, at a frame boundary: attaches the finished builds, builds the owner-built epochs that were asked for, and
@@ -98,6 +104,11 @@ namespace RenderGraph
 		void RequestAll(std::string_view a_reason);
 		/** @brief Any thread: the graphs that looked a_id up are built again, off the render thread. */
 		void RequestFor(std::string_view a_id, std::string_view a_reason);
+		/**
+		 * @brief Any thread: a_change runs on the render thread at the next poll, with no build running, then every epoch's graph is
+		 * built again off the render thread (BuildManager::Change). Runs a_change at once while the graph is inactive.
+		 */
+		void Change(std::function<void()> a_change, std::string_view a_reason);
 
 		/**
 		 * @brief Inside an extension's build (its factory, PrepareForBuild, Gather, its passes' setup): defers a_attached to the attach of

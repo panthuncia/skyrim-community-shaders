@@ -10,8 +10,11 @@
 #include "Features/DrawcallLimitFix/Core/Gpu/FrameValues.h"
 #include "Features/RemoteControl/GpuCounters.h"
 #include "RenderGraph/DxvkImageImport.h"
+#include "RenderGraph/Engine/Native/Native.h"
 #include "RenderGraph/Engine/Targets/EngineTargets.h"
 #include "RenderGraph/Switches.h"
+
+#include <Resources/ExternalTextureResource.h>
 
 namespace DCLF::Draws
 {
@@ -42,6 +45,12 @@ namespace DCLF::Draws
 		static const bool shareOwned = !Switches::Off("CS_ORG_ENGINE_TARGETS_DCLF");
 		if (shareOwned)
 			if (auto owned = RenderGraph::Engine::Targets::FindImage(reinterpret_cast<std::uint64_t>(a_image.image)))
+				return owned;
+		// Native mode: the graph-owned texture of the image (RenderGraph::Engine::Native::GraphTextureOfImage), when the import can
+		// hold it; otherwise the image is imported here.
+		if (RenderGraph::Engine::Native::Active())
+			if (auto owned = std::dynamic_pointer_cast<org::ExternalTextureResource>(
+					RenderGraph::Engine::Native::GraphTextureOfImage(reinterpret_cast<std::uint64_t>(a_image.image))))
 				return owned;
 		a_desc.imageDimensions.clear();
 		a_desc.imageDimensions.push_back({ a_image.extent.width, a_image.extent.height, 0, 0 });

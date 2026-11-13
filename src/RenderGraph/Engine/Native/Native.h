@@ -22,6 +22,12 @@ namespace rhi
 	class Resource;
 }
 
+namespace org
+{
+	class ExternalTextureResource;
+	class GloballyIndexedResource;
+}
+
 /**
  * @brief Native mode (org-full-port.md Phase 6, CS_ORG_NATIVE=1): no DXVK. CS creates a BasicRHI Vulkan device itself, the engine's
  * device, immediate context and swap chain are tripwire handles over it, the render graph runs natively (its epochs submit to the
@@ -93,6 +99,38 @@ namespace RenderGraph::Engine::Native
 	 * textures the native device made): the Vulkan image and the layout it rests in between graph epochs. False for anything else.
 	 */
 	bool DescribeResource(const IUnknown* a_object, DxvkOrgInteropResourceInfo& a_info);
+
+	/**
+	 * @name Graph-owned textures (org-native-frame-graph.md, Phase 2). With CS_ORG_NATIVE_OWNED on (the default), the native device
+	 * sorts each texture it makes:
+	 * - exempt: only a shader resource, made with its contents, not DYNAMIC. Its contents go in through a transfer on the graphics
+	 *   queue that ends in the shader-read state, where it rests; graphs read it untracked (GraphOwnership::
+	 *   ExternalImmutableShaderResource). The context's first write promotes it to tracked, through the build manager.
+	 * - tracked: everything else. Once the render graph is up it is a persistent ORG texture (org::PixelBuffer, never aliased),
+	 *   resting in Common between executions while external home states are on. Textures made before the graph, and ones ORG
+	 *   cannot make as D3D11 asked, stay host-made BasicRHI images that the graph imports (logged once per reason).
+	 */
+	/** @{ */
+	/** @brief Whether native mode is active and sorts its textures as above (CS_ORG_NATIVE_OWNED). Any thread. */
+	bool OwnedResources();
+
+	/**
+	 * @brief The one lookup the imports use in native mode: the graph-owned ORG texture behind a_object (a texture or view handle,
+	 * a port's handle around one, or a streamed texture's shell, which answers its window). Null for anything else: an exempt or
+	 * host-made texture, or one native mode did not make; the caller imports it as before then. Any thread.
+	 */
+	std::shared_ptr<org::GloballyIndexedResource> GraphTextureOf(const IUnknown* a_object);
+
+	/** @brief GraphTextureOf for the image a description named (DxvkOrgInteropImageInfo::image), for Drawcall Limit Fix's imports. */
+	std::shared_ptr<org::GloballyIndexedResource> GraphTextureOfImage(std::uint64_t a_image);
+
+	/**
+	 * @brief An exempt texture as a graph resource (the FrameAnchors::ImmutableTexture seam): one per texture, made on the first call
+	 * once its transfer is done (waited for here), with its shader resource views in a_srvFormat (UNKNOWN: the texture's own). Passes
+	 * may only read it. Null when the texture is not exempt; the caller imports it as before then. Any thread.
+	 */
+	std::shared_ptr<org::ExternalTextureResource> ImmutableTextureOf(const IUnknown* a_texture, DXGI_FORMAT a_srvFormat);
+	/** @} */
 
 	/** @brief What native mode knows of a resource it made, from its D3D11 description (DescribeForCensus). */
 	struct ResourceFacts
