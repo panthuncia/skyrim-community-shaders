@@ -10,6 +10,7 @@
 #	include "Features/TerrainBlending/ORGTerrainBlending.h"
 #	include "Globals.h"
 #	include "RenderGraph/ComputeProgram.h"
+#	include "RenderGraph/Engine/Native/Native.h"
 #	include "RenderGraph/FrameAnchors.h"
 #	include "RenderGraph/GraphResources.h"
 #	include "RenderGraph/PublishedResources.h"
@@ -121,7 +122,9 @@ namespace
 
 	/**
 	 * @brief The depth the D3D11 path reads at Prepass (Util::GetCurrentSceneDepthSRV(false)), as a graph texture: on Terrain
-	 * Blending's ORG path its published blended depth, which the graph orders after the blend.
+	 * Blending's ORG path its published blended depth, which the graph orders after the blend. Native mode never imports the D3D11
+	 * texture, which nothing orders after its writer: without the published depth it reads the z-prepass copy. Guest keeps the
+	 * import for Terrain Blending on D3D11.
 	 */
 	DepthSource CurrentDepth()
 	{
@@ -129,7 +132,7 @@ namespace
 		if (terrainBlending.loaded && terrainBlending.settings.Enabled) {
 			if (PublishedResources::IsPublished(ORGTerrainBlending::kBlendedDepthId))
 				return { nullptr, ORGTerrainBlending::kBlendedDepthId };
-			if (terrainBlending.blendedDepthTexture)
+			if (terrainBlending.blendedDepthTexture && !RenderGraph::Engine::Native::Active())
 				return { FrameAnchors::D3D11Texture(kBlendedDepthName, terrainBlending.blendedDepthTexture->resource.get(),
 							 terrainBlending.blendedDepthTexture->srv.get(), nullptr),
 					{}, true };
@@ -140,7 +143,7 @@ namespace
 	const char* DepthLabel(const DepthSource& a_depth)
 	{
 		auto& terrainBlending = globals::features::terrainBlending;
-		if (!terrainBlending.loaded || !terrainBlending.settings.Enabled)
+		if (!terrainBlending.loaded || !terrainBlending.settings.Enabled || (a_depth.published.empty() && !a_depth.blendImport))
 			return "the z-prepass copy";
 		return a_depth.published.empty() ? "Terrain Blending" : "Terrain Blending's graph texture";
 	}
