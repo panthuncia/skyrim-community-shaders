@@ -2942,7 +2942,7 @@ namespace DCLF
 		DeclareReadsExcept(a_builder, a_sets, set);
 		if (set >= buffers.size())
 			return;
-		RenderGraph::DeclareRef(a_builder, *buffers[set], RenderGraph::RefAccess::Write, fmt::format("frame value pool {}", a_pool.index),
+		RenderGraph::DeclareLateRef(a_builder, buffers[set], RenderGraph::RefAccess::Write, fmt::format("frame value pool {}", a_pool.index),
 			impl->poolRefLatches[a_pool.index], a_out);
 	}
 

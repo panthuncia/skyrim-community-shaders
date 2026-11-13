@@ -133,6 +133,7 @@ namespace RenderGraph
 		std::string what;
 		org::ResourceBindingToken binding;
 		std::shared_ptr<const RefLatch> latch;
+		std::shared_ptr<org::VersionedBuffer> late;  // a late-bound buffer: checked against its current version
 		std::unique_ptr<std::atomic<bool>> reported = std::make_unique<std::atomic<bool>>(false);
 	};
 
@@ -140,14 +141,14 @@ namespace RenderGraph
 	{
 		template <class T>
 		org::ResourceBindingToken Declare(org::RenderPassBuilder& a_builder, T& a_buffer, RefAccess a_access, std::string_view a_what,
-			std::shared_ptr<const RefLatch> a_latch, DeclaredRefs& a_out)
+			std::shared_ptr<const RefLatch> a_latch, DeclaredRefs& a_out, std::shared_ptr<org::VersionedBuffer> a_late = nullptr)
 		{
 			const auto binding = a_access == RefAccess::Write ? a_builder.UnorderedAccess(a_buffer, std::span<const org::UavView>{}).Resource() :
 			                                                    a_builder.ShaderResource(a_buffer, std::span<const org::SrvView>{}).Resource();
 			if (a_latch) {
 				if (!a_out.entries)
 					a_out.entries = std::make_shared<std::vector<DeclaredRefs::Entry>>();
-				a_out.entries->push_back({ .what = std::string(a_what), .binding = binding, .latch = std::move(a_latch) });
+				a_out.entries->push_back({ .what = std::string(a_what), .binding = binding, .latch = std::move(a_latch), .late = std::move(a_late) });
 			}
 			return binding;
 		}
@@ -163,6 +164,12 @@ namespace RenderGraph
 		std::shared_ptr<const RefLatch> a_latch, DeclaredRefs& a_out)
 	{
 		return Declare(a_builder, a_buffer, a_access, a_what, std::move(a_latch), a_out);
+	}
+
+	org::ResourceBindingToken DeclareLateRef(org::RenderPassBuilder& a_builder, const std::shared_ptr<org::VersionedBuffer>& a_buffer, RefAccess a_access,
+		std::string_view a_what, std::shared_ptr<const RefLatch> a_latch, DeclaredRefs& a_out)
+	{
+		return Declare(a_builder, *a_buffer, a_access, a_what, std::move(a_latch), a_out, a_buffer);
 	}
 
 	BufferRef DeclaredBufferRef(const org::FramePreparationContext& a_preparation, const org::ResourceBindingToken& a_binding, std::uint64_t a_offset)
@@ -186,7 +193,16 @@ namespace RenderGraph
 				continue;
 			BufferRef declared{};
 			try {
-				declared = DeclaredBufferRef(a_preparation, entry.binding);
+				if (entry.late) {
+					// No version published yet: nothing the latch could carry.
+					const auto current = entry.late->Get();
+					auto* host = RenderGraphRuntime::Get().Host();
+					if (!current || !host)
+						continue;
+					declared = MakeBufferRef(host->Device(), current->GetAPIResource().GetHandle(), 0, std::source_location::current());
+				} else {
+					declared = DeclaredBufferRef(a_preparation, entry.binding);
+				}
 			} catch (const std::exception& e) {
 				if (!entry.reported->exchange(true, std::memory_order_relaxed))
 					logger::warn("[ORG] declared view mismatch: {} reads '{}' through buffer view ref {{slot {}}}, and its declaration does not resolve: {}", a_site,

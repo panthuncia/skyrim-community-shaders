@@ -117,19 +117,27 @@ namespace RenderGraph
 	 */
 	org::ResourceBindingToken DeclareRef(org::RenderPassBuilder& a_builder, const std::shared_ptr<org::Buffer>& a_buffer, RefAccess a_access, std::string_view a_what,
 		std::shared_ptr<const RefLatch> a_latch, DeclaredRefs& a_out);
-	/** @brief DeclareRef for a versioned or late-bound buffer: the check uses the version bound to the preparation. */
+	/** @brief DeclareRef for a versioned buffer: the check uses the version bound to the preparation. Not for a late-bound one. */
 	org::ResourceBindingToken DeclareRef(org::RenderPassBuilder& a_builder, org::VersionedBuffer& a_buffer, RefAccess a_access, std::string_view a_what,
 		std::shared_ptr<const RefLatch> a_latch, DeclaredRefs& a_out);
+	/**
+	 * @brief DeclareRef for a late-bound buffer (org::VersionedBuffer::CreateLateBound). Its declaration always resolves to its stand-in,
+	 * and its readers read the version the host published (PublishLate), so the check uses that current version at Prepare.
+	 */
+	org::ResourceBindingToken DeclareLateRef(org::RenderPassBuilder& a_builder, const std::shared_ptr<org::VersionedBuffer>& a_buffer, RefAccess a_access,
+		std::string_view a_what, std::shared_ptr<const RefLatch> a_latch, DeclaredRefs& a_out);
 
 	/**
 	 * @brief A pass's Prepare (the host's thread): the ref of the declared buffer's backing bound to this preparation (a versioned
-	 * buffer's version for this frame), at a_offset; null when it cannot be resolved. Not a raw ref: the pass declared the buffer.
+	 * buffer's version for this frame), at a_offset; null when it cannot be resolved. Not a raw ref: the pass declared the buffer. A
+	 * late-bound buffer's declaration resolves to its stand-in: its readers take the published version's ref instead.
 	 */
 	BufferRef DeclaredBufferRef(const org::FramePreparationContext& a_preparation, const org::ResourceBindingToken& a_binding, std::uint64_t a_offset = 0);
 
 	/**
 	 * @brief A pass's Prepare (the host's thread): logs "[ORG] declared view mismatch" once per entry whose latched ref (when the site set
-	 * one) is not a ref of the declared buffer's backing bound to this preparation. a_site names the pass.
+	 * one) is not a ref of the declared buffer's backing bound to this preparation (a late-bound buffer's current version). a_site names
+	 * the pass.
 	 */
 	void CheckDeclaredRefs(const DeclaredRefs& a_refs, const org::FramePreparationContext& a_preparation, std::string_view a_site);
 }
