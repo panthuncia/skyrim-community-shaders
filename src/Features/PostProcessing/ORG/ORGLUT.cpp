@@ -50,7 +50,7 @@ namespace ORGPostChain
 				} else {
 					if (!lut.texLUT2D || !lut.texLUT2D->resource)
 						return "the LUT is not loaded";
-					source = FrameAnchors::D3D11Texture("pp.lut", lut.texLUT2D->resource.get(), lut.texLUT2D->srv.get(), nullptr);
+					source = FrameAnchors::ImmutableTexture("pp.lut", lut.texLUT2D->resource.get(), lut.texLUT2D->srv.get());
 					if (!source)
 						return "the LUT texture cannot be imported";
 				}

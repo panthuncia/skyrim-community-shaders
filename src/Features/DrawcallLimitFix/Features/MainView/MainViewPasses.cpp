@@ -466,6 +466,10 @@ namespace DCLF::Draws
 				// Terrain Blending's terrain depth, drawn by the near terrain blocks' twin buckets.
 				if (resources->terrainDepth)
 					bindings.terrainDepth = a_builder.DepthReadWrite(resources->terrainDepth).View();
+				// The foliage record (Policy::RecordFoliagePixels): alpha-tested draws write each pixel's owner through the UAV index the
+				// frame record names (Resources::FoliageRecord::ownersIndex).
+				if (const auto& foliage = resources->foliage)
+					a_builder.UnorderedAccess(foliage->owners, std::span<const org::UavView>{});
 			} else {
 				// The state class sub-ranges' counts the colour calls read (the decal groups' are the count buffer's), and the main buckets'.
 				bindings.classCounts = a_builder.IndirectArguments(*resources->classCounts).Resource();

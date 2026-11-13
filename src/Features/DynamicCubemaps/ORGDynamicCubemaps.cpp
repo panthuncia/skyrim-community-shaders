@@ -420,7 +420,7 @@ namespace
 			winrt::com_ptr<ID3D11Resource> resource;
 			view->GetResource(resource.put());
 			if (auto texture = resource.try_as<ID3D11Texture2D>())
-				imports.defaultCubemap = FrameAnchors::D3D11Texture(kDefaultCubemapName, texture.get(), view, nullptr);
+				imports.defaultCubemap = FrameAnchors::ImmutableTexture(kDefaultCubemapName, texture.get(), view);
 		}
 		return imports;
 	}

@@ -28,6 +28,7 @@ ORGExponentialHeightFog& ORGExponentialHeightFog::Get()
 #	include "Features/LightLimitFix.h"
 #	include "Features/LightLimitFix/ORGLightCulling.h"
 #	include "Features/LightLimitFix/ORGLocalShadows.h"
+#	include "RenderGraph/Engine/Native/Native.h"
 #	include "RenderGraph/Engine/Tripwire/Tripwire.h"
 #	include "Features/Skylighting.h"
 #	include "Features/Skylighting/ORGSkylighting.h"
@@ -539,12 +540,16 @@ namespace
 
 	/**
 	 * @brief A producer's texture, as a_view (the view its feature binds) names it: by its published id while a_view is that id's
-	 * export, so the read is ordered after the producer's write; else the D3D11 texture behind a_view, imported under the id.
+	 * export, so the read is ordered after the producer's write; else the D3D11 texture behind a_view, imported under the id. Native
+	 * mode never imports it, since nothing orders the import after its producer: empty there instead. Guest keeps the import for
+	 * producers on D3D11.
 	 */
 	Source Published(std::string_view a_id, ID3D11ShaderResourceView* a_view)
 	{
 		if (PublishedResources::IsExportOf(a_view, a_id))
 			return { nullptr, std::string(a_id) };
+		if (RenderGraph::Engine::Native::Active())
+			return {};
 		return ImportView(a_id, a_view);
 	}
 
@@ -888,9 +893,14 @@ bool ORGExponentialHeightFog::Prepass()
 	if (ibl.loaded && ibl.settings.EnableIBL != 0 && !ibl.IsDisabledForCurrentScene() && ibl.EnvIBLSRV() && ibl.SkyIBLSRV()) {
 		shape.inputs[kEnvIBL] = Published(ORGIBL::kEnvId, ibl.EnvIBLSRV());
 		shape.inputs[kSkyIBL] = Published(ORGIBL::kSkyId, ibl.SkyIBLSRV());
-		if (!shape.inputs[kEnvIBL] || !shape.inputs[kSkyIBL])
+		if (shape.inputs[kEnvIBL] && shape.inputs[kSkyIBL])
+			inputs.ibl = true;
+		else if (RenderGraph::Engine::Native::Active()) {
+			// Native mode: IBL's SH is not published. The fog runs without IBL, which its constants turn off.
+			shape.inputs[kEnvIBL] = {};
+			shape.inputs[kSkyIBL] = {};
+		} else
 			return fallback("IBL's SH textures cannot be imported");
-		inputs.ibl = true;
 	}
 
 	auto& skylighting = globals::features::skylighting;
@@ -910,8 +920,9 @@ bool ORGExponentialHeightFog::Prepass()
 	auto& terrainShadows = globals::features::terrainShadows;
 	if (terrainShadows.loaded && !skyless) {
 		shape.inputs[kShadowHeights] = Published(ORGTerrainShadows::kShadowHeightId, terrainShadows.GetShadowHeightSRV());
+		// The shader samples the heights without a null check: a frame without them runs on D3D11, natively too.
 		if (!shape.inputs[kShadowHeights])
-			return fallback("Terrain Shadows' heights are missing");
+			return fallback("Terrain Shadows' heights are missing or not published");
 	}
 
 	auto& cloudShadows = globals::features::cloudShadows;
@@ -919,7 +930,7 @@ bool ORGExponentialHeightFog::Prepass()
 		// The occlusion cubemap Cloud Shadows binds at t25 for the frame, not whatever view the slot holds now.
 		shape.inputs[kCloudShadows] = Published(ORGCloudShadows::kOcclusionId, cloudShadows.OcclusionSRV());
 		if (!shape.inputs[kCloudShadows])
-			return fallback("Cloud Shadows' texture is missing");
+			return fallback("Cloud Shadows' texture is missing or not published");
 	}
 
 	auto& lightLimitFix = globals::features::lightLimitFix;

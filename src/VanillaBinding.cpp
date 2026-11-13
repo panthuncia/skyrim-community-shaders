@@ -6,6 +6,8 @@
 #include "State.h"
 #include "Util.h"
 
+#include <winrt/base.h>
+
 namespace VanillaBinding
 {
 	void BindSharedConstantBuffers()
@@ -17,10 +19,22 @@ namespace VanillaBinding
 		context->CSSetConstantBuffers(5, 2, buffers + 1);
 	}
 
+	namespace
+	{
+		// Held like the context's slot holds it, so the view lives while a graph pass may still look it up.
+		winrt::com_ptr<ID3D11ShaderResourceView> lastSceneDepth;
+	}
+
 	void BindSceneDepth()
 	{
 		auto* srv = Util::GetCurrentSceneDepthSRV(true);
+		lastSceneDepth.copy_from(srv);
 		globals::d3d::context->PSSetShaderResources(17, 1, &srv);
+	}
+
+	ID3D11ShaderResourceView* LastSceneDepth()
+	{
+		return lastSceneDepth.get();
 	}
 
 	void BindSkyResources(const RE::BSRenderPass* a_pass)

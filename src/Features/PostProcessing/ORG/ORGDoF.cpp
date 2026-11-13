@@ -96,8 +96,8 @@ namespace ORGPostChain
 				shape.reset();
 				if (frame.constants.BokehMode == 1) {
 					const auto& texture = dof.owner->bokehResources.texBokehShapes[frame.customShapeIndex];
-					shape = texture ? FrameAnchors::D3D11Texture(std::format("PostProcessing::BokehShape{}", frame.customShapeIndex),
-										  texture->resource.get(), texture->srv.get(), nullptr) :
+					shape = texture ? FrameAnchors::ImmutableTexture(std::format("PostProcessing::BokehShape{}", frame.customShapeIndex),
+										  texture->resource.get(), texture->srv.get()) :
 					                  nullptr;
 					if (!shape)
 						return "its custom aperture cannot be imported";

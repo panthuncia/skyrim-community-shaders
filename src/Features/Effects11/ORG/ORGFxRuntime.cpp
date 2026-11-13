@@ -742,7 +742,7 @@ struct ORGFxRuntime::Impl
 			winrt::com_ptr<ID3D11Texture2D> texture;
 			if (!resource || !resource.try_as(texture) || !texture)
 				return fail(fmt::format("texture file '{}' is not a 2D texture", file));
-			e.files[i] = FrameAnchors::D3D11Texture(fmt::format("effects11.{}.{}", e.Name(), slot.name), texture.get(), cached->second.get(), nullptr);
+			e.files[i] = FrameAnchors::ImmutableTexture(fmt::format("effects11.{}.{}", e.Name(), slot.name), texture.get(), cached->second.get());
 			if (!e.files[i])
 				return fail(fmt::format("texture file '{}' could not be imported", file));
 		}

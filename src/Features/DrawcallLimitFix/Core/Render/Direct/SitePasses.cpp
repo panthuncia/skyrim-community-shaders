@@ -93,6 +93,28 @@ namespace DCLF::Direct
 			a_builder.ShaderResource(a_main.frameConstants, noViews);
 		}
 
+		/**
+		 * @brief What a main site's draws read and write by buffer view ref, declared in every graph: the main frame constants (the frame
+		 * record's slots, after the latched copies), and with the foliage record (Policy::RecordFoliagePixels) the depth draws' owners
+		 * (a_depth) or the colour draws' ids and colours. An external epoch's full barriers cover them too; the declarations order them.
+		 */
+		void DeclareFrameReads(org::PassBuilder& a_builder, const Draws::Resources& a_main, bool a_depth)
+		{
+			a_builder.ShaderResource(a_main.frameConstants, std::span<const org::SrvView>{});
+			const auto& foliage = a_main.foliage;
+			if (!foliage)
+				return;
+			const std::span<const org::UavView> noUavs{};
+			if (a_depth) {
+				a_builder.UnorderedAccess(foliage->owners, noUavs);
+				return;
+			}
+			for (std::uint32_t h = 0; h < 2; ++h) {
+				a_builder.UnorderedAccess(foliage->ids[h], noUavs);
+				a_builder.UnorderedAccess(foliage->colours[h], noUavs);
+			}
+		}
+
 		SitePass::Textures MainColours(const Draws::Resources& a_resources)
 		{
 			return { a_resources.native.begin(), a_resources.native.begin() + a_resources.targetCount };
@@ -103,14 +125,16 @@ namespace DCLF::Direct
 		std::shared_ptr<org::RenderPass> DepthSite(const Api::PassContext& a_context)
 		{
 			const auto& main = *a_context.Main();
-			return MakeSitePass(Site::Depth, {}, { main.nativeDepth });
+			return MakeSitePass(Site::Depth, {}, { main.nativeDepth },
+				[resources = a_context.Main()](org::PassBuilder& a_builder) { DeclareFrameReads(a_builder, *resources, true); });
 		}
 
 		// main.colour: main colour, the decals, the families' colour, the second pass.
 		std::shared_ptr<org::RenderPass> ColourSite(const Api::PassContext& a_context)
 		{
 			const auto& main = *a_context.Main();
-			return MakeSitePass(Site::Colour, MainColours(main), { main.nativeDepth });
+			return MakeSitePass(Site::Colour, MainColours(main), { main.nativeDepth },
+				[resources = a_context.Main()](org::PassBuilder& a_builder) { DeclareFrameReads(a_builder, *resources, false); });
 		}
 
 		// forward: the forward range's draws and the refraction normals. In the GPU-driven graph too, under GraphConditions::forwardDirect.
@@ -125,6 +149,10 @@ namespace DCLF::Direct
 			SitePass::Reads reads;
 			if (!conditions.cpuPipeline)
 				reads = [resources = a_context.Main()](org::PassBuilder& a_builder) { DeclareMainReads(a_builder, *resources); };
+			else
+				reads = [resources = a_context.Main()](org::PassBuilder& a_builder) {
+					a_builder.ShaderResource(resources->frameConstants, std::span<const org::SrvView>{});
+				};
 			return MakeSitePass(Site::Forward, std::move(colours), { main.nativeDepth }, std::move(reads));
 		}
 
@@ -147,6 +175,10 @@ namespace DCLF::Direct
 				reads = [resources = a_context.View()](org::PassBuilder& a_builder) {
 					a_builder.ShaderResource(resources->blocks, std::span<const org::SrvView>{});
 					DeclareMainReads(a_builder, *resources->main);
+				};
+			else
+				reads = [resources = a_context.View()](org::PassBuilder& a_builder) {
+					a_builder.ShaderResource(resources->main->frameConstants, std::span<const org::SrvView>{});
 				};
 			return MakeSitePass(Site::FirstPerson, MainColours(*view.main), { view.target }, std::move(reads));
 		}
