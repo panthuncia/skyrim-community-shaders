@@ -86,9 +86,20 @@ public:
 	/**
 	 * @brief Render thread, at Skylighting's Prepass, on a frame that updates the probes: imports this frame's inputs and opens the
 	 * update for the Prepass anchor's run, with the frame's directional shadow data. Without an input the volumes hold this frame.
+	 * When Drawcall Limit Fix drew the occlusion map (NoteOcclusionDrawn), the same run then clears the map (a twin's only) after the
+	 * update read it, for DCLF's next draw.
 	 * @return Whether the ORG path is active; false: the D3D11 dispatch runs.
 	 */
 	bool Update(const Skylighting& a_feature);
+
+	/** @brief Render thread: Drawcall Limit Fix's shadow epoch draws the occlusion map this frame (RenderSkyOcclusionMap). */
+	void NoteOcclusionDrawn();
+
+	/**
+	 * @brief Render thread, before the map is drawn: whether the graph cleared it since its last draw (Update's clear), so no D3D11
+	 * clear is needed. Taken: false until the next clear. Call it for every draw of the map, so an engine draw also uses it up.
+	 */
+	bool TakeOcclusionCleared();
 
 	/** @brief Whether the probe update runs on the render graph: set up, not failed, and the runtime still up. */
 	bool IsActive() const;
