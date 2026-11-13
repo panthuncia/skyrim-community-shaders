@@ -218,8 +218,9 @@ namespace RenderGraph
 			return;
 		++images.found;
 		if (images.logged++ < 32)
-			logger::warn("[ORG] duplicate image: '{}' and '{}' are two live graph resources of image 0x{:x}; each tracks its layout, and their moves "
-						 "are not ordered with each other ({} found so far)",
+			logger::warn(
+				"[ORG] duplicate image: '{}' and '{}' are two live graph resources of image 0x{:x}; each tracks its layout, and their moves "
+				"are not ordered with each other ({} found so far)",
 				a_name, other, a_image, images.found);
 	}
 

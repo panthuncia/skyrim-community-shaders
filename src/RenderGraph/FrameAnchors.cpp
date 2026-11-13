@@ -202,12 +202,12 @@ namespace FrameAnchors
 		struct EngineImport
 		{
 			winrt::com_ptr<ID3D11Texture2D> texture;  // the current version's D3D11 texture
-			std::shared_ptr<org::VersionedTexture> slot;  // an id import's
+			std::shared_ptr<org::VersionedTexture> slot;     // an id import's
 			std::weak_ptr<org::VersionedTexture> looseSlot;  // a loose one's
-			std::string id;  // the id (or the loose holder's name) it was made under, for the logs
-			std::uint64_t image = 0;  // the current version's VkImage (ID3D12Resource on D3D12)
-			DxvkOrgInteropImageInfo info{};  // the current version's image, to import it again with more views
-			org::TextureDescription views;  // the views the current version has: what a new importer's are compared with
+			std::string id;                                  // the id (or the loose holder's name) it was made under, for the logs
+			std::uint64_t image = 0;                         // the current version's VkImage (ID3D12Resource on D3D12)
+			DxvkOrgInteropImageInfo info{};                  // the current version's image, to import it again with more views
+			org::TextureDescription views;                   // the views the current version has: what a new importer's are compared with
 
 			std::shared_ptr<org::VersionedTexture> Slot() const { return slot ? slot : looseSlot.lock(); }
 
@@ -274,7 +274,7 @@ namespace FrameAnchors
 			org::GraphHost* host = nullptr;
 			std::vector<Client> clients;
 			std::map<std::string, std::shared_ptr<EngineImport>, std::less<>> imports;  // by graph id; the ids of one image share one
-			std::vector<std::weak_ptr<EngineImport>> loose;  // ShareImage's slots no id names
+			std::vector<std::weak_ptr<EngineImport>> loose;                             // ShareImage's slots no id names
 			std::uint64_t serial = 0;                                  // bumped by every Publish
 			std::uint64_t resizeGeneration = 0;                        // GraphResources' last seen
 			std::function<void()> lateHook;
