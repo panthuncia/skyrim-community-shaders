@@ -362,3 +362,45 @@ thread.
   under 1 ms.
 - **A new graph's first prepare now includes alias placement and one validated build**, on the host thread. A ticket asked for
   right after an attach may wait for it; watch `WaitTicket`.
+
+## Phase 2 item 2 lane: versioned twins, part A (`org-native/p2-twins-a`)
+
+Owners: Dynamic Cubemaps, Exponential Height Fog, Effects11 (sun rays and the FX runtime), Light Limit Fix (culling, local
+shadows), Post Processing, Upscaling and HDR Display.
+
+**Converted: Exponential Height Fog.**
+- Its volumes, conservative depths, histories and integrated volumes are versioned twins. They are kept across builds, and
+  every pass declares their slots.
+- A new grid extent (a resolution change, the dynamic resolution, a grid setting) resizes them in place as new versions. No
+  client is registered again and nothing is built. Log: `[ORG] Exponential Height Fog: the volumes resized as new versions`.
+- The commit's group counts follow the extent now. The history copies record no extent: zero extents copy the whole version.
+- The integrated volumes are published once, so DCLF's reads of their ids never see a replaced resource.
+- A change of inputs, history or group reduction still registers new passes, over the same textures (the Prepass anchor
+  only, through the build manager). On a real resolution change the scene depth's import changes too, so the Prepass anchor
+  is built again until the imports lane versions engine depths. Every other epoch is left alone.
+- **Cost:** the volumes written and read within a frame (VBufferA, LightScattering, ConservativeDepth) are no longer
+  aliased. A version's backing is made with it, not placed at a build.
+
+**Not converted, and why:**
+- **Dynamic Cubemaps:** every twin has the engine cubemap's fixed size and is never remade. Its rebuilds come from imports and
+  shader reloads.
+- **Effects11 sun rays:** its textures are transients made inside one graph, and new ones come with a new client, which never
+  bumps the resize generation. The raster passes bake the dynamic-resolution viewports, and the shape holds the kMAIN and
+  depth imports, so a size change stays a client rebuild of PostComposite.
+- **Effects11 FX runtime:** the plan is per shape. It bakes viewports into its draws and holds kMAIN, depth and output
+  imports, so it stays a client rebuild of Tonemap.
+- **Light Limit Fix culling:** buffers only. Buffers wait for `VersionedBuffer` (Phase 2 item 4).
+- **Light Limit Fix local shadows:** remade only on a settings change, which usually changes the slot count. That is a new
+  shape class, and a new buffer and latch size.
+- **Post Processing:** the chain bakes viewports (FullViewport, DynamicViewport, mips) into its draws and holds kMAIN and
+  kMAIN_COPY imports. Its images are transients per build. Its effect-owned twins (DoF focus, LUTs, local exposure, motion
+  blur, glare, lens flare) are made new, not resized, and registered at each chain build, so they never bump the resize
+  generation. Versioning them would save nothing while the chain rebuilds. The chain stays a client rebuild of Tonemap.
+- **Upscaling:** Upscaling.cpp destroys and makes the upscaled and hudless textures again. The hudless copy draws into its
+  twin, and `AnchorPasses::Draw::target` has no slot form. Both draws bake viewports, and the client holds kMAIN's import.
+- **HDR Display:** HDRDisplay.cpp destroys and makes its textures again. Bink, Scaleform and Upscaling declare the backings
+  (`GraphOf`), and the client bakes group counts and imports. A format change (an HDR toggle) is a new shape class anyway.
+
+**Follow-ups that would let more of these version:** a slot form of `AnchorPasses::Draw::target`; viewports and group counts
+from the latch for fullscreen draws; versioned engine targets (the imports lane). `p2-twins-b` added slot forms for
+AnchorPasses Copy and Clear (`CopyOf`, `ClearOf`) and `GraphPasses::MakeUavClear(twin)`.
