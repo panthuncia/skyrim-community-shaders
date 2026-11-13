@@ -13,8 +13,9 @@
 #	include "Utils/D3D.h"
 
 #	include <OpenRenderGraph/GraphHost.h>
+#	include <Render/PassBuilders.h>
 #	include <Render/RenderGraph/RenderGraph.h>
-#	include <Render/Runtime/IUploadService.h>
+#	include <RenderPasses/Base/TypedRenderGraphPass.h>
 #	include <Resources/Buffers/Buffer.h>
 #	include <Resources/ExternalTextureResource.h>
 #	include <Resources/PixelBuffer.h>
@@ -249,34 +250,135 @@ namespace GraphResources
 		{
 			return a_desc.MipLevels ? a_desc.MipLevels : static_cast<UINT>(std::bit_width((std::max)({ a_desc.Width, a_desc.Height, 1u })));
 		}
+	}
 
-		/**
-		 * @brief Hands a texture's subresources to the graph's upload service (GraphHost::Uploads). Slice-major entries, as
-		 * rhi::helpers::PlanTextureUploadSubresources reads them. False, logged, without a texture or a graph.
-		 */
-		bool PostUpload(const std::shared_ptr<org::Resource>& a_texture, const std::string& a_name, DXGI_FORMAT a_format, UINT a_width,
-			UINT a_height, UINT a_depth, UINT a_mips, UINT a_arraySize, std::span<const SubresourceData> a_subresources)
+	struct StagedUpload
+	{
+		struct Copy
 		{
-			auto* host = RenderGraphRuntime::Get().Host();
-			auto* uploads = host ? host->Uploads() : nullptr;
-			if (!a_texture || !uploads || a_subresources.empty()) {
-				logger::warn("[ORG] {}: not uploaded: {}", a_name, !a_texture ? "the texture was not created" : "the render graph has no upload service");
-				return false;
+			std::uint32_t mip = 0, slice = 0, z = 0;
+			rhi::CopyableFootprint footprint{};
+		};
+		std::shared_ptr<org::Resource> target;
+		std::shared_ptr<org::Resource> staging;  // an upload-heap buffer, written once before any copy
+		std::vector<Copy> copies;
+	};
+
+	namespace
+	{
+		/**
+		 * @brief A texture's subresources in a new host-visible buffer, at the copy's pitches. Slice-major entries, as
+		 * rhi::helpers::PlanTextureUploadSubresources reads them. Null, logged, without a texture or when the buffer cannot be made.
+		 */
+		std::shared_ptr<const StagedUpload> StageTexture(const std::shared_ptr<org::Resource>& a_texture, const std::string& a_name, DXGI_FORMAT a_format,
+			UINT a_width, UINT a_height, UINT a_depth, UINT a_mips, UINT a_arraySize, std::span<const SubresourceData> a_subresources)
+		{
+			if (!a_texture || a_subresources.empty()) {
+				logger::warn("[ORG] {}: not staged: {}", a_name, !a_texture ? "the texture was not created" : "no contents");
+				return nullptr;
 			}
-			auto subresources = std::make_shared<std::vector<rhi::helpers::SubresourceData>>();
-			subresources->reserve(a_subresources.size());
+			std::vector<rhi::helpers::SubresourceData> sources;
+			sources.reserve(a_subresources.size());
 			for (const auto& subresource : a_subresources)
-				subresources->push_back({ subresource.data, subresource.rowPitch, subresource.slicePitch });
-			try {
-				// Staged before the call returns, on the owner thread or into its mailbox from any other.
-				uploads->PostTextureSubresources(org::runtime::UploadTarget::FromShared(a_texture), rhi::helpers::ToRHI(a_format), a_width, a_height,
-					a_depth, a_mips, a_arraySize, std::move(subresources), nullptr, __FILE__, __LINE__);
-			} catch (const std::exception& e) {
-				logger::error("[ORG] {}: not uploaded: {}", a_name, e.what());
-				return false;
+				sources.push_back({ subresource.data, subresource.rowPitch, subresource.slicePitch });
+			const rhi::Span<const rhi::helpers::SubresourceData> span{ sources.data(), static_cast<std::uint32_t>(sources.size()) };
+			const auto plan = rhi::helpers::PlanTextureUploadSubresources(rhi::helpers::ToRHI(a_format), a_width, a_height, a_depth, a_mips, a_arraySize, span);
+			if (!plan.totalSize || plan.footprints.empty()) {
+				logger::error("[ORG] {}: not staged: no copy layout for format {}", a_name, static_cast<int>(a_format));
+				return nullptr;
 			}
-			return true;
+			try {
+				auto buffer = org::Buffer::CreateShared(rhi::HeapType::Upload, plan.totalSize);
+				buffer->SetName(a_name + " Upload");
+				auto resource = buffer->GetAPIResource();
+				void* mapped = nullptr;
+				resource.Map(&mapped);
+				if (!mapped) {
+					logger::error("[ORG] {}: not staged: its upload buffer could not be mapped", a_name);
+					return nullptr;
+				}
+				rhi::helpers::WriteTextureUploadSubresources(plan, span, mapped, 0);
+				resource.Unmap(0, plan.totalSize);
+				auto staged = std::make_shared<StagedUpload>();
+				staged->target = a_texture;
+				staged->staging = std::move(buffer);
+				for (const auto& fp : plan.footprints)
+					staged->copies.push_back({ fp.mip, fp.arraySlice, fp.zSlice, { fp.offset, fp.rowPitch, fp.width, fp.height, fp.depth } });
+				return staged;
+			} catch (const std::exception& e) {
+				logger::error("[ORG] {}: not staged: {}", a_name, e.what());
+				return nullptr;
+			}
 		}
+
+		using StagedUploads = std::vector<std::shared_ptr<const StagedUpload>>;
+
+		struct UploadBindings
+		{
+			std::vector<org::ResourceBindingToken> sources, targets;  // by upload
+		};
+
+		struct UploadFrame
+		{
+			std::shared_ptr<const StagedUploads> uploads;
+		};
+
+		/** @brief MakeUploadPass's pass: the staged copies, declared on both ends. */
+		class UploadCopyPass final : public org::TypedRenderGraphPass<UploadCopyPass, UploadFrame, UploadBindings>
+		{
+		public:
+			explicit UploadCopyPass(std::shared_ptr<const StagedUploads> a_uploads) :
+				uploads(std::move(a_uploads)) {}
+
+			UploadBindings Declare(org::PassBuilder& a_builder)
+			{
+				a_builder.PreferQueue(org::QueueKind::Graphics);
+				UploadBindings bindings;
+				for (const auto& upload : *uploads) {
+					bindings.sources.push_back(a_builder.CopySource(upload->staging));
+					bindings.targets.push_back(a_builder.CopyDestination(upload->target));
+				}
+				return bindings;
+			}
+
+			// Everything it records is fixed with its uploads.
+			void Revision(std::vector<std::uint64_t>& a_out) const { a_out.push_back(reinterpret_cast<std::uintptr_t>(uploads.get())); }
+
+			UploadFrame Prepare(const UploadBindings&, const org::PassPrepareContext&) const { return { uploads }; }
+
+			static void Record(const UploadBindings& a_bindings, const UploadFrame& a_frame, org::PassRecordContext& a_recording)
+			{
+				if (!a_frame.uploads)
+					return;
+				auto& commands = a_recording.Commands();
+				for (std::size_t i = 0; i < a_frame.uploads->size() && i < a_bindings.targets.size(); ++i) {
+					const auto& upload = *(*a_frame.uploads)[i];
+					const auto texture = a_recording.Resolve(a_bindings.targets[i]).GetHandle();
+					const auto staging = a_recording.Resolve(a_bindings.sources[i]).GetHandle();
+					for (const auto& copy : upload.copies) {
+						rhi::BufferTextureCopyFootprint footprint{};
+						footprint.texture = texture;
+						footprint.buffer = staging;
+						footprint.mip = copy.mip;
+						footprint.arraySlice = copy.slice;
+						footprint.z = copy.z;
+						footprint.footprint = copy.footprint;
+						commands.CopyBufferToTexture(footprint);
+					}
+				}
+			}
+
+		private:
+			std::shared_ptr<const StagedUploads> uploads;
+		};
+	}
+
+	std::shared_ptr<org::RenderPass> MakeUploadPass(std::vector<std::shared_ptr<const StagedUpload>> a_uploads)
+	{
+		std::erase(a_uploads, nullptr);
+		if (a_uploads.empty())
+			return nullptr;
+		return std::make_shared<UploadCopyPass>(std::make_shared<const StagedUploads>(std::move(a_uploads)));
 	}
 
 	ExportedTexture ExportTexture(const ExportDesc& a_desc, const std::string& a_name)
@@ -464,14 +566,14 @@ namespace GraphResources
 		NameViews();
 	}
 
-	bool Texture2D::Upload(std::span<const SubresourceData> a_subresources, UINT a_width, UINT a_height) const
+	std::shared_ptr<const StagedUpload> Texture2D::Stage(std::span<const SubresourceData> a_subresources, UINT a_width, UINT a_height) const
 	{
 		const UINT width = a_width ? (std::min)(a_width, desc.Width) : desc.Width;
 		const UINT height = a_height ? (std::min)(a_height, desc.Height) : desc.Height;
-		return PostUpload(graph, name, desc.Format, width, height, 1, MipsOf(desc), desc.ArraySize, a_subresources);
+		return StageTexture(graph, name, desc.Format, width, height, 1, MipsOf(desc), desc.ArraySize, a_subresources);
 	}
 
-	bool Texture2D::UploadZeros() const
+	std::shared_ptr<const StagedUpload> Texture2D::StageZeros() const
 	{
 		const auto format = rhi::helpers::ToRHI(desc.Format);
 		const bool blocks = rhi::helpers::IsBlockCompressed(format);
@@ -484,7 +586,7 @@ namespace GraphResources
 		for (UINT slice = 0; slice < desc.ArraySize; ++slice)
 			for (UINT mip = 0; mip < MipsOf(desc); ++mip)
 				subresources.push_back({ zeros.data(), rowBytes(mip), rowBytes(mip) * rows(mip) });
-		return Upload(subresources);
+		return Stage(subresources);
 	}
 
 	bool Texture2D::Resize(UINT a_width, UINT a_height)
@@ -524,9 +626,9 @@ namespace GraphResources
 		NameViews();
 	}
 
-	bool Texture3D::Upload(std::span<const SubresourceData> a_depthSlices) const
+	std::shared_ptr<const StagedUpload> Texture3D::Stage(std::span<const SubresourceData> a_depthSlices) const
 	{
-		return PostUpload(graph, name, desc.Format, desc.Width, desc.Height, desc.Depth, 1, 1, a_depthSlices);
+		return StageTexture(graph, name, desc.Format, desc.Width, desc.Height, desc.Depth, 1, 1, a_depthSlices);
 	}
 
 	bool Texture3D::Resize(UINT a_width, UINT a_height, UINT a_depth)
@@ -650,13 +752,16 @@ namespace GraphResources
 	Texture2D::Texture2D(const D3D11_TEXTURE2D_DESC& a_desc, std::string a_name, Options a_options) :
 		Resource(std::move(a_name), a_options), desc(a_desc) {}
 	void Texture2D::Create() {}
-	bool Texture2D::Upload(std::span<const SubresourceData>, UINT, UINT) const { return false; }
-	bool Texture2D::UploadZeros() const { return false; }
+	struct StagedUpload
+	{};
+	std::shared_ptr<org::RenderPass> MakeUploadPass(std::vector<std::shared_ptr<const StagedUpload>>) { return nullptr; }
+	std::shared_ptr<const StagedUpload> Texture2D::Stage(std::span<const SubresourceData>, UINT, UINT) const { return nullptr; }
+	std::shared_ptr<const StagedUpload> Texture2D::StageZeros() const { return nullptr; }
 	bool Texture2D::Resize(UINT, UINT) { return false; }
 	Texture3D::Texture3D(const D3D11_TEXTURE3D_DESC& a_desc, std::string a_name, Options a_options) :
 		Resource(std::move(a_name), a_options), desc(a_desc) {}
 	void Texture3D::Create() {}
-	bool Texture3D::Upload(std::span<const SubresourceData>) const { return false; }
+	std::shared_ptr<const StagedUpload> Texture3D::Stage(std::span<const SubresourceData>) const { return nullptr; }
 	bool Texture3D::Resize(UINT, UINT, UINT) { return false; }
 	StructuredBuffer::StructuredBuffer(const D3D11_BUFFER_DESC&, UINT a_count, std::string a_name, Options a_options) :
 		Resource(std::move(a_name), a_options), count(a_count) {}

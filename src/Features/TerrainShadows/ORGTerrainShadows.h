@@ -25,9 +25,9 @@ namespace DirectX
  * - Both textures are as large as the largest installed heightmap. A heightmap fills their top-left corner; the readers' UV scale
  *   and the update's PxSize say how much of them it covers.
  * - The heightmap: a persistent R16_UNORM graph texture, owned by the graph. Nothing outside the graph reads it, so it has no D3D11
- *   view. A new heightmap is converted to R16_UNORM and handed to the graph's upload service (GraphResources::Texture2D::Upload):
- *   its upload pass fills the corner at the graph's next execution, declared as a copy destination, so it is ordered before the
- *   update that reads it.
+ *   view. A new heightmap is converted to R16_UNORM and staged (GraphResources::Texture2D::Stage); the client's one-shot upload
+ *   pass, armed again for it, fills the corner, declaring the staging buffer and the texture, so it is ordered before the update
+ *   that reads it.
  * - The shadow height map: a persistent graph texture written by the pass. It exports a D3D11 SRV, which the feature binds at t60
  *   for the engine's pixel shaders until those draws are ported. It is published once (PublishedResources): Drawcall Limit Fix's
  *   colour passes read it through the graph.
@@ -66,8 +66,8 @@ public:
 	bool IsActive() const;
 
 	/**
-	 * @brief Replaces the heightmap: converts it to R16_UNORM and queues its bytes on the graph's upload service, which writes them
-	 * into the textures' corner. Registers nothing and publishes nothing.
+	 * @brief Replaces the heightmap: converts it to R16_UNORM and stages its bytes for the client's one-shot upload pass, which writes
+	 * them into the textures' corner. Registers nothing and publishes nothing.
 	 * @param a_image Mip 0 of the DDS (BC4 or any other typed format), at most the size given to Setup. Its bytes are copied before
 	 * this returns.
 	 * @return False, logged, when anything fails; the ORG path is then off for good.

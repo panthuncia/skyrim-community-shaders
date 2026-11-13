@@ -1815,8 +1815,10 @@ is not declarable at the build (`PublishedResources::IsDeclarable`), so the call
 - **Need:** write a rectangle of a graph texture (ImGui's atlas updates) through the graph's upload service, and finish a one-off
   upload in the shader-read state. `IUploadService::UploadTextureSubresources` writes whole subresources from (0, 0) only, though
   `UploadInstance::TextureUpdate` carries an x, y offset; and the upload pass leaves its destinations in the copy state.
-- **Who:** Phase 1's outside-writes lane (native frame graph). `GraphResources::Texture2D::Upload` takes a mip 0 extent for
-  top-left writes (Terrain Shadows' heightmap corner). ImGui keeps a declared upload pass of its own, copying rectangles from its
+- **Who:** Phase 1's outside-writes lane (native frame graph). Async epochs (native mode) record only pointer-targeted buffer
+  copies from the upload service ("Async epochs cannot record these uploads"), so texture contents go through
+  `GraphResources::Texture2D::Stage` / `MakeUploadPass` instead: an upload-heap staging buffer written once, copied by a pass that
+  declares it as a copy source and the texture as a copy destination (with a mip 0 extent for Terrain Shadows' corner). ImGui keeps a declared upload pass of its own, copying rectangles from its
   staging block, and makes MakeTexture's icons exempt (`ExternalImmutableShaderResource`) after a draw pass declared them a shader
   resource once.
 - **Where it fits:** an offset (and extent) in `UploadTextureSubresources`, and a "finish in state" flag (shader-read) that the upload
