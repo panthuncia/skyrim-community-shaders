@@ -10,6 +10,7 @@
 
 #include <Resources/ExternalTextureResource.h>
 #include <Resources/TextureDescription.h>
+#include <Resources/VersionedTexture.h>
 
 #include <algorithm>
 #include <atomic>
@@ -240,6 +241,103 @@ namespace RenderGraph
 		for (auto& entry : entries->second)
 			if (entry.key == a_resource)
 				entry.retired = true;
+	}
+
+	namespace
+	{
+		/** @brief A registered made image (RegisterMadeImage). Held weakly: its maker decides its life. */
+		struct MadeEntry
+		{
+			std::weak_ptr<org::Resource> resource;
+			const org::Resource* key = nullptr;
+			std::weak_ptr<org::VersionedTexture> slot;
+			std::shared_ptr<const org::TextureDescription> views;
+			std::string name;
+		};
+		struct MadeImages
+		{
+			std::mutex mutex;
+			std::unordered_map<std::uint64_t, MadeEntry> byImage;
+			std::unordered_map<const org::Resource*, std::uint64_t> imageOf;
+			std::size_t pruneAt = 256;
+		};
+		MadeImages& Made()
+		{
+			static MadeImages made;
+			return made;
+		}
+	}
+
+	void RegisterMadeImage(std::uint64_t a_image, const std::shared_ptr<org::Resource>& a_resource, const org::TextureDescription& a_views,
+		std::string_view a_name)
+	{
+		if (!a_image || !a_resource)
+			return;
+		auto& made = Made();
+		const std::lock_guard lock(made.mutex);
+		if (made.byImage.size() >= made.pruneAt) {
+			std::erase_if(made.byImage, [&](const auto& a_entry) {
+				if (!a_entry.second.resource.expired())
+					return false;
+				made.imageOf.erase(a_entry.second.key);
+				return true;
+			});
+			made.pruneAt = (std::max<std::size_t>)(256, 2 * made.byImage.size());
+		}
+		// A new image under a handle an old entry still names: the old one's image is gone, so its entry goes too.
+		if (const auto old = made.byImage.find(a_image); old != made.byImage.end())
+			made.imageOf.erase(old->second.key);
+		made.byImage[a_image] = { a_resource, a_resource.get(), {}, std::make_shared<const org::TextureDescription>(a_views), std::string(a_name) };
+		made.imageOf[a_resource.get()] = a_image;
+	}
+
+	void SetMadeImageSlot(const org::Resource* a_resource, const std::shared_ptr<org::VersionedTexture>& a_slot)
+	{
+		if (!a_resource)
+			return;
+		auto& made = Made();
+		const std::lock_guard lock(made.mutex);
+		const auto image = made.imageOf.find(a_resource);
+		if (image == made.imageOf.end())
+			return;
+		if (const auto entry = made.byImage.find(image->second); entry != made.byImage.end() && entry->second.key == a_resource)
+			entry->second.slot = a_slot;
+	}
+
+	void ForgetMadeImage(const org::Resource* a_resource)
+	{
+		if (!a_resource)
+			return;
+		auto& made = Made();
+		const std::lock_guard lock(made.mutex);
+		const auto image = made.imageOf.find(a_resource);
+		if (image == made.imageOf.end())
+			return;
+		if (const auto entry = made.byImage.find(image->second); entry != made.byImage.end() && entry->second.key == a_resource)
+			made.byImage.erase(entry);
+		made.imageOf.erase(image);
+	}
+
+	MadeImage MadeImageOf(std::uint64_t a_image)
+	{
+		if (!a_image)
+			return {};
+		auto& made = Made();
+		const std::lock_guard lock(made.mutex);
+		const auto entry = made.byImage.find(a_image);
+		if (entry == made.byImage.end())
+			return {};
+		MadeImage result;
+		result.resource = entry->second.resource.lock();
+		if (!result.resource)
+			return {};
+		result.slot = entry->second.slot.lock();
+		// A slot that moved on to another version no longer stands for this resource.
+		if (result.slot && result.slot->CurrentResource() != result.resource)
+			result.slot.reset();
+		result.views = entry->second.views;
+		result.name = entry->second.name;
+		return result;
 	}
 
 	namespace

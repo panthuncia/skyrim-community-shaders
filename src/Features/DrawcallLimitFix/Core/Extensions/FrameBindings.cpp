@@ -4,10 +4,12 @@
 #include "Features/DrawcallLimitFix/Core/Render/Internal.h"
 #include "Features/DrawcallLimitFix/Core/Extensions/FrameBindings.h"
 #include "Features/DrawcallLimitFix/Core/Extensions/Registry.h"
+#include "RenderGraph/DxvkImageImport.h"
 #include "RenderGraph/Engine/Targets/EngineTargets.h"
 #include "RenderGraph/Engine/Tripwire/Tripwire.h"
 #include "RenderGraph/FrameAnchors.h"
 #include "RenderGraph/PublishedResources.h"
+#include "RenderGraph/RenderGraphRuntime.h"
 #include "RenderGraph/UndeclaredAccess.h"
 
 #include <Render/PassBuilders.h>
@@ -324,6 +326,14 @@ namespace DCLF::Extensions
 		if (served == view)
 			return false;
 		served = view;
+		// A twin's export swapped into the field (Skylighting's own map while it draws) is not the engine's map. Its import is the
+		// twin, which is published under its own id; under this one it would replace the engine map's slot whenever the two take turns.
+		winrt::com_ptr<ID3D11Resource> resource;
+		view->GetResource(resource.put());
+		DxvkOrgInteropResourceInfo info{};
+		if (resource && !RenderGraph::Engine::Targets::Find(resource.get()) && RenderGraphRuntime::Get().DescribeResource(resource.get(), info) &&
+			info.kind == DXVK_ORG_INTEROP_RESOURCE_IMAGE && RenderGraph::MadeImageOf(reinterpret_cast<std::uint64_t>(info.image.image)).resource)
+			return false;
 		const auto import = FrameAnchors::EngineDepth(static_cast<std::uint32_t>(target));
 		if (!import)
 			return false;

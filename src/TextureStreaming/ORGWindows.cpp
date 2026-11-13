@@ -139,6 +139,8 @@ namespace TextureStreaming::ORG
 		// Any thread: the render thread releases it (FrameTick).
 		~Window()
 		{
+			// Its image goes with the parts below: no import may find the texture after this.
+			RenderGraph::ForgetMadeImage(texture.get());
 			auto& state = S();
 			std::scoped_lock lock(state.mutex);
 			state.retired.push_back({ std::move(view), std::move(d3d11), std::move(texture), std::move(image) });
@@ -225,9 +227,11 @@ namespace TextureStreaming::ORG
 			for (UINT mip = 0; mip < a_desc.MipLevels; ++mip)
 				desc.imageDimensions.push_back({ (std::max)(a_desc.Width >> mip, 1u), (std::max)(a_desc.Height >> mip, 1u), 0, 0 });
 			// In the layout DXVK rests it in. No pass of the graph names it, so the graph never moves it out of there.
-			window->texture = RenderGraph::ImportDxvkTexture(host->Device(), info.image, std::move(desc), name.c_str());
+			window->texture = RenderGraph::ImportDxvkTexture(host->Device(), info.image, desc, name.c_str());
 			if (!window->texture)
 				return false;
+			// The image's one graph resource: an import of the window's texture returns this one.
+			RenderGraph::RegisterMadeImage(reinterpret_cast<std::uint64_t>(info.image.image), window->texture, desc, name);
 			window->index = window->texture->GetSRVInfo(0).slot.index;
 			a_item.window = std::move(window);
 			return true;

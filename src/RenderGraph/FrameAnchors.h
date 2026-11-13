@@ -421,8 +421,13 @@ namespace FrameAnchors
 	 *
 	 * One image, one graph resource: every import here and ShareImage find an image's existing slot before making one. A second id
 	 * for an image already imported shares its slot; an importer that needs a view the slot lacks makes a new version of the same
-	 * image with both sets of views. In native mode the image's graph-owned texture (Engine::Native::GraphTextureOf) is the backing
-	 * when it has every view asked for.
+	 * image with both sets of views. In native mode the image's graph-owned texture (Engine::Native::GraphTextureOf) is always the
+	 * backing: it has every view its bind flags allow.
+	 *
+	 * An image ORG made that already has a graph resource (RenderGraph::MadeImageOf: a GraphResources twin's D3D11 export, an engine
+	 * texture, a streaming window, native mode's exempt textures) is not imported: the import returns that resource, or the twin's
+	 * slot when it is versioned, and the id is not registered for it. Only when that resource lacks a view asked for is the image
+	 * imported again (logged; the duplicate check names it).
 	 */
 	Texture EngineTarget(std::uint32_t a_target);
 
@@ -474,7 +479,8 @@ namespace FrameAnchors
 	 * else a new slot. a_texture is the image's D3D11 texture: the slot keeps it alive, so the image handle is never reused while the
 	 * slot lives. a_desc names the views the caller needs; a slot that lacks one gets a new version of the same image with both
 	 * sets of views. A slot made here is not registered under an id and lives while its holders hold it; an id import of the same
-	 * image later takes it over. Native mode: the image's graph-owned texture is the backing when it has the views. Render thread.
+	 * image later takes it over. An image ORG made with a graph resource of its own gives that resource, as the imports above do.
+	 * Native mode: the image's graph-owned texture is the backing. Render thread.
 	 * Empty when the render graph is not active or the image cannot be imported.
 	 */
 	Texture ShareImage(ID3D11Texture2D* a_texture, const DxvkOrgInteropImageInfo& a_image, const org::TextureDescription& a_desc, std::string_view a_name);

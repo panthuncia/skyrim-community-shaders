@@ -450,6 +450,9 @@ namespace RenderGraph::Engine::Native
 
 		NativeResource::~NativeResource()
 		{
+			// The exempt texture's import does not own the image, which goes with this record: no import may find it after this.
+			if (exemptResource)
+				::RenderGraph::ForgetMadeImage(exemptResource.get());
 			auto& registry = GetRegistry();
 			std::lock_guard guard(registry.lock);
 			registry.live.erase(this);
@@ -3776,6 +3779,8 @@ namespace RenderGraph::Engine::Native
 			return nullptr;
 		}
 		::RenderGraph::NoteImageResource(reinterpret_cast<std::uint64_t>(record->image.image), record->exemptResource, id);
+		// The image's one graph resource: a read-only import of the texture (FrameAnchors) returns it rather than importing it again.
+		::RenderGraph::RegisterMadeImage(reinterpret_cast<std::uint64_t>(record->image.image), record->exemptResource, desc, id);
 		return record->exemptResource;
 	}
 
