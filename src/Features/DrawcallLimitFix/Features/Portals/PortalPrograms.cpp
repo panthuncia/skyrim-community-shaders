@@ -25,6 +25,7 @@
 
 #include <ORGModuleServices/BackingPool.h>
 #include <ORGModuleServices/GrowableBufferTypes.h>
+#include <Render/Runtime/PublicationChannels.h>
 
 #include <algorithm>
 #include <bit>
@@ -38,21 +39,31 @@ namespace DCLF::Features::Portals
 	namespace
 	{
 		constexpr const char* kProgramsName = "cs.dclf.portal-programs";
+		constexpr const char* kChannelName = "cs.dclf.portal-programs.channel";
 		constexpr std::uint32_t kBucketsInput = 0, kInputWords = 1;
 
-		/** @brief An immutable published encoding: its words, the lease holding them on the GPU, and the descriptor the latch names. */
+		/**
+		 * @brief An immutable published encoding: its words, the lease holding them on the GPU, the descriptor the latch names, and its
+		 * backing's binding to the programs' channel (while the publication lives).
+		 */
 		struct Publication
 		{
 			std::vector<std::uint32_t> words;
 			std::shared_ptr<const org::services::BackingLease> lease;
 			std::uint32_t descriptor = 0;
+			std::shared_ptr<void> channelBinding;
 		};
 
-		/** @brief The member batch, the publications' pool and the depth commit's publication (render thread). */
+		/**
+		 * @brief The member batch, the publications' pool, the programs' channel and the depth commit's publication (render thread).
+		 * The channel is what every reader of the programs declares (the cull binding Programs' answer): each publication's backing is
+		 * bound to it (org::runtime::PublicationChannels), so a reader's batch on the compute queue waits for the upload that fills it.
+		 */
 		struct ProgramsScene
 		{
 			std::shared_ptr<Batch> members;
 			std::shared_ptr<org::services::BackingPool> pool;
+			std::shared_ptr<org::Buffer> channel;
 			std::shared_ptr<const Publication> current;
 			std::uint32_t frame = ~0u;  // the scene frame current was published for
 		};
@@ -73,12 +84,17 @@ namespace DCLF::Features::Portals
 				return nullptr;
 			scene->pool = org::services::BackingPool::Create(PooledBackings::Hooks(), FrameRetirement(),
 				{ .name = kProgramsName, .maxPerClass = 0, .spareFree = PooledBackings::PerFrameSpares() });
+			scene->channel = a_setup.StructuredBuffer(1, 4, kChannelName);
+			if (!scene->channel)
+				return nullptr;
 			return scene;
 		}
 
 		void RegisterGraph(const Api::SceneResourcesGraph& a_graph)
 		{
-			RegisterBatch(a_graph.graph, *a_graph.State<ProgramsScene>().members);
+			const auto& scene = a_graph.State<ProgramsScene>();
+			RegisterBatch(a_graph.graph, *scene.members);
+			Draws::Register(a_graph.graph, org::ResourceIdentifier(kChannelName), scene.channel);
 		}
 
 		// The member batch's scratch: by object, and its bucket scratch to the encoding's programs (posted with the revision's inputs).
@@ -156,6 +172,11 @@ namespace DCLF::Features::Portals
 			publication->descriptor = (*lease)->srvIndex;
 			if (!publication->descriptor)
 				throw std::runtime_error("missing GPU descriptor");
+			// The backing is the channel's content while this publication lives: the readers declare the channel.
+			publication->channelBinding = org::runtime::PublicationChannels::Bind((*lease)->buffer->GetAPIResource().GetHandle(),
+				a_scene.channel->GetAPIResource().GetHandle());
+			if (!publication->channelBinding)
+				throw std::runtime_error("the backing could not be bound to the programs' channel");
 			a_uploads((*lease)->buffer, encoded.data(), encoded.size() * sizeof(std::uint32_t), 0);
 			publication->lease = std::move(lease);
 			return publication;
@@ -188,10 +209,14 @@ namespace DCLF::Features::Portals
 				a_commit.executionOwners.push_back(scene->current);
 		}
 
-		// The frame's publication's descriptor (the depth commit's latch; 0: none this frame).
+		// The frame's publication's descriptor (the depth commit's latch; 0: none this frame), and the channel its readers declare.
 		void SelectPrograms(Api::CullBindingSelect& a_select)
 		{
-			if (const auto* scene = SceneOf(a_select.scene); scene && scene->current && scene->frame == a_select.frame)
+			const auto* scene = SceneOf(a_select.scene);
+			if (!scene)
+				return;
+			a_select.Channel(scene->channel);
+			if (scene->current && scene->frame == a_select.frame)
 				a_select.Index(scene->current->descriptor);
 		}
 	}

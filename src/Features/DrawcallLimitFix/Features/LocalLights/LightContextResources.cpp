@@ -24,6 +24,7 @@
 
 #include <ORGModuleServices/BackingPool.h>
 #include <ORGModuleServices/GrowableBufferTypes.h>
+#include <Render/Runtime/PublicationChannels.h>
 #include <algorithm>
 #include <bit>
 #include <map>
@@ -82,13 +83,29 @@ namespace DCLF::Features::LocalLights
 			}
 		};
 
+		/**
+		 * The publications' channels (org::runtime::PublicationChannels): what every reader of the atlas and of the gates' verdicts declares
+		 * (the cull bindings LightContexts and StrictGates answer them). Each publication's backing is bound to its channel while the
+		 * publication lives, so a reader's batch on another queue waits for (or takes) the upload that fills it.
+		 */
+		constexpr const char* kAtlasChannelName = "cs.dclf.light-contexts.atlas.channel";
+		constexpr const char* kGatesChannelName = "cs.dclf.light-contexts.gates.channel";
+
 		struct Scene
 		{
 			std::shared_ptr<org::services::BackingPool> pool;
+			std::shared_ptr<org::Buffer> atlasChannel, gatesChannel;
 			std::shared_ptr<const LightContextPublication> current;
 			Draws::Versioned objectGates;  // by object slot: its gate (the cull binding ObjectGates)
 			org::services::FilledContents<> objectGatesFilled;  // the version the mirror is in, and the column key it holds
 			Gates gates;
+		};
+
+		/** @brief A publication's GPU side: the leases holding the atlas and the verdicts, and their backings' channel bindings. */
+		struct PublicationBackings
+		{
+			std::shared_ptr<org::services::BackingLease> atlas, gates;
+			std::shared_ptr<void> atlasBinding, gatesBinding;
 		};
 
 		std::shared_ptr<void> Setup(const Api::SceneResourcesSetup& a_setup)
@@ -96,6 +113,10 @@ namespace DCLF::Features::LocalLights
 			auto scene = std::make_shared<Scene>();
 			scene->pool = org::services::BackingPool::Create(PooledBackings::Hooks(), FrameRetirement(),
 				{ .name = "cs.dclf.light-contexts", .maxPerClass = 0, .spareFree = PooledBackings::PerFrameSpares() });
+			scene->atlasChannel = a_setup.StructuredBuffer(1, 4, kAtlasChannelName);
+			scene->gatesChannel = a_setup.StructuredBuffer(1, 4, kGatesChannelName);
+			if (!scene->atlasChannel || !scene->gatesChannel)
+				return nullptr;
 			scene->objectGates = Draws::MakeVersioned(a_setup.StructuredBuffer(a_setup.smallStart ? 4u : 4096u, sizeof(std::uint32_t), kObjectGatesName), { .extent = { 0, 4, 4 } });
 			scene->gates.Reset();
 			return scene;
@@ -103,7 +124,10 @@ namespace DCLF::Features::LocalLights
 
 		void RegisterGraph(const Api::SceneResourcesGraph& a_graph)
 		{
-			Draws::Register(a_graph.graph, org::ResourceIdentifier(kObjectGatesName), a_graph.State<Scene>().objectGates);
+			const auto& scene = a_graph.State<Scene>();
+			Draws::Register(a_graph.graph, org::ResourceIdentifier(kObjectGatesName), scene.objectGates);
+			Draws::Register(a_graph.graph, org::ResourceIdentifier(kAtlasChannelName), scene.atlasChannel);
+			Draws::Register(a_graph.graph, org::ResourceIdentifier(kGatesChannelName), scene.gatesChannel);
 		}
 
 		// The column, by object: to the objects the revision holds.
@@ -222,8 +246,12 @@ namespace DCLF::Features::LocalLights
 			return words;
 		}
 
-		/** @brief A uint structured buffer of a_words, read as a ByteAddressBuffer (as the camera's programs publication). */
-		std::shared_ptr<org::services::BackingLease> Upload(Scene& a_scene, const Api::CommitContext& a_commit, const std::vector<std::uint32_t>& a_words, const char* a_name)
+		/**
+		 * @brief A uint structured buffer of a_words, read as a ByteAddressBuffer (as the camera's programs publication), its backing bound
+		 * to a_channel through a_binding.
+		 */
+		std::shared_ptr<org::services::BackingLease> Upload(Scene& a_scene, const Api::CommitContext& a_commit, const std::vector<std::uint32_t>& a_words, const char* a_name,
+			const std::shared_ptr<org::Buffer>& a_channel, std::shared_ptr<void>& a_binding)
 		{
 			const auto capacity = std::bit_ceil(std::max<std::uint64_t>(64, a_words.size()));
 			auto lease = std::make_shared<org::services::BackingLease>(a_scene.pool->Acquire({ .capacityClass = capacity, .stride = 4, .name = a_name }));
@@ -231,6 +259,9 @@ namespace DCLF::Features::LocalLights
 				throw std::runtime_error("allocation failed");
 			if (!(*lease)->srvIndex)
 				throw std::runtime_error("missing GPU descriptor");
+			a_binding = org::runtime::PublicationChannels::Bind((*lease)->buffer->GetAPIResource().GetHandle(), a_channel->GetAPIResource().GetHandle());
+			if (!a_binding)
+				throw std::runtime_error("the backing could not be bound to its channel");
 			a_commit.uploads((*lease)->buffer, a_words.data(), a_words.size() * sizeof(std::uint32_t), 0);
 			return lease;
 		}
@@ -255,21 +286,21 @@ namespace DCLF::Features::LocalLights
 					publication->frame = a_commit.frame;
 					publication->generation = DCLF::Portals::ValidateContexts(words, a_commit.frame);
 					publication->words = words;
-					auto lease = Upload(*scene, a_commit, words, "cs.dclf.light-contexts.atlas");
-					publication->descriptor = (*lease)->srvIndex;
+					auto backings = std::make_shared<PublicationBackings>();
+					backings->atlas = Upload(*scene, a_commit, words, "cs.dclf.light-contexts.atlas", scene->atlasChannel, backings->atlasBinding);
+					publication->descriptor = (*backings->atlas)->srvIndex;
 					// The gates' column first (it interns the chains the verdicts cover), then each gate's verdict per context.
-					std::shared_ptr<org::services::BackingLease> gates;
 					if (std::any_of(selection->frameLights.begin(), selection->frameLights.end(), [](const auto& a_entry) { return a_entry.portalContext && a_entry.portalContext->strict; })) {
 						UploadColumn(*scene, a_commit);
 						publication->gateWords = EncodeVerdicts(scene->gates, *selection);
 						publication->unmodelledGates = scene->gates.unmodelled;
 						publication->rootlessObjects = scene->gates.rootless;
 						if (!publication->gateWords.empty()) {
-							gates = Upload(*scene, a_commit, publication->gateWords, "cs.dclf.light-contexts.gates");
-							publication->gatesDescriptor = (*gates)->srvIndex;
+							backings->gates = Upload(*scene, a_commit, publication->gateWords, "cs.dclf.light-contexts.gates", scene->gatesChannel, backings->gatesBinding);
+							publication->gatesDescriptor = (*backings->gates)->srvIndex;
 						}
 					}
-					publication->owner = std::make_shared<std::pair<std::shared_ptr<org::services::BackingLease>, std::shared_ptr<org::services::BackingLease>>>(std::move(lease), std::move(gates));
+					publication->owner = std::move(backings);
 					scene->current = std::move(publication);
 				} catch (const std::exception& e) {
 					static std::uint64_t rejected = 0;  // render thread
@@ -283,9 +314,12 @@ namespace DCLF::Features::LocalLights
 			a_commit.executionOwners.push_back(scene->current);
 		}
 
+		// The frame's publication's descriptor (0: none), and the channel its readers declare.
 		template <bool Gates>
 		void SelectContexts(Api::CullBindingSelect& a_select)
 		{
+			if (auto* scene = Extensions::SceneResourcesOf<Scene>(a_select.scene, sceneId))
+				a_select.Channel(Gates ? scene->gatesChannel : scene->atlasChannel);
 			if (const auto publication = CurrentLightContexts(a_select.scene, a_select.frame))
 				a_select.Index(Gates ? publication->gatesDescriptor : publication->descriptor);
 		}

@@ -10,6 +10,7 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <initializer_list>
 #include <memory>
 #include <span>
 #include <string>
@@ -18,6 +19,7 @@
 namespace org
 {
 	class Buffer;
+	class RenderPassBuilder;
 	class VersionedBuffer;
 	namespace services
 	{
@@ -67,6 +69,12 @@ namespace DCLF::Api
 		void Buffer(const std::shared_ptr<org::Buffer>& a_buffer) { buffer = &a_buffer; }
 		/** @brief A pooled buffer's SRV index this frame (a frame value pool's: 0 none), which no pass declares. */
 		void Index(std::uint32_t a_srv) { srv = a_srv; }
+		/**
+		 * @brief With Index for a publication made by an upload each frame: its channel (org::runtime::PublicationChannels), a buffer made
+		 * at the scene's setup that every reader declares in place of the pooled backing. The feature binds each publication's backing to
+		 * it, so a reader's batch on another queue waits for (or takes) the upload that fills it. Answer it at a declaration too.
+		 */
+		void Channel(const std::shared_ptr<org::Buffer>& a_channel) { channel = &a_channel; }
 		/** @brief With Versioned or Buffer: how many of its units hold the content its readers may read now (a by-root buffer: the roots the
 		 *  depth commit sent; 0: none yet, its readers bind none). Unanswered: all it names. */
 		void Rows(std::uint32_t a_rows) { rows = a_rows; }
@@ -74,6 +82,7 @@ namespace DCLF::Api
 		// The answer (Core reads it).
 		const std::shared_ptr<org::VersionedBuffer>* versioned = nullptr;
 		const std::shared_ptr<org::Buffer>* buffer = nullptr;
+		const std::shared_ptr<org::Buffer>* channel = nullptr;
 		std::uint32_t srv = 0;
 		std::uint32_t rows = ~0u;
 	};
@@ -122,4 +131,14 @@ namespace DCLF::Extensions
 	 * scene resources' handle, or a null one held by Core (no binding, or a binding answering otherwise). Stable while a_scene lives.
 	 */
 	const std::shared_ptr<org::VersionedBuffer>& CullBindingBuffer(Api::CullBindingSlot a_slot, const Draws::SceneBuffers& a_scene, std::uint32_t a_frame = 0);
+	/**
+	 * @brief SelectCullBinding's channel answer for a pass's declaration (Api::CullBindingSelect::Channel): the buffer a pass that reads
+	 * a_slot's publication declares, or a null one held by Core (no binding, or none answered). Stable while a_scene lives.
+	 */
+	const std::shared_ptr<org::Buffer>& CullBindingChannel(Api::CullBindingSlot a_slot, const Draws::SceneBuffers& a_scene);
+	/**
+	 * @brief Declares a read of every cull binding publication channel in a_slots on a_builder (a pass that reads them through Core's
+	 * descriptor words or the latch's indices). Slots without a channel are skipped.
+	 */
+	void DeclareCullBindingChannels(org::RenderPassBuilder& a_builder, const Draws::SceneBuffers& a_scene, std::initializer_list<Api::CullBindingSlot> a_slots);
 }
