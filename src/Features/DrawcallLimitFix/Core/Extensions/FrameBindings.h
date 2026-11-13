@@ -164,6 +164,23 @@ namespace DCLF::Extensions
 		std::span<const std::string_view> a_ids, std::uint32_t& a_index);
 
 	/**
+	 * @brief The published ids of the engine targets the character light's noise (kCharacterLightRegister) can be: the HDR downsample
+	 * chain, whose last level the luminance chain alternates. The colour and faces passes declare them (only the published ones).
+	 */
+	std::span<const std::string_view> CharacterLightGraphTextureIds();
+
+	/** @brief The published id of the engine's shadow mask (kSHADOW_MASK), which grass reads from its draw row. */
+	std::span<const std::string_view> ShadowMaskGraphTextureIds();
+
+	/**
+	 * @brief Render thread (a commit): GraphTextureIndex for a view of an engine render target (an engine field's view, which may be a
+	 * tripwire handle: matched as the D3D11 view it wraps). On a miss with a new view, publishes the target the view belongs to when ORG
+	 * owns it (RenderGraph::Engine::Targets::Find), so the next build of a pass that lists its id declares it.
+	 */
+	bool EngineTargetTextureIndex(GraphTextureReader a_reader, std::uint32_t a_register, std::string_view a_name, ID3D11ShaderResourceView* a_view,
+		std::span<const std::string_view> a_ids, std::uint32_t& a_index);
+
+	/**
 	 * @brief The most frame graph buffers registrations there may be (a commit keeps each one's indices in a fixed array), and each one's
 	 * registers (Api::FrameGraphBuffers::resources). One past them fails the install: grow this first.
 	 */

@@ -22,6 +22,7 @@
 #include "Features/DrawcallLimitFix/Diagnostics/Reports/Draws.h"
 
 #include "RenderGraph/PublishedResources.h"
+#include "RenderGraph/UndeclaredAccess.h"
 
 #include <array>
 #include <string>
@@ -392,6 +393,15 @@ namespace DCLF
 		std::array<ID3D11ShaderResourceView*, Extensions::kFrameTextureSlots> frameTextureViews{};
 		for (std::size_t i = 0; i < frameTextures.size() && !depthOnly; ++i)
 			frameTextureViews[i] = frameTextures[i].view ? static_cast<ID3D11ShaderResourceView*>(frameTextures[i].view()) : nullptr;
+		// The registers of the frame graph buffers on the graph this epoch (below): their indices are the published buffers', so the
+		// D3D11 views captured there are not imported.
+		const auto graphBuffers = Extensions::RegisteredFrameGraphBuffers();
+		std::array<bool, kTextureRegisters> onGraph{};
+		for (std::size_t b = 0; b < graphBuffers.size() && !depthOnly; ++b)
+			if ((epochResources->graphBuffers >> b) & 1)
+				for (std::uint32_t r = 0; r < graphBuffers[b].count; ++r)
+					if (graphBuffers[b].firstRegister + r < kTextureRegisters)
+						onGraph[graphBuffers[b].firstRegister + r] = true;
 		for (std::uint32_t t = kPixelTextureSlots; t < kTextureRegisters && !depthOnly; ++t) {
 			auto& held = frameTextureBindings[t];
 			const auto at = frameTextureAt[t];
@@ -404,8 +414,20 @@ namespace DCLF
 			// The view is a published export the colour passes declared: the published texture's own descriptor. No import to hold,
 			// the graph registers it.
 			std::uint32_t graphIndex = 0;
+			if (onGraph[t]) {
+				HoldFrameTexture(held.view, held.binding, nullptr, t, 0u, a_commit.bindingOwners);
+				continue;
+			}
 			if (texture &&
 				Extensions::GraphTextureIndex(Extensions::GraphTextureReader::Colour, t, texture->name, view, texture->graphResources, graphIndex)) {
+				HoldFrameTexture(held.view, held.binding, nullptr, t, 0u, a_commit.bindingOwners);
+				a_frameTextures[t] = graphIndex;
+				continue;
+			}
+			// The character light's noise is an engine target (an HDR downsample level): the published target, which the colour passes
+			// declare (Draws::DeclareFrameBuffers).
+			if (t == kCharacterLightRegister && Extensions::EngineTargetTextureIndex(Extensions::GraphTextureReader::Colour, t, "character light", view,
+													Extensions::CharacterLightGraphTextureIds(), graphIndex)) {
 				HoldFrameTexture(held.view, held.binding, nullptr, t, 0u, a_commit.bindingOwners);
 				a_frameTextures[t] = graphIndex;
 				continue;
@@ -415,10 +437,26 @@ namespace DCLF
 			a_frameTextures[t] = HoldFrameTexture(held.view, held.binding, view, t, view ? 0u : textures.NullIndex(), a_commit.bindingOwners);
 		}
 		// The frame graph buffers on the graph (Api::FrameGraphBuffers: Integrations/LightLimitFix's, t35-t37), their indices at their registers.
-		const auto graphBuffers = Extensions::RegisteredFrameGraphBuffers();
-		for (std::size_t b = 0; b < graphBuffers.size() && !depthOnly; ++b)
-			if ((epochResources->graphBuffers >> b) & 1)
-				graphBuffers[b].indices(std::span(a_frameTextures).subspan(graphBuffers[b].firstRegister, graphBuffers[b].count));
+		// The epoch's colour passes declared each registration whose bit is set (Draws::DeclareFrameBuffers): the reads are ordered, only
+		// the indices are this commit's.
+		for (std::size_t b = 0; b < graphBuffers.size() && !depthOnly; ++b) {
+			if (!((epochResources->graphBuffers >> b) & 1))
+				continue;
+			bool indexed = false;
+			{
+				RenderGraph::UndeclaredAccess::DeclaredIndexScope declaredIndices;
+				indexed = graphBuffers[b].indices(std::span(a_frameTextures).subspan(graphBuffers[b].firstRegister, graphBuffers[b].count));
+			}
+			// Gone since the epoch was built (its producer left the graph): the captured views, as before, until the next setup.
+			for (std::uint32_t r = 0; !indexed && r < graphBuffers[b].count; ++r) {
+				const std::uint32_t t = graphBuffers[b].firstRegister + r;
+				if (t >= kTextureRegisters)
+					continue;
+				auto& held = frameTextureBindings[t];
+				auto* const view = capture.psViews[t];
+				a_frameTextures[t] = HoldFrameTexture(held.view, held.binding, view, t, view ? 0u : textures.NullIndex(), a_commit.bindingOwners);
+			}
+		}
 		for (const auto& frameBuffer : depthOnly ? decltype(epochResources->frameBuffers){} : epochResources->frameBuffers) {
 			auto* buffer = BufferOf(capture.psViews[frameBuffer.textureRegister]);
 			mirror.Watch(buffer);

@@ -4,13 +4,18 @@
 #include "Features/DrawcallLimitFix/Core/Render/Internal.h"
 #include "Features/DrawcallLimitFix/Core/Extensions/FrameBindings.h"
 #include "Features/DrawcallLimitFix/Core/Extensions/Registry.h"
+#include "RenderGraph/Engine/Targets/EngineTargets.h"
+#include "RenderGraph/Engine/Tripwire/Tripwire.h"
 #include "RenderGraph/PublishedResources.h"
+#include "RenderGraph/UndeclaredAccess.h"
 
 #include <Render/PassBuilders.h>
 #include <Render/PreparedPass.h>
 
 #include <algorithm>
 #include <atomic>
+#include <format>
+#include <initializer_list>
 #include <memory>
 #include <vector>
 
@@ -61,6 +66,9 @@ namespace DCLF::Extensions
 		if (a_buffers >= registered.size())
 			return false;
 		const auto& buffers = registered[a_buffers];
+		// Only whether the indices exist: the caller drops them, and the colour passes that read them declare their ids
+		// (Draws::DeclareFrameBuffers).
+		RenderGraph::UndeclaredAccess::DeclaredIndexScope declared;
 		return buffers.indices(a_out.first(buffers.count));
 	}
 
@@ -127,6 +135,8 @@ namespace DCLF::Extensions
 	{
 		const org::SrvView view{ .variant = PublishedResources::ShaderResourceVariant(a_id) };
 		DeclaredReads::Entry entry{ .id = std::string(a_id), .view = a_builder.ShaderResource(org::ResourceIdentifier(a_id), view).View() };
+		// The index of the view just declared, which the commit latches.
+		RenderGraph::UndeclaredAccess::DeclaredIndexScope declared;
 		if (!PublishedResources::ShaderResourceIndex(a_id, entry.latched))
 			entry.latched = UINT32_MAX;
 		if (!a_out.entries)
@@ -197,6 +207,8 @@ namespace DCLF::Extensions
 		for (const auto id : a_ids) {
 			if (id.empty() || !declared || std::ranges::find(*declared, id) == declared->end())
 				continue;
+			// A graph build declared the id (DeclareGraphTextures): the read is ordered, only its index is the build's.
+			RenderGraph::UndeclaredAccess::DeclaredIndexScope declaredIndex;
 			if (PublishedResources::IsExportOf(a_view, id) && PublishedResources::ShaderResourceIndex(id, a_index)) {
 				read = id;
 				break;
@@ -218,5 +230,59 @@ namespace DCLF::Extensions
 				logger::info("[DCLF] {} reads the graph resource '{}' (descriptor {})", who, read, a_index);
 		}
 		return !read.empty();
+	}
+
+	namespace
+	{
+		/** @brief Static ids for spans of string_view: "Engine::<target>" for each of a_targets. */
+		std::vector<std::string_view> EngineTargetIds(std::initializer_list<RE::RENDER_TARGET> a_targets)
+		{
+			static std::vector<std::unique_ptr<std::string>> s_names;  // kept for the process: the views point into them
+			std::vector<std::string_view> ids;
+			for (const auto target : a_targets) {
+				s_names.push_back(std::make_unique<std::string>(std::format("Engine::{}", magic_enum::enum_name(target))));
+				ids.emplace_back(*s_names.back());
+			}
+			return ids;
+		}
+	}
+
+	std::span<const std::string_view> CharacterLightGraphTextureIds()
+	{
+		using Target = RE::RENDER_TARGET;
+		static const auto s_ids = EngineTargetIds({ Target::kHDR_DOWNSAMPLE0, Target::kHDR_DOWNSAMPLE1, Target::kHDR_DOWNSAMPLE2, Target::kHDR_DOWNSAMPLE3,
+			Target::kHDR_DOWNSAMPLE4, Target::kHDR_DOWNSAMPLE5, Target::kHDR_DOWNSAMPLE6, Target::kHDR_DOWNSAMPLE7, Target::kHDR_DOWNSAMPLE8,
+			Target::kHDR_DOWNSAMPLE9, Target::kHDR_DOWNSAMPLE10, Target::kHDR_DOWNSAMPLE11, Target::kHDR_DOWNSAMPLE12, Target::kHDR_DOWNSAMPLE13 });
+		return s_ids;
+	}
+
+	std::span<const std::string_view> ShadowMaskGraphTextureIds()
+	{
+		static const auto s_ids = EngineTargetIds({ RE::RENDER_TARGET::kSHADOW_MASK });
+		return s_ids;
+	}
+
+	bool EngineTargetTextureIndex(GraphTextureReader a_reader, std::uint32_t a_register, std::string_view a_name, ID3D11ShaderResourceView* a_view,
+		std::span<const std::string_view> a_ids, std::uint32_t& a_index)
+	{
+		if (!a_view)
+			return false;
+		// The export is the D3D11 view a handle wraps. A native handle wraps none (Unwrap answers null): it is the export itself.
+		auto* view = RenderGraph::Engine::Tripwire::Unwrap(a_view);
+		if (!view)
+			view = a_view;
+		if (GraphTextureIndex(a_reader, a_register, a_name, view, a_ids, a_index))
+			return true;
+		// Publish the target once per new view: the first publish builds every graph again, and the next build declares it.
+		constexpr auto kReaders = static_cast<std::size_t>(GraphTextureReader::Count);
+		static std::array<std::array<const void*, kTextureRegisters>, kReaders> s_served{};
+		auto& served = s_served[static_cast<std::size_t>(a_reader)][a_register < kTextureRegisters ? a_register : 0];
+		if (served != view && RenderGraph::Engine::Targets::Enabled()) {
+			served = view;
+			winrt::com_ptr<ID3D11Resource> resource;
+			view->GetResource(resource.put());
+			RenderGraph::Engine::Targets::Find(resource.get());
+		}
+		return false;
 	}
 }

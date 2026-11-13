@@ -12,10 +12,12 @@
 
 #include "Globals.h"
 #include "RenderGraph/Engine/MainTick.h"
+#include "RenderGraph/Engine/Targets/EngineTargets.h"
 #include "RenderGraph/Engine/Flush/Flush.h"
 #include "RenderGraph/PublishedResources.h"
 #include "RenderGraph/RenderGraphRuntime.h"
 #include "RenderGraph/Engine/Tripwire/Tripwire.h"
+#include "RenderGraph/UndeclaredAccess.h"
 #include "Utils/Logging.h"
 
 #include <Render/PassBuilders.h>
@@ -492,6 +494,18 @@ namespace DCLF::Family
 		Add(EngineTargetId(a_target));
 	}
 
+	void PublishedInputs::AddEngineCopy(RE::RENDER_TARGET a_target)
+	{
+		// The copy is published under its own id, only while ORG owns the target (Engine::Targets). Otherwise it stays a D3D11 texture,
+		// and the id is never declarable.
+		const auto index = static_cast<std::uint32_t>(a_target);
+		if (auto* renderer = globals::game::renderer; renderer && index < static_cast<std::uint32_t>(RE::RENDER_TARGET::kTOTAL)) {
+			if (auto* copy = renderer->GetRuntimeData().renderTargets[index].textureCopy)
+				RenderGraph::Engine::Targets::Find(reinterpret_cast<ID3D11Resource*>(copy));
+		}
+		Add(EngineTargetId(a_target) + " Copy");
+	}
+
 	Extensions::DeclaredReads PublishedInputs::Declare(org::RenderPassBuilder& a_builder)
 	{
 		Extensions::DeclaredReads reads;
@@ -522,6 +536,8 @@ namespace DCLF::Family
 		const auto known = declared.load(std::memory_order_acquire);
 		if (!known || !known->contains(a_id))
 			return InputResult::PublishedLate;
+		// The client's pass declared it (Declare): the read is ordered, only its index is the build's.
+		RenderGraph::UndeclaredAccess::DeclaredIndexScope declaredIndex;
 		return PublishedResources::ShaderResourceIndex(a_id, a_index) ? InputResult::Graph : InputResult::NoView;
 	}
 
