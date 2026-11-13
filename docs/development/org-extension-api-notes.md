@@ -1878,3 +1878,11 @@ is not declarable at the build (`PublishedResources::IsDeclarable`), so the call
   the last structural build CS still makes on the render thread outside DCLF), and failures of `BuildEpochGraph` reported through
   `PollEpochFailures` or not, by option (CS calls its owners itself now).
 - **Found by:** native frame graph Phase 4, build manager lane (2026-11-13).
+
+## The views of an `ExternalTextureResource`
+
+- **Need:** CS returns an image's existing graph resource to a new importer only when it has every view asked for. A `PixelBuffer`
+  answers `GetDescription()`; an `ExternalTextureResource` keeps its description private.
+- **Worked around:** CS's made-image registry (`RenderGraph::RegisterMadeImage`) stores the description beside the resource.
+- **Wanted:** `ExternalTextureResource::GetDescription()`, as `PixelBuffer` has.
+- **Found by:** native frame graph Phase 2, duplicate images lane (2026-11-13).

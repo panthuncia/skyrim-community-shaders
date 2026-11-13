@@ -62,6 +62,8 @@ namespace RenderGraph::Engine::Textures
 					std::unique_lock lock(g_registryMutex);
 					g_registry.erase(graph.get());
 				}
+				// The import does not own the image, which goes below: no import may find it after this.
+				RenderGraph::ForgetMadeImage(graph.get());
 				// The graph's import of the image first, then the image.
 				graph.reset();
 				image = {};
@@ -117,6 +119,8 @@ namespace RenderGraph::Engine::Textures
 			desc.srvFormat = a_format;
 			desc.hasUAV = (a_info.bindFlags & D3D11_BIND_UNORDERED_ACCESS) != 0;
 			desc.uavFormat = a_format;
+			// A CPU-side UAV too, as the twins and the anchors' imports have: an importer that clears it finds this resource enough.
+			desc.hasNonShaderVisibleUAV = desc.hasUAV;
 			for (UINT mip = 0; mip < a_info.mipLevels; ++mip)
 				desc.imageDimensions.push_back({ (std::max)(a_info.width >> mip, 1u), (std::max)(a_info.height >> mip, 1u), 0, 0 });
 			return desc;
@@ -223,11 +227,14 @@ namespace RenderGraph::Engine::Textures
 		}
 
 		// The graph's view of it, in the layout DXVK rests it in.
-		record->graph = RenderGraph::ImportDxvkTexture(host->Device(), info.image, Describe(a_info, format), a_info.name.c_str());
+		const auto graphDesc = Describe(a_info, format);
+		record->graph = RenderGraph::ImportDxvkTexture(host->Device(), info.image, graphDesc, a_info.name.c_str());
 		if (!record->graph) {
 			DropWithTexture(texture, std::move(record));
 			return fail(g_loggedLayout, "the graph cannot import the layout DXVK rests it in");
 		}
+		// The image's one graph resource: an import of the texture (FrameAnchors) returns this one rather than importing it again.
+		RenderGraph::RegisterMadeImage(reinterpret_cast<std::uint64_t>(info.image.image), record->graph, graphDesc, a_info.name);
 		record->name = a_info.name;
 		record->dimension = a_info.dimension;
 		record->desc.Width = a_info.width;

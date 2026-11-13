@@ -491,9 +491,13 @@ namespace GraphResources
 				texture = org::ExternalTextureResource::CreateShared(std::move(image), graphDesc,
 					*home == rhi::ResourceLayout::Common && !RenderGraph::Backend::IsD3D12());
 				texture->SetName(a_name);
+				// The image's graph resource, for the duplicate check (the GENERAL branch's import notes itself).
+				RenderGraph::NoteImageResource(reinterpret_cast<std::uint64_t>(info.image.image), texture, a_name);
 			}
-			exported.graph = std::move(texture);
 			exported.image = reinterpret_cast<std::uint64_t>(info.image.image);
+			// An import of the D3D11 texture finds this resource and returns it (or the twin's slot) instead of importing it again.
+			RenderGraph::RegisterMadeImage(exported.image, texture, graphDesc, a_name);
+			exported.graph = std::move(texture);
 			return exported;
 		} catch (const std::exception& e) {
 			logger::error("[ORG] {}: not exported: {}", a_name, e.what());
@@ -545,6 +549,15 @@ namespace GraphResources
 	}
 
 	bool Resource::AdoptSlot(std::shared_ptr<org::VersionedTexture> a_previous, bool a_sameShape)
+	{
+		const bool joined = JoinSlot(std::move(a_previous), a_sameShape);
+		// An import of the export returns the slot, which its passes follow across versions, rather than this version.
+		if (slot && graph)
+			RenderGraph::SetMadeImageSlot(graph.get(), slot);
+		return joined;
+	}
+
+	bool Resource::JoinSlot(std::shared_ptr<org::VersionedTexture> a_previous, bool a_sameShape)
 	{
 		slot.reset();
 		auto image = std::dynamic_pointer_cast<org::GloballyIndexedResource>(graph);
@@ -621,6 +634,8 @@ namespace GraphResources
 		dsv = nullptr;
 		const bool exported = d3d11 != nullptr;
 		d3d11 = nullptr;
+		// No import can find the export any more.
+		RenderGraph::ForgetMadeImage(graph.get());
 		if (exported && graph)
 			RenderGraphRuntime::Get().ReleaseAfterD3D11(std::move(graph));
 		graph.reset();

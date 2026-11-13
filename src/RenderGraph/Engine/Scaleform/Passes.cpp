@@ -20,6 +20,7 @@
 #	include "RenderGraph/RenderGraphRuntime.h"
 #	include "RenderGraph/RunGate.h"
 #	include "RenderGraph/ShaderBindings.h"
+#	include "RenderGraph/UndeclaredAccess.h"
 
 #	include <OpenRenderGraph/GraphHost.h>
 #	include <Render/LatchBlock.h>
@@ -37,6 +38,7 @@
 #	include <cmath>
 #	include <cstddef>
 #	include <cstring>
+#	include <optional>
 #	include <string>
 
 namespace RenderGraph::Engine::Scaleform::Passes
@@ -524,12 +526,13 @@ namespace RenderGraph::Engine::Scaleform::Passes
 
 		/**
 		 * @brief Native mode: the declared read of the display texture a_view, or null for one read untracked (exempt, or not native's).
-		 * A tracked texture seen for the first time is added to the reads (its image's one graph resource, through
-		 * FrameAnchors::ShareImage, or the promoted exempt texture's own), and the client registers again after the run, so the next
-		 * build declares it.
+		 * A tracked texture seen for the first time is added to the reads (the promoted exempt texture's own resource, or for any other
+		 * tracked texture, graph-owned or host-made, its image's one graph resource through FrameAnchors::ShareImage), and the client
+		 * registers again after the run, so the next build declares it. a_new says whether it was added now.
 		 */
-		const void* DeclaredRead(PathState& a_state, ID3D11ShaderResourceView* a_view)
+		const void* DeclaredRead(PathState& a_state, ID3D11ShaderResourceView* a_view, bool& a_new)
 		{
+			a_new = false;
 			if (!a_view || !Engine::Native::OwnedResources())
 				return nullptr;
 			for (auto& read : a_state.reads)
@@ -538,7 +541,9 @@ namespace RenderGraph::Engine::Scaleform::Passes
 					return read.texture.Key();
 				}
 			FrameAnchors::Texture texture;
-			if (Engine::Native::GraphTextureOf(a_view)) {
+			if (auto promoted = Engine::Native::PromotedTextureOf(a_view)) {
+				texture = FrameAnchors::Texture(std::move(promoted));
+			} else if (Engine::Native::IsTrackedTexture(a_view)) {
 				winrt::com_ptr<ID3D11Resource> resource;
 				a_view->GetResource(resource.put());
 				const auto texture2D = resource.try_as<ID3D11Texture2D>();
@@ -553,8 +558,6 @@ namespace RenderGraph::Engine::Scaleform::Passes
 				desc.hasSRV = true;
 				desc.srvFormat = desc.format;
 				texture = FrameAnchors::ShareImage(texture2D.get(), info.image, desc, "cs.scaleform.read");
-			} else if (auto promoted = Engine::Native::PromotedTextureOf(a_view)) {
-				texture = FrameAnchors::Texture(std::move(promoted));
 			}
 			if (!texture)
 				return nullptr;
@@ -564,6 +567,7 @@ namespace RenderGraph::Engine::Scaleform::Passes
 			read.lastCommit = a_state.commits;
 			a_state.reads.push_back(std::move(read));
 			a_state.readsChanged = true;
+			a_new = true;
 			return texture.Key();
 		}
 
@@ -598,14 +602,21 @@ namespace RenderGraph::Engine::Scaleform::Passes
 			std::vector<const void*> reads(display.textures.size(), nullptr);
 			for (std::size_t i = 0; i < display.textures.size(); ++i) {
 				auto* view = display.textures[i];
-				// The raw index: what an exempt texture is read through, and a tracked one until a build declares it.
+				bool added = false;
+				reads[i] = DeclaredRead(state, view, added);
+				// The raw index: what an exempt texture is read through, and a tracked one until a build declares it. A read declared
+				// before this commit binds its declared view in the pass, so its raw index is only the fallback until that build is
+				// attached: the undeclared-access validator counts it as declared (interim).
+				std::optional<RenderGraph::UndeclaredAccess::DeclaredViewScope> declared;
+				if (reads[i] && !added)
+					declared.emplace();
 				auto binding = DCLF::GpuTextures::Get().ResolveBinding(view, kSourceTag);
+				declared.reset();
 				if (binding.index == DCLF::GpuTextures::kInvalid) {
 					state.commitReason = "a texture's view cannot be resolved";
 					return;
 				}
 				textures[i] = binding.index;
-				reads[i] = DeclaredRead(state, view);
 				frame->owners.push_back(std::move(binding.owner));
 				// The view itself too, until the recording's GPU work retires: EndDisplay's queued releases may drop GFx's.
 				view->AddRef();
@@ -892,7 +903,7 @@ namespace RenderGraph::Engine::Scaleform::Passes
 		}
 
 		/** @brief The role's surface for a_colour with a_depth (DXVK's), imported; without passes when the target cannot be imported. */
-		std::shared_ptr<Surface> MakeSurface([[maybe_unused]] PathState& a_state, Role a_role, ID3D11Texture2D* a_colour, DXGI_FORMAT a_format, ID3D11Texture2D* a_depth)
+		std::shared_ptr<Surface> MakeSurface(Role a_role, ID3D11Texture2D* a_colour, DXGI_FORMAT a_format, ID3D11Texture2D* a_depth)
 		{
 			auto surface = std::make_shared<Surface>();
 			surface->role = a_role;
@@ -977,7 +988,7 @@ namespace RenderGraph::Engine::Scaleform::Passes
 			const auto texture = RoleTexture(a_role, format);
 			if (!texture || format == DXGI_FORMAT_UNKNOWN)
 				return false;
-			auto surface = MakeSurface(a_state, a_role, texture.get(), format, MainDepth());
+			auto surface = MakeSurface(a_role, texture.get(), format, MainDepth());
 			QueuePrograms(a_state, *surface);
 			std::erase_if(a_state.surfaces, [&](const std::shared_ptr<Surface>& a_old) {
 				if (a_old->role != a_role)

@@ -240,6 +240,9 @@ namespace GraphResources
 		 */
 		bool AdoptSlot(std::shared_ptr<org::VersionedTexture> a_previous, bool a_sameShape);
 
+		/** @brief AdoptSlot's work, without telling the made-image registry (RenderGraph::SetMadeImageSlot) about the slot. */
+		bool JoinSlot(std::shared_ptr<org::VersionedTexture> a_previous, bool a_sameShape);
+
 		std::string name;
 		Options options;
 		std::shared_ptr<const void> alive = std::make_shared<const int>(0);

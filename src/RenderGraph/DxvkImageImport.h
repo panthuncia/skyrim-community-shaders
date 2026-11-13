@@ -5,10 +5,10 @@
 // layouts, or every image when DXVK pins them for an older client) is shared with simultaneous access; any other is used
 // exclusively, and the graph's external home states give it back in that layout after each execution.
 //
-// With CS_ORG_NATIVE_EXCLUSIVE_IMPORTS=1, native mode (with CS_ORG_NATIVE_OWNED) imports every image for the graph exclusively: the graph moves it into
+// Native mode (with CS_ORG_NATIVE_OWNED) imports every image for the graph exclusively, whatever it rests in: the graph moves it into
 // each pass's layout and gives it back in its home. That needs one graph resource per image (FrameAnchors' imports find an image's
-// slot before making one), since two resources would each track the image's layout. Shared imports stay the default
-// until the duplicate image check (CS_ORG_IMAGE_DUPLICATE_CHECK) is clean. Raw imports (ImportDxvkImage: the native context's own, Drawcall Limit Fix's bindless views) stay shared in GENERAL, where
+// slot before making one), since two resources would each track the image's layout. CS_ORG_NATIVE_EXCLUSIVE_IMPORTS=0 keeps them
+// shared. Raw imports (ImportDxvkImage: the native context's own, Drawcall Limit Fix's bindless views) stay shared in GENERAL, where
 // the context and the raw views use the image between graph executions.
 
 #include "RenderGraph/BufferRef.h"
@@ -18,6 +18,7 @@
 #include <memory>
 #include <optional>
 #include <source_location>
+#include <string>
 #include <string_view>
 
 #include <rhi.h>
@@ -27,6 +28,7 @@ namespace org
 	class ExternalTextureResource;
 	class Resource;
 	struct TextureDescription;
+	class VersionedTexture;
 }
 
 namespace RenderGraph
@@ -77,6 +79,36 @@ namespace RenderGraph
 	 * image, or an import stands for it), though frames may still finish with it. Any thread.
 	 */
 	void RetireImageResource(const org::Resource* a_resource);
+
+	/** @brief An image ORG made that has a graph resource of its own (MadeImageOf). */
+	struct MadeImage
+	{
+		std::shared_ptr<org::Resource> resource;               // the image's graph resource
+		std::shared_ptr<org::VersionedTexture> slot;           // a versioned twin's slot, whose current version is resource; else null
+		std::shared_ptr<const org::TextureDescription> views;  // the views resource has
+		std::string name;                                      // its maker's name for it, for the logs
+	};
+
+	/**
+	 * @brief Notes that a_resource is the graph resource of a_image, an image ORG made and handed to D3D11: a GraphResources twin's
+	 * export (GraphResources::ExportTexture), an engine texture (Engine::Textures), a streaming window. a_views are the views it has.
+	 * FrameAnchors' imports look the image up (MadeImageOf) and return this resource instead of importing the image again, so the
+	 * image stays one graph resource. Any thread.
+	 */
+	void RegisterMadeImage(std::uint64_t a_image, const std::shared_ptr<org::Resource>& a_resource, const org::TextureDescription& a_views,
+		std::string_view a_name);
+
+	/** @brief A versioned twin's slot for its registered resource (RegisterMadeImage): imports then return the slot. Any thread. */
+	void SetMadeImageSlot(const org::Resource* a_resource, const std::shared_ptr<org::VersionedTexture>& a_slot);
+
+	/**
+	 * @brief Forgets a registered resource. Its maker calls it before the image can go while something else still holds the resource
+	 * (an import that does not own its image), so a new image with the same handle is never answered with it. Any thread.
+	 */
+	void ForgetMadeImage(const org::Resource* a_resource);
+
+	/** @brief The registered resource of a_image, or an empty MadeImage. Any thread. */
+	MadeImage MadeImageOf(std::uint64_t a_image);
 
 	BufferRef ImportBufferRef(rhi::Device a_device, std::uint64_t a_buffer, std::uint64_t a_offset, std::uint64_t a_bytes, std::uint64_t a_address,
 		std::shared_ptr<const void>& a_keep, std::source_location a_where = std::source_location::current());

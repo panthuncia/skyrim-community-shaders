@@ -754,10 +754,10 @@ namespace FrameAnchors
 
 		/**
 		 * @brief The backing of a new slot for a_image with a_desc's views (a_desc gets the views the backing has). Native mode: the
-		 * image's graph-owned texture (Engine::Native::GraphTextureOf; a_texture may be null, then it is looked up by image) when it has
-		 * every view asked for. Otherwise the image imported, with the graph-owned texture's views added when there is one, so a later
-		 * importer that asks for those finds them. The one place an image becomes a graph resource for the anchors and DCLF. Null,
-		 * logged, on failure.
+		 * image's graph-owned texture (Engine::Native::GraphTextureOf; a_texture may be null, then it is looked up by image), always. It
+		 * has every view its D3D11 bind flags allow, so an importer can only ask for one in another format (logged; it gets the
+		 * texture's), and importing the image again would only make a second graph resource of it. Otherwise the image imported. The one
+		 * place an image becomes a graph resource for the anchors and DCLF. Null, logged, on failure.
 		 */
 		std::shared_ptr<org::GloballyIndexedResource> MakeBacking(ID3D11Texture2D* a_texture, const DxvkOrgInteropImageInfo& a_image,
 			org::TextureDescription& a_desc, const std::string& a_id)
@@ -768,21 +768,18 @@ namespace FrameAnchors
 				auto owned = a_texture ? RenderGraph::Engine::Native::GraphTextureOf(a_texture) : RenderGraph::Engine::Native::GraphTextureOfImage(image);
 				if (const auto* texture = dynamic_cast<const org::PixelBuffer*>(owned.get())) {
 					const auto& made = texture->GetDescription();
-					if (Covers(made, a_desc)) {
-						a_desc = made;
-						DescribeSubresources(a_desc, a_image);
-						// It may have been set aside for an import of its image before: it is the image's graph resource again.
-						RenderGraph::NoteImageResource(image, owned, a_id);
-						return owned;
+					if (!Covers(made, a_desc)) {
+						std::string conflict;
+						const auto merged = MergeViews(made, a_desc, conflict);
+						static std::atomic<std::uint32_t> logged{ 0 };
+						if (LogImportLine(logged))
+							logger::warn("[ORG] frame anchors: {}: the graph-owned texture {}{}{}; it stays the image's one graph resource", a_id,
+								Covers(made, merged) ? "has the views asked for in other formats" : "lacks a view asked for, which its bind flags do not allow",
+								conflict.empty() ? "" : ": ", conflict);
 					}
-					std::string conflict;
-					a_desc = MergeViews(made, a_desc, conflict);
-					static std::atomic<std::uint32_t> logged{ 0 };
-					if (LogImportLine(logged))
-						logger::warn("[ORG] frame anchors: {}: the graph-owned texture lacks a view asked for{}{}; its image is imported with both sets of views instead",
-							a_id, conflict.empty() ? "" : ": ", conflict);
-					// Never handed to a graph while this import stands for its image.
-					RenderGraph::RetireImageResource(owned.get());
+					a_desc = made;
+					DescribeSubresources(a_desc, a_image);
+					return owned;
 				}
 			}
 			DescribeSubresources(a_desc, a_image);
@@ -790,6 +787,36 @@ namespace FrameAnchors
 			if (!resource)
 				logger::warn("[ORG] frame anchors: {} could not be imported", a_id);
 			return resource;
+		}
+
+		/**
+		 * @brief The graph resource an image ORG made already has (RenderGraph::MadeImageOf: a GraphResources twin's export, an engine
+		 * texture, a streaming window, native mode's exempt textures): the twin's slot when it is versioned, else the resource itself,
+		 * declared as itself. Null when the image is not one of those, or when its resource lacks a view a_desc asks for (logged): the
+		 * caller imports the image then, and the duplicate check names that second resource.
+		 */
+		Texture MadeTexture(ID3D11Texture2D* a_texture, std::uint64_t a_image, const org::TextureDescription& a_desc, std::string_view a_by)
+		{
+			// Native mode: an exempt texture's graph resource is made on its first lookup (ImmutableTextureOf), which registers it. A
+			// read-only importer looks it up first, so the image keeps that one resource whoever asks first.
+			if (a_texture && RenderGraph::Engine::Native::Active() && !a_desc.hasRTV && !a_desc.hasUAV && !a_desc.hasDSV)
+				(void)RenderGraph::Engine::Native::ImmutableTextureOf(a_texture, DXGI_FORMAT_UNKNOWN);
+			auto made = RenderGraph::MadeImageOf(a_image);
+			if (!made.resource)
+				return {};
+			if (made.views && !Covers(*made.views, a_desc)) {
+				static std::atomic<std::uint32_t> loggedLacking{ 0 };
+				if (LogImportLine(loggedLacking))
+					logger::warn("[ORG] frame anchors: {} asks for a view '{}' lacks; its image is imported again, a second graph resource of it", a_by, made.name);
+				return {};
+			}
+			static std::atomic<std::uint32_t> loggedFound{ 0 };
+			if (LogImportLine(loggedFound))
+				logger::info("[ORG] frame anchors: {} is the image of '{}', which ORG made; it is that graph resource{}", a_by, made.name,
+					made.slot ? "'s slot" : "");
+			if (made.slot)
+				return Texture(made.name, std::move(made.slot));
+			return Texture(std::move(made.resource));
 		}
 
 		/** @brief How a new backing joined an import's slot. */
@@ -863,9 +890,17 @@ namespace FrameAnchors
 			}
 			if (Covers(a_import->views, merged))
 				return;
+			const auto old = slot->CurrentResource();
+			// Native mode's graph-owned texture has every view its bind flags allow: importing its image again would add nothing but a
+			// second graph resource of it.
+			if (dynamic_cast<const org::PixelBuffer*>(old.get())) {
+				static std::atomic<std::uint32_t> logged{ 0 };
+				if (LogImportLine(logged))
+					logger::warn("[ORG] frame anchors: {} asks {}'s graph-owned texture for a view its bind flags do not allow; it keeps its views", a_by, a_import->id);
+				return;
+			}
 			DescribeSubresources(merged, a_import->info);
 			auto& runtime = RenderGraphRuntime::Get();
-			const auto old = slot->CurrentResource();
 			// The old version stops being the image's resource here: frames already prepared with it finish with it.
 			RenderGraph::RetireImageResource(old.get());
 			auto next = RenderGraph::ImportDxvkTexture(runtime.Host()->Device(), a_import->info, merged, a_import->id.c_str());
@@ -925,6 +960,11 @@ namespace FrameAnchors
 			desc.isCubemap = (textureDesc.MiscFlags & D3D11_RESOURCE_MISC_TEXTURECUBE) != 0;
 			DescribeSubresources(desc, info.image);
 			const auto image = reinterpret_cast<std::uint64_t>(info.image.image);
+
+			// An image ORG made with a graph resource of its own (a twin's export in an engine slot, an engine texture): that resource.
+			// The id keeps whatever slot it had; this texture is not a version of it.
+			if (auto made = MadeTexture(a_texture, image, desc, a_id))
+				return made;
 
 			// One image, one graph resource: an image some importer already has keeps its slot, whoever came first. Two graph resources
 			// of one image would each track its state, and their layout moves would race.
@@ -1605,6 +1645,9 @@ namespace FrameAnchors
 		auto desc = a_desc;
 		DescribeSubresources(desc, a_image);
 		const std::string name(a_name);
+		// An image ORG made with a graph resource of its own: that resource (a versioned twin's slot).
+		if (auto made = MadeTexture(a_texture, image, desc, name))
+			return made;
 		// The slot an importer already made for the image, with the caller's views added when it lacks one.
 		if (auto shared = FindImage(state, image)) {
 			EnsureViews(shared, desc, name);
