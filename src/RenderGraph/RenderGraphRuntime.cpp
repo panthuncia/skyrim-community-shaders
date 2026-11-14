@@ -1528,6 +1528,18 @@ struct RenderGraphRuntime::Impl
 			logger::info("[ORG] executions a frame: {:.1f} over {:.1f} epochs (averages over {} frames)", double(statExecutions) / double(statFrames),
 				double(statEpochs) / double(statFrames), statFrames);
 			LogSubmissionCensus(double(statFrames));
+			if (host && host->SubmissionThreadOn()) {
+				// The submission thread (CS_ORG_SUBMIT_THREAD): its time, its queue's depth and who waited for it.
+				const auto t = host->TakeSubmitThreadStats();
+				const double frames = double(statFrames);
+				std::string callers;
+				for (const auto& [why, counts] : t.drainsByCaller)
+					callers += fmt::format("{}{} {:.2f}/frame {:.3f} ms", callers.empty() ? "" : ", ", why, double(counts.first) / frames, counts.second / 1000.0 / frames);
+				logger::info("[ORG] Submission thread: busy {:.3f} ms a frame, {:.1f} tickets a frame ({} given back after a failure), peak depth {}; "
+							 "backpressure {:.2f} waits a frame ({:.3f} ms); drains that waited {:.2f} a frame ({:.3f} ms): {}",
+					t.busyUs / 1000.0 / frames, double(t.tickets) / frames, t.discarded, t.peakDepth, double(t.backpressureWaits) / frames,
+					t.backpressureUs / 1000.0 / frames, double(t.drains) / frames, t.drainUs / 1000.0 / frames, callers.empty() ? "-" : callers);
+			}
 			statFrames = statExecutions = statEpochs = 0;
 		}
 		FrameAnchors::LogRunStats();
@@ -2310,6 +2322,12 @@ bool RenderGraphRuntime::Initialize()
 		// CS_ORG_COALESCE_SUBMITS (native mode, default on, =0 off): an epoch's consecutive batches on one queue go to it in one
 		// queue submission (Desc::coalesceSubmissions). Guest mode hands each batch to DXVK's stream as before.
 		desc.coalesceSubmissions = state->native && Switches::Number("CS_ORG_COALESCE_SUBMITS", 1) != 0;
+		// CS_ORG_SUBMIT_THREAD (native mode, default off, =1 on): an epoch's commit runs on the render thread, and the rest of its
+		// submission (admission, passes recorded at execution, queue submissions) on a submission thread of the host's
+		// (Desc::submissionThread). Off with the phase epochs (CS_ORG_PHASES=1). Guest mode submits on the render thread.
+		desc.submissionThread = state->native && Switches::Number("CS_ORG_SUBMIT_THREAD", 0) != 0 && Switches::Number("CS_ORG_PHASES", 0) == 0;
+		if (desc.submissionThread)
+			logger::info("[ORG] native: epochs submit on a submission thread (CS_ORG_SUBMIT_THREAD=0 turns it off)");
 		// CS_ORG_QUEUE_UPLOADS (default on, =0 off): an async epoch's staged uploads whose destination it first uses on the compute
 		// queue are recorded there, just ahead of its first compute batch, and a compute batch waits for the graphics queue's
 		// uploads only when a pass in it declares what they write. Off: every upload on the graphics queue, and every compute batch
