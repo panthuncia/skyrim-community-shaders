@@ -22,7 +22,10 @@
  * from the latch). The tonemap draw is taken too (5.5.4: ISHDR's BLEND build, the plain and the fade form) when the engine makes it,
  * that is when Effects11 does not replace the HDR effect. Also the copies (ISCopyScaleBias and ISCopyTextureMask through ISCopy.hlsl's
  * ORG vertex stage; a copy from kFRAMEBUFFER reads the back buffer's import), the vanilla TAA (two targets), the SIL composite, the
- * snow's SSS, the local map's edge pass and the colour fill. ISMap and both ISNoise forms rasterize nothing (their vertex shaders
+ * snow's SSS, the local map's edge pass and the colour fill; since round 2 the race menu's face tint (ISAlphaBlend, its loaded
+ * tint masks by heap index from the latch: EffectInfo::latched), the reflections' apply, the lighting composite, the dynamic-resolution
+ * upsample, the parallax-mask blur, the IB lens flares, the SIL raw indirect lighting, FXAA and the underwater mask. ISMap and both
+ * ISNoise forms rasterize nothing (their vertex shaders
  * write no SV_Position): they are taken with no pass. The volumetric lighting's apply and blurs are Volumetric Lighting's port.
  *
  * The compute form: inside a scope, BSImagespaceShader::DispatchComputeShader (100952 / 107734) names the effect, and its
