@@ -1209,8 +1209,9 @@ namespace RenderGraph::Engine::Scaleform::Passes
 		{
 			if (!a_state.failedPrograms.insert(a_key).second)
 				return;
-			logger::error("[ORG] Scaleform programs: the pipeline for vertex kind {}, pixel kind {}, filter {}, blend {}, stencil {}, {} (colour format {}, "
-						  "depth format {}) could not be built; its draws are left out",
+			logger::error(
+				"[ORG] Scaleform programs: the pipeline for vertex kind {}, pixel kind {}, filter {}, blend {}, stencil {}, {} (colour format {}, "
+				"depth format {}) could not be built; its draws are left out",
 				a_key.state.vertexKind, a_key.state.pixelKind, a_key.state.filter, a_key.state.blend, static_cast<int>(a_key.state.stencil),
 				a_key.state.lines ? "line strip" : "triangle list", static_cast<int>(a_key.colour), static_cast<int>(a_key.depth));
 		}
@@ -1407,9 +1408,9 @@ namespace RenderGraph::Engine::Scaleform::Passes
 			state.builtRegistration = state.registrations;
 		} else if (state.builtRegistration == 0 || state.builtRegistration < state.surfacesRegistration) {
 			state.pendingPrograms.clear();
-			a_reason = !FrameAnchors::IsRenderOwner() ? "a segment off the render owner" :
+			a_reason = !FrameAnchors::IsRenderOwner()        ? "a segment off the render owner" :
 			           !RenderGraphRuntime::Get().IsActive() ? "the graph path is off (not set up, or failed)" :
-			                                                  "a surface made again (drawn once the Interface graph is built with it)";
+			                                                   "a surface made again (drawn once the Interface graph is built with it)";
 			return false;
 		}
 

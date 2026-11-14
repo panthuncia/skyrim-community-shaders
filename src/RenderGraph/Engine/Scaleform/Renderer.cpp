@@ -1686,7 +1686,7 @@ namespace RenderGraph::Engine::Scaleform
 					a_out[0] = ratioV;
 				}
 			}
-			const auto colour = [&](const std::uint8_t(&a_bgra)[4], std::int32_t a_at) {
+			const auto colour = [&](const std::uint8_t (&a_bgra)[4], std::int32_t a_at) {
 				if (a_at < 0)
 					return;
 				a_out[a_at] = static_cast<float>(a_bgra[2]) * kByteToUnit;
