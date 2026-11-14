@@ -136,9 +136,11 @@ With `CS_ORG_BINK=1` the graph is the only path for the ticks it takes (primary-
 ### What stays the engine's
 
 - Ticks off the render owner (the logo without `CS_ORG_LOADING_THREAD=1`).
-- A movie larger than 4096x2304, and a tile set whose layout is not the expected one.
-- The framebuffer that cannot be imported, the Present anchor's ring full this frame, no staging block to take, and a target
-  made again while a frame is open (a mode-1 tick always starts between frames, so in practice never).
+- A tile set whose layout is not the one `MakeLayout` computes from the set's own fields (an RE invariant; never seen).
+- The framebuffer that cannot be imported, a staging block that cannot be allocated, and the ticks between HDR's UI texture
+  becoming a new graph resource after the first world frame and the build manager attaching the rebuilt Present graph.
+- Since the parity wave (docs/development/parity/families.md): any movie size draws (the 4096x2304 limit and the staging cap
+  are gone), a resize or format change is a new version of the same target (no rebuild), and mode 2 is deleted.
 
 ### 5.5.9 (2026-11-12, `org-port/ui-movies`)
 
@@ -162,12 +164,10 @@ With `CS_ORG_BINK=1` the graph is the only path for the ticks it takes (primary-
   the engine's for it.
 - **The logo's frame 1:** nothing changed; `loading-org1.env` showed 166 of 166 frames on the graph (org-full-port.md). Without
   `CS_ORG_LOADING_THREAD=1` the logo stays the engine's (5.5.11 makes the switch the default).
-- **Mode 2** (a movie inside another frame, `MoviePlayer::TickInFrame`): its frame is queued for a new anchor, `MovieTiles`
-  (FrameAnchors, late, placed before Interface in the timeline), which the `DrawTiles` detour runs right there, so the tiles land
-  at the engine's point in the caller's frame. The client has a pass per target at each anchor (`cs.bink.tiles.in-frame` and
-  `.hdr`), each with its own `RunSlots`; a commit stores the pending frame only at the anchor it was queued for. A run that did
-  not draw is an error (`did not draw at the MovieTiles anchor`), not a fallback. No caller of `TickInFrame` was found in SE
-  (only its unwind data refers to it), so this path may never run.
+- **Mode 2** (a movie inside another frame, `MoviePlayer::TickInFrame`) had a path through a `MovieTiles` anchor. Deleted in
+  the parity wave: `TickInFrame` (SE 0x1410a2f10, AE 0x141197a60) has no caller in SE 1.5.97 or AE 1.6.1170 (a scan of both
+  unpacked executables for calls, jumps, RIP-relative loads and pointers finds only `.pdata` and EH entries), and `Tick`'s only
+  other caller is inside `TickInFrame`. Bink no longer reserves `MovieTiles`.
 - **The startup logo** was the engine's in `1112-025115-p35-latch-census-short-integ2` (22 draws a frame in the startup window):
   setup failed with `the framebuffer cannot be imported`, because the new `TextureOf` read kFRAMEBUFFER's RTV without unwrapping
   the tripwire handle. It unwraps now, and `Update` logs which part failed.
@@ -194,8 +194,7 @@ the Present anchor. With the switch off and no `CS_ORG_BINK_SHOT`, nothing is ho
 
 A tick is a graph tick when the switch is on, the player is in mode 1, the tick runs on the render owner
 (`FrameAnchors::IsRenderOwner`), the anchor can run this frame (`FrameAnchors::CanRun`: the
-client is in the Present graph since setup's build point, and the ring has room), the framebuffer is imported, and the movie is at
-most 4096x2304.
+client is in the Present graph since setup's build point), and the framebuffer is imported. Any movie size draws.
 
 The ORG side (`BinkGraph.cpp`), the same shape as ImGui's backend (`ImGuiBasicRHI.cpp`):
 
@@ -222,8 +221,8 @@ draw lands in the frame that Present shows, under CS's overlay and HDR output.
 
 - Any of the conditions above false: the engine's path for that tick, D3D11 as before.
 - The movie texture, the staging pool, the sampler, the framebuffer import or the registration fails at Setup, or the client's
-  epoch fails (`onFailed`): logged once (`[ORG] Bink: <why>; the engine draws Bink from now on`), and every later tick is the
-  engine's.
+  epoch fails (`onFailed`): the path is off for the session, logged once (`[ORG] Bink: off for the session: <why>. Movies go to
+  the engine's tile draw, which native mode and the flush latch skip`), the client unregistered, nothing logged per tick.
 - A queued frame whose run did not submit with the passes (no `executed` signal; only an epoch failure after `CanRun` allowed
   it): logged as an error, and that frame is lost. The next ticks stay on the graph.
 - A tile set whose layout is not the expected one (bytes per pixel, tile count): logged, that movie stays the engine's.
@@ -327,6 +326,4 @@ client and the tile program are ready from setup ("The primary path").
   ones the engine's while the client joins. The client registers at `State::Setup`; if that ever comes after the logo, the
   logo is the engine's.
 - HDR output's UI texture as the target.
-- Mode 2 movies (inside another frame) need their draw at the point of `DrawTiles`, not at the Present: an anchor at that
-  point, or a draw into the frame's own epoch.
 - On AE the console and Papyrus commands' own IDs were not looked up; the port does not hook them.

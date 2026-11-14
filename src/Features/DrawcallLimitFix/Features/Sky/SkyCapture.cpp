@@ -424,9 +424,15 @@ namespace DCLF::Features::Sky
 				GpuTextures::ResolveFailure failure = GpuTextures::ResolveFailure::None;
 				const auto slot = Family::SlotTexture(view, GpuTextures::ViewKind::Texture2D, GpuTextures::Tag(GpuTextures::Source::FrameSlot, t),
 					constants.textures[t], owners, &failure);
-				if (slot == Family::SlotResult::Published)
-					return "a texture slot holds a published graph texture";
-				if (slot != Family::SlotResult::Ok) {
+				// A published graph texture is read by its id, which the view's client declares (ListInputs), as the water does.
+				if (slot == Family::SlotResult::Published) {
+					const auto id = PublishedResources::ExportedId(view);
+					const auto result = SkyDraws::ReadPublished(a_capture.view, id, constants.textures[t]);
+					if (result != Family::InputResult::Graph) {
+						Refusals().Report(std::format("a {} draw's t{} holds '{}'", NameOf(a_capture.view), t, id), Family::ReasonOf(result));
+						return "a texture slot holds a published graph texture its client cannot read";
+					}
+				} else if (slot != Family::SlotResult::Ok) {
 					Refusals().Report(std::format("a texture of technique {} could not be imported", state->currentPixelDescriptor & 0xFF),
 						GpuTextures::DescribeFailure(view, t, failure));
 					return "a texture it samples could not be imported";

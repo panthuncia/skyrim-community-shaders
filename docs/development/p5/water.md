@@ -262,7 +262,7 @@ render thread at its first draw`). Constants come from the engine constants capt
   published during play (an error).
 - Per draw: a colour target its view's client does not import, a state with no description or no ORG form,
   geometry that is not a static triangle-list TriShape within its buffers, a texture that cannot be imported, sampler modes with no
-  graph sampler, more than 64 draws, an inactive engine constants capture.
+  graph sampler, (more than 64 draws now continue in a new run) an inactive engine constants capture.
 - The water displacement simulation (ImageSpace's, P5.6).
 
 None of these is vouched for under the flush latch: a batch or the rest of one the family does not take is skipped there and counted by
