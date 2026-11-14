@@ -1021,6 +1021,12 @@ namespace DCLF
 			state->frameBlocks = FrameBlockViews::Create(device, state->frameConstants);
 			if (!state->frameBlocks)
 				return fail("the frame blocks' views could not be made");
+			std::vector<FrameBlockViews::Block> faceBlocks;
+			for (std::uint32_t f = 0; f < traits.faces; ++f)
+				faceBlocks.push_back({ std::uint64_t(f) * kViewBlockBytes, kViewBlockBytes });
+			state->faceBlocks = FrameBlockViews::CreateFor(device, state->blocks, faceBlocks, "the faces' camera blocks");
+			if (!state->faceBlocks)
+				return fail("the faces' camera blocks' views could not be made");
 			MatchViewFrameBuffers(*state, resources->frameBuffers);
 		}
 		// The forward part draws through the main set's state classes' colour signatures with an explicit preprocess, as ForwardDrawPass.

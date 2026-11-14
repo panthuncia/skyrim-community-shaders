@@ -205,6 +205,10 @@ namespace DCLF::Draws
 		std::uint64_t frameConstantsAddress = 0;
 		RenderGraph::BufferRef frameConstantsRef;
 		std::shared_ptr<const FrameBlockViews> frameBlocks;  // its pass-wide blocks' views (FrameBlockViews), which its record names
+		// With them, one view per face of the face's block (blocks, kViewBlockBytes each): each face's record names its own at VS and PS b12,
+		// so each face draws with its own camera. The faces' records follow each other in the record slot (kFrameSlotRecord), and each face's
+		// push words name its own.
+		std::shared_ptr<const FrameBlockViews> faceBlocks;
 		bool sharedLightZeroed = false;
 		// With them, its copies of the main pass's frame buffers (Resources::frameBuffers' shape: Deferred's sun cascades at t98), which its
 		// commit fills from each buffer's CPU mirror (this frame's contents) and names at their registers. Made by SetupView, made again by

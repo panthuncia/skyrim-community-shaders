@@ -1,0 +1,2 @@
+# Native Vulkan at Riverwood's river (river.toml).
+extends = ["native-vulkan", "river"]

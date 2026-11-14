@@ -135,7 +135,6 @@ namespace RenderGraph::Engine::Native
 			DclfSwitch{ "CS_DCLF_TERRAIN_PLAIN", "1", "D3D12 draws colour with plain draws only" },
 			DclfSwitch{ "CS_DCLF_DECAL_PLAIN", "1", "D3D12 draws colour with plain draws only" },
 			DclfSwitch{ "CS_DCLF_FORWARD_PLAIN", "1", "D3D12 draws colour with plain draws only" },
-			DclfSwitch{ "CS_DCLF_REFLECTIONS", "0", "the water reflection's views are not ported" },
 		};
 
 		std::string g_d3d12DclfOff;

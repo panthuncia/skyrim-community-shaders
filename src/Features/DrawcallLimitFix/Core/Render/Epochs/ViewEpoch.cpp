@@ -200,7 +200,16 @@ namespace DCLF
 			// PS b12 its block.
 			const auto base = FramePushWords(a_in.frameConstantsAddress, a_in.frameConstantsRef);
 			frame->push.assign(traits.faces, base);
+			// A view with frame constants of its own holds a record per face (ViewResources::faceBlocks): each face's words name its own.
+			const bool faceRecords = a_resources.frameConstants && a_resources.faceBlocks;
 			for (std::uint32_t f = 0; f < traits.faces; ++f) {
+				if (faceRecords && f) {
+					auto& words = frame->push[f];
+					const std::uint64_t record = (std::uint64_t(words[kFramePushRecord + 1]) << 32 | words[kFramePushRecord]) + std::uint64_t(f) * sizeof(DrawBindings);
+					words[kFramePushRecord] = static_cast<std::uint32_t>(record);
+					words[kFramePushRecord + 1] = static_cast<std::uint32_t>(record >> 32);
+					words[kFramePushRecordRef + 1] += f * static_cast<std::uint32_t>(sizeof(DrawBindings));
+				}
 				const std::uint64_t block = a_resources.blocksAddress + std::uint64_t(f) * kViewBlockBytes;
 				for (const bool pixel : { false, true })
 					if (const std::uint32_t word = FramePushWord(pixel, kPerFrameVertexRegister); word != ~0u) {
@@ -445,7 +454,18 @@ namespace DCLF
 			const std::uint32_t nullIndex = textures.NullIndex() != kInvalidIndex ? textures.NullIndex() : 0u;
 			const DrawBindings record = FrameRecordOf(own->frameConstantsAddress, own->frameConstantsRef, *own->frameBlocks, vsMask, psMask, state.frameTextures, nullIndex, *InstalledPayload(),
 				{ FrameValues::Get().PlacementsIndex(), FrameValues::Get().PalettesIndex(), FrameValues::Get().ShadingIndex() }, adopted, *scene, frameNumber);
-			frame(own->frameConstants, &record, sizeof(record), std::uint64_t(kFrameSlotRecord) * kFrameSlotBytes);
+			// A record per face, each naming its face's block at VS and PS b12 (the faces' cameras), back to back in the record slot.
+			std::array<DrawBindings, kMaxViewFaces> records;
+			const std::uint32_t faces = own->faceBlocks ? std::min(own->traits ? own->traits->faces : 1u, kMaxViewFaces) : 1u;
+			for (std::uint32_t f = 0; f < faces; ++f) {
+				records[f] = record;
+				if (own->faceBlocks)
+					ForEachFrameBlock([&](bool, std::uint32_t a_register, std::uint32_t a_block) {
+						if (a_register == kPerFrameVertexRegister)
+							records[f].frameBlocks[a_block] = own->faceBlocks->indices[f];
+					});
+			}
+			frame(own->frameConstants, records.data(), sizeof(DrawBindings) * faces, std::uint64_t(kFrameSlotRecord) * kFrameSlotBytes);
 			frame(own->frameConstants, shared.data(), shared.size(), FrameSlotOffset(true, kSharedDataRegister));
 			frame(own->frameConstants, feature.data(), feature.size(), FrameSlotOffset(true, kFeatureDataRegister));
 			ZeroSharedLightOnce(uploads, own->frameConstants, own->sharedLightZeroed);
