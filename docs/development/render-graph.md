@@ -1121,8 +1121,7 @@ A native device handle answers through the native services instead of failing:
     They are BasicRHI commands on both backends ([parity/native-context.md](./parity/native-context.md)). Once the graph is
     up each goes through ORG's external client when the call is made: an image the graph tracks takes its barriers from its
     ledger, every other resource moves from Common into its command's state and back. Before the graph is up they go on the
-    context's own lists. Nothing waits for the GPU unless Map needs the memory. `Flush` does nothing. On Vulkan this is
-    `CS_ORG_NATIVE_RHI_CONTEXT=1` until the raw Vulkan dialect (Vulkan's own commands in GENERAL) is deleted.
+    context's own lists. Nothing waits for the GPU unless Map needs the memory. `Flush` does nothing.
 -   **Wrapped port resources**: `RenderGraphRuntime::WrapTexture` and `WrapBuffer` make native handles over the port's own
     BasicRHI image or buffer (the image moved into GENERAL, uploaded or zeroed), so `GraphResources::ExportTexture`, the
     engine targets, textures, buffers and texture streaming work as they do on DXVK. A port's handle that wraps a native
@@ -1298,7 +1297,6 @@ commas) is read with `Switches::List`: each item trimmed, empty items left out, 
 | `CS_ORG_NATIVE_BACKEND=d3d12` | Native mode's device: `vulkan` (default) or `d3d12` ("Native mode on D3D12"). It needs `CS_ORG_NATIVE=1` and a build with `CS_ORG_D3D12` (default on); without either the graph is off with that reason. With `CS_ORG_NATIVE_VALIDATION=1` the D3D12 debug layer is on, and `SARP_D3D12_GPU_VALIDATION=1` adds GPU-based validation. |
 | `CS_ORG_NATIVE_PRESENT_PROBE=1` | Native mode: about once a second a present also copies the back buffer into a readback buffer, and a later one logs `[ORG native] present probe ...` with its mean colour and how much of it is not black. Tells "nothing was drawn" from "the capture is broken". |
 | `BASICRHI_D3D12_RESET_TRACE=1` | BasicRHI's D3D12 backend keeps the stack of each command list's last reset, and logs it with the warning for a list reset while it records. |
-| `CS_ORG_NATIVE_RHI_CONTEXT=1` | Native mode on Vulkan: the context's copies, clears and fills are recorded with BasicRHI's commands, as on D3D12, instead of Vulkan's own. For comparing the two paths on one device. |
 | `CS_ORG_D3D12_SELFTEST=1` | Beside the game, on a D3D12 device of its own: builds `RenderGraph/D3D12SelfTest.hlsl` to DXIL, runs one dispatch through the descriptor heap and root constants and checks the readback, then presents 120 frames to a small window. Logs `[ORG] D3D12 self-test: passed` or the step that failed. `CS_ORG_D3D12_SELFTEST_HDR=1` asks the window for HDR10. Needs no native mode. |
 | `CS_ORG_D3D12_DEBUG=1` | The D3D12 debug layer on the self-test's device (and DRED with it). |
 | `CS_ORG_D3D12_SDK=<version>` | With `CS_ORG_NATIVE_BACKEND=d3d12`: load the Agility SDK of that `D3D12SDKVersion` through a device factory. Its `D3D12Core.dll` comes from `CS_ORG_D3D12_SDK_PATH`, else `Data/SKSE/Plugins/CommunityShaders/D3D12`. Unset: the system's D3D12 runtime. |

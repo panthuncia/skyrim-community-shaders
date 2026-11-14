@@ -31,7 +31,7 @@ Deletion commits. Merge them after testing the first part.
 
 ### One route for the context's work (`RunOp`, `Immediate::Route`)
 
-This route is what D3D12 always uses. On Vulkan it needs `CS_ORG_NATIVE_RHI_CONTEXT=1` until commit 8.
+This route is what D3D12 always uses. On Vulkan it needed `CS_ORG_NATIVE_RHI_CONTEXT=1` until commit 8; it is now the only route.
 
 Every context operation names its uses. A use is a resource, a subresource range, and the state its command needs. The operations
 covered are copies, unmaps, updates, clears, mip generation, the present probe and the zeroing of wrapped textures.
