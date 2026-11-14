@@ -905,13 +905,29 @@ if(NOT _FFX_VK_RUNTIME_SHA256 STREQUAL _FFX_VK_PINNED_SHA256)
     message(FATAL_ERROR "Packaged Vulkan FSR runtime does not match the pinned Streamline fork")
 endif()
 
-# Reject legacy backend binaries in Vulkan package inputs.
+# Native D3D12's FSR runtime (sl.fsr on a D3D12 device): AMD's signed amd_fidelityfx_dx12.dll, pinned to the FidelityFX SDK the fork
+# carries when that submodule is checked out.
+set(_FFX_DX12_RUNTIME "${CMAKE_SOURCE_DIR}/package/SKSE/Plugins/CommunityShaders/bin/amd_fidelityfx_dx12.dll")
+if(NOT EXISTS "${_FFX_DX12_RUNTIME}")
+    message(FATAL_ERROR "Missing D3D12 FSR runtime: ${_FFX_DX12_RUNTIME}")
+endif()
+set(_FFX_DX12_PINNED "${CMAKE_SOURCE_DIR}/extern/Streamline/external/fidelityfx-sdk/PrebuiltSignedDLL/amd_fidelityfx_dx12.dll")
+if(EXISTS "${_FFX_DX12_PINNED}")
+    file(SHA256 "${_FFX_DX12_RUNTIME}" _FFX_DX12_RUNTIME_SHA256)
+    file(SHA256 "${_FFX_DX12_PINNED}" _FFX_DX12_PINNED_SHA256)
+    if(NOT _FFX_DX12_RUNTIME_SHA256 STREQUAL _FFX_DX12_PINNED_SHA256)
+        message(FATAL_ERROR "Packaged D3D12 FSR runtime does not match the FidelityFX SDK the Streamline fork pins")
+    endif()
+endif()
+
+# Reject legacy backend binaries in package inputs: any D3D12 runtime but the pinned FidelityFX one above.
 file(GLOB_RECURSE _LEGACY_UPSCALING_RUNTIMES
     "${CMAKE_SOURCE_DIR}/package/*dx12*.dll"
     "${CMAKE_SOURCE_DIR}/package/*d3d12*.dll"
     "${CMAKE_SOURCE_DIR}/features/Upscaling/*dx12*.dll"
     "${CMAKE_SOURCE_DIR}/features/Upscaling/*d3d12*.dll"
 )
+list(FILTER _LEGACY_UPSCALING_RUNTIMES EXCLUDE REGEX "/package/SKSE/Plugins/CommunityShaders/bin/amd_fidelityfx_dx12[.]dll$")
 if(_LEGACY_UPSCALING_RUNTIMES)
     message(FATAL_ERROR "Legacy upscaling runtimes found in Vulkan package inputs: ${_LEGACY_UPSCALING_RUNTIMES}")
 endif()
