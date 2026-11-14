@@ -14,12 +14,47 @@
 #include "Features/DrawcallLimitFix/Diagnostics/Draws/Events.h"
 #include "Features/DrawcallLimitFix/Diagnostics/ScheduleDump.h"
 
+#include "Features/DrawcallLimitFix/Core/Gpu/BuildExecutor.h"
+
 #include <cassert>
+#include <mutex>
+#include <unordered_map>
 
 namespace DCLF::Draws
 {
 	namespace
 	{
+		/** @brief A LoadProgram entry: one desc's load. The program is written before the state turns kLoaded. */
+		struct ProgramLoad
+		{
+			static constexpr int kLoading = 0, kLoaded = 1, kFailed = 2;
+			std::atomic<int> state{ kLoading };
+			std::shared_ptr<const ComputeProgram> program;
+		};
+
+		/** @brief LoadProgram's entries, by desc, for one device (a new device starts over). */
+		struct ProgramLoads
+		{
+			std::mutex mutex;
+			const void* device = nullptr;
+			std::unordered_map<std::string, std::shared_ptr<ProgramLoad>> entries;
+		};
+
+		ProgramLoads& Loads()
+		{
+			static ProgramLoads loads;
+			return loads;
+		}
+
+		/** @brief Everything in a desc that changes what Load builds. */
+		std::string ProgramKey(const ComputeProgram::Desc& a_desc)
+		{
+			std::string key = a_desc.source + '|' + Util::WStringToString(a_desc.entry) + '|' + std::to_string(a_desc.constantWords) + (a_desc.commonDefines ? "|c" : "|n");
+			for (const auto& [name, value] : a_desc.defines)
+				key += '|' + Util::WStringToString(name) + '=' + Util::WStringToString(value);
+			return key;
+		}
+
 		/** @brief A device-local buffer the shaders read by device address. */
 		std::shared_ptr<org::Buffer> DeviceBuffer(std::uint64_t a_bytes, const char* a_name)
 		{
@@ -421,6 +456,27 @@ namespace DCLF
 
 	bool IndirectDraws::Impl::CreateMainBuffers(Resources& a_state, [[maybe_unused]] org::GraphHost& a_host, rhi::Device a_device)
 	{
+		// The programs first, off the render thread (LoadProgram): while they compile nothing is made, and DCLF stays off. The shadow
+		// views', the views' and the sort's are asked here too, so every BuildDraws entry compiles at once and their setups find them ready.
+		bool pending = false;
+		auto load = [&](const ComputeProgram::Desc& a_desc) {
+			bool loading = false;
+			auto program = LoadProgram(a_device, a_desc, loading);
+			pending = pending || loading;
+			return program;
+		};
+		// CS_DCLF_REF_TRACE: the main build records its refs too.
+		auto buildDraws = load({ .source = kBuildDrawsShader, .constantWords = kBuildDrawsConstantWords, .defines = ::DCLF::Diagnostics::RefTrace::ComputeDefines(2) });
+		auto clearPortalQueries = load({ .source = kBuildDrawsShader, .entry = L"ClearPortalQueries", .constantWords = kBuildDrawsConstantWords });
+		auto preparePortalQueries = load({ .source = kBuildDrawsShader, .entry = L"PreparePortalQueries", .constantWords = kBuildDrawsConstantWords });
+		auto forwardSort = load({ .source = kForwardSortShader, .constantWords = kForwardSortConstantWords });
+		(void)load({ .source = kBuildDrawsShader, .entry = L"ShadowCasterRows", .constantWords = kBuildDrawsConstantWords });
+		(void)load({ .source = kBuildDrawsShader, .entry = L"ShadowViews", .constantWords = kBuildDrawsConstantWords });
+		(void)load({ .source = kBuildDrawsShader, .constantWords = kBuildDrawsConstantWords });
+		// DrawSort::Create loads its own: this compiles it ahead, so its load finds the compile cached.
+		(void)load({ .source = kSortSequencesShader, .constantWords = kSortSequencesConstantWords });
+		if (pending)
+			return NotReady(8, "its compute programs are compiling off the render thread");
 		// The sequence ranges (SequenceSlots) at the first layout's sizes, required to every draw the scene can produce (RequireMain);
 		// sized to the layout exactly (its ranges grow by doubling).
 		const bool smallTables = SwitchValue(Switch::TableStart) == "small";
@@ -446,12 +502,11 @@ namespace DCLF
 		a_state.preprocessMain = PreprocessStates::Create(a_device, "the main segment");
 		// The forward epoch records in its own epoch, so it needs its own state lists.
 		a_state.preprocessForward = PreprocessStates::Create(a_device, "the forward epoch");
-		// CS_DCLF_REF_TRACE: the main build records its refs too.
-		a_state.buildDraws = ComputeProgram::Load(a_device, { .source = kBuildDrawsShader, .constantWords = kBuildDrawsConstantWords, .defines = ::DCLF::Diagnostics::RefTrace::ComputeDefines(2) });
+		a_state.buildDraws = std::move(buildDraws);
 		if (!a_state.buildDraws)
 			return NotReady(7, "the BuildDraws program could not be created");
-		a_state.clearPortalQueries = ComputeProgram::Load(a_device, { .source = kBuildDrawsShader, .entry = L"ClearPortalQueries", .constantWords = kBuildDrawsConstantWords });
-		a_state.preparePortalQueries = ComputeProgram::Load(a_device, { .source = kBuildDrawsShader, .entry = L"PreparePortalQueries", .constantWords = kBuildDrawsConstantWords });
+		a_state.clearPortalQueries = std::move(clearPortalQueries);
+		a_state.preparePortalQueries = std::move(preparePortalQueries);
 		if (!a_state.clearPortalQueries || !a_state.preparePortalQueries)
 			return NotReady(7, "the main member portal query programs could not be created");
 		a_state.portalQuerySignature = CreateDispatchSignature(a_device, a_state.preparePortalQueries->layout->GetHandle());
@@ -459,7 +514,7 @@ namespace DCLF
 			return NotReady(7, "the main member portal query signature could not be created");
 
 		// Without the forward sort the forward epoch draws nothing.
-		a_state.forwardSort = ComputeProgram::Load(a_device, { .source = kForwardSortShader, .constantWords = kForwardSortConstantWords });
+		a_state.forwardSort = std::move(forwardSort);
 		if (!a_state.forwardSort)
 			logger::warn("[DCLF] the forward sort program could not be created: the forward epoch draws nothing");
 		a_state.dispatchSignature = CreateDispatchSignature(a_device, a_state.buildDraws->layout->GetHandle());
@@ -739,6 +794,39 @@ namespace DCLF
 		}
 	}
 
+	std::shared_ptr<const ComputeProgram> LoadProgram(rhi::Device a_device, const ComputeProgram::Desc& a_desc, bool& a_pending)
+	{
+		auto& loads = Loads();
+		std::shared_ptr<ProgramLoad> entry;
+		bool start = false;
+		{
+			std::lock_guard lock(loads.mutex);
+			if (loads.device != a_device.impl) {
+				loads.entries.clear();
+				loads.device = a_device.impl;
+			}
+			auto& slot = loads.entries[ProgramKey(a_desc)];
+			if (!slot) {
+				slot = std::make_shared<ProgramLoad>();
+				start = true;
+			}
+			entry = slot;
+		}
+		if (start) {
+			// The compile can block in DXC for seconds after a shader change: the build executor's, never the render thread's. Inline
+			// only when the executor refuses the task.
+			auto task = [entry, a_device, desc = a_desc] {
+				entry->program = ComputeProgram::Load(a_device, desc);
+				entry->state.store(entry->program ? ProgramLoad::kLoaded : ProgramLoad::kFailed, std::memory_order_release);
+			};
+			if (!BuildSubmitter()(task))
+				task();
+		}
+		const int state = entry->state.load(std::memory_order_acquire);
+		a_pending = state == ProgramLoad::kLoading;
+		return state == ProgramLoad::kLoaded ? entry->program : nullptr;
+	}
+
 	bool ShadowEngine::SetupShadow()
 	{
 		if (shadow)
@@ -749,6 +837,12 @@ namespace DCLF
 		if (!host)
 			return ShadowNotReady(0, "no render graph");
 		auto device = host->Device();
+		// The programs first (LoadProgram): while they compile, nothing is made and the views stay native.
+		bool pending = false, rowsPending = false;
+		auto assignCasterRows = LoadProgram(device, { .source = kBuildDrawsShader, .entry = L"ShadowCasterRows", .constantWords = kBuildDrawsConstantWords }, rowsPending);
+		auto buildDraws = LoadProgram(device, { .source = kBuildDrawsShader, .entry = L"ShadowViews", .constantWords = kBuildDrawsConstantWords }, pending);
+		if (pending || rowsPending)
+			return ShadowNotReady(0, "the compute programs are compiling off the render thread");
 		auto state = std::make_shared<ShadowResources>();
 		state->constants = DeviceBuffer(kShadowConstantBytes, "cs.dclf.shadow.constants");
 		// The shadow commit latches into the constants alone, known before any graph declares the pass.
@@ -777,7 +871,7 @@ namespace DCLF
 			{ .extent = { 0, sizeof(DrawSequence), 4 }, .policy = org::services::GrowthPolicy::Headroom(25, 64) });
 		state->casterFirsts = MakeVersioned(CreateWords(objects, true, "cs.dclf.shadow.caster-firsts"), { .extent = { 0, 4, 4 } });
 		state->casterRowsUsed = CreateWords(4u, true, "cs.dclf.shadow.caster-rows-used");
-		state->assignCasterRows = ComputeProgram::Load(device, { .source = kBuildDrawsShader, .entry = L"ShadowCasterRows", .constantWords = kBuildDrawsConstantWords });
+		state->assignCasterRows = std::move(assignCasterRows);
 		if (!state->assignCasterRows) {
 			shadowSetupFailed = true;
 			return ShadowNotReady(1, "the caster rows' compute program could not be created");
@@ -788,7 +882,7 @@ namespace DCLF
 			return ShadowNotReady(1, "the caster rows' dispatch signature could not be created");
 		}
 		// Every view of an epoch in one dispatch (BuildDrawsCS's ShadowViews: ShadowBuildDrawsPass).
-		state->buildDraws = ComputeProgram::Load(device, { .source = kBuildDrawsShader, .entry = L"ShadowViews", .constantWords = kBuildDrawsConstantWords });
+		state->buildDraws = std::move(buildDraws);
 		if (!state->buildDraws) {
 			shadowSetupFailed = true;
 			return ShadowNotReady(1, "the BuildDraws compute program could not be created");
@@ -865,10 +959,15 @@ namespace DCLF
 			logger::warn("[DCLF] the {} view's {}; it stays native", traits.name, a_what);
 			return false;
 		};
+		// The program first (LoadProgram): while it compiles the view is not set up, and stays native, without failing.
+		bool pending = false;
+		auto buildDraws = LoadProgram(device, { .source = kBuildDrawsShader, .constantWords = kBuildDrawsConstantWords }, pending);
+		if (pending)
+			return false;
 		auto state = std::make_shared<ViewResources>();
 		state->traits = &traits;
 		state->main = resources;
-		state->buildDraws = ComputeProgram::Load(device, { .source = kBuildDrawsShader, .constantWords = kBuildDrawsConstantWords });
+		state->buildDraws = std::move(buildDraws);
 		if (state->buildDraws)
 			state->dispatchSignature = CreateDispatchSignature(device, state->buildDraws->layout->GetHandle());
 		if (!state->dispatchSignature)
