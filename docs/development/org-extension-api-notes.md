@@ -1927,3 +1927,17 @@ is not declarable at the build (`PublishedResources::IsDeclarable`), so the call
 - **Wanted, if the wait shows:** per-graph transient resource objects (a build clones its transients), plus a detached prepare and record
   path whose recordings carry the build generation the attach gives them.
 - **Found by:** native frame graph Phase 4, DCLF async builds lane (2026-11-13).
+
+## A null UAV view and a geometry stage for `.fx` effects
+
+- **Need:** the ORG FX runtime must take every preset FX11 takes ([parity/fx.md](./parity/fx.md)). Two constructs it cannot:
+  - `RW*` globals. Effects11 never binds a UAV, so FX11 reads zero and drops writes. The lowering would bind each `RW*` global to
+    a null UAV view of its type.
+  - Geometry shaders on a pass. FX11 runs them between the quad's vertex and pixel stages.
+- **Blocked by:**
+  - `IDescriptorService` has owned SRVs and samplers but no owned UAV. BasicRHI already writes a null view for an invalid resource
+    (`Device::CreateUnorderedAccessView`), so `CreateOwnedUnorderedAccessView` with an invalid resource would be the whole addition.
+  - BasicRHI pipelines have no geometry stage (`ShaderStage` has none), so `RasterProgram` cannot take one.
+- **Worked around:** an effect with either is off on ORG, logged. Hull and domain passes are left out (D3D11 draws nothing with
+  them on a quad), and a compute shader on a pass is ignored.
+- **Found by:** parity wave, `par-fx` lane (2026-11-14).
