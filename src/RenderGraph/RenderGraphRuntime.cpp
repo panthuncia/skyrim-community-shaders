@@ -1469,10 +1469,11 @@ struct RenderGraphRuntime::Impl
 						 "late-bound versions: {} uploads taken to a declaring batch's queue, {} waited for off the graphics queue; "
 						 "{} undeclared destinations made every other-queue batch wait); "
 						 "{} completions left to the host's next GPU wake-up instead of a signal; {} tickets stale only by a new version; {} epoch graphs built again; "
-						 "recordings: {} made, {} revision copies recorded, {} revision submissions ({} waited for a sealed copy, {} skipped with every copy busy); admissions: {} predicted, {} planned",
+						 "recordings: {} made, {} revision copies recorded, {} revision submissions ({} waited for a sealed copy, {} skipped with every copy busy); admissions: {} predicted, {} planned; "
+						 "live epochs: {} runs bound a kept recording, {} recordings kept, {} not replayable, {} runs found no kept copy free",
 				async.submitted, async.waited, async.stale, async.uploads, async.recordedUploadLists, async.queueUploadCopies, async.sparedUploadWaits,
 				async.lateRoutedUploads, async.lateUploadWaits, async.undeclaredUploads, async.wakesSkipped, async.staleBacking, async.rebuilds, async.recorded, async.revisionCopiesRecorded, async.revisionSubmissions, async.copyWaits,
-				async.copiesBusy, async.predicted, async.planned);
+				async.copiesBusy, async.predicted, async.planned, async.liveReused, async.liveKept, async.liveUnkeepable, async.liveSpilled);
 		}
 		{
 			// What the runs in flight hold (run leases, the frame arena, statistics ranges) and the device's command memory.
@@ -2265,6 +2266,13 @@ bool RenderGraphRuntime::Initialize()
 		// (their published copies are submitted again). A live epoch's recording is used once. Replayable recordings carry no Tracy GPU
 		// zones: turn it off to profile the epochs' passes on the GPU with Tracy (the revision-driven epochs then run synchronously).
 		desc.reuseRecordings = !Switches::Equals("CS_ORG_REUSE_RECORDINGS", "0");
+		// CS_ORG_KEEP_LIVE (native mode, default on, =0 off): a live epoch's runs reuse the recording kept for their copy while every
+		// pass's revision holds, so a run prepares and records nothing on the host's thread (Desc::reuseLiveRecordings). Guest mode
+		// keeps recording every live run.
+		desc.reuseLiveRecordings = state->native && Switches::Number("CS_ORG_KEEP_LIVE", 1) != 0;
+		// CS_ORG_COALESCE_SUBMITS (native mode, default on, =0 off): an epoch's consecutive batches on one queue go to it in one
+		// queue submission (Desc::coalesceSubmissions). Guest mode hands each batch to DXVK's stream as before.
+		desc.coalesceSubmissions = state->native && Switches::Number("CS_ORG_COALESCE_SUBMITS", 1) != 0;
 		// CS_ORG_QUEUE_UPLOADS (default on, =0 off): an async epoch's staged uploads whose destination it first uses on the compute
 		// queue are recorded there, just ahead of its first compute batch, and a compute batch waits for the graphics queue's
 		// uploads only when a pass in it declares what they write. Off: every upload on the graphics queue, and every compute batch
