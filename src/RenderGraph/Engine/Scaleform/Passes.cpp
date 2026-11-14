@@ -357,7 +357,7 @@ namespace RenderGraph::Engine::Scaleform::Passes
 		 * @brief Every draw state the capture can make (Renderer.cpp: the background, ApplyFill, DrawIndexedTriList's vertex kinds,
 		 * DrawBitmaps, the colour matrix filter), for the pass with the depth-stencil or the one without. The set is finite:
 		 * - vertex and pixel kinds: 1 with 1-3 (solid, bitmap), 2 with 4-6 (bitmaps), 3 with 12-14 and 16-18 (XY16iC32 gouraud),
-		 *   4 with 11, 13, 14, 15, 17, 18 (XY16iCF32 gouraud), 5 with 11, 14, 15, 18 (gouraud type 3); filters 23 and 24; line strips
+		 *   4 with 11, 13, 14, 15, 17, 18 (XY16iCF32 gouraud), 5 with 11, 14, 15, 18 (gouraud type 3); filters 1 to 24; line strips
 		 *   of kind 1 with 1 (the line style's colour);
 		 * - blends: the Multiply and Darken kinds (3, 6, 15-18, filter 24) only with the multiply and darken states (4, 6), the other
 		 *   kinds with 1, 2, 3, 5, the solid and glyph kinds (1, 4) with any, the filters from the filters' array (8 + the index);
@@ -406,6 +406,13 @@ namespace RenderGraph::Engine::Scaleform::Passes
 			add({ .vertexKind = 1, .pixelKind = 1, .lines = 1 }, { 1, 2, 3, 4, 5, 6, 7 });
 			add({ .vertexKind = 0, .pixelKind = 0, .filter = 23 }, { 9, 10, 11, 13, 15, 7 });
 			add({ .vertexKind = 0, .pixelKind = 0, .filter = 24 }, { 12, 14, 7 });
+			// The blur family (DrawBlurRect): its last pass blends with the filters' array for the mode (the Multiply and Darken shaders
+			// with those modes' states), its passes before with the normal one (9, among those listed).
+			for (std::uint8_t filter = 1; filter <= 22; ++filter) {
+				const bool multiplies = filter == 4 || filter == 5 || filter == 6 || (filter >= 11 && filter <= 14) || filter == 17 || filter == 18 || filter == 20 ||
+				                        filter == 22;
+				add({ .vertexKind = 0, .pixelKind = 0, .filter = filter }, multiplies ? std::vector<std::uint8_t>{ 12, 14, 7 } : std::vector<std::uint8_t>{ 9, 10, 11, 13, 15, 7 });
+			}
 			return states;
 		}
 

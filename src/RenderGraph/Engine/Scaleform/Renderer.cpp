@@ -13,6 +13,7 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <cmath>
 #include <cstring>
 #include <map>
 #include <mutex>
@@ -285,6 +286,7 @@ namespace RenderGraph::Engine::Scaleform
 			};
 			std::vector<Redirect> redirects;
 			std::uint64_t redirectSerial = 0;
+			std::uint32_t pinnedScratch = 0;  // scratch images a filter holds between its passes (a bit each)
 			std::uint32_t d3d11Parts = 0;
 			std::uint32_t graphSegments = 0;
 			// The pixel stage the renderer has bound, for a draw with the fill off (ApplyFillStyle sets nothing then): its kind,
@@ -1178,6 +1180,7 @@ namespace RenderGraph::Engine::Scaleform
 			capture.display.Reset();
 			capture.targets.clear();
 			capture.redirects.clear();
+			capture.pinnedScratch = 0;
 			capture.inFilter = false;
 		}
 
@@ -1346,7 +1349,7 @@ namespace RenderGraph::Engine::Scaleform
 				mark(frame.scratch);
 			for (const auto& redirect : capture.redirects)
 				mark(redirect.scratch);
-			return busy;
+			return busy | capture.pinnedScratch;
 		}
 
 		/**
@@ -1369,7 +1372,7 @@ namespace RenderGraph::Engine::Scaleform
 					scratch = static_cast<std::int32_t>(i);
 			if (scratch < 0) {
 				// The oldest texture whose scratch image is not being drawn into gives it up.
-				std::uint32_t drawing = 0;
+				std::uint32_t drawing = capture.pinnedScratch;
 				if (capture.display.scratch >= 0)
 					drawing |= 1u << capture.display.scratch;
 				for (const auto& frame : capture.targets)
@@ -1493,8 +1496,12 @@ namespace RenderGraph::Engine::Scaleform
 			ResumeAfterD3D11(a_renderer);
 		}
 
+		bool CaptureBlur(void* a_renderer, RE::GTexture* a_source, const float* a_sourceRect, const float* a_destRect, const void* a_params);
+
 		void DrawBlurRect(void* a_renderer, RE::GTexture* a_source, const float* a_sourceRect, const float* a_destRect, const void* a_params)
 		{
+			if (Capturing() && a_source && a_sourceRect && a_destRect && a_params && CaptureBlur(a_renderer, a_source, a_sourceRect, a_destRect, a_params))
+				return;
 			Filter(a_renderer, "a blur, shadow, glow or bevel filter (DrawBlurRect)",
 				[&] { Original<BlurFn>(kDrawBlurRect)(a_renderer, a_source, a_sourceRect, a_destRect, a_params); });
 		}
@@ -1559,6 +1566,277 @@ namespace RenderGraph::Engine::Scaleform
 			command.record = capture.display.Append(&record, sizeof(record), 16);
 			command.vertexCount = 6;
 			capture.display.commands.push_back(command);
+		}
+
+		/** @brief GRenderer::BlurFilterParams (17 dwords; DrawBlurRect SE 82836 reads them from its fifth argument). */
+		struct BlurParams
+		{
+			std::uint32_t flags;
+			float blurX, blurY;
+			std::uint32_t passes;
+			float offsetX, offsetY;
+			std::uint8_t color[4];   // B, G, R, A
+			std::uint8_t color2[4];  // the same
+			float strength;
+			float cxform[8];  // rMul, rAdd, gMul, gAdd, bMul, bAdd, aMul, aAdd
+		};
+		static_assert(sizeof(BlurParams) == 0x44);
+
+		// The filter pixel shader table's slot (PS-B, 1 to 26) to FilterPS.hlsl's FILTER.
+		constexpr std::array<std::uint8_t, 27> kFilterOfSlot{ 0, 1, 2, 4, 5, 3, 2, 6, 5, 7, 8, 11, 12, 10, 9, 14, 13, 15, 15, 17, 17, 19, 21, 20, 22, 23, 24 };
+
+		/**
+		 * @brief Where a slot's constants go in its 32-float PSConstants (the renderer's offset table, SE 0x141e0ac70), -1 for none, and
+		 * which textures it reads: the original source (srctex) and the pass's source (tex), by stage.
+		 */
+		struct FilterLayout
+		{
+			std::int32_t offset, scolor, scolor2, srctexscale, texscale;
+			std::int32_t srctex, tex;
+		};
+
+		FilterLayout LayoutOfSlot(std::uint32_t a_slot)
+		{
+			if (a_slot <= 16)
+				return { 12, 16, 20, 24, 26, 0, 1 };
+			if (a_slot <= 20)
+				return { 12, 16, -1, -1, 20, -1, 0 };  // srctexscale's index is -1: see BlurConstants
+			return { -1, -1, -1, -1, 12, -1, 0 };
+		}
+
+		/**
+		 * @brief One pass's PSConstants as DrawBlurRect writes them (docs/development/p5/scaleform.md, "The blur family"), for the
+		 * pass's source of a_width by a_height and the original source of a_originalWidth by a_originalHeight (the sizes the draws sample
+		 * in: a scratch image's for a texture drawn into one).
+		 */
+		void BlurConstants(const BlurParams& a_params, std::uint32_t a_slot, bool a_last, float a_width, float a_height, float a_originalWidth,
+			float a_originalHeight, float (&a_out)[32])
+		{
+			std::memset(a_out, 0, sizeof(a_out));
+			const FilterLayout layout = LayoutOfSlot(a_slot);
+			const float* cx = a_params.cxform;
+			if (a_last) {
+				const float alpha = cx[6];
+				const float mul[4] = { cx[0] * alpha, cx[2] * alpha, cx[4] * alpha, alpha };
+				const float add[4] = { cx[1] * alpha, cx[3] * alpha, cx[5] * alpha, cx[7] };
+				for (int i = 0; i < 4; ++i) {
+					a_out[4 + i] = mul[i];
+					a_out[i] = add[i] * kByteToUnit;
+				}
+			} else {
+				for (int i = 0; i < 4; ++i)
+					a_out[4 + i] = 1.0f;
+			}
+			const float sx = static_cast<float>(static_cast<std::uint32_t>((std::max)(a_params.blurX - 1.0f, 0.0f))) * 0.5f;
+			const float sy = static_cast<float>(static_cast<std::uint32_t>((std::max)(a_params.blurY - 1.0f, 0.0f))) * 0.5f;
+			const float weight = 1.0f / ((2.0f * sy + 1.0f) * (2.0f * sx + 1.0f));
+			if (a_slot == 21 || a_slot == 23) {
+				a_out[8] = a_params.blurX > 1.0f ? sx : sy;
+				a_out[11] = weight;
+				a_out[layout.texscale] = a_params.blurX > 1.0f ? 1.0f / a_width : 0.0f;
+				a_out[layout.texscale + 1] = a_params.blurY > 1.0f ? 1.0f / a_height : 0.0f;
+			} else {
+				a_out[8] = sx;
+				a_out[9] = sy;
+				a_out[11] = weight;
+				a_out[layout.texscale] = 1.0f / a_width;
+				a_out[layout.texscale + 1] = 1.0f / a_height;
+			}
+			if (layout.offset >= 0) {
+				a_out[layout.offset] = -a_params.offsetX;
+				a_out[layout.offset + 1] = -a_params.offsetY;
+				// srctexscale: for slots 17-20 its index is -1, so the renderer writes the width ratio before the buffer and the height
+				// ratio over cxadd.r; the shadow-only shaders see that.
+				const float ratioU = a_width / a_originalWidth, ratioV = a_height / a_originalHeight;
+				if (layout.srctexscale >= 0) {
+					a_out[layout.srctexscale] = ratioU;
+					a_out[layout.srctexscale + 1] = ratioV;
+				} else {
+					a_out[0] = ratioV;
+				}
+			}
+			const auto colour = [&](const std::uint8_t(&a_bgra)[4], std::int32_t a_at) {
+				if (a_at < 0)
+					return;
+				a_out[a_at] = static_cast<float>(a_bgra[2]) * kByteToUnit;
+				a_out[a_at + 1] = static_cast<float>(a_bgra[1]) * kByteToUnit;
+				a_out[a_at + 2] = static_cast<float>(a_bgra[0]) * kByteToUnit;
+				a_out[a_at + 3] = static_cast<float>(a_bgra[3]) * kByteToUnit;
+			};
+			colour(a_params.color, layout.scolor);
+			colour(a_params.color2, layout.scolor2);
+		}
+
+		/** @brief A filter draw's bytes with the blur family's 128-byte constants (Scaleform/Filter.hlsli reads the same offsets). */
+		struct BlurRecord
+		{
+			float vertices[6][6];
+			float mvp[4][4];
+			float constants[32];
+		};
+		static_assert(offsetof(BlurRecord, mvp) == kFilterMatrixOffset && offsetof(BlurRecord, constants) == kFilterConstantsOffset);
+
+		/**
+		 * @brief One blur pass's draw: the rectangle a_dest (in the matrix's space) sampling a_rect of the source over a_width by a_height,
+		 * with a_slot's shader and constants, the textures by stage, clamped and linear.
+		 */
+		void EmitBlurPass(void* a_renderer, const float* a_matrix, const float* a_dest, const float* a_rect, float a_width, float a_height, std::uint32_t a_slot,
+			const float (&a_constants)[32], std::int32_t a_srctex, std::int32_t a_tex, std::uint8_t a_blend)
+		{
+			auto& capture = Current();
+			BlurRecord record{};
+			const float u0 = a_rect[0] / a_width, v0 = a_rect[1] / a_height, u1 = a_rect[2] / a_width, v1 = a_rect[3] / a_height;
+			const float corners[4][6] = {
+				{ a_dest[0], a_dest[1], 0.0f, 1.0f, u0, v0 },
+				{ a_dest[2], a_dest[1], 0.0f, 1.0f, u1, v0 },
+				{ a_dest[0], a_dest[3], 0.0f, 1.0f, u0, v1 },
+				{ a_dest[2], a_dest[3], 0.0f, 1.0f, u1, v1 },
+			};
+			constexpr int kOrder[6] = { 0, 1, 2, 2, 1, 3 };
+			for (int i = 0; i < 6; ++i)
+				std::memcpy(record.vertices[i], corners[kOrder[i]], sizeof(record.vertices[i]));
+			DrawRecord matrixRecord{};
+			DrawMatrix(a_renderer, a_matrix, matrixRecord);
+			std::memcpy(record.mvp, matrixRecord.mvp, sizeof(record.mvp));
+			std::memcpy(record.constants, a_constants, sizeof(record.constants));
+
+			const FilterLayout layout = LayoutOfSlot(a_slot);
+			Command command{};
+			command.kind = Command::Kind::Draw;
+			command.state.vertexKind = 0;
+			command.state.pixelKind = 0;
+			command.state.filter = kFilterOfSlot[a_slot];
+			command.state.blend = a_blend;
+			command.state.stencil = capture.stencil;
+			command.stencilRef = capture.stencilRef;
+			if (layout.srctex >= 0)
+				command.textures[layout.srctex] = a_srctex;
+			command.textures[layout.tex] = a_tex;
+			command.samplers[0] = command.samplers[1] = 3;  // Bind(stage, clamp, linear)
+			command.record = capture.display.Append(&record, sizeof(record), 16);
+			command.vertexCount = 6;
+			capture.display.commands.push_back(command);
+		}
+
+		/**
+		 * @brief DrawBlurRect (SE 82836 / AE 84957) on the graph: its passes before the last drawn into scratch images (each cleared, as
+		 * the renderer's PushTempRenderTarget clears its pooled target, onto {-1, -1, 1, 1} with the identity matrix), the last onto the
+		 * current target with the current matrix and a_destRect. The shaders, constants, textures and blends are the renderer's
+		 * (docs/development/p5/scaleform.md, "The blur family"). False, nothing captured, for a source the graph cannot read.
+		 */
+		bool CaptureBlur(void* a_renderer, RE::GTexture* a_source, const float* a_sourceRect, const float* a_destRect, const void* a_params)
+		{
+			auto& capture = Current();
+			const auto* redirect = FindRedirect(a_source);
+			if (!redirect) {
+				// A source the graph cannot read stays the D3D11 renderer's filter (checked here: TextureIndex's abort replays the
+				// last kept call, and a filter keeps none).
+				if (!IsPlainTexture(a_source) || !Field<void*>(a_source, Layout::kTextureResource))
+					return false;
+				auto* view = Field<ID3D11ShaderResourceView*>(a_source, Layout::kTextureView);
+				if (!view || !Tripwire::Unwrap(view))
+					return false;
+			}
+			std::uint32_t scratchWidth = 0, scratchHeight = 0;
+			Passes::ScratchSize(scratchWidth, scratchHeight);
+			const auto params = *static_cast<const BlurParams*>(a_params);
+			const float sourceRect[4] = { a_sourceRect[0], a_sourceRect[1], a_sourceRect[2], a_sourceRect[3] };
+			const float destRect[4] = { a_destRect[0], a_destRect[1], a_destRect[2], a_destRect[3] };
+			const std::int32_t original = TextureIndex(a_renderer, a_source);
+			if (original == kNoTexture)
+				return false;
+			const float originalWidth = static_cast<float>((std::max)(Field<std::uint32_t>(a_source, Layout::kTextureWidth), 1u)) / (redirect ? redirect->scaleU : 1.0f);
+			const float originalHeight = static_cast<float>((std::max)(Field<std::uint32_t>(a_source, Layout::kTextureHeight), 1u)) / (redirect ? redirect->scaleV : 1.0f);
+
+			// The renderer's three parameter sets: passes alternate the first two, the last uses the third. A blur of more than 32 taps
+			// blurs one axis a pass, in twice the passes.
+			const bool split = params.blurX * params.blurY > 32.0f;
+			BlurParams sets[3] = { params, params, params };
+			if (split) {
+				sets[0].blurY = 1.0f;
+				sets[1].blurX = 1.0f;
+				sets[2].blurX = 1.0f;
+			}
+			const std::uint32_t passes = (std::max)(params.passes, 1u) * (split ? 2u : 1u);
+			const bool multiply = Multiply();
+			std::uint32_t lastSlot = split ? (multiply ? 23 : 21) : (multiply ? 24 : 22);
+			if (params.flags & 0x2) {
+				if (!(params.flags & 0x400))
+					lastSlot = ((~(params.flags >> 6) & 8) | 1) + ((params.flags & 0x100) ? 4 : 0) + ((params.flags & 0x4) ? 1 : 0);
+				else
+					lastSlot = (params.flags & 0x4) ? 18 : 17;
+				if (multiply)
+					lastSlot += 2;
+			}
+
+			static constexpr float kIdentity[6] = { 1.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f };
+			static constexpr float kUnitRect[4] = { -1.0f, -1.0f, 1.0f, 1.0f };
+			std::int32_t source = original;  // the pass's source
+			float sourceWidth = originalWidth, sourceHeight = originalHeight;
+			std::int32_t held = -1;  // the scratch image the last intermediate pass drew into
+			const std::uint32_t first = (params.flags & 0x20000) ? passes - 1 : 0;
+			for (std::uint32_t pass = first; pass + 1 < passes; ++pass) {
+				const auto& set = sets[pass & 1];
+				const std::uint32_t slot = split ? 21 : 22;
+				const auto width = static_cast<std::uint32_t>(std::ceil(sourceRect[2] - sourceRect[0]));
+				const auto height = static_cast<std::uint32_t>(std::ceil(sourceRect[3] - sourceRect[1]));
+				const std::int32_t scratch = AcquireScratch(nullptr, (std::max)(width, 1u), (std::max)(height, 1u));
+				if (scratch == Display::kLostScratch) {
+					NotePart("a filter pass that no scratch image could take (the filter is not drawn)");
+					if (held >= 0)
+						capture.pinnedScratch &= ~(1u << held);
+					return true;
+				}
+				float constants[32];
+				BlurConstants(set, slot, false, sourceWidth, sourceHeight, originalWidth, originalHeight, constants);
+				// The pass as its own segment into the scratch image; the interrupted segment's target and state come back after.
+				Flush(a_renderer);
+				const std::int32_t interrupted = capture.display.scratch;
+				float viewport[4], viewMatrix[6];
+				std::memcpy(viewport, capture.display.viewport, sizeof(viewport));
+				std::memcpy(viewMatrix, capture.viewMatrix, sizeof(viewMatrix));
+				const Stencil stencil = capture.stencil;
+				const std::uint32_t stencilRef = capture.stencilRef;
+				ClearSegment();
+				capture.display.scratch = scratch;
+				capture.display.viewport[0] = capture.display.viewport[1] = 0.0f;
+				capture.display.viewport[2] = static_cast<float>((std::max)(width, 1u));
+				capture.display.viewport[3] = static_cast<float>((std::max)(height, 1u));
+				// PushRenderTarget's view matrix for the frame {-1, -1, 1, 1}.
+				const float unitView[6] = { 1.0f, 0.0f, 0.0f, 0.0f, -1.0f, 0.0f };
+				std::memcpy(capture.viewMatrix, unitView, sizeof(unitView));
+				capture.stencil = Stencil::Off;
+				capture.stencilRef = 0;
+				StartSegment(a_renderer);
+				capture.display.clearTarget = true;
+				EmitBlurPass(a_renderer, kIdentity, kUnitRect, sourceRect, sourceWidth, sourceHeight, slot, constants, original, source,
+					capture.inMask ? 7 : 9);
+				Flush(a_renderer);
+				ClearSegment();
+				capture.display.scratch = interrupted;
+				std::memcpy(capture.display.viewport, viewport, sizeof(viewport));
+				std::memcpy(capture.viewMatrix, viewMatrix, sizeof(viewMatrix));
+				capture.stencil = stencil;
+				capture.stencilRef = stencilRef;
+				StartSegment(a_renderer);
+				// The previous intermediate is read; this one is held for the next pass.
+				if (held >= 0)
+					capture.pinnedScratch &= ~(1u << held);
+				held = scratch;
+				capture.pinnedScratch |= 1u << scratch;
+				source = ScratchTexture(scratch);
+				sourceWidth = static_cast<float>(scratchWidth);
+				sourceHeight = static_cast<float>(scratchHeight);
+			}
+			// The last pass onto the current target: the filters' blend array for the mode, nothing while a mask is drawn.
+			float constants[32];
+			BlurConstants(sets[2], lastSlot, true, sourceWidth, sourceHeight, originalWidth, originalHeight, constants);
+			const std::uint8_t blend = capture.inMask ? 7 : static_cast<std::uint8_t>(8 + kBlendStates[capture.blendMode > 14 ? 0 : capture.blendMode]);
+			EmitBlurPass(a_renderer, &Field<float>(a_renderer, Layout::kMatrix), destRect, sourceRect, sourceWidth, sourceHeight, lastSlot, constants, original,
+				source, blend);
+			if (held >= 0)
+				capture.pinnedScratch &= ~(1u << held);
+			return true;
 		}
 
 		void DrawColorMatrixRect(void* a_renderer, RE::GTexture* a_source, const float* a_sourceRect, const float* a_destRect, const float* a_matrix)
