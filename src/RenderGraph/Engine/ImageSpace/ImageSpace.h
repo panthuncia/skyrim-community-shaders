@@ -35,15 +35,17 @@
  * The pass set is fixed for the session at Setup (docs/development/p5/imagespace.md, "The primary path"): every shape (effect,
  * outputs, inputs, samplers, blend state, viewport, all by value) of the shape manifest beside the shader store, with the shapes
  * the RE says they imply, is a pass behind a gate entry, registered once. Programs are queued at Setup and taken by each pass when
- * the graph is first built (ProgramCache::GetNow), before any world frame. A shape outside the manifest stays with the engine for
- * the session (logged once) and is written to the manifest for the next one: nothing registers again during play. Two kinds of
+ * the graph is first built (ProgramCache::GetNow), before any world frame. A shape outside the manifest is built on first sight: a
+ * client of its own with one pass (FrameAnchors::Register, built by the build manager off the render thread, the main registration
+ * running meanwhile), whose draws are runs of their own once its graph is attached; the draws before that stay with the engine
+ * (logged), and the manifest has the shape from the next session. Two kinds of
  * shape need no session to see them first: the flow copy (its flow map is made at Setup if the engine has not made it) and the
  * whole-target shape of an effect that keeps the viewport before it (refraction, the distant blur). The engine's
  * targets made again (a resize) register the same shapes on the new imports, into the build the new imports ask for anyway.
  *
  * Inherent refusals, per draw: an effect not selected, a target outside the engine's table, a scissor rectangle, dynamic
- * resolution's quad, a manager rectangle, a clear at the bind, a shape outside the session's set, an anchor whose built graph does
- * not hold the registration yet (FrameAnchors::CanRun). Constants the capture missed are failures, logged as errors. A batch that is
+ * resolution's quad, a manager rectangle, a clear at the bind, a shape whose pass is still being built (first sight), an anchor
+ * whose built graph does not hold the registration yet (FrameAnchors::CanRun). Constants the capture missed are failures, logged as errors. A batch that is
  * pending when the engine draws something else is run first, so the engine's order is kept. A failed graph returns every effect to
  * the engine for the session. A covered effect's draw the engine still makes is not vouched for in the flush latch (no
  * Flush::Reason): under the latch it is skipped, and the residue census counts it.
