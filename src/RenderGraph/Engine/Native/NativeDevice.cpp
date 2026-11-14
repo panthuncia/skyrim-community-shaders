@@ -1632,13 +1632,21 @@ namespace RenderGraph::Engine::Native
 					LogHostMade(fmt::format("ORG could not make it ({})", e.what()), a_request.name);
 					return false;
 				}
-				// ORG made it Undefined: into Common with its contents, as the context and the graph's home states expect until Phase 4.
-				if (!Initialize(record->resource->GetHandle(), a_request, a_format, a_mips, a_layers, a_depth)) {
-					LogOnce(loggedUpload, a_request.name, "its initial layout or contents could not be written");
-					return false;
+				if (RhiContext()) {
+					// Its contents through ORG's external client: the ledger moves it out of Undefined and knows where it is after.
+					if (!InitializeTracked(*record, a_request, a_format, a_mips, a_layers, a_depth)) {
+						LogOnce(loggedUpload, a_request.name, "its initial layout or contents could not be written");
+						return false;
+					}
+				} else {
+					// ORG made it Undefined: into Common with its contents, as the raw context and the graph's home states expect.
+					if (!Initialize(record->resource->GetHandle(), a_request, a_format, a_mips, a_layers, a_depth)) {
+						LogOnce(loggedUpload, a_request.name, "its initial layout or contents could not be written");
+						return false;
+					}
+					if (auto* tracker = record->graphOwned->GetStateTracker())
+						*tracker = org::SymbolicTracker();  // the whole texture in Common
 				}
-				if (auto* tracker = record->graphOwned->GetStateTracker())
-					*tracker = org::SymbolicTracker();  // the whole texture in Common
 				record->ownership = NativeResource::Ownership::Tracked;
 				NoteOwnedImage(*record);
 				// The image's one graph resource, for the duplicate check (imports find it through GraphTextureOf).
@@ -2034,14 +2042,53 @@ namespace RenderGraph::Engine::Native
 			 */
 			bool Initialize(rhi::ResourceHandle a_texture, const TextureRequest& a_request, rhi::Format a_format, uint32_t a_mips, uint32_t a_layers, uint32_t a_depth)
 			{
-				rhi::ResourcePtr upload;
+				auto upload = std::make_shared<rhi::ResourcePtr>();
 				std::vector<InitialCopy> copies;
 				rhi::TextureSubresourceRange all{};
-				if (!StageInitialData(a_texture, a_request, a_format, a_mips, a_layers, a_depth, upload, copies, all))
+				if (!StageInitialData(a_texture, a_request, a_format, a_mips, a_layers, a_depth, *upload, copies, all))
 					return false;
-				return oneShot.Run((copies.empty() ? "initial layout " : "initial contents ") + a_request.name, [&](rhi::CommandList a_list) {
-					RecordInitialize(a_list, a_texture, all, upload, copies, rhi::ResourceLayout::Common, rhi::ResourceAccessType::Common);
-				});
+				const std::string label = (copies.empty() ? "initial layout " : "initial contents ") + a_request.name;
+				const auto record = [&](rhi::CommandList& a_list) {
+					RecordInitialize(a_list, a_texture, all, *upload, copies, rhi::ResourceLayout::Common, rhi::ResourceAccessType::Common);
+				};
+				if (!RhiContext())
+					return oneShot.Run(label, record);
+				// The BasicRHI context: an image no graph tracks yet, through ORG's external client once the graph is up (on the context's
+				// own list before). Waited for, so a graph that imports it later on another queue finds it written.
+				const uint64_t value = immediate.RunUntracked(
+					label, [&](rhi::CommandList& a_list, const Immediate::Descriptors&) { record(a_list); }, { upload }, {});
+				return value && immediate.Wait(value);
+			}
+
+			/**
+			 * @brief A tracked texture's first contents (MakeGraphOwned, with the BasicRHI context), through ORG's external client: its
+			 * PixelBuffer is declared as a copy destination (in Common when there is nothing to copy), so the ledger moves it out of
+			 * Undefined and holds where it is after. No wait: every later use, graph or context, is ordered by that ledger.
+			 */
+			bool InitializeTracked(NativeResource& a_record, const TextureRequest& a_request, rhi::Format a_format, uint32_t a_mips, uint32_t a_layers, uint32_t a_depth)
+			{
+				auto& texture = *a_record.graphOwned;
+				const auto handle = texture.GetAPIResource().GetHandle();
+				auto upload = std::make_shared<rhi::ResourcePtr>();
+				std::vector<InitialCopy> copies;
+				rhi::TextureSubresourceRange all{};
+				if (!StageInitialData(handle, a_request, a_format, a_mips, a_layers, a_depth, *upload, copies, all))
+					return false;
+				const ::RenderGraph::ExternalWork::Access access{ &texture, {},
+					{ rhi::ResourceAccessType::CopyDest, copies.empty() ? rhi::ResourceLayout::Common : rhi::ResourceLayout::CopyDest, rhi::ResourceSyncState::Copy } };
+				NativeResource* const used[] = { &a_record };
+				const auto record = [&](rhi::CommandList& a_list, const Immediate::Descriptors&) {
+					for (const auto& copy : copies) {
+						rhi::BufferTextureCopyFootprint region{};
+						region.texture = handle;
+						region.buffer = (*upload)->GetHandle();
+						region.mip = copy.mip;
+						region.arraySlice = copy.slice;
+						region.footprint = copy.footprint;
+						a_list.CopyBufferToTexture(region);
+					}
+				};
+				return immediate.Route((copies.empty() ? "initial layout " : "initial contents ") + a_request.name, { &access, 1 }, {}, record, { upload }, used) != 0;
 			}
 
 			/**
