@@ -54,10 +54,7 @@ public:
 
 	static ORGLocalShadows& Get();
 
-	/**
-	 * @brief Whether CS_ORG_LIGHT_LIMIT_FIX_SHADOWS=1 is set. The earlier name CS_ORG_LLF_SHADOWS is read when the new one is
-	 * unset, with a deprecation warning.
-	 */
+	/** @brief Whether CS_ORG_LIGHT_LIMIT_FIX_SHADOWS=1 is set. */
 	static bool Requested();
 
 	/** @brief Reserves the EarlyPrepass anchor when requested. Call before the render graph initializes (PostPostLoad). */

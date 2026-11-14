@@ -31,8 +31,6 @@ namespace
 {
 	constexpr const char* kClientId = "cs.llf.local-shadows";
 	constexpr std::string_view kSwitch = "CS_ORG_LIGHT_LIMIT_FIX_SHADOWS";
-	// The switch's earlier name, which older scenario files still set.
-	constexpr std::string_view kDeprecatedSwitch = "CS_ORG_LLF_SHADOWS";
 	constexpr const char* kShader = "LightLimitFix/LocalShadowCopyCS.hlsl";
 	// LocalShadowCopyCS's group size (GROUP_SIZE).
 	constexpr std::uint32_t kGroupSize = 8;
@@ -213,12 +211,7 @@ ORGLocalShadows::~ORGLocalShadows() = default;
 
 bool ORGLocalShadows::Requested()
 {
-	static const bool requested = [] {
-		if (Switches::IsSet(kSwitch) || !Switches::IsSet(kDeprecatedSwitch))
-			return Switches::On(kSwitch);
-		logger::warn("[ORG] {} is deprecated; set {} instead", kDeprecatedSwitch, kSwitch);
-		return Switches::On(kDeprecatedSwitch);
-	}();
+	static const bool requested = Switches::On(kSwitch);
 	return requested;
 }
 

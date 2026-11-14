@@ -54,7 +54,6 @@ namespace RenderGraph::Engine::Native
 			"CS_ORG_ENGINE_CONSTANTS",
 			"CS_ORG_ENGINE_SKELETON",
 			"CS_ORG_SKY",
-			"CS_ORG_SKY_CLOUDS",
 			"CS_ORG_OCCLUSION_QUERIES",
 			"CS_ORG_VOLUMETRIC_LIGHTING",
 			"CS_ORG_WATER",
@@ -80,7 +79,6 @@ namespace RenderGraph::Engine::Native
 			Conflict{ "CS_ORG_OWNED_FRAME", "1", "the owned frame runs DXVK as a guest on BasicRHI's device; native mode has no DXVK" },
 			Conflict{ "CS_ORG", "0", "native mode is the render graph: it cannot be off" },
 			Conflict{ "CS_ORG", "features", "native mode is the render graph: it cannot be off" },
-			Conflict{ "CS_ORG_SCALEFORM_D3D11_PARTS", "1", "it draws Scaleform's remaining parts through D3D11" },
 		};
 
 		/**

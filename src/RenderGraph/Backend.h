@@ -5,7 +5,6 @@
 #include <rhi.h>
 
 #include <string>
-#include <string_view>
 
 /**
  * @brief Which BasicRHI backend the render graph runs on, and what that changes for the rest of CS.
@@ -40,11 +39,4 @@ namespace RenderGraph::Backend
 	 * (CS_ORG_NATIVE=1) and a build with the D3D12 backend.
 	 */
 	std::string RequestError();
-
-	/**
-	 * @brief The reason a subsystem is off on the active backend, for its log line and the menu. Empty on Vulkan.
-	 * @param a_what the subsystem ("Drawcall Limit Fix's draw pipelines").
-	 * @param a_why what it needs that D3D12 lacks.
-	 */
-	std::string UnsupportedReason(std::string_view a_what, std::string_view a_why);
 }

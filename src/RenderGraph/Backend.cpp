@@ -62,13 +62,6 @@ namespace RenderGraph::Backend
 			return "CS_ORG_NATIVE_BACKEND=d3d12 needs CS_ORG_NATIVE=1: DXVK runs the game on Vulkan, so the render graph cannot share a D3D12 device with it";
 		return {};
 	}
-
-	std::string UnsupportedReason(std::string_view a_what, std::string_view a_why)
-	{
-		if (!IsD3D12())
-			return {};
-		return fmt::format("{} is not available on D3D12 (CS_ORG_NATIVE_BACKEND=d3d12): {}", a_what, a_why);
-	}
 }
 
 #endif
