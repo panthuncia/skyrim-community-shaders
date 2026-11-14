@@ -1760,6 +1760,8 @@ namespace RenderGraph::Engine::ImageSpace
 			}
 		}
 
+		void NoteImports(const Spec& a_spec);
+
 		/**
 		 * @brief Registers the client with a pass for every shape of a_keys (numbered from 0 by their place in the frame), replacing any
 		 * earlier registration. Setup's, and again on the same shapes when the engine made its targets again. The anchor's graph is
