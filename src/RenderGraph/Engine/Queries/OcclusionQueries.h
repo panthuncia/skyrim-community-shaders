@@ -93,8 +93,8 @@ namespace RenderGraph::Engine::OcclusionQueries
 	/**
 	 * @brief The ORG queries of one client's runs: a range of PerRun() occlusion queries per run, and a readback of their counts. A
 	 * run's range is its lease index's (org::RunRef::lease). The ranges come in chunks of kRunsPerChunk lease indices, each a query
-	 * pool and a readback buffer of its own, made when a run's commit first needs one, so they grow with the host's runs in flight and
-	 * never move. Every recording of the client's pass resets its run's range, counts each draw with one query (Pool and Index;
+	 * pool and a readback buffer of its own. Create makes kSetupChunks of them, so the client's first build declares every readback
+	 * play needs; a commit that needs a later one makes it. Chunks never move. Every recording of the client's pass resets its run's range, counts each draw with one query (Pool and Index;
 	 * RasterProgram::DrawDesc::occlusionPool), and resolves the range (Resolve). The commit names the engine slots its run counts
 	 * (Commit); the executed callback marks the run submitted (Executed). A range's counts are read when the next run of its lease
 	 * index commits (the lease's last run retired before the index was opened again), or earlier when GetQueryData finds that work
@@ -114,6 +114,13 @@ namespace RenderGraph::Engine::OcclusionQueries
 
 		/** @brief The lease indices one query pool and readback serve. */
 		static constexpr std::uint32_t kRunsPerChunk = 64;
+
+		/**
+		 * @brief The chunks Create makes: lease indices for 256 runs in flight, above what the host reaches in play (every anchor's
+		 * runs over its frames in flight, plus the published copies). A chunk past them is still made at a commit, and refreshes the
+		 * client (logged by FrameAnchors).
+		 */
+		static constexpr std::uint32_t kSetupChunks = 4;
 
 		/**
 		 * @brief The readback buffers made so far, in chunk order: what the client's pass declares as copy destinations at its build.

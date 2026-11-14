@@ -19,8 +19,9 @@
 //   family's batch, between the two.
 //
 // Programs: Utility.hlsl's ORG build (UTILITY_ORG_SCENE: the base texture, the fog of war, depth and the shadow maps, skinned or
-// not), Lighting.hlsl's (LIGHTING_ORG) and Effect.hlsl's (EFFECT_ORG), both with the world's CS features off. A draw of a shader
-// with no ORG build (tree LOD), a particle draw or one the family refuses ends its batch's latched part; the engine draws the rest.
+// not), Lighting.hlsl's (LIGHTING_ORG) and Effect.hlsl's (EFFECT_ORG), both with the world's CS features off. Particles (Effect
+// through DrawDynamicTriShape's DrawData copy) are latched as two-stream draws. A draw of a shader with no ORG build (tree LOD) or
+// one the family refuses ends its batch's latched part; the engine draws the rest.
 
 #include "Features/DrawcallLimitFix/Api/Feature.h"
 #include "Features/DrawcallLimitFix/Core/Engine/EngineAccess.h"

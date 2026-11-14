@@ -294,7 +294,7 @@ render thread at its first draw`). Constants come from the engine constants capt
   imported; a published input not listed, or first published during play (`PublishedLate`, an error).
 - Per draw: not BSSkyShader, a state with no description or no ORG form (dual source), geometry
   that is not a static triangle-list TriShape within its buffers, a texture that cannot be imported, sampler modes with no graph
-  sampler, a face's cloud layers out of order, more than 128 draws, an inactive engine constants capture.
+  sampler, a face's cloud layers out of order, more than 128 draws in a face run holding cloud layers (other batches continue in a new run), an inactive engine constants capture.
 - A cloud group with another shader's pass (a sky-object effect) or another geometry type.
 
 ### What can trigger a graph rebuild (primary path)

@@ -97,6 +97,16 @@ namespace DCLF::Features::MenuViews::Scenes
 			SceneDraws::Submit(std::move(run));
 		}
 
+		/**
+		 * @brief Whether the draw's vertex PerGeometry (b2) is there as its shader reads it: bound, or not declared by the shader at all
+		 * (no group buffer of its own: a skinned depth draw takes its transforms from the bones). An undeclared group copies as zeros,
+		 * which the same descriptor's ORG build does not read either.
+		 */
+		bool HasVertexPerGeometry(Family::Constants::UseId a_use, const RE::BSGraphics::VertexShader* a_vs)
+		{
+			return Family::ConstantBytes(a_use, Stage::Vertex, 2) != 0 || !a_vs || !a_vs->constantBuffers[2].buffer;
+		}
+
 		/** @brief A refusal: the latched part runs now and the rest of the batch is the engine's; logged once per reason and view. */
 		void Refuse(Capture& a_capture, std::string_view a_reason, std::string_view a_detail = {})
 		{
@@ -203,8 +213,8 @@ namespace DCLF::Features::MenuViews::Scenes
 			const auto use = Family::CaptureConstants();
 			if (!use.Valid())
 				return "the engine constants capture is not active";
-			if (!Family::ConstantBytes(use, Stage::Vertex, 2))
-				return "no vertex PerGeometry";
+			if (!HasVertexPerGeometry(use, vs))
+				return "its vertex shader declares a PerGeometry that is not bound";
 			Family::CopyRows(use, Stage::Vertex, 0, constants.vsTechnique, kVSTechniqueRows);
 			Family::CopyRows(use, Stage::Vertex, 1, constants.vsMaterial, kVSMaterialRows);
 			Family::CopyRows(use, Stage::Vertex, 2, constants.vsGeometry, kVSGeometryRows);
@@ -303,8 +313,8 @@ namespace DCLF::Features::MenuViews::Scenes
 			const auto use = Family::CaptureConstants();
 			if (!use.Valid())
 				return "the engine constants capture is not active";
-			if (!Family::ConstantBytes(use, Stage::Vertex, 2))
-				return "no vertex PerGeometry";
+			if (!HasVertexPerGeometry(use, vs))
+				return "its vertex shader declares a PerGeometry that is not bound";
 			Family::CopyRows(use, Stage::Vertex, 0, constants.vsTechnique, kLightingVSTechniqueRows);
 			Family::CopyRows(use, Stage::Vertex, 1, constants.vsMaterial, kLightingVSMaterialRows);
 			Family::CopyRows(use, Stage::Vertex, 2, constants.vsGeometry, kLightingVSGeometryRows);
@@ -414,8 +424,8 @@ namespace DCLF::Features::MenuViews::Scenes
 			const auto use = Family::CaptureConstants();
 			if (!use.Valid())
 				return "the engine constants capture is not active";
-			if (!Family::ConstantBytes(use, Stage::Vertex, 2))
-				return "no vertex PerGeometry";
+			if (!HasVertexPerGeometry(use, vs))
+				return "its vertex shader declares a PerGeometry that is not bound";
 			Family::CopyRows(use, Stage::Vertex, 0, constants.vsTechnique, kEffectVSTechniqueRows);
 			Family::CopyRows(use, Stage::Vertex, 1, constants.vsMaterial, kEffectVSMaterialRows);
 			Family::CopyRows(use, Stage::Vertex, 2, constants.vsGeometry, kEffectVSGeometryRows);

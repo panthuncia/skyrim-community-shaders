@@ -169,7 +169,7 @@ namespace DCLF::Features::ShadowMask
 		 */
 		bool Setup();
 		/**
-		 * @brief Whether a_view's batch is taken: its client exists, kSHADOW_MASK is still the import it was made with, and a run of the
+		 * @brief Whether a_view's batch is taken: its client exists (taking kSHADOW_MASK's new slot after a format change), and a run of the
 		 * anchor now would draw (FrameAnchors::CanRun). False is logged once per reason; the engine draws the batch.
 		 */
 		bool CanTake(View a_view);

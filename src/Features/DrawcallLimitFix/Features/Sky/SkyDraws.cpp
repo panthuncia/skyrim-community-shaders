@@ -40,7 +40,7 @@ namespace DCLF::Features::Sky::SkyDraws
 	namespace
 	{
 		constexpr const char* kShader = "Sky.hlsl";
-		// The most draws a batch latches; a batch's draws past it are the engine's. A cloudy weather draws about 40.
+		// The most draws a run latches; a batch with more draws in several runs (SkyCapture's Continue). A cloudy weather draws about 40.
 		constexpr std::uint32_t kMaxDraws = 128;
 		constexpr std::uint32_t kFaces = 6;
 		constexpr std::uint32_t kDrawStride = static_cast<std::uint32_t>(sizeof(DrawConstants));

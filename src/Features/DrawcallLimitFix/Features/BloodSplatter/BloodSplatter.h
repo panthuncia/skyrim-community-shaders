@@ -95,7 +95,7 @@ namespace DCLF::Features::BloodSplatter
 		 */
 		bool Setup();
 		/**
-		 * @brief Whether a batch is taken: the client exists, imports the back buffer the engine binds now, and a run of the anchor now
+		 * @brief Whether a batch is taken: the client exists (taking the back buffer's new slot after a format change), and a run of the anchor now
 		 * would draw (FrameAnchors::CanRun). False is logged once per reason; the engine draws the batch.
 		 */
 		bool CanTake();

@@ -197,10 +197,10 @@ render thread at its first draw`). Constants come from the engine constants capt
 
 ### What stays the engine's
 
-- A view kept off by `CS_ORG_SHADOW_MASK_VIEWS`, and kSHADOW_MASK made again since its client imported it (a resolution change).
+- A view kept off by `CS_ORG_SHADOW_MASK_VIEWS`. (Parity wave: kSHADOW_MASK made again is its slot's next version, or a new slot the client takes; parity/families.md.)
 - Per draw: not BSUtilityShader, a target other than kSHADOW_MASK alone (or a depth target bound), a state with no description or no
   ORG form, geometry that is not a static triangle-list TriShape within its buffers, a read slot holding a published texture not
-  listed (or published during play), a texture that cannot be imported, more than 32 draws, an inactive engine constants capture.
+  listed (or published during play), a texture that cannot be imported, (more than 32 draws now continue in a new run) an inactive engine constants capture.
 
 Changed with the primary path: the program's descriptor is CS's lookup (`State::modifiedPixelDescriptor`), and the stages are
 compiled for Utility's RenderShadowmask* pixel descriptors only.

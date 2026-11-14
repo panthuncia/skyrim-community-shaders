@@ -28,6 +28,7 @@
 #include <atomic>
 #include <cstring>
 #include <format>
+#include <mutex>
 #include <string_view>
 
 namespace DCLF::Features::ShadowMask::ShadowMaskDraws
@@ -35,7 +36,7 @@ namespace DCLF::Features::ShadowMask::ShadowMaskDraws
 	namespace
 	{
 		constexpr const char* kShader = "Utility.hlsl";
-		// The most draws a batch latches (ShadowMaskCapture's kMaxLatched).
+		// The most draws a run latches (ShadowMaskCapture's kMaxLatched).
 		constexpr std::uint32_t kMaxDraws = 32;
 		constexpr std::uint32_t kDrawStride = static_cast<std::uint32_t>(sizeof(DrawConstants));
 		constexpr std::size_t kViews = static_cast<std::size_t>(View::Count);
@@ -57,13 +58,21 @@ namespace DCLF::Features::ShadowMask::ShadowMaskDraws
 			// One draw entry per latched draw. The anchor closes it at every run, and only this client's commit opens it, so a run of
 			// the anchor that another client keeps draws nothing of this client's older run.
 			std::shared_ptr<::RenderGraph::RunGate> gate;
-			FrameAnchors::Texture target;  // kSHADOW_MASK, as imported at the registration
+			// kSHADOW_MASK as last imported (Target). A new texture of the same format is the slot's next version; another format is a
+			// new slot, taken at the next batch (CanTake) and declared from the next build.
+			FrameAnchors::Texture target;
+			mutable std::mutex targetMutex;  // the render thread replaces target, a build reads it
 			// Every published id the view's draws can read, fixed here (ListInputs). Each build declares the registered ones.
 			Family::PublishedInputs inputs;
 			// Render thread writes, the host's thread reads.
 			std::shared_ptr<const Run> run;
 			bool pending = false;
-			bool targetLogged = false;
+
+			FrameAnchors::Texture Target() const
+			{
+				std::scoped_lock lock(targetMutex);
+				return target;
+			}
 			std::atomic<std::uint64_t> executed{ 0 };  // runs submitted with this client's pass (its executed callback)
 		};
 
@@ -91,7 +100,7 @@ namespace DCLF::Features::ShadowMask::ShadowMaskDraws
 			{
 				Bindings bindings{};
 				bindings.shared = SharedConstants::Declare(a_builder);
-				bindings.target = a_builder.RenderTarget(client->target).View();
+				bindings.target = a_builder.RenderTarget(client->Target()).View();
 				// The published inputs, each with the view whose index the draws' latches carry. Every registered one is declared, read
 				// this frame or not, so a new Publish needs no new client.
 				bindings.inputs = client->inputs.Declare(a_builder);
@@ -329,12 +338,16 @@ namespace DCLF::Features::ShadowMask::ShadowMaskDraws
 		const auto& client = state.clients[static_cast<std::size_t>(a_view)];
 		if (!client)
 			return false;
-		// kSHADOW_MASK made again (a resolution change) is another import: those batches stay the engine's until the next start (no
-		// client is registered again during play).
-		if (FrameAnchors::EngineTarget(kShadowMaskTarget) != client->target) {
-			if (!std::exchange(client->targetLogged, true))
-				logger::warn("[DCLF] shadow mask: kSHADOW_MASK changed since the {} client registered; those batches stay the engine's", client->id);
-			return false;
+		// kSHADOW_MASK made again at another size is the slot's next version (FrameAnchors rebuilds what took its size). Another format
+		// is a new slot: the client takes it and is built again with it (the import already asked every graph holding the old slot to be
+		// built again), and its batches wait for that build's attach below.
+		if (auto current = FrameAnchors::EngineTarget(kShadowMaskTarget); current && current != client->Target()) {
+			{
+				std::scoped_lock lock(client->targetMutex);
+				client->target = std::move(current);
+			}
+			FrameAnchors::Refresh(client->id);
+			logger::info("[DCLF] shadow mask: kSHADOW_MASK is another graph resource (a format change); the {} client is built again with it", client->id);
 		}
 		if (!FrameAnchors::CanRun(client->id, FrameAnchors::Anchor::EngineDraws)) {
 			static Util::ReasonLog log("[DCLF] shadow mask: the engine draws a batch", spdlog::level::err);

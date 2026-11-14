@@ -54,18 +54,18 @@ namespace RenderGraph::Engine::Bink
 
 		/**
 		 * @brief Render thread, at the start of a tick that could draw on the graph: whether this tick may. The client joined the
-		 * Present anchor's graph at setup's build point and the tile programs were built at setup. When a target was made again (a
-		 * resize, HDR's textures made again) the client is refreshed, and with a_betweenFrames (a blocking movie's tick before it
-		 * begins its frame) the graph is built here, between two frames. The refusals left: the ring full this frame
-		 * (FrameAnchors::CanRun), a framebuffer that cannot be imported, and a target made again inside a frame. A frame queued
-		 * earlier that did not draw is logged as an error. a_inFrame: a movie inside another frame (player mode 2), drawn at the
-		 * MovieTiles anchor. False: the graph does not draw this tick.
+		 * Present anchor's graph at setup's build point and the tile programs are chosen per frame at the commit. When a target was
+		 * made again as another graph resource (HDR's UI texture appearing) the client is refreshed, and with a_betweenFrames (a
+		 * blocking movie's tick before it begins its frame) the graph is built here, between two frames. False only while that
+		 * build is not attached yet, or when the framebuffer cannot be imported. A frame queued earlier that did not draw is logged
+		 * as an error.
 		 */
-		bool Begin(bool a_betweenFrames, bool a_inFrame);
+		bool Begin(bool a_betweenFrames);
 
 		/**
 		 * @brief Render thread: the movie's tiles, their place in a staging buffer and in the movie texture's chunks (a_tileSize: the
-		 * whole tiles' edge); null, logged, when the graph path cannot draw it (a movie over 4096x2304).
+		 * whole tiles' edge). Any size: a movie larger than the movie texture is drawn in chunks. Null only for a
+		 * layout with no tiles.
 		 */
 		std::shared_ptr<Movie> CreateMovie(const Layout& a_layout, std::uint32_t a_tileSize);
 
@@ -81,13 +81,7 @@ namespace RenderGraph::Engine::Bink
 		 * with a_hdr (HDR Display redirected the framebuffer there). False when there is nothing the graph can draw: the engine's draw
 		 * runs.
 		 */
-		bool Queue(const std::shared_ptr<Movie>& a_movie, bool a_hdr, bool a_inFrame);
-
-		/**
-		 * @brief Render thread, right after Queue of a movie inside another frame (player mode 2), at the tile draw's point: the
-		 * MovieTiles anchor runs the queued frame there, in the frame's order. False, logged as an error, when it did not draw.
-		 */
-		bool DrawInFrame();
+		bool Queue(const std::shared_ptr<Movie>& a_movie, bool a_hdr);
 
 		/** @brief Render thread, at the end of every tick that called Begin: drops a staging buffer the tick took but did not queue. */
 		void EndTick(Movie& a_movie);

@@ -38,7 +38,8 @@ namespace DCLF::Features::Sky
 		using ::RenderGraph::Engine::Tripwire::Unwrap;
 		using Stage = Family::Constants::Stage;
 
-		// The most draws one batch latches; past it a draw is the engine's (SkyDraws' latch has room for this many).
+		// The most draws one run latches (SkyDraws' latch has room for this many). A batch with more runs what it latched at that point
+		// and goes on in a new run (Continue).
 		constexpr std::size_t kMaxLatched = 128;
 
 		const char* NameOf(View a_view) { return a_view == View::Main ? "main" : a_view == View::Face ? "face" : "sun occlusion"; }
@@ -285,6 +286,27 @@ namespace DCLF::Features::Sky
 		}
 
 		/**
+		 * @brief A full run: the latched part runs now, and the batch goes on in a new run with the same view, face and inputs (their
+		 * imports are kept with the run that submitted them, for longer than this frame). False when the run holds a face's cloud draws:
+		 * a later layer's copies draw every earlier layer of their run, so the rest of that batch stays one run and is refused.
+		 */
+		bool Continue(Capture& a_capture)
+		{
+			const auto& full = *a_capture.run;
+			if (std::ranges::any_of(full.draws, [](const Draw& a_draw) { return a_draw.occlusion; }))
+				return false;
+			auto next = std::make_shared<Run>();
+			next->view = full.view;
+			next->face = full.face;
+			next->sceneDepthIndex = full.sceneDepthIndex;
+			next->sceneDepthNull = full.sceneDepthNull;
+			next->headerIndices = full.headerIndices;
+			FlushLatched(a_capture);
+			a_capture.run = std::move(next);
+			return true;
+		}
+
+		/**
 		 * @brief A refusal: the latched part runs now, and the rest of the batch (the cloud group's included) is the engine's, vouched for
 		 * until Finish. Logged once per reason, technique and view.
 		 */
@@ -302,9 +324,9 @@ namespace DCLF::Features::Sky
 		 */
 		const char* TryLatchDraw(Capture& a_capture, const Family::TriShape* a_shape, std::uint32_t a_start, std::uint32_t a_triangles)
 		{
+			if (a_capture.run->draws.size() >= kMaxLatched && !Continue(a_capture))
+				return "more draws than one run latches, with a face's cloud layers among them";
 			auto& run = *a_capture.run;
-			if (run.draws.size() >= kMaxLatched)
-				return "more draws than the batch latches";
 			const auto& rss = RE::BSGraphics::RendererShadowState::GetSingleton()->GetRuntimeData();
 			const auto* vs = rss.currentVertexShader;
 			const auto* ps = rss.currentPixelShader;
@@ -402,9 +424,15 @@ namespace DCLF::Features::Sky
 				GpuTextures::ResolveFailure failure = GpuTextures::ResolveFailure::None;
 				const auto slot = Family::SlotTexture(view, GpuTextures::ViewKind::Texture2D, GpuTextures::Tag(GpuTextures::Source::FrameSlot, t),
 					constants.textures[t], owners, &failure);
-				if (slot == Family::SlotResult::Published)
-					return "a texture slot holds a published graph texture";
-				if (slot != Family::SlotResult::Ok) {
+				// A published graph texture is read by its id, which the view's client declares (ListInputs), as the water does.
+				if (slot == Family::SlotResult::Published) {
+					const auto id = PublishedResources::ExportedId(view);
+					const auto result = SkyDraws::ReadPublished(a_capture.view, id, constants.textures[t]);
+					if (result != Family::InputResult::Graph) {
+						Refusals().Report(std::format("a {} draw's t{} holds '{}'", NameOf(a_capture.view), t, id), Family::ReasonOf(result));
+						return "a texture slot holds a published graph texture its client cannot read";
+					}
+				} else if (slot != Family::SlotResult::Ok) {
 					Refusals().Report(std::format("a texture of technique {} could not be imported", state->currentPixelDescriptor & 0xFF),
 						GpuTextures::DescribeFailure(view, t, failure));
 					return "a texture it samples could not be imported";

@@ -62,8 +62,8 @@ The pieces every engine draw family shares are `Core/Engine/Family` (render-grap
 
 The client is made once, at the first main-thread tick (`RenderGraph::Engine::MainTick`, after the frame-job wait) the render graph
 runs, before any blood is drawn, and asks for its build there (`RequestJoin`): the first hit does not rebuild the EngineDraws graph
-mid-fight. The first batch after the client is in the built graph probes. Nothing registers again: a new back buffer (a swap chain made again) keeps the
-screen blood the engine's for the session, logged once.
+mid-fight. The first batch after the client is in the built graph probes. Nothing registers again: a new back buffer (a swap chain made again) is the
+slot's next version (since the parity wave; a new format is a new slot the client takes).
 
 ### Accepted differences
 
@@ -109,10 +109,10 @@ render thread at its first draw`). Constants come from the engine constants capt
 
 ### What stays the engine's
 
-- A back buffer other than the one the client imported (a swap chain made again): every batch, logged once.
+- (Parity wave: a swap chain made again is the back buffer slot's next version; a new format is a new slot the client takes and is built again with. See parity/families.md.)
 - Per draw: not BSBloodSplatterShader, a depth or stencil test, targets other than the back buffer alone, a state with no
   description or no ORG form, geometry that is not a static triangle-list TriShape within its buffers, a slot holding a published
-  texture, a texture that cannot be imported, more than 32 draws, an inactive engine constants capture.
+  texture, a texture that cannot be imported, (more than 32 draws now continue in a new run) an inactive engine constants capture.
 
 ### What can trigger a graph rebuild (primary path)
 
