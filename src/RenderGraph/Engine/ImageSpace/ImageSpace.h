@@ -20,7 +20,10 @@
  * separable compute blur), the end-of-frame chain's depth of field or distant blur (with its compute blur), refraction and radial
  * blur, the snow pass's ISCopySubRegionCS and Main::RenderWaterEffects' flow copies (each queued texture read by its heap index
  * from the latch). The tonemap draw is taken too (5.5.4: ISHDR's BLEND build, the plain and the fade form) when the engine makes it,
- * that is when Effects11 does not replace the HDR effect. The volumetric lighting's apply and blurs are Volumetric Lighting's port.
+ * that is when Effects11 does not replace the HDR effect. Also the copies (ISCopyScaleBias and ISCopyTextureMask through ISCopy.hlsl's
+ * ORG vertex stage; a copy from kFRAMEBUFFER reads the back buffer's import), the vanilla TAA (two targets), the SIL composite, the
+ * snow's SSS, the local map's edge pass and the colour fill. ISMap and both ISNoise forms rasterize nothing (their vertex shaders
+ * write no SV_Position): they are taken with no pass. The volumetric lighting's apply and blurs are Volumetric Lighting's port.
  *
  * The compute form: inside a scope, BSImagespaceShader::DispatchComputeShader (100952 / 107734) names the effect, and its
  * DispatchCSShader (75532 / 77329) is withheld and latched: the shadow state's compute slots name the input and output targets
@@ -38,15 +41,16 @@
  * the graph is first built (ProgramCache::GetNow), before any world frame. A shape outside the manifest is built on first sight: a
  * client of its own with one pass (FrameAnchors::Register, built by the build manager off the render thread, the main registration
  * running meanwhile), whose draws are runs of their own once its graph is attached; the draws before that stay with the engine
- * (logged), and the manifest has the shape from the next session. Two kinds of
- * shape need no session to see them first: the flow copy (its flow map is made at Setup if the engine has not made it) and the
- * whole-target shape of an effect that keeps the viewport before it (refraction, the distant blur). The engine's
- * targets made again (a resize) register the same shapes on the new imports, into the build the new imports ask for anyway.
+ * (logged), and the manifest has the shape from the next session. Two kinds of shape need no session to see them first: the flow
+ * copy (its flow map is made at Setup if the engine has not made it) and the whole-target shape of an effect that keeps the viewport
+ * before it (refraction, the distant blur). The engine's targets made again (a resize) register the same shapes, with those built on
+ * first sight, on the new imports, into the build the new imports ask for anyway.
  *
- * Inherent refusals, per draw: an effect not selected, a target outside the engine's table, a scissor rectangle, dynamic
- * resolution's quad, a manager rectangle, a shape whose pass is still being built (first sight), an anchor
- * whose built graph does not hold the registration yet (FrameAnchors::CanRun). Constants the capture missed are failures, logged as errors. A batch that is
- * pending when the engine draws something else is run first, so the engine's order is kept. A failed graph returns every effect to
+ * Inherent refusals, per draw: an effect not selected, a target outside the engine's table, a scissor rectangle, a depth or stencil
+ * test, dynamic resolution's quad, a manager rectangle, a viewport outside its target, a shape whose pass is still being built
+ * (first sight), an anchor whose built graph does not hold the registration yet (FrameAnchors::CanRun). A draw whose target is
+ * cleared at the bind is taken after the pending batch runs (the clear goes between). Constants the capture missed are failures,
+ * logged as errors. A batch that is pending when the engine draws something else is run first, so the engine's order is kept. A failed graph returns every effect to
  * the engine for the session. A covered effect's draw the engine still makes is not vouched for in the flush latch (no
  * Flush::Reason): under the latch it is skipped, and the residue census counts it.
  *
