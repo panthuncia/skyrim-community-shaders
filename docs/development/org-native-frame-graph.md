@@ -1214,3 +1214,27 @@ Lines to read, once per report:
   anchors in their region's epoch: ...`. A region execution counts once, however many runs joined it. Joins are runs minus executions.
   A held execution whose submission failed counts under `failed`, not as an execution.
 - `[ORG] Epoch CPU <segment> (native): ...` per segment, `[ORG] Async epochs: ...` and `[ORG] Run memory: ...`.
+
+## Phase 4 measurements (2026-11-13, RTX 5080, Dev-Fast, integrate dda594b00)
+
+All runs are background runs (`CS_TEST_BACKGROUND=1`).
+
+**Exclusive imports and home states off.**
+- With exclusive imports (`CS_ORG_NATIVE_EXCLUSIVE_IMPORTS=1`), the start and Whiterun shots match the default within about 1%, in quick runs and in tours. Routing the native context's work through the ledger fixed the flashing.
+- Home states off (`CS_ORG_NATIVE_HOME_STATES=0`) needs `CS_ORG_NATIVE_IN_STREAM=1`. Without in-stream epochs, the engine's loading-screen draws fail and the load never ends. With them, quick runs and tours pass.
+- An intermittent load stall was seen twice: the first load never finished, the loading screen kept drawing, and nothing was logged. Once it was an exclusive-imports tour, once a home-states-off quick run without in-stream, both on builds before c7423914c. It did not recur in four exclusive quick runs or two later tours. A watcher that dumps the game 60 s into a stalled load is ready for the next one.
+- The Dragonsreach tour shot is not repeatable on this machine. A control run with default settings differs from the others by 22-42%, because the sun patches through the windows move between runs. Judge interiors by eye, not by that number.
+
+**Regions** (`CS_ORG_REGIONS=1`): 46 executions a frame over 24 epochs, against 51 over 25 with them off.
+- Per frame, 20 region executions hold 25 anchor runs (5 joins).
+- Splits per frame, by cause:
+  - a client's second commit: 8;
+  - an anchor with its own epoch: 6;
+  - another epoch: 3;
+  - another region's anchor: 2;
+  - external commands: 1.
+- The next gains are anchors whose clients commit twice (they could join like ImageSpace does), and hand-written clients that are not gated yet: Scaleform, DCLF's draw families, Bink, ImGui, SSS, IBL.
+
+**Frame rate** (`native-vulkan+perf-quick`, vsync off): default 30.2 fps, regions 29.3, exclusive imports 28.1, home states off 30.9.
+- The samples within one run spread from 23 to 37 fps, so these differences are noise.
+- Dev-Fast (/Od) on this machine is CPU-bound, so the GPU savings that home states off should bring (resting layouts) cannot show. Measure them in a Release build, or on the RX 6600, where the 1.2 ms was found.
