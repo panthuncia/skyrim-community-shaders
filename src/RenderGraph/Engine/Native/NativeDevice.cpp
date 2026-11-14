@@ -286,6 +286,12 @@ namespace RenderGraph::Engine::Native
 			ci.enableDebug = Switches::On("CS_ORG_NATIVE_VALIDATION");
 			// Hang diagnostics where DXVK's hang mode would be on (DXVK_DEBUG=hang, CS_GPU_CRASH_ANALYSIS); CS_ORG_CRASH_MARKERS=0 off.
 			ci.enableCrashMarkers = (Switches::Equals("DXVK_DEBUG", "hang") || Aftermath::WantsCrashAnalysis()) && !Switches::Off("CS_ORG_CRASH_MARKERS");
+			// Nsight Aftermath's checkpoints, as on DXVK's adopted device: with crash markers on, every debug label (the graph's passes)
+			// sets an NV checkpoint that its dump resolves to the pass name.
+			if (Aftermath::IsEnabled()) {
+				ci.vulkanRegisterCheckpoint = &Aftermath::RegisterOrgCheckpoint;
+				ci.vulkanDetailedCheckpoints = Switches::Equals("CS_ORG_DETAILED_CHECKPOINTS", "1");
+			}
 			// The graph binds on descriptor buffers alone, as on DXVK's device (RenderGraphRuntime's binding model check).
 			ci.vulkanBindingModels = rhi::vulkan::BindingModel_DescriptorBuffer;
 			ci.vulkanCreateHooks = &hooks;
@@ -4953,6 +4959,33 @@ namespace RenderGraph::Engine::Native
 		return applied;
 	}
 
+	bool DescribeVulkanDevice(DxvkOrgInteropDeviceInfo& a_info)
+	{
+		if (!g_device || OnD3D12())
+			return false;
+		const auto device = g_device->Rhi();
+		a_info = {};
+		a_info.version = DXVK_ORG_INTEROP_VERSION;
+		a_info.getInstanceProcAddr = LoaderProc();
+		a_info.instance = rhi::vulkan::get_instance(device);
+		a_info.instanceApiVersion = rhi::vulkan::get_api_version(device);
+		a_info.physicalDevice = rhi::vulkan::get_physical_device(device);
+		a_info.device = rhi::vulkan::get_device(device);
+		a_info.graphicsQueue = rhi::vulkan::get_queue(g_device->graphics);
+		a_info.graphicsQueueFamily = rhi::vulkan::get_queue_family_index(g_device->graphics);
+		return a_info.getInstanceProcAddr && a_info.instance && a_info.physicalDevice && a_info.device && a_info.graphicsQueue;
+	}
+
+	HRESULT __stdcall RunOnGraphicsQueue(ID3D11Device*, void (*a_callback)(void*, VkQueue_T*), void* a_user)
+	{
+		if (!g_device || OnD3D12() || !a_callback)
+			return E_FAIL;
+		const VkQueue queue = rhi::vulkan::get_queue(g_device->graphics);
+		std::lock_guard guard(g_queueLock);
+		a_callback(a_user, queue);
+		return S_OK;
+	}
+
 	void Shutdown()
 	{
 		if (!g_device)
@@ -4995,6 +5028,8 @@ namespace RenderGraph::Engine::Native
 	winrt::com_ptr<ID3D11Buffer> WrapBuffer(const rhi::Resource&, const D3D11_BUFFER_DESC&, const char*) { return nullptr; }
 	void Shutdown() {}
 	bool SetSwapChainColorSpace(bool) { return false; }
+	bool DescribeVulkanDevice(DxvkOrgInteropDeviceInfo&) { return false; }
+	HRESULT __stdcall RunOnGraphicsQueue(ID3D11Device*, void (*)(void*, VkQueue_T*), void*) { return E_FAIL; }
 	bool CreateStreamShell(const D3D11_TEXTURE2D_DESC&, ID3D11Texture2D**, ID3D11ShaderResourceView**) { return false; }
 	HRESULT __stdcall StreamEnableView(ID3D11ShaderResourceView*, void(__stdcall*)(std::uint64_t), void(__stdcall*)(std::uint64_t),
 		const D3D11_SUBRESOURCE_DATA*(__stdcall*)(std::uint64_t, BOOL), std::uint64_t)

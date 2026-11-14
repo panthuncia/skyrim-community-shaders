@@ -8,6 +8,7 @@
 #	include "Globals.h"
 #	include "RenderGraph/BuildManager.h"
 #	include "RenderGraph/DxvkOrgInterop.h"
+#	include "RenderGraph/Engine/Native/Native.h"
 
 #	include <OpenRenderGraph/GraphHost.h>
 #	include <Telemetry/NvPerfCapture.h>
@@ -94,18 +95,27 @@ namespace GpuCounters::detail
 			const char* Profiler() const noexcept override { return "Nsight Perf"; }
 			std::vector<MetricRequest> DefaultMetrics() const override { return NvPerfDefaultMetrics(); }
 
-			// DXVK's exports, its device's queue, the graph host's hooks. Nothing here loads the library.
+			// DXVK's exports, its device's queue, the graph host's hooks. Nothing here loads the library. Native mode (no DXVK module):
+			// the frame boundaries run on the native graphics queue under its lock (Native::RunOnGraphicsQueue), and the engine's perf
+			// events push no ranges, since engine work records no GPU commands there.
 			bool Register(const DxvkOrgInteropDeviceInfo& a_info, void* a_dxvkModule, org::GraphHost& a_host)
 			{
 				const auto module = static_cast<HMODULE>(a_dxvkModule);
-				enqueueQueueCallback = reinterpret_cast<PFN_dxvkEnqueueQueueCallback>(::GetProcAddress(module, "dxvkEnqueueQueueCallback"));
-				emitCommandBufferCallback = reinterpret_cast<PFN_dxvkEmitCommandBufferCallback>(::GetProcAddress(module, "dxvkEmitCommandBufferCallback"));
-				const auto setBoundaryCallbacks = reinterpret_cast<PFN_dxvkSetCommandBufferBoundaryCallbacks>(::GetProcAddress(module, "dxvkSetCommandBufferBoundaryCallbacks"));
-				if (!enqueueQueueCallback || !emitCommandBufferCallback || !setBoundaryCallbacks) {
-					unavailable = "the DXVK build lacks the queue and command buffer callbacks";
-					logger::warn("[NvPerf] {}; no Vulkan capture", unavailable);
-					return false;
+				PFN_dxvkSetCommandBufferBoundaryCallbacks setBoundaryCallbacks = nullptr;
+				if (module) {
+					enqueueQueueCallback = reinterpret_cast<PFN_dxvkEnqueueQueueCallback>(::GetProcAddress(module, "dxvkEnqueueQueueCallback"));
+					emitCommandBufferCallback = reinterpret_cast<PFN_dxvkEmitCommandBufferCallback>(::GetProcAddress(module, "dxvkEmitCommandBufferCallback"));
+					setBoundaryCallbacks = reinterpret_cast<PFN_dxvkSetCommandBufferBoundaryCallbacks>(::GetProcAddress(module, "dxvkSetCommandBufferBoundaryCallbacks"));
+					if (!enqueueQueueCallback || !emitCommandBufferCallback || !setBoundaryCallbacks) {
+						unavailable = "the DXVK build lacks the queue and command buffer callbacks";
+						logger::warn("[NvPerf] {}; no Vulkan capture", unavailable);
+						return false;
+					}
+				} else {
+					enqueueQueueCallback = &RenderGraph::Engine::Native::RunOnGraphicsQueue;
 				}
+				// The native device lists no extensions: the check is DXVK's.
+				extensionsListed = a_info.enabledExtensions != nullptr;
 				for (std::uint32_t i = 0; i < a_info.enabledExtensionCount; ++i)
 					semaphores |= std::strcmp(a_info.enabledExtensions[i], "VK_KHR_external_semaphore_win32") == 0;
 
@@ -126,8 +136,9 @@ namespace GpuCounters::detail
 				host = &a_host;
 
 				g_backend = this;
-				if (FAILED(setBoundaryCallbacks(globals::d3d::device, &CloseInDxvk, &ReopenInDxvk, nullptr)))
+				if (setBoundaryCallbacks && FAILED(setBoundaryCallbacks(globals::d3d::device, &CloseInDxvk, &ReopenInDxvk, nullptr)))
 					logger::warn("[NvPerf] DXVK refused the command buffer boundary callbacks: engine ranges across its flushes will be unbalanced");
+				logger::info("[NvPerf] Vulkan backend registered on {}'s graphics queue", module ? "DXVK" : "the native device");
 				// The graph's passes: their ranges recorded in their own command lists (under QueueControl::Boundaries a range
 				// only records; the frame boundaries make every queue call). Set now, while no frame executes; until a capture
 				// arms they only test g_recording.
@@ -169,7 +180,7 @@ namespace GpuCounters::detail
 					return false;
 				}
 				a_device.available = true;
-				if (!semaphores)
+				if (extensionsListed && !semaphores)
 					logger::warn("[NvPerf] DXVK's device lacks VK_KHR_external_semaphore_win32, which the profiler needs");
 				nvperf::SetQueueControl(nvperf::QueueControl::Boundaries);
 				// Logs the chip and whether the profiler supports it; the capture itself fails cleanly when it does not.
@@ -317,7 +328,7 @@ namespace GpuCounters::detail
 			{
 				const std::string name(a_name);
 				bool pushed = false;
-				if (armed && PerfEventSelected(a_capture.configuration.ranges, name) && nvperf::RangeSelected(kQueueName, name.c_str())) {
+				if (armed && emitCommandBufferCallback && PerfEventSelected(a_capture.configuration.ranges, name) && nvperf::RangeSelected(kQueueName, name.c_str())) {
 					const char* interned = names.insert(name).first->c_str();
 					pushed = SUCCEEDED(emitCommandBufferCallback(globals::d3d::device, &PushInDxvk, const_cast<char*>(interned)));
 				}
@@ -447,6 +458,7 @@ namespace GpuCounters::detail
 			std::string unavailable;  // why no capture can run (empty: none)
 			std::string deviceName;
 			bool semaphores = false;
+			bool extensionsListed = true;  // false on the native device, which lists no extensions
 			// Frames between arming and the first pass: every command buffer that executes in a pass must have been
 			// recorded while armed, and the graph host records its epochs up to its frame slots ahead.
 			std::uint64_t lead = 4;

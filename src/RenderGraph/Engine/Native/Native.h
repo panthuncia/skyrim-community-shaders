@@ -11,7 +11,9 @@
 
 #include <winrt/base.h>
 
+struct DxvkOrgInteropDeviceInfo;
 struct DxvkOrgInteropResourceInfo;
+struct VkQueue_T;
 struct VkCommandBuffer_T;
 struct VkSemaphoreSubmitInfo;
 struct DxvkOrgInteropTextureWrap;
@@ -185,6 +187,25 @@ namespace RenderGraph::Engine::Native
 	 * refuses HDR10).
 	 */
 	bool SetSwapChainColorSpace(bool a_hdr);
+
+	/**
+	 * @name The profilers' view of the native Vulkan device (GPU counters, RenderGraphRuntime::Initialize), what DXVK's
+	 * dxvkGetInteropDeviceInfo and dxvkEnqueueQueueCallback give them in guest mode.
+	 */
+	/** @{ */
+	/**
+	 * @brief The native Vulkan device as DXVK describes its own: instance, physical device, device, graphics queue and family, and
+	 * the loader's vkGetInstanceProcAddr. No extension or feature list (BasicRHI keeps none). False on D3D12 or before stage 3.
+	 */
+	bool DescribeVulkanDevice(DxvkOrgInteropDeviceInfo& a_info);
+
+	/**
+	 * @brief Runs a_callback now with the native graphics queue, holding the lock every queue access takes, so it lands between the
+	 * submissions made before and after the call. The signature of DXVK's dxvkEnqueueQueueCallback (a_device is ignored). E_FAIL on
+	 * D3D12 or before stage 3.
+	 */
+	HRESULT __stdcall RunOnGraphicsQueue(ID3D11Device* a_device, void (*a_callback)(void*, VkQueue_T*), void* a_user);
+	/** @} */
 
 	/**
 	 * @brief RenderGraphRuntime::WrapTexture in native mode: a native texture handle over an image a port made with BasicRHI, so its
