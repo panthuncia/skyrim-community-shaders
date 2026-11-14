@@ -194,6 +194,10 @@ namespace RenderGraph::Engine::Scaleform::Passes
 			bool readsChanged = false;
 			std::uint64_t commits = 0;
 			std::uint32_t registrations = 0;
+			// The registration that made the surfaces as they are now, and the latest one a built graph is known to hold. A registration
+			// for new reads alone keeps the surfaces: the graph built before it still draws them (a new read keeps its raw index there).
+			std::uint32_t surfacesRegistration = 0;
+			std::uint32_t builtRegistration = 0;
 			std::uint32_t largestSegment = 0;
 			ProgramCache<RasterProgram, ProgramKey> programs{ "Scaleform" };
 			std::set<ProgramKey> failedPrograms;  // each logged once (NoteFailedProgram)
@@ -909,6 +913,33 @@ namespace RenderGraph::Engine::Scaleform::Passes
 			return FrameAnchors::ImportTexture(a_id, a_texture, desc);
 		}
 
+		/**
+		 * @brief The graph texture of the role's target a_colour (DXVK's): an engine target's slot, HDR's twin (a_ownId set to the id this
+		 * client registers it under), or this client's import, one id per role (a texture made again for the role is that import's next
+		 * version, or a new slot, never one more id).
+		 */
+		FrameAnchors::Texture ColourOf(Role a_role, ID3D11Texture2D* a_colour, DXGI_FORMAT a_format, std::string& a_ownId)
+		{
+			a_ownId.clear();
+			if (const auto target = EngineTargetOf(a_colour); target >= 0)
+				return FrameAnchors::EngineTarget(static_cast<std::uint32_t>(target));
+			if (auto owned = ORGHDRDisplay::Get().GraphOf(a_colour)) {
+				// HDR's UI texture as the graph owns it (CS_ORG_HDR_DISPLAY): the twin, which the composite reads.
+				a_ownId = "cs.scaleform.hdr-ui";
+				return owned;
+			}
+			return ImportTarget(a_colour, a_format, fmt::format("cs.scaleform.target.{}", static_cast<int>(a_role)));
+		}
+
+		/** @brief The graph texture of a depth-stencil a_depth (DXVK's): an engine depth target's slot, or none. */
+		FrameAnchors::Texture DepthTextureOf(ID3D11Texture2D* a_depth)
+		{
+			if (!a_depth)
+				return {};
+			const auto depth = EngineDepthOf(a_depth);
+			return depth >= 0 ? FrameAnchors::EngineDepth(static_cast<std::uint32_t>(depth)) : FrameAnchors::Texture{};
+		}
+
 		/** @brief The role's surface for a_colour with a_depth (DXVK's), imported; without passes when the target cannot be imported. */
 		std::shared_ptr<Surface> MakeSurface(Role a_role, ID3D11Texture2D* a_colour, DXGI_FORMAT a_format, ID3D11Texture2D* a_depth)
 		{
@@ -921,19 +952,9 @@ namespace RenderGraph::Engine::Scaleform::Passes
 			surface->width = colourDesc.Width;
 			surface->height = colourDesc.Height;
 			surface->colourFormat = rhi::helpers::ToRHI(a_format);
-			if (const auto target = EngineTargetOf(a_colour); target >= 0) {
-				surface->colour = FrameAnchors::EngineTarget(static_cast<std::uint32_t>(target));
-			} else if (auto owned = ORGHDRDisplay::Get().GraphOf(a_colour)) {
-				// HDR's UI texture as the graph owns it (CS_ORG_HDR_DISPLAY): the twin, which the composite reads.
-				surface->ownId = "cs.scaleform.hdr-ui";
-				surface->colour = std::move(owned);
-			} else {
-				// One id per role: a texture made again for the role is that import's next version or a new slot, never one more id.
-				surface->colour = ImportTarget(a_colour, a_format, fmt::format("cs.scaleform.target.{}", static_cast<int>(a_role)));
-			}
+			surface->colour = ColourOf(a_role, a_colour, a_format, surface->ownId);
 			if (a_depth) {
-				if (const auto depth = EngineDepthOf(a_depth); depth >= 0)
-					surface->depth = FrameAnchors::EngineDepth(static_cast<std::uint32_t>(depth));
+				surface->depth = DepthTextureOf(a_depth);
 				if (surface->depth) {
 					D3D11_TEXTURE2D_DESC depthDesc{};
 					a_depth->GetDesc(&depthDesc);
@@ -1010,6 +1031,45 @@ namespace RenderGraph::Engine::Scaleform::Passes
 		}
 
 		/**
+		 * @brief The role's surface kept for its texture made again (a resize, HDR's textures made again) when the texture is the same
+		 * graph texture as before: the slot of an engine target or of this client's import takes the new texture as its next version, so
+		 * the passes stay and nothing is built. Its D3D11 identity and size follow the new texture. Null when the graph texture changed
+		 * (another slot, another format, another depth-stencil): the caller makes the surface again.
+		 */
+		Surface* RefreshSurface(PathState& a_state, Role a_role, const Display& a_display)
+		{
+			const auto found = std::ranges::find_if(a_state.surfaces, [&](const auto& a_surface) { return a_surface->role == a_role; });
+			if (found == a_state.surfaces.end() || !(*found)->Drawable())
+				return nullptr;
+			Surface& surface = **found;
+			if (surface.colourFormat != rhi::helpers::ToRHI(a_display.targetFormat))
+				return nullptr;
+			std::string ownId;
+			const auto colour = ColourOf(a_role, a_display.target, a_display.targetFormat, ownId);
+			if (!colour || !(colour == surface.colour) || ownId != surface.ownId)
+				return nullptr;
+			auto* depthTexture = MainDepth();
+			const auto depth = DepthTextureOf(depthTexture);
+			if (!(depth == surface.depth))
+				return nullptr;
+			surface.colourTexture.copy_from(a_display.target);
+			surface.depthTexture.copy_from(depthTexture);
+			D3D11_TEXTURE2D_DESC desc{};
+			a_display.target->GetDesc(&desc);
+			surface.width = desc.Width;
+			surface.height = desc.Height;
+			if (depthTexture && surface.depth) {
+				D3D11_TEXTURE2D_DESC depthDesc{};
+				depthTexture->GetDesc(&depthDesc);
+				surface.width = std::min(surface.width, depthDesc.Width);
+				surface.height = std::min(surface.height, depthDesc.Height);
+			}
+			logger::info("[ORG] Scaleform: the {} texture was made again ({}x{}); its surface draws it as the slot's next version, nothing is built",
+				RoleName(a_role), desc.Width, desc.Height);
+			return &surface;
+		}
+
+		/**
 		 * @brief The surface a_display draws onto. Only the framebuffer's and HDR's UI texture's, declared at setup, are drawn on the
 		 * graph. When one of those roles' textures was made again (a resize, HDR's textures made again), its surface is made again
 		 * and the client registered again: the Interface graph is built with it at the next build point, between frames (a rebuild
@@ -1036,10 +1096,12 @@ namespace RenderGraph::Engine::Scaleform::Passes
 				DXGI_FORMAT format{};
 				if (RoleTexture(role, format).get() != a_display.target)
 					continue;
-				logger::info("[ORG] Scaleform: the {} texture was made again (a resize or an HDR change); the Interface graph is built again with it",
+				if (auto* refreshed = RefreshSurface(a_state, role, a_display); refreshed)
+					return refreshed;
+				logger::info("[ORG] Scaleform: the {} texture was made again as another graph resource; the Interface graph is built again with it",
 					RoleName(role));
-				if (DeclareSurface(a_state, role))
-					RegisterClient(a_state);
+				if (DeclareSurface(a_state, role) && RegisterClient(a_state))
+					a_state.surfacesRegistration = a_state.registrations;
 				a_reason = "a surface made again (drawn once the Interface graph is built with it)";
 				return nullptr;
 			}
@@ -1151,6 +1213,7 @@ namespace RenderGraph::Engine::Scaleform::Passes
 		}
 		if (!RegisterClient(state))
 			return;
+		state.surfacesRegistration = state.registrations;
 		state.setUp = true;
 		logger::info("[ORG] Scaleform: on (CS_ORG_SCALEFORM); the client joins the Interface graph at setup's build point");
 	}
@@ -1194,11 +1257,15 @@ namespace RenderGraph::Engine::Scaleform::Passes
 			if (!state.pendingPrograms[i])
 				NoteFailedProgram(state, key);
 		}
-		if (!FrameAnchors::CanRun(kClientId, Anchor::Interface)) {
+		// The latest registration is in the built graph, or an older one with the same surfaces is: a registration for new reads alone
+		// does not wait for its build (the reads it adds keep their raw indices until then). Only new surfaces wait.
+		if (FrameAnchors::CanRun(kClientId, Anchor::Interface)) {
+			state.builtRegistration = state.registrations;
+		} else if (state.builtRegistration == 0 || state.builtRegistration < state.surfacesRegistration) {
 			state.pendingPrograms.clear();
-			// Setup's build point put the client in the graph: it is outside it only after a surface was made again, until the next build.
-			a_reason = FrameAnchors::InBuiltGraph(kClientId, Anchor::Interface) ? "the Interface anchor's ring is full this frame" :
-			                                                                       "a surface made again (drawn once the Interface graph is built with it)";
+			a_reason = !FrameAnchors::IsRenderOwner() ? "a segment off the render owner" :
+			           !RenderGraphRuntime::Get().IsActive() ? "the graph path is off (not set up, or failed)" :
+			                                                  "a surface made again (drawn once the Interface graph is built with it)";
 			return false;
 		}
 

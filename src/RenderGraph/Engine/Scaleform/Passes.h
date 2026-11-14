@@ -29,11 +29,11 @@ namespace RenderGraph::Engine::Scaleform::Passes
 	bool Ready();
 
 	/**
-	 * @brief Draws a_display on the graph here, as the Interface anchor's run. False when it did not (the caller replays the
-	 * display into the D3D11 renderer), with a_reason: an inherent refusal (a render target other than the framebuffer and HDR's UI
-	 * texture, a mask on another depth-stencil, a segment longer than the run gate, the anchor's ring full), a surface made again (a
-	 * resize or an HDR change, until the next build point), or a failure (a pipeline that cannot be made, a texture whose view
-	 * cannot be resolved, a run that did not execute: logged as an error). A pipeline not built yet is built here. Render thread.
+	 * @brief Draws a_display on the graph here, as one Interface anchor run per run gate's worth of commands. False when it did not
+	 * (the caller replays the display into the D3D11 renderer), with a_reason: an inherent refusal (a render target that is not a
+	 * surface, a mask on another depth-stencil), a surface made again as another graph resource (until the next build point), or a
+	 * failure (a texture whose view cannot be resolved, a run that did not execute: logged as an error). A pipeline not built yet is
+	 * built here; a draw whose pipeline failed is left out (logged once). Render thread.
 	 */
 	bool Submit(Display& a_display, const char*& a_reason);
 }
