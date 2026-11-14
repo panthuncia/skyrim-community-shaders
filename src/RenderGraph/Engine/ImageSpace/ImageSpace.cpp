@@ -146,6 +146,8 @@ namespace RenderGraph::Engine::ImageSpace
 			// Drawn from its own geometry, not the manager's quad (the ripple makers): its vertex stage is its source's, which pulls the
 			// geometry by device address from the latch's PerFrame words (TakeDraw); the gate opens it with the draw's index count.
 			bool geometry = false;
+			// Its source has an ORG vertex stage over the graph's fullscreen triangle (the copies that move their coordinates there).
+			bool vertexStage = false;
 		};
 
 		/** @brief The push words of an effect's feature handles (EffectInfo::features): s9, then the five headers' resources. */
@@ -192,13 +194,16 @@ namespace RenderGraph::Engine::ImageSpace
 			// manager's fade is above 0.
 			{ Effects::ISHDRTonemapBlendCinematic, "ISHDRTonemapBlendCinematic", "tonemap", "ISHDR.hlsl", 3, 0b111, 3 },
 			{ Effects::ISHDRTonemapBlendCinematicFade, "ISHDRTonemapBlendCinematicFade", "tonemap", "ISHDR.hlsl", 3, 0b111, 3 },
-			// The copies whose vertex shader passes the coordinates through (ISCopyScaleBias and ISCopyTextureMask move them in theirs,
-			// which the graph's fullscreen triangle cannot): back to the chain's destination in the pre-tonemap composites, and the main
+			// The copies whose vertex shader passes the coordinates through: back to the chain's destination in the pre-tonemap composites, and the main
 			// frame's, the menus' and the end-of-frame chain's copies outside every scope (each call a scope of its own).
 			{ Effects::ISCopy, "ISCopy", "iscopy", "ISCopy.hlsl", 1, 0b1, 1, 0, false, true },
 			{ Effects::ISCopyDynamicFetchDisabled, "ISCopyDynamicFetchDisabled", "iscopy", "ISCopy.hlsl", 1, 0b1, 1, 0, false, true },
 			{ Effects::ISCopyCustomViewport, "ISCopyCustomViewport", "iscopy", "ISCopy.hlsl", 1, 0b1, 1, 0, false, true },
 			{ Effects::ISCopyGrayScale, "ISCopyGrayScale", "iscopy", "ISCopy.hlsl", 1, 0b1, 1, 0, false, true },
+			// The copies that move the coordinates in their vertex shader (a scale and bias, or a turn about the centre): ISCopy.hlsl's
+			// ORG vertex stage makes the same change over the fullscreen triangle (EffectInfo::vertexStage).
+			{ Effects::ISCopyScaleBias, "ISCopyScaleBias", "iscopy", "ISCopy.hlsl", 1, 0b1, 1, 0, false, true, 1, false, false, false, true },
+			{ Effects::ISCopyTextureMask, "ISCopyTextureMask", "iscopy", "ISCopy.hlsl", 1, 0b1, 1, 0, false, true, 1, false, false, false, true },
 			// The get-hit effect's last draw (end-of-frame chain slot 7): t0 the image, t1 its blurred copy (kGETHIT_BUFFER's blur).
 			{ Effects::ISDoubleVision, "ISDoubleVision", "gethit", "ISDoubleVision.hlsl", 2, 0b11, 2, 0, false, true },
 			// The water's displacement simulation (the WaterDisplacement effect, slot 31, from the water system's update: ScopeKind::Water)
@@ -1373,8 +1378,9 @@ namespace RenderGraph::Engine::ImageSpace
 			BlendFor(blendBits, effect.targets, blend, error);
 			RasterProgram::Desc desc{};
 			desc.pixelSource = effect.source;
-			// A geometry effect's vertex stage is its source's ORG build, which pulls the geometry (TakeDraw writes where it is).
-			if (effect.geometry)
+			// A geometry effect's vertex stage is its source's ORG build, which pulls the geometry (TakeDraw writes where it is); a
+			// vertexStage effect's moves the fullscreen triangle's coordinates.
+			if (effect.geometry || effect.vertexStage)
 				desc.vertexSource = effect.source;
 			// FXC-era sources (vector conditions in ?:).
 			desc.languageVersion = L"2018";
