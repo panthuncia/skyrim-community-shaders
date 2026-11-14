@@ -29,6 +29,7 @@
 #	include <RenderPasses/Base/TypedRenderGraphPass.h>
 #	include <Resources/Buffers/Buffer.h>
 #	include <Resources/ExternalTextureResource.h>
+#	include <Resources/PixelBuffer.h>
 #	include <Resources/TextureDescription.h>
 #	include <rhi_helpers.h>
 
@@ -39,6 +40,7 @@
 #	include <cstddef>
 #	include <cstring>
 #	include <optional>
+#	include <set>
 #	include <string>
 
 namespace RenderGraph::Engine::Scaleform::Passes
@@ -53,8 +55,12 @@ namespace RenderGraph::Engine::Scaleform::Passes
 		// GpuTextures' diagnostic source tag for Scaleform's views (ImGui's is 256).
 		constexpr std::uint32_t kSourceTag = DCLF::GpuTextures::Tag(DCLF::GpuTextures::Source::Scaleform);
 		constexpr std::uint32_t kMinimumStaging = 256u << 10;
-		// The most commands one segment draws on the graph: one run gate entry each. A longer segment is replayed into D3D11.
+		// The most commands one Interface run draws: one run gate entry each. A longer segment is drawn in several runs.
 		constexpr std::uint32_t kGateEntries = 1024;
+		// The scratch images GFx's render targets are drawn into on the graph (PushRenderTarget: a filter's source, its passes): a
+		// blur's source and its two intermediates, and one more for a nested target.
+		constexpr std::uint32_t kScratchTargets = 4;
+		constexpr rhi::Format kScratchFormat = rhi::Format::R8G8B8A8_UNorm;
 
 		using FrameAnchors::Anchor;
 
@@ -131,6 +137,9 @@ namespace RenderGraph::Engine::Scaleform::Passes
 			rhi::Viewport viewport{};
 			rhi::ScissorRect scissor{};
 			std::uint32_t width = 0, height = 0;
+			// The run starts by clearing the target to zero (a render target GFx pushed: PushRenderTarget clears it whole).
+			bool clear = false;
+			rhi::Format format = rhi::Format::Unknown;
 			std::vector<std::shared_ptr<const void>> owners;  // programs, samplers, texture descriptors and views
 		};
 
@@ -146,8 +155,16 @@ namespace RenderGraph::Engine::Scaleform::Passes
 			Framebuffer,  // the back buffer (kFRAMEBUFFER's RTV, or HDR's saved one)
 			HdrUi,        // HDR's UI texture, while HDR redirects the interface into it
 			Main,         // kMAIN: the main menu's and the loading menu's movies
+			// kBOOK_TEXT_0 to 3: the book menu's pages, rendered into a texture of GFx's (kViewportRenderTexture) that is one of these
+			// engine targets, with kBOOK_TEXT's depth-stencil for masks.
+			Book0,
+			Book1,
+			Book2,
+			Book3,
 		};
-		constexpr std::array<Role, 3> kRoles{ Role::Framebuffer, Role::HdrUi, Role::Main };
+		constexpr std::array<Role, 7> kRoles{ Role::Framebuffer, Role::HdrUi, Role::Main, Role::Book0, Role::Book1, Role::Book2, Role::Book3 };
+
+		bool IsBook(Role a_role) { return a_role >= Role::Book0 && a_role <= Role::Book3; }
 
 		/**
 		 * @brief A target the displays draw onto, with kMAIN's depth-stencil for masks. It has two passes: one with the target alone,
@@ -157,6 +174,8 @@ namespace RenderGraph::Engine::Scaleform::Passes
 		struct Surface
 		{
 			Role role = Role::Framebuffer;
+			// A scratch image's index (a graph texture of this client's that GFx's pushed render targets are drawn into), or -1 for a role.
+			std::int32_t scratch = -1;
 			winrt::com_ptr<ID3D11Texture2D> colourTexture;  // DXVK's: the surface's identity
 			winrt::com_ptr<ID3D11Texture2D> depthTexture;
 			FrameAnchors::Texture colour;  // an engine target's slot, or this client's own import
@@ -186,19 +205,27 @@ namespace RenderGraph::Engine::Scaleform::Passes
 			bool failed = false;
 			bool setUp = false;
 			std::array<org::OwnedDescriptorBinding, 4> samplers;  // the renderer's, by wrap * 2 + sample
-			std::vector<std::shared_ptr<Surface>> surfaces;       // one per role that has a texture
+			std::vector<std::shared_ptr<Surface>> surfaces;       // one per role that has a texture, then the scratch images
+			std::uint32_t scratchWidth = 0, scratchHeight = 0;    // every scratch image's size (the largest role surface's)
 			// Native mode: the tracked textures the displays read (graph-owned, or exempt ones the context wrote since). The passes
 			// declare each, and a draw binds its declared view. A new one registers the client again after the run (readsChanged).
 			std::vector<Read> reads;
 			bool readsChanged = false;
 			std::uint64_t commits = 0;
 			std::uint32_t registrations = 0;
+			// The registration that made the surfaces as they are now, and the latest one a built graph is known to hold. A registration
+			// for new reads alone keeps the surfaces: the graph built before it still draws them (a new read keeps its raw index there).
+			std::uint32_t surfacesRegistration = 0;
+			std::uint32_t builtRegistration = 0;
 			std::uint32_t largestSegment = 0;
 			ProgramCache<RasterProgram, ProgramKey> programs{ "Scaleform" };
+			std::set<ProgramKey> failedPrograms;  // each logged once (NoteFailedProgram)
 			std::shared_ptr<RunGate> gate;
 			std::shared_ptr<FrameStaging> staging;
-			// The run in progress (Submit to the end of its anchor run).
+			// The run in progress (Submit to the end of its anchor run): the display, and the commands of it this run draws.
 			Display* pending = nullptr;
+			std::uint32_t pendingFirst = 0;
+			std::uint32_t pendingCount = 0;
 			Surface* pendingSurface = nullptr;
 			bool pendingDepth = false;                                          // the pass with the depth-stencil draws it
 			std::vector<std::shared_ptr<const RasterProgram>> pendingPrograms;  // per command; null for a clear
@@ -330,7 +357,7 @@ namespace RenderGraph::Engine::Scaleform::Passes
 		 * @brief Every draw state the capture can make (Renderer.cpp: the background, ApplyFill, DrawIndexedTriList's vertex kinds,
 		 * DrawBitmaps, the colour matrix filter), for the pass with the depth-stencil or the one without. The set is finite:
 		 * - vertex and pixel kinds: 1 with 1-3 (solid, bitmap), 2 with 4-6 (bitmaps), 3 with 12-14 and 16-18 (XY16iC32 gouraud),
-		 *   4 with 11, 13, 14, 15, 17, 18 (XY16iCF32 gouraud), 5 with 11, 14, 15, 18 (gouraud type 3); filters 23 and 24; line strips
+		 *   4 with 11, 13, 14, 15, 17, 18 (XY16iCF32 gouraud), 5 with 11, 14, 15, 18 (gouraud type 3); filters 1 to 24; line strips
 		 *   of kind 1 with 1 (the line style's colour);
 		 * - blends: the Multiply and Darken kinds (3, 6, 15-18, filter 24) only with the multiply and darken states (4, 6), the other
 		 *   kinds with 1, 2, 3, 5, the solid and glyph kinds (1, 4) with any, the filters from the filters' array (8 + the index);
@@ -379,6 +406,13 @@ namespace RenderGraph::Engine::Scaleform::Passes
 			add({ .vertexKind = 1, .pixelKind = 1, .lines = 1 }, { 1, 2, 3, 4, 5, 6, 7 });
 			add({ .vertexKind = 0, .pixelKind = 0, .filter = 23 }, { 9, 10, 11, 13, 15, 7 });
 			add({ .vertexKind = 0, .pixelKind = 0, .filter = 24 }, { 12, 14, 7 });
+			// The blur family (DrawBlurRect): its last pass blends with the filters' array for the mode (the Multiply and Darken shaders
+			// with those modes' states), its passes before with the normal one (9, among those listed).
+			for (std::uint8_t filter = 1; filter <= 22; ++filter) {
+				const bool multiplies = filter == 4 || filter == 5 || filter == 6 || (filter >= 11 && filter <= 14) || filter == 17 || filter == 18 || filter == 20 ||
+				                        filter == 22;
+				add({ .vertexKind = 0, .pixelKind = 0, .filter = filter }, multiplies ? std::vector<std::uint8_t>{ 12, 14, 7 } : std::vector<std::uint8_t>{ 9, 10, 11, 13, 15, 7 });
+			}
 			return states;
 		}
 
@@ -435,7 +469,7 @@ namespace RenderGraph::Engine::Scaleform::Passes
 					return;
 				const org::RunRef run = a_recording.Run();
 				const auto frame = a_pass.slots->Take(run);
-				if (!frame || !frame->staging || frame->commands.empty())
+				if (!frame || !frame->staging || (frame->commands.empty() && !frame->clear))
 					return;
 				a_recording.Retain(frame);
 				a_recording.Retain(a_pass.gate);
@@ -444,8 +478,13 @@ namespace RenderGraph::Engine::Scaleform::Passes
 				rhi::ColorAttachment colour{};
 				colour.rtv = a_recording.View(a_bindings.colour);
 				colour.resource = a_recording.Resolve(a_bindings.colour).GetHandle();
-				colour.loadOp = rhi::LoadOp::Load;
+				colour.loadOp = frame->clear ? rhi::LoadOp::Clear : rhi::LoadOp::Load;
 				colour.storeOp = rhi::StoreOp::Store;
+				if (frame->clear) {
+					colour.clear.type = rhi::ClearValueType::Color;
+					colour.clear.format = frame->format;
+					colour.clear.rgba[0] = colour.clear.rgba[1] = colour.clear.rgba[2] = colour.clear.rgba[3] = 0.0f;
+				}
 				rhi::DepthAttachment depth{};
 				if (a_bindings.hasDepth) {
 					depth.dsv = a_recording.View(a_bindings.depth);
@@ -571,6 +610,17 @@ namespace RenderGraph::Engine::Scaleform::Passes
 			return texture.Key();
 		}
 
+		/** @brief The scratch image a_scratch's surface, or null. */
+		const Surface* ScratchSurface(const PathState& a_state, std::int32_t a_scratch)
+		{
+			if (a_scratch < 0)
+				return nullptr;
+			for (const auto& surface : a_state.surfaces)
+				if (surface->scratch == a_scratch)
+					return surface.get();
+			return nullptr;
+		}
+
 		/**
 		 * @brief Inside the epoch: the pending display's frame, stored for this run in the slots of the pass that draws it, with its
 		 * draws' gate entries opened. Every other pass's entry for this run is emptied first, so nothing older is left there.
@@ -632,8 +682,10 @@ namespace RenderGraph::Engine::Scaleform::Passes
 			}
 			std::memcpy(frame->staging->Bytes().data(), display.staging.data(), display.staging.size());
 
-			frame->commands.reserve(display.commands.size());
-			for (std::size_t i = 0; i < display.commands.size(); ++i) {
+			const std::size_t first = state.pendingFirst;
+			const std::size_t last = std::min<std::size_t>(first + state.pendingCount, display.commands.size());
+			frame->commands.reserve(last - first);
+			for (std::size_t i = first; i < last; ++i) {
 				const Command& command = display.commands[i];
 				FrameCommand& out = frame->commands.emplace_back();
 				out.kind = command.kind;
@@ -646,8 +698,12 @@ namespace RenderGraph::Engine::Scaleform::Passes
 					const std::int32_t texture = command.textures[a_stage];
 					return texture >= 0 ? textures[static_cast<std::size_t>(texture)] : 0u;
 				};
-				for (std::uint32_t stage = 0; stage < 2; ++stage)
-					out.reads[stage] = command.textures[stage] >= 0 ? reads[static_cast<std::size_t>(command.textures[stage])] : nullptr;
+				for (std::uint32_t stage = 0; stage < 2; ++stage) {
+					const std::int32_t texture = command.textures[stage];
+					// A scratch image is read through the view every pass declares (its index replaces the block's word in Record).
+					const auto* scratch = ScratchSurface(state, ScratchOf(texture));
+					out.reads[stage] = texture >= 0 ? reads[static_cast<std::size_t>(texture)] : (scratch ? scratch->colour.Key() : nullptr);
+				}
 				out.filter = command.state.filter != 0;
 				if (command.state.filter) {
 					FilterBlock filter{};
@@ -678,6 +734,8 @@ namespace RenderGraph::Engine::Scaleform::Passes
 
 			frame->width = surface.width;
 			frame->height = surface.height;
+			frame->clear = display.clearTarget && state.pendingFirst == 0;
+			frame->format = surface.colourFormat;
 			frame->viewport = { display.viewport[0], display.viewport[1], display.viewport[2], display.viewport[3], 0.0f, 1.0f };
 			// D3D11 clips to the viewport (the renderer's rasterizer state has no scissor).
 			const float left = std::clamp(display.viewport[0], 0.0f, static_cast<float>(surface.width));
@@ -688,9 +746,10 @@ namespace RenderGraph::Engine::Scaleform::Passes
 				static_cast<std::uint32_t>(std::ceil(right) - std::floor(left)), static_cast<std::uint32_t>(std::ceil(bottom) - std::floor(top)) };
 
 			slots->Store(run, std::move(frame));
-			for (std::uint32_t i = 0; i < display.commands.size(); ++i)
-				if (display.commands[i].kind == Command::Kind::Draw)
-					state.gate->OpenDraw(i, display.commands[i].vertexCount);
+			// The run's commands use the gate entries from 0, in order.
+			for (std::size_t i = first; i < last; ++i)
+				if (display.commands[i].kind == Command::Kind::Draw && state.pendingPrograms[i])
+					state.gate->OpenDraw(static_cast<std::uint32_t>(i - first), display.commands[i].vertexCount);
 			state.committed = true;
 		}
 
@@ -704,6 +763,10 @@ namespace RenderGraph::Engine::Scaleform::Passes
 			auto declared = std::make_shared<Reads>();
 			for (const auto& read : a_state.reads)
 				declared->push_back(read.texture);
+			// The scratch images, read by any pass but their own (DisplayPass::Declare leaves its own target out).
+			for (const auto& surface : a_state.surfaces)
+				if (surface->scratch >= 0 && surface->Drawable())
+					declared->push_back(surface->colour);
 			std::shared_ptr<const Reads> reads = std::move(declared);
 			for (std::size_t i = 0; i < a_state.surfaces.size(); ++i) {
 				std::shared_ptr<const Surface> surface = a_state.surfaces[i];
@@ -792,12 +855,12 @@ namespace RenderGraph::Engine::Scaleform::Passes
 			static const std::array<std::string, static_cast<std::size_t>(RE::RENDER_TARGET::kTOTAL)> s_engine = [] {
 				std::array<std::string, static_cast<std::size_t>(RE::RENDER_TARGET::kTOTAL)> names;
 				for (std::size_t i = 0; i < names.size(); ++i)
-					names[i] = fmt::format("a render target other than the framebuffer, HDR's UI texture and kMAIN (engine target {})", i);
+					names[i] = fmt::format("a render target that is not a surface (engine target {})", i);
 				return names;
 			}();
 			const auto target = EngineTargetOf(a_texture);
 			return target >= 0 ? s_engine[static_cast<std::size_t>(target)].c_str() :
-			                     "a render target other than the framebuffer, HDR's UI texture and kMAIN (not an engine target)";
+			                     "a render target that is not a surface (not an engine target)";
 		}
 
 		/** @brief The engine depth-stencil target whose texture is a_texture (DXVK's), or -1. */
@@ -849,10 +912,12 @@ namespace RenderGraph::Engine::Scaleform::Passes
 		{
 			if (a_role == Role::Framebuffer)
 				return TextureOf(FramebufferRtv(), a_format);
-			if (a_role == Role::Main) {
+			if (a_role == Role::Main || IsBook(a_role)) {
 				auto* renderer = globals::game::renderer;
 				a_format = DXGI_FORMAT_UNKNOWN;
-				return renderer ? TextureOf(renderer->GetRuntimeData().renderTargets[static_cast<std::uint32_t>(RE::RENDER_TARGET::kMAIN)].RTV, a_format) : nullptr;
+				const auto target = a_role == Role::Main ? static_cast<std::uint32_t>(RE::RENDER_TARGET::kMAIN) :
+				                                           static_cast<std::uint32_t>(RE::RENDER_TARGET::kBOOK_TEXT_0) + (static_cast<std::uint32_t>(a_role) - static_cast<std::uint32_t>(Role::Book0));
+				return renderer ? TextureOf(renderer->GetRuntimeData().renderTargets[target].RTV, a_format) : nullptr;
 			}
 			const auto& hdr = globals::features::hdrDisplay;
 			a_format = DXGI_FORMAT_UNKNOWN;
@@ -866,6 +931,14 @@ namespace RenderGraph::Engine::Scaleform::Passes
 				return "framebuffer";
 			case Role::HdrUi:
 				return "HDR UI";
+			case Role::Book0:
+				return "kBOOK_TEXT_0";
+			case Role::Book1:
+				return "kBOOK_TEXT_1";
+			case Role::Book2:
+				return "kBOOK_TEXT_2";
+			case Role::Book3:
+				return "kBOOK_TEXT_3";
 			default:
 				return "kMAIN";
 			}
@@ -878,6 +951,18 @@ namespace RenderGraph::Engine::Scaleform::Passes
 			if (!renderer)
 				return nullptr;
 			const auto& depth = renderer->GetDepthStencilData().depthStencils[static_cast<std::uint32_t>(RE::RENDER_TARGETS_DEPTHSTENCIL::kMAIN)];
+			return depth.texture ? Tripwire::Unwrap(depth.texture) : nullptr;
+		}
+
+		/** @brief The depth-stencil a role's displays mask with (DXVK's): kBOOK_TEXT's for the book's pages, kMAIN's for the rest. */
+		ID3D11Texture2D* RoleDepth(Role a_role)
+		{
+			if (!IsBook(a_role))
+				return MainDepth();
+			auto* renderer = globals::game::renderer;
+			if (!renderer)
+				return nullptr;
+			const auto& depth = renderer->GetDepthStencilData().depthStencils[static_cast<std::uint32_t>(RE::RENDER_TARGETS_DEPTHSTENCIL::kBOOK_TEXT)];
 			return depth.texture ? Tripwire::Unwrap(depth.texture) : nullptr;
 		}
 
@@ -902,6 +987,33 @@ namespace RenderGraph::Engine::Scaleform::Passes
 			return FrameAnchors::ImportTexture(a_id, a_texture, desc);
 		}
 
+		/**
+		 * @brief The graph texture of the role's target a_colour (DXVK's): an engine target's slot, HDR's twin (a_ownId set to the id this
+		 * client registers it under), or this client's import, one id per role (a texture made again for the role is that import's next
+		 * version, or a new slot, never one more id).
+		 */
+		FrameAnchors::Texture ColourOf(Role a_role, ID3D11Texture2D* a_colour, DXGI_FORMAT a_format, std::string& a_ownId)
+		{
+			a_ownId.clear();
+			if (const auto target = EngineTargetOf(a_colour); target >= 0)
+				return FrameAnchors::EngineTarget(static_cast<std::uint32_t>(target));
+			if (auto owned = ORGHDRDisplay::Get().GraphOf(a_colour)) {
+				// HDR's UI texture as the graph owns it (CS_ORG_HDR_DISPLAY): the twin, which the composite reads.
+				a_ownId = "cs.scaleform.hdr-ui";
+				return owned;
+			}
+			return ImportTarget(a_colour, a_format, fmt::format("cs.scaleform.target.{}", static_cast<int>(a_role)));
+		}
+
+		/** @brief The graph texture of a depth-stencil a_depth (DXVK's): an engine depth target's slot, or none. */
+		FrameAnchors::Texture DepthTextureOf(ID3D11Texture2D* a_depth)
+		{
+			if (!a_depth)
+				return {};
+			const auto depth = EngineDepthOf(a_depth);
+			return depth >= 0 ? FrameAnchors::EngineDepth(static_cast<std::uint32_t>(depth)) : FrameAnchors::Texture{};
+		}
+
 		/** @brief The role's surface for a_colour with a_depth (DXVK's), imported; without passes when the target cannot be imported. */
 		std::shared_ptr<Surface> MakeSurface(Role a_role, ID3D11Texture2D* a_colour, DXGI_FORMAT a_format, ID3D11Texture2D* a_depth)
 		{
@@ -914,19 +1026,9 @@ namespace RenderGraph::Engine::Scaleform::Passes
 			surface->width = colourDesc.Width;
 			surface->height = colourDesc.Height;
 			surface->colourFormat = rhi::helpers::ToRHI(a_format);
-			if (const auto target = EngineTargetOf(a_colour); target >= 0) {
-				surface->colour = FrameAnchors::EngineTarget(static_cast<std::uint32_t>(target));
-			} else if (auto owned = ORGHDRDisplay::Get().GraphOf(a_colour)) {
-				// HDR's UI texture as the graph owns it (CS_ORG_HDR_DISPLAY): the twin, which the composite reads.
-				surface->ownId = "cs.scaleform.hdr-ui";
-				surface->colour = std::move(owned);
-			} else {
-				// One id per role: a texture made again for the role is that import's next version or a new slot, never one more id.
-				surface->colour = ImportTarget(a_colour, a_format, fmt::format("cs.scaleform.target.{}", static_cast<int>(a_role)));
-			}
+			surface->colour = ColourOf(a_role, a_colour, a_format, surface->ownId);
 			if (a_depth) {
-				if (const auto depth = EngineDepthOf(a_depth); depth >= 0)
-					surface->depth = FrameAnchors::EngineDepth(static_cast<std::uint32_t>(depth));
+				surface->depth = DepthTextureOf(a_depth);
 				if (surface->depth) {
 					D3D11_TEXTURE2D_DESC depthDesc{};
 					a_depth->GetDesc(&depthDesc);
@@ -973,7 +1075,7 @@ namespace RenderGraph::Engine::Scaleform::Passes
 		Surface* Find(const PathState& a_state, ID3D11Texture2D* a_colour)
 		{
 			for (const auto& surface : a_state.surfaces)
-				if (surface->colourTexture.get() == a_colour)
+				if (surface->scratch < 0 && a_colour && surface->colourTexture.get() == a_colour)
 					return surface.get();
 			return nullptr;
 		}
@@ -988,10 +1090,10 @@ namespace RenderGraph::Engine::Scaleform::Passes
 			const auto texture = RoleTexture(a_role, format);
 			if (!texture || format == DXGI_FORMAT_UNKNOWN)
 				return false;
-			auto surface = MakeSurface(a_role, texture.get(), format, MainDepth());
+			auto surface = MakeSurface(a_role, texture.get(), format, RoleDepth(a_role));
 			QueuePrograms(a_state, *surface);
 			std::erase_if(a_state.surfaces, [&](const std::shared_ptr<Surface>& a_old) {
-				if (a_old->role != a_role)
+				if (a_old->scratch >= 0 || a_old->role != a_role)
 					return false;
 				// A pass of an older build that still holds it draws nothing more; its textures go once D3D11 and the graph are done.
 				a_old->Clear();
@@ -1003,6 +1105,45 @@ namespace RenderGraph::Engine::Scaleform::Passes
 		}
 
 		/**
+		 * @brief The role's surface kept for its texture made again (a resize, HDR's textures made again) when the texture is the same
+		 * graph texture as before: the slot of an engine target or of this client's import takes the new texture as its next version, so
+		 * the passes stay and nothing is built. Its D3D11 identity and size follow the new texture. Null when the graph texture changed
+		 * (another slot, another format, another depth-stencil): the caller makes the surface again.
+		 */
+		Surface* RefreshSurface(PathState& a_state, Role a_role, const Display& a_display)
+		{
+			const auto found = std::ranges::find_if(a_state.surfaces, [&](const auto& a_surface) { return a_surface->scratch < 0 && a_surface->role == a_role; });
+			if (found == a_state.surfaces.end() || !(*found)->Drawable())
+				return nullptr;
+			Surface& surface = **found;
+			if (surface.colourFormat != rhi::helpers::ToRHI(a_display.targetFormat))
+				return nullptr;
+			std::string ownId;
+			const auto colour = ColourOf(a_role, a_display.target, a_display.targetFormat, ownId);
+			if (!colour || !(colour == surface.colour) || ownId != surface.ownId)
+				return nullptr;
+			auto* depthTexture = RoleDepth(a_role);
+			const auto depth = DepthTextureOf(depthTexture);
+			if (!(depth == surface.depth))
+				return nullptr;
+			surface.colourTexture.copy_from(a_display.target);
+			surface.depthTexture.copy_from(depthTexture);
+			D3D11_TEXTURE2D_DESC desc{};
+			a_display.target->GetDesc(&desc);
+			surface.width = desc.Width;
+			surface.height = desc.Height;
+			if (depthTexture && surface.depth) {
+				D3D11_TEXTURE2D_DESC depthDesc{};
+				depthTexture->GetDesc(&depthDesc);
+				surface.width = std::min(surface.width, depthDesc.Width);
+				surface.height = std::min(surface.height, depthDesc.Height);
+			}
+			logger::info("[ORG] Scaleform: the {} texture was made again ({}x{}); its surface draws it as the slot's next version, nothing is built",
+				RoleName(a_role), desc.Width, desc.Height);
+			return &surface;
+		}
+
+		/**
 		 * @brief The surface a_display draws onto. Only the framebuffer's and HDR's UI texture's, declared at setup, are drawn on the
 		 * graph. When one of those roles' textures was made again (a resize, HDR's textures made again), its surface is made again
 		 * and the client registered again: the Interface graph is built with it at the next build point, between frames (a rebuild
@@ -1010,6 +1151,13 @@ namespace RenderGraph::Engine::Scaleform::Passes
 		 */
 		Surface* SurfaceFor(PathState& a_state, const Display& a_display, bool a_needsDepth, const char*& a_reason)
 		{
+			if (a_display.scratch != -1) {
+				// A render target GFx pushed: drawn into its scratch image.
+				auto* scratch = const_cast<Surface*>(ScratchSurface(a_state, a_display.scratch));
+				if (!scratch || !scratch->Drawable())
+					a_reason = "a render target of GFx's that no scratch image could take (larger than the screen, or all in use)";
+				return scratch && scratch->Drawable() ? scratch : nullptr;
+			}
 			if (auto* surface = Find(a_state, a_display.target)) {
 				if (!surface->Drawable()) {
 					a_reason = "a render target the graph cannot import";
@@ -1029,10 +1177,12 @@ namespace RenderGraph::Engine::Scaleform::Passes
 				DXGI_FORMAT format{};
 				if (RoleTexture(role, format).get() != a_display.target)
 					continue;
-				logger::info("[ORG] Scaleform: the {} texture was made again (a resize or an HDR change); the Interface graph is built again with it",
+				if (auto* refreshed = RefreshSurface(a_state, role, a_display); refreshed)
+					return refreshed;
+				logger::info("[ORG] Scaleform: the {} texture was made again as another graph resource; the Interface graph is built again with it",
 					RoleName(role));
-				if (DeclareSurface(a_state, role))
-					RegisterClient(a_state);
+				if (DeclareSurface(a_state, role) && RegisterClient(a_state))
+					a_state.surfacesRegistration = a_state.registrations;
 				a_reason = "a surface made again (drawn once the Interface graph is built with it)";
 				return nullptr;
 			}
@@ -1040,7 +1190,7 @@ namespace RenderGraph::Engine::Scaleform::Passes
 			return nullptr;
 		}
 
-		/** @brief Logs each new power of two of the largest segment, to size kGateEntries from. */
+		/** @brief Logs each new power of two of the largest segment (more than kGateEntries commands take more than one run). */
 		void NoteSegment(PathState& a_state, std::uint32_t a_commands)
 		{
 			if (a_commands <= a_state.largestSegment)
@@ -1048,7 +1198,22 @@ namespace RenderGraph::Engine::Scaleform::Passes
 			const bool log = a_commands >= 64 && std::bit_floor(a_commands) > std::bit_floor(std::max(a_state.largestSegment, 1u));
 			a_state.largestSegment = a_commands;
 			if (log)
-				logger::info("[ORG] Scaleform: the largest segment so far has {} commands (the Interface gate holds {})", a_commands, kGateEntries);
+				logger::info("[ORG] Scaleform: the largest segment so far has {} commands (drawn in runs of at most {})", a_commands, kGateEntries);
+		}
+
+		/**
+		 * @brief A draw whose pipeline could not be built: the ProgramCache logged the build's error once; this names the key, once.
+		 * The draw is left out and the rest of its segment draws.
+		 */
+		void NoteFailedProgram(PathState& a_state, const ProgramKey& a_key)
+		{
+			if (!a_state.failedPrograms.insert(a_key).second)
+				return;
+			logger::error(
+				"[ORG] Scaleform programs: the pipeline for vertex kind {}, pixel kind {}, filter {}, blend {}, stencil {}, {} (colour format {}, "
+				"depth format {}) could not be built; its draws are left out",
+				a_key.state.vertexKind, a_key.state.pixelKind, a_key.state.filter, a_key.state.blend, static_cast<int>(a_key.state.stencil),
+				a_key.state.lines ? "line strip" : "triangle list", static_cast<int>(a_key.colour), static_cast<int>(a_key.depth));
 		}
 
 		/** @brief A run that did not draw: an error of the graph path, logged once per reason. Not a readiness state. */
@@ -1073,6 +1238,67 @@ namespace RenderGraph::Engine::Scaleform::Passes
 				return "the Interface epoch failed";
 			}
 		}
+	}
+
+	namespace
+	{
+		/**
+		 * @brief The scratch images: kScratchTargets graph textures of this client's, the largest role surface's size, registered with
+		 * the Interface graph and declared by every pass. GFx's pushed render targets are drawn into them (a filter's source and its
+		 * passes); the draws that read GFx's texture read its scratch image. Each has a pass that draws into it. Their pipelines queued.
+		 */
+		void MakeScratch(PathState& a_state)
+		{
+			for (const auto& surface : a_state.surfaces)
+				if (surface->Drawable()) {
+					a_state.scratchWidth = std::max(a_state.scratchWidth, surface->width);
+					a_state.scratchHeight = std::max(a_state.scratchHeight, surface->height);
+				}
+			if (!a_state.scratchWidth || !a_state.scratchHeight)
+				return;
+			for (std::uint32_t i = 0; i < kScratchTargets; ++i) {
+				org::TextureDescription desc{};
+				desc.imageDimensions = { { a_state.scratchWidth, a_state.scratchHeight, 0, 0 } };
+				desc.channels = 4;
+				desc.format = kScratchFormat;
+				desc.hasRTV = true;
+				desc.rtvFormat = kScratchFormat;
+				desc.hasSRV = true;
+				desc.srvFormat = kScratchFormat;
+				auto texture = org::PixelBuffer::CreateShared(desc);
+				if (!texture) {
+					logger::warn("[ORG] Scaleform: scratch image {} could not be made; GFx's render targets beyond it are not drawn", i);
+					break;
+				}
+				auto surface = std::make_shared<Surface>();
+				surface->scratch = static_cast<std::int32_t>(i);
+				surface->ownId = fmt::format("cs.scaleform.scratch.{}", i);
+				texture->SetName(surface->ownId);
+				surface->colour = FrameAnchors::Texture(std::static_pointer_cast<org::Resource>(texture));
+				surface->colourFormat = kScratchFormat;
+				surface->width = a_state.scratchWidth;
+				surface->height = a_state.scratchHeight;
+				surface->colourSlots = std::make_shared<const Slots>();
+				if (i == 0)
+					QueuePrograms(a_state, *surface);
+				a_state.surfaces.push_back(std::move(surface));
+			}
+			logger::info("[ORG] Scaleform: {} scratch images of {}x{} for GFx's render targets", kScratchTargets, a_state.scratchWidth, a_state.scratchHeight);
+		}
+	}
+
+	bool ScratchSize(std::uint32_t& a_width, std::uint32_t& a_height)
+	{
+		const auto& state = Path();
+		a_width = state.scratchWidth;
+		a_height = state.scratchHeight;
+		return state.setUp && a_width && a_height;
+	}
+
+	std::uint32_t ScratchCount()
+	{
+		const auto& state = Path();
+		return static_cast<std::uint32_t>(std::ranges::count_if(state.surfaces, [](const auto& a_surface) { return a_surface->scratch >= 0; }));
 	}
 
 	bool Reserve()
@@ -1123,13 +1349,15 @@ namespace RenderGraph::Engine::Scaleform::Passes
 		}
 		for (const auto role : kRoles)
 			(void)DeclareSurface(state, role);
+		MakeScratch(state);
 		if (std::ranges::none_of(state.surfaces, [](const auto& a_surface) { return a_surface->Drawable(); })) {
 			state.failed = true;
-			logger::error("[ORG] Scaleform: none of the framebuffer, HDR's UI texture and kMAIN can be imported; the D3D11 renderer draws");
+			logger::error("[ORG] Scaleform: none of the surfaces' targets can be imported; the D3D11 renderer draws");
 			return;
 		}
 		if (!RegisterClient(state))
 			return;
+		state.surfacesRegistration = state.registrations;
 		state.setUp = true;
 		logger::info("[ORG] Scaleform: on (CS_ORG_SCALEFORM); the client joins the Interface graph at setup's build point");
 	}
@@ -1147,23 +1375,21 @@ namespace RenderGraph::Engine::Scaleform::Passes
 			a_reason = "the graph path is off (not set up, or failed)";
 			return false;
 		}
-		if (a_display.commands.empty())
+		if (a_display.commands.empty() && !a_display.clearTarget)
 			return true;  // nothing drawn, as the D3D11 renderer would draw nothing
 		const auto commandCount = static_cast<std::uint32_t>(a_display.commands.size());
 		NoteSegment(state, commandCount);
-		if (commandCount > kGateEntries) {
-			a_reason = "a segment with more commands than the Interface gate holds";
-			return false;
-		}
-		// Without a depth-stencil bound the D3D11 masks do nothing either; with one, the graph must have it.
-		const bool needsDepth = a_display.depth && std::ranges::any_of(a_display.commands, [](const Command& a_command) {
+		// Without a depth-stencil bound the D3D11 masks do nothing either; with one, the graph must have it. The scratch images have
+		// none: masks inside a render target GFx pushed are not drawn (its stencil surface is not a scratch image yet).
+		const bool needsDepth = a_display.scratch == -1 && a_display.depth && std::ranges::any_of(a_display.commands, [](const Command& a_command) {
 			return a_command.kind == Command::Kind::ClearStencil || a_command.state.stencil != Stencil::Off;
 		});
 		Surface* surface = SurfaceFor(state, a_display, needsDepth, a_reason);
 		if (!surface)
 			return false;
 
-		// Every pipeline was queued at setup; one the build thread has not finished yet is built here, never left to D3D11.
+		// Every pipeline was queued at setup; one the build thread has not finished yet is built here, never left to D3D11. A key that
+		// failed to build leaves its draw out (logged once); the rest of the segment draws.
 		state.pendingPrograms.assign(a_display.commands.size(), nullptr);
 		for (std::size_t i = 0; i < a_display.commands.size(); ++i) {
 			const Command& command = a_display.commands[i];
@@ -1173,37 +1399,45 @@ namespace RenderGraph::Engine::Scaleform::Passes
 			if (!needsDepth)
 				key.state.stencil = Stencil::Off;
 			state.pendingPrograms[i] = state.programs.Require(key, [&] { return DescOf(key); });
-			if (!state.pendingPrograms[i]) {
-				state.pendingPrograms.clear();
-				a_reason = "a pipeline that cannot be made";
-				return false;
-			}
+			if (!state.pendingPrograms[i])
+				NoteFailedProgram(state, key);
 		}
-		if (!FrameAnchors::CanRun(kClientId, Anchor::Interface)) {
+		// The latest registration is in the built graph, or an older one with the same surfaces is: a registration for new reads alone
+		// does not wait for its build (the reads it adds keep their raw indices until then). Only new surfaces wait.
+		if (FrameAnchors::CanRun(kClientId, Anchor::Interface)) {
+			state.builtRegistration = state.registrations;
+		} else if (state.builtRegistration == 0 || state.builtRegistration < state.surfacesRegistration) {
 			state.pendingPrograms.clear();
-			// Setup's build point put the client in the graph: it is outside it only after a surface was made again, until the next build.
-			a_reason = FrameAnchors::InBuiltGraph(kClientId, Anchor::Interface) ? "the Interface anchor's ring is full this frame" :
-			                                                                       "a surface made again (drawn once the Interface graph is built with it)";
+			a_reason = !FrameAnchors::IsRenderOwner()        ? "a segment off the render owner" :
+			           !RenderGraphRuntime::Get().IsActive() ? "the graph path is off (not set up, or failed)" :
+			                                                   "a surface made again (drawn once the Interface graph is built with it)";
 			return false;
 		}
 
+		// One run per kGateEntries commands, in order: the target and the depth-stencil carry what each run drew into the next.
 		state.pending = &a_display;
 		state.pendingSurface = surface;
 		state.pendingDepth = needsDepth;
-		state.committed = false;
-		state.executed = false;
-		state.commitReason = nullptr;
-		const auto result = FrameAnchors::Run(Anchor::Interface);
+		a_reason = nullptr;
+		for (std::uint32_t first = 0; first < commandCount && !a_reason; first += kGateEntries) {
+			state.pendingFirst = first;
+			state.pendingCount = std::min(kGateEntries, commandCount - first);
+			state.committed = false;
+			state.executed = false;
+			state.commitReason = nullptr;
+			const auto result = FrameAnchors::Run(Anchor::Interface);
+			if (!result)
+				a_reason = ReasonOf(result.status);
+			else if (!state.committed)
+				a_reason = state.commitReason ? state.commitReason : "the commit did not run";
+			else if (!state.executed)
+				a_reason = "the client was not in the Interface epoch";
+		}
 		state.pending = nullptr;
 		state.pendingSurface = nullptr;
+		state.pendingFirst = state.pendingCount = 0;
 		state.pendingPrograms.clear();
-		if (!result)
-			a_reason = ReasonOf(result.status);
-		else if (!state.committed)
-			a_reason = state.commitReason ? state.commitReason : "the commit did not run";
-		else if (!state.executed)
-			a_reason = "the client was not in the Interface epoch";
-		else
+		if (!a_reason)
 			return true;
 		Failure(a_reason);
 		return false;
@@ -1219,6 +1453,12 @@ namespace RenderGraph::Engine::Scaleform::Passes
 	bool Reserve() { return false; }
 	void Setup() {}
 	bool Ready() { return false; }
+	bool ScratchSize(std::uint32_t& a_width, std::uint32_t& a_height)
+	{
+		a_width = a_height = 0;
+		return false;
+	}
+	std::uint32_t ScratchCount() { return 0; }
 	bool Submit(Display&, const char*& a_reason)
 	{
 		a_reason = "built without the render graph";

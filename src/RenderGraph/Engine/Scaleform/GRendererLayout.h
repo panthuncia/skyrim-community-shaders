@@ -43,6 +43,12 @@ namespace RenderGraph::Engine::Scaleform::Layout
 	inline constexpr std::size_t kRenderTarget = 0x740;
 	inline constexpr std::size_t kRenderTargetRtv = 0x50;  // in the GRenderTargetD3D1x: ID3D11RenderTargetView*
 	inline constexpr std::size_t kRenderTargetDsv = 0x58;  // ID3D11DepthStencilView*
+	// The GRenderTargetD3D1x's texture (a GTextureD3D1x*: PushTempRenderTarget returns it) and the size its pusher asked for, which
+	// PushRenderTarget sets the viewport to (SE 0x140f61830 reads +0x38, then +0x60 and +0x64; PushTempRenderTarget SE 0x140f61c70
+	// writes the asked size there before it pushes).
+	inline constexpr std::size_t kRenderTargetTexture = 0x38;
+	inline constexpr std::size_t kRenderTargetWidth = 0x60;   // std::uint32_t
+	inline constexpr std::size_t kRenderTargetHeight = 0x64;  // std::uint32_t
 	// The blend stack, a GArray<std::uint32_t> at +0x728 (data, then this size, then the capacity): PushBlendMode appends the mode
 	// before, PopBlendMode (a no-op when empty) removes the last. Checked on both (SE 0x140f61770 / 0x140f61120, AE 0x14104c300 /
 	// 0x14104bd10, vtable slots 17 and 18).

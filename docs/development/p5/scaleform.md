@@ -21,7 +21,10 @@ shaders `package/Shaders/Scaleform/`, behind `CS_ORG_SCALEFORM=1` (default off).
     "D3D11 parts"): render to a texture, filter sources, blur/shadow/glow/bevel filters, line strips, 3D, 32-bit indices,
     video textures.
   - The colour matrix filter onto a display's target is a graph draw with the transcribed `FilterVS.hlsl`/`FilterPS.hlsl`.
-- **Still D3D11:** the blur family's passes (`DrawBlurRect`, a D3D11 part), everything drawn into GFx's own render targets
+- **Parity wave (2026-11-14, [parity/scaleform.md](../parity/scaleform.md)):** GFx's render targets, the blur family,
+  render-texture displays (the book), `SetDisplayRenderTarget` inside a display and long segments are on the graph; the D3D11
+  parts, their replay and the three `Flush::Reason`s are deleted. The bullets below describe the state before it.
+- **Still D3D11 (before the parity wave):** the blur family's passes (`DrawBlurRect`, a D3D11 part), everything drawn into GFx's own render targets
   (their textures are then read by graph draws), a whole display into a render texture (`kViewportRenderTexture`), and the
   parts above. In the 15 runs before this change (HUD, inventory, map, journal, loads) **no** filter, render target, line strip
   or render-texture display appeared at all; the census line says how often they occur now.
@@ -80,6 +83,9 @@ With `CS_ORG_SCALEFORM=1` the graph is the only path for what it draws (primary-
 
 ### What stays the engine's
 
+Superseded by [parity/scaleform.md](../parity/scaleform.md), "The items": most of this list is on the graph now, and what
+is left is left out and counted, not drawn by D3D11.
+
 Inherent refusals, each counted in the census and logged once:
 
 - Whole displays: off the render owner (a loading screen without `CS_ORG_LOADING_THREAD=1`), without a video mode, into a
@@ -124,6 +130,8 @@ Each was a D3D11 part of one call before. They follow what the D3D11 renderer do
 - The solid fill (pixel kind 1) is enumerated with every blend: Multiply and Darken keep kind 1 for it.
 
 ## Census
+
+The line after the parity wave's deletion commit: [parity/scaleform.md](../parity/scaleform.md), "Census and log lines".
 
 Every 1000 displays, and the first time each reason comes up (`[ORG] Scaleform: the D3D11 renderer draws: <reason>`):
 
@@ -270,6 +278,9 @@ A display (`BeginDisplay` to `EndDisplay`) is a sequence of graph segments and D
    `BeginDisplay` took.
 
 ### D3D11 parts
+
+Deleted in the parity wave ([parity/scaleform.md](../parity/scaleform.md)): render targets and filters are graph segments
+into scratch images, and a draw the graph cannot take is left out.
 
 A display is a sequence of graph segments and D3D11 parts. Each segment is one `Passes::Submit` (one Interface epoch run).
 
@@ -477,6 +488,8 @@ The background rectangle `BeginDisplay` draws is one of the display's draws.
 
 ### Fallback
 
+Deleted in the parity wave: a segment the graph cannot draw is left out and counted, not replayed.
+
 A segment the graph cannot draw is replayed into D3D11: an inherent refusal ("What stays the engine's"), a surface made again
 until the next build, or a failure (a pipeline that cannot be made, a texture whose view cannot be resolved, an epoch that did
 not run, logged as an error); a display refused at `BeginDisplay` is D3D11's
@@ -545,7 +558,10 @@ good on a graph failure.
 
 What the guest phase leaves for the cutover:
 
-- **Private target imports (a blocker).** A target that is not an engine target (the back buffer, HDR's UI texture) is imported
+- **Private target imports:** cleared. Scaleform's imports go through `FrameAnchors::ImportTexture` (one graph resource per
+  image), HDR's UI texture shares Bink's `hdr.ui` slot, and GFx's own targets are no longer imported (scratch images, parity
+  wave). The text below is the old state.
+- **Private target imports (a blocker, before).** A target that is not an engine target (the back buffer, HDR's UI texture) is imported
   with `RenderGraph::ImportDxvkTexture` as `cs.scaleform.target.<n>`, beside HDR's own import of its UI texture
   (`cs.d3d11.hdr.ui`, which has no RTV). No graph-native path exists for either yet: the back buffer becomes the owned frame's
   swap chain image and HDR's UI texture a `GraphResources` twin with an RTV (HDR's port); the surfaces then read them by name.
