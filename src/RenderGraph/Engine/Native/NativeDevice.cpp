@@ -770,9 +770,9 @@ namespace RenderGraph::Engine::Native
 				}
 				slot.value = ++value;
 				slot.keep = std::move(a_keep);
-				for (auto* used : a_used)
-					if (used)
-						used->lastUse.store(value, std::memory_order_release);
+				for (auto* record : a_used)
+					if (record)
+						record->lastUse.store(value, std::memory_order_release);
 				return value;
 			}
 
@@ -2681,7 +2681,7 @@ namespace RenderGraph::Engine::Native
 					continue;
 				const bool homeOff = ::RenderGraph::NativeHomeStatesOff();
 				const bool moves = !graph->CommonLayoutOnly();
-				const bool inRun = ::RenderGraph::FrameAnchors::InRun();
+				const bool inRun = ::FrameAnchors::InRun();
 				const bool race = homeOff || (moves && (inRun || !graph->GoesHome()));
 				::RenderGraph::RawAccess::Count(::RenderGraph::RawAccess::Kind::ContextTracked);
 				if (race)
