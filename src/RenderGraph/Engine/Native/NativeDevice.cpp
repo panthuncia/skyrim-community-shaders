@@ -739,6 +739,8 @@ namespace RenderGraph::Engine::Native
 			template <class Body>
 			uint64_t Submit(const std::string& a_label, Body&& a_body, std::vector<std::shared_ptr<const void>> a_keep, std::initializer_list<NativeResource*> a_used)
 			{
+				// A region's held anchor runs go first: this work must follow them on the GPU.
+				::FrameAnchors::FlushRegions("raw work");
 				std::lock_guard guard(lock);
 				const uint32_t index = static_cast<uint32_t>(next++ % kSlots);
 				auto& slot = slots[index];
