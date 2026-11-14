@@ -3185,7 +3185,7 @@ stand-ins and the engine boundary are the GPU path's: the same objects are DCLF'
     DCLF's retirement clock counts those signals with the host's submissions (`Core/Runtime/FrameRetirement.h`).
 
 **The modes and cadences.**
--   `dclf:cpu-record=indirect` (the default off NVIDIA; NVIDIA defaults to `serial`, whose pushed colour saves 0.21 ms of GPU time on an RTX 5080): each cull job writes its batch's draws into its frame slot's draw buffer
+-   `dclf:cpu-record=indirect` (the default on every vendor, `DefaultRecordMode` in `Toggles.cpp`; `serial`, with pushed colour, was 0.21 ms of GPU time faster on an RTX 5080 and 0.5 ms on an RX 6600): each cull job writes its batch's draws into its frame slot's draw buffer
     (`Direct/Recorder.h`, `IndirectDraw`), and the CS thread records one indirect draw per run of a pipeline. An indirect draw cannot
     push per draw, so a draw's instance names its record, which holds its sequence's index and its object word
     (`kDirectFlagDrawRecords`, `DCLFDrawSequence`). Colour therefore always uses the pulled pipelines; `kExpPushedColour` and

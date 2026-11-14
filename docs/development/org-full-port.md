@@ -65,8 +65,9 @@ the D3D11 path. SE 1.5.97 is deferred. Phase 5 wave 1, each against its D3D11 ru
 
 - **P5.7 constants:** every engine constant-buffer use is captured into graph memory; a read-back check found 0 differences.
 - **P5.1 skeleton:** the engine's nine clear and depth-copy sites run on the graph; no tripwire line from them is left.
-- **P5.3 sky:** the main view and the reflection faces draw on the graph (mean diff 1.0-1.6). The cloud layers stay the
-  engine's by default (`CS_ORG_SKY_CLOUDS`, off until a run confirms them; p5/sky.md, "Cloud layers").
+- **P5.3 sky:** the main view and the reflection faces draw on the graph (mean diff 1.0-1.6). The cloud layers were the
+  engine's by default in wave 1; they are always on the graph since 91b722642, and the `CS_ORG_SKY_CLOUDS` switch is gone
+  (p5/sky.md, "Cloud layers").
 - **P5.11 Bink:** a main-thread movie draws on the graph (165 of 166 frames), decoded frames identical. The startup logo
   plays on its own thread; with P5.12's `CS_ORG_LOADING_THREAD=1` it draws on the graph too (164 or 165 of 166 frames).
 - **P5.10 Scaleform:** about half the displays drew on the graph in wave 1, shots match. The rest were loading-screen
@@ -855,7 +856,8 @@ no D3D12 device to share with it. Select it with `CS_ORG_NATIVE_BACKEND=d3d12`.
   (Streamline `org-port/dx12`). CS's Streamline integration is off on D3D12 by name: it hands Streamline DXVK's device
   and Vulkan resources. DLSS, DLSS-G and Reflex on D3D12 need `slSetD3DDevice` on the native device and D3D12 tags.
 - **P7.4:** BasicRHI's D3D12 swap chain already has HDR colour spaces (`SetColorSpace1`), frame latency and its waitable
-  object. `Engine::ConfigureSwapchain` applies them on either backend. DRED is on with the debug layer or with crash
+  object. `Engine::ConfigureSwapchain` applies them; its only caller is the D3D12 self-test (`D3D12SelfTest.cpp`), so native
+  mode's swap chains do not go through it. DRED is on with the debug layer or with crash
   markers (BasicRHI `enableCrashMarkers` on D3D12, set from hang mode as on Vulkan).
 
 **Native mode on D3D12** (2026-11-12): `CS_ORG_NATIVE=1 CS_ORG_NATIVE_BACKEND=d3d12`, scenario

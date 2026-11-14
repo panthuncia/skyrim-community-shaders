@@ -76,7 +76,6 @@ namespace Testing::SwitchRegistry
 			"CS_ORG_ALIAS_LOG",
 			"CS_ORG_ANCHOR_SELFTEST",
 			"CS_ORG_ANCHOR_SELFTEST_FAIL",
-			"CS_ORG_BINDLESS",
 			"CS_ORG_BINK",
 			"CS_ORG_BINK_SHOT",
 			"CS_ORG_BLOOD_SPLATTER",
@@ -92,6 +91,7 @@ namespace Testing::SwitchRegistry
 			"CS_ORG_D3D12_SDK_PATH",
 			"CS_ORG_D3D12_SELFTEST",
 			"CS_ORG_D3D12_SELFTEST_HDR",
+			"CS_ORG_DEFERRED_CLEARS",
 			"CS_ORG_DETAILED_CHECKPOINTS",
 			"CS_ORG_DYNAMIC_CUBEMAPS",
 			"CS_ORG_E11_RAYS",
@@ -124,7 +124,6 @@ namespace Testing::SwitchRegistry
 			"CS_ORG_IN_STREAM",
 			"CS_ORG_LIGHT_LIMIT_FIX_SHADOWS",
 			"CS_ORG_LLF_PARITY",
-			"CS_ORG_LLF_SHADOWS",
 			"CS_ORG_LOADING_THREAD",
 			"CS_ORG_MAP",
 			"CS_ORG_MENU3D",
@@ -157,7 +156,6 @@ namespace Testing::SwitchRegistry
 			"CS_ORG_RESTING_LAYOUTS",
 			"CS_ORG_REUSE_RECORDINGS",
 			"CS_ORG_SCALEFORM",
-			"CS_ORG_SCALEFORM_D3D11_PARTS",
 			"CS_ORG_SCREENSHOT",
 			"CS_ORG_SCREEN_SPACE_GI",
 			"CS_ORG_SCREEN_SPACE_SHADOWS",
@@ -166,7 +164,6 @@ namespace Testing::SwitchRegistry
 			"CS_ORG_SHARED_CONSTANTS_CHECK",
 			"CS_ORG_SKY",
 			"CS_ORG_SKYLIGHTING",
-			"CS_ORG_SKY_CLOUDS",
 			"CS_ORG_SSGI_DEBUG",
 			"CS_ORG_SUBMIT",
 			"CS_ORG_SUBSURFACE_SCATTERING",
@@ -256,6 +253,22 @@ namespace Testing::SwitchRegistry
 			"VK_LOADER_LAYERS_ENABLE",
 		};
 
+		// The render graph's epoch and submission switches, with their help text. Listed here, not in DCLF's registry, so they are
+		// checked in builds without Drawcall Limit Fix too.
+		struct Described
+		{
+			std::string_view name;
+			std::string_view description;
+		};
+		constexpr Described kDescribed[] = {
+			{ "CS_ORG_ASYNC_EPOCHS", "0: epochs are recorded on the render thread" },
+			{ "CS_ORG_BATCH_SUBMIT", "0: an epoch's submissions go to DXVK one at a time" },
+			{ "CS_ORG_CLOSED", "1: epochs return every resource to its home state and start with a full barrier (closed executions, an interop fallback)" },
+			{ "CS_ORG_EARLY_FLUSH", "1: DXVK's pending work is flushed when an epoch starts (a second DXVK list per epoch)" },
+			{ "CS_ORG_EPOCHS", "0: the render graph runs without epochs, and DCLF does not install" },
+			{ "CS_ORG_EXTERNAL_HOME", "0: epochs do not return DXVK's images to their home state on the graphics queue (unsafe: DXVK expects them there)" },
+		};
+
 		// Families read by a computed name: any name with the prefix is known.
 		constexpr std::string_view kPrefixes[] = { "CS_GPU_COUNTERS_", "CS_NVPERF_", "DXVK_", "VK_" };
 
@@ -297,7 +310,7 @@ namespace Testing::SwitchRegistry
 	{
 		bool found = false;
 		ForEachDclfRow([&](std::string_view a_row, std::string_view, std::string_view) { found = found || a_row == a_name; });
-		if (found || std::ranges::find(kOther, a_name) != std::end(kOther))
+		if (found || std::ranges::find(kOther, a_name) != std::end(kOther) || std::ranges::find(kDescribed, a_name, &Described::name) != std::end(kDescribed))
 			return Known::Yes;
 		for (const auto prefix : kPrefixes)
 			if (a_name.starts_with(prefix) && a_name.size() > prefix.size())
@@ -315,6 +328,9 @@ namespace Testing::SwitchRegistry
 			if (names.emplace(a_name).second)
 				all.push_back({ std::string(a_name), std::string(a_kind), std::string(a_description), "dclf" });
 		});
+		for (const auto& row : kDescribed)
+			if (names.emplace(row.name).second)
+				all.push_back({ std::string(row.name), "other", std::string(row.description), Family(row.name) });
 		for (const auto name : kOther)
 			if (names.emplace(name).second)
 				all.push_back({ std::string(name), "other", "", Family(name) });

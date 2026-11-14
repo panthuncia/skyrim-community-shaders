@@ -26,7 +26,10 @@ namespace
 
 	Boot g_boot;
 
-	/** @brief An environment variable's value, read from the process environment (not through Switches, which caches). */
+	/**
+	 * @brief An environment variable's value, read from the process environment. Not through Switches, which caches: ApplyAtBoot
+	 * sets CS_ORG_NATIVE and CS_ORG_NATIVE_BACKEND after reading them, and a cached read would hide that from Native::Requested.
+	 */
 	std::string Environment(const char* a_name)
 	{
 		char value[64]{};

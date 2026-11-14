@@ -6,9 +6,12 @@
 #include "Globals.h"
 #include "RenderGraph/Engine/Tripwire/Tripwire.h"
 #include "RenderGraph/Switches.h"
+#include "Utils/SwitchFile.h"
 
+#include <algorithm>
 #include <array>
 #include <atomic>
+#include <ranges>
 #include <string>
 
 namespace RenderGraph::Engine::Native
@@ -54,7 +57,6 @@ namespace RenderGraph::Engine::Native
 			"CS_ORG_ENGINE_CONSTANTS",
 			"CS_ORG_ENGINE_SKELETON",
 			"CS_ORG_SKY",
-			"CS_ORG_SKY_CLOUDS",
 			"CS_ORG_OCCLUSION_QUERIES",
 			"CS_ORG_VOLUMETRIC_LIGHTING",
 			"CS_ORG_WATER",
@@ -80,8 +82,43 @@ namespace RenderGraph::Engine::Native
 			Conflict{ "CS_ORG_OWNED_FRAME", "1", "the owned frame runs DXVK as a guest on BasicRHI's device; native mode has no DXVK" },
 			Conflict{ "CS_ORG", "0", "native mode is the render graph: it cannot be off" },
 			Conflict{ "CS_ORG", "features", "native mode is the render graph: it cannot be off" },
-			Conflict{ "CS_ORG_SCALEFORM_D3D11_PARTS", "1", "it draws Scaleform's remaining parts through D3D11" },
 		};
+
+		/**
+		 * @brief Switches that narrow a port to part of its work: set to anything but every part, each one is a startup error. The parts
+		 * left out stay the engine's draws, and native mode drops engine draws without a word.
+		 */
+		struct Narrowing
+		{
+			const char* name;
+			std::string_view all;  // the parts, comma separated, that cover the whole port; unset covers it too
+			bool anyCase;          // the reader ignores case
+			const char* why;
+		};
+		constexpr std::array kNarrowings{
+			Narrowing{ "CS_ORG_WATER_PARTS", "mask,surface", false, "it leaves the water views it does not name to the engine" },
+			Narrowing{ "CS_ORG_SHADOW_MASK_VIEWS", "world,menu", false, "it leaves the shadow mask views it does not name to the engine" },
+			Narrowing{ "CS_ORG_IMAGESPACE_EFFECTS", "all", true, "it leaves the ImageSpace effects it does not name to the engine" },
+		};
+
+		/** @brief Whether a narrowing switch names every part (or is unset), compared as its reader compares them. */
+		bool CoversAll(const Narrowing& a_switch)
+		{
+			const auto items = Switches::List(a_switch.name);
+			if (items.empty())
+				return true;
+			for (const auto part : std::views::split(a_switch.all, ',')) {
+				const std::string_view wanted(part.begin(), part.end());
+				const bool named = std::ranges::any_of(items, [&](const std::string& a_item) {
+					if (!a_switch.anyCase)
+						return a_item == wanted;
+					return a_item.size() == wanted.size() && _strnicmp(a_item.data(), wanted.data(), wanted.size()) == 0;
+				});
+				if (!named)
+					return false;
+			}
+			return true;
+		}
 
 		/**
 		 * @brief Drawcall Limit Fix on D3D12: what has no D3D12 port yet, kept off, and the plain draws D3D12 needs kept on. DCLF's D3D12
@@ -161,6 +198,15 @@ namespace RenderGraph::Engine::Native
 			if (Switches::Equals(conflict.name, conflict.value))
 				Fail(fmt::format("{}={}", conflict.name, conflict.value), conflict.why);
 		}
+		for (const auto& narrowing : kNarrowings) {
+			if (!CoversAll(narrowing))
+				Fail(fmt::format("{}={}", narrowing.name, Switches::Value(narrowing.name)), narrowing.why);
+		}
+		// Drawcall Limit Fix draws the world's geometry in native mode: without it the engine's draws would be dropped.
+		if (std::ranges::contains(Switches::List("CS_DISABLE_FEATURES"), std::string_view("DrawcallLimitFix")))
+			Fail("CS_DISABLE_FEATURES naming DrawcallLimitFix", "the world's draws it takes would stay the engine's");
+		if (Util::SwitchFile::Value("CS_DCLF", false) == "0")
+			Fail("CS_DCLF=0", "the world's draws Drawcall Limit Fix takes would stay the engine's");
 		std::string turnedOn;
 		for (const char* name : kPortSwitches) {
 			// Read the environment directly: a switch read through Switches is cached, and this must run before the first read.
@@ -183,9 +229,8 @@ namespace RenderGraph::Engine::Native
 		}
 		Stage("switches", turnedOn.empty() ? std::string("every port switch was set already") : fmt::format("turned on {}", turnedOn));
 		// D3D12: Drawcall Limit Fix's parts without a D3D12 port, by their own switches (read later, at DCLF's install).
-		char backend[16]{};
-		const DWORD backendLength = ::GetEnvironmentVariableA("CS_ORG_NATIVE_BACKEND", backend, sizeof(backend));
-		if (backendLength == 0 || backendLength >= sizeof(backend) || _stricmp(backend, "d3d12") != 0)
+		// GraphicsAPI::ApplyAtBoot set CS_ORG_NATIVE_BACKEND already, so the cached read sees its value.
+		if (!Switches::EqualsNoCase("CS_ORG_NATIVE_BACKEND", "d3d12"))
 			return;
 		std::string set, kept;
 		for (const auto& entry : kD3D12DclfSwitches) {

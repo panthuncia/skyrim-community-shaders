@@ -45,12 +45,6 @@ namespace DCLF
 		ProjectedUv,
 		PlainSnowSparkle,
 		Shadows,
-		OrgEpochs,
-		OrgAsyncEpochs,
-		OrgClosed,
-		OrgExternalHome,
-		OrgBatchSubmit,
-		OrgEarlyFlush,
 
 		// Parity checks: a live path against a from-scratch reference, logging each mismatch.
 		PersistentParity,

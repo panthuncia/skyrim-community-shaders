@@ -127,8 +127,9 @@ With `CS_ORG_BINK=1` the graph is the only path for the ticks it takes (primary-
 - **A queued frame that did not draw** (its run did not submit with the passes) is an error: `[ORG] Bink: a movie frame queued
   for the Present anchor did not draw (N so far)`. The next ticks draw on the graph.
 - **Staging:** one block per frame in flight plus the one the decoder fills (5), so a tick finds one in normal play.
-- **The flush latch:** the engine's `DrawTiles` on a tick the graph does not take runs in `Flush::EngineDraws` (`bink: tick not
-  taken`).
+- **A tick the graph does not take** calls the engine's `DrawTiles`, and the reason is logged once
+  (`[ORG] Bink: the engine draws this frame`, a `Util::ReasonLog`). It opens no `Flush::EngineDraws` scope, so under the flush latch
+  those draws are dropped.
 - **Rebuild trigger:** a new back buffer (a resize) refreshes the client once. The Present graph is built at the next build point
   between frames, and the ticks until then are the engine's (`the framebuffer was made again`).
 
