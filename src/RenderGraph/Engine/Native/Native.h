@@ -178,6 +178,15 @@ namespace RenderGraph::Engine::Native
 	HRESULT Present(UINT a_syncInterval, UINT a_flags);
 
 	/**
+	 * @brief HDR Display's colour space change (UpdateSwapChainColorSpace) in native mode: HDR10 (ST.2084 PQ, Rec. 2020) or SDR on
+	 * BasicRHI's swap chain, through Engine::ConfigureSwapchain, under the present lock once the queued presents are done. The swap
+	 * chain handle answers no IDXGISwapChain3/4, so HDR Display calls this instead of SetColorSpace1. Logs the colour space it ends in.
+	 * @return Whether the swap chain now presents in the colour space asked for (false before stage 4, or when the display path
+	 * refuses HDR10).
+	 */
+	bool SetSwapChainColorSpace(bool a_hdr);
+
+	/**
 	 * @brief RenderGraphRuntime::WrapTexture in native mode: a native texture handle over an image a port made with BasicRHI, so its
 	 * D3D11 readers (the engine's fields, the context's copies and clears) and the graph's import reach the same image. The image is
 	 * moved into GENERAL, its contents uploaded (a_data) or zeroed, as DXVK's wrap does. a_info answers as dxvkCreateTextureFromVkImage

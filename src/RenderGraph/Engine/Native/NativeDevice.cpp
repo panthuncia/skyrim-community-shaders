@@ -4561,7 +4561,9 @@ namespace RenderGraph::Engine::Native
 				rhi::Result::Ok ||
 			!state->swapchain)
 			Fail("the native swap chain", "BasicRHI could not create a swap chain on the game's window");
-		(void)state->swapchain->SetMaximumFrameLatency(state->frameLatency);
+		// SDR and the frame latency, as the self-test configures its swap chain. HDR Display switches the colour space later
+		// (SetSwapChainColorSpace).
+		(void)ConfigureSwapchain(state->swapchain.Get(), { .hdr = false, .maximumFrameLatency = state->frameLatency });
 		if (!state->MakePresentObjects())
 			Fail("the native swap chain", "the present's command lists or timeline could not be made");
 		g_device = state;
@@ -4933,6 +4935,24 @@ namespace RenderGraph::Engine::Native
 		return 0;
 	}
 
+	bool SetSwapChainColorSpace(bool a_hdr)
+	{
+		if (!g_device || !g_device->swapchain)
+			return false;
+		std::lock_guard guard(g_device->presentLock);
+		const auto wanted = a_hdr ? rhi::SwapchainColorSpace::Hdr10St2084 : rhi::SwapchainColorSpace::SrgbNonlinear;
+		if (g_device->swapchain->ColorSpace() == wanted)
+			return true;
+		// The swap chain's images are made again: the queued presents' copies into them finish first.
+		g_device->WaitPresents();
+		const bool configured = ConfigureSwapchain(g_device->swapchain.Get(), { .hdr = a_hdr, .maximumFrameLatency = g_device->frameLatency });
+		const bool applied = g_device->swapchain->ColorSpace() == wanted;
+		logger::info("[ORG native] swap chain colour space: {} asked, {} now ({} images, DXGI format {} back buffer){}", a_hdr ? "HDR10 (PQ, Rec. 2020)" : "SDR",
+			g_device->swapchain->ColorSpace() == rhi::SwapchainColorSpace::Hdr10St2084 ? "HDR10" : "SDR", g_device->swapchain->ImageCount(),
+			static_cast<int>(g_device->format), configured ? "" : "; the swap chain refused it (see the [ORG] line above)");
+		return applied;
+	}
+
 	void Shutdown()
 	{
 		if (!g_device)
@@ -4974,6 +4994,7 @@ namespace RenderGraph::Engine::Native
 	}
 	winrt::com_ptr<ID3D11Buffer> WrapBuffer(const rhi::Resource&, const D3D11_BUFFER_DESC&, const char*) { return nullptr; }
 	void Shutdown() {}
+	bool SetSwapChainColorSpace(bool) { return false; }
 	bool CreateStreamShell(const D3D11_TEXTURE2D_DESC&, ID3D11Texture2D**, ID3D11ShaderResourceView**) { return false; }
 	HRESULT __stdcall StreamEnableView(ID3D11ShaderResourceView*, void(__stdcall*)(std::uint64_t), void(__stdcall*)(std::uint64_t),
 		const D3D11_SUBRESOURCE_DATA*(__stdcall*)(std::uint64_t, BOOL), std::uint64_t)
