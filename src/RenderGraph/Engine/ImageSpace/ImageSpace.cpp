@@ -233,6 +233,12 @@ namespace RenderGraph::Engine::ImageSpace
 			{ Effects::ISCompositeVolumetricLighting, "ISCompositeVolumetricLighting", "composite", "ISCompositeLensFlareVolumetricLighting.hlsl", 2, 0b01, 2 },
 			{ Effects::ISCompositeLensFlare, "ISCompositeLensFlare", "composite", "ISCompositeLensFlareVolumetricLighting.hlsl", 2, 0b10, 2 },
 			{ Effects::ISCompositeLensFlareVolumetricLighting, "ISCompositeLensFlareVolumetricLighting", "composite", "ISCompositeLensFlareVolumetricLighting.hlsl", 2, 0b11, 2 },
+			// The image-based lens flares (the pre-tonemap composites' +0x180): the brightest-pick downsample with its jitter
+			// compensation (t0 the source, t1 the last frame's, t2 the motion vectors), the plain blur (its radius a constant), and the
+			// flares from the blurred image. Own scopes outside the composites.
+			{ Effects::ISDownsample, "ISDownsample", "iblensflare", "ISDownsample.hlsl", 3, 0b111, 3, 0, false, true },
+			{ Effects::ISBlur, "ISBlur", "iblensflare", "ISBlur.hlsl", 2, 0b01, 2, 0, false, true },
+			{ Effects::ISIBLensFlares, "ISIBLensFlares", "iblensflare", "ISIBLensFlare.hlsl", 1, 0b1, 1, 0, false, true },
 			// The SIL composite (the pre-tonemap composites' +0x1d8): t0 the source, t1 the indirect lighting.
 			{ Effects::ISSILComposite, "ISSILComposite", "composite", "ISSILComposite.hlsl", 2, 0b11, 2 },
 			// RenderSSAO (100520 / 107245), through the explicit-target Render (100951 / 107733).
