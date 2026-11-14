@@ -2599,14 +2599,6 @@ family = "org"
 kind = "other"
 description = "native Vulkan: false turns home states off (images stay where the graph left them; implies exclusive imports; no in-stream epochs; the context's work on tracked images goes through ExternalWork)"
 
-[key."org.native_in_stream"]
-env = "CS_ORG_NATIVE_IN_STREAM"
-type = "bool"
-default = false
-family = "org"
-kind = "other"
-description = "native with home states off: keep in-stream epochs (and with them DCLF's direct forward families)"
-
 [key."org.native_op_census"]
 env = "CS_ORG_NATIVE_OP_CENSUS"
 type = "bool"

@@ -14,8 +14,6 @@
 struct DxvkOrgInteropDeviceInfo;
 struct DxvkOrgInteropResourceInfo;
 struct VkQueue_T;
-struct VkCommandBuffer_T;
-struct VkSemaphoreSubmitInfo;
 struct DxvkOrgInteropTextureWrap;
 
 namespace rhi
@@ -220,13 +218,6 @@ namespace RenderGraph::Engine::Native
 
 	/** @brief RenderGraphRuntime::WrapBuffer in native mode: a native buffer handle over a port's BasicRHI buffer. Null on failure. */
 	winrt::com_ptr<ID3D11Buffer> WrapBuffer(const rhi::Resource& a_buffer, const D3D11_BUFFER_DESC& a_desc, const char* a_name);
-
-	/**
-	 * @brief RenderGraphRuntime::EmitExternalCommands in native mode, which DXVK's stream did: a_record into a command buffer of
-	 * its own on the graphics queue, submitted now with a_waits and a_signals, between full memory barriers. False on failure.
-	 */
-	bool EmitExternalCommands(void (*a_record)(void*, VkCommandBuffer_T*), void* a_user, const VkSemaphoreSubmitInfo* a_waits, std::uint32_t a_waitCount,
-		const VkSemaphoreSubmitInfo* a_signals, std::uint32_t a_signalCount);
 
 	/**
 	 * @brief RenderGraphRuntime::EmitCommands in native mode, on Vulkan and D3D12: a_record (BasicRHI commands, nothing bound at the
