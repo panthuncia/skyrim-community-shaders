@@ -240,11 +240,12 @@ namespace FrameAnchors
 	 * - once: a one-shot pass (a clear, an upload, a fill). It is in the anchor's graph until one run with it was submitted, then
 	 *   the graph is built again without it; Rearm puts it back. The anchor runs while the pass is pending, active client or not.
 	 *   Its work must give the same result if it ran twice.
-	 * - atExecution: when the anchor's epoch runs in DXVK's stream, the pass is recorded there, after the run's commit, instead of
-	 *   ahead on the graph host's thread (ExternalPassDesc::RecordAtExecution). A pass whose work this run is known by then may skip
-	 *   the run (TypedRenderGraphPass's SkipsAtExecution: AnchorPasses' gated draws and dispatches whose gate entry is closed). For
-	 *   anchors that run many gated passes of which a few are open each run. Ignored for a pass on the compute queue, and when
-	 *   the epoch is not in the stream.
+	 * - atExecution: the pass is recorded after the run's commit instead of ahead on the graph host's thread
+	 *   (ExternalPassDesc::RecordAtExecution): in DXVK's stream when the anchor's epoch runs there (guest), or inline into the
+	 *   epoch's own command list at its submission (native, org::GraphHost::SetInlineAtExecution). A pass whose work this run is
+	 *   known by then may skip the run (TypedRenderGraphPass's SkipsAtExecution: AnchorPasses' gated draws and dispatches whose gate
+	 *   entry is closed). For anchors that run many gated passes of which a few are open each run. Ignored for a pass on the compute
+	 *   queue, and when the epoch records nothing at execution (org::RenderGraph::PassEpochRecordsAtExecution).
 	 */
 	struct PassDesc
 	{
