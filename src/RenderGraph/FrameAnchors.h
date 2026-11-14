@@ -264,6 +264,10 @@ namespace FrameAnchors
 		// Builder sets it. A client with gated passes at several anchors gives each anchor its own gate entries: a phase may hold runs
 		// of two of them, and each anchor's passes must then do only their own run's work.
 		bool gated = false;
+		// With atExecution: every draw and dispatch of the pass takes its counts from its run gate (indirect), and it records no other
+		// work. Recorded ahead, it does nothing on a run whose commit left its entries closed. So native mode records it ahead, in the
+		// epoch's kept recording, when GPU gates are on (GpuGates). It is recorded at execution only to leave out the empty commands.
+		bool gpuGated = false;
 	};
 
 	/**
@@ -327,6 +331,12 @@ namespace FrameAnchors
 	 * not name the run: a ticket prepared ahead stays current. Render thread, at a build (a pass's make).
 	 */
 	bool RecordsAtExecution(Anchor a_anchor);
+
+	/**
+	 * @brief Whether passes marked PassDesc::gpuGated are recorded ahead instead of at execution: native mode, unless
+	 * CS_ORG_GPU_GATES=0. Their gate then decides on the GPU, through their indirect counts.
+	 */
+	bool GpuGates();
 
 	/**
 	 * @brief The Revision of a pass whose Record reads what its run's commit stored (a run slot): recorded at execution

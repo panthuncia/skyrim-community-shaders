@@ -115,6 +115,7 @@ namespace Testing::SwitchRegistry
 			"CS_ORG_FRAME_SEQUENCE",
 			"CS_ORG_FX",
 			"CS_ORG_GLINTS",
+			"CS_ORG_GPU_GATES",
 			"CS_ORG_GRAPHRES_SELFTEST",
 			"CS_ORG_GRASS_COLLISION",
 			"CS_ORG_HDR_DISPLAY",

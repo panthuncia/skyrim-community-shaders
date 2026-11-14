@@ -853,7 +853,8 @@ namespace FrameAnchors
 						desc.PreferQueue(org::QueueKind::Graphics);
 					// Recorded after the run's commit, on the graphics queue only (PassDesc::atExecution): in DXVK's stream (guest), or inline
 					// into the epoch's own list (native).
-					if (pass.atExecution && pass.queue == PassQueue::Default && a_graph.PassEpochRecordsAtExecution())
+					// A GPU-gated pass is recorded ahead instead: its closed entries make its indirect counts zero (GpuGates).
+					if (pass.atExecution && !(pass.gpuGated && GpuGates()) && pass.queue == PassQueue::Default && a_graph.PassEpochRecordsAtExecution())
 						desc.RecordAtExecution();
 					a_out.push_back(std::move(desc.Epoch(epoch)));
 				}
@@ -1410,6 +1411,13 @@ namespace FrameAnchors
 	bool RecordsAtExecution(Anchor a_anchor)
 	{
 		return HasEpoch(a_anchor) && RenderGraphRuntime::Get().RecordsAtExecution(EpochOfAnchor(a_anchor));
+	}
+
+	bool GpuGates()
+	{
+		// CS_ORG_GPU_GATES (native mode, default on, =0 off).
+		static const bool on = Switches::Number("CS_ORG_GPU_GATES", 1) != 0;
+		return on && RenderGraph::Engine::Native::Active();
 	}
 
 	bool Register(ClientDesc a_client)
@@ -2541,6 +2549,7 @@ namespace FrameAnchors
 	bool Reserve(Anchor) { return false; }
 	bool HasEpoch(Anchor) { return false; }
 	bool RecordsAtExecution(Anchor) { return false; }
+	bool GpuGates() { return false; }
 	bool Register(ClientDesc) { return false; }
 	void Unregister(std::string_view) {}
 	void Refresh(std::string_view) {}

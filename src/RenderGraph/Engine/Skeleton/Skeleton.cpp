@@ -672,7 +672,9 @@ namespace RenderGraph::Engine::Skeleton
 					// A run clears a few of the group's views: recorded after the commit, the others record nothing.
 					.atExecution = true,
 					// Its clears are gated draws that load the view: a region execution may hold the pass unopened.
-					.gated = true });
+					.gated = true,
+					// Every clear is an indirect draw through the gate, so native mode records it ahead.
+					.gpuGated = true });
 				group.specs.emplace(spec->target, std::move(pass));
 			}
 			client.active = [a_group] { return !GroupOf(a_group).pending.empty(); };
