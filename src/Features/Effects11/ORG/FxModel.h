@@ -427,6 +427,7 @@ namespace OrgFx
 		std::uint32_t arraySize = 0;
 		std::string semantic;
 		std::string interpolation;
+		bool rowMajor = false;     // a matrix stored row by row (row_major, or #pragma pack_matrix(row_major) before it)
 		std::uint32_t offset = 0;  // in a constant buffer (FXC packing), from the struct's start
 	};
 

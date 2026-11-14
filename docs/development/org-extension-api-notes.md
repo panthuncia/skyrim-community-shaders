@@ -1935,3 +1935,16 @@ colour fill). `RasterProgram::Desc` already takes a depth format and `DepthStenc
 `AnchorPasses::Draw` has no depth attachment (a declared DepthRead view), no stencil reference and no scissor rectangle. With those
 three fields the port could take these draws as passes like any other (docs/development/parity/imagespace.md). A viewport larger
 than its target needs a dynamic viewport separate from the render area.
+## A null UAV view and a geometry stage for `.fx` effects
+
+- **Need:** the ORG FX runtime must take every preset FX11 takes ([parity/fx.md](./parity/fx.md)). Two constructs it cannot:
+  - `RW*` globals. Effects11 never binds a UAV, so FX11 reads zero and drops writes. The lowering would bind each `RW*` global to
+    a null UAV view of its type.
+  - Geometry shaders on a pass. FX11 runs them between the quad's vertex and pixel stages.
+- **Blocked by:**
+  - `IDescriptorService` has owned SRVs and samplers but no owned UAV. BasicRHI already writes a null view for an invalid resource
+    (`Device::CreateUnorderedAccessView`), so `CreateOwnedUnorderedAccessView` with an invalid resource would be the whole addition.
+  - BasicRHI pipelines have no geometry stage (`ShaderStage` has none), so `RasterProgram` cannot take one.
+- **Worked around:** an effect with either is off on ORG, logged. Hull and domain passes are left out (D3D11 draws nothing with
+  them on a quad), and a compute shader on a pass is ignored.
+- **Found by:** parity wave, `par-fx` lane (2026-11-14).

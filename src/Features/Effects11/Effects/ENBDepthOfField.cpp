@@ -80,8 +80,7 @@ void ENBDepthOfField::Execute()
 	SetShaderResourceVariable("TextureFocus", textureFocusWrite.srv.get());
 	SetShaderResourceVariable("TextureOriginal", textureMain.SRV);
 
-	const auto technique = selectedTechniqueIndex < uiTechniques.size() ? GetSelectedTechnique() : fallbackTechnique;
-	auto [executed, inOutput, inTemp] = ExecuteTechniqueSequence(technique, textureMain.SRV, *textureHDRTemp, *textureHDRTemp2);
+	auto [executed, inOutput, inTemp] = ExecuteTechniqueSequence(GetChainTechnique(), textureMain.SRV, *textureHDRTemp, *textureHDRTemp2);
 
 	if (executed && (inOutput || inTemp)) {
 		auto* result = inOutput ? textureHDRTemp : textureHDRTemp2;
@@ -121,6 +120,11 @@ void ENBDepthOfField::UpdateEffectVariables()
 	dofParameters.w = blendFactor(idFocusingTime);
 
 	SetVectorVariable("DofParameters", &dofParameters, sizeof(dofParameters));
+}
+
+std::string ENBDepthOfField::GetChainTechnique() const
+{
+	return selectedTechniqueIndex < uiTechniques.size() ? GetSelectedTechnique() : fallbackTechnique;
 }
 
 ID3D11ShaderResourceView* ENBDepthOfField::GetApertureSRV() const

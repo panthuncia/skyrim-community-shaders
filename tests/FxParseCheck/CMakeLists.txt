@@ -25,3 +25,5 @@ endif()
 target_link_libraries(fx-parse-check PRIVATE d3dcompiler dxguid)
 
 add_test(NAME FxParseCheck.constructs COMMAND fx-parse-check "${_cs_root}/tools/fx-parse-check/testdata/constructs.fx")
+add_test(NAME FxParseCheck.packing COMMAND fx-parse-check "${_cs_root}/tools/fx-parse-check/testdata/packing.fx")
+add_test(NAME FxParseCheck.many-resources COMMAND fx-parse-check "${_cs_root}/tools/fx-parse-check/testdata/many-resources.fx")
