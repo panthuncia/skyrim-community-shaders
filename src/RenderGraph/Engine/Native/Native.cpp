@@ -142,8 +142,6 @@ namespace RenderGraph::Engine::Native
 			DclfSwitch{ "CS_DCLF_PARTICLES", "0", "the particle path is not ported" },
 			DclfSwitch{ "CS_DCLF_MASTER_PARTICLES", "0", "the particle path is not ported" },
 			DclfSwitch{ "CS_DCLF_BILLBOARD_PARTICLES", "0", "the particle path is not ported" },
-			DclfSwitch{ "CS_DCLF_GRASS", "0", "the grass draw family (RunGrass) is not ported" },
-			DclfSwitch{ "CS_DCLF_LOD_TREES", "0", "the tree LOD draw family (DistantTree) is not ported" },
 			DclfSwitch{ "CS_DCLF_FIRST_PERSON", "0", "first person's sites are not checked on D3D12 yet" },
 			DclfSwitch{ "CS_DCLF_REFLECTIONS", "0", "the water reflection's views are not ported" },
 		};
