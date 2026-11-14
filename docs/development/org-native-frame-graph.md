@@ -1346,3 +1346,45 @@ that build is attached.
 - No load stall with exclusive imports recurred: 4 quick runs, 2 tours, and the graph-present tour.
 
 **Switch defaults are unchanged:** home states on, imports shared, regions off, graph present off. Turning them on by default is the next decision.
+
+## Kept live recordings and coalesced submits (2026-11-14, `org-native/phases`)
+
+**Where an execution's cost went** (perf-taa, native Vulkan, Perf-Fast, Tracy; per-anchor epochs, 52 executions a frame).
+Tracy inflates the absolute numbers; the split is what matters.
+- Render thread, 189 us an execution (9.8 ms a frame):
+  - passes recorded at execution, 61 us (3.2 ms). 1.3 ms of it is real recording (about 99 passes), 0.95 ms is about 1,770
+    gated passes that skip and record only their barriers;
+  - queue submissions, 41 us (97 a frame, 2.1 ms): one per batch;
+  - handoff lists 19 us, admission 16 us, the commit 10 us, upload lists about 13 us, the rest about 33 us.
+- Host thread, 250 us a ticket (13 ms a frame): pass preparation 4.2 ms, the admission plan 5.1 ms, recording 1.8 ms, plus
+  retirement 3.2 ms.
+
+So preparation and recording scale with pass count on the host thread only. On the render thread most of the cost is fixed per
+execution and per batch, plus the at-execution passes. The phase epochs (28 executions) made each execution larger: 167 queue
+submissions a frame (late batches split their graphs into more batches), 2,140 skipped passes, and a host thread busy 23 ms a
+frame. That is why they ran slower.
+
+**What changed.**
+- `CS_ORG_KEEP_LIVE` (native, default on; ORG `Desc::reuseLiveRecordings`): a live epoch's run binds the recording kept for its
+  copy while every pass revision holds. The host thread prepares and records nothing for it. In the world all live runs bind a
+  kept recording.
+- A kept recording's at-execution passes now skip like a fresh recording's (`PreparedPass::SkipsAgain`). Before, a replay
+  recorded every gated pass in full.
+- `CS_ORG_COALESCE_SUBMITS` (native, default on; ORG `Desc::coalesceSubmissions`): an execution's consecutive batches on one
+  queue are one queue submission (97 -> 57 a frame).
+- `CS_ORG_PHASES` (default off): the phase epochs only on request. Per-anchor epochs are faster with the two options above.
+
+**Results** (perf-taa, frames per second between the marks, no capture):
+
+| Shape | Before | Keep only | Coalesce only | Both |
+|---|---|---|---|---|
+| Per-anchor epochs (52 executions) | 62.0, 66.1 | 69.6 | 72.6 | 73.0 |
+| Phase epochs (28 executions) | 48.5 | - | - | 52.5 |
+
+Tracy, per-anchor, both on: render thread epoch submission 9.8 -> 7.9 ms a frame, host thread busy 16.1 -> 4.1 ms.
+
+**What is left on the render thread** (Tracy, 7.9 ms a frame): at-execution passes 2.8 ms (0.9 ms of it skipped gated passes),
+queue submissions 1.2 ms, handoff 0.7, admission 0.7, commit 0.5, upload lists about 0.6, the rest 1.6 ms. Merging epochs does
+not reduce this while gated passes record at execution and admission grows with the graph: a merged graph pays for every
+pass that did not run. Gating on the GPU (indirect counts from latches, recorded once) would let gated passes leave the
+at-execution class.

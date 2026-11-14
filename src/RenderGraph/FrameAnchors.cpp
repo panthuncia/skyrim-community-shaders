@@ -1679,9 +1679,11 @@ namespace FrameAnchors
 		static const bool on = [] {
 			if (!RenderGraph::Engine::Native::Requested())
 				return false;
-			// CS_ORG_PHASES=0 keeps an epoch per anchor in native mode too, for comparisons.
-			if (Switches::Number("CS_ORG_PHASES", 1) == 0) {
-				logger::info("[ORG] frame phases off (CS_ORG_PHASES=0): every anchor keeps its own epoch");
+			// Off by default (CS_ORG_PHASES=1 turns them on): with kept live recordings, per-anchor epochs run faster than phase
+			// epochs (perf-taa 73 against 52.5 fps). A phase execution records every gated pass of its larger graph again, and its
+			// admission covers more resources.
+			if (Switches::Number("CS_ORG_PHASES", 0) == 0) {
+				logger::info("[ORG] frame phases off (CS_ORG_PHASES=1 turns them on): every anchor keeps its own epoch");
 				return false;
 			}
 			if (!RenderGraphRuntime::EpochsEnabled() || Switches::Equals("CS_ORG_ASYNC_EPOCHS", "0")) {
