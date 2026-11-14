@@ -668,7 +668,9 @@ namespace RenderGraph::Engine::Skeleton
 					.kind = FrameAnchors::PassKind::Render,
 					.make = [pass] { return std::static_pointer_cast<org::RenderPass>(std::make_shared<ClearPass>(pass)); },
 					// A run clears a few of the group's views: recorded after the commit, the others record nothing.
-					.atExecution = true });
+					.atExecution = true,
+					// Its clears are gated draws that load the view: a region execution may hold the pass unopened.
+					.gated = true });
 				group.specs.emplace(spec->target, std::move(pass));
 			}
 			client.active = [a_group] { return !GroupOf(a_group).pending.empty(); };

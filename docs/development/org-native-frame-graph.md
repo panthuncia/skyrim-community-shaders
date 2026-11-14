@@ -1063,3 +1063,138 @@ Test runs now use `CS_TEST_BACKGROUND=1`, so they never focus the game or move t
 - With home states off, DCLF's direct forward families are off unless `CS_ORG_NATIVE_IN_STREAM=1`. First person may then fall to
   "the engine's" path (see `GraphConditions`' warning).
 - Raw buffer work after compute-queue graph work is still unordered in native mode.
+
+## Phase 4 items 1 and 2 lane: region subgraphs (`org-native/p4-regions`)
+
+`CS_ORG_REGIONS=1` (native mode only, off by default) groups the frame anchors into six region epochs. Consecutive runs of a region's
+anchors share one execution. Guest mode refuses the switch with a warning and keeps one epoch per anchor.
+
+**Why not "submit at the region's last hook".** A region's anchors are interleaved with other GPU work: DCLF's epochs (shadow views,
+the Z-prepass, reflection faces, main opaque, forward, first person), Light Limit Fix's culling, and anchors that run all over the frame.
+Deferring an anchor's work past such work changes what it reads or overwrites. Examples:
+- a shadow slice's clear must come before that slice's shadow-view draws;
+- the main depth's clear must come before the Z-prepass;
+- a reflection face's cube clear and its sky must come before that face's DCLF draws.
+
+A static split list would have to know every such pair, and the run-order census shows the reflection faces alone in 43 sequences.
+So the regions are split at run time instead:
+- A region's execution is held open from its first anchor run.
+- It is submitted just before any other GPU work.
+- The GPU therefore sees every run's work in the same order as before. Only runs with nothing between them share an execution.
+
+**How a run joins** (`FrameAnchors.cpp`: `Capture`, `JoinRefusal`, `SubmitHeld`).
+- **Which anchors.** An anchor's passes move from its own epoch to its region's when every pass at it is gated (`PassDesc::gated`): each
+  draw or dispatch goes through its client's run gate, or through a latch that reads zero in a run its commit did not write, and nothing
+  clears by itself. A region execution holds the passes of all its merged anchors, so a pass whose anchor did not run in it must do
+  nothing. The decision is made per snapshot (`Snapshot::merged`): a client that registers an ungated pass moves the anchor back to its
+  own epoch at the next build. Both graphs are asked for whenever a client changes.
+- **Gated passes.** `AnchorPasses::Builder` sets `gated` itself: a draw with a gate entry and no clear load, or a dispatch with a gate
+  entry or latched group counts. ImageSpace's passes and the engine skeleton's clears set it by hand. One-shot passes, copies, uploads,
+  UAV clears and hand-written passes without the flag keep their anchor in its own epoch.
+- **The held run.** ORG's new `GraphHost::HoldEpochTicket` takes the region epoch's next ticket at the first run. Each run's commits
+  write into that ticket's run (`UseHeldRun`). The next `SubmitEpoch` of the region submits it. Gates are closed once, when the hold
+  begins, for every client of the region graph's merged anchors and for retired registrations.
+- **Joining rules.** A run joins the held execution only when all of these hold; otherwise the execution is submitted first and the run
+  starts a new one:
+  - its anchor comes later in the region's order (the anchors' places in `kTimeline`), or it repeats the last anchor;
+  - none of its active clients committed into the execution already, unless the client says it can (`ClientDesc::joins`);
+  - a repeat has exactly the clients of the earlier run;
+  - CS's shared constants are what the execution's first commit wrote (`SharedConstants::CommittedMatches`);
+  - no `ExternalWork` submission happened since the hold began (it cannot be submitted after; it is logged once).
+
+  So each latch region and gate entry is written once per execution, and a region graph's pass order (anchors in frame order, each
+  anchor's passes by order key) is the order the runs happened.
+- **Submitted before:** `TryExecuteEpoch` and `ExecuteExternalEpoch` of any other epoch, `EmitExternalCommands`, every build point
+  (`GuardedBuild`: an attach would give the held ticket back), `FlushPendingStreamWork` (a render-thread GPU wait), the present (the
+  present hook, just before the native present), a change of render owner, and `SealPresented` as a safety net. A run of an anchor with
+  its own epoch, or of another region's anchor, submits it as well.
+- **Executed callbacks** run at the capture. The held work reaches the GPU before any later GPU work, which is what `executed` promises.
+  The exception is a region submission that fails later: its clients are dropped then.
+- **Uploads** a commit queues ride the region's submission, which comes before any other submission.
+
+**Repeated runs as static gated passes.** These anchors already have one gated pass per (operation, engine target):
+- ImageSpace: one pass per shape;
+- the skeleton's clears: one pass per view.
+
+ImageSpace's runs are the scopes of the chain. Its client now joins a held execution when the batch's first entry is above the last
+entry it committed. A batch's entries rise (`AdmitShape`), so no entry is opened twice and later passes run later. Its held heap-index
+sources are kept per run instead of per lease index. Several commits into one run add to them; a new run clears them.
+
+The skeleton's clear groups do not join: each run latches colours by entry, and two runs of a group could clear the same view.
+Consecutive clears with nothing between them are one run already (the skeleton batches them).
+
+**The region map as built** (`kRegionOf`):
+
+| Region | Anchors | Splits that happen at run time |
+|---|---|---|
+| Shadows | EngineShadowClear, DecalQueries | every slice: the shadow view epoch follows each clear |
+| Pre-main | EarlyPrepass, EngineFrameClear, EngineDepthCopy, ReflectionsPrepass, EngineCubeClear, SkyReflections, DepthDone, Prepass, Sky | Z-prepass, first-person depth, reflection faces, light culling, main opaque |
+| Deferred | DeferredPasses, DeferredComposite, PostComposite | ungated clients (the composite, Dynamic Cubemaps' one-shot pass) |
+| Engine draws | EngineDraws, EngineQueries | forward and first person; the families are not flagged yet |
+| Post | VolumetricLighting, PostProcessing, Upscale, ImageSpace, EngineCopy, Tonemap, FrameGeneration | EngineCopy's ungated copy, ungated tonemap clients, changed shared constants |
+| Interface | Interface, MovieTiles, Present, Overlay, HDROutput, Capture | DCLF's BeforePresent, ungated Scaleform, Bink, ImGui and capture |
+
+Two departures from the brief's list:
+- EarlyPrepass is in pre-main, not shadows. Its clients are the shadow features, but it runs after the sky occlusion epoch and right
+  before the main depth's clear, which is pre-main's.
+- An anchor that runs at several places of the frame (EngineFrameClear, EngineDepthCopy, EngineDraws, EngineQueries) has one region.
+  A run elsewhere in the frame finds another region held and submits it first, so this is still correct.
+
+The log line `[ORG] frame regions: ... anchors in their region's epoch: ...` names the anchors that actually merged.
+
+**What merges, honestly.** Only consecutive runs without GPU work between them share an execution, and DCLF's epochs sit between most
+anchors. The ~12 executions the plan hoped for need the anchors' work to move past DCLF's epochs, which this lane does not do. The gain
+expected now:
+- mostly ImageSpace's runs (about 12) collapsing into a few executions, split at EngineCopy;
+- VolumetricLighting joining them when it runs right before;
+- gated neighbours elsewhere, made with the Builder, when all their passes are gated: SSGI and Sun Rays in deferred, height fog and
+  Skylighting at the prepass. Hand-written clients (Subsurface Scattering, Screen Space Shadows, IBL) keep their anchors' own epochs
+  until they set the flag;
+- the region epochs add up to six epochs, and merged anchors' own epochs run nothing.
+
+Clients that could opt in later with `PassDesc::gated`: Scaleform, DCLF's engine-draw families, the sky, Bink, ImGui and the clients
+with hand-written gated passes. That lets more neighbours merge.
+
+**What is not hooked.** Two kinds of raw work run outside the anchors' reach:
+- the native immediate context's raw operations (host-made images, UAV clears, GenerateMips, DYNAMIC uploads);
+- `ExternalWork`.
+
+Both live in the `p4-raw-work` lane's files. A region held across one of them would let that work run ahead of the held runs.
+- `ExternalWork` is detected by its submission counter (logged once, and the held execution is submitted at the next run).
+- The raw operations are not detected. The native census shows none in the world.
+
+The fix is one call, `FrameAnchors::FlushRegions("raw work")`, at the start of `Immediate::Submit` and `ExternalWork::Submit`.
+
+**Statistics** (with `CS_ORG_EPOCH_STATS=1`, every epoch-stats window):
+- `[ORG] executions a frame: X over Y epochs` counts every submitted execution and the distinct epochs that ran. Read it with the switch
+  on and off.
+- `[ORG] frame regions: N executions held M anchor runs (R each); L lost to a build; submitted before: <cause> <count>, ...; anchors in
+  their region's epoch: ...`. The causes show where regions split: another epoch, an anchor with its own epoch, out of order, a
+  client's second commit, the shared constants, the present.
+
+**ORG change** (`extern/OpenRenderGraph`, branch `org-native/p4-regions`, 53848cd): `GraphHost::HoldEpochTicket`, `HoldsEpochTicket`,
+`UseHeldRun`/`EndHeldRun`, `ReleaseHeldEpochTicket`, and `CurrentRun()` returning the held run inside `UseHeldRun`.
+- `SubmitEpoch` takes the held ticket.
+- A build of the epoch (`HoldAsync`) gives it back first.
+- `StopAsync` abandons it.
+- persistent-epochs.md has the contract.
+
+**What to check** (`tools/cs-test/configs/native-regions-quick.toml`, against `native-quick`; then a native tour with `--set org.regions=true`):
+- The shots match with regions on and off: ImageSpace's chain (bloom, TAA, depth of field, water), the deferred features, the UI.
+- `[ORG] frame regions (CS_ORG_REGIONS): ...` once at startup, naming the region epochs.
+- The anchors-in-region list includes ImageSpace.
+- `executions a frame` drops with the switch on; ImageSpace's share is the expected gain.
+- No `lost to a build` above 0, no `held run back`, `GPU work was submitted from inside a commit` or `external work ... while a region
+  held` lines, no `[E]` lines.
+- Guest with `CS_ORG_REGIONS=1` logs the refusal and runs as before.
+
+**Risks.**
+- **Honesty of `gated`.** A pass marked gated that does work unopened would run at every execution of its region. The Builder's rule
+  covers draws and dispatches. A draw with a clear load is not gated.
+- **Executions per frame may not drop much** where shared constants change between ImageSpace scopes (the `the shared constants
+  changed` cause shows it). Comparing only the blocks a run's passes read would help.
+- **A build's attach while a region holds** gives the held run back. The build points submit first, so only a build outside them
+  (shader reload's synchronous build is at a build point) would lose one frame's runs of that region (`lost to a build`).
+- **Raw native work and `ExternalWork`** between two merged runs (above).
+- **`executed` before the GPU submission.** A client that read back right after `Run` would need the region submitted first. None does
+  today: readbacks go through ORG's readback service, which completes after the execution.

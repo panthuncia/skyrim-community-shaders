@@ -183,6 +183,19 @@ Keys used so far:
   the anchor table's `runsPerFrame`. Each run opens a lease of its own and waits for nothing; the lease retires once its GPU work is
   done (ORG's persistent-epochs.md, "Run leases"). An anchor may run any number of times a frame.
 
+### Several anchor runs in one execution (regions)
+
+- **Need:** consecutive anchor runs with no other GPU work between them should share one graph execution, without moving any run's
+  work past work it depends on.
+- **Who:** native mode's region subgraphs (`CS_ORG_REGIONS`); ImageSpace's dozen runs a frame are the main case.
+- **Where it fits:** the regions run as six epochs (FrameAnchors.h, "Regions"), and ORG holds one ticket open across the runs
+  (`GraphHost::HoldEpochTicket`, `UseHeldRun`). A client opts in per pass with `PassDesc::gated`: every draw or dispatch goes through
+  its run gate or a latch, and the pass clears nothing by itself. `AnchorPasses::Builder` sets the flag. A client that commits more
+  than once into one execution says so with `ClientDesc::joins` (ImageSpace: the batch's entries are above the last ones it opened).
+  Work outside the anchors that must follow held runs calls `FrameAnchors::FlushRegions` first; RenderGraphRuntime does that for
+  every epoch, external commands, build points and GPU waits, and the present hook before the present.
+- **Found by:** Phase 4 items 1 and 2 (`org-native/p4-regions`, 2026-11-13).
+
 ### More runs of one anchor than the frame slot budget holds
 
 - **Need:** run an engine family's withheld work at as many points of the frame as the engine reaches it (ImageSpace: the SAO

@@ -2681,6 +2681,14 @@ family = "org"
 kind = "other"
 description = ""
 
+[key."org.regions"]
+env = "CS_ORG_REGIONS"
+type = "bool"
+default = false
+family = "org"
+kind = "other"
+description = "true (native mode only): anchors whose passes are all gated run in six region epochs; consecutive runs of a region share one execution, submitted before any other GPU work (\"[ORG] frame regions\" with CS_ORG_EPOCH_STATS)"
+
 [key."org.residue_census"]
 env = "CS_ORG_RESIDUE_CENSUS"
 type = "bool"

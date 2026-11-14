@@ -228,7 +228,8 @@ namespace RenderGraph::AnchorPasses
 
 	private:
 		bool Check(std::string_view a_name, const std::vector<Bind>& a_bindings, std::uint32_t a_programWords, std::optional<std::uint32_t> a_gate);
-		void Push(std::string_view a_step, FrameAnchors::PassKind a_kind, std::function<std::shared_ptr<org::RenderPass>()> a_make, bool a_once);
+		void Push(std::string_view a_step, FrameAnchors::PassKind a_kind, std::function<std::shared_ptr<org::RenderPass>()> a_make, bool a_once,
+			bool a_gated = false);
 
 		FrameAnchors::Anchor anchor;
 		std::string prefix;
