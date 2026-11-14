@@ -378,28 +378,6 @@ namespace RenderGraph::Engine::ImageSpace
 			Count
 		};
 
-		/**
-		 * @brief How many batches each kind of scope may start in a frame: its share of the anchor's runs a frame. Each kind has a
-		 * share of its own, so the scopes early in the frame never use up the runs of the ones after them. The pre-tonemap
-		 * composites, the SAO and reflection passes and the HDR effect have a second run for a batch cut short by a draw the graph
-		 * does not take. Effect scopes have one run per call: the depth-of-field (or distant blur) draw, its two compute blurs,
-		 * refraction, the radial blur, the snow copy, the water blend, the LDR downsample and the copies outside every scope (the
-		 * main frame's, the menus' and the end-of-frame chain's), and there the blur composites' and the get-hit effect's draws. The
-		 * water's flow copies have a share of their own (one run per copy: a cell load queues a few). The water's displacement update
-		 * has two (a second for a batch cut short by a ripple, which the graph does not take).
-		 * Run leases give an anchor as many runs as it makes, so these are bounds against a runaway frame, not budgets: each is
-		 * several times what a frame uses (the blur composites, bright pass and adaptation chain take several runs in one scope).
-		 */
-		constexpr std::array<std::uint32_t, static_cast<std::size_t>(ScopeKind::Count)> kScopeRuns{ 16, 16, 16, 16, 64, 16, 8 };
-
-		constexpr std::uint32_t ScopeRunsTotal()
-		{
-			std::uint32_t total = 0;
-			for (const auto runs : kScopeRuns)
-				total += runs;
-			return total;
-		}
-
 		/** @brief A raster program's key: the effect, the outputs' formats and the packed blend state. */
 		using ProgramKey = std::tuple<std::size_t, rhi::Format, rhi::Format, std::uint32_t>;
 
@@ -466,7 +444,6 @@ namespace RenderGraph::Engine::ImageSpace
 			// The frame and its batches.
 			std::uint32_t scope = 0;                                   // the current scope (ScopeKind)
 			std::uint32_t drawIndex = 0;                               // eligible draws and dispatches so far in the current scope
-			std::array<std::uint32_t, kScopeRuns.size()> scopeRuns{};  // batches each kind of scope started this frame
 			std::uint32_t frame = UINT32_MAX;
 			std::uint32_t runsThisFrame = 0;
 			std::uint32_t scopeDepth = 0;
@@ -2173,7 +2150,6 @@ namespace RenderGraph::Engine::ImageSpace
 			Flush();
 			state.frame = frame;
 			state.runsThisFrame = 0;
-			state.scopeRuns.fill(0);
 			QueuePrograms();
 			CheckImports();
 			RetryBuild();
@@ -2204,13 +2180,9 @@ namespace RenderGraph::Engine::ImageSpace
 			// or the same pass again) starts a new batch.
 			if (!state.batch.empty() && spec->entry <= state.lastEntry)
 				Flush();
-			// A new batch is a new run: withheld only when the run can draw it now (owner, built graph), and only as often as its kind of
-			// scope may start one this frame (kScopeRuns).
+			// A new batch is a new run: withheld only when the run can draw it now (owner, built graph). An anchor makes as many runs a
+			// frame as its batches need (run leases), so no scope runs out of them.
 			if (state.batch.empty()) {
-				if (state.scopeRuns[state.scope] >= kScopeRuns[state.scope]) {
-					Refuse("its scope used its runs this frame", a_effect);
-					return nullptr;
-				}
 				if (!FrameAnchors::CanRun(kClientId, Anchor::ImageSpace)) {
 					// Before the first build after Setup or after a resize's registration (one build point).
 					Refuse("the ImageSpace anchor's graph does not hold this registration yet", a_effect);
@@ -2224,8 +2196,6 @@ namespace RenderGraph::Engine::ImageSpace
 		void AddToBatch(const Spec& a_spec, Pending a_pending, std::span<const std::shared_ptr<const org::LatchBlock>> a_blocks)
 		{
 			auto& state = IS();
-			if (state.batch.empty())
-				++state.scopeRuns[state.scope];
 			a_pending.entry = a_spec.entry;
 			state.batch.push_back(a_pending);
 			for (const auto& block : a_blocks)
@@ -2474,8 +2444,8 @@ namespace RenderGraph::Engine::ImageSpace
 		}
 
 		/**
-		 * @brief A scope begins (ScopeKind): its draws' passes are ordered by their place in it, and its kind may start kScopeRuns
-		 * batches a frame. Nested scopes are part of the outer one.
+		 * @brief A scope begins (ScopeKind): its draws' passes are ordered by their place in it, and its batch runs at its end at the
+		 * latest. Nested scopes are part of the outer one.
 		 */
 		void EnterScope(ScopeKind a_scope)
 		{

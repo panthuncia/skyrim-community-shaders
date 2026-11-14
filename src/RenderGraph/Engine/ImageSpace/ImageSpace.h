@@ -29,8 +29,8 @@
  *
  * Scopes: the HDR effect, the pre-tonemap composites, RenderSSAO and the reflection pass, and each call of an own-scope effect made
  * outside them (the end-of-frame effects, the depth-of-field blur, the snow copy, the water blend, the LDR downsample, each flow
- * copy). A batch runs at its scope's end at the latest (CS code between these calls uses D3D11 and runs other anchors). Each kind of
- * scope has its own share of the anchor's 19 runs a frame, so the early scopes never use up the later ones' runs.
+ * copy). A batch runs at its scope's end at the latest (CS code between these calls uses D3D11 and runs other anchors). The anchor
+ * makes as many runs a frame as the batches need (run leases): no scope runs out of them.
  *
  * The pass set is fixed for the session at Setup (docs/development/p5/imagespace.md, "The primary path"): every shape (effect,
  * outputs, inputs, samplers, blend state, viewport, all by value) of the shape manifest beside the shader store, with the shapes
@@ -42,8 +42,8 @@
  * targets made again (a resize) register the same shapes on the new imports, into the build the new imports ask for anyway.
  *
  * Inherent refusals, per draw: an effect not selected, a target outside the engine's table, a scissor rectangle, dynamic
- * resolution's quad, a manager rectangle, a clear at the bind, a shape outside the session's set, an anchor that cannot run another
- * batch now (FrameAnchors::CanRun, its runs a frame). Constants the capture missed are failures, logged as errors. A batch that is
+ * resolution's quad, a manager rectangle, a clear at the bind, a shape outside the session's set, an anchor whose built graph does
+ * not hold the registration yet (FrameAnchors::CanRun). Constants the capture missed are failures, logged as errors. A batch that is
  * pending when the engine draws something else is run first, so the engine's order is kept. A failed graph returns every effect to
  * the engine for the session. A covered effect's draw the engine still makes is not vouched for in the flush latch (no
  * Flush::Reason): under the latch it is skipped, and the residue census counts it.
