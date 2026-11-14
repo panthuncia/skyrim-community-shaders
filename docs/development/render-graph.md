@@ -1109,8 +1109,9 @@ Each stage logs one `[ORG native] stage <n>: <name>: ...` line, so a start that 
 
 A native device handle answers through the native services instead of failing:
 
--   **Textures** (1D, 2D, 3D): a BasicRHI image, its initial data uploaded through a one-shot copy on the graphics queue, and
-    left in GENERAL (the graph's Common home state). Typeless formats are made in the format their binding implies. A
+-   **Textures** (1D, 2D, 3D): a BasicRHI image, or a graph-owned texture once the graph is up. Its initial data goes in
+    through the context's route below (a graph-owned texture's through ORG's external client, which leaves its state in its
+    ledger), and a host-made image rests in Common (GENERAL on Vulkan). Typeless formats are made in the format their binding implies. A
     STAGING texture is a buffer in readback or upload memory, each subresource at a 512-byte offset with 256-byte rows. A
     DYNAMIC texture is an image plus such an upload buffer, which Map hands out and Unmap copies in. Multisampled textures
     are not built (logged once, `E_NOTIMPL`).
@@ -1118,11 +1119,13 @@ A native device handle answers through the native services instead of failing:
     CPU access, else device-local.
 -   **The context's resource work**: `Map`/`Unmap` (buffers and staging textures in host memory; a read or a write waits only
     for the context's own GPU work that last used the memory, `DO_NOT_WAIT` returns `DXGI_ERROR_WAS_STILL_DRAWING`,
-    `WRITE_NO_OVERWRITE` never waits), `UpdateSubresource`, `CopyResource`, `CopySubresourceRegion`, `GenerateMips` (a blit
-    chain), `ClearRenderTargetView`, `ClearDepthStencilView` and both UAV clears (an image clear, or `vkCmdFillBuffer` with
-    the first value on a buffer). Each is its own command list on the graphics queue, submitted when the call is made, with a
-    full memory barrier before and after: it lands between the graph epochs submitted before and after it, in the order D3D11
-    code calls them. Nothing waits for the GPU unless Map needs the memory. `Flush` does nothing.
+    `WRITE_NO_OVERWRITE` never waits), `UpdateSubresource`, `CopyResource`, `CopySubresourceRegion`, `GenerateMips` (a
+    compute mip chain with ORG's `GenerateMips.hlsl`), `ClearRenderTargetView`, `ClearDepthStencilView` and both UAV clears.
+    They are BasicRHI commands on both backends ([parity/native-context.md](./parity/native-context.md)). Once the graph is
+    up each goes through ORG's external client when the call is made: an image the graph tracks takes its barriers from its
+    ledger, every other resource moves from Common into its command's state and back. Before the graph is up they go on the
+    context's own lists. Nothing waits for the GPU unless Map needs the memory. `Flush` does nothing. On Vulkan this is
+    `CS_ORG_NATIVE_RHI_CONTEXT=1` until the raw Vulkan dialect (Vulkan's own commands in GENERAL) is deleted.
 -   **Wrapped port resources**: `RenderGraphRuntime::WrapTexture` and `WrapBuffer` make native handles over the port's own
     BasicRHI image or buffer (the image moved into GENERAL, uploaded or zeroed), so `GraphResources::ExportTexture`, the
     engine targets, textures, buffers and texture streaming work as they do on DXVK. A port's handle that wraps a native
@@ -1201,11 +1204,9 @@ left to the process exit (no DXVK teardown callback).
 `Engine::CreateD3D12Device` on the game's adapter) and records it (`RenderGraph::Backend::SetActive`), so the runtime
 shaders build to DXIL. The rest of native mode is the same code, except:
 
--   **The context's work** is BasicRHI's commands (`CopyBufferRegion`, `CopyTextureRegion`, `CopyBufferToTexture`,
-    `CopyTextureToBuffer`, render target, depth and UAV clears). Each resource moves from Common into the layout its command
-    needs and back, which orders the work with the epochs. Each of the 32 context slots has an RTV, a DSV and a UAV of its
-    own. `GenerateMips` does nothing (no blit; logged once). Copies between staging memory and an image take whole colour
-    subresources only.
+-   **The context's work** is the same BasicRHI route as on Vulkan. `CS_ORG_NATIVE_HOME_STATES=0` and
+    `CS_ORG_NATIVE_EXCLUSIVE_IMPORTS=1` mean the same here as on Vulkan; D3D12's imports of images resting in Common are
+    exclusive either way.
 -   **Descriptions for imports**: `DescribeResource` puts the `ID3D12Resource` where the `VkImage` or `VkBuffer` goes, with
     a buffer's GPU virtual address and no Vulkan format. `ImportDxvkImage` imports it with `rhi::dx12::import_resource`.
     D3D12's Common layout cannot be a render target, depth or UAV, so a texture resting in Common is imported for
@@ -1233,7 +1234,7 @@ validation.
     the binds the latch keeps) gets nothing.
 -   **Context work.** Draws, dispatches and binds still in the census do nothing. A DYNAMIC buffer is not renamed on
     `WRITE_DISCARD`, because no native GPU work reads a buffer except the context's own copies; the graph does not import
-    native buffers yet. Copies of a depth-stencil image through staging memory carry the depth aspect only.
+    native buffers yet.
 -   **HDR**: HDR Display's output is not shown through the swap chain (no `SetFrameSource` in native mode), and the colour
     space is not switched.
 -   **Upscaling and frame generation**: off (stage 2).
