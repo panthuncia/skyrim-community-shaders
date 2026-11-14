@@ -89,6 +89,40 @@ namespace
 		return GraphicsAPI::FromKey(mode->get<std::string>());
 	}
 
+	/**
+	 * @brief Writes the menu's choice into SettingsUser.json now, leaving every other entry as it is. The choice only matters at the
+	 * next start, so it must not wait for the menu's Save button: without that, a restart found no choice and ran on DXVK. DXVK is
+	 * the default and is written as no entry, as State::Save writes it.
+	 */
+	bool SaveChoice(GraphicsAPI::Mode a_mode)
+	{
+		const auto path = Util::PathHelpers::GetSettingsUserPath();
+		json settings = json::object();
+		std::error_code error;
+		if (std::filesystem::exists(path, error)) {
+			auto loaded = Util::FileHelpers::ReadJsonObject(path, "user config (Graphics API)");
+			if (!loaded) {
+				// Rewriting an unreadable file would lose the user's other settings.
+				logger::error("[Graphics API] {} could not be read, so the choice of {} was not saved", path.string(), GraphicsAPI::Key(a_mode));
+				return false;
+			}
+			settings = std::move(*loaded);
+		}
+		auto& feature = settings["Graphics API"];
+		if (!feature.is_object())
+			feature = json::object();
+		if (a_mode == GraphicsAPI::Mode::DXVK)
+			feature.erase("Mode");
+		else
+			feature["Mode"] = GraphicsAPI::Key(a_mode);
+		if (feature.empty())
+			settings.erase("Graphics API");
+		if (!Util::FileHelpers::WriteJsonAtomically(path, settings, 1, "config (Graphics API)"))
+			return false;
+		logger::info("[Graphics API] Saved {} for the next start in {}", GraphicsAPI::Key(a_mode), path.string());
+		return true;
+	}
+
 	const char* SourceName(GraphicsAPI::Source a_source)
 	{
 		switch (a_source) {
@@ -245,8 +279,10 @@ void GraphicsAPI::DrawSettings()
 	for (int i = 0; i < static_cast<int>(Mode::Count); ++i) {
 		const auto mode = static_cast<Mode>(i);
 		Util::DisableGuard disable(!Available(mode));
-		if (ImGui::RadioButton(labels[i], selected == mode))
+		if (ImGui::RadioButton(labels[i], selected == mode) && selected != mode) {
 			selected = mode;
+			SaveChoice(mode);
+		}
 		if (auto _tt = Util::HoverTooltipWrapper()) {
 			ImGui::TextUnformatted(tooltips[i]);
 			if (!Available(mode))
