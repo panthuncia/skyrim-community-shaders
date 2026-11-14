@@ -139,7 +139,6 @@ namespace RenderGraph::Engine::Native
 			DclfSwitch{ "CS_DCLF_DECAL_PLAIN", "1", "D3D12 draws colour with plain draws only" },
 			DclfSwitch{ "CS_DCLF_FORWARD_PLAIN", "1", "D3D12 draws colour with plain draws only" },
 			DclfSwitch{ "CS_DCLF_FORWARD", "0", "the forward epoch is not checked on D3D12 yet" },
-			DclfSwitch{ "CS_DCLF_REFRACTION", "0", "the refraction draw pushes block addresses and has no instance word (ForwardPasses)" },
 			DclfSwitch{ "CS_DCLF_EFFECTS", "0", "the Effect program family's builds are not ported" },
 			DclfSwitch{ "CS_DCLF_OPAQUE_EFFECTS", "0", "the Effect program family's builds are not ported" },
 			DclfSwitch{ "CS_DCLF_BILLBOARDS", "0", "the Effect program family's builds are not ported" },
