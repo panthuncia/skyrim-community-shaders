@@ -317,10 +317,14 @@ namespace RenderGraph::Engine::OcclusionQueries
 			}
 			state->stride = (std::max)(probe->GetQueryResultInfo().elementSize, 8u);
 		}
-		if (!state->ChunkOf(0, true))
-			return nullptr;
-		logger::info("[ORG] occlusion queries: {}: {} queries a run, in pools of {} runs made as the host's runs in flight need them", state->name,
-			a_perRun, kRunsPerChunk);
+		// Every chunk the host's runs in flight reach in play, made now: the client's first build declares their readbacks, so no
+		// commit makes one and refreshes the client during play (a rebuild, and the client's runs refused until it is attached). Early
+		// in a session the lease indices passed 64 and the sun's queries answered their last count until that rebuild.
+		for (std::uint32_t chunk = 0; chunk < kSetupChunks; ++chunk)
+			if (!state->ChunkOf(chunk * kRunsPerChunk, true))
+				return nullptr;
+		logger::info("[ORG] occlusion queries: {}: {} queries a run, in pools of {} runs; {} lease indices made at setup", state->name, a_perRun, kRunsPerChunk,
+			kSetupChunks * kRunsPerChunk);
 		return std::make_shared<QueryRing>(std::move(state));
 	}
 
