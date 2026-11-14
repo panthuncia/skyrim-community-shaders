@@ -981,7 +981,7 @@ struct ORGFxRuntime::Impl
 		// Effect code built by Effects11 on D3D11, which gives it none of CS's shader defines.
 		desc.commonDefines = false;
 		desc.languageVersion = L"2018";
-		desc.constantWords = a_effect.lowered.PushWords();
+		desc.constantWords = lowered.layout.pushWords;
 		desc.targets = { { .format = a_format, .blend = a_state.blend } };
 		desc.alphaToCoverage = a_state.alphaToCoverage;
 		desc.raster = a_state.raster;
@@ -1168,19 +1168,30 @@ struct ORGFxRuntime::Impl
 				write.screenSize[2] = aspect;
 				write.screenSize[3] = 1.0f / aspect;
 				frame->writes.push_back(write);
-				draw->push = { { PushWord::Kind::LatchHandle, 0 }, { PushWord::Kind::LatchOffset, region } };
-				for (std::size_t i = 0; i < e.lowered.resources.size(); ++i) {
-					const auto& slot = e.lowered.resources[i];
-					if (slot.kind == OrgFx::ResourceSlot::Kind::Sampler) {
-						draw->push.push_back({ PushWord::Kind::Literal, e.samplers[i].Index() });
-						draw->samplers.push_back(e.samplers[i]);
-					} else {
-						const Res resource = Resolve(e, i, a_names, a_color, target);
-						draw->push.push_back({ PushWord::Kind::Input, draw->Input(resource) });
-					}
+				// The handles at the pass's words; with more entries than words, those the pass does not reach read black or any sampler.
+				const auto layout = OrgFx::LayoutPass(e.lowered, e.desc, a_technique, p);
+				if (!layout.ok) {
+					FailEffect(e, fmt::format("{}: technique '{}' pass {}: {}", e.Name(), technique.name, p, layout.error));
+					return;
 				}
-				while (draw->push.size() < e.lowered.PushWords())
-					draw->push.push_back({});
+				draw->push.assign(layout.pushWords, PushWord{});
+				draw->push[0] = { PushWord::Kind::LatchHandle, 0 };
+				draw->push[1] = { PushWord::Kind::LatchOffset, region };
+				if (layout.shared) {
+					draw->push[OrgFx::kUnusedTextureWord] = { PushWord::Kind::Input, draw->Input(Black()) };
+					draw->push[OrgFx::kUnusedSamplerWord] = { PushWord::Kind::Literal, impl.cs.linearSampler.Index() };
+					draw->samplers.push_back(impl.cs.linearSampler);
+				}
+				for (std::size_t i = 0; i < e.lowered.resources.size(); ++i) {
+					const auto word = layout.words[i];
+					if (layout.shared && (word == OrgFx::kUnusedTextureWord || word == OrgFx::kUnusedSamplerWord))
+						continue;
+					if (e.lowered.resources[i].kind == OrgFx::ResourceSlot::Kind::Sampler) {
+						draw->push[word] = { PushWord::Kind::Literal, e.samplers[i].Index() };
+						draw->samplers.push_back(e.samplers[i]);
+					} else
+						draw->push[word] = { PushWord::Kind::Input, draw->Input(Resolve(e, i, a_names, a_color, target)) };
+				}
 				++frame->fxPasses;
 				AddStep(std::shared_ptr<const DrawSpec>(std::move(draw)), fmt::format("{}.{}.p{}", e.Name(), technique.name, p));
 			}
