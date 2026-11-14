@@ -685,8 +685,9 @@ namespace RenderGraph::Engine::ImageSpace
 
 		/**
 		 * @brief The engine target a shader resource view is: a render target's index (with a mip for a target that is one mip of
-		 * another's texture), a depth-stencil target's depth SRV as kDepthInput | index, or -1. kFRAMEBUFFER (an RTV only) is never
-		 * one.
+		 * another's texture), a depth-stencil target's depth SRV as kDepthInput | index, or -1. kFRAMEBUFFER is one when the engine
+		 * made an SRV of the back buffer (the screenshot copies read it): FrameAnchors::EngineTarget imports the back buffer with that
+		 * view (in native mode its graph-owned slot), so the pass declares the read.
 		 */
 		std::int32_t InputOfView(ID3D11ShaderResourceView* a_view)
 		{
@@ -694,6 +695,8 @@ namespace RenderGraph::Engine::ImageSpace
 			if (!renderer || !a_view)
 				return -1;
 			const auto& targets = renderer->GetRuntimeData().renderTargets;
+			if (targets[RE::RENDER_TARGET::kFRAMEBUFFER].SRV == a_view)
+				return static_cast<std::int32_t>(RE::RENDER_TARGET::kFRAMEBUFFER);
 			for (std::uint32_t i = RE::RENDER_TARGET::kMAIN; i < RE::RENDER_TARGET::kTOTAL; ++i)
 				if (targets[i].SRV == a_view)
 					return targets[i].texture ? static_cast<std::int32_t>(i) : MipInputOfView(a_view);
