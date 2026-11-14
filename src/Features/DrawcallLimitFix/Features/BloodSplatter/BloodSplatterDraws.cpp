@@ -23,6 +23,7 @@
 
 #include <atomic>
 #include <cstring>
+#include <mutex>
 
 namespace DCLF::Features::BloodSplatter::BloodSplatterDraws
 {
@@ -46,10 +47,18 @@ namespace DCLF::Features::BloodSplatter::BloodSplatterDraws
 			// One draw entry per latched draw. The anchor closes it at every run, and only this client's commit opens it, so a run of
 			// the anchor that another client keeps draws nothing of this client's older run.
 			std::shared_ptr<::RenderGraph::RunGate> gate;
-			FrameAnchors::Texture target;  // the back buffer, as imported at the registration
+			// The back buffer as last imported (Target). A swap chain made again with the same format is the slot's next version; another
+			// format is a new slot, taken at the next batch (CanTake) and declared from the next build.
+			FrameAnchors::Texture target;
+			mutable std::mutex targetMutex;  // the render thread replaces target, a build reads it
 			std::shared_ptr<const Run> run;
 			bool pending = false;
-			bool targetLogged = false;
+
+			FrameAnchors::Texture Target() const
+			{
+				std::scoped_lock lock(targetMutex);
+				return target;
+			}
 			std::atomic<std::uint64_t> executed{ 0 };  // runs submitted with this client's pass (its executed callback)
 		};
 
@@ -71,7 +80,7 @@ namespace DCLF::Features::BloodSplatter::BloodSplatterDraws
 			explicit BloodPass(std::shared_ptr<Client> a_client) :
 				client(std::move(a_client)) {}
 
-			Bindings Declare(org::PassBuilder& a_builder) { return { a_builder.RenderTarget(client->target).View() }; }
+			Bindings Declare(org::PassBuilder& a_builder) { return { a_builder.RenderTarget(client->Target()).View() }; }
 
 			void Revision(std::vector<std::uint64_t>& a_out) const
 			{
@@ -243,12 +252,16 @@ namespace DCLF::Features::BloodSplatter::BloodSplatterDraws
 		const auto& client = state.client;
 		if (state.failed || !client)
 			return false;
-		// The back buffer the engine binds now must be the one the client imported: a new swap chain keeps the screen blood the engine's
-		// (no client is registered again during play).
-		if (FrameAnchors::EngineTarget(0) != client->target) {
-			if (!std::exchange(client->targetLogged, true))
-				logger::warn("[DCLF] blood splatter: the back buffer changed since the client registered; the screen blood stays the engine's");
-			return false;
+		// A swap chain made again keeps the back buffer's slot (its next version). One of another format is a new slot: the client takes
+		// it and is built again with it (the import already asked every graph holding the old slot to be built again), and its batches
+		// wait for that build's attach below.
+		if (auto current = FrameAnchors::EngineTarget(0); current && current != client->Target()) {
+			{
+				std::scoped_lock lock(client->targetMutex);
+				client->target = std::move(current);
+			}
+			FrameAnchors::Refresh(kClientId);
+			logger::info("[DCLF] blood splatter: the back buffer is another graph resource (a format change); the client is built again with it");
 		}
 		if (!FrameAnchors::CanRun(kClientId, FrameAnchors::Anchor::EngineDraws)) {
 			static Util::ReasonLog log("[DCLF] blood splatter: the engine draws a batch", spdlog::level::err);
