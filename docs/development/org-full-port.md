@@ -912,6 +912,9 @@ the code, with the work for each piece. The pieces build on each other in this o
    into BasicRHI primary lists submitted in order (the native External would take a BasicRHI list instead of a
    `VkCommandBuffer`). `SiteStats`' raw Vulkan queries become BasicRHI query pools. Until then the forward family needs the
    GPU path.
+   **Done (2026-11-14, lane `par-dclf-cpu`, `parity/dclf-cpu.md`):** in native mode the sites record inline into their epochs'
+   primary lists (ORG's inline at-execution passes), with no secondaries; waits and signals are BasicRHI timeline points;
+   `SiteStats` uses BasicRHI query pools.
 6. **Texture imports** (`GpuTextures`: `rhi::vulkan::import_buffer` of buffer-backed views) use
    `rhi::dx12::import_resource` on the ID3D12Resource that native mode's descriptions already carry.
 

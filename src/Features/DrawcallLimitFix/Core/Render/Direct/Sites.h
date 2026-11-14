@@ -3,7 +3,7 @@
 // The CPU-driven pipeline's draw sites (Direct.h; dclf-architecture.md, "The CPU-driven pipeline"): at each draw epoch's trigger, while
 // the graph is built for the CPU pipeline (GraphConditions::cpuPipeline), the epoch's commits run on the render thread as in the GPU
 // path (they latch the frame's values), its submission is the site's instead: the site's views culled on DCLF's pool, and one callback
-// queued into DXVK's command stream (RenderGraphRuntime::EmitExternalCommands) that records, on DXVK's CS thread into DXVK's own command
+// queued into DXVK's command stream (RenderGraphRuntime::EmitCommands) that records, on DXVK's CS thread into DXVK's own command
 // buffer, its epoch's ORG execution (the commits' uploads, its CPU pipeline passes), the views' direct draws (Recorder.h) inside one rendering per
 // target, and the exit barrier. Nothing waits on the render thread but a frame slot's reuse (FrameStart).
 //

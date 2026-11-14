@@ -2155,13 +2155,15 @@ Core keeps the ranges, the `kRasterForward` bits, `ForwardSortCS`, the shared ep
     draws, refraction and first person's forward part. Why: `core.forward-sort` can only sort within a pipeline (with
     `CS_DCLF_FORWARD_PLAIN=0`, a state class), because a draw's pipeline is fixed by the range it is in, and those lists then draw in
     creation order whatever their depth. Smoke drew over the log in front of it, and no fixed order of the lists is right: flames
-    in front of logs and smoke behind them interleave. Off, or with the epoch not in DXVK's stream (`CS_ORG_IN_STREAM=0`), the GPU path runs.
+    in front of logs and smoke behind them interleave. Off, or with the epoch not recording at execution (guest with `CS_ORG_IN_STREAM=0`;
+    `RenderGraphRuntime::RecordsAtExecution`), the GPU path runs. Native mode records at execution inline, so the family runs there too.
     -   **What is shared.** `Direct::ColourCommitted` makes the views, pool jobs run `CullBatch`, `ForwardReached` is the trigger,
         `RecordForwardSite` sorts and records on DXVK's CS thread, and `core.forward-direct` is the late pass, in both modes.
     -   **What differs, by `FrameSlot::ownsEpochs`.** False in a GPU-driven frame: the slot is one of `State::forwardSlots`, never waited for, and
         retires by a `SubmittedRetirementPoint` taken at `EndFrame`, not by a frame signal. It takes no host frame slot, and no site opens
         but the forward family's. The graph runs the epoch itself, so `ForwardReached` hands the run to the late pass in DXVK's stream, ahead of
-        the execution (`HandOffRun`). ORG records a pass per frame only in an external epoch, so this needs the epoch in the stream. Without
+        the execution (`HandOffRun`); in native mode directly, as the epoch records the pass inline during its submission. ORG records a
+        pass per frame only at execution, so this needs the epoch in the stream (guest) or inline recording (native). Without
         this frame's cull frame nothing is handed off and the frame draws no forward objects (`FORWARD SKIPPED` on the `[CPU]` line),
         because the recording would otherwise wait on a later frame, which a frame's start may wait on this frame's GPU work for.
     -   **Root state: a read-only observer (`KickCpuFrameState`'s `a_observer`, `Features/Fades/FadeCpuStage.cpp`).** `FadeStateCS` stays the fades'
@@ -3162,6 +3164,10 @@ stand-ins and the engine boundary are the GPU path's: the same objects are DCLF'
     views: the reflection's faces into their cube and first person's depth, `ViewSites.cpp`), colour (decal depth, main colour,
     the families' colour, the second pass), forward (forward and refraction) and first person's colour (`fp.colour-render`).
     Every site records into secondaries of the CS thread's (`SiteFrame.h`, `SiteOut`).
+    That is guest mode. **In native mode** (Vulkan and D3D12; `Direct::SitesInline`, `parity/dclf-cpu.md`) the sites' epochs are not
+    external: `Direct::ExecuteEpoch` submits each through `RenderGraphRuntime::ExecuteEpoch`, its commit opens the run, and the late pass
+    records the draws inline into the epoch's own primary list during the submission, on the render thread, with no secondaries. The
+    frame signal is a BasicRHI list of its own (`RenderGraphRuntime::EmitCommands`) in both modes.
 -   **One descriptor model.** BasicRHI and DXVK must bind the same model in DXVK's command buffer: with DXVK on descriptor
     buffers and BasicRHI on heaps, NVIDIA fetched garbage descriptors in the callbacks' draws (render-graph.md, "External
     commands in DXVK's command buffer"). The graph runs on descriptor buffers alone, with BasicRHI's shaders lowered to them
@@ -3193,7 +3199,7 @@ stand-ins and the engine boundary are the GPU path's: the same objects are DCLF'
     `serial`: the CS thread records each culled batch as it arrives, in list order (a reorder
     window by batch index). `parallel`: each cull job records its plain-list batches into a secondary of its own (a command
     pool per worker and frame slot); the callback executes them in list order. Decals, forward and refraction are one ordered
-    stream on the CS thread in both.
+    stream on the CS thread in both. Native mode makes no secondaries: `parallel` records as `indirect` there (`Direct::FrameMode`).
 -   `dclf:cpu-cadence-<view>=frame|snapshot`: a view culled and recorded every frame, or once per batch set. A per-snapshot
     view (`PrepareSnapshotView`) is culled per frame on the set's first frame and, beside it, culled again with the snapshot's
     spheres against the view as that frame captured it and recorded into one simultaneous-use secondary; the set's later frames
@@ -3201,7 +3207,7 @@ stand-ins and the engine boundary are the GPU path's: the same objects are DCLF'
     index pool, push words, map row and pipelines' set version) and dropped when the draws' index ranges move. The recording is
     made at the set's first frame, not on the snapshot builder: the builder has no captured view until a frame has one. Main is
     always per frame, and so are the main camera's other lists (their culls are kAccumulated's) and first person (its colour
-    site draws its depth view's batches).
+    site draws its depth view's batches). Native mode records every view per frame (no secondaries there).
 
 **What is live.** Every site above: CPU mode covers every DCLF epoch whose site is live (`Direct::ShadowSiteLive`,
 `ViewSiteLive`; the shadow site with DCLF's shadows on, a view with its feature on).
