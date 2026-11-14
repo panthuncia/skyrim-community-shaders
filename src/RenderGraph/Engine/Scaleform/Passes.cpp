@@ -147,8 +147,16 @@ namespace RenderGraph::Engine::Scaleform::Passes
 			Framebuffer,  // the back buffer (kFRAMEBUFFER's RTV, or HDR's saved one)
 			HdrUi,        // HDR's UI texture, while HDR redirects the interface into it
 			Main,         // kMAIN: the main menu's and the loading menu's movies
+			// kBOOK_TEXT_0 to 3: the book menu's pages, rendered into a texture of GFx's (kViewportRenderTexture) that is one of these
+			// engine targets, with kBOOK_TEXT's depth-stencil for masks.
+			Book0,
+			Book1,
+			Book2,
+			Book3,
 		};
-		constexpr std::array<Role, 3> kRoles{ Role::Framebuffer, Role::HdrUi, Role::Main };
+		constexpr std::array<Role, 7> kRoles{ Role::Framebuffer, Role::HdrUi, Role::Main, Role::Book0, Role::Book1, Role::Book2, Role::Book3 };
+
+		bool IsBook(Role a_role) { return a_role >= Role::Book0 && a_role <= Role::Book3; }
 
 		/**
 		 * @brief A target the displays draw onto, with kMAIN's depth-stencil for masks. It has two passes: one with the target alone,
@@ -803,12 +811,12 @@ namespace RenderGraph::Engine::Scaleform::Passes
 			static const std::array<std::string, static_cast<std::size_t>(RE::RENDER_TARGET::kTOTAL)> s_engine = [] {
 				std::array<std::string, static_cast<std::size_t>(RE::RENDER_TARGET::kTOTAL)> names;
 				for (std::size_t i = 0; i < names.size(); ++i)
-					names[i] = fmt::format("a render target other than the framebuffer, HDR's UI texture and kMAIN (engine target {})", i);
+					names[i] = fmt::format("a render target that is not a surface (engine target {})", i);
 				return names;
 			}();
 			const auto target = EngineTargetOf(a_texture);
 			return target >= 0 ? s_engine[static_cast<std::size_t>(target)].c_str() :
-			                     "a render target other than the framebuffer, HDR's UI texture and kMAIN (not an engine target)";
+			                     "a render target that is not a surface (not an engine target)";
 		}
 
 		/** @brief The engine depth-stencil target whose texture is a_texture (DXVK's), or -1. */
@@ -860,10 +868,12 @@ namespace RenderGraph::Engine::Scaleform::Passes
 		{
 			if (a_role == Role::Framebuffer)
 				return TextureOf(FramebufferRtv(), a_format);
-			if (a_role == Role::Main) {
+			if (a_role == Role::Main || IsBook(a_role)) {
 				auto* renderer = globals::game::renderer;
 				a_format = DXGI_FORMAT_UNKNOWN;
-				return renderer ? TextureOf(renderer->GetRuntimeData().renderTargets[static_cast<std::uint32_t>(RE::RENDER_TARGET::kMAIN)].RTV, a_format) : nullptr;
+				const auto target = a_role == Role::Main ? static_cast<std::uint32_t>(RE::RENDER_TARGET::kMAIN) :
+				                                           static_cast<std::uint32_t>(RE::RENDER_TARGET::kBOOK_TEXT_0) + (static_cast<std::uint32_t>(a_role) - static_cast<std::uint32_t>(Role::Book0));
+				return renderer ? TextureOf(renderer->GetRuntimeData().renderTargets[target].RTV, a_format) : nullptr;
 			}
 			const auto& hdr = globals::features::hdrDisplay;
 			a_format = DXGI_FORMAT_UNKNOWN;
@@ -877,6 +887,14 @@ namespace RenderGraph::Engine::Scaleform::Passes
 				return "framebuffer";
 			case Role::HdrUi:
 				return "HDR UI";
+			case Role::Book0:
+				return "kBOOK_TEXT_0";
+			case Role::Book1:
+				return "kBOOK_TEXT_1";
+			case Role::Book2:
+				return "kBOOK_TEXT_2";
+			case Role::Book3:
+				return "kBOOK_TEXT_3";
 			default:
 				return "kMAIN";
 			}
@@ -889,6 +907,18 @@ namespace RenderGraph::Engine::Scaleform::Passes
 			if (!renderer)
 				return nullptr;
 			const auto& depth = renderer->GetDepthStencilData().depthStencils[static_cast<std::uint32_t>(RE::RENDER_TARGETS_DEPTHSTENCIL::kMAIN)];
+			return depth.texture ? Tripwire::Unwrap(depth.texture) : nullptr;
+		}
+
+		/** @brief The depth-stencil a role's displays mask with (DXVK's): kBOOK_TEXT's for the book's pages, kMAIN's for the rest. */
+		ID3D11Texture2D* RoleDepth(Role a_role)
+		{
+			if (!IsBook(a_role))
+				return MainDepth();
+			auto* renderer = globals::game::renderer;
+			if (!renderer)
+				return nullptr;
+			const auto& depth = renderer->GetDepthStencilData().depthStencils[static_cast<std::uint32_t>(RE::RENDER_TARGETS_DEPTHSTENCIL::kBOOK_TEXT)];
 			return depth.texture ? Tripwire::Unwrap(depth.texture) : nullptr;
 		}
 
@@ -1016,7 +1046,7 @@ namespace RenderGraph::Engine::Scaleform::Passes
 			const auto texture = RoleTexture(a_role, format);
 			if (!texture || format == DXGI_FORMAT_UNKNOWN)
 				return false;
-			auto surface = MakeSurface(a_role, texture.get(), format, MainDepth());
+			auto surface = MakeSurface(a_role, texture.get(), format, RoleDepth(a_role));
 			QueuePrograms(a_state, *surface);
 			std::erase_if(a_state.surfaces, [&](const std::shared_ptr<Surface>& a_old) {
 				if (a_old->role != a_role)
@@ -1048,7 +1078,7 @@ namespace RenderGraph::Engine::Scaleform::Passes
 			const auto colour = ColourOf(a_role, a_display.target, a_display.targetFormat, ownId);
 			if (!colour || !(colour == surface.colour) || ownId != surface.ownId)
 				return nullptr;
-			auto* depthTexture = MainDepth();
+			auto* depthTexture = RoleDepth(a_role);
 			const auto depth = DepthTextureOf(depthTexture);
 			if (!(depth == surface.depth))
 				return nullptr;
@@ -1208,7 +1238,7 @@ namespace RenderGraph::Engine::Scaleform::Passes
 			(void)DeclareSurface(state, role);
 		if (std::ranges::none_of(state.surfaces, [](const auto& a_surface) { return a_surface->Drawable(); })) {
 			state.failed = true;
-			logger::error("[ORG] Scaleform: none of the framebuffer, HDR's UI texture and kMAIN can be imported; the D3D11 renderer draws");
+			logger::error("[ORG] Scaleform: none of the surfaces' targets can be imported; the D3D11 renderer draws");
 			return;
 		}
 		if (!RegisterClient(state))

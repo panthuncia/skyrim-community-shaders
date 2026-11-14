@@ -168,6 +168,18 @@ namespace RenderGraph::Engine::Scaleform
 				logger::info("[ORG] Scaleform: the D3D11 renderer draws: {}", a_reason);
 		}
 
+		/**
+		 * @brief A display without a video mode: the D3D11 renderer's BeginDisplay returns at once and every draw skips (SE 82819 tests
+		 * +0xC0 first), so it draws nothing either way. Counted as on the graph.
+		 */
+		void CountEmpty()
+		{
+			auto& counters = Count();
+			std::scoped_lock lock(counters.mutex);
+			++counters.graph;
+			Report(counters);
+		}
+
 		/** @brief A display that never began a capture: D3D11's whole. */
 		void CountD3D11(const char* a_reason)
 		{
@@ -1037,12 +1049,48 @@ namespace RenderGraph::Engine::Scaleform
 		}
 
 		/**
+		 * @brief The renderer's current render target (+0x740: SetDisplayRenderTarget's, or the top of its stack) as the display's
+		 * target: its RTV (+0x50) and DSV (+0x58), the views PushRenderTarget and PopRenderTarget bind. False when it has no RTV.
+		 */
+		bool ReadRendererTarget(void* a_renderer, Display& a_display)
+		{
+			auto* target = Field<std::byte*>(a_renderer, Layout::kRenderTarget);
+			auto* rtv = target ? *reinterpret_cast<ID3D11RenderTargetView**>(target + Layout::kRenderTargetRtv) : nullptr;
+			if (!rtv)
+				return false;
+			rtv = Tripwire::Unwrap(rtv);
+			winrt::com_ptr<ID3D11Resource> resource;
+			rtv->GetResource(resource.put());
+			auto texture = resource.try_as<ID3D11Texture2D>();
+			if (!texture)
+				return false;
+			D3D11_RENDER_TARGET_VIEW_DESC rtvDesc{};
+			rtv->GetDesc(&rtvDesc);
+			a_display.target = texture.detach();
+			a_display.targetFormat = rtvDesc.Format;
+			if (auto* dsv = *reinterpret_cast<ID3D11DepthStencilView**>(target + Layout::kRenderTargetDsv)) {
+				winrt::com_ptr<ID3D11Resource> depthResource;
+				Tripwire::Unwrap(dsv)->GetResource(depthResource.put());
+				if (auto depth = depthResource.try_as<ID3D11Texture2D>()) {
+					D3D11_TEXTURE2D_DESC desc{};
+					depth->GetDesc(&desc);
+					a_display.depthFormat = desc.Format;
+					a_display.depth = depth.detach();
+				}
+			}
+			return true;
+		}
+
+		/**
 		 * @brief Render target 0 and the depth-stencil UI::DrawInterface bound, from the engine's shadow state (its render target and
 		 * depth-stencil indices, as its ApplyState bound them), never from D3D11: under the flush latch the context's state is stale.
-		 * The objects are DXVK's, whatever the engine's tables hold.
+		 * The objects are DXVK's, whatever the engine's tables hold. A display into a render texture of GFx's (the book's pages), or one
+		 * with no target in the shadow state, draws onto the renderer's own current render target, which SetDisplayRenderTarget bound.
 		 */
-		bool ReadTargets(Display& a_display)
+		bool ReadTargets(void* a_renderer, Display& a_display, bool a_renderTexture)
 		{
+			if (a_renderTexture)
+				return ReadRendererTarget(a_renderer, a_display);
 			auto* renderer = globals::game::renderer;
 			auto* shadow = globals::game::shadowState;
 			if (!renderer || !shadow)
@@ -1050,10 +1098,10 @@ namespace RenderGraph::Engine::Scaleform
 			const auto& rss = shadow->GetRuntimeData();
 			const auto index = static_cast<std::uint32_t>(rss.renderTargets[0]);
 			if (index >= static_cast<std::uint32_t>(RE::RENDER_TARGET::kTOTAL))
-				return false;
+				return ReadRendererTarget(a_renderer, a_display);
 			auto* rtv = renderer->GetRuntimeData().renderTargets[index].RTV;
 			if (!rtv)
-				return false;
+				return ReadRendererTarget(a_renderer, a_display);
 			rtv = Tripwire::Unwrap(rtv);
 			winrt::com_ptr<ID3D11Resource> resource;
 			rtv->GetResource(resource.put());
@@ -1122,22 +1170,20 @@ namespace RenderGraph::Engine::Scaleform
 			}
 			if (capture.active)
 				EndDangling(a_renderer);
-			const char* reason = nullptr;
-			if (!Passes::Ready())
-				reason = "a whole display while the graph path is off (not set up, or failed)";
-			else if (!VideoModeSet(a_renderer))
-				reason = "a whole display without a video mode";
-			else if (a_viewport->flags & kViewportRenderTexture)
-				reason = "a whole display into a render texture of GFx's (graph displays read it after)";
-			if (reason) {
-				CountD3D11(reason);
+			if (!Passes::Ready()) {
+				CountD3D11("a whole display while the graph path is off (not set up, or failed)");
 				const Flush::EngineDraws engine(WholeReason());
 				original(a_renderer, a_background, a_viewport, a_x0, a_x1, a_y0, a_y1);
 				return;
 			}
+			if (!VideoModeSet(a_renderer)) {
+				// The D3D11 renderer draws nothing without a video mode; its calls in this display skip as well.
+				CountEmpty();
+				return;
+			}
 
 			ClearDisplay();
-			if (!ReadTargets(capture.display)) {
+			if (!ReadTargets(a_renderer, capture.display, (a_viewport->flags & kViewportRenderTexture) != 0)) {
 				capture.display.Reset();
 				CountD3D11("a whole display with no render target bound");
 				const Flush::EngineDraws engine(WholeReason());
