@@ -2630,13 +2630,6 @@ family = "org"
 kind = "other"
 description = ""
 
-[key."org.native_rhi_context"]
-env = "CS_ORG_NATIVE_RHI_CONTEXT"
-type = "string"
-family = "org"
-kind = "other"
-description = ""
-
 [key."org.native_write_census"]
 env = "CS_ORG_NATIVE_WRITE_CENSUS"
 type = "bool"

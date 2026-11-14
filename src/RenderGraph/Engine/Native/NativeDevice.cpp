@@ -73,16 +73,6 @@ namespace RenderGraph::Engine::Native
 			return ::RenderGraph::Backend::IsD3D12();
 		}
 
-		/**
-		 * @brief Whether the context's work is recorded with BasicRHI commands (copies, clears, fills) instead of Vulkan's own.
-		 * Always on D3D12. On Vulkan only with CS_ORG_NATIVE_RHI_CONTEXT=1, to compare the two paths on one device.
-		 */
-		bool RhiContext()
-		{
-			static const bool vulkanOptIn = Switches::On("CS_ORG_NATIVE_RHI_CONTEXT");
-			return OnD3D12() || vulkanOptIn;
-		}
-
 		/** @brief The ID3D12Resource behind a BasicRHI resource of the D3D12 device, or null. */
 		void* D3D12ResourceOf(const rhi::Resource& a_resource)
 		{
@@ -489,7 +479,6 @@ namespace RenderGraph::Engine::Native
 		}
 
 		std::shared_ptr<org::Resource> LedgerResourceOf(NativeResource& a_record);
-		void CheckRawAccess(const std::string& a_label, std::span<NativeResource* const> a_used);
 
 		/** @brief Points every handle of a_record at a_target (null: at a_record itself again). Any thread. */
 		void Rename(NativeResource& a_record, std::shared_ptr<NativeResource> a_target)
@@ -538,86 +527,20 @@ namespace RenderGraph::Engine::Native
 				a_list.vt->endDebugLabel(&a_list);
 		}
 
-		/** @brief One-shot command lists on the graphics queue for creation-time work (initial layout, initial data), waited for. */
-		class OneShot
-		{
-		public:
-			bool Init(rhi::Device a_device)
-			{
-				device = a_device;
-				queue = device.GetQueue(rhi::QueueKind::Graphics);
-				const bool ok = device.CreateCommandAllocator(rhi::QueueKind::Graphics, allocator) == rhi::Result::Ok && allocator &&
-				                device.CreateCommandList(rhi::QueueKind::Graphics, allocator.Get(), list) == rhi::Result::Ok && list &&
-				                device.CreateTimeline(timeline, 0, "CS native one-shot") == rhi::Result::Ok && timeline;
-				if (ok) {
-					list->SetName("CS native creation");
-					// A list is made recording; it begins again at its first use (D3D12 resets only a closed list).
-					list->End();
-				}
-				return ok;
-			}
-
-			/** @brief Records a_record, submits it and waits for the GPU. Any thread (one at a time). a_label names it in crash markers. */
-			template <class F>
-			bool Run(const std::string& a_label, F&& a_record)
-			{
-				std::lock_guard guard(lock);
-				allocator->Recycle();
-				list->Recycle(allocator.Get());
-				BeginLabel(list.Get(), a_label);
-				a_record(list.Get());
-				EndLabel(list.Get());
-				list->End();
-				rhi::CommandList lists[] = { list.Get() };
-				const rhi::TimelinePoint signal{ timeline->GetHandle(), ++value };
-				rhi::SubmitDesc submit{};
-				submit.signals = { &signal, 1 };
-				if (queue.Submit({ lists, 1 }, submit) != rhi::Result::Ok)
-					return false;
-				return timeline->HostWait(value) == rhi::Result::Ok;
-			}
-
-		private:
-			std::mutex lock;
-			rhi::Device device;
-			rhi::Queue queue;
-			rhi::CommandAllocatorPtr allocator;
-			rhi::CommandListPtr list;
-			rhi::TimelinePtr timeline;
-			uint64_t value = 0;
-		};
-
 		/**
-		 * @brief The immediate context's work: one command list per operation (a copy, a clear, a mip chain), submitted on the graphics
-		 * queue when the call is made. Calls reach it in the order D3D11 code makes them, and the graph's epochs submit on the same queue
-		 * at their points, so each operation lands between the epochs before and after it. Every image rests in Common (GENERAL on
-		 * Vulkan) between operations.
-		 *
-		 * Two ways to record. On Vulkan (the default there) the commands are Vulkan's own (vkCmdCopyImage, vkCmdClearColorImage, ...)
-		 * inside a BasicRHI command list, between full memory barriers, on images left in GENERAL. With RhiContext() (D3D12, or
-		 * CS_ORG_NATIVE_RHI_CONTEXT=1 on Vulkan) they are BasicRHI commands, and each resource moves from Common into the layout and
-		 * access its command needs and back, which orders it with the work before and after. Each slot has descriptors of its own
-		 * for the clears (an RTV, a DSV and a UAV in a shader-visible and a CPU heap), reused with the slot.
-		 *
-		 * Nothing waits unless a caller asks (Map of a resource the GPU still uses). A list is reused once the timeline has passed it,
-		 * and what an operation keeps alive (its upload buffer) is released then.
+		 * @brief The immediate context's work, recorded with BasicRHI commands on both backends, one operation at a time (a copy, a
+		 * clear, a mip chain), in the order D3D11 code makes the calls. Two routes to the queue:
+		 * - once the render graph is up, ORG's external client (Route): a tracked image's barriers come from its ledger, and every
+		 *   other resource moves from Common into the state its command needs and back;
+		 * - before that (the engine's startup textures), the context's own lists (RunRhi), with the same barriers.
+		 * Both signal this context's timeline, so Map, Wait and the queries cover either. Each slot has descriptors of its own (an
+		 * RTV, a DSV, and UAVs in a shader-visible and a CPU heap), reused once the timeline has passed the slot's last work, when what
+		 * that work kept alive (its upload buffer) is released too. Nothing waits unless a caller asks (Map of memory the GPU still
+		 * uses).
 		 */
 		class Immediate
 		{
 		public:
-			struct Vulkan
-			{
-				PFN_vkCmdPipelineBarrier2 barrier = nullptr;
-				PFN_vkCmdCopyBuffer copyBuffer = nullptr;
-				PFN_vkCmdCopyImage copyImage = nullptr;
-				PFN_vkCmdCopyBufferToImage copyBufferToImage = nullptr;
-				PFN_vkCmdCopyImageToBuffer copyImageToBuffer = nullptr;
-				PFN_vkCmdBlitImage blitImage = nullptr;
-				PFN_vkCmdClearColorImage clearColorImage = nullptr;
-				PFN_vkCmdClearDepthStencilImage clearDepthStencilImage = nullptr;
-				PFN_vkCmdFillBuffer fillBuffer = nullptr;
-			};
-
 			/** @brief UAV descriptors per slot: one per clear an operation records (a mip each), since D3D12 reads a UAV clear's at execution. */
 			static constexpr uint32_t kUavsPerSlot = 16;
 
@@ -634,33 +557,16 @@ namespace RenderGraph::Engine::Native
 			{
 				device = a_device;
 				queue = device.GetQueue(rhi::QueueKind::Graphics);
-				bool ok = true;
-				if (!OnD3D12()) {
-					const VkDevice vkDevice = rhi::vulkan::get_device(device);
-					const auto getDeviceProcAddr = reinterpret_cast<PFN_vkGetDeviceProcAddr>(LoaderProc()(rhi::vulkan::get_instance(device), "vkGetDeviceProcAddr"));
-					if (!getDeviceProcAddr)
-						return false;
-					const auto resolve = [&](auto& a_into, const char* a_name) {
-						a_into = reinterpret_cast<std::remove_reference_t<decltype(a_into)>>(getDeviceProcAddr(vkDevice, a_name));
-						return a_into != nullptr;
-					};
-					ok = resolve(vk.barrier, "vkCmdPipelineBarrier2") && resolve(vk.copyBuffer, "vkCmdCopyBuffer") && resolve(vk.copyImage, "vkCmdCopyImage") &&
-					     resolve(vk.copyBufferToImage, "vkCmdCopyBufferToImage") && resolve(vk.copyImageToBuffer, "vkCmdCopyImageToBuffer") &&
-					     resolve(vk.blitImage, "vkCmdBlitImage") && resolve(vk.clearColorImage, "vkCmdClearColorImage") &&
-					     resolve(vk.clearDepthStencilImage, "vkCmdClearDepthStencilImage") && resolve(vk.fillBuffer, "vkCmdFillBuffer");
-				}
-				if (ok && RhiContext()) {
-					const auto heapOf = [&](rhi::DescriptorHeapType a_type, uint32_t a_capacity, bool a_shaderVisible, const char* a_name, rhi::DescriptorHeapPtr& a_out) {
-						return device.CreateDescriptorHeap(rhi::DescriptorHeapDesc{ a_type, a_capacity, a_shaderVisible, a_name }, a_out) == rhi::Result::Ok && a_out;
-					};
-					const auto heap = [&](rhi::DescriptorHeapType a_type, bool a_shaderVisible, const char* a_name, rhi::DescriptorHeapPtr& a_out) {
-						return heapOf(a_type, kSlots, a_shaderVisible, a_name, a_out);
-					};
-					ok = heap(rhi::DescriptorHeapType::RTV, false, "CS native immediate RTVs", rtvHeap) &&
-					     heap(rhi::DescriptorHeapType::DSV, false, "CS native immediate DSVs", dsvHeap) &&
-					     heapOf(rhi::DescriptorHeapType::CbvSrvUav, kSlots * kUavsPerSlot, true, "CS native immediate UAVs", uavHeap) &&
-					     heapOf(rhi::DescriptorHeapType::CbvSrvUav, kSlots * kUavsPerSlot, false, "CS native immediate UAVs (CPU)", uavCpuHeap);
-				}
+				const auto heapOf = [&](rhi::DescriptorHeapType a_type, uint32_t a_capacity, bool a_shaderVisible, const char* a_name, rhi::DescriptorHeapPtr& a_out) {
+					return device.CreateDescriptorHeap(rhi::DescriptorHeapDesc{ a_type, a_capacity, a_shaderVisible, a_name }, a_out) == rhi::Result::Ok && a_out;
+				};
+				const auto heap = [&](rhi::DescriptorHeapType a_type, bool a_shaderVisible, const char* a_name, rhi::DescriptorHeapPtr& a_out) {
+					return heapOf(a_type, kSlots, a_shaderVisible, a_name, a_out);
+				};
+				bool ok = heap(rhi::DescriptorHeapType::RTV, false, "CS native immediate RTVs", rtvHeap) &&
+				     heap(rhi::DescriptorHeapType::DSV, false, "CS native immediate DSVs", dsvHeap) &&
+				     heapOf(rhi::DescriptorHeapType::CbvSrvUav, kSlots * kUavsPerSlot, true, "CS native immediate UAVs", uavHeap) &&
+				     heapOf(rhi::DescriptorHeapType::CbvSrvUav, kSlots * kUavsPerSlot, false, "CS native immediate UAVs (CPU)", uavCpuHeap);
 				for (uint32_t i = 0; i < kSlots; ++i) {
 					auto& slot = slots[i];
 					ok = ok && device.CreateCommandAllocator(rhi::QueueKind::Graphics, slot.allocator) == rhi::Result::Ok && slot.allocator &&
@@ -675,28 +581,11 @@ namespace RenderGraph::Engine::Native
 			}
 
 			/**
-			 * @brief Records a_record with Vulkan's own commands and submits it (the Vulkan path). a_keep lives until the work is done;
-			 * each of a_used gets the work's value as its last use. Returns that value, 0 when the submission failed (logged). Any
-			 * thread, one at a time.
-			 */
-			uint64_t Run(const std::string& a_label, const std::function<void(const Vulkan&, VkCommandBuffer)>& a_record,
-				std::vector<std::shared_ptr<const void>> a_keep, std::initializer_list<NativeResource*> a_used)
-			{
-				return Submit(
-					a_label,
-					[&](Slot& a_slot, uint32_t) {
-						const VkCommandBuffer commands = rhi::vulkan::get_cmd_list(a_slot.list.Get());
-						FullBarrier(commands);
-						a_record(vk, commands);
-						FullBarrier(commands);
-					},
-					std::move(a_keep), std::span<NativeResource* const>(a_used.begin(), a_used.size()));
-			}
-
-			/**
-			 * @brief As Run, with BasicRHI commands (RhiContext()), on the context's own list: a_record gets the list and the slot's
-			 * descriptors, and records its own barriers, which order it with the work before and after. Only for work before the render
-			 * graph is up: from then on the context's work goes through Route.
+			 * @brief Records a_record on the context's own list and submits it on the graphics queue: a_record gets the list and the
+			 * slot's descriptors, and records its own barriers, which order it with the work before and after. a_keep lives until the
+			 * work is done; each of a_used gets the work's value as its last use. Returns that value, 0 when the submission failed
+			 * (logged). Only for work before the render graph is up (no graph epoch runs then): from then on the context's work goes
+			 * through Route. Any thread, one at a time.
 			 */
 			uint64_t RunRhi(const std::string& a_label, const std::function<void(rhi::CommandList&, const Descriptors&)>& a_record,
 				std::vector<std::shared_ptr<const void>> a_keep, std::span<NativeResource* const> a_used)
@@ -754,51 +643,13 @@ namespace RenderGraph::Engine::Native
 			}
 
 			/**
-			 * @brief As Run, through ORG's external client (ExternalWork) instead of the context's own lists: for work on images the graph
-			 * tracks once their layout is the ledgers' (NativeGraphMovesImages). a_accesses names each tracked image's graph resource in
-			 * GENERAL (Common), so the client moves it there from wherever the ledger says it is, and the ledger then holds GENERAL. The
-			 * images of a_untracked keep the context's contract: an exempt one leaves the shader-read state around the work. The work
-			 * ends with a full barrier, and signals this context's timeline, so Map and Wait cover it as they cover Run. Returns the
-			 * work's value, 0 when nothing was submitted (the caller then uses Run). Any thread, one at a time.
-			 */
-			uint64_t RunTracked(const std::string& a_label, std::span<const ::RenderGraph::ExternalWork::Access> a_accesses,
-				std::span<NativeResource* const> a_untracked, const std::function<void(const Vulkan&, VkCommandBuffer)>& a_record,
-				std::vector<std::shared_ptr<const void>> a_keep, std::initializer_list<NativeResource*> a_used)
-			{
-				std::lock_guard guard(lock);
-				// The client submits on this queue too. The lock keeps this context's signals in order.
-				const rhi::TimelinePoint signal{ timeline->GetHandle(), value + 1 };
-				auto keep = std::make_shared<std::vector<std::shared_ptr<const void>>>(std::move(a_keep));
-				const bool submitted = ::RenderGraph::ExternalWork::Submit(
-					a_label, a_accesses,
-					[&](rhi::CommandList& a_list) {
-						BeginLabel(a_list, a_label);
-						LeaveShaderRead(a_list, a_untracked, false);
-						const VkCommandBuffer commands = rhi::vulkan::get_cmd_list(a_list);
-						a_record(vk, commands);
-						FullBarrier(commands);
-						LeaveShaderRead(a_list, a_untracked, true);
-						EndLabel(a_list);
-					},
-					std::move(keep), { &signal, 1 });
-				if (!submitted)
-					return 0;
-				++value;
-				for (auto* used : a_used)
-					if (used)
-						used->lastUse.store(value, std::memory_order_release);
-				::RenderGraph::RawAccess::Count(::RenderGraph::RawAccess::Kind::Routed);
-				return value;
-			}
-
-			/**
 			 * @brief Work that records its own barriers and names no image a graph tracks (a new image's first contents): Route once the
 			 * render graph is up, else RunRhi.
 			 */
 			uint64_t RunUntracked(const std::string& a_label, const std::function<void(rhi::CommandList&, const Descriptors&)>& a_record,
 				std::vector<std::shared_ptr<const void>> a_keep, std::span<NativeResource* const> a_used)
 			{
-				if (RhiContext() && RenderGraphRuntime::Get().IsActive())
+				if (RenderGraphRuntime::Get().IsActive())
 					return Route(a_label, {}, {}, a_record, std::move(a_keep), a_used);
 				return RunRhi(a_label, a_record, std::move(a_keep), a_used);
 			}
@@ -861,8 +712,6 @@ namespace RenderGraph::Engine::Native
 			template <class Body>
 			uint64_t Submit(const std::string& a_label, Body&& a_body, std::vector<std::shared_ptr<const void>> a_keep, std::span<NativeResource* const> a_used)
 			{
-				// A region's held anchor runs go first: this work must follow them on the GPU.
-				::FrameAnchors::FlushRegions("raw work");
 				std::lock_guard guard(lock);
 				const uint32_t index = AcquireSlotLocked();
 				auto& slot = slots[index];
@@ -870,13 +719,11 @@ namespace RenderGraph::Engine::Native
 				slot.list->Recycle(slot.allocator.Get());
 				// The operation's name and its resource, so a device fault's crash markers name the work that ran.
 				BeginLabel(slot.list.Get(), a_label);
-				// An exempt texture rests in the shader-read state, and the operations expect Common (GENERAL on Vulkan): it goes there
-				// for the operation and back after it. Same queue, barriers on all work, so the graph's reads before and after are ordered.
-				const std::span<NativeResource* const> used = a_used;
-				CheckRawAccess(a_label, used);
-				LeaveShaderRead(slot.list.Get(), used, false);
+				// An exempt texture rests in the shader-read state, and the operations expect Common: it goes there for the operation and
+				// back after it.
+				LeaveShaderRead(slot.list.Get(), a_used, false);
 				a_body(slot, index);
-				LeaveShaderRead(slot.list.Get(), used, true);
+				LeaveShaderRead(slot.list.Get(), a_used, true);
 				EndLabel(slot.list.Get());
 				slot.list->End();
 				rhi::CommandList lists[] = { slot.list.Get() };
@@ -895,19 +742,6 @@ namespace RenderGraph::Engine::Native
 					if (record)
 						record->lastUse.store(value, std::memory_order_release);
 				return value;
-			}
-
-			void FullBarrier(VkCommandBuffer a_commands) const
-			{
-				VkMemoryBarrier2 memory{ VK_STRUCTURE_TYPE_MEMORY_BARRIER_2 };
-				memory.srcStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
-				memory.srcAccessMask = VK_ACCESS_2_MEMORY_WRITE_BIT;
-				memory.dstStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
-				memory.dstAccessMask = VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT;
-				VkDependencyInfo dependency{ VK_STRUCTURE_TYPE_DEPENDENCY_INFO };
-				dependency.memoryBarrierCount = 1;
-				dependency.pMemoryBarriers = &memory;
-				vk.barrier(a_commands, &dependency);
 			}
 
 			/**
@@ -938,7 +772,6 @@ namespace RenderGraph::Engine::Native
 			std::mutex lock;
 			rhi::Device device;
 			rhi::Queue queue;
-			Vulkan vk;
 			rhi::DescriptorHeapPtr rtvHeap, dsvHeap, uavHeap, uavCpuHeap;
 			std::array<Slot, kSlots> slots;
 			uint64_t next = 0;
@@ -1426,8 +1259,6 @@ namespace RenderGraph::Engine::Native
 			uint64_t next = 0;
 		};
 
-		bool RecordCopy(const Immediate::Vulkan& a_vk, VkCommandBuffer a_commands, const NativeResource& a_destination, uint32_t a_destinationSub, VkOffset3D a_at,
-			const NativeResource& a_source, uint32_t a_sourceSub, const D3D11_BOX* a_box);
 		uint64_t CopyRhi(const std::string& a_label, const std::shared_ptr<NativeResource>& a_destination, const std::shared_ptr<NativeResource>& a_source, bool a_all,
 			uint32_t a_destinationSub, uint32_t a_x, uint32_t a_y, uint32_t a_z, uint32_t a_sourceSub, const D3D11_BOX* a_box, bool& a_recorded, bool* a_routed);
 
@@ -1441,11 +1272,10 @@ namespace RenderGraph::Engine::Native
 
 			std::shared_ptr<rhi::DevicePtr> device;
 			rhi::Queue graphics;
-			OneShot oneShot;
 			Immediate immediate;
 			External external;
 			// GenerateMips' compute programs (ORG's GenerateMips.hlsl): for 2D textures, and for arrays and cubes. Loaded once the render
-			// graph is up, with the BasicRHI context (LoadMipPrograms).
+			// graph is up (LoadMipPrograms).
 			std::shared_ptr<const GraphPasses::GenerateMipsProgram> mips2D, mipsArray;
 			Commands commands;
 
@@ -1711,7 +1541,7 @@ namespace RenderGraph::Engine::Native
 					auto texture = org::PixelBuffer::CreateShared(desc);
 					texture->SetName(fmt::format("cs.native.texture.{}", record->serial));
 					// Without native home states nothing goes home: the graph leaves it where its last pass did, and the context's work
-					// takes the layout from the ledger (Immediate::RunTracked).
+					// takes the layout from the ledger (Immediate::Route).
 					texture->SetHostHome(!::RenderGraph::NativeHomeStatesOff());
 					if (!FillImage(*record, texture->GetAPIResource(), a_request, a_dxgiFormat, a_format, a_support, a_mips, a_layers, a_depth, VK_IMAGE_LAYOUT_GENERAL)) {
 						LogHostMade("BasicRHI did not describe the image ORG made", a_request.name);
@@ -1728,20 +1558,10 @@ namespace RenderGraph::Engine::Native
 					LogHostMade(fmt::format("ORG could not make it ({})", e.what()), a_request.name);
 					return false;
 				}
-				if (RhiContext()) {
-					// Its contents through ORG's external client: the ledger moves it out of Undefined and knows where it is after.
-					if (!InitializeTracked(*record, a_request, a_format, a_mips, a_layers, a_depth)) {
-						LogOnce(loggedUpload, a_request.name, "its initial layout or contents could not be written");
-						return false;
-					}
-				} else {
-					// ORG made it Undefined: into Common with its contents, as the raw context and the graph's home states expect.
-					if (!Initialize(record->resource->GetHandle(), a_request, a_format, a_mips, a_layers, a_depth)) {
-						LogOnce(loggedUpload, a_request.name, "its initial layout or contents could not be written");
-						return false;
-					}
-					if (auto* tracker = record->graphOwned->GetStateTracker())
-						*tracker = org::SymbolicTracker();  // the whole texture in Common
+				// Its contents through ORG's external client: the ledger moves it out of Undefined and knows where it is after.
+				if (!InitializeTracked(*record, a_request, a_format, a_mips, a_layers, a_depth)) {
+					LogOnce(loggedUpload, a_request.name, "its initial layout or contents could not be written");
+					return false;
 				}
 				record->ownership = NativeResource::Ownership::Tracked;
 				NoteOwnedImage(*record);
@@ -2144,15 +1964,14 @@ namespace RenderGraph::Engine::Native
 				if (!StageInitialData(a_texture, a_request, a_format, a_mips, a_layers, a_depth, *upload, copies, all))
 					return false;
 				const std::string label = (copies.empty() ? "initial layout " : "initial contents ") + a_request.name;
-				const auto record = [&](rhi::CommandList& a_list) {
-					RecordInitialize(a_list, a_texture, all, *upload, copies, rhi::ResourceLayout::Common, rhi::ResourceAccessType::Common);
-				};
-				if (!RhiContext())
-					return oneShot.Run(label, record);
-				// The BasicRHI context: an image no graph tracks yet, through ORG's external client once the graph is up (on the context's
-				// own list before). Waited for, so a graph that imports it later on another queue finds it written.
+				// An image no graph tracks yet: through ORG's external client once the graph is up (on the context's own list before).
+				// Waited for, so a graph that imports it later on another queue finds it written.
 				const uint64_t value = immediate.RunUntracked(
-					label, [&](rhi::CommandList& a_list, const Immediate::Descriptors&) { record(a_list); }, { upload }, {});
+					label,
+					[&](rhi::CommandList& a_list, const Immediate::Descriptors&) {
+						RecordInitialize(a_list, a_texture, all, *upload, copies, rhi::ResourceLayout::Common, rhi::ResourceAccessType::Common);
+					},
+					{ upload }, {});
 				return value && immediate.Wait(value);
 			}
 
@@ -2690,13 +2509,7 @@ namespace RenderGraph::Engine::Native
 				const auto source = a_source;
 				const auto staging = probe.staging;
 				bool recorded = false;
-				if (RhiContext()) {
-					probe.value = CopyRhi("present probe", staging, source, false, 0, 0, 0, 0, 0, nullptr, recorded, nullptr);
-				} else {
-					probe.value = immediate.Run("present probe",
-						[&](const Immediate::Vulkan& a_vk, VkCommandBuffer a_commands) { recorded = RecordCopy(a_vk, a_commands, *staging, 0, {}, *source, 0, nullptr); },
-						{ source, staging }, { source.get(), staging.get() });
-				}
+				probe.value = CopyRhi("present probe", staging, source, false, 0, 0, 0, 0, 0, nullptr, recorded, nullptr);
 				if (!recorded) {
 					probe.value = 0;
 					static std::atomic_flag logged;
@@ -3222,103 +3035,6 @@ namespace RenderGraph::Engine::Native
 		}
 
 		/**
-		 * @brief The raw access check (CS_ORG_RAW_ACCESS_CHECK=1): the context's own path is about to use a_used. Each image the graph
-		 * tracks is counted. It is flagged as a race when the graph may hold it in a layout other than the GENERAL this path assumes:
-		 * with home states off (the graph leaves it where its last pass did), inside an anchor run (an execution may have moved it and
-		 * not given it back yet), or when its graph resource moves layouts and does not go home. Logged once per resource and operation.
-		 */
-		void CheckRawAccess(const std::string& a_label, std::span<NativeResource* const> a_used)
-		{
-			if (!::RenderGraph::RawAccess::On() || !RenderGraphRuntime::Get().IsActive())
-				return;
-			for (auto* used : a_used) {
-				if (!used || used->kind != NativeResource::Kind::Image)
-					continue;
-				std::shared_ptr<org::Resource> graph;
-				const char* kind = "";
-				if (used->ownership == NativeResource::Ownership::Tracked) {
-					graph = used->graphOwned;
-					kind = "graph-owned";
-				} else if (used->ownership == NativeResource::Ownership::Exempt) {
-					if (!used->promoted.load(std::memory_order_acquire))
-						continue;
-					std::lock_guard guard(used->graphLock);
-					graph = used->exemptResource;
-					kind = "promoted exempt";
-				} else {
-					graph = ::RenderGraph::GraphResourceOfImage(reinterpret_cast<std::uint64_t>(used->image.image));
-					kind = "host-made, imported";
-				}
-				if (!graph)
-					continue;
-				const bool homeOff = ::RenderGraph::NativeHomeStatesOff();
-				const bool moves = !graph->CommonLayoutOnly();
-				const bool inRun = ::FrameAnchors::InRun();
-				const bool race = homeOff || (moves && (inRun || !graph->GoesHome()));
-				::RenderGraph::RawAccess::Count(::RenderGraph::RawAccess::Kind::ContextTracked);
-				if (race)
-					::RenderGraph::RawAccess::Count(::RenderGraph::RawAccess::Kind::ContextRace);
-				const auto operation = std::string_view(a_label).substr(0, std::string_view(a_label).find(' '));
-				if (!::RenderGraph::RawAccess::LogOnce(used->serial * 1000003u + std::hash<std::string_view>{}(operation)))
-					continue;
-				logger::info(
-					"[ORG raw access] '{}' on '{}' runs on the immediate context's own path and assumes GENERAL; the graph tracks the image as "
-					"'{}' ({}, {}, {}); {}: {}",
-					a_label, used->name, graph->GetName(), kind, moves ? "moved between layouts" : "Common only",
-					graph->GoesHome() ? "goes home after each execution" : "no home", inRun ? "inside an anchor run" : "between anchor runs",
-					race ? "RACE: the graph may hold it in another layout here" : "safe while home states hold");
-			}
-		}
-
-		/** @brief An image an operation of the context uses, and whether the operation reads and writes it. */
-		struct RawUse
-		{
-			NativeResource* record = nullptr;
-			bool read = false;
-			bool write = false;
-		};
-
-		/**
-		 * @brief Runs one of the context's Vulkan operations through ORG's external client when the graph moves native images and one of
-		 * a_uses is an image the graph tracks (LedgerResourceOf): the ledgers move each tracked image into GENERAL first, so a_record's
-		 * commands, written for GENERAL, stay as they are. Untracked uses keep the context's contract. False, with nothing done, when
-		 * the graph does not move native images, the context records BasicRHI commands (RhiContext()), nothing is tracked, or the
-		 * submission failed: the caller then runs the operation on the context's own path.
-		 */
-		bool RouteRaw(const std::string& a_label, std::initializer_list<RawUse> a_uses, const std::function<void(const Immediate::Vulkan&, VkCommandBuffer)>& a_record,
-			std::vector<std::shared_ptr<const void>> a_keep, std::initializer_list<NativeResource*> a_used)
-		{
-			if (!::RenderGraph::NativeGraphMovesImages() || RhiContext() || !RenderGraphRuntime::Get().IsActive())
-				return false;
-			std::vector<::RenderGraph::ExternalWork::Access> accesses;
-			std::vector<NativeResource*> untracked;
-			std::vector<std::shared_ptr<org::Resource>> ledgers;
-			for (const auto& use : a_uses) {
-				if (!use.record)
-					continue;
-				auto ledger = LedgerResourceOf(*use.record);
-				if (!ledger) {
-					untracked.push_back(use.record);
-					continue;
-				}
-				// The same image twice (a copy within it, mip generation) is one access, reading and writing.
-				const auto access = static_cast<rhi::ResourceAccessType>((use.read ? rhi::ResourceAccessType::CopySource : 0) |
-																		 (use.write ? rhi::ResourceAccessType::CopyDest : 0));
-				if (const auto same = std::ranges::find(ledgers, ledger); same != ledgers.end()) {
-					auto& entry = accesses[static_cast<std::size_t>(same - ledgers.begin())];
-					entry.state.access = static_cast<rhi::ResourceAccessType>(entry.state.access | access);
-					continue;
-				}
-				accesses.push_back({ ledger.get(), {}, { access, rhi::ResourceLayout::Common, rhi::ResourceSyncState::Copy } });
-				ledgers.push_back(std::move(ledger));
-			}
-			if (accesses.empty())
-				return false;
-			a_keep.insert(a_keep.end(), ledgers.begin(), ledgers.end());
-			return g_device->immediate.RunTracked(a_label, accesses, untracked, a_record, std::move(a_keep), a_used) != 0;
-		}
-
-		/**
 		 * @brief The context is about to write a_record. An exempt texture is promoted to tracked, once: the context keeps moving it
 		 * out of the shader-read state and back around its own work (Immediate::LeaveShaderRead), which orders the write with the
 		 * graph's work on the graphics queue, and the graph resource made for it (ImmutableTextureOf) becomes graph-managed through the
@@ -3367,94 +3083,13 @@ namespace RenderGraph::Engine::Native
 					a_object ? Tripwire::Describe(a_object).name : std::string("null"));
 		}
 
-		/** @brief Where subresource a_sub of a staging record lies for a Vulkan buffer-image copy, with a region inside it. */
-		VkBufferImageCopy StagingRegion(const NativeResource& a_staging, uint32_t a_sub, VkOffset3D a_offset, VkExtent3D a_extent, uint32_t a_imageLayer,
-			VkOffset3D a_imageOffset, VkImageAspectFlags a_aspect)
-		{
-			const auto& shape = a_staging.shape;
-			const auto& entry = a_staging.layout[a_sub];
-			const uint32_t block = shape.BlockSize();
-			VkBufferImageCopy copy{};
-			copy.bufferOffset = entry.offset + uint64_t(a_offset.z) * entry.depthPitch + uint64_t(a_offset.y / block) * entry.rowPitch +
-			                    uint64_t(a_offset.x / block) * shape.blockBytes;
-			copy.bufferRowLength = entry.rowPitch / shape.blockBytes * block;
-			copy.bufferImageHeight = entry.depthPitch / entry.rowPitch * block;
-			copy.imageSubresource = { a_aspect, a_sub % shape.mips, a_imageLayer, 1 };
-			copy.imageOffset = a_imageOffset;
-			copy.imageExtent = a_extent;
-			return copy;
-		}
-
 		/** @brief The whole extent of a subresource's mip. */
 		VkExtent3D MipExtent(const Shape& a_shape, uint32_t a_mip)
 		{
 			return { a_shape.Width(a_mip), a_shape.Height(a_mip), a_shape.Depth(a_mip) };
 		}
 
-		/**
-		 * @brief One subresource region from a_source to a_destination, whatever each is (a buffer, an image, a staging texture). a_box
-		 * null is the whole subresource (the whole buffer). Records into a_commands; false when the pair cannot be copied.
-		 */
-		bool RecordCopy(const Immediate::Vulkan& a_vk, VkCommandBuffer a_commands, const NativeResource& a_destination, uint32_t a_destinationSub, VkOffset3D a_at,
-			const NativeResource& a_source, uint32_t a_sourceSub, const D3D11_BOX* a_box)
-		{
-			using Kind = NativeResource::Kind;
-			const bool sourceBuffer = a_source.kind == Kind::Buffer;
-			const bool destinationBuffer = a_destination.kind == Kind::Buffer;
-			if (sourceBuffer || destinationBuffer) {
-				if (!sourceBuffer || !destinationBuffer)
-					return false;
-				const uint64_t from = a_box ? a_box->left : 0;
-				const uint64_t size = a_box ? a_box->right - a_box->left : (std::min)(a_source.size, a_destination.size);
-				if (from + size > a_source.size || a_at.x + size > a_destination.size)
-					return false;
-				const VkBufferCopy copy{ from, static_cast<VkDeviceSize>(a_at.x), size };
-				a_vk.copyBuffer(a_commands, a_source.vkBuffer, a_destination.vkBuffer, 1, &copy);
-				return true;
-			}
-			const Shape& sourceShape = a_source.shape;
-			if (a_sourceSub >= sourceShape.Subresources() || a_destinationSub >= a_destination.shape.Subresources())
-				return false;
-			const uint32_t sourceMip = a_sourceSub % sourceShape.mips;
-			const VkOffset3D from = a_box ? VkOffset3D{ static_cast<int32_t>(a_box->left), static_cast<int32_t>(a_box->top), static_cast<int32_t>(a_box->front) } :
-			                                VkOffset3D{ 0, 0, 0 };
-			const VkExtent3D extent = a_box ? VkExtent3D{ a_box->right - a_box->left, a_box->bottom - a_box->top, a_box->back - a_box->front } :
-			                                  MipExtent(sourceShape, sourceMip);
-			const uint32_t sourceLayer = a_sourceSub / sourceShape.mips;
-			const uint32_t destinationLayer = a_destinationSub / a_destination.shape.mips;
-			if (a_source.kind == Kind::Image && a_destination.kind == Kind::Image) {
-				VkImageCopy copy{};
-				copy.srcSubresource = { sourceShape.aspects, sourceMip, sourceLayer, 1 };
-				copy.srcOffset = from;
-				copy.dstSubresource = { a_destination.shape.aspects, a_destinationSub % a_destination.shape.mips, destinationLayer, 1 };
-				copy.dstOffset = a_at;
-				copy.extent = extent;
-				a_vk.copyImage(a_commands, a_source.image.image, VK_IMAGE_LAYOUT_GENERAL, a_destination.image.image, VK_IMAGE_LAYOUT_GENERAL, 1, &copy);
-				return true;
-			}
-			if (a_source.kind == Kind::Image && a_destination.kind == Kind::Staging) {
-				const auto copy = StagingRegion(a_destination, a_destinationSub, a_at, extent, sourceLayer, from, sourceShape.copyAspect);
-				a_vk.copyImageToBuffer(a_commands, a_source.image.image, VK_IMAGE_LAYOUT_GENERAL, a_destination.vkBuffer, 1, &copy);
-				return true;
-			}
-			if (a_source.kind == Kind::Staging && a_destination.kind == Kind::Image) {
-				const auto copy = StagingRegion(a_source, a_sourceSub, from, extent, destinationLayer, a_at, a_destination.shape.copyAspect);
-				a_vk.copyBufferToImage(a_commands, a_source.vkBuffer, a_destination.image.image, VK_IMAGE_LAYOUT_GENERAL, 1, &copy);
-				return true;
-			}
-			// Staging to staging: row by row would be needed for a region; the whole subresource is one buffer range.
-			if (a_box || a_at.x || a_at.y || a_at.z)
-				return false;
-			const auto& sourceEntry = a_source.layout[a_sourceSub];
-			const auto& destinationEntry = a_destination.layout[a_destinationSub];
-			if (sourceEntry.rowPitch != destinationEntry.rowPitch || sourceEntry.depthPitch != destinationEntry.depthPitch)
-				return false;
-			const VkBufferCopy copy{ sourceEntry.offset, destinationEntry.offset, uint64_t(sourceEntry.depthPitch) * sourceShape.Depth(sourceMip) };
-			a_vk.copyBuffer(a_commands, a_source.vkBuffer, a_destination.vkBuffer, 1, &copy);
-			return true;
-		}
-
-		// ---- The context's work as BasicRHI commands (RhiContext()) ------------------------------------------------------------
+		// ---- The context's work as BasicRHI commands -------------------------------------------------------------------------------
 
 		/** @brief One resource an operation uses: the subresources, and the layout, access and stages its command needs. */
 		struct Use
@@ -4235,65 +3870,10 @@ namespace RenderGraph::Engine::Native
 			if (record->kind == NativeResource::Kind::Image && record->upload && a_subresource < record->shape.Subresources()) {
 				const auto image = record;
 				const auto upload = record->upload;
-				if (RhiContext()) {
-					bool recorded = false, routed = false;
-					CopyRhi("unmap (dynamic upload) " + image->name, image, upload, false, a_subresource, 0, 0, 0, a_subresource, nullptr, recorded, &routed);
-					NoteRun(OpCensus::Op::UnmapUpload, *image, a_resource, nullptr, routed);
-					return;
-				}
-				// An image the graph tracks, once its layout is the ledgers': through ORG's external client.
-				if (RouteRaw("unmap (dynamic upload) " + image->name, { { image.get(), false, true }, { upload.get(), true, false } },
-						[&](const Immediate::Vulkan& a_vk, VkCommandBuffer a_commands) {
-							(void)RecordCopy(a_vk, a_commands, *image, a_subresource, {}, *upload, a_subresource, nullptr);
-						},
-						{ image, upload }, { image.get(), upload.get() })) {
-					NoteRouted(OpCensus::Op::UnmapUpload, *image, OpCensus::Route::ExternalWork);
-					return;
-				}
-				if (OpCensus::Flags())
-					NoteOp(OpCensus::Op::UnmapUpload, *image, a_resource);
-				NoteRaw(OpCensus::Op::UnmapUpload, *image);
-				g_device->immediate.Run("unmap (dynamic upload) " + image->name,
-					[&](const Immediate::Vulkan& a_vk, VkCommandBuffer a_commands) {
-						(void)RecordCopy(a_vk, a_commands, *image, a_subresource, {}, *upload, a_subresource, nullptr);
-					},
-					{ image, upload }, { image.get(), upload.get() });
+				bool recorded = false, routed = false;
+				CopyRhi("unmap (dynamic upload) " + image->name, image, upload, false, a_subresource, 0, 0, 0, a_subresource, nullptr, recorded, &routed);
+				NoteRun(OpCensus::Op::UnmapUpload, *image, a_resource, nullptr, routed);
 			}
-		}
-
-		/**
-		 * @brief Copies between two images the graph tracks through ORG's external client (ExternalWork): their ledgers give the
-		 * barriers, so no graph changes and the copy lands here in the stream. a_subresources lists (destination, source) subresource
-		 * pairs; with a_box, one region of the first pair to (a_x, a_y, a_z). False, with nothing done, when either image is not
-		 * tracked, a subresource does not exist, or the submission failed: the caller records the copy itself.
-		 */
-		bool CopyExternally(const std::shared_ptr<NativeResource>& a_destination, const std::shared_ptr<NativeResource>& a_source,
-			std::span<const std::pair<uint32_t, uint32_t>> a_subresources, uint32_t a_x, uint32_t a_y, uint32_t a_z, const D3D11_BOX* a_box)
-		{
-			if (a_destination->kind != NativeResource::Kind::Image || a_source->kind != NativeResource::Kind::Image || a_subresources.empty())
-				return false;
-			// Within one image: one resource cannot be declared as both copy states. RouteRaw takes it (reading and writing, in GENERAL).
-			if (a_destination == a_source)
-				return false;
-			const auto to = LedgerResourceOf(*a_destination);
-			const auto from = LedgerResourceOf(*a_source);
-			if (!to || !from)
-				return false;
-			for (const auto& [destinationSub, sourceSub] : a_subresources)
-				if (destinationSub >= a_destination->shape.Subresources() || sourceSub >= a_source->shape.Subresources())
-					return false;
-			const auto toHandle = to->GetAPIResource().GetHandle();
-			const auto fromHandle = from->GetAPIResource().GetHandle();
-			const std::array accesses{ ::RenderGraph::ExternalWork::CopyDestination(*to), ::RenderGraph::ExternalWork::CopySource(*from) };
-			return ::RenderGraph::ExternalWork::Submit(
-				"native context copy", accesses,
-				[&](rhi::CommandList& a_list) {
-					for (const auto& [destinationSub, sourceSub] : a_subresources) {
-						const auto [region, source] = ImageCopyRegions(*a_destination, toHandle, destinationSub, a_x, a_y, a_z, *a_source, fromHandle, sourceSub, a_box);
-						a_list.CopyTextureRegion(region, source);
-					}
-				},
-				std::make_shared<std::pair<std::shared_ptr<NativeResource>, std::shared_ptr<NativeResource>>>(a_destination, a_source));
 		}
 
 		void ContextUpdateSubresource(ID3D11Resource* a_resource, UINT a_subresource, const D3D11_BOX* a_box, const void* a_data, UINT a_rowPitch, UINT a_depthPitch)
@@ -4307,11 +3887,8 @@ namespace RenderGraph::Engine::Native
 				return;
 			}
 			const auto op = record->kind == NativeResource::Kind::Buffer ? OpCensus::Op::UpdateBuffer : OpCensus::Op::UpdateTexture;
-			// A tracked texture's update goes through ORG's external client below; everything else is counted here.
-			const bool external = record->kind == NativeResource::Kind::Image && record->shape.aspects == VK_IMAGE_ASPECT_COLOR_BIT &&
-			                      a_subresource < record->shape.Subresources() && LedgerResourceOf(*record);
-			// The BasicRHI route counts a texture's update where it runs (NoteRun).
-			if (OpCensus::Flags() && !external && !(RhiContext() && record->kind == NativeResource::Kind::Image))
+			// A texture's update is counted where it runs (NoteRun).
+			if (OpCensus::Flags() && record->kind != NativeResource::Kind::Image)
 				NoteOp(op, *record, a_resource);
 			if (record->kind == NativeResource::Kind::Buffer) {
 				const uint64_t from = a_box ? a_box->left : 0;
@@ -4340,22 +3917,13 @@ namespace RenderGraph::Engine::Native
 					return;
 				std::memcpy(data, a_data, size);
 				upload->resource->Unmap(0, size);
-				if (RhiContext()) {
-					const std::array uses{ CopySource(*upload, {}), CopyDest(*record, {}) };
-					RunOp(
-						"update buffer " + record->name, uses,
-						[&](rhi::CommandList& a_list, const Immediate::Descriptors&, std::span<const rhi::Resource> a_handles) {
-							a_list.CopyBufferRegion(a_handles[1].GetHandle(), from, a_handles[0].GetHandle(), 0, size);
-						},
-						{ upload, record });
-					return;
-				}
-				g_device->immediate.Run("update buffer " + record->name,
-					[&](const Immediate::Vulkan& a_vk, VkCommandBuffer a_commands) {
-						const VkBufferCopy copy{ 0, from, size };
-						a_vk.copyBuffer(a_commands, upload->vkBuffer, record->vkBuffer, 1, &copy);
+				const std::array uses{ CopySource(*upload, {}), CopyDest(*record, {}) };
+				RunOp(
+					"update buffer " + record->name, uses,
+					[&](rhi::CommandList& a_list, const Immediate::Descriptors&, std::span<const rhi::Resource> a_handles) {
+						a_list.CopyBufferRegion(a_handles[1].GetHandle(), from, a_handles[0].GetHandle(), 0, size);
 					},
-					{ upload, record }, { record.get() });
+					{ upload, record });
 				return;
 			}
 
@@ -4398,9 +3966,9 @@ namespace RenderGraph::Engine::Native
 				return;
 			}
 			NoteWrite(*record);
-			// A depth-stencil texture on the BasicRHI route: D3D11's interleaved texels split into the two planes (the whole
-			// subresource: D3D11 takes no box for depth-stencil), each copied into its plane, in the depth form the image keeps.
-			if (const uint32_t texel = StencilTexelBytes(shape); texel && RhiContext()) {
+			// A depth-stencil texture: D3D11's interleaved texels split into the two planes (the whole subresource: D3D11 takes no box
+			// for depth-stencil), each copied into its plane, in the depth form the image keeps.
+			if (const uint32_t texel = StencilTexelBytes(shape)) {
 				const uint32_t width = shape.Width(mip), height = shape.Height(mip);
 				const uint32_t depthPitch = (width * 4u + 255u) & ~255u, stencilPitch = (width + 255u) & ~255u;
 				const uint64_t stencilOffset = (uint64_t(depthPitch) * height + 511) & ~uint64_t(511);
@@ -4446,70 +4014,26 @@ namespace RenderGraph::Engine::Native
 				return;
 			writeRows(static_cast<std::byte*>(data));
 			upload->resource->Unmap(0, upload->size);
-			// The BasicRHI route: the upload's copy, through the ledgers when the graph tracks the texture (a depth texture: its depth
-			// plane, whose texels are D3D11's).
-			if (RhiContext()) {
-				bool routed = false;
-				const std::array uses{ CopySource(*upload, {}), CopyDest(*record, SubresourceOf(*record, a_subresource)) };
-				RunOp(
-					"update texture " + record->name, uses,
-					[&](rhi::CommandList& a_list, const Immediate::Descriptors&, std::span<const rhi::Resource> a_handles) {
-						rhi::BufferTextureCopyFootprint copy{};
-						copy.texture = a_handles[1].GetHandle();
-						copy.buffer = a_handles[0].GetHandle();
-						copy.mip = mip;
-						copy.arraySlice = a_subresource / shape.mips;
-						copy.x = static_cast<uint32_t>(at.x);
-						copy.y = static_cast<uint32_t>(at.y);
-						copy.z = static_cast<uint32_t>(at.z);
-						copy.footprint = { 0, rowPitch, FootprintExtent(shape, extent.width), FootprintExtent(shape, extent.height), extent.depth };
-						a_list.CopyBufferToTexture(copy);
-					},
-					{ upload, record }, &routed);
-				NoteRun(op, *record, a_resource, nullptr, routed);
-				return;
-			}
-			// A texture the graph tracks: the upload's copy through ORG's external client, its barriers from the ledgers.
-			if (const auto ledger = external ? LedgerResourceOf(*record) : nullptr) {
-				const auto handle = ledger->GetAPIResource().GetHandle();
-				const std::array accesses{ ::RenderGraph::ExternalWork::CopyDestination(*ledger) };
-				const bool submitted = ::RenderGraph::ExternalWork::Submit(
-					"native context texture update", accesses,
-					[&](rhi::CommandList& a_list) {
-						rhi::BufferTextureCopyFootprint copy{};
-						copy.texture = handle;
-						copy.buffer = upload->resource->GetHandle();
-						copy.mip = mip;
-						copy.arraySlice = a_subresource / shape.mips;
-						copy.x = static_cast<uint32_t>(at.x);
-						copy.y = static_cast<uint32_t>(at.y);
-						copy.z = static_cast<uint32_t>(at.z);
-						copy.footprint = { 0, rowPitch, FootprintExtent(shape, extent.width), FootprintExtent(shape, extent.height), extent.depth };
-						a_list.CopyBufferToTexture(copy);
-					},
-					std::make_shared<std::pair<std::shared_ptr<NativeResource>, std::shared_ptr<NativeResource>>>(upload, record));
-				if (submitted) {
-					NoteRouted(op, *record, OpCensus::Route::ExternalWork);
-					return;
-				}
-				// Not submitted: the context's own path below, counted there.
-				if (OpCensus::Flags())
-					NoteOp(op, *record, a_resource);
-			}
-			NoteRaw(op, *record);
-			const auto updateCommands = [&](const Immediate::Vulkan& a_vk, VkCommandBuffer a_commands) {
-				VkBufferImageCopy copy{};
-				copy.bufferRowLength = rowPitch / shape.blockBytes * shape.BlockSize();
-				copy.bufferImageHeight = rows * shape.BlockSize();
-				copy.imageSubresource = { shape.copyAspect, mip, a_subresource / shape.mips, 1 };
-				copy.imageOffset = at;
-				copy.imageExtent = extent;
-				a_vk.copyBufferToImage(a_commands, upload->vkBuffer, record->image.image, VK_IMAGE_LAYOUT_GENERAL, 1, &copy);
-			};
-			// An image the graph tracks that the client's colour path above did not take (a depth image): its layout from the ledger.
-			if (RouteRaw("update texture " + record->name, { { record.get(), false, true } }, updateCommands, { upload, record }, { record.get() }))
-				return;
-			g_device->immediate.Run("update texture " + record->name, updateCommands, { upload, record }, { record.get() });
+			// The upload's copy, through the ledgers when the graph tracks the texture (a depth texture: its depth plane, whose texels
+			// are D3D11's).
+			bool routed = false;
+			const std::array uses{ CopySource(*upload, {}), CopyDest(*record, SubresourceOf(*record, a_subresource)) };
+			RunOp(
+				"update texture " + record->name, uses,
+				[&](rhi::CommandList& a_list, const Immediate::Descriptors&, std::span<const rhi::Resource> a_handles) {
+					rhi::BufferTextureCopyFootprint copy{};
+					copy.texture = a_handles[1].GetHandle();
+					copy.buffer = a_handles[0].GetHandle();
+					copy.mip = mip;
+					copy.arraySlice = a_subresource / shape.mips;
+					copy.x = static_cast<uint32_t>(at.x);
+					copy.y = static_cast<uint32_t>(at.y);
+					copy.z = static_cast<uint32_t>(at.z);
+					copy.footprint = { 0, rowPitch, FootprintExtent(shape, extent.width), FootprintExtent(shape, extent.height), extent.depth };
+					a_list.CopyBufferToTexture(copy);
+				},
+				{ upload, record }, &routed);
+			NoteRun(op, *record, a_resource, nullptr, routed);
 		}
 
 		void ContextCopySubresourceRegion(ID3D11Resource* a_destination, UINT a_destinationSub, UINT a_x, UINT a_y, UINT a_z, ID3D11Resource* a_source,
@@ -4526,55 +4050,12 @@ namespace RenderGraph::Engine::Native
 			if (destination == source && a_destinationSub == a_sourceSub)
 				return;
 			NoteWrite(*destination);
-			// The BasicRHI route: through the ledgers for each side the graph tracks.
-			if (RhiContext()) {
-				bool recorded = false, routed = false;
-				CopyRhi("copy region " + source->name + " to " + destination->name, destination, source, false, a_destinationSub, a_x, a_y, a_z, a_sourceSub, a_box,
-					recorded, &routed);
-				NoteRun(OpCensus::Op::CopyRegion, *destination, a_destination, nullptr, routed);
-				NoteRun(OpCensus::Op::CopyRegionSource, *source, a_source, nullptr, routed);
-				if (!recorded) {
-					static std::atomic_flag logged;
-					if (!logged.test_and_set())
-						logger::warn("[ORG native] CopySubresourceRegion from \"{}\" to \"{}\" is not a copy native mode makes (logged once)", source->name, destination->name);
-				}
-				return;
-			}
-			// Two textures the graph tracks: through ORG's external client.
-			if (const std::pair<uint32_t, uint32_t> pair{ a_destinationSub, a_sourceSub };
-				CopyExternally(destination, source, { &pair, 1 }, a_x, a_y, a_z, a_box)) {
-				NoteRouted(OpCensus::Op::CopyRegion, *destination, OpCensus::Route::ExternalWork);
-				NoteRouted(OpCensus::Op::CopyRegionSource, *source, OpCensus::Route::ExternalWork);
-				return;
-			}
-			bool recorded = false;
-			// One side the graph tracks (the other a staging texture, or an image no graph imported): through ORG's external client.
-			if (RouteRaw("copy region " + source->name + " to " + destination->name, { { destination.get(), false, true }, { source.get(), true, false } },
-					[&](const Immediate::Vulkan& a_vk, VkCommandBuffer a_commands) {
-						recorded = RecordCopy(a_vk, a_commands, *destination, a_destinationSub,
-							{ static_cast<int32_t>(a_x), static_cast<int32_t>(a_y), static_cast<int32_t>(a_z) }, *source, a_sourceSub, a_box);
-					},
-					{ destination, source }, { destination.get(), source.get() })) {
-				NoteRouted(OpCensus::Op::CopyRegion, *destination, OpCensus::Route::ExternalWork);
-				NoteRouted(OpCensus::Op::CopyRegionSource, *source, OpCensus::Route::ExternalWork);
-				if (!recorded) {
-					static std::atomic_flag logged;
-					if (!logged.test_and_set())
-						logger::warn("[ORG native] CopySubresourceRegion from \"{}\" to \"{}\" is not a copy native mode makes (logged once)", source->name, destination->name);
-				}
-				return;
-			}
-			if (OpCensus::Flags()) {
-				NoteOp(OpCensus::Op::CopyRegion, *destination, a_destination);
-				NoteOp(OpCensus::Op::CopyRegionSource, *source, a_source);
-			}
-			NoteRaw(OpCensus::Op::CopyRegion, *destination);
-			g_device->immediate.Run("copy region " + source->name + " to " + destination->name,
-				[&](const Immediate::Vulkan& a_vk, VkCommandBuffer a_commands) {
-					recorded = RecordCopy(a_vk, a_commands, *destination, a_destinationSub,
-						{ static_cast<int32_t>(a_x), static_cast<int32_t>(a_y), static_cast<int32_t>(a_z) }, *source, a_sourceSub, a_box);
-				},
-				{ destination, source }, { destination.get(), source.get() });
+			// Through the ledgers for each side the graph tracks.
+			bool recorded = false, routed = false;
+			CopyRhi("copy region " + source->name + " to " + destination->name, destination, source, false, a_destinationSub, a_x, a_y, a_z, a_sourceSub, a_box, recorded,
+				&routed);
+			NoteRun(OpCensus::Op::CopyRegion, *destination, a_destination, nullptr, routed);
+			NoteRun(OpCensus::Op::CopyRegionSource, *source, a_source, nullptr, routed);
 			if (!recorded) {
 				static std::atomic_flag logged;
 				if (!logged.test_and_set())
@@ -4602,60 +4083,11 @@ namespace RenderGraph::Engine::Native
 				NoteRouted(OpCensus::Op::CopySource, *source, OpCensus::Route::GraphPass);
 				return;
 			}
-			// The BasicRHI route: every subresource, through the ledgers for each side the graph tracks.
-			if (RhiContext()) {
-				bool recorded = false, routed = false;
-				CopyRhi("copy " + source->name + " to " + destination->name, destination, source, true, 0, 0, 0, 0, 0, nullptr, recorded, &routed);
-				NoteRun(OpCensus::Op::Copy, *destination, a_destination, nullptr, routed);
-				NoteRun(OpCensus::Op::CopySource, *source, a_source, nullptr, routed);
-				if (!recorded) {
-					static std::atomic_flag logged;
-					if (!logged.test_and_set())
-						logger::warn("[ORG native] CopyResource from \"{}\" to \"{}\" is not a copy native mode makes (logged once)", source->name, destination->name);
-				}
-				return;
-			}
-			// Two textures the graph tracks: every subresource through ORG's external client.
-			if (destination->kind == NativeResource::Kind::Image && source->kind == NativeResource::Kind::Image) {
-				std::vector<std::pair<uint32_t, uint32_t>> subresources;
-				const uint32_t count = (std::min)(destination->shape.Subresources(), source->shape.Subresources());
-				for (uint32_t sub = 0; sub < count; ++sub)
-					subresources.emplace_back(sub, sub);
-				if (CopyExternally(destination, source, subresources, 0, 0, 0, nullptr)) {
-					NoteRouted(OpCensus::Op::Copy, *destination, OpCensus::Route::ExternalWork);
-					NoteRouted(OpCensus::Op::CopySource, *source, OpCensus::Route::ExternalWork);
-					return;
-				}
-			}
-			bool recorded = true;
-			const auto copyCommands = [&](const Immediate::Vulkan& a_vk, VkCommandBuffer a_commands) {
-				if (destination->kind == NativeResource::Kind::Buffer || source->kind == NativeResource::Kind::Buffer) {
-					recorded = RecordCopy(a_vk, a_commands, *destination, 0, {}, *source, 0, nullptr);
-					return;
-				}
-				const uint32_t count = (std::min)(destination->shape.Subresources(), source->shape.Subresources());
-				for (uint32_t sub = 0; sub < count; ++sub)
-					recorded = RecordCopy(a_vk, a_commands, *destination, sub, {}, *source, sub, nullptr) && recorded;
-			};
-			// One side the graph tracks (the other a staging texture: a readback, or an image no graph imported): through ORG's
-			// external client.
-			if (RouteRaw("copy " + source->name + " to " + destination->name, { { destination.get(), false, true }, { source.get(), true, false } }, copyCommands,
-					{ destination, source }, { destination.get(), source.get() })) {
-				NoteRouted(OpCensus::Op::Copy, *destination, OpCensus::Route::ExternalWork);
-				NoteRouted(OpCensus::Op::CopySource, *source, OpCensus::Route::ExternalWork);
-				if (!recorded) {
-					static std::atomic_flag logged;
-					if (!logged.test_and_set())
-						logger::warn("[ORG native] CopyResource from \"{}\" to \"{}\" is not a copy native mode makes (logged once)", source->name, destination->name);
-				}
-				return;
-			}
-			if (OpCensus::Flags()) {
-				NoteOp(OpCensus::Op::Copy, *destination, a_destination);
-				NoteOp(OpCensus::Op::CopySource, *source, a_source);
-			}
-			NoteRaw(OpCensus::Op::Copy, *destination);
-			g_device->immediate.Run("copy " + source->name + " to " + destination->name, copyCommands, { destination, source }, { destination.get(), source.get() });
+			// Every subresource, through the ledgers for each side the graph tracks.
+			bool recorded = false, routed = false;
+			CopyRhi("copy " + source->name + " to " + destination->name, destination, source, true, 0, 0, 0, 0, 0, nullptr, recorded, &routed);
+			NoteRun(OpCensus::Op::Copy, *destination, a_destination, nullptr, routed);
+			NoteRun(OpCensus::Op::CopySource, *source, a_source, nullptr, routed);
 			if (!recorded) {
 				static std::atomic_flag logged;
 				if (!logged.test_and_set())
@@ -4809,47 +4241,12 @@ namespace RenderGraph::Engine::Native
 			}
 			NoteWrite(*record);
 			const Shape& shape = record->shape;
-			// The BasicRHI route: a compute mip chain.
-			if (RhiContext()) {
-				if (shape.mips < 2 || shape.aspects != VK_IMAGE_ASPECT_COLOR_BIT)
-					return;
-				bool routed = false;
-				if (GenerateMipsRhi(record, routed))
-					NoteRun(OpCensus::Op::GenerateMips, *record, nullptr, a_view, routed);
-				return;
-			}
-			// Each mip from the one above it, linearly filtered; a barrier between, since each level reads the last one written.
-			const auto mipCommands = [&](const Immediate::Vulkan& a_vk, VkCommandBuffer a_commands) {
-				for (uint32_t mip = 1; mip < shape.mips; ++mip) {
-					VkImageBlit blit{};
-					blit.srcSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, mip - 1, 0, shape.layers };
-					blit.srcOffsets[1] = { static_cast<int32_t>(shape.Width(mip - 1)), static_cast<int32_t>(shape.Height(mip - 1)), static_cast<int32_t>(shape.Depth(mip - 1)) };
-					blit.dstSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, mip, 0, shape.layers };
-					blit.dstOffsets[1] = { static_cast<int32_t>(shape.Width(mip)), static_cast<int32_t>(shape.Height(mip)), static_cast<int32_t>(shape.Depth(mip)) };
-					a_vk.blitImage(a_commands, record->image.image, VK_IMAGE_LAYOUT_GENERAL, record->image.image, VK_IMAGE_LAYOUT_GENERAL, 1, &blit, VK_FILTER_LINEAR);
-					VkMemoryBarrier2 memory{ VK_STRUCTURE_TYPE_MEMORY_BARRIER_2 };
-					memory.srcStageMask = VK_PIPELINE_STAGE_2_BLIT_BIT;
-					memory.srcAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT;
-					memory.dstStageMask = VK_PIPELINE_STAGE_2_BLIT_BIT;
-					memory.dstAccessMask = VK_ACCESS_2_TRANSFER_READ_BIT;
-					VkDependencyInfo dependency{ VK_STRUCTURE_TYPE_DEPENDENCY_INFO };
-					dependency.memoryBarrierCount = 1;
-					dependency.pMemoryBarriers = &memory;
-					a_vk.barrier(a_commands, &dependency);
-				}
-			};
-			// An image the graph tracks, once its layout is the ledgers': through ORG's external client, reading and writing it.
-			if (shape.mips >= 2 && shape.aspects == VK_IMAGE_ASPECT_COLOR_BIT &&
-				RouteRaw("generate mips " + record->name, { { record.get(), true, true } }, mipCommands, { record }, { record.get() })) {
-				NoteRouted(OpCensus::Op::GenerateMips, *record, OpCensus::Route::ExternalWork);
-				return;
-			}
-			if (OpCensus::Flags())
-				NoteOp(OpCensus::Op::GenerateMips, *record, nullptr, a_view);
-			NoteRaw(OpCensus::Op::GenerateMips, *record);
+			// A compute mip chain.
 			if (shape.mips < 2 || shape.aspects != VK_IMAGE_ASPECT_COLOR_BIT)
 				return;
-			g_device->immediate.Run("generate mips " + record->name, mipCommands, { record }, { record.get() });
+			bool routed = false;
+			if (GenerateMipsRhi(record, routed))
+				NoteRun(OpCensus::Op::GenerateMips, *record, nullptr, a_view, routed);
 		}
 
 		/** @brief The image subresources a render target, depth-stencil or unordered access view covers. */
@@ -4888,21 +4285,6 @@ namespace RenderGraph::Engine::Native
 			return range;
 		}
 
-		/**
-		 * @brief Clears colour image subresources with Vulkan's command, in GENERAL. An image the graph tracks goes through ORG's external
-		 * client once its layout is the ledgers' (RouteRaw), when a_route allows it. Returns whether it went there.
-		 */
-		bool ClearColor(const std::shared_ptr<NativeResource>& a_record, const VkImageSubresourceRange& a_range, const VkClearColorValue& a_value, bool a_route = false)
-		{
-			const auto commands = [&](const Immediate::Vulkan& a_vk, VkCommandBuffer a_commands) {
-				a_vk.clearColorImage(a_commands, a_record->image.image, VK_IMAGE_LAYOUT_GENERAL, &a_value, 1, &a_range);
-			};
-			if (a_route && RouteRaw("clear " + a_record->name, { { a_record.get(), false, true } }, commands, { a_record }, { a_record.get() }))
-				return true;
-			g_device->immediate.Run("clear " + a_record->name, commands, { a_record }, { a_record.get() });
-			return false;
-		}
-
 		void ContextClearRenderTargetView(ID3D11RenderTargetView* a_view, const FLOAT a_color[4])
 		{
 			const auto record = Resolve(a_view);
@@ -4919,40 +4301,18 @@ namespace RenderGraph::Engine::Native
 			}
 			D3D11_RENDER_TARGET_VIEW_DESC desc{};
 			a_view->GetDesc(&desc);
-			// The BasicRHI route: through the ledgers when the graph tracks the image.
-			if (RhiContext()) {
-				const auto range = ToRhiRange(ViewRange(desc, record->shape, VK_IMAGE_ASPECT_COLOR_BIT));
-				const std::array<float, 4> color{ a_color[0], a_color[1], a_color[2], a_color[3] };
-				const std::array uses{ ClearUse(*record, range, false) };
-				bool routed = false;
-				RunOp(
-					"clear " + record->name, uses,
-					[&](rhi::CommandList& a_list, const Immediate::Descriptors& a_descriptors, std::span<const rhi::Resource> a_handles) {
-						ClearImageRhi(a_list, a_descriptors, *record, a_handles[0].GetHandle(), range, color.data(), false, false, false, 0.0f, 0);
-					},
-					{ record }, &routed);
-				NoteRun(OpCensus::Op::ClearRenderTarget, *record, nullptr, a_view, routed);
-				return;
-			}
-			if (::RenderGraph::NativeGraphMovesImages() && LedgerResourceOf(*record)) {
-				VkClearColorValue value{};
-				std::memcpy(value.float32, a_color, sizeof(value.float32));
-				if (ClearColor(record, ViewRange(desc, record->shape, VK_IMAGE_ASPECT_COLOR_BIT), value, true)) {
-					NoteRouted(OpCensus::Op::ClearRenderTarget, *record, OpCensus::Route::ExternalWork);
-					return;
-				}
-				// Not submitted: cleared on the context's own path above, counted here.
-				if (OpCensus::Flags())
-					NoteOp(OpCensus::Op::ClearRenderTarget, *record, nullptr, a_view);
-				NoteRaw(OpCensus::Op::ClearRenderTarget, *record);
-				return;
-			}
-			if (OpCensus::Flags())
-				NoteOp(OpCensus::Op::ClearRenderTarget, *record, nullptr, a_view);
-			NoteRaw(OpCensus::Op::ClearRenderTarget, *record);
-			VkClearColorValue value{};
-			std::memcpy(value.float32, a_color, sizeof(value.float32));
-			ClearColor(record, ViewRange(desc, record->shape, VK_IMAGE_ASPECT_COLOR_BIT), value);
+			// Through the ledgers when the graph tracks the image.
+			const auto range = ToRhiRange(ViewRange(desc, record->shape, VK_IMAGE_ASPECT_COLOR_BIT));
+			const std::array<float, 4> color{ a_color[0], a_color[1], a_color[2], a_color[3] };
+			const std::array uses{ ClearUse(*record, range, false) };
+			bool routed = false;
+			RunOp(
+				"clear " + record->name, uses,
+				[&](rhi::CommandList& a_list, const Immediate::Descriptors& a_descriptors, std::span<const rhi::Resource> a_handles) {
+					ClearImageRhi(a_list, a_descriptors, *record, a_handles[0].GetHandle(), range, color.data(), false, false, false, 0.0f, 0);
+				},
+				{ record }, &routed);
+			NoteRun(OpCensus::Op::ClearRenderTarget, *record, nullptr, a_view, routed);
 		}
 
 		/** @brief A buffer UAV's byte range: its elements times their size (structured stride, 4 for raw, the format's for typed). */
@@ -4973,11 +4333,8 @@ namespace RenderGraph::Engine::Native
 			return a_size != 0;
 		}
 
-		/**
-		 * @brief A UAV clear: an image's subresources with a_value, or a buffer's range filled with a_word (vkCmdFillBuffer's one word).
-		 * With RhiContext() it is a UAV clear of the view's subresources or range, with a_value's four words (a_float: as floats).
-		 */
-		void ClearUnorderedAccess(ID3D11UnorderedAccessView* a_view, const VkClearColorValue& a_value, uint32_t a_word, const char* a_operation, bool a_float)
+		/** @brief A UAV clear of the view's subresources or buffer range, with a_value's four words (a_float: as floats). */
+		void ClearUnorderedAccess(ID3D11UnorderedAccessView* a_view, const VkClearColorValue& a_value, const char* a_operation, bool a_float)
 		{
 			const auto record = Resolve(a_view);
 			if (!record) {
@@ -4988,49 +4345,22 @@ namespace RenderGraph::Engine::Native
 			const auto op = a_float ? OpCensus::Op::ClearUavFloat : OpCensus::Op::ClearUavUint;
 			D3D11_UNORDERED_ACCESS_VIEW_DESC desc{};
 			a_view->GetDesc(&desc);
-			// The BasicRHI route: a UAV clear of the view's subresources or range, through the ledgers when the graph tracks the image.
-			if (RhiContext()) {
-				rhi::TextureSubresourceRange range{};
-				VkDeviceSize offset = 0, size = 0;
-				if (record->kind == NativeResource::Kind::Image)
-					range = ToRhiRange(ViewRange(desc, record->shape, VK_IMAGE_ASPECT_COLOR_BIT));
-				else if (record->kind != NativeResource::Kind::Buffer || !UavBytes(*record, desc, offset, size))
-					return;
-				const std::array uses{ UnorderedUse(*record, range) };
-				bool routed = false;
-				RunOp(
-					std::string(a_float ? "clear (float) " : "clear (uint) ") + record->name, uses,
-					[&](rhi::CommandList& a_list, const Immediate::Descriptors& a_descriptors, std::span<const rhi::Resource> a_handles) {
-						ClearUnorderedRhi(a_list, a_descriptors, *record, a_handles[0], range, offset, size, a_value.uint32, a_float ? a_value.float32 : nullptr);
-					},
-					{ record }, &routed);
-				NoteRun(op, *record, nullptr, a_view, routed);
-				return;
-			}
-			if (::RenderGraph::NativeGraphMovesImages() && record->kind == NativeResource::Kind::Image && LedgerResourceOf(*record)) {
-				const bool routed = ClearColor(record, ViewRange(desc, record->shape, VK_IMAGE_ASPECT_COLOR_BIT), a_value, true);
-				if (routed) {
-					NoteRouted(op, *record, OpCensus::Route::ExternalWork);
-				} else {
-					if (OpCensus::Flags())
-						NoteOp(op, *record, nullptr, a_view);
-					NoteRaw(op, *record);
-				}
-				return;
-			}
-			if (OpCensus::Flags())
-				NoteOp(op, *record, nullptr, a_view);
-			NoteRaw(op, *record);
-			if (record->kind == NativeResource::Kind::Image) {
-				ClearColor(record, ViewRange(desc, record->shape, VK_IMAGE_ASPECT_COLOR_BIT), a_value);
-				return;
-			}
+			// Through the ledgers when the graph tracks the image.
+			rhi::TextureSubresourceRange range{};
 			VkDeviceSize offset = 0, size = 0;
-			if (record->kind != NativeResource::Kind::Buffer || !UavBytes(*record, desc, offset, size))
+			if (record->kind == NativeResource::Kind::Image)
+				range = ToRhiRange(ViewRange(desc, record->shape, VK_IMAGE_ASPECT_COLOR_BIT));
+			else if (record->kind != NativeResource::Kind::Buffer || !UavBytes(*record, desc, offset, size))
 				return;
-			g_device->immediate.Run("fill " + record->name,
-				[&](const Immediate::Vulkan& a_vk, VkCommandBuffer a_commands) { a_vk.fillBuffer(a_commands, record->vkBuffer, offset, size, a_word); },
-				{ record }, { record.get() });
+			const std::array uses{ UnorderedUse(*record, range) };
+			bool routed = false;
+			RunOp(
+				std::string(a_float ? "clear (float) " : "clear (uint) ") + record->name, uses,
+				[&](rhi::CommandList& a_list, const Immediate::Descriptors& a_descriptors, std::span<const rhi::Resource> a_handles) {
+					ClearUnorderedRhi(a_list, a_descriptors, *record, a_handles[0], range, offset, size, a_value.uint32, a_float ? a_value.float32 : nullptr);
+				},
+				{ record }, &routed);
+			NoteRun(op, *record, nullptr, a_view, routed);
 		}
 
 		void ContextClearUnorderedAccessViewUint(ID3D11UnorderedAccessView* a_view, const UINT a_values[4])
@@ -5039,7 +4369,7 @@ namespace RenderGraph::Engine::Native
 				return;
 			VkClearColorValue value{};
 			std::memcpy(value.uint32, a_values, sizeof(value.uint32));
-			ClearUnorderedAccess(a_view, value, a_values[0], "ClearUnorderedAccessViewUint", false);
+			ClearUnorderedAccess(a_view, value, "ClearUnorderedAccessViewUint", false);
 		}
 
 		void ContextClearUnorderedAccessViewFloat(ID3D11UnorderedAccessView* a_view, const FLOAT a_values[4])
@@ -5048,9 +4378,7 @@ namespace RenderGraph::Engine::Native
 				return;
 			VkClearColorValue value{};
 			std::memcpy(value.float32, a_values, sizeof(value.float32));
-			uint32_t word = 0;
-			std::memcpy(&word, &a_values[0], sizeof(word));
-			ClearUnorderedAccess(a_view, value, word, "ClearUnorderedAccessViewFloat", true);
+			ClearUnorderedAccess(a_view, value, "ClearUnorderedAccessViewFloat", true);
 		}
 
 		void ContextClearDepthStencilView(ID3D11DepthStencilView* a_view, UINT a_flags, FLOAT a_depth, UINT8 a_stencil)
@@ -5077,34 +4405,18 @@ namespace RenderGraph::Engine::Native
 			D3D11_DEPTH_STENCIL_VIEW_DESC desc{};
 			a_view->GetDesc(&desc);
 			const VkImageSubresourceRange range = ViewRange(desc, record->shape, aspects);
-			// The BasicRHI route: through the ledgers when the graph tracks the image.
-			if (RhiContext()) {
-				const auto rhiRange = ToRhiRange(range);
-				const bool depth = (aspects & VK_IMAGE_ASPECT_DEPTH_BIT) != 0, stencil = (aspects & VK_IMAGE_ASPECT_STENCIL_BIT) != 0;
-				const std::array uses{ ClearUse(*record, rhiRange, true) };
-				bool routed = false;
-				RunOp(
-					"clear depth " + record->name, uses,
-					[&](rhi::CommandList& a_list, const Immediate::Descriptors& a_descriptors, std::span<const rhi::Resource> a_handles) {
-						ClearImageRhi(a_list, a_descriptors, *record, a_handles[0].GetHandle(), rhiRange, nullptr, true, depth, stencil, a_depth, a_stencil);
-					},
-					{ record }, &routed);
-				NoteRun(OpCensus::Op::ClearDepthStencil, *record, nullptr, a_view, routed);
-				return;
-			}
-			const VkClearDepthStencilValue value{ a_depth, a_stencil };
-			const auto depthCommands = [&](const Immediate::Vulkan& a_vk, VkCommandBuffer a_commands) {
-				a_vk.clearDepthStencilImage(a_commands, record->image.image, VK_IMAGE_LAYOUT_GENERAL, &value, 1, &range);
-			};
-			// An image the graph tracks, once its layout is the ledgers': through ORG's external client.
-			if (RouteRaw("clear depth " + record->name, { { record.get(), false, true } }, depthCommands, { record }, { record.get() })) {
-				NoteRouted(OpCensus::Op::ClearDepthStencil, *record, OpCensus::Route::ExternalWork);
-				return;
-			}
-			if (OpCensus::Flags())
-				NoteOp(OpCensus::Op::ClearDepthStencil, *record, nullptr, a_view);
-			NoteRaw(OpCensus::Op::ClearDepthStencil, *record);
-			g_device->immediate.Run("clear depth " + record->name, depthCommands, { record }, { record.get() });
+			// Through the ledgers when the graph tracks the image.
+			const auto rhiRange = ToRhiRange(range);
+			const bool depth = (aspects & VK_IMAGE_ASPECT_DEPTH_BIT) != 0, stencil = (aspects & VK_IMAGE_ASPECT_STENCIL_BIT) != 0;
+			const std::array uses{ ClearUse(*record, rhiRange, true) };
+			bool routed = false;
+			RunOp(
+				"clear depth " + record->name, uses,
+				[&](rhi::CommandList& a_list, const Immediate::Descriptors& a_descriptors, std::span<const rhi::Resource> a_handles) {
+					ClearImageRhi(a_list, a_descriptors, *record, a_handles[0].GetHandle(), rhiRange, nullptr, true, depth, stencil, a_depth, a_stencil);
+				},
+				{ record }, &routed);
+			NoteRun(OpCensus::Op::ClearDepthStencil, *record, nullptr, a_view, routed);
 		}
 
 		/**
@@ -5254,8 +4566,7 @@ namespace RenderGraph::Engine::Native
 		if (!g_device)
 			return;
 		g_device->OnGraphReady();
-		if (RhiContext())
-			g_device->LoadMipPrograms();
+		g_device->LoadMipPrograms();
 	}
 
 	bool OwnedResources()
@@ -5425,12 +4736,10 @@ namespace RenderGraph::Engine::Native
 			if (!state->external.Init(state->Rhi()))
 				Fail("the native device", "the external commands' command pool, timeline or Vulkan entry points could not be made");
 		}
-		if (!state->oneShot.Init(state->Rhi()))
-			Fail("the native device", "its command lists or timeline for resource creation could not be made");
 		if (!state->commands.Init(state->Rhi()))
 			Fail("the native device", "the command lists or timeline for commands outside the graph could not be made");
 		if (!state->immediate.Init(state->Rhi()))
-			Fail("the native device", "the context's command lists, timeline or Vulkan entry points could not be made");
+			Fail("the native device", "the context's command lists, timeline or descriptor heaps could not be made");
 
 		// The swap chain on the game's window. Native mode never takes exclusive fullscreen.
 		state->window = a_desc->OutputWindow;
@@ -5624,9 +4933,9 @@ namespace RenderGraph::Engine::Native
 			LogOnce(loggedInitialize, request.name, "the image to wrap could not be moved into GENERAL or given its contents");
 			return nullptr;
 		}
-		// vkCmdClearColorImage cannot write a block-compressed image (DynamicCubemaps' BC6H cubemaps): those are left as made, which
-		// their owners write before reading.
-		if (!a_data && !record->shape.blocks && RhiContext()) {
+		// A block-compressed image cannot be cleared (DynamicCubemaps' BC6H cubemaps): those are left as made, which their owners
+		// write before reading.
+		if (!a_data && !record->shape.blocks) {
 			// Zeroed through whatever view its bind flags allow; an image with none of them is left as made, as above.
 			const bool renderTarget = (request.bindFlags & D3D11_BIND_RENDER_TARGET) != 0;
 			const bool depthStencil = (request.bindFlags & D3D11_BIND_DEPTH_STENCIL) != 0;
@@ -5649,19 +4958,6 @@ namespace RenderGraph::Engine::Native
 					},
 					{ record });
 			}
-		} else if (!a_data && !record->shape.blocks) {
-			const VkImageSubresourceRange all{ record->shape.aspects, 0, request.mipLevels, 0, layers };
-			g_device->immediate.Run("zero " + record->name,
-				[&](const Immediate::Vulkan& a_vk, VkCommandBuffer a_commands) {
-					if (record->shape.aspects == VK_IMAGE_ASPECT_COLOR_BIT) {
-						const VkClearColorValue zero{};
-						a_vk.clearColorImage(a_commands, record->image.image, VK_IMAGE_LAYOUT_GENERAL, &zero, 1, &all);
-					} else {
-						const VkClearDepthStencilValue zero{};
-						a_vk.clearDepthStencilImage(a_commands, record->image.image, VK_IMAGE_LAYOUT_GENERAL, &zero, 1, &all);
-					}
-				},
-				{ record }, { record.get() });
 		}
 		a_info = {};
 		a_info.version = DXVK_ORG_INTEROP_VERSION;
