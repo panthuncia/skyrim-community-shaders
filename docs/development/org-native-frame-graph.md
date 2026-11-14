@@ -1388,3 +1388,35 @@ queue submissions 1.2 ms, handoff 0.7, admission 0.7, commit 0.5, upload lists a
 not reduce this while gated passes record at execution and admission grows with the graph: a merged graph pays for every
 pass that did not run. Gating on the GPU (indirect counts from latches, recorded once) would let gated passes leave the
 at-execution class.
+
+## Submission census and cheap fixes (2026-11-14, `org-native/phases`)
+
+**Census.** With `CS_ORG_EPOCH_STATS=1` the statistics report adds ORG's submission census (`org::diagnostics::Census`,
+`SubmissionCensus.h`): command lists a frame by kind, queue submissions by kind and why each is apart from the one before it,
+open admissions by how they found their plan, handoff cache misses, and the sequencer's hold and waits.
+
+**What it found** (perf-taa, native Vulkan, 52 executions a frame, before the fixes):
+- Lists begun a frame: 156 upload lists (52 graphics, 104 queue-scoped), of which 152 recorded nothing; 43 handoff lists (25
+  more reused); 24 inline. The 57 batch lists are kept recordings and are not begun again.
+- Queue submissions: 54 batch submissions, 2 upload, 1 queue-scoped upload. No release or home-acquire submissions in this
+  scene. 48 of the batch submissions follow an earlier ticket's on the same queue, and the one before already waited for
+  everything they wait for. Only holding a ticket back could merge them (the submission thread's job).
+- 22 admissions a frame missed their prediction because the entry states differed. Most alternate between frames.
+- `vkQueueSubmit` is 20 us a call; the rest of `Queue::Submit`, lock included, about 2 us. The sequencer and
+  `timelinesMutex` show no contention.
+
+**What changed.**
+- A ticket without pending uploads begins, records and closes no upload list (`IUploadService::HasPendingUploads`). The
+  host's thread no longer begins them ahead. 6 upload lists a frame instead of 156.
+- A prediction slot keeps its last three plans besides the current one. 16 of the 22 misses now find an earlier plan.
+- The handoff cache keeps four plans' lists per frame slot. 13 handoff lists recorded a frame instead of 43.
+
+| perf-taa, Tracy | Before (`66285f8ca`) | Upload lists | Plans and handoffs |
+|---|---|---|---|
+| Render thread `SubmitTicket` ms a frame | 6.13 | 5.85 | 5.30 |
+| Lists begun a frame | 223 | 73 | 43 |
+| Queue submissions a frame | 57 | 57 | 57 |
+
+What is left on the render thread (5.3 ms): queue submissions 1.4 (58 calls), at-execution recording 1.4, commit inputs 0.5,
+admission 0.5, `ORG.Persistent.Commit` 0.35, the revision check (`CheckTicket`) 0.3, handoff 0.23. The submission count and
+the at-execution recording need the submission thread and segment lists.
