@@ -19,8 +19,8 @@
  * explicit-target Render, 100951 / 107733), and the screen-space reflection pass (the mask downsample, the ray march, and its
  * separable compute blur), the end-of-frame chain's depth of field or distant blur (with its compute blur), refraction and radial
  * blur, the snow pass's ISCopySubRegionCS and Main::RenderWaterEffects' flow copies (each queued texture read by its heap index
- * from the latch). The tonemap draw stays with D3D11 (Effects11, Post Processing and HDR Display own it), as does every effect
- * outside the list (the volumetric lighting's apply and blurs: Volumetric Lighting's port).
+ * from the latch). The tonemap draw is taken too (5.5.4: ISHDR's BLEND build, the plain and the fade form) when the engine makes it,
+ * that is when Effects11 does not replace the HDR effect. The volumetric lighting's apply and blurs are Volumetric Lighting's port.
  *
  * The compute form: inside a scope, BSImagespaceShader::DispatchComputeShader (100952 / 107734) names the effect, and its
  * DispatchCSShader (75532 / 77329) is withheld and latched: the shadow state's compute slots name the input and output targets
