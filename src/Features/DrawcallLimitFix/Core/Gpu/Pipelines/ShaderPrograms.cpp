@@ -568,9 +568,12 @@ namespace DCLF
 				request.defines.push_back({ L"DCLF_PULLED_ROWS", L"1" });
 			// D3D12: such a build also reads the pass's bindings itself (DxilStages::PrepareFrameSource rewrites it before it compiles). The
 			// other builds keep their registers: the unpulled ones are only reflected there (no D3D12 pipeline has their layout). A pulled
-			// Utility build (the shadow views' and the occlusion maps') reads its blocks through the view's push words (kShadowPush*).
+			// Utility build (the shadow views' and the occlusion maps') reads its blocks through the view's push words (kShadowPush*). A draw
+			// family's builds (DistantTree, RunGrass: always pulled) read their rows themselves and the rest through the frame record, as the
+			// Z-prepass's do: the family layout is zLayout, which has no ranges on D3D12.
 			const bool utility = a_sourceName == kUtilitySourcePath;
-			if (a_pulled && (a_sourceName == kSourcePath || a_family || utility) && !::RenderGraph::ShaderTarget::IsSpirv()) {
+			const bool drawFamily = Extensions::DrawFamilyOfShader(static_cast<std::uint8_t>(a_lighting.shaderType.get())) != Api::DrawFamily::Count;
+			if (a_pulled && (a_sourceName == kSourcePath || a_family || utility || drawFamily) && !::RenderGraph::ShaderTarget::IsSpirv()) {
 				request.defines.push_back({ DxilStages::kFrameDefine, L"1" });
 				if (utility)
 					request.defines.push_back({ DxilStages::kShadowFrameDefine, L"1" });
