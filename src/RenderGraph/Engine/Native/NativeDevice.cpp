@@ -1975,8 +1975,10 @@ namespace RenderGraph::Engine::Native
 			 */
 			bool MakeGraphBackBuffer()
 			{
-				// One version per present slot, as BasicRenderer's presentation colours.
-				const uint32_t count = kPresentSlots;
+				// One version. The present's copy runs on the graphics queue through the ledger, so the next frame's first write
+				// waits for it by a barrier. More versions rotated every frame, and each rotation made every ticket prepared ahead
+				// stale and every kept recording unusable (NoteNewVersions).
+				const uint32_t count = 1;
 				DropGraphBackBuffer();
 				if (!backBufferRecord || !RenderGraphRuntime::Get().IsActive())
 					return false;

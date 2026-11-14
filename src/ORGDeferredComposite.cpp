@@ -155,15 +155,16 @@ namespace
 
 	struct CompositeFrame
 	{
-		std::shared_ptr<const Execution> execution;
+		std::shared_ptr<const Execution> execution;  // null when the pass records at execution: Record reads shared's then
+		std::shared_ptr<const Shared> shared;
 		bool reflectance = false, depth = false;
 	};
 
 	class CompositePass final : public org::TypedRenderGraphPass<CompositePass, CompositeFrame, CompositeBindings>
 	{
 	public:
-		explicit CompositePass(std::shared_ptr<Shared> a_shared) :
-			shared(std::move(a_shared)) {}
+		CompositePass(std::shared_ptr<Shared> a_shared, bool a_atExecution) :
+			shared(std::move(a_shared)), atExecution(a_atExecution) {}
 
 		CompositeBindings Declare(org::PassBuilder& a_builder)
 		{
@@ -199,26 +200,33 @@ namespace
 			return bindings;
 		}
 
-		// The recorded dispatch depends on the execution only: the shared constants are uploaded each run.
+		// The recorded dispatch depends on the execution only: the shared constants are uploaded each run. Recorded at execution, it
+		// reads the execution the commit chose when it records, so the execution is not part of it: the normals target alternates
+		// every frame, and a ticket prepared ahead would be prepared again each time.
 		void Revision(std::vector<std::uint64_t>& a_out) const
 		{
+			if (atExecution)
+				return;
 			const auto execution = shared->execution.load(std::memory_order_acquire);
 			a_out.push_back(execution ? execution->serial : 0);
 		}
 
 		CompositeFrame Prepare(const CompositeBindings&, const org::PassPrepareContext&) const
 		{
-			return { shared->execution.load(std::memory_order_acquire), static_cast<bool>(shared->targets.reflectance),
+			return { atExecution ? nullptr : shared->execution.load(std::memory_order_acquire), shared, static_cast<bool>(shared->targets.reflectance),
 				static_cast<bool>(shared->targets.depth) };
 		}
 
 		static void Record(const CompositeBindings& a_bindings, const CompositeFrame& a_frame, org::PassRecordContext& a_recording)
 		{
-			const auto* execution = a_frame.execution.get();
+			const auto executionRef = a_frame.execution ? a_frame.execution :
+			                          a_frame.shared    ? a_frame.shared->execution.load(std::memory_order_acquire) :
+			                                              nullptr;
+			const auto* execution = executionRef.get();
 			if (!execution || !execution->program)
 				return;
 			// The descriptors it names live as long as any submission of this recording.
-			a_recording.Retain(a_frame.execution);
+			a_recording.Retain(executionRef);
 			const Handle null = execution->null;
 			// Each input's index comes from the view its declaration returned (kViewSlots order).
 			std::array<Handle, kViewSlots.size()> inputs{};
@@ -251,6 +259,7 @@ namespace
 
 	private:
 		std::shared_ptr<Shared> shared;
+		bool atExecution = false;  // FrameAnchors::RecordsAtExecution at the build
 	};
 
 	/** @brief Deferred::CompositeDefines as the program takes them; ComputeProgram adds the common ones, as Util::CompileShader does. */
@@ -371,7 +380,12 @@ struct ORGDeferredComposite::Impl
 			.passes = { { .name = "cs.deferred.composite",
 				.anchor = FrameAnchors::Anchor::DeferredComposite,
 				.order = 0,
-				.make = [next] { return std::static_pointer_cast<org::RenderPass>(std::make_shared<CompositePass>(next)); } } },
+				.make = [next] {
+					return std::static_pointer_cast<org::RenderPass>(
+						std::make_shared<CompositePass>(next, FrameAnchors::RecordsAtExecution(FrameAnchors::Anchor::DeferredComposite)));
+				},
+				// Its execution is chosen by the commit: recorded then, the pass reads it without a ticket prepared again.
+				.atExecution = true } },
 			.commit = [this](const FrameAnchors::Point&) { Commit(); },
 			.active = [this] { return frameReady; },
 			.onFailed = [this] {

@@ -435,15 +435,16 @@ namespace RenderGraph::Engine::Scaleform::Passes
 		 *
 		 * Each draw reads its vertex count from its command's entry of the client's run gate, which the anchors close at the start of
 		 * every run and only this client's commit opens: a run without that commit (a frame left in a slot by a run that failed, a run
-		 * kept by another client) draws nothing. The pass has no Revision, so ORG never keeps its recording: it is recorded at every
+		 * kept by another client) draws nothing. Its Revision is FrameAnchors::CommitReadRevision: it is recorded at every
 		 * run from the frame of that run, which names the display's pipelines, and its push blocks are that run's.
 		 */
 		class DisplayPass final : public org::TypedRenderGraphPass<DisplayPass, PassFrame, PassBindings>
 		{
 		public:
 			DisplayPass(std::shared_ptr<const Surface> a_surface, std::shared_ptr<const Slots> a_slots, std::shared_ptr<const RunGate> a_gate, bool a_withDepth,
-				std::shared_ptr<const Reads> a_reads) :
-				surface(std::move(a_surface)), slots(std::move(a_slots)), gate(std::move(a_gate)), withDepth(a_withDepth), reads(std::move(a_reads)) {}
+				std::shared_ptr<const Reads> a_reads, bool a_atExecution) :
+				surface(std::move(a_surface)), slots(std::move(a_slots)), gate(std::move(a_gate)), withDepth(a_withDepth), reads(std::move(a_reads)),
+				atExecution(a_atExecution) {}
 
 			PassBindings Declare(org::PassBuilder& a_builder)
 			{
@@ -460,6 +461,8 @@ namespace RenderGraph::Engine::Scaleform::Passes
 							bindings.reads.emplace_back(read.Key(), a_builder.ShaderResource(read).View());
 				return bindings;
 			}
+
+			void Revision(std::vector<std::uint64_t>& a_out) const { FrameAnchors::CommitReadRevision(atExecution, a_out); }
 
 			PassFrame Prepare(const PassBindings&, const org::PassPrepareContext&) const { return { slots, gate }; }
 
@@ -561,6 +564,7 @@ namespace RenderGraph::Engine::Scaleform::Passes
 			std::shared_ptr<const RunGate> gate;
 			bool withDepth = false;
 			std::shared_ptr<const Reads> reads;
+			bool atExecution = false;  // FrameAnchors::RecordsAtExecution at the build
 		};
 
 		/**
@@ -777,7 +781,11 @@ namespace RenderGraph::Engine::Scaleform::Passes
 						.anchor = Anchor::Interface,
 						.order = a_order,
 						.kind = FrameAnchors::PassKind::Render,
-						.make = [surface, a_slots, gate, a_withDepth, reads] { return std::make_shared<DisplayPass>(surface, a_slots, gate, a_withDepth, reads); } });
+						.make = [surface, a_slots, gate, a_withDepth, reads] {
+							return std::make_shared<DisplayPass>(surface, a_slots, gate, a_withDepth, reads, FrameAnchors::RecordsAtExecution(Anchor::Interface));
+						},
+						// It reads the run's slot, which the commit stores: recorded then, without a ticket prepared again.
+						.atExecution = true });
 				};
 				add(surface->colourSlots, false, "", 100 + 2 * static_cast<std::int32_t>(i));
 				if (surface->depthSlots)

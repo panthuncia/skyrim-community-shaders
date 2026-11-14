@@ -519,8 +519,8 @@ namespace ImGuiBasicRHI
 		class UploadPass final : public org::TypedRenderGraphPass<UploadPass, PassFrame, UploadBindings>
 		{
 		public:
-			UploadPass(std::shared_ptr<const Shared> a_shared, std::shared_ptr<const Atlas> a_atlas) :
-				shared(std::move(a_shared)), atlas(std::move(a_atlas)) {}
+			UploadPass(std::shared_ptr<const Shared> a_shared, std::shared_ptr<const Atlas> a_atlas, bool a_atExecution) :
+				shared(std::move(a_shared)), atlas(std::move(a_atlas)), atExecution(a_atExecution) {}
 
 			UploadBindings Declare(org::PassBuilder& a_builder)
 			{
@@ -530,6 +530,9 @@ namespace ImGuiBasicRHI
 					bindings.pages.push_back(a_builder.CopyDestination(*page).Resource());
 				return bindings;
 			}
+
+			// Record reads the run's slot, which the commit stores (FrameAnchors::CommitReadRevision).
+			void Revision(std::vector<std::uint64_t>& a_out) const { FrameAnchors::CommitReadRevision(atExecution, a_out); }
 
 			PassFrame Prepare(const UploadBindings&, const org::PassPrepareContext&) const { return { shared->uploadSlots }; }
 
@@ -582,6 +585,7 @@ namespace ImGuiBasicRHI
 		private:
 			std::shared_ptr<const Shared> shared;
 			std::shared_ptr<const Atlas> atlas;
+			bool atExecution = false;
 		};
 
 		struct DrawBindings
@@ -599,8 +603,8 @@ namespace ImGuiBasicRHI
 		class OverlayPass final : public org::TypedRenderGraphPass<OverlayPass, PassFrame, DrawBindings>
 		{
 		public:
-			OverlayPass(FrameAnchors::Texture a_target, std::shared_ptr<const Shared> a_shared, std::shared_ptr<const Atlas> a_atlas) :
-				target(std::move(a_target)), shared(std::move(a_shared)), atlas(std::move(a_atlas)) {}
+			OverlayPass(FrameAnchors::Texture a_target, std::shared_ptr<const Shared> a_shared, std::shared_ptr<const Atlas> a_atlas, bool a_atExecution) :
+				target(std::move(a_target)), shared(std::move(a_shared)), atlas(std::move(a_atlas)), atExecution(a_atExecution) {}
 
 			DrawBindings Declare(org::PassBuilder& a_builder)
 			{
@@ -609,6 +613,9 @@ namespace ImGuiBasicRHI
 					bindings.pages.push_back(a_builder.ShaderResource(*page).View());
 				return bindings;
 			}
+
+			// Record reads the run's slot, which the commit stores (FrameAnchors::CommitReadRevision).
+			void Revision(std::vector<std::uint64_t>& a_out) const { FrameAnchors::CommitReadRevision(atExecution, a_out); }
 
 			PassFrame Prepare(const DrawBindings&, const org::PassPrepareContext&) const { return { shared->drawSlots }; }
 
@@ -675,6 +682,7 @@ namespace ImGuiBasicRHI
 			FrameAnchors::Texture target;
 			std::shared_ptr<const Shared> shared;
 			std::shared_ptr<const Atlas> atlas;
+			bool atExecution = false;
 		};
 	}
 
@@ -922,7 +930,7 @@ namespace ImGuiBasicRHI
 		auto& state = Backend();
 		if (!a_target || !RenderGraphRuntime::Get().Host() || !EnsureAtlas(state))
 			return nullptr;
-		return std::make_shared<OverlayPass>(std::move(a_target), state.shared, state.shared->atlas);
+		return std::make_shared<OverlayPass>(std::move(a_target), state.shared, state.shared->atlas, FrameAnchors::RecordsAtExecution(FrameAnchors::Anchor::Overlay));
 	}
 
 	std::shared_ptr<org::RenderPass> MakeUploadPass()
@@ -930,7 +938,7 @@ namespace ImGuiBasicRHI
 		auto& state = Backend();
 		if (!RenderGraphRuntime::Get().Host() || !EnsureAtlas(state))
 			return nullptr;
-		return std::make_shared<UploadPass>(state.shared, state.shared->atlas);
+		return std::make_shared<UploadPass>(state.shared, state.shared->atlas, FrameAnchors::RecordsAtExecution(FrameAnchors::Anchor::Overlay));
 	}
 }
 

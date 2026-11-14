@@ -1385,6 +1385,11 @@ namespace FrameAnchors
 		return IndexOf(a_anchor) < kAnchors && state.frozen && state.reserved[IndexOf(a_anchor)] && state.host && RenderGraphRuntime::Get().IsActive();
 	}
 
+	bool RecordsAtExecution(Anchor a_anchor)
+	{
+		return HasEpoch(a_anchor) && RenderGraphRuntime::Get().RecordsAtExecution(EpochOfAnchor(a_anchor));
+	}
+
 	bool Register(ClientDesc a_client)
 	{
 		auto lock = Guard();
@@ -1771,6 +1776,13 @@ namespace FrameAnchors
 		 * pass the execution's runs opened (the region's graph runs anchors in frame order, each one's passes by order key), and no
 		 * latch region or gate entry may be written twice.
 		 */
+		/** @brief A lasting copy of a_text, for RegionStats' causes (which keep pointers). Render owner. */
+		const char* Interned(std::string a_text)
+		{
+			static std::set<std::string> texts;
+			return texts.insert(std::move(a_text)).first->c_str();
+		}
+
 		const char* JoinRefusal(const Held& a_held, std::uint32_t a_index, const std::vector<RunClient>& a_clients, bool a_sharedConstants)
 		{
 			const bool repeat = (a_held.anchors >> a_index & 1u) != 0;
@@ -1792,7 +1804,7 @@ namespace FrameAnchors
 				if (repeat && !before)
 					return "an anchor run again with other clients";
 				if (before && !(client.desc->joins && client.desc->joins()))
-					return "a client's second commit";
+					return Interned(fmt::format("a client's second commit ({} at {})", client.desc->id, kInfo[a_index].name));
 			}
 			if (a_sharedConstants && a_held.sharedConstants && !SharedConstants::CommittedMatches())
 				return "the shared constants changed";
@@ -1987,7 +1999,7 @@ namespace FrameAnchors
 		std::uint64_t built = 0;
 		RenderGraphRuntime::EpochResult result = RenderGraphRuntime::EpochResult::Stopped;
 		// A region's held execution goes first: its runs came before this one (ExecuteEpoch would submit it too; here it is counted as this).
-		FlushRegions("an anchor with its own epoch", static_cast<std::uint32_t>(segment));
+		FlushRegions(Interned(fmt::format("an anchor with its own epoch ({})", kInfo[index].name)), static_cast<std::uint32_t>(segment));
 		{
 			RenderGraphRuntime::EpochBodyScope body(segment);
 			result = runtime.TryExecuteEpoch(segment, [&](org::RenderGraph&) {
@@ -2420,6 +2432,7 @@ namespace FrameAnchors
 	const char* Name(Anchor) { return "unknown"; }
 	bool Reserve(Anchor) { return false; }
 	bool HasEpoch(Anchor) { return false; }
+	bool RecordsAtExecution(Anchor) { return false; }
 	bool Register(ClientDesc) { return false; }
 	void Unregister(std::string_view) {}
 	void Refresh(std::string_view) {}

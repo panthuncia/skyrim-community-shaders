@@ -94,9 +94,10 @@ namespace
 		std::mutex mutex;
 		std::vector<std::pair<std::shared_ptr<Request>, org::ReadbackCaptureResult>> done;  // guarded: finished readbacks
 		std::shared_ptr<org::runtime::IReadbackService> service;
-		// Render thread: what the next build's pass copies, and for which capture (builds run on the render thread).
+		// Render thread: what the pass copies (a change rebuilds the client). The capture armed at this capture point, which the pass's
+		// preparation reads (any thread that prepares the run).
 		FrameAnchors::Texture source;
-		std::shared_ptr<Request> armed;
+		std::atomic<std::shared_ptr<Request>> armed;
 	};
 
 	struct CaptureFrame
@@ -106,16 +107,16 @@ namespace
 	};
 
 	/**
-	 * @brief The source's first subresource into a readback buffer, for the one capture it was built for. A readback plan
-	 * cannot be part of a kept recording, so the pass has no revision and is prepared for each ticket; AnchorPasses' copy
-	 * cannot express it.
+	 * @brief The source's first subresource into a readback buffer, for the capture armed when the run is prepared. The pass is in the
+	 * graph for good: a capture needs no build, so its copy is in the epoch submitted at its own capture point. A readback plan cannot
+	 * be part of a kept recording, so the pass has no revision and is prepared for each ticket; AnchorPasses' copy cannot express it.
 	 */
 	class CapturePass final : public org::TypedRenderGraphPass<CapturePass, CaptureFrame>
 	{
 	public:
-		// At the build, on the render thread: the source and the request as they are now.
-		CapturePass(std::shared_ptr<Shared> a_shared, FrameAnchors::Texture a_source, std::shared_ptr<Request> a_request) :
-			shared(std::move(a_shared)), source(std::move(a_source)), request(std::move(a_request)) {}
+		// At the build, on the render thread: the source as it is now.
+		CapturePass(std::shared_ptr<Shared> a_shared, FrameAnchors::Texture a_source) :
+			shared(std::move(a_shared)), source(std::move(a_source)) {}
 
 		void Declare(org::PassBuilder& a_builder)
 		{
@@ -125,6 +126,7 @@ namespace
 
 		CaptureFrame Prepare(const org::PassPrepareContext& a_preparation)
 		{
+			const auto request = shared->armed.load(std::memory_order_acquire);
 			if (!request || request->closed.load(std::memory_order_acquire) || !shared->service)
 				return {};
 			CaptureFrame data{};
@@ -167,7 +169,6 @@ namespace
 		std::shared_ptr<Shared> shared;
 		FrameAnchors::Texture source;
 		org::ResourceBindingToken binding;  // the source's declaration
-		std::shared_ptr<Request> request;
 	};
 
 	FrameAnchors::Texture Import(const ORGScreenshot::Source& a_source)
@@ -224,15 +225,18 @@ bool ORGScreenshot::Setup(std::function<void()> a_onFailed)
 		return false;
 	}
 	RenderGraph::AnchorPasses::Builder builder(FrameAnchors::Anchor::Capture, kClientId, 100);
-	// One-shot: in the graph only from a capture's Rearm until one run with it was submitted.
+	// In the graph for good (a gated pass, not a one-shot): it copies only while a capture is armed.
 	builder.Add("copy", FrameAnchors::PassKind::Copy, [shared]() -> std::shared_ptr<org::RenderPass> {
-		return shared->source ? std::make_shared<CapturePass>(shared, shared->source, shared->armed) : nullptr;
-	}, true);
+		return shared->source ? std::make_shared<CapturePass>(shared, shared->source) : nullptr;
+	});
 	FrameAnchors::ClientDesc client{};
 	client.id = kClientId;
 	client.passes = builder.Take();
-	// No per-run work: the anchor runs the copy only while it is armed.
-	client.active = [] { return false; };
+	// The anchor runs the copy only while a capture is armed.
+	client.active = [weak = std::weak_ptr<Shared>(shared)] {
+		const auto owner = weak.lock();
+		return owner && owner->armed.load(std::memory_order_acquire) != nullptr;
+	};
 	client.onFailed = [] {
 		auto& impl = *Get().impl;
 		logger::error("[ORG] Screenshot: the render graph failed; captures use D3D11 ({} readbacks lost)", impl.outstanding.size());
@@ -265,6 +269,8 @@ bool ORGScreenshot::SetSource(const Source& a_source)
 		return false;
 	if (source != state.shared->source) {
 		state.shared->source = std::move(source);
+		// The pass reads the new source from the client's next build.
+		FrameAnchors::Refresh(kClientId);
 		logger::info("[ORG] Screenshot: the copy now reads {}", a_source.importName ? a_source.importName : "the source");
 	}
 	return true;
@@ -284,14 +290,11 @@ bool ORGScreenshot::Capture(const Source& a_source, OnPixels a_onPixels)
 	request->id = ++state.nextId;
 	request->armedAt = state.points;
 	request->onPixels = std::move(a_onPixels);
-	// The copy pass made again for this request and source: armed when it is not pending, and rebuilt when an earlier capture's
-	// withdrawn copy still is.
-	state.shared->armed = request;
-	FrameAnchors::Rearm(kClientId);
-	FrameAnchors::Refresh(kClientId);
+	// The pass is in the graph already: arming the request is enough for this run's preparation to copy for it.
+	state.shared->armed.store(request, std::memory_order_release);
 	const bool ran = FrameAnchors::Run(FrameAnchors::Anchor::Capture);
 	request->closed.store(true, std::memory_order_release);
-	state.shared->armed.reset();
+	state.shared->armed.store(nullptr, std::memory_order_release);
 	state.ranThisPoint = true;
 	if (!ran || !state.registered) {
 		request->withdrawn.store(true, std::memory_order_release);

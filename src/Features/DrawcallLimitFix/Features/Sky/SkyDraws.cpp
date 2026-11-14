@@ -118,7 +118,7 @@ namespace DCLF::Features::Sky::SkyDraws
 
 		struct Frame
 		{
-			std::shared_ptr<const Run> run;
+			std::shared_ptr<const Run> run;  // null when the pass records at execution: Record reads the client's run then
 			std::shared_ptr<const Client> client;
 			Part part = Part::Main;
 		};
@@ -127,8 +127,8 @@ namespace DCLF::Features::Sky::SkyDraws
 		class SkyPass final : public org::TypedRenderGraphPass<SkyPass, Frame, Bindings>
 		{
 		public:
-			SkyPass(std::shared_ptr<Client> a_client, Part a_part) :
-				client(std::move(a_client)), part(a_part) {}
+			SkyPass(std::shared_ptr<Client> a_client, Part a_part, bool a_atExecution) :
+				client(std::move(a_client)), part(a_part), atExecution(a_atExecution) {}
 
 			Bindings Declare(org::PassBuilder& a_builder)
 			{
@@ -187,20 +187,30 @@ namespace DCLF::Features::Sky::SkyDraws
 
 			// The run's draws (their programs, counts, layers and viewports), its face and its unpublished inputs, as the render thread
 			// published it before the run. The latched values (constants, geometry, textures) are not in it.
+			// Recorded at execution, the pass reads the run its commit published when it records, so the run is not part of it: the
+			// reflection faces and the sun's queries change every run, and a ticket prepared ahead would be prepared again each time.
 			void Revision(std::vector<std::uint64_t>& a_out) const
 			{
-				const auto run = std::atomic_load(&client->run);
 				a_out.push_back(static_cast<std::uint64_t>(part));
-				a_out.push_back(run ? run->revision : 0);
+				if (!atExecution) {
+					const auto run = std::atomic_load(&client->run);
+					a_out.push_back(run ? run->revision : 0);
+				}
 			}
 
-			Frame Prepare(const Bindings&, const org::PassPrepareContext&) const { return { std::atomic_load(&client->run), client, part }; }
+			Frame Prepare(const Bindings&, const org::PassPrepareContext&) const
+			{
+				return { atExecution ? nullptr : std::atomic_load(&client->run), client, part };
+			}
 
 			static void Record(const Bindings& a_bindings, const Frame& a_frame, org::PassRecordContext& a_recording)
 			{
-				if (!a_frame.run || !a_frame.client)
+				if (!a_frame.client)
 					return;
-				const auto& run = *a_frame.run;
+				const auto runRef = a_frame.run ? a_frame.run : std::atomic_load(&a_frame.client->run);
+				if (!runRef)
+					return;
+				const auto& run = *runRef;
 				const auto& c = *a_frame.client;
 				const Part part = a_frame.part;
 				// The sun's parts: only the one of the run's depth target records, and it alone touches the run's queries.
@@ -300,6 +310,7 @@ namespace DCLF::Features::Sky::SkyDraws
 		private:
 			std::shared_ptr<Client> client;
 			Part part;
+			bool atExecution = false;  // FrameAnchors::RecordsAtExecution at the build
 		};
 
 		/** @brief ProgramKey::variant's defines: SKY_ORG_FACES for a face's programs. */
@@ -464,7 +475,11 @@ namespace DCLF::Features::Sky::SkyDraws
 					.anchor = client->anchor,
 					.order = a_order,
 					.kind = FrameAnchors::PassKind::Render,
-					.make = [client, a_part]() -> std::shared_ptr<org::RenderPass> { return std::make_shared<SkyPass>(client, a_part); } });
+					.make = [client, a_part]() -> std::shared_ptr<org::RenderPass> {
+						return std::make_shared<SkyPass>(client, a_part, FrameAnchors::RecordsAtExecution(client->anchor));
+					},
+					// The run's draws are known after its commit: recorded then, the pass reads them without a ticket prepared again.
+					.atExecution = true });
 			};
 			if (a_shape.view == View::Sun) {
 				addPass("occlusion", Part::SunMain, 0);

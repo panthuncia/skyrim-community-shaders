@@ -157,12 +157,15 @@ namespace ImGuiRenderer
 				.anchor = FrameAnchors::Anchor::Overlay,
 				.order = 999,
 				.kind = FrameAnchors::PassKind::Copy,
-				.make = [] { return ImGuiBasicRHI::MakeUploadPass(); } });
+				.make = [] { return ImGuiBasicRHI::MakeUploadPass(); },
+				// It reads the run's slot, which the commit stores: recorded then, without a ticket prepared again.
+				.atExecution = true });
 			client.passes.push_back({ .name = "cs.imgui.draw",
 				.anchor = FrameAnchors::Anchor::Overlay,
 				.order = 1000,
 				.kind = FrameAnchors::PassKind::Render,
-				.make = [] { return ImGuiBasicRHI::MakePass(Renderer().target); } });
+				.make = [] { return ImGuiBasicRHI::MakePass(Renderer().target); },
+				.atExecution = true });
 			client.registerResources = [](org::RenderGraph& a_graph) {
 				auto& state = Renderer();
 				// The anchors register their imports; only a plain resource is this client's to register.

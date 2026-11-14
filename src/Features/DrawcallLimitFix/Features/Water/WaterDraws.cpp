@@ -85,7 +85,7 @@ namespace DCLF::Features::Water::WaterDraws
 
 		struct Frame
 		{
-			std::shared_ptr<const Run> run;
+			std::shared_ptr<const Run> run;  // null when the pass records at execution: Record reads the client's run then
 			std::shared_ptr<const Client> client;
 		};
 
@@ -93,8 +93,8 @@ namespace DCLF::Features::Water::WaterDraws
 		class WaterPass final : public org::TypedRenderGraphPass<WaterPass, Frame, Bindings>
 		{
 		public:
-			explicit WaterPass(std::shared_ptr<Client> a_client) :
-				client(std::move(a_client)) {}
+			WaterPass(std::shared_ptr<Client> a_client, bool a_atExecution) :
+				client(std::move(a_client)), atExecution(a_atExecution) {}
 
 			Bindings Declare(org::PassBuilder& a_builder)
 			{
@@ -115,8 +115,12 @@ namespace DCLF::Features::Water::WaterDraws
 			}
 
 			// The run's draws (their programs, targets, stencil references, counts and viewports) and the headers' indices.
+			// Recorded at execution, the pass reads the run its commit published when it records: the run is not part of it, so a
+			// ticket prepared ahead stays current when the draws change.
 			void Revision(std::vector<std::uint64_t>& a_out) const
 			{
+				if (atExecution)
+					return;
 				const auto run = std::atomic_load(&client->run);
 				a_out.push_back(run ? run->revision : 0);
 			}
@@ -124,14 +128,17 @@ namespace DCLF::Features::Water::WaterDraws
 			Frame Prepare(const Bindings& a_bindings, const org::PassPrepareContext& a_preparation) const
 			{
 				Extensions::CheckDeclaredReads(a_bindings.inputs, a_preparation, client->id);
-				return { std::atomic_load(&client->run), client };
+				return { atExecution ? nullptr : std::atomic_load(&client->run), client };
 			}
 
 			static void Record(const Bindings& a_bindings, const Frame& a_frame, org::PassRecordContext& a_recording)
 			{
-				if (!a_frame.run || !a_frame.client)
+				if (!a_frame.client)
 					return;
-				const auto& run = *a_frame.run;
+				const auto runRef = a_frame.run ? a_frame.run : std::atomic_load(&a_frame.client->run);
+				if (!runRef)
+					return;
+				const auto& run = *runRef;
 				const auto& c = *a_frame.client;
 				const auto shared = SharedConstants::Index(a_recording, a_bindings.shared);
 				const auto& headers = run.headerIndices;
@@ -177,6 +184,7 @@ namespace DCLF::Features::Water::WaterDraws
 
 		private:
 			std::shared_ptr<Client> client;
+			bool atExecution = false;  // FrameAnchors::RecordsAtExecution at the build
 		};
 
 		/**
@@ -290,7 +298,11 @@ namespace DCLF::Features::Water::WaterDraws
 				.anchor = FrameAnchors::Anchor::EngineDraws,
 				.order = a_shape.view == View::Mask ? 0 : 1,
 				.kind = FrameAnchors::PassKind::Render,
-				.make = [client]() -> std::shared_ptr<org::RenderPass> { return std::make_shared<WaterPass>(client); } });
+				.make = [client]() -> std::shared_ptr<org::RenderPass> {
+					return std::make_shared<WaterPass>(client, FrameAnchors::RecordsAtExecution(FrameAnchors::Anchor::EngineDraws));
+				},
+				// The run's draws are known after its commit: recorded then, the pass reads them without a ticket prepared again.
+				.atExecution = true });
 			desc.commit = [client](const FrameAnchors::Point&) {
 				const auto run = std::atomic_load(&client->run);
 				auto* host = RenderGraphRuntime::Get().Host();

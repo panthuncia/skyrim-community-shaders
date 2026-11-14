@@ -1432,7 +1432,7 @@ struct RenderGraphRuntime::Impl
 			stats.cachedAdmissions += e.cachedAdmissions;
 			stats.batches += e.batches;
 		}
-		if (native || ++epochCount < kEpochStatsWindow)
+		if (++epochCount < kEpochStatsWindow)
 			return;
 		ReportEpochStats();
 	}

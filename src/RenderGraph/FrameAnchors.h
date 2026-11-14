@@ -1,5 +1,6 @@
 #pragma once
 
+#include <atomic>
 #include <cstdint>
 #include <functional>
 #include <memory>
@@ -317,6 +318,24 @@ namespace FrameAnchors
 
 	/** @brief Whether the anchor has an epoch (reserved before initialization, and the runtime is up). */
 	bool HasEpoch(Anchor a_anchor);
+
+	/**
+	 * @brief Whether a PassDesc::atExecution pass of the anchor's own epoch is recorded after the run's commit (native: always;
+	 * guest: when the epoch runs in DXVK's stream). Such a pass can read what the commit wrote when it records, so its revision need
+	 * not name the run: a ticket prepared ahead stays current. Render thread, at a build (a pass's make).
+	 */
+	bool RecordsAtExecution(Anchor a_anchor);
+
+	/**
+	 * @brief The Revision of a pass whose Record reads what its run's commit stored (a run slot): recorded at execution
+	 * (a_atExecution, RecordsAtExecution at the build), nothing changes it, so a ticket prepared ahead stays current. Recorded ahead,
+	 * every call gives a new word: the ticket is prepared again after the commit, which is when its Record can read the slot.
+	 */
+	inline void CommitReadRevision(bool a_atExecution, std::vector<std::uint64_t>& a_out)
+	{
+		static std::atomic<std::uint64_t> ahead{ 0 };
+		a_out.push_back(a_atExecution ? 0 : ahead.fetch_add(1, std::memory_order_relaxed) + 1);
+	}
 
 	/**
 	 * @brief Registers (or replaces) a client. Render thread, with the runtime active. False, logged, when the runtime is not active,

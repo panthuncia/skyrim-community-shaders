@@ -1,0 +1,2 @@
+# native-d3d12, the TAA perf sample (perf-taa.toml).
+extends = ["native-d3d12", "perf-taa"]
