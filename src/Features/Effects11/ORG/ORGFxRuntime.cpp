@@ -204,7 +204,7 @@ namespace
 		OrgFx::EffectDesc desc;
 		OrgFx::LoweredEffect lowered;
 		std::vector<ValueCopy> values;
-		std::int32_t screenSize = -1;  // ScreenSize's offset in $Globals
+		std::int32_t screenSize = -1;  // ScreenSize's offset in the values region
 		std::uint32_t screenSizeBytes = 0;
 		std::vector<org::OwnedDescriptorBinding> samplers;  // per resource slot; empty for textures
 		std::vector<Res> files;                             // per resource slot: its ResourceName texture, or null
@@ -330,7 +330,7 @@ namespace
 		winrt::com_ptr<ID3DX11Effect> compiled;  // keeps the variables below alive
 		std::vector<ValueCopy> values;
 		std::uint32_t valuesSize = 0;
-		std::int32_t screenSize = -1;  // ScreenSize's offset in $Globals
+		std::int32_t screenSize = -1;  // ScreenSize's offset in the values region
 		std::uint32_t screenSizeBytes = 0;
 	};
 
@@ -528,6 +528,15 @@ namespace
 		return desc;
 	}
 
+	/** @brief Where a constant buffer ($Globals when a_cbuffer is empty) sits in a pass's values region; null when it has none. */
+	const OrgFx::ValueRegion* RegionOf(const OrgFx::LoweredEffect& a_lowered, std::string_view a_cbuffer)
+	{
+		for (const auto& region : a_lowered.regions)
+			if (region.cbuffer == a_cbuffer)
+				return &region;
+		return nullptr;
+	}
+
 	std::string FirstError(const std::vector<OrgFx::Diagnostic>& a_diagnostics)
 	{
 		for (const auto& d : a_diagnostics)
@@ -684,18 +693,20 @@ struct ORGFxRuntime::Impl
 		e.desc = OrgFx::Parse(text);
 		if (e.desc.Count(OrgFx::Severity::Error))
 			return fail("parse error, " + FirstError(e.desc.diagnostics));
-		if (!e.desc.constantBuffers.empty())
-			return fail("cbuffer blocks are not supported yet");
 		e.lowered = OrgFx::LowerEffect(text, e.desc);
 		if (!e.lowered.ok)
 			return fail("lowering failed, " + FirstError(e.lowered.diagnostics));
 
-		// FX11 keeps the values; its $Globals must be laid out as the lowered code reads it.
+		// FX11 keeps the values; its $Globals and cbuffers must be laid out as the lowered code reads them. A cbuffer variable's
+		// offset is from its cbuffer's start in both; its bytes go to that cbuffer's region.
 		auto* effect = fx11->GetEffect();
 		e.compiled.copy_from(effect);
 		for (const auto& v : e.desc.variables) {
-			if (v.bufferOffset < 0 || !v.cbuffer.empty() || v.modifiers.isStatic)
+			if (v.bufferOffset < 0 || v.modifiers.isStatic)
 				continue;
+			const auto region = RegionOf(e.lowered, v.cbuffer);
+			if (!region)
+				return fail(fmt::format("'{}' is in cbuffer '{}', which the lowering has no region for", v.name, v.cbuffer));
 			auto* variable = effect->GetVariableByName(v.name.c_str());
 			if (!variable || !variable->IsValid())
 				return fail(fmt::format("FX11 has no variable '{}'", v.name));
@@ -705,15 +716,15 @@ struct ORGFxRuntime::Impl
 				return fail(fmt::format("FX11 cannot describe '{}'", v.name));
 			if (variableDesc.BufferOffset != static_cast<std::uint32_t>(v.bufferOffset))
 				return fail(fmt::format("'{}' is at byte {} of FX11's $Globals, {} of the parser's", v.name, variableDesc.BufferOffset, v.bufferOffset));
-			const std::uint32_t offset = static_cast<std::uint32_t>(v.bufferOffset);
+			const std::uint32_t offset = region->offset + static_cast<std::uint32_t>(v.bufferOffset);
 			if (offset >= e.lowered.valuesSize)
 				continue;
 			const std::uint32_t size = (std::min)({ typeDesc.UnpackedSize, v.bufferSize, e.lowered.valuesSize - offset });
 			if (size)
 				e.values.push_back({ variable, offset, size });
 		}
-		if (const auto* screenSize = e.desc.FindVariable("ScreenSize"); screenSize && screenSize->bufferOffset >= 0 && screenSize->cbuffer.empty()) {
-			e.screenSize = screenSize->bufferOffset;
+		if (const auto* screenSize = e.desc.FindVariable("ScreenSize"); screenSize && screenSize->bufferOffset >= 0 && RegionOf(e.lowered, screenSize->cbuffer)) {
+			e.screenSize = static_cast<std::int32_t>(RegionOf(e.lowered, screenSize->cbuffer)->offset) + screenSize->bufferOffset;
 			e.screenSizeBytes = (std::min)(screenSize->bufferSize, 16u);
 		}
 
