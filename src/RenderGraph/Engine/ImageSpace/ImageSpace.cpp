@@ -3417,7 +3417,10 @@ namespace RenderGraph::Engine::ImageSpace
 					state.drawShape = a_shape;
 					state.drawStart = a_start;
 					state.drawTriangles = a_triangles;
-					if ((quad || geometry) && state.scopeDepth > 0 && state.current && state.current->eligible && !state.current->compute && !state.current->drew) {
+					// A geometry effect may draw several shapes in one call (the underwater mask): each is taken, a run of its own when
+					// its pass is already in the batch (AdmitShape).
+					if ((quad || geometry) && state.scopeDepth > 0 && state.current && state.current->eligible && !state.current->compute &&
+						(!state.current->drew || geometry)) {
 						// TakeDraw applies the engine's state (SetDirtyStates) before the engine's DrawTriShape would have: give the
 						// shadow state this shape's vertex description first, as DrawTriShape does. Otherwise the input layout is
 						// built from the previous draw's description and the effect's vertex shader.
