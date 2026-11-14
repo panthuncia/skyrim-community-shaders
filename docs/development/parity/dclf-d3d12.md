@@ -113,3 +113,31 @@ The Skylighting and precipitation occlusion maps draw through the same `ShadowVi
   the CPU pipeline.
 - **The `[DCLF] D3D12: on` line** (`DrawcallLimitFix.cpp`) still says only the main view's Lighting draws. The off list it
   prints is correct.
+
+## WS4.3 (Effect family): findings so far, no code change
+
+- **Offline checks.** The Effect pulled stages were checked with `dclf-shadertool rewrite`, then the preprocess, then
+  `dclf-shadertool d3d12`, and DXC SM 6.6. The rewrite used the game's options: material textures 0-13, 15, 71, 74, 80-91;
+  shadow mask 14; 16 samplers; eager and lazy rows. Every permutation tried passes the frame rewrite and builds to DXIL
+  binding only b190 and b191:
+  - VC TEXCOORD TEXTURE, skinned, MEMBRANE, SOFT PROJECTED_UV, LIGHTING, GRAYSCALE_TO_ALPHA and GRAYSCALE_TO_COLOR,
+    ALPHA_TEST, TEXCOORD_INDEX, PARTICLES, STRIP_PARTICLES, BLOOD, MULTBLEND_DECAL, SKY_OBJECT, MOTIONVECTORS_NORMALS
+  - DCLF_DEPTH_ONLY
+  - with and without the feature defines (Light Limit Fix, Skylighting, IBL, cloud shadows, height fog, volumetric shadows,
+    wetness, dynamic cubemaps)
+
+  The rejections the plan names (`FrameSource.cpp` resource arrays and member types) did not reproduce. A game run with
+  `CS_DCLF_EFFECTS=1 CS_DCLF_FORWARD=1` on D3D12 should look for `the D3D12 build's frame rewrite failed` lines. If one
+  appears, run `CS_D3D12_SOURCE_DUMP=<dir>` and feed the dumped source to `dclf-shadertool d3d12`.
+- **Decoupling the opaque effects from the forward toggle** is not done. The opaque effects (`Api::ObjectClass::OpaqueEffect`)
+  share the `effects` toggle, which needs `forward`. The cleanest form is a toggle of their own:
+  - registered with `.after = "decals"` and `.needs = { "decals" }`, which is allowed because needs resolve after every
+    feature registers (`Toggles.cpp`);
+  - seeded by `CS_DCLF_OPAQUE_EFFECTS`.
+
+  Two things make that unsafe to change without a build:
+  - The packed toggle word has a 32-bit budget (`kFirstRegisteredBit` plus 25 registered toggles), and one more toggle may
+    not fit. Going over fails at install.
+  - The effect classification (`EffectDescriptors.cpp`) and the Effect port's frame rows may assume the `effects` class is on.
+
+  `CS_DCLF_EFFECTS` and `CS_DCLF_OPAQUE_EFFECTS` stay in `kD3D12DclfSwitches`.

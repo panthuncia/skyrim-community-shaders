@@ -275,8 +275,8 @@ namespace DCLF::FrameSource
 				// The block's view (a pass-wide block) or its ref (any other), as the build's pass gives them.
 				const std::string view = options.shadow ? std::format("DCLFShadowBlockView({})", a_register) : std::format("DCLFFrameBlockIndex({})", ordinal);
 				const std::string byRef = options.shadow ? std::format("DCLFShadowBlockRef({})", a_register) :
-				                                          std::format("DCLFFrameBlockSpan({}, {})", options.pixel ? "true" : "false", a_register);
-				out +=std::format("// {} b{} ({}): the pass's {} (DCLF FrameSource)\n", name, a_register, stage, passWide ? "view of the block" : "block, by address");
+				                                           std::format("DCLFFrameBlockSpan({}, {})", options.pixel ? "true" : "false", a_register);
+				out += std::format("// {} b{} ({}): the pass's {} (DCLF FrameSource)\n", name, a_register, stage, passWide ? "view of the block" : "block, by address");
 				++result.blocks;
 				if (packed == 0) {
 					// The same members in a struct, read as a ConstantBuffer: cbuffer packing, as the block was written.
