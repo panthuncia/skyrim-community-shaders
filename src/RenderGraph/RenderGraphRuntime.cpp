@@ -1453,6 +1453,9 @@ struct RenderGraphRuntime::Impl
 			list(Census::List::HandoffReused), list(Census::List::Release), list(Census::List::HomeAcquire), list(Census::List::Upload),
 			list(Census::List::UploadEmpty), list(Census::List::QueueUpload), list(Census::List::QueueUploadEmpty),
 			f(c.handoffMisses[0]), f(c.handoffMisses[1]), f(c.handoffMisses[2]));
+		logger::info("[ORG] Submission census, open admissions a frame: {:.1f} predicted, {:.1f} predicted by an earlier plan, {:.1f} not entry-only, {:.1f} alias "
+					 "invalidated, {:.1f} new prediction slot, {:.1f} states differ",
+			f(c.admissions[0]), f(c.admissions[1]), f(c.admissions[2]), f(c.admissions[3]), f(c.admissions[4]), f(c.admissions[5]));
 		static constexpr const char* kKinds[] = { "batches", "uploads", "release", "leading uploads", "home acquire" };
 		std::string kinds;
 		for (size_t k = 0; k < size_t(Census::Submission::Count); ++k) {
