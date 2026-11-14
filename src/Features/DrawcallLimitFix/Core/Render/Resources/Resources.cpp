@@ -458,11 +458,11 @@ namespace DCLF
 	{
 		// The programs first, off the render thread (LoadProgram): while they compile nothing is made, and DCLF stays off. The shadow
 		// views', the views' and the sort's are asked here too, so every BuildDraws entry compiles at once and their setups find them ready.
-		bool pending = false;
+		bool programsPending = false;
 		auto load = [&](const ComputeProgram::Desc& a_desc) {
 			bool loading = false;
 			auto program = LoadProgram(a_device, a_desc, loading);
-			pending = pending || loading;
+			programsPending = programsPending || loading;
 			return program;
 		};
 		// CS_DCLF_REF_TRACE: the main build records its refs too.
@@ -475,7 +475,7 @@ namespace DCLF
 		(void)load({ .source = kBuildDrawsShader, .constantWords = kBuildDrawsConstantWords });
 		// DrawSort::Create loads its own: this compiles it ahead, so its load finds the compile cached.
 		(void)load({ .source = kSortSequencesShader, .constantWords = kSortSequencesConstantWords });
-		if (pending)
+		if (programsPending)
 			return NotReady(8, "its compute programs are compiling off the render thread");
 		// The sequence ranges (SequenceSlots) at the first layout's sizes, required to every draw the scene can produce (RequireMain);
 		// sized to the layout exactly (its ranges grow by doubling).
@@ -794,7 +794,7 @@ namespace DCLF
 		}
 	}
 
-	std::shared_ptr<const ComputeProgram> LoadProgram(rhi::Device a_device, const ComputeProgram::Desc& a_desc, bool& a_pending)
+	std::shared_ptr<const ComputeProgram> Draws::LoadProgram(rhi::Device a_device, const ComputeProgram::Desc& a_desc, bool& a_pending)
 	{
 		auto& loads = Loads();
 		std::shared_ptr<ProgramLoad> entry;
@@ -960,9 +960,9 @@ namespace DCLF
 			return false;
 		};
 		// The program first (LoadProgram): while it compiles the view is not set up, and stays native, without failing.
-		bool pending = false;
-		auto buildDraws = LoadProgram(device, { .source = kBuildDrawsShader, .constantWords = kBuildDrawsConstantWords }, pending);
-		if (pending)
+		bool programsPending = false;
+		auto buildDraws = LoadProgram(device, { .source = kBuildDrawsShader, .constantWords = kBuildDrawsConstantWords }, programsPending);
+		if (programsPending)
 			return false;
 		auto state = std::make_shared<ViewResources>();
 		state->traits = &traits;
