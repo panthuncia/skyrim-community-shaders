@@ -19,11 +19,21 @@
 
 // The pass's push data after the draw's (DrawPipelines.h, kFramePushBinding): the frame record's device address in words 0 and 1
 // (kFramePushRecord, kShadowPushFrameRecord: the layout's), its ref in words 2 and 3 (kFramePushRecordRef, kShadowPushFrameRecordRef).
-// Only the first row is declared: the shadow views' push words are fewer than the main layout's.
+// Only the first row is declared: the shadow views' push words are fewer than the main layout's. A D3D12 shadow view's build
+// (DCLF_D3D12_SHADOW_FRAME) declares its other push words too (DrawPipelines.h, kShadowPushWords: 14), which name its blocks; D3D12
+// checks the block against the layout's root constants, so it ends at word 13.
 cbuffer DCLFFramePush : register(b191)
 {
 	uint2 DCLFFrameRecordWords : packoffset(c0.x);
 	uint2 DCLFFrameRecordRef : packoffset(c0.z);
+#	if defined(DCLF_D3D12_SHADOW_FRAME)
+	// ShadowViewPass on D3D12: the view block's ref (PerTechnique, b0) and its VS_PerFrame copy's (b12), words 4-7.
+	uint4 DCLFShadowPushViewBlocks : packoffset(c1);
+	// The zero block's ref, then SharedData's constant buffer view (b5; the second word 0), words 8-11.
+	uint4 DCLFShadowPushArena : packoffset(c2);
+	// FeatureData's constant buffer view (b6; the second word 0), words 12-13.
+	uint2 DCLFShadowPushFeatureData : packoffset(c3.x);
+#	endif
 };
 
 // DrawBindings' parts (DrawPipelines.h): 14 VS and 14 PS block addresses, 128 texture indices, 16 sampler indices, the pass-wide
@@ -93,6 +103,17 @@ struct DCLFRawBlock
 {
 	float4 r[4096];
 };
+
+#	if defined(DCLF_D3D12_SHADOW_FRAME)
+// A shadow view's blocks (FrameSource's shadow rewrite), as its layout maps them on Vulkan (ShadowLayoutRanges): PerTechnique (b0) the
+// view block, VS_PerFrame (b12) its copy, any other register the zero block, by ref; SharedData (b5) and FeatureData (b6) by view.
+// The register is a literal, so each folds to one push word.
+DeviceRef DCLFShadowBlockRef(uint a_register)
+{
+	return a_register == 0 ? DCLFShadowPushViewBlocks.xy : (a_register == 12 ? DCLFShadowPushViewBlocks.zw : DCLFShadowPushArena.xy);
+}
+uint DCLFShadowBlockView(uint a_register) { return a_register == 5 ? DCLFShadowPushArena.z : DCLFShadowPushFeatureData.x; }
+#	endif
 
 #endif
 

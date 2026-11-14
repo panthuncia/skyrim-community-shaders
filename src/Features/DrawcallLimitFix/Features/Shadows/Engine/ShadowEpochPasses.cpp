@@ -25,6 +25,7 @@
 #include "Features/DrawcallLimitFix/Diagnostics/Observation.h"
 
 #include "Features/RemoteControl/GpuCounters.h"
+#include "RenderGraph/Backend.h"
 #include "RenderGraph/RenderGraphRuntime.h"
 #include <OpenRenderGraph/GraphHost.h>
 #include <Render/LatchBlock.h>
@@ -279,6 +280,9 @@ namespace DCLF::Draws
 			std::uint32_t index = 0;  // into frame->views (its target's slice: the bindings' depth view)
 		};
 		std::vector<View> views;
+		// D3D12: SharedData's and FeatureData's constant buffer views (ShadowResources::blockViewIndices), which the views' push words name.
+		std::array<std::uint32_t, 2> blockViews{};
+		bool blockViewsMade = false;
 	};
 
 	/**
@@ -349,6 +353,8 @@ namespace DCLF::Draws
 			}
 			if (!prepared.views.empty())
 				prepared.frame = std::move(frame);
+			prepared.blockViews = resources->blockViewIndices;
+			prepared.blockViewsMade = resources->blockViews != nullptr;
 			return prepared;
 		}
 
@@ -390,6 +396,42 @@ namespace DCLF::Draws
 				a_words[1] = static_cast<std::uint32_t>(a_value >> 32);
 			};
 			const rhi::IndexBufferView pool{ a_recording.Resolve(a_bindings.pool).GetHandle(), 0, 0, rhi::Format::R16_UInt };  // the whole buffer
+			// D3D12's layout holds root constants alone: a view's push words name its blocks by ref (the view block and its VS_PerFrame copy,
+			// the zero block) and by constant buffer view (SharedData, FeatureData), as the stages' frame rewrite reads them
+			// (Common/DCLFFrameRecord.hlsli, DCLF_D3D12_SHADOW_FRAME). Vulkan's layout reads the shape's addresses.
+			const bool d3d12 = ::RenderGraph::Backend::IsD3D12();
+			RenderGraph::BufferRef viewBlocksRef, constantsRef;
+			if (d3d12) {
+				viewBlocksRef = DCLF::Draws::RecordingBufferRef(a_recording, a_bindings.viewBlocks);
+				constantsRef = DCLF::Draws::RecordingBufferRef(a_recording, a_bindings.constants);
+				if (!viewBlocksRef || !constantsRef || !a_prepared.blockViewsMade) {
+					static std::atomic<bool> warned{ false };
+					if (!warned.exchange(true))
+						logger::error("[DCLF] D3D12 shadow views: no buffer view ref of the view blocks or the constants, or no SharedData view; the views draw nothing");
+					return;
+				}
+			}
+			auto viewPush = [&](const ShadowFrameView& a_view) {
+				auto push = a_view.push;
+				if (d3d12) {
+					auto ref = [&](std::uint32_t a_word, RenderGraph::BufferRef a_ref) {
+						push[a_word] = a_ref.viewSlot;
+						push[a_word + 1] = a_ref.byteOffset;
+					};
+					const RenderGraph::BufferRef viewBlock = viewBlocksRef + std::uint64_t(a_view.slot) * kShadowViewSlotBytes;
+					ref(kShadowPushViewBlock, viewBlock);
+					ref(kShadowPushPerFrame, viewBlock + kShadowPerFrameOffset);
+					ref(kShadowPushZeros, constantsRef + kShadowArenaBlocksOffset);  // the zero block heads the arena (ShadowArenaBlocksOf)
+					push[kShadowPushSharedData] = a_prepared.blockViews[0];
+					push[kShadowPushSharedData + 1] = 0;
+					push[kShadowPushFeatureData] = a_prepared.blockViews[1];
+					push[kShadowPushFeatureData + 1] = 0;
+				}
+				return push;
+			};
+			// A draw's arguments follow its first instance's word (kShadowDrawBytes): D3D12's signature reads the word too
+			// (kDrawPushInstance), Vulkan's only the arguments.
+			const std::uint64_t argumentsOffset = d3d12 ? 0u : kShadowDrawArgumentsOffset;
 			// nvperf ranges around each view's pass, when a capture selects them.
 			void* const nvCommands = GpuCounters::CommandBufferRangesActive() ? rhi::vulkan::get_cmd_list(commands) : nullptr;
 			std::uint32_t recordedDraws = 0;
@@ -403,7 +445,8 @@ namespace DCLF::Draws
 				commands.SetPrimitiveTopology(rhi::PrimitiveTopology::TriangleList);
 				commands.BindLayout(frame.indirect.layout);
 				commands.SetIndexBuffer(pool);
-				commands.PushConstants(rhi::ShaderStage::AllGraphics, 0, kFramePushBinding, 0, kShadowPushWords, view.push.data());
+				const auto push = viewPush(view);
+				commands.PushConstants(rhi::ShaderStage::AllGraphics, 0, kFramePushBinding, 0, kShadowPushWords, push.data());
 				const auto drawArgs = a_recording.Resolve(a_bindings.drawArgs[view.slot]).GetHandle();
 				const auto counts = a_recording.Resolve(a_bindings.bucketCounts[view.slot]).GetHandle();
 				for (std::uint32_t b = 0; b < view.buckets.size(); ++b) {
@@ -419,7 +462,8 @@ namespace DCLF::Draws
 					split(words + kShadowDrawPushVertexLayout, frame.indirect.vertexLayouts[bucket.pipeline]);
 					commands.BindPipeline(frame.indirect.pipelines[bucket.pipeline]);
 					commands.PushConstants(rhi::ShaderStage::AllGraphics, 0, kDrawPushBinding, 0, kDrawPushWords, words);
-					commands.ExecuteIndirect(frame.indirect.drawSignature, drawArgs, std::uint64_t(bucket.first) * kShadowDrawBytes, counts, std::uint64_t(b) * sizeof(std::uint32_t),
+					commands.ExecuteIndirect(frame.indirect.drawSignature, drawArgs, std::uint64_t(bucket.first) * kShadowDrawBytes + argumentsOffset, counts,
+						std::uint64_t(b) * sizeof(std::uint32_t),
 						bucket.capacity);
 					++recordedDraws;
 				}

@@ -56,7 +56,6 @@ static float4 TranslationMatrix0 = OrgEngineRow(PerGeometryAt, 1);
 static float4 TranslationMatrix1 = OrgEngineRow(PerGeometryAt, 2);
 #	endif
 
-#	if defined(__spirv__)
 // The ripple's geometry (ImageSpace.cpp, TakeDraw): FrameSrv and FrameOffset the vertex buffer's view ref, FrameSize and Source the
 // 16-bit index buffer's, Padding the vertex stride (low 16 bits) and the first index (high 16 bits). The position is the vertex's
 // first attribute, four floats.
@@ -73,14 +72,6 @@ VS_INPUT PullRippleVertex(uint a_vertexID)
 	input.TexCoord = 0.0.xx;
 	return input;
 }
-#	else
-// The D3D12 build has no vertex pulling yet: it compiles, and draws nothing.
-VS_INPUT PullRippleVertex(uint a_vertexID)
-{
-	VS_INPUT input = (VS_INPUT)0;
-	return input;
-}
-#	endif
 
 VS_OUTPUT main(uint a_vertexID: SV_VertexID)
 {

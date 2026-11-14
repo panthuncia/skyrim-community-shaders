@@ -182,6 +182,10 @@ namespace DCLF::Draws
 		GrowableRows viewBlocks;
 		std::uint64_t constantsAddress = 0;
 		RenderGraph::BufferRef constantsRef;  // the stages that read the views' frame record themselves read it through this
+		// D3D12: the constant buffer views of the constants' SharedData and FeatureData (ShadowArenaBlocksOf), in that order, which a view's
+		// push words name there (ShadowViewPass; Common/DCLFFrameRecord.hlsli, DCLFShadowBlockView). Null on Vulkan, whose layout maps them.
+		std::shared_ptr<const FrameBlockViews> blockViews;
+		std::array<std::uint32_t, 2> blockViewIndices{};  // their heap indices
 		// BuildDrawsCS's ShadowViews entry: every view of an epoch in one dispatch (ShadowBuildDrawsPass), dispatched through
 		// dispatchSignature.
 		std::shared_ptr<const ComputeProgram> buildDraws;

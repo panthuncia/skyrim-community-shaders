@@ -752,7 +752,6 @@ VS_OUTPUT main(uint index : SV_VertexID, uint a_instance : SV_InstanceID)
 	return vsout;
 }
 #		elif defined(EFFECT_ORG)
-#			if defined(__spirv__)
 // The ORG build's vertex stage: the draw's vertex pulled as the input assembler reads it (its 16-bit index, then its attributes),
 // then the engine's stage (DCLFShade).
 VS_OUTPUT main(uint a_vertexID : SV_VertexID)
@@ -764,25 +763,16 @@ VS_OUTPUT main(uint a_vertexID : SV_VertexID)
 	DCLFStream first = { EffectDraw.VertexAddress, EffectDraw.VertexStride };
 	DCLFStream second = { EffectDraw.StreamAddress, EffectDraw.StreamStride };
 	const VS_INPUT input = DCLFPulledInput(index, first, second);
-#				if defined(TEXCOORD_INDEX)
-#					if defined(NORMALS)
+#			if defined(TEXCOORD_INDEX)
+#				if defined(NORMALS)
 	const uint texCoordIndex = min((uint)input.TexCoord0.z, 127u);
-#					else
+#				else
 	const uint texCoordIndex = min((uint)input.Position.w, 127u);
-#					endif
-	IndexedTexCoord[texCoordIndex] = asfloat(OrgLatch_EffectDraw.Load4(OrgOffset_EffectDraw + EFFECT_ORG_INDEXED_TEXCOORDS + texCoordIndex * 16));
 #				endif
+	IndexedTexCoord[texCoordIndex] = asfloat(OrgLatch_EffectDraw.Load4(OrgOffset_EffectDraw + EFFECT_ORG_INDEXED_TEXCOORDS + texCoordIndex * 16));
+#			endif
 	return DCLFShade(input);
 }
-#			else
-// The D3D12 build has no vertex pulling yet: it compiles, and draws nothing.
-VS_OUTPUT main(uint a_vertexID : SV_VertexID)
-{
-	VS_OUTPUT vsout = (VS_OUTPUT)0;
-	vsout.Position = float4(0, 0, (float)EffectDraw.FirstIndex, 1);
-	return vsout;
-}
-#			endif
 #		else
 VS_OUTPUT main(uint index : SV_VertexID)
 {

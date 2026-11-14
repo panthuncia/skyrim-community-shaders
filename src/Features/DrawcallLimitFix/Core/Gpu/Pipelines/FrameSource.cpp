@@ -258,9 +258,12 @@ namespace DCLF::FrameSource
 					return false;
 				const std::string name(a_name);
 				const std::uint32_t mask = options.pixel ? options.pixelBlocks : options.vertexBlocks;
-				const bool passWide = a_register < 32 && ((mask >> a_register) & 1);
+				// A shadow view's SharedData and FeatureData have a view each (its push words); its other blocks a ref each.
+				const bool passWide = options.shadow ? (a_register == 5 || a_register == 6) : (a_register < 32 && ((mask >> a_register) & 1));
 				if (a_register >= 14)
 					return Fail(std::format("constant buffer {} is at b{}, which is no register a DCLF pass gives", name, a_register));
+				if (options.shadow && !options.pixel && a_register == 1)
+					return Fail(std::format("constant buffer {} is at VS b1, the draw's material row, which a pulled shadow stage reads itself", name));
 				std::size_t packed = 0;
 				for (const auto& member : members)
 					packed += member.second ? 1 : 0;
@@ -269,6 +272,10 @@ namespace DCLF::FrameSource
 				const std::uint32_t ordinal = (options.pixel ? static_cast<std::uint32_t>(std::popcount(options.vertexBlocks)) : 0u) +
 				                              static_cast<std::uint32_t>(std::popcount(mask & ((1u << a_register) - 1)));
 				const std::string stage = options.pixel ? "PS" : "VS";
+				// The block's view (a pass-wide block) or its ref (any other), as the build's pass gives them.
+				const std::string view = options.shadow ? std::format("DCLFShadowBlockView({})", a_register) : std::format("DCLFFrameBlockIndex({})", ordinal);
+				const std::string byRef = options.shadow ? std::format("DCLFShadowBlockRef({})", a_register) :
+				                                           std::format("DCLFFrameBlockSpan({}, {})", options.pixel ? "true" : "false", a_register);
 				out += std::format("// {} b{} ({}): the pass's {} (DCLF FrameSource)\n", name, a_register, stage, passWide ? "view of the block" : "block, by address");
 				++result.blocks;
 				if (packed == 0) {
@@ -280,7 +287,7 @@ namespace DCLF::FrameSource
 						out += std::format("\t{}{}{} {}{};\n", member.qualifiers, member.qualifiers.empty() ? "" : " ", member.type, member.name,
 							member.array ? std::format("[{}]", member.count) : std::string{});
 					out += "};\n";
-					out += std::format("static ConstantBuffer<DCLFBlock_{0}> DCLFBlockView_{0} = ResourceDescriptorHeap[DCLFFrameBlockIndex({1})];\n", name, ordinal);
+					out += std::format("static ConstantBuffer<DCLFBlock_{0}> DCLFBlockView_{0} = ResourceDescriptorHeap[{1}];\n", name, view);
 					for (const auto& [member, offset] : members) {
 						out += std::format("static const {} {}{} = DCLFBlockView_{}.{};\n", member.type, member.name,
 							member.array ? std::format("[{}]", member.count) : std::string{}, name, member.name);
@@ -291,10 +298,10 @@ namespace DCLF::FrameSource
 				// Register by register: the pass's view, or the block's raw view by its address.
 				std::string registerOf;
 				if (passWide) {
-					out += std::format("static ConstantBuffer<DCLFRawBlock> DCLFBlockView_{} = ResourceDescriptorHeap[DCLFFrameBlockIndex({})];\n", name, ordinal);
+					out += std::format("static ConstantBuffer<DCLFRawBlock> DCLFBlockView_{} = ResourceDescriptorHeap[{}];\n", name, view);
 					registerOf = std::format("DCLFBlockView_{}.r[{{}}]", name);
 				} else {
-					out += std::format("static const uint2 DCLFBlockSpan_{} = DCLFFrameBlockSpan({}, {});\n", name, options.pixel ? "true" : "false", a_register);
+					out += std::format("static const uint2 DCLFBlockSpan_{} = {};\n", name, byRef);
 					registerOf = std::format("DCLFSpanRegister(DCLFBlockSpan_{}, {{}})", name);
 				}
 				const auto reg = [&](std::uint32_t a_row) { return std::vformat(registerOf, std::make_format_args(a_row)); };

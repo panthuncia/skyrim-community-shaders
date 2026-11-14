@@ -575,12 +575,17 @@ namespace DCLF::Draws
 	};
 	static_assert(sizeof(ShadowBuildView) == 28);
 	/**
-	 * @brief A shadow view's draw (ShadowResources::drawArgs): DrawIndexedIndirect's arguments alone, the first instance naming its caster
-	 * row. Everything else about the draw is the object's, whichever view draws it: its one row of the caster rows.
+	 * @brief A shadow view's draw (ShadowResources::drawArgs): its first instance, then DrawIndexedIndirect's arguments (at
+	 * kShadowDrawArgumentsOffset), the first instance naming its caster row. Everything else about the draw is the object's, whichever
+	 * view draws it: its one row of the caster rows. The word before the arguments is D3D12's: SV_InstanceID does not count the first
+	 * instance there, so the shadow views' signature writes the word into the draw push word the pulled stage adds (kDrawPushInstance;
+	 * DCLFObjects.hlsli, DCLFInstanceWord). Vulkan's signature starts at the arguments. One layout on both backends (BuildDrawsCS,
+	 * StoreShadowDraw).
 	 */
-	constexpr std::uint32_t kShadowDrawBytes = 20;
+	constexpr std::uint32_t kShadowDrawBytes = 24;
+	constexpr std::uint32_t kShadowDrawArgumentsOffset = 4;
 	// A slot's unit of its draw arguments: half again a draw (ShadowSlotSequences), to a word.
-	constexpr std::uint32_t kShadowDrawUnitBytes = 32;
+	constexpr std::uint32_t kShadowDrawUnitBytes = 36;
 
 	/**
 	 * @brief A sun plane set in a latch block (a SunRegion: a 16-byte count header, then records): the full-frustum processes here,

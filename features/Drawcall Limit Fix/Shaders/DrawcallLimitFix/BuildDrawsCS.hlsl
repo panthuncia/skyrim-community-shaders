@@ -817,7 +817,10 @@ void StoreShadowSequence(RWByteAddressBuffer sequences, uint slot, uint instance
 // it. What the pulled vertex stage reads of a DrawSequence (Utility.hlsl, DCLFShadowVertex), at the same offsets and stride, so the draw's
 // first instance finds the row as the CPU pipeline's finds its resident sequence. Views write a row's same words; a row is read only by a
 // draw this frame's culling wrote. ----
-static const uint kShadowDrawStride = 20;  // GpuLayouts.h, kShadowDrawBytes
+// A draw: its first instance, then its arguments (GpuLayouts.h, kShadowDrawBytes and kShadowDrawArgumentsOffset). D3D12's signature reads
+// the first word into the draw push word the pulled stage adds (SV_InstanceID does not count the first instance there); Vulkan's reads
+// the arguments alone.
+static const uint kShadowDrawStride = 24;
 
 void StoreCasterRow(RWByteAddressBuffer a_rows, uint a_row, uint a_technique, uint4 a_rowWords, uint a_objectWord, uint4 a_vertexBuffer, uint4 a_streamBuffer)
 {
@@ -833,8 +836,9 @@ void StoreShadowDraw(RWByteAddressBuffer a_draws, uint a_slot, uint a_row, uint 
 {
 	const bool pooled = a_poolFirst != 0xFFFFFFFFu;
 	const uint base = a_slot * kShadowDrawStride;
-	a_draws.Store4(base, uint4(pooled ? a_indexCount : 0, 1, pooled ? a_poolFirst + a_firstIndex : 0, 0));
-	a_draws.Store(base + 16, a_row);
+	a_draws.Store(base, a_row);
+	a_draws.Store4(base + 4, uint4(pooled ? a_indexCount : 0, 1, pooled ? a_poolFirst + a_firstIndex : 0, 0));
+	a_draws.Store(base + 20, a_row);
 }
 
 // The partitions an input can draw in any frame: a LOD skin's levels' masks ORed, as its walk's mask is one of them.
