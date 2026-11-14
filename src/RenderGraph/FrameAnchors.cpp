@@ -1679,6 +1679,11 @@ namespace FrameAnchors
 		static const bool on = [] {
 			if (!RenderGraph::Engine::Native::Requested())
 				return false;
+			// CS_ORG_PHASES=0 keeps an epoch per anchor in native mode too, for comparisons.
+			if (Switches::Number("CS_ORG_PHASES", 1) == 0) {
+				logger::info("[ORG] frame phases off (CS_ORG_PHASES=0): every anchor keeps its own epoch");
+				return false;
+			}
 			if (!RenderGraphRuntime::EpochsEnabled() || Switches::Equals("CS_ORG_ASYNC_EPOCHS", "0")) {
 				logger::warn("[ORG] frame phases need epochs and async epochs; every anchor keeps its own epoch");
 				return false;
