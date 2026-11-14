@@ -435,7 +435,12 @@ namespace RenderGraph::Engine::ImageSpace
 			bool noFogTried = false;
 			// By run lease index: the sources a run's latched draws read by heap index (Pending::source), held until the next run of
 			// the index commits (the lease's last run retired before the index was opened again). Grown with the host's lease indices.
+			// heldRuns: the run each index's sources are for. With regions several commits write into one run, and add to its sources.
 			std::vector<std::vector<std::shared_ptr<const void>>> heldSources;
+			std::vector<org::RunRef> heldRuns;
+			// Regions: the last gate entry the last commit opened. A later batch joins the same run only with higher entries (its passes
+			// run after those already opened, and no entry is opened twice).
+			std::uint32_t committedLast = 0;
 			// The registration: every pass, by entry and by shape, and the engine objects its imports were made from (a resize check).
 			std::vector<std::shared_ptr<const Spec>> specs;
 			std::map<ShapeKey, const Spec*> specOf;
@@ -1729,7 +1734,9 @@ namespace RenderGraph::Engine::ImageSpace
 						return MakeNotedPass(spec, latch, gate);
 					},
 					// A run opens a few of the shapes' gate entries: recorded after the commit, the closed ones record nothing.
-					.atExecution = true });
+					.atExecution = true,
+					// Every draw and dispatch goes through the gate, and none clears: a region execution may hold the pass unopened.
+					.gated = true });
 			}
 			FrameAnchors::ClientDesc client{};
 			client.id = kClientId;
@@ -1742,10 +1749,16 @@ namespace RenderGraph::Engine::ImageSpace
 				const org::RunRef run = RenderGraphRuntime::Get().Host()->CurrentRun();
 				// The sources this lease index's last run read by heap index are retired now: that run retired before the index was
 				// opened again.
-				if (current.heldSources.size() <= run.lease)
+				if (current.heldSources.size() <= run.lease) {
 					current.heldSources.resize(static_cast<std::size_t>(run.lease) + 1);
+					current.heldRuns.resize(static_cast<std::size_t>(run.lease) + 1);
+				}
 				auto& held = current.heldSources[run.lease];
-				held.clear();
+				// A new run of the index lets the last one's sources go; another batch of the same run (regions) adds to them.
+				if (!(current.heldRuns[run.lease] == run)) {
+					held.clear();
+					current.heldRuns[run.lease] = run;
+				}
 				for (const auto& pending : current.batch) {
 					if (pending.source)
 						held.push_back(pending.source);
@@ -1755,6 +1768,14 @@ namespace RenderGraph::Engine::ImageSpace
 					else
 						current.gate->OpenDraw(pending.entry, pending.vertices);
 				}
+				if (!current.batch.empty())
+					current.committedLast = current.batch.back().entry;
+			};
+			// Regions: a batch joins the run an earlier batch of this frame committed into when its passes all come after that batch's
+			// (the batch's entries rise: AdmitShape starts a new batch at an entry at or before the last one).
+			client.joins = [] {
+				const auto& current = IS();
+				return !current.batch.empty() && current.batch.front().entry > current.committedLast;
 			};
 			client.executed = [](const FrameAnchors::Point&) { IS().executed = true; };
 			client.onFailed = [] {
@@ -2833,6 +2854,7 @@ namespace RenderGraph::Engine::ImageSpace
 		state.gate = RunGate::Create("ImageSpace", kGateEntries);
 		state.latch = org::LatchBlock::Create("ImageSpace::ConstantsAt", kGateEntries * static_cast<std::uint32_t>(sizeof(ConstantsAt)));
 		state.heldSources.clear();
+		state.heldRuns.clear();
 		if (!state.gate || !state.latch)
 			return off("its run gate or latch could not be made");
 		SelectEffects();
