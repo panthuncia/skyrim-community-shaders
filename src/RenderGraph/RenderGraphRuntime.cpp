@@ -1438,6 +1438,37 @@ struct RenderGraphRuntime::Impl
 		ReportEpochStats();
 	}
 
+	// The submission census's counts a frame (org::diagnostics::Census): command lists and queue submissions by kind, why each
+	// submission is apart from the one before it, the handoff cache's misses and the sequencer's waits.
+	static void LogSubmissionCensus(double a_frames)
+	{
+		using Census = org::diagnostics::SubmissionCensus;
+		const auto c = org::diagnostics::Census().Take();
+		const auto f = [&](uint64_t a_value) { return double(a_value) / a_frames; };
+		const auto list = [&](Census::List a_kind) { return f(c.lists[size_t(a_kind)]); };
+		logger::info("[ORG] Submission census, command lists a frame: {:.1f} batch, {:.1f} inline ({:.1f} barriers only), {:.1f} handoff recorded, "
+					 "{:.1f} handoff reused, {:.1f} release, {:.1f} home acquire, {:.1f} upload ({:.1f} empty), {:.1f} queue-scoped upload ({:.1f} empty); "
+					 "handoff cache misses a frame: {:.1f} planned admission, {:.1f} several segments, {:.1f} new plan",
+			list(Census::List::Batch), list(Census::List::Inline), list(Census::List::InlineBarriersOnly), list(Census::List::Handoff),
+			list(Census::List::HandoffReused), list(Census::List::Release), list(Census::List::HomeAcquire), list(Census::List::Upload),
+			list(Census::List::UploadEmpty), list(Census::List::QueueUpload), list(Census::List::QueueUploadEmpty),
+			f(c.handoffMisses[0]), f(c.handoffMisses[1]), f(c.handoffMisses[2]));
+		static constexpr const char* kKinds[] = { "batches", "uploads", "release", "leading uploads", "home acquire" };
+		std::string kinds;
+		for (size_t k = 0; k < size_t(Census::Submission::Count); ++k) {
+			const auto& by = c.submissions[k];
+			const uint64_t total = by[0] + by[1] + by[2] + by[3];
+			if (!total)
+				continue;
+			kinds += fmt::format("; {} {:.1f} ({:.1f} lists; apart because: other queue {:.1f}, same ticket {:.1f}, earlier ticket, a new wait {:.1f}, earlier ticket, waits covered {:.1f})",
+				kKinds[k], f(total), f(c.submittedLists[k]), f(by[0]), f(by[1]), f(by[2]), f(by[3]));
+		}
+		logger::info("[ORG] Submission census, queue submissions a frame{}; new waits after an earlier ticket: {:.1f} on another queue, {:.1f} on the frame's values, "
+					 "{:.1f} other; sequencer: held {:.3f} ms a frame, {:.1f} waits for another thread ({:.3f} ms)",
+			kinds, f(c.uncoveredWaits[0]), f(c.uncoveredWaits[1]), f(c.uncoveredWaits[2]), f(c.sequencerHeldNs) / 1e6, f(c.sequencerWaits),
+			f(c.sequencerWaitNs) / 1e6);
+	}
+
 	// The statistics report: per segment, the async epochs, the run memory, executions a frame and the anchors' runs and regions.
 	// Guest mode reports every kEpochStatsWindow epochs (RecordEpoch), native mode every kNativeStatsFrames presents (SealPresented).
 	void ReportEpochStats()
@@ -1493,6 +1524,7 @@ struct RenderGraphRuntime::Impl
 		if (statFrames) {
 			logger::info("[ORG] executions a frame: {:.1f} over {:.1f} epochs (averages over {} frames)", double(statExecutions) / double(statFrames),
 				double(statEpochs) / double(statFrames), statFrames);
+			LogSubmissionCensus(double(statFrames));
 			statFrames = statExecutions = statEpochs = 0;
 		}
 		FrameAnchors::LogRunStats();
@@ -2240,6 +2272,8 @@ bool RenderGraphRuntime::Initialize()
 	}
 	// Both modes. It was read only in the guest branch above, so native mode never kept statistics.
 	state->epochStats = Switches::Equals("CS_ORG_EPOCH_STATS", "1");
+	// The submission census (command lists and queue submissions by kind) counts only with the statistics on.
+	org::diagnostics::Census().enabled.store(state->epochStats, std::memory_order_relaxed);
 	if ((*state->device)->CreateTimeline(state->nativeTimelines, 0, "CS native timeline lookup") != rhi::Result::Ok || !state->nativeTimelines)
 		return disable("BasicRHI could not create a timeline on DXVK's Vulkan device");
 
