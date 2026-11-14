@@ -1238,3 +1238,92 @@ All runs are background runs (`CS_TEST_BACKGROUND=1`).
 **Frame rate** (`native-vulkan+perf-quick`, vsync off): default 30.2 fps, regions 29.3, exclusive imports 28.1, home states off 30.9.
 - The samples within one run spread from 23 to 37 fps, so these differences are noise.
 - Dev-Fast (/Od) on this machine is CPU-bound, so the GPU savings that home states off should bring (resting layouts) cannot show. Measure them in a Release build, or on the RX 6600, where the 1.2 ms was found.
+
+## Phase 4 item 5 lane: present through a graph tail (`org-native/p4-present`)
+
+`CS_ORG_NATIVE_GRAPH_PRESENT` (native Vulkan only, off by default) presents the way BasicRenderer does:
+- the back buffer is a graph-owned slot with one version per present slot;
+- an `ExternalWork` tail copies the current version into the acquired swap chain image.
+
+`=1` makes one version per present slot (3). `=single` makes one version, so there is no version change each frame. `0` or unset keeps
+the hand-written copy.
+
+**How it works** (`NativeDevice.cpp`, `NativeState::GraphBackBuffer`).
+- **The versions.** `RenderGraphRuntime::Initialize` calls `Native::OnGraphReady` once the host is up, before any import. The native
+  device then makes the versions as graph-owned textures (`MakeTexture`, so each is a persistent `PixelBuffer` with its own record):
+  - they have the back buffer's size, format and bind flags;
+  - they become one `org::VersionedTexture`, the first current and the others made ahead (`Make`), as BasicRenderer's
+    `m_presentationColorVersions` are;
+  - each version's image is registered as a made image of the slot (`RegisterMadeImage`, `SetMadeImageSlot`).
+- **The rename.** The engine keeps one `ID3D11Texture2D` for the back buffer and its views. Its record gets `renamed`, the current
+  version's record, and `Resolve` answers it for every handle of the back buffer. So:
+  - `DescribeResource` names the current version's image;
+  - `FrameAnchors::EngineTarget(kFRAMEBUFFER)`, `ShareImage` and `ImportTexture` find it with `MadeImageOf` and return the slot;
+  - every pass that writes the back buffer (ImageSpace's last draw, upscaling, HDR output, Bink, Scaleform, ImGui, DCLF's blood
+    splatter) declares the slot, and the preparation binds the current version;
+  - the context's raw work (clears, capture readbacks, the present probe) runs on the current version's record, through `RouteRaw`
+    when the graph moves images.
+- **The tail.** On the render owner (`FrameAnchors::IsRenderOwner`), `Present` calls `PresentThroughLedger(version, ..., tail)`:
+  - `ExternalWork::Submit` declares the version as a copy source (`ExternalWork::CopySource`). The client moves it there from the
+    ledger's state, after the frame's last write. It flushes held regions first (`FlushRegions`).
+  - The swap chain image is not the graph's. The tail records its barriers: Undefined to CopyDest, the copy, then CopyDest to Present.
+  - The submission signals the present timeline, and `swapchain->Present` waits on that point. Acquire, present semaphores and frame
+    pacing are as before.
+- **The next version.** After the present, `NextGraphVersion` adopts the next present slot's version, renames the back buffer to it and
+  calls `GraphHost::NoteNewVersions`. Tickets prepared for the old version are prepared again. The client keeps each version from its
+  next writer until its tail's copy is done, so frame N+1 can draw while frame N's copy runs.
+- **Home states.**
+  - On (default): the client is closed and gives the version back in Common. The versions keep their host home.
+  - Off (`CS_ORG_NATIVE_HOME_STATES=0`): the client is open and leaves the version in CopySource. The ledger carries that to the next
+    frame that writes it.
+- **Copy size.** The copy takes the smaller of the version's size and the swap chain's. They are equal unless a mode change made the
+  swap chain again alone. Formats are equal by construction (`BackBufferFormat`/`SwapchainFormat`), HDR10's R10G10B10A2 included.
+
+**Fallbacks** (each logged once).
+- A present on a thread that does not own rendering (a loading screen or the logo without `CS_ORG_LOADING_THREAD`): it copies the
+  current version on the old path and does not change versions. Versions are published on the render owner only.
+- The client refuses the tail: the old path for that present, and the version stays current.
+- D3D12 (`CS_ORG_NATIVE_BACKEND=d3d12`): `graph present ... not on D3D12`, and the old path.
+- The versions cannot be made: `back buffer version N could not be made`, and the old path.
+- Guest (DXVK) mode never reaches this code.
+
+**Resize.** `ResizeBuffers` drops the slot with the old back buffer, makes new versions at the new size as a new slot, and asks for one
+structural rebuild (`native back buffer resized: its graph present slot is made again`). Graphs built with the old slot declare it until
+that build is attached.
+
+**Log lines.**
+- `[ORG native] graph present (CS_ORG_NATIVE_GRAPH_PRESENT): the back buffer is a graph-owned slot of 3 versions ...`, once at startup.
+- `[ORG] frame anchors: cs.engine.target.0 is the image of 'Native::BackBuffer', which ORG made; it is that graph resource's slot`
+  (and the same for Scaleform's, ImGui's and Bink's imports).
+- `[ORG native] graph present: a present on thread ...` on a loading screen without the loading thread.
+
+**What to check.**
+1. `native-graph-present-quick` against `native-quick`: the shots match. The probe's `mean RGB` lines are close, with the same share of
+   pixels lit.
+2. A native tour with `--set org.native_graph_present=1`, against one without. Watch:
+   - menus, the console and loading screens for flicker: a frame now starts from the contents of the version used three frames ago;
+   - the frame rate: `NoteNewVersions` each frame prepares the tickets prepared ahead again.
+
+   If either is worse, try `single`.
+3. With `CS_ORG_NATIVE_HOME_STATES=0` and `CS_ORG_NATIVE_IN_STREAM=1`: the same shots. `native-validation` shows no new layout errors on
+   the versions or the swap chain images.
+4. With `CS_ORG_REGIONS=1`: the same shots, and no `external work ... while a region held` lines.
+5. HDR output on: the HDR shots match, and the swap chain still reports HDR10.
+6. `native-d3d12-quick` with the switch: the `not on D3D12` line, and the shots as before.
+7. Look for `asks for a view ... lacks` naming `Native::BackBuffer`. Such an importer falls back to an import of one version's image.
+   That import is cached by the D3D11 texture, so it would keep drawing into one version: two frames in three would show stale contents.
+
+**Risks.**
+- **Partial redraws.** With three versions, anything that draws over the previous frame without clearing sees an older frame. That is
+  the contract of a flip-model swap chain's buffers, which DXVK hides behind its own single back buffer. `single` keeps the old
+  contents.
+- **`NoteNewVersions` each frame.** Recordings made ahead are tagged with the host's backing version, so one recorded ahead may no
+  longer bind and is made again. DCLF already calls `NoteNewVersions` when it adopts versions, so this path exists, but now it runs
+  every frame.
+- **Raw handles kept across frames.** A client that keeps a raw image or view of the back buffer across frames (`Texture::Current()`
+  kept, or a DCLF raw view baked into an epoch build) writes an old version. Those must declare the slot.
+- **A present on another thread during a version change.** `MadeImageOf` drops the slot when the registered version is no longer
+  current, so a describe between `Adopt` and the rename returns a plain resource for that call. Only work off the render owner can hit
+  this.
+- **Startup order.** The versions exist only once the host is up. Frames before that (the logo) copy the host-made back buffer as
+  before.

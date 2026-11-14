@@ -95,6 +95,13 @@ namespace RenderGraph::Engine::Native
 	std::shared_ptr<rhi::DevicePtr> Device();
 
 	/**
+	 * @brief RenderGraphRuntime::Initialize, once the render graph is up on the native device and before any import: with
+	 * CS_ORG_NATIVE_GRAPH_PRESENT, the back buffer becomes a graph-owned slot with one version per present slot, and the present
+	 * copies it through ORG's external client (org-native-frame-graph.md, "Phase 4 item 5 lane").
+	 */
+	void OnGraphReady();
+
+	/**
 	 * @brief What DXVK's dxvkGetInteropResourceInfo answers for its objects, for the textures native mode made (the back buffer, and
 	 * textures the native device made): the Vulkan image and the layout it rests in between graph epochs. False for anything else.
 	 */

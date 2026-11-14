@@ -3246,6 +3246,15 @@ family = "org"
 kind = "other"
 description = "native: graph imports are exclusive, moved into each pass layout (default false: shared, Common-only, until the duplicate image check is clean)"
 
+[key."org.native_graph_present"]
+env = "CS_ORG_NATIVE_GRAPH_PRESENT"
+type = "enum"
+choices = ["0", "1", "single"]
+default = "0"
+family = "org"
+kind = "other"
+description = "native Vulkan: the back buffer is a graph-owned slot with one version per present slot (1) or one version (single), copied into the swap chain image by an ExternalWork tail (\"[ORG native] graph present\" lines); 0 keeps the hand-written copy"
+
 [key."org.native_home_states"]
 env = "CS_ORG_NATIVE_HOME_STATES"
 type = "bool"
