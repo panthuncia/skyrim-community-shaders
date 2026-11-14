@@ -297,6 +297,9 @@ namespace RenderGraph::Engine::ImageSpace
 			// The water's temporal blend (the explicit-target Render, outside the other scopes): t0 the image, t1 the water history,
 			// t2 the motion vectors, t3 the depth, t4 the water mask; into kMAIN (SV_Target0) and the next history (SV_Target1).
 			{ Effects::ISWaterBlend, "ISWaterBlend", "waterblend", "ISWaterBlend.hlsl", 5, 0b11111, 5, 0, false, true, 2 },
+			// The underwater mask (the manager's +0x208): Water.hlsl's UNDERWATERMASK form over the engine's own geometry, pulled by its
+			// vertex stage (EffectInfo::geometry), usually with the main depth test. Its own scope outside the other scopes.
+			{ Effects::ISUnderwaterMask, "ISUnderwaterMask", "underwatermask", "Water.hlsl", 0, 0, 0, 0, false, true, 1, false, false, true },
 			// The vanilla TAA (ImageSpaceManager+0x1f0 in the end-of-frame chain, when Upscaling does not replace it): t0 the image, t1
 			// the history, t2 the motion vectors, t3 the depth, t4 the TAA mask, t5 the alpha; into the image (SV_Target0) and the next
 			// history (SV_Target1). Each call outside a scope is a scope of its own. The UI and water forms have no CS source path
