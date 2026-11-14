@@ -2012,6 +2012,21 @@ namespace RenderGraph::Engine::ImageSpace
 				for (const auto& pair : swaps)
 					if (Mentions(a_keys[i], pair.first) || Mentions(a_keys[i], pair.second))
 						add(Swapped(a_keys[i], pair), a_keys[i]);
+			// The TAA histories swap by frame (the read history is the other frame's written one): a shape that writes one and reads the
+			// other implies the other direction, so both are passes whichever the first session drew first. Applied after the pairs
+			// above, so the kMAIN / kMAIN_COPY partners get theirs too.
+			constexpr std::array kHistories{
+				std::pair{ RE::RENDER_TARGET::kTEMPORAL_AA_ACCUMULATION_1, RE::RENDER_TARGET::kTEMPORAL_AA_ACCUMULATION_2 },
+				std::pair{ RE::RENDER_TARGET::kTEMPORAL_AA_UI_ACCUMULATION_1, RE::RENDER_TARGET::kTEMPORAL_AA_UI_ACCUMULATION_2 },
+				std::pair{ RE::RENDER_TARGET::kTEMPORAL_AA_WATER_1, RE::RENDER_TARGET::kTEMPORAL_AA_WATER_2 },
+			};
+			const auto withPairs = a_keys.size();
+			for (std::size_t i = 0; i < withPairs; ++i)
+				for (const auto& [first, second] : kHistories) {
+					const std::pair names{ static_cast<std::int32_t>(first), static_cast<std::int32_t>(second) };
+					if (Mentions(a_keys[i], names.first) || Mentions(a_keys[i], names.second))
+						add(Swapped(a_keys[i], names), a_keys[i]);
+				}
 			const auto withSwaps = a_keys.size();
 			for (std::size_t i = 0; i < withSwaps; ++i) {
 				if (!SharesShapes(a_keys[i].effect))
