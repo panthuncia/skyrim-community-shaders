@@ -107,15 +107,8 @@ namespace DCLF
 			// (Features/TreeWind's CS_DCLF_TREE_LIST_ALL, then Features/Effects' CS_DCLF_OPAQUE_EFFECTS, are listed here, after
 			// CS_DCLF_SHADOWS: Features/OcclusionMaps' CS_DCLF_SKYLIGHT and CS_DCLF_PRECIPITATION, Features/Reflection's and
 			// Features/FirstPerson's switches before CS_DCLF_OPAQUE_EFFECTS, Features/Billboards' CS_DCLF_BILLBOARD_PARTICLES after it.)
-			// (Features/Fades' CS_DCLF_EMPTY_FADE_NODE is listed here, before CS_ORG_EPOCHS.)
-			{ OrgEpochs, "CS_ORG_EPOCHS", F, Reduced::Zero, true, "0: the render graph runs without epochs, and DCLF does not install" },
-			{ OrgAsyncEpochs, "CS_ORG_ASYNC_EPOCHS", F, Reduced::Zero, true, "0: epochs are recorded on the render thread" },
-			{ OrgClosed, "CS_ORG_CLOSED", F, N, true,
-				"1: epochs return every resource to its home state and start with a full barrier (closed executions, an interop fallback)" },
-			{ OrgExternalHome, "CS_ORG_EXTERNAL_HOME", F, Reduced::Zero, true,
-				"0: epochs do not return DXVK's images to their home state on the graphics queue (unsafe: DXVK expects them there)" },
-			{ OrgBatchSubmit, "CS_ORG_BATCH_SUBMIT", F, Reduced::Zero, true, "0: an epoch's submissions go to DXVK one at a time" },
-			{ OrgEarlyFlush, "CS_ORG_EARLY_FLUSH", F, N, true, "1: DXVK's pending work is flushed when an epoch starts (a second DXVK list per epoch)" },
+			// (Features/Fades' CS_DCLF_EMPTY_FADE_NODE is listed here, after CS_DCLF_SHADOWS and the rows anchored after it.)
+			// (The render graph's epoch and submission switches, CS_ORG_EPOCHS and the rest, are in src/Testing/SwitchRegistry.cpp.)
 
 			{ PersistentParity, "CS_DCLF_PERSISTENT_PARITY", P, N, false, "1: every kept store (records, bindings, slots, shading, geometry) against a rebuild, every 60 frames" },
 			{ WalkParity, "CS_DCLF_WALK_PARITY", P, N, false, "1: the delta walk against a dense walk, every 60 frames" },

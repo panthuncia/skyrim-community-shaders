@@ -181,9 +181,8 @@ namespace RenderGraph::Engine::Native
 		}
 		Stage("switches", turnedOn.empty() ? std::string("every port switch was set already") : fmt::format("turned on {}", turnedOn));
 		// D3D12: Drawcall Limit Fix's parts without a D3D12 port, by their own switches (read later, at DCLF's install).
-		char backend[16]{};
-		const DWORD backendLength = ::GetEnvironmentVariableA("CS_ORG_NATIVE_BACKEND", backend, sizeof(backend));
-		if (backendLength == 0 || backendLength >= sizeof(backend) || _stricmp(backend, "d3d12") != 0)
+		// GraphicsAPI::ApplyAtBoot set CS_ORG_NATIVE_BACKEND already, so the cached read sees its value.
+		if (!Switches::EqualsNoCase("CS_ORG_NATIVE_BACKEND", "d3d12"))
 			return;
 		std::string set, kept;
 		for (const auto& entry : kD3D12DclfSwitches) {

@@ -81,6 +81,64 @@ SPECIAL = {
         "key": "org.census_top", "type": "int",
         "description": "entries each of those window reports lists (default 25)",
     },
+    "CS_ORG_DEFERRED_CLEARS": {
+        "key": "org.deferred_clears", "type": "bool", "default": True,
+        "description": "false: the engine clears the six GBuffer targets itself, instead of one clear pass at the Prepass anchor",
+    },
+    # The epoch and submission switches (src/Testing/SwitchRegistry.cpp, kDescribed).
+    "CS_ORG_EPOCHS": {
+        "key": "org.epochs", "type": "bool", "default": True,
+        "description": "0: the render graph runs without epochs, and DCLF does not install",
+    },
+    "CS_ORG_ASYNC_EPOCHS": {
+        "key": "org.async_epochs", "type": "bool", "default": True,
+        "description": "0: epochs are recorded on the render thread",
+    },
+    "CS_ORG_CLOSED": {
+        "key": "org.closed", "type": "bool", "default": False,
+        "description": "1: epochs return every resource to its home state and start with a full barrier (closed executions, an "
+                       "interop fallback)",
+    },
+    "CS_ORG_EXTERNAL_HOME": {
+        "key": "org.external_home", "type": "bool", "default": True,
+        "description": "0: epochs do not return DXVK's images to their home state on the graphics queue (unsafe: DXVK expects them "
+                       "there)",
+    },
+    "CS_ORG_BATCH_SUBMIT": {
+        "key": "org.batch_submit", "type": "bool", "default": True,
+        "description": "0: an epoch's submissions go to DXVK one at a time",
+    },
+    "CS_ORG_EARLY_FLUSH": {
+        "key": "org.early_flush", "type": "bool", "default": False,
+        "description": "1: DXVK's pending work is flushed when an epoch starts (a second DXVK list per epoch)",
+    },
+    # Written into schema.toml by hand before; kept here so a regeneration does not drop them.
+    "CS_ORG_IMAGE_DUPLICATE_CHECK": {
+        "key": "org.image_duplicate_check", "type": "bool", "default": False,
+        "description": "log when two live graph resources wrap one image (any importer)",
+    },
+    "CS_ORG_NATIVE_EXCLUSIVE_IMPORTS": {
+        "key": "org.native_exclusive_imports", "type": "bool", "default": False,
+        "description": "native: graph imports are exclusive, moved into each pass layout (default false: shared, Common-only, "
+                       "until the duplicate image check is clean)",
+    },
+    "CS_ORG_NATIVE_HOME_STATES": {
+        "key": "org.native_home_states", "type": "bool", "default": True,
+        "description": "native Vulkan: false turns home states off (images stay where the graph left them; implies exclusive "
+                       "imports; no in-stream epochs; the context's work on tracked images goes through ExternalWork)",
+    },
+    "CS_ORG_NATIVE_IN_STREAM": {
+        "key": "org.native_in_stream", "type": "bool", "default": False,
+        "description": "native with home states off: keep in-stream epochs (and with them DCLF's direct forward families)",
+    },
+    "CS_ORG_NATIVE_OWNED": {
+        "key": "org.native_owned", "type": "bool", "default": True,
+        "description": "native: engine textures are graph-owned and immutable ones exempt (false restores host-made textures)",
+    },
+    "CS_ORG_RAW_ACCESS_CHECK": {
+        "key": "org.raw_access_check", "type": "bool", "default": False,
+        "description": "native: log and count work on graph-tracked images that skips the graph's state tracking ([ORG raw access] lines)",
+    },
     "CS_HANG_WATCHDOG": {
         "key": "cs.hang_watchdog", "type": "int",
         "description": "seconds without progress before the hang watchdog writes its report (default 15)",
