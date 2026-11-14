@@ -39,6 +39,7 @@
 #	include <cstddef>
 #	include <cstring>
 #	include <optional>
+#	include <set>
 #	include <string>
 
 namespace RenderGraph::Engine::Scaleform::Passes
@@ -195,6 +196,7 @@ namespace RenderGraph::Engine::Scaleform::Passes
 			std::uint32_t registrations = 0;
 			std::uint32_t largestSegment = 0;
 			ProgramCache<RasterProgram, ProgramKey> programs{ "Scaleform" };
+			std::set<ProgramKey> failedPrograms;  // each logged once (NoteFailedProgram)
 			std::shared_ptr<RunGate> gate;
 			std::shared_ptr<FrameStaging> staging;
 			// The run in progress (Submit to the end of its anchor run): the display, and the commands of it this run draws.
@@ -1056,6 +1058,20 @@ namespace RenderGraph::Engine::Scaleform::Passes
 				logger::info("[ORG] Scaleform: the largest segment so far has {} commands (drawn in runs of at most {})", a_commands, kGateEntries);
 		}
 
+		/**
+		 * @brief A draw whose pipeline could not be built: the ProgramCache logged the build's error once; this names the key, once.
+		 * The draw is left out and the rest of its segment draws.
+		 */
+		void NoteFailedProgram(PathState& a_state, const ProgramKey& a_key)
+		{
+			if (!a_state.failedPrograms.insert(a_key).second)
+				return;
+			logger::error("[ORG] Scaleform programs: the pipeline for vertex kind {}, pixel kind {}, filter {}, blend {}, stencil {}, {} (colour format {}, "
+						  "depth format {}) could not be built; its draws are left out",
+				a_key.state.vertexKind, a_key.state.pixelKind, a_key.state.filter, a_key.state.blend, static_cast<int>(a_key.state.stencil),
+				a_key.state.lines ? "line strip" : "triangle list", static_cast<int>(a_key.colour), static_cast<int>(a_key.depth));
+		}
+
 		/** @brief A run that did not draw: an error of the graph path, logged once per reason. Not a readiness state. */
 		void Failure(const char* a_reason)
 		{
@@ -1164,7 +1180,8 @@ namespace RenderGraph::Engine::Scaleform::Passes
 		if (!surface)
 			return false;
 
-		// Every pipeline was queued at setup; one the build thread has not finished yet is built here, never left to D3D11.
+		// Every pipeline was queued at setup; one the build thread has not finished yet is built here, never left to D3D11. A key that
+		// failed to build leaves its draw out (logged once); the rest of the segment draws.
 		state.pendingPrograms.assign(a_display.commands.size(), nullptr);
 		for (std::size_t i = 0; i < a_display.commands.size(); ++i) {
 			const Command& command = a_display.commands[i];
@@ -1174,11 +1191,8 @@ namespace RenderGraph::Engine::Scaleform::Passes
 			if (!needsDepth)
 				key.state.stencil = Stencil::Off;
 			state.pendingPrograms[i] = state.programs.Require(key, [&] { return DescOf(key); });
-			if (!state.pendingPrograms[i]) {
-				state.pendingPrograms.clear();
-				a_reason = "a pipeline that cannot be made";
-				return false;
-			}
+			if (!state.pendingPrograms[i])
+				NoteFailedProgram(state, key);
 		}
 		if (!FrameAnchors::CanRun(kClientId, Anchor::Interface)) {
 			state.pendingPrograms.clear();
