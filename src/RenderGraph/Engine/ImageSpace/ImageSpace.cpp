@@ -275,6 +275,10 @@ namespace RenderGraph::Engine::ImageSpace
 			// history (SV_Target1). Each call outside a scope is a scope of its own. The UI and water forms have no CS source path
 			// (imagespace-shaders.md) and stay the engine's.
 			{ Effects::ISTemporalAA, "ISTemporalAA", "taa", "ISTemporalAA.hlsl", 6, 0b111111, 6, 0, false, true, 2 },
+			// The local map's edge pass (16094: kLOCAL_MAP_SWAP into kLOCAL_MAP, outside the frame's scopes: each call a scope of its own).
+			{ Effects::ISLocalMap, "ISLocalMap", "localmap", "ISLocalMap.hlsl", 1, 0b1, 1, 0, false, true },
+			// A colour fill (menu 3D's clear among others). Draws with a stencil test or a manager rectangle are refused as for any effect.
+			{ Effects::ISSimpleColor, "ISSimpleColor", "simplecolor", "ISSimpleColor.hlsl", 0, 0, 0, 0, false, true },
 		});
 
 		/**
