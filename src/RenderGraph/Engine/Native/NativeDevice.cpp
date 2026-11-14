@@ -4165,41 +4165,6 @@ namespace RenderGraph::Engine::Native
 			}
 		}
 
-		/**
-		 * @brief Copies between two images the graph tracks through ORG's external client (ExternalWork): their ledgers give the
-		 * barriers, so no graph changes and the copy lands here in the stream. a_subresources lists (destination, source) subresource
-		 * pairs; with a_box, one region of the first pair to (a_x, a_y, a_z). False, with nothing done, when either image is not
-		 * tracked, a subresource does not exist, or the submission failed: the caller records the copy itself.
-		 */
-		bool CopyExternally(const std::shared_ptr<NativeResource>& a_destination, const std::shared_ptr<NativeResource>& a_source,
-			std::span<const std::pair<uint32_t, uint32_t>> a_subresources, uint32_t a_x, uint32_t a_y, uint32_t a_z, const D3D11_BOX* a_box)
-		{
-			if (a_destination->kind != NativeResource::Kind::Image || a_source->kind != NativeResource::Kind::Image || a_subresources.empty())
-				return false;
-			// Within one image: one resource cannot be declared as both copy states. RouteRaw takes it (reading and writing, in GENERAL).
-			if (a_destination == a_source)
-				return false;
-			const auto to = LedgerResourceOf(*a_destination);
-			const auto from = LedgerResourceOf(*a_source);
-			if (!to || !from)
-				return false;
-			for (const auto& [destinationSub, sourceSub] : a_subresources)
-				if (destinationSub >= a_destination->shape.Subresources() || sourceSub >= a_source->shape.Subresources())
-					return false;
-			const auto toHandle = to->GetAPIResource().GetHandle();
-			const auto fromHandle = from->GetAPIResource().GetHandle();
-			const std::array accesses{ ::RenderGraph::ExternalWork::CopyDestination(*to), ::RenderGraph::ExternalWork::CopySource(*from) };
-			return ::RenderGraph::ExternalWork::Submit(
-				"native context copy", accesses,
-				[&](rhi::CommandList& a_list) {
-					for (const auto& [destinationSub, sourceSub] : a_subresources) {
-						const auto [region, source] = ImageCopyRegions(*a_destination, toHandle, destinationSub, a_x, a_y, a_z, *a_source, fromHandle, sourceSub, a_box);
-						a_list.CopyTextureRegion(region, source);
-					}
-				},
-				std::make_shared<std::pair<std::shared_ptr<NativeResource>, std::shared_ptr<NativeResource>>>(a_destination, a_source));
-		}
-
 		void ContextUpdateSubresource(ID3D11Resource* a_resource, UINT a_subresource, const D3D11_BOX* a_box, const void* a_data, UINT a_rowPitch, UINT a_depthPitch)
 		{
 			if (!a_data)
@@ -4444,15 +4409,8 @@ namespace RenderGraph::Engine::Native
 				}
 				return;
 			}
-			// Two textures the graph tracks: through ORG's external client.
-			if (const std::pair<uint32_t, uint32_t> pair{ a_destinationSub, a_sourceSub };
-				CopyExternally(destination, source, { &pair, 1 }, a_x, a_y, a_z, a_box)) {
-				NoteRouted(OpCensus::Op::CopyRegion, *destination, OpCensus::Route::ExternalWork);
-				NoteRouted(OpCensus::Op::CopyRegionSource, *source, OpCensus::Route::ExternalWork);
-				return;
-			}
 			bool recorded = false;
-			// One side the graph tracks (the other a staging texture, or an image no graph imported): through ORG's external client.
+			// A side the graph tracks: through ORG's external client.
 			if (RouteRaw("copy region " + source->name + " to " + destination->name, { { destination.get(), false, true }, { source.get(), true, false } },
 					[&](const Immediate::Vulkan& a_vk, VkCommandBuffer a_commands) {
 						recorded = RecordCopy(a_vk, a_commands, *destination, a_destinationSub,
@@ -4519,18 +4477,6 @@ namespace RenderGraph::Engine::Native
 				}
 				return;
 			}
-			// Two textures the graph tracks: every subresource through ORG's external client.
-			if (destination->kind == NativeResource::Kind::Image && source->kind == NativeResource::Kind::Image) {
-				std::vector<std::pair<uint32_t, uint32_t>> subresources;
-				const uint32_t count = (std::min)(destination->shape.Subresources(), source->shape.Subresources());
-				for (uint32_t sub = 0; sub < count; ++sub)
-					subresources.emplace_back(sub, sub);
-				if (CopyExternally(destination, source, subresources, 0, 0, 0, nullptr)) {
-					NoteRouted(OpCensus::Op::Copy, *destination, OpCensus::Route::ExternalWork);
-					NoteRouted(OpCensus::Op::CopySource, *source, OpCensus::Route::ExternalWork);
-					return;
-				}
-			}
 			bool recorded = true;
 			const auto copyCommands = [&](const Immediate::Vulkan& a_vk, VkCommandBuffer a_commands) {
 				if (destination->kind == NativeResource::Kind::Buffer || source->kind == NativeResource::Kind::Buffer) {
@@ -4541,8 +4487,7 @@ namespace RenderGraph::Engine::Native
 				for (uint32_t sub = 0; sub < count; ++sub)
 					recorded = RecordCopy(a_vk, a_commands, *destination, sub, {}, *source, sub, nullptr) && recorded;
 			};
-			// One side the graph tracks (the other a staging texture: a readback, or an image no graph imported): through ORG's
-			// external client.
+			// A side the graph tracks: through ORG's external client.
 			if (RouteRaw("copy " + source->name + " to " + destination->name, { { destination.get(), false, true }, { source.get(), true, false } }, copyCommands,
 					{ destination, source }, { destination.get(), source.get() })) {
 				NoteRouted(OpCensus::Op::Copy, *destination, OpCensus::Route::ExternalWork);
