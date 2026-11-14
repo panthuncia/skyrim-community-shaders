@@ -2468,6 +2468,8 @@ bool RenderGraphRuntime::Initialize()
 	impl = std::move(state);
 	disabledReason.clear();
 	if (impl->native) {
+		// Before any import: the graph present's back buffer slot (CS_ORG_NATIVE_GRAPH_PRESENT).
+		RenderGraph::Engine::Native::OnGraphReady();
 		logger::info("[ORG] Render graph runs natively on BasicRHI's {} device; submissions go to its queues directly",
 			RenderGraph::Backend::Name(RenderGraph::Backend::Active()));
 	} else {
