@@ -19,12 +19,14 @@
 #	include "RenderGraph/Engine/Tripwire/Tripwire.h"
 #	include "RenderGraph/Backend.h"
 #	include "RenderGraph/BuildManager.h"
+#	include "RenderGraph/ComputeProgram.h"
 #	include "RenderGraph/DxvkImageImport.h"
 #	include "RenderGraph/Engine/D3D12Device.h"
 #	include "RenderGraph/Engine/Native/OpCensus.h"
 #	include "RenderGraph/Engine/Skeleton/SkeletonSites.h"
 #	include "RenderGraph/ExternalWork.h"
 #	include "RenderGraph/FrameAnchors.h"
+#	include "RenderGraph/GenerateMips.h"
 #	include "RenderGraph/GraphResources.h"
 #	include "RenderGraph/RenderGraphRuntime.h"
 #	include "RenderGraph/Switches.h"
@@ -323,6 +325,10 @@ namespace RenderGraph::Engine::Native
 			uint64_t offset = 0;
 			uint32_t rowPitch = 0;
 			uint32_t depthPitch = 0;
+			// A depth-stencil staging texture: where the GPU's depth and stencil planes of the subresource lie (StencilTexelBytes).
+			// The CPU sees D3D11's interleaved texels at offset; copies move them between the two (RepackDepthStencil).
+			uint64_t depthOffset = 0, stencilOffset = 0;
+			uint32_t depthRowPitch = 0, stencilRowPitch = 0;
 		};
 
 		/** @brief A texture's shape, as the context's operations need it. Rows and row bytes count blocks for compressed formats. */
@@ -396,6 +402,12 @@ namespace RenderGraph::Engine::Native
 			std::shared_ptr<NativeResource> upload;
 			// The value of the last immediate work that read or wrote it (Immediate), so Map waits only for that.
 			std::atomic<uint64_t> lastUse{ 0 };
+			// A depth-stencil staging texture: whether a copy from an image wrote its planes since the CPU's texels were last made from
+			// them (Map makes them then), and whether that image's depth plane holds floats (DepthPlaneFloat).
+			std::atomic<bool> planesNewer{ false };
+			bool planeFloat = false;
+			// GenerateMips' scratch texture (MipScratchOf): a UAV twin of this image the mip chain is built in. Made on first use.
+			std::shared_ptr<NativeResource> mipScratch;
 			// A shell's window (StreamSetWindow), and whether the streamer enabled it (StreamEnableView).
 			std::mutex windowLock;
 			winrt::com_ptr<ID3D11ShaderResourceView> window;
@@ -1028,6 +1040,67 @@ namespace RenderGraph::Engine::Native
 			return { channel(0), channel(1), channel(2), channel(3) };
 		}
 
+		/**
+		 * @brief A depth-stencil format's D3D11 texel size: 4 bytes (D24S8: depth in the low 24 bits, stencil in the top byte) or 8
+		 * (D32S8X24: float depth, then the stencil byte). 0 for a format without stencil.
+		 */
+		uint32_t StencilTexelBytes(const Shape& a_shape)
+		{
+			return (a_shape.aspects & VK_IMAGE_ASPECT_STENCIL_BIT) ? a_shape.blockBytes : 0u;
+		}
+
+		/**
+		 * @brief One subresource's depth-stencil texels between D3D11's interleaved form (a_main, a_texel bytes each) and the GPU's
+		 * planes: a_depth (4 bytes a texel: a float when a_float, else 24-bit UNORM in the low bits) and a_stencil (1 byte a texel).
+		 * a_unpack: planes to D3D11's form, else D3D11's form to planes.
+		 */
+		void RepackDepthStencil(bool a_unpack, uint32_t a_texel, bool a_float, std::byte* a_main, uint32_t a_mainPitch, std::byte* a_depth, uint32_t a_depthPitch,
+			std::byte* a_stencil, uint32_t a_stencilPitch, uint32_t a_width, uint32_t a_rows)
+		{
+			constexpr float kUnorm24 = 16777215.0f;
+			for (uint32_t row = 0; row < a_rows; ++row) {
+				std::byte* main = a_main + uint64_t(row) * a_mainPitch;
+				std::byte* depth = a_depth + uint64_t(row) * a_depthPitch;
+				std::byte* stencil = a_stencil + uint64_t(row) * a_stencilPitch;
+				for (uint32_t x = 0; x < a_width; ++x) {
+					std::byte* texel = main + uint64_t(x) * a_texel;
+					uint32_t plane = 0;
+					if (a_unpack) {
+						std::memcpy(&plane, depth + uint64_t(x) * 4, 4);
+						if (a_texel == 4) {
+							uint32_t unorm = plane & 0xFFFFFFu;
+							if (a_float) {
+								float value = 0.0f;
+								std::memcpy(&value, &plane, 4);
+								unorm = static_cast<uint32_t>(std::clamp(value, 0.0f, 1.0f) * kUnorm24 + 0.5f);
+							}
+							const uint32_t packed = unorm | (uint32_t(std::to_integer<uint8_t>(stencil[x])) << 24);
+							std::memcpy(texel, &packed, 4);
+						} else {
+							std::memcpy(texel, &plane, 4);
+							texel[4] = stencil[x];
+							std::memset(texel + 5, 0, 3);
+						}
+					} else {
+						if (a_texel == 4) {
+							uint32_t packed = 0;
+							std::memcpy(&packed, texel, 4);
+							plane = packed & 0xFFFFFFu;
+							if (a_float) {
+								const float value = static_cast<float>(plane) / kUnorm24;
+								std::memcpy(&plane, &value, 4);
+							}
+							stencil[x] = static_cast<std::byte>(packed >> 24);
+						} else {
+							std::memcpy(&plane, texel, 4);
+							stencil[x] = texel[4];
+						}
+						std::memcpy(depth + uint64_t(x) * 4, &plane, 4);
+					}
+				}
+			}
+		}
+
 		uint32_t FullMipCount(uint32_t a_width, uint32_t a_height, uint32_t a_depth)
 		{
 			uint32_t size = (std::max)({ a_width, a_height, a_depth, 1u });
@@ -1276,6 +1349,9 @@ namespace RenderGraph::Engine::Native
 			OneShot oneShot;
 			Immediate immediate;
 			External external;
+			// GenerateMips' compute programs (ORG's GenerateMips.hlsl): for 2D textures, and for arrays and cubes. Loaded once the render
+			// graph is up, with the BasicRHI context (LoadMipPrograms).
+			std::shared_ptr<const GraphPasses::GenerateMipsProgram> mips2D, mipsArray;
 
 			// The swap chain on the game's window, and the back buffer the engine draws into (through the graph's passes).
 			rhi::SwapchainPtr swapchain;
@@ -1689,6 +1765,19 @@ namespace RenderGraph::Engine::Native
 						offset = (offset + uint64_t(entry.depthPitch) * shape.Depth(mip) + 511) & ~uint64_t(511);
 					}
 				}
+				// A depth-stencil format: room for the GPU's two planes of each subresource, after the CPU's texels. Its copies to and
+				// from images go through them (4-byte depth texels, 1-byte stencil texels).
+				if (StencilTexelBytes(shape)) {
+					for (auto& entry : record->layout) {
+						const uint32_t mip = static_cast<uint32_t>(&entry - record->layout.data()) % mips;
+						entry.depthRowPitch = (shape.Width(mip) * 4u + 255u) & ~255u;
+						entry.depthOffset = offset;
+						offset = (offset + uint64_t(entry.depthRowPitch) * shape.Height(mip) + 511) & ~uint64_t(511);
+						entry.stencilRowPitch = (shape.Width(mip) + 255u) & ~255u;
+						entry.stencilOffset = offset;
+						offset = (offset + uint64_t(entry.stencilRowPitch) * shape.Height(mip) + 511) & ~uint64_t(511);
+					}
+				}
 				record->readback = !a_upload && (a_request.cpuAccess & D3D11_CPU_ACCESS_READ);
 				if (!MakeBufferResource(*record, (std::max)(offset, uint64_t(1)), record->readback ? rhi::HeapType::Readback : rhi::HeapType::Upload, false))
 					return E_OUTOFMEMORY;
@@ -1759,6 +1848,60 @@ namespace RenderGraph::Engine::Native
 				a_record.address = static_cast<VkDeviceAddress>(info.deviceAddress);
 				a_record.usage = static_cast<VkBufferUsageFlags>(info.usage);
 				return true;
+			}
+
+			/** @brief GenerateMips' programs, once the render graph's shader compiler is up. Render thread, at startup. */
+			void LoadMipPrograms()
+			{
+				mips2D = GraphPasses::LoadGenerateMips(Rhi(), false);
+				mipsArray = GraphPasses::LoadGenerateMips(Rhi(), true);
+				logger::info("[ORG native] GenerateMips: the context builds mip chains with a compute shader ({}2D textures, {}arrays and cubes)",
+					mips2D ? "" : "not for ", mipsArray ? "" : "not for ");
+			}
+
+			/**
+			 * @brief GenerateMips' scratch texture for a_image: a texture of its size, mips and slices with unordered access, in
+			 * a_format (the UNORM twin of an sRGB format), resting in Common. Null when it cannot be made.
+			 */
+			std::shared_ptr<NativeResource> MakeMipScratch(const NativeResource& a_image, rhi::Format a_format)
+			{
+				const auto& shape = a_image.shape;
+				auto record = std::make_shared<NativeResource>();
+				record->name = a_image.name + " (mip scratch)";
+				record->kind = NativeResource::Kind::Image;
+				record->shape = shape;
+				record->shape.format = record->shape.viewFormat = a_format;
+				rhi::ResourceDesc desc{};
+				desc.type = rhi::ResourceType::Texture2D;
+				desc.heapType = rhi::HeapType::DeviceLocal;
+				desc.resourceFlags = rhi::RF_AllowUnorderedAccess;
+				desc.debugName = record->name.c_str();
+				desc.texture.format = a_format;
+				desc.texture.width = shape.width;
+				desc.texture.height = shape.height;
+				desc.texture.depthOrLayers = static_cast<uint16_t>(shape.layers);
+				desc.texture.mipLevels = static_cast<uint16_t>(shape.mips);
+				desc.texture.sampleCount = 1;
+				if (Rhi().CreateCommittedResource(desc, record->resource) != rhi::Result::Ok || !record->resource)
+					return nullptr;
+				// Undefined to Common, where it rests between mip chains.
+				const rhi::TextureSubresourceRange all{ 0, shape.mips, 0, shape.layers, 0, 1 };
+				const auto handle = record->resource->GetHandle();
+				NativeResource* const used[] = { record.get() };
+				const auto initialize = [&](rhi::CommandList& a_list, const Immediate::Descriptors&) {
+					RecordInitialize(a_list, handle, all, {}, {}, rhi::ResourceLayout::Common, rhi::ResourceAccessType::Common);
+				};
+				return immediate.RunUntracked("mip scratch " + a_image.name, initialize, {}, used) ? record : nullptr;
+			}
+
+			/** @brief A short-lived device buffer for one copy's rows (CopyRhi's bounce), kept until that copy's work is done. */
+			std::shared_ptr<NativeResource> MakeBounce(uint64_t a_size)
+			{
+				auto record = std::make_shared<NativeResource>();
+				record->name = "Native::Bounce";
+				if (!MakeBufferResource(*record, (std::max)(a_size, uint64_t(1)), rhi::HeapType::DeviceLocal, false))
+					return nullptr;
+				return record;
 			}
 
 			/** @brief A short-lived upload buffer for one context operation, kept until that operation's work is done. */
@@ -3323,15 +3466,6 @@ namespace RenderGraph::Engine::Native
 			return a_shape.blocks ? (a_texels + 3u) & ~3u : a_texels;
 		}
 
-		/** @brief The placed footprint of one subresource of a staging record (its own layout entry, the whole subresource). */
-		rhi::CopyableFootprint StagingFootprint(const NativeResource& a_staging, uint32_t a_sub)
-		{
-			const auto& shape = a_staging.shape;
-			const auto& entry = a_staging.layout[a_sub];
-			const uint32_t mip = a_sub % shape.mips;
-			return { entry.offset, entry.rowPitch, FootprintExtent(shape, shape.Width(mip)), FootprintExtent(shape, shape.Height(mip)), shape.Depth(mip) };
-		}
-
 		/**
 		 * @brief The destination and source regions of one subresource copy between two images, on the handles given (a record's own
 		 * import, or its graph resource's). a_box null is the whole source subresource. The subresources must exist.
@@ -3363,13 +3497,73 @@ namespace RenderGraph::Engine::Native
 		}
 
 		/**
+		 * @brief Whether a depth-stencil image's depth plane holds floats in a buffer copy: D32S8X24, and the D24 family where BasicRHI
+		 * stores it as D32S8 (Vulkan devices without D24S8 attachments). Else 24-bit UNORM.
+		 */
+		bool DepthPlaneFloat(const NativeResource& a_image)
+		{
+			if (a_image.shape.blockBytes == 8)
+				return true;
+			return !OnD3D12() && a_image.image.format == VK_FORMAT_D32_SFLOAT_S8_UINT;
+		}
+
+		/** @brief A buffer barrier on a bounce buffer, between two of its copy states (Common at the start). */
+		void BounceBarrier(rhi::CommandList& a_list, const NativeResource& a_bounce, rhi::ResourceAccessType a_before, rhi::ResourceAccessType a_after)
+		{
+			rhi::BufferBarrier barrier{};
+			barrier.buffer = a_bounce.resource->GetHandle();
+			barrier.beforeSync = a_before == rhi::ResourceAccessType::Common ? rhi::ResourceSyncState::All : rhi::ResourceSyncState::Copy;
+			barrier.afterSync = rhi::ResourceSyncState::Copy;
+			barrier.beforeAccess = a_before;
+			barrier.afterAccess = a_after;
+			a_list.Barriers({ {}, { &barrier, 1 }, {} });
+		}
+
+		/** @brief A region of a staging subresource: its rows, the bytes of each, and where each row starts in the staging buffer. */
+		struct StagingRows
+		{
+			uint32_t rows = 0, rowBytes = 0, depth = 1;
+			uint64_t start = 0;  // the region's first byte
+			uint32_t rowPitch = 0, depthPitch = 0;
+			uint64_t At(uint32_t a_z, uint32_t a_row) const { return start + uint64_t(a_z) * depthPitch + uint64_t(a_row) * rowPitch; }
+		};
+
+		/** @brief The region of staging subresource a_sub at (a_x, a_y, a_z), a_width x a_height x a_depth texels. */
+		StagingRows RowsOf(const NativeResource& a_staging, uint32_t a_sub, uint32_t a_x, uint32_t a_y, uint32_t a_z, uint32_t a_width, uint32_t a_height, uint32_t a_depth)
+		{
+			const auto& shape = a_staging.shape;
+			const auto& entry = a_staging.layout[a_sub];
+			const uint32_t block = shape.BlockSize();
+			StagingRows rows;
+			rows.rows = shape.Rows(a_height);
+			rows.rowBytes = shape.RowBytes(a_width);
+			rows.depth = a_depth;
+			rows.rowPitch = entry.rowPitch;
+			rows.depthPitch = entry.depthPitch;
+			rows.start = entry.offset + uint64_t(a_z) * entry.depthPitch + uint64_t(a_y / block) * entry.rowPitch + uint64_t(a_x / block) * shape.blockBytes;
+			return rows;
+		}
+
+		/** @brief The bounce buffer's row pitch for a region of a_rows (StagingRows): 256-byte rows, as every backend's footprints take. */
+		uint32_t BouncePitch(const StagingRows& a_rows)
+		{
+			return (a_rows.rowBytes + 255u) & ~255u;
+		}
+
+		/**
 		 * @brief One subresource region from a_source to a_destination with BasicRHI commands, whatever each is (a buffer, an image, a
 		 * staging texture), on the handles given, with each already in its copy state (RunOp). a_box null is the whole subresource
-		 * (the whole buffer). Staging copies take whole subresources only (a box is refused), since a placed footprint must start at
-		 * an aligned offset; a staging copy of a depth-stencil image is refused too. False when the pair cannot be copied.
+		 * (the whole buffer).
+		 * - A placed footprint starts at an aligned offset, so a staging region that does not start a subresource goes through
+		 *   a_bounce (a buffer CopyRhi made for it, resting in Common): the image's region and the bounce at offset 0, the rows between
+		 *   the bounce and the staging texture.
+		 * - A depth image copies its depth plane; a depth-stencil image copies both planes, to or from the staging texture's plane areas
+		 *   (CopyRhi repacks them with the CPU's texels).
+		 * False when the pair cannot be copied.
 		 */
 		bool RecordCopyRhi(rhi::CommandList& a_list, const NativeResource& a_destination, rhi::ResourceHandle a_destinationHandle, uint32_t a_destinationSub,
-			uint32_t a_x, uint32_t a_y, uint32_t a_z, const NativeResource& a_source, rhi::ResourceHandle a_sourceHandle, uint32_t a_sourceSub, const D3D11_BOX* a_box)
+			uint32_t a_x, uint32_t a_y, uint32_t a_z, const NativeResource& a_source, rhi::ResourceHandle a_sourceHandle, uint32_t a_sourceSub, const D3D11_BOX* a_box,
+			const NativeResource* a_bounce)
 		{
 			using Kind = NativeResource::Kind;
 			const bool sourceBuffer = a_source.kind == Kind::Buffer;
@@ -3392,37 +3586,69 @@ namespace RenderGraph::Engine::Native
 			const uint32_t sourceLayer = a_sourceSub / sourceShape.mips;
 			const uint32_t destinationMip = a_destinationSub % destinationShape.mips;
 			const uint32_t destinationLayer = a_destinationSub / destinationShape.mips;
+			// The region copied, in texels: the box, or the whole source subresource.
+			const uint32_t width = a_box ? a_box->right - a_box->left : sourceShape.Width(sourceMip);
+			const uint32_t height = a_box ? a_box->bottom - a_box->top : sourceShape.Height(sourceMip);
+			const uint32_t depth = a_box ? a_box->back - a_box->front : sourceShape.Depth(sourceMip);
 			if (a_source.kind == Kind::Image && a_destination.kind == Kind::Image) {
 				const auto [to, from] = ImageCopyRegions(a_destination, a_destinationHandle, a_destinationSub, a_x, a_y, a_z, a_source, a_sourceHandle, a_sourceSub, a_box);
 				a_list.CopyTextureRegion(to, from);
 				return true;
 			}
 			if (a_source.kind == Kind::Image && a_destination.kind == Kind::Staging) {
-				// Into the staging subresource's start (a placed footprint starts at an aligned offset), from any region of the image: the
-				// texture side's offset is the box's origin, and the footprint's extent the box's (BasicRHI's buffer-texture copies).
-				if (a_x || a_y || a_z || sourceShape.aspects != VK_IMAGE_ASPECT_COLOR_BIT)
-					return false;
 				rhi::BufferTextureCopyFootprint copy{};
 				copy.texture = a_sourceHandle;
 				copy.buffer = a_destinationHandle;
 				copy.mip = sourceMip;
 				copy.arraySlice = sourceLayer;
-				copy.footprint = StagingFootprint(a_destination, a_destinationSub);
-				if (a_box) {
-					copy.x = a_box->left;
-					copy.y = a_box->top;
-					copy.z = a_box->front;
-					copy.footprint.width = FootprintExtent(sourceShape, a_box->right - a_box->left);
-					copy.footprint.height = FootprintExtent(sourceShape, a_box->bottom - a_box->top);
-					copy.footprint.depth = a_box->back - a_box->front;
+				const auto& entry = a_destination.layout[a_destinationSub];
+				if (sourceShape.aspects != VK_IMAGE_ASPECT_COLOR_BIT) {
+					// D3D11 copies a depth subresource whole. Depth alone lands on the CPU's texels (same size); with stencil, each plane
+					// in its own area.
+					if (a_box || a_x || a_y || a_z)
+						return false;
+					copy.footprint = { entry.offset, entry.rowPitch, sourceShape.Width(sourceMip), sourceShape.Height(sourceMip), 1 };
+					if (!StencilTexelBytes(sourceShape)) {
+						a_list.CopyTextureToBuffer(copy);
+						return true;
+					}
+					if (!StencilTexelBytes(destinationShape))
+						return false;
+					copy.footprint.offset = entry.depthOffset;
+					copy.footprint.rowPitch = entry.depthRowPitch;
+					copy.plane = 0;
+					a_list.CopyTextureToBuffer(copy);
+					copy.footprint.offset = entry.stencilOffset;
+					copy.footprint.rowPitch = entry.stencilRowPitch;
+					copy.plane = 1;
+					a_list.CopyTextureToBuffer(copy);
+					return true;
 				}
+				copy.x = a_box ? a_box->left : 0;
+				copy.y = a_box ? a_box->top : 0;
+				copy.z = a_box ? a_box->front : 0;
+				copy.footprint = { entry.offset, entry.rowPitch, FootprintExtent(sourceShape, width), FootprintExtent(sourceShape, height), depth };
+				if (!a_x && !a_y && !a_z) {
+					a_list.CopyTextureToBuffer(copy);
+					return true;
+				}
+				// Into the middle of a staging subresource: the region into the bounce buffer, then row by row into place.
+				if (!a_bounce)
+					return false;
+				const auto rows = RowsOf(a_destination, a_destinationSub, a_x, a_y, a_z, width, height, depth);
+				const uint32_t pitch = BouncePitch(rows);
+				copy.buffer = a_bounce->resource->GetHandle();
+				copy.footprint.offset = 0;
+				copy.footprint.rowPitch = pitch;
+				BounceBarrier(a_list, *a_bounce, rhi::ResourceAccessType::Common, rhi::ResourceAccessType::CopyDest);
 				a_list.CopyTextureToBuffer(copy);
+				BounceBarrier(a_list, *a_bounce, rhi::ResourceAccessType::CopyDest, rhi::ResourceAccessType::CopySource);
+				for (uint32_t z = 0; z < rows.depth; ++z)
+					for (uint32_t row = 0; row < rows.rows; ++row)
+						a_list.CopyBufferRegion(a_destinationHandle, rows.At(z, row), copy.buffer, (uint64_t(z) * rows.rows + row) * pitch, rows.rowBytes);
 				return true;
 			}
 			if (a_source.kind == Kind::Staging && a_destination.kind == Kind::Image) {
-				// From the staging subresource's start only (a region elsewhere would start the footprint at an unaligned offset).
-				if ((a_box && (a_box->left || a_box->top || a_box->front)) || destinationShape.aspects != VK_IMAGE_ASPECT_COLOR_BIT)
-					return false;
 				rhi::BufferTextureCopyFootprint copy{};
 				copy.texture = a_destinationHandle;
 				copy.buffer = a_sourceHandle;
@@ -3431,31 +3657,106 @@ namespace RenderGraph::Engine::Native
 				copy.x = a_x;
 				copy.y = a_y;
 				copy.z = a_z;
-				copy.footprint = StagingFootprint(a_source, a_sourceSub);
-				if (a_box) {
-					copy.footprint.width = FootprintExtent(a_source.shape, a_box->right);
-					copy.footprint.height = FootprintExtent(a_source.shape, a_box->bottom);
-					copy.footprint.depth = a_box->back;
+				const auto& entry = a_source.layout[a_sourceSub];
+				if (destinationShape.aspects != VK_IMAGE_ASPECT_COLOR_BIT) {
+					if (a_box || a_x || a_y || a_z)
+						return false;
+					copy.footprint = { entry.offset, entry.rowPitch, destinationShape.Width(destinationMip), destinationShape.Height(destinationMip), 1 };
+					if (!StencilTexelBytes(destinationShape)) {
+						a_list.CopyBufferToTexture(copy);
+						return true;
+					}
+					if (!StencilTexelBytes(sourceShape))
+						return false;
+					copy.footprint.offset = entry.depthOffset;
+					copy.footprint.rowPitch = entry.depthRowPitch;
+					copy.plane = 0;
+					a_list.CopyBufferToTexture(copy);
+					copy.footprint.offset = entry.stencilOffset;
+					copy.footprint.rowPitch = entry.stencilRowPitch;
+					copy.plane = 1;
+					a_list.CopyBufferToTexture(copy);
+					return true;
 				}
+				copy.footprint = { entry.offset, entry.rowPitch, FootprintExtent(sourceShape, width), FootprintExtent(sourceShape, height), depth };
+				if (!a_box || (!a_box->left && !a_box->top && !a_box->front)) {
+					a_list.CopyBufferToTexture(copy);
+					return true;
+				}
+				// From the middle of a staging subresource: row by row into the bounce buffer, then the region from it.
+				if (!a_bounce)
+					return false;
+				const auto rows = RowsOf(a_source, a_sourceSub, a_box->left, a_box->top, a_box->front, width, height, depth);
+				const uint32_t pitch = BouncePitch(rows);
+				const auto bounce = a_bounce->resource->GetHandle();
+				BounceBarrier(a_list, *a_bounce, rhi::ResourceAccessType::Common, rhi::ResourceAccessType::CopyDest);
+				for (uint32_t z = 0; z < rows.depth; ++z)
+					for (uint32_t row = 0; row < rows.rows; ++row)
+						a_list.CopyBufferRegion(bounce, (uint64_t(z) * rows.rows + row) * pitch, a_sourceHandle, rows.At(z, row), rows.rowBytes);
+				BounceBarrier(a_list, *a_bounce, rhi::ResourceAccessType::CopyDest, rhi::ResourceAccessType::CopySource);
+				copy.buffer = bounce;
+				copy.footprint.offset = 0;
+				copy.footprint.rowPitch = pitch;
 				a_list.CopyBufferToTexture(copy);
 				return true;
 			}
-			// Staging to staging: the whole subresource as one buffer range.
-			if (a_box || a_x || a_y || a_z)
+			// Staging to staging: row by row (the whole subresource at once when the layouts match). Texel sizes must match.
+			if (sourceShape.blockBytes != destinationShape.blockBytes || sourceShape.BlockSize() != destinationShape.BlockSize())
 				return false;
 			const auto& sourceEntry = a_source.layout[a_sourceSub];
 			const auto& destinationEntry = a_destination.layout[a_destinationSub];
-			if (sourceEntry.rowPitch != destinationEntry.rowPitch || sourceEntry.depthPitch != destinationEntry.depthPitch)
-				return false;
-			a_list.CopyBufferRegion(a_destinationHandle, destinationEntry.offset, a_sourceHandle, sourceEntry.offset, uint64_t(sourceEntry.depthPitch) * sourceShape.Depth(sourceMip));
+			if (!a_box && !a_x && !a_y && !a_z && sourceEntry.rowPitch == destinationEntry.rowPitch && sourceEntry.depthPitch == destinationEntry.depthPitch) {
+				a_list.CopyBufferRegion(a_destinationHandle, destinationEntry.offset, a_sourceHandle, sourceEntry.offset,
+					uint64_t(sourceEntry.depthPitch) * sourceShape.Depth(sourceMip));
+				return true;
+			}
+			const auto from = RowsOf(a_source, a_sourceSub, a_box ? a_box->left : 0, a_box ? a_box->top : 0, a_box ? a_box->front : 0, width, height, depth);
+			const auto to = RowsOf(a_destination, a_destinationSub, a_x, a_y, a_z, width, height, depth);
+			for (uint32_t z = 0; z < from.depth; ++z)
+				for (uint32_t row = 0; row < from.rows; ++row)
+					a_list.CopyBufferRegion(a_destinationHandle, to.At(z, row), a_sourceHandle, from.At(z, row), from.rowBytes);
 			return true;
+		}
+
+		/**
+		 * @brief Moves a depth-stencil staging texture's texels between the CPU's form and its plane areas: a_unpack makes the CPU's
+		 * texels from the planes, else the planes from the texels, in a_float's depth form. Every subresource, or a_sub alone. The
+		 * caller waited for the GPU's last use of the memory.
+		 */
+		void RepackStaging(NativeResource& a_staging, bool a_unpack, bool a_float, uint32_t a_sub = UINT32_MAX)
+		{
+			const uint32_t texel = StencilTexelBytes(a_staging.shape);
+			if (!texel)
+				return;
+			void* data = nullptr;
+			a_staging.resource->Map(&data);
+			if (!data)
+				return;
+			auto* base = static_cast<std::byte*>(data);
+			for (uint32_t sub = 0; sub < a_staging.layout.size(); ++sub) {
+				if (a_sub != UINT32_MAX && sub != a_sub)
+					continue;
+				const auto& entry = a_staging.layout[sub];
+				const uint32_t mip = sub % a_staging.shape.mips;
+				RepackDepthStencil(a_unpack, texel, a_float, base + entry.offset, entry.rowPitch, base + entry.depthOffset, entry.depthRowPitch, base + entry.stencilOffset,
+					entry.stencilRowPitch, a_staging.shape.Width(mip), a_staging.shape.Height(mip));
+			}
+			a_staging.resource->Unmap(0, a_unpack ? 0 : a_staging.size);
+		}
+
+		/** @brief Before the CPU reads or writes a depth-stencil staging texture's texels: makes them from the planes a copy wrote. */
+		void UnpackStagingIfNewer(NativeResource& a_staging)
+		{
+			if (a_staging.planesNewer.exchange(false, std::memory_order_acq_rel))
+				RepackStaging(a_staging, true, a_staging.planeFloat);
 		}
 
 		/**
 		 * @brief A copy through RunOp: subresource a_sourceSub of a_source into a_destinationSub of a_destination at (a_x, a_y, a_z), or
 		 * with a_all every subresource the two share (a buffer: the whole of the smaller). The source is read and the destination
-		 * written: buffers and staging memory whole, images in the subresources copied. a_recorded is false when the pair is not a copy
-		 * native mode makes. Returns the work's value (0: nothing submitted).
+		 * written: buffers and staging memory whole, images in the subresources copied. A staging region inside a subresource goes
+		 * through a bounce buffer, and a depth-stencil staging texture's planes are made from the CPU's texels first, or marked newer
+		 * after. a_recorded is false when the pair is not a copy native mode makes. Returns the work's value (0: nothing submitted).
 		 */
 		uint64_t CopyRhi(const std::string& a_label, const std::shared_ptr<NativeResource>& a_destination, const std::shared_ptr<NativeResource>& a_source, bool a_all,
 			uint32_t a_destinationSub, uint32_t a_x, uint32_t a_y, uint32_t a_z, uint32_t a_sourceSub, const D3D11_BOX* a_box, bool& a_recorded, bool* a_routed)
@@ -3473,20 +3774,68 @@ namespace RenderGraph::Engine::Native
 				a_recorded = false;
 				return 0;
 			}
+			std::vector<std::shared_ptr<const void>> keep{ a_destination, a_source };
+			// A staging region that does not start its subresource: a bounce buffer for the footprint.
+			std::shared_ptr<NativeResource> bounce;
+			if (!buffers && !a_all) {
+				const bool intoStaging = a_source->kind == Kind::Image && a_destination->kind == Kind::Staging && (a_x || a_y || a_z);
+				const bool fromStaging = a_source->kind == Kind::Staging && a_destination->kind == Kind::Image && a_box && (a_box->left || a_box->top || a_box->front);
+				if (intoStaging || fromStaging) {
+					const auto& staging = intoStaging ? *a_destination : *a_source;
+					const uint32_t sub = intoStaging ? a_destinationSub : a_sourceSub;
+					const uint32_t mip = a_sourceSub % a_source->shape.mips;
+					const uint32_t width = a_box ? a_box->right - a_box->left : a_source->shape.Width(mip);
+					const uint32_t height = a_box ? a_box->bottom - a_box->top : a_source->shape.Height(mip);
+					const uint32_t depth = a_box ? a_box->back - a_box->front : a_source->shape.Depth(mip);
+					const auto rows = RowsOf(staging, sub, 0, 0, 0, width, height, depth);
+					bounce = g_device->MakeBounce(uint64_t(BouncePitch(rows)) * rows.rows * rows.depth);
+					if (!bounce) {
+						a_recorded = false;
+						return 0;
+					}
+					keep.push_back(bounce);
+				}
+			}
+			// Depth-stencil staging memory: the CPU's texels into the planes the copy reads, in the image's depth form; the planes are
+			// newer than the texels after a copy writes them.
+			const bool stencilSource = a_source->kind == Kind::Staging && StencilTexelBytes(a_source->shape);
+			const bool stencilDestination = a_destination->kind == Kind::Staging && StencilTexelBytes(a_destination->shape);
+			if (stencilSource) {
+				if (!g_device->immediate.Wait(a_source->lastUse.load(std::memory_order_acquire))) {
+					a_recorded = false;
+					return 0;
+				}
+				UnpackStagingIfNewer(*a_source);
+				if (a_destination->kind == Kind::Image)
+					RepackStaging(*a_source, false, DepthPlaneFloat(*a_destination), a_all ? UINT32_MAX : a_sourceSub);
+			}
+			if (stencilDestination && a_source->kind == Kind::Staging) {
+				// Staging to staging copies the CPU's texels: the destination's are made from its planes first, so a region keeps the rest.
+				if (!g_device->immediate.Wait(a_destination->lastUse.load(std::memory_order_acquire))) {
+					a_recorded = false;
+					return 0;
+				}
+				UnpackStagingIfNewer(*a_destination);
+			}
 			const std::array uses{ CopySource(*a_source, rangeOf(*a_source, a_sourceSub)), CopyDest(*a_destination, rangeOf(*a_destination, a_destinationSub)) };
-			return RunOp(
+			const uint64_t value = RunOp(
 				a_label, uses,
 				[&](rhi::CommandList& a_list, const Immediate::Descriptors&, std::span<const rhi::Resource> a_handles) {
 					const auto from = a_handles[0].GetHandle();
 					const auto to = a_handles[1].GetHandle();
 					if (!a_all || buffers) {
-						a_recorded = RecordCopyRhi(a_list, *a_destination, to, a_destinationSub, a_x, a_y, a_z, *a_source, from, a_sourceSub, a_box);
+						a_recorded = RecordCopyRhi(a_list, *a_destination, to, a_destinationSub, a_x, a_y, a_z, *a_source, from, a_sourceSub, a_box, bounce.get());
 						return;
 					}
 					for (uint32_t sub = 0; sub < count; ++sub)
-						a_recorded = RecordCopyRhi(a_list, *a_destination, to, sub, 0, 0, 0, *a_source, from, sub, nullptr) && a_recorded;
+						a_recorded = RecordCopyRhi(a_list, *a_destination, to, sub, 0, 0, 0, *a_source, from, sub, nullptr, nullptr) && a_recorded;
 				},
-				{ a_destination, a_source }, a_routed);
+				std::move(keep), a_routed);
+			if (value && a_recorded && stencilDestination && a_source->kind == Kind::Image) {
+				a_destination->planeFloat = DepthPlaneFloat(*a_source);
+				a_destination->planesNewer.store(true, std::memory_order_release);
+			}
+			return value;
 		}
 
 		/** @brief The use of an image a clear writes: as a render target, or as depth (both planes of a depth-stencil image). */
@@ -3709,6 +4058,10 @@ namespace RenderGraph::Engine::Native
 				if (const HRESULT graph = WaitGraphReaders(*cpu, (a_flags & D3D11_MAP_FLAG_DO_NOT_WAIT) != 0); FAILED(graph))
 					return graph;
 			}
+			// A depth-stencil staging texture a copy wrote: its texels are made from the planes now (the copy is done: waited above,
+			// or a read always waits).
+			if (cpu->kind == NativeResource::Kind::Staging && a_type != D3D11_MAP_WRITE_NO_OVERWRITE)
+				UnpackStagingIfNewer(*cpu);
 			void* data = nullptr;
 			cpu->resource->Map(&data);
 			if (!data)
@@ -3886,6 +4239,7 @@ namespace RenderGraph::Engine::Native
 				// The CPU writes the staging memory itself, row by row at the region's place.
 				if (!g_device->immediate.Wait(record->lastUse.load(std::memory_order_acquire)))
 					return;
+				UnpackStagingIfNewer(*record);
 				void* data = nullptr;
 				record->resource->Map(&data);
 				if (!data)
@@ -3901,6 +4255,45 @@ namespace RenderGraph::Engine::Native
 				return;
 			}
 			NoteWrite(*record);
+			// A depth-stencil texture on the BasicRHI route: D3D11's interleaved texels split into the two planes (the whole
+			// subresource: D3D11 takes no box for depth-stencil), each copied into its plane, in the depth form the image keeps.
+			if (const uint32_t texel = StencilTexelBytes(shape); texel && RhiContext()) {
+				const uint32_t width = shape.Width(mip), height = shape.Height(mip);
+				const uint32_t depthPitch = (width * 4u + 255u) & ~255u, stencilPitch = (width + 255u) & ~255u;
+				const uint64_t stencilOffset = (uint64_t(depthPitch) * height + 511) & ~uint64_t(511);
+				auto planes = g_device->MakeUpload(stencilOffset + uint64_t(stencilPitch) * height);
+				if (!planes)
+					return;
+				void* mapped = nullptr;
+				planes->resource->Map(&mapped);
+				if (!mapped)
+					return;
+				auto* base = static_cast<std::byte*>(mapped);
+				// Packing only reads the D3D11 texels.
+				RepackDepthStencil(false, texel, DepthPlaneFloat(*record), const_cast<std::byte*>(static_cast<const std::byte*>(a_data)), a_rowPitch, base, depthPitch,
+					base + stencilOffset, stencilPitch, width, height);
+				planes->resource->Unmap(0, planes->size);
+				bool routed = false;
+				const std::array uses{ CopySource(*planes, {}), CopyDest(*record, SubresourceOf(*record, a_subresource)) };
+				RunOp(
+					"update depth-stencil " + record->name, uses,
+					[&](rhi::CommandList& a_list, const Immediate::Descriptors&, std::span<const rhi::Resource> a_handles) {
+						rhi::BufferTextureCopyFootprint copy{};
+						copy.texture = a_handles[1].GetHandle();
+						copy.buffer = a_handles[0].GetHandle();
+						copy.mip = mip;
+						copy.arraySlice = a_subresource / shape.mips;
+						copy.footprint = { 0, depthPitch, width, height, 1 };
+						copy.plane = 0;
+						a_list.CopyBufferToTexture(copy);
+						copy.footprint = { stencilOffset, stencilPitch, width, height, 1 };
+						copy.plane = 1;
+						a_list.CopyBufferToTexture(copy);
+					},
+					{ planes, record }, &routed);
+				NoteRun(op, *record, a_resource, nullptr, routed);
+				return;
+			}
 			auto upload = g_device->MakeUpload(uint64_t(rowPitch) * rows * extent.depth);
 			if (!upload)
 				return;
@@ -3910,14 +4303,9 @@ namespace RenderGraph::Engine::Native
 				return;
 			writeRows(static_cast<std::byte*>(data));
 			upload->resource->Unmap(0, upload->size);
-			// The BasicRHI route: the upload's copy, through the ledgers when the graph tracks the texture.
+			// The BasicRHI route: the upload's copy, through the ledgers when the graph tracks the texture (a depth texture: its depth
+			// plane, whose texels are D3D11's).
 			if (RhiContext()) {
-				if (shape.aspects != VK_IMAGE_ASPECT_COLOR_BIT) {
-					static std::atomic_flag logged;
-					if (!logged.test_and_set())
-						logger::warn("[ORG native] UpdateSubresource of the depth-stencil image \"{}\" is not made with BasicRHI's commands (logged once)", record->name);
-					return;
-				}
 				bool routed = false;
 				const std::array uses{ CopySource(*upload, {}), CopyDest(*record, SubresourceOf(*record, a_subresource)) };
 				RunOp(
@@ -4132,6 +4520,142 @@ namespace RenderGraph::Engine::Native
 			}
 		}
 
+		/** @brief The UNORM twin of an sRGB format GenerateMips' scratch takes (its UAVs cannot be sRGB), else the format itself. */
+		rhi::Format LinearTwin(rhi::Format a_format)
+		{
+			switch (a_format) {
+			case rhi::Format::R8G8B8A8_UNorm_sRGB:
+				return rhi::Format::R8G8B8A8_UNorm;
+			case rhi::Format::B8G8R8A8_UNorm_sRGB:
+				return rhi::Format::B8G8R8A8_UNorm;
+			case rhi::Format::B8G8R8X8_UNorm_sRGB:
+				return rhi::Format::B8G8R8X8_UNorm;
+			default:
+				return a_format;
+			}
+		}
+
+		/** @brief A barrier on GenerateMips' scratch texture (every subresource) between two of its states. */
+		void ScratchBarrier(rhi::CommandList& a_list, const NativeResource& a_scratch, const Use& a_before, const Use& a_after)
+		{
+			rhi::TextureBarrier barrier{};
+			barrier.texture = a_scratch.resource->GetHandle();
+			barrier.range = { 0, a_scratch.shape.mips, 0, a_scratch.shape.layers, 0, 1 };
+			barrier.beforeSync = a_before.sync;
+			barrier.afterSync = a_after.sync;
+			barrier.beforeAccess = a_before.access;
+			barrier.afterAccess = a_after.access;
+			barrier.beforeLayout = a_before.layout;
+			barrier.afterLayout = a_after.layout;
+			a_list.Barriers({ { &barrier, 1 }, {}, {} });
+		}
+
+		/**
+		 * @brief GenerateMips with BasicRHI commands. ORG's GenerateMips.hlsl builds the chain in a scratch texture with unordered
+		 * access (BasicRHI has no blit, and the engine's textures have no UAVs): mip 0 is copied in, each mip is the area-weighted
+		 * average of the one above it (an sRGB texture averaged in linear space, through the UNORM scratch), and mips 1 to N-1 are
+		 * copied back. Through the ledgers when the graph tracks the image (mip 0 read, the rest written). False, logged once a
+		 * reason, when native mode cannot build this texture's mips.
+		 */
+		bool GenerateMipsRhi(const std::shared_ptr<NativeResource>& a_record, bool& a_routed)
+		{
+			const Shape& shape = a_record->shape;
+			const auto refuse = [&](std::atomic_flag& a_logged, const char* a_why) {
+				if (!a_logged.test_and_set())
+					logger::warn("[ORG native] GenerateMips on \"{}\": {}; its mips stay as they are (logged once)", a_record->name, a_why);
+				return false;
+			};
+			if (shape.dimension != D3D11_RESOURCE_DIMENSION_TEXTURE2D) {
+				static std::atomic_flag logged;
+				return refuse(logged, "native mode builds mip chains of 2D textures, arrays and cubes only");
+			}
+			if (shape.blocks) {
+				static std::atomic_flag logged;
+				return refuse(logged, "a block-compressed texture has no mip chain to build");
+			}
+			const bool array = shape.layers > 1;
+			const auto& program = array ? g_device->mipsArray : g_device->mips2D;
+			if (!program || !program->compute) {
+				static std::atomic_flag logged;
+				return refuse(logged, "the GenerateMips compute shader is not loaded");
+			}
+			const rhi::Format format = LinearTwin(shape.format);
+			if (!a_record->mipScratch) {
+				rhi::FormatSupport support{};
+				if (g_device->Rhi().QueryFormatSupport(format, support) != rhi::Result::Ok || !(support.usage & rhi::FU_UnorderedAccess) || support.srvSwizzle) {
+					static std::atomic_flag logged;
+					return refuse(logged, "its format takes no unordered access view, which the compute shader writes");
+				}
+				a_record->mipScratch = g_device->MakeMipScratch(*a_record, format);
+				if (!a_record->mipScratch) {
+					static std::atomic_flag logged;
+					return refuse(logged, "its scratch texture could not be made");
+				}
+			}
+			const auto scratch = a_record->mipScratch;
+			const auto scratchHandle = scratch->resource->GetHandle();
+			const uint32_t mips = shape.mips, layers = shape.layers;
+			const uint32_t flags = format != shape.format ? 1u : 0u;  // GenerateMips.hlsl's sRGB bit
+			const Use common{ scratch.get(), {} };
+			const Use copyDest{ scratch.get(), {}, rhi::ResourceLayout::CopyDest, rhi::ResourceAccessType::CopyDest, rhi::ResourceSyncState::Copy };
+			const Use copySource{ scratch.get(), {}, rhi::ResourceLayout::CopySource, rhi::ResourceAccessType::CopySource, rhi::ResourceSyncState::Copy };
+			const Use unordered{ scratch.get(), {}, rhi::ResourceLayout::UnorderedAccess, rhi::ResourceAccessType::UnorderedAccess, rhi::ResourceSyncState::ComputeShading };
+			const std::array uses{ CopySource(*a_record, { 0, 1, 0, layers, 0, 1 }), CopyDest(*a_record, { 1, mips - 1, 0, layers, 0, 1 }) };
+			const auto record = [&](rhi::CommandList& a_list, const Immediate::Descriptors& a_descriptors, std::span<const rhi::Resource> a_handles) {
+				const auto image = a_handles[0].GetHandle();
+				const auto copy = [&](rhi::ResourceHandle a_to, rhi::ResourceHandle a_from, uint32_t a_mip, uint32_t a_layer) {
+					rhi::TextureCopyRegion to{};
+					to.texture = a_to;
+					to.mip = a_mip;
+					to.arraySlice = a_layer;
+					to.width = shape.Width(a_mip);
+					to.height = shape.Height(a_mip);
+					rhi::TextureCopyRegion from = to;
+					from.texture = a_from;
+					a_list.CopyTextureRegion(to, from);
+				};
+				ScratchBarrier(a_list, *scratch, common, copyDest);
+				for (uint32_t layer = 0; layer < layers; ++layer)
+					copy(scratchHandle, image, 0, layer);
+				ScratchBarrier(a_list, *scratch, copyDest, unordered);
+				// A UAV of each scratch mip, all slices, in the slot's shader-visible heap (bound): the shader reads them by index.
+				const uint32_t first = a_descriptors.uavShaderVisible.index;
+				for (uint32_t mip = 0; mip < mips; ++mip) {
+					rhi::UavDesc desc{};
+					desc.formatOverride = format;
+					if (array) {
+						desc.dimension = rhi::UavDim::Texture2DArray;
+						desc.texture2DArray.mipSlice = mip;
+						desc.texture2DArray.firstArraySlice = 0;
+						desc.texture2DArray.arraySize = layers;
+						desc.texture2DArray.planeSlice = 0;
+					} else {
+						desc.dimension = rhi::UavDim::Texture2D;
+						desc.texture2D.mipSlice = mip;
+						desc.texture2D.planeSlice = 0;
+					}
+					(void)g_device->Rhi().CreateUnorderedAccessView({ a_descriptors.uavShaderVisible.heap, first + mip }, scratchHandle, desc);
+				}
+				a_list.BindLayout(program->compute->layout->GetHandle());
+				a_list.BindPipeline(program->compute->Pipeline());
+				for (uint32_t mip = 1; mip < mips; ++mip) {
+					// The previous dispatch wrote this one's source.
+					if (mip > 1)
+						ScratchBarrier(a_list, *scratch, unordered, unordered);
+					const std::array<uint32_t, 7> constants{ first + mip - 1, first + mip, shape.Width(mip - 1), shape.Height(mip - 1), shape.Width(mip), shape.Height(mip),
+						flags };
+					a_list.PushConstants(rhi::ShaderStage::Compute, 0, 0, 0, static_cast<uint32_t>(constants.size()), constants.data());
+					a_list.Dispatch((shape.Width(mip) + 7) / 8, (shape.Height(mip) + 7) / 8, layers);
+				}
+				ScratchBarrier(a_list, *scratch, unordered, copySource);
+				for (uint32_t mip = 1; mip < mips; ++mip)
+					for (uint32_t layer = 0; layer < layers; ++layer)
+						copy(image, scratchHandle, mip, layer);
+				ScratchBarrier(a_list, *scratch, copySource, common);
+			};
+			return RunOp("generate mips " + a_record->name, uses, record, { a_record, scratch }, &a_routed) != 0;
+		}
+
 		void ContextGenerateMips(ID3D11ShaderResourceView* a_view)
 		{
 			const auto record = Resolve(a_view);
@@ -4142,6 +4666,15 @@ namespace RenderGraph::Engine::Native
 			}
 			NoteWrite(*record);
 			const Shape& shape = record->shape;
+			// The BasicRHI route: a compute mip chain.
+			if (RhiContext()) {
+				if (shape.mips < 2 || shape.aspects != VK_IMAGE_ASPECT_COLOR_BIT)
+					return;
+				bool routed = false;
+				if (GenerateMipsRhi(record, routed))
+					NoteRun(OpCensus::Op::GenerateMips, *record, nullptr, a_view, routed);
+				return;
+			}
 			// Each mip from the one above it, linearly filtered; a barrier between, since each level reads the last one written.
 			const auto mipCommands = [&](const Immediate::Vulkan& a_vk, VkCommandBuffer a_commands) {
 				for (uint32_t mip = 1; mip < shape.mips; ++mip) {
@@ -4173,15 +4706,6 @@ namespace RenderGraph::Engine::Native
 			NoteRaw(OpCensus::Op::GenerateMips, *record);
 			if (shape.mips < 2 || shape.aspects != VK_IMAGE_ASPECT_COLOR_BIT)
 				return;
-			// BasicRHI has no blit: the mips stay as they are. The engine asks this of few textures (logged once with the first).
-			if (RhiContext()) {
-				static std::atomic_flag logged;
-				if (!logged.test_and_set())
-					logger::warn("[ORG native] GenerateMips on \"{}\": BasicRHI's commands have no blit, so native mode on D3D12 (or "
-								 "CS_ORG_NATIVE_RHI_CONTEXT=1) leaves the mips as they are (logged once)",
-						record->name);
-				return;
-			}
 			g_device->immediate.Run("generate mips " + record->name, mipCommands, { record }, { record.get() });
 		}
 
@@ -4584,8 +5108,11 @@ namespace RenderGraph::Engine::Native
 
 	void OnGraphReady()
 	{
-		if (g_device)
-			g_device->OnGraphReady();
+		if (!g_device)
+			return;
+		g_device->OnGraphReady();
+		if (RhiContext())
+			g_device->LoadMipPrograms();
 	}
 
 	bool OwnedResources()
