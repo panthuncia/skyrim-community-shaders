@@ -1937,6 +1937,11 @@ namespace OrgFx
 						continue;
 					}
 					a.value = Text(valueStart, valueEnd);
+					// The FX10 form of the state calls: the state object by name.
+					if (name == "BlendState" || name == "DepthStencilState" || name == "RasterizerState") {
+						(name == "BlendState" ? p.blendState : name == "DepthStencilState" ? p.depthStencilState : p.rasterizerState) = a.value;
+						continue;
+					}
 					Diag(Severity::Warning, line, std::format("render state '{} = {}' in pass '{}' is not applied by the ORG runtime", a.key, a.value, p.name));
 					p.otherStates.push_back(std::move(a));
 				}

@@ -51,6 +51,7 @@ ORGFxRuntime& ORGFxRuntime::Get()
 #	include <array>
 #	include <chrono>
 #	include <map>
+#	include <optional>
 #	include <set>
 #	include <span>
 #	include <string_view>
@@ -223,7 +224,36 @@ namespace
 		std::uint32_t size = 0;
 	};
 
-	using ProgramKey = std::tuple<std::uint32_t, std::uint32_t, rhi::Format>;  // technique, pass, target format
+	/**
+	 * @brief The output-merger and rasterizer state an .fx pass draws with. FX11's Apply sets only the states a pass names, so a pass
+	 * that names none keeps the last one set: by an earlier pass, or by EffectManager before its own draws (opaque, no culling).
+	 * Depth-stencil state does nothing here: Effects11 binds no depth view.
+	 */
+	struct PassState
+	{
+		rhi::BlendAttachment blend{};
+		bool alphaToCoverage = false;
+		std::array<float, 4> blendFactor{ 1.0f, 1.0f, 1.0f, 1.0f };
+		std::uint32_t sampleMask = 0xFFFFFFFF;
+		rhi::RasterState raster{ .cull = rhi::CullMode::None };
+
+		/** @brief Whether the blend reads the factor, which the draw sets on its list. */
+		bool ReadsFactor() const
+		{
+			const auto reads = [](rhi::BlendFactor a_factor) { return a_factor == rhi::BlendFactor::BlendFactor || a_factor == rhi::BlendFactor::InvBlendFactor; };
+			return blend.enable && (reads(blend.srcColor) || reads(blend.dstColor) || reads(blend.srcAlpha) || reads(blend.dstAlpha));
+		}
+
+		/** @brief What the pipeline depends on, for the program cache's key. */
+		std::string Key() const
+		{
+			return fmt::format("{} {} {} {} {} {} {} {} {}|{} {} {} {}", blend.enable, static_cast<int>(blend.srcColor), static_cast<int>(blend.dstColor),
+				static_cast<int>(blend.colorOp), static_cast<int>(blend.srcAlpha), static_cast<int>(blend.dstAlpha), static_cast<int>(blend.alphaOp),
+				static_cast<int>(blend.writeMask), alphaToCoverage, static_cast<int>(raster.fill), static_cast<int>(raster.cull), raster.frontCCW, raster.depthClip);
+		}
+	};
+
+	using ProgramKey = std::tuple<std::uint32_t, std::uint32_t, rhi::Format, std::string>;  // technique, pass, target format, PassState::Key
 
 	/** @brief One .fx effect on the graph: the parse, the lowering, its bindings and its compiled passes. */
 	struct FxEffect
@@ -312,6 +342,7 @@ namespace
 		std::vector<PushWord> push;
 		std::uint32_t vertexCount = 3;
 		std::vector<org::OwnedDescriptorBinding> samplers;  // the samplers its push block names, kept while the pass lives
+		std::optional<std::array<float, 4>> blendFactor;    // set on the list before the draw when its blend reads it
 
 		std::uint32_t Input(const Res& a_resource)
 		{
@@ -449,6 +480,8 @@ namespace
 					break;
 				}
 			}
+			if (draw.blendFactor)
+				a_recording.Commands().SetBlendFactor(draw.blendFactor->data());
 			const RasterProgram::Colour colour{ .view = &a_bindings.target, .load = rhi::LoadOp::Load };
 			draw.program->Draw(a_recording, { .colours = { &colour, 1 },
 												.viewport = { .width = draw.width, .height = draw.height },
@@ -558,6 +591,125 @@ namespace
 		desc.minLod = (std::max)(desc.minLod, 0.0f);
 		desc.maxLod = (std::max)(desc.maxLod, desc.minLod);
 		return desc;
+	}
+
+	rhi::BlendFactor BlendFactorOf(OrgFx::BlendFactor a_factor)
+	{
+		using F = OrgFx::BlendFactor;
+		switch (a_factor) {
+		case F::Zero:
+			return rhi::BlendFactor::Zero;
+		case F::One:
+			return rhi::BlendFactor::One;
+		case F::SrcColor:
+			return rhi::BlendFactor::SrcColor;
+		case F::InvSrcColor:
+			return rhi::BlendFactor::InvSrcColor;
+		case F::SrcAlpha:
+			return rhi::BlendFactor::SrcAlpha;
+		case F::InvSrcAlpha:
+			return rhi::BlendFactor::InvSrcAlpha;
+		case F::DestAlpha:
+			return rhi::BlendFactor::DstAlpha;
+		case F::InvDestAlpha:
+			return rhi::BlendFactor::InvDstAlpha;
+		case F::DestColor:
+			return rhi::BlendFactor::DstColor;
+		case F::InvDestColor:
+			return rhi::BlendFactor::InvDstColor;
+		case F::SrcAlphaSat:
+			return rhi::BlendFactor::SrcAlphaSat;
+		case F::Factor:
+			return rhi::BlendFactor::BlendFactor;
+		case F::InvFactor:
+			return rhi::BlendFactor::InvBlendFactor;
+		case F::Src1Color:
+			return rhi::BlendFactor::Src1Color;
+		case F::InvSrc1Color:
+			return rhi::BlendFactor::InvSrc1Color;
+		case F::Src1Alpha:
+			return rhi::BlendFactor::Src1Alpha;
+		case F::InvSrc1Alpha:
+			return rhi::BlendFactor::InvSrc1Alpha;
+		}
+		return rhi::BlendFactor::One;
+	}
+
+	rhi::BlendOp BlendOpOf(OrgFx::BlendOp a_op)
+	{
+		switch (a_op) {
+		case OrgFx::BlendOp::Subtract:
+			return rhi::BlendOp::Sub;
+		case OrgFx::BlendOp::RevSubtract:
+			return rhi::BlendOp::RevSub;
+		case OrgFx::BlendOp::Min:
+			return rhi::BlendOp::Min;
+		case OrgFx::BlendOp::Max:
+			return rhi::BlendOp::Max;
+		default:
+			return rhi::BlendOp::Add;
+		}
+	}
+
+	/** @brief Whether a state call names no state object (D3D11's default state then). */
+	bool IsNullState(std::string_view a_name)
+	{
+		return a_name == "NULL" || a_name == "0" || a_name == "nullptr";
+	}
+
+	/**
+	 * @brief The state after FX11 applies a_pass on top of a_state: the blend and rasterizer states it names replace the current ones,
+	 * NULL being D3D11's default. False, with a_reason, when a state cannot be found or a pass sets FX9-style render states.
+	 */
+	bool ApplyPassStates(const OrgFx::EffectDesc& a_desc, const OrgFx::Pass& a_pass, PassState& a_state, std::string& a_reason)
+	{
+		if (!a_pass.otherStates.empty()) {
+			a_reason = fmt::format("pass '{}' sets render state '{}' in the FX9 form", a_pass.name, a_pass.otherStates.front().key);
+			return false;
+		}
+		if (!a_pass.blendState.empty()) {
+			a_state.blend = {};
+			a_state.alphaToCoverage = false;
+			if (!IsNullState(a_pass.blendState)) {
+				const auto* state = a_desc.FindState(a_pass.blendState);
+				if (!state || state->kind != OrgFx::StateKind::Blend || state->arraySize) {
+					a_reason = fmt::format("pass '{}' sets blend state '{}', which is not a blend state block", a_pass.name, a_pass.blendState);
+					return false;
+				}
+				// One target: with independent blending off D3D11 uses target 0's state anyway.
+				const auto& target = state->blend.targets[0];
+				a_state.blend.enable = target.enable;
+				a_state.blend.srcColor = BlendFactorOf(target.src);
+				a_state.blend.dstColor = BlendFactorOf(target.dest);
+				a_state.blend.colorOp = BlendOpOf(target.op);
+				a_state.blend.srcAlpha = BlendFactorOf(target.srcAlpha);
+				a_state.blend.dstAlpha = BlendFactorOf(target.destAlpha);
+				a_state.blend.alphaOp = BlendOpOf(target.opAlpha);
+				a_state.blend.writeMask = static_cast<rhi::ColorWriteEnable>(target.writeMask & 0xF);
+				a_state.alphaToCoverage = state->blend.alphaToCoverage;
+			}
+			a_state.blendFactor = a_pass.blendFactor;
+			a_state.sampleMask = a_pass.sampleMask;
+		}
+		if (!a_pass.rasterizerState.empty()) {
+			// D3D11's default rasterizer state culls back faces; Effects11's quad faces the front.
+			a_state.raster = rhi::RasterState{};
+			if (!IsNullState(a_pass.rasterizerState)) {
+				const auto* state = a_desc.FindState(a_pass.rasterizerState);
+				if (!state || state->kind != OrgFx::StateKind::Rasterizer || state->arraySize) {
+					a_reason = fmt::format("pass '{}' sets rasterizer state '{}', which is not a rasterizer state block", a_pass.name, a_pass.rasterizerState);
+					return false;
+				}
+				const auto& r = state->rasterizer;
+				a_state.raster.fill = r.fill == OrgFx::FillMode::Wireframe ? rhi::FillMode::Wireframe : rhi::FillMode::Solid;
+				a_state.raster.cull = r.cull == OrgFx::CullMode::None ? rhi::CullMode::None : (r.cull == OrgFx::CullMode::Front ? rhi::CullMode::Front : rhi::CullMode::Back);
+				a_state.raster.frontCCW = r.frontCounterClockwise;
+				a_state.raster.depthClip = r.depthClip;
+				// Depth bias needs a depth target. Effects11 sets no scissor rectangle; the render area, which is also the scissor
+				// here, covers the target.
+			}
+		}
+		return true;
 	}
 
 	/** @brief Where a constant buffer ($Globals when a_cbuffer is empty) sits in a pass's values region; null when it has none. */
@@ -799,25 +951,21 @@ struct ORGFxRuntime::Impl
 		return true;
 	}
 
-	/** @brief One pass's program for a target format, compiled on first use. Null, with a_reason, on failure. */
-	std::shared_ptr<const RasterProgram> FxProgram(FxEffect& a_effect, std::uint32_t a_technique, std::uint32_t a_pass, rhi::Format a_format, std::string& a_reason)
+	/** @brief One pass's program for a target format and state, compiled on first use. Null, with a_reason, on failure. */
+	std::shared_ptr<const RasterProgram> FxProgram(FxEffect& a_effect, std::uint32_t a_technique, std::uint32_t a_pass, rhi::Format a_format, const PassState& a_state,
+		std::string& a_reason)
 	{
-		const ProgramKey key{ a_technique, a_pass, a_format };
+		const ProgramKey key{ a_technique, a_pass, a_format, a_state.Key() };
 		if (const auto it = a_effect.programs.find(key); it != a_effect.programs.end()) {
 			if (!it->second)
 				a_reason = fmt::format("{}: technique '{}' pass {} did not compile", a_effect.Name(), a_effect.desc.techniques[a_technique].name, a_pass);
 			return it->second;
 		}
 		const auto& technique = a_effect.desc.techniques[a_technique];
-		const auto& pass = technique.passes[a_pass];
 		auto remember = [&](std::shared_ptr<const RasterProgram> a_program) {
 			a_effect.programs.emplace(key, a_program);
 			return a_program;
 		};
-		if (!pass.blendState.empty() || !pass.depthStencilState.empty() || !pass.rasterizerState.empty() || !pass.otherStates.empty()) {
-			a_reason = fmt::format("{}: technique '{}' pass {} sets render states, which are not supported yet", a_effect.Name(), technique.name, a_pass);
-			return remember(nullptr);
-		}
 		const auto lowered = OrgFx::LowerPass(a_effect.lowered, a_effect.desc, a_technique, a_pass);
 		if (!lowered.ok) {
 			a_reason = fmt::format("{}: technique '{}' pass {} could not be lowered, {}", a_effect.Name(), technique.name, a_pass, FirstError(lowered.diagnostics));
@@ -834,7 +982,9 @@ struct ORGFxRuntime::Impl
 		desc.commonDefines = false;
 		desc.languageVersion = L"2018";
 		desc.constantWords = a_effect.lowered.PushWords();
-		desc.targets = { { .format = a_format } };
+		desc.targets = { { .format = a_format, .blend = a_state.blend } };
+		desc.alphaToCoverage = a_state.alphaToCoverage;
+		desc.raster = a_state.raster;
 		auto program = RasterProgram::Load(RenderGraphRuntime::Get().Host()->Device(), desc);
 		if (!program)
 			a_reason = fmt::format("{}: DXC could not build technique '{}' pass {} (the [ORG] error above has its messages)", a_effect.Name(), technique.name, a_pass);
@@ -920,6 +1070,9 @@ struct ORGFxRuntime::Impl
 		void CsDraw(std::string a_step, std::shared_ptr<const RasterProgram> a_program, Res a_target, std::uint32_t a_width, std::uint32_t a_height,
 			std::vector<AP::Bind> a_bindings)
 		{
+			// CS's own draws set EffectManager's states first (CopyTexture, the downsample, the sun mask): the .fx passes after them
+			// start from those.
+			state = {};
 			if (!a_program)
 				Fail(fmt::format("Effects11::{}: its program could not be built", a_step));
 			AddStep(AP::Draw{ .name = a_step,
@@ -984,7 +1137,16 @@ struct ORGFxRuntime::Impl
 			const auto& technique = e.desc.techniques[a_technique];
 			for (std::uint32_t p = 0; p < technique.passes.size(); ++p) {
 				std::string reason;
-				auto program = impl.FxProgram(e, a_technique, p, format, reason);
+				if (!ApplyPassStates(e.desc, technique.passes[p], state, reason)) {
+					FailEffect(e, fmt::format("{}: technique '{}': {}", e.Name(), technique.name, reason));
+					return;
+				}
+				// The target has one sample: a mask without sample 0 writes nothing, so the pass is left out.
+				if (!(state.sampleMask & 1u)) {
+					logger::info("[ORG] Effects11: {} technique '{}' pass {} has a sample mask without sample 0 and draws nothing", e.Name(), technique.name, p);
+					continue;
+				}
+				auto program = impl.FxProgram(e, a_technique, p, format, state, reason);
 				if (!program) {
 					FailEffect(e, std::move(reason));
 					return;
@@ -996,6 +1158,8 @@ struct ORGFxRuntime::Impl
 				draw->width = width;
 				draw->height = height;
 				draw->vertexCount = OrgFx::kQuadVertexCount;
+				if (state.ReadsFactor())
+					draw->blendFactor = state.blendFactor;
 				const std::uint32_t region = Region(e.lowered.valuesSize);
 				RegionWrite write{ .kind = RegionWrite::Kind::FxValues, .effect = a_fx, .offset = region };
 				const float aspect = static_cast<float>(width) / static_cast<float>(height);
@@ -1224,6 +1388,7 @@ struct ORGFxRuntime::Impl
 		Impl& impl;
 		const Inputs& inputs;
 		std::shared_ptr<Frame> frame;
+		PassState state;  // what FX11's context holds for the next .fx pass
 	};
 
 	/** @brief The shape the plan follows; a change registers a new plan. */
