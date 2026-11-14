@@ -1927,3 +1927,24 @@ is not declarable at the build (`PublishedResources::IsDeclarable`), so the call
 - **Wanted, if the wait shows:** per-graph transient resource objects (a build clones its transients), plus a detached prepare and record
   path whose recordings carry the build generation the attach gives them.
 - **Found by:** native frame graph Phase 4, DCLF async builds lane (2026-11-13).
+
+## External client submissions without accesses, and several ranges of one resource
+
+- **Need:** native mode's context sends every operation through `org::ExternalClient` once the graph is up, also operations on
+  resources no graph tracks (an empty access list), and copies within one image (two accesses of one resource, disjoint ranges:
+  the source subresource as a copy source, the destination as a copy destination).
+- **Relies on:** `BuildExternalPublication` takes several ranges of one backing as several declarations of its slot, and builds a
+  pass with no resources. Neither is covered by ORG's tests.
+- **Wanted:** a test of each in ORG's external client tests.
+- **Found by:** parity wave, native context lane (2026-11-14).
+
+## Plane-aware buffer copies in BasicRHI
+
+- **Need:** D3D11 staging copies and `UpdateSubresource` of depth-stencil textures. Vulkan buffer copies take one aspect; D3D12
+  copies one plane's subresource, with a footprint format of its own.
+- **Done:** `rhi::BufferTextureCopyFootprint::plane` (BasicRHI branch `org-native/par-native-context`, b6142d9): 0 depth, 1 stencil.
+  Vulkan picks the aspect and the plane's texel size; D3D12 picks the plane's subresource and asks `GetCopyableFootprints` for its
+  format. CS repacks D3D11's interleaved texels on the CPU (`RepackDepthStencil`).
+- **Wanted:** `Device::GetCopyableFootprints` honouring `FootprintRangeDesc::firstPlane` on Vulkan too, so callers can size plane
+  areas from BasicRHI instead of by hand.
+- **Found by:** parity wave, native context lane (2026-11-14).
