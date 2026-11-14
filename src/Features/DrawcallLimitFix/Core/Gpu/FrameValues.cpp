@@ -2975,15 +2975,14 @@ namespace DCLF
 			host->SetFrameWaitValue(0);
 	}
 
-	FrameValues::FrameWait FrameValues::FrameWaitPoint() const
+	rhi::TimelinePoint FrameValues::FrameWaitPoint() const
 	{
 		auto* host = RenderGraphRuntime::Get().Host();
 		const auto timeline = RenderGraphRuntime::Get().FrameWaitTimeline();
 		const std::uint64_t value = host && impl->kicked ? host->FrameWaitValue() : 0;
-		rhi::VulkanTimelineInfo info{};
-		if (!value || !timeline || !*timeline || !rhi::QueryNativeTimeline(timeline->Get(), rhi::RHI_IID_VK_TIMELINE, &info, sizeof(info)))
+		if (!value || !timeline || !*timeline)
 			return {};
-		return { static_cast<VkSemaphore_T*>(info.timeline), value };
+		return { (*timeline)->GetHandle(), value };
 	}
 
 	void FrameValues::WaitSignalSubmitted()

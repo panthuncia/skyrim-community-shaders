@@ -157,8 +157,8 @@ namespace DCLF::Direct::detail
 		// The site file's own state for this run (ShadowSite.cpp's views and maps, ViewSites.cpp's hosted views, Families.cpp's draws), by
 		// file; released with the run at the slot's retirement.
 		std::shared_ptr<void> shadowState, viewState, familyState;
-		rhi::CommandListPtr adopted;  // DXVK's buffer, wrapped: kept to the slot's retirement (what its recording allocated)
-		std::vector<rhi::CommandListPtr> adoptedEarlier;  // the same for its execution's earlier segments
+		// The CPU-frame timeline's value of its frame (its slot's signal once queued): when its site stats can be read.
+		std::uint64_t frameValue = 0;
 	};
 
 	/** @brief A frame slot: everything a CPU frame's sites made, kept until the frame's signal completes. */
@@ -218,8 +218,7 @@ namespace DCLF::Direct::detail
 	{
 		rhi::Device device;
 		bool deviceSet = false;
-		std::shared_ptr<rhi::TimelinePtr> timeline;
-		VkSemaphore semaphore = VK_NULL_HANDLE;
+		std::shared_ptr<rhi::TimelinePtr> timeline;  // DCLF's CPU-frame timeline (cs.dclf.cpu-frames), a BasicRHI timeline of the host's device
 		std::uint64_t signalled = 0;  // the timeline's last value queued
 		std::uint64_t submitted = 0;  // the last value known submitted (SubmitQueued's flush, or a frame's own work after it)
 		std::uint64_t hostSubmitted = 0;  // the host's submissions made at SubmitQueued's last flush
@@ -240,7 +239,7 @@ namespace DCLF::Direct::detail
 		bool loggedNoCallback = false, loggedNotAdopted = false, loggedNoLatePass = false, loggedExternal = false;
 		rhi::CommandSignaturePtr indirectSignature;  // one indexed draw at IndirectDraw's stride
 		// Emit's scratch (render thread): a site's waits and signals for DXVK's submission.
-		std::vector<RenderGraphRuntime::ExternalCommandsWait> emitWaits, emitSignals;
+		std::vector<rhi::TimelinePoint> emitWaits, emitSignals;
 	};
 
 	State& S();

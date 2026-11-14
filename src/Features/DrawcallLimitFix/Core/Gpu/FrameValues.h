@@ -13,7 +13,7 @@
 #include <optional>
 #include <vector>
 
-struct VkSemaphore_T;
+#include <rhi.h>
 
 namespace org
 {
@@ -164,19 +164,14 @@ namespace DCLF
 		void WaitSignalSubmitted();
 		/** @brief Render thread, after the frame's last submission: binds the frame's backings to it (SubmittedRetirementPoint). */
 		void EndFrame();
-		/** @brief A GPU wait on a Vulkan timeline semaphore (VkSemaphore): none while semaphore is null. */
-		struct FrameWait
-		{
-			VkSemaphore_T* semaphore = nullptr;
-			std::uint64_t value = 0;
-		};
 		/**
 		 * @brief Render thread, after Kick: what the frame's GPU work must wait for, the frame-wait timeline (signalled from the upload
 		 * queue once the producer's uploads for the frame are sent) at the frame's value (what Kick set as the host's SetFrameWaitValue).
-		 * None on a frame without a producer. Work submitted outside ORG's batches (the CPU mode's external commands in DXVK's command
-		 * buffer: the next DXVK submission waits for it) takes it at its trigger, on the render thread: the next Kick moves it.
+		 * Value 0 (none) on a frame without a producer. Work submitted outside ORG's batches (guest: the CPU sites' external commands
+		 * in DXVK's command buffer, RenderGraphRuntime::EmitCommands) takes it at its trigger, on the render thread: the next Kick moves
+		 * it. ORG's batches wait for it themselves (GraphHost::SetFrameWaitValue), the native mode's inline site passes among them.
 		 */
-		FrameWait FrameWaitPoint() const;
+		rhi::TimelinePoint FrameWaitPoint() const;
 		/** @brief The row sets a pass reads (DeclareReads): bits. Pools: every registered pool (Api::FrameValuePool: Features/Fades' seeds...). */
 		enum ReadSets : std::uint32_t
 		{

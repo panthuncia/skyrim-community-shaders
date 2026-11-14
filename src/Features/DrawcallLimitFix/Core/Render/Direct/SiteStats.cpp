@@ -1,9 +1,9 @@
-// volk must precede every Vulkan header of the translation unit.
-#include <rhi_interop_vulkan.h>
-
 #include "Features/DrawcallLimitFix/Core/Render/Direct/SiteStats.h"
 
+#include <rhi_helpers.h>
+
 #include <array>
+#include <cstring>
 #include <mutex>
 #include <vector>
 
@@ -16,32 +16,29 @@ namespace DCLF::Direct::SiteStats
 		constexpr std::uint32_t kLogFrames = 300;
 		constexpr std::uint32_t kGiveUpFrames = 32;
 		constexpr std::array<const char*, kSites> kSiteNames{ "shadow", "depth", "colour", "forward", "first person" };
-		// Input vertices, input primitives, vertex shader invocations, clipper input and output, fragment shader invocations.
-		constexpr VkQueryPipelineStatisticFlags kStatistics = VK_QUERY_PIPELINE_STATISTIC_INPUT_ASSEMBLY_VERTICES_BIT |
-		                                                      VK_QUERY_PIPELINE_STATISTIC_INPUT_ASSEMBLY_PRIMITIVES_BIT |
-		                                                      VK_QUERY_PIPELINE_STATISTIC_VERTEX_SHADER_INVOCATIONS_BIT |
-		                                                      VK_QUERY_PIPELINE_STATISTIC_CLIPPING_INVOCATIONS_BIT |
-		                                                      VK_QUERY_PIPELINE_STATISTIC_CLIPPING_PRIMITIVES_BIT |
-		                                                      VK_QUERY_PIPELINE_STATISTIC_FRAGMENT_SHADER_INVOCATIONS_BIT;
-		constexpr std::size_t kValues = 6;
+		// Input vertices, input primitives, vertex shader invocations, fragment shader invocations.
+		constexpr std::size_t kValues = 4;
+		constexpr std::array<rhi::PipelineStatTypes, kValues> kFields{ rhi::PipelineStatTypes::IAVertices, rhi::PipelineStatTypes::IAPrimitives,
+			rhi::PipelineStatTypes::VSInvocations, rhi::PipelineStatTypes::PSInvocations };
+		constexpr rhi::PipelineStatsMask kStatistics =
+			rhi::PipelineStatBits::PS_IAVertices | rhi::PipelineStatBits::PS_IAPrimitives | rhi::PipelineStatBits::PS_VSInvocations | rhi::PipelineStatBits::PS_PSInvocations;
 
 		struct Pending
 		{
 			std::uint32_t slot;
 			std::size_t site;
-			std::uint64_t frame;
+			std::uint64_t frameValue;  // the CPU-frame timeline's value that covers it
+			std::uint64_t frame;       // Collect's count when it began
 		};
 
 		struct State
 		{
 			std::once_flag once;
 			bool ready = false;
-			VkDevice device = VK_NULL_HANDLE;
-			VkQueryPool pool = VK_NULL_HANDLE;
-			PFN_vkCmdResetQueryPool cmdReset = nullptr;
-			PFN_vkCmdBeginQuery cmdBegin = nullptr;
-			PFN_vkCmdEndQuery cmdEnd = nullptr;
-			PFN_vkGetQueryPoolResults getResults = nullptr;
+			rhi::QueryPoolPtr pool;
+			rhi::ResourcePtr readback;
+			std::uint32_t stride = 0;                      // bytes per query in the readback buffer
+			std::array<std::uint32_t, kValues> offsets{};  // each field's byte offset in a query's result (~0u: not supported)
 			std::mutex mutex;
 			std::uint32_t next = 0;
 			std::vector<Pending> pending;
@@ -61,26 +58,32 @@ namespace DCLF::Direct::SiteStats
 		void Setup(rhi::Device a_device)
 		{
 			auto& s = S();
-			const HMODULE loader = ::GetModuleHandleW(L"vulkan-1.dll");
-			const auto getDeviceProcAddr = loader ? reinterpret_cast<PFN_vkGetDeviceProcAddr>(::GetProcAddress(loader, "vkGetDeviceProcAddr")) : nullptr;
-			s.device = rhi::vulkan::get_device(a_device);
-			if (!getDeviceProcAddr || !s.device) {
-				logger::warn("[DCLF] site stats: no Vulkan device");
-				return;
-			}
-			const auto create = reinterpret_cast<PFN_vkCreateQueryPool>(getDeviceProcAddr(s.device, "vkCreateQueryPool"));
-			s.cmdReset = reinterpret_cast<PFN_vkCmdResetQueryPool>(getDeviceProcAddr(s.device, "vkCmdResetQueryPool"));
-			s.cmdBegin = reinterpret_cast<PFN_vkCmdBeginQuery>(getDeviceProcAddr(s.device, "vkCmdBeginQuery"));
-			s.cmdEnd = reinterpret_cast<PFN_vkCmdEndQuery>(getDeviceProcAddr(s.device, "vkCmdEndQuery"));
-			s.getResults = reinterpret_cast<PFN_vkGetQueryPoolResults>(getDeviceProcAddr(s.device, "vkGetQueryPoolResults"));
-			VkQueryPoolCreateInfo info{ VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO };
-			info.queryType = VK_QUERY_TYPE_PIPELINE_STATISTICS;
-			info.queryCount = kSlots;
-			info.pipelineStatistics = kStatistics;
-			if (!create || !s.cmdReset || !s.cmdBegin || !s.cmdEnd || !s.getResults || create(s.device, &info, nullptr, &s.pool) != VK_SUCCESS) {
+			rhi::QueryPoolDesc desc{};
+			desc.type = rhi::QueryType::PipelineStatistics;
+			desc.count = kSlots;
+			desc.statsMask = kStatistics;
+			if (a_device.CreateQueryPool(desc, s.pool) != rhi::Result::Ok || !s.pool) {
 				logger::warn("[DCLF] site stats: could not create the pipeline statistics query pool");
 				return;
 			}
+			// Where each counter sits in a query's result: the backend's own layout (D3D12's statistics struct, Vulkan's bit order).
+			std::array<rhi::PipelineStatsFieldDesc, kValues> fields{};
+			for (std::size_t v = 0; v < kValues; ++v)
+				fields[v].field = kFields[v];
+			const auto layout = s.pool->GetPipelineStatsLayout(fields.data(), static_cast<std::uint32_t>(fields.size()));
+			s.offsets.fill(~0u);
+			for (std::uint32_t i = 0; i < layout.fields.size; ++i)
+				for (std::size_t v = 0; v < kValues; ++v)
+					if (layout.fields.data[i].field == kFields[v] && layout.fields.data[i].supported)
+						s.offsets[v] = layout.fields.data[i].byteOffset;
+			s.stride = s.pool->GetQueryResultInfo().elementSize;
+			const auto bufferDesc = rhi::helpers::ResourceDesc::Buffer(std::uint64_t(s.stride) * kSlots, rhi::HeapType::Readback);
+			if (!s.stride || a_device.CreateCommittedResource(bufferDesc, s.readback) != rhi::Result::Ok || !s.readback) {
+				logger::warn("[DCLF] site stats: could not create the pipeline statistics' readback buffer");
+				s.pool = {};
+				return;
+			}
+			s.readback->SetName("cs.dclf.cpu.site-stats");
 			s.ready = true;
 			logger::info("[DCLF] site stats on: pipeline statistics per CPU pipeline site, logged every {} frames", kLogFrames);
 		}
@@ -95,34 +98,35 @@ namespace DCLF::Direct::SiteStats
 		return enabled;
 	}
 
-	std::uint32_t Begin(rhi::Device a_device, void* a_commandBuffer, std::size_t a_site)
+	std::uint32_t Begin(rhi::Device a_device, rhi::CommandList& a_list, std::size_t a_site, std::uint64_t a_frameValue)
 	{
-		if (!Enabled() || a_site >= kSites || !a_commandBuffer)
+		if (!Enabled() || a_site >= kSites)
 			return ~0u;
 		auto& s = S();
 		std::call_once(s.once, [&] { Setup(a_device); });
 		if (!s.ready)
 			return ~0u;
-		const auto commandBuffer = static_cast<VkCommandBuffer>(a_commandBuffer);
 		std::uint32_t slot = 0;
 		{
 			std::lock_guard lock(s.mutex);
 			slot = s.next++ % kSlots;
-			s.pending.push_back({ slot, a_site, s.frame });
+			s.pending.push_back({ slot, a_site, a_frameValue, s.frame });
 		}
-		s.cmdReset(commandBuffer, s.pool, slot, 1);
-		s.cmdBegin(commandBuffer, s.pool, slot, 0);
+		a_list.ResetQueries(s.pool->GetHandle(), slot, 1);
+		a_list.BeginQuery(s.pool->GetHandle(), slot);
 		return slot;
 	}
 
-	void End(void* a_commandBuffer, std::uint32_t a_slot)
+	void End(rhi::CommandList& a_list, std::uint32_t a_slot)
 	{
 		if (a_slot == ~0u)
 			return;
-		S().cmdEnd(static_cast<VkCommandBuffer>(a_commandBuffer), S().pool, a_slot);
+		auto& s = S();
+		a_list.EndQuery(s.pool->GetHandle(), a_slot);
+		a_list.ResolveQueryData(s.pool->GetHandle(), a_slot, 1, s.readback->GetHandle(), std::uint64_t(s.stride) * a_slot);
 	}
 
-	void Collect()
+	void Collect(std::uint64_t a_completed)
 	{
 		if (!Enabled())
 			return;
@@ -132,19 +136,37 @@ namespace DCLF::Direct::SiteStats
 		std::lock_guard lock(s.mutex);
 		++s.frame;
 		std::vector<Pending> waiting;
+		void* mapped = nullptr;
+		bool mapFailed = false;
 		for (const auto& entry : s.pending) {
-			std::array<std::uint64_t, kValues> values{};
-			const VkResult result = s.getResults(s.device, s.pool, entry.slot, 1, sizeof(values), values.data(), sizeof(values), VK_QUERY_RESULT_64_BIT);
-			if (result == VK_SUCCESS) {
-				for (std::size_t v = 0; v < kValues; ++v)
-					s.sums[entry.site][v] += static_cast<double>(values[v]);
-				++s.queries[entry.site];
-			} else if (s.frame - entry.frame < kGiveUpFrames) {
-				waiting.push_back(entry);
-			} else {
-				++s.dropped;
+			// Its frame not done yet: kept, unless its signal never came (a frame whose signal was not queued).
+			if (entry.frameValue > a_completed || mapFailed) {
+				if (s.frame - entry.frame < kGiveUpFrames)
+					waiting.push_back(entry);
+				else
+					++s.dropped;
+				continue;
 			}
+			if (!mapped) {
+				s.readback->Map(&mapped, 0, std::uint64_t(s.stride) * kSlots);
+				if (!mapped) {
+					mapFailed = true;
+					waiting.push_back(entry);
+					continue;
+				}
+			}
+			const auto* result = static_cast<const std::byte*>(mapped) + std::uint64_t(s.stride) * entry.slot;
+			for (std::size_t v = 0; v < kValues; ++v) {
+				if (s.offsets[v] == ~0u)
+					continue;
+				std::uint64_t value = 0;
+				std::memcpy(&value, result + s.offsets[v], sizeof(value));
+				s.sums[entry.site][v] += static_cast<double>(value);
+			}
+			++s.queries[entry.site];
 		}
+		if (mapped)
+			s.readback->Unmap(0, 0);
 		s.pending.swap(waiting);
 		if (++s.frames < kLogFrames)
 			return;
@@ -153,8 +175,8 @@ namespace DCLF::Direct::SiteStats
 				continue;
 			const auto& v = s.sums[site];
 			const double f = s.frames;
-			logger::info("[DCLF] site stats {}: {:.2f} queries, IA vertices {:.0f}, IA prims {:.0f}, VS {:.0f}, clip in {:.0f} ({:.1f}% of IA), clip out {:.0f}, PS {:.0f} (per frame, {} frames, {} dropped)",
-				kSiteNames[site], s.queries[site] / f, v[0] / f, v[1] / f, v[2] / f, v[3] / f, v[1] ? 100.0 * v[3] / v[1] : 0.0, v[4] / f, v[5] / f, s.frames, s.dropped);
+			logger::info("[DCLF] site stats {}: {:.2f} queries, IA vertices {:.0f}, IA prims {:.0f}, VS {:.0f}, PS {:.0f} (per frame, {} frames, {} dropped)",
+				kSiteNames[site], s.queries[site] / f, v[0] / f, v[1] / f, v[2] / f, v[3] / f, s.frames, s.dropped);
 		}
 		s.sums = {};
 		s.queries = {};
