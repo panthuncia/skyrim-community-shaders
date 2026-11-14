@@ -193,7 +193,9 @@ entries `OrgFxVS` and `OrgFxPS` (passes with the same shaders produce the same t
    give lines of the preprocessed text. Function bodies, structs, classes and `static` globals stay byte for byte.
 2. **Prologue (bindless ABI).** The push block (`cbuffer OrgFxBindings : register(b0)`, `uint4 OrgFxPush[]`,
    `LoweredEffect::PushWords()` words) holds the heap index of a raw buffer (a `LatchBlock` region in practice), this
-   pass's byte offset in it, then one heap index per `LoweredEffect::resources` entry (at most `kMaxResources`, 30). The
+   pass's byte offset in it, then the heap indices at the words `OrgFx::LayoutPass` gives each `LoweredEffect::resources`
+   entry: one per entry in order when the effect has at most `kMaxResources` (30), else only the entries the pass's shaders
+   reach by name, with two shared words (black texture, linear sampler) for the rest, at most 28 reached per pass. The
    region holds the constant buffers (`$Globals`, then each `cbuffer`, `LoweredEffect::regions`). Handles are fixed for a
    recording and known only at record time, so they cannot sit in the latch the commit writes. So:
     - `static float4 Timer = OrgFxValues.Load<float4>(OrgFxValuesOffset + 16u);` at the variable's offset; bools compare
@@ -267,12 +269,17 @@ all four do nothing.
   blocks (`SamplerDesc` as the `D3D11_SAMPLER_DESC` FX11 makes, through `ShaderBindings::SamplerFromD3D11`), bare `SamplerState`s take D3D11's default. `ResourceName` textures are
   FX11's loaded files, imported with `FrameAnchors::D3D11Texture`. Passes compile when a plan first needs them, keyed by
   technique, pass and target format: `RasterProgram` from generated text (the same text for both stages, entries
-  `OrgFxVS`/`OrgFxPS`, `-HV 2018`). A pass with blend, depth or rasterizer states, a parse or lowering error, or a DXC
-  failure fails its effect until the next reload.
+  `OrgFxVS`/`OrgFxPS`, `-HV 2018`). Blend and rasterizer states become the pipeline's: a pass that sets none keeps the last
+  one set, as FX11's Apply does, back to EffectManager's after CS's own draws; the blend factor is set on the list. Depth-stencil
+  state does nothing (no depth view is bound). A pass whose sample mask lacks sample 0, or that sets hull or domain shaders,
+  draws nothing on D3D11 and is left out; a compute shader on a pass is ignored. `cbuffer` variables are copied into their
+  region. A geometry shader, a UAV, a parse or lowering error, or a DXC failure fails its effect until the next reload.
 - **Plan.** `Planner::Build` replays `ExecuteEffects` in order and resolves FX11's ping-pong into fixed graph textures
   (`Effects11::<name>`): the tonemap's input (kMAIN, or another target with an upscaler on) copied into `Original`, a
   graph texture with a UAV, since engine targets may have none (a plain copy when the format and size match, as
-  `CopyResource`, else CopyPS); colour correction of `Original` in place, then `Original` copied into kMAIN when kMAIN
+  `CopyResource`, else CopyPS); colour correction of `Original` in place; `enbdepthoffield.fx` (Aperture, ReadFocus and
+  Focus into kept 1x1/16x16 textures with history copies, then its chain into `HDRTemp`/`HDRTemp2`, copied back over
+  `Original`; later effects read this frame's aperture as `TextureAperture`); then `Original` copied into kMAIN when kMAIN
   has an RTV (FX11 leaves its corrected image there), before the output copy; the downsample to 1024, 512 and 256 (three textures, since
   FX11 binds single mips only; each a bilinear half of the one before, which is the box filter GenerateMips gave); the
   bloom and lens chains (`Effect::ExecuteTechniqueSequence`'s rule, `RenderTarget` annotations to the `RenderTarget*`
@@ -313,10 +320,10 @@ all four do nothing.
 
 Not supported yet (the frame stays on FX11, logged):
 
-- `enbdepthoffield.fx` (its aperture and focus history pairs, and the copy back into kMAIN).
-- `cbuffer` blocks, render states in passes, `RenderTarget` annotations naming textures other than `RenderTarget*`
-  (`TextureHDRTemp` and the like), effects with more than 30 textures and samplers, `#pragma pack_matrix(row_major)`
-  (a parse error), encrypted presets.
+- Geometry shaders (BasicRHI has no geometry stage) and UAVs (ORG has no owned null UAV view to stand in for FX11's
+  unbound one).
+- Encrypted presets: only FX11 gets their compiled `fx_5_0` binary. See [parity/fx.md](./parity/fx.md).
+- A pass that reaches more than 28 textures and samplers.
 - The UI seam below: FX11 still holds the values, so FX11 must still compile every effect.
 - GPU timers per pass, and `Effects11::<effect> Pass <n>` profiler zones.
 
@@ -365,7 +372,8 @@ fx-parse-check [-v] [--dxc C:\VulkanSDK\<ver>\Bin\dxc.exe] [--out <folder>] <enb
 
 - Encrypted (`KIEFX`) presets: CS only sees the `fx_5_0` binary. They stay on FX11.
 - Geometry, hull, domain and compute shaders in `.fx`, stream output, UAVs, `shared` variables and effect pools, dynamic
-  shader linkage (`interface`), MSAA textures. Parsed and reported; an effect using them stays on FX11.
+  shader linkage (`interface`), MSAA textures. Parsed and reported; an effect using geometry shaders or UAVs stays on
+  FX11. A compute shader on a pass is ignored and a pass with hull or domain shaders is left out, as their draws do on D3D11.
 - DX9-style render states (`ZEnable`, `AlphaBlendEnable`) and `sampler_state` initializers: parsed and reported.
 - The CS-owned Effects11 shaders (volumetric rays, sun rays, colour correction): W4 ports them as ordinary dual-target
   shaders; this runtime only schedules them in the same anchor.
@@ -393,8 +401,8 @@ Done: `RasterProgram` from generated text (`Desc::pixelText`/`vertexText`, `lang
 "What execution does today"), the scenarios. Next:
 
 1. Done: build and A/B on Rudy's preset. The graph matches FX11 in both test cells.
-2. `enbdepthoffield.fx`: the aperture and focus pairs as History textures with copies, the chain into HDRTemp/HDRTemp2,
-   and the copy back into kMAIN.
+2. Done (parity wave): `enbdepthoffield.fx`, `cbuffer` blocks, render states, `RenderTarget` annotations to any texture
+   FX11 finds, more than 30 textures, `#pragma pack_matrix`. See [parity/fx.md](./parity/fx.md).
 3. The UI seam (section 5): `UIVariable` value handle, and UI variables built from the model on the ORG path, so the
    value image starts from `BuildDefaultValues` and FX11 is no longer compiled.
 4. GPU timers per pass (P2 timers), and the rest of the "not supported yet" list.
