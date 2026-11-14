@@ -468,9 +468,13 @@ namespace GraphResources
 			graphDesc.initialLayout = *home;
 			std::shared_ptr<org::ExternalTextureResource> texture;
 			if (*home == rhi::ResourceLayout::Common && !RenderGraph::Backend::IsD3D12()) {
-				// Resting in GENERAL (native mode): the graph reads and renders it in GENERAL alone. That takes an import with
-				// simultaneous access, since BasicRHI renders its own images in the attachment layouts. The import does not own the
-				// image, so the graph texture keeps it: the import goes first, then the image.
+				// Resting in GENERAL (native mode). With shared native imports (the default) the graph reads and renders it in GENERAL
+				// alone. That takes an import with simultaneous access, since BasicRHI renders its own images in the attachment layouts.
+				// With exclusive native imports (CS_ORG_NATIVE_EXCLUSIVE_IMPORTS=1, or CS_ORG_NATIVE_HOME_STATES=0) the import is
+				// exclusive and the graph moves the image between layouts. Its other users follow: the native context's work on the
+				// D3D11 wrap goes through ORG's external client (this resource is its ledger: MadeImageOf), and DCLF's views of it are
+				// made on this resource. The import does not own the image, so the graph texture keeps it: the import goes first, then
+				// the image.
 				struct Kept
 				{
 					rhi::ResourcePtr image;

@@ -968,3 +968,98 @@ So:
 - Still on the render thread: a rebuild of the main resources under claims (rare) and shader reload.
 
 Test runs now use `CS_TEST_BACKGROUND=1`, so they never focus the game or move the mouse.
+
+## Phase 4 item 3 lane: raw work and home states (`org-native/p4-raw-work`)
+
+**What still touches tracked images outside the graph** (read from the code, before any run).
+- **DCLF's bindless views: the likely cause of the flashing.** `GpuTextures::Import` imports a native image raw (`ImportDxvkImage`). A
+  native image that rests in GENERAL gets simultaneous access, and BasicRHI then writes its view's descriptor with
+  `VK_IMAGE_LAYOUT_GENERAL` (`generalLayoutOnly` in `rhi_vulkan.cpp`). With exclusive imports, the graph moves these images into
+  `SHADER_READ_ONLY_OPTIMAL` in the pass that declares the read, so the descriptor names the wrong layout. This hits:
+  - host-made images: the engine's targets are made at startup, before the graph is up;
+  - GraphResources' native twin exports;
+  - graph-owned PixelBuffers, which already move layouts even with shared imports.
+
+  Every DCLF read of an engine target goes through these views, and so does every port that reads through
+  `GpuTextures::ResolveBinding`'s interim indices. In guest mode the same images rest in read-only layouts, so the raw views name
+  the read-only layout and match. That is why guest's exclusive imports work.
+- **The native immediate context.** After Phase 3, the world's frames have no raw GPU work on images. What is left: loading-screen
+  uploads and copies, DYNAMIC texture unmaps, mip generation, UAV clears, readback copies (the present probe, captures) and
+  creation-time work. With home states on, these are correct between executions: every execution gives each image back in GENERAL.
+  The exception is a call made inside an anchor run (Phase 3's risk).
+- **The present's copy.** It assumes the back buffer in Common. That is right with home states on, and wrong without them.
+- **Not covered.**
+  - Buffers have no layouts, so they are left as they are.
+  - Queue order: native mode has no exit queue boundary. A raw graphics-queue operation is not ordered after a compute- or
+    copy-queue last use. With home states on, external homes release host-owned textures to graphics. Without them, the routed work
+    takes its waits from the ledger. Raw buffer work is not covered either way.
+
+**The diagnostic: `CS_ORG_RAW_ACCESS_CHECK=1`.**
+- `[ORG raw access] '<operation> <name>' on '<name>' runs on the immediate context's own path and assumes GENERAL; the graph tracks
+  the image as '<graph resource>' (<graph-owned | promoted exempt | host-made, imported>, <moved between layouts | Common only>,
+  <goes home after each execution | no home>); <inside an anchor run | between anchor runs>: <RACE ... | safe while home states hold>`.
+  Logged once per resource and operation. A race is any such use with home states off, inside an anchor run, or on a resource that
+  moves layouts and does not go home.
+- `[ORG raw access] DCLF's view of '<graph resource>' names GENERAL, but the graph moves the image between layouts; ...`. Logged once
+  per image, while the graph is not moving native images. With it moving them, these views are made on the graph resource instead.
+- Every 600 frames, when the counts changed: `[ORG raw access] so far: N native context operations on tracked images outside the
+  graph (M where the graph may hold another layout); R sent through external work; G DCLF views in GENERAL of images the graph moves;
+  V DCLF views made on the graph resource; home states on|off, exclusive imports on|off`.
+- It sees only images. "Tracked" means an image with a graph resource (`GraphResourceOfImage`): a graph-owned texture, a made image,
+  or the newest graph import of a host-made image.
+
+**What changed.**
+- **`GraphResourceOfImage`** (`DxvkImageImport`) finds the graph resource whose ledger follows an image. `ImportDxvkTexture` notes
+  every native import for it.
+- **`NativeGraphMovesImages()`** (native Vulkan, with home states off or exclusive imports) turns on the routing below. The default,
+  shared imports with home states on, keeps the old paths.
+- **The context's work goes through the ledgers.** `LedgerResourceOf` also returns a host-made image's graph import. `RouteRaw` sends
+  an operation with at least one tracked image through `ExternalWork`. Each tracked image is declared in GENERAL (Common) with copy
+  access, so the client moves it there from wherever the ledger says. The context's Vulkan commands stay as they were.
+  - Covered: DYNAMIC unmaps, texture updates (depth too), copies with one tracked side (readbacks included), mip generation, and
+    colour, UAV and depth clears.
+  - Untracked images in the same operation keep the context's contract (exempt ones leave the shader-read state around it).
+  - The work ends with a full barrier and signals the context's own timeline (`ExternalWork::Submit` takes extra signals), so `Map`
+    and `Wait` still cover it. The context's lock is held around the submission, so its timeline values stay in order.
+- **Copies between two tracked images** keep the client's copy-layout path (`CopyExternally`). A copy within one image now goes to
+  `RouteRaw` (one access, reading and writing).
+- **The present's copy** reads the back buffer through the client (`PresentThroughLedger`) when the graph moves native images.
+- **DCLF's views** of an image the graph moves are made on the graph resource's own image (`ImportedBacking::graphResource`), so their
+  descriptors name the read-only layout the declaring pass guarantees. Untracked images keep the raw import.
+- **Home states off: `CS_ORG_NATIVE_HOME_STATES=0`.** Native Vulkan only; the default stays on.
+  - `externalHomeStates` is off.
+  - Exclusive native imports are implied, so no import is Common-only.
+  - `SetHostHome` is off on graph-owned PixelBuffers.
+  - `ExternalWork` becomes open, since it follows `externalHomeStates`.
+  - Native in-stream epochs are off unless `CS_ORG_NATIVE_IN_STREAM=1`. DCLF's direct forward and first-person families need them, so
+    they turn off (`GraphConditions`).
+  - D3D12 and guest mode are unchanged.
+- **Exclusive imports** stay off by default (`CS_ORG_NATIVE_EXCLUSIVE_IMPORTS`). With `=1` alone, home states stay on and the routing
+  and views above apply.
+- New log lines:
+  - `[ORG] native home states: <on | off ...>; graph imports of native images: <exclusive | shared>`;
+  - `[ORG] in-stream epochs: none without native home states ...`;
+  - `[ORG] external work: ORG's external client is ready (open submissions ...)`.
+
+**For the main session.**
+1. A native quick run with `CS_ORG_RAW_ACCESS_CHECK=1` and the defaults: the races left with home states on. Expect no RACE lines
+   between anchor runs. Expect `DCLF views in GENERAL of images the graph moves` above zero: those are PixelBuffers and twins.
+2. The same with `CS_ORG_NATIVE_EXCLUSIVE_IMPORTS=1`: no flashing, haze present, shots match the shared run.
+   `DCLF views made on the graph resource` above zero, `views in GENERAL` at zero.
+3. The same with `CS_ORG_NATIVE_HOME_STATES=0`: the same visual checks. In the log:
+   - the home-states line says off;
+   - `sent through external work` above zero on loading screens;
+   - no RACE lines (each one names raw work still on the context's own path).
+4. `native-validation` with each of 2 and 3: no new layout errors. A descriptor-layout mismatch here would name a view still made raw.
+5. If DCLF's forward or first-person draws differ with home states off, try `CS_ORG_NATIVE_IN_STREAM=1`.
+
+**Risks.**
+- ExternalWork submissions from inside an anchor run read the ledgers before that run's batches commit. ORG's prediction check
+  (`Predicts`) should re-plan the run. This is not tested.
+- Declaring copy access in GENERAL is a broad state for the ledger. The next graph use transitions out of GENERAL, which costs one
+  barrier per routed operation.
+- A DCLF read that some pass does not declare as a shader read sees a read-only descriptor on an image in another layout. The
+  undeclared-access validator reads 0 in the world, so none is expected.
+- With home states off, DCLF's direct forward families are off unless `CS_ORG_NATIVE_IN_STREAM=1`. First person may then fall to
+  "the engine's" path (see `GraphConditions`' warning).
+- Raw buffer work after compute-queue graph work is still unordered in native mode.

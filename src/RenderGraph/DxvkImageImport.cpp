@@ -13,11 +13,13 @@
 #include <Resources/VersionedTexture.h>
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <filesystem>
 #include <mutex>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 // BasicRHI's D3D12 import (rhi_interop_dx12.h), declared here: that header brings DirectX-Headers' d3d12.h, which this translation
@@ -57,8 +59,33 @@ namespace RenderGraph
 		 */
 		bool ExclusiveGraphImports()
 		{
-			static const bool on = Switches::On("CS_ORG_NATIVE_EXCLUSIVE_IMPORTS");
-			return on && Engine::Native::OwnedResources();
+			return NativeExclusiveImports();
+		}
+
+		/** @brief The newest graph import of each image (ImportDxvkTexture), held weakly, for GraphResourceOfImage. */
+		struct GraphImports
+		{
+			std::mutex mutex;
+			std::unordered_map<std::uint64_t, std::weak_ptr<org::ExternalTextureResource>> byImage;
+			std::size_t pruneAt = 256;
+		};
+		GraphImports& Imported()
+		{
+			static GraphImports imports;
+			return imports;
+		}
+
+		void NoteGraphImport(std::uint64_t a_image, const std::shared_ptr<org::ExternalTextureResource>& a_resource)
+		{
+			if (!a_image || !a_resource || !Engine::Native::Active())
+				return;
+			auto& imports = Imported();
+			const std::lock_guard lock(imports.mutex);
+			imports.byImage[a_image] = a_resource;
+			if (imports.byImage.size() >= imports.pruneAt) {
+				std::erase_if(imports.byImage, [](const auto& a_entry) { return a_entry.second.expired(); });
+				imports.pruneAt = (std::max<std::size_t>)(256, 2 * imports.byImage.size());
+			}
 		}
 
 		rhi::ResourcePtr ImportImage(rhi::Device a_device, const DxvkOrgInteropImageInfo& a_image, const char* a_name, bool a_exclusive)
@@ -137,8 +164,105 @@ namespace RenderGraph
 		if (result) {
 			result->SetName(a_name);
 			NoteImageResource(reinterpret_cast<std::uint64_t>(a_image.image), result, a_name ? a_name : "");
+			NoteGraphImport(reinterpret_cast<std::uint64_t>(a_image.image), result);
 		}
 		return result;
+	}
+
+	bool NativeHomeStatesOff()
+	{
+		static const bool off = Switches::Off("CS_ORG_NATIVE_HOME_STATES");
+		return off && Engine::Native::Active() && !Backend::IsD3D12();
+	}
+
+	bool NativeExclusiveImports()
+	{
+		static const bool on = Switches::On("CS_ORG_NATIVE_EXCLUSIVE_IMPORTS");
+		return (on || NativeHomeStatesOff()) && Engine::Native::OwnedResources();
+	}
+
+	bool NativeGraphMovesImages()
+	{
+		// D3D12 imports are exclusive anyway and keep home states: its context's work stays as it is (Phase 5).
+		return !Backend::IsD3D12() && (NativeHomeStatesOff() || NativeExclusiveImports());
+	}
+
+	std::shared_ptr<org::Resource> GraphResourceOfImage(std::uint64_t a_image)
+	{
+		if (!a_image)
+			return nullptr;
+		if (auto owned = Engine::Native::GraphTextureOfImage(a_image))
+			return owned;
+		if (auto made = MadeImageOf(a_image); made.resource)
+			return made.resource;
+		auto& imports = Imported();
+		const std::lock_guard lock(imports.mutex);
+		const auto found = imports.byImage.find(a_image);
+		return found != imports.byImage.end() ? found->second.lock() : nullptr;
+	}
+
+	namespace RawAccess
+	{
+		namespace
+		{
+			struct Counters
+			{
+				std::array<std::atomic<std::uint64_t>, static_cast<std::size_t>(Kind::Count)> counts{};
+				std::array<std::uint64_t, static_cast<std::size_t>(Kind::Count)> reported{};
+				std::mutex mutex;
+				std::unordered_set<std::uint64_t> logged;
+			};
+			Counters& Get()
+			{
+				static Counters counters;
+				return counters;
+			}
+		}
+
+		bool On()
+		{
+			static const bool on = Switches::On("CS_ORG_RAW_ACCESS_CHECK");
+			return on;
+		}
+
+		void Count(Kind a_kind)
+		{
+			if (a_kind < Kind::Count)
+				Get().counts[static_cast<std::size_t>(a_kind)].fetch_add(1, std::memory_order_relaxed);
+		}
+
+		bool LogOnce(std::uint64_t a_key)
+		{
+			constexpr std::size_t kMaxLines = 64;
+			auto& counters = Get();
+			const std::lock_guard lock(counters.mutex);
+			if (counters.logged.size() >= kMaxLines)
+				return false;
+			return counters.logged.insert(a_key).second;
+		}
+
+		void Summary()
+		{
+			if (!On())
+				return;
+			auto& counters = Get();
+			std::array<std::uint64_t, static_cast<std::size_t>(Kind::Count)> now{};
+			for (std::size_t i = 0; i < now.size(); ++i)
+				now[i] = counters.counts[i].load(std::memory_order_relaxed);
+			{
+				const std::lock_guard lock(counters.mutex);
+				if (now == counters.reported)
+					return;
+				counters.reported = now;
+			}
+			logger::info(
+				"[ORG raw access] so far: {} native context operations on tracked images outside the graph ({} where the graph may hold "
+				"another layout); {} sent through external work; {} DCLF views in GENERAL of images the graph moves; {} DCLF views made on "
+				"the graph resource; home states {}, exclusive imports {}",
+				now[static_cast<std::size_t>(Kind::ContextTracked)], now[static_cast<std::size_t>(Kind::ContextRace)],
+				now[static_cast<std::size_t>(Kind::Routed)], now[static_cast<std::size_t>(Kind::ViewGeneral)],
+				now[static_cast<std::size_t>(Kind::ViewFromGraph)], NativeHomeStatesOff() ? "off" : "on", NativeExclusiveImports() ? "on" : "off");
+		}
 	}
 
 	namespace

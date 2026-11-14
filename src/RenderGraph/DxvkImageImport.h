@@ -10,6 +10,9 @@
 // slot before making one), since two resources would each track the image's layout. Shared imports stay the default
 // until the duplicate image check (CS_ORG_IMAGE_DUPLICATE_CHECK) is clean. Raw imports (ImportDxvkImage: the native context's own, Drawcall Limit Fix's bindless views) stay shared in GENERAL, where
 // the context and the raw views use the image between graph executions.
+//
+// With CS_ORG_NATIVE_HOME_STATES=0 (native Vulkan), exclusive imports are implied and nothing goes home: the native context's work on
+// tracked images goes through ORG's external client, and DCLF's views of them are made on the graph resource (NativeGraphMovesImages).
 
 #include "RenderGraph/BufferRef.h"
 #include "RenderGraph/DxvkOrgInterop.h"
@@ -109,6 +112,62 @@ namespace RenderGraph
 
 	/** @brief The registered resource of a_image, or an empty MadeImage. Any thread. */
 	MadeImage MadeImageOf(std::uint64_t a_image);
+
+	/**
+	 * @brief Whether native mode runs without home states (CS_ORG_NATIVE_HOME_STATES=0; org-native-frame-graph.md, Phase 4 item 3).
+	 * The graph then leaves every image in the layout its last pass used, and the ledgers carry it to the next user. Native Vulkan only:
+	 * D3D12 and guest (DXVK) mode keep home states. Off (home states on) by default. Any thread.
+	 */
+	bool NativeHomeStatesOff();
+
+	/**
+	 * @brief Whether the graph's imports of native images are exclusive (CS_ORG_NATIVE_EXCLUSIVE_IMPORTS=1, or home states off; both
+	 * with CS_ORG_NATIVE_OWNED). The graph then moves each image into its passes' layouts. Any thread.
+	 */
+	bool NativeExclusiveImports();
+
+	/**
+	 * @brief Whether raw work on images the graph tracks must take each image's layout from the ledgers: native mode with home states
+	 * off or exclusive imports. The native context then sends such work through ORG's external client, and Drawcall Limit Fix's views
+	 * of such images name the read-only layout their declaring passes move them to. Any thread.
+	 */
+	bool NativeGraphMovesImages();
+
+	/**
+	 * @brief The graph resource whose ledger follows a_image (a VkImage, or the ID3D12Resource on D3D12): native mode's graph-owned
+	 * texture, a made image (RegisterMadeImage), or the newest live graph import of it (ImportDxvkTexture). Null when no graph
+	 * tracks the image. Any thread.
+	 */
+	std::shared_ptr<org::Resource> GraphResourceOfImage(std::uint64_t a_image);
+
+	/**
+	 * @brief The raw access check (CS_ORG_RAW_ACCESS_CHECK=1): counts and logs work on images the graph tracks that does not go through
+	 * the graph's state tracking (org-native-frame-graph.md, "Phase 4 item 3 lane"). Cheap when off.
+	 */
+	namespace RawAccess
+	{
+		enum class Kind : std::uint32_t
+		{
+			ContextTracked,  // the native context's own path on an image the graph tracks
+			ContextRace,     // ... where the graph may hold it in another layout (home states off, or inside an anchor run)
+			ViewGeneral,     // a raw GENERAL view (Drawcall Limit Fix) of an image the graph moves between layouts
+			ViewFromGraph,   // such a view made on the graph resource instead, in the read-only layout
+			Routed,          // the native context's work on a tracked image sent through ORG's external client
+			Count
+		};
+
+		/** @brief Whether the check is on. Any thread. */
+		bool On();
+
+		/** @brief Counts one access of a_kind. Any thread. */
+		void Count(Kind a_kind);
+
+		/** @brief Whether a line for a_key should be logged: true once per key, for the first 64 keys. Any thread. */
+		bool LogOnce(std::uint64_t a_key);
+
+		/** @brief Logs the counts when they changed since the last call (native Present calls it every 600 frames). */
+		void Summary();
+	}
 
 	BufferRef ImportBufferRef(rhi::Device a_device, std::uint64_t a_buffer, std::uint64_t a_offset, std::uint64_t a_bytes, std::uint64_t a_address,
 		std::shared_ptr<const void>& a_keep, std::source_location a_where = std::source_location::current());

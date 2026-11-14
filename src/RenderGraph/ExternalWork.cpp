@@ -52,13 +52,15 @@ namespace RenderGraph::ExternalWork
 				desc.queues = { { device.GetQueue(rhi::QueueKind::Graphics), rhi::QueueKind::Graphics },
 					{ device.GetQueue(rhi::QueueKind::Compute), rhi::QueueKind::Compute }, { device.GetQueue(rhi::QueueKind::Copy), rhi::QueueKind::Copy } };
 				desc.name = "CS external work";
-				// The host gives its resources back in their home states after each execution: so does the client.
+				// The host gives its resources back in their home states after each execution: so does the client. Without home states
+				// (native, CS_ORG_NATIVE_HOME_STATES=0) the host has none, and the client is open.
 				desc.closed = host->ClosedExecutions() || host->GetDesc().externalHomeStates;
 				desc.entryFullBarrier = true;
 				const bool closed = desc.closed;
 				a_state.client = std::make_unique<org::ExternalClient>(std::move(desc));
-				logger::info("[ORG] external work: ORG's external client is ready ({} submissions: each returns what it used to its home state)",
-					closed ? "closed" : "open");
+				logger::info("[ORG] external work: ORG's external client is ready ({})",
+					closed ? "closed submissions: each returns what it used to its home state" :
+							 "open submissions: each leaves what it used in the state it declared, for the ledgers to carry on");
 			} catch (const std::exception& e) {
 				a_state.failed = true;
 				logger::error("[ORG] external work: ORG's external client could not be made: {}; such work keeps its own path", e.what());
@@ -83,7 +85,7 @@ namespace RenderGraph::ExternalWork
 	}
 
 	bool Submit(std::string_view a_label, std::span<const Access> a_accesses, const std::function<void(rhi::CommandList&)>& a_record,
-		std::shared_ptr<const void> a_keepAlive)
+		std::shared_ptr<const void> a_keepAlive, std::span<const rhi::TimelinePoint> a_signals)
 	{
 		auto& state = Get();
 		// One submission at a time: the client serializes them anyway, and this lock also covers its creation and Shutdown.
@@ -92,7 +94,7 @@ namespace RenderGraph::ExternalWork
 		if (!client)
 			return false;
 		try {
-			client->Submit(0, a_accesses, a_record, {}, std::move(a_keepAlive));
+			client->Submit(0, a_accesses, a_record, a_signals, std::move(a_keepAlive));
 		} catch (const std::exception& e) {
 			if (state.loggedFailures.emplace(a_label).second)
 				logger::error("[ORG] external work: '{}' could not be submitted: {}; it keeps its own path (logged once per kind)", a_label, e.what());
