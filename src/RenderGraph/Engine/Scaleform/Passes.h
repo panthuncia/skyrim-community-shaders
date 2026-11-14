@@ -41,7 +41,7 @@ namespace RenderGraph::Engine::Scaleform::Passes
 
 	/**
 	 * @brief Draws a_display on the graph here, as one Interface anchor run per run gate's worth of commands. False when it did not
-	 * (the caller replays the display into the D3D11 renderer), with a_reason: an inherent refusal (a render target that is not a
+	 * (the caller leaves the segment out and counts a_reason): an inherent refusal (a render target that is not a
 	 * surface, a mask on another depth-stencil), a surface made again as another graph resource (until the next build point), or a
 	 * failure (a texture whose view cannot be resolved, a run that did not execute: logged as an error). A pipeline not built yet is
 	 * built here; a draw whose pipeline failed is left out (logged once). Render thread.
