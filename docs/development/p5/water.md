@@ -75,12 +75,13 @@ FinishAccumulating also copies the main depth into kPOST_ZPREPASS_COPY again whe
 **Main::RenderWaterEffects** (35561 / 36560) runs before the main pass: the water system's update (TESWaterReflections::Update 31383,
 the displacement simulation through ImageSpaceEffectWaterDisplacement, 31385 and 99025) and the flow copies Unified Water patches out.
 
-### The displacement simulation: left to the engine
+### The displacement simulation: ImageSpace's
 
 ImageSpaceEffectWaterDisplacement (ImageSpace slot 31, shaders 86-94) runs the wading and rain ripple simulation into
-kWATER_DISPLACEMENT and its swap. None of its nine shaders has a CS HLSL in the descriptor map (vanilla DXBC runs), the ImageSpace
-chain is P5.6's (another lane), and only the wading water reads its output. So it stays the engine's: it runs earlier in DXVK's stream
-than the EngineDraws epoch, and the water's draws read kWATER_DISPLACEMENT at t2 as the engine binds it, through GpuTextures.
+kWATER_DISPLACEMENT and its swap. The water family does not draw it. Its nine shaders are in ImageSpace's covered list
+(`ISWaterDisplacement*`, the `waterdisplacement` group, `ImageSpace.cpp`; built from `ISWaterDisplacement.hlsl`), so with
+`CS_ORG_IMAGESPACE=1` it is a graph pass. It runs from the water system's update, before the main pass, and the water's draws read
+kWATER_DISPLACEMENT at t2 as the engine binds it, through GpuTextures.
 
 ## The family
 

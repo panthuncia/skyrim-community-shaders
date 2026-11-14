@@ -57,7 +57,7 @@ only `0` turns it off. Parity, diagnostic and test switches are off unless set.
 | `CS_DCLF_PRECOMPILE` | on (unless 0) | `0`: DCLF's SPIR-V programs compile on first use instead of alongside the engine's shaders. |
 | `CS_DCLF_CULL` | `occlusion` (`frustum` on AMD) | `off`, `frustum` or `occlusion`: GPU culling. `off` and `frustum` count as a reduced featureset. AMD defaults to `frustum` while its HZB reads back empty (dclf-open-defects.md). |
 | `CS_DCLF_PIPELINE` | `gpu` | `cpu`: the CPU-driven pipeline (an experiment; dclf-architecture.md, "The CPU-driven pipeline"). Live: `dclf:pipeline=gpu\|cpu`, from the next build point. |
-| `CS_DCLF_CPU_RECORD` | `serial` on NVIDIA, `indirect` elsewhere | `serial`: the CS thread records each draw. `indirect`: the cull jobs write draws (needs pulled colour, 0.21 ms of GPU time on an RTX 5080). `parallel`: the CPU pipeline's plain lists recorded into a secondary per batch on the pool. Live: `dclf:cpu-record=indirect\|serial\|parallel`. |
+| `CS_DCLF_CPU_RECORD` | `indirect` on every vendor | `serial`: the CS thread records each draw. `indirect`: the cull jobs write draws (needs pulled colour, 0.21 ms of GPU time on an RTX 5080). `parallel`: the CPU pipeline's plain lists recorded into a secondary per batch on the pool. Live: `dclf:cpu-record=indirect\|serial\|parallel`. |
 | `CS_DCLF_CPU_CADENCE` | `frame` | `frame\|snapshot`, or `<view>=frame\|snapshot,...`: a CPU pipeline view culled every frame or once per snapshot (main always per frame). Live: `dclf:cpu-cadence-<view>=frame\|snapshot`, `dclf:cpu-cadence=frame\|snapshot`. Views: `main`, `decal`, `forward`, `refraction`, `sun`, `spot`, `point`, `sky`, `precipitation`, `reflection`, `first-person`. |
 | `CS_DCLF_CPU_BATCH` | 256 | The CPU pipeline's batch lanes, at startup (a multiple of 8). |
 | `CS_DCLF_SKINNED` | on (unless 1) | `0`: skinned objects stay native. |
@@ -205,15 +205,16 @@ Each compares a live path with a reference built from scratch and flags every mi
 
 ### Other switches DCLF runs depend on
 
-Read from the environment only.
+Read from the environment only. The epoch and submission switches are registered in `src/Testing/SwitchRegistry.cpp`, not in
+DCLF's registry, so DCLF's startup summary does not list them.
 
 | Switch | Where | Meaning |
 | --- | --- | --- |
-| `CS_ORG_EPOCHS` | registry, `RenderGraphRuntime.cpp` | `0`: the render graph runs without epochs, and DCLF does not install. |
-| `CS_ORG_ASYNC_EPOCHS` | registry | `0`: epochs are recorded on the render thread. A reduced featureset. |
-| `CS_ORG_CLOSED` | registry | `0`: epochs do not return their resources to their home states. |
-| `CS_ORG_BATCH_SUBMIT` | registry | `0`: an epoch's submissions go to DXVK one at a time. |
-| `CS_ORG_EARLY_FLUSH` | registry | `1`: DXVK's pending work is flushed when an epoch starts (a second DXVK list per epoch). |
+| `CS_ORG_EPOCHS` | `RenderGraphRuntime.cpp` | `0`: the render graph runs without epochs, and DCLF does not install. |
+| `CS_ORG_ASYNC_EPOCHS` | `RenderGraphRuntime.cpp` | `0`: epochs are recorded on the render thread. |
+| `CS_ORG_CLOSED` | `RenderGraphRuntime.cpp` | `1`: epochs return every resource to its home state and start with a full barrier (closed executions, an interop fallback). |
+| `CS_ORG_BATCH_SUBMIT` | `RenderGraphRuntime.cpp` | `0`: an epoch's submissions go to DXVK one at a time. |
+| `CS_ORG_EARLY_FLUSH` | `RenderGraphRuntime.cpp` | `1`: DXVK's pending work is flushed when an epoch starts (a second DXVK list per epoch). |
 | `CS_ORG_COMPUTE_QUEUE` | `RenderGraphRuntime.cpp` | `0`: BasicRHI's compute queue aliases the graphics one. |
 | `CS_ORG_UPLOAD_QUEUE` | `RenderGraphRuntime.cpp` | `0`: no spare transfer queue for uploads. |
 | `CS_ORG_SUBMIT` | `RenderGraphRuntime.cpp` | `flush`: each epoch flushes and waits for DXVK's command stream instead of enqueuing its submission. |
