@@ -567,9 +567,14 @@ namespace DCLF
 			if (a_pulled && (a_sourceName == kSourcePath || a_family))
 				request.defines.push_back({ L"DCLF_PULLED_ROWS", L"1" });
 			// D3D12: such a build also reads the pass's bindings itself (DxilStages::PrepareFrameSource rewrites it before it compiles). The
-			// other builds keep their registers: the unpulled ones are only reflected there (no D3D12 pipeline has their layout).
-			if (a_pulled && (a_sourceName == kSourcePath || a_family) && !::RenderGraph::ShaderTarget::IsSpirv())
+			// other builds keep their registers: the unpulled ones are only reflected there (no D3D12 pipeline has their layout). A pulled
+			// Utility build (the shadow views' and the occlusion maps') reads its blocks through the view's push words (kShadowPush*).
+			const bool utility = a_sourceName == kUtilitySourcePath;
+			if (a_pulled && (a_sourceName == kSourcePath || a_family || utility) && !::RenderGraph::ShaderTarget::IsSpirv()) {
 				request.defines.push_back({ DxilStages::kFrameDefine, L"1" });
+				if (utility)
+					request.defines.push_back({ DxilStages::kShadowFrameDefine, L"1" });
+			}
 			// D3D12 on AMD: device refs indexed as uniform (Common/DeviceRef.hlsli). The driver turns a non-uniform index into a loop around
 			// every load (the colour pass took 17 ms against 9), and its waves never mix draws, so the refs are uniform in a wave anyway.
 			if (!::RenderGraph::ShaderTarget::IsSpirv() && RenderGraphRuntime::VendorId() == 0x1002)

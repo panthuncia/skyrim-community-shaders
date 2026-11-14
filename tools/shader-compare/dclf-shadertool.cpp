@@ -7,10 +7,11 @@
 // CS_DCLF_STAGE_DUMP "options" line names; --lazy (CS_DCLF_LAZY_ROWS) takes the eager names from every .hlsl and .hlsli under --shaders,
 // as RenderGraphRuntime::ShaderSourceFiles lists them.
 //
-//   dclf-shadertool d3d12 <preprocessed.hlsl> <out.hlsl> --pixel|--vertex
+//   dclf-shadertool d3d12 <preprocessed.hlsl> <out.hlsl> --pixel|--vertex [--shadow]
 //
 // d3d12: a D3D12 pulled build's frame rewrite (FrameSource::Rewrite) of DXC -P output, with the pass-wide blocks of DrawPipelines.h
-// (kFramePushVS, kFramePushPS), as ShaderPrograms makes it.
+// (kFramePushVS, kFramePushPS), as ShaderPrograms makes it; --shadow: a shadow view's Utility build's (DCLF_D3D12_SHADOW_FRAME), whose
+// blocks are its push words'.
 #include "Features/DrawcallLimitFix/Core/Gpu/Pipelines/FrameSource.h"
 #include "Features/DrawcallLimitFix/Core/Gpu/Pipelines/PulledSource.h"
 
@@ -28,7 +29,8 @@ namespace
 	int Usage()
 	{
 		std::cerr << "usage: dclf-shadertool rewrite <in.hlsl> <out.hlsl> --shaders <dir> --material-textures <r,r,...> [--shadow-mask <slot>] "
-					 "[--samplers <count>] [--lazy]\n";
+					 "[--samplers <count>] [--lazy]\n"
+					 "       dclf-shadertool d3d12 <preprocessed.hlsl> <out.hlsl> --pixel|--vertex [--shadow]\n";
 		return 2;
 	}
 
@@ -96,10 +98,12 @@ namespace
 {
 	int D3D12(int a_argc, char** a_argv)
 	{
-		if (a_argc != 5)
+		if (a_argc != 5 && a_argc != 6)
 			return Usage();
 		const std::string stage = a_argv[4];
 		if (stage != "--pixel" && stage != "--vertex")
+			return Usage();
+		if (a_argc == 6 && std::string(a_argv[5]) != "--shadow")
 			return Usage();
 		std::ifstream in(a_argv[2], std::ios::binary);
 		const std::string source((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
@@ -112,6 +116,7 @@ namespace
 		options.pixel = stage == "--pixel";
 		options.vertexBlocks = (1u << 3) | (1u << 5) | (1u << 6) | (1u << 7) | (1u << 8) | (1u << 11) | (1u << 12) | (1u << 13);
 		options.pixelBlocks = (1u << 3) | (1u << 5) | (1u << 6) | (1u << 9) | (1u << 10) | (1u << 12) | (1u << 13);
+		options.shadow = a_argc == 6;
 		const auto result = DCLF::FrameSource::Rewrite(source, options);
 		if (!result.error.empty()) {
 			std::cerr << "d3d12 rewrite failed: " << result.error << "\n";

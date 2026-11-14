@@ -224,6 +224,7 @@ namespace DCLF::DxilStages
 		options.pixelBlocks = kFramePushPS;
 		options.keepFirst = kDrawPushBinding;
 		options.keepLast = kFramePushBinding;
+		options.shadow = std::ranges::any_of(a_request.defines, [](const org::services::ShaderDefine& a_define) { return a_define.name == kShadowFrameDefine; });
 		auto rewritten = FrameSource::Rewrite(std::string_view(text->GetStringPointer(), text->GetStringLength()), options);
 		if (!rewritten.error.empty()) {
 			a_error = "the D3D12 build's frame rewrite failed: " + rewritten.error;

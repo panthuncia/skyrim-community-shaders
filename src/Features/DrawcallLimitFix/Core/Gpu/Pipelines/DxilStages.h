@@ -22,6 +22,8 @@ namespace DCLF::DxilStages
 {
 	/** @brief The define a D3D12 pulled build carries (ShaderPrograms): its source is preprocessed and rewritten before it compiles. */
 	inline constexpr const wchar_t* kFrameDefine = L"DCLF_D3D12_FRAME";
+	/** @brief The define a D3D12 pulled Utility build carries with kFrameDefine: its blocks are the shadow view's push words (FrameSource::Options::shadow). */
+	inline constexpr const wchar_t* kShadowFrameDefine = L"DCLF_D3D12_SHADOW_FRAME";
 
 	/** @brief Whether a_binary is a DXIL container. */
 	bool IsDxil(std::span<const std::byte> a_binary);
@@ -51,8 +53,8 @@ namespace DCLF::DxilStages
 
 	/**
 	 * @brief A D3D12 pulled build's source: Common/DCLFFrameRecord.hlsli first, preprocessed with the request's defines and include
-	 * directories, then FrameSource's rewrite for its stage (ps_* or vs_*). a_request's source then points into a_storage. False with
-	 * a_error when either step fails.
+	 * directories, then FrameSource's rewrite for its stage (ps_* or vs_*; a shadow view's with kShadowFrameDefine). a_request's source
+	 * then points into a_storage. False with a_error when either step fails.
 	 */
 	bool PrepareFrameSource(org::services::ShaderCompileRequest& a_request, std::string& a_storage, std::string& a_error);
 }

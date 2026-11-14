@@ -17,6 +17,7 @@
  * - a constant buffer (b#): the pass's view of its block (the record's frameBlocks for a pass-wide block, else its address), each
  *   member a static of the same name. A block whose members are placed with packoffset is read register by register; one without
  *   is the same members in a struct, read as a ConstantBuffer (cbuffer packing either way).
+ * A shadow view's build (Options::shadow) reads its blocks through the view's push words instead.
  */
 namespace DCLF::FrameSource
 {
@@ -28,6 +29,11 @@ namespace DCLF::FrameSource
 		std::uint32_t pixelBlocks = 0;
 		// The constant buffer registers left as they are: the push blocks.
 		std::uint32_t keepFirst = 190, keepLast = 191;
+		// A shadow view's build (Utility.hlsl under DCLF_D3D12_SHADOW_FRAME): its blocks are the view's push words (DrawPipelines.h,
+		// kShadowPush*), not the frame record's. SharedData (b5) and FeatureData (b6) by the constant buffer view a word names, every other
+		// block by the buffer view ref a word names (Common/DCLFFrameRecord.hlsli, DCLFShadowBlockView and DCLFShadowBlockRef). The block
+		// masks above are not read.
+		bool shadow = false;
 	};
 
 	struct Result
