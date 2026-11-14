@@ -106,13 +106,10 @@ The Skylighting and precipitation occlusion maps draw through the same `ShadowVi
 
 ## What is left
 
-- **Refraction** (WS4.4) stays off. `ForwardPasses`/`MainShadowLayoutPush` push block addresses. On D3D12 they need the
-  same refs and views. The refraction signature (`shadowDrawSignature`) needs Constant+DrawIndexed and
-  `PlainDrawArgumentsOffset()`. Its stages already build with the shadow rewrite.
+- **Refraction** (WS4.4): done by lane par-dclf-d3d12b (below).
 - **The CPU pipeline's shadow sites** (`Direct/Sites.cpp`, `Recorder.cpp`) push addresses too. They stay Vulkan-only with
   the CPU pipeline.
-- **The `[DCLF] D3D12: on` line** (`DrawcallLimitFix.cpp`) still says only the main view's Lighting draws. The off list it
-  prints is correct.
+- **The `[DCLF] D3D12: on` line**: fixed by lane par-dclf-d3d12b.
 
 ## WS4.3 (Effect family): findings so far, no code change
 
@@ -129,7 +126,8 @@ The Skylighting and precipitation occlusion maps draw through the same `ShadowVi
   The rejections the plan names (`FrameSource.cpp` resource arrays and member types) did not reproduce. A game run with
   `CS_DCLF_EFFECTS=1 CS_DCLF_FORWARD=1` on D3D12 should look for `the D3D12 build's frame rewrite failed` lines. If one
   appears, run `CS_D3D12_SOURCE_DUMP=<dir>` and feed the dumped source to `dclf-shadertool d3d12`.
-- **Decoupling the opaque effects from the forward toggle** is not done. The opaque effects (`Api::ObjectClass::OpaqueEffect`)
+- **Decoupling the opaque effects from the forward toggle**: done by lane par-dclf-d3d12b (below), without a new toggle.
+  The notes that follow are the earlier analysis. The opaque effects (`Api::ObjectClass::OpaqueEffect`)
   share the `effects` toggle, which needs `forward`. The cleanest form is a toggle of their own:
   - registered with `.after = "decals"` and `.needs = { "decals" }`, which is allowed because needs resolve after every
     feature registers (`Toggles.cpp`);
@@ -141,3 +139,96 @@ The Skylighting and precipitation occlusion maps draw through the same `ShadowVi
   - The effect classification (`EffectDescriptors.cpp`) and the Effect port's frame rows may assume the `effects` class is on.
 
   `CS_DCLF_EFFECTS` and `CS_DCLF_OPAQUE_EFFECTS` stay in `kD3D12DclfSwitches`.
+
+# Lane par-dclf-d3d12b: refraction, effects, tree LOD and grass, setup compiles (WS4.3-4.6, WS3)
+
+Base `org-native/integrate` 2dde906fe. Native D3D12 drew no world geometry on the test machine at the time, so none of this
+is confirmed in game. Each stage below was checked offline: `dclf-shadertool d3d12` over the DXC preprocess, then DXC SM 6.6.
+Every build binds only b190 and b191 (some pixel stages bind only b191).
+
+## What changed
+
+- **Refraction (WS4.4).**
+  - On D3D12, `RefractionDrawPass` pushes the shadow layout's block words as refs and constant buffer views
+    (`MainShadowLayoutViews`, `Passes/Forward.cpp`). The view block, VS_PerFrame and the zero block are refs into the main
+    frame constants. SharedData and FeatureData use the main `FrameBlockViews`.
+  - LodFadeFrame is pushed as a ref there, and `Utility.hlsl` reads it directly on DXIL.
+  - On D3D12 the refraction signature (`shadowDrawSignature`) is Constant(`kDrawPushInstance`) then DrawIndexed, and the pass
+    starts at `PlainDrawArgumentsOffset()`. `StoreShadowSequence` already wrote the instance word.
+  - SPIR-V is unchanged.
+- **Effects (WS4.3).**
+  - The `effects` toggle no longer needs `forward`.
+  - `EffectDrawOf` refuses a pass that belongs to the forward epoch while the Forward class is off: blended, Falloff unblended
+    and particles. It returns `Ineligible::AlphaBlend`, as Eligibility does for blended Lighting.
+  - Opaque effects and effect decals draw in the G-buffer either way.
+  - The `particles` toggle now needs both `effects` and `forward`.
+  - No toggle was added. The packed word holds 5 core bits and 23 registered toggles (28 of 32).
+- **Tree LOD and grass (WS4.5).**
+  - On D3D12, draw-family builds take `DCLF_D3D12_FRAME` (`MakeStageRequest`): DistantTree, RunGrass and tree LOD's forward
+    program. FrameSource then reads their frame blocks, textures and samplers through the frame record.
+  - Checked: colour, depth, TruePBR and forward permutations, without feature defines and with these: SSS, IBL, Dynamic
+    Cubemaps, height fog, cloud and terrain shadows, Skylighting, volumetric shadows, LLF, Grass Collision, Grass Lighting,
+    wetness, HDR, linear lighting.
+  - Grass reads its visible entry by `SV_InstanceID` counting from the first instance. It draws with a new family signature,
+    `Api::DrawFamilySignature::InstanceWordDrawInstanced`:
+    - A 20-byte record: the first instance word, then DrawInstanced's arguments (`GrassLayout.h` `DrawArgs`, written by
+      `GrassArgsCS`).
+    - D3D12's signature writes the word into `kDrawPushInstance`, and `RunGrass.hlsl` adds it.
+    - Vulkan's signature starts 4 bytes in (`FamilyPipelines::argumentsOffset`).
+    - The draws buffer grew from 221,248 to 270,400 bytes.
+  - Tree LOD keeps the plain signature: every draw has first instance 0, and the stage adds phase two's start itself.
+- **Setup compiles (WS3).**
+  - `LoadProgram` (`Resources/Helpers.h`) loads a setup's compute programs on the build executor and caches them per device.
+  - Before it makes anything, the main setup asks for every BuildDraws entry, the forward sort and the sort scatter.
+  - While any program is loading, the main setup returns not ready and logs `[DCLF] Main-pass draws not ready: its compute
+    programs are compiling off the render thread`. DCLF stays off, the engine draws, and the setup runs again next frame.
+  - The shadow setup (`shadow views not ready: the compute programs are compiling ...`) and the view setups wait the same way,
+    without failing.
+  - `PrefixSum::Load` and the sort scatter's own load in `DrawSort::Create` still run on the render thread. They are small,
+    and by then the scatter's compile is cached.
+- **Log line.** It now reads `[DCLF] D3D12: on, the GPU pipeline with plain indirect draws (every part but the D3D12 switch
+  table's)`.
+
+Rows removed from the switch table, each in its own commit:
+
+- `CS_DCLF_REFRACTION`
+- `CS_DCLF_EFFECTS`, `CS_DCLF_OPAQUE_EFFECTS`, `CS_DCLF_BILLBOARDS`
+- `CS_DCLF_GRASS`, `CS_DCLF_LOD_TREES`
+
+`CS_DCLF_FORWARD` is still 0 on D3D12. Refraction and the blended effects therefore draw nothing there yet. Opaque effects,
+effect decals, grass and tree LOD do draw.
+
+## How to test
+
+- **Native D3D12** (`native-d3d12.env`), once the world draws there.
+  - Log: the off list must not name the removed rows. There must be no `the D3D12 build's frame rewrite failed` and no
+    `D3D12 refraction: no buffer view ref`. `grass pipelines ready` and `tree LOD pipelines ready` should appear.
+  - Shots: compare with native Vulkan. Forge coals and other opaque effects in Whiterun, grass and distant trees.
+  - With `CS_DCLF_FORWARD=1`, also check heat haze over braziers (refraction) and blended effects.
+- **A failing build:** run with `CS_D3D12_SOURCE_DUMP=<dir>` and feed the dumped source to `dclf-shadertool d3d12`.
+- **Guest and native Vulkan:** grass changed layout on both backends (20-byte draws, signature 4 bytes in). Check that grass
+  draws, in both depth phases, and moves in the wind.
+- **Watchdog:** change `BuildDrawsCS.hlsl` (a comment), then launch guest and native. The log should show the not-ready
+  line, then DCLF comes on a few seconds later with no hang report.
+- **Forward off on Vulkan** (`CS_DCLF_FORWARD=0`): opaque effects stay DCLF's, and blended effects are the engine's.
+
+## What is left
+
+- **Water reflections (WS4.6) stay in the table.**
+  - The faces would build. Their pipelines are pulled builds with the frame rewrite now, and their draws use
+    `zDrawSignature` and the view's frame push words.
+  - Reading the code turned up a problem on both backends, in how each face gets its camera:
+    - `ViewEpoch.cpp` writes each face's VS and PS b12 (VS_PerFrame) into that face's frame push words.
+    - Since the frame block views (a992281e1, 2026-10-27), the main and Z layouts read every pass-wide block through the frame
+      record's `frameBlocks` view, b12 included. The D3D12 rewrite does the same (`DCLFFrameBlockIndex`).
+    - A view has one record and one set of views, over its own frame constants. Its commit never writes their b12 slot.
+  - The effect: all six faces would read one unwritten VS_PerFrame. First person uses the main frame constants and pushes
+    its own b12, so it would draw with the main camera's projection.
+  - To confirm: check the Reflection feature's face-camera parity line and a first-person shot on Vulkan.
+  - The fix: a record per face (or per-face b12 views), with the record ref pushed per face.
+- **Shader reload device loss on D3D12** (`dclf:reload-shaders`) is not fixed.
+  - It is not a missing frame rewrite: DCLF's rebuild path takes it (`CompileProgram` -> `CompileStage`).
+  - The cause is probably outside DCLF's pipelines: the retirement of replaced pipelines, or kept recordings that still bind
+    them (RenderGraphRuntime, ComputeProgram).
+  - Next step: run it once with the D3D12 debug layer.
+- These rows also stay in the table: particles and master particles, first person, and the CPU pipeline rows.
