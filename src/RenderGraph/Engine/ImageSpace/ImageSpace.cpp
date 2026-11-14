@@ -154,10 +154,10 @@ namespace RenderGraph::Engine::ImageSpace
 			// ISMap stays on vanilla's DXBC): the engine's draw rasterizes nothing (imagespace-shaders.md, inferred). Taken with no pass:
 			// the engine's state is applied as its draw would, and nothing is drawn.
 			bool rastersNothing = false;
-			// Its textures are loaded ones, not engine targets (ISAlphaBlend's tint masks): each read slot is read by the heap index the
-			// draw's latch holds (SourcesAt, after its constants), so its source list has no SRV entries, and a second LATCH follows the
-			// constants' one.
-			bool latchedSources = false;
+			// A bit per texture slot that holds a loaded texture, not an engine target (ISAlphaBlend's tint masks, the IB lens flares'
+			// ramps and masks): such a slot is read by the heap index the draw's latch holds (SourcesAt, after its constants), so the
+			// source's resource list has no SRV entry for it, and a second LATCH follows the constants' one.
+			std::uint32_t latched = 0;
 		};
 
 		/** @brief The push words of an effect's feature handles (EffectInfo::features): s9, then the five headers' resources. */
@@ -299,8 +299,8 @@ namespace RenderGraph::Engine::ImageSpace
 			// A colour fill (menu 3D's clear among others), with menu 3D's stencil test and scissor when the engine sets them.
 			{ Effects::ISSimpleColor, "ISSimpleColor", "simplecolor", "ISSimpleColor.hlsl", 0, 0, 0, 0, false, true },
 			// The race menu's face tint (outside the frame's scopes: each call a scope of its own): sixteen loaded tint masks, each read
-			// by its heap index from the draw's latch (EffectInfo::latchedSources), blended over grey.
-			{ Effects::ISAlphaBlend, "ISAlphaBlend", "alphablend", "ISAlphaBlend.hlsl", 16, 0xFFFF, 16, 0, false, true, 1, false, false, false, false, false, true },
+			// by its heap index from the draw's latch (EffectInfo::latched), blended over grey.
+			{ Effects::ISAlphaBlend, "ISAlphaBlend", "alphablend", "ISAlphaBlend.hlsl", 16, 0xFFFF, 16, 0, false, true, 1, false, false, false, false, false, 0xFFFF },
 			// The screen-space reflections' apply (t0 the blurred reflections, t1 the water mask, t2 the image). Its own scope outside the
 			// other scopes, part of the enclosing one inside them.
 			{ Effects::ISApplyReflections, "ISApplyReflections", "applyreflections", "ISApplyReflections.hlsl", 3, 0b111, 3, 0, false, true },
@@ -448,7 +448,7 @@ namespace RenderGraph::Engine::ImageSpace
 			std::array<std::uint32_t, 3> groups{};
 			std::shared_ptr<const void> source;  // the descriptor and texture behind at.source, held until the run's GPU work retires
 			std::uint32_t vertices = 3;          // a draw's vertex count: the fullscreen triangle's, or a geometry effect's indices
-			std::optional<SourcesAt> sources;    // a latched-sources effect's heap indices (EffectInfo::latchedSources); source holds them
+			std::optional<SourcesAt> sources;    // the latched slots' heap indices (EffectInfo::latched); source holds them
 		};
 
 		/** @brief The BSImagespaceShader::Render (or DispatchComputeShader) call in progress. */
@@ -1008,7 +1008,7 @@ namespace RenderGraph::Engine::ImageSpace
 					continue;
 				}
 				// A loaded texture, read by its heap index from the draw's latch (TakeDraw resolves the shadow state's view).
-				if (a_effect.latchedSources) {
+				if (a_effect.latched & (1u << slot)) {
 					a_out.inputs[slot] = kLatchSourceInput;
 					if (slot < a_effect.samplers) {
 						a_out.address[slot] = a_address[slot].underlying();
@@ -1694,8 +1694,8 @@ namespace RenderGraph::Engine::ImageSpace
 			// FXC-era sources (vector conditions in ?:).
 			desc.languageVersion = L"2018";
 			// Shared (4 words), the SRVs, the samplers, the feature handles, the latch (2), the sources' latch (2).
-			desc.constantWords = 4 + (effect.latchedSources ? 0 : effect.slots) + effect.samplers + (effect.features ? kFeatureWords : 0) + 2 +
-			                     (effect.latchedSources ? 2 : 0);
+			desc.constantWords = 4 + effect.slots - static_cast<std::uint32_t>(std::popcount(effect.latched)) + effect.samplers +
+			                     (effect.features ? kFeatureWords : 0) + 2 + (effect.latched ? 2 : 0);
 			// The stage defines are RasterProgram's own.
 			desc.defines = DefinesOf(effectIndex);
 			desc.targets = { { .format = format, .blend = blend[0] } };
@@ -1837,9 +1837,10 @@ namespace RenderGraph::Engine::ImageSpace
 			// The shader's resource list order: the shared constants, t0.., s0.., (u0), the constants' location.
 			std::vector<AnchorPasses::Bind> bindings;
 			bindings.push_back(AnchorPasses::Bind::Shared());
-			// A latched-sources effect reads its textures by the latch's heap indices: no SRV entries.
-			for (std::uint32_t slot = 0; !effect.latchedSources && slot < effect.slots; ++slot)
-				bindings.push_back(spec.inputs[slot] ? AnchorPasses::Bind::Srv(spec.inputs[slot], MipOfName(spec.key.inputs[slot])) : AnchorPasses::Bind::Unused());
+			// A latched slot is read by the latch's heap index: no SRV entry.
+			for (std::uint32_t slot = 0; slot < effect.slots; ++slot)
+				if (!(effect.latched & (1u << slot)))
+					bindings.push_back(spec.inputs[slot] ? AnchorPasses::Bind::Srv(spec.inputs[slot], MipOfName(spec.key.inputs[slot])) : AnchorPasses::Bind::Unused());
 			for (std::uint32_t slot = 0; slot < effect.samplers; ++slot)
 				bindings.push_back(SlotRead(spec, slot) ? AnchorPasses::Bind::Handle(samplers[slot]) : AnchorPasses::Bind::Unused());
 			if (effect.features) {
@@ -1852,7 +1853,7 @@ namespace RenderGraph::Engine::ImageSpace
 			if (effect.compute)
 				bindings.push_back(AnchorPasses::Bind::Uav(spec.output));
 			bindings.push_back(AnchorPasses::Bind::Latch(spec.entry * kLatchStride));
-			if (effect.latchedSources)
+			if (effect.latched)
 				bindings.push_back(AnchorPasses::Bind::Latch(spec.entry * kLatchStride + static_cast<std::uint32_t>(sizeof(ConstantsAt))));
 			AnchorPasses::Builder builder(Anchor::ImageSpace, kClientId, static_cast<std::int32_t>(spec.entry), a_latch, a_gate);
 			if (effect.compute) {
@@ -2852,10 +2853,11 @@ namespace RenderGraph::Engine::ImageSpace
 		}
 
 		/**
-		 * @brief A latched-sources effect's textures (ISAlphaBlend's tint masks): each read slot's view in the shadow state, by its heap
-		 * index, into a_pending's SourcesAt, held with the run. They are loaded textures the engine made from files and never writes: the
-		 * immutable class the graph exempts from declarations, so a bindless index is their read. An empty slot reads the null texture,
-		 * as D3D11 reads a null view. False (a failure) when a view has no heap index.
+		 * @brief An effect's latched slots (EffectInfo::latched: ISAlphaBlend's tint masks): each one's view in the shadow state, by its
+		 * heap index, into a_pending's SourcesAt, held with the run. They are loaded textures the engine made from files and never
+		 * writes: the immutable class the graph exempts from declarations, so a bindless index is their read. An empty slot reads the
+		 * null texture, as D3D11 reads a null view. False (refused) when a slot holds an engine target, which only a declared read may
+		 * read; a failure when a view has no heap index.
 		 */
 		bool LatchSources(Pending& a_pending, std::size_t a_effect)
 		{
@@ -2865,8 +2867,13 @@ namespace RenderGraph::Engine::ImageSpace
 			SourcesAt sources{};
 			constexpr std::uint32_t kSourceTag = DCLF::GpuTextures::Tag(DCLF::GpuTextures::Source::FrameSlot, 0);
 			for (std::uint32_t slot = 0; slot < effect.slots && slot < kMaxSlots; ++slot) {
-				if (!(effect.reads & (1u << slot)))
+				if (!(effect.reads & effect.latched & (1u << slot)))
 					continue;
+				if (InputOfView(shadow.PSTexture[slot]) >= 0) {
+					Flush();
+					Refuse("a slot it reads by heap index holds an engine target", a_effect);
+					return false;
+				}
 				auto binding = shadow.PSTexture[slot] ? DCLF::GpuTextures::Get().ResolveBinding(shadow.PSTexture[slot], kSourceTag) :
 				                                        DCLF::GpuTextures::Get().NullOf(DCLF::GpuTextures::ViewKind::Texture2D);
 				if (binding.index == DCLF::GpuTextures::kInvalid) {
@@ -2956,7 +2963,7 @@ namespace RenderGraph::Engine::ImageSpace
 			Pending pending{ .at = { .srv = at.srvIndex, .offset = at.offset, .frameSrv = frameAt.srvIndex, .frameOffset = frameAt.offset, .size = size, .frameSize = frameAt.size } };
 			if (effect.geometry && !LatchGeometry(pending, scope.effect))
 				return false;
-			if (effect.latchedSources && !LatchSources(pending, scope.effect))
+			if (effect.latched && !LatchSources(pending, scope.effect))
 				return false;
 			if (admitted.late)
 				RunLate(*admitted.late, std::move(pending), blocks);
