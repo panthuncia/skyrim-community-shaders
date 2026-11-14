@@ -826,7 +826,7 @@ namespace RenderGraph::Engine::Scaleform::Passes
 		/**
 		 * @brief Native mode: registers the client again with the reads as they are now, after a run that found a new tracked texture.
 		 * Reads no commit used for kReadIdleCommits are dropped first. The Interface graph is built again off the render thread; until
-		 * it is attached, displays are replayed as after a surface was made again.
+		 * it is attached, the graph built before draws the displays, the new reads through their raw indices.
 		 */
 		void RegisterReads(PathState& a_state)
 		{
@@ -1223,7 +1223,7 @@ namespace RenderGraph::Engine::Scaleform::Passes
 			if (std::ranges::find(logged, a_reason) != logged.end())
 				return;
 			logged.push_back(a_reason);
-			logger::error("[ORG] Scaleform: a segment did not draw on the graph ({}); it was replayed into D3D11", a_reason);
+			logger::error("[ORG] Scaleform: a segment did not draw on the graph ({}); it is left out", a_reason);
 		}
 
 		/** @brief Submit's reason for a run that did not submit. */
@@ -1340,7 +1340,7 @@ namespace RenderGraph::Engine::Scaleform::Passes
 		state.gate = RunGate::Create("cs.scaleform.gate", kGateEntries);
 		state.staging = FrameStaging::Create({ .name = "cs.scaleform.staging",
 			.minimumBytes = kMinimumStaging,
-			// About the Interface anchor's runs a frame: a display, and one more per D3D11 part.
+			// About the Interface anchor's runs a frame: a display, and one more per render target or filter pass in it.
 			.runsPerFrame = 6 });
 		if (!state.gate || !state.staging) {
 			state.failed = true;

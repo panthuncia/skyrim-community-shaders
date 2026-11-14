@@ -1,7 +1,6 @@
 #include "RenderGraph/Engine/Scaleform/Scaleform.h"
 
 #include "Globals.h"
-#include "RenderGraph/Engine/Flush/Flush.h"
 #include "RenderGraph/Engine/Scaleform/Display.h"
 #include "RenderGraph/Engine/Scaleform/GRendererLayout.h"
 #include "RenderGraph/Engine/Scaleform/GfxTextures.h"
@@ -112,12 +111,8 @@ namespace RenderGraph::Engine::Scaleform
 		using SetMatrixFn = void (*)(void*, const float*);
 		using SetBlendFn = void (*)(void*, std::uint32_t);
 		using VoidFn = void (*)(void*);
-		using DataFn = void (*)(void*, const void*, std::int32_t, std::int32_t, void*);
 		using DrawTrianglesFn = void (*)(void*, std::int32_t, std::int32_t, std::int32_t, std::int32_t, std::int32_t);
 		using DrawLinesFn = void (*)(void*, std::int32_t, std::int32_t);
-		using ColorFn = void (*)(void*, const std::uint32_t*);
-		using FillBitmapFn = void (*)(void*, const FillTexture*);
-		using FillGouraudFn = void (*)(void*, std::int32_t, const FillTexture*, const FillTexture*, const FillTexture*);
 		using DrawBitmapsFn = void (*)(void*, const BitmapDesc*, std::int32_t, std::int32_t, std::int32_t, RE::GTexture*, const float*, void*);
 		using MaskFn = void (*)(void*, std::int32_t);
 		using BeginDisplayFn = void (*)(void*, const std::uint32_t*, const Viewport*, float, float, float, float);
@@ -128,18 +123,18 @@ namespace RenderGraph::Engine::Scaleform
 		using ColorMatrixFn = void (*)(void*, RE::GTexture*, const float*, const float*, const float*);
 
 		/**
-		 * @brief The census (docs/development/p5/scaleform.md, "Census"): what drew each display, and every D3D11 part by reason. A
-		 * display is the graph's (every draw on the graph), mixed (graph segments with D3D11 parts between them: filters, render
-		 * targets, a draw the graph does not take) or D3D11's (no graph segment). Any thread (a loading-screen display counts too).
+		 * @brief The census (docs/parity/scaleform.md, "Census"): what became of each display, and every draw or segment left out by
+		 * reason. A display is the graph's (every draw on the graph), on the graph with draws left out, or not on the graph (refused
+		 * whole: the D3D11 renderer gets it, which draws nothing in native mode or under the flush latch). Any thread.
 		 */
 		struct Counters
 		{
 			std::mutex mutex;
 			std::uint64_t graph = 0;
 			std::uint64_t mixed = 0;
-			std::uint64_t d3d11 = 0;
+			std::uint64_t lost = 0;
 			std::uint64_t segments = 0;                    // graph segments drawn
-			std::map<std::string, std::uint64_t> reasons;  // D3D11 parts (a whole display counts once)
+			std::map<std::string, std::uint64_t> reasons;  // left out (a whole display counts once)
 		};
 
 		Counters& Count()
@@ -150,23 +145,23 @@ namespace RenderGraph::Engine::Scaleform
 
 		void Report(Counters& a_counters)
 		{
-			const std::uint64_t total = a_counters.graph + a_counters.mixed + a_counters.d3d11;
+			const std::uint64_t total = a_counters.graph + a_counters.mixed + a_counters.lost;
 			if (total % kReportEvery)
 				return;
 			std::string reasons;
 			for (const auto& [reason, count] : a_counters.reasons)
 				reasons += fmt::format("{}{} {}", reasons.empty() ? "" : ", ", count, reason);
-			logger::info("[ORG] Scaleform census: {} displays: {} on the graph, {} on the graph with D3D11 parts, {} on D3D11; {} graph segments; D3D11 parts: {}",
-				total, a_counters.graph, a_counters.mixed, a_counters.d3d11, a_counters.segments, reasons.empty() ? "none" : reasons);
+			logger::info("[ORG] Scaleform census: {} displays: {} on the graph, {} with draws left out, {} not on the graph; {} graph segments; left out: {}",
+				total, a_counters.graph, a_counters.mixed, a_counters.lost, a_counters.segments, reasons.empty() ? "none" : reasons);
 		}
 
-		/** @brief A part of a display (or a whole one) the D3D11 renderer draws, and why: logged the first time a reason comes up. */
-		void NoteD3D11(const char* a_reason)
+		/** @brief Something of a display (or a whole one) the graph does not draw, and why: logged the first time a reason comes up. */
+		void NoteLost(const char* a_reason)
 		{
 			auto& counters = Count();
 			std::scoped_lock lock(counters.mutex);
 			if (counters.reasons[a_reason]++ == 0)
-				logger::info("[ORG] Scaleform: the D3D11 renderer draws: {}", a_reason);
+				logger::warn("[ORG] Scaleform: not drawn on the graph: {}", a_reason);
 		}
 
 		/**
@@ -181,28 +176,15 @@ namespace RenderGraph::Engine::Scaleform
 			Report(counters);
 		}
 
-		/** @brief A display that never began a capture: D3D11's whole. */
-		void CountD3D11(const char* a_reason)
+		/** @brief A display that never began a capture: the D3D11 renderer gets it whole. */
+		void CountLost(const char* a_reason)
 		{
-			NoteD3D11(a_reason);
+			NoteLost(a_reason);
 			auto& counters = Count();
 			std::scoped_lock lock(counters.mutex);
-			++counters.d3d11;
+			++counters.lost;
 			Report(counters);
 		}
-
-		/**
-		 * @brief A call kept for a replay into the D3D11 renderer: its slot and arguments. What an argument points at is copied into
-		 * Capture::bytes at `bytes` (matrices, fills, bitmaps); for SetVertexData and SetIndexData `bytes` is the ArrayUse's index,
-		 * whose copy is in the segment's staging bytes once a draw read it.
-		 */
-		struct Kept
-		{
-			Slot slot;
-			std::uint32_t bytes = kNoOffset;
-			std::int32_t args[5] = {};
-			void* object = nullptr;  // a GTexture argument
-		};
 
 		/**
 		 * @brief A vertex or index array a segment sets. GFx's memory is valid while it is set (the D3D11 renderer reads it at every
@@ -220,21 +202,13 @@ namespace RenderGraph::Engine::Scaleform
 		struct Capture
 		{
 			bool active = false;
-			// The D3D11 renderer runs kept calls (a replay, an aborted call): every call it makes goes to it directly.
-			bool replaying = false;
 			Display display;  // the segment being captured
-			// The segment's calls, what they point at, and the arrays they set, until the next segment.
-			std::vector<Kept> kept;
-			std::vector<std::byte> bytes;
+			// The arrays the segment's draws read, each copied into its staging bytes once.
 			std::vector<ArrayUse> arrays;
 			std::int32_t vertexArray = -1;  // the ArrayUse the renderer's vertex fields hold now
 			std::int32_t indexArray = -1;   // and its index fields
-			// BeginDisplay's arguments, for the D3D11 renderer's BeginDisplay when it draws a part (D3D11Ready).
-			Viewport viewport{};
-			float frame[4]{};  // x0, x1, y0, y1
 			// The mirrored state.
 			std::uint32_t blendMode = 0;
-			std::uint32_t savedBlendMode = 0;  // the renderer's when the display began
 			// The renderer's blend stack (+0x728): the mode before each push still on it.
 			std::vector<std::uint32_t> blendStack;
 			bool inMask = false;
@@ -244,20 +218,6 @@ namespace RenderGraph::Engine::Scaleform
 			float viewMatrix[6]{};  // the user matrix times the viewport matrix
 			float texgen[4][4]{};   // the vertex constants' texgen rows, as the renderer keeps them between draws
 			std::unordered_map<ID3D11ShaderResourceView*, std::int32_t> textureIndex;
-			/** @brief The blend and mask state a segment begins in, which a replay of it starts from. */
-			struct MaskState
-			{
-				std::uint32_t blendMode = 0;
-				std::vector<std::uint32_t> blendStack;
-				bool inMask = false;
-				std::int32_t maskLevel = 0;
-				Stencil stencil = Stencil::Off;
-				std::uint32_t stencilRef = 0;
-			} segmentStart;
-			// D3D11 parts: whether the D3D11 renderer has begun the display, a filter it is drawing, and the display's fate so far.
-			bool d3d11Begun = false;
-			bool retargeted = false;  // the part since the last segment pushed a render target (ResumeAfterD3D11 checks the target)
-			bool inFilter = false;
 			/**
 			 * @brief A render target GFx pushed inside the display (PushRenderTarget), drawn into a scratch image on the graph: what the
 			 * segment it interrupted draws onto, and the state PopRenderTarget gives back.
@@ -287,7 +247,8 @@ namespace RenderGraph::Engine::Scaleform
 			std::vector<Redirect> redirects;
 			std::uint64_t redirectSerial = 0;
 			std::uint32_t pinnedScratch = 0;  // scratch images a filter holds between its passes (a bit each)
-			std::uint32_t d3d11Parts = 0;
+			// The display's fate so far: what was left out, and the segments drawn.
+			std::uint32_t leftOut = 0;
 			std::uint32_t graphSegments = 0;
 			// The pixel stage the renderer has bound, for a draw with the fill off (ApplyFillStyle sets nothing then): its kind,
 			// its textures and samplers, and its constants. pixelKind 0: none known yet; nullShader: a bitmap fill without a texture
@@ -310,67 +271,10 @@ namespace RenderGraph::Engine::Scaleform
 			return s_capture;
 		}
 
-		/**
-		 * @brief Whether calls are captured now: a display is, the D3D11 renderer is not drawing a render target or filter of it, and
-		 * it is not running kept calls.
-		 */
+		/** @brief Whether calls are captured now: a display is, on the render owner. */
 		bool Capturing()
 		{
-			const auto& capture = Current();
-			return capture.active && !capture.replaying && !capture.inFilter && FrameAnchors::IsRenderOwner();
-		}
-
-		/** @brief Marks the D3D11 renderer running kept calls for the scope. */
-		struct ReplayScope
-		{
-			ReplayScope() { Current().replaying = true; }
-			~ReplayScope() { Current().replaying = false; }
-			ReplayScope(const ReplayScope&) = delete;
-			ReplayScope& operator=(const ReplayScope&) = delete;
-		};
-
-		// What the D3D11 renderer draws on purpose, for the flush latch (Flush::EngineDraws; flush.md, "Allowed engine draws").
-		/** @brief A whole display the graph does not take (BeginDisplay's refusals, another thread's display). */
-		const Flush::Reason& WholeReason()
-		{
-			static const Flush::Reason s_reason{ "scaleform: display not taken" };
-			return s_reason;
-		}
-
-		/** @brief A D3D11 part of a captured display: a call the graph does not take, a render target, a filter, the rest of a display. */
-		const Flush::Reason& PartReason()
-		{
-			static const Flush::Reason s_reason{ "scaleform: D3D11 part" };
-			return s_reason;
-		}
-
-		/** @brief A segment the graph refused or did not draw, replayed into the D3D11 renderer. */
-		const Flush::Reason& ReplayReason()
-		{
-			static const Flush::Reason s_reason{ "scaleform: segment replayed" };
-			return s_reason;
-		}
-
-		/** @brief The reason of a draw that reaches the D3D11 renderer outside a capture: a part of a captured display, or a whole one. */
-		const Flush::Reason& DeclinedReason()
-		{
-			return Current().active && FrameAnchors::IsRenderOwner() ? PartReason() : WholeReason();
-		}
-
-		void Keep(const Kept& a_call)
-		{
-			Current().kept.push_back(a_call);
-		}
-
-		/** @brief a_size bytes of a_source kept for a replay of the segment (16-aligned); their offset in Capture::bytes. */
-		std::uint32_t KeepBytes(const void* a_source, std::size_t a_size)
-		{
-			auto& bytes = Current().bytes;
-			const std::size_t offset = (bytes.size() + 15) & ~std::size_t{ 15 };
-			bytes.resize(offset + a_size);
-			if (a_size && a_source)
-				std::memcpy(bytes.data() + offset, a_source, a_size);
-			return static_cast<std::uint32_t>(offset);
+			return Current().active && FrameAnchors::IsRenderOwner();
 		}
 
 		/** @brief A new ArrayUse for the array the renderer's fields describe; its index. */
@@ -381,254 +285,39 @@ namespace RenderGraph::Engine::Scaleform
 			return static_cast<std::int32_t>(arrays.size() - 1);
 		}
 
-		/** @brief What a replayed SetVertexData or SetIndexData passes: the segment's copy, or GFx's array when no draw read it. */
-		const void* ArrayData(std::uint32_t a_index)
-		{
-			const auto& capture = Current();
-			if (a_index >= capture.arrays.size())
-				return nullptr;
-			const auto& use = capture.arrays[a_index];
-			return use.staging != kNoOffset ? capture.display.staging.data() + use.staging : use.source;
-		}
-
 		std::uint32_t IndexSize(std::uint32_t a_dxgiFormat)
 		{
 			return a_dxgiFormat == DXGI_FORMAT_R16_UINT ? 2 : 4;
 		}
 
-		/** @brief The renderer's arrays as SetVertexData and SetIndexData take them (data, count, GFx's format). */
-		struct LiveArrays
-		{
-			const void* vertices = nullptr;
-			std::int32_t vertexCount = 0;
-			std::int32_t vertexFormat = 0;
-			const void* indices = nullptr;
-			std::int32_t indexCount = 0;
-			std::int32_t indexFormat = 0;
-		};
-
-		LiveArrays ReadArrays(void* a_renderer)
-		{
-			LiveArrays live;
-			live.vertices = Field<const void*>(a_renderer, Layout::kVertexData);
-			live.vertexCount = Field<std::int32_t>(a_renderer, Layout::kVertexCount);
-			live.vertexFormat = Field<std::int32_t>(a_renderer, Layout::kVertexFormat);
-			live.indices = Field<const void*>(a_renderer, Layout::kIndexData);
-			live.indexCount = Field<std::int32_t>(a_renderer, Layout::kIndexCount);
-			live.indexFormat = Layout::IndexFormatOf(Field<std::uint32_t>(a_renderer, Layout::kIndexFormat));
-			return live;
-		}
-
-		/** @brief The renderer's arrays set through its setters (which also mark its dynamic buffers stale). */
-		void WriteArrays(void* a_renderer, const LiveArrays& a_arrays)
-		{
-			Original<DataFn>(kSetVertexData)(a_renderer, a_arrays.vertices, a_arrays.vertexCount, a_arrays.vertexFormat, nullptr);
-			Original<DataFn>(kSetIndexData)(a_renderer, a_arrays.indices, a_arrays.indexCount, a_arrays.indexFormat, nullptr);
-		}
-
-		/**
-		 * @brief The segment starts from the arrays the renderer holds now: kept as its first setters, so a replay of the segment draws
-		 * from them (their copies once a draw read them) whatever GFx set after.
-		 */
-		void KeepLiveArrays(void* a_renderer)
-		{
-			auto& capture = Current();
-			const LiveArrays live = ReadArrays(a_renderer);
-			capture.vertexArray = UseArray(live.vertices, live.vertexCount, Field<std::uint32_t>(a_renderer, Layout::kVertexStride));
-			Keep({ .slot = kSetVertexData, .bytes = static_cast<std::uint32_t>(capture.vertexArray), .args = { live.vertexCount, live.vertexFormat } });
-			capture.indexArray = UseArray(live.indices, live.indexCount, IndexSize(Field<std::uint32_t>(a_renderer, Layout::kIndexFormat)));
-			Keep({ .slot = kSetIndexData, .bytes = static_cast<std::uint32_t>(capture.indexArray), .args = { live.indexCount, live.indexFormat } });
-		}
-
-		/** @brief One kept call run in the D3D11 renderer, its arguments read back from the segment's bytes. */
-		void Run(void* a_renderer, const Kept& a_call)
-		{
-			auto& capture = Current();
-			const bool array = a_call.slot == kSetVertexData || a_call.slot == kSetIndexData;
-			const std::byte* bytes = !array && a_call.bytes != kNoOffset ? capture.bytes.data() + a_call.bytes : nullptr;
-			const auto* floats = reinterpret_cast<const float*>(bytes);
-			const auto& a = a_call.args;
-			switch (a_call.slot) {
-			case kBeginDisplay:
-				{
-					const auto background = static_cast<std::uint32_t>(a[0]);
-					Original<BeginDisplayFn>(kBeginDisplay)(a_renderer, &background, &capture.viewport, capture.frame[0], capture.frame[1], capture.frame[2], capture.frame[3]);
-					break;
-				}
-			case kSetMatrix:
-			case kSetUserMatrix:
-			case kSetCxform:
-			case kSetPerspective3D:
-			case kSetView3D:
-			case kSetWorld3D:  // null when kept without a matrix
-				Original<SetMatrixFn>(a_call.slot)(a_renderer, floats);
-				break;
-			case kPushBlendMode:
-				Original<SetBlendFn>(kPushBlendMode)(a_renderer, static_cast<std::uint32_t>(a[0]));
-				break;
-			case kPopBlendMode:
-			case kLineStyleDisable:
-			case kFillStyleDisable:
-			case kEndSubmitMask:
-			case kDisableMask:
-				Original<VoidFn>(a_call.slot)(a_renderer);
-				break;
-			case kSetVertexData:
-			case kSetIndexData:
-				Original<DataFn>(a_call.slot)(a_renderer, ArrayData(a_call.bytes), a[0], a[1], nullptr);
-				break;
-			case kDrawIndexedTriList:
-				Original<DrawTrianglesFn>(kDrawIndexedTriList)(a_renderer, a[0], a[1], a[2], a[3], a[4]);
-				break;
-			case kDrawLineStrip:
-				Original<DrawLinesFn>(kDrawLineStrip)(a_renderer, a[0], a[1]);
-				break;
-			case kLineStyleColor:
-			case kFillStyleColor:
-				{
-					const auto color = static_cast<std::uint32_t>(a[0]);
-					Original<ColorFn>(a_call.slot)(a_renderer, &color);
-					break;
-				}
-			case kFillStyleBitmap:
-				Original<FillBitmapFn>(kFillStyleBitmap)(a_renderer, reinterpret_cast<const FillTexture*>(bytes));
-				break;
-			case kFillStyleGouraud:
-				{
-					// The three textures, each present when its bit in args[1] is.
-					const auto* fills = reinterpret_cast<const FillTexture*>(bytes);
-					Original<FillGouraudFn>(kFillStyleGouraud)(a_renderer, a[0], (a[1] & 1) ? &fills[0] : nullptr, (a[1] & 2) ? &fills[1] : nullptr,
-						(a[1] & 4) ? &fills[2] : nullptr);
-					break;
-				}
-			case kDrawBitmaps:
-				{
-					// The matrix at `bytes`, the bitmaps at args[1].
-					const auto* bitmaps = reinterpret_cast<const BitmapDesc*>(capture.bytes.data() + a[1]);
-					Original<DrawBitmapsFn>(kDrawBitmaps)(a_renderer, bitmaps, a[0], 0, a[0], static_cast<RE::GTexture*>(a_call.object), floats, nullptr);
-					break;
-				}
-			case kBeginSubmitMask:
-				Original<MaskFn>(kBeginSubmitMask)(a_renderer, a[0]);
-				break;
-			case kDrawColorMatrixRect:
-				// The source rectangle, the destination rectangle and the matrix, one after the other.
-				Original<ColorMatrixFn>(kDrawColorMatrixRect)(a_renderer, static_cast<RE::GTexture*>(a_call.object), floats, floats + 4, floats + 8);
-				break;
-			default:
-				break;
-			}
-		}
-
-		/**
-		 * @brief The D3D11 renderer's blend stack, blend and mask fields set to a_state, and its depth-stencil state bound as its mask
-		 * calls bind it. The stack is rebuilt through its own Pop/PushBlendMode (a push stores the mode the field holds), so the
-		 * display's later PopBlendMode calls pop what GFx pushed.
-		 */
-		void SyncD3D11(void* a_renderer, const Capture::MaskState& a_state)
-		{
-			while (Field<std::uint64_t>(a_renderer, Layout::kBlendStackSize) != 0)
-				Original<VoidFn>(kPopBlendMode)(a_renderer);
-			for (const std::uint32_t mode : a_state.blendStack) {
-				Field<std::uint32_t>(a_renderer, Layout::kBlendMode) = mode;
-				Original<SetBlendFn>(kPushBlendMode)(a_renderer, 0);  // modes 0 to 2 keep the field's mode
-			}
-			Field<std::uint32_t>(a_renderer, Layout::kBlendMode) = a_state.blendMode;
-			Field<std::uint8_t>(a_renderer, Layout::kMaskSubmitting) = a_state.inMask ? 1 : 0;
-			Field<std::int32_t>(a_renderer, Layout::kMaskLevel) = a_state.maskLevel;
-			auto* const* states = &Field<ID3D11DepthStencilState*>(a_renderer, Layout::kDepthStencilStates);
-			auto* state = states[static_cast<std::size_t>(a_state.stencil)];
-			Field<ID3D11DepthStencilState*>(a_renderer, Layout::kDepthStencilState) = state;
-			if (auto* context = Field<ID3D11DeviceContext*>(a_renderer, Layout::kContext))
-				context->OMSetDepthStencilState(state, a_state.stencilRef);
-		}
-
-		Capture::MaskState MirroredState()
-		{
-			const auto& capture = Current();
-			return { capture.blendMode, capture.blendStack, capture.inMask, capture.maskLevel, capture.stencil, capture.stencilRef };
-		}
-
-		/**
-		 * @brief The D3D11 renderer ready to draw a part of the display: its BeginDisplay run once (without the background, which
-		 * the graph's first segment drew; the world 3D matrix it resets put back), and its blend stack, blend and mask state the
-		 * mirrored ones.
-		 */
-		void D3D11Ready(void* a_renderer)
-		{
-			auto& capture = Current();
-			if (!capture.d3d11Begun) {
-				const ReplayScope scope;
-				const Flush::EngineDraws engine(PartReason());
-				const float* world = Field<const float*>(a_renderer, Layout::kWorld3D);
-				const std::uint32_t none = 0;
-				Original<BeginDisplayFn>(kBeginDisplay)(a_renderer, &none, &capture.viewport, capture.frame[0], capture.frame[1], capture.frame[2], capture.frame[3]);
-				Field<const float*>(a_renderer, Layout::kWorld3D) = world;
-				capture.d3d11Begun = true;
-			}
-			SyncD3D11(a_renderer, MirroredState());
-		}
-
-		/**
-		 * @brief The segment's kept calls replayed into the D3D11 renderer. GFx's arrays and world 3D matrix, which the replay leaves
-		 * as the segment's copies, are set back after.
-		 */
-		void Replay(void* a_renderer)
-		{
-			auto& capture = Current();
-			const LiveArrays live = ReadArrays(a_renderer);
-			const float* world = Field<const float*>(a_renderer, Layout::kWorld3D);
-			if (capture.d3d11Begun) {
-				// A later segment: from the state it began in.
-				SyncD3D11(a_renderer, capture.segmentStart);
-			} else {
-				// The first: its calls begin with the display's BeginDisplay.
-				Field<std::uint32_t>(a_renderer, Layout::kBlendMode) = capture.savedBlendMode;
-				capture.d3d11Begun = true;
-			}
-			{
-				const ReplayScope scope;
-				const Flush::EngineDraws engine(ReplayReason());
-				for (const auto& call : capture.kept)
-					Run(a_renderer, call);
-			}
-			capture.kept.clear();
-			WriteArrays(a_renderer, live);
-			Field<const float*>(a_renderer, Layout::kWorld3D) = world;
-		}
-
-		/** @brief The segment's commands, kept calls and their bytes dropped. */
+		/** @brief The segment's commands and arrays dropped. */
 		void ClearSegment()
 		{
 			auto& capture = Current();
-			capture.kept.clear();
-			capture.bytes.clear();
 			capture.arrays.clear();
 			capture.vertexArray = capture.indexArray = -1;
 			capture.display.ResetCommands();
 			capture.textureIndex.clear();
 		}
 
-		/** @brief A new segment: nothing kept yet but the arrays it starts from, the state it begins in noted. After a D3D11 part. */
+		/** @brief A new segment of the display (after a render target was pushed or popped, or a filter's pass). */
 		void StartSegment(void* a_renderer)
 		{
 			auto& capture = Current();
 			ClearSegment();
-			capture.segmentStart = MirroredState();
-			KeepLiveArrays(a_renderer);
 			// The renderer's texgen rows are the ones its last draw left.
 			std::memcpy(capture.texgen, &Field<float>(a_renderer, Layout::kTexgen), sizeof(capture.texgen));
 		}
 
-		/** @brief A D3D11 part of the display, counted (its reason logged the first time). */
-		void NotePart(const char* a_reason)
+		/** @brief A draw or segment of the display the graph does not draw, counted (its reason logged the first time). */
+		void NoteLeftOut(const char* a_reason)
 		{
-			++Current().d3d11Parts;
-			NoteD3D11(a_reason);
+			++Current().leftOut;
+			NoteLost(a_reason);
 		}
 
-		/** @brief The segment drawn now: by the graph, or replayed into the D3D11 renderer when the graph cannot draw it. */
-		void Flush(void* a_renderer)
+		/** @brief The segment drawn now by the graph; when it cannot be, it is left out (counted by the graph's reason). */
+		void Flush(void*)
 		{
 			auto& capture = Current();
 			if (capture.display.commands.empty() && !capture.display.clearTarget)
@@ -641,13 +330,7 @@ namespace RenderGraph::Engine::Scaleform
 				++counters.segments;
 				return;
 			}
-			NotePart(reason ? reason : "the graph did not draw a segment");
-			// A segment into a render target GFx pushed has no D3D11 target bound to replay onto: it is not drawn.
-			if (capture.display.scratch != -1) {
-				capture.kept.clear();
-				return;
-			}
-			Replay(a_renderer);
+			NoteLeftOut(reason ? reason : "the graph did not draw a segment");
 		}
 
 		/** @brief The display's fate, counted once its capture ends. */
@@ -656,85 +339,11 @@ namespace RenderGraph::Engine::Scaleform
 			const auto& capture = Current();
 			auto& counters = Count();
 			std::scoped_lock lock(counters.mutex);
-			if (capture.d3d11Parts == 0)
+			if (capture.leftOut == 0)
 				++counters.graph;
-			else if (capture.graphSegments == 0)
-				++counters.d3d11;
 			else
 				++counters.mixed;
 			Report(counters);
-		}
-
-		/** @brief The capture ends: the rest of the display goes to the D3D11 renderer directly (it is ready for it). */
-		void EndCapture(const char* a_reason)
-		{
-			Current().active = false;
-			ClearSegment();
-			NotePart(a_reason);
-			FinishDisplay();
-		}
-
-		/**
-		 * @brief The D3D11 renderer draws a part of the display now (a render target, a filter): the segment so far is drawn first,
-		 * so the order is D3D11's, and the D3D11 renderer is made ready for it.
-		 */
-		void BeginD3D11Part(void* a_renderer, const char* a_reason)
-		{
-			NotePart(a_reason);
-			Flush(a_renderer);
-			D3D11Ready(a_renderer);
-		}
-
-		/**
-		 * @brief The texture of the render target the D3D11 renderer binds after its render target stack unwound (PopRenderTarget binds
-		 * the current render target's RTV, +0x740 then +0x50), from its own bookkeeping; null when it has none.
-		 */
-		ID3D11Resource* RendererTarget(void* a_renderer)
-		{
-			auto* target = Field<std::byte*>(a_renderer, Layout::kRenderTarget);
-			auto* rtv = target ? *reinterpret_cast<ID3D11RenderTargetView**>(target + Layout::kRenderTargetRtv) : nullptr;
-			if (!rtv)
-				return nullptr;
-			winrt::com_ptr<ID3D11Resource> resource;
-			Tripwire::Unwrap(rtv)->GetResource(resource.put());
-			return resource.get();  // the target keeps its own reference
-		}
-
-		/**
-		 * @brief The capture goes on after a D3D11 part, onto the target it began on. When the D3D11 renderer left another target
-		 * bound (its render target stack restores the display render target it was given), the rest of the display is D3D11's.
-		 */
-		void ResumeAfterD3D11(void* a_renderer)
-		{
-			auto& capture = Current();
-			// Only a part that pushed a render target (one of GFx's, a filter's) can leave another bound: the renderer's pop binds its
-			// current render target's view, read from its own bookkeeping (D3D11's state is stale under the flush latch).
-			const bool retargeted = std::exchange(capture.retargeted, false);
-			if (retargeted && RendererTarget(a_renderer) != static_cast<ID3D11Resource*>(capture.display.target)) {
-				EndCapture("another render target bound after a D3D11 part (the rest of the display)");
-				return;
-			}
-			StartSegment(a_renderer);
-		}
-
-		/**
-		 * @brief A call the graph does not take, the last one kept: the segment before it is drawn, the D3D11 renderer draws the call,
-		 * and the capture goes on with a new segment. Returns false.
-		 */
-		bool Abort(void* a_renderer, const char* a_reason)
-		{
-			auto& capture = Current();
-			const Kept call = capture.kept.back();
-			capture.kept.pop_back();
-			BeginD3D11Part(a_renderer, a_reason);
-			{
-				// Its bytes stay until the next segment starts.
-				const ReplayScope scope;
-				const Flush::EngineDraws engine(PartReason());
-				Run(a_renderer, call);
-			}
-			ResumeAfterD3D11(a_renderer);
-			return false;
 		}
 
 		bool VideoModeSet(void* a_renderer)
@@ -809,9 +418,9 @@ namespace RenderGraph::Engine::Scaleform
 
 		/**
 		 * @brief The display's index for a texture's view (DXVK's, referenced once per display), ScratchTexture(k) for a texture drawn
-		 * into scratch image k in this display; kNoTexture, aborted, when there is none.
+		 * into scratch image k in this display; kNoTexture, the draw left out, when there is none.
 		 */
-		std::int32_t TextureIndex(void* a_renderer, RE::GTexture* a_texture)
+		std::int32_t TextureIndex(void*, RE::GTexture* a_texture)
 		{
 			auto& capture = Current();
 			if (const auto* redirect = FindRedirect(a_texture))
@@ -819,8 +428,8 @@ namespace RenderGraph::Engine::Scaleform
 			auto* view = Field<ID3D11ShaderResourceView*>(a_texture, Layout::kTextureView);
 			auto* raw = view ? Tripwire::Unwrap(view) : nullptr;
 			if (!raw) {
-				Abort(a_renderer, view ? "a texture view the graph cannot read (a native handle)" : "a texture without a view");
-				return -1;
+				NoteLeftOut(view ? "a draw of a texture view the graph cannot read (a native handle)" : "a draw of a texture without a view");
+				return kNoTexture;
 			}
 			if (const auto found = capture.textureIndex.find(raw); found != capture.textureIndex.end())
 				return found->second;
@@ -831,11 +440,16 @@ namespace RenderGraph::Engine::Scaleform
 			return index;
 		}
 
-		/** @brief ApplyFillTexture: stage a_stage's texture and sampler, and its texgen rows. False, aborted, when it cannot be read. */
+		/**
+		 * @brief ApplyFillTexture: stage a_stage's texture and sampler, and its texgen rows. False, the draw left out, when it cannot be
+		 * read: a texture that is not a plain GTextureD3D1x is a YUV one, which only GFx's video player makes (not linked in Skyrim).
+		 */
 		bool BindTexture(void* a_renderer, const FillTexture& a_fill, std::uint32_t a_stage, Command& a_command)
 		{
-			if (!IsPlainTexture(a_fill.texture))
-				return Abort(a_renderer, "a fill texture that is not a plain GTextureD3D1x");
+			if (!IsPlainTexture(a_fill.texture)) {
+				NoteLeftOut("a draw of a fill texture that is not a plain GTextureD3D1x (video)");
+				return false;
+			}
 			const auto index = TextureIndex(a_renderer, a_fill.texture);
 			if (index == kNoTexture)
 				return false;
@@ -927,7 +541,7 @@ namespace RenderGraph::Engine::Scaleform
 			return true;
 		}
 
-		/** @brief ApplyFillStyle: the pixel shader, its constants and textures. False when nothing is drawn (aborted, or logged). */
+		/** @brief ApplyFillStyle: the pixel shader, its constants and textures. False when nothing is drawn (left out, logged). */
 		bool ApplyFill(void* a_renderer, const FillStyle& a_fill, std::int32_t a_vertexFormat, Command& a_command, DrawRecord& a_record)
 		{
 			switch (a_fill.mode) {
@@ -1006,13 +620,13 @@ namespace RenderGraph::Engine::Scaleform
 
 		/**
 		 * @brief The array the renderer's fields hold, in the segment's staging bytes: copied once, at the segment's first draw that
-		 * reads it (a replay then reads that copy too). Its offset.
+		 * reads it. Its offset.
 		 */
 		std::uint32_t StageArray(std::int32_t& a_use, const void* a_source, std::int32_t a_count, std::uint32_t a_elementSize)
 		{
 			auto& capture = Current();
 			if (a_use < 0 || capture.arrays[a_use].source != a_source || capture.arrays[a_use].count != a_count || capture.arrays[a_use].elementSize != a_elementSize)
-				a_use = UseArray(a_source, a_count, a_elementSize);  // the setters keep every change, so this is the kept one in practice
+				a_use = UseArray(a_source, a_count, a_elementSize);  // GFx set another array since the segment's last draw
 			auto& use = capture.arrays[a_use];
 			if (use.staging == kNoOffset)
 				use.staging = capture.display.Append(a_source, static_cast<std::size_t>(std::max(a_count, 0)) * a_elementSize, 4);
@@ -1212,14 +826,9 @@ namespace RenderGraph::Engine::Scaleform
 			capture.targets.clear();
 			capture.redirects.clear();
 			capture.pinnedScratch = 0;
-			capture.inFilter = false;
 		}
 
-		/**
-		 * @brief A display that never ended (no EndDisplay before the next BeginDisplay): its last segment drawn, and the D3D11
-		 * renderer's EndDisplay run when it began the display (it releases the render target and depth-stencil views its
-		 * BeginDisplay took).
-		 */
+		/** @brief A display that never ended (no EndDisplay before the next BeginDisplay): its last segment drawn. */
 		void EndDangling(void* a_renderer)
 		{
 			auto& capture = Current();
@@ -1228,10 +837,6 @@ namespace RenderGraph::Engine::Scaleform
 			Field<std::uint32_t>(a_renderer, Layout::kBlendMode) = capture.blendMode;
 			FinishDisplay();
 			ClearDisplay();
-			if (capture.d3d11Begun) {
-				capture.d3d11Begun = false;
-				Original<VoidFn>(kEndDisplay)(a_renderer);
-			}
 		}
 
 		void BeginDisplay(void* a_renderer, const std::uint32_t* a_background, const Viewport* a_viewport, float a_x0, float a_x1, float a_y0, float a_y1)
@@ -1240,16 +845,14 @@ namespace RenderGraph::Engine::Scaleform
 			const auto original = Original<BeginDisplayFn>(kBeginDisplay);
 			// The capture is the render owner's: another thread's display neither reads nor ends it.
 			if (!FrameAnchors::IsRenderOwner()) {
-				CountD3D11("a whole display off the render thread (a loading screen without CS_ORG_LOADING_THREAD=1)");
-				const Flush::EngineDraws engine(WholeReason());
+				CountLost("a whole display off the render thread (a loading screen without CS_ORG_LOADING_THREAD=1)");
 				original(a_renderer, a_background, a_viewport, a_x0, a_x1, a_y0, a_y1);
 				return;
 			}
 			if (capture.active)
 				EndDangling(a_renderer);
 			if (!Passes::Ready()) {
-				CountD3D11("a whole display while the graph path is off (not set up, or failed)");
-				const Flush::EngineDraws engine(WholeReason());
+				CountLost("a whole display while the graph path is off (not set up, or failed)");
 				original(a_renderer, a_background, a_viewport, a_x0, a_x1, a_y0, a_y1);
 				return;
 			}
@@ -1261,36 +864,25 @@ namespace RenderGraph::Engine::Scaleform
 
 			ClearDisplay();
 			if (!ReadTargets(a_renderer, capture.display, (a_viewport->flags & kViewportRenderTexture) != 0)) {
+				// Neither the shadow state nor the renderer has a target to draw onto.
 				capture.display.Reset();
-				CountD3D11("a whole display with no render target bound");
-				const Flush::EngineDraws engine(WholeReason());
+				CountLost("a whole display with no render target bound");
 				original(a_renderer, a_background, a_viewport, a_x0, a_x1, a_y0, a_y1);
 				return;
 			}
 			capture.active = true;
-			capture.d3d11Begun = false;
-			capture.retargeted = false;
-			capture.d3d11Parts = 0;
+			capture.leftOut = 0;
 			capture.graphSegments = 0;
 			const std::uint32_t background = *a_background;
 			const Viewport viewport = *a_viewport;
-			capture.viewport = viewport;
-			capture.frame[0] = a_x0;
-			capture.frame[1] = a_x1;
-			capture.frame[2] = a_y0;
-			capture.frame[3] = a_y1;
-			// The first segment's calls: the BeginDisplay (from the saved viewport and frame), then the arrays the display starts from.
-			Keep({ .slot = kBeginDisplay, .args = { static_cast<std::int32_t>(background) } });
-			KeepLiveArrays(a_renderer);
 
 			// What BeginDisplay resets, and the state it starts from.
-			capture.blendMode = capture.savedBlendMode = Field<std::uint32_t>(a_renderer, Layout::kBlendMode);
+			capture.blendMode = Field<std::uint32_t>(a_renderer, Layout::kBlendMode);
 			capture.blendStack.clear();
 			capture.inMask = false;
 			capture.maskLevel = 0;
 			capture.stencil = Stencil::Off;
 			capture.stencilRef = 0;
-			capture.segmentStart = MirroredState();
 			// A fill-off draw reuses only what this display bound: an older display's textures may be gone.
 			capture.boundFill = {};
 			capture.boundVertexKind = 1;
@@ -1332,14 +924,13 @@ namespace RenderGraph::Engine::Scaleform
 			// The capture is the render owner's: another thread's display neither ends nor resets it.
 			if (FrameAnchors::IsRenderOwner()) {
 				if (capture.active) {
-					// The last segment: by the graph, or replayed into D3D11.
+					// The last segment, on the graph.
 					Flush(a_renderer);
 					capture.active = false;
 					Field<std::uint32_t>(a_renderer, Layout::kBlendMode) = capture.blendMode;
 					FinishDisplay();
 				}
 				ClearDisplay();
-				capture.d3d11Begun = false;
 			}
 			// Either way: it releases the textures GFx queued for release, and the targets a D3D11 BeginDisplay took.
 			Original<VoidFn>(kEndDisplay)(a_renderer);
@@ -1359,9 +950,9 @@ namespace RenderGraph::Engine::Scaleform
 			ClearSegment();
 			capture.display.Reset();
 			if (!ReadRendererTarget(a_renderer, capture.display)) {
-				// No target to draw onto: neither does the D3D11 renderer.
-				EndCapture("SetDisplayRenderTarget inside a display to a target without a view (the rest of the display)");
-				return;
+				// No target to draw onto: neither has the D3D11 renderer. The rest of the display is left out.
+				capture.display.scratch = Display::kLostScratch;
+				NoteLeftOut("SetDisplayRenderTarget inside a display to a target without a view (the rest of the display)");
 			}
 			StartSegment(a_renderer);
 		}
@@ -1459,7 +1050,7 @@ namespace RenderGraph::Engine::Scaleform
 			const std::uint32_t height = texture ? Field<std::uint32_t>(target, Layout::kRenderTargetHeight) : 64;
 			const std::int32_t scratch = AcquireScratch(texture, width, height);
 			if (scratch == Display::kLostScratch)
-				NotePart("a render target of GFx's that no scratch image could take (its draws are not drawn)");
+				NoteLeftOut("a render target of GFx's that no scratch image could take (its draws are left out)");
 
 			ClearSegment();
 			capture.display.scratch = scratch;
@@ -1507,55 +1098,34 @@ namespace RenderGraph::Engine::Scaleform
 			StartSegment(a_renderer);
 		}
 
-		/** @brief A filter drawn onto the display's target: the D3D11 renderer draws it (its passes and its own render targets) in order. */
-		template <class Fn>
-		void Filter(void* a_renderer, const char* a_reason, Fn&& a_draw)
-		{
-			auto& capture = Current();
-			if (!Capturing()) {
-				const Flush::EngineDraws engine(DeclinedReason());
-				return a_draw();
-			}
-			BeginD3D11Part(a_renderer, a_reason);
-			capture.inFilter = true;
-			capture.retargeted = true;
-			{
-				const Flush::EngineDraws scope(PartReason());
-				a_draw();
-			}
-			capture.inFilter = false;
-			ResumeAfterD3D11(a_renderer);
-		}
-
 		bool CaptureBlur(void* a_renderer, RE::GTexture* a_source, const float* a_sourceRect, const float* a_destRect, const void* a_params);
 
 		void DrawBlurRect(void* a_renderer, RE::GTexture* a_source, const float* a_sourceRect, const float* a_destRect, const void* a_params)
 		{
-			if (Capturing() && a_source && a_sourceRect && a_destRect && a_params && CaptureBlur(a_renderer, a_source, a_sourceRect, a_destRect, a_params))
-				return;
-			Filter(a_renderer, "a blur, shadow, glow or bevel filter (DrawBlurRect)",
-				[&] { Original<BlurFn>(kDrawBlurRect)(a_renderer, a_source, a_sourceRect, a_destRect, a_params); });
+			if (!Capturing())
+				return Original<BlurFn>(kDrawBlurRect)(a_renderer, a_source, a_sourceRect, a_destRect, a_params);
+			if (!a_source || !a_sourceRect || !a_destRect || !a_params || !CaptureBlur(a_renderer, a_source, a_sourceRect, a_destRect, a_params))
+				NoteLeftOut("a blur, shadow, glow or bevel filter of a texture the graph cannot read");
 		}
 
 		/**
 		 * @brief DrawColorMatrixRect as a graph draw: FilterVS.hlsl and FilterPS.hlsl's FILTER 23 (24 for Multiply and Darken), with
 		 * the constants the D3D11 renderer writes (SE 0x140f5e840): the current matrix, the source rectangle over the texture's size,
-		 * the filters' blend array, the source bound clamped and linear. A source the graph cannot read makes it a D3D11 part.
+		 * the filters' blend array, the source bound clamped and linear. A source the graph cannot read leaves it out.
 		 */
 		void CaptureColorMatrix(void* a_renderer, RE::GTexture* a_source, const float* a_sourceRect, const float* a_destRect, const float* a_matrix)
 		{
 			auto& capture = Current();
-			// The source rectangle, the destination rectangle and the matrix, kept one after the other.
+			// The source rectangle, the destination rectangle and the matrix, copied one after the other.
 			std::array<float, 28> arguments;
 			std::memcpy(arguments.data(), a_sourceRect, sizeof(float) * 4);
 			std::memcpy(arguments.data() + 4, a_destRect, sizeof(float) * 4);
 			std::memcpy(arguments.data() + 8, a_matrix, sizeof(float) * 20);
-			Keep({ .slot = kDrawColorMatrixRect, .bytes = KeepBytes(arguments.data(), sizeof(arguments)), .object = a_source });
 			const float* source = arguments.data();
 			const float* dest = arguments.data() + 4;
 			const float* matrix = arguments.data() + 8;
-			if (!IsPlainTexture(a_source) || !Field<void*>(a_source, Layout::kTextureResource)) {
-				Abort(a_renderer, "a colour matrix filter of a texture the graph cannot read");
+			if (!FindRedirect(a_source) && (!IsPlainTexture(a_source) || !Field<void*>(a_source, Layout::kTextureResource))) {
+				NoteLeftOut("a colour matrix filter of a texture the graph cannot read");
 				return;
 			}
 			const auto index = TextureIndex(a_renderer, a_source);
@@ -1760,8 +1330,7 @@ namespace RenderGraph::Engine::Scaleform
 			auto& capture = Current();
 			const auto* redirect = FindRedirect(a_source);
 			if (!redirect) {
-				// A source the graph cannot read stays the D3D11 renderer's filter (checked here: TextureIndex's abort replays the
-				// last kept call, and a filter keeps none).
+				// A source the graph cannot read: the filter is left out (the caller counts it).
 				if (!IsPlainTexture(a_source) || !Field<void*>(a_source, Layout::kTextureResource))
 					return false;
 				auto* view = Field<ID3D11ShaderResourceView*>(a_source, Layout::kTextureView);
@@ -1813,7 +1382,7 @@ namespace RenderGraph::Engine::Scaleform
 				const auto height = static_cast<std::uint32_t>(std::ceil(sourceRect[3] - sourceRect[1]));
 				const std::int32_t scratch = AcquireScratch(nullptr, (std::max)(width, 1u), (std::max)(height, 1u));
 				if (scratch == Display::kLostScratch) {
-					NotePart("a filter pass that no scratch image could take (the filter is not drawn)");
+					NoteLeftOut("a filter pass that no scratch image could take (the filter is left out)");
 					if (held >= 0)
 						capture.pinnedScratch &= ~(1u << held);
 					return true;
@@ -1872,35 +1441,16 @@ namespace RenderGraph::Engine::Scaleform
 
 		void DrawColorMatrixRect(void* a_renderer, RE::GTexture* a_source, const float* a_sourceRect, const float* a_destRect, const float* a_matrix)
 		{
-			if (Capturing() && a_source && a_sourceRect && a_destRect && a_matrix)
-				return CaptureColorMatrix(a_renderer, a_source, a_sourceRect, a_destRect, a_matrix);
-			Filter(a_renderer, "a colour matrix filter (DrawColorMatrixRect)",
-				[&] { Original<ColorMatrixFn>(kDrawColorMatrixRect)(a_renderer, a_source, a_sourceRect, a_destRect, a_matrix); });
-		}
-
-		/** @brief A pure setter of a value it copies: forwarded always; inside a capture also kept, with its argument copied. */
-		template <Slot S, std::size_t N>
-		void MatrixSetter(void* a_renderer, const float* a_values)
-		{
-			Original<SetMatrixFn>(S)(a_renderer, a_values);
 			if (!Capturing())
-				return;
-			Keep({ .slot = S, .bytes = KeepBytes(a_values, sizeof(float) * N) });
-		}
-
-		/** @brief SetWorld3D keeps the pointer it is given: a replay gives it the segment's copy, and puts GFx's back after. */
-		void SetWorld3D(void* a_renderer, const float* a_matrix)
-		{
-			Original<SetMatrixFn>(kSetWorld3D)(a_renderer, a_matrix);
-			if (Capturing())
-				Keep({ .slot = kSetWorld3D, .bytes = a_matrix ? KeepBytes(a_matrix, sizeof(float) * 16) : kNoOffset });
+				return Original<ColorMatrixFn>(kDrawColorMatrixRect)(a_renderer, a_source, a_sourceRect, a_destRect, a_matrix);
+			if (a_source && a_sourceRect && a_destRect && a_matrix)
+				CaptureColorMatrix(a_renderer, a_source, a_sourceRect, a_destRect, a_matrix);
 		}
 
 		void PushBlendMode(void* a_renderer, std::uint32_t a_mode)
 		{
 			if (!Capturing())
 				return Original<SetBlendFn>(kPushBlendMode)(a_renderer, a_mode);
-			Keep({ .slot = kPushBlendMode, .args = { static_cast<std::int32_t>(a_mode) } });
 			// The renderer's rule: the stack keeps the mode before; Normal and Layer keep the parent's mode.
 			auto& capture = Current();
 			capture.blendStack.push_back(capture.blendMode);
@@ -1912,7 +1462,6 @@ namespace RenderGraph::Engine::Scaleform
 		{
 			if (!Capturing())
 				return Original<VoidFn>(kPopBlendMode)(a_renderer);
-			Keep({ .slot = kPopBlendMode });
 			auto& capture = Current();
 			if (capture.blendStack.empty())
 				return;
@@ -1927,70 +1476,10 @@ namespace RenderGraph::Engine::Scaleform
 			capture.blendMode = mode;
 		}
 
-		template <Slot S>
-		void DataSetter(void* a_renderer, const void* a_data, std::int32_t a_count, std::int32_t a_format, void* a_cache)
-		{
-			Original<DataFn>(S)(a_renderer, a_data, a_count, a_format, a_cache);
-			if (!Capturing())
-				return;
-			// The copy is made at the array's first draw (StageArray); a replay passes it, or GFx's pointer when no draw read the array.
-			auto& capture = Current();
-			std::int32_t& use = S == kSetVertexData ? capture.vertexArray : capture.indexArray;
-			const std::uint32_t elementSize = S == kSetVertexData ? Field<std::uint32_t>(a_renderer, Layout::kVertexStride) :
-			                                                        IndexSize(Field<std::uint32_t>(a_renderer, Layout::kIndexFormat));
-			use = UseArray(a_data, a_count, elementSize);
-			Keep({ .slot = S, .bytes = static_cast<std::uint32_t>(use), .args = { a_count, a_format } });
-		}
-
-		template <Slot S>
-		void StyleDisable(void* a_renderer)
-		{
-			Original<VoidFn>(S)(a_renderer);
-			if (Capturing())
-				Keep({ .slot = S });
-		}
-
-		template <Slot S>
-		void StyleColor(void* a_renderer, const std::uint32_t* a_color)
-		{
-			Original<ColorFn>(S)(a_renderer, a_color);
-			if (!Capturing())
-				return;
-			Keep({ .slot = S, .args = { static_cast<std::int32_t>(*a_color) } });
-		}
-
-		void FillStyleBitmap(void* a_renderer, const FillTexture* a_fill)
-		{
-			Original<FillBitmapFn>(kFillStyleBitmap)(a_renderer, a_fill);
-			if (!Capturing())
-				return;
-			Keep({ .slot = kFillStyleBitmap, .bytes = KeepBytes(a_fill, sizeof(FillTexture)) });
-		}
-
-		void FillStyleGouraud(void* a_renderer, std::int32_t a_type, const FillTexture* a_texture0, const FillTexture* a_texture1, const FillTexture* a_texture2)
-		{
-			Original<FillGouraudFn>(kFillStyleGouraud)(a_renderer, a_type, a_texture0, a_texture1, a_texture2);
-			if (!Capturing())
-				return;
-			// The three textures kept side by side, each present when its bit in args[1] is.
-			FillTexture fills[3]{};
-			const FillTexture* given[3] = { a_texture0, a_texture1, a_texture2 };
-			std::int32_t present = 0;
-			for (int i = 0; i < 3; ++i)
-				if (given[i]) {
-					fills[i] = *given[i];
-					present |= 1 << i;
-				}
-			Keep({ .slot = kFillStyleGouraud, .bytes = KeepBytes(fills, sizeof(fills)), .args = { a_type, present } });
-		}
-
 		void DrawIndexedTriList(void* a_renderer, std::int32_t a_base, std::int32_t a_min, std::int32_t a_count, std::int32_t a_start, std::int32_t a_triangles)
 		{
-			if (!Capturing()) {
-				const Flush::EngineDraws engine(DeclinedReason());
+			if (!Capturing())
 				return Original<DrawTrianglesFn>(kDrawIndexedTriList)(a_renderer, a_base, a_min, a_count, a_start, a_triangles);
-			}
-			Keep({ .slot = kDrawIndexedTriList, .args = { a_base, a_min, a_count, a_start, a_triangles } });
 			// The renderer's own early outs: nothing drawn.
 			if (!VideoModeSet(a_renderer) || !Field<const void*>(a_renderer, Layout::kVertexData) || !Field<const void*>(a_renderer, Layout::kIndexData) ||
 				!Field<std::uint32_t>(a_renderer, Layout::kIndexFormat) || a_triangles <= 0)
@@ -2031,11 +1520,8 @@ namespace RenderGraph::Engine::Scaleform
 
 		void DrawLineStrip(void* a_renderer, std::int32_t a_base, std::int32_t a_lines)
 		{
-			if (!Capturing()) {
-				const Flush::EngineDraws engine(DeclinedReason());
+			if (!Capturing())
 				return Original<DrawLinesFn>(kDrawLineStrip)(a_renderer, a_base, a_lines);
-			}
-			Keep({ .slot = kDrawLineStrip, .args = { a_base, a_lines } });
 			if (!VideoModeSet(a_renderer) || !Field<const void*>(a_renderer, Layout::kVertexData) || a_lines <= 0)
 				return;
 			// DrawLineStrip (SE 82839): vertex shader 1 (7 in 3D), the line style through ApplyFillStyle, the current matrix, and a
@@ -2061,23 +1547,19 @@ namespace RenderGraph::Engine::Scaleform
 		void DrawBitmaps(void* a_renderer, const BitmapDesc* a_bitmaps, std::int32_t a_listSize, std::int32_t a_start, std::int32_t a_count, RE::GTexture* a_texture,
 			const float* a_matrix, void* a_cache)
 		{
-			if (!Capturing()) {
-				const Flush::EngineDraws engine(DeclinedReason());
+			if (!Capturing())
 				return Original<DrawBitmapsFn>(kDrawBitmaps)(a_renderer, a_bitmaps, a_listSize, a_start, a_count, a_texture, a_matrix, a_cache);
-			}
 			if (!VideoModeSet(a_renderer) || !a_bitmaps || !a_texture || a_count <= 0)
 				return;  // the renderer draws nothing (and its state changes are the next draw's anyway)
-			// The matrix and the bitmaps kept, for a replay.
-			const std::uint32_t matrixBytes = KeepBytes(a_matrix, sizeof(float) * 6);
 			const auto* bitmaps = a_bitmaps + a_start;
-			const std::uint32_t bitmapBytes = KeepBytes(bitmaps, sizeof(BitmapDesc) * static_cast<std::size_t>(a_count));
-			Keep({ .slot = kDrawBitmaps, .bytes = matrixBytes, .args = { a_count, static_cast<std::int32_t>(bitmapBytes) }, .object = a_texture });
-			if (!IsPlainTexture(a_texture)) {
-				Abort(a_renderer, "bitmaps of a texture that is not a plain GTextureD3D1x (video)");
+			const bool redirected = FindRedirect(a_texture) != nullptr;
+			if (!redirected && !IsPlainTexture(a_texture)) {
+				NoteLeftOut("bitmaps of a texture that is not a plain GTextureD3D1x (video)");
 				return;
 			}
-			if (!Field<void*>(a_texture, Layout::kTextureResource)) {
-				Abort(a_renderer, "bitmaps of a texture whose data is lost");
+			if (!redirected && !Field<void*>(a_texture, Layout::kTextureResource)) {
+				// Its data was lost (the device was reset): GFx makes it again before it is drawn again.
+				NoteLeftOut("bitmaps of a texture whose data is lost");
 				return;
 			}
 			Command command{};
@@ -2127,7 +1609,6 @@ namespace RenderGraph::Engine::Scaleform
 		{
 			if (!Capturing())
 				return Original<MaskFn>(kBeginSubmitMask)(a_renderer, a_mode);
-			Keep({ .slot = kBeginSubmitMask, .args = { a_mode } });
 			if (!VideoModeSet(a_renderer))
 				return;
 			auto& capture = Current();
@@ -2156,7 +1637,6 @@ namespace RenderGraph::Engine::Scaleform
 		{
 			if (!Capturing())
 				return Original<VoidFn>(kEndSubmitMask)(a_renderer);
-			Keep({ .slot = kEndSubmitMask });
 			if (!VideoModeSet(a_renderer))
 				return;
 			auto& capture = Current();
@@ -2169,7 +1649,6 @@ namespace RenderGraph::Engine::Scaleform
 		{
 			if (!Capturing())
 				return Original<VoidFn>(kDisableMask)(a_renderer);
-			Keep({ .slot = kDisableMask });
 			if (!VideoModeSet(a_renderer))
 				return;
 			auto& capture = Current();
@@ -2212,24 +1691,10 @@ namespace RenderGraph::Engine::Scaleform
 			set(kPushTempRenderTarget, &PushTempRenderTarget);
 			set(kBeginDisplay, &BeginDisplay);
 			set(kEndDisplay, &EndDisplay);
-			set(kSetMatrix, &MatrixSetter<kSetMatrix, 6>);
-			set(kSetUserMatrix, &MatrixSetter<kSetUserMatrix, 6>);
-			set(kSetCxform, &MatrixSetter<kSetCxform, 8>);
 			set(kPushBlendMode, &PushBlendMode);
 			set(kPopBlendMode, &PopBlendMode);
-			set(kSetPerspective3D, &MatrixSetter<kSetPerspective3D, 16>);
-			set(kSetView3D, &MatrixSetter<kSetView3D, 16>);
-			set(kSetWorld3D, &SetWorld3D);
-			set(kSetVertexData, &DataSetter<kSetVertexData>);
-			set(kSetIndexData, &DataSetter<kSetIndexData>);
 			set(kDrawIndexedTriList, &DrawIndexedTriList);
 			set(kDrawLineStrip, &DrawLineStrip);
-			set(kLineStyleDisable, &StyleDisable<kLineStyleDisable>);
-			set(kLineStyleColor, &StyleColor<kLineStyleColor>);
-			set(kFillStyleDisable, &StyleDisable<kFillStyleDisable>);
-			set(kFillStyleColor, &StyleColor<kFillStyleColor>);
-			set(kFillStyleBitmap, &FillStyleBitmap);
-			set(kFillStyleGouraud, &FillStyleGouraud);
 			set(kDrawBitmaps, &DrawBitmaps);
 			set(kBeginSubmitMask, &BeginSubmitMask);
 			set(kEndSubmitMask, &EndSubmitMask);
