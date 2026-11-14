@@ -1078,9 +1078,10 @@ namespace RenderGraph::Engine::ImageSpace
 
 		/**
 		 * @brief The draw's shape from the shadow state, as SetDirtyStates is about to apply it (all but the viewport: ReadViewport
-		 * reads it once SetDirtyStates ran); false with a reason when no pass can draw it.
+		 * reads it once SetDirtyStates ran); false with a reason when no pass can draw it. a_clears: SetDirtyStates clears the target
+		 * as it binds it (the caller runs the pending batch first, so the clear lands between it and this draw).
 		 */
-		bool ReadShape(std::size_t a_effect, ShapeKey& a_out, OutputView& a_output, std::string_view& a_refusal)
+		bool ReadShape(std::size_t a_effect, ShapeKey& a_out, OutputView& a_output, std::string_view& a_refusal, bool& a_clears)
 		{
 			const auto& effect = kEffects[a_effect];
 			auto& shadow = RE::BSGraphics::RendererShadowState::GetSingleton()->GetRuntimeData();
@@ -1114,12 +1115,10 @@ namespace RenderGraph::Engine::ImageSpace
 				a_refusal = "a depth or stencil test";
 				return false;
 			}
-			// A clear is applied by SetDirtyStates when the target is bound; the pending batch would run after it.
+			// A clear is applied by SetDirtyStates when the target is bound, through the D3D11 context (the native context and DXVK keep
+			// it in the stream's order). The pending batch must run before it.
 			constexpr std::uint32_t kDirtyRenderTarget = 0x1;
-			if ((shadow.stateUpdateFlags.underlying() & kDirtyRenderTarget) && shadow.setRenderTargetMode[0] <= RE::BSGraphics::SetRenderTargetMode::SRTM_CLEAR_STENCIL) {
-				a_refusal = "its target is cleared at the bind";
-				return false;
-			}
+			a_clears = (shadow.stateUpdateFlags.underlying() & kDirtyRenderTarget) && shadow.setRenderTargetMode[0] <= RE::BSGraphics::SetRenderTargetMode::SRTM_CLEAR_STENCIL;
 			if (!ResolveOutput(output, a_output, a_refusal))
 				return false;
 			if (shadow.rasterStateScissorMode != 0) {
@@ -2428,11 +2427,15 @@ namespace RenderGraph::Engine::ImageSpace
 			ShapeKey key{};
 			OutputView output;
 			std::string_view refusal;
-			if (!ReadShape(scope.effect, key, output, refusal)) {
+			bool clears = false;
+			if (!ReadShape(scope.effect, key, output, refusal, clears)) {
 				Flush();
 				Refuse(refusal, scope.effect);
 				return false;
 			}
+			// The clear SetDirtyStates makes below goes after the batch's draws, and this draw starts a new batch after it.
+			if (clears)
+				Flush();
 			// The engine's state for the draw goes to D3D11 as before (the draw would apply it; when the engine draws, its own call
 			// finds nothing left to apply). The shadow state then holds the viewport the draw uses.
 			static REL::Relocation<void (*)(bool)> setDirtyStates{ REL::RelocationID(75580, 77386) };
