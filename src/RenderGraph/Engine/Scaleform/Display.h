@@ -38,6 +38,15 @@ namespace RenderGraph::Engine::Scaleform
 		auto operator<=>(const DrawState&) const = default;
 	};
 
+	/** @brief Command::textures: no texture. */
+	inline constexpr std::int32_t kNoTexture = -1;
+
+	/** @brief Command::textures for the scratch image a_scratch (a render target of GFx's drawn on the graph): -2, -3, ... */
+	constexpr std::int32_t ScratchTexture(std::int32_t a_scratch) { return -2 - a_scratch; }
+
+	/** @brief The scratch image a Command::textures entry names, or -1 for a display texture or none. */
+	constexpr std::int32_t ScratchOf(std::int32_t a_texture) { return a_texture <= -2 ? -2 - a_texture : -1; }
+
 	/** @brief A display command: a draw, or the stencil clear BeginSubmitMask(kClear) makes. */
 	struct Command
 	{
@@ -51,7 +60,7 @@ namespace RenderGraph::Engine::Scaleform
 		std::uint32_t stencilRef = 0;
 		std::uint32_t record = 0;       // bytes into the display's staging bytes: its ScaleformFillDraw
 		std::uint32_t vertexCount = 0;  // vertices the draw makes (triangles times three)
-		std::int32_t textures[2] = { -1, -1 };  // indices into Display::textures, stages 0 and 1
+		std::int32_t textures[2] = { kNoTexture, kNoTexture };  // indices into Display::textures, or ScratchTexture(k); stages 0 and 1
 		std::uint8_t samplers[2] = { 0, 0 };    // the renderer's sampler index (wrap * 2 + sample), stages 0 and 1
 		bool noColour = false;  // a null pixel shader (a bitmap fill without a texture): the draw writes the stencil only
 	};
@@ -100,6 +109,12 @@ namespace RenderGraph::Engine::Scaleform
 		DXGI_FORMAT targetFormat = DXGI_FORMAT_UNKNOWN;  // its RTV's format
 		ID3D11Texture2D* depth = nullptr;       // the bound DSV's texture (DXVK's), referenced; null without one
 		DXGI_FORMAT depthFormat = DXGI_FORMAT_UNKNOWN;
+		// A render target of GFx's pushed inside the display (PushRenderTarget): the scratch image the segment draws onto in its place,
+		// or -1 for `target`, or kLostScratch when no scratch image could take it (the segment draws nothing).
+		std::int32_t scratch = -1;
+		static constexpr std::int32_t kLostScratch = -2;
+		// The segment starts where GFx pushed its target, which PushRenderTarget clears whole to zero.
+		bool clearTarget = false;
 
 		Display() = default;
 		Display(const Display&) = delete;
@@ -116,6 +131,7 @@ namespace RenderGraph::Engine::Scaleform
 				depth->Release();
 			target = depth = nullptr;
 			targetFormat = depthFormat = DXGI_FORMAT_UNKNOWN;
+			scratch = -1;
 		}
 
 		/** @brief The commands, their bytes and textures dropped; the target and viewport kept (the next segment of the display). */
@@ -126,6 +142,7 @@ namespace RenderGraph::Engine::Scaleform
 			textures.clear();
 			staging.clear();
 			commands.clear();
+			clearTarget = false;
 		}
 
 		/** @brief a_bytes appended at a_alignment; their offset. */

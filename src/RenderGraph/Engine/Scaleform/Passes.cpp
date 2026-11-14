@@ -29,6 +29,7 @@
 #	include <RenderPasses/Base/TypedRenderGraphPass.h>
 #	include <Resources/Buffers/Buffer.h>
 #	include <Resources/ExternalTextureResource.h>
+#	include <Resources/PixelBuffer.h>
 #	include <Resources/TextureDescription.h>
 #	include <rhi_helpers.h>
 
@@ -56,6 +57,10 @@ namespace RenderGraph::Engine::Scaleform::Passes
 		constexpr std::uint32_t kMinimumStaging = 256u << 10;
 		// The most commands one Interface run draws: one run gate entry each. A longer segment is drawn in several runs.
 		constexpr std::uint32_t kGateEntries = 1024;
+		// The scratch images GFx's render targets are drawn into on the graph (PushRenderTarget: a filter's source, its passes): a
+		// blur's source and its two intermediates, and one more for a nested target.
+		constexpr std::uint32_t kScratchTargets = 4;
+		constexpr rhi::Format kScratchFormat = rhi::Format::R8G8B8A8_UNorm;
 
 		using FrameAnchors::Anchor;
 
@@ -132,6 +137,9 @@ namespace RenderGraph::Engine::Scaleform::Passes
 			rhi::Viewport viewport{};
 			rhi::ScissorRect scissor{};
 			std::uint32_t width = 0, height = 0;
+			// The run starts by clearing the target to zero (a render target GFx pushed: PushRenderTarget clears it whole).
+			bool clear = false;
+			rhi::Format format = rhi::Format::Unknown;
 			std::vector<std::shared_ptr<const void>> owners;  // programs, samplers, texture descriptors and views
 		};
 
@@ -166,6 +174,8 @@ namespace RenderGraph::Engine::Scaleform::Passes
 		struct Surface
 		{
 			Role role = Role::Framebuffer;
+			// A scratch image's index (a graph texture of this client's that GFx's pushed render targets are drawn into), or -1 for a role.
+			std::int32_t scratch = -1;
 			winrt::com_ptr<ID3D11Texture2D> colourTexture;  // DXVK's: the surface's identity
 			winrt::com_ptr<ID3D11Texture2D> depthTexture;
 			FrameAnchors::Texture colour;  // an engine target's slot, or this client's own import
@@ -195,7 +205,8 @@ namespace RenderGraph::Engine::Scaleform::Passes
 			bool failed = false;
 			bool setUp = false;
 			std::array<org::OwnedDescriptorBinding, 4> samplers;  // the renderer's, by wrap * 2 + sample
-			std::vector<std::shared_ptr<Surface>> surfaces;       // one per role that has a texture
+			std::vector<std::shared_ptr<Surface>> surfaces;       // one per role that has a texture, then the scratch images
+			std::uint32_t scratchWidth = 0, scratchHeight = 0;    // every scratch image's size (the largest role surface's)
 			// Native mode: the tracked textures the displays read (graph-owned, or exempt ones the context wrote since). The passes
 			// declare each, and a draw binds its declared view. A new one registers the client again after the run (readsChanged).
 			std::vector<Read> reads;
@@ -451,7 +462,7 @@ namespace RenderGraph::Engine::Scaleform::Passes
 					return;
 				const org::RunRef run = a_recording.Run();
 				const auto frame = a_pass.slots->Take(run);
-				if (!frame || !frame->staging || frame->commands.empty())
+				if (!frame || !frame->staging || (frame->commands.empty() && !frame->clear))
 					return;
 				a_recording.Retain(frame);
 				a_recording.Retain(a_pass.gate);
@@ -460,8 +471,13 @@ namespace RenderGraph::Engine::Scaleform::Passes
 				rhi::ColorAttachment colour{};
 				colour.rtv = a_recording.View(a_bindings.colour);
 				colour.resource = a_recording.Resolve(a_bindings.colour).GetHandle();
-				colour.loadOp = rhi::LoadOp::Load;
+				colour.loadOp = frame->clear ? rhi::LoadOp::Clear : rhi::LoadOp::Load;
 				colour.storeOp = rhi::StoreOp::Store;
+				if (frame->clear) {
+					colour.clear.type = rhi::ClearValueType::Color;
+					colour.clear.format = frame->format;
+					colour.clear.rgba[0] = colour.clear.rgba[1] = colour.clear.rgba[2] = colour.clear.rgba[3] = 0.0f;
+				}
 				rhi::DepthAttachment depth{};
 				if (a_bindings.hasDepth) {
 					depth.dsv = a_recording.View(a_bindings.depth);
@@ -587,6 +603,17 @@ namespace RenderGraph::Engine::Scaleform::Passes
 			return texture.Key();
 		}
 
+		/** @brief The scratch image a_scratch's surface, or null. */
+		const Surface* ScratchSurface(const PathState& a_state, std::int32_t a_scratch)
+		{
+			if (a_scratch < 0)
+				return nullptr;
+			for (const auto& surface : a_state.surfaces)
+				if (surface->scratch == a_scratch)
+					return surface.get();
+			return nullptr;
+		}
+
 		/**
 		 * @brief Inside the epoch: the pending display's frame, stored for this run in the slots of the pass that draws it, with its
 		 * draws' gate entries opened. Every other pass's entry for this run is emptied first, so nothing older is left there.
@@ -664,8 +691,12 @@ namespace RenderGraph::Engine::Scaleform::Passes
 					const std::int32_t texture = command.textures[a_stage];
 					return texture >= 0 ? textures[static_cast<std::size_t>(texture)] : 0u;
 				};
-				for (std::uint32_t stage = 0; stage < 2; ++stage)
-					out.reads[stage] = command.textures[stage] >= 0 ? reads[static_cast<std::size_t>(command.textures[stage])] : nullptr;
+				for (std::uint32_t stage = 0; stage < 2; ++stage) {
+					const std::int32_t texture = command.textures[stage];
+					// A scratch image is read through the view every pass declares (its index replaces the block's word in Record).
+					const auto* scratch = ScratchSurface(state, ScratchOf(texture));
+					out.reads[stage] = texture >= 0 ? reads[static_cast<std::size_t>(texture)] : (scratch ? scratch->colour.Key() : nullptr);
+				}
 				out.filter = command.state.filter != 0;
 				if (command.state.filter) {
 					FilterBlock filter{};
@@ -696,6 +727,8 @@ namespace RenderGraph::Engine::Scaleform::Passes
 
 			frame->width = surface.width;
 			frame->height = surface.height;
+			frame->clear = display.clearTarget && state.pendingFirst == 0;
+			frame->format = surface.colourFormat;
 			frame->viewport = { display.viewport[0], display.viewport[1], display.viewport[2], display.viewport[3], 0.0f, 1.0f };
 			// D3D11 clips to the viewport (the renderer's rasterizer state has no scissor).
 			const float left = std::clamp(display.viewport[0], 0.0f, static_cast<float>(surface.width));
@@ -723,6 +756,10 @@ namespace RenderGraph::Engine::Scaleform::Passes
 			auto declared = std::make_shared<Reads>();
 			for (const auto& read : a_state.reads)
 				declared->push_back(read.texture);
+			// The scratch images, read by any pass but their own (DisplayPass::Declare leaves its own target out).
+			for (const auto& surface : a_state.surfaces)
+				if (surface->scratch >= 0 && surface->Drawable())
+					declared->push_back(surface->colour);
 			std::shared_ptr<const Reads> reads = std::move(declared);
 			for (std::size_t i = 0; i < a_state.surfaces.size(); ++i) {
 				std::shared_ptr<const Surface> surface = a_state.surfaces[i];
@@ -1031,7 +1068,7 @@ namespace RenderGraph::Engine::Scaleform::Passes
 		Surface* Find(const PathState& a_state, ID3D11Texture2D* a_colour)
 		{
 			for (const auto& surface : a_state.surfaces)
-				if (surface->colourTexture.get() == a_colour)
+				if (surface->scratch < 0 && a_colour && surface->colourTexture.get() == a_colour)
 					return surface.get();
 			return nullptr;
 		}
@@ -1049,7 +1086,7 @@ namespace RenderGraph::Engine::Scaleform::Passes
 			auto surface = MakeSurface(a_role, texture.get(), format, RoleDepth(a_role));
 			QueuePrograms(a_state, *surface);
 			std::erase_if(a_state.surfaces, [&](const std::shared_ptr<Surface>& a_old) {
-				if (a_old->role != a_role)
+				if (a_old->scratch >= 0 || a_old->role != a_role)
 					return false;
 				// A pass of an older build that still holds it draws nothing more; its textures go once D3D11 and the graph are done.
 				a_old->Clear();
@@ -1068,7 +1105,7 @@ namespace RenderGraph::Engine::Scaleform::Passes
 		 */
 		Surface* RefreshSurface(PathState& a_state, Role a_role, const Display& a_display)
 		{
-			const auto found = std::ranges::find_if(a_state.surfaces, [&](const auto& a_surface) { return a_surface->role == a_role; });
+			const auto found = std::ranges::find_if(a_state.surfaces, [&](const auto& a_surface) { return a_surface->scratch < 0 && a_surface->role == a_role; });
 			if (found == a_state.surfaces.end() || !(*found)->Drawable())
 				return nullptr;
 			Surface& surface = **found;
@@ -1107,6 +1144,13 @@ namespace RenderGraph::Engine::Scaleform::Passes
 		 */
 		Surface* SurfaceFor(PathState& a_state, const Display& a_display, bool a_needsDepth, const char*& a_reason)
 		{
+			if (a_display.scratch != -1) {
+				// A render target GFx pushed: drawn into its scratch image.
+				auto* scratch = const_cast<Surface*>(ScratchSurface(a_state, a_display.scratch));
+				if (!scratch || !scratch->Drawable())
+					a_reason = "a render target of GFx's that no scratch image could take (larger than the screen, or all in use)";
+				return scratch && scratch->Drawable() ? scratch : nullptr;
+			}
 			if (auto* surface = Find(a_state, a_display.target)) {
 				if (!surface->Drawable()) {
 					a_reason = "a render target the graph cannot import";
@@ -1188,6 +1232,67 @@ namespace RenderGraph::Engine::Scaleform::Passes
 		}
 	}
 
+	namespace
+	{
+		/**
+		 * @brief The scratch images: kScratchTargets graph textures of this client's, the largest role surface's size, registered with
+		 * the Interface graph and declared by every pass. GFx's pushed render targets are drawn into them (a filter's source and its
+		 * passes); the draws that read GFx's texture read its scratch image. Each has a pass that draws into it. Their pipelines queued.
+		 */
+		void MakeScratch(PathState& a_state)
+		{
+			for (const auto& surface : a_state.surfaces)
+				if (surface->Drawable()) {
+					a_state.scratchWidth = std::max(a_state.scratchWidth, surface->width);
+					a_state.scratchHeight = std::max(a_state.scratchHeight, surface->height);
+				}
+			if (!a_state.scratchWidth || !a_state.scratchHeight)
+				return;
+			for (std::uint32_t i = 0; i < kScratchTargets; ++i) {
+				org::TextureDescription desc{};
+				desc.imageDimensions = { { a_state.scratchWidth, a_state.scratchHeight, 0, 0 } };
+				desc.channels = 4;
+				desc.format = kScratchFormat;
+				desc.hasRTV = true;
+				desc.rtvFormat = kScratchFormat;
+				desc.hasSRV = true;
+				desc.srvFormat = kScratchFormat;
+				auto texture = org::PixelBuffer::CreateShared(desc);
+				if (!texture) {
+					logger::warn("[ORG] Scaleform: scratch image {} could not be made; GFx's render targets beyond it are not drawn", i);
+					break;
+				}
+				auto surface = std::make_shared<Surface>();
+				surface->scratch = static_cast<std::int32_t>(i);
+				surface->ownId = fmt::format("cs.scaleform.scratch.{}", i);
+				texture->SetName(surface->ownId);
+				surface->colour = FrameAnchors::Texture(std::static_pointer_cast<org::Resource>(texture));
+				surface->colourFormat = kScratchFormat;
+				surface->width = a_state.scratchWidth;
+				surface->height = a_state.scratchHeight;
+				surface->colourSlots = std::make_shared<const Slots>();
+				if (i == 0)
+					QueuePrograms(a_state, *surface);
+				a_state.surfaces.push_back(std::move(surface));
+			}
+			logger::info("[ORG] Scaleform: {} scratch images of {}x{} for GFx's render targets", kScratchTargets, a_state.scratchWidth, a_state.scratchHeight);
+		}
+	}
+
+	bool ScratchSize(std::uint32_t& a_width, std::uint32_t& a_height)
+	{
+		const auto& state = Path();
+		a_width = state.scratchWidth;
+		a_height = state.scratchHeight;
+		return state.setUp && a_width && a_height;
+	}
+
+	std::uint32_t ScratchCount()
+	{
+		const auto& state = Path();
+		return static_cast<std::uint32_t>(std::ranges::count_if(state.surfaces, [](const auto& a_surface) { return a_surface->scratch >= 0; }));
+	}
+
 	bool Reserve()
 	{
 		auto& state = Path();
@@ -1236,6 +1341,7 @@ namespace RenderGraph::Engine::Scaleform::Passes
 		}
 		for (const auto role : kRoles)
 			(void)DeclareSurface(state, role);
+		MakeScratch(state);
 		if (std::ranges::none_of(state.surfaces, [](const auto& a_surface) { return a_surface->Drawable(); })) {
 			state.failed = true;
 			logger::error("[ORG] Scaleform: none of the surfaces' targets can be imported; the D3D11 renderer draws");
@@ -1261,12 +1367,13 @@ namespace RenderGraph::Engine::Scaleform::Passes
 			a_reason = "the graph path is off (not set up, or failed)";
 			return false;
 		}
-		if (a_display.commands.empty())
+		if (a_display.commands.empty() && !a_display.clearTarget)
 			return true;  // nothing drawn, as the D3D11 renderer would draw nothing
 		const auto commandCount = static_cast<std::uint32_t>(a_display.commands.size());
 		NoteSegment(state, commandCount);
-		// Without a depth-stencil bound the D3D11 masks do nothing either; with one, the graph must have it.
-		const bool needsDepth = a_display.depth && std::ranges::any_of(a_display.commands, [](const Command& a_command) {
+		// Without a depth-stencil bound the D3D11 masks do nothing either; with one, the graph must have it. The scratch images have
+		// none: masks inside a render target GFx pushed are not drawn (its stencil surface is not a scratch image yet).
+		const bool needsDepth = a_display.scratch == -1 && a_display.depth && std::ranges::any_of(a_display.commands, [](const Command& a_command) {
 			return a_command.kind == Command::Kind::ClearStencil || a_command.state.stencil != Stencil::Off;
 		});
 		Surface* surface = SurfaceFor(state, a_display, needsDepth, a_reason);
@@ -1338,6 +1445,12 @@ namespace RenderGraph::Engine::Scaleform::Passes
 	bool Reserve() { return false; }
 	void Setup() {}
 	bool Ready() { return false; }
+	bool ScratchSize(std::uint32_t& a_width, std::uint32_t& a_height)
+	{
+		a_width = a_height = 0;
+		return false;
+	}
+	std::uint32_t ScratchCount() { return 0; }
 	bool Submit(Display&, const char*& a_reason)
 	{
 		a_reason = "built without the render graph";

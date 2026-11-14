@@ -190,9 +190,6 @@ namespace RenderGraph::Engine::Scaleform
 			Report(counters);
 		}
 
-		/** @brief The most D3D11 parts a display has between graph segments; past it the rest of the display is D3D11's. */
-		constexpr std::uint32_t kMaxD3D11Parts = 8;
-
 		/**
 		 * @brief A call kept for a replay into the D3D11 renderer: its slot and arguments. What an argument points at is copied into
 		 * Capture::bytes at `bytes` (matrices, fills, bitmaps); for SetVertexData and SetIndexData `bytes` is the ArrayUse's index,
@@ -256,12 +253,38 @@ namespace RenderGraph::Engine::Scaleform
 				Stencil stencil = Stencil::Off;
 				std::uint32_t stencilRef = 0;
 			} segmentStart;
-			// D3D11 parts: whether the D3D11 renderer has begun the display, the render targets it has pushed (their draws are its),
-			// a filter it is drawing, and the display's fate so far.
+			// D3D11 parts: whether the D3D11 renderer has begun the display, a filter it is drawing, and the display's fate so far.
 			bool d3d11Begun = false;
 			bool retargeted = false;  // the part since the last segment pushed a render target (ResumeAfterD3D11 checks the target)
-			std::uint32_t targetDepth = 0;
 			bool inFilter = false;
+			/**
+			 * @brief A render target GFx pushed inside the display (PushRenderTarget), drawn into a scratch image on the graph: what the
+			 * segment it interrupted draws onto, and the state PopRenderTarget gives back.
+			 */
+			struct TargetFrame
+			{
+				float viewport[4];
+				float viewMatrix[6];
+				std::int32_t scratch;  // the interrupted segment's target: a scratch image, or -1 for the display's target
+				bool inMask;
+				std::int32_t maskLevel;
+				Stencil stencil;
+				std::uint32_t stencilRef;
+			};
+			std::vector<TargetFrame> targets;
+			/**
+			 * @brief A texture of GFx's drawn into a scratch image in this display: draws that read the texture read the scratch image, with
+			 * the coordinates GFx made for the texture's size scaled to the scratch image's.
+			 */
+			struct Redirect
+			{
+				RE::GTexture* texture;
+				std::int32_t scratch;
+				float scaleU, scaleV;
+				std::uint64_t serial;  // the oldest is reused first
+			};
+			std::vector<Redirect> redirects;
+			std::uint64_t redirectSerial = 0;
 			std::uint32_t d3d11Parts = 0;
 			std::uint32_t graphSegments = 0;
 			// The pixel stage the renderer has bound, for a draw with the fill off (ApplyFillStyle sets nothing then): its kind,
@@ -292,7 +315,7 @@ namespace RenderGraph::Engine::Scaleform
 		bool Capturing()
 		{
 			const auto& capture = Current();
-			return capture.active && !capture.replaying && capture.targetDepth == 0 && !capture.inFilter && FrameAnchors::IsRenderOwner();
+			return capture.active && !capture.replaying && !capture.inFilter && FrameAnchors::IsRenderOwner();
 		}
 
 		/** @brief Marks the D3D11 renderer running kept calls for the scope. */
@@ -606,7 +629,7 @@ namespace RenderGraph::Engine::Scaleform
 		void Flush(void* a_renderer)
 		{
 			auto& capture = Current();
-			if (capture.display.commands.empty())
+			if (capture.display.commands.empty() && !capture.display.clearTarget)
 				return;
 			const char* reason = nullptr;
 			if (Passes::Submit(capture.display, reason)) {
@@ -617,6 +640,11 @@ namespace RenderGraph::Engine::Scaleform
 				return;
 			}
 			NotePart(reason ? reason : "the graph did not draw a segment");
+			// A segment into a render target GFx pushed has no D3D11 target bound to replay onto: it is not drawn.
+			if (capture.display.scratch != -1) {
+				capture.kept.clear();
+				return;
+			}
 			Replay(a_renderer);
 		}
 
@@ -682,10 +710,6 @@ namespace RenderGraph::Engine::Scaleform
 			const bool retargeted = std::exchange(capture.retargeted, false);
 			if (retargeted && RendererTarget(a_renderer) != static_cast<ID3D11Resource*>(capture.display.target)) {
 				EndCapture("another render target bound after a D3D11 part (the rest of the display)");
-				return;
-			}
-			if (capture.d3d11Parts >= kMaxD3D11Parts) {
-				EndCapture("too many D3D11 parts in one display (the rest of the display)");
 				return;
 			}
 			StartSegment(a_renderer);
@@ -772,10 +796,24 @@ namespace RenderGraph::Engine::Scaleform
 			return a_texture && *reinterpret_cast<const std::uintptr_t*>(a_texture) == vtable;
 		}
 
-		/** @brief The display's index for a texture's view (DXVK's, referenced once per display); -1, aborted, when there is none. */
+		/** @brief The redirect of a texture of GFx's drawn into a scratch image in this display, or null. */
+		const Capture::Redirect* FindRedirect(const RE::GTexture* a_texture)
+		{
+			for (const auto& redirect : Current().redirects)
+				if (redirect.texture == a_texture)
+					return &redirect;
+			return nullptr;
+		}
+
+		/**
+		 * @brief The display's index for a texture's view (DXVK's, referenced once per display), ScratchTexture(k) for a texture drawn
+		 * into scratch image k in this display; kNoTexture, aborted, when there is none.
+		 */
 		std::int32_t TextureIndex(void* a_renderer, RE::GTexture* a_texture)
 		{
 			auto& capture = Current();
+			if (const auto* redirect = FindRedirect(a_texture))
+				return ScratchTexture(redirect->scratch);
 			auto* view = Field<ID3D11ShaderResourceView*>(a_texture, Layout::kTextureView);
 			auto* raw = view ? Tripwire::Unwrap(view) : nullptr;
 			if (!raw) {
@@ -797,17 +835,21 @@ namespace RenderGraph::Engine::Scaleform
 			if (!IsPlainTexture(a_fill.texture))
 				return Abort(a_renderer, "a fill texture that is not a plain GTextureD3D1x");
 			const auto index = TextureIndex(a_renderer, a_fill.texture);
-			if (index < 0)
+			if (index == kNoTexture)
 				return false;
 			a_command.textures[a_stage] = index;
 			a_command.samplers[a_stage] = static_cast<std::uint8_t>((a_fill.wrapMode * 2 + a_fill.sampleMode) & 3);
+			// A texture drawn into a scratch image: its coordinates scaled from the texture's size to the scratch image's.
+			const auto* redirect = FindRedirect(a_fill.texture);
+			const float scaleU = redirect ? redirect->scaleU : 1.0f;
+			const float scaleV = redirect ? redirect->scaleV : 1.0f;
 			auto& texgen = Current().texgen;
-			texgen[a_stage * 2][0] = a_fill.matrix[0];
-			texgen[a_stage * 2][1] = a_fill.matrix[1];
-			texgen[a_stage * 2][3] = a_fill.matrix[2];
-			texgen[a_stage * 2 + 1][0] = a_fill.matrix[3];
-			texgen[a_stage * 2 + 1][1] = a_fill.matrix[4];
-			texgen[a_stage * 2 + 1][3] = a_fill.matrix[5];
+			texgen[a_stage * 2][0] = a_fill.matrix[0] * scaleU;
+			texgen[a_stage * 2][1] = a_fill.matrix[1] * scaleU;
+			texgen[a_stage * 2][3] = a_fill.matrix[2] * scaleU;
+			texgen[a_stage * 2 + 1][0] = a_fill.matrix[3] * scaleV;
+			texgen[a_stage * 2 + 1][1] = a_fill.matrix[4] * scaleV;
+			texgen[a_stage * 2 + 1][3] = a_fill.matrix[5] * scaleV;
 			return true;
 		}
 
@@ -818,7 +860,7 @@ namespace RenderGraph::Engine::Scaleform
 			bound.pixelKind = a_command.state.pixelKind;
 			bound.nullShader = a_command.noColour;
 			for (std::uint32_t stage = 0; stage < 2; ++stage) {
-				bound.textures[stage] = a_command.textures[stage] >= 0 ? a_fill.textures[stage].texture : nullptr;
+				bound.textures[stage] = a_command.textures[stage] != kNoTexture ? a_fill.textures[stage].texture : nullptr;
 				bound.samplers[stage] = a_command.samplers[stage];
 			}
 			std::memcpy(bound.cxmul, a_record.cxmul, sizeof(bound.cxmul));
@@ -844,7 +886,7 @@ namespace RenderGraph::Engine::Scaleform
 				if (!bound.textures[stage])
 					continue;
 				const auto index = TextureIndex(a_renderer, bound.textures[stage]);
-				if (index < 0)
+				if (index == kNoTexture)
 					return false;
 				a_command.textures[stage] = index;
 				a_command.samplers[stage] = bound.samplers[stage];
@@ -1134,7 +1176,8 @@ namespace RenderGraph::Engine::Scaleform
 			auto& capture = Current();
 			ClearSegment();
 			capture.display.Reset();
-			capture.targetDepth = 0;
+			capture.targets.clear();
+			capture.redirects.clear();
 			capture.inFilter = false;
 		}
 
@@ -1268,50 +1311,166 @@ namespace RenderGraph::Engine::Scaleform
 			Original<VoidFn>(kEndDisplay)(a_renderer);
 		}
 
+		/**
+		 * @brief SetDisplayRenderTarget inside a display: the segment so far is drawn onto the old target, and the rest of the display
+		 * onto the new one (the renderer's current render target, as the D3D11 renderer then draws onto it).
+		 */
 		void SetDisplayRenderTarget(void* a_renderer, void* a_target, bool a_setState)
 		{
-			if (Capturing()) {
-				BeginD3D11Part(a_renderer, "SetDisplayRenderTarget inside a display (the rest of the display)");
-				Current().active = false;
-				FinishDisplay();
-			}
+			auto& capture = Current();
+			if (!Capturing() || !capture.targets.empty())
+				return Original<DisplayTargetFn>(kSetDisplayRenderTarget)(a_renderer, a_target, a_setState);
+			Flush(a_renderer);
 			Original<DisplayTargetFn>(kSetDisplayRenderTarget)(a_renderer, a_target, a_setState);
+			ClearSegment();
+			capture.display.Reset();
+			if (!ReadRendererTarget(a_renderer, capture.display)) {
+				// No target to draw onto: neither does the D3D11 renderer.
+				EndCapture("SetDisplayRenderTarget inside a display to a target without a view (the rest of the display)");
+				return;
+			}
+			StartSegment(a_renderer);
+		}
+
+		/** @brief The scratch images in use: the targets being drawn into and the textures read from them. */
+		std::uint32_t BusyScratch()
+		{
+			const auto& capture = Current();
+			std::uint32_t busy = 0;
+			const auto mark = [&](std::int32_t a_scratch) {
+				if (a_scratch >= 0)
+					busy |= 1u << a_scratch;
+			};
+			mark(capture.display.scratch);
+			for (const auto& frame : capture.targets)
+				mark(frame.scratch);
+			for (const auto& redirect : capture.redirects)
+				mark(redirect.scratch);
+			return busy;
 		}
 
 		/**
-		 * @brief A render target pushed: the D3D11 renderer draws everything into it (render to a texture, a filter's source), the
-		 * segment before it drawn first. Its texture is GFx's, which a later graph draw reads like any other.
+		 * @brief A scratch image for a render target GFx pushed, a_width by a_height of a_texture (GFx's, its size at +0x38): a free one,
+		 * or the one the oldest redirect not being drawn into holds. The texture's reads go to it until it is pushed again or the display
+		 * ends. Display::kLostScratch when the target is larger than the scratch images or every one is being drawn into.
 		 */
-		void EnterTarget(void* a_renderer, const char* a_reason)
+		std::int32_t AcquireScratch(RE::GTexture* a_texture, std::uint32_t a_width, std::uint32_t a_height)
 		{
 			auto& capture = Current();
-			if (Capturing()) {
-				BeginD3D11Part(a_renderer, a_reason);
-				capture.targetDepth = 1;
-				capture.retargeted = true;
-			} else if (capture.active && capture.targetDepth && !capture.inFilter && FrameAnchors::IsRenderOwner()) {
-				++capture.targetDepth;
+			std::uint32_t width = 0, height = 0;
+			const auto count = Passes::ScratchCount();
+			if (!Passes::ScratchSize(width, height) || !count || a_width > width || a_height > height)
+				return Display::kLostScratch;
+			std::erase_if(capture.redirects, [&](const Capture::Redirect& a_redirect) { return a_texture && a_redirect.texture == a_texture; });
+			std::uint32_t busy = BusyScratch();
+			std::int32_t scratch = -1;
+			for (std::uint32_t i = 0; i < count && scratch < 0; ++i)
+				if (!(busy >> i & 1u))
+					scratch = static_cast<std::int32_t>(i);
+			if (scratch < 0) {
+				// The oldest texture whose scratch image is not being drawn into gives it up.
+				std::uint32_t drawing = 0;
+				if (capture.display.scratch >= 0)
+					drawing |= 1u << capture.display.scratch;
+				for (const auto& frame : capture.targets)
+					if (frame.scratch >= 0)
+						drawing |= 1u << frame.scratch;
+				const Capture::Redirect* oldest = nullptr;
+				for (const auto& redirect : capture.redirects)
+					if (!(drawing >> redirect.scratch & 1u) && (!oldest || redirect.serial < oldest->serial))
+						oldest = &redirect;
+				if (!oldest)
+					return Display::kLostScratch;
+				scratch = oldest->scratch;
+				std::erase_if(capture.redirects, [&](const Capture::Redirect& a_redirect) { return a_redirect.scratch == scratch; });
 			}
+			if (a_texture && IsPlainTexture(a_texture)) {
+				const float textureWidth = static_cast<float>((std::max)(Field<std::uint32_t>(a_texture, Layout::kTextureWidth), 1u));
+				const float textureHeight = static_cast<float>((std::max)(Field<std::uint32_t>(a_texture, Layout::kTextureHeight), 1u));
+				capture.redirects.push_back(
+					{ a_texture, scratch, textureWidth / static_cast<float>(width), textureHeight / static_cast<float>(height), ++capture.redirectSerial });
+			}
+			return scratch;
 		}
 
+		/**
+		 * @brief PushRenderTarget (SE 82887 / AE 85004) inside a captured display: the segment so far is drawn, the D3D11 renderer
+		 * keeps its own bookkeeping (its target stack, +0x740, the viewport struct, the 3D matrices through the vtable), and the draws
+		 * until the matching PopRenderTarget are drawn into a scratch image on the graph in the target's place, cleared first as the
+		 * renderer clears the target whole. The renderer's own transform there: the viewport (0, 0, target +0x60, target +0x64), the
+		 * view matrix mapping the frame rectangle to clip space ([2 / w, 0, -1 - 2 left / w; 0, -2 / h, 1 + 2 top / h], w and h at least
+		 * 1, no user matrix), the depth-stencil state off. PushTempRenderTarget makes its pooled target and pushes it through here.
+		 */
 		void PushRenderTarget(void* a_renderer, const float* a_frame, void* a_target)
 		{
-			EnterTarget(a_renderer, "render to a texture (PushRenderTarget)");
+			if (!Capturing() || !a_frame || !a_target)
+				return Original<PushTargetFn>(kPushRenderTarget)(a_renderer, a_frame, a_target);
+			auto& capture = Current();
+			Flush(a_renderer);
 			Original<PushTargetFn>(kPushRenderTarget)(a_renderer, a_frame, a_target);
+
+			Capture::TargetFrame frame{};
+			std::memcpy(frame.viewport, capture.display.viewport, sizeof(frame.viewport));
+			std::memcpy(frame.viewMatrix, capture.viewMatrix, sizeof(frame.viewMatrix));
+			frame.scratch = capture.display.scratch;
+			frame.inMask = capture.inMask;
+			frame.maskLevel = capture.maskLevel;
+			frame.stencil = capture.stencil;
+			frame.stencilRef = capture.stencilRef;
+			capture.targets.push_back(frame);
+
+			auto* target = static_cast<std::byte*>(a_target);
+			auto* texture = *reinterpret_cast<RE::GTexture**>(target + Layout::kRenderTargetTexture);
+			const std::uint32_t width = texture ? Field<std::uint32_t>(target, Layout::kRenderTargetWidth) : 64;
+			const std::uint32_t height = texture ? Field<std::uint32_t>(target, Layout::kRenderTargetHeight) : 64;
+			const std::int32_t scratch = AcquireScratch(texture, width, height);
+			if (scratch == Display::kLostScratch)
+				NotePart("a render target of GFx's that no scratch image could take (its draws are not drawn)");
+
+			ClearSegment();
+			capture.display.scratch = scratch;
+			capture.display.viewport[0] = capture.display.viewport[1] = 0.0f;
+			capture.display.viewport[2] = static_cast<float>(width);
+			capture.display.viewport[3] = static_cast<float>(height);
+			const float frameWidth = (std::max)(a_frame[2] - a_frame[0], 1.0f);
+			const float frameHeight = (std::max)(a_frame[3] - a_frame[1], 1.0f);
+			capture.viewMatrix[0] = 2.0f / frameWidth;
+			capture.viewMatrix[1] = 0.0f;
+			capture.viewMatrix[2] = -1.0f - capture.viewMatrix[0] * a_frame[0];
+			capture.viewMatrix[3] = 0.0f;
+			capture.viewMatrix[4] = -2.0f / frameHeight;
+			capture.viewMatrix[5] = 1.0f - capture.viewMatrix[4] * a_frame[1];
+			capture.stencil = Stencil::Off;
+			capture.stencilRef = 0;
+			StartSegment(a_renderer);
+			capture.display.clearTarget = true;
 		}
 
 		RE::GTexture* PushTempRenderTarget(void* a_renderer, const float* a_frame, std::uint32_t a_width, std::uint32_t a_height, bool a_stencil)
 		{
-			EnterTarget(a_renderer, "a filter's source (PushTempRenderTarget)");
+			// The renderer pushes its pooled target through the vtable's PushRenderTarget (above).
 			return Original<PushTempTargetFn>(kPushTempRenderTarget)(a_renderer, a_frame, a_width, a_height, a_stencil);
 		}
 
+		/** @brief PopRenderTarget (SE 82882 / AE 85001) of a target pushed in the capture: its segment drawn, the interrupted one goes on. */
 		void PopRenderTarget(void* a_renderer)
 		{
-			Original<VoidFn>(kPopRenderTarget)(a_renderer);
 			auto& capture = Current();
-			if (capture.active && capture.targetDepth && !capture.inFilter && FrameAnchors::IsRenderOwner() && --capture.targetDepth == 0)
-				ResumeAfterD3D11(a_renderer);
+			if (!Capturing() || capture.targets.empty())
+				return Original<VoidFn>(kPopRenderTarget)(a_renderer);
+			Flush(a_renderer);
+			Original<VoidFn>(kPopRenderTarget)(a_renderer);
+			const auto frame = capture.targets.back();
+			capture.targets.pop_back();
+			ClearSegment();
+			capture.display.scratch = frame.scratch;
+			std::memcpy(capture.display.viewport, frame.viewport, sizeof(frame.viewport));
+			std::memcpy(capture.viewMatrix, frame.viewMatrix, sizeof(frame.viewMatrix));
+			capture.inMask = frame.inMask;
+			capture.maskLevel = frame.maskLevel;
+			capture.stencil = frame.stencil;
+			capture.stencilRef = frame.stencilRef;
+			StartSegment(a_renderer);
 		}
 
 		/** @brief A filter drawn onto the display's target: the D3D11 renderer draws it (its passes and its own render targets) in order. */
@@ -1362,12 +1521,13 @@ namespace RenderGraph::Engine::Scaleform
 				return;
 			}
 			const auto index = TextureIndex(a_renderer, a_source);
-			if (index < 0)
+			if (index == kNoTexture)
 				return;
 
 			FilterRecord record{};
-			const float width = static_cast<float>((std::max)(Field<std::uint32_t>(a_source, Layout::kTextureWidth), 1u));
-			const float height = static_cast<float>((std::max)(Field<std::uint32_t>(a_source, Layout::kTextureHeight), 1u));
+			const auto* redirect = FindRedirect(a_source);
+			const float width = static_cast<float>((std::max)(Field<std::uint32_t>(a_source, Layout::kTextureWidth), 1u)) / (redirect ? redirect->scaleU : 1.0f);
+			const float height = static_cast<float>((std::max)(Field<std::uint32_t>(a_source, Layout::kTextureHeight), 1u)) / (redirect ? redirect->scaleV : 1.0f);
 			const float u0 = source[0] / width, v0 = source[1] / height, u1 = source[2] / width, v1 = source[3] / height;
 			const float corners[4][6] = {
 				{ dest[0], dest[1], 0.0f, 1.0f, u0, v0 },
@@ -1616,10 +1776,13 @@ namespace RenderGraph::Engine::Scaleform
 			FinishVertexKind(a_renderer, command);
 			command.state.pixelKind = Field<std::uint32_t>(a_texture, Layout::kTextureFormat) == DXGI_FORMAT_A8_UNORM ? 4 : (Multiply() ? 6 : 5);
 			const auto index = TextureIndex(a_renderer, a_texture);
-			if (index < 0)
+			if (index == kNoTexture)
 				return;
 			command.textures[0] = index;
 			command.samplers[0] = 3;  // Bind(0, clamp, linear)
+			const auto* redirect = FindRedirect(a_texture);
+			const float scaleU = redirect ? redirect->scaleU : 1.0f;
+			const float scaleV = redirect ? redirect->scaleV : 1.0f;
 
 			auto& capture = Current();
 			DrawRecord record{};
@@ -1637,10 +1800,11 @@ namespace RenderGraph::Engine::Scaleform
 			vertices.reserve(static_cast<std::size_t>(a_count) * 6);
 			for (std::int32_t i = 0; i < a_count; ++i) {
 				const BitmapDesc& b = bitmaps[i];
-				const GlyphVertex lt{ b.coords[0], b.coords[1], b.texCoords[0], b.texCoords[1], b.color };
-				const GlyphVertex rt{ b.coords[2], b.coords[1], b.texCoords[2], b.texCoords[1], b.color };
-				const GlyphVertex lb{ b.coords[0], b.coords[3], b.texCoords[0], b.texCoords[3], b.color };
-				const GlyphVertex rb{ b.coords[2], b.coords[3], b.texCoords[2], b.texCoords[3], b.color };
+				const float u0 = b.texCoords[0] * scaleU, v0 = b.texCoords[1] * scaleV, u1 = b.texCoords[2] * scaleU, v1 = b.texCoords[3] * scaleV;
+				const GlyphVertex lt{ b.coords[0], b.coords[1], u0, v0, b.color };
+				const GlyphVertex rt{ b.coords[2], b.coords[1], u1, v0, b.color };
+				const GlyphVertex lb{ b.coords[0], b.coords[3], u0, v1, b.color };
+				const GlyphVertex rb{ b.coords[2], b.coords[3], u1, v1, b.color };
 				vertices.insert(vertices.end(), { lt, rt, lb, lb, rt, rb });
 			}
 			record.vertexOffset = capture.display.Append(vertices.data(), vertices.size() * sizeof(GlyphVertex), 4);

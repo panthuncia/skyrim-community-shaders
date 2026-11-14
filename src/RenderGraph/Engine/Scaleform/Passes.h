@@ -1,5 +1,7 @@
 #pragma once
 
+#include <cstdint>
+
 namespace RenderGraph::Engine::Scaleform
 {
 	struct Display;
@@ -27,6 +29,15 @@ namespace RenderGraph::Engine::Scaleform::Passes
 
 	/** @brief Whether displays are captured for the graph: set up, not failed, the runtime active with the Interface epoch. */
 	bool Ready();
+
+	/**
+	 * @brief The size of the scratch images GFx's pushed render targets are drawn into (Display::scratch). False when there are none.
+	 * A target larger than this cannot be drawn.
+	 */
+	bool ScratchSize(std::uint32_t& a_width, std::uint32_t& a_height);
+
+	/** @brief How many scratch images there are (Display::scratch and ScratchTexture take 0 to this minus one). */
+	std::uint32_t ScratchCount();
 
 	/**
 	 * @brief Draws a_display on the graph here, as one Interface anchor run per run gate's worth of commands. False when it did not
