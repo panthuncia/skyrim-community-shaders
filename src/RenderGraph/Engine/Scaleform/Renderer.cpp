@@ -855,6 +855,32 @@ namespace RenderGraph::Engine::Scaleform
 			return true;
 		}
 
+		/**
+		 * @brief A two-texture gouraud fill without its second texture: ApplyFillTexture binds stage 1 only for a texture it has, so
+		 * the one the display bound there last stays, with its texgen rows (inferred from the fill-off rule, not read in Ghidra). Without
+		 * one in this display, stage 0's texture is read there (logged once).
+		 */
+		bool BindStaleSecond(void* a_renderer, Command& a_command)
+		{
+			const auto& bound = Current().boundFill;
+			RE::GTexture* texture = bound.textures[1];
+			std::uint8_t sampler = bound.samplers[1];
+			if (!texture) {
+				static std::atomic_flag logged;
+				if (!logged.test_and_set())
+					logger::info("[ORG] Scaleform: a two-texture gouraud fill without its second texture, before any second texture of its display; stage 0's is read there");
+				a_command.textures[1] = a_command.textures[0];
+				a_command.samplers[1] = a_command.samplers[0];
+				return true;
+			}
+			const auto index = TextureIndex(a_renderer, texture);
+			if (index == kNoTexture)
+				return false;
+			a_command.textures[1] = index;
+			a_command.samplers[1] = sampler;
+			return true;
+		}
+
 		/** @brief The pixel stage a draw set, kept for a later draw with the fill off. */
 		void NoteBoundFill(const FillStyle& a_fill, const Command& a_command, const DrawRecord& a_record)
 		{
@@ -862,6 +888,9 @@ namespace RenderGraph::Engine::Scaleform
 			bound.pixelKind = a_command.state.pixelKind;
 			bound.nullShader = a_command.noColour;
 			for (std::uint32_t stage = 0; stage < 2; ++stage) {
+				// A stage read from the stale binding (BindStaleSecond) keeps that binding.
+				if (a_command.textures[stage] != kNoTexture && !a_fill.textures[stage].texture)
+					continue;
 				bound.textures[stage] = a_command.textures[stage] != kNoTexture ? a_fill.textures[stage].texture : nullptr;
 				bound.samplers[stage] = a_command.samplers[stage];
 			}
@@ -928,10 +957,12 @@ namespace RenderGraph::Engine::Scaleform
 							kind = 13;
 						} else {
 							kind = 14;
-							if (!a_fill.textures[1].texture)
-								return Abort(a_renderer, "a two-texture gouraud fill without its second texture");
-							if (!BindTexture(a_renderer, a_fill.textures[1], 1, a_command))
+							if (a_fill.textures[1].texture) {
+								if (!BindTexture(a_renderer, a_fill.textures[1], 1, a_command))
+									return false;
+							} else if (!BindStaleSecond(a_renderer, a_command)) {
 								return false;
+							}
 						}
 					}
 					a_command.state.pixelKind = Multiply() ? kind + 4 : kind;
