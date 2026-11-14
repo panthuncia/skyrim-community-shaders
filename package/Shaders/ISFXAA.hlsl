@@ -27,6 +27,23 @@ void main(float4 v0 : POSITION0, float2 v1 : TEXCOORD0, out float4 o0 : SV_POSIT
 #endif
 
 #if defined(PSHADER)
+#	if defined(CS_ORG_BINDLESS)
+// The ORG build of the pixel stage (RenderGraph/Engine/ImageSpace, CS_ORG_IMAGESPACE): t0 and s0 from the heap, the shared
+// constants, and PerGeometry from the engine-constants capture through the pass's latch. The vertex stage is the graph's
+// fullscreen triangle, which writes no TEXCOORD1: this stage never reads it, so the ORG entry does not take it.
+#		define ORG_SHARED_CONSTANTS
+#		include "Common/OrgEngineConstants.hlsli"
+#		include "Common/OrgResources.hlsli"
+#		define ISFXAA_ORG_RESOURCES(X) X(SHARED, ConstantBuffer, Shared, 0) X(SRV, Texture2D<float4>, Src0Tex, 0) X(SAMPLER, SamplerState, Src0Sampler, 0) X(LATCH, OrgEngineConstantsAt, PerGeometryAt, 2)
+ORG_PUSH_BLOCK(ISFXAA_ORG_RESOURCES(ORG_HANDLE))
+ISFXAA_ORG_RESOURCES(ORG_RESOURCE)
+static float4 Offsets0 = OrgEngineRow(PerGeometryAt, 0);
+static float4 Offsets1 = OrgEngineRow(PerGeometryAt, 1);
+static float4 Offsets2 = OrgEngineRow(PerGeometryAt, 2);
+static float4 Offsets3 = OrgEngineRow(PerGeometryAt, 3);
+
+void main(float4 v0 : SV_POSITION0, float2 v1 : TEXCOORD0, out float4 o0 : SV_Target0)
+#	else
 SamplerState Src0Sampler : register(s0);
 Texture2D<float4> Src0Tex : register(t0);
 
@@ -40,6 +57,7 @@ cbuffer PerGeometry : register(b2)
 };
 
 void main(float4 v0 : SV_POSITION0, float2 v1 : TEXCOORD0, float4 v2 : TEXCOORD1, out float4 o0 : SV_Target0)
+#	endif
 {
 	uint4 r0 = 0, r1 = 0, r2 = 0, r3 = 0, r4 = 0, r5 = 0;
 	o0 = 0;

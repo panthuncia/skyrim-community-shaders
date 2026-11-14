@@ -364,6 +364,23 @@ bool RasterProgram::Draw(org::RecordingContext& a_recording, const DrawDesc& a_d
 	commands.BindPipeline(Pipeline());
 	// Set every draw: the reference holds across the list's passes, so a draw that wants 0 must not inherit another's.
 	commands.SetStencilRef(a_draw.stencilReference);
+	// BeginPass set viewport 0 and the scissor to the render area; a draw with its own replaces them inside this pass.
+	if (a_draw.dynamicViewport)
+		commands.SetViewports({ &*a_draw.dynamicViewport, 1 });
+	if (a_draw.scissor) {
+		// Clipped to the render area, as the render area would clip it: nothing outside the pass's area is drawn either way.
+		const auto& area = a_draw.viewport;
+		const auto& rect = *a_draw.scissor;
+		const std::int64_t left = (std::max)(static_cast<std::int64_t>(rect.x), static_cast<std::int64_t>(area.x));
+		const std::int64_t top = (std::max)(static_cast<std::int64_t>(rect.y), static_cast<std::int64_t>(area.y));
+		const std::int64_t right = (std::min)(static_cast<std::int64_t>(rect.x) + rect.width, static_cast<std::int64_t>(area.x) + area.width);
+		const std::int64_t bottom = (std::min)(static_cast<std::int64_t>(rect.y) + rect.height, static_cast<std::int64_t>(area.y) + area.height);
+		const rhi::ScissorRect clipped{ .x = static_cast<std::int32_t>(left),
+			.y = static_cast<std::int32_t>(top),
+			.width = static_cast<std::uint32_t>((std::max)(right - left, std::int64_t(0))),
+			.height = static_cast<std::uint32_t>((std::max)(bottom - top, std::int64_t(0))) };
+		commands.SetScissors({ &clipped, 1 });
+	}
 	if (!a_draw.constants.empty())
 		commands.PushConstants(rhi::ShaderStage::AllGraphics, 0, 0, 0, static_cast<std::uint32_t>(a_draw.constants.size()), a_draw.constants.data());
 	// Inside the render pass: Vulkan ends a query begun inside a pass in that same pass, and the count is this draw's alone.

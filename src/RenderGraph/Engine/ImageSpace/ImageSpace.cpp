@@ -45,6 +45,7 @@ bool RenderGraph::Engine::ImageSpace::Requested()
 #	include <algorithm>
 #	include <array>
 #	include <atomic>
+#	include <bit>
 #	include <cctype>
 #	include <cfloat>
 #	include <cmath>
@@ -73,12 +74,13 @@ namespace RenderGraph::Engine::ImageSpace
 		constexpr const char* kClientId = "cs.engine.imagespace";
 		// Gate entries (one per pass, numbered by the shapes' place in the frame).
 		constexpr std::uint32_t kGateEntries = 256;
-		// SRV slots a shader file's ORG push block lists at most (t0..t(n-1); its samplers and UAVs follow): ISSAOComposite's seven.
-		constexpr std::uint32_t kMaxSlots = 7;
+		// Texture slots a shape names at most (t0..t15, the engine's PS slots): ISAlphaBlend reads all sixteen, ISLightingComposite eight.
+		constexpr std::uint32_t kMaxSlots = 16;
 		// The shape manifest: a shape not seen for this many sessions is dropped, and it is written at most this often.
 		constexpr std::uint32_t kManifestSessions = 16;
 		constexpr std::uint32_t kManifestWriteFrames = 300;
-		constexpr std::uint32_t kManifestVersion = 1;
+		// 2: the viewport as float bits with its depth range, the depth-stencil target and modes, and the scissor.
+		constexpr std::uint32_t kManifestVersion = 2;
 
 		/**
 		 * @brief How a ShapeKey names an input: an engine render target (its RE::RENDER_TARGET), or with one of these bits an engine
@@ -152,6 +154,10 @@ namespace RenderGraph::Engine::ImageSpace
 			// ISMap stays on vanilla's DXBC): the engine's draw rasterizes nothing (imagespace-shaders.md, inferred). Taken with no pass:
 			// the engine's state is applied as its draw would, and nothing is drawn.
 			bool rastersNothing = false;
+			// A bit per texture slot that holds a loaded texture, not an engine target (ISAlphaBlend's tint masks, the IB lens flares'
+			// ramps and masks): such a slot is read by the heap index the draw's latch holds (SourcesAt, after its constants), so the
+			// source's resource list has no SRV entry for it, and a second LATCH follows the constants' one.
+			std::uint32_t latched = 0;
 		};
 
 		/** @brief The push words of an effect's feature handles (EffectInfo::features): s9, then the five headers' resources. */
@@ -227,8 +233,17 @@ namespace RenderGraph::Engine::ImageSpace
 			{ Effects::ISCompositeVolumetricLighting, "ISCompositeVolumetricLighting", "composite", "ISCompositeLensFlareVolumetricLighting.hlsl", 2, 0b01, 2 },
 			{ Effects::ISCompositeLensFlare, "ISCompositeLensFlare", "composite", "ISCompositeLensFlareVolumetricLighting.hlsl", 2, 0b10, 2 },
 			{ Effects::ISCompositeLensFlareVolumetricLighting, "ISCompositeLensFlareVolumetricLighting", "composite", "ISCompositeLensFlareVolumetricLighting.hlsl", 2, 0b11, 2 },
+			// The image-based lens flares (the pre-tonemap composites' +0x180): the brightest-pick downsample with its jitter
+			// compensation (t0 the source, t1 the last frame's, t2 the motion vectors), the plain blur (its radius a constant), and the
+			// flares from the blurred image. Own scopes outside the composites.
+			{ Effects::ISDownsample, "ISDownsample", "iblensflare", "ISDownsample.hlsl", 3, 0b111, 3, 0, false, true },
+			{ Effects::ISBlur, "ISBlur", "iblensflare", "ISBlur.hlsl", 2, 0b01, 2, 0, false, true },
+			{ Effects::ISIBLensFlares, "ISIBLensFlares", "iblensflare", "ISIBLensFlare.hlsl", 1, 0b1, 1, 0, false, true },
 			// The SIL composite (the pre-tonemap composites' +0x1d8): t0 the source, t1 the indirect lighting.
 			{ Effects::ISSILComposite, "ISSILComposite", "composite", "ISSILComposite.hlsl", 2, 0b11, 2 },
+			// The SIL raw indirect lighting before it: t0 the camera depth, t1 the normals, t2 the motion vectors, t3 the emissive colour,
+			// t4 the accumulated indirect lighting.
+			{ Effects::ISSILRawInd, "ISSILRawInd", "composite", "ISSILRawInd.hlsl", 5, 0b11111, 5 },
 			// RenderSSAO (100520 / 107245), through the explicit-target Render (100951 / 107733).
 			{ Effects::ISSAOCameraZ, "ISSAOCameraZ", "sao", "ISSAOCameraZ.hlsl", 1, 0b1, 1 },
 			{ Effects::ISMinify, "ISMinify", "sao", "ISSAOMinify.hlsl", 1, 0b1, 1 },
@@ -262,6 +277,8 @@ namespace RenderGraph::Engine::ImageSpace
 			{ Effects::ISRadialBlur, "ISRadialBlur", "radialblur", "ISRadialBlur.hlsl", 1, 0b1, 1, 0, false, true },
 			{ Effects::ISRadialBlurMedium, "ISRadialBlurMedium", "radialblur", "ISRadialBlur.hlsl", 1, 0b1, 1, 0, false, true },
 			{ Effects::ISRadialBlurHigh, "ISRadialBlurHigh", "radialblur", "ISRadialBlur.hlsl", 1, 0b1, 1, 0, false, true },
+			// FXAA (the end-of-frame chain's slot 2, with the game's FXAA setting): t0 the image. Each call a scope of its own.
+			{ Effects::ISFXAA, "ISFXAA", "fxaa", "ISFXAA.hlsl", 1, 0b1, 1, 0, false, true },
 			// The world map's depth blur (the map menu's view, outside the frame's scopes: each call a scope of its own): t0 the image,
 			// t1 the depth. The NoSkyBlur form leaves the sky sharp (NO_SKY).
 			{ Effects::ISWorldMap, "ISWorldMap", "worldmap", "ISWorldMap.hlsl", 2, 0b11, 2, 0, false, true },
@@ -270,12 +287,19 @@ namespace RenderGraph::Engine::ImageSpace
 			// the depth at t1 (DEPTH_THRESHOLD). Horizontal, then vertical, each call a scope of its own.
 			{ Effects::ISDepthOfFieldBlurHCS, "ISDepthOfFieldBlurHCS", "dof", "ISBlurCS.hlsl", 2, 0b11, 2, 0, true, true },
 			{ Effects::ISDepthOfFieldBlurVCS, "ISDepthOfFieldBlurVCS", "dof", "ISBlurCS.hlsl", 2, 0b11, 2, 0, true, true },
+			// The parallax mask's separable compute blur (ISBlurCS's parallax-mask build, the horizontal pass reading alpha): t0 only. Its
+			// own scope outside the other scopes.
+			{ Effects::ISParallaxMaskBlurHCS, "ISParallaxMaskBlurHCS", "parallaxmask", "ISBlurCS.hlsl", 2, 0b01, 2, 0, true, true },
+			{ Effects::ISParallaxMaskBlurVCS, "ISParallaxMaskBlurVCS", "parallaxmask", "ISBlurCS.hlsl", 2, 0b01, 2, 0, true, true },
 			// The sub-rectangle copy, t0 to u0, no sampler: the snow pass's (107734 <- 107217 <- Main::RenderWorld, engine targets) and
 			// Main::RenderWaterEffects' (35561 / 36560: each queued flow texture into the flow map, the source by heap index).
 			{ Effects::ISCopySubRegionCS, "ISCopySubRegionCS", "copy", "ISCopySubRegionCS.hlsl", 1, 0b1, 0, 0, true, true },
 			// The water's temporal blend (the explicit-target Render, outside the other scopes): t0 the image, t1 the water history,
 			// t2 the motion vectors, t3 the depth, t4 the water mask; into kMAIN (SV_Target0) and the next history (SV_Target1).
 			{ Effects::ISWaterBlend, "ISWaterBlend", "waterblend", "ISWaterBlend.hlsl", 5, 0b11111, 5, 0, false, true, 2 },
+			// The underwater mask (the manager's +0x208): Water.hlsl's UNDERWATERMASK form over the engine's own geometry, pulled by its
+			// vertex stage (EffectInfo::geometry), usually with the main depth test. Its own scope outside the other scopes.
+			{ Effects::ISUnderwaterMask, "ISUnderwaterMask", "underwatermask", "Water.hlsl", 0, 0, 0, 0, false, true, 1, false, false, true },
 			// The vanilla TAA (ImageSpaceManager+0x1f0 in the end-of-frame chain, when Upscaling does not replace it): t0 the image, t1
 			// the history, t2 the motion vectors, t3 the depth, t4 the TAA mask, t5 the alpha; into the image (SV_Target0) and the next
 			// history (SV_Target1). Each call outside a scope is a scope of its own. The UI and water forms have no CS source path
@@ -283,11 +307,25 @@ namespace RenderGraph::Engine::ImageSpace
 			{ Effects::ISTemporalAA, "ISTemporalAA", "taa", "ISTemporalAA.hlsl", 6, 0b111111, 6, 0, false, true, 2 },
 			// The local map's edge pass (16094: kLOCAL_MAP_SWAP into kLOCAL_MAP, outside the frame's scopes: each call a scope of its own).
 			{ Effects::ISLocalMap, "ISLocalMap", "localmap", "ISLocalMap.hlsl", 1, 0b1, 1, 0, false, true },
-			// A colour fill (menu 3D's clear among others). Draws with a stencil test or a manager rectangle are refused as for any effect.
 			// The snow's subsurface scattering (Main::RenderWorld, outside the frame's scopes: each call a scope of its own): t0 the depth,
 			// t1 the snow's diffuse, t2 its alpha and specular.
 			{ Effects::ISSnowSSS, "ISSnowSSS", "snow", "ISSnowSSS.hlsl", 3, 0b111, 3, 0, false, true },
+			// A colour fill (menu 3D's clear among others), with menu 3D's stencil test and scissor when the engine sets them.
 			{ Effects::ISSimpleColor, "ISSimpleColor", "simplecolor", "ISSimpleColor.hlsl", 0, 0, 0, 0, false, true },
+			// The race menu's face tint (outside the frame's scopes: each call a scope of its own): sixteen loaded tint masks, each read
+			// by its heap index from the draw's latch (EffectInfo::latched), blended over grey.
+			{ Effects::ISAlphaBlend, "ISAlphaBlend", "alphablend", "ISAlphaBlend.hlsl", 16, 0xFFFF, 16, 0, false, true, 1, false, false, false, false, false, 0xFFFF },
+			// The screen-space reflections' apply (t0 the blurred reflections, t1 the water mask, t2 the image). Its own scope outside the
+			// other scopes, part of the enclosing one inside them.
+			{ Effects::ISApplyReflections, "ISApplyReflections", "applyreflections", "ISApplyReflections.hlsl", 3, 0b111, 3, 0, false, true },
+			// The lighting composite (albedo, diffuse, specular, SAO, fog, the directional light's diffuse and specular, the shadow mask):
+			// the directional-light form reads all eight, the plain form no directional light, the menu form no SAO or shadow mask.
+			{ Effects::ISLightingComposite, "ISLightingComposite", "lightingcomposite", "ISLightingComposite.hlsl", 8, 0xFF, 8, 0, false, true },
+			{ Effects::ISLightingCompositeNoDirectionalLight, "ISLightingCompositeNoDirectionalLight", "lightingcomposite", "ISLightingComposite.hlsl", 8, 0b10011111, 8, 0,
+				false, true },
+			{ Effects::ISLightingCompositeMenu, "ISLightingCompositeMenu", "lightingcomposite", "ISLightingComposite.hlsl", 8, 0b01110111, 8, 0, false, true },
+			// The dynamic-resolution upsample (the end-of-frame chain's +0x1f8): the full quad, its coordinates scaled in the shader.
+			{ Effects::ISUpsampleDynamicResolution, "ISUpsampleDynamicResolution", "upsample", "ISUpsampleDynamicResolution.hlsl", 1, 0b1, 1, 0, false, true },
 			// The effects whose vertex shader writes no SV_Position (EffectInfo::rastersNothing): no pass, nothing drawn.
 			{ Effects::ISMap, "ISMap", "nodraw", "ISMap.hlsl", 0, 0, 0, 0, false, true, 1, false, false, false, false, true },
 			{ Effects::ISNoiseScrollAndBlend, "ISNoiseScrollAndBlend", "nodraw", "ISNoise.hlsl", 0, 0, 0, 0, false, true, 1, false, false, false, false, true },
@@ -319,24 +357,62 @@ namespace RenderGraph::Engine::ImageSpace
 		 */
 		bool BlendDescOf(std::uint32_t a_blend, D3D11_BLEND_DESC& a_out);
 
+		/** @brief As BlendDescOf, for the engine's depth-stencil state at a table index (depth mode * kStencilModes + stencil mode). */
+		bool DepthDescOf(std::uint32_t a_index, D3D11_DEPTH_STENCIL_DESC& a_out);
+
+		/** @brief Whether a depth-stencil state writes depth or stencil (the pass then declares its target read-write). */
+		bool DepthWrites(const D3D11_DEPTH_STENCIL_DESC& a_desc)
+		{
+			const auto writes = [](const D3D11_DEPTH_STENCILOP_DESC& a_face) {
+				return a_face.StencilFailOp != D3D11_STENCIL_OP_KEEP || a_face.StencilDepthFailOp != D3D11_STENCIL_OP_KEEP || a_face.StencilPassOp != D3D11_STENCIL_OP_KEEP;
+			};
+			return (a_desc.DepthEnable && a_desc.DepthWriteMask == D3D11_DEPTH_WRITE_MASK_ALL) ||
+			       (a_desc.StencilEnable && a_desc.StencilWriteMask != 0 && (writes(a_desc.FrontFace) || writes(a_desc.BackFace)));
+		}
+
+		/** @brief Every slot unread (-1). */
+		constexpr std::array<std::int32_t, kMaxSlots> NoInputs()
+		{
+			std::array<std::int32_t, kMaxSlots> inputs{};
+			inputs.fill(-1);
+			return inputs;
+		}
+
+		/** @brief The engine's depth-stencil table's shape (RE::BSGraphics, p4.6-shaders-states.md "State tables"). */
+		constexpr std::uint32_t kDepthModes = 6;
+		constexpr std::uint32_t kStencilModes = 40;
+
 		/**
 		 * @brief What one pass is made for, by value (the shape manifest stores it): the effect, its outputs and inputs, its samplers,
-		 * its blend state and its viewport. A compute shape's output is the render target behind its UAV (u0); it has no blend state and
-		 * no viewport.
+		 * its blend state, its viewport, its depth-stencil target and modes, and its scissor. A compute shape's output is the render
+		 * target behind its UAV (u0); it has no blend state, viewport, depth or scissor.
 		 */
 		struct ShapeKey
 		{
 			std::uint32_t effect = 0;   // kEffects index
 			std::int32_t output = -1;   // RE::RENDER_TARGET, with a mip (WithMip)
 			std::int32_t output1 = -1;  // SV_Target1's render target (EffectInfo::targets 2), or -1
-			std::array<std::int32_t, kMaxSlots> inputs{ -1, -1, -1, -1, -1, -1, -1 };  // kDepthInput / kCubeInput / kLatchSourceInput, or a render target (with a mip)
+			std::array<std::int32_t, kMaxSlots> inputs = NoInputs();  // kDepthInput / kCubeInput / kLatchSourceInput, or a render target (with a mip)
 			std::array<std::uint32_t, kMaxSlots> address{};
 			std::array<std::uint32_t, kMaxSlots> filter{};
 			std::uint32_t blend = kNoBlend;  // PackBlend
 			bool compute = false;
-			std::array<std::uint32_t, 4> viewport{};  // x, y, width, height in the output's pixels (of its mip)
+			// The engine's viewport as float bits: x, y, width, height in the output's pixels (of its mip), then the depth range. Values
+			// within 1/64 of a whole pixel are that pixel (ReadViewport), so dynamic resolution's float products give one shape.
+			std::array<std::uint32_t, 6> viewport{};
+			// The depth-stencil target (RE::RENDER_TARGETS_DEPTHSTENCIL) when the draw tests or writes depth or stencil, else -1; its
+			// depth and stencil modes (the engine's table) and the stencil reference.
+			std::int32_t depth = -1;
+			std::uint32_t depthMode = 0, stencilMode = 0, stencilRef = 0;
+			// The scissor (left, top, right, bottom, as RSSetScissorRects got it) when the raster state scissors (the manager's
+			// rectangle: menu 3D).
+			bool scissored = false;
+			std::array<std::int32_t, 4> scissor{};
 
-			auto Tie() const { return std::tie(effect, output, output1, inputs, address, filter, blend, compute, viewport); }
+			auto Tie() const
+			{
+				return std::tie(effect, output, output1, inputs, address, filter, blend, compute, viewport, depth, depthMode, stencilMode, stencilRef, scissored, scissor);
+			}
 			bool operator<(const ShapeKey& a_other) const { return Tie() < a_other.Tie(); }
 			bool operator==(const ShapeKey& a_other) const { return Tie() == a_other.Tie(); }
 		};
@@ -352,6 +428,8 @@ namespace RenderGraph::Engine::ImageSpace
 			std::array<FrameAnchors::Texture, kMaxSlots> inputs;
 			rhi::Format format = rhi::Format::Unknown;        // the outputs' render target view formats
 			rhi::Format format1 = rhi::Format::Unknown;
+			FrameAnchors::Texture depth;                      // the depth-stencil target's import (ShapeKey::depth)
+			rhi::Format depthFormat = rhi::Format::Unknown;   // its depth-stencil view's format
 		};
 
 		/** @brief OrgEngineConstantsAt in Common/OrgEngineConstants.hlsli. */
@@ -368,6 +446,13 @@ namespace RenderGraph::Engine::ImageSpace
 		};
 		static_assert(sizeof(ConstantsAt) == 32);
 
+		/** @brief OrgEngineSourcesAt in Common/OrgEngineConstants.hlsli: a latched-sources effect's heap index per texture slot. */
+		using SourcesAt = std::array<std::uint32_t, kMaxSlots>;
+		static_assert(sizeof(SourcesAt) == 64);
+
+		/** @brief A gate entry's bytes in a client's latch: its ConstantsAt, then its SourcesAt. */
+		constexpr std::uint32_t kLatchStride = static_cast<std::uint32_t>(sizeof(ConstantsAt) + sizeof(SourcesAt));
+
 		/** @brief A taken draw or dispatch waiting for its batch's run: its pass, where its constants are, and a dispatch's groups. */
 		struct Pending
 		{
@@ -377,6 +462,7 @@ namespace RenderGraph::Engine::ImageSpace
 			std::array<std::uint32_t, 3> groups{};
 			std::shared_ptr<const void> source;  // the descriptor and texture behind at.source, held until the run's GPU work retires
 			std::uint32_t vertices = 3;          // a draw's vertex count: the fullscreen triangle's, or a geometry effect's indices
+			std::optional<SourcesAt> sources;    // the latched slots' heap indices (EffectInfo::latched); source holds them
 		};
 
 		/** @brief The BSImagespaceShader::Render (or DispatchComputeShader) call in progress. */
@@ -427,8 +513,11 @@ namespace RenderGraph::Engine::ImageSpace
 			Count
 		};
 
-		/** @brief A raster program's key: the effect, the outputs' formats and the packed blend state. */
-		using ProgramKey = std::tuple<std::size_t, rhi::Format, rhi::Format, std::uint32_t>;
+		/**
+		 * @brief A raster program's key: the effect, the outputs' formats, the packed blend state, the depth-stencil format (Unknown:
+		 * none) and the depth-stencil table index (depth mode * kStencilModes + stencil mode).
+		 */
+		using ProgramKey = std::tuple<std::size_t, rhi::Format, rhi::Format, std::uint32_t, rhi::Format, std::uint32_t>;
 
 		/** @brief One shape of the manifest: where it is in the frame, and the last session that saw it. */
 		struct ManifestEntry
@@ -519,6 +608,12 @@ namespace RenderGraph::Engine::ImageSpace
 			// Each packed engine blend state's description, as last read from the engine's table (BlendDescOf) or the manifest: a pass
 			// made at a build when the table entry is empty takes it from here.
 			std::map<std::uint32_t, D3D11_BLEND_DESC> blendDescs;
+			// The same for the engine's depth-stencil states, by table index (depth mode * kStencilModes + stencil mode).
+			std::map<std::uint32_t, D3D11_DEPTH_STENCIL_DESC> depthDescs;
+			// The last scissor the engine set (75564 / 77365: RSSetScissorRects, left, top, right, bottom). The raster state's scissor
+			// mode says whether a draw uses it. scissorKnown: one was set this session.
+			std::array<std::int32_t, 4> scissor{};
+			bool scissorKnown = false;
 			// Counters.
 			std::uint64_t taken = 0, engineDrawn = 0, batches = 0, lost = 0;
 			// Why each effect's draws stayed with the engine, logged once per reason and effect: refusals (cases the port does not
@@ -872,6 +967,20 @@ namespace RenderGraph::Engine::ImageSpace
 			return target.texture ? static_cast<const void*>(target.texture) : static_cast<const void*>(target.RTV);
 		}
 
+		/** @brief The format of an engine depth-stencil target's first depth-stencil view, or Unknown. */
+		rhi::Format DsvFormatOf(std::uint32_t a_depth)
+		{
+			auto* renderer = globals::game::renderer;
+			if (!renderer || a_depth >= RE::RENDER_TARGETS_DEPTHSTENCIL::kTOTAL)
+				return rhi::Format::Unknown;
+			auto* view = renderer->GetDepthStencilData().depthStencils[a_depth].views[0];
+			if (!view)
+				return rhi::Format::Unknown;
+			D3D11_DEPTH_STENCIL_VIEW_DESC desc{};
+			Tripwire::Unwrap(view)->GetDesc(&desc);
+			return rhi::helpers::ToRHI(desc.Format);
+		}
+
 		/** @brief The format of an output's render target view (the program's target format), from the target or the texture it is a mip of. */
 		rhi::Format RtvFormatOf(std::int32_t a_name, const FrameAnchors::Texture& a_import)
 		{
@@ -910,6 +1019,15 @@ namespace RenderGraph::Engine::ImageSpace
 					continue;
 				if (a_effect.cubes & (1u << slot)) {
 					a_out.inputs[slot] = kCubeInput | static_cast<std::int32_t>(RE::RENDER_TARGETS_CUBEMAP::kREFLECTIONS);
+					continue;
+				}
+				// A loaded texture, read by its heap index from the draw's latch (TakeDraw resolves the shadow state's view).
+				if (a_effect.latched & (1u << slot)) {
+					a_out.inputs[slot] = kLatchSourceInput;
+					if (slot < a_effect.samplers) {
+						a_out.address[slot] = a_address[slot].underlying();
+						a_out.filter[slot] = a_filter[slot].underlying();
+					}
 					continue;
 				}
 				const auto input = InputOfView(a_views[slot]);
@@ -1058,45 +1176,88 @@ namespace RenderGraph::Engine::ImageSpace
 			return true;
 		}
 
+		/** @brief A shape's viewport as floats (ShapeKey::viewport). */
+		rhi::Viewport ViewportOf(const ShapeKey& a_key)
+		{
+			const auto& bits = a_key.viewport;
+			return { .x = std::bit_cast<float>(bits[0]),
+				.y = std::bit_cast<float>(bits[1]),
+				.width = std::bit_cast<float>(bits[2]),
+				.height = std::bit_cast<float>(bits[3]),
+				.minDepth = std::bit_cast<float>(bits[4]),
+				.maxDepth = std::bit_cast<float>(bits[5]) };
+		}
+
+		/** @brief ShapeKey::viewport of a viewport. */
+		std::array<std::uint32_t, 6> ViewportBits(const rhi::Viewport& a_viewport)
+		{
+			return { std::bit_cast<std::uint32_t>(a_viewport.x), std::bit_cast<std::uint32_t>(a_viewport.y), std::bit_cast<std::uint32_t>(a_viewport.width),
+				std::bit_cast<std::uint32_t>(a_viewport.height), std::bit_cast<std::uint32_t>(a_viewport.minDepth), std::bit_cast<std::uint32_t>(a_viewport.maxDepth) };
+		}
+
+		/**
+		 * @brief The pass's render area for a shape drawn into an output of a_width x a_height: the viewport's pixels inside the output
+		 * (D3D11 clips the rest), rounded outward. The viewport itself goes to the draw when it is not exactly that area
+		 * (AnchorPasses::Draw::dynamicViewport), so TEXCOORD0 spans the engine's viewport. False when nothing of it is inside.
+		 */
+		bool RenderAreaOf(const ShapeKey& a_key, std::uint32_t a_width, std::uint32_t a_height, RasterProgram::Viewport& a_area, bool& a_exact)
+		{
+			const auto viewport = ViewportOf(a_key);
+			const double left = (std::max)(std::floor(static_cast<double>(viewport.x)), 0.0);
+			const double top = (std::max)(std::floor(static_cast<double>(viewport.y)), 0.0);
+			const double right = (std::min)(std::ceil(static_cast<double>(viewport.x) + viewport.width), static_cast<double>(a_width));
+			const double bottom = (std::min)(std::ceil(static_cast<double>(viewport.y) + viewport.height), static_cast<double>(a_height));
+			if (!(right > left) || !(bottom > top))
+				return false;
+			a_area = { .x = static_cast<std::uint32_t>(left),
+				.y = static_cast<std::uint32_t>(top),
+				.width = static_cast<std::uint32_t>(right - left),
+				.height = static_cast<std::uint32_t>(bottom - top),
+				.minDepth = viewport.minDepth,
+				.maxDepth = viewport.maxDepth };
+			a_exact = viewport.x == static_cast<float>(a_area.x) && viewport.y == static_cast<float>(a_area.y) && viewport.width == static_cast<float>(a_area.width) &&
+			          viewport.height == static_cast<float>(a_area.height);
+			return true;
+		}
+
 		/**
 		 * @brief The viewport the engine's draw uses, from the shadow state (RendererShadowState::viewPort, +0x70: what SetDirtyStates
 		 * applies): the whole target (Render's UpdateViewPort), the caller's (the explicit-target Render), the one a custom-viewport
 		 * effect keeps (ImageSpaceEffect::unk88: Render leaves the viewport as it is), or the dynamic-resolution part of the target. Never
-		 * the D3D11 context's: under the flush latch it is stale. The pass draws it as its render area, so it must be whole pixels inside
-		 * the output. False with a reason (and the viewport as a_detail).
+		 * the D3D11 context's: under the flush latch it is stale. It may be fractional or reach past the output: the pass draws its
+		 * pixels inside the output as its render area, with the viewport itself as the draw's (RenderAreaOf). False with a reason (and
+		 * the viewport as a_detail) when it is empty or entirely outside the output.
 		 */
 		bool ReadViewport(const OutputView& a_output, ShapeKey& a_key, std::string_view& a_refusal, std::string& a_detail)
 		{
 			const auto& viewport = RE::BSGraphics::RendererShadowState::GetSingleton()->GetRuntimeData().viewPort;
 			a_detail = fmt::format("{}x{} at ({}, {}) in {}x{}, depth {} to {}", viewport.Width, viewport.Height, viewport.TopLeftX, viewport.TopLeftY, a_output.width,
 				a_output.height, viewport.MinDepth, viewport.MaxDepth);
-			// The dynamic-resolution viewport's depth range is a float product too (0 to 0.99998 seen). A taken draw has depth testing and
-			// writes off (ReadShape), so a range within 1e-3 of 0 to 1 writes the same pixels.
-			if (std::abs(viewport.MinDepth) > 1e-3f || std::abs(viewport.MaxDepth - 1.0f) > 1e-3f) {
-				a_refusal = "a viewport depth range other than 0 to 1";
-				return false;
-			}
 			// The dynamic-resolution sizes are float products. Within 1/64 of a whole pixel, the pixels covered are the same and
-			// TEXCOORD0 differs by far less than a texel.
-			const std::array values{ viewport.TopLeftX, viewport.TopLeftY, viewport.Width, viewport.Height };
-			std::array<std::uint32_t, 4> rect{};
-			for (std::size_t i = 0; i < values.size(); ++i) {
-				const float rounded = std::round(values[i]);
-				if (!(rounded >= 0.0f) || std::abs(values[i] - rounded) > 1.0f / 64.0f) {
-					a_refusal = "a viewport that is not whole pixels";
-					return false;
-				}
-				rect[i] = static_cast<std::uint32_t>(rounded);
-			}
-			if (rect[2] == 0 || rect[3] == 0) {
+			// TEXCOORD0 differs by far less than a texel: such a value is the whole pixel, so the shape is the same every frame.
+			const auto snap = [](float a_value, float a_tolerance) {
+				const float rounded = std::round(a_value);
+				return std::abs(a_value - rounded) <= a_tolerance ? rounded : a_value;
+			};
+			rhi::Viewport read{ .x = snap(viewport.TopLeftX, 1.0f / 64.0f),
+				.y = snap(viewport.TopLeftY, 1.0f / 64.0f),
+				.width = snap(viewport.Width, 1.0f / 64.0f),
+				.height = snap(viewport.Height, 1.0f / 64.0f),
+				// The dynamic-resolution viewport's depth range is a float product too (0 to 0.99998 seen).
+				.minDepth = snap(viewport.MinDepth, 1e-3f),
+				.maxDepth = snap(viewport.MaxDepth, 1e-3f) };
+			if (!std::isfinite(read.x) || !std::isfinite(read.y) || !std::isfinite(read.width) || !std::isfinite(read.height) || !(read.width > 0.0f) ||
+				!(read.height > 0.0f) || !std::isfinite(read.minDepth) || !std::isfinite(read.maxDepth)) {
 				a_refusal = "an empty viewport";
 				return false;
 			}
-			if (rect[0] + rect[2] > a_output.width || rect[1] + rect[3] > a_output.height) {
-				a_refusal = "a viewport outside its target";
+			a_key.viewport = ViewportBits(read);
+			RasterProgram::Viewport area;
+			bool exact = false;
+			if (!RenderAreaOf(a_key, a_output.width, a_output.height, area, exact)) {
+				a_refusal = "a viewport entirely outside its target";
 				return false;
 			}
-			a_key.viewport = rect;
 			return true;
 		}
 
@@ -1139,25 +1300,54 @@ namespace RenderGraph::Engine::ImageSpace
 					a_refusal = "more render targets than its shader writes";
 					return false;
 				}
-			// The engine leaves a depth target bound through the chain with the test off: the pass binds none then, and the draw is the same.
-			if (shadow.depthStencil != UINT32_MAX &&
-				(shadow.depthStencilDepthMode != RE::BSGraphics::DepthStencilDepthMode::kDisabled || shadow.depthStencilStencilMode != 0)) {
-				a_refusal = "a depth or stencil test";
-				return false;
-			}
 			// A clear is applied by SetDirtyStates when the target is bound, through the D3D11 context (the native context and DXVK keep
 			// it in the stream's order). The pending batch must run before it.
 			constexpr std::uint32_t kDirtyRenderTarget = 0x1;
-			a_clears = (shadow.stateUpdateFlags.underlying() & kDirtyRenderTarget) && shadow.setRenderTargetMode[0] <= RE::BSGraphics::SetRenderTargetMode::SRTM_CLEAR_STENCIL;
+			const bool dirtyTargets = (shadow.stateUpdateFlags.underlying() & kDirtyRenderTarget) != 0;
+			a_clears = dirtyTargets && shadow.setRenderTargetMode[0] <= RE::BSGraphics::SetRenderTargetMode::SRTM_CLEAR_STENCIL;
+			// The engine leaves a depth target bound through the chain with the test off: the pass binds none then, and the draw is the
+			// same. With a depth or stencil mode the target is the pass's depth attachment, with the engine's state for those modes.
+			const auto depthMode = static_cast<std::uint32_t>(shadow.depthStencilDepthMode);
+			const auto stencilMode = shadow.depthStencilStencilMode;
+			if (shadow.depthStencil != UINT32_MAX && (depthMode != 0 || stencilMode != 0)) {
+				if (shadow.depthStencil >= RE::RENDER_TARGETS_DEPTHSTENCIL::kTOTAL || shadow.depthStencilSlice != 0) {
+					a_refusal = "a depth target outside the engine's table, or a slice of one";
+					return false;
+				}
+				D3D11_DEPTH_STENCIL_DESC desc{};
+				if (depthMode >= kDepthModes || stencilMode >= kStencilModes || !DepthDescOf(depthMode * kStencilModes + stencilMode, desc)) {
+					a_refusal = "a depth or stencil mode outside the engine's table";
+					return false;
+				}
+				a_out.depth = static_cast<std::int32_t>(shadow.depthStencil);
+				a_out.depthMode = depthMode;
+				a_out.stencilMode = stencilMode;
+				a_out.stencilRef = desc.StencilEnable ? (shadow.stencilRef & 0xFF) : 0u;
+				// A depth clear at the bind (modes 0 to 2 and 6) goes to D3D11 in the stream's order too.
+				const auto depthClear = shadow.setDepthStencilMode;
+				a_clears = a_clears || (dirtyTargets && (depthClear <= RE::BSGraphics::SetRenderTargetMode::SRTM_CLEAR_STENCIL ||
+															depthClear == RE::BSGraphics::SetRenderTargetMode::SRTM_INIT));
+			}
 			if (!ResolveOutput(output, a_output, a_refusal))
 				return false;
+			// The manager's rectangle (menu 3D): BSImagespaceShader::Render turns the raster state's scissor on and sets the rectangle
+			// through 75564 (RSSetScissorRects, checked in the SE binary), which the Scissor hook keeps.
 			if (shadow.rasterStateScissorMode != 0) {
-				a_refusal = "a scissor rectangle";
-				return false;
+				if (!IS().scissorKnown) {
+					a_refusal = "a scissor the engine did not set through its scissor function";
+					return false;
+				}
+				a_out.scissored = true;
+				a_out.scissor = IS().scissor;
 			}
 			a_out.output = a_output.name;
 			if (!ReadInputs(effect, shadow.PSTexture, shadow.PSTextureAddressMode, shadow.PSTextureFilterMode, a_out, a_refusal))
 				return false;
+			// One pass cannot read a depth target as a texture and bind it as its depth attachment.
+			if (a_out.depth >= 0 && std::ranges::find(a_out.inputs, kDepthInput | a_out.depth) != a_out.inputs.end()) {
+				a_refusal = "it reads the depth target it tests against";
+				return false;
+			}
 			const auto draw = Pipeline::EngineDrawState::Latch();
 			a_out.blend = PackBlend(draw.blendMode, draw.alphaToCoverage, draw.writeMode, draw.blendExtra);
 			if (D3D11_BLEND_DESC desc{}; !BlendDescOf(a_out.blend, desc)) {
@@ -1167,18 +1357,56 @@ namespace RenderGraph::Engine::ImageSpace
 			return true;
 		}
 
+		/** @brief The engine's sampler table's shape: 6 address modes by 5 filter modes (p4.6-shaders-states.md "State tables"). */
+		constexpr std::uint32_t kSamplerAddressModes = 6;
+		constexpr std::uint32_t kSamplerFilterModes = 5;
+
+		/**
+		 * @brief The description of the engine's sampler for an address and filter mode, as the renderer makes its table (SE 75831
+		 * 0x140d89480, read in the binary; AE 77653): the address modes clamp, U clamp and V wrap, U wrap and V clamp, wrap, border
+		 * (black) and mirror (W follows U); the filters point and linear without mips (MaxLOD 0), trilinear, anisotropic and the
+		 * comparison sampler (LESS), with MinLOD -FLT_MAX. The anisotropy is CS's cap (EngineHooks' CreateSamplerState detour). Made
+		 * from the modes alone, so a pass has its sampler before the engine made its table. False for modes outside the table.
+		 */
+		bool EngineSamplerDesc(std::uint32_t a_address, std::uint32_t a_filter, D3D11_SAMPLER_DESC& a_out)
+		{
+			if (a_address >= kSamplerAddressModes || a_filter >= kSamplerFilterModes)
+				return false;
+			constexpr std::array<std::array<D3D11_TEXTURE_ADDRESS_MODE, 2>, kSamplerAddressModes> kAddress{ {
+				{ D3D11_TEXTURE_ADDRESS_CLAMP, D3D11_TEXTURE_ADDRESS_CLAMP },
+				{ D3D11_TEXTURE_ADDRESS_CLAMP, D3D11_TEXTURE_ADDRESS_WRAP },
+				{ D3D11_TEXTURE_ADDRESS_WRAP, D3D11_TEXTURE_ADDRESS_CLAMP },
+				{ D3D11_TEXTURE_ADDRESS_WRAP, D3D11_TEXTURE_ADDRESS_WRAP },
+				{ D3D11_TEXTURE_ADDRESS_BORDER, D3D11_TEXTURE_ADDRESS_BORDER },
+				{ D3D11_TEXTURE_ADDRESS_MIRROR, D3D11_TEXTURE_ADDRESS_MIRROR },
+			} };
+			constexpr std::array<D3D11_FILTER, kSamplerFilterModes> kFilter{ D3D11_FILTER_MIN_MAG_MIP_POINT, D3D11_FILTER_MIN_MAG_LINEAR_MIP_POINT,
+				D3D11_FILTER_MIN_MAG_MIP_LINEAR, D3D11_FILTER_ANISOTROPIC, D3D11_FILTER_COMPARISON_MIN_MAG_LINEAR_MIP_POINT };
+			// CS caps the engine's anisotropy at 8 (EngineHooks.cpp, kMaxSamplerAnisotropy); the engine asks for 16.
+			constexpr UINT kAnisotropy = 8;
+			a_out = {};
+			a_out.Filter = kFilter[a_filter];
+			a_out.AddressU = a_out.AddressW = kAddress[a_address][0];
+			a_out.AddressV = kAddress[a_address][1];
+			a_out.MipLODBias = 0.0f;
+			a_out.MaxAnisotropy = a_filter >= 3 ? kAnisotropy : 1;
+			// The engine leaves LESS set after the comparison sampler; only that filter reads it.
+			a_out.ComparisonFunc = a_filter == 4 ? D3D11_COMPARISON_LESS : D3D11_COMPARISON_NEVER;
+			a_out.MinLOD = -FLT_MAX;
+			a_out.MaxLOD = a_filter <= 1 ? 0.0f : FLT_MAX;
+			return true;
+		}
+
+		/** @brief The heap index of the ORG sampler for an engine address and filter mode (EngineSamplerDesc), made on first use; UINT32_MAX on failure. */
 		std::uint32_t SamplerFor(std::uint32_t a_address, std::uint32_t a_filter)
 		{
 			auto& state = IS();
 			const auto key = std::make_pair(a_address, a_filter);
 			if (const auto it = state.samplers.find(key); it != state.samplers.end())
 				return it->second ? it->second.Index() : UINT32_MAX;
-			// The engine fills its sampler table at its renderer's start, after CS's Setup: an entry missing now is asked for again later.
-			auto* sampler = Pipeline::EngineSamplerState(a_address, a_filter);
-			if (!sampler)
-				return UINT32_MAX;
 			D3D11_SAMPLER_DESC desc{};
-			sampler->GetDesc(&desc);
+			if (!EngineSamplerDesc(a_address, a_filter, desc))
+				return UINT32_MAX;
 			org::OwnedDescriptorBinding binding = ShaderBindings::CreateSamplerFromD3D11(desc);
 			state.samplers.emplace(key, binding);
 			return binding ? binding.Index() : UINT32_MAX;
@@ -1196,6 +1424,61 @@ namespace RenderGraph::Engine::ImageSpace
 			if (kept == state.blendDescs.end())
 				return false;
 			a_out = kept->second;
+			return true;
+		}
+
+		bool DepthDescOf(std::uint32_t a_index, D3D11_DEPTH_STENCIL_DESC& a_out)
+		{
+			auto& state = IS();
+			if (auto* object = Pipeline::EngineDepthStencilState(a_index / kStencilModes, a_index % kStencilModes)) {
+				object->GetDesc(&a_out);
+				state.depthDescs[a_index] = a_out;
+				return true;
+			}
+			const auto kept = state.depthDescs.find(a_index);
+			if (kept == state.depthDescs.end())
+				return false;
+			a_out = kept->second;
+			return true;
+		}
+
+		/** @brief A depth-stencil description as the manifest keeps it: the depth fields, the stencil masks, then each face's four ops. */
+		json DepthToJson(const D3D11_DEPTH_STENCIL_DESC& a_desc)
+		{
+			json out = json::array({ static_cast<std::int64_t>(a_desc.DepthEnable), static_cast<std::int64_t>(a_desc.DepthWriteMask),
+				static_cast<std::int64_t>(a_desc.DepthFunc), static_cast<std::int64_t>(a_desc.StencilEnable), static_cast<std::int64_t>(a_desc.StencilReadMask),
+				static_cast<std::int64_t>(a_desc.StencilWriteMask) });
+			for (const auto* face : { &a_desc.FrontFace, &a_desc.BackFace }) {
+				out.push_back(static_cast<std::int64_t>(face->StencilFailOp));
+				out.push_back(static_cast<std::int64_t>(face->StencilDepthFailOp));
+				out.push_back(static_cast<std::int64_t>(face->StencilPassOp));
+				out.push_back(static_cast<std::int64_t>(face->StencilFunc));
+			}
+			return out;
+		}
+
+		/** @brief The manifest's form of a depth-stencil description read back; false for a malformed one. */
+		bool DepthFromJson(const json& a_item, D3D11_DEPTH_STENCIL_DESC& a_out)
+		{
+			if (!a_item.is_array() || a_item.size() != 14)
+				return false;
+			try {
+				a_out.DepthEnable = a_item[0].get<std::int64_t>() != 0;
+				a_out.DepthWriteMask = static_cast<D3D11_DEPTH_WRITE_MASK>(a_item[1].get<std::int64_t>());
+				a_out.DepthFunc = static_cast<D3D11_COMPARISON_FUNC>(a_item[2].get<std::int64_t>());
+				a_out.StencilEnable = a_item[3].get<std::int64_t>() != 0;
+				a_out.StencilReadMask = static_cast<UINT8>(a_item[4].get<std::int64_t>());
+				a_out.StencilWriteMask = static_cast<UINT8>(a_item[5].get<std::int64_t>());
+				std::size_t at = 6;
+				for (auto* face : { &a_out.FrontFace, &a_out.BackFace }) {
+					face->StencilFailOp = static_cast<D3D11_STENCIL_OP>(a_item[at++].get<std::int64_t>());
+					face->StencilDepthFailOp = static_cast<D3D11_STENCIL_OP>(a_item[at++].get<std::int64_t>());
+					face->StencilPassOp = static_cast<D3D11_STENCIL_OP>(a_item[at++].get<std::int64_t>());
+					face->StencilFunc = static_cast<D3D11_COMPARISON_FUNC>(a_item[at++].get<std::int64_t>());
+				}
+			} catch (const std::exception&) {
+				return false;
+			}
 			return true;
 		}
 
@@ -1390,10 +1673,28 @@ namespace RenderGraph::Engine::ImageSpace
 			       read(fog, ORGExponentialHeightFog::kFarIntegratedId, true) && read(fog && has("DYNAMIC_CUBEMAPS"), ORGDynamicCubemaps::kEnvBC6HId, false);
 		}
 
-		/** @brief The raster program's description for a key (the blend was checked by BlendFor). Needs the engine's effect object. */
+		/**
+		 * @brief The ORG depth-stencil state of a ProgramKey's table index, and whether it writes; false when neither the engine's table
+		 * nor the manifest has the entry yet.
+		 */
+		bool DepthStateFor(std::uint32_t a_index, rhi::DepthStencilState& a_out, bool* a_writes = nullptr)
+		{
+			D3D11_DEPTH_STENCIL_DESC desc{};
+			if (!DepthDescOf(a_index, desc))
+				return false;
+			a_out = Pipeline::DepthStencilFromD3D11(desc);
+			if (a_writes)
+				*a_writes = DepthWrites(desc);
+			return true;
+		}
+
+		/**
+		 * @brief The raster program's description for a key (the blend was checked by BlendFor, the depth-stencil state by DepthStateFor).
+		 * Needs the engine's effect object.
+		 */
 		RasterProgram::Desc DescribeRaster(const ProgramKey& a_key)
 		{
-			const auto& [effectIndex, format, format1, blendBits] = a_key;
+			const auto& [effectIndex, format, format1, blendBits, depthFormat, depthIndex] = a_key;
 			const auto& effect = kEffects[effectIndex];
 			std::array<rhi::BlendAttachment, 2> blend{};
 			std::string error;
@@ -1406,14 +1707,33 @@ namespace RenderGraph::Engine::ImageSpace
 				desc.vertexSource = effect.source;
 			// FXC-era sources (vector conditions in ?:).
 			desc.languageVersion = L"2018";
-			// Shared (4 words), the SRVs, the samplers, the feature handles, the latch (2).
-			desc.constantWords = 4 + effect.slots + effect.samplers + (effect.features ? kFeatureWords : 0) + 2;
+			// Shared (4 words), the SRVs, the samplers, the feature handles, the latch (2), the sources' latch (2).
+			desc.constantWords = 4 + effect.slots - static_cast<std::uint32_t>(std::popcount(effect.latched)) + effect.samplers +
+			                     (effect.features ? kFeatureWords : 0) + 2 + (effect.latched ? 2 : 0);
 			// The stage defines are RasterProgram's own.
 			desc.defines = DefinesOf(effectIndex);
 			desc.targets = { { .format = format, .blend = blend[0] } };
 			if (format1 != rhi::Format::Unknown)
 				desc.targets.push_back({ .format = format1, .blend = blend[1] });
+			// A draw with a depth or stencil test (menu 3D's stencil composite and fill): the engine's state for its modes.
+			if (depthFormat != rhi::Format::Unknown) {
+				desc.depthFormat = depthFormat;
+				DepthStateFor(depthIndex, desc.depth);
+			}
 			return desc;
+		}
+
+		/**
+		 * @brief Whether a spec reads a texture slot through a sampler of its own: an imported input, or a latched source; not a cube
+		 * slot CS binds with its own sampler.
+		 */
+		bool SlotRead(const Spec& a_spec, std::uint32_t a_slot)
+		{
+			const auto& effect = kEffects[a_spec.key.effect];
+			if (a_slot >= kMaxSlots || (effect.cubes & (1u << a_slot)))
+				return false;
+			const auto name = a_spec.key.inputs[a_slot];
+			return a_spec.inputs[a_slot] || (name >= 0 && (name & kLatchSourceInput));
 		}
 
 		/** @brief The compute program's description (BSImagespaceShader::DispatchComputeShader dispatches technique 0, 100952 / 107734). */
@@ -1430,7 +1750,25 @@ namespace RenderGraph::Engine::ImageSpace
 		}
 
 		/** @brief A spec's raster program key. */
-		ProgramKey KeyOf(const Spec& a_spec) { return { a_spec.key.effect, a_spec.format, a_spec.format1, a_spec.key.blend }; }
+		ProgramKey KeyOf(const Spec& a_spec)
+		{
+			const auto depthIndex = a_spec.depth ? a_spec.key.depthMode * kStencilModes + a_spec.key.stencilMode : 0u;
+			return { a_spec.key.effect, a_spec.format, a_spec.format1, a_spec.key.blend, a_spec.depth ? a_spec.depthFormat : rhi::Format::Unknown, depthIndex };
+		}
+
+		/** @brief Whether a raster spec's program can be described now: its blend and depth-stencil states are known. a_error says which is not. */
+		bool StatesKnown(const Spec& a_spec, std::string& a_error)
+		{
+			std::array<rhi::BlendAttachment, 2> blend{};
+			if (!BlendFor(a_spec.key.blend, kEffects[a_spec.key.effect].targets, blend, a_error))
+				return false;
+			rhi::DepthStencilState depth{};
+			if (a_spec.depth && !DepthStateFor(std::get<5>(KeyOf(a_spec)), depth)) {
+				a_error = "no engine depth-stencil state";
+				return false;
+			}
+			return true;
+		}
 
 		/**
 		 * @brief Queues the program of every registered pass on the program build thread once its defines (the engine's effect object or
@@ -1444,9 +1782,8 @@ namespace RenderGraph::Engine::ImageSpace
 			for (const auto& spec : state.specs) {
 				if (state.programsQueued.contains(spec.get()) || !HasDefines(spec->key.effect))
 					continue;
-				std::array<rhi::BlendAttachment, 2> blend{};
 				std::string error;
-				if (!spec->key.compute && !BlendFor(spec->key.blend, kEffects[spec->key.effect].targets, blend, error))
+				if (!spec->key.compute && !StatesKnown(*spec, error))
 					continue;
 				state.programsQueued.insert(spec.get());
 				if (spec->key.compute)
@@ -1472,27 +1809,29 @@ namespace RenderGraph::Engine::ImageSpace
 					spec.name);
 				return nullptr;
 			}
-			// The engine's blend and sampler tables are read here, at the graph's build, not at Setup (they are filled after it).
+			// The engine's blend and depth-stencil tables are read here, at the graph's build, not at Setup (they are filled after it);
+			// the manifest keeps the entries its shapes use. The samplers are made from their modes alone (EngineSamplerDesc).
 			if (!spec.key.compute) {
-				std::array<rhi::BlendAttachment, 2> blend{};
 				std::string error;
-				if (!BlendFor(spec.key.blend, effect.targets, blend, error)) {
-					if (D3D11_BLEND_DESC desc{}; !BlendDescOf(spec.key.blend, desc))
+				if (!StatesKnown(spec, error)) {
+					// Only an entry neither the table nor the manifest has is worth another build; a state with no ORG form stays out.
+					D3D11_BLEND_DESC blend{};
+					D3D11_DEPTH_STENCIL_DESC depth{};
+					if (!BlendDescOf(spec.key.blend, blend) || (spec.depth && !DepthDescOf(spec.key.depthMode * kStencilModes + spec.key.stencilMode, depth)))
 						state.retryBuild = true;
-					logger::info("[ORG] ImageSpace: {}: its blend state has no ORG form at the graph's build ({}); its pass is left out", spec.name, error);
+					logger::info("[ORG] ImageSpace: {}: its blend or depth-stencil state has no ORG form at the graph's build ({}); its pass is left out", spec.name,
+						error);
 					return nullptr;
 				}
 			}
 			std::array<std::uint32_t, kMaxSlots> samplers{};
 			for (std::uint32_t slot = 0; slot < effect.samplers; ++slot) {
-				if (!spec.inputs[slot] || (effect.cubes & (1u << slot)))
+				if (!SlotRead(spec, slot))
 					continue;
 				samplers[slot] = SamplerFor(spec.key.address[slot], spec.key.filter[slot]);
 				if (samplers[slot] == UINT32_MAX) {
-					if (!Pipeline::EngineSamplerState(spec.key.address[slot], spec.key.filter[slot]))
-						state.retryBuild = true;
-					logger::info("[ORG] ImageSpace: {}: sampler {} (address {}, filter {}) has no ORG form at the graph's build; its pass is left out", spec.name,
-						slot, spec.key.address[slot], spec.key.filter[slot]);
+					logger::error("[ORG] ImageSpace: {}: sampler {} (address {}, filter {}) could not be made; its pass is left out", spec.name, slot,
+						spec.key.address[slot], spec.key.filter[slot]);
 					return nullptr;
 				}
 			}
@@ -1512,10 +1851,12 @@ namespace RenderGraph::Engine::ImageSpace
 			// The shader's resource list order: the shared constants, t0.., s0.., (u0), the constants' location.
 			std::vector<AnchorPasses::Bind> bindings;
 			bindings.push_back(AnchorPasses::Bind::Shared());
+			// A latched slot is read by the latch's heap index: no SRV entry.
 			for (std::uint32_t slot = 0; slot < effect.slots; ++slot)
-				bindings.push_back(spec.inputs[slot] ? AnchorPasses::Bind::Srv(spec.inputs[slot], MipOfName(spec.key.inputs[slot])) : AnchorPasses::Bind::Unused());
+				if (!(effect.latched & (1u << slot)))
+					bindings.push_back(spec.inputs[slot] ? AnchorPasses::Bind::Srv(spec.inputs[slot], MipOfName(spec.key.inputs[slot])) : AnchorPasses::Bind::Unused());
 			for (std::uint32_t slot = 0; slot < effect.samplers; ++slot)
-				bindings.push_back(spec.inputs[slot] && !(effect.cubes & (1u << slot)) ? AnchorPasses::Bind::Handle(samplers[slot]) : AnchorPasses::Bind::Unused());
+				bindings.push_back(SlotRead(spec, slot) ? AnchorPasses::Bind::Handle(samplers[slot]) : AnchorPasses::Bind::Unused());
 			if (effect.features) {
 				std::string missing;
 				if (!FeatureBinds(spec.key.effect, bindings, missing)) {
@@ -1525,7 +1866,9 @@ namespace RenderGraph::Engine::ImageSpace
 			}
 			if (effect.compute)
 				bindings.push_back(AnchorPasses::Bind::Uav(spec.output));
-			bindings.push_back(AnchorPasses::Bind::Latch(spec.entry * static_cast<std::uint32_t>(sizeof(ConstantsAt))));
+			bindings.push_back(AnchorPasses::Bind::Latch(spec.entry * kLatchStride));
+			if (effect.latched)
+				bindings.push_back(AnchorPasses::Bind::Latch(spec.entry * kLatchStride + static_cast<std::uint32_t>(sizeof(ConstantsAt))));
 			AnchorPasses::Builder builder(Anchor::ImageSpace, kClientId, static_cast<std::int32_t>(spec.entry), a_latch, a_gate);
 			if (effect.compute) {
 				AnchorPasses::Dispatch dispatch{};
@@ -1543,9 +1886,32 @@ namespace RenderGraph::Engine::ImageSpace
 				draw.mip = MipOfName(spec.key.output);
 				if (spec.output1)
 					draw.extraTargets.push_back(spec.output1);
-				// The engine's viewport (ReadViewport): the whole target, or a part of it (dynamic resolution, a custom viewport).
-				const auto& viewport = spec.key.viewport;
-				draw.viewport = { .x = viewport[0], .y = viewport[1], .width = viewport[2], .height = viewport[3] };
+				// The engine's viewport (ReadViewport): the whole target, or a part of it (dynamic resolution, a custom viewport). Its
+				// pixels inside the output are the render area; a viewport that is not exactly that area is the draw's own.
+				const auto mip = MipOfName(spec.key.output);
+				const auto shift = mip == AnchorPasses::kAllMips ? 0u : mip;
+				bool exact = false;
+				if (!RenderAreaOf(spec.key, (std::max)(spec.output.Width() >> shift, 1u), (std::max)(spec.output.Height() >> shift, 1u), draw.viewport, exact)) {
+					logger::error("[ORG] ImageSpace: {}: its viewport is outside its output; its pass is left out of the graph", spec.name);
+					return nullptr;
+				}
+				if (!exact)
+					draw.dynamicViewport = ViewportOf(spec.key);
+				if (spec.key.scissored) {
+					const auto& rect = spec.key.scissor;
+					draw.scissor = rhi::ScissorRect{ .x = rect[0],
+						.y = rect[1],
+						.width = static_cast<std::uint32_t>((std::max)(rect[2] - rect[0], 0)),
+						.height = static_cast<std::uint32_t>((std::max)(rect[3] - rect[1], 0)) };
+				}
+				if (spec.depth) {
+					bool writes = false;
+					rhi::DepthStencilState depth{};
+					DepthStateFor(std::get<5>(KeyOf(spec)), depth, &writes);
+					draw.depth = spec.depth;
+					draw.depthReadOnly = !writes;
+					draw.stencilReference = spec.key.stencilRef;
+				}
 				draw.load = rhi::LoadOp::Load;
 				draw.gate = spec.entry;
 				builder.Add(std::move(draw));
@@ -1586,16 +1952,25 @@ namespace RenderGraph::Engine::ImageSpace
 			if (!spec->output || (a_key.output1 >= 0 && !spec->output1))
 				refusal = "its output could not be imported";
 			else if (!a_key.compute) {
-				// The viewport was read against the target's size when the shape was seen; this session's import must hold it.
+				// The viewport was read against the target's size when the shape was seen; some of it must be inside this session's import.
 				const auto mip = MipOfName(a_key.output);
 				const auto shift = mip == AnchorPasses::kAllMips ? 0u : mip;
 				const auto width = (std::max)(spec->output.Width() >> shift, 1u);
 				const auto height = (std::max)(spec->output.Height() >> shift, 1u);
-				if (a_key.viewport[0] + a_key.viewport[2] > width || a_key.viewport[1] + a_key.viewport[3] > height)
+				RasterProgram::Viewport area;
+				bool exact = false;
+				if (!RenderAreaOf(a_key, width, height, area, exact))
 					refusal = "its viewport is outside its imported output (another resolution)";
 				spec->format = RtvFormatOf(a_key.output, spec->output);
 				if (spec->output1)
 					spec->format1 = RtvFormatOf(a_key.output1, spec->output1);
+				// The depth-stencil target: imported as the depth inputs are, drawn through its depth-stencil view's format.
+				if (refusal.empty() && a_key.depth >= 0) {
+					spec->depth = ImportOf(kDepthInput | a_key.depth);
+					spec->depthFormat = DsvFormatOf(static_cast<std::uint32_t>(a_key.depth));
+					if (!spec->depth || spec->depthFormat == rhi::Format::Unknown)
+						refusal = "its depth target could not be imported";
+				}
 			}
 			for (std::uint32_t slot = 0; refusal.empty() && slot < effect.slots; ++slot) {
 				// A latched source has no import: the shader reads it by the heap index in the draw's latch.
@@ -1685,7 +2060,7 @@ namespace RenderGraph::Engine::ImageSpace
 				if (!ResolveOutput(a_key.output, output, refusal))
 					return;
 				ShapeKey whole = a_key;
-				whole.viewport = { 0, 0, output.width, output.height };
+				whole.viewport = ViewportBits({ .width = static_cast<float>(output.width), .height = static_cast<float>(output.height) });
 				if (a_keys.size() < kGateEntries && std::ranges::find(a_keys, whole) == a_keys.end() && !state.refusedShapes.contains(whole)) {
 					a_keys.push_back(whole);
 					a_positions.emplace(whole, a_positions.contains(a_key) ? a_positions[a_key] : 0u);
@@ -1716,6 +2091,21 @@ namespace RenderGraph::Engine::ImageSpace
 				for (const auto& pair : swaps)
 					if (Mentions(a_keys[i], pair.first) || Mentions(a_keys[i], pair.second))
 						add(Swapped(a_keys[i], pair), a_keys[i]);
+			// The TAA histories swap by frame (the read history is the other frame's written one): a shape that writes one and reads the
+			// other implies the other direction, so both are passes whichever the first session drew first. Applied after the pairs
+			// above, so the kMAIN / kMAIN_COPY partners get theirs too.
+			constexpr std::array kHistories{
+				std::pair{ RE::RENDER_TARGET::kTEMPORAL_AA_ACCUMULATION_1, RE::RENDER_TARGET::kTEMPORAL_AA_ACCUMULATION_2 },
+				std::pair{ RE::RENDER_TARGET::kTEMPORAL_AA_UI_ACCUMULATION_1, RE::RENDER_TARGET::kTEMPORAL_AA_UI_ACCUMULATION_2 },
+				std::pair{ RE::RENDER_TARGET::kTEMPORAL_AA_WATER_1, RE::RENDER_TARGET::kTEMPORAL_AA_WATER_2 },
+			};
+			const auto withPairs = a_keys.size();
+			for (std::size_t i = 0; i < withPairs; ++i)
+				for (const auto& [first, second] : kHistories) {
+					const std::pair names{ static_cast<std::int32_t>(first), static_cast<std::int32_t>(second) };
+					if (Mentions(a_keys[i], names.first) || Mentions(a_keys[i], names.second))
+						add(Swapped(a_keys[i], names), a_keys[i]);
+				}
 			const auto withSwaps = a_keys.size();
 			for (std::size_t i = 0; i < withSwaps; ++i) {
 				if (!SharesShapes(a_keys[i].effect))
@@ -1752,7 +2142,9 @@ namespace RenderGraph::Engine::ImageSpace
 			for (const auto& pending : a_batch) {
 				if (pending.source)
 					held.push_back(pending.source);
-				a_latch.WriteValue(run, pending.entry * static_cast<std::uint32_t>(sizeof(ConstantsAt)), pending.at);
+				a_latch.WriteValue(run, pending.entry * kLatchStride, pending.at);
+				if (pending.sources)
+					a_latch.WriteValue(run, pending.entry * kLatchStride + static_cast<std::uint32_t>(sizeof(ConstantsAt)), *pending.sources);
 				if (pending.compute)
 					a_gate.OpenDispatch(pending.entry, pending.groups[0], pending.groups[1], pending.groups[2]);
 				else
@@ -1872,17 +2264,16 @@ namespace RenderGraph::Engine::ImageSpace
 				return nullptr;
 			}
 			late->gate = RunGate::Create(late->id, 1);
-			late->latch = org::LatchBlock::Create(late->id + "::ConstantsAt", static_cast<std::uint32_t>(sizeof(ConstantsAt)));
+			late->latch = org::LatchBlock::Create(late->id + "::ConstantsAt", kLatchStride);
 			if (!late->gate || !late->latch) {
 				a_refusal = "its run gate or latch could not be made";
 				return nullptr;
 			}
 			// Queued now, on the render thread (the defines read State); the pass takes it at the build.
-			std::array<rhi::BlendAttachment, 2> blend{};
 			std::string error;
 			if (a_key.compute)
 				ComputePrograms().Get(a_key.effect, [&] { return DescribeCompute(a_key.effect); });
-			else if (BlendFor(a_key.blend, effect.targets, blend, error))
+			else if (StatesKnown(*late->spec, error))
 				Programs().Get(KeyOf(*late->spec), [&] { return DescribeRaster(KeyOf(*late->spec)); });
 			FrameAnchors::ClientDesc client{};
 			client.id = late->id;
@@ -1934,6 +2325,12 @@ namespace RenderGraph::Engine::ImageSpace
 				{ "blend", a_key.blend },
 				{ "compute", a_key.compute },
 				{ "viewport", a_key.viewport },
+				{ "depth", a_key.depth },
+				{ "depthMode", a_key.depthMode },
+				{ "stencilMode", a_key.stencilMode },
+				{ "stencilRef", a_key.stencilRef },
+				{ "scissored", a_key.scissored },
+				{ "scissor", a_key.scissor },
 				{ "position", a_entry.position },
 				{ "lastSession", a_entry.lastSession } };
 		}
@@ -1963,7 +2360,14 @@ namespace RenderGraph::Engine::ImageSpace
 				key.blend = a_item.at("blend").get<std::uint32_t>();
 				key.compute = a_item.at("compute").get<bool>();
 				key.viewport = a_item.at("viewport").get<decltype(key.viewport)>();
-				if (key.compute != kEffects[key.effect].compute)
+				key.depth = a_item.at("depth").get<std::int32_t>();
+				key.depthMode = a_item.at("depthMode").get<std::uint32_t>();
+				key.stencilMode = a_item.at("stencilMode").get<std::uint32_t>();
+				key.stencilRef = a_item.at("stencilRef").get<std::uint32_t>();
+				key.scissored = a_item.at("scissored").get<bool>();
+				key.scissor = a_item.at("scissor").get<decltype(key.scissor)>();
+				if (key.compute != kEffects[key.effect].compute || key.depthMode >= kDepthModes || key.stencilMode >= kStencilModes ||
+					key.depth >= static_cast<std::int32_t>(RE::RENDER_TARGETS_DEPTHSTENCIL::kTOTAL))
 					return std::nullopt;
 				ManifestEntry entry{ .position = a_item.at("position").get<std::uint32_t>(), .lastSession = a_item.at("lastSession").get<std::uint32_t>() };
 				return std::make_pair(key, entry);
@@ -2012,6 +2416,14 @@ namespace RenderGraph::Engine::ImageSpace
 					} catch (const std::exception&) {
 					}
 				}
+				for (const auto& [key, item] : root.value("depthStencils", json::object()).items()) {
+					D3D11_DEPTH_STENCIL_DESC desc{};
+					try {
+						if (const auto index = static_cast<std::uint32_t>(std::stoul(key)); index < kDepthModes * kStencilModes && DepthFromJson(item, desc))
+							state.depthDescs.emplace(index, desc);
+					} catch (const std::exception&) {
+					}
+				}
 				for (const auto& [name, defines] : root.value("defines", json::object()).items()) {
 					const auto effect = EffectNamed(name);
 					if (effect >= 0 && defines.is_array())
@@ -2054,8 +2466,15 @@ namespace RenderGraph::Engine::ImageSpace
 			for (const auto& [key, entry] : shapes)
 				if (const auto kept = state.blendDescs.find(key.blend); !key.compute && kept != state.blendDescs.end())
 					blends[std::to_string(key.blend)] = BlendToJson(kept->second);
+			// And the depth-stencil descriptions, for the same reason.
+			json depthStencils = json::object();
+			for (const auto& [key, entry] : shapes) {
+				const auto index = key.depthMode * kStencilModes + key.stencilMode;
+				if (const auto kept = state.depthDescs.find(index); key.depth >= 0 && kept != state.depthDescs.end())
+					depthStencils[std::to_string(index)] = DepthToJson(kept->second);
+			}
 			const json root{ { "version", kManifestVersion }, { "session", state.session }, { "shapes", std::move(items) }, { "defines", std::move(defines) },
-				{ "blends", std::move(blends) } };
+				{ "blends", std::move(blends) }, { "depthStencils", std::move(depthStencils) } };
 			std::error_code error;
 			const auto path = ManifestPath();
 			std::filesystem::create_directories(path.parent_path(), error);
@@ -2100,10 +2519,12 @@ namespace RenderGraph::Engine::ImageSpace
 				return;
 			state.manifest.emplace(a_key, ManifestEntry{ .position = state.scope << 16 | std::min(state.drawIndex, 0xFFFFu), .lastSession = state.session });
 			if (state.logShapes) {
-				const auto& viewport = a_key.viewport;
-				logger::info("[ORG] ImageSpace: new shape {} into {}{}{} from {} {} {}, viewport {}x{} at ({}, {})", kEffects[a_key.effect].effectName,
+				const auto viewport = ViewportOf(a_key);
+				logger::info("[ORG] ImageSpace: new shape {} into {}{}{} from {} {} {}, viewport {}x{} at ({}, {}){}{}", kEffects[a_key.effect].effectName,
 					NameForLog(a_key.output), a_key.output1 >= 0 ? " and " : "", a_key.output1 >= 0 ? NameForLog(a_key.output1) : "", NameForLog(a_key.inputs[0]),
-					NameForLog(a_key.inputs[1]), NameForLog(a_key.inputs[2]), viewport[2], viewport[3], viewport[0], viewport[1]);
+					NameForLog(a_key.inputs[1]), NameForLog(a_key.inputs[2]), viewport.width, viewport.height, viewport.x, viewport.y,
+					a_key.depth >= 0 ? fmt::format(", depth{} modes {}/{} ref {}", a_key.depth, a_key.depthMode, a_key.stencilMode, a_key.stencilRef) : std::string(),
+					a_key.scissored ? fmt::format(", scissor ({}, {}) to ({}, {})", a_key.scissor[0], a_key.scissor[1], a_key.scissor[2], a_key.scissor[3]) : std::string());
 			}
 		}
 
@@ -2172,7 +2593,8 @@ namespace RenderGraph::Engine::ImageSpace
 		}
 
 		/**
-		 * @brief A pass left out at a build because the engine had not filled its blend or sampler table yet: the client's graph is built
+		 * @brief A pass left out at a build because the engine had not filled its blend or depth-stencil table yet (and the manifest did
+		 * not keep the entry): the client's graph is built
 		 * once more, at the next frame outside the world (no player cell: the main menu, where the first build happens) once the tables
 		 * hold what the passes need. Never in play: a world frame leaves it for the next session (logged).
 		 */
@@ -2190,10 +2612,8 @@ namespace RenderGraph::Engine::ImageSpace
 			for (const auto& spec : state.specs) {
 				if (D3D11_BLEND_DESC desc{}; !spec->key.compute && !BlendDescOf(spec->key.blend, desc))
 					return;
-				const auto& effect = kEffects[spec->key.effect];
-				for (std::uint32_t slot = 0; slot < effect.samplers; ++slot)
-					if (spec->inputs[slot] && !(effect.cubes & (1u << slot)) && !Pipeline::EngineSamplerState(spec->key.address[slot], spec->key.filter[slot]))
-						return;
+				if (D3D11_DEPTH_STENCIL_DESC desc{}; spec->key.depth >= 0 && !DepthDescOf(spec->key.depthMode * kStencilModes + spec->key.stencilMode, desc))
+					return;
 			}
 			state.retryBuild = false;
 			logger::info("[ORG] ImageSpace: the engine's state tables are filled; the client's graph is built again (outside the world)");
@@ -2447,6 +2867,44 @@ namespace RenderGraph::Engine::ImageSpace
 		}
 
 		/**
+		 * @brief An effect's latched slots (EffectInfo::latched: ISAlphaBlend's tint masks): each one's view in the shadow state, by its
+		 * heap index, into a_pending's SourcesAt, held with the run. They are loaded textures the engine made from files and never
+		 * writes: the immutable class the graph exempts from declarations, so a bindless index is their read. An empty slot reads the
+		 * null texture, as D3D11 reads a null view. False (refused) when a slot holds an engine target, which only a declared read may
+		 * read; a failure when a view has no heap index.
+		 */
+		bool LatchSources(Pending& a_pending, std::size_t a_effect)
+		{
+			const auto& effect = kEffects[a_effect];
+			const auto& shadow = RE::BSGraphics::RendererShadowState::GetSingleton()->GetRuntimeData();
+			auto owners = std::make_shared<std::vector<std::shared_ptr<const void>>>();
+			SourcesAt sources{};
+			constexpr std::uint32_t kSourceTag = DCLF::GpuTextures::Tag(DCLF::GpuTextures::Source::FrameSlot, 0);
+			for (std::uint32_t slot = 0; slot < effect.slots && slot < kMaxSlots; ++slot) {
+				if (!(effect.reads & effect.latched & (1u << slot)))
+					continue;
+				if (InputOfView(shadow.PSTexture[slot]) >= 0) {
+					Flush();
+					Refuse("a slot it reads by heap index holds an engine target", a_effect);
+					return false;
+				}
+				auto binding = shadow.PSTexture[slot] ? DCLF::GpuTextures::Get().ResolveBinding(shadow.PSTexture[slot], kSourceTag) :
+				                                        DCLF::GpuTextures::Get().NullOf(DCLF::GpuTextures::ViewKind::Texture2D);
+				if (binding.index == DCLF::GpuTextures::kInvalid) {
+					Flush();
+					Failure(fmt::format("its texture {} has no heap index", slot), a_effect);
+					return false;
+				}
+				sources[slot] = binding.index;
+				if (binding.owner)
+					owners->push_back(std::move(binding.owner));
+			}
+			a_pending.sources = sources;
+			a_pending.source = std::move(owners);
+			return true;
+		}
+
+		/**
 		 * @brief The engine's draw of the current effect: taken into the batch (true; the caller skips the engine's draw) or left to the
 		 * engine (false, after running any pending batch so the engine's order holds).
 		 */
@@ -2518,6 +2976,8 @@ namespace RenderGraph::Engine::ImageSpace
 			const std::array blocks{ at.block, frameAt.block };
 			Pending pending{ .at = { .srv = at.srvIndex, .offset = at.offset, .frameSrv = frameAt.srvIndex, .frameOffset = frameAt.offset, .size = size, .frameSize = frameAt.size } };
 			if (effect.geometry && !LatchGeometry(pending, scope.effect))
+				return false;
+			if (effect.latched && !LatchSources(pending, scope.effect))
 				return false;
 			if (admitted.late)
 				RunLate(*admitted.late, std::move(pending), blocks);
@@ -2620,26 +3080,26 @@ namespace RenderGraph::Engine::ImageSpace
 			auto* manager = RE::ImageSpaceManager::GetSingleton();
 			if (!manager)
 				return "no ImageSpaceManager";
-			// The manager's rectangle (+0x10 left, +0x14 right, +0x18 top, +0x1C bottom; menu 3D sets it): Render applies it as the
-			// viewport when left and right are not -1. That is the engine's own test (the same two fields on SE and AE), so this
-			// tests the same two.
-			// NiRect keeps its fields protected: read them in their order (left, right, top, bottom).
-			const auto* rect = reinterpret_cast<const std::int32_t*>(&manager->rect);
-			if (rect[0] != -1 && rect[1] != -1)
-				return "a sub-rectangle of its target";
+			// The manager's rectangle (+0x10 left, +0x14 right, +0x18 top, +0x1C bottom; menu 3D sets it) is not a refusal: Render
+			// turns the raster state's scissor on and sets the rectangle as the scissor through 75564 (SE 0x14130ce28 to 0x14130ce71,
+			// read in the binary), and the draw's shape takes it (ReadShape, the Scissor hook).
 			// +0x58 (RUNTIME_DATA::unk58, SE and AE; VR's layout differs): RenderEffect draws the dynamic-resolution quad (+0x50)
 			// instead of the full one (+0x48) when it is set (SE 0x141297b40, AE 0x141481ff0).
 			// A geometry effect (the ripple makers) draws its own shape, whatever quad the manager would use.
 			if (a_geometryEffect)
 				return {};
-			if (manager->GetRuntimeData().unk58)
-				return "dynamic resolution";
 			// Render draws its geometry argument (AE 0x1414f88b0): the manager's quad (+0x48, +0x50 for dynamic resolution) for an
 			// effect, or the ripple makers' own quads in the water's displacement update. The graph's fullscreen triangle is the first.
+			// The dynamic-resolution quad is refused by itself, not by the manager's flag: an effect drawn with the full quad while the
+			// flag is set (the upsample) is taken.
 			const auto* base = reinterpret_cast<const std::byte*>(manager);
-			if (a_geometry != *reinterpret_cast<void* const*>(base + 0x48) && a_geometry != *reinterpret_cast<void* const*>(base + 0x50))
-				return "a geometry other than the full-screen quad";
-			return {};
+			const auto* full = *reinterpret_cast<void* const*>(base + 0x48);
+			const auto* dynamic = *reinterpret_cast<void* const*>(base + 0x50);
+			if (a_geometry == full)
+				return {};
+			if (a_geometry == dynamic)
+				return "dynamic resolution's quad";
+			return "a geometry other than the full-screen quad";
 		}
 
 		/**
@@ -2916,6 +3376,24 @@ namespace RenderGraph::Engine::ImageSpace
 			static inline REL::Relocation<decltype(thunk)> func;
 		};
 
+		/**
+		 * @brief The renderer's scissor setter (75564 / 77365: (renderer, x, y, width, height), which calls RSSetScissorRects with
+		 * (x, y, x + width, y + height); read in the SE binary at 0x140d70100). The rectangle it sets is kept for the draws whose raster
+		 * state scissors (ReadShape): the D3D11 context's state is not read, since it is stale under the flush latch.
+		 * LegacyGraphicsCompatibility patches two calls to it (bounds to extents); this sees what they pass on.
+		 */
+		struct Scissor
+		{
+			static void thunk(void* a_renderer, std::int32_t a_x, std::int32_t a_y, std::int32_t a_width, std::int32_t a_height)
+			{
+				auto& state = IS();
+				state.scissor = { a_x, a_y, a_x + a_width, a_y + a_height };
+				state.scissorKnown = true;
+				func(a_renderer, a_x, a_y, a_width, a_height);
+			}
+			static inline REL::Relocation<decltype(thunk)> func;
+		};
+
 		/** @brief BSGraphics::Renderer::DrawTriShape (75477 / 77263): the current effect's draw is taken; any other runs the batch first. */
 		struct DrawTriShape
 		{
@@ -2939,7 +3417,10 @@ namespace RenderGraph::Engine::ImageSpace
 					state.drawShape = a_shape;
 					state.drawStart = a_start;
 					state.drawTriangles = a_triangles;
-					if ((quad || geometry) && state.scopeDepth > 0 && state.current && state.current->eligible && !state.current->compute && !state.current->drew) {
+					// A geometry effect may draw several shapes in one call (the underwater mask): each is taken, a run of its own when
+					// its pass is already in the batch (AdmitShape).
+					if ((quad || geometry) && state.scopeDepth > 0 && state.current && state.current->eligible && !state.current->compute &&
+						(!state.current->drew || geometry)) {
 						// TakeDraw applies the engine's state (SetDirtyStates) before the engine's DrawTriShape would have: give the
 						// shadow state this shape's vertex description first, as DrawTriShape does. Otherwise the input layout is
 						// built from the previous draw's description and the effect's vertex shader.
@@ -3008,15 +3489,15 @@ namespace RenderGraph::Engine::ImageSpace
 		stl::detour_thunk<WaterDisplacement>(REL::RelocationID(31385, 32176));
 		stl::detour_thunk<DrawTriShape>(REL::RelocationID(75477, 77263));
 		stl::detour_thunk<DispatchCSShader>(REL::RelocationID(75532, 77329));
+		stl::detour_thunk<Scissor>(REL::RelocationID(75564, 77365));
 		auto& state = IS();
 		state.installed = ShaderRender::func.address() && HDRRender::func.address() && PreTonemapComposites::func.address() && ExplicitRender::func.address() &&
 		                  DispatchComputeShader::func.address() && RenderSSAO::func.address() && RenderReflections::func.address() && WaterDisplacement::func.address() &&
-		                  DrawTriShape::func.address() &&
-		                  DispatchCSShader::func.address();
+		                  DrawTriShape::func.address() && DispatchCSShader::func.address() && Scissor::func.address();
 		if (state.installed)
 			logger::info(
 				"[ORG] ImageSpace: hooks installed (BSImagespaceShader::Render and its explicit-target form, DispatchComputeShader, the HDR effect, the pre-tonemap "
-				"composites, RenderSSAO, the reflections pass, the water's displacement update, DrawTriShape, DispatchCSShader)");
+				"composites, RenderSSAO, the reflections pass, the water's displacement update, DrawTriShape, DispatchCSShader, the scissor setter)");
 		else
 			logger::error("[ORG] ImageSpace: a hook could not be installed; the ImageSpace chain stays on D3D11");
 	}
@@ -3047,7 +3528,7 @@ namespace RenderGraph::Engine::ImageSpace
 		if (std::error_code error; !std::filesystem::exists(std::filesystem::path(RenderGraphRuntime::kShaderDirectory) / "Common/OrgEngineConstants.hlsli", error))
 			return off("Data/Shaders has no Common/OrgEngineConstants.hlsli: the staged shaders predate the ORG builds of ISHDR, ISBlur and the VL composite");
 		state.gate = RunGate::Create("ImageSpace", kGateEntries);
-		state.latch = org::LatchBlock::Create("ImageSpace::ConstantsAt", kGateEntries * static_cast<std::uint32_t>(sizeof(ConstantsAt)));
+		state.latch = org::LatchBlock::Create("ImageSpace::ConstantsAt", kGateEntries * kLatchStride);
 		state.heldSources.clear();
 		state.heldRuns.clear();
 		if (!state.gate || !state.latch)

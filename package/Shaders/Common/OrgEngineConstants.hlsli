@@ -44,6 +44,21 @@ struct OrgEngineConstantsAt
 
 #	define ORG_ENGINE_NO_SOURCE 0xFFFFFFFF
 
+/**
+ * The heap index of each texture slot (t0 to t15) of a draw whose textures are loaded ones the engine binds anew each time
+ * (ISAlphaBlend's tint masks). Latched after the draw's OrgEngineConstantsAt; an empty slot holds the null texture's index.
+ */
+struct OrgEngineSourcesAt
+{
+	uint4 Index[4];
+};
+
+/** The heap index of texture slot a_slot. */
+uint OrgEngineSource(OrgEngineSourcesAt a_at, uint a_slot)
+{
+	return a_at.Index[a_slot / 4][a_slot % 4];
+}
+
 /** One 16-byte row of a draw's PerGeometry; 0 past its bound size. */
 float4 OrgEngineRow(OrgEngineConstantsAt a_at, uint a_row)
 {

@@ -22,7 +22,10 @@
  * from the latch). The tonemap draw is taken too (5.5.4: ISHDR's BLEND build, the plain and the fade form) when the engine makes it,
  * that is when Effects11 does not replace the HDR effect. Also the copies (ISCopyScaleBias and ISCopyTextureMask through ISCopy.hlsl's
  * ORG vertex stage; a copy from kFRAMEBUFFER reads the back buffer's import), the vanilla TAA (two targets), the SIL composite, the
- * snow's SSS, the local map's edge pass and the colour fill. ISMap and both ISNoise forms rasterize nothing (their vertex shaders
+ * snow's SSS, the local map's edge pass and the colour fill; since round 2 the race menu's face tint (ISAlphaBlend, its loaded
+ * tint masks by heap index from the latch: EffectInfo::latched), the reflections' apply, the lighting composite, the dynamic-resolution
+ * upsample, the parallax-mask blur, the IB lens flares, the SIL raw indirect lighting, FXAA and the underwater mask. ISMap and both
+ * ISNoise forms rasterize nothing (their vertex shaders
  * write no SV_Position): they are taken with no pass. The volumetric lighting's apply and blurs are Volumetric Lighting's port.
  *
  * The compute form: inside a scope, BSImagespaceShader::DispatchComputeShader (100952 / 107734) names the effect, and its
@@ -46,8 +49,13 @@
  * before it (refraction, the distant blur). The engine's targets made again (a resize) register the same shapes, with those built on
  * first sight, on the new imports, into the build the new imports ask for anyway.
  *
- * Inherent refusals, per draw: an effect not selected, a target outside the engine's table, a scissor rectangle, a depth or stencil
- * test, dynamic resolution's quad, a manager rectangle, a viewport outside its target, a shape whose pass is still being built
+ * A draw's depth or stencil test (menu 3D's stencil composite and fill) binds the engine's depth target with the engine's state for
+ * its modes; a scissor (the manager's rectangle, which Render sets through the renderer's scissor setter, hooked to keep it) is the
+ * pass's scissor; a viewport that is fractional or reaches past its target is the draw's own viewport, its pixels inside the target
+ * the render area. Samplers are made from the engine's address and filter modes alone, so no pass waits for the engine's table.
+ *
+ * Inherent refusals, per draw: an effect not selected, a target outside the engine's table, dynamic resolution's quad, a viewport
+ * entirely outside its target, a draw that reads the depth target it tests against, a shape whose pass is still being built
  * (first sight), an anchor whose built graph does not hold the registration yet (FrameAnchors::CanRun). A draw whose target is
  * cleared at the bind is taken after the pending batch runs (the clear goes between). Constants the capture missed are failures,
  * logged as errors. A batch that is pending when the engine draws something else is run first, so the engine's order is kept. A failed graph returns every effect to

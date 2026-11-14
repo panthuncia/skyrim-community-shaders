@@ -7,6 +7,7 @@
 #	include <array>
 #	include <cstdint>
 #	include <memory>
+#	include <optional>
 #	include <span>
 #	include <string>
 #	include <utility>
@@ -130,7 +131,10 @@ struct RasterProgram
 		float clear = 1.0f;  // with LoadOp::Clear
 	};
 
-	/** @brief The render area, which is also the viewport and the scissor (BasicRHI has no separate dynamic viewport yet). */
+	/**
+	 * @brief The render area. It is also the viewport and the scissor, unless DrawDesc::dynamicViewport or DrawDesc::scissor
+	 * replaces them for the draw.
+	 */
 	struct Viewport
 	{
 		std::uint32_t x = 0, y = 0, width = 0, height = 0;
@@ -142,6 +146,12 @@ struct RasterProgram
 		std::span<const Colour> colours;  // as many as the program's targets
 		const Depth* depth = nullptr;     // when the program has a depth format
 		Viewport viewport;
+		// When set, the draw's viewport (CommandList::SetViewports) instead of the render area. It may be fractional and reach
+		// past the render area and the targets: the render area and the scissor clip it. A fullscreen draw's TEXCOORD0 then
+		// spans this viewport, not the render area.
+		std::optional<rhi::Viewport> dynamicViewport;
+		// When set, the draw's scissor (CommandList::SetScissors), clipped to the render area. Unset: the render area.
+		std::optional<rhi::ScissorRect> scissor;
 		std::span<const std::uint32_t> constants;  // at most constantWords
 		std::uint32_t vertexCount = 3;             // the fullscreen triangle
 		std::uint32_t instanceCount = 1;

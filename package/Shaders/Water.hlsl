@@ -19,6 +19,19 @@ namespace HorizonFix
 
 #if defined(UNDERWATERMASK)
 
+#	if defined(CS_ORG_BINDLESS)
+// The ORG build of ISUnderwaterMask (RenderGraph/Engine/ImageSpace, CS_ORG_IMAGESPACE). It draws the engine's own geometry: the vertex
+// stage pulls it by device address, which the port writes into the latch's PerFrame words (this form reads no PerFrame). The pixel
+// stage writes 1 and reads nothing. One push block serves both stages.
+#		define ORG_SHARED_CONSTANTS
+#		include "Common/DeviceRef.hlsli"
+#		include "Common/OrgEngineConstants.hlsli"
+#		include "Common/OrgResources.hlsli"
+#		define UNDERWATERMASK_ORG_RESOURCES(X) X(SHARED, ConstantBuffer, Shared, 0) X(LATCH, OrgEngineConstantsAt, PerGeometryAt, 2)
+ORG_PUSH_BLOCK(UNDERWATERMASK_ORG_RESOURCES(ORG_HANDLE))
+UNDERWATERMASK_ORG_RESOURCES(ORG_RESOURCE)
+#	endif
+
 #	if defined(VSHADER)
 struct VS_INPUT
 {
@@ -33,7 +46,7 @@ struct VS_OUTPUT
 
 #	ifdef VSHADER
 
-VS_OUTPUT main(VS_INPUT input)
+VS_OUTPUT UnderwaterMaskVertex(VS_INPUT input)
 {
 	VS_OUTPUT vsout;
 
@@ -42,6 +55,43 @@ VS_OUTPUT main(VS_INPUT input)
 
 	return vsout;
 }
+
+#		if defined(CS_ORG_BINDLESS)
+#			if defined(__spirv__)
+// The draw's geometry (ImageSpace.cpp, TakeDraw): FrameSrv and FrameOffset the vertex buffer's view ref, FrameSize and Source the
+// 16-bit index buffer's, Padding the vertex stride (low 16 bits) and the first index (high 16 bits). The position is the vertex's
+// first attribute, four floats.
+VS_INPUT PullUnderwaterMaskVertex(uint a_vertexID)
+{
+	const DeviceRef vertices = DeviceRef(PerGeometryAt.FrameSrv, PerGeometryAt.FrameOffset);
+	const DeviceRef indices = DeviceRef(PerGeometryAt.FrameSize, PerGeometryAt.Source);
+	const uint stride = PerGeometryAt.Padding & 0xFFFF;
+	const uint indexNumber = (PerGeometryAt.Padding >> 16) + a_vertexID;
+	const uint indexWord = DeviceLoad(uint, DeviceRefAdd(indices, (indexNumber * 2) & ~3u));
+	const uint index = (indexNumber & 1) ? (indexWord >> 16) : (indexWord & 0xFFFF);
+	VS_INPUT input;
+	input.Position = asfloat(DeviceLoad(uint4, DeviceRefAdd(vertices, index * stride)));
+	return input;
+}
+#			else
+// The D3D12 build has no vertex pulling yet: it compiles, and draws nothing.
+VS_INPUT PullUnderwaterMaskVertex(uint a_vertexID)
+{
+	VS_INPUT input = (VS_INPUT)0;
+	return input;
+}
+#			endif
+
+VS_OUTPUT main(uint a_vertexID: SV_VertexID)
+{
+	return UnderwaterMaskVertex(PullUnderwaterMaskVertex(a_vertexID));
+}
+#		else
+VS_OUTPUT main(VS_INPUT input)
+{
+	return UnderwaterMaskVertex(input);
+}
+#		endif
 #	endif
 
 typedef VS_OUTPUT PS_INPUT;

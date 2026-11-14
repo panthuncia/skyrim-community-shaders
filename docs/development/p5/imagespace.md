@@ -63,8 +63,8 @@ mechanism below unless the row says otherwise.
 | Bright-pass bloom (23-29: 79-85, then 65-71) | HDR Render | downsample0, swap, luminance | `kHDR_BLURSWAP`, `kHDR_BLOOM` | **Built** (ISBlur): the bright-pass draw into the swap and, since 5.5.4, the plain blur's draw into `kHDR_BLOOM` |
 | Tonemap (55, 56) | HDR Render | bloom, source, luminance | the HDR output (`kIMAGESPACE_TEMP_COPY` when TAA or an upscaler follows, else the destination) | **Built** (5.5.4, ISHDR's `BLEND` build): the draw the engine makes when Effects11 does not replace the HDR effect, with Post Processing's passthrough or the vanilla tonemap. The fade form implies the plain one's shapes and back. |
 | VL / lens flare composite (114-116) | 99024 (+0x190 helper, 100493) | VL target, lens flare target | the pre-tonemap source | **Built** (ISCompositeLensFlareVolumetricLighting) |
-| SIL composite (146 / 147) | 99024 (+0x1d8, 100528) | | | **Built** (parity wave): ISSILComposite in the composites' scope; ISSILRawInd Next |
-| IB lens flares (105, 119-122, 124) | 99024 (+0x180, 100481) | | `kIBLENSFLARES_*` | Next: raster ones through this mechanism; 121/122 are compute (below) |
+| SIL composite (146 / 147) | 99024 (+0x1d8, 100528) | | | **Built** (parity wave): ISSILComposite in the composites' scope; ISSILRawInd since round 2 |
+| IB lens flares (105, 119-122, 124) | 99024 (+0x180, 100481) | | `kIBLENSFLARES_*` | **Built** (round 2): ISDownsample (119), ISBlur (105) and ISIBLensFlares (124); the compute downsamples 121/122 and ISExp (123) Next |
 | ISCopy (34, 35, 37, 38) | 99024, 99023, and the callers in R4's table | an engine target | an engine target | **Built** (5.5.4, ISCopy.hlsl dual-target): inside a scope as part of it, else each call a scope of its own. Since the parity wave a copy from `kFRAMEBUFFER` reads the back buffer's import (the engine's SRV of it), and ISCopyScaleBias (36) and ISCopyTextureMask (41) draw through ISCopy.hlsl's ORG vertex stage. |
 | VL apply (103) and the VL CS blur (106/107 via +0x188) | RenderWorldPostProcess (100430) | depth, shadow maps | `kVOLUMETRIC_LIGHTING_*` | Next. 106/107 and CS's own `ISVolumetricLightingGenerateCS` / `RaymarchCS` / `BlurHCS` / `BlurVCS` are compute: `DispatchCSShader` (75532 / 77329) with CS's replacement chosen in `CSShadersSupport::Renderer_DispatchCSShader` (Hooks.cpp). The compute form of this mechanism latches the dispatch there: CS b0 from the capture (`Find(Current(), Compute, 0)` after `OnDispatch`), the CS SRVs/UAVs from the shadow state's CS slots, group counts into a gate entry (`OpenDispatch`). |
 | SSAO (SAO 132-145, `RenderSSAO` 100520 / 107245; compute set 134/135/137/145 via 100526) | RenderWorld | depth, normals, motion vectors, last frame's AO | SAO targets, then composite into kMAIN | **Built** (wave 3): CameraZ, Minify, MinifyContrast, RawAO, RawAONoTemporal, BlurH, BlurV through the explicit-target Render. The composites 138-140 since 5.5.4 (below, "5.5.4: the remainder"): the feature inputs CS's headers read are bound by published id. The compute set is not used by a vanilla frame (the census saw none) and is not taken. |
@@ -72,15 +72,15 @@ mechanism below unless the row says otherwise.
 | DOF (3: 58, 11 or the CS blur 112/113, 45-47) and the distant blur (49-51) | 99023 slot 3 | downsample, swap, depth, underwater mask | the chain's target | **Built** (w3-slots): ISDepthOfField*/ISDistantBlur* and the compute blur 112/113 (ISBlurCS's DOF build), each call a scope of its own. The downsample (58) and the raster blur (11) are Next. |
 | Radial blur (5: 52-54), full-screen blur (6), get hit (7: 34, 10, 40) | 99023 slots 5-7 | | | **Built**: the radial blur (w3-slots), and since 5.5.4 the blur composites' draws (ISBlur 65-71, ISNonHDRBlur 72-78), ISCopy and ISDoubleVision (dual-target), each draw outside a scope a scope of its own |
 | Refraction (1: 39) | 99023 slot 1 | src, `kREFRACTION_NORMALS` | the chain's target | **Built** (w3-slots, its own scope) |
-| FXAA (2) | 99023 slot 2 | | | Next (transcribed source; with the game's FXAA setting only) (parity wave: [parity/imagespace.md](../parity/imagespace.md)) |
+| FXAA (2) | 99023 slot 2 | | | **Built** (round 2): ISFXAA.hlsl's ORG pixel stage, each call a scope of its own (parity wave: [parity/imagespace.md](../parity/imagespace.md)) |
 | World map (0: 43/44), Map (8: 42) | 99023 slot 0, the map menu | | | ISWorldMap built. ISMap (parity wave): taken with no pass, its vanilla VS writes no SV_Position so its draw rasterizes nothing (inferred) |
 | Local map (98) | 16094 | `kLOCAL_MAP_SWAP` | `kLOCAL_MAP` | **Built** (parity wave): ISLocalMap.hlsl dual-target, each call a scope of its own |
 | Water displacement (31: 86-94) | 31385 / 32176, the water system's displacement update | its own simulation targets | `kWATER_DISPLACEMENT*` | **Built** (5.5.4): 31385 / 32176 is a scope (`ScopeKind::Water`, two runs), ISWaterDisplacement.hlsl dual-target (the heightmaps' four neighbour coordinates made in the pixel shader). The ripple makers (88, 89) draw their own quads: their vertex stage (ISWaterDisplacement.hlsl's ORG build, `PullRippleVertex`) pulls the shape DrawTriShape gets by device address (`EffectInfo::geometry`, TakeDraw's `LatchGeometry`: the addresses ride the latch's PerFrame words, which they do not read), and the gate opens the draw with its index count. A ripple each run: more than the scope's runs in a frame are refused. |
-| Water blend (155), underwater mask (156) | +0x200, +0x208 | | | Next (155 is active CS HLSL) |
+| Water blend (155), underwater mask (156) | +0x200, +0x208 | | | 155 **built** (5.5.4); 156 **built** (round 2): Water.hlsl's UNDERWATERMASK ORG form, a geometry effect with the draw's depth test |
 | Snow SSS (150), CopySubRegionCS (117) | RenderWorld, Main::RenderWaterEffects | | the snow swap; the water's flow map | 117 **built**: the snow copy (w3-slots: the compute form, its own scope) and the water's flow copies (5.5.4: the source by heap index in the latch); 150 **built** (parity wave, its own scope) |
 | TAA (151-153) | +0x1f0 | | | Upscaling's when it replaces TAA. Otherwise (native mode) ISTemporalAA is **built** (parity wave: two targets, ISTemporalAA.hlsl dual-target); `_UI` and `_Water` have no CS source path and stay the engine's |
-| Dynamic-resolution upsample (154) | +0x1f8 | | | Next, with dynamic resolution (refused today) |
-| Noise (33), reflections (102, 108-109, 130-131), parallax mask blur (110-111), lighting composite (125-127), Perlin noise (128-129), debug (118, 149), simple colour (148), TAA UI/water | various | | | ISNoise (95, 96) taken with no pass (no SV_Position); simple colour (148) **built** without a stencil test; the rest Next (parity wave: [parity/imagespace.md](../parity/imagespace.md)) |
+| Dynamic-resolution upsample (154) | +0x1f8 | | | **Built** (round 2): it draws the full quad; only the dynamic-resolution quad itself is refused |
+| Noise (33), reflections (102, 108-109, 130-131), parallax mask blur (110-111), lighting composite (125-127), Perlin noise (128-129), debug (118, 149), simple colour (148), TAA UI/water | various | | | ISNoise (95, 96) taken with no pass (no SV_Position); simple colour (148) **built**, with menu 3D's stencil since round 2; the reflections' apply (102), the parallax mask blur (110-111) and the lighting composite (125-127) **built** in round 2; Perlin noise, debug and TAA UI/water Next (parity wave: [parity/imagespace.md](../parity/imagespace.md)) |
 
 **Boundaries with other features.**
 
@@ -258,7 +258,9 @@ target (an unbound average-depth slot, for example) keeps that effect with the e
 **Passes.** One `AnchorPasses::Draw` per shape: the effect's RasterProgram (its CS source, the D3D11 build's defines from
 `ShaderCache::GetCompileDefines`, the target's format, the engine blend state as an rhi blend), the output and inputs as
 `FrameAnchors::EngineTarget` imports (the P4 targets' published textures under `CS_ORG_ENGINE_TARGETS`), samplers made from
-the engine's sampler table, load op Load, the shape's viewport as the render area, and the gate entry. The ping-pong of the
+the engine's address and filter modes (since the parity wave's round 2, as the renderer builds its table, not from the table), load
+op Load, the shape's viewport's pixels inside the target as the render area (the viewport itself as the draw's when it differs), the
+depth target, stencil reference and scissor when the draw has them (round 2), and the gate entry. The ping-pong of the
 chain is in the shapes: each (output, inputs, viewport) the engine uses is its own pass. The graph's fullscreen triangle gives
 TEXCOORD0 from 0 to 1 over the render area, as the engine's quad does over its viewport.
 
@@ -286,7 +288,7 @@ own, which is what the capture does already.
   are inherent refusals, at info.
 - Failures, at error (`<effect> failed on the graph and stays with the engine`): constants the capture does not hold for the draw,
   or a ring chunk missing. On the primary path these should not happen.
-- Per shape, at Setup: an import that fails, a viewport outside this resolution's target, a sampler or blend without an ORG form
+- Per shape, at Setup: an import that fails, a viewport entirely outside this resolution's target, a blend without an ORG form
   (blend factor, dual source): `<effect> into <target> has no pass this session (<reason>)`. A program that does not build leaves
   its pass out of the graph (error).
 - Under the flush latch (flush.md) no ImageSpace draw is vouched for: a draw the engine still makes (an effect the port does not
@@ -384,7 +386,7 @@ are passes from Setup. By class:
 | The VL dispatches from AE 107023 (SE 100306) | **Volumetric Lighting's port**: the VL render is detoured, its dispatches withheld at Hooks.cpp's DispatchCSShader seam, and the generate and raymarch run at the VolumetricLighting anchor with the engine's PerTechnique latched. This port's 107023 detour and the reason `imagespace: volumetric lighting compute` are deleted. |
 | ISCopySubRegionCS from `Main::RenderWaterEffects` (BGSAutoWater's queue) | Taken (5.5.4): the flow map is an import made at Setup, and each copy's loaded texture is read by its heap index from the latch. |
 | The tonemap (55, 56) | Stays: CS's tonemap owners (Effects11, Post Processing, HDR Display). |
-| A fractional viewport, the dynamic-resolution quad (`unk58`), a manager rectangle (menu 3D) | Stay, as before (inherent refusals). |
+| A fractional viewport, the dynamic-resolution quad (`unk58`), a manager rectangle (menu 3D) | Taken since the parity wave's round 2, except the dynamic-resolution quad (still refused, now by the quad itself rather than the flag): a fractional viewport is the draw's own viewport, the manager's rectangle a scissor ([parity/imagespace.md](../parity/imagespace.md)). |
 
 ## 5.5.4: the remainder
 

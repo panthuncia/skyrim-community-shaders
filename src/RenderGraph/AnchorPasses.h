@@ -115,7 +115,10 @@ namespace RenderGraph::AnchorPasses
 		}
 	};
 
-	/** @brief A fullscreen raster pass: a_program's pixel stage over the viewport, into one target (or one mip of it). */
+	/**
+	 * @brief A fullscreen raster pass: a_program's pixel stage over the viewport, into one target (or one mip of it), with an
+	 * optional depth-stencil attachment, scissor and viewport of its own.
+	 */
 	struct Draw
 	{
 		std::string name;  // the step: the pass is "<prefix>.<name>"
@@ -129,6 +132,15 @@ namespace RenderGraph::AnchorPasses
 		rhi::LoadOp load = rhi::LoadOp::Load;
 		std::array<float, 4> clear{};  // with LoadOp::Clear
 		std::optional<std::uint32_t> gate;  // the builder's run gate entry: the draw happens only on runs whose commit opened it
+		// The depth-stencil attachment (an import's slot or any graph resource), for a program with a depth format. Loaded and
+		// stored. Read only (PassBuilder::DepthRead) unless the program's depth state writes depth or stencil.
+		FrameAnchors::Texture depth;
+		bool depthReadOnly = true;
+		std::uint32_t stencilReference = 0;  // the stencil test's and REPLACE's reference (RasterProgram::DrawDesc)
+		// The draw's own viewport and scissor inside the render area (RasterProgram::DrawDesc::dynamicViewport and scissor). The
+		// viewport may reach past the target: TEXCOORD0 then spans it as the engine's viewport would.
+		std::optional<rhi::Viewport> dynamicViewport;
+		std::optional<rhi::ScissorRect> scissor;
 	};
 
 	/** @brief A compute pass: fixed group counts, a run gate entry, or group counts at a latch offset the commit writes. */

@@ -163,6 +163,7 @@ namespace RenderGraph::AnchorPasses
 			org::DeclaredViewToken target;
 			std::vector<org::DeclaredViewToken> extraTargets;
 			DeclaredBindings declared;
+			std::optional<org::DeclaredViewToken> depth;
 		};
 
 		class FullscreenPass final : public org::TypedRenderGraphPass<FullscreenPass, SpecFrame<Draw>, DrawBindings>
@@ -181,7 +182,10 @@ namespace RenderGraph::AnchorPasses
 				std::vector<org::DeclaredViewToken> extra;
 				for (const auto& target : draw.extraTargets)
 					extra.push_back(a_builder.RenderTarget(target).View());
-				return { view, std::move(extra), DeclareBindings(a_builder, draw.bindings) };
+				std::optional<org::DeclaredViewToken> depth;
+				if (draw.depth)
+					depth = draw.depthReadOnly ? a_builder.DepthRead(draw.depth).View() : a_builder.DepthReadWrite(draw.depth).View();
+				return { view, std::move(extra), DeclareBindings(a_builder, draw.bindings), depth };
 			}
 
 			// The recording depends only on what the pass was made with.
@@ -208,7 +212,17 @@ namespace RenderGraph::AnchorPasses
 				for (const auto& extra : a_bindings.extraTargets)
 					if (colourCount < colours.size())
 						colours[colourCount++] = { .view = &extra, .load = draw.load, .clear = draw.clear };
-				RasterProgram::DrawDesc desc{ .colours = { colours.data(), colourCount }, .viewport = draw.viewport, .constants = words.Span(), .debugName = draw.name.c_str() };
+				RasterProgram::Depth depth{};
+				if (a_bindings.depth)
+					depth = { .view = &*a_bindings.depth, .readOnly = draw.depthReadOnly, .load = rhi::LoadOp::Load };
+				RasterProgram::DrawDesc desc{ .colours = { colours.data(), colourCount },
+					.depth = a_bindings.depth ? &depth : nullptr,
+					.viewport = draw.viewport,
+					.dynamicViewport = draw.dynamicViewport,
+					.scissor = draw.scissor,
+					.constants = words.Span(),
+					.debugName = draw.name.c_str(),
+					.stencilReference = draw.stencilReference };
 				if (draw.gate) {
 					desc.indirect = &spec.gate->Latch();
 					desc.indirectOffset = spec.gate->Offset(*draw.gate);
@@ -426,6 +440,11 @@ namespace RenderGraph::AnchorPasses
 	{
 		if (!a_draw.program || !a_draw.target || std::ranges::any_of(a_draw.extraTargets, [](const auto& a_target) { return !a_target; })) {
 			Fail(std::format("{}: a program or target is missing", a_draw.name));
+			return;
+		}
+		if (static_cast<bool>(a_draw.depth) != a_draw.program->hasDepth) {
+			Fail(std::format("{}: {}", a_draw.name, a_draw.program->hasDepth ? "the program has a depth format and no depth target is given" :
+			                                                                    "a depth target is given and the program has no depth format"));
 			return;
 		}
 		if (!Check(a_draw.name, a_draw.bindings, a_draw.program->constantWords, a_draw.gate))
