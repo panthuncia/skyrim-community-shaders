@@ -411,7 +411,6 @@ namespace DCLF::Draws
 					return;
 				}
 			}
-			const auto arena = d3d12 ? ShadowArenaBlocksOf() : ShadowArenaBlocks{};
 			auto viewPush = [&](const ShadowFrameView& a_view) {
 				auto push = a_view.push;
 				if (d3d12) {
@@ -422,7 +421,7 @@ namespace DCLF::Draws
 					const RenderGraph::BufferRef viewBlock = viewBlocksRef + std::uint64_t(a_view.slot) * kShadowViewSlotBytes;
 					ref(kShadowPushViewBlock, viewBlock);
 					ref(kShadowPushPerFrame, viewBlock + kShadowPerFrameOffset);
-					ref(kShadowPushZeros, constantsRef + arena.zeros);
+					ref(kShadowPushZeros, constantsRef + kShadowArenaBlocksOffset);  // the zero block heads the arena (ShadowArenaBlocksOf)
 					push[kShadowPushSharedData] = a_prepared.blockViews[0];
 					push[kShadowPushSharedData + 1] = 0;
 					push[kShadowPushFeatureData] = a_prepared.blockViews[1];
