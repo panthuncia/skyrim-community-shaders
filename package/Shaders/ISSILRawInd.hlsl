@@ -4,9 +4,27 @@
 // constant layout are vanilla's. Temporaries hold raw bits (uint4), as DXBC registers do; integer work goes
 // through asint/asuint and float work through asfloat. Checked against the vanilla shader on random inputs.
 
+#if defined(CS_ORG_BINDLESS)
+// The ORG build of the pixel stage (RenderGraph/Engine/ImageSpace, CS_ORG_IMAGESPACE): t0-t4 and s0-s4 from the heap, the shared
+// constants, and PerGeometry from the engine-constants capture through the pass's latch. The vertex stage is the graph's
+// fullscreen triangle.
+#	define ORG_SHARED_CONSTANTS
+#	include "Common/OrgEngineConstants.hlsli"
+#	include "Common/OrgResources.hlsli"
+#	define ISSILRAWIND_ORG_RESOURCES(X) X(SHARED, ConstantBuffer, Shared, 0) X(SRV, Texture2D<float4>, CS_Z_BufferTex, 0) X(SRV, Texture2D<float4>, NormalsTex, 1) X(SRV, Texture2D<float4>, MotionVectorsTex, 2) X(SRV, Texture2D<float4>, EmissiveColorTex, 3) X(SRV, Texture2D<float4>, AccumIndTex, 4) X(SAMPLER, SamplerState, CS_Z_BufferSampler, 0) X(SAMPLER, SamplerState, NormalsSampler, 1) X(SAMPLER, SamplerState, MotionVectorsSampler, 2) X(SAMPLER, SamplerState, EmissiveColorSampler, 3) X(SAMPLER, SamplerState, AccumIndSampler, 4) X(LATCH, OrgEngineConstantsAt, PerGeometryAt, 2)
+ORG_PUSH_BLOCK(ISSILRAWIND_ORG_RESOURCES(ORG_HANDLE))
+ISSILRAWIND_ORG_RESOURCES(ORG_RESOURCE)
+#endif
+
 #include "Common/DummyVSTexCoord.hlsl"
 
 #if defined(PSHADER)
+#	if defined(CS_ORG_BINDLESS)
+static float4 g_ProjInfos = OrgEngineRow(PerGeometryAt, 0);
+static float4 g_IndInfos = OrgEngineRow(PerGeometryAt, 1);
+static float4 g_ScreenInfos = OrgEngineRow(PerGeometryAt, 2);
+static float4 g_IndInfos2 = OrgEngineRow(PerGeometryAt, 3);
+#	else
 SamplerState CS_Z_BufferSampler : register(s0);
 SamplerState NormalsSampler : register(s1);
 SamplerState MotionVectorsSampler : register(s2);
@@ -26,6 +44,7 @@ cbuffer PerGeometry : register(b2)
 	float4 g_ScreenInfos : packoffset(c2);
 	float4 g_IndInfos2 : packoffset(c3);
 };
+#	endif
 
 void main(float4 v0 : SV_POSITION0, float2 v1 : TEXCOORD0, out float4 o0 : SV_Target0)
 {
