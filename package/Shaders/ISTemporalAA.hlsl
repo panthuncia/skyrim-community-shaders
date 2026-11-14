@@ -1,3 +1,17 @@
+#if defined(CS_ORG_BINDLESS)
+// The ORG build of the pixel stage (RenderGraph/Engine/ImageSpace, CS_ORG_IMAGESPACE): t0-t5 and s0-s5 from the heap, the shared
+// constants, and PerGeometry from the engine-constants capture through the pass's latch. The vertex stage is the graph's fullscreen
+// triangle.
+#	define ORG_SHARED_CONSTANTS
+// FrameBuffer is the PerFrame the engine's draw had bound (captured with PerGeometry), not CS's shared snapshot.
+#	define ORG_SHARED_FRAMEBUFFER_AT PerGeometryAt
+#	include "Common/OrgEngineConstants.hlsli"
+#	include "Common/OrgResources.hlsli"
+#	define ISTEMPORALAA_ORG_RESOURCES(X) X(SHARED, ConstantBuffer, Shared, 0) X(SRV, Texture2D<float4>, currentFrameTex, 0) X(SRV, Texture2D<float4>, historyTex, 1) X(SRV, Texture2D<float4>, velocityTex, 2) X(SRV, Texture2D<float4>, depthTex, 3) X(SRV, Texture2D<float4>, maskTex, 4) X(SRV, Texture2D<float4>, alphaTex, 5) X(SAMPLER, SamplerState, currentFrameSampler, 0) X(SAMPLER, SamplerState, historySampler, 1) X(SAMPLER, SamplerState, velocitySampler, 2) X(SAMPLER, SamplerState, depthSampler, 3) X(SAMPLER, SamplerState, maskSampler, 4) X(SAMPLER, SamplerState, alphaSampler, 5) X(LATCH, OrgEngineConstantsAt, PerGeometryAt, 2)
+ORG_PUSH_BLOCK(ISTEMPORALAA_ORG_RESOURCES(ORG_HANDLE))
+ISTEMPORALAA_ORG_RESOURCES(ORG_RESOURCE)
+#endif
+
 #include "Common/Color.hlsli"
 #include "Common/DisplayMapping.hlsli"
 #include "Common/DummyVSTexCoord.hlsl"
@@ -13,6 +27,15 @@ struct PS_OUTPUT
 
 #if defined(PSHADER)
 
+#	if defined(CS_ORG_BINDLESS)
+// PerGeometry by row, in the order the D3D11 cbuffer below places it.
+static float4 TexelSizeParams = OrgEngineRow(PerGeometryAt, 0);
+static float4 JitterAndRes = OrgEngineRow(PerGeometryAt, 1);
+static float4 NeighborWeights = OrgEngineRow(PerGeometryAt, 2);
+static float4 TexelOffset = OrgEngineRow(PerGeometryAt, 3);
+static float4 BlendParams = OrgEngineRow(PerGeometryAt, 4);
+static float4 ThresholdParams = OrgEngineRow(PerGeometryAt, 5);
+#	else
 Texture2D<float4> currentFrameTex : register(t0);
 Texture2D<float4> historyTex : register(t1);
 Texture2D<float4> velocityTex : register(t2);
@@ -36,6 +59,7 @@ cbuffer PerGeometry : register(b2)
 	float4 BlendParams : packoffset(c4);
 	float4 ThresholdParams : packoffset(c5);
 };
+#	endif
 
 // Decompiler comparison idiom: cmp(expr) => -(expr), used as a truthy mask in ?: selects.
 #	define cmp -

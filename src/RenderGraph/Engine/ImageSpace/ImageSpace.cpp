@@ -44,6 +44,7 @@ bool RenderGraph::Engine::ImageSpace::Requested()
 
 #	include <algorithm>
 #	include <array>
+#	include <atomic>
 #	include <cctype>
 #	include <cfloat>
 #	include <cmath>
@@ -145,6 +146,12 @@ namespace RenderGraph::Engine::ImageSpace
 			// Drawn from its own geometry, not the manager's quad (the ripple makers): its vertex stage is its source's, which pulls the
 			// geometry by device address from the latch's PerFrame words (TakeDraw); the gate opens it with the draw's index count.
 			bool geometry = false;
+			// Its source has an ORG vertex stage over the graph's fullscreen triangle (the copies that move their coordinates there).
+			bool vertexStage = false;
+			// Its vertex shader writes POSITION, not SV_Position (vanilla's ISMap and both ISNoise forms; CS's ISNoise.hlsl the same, and
+			// ISMap stays on vanilla's DXBC): the engine's draw rasterizes nothing (imagespace-shaders.md, inferred). Taken with no pass:
+			// the engine's state is applied as its draw would, and nothing is drawn.
+			bool rastersNothing = false;
 		};
 
 		/** @brief The push words of an effect's feature handles (EffectInfo::features): s9, then the five headers' resources. */
@@ -191,13 +198,16 @@ namespace RenderGraph::Engine::ImageSpace
 			// manager's fade is above 0.
 			{ Effects::ISHDRTonemapBlendCinematic, "ISHDRTonemapBlendCinematic", "tonemap", "ISHDR.hlsl", 3, 0b111, 3 },
 			{ Effects::ISHDRTonemapBlendCinematicFade, "ISHDRTonemapBlendCinematicFade", "tonemap", "ISHDR.hlsl", 3, 0b111, 3 },
-			// The copies whose vertex shader passes the coordinates through (ISCopyScaleBias and ISCopyTextureMask move them in theirs,
-			// which the graph's fullscreen triangle cannot): back to the chain's destination in the pre-tonemap composites, and the main
+			// The copies whose vertex shader passes the coordinates through: back to the chain's destination in the pre-tonemap composites, and the main
 			// frame's, the menus' and the end-of-frame chain's copies outside every scope (each call a scope of its own).
 			{ Effects::ISCopy, "ISCopy", "iscopy", "ISCopy.hlsl", 1, 0b1, 1, 0, false, true },
 			{ Effects::ISCopyDynamicFetchDisabled, "ISCopyDynamicFetchDisabled", "iscopy", "ISCopy.hlsl", 1, 0b1, 1, 0, false, true },
 			{ Effects::ISCopyCustomViewport, "ISCopyCustomViewport", "iscopy", "ISCopy.hlsl", 1, 0b1, 1, 0, false, true },
 			{ Effects::ISCopyGrayScale, "ISCopyGrayScale", "iscopy", "ISCopy.hlsl", 1, 0b1, 1, 0, false, true },
+			// The copies that move the coordinates in their vertex shader (a scale and bias, or a turn about the centre): ISCopy.hlsl's
+			// ORG vertex stage makes the same change over the fullscreen triangle (EffectInfo::vertexStage).
+			{ Effects::ISCopyScaleBias, "ISCopyScaleBias", "iscopy", "ISCopy.hlsl", 1, 0b1, 1, 0, false, true, 1, false, false, false, true },
+			{ Effects::ISCopyTextureMask, "ISCopyTextureMask", "iscopy", "ISCopy.hlsl", 1, 0b1, 1, 0, false, true, 1, false, false, false, true },
 			// The get-hit effect's last draw (end-of-frame chain slot 7): t0 the image, t1 its blurred copy (kGETHIT_BUFFER's blur).
 			{ Effects::ISDoubleVision, "ISDoubleVision", "gethit", "ISDoubleVision.hlsl", 2, 0b11, 2, 0, false, true },
 			// The water's displacement simulation (the WaterDisplacement effect, slot 31, from the water system's update: ScopeKind::Water)
@@ -217,6 +227,8 @@ namespace RenderGraph::Engine::ImageSpace
 			{ Effects::ISCompositeVolumetricLighting, "ISCompositeVolumetricLighting", "composite", "ISCompositeLensFlareVolumetricLighting.hlsl", 2, 0b01, 2 },
 			{ Effects::ISCompositeLensFlare, "ISCompositeLensFlare", "composite", "ISCompositeLensFlareVolumetricLighting.hlsl", 2, 0b10, 2 },
 			{ Effects::ISCompositeLensFlareVolumetricLighting, "ISCompositeLensFlareVolumetricLighting", "composite", "ISCompositeLensFlareVolumetricLighting.hlsl", 2, 0b11, 2 },
+			// The SIL composite (the pre-tonemap composites' +0x1d8): t0 the source, t1 the indirect lighting.
+			{ Effects::ISSILComposite, "ISSILComposite", "composite", "ISSILComposite.hlsl", 2, 0b11, 2 },
 			// RenderSSAO (100520 / 107245), through the explicit-target Render (100951 / 107733).
 			{ Effects::ISSAOCameraZ, "ISSAOCameraZ", "sao", "ISSAOCameraZ.hlsl", 1, 0b1, 1 },
 			{ Effects::ISMinify, "ISMinify", "sao", "ISSAOMinify.hlsl", 1, 0b1, 1 },
@@ -264,6 +276,22 @@ namespace RenderGraph::Engine::ImageSpace
 			// The water's temporal blend (the explicit-target Render, outside the other scopes): t0 the image, t1 the water history,
 			// t2 the motion vectors, t3 the depth, t4 the water mask; into kMAIN (SV_Target0) and the next history (SV_Target1).
 			{ Effects::ISWaterBlend, "ISWaterBlend", "waterblend", "ISWaterBlend.hlsl", 5, 0b11111, 5, 0, false, true, 2 },
+			// The vanilla TAA (ImageSpaceManager+0x1f0 in the end-of-frame chain, when Upscaling does not replace it): t0 the image, t1
+			// the history, t2 the motion vectors, t3 the depth, t4 the TAA mask, t5 the alpha; into the image (SV_Target0) and the next
+			// history (SV_Target1). Each call outside a scope is a scope of its own. The UI and water forms have no CS source path
+			// (imagespace-shaders.md) and stay the engine's.
+			{ Effects::ISTemporalAA, "ISTemporalAA", "taa", "ISTemporalAA.hlsl", 6, 0b111111, 6, 0, false, true, 2 },
+			// The local map's edge pass (16094: kLOCAL_MAP_SWAP into kLOCAL_MAP, outside the frame's scopes: each call a scope of its own).
+			{ Effects::ISLocalMap, "ISLocalMap", "localmap", "ISLocalMap.hlsl", 1, 0b1, 1, 0, false, true },
+			// A colour fill (menu 3D's clear among others). Draws with a stencil test or a manager rectangle are refused as for any effect.
+			// The snow's subsurface scattering (Main::RenderWorld, outside the frame's scopes: each call a scope of its own): t0 the depth,
+			// t1 the snow's diffuse, t2 its alpha and specular.
+			{ Effects::ISSnowSSS, "ISSnowSSS", "snow", "ISSnowSSS.hlsl", 3, 0b111, 3, 0, false, true },
+			{ Effects::ISSimpleColor, "ISSimpleColor", "simplecolor", "ISSimpleColor.hlsl", 0, 0, 0, 0, false, true },
+			// The effects whose vertex shader writes no SV_Position (EffectInfo::rastersNothing): no pass, nothing drawn.
+			{ Effects::ISMap, "ISMap", "nodraw", "ISMap.hlsl", 0, 0, 0, 0, false, true, 1, false, false, false, false, true },
+			{ Effects::ISNoiseScrollAndBlend, "ISNoiseScrollAndBlend", "nodraw", "ISNoise.hlsl", 0, 0, 0, 0, false, true, 1, false, false, false, false, true },
+			{ Effects::ISNoiseNormalmap, "ISNoiseNormalmap", "nodraw", "ISNoise.hlsl", 0, 0, 0, 0, false, true, 1, false, false, false, false, true },
 		});
 
 		/**
@@ -363,6 +391,27 @@ namespace RenderGraph::Engine::ImageSpace
 		};
 
 		/**
+		 * @brief A shape first seen in play (not in the session's registration): a client of its own with one pass, registered on first
+		 * sight. FrameAnchors::Register asks the build manager for the anchor's graph, which builds it off the render thread; the main
+		 * registration keeps running meanwhile. Once the built graph holds it, each of its draws is a run of its own (the main batch runs
+		 * first). The manifest has the shape from the next session, which registers it with the rest at Setup.
+		 */
+		struct LateClient
+		{
+			std::string id;
+			std::shared_ptr<const Spec> spec;  // entry 0 of its own gate and latch
+			std::shared_ptr<RunGate> gate;
+			std::shared_ptr<org::LatchBlock> latch;
+			std::atomic<bool> made = false;  // the last build made its pass (set on the build thread)
+			bool failed = false;             // its epoch failed with it: its draws stay with the engine
+			bool ready = false;              // its first draw on the graph was logged
+			std::vector<Pending> batch;      // the draw its run takes (one)
+		};
+
+		/** @brief At most this many shapes are built on first sight in a session: more means something draws a new shape each frame. */
+		constexpr std::size_t kMaxLateClients = 64;
+
+		/**
 		 * @brief The engine functions whose ImageSpace work is taken, each a scope: its draws are batched, and the batch runs at the
 		 * scope's end at the latest (CS code around these calls may use D3D11 or run other anchors).
 		 */
@@ -377,28 +426,6 @@ namespace RenderGraph::Engine::ImageSpace
 			Water,        // the water system's displacement update (31385 / 32176): the WaterDisplacement effect's simulation draws
 			Count
 		};
-
-		/**
-		 * @brief How many batches each kind of scope may start in a frame: its share of the anchor's runs a frame. Each kind has a
-		 * share of its own, so the scopes early in the frame never use up the runs of the ones after them. The pre-tonemap
-		 * composites, the SAO and reflection passes and the HDR effect have a second run for a batch cut short by a draw the graph
-		 * does not take. Effect scopes have one run per call: the depth-of-field (or distant blur) draw, its two compute blurs,
-		 * refraction, the radial blur, the snow copy, the water blend, the LDR downsample and the copies outside every scope (the
-		 * main frame's, the menus' and the end-of-frame chain's), and there the blur composites' and the get-hit effect's draws. The
-		 * water's flow copies have a share of their own (one run per copy: a cell load queues a few). The water's displacement update
-		 * has two (a second for a batch cut short by a ripple, which the graph does not take).
-		 * Run leases give an anchor as many runs as it makes, so these are bounds against a runaway frame, not budgets: each is
-		 * several times what a frame uses (the blur composites, bright pass and adaptation chain take several runs in one scope).
-		 */
-		constexpr std::array<std::uint32_t, static_cast<std::size_t>(ScopeKind::Count)> kScopeRuns{ 16, 16, 16, 16, 64, 16, 8 };
-
-		constexpr std::uint32_t ScopeRunsTotal()
-		{
-			std::uint32_t total = 0;
-			for (const auto runs : kScopeRuns)
-				total += runs;
-			return total;
-		}
 
 		/** @brief A raster program's key: the effect, the outputs' formats and the packed blend state. */
 		using ProgramKey = std::tuple<std::size_t, rhi::Format, rhi::Format, std::uint32_t>;
@@ -446,6 +473,9 @@ namespace RenderGraph::Engine::ImageSpace
 			std::map<ShapeKey, const Spec*> specOf;
 			std::map<std::int32_t, const void*> importedObjects;
 			std::set<ShapeKey> refusedShapes;    // shapes no pass can be made for (logged once)
+			// Shapes first seen in play, each a client of its own built on first sight (LateClient), by shape.
+			std::map<ShapeKey, std::shared_ptr<LateClient>> late;
+			std::uint32_t lateSerial = 0;
 			std::set<ShapeKey> loggedConstants;  // shapes whose constant sizes were logged (CS_ORG_IMAGESPACE_LOG)
 			std::uint32_t registrations = 0;
 			// The shape manifest (Data/ShaderCache/v2/ImageSpaceShapes.json): read at Setup, written when a session sees new shapes.
@@ -466,7 +496,6 @@ namespace RenderGraph::Engine::ImageSpace
 			// The frame and its batches.
 			std::uint32_t scope = 0;                                   // the current scope (ScopeKind)
 			std::uint32_t drawIndex = 0;                               // eligible draws and dispatches so far in the current scope
-			std::array<std::uint32_t, kScopeRuns.size()> scopeRuns{};  // batches each kind of scope started this frame
 			std::uint32_t frame = UINT32_MAX;
 			std::uint32_t runsThisFrame = 0;
 			std::uint32_t scopeDepth = 0;
@@ -565,6 +594,9 @@ namespace RenderGraph::Engine::ImageSpace
 			state.on = false;
 			logger::error("[ORG] ImageSpace: {}; every ImageSpace effect returns to the engine", a_why);
 			FrameAnchors::Unregister(kClientId);
+			for (const auto& [key, late] : state.late)
+				FrameAnchors::Unregister(late->id);
+			state.late.clear();
 		}
 
 		/** @brief CS_ORG_IMAGESPACE_EFFECTS: effect names or groups, any case; unset, empty or "all" selects every effect. */
@@ -680,8 +712,9 @@ namespace RenderGraph::Engine::ImageSpace
 
 		/**
 		 * @brief The engine target a shader resource view is: a render target's index (with a mip for a target that is one mip of
-		 * another's texture), a depth-stencil target's depth SRV as kDepthInput | index, or -1. kFRAMEBUFFER (an RTV only) is never
-		 * one.
+		 * another's texture), a depth-stencil target's depth SRV as kDepthInput | index, or -1. kFRAMEBUFFER is one when the engine
+		 * made an SRV of the back buffer (the screenshot copies read it): FrameAnchors::EngineTarget imports the back buffer with that
+		 * view (in native mode its graph-owned slot), so the pass declares the read.
 		 */
 		std::int32_t InputOfView(ID3D11ShaderResourceView* a_view)
 		{
@@ -689,6 +722,8 @@ namespace RenderGraph::Engine::ImageSpace
 			if (!renderer || !a_view)
 				return -1;
 			const auto& targets = renderer->GetRuntimeData().renderTargets;
+			if (targets[RE::RENDER_TARGET::kFRAMEBUFFER].SRV == a_view)
+				return static_cast<std::int32_t>(RE::RENDER_TARGET::kFRAMEBUFFER);
 			for (std::uint32_t i = RE::RENDER_TARGET::kMAIN; i < RE::RENDER_TARGET::kTOTAL; ++i)
 				if (targets[i].SRV == a_view)
 					return targets[i].texture ? static_cast<std::int32_t>(i) : MipInputOfView(a_view);
@@ -1073,9 +1108,10 @@ namespace RenderGraph::Engine::ImageSpace
 
 		/**
 		 * @brief The draw's shape from the shadow state, as SetDirtyStates is about to apply it (all but the viewport: ReadViewport
-		 * reads it once SetDirtyStates ran); false with a reason when no pass can draw it.
+		 * reads it once SetDirtyStates ran); false with a reason when no pass can draw it. a_clears: SetDirtyStates clears the target
+		 * as it binds it (the caller runs the pending batch first, so the clear lands between it and this draw).
 		 */
-		bool ReadShape(std::size_t a_effect, ShapeKey& a_out, OutputView& a_output, std::string_view& a_refusal)
+		bool ReadShape(std::size_t a_effect, ShapeKey& a_out, OutputView& a_output, std::string_view& a_refusal, bool& a_clears)
 		{
 			const auto& effect = kEffects[a_effect];
 			auto& shadow = RE::BSGraphics::RendererShadowState::GetSingleton()->GetRuntimeData();
@@ -1109,12 +1145,10 @@ namespace RenderGraph::Engine::ImageSpace
 				a_refusal = "a depth or stencil test";
 				return false;
 			}
-			// A clear is applied by SetDirtyStates when the target is bound; the pending batch would run after it.
+			// A clear is applied by SetDirtyStates when the target is bound, through the D3D11 context (the native context and DXVK keep
+			// it in the stream's order). The pending batch must run before it.
 			constexpr std::uint32_t kDirtyRenderTarget = 0x1;
-			if ((shadow.stateUpdateFlags.underlying() & kDirtyRenderTarget) && shadow.setRenderTargetMode[0] <= RE::BSGraphics::SetRenderTargetMode::SRTM_CLEAR_STENCIL) {
-				a_refusal = "its target is cleared at the bind";
-				return false;
-			}
+			a_clears = (shadow.stateUpdateFlags.underlying() & kDirtyRenderTarget) && shadow.setRenderTargetMode[0] <= RE::BSGraphics::SetRenderTargetMode::SRTM_CLEAR_STENCIL;
 			if (!ResolveOutput(output, a_output, a_refusal))
 				return false;
 			if (shadow.rasterStateScissorMode != 0) {
@@ -1366,8 +1400,9 @@ namespace RenderGraph::Engine::ImageSpace
 			BlendFor(blendBits, effect.targets, blend, error);
 			RasterProgram::Desc desc{};
 			desc.pixelSource = effect.source;
-			// A geometry effect's vertex stage is its source's ORG build, which pulls the geometry (TakeDraw writes where it is).
-			if (effect.geometry)
+			// A geometry effect's vertex stage is its source's ORG build, which pulls the geometry (TakeDraw writes where it is); a
+			// vertexStage effect's moves the fullscreen triangle's coordinates.
+			if (effect.geometry || effect.vertexStage)
 				desc.vertexSource = effect.source;
 			// FXC-era sources (vector conditions in ?:).
 			desc.languageVersion = L"2018";
@@ -1535,9 +1570,10 @@ namespace RenderGraph::Engine::ImageSpace
 
 		/**
 		 * @brief The pass for a shape, made at Setup (its textures imported), or none (logged once). Its samplers, blend state and program
-		 * are taken when the graph is built (MakePass): the engine fills its state tables after Setup.
+		 * are taken when the graph is built (MakePass): the engine fills its state tables after Setup. a_tag replaces the entry in its
+		 * name (a shape built on first sight: every such pass is entry 0 of its own client).
 		 */
-		std::shared_ptr<const Spec> MakeSpec(const ShapeKey& a_key, std::uint32_t a_entry)
+		std::shared_ptr<const Spec> MakeSpec(const ShapeKey& a_key, std::uint32_t a_entry, std::string_view a_tag = {})
 		{
 			auto& state = IS();
 			const auto& effect = kEffects[a_key.effect];
@@ -1574,7 +1610,8 @@ namespace RenderGraph::Engine::ImageSpace
 					logger::info("[ORG] ImageSpace: {} into {} has no pass this session ({})", effect.effectName, NameForLog(a_key.output), refusal);
 				return nullptr;
 			}
-			spec->name = fmt::format("{}.{}.{}", effect.effectName, NameForLog(a_key.output), spec->entry);
+			spec->name = a_tag.empty() ? fmt::format("{}.{}.{}", effect.effectName, NameForLog(a_key.output), spec->entry) :
+			                             fmt::format("{}.{}.{}", effect.effectName, NameForLog(a_key.output), a_tag);
 			return spec;
 		}
 
@@ -1694,6 +1731,36 @@ namespace RenderGraph::Engine::ImageSpace
 		}
 
 		/**
+		 * @brief A client's commit: each pending draw's constants location written into a_latch at its entry and its gate entry opened.
+		 * The sources it reads by heap index are held until the run lease index's next run (its last run retired before the index was
+		 * opened again).
+		 */
+		void CommitBatch(const std::vector<Pending>& a_batch, org::LatchBlock& a_latch, RunGate& a_gate)
+		{
+			auto& state = IS();
+			const org::RunRef run = RenderGraphRuntime::Get().Host()->CurrentRun();
+			if (state.heldSources.size() <= run.lease) {
+				state.heldSources.resize(static_cast<std::size_t>(run.lease) + 1);
+				state.heldRuns.resize(static_cast<std::size_t>(run.lease) + 1);
+			}
+			auto& held = state.heldSources[run.lease];
+			// A new run of the index lets the last one's sources go; another batch of the same run (regions) adds to them.
+			if (!(state.heldRuns[run.lease] == run)) {
+				held.clear();
+				state.heldRuns[run.lease] = run;
+			}
+			for (const auto& pending : a_batch) {
+				if (pending.source)
+					held.push_back(pending.source);
+				a_latch.WriteValue(run, pending.entry * static_cast<std::uint32_t>(sizeof(ConstantsAt)), pending.at);
+				if (pending.compute)
+					a_gate.OpenDispatch(pending.entry, pending.groups[0], pending.groups[1], pending.groups[2]);
+				else
+					a_gate.OpenDraw(pending.entry, pending.vertices);
+			}
+		}
+
+		/**
 		 * @brief Registers the client with a pass for every shape of a_keys (numbered from 0 by their place in the frame), replacing any
 		 * earlier registration. Setup's, and again on the same shapes when the engine made its targets again. The anchor's graph is
 		 * built with it at the next build point; FrameAnchors::CanRun says when.
@@ -1710,12 +1777,7 @@ namespace RenderGraph::Engine::ImageSpace
 				if (state.specs.size() >= kGateEntries)
 					break;
 				if (auto spec = MakeSpec(key, static_cast<std::uint32_t>(state.specs.size()))) {
-					for (const auto name : { spec->key.output, spec->key.output1 })
-						if (name >= 0)
-							state.importedObjects[ImportOfName(name)] = EngineObjectOf(name);
-					for (const auto name : spec->key.inputs)
-						if (name >= 0)
-							state.importedObjects[ImportOfName(name)] = EngineObjectOf(name);
+					NoteImports(*spec);
 					state.specOf.emplace(spec->key, spec.get());
 					state.specs.push_back(std::move(spec));
 				}
@@ -1746,28 +1808,7 @@ namespace RenderGraph::Engine::ImageSpace
 			client.active = [] { return !IS().batch.empty(); };
 			client.commit = [](const FrameAnchors::Point&) {
 				auto& current = IS();
-				const org::RunRef run = RenderGraphRuntime::Get().Host()->CurrentRun();
-				// The sources this lease index's last run read by heap index are retired now: that run retired before the index was
-				// opened again.
-				if (current.heldSources.size() <= run.lease) {
-					current.heldSources.resize(static_cast<std::size_t>(run.lease) + 1);
-					current.heldRuns.resize(static_cast<std::size_t>(run.lease) + 1);
-				}
-				auto& held = current.heldSources[run.lease];
-				// A new run of the index lets the last one's sources go; another batch of the same run (regions) adds to them.
-				if (!(current.heldRuns[run.lease] == run)) {
-					held.clear();
-					current.heldRuns[run.lease] = run;
-				}
-				for (const auto& pending : current.batch) {
-					if (pending.source)
-						held.push_back(pending.source);
-					current.latch->WriteValue(run, pending.entry * static_cast<std::uint32_t>(sizeof(ConstantsAt)), pending.at);
-					if (pending.compute)
-						current.gate->OpenDispatch(pending.entry, pending.groups[0], pending.groups[1], pending.groups[2]);
-					else
-						current.gate->OpenDraw(pending.entry, pending.vertices);
-				}
+				CommitBatch(current.batch, *current.latch, *current.gate);
 				if (!current.batch.empty())
 					current.committedLast = current.batch.back().entry;
 			};
@@ -1792,6 +1833,86 @@ namespace RenderGraph::Engine::ImageSpace
 			++state.registrations;
 			logger::info("[ORG] ImageSpace: registered {} passes (registration {}); the anchor's graph holds them from its next build", state.specs.size(),
 				state.registrations);
+		}
+
+		/** @brief Notes the engine objects a spec's imports were made from, for the resize check (CheckImports). */
+		void NoteImports(const Spec& a_spec)
+		{
+			auto& state = IS();
+			for (const auto name : { a_spec.key.output, a_spec.key.output1 })
+				if (name >= 0)
+					state.importedObjects[ImportOfName(name)] = EngineObjectOf(name);
+			for (const auto name : a_spec.key.inputs)
+				if (name >= 0)
+					state.importedObjects[ImportOfName(name)] = EngineObjectOf(name);
+		}
+
+		/**
+		 * @brief The client of a shape first seen in play, registered now if it has none (LateClient): its program is queued on the
+		 * program build thread, and FrameAnchors::Register asks for the anchor's graph, which the build manager builds off the render
+		 * thread. Null (with a_refusal) when no pass can be made for the shape or the session built too many. Render thread.
+		 */
+		LateClient* LateFor(const ShapeKey& a_key, std::string_view& a_refusal)
+		{
+			auto& state = IS();
+			if (const auto found = state.late.find(a_key); found != state.late.end())
+				return found->second.get();
+			if (state.late.size() >= kMaxLateClients) {
+				a_refusal = "the session built too many shapes on first sight";
+				return nullptr;
+			}
+			const auto& effect = kEffects[a_key.effect];
+			auto late = std::make_shared<LateClient>();
+			late->id = fmt::format("{}.late.{}", kClientId, ++state.lateSerial);
+			late->spec = MakeSpec(a_key, 0, fmt::format("late{}", state.lateSerial));
+			if (!late->spec) {
+				a_refusal = "no pass can be made for its shape (logged)";
+				return nullptr;
+			}
+			late->gate = RunGate::Create(late->id, 1);
+			late->latch = org::LatchBlock::Create(late->id + "::ConstantsAt", static_cast<std::uint32_t>(sizeof(ConstantsAt)));
+			if (!late->gate || !late->latch) {
+				a_refusal = "its run gate or latch could not be made";
+				return nullptr;
+			}
+			// Queued now, on the render thread (the defines read State); the pass takes it at the build.
+			std::array<rhi::BlendAttachment, 2> blend{};
+			std::string error;
+			if (a_key.compute)
+				ComputePrograms().Get(a_key.effect, [&] { return DescribeCompute(a_key.effect); });
+			else if (BlendFor(a_key.blend, effect.targets, blend, error))
+				Programs().Get(KeyOf(*late->spec), [&] { return DescribeRaster(KeyOf(*late->spec)); });
+			FrameAnchors::ClientDesc client{};
+			client.id = late->id;
+			client.passes.push_back({ .name = fmt::format("{}.{}", late->id, late->spec->name),
+				.anchor = Anchor::ImageSpace,
+				.order = static_cast<std::int32_t>(kGateEntries + state.lateSerial),
+				.kind = a_key.compute ? FrameAnchors::PassKind::Compute : FrameAnchors::PassKind::Render,
+				.make = [late, latch = std::shared_ptr<const org::LatchBlock>(late->latch), gate = std::shared_ptr<const RunGate>(late->gate)] {
+					auto pass = MakePass(late->spec, latch, gate);
+					late->made = pass != nullptr;
+					return pass;
+				},
+				.atExecution = true,
+				.gated = true });
+			client.sharedConstants = true;
+			client.gates = { late->gate };
+			client.active = [late] { return !late->batch.empty(); };
+			client.commit = [late](const FrameAnchors::Point&) { CommitBatch(late->batch, *late->latch, *late->gate); };
+			client.executed = [](const FrameAnchors::Point&) { IS().executed = true; };
+			client.onFailed = [late] {
+				late->failed = true;
+				logger::error("[ORG] ImageSpace: the pass of {}, built on first sight, failed with the anchor; its draws return to the engine", late->spec->name);
+			};
+			if (!FrameAnchors::Register(std::move(client))) {
+				a_refusal = "the ImageSpace anchor refused its client";
+				return nullptr;
+			}
+			NoteImports(*late->spec);
+			logger::info("[ORG] ImageSpace: {} into {} is a shape this session did not register; its pass is built now off the render thread ({}), and the "
+						 "manifest has it from the next session",
+				effect.effectName, NameForLog(a_key.output), late->id);
+			return state.late.emplace(a_key, std::move(late)).first->second.get();
 		}
 
 		/** @brief The manifest's file, beside the shader store (Util::kShaderStoreDirName: Data/ShaderCache keeps only that folder). */
@@ -2033,10 +2154,17 @@ namespace RenderGraph::Engine::ImageSpace
 				}
 			if (!changed)
 				return;
-			logger::info("[ORG] ImageSpace: the engine made its targets again; the {} passes register again on the new imports", state.specs.size());
+			logger::info("[ORG] ImageSpace: the engine made its targets again; the {} passes and {} built on first sight register again on the new imports",
+				state.specs.size(), state.late.size());
 			std::vector<ShapeKey> keys;
 			for (const auto& spec : state.specs)
 				keys.push_back(spec->key);
+			// The shapes built on first sight join the main registration: it is built again for the new imports anyway.
+			for (const auto& [key, late] : state.late) {
+				keys.push_back(key);
+				FrameAnchors::Unregister(late->id);
+			}
+			state.late.clear();
 			state.refusedShapes.clear();
 			RegisterClient(keys);
 		}
@@ -2083,19 +2211,16 @@ namespace RenderGraph::Engine::ImageSpace
 		 * failure (its onFailed returns ImageSpace to the engine at the next poll). The engine's state for those draws is gone by
 		 * now, so they cannot be drawn by the engine any more: they are counted and logged as an error.
 		 */
-		void Flush()
+		/** @brief Runs the anchor for a_count withheld draws (the main batch's, or a shape built on first sight's) and counts them. */
+		void RunAnchor(std::size_t a_count)
 		{
 			auto& state = IS();
-			if (state.batch.empty() || state.flushing)
-				return;
-			const auto count = state.batch.size();
+			const auto count = a_count;
 			state.executed = false;
 			state.flushing = true;
 			const auto result = FrameAnchors::Run(Anchor::ImageSpace);
 			state.flushing = false;
 			++state.runsThisFrame;
-			state.batch.clear();
-			state.keepAlive.clear();
 			if (!result || !state.executed) {
 				state.lost += count;
 				static Util::ReasonLog s_lost("[ORG] ImageSpace: a batch the anchor could run did not draw", spdlog::level::err);
@@ -2106,6 +2231,31 @@ namespace RenderGraph::Engine::ImageSpace
 			++state.batches;
 			if (state.batches == 1)
 				logger::info("[ORG] ImageSpace: the first batch ({} draws) ran on the graph", count);
+		}
+
+		void Flush()
+		{
+			auto& state = IS();
+			if (state.batch.empty() || state.flushing)
+				return;
+			RunAnchor(state.batch.size());
+			state.batch.clear();
+			state.keepAlive.clear();
+		}
+
+		/**
+		 * @brief A withheld draw of a shape built on first sight: the main batch runs first (the engine's order), then this draw as a run
+		 * of its own, through its client's gate and latch.
+		 */
+		void RunLate(LateClient& a_late, Pending a_pending, std::span<const std::shared_ptr<const org::LatchBlock>> a_blocks)
+		{
+			Flush();
+			// The constant chunks the draw reads, until its run.
+			const std::vector<std::shared_ptr<const org::LatchBlock>> keep(a_blocks.begin(), a_blocks.end());
+			a_pending.entry = 0;
+			a_late.batch.push_back(std::move(a_pending));
+			RunAnchor(1);
+			a_late.batch.clear();
 		}
 
 		/**
@@ -2173,7 +2323,6 @@ namespace RenderGraph::Engine::ImageSpace
 			Flush();
 			state.frame = frame;
 			state.runsThisFrame = 0;
-			state.scopeRuns.fill(0);
 			QueuePrograms();
 			CheckImports();
 			RetryBuild();
@@ -2181,51 +2330,77 @@ namespace RenderGraph::Engine::ImageSpace
 			LogEngineDraws();
 		}
 
+		/** @brief Where a withheld draw goes: its pass, and the client built on first sight it belongs to (null: the main batch). */
+		struct Admission
+		{
+			const Spec* spec = nullptr;
+			LateClient* late = nullptr;
+		};
+
 		/**
 		 * @brief The pass for a read shape, and room for it in a batch: the spec when the draw or dispatch may be withheld (any pending
-		 * batch it cannot join has run), or null when the engine keeps it (its reason counted).
+		 * batch it cannot join has run), or no spec when the engine keeps it (its reason counted). A shape the session did not register
+		 * is built on first sight (LateFor); its draws are taken once the anchor's built graph holds its pass, each a run of its own.
 		 */
-		const Spec* AdmitShape(const ShapeKey& a_key, std::size_t a_effect)
+		Admission AdmitShape(const ShapeKey& a_key, std::size_t a_effect)
 		{
 			auto& state = IS();
 			NoteShape(a_key);
 			const Spec* spec = SpecFor(a_key);
 			if (!spec) {
-				Flush();
-				Refuse("a shape this session did not register; the manifest has it from the next session", a_effect);
-				return nullptr;
+				std::string_view refusal;
+				auto* late = LateFor(a_key, refusal);
+				if (!late) {
+					Flush();
+					Refuse(refusal, a_effect);
+					return {};
+				}
+				if (late->failed) {
+					Flush();
+					Refuse("its pass, built on first sight, failed with the anchor", a_effect);
+					return {};
+				}
+				if (!FrameAnchors::CanRun(late->id, Anchor::ImageSpace)) {
+					Flush();
+					Refuse("a shape first seen this session, whose pass is being built off the render thread", a_effect);
+					return {};
+				}
+				if (!late->made) {
+					Flush();
+					Refuse("its pass was left out of the graph's build (logged with the reason)", a_effect);
+					return {};
+				}
+				if (!late->ready) {
+					late->ready = true;
+					logger::info("[ORG] ImageSpace: {} is drawn on the graph from now (built on first sight)", late->spec->name);
+				}
+				return { late->spec.get(), late };
 			}
 			if (!state.passMade[spec->entry]) {
 				Flush();
 				Refuse("its pass was left out of the graph's build (logged with the reason)", a_effect);
-				return nullptr;
+				return {};
 			}
 			// A batch runs in its passes' order: a pass at or before the last one taken (the engine's order differs from the manifest's,
 			// or the same pass again) starts a new batch.
 			if (!state.batch.empty() && spec->entry <= state.lastEntry)
 				Flush();
-			// A new batch is a new run: withheld only when the run can draw it now (owner, built graph), and only as often as its kind of
-			// scope may start one this frame (kScopeRuns).
+			// A new batch is a new run: withheld only when the run can draw it now (owner, built graph). An anchor makes as many runs a
+			// frame as its batches need (run leases), so no scope runs out of them.
 			if (state.batch.empty()) {
-				if (state.scopeRuns[state.scope] >= kScopeRuns[state.scope]) {
-					Refuse("its scope used its runs this frame", a_effect);
-					return nullptr;
-				}
 				if (!FrameAnchors::CanRun(kClientId, Anchor::ImageSpace)) {
 					// Before the first build after Setup or after a resize's registration (one build point).
 					Refuse("the ImageSpace anchor's graph does not hold this registration yet", a_effect);
-					return nullptr;
+					return {};
 				}
 			}
-			return spec;
+			return { spec, nullptr };
 		}
 
 		/** @brief A withheld draw or dispatch joins the batch (a new batch counts against its scope). */
 		void AddToBatch(const Spec& a_spec, Pending a_pending, std::span<const std::shared_ptr<const org::LatchBlock>> a_blocks)
 		{
 			auto& state = IS();
-			if (state.batch.empty())
-				++state.scopeRuns[state.scope];
 			a_pending.entry = a_spec.entry;
 			state.batch.push_back(a_pending);
 			for (const auto& block : a_blocks)
@@ -2280,17 +2455,28 @@ namespace RenderGraph::Engine::ImageSpace
 			scope.drew = true;
 			const auto& effect = kEffects[scope.effect];
 			++state.drawIndex;
+			static REL::Relocation<void (*)(bool)> setDirtyStates{ REL::RelocationID(75580, 77386) };
+			if (effect.rastersNothing) {
+				// Its state goes to D3D11 as the draw would apply it (a clear at the bind among it), after the pending batch.
+				Flush();
+				setDirtyStates(false);
+				++state.taken;
+				return true;
+			}
 			ShapeKey key{};
 			OutputView output;
 			std::string_view refusal;
-			if (!ReadShape(scope.effect, key, output, refusal)) {
+			bool clears = false;
+			if (!ReadShape(scope.effect, key, output, refusal, clears)) {
 				Flush();
 				Refuse(refusal, scope.effect);
 				return false;
 			}
+			// The clear SetDirtyStates makes below goes after the batch's draws, and this draw starts a new batch after it.
+			if (clears)
+				Flush();
 			// The engine's state for the draw goes to D3D11 as before (the draw would apply it; when the engine draws, its own call
 			// finds nothing left to apply). The shadow state then holds the viewport the draw uses.
-			static REL::Relocation<void (*)(bool)> setDirtyStates{ REL::RelocationID(75580, 77386) };
 			setDirtyStates(false);
 			std::string detail;
 			if (!ReadViewport(output, key, refusal, detail)) {
@@ -2298,8 +2484,8 @@ namespace RenderGraph::Engine::ImageSpace
 				Refuse(refusal, scope.effect, detail);
 				return false;
 			}
-			const Spec* spec = AdmitShape(key, scope.effect);
-			if (!spec)
+			const auto admitted = AdmitShape(key, scope.effect);
+			if (!admitted.spec)
 				return false;
 			// The capture records the draw's constants as a use: the draw is withheld, so no draw hook records it.
 			const auto use = Constants::Capture(Constants::kDrawStages);
@@ -2331,7 +2517,10 @@ namespace RenderGraph::Engine::ImageSpace
 			Pending pending{ .at = { .srv = at.srvIndex, .offset = at.offset, .frameSrv = frameAt.srvIndex, .frameOffset = frameAt.offset, .size = size, .frameSize = frameAt.size } };
 			if (effect.geometry && !LatchGeometry(pending, scope.effect))
 				return false;
-			AddToBatch(*spec, std::move(pending), blocks);
+			if (admitted.late)
+				RunLate(*admitted.late, std::move(pending), blocks);
+			else
+				AddToBatch(*admitted.spec, std::move(pending), blocks);
 			if (state.logShapes && state.loggedConstants.insert(key).second)
 				logger::info("[ORG] ImageSpace: {} into {} taken with {} bytes of PerGeometry ({}) and {} of PerFrame", effect.effectName, NameForLog(key.output), size,
 					!slot ? "none bound" : slot->group == Constants::Group::PSGeometry ? "PS geometry pool" : "custom", frameAt.size);
@@ -2364,8 +2553,8 @@ namespace RenderGraph::Engine::ImageSpace
 				Refuse("an empty dispatch", scope.effect);
 				return false;
 			}
-			const Spec* spec = AdmitShape(key, scope.effect);
-			if (!spec)
+			const auto admitted = AdmitShape(key, scope.effect);
+			if (!admitted.spec)
 				return false;
 			// A flow copy's source, a loaded texture (an ORG engine texture, or DXVK's imported), read by its heap index from the latch.
 			// It is a flow texture BGSAutoWater loaded from a file and never writes: the immutable class the graph exempts from
@@ -2408,7 +2597,11 @@ namespace RenderGraph::Engine::ImageSpace
 			ConstantsAt where{ .srv = at.srvIndex, .offset = at.offset, .size = at.size };
 			if (source)
 				where.source = sourceBinding.index;
-			AddToBatch(*spec, { .at = where, .compute = true, .groups = { a_x, a_y, a_z }, .source = std::move(sourceBinding.owner) }, blocks);
+			Pending pending{ .at = where, .compute = true, .groups = { a_x, a_y, a_z }, .source = std::move(sourceBinding.owner) };
+			if (admitted.late)
+				RunLate(*admitted.late, std::move(pending), blocks);
+			else
+				AddToBatch(*admitted.spec, std::move(pending), blocks);
 			if (state.logShapes && state.loggedConstants.insert(key).second)
 				logger::info("[ORG] ImageSpace: {} into {} taken with {} bytes of compute constants", effect.effectName, NameForLog(key.output), at.size);
 			return true;
@@ -2474,8 +2667,8 @@ namespace RenderGraph::Engine::ImageSpace
 		}
 
 		/**
-		 * @brief A scope begins (ScopeKind): its draws' passes are ordered by their place in it, and its kind may start kScopeRuns
-		 * batches a frame. Nested scopes are part of the outer one.
+		 * @brief A scope begins (ScopeKind): its draws' passes are ordered by their place in it, and its batch runs at its end at the
+		 * latest. Nested scopes are part of the outer one.
 		 */
 		void EnterScope(ScopeKind a_scope)
 		{
@@ -2886,10 +3079,10 @@ namespace RenderGraph::Engine::ImageSpace
 	std::string Status()
 	{
 		const auto& state = IS();
-		return fmt::format("ImageSpace: {}, {} passes, {} registrations, {} shapes in the manifest ({} seen this session), {} draws taken in {} batches, {} left to the "
-						   "engine, {} missed",
-			state.on ? "on" : "off", state.specs.size(), state.registrations, state.manifest.size(), state.seen.size(), state.taken, state.batches, state.engineDrawn,
-			state.lost);
+		return fmt::format("ImageSpace: {}, {} passes, {} built on first sight, {} registrations, {} shapes in the manifest ({} seen this session), {} draws taken in "
+						   "{} batches, {} left to the engine, {} missed",
+			state.on ? "on" : "off", state.specs.size(), state.late.size(), state.registrations, state.manifest.size(), state.seen.size(), state.taken, state.batches,
+			state.engineDrawn, state.lost);
 	}
 }
 
