@@ -8,34 +8,40 @@ namespace DCLF::Draws
 {
 	std::shared_ptr<const FrameBlockViews> FrameBlockViews::Create(rhi::Device a_device, const std::shared_ptr<org::Buffer>& a_frameConstants)
 	{
+		std::array<Block, kFrameBlocks> blocks{};
+		ForEachFrameBlock([&](bool a_pixel, std::uint32_t a_register, std::uint32_t a_block) {
+			// The shared light block is half a slot (FrameSlots.h, kSharedLightBlockBytes).
+			const std::uint64_t bytes = a_pixel && a_register == 3 ? kSharedLightBlockBytes : kFrameSlotBytes;
+			blocks[a_block] = { FrameBlockOffset(a_pixel, a_register), static_cast<std::uint32_t>(bytes) };
+		});
+		return CreateFor(a_device, a_frameConstants, blocks, "frame block");
+	}
+
+	std::shared_ptr<const FrameBlockViews> FrameBlockViews::CreateFor(rhi::Device a_device, const std::shared_ptr<org::Buffer>& a_buffer, std::span<const Block> a_blocks,
+		const char* a_what)
+	{
 		auto* host = RenderGraphRuntime::Get().Host();
 		auto service = host && host->Graph() ? host->Graph()->RetainDescriptorService() : nullptr;
-		if (!service || !a_frameConstants) {
-			logger::error("[DCLF] frame block views: no descriptor service");
+		if (!service || !a_buffer || a_blocks.size() > kFrameBlocks) {
+			logger::error("[DCLF] {} views: no descriptor service", a_what);
 			return nullptr;
 		}
 		auto views = std::make_shared<FrameBlockViews>();
 		views->service = std::move(service);
-		views->buffer = a_frameConstants;
-		const auto resource = a_frameConstants->GetAPIResource().GetHandle();
-		bool ok = true;
-		ForEachFrameBlock([&](bool a_pixel, std::uint32_t a_register, std::uint32_t a_block) {
-			if (!ok)
-				return;
+		views->buffer = a_buffer;
+		const auto resource = a_buffer->GetAPIResource().GetHandle();
+		for (std::uint32_t b = 0; b < a_blocks.size(); ++b) {
 			const rhi::DescriptorSlot slot = views->service->AllocateDescriptorSlot(rhi::DescriptorHeapType::CbvSrvUav, true);
-			views->slots[a_block] = slot;
-			views->made = a_block + 1;
-			// The shared light block is half a slot (FrameSlots.h, kSharedLightBlockBytes).
-			const std::uint64_t bytes = a_pixel && a_register == 3 ? kSharedLightBlockBytes : kFrameSlotBytes;
-			const rhi::CbvDesc desc{ .byteOffset = FrameBlockOffset(a_pixel, a_register), .byteSize = static_cast<std::uint32_t>(bytes) };
+			views->slots[b] = slot;
+			views->made = b + 1;
+			const rhi::CbvDesc desc{ .byteOffset = a_blocks[b].offset, .byteSize = a_blocks[b].bytes };
 			if (!slot.heap.valid() || a_device.CreateConstantBufferView(slot, resource, desc) != rhi::Result::Ok) {
-				logger::error("[DCLF] frame block views: the view of {} b{} could not be made", a_pixel ? "PS" : "VS", a_register);
-				ok = false;
-				return;
+				logger::error("[DCLF] {} views: the view of block {} ({} bytes at {}) could not be made", a_what, b, a_blocks[b].bytes, a_blocks[b].offset);
+				return nullptr;
 			}
-			views->indices[a_block] = slot.index;
-		});
-		return ok ? std::shared_ptr<const FrameBlockViews>(std::move(views)) : nullptr;
+			views->indices[b] = slot.index;
+		}
+		return views;
 	}
 
 	FrameBlockViews::~FrameBlockViews()

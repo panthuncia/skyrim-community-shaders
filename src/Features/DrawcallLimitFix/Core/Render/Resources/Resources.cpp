@@ -3,6 +3,7 @@
 // scene's draw bound and the main latch the revision code keeps.
 #include "Features/DrawcallLimitFix/Core/Render/Internal.h"
 #include "Features/DrawcallLimitFix/Diagnostics/RefTrace.h"
+#include "RenderGraph/Backend.h"
 #include "RenderGraph/BufferRefs.h"
 
 #include "Features/DrawcallLimitFix/Core/Extensions/DepthPyramid.h"
@@ -808,6 +809,22 @@ namespace DCLF
 		if (!state->constantsAddress || !state->constantsRef) {
 			shadowSetupFailed = true;
 			return ShadowNotReady(2, "no device address or buffer view ref for the shadow buffers");
+		}
+		// D3D12: SharedData and FeatureData by constant buffer views, which the views' push words name (ShadowViewPass). Their places are
+		// fixed for the session (ShadowArenaBlocksOf); a view covers whole 256-byte rows, at most a constant buffer's 64 KiB.
+		if (::RenderGraph::Backend::IsD3D12()) {
+			const auto arena = ShadowArenaBlocksOf();
+			const auto rows = [](std::uint32_t a_bytes) {
+				return static_cast<std::uint32_t>(std::min<std::uint64_t>((std::max<std::uint64_t>(a_bytes, 1) + kConstantAlignment - 1) & ~(kConstantAlignment - 1), 65536));
+			};
+			const std::array<FrameBlockViews::Block, 2> blocks{ { { arena.sharedData, rows(arena.sharedBytes ? arena.sharedBytes : static_cast<std::uint32_t>(kShadowZeroBlockBytes)) },
+				{ arena.featureData, rows(arena.featureBytes ? arena.featureBytes : static_cast<std::uint32_t>(kShadowZeroBlockBytes)) } } };
+			state->blockViews = FrameBlockViews::CreateFor(device, state->constants, blocks, "shadow block");
+			if (!state->blockViews) {
+				shadowSetupFailed = true;
+				return ShadowNotReady(1, "the shadow views' SharedData and FeatureData views could not be made");
+			}
+			state->blockViewIndices = { state->blockViews->indices[0], state->blockViews->indices[1] };
 		}
 		shadow = state;
 		shadowHost.ShadowResourcesMade(state);

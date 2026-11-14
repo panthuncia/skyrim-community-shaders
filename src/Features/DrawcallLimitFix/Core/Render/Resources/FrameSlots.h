@@ -189,6 +189,18 @@ namespace DCLF::Draws
 	public:
 		/** @brief Render thread, with the buffer: null (logged) when a slot or view cannot be made. */
 		static std::shared_ptr<const FrameBlockViews> Create(rhi::Device a_device, const std::shared_ptr<org::Buffer>& a_frameConstants);
+		/** @brief A block of a buffer a view covers: its offset (256-aligned) and bytes (a multiple of 256). */
+		struct Block
+		{
+			std::uint64_t offset = 0;
+			std::uint32_t bytes = 0;
+		};
+		/**
+		 * @brief Views of other blocks of a_buffer, in a_blocks' order (at most kFrameBlocks): the shadow views' SharedData and FeatureData
+		 * on D3D12 (ShadowResources::blockViews). a_what names them in the log. Render thread; null (logged) when one cannot be made.
+		 */
+		static std::shared_ptr<const FrameBlockViews> CreateFor(rhi::Device a_device, const std::shared_ptr<org::Buffer>& a_buffer, std::span<const Block> a_blocks,
+			const char* a_what);
 		FrameBlockViews() = default;
 		FrameBlockViews(const FrameBlockViews&) = delete;
 		FrameBlockViews& operator=(const FrameBlockViews&) = delete;
