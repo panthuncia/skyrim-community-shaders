@@ -22,14 +22,11 @@ struct DecalOcclusionDraw
 ORG_PUSH_BLOCK(DECAL_OCCLUSION_RESOURCES(ORG_HANDLE))
 DECAL_OCCLUSION_RESOURCES(ORG_RESOURCE)
 
-#if defined(__spirv__)
-#	define DCLF_PULLED_VERTICES
-#	include "Common/DCLFVertexPull.hlsli"
-#endif
+#define DCLF_PULLED_VERTICES
+#include "Common/DCLFVertexPull.hlsli"
 
 float4 VSMain(uint a_vertexID : SV_VertexID) : SV_Position
 {
-#if defined(__spirv__)
 	// The draw's 16-bit index, then its position, as the input assembler reads them.
 	DCLFDrawVertexLayout = Draw.VertexLayout;
 	const uint indexNumber = Draw.FirstIndex + a_vertexID;
@@ -40,10 +37,6 @@ float4 VSMain(uint a_vertexID : SV_VertexID) : SV_Position
 	DCLFStreamsAt(index, first, second);
 	const float4 position = float4(DCLFPullPosition(first, second).xyz, 1.0);
 	return float4(dot(Draw.ClipRows[0], position), dot(Draw.ClipRows[1], position), dot(Draw.ClipRows[2], position), dot(Draw.ClipRows[3], position));
-#else
-	// The D3D12 build has no vertex pulling yet: it compiles, and draws nothing.
-	return float4(0, 0, 0, 0);
-#endif
 }
 
 void PSMain()

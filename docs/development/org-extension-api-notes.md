@@ -1384,8 +1384,8 @@ Keys used so far:
   drawing), so every engine side effect of the setup stays. `ConstantMirror` (`Watch` from the shader's SetupGeometry, `Contents` at
   the draw) gives the constants without a decode.
 - **Gaps found:** an anchor is a fixed enum, so every such point is a framework edit; a generic "run an epoch here" for families
-  would avoid that. `RasterProgram` has no vertex input or index buffer: a family pulls its vertices by device address
-  (`DCLFVertexPull.hlsli`, SPIR-V only, so its DXIL build draws nothing yet), and draws one render pass per draw. It had no
+  would avoid that. `RasterProgram` has no vertex input or index buffer: a family pulls its vertices through buffer view refs
+  (`DCLFVertexPull.hlsli`, on SPIR-V and DXIL alike since the parity wave), and draws one render pass per draw. It had no
   stencil reference either (`DrawDesc::stencilReference` came with the water family, "Engine draw families with stencil"). ORG makes per-slice views of a cube array as cube-array views, so a pass cannot bind one cube of an
   array as a `TextureCube` (Cloud Shadows' per-layer occlusion stays out of the ORG sky for that reason).
 - **Found by:** P5.3 (2026-11-10).

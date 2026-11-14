@@ -252,9 +252,8 @@ VS_OUTPUT main(VS_INPUT input)
 }
 
 #	if defined(CS_ORG_BINDLESS)
-#		if defined(__spirv__)
-#			define DCLF_PULLED_VERTICES
-#			include "Common/DCLFVertexPull.hlsli"
+#		define DCLF_PULLED_VERTICES
+#		include "Common/DCLFVertexPull.hlsli"
 
 /** @brief The draw's vertex a_vertexID, pulled as the input assembler reads it: its 16-bit index, then its attributes. */
 VS_INPUT SkyPullVertex(uint a_vertexID)
@@ -269,20 +268,12 @@ VS_INPUT SkyPullVertex(uint a_vertexID)
 
 	VS_INPUT input;
 	input.Position = DCLFPullPosition(first, second);
-#			if defined(TEX) || defined(HORIZFADE)
+#		if defined(TEX) || defined(HORIZFADE)
 	input.TexCoord = DCLFPullHalf2(1, first, second);
-#			endif
+#		endif
 	input.Color = DCLFPullUnorm4(5, 0, first, second);
 	return input;
 }
-#		else
-// The D3D12 build has no vertex pulling yet: it compiles, and draws nothing.
-VS_INPUT SkyPullVertex(uint a_vertexID)
-{
-	VS_INPUT input = (VS_INPUT)0;
-	return input;
-}
-#		endif
 
 VS_OUTPUT main(uint a_vertexID: SV_VertexID)
 {

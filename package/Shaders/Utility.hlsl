@@ -738,9 +738,8 @@ VS_OUTPUT main(uint index : SV_VertexID, uint a_instance : SV_InstanceID)
 #endif
 
 #if defined(VSHADER) && defined(UTILITY_ORG_SCENE)
-#	if defined(__spirv__)
-#		define DCLF_PULLED_VERTICES
-#		include "Common/DCLFVertexPull.hlsli"
+#	define DCLF_PULLED_VERTICES
+#	include "Common/DCLFVertexPull.hlsli"
 
 // The scene build's vertex stage: the draw's vertex pulled as the input assembler reads it (its 16-bit index, then its
 // attributes as the engine's input layout for the draw's vertex layout decodes them), then the engine's stage (UtilityOrgSceneShade).
@@ -755,35 +754,25 @@ VS_OUTPUT main(uint a_vertexID: SV_VertexID)
 	DCLFStreamsAt(index, first, second);
 	VS_INPUT input;
 	input.PositionMS = float4(DCLFPullPosition(first, second).xyz, 1);
-#		if defined(TEXTURE)
+#	if defined(TEXTURE)
 	input.TexCoord = DCLFPullHalf2(1, first, second);
-#		endif
-#		if defined(NORMALS)
+#	endif
+#	if defined(NORMALS)
 	input.Normal = DCLFPullUnorm4(3, 0, first, second);
 	input.Bitangent = DCLFPullUnorm4(4, 0, first, second);
-#		endif
-#		if defined(VC)
+#	endif
+#	if defined(VC)
 	input.Color = DCLFPullUnorm4(5, 0, first, second);
-#		endif
-#		if defined(SKINNED)
+#	endif
+#	if defined(SKINNED)
 	input.BoneWeights = DCLFPullHalf4(6, first, second);
 	input.BoneIndices = DCLFPullUnorm4(6, 8, first, second);
-#		endif
+#	endif
 	return UtilityOrgSceneShade(input);
 }
-#	else
-// The D3D12 build has no vertex pulling yet: it compiles, and draws nothing.
-VS_OUTPUT main(uint a_vertexID: SV_VertexID)
-{
-	VS_OUTPUT vsout = (VS_OUTPUT)0;
-	vsout.PositionCS = float4(0, 0, (float)SceneDraw.FirstIndex, 1);
-	return vsout;
-}
-#	endif
 #elif defined(VSHADER) && defined(UTILITY_ORG)
-#	if defined(__spirv__)
-#		define DCLF_PULLED_VERTICES
-#		include "Common/DCLFVertexPull.hlsli"
+#	define DCLF_PULLED_VERTICES
+#	include "Common/DCLFVertexPull.hlsli"
 
 // The ORG build's vertex stage: the engine's screen quad (ImageSpaceManager's, which every shadow mask pass draws), its vertex pulled as
 // the input assembler reads it (its 16-bit index, then its position), placed as the D3D11 stage places it. The depth the D3D11 stage
@@ -801,15 +790,6 @@ VS_OUTPUT main(uint a_vertexID: SV_VertexID)
 	vsout.PositionCS = float4(DCLFPullPosition(first, second).xy, 0, 1);
 	return vsout;
 }
-#	else
-// The D3D12 build has no vertex pulling yet: it compiles, and draws nothing (every vertex at one place; the depth is not read).
-VS_OUTPUT main(uint a_vertexID: SV_VertexID)
-{
-	VS_OUTPUT vsout;
-	vsout.PositionCS = float4(0, 0, (float)ShadowMaskDraw.FirstIndex, 1);
-	return vsout;
-}
-#	endif
 #endif
 
 typedef VS_OUTPUT PS_INPUT;

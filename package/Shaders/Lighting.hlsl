@@ -756,7 +756,6 @@ VS_OUTPUT main(uint index : SV_VertexID)
 	return DCLFShade(DCLFPulledInput(index, first, second));
 }
 #	elif defined(LIGHTING_ORG)
-#		if defined(__spirv__)
 // The ORG build's vertex stage: the draw's vertex pulled as the input assembler reads it (its 16-bit index, then its attributes as
 // the engine's input layout for the draw's vertex layout decodes them), then the engine's stage (DCLFShade).
 VS_OUTPUT main(uint a_vertexID : SV_VertexID)
@@ -769,15 +768,6 @@ VS_OUTPUT main(uint a_vertexID : SV_VertexID)
 	DCLFStream second = { DeviceRef(0, 0), 0u };
 	return DCLFShade(DCLFPulledInput(index, first, second));
 }
-#		else
-// The D3D12 build has no vertex pulling yet: it compiles, and draws nothing.
-VS_OUTPUT main(uint a_vertexID : SV_VertexID)
-{
-	VS_OUTPUT vsout = (VS_OUTPUT)0;
-	vsout.Position = float4(0, 0, (float)LightingDraw.FirstIndex, 1);
-	return vsout;
-}
-#		endif
 #	endif  // DCLF_PULLED, DCLF_PULLED_VERTICES, LIGHTING_ORG
 #endif  // VSHADER
 
