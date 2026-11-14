@@ -49,7 +49,7 @@
  * A draw's depth or stencil test (menu 3D's stencil composite and fill) binds the engine's depth target with the engine's state for
  * its modes; a scissor (the manager's rectangle, which Render sets through the renderer's scissor setter, hooked to keep it) is the
  * pass's scissor; a viewport that is fractional or reaches past its target is the draw's own viewport, its pixels inside the target
- * the render area.
+ * the render area. Samplers are made from the engine's address and filter modes alone, so no pass waits for the engine's table.
  *
  * Inherent refusals, per draw: an effect not selected, a target outside the engine's table, dynamic resolution's quad, a viewport
  * entirely outside its target, a draw that reads the depth target it tests against, a shape whose pass is still being built

@@ -1296,18 +1296,56 @@ namespace RenderGraph::Engine::ImageSpace
 			return true;
 		}
 
+		/** @brief The engine's sampler table's shape: 6 address modes by 5 filter modes (p4.6-shaders-states.md "State tables"). */
+		constexpr std::uint32_t kSamplerAddressModes = 6;
+		constexpr std::uint32_t kSamplerFilterModes = 5;
+
+		/**
+		 * @brief The description of the engine's sampler for an address and filter mode, as the renderer makes its table (SE 75831
+		 * 0x140d89480, read in the binary; AE 77653): the address modes clamp, U clamp and V wrap, U wrap and V clamp, wrap, border
+		 * (black) and mirror (W follows U); the filters point and linear without mips (MaxLOD 0), trilinear, anisotropic and the
+		 * comparison sampler (LESS), with MinLOD -FLT_MAX. The anisotropy is CS's cap (EngineHooks' CreateSamplerState detour). Made
+		 * from the modes alone, so a pass has its sampler before the engine made its table. False for modes outside the table.
+		 */
+		bool EngineSamplerDesc(std::uint32_t a_address, std::uint32_t a_filter, D3D11_SAMPLER_DESC& a_out)
+		{
+			if (a_address >= kSamplerAddressModes || a_filter >= kSamplerFilterModes)
+				return false;
+			constexpr std::array<std::array<D3D11_TEXTURE_ADDRESS_MODE, 2>, kSamplerAddressModes> kAddress{ {
+				{ D3D11_TEXTURE_ADDRESS_CLAMP, D3D11_TEXTURE_ADDRESS_CLAMP },
+				{ D3D11_TEXTURE_ADDRESS_CLAMP, D3D11_TEXTURE_ADDRESS_WRAP },
+				{ D3D11_TEXTURE_ADDRESS_WRAP, D3D11_TEXTURE_ADDRESS_CLAMP },
+				{ D3D11_TEXTURE_ADDRESS_WRAP, D3D11_TEXTURE_ADDRESS_WRAP },
+				{ D3D11_TEXTURE_ADDRESS_BORDER, D3D11_TEXTURE_ADDRESS_BORDER },
+				{ D3D11_TEXTURE_ADDRESS_MIRROR, D3D11_TEXTURE_ADDRESS_MIRROR },
+			} };
+			constexpr std::array<D3D11_FILTER, kSamplerFilterModes> kFilter{ D3D11_FILTER_MIN_MAG_MIP_POINT, D3D11_FILTER_MIN_MAG_LINEAR_MIP_POINT,
+				D3D11_FILTER_MIN_MAG_MIP_LINEAR, D3D11_FILTER_ANISOTROPIC, D3D11_FILTER_COMPARISON_MIN_MAG_LINEAR_MIP_POINT };
+			// CS caps the engine's anisotropy at 8 (EngineHooks.cpp, kMaxSamplerAnisotropy); the engine asks for 16.
+			constexpr UINT kAnisotropy = 8;
+			a_out = {};
+			a_out.Filter = kFilter[a_filter];
+			a_out.AddressU = a_out.AddressW = kAddress[a_address][0];
+			a_out.AddressV = kAddress[a_address][1];
+			a_out.MipLODBias = 0.0f;
+			a_out.MaxAnisotropy = a_filter >= 3 ? kAnisotropy : 1;
+			// The engine leaves LESS set after the comparison sampler; only that filter reads it.
+			a_out.ComparisonFunc = a_filter == 4 ? D3D11_COMPARISON_LESS : D3D11_COMPARISON_NEVER;
+			a_out.MinLOD = -FLT_MAX;
+			a_out.MaxLOD = a_filter <= 1 ? 0.0f : FLT_MAX;
+			return true;
+		}
+
+		/** @brief The heap index of the ORG sampler for an engine address and filter mode (EngineSamplerDesc), made on first use; UINT32_MAX on failure. */
 		std::uint32_t SamplerFor(std::uint32_t a_address, std::uint32_t a_filter)
 		{
 			auto& state = IS();
 			const auto key = std::make_pair(a_address, a_filter);
 			if (const auto it = state.samplers.find(key); it != state.samplers.end())
 				return it->second ? it->second.Index() : UINT32_MAX;
-			// The engine fills its sampler table at its renderer's start, after CS's Setup: an entry missing now is asked for again later.
-			auto* sampler = Pipeline::EngineSamplerState(a_address, a_filter);
-			if (!sampler)
-				return UINT32_MAX;
 			D3D11_SAMPLER_DESC desc{};
-			sampler->GetDesc(&desc);
+			if (!EngineSamplerDesc(a_address, a_filter, desc))
+				return UINT32_MAX;
 			org::OwnedDescriptorBinding binding = ShaderBindings::CreateSamplerFromD3D11(desc);
 			state.samplers.emplace(key, binding);
 			return binding ? binding.Index() : UINT32_MAX;
@@ -1697,7 +1735,7 @@ namespace RenderGraph::Engine::ImageSpace
 				return nullptr;
 			}
 			// The engine's blend and depth-stencil tables are read here, at the graph's build, not at Setup (they are filled after it);
-			// the manifest keeps the entries its shapes use.
+			// the manifest keeps the entries its shapes use. The samplers are made from their modes alone (EngineSamplerDesc).
 			if (!spec.key.compute) {
 				std::string error;
 				if (!StatesKnown(spec, error)) {
@@ -1717,10 +1755,8 @@ namespace RenderGraph::Engine::ImageSpace
 					continue;
 				samplers[slot] = SamplerFor(spec.key.address[slot], spec.key.filter[slot]);
 				if (samplers[slot] == UINT32_MAX) {
-					if (!Pipeline::EngineSamplerState(spec.key.address[slot], spec.key.filter[slot]))
-						state.retryBuild = true;
-					logger::info("[ORG] ImageSpace: {}: sampler {} (address {}, filter {}) has no ORG form at the graph's build; its pass is left out", spec.name,
-						slot, spec.key.address[slot], spec.key.filter[slot]);
+					logger::error("[ORG] ImageSpace: {}: sampler {} (address {}, filter {}) could not be made; its pass is left out", spec.name, slot,
+						spec.key.address[slot], spec.key.filter[slot]);
 					return nullptr;
 				}
 			}
@@ -2482,10 +2518,6 @@ namespace RenderGraph::Engine::ImageSpace
 					return;
 				if (D3D11_DEPTH_STENCIL_DESC desc{}; spec->key.depth >= 0 && !DepthDescOf(spec->key.depthMode * kStencilModes + spec->key.stencilMode, desc))
 					return;
-				const auto& effect = kEffects[spec->key.effect];
-				for (std::uint32_t slot = 0; slot < effect.samplers; ++slot)
-					if (spec->inputs[slot] && !(effect.cubes & (1u << slot)) && !Pipeline::EngineSamplerState(spec->key.address[slot], spec->key.filter[slot]))
-						return;
 			}
 			state.retryBuild = false;
 			logger::info("[ORG] ImageSpace: the engine's state tables are filled; the client's graph is built again (outside the world)");
