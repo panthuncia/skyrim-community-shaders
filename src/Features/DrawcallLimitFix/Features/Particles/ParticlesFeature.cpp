@@ -17,14 +17,14 @@ namespace DCLF::Features::Particles
 		{
 			// Where Core's were listed: after the refraction (before Features/Billboards', which registers after this feature).
 			const auto particles = a_context.RegisterSwitch({ .name = "CS_DCLF_PARTICLES", .kind = Api::SwitchKind::Feature, .reduced = Api::SwitchReduced::UnlessOne,
-				.description = "1: particle systems with an effect shader (NiParticleSystem: smoke, flames, glows) drawn by DCLF's forward epoch from snapshots taken at the engine's particle update, sorted with the blended objects (T7e; needs CS_DCLF_EFFECTS); 0 they stay native (live toggle's seed)",
+				.description = "1: particle systems with an effect shader (NiParticleSystem: smoke, flames, glows) drawn by DCLF's forward epoch from snapshots taken at the engine's particle update, sorted with the blended objects (T7e; needs CS_DCLF_EFFECTS and CS_DCLF_FORWARD); 0 they stay native (live toggle's seed)",
 				.after = "CS_DCLF_REFRACTION" });
 			// NiParticleSystem geometry with a BSEffectShaderProperty, its quads built by DCLF from snapshots taken at the engine's particle
 			// update (ParticleSnapshots) and drawn in the forward epoch's sort (needs effects; on by default: CS_DCLF_PARTICLES=0 seeds it
 			// off): an object class.
 			particlesToggle = a_context.RegisterToggle({ .name = "particles", .label = "Particle systems: smoke, flames, glows",
 				.tooltip = "T7e: DCLF draws effect-shader particle systems in the forward epoch, sorted with the other blended objects, their quads built from snapshots taken at the engine's particle update. On by default (validated fp6).",
-				.seed = particles, .entersClassification = true, .after = "refraction", .needs = { "effects" } });
+				.seed = particles, .entersClassification = true, .after = "refraction", .needs = { "effects", "forward" } });
 			// The particle geometry types (ParticleGeometryType): DCLF's while the toggle is on. A particle system (kParticles) without a skin
 			// is the particle systems' item class (its palette block its quads: ParticleRows.cpp), and a mover: its bound and quads change with
 			// each update, invisibly to the walk (FrameValues places it every frame; its update's snapshot capture pushes its move event).

@@ -96,7 +96,7 @@ namespace DCLF
 		// What it lacks arrives with the frame's inputs or its program (Finished::drawFamily); DrainLane retries each pass.
 		const auto* input = lane.input.get();
 		if (!input || !input->drawFamilySource[f] || input->targets.colorCount == 0 || input->targets.depth == DXGI_FORMAT_UNKNOWN || !input->frontCCW || !input->states ||
-			!zLayout || !familySignatures[f])
+			!zLayout || !FamilySignature(a_family))
 			return;
 		// The colour pipelines blend as the engine's write mode the program names (tree LOD's 1, the opaque mode, read unasked by
 		// CaptureEngineStates); another is asked of the render thread once, and the family tried again each pass until it is read. If
@@ -267,11 +267,13 @@ namespace DCLF
 			const auto& impl = *drawPipelines.impl;
 			const auto f = static_cast<std::size_t>(a_family);
 			// None once the targets changed after the catalog was built (as GetIndirectState).
-			if (!a_catalog || !a_catalog->families[f].pipelines || a_catalog->targetsGeneration != a_targetsGeneration || !impl.familySignatures[f])
+			const auto& signature = impl.FamilySignature(a_family);
+			if (!a_catalog || !a_catalog->families[f].pipelines || a_catalog->targetsGeneration != a_targetsGeneration || !signature)
 				return false;
 			const auto* built = static_cast<const DrawPipelines::Impl::FamilyBuilt*>(a_catalog->families[f].pipelines.get());
+			const bool instanceWord = Extensions::DrawFamilyOf(a_family).contribution.program.signature == Api::DrawFamilySignature::InstanceWordDrawInstanced;
 			a_out = FamilyPipelines{ built->depth->GetHandle(), built->colours[0]->GetHandle(), built->colours[1] ? built->colours[1]->GetHandle() : rhi::PipelineHandle{},
-				impl.familySignatures[f]->GetHandle() };
+				signature->GetHandle(), instanceWord && !impl.d3d12 ? 4u : 0u };
 			return true;
 		}
 	};

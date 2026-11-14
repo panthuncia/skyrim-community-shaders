@@ -136,15 +136,9 @@ namespace RenderGraph::Engine::Native
 			DclfSwitch{ "CS_DCLF_TERRAIN_PLAIN", "1", "D3D12 draws colour with plain draws only" },
 			DclfSwitch{ "CS_DCLF_DECAL_PLAIN", "1", "D3D12 draws colour with plain draws only" },
 			DclfSwitch{ "CS_DCLF_FORWARD_PLAIN", "1", "D3D12 draws colour with plain draws only" },
-			DclfSwitch{ "CS_DCLF_REFRACTION", "0", "the refraction draw pushes block addresses and has no instance word (ForwardPasses)" },
-			DclfSwitch{ "CS_DCLF_EFFECTS", "0", "the Effect program family's builds are not ported" },
-			DclfSwitch{ "CS_DCLF_OPAQUE_EFFECTS", "0", "the Effect program family's builds are not ported" },
-			DclfSwitch{ "CS_DCLF_BILLBOARDS", "0", "the Effect program family's builds are not ported" },
 			DclfSwitch{ "CS_DCLF_PARTICLES", "0", "the particle path is not ported" },
 			DclfSwitch{ "CS_DCLF_MASTER_PARTICLES", "0", "the particle path is not ported" },
 			DclfSwitch{ "CS_DCLF_BILLBOARD_PARTICLES", "0", "the particle path is not ported" },
-			DclfSwitch{ "CS_DCLF_GRASS", "0", "the grass draw family (RunGrass) is not ported" },
-			DclfSwitch{ "CS_DCLF_LOD_TREES", "0", "the tree LOD draw family (DistantTree) is not ported" },
 			DclfSwitch{ "CS_DCLF_REFLECTIONS", "0", "the water reflection's views are not ported" },
 		};
 

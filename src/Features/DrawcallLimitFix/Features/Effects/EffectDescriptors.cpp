@@ -62,6 +62,11 @@ namespace DCLF::Features::Effects
 			if (a_draw.opaque && (!opaqueEffects || !Extensions::ObjectClassOn(ActiveToggles(), Api::ObjectClass::Decal) || (f & Bit(Flag::kFalloff)) || !(f & Bit(Flag::kZBufferTest)) ||
 									 !(f & Bit(Flag::kZBufferWrite)) || ParticleGeometryType(a_leaf.Type())))
 				return Ineligible::EffectOpaque;
+			// Anything else that is not a decal is hint 1, the forward epoch's (blended, Falloff unblended, particles): native while the
+			// forward epoch is off, as a blended Lighting pass is (Eligibility, Ineligible::AlphaBlend). The opaque effects and the decals
+			// do not need it, so the effects toggle does not either.
+			if (!a_draw.opaque && !a_draw.decal && !Extensions::ObjectClassOn(ActiveToggles(), Api::ObjectClass::Forward))
+				return Ineligible::AlphaBlend;
 			// A taken particle system: hint 1, the forward epoch's.
 			a_draw.particles = ParticleGeometryType(a_leaf.Type());
 			if (variants & kEffectVariantBlendPair)

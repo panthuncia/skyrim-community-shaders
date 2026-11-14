@@ -9,7 +9,8 @@
 // slot's counts zeroed for the next frame's cull.
 //
 // A draw's firstInstance is the start of its range in the visible list: the vertex stage reads its instance's entry by SV_InstanceID,
-// which counts from it.
+// which counts from it on Vulkan. D3D12's does not, so each draw's arguments follow a word holding its first instance, which D3D12's
+// signature writes into the draw's push data (GrassLayout.h, DrawArgs: 20 bytes a draw).
 
 // Must match GrassArgsConstants (Features/Grass/GrassTables.h).
 cbuffer GrassArgsConstants : register(b0)
@@ -39,14 +40,17 @@ static const uint kColourDraws = 8;
 static const uint kCountsOffset = 64;
 static const uint kPhaseOneCountsOffset = kCountsOffset + kMaxDrawSlots * 4;
 static const uint kPhaseOneArgs = kPhaseOneCountsOffset + kMaxDrawSlots * 4;
-static const uint kPhaseTwoArgs = kPhaseOneArgs + kMaxDrawSlots * 16;
-static const uint kColourArgs = kPhaseTwoArgs + kMaxDrawSlots * 16;  // the second colour program's follow, kMaxDrawSlots * 16 on
+static const uint kDrawArgsBytes = 20;  // DrawArgs: the first instance word, then the arguments
+static const uint kPhaseTwoArgs = kPhaseOneArgs + kMaxDrawSlots * kDrawArgsBytes;
+static const uint kColourArgs = kPhaseTwoArgs + kMaxDrawSlots * kDrawArgsBytes;  // the second colour program's follow, kMaxDrawSlots * 20 on
 
 void Pack(RWByteAddressBuffer a_draws, uint a_counter, uint a_array, uint a_vertices, uint a_instances, uint a_first)
 {
 	uint at;
 	a_draws.InterlockedAdd(a_counter, 1u, at);
-	a_draws.Store4(a_array + at * 16, uint4(a_vertices, a_instances, 0, a_first));
+	const uint record = a_array + at * kDrawArgsBytes;
+	a_draws.Store(record, a_first);
+	a_draws.Store4(record + 4, uint4(a_vertices, a_instances, 0, a_first));
 }
 
 [numthreads(64, 1, 1)] void main(uint a_id : SV_DispatchThreadID)
@@ -86,6 +90,6 @@ void Pack(RWByteAddressBuffer a_draws, uint a_counter, uint a_array, uint a_vert
 			Pack(draws, kPhaseTwoDraws, kPhaseTwoArgs, vertices, count - phaseOne, tier == 2 ? first : first + phaseOne);
 	} else if (count) {
 		const uint program = (buckets.Load(bucketBase + 12) & kBucketTruePbr) != 0 ? 1u : 0u;
-		Pack(draws, kColourDraws + program * 4, kColourArgs + program * kMaxDrawSlots * 16, vertices, count, first);
+		Pack(draws, kColourDraws + program * 4, kColourArgs + program * kMaxDrawSlots * kDrawArgsBytes, vertices, count, first);
 	}
 }

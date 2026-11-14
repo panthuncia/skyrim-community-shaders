@@ -8,6 +8,7 @@
 #include "Features/DrawcallLimitFix/Core/Gpu/GpuTextures.h"
 #include "Features/DrawcallLimitFix/Core/Gpu/Pipelines/DrawPipelinesRhi.h"
 #include "Features/DrawcallLimitFix/Core/Settings/Switches.h"
+#include "RenderGraph/ComputeProgram.h"
 
 #include <RenderPasses/Base/TypedRenderGraphPass.h>
 #include <Resources/Buffers/Buffer.h>
@@ -21,6 +22,15 @@
 
 namespace DCLF::Draws
 {
+	/**
+	 * @brief A compute program of DCLF's setups (the main, shadow and view resources), loaded off the render thread. The first call for a
+	 * desc starts ComputeProgram::Load on the build executor (BuildSubmitter) and returns null with a_pending set; later calls return the
+	 * same program once it is loaded. Null with a_pending clear: the load failed (logged by Load). A setup that sees a_pending set is not
+	 * ready that frame: DCLF stays off and the engine draws, and the setup runs again next frame. Each desc is loaded once per device.
+	 * Any thread.
+	 */
+	std::shared_ptr<const ComputeProgram> LoadProgram(rhi::Device a_device, const ComputeProgram::Desc& a_desc, bool& a_pending);
+
 	// A live override of CS_DCLF_ASYNC_COMPUTE (the test harness's dclf:async-compute, then a graph rebuild): -1 none, 0 graphics, 1 compute.
 	inline std::atomic<int> asyncComputeOverride{ -1 };
 	// The sun views' contribution cull (kCullMinTexels): the least a caster's bound radius may project to, in texels; 0 off. Read by

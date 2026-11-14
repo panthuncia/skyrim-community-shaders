@@ -119,7 +119,7 @@ namespace DCLF::Features::Grass
 			.colours = 2,
 			.writeMode = kWriteMode,
 			.build = Api::DrawFamilyBuild::DepthThenEqualColour,
-			.signature = Api::DrawFamilySignature::DrawInstanced };
+			.signature = Api::DrawFamilySignature::InstanceWordDrawInstanced };
 		static_assert(kProgram.descriptors.depth == 0x8 && kProgram.descriptors.colour2 == 0x9 &&
 						  (kProgram.descriptors.colour & static_cast<std::uint32_t>(SIE::ShaderCache::GrassShaderFlags::AlphaTest)) == 0,
 			"grass's descriptors are not the engine's (RenderDepth, TruePbr; the colour program without AlphaTest)");
@@ -172,7 +172,8 @@ namespace DCLF::Features::Grass
 
 		/**
 		 * @brief The depth passes: each phase's array of depth draws (a bucket tier's culled instances each); the colour pass: each colour
-		 * program's array, EQUAL against the depth draws. Each ExecuteIndirect reads its draw count from the draws buffer's header.
+		 * program's array, EQUAL against the depth draws. Each ExecuteIndirect reads its draw count from the draws buffer's header, and starts
+		 * where the family's signature reads a draw (DrawArgs: its first instance word on D3D12, its arguments on Vulkan).
 		 */
 		void MainRecord(const Api::DrawFamilyRecord& a_record)
 		{
@@ -183,14 +184,14 @@ namespace DCLF::Features::Grass
 				const bool phaseTwo = a_record.pass == Api::DrawFamilyPass::DepthPhaseTwo;
 				commands.BindPipeline(pipelines.depth);
 				Push(commands, a_record.row, phaseTwo ? 2u : 1u, 0u);
-				commands.ExecuteIndirect(pipelines.drawSignature, a_record.arguments, phaseTwo ? kPhaseTwoArgs : kPhaseOneArgs, a_record.arguments,
+				commands.ExecuteIndirect(pipelines.drawSignature, a_record.arguments, (phaseTwo ? kPhaseTwoArgs : kPhaseOneArgs) + pipelines.argumentsOffset, a_record.arguments,
 					phaseTwo ? offsetof(DrawsHeader, phaseTwoDraws) : offsetof(DrawsHeader, phaseOneDraws), kMaxDrawSlots);
 				return;
 			}
 			for (std::uint32_t program = 0; program < 2; ++program) {
 				commands.BindPipeline(program ? pipelines.colour2 : pipelines.colour);
 				Push(commands, a_record.row, 0u, program);
-				commands.ExecuteIndirect(pipelines.drawSignature, a_record.arguments, kColourArgs[program], a_record.arguments,
+				commands.ExecuteIndirect(pipelines.drawSignature, a_record.arguments, kColourArgs[program] + pipelines.argumentsOffset, a_record.arguments,
 					offsetof(DrawsHeader, colourDraws) + program * sizeof(std::uint32_t), kMaxDrawSlots);
 			}
 		}

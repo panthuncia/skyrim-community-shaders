@@ -589,6 +589,15 @@ namespace DCLF
 		// The draw families' draw signatures, by family (Api::DrawFamilySignature::DrawInstanced: a plain DrawInstanced under zLayout). Their
 		// pipelines are the lane's (Lane::families).
 		std::array<rhi::CommandSignaturePtr, kDrawFamilyLanes> familySignatures;
+		// Api::DrawFamilySignature::InstanceWordDrawInstanced's, the same for every family that asks for it: a 20-byte record, its first
+		// instance word then DrawInstanced's arguments. D3D12 reads both (Constant into kDrawPushInstance, then the draw), Vulkan the draw.
+		rhi::CommandSignaturePtr familyInstanceWordSignature;
+		/** @brief a_family's draw signature, as its program names it (null when it could not be made). After InstallFeatures. */
+		const rhi::CommandSignaturePtr& FamilySignature(Api::DrawFamily a_family) const
+		{
+			const bool instanceWord = Extensions::DrawFamilyOf(a_family).contribution.program.signature == Api::DrawFamilySignature::InstanceWordDrawInstanced;
+			return instanceWord ? familyInstanceWordSignature : familySignatures[static_cast<std::size_t>(a_family)];
+		}
 		struct FamilyBuilt
 		{
 			rhi::PipelinePtr depth;
@@ -599,7 +608,8 @@ namespace DCLF
 		bool refractionAsked = false;  // the refraction pipeline (RequestRefraction)
 		ankerl::unordered_dense::set<ForwardPipelineKey, ForwardPipelineKeyHash> forwardAsked;
 		rhi::PipelineLayoutHandle ShadowLayout() const { return shadowLayout->GetHandle(); }
-		// The shadow views' plain indirect draw: a DrawSequence's tail as an indexed draw from the index pool (StoreShadowSequence).
+		// The refraction's plain indirect draw, in the shadow views' layout: a DrawSequence's tail as an indexed draw from the index pool
+		// (StoreShadowSequence); on D3D12 the word before it, the draw's instance, first (kDrawPushInstance).
 		rhi::CommandSignaturePtr shadowDrawSignature;
 		// The shadow views' draws: their first instance and arguments (kShadowDrawBytes; D3D12 reads the instance word too), the rest
 		// being their caster rows.

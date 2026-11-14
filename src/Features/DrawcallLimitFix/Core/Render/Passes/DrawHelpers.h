@@ -31,6 +31,8 @@
 
 namespace DCLF::Draws
 {
+	class FrameBlockViews;  // Resources/FrameSlots.h
+
 	/**
 	 * @brief A buffer's device address, for a pass that records one into its push data. 0 once the render graph has stopped (device
 	 * lost, or turned off): a worker may still be recording then, and what it records is never submitted.
@@ -138,6 +140,12 @@ namespace DCLF::Draws
 	 * slots at a_frameConstants, and the zeroed shared light block as the zero block.
 	 */
 	void MainShadowLayoutPush(std::uint64_t a_frameConstants, RenderGraph::BufferRef a_frameConstantsRef, std::uint32_t (&a_out)[kShadowPushWords]);
+	/**
+	 * @brief D3D12's form of MainShadowLayoutPush's block words (4-13), which its stages read themselves (Common/DCLFFrameRecord.hlsli,
+	 * DCLF_D3D12_SHADOW_FRAME): the view block, VS_PerFrame and the zero block by ref into the frame constants at a_frameConstantsRef,
+	 * SharedData and FeatureData by their views in a_blocks (the main frame constants' FrameBlockViews). Words 0-3 are left as they are.
+	 */
+	void MainShadowLayoutViews(RenderGraph::BufferRef a_frameConstantsRef, const FrameBlockViews& a_blocks, std::uint32_t (&a_out)[kShadowPushWords]);
 	/** @brief The address of the frame's LodFadeFrame (after FrameLighting in the lighting slot) in the main frame constants at a_frameConstants. */
 	std::uint64_t LodFadeFrameAddress(std::uint64_t a_frameConstants);
 

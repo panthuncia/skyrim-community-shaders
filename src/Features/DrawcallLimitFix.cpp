@@ -259,7 +259,7 @@ void DrawcallLimitFix::SetupResources()
 		unavailableReason = "the GPU or driver lacks the indirect pipelines DCLF draws with (see the [DCLF] Indirect pipelines line)";
 	else {
 		if (d3d12)
-			logger::info("[DCLF] D3D12: on, the main view's Lighting draws in the Z-prepass and the colour pass's plain buckets; still off there: {}",
+			logger::info("[DCLF] D3D12: on, the GPU pipeline with plain indirect draws (every part but the D3D12 switch table's); still off there: {}",
 				::RenderGraph::Engine::Native::D3D12DclfOff());
 		return;
 	}
