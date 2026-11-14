@@ -105,6 +105,7 @@ namespace
 		{ "SDRTemp2", 0, DXGI_FORMAT_R10G10B10A2_UNORM, Lifetime::Transient },
 		{ "Scratch", 0, DXGI_FORMAT_R10G10B10A2_UNORM, Lifetime::Transient },
 		{ "HDRTemp", 0, DXGI_FORMAT_R16G16B16A16_FLOAT, Lifetime::History },
+		{ "HDRTemp2", 0, DXGI_FORMAT_R16G16B16A16_FLOAT, Lifetime::History },
 		{ "Lens", 0, DXGI_FORMAT_R16G16B16A16_FLOAT, Lifetime::History },
 		{ "Bloom", 1024, DXGI_FORMAT_R16G16B16A16_FLOAT, Lifetime::History },
 		{ "BloomTemp", 1024, DXGI_FORMAT_R16G16B16A16_FLOAT, Lifetime::History },
@@ -145,6 +146,37 @@ namespace
 	bool IsRenderTargetName(std::string_view a_name)
 	{
 		return a_name.starts_with("RenderTarget") && FindSpec(a_name);
+	}
+
+	/**
+	 * @brief The graph texture a technique's RenderTarget annotation names, as Effect::GetRenderTargetView resolves it: a RenderTarget*
+	 * texture, one of TextureManager's common textures, or one of the effect's own (a_own: FX11's name, then the graph's). Empty when
+	 * FX11 finds no texture by that name, and so draws to the chain's output.
+	 */
+	std::string_view RenderTargetOf(std::string_view a_name, std::span<const std::pair<std::string_view, std::string_view>> a_own)
+	{
+		if (IsRenderTargetName(a_name))
+			return a_name;
+		for (const auto& [fx11, graph] : a_own)
+			if (fx11 == a_name)
+				return graph;
+		// TextureManager's common textures (CommonTextureSpecs) by FX11's name. The swaps FX11 does between them (bloom, adaptation)
+		// are fixed textures here, so a write lands in the texture the plan names first.
+		static constexpr std::pair<std::string_view, std::string_view> kCommon[] = {
+			{ "TextureHDRTemp", "HDRTemp" },
+			{ "TextureHDRTemp2", "HDRTemp2" },
+			{ "TextureSDRTemp", "SDRTemp" },
+			{ "TextureSDRTemp2", "SDRTemp2" },
+			{ "TextureBloom", "Bloom" },
+			{ "TextureBloomTemp", "BloomTemp" },
+			{ "TextureLens", "Lens" },
+			{ "TextureAdaptation", "Adaptation" },
+			{ "TextureAdaptationSwap", "AdaptationHistory" },
+		};
+		for (const auto& [fx11, graph] : kCommon)
+			if (fx11 == a_name)
+				return graph;
+		return {};
 	}
 
 	/** @brief The graph textures, kept while the screen size stays the same. */
@@ -1031,13 +1063,9 @@ struct ORGFxRuntime::Impl
 					output = a_temp;
 				}
 				if (!info.renderTargetName.empty()) {
-					if (IsRenderTargetName(info.renderTargetName))
-						output = info.renderTargetName;
-					else if (fx11.effectTextureCache.contains(info.renderTargetName) || TextureManager::GetSingleton().FindCommonTexture(info.renderTargetName)) {
-						FailEffect(e, fmt::format("{}: technique '{}' renders to '{}', which is not supported yet", e.Name(), name, info.renderTargetName));
-						return result;
-					}
-					// Otherwise FX11 falls back to the chain's output too.
+					// A name FX11 cannot find leaves the output at the chain's, as there.
+					if (const auto target = RenderTargetOf(info.renderTargetName, OwnTargets(a_fx)); !target.empty())
+						output = target;
 				} else
 					++swapCounter;
 				FxTechnique(a_fx, technique->second, output, input, a_names);
@@ -1048,6 +1076,15 @@ struct ORGFxRuntime::Impl
 				}
 			}
 			return result;
+		}
+
+		/** @brief The effect's own textures a RenderTarget annotation may name (Effect::effectTextureCache): FX11's name, the graph's. */
+		static std::span<const std::pair<std::string_view, std::string_view>> OwnTargets(Fx a_fx)
+		{
+			static constexpr std::pair<std::string_view, std::string_view> kPostPass[] = { { "TextureScratch", "Scratch" } };
+			if (a_fx == Fx::PostPass)
+				return kPostPass;
+			return {};
 		}
 
 		/** @brief ExecuteTechnique: every pass of a technique by name, when the effect has it. */
