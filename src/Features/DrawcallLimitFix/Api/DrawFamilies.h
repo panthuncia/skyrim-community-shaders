@@ -53,7 +53,13 @@ namespace DCLF::Api
 	{
 		// One non-indexed draw's arguments (vertices, instances, first vertex, first instance). A family's record may execute one, or an
 		// array of them with a GPU count (ExecuteIndirect with a count buffer: the array's capacity, the count read from the buffer).
+		// SV_InstanceID counts from the first instance on Vulkan only: a family whose stages read it must not draw with a first instance.
 		DrawInstanced,
+		// DrawInstanced's arguments after a word holding the draw's first instance (20 bytes a draw): for stages that read SV_InstanceID
+		// counting from the first instance. D3D12's SV_InstanceID does not count it, so there the signature also writes the word into
+		// the draw push word the stage adds (kDrawPushInstance). A record executes from the word on D3D12 and from the arguments, 4 bytes
+		// on, on Vulkan (FamilyPipelines::argumentsOffset).
+		InstanceWordDrawInstanced,
 	};
 
 	/**

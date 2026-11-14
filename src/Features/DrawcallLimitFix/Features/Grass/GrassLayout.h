@@ -180,8 +180,9 @@ namespace DCLF::GrassInstances
 
 	/*
 	 * The draws buffer (fixed, not versioned; the family's declared indirect-argument resource): per draw slot (a bucket's tier,
-	 * ds = bucket * 3 + tier) the cull's count, phase 1's count, and four arrays of non-indexed DrawInstanced arguments - phase 1's
-	 * depth draws, phase 2's, the colour draws of each colour program - each packed by GrassArgsCS with its draws' count in the header.
+	 * ds = bucket * 3 + tier) the cull's count, phase 1's count, and four arrays of non-indexed DrawInstanced arguments, each after its
+	 * first instance word (DrawArgs) - phase 1's depth draws, phase 2's, the colour draws of each colour program - each packed by
+	 * GrassArgsCS with its draws' count in the header.
 	 */
 	inline constexpr std::uint32_t kMaxBuckets = 1024;
 	inline constexpr std::uint32_t kMaxDrawSlots = kTiers * kMaxBuckets;
@@ -201,12 +202,17 @@ namespace DCLF::GrassInstances
 	// (the cull's, or the tier's cost-biased one).
 	inline constexpr std::uint32_t kStatLive = 0, kStatOutside = 1, kStatThinned = 2, kStatFaded = 3, kStatFar = 4;
 
-	/** @brief One non-indexed DrawInstanced's arguments (the family's signature). */
+	/**
+	 * @brief One draw (the family's signature, Api::DrawFamilySignature::InstanceWordDrawInstanced): its first instance, then a non-indexed
+	 * DrawInstanced's arguments. RunGrass's vertex stage reads its visible entry by SV_InstanceID counting from the first instance: D3D12's
+	 * signature writes the word into the draw push word the stage adds there, Vulkan's starts at vertexCount (FamilyPipelines::argumentsOffset).
+	 */
 	struct DrawArgs
 	{
+		std::uint32_t instanceWord = 0;
 		std::uint32_t vertexCount = 0, instanceCount = 0, firstVertex = 0, firstInstance = 0;
 	};
-	static_assert(sizeof(DrawArgs) == 16);
+	static_assert(sizeof(DrawArgs) == 20 && offsetof(DrawArgs, vertexCount) == 4);
 
 	inline constexpr std::uint64_t kCountsOffset = sizeof(DrawsHeader);
 	inline constexpr std::uint64_t kPhaseOneCountsOffset = kCountsOffset + kMaxDrawSlots * sizeof(std::uint32_t);
@@ -214,8 +220,8 @@ namespace DCLF::GrassInstances
 	inline constexpr std::uint64_t kPhaseTwoArgs = kPhaseOneArgs + kMaxDrawSlots * sizeof(DrawArgs);
 	inline constexpr std::uint64_t kColourArgs[2] = { kPhaseTwoArgs + kMaxDrawSlots * sizeof(DrawArgs), kPhaseTwoArgs + 2ull * kMaxDrawSlots * sizeof(DrawArgs) };
 	inline constexpr std::uint64_t kDrawsBytes = kColourArgs[1] + kMaxDrawSlots * sizeof(DrawArgs);
-	static_assert(kCountsOffset == 64 && kPhaseOneCountsOffset == 12352 && kPhaseOneArgs == 24640 && kPhaseTwoArgs == 73792 && kColourArgs[0] == 122944 &&
-				  kColourArgs[1] == 172096 && kDrawsBytes == 221248);
+	static_assert(kCountsOffset == 64 && kPhaseOneCountsOffset == 12352 && kPhaseOneArgs == 24640 && kPhaseTwoArgs == 86080 && kColourArgs[0] == 147520 &&
+				  kColourArgs[1] == 208960 && kDrawsBytes == 270400);
 
 	/*
 	 * The visible list (versioned, a unit per instance slot, 12 bytes a unit): the visible entries (instance indices) at

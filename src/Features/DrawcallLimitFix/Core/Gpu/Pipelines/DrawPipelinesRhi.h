@@ -118,14 +118,16 @@ namespace DCLF
 	rhi::PipelineHandle ForwardPipelineOf(const PipelineCatalog* a_catalog, const ForwardPipelineKey& a_key, const ForwardTargets& a_targets);
 
 	/**
-	 * @brief A draw family's pipelines and its draws' signature (DrawPipelines::RequestFamily; the slot's signature,
-	 * Api::DrawFamilySignature::DrawInstanced): its depth pipeline, its colour one, and its second colour one with two colour programs
-	 * (Api::DrawFamilyProgram::colours; null with one).
+	 * @brief A draw family's pipelines and its draws' signature (DrawPipelines::RequestFamily; Api::DrawFamilyProgram::signature): its
+	 * depth pipeline, its colour one, and its second colour one with two colour programs (Api::DrawFamilyProgram::colours; null with one).
 	 */
 	struct FamilyPipelines
 	{
 		rhi::PipelineHandle depth{}, colour{}, colour2{};
-		rhi::CommandSignatureHandle drawSignature{};  // one non-indexed DrawInstanced's arguments (16 bytes)
+		// One non-indexed DrawInstanced's arguments (16 bytes), or with InstanceWordDrawInstanced a first instance word before them (20).
+		rhi::CommandSignatureHandle drawSignature{};
+		// Where the signature starts in a draw's record: 4 for InstanceWordDrawInstanced on Vulkan (past the word), else 0.
+		std::uint64_t argumentsOffset = 0;
 	};
 
 	/**

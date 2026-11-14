@@ -25,6 +25,11 @@ cbuffer DCLFGrassPush : register(b190)
 	uint DCLFGrassPhase : packoffset(c0.z);
 	uint DCLFGrassProgram : packoffset(c0.w);
 	uint2 DCLFGrassUnused : packoffset(c1.x);
+#	if !defined(__spirv__)
+	// D3D12: SV_InstanceID does not count the draw's first instance. The family's signature writes it into this word per draw instead
+	// (DrawPipelines.h, kDrawPushInstance; GrassArgsCS stores it before the draw's arguments).
+	uint DCLFGrassInstanceWord : packoffset(c5.w);
+#	endif
 };
 #	include "Common/DCLFVertexPull.hlsli"
 DeviceRef DCLFGrassDraw() { return DCLFGrassDrawAddress; }
@@ -464,6 +469,9 @@ VS_OUTPUT DCLFGrassVertex(VS_INPUT input, float3 a_origin, uint4 a_frame, uint a
 // indices, attributes as the engine's input layout for the mesh's vertex layout has them (one stream).
 VS_OUTPUT main(uint a_vertex : SV_VertexID, uint a_instance : SV_InstanceID)
 {
+#		if !defined(__spirv__)
+	a_instance += DCLFGrassInstanceWord;  // D3D12: the draw's first instance, from its push word
+#		endif
 	const uint index = DeviceLoad(uint, DeviceRefAdd(DCLFGrassTable(kDCLFGrassVisible), 4 * a_instance), 4);
 	const uint shapeSlot = DeviceLoad(uint, DeviceRefAdd(DCLFGrassTable(kDCLFGrassOwners), 4 * index), 4);
 	const DeviceRef shape = DeviceRefAdd(DCLFGrassTable(kDCLFGrassShapes), 32 * shapeSlot);
