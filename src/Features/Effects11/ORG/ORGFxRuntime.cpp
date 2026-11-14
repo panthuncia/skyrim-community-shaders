@@ -1165,6 +1165,15 @@ struct ORGFxRuntime::Impl
 					FailEffect(e, fmt::format("{}: technique '{}': {}", e.Name(), technique.name, reason));
 					return;
 				}
+				// Tessellation stages need a patch list, and the quad is a triangle list (a strip on FX11): D3D11 draws nothing.
+				const auto sets = [&](OrgFx::Stage a_stage) {
+					const auto& binding = technique.passes[p].shaders[static_cast<std::size_t>(a_stage)];
+					return binding.set && !binding.null;
+				};
+				if (sets(OrgFx::Stage::Hull) || sets(OrgFx::Stage::Domain)) {
+					logger::info("[ORG] Effects11: {} technique '{}' pass {} sets tessellation shaders on a quad and draws nothing, as on D3D11", e.Name(), technique.name, p);
+					continue;
+				}
 				// The target has one sample: a mask without sample 0 writes nothing, so the pass is left out.
 				if (!(state.sampleMask & 1u)) {
 					logger::info("[ORG] Effects11: {} technique '{}' pass {} has a sample mask without sample 0 and draws nothing", e.Name(), technique.name, p);

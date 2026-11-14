@@ -515,6 +515,11 @@ namespace OrgFx
 		for (std::size_t s = 0; s < pass.shaders.size(); ++s) {
 			const auto stage = static_cast<Stage>(s);
 			const auto& b = pass.shaders[s];
+			// A compute shader set on a pass is never run by its draw, as on FX11: it is left out.
+			if (stage == Stage::Compute && b.set && !b.null) {
+				out.diagnostics.push_back({ Severity::Info, b.line, std::format("pass '{}' of '{}' sets a compute shader, which its draw does not run", pass.name, technique.name) });
+				continue;
+			}
 			if (stage != Stage::Vertex && stage != Stage::Pixel && b.set && !b.null)
 				return fail(b.line, std::format("pass '{}' of '{}' sets a {} shader", pass.name, technique.name, StageName(stage)));
 		}

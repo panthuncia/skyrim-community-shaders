@@ -2203,7 +2203,11 @@ namespace OrgFx
 						for (std::size_t s = 0; s < p.shaders.size(); ++s) {
 							const auto& b = p.shaders[s];
 							const auto stage = static_cast<Stage>(s);
-							if (b.set && !b.null && stage != Stage::Vertex && stage != Stage::Pixel)
+							if (b.set && !b.null && stage == Stage::Compute)
+								Diag(Severity::Info, b.line, std::format("technique '{}' pass '{}' sets a compute shader, which its draw does not run (as on FX11)", t.name, p.name));
+							else if (b.set && !b.null && (stage == Stage::Hull || stage == Stage::Domain))
+								Diag(Severity::Warning, b.line, std::format("technique '{}' pass '{}' sets a {} shader: the quad is not a patch list, so the pass draws nothing (as on D3D11)", t.name, p.name, StageName(stage)));
+							else if (b.set && !b.null && stage != Stage::Vertex && stage != Stage::Pixel)
 								Diag(Severity::Warning, b.line, std::format("technique '{}' pass '{}' sets a {} shader, which the ORG runtime does not run", t.name, p.name, StageName(stage)));
 							for (const auto& a : b.arguments)
 								if (a.kind == ShaderArgument::Kind::Expression)

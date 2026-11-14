@@ -117,6 +117,9 @@ namespace OrgFx
 	 */
 	PassLayout LayoutPass(const LoweredEffect& a_effect, const EffectDesc& a_fx, std::uint32_t a_technique, std::uint32_t a_pass);
 
-	/** @brief The push block's prologue, the effect's body and the two entry wrappers for one pass. Fails for anything but a vertex and a pixel shader. */
+	/**
+	 * @brief The push block's prologue, the effect's body and the two entry wrappers for one pass. A compute shader on the pass is
+	 * left out (its draw never runs it). Fails for a geometry, hull or domain shader.
+	 */
 	LoweredPass LowerPass(const LoweredEffect& a_effect, const EffectDesc& a_fx, std::uint32_t a_technique, std::uint32_t a_pass);
 }
