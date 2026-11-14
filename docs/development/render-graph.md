@@ -1165,6 +1165,8 @@ A native device handle answers through the native services instead of failing:
     the game chose.
 -   **The swap chain**: `GetBuffer(0)` is the back buffer (a native texture); `ResizeBuffers` resizes the swap chain and
     makes a new back buffer; `GetFullscreenState` says windowed, and `SetFullscreenState` and `ResizeTarget` change nothing.
+    It is made SDR with the frame latency through `Engine::ConfigureSwapchain`. HDR Display switches its colour space through
+    `Native::SetSwapChainColorSpace`, since the handle answers no `IDXGISwapChain4`.
     `GetContainingOutput` is the game adapter's output on the window's monitor.
 
 Everything else on the device, and every context method, is a tripwire: logged once per call site, failed. A call from
@@ -1234,8 +1236,9 @@ validation.
 -   **Context work.** Draws, dispatches and binds still in the census do nothing. A DYNAMIC buffer is not renamed on
     `WRITE_DISCARD`, because no native GPU work reads a buffer except the context's own copies; the graph does not import
     native buffers yet. Copies of a depth-stencil image through staging memory carry the depth aspect only.
--   **HDR**: HDR Display's output is not shown through the swap chain (no `SetFrameSource` in native mode), and the colour
-    space is not switched.
+-   **HDR**: the colour space follows HDR Display (`Native::SetSwapChainColorSpace`, through `Engine::ConfigureSwapchain`), and
+    the output reaches the swap chain through the back buffer: ORGHDRDisplay copies it there on the graph, and the present copies
+    the back buffer. Not checked on an HDR display yet ([parity/hdr-tooling.md](./parity/hdr-tooling.md)).
 -   **Upscaling and frame generation**: off (stage 2).
 
 ## Tripwire handles

@@ -1935,3 +1935,12 @@ colour fill). `RasterProgram::Desc` already takes a depth format and `DepthStenc
 `AnchorPasses::Draw` has no depth attachment (a declared DepthRead view), no stencil reference and no scissor rectangle. With those
 three fields the port could take these draws as passes like any other (docs/development/parity/imagespace.md). A viewport larger
 than its target needs a dynamic viewport separate from the render area.
+
+## Push results from `nvperf::BeginPassRange` (D3D12 counters)
+
+ORG's `Telemetry/NvPerfCapture` already takes D3D12 queues (`MakeQueueTarget`, `BeginPassRange`, `EndPassRange`). CS's Nsight Perf
+backend keeps a bit per open pass range so it pops only what it pushed, which needs `PushRange`'s result. On Vulkan it gets the
+`VkCommandBuffer` itself and calls `PushRange`. On D3D12 it cannot: `rhi_interop_dx12.h` brings DirectX-Headers' `d3d12.h`,
+which CS's translation units do not mix with the SDK's. With `BeginPassRange` returning whether it pushed (or a
+`NativeCommandList(backend, list)` helper in ORG), the backend could run on native D3D12 too
+(docs/development/parity/hdr-tooling.md).
