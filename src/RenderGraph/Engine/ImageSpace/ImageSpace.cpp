@@ -297,6 +297,8 @@ namespace RenderGraph::Engine::ImageSpace
 			// The race menu's face tint (outside the frame's scopes: each call a scope of its own): sixteen loaded tint masks, each read
 			// by its heap index from the draw's latch (EffectInfo::latchedSources), blended over grey.
 			{ Effects::ISAlphaBlend, "ISAlphaBlend", "alphablend", "ISAlphaBlend.hlsl", 16, 0xFFFF, 16, 0, false, true, 1, false, false, false, false, false, true },
+			// The dynamic-resolution upsample (the end-of-frame chain's +0x1f8): the full quad, its coordinates scaled in the shader.
+			{ Effects::ISUpsampleDynamicResolution, "ISUpsampleDynamicResolution", "upsample", "ISUpsampleDynamicResolution.hlsl", 1, 0b1, 1, 0, false, true },
 			// The effects whose vertex shader writes no SV_Position (EffectInfo::rastersNothing): no pass, nothing drawn.
 			{ Effects::ISMap, "ISMap", "nodraw", "ISMap.hlsl", 0, 0, 0, 0, false, true, 1, false, false, false, false, true },
 			{ Effects::ISNoiseScrollAndBlend, "ISNoiseScrollAndBlend", "nodraw", "ISNoise.hlsl", 0, 0, 0, 0, false, true, 1, false, false, false, false, true },
@@ -3052,14 +3054,18 @@ namespace RenderGraph::Engine::ImageSpace
 			// A geometry effect (the ripple makers) draws its own shape, whatever quad the manager would use.
 			if (a_geometryEffect)
 				return {};
-			if (manager->GetRuntimeData().unk58)
-				return "dynamic resolution";
 			// Render draws its geometry argument (AE 0x1414f88b0): the manager's quad (+0x48, +0x50 for dynamic resolution) for an
 			// effect, or the ripple makers' own quads in the water's displacement update. The graph's fullscreen triangle is the first.
+			// The dynamic-resolution quad is refused by itself, not by the manager's flag: an effect drawn with the full quad while the
+			// flag is set (the upsample) is taken.
 			const auto* base = reinterpret_cast<const std::byte*>(manager);
-			if (a_geometry != *reinterpret_cast<void* const*>(base + 0x48) && a_geometry != *reinterpret_cast<void* const*>(base + 0x50))
-				return "a geometry other than the full-screen quad";
-			return {};
+			const auto* full = *reinterpret_cast<void* const*>(base + 0x48);
+			const auto* dynamic = *reinterpret_cast<void* const*>(base + 0x50);
+			if (a_geometry == full)
+				return {};
+			if (a_geometry == dynamic)
+				return "dynamic resolution's quad";
+			return "a geometry other than the full-screen quad";
 		}
 
 		/**
