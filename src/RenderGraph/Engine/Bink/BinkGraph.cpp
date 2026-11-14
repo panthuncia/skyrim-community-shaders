@@ -221,6 +221,12 @@ namespace RenderGraph::Engine::Bink::Graph
 			});
 		}
 
+		/**
+		 * @brief Bink's graph path off for the session, cleanly: the pending frame dropped, the client unregistered (its anchor's graph is
+		 * built without it at the next build point), the movie texture and staging pool kept only by the frames in flight. Every later
+		 * tick calls the engine's tile draw, which draws only where engine draws run (plain D3D11 and guest without the flush latch). One
+		 * error line names the reason; nothing is logged per tick.
+		 */
 		void Fail(BinkState& a_state, const char* a_why)
 		{
 			if (a_state.failed)
@@ -228,7 +234,7 @@ namespace RenderGraph::Engine::Bink::Graph
 			a_state.failed = true;
 			a_state.pending.reset();
 			FrameAnchors::Unregister(kClientId);
-			logger::error("[ORG] Bink: {}; the engine draws Bink from now on", a_why);
+			logger::error("[ORG] Bink: off for the session: {}. Movies go to the engine's tile draw, which native mode and the flush latch skip", a_why);
 		}
 
 		Util::ReasonLog& EngineDraws()
@@ -638,8 +644,9 @@ namespace RenderGraph::Engine::Bink::Graph
 			return false;
 		};
 		auto& state = Get();
+		// Off for the session (Fail logged why once).
 		if (state.failed)
-			return refuse("the graph path failed earlier");
+			return false;
 		if (!state.setUp)
 			return refuse("the graph path is not set up");
 		if (!RenderGraphRuntime::Get().IsActive())

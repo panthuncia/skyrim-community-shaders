@@ -19,7 +19,7 @@
  *
  * Everything else keeps the engine's path: a tick on another thread (without CS_ORG_LOADING_THREAD=1, the startup logo, which
  * plays on the MoviePlayer sequence thread under Renderer::Lock, where no anchor runs then), and every tick after the graph path
- * failed. Movies of any size draw on the graph (in chunks of the movie texture). Mode 2 (a movie inside another frame,
+ * was turned off for the session (a setup part missing or the render graph failed; one error line names it). Movies of any size draw on the graph (in chunks of the movie texture). Mode 2 (a movie inside another frame,
  * MoviePlayer::TickInFrame) has no caller in SE or AE. With HDR output on, the tiles go into HDR Display's UI texture, as the
  * engine's draw does.
  */
