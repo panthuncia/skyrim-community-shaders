@@ -21,7 +21,9 @@
  * The client runs on the graphics queue (slot 0) with the graphs' queue slots (graphics, compute, copy), on the host's runtime.
  * - While the host gives resources back in their home states (external home states, or closed executions), the client's
  *   submissions are closed too: each starts with a full memory barrier and returns what it used to its home state. That is the
- *   contract every other user of those resources between graph executions still relies on (Phase 4 turns it off).
+ *   contract every other user of those resources between graph executions still relies on. With native home states off
+ *   (CS_ORG_NATIVE_HOME_STATES=0) the host has no external home states, so the submissions are open: each leaves what it used in
+ *   the state it declared, and the ledgers carry that to the next user.
  * - It always starts with a full memory barrier. The native immediate context's own work shares the queue, and the ledgers do not
  *   know about it.
  *
@@ -41,12 +43,13 @@ namespace RenderGraph::ExternalWork
 	/**
 	 * @brief Records a_record and submits it on the graphics queue now, after everything submitted before it. a_accesses lists every
 	 * graph resource the work uses; each must have a backing. Work on resources the graph does not track (an upload buffer) needs no
-	 * entry. a_keepAlive is held until the GPU is done. a_label names the work in the log. Any thread.
+	 * entry. a_keepAlive is held until the GPU is done. a_label names the work in the log. a_signals are extra timeline points the
+	 * submission signals when it is done (the native context's own timeline, so its waits cover the work). Any thread.
 	 * @return False when nothing was submitted: the render graph is not active, the client could not be made, or the submission
 	 * failed (logged once per label). The caller then does the work its own way.
 	 */
 	bool Submit(std::string_view a_label, std::span<const Access> a_accesses, const std::function<void(rhi::CommandList&)>& a_record,
-		std::shared_ptr<const void> a_keepAlive = {});
+		std::shared_ptr<const void> a_keepAlive = {}, std::span<const rhi::TimelinePoint> a_signals = {});
 
 	/** @brief How many submissions went through the client so far. Any thread. */
 	std::uint64_t Submissions();

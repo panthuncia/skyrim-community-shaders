@@ -19,6 +19,7 @@
 #include "RenderGraph/FrameAnchors.h"
 #include "RenderGraph/GraphResources.h"
 #include "RenderGraph/Engine/GuestDevice.h"
+#include "RenderGraph/DxvkImageImport.h"
 #include "RenderGraph/Engine/Native/Native.h"
 #include "RenderGraph/Engine/Native/OpCensus.h"
 #include "RenderGraph/Engine/OwnedFrame.h"
@@ -2232,7 +2233,19 @@ bool RenderGraphRuntime::Initialize()
 		desc.closedExecutions = EpochsEnabled() && Switches::Equals("CS_ORG_CLOSED", "1");
 		// CS_ORG_EXTERNAL_HOME (default on, =0 off): each epoch gives DXVK's images (the imports) back in their home state on the
 		// graphics queue, where DXVK uses them between the epochs (GENERAL, the external-commands contract).
-		desc.externalHomeStates = !Switches::Equals("CS_ORG_EXTERNAL_HOME", "0");
+		// Native Vulkan with CS_ORG_NATIVE_HOME_STATES=0 has none: no image goes home, the ledgers carry each image's layout from
+		// one execution to the next, and the native context's work on tracked images takes it from them (ExternalWork, open).
+		const bool nativeHomeOff = state->native && RenderGraph::NativeHomeStatesOff();
+		desc.externalHomeStates = !Switches::Equals("CS_ORG_EXTERNAL_HOME", "0") && !nativeHomeOff;
+		if (state->native) {
+			const char* home = "on: every execution gives images back in Common";
+			if (nativeHomeOff)
+				home = "off (CS_ORG_NATIVE_HOME_STATES=0): images stay where the graph's last pass left them";
+			else if (RenderGraph::Backend::IsD3D12() && Switches::Off("CS_ORG_NATIVE_HOME_STATES"))
+				home = "on (D3D12 keeps them; the switch is for Vulkan)";
+			logger::info("[ORG] native home states: {}; graph imports of native images: {}", home,
+				RenderGraph::NativeExclusiveImports() ? "exclusive (the graph moves each image between layouts)" : "shared (Common only)");
+		}
 		// CS_ORG_REUSE_RECORDINGS (default on, =0 off): tickets record replayable recordings, which the revision-driven epochs need
 		// (their published copies are submitted again). A live epoch's recording is used once. Replayable recordings carry no Tracy GPU
 		// zones: turn it off to profile the epochs' passes on the GPU with Tracy (the revision-driven epochs then run synchronously).
@@ -2375,9 +2388,16 @@ bool RenderGraphRuntime::Initialize()
 			// stream's order on DXVK), so DCLF's direct forward and first-person families have their in-stream epochs.
 			// Not on D3D12: an in-stream epoch's segments are secondaries recorded outside rendering, and a D3D12 bundle can hold no
 			// copies or barriers (BeginSecondary refuses). Its epochs submit directly instead.
-			const bool nativeInStream = state->native && !RenderGraph::Backend::IsD3D12();
+			// Without native home states (CS_ORG_NATIVE_HOME_STATES=0) none either, unless CS_ORG_NATIVE_IN_STREAM=1 keeps them: every epoch
+			// submits directly. Drawcall Limit Fix's direct forward and first-person families need in-stream epochs, so they are off then.
+			const bool nativeHomeOffDirect = state->native && RenderGraph::NativeHomeStatesOff() && !Switches::On("CS_ORG_NATIVE_IN_STREAM");
+			const bool nativeInStream = state->native && !RenderGraph::Backend::IsD3D12() && !nativeHomeOffDirect;
 			if (state->native && RenderGraph::Backend::IsD3D12())
 				logger::info("[ORG] in-stream epochs: none on D3D12 (bundles cannot hold an epoch's copies and barriers); every epoch submits directly");
+			else if (nativeHomeOffDirect)
+				logger::info(
+					"[ORG] in-stream epochs: none without native home states (CS_ORG_NATIVE_IN_STREAM=1 keeps them); every epoch submits "
+					"directly, and DCLF's direct forward families are off");
 			if ((state->emitExternalCommands || nativeInStream) && !Switches::Equals("CS_ORG_IN_STREAM", "0")) {
 				state->inStreamEpochs = epochs;
 				const auto list = Switches::Value("CS_ORG_IN_STREAM");
