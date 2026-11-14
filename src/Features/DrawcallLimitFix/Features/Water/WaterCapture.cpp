@@ -38,7 +38,8 @@ namespace DCLF::Features::Water
 
 		static_assert(sizeof(Deferred::DirectionalShadowLightData) == kDirectionalShadowBytes, "t98's record");
 
-		// The most draws one batch latches; past it a draw is the engine's (WaterDraws' latch has room for this many).
+		// The most draws one run latches (WaterDraws' latch has room for this many). A batch with more runs what it latched at that
+		// point and goes on in a new run (Interrupt), so no draw is refused for the count.
 		constexpr std::size_t kMaxLatched = 64;
 		// Light Limit Fix's strict lights (PS b3: LightLimitFix::StrictLightDataCB, bound once a frame by CS).
 		constexpr std::uint32_t kStrictLightSlot = 3;
@@ -202,9 +203,9 @@ namespace DCLF::Features::Water
 		 */
 		const char* TryLatchDraw(Capture& a_capture, const Family::TriShape* a_shape, std::uint32_t a_start, std::uint32_t a_triangles)
 		{
+			if (a_capture.run->draws.size() >= kMaxLatched)
+				Interrupt(a_capture);
 			auto& run = *a_capture.run;
-			if (run.draws.size() >= kMaxLatched)
-				return "more draws than the batch latches";
 			const auto& rss = RE::BSGraphics::RendererShadowState::GetSingleton()->GetRuntimeData();
 			const auto* vs = rss.currentVertexShader;
 			const auto* ps = rss.currentPixelShader;

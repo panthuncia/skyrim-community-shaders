@@ -36,7 +36,7 @@ namespace DCLF::Features::Water::WaterDraws
 	namespace
 	{
 		constexpr const char* kShader = "Water.hlsl";
-		// The most draws a batch latches (WaterCapture's kMaxLatched); a batch's draws past it are the engine's.
+		// The most draws a run latches (WaterCapture's kMaxLatched); a batch with more draws in several runs.
 		constexpr std::uint32_t kMaxDraws = 64;
 		constexpr std::uint32_t kDrawStride = static_cast<std::uint32_t>(sizeof(DrawLatch));
 		constexpr std::size_t kViews = static_cast<std::size_t>(View::Count);
