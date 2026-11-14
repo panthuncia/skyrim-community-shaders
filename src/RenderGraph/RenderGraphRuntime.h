@@ -31,6 +31,7 @@ namespace org::services
 
 namespace rhi
 {
+	class CommandList;
 	class Resource;
 	class Timeline;
 	struct TimelinePoint;
@@ -439,6 +440,28 @@ public:
 		const char* a_label, bool a_fullBarrier = false);
 	/** @brief An ORG timeline point as the semaphore EmitExternalCommands takes (the frame-wait timeline's too); none when it has none. */
 	static ExternalCommandsWait NativeTimelinePoint(const rhi::TimelinePoint& a_point);
+	/**
+	 * @brief Render thread: EmitExternalCommands with BasicRHI types, the same call in every ORG mode and on both native backends.
+	 * a_record (may be null: waits and signals only) records BasicRHI commands into a_commands, starting with nothing bound; it binds
+	 * the heaps, layout and push data it uses and begins and ends every rendering it opens. a_waits and a_signals are the host's
+	 * timeline points.
+	 * - Guest (DXVK): DXVK's external commands, as EmitExternalCommands (stream order, a_bindsState, a_fullBarrier). DXVK's command
+	 *   buffer is adopted as a_commands (rhi::vulkan::AdoptCommandBuffer), and the wrapper is kept until D3D11 work issued after
+	 *   the call completes.
+	 * - Native (Vulkan and D3D12): a command list of its own on the graphics queue, submitted now between full memory barriers.
+	 * Work that belongs to an epoch (a CPU site's draws) is a pass recorded at execution instead (RecordsAtExecution): native mode
+	 * records it inline into the epoch's own list, with no submission of its own (docs/development/parity/inline-exec.md).
+	 * a_record runs exactly once when this returns true, never when it returns false.
+	 */
+	bool EmitCommands(void (*a_record)(void* a_user, rhi::CommandList& a_commands), void* a_user, const rhi::TimelinePoint* a_waits,
+		std::uint32_t a_waitCount, const rhi::TimelinePoint* a_signals, std::uint32_t a_signalCount, bool a_bindsState, const char* a_label,
+		bool a_fullBarrier = false);
+	/**
+	 * @brief Whether a pass of the epoch declared RecordAtExecution is recorded at execution: in DXVK's stream (an in-stream epoch,
+	 * guest) or inline into the epoch's own command list (native: org::GraphHost::SetInlineAtExecution, every epoch that is not
+	 * external). Otherwise it is recorded ahead. org::RenderGraph::PassEpochRecordsAtExecution answers the same while a graph builds.
+	 */
+	bool RecordsAtExecution(std::uint32_t a_epoch) const;
 	/**
 	 * @brief The async epochs whose graphics work goes into DXVK's own command stream (CS_ORG_IN_STREAM, default on when DXVK takes
 	 * external commands; =0 off): external epochs (org::GraphHost::SetExternalEpochs) whose execution ExecuteEpoch emits there, so

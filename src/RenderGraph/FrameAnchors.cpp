@@ -832,8 +832,9 @@ namespace FrameAnchors
 						desc.PreferQueue(org::QueueKind::Compute);
 					else if (pass.kind != PassKind::Render)
 						desc.PreferQueue(org::QueueKind::Graphics);
-					// Recorded in DXVK's stream after the run's commit, on the graphics queue only (PassDesc::atExecution).
-					if (pass.atExecution && pass.queue == PassQueue::Default && a_graph.PassEpochInHostStream())
+					// Recorded after the run's commit, on the graphics queue only (PassDesc::atExecution): in DXVK's stream (guest), or inline
+					// into the epoch's own list (native).
+					if (pass.atExecution && pass.queue == PassQueue::Default && a_graph.PassEpochRecordsAtExecution())
 						desc.RecordAtExecution();
 					a_out.push_back(std::move(desc.Epoch(epoch)));
 				}

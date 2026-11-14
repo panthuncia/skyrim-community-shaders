@@ -1331,6 +1331,95 @@ namespace RenderGraph::Engine::Native
 			PFN_vkSignalSemaphore signalSemaphore = nullptr;
 		};
 
+		/**
+		 * @brief RenderGraphRuntime::EmitCommands in native mode, on both backends: a client's BasicRHI recording into a command
+		 * list of its own on the graphics queue, submitted at the call with the client's timeline waits and signals, between full
+		 * memory barriers. For work that is not a graph pass (DCLF's frame signal, a site not yet moved into its epoch). A site's
+		 * draws belong in its epoch as a pass recorded at execution, which the graph records inline (org::GraphHost::
+		 * SetInlineAtExecution): no submission of its own.
+		 */
+		class Commands
+		{
+		public:
+			bool Init(rhi::Device a_device)
+			{
+				queue = a_device.GetQueue(rhi::QueueKind::Graphics);
+				for (auto& slot : slots) {
+					if (a_device.CreateCommandAllocator(rhi::QueueKind::Graphics, slot.allocator) != rhi::Result::Ok || !slot.allocator ||
+						a_device.CreateCommandList(rhi::QueueKind::Graphics, slot.allocator.Get(), slot.list) != rhi::Result::Ok || !slot.list)
+						return false;
+					slot.list->SetName("CS native commands");
+					// A list is made recording; it begins again at its first use (D3D12 resets only a closed list).
+					slot.list->End();
+				}
+				return a_device.CreateTimeline(timeline, 0, "CS native commands") == rhi::Result::Ok && timeline;
+			}
+
+			/**
+			 * @brief The caller's contract (RenderGraphRuntime::EmitCommands): a_record runs exactly once when this returns true, and
+			 * never when it returns false. It starts with nothing bound and binds what it uses. Any thread, one call at a time.
+			 */
+			bool Run(void (*a_record)(void*, rhi::CommandList&), void* a_user, std::span<const rhi::TimelinePoint> a_waits,
+				std::span<const rhi::TimelinePoint> a_signals, const char* a_label)
+			{
+				std::lock_guard guard(lock);
+				auto& slot = slots[next++ % kSlots];
+				if (slot.value && timeline->GetCompletedValue() < slot.value && timeline->HostWait(slot.value) != rhi::Result::Ok)
+					return false;
+				slot.allocator->Recycle();
+				slot.list->Recycle(slot.allocator.Get());
+				auto list = slot.list.Get();
+				BeginLabel(list, a_label ? a_label : "CS native commands");
+				// The work lands between the graph's submissions before and after it, as DXVK's stream would put it: ordered by the
+				// queue, with every access before and after it made visible.
+				auto full = rhi::FullMemoryBarrier();
+				rhi::BarrierBatch barriers{};
+				barriers.globals = { &full, 1u };
+				list.Barriers(barriers);
+				if (a_record)
+					a_record(a_user, list);
+				list.Barriers(barriers);
+				EndLabel(list);
+				list.End();
+				thread_local std::vector<rhi::TimelinePoint> waits, signals;
+				waits.assign(a_waits.begin(), a_waits.end());
+				signals.assign(a_signals.begin(), a_signals.end());
+				signals.push_back({ timeline->GetHandle(), value + 1 });
+				rhi::CommandList lists[] = { list };
+				rhi::SubmitDesc submit{};
+				submit.waits = { waits.data(), static_cast<uint32_t>(waits.size()) };
+				submit.signals = { signals.data(), static_cast<uint32_t>(signals.size()) };
+				if (queue.Submit({ lists, 1 }, submit) != rhi::Result::Ok) {
+					// The recording ran, so the call counts as taken. Its signals are not given: a failed submission is a lost device.
+					static std::atomic_flag logged;
+					if (!logged.test_and_set())
+						logger::error("[ORG native] commands ('{}') could not be submitted; such work is lost (logged once)", a_label ? a_label : "");
+					slot.value = 0;
+					return true;
+				}
+				slot.value = ++value;
+				return true;
+			}
+
+		private:
+			// Out-of-graph work is a few calls a frame: enough lists that a reuse never waits for recent work.
+			static constexpr uint32_t kSlots = 64;
+
+			struct Slot
+			{
+				rhi::CommandAllocatorPtr allocator;
+				rhi::CommandListPtr list;
+				uint64_t value = 0;
+			};
+
+			std::mutex lock;
+			rhi::Queue queue;
+			std::array<Slot, kSlots> slots;
+			rhi::TimelinePtr timeline;
+			uint64_t value = 0;
+			uint64_t next = 0;
+		};
+
 		bool RecordCopy(const Immediate::Vulkan& a_vk, VkCommandBuffer a_commands, const NativeResource& a_destination, uint32_t a_destinationSub, VkOffset3D a_at,
 			const NativeResource& a_source, uint32_t a_sourceSub, const D3D11_BOX* a_box);
 		uint64_t CopyRhi(const std::string& a_label, const std::shared_ptr<NativeResource>& a_destination, const std::shared_ptr<NativeResource>& a_source, bool a_all,
@@ -1352,6 +1441,7 @@ namespace RenderGraph::Engine::Native
 			// GenerateMips' compute programs (ORG's GenerateMips.hlsl): for 2D textures, and for arrays and cubes. Loaded once the render
 			// graph is up, with the BasicRHI context (LoadMipPrograms).
 			std::shared_ptr<const GraphPasses::GenerateMipsProgram> mips2D, mipsArray;
+			Commands commands;
 
 			// The swap chain on the game's window, and the back buffer the engine draws into (through the graph's passes).
 			rhi::SwapchainPtr swapchain;
@@ -5331,6 +5421,8 @@ namespace RenderGraph::Engine::Native
 		}
 		if (!state->oneShot.Init(state->Rhi()))
 			Fail("the native device", "its command lists or timeline for resource creation could not be made");
+		if (!state->commands.Init(state->Rhi()))
+			Fail("the native device", "the command lists or timeline for commands outside the graph could not be made");
 		if (!state->immediate.Init(state->Rhi()))
 			Fail("the native device", "the context's command lists, timeline or Vulkan entry points could not be made");
 
@@ -5488,6 +5580,12 @@ namespace RenderGraph::Engine::Native
 			return false;
 		}
 		return g_device->external.Run(a_record, a_user, { a_waits, a_waitCount }, { a_signals, a_signalCount });
+	}
+
+	bool EmitCommands(void (*a_record)(void*, rhi::CommandList&), void* a_user, const rhi::TimelinePoint* a_waits, std::uint32_t a_waitCount,
+		const rhi::TimelinePoint* a_signals, std::uint32_t a_signalCount, const char* a_label)
+	{
+		return g_device && g_device->commands.Run(a_record, a_user, { a_waits, a_waitCount }, { a_signals, a_signalCount }, a_label);
 	}
 
 	winrt::com_ptr<ID3D11Resource> WrapTexture(const rhi::Resource& a_image, const DxvkOrgInteropTextureWrap& a_wrap, DxvkOrgInteropResourceInfo& a_info,
@@ -5758,6 +5856,10 @@ namespace RenderGraph::Engine::Native
 	bool IsTrackedTexture(const IUnknown*) { return false; }
 	HRESULT Present(UINT, UINT) { return E_FAIL; }
 	bool EmitExternalCommands(void (*)(void*, VkCommandBuffer_T*), void*, const VkSemaphoreSubmitInfo*, std::uint32_t, const VkSemaphoreSubmitInfo*, std::uint32_t)
+	{
+		return false;
+	}
+	bool EmitCommands(void (*)(void*, rhi::CommandList&), void*, const rhi::TimelinePoint*, std::uint32_t, const rhi::TimelinePoint*, std::uint32_t, const char*)
 	{
 		return false;
 	}

@@ -2404,20 +2404,25 @@ bool RenderGraphRuntime::Initialize()
 			logger::info("[ORG] async epochs: {}; revision-driven: {}", fmt::join(epochs, ","), fmt::join(revisionEpochs, ","));
 			// In DXVK's own command stream unless CS_ORG_IN_STREAM=0 (or DXVK takes no external commands); a list of epochs (3,1) puts only
 			// those there.
-			// Native mode runs them too: EmitExternalCommands puts each segment on the graphics queue in the call's order (the
-			// stream's order on DXVK), so DCLF's direct forward and first-person families have their in-stream epochs.
-			// Not on D3D12: an in-stream epoch's segments are secondaries recorded outside rendering, and a D3D12 bundle can hold no
-			// copies or barriers (BeginSecondary refuses). Its epochs submit directly instead.
-			// Without native home states (CS_ORG_NATIVE_HOME_STATES=0) none either, unless CS_ORG_NATIVE_IN_STREAM=1 keeps them: every epoch
-			// submits directly. Drawcall Limit Fix's direct forward and first-person families need in-stream epochs, so they are off then.
-			const bool nativeHomeOffDirect = state->native && RenderGraph::NativeHomeStatesOff() && !Switches::On("CS_ORG_NATIVE_IN_STREAM");
-			const bool nativeInStream = state->native && !RenderGraph::Backend::IsD3D12() && !nativeHomeOffDirect;
-			if (state->native && RenderGraph::Backend::IsD3D12())
-				logger::info("[ORG] in-stream epochs: none on D3D12 (bundles cannot hold an epoch's copies and barriers); every epoch submits directly");
-			else if (nativeHomeOffDirect)
-				logger::info(
-					"[ORG] in-stream epochs: none without native home states (CS_ORG_NATIVE_IN_STREAM=1 keeps them); every epoch submits "
-					"directly, and DCLF's direct forward families are off");
+			// Native mode owns its queues: no external epochs. Every epoch submits directly, and a pass recorded at execution is
+			// recorded inline, into the epoch's own command list at its place in the graph's order, with the graph's barriers
+			// (org::GraphHost::SetInlineAtExecution), on Vulkan and D3D12 alike.
+			// CS_ORG_NATIVE_IN_STREAM=1 (native Vulkan only) keeps the old emulation until Drawcall Limit Fix's sites move to inline passes:
+			// in-stream epochs whose segments Native::External submits on the graphics queue in the call's order, which DCLF's direct
+			// forward and first-person families need (RenderGraphRuntime::InStreamEpochs).
+			const bool nativeInStream = state->native && !RenderGraph::Backend::IsD3D12() && Switches::On("CS_ORG_NATIVE_IN_STREAM");
+			if (state->native) {
+				state->host->SetInlineAtExecution(true);
+				if (nativeInStream)
+					logger::info(
+						"[ORG] native: passes recorded at execution are recorded inline; CS_ORG_NATIVE_IN_STREAM=1 keeps in-stream epochs "
+						"(their segments submitted by native external commands)");
+				else
+					logger::info(
+						"[ORG] native: no external epochs; every epoch submits directly, and passes recorded at execution are recorded "
+						"inline into their epoch's command list. DCLF's direct forward families need in-stream epochs until they move to "
+						"inline passes, so they are off");
+			}
 			if ((state->emitExternalCommands || nativeInStream) && !Switches::Equals("CS_ORG_IN_STREAM", "0")) {
 				state->inStreamEpochs = epochs;
 				const auto list = Switches::Value("CS_ORG_IN_STREAM");
@@ -3638,6 +3643,81 @@ RenderGraphRuntime::ExternalCommandsWait RenderGraphRuntime::NativeTimelinePoint
 	return { static_cast<VkSemaphore_T*>(info.timeline), a_point.value, 0 };
 }
 
+namespace
+{
+	/** @brief EmitCommands' recording in DXVK's stream: the client's callback, and the wrapper its commands record through. */
+	struct AdoptedCommands
+	{
+		void (*record)(void*, rhi::CommandList&) = nullptr;
+		void* user = nullptr;
+		rhi::Device device;
+		// Kept until D3D11 work issued after the call completes (ReleaseAfterD3D11): the wrapper owns GPU scratch its recording
+		// may allocate (rhi::vulkan::AdoptCommandBuffer).
+		std::shared_ptr<rhi::CommandListPtr> wrapper;
+	};
+
+	/** @brief DXVK's CS thread, once: DXVK's command buffer adopted as a BasicRHI list for the client's callback. */
+	void RecordAdoptedCommands(void* a_user, VkCommandBuffer a_commandBuffer)
+	{
+		const std::unique_ptr<AdoptedCommands> commands(static_cast<AdoptedCommands*>(a_user));
+		*commands->wrapper = rhi::vulkan::AdoptCommandBuffer(commands->device, a_commandBuffer, rhi::QueueKind::Graphics);
+		if (!*commands->wrapper) {
+			static std::atomic_flag logged;
+			if (!logged.test_and_set())
+				logger::error("[ORG] EmitCommands: DXVK's command buffer could not be adopted; the caller's commands are left out (logged once)");
+			return;
+		}
+		auto list = commands->wrapper->Get();
+		commands->record(commands->user, list);
+	}
+
+	void RecordNoCommands(void*, VkCommandBuffer) {}
+}
+
+bool RenderGraphRuntime::EmitCommands(void (*a_record)(void* a_user, rhi::CommandList& a_commands), void* a_user, const rhi::TimelinePoint* a_waits,
+	std::uint32_t a_waitCount, const rhi::TimelinePoint* a_signals, std::uint32_t a_signalCount, bool a_bindsState, const char* a_label, bool a_fullBarrier)
+{
+	if (!impl || !impl->host || (!impl->native && !impl->emitExternalCommands))
+		return false;
+	if (impl->native) {
+		// Regions: commands submitted now come after the anchor runs a region holds.
+		FrameAnchors::FlushRegions("commands");
+		return RenderGraph::Engine::Native::EmitCommands(a_record, a_user, a_waits, a_waitCount, a_signals, a_signalCount, a_label);
+	}
+	// DXVK takes Vulkan semaphores: each point through the host's timelines.
+	thread_local std::vector<ExternalCommandsWait> points;
+	points.clear();
+	for (const auto& point : std::span(a_waits, a_waitCount))
+		points.push_back(NativeTimelinePoint(point));
+	for (const auto& point : std::span(a_signals, a_signalCount))
+		points.push_back(NativeTimelinePoint(point));
+	if (std::ranges::any_of(points, [](const ExternalCommandsWait& a_point) { return a_point.semaphore == nullptr; })) {
+		static std::atomic_flag logged;
+		if (!logged.test_and_set())
+			logger::error("[ORG] EmitCommands ('{}'): a wait or signal is not on one of the host's timelines; nothing emitted (logged once)", a_label ? a_label : "");
+		return false;
+	}
+	const std::span<const ExternalCommandsWait> waits(points.data(), a_waitCount), signals(points.data() + a_waitCount, a_signalCount);
+	if (!a_record)
+		return EmitExternalCommands(&RecordNoCommands, nullptr, waits, signals, false, a_label, a_fullBarrier);
+	auto wrapper = std::make_shared<rhi::CommandListPtr>();
+	// DXVK's CS thread frees it in the callback, which may run before the call returns; when the call fails, it never runs.
+	auto* commands = new AdoptedCommands{ a_record, a_user, impl->host->Device(), wrapper };
+	if (!EmitExternalCommands(&RecordAdoptedCommands, commands, waits, signals, a_bindsState, a_label, a_fullBarrier)) {
+		delete commands;
+		return false;
+	}
+	ReleaseAfterD3D11(std::move(wrapper));
+	return true;
+}
+
+bool RenderGraphRuntime::RecordsAtExecution(std::uint32_t a_epoch) const
+{
+	if (!impl || !impl->host)
+		return false;
+	return impl->host->InlineAtExecution() || std::ranges::contains(impl->inStreamEpochs, a_epoch);
+}
+
 std::vector<std::uint32_t> RenderGraphRuntime::InStreamEpochs() const
 {
 	return impl ? impl->inStreamEpochs : std::vector<std::uint32_t>{};
@@ -3829,6 +3909,9 @@ bool RenderGraphRuntime::EmitExternalCommands(void (*)(void*, VkCommandBuffer), 
 	std::span<const ExternalCommandsWait>, bool, const char*, bool) { return false; }
 RenderGraphRuntime::ExternalCommandsWait RenderGraphRuntime::NativeTimelinePoint(const rhi::TimelinePoint&) { return {}; }
 std::vector<std::uint32_t> RenderGraphRuntime::InStreamEpochs() const { return {}; }
+bool RenderGraphRuntime::EmitCommands(void (*)(void*, rhi::CommandList&), void*, const rhi::TimelinePoint*, std::uint32_t, const rhi::TimelinePoint*, std::uint32_t,
+	bool, const char*, bool) { return false; }
+bool RenderGraphRuntime::RecordsAtExecution(std::uint32_t) const { return false; }
 std::uint32_t RenderGraphRuntime::VendorId() { return 0; }
 org::services::ShaderCompiler* RenderGraphRuntime::ShaderCompiler() { return nullptr; }
 const std::vector<std::filesystem::path>& RenderGraphRuntime::ShaderSourceFiles()
