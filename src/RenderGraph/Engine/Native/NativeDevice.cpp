@@ -1171,165 +1171,17 @@ namespace RenderGraph::Engine::Native
 				a_request.miscFlags, a_request.data ? ", with data" : "");
 		}
 
-		// ---- Queue access and external commands -------------------------------------------------------------------------------
+		// ---- Queue access and commands outside the graph ---------------------------------------------------------------------
 
 		/**
-		 * @brief The lock around every access to the device's queues: BasicRHI takes it through its sharing hooks
-		 * (rhi::vulkan::ShareVulkanDevice), and External takes it around its own vkQueueSubmit2, so the two never use a queue at once.
+		 * @brief The lock around every access to the device's queues, which BasicRHI takes through its sharing hooks
+		 * (rhi::vulkan::ShareVulkanDevice). Every submission is BasicRHI's now. The shared device is kept for its whole-device waits,
+		 * which wait for BasicRHI's timelines instead of vkDeviceWaitIdle.
 		 */
 		std::mutex g_queueLock;
 
 		void LockQueue(void*, VkQueue) { g_queueLock.lock(); }
 		void UnlockQueue(void*, VkQueue) { g_queueLock.unlock(); }
-
-		/**
-		 * @brief RenderGraphRuntime::EmitExternalCommands in native mode: what DXVK's dxvkEmitExternalCommands does in its stream.
-		 * A client's recording (DCLF's sites, its frame signal) goes into a command buffer of its own on the graphics queue,
-		 * submitted at the call with the client's waits and signals, between full memory barriers. It lands after everything
-		 * submitted before it and before everything after, as DXVK's stream order would put it. Images rest in GENERAL, as the
-		 * recording expects.
-		 */
-		class External
-		{
-		public:
-			bool Init(rhi::Device a_device)
-			{
-				device = rhi::vulkan::get_device(a_device);
-				const auto graphics = a_device.GetQueue(rhi::QueueKind::Graphics);
-				queue = rhi::vulkan::get_queue(graphics);
-				const auto getDeviceProcAddr = reinterpret_cast<PFN_vkGetDeviceProcAddr>(LoaderProc()(rhi::vulkan::get_instance(a_device), "vkGetDeviceProcAddr"));
-				if (!getDeviceProcAddr)
-					return false;
-				const auto resolve = [&](auto& a_into, const char* a_name) {
-					a_into = reinterpret_cast<std::remove_reference_t<decltype(a_into)>>(getDeviceProcAddr(device, a_name));
-					return a_into != nullptr;
-				};
-				PFN_vkCreateCommandPool createPool = nullptr;
-				PFN_vkAllocateCommandBuffers allocate = nullptr;
-				PFN_vkCreateSemaphore createSemaphore = nullptr;
-				if (!resolve(createPool, "vkCreateCommandPool") || !resolve(allocate, "vkAllocateCommandBuffers") || !resolve(createSemaphore, "vkCreateSemaphore") ||
-					!resolve(reset, "vkResetCommandBuffer") || !resolve(begin, "vkBeginCommandBuffer") || !resolve(end, "vkEndCommandBuffer") ||
-					!resolve(submit, "vkQueueSubmit2") || !resolve(barrier, "vkCmdPipelineBarrier2") || !resolve(wait, "vkWaitSemaphores") ||
-					!resolve(signalSemaphore, "vkSignalSemaphore"))
-					return false;
-				VkCommandPoolCreateInfo poolInfo{ VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO };
-				poolInfo.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
-				poolInfo.queueFamilyIndex = rhi::vulkan::get_queue_family_index(graphics);
-				if (createPool(device, &poolInfo, nullptr, &pool) != VK_SUCCESS)
-					return false;
-				VkCommandBufferAllocateInfo allocateInfo{ VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO };
-				allocateInfo.commandPool = pool;
-				allocateInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
-				allocateInfo.commandBufferCount = kSlots;
-				if (allocate(device, &allocateInfo, commands.data()) != VK_SUCCESS)
-					return false;
-				VkSemaphoreTypeCreateInfo type{ VK_STRUCTURE_TYPE_SEMAPHORE_TYPE_CREATE_INFO };
-				type.semaphoreType = VK_SEMAPHORE_TYPE_TIMELINE;
-				VkSemaphoreCreateInfo semaphoreInfo{ VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO };
-				semaphoreInfo.pNext = &type;
-				return createSemaphore(device, &semaphoreInfo, nullptr, &timeline) == VK_SUCCESS;
-			}
-
-			/**
-			 * @brief The caller's contract (RenderGraphRuntime::EmitExternalCommands, as DXVK's): a_record runs exactly once when this
-			 * returns true, and never when it returns false, so the caller still owns a_user then (EmitExecution frees its segment). Once
-			 * a_record has run this returns true whatever follows: a failed submit (a lost device) signals the client's points from the
-			 * host instead, so nothing waits on work that never ran.
-			 */
-			bool Run(void (*a_record)(void*, VkCommandBuffer), void* a_user, std::span<const VkSemaphoreSubmitInfo> a_waits,
-				std::span<const VkSemaphoreSubmitInfo> a_signals)
-			{
-				std::lock_guard guard(lock);
-				const uint32_t slot = static_cast<uint32_t>(next++ % kSlots);
-				if (values[slot]) {
-					VkSemaphoreWaitInfo waitInfo{ VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO };
-					waitInfo.semaphoreCount = 1;
-					waitInfo.pSemaphores = &timeline;
-					waitInfo.pValues = &values[slot];
-					if (wait(device, &waitInfo, 5'000'000'000ull) != VK_SUCCESS)
-						return false;
-				}
-				const VkCommandBuffer commandBuffer = commands[slot];
-				reset(commandBuffer, 0);
-				VkCommandBufferBeginInfo beginInfo{ VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO };
-				beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-				begin(commandBuffer, &beginInfo);
-				FullBarrier(commandBuffer);
-				if (a_record)
-					a_record(a_user, commandBuffer);
-				FullBarrier(commandBuffer);
-				end(commandBuffer);
-
-				thread_local std::vector<VkSemaphoreSubmitInfo> signals;
-				signals.assign(a_signals.begin(), a_signals.end());
-				signals.push_back({ VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO, nullptr, timeline, value + 1, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, 0 });
-				VkCommandBufferSubmitInfo commandInfo{ VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO };
-				commandInfo.commandBuffer = commandBuffer;
-				VkSubmitInfo2 submitInfo{ VK_STRUCTURE_TYPE_SUBMIT_INFO_2 };
-				submitInfo.waitSemaphoreInfoCount = static_cast<uint32_t>(a_waits.size());
-				submitInfo.pWaitSemaphoreInfos = a_waits.data();
-				submitInfo.commandBufferInfoCount = 1;
-				submitInfo.pCommandBufferInfos = &commandInfo;
-				submitInfo.signalSemaphoreInfoCount = static_cast<uint32_t>(signals.size());
-				submitInfo.pSignalSemaphoreInfos = signals.data();
-				VkResult result;
-				{
-					std::lock_guard queueGuard(g_queueLock);
-					result = submit(queue, 1, &submitInfo, VK_NULL_HANDLE);
-				}
-				if (result != VK_SUCCESS) {
-					static std::atomic_flag logged;
-					if (!logged.test_and_set())
-						logger::error("[ORG native] external commands could not be submitted ({}); such work is lost, its signals given from the host", static_cast<int>(result));
-					// The recording ran (a_record owned a_user): taken, as the contract says. Its timeline points are signalled here.
-					for (const auto& point : a_signals) {
-						VkSemaphoreSignalInfo signalInfo{ VK_STRUCTURE_TYPE_SEMAPHORE_SIGNAL_INFO };
-						signalInfo.semaphore = point.semaphore;
-						signalInfo.value = point.value;
-						(void)signalSemaphore(device, &signalInfo);
-					}
-					// The slot's buffer was never submitted: reusable without a wait.
-					values[slot] = 0;
-					return true;
-				}
-				values[slot] = ++value;
-				return true;
-			}
-
-		private:
-			// In-stream epochs submit a segment each, dozens a frame: enough buffers that a reuse never waits for recent work.
-			static constexpr uint32_t kSlots = 512;
-
-			void FullBarrier(VkCommandBuffer a_commands) const
-			{
-				VkMemoryBarrier2 memory{ VK_STRUCTURE_TYPE_MEMORY_BARRIER_2 };
-				memory.srcStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
-				memory.srcAccessMask = VK_ACCESS_2_MEMORY_WRITE_BIT;
-				memory.dstStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
-				memory.dstAccessMask = VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT;
-				VkDependencyInfo dependency{ VK_STRUCTURE_TYPE_DEPENDENCY_INFO };
-				dependency.memoryBarrierCount = 1;
-				dependency.pMemoryBarriers = &memory;
-				barrier(a_commands, &dependency);
-			}
-
-			std::mutex lock;
-			VkDevice device = VK_NULL_HANDLE;
-			VkQueue queue = VK_NULL_HANDLE;
-			VkCommandPool pool = VK_NULL_HANDLE;
-			std::array<VkCommandBuffer, kSlots> commands{};
-			std::array<uint64_t, kSlots> values{};
-			VkSemaphore timeline = VK_NULL_HANDLE;
-			uint64_t value = 0;
-			uint64_t next = 0;
-			PFN_vkResetCommandBuffer reset = nullptr;
-			PFN_vkBeginCommandBuffer begin = nullptr;
-			PFN_vkEndCommandBuffer end = nullptr;
-			PFN_vkQueueSubmit2 submit = nullptr;
-			PFN_vkCmdPipelineBarrier2 barrier = nullptr;
-			PFN_vkWaitSemaphores wait = nullptr;
-			PFN_vkSignalSemaphore signalSemaphore = nullptr;
-		};
 
 		/**
 		 * @brief RenderGraphRuntime::EmitCommands in native mode, on both backends: a client's BasicRHI recording into a command
@@ -1437,7 +1289,6 @@ namespace RenderGraph::Engine::Native
 			rhi::Queue graphics;
 			OneShot oneShot;
 			Immediate immediate;
-			External external;
 			// GenerateMips' compute programs (ORG's GenerateMips.hlsl): for 2D textures, and for arrays and cubes. Loaded once the render
 			// graph is up, with the BasicRHI context (LoadMipPrograms).
 			std::shared_ptr<const GraphPasses::GenerateMipsProgram> mips2D, mipsArray;
@@ -5413,11 +5264,9 @@ namespace RenderGraph::Engine::Native
 						 "errors are logged as \"Vulkan validation: ...\" lines, drained at every present");
 		state->graphics = state->Rhi().GetQueue(rhi::QueueKind::Graphics);
 		if (!OnD3D12()) {
-			// BasicRHI's queue accesses take the lock External takes around its own submissions.
+			// BasicRHI's queue accesses take one lock.
 			if (rhi::vulkan::ShareVulkanDevice(state->Rhi(), rhi::vulkan::QueueSubmissionHooks{ nullptr, &LockQueue, &UnlockQueue, nullptr }) != rhi::Result::Ok)
-				Fail("the native device", "BasicRHI could not take the queue lock hooks external commands share with it");
-			if (!state->external.Init(state->Rhi()))
-				Fail("the native device", "the external commands' command pool, timeline or Vulkan entry points could not be made");
+				Fail("the native device", "BasicRHI could not take the queue lock hooks");
 		}
 		if (!state->oneShot.Init(state->Rhi()))
 			Fail("the native device", "its command lists or timeline for resource creation could not be made");
@@ -5563,23 +5412,6 @@ namespace RenderGraph::Engine::Native
 	HRESULT Present(UINT a_syncInterval, UINT a_flags)
 	{
 		return g_device ? g_device->Present(a_syncInterval, a_flags) : E_FAIL;
-	}
-
-	bool EmitExternalCommands(void (*a_record)(void*, VkCommandBuffer_T*), void* a_user, const VkSemaphoreSubmitInfo* a_waits, std::uint32_t a_waitCount,
-		const VkSemaphoreSubmitInfo* a_signals, std::uint32_t a_signalCount)
-	{
-		if (!g_device)
-			return false;
-		// External commands are Vulkan command buffers with Vulkan semaphores (DCLF's CPU pipeline sites and frame signal). D3D12 has
-		// neither, and DCLF is off there (DrawcallLimitFix::SetupResources), so a call is refused by name.
-		if (OnD3D12()) {
-			static std::atomic_flag logged;
-			if (!logged.test_and_set())
-				logger::error("[ORG native] external commands (Vulkan command buffers, RenderGraphRuntime::EmitExternalCommands) are not available on D3D12; "
-							  "the caller's work is not done (logged once)");
-			return false;
-		}
-		return g_device->external.Run(a_record, a_user, { a_waits, a_waitCount }, { a_signals, a_signalCount });
 	}
 
 	bool EmitCommands(void (*a_record)(void*, rhi::CommandList&), void* a_user, const rhi::TimelinePoint* a_waits, std::uint32_t a_waitCount,
@@ -5855,10 +5687,6 @@ namespace RenderGraph::Engine::Native
 	std::shared_ptr<org::ExternalTextureResource> PromotedTextureOf(const IUnknown*) { return nullptr; }
 	bool IsTrackedTexture(const IUnknown*) { return false; }
 	HRESULT Present(UINT, UINT) { return E_FAIL; }
-	bool EmitExternalCommands(void (*)(void*, VkCommandBuffer_T*), void*, const VkSemaphoreSubmitInfo*, std::uint32_t, const VkSemaphoreSubmitInfo*, std::uint32_t)
-	{
-		return false;
-	}
 	bool EmitCommands(void (*)(void*, rhi::CommandList&), void*, const rhi::TimelinePoint*, std::uint32_t, const rhi::TimelinePoint*, std::uint32_t, const char*)
 	{
 		return false;

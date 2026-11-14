@@ -2407,23 +2407,13 @@ bool RenderGraphRuntime::Initialize()
 			// Native mode owns its queues: no external epochs. Every epoch submits directly, and a pass recorded at execution is
 			// recorded inline, into the epoch's own command list at its place in the graph's order, with the graph's barriers
 			// (org::GraphHost::SetInlineAtExecution), on Vulkan and D3D12 alike.
-			// CS_ORG_NATIVE_IN_STREAM=1 (native Vulkan only) keeps the old emulation until Drawcall Limit Fix's sites move to inline passes:
-			// in-stream epochs whose segments Native::External submits on the graphics queue in the call's order, which DCLF's direct
-			// forward and first-person families need (RenderGraphRuntime::InStreamEpochs).
-			const bool nativeInStream = state->native && !RenderGraph::Backend::IsD3D12() && Switches::On("CS_ORG_NATIVE_IN_STREAM");
 			if (state->native) {
 				state->host->SetInlineAtExecution(true);
-				if (nativeInStream)
-					logger::info(
-						"[ORG] native: passes recorded at execution are recorded inline; CS_ORG_NATIVE_IN_STREAM=1 keeps in-stream epochs "
-						"(their segments submitted by native external commands)");
-				else
-					logger::info(
-						"[ORG] native: no external epochs; every epoch submits directly, and passes recorded at execution are recorded "
-						"inline into their epoch's command list. DCLF's direct forward families need in-stream epochs until they move to "
-						"inline passes, so they are off");
+				logger::info(
+					"[ORG] native: no external epochs; every epoch submits directly, and passes recorded at execution are recorded "
+					"inline into their epoch's command list");
 			}
-			if ((state->emitExternalCommands || nativeInStream) && !Switches::Equals("CS_ORG_IN_STREAM", "0")) {
+			if (state->emitExternalCommands && !Switches::Equals("CS_ORG_IN_STREAM", "0")) {
 				state->inStreamEpochs = epochs;
 				const auto list = Switches::Value("CS_ORG_IN_STREAM");
 				if (list.find(',') != std::string::npos) {
@@ -3591,7 +3581,20 @@ bool RenderGraphRuntime::EmitExternalCommands(void (*a_record)(void* a_user, VkC
 	std::span<const ExternalCommandsWait> a_waits, std::span<const ExternalCommandsWait> a_signals, bool a_bindsState, const char* a_label,
 	bool a_fullBarrier)
 {
-	if (!impl || !a_record || (!impl->native && !impl->emitExternalCommands))
+	if (!impl || !a_record)
+		return false;
+	// Native mode takes no Vulkan command buffers: EmitCommands records BasicRHI commands on both backends, and epoch work is a pass
+	// recorded at execution, inline (docs/development/parity/inline-exec.md).
+	if (impl->native) {
+		static std::atomic_flag logged;
+		if (!logged.test_and_set())
+			logger::error(
+				"[ORG] native: EmitExternalCommands ('{}') takes Vulkan command buffers, which native mode has none of; use EmitCommands "
+				"(logged once)",
+				a_label ? a_label : "");
+		return false;
+	}
+	if (!impl->emitExternalCommands)
 		return false;
 	// Regions: commands put in the stream now come after the anchor runs a region holds.
 	FrameAnchors::FlushRegions("external commands");
@@ -3617,10 +3620,6 @@ bool RenderGraphRuntime::EmitExternalCommands(void (*a_record)(void* a_user, VkC
 	commands.signalCount = static_cast<std::uint32_t>(a_signals.size());
 	commands.signals = semaphores.data() + a_waits.size();
 	commands.label = a_label;
-	// Native mode: the commands go to the graphics queue at once, in the order of the calls, as DXVK's stream would order them.
-	if (impl->native)
-		return RenderGraph::Engine::Native::EmitExternalCommands(a_record, a_user, semaphores.data(), static_cast<std::uint32_t>(a_waits.size()),
-			semaphores.data() + a_waits.size(), static_cast<std::uint32_t>(a_signals.size()));
 	// The guard may flush, which DXVK's worker sees before these commands: the scratch above stays as it is.
 	impl->GuardStreamWaits(a_waits, a_label);
 	if (FAILED(impl->emitExternalCommands(globals::d3d::device, &commands)))

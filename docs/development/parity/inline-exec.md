@@ -27,8 +27,9 @@ sites record BasicRHI lists on every backend.
   whenever `org::RenderGraph::PassEpochRecordsAtExecution()` says so. In native mode, ImageSpace's gated passes and the skeleton's
   clears are then recorded inline, and a closed pass costs only its barriers, as in guest.
 - **The BasicRHI seam for DCLF**: `RenderGraphRuntime::EmitCommands` and `RenderGraphRuntime::RecordsAtExecution` (below).
-- **Deletion, a separate final commit**: `Native::External`, `Native::EmitExternalCommands` and `CS_ORG_NATIVE_IN_STREAM`. Merge
-  it only after DCLF's sites moved. After it, `RenderGraphRuntime::EmitExternalCommands` refuses in native mode.
+- **Deletion, a separate final commit** (this text describes the tree after it): `Native::External`,
+  `Native::EmitExternalCommands` and `CS_ORG_NATIVE_IN_STREAM` are gone. `RenderGraphRuntime::EmitExternalCommands` refuses in
+  native mode (logged once).
 
 ## The API
 
