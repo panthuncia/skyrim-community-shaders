@@ -74,8 +74,8 @@ namespace RenderGraph::Engine::ImageSpace
 		constexpr const char* kClientId = "cs.engine.imagespace";
 		// Gate entries (one per pass, numbered by the shapes' place in the frame).
 		constexpr std::uint32_t kGateEntries = 256;
-		// SRV slots a shader file's ORG push block lists at most (t0..t(n-1); its samplers and UAVs follow): ISSAOComposite's seven.
-		constexpr std::uint32_t kMaxSlots = 7;
+		// Texture slots a shape names at most (t0..t15, the engine's PS slots): ISAlphaBlend reads all sixteen, ISLightingComposite eight.
+		constexpr std::uint32_t kMaxSlots = 16;
 		// The shape manifest: a shape not seen for this many sessions is dropped, and it is written at most this often.
 		constexpr std::uint32_t kManifestSessions = 16;
 		constexpr std::uint32_t kManifestWriteFrames = 300;
@@ -154,6 +154,10 @@ namespace RenderGraph::Engine::ImageSpace
 			// ISMap stays on vanilla's DXBC): the engine's draw rasterizes nothing (imagespace-shaders.md, inferred). Taken with no pass:
 			// the engine's state is applied as its draw would, and nothing is drawn.
 			bool rastersNothing = false;
+			// Its textures are loaded ones, not engine targets (ISAlphaBlend's tint masks): each read slot is read by the heap index the
+			// draw's latch holds (SourcesAt, after its constants), so its source list has no SRV entries, and a second LATCH follows the
+			// constants' one.
+			bool latchedSources = false;
 		};
 
 		/** @brief The push words of an effect's feature handles (EffectInfo::features): s9, then the five headers' resources. */
@@ -290,6 +294,9 @@ namespace RenderGraph::Engine::ImageSpace
 			{ Effects::ISSnowSSS, "ISSnowSSS", "snow", "ISSnowSSS.hlsl", 3, 0b111, 3, 0, false, true },
 			// A colour fill (menu 3D's clear among others), with menu 3D's stencil test and scissor when the engine sets them.
 			{ Effects::ISSimpleColor, "ISSimpleColor", "simplecolor", "ISSimpleColor.hlsl", 0, 0, 0, 0, false, true },
+			// The race menu's face tint (outside the frame's scopes: each call a scope of its own): sixteen loaded tint masks, each read
+			// by its heap index from the draw's latch (EffectInfo::latchedSources), blended over grey.
+			{ Effects::ISAlphaBlend, "ISAlphaBlend", "alphablend", "ISAlphaBlend.hlsl", 16, 0xFFFF, 16, 0, false, true, 1, false, false, false, false, false, true },
 			// The effects whose vertex shader writes no SV_Position (EffectInfo::rastersNothing): no pass, nothing drawn.
 			{ Effects::ISMap, "ISMap", "nodraw", "ISMap.hlsl", 0, 0, 0, 0, false, true, 1, false, false, false, false, true },
 			{ Effects::ISNoiseScrollAndBlend, "ISNoiseScrollAndBlend", "nodraw", "ISNoise.hlsl", 0, 0, 0, 0, false, true, 1, false, false, false, false, true },
@@ -334,6 +341,14 @@ namespace RenderGraph::Engine::ImageSpace
 			       (a_desc.StencilEnable && a_desc.StencilWriteMask != 0 && (writes(a_desc.FrontFace) || writes(a_desc.BackFace)));
 		}
 
+		/** @brief Every slot unread (-1). */
+		constexpr std::array<std::int32_t, kMaxSlots> NoInputs()
+		{
+			std::array<std::int32_t, kMaxSlots> inputs{};
+			inputs.fill(-1);
+			return inputs;
+		}
+
 		/** @brief The engine's depth-stencil table's shape (RE::BSGraphics, p4.6-shaders-states.md "State tables"). */
 		constexpr std::uint32_t kDepthModes = 6;
 		constexpr std::uint32_t kStencilModes = 40;
@@ -348,7 +363,7 @@ namespace RenderGraph::Engine::ImageSpace
 			std::uint32_t effect = 0;   // kEffects index
 			std::int32_t output = -1;   // RE::RENDER_TARGET, with a mip (WithMip)
 			std::int32_t output1 = -1;  // SV_Target1's render target (EffectInfo::targets 2), or -1
-			std::array<std::int32_t, kMaxSlots> inputs{ -1, -1, -1, -1, -1, -1, -1 };  // kDepthInput / kCubeInput / kLatchSourceInput, or a render target (with a mip)
+			std::array<std::int32_t, kMaxSlots> inputs = NoInputs();  // kDepthInput / kCubeInput / kLatchSourceInput, or a render target (with a mip)
 			std::array<std::uint32_t, kMaxSlots> address{};
 			std::array<std::uint32_t, kMaxSlots> filter{};
 			std::uint32_t blend = kNoBlend;  // PackBlend
@@ -402,6 +417,13 @@ namespace RenderGraph::Engine::ImageSpace
 		};
 		static_assert(sizeof(ConstantsAt) == 32);
 
+		/** @brief OrgEngineSourcesAt in Common/OrgEngineConstants.hlsli: a latched-sources effect's heap index per texture slot. */
+		using SourcesAt = std::array<std::uint32_t, kMaxSlots>;
+		static_assert(sizeof(SourcesAt) == 64);
+
+		/** @brief A gate entry's bytes in a client's latch: its ConstantsAt, then its SourcesAt. */
+		constexpr std::uint32_t kLatchStride = static_cast<std::uint32_t>(sizeof(ConstantsAt) + sizeof(SourcesAt));
+
 		/** @brief A taken draw or dispatch waiting for its batch's run: its pass, where its constants are, and a dispatch's groups. */
 		struct Pending
 		{
@@ -411,6 +433,7 @@ namespace RenderGraph::Engine::ImageSpace
 			std::array<std::uint32_t, 3> groups{};
 			std::shared_ptr<const void> source;  // the descriptor and texture behind at.source, held until the run's GPU work retires
 			std::uint32_t vertices = 3;          // a draw's vertex count: the fullscreen triangle's, or a geometry effect's indices
+			std::optional<SourcesAt> sources;    // a latched-sources effect's heap indices (EffectInfo::latchedSources); source holds them
 		};
 
 		/** @brief The BSImagespaceShader::Render (or DispatchComputeShader) call in progress. */
@@ -967,6 +990,15 @@ namespace RenderGraph::Engine::ImageSpace
 					continue;
 				if (a_effect.cubes & (1u << slot)) {
 					a_out.inputs[slot] = kCubeInput | static_cast<std::int32_t>(RE::RENDER_TARGETS_CUBEMAP::kREFLECTIONS);
+					continue;
+				}
+				// A loaded texture, read by its heap index from the draw's latch (TakeDraw resolves the shadow state's view).
+				if (a_effect.latchedSources) {
+					a_out.inputs[slot] = kLatchSourceInput;
+					if (slot < a_effect.samplers) {
+						a_out.address[slot] = a_address[slot].underlying();
+						a_out.filter[slot] = a_filter[slot].underlying();
+					}
 					continue;
 				}
 				const auto input = InputOfView(a_views[slot]);
@@ -1646,8 +1678,9 @@ namespace RenderGraph::Engine::ImageSpace
 				desc.vertexSource = effect.source;
 			// FXC-era sources (vector conditions in ?:).
 			desc.languageVersion = L"2018";
-			// Shared (4 words), the SRVs, the samplers, the feature handles, the latch (2).
-			desc.constantWords = 4 + effect.slots + effect.samplers + (effect.features ? kFeatureWords : 0) + 2;
+			// Shared (4 words), the SRVs, the samplers, the feature handles, the latch (2), the sources' latch (2).
+			desc.constantWords = 4 + (effect.latchedSources ? 0 : effect.slots) + effect.samplers + (effect.features ? kFeatureWords : 0) + 2 +
+			                     (effect.latchedSources ? 2 : 0);
 			// The stage defines are RasterProgram's own.
 			desc.defines = DefinesOf(effectIndex);
 			desc.targets = { { .format = format, .blend = blend[0] } };
@@ -1659,6 +1692,19 @@ namespace RenderGraph::Engine::ImageSpace
 				DepthStateFor(depthIndex, desc.depth);
 			}
 			return desc;
+		}
+
+		/**
+		 * @brief Whether a spec reads a texture slot through a sampler of its own: an imported input, or a latched source; not a cube
+		 * slot CS binds with its own sampler.
+		 */
+		bool SlotRead(const Spec& a_spec, std::uint32_t a_slot)
+		{
+			const auto& effect = kEffects[a_spec.key.effect];
+			if (a_slot >= kMaxSlots || (effect.cubes & (1u << a_slot)))
+				return false;
+			const auto name = a_spec.key.inputs[a_slot];
+			return a_spec.inputs[a_slot] || (name >= 0 && (name & kLatchSourceInput));
 		}
 
 		/** @brief The compute program's description (BSImagespaceShader::DispatchComputeShader dispatches technique 0, 100952 / 107734). */
@@ -1751,7 +1797,7 @@ namespace RenderGraph::Engine::ImageSpace
 			}
 			std::array<std::uint32_t, kMaxSlots> samplers{};
 			for (std::uint32_t slot = 0; slot < effect.samplers; ++slot) {
-				if (!spec.inputs[slot] || (effect.cubes & (1u << slot)))
+				if (!SlotRead(spec, slot))
 					continue;
 				samplers[slot] = SamplerFor(spec.key.address[slot], spec.key.filter[slot]);
 				if (samplers[slot] == UINT32_MAX) {
@@ -1776,10 +1822,11 @@ namespace RenderGraph::Engine::ImageSpace
 			// The shader's resource list order: the shared constants, t0.., s0.., (u0), the constants' location.
 			std::vector<AnchorPasses::Bind> bindings;
 			bindings.push_back(AnchorPasses::Bind::Shared());
-			for (std::uint32_t slot = 0; slot < effect.slots; ++slot)
+			// A latched-sources effect reads its textures by the latch's heap indices: no SRV entries.
+			for (std::uint32_t slot = 0; !effect.latchedSources && slot < effect.slots; ++slot)
 				bindings.push_back(spec.inputs[slot] ? AnchorPasses::Bind::Srv(spec.inputs[slot], MipOfName(spec.key.inputs[slot])) : AnchorPasses::Bind::Unused());
 			for (std::uint32_t slot = 0; slot < effect.samplers; ++slot)
-				bindings.push_back(spec.inputs[slot] && !(effect.cubes & (1u << slot)) ? AnchorPasses::Bind::Handle(samplers[slot]) : AnchorPasses::Bind::Unused());
+				bindings.push_back(SlotRead(spec, slot) ? AnchorPasses::Bind::Handle(samplers[slot]) : AnchorPasses::Bind::Unused());
 			if (effect.features) {
 				std::string missing;
 				if (!FeatureBinds(spec.key.effect, bindings, missing)) {
@@ -1789,7 +1836,9 @@ namespace RenderGraph::Engine::ImageSpace
 			}
 			if (effect.compute)
 				bindings.push_back(AnchorPasses::Bind::Uav(spec.output));
-			bindings.push_back(AnchorPasses::Bind::Latch(spec.entry * static_cast<std::uint32_t>(sizeof(ConstantsAt))));
+			bindings.push_back(AnchorPasses::Bind::Latch(spec.entry * kLatchStride));
+			if (effect.latchedSources)
+				bindings.push_back(AnchorPasses::Bind::Latch(spec.entry * kLatchStride + static_cast<std::uint32_t>(sizeof(ConstantsAt))));
 			AnchorPasses::Builder builder(Anchor::ImageSpace, kClientId, static_cast<std::int32_t>(spec.entry), a_latch, a_gate);
 			if (effect.compute) {
 				AnchorPasses::Dispatch dispatch{};
@@ -2063,7 +2112,9 @@ namespace RenderGraph::Engine::ImageSpace
 			for (const auto& pending : a_batch) {
 				if (pending.source)
 					held.push_back(pending.source);
-				a_latch.WriteValue(run, pending.entry * static_cast<std::uint32_t>(sizeof(ConstantsAt)), pending.at);
+				a_latch.WriteValue(run, pending.entry * kLatchStride, pending.at);
+				if (pending.sources)
+					a_latch.WriteValue(run, pending.entry * kLatchStride + static_cast<std::uint32_t>(sizeof(ConstantsAt)), *pending.sources);
 				if (pending.compute)
 					a_gate.OpenDispatch(pending.entry, pending.groups[0], pending.groups[1], pending.groups[2]);
 				else
@@ -2183,7 +2234,7 @@ namespace RenderGraph::Engine::ImageSpace
 				return nullptr;
 			}
 			late->gate = RunGate::Create(late->id, 1);
-			late->latch = org::LatchBlock::Create(late->id + "::ConstantsAt", static_cast<std::uint32_t>(sizeof(ConstantsAt)));
+			late->latch = org::LatchBlock::Create(late->id + "::ConstantsAt", kLatchStride);
 			if (!late->gate || !late->latch) {
 				a_refusal = "its run gate or latch could not be made";
 				return nullptr;
@@ -2786,6 +2837,38 @@ namespace RenderGraph::Engine::ImageSpace
 		}
 
 		/**
+		 * @brief A latched-sources effect's textures (ISAlphaBlend's tint masks): each read slot's view in the shadow state, by its heap
+		 * index, into a_pending's SourcesAt, held with the run. They are loaded textures the engine made from files and never writes: the
+		 * immutable class the graph exempts from declarations, so a bindless index is their read. An empty slot reads the null texture,
+		 * as D3D11 reads a null view. False (a failure) when a view has no heap index.
+		 */
+		bool LatchSources(Pending& a_pending, std::size_t a_effect)
+		{
+			const auto& effect = kEffects[a_effect];
+			const auto& shadow = RE::BSGraphics::RendererShadowState::GetSingleton()->GetRuntimeData();
+			auto owners = std::make_shared<std::vector<std::shared_ptr<const void>>>();
+			SourcesAt sources{};
+			constexpr std::uint32_t kSourceTag = DCLF::GpuTextures::Tag(DCLF::GpuTextures::Source::FrameSlot, 0);
+			for (std::uint32_t slot = 0; slot < effect.slots && slot < kMaxSlots; ++slot) {
+				if (!(effect.reads & (1u << slot)))
+					continue;
+				auto binding = shadow.PSTexture[slot] ? DCLF::GpuTextures::Get().ResolveBinding(shadow.PSTexture[slot], kSourceTag) :
+				                                        DCLF::GpuTextures::Get().NullOf(DCLF::GpuTextures::ViewKind::Texture2D);
+				if (binding.index == DCLF::GpuTextures::kInvalid) {
+					Flush();
+					Failure(fmt::format("its texture {} has no heap index", slot), a_effect);
+					return false;
+				}
+				sources[slot] = binding.index;
+				if (binding.owner)
+					owners->push_back(std::move(binding.owner));
+			}
+			a_pending.sources = sources;
+			a_pending.source = std::move(owners);
+			return true;
+		}
+
+		/**
 		 * @brief The engine's draw of the current effect: taken into the batch (true; the caller skips the engine's draw) or left to the
 		 * engine (false, after running any pending batch so the engine's order holds).
 		 */
@@ -2857,6 +2940,8 @@ namespace RenderGraph::Engine::ImageSpace
 			const std::array blocks{ at.block, frameAt.block };
 			Pending pending{ .at = { .srv = at.srvIndex, .offset = at.offset, .frameSrv = frameAt.srvIndex, .frameOffset = frameAt.offset, .size = size, .frameSize = frameAt.size } };
 			if (effect.geometry && !LatchGeometry(pending, scope.effect))
+				return false;
+			if (effect.latchedSources && !LatchSources(pending, scope.effect))
 				return false;
 			if (admitted.late)
 				RunLate(*admitted.late, std::move(pending), blocks);
@@ -3400,7 +3485,7 @@ namespace RenderGraph::Engine::ImageSpace
 		if (std::error_code error; !std::filesystem::exists(std::filesystem::path(RenderGraphRuntime::kShaderDirectory) / "Common/OrgEngineConstants.hlsli", error))
 			return off("Data/Shaders has no Common/OrgEngineConstants.hlsli: the staged shaders predate the ORG builds of ISHDR, ISBlur and the VL composite");
 		state.gate = RunGate::Create("ImageSpace", kGateEntries);
-		state.latch = org::LatchBlock::Create("ImageSpace::ConstantsAt", kGateEntries * static_cast<std::uint32_t>(sizeof(ConstantsAt)));
+		state.latch = org::LatchBlock::Create("ImageSpace::ConstantsAt", kGateEntries * kLatchStride);
 		state.heldSources.clear();
 		state.heldRuns.clear();
 		if (!state.gate || !state.latch)
