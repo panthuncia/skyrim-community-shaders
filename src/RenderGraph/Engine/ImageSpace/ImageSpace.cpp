@@ -276,6 +276,10 @@ namespace RenderGraph::Engine::ImageSpace
 			// the depth at t1 (DEPTH_THRESHOLD). Horizontal, then vertical, each call a scope of its own.
 			{ Effects::ISDepthOfFieldBlurHCS, "ISDepthOfFieldBlurHCS", "dof", "ISBlurCS.hlsl", 2, 0b11, 2, 0, true, true },
 			{ Effects::ISDepthOfFieldBlurVCS, "ISDepthOfFieldBlurVCS", "dof", "ISBlurCS.hlsl", 2, 0b11, 2, 0, true, true },
+			// The parallax mask's separable compute blur (ISBlurCS's parallax-mask build, the horizontal pass reading alpha): t0 only. Its
+			// own scope outside the other scopes.
+			{ Effects::ISParallaxMaskBlurHCS, "ISParallaxMaskBlurHCS", "parallaxmask", "ISBlurCS.hlsl", 2, 0b01, 2, 0, true, true },
+			{ Effects::ISParallaxMaskBlurVCS, "ISParallaxMaskBlurVCS", "parallaxmask", "ISBlurCS.hlsl", 2, 0b01, 2, 0, true, true },
 			// The sub-rectangle copy, t0 to u0, no sampler: the snow pass's (107734 <- 107217 <- Main::RenderWorld, engine targets) and
 			// Main::RenderWaterEffects' (35561 / 36560: each queued flow texture into the flow map, the source by heap index).
 			{ Effects::ISCopySubRegionCS, "ISCopySubRegionCS", "copy", "ISCopySubRegionCS.hlsl", 1, 0b1, 0, 0, true, true },
