@@ -58,15 +58,16 @@ namespace DCLF::Api
 	 * - frameRows: render thread, at each latch of the main rows: the buffer view ref and row count of the frame's per-object rows the
 	 *   pass writes (BuildDrawsLatch::frameRows; Features/Fades' object rows, which the pixel stages read by a frame binding), so that a
 	 *   recording the graph keeps across frames finds the frame's backing. One pass may have one, scheduled as latchWord's is.
-	 * - cpuPipeline: the pass is in its epoch in the CPU-driven pipeline too (dclf:pipeline=cpu), whose graph has its epochs external
-	 *   (Core/Render/Epochs/GraphConditions.h): the revisions record it, and its site executes the recording in DXVK's command buffer
-	 *   before its draws, on the graphics queue (a preferred queue is not taken there). False: the pass is left out there (the CPU does
-	 *   its work).
-	 * - recordAtExecution (with cpuPipeline): the pass is in the CPU-driven pipeline only, recorded by its site's execution on DXVK's CS
-	 *   thread into DXVK's command buffer (ORG's late batch: ExternalPassDesc::RecordAtExecution), once its views' culls are in: the
-	 *   direct sites' draws (Core/Render/Direct/SitePasses.cpp).
-	 * - gpuLate (with recordAtExecution): the pass is in the GPU-driven graph too, where its make decides, recorded by its in-stream epoch's
-	 *   execution: the forward site's (GraphConditions::forwardDirect).
+	 * - cpuPipeline: the pass is in its epoch in the CPU-driven pipeline too (dclf:pipeline=cpu; Core/Render/Epochs/GraphConditions.h):
+	 *   the revisions record it, on the graphics queue (a preferred queue is not taken there). In guest the epochs are external and the
+	 *   site executes the recording in DXVK's command buffer before its draws; in native the graph submits it. False: the pass is left
+	 *   out there (the CPU does its work).
+	 * - recordAtExecution (with cpuPipeline): the pass is in the CPU-driven pipeline only, recorded at execution (ORG's late batch:
+	 *   ExternalPassDesc::RecordAtExecution), after the commit opened its site's run: in guest by the site's execution on DXVK's CS thread
+	 *   into DXVK's command buffer, in native inline into the epoch's own list on the render thread. The direct sites' draws
+	 *   (Core/Render/Direct/SitePasses.cpp).
+	 * - gpuLate (with recordAtExecution): the pass is in the GPU-driven graph too, where its make decides, recorded at execution by its
+	 *   epoch (in-stream in guest, inline in native): the forward site's (GraphConditions::forwardDirect).
 	 */
 	/**
 	 * @brief A pass's frame rows (PassDef::frameRows, animatedRows): its frame's backing's device address, buffer view ref (what shaders read

@@ -353,6 +353,9 @@ namespace DCLF::Direct::detail
 		// The run's descriptor heaps (its bindings'), bound in DXVK's buffer before each execution of the site's secondaries (BindHeaps).
 		rhi::DescriptorHeapHandle resourceHeap{}, samplerHeap{};
 		rhi::CommandList* open = nullptr;
+		// Native (SitesInline): primary is the epoch's own list, recorded on the render thread with nothing of DXVK's bound. Everything
+		// goes straight into it; no secondary is made.
+		bool direct = false;
 
 		rhi::CommandList& Inline();
 		rhi::CommandList& Primary();
@@ -381,10 +384,22 @@ namespace DCLF::Direct::detail
 	std::vector<const CulledBatch*> RecordViewPass(SiteOut& a_out, SiteRun& a_run, SiteView& a_view, rhi::PassBeginInfo a_begin, RecordBindings const& a_bindings);
 
 	/**
-	 * @brief DXVK's CS thread, inside a site's execution (ExternalEpochExecution::Execute), from its epoch's late pass (SitePasses.cpp):
-	 * the run being executed, if it is a_site's, records its draws into a_list (the pass's list: DXVK's buffer), after a full barrier
-	 * (its epoch's CPU pipeline passes write memory the graph does not track, by address). False: no run of a_site is being executed,
-	 * or its inputs are incomplete.
+	 * @brief Any thread: whether the host records passes recorded at execution inline (native mode: GraphHost::InlineAtExecution). The
+	 * CPU frames' site epochs are then not external: the graph submits them, and their late passes record the sites' draws inline into
+	 * the epochs' own primary lists on the render thread, with no secondaries (FrameMode: Parallel records Indirect, every cadence per
+	 * frame) and no external commands.
+	 */
+	bool SitesInline();
+
+	/**
+	 * @brief From a site epoch's late pass (SitePasses.cpp), after a full barrier (its epoch's CPU pipeline passes write memory the graph
+	 * does not track, by address), records a_site's run's draws into a_list:
+	 * - guest: on DXVK's CS thread, inside a site's execution (ExternalEpochExecution::Execute), the run being executed; a_list is
+	 *   DXVK's buffer;
+	 * - native: on the render thread, during the epoch's submission, the run its commit opened (ExecuteEpoch); a_list is the epoch's
+	 *   own primary list;
+	 * - a GPU-driven frame's forward family: the run handed off (HandOffRun).
+	 * False: no run of a_site, or its inputs are incomplete.
 	 */
 	bool RecordExecutingSite(Site a_site, rhi::CommandList& a_list);
 

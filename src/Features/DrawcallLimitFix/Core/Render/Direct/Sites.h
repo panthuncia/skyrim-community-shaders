@@ -7,6 +7,11 @@
 // buffer, its epoch's ORG execution (the commits' uploads, its CPU pipeline passes), the views' direct draws (Recorder.h) inside one rendering per
 // target, and the exit barrier. Nothing waits on the render thread but a frame slot's reuse (FrameStart).
 //
+// That is guest mode (DXVK). In native mode (Vulkan and D3D12: SiteFrame.h, SitesInline) the epochs are not external: the graph submits
+// each, its commit opening the site's run, and its late pass records the draws inline into the epoch's own primary list during the
+// submission, on the render thread, with no secondaries and no external commands. The frame signal is a BasicRHI list of its own
+// (RenderGraphRuntime::EmitCommands) in both modes.
+//
 // The sites: shadow (the shadow views and occlusion maps, ShadowSite.cpp), depth (main depth, the families' depth and the hosted views:
 // the reflection's faces and first person's depth, ViewSites.cpp), colour (main colour, decals, the families' colour), forward (forward
 // and refraction) and first person's colour. A view type at the per-snapshot cadence is drawn from a recording made once per batch set
@@ -151,14 +156,15 @@ namespace DCLF::Direct
 	/*
 	 * The GPU-driven graph's forward family on the CPU (GraphConditions::forwardDirect; dclf-architecture.md, "The forward epoch"): the one
 	 * thing a frame there sends through these sites, because ForwardSortCS can order draws only within a pipeline. FrameStart opens a slot
-	 * for it (FrameSlot::ownsEpochs false), ColourCommitted its views and culls, ForwardReached hands its run to the forward epoch's late pass
-	 * in DXVK's stream. The epoch is the graph's own, in DXVK's stream as every async epoch is (RenderGraphRuntime::InStreamEpochs). Root states
-	 * come from the CPU fade stage's read-only observer (KickCpuFrameState). The GPU's events keep reporting visibility.
+	 * for it (FrameSlot::ownsEpochs false), ColourCommitted its views and culls, ForwardReached hands its run to the forward epoch's late pass:
+	 * in DXVK's stream in guest (the epoch is in-stream, RenderGraphRuntime::InStreamEpochs), directly in native, where the epoch records
+	 * the pass inline during its submission (RenderGraphRuntime::RecordsAtExecution). Root states come from the CPU fade stage's read-only
+	 * observer (KickCpuFrameState). The GPU's events keep reporting visibility.
 	 */
 
 	/** @brief Render thread: the frame's batches in either mode, null without any: a GPU-driven forward epoch is then not covered. */
 	const ViewBatchSet* ForwardBatches();
-	/** @brief Render thread: the forward epoch failed after ForwardReached's hand-off: its run withdrawn, in stream order. */
+	/** @brief Render thread: the forward epoch failed after ForwardReached's hand-off: its run withdrawn (guest: in stream order). */
 	void ForwardHandOffCancel();
 
 	/** @brief One report window's totals (Reports::CpuPipelineLine): FrameCounters summed, the frames, and the sites' drawn > 0 checks. */

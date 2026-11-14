@@ -706,6 +706,8 @@ namespace DCLF::Direct::detail
 
 	rhi::CommandList& SiteOut::Inline()
 	{
+		if (direct)
+			return primary;
 		if (open)
 			return *open;
 		open = pool.Next(device);
@@ -735,7 +737,7 @@ namespace DCLF::Direct::detail
 
 	void SiteOut::BindHeaps()
 	{
-		if (resourceHeap.valid())
+		if (!direct && resourceHeap.valid())
 			primary.SetDescriptorHeaps(resourceHeap, samplerHeap);
 	}
 
@@ -932,15 +934,26 @@ namespace DCLF::Direct::detail
 		thread_local SiteRun* executing = nullptr;
 	}
 
+	bool SitesInline()
+	{
+		const auto* host = RenderGraphRuntime::Get().Host();
+		return host && host->InlineAtExecution();
+	}
+
 	bool RecordExecutingSite(Site a_site, rhi::CommandList& a_list)
 	{
+		auto& s = S();
 		auto* run = executing;
-		// A GPU-driven frame's: no site callback runs its execution, so its run came through the stream (ForwardReached).
-		const bool handed = !run;
-		if (handed) {
-			run = S().handedOff.load(std::memory_order_acquire);
+		// Not inside a site callback (the guest's CPU frames): a native CPU frame records the run its epoch's commit opened, inline during
+		// the epoch's submission on the render thread (Direct::ExecuteEpoch); a GPU-driven frame's run came through the hand-off
+		// (ForwardReached, FirstPersonColourReached).
+		const bool callback = run != nullptr;
+		if (!callback && SitesInline() && s.pending && s.pending->site == a_site && s.pending->slot->ownsEpochs)
+			run = s.pending;
+		if (!run) {
+			run = s.handedOff.load(std::memory_order_acquire);
 			if (run && run->site == a_site)
-				S().handedOff.store(nullptr, std::memory_order_release);
+				s.handedOff.store(nullptr, std::memory_order_release);
 		}
 		if (!run || run->site != a_site || !run->valid)
 			return false;
@@ -951,13 +964,18 @@ namespace DCLF::Direct::detail
 				drawn += std::atomic_ref<std::uint32_t>(run->slot->counters.drawn[static_cast<std::size_t>(view->type)]).load(std::memory_order_relaxed);
 			return drawn;
 		};
-		const std::uint32_t drawnBefore = handed ? drawnNow() : 0u;
+		const std::uint32_t drawnBefore = callback ? 0u : drawnNow();
 		auto full = rhi::FullMemoryBarrier();
 		rhi::BarrierBatch barrier{};
 		barrier.globals = { &full, 1u };
 		a_list.Barriers(barrier);
-		// Its passes: all of them in secondaries but the parallel lists' executions (SiteOut).
+		// A native CPU frame's site stats go here, around the draws (the guest's callback wraps the whole execution).
+		const std::size_t siteIndex = static_cast<std::size_t>(run->site);
+		const std::uint32_t statsSlot = !callback && run->slot->ownsEpochs ? SiteStats::Begin(run->device, a_list, siteIndex, run->frameValue) : ~0u;
+		// Its passes: in guest all of them in secondaries but the parallel lists' executions; in native straight into a_list, the
+		// epoch's own primary list (SiteOut).
 		SiteOut out{ a_list, run->slot->cs.lists, run->device, run->bindings.resourceHeap, run->bindings.samplerHeap };
+		out.direct = SitesInline();
 		switch (run->site) {
 		case Site::Shadow:
 			RecordShadowSite(out, *run);
@@ -978,14 +996,15 @@ namespace DCLF::Direct::detail
 			break;
 		}
 		out.Flush();
+		SiteStats::End(a_list, statsSlot);
 		run->recordedDraws = true;
-		if (handed) {
+		// The site's counters (the guest's callback keeps its own runs').
+		if (!callback) {
 			auto& slot = *run->slot;
-			const std::size_t site = static_cast<std::size_t>(run->site);
-			Add(slot.siteRuns[site], 1u);
+			Add(slot.siteRuns[siteIndex], 1u);
 			if (drawnNow() == drawnBefore)
-				Add(slot.siteEmpty[site], 1u);
-			Add(slot.counters.recordUs[site], MicrosecondsSince(start));
+				Add(slot.siteEmpty[siteIndex], 1u);
+			Add(slot.counters.recordUs[siteIndex], MicrosecondsSince(start));
 		}
 		return true;
 	}
@@ -1283,6 +1302,13 @@ namespace DCLF::Direct::detail
 			++s.window.forwardSkipped;
 			return false;
 		}
+		// Native: the epoch records its late pass inline during its submission, after this call and on this thread, so the run is handed
+		// over directly.
+		if (SitesInline()) {
+			s.handedOff.store(&a_run, std::memory_order_release);
+			return true;
+		}
+		// Guest: in stream order, ahead of the epoch's execution in DXVK's stream.
 		const auto handOff = [](void* a_user, rhi::CommandList&) { S().handedOff.store(static_cast<SiteRun*>(a_user), std::memory_order_release); };
 		if (!RenderGraphRuntime::Get().EmitCommands(handOff, &a_run, nullptr, 0, nullptr, 0, false, "DCLF forward draws")) {
 			++s.window.notQueued;
@@ -1375,6 +1401,10 @@ namespace DCLF::Direct
 
 	void ForwardHandOffCancel()
 	{
+		if (SitesInline()) {
+			S().handedOff.store(nullptr, std::memory_order_release);
+			return;
+		}
 		const auto cancel = [](void*, rhi::CommandList&) { S().handedOff.store(nullptr, std::memory_order_release); };
 		(void)RenderGraphRuntime::Get().EmitCommands(cancel, nullptr, nullptr, 0, nullptr, 0, false, "DCLF forward hand-off cancelled");
 	}
@@ -1383,6 +1413,14 @@ namespace DCLF::Direct
 	{
 		Mode mode = ModeOf(FrameToggles());
 		mode.cpu = CpuFrame();
+		// Native: the sites record straight into their epochs' primary lists (SiteOut::direct), with no secondaries. D3D12's bundles cannot
+		// set viewports or hold barriers, so neither backend uses them there: Parallel mode records Indirect, and every view is culled and
+		// recorded per frame.
+		if (SitesInline()) {
+			if (mode.record == RecordMode::Parallel)
+				mode.record = RecordMode::Indirect;
+			mode.cadence.fill(Cadence::PerFrame);
+		}
 		return mode;
 	}
 
@@ -1610,6 +1648,44 @@ namespace DCLF::Direct
 		++s.window.frames;
 	}
 
+	namespace
+	{
+		/**
+		 * @brief Native, a CPU frame's site epoch (Direct::ExecuteEpoch): the epoch is not external, so the graph submits it. Its ticket's
+		 * commit is a_body, which opens the site's run (State::pending), and its late pass records the run's draws inline into the epoch's
+		 * own primary list during the same submission, on this thread (RecordExecutingSite). ORG's batches wait for the frame wait
+		 * themselves, and ORG holds a_owner until the execution retires.
+		 */
+		bool ExecuteInlineEpoch(RenderGraphRuntime::Segment a_segment, const std::function<void()>& a_body, std::shared_ptr<const void> a_owner)
+		{
+			auto& s = S();
+			bool executed = true;
+			if (Draws::CpuPipelineSegmentRecords(a_segment)) {
+				try {
+					executed = RenderGraphRuntime::Get().ExecuteEpoch(a_segment, [&](org::RenderGraph&) { a_body(); }, std::move(a_owner));
+				} catch (const std::exception& e) {
+					executed = false;
+					if (!std::exchange(s.loggedExternal, true))
+						logger::error("[DCLF] CPU pipeline: the {} site's ORG epoch was not submitted ({}): its draws are left out", static_cast<std::uint32_t>(a_segment), e.what());
+				}
+			} else {
+				// No CPU pipeline passes in the epoch: nothing to submit and no late pass to draw, as the guest's callback without an execution.
+				auto* graph = RenderGraphRuntime::Get().Host()->Graph();
+				org::runtime::ScopedActiveGraphServices services(graph->GetUploadService(), graph->GetDescriptorService());
+				a_body();
+				s.current->holds.push_back(std::move(a_owner));
+			}
+			auto* run = std::exchange(s.pending, nullptr);
+			if (!run)
+				return executed;
+			if (executed && run->valid && !run->recordedDraws && !std::exchange(s.loggedNoLatePass, true))
+				logger::error("[DCLF] CPU pipeline: the {} site's epoch was submitted without recording its late pass (no draws pass in its graph): it draws nothing",
+					static_cast<std::uint32_t>(run->site));
+			run->valid = run->valid && executed;
+			return executed;
+		}
+	}
+
 	bool ExecuteEpoch(RenderGraphRuntime::Segment a_segment, const std::function<void()>& a_body, std::shared_ptr<const void> a_owner)
 	{
 		auto& s = S();
@@ -1626,6 +1702,8 @@ namespace DCLF::Direct
 		// The colour commit writes the main latch in an external run of its own, the depth commit's kept for the depth site's readers.
 		if (a_segment == RenderGraphRuntime::Segment::MainOpaque)
 			(void)host->BeginExternalRun(S().timeline, S().signalled + 1);
+		if (SitesInline())
+			return ExecuteInlineEpoch(a_segment, a_body, std::move(a_owner));
 		std::shared_ptr<org::ExternalEpochExecution> execution;
 		bool executed = true;
 		if (Draws::CpuPipelineSegmentRecords(a_segment)) {

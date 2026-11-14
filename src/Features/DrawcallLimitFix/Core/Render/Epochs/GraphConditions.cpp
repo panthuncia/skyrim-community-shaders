@@ -90,10 +90,12 @@ namespace DCLF::Draws
 		// Which one draws this kind of cell (Auto: interiors CPU-driven): entering or leaving an interior rebuilds the graph anyway. Every
 		// cell without device-generated commands.
 		next.cpuPipeline = CpuPipelineForCell(Toggles::Get().Active(), next.interior);
+		// The direct forward families need their epochs' late passes recorded at execution, after the commit: in DXVK's stream (guest's
+		// in-stream epochs) or inline into the epoch's own list (native).
+		const auto& runtime = RenderGraphRuntime::Get();
 		next.forwardDirect = !next.cpuPipeline && SwitchOnUnlessZero(Switch::ForwardDirect) &&
-		                     std::ranges::contains(RenderGraphRuntime::Get().InStreamEpochs(), RenderGraphRuntime::EpochOf(RenderGraphRuntime::Segment::Forward));
-		next.firstPersonForwardDirect = next.forwardDirect &&
-		                                std::ranges::contains(RenderGraphRuntime::Get().InStreamEpochs(), RenderGraphRuntime::EpochOf(RenderGraphRuntime::Segment::FirstPerson));
+		                     runtime.RecordsAtExecution(RenderGraphRuntime::EpochOf(RenderGraphRuntime::Segment::Forward));
+		next.firstPersonForwardDirect = next.forwardDirect && runtime.RecordsAtExecution(RenderGraphRuntime::EpochOf(RenderGraphRuntime::Segment::FirstPerson));
 		// The first-person forward part has no plain buckets: without device-generated commands only the CPU pipeline or the direct
 		// forward family draws it, and without either the view is the engine's (no epochs, no slots).
 		next.firstPerson = next.cpuPipeline || next.firstPersonForwardDirect || DrawPipelines::Get().DeviceGenerated();
@@ -116,10 +118,11 @@ namespace DCLF::Draws
 				next.cuts.empty() ? "" : ", passes cut: ", next.cuts);
 		// The epochs the CPU pipeline's sites execute themselves (their passes before the draws), before the build the change requests,
 		// with the ones executed in DXVK's stream (RenderGraphRuntime::InStreamEpochs). Only the builds read the host's list: the running
-		// graphs keep the one they were built with until the new ones attach.
+		// graphs keep the one they were built with until the new ones attach. A host that records passes at execution inline (native)
+		// submits the sites' epochs itself, their late passes recording the draws (Direct::SitesInline): none is external there.
 		if (next.cpuPipeline != requested->cpuPipeline) {
 			auto external = RenderGraphRuntime::Get().InStreamEpochs();
-			if (next.cpuPipeline)
+			if (next.cpuPipeline && !a_host.InlineAtExecution())
 				for (const auto epoch : CpuPipelineEpochs())
 					if (std::ranges::find(external, epoch) == external.end())
 						external.push_back(epoch);
