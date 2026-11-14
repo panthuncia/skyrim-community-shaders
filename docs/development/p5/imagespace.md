@@ -63,24 +63,24 @@ mechanism below unless the row says otherwise.
 | Bright-pass bloom (23-29: 79-85, then 65-71) | HDR Render | downsample0, swap, luminance | `kHDR_BLURSWAP`, `kHDR_BLOOM` | **Built** (ISBlur): the bright-pass draw into the swap and, since 5.5.4, the plain blur's draw into `kHDR_BLOOM` |
 | Tonemap (55, 56) | HDR Render | bloom, source, luminance | the HDR output (`kIMAGESPACE_TEMP_COPY` when TAA or an upscaler follows, else the destination) | **Built** (5.5.4, ISHDR's `BLEND` build): the draw the engine makes when Effects11 does not replace the HDR effect, with Post Processing's passthrough or the vanilla tonemap. The fade form implies the plain one's shapes and back. |
 | VL / lens flare composite (114-116) | 99024 (+0x190 helper, 100493) | VL target, lens flare target | the pre-tonemap source | **Built** (ISCompositeLensFlareVolumetricLighting) |
-| SIL composite (146 / 147) | 99024 (+0x1d8, 100528) | | | Next: ISSILComposite, ISSILRawInd sources exist; same mechanism |
+| SIL composite (146 / 147) | 99024 (+0x1d8, 100528) | | | **Built** (parity wave): ISSILComposite in the composites' scope; ISSILRawInd Next |
 | IB lens flares (105, 119-122, 124) | 99024 (+0x180, 100481) | | `kIBLENSFLARES_*` | Next: raster ones through this mechanism; 121/122 are compute (below) |
-| ISCopy (34, 35, 37, 38) | 99024, 99023, and the callers in R4's table | an engine target | an engine target | **Built** (5.5.4, ISCopy.hlsl dual-target): inside a scope as part of it, else each call a scope of its own. A copy from `kFRAMEBUFFER` (no SRV) is refused. ISCopyScaleBias (36) and ISCopyTextureMask (41) move the coordinates in their vertex shader, which the graph's triangle cannot: not taken. |
+| ISCopy (34, 35, 37, 38) | 99024, 99023, and the callers in R4's table | an engine target | an engine target | **Built** (5.5.4, ISCopy.hlsl dual-target): inside a scope as part of it, else each call a scope of its own. Since the parity wave a copy from `kFRAMEBUFFER` reads the back buffer's import (the engine's SRV of it), and ISCopyScaleBias (36) and ISCopyTextureMask (41) draw through ISCopy.hlsl's ORG vertex stage. |
 | VL apply (103) and the VL CS blur (106/107 via +0x188) | RenderWorldPostProcess (100430) | depth, shadow maps | `kVOLUMETRIC_LIGHTING_*` | Next. 106/107 and CS's own `ISVolumetricLightingGenerateCS` / `RaymarchCS` / `BlurHCS` / `BlurVCS` are compute: `DispatchCSShader` (75532 / 77329) with CS's replacement chosen in `CSShadersSupport::Renderer_DispatchCSShader` (Hooks.cpp). The compute form of this mechanism latches the dispatch there: CS b0 from the capture (`Find(Current(), Compute, 0)` after `OnDispatch`), the CS SRVs/UAVs from the shadow state's CS slots, group counts into a gate entry (`OpenDispatch`). |
 | SSAO (SAO 132-145, `RenderSSAO` 100520 / 107245; compute set 134/135/137/145 via 100526) | RenderWorld | depth, normals, motion vectors, last frame's AO | SAO targets, then composite into kMAIN | **Built** (wave 3): CameraZ, Minify, MinifyContrast, RawAO, RawAONoTemporal, BlurH, BlurV through the explicit-target Render. The composites 138-140 since 5.5.4 (below, "5.5.4: the remainder"): the feature inputs CS's headers read are bound by published id. The compute set is not used by a vanilla frame (the census saw none) and is not taken. |
 | Reflections (130 ray march, 120 mask downsample, 108/109 the compute blur) | the reflection pass 100428 / 107146 | normals mask, colour, depth, alpha, the reflection cubemap (CS, t4) | `kSSR_RAW`, the blurred pair | **Built** (wave 3): the downsample and the ray march through the explicit-target Render, the blur H/V through the compute form. The compute downsample (122) is taken by the same form when the game picks it. |
 | DOF (3: 58, 11 or the CS blur 112/113, 45-47) and the distant blur (49-51) | 99023 slot 3 | downsample, swap, depth, underwater mask | the chain's target | **Built** (w3-slots): ISDepthOfField*/ISDistantBlur* and the compute blur 112/113 (ISBlurCS's DOF build), each call a scope of its own. The downsample (58) and the raster blur (11) are Next. |
 | Radial blur (5: 52-54), full-screen blur (6), get hit (7: 34, 10, 40) | 99023 slots 5-7 | | | **Built**: the radial blur (w3-slots), and since 5.5.4 the blur composites' draws (ISBlur 65-71, ISNonHDRBlur 72-78), ISCopy and ISDoubleVision (dual-target), each draw outside a scope a scope of its own |
 | Refraction (1: 39) | 99023 slot 1 | src, `kREFRACTION_NORMALS` | the chain's target | **Built** (w3-slots, its own scope) |
-| FXAA (2) | 99023 slot 2 | | | Next (transcribed source; with the game's FXAA setting only) |
-| World map (0: 43/44), Map (8: 42) | 99023 slot 0, the map menu | | | Next; the map camera is p5-menus'. ISMap's vanilla VS has no SV_Position (imagespace-shaders.md): decide whether the pass draws |
-| Local map (98) | 16094 | `kLOCAL_MAP_SWAP` | `kLOCAL_MAP` | Next: one draw, src to dst, outside the end-of-frame chain: a scope detour on 16094 and the same mechanism |
+| FXAA (2) | 99023 slot 2 | | | Next (transcribed source; with the game's FXAA setting only) (parity wave: [parity/imagespace.md](../parity/imagespace.md)) |
+| World map (0: 43/44), Map (8: 42) | 99023 slot 0, the map menu | | | ISWorldMap built. ISMap (parity wave): taken with no pass, its vanilla VS writes no SV_Position so its draw rasterizes nothing (inferred) |
+| Local map (98) | 16094 | `kLOCAL_MAP_SWAP` | `kLOCAL_MAP` | **Built** (parity wave): ISLocalMap.hlsl dual-target, each call a scope of its own |
 | Water displacement (31: 86-94) | 31385 / 32176, the water system's displacement update | its own simulation targets | `kWATER_DISPLACEMENT*` | **Built** (5.5.4): 31385 / 32176 is a scope (`ScopeKind::Water`, two runs), ISWaterDisplacement.hlsl dual-target (the heightmaps' four neighbour coordinates made in the pixel shader). The ripple makers (88, 89) draw their own quads: their vertex stage (ISWaterDisplacement.hlsl's ORG build, `PullRippleVertex`) pulls the shape DrawTriShape gets by device address (`EffectInfo::geometry`, TakeDraw's `LatchGeometry`: the addresses ride the latch's PerFrame words, which they do not read), and the gate opens the draw with its index count. A ripple each run: more than the scope's runs in a frame are refused. |
 | Water blend (155), underwater mask (156) | +0x200, +0x208 | | | Next (155 is active CS HLSL) |
-| Snow SSS (150), CopySubRegionCS (117) | RenderWorld, Main::RenderWaterEffects | | the snow swap; the water's flow map | 117 **built**: the snow copy (w3-slots: the compute form, its own scope) and the water's flow copies (5.5.4: the source by heap index in the latch); 150 Next |
-| TAA (151-153) | +0x1f0 | | | Upscaling's (its TAA replacement); stays |
+| Snow SSS (150), CopySubRegionCS (117) | RenderWorld, Main::RenderWaterEffects | | the snow swap; the water's flow map | 117 **built**: the snow copy (w3-slots: the compute form, its own scope) and the water's flow copies (5.5.4: the source by heap index in the latch); 150 **built** (parity wave, its own scope) |
+| TAA (151-153) | +0x1f0 | | | Upscaling's when it replaces TAA. Otherwise (native mode) ISTemporalAA is **built** (parity wave: two targets, ISTemporalAA.hlsl dual-target); `_UI` and `_Water` have no CS source path and stay the engine's |
 | Dynamic-resolution upsample (154) | +0x1f8 | | | Next, with dynamic resolution (refused today) |
-| Noise (33), reflections (102, 108-109, 130-131), parallax mask blur (110-111), lighting composite (125-127), Perlin noise (128-129), debug (118, 149), simple colour (148), TAA UI/water | various | | | Next; 148 (menu 3D's clear) is p5-menus' boundary |
+| Noise (33), reflections (102, 108-109, 130-131), parallax mask blur (110-111), lighting composite (125-127), Perlin noise (128-129), debug (118, 149), simple colour (148), TAA UI/water | various | | | ISNoise (95, 96) taken with no pass (no SV_Position); simple colour (148) **built** without a stencil test; the rest Next (parity wave: [parity/imagespace.md](../parity/imagespace.md)) |
 
 **Boundaries with other features.**
 
@@ -138,10 +138,10 @@ is where the set of shapes comes from: it is known before the session's first fr
   main menu. There is no learning window, no joining phase and no cell-change join: from the first world frame every registered shape
   draws on the graph.
 - **A shape outside the manifest** (the first session after a new install, a new resolution or Upscaling mode, an effect the tour
-  never reached) is refused for the session: the engine draws it, the reason is logged once per effect (`a shape this session did not
-  register; the manifest has it from the next session`), and the shape goes into the manifest. No graph build follows during play
-  (FrameAnchors has no asynchronous anchor build to switch in at a snapshot, so the rebuild rule leaves no other choice). Under the
-  flush latch such a draw is lost: the first run of a new variant fills the manifest, and runs after it are the ones to judge.
+  never reached) is built on first sight (parity wave): a client of its own with one pass, registered at once; the build manager
+  builds the anchor's graph off the render thread while the main registration keeps running. Draws of the shape before that graph
+  is attached stay with the engine (lost under the latch, a frame or two); after it each is a run of its own. The shape goes into the
+  manifest as before. See [parity/imagespace.md](../parity/imagespace.md).
 
 ### Programs before the first world frame
 
@@ -234,7 +234,8 @@ it (`Capture(StageBit(Compute))`, `Find(use, Compute, 0)`), and the group counts
 pass is an `AnchorPasses::Dispatch` through the gate, with the CS source built by `ProgramCache<ComputeProgram>` from
 `GetCompileDefines(shader, Compute, 0)`. The separable blur helper (107209/107210) sizes the groups from the target and GRIDSIZE.
 
-**Runs a frame.** Each kind of scope has its own share of the anchor's runs a frame (`kScopeRuns` in `ImageSpace.cpp`): the
+**Runs a frame.** (Parity wave: the shares and their refusal are gone; run leases give the anchor as many runs as it makes. The
+rest of this paragraph is history.) Each kind of scope has its own share of the anchor's runs a frame (`kScopeRuns` in `ImageSpace.cpp`): the
 composites 1, the HDR effect 2, RenderSSAO 2, the reflection pass 2, the own-scope effects 8 (one per call) and the water's flow
 copies 4 (one per copy). The anchor is sized for the sum, 19 (`FrameAnchors.cpp`); Setup warns when it is sized for fewer. A share of its own per kind means the scopes early in
 the frame never use up the runs of the ones after them; the second run of SSAO, the reflections and HDR covers a batch cut short by
@@ -272,7 +273,7 @@ own, which is what the capture does already.
 | --- | --- |
 | Effects that run on some frames only (bloom radius changes, adaptation, composites without VL) | Each shape is a pass behind its gate entry; a run opens only the entries it draws. No rebuild. |
 | Targets changing between effects (the luminance chain's alternation, ping-pong, SAO's AO history) | Separate shapes in the manifest, with the shapes the RE says they imply (kMAIN / kMAIN_COPY, the alternating last luminance level, every bloom radius), all registered at Setup. No rebuild. |
-| A shape the session did not register (a new viewport, a new effect, the first session) | Refused for the session and written to the manifest; the next session registers it at Setup. No rebuild during play. |
+| A shape the session did not register (a new viewport, a new effect, the first session) | A client of its own built on first sight, off the render thread (the build manager); written to the manifest, so the next session registers it at Setup. |
 | Programs | Queued at Setup on the program build thread; each pass takes its program at the graph's first build (`ProgramCache::GetNow`), in the main menu. Never a rebuild. |
 | The engine's targets made again (a resize) | The new import (`FrameAnchors::EngineTarget`) already asks every anchor's graph to be built again; the client registers the same shapes on the new imports into that build. No build of its own. |
 | Registration itself | Once, at Setup, before the main menu's first build point. |
