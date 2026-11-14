@@ -53,7 +53,7 @@ namespace RenderGraph::Engine::Scaleform::Passes
 		// GpuTextures' diagnostic source tag for Scaleform's views (ImGui's is 256).
 		constexpr std::uint32_t kSourceTag = DCLF::GpuTextures::Tag(DCLF::GpuTextures::Source::Scaleform);
 		constexpr std::uint32_t kMinimumStaging = 256u << 10;
-		// The most commands one segment draws on the graph: one run gate entry each. A longer segment is replayed into D3D11.
+		// The most commands one Interface run draws: one run gate entry each. A longer segment is drawn in several runs.
 		constexpr std::uint32_t kGateEntries = 1024;
 
 		using FrameAnchors::Anchor;
@@ -197,8 +197,10 @@ namespace RenderGraph::Engine::Scaleform::Passes
 			ProgramCache<RasterProgram, ProgramKey> programs{ "Scaleform" };
 			std::shared_ptr<RunGate> gate;
 			std::shared_ptr<FrameStaging> staging;
-			// The run in progress (Submit to the end of its anchor run).
+			// The run in progress (Submit to the end of its anchor run): the display, and the commands of it this run draws.
 			Display* pending = nullptr;
+			std::uint32_t pendingFirst = 0;
+			std::uint32_t pendingCount = 0;
 			Surface* pendingSurface = nullptr;
 			bool pendingDepth = false;                                          // the pass with the depth-stencil draws it
 			std::vector<std::shared_ptr<const RasterProgram>> pendingPrograms;  // per command; null for a clear
@@ -632,8 +634,10 @@ namespace RenderGraph::Engine::Scaleform::Passes
 			}
 			std::memcpy(frame->staging->Bytes().data(), display.staging.data(), display.staging.size());
 
-			frame->commands.reserve(display.commands.size());
-			for (std::size_t i = 0; i < display.commands.size(); ++i) {
+			const std::size_t first = state.pendingFirst;
+			const std::size_t last = std::min<std::size_t>(first + state.pendingCount, display.commands.size());
+			frame->commands.reserve(last - first);
+			for (std::size_t i = first; i < last; ++i) {
 				const Command& command = display.commands[i];
 				FrameCommand& out = frame->commands.emplace_back();
 				out.kind = command.kind;
@@ -688,9 +692,10 @@ namespace RenderGraph::Engine::Scaleform::Passes
 				static_cast<std::uint32_t>(std::ceil(right) - std::floor(left)), static_cast<std::uint32_t>(std::ceil(bottom) - std::floor(top)) };
 
 			slots->Store(run, std::move(frame));
-			for (std::uint32_t i = 0; i < display.commands.size(); ++i)
-				if (display.commands[i].kind == Command::Kind::Draw)
-					state.gate->OpenDraw(i, display.commands[i].vertexCount);
+			// The run's commands use the gate entries from 0, in order.
+			for (std::size_t i = first; i < last; ++i)
+				if (display.commands[i].kind == Command::Kind::Draw && state.pendingPrograms[i])
+					state.gate->OpenDraw(static_cast<std::uint32_t>(i - first), display.commands[i].vertexCount);
 			state.committed = true;
 		}
 
@@ -1040,7 +1045,7 @@ namespace RenderGraph::Engine::Scaleform::Passes
 			return nullptr;
 		}
 
-		/** @brief Logs each new power of two of the largest segment, to size kGateEntries from. */
+		/** @brief Logs each new power of two of the largest segment (more than kGateEntries commands take more than one run). */
 		void NoteSegment(PathState& a_state, std::uint32_t a_commands)
 		{
 			if (a_commands <= a_state.largestSegment)
@@ -1048,7 +1053,7 @@ namespace RenderGraph::Engine::Scaleform::Passes
 			const bool log = a_commands >= 64 && std::bit_floor(a_commands) > std::bit_floor(std::max(a_state.largestSegment, 1u));
 			a_state.largestSegment = a_commands;
 			if (log)
-				logger::info("[ORG] Scaleform: the largest segment so far has {} commands (the Interface gate holds {})", a_commands, kGateEntries);
+				logger::info("[ORG] Scaleform: the largest segment so far has {} commands (drawn in runs of at most {})", a_commands, kGateEntries);
 		}
 
 		/** @brief A run that did not draw: an error of the graph path, logged once per reason. Not a readiness state. */
@@ -1151,10 +1156,6 @@ namespace RenderGraph::Engine::Scaleform::Passes
 			return true;  // nothing drawn, as the D3D11 renderer would draw nothing
 		const auto commandCount = static_cast<std::uint32_t>(a_display.commands.size());
 		NoteSegment(state, commandCount);
-		if (commandCount > kGateEntries) {
-			a_reason = "a segment with more commands than the Interface gate holds";
-			return false;
-		}
 		// Without a depth-stencil bound the D3D11 masks do nothing either; with one, the graph must have it.
 		const bool needsDepth = a_display.depth && std::ranges::any_of(a_display.commands, [](const Command& a_command) {
 			return a_command.kind == Command::Kind::ClearStencil || a_command.state.stencil != Stencil::Off;
@@ -1187,23 +1188,30 @@ namespace RenderGraph::Engine::Scaleform::Passes
 			return false;
 		}
 
+		// One run per kGateEntries commands, in order: the target and the depth-stencil carry what each run drew into the next.
 		state.pending = &a_display;
 		state.pendingSurface = surface;
 		state.pendingDepth = needsDepth;
-		state.committed = false;
-		state.executed = false;
-		state.commitReason = nullptr;
-		const auto result = FrameAnchors::Run(Anchor::Interface);
+		a_reason = nullptr;
+		for (std::uint32_t first = 0; first < commandCount && !a_reason; first += kGateEntries) {
+			state.pendingFirst = first;
+			state.pendingCount = std::min(kGateEntries, commandCount - first);
+			state.committed = false;
+			state.executed = false;
+			state.commitReason = nullptr;
+			const auto result = FrameAnchors::Run(Anchor::Interface);
+			if (!result)
+				a_reason = ReasonOf(result.status);
+			else if (!state.committed)
+				a_reason = state.commitReason ? state.commitReason : "the commit did not run";
+			else if (!state.executed)
+				a_reason = "the client was not in the Interface epoch";
+		}
 		state.pending = nullptr;
 		state.pendingSurface = nullptr;
+		state.pendingFirst = state.pendingCount = 0;
 		state.pendingPrograms.clear();
-		if (!result)
-			a_reason = ReasonOf(result.status);
-		else if (!state.committed)
-			a_reason = state.commitReason ? state.commitReason : "the commit did not run";
-		else if (!state.executed)
-			a_reason = "the client was not in the Interface epoch";
-		else
+		if (!a_reason)
 			return true;
 		Failure(a_reason);
 		return false;
