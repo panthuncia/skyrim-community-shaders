@@ -133,15 +133,14 @@ families").
   the anchor's run will draw it; otherwise the engine draws the batch, vouched for (`Flush::EngineDraws`), logged once. After the
   batch (or at a refusal) `Family::RunWithheld` runs the anchor; any status but `Ran` is an error, logged once, and nothing is
   retried. The client's `executed` callback counts the runs that drew.
-- **The cloud group** (a thunk on the +0x284 / +0x274 call), with `CS_ORG_SKY_CLOUDS`. When group 13 is a pass list of BSSkyShader
+- **The cloud group** (a thunk on the +0x284 / +0x274 call), always with `CS_ORG_SKY=1` ("Cloud layers" below). When group 13 is a pass list of BSSkyShader
   TriShapes only, the capture spans it: the batch's capture stays open, the cloud passes are latched the same way, and the run is
   handed to the anchor after the group. FinishAccumulating calls the group exactly when the capture spans it (non-null, flag 1). If
   the call does not come (another hook at its site), the capture is finished at the next sky batch and no batch spans the group again
   for the session (`the cloud group was not drawn after a sky batch that spanned it`). A group with another shader's pass (a
   sky-object effect, hint `0x12`), another geometry type, or no pass list is drawn by the engine after the anchor's run, in the
   engine's order (logged once). A cloud draw the family cannot take is an inherent refusal for that batch (there is no backoff: the programs are prebuilt and the
-  textures streamed, which were the backoff's reasons). With `CS_ORG_SKY_CLOUDS` off the group is the engine's, vouched for
-  (`sky: cloud layers`); the group's call is hooked either way.
+  textures streamed, which were the backoff's reasons).
 - **The choke point** (the family's taker at the shared `DrawTriShape` detour). While a batch is latched, a draw is recorded instead
   of drawn: the shadow state SetDirtyStates would apply (`EngineDrawState::Latch`), the alpha test reference, CS's extra descriptor,
   the PerGeometry constants SetupGeometry wrote (ConstantMirror), the technique's textures and samplers, the static vertex and index
@@ -240,7 +239,7 @@ leaving the D3D11 layers stale for the engine's main clouds) are fixed. Found an
 ## The switch
 
 `CS_ORG_SKY=1` (render-graph.md, "Switches"); default off. It needs DCLF running and, while Cloud Shadows is loaded,
-`CS_ORG_CLOUD_SHADOWS=1` (else the sky stays the engine's, logged once). `CS_ORG_SKY_CLOUDS` is the feature choice above. The feature
+`CS_ORG_CLOUD_SHADOWS=1` (else the sky stays the engine's, logged once). The feature
 is registered in DCLF's list (`Features/FeatureList.cpp`, `Sky::Feature()`, before Fades); its status line is DCLF's `sky` entry
 (`runs (drawn), draws, programs`).
 
