@@ -1,3 +1,17 @@
+#if defined(CS_ORG_BINDLESS)
+// The ORG build of the pixel stage (RenderGraph/Engine/ImageSpace, CS_ORG_IMAGESPACE): t0 and s0 from the heap (the ramps and masks
+// are declared but never read), the shared constants, and PerGeometry from the engine-constants capture through the pass's latch.
+// The vertex stage is the graph's fullscreen triangle.
+#	define ORG_SHARED_CONSTANTS
+// FrameBuffer is the PerFrame the engine's draw had bound (captured with PerGeometry), not CS's shared snapshot.
+#	define ORG_SHARED_FRAMEBUFFER_AT PerGeometryAt
+#	include "Common/OrgEngineConstants.hlsli"
+#	include "Common/OrgResources.hlsli"
+#	define ISIBLENSFLARE_ORG_RESOURCES(X) X(SHARED, ConstantBuffer, Shared, 0) X(SRV, Texture2D<float4>, DownScaledBlurredHDRTex, 0) X(SAMPLER, SamplerState, DownScaledBlurredHDRSampler, 0) X(LATCH, OrgEngineConstantsAt, PerGeometryAt, 2)
+ORG_PUSH_BLOCK(ISIBLENSFLARE_ORG_RESOURCES(ORG_HANDLE))
+ISIBLENSFLARE_ORG_RESOURCES(ORG_RESOURCE)
+#endif
+
 #include "Common/DummyVSTexCoord.hlsl"
 #include "Common/FrameBuffer.hlsli"
 
@@ -9,6 +23,22 @@ struct PS_OUTPUT
 };
 
 #if defined(PSHADER)
+#	if defined(CS_ORG_BINDLESS)
+static float lensCount = OrgEngineRow(PerGeometryAt, 0).x;
+static float flareDispersal = OrgEngineRow(PerGeometryAt, 0).y;
+static float lightsRangeDownshift = OrgEngineRow(PerGeometryAt, 0).z;
+static float invLightsRangeDownshift = OrgEngineRow(PerGeometryAt, 0).w;
+static float lateralRepeat = OrgEngineRow(PerGeometryAt, 1).x;
+static float channelsDistortionRed = OrgEngineRow(PerGeometryAt, 1).y;
+static float channelsDistortionGreen = OrgEngineRow(PerGeometryAt, 1).z;
+static float channelsDistortionBlue = OrgEngineRow(PerGeometryAt, 1).w;
+static float texelOffsetX = OrgEngineRow(PerGeometryAt, 2).x;
+static float texelOffsetY = OrgEngineRow(PerGeometryAt, 2).y;
+static float haloFetch = OrgEngineRow(PerGeometryAt, 2).z;
+static float haloWidthPow = OrgEngineRow(PerGeometryAt, 2).w;
+static float dynamicSource = OrgEngineRow(PerGeometryAt, 3).x;
+static float globalIntensity = OrgEngineRow(PerGeometryAt, 3).y;
+#	else
 SamplerState DownScaledBlurredHDRSampler : register(s0);
 SamplerState RampsSampler : register(s1);
 SamplerState MasksSampler : register(s2);
@@ -34,6 +64,7 @@ cbuffer PerGeometry : register(b2)
 	float dynamicSource : packoffset(c3.x);
 	float globalIntensity : packoffset(c3.y);  // vanilla's place; the engine fills it by name
 };
+#	endif
 
 float4 GetSampleColor(float2 texCoord)
 {
