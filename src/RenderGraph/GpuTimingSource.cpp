@@ -7,6 +7,7 @@
 
 #include "GpuEventTimers.h"
 #include "GpuIdleTrace.h"
+#include "RenderGraph/Engine/Native/Native.h"
 #include "RenderGraph/Switches.h"
 
 #if defined(CS_HAS_RENDER_GRAPH)
@@ -229,13 +230,22 @@ namespace GpuTimingSource
 
 	Timers SelectedTimers()
 	{
-		static const Timers timers = Switches::EqualsNoCase("CS_GPU_TIMERS", "graph") ? Timers::Graph : Timers::D3D11;
+		// Native mode has no D3D11 timestamp: its context's queries answer 0. The graph is the only source there, whatever the switch says.
+		static const Timers timers = [] {
+			if (!RenderGraph::Engine::Native::Requested())
+				return Switches::EqualsNoCase("CS_GPU_TIMERS", "graph") ? Timers::Graph : Timers::D3D11;
+			if (Switches::IsSet("CS_GPU_TIMERS") && !Switches::EqualsNoCase("CS_GPU_TIMERS", "graph"))
+				logger::info("[GpuEvents] native mode: GPU timers come from the render graph (CS_GPU_TIMERS={} has no D3D11 queries to read here)",
+					Switches::Value("CS_GPU_TIMERS"));
+			return Timers::Graph;
+		}();
 		return timers;
 	}
 
 	bool IdleFromGraph()
 	{
-		static const bool graph = Switches::EqualsNoCase("CS_GPU_IDLE_SOURCE", "graph");
+		// Native mode has no DXVK submission trace: the graph's ranges are the only source there.
+		static const bool graph = RenderGraph::Engine::Native::Requested() || Switches::EqualsNoCase("CS_GPU_IDLE_SOURCE", "graph");
 		return graph;
 	}
 

@@ -10,13 +10,14 @@
  * (VK_EXT_memory_budget, P0.7), and ORG's allocator by owner label (P0.13), in place of DXVK's heap reports.
  *
  * CS_ORG_VRAM_SOURCE=org selects it for the heaps of Vram::Current and for texture streaming's budget. DXVK's snapshot still lists
- * D3D11's resources while DXVK is loaded, and DXVK's own totals still go into the reconciliation. The default stays DXVK's reports.
+ * D3D11's resources while DXVK is loaded, and DXVK's own totals still go into the reconciliation. The default stays DXVK's reports,
+ * except in native mode (CS_ORG_NATIVE=1), which has no DXVK and always reads BasicRHI.
  *
  * Without the render graph every call returns nothing.
  */
 namespace Vram::Org
 {
-	/** @brief Whether CS_ORG_VRAM_SOURCE=org: the heaps come from BasicRHI. Read once. */
+	/** @brief Whether CS_ORG_VRAM_SOURCE=org, or native mode: the heaps come from BasicRHI. Read once. */
 	bool Selected();
 
 	/** @brief One segment group of the device: video memory, or system memory. */
