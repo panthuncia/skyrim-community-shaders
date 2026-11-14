@@ -370,6 +370,7 @@ namespace OrgFx
 			{ "INVDESTCOLOR", BlendFactor::InvDestColor },
 			{ "SRCALPHASAT", BlendFactor::SrcAlphaSat },
 			{ "BLENDFACTOR", BlendFactor::Factor },
+			{ "FACTOR", BlendFactor::Factor },  // BLEND_FACTOR, once the BLEND prefix is stripped
 			{ "INVBLENDFACTOR", BlendFactor::InvFactor },
 			{ "SRC1COLOR", BlendFactor::Src1Color },
 			{ "INVSRC1COLOR", BlendFactor::InvSrc1Color },
