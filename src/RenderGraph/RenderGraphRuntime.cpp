@@ -955,6 +955,9 @@ struct RenderGraphRuntime::Impl
 	// CS_ORG_EPOCH_STATS=1: render-thread CPU time per epoch, by segment and by phase of the host's frame,
 	// logged every kEpochStatsWindow epochs.
 	static constexpr uint32_t kEpochStatsWindow = 600;
+	// Native mode reports every kNativeStatsFrames presents instead (ReportEpochStats from SealPresented).
+	// Its epochs a frame change with CS_ORG_REGIONS, so a window of epochs would cover different spans with the switch on and off.
+	static constexpr uint64_t kNativeStatsFrames = 300;
 	bool epochStats = false;
 	// CS_ORG_EARLY_FLUSH (default on, =0 off): hand DXVK's pending D3D11 work to the GPU when an epoch starts.
 	bool earlyFlush = false;
@@ -1429,8 +1432,15 @@ struct RenderGraphRuntime::Impl
 			stats.cachedAdmissions += e.cachedAdmissions;
 			stats.batches += e.batches;
 		}
-		if (++epochCount < kEpochStatsWindow)
+		if (native || ++epochCount < kEpochStatsWindow)
 			return;
+		ReportEpochStats();
+	}
+
+	// The statistics report: per segment, the async epochs, the run memory, executions a frame and the anchors' runs and regions.
+	// Guest mode reports every kEpochStatsWindow epochs (RecordEpoch), native mode every kNativeStatsFrames presents (SealPresented).
+	void ReportEpochStats()
+	{
 		for (std::size_t i = 0; i < epochSegmentStats.size(); ++i) {
 			auto& stats = epochSegmentStats[i];
 			if (!stats.epochs)
@@ -1447,7 +1457,7 @@ struct RenderGraphRuntime::Impl
 					(stats.bodyUs - stats.bodyEpochUs) / stats.bodies, stats.bodyJoinUs / stats.bodies);
 			}
 			logger::info("[ORG] Epoch CPU {} ({}): avg {:.1f} us, max {:.1f} us over {} epochs; {:.1f} batches, {:.1f} queue submissions ({:.1f} DXVK enqueues) each; {}/{} segment admissions cached; by phase (us): {}",
-				SegmentLabel(static_cast<Segment>(i)), enqueueSubmission ? "stream" : "flush", stats.totalUs / stats.epochs, stats.maxUs, stats.epochs,
+				SegmentLabel(static_cast<Segment>(i)), native ? "native" : enqueueSubmission ? "stream" : "flush", stats.totalUs / stats.epochs, stats.maxUs, stats.epochs,
 				double(stats.batches) / stats.epochs, double(stats.hookCalls) / stats.epochs, double(stats.enqueues) / stats.epochs, stats.cachedAdmissions, stats.segments, phases);
 			stats = {};
 		}
@@ -2068,7 +2078,6 @@ bool RenderGraphRuntime::Initialize()
 			state->enqueueSubmission = nullptr;
 		if (state->enqueueSubmission && !Switches::Equals("CS_ORG_BATCH_SUBMIT", "0"))
 			state->enqueueSubmissions = ResolveExport<PFN_dxvkEnqueueInteropSubmissions>(d3d11, "dxvkEnqueueInteropSubmissions");
-		state->epochStats = Switches::Equals("CS_ORG_EPOCH_STATS", "1");
 		state->earlyFlush = Switches::Equals("CS_ORG_EARLY_FLUSH", "1");
 
 		auto d3dDevice = globals::d3d::device;
@@ -2227,6 +2236,8 @@ bool RenderGraphRuntime::Initialize()
 		} else if (rhi::vulkan::AdoptVulkanDevice(adopt, *state->device) != rhi::Result::Ok || !*state->device)
 			return disable("BasicRHI could not adopt DXVK's Vulkan device");
 	}
+	// Both modes. It was read only in the guest branch above, so native mode never kept statistics.
+	state->epochStats = Switches::Equals("CS_ORG_EPOCH_STATS", "1");
 	if ((*state->device)->CreateTimeline(state->nativeTimelines, 0, "CS native timeline lookup") != rhi::Result::Ok || !state->nativeTimelines)
 		return disable("BasicRHI could not create a timeline on DXVK's Vulkan device");
 
@@ -2844,6 +2855,8 @@ void RenderGraphRuntime::SealPresented()
 		++impl->statFrames;
 		impl->statExecutions += impl->frameExecutions;
 		impl->statEpochs += static_cast<std::uint64_t>(std::popcount(impl->frameEpochs));
+		if (impl->native && impl->statFrames >= Impl::kNativeStatsFrames)
+			impl->ReportEpochStats();
 	}
 	if (impl) {
 		impl->frameExecutions = 0;

@@ -1198,3 +1198,19 @@ The fix is one call, `FrameAnchors::FlushRegions("raw work")`, at the start of `
 - **Raw native work and `ExternalWork`** between two merged runs (above).
 - **`executed` before the GPU submission.** A client that read back right after `Run` would need the region submitted first. None does
   today: readbacks go through ORG's readback service, which completes after the execution.
+
+## Epoch statistics in native mode (`org-native/p4-stats`)
+
+`CS_ORG_EPOCH_STATS=1` printed nothing in native mode. The runtime read the switch only in its guest (DXVK) setup branch, so native
+mode never kept the statistics: no `executions a frame`, no `Run memory`, no `frame regions` line. The run-shapes lines print because
+they have their own switch. The switch is now read for both modes.
+
+Native mode reports every 300 presents, from `SealPresented`. Guest mode still reports every 600 epochs. Native's epochs a frame change
+with `CS_ORG_REGIONS`, so a window of presents compares the switch on and off over the same span.
+
+Lines to read, once per report:
+- `[ORG] executions a frame: X over Y epochs (averages over 300 frames)`: compare `CS_ORG_REGIONS=1` against off.
+- `[ORG] frame regions: N executions held M anchor runs (R each, J joins); L lost to a build, F failed; submitted before: <cause> <count>, ...;
+  anchors in their region's epoch: ...`. A region execution counts once, however many runs joined it. Joins are runs minus executions.
+  A held execution whose submission failed counts under `failed`, not as an execution.
+- `[ORG] Epoch CPU <segment> (native): ...` per segment, `[ORG] Async epochs: ...` and `[ORG] Run memory: ...`.
