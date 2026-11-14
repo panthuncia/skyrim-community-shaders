@@ -62,6 +62,11 @@ SPECIAL = {
         "key": "org.validate_undeclared_log", "type": "int",
         "description": "how many first-access lines the undeclared-access validator logs (default 256)",
     },
+    "CS_ORG_FRAME_SEQUENCE": {
+        "key": "org.frame_sequence", "type": "int",
+        "description": "N: log one frame's ordered anchor runs, epoch submissions and boundaries every N frames per window "
+                       "(1 means 600; \"[ORG] frame sequence\")",
+    },
     "CS_ORG_CENSUS_FRAMES": {
         "key": "org.census_frames", "type": "int",
         "description": "frames per window report of the native censuses, run shapes and validator (default 600)",

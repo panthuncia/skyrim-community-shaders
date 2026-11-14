@@ -28,6 +28,7 @@
 #include "RenderGraph/GpuTimingSource.h"
 #include "RenderGraph/ProgramCache.h"
 #include "RenderGraph/RunShapes.h"
+#include "RenderGraph/FrameSequence.h"
 #include "RenderGraph/UndeclaredAccess.h"
 #include "RenderGraph/Switches.h"
 #include "Features/RemoteControl/GpuTimestamps.h"
@@ -2660,6 +2661,7 @@ std::uint64_t RenderGraphRuntime::FlushPendingStreamWork()
 		return 0;
 	// Regions: a region's held execution is GPU work the wait may depend on.
 	FrameAnchors::FlushRegions("a wait for the GPU");
+	RenderGraph::FrameSequence::NoteBoundary("a wait for the GPU");
 	const uint64_t enqueued = impl->streamEnqueued.load(std::memory_order_acquire);
 	const uint64_t submitted = impl->streamSubmitted.load(std::memory_order_acquire);
 	if (enqueued <= submitted)
@@ -2733,6 +2735,7 @@ bool RenderGraphRuntime::GuardedBuild(const std::function<bool()>& a_build)
 {
 	// Regions: a build of a region's epoch gives its held run back, so a held execution is submitted first.
 	FrameAnchors::FlushRegions("a build point");
+	RenderGraph::FrameSequence::NoteBoundary("a build point");
 	try {
 		return a_build();
 	} catch (const std::exception& e) {
@@ -2861,6 +2864,7 @@ void RenderGraphRuntime::SealPresented()
 	// The native frame graph diagnostics close their frame (cheap when their switches are off).
 	RenderGraph::Engine::Native::OpCensus::EndFrame();
 	RenderGraph::RunShapes::EndFrame();
+	RenderGraph::FrameSequence::EndFrame();
 	RenderGraph::UndeclaredAccess::EndFrame();
 	// The latch checks' frame (CheckDeclaredRefs): what a site latches from here is the next frame's.
 	RenderGraph::AdvanceRefFrame();
@@ -3053,6 +3057,7 @@ RenderGraphRuntime::EpochResult RenderGraphRuntime::TryExecuteEpoch(Segment a_se
 		return EpochResult::Stopped;
 	// Regions (FrameAnchors.h): the anchor runs a region holds come before this epoch's work.
 	FrameAnchors::FlushRegions("another epoch", static_cast<std::uint32_t>(a_segment));
+	RenderGraph::FrameSequence::NoteEpoch(Impl::SegmentLabel(a_segment));
 	impl->CloseLeftOpenExternal();
 	// Diagnostics (dclf:epochs=0): Drawcall Limit Fix's epochs report submitted without submitting anything, so a run times the frame
 	// without their boundaries (the flush, the queue barriers, the split render passes). Their objects are then drawn by nobody.
@@ -3682,6 +3687,7 @@ bool RenderGraphRuntime::EmitCommands(void (*a_record)(void* a_user, rhi::Comman
 	if (impl->native) {
 		// Regions: commands submitted now come after the anchor runs a region holds.
 		FrameAnchors::FlushRegions("commands");
+		RenderGraph::FrameSequence::NoteBoundary(a_label ? a_label : "commands");
 		return RenderGraph::Engine::Native::EmitCommands(a_record, a_user, a_waits, a_waitCount, a_signals, a_signalCount, a_label);
 	}
 	// DXVK takes Vulkan semaphores: each point through the host's timelines.

@@ -13,6 +13,7 @@
 #	include "RenderGraph/BuildManager.h"
 #	include "RenderGraph/DxvkImageImport.h"
 #	include "RenderGraph/ExternalWork.h"
+#	include "RenderGraph/FrameSequence.h"
 #	include "RenderGraph/GraphResources.h"
 #	include "RenderGraph/PublishedResources.h"
 #	include "RenderGraph/RenderGraphRuntime.h"
@@ -1783,6 +1784,18 @@ namespace FrameAnchors
 			return texts.insert(std::move(a_text)).first->c_str();
 		}
 
+		/** @brief The frame sequence census: a run's active clients' ids, comma separated. */
+		void NoteSequenceRun(const Point& a_point, bool a_held, const std::vector<RunClient>& a_clients)
+		{
+			if (!RenderGraph::FrameSequence::On())
+				return;
+			std::string ids;
+			for (const auto& client : a_clients)
+				if (client.active)
+					ids += (ids.empty() ? "" : ",") + client.desc->id;
+			RenderGraph::FrameSequence::NoteRun(kInfo[IndexOf(a_point.anchor)].name, a_held, ids, a_point.input, a_point.output);
+		}
+
 		const char* JoinRefusal(const Held& a_held, std::uint32_t a_index, const std::vector<RunClient>& a_clients, bool a_sharedConstants)
 		{
 			const bool repeat = (a_held.anchors >> a_index & 1u) != 0;
@@ -1928,6 +1941,7 @@ namespace FrameAnchors
 						active += reinterpret_cast<std::uintptr_t>(client.desc.get()) * 0x9E3779B97F4A7C15ull;
 				RenderGraph::RunShapes::EndRun(index, kInfo[index].name, a_point.input, a_point.output, active);
 			}
+			NoteSequenceRun(a_point, true, a_clients);
 			// Last: an executed callback may register, refresh or rearm. A merged anchor has no one-shot pass (Snapshot::merged).
 			const std::uint64_t built = a_built->serial;
 			for (const auto& client : a_clients)
@@ -2000,6 +2014,7 @@ namespace FrameAnchors
 		RenderGraphRuntime::EpochResult result = RenderGraphRuntime::EpochResult::Stopped;
 		// A region's held execution goes first: its runs came before this one (ExecuteEpoch would submit it too; here it is counted as this).
 		FlushRegions(Interned(fmt::format("an anchor with its own epoch ({})", kInfo[index].name)), static_cast<std::uint32_t>(segment));
+		NoteSequenceRun(a_point, false, clients);
 		{
 			RenderGraphRuntime::EpochBodyScope body(segment);
 			result = runtime.TryExecuteEpoch(segment, [&](org::RenderGraph&) {

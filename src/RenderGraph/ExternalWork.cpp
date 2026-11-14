@@ -6,6 +6,7 @@
 #	include "RenderGraph/ExternalWork.h"
 
 #	include "RenderGraph/FrameAnchors.h"
+#	include "RenderGraph/FrameSequence.h"
 #	include "RenderGraph/RenderGraphRuntime.h"
 
 #	include <OpenRenderGraph/GraphHost.h>
@@ -89,6 +90,7 @@ namespace RenderGraph::ExternalWork
 	{
 		// A region's held anchor runs go first: this work must follow them on the GPU.
 		::FrameAnchors::FlushRegions("external work");
+		::RenderGraph::FrameSequence::NoteBoundary(fmt::format("external work: {}", a_label));
 		auto& state = Get();
 		// One submission at a time: the client serializes them anyway, and this lock also covers its creation and Shutdown.
 		std::lock_guard guard(state.lock);

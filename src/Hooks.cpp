@@ -13,6 +13,7 @@
 #include "RenderGraph/Engine/Targets/EngineTargets.h"
 #include "RenderGraph/Engine/Pipeline/EngineHooks.h"
 #include "RenderGraph/Engine/Tripwire/Tripwire.h"
+#include "RenderGraph/FrameSequence.h"
 #include "RenderGraph/GpuTimingSource.h"
 #include "RenderGraph/Engine/Tripwire/GuestDevice.h"
 #include "ShaderTools/BSShaderHooks.h"
@@ -600,6 +601,7 @@ struct IDXGISwapChain_Present
 						ZoneScopedN("CS.Present.NativeWait");
 						// Regions: what a region still holds (the overlay, HDR output, the capture) reaches the GPU before the present.
 						FrameAnchors::FlushRegions("the present");
+						RenderGraph::FrameSequence::NoteBoundary("the present");
 						GpuEventTimers::BeginEvent("mark before native present");
 						GpuEventTimers::EndEvent();
 						// A load without a loading menu (or a re-entry), held until Drawcall Limit Fix draws its objects: the previous frame
