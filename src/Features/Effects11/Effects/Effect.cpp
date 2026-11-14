@@ -487,6 +487,12 @@ bool Effect::LoadFXFile()
 			errors.push_back("Failed to create effect from compiled shader");
 			return false;
 		}
+		// The ORG FX runtime parses the text FXC compiled here: the raw source through the same include handler.
+		ENBExtender::PresetInclude ppInclude(enbseriesPath, uiDefines, iniPathStr, iniSection);
+		if (auto pp = preprocess(sourceCode, &ppInclude); !pp.empty()) {
+			ENBExtender::StripLineDirectives(pp);
+			keepPreprocessed(std::move(pp));
+		}
 	}
 
 	ReflectCompiledEffect();
