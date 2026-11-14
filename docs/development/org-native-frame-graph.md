@@ -1327,3 +1327,22 @@ that build is attached.
   this.
 - **Startup order.** The versions exist only once the host is up. Frames before that (the logo) copy the host-made back buffer as
   before.
+
+## Graph present and correctness pass (2026-11-13, RTX 5080, integrate 9f5ebee3f)
+
+**Graph present** (`CS_ORG_NATIVE_GRAPH_PRESENT`, values `0`/`1`/`single`; set it in cs-test as a string, `--set 'org.native_graph_present="1"'`).
+- The back buffer is a graph-owned slot of 3 versions. Every importer resolves to it: `cs.engine.target.0` and the Scaleform target.
+- Shots match the hand-copied present in a quick run (3.4% of pixels), and in a quick run with home states off, in-stream on and regions on (2.7%).
+- A native tour with graph present and exclusive imports passes, and its start and Whiterun shots match.
+- On D3D12 it logs "not on D3D12" and keeps the hand copy.
+
+**Correctness.**
+- Vulkan validation with home states off, in-stream on, regions and graph present logs the same 11 messages as the default settings, all the known unused SV_Target2 write. There are no layout errors.
+- Two "hangs" in this pass were the render thread waiting on a synchronous compute shader compile, `DCLF::IndirectDraws::Impl::CreateMainBuffers` → `ComputeProgram::Load` → `ShaderCompiler::Compile`, slowed past the watchdog's 15 s:
+  - a default-settings validation run;
+  - one of two D3D12 quick runs, which hung at the compiling phase.
+
+  Neither is caused by Phase 4. That compile belongs off the render thread, gated on readiness like DCLF's builds.
+- No load stall with exclusive imports recurred: 4 quick runs, 2 tours, and the graph-present tour.
+
+**Switch defaults are unchanged:** home states on, imports shared, regions off, graph present off. Turning them on by default is the next decision.
