@@ -1134,7 +1134,9 @@ A native device handle answers through the native services instead of failing:
     the client's commands into a command buffer of native mode's own and submits it on the graphics queue at the call, with
     the client's waits and signals, between full memory barriers. BasicRHI's queue accesses share one lock with it
     (`ShareVulkanDevice` hooks). Without it DCLF's external runs waited for a frame signal nothing sent, and the host's runs
-    in flight grew until none were left.
+    in flight grew until none were left. Native Vulkan only, and on its way out: `RenderGraphRuntime::EmitCommands` is the
+    BasicRHI form of the same call on both backends, and work that belongs to an epoch is a pass recorded at execution,
+    recorded inline ([parity/inline-exec.md](./parity/inline-exec.md)).
 -   **Device features**: every supported core and Vulkan 1.1-1.3 feature (but robustBufferAccess, sparse binding and
     protected memory) is enabled, as DXVK enables them; DCLF's counted indirect draws need `drawIndirectCount`.
 -   **Binds**: the native context stores what D3D11 code binds (shaders, shader resources, constant buffers, samplers, compute
@@ -1184,7 +1186,9 @@ and no submission thread, so the owned frame's lost wake (P6.0) cannot happen he
 ### The host
 
 In native mode `RenderGraphRuntime::Initialize` takes `Native::Device()` and resolves no DXVK export. The host has no queue
-boundaries, no in-stream or external epochs and no stream points, and its submissions go to BasicRHI's queues directly
+boundaries, no in-stream or external epochs and no stream points (`CS_ORG_NATIVE_IN_STREAM=1` keeps the old in-stream
+emulation on Vulkan until DCLF's sites move). A pass recorded at execution is recorded inline into its epoch's own command
+list (`org::GraphHost::SetInlineAtExecution`, [parity/inline-exec.md](./parity/inline-exec.md)). Its submissions go to BasicRHI's queues directly
 (BasicRHI's queue lock orders them against the present's). `ReleaseAfterD3D11` keeps an owner until the graph's
 submissions made before its release have retired (the host's retired callback). DXC loads from CS's runtime directory
 (`Native::RuntimeDirectory`, `CommunityShaders/bin`). `WrapTexture` and `WrapBuffer` make nothing, so the ports that wrap
@@ -1362,7 +1366,7 @@ commas) is read with `Switches::List`: each item trimmed, empty items left out, 
 | `CS_ORG_ENGINE_TARGETS_DCLF=0` | With `CS_ORG_ENGINE_TARGETS=1`, DCLF imports the engine targets' images itself instead of reading their published textures (a bisecting aid). |
 | `CS_ORG_IMAGE_DUPLICATE_CHECK=1` | Logs `[ORG] duplicate image: ...` when two live graph resources wrap one image (any importer: the anchors, DCLF, Scaleform, ImGui, twins, native textures). Off by default; cheap. |
 | `CS_ORG_NATIVE_EXCLUSIVE_IMPORTS=1` | With `CS_ORG_NATIVE=1`, makes the graph's imports exclusive (moved into each pass's layout) instead of shared (simultaneous access, Common-only). Off until `CS_ORG_IMAGE_DUPLICATE_CHECK=1` logs no duplicate image. |
-| `CS_ORG_NATIVE_HOME_STATES=0` | Native Vulkan: no home states. The graph leaves each image where its last pass did, and the ledgers carry it on. Implies exclusive native imports and no in-stream epochs (`CS_ORG_NATIVE_IN_STREAM=1` keeps them). The native context's work on tracked images, and the present's copy, go through `ExternalWork` (open submissions). See [org-native-frame-graph.md](./org-native-frame-graph.md), "Phase 4 item 3 lane". |
+| `CS_ORG_NATIVE_HOME_STATES=0` | Native Vulkan: no home states. The graph leaves each image where its last pass did, and the ledgers carry it on. Implies exclusive native imports. Native mode has no in-stream epochs (`CS_ORG_NATIVE_IN_STREAM=1` keeps them on Vulkan until DCLF's sites move to inline passes). The native context's work on tracked images, and the present's copy, go through `ExternalWork` (open submissions). See [org-native-frame-graph.md](./org-native-frame-graph.md), "Phase 4 item 3 lane". |
 | `CS_ORG_RAW_ACCESS_CHECK=1` | Native: logs `[ORG raw access] ...` for each raw use of an image the graph tracks (the immediate context's own path, DCLF's GENERAL views), flags races, and logs counts every 600 frames. |
 | `CS_ORG_ENGINE_SHADERS=1` | Record a description of every shader and input layout the device creates, and of each engine state object and query on first lookup, for Phase 5's pipelines (`src/RenderGraph/Engine/Pipeline`, `docs/development/p4/p4.6-shaders-states.md`). With the guest context installed, the engine's shader objects, cached input layouts, state tables and query pools hold tripwire handles that wrap the real objects. Logs `[ORG] engine pipeline descriptions: ...`. |
 | `CS_ORG_ENGINE_BUFFERS=1` | The engine's static vertex and index buffers (the geometry creators 75473/75476/75481) are ORG buffers in GPUUpload memory, handed to the engine as guest DXVK buffers or tripwire handles, and its dynamic ring (75484) is an ORG upload ring retired through `ReleaseAfterD3D11` instead of an event query. DCLF reads those buffers directly. See [p4/p4.5-buffers.md](./p4/p4.5-buffers.md). |

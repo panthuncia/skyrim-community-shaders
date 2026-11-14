@@ -3269,7 +3269,7 @@ type = "bool"
 default = false
 family = "org"
 kind = "other"
-description = "native with home states off: keep in-stream epochs (and with them DCLF's direct forward families)"
+description = "native Vulkan: keep in-stream epochs through native external commands (and with them DCLF's direct forward families) until DCLF's sites record inline"
 
 [key."org.raw_access_check"]
 env = "CS_ORG_RAW_ACCESS_CHECK"

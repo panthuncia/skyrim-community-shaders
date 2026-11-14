@@ -18,8 +18,10 @@ struct DxvkOrgInteropTextureWrap;
 
 namespace rhi
 {
+	class CommandList;
 	class DevicePtr;
 	class Resource;
+	struct TimelinePoint;
 }
 
 namespace org
@@ -195,6 +197,14 @@ namespace RenderGraph::Engine::Native
 	 */
 	bool EmitExternalCommands(void (*a_record)(void*, VkCommandBuffer_T*), void* a_user, const VkSemaphoreSubmitInfo* a_waits, std::uint32_t a_waitCount,
 		const VkSemaphoreSubmitInfo* a_signals, std::uint32_t a_signalCount);
+
+	/**
+	 * @brief RenderGraphRuntime::EmitCommands in native mode, on Vulkan and D3D12: a_record (BasicRHI commands, nothing bound at the
+	 * start) into a command list of its own on the graphics queue, submitted now with a_waits and a_signals (the device's
+	 * timelines), between full memory barriers. a_record runs exactly once when this returns true, never when it returns false.
+	 */
+	bool EmitCommands(void (*a_record)(void*, rhi::CommandList&), void* a_user, const rhi::TimelinePoint* a_waits, std::uint32_t a_waitCount,
+		const rhi::TimelinePoint* a_signals, std::uint32_t a_signalCount, const char* a_label);
 
 	/**
 	 * @name Texture streaming's shells (TextureStreaming/Streamer.cpp), what DXVK's dxvkStream* exports do. A shell is a texture

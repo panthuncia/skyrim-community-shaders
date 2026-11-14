@@ -1927,3 +1927,14 @@ is not declarable at the build (`PublishedResources::IsDeclarable`), so the call
 - **Wanted, if the wait shows:** per-graph transient resource objects (a build clones its transients), plus a detached prepare and record
   path whose recordings carry the build generation the attach gives them.
 - **Found by:** native frame graph Phase 4, DCLF async builds lane (2026-11-13).
+
+## Passes recorded at execution without a host stream (done in CS's ORG branch)
+
+- **Need:** native mode owns its queues and has no DXVK stream for external epochs. DCLF's CPU sites and the frame anchors' gated
+  passes still need to record after the run's commit, on Vulkan and D3D12.
+- **Done:** `GraphHost::SetInlineAtExecution` (`RenderGraph::SetInlineAtExecution`). A `RecordAtExecution` pass of an epoch that is
+  not external is recorded when its batch is submitted, into a primary list of the graph's, with the admission's barriers, and
+  submitted in the batch's place. `RenderGraph::PassEpochRecordsAtExecution` tells an extension whether such a pass is recorded at
+  execution. A kept recording records its late batch again at each submission.
+- **Left:** inline lists carry no Tracy GPU zones (the submitting thread records them beside the recording workers).
+- **Found by:** parity wave, `par-inline-exec` lane (2026-11-14). Notes: [parity/inline-exec.md](./parity/inline-exec.md).
