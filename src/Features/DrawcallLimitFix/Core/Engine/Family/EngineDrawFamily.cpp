@@ -43,11 +43,35 @@ namespace DCLF::Family
 			return takers;
 		}
 
-		/** @brief BSGraphics::Renderer::DrawTriShape (SE 75477, AE 77263): a family's open batch takes the draw instead. */
+		/**
+		 * @brief The shadow state a draw function sets before its SetDirtyStates: the geometry's VertexDesc (dirty bit 0x400) and a
+		 * triangle list (dirty bit 0x800). DrawTriShape (SE 0x140d6bfe0, AE 0x140e464d0) and the DrawData copy both start this way, so a
+		 * taker reads the state the engine's draw would apply, not what the previous draw left (topology 0 before the first one).
+		 */
+		void SetDrawState(std::uint64_t a_vertexDesc)
+		{
+			using Flags = RE::BSGraphics::ShaderFlags;
+			auto& shadow = RE::BSGraphics::RendererShadowState::GetSingleton()->GetRuntimeData();
+			if (shadow.vertexDesc != a_vertexDesc) {
+				shadow.vertexDesc = a_vertexDesc;
+				shadow.stateUpdateFlags.set(Flags::DIRTY_VERTEX_DESC);
+			}
+			if (shadow.topology != D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST) {
+				shadow.topology = D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST;
+				shadow.stateUpdateFlags.set(Flags::DIRTY_PRIMITIVE_TOPO);
+			}
+		}
+
+		/**
+		 * @brief BSGraphics::Renderer::DrawTriShape (SE 75477, AE 77263): a family's open batch takes the draw instead. The shadow state
+		 * gets the shape's VertexDesc and a triangle list first, as the engine's function sets them.
+		 */
 		struct DrawTriShape
 		{
 			static void thunk(void* a_renderer, TriShape* a_shape, std::uint32_t a_start, std::uint32_t a_triangles)
 			{
+				if (a_shape)
+					SetDrawState(a_shape->vertexDesc);
 				for (const auto& taker : Takers())
 					if (taker.take(a_shape, a_start, a_triangles))
 						return;
@@ -78,16 +102,7 @@ namespace DCLF::Family
 			static void thunk(void* a_renderer, DynamicDrawData* a_data, void* a_arg3, std::uint32_t a_start, std::uint32_t a_triangles)
 			{
 				if (a_data) {
-					using Flags = RE::BSGraphics::ShaderFlags;
-					auto& shadow = RE::BSGraphics::RendererShadowState::GetSingleton()->GetRuntimeData();
-					if (shadow.vertexDesc != a_data->vertexDesc) {
-						shadow.vertexDesc = a_data->vertexDesc;
-						shadow.stateUpdateFlags.set(Flags::DIRTY_VERTEX_DESC);
-					}
-					if (shadow.topology != D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST) {
-						shadow.topology = D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST;
-						shadow.stateUpdateFlags.set(Flags::DIRTY_PRIMITIVE_TOPO);
-					}
+					SetDrawState(a_data->vertexDesc);
 					for (const auto& taker : DynamicTakers())
 						if (taker.take(a_data, a_start, a_triangles))
 							return;
