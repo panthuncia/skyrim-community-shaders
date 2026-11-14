@@ -377,9 +377,10 @@ namespace FrameAnchors
 		/** @brief Regions: what the executions held and why they were submitted, since the last report (LogRunStats). Render owner. */
 		struct RegionStats
 		{
-			std::uint64_t executions = 0;                               // region executions submitted
+			std::uint64_t executions = 0;                               // region executions submitted, once each however many runs joined
 			std::uint64_t runs = 0;                                     // anchor runs they held
 			std::uint64_t lost = 0;                                     // held runs a build gave back before their submission
+			std::uint64_t failed = 0;                                   // held executions whose submission failed (not in executions)
 			std::vector<std::pair<const char*, std::uint64_t>> causes;  // why each was submitted, by static string
 			void Count(const char* a_why)
 			{
@@ -1738,10 +1739,9 @@ namespace FrameAnchors
 				throw;
 			}
 			a_state.flushing = false;
-			++a_state.regionStats.executions;
-			a_state.regionStats.runs += held.runs;
-			a_state.regionStats.Count(a_why);
 			if (result != RenderGraphRuntime::EpochResult::Submitted) {
+				// It did not reach the GPU: counted as failed, not as an execution.
+				++a_state.regionStats.failed;
 				// Nothing was submitted; a ticket still held goes back.
 				if (a_state.host->HoldsEpochTicket(held.epoch)) {
 					try {
@@ -1755,6 +1755,10 @@ namespace FrameAnchors
 					StopAll(a_state, name);
 				return;
 			}
+			// An execution counts once, with all the runs that joined it.
+			++a_state.regionStats.executions;
+			a_state.regionStats.runs += held.runs;
+			a_state.regionStats.Count(a_why);
 			// An epoch must not be the last GPU work before a third-party Vulkan consumer (render-graph.md, "Hazard: external Vulkan
 			// work directly after a graph epoch").
 			if (held.late && a_state.lateHook)
@@ -2147,11 +2151,12 @@ namespace FrameAnchors
 				for (std::uint32_t i = 0; i < kAnchors; ++i)
 					if (snapshot->merged >> i & 1u)
 						merged += fmt::format("{}{}", merged.empty() ? "" : ", ", kInfo[i].name);
+			// Joins: runs that went into an execution another run had opened (runs minus executions).
 			logger::info(
-				"[ORG] frame regions: {} executions held {} anchor runs ({:.2f} each); {} lost to a build; submitted before: {}; anchors in their "
-				"region's epoch: {}",
-				stats.executions, stats.runs, stats.executions ? double(stats.runs) / double(stats.executions) : 0.0, stats.lost,
-				causes.empty() ? std::string("nothing") : causes, merged.empty() ? std::string("none") : merged);
+				"[ORG] frame regions: {} executions held {} anchor runs ({:.2f} each, {} joins); {} lost to a build, {} failed; submitted before: {}; "
+				"anchors in their region's epoch: {}",
+				stats.executions, stats.runs, stats.executions ? double(stats.runs) / double(stats.executions) : 0.0, stats.runs - stats.executions,
+				stats.lost, stats.failed, causes.empty() ? std::string("nothing") : causes, merged.empty() ? std::string("none") : merged);
 			stats = {};
 		}
 	}
