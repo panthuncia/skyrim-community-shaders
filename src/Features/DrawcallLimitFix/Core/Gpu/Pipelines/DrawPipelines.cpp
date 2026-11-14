@@ -231,11 +231,6 @@ namespace DCLF
 		rhi::CommandSignatureDesc drawDesc{};
 		drawDesc.args = { &draw, 1 };
 		drawDesc.byteStride = sizeof(DrawSequence);
-		if (device.CreateCommandSignature(drawDesc, ShadowLayout(), shadowDrawSignature) != rhi::Result::Ok) {
-			supported = false;
-			logger::error("[DCLF] Could not create the shadow views' draw signature");
-			return false;
-		}
 		// D3D12: SV_InstanceID does not count the first instance, so each plain draw also writes it into the draw push word the pulled
 		// stages add (kDrawPushInstance; DCLFObjects.hlsli, DCLFInstanceWord): the sequence's word before its arguments, which BuildDrawsCS
 		// fills (RecordBucketDraw starts the arguments there, PlainDrawArgumentsOffset).
@@ -243,6 +238,15 @@ namespace DCLF
 		instanceDraw[0].kind = rhi::IndirectArgKind::Constant;
 		instanceDraw[0].u.rootConstants = { 0, kDrawPushInstance, 1 };
 		instanceDraw[1].kind = rhi::IndirectArgKind::DrawIndexed;
+		// The refraction's draws (RefractionDrawPass) in the shadow views' layout: pooled sequences, as the Z-prepass's.
+		rhi::CommandSignatureDesc refractionDrawDesc = drawDesc;
+		if (d3d12)
+			refractionDrawDesc.args = { instanceDraw, 2 };
+		if (device.CreateCommandSignature(refractionDrawDesc, ShadowLayout(), shadowDrawSignature) != rhi::Result::Ok) {
+			supported = false;
+			logger::error("[DCLF] Could not create the refraction's draw signature");
+			return false;
+		}
 		// A shadow view's draw is its first instance, then its arguments (kShadowDrawBytes): D3D12's signature reads both, Vulkan's the
 		// arguments alone (ShadowViewPass starts it kShadowDrawArgumentsOffset in).
 		rhi::CommandSignatureDesc shadowViewDrawDesc = drawDesc;

@@ -19,6 +19,7 @@
 #include <RenderPasses/Base/TypedRenderGraphPass.h>
 #include <rhi.h>
 
+#include <atomic>
 #include <cstdint>
 #include <memory>
 #include <span>
@@ -174,6 +175,8 @@ namespace DCLF::Draws
 		std::shared_ptr<const PassFrame> frame;
 		std::uint64_t frameConstants = 0;
 		RenderGraph::BufferRef frameConstantsRef;
+		// D3D12: the frame constants' block views, which the push words name (MainShadowLayoutViews).
+		std::shared_ptr<const FrameBlockViews> frameBlocks;
 	};
 
 	class RefractionDrawPass final : public org::TypedRenderGraphPass<RefractionDrawPass, RefractionPrepared, RefractionBindings>
@@ -216,6 +219,7 @@ namespace DCLF::Draws
 			prepared.frame = std::move(frame);
 			prepared.frameConstants = resources->frameConstantsAddress;
 			prepared.frameConstantsRef = resources->frameConstantsRef;
+			prepared.frameBlocks = resources->frameBlocks;
 			return prepared;
 		}
 
@@ -223,6 +227,14 @@ namespace DCLF::Draws
 		{
 			if (!a_prepared.frame || !a_prepared.frameConstants)
 				return;
+			// D3D12's layout holds root constants alone: the stages read their blocks through the push words (MainShadowLayoutViews).
+			const bool d3d12 = ::RenderGraph::Backend::IsD3D12();
+			if (d3d12 && (!a_prepared.frameConstantsRef || !a_prepared.frameBlocks)) {
+				static std::atomic<bool> warned{ false };
+				if (!warned.exchange(true))
+					logger::error("[DCLF] D3D12 refraction: no buffer view ref or block views of the frame constants; the refraction draws nothing");
+				return;
+			}
 			const auto& frame = *a_prepared.frame;
 			auto& commands = a_recording.Commands();
 			commands.SetDescriptorHeaps(frame.resourceHeap, frame.samplerHeap);
@@ -252,16 +264,25 @@ namespace DCLF::Draws
 			const std::uint64_t constants = a_prepared.frameConstants;
 			std::uint32_t pass[kShadowPushWords]{};
 			MainShadowLayoutPush(constants, a_prepared.frameConstantsRef, pass);
+			if (d3d12)
+				MainShadowLayoutViews(a_prepared.frameConstantsRef, *a_prepared.frameBlocks, pass);
 			const auto sequences = a_recording.Resolve(a_bindings.sequences).GetHandle();
 			const auto count = a_recording.Resolve(a_bindings.count).GetHandle();
 			const std::uint64_t first = RefractionSlot(frame) * sizeof(DrawSequence);
 			// Call words: the range's first sequence, and the frame's LodFadeFrame (after FrameLighting in the lighting slot) in the
-			// material rows' words, which the refraction stage reads instead.
+			// material rows' words, which the refraction stage reads instead: its device address on Vulkan (the layout's word), its ref
+			// on D3D12 (no layout reads it there).
 			std::uint32_t words[kDrawPushWords]{};
 			const RenderGraph::BufferRef sequence = DCLF::Draws::RecordingBufferRef(a_recording, a_bindings.sequences) + first;
 			words[kShadowDrawPushSequences] = sequence.viewSlot;
 			words[kShadowDrawPushSequences + 1] = sequence.byteOffset;
-			split(words + kShadowDrawPushMaterialRows, LodFadeFrameAddress(constants));
+			if (d3d12) {
+				const RenderGraph::BufferRef lodFadeFrame = a_prepared.frameConstantsRef + LodFadeFrameAddress(0);
+				words[kShadowDrawPushMaterialRows] = lodFadeFrame.viewSlot;
+				words[kShadowDrawPushMaterialRows + 1] = lodFadeFrame.byteOffset;
+			} else {
+				split(words + kShadowDrawPushMaterialRows, LodFadeFrameAddress(constants));
+			}
 			commands.BeginPass(begin);
 			commands.SetPrimitiveTopology(rhi::PrimitiveTopology::TriangleList);
 			commands.BindLayout(frame.indirect.refractionLayout);
@@ -269,7 +290,8 @@ namespace DCLF::Draws
 			commands.PushConstants(rhi::ShaderStage::AllGraphics, 0, kFramePushBinding, 0, kShadowPushWords, pass);
 			commands.BindPipeline(frame.indirect.refraction);
 			commands.PushConstants(rhi::ShaderStage::AllGraphics, 0, kDrawPushBinding, 0, kDrawPushWords, words);
-			commands.ExecuteIndirect(frame.indirect.refractionDrawSignature, sequences, first + kSequenceDrawOffset, count,
+			// D3D12's signature also reads the draw's instance, the word before its arguments (PlainDrawArgumentsOffset).
+			commands.ExecuteIndirect(frame.indirect.refractionDrawSignature, sequences, first + PlainDrawArgumentsOffset(), count,
 				std::uint64_t(kCountRefractionWord) * sizeof(std::uint32_t), frame.refractionCapacity);
 			commands.EndPass();
 		}

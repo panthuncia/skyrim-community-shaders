@@ -599,7 +599,8 @@ namespace DCLF
 		bool refractionAsked = false;  // the refraction pipeline (RequestRefraction)
 		ankerl::unordered_dense::set<ForwardPipelineKey, ForwardPipelineKeyHash> forwardAsked;
 		rhi::PipelineLayoutHandle ShadowLayout() const { return shadowLayout->GetHandle(); }
-		// The shadow views' plain indirect draw: a DrawSequence's tail as an indexed draw from the index pool (StoreShadowSequence).
+		// The refraction's plain indirect draw, in the shadow views' layout: a DrawSequence's tail as an indexed draw from the index pool
+		// (StoreShadowSequence); on D3D12 the word before it, the draw's instance, first (kDrawPushInstance).
 		rhi::CommandSignaturePtr shadowDrawSignature;
 		// The shadow views' draws: their first instance and arguments (kShadowDrawBytes; D3D12 reads the instance word too), the rest
 		// being their caster rows.

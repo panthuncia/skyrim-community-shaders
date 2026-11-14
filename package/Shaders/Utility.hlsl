@@ -633,8 +633,13 @@ VS_OUTPUT DCLFRefractionVertex(uint index, uint a_instance)
 
 	// The refraction LOD fade (EyePos.w): FUN_14147c470 at the fade node's metric, while the node's LOD fades apply (LodFadeNodeOf);
 	// else the property's, as it holds it (the shading row's MaterialData.x). Past the end the engine registers no pass: no draw.
-	// LodFadeFrame (LightingDescriptors.h), in the frame constants: the push word is the layout's device address.
+	// LodFadeFrame (LightingDescriptors.h), in the frame constants: the push word is the layout's device address on Vulkan, and its
+	// ref on D3D12, where no layout reads it (RefractionDrawPass).
+#		if defined(__spirv__)
 	const DeviceRef lodFrame = DCLFRefFromBacking(kDCLFBackingFrameConstants, DCLFMaterialRowsAddress);
+#		else
+	const DeviceRef lodFrame = DCLFMaterialRowsAddress;
+#		endif
 	const float4 fadeNode = DCLFPlacements[object].LodFadeNode;
 	float fade = DCLFShading[object].MaterialData.x;
 	const float3 eye = float3(DCLFRefractionFloat(lodFrame, 0), DCLFRefractionFloat(lodFrame, 1), DCLFRefractionFloat(lodFrame, 2));

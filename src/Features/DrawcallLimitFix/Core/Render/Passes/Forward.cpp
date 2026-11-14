@@ -117,6 +117,24 @@ namespace DCLF::Draws
 		split(a_out + kShadowPushFeatureData, constants + FrameSlotOffset(false, kFeatureDataRegister));
 	}
 
+	void MainShadowLayoutViews(RenderGraph::BufferRef a_frameConstantsRef, const FrameBlockViews& a_blocks, std::uint32_t (&a_out)[kShadowPushWords])
+	{
+		auto ref = [&](std::uint32_t a_word, RenderGraph::BufferRef a_ref) {
+			a_out[a_word] = a_ref.viewSlot;
+			a_out[a_word + 1] = a_ref.byteOffset;
+		};
+		ref(kShadowPushViewBlock, a_frameConstantsRef + FrameSlotOffset(false, 0));
+		ref(kShadowPushPerFrame, a_frameConstantsRef + FrameSlotOffset(false, kPerFrameVertexRegister));
+		ref(kShadowPushZeros, a_frameConstantsRef + std::uint64_t(kFrameSlotSharedLight) * kFrameSlotBytes);
+		// A block's view is its ordinal in the frame push words' order (FrameBlockViews::Create).
+		auto view = [&](std::uint32_t a_word, std::uint32_t a_register) {
+			a_out[a_word] = a_blocks.indices[(FramePushWord(false, a_register) - kFramePushRegisters) / 2];
+			a_out[a_word + 1] = 0;
+		};
+		view(kShadowPushSharedData, kSharedDataRegister);
+		view(kShadowPushFeatureData, kFeatureDataRegister);
+	}
+
 	std::uint64_t LodFadeFrameAddress(std::uint64_t a_frameConstants)
 	{
 		return a_frameConstants + std::uint64_t(kFrameSlotLighting) * kFrameSlotBytes + sizeof(FrameLighting);
