@@ -2255,16 +2255,14 @@ bool RenderGraphRuntime::Initialize()
 		desc.closedExecutions = EpochsEnabled() && Switches::Equals("CS_ORG_CLOSED", "1");
 		// CS_ORG_EXTERNAL_HOME (default on, =0 off): each epoch gives DXVK's images (the imports) back in their home state on the
 		// graphics queue, where DXVK uses them between the epochs (GENERAL, the external-commands contract).
-		// Native Vulkan with CS_ORG_NATIVE_HOME_STATES=0 has none: no image goes home, the ledgers carry each image's layout from
-		// one execution to the next, and the native context's work on tracked images takes it from them (ExternalWork, open).
+		// Native mode (Vulkan or D3D12) with CS_ORG_NATIVE_HOME_STATES=0 has none: no image goes home, the ledgers carry each image's
+		// layout from one execution to the next, and the native context's work on tracked images takes it from them (ExternalWork, open).
 		const bool nativeHomeOff = state->native && RenderGraph::NativeHomeStatesOff();
 		desc.externalHomeStates = !Switches::Equals("CS_ORG_EXTERNAL_HOME", "0") && !nativeHomeOff;
 		if (state->native) {
 			const char* home = "on: every execution gives images back in Common";
 			if (nativeHomeOff)
 				home = "off (CS_ORG_NATIVE_HOME_STATES=0): images stay where the graph's last pass left them";
-			else if (RenderGraph::Backend::IsD3D12() && Switches::Off("CS_ORG_NATIVE_HOME_STATES"))
-				home = "on (D3D12 keeps them; the switch is for Vulkan)";
 			logger::info("[ORG] native home states: {}; graph imports of native images: {}", home,
 				RenderGraph::NativeExclusiveImports() ? "exclusive (the graph moves each image between layouts)" : "shared (Common only)");
 		}

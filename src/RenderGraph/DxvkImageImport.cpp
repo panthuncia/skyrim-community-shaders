@@ -172,7 +172,7 @@ namespace RenderGraph
 	bool NativeHomeStatesOff()
 	{
 		static const bool off = Switches::Off("CS_ORG_NATIVE_HOME_STATES");
-		return off && Engine::Native::Active() && !Backend::IsD3D12();
+		return off && Engine::Native::Active();
 	}
 
 	bool NativeExclusiveImports()
@@ -183,8 +183,9 @@ namespace RenderGraph
 
 	bool NativeGraphMovesImages()
 	{
-		// D3D12 imports are exclusive anyway and keep home states: its context's work stays as it is (Phase 5).
-		return !Backend::IsD3D12() && (NativeHomeStatesOff() || NativeExclusiveImports());
+		// The same on both backends. D3D12's imports are exclusive anyway; with home states on and shared imports the context's work
+		// still finds each image in Common between executions, as on Vulkan.
+		return NativeHomeStatesOff() || NativeExclusiveImports();
 	}
 
 	std::shared_ptr<org::Resource> GraphResourceOfImage(std::uint64_t a_image)
