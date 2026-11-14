@@ -1,0 +1,2 @@
+# Native Vulkan, the shadow flicker burst (flicker.toml).
+extends = ["native-vulkan", "flicker"]

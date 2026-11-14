@@ -1,0 +1,2 @@
+# Native Vulkan, the shadow flicker burst with the taa upscale method.
+extends = ["native-vulkan", "flicker-taa"]
