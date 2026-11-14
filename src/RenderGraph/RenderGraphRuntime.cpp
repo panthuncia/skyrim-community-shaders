@@ -56,6 +56,7 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <bit>
 #include <filesystem>
 #include <semaphore>
 
@@ -962,6 +963,11 @@ struct RenderGraphRuntime::Impl
 	// Queue submissions the graph hands to the hook during the current epoch (each is one DXVK enqueue).
 	uint32_t epochHookCalls = 0;
 	std::uint64_t submittedSegments = 0;  // since TakeSubmittedSegments
+	// CS_ORG_EPOCH_STATS: the executions submitted this frame and the epochs they ran (a bit by segment), and their totals over the
+	// frames since the last report.
+	std::uint32_t frameExecutions = 0;
+	std::uint64_t frameEpochs = 0;
+	std::uint64_t statFrames = 0, statExecutions = 0, statEpochs = 0;
 	// DXVK enqueues during the current epoch: one per hook call, or one for the whole epoch when batching.
 	uint32_t epochEnqueues = 0;
 
@@ -1470,6 +1476,11 @@ struct RenderGraphRuntime::Impl
 				runs.arena.liveRegions, runs.arena.runs, runs.arena.trimmed, commands.commandPools, commands.commandLists, commands.scratchPagesHeld,
 				commands.scratchBytesHeld * kKiB, commands.scratchPagesPooled, commands.scratchBytesPooled * kKiB, commands.dgcPagesHeld, commands.dgcBytesHeld * kKiB,
 				commands.dgcPagesPooled, commands.dgcBytesPooled * kKiB);
+		}
+		if (statFrames) {
+			logger::info("[ORG] executions a frame: {:.1f} over {:.1f} epochs (averages over {} frames)", double(statExecutions) / double(statFrames),
+				double(statEpochs) / double(statFrames), statFrames);
+			statFrames = statExecutions = statEpochs = 0;
 		}
 		FrameAnchors::LogRunStats();
 		epochCount = 0;
@@ -2620,6 +2631,8 @@ std::uint64_t RenderGraphRuntime::FlushPendingStreamWork()
 {
 	if (!IsActive())
 		return 0;
+	// Regions: a region's held execution is GPU work the wait may depend on.
+	FrameAnchors::FlushRegions("a wait for the GPU");
 	const uint64_t enqueued = impl->streamEnqueued.load(std::memory_order_acquire);
 	const uint64_t submitted = impl->streamSubmitted.load(std::memory_order_acquire);
 	if (enqueued <= submitted)
@@ -2691,6 +2704,8 @@ void RenderGraphRuntime::PollEpochFailures()
 
 bool RenderGraphRuntime::GuardedBuild(const std::function<bool()>& a_build)
 {
+	// Regions: a build of a region's epoch gives its held run back, so a held execution is submitted first.
+	FrameAnchors::FlushRegions("a build point");
 	try {
 		return a_build();
 	} catch (const std::exception& e) {
@@ -2803,6 +2818,17 @@ void RenderGraphRuntime::SignalFramePace(bool a_active)
 
 void RenderGraphRuntime::SealPresented()
 {
+	// Regions: the present hook submitted what a region held; anything held since (a run after the present) goes before the seal.
+	FrameAnchors::FlushRegions("the frame's end");
+	if (impl && impl->epochStats) {
+		++impl->statFrames;
+		impl->statExecutions += impl->frameExecutions;
+		impl->statEpochs += static_cast<std::uint64_t>(std::popcount(impl->frameEpochs));
+	}
+	if (impl) {
+		impl->frameExecutions = 0;
+		impl->frameEpochs = 0;
+	}
 	// The native frame graph diagnostics close their frame (cheap when their switches are off).
 	RenderGraph::Engine::Native::OpCensus::EndFrame();
 	RenderGraph::RunShapes::EndFrame();
@@ -2903,6 +2929,7 @@ std::shared_ptr<org::ExternalEpochExecution> RenderGraphRuntime::ExecuteExternal
 	ZoneScopedN("CS.ORG.ExecuteExternalEpoch");
 	if (!IsActive() || !impl->asyncEpochs)
 		return nullptr;
+	FrameAnchors::FlushRegions("another epoch", static_cast<std::uint32_t>(a_segment));
 	impl->CloseLeftOpenExternal();
 	impl->TakeCompletedEpochs();
 	std::function<void(org::RenderGraph&)> beforePrepare;
@@ -2931,6 +2958,8 @@ std::shared_ptr<org::ExternalEpochExecution> RenderGraphRuntime::ExecuteExternal
 	}
 	impl->MarkEpoch(impl->host->LastHostFrame(), a_segment);
 	RenderGraph::Engine::Native::OpCensus::NoteEpoch(label);
+	++impl->frameExecutions;
+	impl->frameEpochs |= std::uint64_t{ 1 } << static_cast<std::uint32_t>(a_segment);
 	auto execution = impl->host->TakeExternalExecution();
 	// Open until the caller emits the execution and calls CloseExternalEpoch.
 	impl->externalOpen = true;
@@ -2993,6 +3022,8 @@ RenderGraphRuntime::EpochResult RenderGraphRuntime::TryExecuteEpoch(Segment a_se
 	ZoneScopedN("CS.ORG.ExecuteEpoch");
 	if (!IsActive())
 		return EpochResult::Stopped;
+	// Regions (FrameAnchors.h): the anchor runs a region holds come before this epoch's work.
+	FrameAnchors::FlushRegions("another epoch", static_cast<std::uint32_t>(a_segment));
 	impl->CloseLeftOpenExternal();
 	// Diagnostics (dclf:epochs=0): Drawcall Limit Fix's epochs report submitted without submitting anything, so a run times the frame
 	// without their boundaries (the flush, the queue barriers, the split render passes). Their objects are then drawn by nobody.
@@ -3185,6 +3216,8 @@ RenderGraphRuntime::EpochResult RenderGraphRuntime::TryExecuteEpoch(Segment a_se
 		}
 		impl->submittedSegments |= std::uint64_t{ 1 } << static_cast<std::uint32_t>(a_segment);
 		impl->failedEpochsLogged &= ~(std::uint64_t{ 1 } << static_cast<std::uint32_t>(a_segment));
+		++impl->frameExecutions;
+		impl->frameEpochs |= std::uint64_t{ 1 } << static_cast<std::uint32_t>(a_segment);
 		// CS_ORG_NATIVE_OP_CENSUS: the immediate context's operations from here on fall after this epoch.
 		RenderGraph::Engine::Native::OpCensus::NoteEpoch(Impl::SegmentLabel(a_segment));
 		return EpochResult::Submitted;
@@ -3522,6 +3555,8 @@ bool RenderGraphRuntime::EmitExternalCommands(void (*a_record)(void* a_user, VkC
 {
 	if (!impl || !a_record || (!impl->native && !impl->emitExternalCommands))
 		return false;
+	// Regions: commands put in the stream now come after the anchor runs a region holds.
+	FrameAnchors::FlushRegions("external commands");
 	// DXVK copies the semaphores at the call: one scratch per calling thread (the render thread), reused.
 	thread_local std::vector<VkSemaphoreSubmitInfo> semaphores;
 	semaphores.clear();

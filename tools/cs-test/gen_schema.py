@@ -40,6 +40,11 @@ SPECIAL = {
         "use_instead": "[features] <ShortName> = false",
         "description": "comma-separated feature short names disabled at boot (write [features] instead)",
     },
+    "CS_ORG_REGIONS": {
+        "key": "org.regions", "type": "bool", "default": False,
+        "description": "true (native mode only): anchors whose passes are all gated run in six region epochs; consecutive runs of a "
+                       "region share one execution, submitted before any other GPU work (\"[ORG] frame regions\" with CS_ORG_EPOCH_STATS)",
+    },
     "CS_ORG_EPOCH_STATS": {
         "key": "org.epoch_stats", "type": "bool", "default": False,
         "description": "true: render-thread CPU time per epoch, each anchor's peak runs a frame, and the run shapes per window "

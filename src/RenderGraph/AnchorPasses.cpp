@@ -410,14 +410,16 @@ namespace RenderGraph::AnchorPasses
 		return true;
 	}
 
-	void Builder::Push(std::string_view a_step, FrameAnchors::PassKind a_kind, std::function<std::shared_ptr<org::RenderPass>()> a_make, bool a_once)
+	void Builder::Push(std::string_view a_step, FrameAnchors::PassKind a_kind, std::function<std::shared_ptr<org::RenderPass>()> a_make, bool a_once,
+		bool a_gated)
 	{
 		passes.push_back({ .name = std::format("{}.{}", prefix, a_step),
 			.anchor = anchor,
 			.order = orderBase + static_cast<std::int32_t>(passes.size()),
 			.kind = a_kind,
 			.make = std::move(a_make),
-			.once = a_once });
+			.once = a_once,
+			.gated = a_gated });
 	}
 
 	void Builder::Add(Draw a_draw)
@@ -430,8 +432,10 @@ namespace RenderGraph::AnchorPasses
 			return;
 		const std::string step = a_draw.name;
 		a_draw.name = std::format("{}.{}", prefix, step);
+		// Gated (FrameAnchors::PassDesc::gated): its draw goes through the run gate, and its render pass clears nothing.
+		const bool gated = a_draw.gate.has_value() && a_draw.load != rhi::LoadOp::Clear;
 		auto spec = std::make_shared<const Spec<Draw>>(Spec<Draw>{ std::move(a_draw), latch, gate });
-		Push(step, FrameAnchors::PassKind::Render, [spec]() -> std::shared_ptr<org::RenderPass> { return std::make_shared<FullscreenPass>(spec); }, false);
+		Push(step, FrameAnchors::PassKind::Render, [spec]() -> std::shared_ptr<org::RenderPass> { return std::make_shared<FullscreenPass>(spec); }, false, gated);
 	}
 
 	void Builder::Add(Dispatch a_dispatch)
@@ -447,8 +451,11 @@ namespace RenderGraph::AnchorPasses
 			return;
 		}
 		const std::string step = a_dispatch.name;
+		// Gated (FrameAnchors::PassDesc::gated): its groups come from the run gate, or from the latch, which reads zero in a run whose
+		// commit did not write it.
+		const bool gated = a_dispatch.gate.has_value() || a_dispatch.latchArgs.has_value();
 		auto spec = std::make_shared<const Spec<Dispatch>>(Spec<Dispatch>{ std::move(a_dispatch), latch, gate });
-		Push(step, FrameAnchors::PassKind::Compute, [spec]() -> std::shared_ptr<org::RenderPass> { return std::make_shared<DispatchPass>(spec); }, false);
+		Push(step, FrameAnchors::PassKind::Compute, [spec]() -> std::shared_ptr<org::RenderPass> { return std::make_shared<DispatchPass>(spec); }, false, gated);
 	}
 
 	void Builder::Add(Copy a_copy)

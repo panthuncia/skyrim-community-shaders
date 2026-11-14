@@ -53,6 +53,15 @@ namespace RenderGraph
  * ("cs.org.frame-anchors") makes every client's passes at each build; a client change rebuilds only its anchors' epochs. The ordering
  * rule of each anchor is in docs/development/org-extension-api-notes.md, "Attaching passes to the frame".
  *
+ * Regions (CS_ORG_REGIONS=1, native mode only; docs/development/org-native-frame-graph.md, "Phase 4 items 1 and 2 lane"): each
+ * anchor also belongs to one of six regions (shadows, pre-main, deferred, engine draws, post, interface), and each region has an
+ * epoch of its own. An anchor whose passes are all gated (PassDesc::gated) has them in its region's epoch instead of its own. A run
+ * of such an anchor does not submit: its commits write into the region's held run (org::GraphHost::HoldEpochTicket), and the
+ * region submits once, just before any other GPU work (another epoch, external commands, a build point, the present). So
+ * consecutive runs of a region's anchors share one execution, and the GPU still sees every run's work where it saw it before. A
+ * run joins the held execution only when its anchor comes later in the region's order (or repeats, with every client agreeing
+ * through ClientDesc::joins), none of its clients committed already (unless it joins), and CS's shared constants did not change.
+ *
  * Threads: everything here is called on the render thread (IsRenderOwner: the main thread, or with CS_ORG_LOADING_THREAD=1 the
  * thread that last began an engine frame). With that switch the state is also under a mutex, so a feature's Register from the
  * main thread during a load never interleaves with a loading-screen run. A pass's Prepare and Record run on the graph host's
@@ -247,6 +256,10 @@ namespace FrameAnchors
 		std::function<std::shared_ptr<org::RenderPass>()> make;
 		bool once = false;
 		bool atExecution = false;
+		// Every draw or dispatch the pass records goes through its client's run gate (or a latch the commit writes, which reads zero
+		// in a run whose commit did not write it), and it clears nothing by itself: in a run that did not open it, it does nothing.
+		// An anchor whose passes are all gated can share its region's execution (regions, above). AnchorPasses' Builder sets it.
+		bool gated = false;
 	};
 
 	/**
@@ -285,6 +298,11 @@ namespace FrameAnchors
 		bool sharedConstants = false;
 		std::vector<std::shared_ptr<RenderGraph::RunGate>> gates;
 		std::function<void(const Point&)> executed;
+		// Regions only: asked at a run whose region execution already holds a commit of this client (an earlier run of the same
+		// anchor, or another of its anchors in the region). True lets this run's commit write into the same run as well: what it opens
+		// and writes does not overlap what the earlier commits of this execution opened and wrote, and its passes come after theirs.
+		// Null: never, and the region submits what it holds first.
+		std::function<bool()> joins;
 	};
 
 	/** @brief An anchor's name, as the logs and docs give it ("DeferredPasses"). */
@@ -502,6 +520,18 @@ namespace FrameAnchors
 	 * texture that is destroyed or replaced under another name. Render thread. Nothing when the id is unknown.
 	 */
 	void ReleaseImport(std::string_view a_id);
+
+	/** @brief Whether regions are on (CS_ORG_REGIONS=1 in native mode, with epochs and async epochs). Any thread. */
+	bool RegionsOn();
+
+	/**
+	 * @brief Regions: the region execution held now (if any) is submitted, because GPU work that must follow it is about to be
+	 * submitted (a_why, a static string, counted in the region statistics). a_segment: the epoch about to be submitted, which is not
+	 * flushed when it is the held region's own. Render owner only; nothing elsewhere or when nothing is held. Cheap when regions are
+	 * off. RenderGraphRuntime calls it before every epoch, external epoch and external commands and at build points; the present
+	 * hook calls it before the present.
+	 */
+	void FlushRegions(const char* a_why, std::uint32_t a_segment = UINT32_MAX);
 
 	// What RenderGraphRuntime asks of the anchors.
 
