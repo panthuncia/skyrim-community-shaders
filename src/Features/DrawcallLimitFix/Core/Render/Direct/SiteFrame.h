@@ -157,8 +157,8 @@ namespace DCLF::Direct::detail
 		// The site file's own state for this run (ShadowSite.cpp's views and maps, ViewSites.cpp's hosted views, Families.cpp's draws), by
 		// file; released with the run at the slot's retirement.
 		std::shared_ptr<void> shadowState, viewState, familyState;
-		rhi::CommandListPtr adopted;  // DXVK's buffer, wrapped: kept to the slot's retirement (what its recording allocated)
-		std::vector<rhi::CommandListPtr> adoptedEarlier;  // the same for its execution's earlier segments
+		// The CPU-frame timeline's value of its frame (its slot's signal once queued): when its site stats can be read.
+		std::uint64_t frameValue = 0;
 	};
 
 	/** @brief A frame slot: everything a CPU frame's sites made, kept until the frame's signal completes. */
@@ -218,8 +218,7 @@ namespace DCLF::Direct::detail
 	{
 		rhi::Device device;
 		bool deviceSet = false;
-		std::shared_ptr<rhi::TimelinePtr> timeline;
-		VkSemaphore semaphore = VK_NULL_HANDLE;
+		std::shared_ptr<rhi::TimelinePtr> timeline;  // DCLF's CPU-frame timeline (cs.dclf.cpu-frames), a BasicRHI timeline of the host's device
 		std::uint64_t signalled = 0;  // the timeline's last value queued
 		std::uint64_t submitted = 0;  // the last value known submitted (SubmitQueued's flush, or a frame's own work after it)
 		std::uint64_t hostSubmitted = 0;  // the host's submissions made at SubmitQueued's last flush
@@ -238,9 +237,11 @@ namespace DCLF::Direct::detail
 		std::atomic<std::uint32_t> nextWorker{ 0 };
 		WindowCounters window;
 		bool loggedNoCallback = false, loggedNotAdopted = false, loggedNoLatePass = false, loggedExternal = false;
-		rhi::CommandSignaturePtr indirectSignature;  // one indexed draw at IndirectDraw's stride
+		rhi::CommandSignaturePtr indirectSignature;  // Vulkan's: one indexed draw at IndirectDraw's stride, read past its instance word
+		// D3D12's, by the layout they were made for (IndirectSignatureFor): the instance word, then the indexed draw.
+		std::vector<std::pair<rhi::PipelineLayoutHandle, rhi::CommandSignaturePtr>> layoutSignatures;
 		// Emit's scratch (render thread): a site's waits and signals for DXVK's submission.
-		std::vector<RenderGraphRuntime::ExternalCommandsWait> emitWaits, emitSignals;
+		std::vector<rhi::TimelinePoint> emitWaits, emitSignals;
 	};
 
 	State& S();
@@ -354,6 +355,9 @@ namespace DCLF::Direct::detail
 		// The run's descriptor heaps (its bindings'), bound in DXVK's buffer before each execution of the site's secondaries (BindHeaps).
 		rhi::DescriptorHeapHandle resourceHeap{}, samplerHeap{};
 		rhi::CommandList* open = nullptr;
+		// Native (SitesInline): primary is the epoch's own list, recorded on the render thread with nothing of DXVK's bound. Everything
+		// goes straight into it; no secondary is made.
+		bool direct = false;
 
 		rhi::CommandList& Inline();
 		rhi::CommandList& Primary();
@@ -382,10 +386,22 @@ namespace DCLF::Direct::detail
 	std::vector<const CulledBatch*> RecordViewPass(SiteOut& a_out, SiteRun& a_run, SiteView& a_view, rhi::PassBeginInfo a_begin, RecordBindings const& a_bindings);
 
 	/**
-	 * @brief DXVK's CS thread, inside a site's execution (ExternalEpochExecution::Execute), from its epoch's late pass (SitePasses.cpp):
-	 * the run being executed, if it is a_site's, records its draws into a_list (the pass's list: DXVK's buffer), after a full barrier
-	 * (its epoch's CPU pipeline passes write memory the graph does not track, by address). False: no run of a_site is being executed,
-	 * or its inputs are incomplete.
+	 * @brief Any thread: whether the host records passes recorded at execution inline (native mode: GraphHost::InlineAtExecution). The
+	 * CPU frames' site epochs are then not external: the graph submits them, and their late passes record the sites' draws inline into
+	 * the epochs' own primary lists on the render thread, with no secondaries (FrameMode: Parallel records Indirect, every cadence per
+	 * frame) and no external commands.
+	 */
+	bool SitesInline();
+
+	/**
+	 * @brief From a site epoch's late pass (SitePasses.cpp), after a full barrier (its epoch's CPU pipeline passes write memory the graph
+	 * does not track, by address), records a_site's run's draws into a_list:
+	 * - guest: on DXVK's CS thread, inside a site's execution (ExternalEpochExecution::Execute), the run being executed; a_list is
+	 *   DXVK's buffer;
+	 * - native: on the render thread, during the epoch's submission, the run its commit opened (ExecuteEpoch); a_list is the epoch's
+	 *   own primary list;
+	 * - a GPU-driven frame's forward family: the run handed off (HandOffRun).
+	 * False: no run of a_site, or its inputs are incomplete.
 	 */
 	bool RecordExecutingSite(Site a_site, rhi::CommandList& a_list);
 

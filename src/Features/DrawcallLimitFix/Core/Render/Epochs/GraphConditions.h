@@ -28,16 +28,17 @@ namespace DCLF::Draws
 		bool twoPassOcclusion = true;  // the cull mode tests occlusion (cullMode 2): the HZB and the depth epoch's phase 2 block
 		// The CPU-driven pipeline (CpuPipelineFor the cell: Toggles.h; Core/Render/Direct): a DCLF epoch keeps only its passes in the CPU
 		// pipeline (Api::PassDef::cpuPipeline: the latched and index pool copies, texture transforms, the object rows, tree LOD's and
-		// grass's single-phase culls and arguments, tree wind), as external epochs (org::GraphHost::SetExternalEpochs:
-		// CpuPipelineEpochs), which the revisions record and the sites execute in DXVK's command buffer before their draws
-		// (Direct::ExecuteEpoch). The draws (main depth and colour, shadow and occlusion maps, forward, the reflection's faces, first
+		// grass's single-phase culls and arguments, tree wind), which the revisions record. In guest they are external epochs
+		// (org::GraphHost::SetExternalEpochs: CpuPipelineEpochs), which the sites execute in DXVK's command buffer before their draws
+		// (Direct::ExecuteEpoch); in native the graph submits them, the sites' late passes recorded inline (Direct::SitesInline). The draws (main depth and colour, shadow and occlusion maps, forward, the reflection's faces, first
 		// person's depth and colour) are the direct sites'; the builds, the HZB and phase 2, the visibility and fade-event readbacks and
 		// fade state are left out (the CPU's).
 		bool cpuPipeline = false;
 		// The GPU-driven graph sends the forward family through the CPU pipeline's cull, sort and forward site (CS_DCLF_FORWARD_DIRECT,
-		// Direct/Sites.h). Only when the epoch is in DXVK's stream: ORG records a pass per frame in an external epoch alone.
+		// Direct/Sites.h). Only when the epoch records its late pass at execution (RenderGraphRuntime::RecordsAtExecution): in DXVK's
+		// stream (guest), or inline into the epoch's own list (native).
 		bool forwardDirect = false;
-		// With it, first person's forward part too, while its colour epoch is in DXVK's stream.
+		// With it, first person's forward part too, while its colour epoch records at execution as well.
 		bool firstPersonForwardDirect = false;
 		// DCLF can draw the first-person view whole: the CPU pipeline, device-generated commands, or firstPersonForwardDirect for its
 		// forward part (which has no plain buckets). Without it the view is the engine's: its epochs have no passes and its slots are

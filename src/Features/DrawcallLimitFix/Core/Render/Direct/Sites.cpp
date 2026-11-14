@@ -22,14 +22,13 @@
 #include "Features/DrawcallLimitFix/Core/Runtime/SceneScheduler.h"
 #include "Features/DrawcallLimitFix/Core/Settings/Switches.h"
 #include "Features/DrawcallLimitFix/Core/Settings/Toggles.h"
+#include "RenderGraph/Backend.h"
 
 #include <ORGModuleServices/BackingPool.h>
 #include <Render/RenderGraph/ExternalEpochExecution.h>
 #include <Render/Runtime/ScopedActiveGraphServices.h>
 #include <Resources/Buffers/Buffer.h>
 #include <rhi.h>
-#include <rhi_interop.h>
-#include <rhi_interop_vulkan.h>
 #include <Tracy/Tracy.hpp>
 #include <Tracy/TracyD3D11.hpp>
 
@@ -286,6 +285,7 @@ namespace DCLF::Direct::detail
 		run.record = FrameMode().record;
 		run.slot = &a_slot;
 		run.device = S().device;
+		run.frameValue = S().signalled + 1;
 		return run;
 	}
 
@@ -707,6 +707,8 @@ namespace DCLF::Direct::detail
 
 	rhi::CommandList& SiteOut::Inline()
 	{
+		if (direct)
+			return primary;
 		if (open)
 			return *open;
 		open = pool.Next(device);
@@ -736,7 +738,7 @@ namespace DCLF::Direct::detail
 
 	void SiteOut::BindHeaps()
 	{
-		if (resourceHeap.valid())
+		if (!direct && resourceHeap.valid())
 			primary.SetDescriptorHeaps(resourceHeap, samplerHeap);
 	}
 
@@ -933,15 +935,26 @@ namespace DCLF::Direct::detail
 		thread_local SiteRun* executing = nullptr;
 	}
 
+	bool SitesInline()
+	{
+		const auto* host = RenderGraphRuntime::Get().Host();
+		return host && host->InlineAtExecution();
+	}
+
 	bool RecordExecutingSite(Site a_site, rhi::CommandList& a_list)
 	{
+		auto& s = S();
 		auto* run = executing;
-		// A GPU-driven frame's: no site callback runs its execution, so its run came through the stream (ForwardReached).
-		const bool handed = !run;
-		if (handed) {
-			run = S().handedOff.load(std::memory_order_acquire);
+		// Not inside a site callback (the guest's CPU frames): a native CPU frame records the run its epoch's commit opened, inline during
+		// the epoch's submission on the render thread (Direct::ExecuteEpoch); a GPU-driven frame's run came through the hand-off
+		// (ForwardReached, FirstPersonColourReached).
+		const bool callback = run != nullptr;
+		if (!callback && SitesInline() && s.pending && s.pending->site == a_site && s.pending->slot->ownsEpochs)
+			run = s.pending;
+		if (!run) {
+			run = s.handedOff.load(std::memory_order_acquire);
 			if (run && run->site == a_site)
-				S().handedOff.store(nullptr, std::memory_order_release);
+				s.handedOff.store(nullptr, std::memory_order_release);
 		}
 		if (!run || run->site != a_site || !run->valid)
 			return false;
@@ -952,13 +965,18 @@ namespace DCLF::Direct::detail
 				drawn += std::atomic_ref<std::uint32_t>(run->slot->counters.drawn[static_cast<std::size_t>(view->type)]).load(std::memory_order_relaxed);
 			return drawn;
 		};
-		const std::uint32_t drawnBefore = handed ? drawnNow() : 0u;
+		const std::uint32_t drawnBefore = callback ? 0u : drawnNow();
 		auto full = rhi::FullMemoryBarrier();
 		rhi::BarrierBatch barrier{};
 		barrier.globals = { &full, 1u };
 		a_list.Barriers(barrier);
-		// Its passes: all of them in secondaries but the parallel lists' executions (SiteOut).
+		// A native CPU frame's site stats go here, around the draws (the guest's callback wraps the whole execution).
+		const std::size_t siteIndex = static_cast<std::size_t>(run->site);
+		const std::uint32_t statsSlot = !callback && run->slot->ownsEpochs ? SiteStats::Begin(run->device, a_list, siteIndex, run->frameValue) : ~0u;
+		// Its passes: in guest all of them in secondaries but the parallel lists' executions; in native straight into a_list, the
+		// epoch's own primary list (SiteOut).
 		SiteOut out{ a_list, run->slot->cs.lists, run->device, run->bindings.resourceHeap, run->bindings.samplerHeap };
+		out.direct = SitesInline();
 		switch (run->site) {
 		case Site::Shadow:
 			RecordShadowSite(out, *run);
@@ -979,20 +997,24 @@ namespace DCLF::Direct::detail
 			break;
 		}
 		out.Flush();
+		SiteStats::End(a_list, statsSlot);
 		run->recordedDraws = true;
-		if (handed) {
+		// The site's counters (the guest's callback keeps its own runs').
+		if (!callback) {
 			auto& slot = *run->slot;
-			const std::size_t site = static_cast<std::size_t>(run->site);
-			Add(slot.siteRuns[site], 1u);
+			Add(slot.siteRuns[siteIndex], 1u);
 			if (drawnNow() == drawnBefore)
-				Add(slot.siteEmpty[site], 1u);
-			Add(slot.counters.recordUs[site], MicrosecondsSince(start));
+				Add(slot.siteEmpty[siteIndex], 1u);
+			Add(slot.counters.recordUs[siteIndex], MicrosecondsSince(start));
 		}
 		return true;
 	}
 
-	/** @brief DXVK's CS thread: a site's commands into DXVK's command buffer (EmitExternalCommands' callback): its epoch's execution. */
-	void SiteCallback(void* a_user, VkCommandBuffer a_commandBuffer)
+	/**
+	 * @brief DXVK's CS thread (guest): a site's commands into DXVK's command buffer, adopted as a_list (RenderGraphRuntime::EmitCommands'
+	 * callback, one per segment of its epoch's execution): the segment executed.
+	 */
+	void SiteCallback(void* a_user, rhi::CommandList& a_list)
 	{
 		auto& run = *static_cast<SiteRun*>(a_user);
 		auto& slot = *run.slot;
@@ -1014,23 +1036,19 @@ namespace DCLF::Direct::detail
 			for (const auto* view : run.views)
 				run.drawnBefore += std::atomic_ref<std::uint32_t>(slot.counters.drawn[static_cast<std::size_t>(view->type)]).load(std::memory_order_relaxed);
 		}
-		if (run.adopted)
-			run.adoptedEarlier.push_back(std::move(run.adopted));
-		run.adopted = rhi::vulkan::AdoptCommandBuffer(run.device, a_commandBuffer, rhi::QueueKind::Graphics);
-		if (run.adopted && run.valid && run.execution) {
+		if (run.valid && run.execution) {
 			// The epoch's ORG execution: the commits' uploads, its CPU pipeline passes, then its late pass, which records the draws
 			// (RecordExecutingSite), with ORG's barriers, its entry and exit full (the external queue boundary).
 			executing = &run;
-			const std::uint32_t statsSlot = SiteStats::Begin(run.device, a_commandBuffer, site);
+			const std::uint32_t statsSlot = SiteStats::Begin(run.device, a_list, site, run.frameValue);
 			if (segment < run.execution->segments.size())
-				run.execution->Execute(segment, run.adopted.Get());
-			SiteStats::End(a_commandBuffer, statsSlot);
+				run.execution->Execute(segment, a_list);
+			SiteStats::End(a_list, statsSlot);
 			executing = nullptr;
 			if (lastSegment && !run.recordedDraws && !std::exchange(S().loggedNoLatePass, true))
 				logger::error("[DCLF] CPU pipeline: the {} site's epoch was executed without its late pass (no draws pass in its recording): it draws nothing", site);
 		} else if (!std::exchange(S().loggedNotAdopted, true)) {
-			logger::error("[DCLF] CPU pipeline: DXVK's command buffer could not be adopted, the site's targets have no views, or its epoch gave no execution: "
-						  "the {} site draws nothing", site);
+			logger::error("[DCLF] CPU pipeline: the site's targets have no views, or its epoch gave no execution: the {} site draws nothing", site);
 		}
 		if (!lastSegment) {
 			Add(slot.counters.recordUs[site], MicrosecondsSince(start));
@@ -1051,9 +1069,6 @@ namespace DCLF::Direct::detail
 		Add(slot.counters.recordUs[site], MicrosecondsSince(start));
 	}
 
-	/** @brief DXVK's CS thread: the frame's signal's callback, which records nothing (its signal joins the submission). */
-	void SignalCallback(void*, VkCommandBuffer) {}
-
 	/**
 	 * @brief Render thread, after the epoch body: the site's callback queued, with the frame values' wait and its execution's waits and
 	 * signals (the execution carries the commits' uploads: its leading lists, the host recorded them with its ticket).
@@ -1063,7 +1078,7 @@ namespace DCLF::Direct::detail
 		DCLF_ZONE("CS.DCLF.Cpu.Emit");
 		auto& s = S();
 		auto* host = RenderGraphRuntime::Get().Host();
-		const auto wait = FrameValues::Get().FrameWaitPoint();
+		const rhi::TimelinePoint wait = FrameValues::Get().FrameWaitPoint();
 		auto& waits = s.emitWaits;
 		auto& signals = s.emitSignals;
 		static constexpr const char* kLabels[kSites] = { "DCLF direct shadow", "DCLF direct depth", "DCLF direct colour", "DCLF direct forward",
@@ -1076,23 +1091,17 @@ namespace DCLF::Direct::detail
 		for (std::size_t index = 0; index < count; ++index) {
 			waits.clear();
 			signals.clear();
-			if (index == 0 && wait.semaphore)
-				waits.push_back({ wait.semaphore, wait.value, 0 });
+			if (index == 0 && wait.value)
+				waits.push_back(wait);
 			if (execution && index < execution->segments.size()) {
 				const auto& segment = execution->segments[index];
 				if (segment.split && index)
 					RenderGraphRuntime::Get().SplitStream();
-				for (const auto& point : segment.waits)
-					if (const auto converted = RenderGraphRuntime::NativeTimelinePoint(point); converted.semaphore)
-						waits.push_back(converted);
-				for (const auto& point : segment.signals) {
-					const auto converted = RenderGraphRuntime::NativeTimelinePoint(point);
-					if (!converted.semaphore)
-						stl::report_and_fail("Drawcall Limit Fix: an ORG execution's signal has no Vulkan semaphore");
-					signals.push_back(converted);
-				}
+				waits.insert(waits.end(), segment.waits.begin(), segment.waits.end());
+				signals.insert(signals.end(), segment.signals.begin(), segment.signals.end());
 			}
-			if (RenderGraphRuntime::Get().EmitExternalCommands(&SiteCallback, &a_run, waits, signals, true, kLabels[static_cast<std::size_t>(a_run.site)], true))
+			if (RenderGraphRuntime::Get().EmitCommands(&SiteCallback, &a_run, waits.data(), static_cast<std::uint32_t>(waits.size()), signals.data(),
+					static_cast<std::uint32_t>(signals.size()), true, kLabels[static_cast<std::size_t>(a_run.site)], true))
 				continue;
 			// Not queued: what the rest of the execution's signals would have completed, completed without its work (the graph waits for
 			// them).
@@ -1100,7 +1109,8 @@ namespace DCLF::Direct::detail
 				RenderGraphRuntime::Get().SignalExecutionUnexecuted(*execution, index, kLabels[static_cast<std::size_t>(a_run.site)]);
 			++s.window.notQueued;
 			if (!std::exchange(s.loggedNoCallback, true))
-				logger::error("[DCLF] CPU pipeline: DXVK took no external commands (dxvkEmitExternalCommands missing): its sites draw nothing");
+				logger::error("[DCLF] CPU pipeline: DXVK took no external commands (dxvkEmitExternalCommands missing, or a wait or signal not on the "
+							  "host's timelines): its sites draw nothing");
 			return false;
 		}
 		return true;
@@ -1149,7 +1159,8 @@ namespace DCLF::Direct::detail
 	void Release(FrameSlot& a_slot)
 	{
 		DCLF_ZONE("CS.DCLF.Cpu.Release");
-		SiteStats::Collect();
+		if (const auto& timeline = S().timeline; timeline && *timeline)
+			SiteStats::Collect((*timeline)->GetCompletedValue());
 		// Nothing of its frame still runs on the pool (frames ago: in practice never waited for), and a continuation not started yet
 		// will do nothing.
 		a_slot.generation.fetch_add(1, std::memory_order_seq_cst);
@@ -1292,8 +1303,15 @@ namespace DCLF::Direct::detail
 			++s.window.forwardSkipped;
 			return false;
 		}
-		const auto handOff = [](void* a_user, VkCommandBuffer) { S().handedOff.store(static_cast<SiteRun*>(a_user), std::memory_order_release); };
-		if (!RenderGraphRuntime::Get().EmitExternalCommands(handOff, &a_run, {}, {}, false, "DCLF forward draws")) {
+		// Native: the epoch records its late pass inline during its submission, after this call and on this thread, so the run is handed
+		// over directly.
+		if (SitesInline()) {
+			s.handedOff.store(&a_run, std::memory_order_release);
+			return true;
+		}
+		// Guest: in stream order, ahead of the epoch's execution in DXVK's stream.
+		const auto handOff = [](void* a_user, rhi::CommandList&) { S().handedOff.store(static_cast<SiteRun*>(a_user), std::memory_order_release); };
+		if (!RenderGraphRuntime::Get().EmitCommands(handOff, &a_run, nullptr, 0, nullptr, 0, false, "DCLF forward draws")) {
 			++s.window.notQueued;
 			return false;
 		}
@@ -1303,6 +1321,33 @@ namespace DCLF::Direct::detail
 	namespace
 	{
 		constexpr std::uint32_t kMinimumIndirectDraws = 1u << 15;
+
+		/**
+		 * @brief Render thread (D3D12 records only in native mode, inline): D3D12's indirect draw signature for a_layout, made once a layout:
+		 * the draw's instance word into kDrawPushInstance, then its arguments. A root constant argument names the layout's root signature,
+		 * so each layout the runs draw under (the Z-prepass's, the shadow views') has its own. Null when it cannot be made (logged once).
+		 */
+		rhi::CommandSignatureHandle IndirectSignatureFor(rhi::PipelineLayoutHandle a_layout)
+		{
+			auto& s = S();
+			const auto same = [&](const auto& a_entry) { return a_entry.first.index == a_layout.index && a_entry.first.generation == a_layout.generation; };
+			if (const auto found = std::find_if(s.layoutSignatures.begin(), s.layoutSignatures.end(), same); found != s.layoutSignatures.end())
+				return found->second ? found->second->GetHandle() : rhi::CommandSignatureHandle{};
+			rhi::IndirectArg args[2]{};
+			args[0].kind = rhi::IndirectArgKind::Constant;
+			args[0].u.rootConstants = { 0, kDrawPushInstance, 1 };
+			args[1].kind = rhi::IndirectArgKind::DrawIndexed;
+			rhi::CommandSignatureDesc desc{};
+			desc.args = { args, 2 };
+			desc.byteStride = sizeof(IndirectDraw);
+			auto& entry = s.layoutSignatures.emplace_back(a_layout, rhi::CommandSignaturePtr{});
+			if (s.device.CreateCommandSignature(desc, a_layout, entry.second) != rhi::Result::Ok || !entry.second) {
+				entry.second = {};
+				logger::error("[DCLF] CPU pipeline: a D3D12 indirect draws' signature could not be made; those runs draw nothing");
+				return {};
+			}
+			return entry.second->GetHandle();
+		}
 
 		/**
 		 * @brief Render thread, a CPU frame's start, its slot retired: the slot's draw buffer, large enough for what its last frame reserved
@@ -1342,7 +1387,9 @@ namespace DCLF::Direct::detail
 				logger::error("[DCLF] CPU pipeline: the indirect draws' buffer has no {}; its views draw directly", mapped ? "buffer view ref" : "mapping");
 				return;
 			}
-			a_slot.indirect = { s.indirectSignature->GetHandle(), resource.GetHandle(), ref, static_cast<IndirectDraw*>(mapped), capacity, &a_slot.drawCursor };
+			const bool d3d12 = ::RenderGraph::Backend::IsD3D12();
+			a_slot.indirect = { s.indirectSignature->GetHandle(), d3d12 ? &IndirectSignatureFor : nullptr, d3d12 ? 0u : offsetof(IndirectDraw, indexCount), resource.GetHandle(),
+				ref, static_cast<IndirectDraw*>(mapped), capacity, &a_slot.drawCursor };
 		}
 	}
 
@@ -1357,13 +1404,10 @@ namespace DCLF::Direct::detail
 		s.deviceSet = true;
 		s.device = host->Device();
 		auto timeline = std::make_shared<rhi::TimelinePtr>();
-		rhi::VulkanTimelineInfo info{};
-		if (s.device.CreateTimeline(*timeline, 0, "cs.dclf.cpu-frames") != rhi::Result::Ok ||
-			!rhi::QueryNativeTimeline(timeline->Get(), rhi::RHI_IID_VK_TIMELINE, &info, sizeof(info)) || !info.timeline) {
+		if (s.device.CreateTimeline(*timeline, 0, "cs.dclf.cpu-frames") != rhi::Result::Ok || !*timeline) {
 			logger::error("[DCLF] CPU pipeline: its frame timeline could not be made; CPU frames draw nothing");
 			return false;
 		}
-		s.semaphore = static_cast<VkSemaphore>(info.timeline);
 		s.timeline = timeline;
 		SetCpuFrameTimeline(std::move(timeline));
 		return true;
@@ -1387,14 +1431,26 @@ namespace DCLF::Direct
 
 	void ForwardHandOffCancel()
 	{
-		const auto cancel = [](void*, VkCommandBuffer) { S().handedOff.store(nullptr, std::memory_order_release); };
-		(void)RenderGraphRuntime::Get().EmitExternalCommands(cancel, nullptr, {}, {}, false, "DCLF forward hand-off cancelled");
+		if (SitesInline()) {
+			S().handedOff.store(nullptr, std::memory_order_release);
+			return;
+		}
+		const auto cancel = [](void*, rhi::CommandList&) { S().handedOff.store(nullptr, std::memory_order_release); };
+		(void)RenderGraphRuntime::Get().EmitCommands(cancel, nullptr, nullptr, 0, nullptr, 0, false, "DCLF forward hand-off cancelled");
 	}
 
 	Mode FrameMode()
 	{
 		Mode mode = ModeOf(FrameToggles());
 		mode.cpu = CpuFrame();
+		// Native: the sites record straight into their epochs' primary lists (SiteOut::direct), with no secondaries. D3D12's bundles cannot
+		// set viewports or hold barriers, so neither backend uses them there: Parallel mode records Indirect, and every view is culled and
+		// recorded per frame.
+		if (SitesInline()) {
+			if (mode.record == RecordMode::Parallel)
+				mode.record = RecordMode::Indirect;
+			mode.cadence.fill(Cadence::PerFrame);
+		}
 		return mode;
 	}
 
@@ -1587,8 +1643,10 @@ namespace DCLF::Direct
 		// wait for it (a producer reusing a copy this frame bound) would then wait for that next frame's own work.
 		s.submitted = s.signalled;
 		const std::uint64_t value = s.signalled + 1;
-		const RenderGraphRuntime::ExternalCommandsWait signals[1]{ { s.semaphore, value, 0 } };
-		if (RenderGraphRuntime::Get().EmitExternalCommands(&SignalCallback, nullptr, {}, signals, false, "DCLF CPU frame")) {
+		// Guest: a signal-only external command in DXVK's stream. Native: a list of its own on the graphics queue, after the frame's
+		// site epochs (submitted before it, in call order).
+		const rhi::TimelinePoint signal{ (*s.timeline)->GetHandle(), value };
+		if (RenderGraphRuntime::Get().EmitCommands(nullptr, nullptr, nullptr, 0, &signal, 1, false, "DCLF CPU frame")) {
 			s.signalled = value;
 			slot->signal = value;
 			NoteCpuFrameSignalled(value);
@@ -1620,6 +1678,44 @@ namespace DCLF::Direct
 		++s.window.frames;
 	}
 
+	namespace
+	{
+		/**
+		 * @brief Native, a CPU frame's site epoch (Direct::ExecuteEpoch): the epoch is not external, so the graph submits it. Its ticket's
+		 * commit is a_body, which opens the site's run (State::pending), and its late pass records the run's draws inline into the epoch's
+		 * own primary list during the same submission, on this thread (RecordExecutingSite). ORG's batches wait for the frame wait
+		 * themselves, and ORG holds a_owner until the execution retires.
+		 */
+		bool ExecuteInlineEpoch(RenderGraphRuntime::Segment a_segment, const std::function<void()>& a_body, std::shared_ptr<const void> a_owner)
+		{
+			auto& s = S();
+			bool executed = true;
+			if (Draws::CpuPipelineSegmentRecords(a_segment)) {
+				try {
+					executed = RenderGraphRuntime::Get().ExecuteEpoch(a_segment, [&](org::RenderGraph&) { a_body(); }, std::move(a_owner));
+				} catch (const std::exception& e) {
+					executed = false;
+					if (!std::exchange(s.loggedExternal, true))
+						logger::error("[DCLF] CPU pipeline: the {} site's ORG epoch was not submitted ({}): its draws are left out", static_cast<std::uint32_t>(a_segment), e.what());
+				}
+			} else {
+				// No CPU pipeline passes in the epoch: nothing to submit and no late pass to draw, as the guest's callback without an execution.
+				auto* graph = RenderGraphRuntime::Get().Host()->Graph();
+				org::runtime::ScopedActiveGraphServices services(graph->GetUploadService(), graph->GetDescriptorService());
+				a_body();
+				s.current->holds.push_back(std::move(a_owner));
+			}
+			auto* run = std::exchange(s.pending, nullptr);
+			if (!run)
+				return executed;
+			if (executed && run->valid && !run->recordedDraws && !std::exchange(s.loggedNoLatePass, true))
+				logger::error("[DCLF] CPU pipeline: the {} site's epoch was submitted without recording its late pass (no draws pass in its graph): it draws nothing",
+					static_cast<std::uint32_t>(run->site));
+			run->valid = run->valid && executed;
+			return executed;
+		}
+	}
+
 	bool ExecuteEpoch(RenderGraphRuntime::Segment a_segment, const std::function<void()>& a_body, std::shared_ptr<const void> a_owner)
 	{
 		auto& s = S();
@@ -1636,6 +1732,8 @@ namespace DCLF::Direct
 		// The colour commit writes the main latch in an external run of its own, the depth commit's kept for the depth site's readers.
 		if (a_segment == RenderGraphRuntime::Segment::MainOpaque)
 			(void)host->BeginExternalRun(S().timeline, S().signalled + 1);
+		if (SitesInline())
+			return ExecuteInlineEpoch(a_segment, a_body, std::move(a_owner));
 		std::shared_ptr<org::ExternalEpochExecution> execution;
 		bool executed = true;
 		if (Draws::CpuPipelineSegmentRecords(a_segment)) {

@@ -13,15 +13,19 @@
 #include "Features/DrawcallLimitFix/Core/Render/Epochs/GraphConditions.h"
 #include "Features/DrawcallLimitFix/Core/Render/Revision/Shapes.h"
 #include "Features/DrawcallLimitFix/Core/Settings/Toggles.h"
+#include "RenderGraph/Backend.h"
+#include "RenderGraph/BufferRefs.h"
 
 #include <Resources/Buffers/Buffer.h>
 #include <Resources/ExternalTextureResource.h>
 #include <rhi.h>
 
 #include <algorithm>
+#include <atomic>
 #include <array>
 #include <deque>
 #include <memory>
+#include <source_location>
 #include <vector>
 #include <Tracy/Tracy.hpp>
 #include <Tracy/TracyC.h>
@@ -220,7 +224,25 @@ namespace DCLF::Direct
 			}
 		common.poolFirsts = slot->poolFirsts;
 		const auto& targets = *state->targets;
-		const bool drawable = shape.indirect.valid && common.indexPool.valid() && shape.rows;
+		bool drawable = shape.indirect.valid && common.indexPool.valid() && shape.rows;
+		// D3D12's layout holds root constants alone: a view's push words name its blocks by ref (the view block and its VS_PerFrame copy,
+		// the zero block) and by constant buffer view (SharedData, FeatureData), as ShadowViewPass's do there. Vulkan's layout reads the
+		// shape's addresses.
+		const bool d3d12 = ::RenderGraph::Backend::IsD3D12();
+		RenderGraph::BufferRef viewBlocksRef{};
+		if (d3d12 && drawable) {
+			if (resources.viewBlocks.buffer)
+				if (auto version = a_inputs.adopted->Find(*resources.viewBlocks.buffer); version && version->buffer) {
+					viewBlocksRef = RenderGraph::MakeBufferRef(s.device, version->buffer->GetAPIResource().GetHandle(), 0, std::source_location::current());
+					slot->holds.push_back(std::move(version));
+				}
+			if (!viewBlocksRef || !resources.constantsRef || !resources.blockViews) {
+				drawable = false;
+				static std::atomic<bool> warned{ false };
+				if (!warned.exchange(true))
+					logger::error("[DCLF] D3D12 CPU shadow site: no buffer view ref of the view blocks or the constants, or no SharedData view; its views draw nothing");
+			}
+		}
 		TracyCZoneEnd(sState);
 		for (const auto& latched : a_inputs.views) {
 			if (!drawable || latched.index >= shape.views.size() || latched.index >= shape.rows->size())
@@ -239,6 +261,21 @@ namespace DCLF::Direct
 			// The view's own pass words (ShadowFrameView::push: its latched blocks' addresses), so its recording holds for as long as the shape.
 			static_assert(std::tuple_size_v<decltype(view.push)> == std::tuple_size_v<decltype(bindings.shadowPush)>);
 			std::copy(view.push.begin(), view.push.end(), bindings.shadowPush.begin());
+			if (d3d12) {
+				auto& push = bindings.shadowPush;
+				const auto ref = [&](std::uint32_t a_word, RenderGraph::BufferRef a_ref) {
+					push[a_word] = a_ref.viewSlot;
+					push[a_word + 1] = a_ref.byteOffset;
+				};
+				const RenderGraph::BufferRef viewBlock = viewBlocksRef + std::uint64_t(view.slot) * Draws::kShadowViewSlotBytes;
+				ref(kShadowPushViewBlock, viewBlock);
+				ref(kShadowPushPerFrame, viewBlock + Draws::kShadowPerFrameOffset);
+				ref(kShadowPushZeros, resources.constantsRef + Draws::kShadowArenaBlocksOffset);  // the zero block heads the arena
+				push[kShadowPushSharedData] = resources.blockViewIndices[0];
+				push[kShadowPushSharedData + 1] = 0;
+				push[kShadowPushFeatureData] = resources.blockViewIndices[1];
+				push[kShadowPushFeatureData + 1] = 0;
+			}
 			bindings.shadowMapRow = mapRow;
 			const bool occlusion = IsOcclusionView(latched.type);
 			CullView cull = occlusion ? OcclusionCullView(latched.type, latched.slot, latched.latch) :

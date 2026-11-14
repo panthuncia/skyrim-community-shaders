@@ -105,6 +105,7 @@ namespace DCLF::Direct
 		// one: the rows' blocks mapped from pushed addresses) under the main layout, each draw pushing its sequence's 24 words as a
 		// device-generated draw's Constant argument; off, the pulled colour pipelines (Built::pulledColour), whose pixel stages load
 		// the blocks through the rows' addresses: on NVIDIA 25-30 registers more (96 to 123-127, 128 to 151), one occupancy step.
+		// Vulkan only: D3D12 builds no unpulled pipelines, so this and kExpPushedDepth do nothing there (Recorder.cpp, BeginList).
 		kExpPushedColour = 1u << 10,
 		// Likewise the depth lists (main depth, the hosted views' depth) with each key's depth pipeline (kDepthVariant) in place of its Z
 		// group's pulled one (Built::pulledDepth), but for a recording with Terrain Blending's depth offset (kZDrawPushOffsetDepth).

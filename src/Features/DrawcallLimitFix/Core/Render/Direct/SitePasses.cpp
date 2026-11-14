@@ -1,6 +1,6 @@
 // The CPU-driven pipeline's draws as graph passes (Sites.h): each draw site's epoch ends with a late pass (Api::PassDef::recordAtExecution,
-// ORG's RecordAtExecution), which the site's execution records on DXVK's CS thread into DXVK's command buffer, once the site's culls are in
-// (SiteFrame.h, RecordExecutingSite). It declares the targets its site draws, so the graph orders, times and names the draws with the
+// ORG's RecordAtExecution), recorded at execution once the commit opened the site's run (SiteFrame.h, RecordExecutingSite): in guest by
+// the site's execution on DXVK's CS thread into DXVK's command buffer, in native inline into the epoch's own list on the render thread. It declares the targets its site draws, so the graph orders, times and names the draws with the
 // epoch's other passes; its revision is constant (what it draws is its run's, not the recording's), so a kept recording records it again
 // in each execution (PreparedPass::RecordAgain).
 

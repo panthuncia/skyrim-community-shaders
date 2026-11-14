@@ -172,7 +172,7 @@ DeviceRef DCLFDrawSequence(uint a_instance)
 	a_instance += DCLFInstanceWord;  // D3D12: the draw's instance from its push word (DCLFPushData)
 #		endif
 	if ((DCLFDirectFlags & 4u) != 0) {
-		const uint2 record = DeviceLoad(uint2, DeviceRefAdd(DCLFDrawRecords, a_instance * 28 + 20), 4);
+		const uint2 record = DeviceLoad(uint2, DeviceRefAdd(DCLFDrawRecords, a_instance * 32 + 24), 4);
 		DCLFDrawRecordWord = record.y;
 		return DeviceRefAdd(DCLFSequencesAddress, record.x * kDCLFSequenceStride);
 	}
