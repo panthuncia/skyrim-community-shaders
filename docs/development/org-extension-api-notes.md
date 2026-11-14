@@ -1927,3 +1927,11 @@ is not declarable at the build (`PublishedResources::IsDeclarable`), so the call
 - **Wanted, if the wait shows:** per-graph transient resource objects (a build clones its transients), plus a detached prepare and record
   path whose recordings carry the build generation the attach gives them.
 - **Found by:** native frame graph Phase 4, DCLF async builds lane (2026-11-13).
+
+## Depth-stencil and scissor on `AnchorPasses::Draw`
+
+ImageSpace still refuses draws with a scissor rectangle or a depth or stencil test (menu 3D's `NOT_EQUAL` composite and its
+colour fill). `RasterProgram::Desc` already takes a depth format and `DepthStencilState`, and the draw a stencil reference, but
+`AnchorPasses::Draw` has no depth attachment (a declared DepthRead view), no stencil reference and no scissor rectangle. With those
+three fields the port could take these draws as passes like any other (docs/development/parity/imagespace.md). A viewport larger
+than its target needs a dynamic viewport separate from the render area.
