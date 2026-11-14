@@ -300,6 +300,12 @@ namespace RenderGraph::Engine::ImageSpace
 			// The screen-space reflections' apply (t0 the blurred reflections, t1 the water mask, t2 the image). Its own scope outside the
 			// other scopes, part of the enclosing one inside them.
 			{ Effects::ISApplyReflections, "ISApplyReflections", "applyreflections", "ISApplyReflections.hlsl", 3, 0b111, 3, 0, false, true },
+			// The lighting composite (albedo, diffuse, specular, SAO, fog, the directional light's diffuse and specular, the shadow mask):
+			// the directional-light form reads all eight, the plain form no directional light, the menu form no SAO or shadow mask.
+			{ Effects::ISLightingComposite, "ISLightingComposite", "lightingcomposite", "ISLightingComposite.hlsl", 8, 0xFF, 8, 0, false, true },
+			{ Effects::ISLightingCompositeNoDirectionalLight, "ISLightingCompositeNoDirectionalLight", "lightingcomposite", "ISLightingComposite.hlsl", 8, 0b10011111, 8, 0,
+				false, true },
+			{ Effects::ISLightingCompositeMenu, "ISLightingCompositeMenu", "lightingcomposite", "ISLightingComposite.hlsl", 8, 0b01110111, 8, 0, false, true },
 			// The dynamic-resolution upsample (the end-of-frame chain's +0x1f8): the full quad, its coordinates scaled in the shader.
 			{ Effects::ISUpsampleDynamicResolution, "ISUpsampleDynamicResolution", "upsample", "ISUpsampleDynamicResolution.hlsl", 1, 0b1, 1, 0, false, true },
 			// The effects whose vertex shader writes no SV_Position (EffectInfo::rastersNothing): no pass, nothing drawn.
