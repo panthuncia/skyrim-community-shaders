@@ -148,6 +148,10 @@ namespace RenderGraph::Engine::ImageSpace
 			bool geometry = false;
 			// Its source has an ORG vertex stage over the graph's fullscreen triangle (the copies that move their coordinates there).
 			bool vertexStage = false;
+			// Its vertex shader writes POSITION, not SV_Position (vanilla's ISMap and both ISNoise forms; CS's ISNoise.hlsl the same, and
+			// ISMap stays on vanilla's DXBC): the engine's draw rasterizes nothing (imagespace-shaders.md, inferred). Taken with no pass:
+			// the engine's state is applied as its draw would, and nothing is drawn.
+			bool rastersNothing = false;
 		};
 
 		/** @brief The push words of an effect's feature handles (EffectInfo::features): s9, then the five headers' resources. */
@@ -279,6 +283,10 @@ namespace RenderGraph::Engine::ImageSpace
 			{ Effects::ISLocalMap, "ISLocalMap", "localmap", "ISLocalMap.hlsl", 1, 0b1, 1, 0, false, true },
 			// A colour fill (menu 3D's clear among others). Draws with a stencil test or a manager rectangle are refused as for any effect.
 			{ Effects::ISSimpleColor, "ISSimpleColor", "simplecolor", "ISSimpleColor.hlsl", 0, 0, 0, 0, false, true },
+			// The effects whose vertex shader writes no SV_Position (EffectInfo::rastersNothing): no pass, nothing drawn.
+			{ Effects::ISMap, "ISMap", "nodraw", "ISMap.hlsl", 0, 0, 0, 0, false, true, 1, false, false, false, false, true },
+			{ Effects::ISNoiseScrollAndBlend, "ISNoiseScrollAndBlend", "nodraw", "ISNoise.hlsl", 0, 0, 0, 0, false, true, 1, false, false, false, false, true },
+			{ Effects::ISNoiseNormalmap, "ISNoiseNormalmap", "nodraw", "ISNoise.hlsl", 0, 0, 0, 0, false, true, 1, false, false, false, false, true },
 		});
 
 		/**
@@ -2442,6 +2450,14 @@ namespace RenderGraph::Engine::ImageSpace
 			scope.drew = true;
 			const auto& effect = kEffects[scope.effect];
 			++state.drawIndex;
+			static REL::Relocation<void (*)(bool)> setDirtyStates{ REL::RelocationID(75580, 77386) };
+			if (effect.rastersNothing) {
+				// Its state goes to D3D11 as the draw would apply it (a clear at the bind among it), after the pending batch.
+				Flush();
+				setDirtyStates(false);
+				++state.taken;
+				return true;
+			}
 			ShapeKey key{};
 			OutputView output;
 			std::string_view refusal;
@@ -2456,7 +2472,6 @@ namespace RenderGraph::Engine::ImageSpace
 				Flush();
 			// The engine's state for the draw goes to D3D11 as before (the draw would apply it; when the engine draws, its own call
 			// finds nothing left to apply). The shadow state then holds the viewport the draw uses.
-			static REL::Relocation<void (*)(bool)> setDirtyStates{ REL::RelocationID(75580, 77386) };
 			setDirtyStates(false);
 			std::string detail;
 			if (!ReadViewport(output, key, refusal, detail)) {
