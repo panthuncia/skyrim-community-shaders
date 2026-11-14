@@ -23,7 +23,7 @@ namespace RenderGraph::Engine
 		// The resource heap the client indexes. BasicRHI adds the buffer view refs' region past it (rhi_shader_abi.h), and D3D12
 		// refuses a shader-visible heap above 1,000,000 descriptors: with a full million the heap with the region was refused, and
 		// every buffer view ref read zero (no world drawn on NVIDIA). The Vulkan device also reports the region's slots fewer.
-		constexpr std::uint32_t kResourceDescriptors = 1'000'000 - BUFFER_VIEW_REF_SLOTS;
+		constexpr std::uint32_t kResourceDescriptors = 1'000'000 - rhi::BUFFER_VIEW_REF_SLOTS;
 		constexpr std::uint32_t kSamplerDescriptors = 2048;
 
 		// From d3d12.h, spelled out so no GUID library is needed.
