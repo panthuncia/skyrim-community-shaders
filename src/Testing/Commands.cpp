@@ -518,6 +518,17 @@ namespace Testing
 				Upscaling::RequestFrameGenTest(a_arg == "off" ? 0 : a_arg == "fsr" ? 1 : 2);
 				return true;
 			});
+			// "upscale": none|taa|fsr|dlss|xess, the upscale method as the Upscaling menu sets it.
+			RegisterCommand("upscale", [](const std::string& a_arg, std::string& a_error) {
+				static constexpr std::array<std::string_view, 5> kMethods{ "none", "taa", "fsr", "dlss", "xess" };
+				const auto found = std::ranges::find(kMethods, a_arg);
+				if (found == kMethods.end()) {
+					a_error = "not none, taa, fsr, dlss or xess";
+					return false;
+				}
+				Upscaling::RequestUpscaleTest(static_cast<int>(found - kMethods.begin()));
+				return true;
+			});
 			// "pp": <effect type>=0|1, a Post Processing effect's menu toggle.
 			RegisterCommand("pp", [](const std::string& a_arg, std::string& a_error) {
 				const auto separator = a_arg.rfind('=');

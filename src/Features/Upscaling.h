@@ -97,6 +97,8 @@ public:
 	 * frame's start. 0: off, 1: FSR-FG, 2: DLSS-G.
 	 */
 	static void RequestFrameGenTest(int a_method);
+	/** @brief A test run's upscale method (the "upscale" command: an UpscaleMethod), applied at the next render frame's start. */
+	static void RequestUpscaleTest(int a_method);
 	static void NotifyWindowModifying(bool a_modifying);  // WM_ENTERSIZEMOVE / WM_EXITSIZEMOVE
 	static void NotifyDisplayState(bool a_on);            // GUID_CONSOLE_DISPLAY_STATE
 	static void NotifyDesktopChanged();                   // WM_DISPLAYCHANGE
@@ -109,6 +111,7 @@ public:
 
 	static inline std::atomic<bool> s_windowUnfocused{ false };
 	static inline std::atomic<int> s_frameGenTestRequest{ -1 };  // RequestFrameGenTest's, -1: none
+	static inline std::atomic<int> s_upscaleTestRequest{ -1 };   // RequestUpscaleTest's, -1: none
 	static inline std::atomic<bool> s_windowModifying{ false };
 	static inline std::atomic<bool> s_displayOff{ false };
 	static inline std::atomic<std::uint64_t> s_displayChangedTick{ 0 };

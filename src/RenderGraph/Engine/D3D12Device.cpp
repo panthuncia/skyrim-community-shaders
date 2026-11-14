@@ -170,12 +170,13 @@ namespace RenderGraph::Engine
 		ci.enableDebug = a_options.debug;
 		ci.enableCrashMarkers = a_options.crashMarkers;
 		ci.d3d12DeviceFactory = factory.get();
+		ci.streamlineHost = static_cast<const rhi::DeviceCreateInfo::StreamlineHost*>(a_options.streamlineHost);
 		if (a_options.adapterLuid) {
 			ci.adapterLuid = a_options.adapterLuid;
 			ci.requireAdapterLuid = true;
 		}
 
-		// Streamline's interposer stays off: CS loads Streamline itself (Features/Upscaling/Streamline).
+		// With a_options.streamlineHost: the device through Streamline's manual hooking, on CS's own slInit (Features/Upscaling/Streamline).
 		a_device = std::make_shared<rhi::DevicePtr>();
 		if (rhi::CreateD3D12Device(ci, *a_device, false) != rhi::Result::Ok || !*a_device)
 			return fail(factory ? "rhi::CreateD3D12Device failed with the Agility SDK device factory (see BasicRHI's log lines above)" :

@@ -22,6 +22,8 @@ namespace RenderGraph::Engine
 		std::uint32_t framesInFlight = 3;
 		// The adapter to create the device on (its LUID, LowPart and HighPart as one 64-bit pattern). 0 lets BasicRHI choose.
 		std::uint64_t adapterLuid = 0;
+		// Streamline initialized by CS for this device (rhi::DeviceCreateInfo::StreamlineHost), or null.
+		const void* streamlineHost = nullptr;
 	};
 
 	/**

@@ -34,10 +34,13 @@ if(CS_RENDER_GRAPH)
         message(WARNING "CS_RENDER_GRAPH: ${_cs_org_missing} not found under CS_ORG_ROOT=${CS_ORG_ROOT}; building without the render graph")
     else()
         # The Vulkan backend always: CS reaches the GPU through DXVK by default. The D3D12 backend with CS_ORG_D3D12, for the
-        # native mode's CS_ORG_BACKEND=d3d12. Streamline, PIX and Tracy GPU zones belong to the host (CS owns Streamline).
+        # native mode's CS_ORG_BACKEND=d3d12. PIX and Tracy GPU zones belong to the host. Streamline: CS owns slInit and the
+        # evaluates; native mode's device comes up through BasicRHI's Streamline support (DeviceCreateInfo::streamlineHost), on the
+        # fork's headers. BasicRHI's direct Streamline calls resolve to CS's forwarders (Features/Upscaling/StreamlineImports.cpp).
         set(BASICRHI_ENABLE_D3D12 ${CS_ORG_D3D12} CACHE BOOL "" FORCE)
         set(BASICRHI_ENABLE_VULKAN ON CACHE BOOL "" FORCE)
-        set(BASICRHI_ENABLE_STREAMLINE OFF CACHE BOOL "" FORCE)
+        set(BASICRHI_ENABLE_STREAMLINE ON CACHE BOOL "" FORCE)
+        set(BASICRHI_STREAMLINE_HEADERS_DIR "${CMAKE_SOURCE_DIR}/extern/Streamline/include" CACHE PATH "" FORCE)
         set(BASICRHI_ENABLE_PIX OFF CACHE BOOL "" FORCE)
         set(BASICRHI_ENABLE_RESHAPE OFF CACHE BOOL "" FORCE)
         set(BASICRHI_ENABLE_TRACY_GPU_PROFILING OFF CACHE BOOL "" FORCE)

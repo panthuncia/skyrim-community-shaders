@@ -7,6 +7,8 @@
 #include <cstdint>
 #include <memory>
 #include <string>
+#include <functional>
+#include <span>
 #include <string_view>
 
 #include <winrt/base.h>
@@ -204,6 +206,47 @@ namespace RenderGraph::Engine::Native
 	 * the loader's vkGetInstanceProcAddr. No extension or feature list (BasicRHI keeps none). False on D3D12 or before stage 3.
 	 */
 	bool DescribeVulkanDevice(DxvkOrgInteropDeviceInfo& a_info);
+
+	/** @brief The LUID of the adapter the native device was made on (LowPart and HighPart as one 64-bit pattern), or 0. */
+	std::uint64_t AdapterLuid();
+
+	/** @brief An image external work (Streamline's evaluates) reads or writes: a D3D11 handle the native device made, and how. */
+	struct ExternalImage
+	{
+		enum class Use : std::uint8_t
+		{
+			Read,   // sampled
+			Write,  // unordered access
+		};
+		ID3D11Resource* resource = nullptr;
+		Use use = Use::Read;
+	};
+
+	/**
+	 * @brief What external work's commands get for each ExternalImage, in their order. native: the VkImage or the ID3D12Resource*.
+	 * view: on Vulkan a VkImageView of every mip and layer (a depth image's depth aspect), made for this work and destroyed after it;
+	 * 0 on D3D12. state: the layout the image is in for the commands (VkImageLayout, or the D3D12 legacy resource state Streamline's
+	 * tags take). format: VkFormat or DXGI_FORMAT.
+	 */
+	struct ExternalImageInfo
+	{
+		void* native = nullptr;
+		std::uint64_t view = 0;
+		std::uint64_t state = 0;
+		std::uint32_t format = 0;
+		std::uint32_t width = 0, height = 0, mips = 1, layers = 1;
+		std::uint32_t usage = 0;  // Vulkan: VkImageUsageFlags
+	};
+
+	/**
+	 * @brief Runs external commands (a_record, given the native command list: a VkCommandBuffer, or the ID3D12GraphicsCommandList
+	 * Streamline's proxy device made) on a list of their own, on the context's route: in queue order after the graph's work so far,
+	 * each image moved into its state by its ledger (or from Common, an image no graph tracks). a_keep is held until the GPU is
+	 * past the work. False, logged once per label, when an image is not the native device's or nothing was submitted. Render
+	 * thread.
+	 */
+	bool RunExternal(const std::string& a_label, std::span<const ExternalImage> a_images,
+		const std::function<void(void* a_nativeList, std::span<const ExternalImageInfo> a_images)>& a_record, std::shared_ptr<const void> a_keep = nullptr);
 
 	/**
 	 * @brief Runs a_callback now with the native graphics queue, holding the lock every queue access takes, so it lands between the

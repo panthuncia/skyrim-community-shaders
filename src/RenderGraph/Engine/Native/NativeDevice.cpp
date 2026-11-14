@@ -14,6 +14,9 @@
 #	include <functional>
 
 #	include "Aftermath.h"
+#	include "Features/Upscaling.h"
+#	include "Features/Upscaling/Streamline.h"
+#	include "Globals.h"
 #	include "RenderGraph/DxvkOrgInterop.h"
 #	include "RenderGraph/Engine/Tripwire/GuestDevice.h"
 #	include "RenderGraph/Engine/Tripwire/Tripwire.h"
@@ -49,6 +52,7 @@
 #	include <cstring>
 #	include <chrono>
 #	include <mutex>
+#	include <set>
 #	include <span>
 #	include <unordered_map>
 #	include <unordered_set>
@@ -248,8 +252,33 @@ namespace RenderGraph::Engine::Native
 		 * (CS_ORG_BACKEND, the D3D12 lane), and everything after it uses rhi calls except the image description for the graph's
 		 * imports (DescribeResource), which is Vulkan's.
 		 */
+		/**
+		 * @brief Upscaling loaded: Streamline initialized for the native backend before the device exists, so the device comes up through
+		 * it (rhi::DeviceCreateInfo::streamlineHost). False when Streamline cannot run: the device is made without it, and the upscalers
+		 * fall back to TAA.
+		 */
+		bool NativeStreamline(rhi::DeviceCreateInfo::StreamlineHost& a_host)
+		{
+			if (!globals::features::upscaling.loaded)
+				return false;
+			auto* streamline = Streamline::GetSingleton();
+			if (!streamline->InitializeForNative() || !streamline->InterposerModule())
+				return false;
+			a_host.interposer = streamline->InterposerModule();
+			a_host.features = streamline->LoadedFeatures().data();
+			a_host.featureCount = static_cast<uint32_t>(streamline->LoadedFeatures().size());
+			a_host.pluginDirectory = streamline->PluginDirectory().c_str();
+			return true;
+		}
+
+		uint64_t g_adapterLuid = 0;
+
 		bool CreateBasicRhiDevice(IDXGIAdapter* a_adapter, std::shared_ptr<rhi::DevicePtr>& a_out, std::string& a_reason)
 		{
+			static rhi::DeviceCreateInfo::StreamlineHost streamlineHost{};
+			const bool streamline = NativeStreamline(streamlineHost);
+			if (DXGI_ADAPTER_DESC described{}; a_adapter && SUCCEEDED(a_adapter->GetDesc(&described)))
+				g_adapterLuid = (static_cast<uint64_t>(static_cast<uint32_t>(described.AdapterLuid.HighPart)) << 32) | described.AdapterLuid.LowPart;
 			// CS_ORG_NATIVE_BACKEND=d3d12: BasicRHI's D3D12 device on the same adapter. Everything after this point is the same
 			// code, except where a function asks OnD3D12().
 			if (::RenderGraph::Backend::Requested() == rhi::Backend::D3D12) {
@@ -261,6 +290,7 @@ namespace RenderGraph::Engine::Native
 				DXGI_ADAPTER_DESC adapter{};
 				if (a_adapter && SUCCEEDED(a_adapter->GetDesc(&adapter)))
 					options.adapterLuid = (static_cast<uint64_t>(static_cast<uint32_t>(adapter.AdapterLuid.HighPart)) << 32) | adapter.AdapterLuid.LowPart;
+				options.streamlineHost = streamline ? &streamlineHost : nullptr;
 				if (!Engine::CreateD3D12Device(options, a_out, a_reason))
 					return false;
 				::RenderGraph::Backend::SetActive(rhi::Backend::D3D12);
@@ -294,7 +324,8 @@ namespace RenderGraph::Engine::Native
 				ci.requireAdapterLuid = true;
 			}
 			a_out = std::make_shared<rhi::DevicePtr>();
-			// Streamline's interposer stays off: no upscaler or frame generation runs in native mode yet.
+			// Upscaling loaded: through Streamline's manual hooking, on CS's own slInit (NativeStreamline).
+			ci.streamlineHost = streamline ? &streamlineHost : nullptr;
 			if (rhi::CreateVulkanDevice(ci, *a_out, false) != rhi::Result::Ok || !*a_out) {
 				a_reason = ci.requireAdapterLuid ? "rhi::CreateVulkanDevice failed on the game's adapter (see BasicRHI's log lines above)" :
 				                                   "rhi::CreateVulkanDevice failed (see BasicRHI's log lines above)";
@@ -4954,6 +4985,145 @@ namespace RenderGraph::Engine::Native
 		return applied;
 	}
 
+	bool RunExternal(const std::string& a_label, std::span<const ExternalImage> a_images,
+		const std::function<void(void* a_nativeList, std::span<const ExternalImageInfo> a_images)>& a_record, std::shared_ptr<const void> a_keep)
+	{
+		static std::mutex logLock;
+		static std::set<std::string> logged;
+		const auto refuse = [&](std::string_view a_why) {
+			std::lock_guard guard(logLock);
+			if (logged.insert(a_label).second)
+				logger::error("[ORG native] external work '{}': {}; it does not run (logged once)", a_label, a_why);
+			return false;
+		};
+		if (!g_device || !RenderGraphRuntime::Get().IsActive())
+			return refuse("no native device or render graph");
+		const bool d3d12 = OnD3D12();
+		// Each image's graph resource, whose ledger moves it into the state its commands need: a tracked texture's own, else the graph
+		// resource of its image (an engine target the graph made: its exclusive import, which the graph moves in native mode).
+		std::vector<::RenderGraph::ExternalWork::Access> accesses;
+		std::vector<rhi::Resource> handles;
+		std::vector<std::string> names;
+		std::vector<NativeResource*> used;
+		std::vector<std::shared_ptr<const void>> keep;
+		for (const auto& image : a_images) {
+			auto record = ImageRecordOf(image.resource);
+			if (!record)
+				return refuse("an image is not one the native device made");
+			auto graph = LedgerResourceOf(*record);
+			if (!graph)
+				graph = ::RenderGraph::GraphResourceOfImage(reinterpret_cast<std::uint64_t>(record->image.image));
+			if (!graph)
+				return refuse(fmt::format("'{}' has no graph resource", record->name));
+			const bool write = image.use == ExternalImage::Use::Write;
+			// Vulkan: GENERAL (Common) serves sampling and storage alike, so the tags name one layout. D3D12: each use's own layout.
+			const auto layout = d3d12 ? (write ? rhi::ResourceLayout::UnorderedAccess : rhi::ResourceLayout::ShaderResource) : rhi::ResourceLayout::Common;
+			const auto access = write ? rhi::ResourceAccessType::UnorderedAccess : rhi::ResourceAccessType::ShaderResource;
+			accesses.push_back({ graph.get(), {}, { access, layout, rhi::ResourceSyncState::All } });
+			handles.push_back(graph->GetAPIResource());
+			names.push_back(record->name);
+			used.push_back(record.get());
+			keep.push_back(std::move(graph));
+			keep.push_back(std::move(record));
+		}
+		if (a_keep)
+			keep.push_back(std::move(a_keep));
+		// Vulkan views made for this work, destroyed once its slot retires (the keep list's last owner).
+		struct Views
+		{
+			VkDevice device = VK_NULL_HANDLE;
+			PFN_vkDestroyImageView destroy = nullptr;
+			std::vector<VkImageView> views;
+			~Views()
+			{
+				for (auto view : views)
+					if (view && destroy)
+						destroy(device, view, nullptr);
+			}
+		};
+		auto views = std::make_shared<Views>();
+		keep.push_back(views);
+		bool recorded = false;
+		std::string why = "its images could not be described";
+		const std::span<const rhi::Resource> a_handles = handles;
+		const uint64_t value = g_device->immediate.Route(
+			a_label, accesses, {},
+			[&](rhi::CommandList& a_list, const Immediate::Descriptors&) {
+				std::vector<ExternalImageInfo> infos(a_images.size());
+				void* nativeList = nullptr;
+#	if defined(CS_ORG_HAS_D3D12)
+				if (d3d12) {
+					// rhi_interop_dx12.h's getters, through rhi_interop.h: that header's d3d12.h is not this file's.
+					rhi::D3D12CmdListInfo list{};
+					if (rhi::QueryNativeCmdList(a_list, rhi::RHI_IID_D3D12_STREAMLINE_CMD_LIST, &list, sizeof(list)) && list.cmdList)
+						nativeList = list.cmdList;
+					else if (rhi::QueryNativeCmdList(a_list, rhi::RHI_IID_D3D12_CMD_LIST, &list, sizeof(list)))
+						nativeList = list.cmdList;
+					for (std::size_t i = 0; i < infos.size(); ++i) {
+						rhi::D3D12ResourceInfo native{};
+						if (!rhi::QueryNativeResource(a_handles[i], rhi::RHI_IID_D3D12_RESOURCE, &native, sizeof(native)) || !native.resource)
+							return;
+						auto* resource = static_cast<ID3D12Resource*>(native.resource);
+						const auto desc = resource->GetDesc();
+						infos[i] = { resource, 0,
+							static_cast<std::uint64_t>(a_images[i].use == ExternalImage::Use::Write ? D3D12_RESOURCE_STATE_UNORDERED_ACCESS :
+							                                                                           D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE),
+							static_cast<std::uint32_t>(desc.Format), static_cast<std::uint32_t>(desc.Width), desc.Height, desc.MipLevels, desc.DepthOrArraySize, 0 };
+					}
+				}
+#	endif
+				if (!d3d12) {
+					const VkDevice device = rhi::vulkan::get_device(g_device->Rhi());
+					const auto getDeviceProc = rhi::vulkan::get_device_proc_addr();
+					auto create = getDeviceProc ? reinterpret_cast<PFN_vkCreateImageView>(getDeviceProc(device, "vkCreateImageView")) : nullptr;
+					views->device = device;
+					views->destroy = getDeviceProc ? reinterpret_cast<PFN_vkDestroyImageView>(getDeviceProc(device, "vkDestroyImageView")) : nullptr;
+					nativeList = rhi::vulkan::get_cmd_list(a_list);
+					if (!create || !views->destroy || !nativeList) {
+						why = nativeList ? "no vkCreateImageView" : "no native command buffer";
+						return;
+					}
+					for (std::size_t i = 0; i < infos.size(); ++i) {
+						rhi::VulkanResourceInfo info{};
+						if (!rhi::vulkan::get_resource_info(a_handles[i], info) || !info.resource) {
+							why = fmt::format("image {} ('{}'): its graph resource has no Vulkan image (handle valid {})", i, names[i], a_handles[i].IsValid());
+							return;
+						}
+						const auto format = static_cast<VkFormat>(info.nativeFormat);
+						VkImageViewCreateInfo viewInfo{ VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO };
+						viewInfo.image = static_cast<VkImage>(info.resource);
+						viewInfo.viewType = info.arrayLayers > 1 ? VK_IMAGE_VIEW_TYPE_2D_ARRAY : VK_IMAGE_VIEW_TYPE_2D;
+						viewInfo.format = format;
+						const bool depth = format == VK_FORMAT_D24_UNORM_S8_UINT || format == VK_FORMAT_D32_SFLOAT || format == VK_FORMAT_D32_SFLOAT_S8_UINT ||
+						                   format == VK_FORMAT_D16_UNORM || format == VK_FORMAT_X8_D24_UNORM_PACK32 || format == VK_FORMAT_D16_UNORM_S8_UINT;
+						viewInfo.subresourceRange = { static_cast<VkImageAspectFlags>(depth ? VK_IMAGE_ASPECT_DEPTH_BIT : VK_IMAGE_ASPECT_COLOR_BIT), 0, info.mipLevels, 0,
+							info.arrayLayers };
+						VkImageView view = VK_NULL_HANDLE;
+						if (const VkResult made = create(device, &viewInfo, nullptr, &view); made != VK_SUCCESS) {
+							why = fmt::format("image {} ('{}', VkFormat {}): vkCreateImageView failed ({})", i, names[i], static_cast<int>(format), static_cast<int>(made));
+							return;
+						}
+						views->views.push_back(view);
+						infos[i] = { info.resource, reinterpret_cast<std::uint64_t>(view), static_cast<std::uint64_t>(VK_IMAGE_LAYOUT_GENERAL), info.nativeFormat, info.width,
+							info.height, info.mipLevels, info.arrayLayers, info.usage };
+					}
+				}
+				if (!nativeList)
+					return;
+				a_record(nativeList, infos);
+				recorded = true;
+			},
+			std::move(keep), used);
+		if (!value || !recorded)
+			return refuse(value ? why : "the context did not submit it");
+		return true;
+	}
+
+	uint64_t AdapterLuid()
+	{
+		return g_adapterLuid;
+	}
+
 	bool DescribeVulkanDevice(DxvkOrgInteropDeviceInfo& a_info)
 	{
 		if (!g_device || OnD3D12())
@@ -5025,6 +5195,11 @@ namespace RenderGraph::Engine::Native
 	void Shutdown() {}
 	bool SetSwapChainColorSpace(bool) { return false; }
 	bool DescribeVulkanDevice(DxvkOrgInteropDeviceInfo&) { return false; }
+	uint64_t AdapterLuid() { return 0; }
+	bool RunExternal(const std::string&, std::span<const ExternalImage>, const std::function<void(void*, std::span<const ExternalImageInfo>)>&, std::shared_ptr<const void>)
+	{
+		return false;
+	}
 	HRESULT __stdcall RunOnGraphicsQueue(ID3D11Device*, void (*)(void*, VkQueue_T*), void*) { return E_FAIL; }
 	bool CreateStreamShell(const D3D11_TEXTURE2D_DESC&, ID3D11Texture2D**, ID3D11ShaderResourceView**) { return false; }
 	HRESULT __stdcall StreamEnableView(ID3D11ShaderResourceView*, void(__stdcall*)(std::uint64_t), void(__stdcall*)(std::uint64_t),
