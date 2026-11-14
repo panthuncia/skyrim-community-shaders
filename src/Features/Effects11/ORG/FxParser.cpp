@@ -55,8 +55,18 @@ namespace OrgFx
 			std::uint32_t line = 0;
 		};
 
-		/** @brief Tokens of the text. Directive lines and comments are dropped; punctuation is one character except "::". */
-		std::vector<Token> Lex(std::string_view a_src, std::vector<Diagnostic>& a_diagnostics)
+		/** @brief A `#pragma pack_matrix` line: from a_offset on, matrices without a majorness keyword take this one. */
+		struct PackChange
+		{
+			std::uint32_t offset = 0;
+			bool rowMajor = false;
+		};
+
+		/**
+		 * @brief Tokens of the text. Directive lines and comments are dropped; punctuation is one character except "::".
+		 * `#pragma pack_matrix` lines are kept in a_packs, in text order.
+		 */
+		std::vector<Token> Lex(std::string_view a_src, std::vector<Diagnostic>& a_diagnostics, std::vector<PackChange>& a_packs)
 		{
 			std::vector<Token> out;
 			const std::size_t n = a_src.size();
@@ -95,10 +105,15 @@ namespace OrgFx
 						++i;
 					}
 					const auto directive = a_src.substr(directiveStart, i - directiveStart);
-					// Column-major is the default, so only row_major changes the layout. The parser does not apply it: the effect
-					// fails, and FX11 runs it, rather than reading every matrix transposed.
-					if (const auto pack = directive.find("pack_matrix"); pack != std::string_view::npos && directive.find("row_major", pack) != std::string_view::npos)
-						a_diagnostics.push_back({ Severity::Error, line, "#pragma pack_matrix(row_major) is not supported" });
+					// Column-major is the default. The pragma changes it for the declarations after it, as FXC applies it.
+					if (const auto pack = directive.find("pack_matrix"); pack != std::string_view::npos && directive.find("pragma") != std::string_view::npos) {
+						if (directive.find("row_major", pack) != std::string_view::npos)
+							a_packs.push_back({ static_cast<std::uint32_t>(directiveStart), true });
+						else if (directive.find("column_major", pack) != std::string_view::npos)
+							a_packs.push_back({ static_cast<std::uint32_t>(directiveStart), false });
+						else
+							a_diagnostics.push_back({ Severity::Warning, line, "#pragma pack_matrix without row_major or column_major is ignored" });
+					}
 					continue;
 				}
 				lineStart = false;
@@ -476,7 +491,7 @@ namespace OrgFx
 			Parser(std::string_view a_source, EffectDesc& a_fx) :
 				src(a_source), fx(a_fx)
 			{
-				toks = Lex(a_source, fx.diagnostics);
+				toks = Lex(a_source, fx.diagnostics, packs);
 				limit = toks.size() - 1;
 			}
 
@@ -499,7 +514,20 @@ namespace OrgFx
 			std::size_t attributeStart = std::numeric_limits<std::size_t>::max();
 			std::unordered_map<std::string, ShaderBinding> shaderVariables;
 			std::unordered_map<std::string, Type> typedefs;
+			std::vector<PackChange> packs;
 			mutable Token sentinel{};
+
+			/** @brief The majorness a matrix declared at byte a_offset takes when it names none: the last pack_matrix before it. */
+			bool DefaultRowMajor(std::uint32_t a_offset) const
+			{
+				bool rowMajor = false;
+				for (const auto& change : packs) {
+					if (change.offset > a_offset)
+						break;
+					rowMajor = change.rowMajor;
+				}
+				return rowMajor;
+			}
 
 			// Cursor
 
@@ -1141,6 +1169,8 @@ namespace OrgFx
 					Variable v;
 					v.type = a_type;
 					v.modifiers = a_mods;
+					if (a_type.matrix && !a_mods.rowMajor && !a_mods.columnMajor)
+						v.modifiers.rowMajor = DefaultRowMajor(Peek().begin);
 					v.name = std::string(Peek().text);
 					v.line = Peek().line;
 					v.cbuffer = a_cbuffer;
@@ -1319,10 +1349,14 @@ namespace OrgFx
 						continue;
 					}
 					bool isStatic = false;
+					bool rowMajor = false;
+					bool columnMajor = false;
 					std::string interpolation;
 					while (IsIdent() && IsIdent(1) &&
 						   (kDeclModifiers.contains(Peek().text) || kInterpolation.contains(Peek().text))) {
 						isStatic |= Peek().text == "static";
+						rowMajor |= Peek().text == "row_major";
+						columnMajor |= Peek().text == "column_major";
 						if (kInterpolation.contains(Peek().text))
 							interpolation = std::string(Peek().text);
 						++pos;
@@ -1353,6 +1387,7 @@ namespace OrgFx
 						StructMember m;
 						m.type = type;
 						m.interpolation = interpolation;
+						m.rowMajor = type.matrix && (rowMajor || (!columnMajor && DefaultRowMajor(Peek().begin)));
 						m.name = std::string(Peek().text);
 						++pos;
 						m.arraySize = ParseArraySize();
@@ -2087,7 +2122,7 @@ namespace OrgFx
 						return std::nullopt;
 					std::uint32_t offset = 0;
 					for (const auto& m : s->members) {
-						auto placement = Place(offset, m.type, {}, m.arraySize, a_depth + 1);
+						auto placement = Place(offset, m.type, Modifiers{ .rowMajor = m.rowMajor }, m.arraySize, a_depth + 1);
 						if (!placement)
 							return std::nullopt;
 						offset = placement->second;
@@ -2126,7 +2161,7 @@ namespace OrgFx
 					std::uint32_t offset = 0;
 					bool ok = true;
 					for (auto& m : s.members) {
-						auto placement = Place(offset, m.type, {}, m.arraySize);
+						auto placement = Place(offset, m.type, Modifiers{ .rowMajor = m.rowMajor }, m.arraySize);
 						if (!placement) {
 							ok = false;
 							break;

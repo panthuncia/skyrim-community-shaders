@@ -156,7 +156,7 @@ namespace OrgFx
 					std::string out = "{ ";
 					for (std::size_t i = 0; i < s->members.size(); ++i) {
 						const auto& m = s->members[i];
-						auto e = ValueLoad(m.type, {}, m.arraySize, a_offset + m.offset, a_line, a_depth + 1);
+						auto e = ValueLoad(m.type, Modifiers{ .rowMajor = m.rowMajor }, m.arraySize, a_offset + m.offset, a_line, a_depth + 1);
 						if (e.empty())
 							return {};
 						out += (i ? ", " : "") + e;
