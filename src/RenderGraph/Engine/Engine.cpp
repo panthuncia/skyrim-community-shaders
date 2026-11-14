@@ -54,14 +54,16 @@ namespace RenderGraph::Engine
 		Skeleton::Setup();
 		// CS_ORG_IMAGESPACE: the ImageSpace draws on the graph; the client registers once the effects' shapes are known.
 		ImageSpace::Setup();
-		// CS_ORG_BINK: the movie player's client at the Present anchor, registered once for the session.
-		Bink::Setup();
 	}
 
 	void PostSetup()
 	{
 		// CS_ORG_SCALEFORM: the framebuffer's and HDR's UI texture's surfaces (HDR made its texture in its SetupResources).
 		Scaleform::Setup();
+		// CS_ORG_BINK: the movie player's client at the Present anchor, registered once for the session. After the features'
+		// SetupResources, so HDR's UI texture exists and its pass is in the client from the start: the startup logo's first tick
+		// then finds the client in the built graph instead of refreshing it.
+		Bink::Setup();
 		// Every client registered at setup joins its anchors' graphs now, not at the first frame's build point.
 		if (RenderGraphRuntime::Get().IsActive())
 			(void)FrameAnchors::BuildPending("CS's setup");

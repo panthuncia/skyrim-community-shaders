@@ -26,8 +26,8 @@ namespace RenderGraph::Engine
 	void Setup();
 
 	/**
-	 * @brief State::Setup, after the features' SetupResources and PostSetupResources (HDR's UI texture exists then): Scaleform's client
-	 * with its surfaces and its pipelines queued, then the graphs every client registered so far waits to join are built
+	 * @brief State::Setup, after the features' SetupResources and PostSetupResources (HDR's UI texture exists then): Scaleform's and Bink's clients
+	 * with their targets and pipelines, then the graphs every client registered so far waits to join are built
 	 * (FrameAnchors::BuildPending), so the primary-path clients (Skeleton, Bink, Scaleform) are in their anchors' graphs before the
 	 * first frame. Render thread, between frames.
 	 */
