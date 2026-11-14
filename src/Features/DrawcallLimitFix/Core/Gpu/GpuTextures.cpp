@@ -227,6 +227,9 @@ namespace DCLF
 			std::vector<std::shared_ptr<const void>> storages;
 			// An engine texture ORG owns (CS_ORG_ENGINE_TEXTURES): its record, which holds the image the descriptor reads.
 			std::shared_ptr<const RenderGraph::Engine::Textures::Texture> engineTexture;
+			// The graph resource whose own image the descriptor reads, when the graph moves the image between layouts (native mode
+			// without home states or with exclusive imports: RenderGraph::NativeGraphMovesImages).
+			std::shared_ptr<org::Resource> graphResource;
 			~ImportedBacking()
 			{
 				// The descriptor's last use is done (the binding released this on the cleanup queue): the wrapper first, then the
@@ -604,6 +607,7 @@ namespace DCLF
 			}
 
 			DxvkOrgInteropResourceInfo info{};
+			std::shared_ptr<org::Resource> graphResource;
 			// Pinless: the import is tracked, ended by its backing once made, else here.
 			struct Tracking
 			{
@@ -671,7 +675,25 @@ namespace DCLF
 				// imports by the stable DXVK image and the game SRV that produced this view.
 				const auto importName = std::format("DCLF texture image {:#x} SRV {:#x}",
 					reinterpret_cast<std::uintptr_t>(image.image), reinterpret_cast<std::uintptr_t>(view));
-				{
+				// An image resting in GENERAL that a graph moves between layouts (native mode's tracked images with exclusive imports):
+				// a raw import's view names GENERAL, but the pass that declares the read holds the image in the read-only layout. With
+				// the graph moving images (RenderGraph::NativeGraphMovesImages) the view is made on the graph resource's own image,
+				// whose descriptor names that read-only layout. The raw access check counts the GENERAL views left.
+				if (image.layout == VK_IMAGE_LAYOUT_GENERAL && (RenderGraph::NativeGraphMovesImages() || RenderGraph::RawAccess::On()))
+					if (auto graph = RenderGraph::GraphResourceOfImage(reinterpret_cast<std::uint64_t>(image.image)); graph && !graph->CommonLayoutOnly())
+						graphResource = std::move(graph);
+				if (graphResource && RenderGraph::NativeGraphMovesImages()) {
+					RenderGraph::RawAccess::Count(RenderGraph::RawAccess::Kind::ViewFromGraph);
+				} else {
+					if (graphResource) {
+						RenderGraph::RawAccess::Count(RenderGraph::RawAccess::Kind::ViewGeneral);
+						if (RenderGraph::RawAccess::LogOnce(reinterpret_cast<std::uint64_t>(image.image)))
+							logger::info(
+								"[ORG raw access] DCLF's view of '{}' names GENERAL, but the graph moves the image between layouts; a pass that "
+								"declares the read holds it in the read-only layout",
+								graphResource->GetName());
+						graphResource.reset();
+					}
 					DCLF_ZONE("CS.DCLF.Texture.Import.WrapImage");
 					a_entry.image = RenderGraph::ImportDxvkImage(a_context.device, image, importName.c_str());
 					if (!a_entry.image)
@@ -685,11 +707,13 @@ namespace DCLF
 			auto backing = a_context.cleanup->Make<ImportedBacking>();
 			backing->view.copy_from(view);
 			backing->image = std::move(a_entry.image);
+			backing->graphResource = std::move(graphResource);
 			backing->tracked = std::exchange(tracking.object, nullptr);
 			a_entry.backing = backing;
 			{
 				DCLF_ZONE("CS.DCLF.Texture.Import.CreateView");
-				a_entry.binding = a_context.service->CreateOwnedShaderResourceView(a_context.deviceOwner, backing->image.Get(), backing, srv);
+				const rhi::Resource viewed = backing->graphResource ? backing->graphResource->GetAPIResource() : backing->image.Get();
+				a_entry.binding = a_context.service->CreateOwnedShaderResourceView(a_context.deviceOwner, viewed, backing, srv);
 			}
 			if (!a_entry.binding)
 				return Reject::View;
