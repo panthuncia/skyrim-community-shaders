@@ -31,6 +31,12 @@ SPECIAL = {
         "key": "org.backend", "type": "enum", "choices": ["vulkan", "d3d12"], "default": "vulkan",
         "description": "native mode's backend; d3d12 needs org.native",
     },
+    "CS_ORG_NATIVE_GRAPH_PRESENT": {
+        "key": "org.native_graph_present", "type": "enum", "choices": ["0", "1", "single"], "default": "0",
+        "description": "native Vulkan: the back buffer is a graph-owned slot with one version per present slot (1) or one version "
+                       "(single), copied into the swap chain image by an ExternalWork tail (\"[ORG native] graph present\" lines); "
+                       "0 keeps the hand-written copy",
+    },
     "CS_ORG_NATIVE_VALIDATION": {
         "key": "org.validation", "type": "bool", "default": False,
         "description": "true: BasicRHI's API validation in native mode (Vulkan layers or the D3D12 debug layer)",
