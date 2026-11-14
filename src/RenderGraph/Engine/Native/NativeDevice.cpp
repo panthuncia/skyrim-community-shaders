@@ -2314,6 +2314,11 @@ namespace RenderGraph::Engine::Native
 			HRESULT FinishPresent(const rhi::TimelinePoint& a_signal, UINT a_syncInterval, const std::shared_ptr<NativeResource>& a_source)
 			{
 				static const bool probeEnabled = Switches::On("CS_ORG_NATIVE_PRESENT_PROBE");
+				// CS_ORG_NATIVE_SYNC_PRESENT=1, a diagnostic: each present waits for the frame's GPU work, so the CPU never runs a frame
+				// ahead (tells a race on memory reused across frames from a GPU ordering bug).
+				static const bool syncPresent = Switches::On("CS_ORG_NATIVE_SYNC_PRESENT");
+				if (syncPresent)
+					(void)Rhi().WaitIdle();
 				++presents;
 				if (probeEnabled)
 					RecordProbe(a_source);

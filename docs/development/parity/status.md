@@ -54,12 +54,53 @@ On the RTX 5080 (background runs):
 - The river configs (`river`): guest, native Vulkan and native D3D12 show the same water reflections.
 - The upscalers configs: DLSS, FSR, XeSS and TAA on each of the three modes.
 
+## Performance (2026-11-14, perf-taa configs, RTX 5080, Perf-Fast build with Tracy)
+
+The perf-taa sample: the autoloaded save, TAA, 900 frames. Frame rates:
+
+| Mode | Before | Now |
+| --- | --- | --- |
+| Guest (DXVK) | 144 | 142 |
+| Native Vulkan | 54.5 | 78-83 |
+| Native D3D12 | - | 71 |
+
+What changed:
+- The graph present's back buffer has one version. Its three versions rotated every frame, and each rotation made every ticket
+  prepared ahead stale and every kept recording unusable.
+- Passes whose data the commit stores record at execution, with a stable revision: the sky, water, deferred composite, ImGui
+  and Scaleform passes. No ticket goes stale in the world now.
+- Back-to-back skeleton clears share one region execution.
+
+Where native's time goes now (Tracy, native Vulkan, per frame): native is CPU-bound on the render thread. Guest's render
+thread spends about 1.9 ms in instrumented code; native's spends 9.6 ms, about 7.5 ms of it in 47 epoch submissions (guest
+has about 7). The graph host thread, which prepares the tickets, is busy about 11 ms a frame. Per epoch:
+- render thread, about 160 us: inline recording 2.2 ms a frame, 75 queue submissions (1.3 ms), ticket admission and handoff,
+  upload lists, command list resets;
+- host thread, about 200 us: recording, `CompileFrame` (pass preparation, about 1,400 invocations a frame), retirement.
+
+The epochs: 6 of DCLF, 21 anchor epochs, about 20 region executions. ImageSpace's batches still split about 5 times a frame:
+the HDR luminance chain swaps its two targets every frame, so no one entry order fits both frames (it would need duplicate
+passes).
+
+To match DXVK, native needs what DXVK's CS thread gives it: the GPU work off the render thread. The plan:
+1. An ordered submission thread for the graphics queue. The render thread commits each epoch's inputs; the thread admits,
+   records inline and submits. The native context's submissions, ExternalWork and the present go through the same queue,
+   so the ledger and submission order stay one sequence.
+2. Fewer epochs: anchors that run back to back in one region execution beyond gated passes; ImageSpace duplicate passes.
+3. Cheaper ticket preparation on the host thread (pass preparation per invocation, retirement), or several preparing threads.
+
 ## Open
 
 - **D3D12 shadow flicker** (the `flicker` configs, scored by tile spikes over 60 consecutive frames): D3D12 only, GPU-driven shadow
-  path only (`CS_DCLF_PIPELINE=cpu` and `CS_DCLF_SHADOWS=0` show none; Vulkan shows none). Ruled out: barrier sync scopes
-  (`BASICRHI_DX12_FULL_BARRIERS`), the compute and copy queues, occlusion culling, scene value copies, root constants after
-  ExecuteIndirect, UAV hazards between passes, the upscaler.
+  path only (`CS_DCLF_PIPELINE=cpu` and `CS_DCLF_SHADOWS=0` show none; Vulkan scores 0 on the same build). In a spike frame some
+  casters (a tree's branches) are missing from the shadow map for one frame.
+  - Ruled out: barrier sync scopes (`BASICRHI_DX12_FULL_BARRIERS`), the compute and copy queues, occlusion culling, scene value
+    copies, root constants after ExecuteIndirect, UAV hazards between declared passes, the upscaler, shadow pipeline merging
+    (`CS_DCLF_SHADOW_MERGE=0`), depth clamp (`CS_DCLF_SHADOW_DEPTH_CLAMP=0`), and races on memory reused across frames
+    (`CS_ORG_NATIVE_SYNC_PRESENT=1`, a GPU wait at every present, still flickers).
+  - Leads: BuildDrawsCS writes an object's caster row (`StoreCasterRow`, indexed by the object's caster first) from every shadow
+    view that draws it, in one dispatch; and the fade root states are read undeclared. Vulkan's global barriers can hide an
+    undeclared access that D3D12's per-resource barriers do not.
 - **Frame generation in native**: the native presenter needs the frame-generation controls DXVK exports (swap chain recreate,
   sync present, queue depth, tearing, the torn-down callback). Until then DLSS-G and FSR-FG stay off in native.
 - **Residue:** the reflection cube face draws; load-window shadow draws; the refused occlusion-query draw; the sun occlusion
