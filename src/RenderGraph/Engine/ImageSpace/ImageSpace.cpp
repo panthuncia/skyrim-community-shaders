@@ -3038,10 +3038,10 @@ namespace RenderGraph::Engine::ImageSpace
 	std::string Status()
 	{
 		const auto& state = IS();
-		return fmt::format("ImageSpace: {}, {} passes, {} registrations, {} shapes in the manifest ({} seen this session), {} draws taken in {} batches, {} left to the "
-						   "engine, {} missed",
-			state.on ? "on" : "off", state.specs.size(), state.registrations, state.manifest.size(), state.seen.size(), state.taken, state.batches, state.engineDrawn,
-			state.lost);
+		return fmt::format("ImageSpace: {}, {} passes, {} built on first sight, {} registrations, {} shapes in the manifest ({} seen this session), {} draws taken in "
+						   "{} batches, {} left to the engine, {} missed",
+			state.on ? "on" : "off", state.specs.size(), state.late.size(), state.registrations, state.manifest.size(), state.seen.size(), state.taken, state.batches,
+			state.engineDrawn, state.lost);
 	}
 }
 
