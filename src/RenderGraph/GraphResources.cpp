@@ -468,14 +468,10 @@ namespace GraphResources
 			graphDesc.initialLayout = *home;
 			std::shared_ptr<org::ExternalTextureResource> texture;
 			if (*home == rhi::ResourceLayout::Common) {
-				// Resting in Common (native mode, GENERAL on Vulkan). With shared native imports on Vulkan (the default) the graph reads
-				// and renders it in GENERAL alone. That takes an import with simultaneous access, since BasicRHI renders its own images
-				// in the attachment layouts. D3D12's imports of it are exclusive either way (ImportDxvkTexture).
-				// With exclusive native imports (CS_ORG_NATIVE_EXCLUSIVE_IMPORTS=1, or CS_ORG_NATIVE_HOME_STATES=0) the import is
-				// exclusive and the graph moves the image between layouts. Its other users follow: the native context's work on the
-				// D3D11 wrap goes through ORG's external client (this resource is its ledger: MadeImageOf), and DCLF's views of it are
-				// made on this resource. The import does not own the image, so the graph texture keeps it: the import goes first, then
-				// the image.
+				// Resting in Common (native mode). The import is exclusive and the graph moves the image between layouts. Its other
+				// users follow: the native context's work on the D3D11 wrap goes through ORG's external client (this resource is its
+				// ledger: MadeImageOf), and DCLF's views of it are made on this resource. The import does not own the image, so the
+				// graph texture keeps it: the import goes first, then the image.
 				struct Kept
 				{
 					rhi::ResourcePtr image;

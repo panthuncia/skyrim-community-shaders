@@ -19,11 +19,8 @@
  * use, so a graph that uses the resource next starts from the right state, and nothing about any graph changes.
  *
  * The client runs on the graphics queue (slot 0) with the graphs' queue slots (graphics, compute, copy), on the host's runtime.
- * - While the host gives resources back in their home states (external home states, or closed executions), the client's
- *   submissions are closed too: each starts with a full memory barrier and returns what it used to its home state. That is the
- *   contract every other user of those resources between graph executions still relies on. With native home states off
- *   (CS_ORG_NATIVE_HOME_STATES=0) the host has no external home states, so the submissions are open: each leaves what it used in
- *   the state it declared, and the ledgers carry that to the next user.
+ * - Native mode has no home states, so the submissions are open: each leaves what it used in the state it declared, and the
+ *   ledgers carry that to the next user. (With closed executions, CS_ORG_CLOSED, each returns what it used to its home state.)
  * - It always starts with a full memory barrier. The native immediate context's own work shares the queue, and the ledgers do not
  *   know about it.
  *

@@ -53,7 +53,7 @@ namespace RenderGraph
  * ("cs.org.frame-anchors") makes every client's passes at each build; a client change rebuilds only its anchors' epochs. The ordering
  * rule of each anchor is in docs/development/org-extension-api-notes.md, "Attaching passes to the frame".
  *
- * Regions (CS_ORG_REGIONS=1, native mode only; docs/development/org-native-frame-graph.md, "Phase 4 items 1 and 2 lane"): each
+ * Regions (native mode only; docs/development/org-native-frame-graph.md, "Phase 4 items 1 and 2 lane"): each
  * anchor also belongs to one of six regions (shadows, pre-main, deferred, engine draws, post, interface), and each region has an
  * epoch of its own. An anchor whose passes are all gated (PassDesc::gated) has them in its region's epoch instead of its own. A run
  * of such an anchor does not submit: its commits write into the region's held run (org::GraphHost::HoldEpochTicket), and the
@@ -522,7 +522,7 @@ namespace FrameAnchors
 	 */
 	void ReleaseImport(std::string_view a_id);
 
-	/** @brief Whether regions are on (CS_ORG_REGIONS=1 in native mode, with epochs and async epochs). Any thread. */
+	/** @brief Whether regions are on (native mode, with epochs and async epochs). Any thread. */
 	bool RegionsOn();
 
 	/**

@@ -362,7 +362,7 @@ namespace RenderGraph::Engine::Native
 			/**
 			 * @brief Who keeps an image's state (org-native-frame-graph.md, Phase 2).
 			 * - Host: the native device made it with BasicRHI, and the graph imports it (textures made before the graph was up, ones
-			 *   ORG cannot describe, wrapped images, and every texture with CS_ORG_NATIVE_OWNED=0).
+			 *   ORG cannot describe, and wrapped images).
 			 * - Tracked: ORG made it (graphOwned, a persistent PixelBuffer that is never aliased) and its graphs track it.
 			 * - Exempt: made with its contents and only read since. It rests in the shader-read state and graphs read it untracked
 			 *   (org::Resource::GraphOwnership::ExternalImmutableShaderResource).
@@ -425,7 +425,7 @@ namespace RenderGraph::Engine::Native
 			std::atomic<bool> promoted{ false };
 			std::mutex graphLock;
 			std::shared_ptr<org::ExternalTextureResource> exemptResource;
-			// The engine's back buffer with CS_ORG_NATIVE_GRAPH_PRESENT: the graph-owned version the frame draws into now. Resolve
+			// The engine's back buffer under the graph present: the graph-owned version the frame draws into now. Resolve
 			// answers it for every handle of this record, so the context's work and the imports follow the version. Read and
 			// written with the registry's lock.
 			std::shared_ptr<NativeResource> renamed;
@@ -504,13 +504,6 @@ namespace RenderGraph::Engine::Native
 			auto& registry = GetRegistry();
 			std::lock_guard guard(registry.lock);
 			registry.byImage[reinterpret_cast<std::uint64_t>(a_record.image.image)] = &a_record;
-		}
-
-		/** @brief Whether native mode makes graph-owned and exempt textures (CS_ORG_NATIVE_OWNED, on unless set to 0). */
-		bool OwnedOn()
-		{
-			static const bool on = !Switches::Off("CS_ORG_NATIVE_OWNED");
-			return on;
 		}
 
 		/** @brief A debug label on a BasicRHI list: its crash markers then name the work (labels are no-ops where unsupported). */
@@ -1158,7 +1151,7 @@ namespace RenderGraph::Engine::Native
 				std::chrono::steady_clock::time_point last{};
 			} probe;
 			std::shared_ptr<NativeResource> backBufferRecord;  // the engine's back buffer: its record (CurrentOf: the version it stands for)
-			// CS_ORG_NATIVE_GRAPH_PRESENT (BasicRenderer's presentation colour): the back buffer the engine sees stands for one graph-owned
+			// The graph present (BasicRenderer's presentation colour): the back buffer the engine sees stands for one graph-owned
 			// texture per present slot, published as the versions of one slot. Every importer of the back buffer gets the slot, so the
 			// frame's passes write the current version. The present's tail copies that version into the swap chain image through
 			// ORG's external client, and the next present slot's version becomes current. Empty when the switch is off, before the
@@ -1186,7 +1179,7 @@ namespace RenderGraph::Engine::Native
 			rhi::Device Rhi() { return device->Get(); }
 
 			/**
-			 * @brief The texture. With CS_ORG_NATIVE_OWNED on (the default), by class:
+			 * @brief The texture, by class:
 			 * - exempt (IsExemptRequest): a BasicRHI image whose contents go in through InitializeShaderRead, resting in the shader-read
 			 *   state from then on;
 			 * - tracked: a persistent ORG texture (MakeGraphOwned) once the render graph is up, resting in Common between executions;
@@ -1247,8 +1240,8 @@ namespace RenderGraph::Engine::Native
 				const uint32_t depth = a_request.dimension == D3D11_RESOURCE_DIMENSION_TEXTURE3D ? a_request.depthOrArraySize : 1;
 				const uint32_t layers = a_request.dimension == D3D11_RESOURCE_DIMENSION_TEXTURE3D ? 1 : a_request.depthOrArraySize;
 				const uint32_t mips = a_request.mipLevels ? a_request.mipLevels : FullMipCount(a_request.width, a_request.height, depth);
-				const bool exempt = OwnedOn() && IsExemptRequest(a_request);
-				if (OwnedOn() && !exempt) {
+				const bool exempt = IsExemptRequest(a_request);
+				if (!exempt) {
 					std::shared_ptr<NativeResource> owned;
 					if (MakeGraphOwned(a_request, dxgiFormat, format, viewFormat, support, typelessDepth, cube, mips, layers, depth, owned)) {
 						a_out = std::move(owned);
@@ -1326,9 +1319,8 @@ namespace RenderGraph::Engine::Native
 			/**
 			 * @brief A tracked texture made by ORG (Phase 2 of org-native-frame-graph.md): a persistent PixelBuffer, materialized and never
 			 * aliased, named by a stable id ("cs.native.texture.<serial>"). The record imports its image for the context's operations and
-			 * the D3D11 views. Until Phase 4 turns external home states off, the context's raw operations still expect the image in Common,
-			 * so it is moved there (with its contents) at creation, its tracker says so, and it has a host home (org::Resource::SetHostHome):
-			 * each execution gives it back in Common. False, with nothing made, when ORG cannot make it as D3D11 asked (logged once per
+			 * the D3D11 views. It is moved to Common (with its contents) at creation and its tracker says so; from then on the ledgers
+			 * carry its layout, and the context's work takes it from them (Immediate::Route). False, with nothing made, when ORG cannot make it as D3D11 asked (logged once per
 			 * reason): the caller makes it with BasicRHI instead.
 			 */
 			bool MakeGraphOwned(const TextureRequest& a_request, DXGI_FORMAT a_dxgiFormat, rhi::Format a_format, rhi::Format a_viewFormat, const rhi::FormatSupport& a_support,
@@ -1391,9 +1383,6 @@ namespace RenderGraph::Engine::Native
 				try {
 					auto texture = org::PixelBuffer::CreateShared(desc);
 					texture->SetName(fmt::format("cs.native.texture.{}", record->serial));
-					// Without native home states nothing goes home: the graph leaves it where its last pass did, and the context's work
-					// takes the layout from the ledger (Immediate::Route).
-					texture->SetHostHome(!::RenderGraph::NativeHomeStatesOff());
 					if (!FillImage(*record, texture->GetAPIResource(), a_request, a_dxgiFormat, a_format, a_support, a_mips, a_layers, a_depth, VK_IMAGE_LAYOUT_GENERAL)) {
 						LogHostMade("BasicRHI did not describe the image ORG made", a_request.name);
 						return false;
@@ -1932,18 +1921,6 @@ namespace RenderGraph::Engine::Native
 				return backBuffer != nullptr;
 			}
 
-			/**
-			 * @brief How many graph-owned back buffer versions CS_ORG_NATIVE_GRAPH_PRESENT asks for: one per present slot ("1"), one
-			 * ("single": the tail without a version change each frame), or 0 (off, the default).
-			 */
-			static uint32_t GraphPresentVersions()
-			{
-				static const uint32_t versions = Switches::On("CS_ORG_NATIVE_GRAPH_PRESENT")               ? kPresentSlots :
-				                                 Switches::Equals("CS_ORG_NATIVE_GRAPH_PRESENT", "single") ? 1u :
-				                                                                                             0u;
-				return versions;
-			}
-
 			/** @brief Forgets the graph present's versions: the made-image registry lets go of them, and the back buffer is its own again. */
 			void DropGraphBackBuffer()
 			{
@@ -1956,24 +1933,19 @@ namespace RenderGraph::Engine::Native
 			}
 
 			/**
-			 * @brief CS_ORG_NATIVE_GRAPH_PRESENT: makes the back buffer's graph-owned versions at its size and format, one slot for all
+			 * @brief The graph present: makes the back buffer's graph-owned versions at its size and format, one slot for all
 			 * of them, and points the engine's back buffer at the first. Each version's image is registered as a made image of the slot
 			 * (RegisterMadeImage, SetMadeImageSlot), so every importer of the back buffer (the anchors' engine target, ShareImage,
 			 * ImportTexture) gets the slot, and the graph's passes declare it. With the present lock, once the render graph is up.
-			 * @return False, logged, when the switch is off or the versions could not be made: the present copies by hand then.
+			 * @return False, logged, when the versions could not be made: the present copies by hand then.
 			 */
 			bool MakeGraphBackBuffer()
 			{
-				const uint32_t count = GraphPresentVersions();
+				// One version per present slot, as BasicRenderer's presentation colours.
+				const uint32_t count = kPresentSlots;
 				DropGraphBackBuffer();
-				if (!count || !backBufferRecord || !RenderGraphRuntime::Get().IsActive())
+				if (!backBufferRecord || !RenderGraphRuntime::Get().IsActive())
 					return false;
-				if (OnD3D12()) {
-					static std::atomic_flag logged;
-					if (!logged.test_and_set())
-						logger::info("[ORG native] graph present (CS_ORG_NATIVE_GRAPH_PRESENT): not on D3D12; the present copies the back buffer by hand there");
-					return false;
-				}
 				GraphBackBuffer made;
 				for (uint32_t i = 0; i < count; ++i) {
 					TextureRequest request;
@@ -2009,7 +1981,7 @@ namespace RenderGraph::Engine::Native
 				graph = std::move(made);
 				Rename(*backBufferRecord, graph.records.front());
 				logger::info(
-					"[ORG native] graph present (CS_ORG_NATIVE_GRAPH_PRESENT): the back buffer is a graph-owned slot of {} version{} ({}x{}, DXGI "
+					"[ORG native] graph present: the back buffer is a graph-owned slot of {} version{} ({}x{}, DXGI "
 					"format {}); the present copies the current one into the swap chain image through ORG's external client{}",
 					count, count == 1 ? "" : "s", width, height, static_cast<int>(format), count > 1 ? ", and the next present slot's version becomes current" : "");
 				return true;
@@ -2031,7 +2003,7 @@ namespace RenderGraph::Engine::Native
 					host->NoteNewVersions();
 			}
 
-			/** @brief The render graph is up: the graph present's versions, when the switch asks for them. */
+			/** @brief The render graph is up: the graph present's versions. */
 			void OnGraphReady()
 			{
 				std::lock_guard guard(presentLock);
@@ -2149,7 +2121,7 @@ namespace RenderGraph::Engine::Native
 				const auto source = CurrentOf(backBufferRecord);
 				if (!source)
 					return S_OK;
-				// CS_ORG_NATIVE_GRAPH_PRESENT: the tail. Only the render owner moves to the next version. A loading screen or the logo
+				// The graph present's tail. Only the render owner moves to the next version. A loading screen or the logo
 				// presenting from another thread copies the current version below, and it stays current.
 				if (graph.slot && source->graphOwned) {
 					if (::FrameAnchors::IsRenderOwner()) {
@@ -2170,17 +2142,15 @@ namespace RenderGraph::Engine::Native
 								::GetCurrentThreadId());
 					}
 				}
-				// Without home states the back buffer is wherever the frame's last pass left it: the copy goes through ORG's external
-				// client, which takes its layout from the ledger.
-				if (::RenderGraph::NativeGraphMovesImages()) {
-					if (const auto ledger = LedgerResourceOf(*source)) {
-						const HRESULT result = PresentThroughLedger(*ledger, source, slot, target, a_syncInterval, false);
-						if (result != E_PENDING)
-							return result;
-					}
+				// The back buffer is wherever the frame's last pass left it: the copy goes through ORG's external client, which takes its
+				// layout from the ledger.
+				if (const auto ledger = LedgerResourceOf(*source)) {
+					const HRESULT result = PresentThroughLedger(*ledger, source, slot, target, a_syncInterval, false);
+					if (result != E_PENDING)
+						return result;
 				}
-				// The graph gives the back buffer back in its home state, Common (GENERAL), on the graphics queue, so this copy is
-				// ordered after the frame's last write by queue submission order.
+				// Before the render graph is up (the logo) nothing has moved the back buffer out of Common, and the queue orders this copy
+				// after the frame's writes.
 				const rhi::ResourceHandle sourceImage = source->resource->GetHandle();
 				const uint32_t copyWidth = (std::min)(source->shape.width, width), copyHeight = (std::min)(source->shape.height, height);
 				std::array<rhi::TextureBarrier, 2> before{};
@@ -2246,7 +2216,7 @@ namespace RenderGraph::Engine::Native
 			 * states off the ledger holds that state for the next frame's first pass; with them on the client gives it back in Common.
 			 * The swap chain image is not the graph's: its barriers are recorded here, as on the own path, and leave it ready to present.
 			 * The present waits for the submission's signal.
-			 * - a_tail: CS_ORG_NATIVE_GRAPH_PRESENT's tail, with or without home states. After the present, the next present slot's
+			 * - a_tail: the graph present's tail. After the present, the next present slot's
 			 *   version becomes current (NextGraphVersion).
 			 * - Otherwise: the back buffer's copy with home states off.
 			 * Returns E_PENDING, with nothing submitted, when the client refused: the caller copies on its own path.
@@ -2872,8 +2842,6 @@ namespace RenderGraph::Engine::Native
 			if (a_record.ownership == NativeResource::Ownership::Tracked)
 				return a_record.graphOwned;
 			if (a_record.ownership == NativeResource::Ownership::Host) {
-				if (!::RenderGraph::NativeGraphMovesImages())
-					return nullptr;
 				auto graph = ::RenderGraph::GraphResourceOfImage(reinterpret_cast<std::uint64_t>(a_record.image.image));
 				return graph && graph->IsRenderGraphManaged() ? graph : nullptr;
 			}
@@ -4422,7 +4390,7 @@ namespace RenderGraph::Engine::Native
 
 	bool OwnedResources()
 	{
-		return g_device && OwnedOn();
+		return g_device != nullptr;
 	}
 
 	namespace

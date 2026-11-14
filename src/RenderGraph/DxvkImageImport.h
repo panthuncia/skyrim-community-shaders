@@ -5,16 +5,11 @@
 // layouts, or every image when DXVK pins them for an older client) is shared with simultaneous access; any other is used
 // exclusively, and the graph's external home states give it back in that layout after each execution.
 //
-// With CS_ORG_NATIVE_EXCLUSIVE_IMPORTS=1, native mode (with CS_ORG_NATIVE_OWNED) imports every image for the graph exclusively: the graph moves it into
-// each pass's layout and gives it back in its home. That needs one graph resource per image (FrameAnchors' imports find an image's
-// slot before making one), since two resources would each track the image's layout. Shared imports stay the default
-// until the duplicate image check (CS_ORG_IMAGE_DUPLICATE_CHECK) is clean. Raw imports (ImportDxvkImage: the native context's own, Drawcall Limit Fix's bindless views) stay shared in GENERAL, where
-// the context and the raw views use the image between graph executions.
-//
-// With CS_ORG_NATIVE_HOME_STATES=0 (native Vulkan or D3D12), exclusive imports are implied and nothing goes home: the native context's
-// work on tracked images goes through ORG's external client, and DCLF's views of them are made on the graph resource
-// (NativeGraphMovesImages). D3D12's imports of images resting in Common are exclusive either way (its Common layout cannot be a render
-// target, depth or UAV), so there the switches change only the home states and how the context's work finds each image's layout.
+// Native mode (Vulkan or D3D12) imports every image for the graph exclusively and has no home states: the graph moves each image into
+// its passes' layouts and its ledgers carry the layout from one execution to the next. That needs one graph resource per image
+// (FrameAnchors' imports find an image's slot before making one). The native context's work on tracked images goes through ORG's
+// external client, and DCLF's views of them are made on the graph resource (NativeGraphMovesImages). Raw imports (ImportDxvkImage)
+// stay shared in GENERAL.
 
 #include "RenderGraph/BufferRef.h"
 #include "RenderGraph/DxvkOrgInterop.h"
@@ -116,22 +111,9 @@ namespace RenderGraph
 	MadeImage MadeImageOf(std::uint64_t a_image);
 
 	/**
-	 * @brief Whether native mode runs without home states (CS_ORG_NATIVE_HOME_STATES=0; org-native-frame-graph.md, Phase 4 item 3).
-	 * The graph then leaves every image in the layout its last pass used, and the ledgers carry it to the next user. Native Vulkan and
-	 * native D3D12; guest (DXVK) mode keeps home states. Off (home states on) by default. Any thread.
-	 */
-	bool NativeHomeStatesOff();
-
-	/**
-	 * @brief Whether the graph's imports of native images are exclusive (CS_ORG_NATIVE_EXCLUSIVE_IMPORTS=1, or home states off; both
-	 * with CS_ORG_NATIVE_OWNED). The graph then moves each image into its passes' layouts. Any thread.
-	 */
-	bool NativeExclusiveImports();
-
-	/**
-	 * @brief Whether raw work on images the graph tracks must take each image's layout from the ledgers: native mode (Vulkan or D3D12)
-	 * with home states off or exclusive imports. The native context then sends such work through ORG's external client, and Drawcall
-	 * Limit Fix's views of such images name the read-only layout their declaring passes move them to. Any thread.
+	 * @brief Whether raw work on images the graph tracks must take each image's layout from the ledgers: native mode (Vulkan or D3D12),
+	 * which has no home states and imports exclusively. The native context then sends such work through ORG's external client, and
+	 * Drawcall Limit Fix's views of such images name the read-only layout their declaring passes move them to. Any thread.
 	 */
 	bool NativeGraphMovesImages();
 

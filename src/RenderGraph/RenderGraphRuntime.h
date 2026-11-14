@@ -122,7 +122,7 @@ public:
 		AnchorDecalQueries,
 		AnchorMovieTiles,
 		AnchorEngineCopy,
-		// The frame regions' epochs (CS_ORG_REGIONS=1, native mode; FrameAnchors.h, "Regions"): one per region, holding the passes of
+		// The frame regions' epochs (native mode; FrameAnchors.h, "Regions"): one per region, holding the passes of
 		// its anchors whose work is all behind run gates. Consecutive runs of those anchors share one execution.
 		RegionShadows,
 		RegionPreMain,

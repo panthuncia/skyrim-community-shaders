@@ -97,8 +97,8 @@ namespace RenderGraph::Engine::Native
 	std::shared_ptr<rhi::DevicePtr> Device();
 
 	/**
-	 * @brief RenderGraphRuntime::Initialize, once the render graph is up on the native device and before any import: with
-	 * CS_ORG_NATIVE_GRAPH_PRESENT, the back buffer becomes a graph-owned slot with one version per present slot, and the present
+	 * @brief RenderGraphRuntime::Initialize, once the render graph is up on the native device and before any import: the back buffer
+	 * becomes a graph-owned slot with one version per present slot, and the present
 	 * copies it through ORG's external client (org-native-frame-graph.md, "Phase 4 item 5 lane").
 	 */
 	void OnGraphReady();
@@ -110,7 +110,7 @@ namespace RenderGraph::Engine::Native
 	bool DescribeResource(const IUnknown* a_object, DxvkOrgInteropResourceInfo& a_info);
 
 	/**
-	 * @name Graph-owned textures (org-native-frame-graph.md, Phase 2). With CS_ORG_NATIVE_OWNED on (the default), the native device
+	 * @name Graph-owned textures (org-native-frame-graph.md, Phase 2). The native device
 	 * sorts each texture it makes:
 	 * - exempt: only a shader resource, made with its contents, not DYNAMIC. Its contents go in through a transfer on the graphics
 	 *   queue that ends in the shader-read state, where it rests; graphs read it untracked (GraphOwnership::
@@ -120,7 +120,7 @@ namespace RenderGraph::Engine::Native
 	 *   cannot make as D3D11 asked, stay host-made BasicRHI images that the graph imports (logged once per reason).
 	 */
 	/** @{ */
-	/** @brief Whether native mode is active and sorts its textures as above (CS_ORG_NATIVE_OWNED). Any thread. */
+	/** @brief Whether native mode is active and sorts its textures as above. Any thread. */
 	bool OwnedResources();
 
 	/**

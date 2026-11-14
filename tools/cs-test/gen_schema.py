@@ -31,12 +31,6 @@ SPECIAL = {
         "key": "org.backend", "type": "enum", "choices": ["vulkan", "d3d12"], "default": "vulkan",
         "description": "native mode's backend; d3d12 needs org.native",
     },
-    "CS_ORG_NATIVE_GRAPH_PRESENT": {
-        "key": "org.native_graph_present", "type": "enum", "choices": ["0", "1", "single"], "default": "0",
-        "description": "native Vulkan: the back buffer is a graph-owned slot with one version per present slot (1) or one version "
-                       "(single), copied into the swap chain image by an ExternalWork tail (\"[ORG native] graph present\" lines); "
-                       "0 keeps the hand-written copy",
-    },
     "CS_ORG_NATIVE_VALIDATION": {
         "key": "org.validation", "type": "bool", "default": False,
         "description": "true: BasicRHI's API validation in native mode (Vulkan layers or the D3D12 debug layer)",
@@ -45,11 +39,6 @@ SPECIAL = {
         "key": "cs.disable_features", "type": "string",
         "use_instead": "[features] <ShortName> = false",
         "description": "comma-separated feature short names disabled at boot (write [features] instead)",
-    },
-    "CS_ORG_REGIONS": {
-        "key": "org.regions", "type": "bool", "default": False,
-        "description": "true (native mode only): anchors whose passes are all gated run in six region epochs; consecutive runs of a "
-                       "region share one execution, submitted before any other GPU work (\"[ORG] frame regions\" with CS_ORG_EPOCH_STATS)",
     },
     "CS_ORG_EPOCH_STATS": {
         "key": "org.epoch_stats", "type": "bool", "default": False,
@@ -116,24 +105,6 @@ SPECIAL = {
     "CS_ORG_IMAGE_DUPLICATE_CHECK": {
         "key": "org.image_duplicate_check", "type": "bool", "default": False,
         "description": "log when two live graph resources wrap one image (any importer)",
-    },
-    "CS_ORG_NATIVE_EXCLUSIVE_IMPORTS": {
-        "key": "org.native_exclusive_imports", "type": "bool", "default": False,
-        "description": "native: graph imports are exclusive, moved into each pass layout (default false: shared, Common-only, "
-                       "until the duplicate image check is clean)",
-    },
-    "CS_ORG_NATIVE_HOME_STATES": {
-        "key": "org.native_home_states", "type": "bool", "default": True,
-        "description": "native Vulkan: false turns home states off (images stay where the graph left them; implies exclusive "
-                       "imports; no in-stream epochs; the context's work on tracked images goes through ExternalWork)",
-    },
-    "CS_ORG_NATIVE_IN_STREAM": {
-        "key": "org.native_in_stream", "type": "bool", "default": False,
-        "description": "native with home states off: keep in-stream epochs (and with them DCLF's direct forward families)",
-    },
-    "CS_ORG_NATIVE_OWNED": {
-        "key": "org.native_owned", "type": "bool", "default": True,
-        "description": "native: engine textures are graph-owned and immutable ones exempt (false restores host-made textures)",
     },
     "CS_ORG_RAW_ACCESS_CHECK": {
         "key": "org.raw_access_check", "type": "bool", "default": False,

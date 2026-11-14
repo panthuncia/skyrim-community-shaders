@@ -956,7 +956,7 @@ struct RenderGraphRuntime::Impl
 	// logged every kEpochStatsWindow epochs.
 	static constexpr uint32_t kEpochStatsWindow = 600;
 	// Native mode reports every kNativeStatsFrames presents instead (ReportEpochStats from SealPresented).
-	// Its epochs a frame change with CS_ORG_REGIONS, so a window of epochs would cover different spans with the switch on and off.
+	// A frame holds a varying number of epochs (regions), so a window of presents is steadier than one of epochs.
 	static constexpr uint64_t kNativeStatsFrames = 300;
 	bool epochStats = false;
 	// CS_ORG_EARLY_FLUSH (default on, =0 off): hand DXVK's pending D3D11 work to the GPU when an epoch starts.
@@ -2255,17 +2255,11 @@ bool RenderGraphRuntime::Initialize()
 		desc.closedExecutions = EpochsEnabled() && Switches::Equals("CS_ORG_CLOSED", "1");
 		// CS_ORG_EXTERNAL_HOME (default on, =0 off): each epoch gives DXVK's images (the imports) back in their home state on the
 		// graphics queue, where DXVK uses them between the epochs (GENERAL, the external-commands contract).
-		// Native mode (Vulkan or D3D12) with CS_ORG_NATIVE_HOME_STATES=0 has none: no image goes home, the ledgers carry each image's
-		// layout from one execution to the next, and the native context's work on tracked images takes it from them (ExternalWork, open).
-		const bool nativeHomeOff = state->native && RenderGraph::NativeHomeStatesOff();
-		desc.externalHomeStates = !Switches::Equals("CS_ORG_EXTERNAL_HOME", "0") && !nativeHomeOff;
-		if (state->native) {
-			const char* home = "on: every execution gives images back in Common";
-			if (nativeHomeOff)
-				home = "off (CS_ORG_NATIVE_HOME_STATES=0): images stay where the graph's last pass left them";
-			logger::info("[ORG] native home states: {}; graph imports of native images: {}", home,
-				RenderGraph::NativeExclusiveImports() ? "exclusive (the graph moves each image between layouts)" : "shared (Common only)");
-		}
+		// Native mode (Vulkan or D3D12) has none: no image goes home, the ledgers carry each image's layout from one execution to the
+		// next, and the native context's work on tracked images takes it from them (ExternalWork, open).
+		desc.externalHomeStates = !state->native && !Switches::Equals("CS_ORG_EXTERNAL_HOME", "0");
+		if (state->native)
+			logger::info("[ORG] native: no home states; the graph imports native images exclusively and its ledgers carry their layouts");
 		// CS_ORG_REUSE_RECORDINGS (default on, =0 off): tickets record replayable recordings, which the revision-driven epochs need
 		// (their published copies are submitted again). A live epoch's recording is used once. Replayable recordings carry no Tracy GPU
 		// zones: turn it off to profile the epochs' passes on the GPU with Tracy (the revision-driven epochs then run synchronously).
@@ -2472,7 +2466,7 @@ bool RenderGraphRuntime::Initialize()
 	impl = std::move(state);
 	disabledReason.clear();
 	if (impl->native) {
-		// Before any import: the graph present's back buffer slot (CS_ORG_NATIVE_GRAPH_PRESENT).
+		// Before any import: the graph present's back buffer slot.
 		RenderGraph::Engine::Native::OnGraphReady();
 		logger::info("[ORG] Render graph runs natively on BasicRHI's {} device; submissions go to its queues directly",
 			RenderGraph::Backend::Name(RenderGraph::Backend::Active()));

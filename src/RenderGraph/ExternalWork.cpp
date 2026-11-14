@@ -53,8 +53,7 @@ namespace RenderGraph::ExternalWork
 				desc.queues = { { device.GetQueue(rhi::QueueKind::Graphics), rhi::QueueKind::Graphics },
 					{ device.GetQueue(rhi::QueueKind::Compute), rhi::QueueKind::Compute }, { device.GetQueue(rhi::QueueKind::Copy), rhi::QueueKind::Copy } };
 				desc.name = "CS external work";
-				// The host gives its resources back in their home states after each execution: so does the client. Without home states
-				// (native, CS_ORG_NATIVE_HOME_STATES=0) the host has none, and the client is open.
+				// Native mode has no home states: the client is open, and the ledgers carry what it leaves to the next user.
 				desc.closed = host->ClosedExecutions() || host->GetDesc().externalHomeStates;
 				desc.entryFullBarrier = true;
 				const bool closed = desc.closed;

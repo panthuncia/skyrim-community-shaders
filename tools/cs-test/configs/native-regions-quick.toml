@@ -1,7 +1,0 @@
-# Native quick with the frame regions (CS_ORG_REGIONS, org-native-frame-graph.md "Phase 4 items 1 and 2 lane") and the epoch statistics.
-# Compare with native-quick (regions off): the shots must match; "[ORG] executions a frame" and "[ORG] frame regions" give the counts.
-extends = ["native-quick"]
-
-[org]
-regions = true
-epoch_stats = true

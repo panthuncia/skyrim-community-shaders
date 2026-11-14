@@ -115,7 +115,7 @@ namespace FrameAnchors
 		constexpr std::array<Segment, static_cast<std::size_t>(Segment::Count)> kTimeline{
 			Segment::AnchorDecalQueries,       // the decal occlusion tests, at the frame's start before Main::Draw
 			Segment::AnchorEngineShadowClear,  // each shadow map slice's clear, before its draws (nominally here)
-			Segment::RegionShadows,            // the shadows region (CS_ORG_REGIONS): submitted before the next other GPU work
+			Segment::RegionShadows,            // the shadows region: submitted before the next other GPU work
 			Segment::ShadowView,
 			Segment::SkyOcclusion,
 			Segment::AnchorEarlyPrepass,      // Main::RenderShadowMaps returned
@@ -131,16 +131,16 @@ namespace FrameAnchors
 			Segment::LightCulling,              // Light Limit Fix's Prepass
 			Segment::AnchorPrepass,             // after every feature's Prepass
 			Segment::AnchorSky,                 // the main pass's sky batch, before Drawcall Limit Fix's colour epoch
-			Segment::RegionPreMain,             // the pre-main region (CS_ORG_REGIONS)
+			Segment::RegionPreMain,             // the pre-main region
 			Segment::MainOpaque,
 			Segment::AnchorDeferredPasses,     // EndDeferred, after the blended decals
 			Segment::AnchorDeferredComposite,  // DeferredPasses, after the D3D11 SSGI and SSS
 			Segment::AnchorPostComposite,      // DeferredPasses' end, after the composite
-			Segment::RegionDeferred,           // the deferred region (CS_ORG_REGIONS)
+			Segment::RegionDeferred,           // the deferred region
 			Segment::AnchorEngineDraws,        // the water, before the forward epoch (nominally here: the shadow masks and the water mask run before, the blood after)
 			Segment::Forward,
 			Segment::AnchorEngineQueries,  // the sun's occlusion queries, after Main::RenderWorld's accumulator (nominally here: a second runs later in the frame)
-			Segment::RegionEngineDraws,    // the engine draws and water region (CS_ORG_REGIONS)
+			Segment::RegionEngineDraws,    // the engine draws and water region
 			Segment::FirstPerson,
 			Segment::AnchorVolumetricLighting,  // RenderWorldPostProcess's VL apply and blur, before the composites and Main_PostProcessing
 			Segment::AnchorPostProcessing,      // Main_PostProcessing, before the upscaler
@@ -149,14 +149,14 @@ namespace FrameAnchors
 			Segment::AnchorEngineCopy,          // the engine's kMAIN copy, between the chain's batches (nominally here; native mode only)
 			Segment::AnchorTonemap,             // in the ImageSpace chain after it
 			Segment::AnchorFrameGeneration,     // after the ImageSpace chain, before frame generation
-			Segment::RegionPost,                // the post region (CS_ORG_REGIONS)
+			Segment::RegionPost,                // the post region
 			Segment::AnchorMovieTiles,          // a Bink movie inside another frame, at its tile draw (nominally here: the frame's UI time)
 			Segment::AnchorInterface,           // Scaleform's displays (UI::DrawInterface), several times a frame
 			Segment::AnchorPresent,
 			Segment::AnchorOverlay,    // the overlay's ImGui draw, inside HDRDisplay's present chain
 			Segment::AnchorHDROutput,  // HDRDisplay's output composite, after the overlay
 			Segment::AnchorCapture,    // the screenshot capture, at the end of HDRDisplay's present chain
-			Segment::RegionInterface,  // the interface and present region (CS_ORG_REGIONS)
+			Segment::RegionInterface,  // the interface and present region
 		};
 
 		std::uint32_t RankOf(std::uint32_t a_segment)
@@ -172,7 +172,7 @@ namespace FrameAnchors
 		std::uint32_t EpochOfAnchor(Anchor a_anchor) { return RenderGraphRuntime::EpochOf(static_cast<Segment>(SegmentOf(a_anchor))); }
 
 		/**
-		 * @brief The frame regions (CS_ORG_REGIONS): each anchor's, in engine order. An anchor that runs at several places of the frame
+		 * @brief The frame regions: each anchor's, in engine order. An anchor that runs at several places of the frame
 		 * (the engine's clears and copies, its draw families) belongs to the region of its main place. Membership alone changes nothing:
 		 * an anchor's passes move to the region's epoch only when they are all gated (Snapshot::merged), and a run joins the held
 		 * execution only when nothing else reached the GPU since its last run (FlushRegions).
@@ -417,7 +417,7 @@ namespace FrameAnchors
 			// failed build (OnEpochFailed); a failed build that kept the old graph puts the one before back.
 			std::array<std::atomic<std::shared_ptr<const Snapshot>>, kAnchors> builtSnapshots{};
 			std::array<std::atomic<std::shared_ptr<const Snapshot>>, kAnchors> previousSnapshots{};
-			// Regions (CS_ORG_REGIONS): which have an epoch (AddToFrame), and each region graph's snapshots, as for the anchors above.
+			// Regions: which have an epoch (AddToFrame), and each region graph's snapshots, as for the anchors above.
 			std::array<bool, kRegions> regionEpochs{};
 			std::array<std::atomic<std::shared_ptr<const Snapshot>>, kRegions> regionSnapshots{};
 			std::array<std::atomic<std::shared_ptr<const Snapshot>>, kRegions> regionPrevious{};
@@ -1648,15 +1648,12 @@ namespace FrameAnchors
 
 	bool RegionsOn()
 	{
+		// Native mode groups anchors into region subgraphs; guest mode keeps one epoch per anchor in DXVK's stream.
 		static const bool on = [] {
-			if (!Switches::Equals("CS_ORG_REGIONS", "1"))
+			if (!RenderGraph::Engine::Native::Requested())
 				return false;
-			if (!RenderGraph::Engine::Native::Requested()) {
-				logger::warn("[ORG] frame regions: CS_ORG_REGIONS=1 is for native mode (CS_ORG_NATIVE=1); guest mode keeps one epoch per anchor");
-				return false;
-			}
 			if (!RenderGraphRuntime::EpochsEnabled() || Switches::Equals("CS_ORG_ASYNC_EPOCHS", "0")) {
-				logger::warn("[ORG] frame regions: CS_ORG_REGIONS=1 needs epochs and async epochs; every anchor keeps its own epoch");
+				logger::warn("[ORG] frame regions need epochs and async epochs; every anchor keeps its own epoch");
 				return false;
 			}
 			return true;
@@ -2353,7 +2350,7 @@ namespace FrameAnchors
 			const auto after = std::ranges::find_if(a_epochs, [&](std::uint32_t a_epoch) { return RankOf(a_epoch) > RankOf(segment); });
 			a_epochs.insert(after, epoch);
 		}
-		// Regions (CS_ORG_REGIONS): an epoch for each region with a reserved anchor, placed after its last anchor in the frame.
+		// Regions: an epoch for each region with a reserved anchor, placed after its last anchor in the frame.
 		if (!RegionsOn())
 			return;
 		for (std::uint32_t i = 0; i < kAnchors; ++i)
@@ -2389,7 +2386,7 @@ namespace FrameAnchors
 			}
 		if (!regions.empty())
 			logger::info(
-				"[ORG] frame regions (CS_ORG_REGIONS): {}; an anchor whose passes are all gated runs in its region's epoch, and consecutive "
+				"[ORG] frame regions: {}; an anchor whose passes are all gated runs in its region's epoch, and consecutive "
 				"runs share one execution",
 				regions);
 	}

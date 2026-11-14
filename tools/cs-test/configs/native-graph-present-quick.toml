@@ -1,7 +1,0 @@
-# Native quick with the graph present (CS_ORG_NATIVE_GRAPH_PRESENT, org-native-frame-graph.md "Phase 4 item 5 lane") and the probe.
-# Compare with native-quick (the hand-written copy): the shots must match. Try "--set org.native_graph_present=single" for one version.
-extends = ["native-quick"]
-
-[org]
-native_graph_present = "1"
-native_present_probe = "1"
