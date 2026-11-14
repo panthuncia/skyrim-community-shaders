@@ -21,6 +21,7 @@ namespace org::runtime
  *   for those ranges beside the graph's times.
  * - CS_GPU_IDLE_SOURCE=graph: CS_GPU_IDLE_TRACE reads the GPU's busy spans from the graph's ranges instead of DXVK's
  *   submission trace. The default, dxvk, keeps the trace.
+ * Native mode (CS_ORG_NATIVE=1) has neither D3D11 queries nor DXVK's trace: both read the graph there, with no switch.
  *
  * What the graph sees: every pass's timestamp pair on each queue, the barrier batches of kept recordings, and the sub-ranges a
  * pass times inside itself. Each range belongs to the Present its epoch was submitted before. A Present's ranges are handed on
@@ -37,10 +38,10 @@ namespace GpuTimingSource
 		Graph,  // the graph's statistics only
 	};
 
-	/** @brief CS_GPU_TIMERS: "graph", or d3d11 by default. Read once. */
+	/** @brief CS_GPU_TIMERS: "graph", or d3d11 by default; always graph in native mode. Read once. */
 	Timers SelectedTimers();
 
-	/** @brief CS_GPU_IDLE_SOURCE=graph: the idle trace reads the graph's ranges instead of DXVK's submission trace. Read once. */
+	/** @brief CS_GPU_IDLE_SOURCE=graph, or native mode: the idle trace reads the graph's ranges instead of DXVK's submission trace. Read once. */
 	bool IdleFromGraph();
 
 	/** @brief The queue a range ran on. Ticks compare only within one queue. */

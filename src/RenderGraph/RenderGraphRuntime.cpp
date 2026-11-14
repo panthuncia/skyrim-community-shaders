@@ -2486,6 +2486,11 @@ bool RenderGraphRuntime::Initialize()
 		RenderGraph::Engine::Native::OnGraphReady();
 		logger::info("[ORG] Render graph runs natively on BasicRHI's {} device; submissions go to its queues directly",
 			RenderGraph::Backend::Name(RenderGraph::Backend::Active()));
+		// Nsight Perf's Vulkan backend on the native device: frame boundaries under the native queue lock, the graph's passes as ranges.
+		if (DxvkOrgInteropDeviceInfo nativeDevice{}; RenderGraph::Engine::Native::DescribeVulkanDevice(nativeDevice))
+			GpuCounters::RegisterVulkanDevice(nativeDevice, nullptr, *impl->host);
+		else
+			logger::info("[GpuCounters] native mode on D3D12: no hardware counters (the Vulkan backend records into Vulkan command buffers)");
 	} else {
 		// Nsight Perf's Vulkan backend: its captures run on DXVK's graphics queue, with the graph's passes as ranges.
 		GpuCounters::RegisterVulkanDevice(info, d3d11, *impl->host);

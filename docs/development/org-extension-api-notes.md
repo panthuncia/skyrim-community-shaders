@@ -1986,3 +1986,12 @@ than its target needs a dynamic viewport separate from the render area.
 - **Note:** the engine's sampler table is now described from its modes alone in `ImageSpace.cpp` (`EngineSamplerDesc`, read from the
   SE binary's table builder 75831). DCLF's `GpuTextures::Sampler` still reads the engine's table; it could share that description so no
   consumer waits for the table.
+
+## Push results from `nvperf::BeginPassRange` (D3D12 counters)
+
+ORG's `Telemetry/NvPerfCapture` already takes D3D12 queues (`MakeQueueTarget`, `BeginPassRange`, `EndPassRange`). CS's Nsight Perf
+backend keeps a bit per open pass range so it pops only what it pushed, which needs `PushRange`'s result. On Vulkan it gets the
+`VkCommandBuffer` itself and calls `PushRange`. On D3D12 it cannot: `rhi_interop_dx12.h` brings DirectX-Headers' `d3d12.h`,
+which CS's translation units do not mix with the SDK's. With `BeginPassRange` returning whether it pushed (or a
+`NativeCommandList(backend, list)` helper in ORG), the backend could run on native D3D12 too
+(docs/development/parity/hdr-tooling.md).

@@ -97,6 +97,13 @@ namespace GpuCounters::detail
 
 			bool Register(const DxvkOrgInteropDeviceInfo& a_info, void* a_dxvkModule, org::GraphHost& a_host)
 			{
+				// Native mode (no DXVK module): GPUPerfAPI must be initialized before the device exists and needs VK_AMD_gpa_interface
+				// on it, which only the DXVK path arranges (GpaBeforeDeviceCreation).
+				if (!a_dxvkModule) {
+					unavailable = "native mode: GPUPerfAPI's Vulkan backend needs DXVK's device (its early initialization and VK_AMD_gpa_interface)";
+					logger::warn("[GPA] {}; no Vulkan capture", unavailable);
+					return false;
+				}
 				const auto module = static_cast<HMODULE>(a_dxvkModule);
 				emitCommandBufferCallback = reinterpret_cast<PFN_dxvkEmitCommandBufferCallback>(::GetProcAddress(module, "dxvkEmitCommandBufferCallback"));
 				const auto setBoundaryCallbacks = reinterpret_cast<PFN_dxvkSetCommandBufferBoundaryCallbacks>(::GetProcAddress(module, "dxvkSetCommandBufferBoundaryCallbacks"));

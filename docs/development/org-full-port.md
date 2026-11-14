@@ -856,8 +856,8 @@ no D3D12 device to share with it. Select it with `CS_ORG_NATIVE_BACKEND=d3d12`.
   (Streamline `org-port/dx12`). CS's Streamline integration is off on D3D12 by name: it hands Streamline DXVK's device
   and Vulkan resources. DLSS, DLSS-G and Reflex on D3D12 need `slSetD3DDevice` on the native device and D3D12 tags.
 - **P7.4:** BasicRHI's D3D12 swap chain already has HDR colour spaces (`SetColorSpace1`), frame latency and its waitable
-  object. `Engine::ConfigureSwapchain` applies them; its only caller is the D3D12 self-test (`D3D12SelfTest.cpp`), so native
-  mode's swap chains do not go through it. DRED is on with the debug layer or with crash
+  object. `Engine::ConfigureSwapchain` applies them, on the D3D12 self-test's swap chain and on native mode's (at creation, and
+  for HDR Display's colour space through `Native::SetSwapChainColorSpace`). DRED is on with the debug layer or with crash
   markers (BasicRHI `enableCrashMarkers` on D3D12, set from hang mode as on Vulkan).
 
 **Native mode on D3D12** (2026-11-12): `CS_ORG_NATIVE=1 CS_ORG_NATIVE_BACKEND=d3d12`, scenario
@@ -974,8 +974,9 @@ Named off on D3D12 until ported:
 - Drawcall Limit Fix's direct sites (secondary lists with viewports): D3D12 bundles cannot set viewports or scissors
   (`FixedFunctionFeatureInfo::secondaryViewportScissor` is false).
 - Everything that talks to DXVK or raw Vulkan: the adoption path in `RenderGraphRuntime::Initialize`, the owned frame,
-  `DXVKInterop`, Nsight Perf's and GPA's Vulkan backends, `VkDriverTrace`, VRAM attribution's Vulkan hooks.
-- Debug labels: BasicRHI's D3D12 lists have none (`SupportsDebugLabels` is false), so passes are unlabelled in PIX.
+  `DXVKInterop`, Nsight Perf's and GPA's Vulkan backends, `VkDriverTrace`, VRAM attribution's Vulkan hooks. (Native Vulkan
+  registers Nsight Perf on its own device: [parity/hdr-tooling.md](./parity/hdr-tooling.md).)
+- Debug labels: BasicRHI's D3D12 lists label passes with PIX events (`BeginEvent` with a UTF-16 name) since the parity wave.
 
 ---
 

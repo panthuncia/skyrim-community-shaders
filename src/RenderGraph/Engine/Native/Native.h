@@ -11,7 +11,9 @@
 
 #include <winrt/base.h>
 
+struct DxvkOrgInteropDeviceInfo;
 struct DxvkOrgInteropResourceInfo;
+struct VkQueue_T;
 struct VkCommandBuffer_T;
 struct VkSemaphoreSubmitInfo;
 struct DxvkOrgInteropTextureWrap;
@@ -178,6 +180,34 @@ namespace RenderGraph::Engine::Native
 	 * swap chain image on the graphics queue, after the frame's graph work, and presents it.
 	 */
 	HRESULT Present(UINT a_syncInterval, UINT a_flags);
+
+	/**
+	 * @brief HDR Display's colour space change (UpdateSwapChainColorSpace) in native mode: HDR10 (ST.2084 PQ, Rec. 2020) or SDR on
+	 * BasicRHI's swap chain, through Engine::ConfigureSwapchain, under the present lock once the queued presents are done. The swap
+	 * chain handle answers no IDXGISwapChain3/4, so HDR Display calls this instead of SetColorSpace1. Logs the colour space it ends in.
+	 * @return Whether the swap chain now presents in the colour space asked for (false before stage 4, or when the display path
+	 * refuses HDR10).
+	 */
+	bool SetSwapChainColorSpace(bool a_hdr);
+
+	/**
+	 * @name The profilers' view of the native Vulkan device (GPU counters, RenderGraphRuntime::Initialize), what DXVK's
+	 * dxvkGetInteropDeviceInfo and dxvkEnqueueQueueCallback give them in guest mode.
+	 */
+	/** @{ */
+	/**
+	 * @brief The native Vulkan device as DXVK describes its own: instance, physical device, device, graphics queue and family, and
+	 * the loader's vkGetInstanceProcAddr. No extension or feature list (BasicRHI keeps none). False on D3D12 or before stage 3.
+	 */
+	bool DescribeVulkanDevice(DxvkOrgInteropDeviceInfo& a_info);
+
+	/**
+	 * @brief Runs a_callback now with the native graphics queue, holding the lock every queue access takes, so it lands between the
+	 * submissions made before and after the call. The signature of DXVK's dxvkEnqueueQueueCallback (a_device is ignored). E_FAIL on
+	 * D3D12 or before stage 3.
+	 */
+	HRESULT __stdcall RunOnGraphicsQueue(ID3D11Device* a_device, void (*a_callback)(void*, VkQueue_T*), void* a_user);
+	/** @} */
 
 	/**
 	 * @brief RenderGraphRuntime::WrapTexture in native mode: a native texture handle over an image a port made with BasicRHI, so its

@@ -169,7 +169,9 @@ namespace GpuCounters
 	 * @brief Once the render graph adopted DXVK's Vulkan device, before the graph's first frame: the Vulkan backend's
 	 * inputs (DXVK's device and queue, its module for the queue and command buffer callbacks, the graph host for its pass
 	 * ranges and frame slots). Installs the callbacks, which only test a flag until a capture arms; the library loads at
-	 * Probe.
+	 * Probe. Native mode passes a null module and the native device (Native::DescribeVulkanDevice): Nsight Perf's frame boundaries
+	 * then run under the native queue lock (Native::RunOnGraphicsQueue), the graph's passes are the ranges, and engine perf events
+	 * (which record no GPU work there) are not measured. GPUPerfAPI refuses it.
 	 */
 	void RegisterVulkanDevice(const DxvkOrgInteropDeviceInfo& a_info, void* a_dxvkModule, org::GraphHost& a_host);
 	/// Whether CS_NVPERF_RANGES (a capture) or CS_NVPERF_TEMPLATE (a trace, NvPerfTrace.h) requests a headless run: read at

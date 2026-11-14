@@ -5,6 +5,7 @@
 
 #include "Vram/OrgMemory.h"
 
+#include "RenderGraph/Engine/Native/Native.h"
 #include "RenderGraph/Switches.h"
 
 #if defined(CS_HAS_RENDER_GRAPH)
@@ -18,7 +19,8 @@ namespace Vram::Org
 {
 	bool Selected()
 	{
-		static const bool selected = Switches::EqualsNoCase("CS_ORG_VRAM_SOURCE", "org");
+		// Native mode has no DXVK memory snapshot: BasicRHI's heaps are the only source there.
+		static const bool selected = RenderGraph::Engine::Native::Requested() || Switches::EqualsNoCase("CS_ORG_VRAM_SOURCE", "org");
 		return selected;
 	}
 

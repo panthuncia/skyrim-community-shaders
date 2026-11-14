@@ -11,6 +11,7 @@
 #include "Menu.h"
 #include "Utils/VersionedRelocation.h"
 #include "PostProcessing.h"
+#include "RenderGraph/Engine/Native/Native.h"
 #include "RenderGraph/Engine/OwnedFrame.h"
 #include "RenderGraph/Engine/Targets/EngineTargets.h"
 #include "ScreenshotFeature.h"
@@ -1668,6 +1669,18 @@ void HDRDisplay::UpdateSwapChainColorSpace() const
 	// chain moving to another monitor), and the cached luminance was previously read once at
 	// setup and never again.
 	RefreshDisplayLuminance();
+
+	// Native mode: the swap chain handle answers no IDXGISwapChain4. BasicRHI's swap chain takes the colour space directly, and the
+	// output reaches it as in guest mode (ORGHDRDisplay copies it into the native back buffer, which the present copies to the swap
+	// chain image).
+	if (RenderGraph::Engine::Native::Active()) {
+		const bool hdr = IsHDREnabledForFrame();
+		if (RenderGraph::Engine::Native::SetSwapChainColorSpace(hdr))
+			logger::info("[HDR] Set swap chain color space to {} (native)", hdr ? "HDR10 (PQ/BT.2020)" : "SDR (sRGB)");
+		else
+			logger::warn("[HDR] Failed to set {} color space (native)", hdr ? "HDR10" : "SDR");
+		return;
+	}
 
 	IDXGISwapChain4* swapChain4 = nullptr;
 
