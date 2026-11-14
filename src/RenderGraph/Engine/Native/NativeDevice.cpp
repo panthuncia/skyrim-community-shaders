@@ -606,6 +606,9 @@ namespace RenderGraph::Engine::Native
 				const std::function<void(rhi::CommandList&, const Descriptors&)>& a_record, std::vector<std::shared_ptr<const void>> a_keep,
 				std::span<NativeResource* const> a_used)
 			{
+				// A region's held anchor runs go first, before this context's lock: submitting them can run CS code that uses the context
+				// again (Route from inside Route threw "resource deadlock would occur"). ExternalWork::Submit's own flush then finds nothing.
+				::FrameAnchors::FlushRegions("native context");
 				std::lock_guard guard(lock);
 				const uint32_t index = AcquireSlotLocked();
 				auto& slot = slots[index];
@@ -4385,7 +4388,12 @@ namespace RenderGraph::Engine::Native
 		if (!g_device)
 			return;
 		g_device->OnGraphReady();
-		g_device->LoadMipPrograms();
+	}
+
+	void OnShaderCompilerReady()
+	{
+		if (g_device)
+			g_device->LoadMipPrograms();
 	}
 
 	bool OwnedResources()
@@ -4991,6 +4999,7 @@ namespace RenderGraph::Engine::Native
 	bool Active() { return false; }
 	std::shared_ptr<rhi::DevicePtr> Device() { return nullptr; }
 	void OnGraphReady() {}
+	void OnShaderCompilerReady() {}
 	HRESULT CreateDeviceAndSwapChain(IDXGIAdapter*, DXGI_SWAP_CHAIN_DESC*, IDXGISwapChain**, ID3D11Device**, D3D_FEATURE_LEVEL*, ID3D11DeviceContext**)
 	{
 		Fail("this build", "it was built without OpenRenderGraph");

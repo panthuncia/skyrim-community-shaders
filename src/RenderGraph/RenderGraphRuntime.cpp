@@ -2507,6 +2507,8 @@ bool RenderGraphRuntime::Initialize()
 			impl->shaderCompiler.reset();
 	}
 #endif
+	if (impl->native)
+		RenderGraph::Engine::Native::OnShaderCompilerReady();
 	IndirectCommandsFeatureInfo indirect{};
 	if ((*impl->device)->QueryFeatureInfo(&indirect.header) == rhi::Result::Ok) {
 		logger::info("[ORG] Indirect commands: generated commands {}, index buffer arguments {}, pipeline sets {} (up to {} pipelines); game resource export {}{}{}",

@@ -104,6 +104,12 @@ namespace RenderGraph::Engine::Native
 	void OnGraphReady();
 
 	/**
+	 * @brief RenderGraphRuntime::Initialize, once the runtime shader compiler exists (after OnGraphReady): loads GenerateMips' compute
+	 * programs. Called before the compiler was made, they loaded nothing and engine GenerateMips calls made no mips.
+	 */
+	void OnShaderCompilerReady();
+
+	/**
 	 * @brief What DXVK's dxvkGetInteropResourceInfo answers for its objects, for the textures native mode made (the back buffer, and
 	 * textures the native device made): the Vulkan image and the layout it rests in between graph epochs. False for anything else.
 	 */

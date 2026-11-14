@@ -2,7 +2,6 @@
 
 #include "DxvkLoader.h"
 #include "Features/RenderDoc.h"
-#include "Features/Upscaling.h"
 #include "Globals.h"
 #include "RenderGraph/Engine/Tripwire/Tripwire.h"
 #include "RenderGraph/Switches.h"
@@ -136,9 +135,6 @@ namespace RenderGraph::Engine::Native
 			DclfSwitch{ "CS_DCLF_TERRAIN_PLAIN", "1", "D3D12 draws colour with plain draws only" },
 			DclfSwitch{ "CS_DCLF_DECAL_PLAIN", "1", "D3D12 draws colour with plain draws only" },
 			DclfSwitch{ "CS_DCLF_FORWARD_PLAIN", "1", "D3D12 draws colour with plain draws only" },
-			DclfSwitch{ "CS_DCLF_PARTICLES", "0", "the particle path is not ported" },
-			DclfSwitch{ "CS_DCLF_MASTER_PARTICLES", "0", "the particle path is not ported" },
-			DclfSwitch{ "CS_DCLF_BILLBOARD_PARTICLES", "0", "the particle path is not ported" },
 			DclfSwitch{ "CS_DCLF_REFLECTIONS", "0", "the water reflection's views are not ported" },
 		};
 
@@ -251,10 +247,8 @@ namespace RenderGraph::Engine::Native
 			Fail("another plugin", "a DXVK DLL is in the process (another mod loads DXVK)");
 		if (RenderDoc::IsLoaded())
 			Fail("the RenderDoc feature", "it captures the game's D3D11, which runs on DXVK");
-		if (globals::features::upscaling.loaded)
-			Fail("the Upscaling feature",
-				"Streamline's upscalers and frame generation take their inputs from DXVK's images (DXVKInterop). Add Upscaling to "
-				"CS_DISABLE_FEATURES for native runs");
+		// Upscaling runs: its TAA and depth upscale are graph passes (ORGUpscaling). Streamline stands down until it runs on the native
+		// device, so its upscalers and frame generation are unavailable and the method falls back to TAA (Upscaling::GetUpscaleMethod).
 		Stage("checks", "DXVK is not loaded, and no feature that needs it is on");
 #endif
 	}

@@ -95,7 +95,12 @@ namespace RenderGraph::Engine::ImageSpace
 		 */
 		constexpr std::int32_t kFlowMapOutput = 0x40000;
 		constexpr std::int32_t kLatchSourceInput = 0x80000;
-		constexpr std::int32_t kKindBits = kDepthInput | kCubeInput | kFlowMapOutput | kLatchSourceInput;
+		/**
+		 * @brief One of the engine's default textures (BSGraphics::State's black, white, grey and flat normal map), by DefaultTextureOf's
+		 * index. The engine binds one where an input has nothing else: ISTemporalAA's t5 when Upscaling turns the vanilla TAA setting off.
+		 */
+		constexpr std::int32_t kDefaultTextureInput = 0x1000000;  // above the mip bits (kMipShift)
+		constexpr std::int32_t kKindBits = kDepthInput | kCubeInput | kFlowMapOutput | kLatchSourceInput | kDefaultTextureInput;
 		constexpr std::int32_t kInputIndexMask = 0xFFFF;
 		/**
 		 * @brief A render target that is one mip of another target's texture (the SAO camera-Z levels: an RTV and SRV of one mip, no
@@ -671,6 +676,8 @@ namespace RenderGraph::Engine::ImageSpace
 				return "flowmap";
 			if (a_name & kLatchSourceInput)
 				return "latched";
+			if (a_name & kDefaultTextureInput)
+				return fmt::format("default{}", IndexOfName(a_name));
 			const auto index = IndexOfName(a_name);
 			if (a_name & kDepthInput)
 				return fmt::format("depth{}", index);
@@ -811,6 +818,36 @@ namespace RenderGraph::Engine::ImageSpace
 		 * made an SRV of the back buffer (the screenshot copies read it): FrameAnchors::EngineTarget imports the back buffer with that
 		 * view (in native mode its graph-owned slot), so the pass declares the read.
 		 */
+		/** @brief The engine's default textures an input may be: BSGraphics::State's black, white, grey and flat normal map. */
+		constexpr std::uint32_t kDefaultTextures = 4;
+
+		/** @brief Default texture a_index's renderer texture (kDefaultTextureInput), or null before the engine made it. */
+		RE::BSGraphics::Texture* DefaultTextureOf(std::uint32_t a_index)
+		{
+			auto* state = globals::game::graphicsState;
+			if (!state)
+				return nullptr;
+			auto& data = state->GetRuntimeData();
+			RE::NiSourceTexture* texture = nullptr;
+			switch (a_index) {
+			case 0:
+				texture = data.defaultTextureBlack.get();
+				break;
+			case 1:
+				texture = data.defaultTextureWhite.get();
+				break;
+			case 2:
+				texture = data.defaultTextureGrey.get();
+				break;
+			case 3:
+				texture = data.defaultTextureNormalMap.get();
+				break;
+			default:
+				break;
+			}
+			return texture ? texture->rendererTexture : nullptr;
+		}
+
 		std::int32_t InputOfView(ID3D11ShaderResourceView* a_view)
 		{
 			auto* renderer = globals::game::renderer;
@@ -826,7 +863,38 @@ namespace RenderGraph::Engine::ImageSpace
 			for (std::uint32_t i = 0; i < RE::RENDER_TARGETS_DEPTHSTENCIL::kTOTAL; ++i)
 				if (depths[i].depthSRV == a_view)
 					return kDepthInput | static_cast<std::int32_t>(i);
+			for (std::uint32_t i = 0; i < kDefaultTextures; ++i)
+				if (auto* texture = DefaultTextureOf(i); texture && texture->resourceView == a_view)
+					return kDefaultTextureInput | static_cast<std::int32_t>(i);
 			return -1;
+		}
+
+		/**
+		 * @brief Names the texture behind a refused input, once per effect and slot: its debug name, size and format, so a refusal says
+		 * which texture is not an engine target.
+		 */
+		void LogForeignInput(const EffectInfo& a_effect, std::uint32_t a_slot, ID3D11ShaderResourceView* a_view)
+		{
+			static std::mutex lock;
+			static std::set<std::pair<const void*, std::uint32_t>> logged;
+			{
+				std::lock_guard guard(lock);
+				if (!logged.emplace(&a_effect, a_slot).second)
+					return;
+			}
+			std::string name = "(no view)";
+			D3D11_TEXTURE2D_DESC desc{};
+			if (a_view) {
+				winrt::com_ptr<ID3D11Resource> resource;
+				a_view->GetResource(resource.put());
+				char text[128]{};
+				UINT size = sizeof(text) - 1;
+				name = resource && SUCCEEDED(resource->GetPrivateData(WKPDID_D3DDebugObjectName, &size, text)) ? std::string(text, size) : std::string("(unnamed)");
+				if (auto texture = resource.try_as<ID3D11Texture2D>())
+					texture->GetDesc(&desc);
+			}
+			logger::info("[ORG] ImageSpace: {} slot {} reads '{}' ({}x{}, DXGI format {}), which is not an engine target", a_effect.effectName, a_slot, name,
+				desc.Width, desc.Height, static_cast<int>(desc.Format));
 		}
 
 		/** @brief The engine render target an unordered access view is, or -1. */
@@ -938,6 +1006,10 @@ namespace RenderGraph::Engine::ImageSpace
 			if (a_name & kFlowMapOutput)
 				return FlowMapImport();
 			const auto index = IndexOfName(a_name);
+			if (a_name & kDefaultTextureInput) {
+				auto* texture = DefaultTextureOf(index);
+				return texture ? FrameAnchors::ImmutableTexture(fmt::format("engine.default-texture.{}", index), static_cast<ID3D11Texture2D*>(texture->texture), texture->resourceView) : nullptr;
+			}
 			if (a_name & kDepthInput)
 				return FrameAnchors::EngineDepth(index);
 			if (a_name & kCubeInput)
@@ -957,6 +1029,10 @@ namespace RenderGraph::Engine::ImageSpace
 			if (a_name & kFlowMapOutput)
 				return FlowMapTexture();
 			const auto index = IndexOfName(a_name);
+			if (a_name & kDefaultTextureInput) {
+				auto* texture = DefaultTextureOf(index);
+				return texture ? texture->texture : nullptr;
+			}
 			if (a_name & kDepthInput)
 				return index < RE::RENDER_TARGETS_DEPTHSTENCIL::kTOTAL ? renderer->GetDepthStencilData().depthStencils[index].texture : nullptr;
 			if (a_name & kCubeInput)
@@ -1033,6 +1109,7 @@ namespace RenderGraph::Engine::ImageSpace
 				const auto input = InputOfView(a_views[slot]);
 				if (input < 0) {
 					a_refusal = "an input that is not an engine target";
+					LogForeignInput(a_effect, slot, a_views[slot]);
 					return false;
 				}
 				if (Overlaps(input, a_out.output) || Overlaps(input, a_out.output1)) {

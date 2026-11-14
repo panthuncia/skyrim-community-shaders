@@ -1377,7 +1377,10 @@ namespace DCLF::Direct::detail
 				return;
 			const std::uint32_t capacity = std::max(kMinimumIndirectDraws, reserved + reserved / 4);
 			a_slot.indirect = {};
-			a_slot.drawBuffer = org::Buffer::CreateShared(rhi::HeapType::HostVisibleCoherent, std::uint64_t(capacity) * sizeof(IndirectDraw), true);
+			// D3D12 refuses unordered access on an upload-heap buffer (the creation fails, and the buffer has no mapping). The GPU only
+			// reads these records, as indirect arguments and through the buffer view ref, so D3D12's buffer is made without it.
+			const bool unordered = !::RenderGraph::Backend::IsD3D12();
+			a_slot.drawBuffer = org::Buffer::CreateShared(rhi::HeapType::HostVisibleCoherent, std::uint64_t(capacity) * sizeof(IndirectDraw), unordered);
 			a_slot.drawBuffer->SetName("cs.dclf.cpu.indirect-draws");
 			auto resource = a_slot.drawBuffer->GetAPIResource();
 			void* mapped = nullptr;

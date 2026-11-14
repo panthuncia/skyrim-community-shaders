@@ -11,6 +11,7 @@
 #include "Upscaling/DXVKInterop.h"
 #include "RenderGraph/FrameAnchors.h"
 #include "RenderGraph/Engine/GuestDevice.h"
+#include "RenderGraph/Engine/Native/Native.h"
 #include "RenderGraph/Engine/OwnedFrame.h"
 #include "RenderGraph/Engine/Tripwire/Tripwire.h"
 #include "RenderGraph/RenderGraphRuntime.h"
@@ -97,6 +98,14 @@ HRESULT WINAPI hk_D3D11CreateDeviceAndSwapChainUpscaling(
 	upscaling.isWindowed = pSwapChainDesc->Windowed;
 
 	const D3D_FEATURE_LEVEL featureLevel = D3D_FEATURE_LEVEL_11_1;
+
+	// CS_ORG_NATIVE=1: no D3D11 device. Hooks.cpp leaves device creation to this hook while Upscaling is loaded, so native mode's
+	// device and swap chain are made here as they are there.
+	if (RenderGraph::Engine::Native::Requested()) {
+		if (globals::features::hdrDisplay.loaded)
+			HDRDisplay::wasExclusiveFullscreen = !pSwapChainDesc->Windowed;
+		return RenderGraph::Engine::Native::CreateDeviceAndSwapChain(pAdapter, pSwapChainDesc, ppSwapChain, ppDevice, pFeatureLevel, ppImmediateContext);
+	}
 
 	// CS_ORG_OWNED_FRAME=1: BasicRHI's device and swap chain, with the game's device on it as DXVK's guest.
 	auto& guest = RenderGraph::Engine::GuestDevice::Get();
@@ -1780,7 +1789,8 @@ void Upscaling::SeparateFromGraphEpochs()
 	// directly after a graph epoch"; found at the Sleeping Giant Inn, where Drawcall Limit Fix's first-person colour epoch is the last epoch
 	// before the upscaler). Frame generation's evaluates do not call this yet. DXVK work that binds image descriptors in between avoids it: a UAV
 	// clear of a small typed texture, which DXVK runs as a compute shader. A plain flush, an empty submission or a buffer fill does not.
-	if (!RenderGraphRuntime::Get().IsActive())
+	// Native mode has no DXVK command stream to separate: its evaluates are graph work in the epoch's own list.
+	if (!RenderGraphRuntime::Get().IsActive() || RenderGraph::Engine::Native::Active())
 		return;
 	if (!epochSeparator) {
 		D3D11_TEXTURE2D_DESC desc{ 64, 64, 1, 1, DXGI_FORMAT_R16G16B16A16_FLOAT, { 1, 0 }, D3D11_USAGE_DEFAULT, D3D11_BIND_UNORDERED_ACCESS | D3D11_BIND_SHADER_RESOURCE, 0, 0 };
