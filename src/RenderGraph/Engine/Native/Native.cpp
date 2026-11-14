@@ -101,9 +101,8 @@ namespace RenderGraph::Engine::Native
 			DclfSwitch{ "CS_DCLF_TERRAIN_PLAIN", "1", "D3D12 draws colour with plain draws only" },
 			DclfSwitch{ "CS_DCLF_DECAL_PLAIN", "1", "D3D12 draws colour with plain draws only" },
 			DclfSwitch{ "CS_DCLF_FORWARD_PLAIN", "1", "D3D12 draws colour with plain draws only" },
-			DclfSwitch{ "CS_DCLF_SHADOWS", "0", "the shadow views' Utility builds read pushed addresses, not ported" },
 			DclfSwitch{ "CS_DCLF_FORWARD", "0", "the forward epoch is not checked on D3D12 yet" },
-			DclfSwitch{ "CS_DCLF_REFRACTION", "0", "the refraction draw uses the shadow views' layout" },
+			DclfSwitch{ "CS_DCLF_REFRACTION", "0", "the refraction draw pushes block addresses and has no instance word (ForwardPasses)" },
 			DclfSwitch{ "CS_DCLF_EFFECTS", "0", "the Effect program family's builds are not ported" },
 			DclfSwitch{ "CS_DCLF_OPAQUE_EFFECTS", "0", "the Effect program family's builds are not ported" },
 			DclfSwitch{ "CS_DCLF_BILLBOARDS", "0", "the Effect program family's builds are not ported" },
@@ -114,8 +113,6 @@ namespace RenderGraph::Engine::Native
 			DclfSwitch{ "CS_DCLF_LOD_TREES", "0", "the tree LOD draw family (DistantTree) is not ported" },
 			DclfSwitch{ "CS_DCLF_FIRST_PERSON", "0", "first person's sites are not checked on D3D12 yet" },
 			DclfSwitch{ "CS_DCLF_REFLECTIONS", "0", "the water reflection's views are not ported" },
-			DclfSwitch{ "CS_DCLF_SKYLIGHT", "0", "Skylighting's occlusion view uses the Utility builds" },
-			DclfSwitch{ "CS_DCLF_PRECIPITATION", "0", "the precipitation occlusion view uses the Utility builds" },
 		};
 
 		std::string g_d3d12DclfOff;

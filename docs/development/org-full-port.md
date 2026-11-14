@@ -945,9 +945,9 @@ the colour pass's main, terrain and decal buckets (`CS_DCLF_MAIN_PLAIN` and the 
   (`DCLFInstanceWord`).
 - **What stays off on D3D12**, by its own switch, which native mode's stage 1 sets (`Native::ApplySwitches`, logged as `[ORG
   native] D3D12: Drawcall Limit Fix switches set`, and in DCLF's `[DCLF] D3D12: on` line): the CPU pipeline
-  (`CS_DCLF_PIPELINE=gpu`, `CS_DCLF_FORWARD_DIRECT=0`), the shadow views (Utility's builds read pushed addresses), the forward
-  epoch, refraction, the Effect family, particles, grass, tree LOD, first person, water reflections, Skylighting's and the
-  precipitation's occlusion views. A value set in the environment is kept.
+  (`CS_DCLF_PIPELINE=gpu`, `CS_DCLF_FORWARD_DIRECT=0`), the forward epoch, refraction, the Effect family, particles, grass, tree
+  LOD, first person, water reflections. A value set in the environment is kept. The shadow views and Skylighting's and the
+  precipitation's occlusion views draw on D3D12 since the parity wave (`docs/development/parity/dclf-d3d12.md`).
 
 **Slice 1 draws (2026-11-12, `test/refs-sweep`, RX 6600).** Native D3D12 draws the main view's Lighting, textured and lit, like
 Vulkan. Three fixes got it there:
@@ -961,9 +961,10 @@ Vulkan. Three fixes got it there:
 
 The ref trace (`CS_DCLF_REF_TRACE`) works on D3D12 too: its table is a committed buffer in host-cached system memory.
 
-Next slices, each on what slice 1 leaves: the shadow views (Utility's pulled builds through a rewrite of their pushed blocks, and
-the shadow draws' instance: their 20-byte draw records have no word before the arguments), then the forward epoch, then the
-families (Effect's pulled builds already take the frame rewrite; DistantTree and RunGrass read their own tables).
+Next slices, each on what slice 1 leaves: the shadow views (done in the parity wave: Utility's pulled builds read their blocks
+through the view's push words, and the shadow draws' 24-byte records carry the instance word; `docs/development/parity/dclf-d3d12.md`),
+then the forward epoch, then the families (Effect's pulled builds already take the frame rewrite; DistantTree and RunGrass read their
+own tables).
 
 Named off on D3D12 until ported:
 
