@@ -78,6 +78,7 @@ namespace
 	/** @brief The .fx effects the runtime runs, in the order ExecuteEffects runs them. */
 	enum class Fx : std::uint8_t
 	{
+		DepthOfField,
 		Bloom,
 		Lens,
 		Adaptation,
@@ -118,6 +119,13 @@ namespace
 		{ "AdaptationCurrent", 16, DXGI_FORMAT_R32_FLOAT, Lifetime::History },
 		{ "Adaptation", 1, DXGI_FORMAT_R32_FLOAT, Lifetime::Transient },
 		{ "AdaptationHistory", 1, DXGI_FORMAT_R32_FLOAT, Lifetime::History },
+		// enbdepthoffield.fx's own: FX11 swaps each pair by frame parity, here the history copies are made after the frame's write.
+		// All kept: a technique the effect lacks leaves its texture as it was.
+		{ "DofAperture", 1, DXGI_FORMAT_R32_FLOAT, Lifetime::History },
+		{ "DofApertureHistory", 1, DXGI_FORMAT_R32_FLOAT, Lifetime::History },
+		{ "DofReadFocus", 16, DXGI_FORMAT_R32_FLOAT, Lifetime::History },
+		{ "DofFocus", 1, DXGI_FORMAT_R32_FLOAT, Lifetime::History },
+		{ "DofFocusHistory", 1, DXGI_FORMAT_R32_FLOAT, Lifetime::History },
 		// What FX11 reads through a null view: zero.
 		{ "Black", 1, DXGI_FORMAT_R8G8B8A8_UNORM, Lifetime::Persistent },
 		{ "RenderTargetRGBA32", 0, DXGI_FORMAT_R8G8B8A8_UNORM, Lifetime::History },
@@ -733,6 +741,8 @@ namespace
 	{
 		auto& manager = EffectManager::GetSingleton();
 		switch (a_fx) {
+		case Fx::DepthOfField:
+			return &manager.enbDepthOfField;
 		case Fx::Bloom:
 			return &manager.enbBloom;
 		case Fx::Lens:
@@ -753,6 +763,8 @@ namespace
 	{
 		auto& manager = EffectManager::GetSingleton();
 		switch (a_fx) {
+		case Fx::DepthOfField:
+			return manager.WillEffectRun(manager.enbDepthOfField, manager.ids.useDepthOfField);
 		case Fx::Bloom:
 			return manager.WillEffectRun(manager.enbBloom, manager.ids.useBloom);
 		case Fx::Lens:
@@ -766,6 +778,15 @@ namespace
 		default:
 			return false;
 		}
+	}
+
+	/** @brief The chain an effect's ExecuteTechniqueSequence runs: its selected technique, and DoF's fallback when it has none. */
+	std::string ChainOf(Fx a_fx)
+	{
+		if (a_fx == Fx::DepthOfField)
+			return EffectManager::GetSingleton().enbDepthOfField.GetChainTechnique();
+		auto* fx11 = Fx11Of(a_fx);
+		return fx11 ? fx11->GetSelectedTechnique() : std::string();
 	}
 
 	std::string TechniqueName(ID3DX11EffectTechnique* a_technique)
@@ -1117,6 +1138,9 @@ struct ORGFxRuntime::Impl
 						resource = named;
 						break;
 					}
+			// The aperture DoF wrote this frame (EffectManager's common TextureAperture), unless the effect names its own.
+			if (!resource && slot.name == "TextureAperture")
+				resource = aperture;
 			// D3D11 unbinds a view of the bound target, so FX11 reads zero there.
 			if (!resource || resource == a_target)
 				resource = Black();
@@ -1257,8 +1281,14 @@ struct ORGFxRuntime::Impl
 		static std::span<const std::pair<std::string_view, std::string_view>> OwnTargets(Fx a_fx)
 		{
 			static constexpr std::pair<std::string_view, std::string_view> kPostPass[] = { { "TextureScratch", "Scratch" } };
+			// FX11's swap pairs by name; this frame's write is the first of each.
+			static constexpr std::pair<std::string_view, std::string_view> kDepthOfField[] = { { "TextureAperture", "DofAperture" },
+				{ "TextureApertureSwap", "DofApertureHistory" }, { "TextureReadFocus", "DofReadFocus" }, { "TextureFocus", "DofFocus" },
+				{ "TextureFocusSwap", "DofFocusHistory" } };
 			if (a_fx == Fx::PostPass)
 				return kPostPass;
+			if (a_fx == Fx::DepthOfField)
+				return kDepthOfField;
 			return {};
 		}
 
@@ -1297,6 +1327,31 @@ struct ORGFxRuntime::Impl
 							.groups = { (width + 7) / 8, (height + 7) / 8, 1 } },
 					"color-correction");
 			}
+			// 2. enbdepthoffield.fx: aperture and focus from last frame's, then its chain from the corrected image, copied back over it.
+			// The textures each technique reads are what FX11's variables hold at that point (EffectManager skips DoF's TextureAperture).
+			if (run(Fx::DepthOfField)) {
+				const Res apertureHistory = Tex("DofApertureHistory");
+				const Res focusHistory = Tex("DofFocusHistory");
+				const Res readFocus = Tex("DofReadFocus");
+				const Res adaptationHistory = run(Fx::Adaptation) ? Tex("AdaptationHistory") : Black();
+				const bool hasAperture = impl.EffectOf(Fx::DepthOfField).techniques.contains("Aperture");
+				std::vector<std::pair<std::string_view, Res>> names{ { "TexturePrevious", apertureHistory }, { "TextureAperture", apertureHistory },
+					{ "TextureCurrent", readFocus }, { "TextureFocus", focusHistory }, { "TextureOriginal", original }, { "TextureAdaptation", adaptationHistory } };
+				Technique(Fx::DepthOfField, "Aperture", "DofAperture", names);
+				names[1].second = Tex("DofAperture");
+				Technique(Fx::DepthOfField, "ReadFocus", "DofReadFocus", names);
+				names[0].second = focusHistory;
+				Technique(Fx::DepthOfField, "Focus", "DofFocus", names);
+				names[3].second = Tex("DofFocus");
+				const auto chain = Sequence(Fx::DepthOfField, ChainOf(Fx::DepthOfField), original, "HDRTemp", "HDRTemp2", names);
+				if (chain.executed && (chain.inOutput || chain.inTemp))
+					CopyTexture("dof-to-original", Tex(chain.inOutput ? "HDRTemp" : "HDRTemp2"), original, width, height);
+				CopyTexture("dof-aperture-history", Tex("DofAperture"), apertureHistory);
+				CopyTexture("dof-focus-history", Tex("DofFocus"), focusHistory);
+				// Later effects read this frame's aperture only when the Aperture technique wrote it (GetApertureSRV).
+				aperture = hasAperture ? Tex("DofAperture") : Black();
+			}
+
 			// FX11 leaves the corrected image in kMAIN; nothing here reads kMAIN again. Before the output copy, which may be kMAIN.
 			if (inputs.main) {
 				if (inputs.mainCopies)
@@ -1325,12 +1380,12 @@ struct ORGFxRuntime::Impl
 
 			// 4. enbbloom.fx and 5. enblens.fx, from the 1024 downsample.
 			if (run(Fx::Bloom)) {
-				const auto chain = Sequence(Fx::Bloom, impl.EffectOf(Fx::Bloom).fx11->GetSelectedTechnique(), downsampled, "Bloom", "BloomTemp",
+				const auto chain = Sequence(Fx::Bloom, ChainOf(Fx::Bloom), downsampled, "Bloom", "BloomTemp",
 					{ { "TextureDownsampled", downsampled }, { "TextureOriginal", original } });
 				bloom = Tex(chain.executed && !chain.inOutput ? "BloomTemp" : "Bloom");
 			}
 			if (run(Fx::Lens)) {
-				const auto chain = Sequence(Fx::Lens, impl.EffectOf(Fx::Lens).fx11->GetSelectedTechnique(), downsampled, "Lens", "HDRTemp",
+				const auto chain = Sequence(Fx::Lens, ChainOf(Fx::Lens), downsampled, "Lens", "HDRTemp",
 					{ { "TextureDownsampled", downsampled }, { "TextureOriginal", original } });
 				lens = Tex(chain.executed && !chain.inOutput ? "HDRTemp" : "Lens");
 			}
@@ -1352,7 +1407,7 @@ struct ORGFxRuntime::Impl
 			// 7. enbeffect.fx, from the corrected image into the SDR pair.
 			std::string_view sdr = "SDRTemp";
 			{
-				const auto chain = Sequence(Fx::Effect, impl.EffectOf(Fx::Effect).fx11->GetSelectedTechnique(), original, "SDRTemp", "SDRTemp2",
+				const auto chain = Sequence(Fx::Effect, ChainOf(Fx::Effect), original, "SDRTemp", "SDRTemp2",
 					{ { "TextureOriginal", original }, { "TextureBloom", bloom }, { "TextureLens", lens }, { "TextureAdaptation", adaptation } });
 				if (chain.executed && !chain.inOutput)
 					sdr = "SDRTemp2";
@@ -1365,7 +1420,7 @@ struct ORGFxRuntime::Impl
 			if (run(Fx::PostPass)) {
 				const std::string_view other = sdr == "SDRTemp" ? "SDRTemp2" : "SDRTemp";
 				const Res postPassInput = Tex(sdr);
-				const auto chain = Sequence(Fx::PostPass, impl.EffectOf(Fx::PostPass).fx11->GetSelectedTechnique(), postPassInput, other, "Scratch",
+				const auto chain = Sequence(Fx::PostPass, ChainOf(Fx::PostPass), postPassInput, other, "Scratch",
 					{ { "TextureOriginal", postPassInput } });
 				if (chain.executed && chain.inOutput)
 					sdr = other;
@@ -1400,6 +1455,7 @@ struct ORGFxRuntime::Impl
 		const Inputs& inputs;
 		std::shared_ptr<Frame> frame;
 		PassState state;  // what FX11's context holds for the next .fx pass
+		Res aperture;     // DoF's aperture this frame, for the effects after it; null (black) when DoF did not write one
 	};
 
 	/** @brief The shape the plan follows; a change registers a new plan. */
@@ -1415,7 +1471,7 @@ struct ORGFxRuntime::Impl
 				continue;
 			}
 			auto& fx11 = *effects[i].fx11;
-			const auto chain = fx11.GetSelectedTechnique();
+			const auto chain = ChainOf(static_cast<Fx>(i));
 			key += " " + chain + ":";
 			if (const auto it = fx11.techniques.find(chain); it != fx11.techniques.end())
 				for (auto& info : it->second)
@@ -1592,6 +1648,9 @@ struct ORGFxRuntime::Impl
 			if (updatedFrame[i] != globals::state->frameCount) {
 				manager.UpdateEffectValues(*e.fx11);
 				updatedFrame[i] = globals::state->frameCount;
+				// DoF blends with its history from the next frame on, as after FX11's Execute.
+				if (static_cast<Fx>(i) == Fx::DepthOfField)
+					manager.enbDepthOfField.MarkHistoryValid();
 			}
 			auto& image = images[i];
 			image.assign(e.valuesSize, 0);
@@ -1699,8 +1758,6 @@ void ORGFxRuntime::Impl::PrepareFrame(std::uint32_t a_input, std::uint32_t a_out
 	auto& manager = EffectManager::GetSingleton();
 	if (globals::state->GetTonemapOwner() != State::TonemapOwner::kEffects11 || !manager.IsInitialized() || !manager.IsPresetLoaded())
 		return self.Inactive({});
-	if (manager.WillEffectRun(manager.enbDepthOfField, manager.ids.useDepthOfField))
-		return self.Inactive("enbdepthoffield.fx is not supported on the render graph yet");
 
 	auto* renderer = globals::game::renderer;
 	auto& targets = renderer->GetRuntimeData().renderTargets;
