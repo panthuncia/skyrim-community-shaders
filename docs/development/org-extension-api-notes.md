@@ -1930,8 +1930,11 @@ is not declarable at the build (`PublishedResources::IsDeclarable`), so the call
 
 ## Depth-stencil and scissor on `AnchorPasses::Draw`
 
-ImageSpace still refuses draws with a scissor rectangle or a depth or stencil test (menu 3D's `NOT_EQUAL` composite and its
-colour fill). `RasterProgram::Desc` already takes a depth format and `DepthStencilState`, and the draw a stencil reference, but
-`AnchorPasses::Draw` has no depth attachment (a declared DepthRead view), no stencil reference and no scissor rectangle. With those
-three fields the port could take these draws as passes like any other (docs/development/parity/imagespace.md). A viewport larger
-than its target needs a dynamic viewport separate from the render area.
+- **Done** (ImageSpace parity round 2): `AnchorPasses::Draw` takes `depth` (declared `DepthRead`, or `DepthReadWrite` with
+  `depthReadOnly = false`), `stencilReference`, `scissor` and `dynamicViewport`. `RasterProgram::DrawDesc` sets the last two inside
+  the pass with BasicRHI's `SetViewports` / `SetScissors`, after `BeginPass`, so the render area clips them and a fullscreen draw's
+  TEXCOORD0 spans the draw's viewport. ImageSpace takes menu 3D's stencil draws, the manager's rectangle (a scissor) and viewports
+  past their target with them (docs/development/parity/imagespace.md).
+- **Note:** the engine's sampler table is now described from its modes alone in `ImageSpace.cpp` (`EngineSamplerDesc`, read from the
+  SE binary's table builder 75831). DCLF's `GpuTextures::Sampler` still reads the engine's table; it could share that description so no
+  consumer waits for the table.
