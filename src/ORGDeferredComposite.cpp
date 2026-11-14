@@ -35,6 +35,7 @@ ORGDeferredComposite& ORGDeferredComposite::Get()
 #	include "RenderGraph/FrameAnchors.h"
 #	include "RenderGraph/PublishedResources.h"
 #	include "RenderGraph/RenderGraphRuntime.h"
+#	include "RenderGraph/RunGate.h"
 #	include "RenderGraph/ShaderBindings.h"
 #	include "RenderGraph/SharedConstants.h"
 #	include "Utils/D3D.h"
@@ -141,6 +142,8 @@ namespace
 	{
 		Targets targets;
 		std::atomic<std::shared_ptr<const Execution>> execution;
+		// One entry, opened by the commit that chose an execution: the pass is gated, so it can run in a frame phase.
+		std::shared_ptr<const RenderGraph::RunGate> gate;
 	};
 
 	struct CompositeBindings
@@ -215,6 +218,12 @@ namespace
 		{
 			return { atExecution ? nullptr : shared->execution.load(std::memory_order_acquire), shared, static_cast<bool>(shared->targets.reflectance),
 				static_cast<bool>(shared->targets.depth) };
+		}
+
+		// Recorded at execution: a run whose commit did not open the gate (it chose no execution) records only the pass's barriers.
+		static bool SkipsAtExecution(const CompositeBindings&, const CompositeFrame& a_frame, const org::PassRecordContext& a_recording)
+		{
+			return a_frame.shared && a_frame.shared->gate && !a_frame.shared->gate->IsOpen(a_recording.Run(), 0);
 		}
 
 		static void Record(const CompositeBindings& a_bindings, const CompositeFrame& a_frame, org::PassRecordContext& a_recording)
@@ -292,6 +301,7 @@ struct ORGDeferredComposite::Impl
 	std::array<std::shared_ptr<const Execution>, 2> byNormals;
 	bool composited = false;
 	std::uint64_t executions = 0;  // the serial of the last execution made
+	std::shared_ptr<RenderGraph::RunGate> gate;  // Shared::gate
 
 	bool LoadPrograms()
 	{
@@ -371,8 +381,15 @@ struct ORGDeferredComposite::Impl
 
 	bool Register(const Targets& a_targets)
 	{
+		if (!gate)
+			gate = RenderGraph::RunGate::Create(kClientId, 1);
+		if (!gate) {
+			logger::warn("[ORG] Deferred composite: no run gate; the composite stays on D3D11");
+			return false;
+		}
 		auto next = std::make_shared<Shared>();
 		next->targets = a_targets;
+		next->gate = gate;
 		auto previous = shared;
 		shared = next;
 		registered = FrameAnchors::Register({
@@ -385,14 +402,21 @@ struct ORGDeferredComposite::Impl
 						std::make_shared<CompositePass>(next, FrameAnchors::RecordsAtExecution(FrameAnchors::Anchor::DeferredComposite)));
 				},
 				// Its execution is chosen by the commit: recorded then, the pass reads it without a ticket prepared again.
-				.atExecution = true } },
-			.commit = [this](const FrameAnchors::Point&) { Commit(); },
+				.atExecution = true,
+				// Gated: it skips a run whose commit did not open its gate entry (SkipsAtExecution).
+				.gated = true } },
+			.commit = [this](const FrameAnchors::Point&) {
+				Commit();
+				if (composited)
+					gate->OpenDispatch(0, 1);
+			},
 			.active = [this] { return frameReady; },
 			.onFailed = [this] {
 				logger::error("[ORG] Deferred composite: the render graph failed; the composite returns to D3D11");
 				failed = true;
 				registered = false; },
 			.sharedConstants = true,
+			.gates = { gate },
 		});
 		// The recordings that read the old executions keep them (CompositePass::Record).
 		if (previous)

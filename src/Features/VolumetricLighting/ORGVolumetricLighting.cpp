@@ -83,14 +83,16 @@ namespace
 	constexpr std::uint32_t OutputOf(std::uint32_t a_output) { return a_output == 0 ? kVolumetricTarget : kPreviousTarget; }
 	constexpr std::uint32_t PreviousOf(std::uint32_t a_output) { return a_output == 0 ? kPreviousTarget : kVolumetricTarget; }
 
-	// Run gate entries: the noise, then four per volume (generate, raymarch, the apply into either output), then the blurs by output.
+	// Run gate entries: the noise, then four per volume (generate, raymarch, the apply into either output), then the blurs by output,
+	// then the depth copy.
 	constexpr std::uint32_t kNoiseEntry = 0;
 	constexpr std::uint32_t GenerateEntry(std::uint32_t a_volume) { return 1 + 4 * a_volume; }
 	constexpr std::uint32_t RaymarchEntry(std::uint32_t a_volume) { return 2 + 4 * a_volume; }
 	constexpr std::uint32_t ApplyEntry(std::uint32_t a_volume, std::uint32_t a_output) { return 3 + 4 * a_volume + a_output; }
 	constexpr std::uint32_t BlurHEntry(std::uint32_t a_output) { return 1 + 4 * kMaxVolumes + a_output; }
 	constexpr std::uint32_t BlurVEntry(std::uint32_t a_output) { return 3 + 4 * kMaxVolumes + a_output; }
-	constexpr std::uint32_t kGateEntries = 5 + 4 * kMaxVolumes;
+	constexpr std::uint32_t kDepthCopyEntry = 5 + 4 * kMaxVolumes;  // the main depth's copy for the next frame
+	constexpr std::uint32_t kGateEntries = kDepthCopyEntry + 1;
 
 	using Float4 = std::array<float, 4>;
 
@@ -493,7 +495,15 @@ struct ORGVolumetricLighting::Impl
 		client.id = kClientId;
 		std::int32_t order = 0;
 		const auto add = [&](std::string a_name, FrameAnchors::PassKind a_kind, std::function<std::shared_ptr<org::RenderPass>()> a_make) {
-			client.passes.push_back({ .name = fmt::format("{}.{}", kClientId, a_name), .anchor = kAnchor, .order = order++, .kind = a_kind, .make = std::move(a_make) });
+			// Every step goes through the client's gate (a copy is recorded at execution, where it skips a run that left its entry closed):
+			// gated, so the anchor can run in a frame phase.
+			client.passes.push_back({ .name = fmt::format("{}.{}", kClientId, a_name),
+				.anchor = kAnchor,
+				.order = order++,
+				.kind = a_kind,
+				.make = std::move(a_make),
+				.atExecution = a_kind == FrameAnchors::PassKind::Copy,
+				.gated = true });
 		};
 		add("noise", FrameAnchors::PassKind::Compute, [this] {
 			return MakeStep(kNoiseEntry, "noise", [&](AnchorPasses::Builder& a_builder) {
@@ -589,15 +599,16 @@ struct ORGVolumetricLighting::Impl
 				});
 			});
 		}
-		// The apply's last step on D3D11 (CopyResource of the main depth into kMAIN_COPY): next frame's apply reads it at t6. A copy
-		// has no gate; the anchor runs only for a frame with the apply.
+		// The apply's last step on D3D11 (CopyResource of the main depth into kMAIN_COPY): next frame's apply reads it at t6. Every run
+		// opens its entry.
 		add("depth-copy", FrameAnchors::PassKind::Copy, [this, shared] {
-			return MakeStep(UINT32_MAX, "depth-copy", [&](AnchorPasses::Builder& a_builder) {
+			return MakeStep(kDepthCopyEntry, "depth-copy", [&](AnchorPasses::Builder& a_builder) {
 				a_builder.Add(AnchorPasses::Copy{ .name = "depth-copy",
 					.source = shared->depth,
 					.target = shared->previousDepth,
 					.width = shared->depth.Width(),
-					.height = shared->depth.Height() });
+					.height = shared->depth.Height(),
+					.gate = kDepthCopyEntry });
 			});
 		});
 		client.registerResources = [shared, fixedState = fixed](org::RenderGraph& a_graph) {
@@ -797,6 +808,7 @@ struct ORGVolumetricLighting::Impl
 		gate.OpenDraw(ApplyEntry(run->volume, run->output));
 		gate.OpenDispatch(BlurHEntry(run->output), run->blurHGroups[0], run->blurHGroups[1], 1);
 		gate.OpenDispatch(BlurVEntry(run->output), run->blurVGroups[0], run->blurVGroups[1], 1);
+		gate.OpenDispatch(kDepthCopyEntry, 1);
 	}
 
 	/** @brief A run reached submission: the noise volume is made when it held the noise. */

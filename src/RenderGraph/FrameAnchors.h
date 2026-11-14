@@ -260,7 +260,9 @@ namespace FrameAnchors
 		bool atExecution = false;
 		// Every draw or dispatch the pass records goes through its client's run gate (or a latch the commit writes, which reads zero
 		// in a run whose commit did not write it), and it clears nothing by itself: in a run that did not open it, it does nothing.
-		// An anchor whose passes are all gated can share its region's execution (regions, above). AnchorPasses' Builder sets it.
+		// An anchor whose passes are all gated can run in a frame phase's execution with other anchors (phases, above). AnchorPasses'
+		// Builder sets it. A client with gated passes at several anchors gives each anchor its own gate entries: a phase may hold runs
+		// of two of them, and each anchor's passes must then do only their own run's work.
 		bool gated = false;
 	};
 

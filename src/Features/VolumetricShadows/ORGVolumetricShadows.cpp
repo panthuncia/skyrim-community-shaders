@@ -12,6 +12,7 @@
 #	include "RenderGraph/GraphResources.h"
 #	include "RenderGraph/PublishedResources.h"
 #	include "RenderGraph/RenderGraphRuntime.h"
+#	include "RenderGraph/RunGate.h"
 #	include "RenderGraph/ShaderBindings.h"
 #	include "RenderGraph/Switches.h"
 #	include "State.h"
@@ -40,6 +41,26 @@ namespace
 	// BlurShadowCS's GROUP_SIZE.
 	constexpr UINT kBlurGroup = 128;
 
+	// Run gate entries: per mip, the downsample, then the horizontal and the vertical blur. The commit opens them all.
+	constexpr std::uint32_t DownsampleEntry(std::uint32_t a_mip) { return a_mip * 3; }
+	constexpr std::uint32_t BlurEntry(std::uint32_t a_mip, bool a_horizontal) { return a_mip * 3 + (a_horizontal ? 1 : 2); }
+	constexpr std::uint32_t kGateEntries = kMips * 3;
+
+	/** @brief A mip's downsample groups (both axes): a group spans 16 source texels; a 32x reduction gathers twice per thread. */
+	std::uint32_t DownsampleGroups(UINT a_sourceWidth, std::uint32_t a_mip)
+	{
+		const UINT outputSize = kCopySize >> a_mip;
+		return a_sourceWidth / 16 / (std::max)(a_sourceWidth / outputSize / 16, 1u);
+	}
+
+	/** @brief A mip's blur groups in x and y: a line of kBlurGroup texels per group along the blur. */
+	std::pair<std::uint32_t, std::uint32_t> BlurGroups(std::uint32_t a_mip, bool a_horizontal)
+	{
+		const std::uint32_t size = kCopySize >> a_mip;
+		const std::uint32_t lines = (size + kBlurGroup - 1) / kBlurGroup;
+		return { a_horizontal ? lines : size, a_horizontal ? size : lines };
+	}
+
 	constexpr auto kCascades = static_cast<std::uint32_t>(RE::RENDER_TARGETS_DEPTHSTENCIL::kSHADOWMAPS_ESRAM);
 	constexpr auto kVolumetric = static_cast<std::uint32_t>(RE::RENDER_TARGETS_DEPTHSTENCIL::kVOLUMETRIC_LIGHTING_SHADOWMAPS_ESRAM);
 
@@ -61,6 +82,7 @@ namespace
 		org::OwnedDescriptorBinding sampler;
 		std::unique_ptr<GraphResources::Texture2D> shadowCopy;  // exported: engine draws and DCLF read it at t18
 		std::unique_ptr<GraphResources::Texture2D> blurTemp;    // transient, aliasable
+		std::shared_ptr<RenderGraph::RunGate> gate;               // the dispatches' counts (kGateEntries), opened by the commit
 		// Render thread: the engine's maps as imported now, and the cascades' width. Read when a pass is made.
 		FrameAnchors::Texture cascades;
 		FrameAnchors::Texture volumetric;  // null: the cascades are read twice
@@ -94,8 +116,9 @@ namespace
 	struct DispatchFrame
 	{
 		const ComputeProgram* program = nullptr;
-		std::uint32_t groupsX = 0, groupsY = 0;
 		ShaderBindings::Handle sampler = 0;
+		std::shared_ptr<const RenderGraph::RunGate> gate;  // the pass's counts: its entry, which the commit opens
+		std::uint32_t entry = 0;
 	};
 
 	// One cascade into its mip of the shared map, with the volumetric copy's depth folded in (DownsampleShadowCS).
@@ -105,13 +128,7 @@ namespace
 		// At the build, on the render thread: the resources as they are now.
 		DownsamplePass(const std::shared_ptr<Resources>& a_resources, std::uint32_t a_mip) :
 			resources(a_resources), program(a_resources->downsample[a_mip]), cascades(a_resources->cascades),
-			volumetric(a_resources->volumetric), output(a_resources->shadowCopy->Graph()), mip(a_mip)
-		{
-			// A group spans 16 source texels; a 32x reduction gathers twice per thread (the D3D11 path's sizing).
-			const UINT outputSize = kCopySize >> a_mip;
-			const UINT width = a_resources->sourceWidth;
-			groups = width / 16 / (std::max)(width / outputSize / 16, 1u);
-		}
+			volumetric(a_resources->volumetric), output(a_resources->shadowCopy->Graph()), mip(a_mip) {}
 
 		DownsampleBindings Declare(org::PassBuilder& a_builder)
 		{
@@ -131,12 +148,11 @@ namespace
 			a_out.push_back(reinterpret_cast<std::uintptr_t>(cascades.Key()));
 			a_out.push_back(reinterpret_cast<std::uintptr_t>(volumetric.Key()));
 			a_out.push_back(reinterpret_cast<std::uintptr_t>(output.get()));
-			a_out.push_back(groups);
 		}
 
 		DispatchFrame Prepare(const DownsampleBindings&, const org::PassPrepareContext&) const
 		{
-			return { program.get(), groups, groups, resources->sampler.Index() };
+			return { program.get(), resources->sampler.Index(), resources->gate, DownsampleEntry(mip) };
 		}
 
 		static void Record(const DownsampleBindings& a_bindings, const DispatchFrame& a_frame, org::PassRecordContext& a_recording)
@@ -145,7 +161,8 @@ namespace
 				return;
 			const DownsampleBlock block{ a_recording.Index(a_bindings.cascades), a_recording.Index(a_bindings.volumetric),
 				a_recording.Index(a_bindings.output), a_frame.sampler };
-			a_frame.program->Dispatch(a_recording, ShaderBindings::Data(block), a_frame.groupsX, a_frame.groupsY, 1);
+			if (a_frame.gate)
+				a_frame.gate->Dispatch(a_recording, *a_frame.program, ShaderBindings::Data(block), a_frame.entry);
 		}
 
 	private:
@@ -155,7 +172,6 @@ namespace
 		FrameAnchors::Texture volumetric;
 		std::shared_ptr<org::Resource> output;
 		std::uint32_t mip;
-		std::uint32_t groups = 0;
 	};
 
 	struct BlurBindings
@@ -188,9 +204,7 @@ namespace
 
 		DispatchFrame Prepare(const BlurBindings&, const org::PassPrepareContext&) const
 		{
-			const std::uint32_t size = kCopySize >> mip;
-			const std::uint32_t lines = (size + kBlurGroup - 1) / kBlurGroup;
-			return { program.get(), horizontal ? lines : size, horizontal ? size : lines, 0 };
+			return { program.get(), 0, resources->gate, BlurEntry(mip, horizontal) };
 		}
 
 		static void Record(const BlurBindings& a_bindings, const DispatchFrame& a_frame, org::PassRecordContext& a_recording)
@@ -198,7 +212,8 @@ namespace
 			if (!a_frame.program)
 				return;
 			const BlurBlock block{ a_recording.Index(a_bindings.input), a_recording.Index(a_bindings.output) };
-			a_frame.program->Dispatch(a_recording, ShaderBindings::Data(block), a_frame.groupsX, a_frame.groupsY, 1);
+			if (a_frame.gate)
+				a_frame.gate->Dispatch(a_recording, *a_frame.program, ShaderBindings::Data(block), a_frame.entry);
 		}
 
 	private:
@@ -235,7 +250,13 @@ namespace
 		client.id = kClientId;
 		// Each pass is left out of a build without the engine's cascades: an epoch never reads a missing map.
 		auto add = [&](std::string a_name, std::int32_t a_order, std::function<std::shared_ptr<org::RenderPass>()> a_make) {
-			client.passes.push_back({ .name = std::string(kClientId) + "." + std::move(a_name), .anchor = FrameAnchors::Anchor::EarlyPrepass, .order = kOrder + a_order, .kind = FrameAnchors::PassKind::Compute, .make = std::move(a_make) });
+			// Gated: every dispatch takes its counts from the client's gate entry, which the commit opens.
+			client.passes.push_back({ .name = std::string(kClientId) + "." + std::move(a_name),
+				.anchor = FrameAnchors::Anchor::EarlyPrepass,
+				.order = kOrder + a_order,
+				.kind = FrameAnchors::PassKind::Compute,
+				.make = std::move(a_make),
+				.gated = true });
 		};
 		for (std::uint32_t mip = 0; mip < kMips; ++mip) {
 			const std::int32_t order = static_cast<std::int32_t>(mip) * 3;
@@ -255,6 +276,18 @@ namespace
 		};
 		// The D3D11 path ran at the shadow mask draw only with directional shadows; so do the passes.
 		client.active = [a_resources] { return a_resources->cascades && a_resources->sourceWidth && globals::state->HasDirectionalShadows(); };
+		client.gates = { a_resources->gate };
+		client.commit = [a_resources](const FrameAnchors::Point&) {
+			const auto& gate = *a_resources->gate;
+			for (std::uint32_t mip = 0; mip < kMips; ++mip) {
+				const std::uint32_t groups = DownsampleGroups(a_resources->sourceWidth, mip);
+				gate.OpenDispatch(DownsampleEntry(mip), groups, groups, 1);
+				for (const bool horizontal : { true, false }) {
+					const auto [x, y] = BlurGroups(mip, horizontal);
+					gate.OpenDispatch(BlurEntry(mip, horizontal), x, y, 1);
+				}
+			}
+		};
 		client.onFailed = std::move(a_onFailed);
 		return client;
 	}
@@ -314,8 +347,9 @@ bool ORGVolumetricShadows::Setup(std::function<void()> a_onFailed)
 	resources->shadowCopy = std::make_unique<GraphResources::Texture2D>(CopyDesc(), std::string(kShadowCopyId),
 		GraphResources::Options{ .lifetime = GraphResources::Lifetime::History, .d3d11 = GraphResources::Export::SRV });
 	resources->blurTemp = std::make_unique<GraphResources::Texture2D>(CopyDesc(), "VolumetricShadows::ShadowBlurTemp");
-	if (!resources->sampler || !*resources->shadowCopy || !resources->shadowCopy->SRV() || !*resources->blurTemp) {
-		logger::warn("[ORG] Volumetric Shadows stays on D3D11: its sampler or textures could not be created");
+	resources->gate = RenderGraph::RunGate::Create(kClientId, kGateEntries);
+	if (!resources->sampler || !*resources->shadowCopy || !resources->shadowCopy->SRV() || !*resources->blurTemp || !resources->gate) {
+		logger::warn("[ORG] Volumetric Shadows stays on D3D11: its sampler, textures or run gate could not be created");
 		return false;
 	}
 	auto state = std::make_unique<Impl>();

@@ -16,6 +16,7 @@ bool ORGDeferredClears::Requested()
 #	include "Globals.h"
 #	include "RenderGraph/FrameAnchors.h"
 #	include "RenderGraph/RenderGraphRuntime.h"
+#	include "RenderGraph/RunGate.h"
 
 #	include <Render/PassBuilders.h>
 #	include <RenderPasses/Base/TypedRenderGraphPass.h>
@@ -45,6 +46,8 @@ namespace
 		bool setUp = false;
 		// The renderer's clear colour at the last commit (render thread writes, the host's thread reads), as four float bit patterns.
 		std::array<std::atomic<std::uint32_t>, 4> colour{};
+		// One entry, opened by every commit: the clear is recorded at execution and skips a run that left it closed (gated).
+		std::shared_ptr<RenderGraph::RunGate> gate;
 	};
 
 	Shared& Get()
@@ -98,6 +101,13 @@ namespace
 
 		ClearFrame Prepare(const ClearBindings&, const org::PassPrepareContext&) const { return { CurrentColour(), width, height }; }
 
+		// Recorded at execution: a run whose commit left the gate closed records only the pass's barriers.
+		static bool SkipsAtExecution(const ClearBindings&, const ClearFrame&, const org::PassRecordContext& a_recording)
+		{
+			const auto& gate = Get().gate;
+			return gate && !gate->IsOpen(a_recording.Run(), 0);
+		}
+
 		static void Record(const ClearBindings& a_bindings, const ClearFrame& a_frame, org::PassRecordContext& a_recording)
 		{
 			std::array<rhi::ColorAttachment, kTargets.size()> colours{};
@@ -143,6 +153,12 @@ namespace ORGDeferredClears
 			logger::info("[ORG] Deferred clears: the render graph or its Prepass anchor is not available; the engine clears the GBuffer");
 			return;
 		}
+		if (!shared.gate)
+			shared.gate = RenderGraph::RunGate::Create(kClientId, 1);
+		if (!shared.gate) {
+			logger::warn("[ORG] Deferred clears: no run gate; the engine clears the GBuffer");
+			return;
+		}
 		FrameAnchors::ClientDesc client{};
 		client.id = kClientId;
 		client.passes.push_back({ .name = std::string(kClientId) + ".gbuffer",
@@ -165,8 +181,12 @@ namespace ORGDeferredClears
 				}
 				const std::uint32_t width = targets[0].Width(), height = targets[0].Height();
 				return std::make_shared<ClearPass>(std::move(targets), width, height);
-			} });
+			},
+			.atExecution = true,
+			.gated = true });
+		client.gates = { shared.gate };
 		client.commit = [](const FrameAnchors::Point&) {
+			Get().gate->OpenDispatch(0, 1);
 			auto* renderer = globals::game::renderer;
 			if (!renderer)
 				return;

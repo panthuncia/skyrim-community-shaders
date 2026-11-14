@@ -276,7 +276,10 @@ bool ORGTerrainShadows::Setup(std::uint32_t a_maxWidth, std::uint32_t a_maxHeigh
 			return current ? GraphResources::MakeUploadPass({ current->heightmap }) : nullptr;
 		},
 		true);
-	builder.Add("update", FrameAnchors::PassKind::Compute, [spec]() -> std::shared_ptr<org::RenderPass> { return std::make_shared<ShadowUpdatePass>(spec); });
+	// Gated: its dispatches take their counts from the client's gate entries, which the commit opens.
+	builder.Add(
+		"update", FrameAnchors::PassKind::Compute, [spec]() -> std::shared_ptr<org::RenderPass> { return std::make_shared<ShadowUpdatePass>(spec); }, false,
+		true);
 	if (builder.Failed()) {
 		logger::error("[ORG] Terrain Shadows: {}; it stays on D3D11", builder.Failure());
 		return false;

@@ -785,7 +785,9 @@ namespace RenderGraph::Engine::Scaleform::Passes
 							return std::make_shared<DisplayPass>(surface, a_slots, gate, a_withDepth, reads, FrameAnchors::RecordsAtExecution(Anchor::Interface));
 						},
 						// It reads the run's slot, which the commit stores: recorded then, without a ticket prepared again.
-						.atExecution = true });
+						.atExecution = true,
+						// Gated: a run whose commit stored no frame in the slot records nothing (DisplayPass::Record), its clear included.
+						.gated = true });
 				};
 				add(surface->colourSlots, false, "", 100 + 2 * static_cast<std::int32_t>(i));
 				if (surface->depthSlots)

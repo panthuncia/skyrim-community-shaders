@@ -336,7 +336,9 @@ bool ORGCloudShadows::Setup(std::function<void()> a_onFailed)
 		.anchor = FrameAnchors::Anchor::ReflectionsPrepass,
 		.order = 0,
 		.kind = FrameAnchors::PassKind::Compute,
-		.make = [next]() -> std::shared_ptr<org::RenderPass> { return std::make_shared<OcclusionCopyPass>(next); } });
+		.make = [next]() -> std::shared_ptr<org::RenderPass> { return std::make_shared<OcclusionCopyPass>(next); },
+		// Gated: every dispatch goes through the client's gate entries.
+		.gated = true });
 	client.registerResources = [next](org::RenderGraph& a_graph) { next->occlusion->Register(a_graph); };
 	client.commit = [next](const FrameAnchors::Point&) { Commit(*next); };
 	// The anchor runs at every cubemap render; only the run after the frame's first reflections prepass copies, as on D3D11.
@@ -382,6 +384,20 @@ namespace
 {
 	constexpr const char* kLayerShader = "CloudShadows/LayerOpsCS.hlsl";
 	constexpr std::uint32_t kLayers = CloudShadows::kMaxCloudLayers;
+	// The anchors the layer operations run at, each with its own range of the gate's entries: a frame phase may hold two of them in one
+	// execution, and each pass then dispatches only for its own anchor's commit.
+	constexpr std::array<FrameAnchors::Anchor, 3> kLayerAnchors{ FrameAnchors::Anchor::ReflectionsPrepass, FrameAnchors::Anchor::SkyReflections,
+		FrameAnchors::Anchor::EarlyPrepass };
+	constexpr std::uint32_t kLayerEntries = 2 * kLayers;  // per anchor: the gathers, then the scatters
+
+	/** @brief a_anchor's place in kLayerAnchors (its range of the gate's entries); 0 for another anchor. */
+	std::uint32_t LayerSlot(FrameAnchors::Anchor a_anchor)
+	{
+		for (std::uint32_t i = 0; i < kLayerAnchors.size(); ++i)
+			if (kLayerAnchors[i] == a_anchor)
+				return i;
+		return 0;
+	}
 	// The scratch array's slots: the most distinct faces one run's copies may read. More, and the queue sends the rest to D3D11.
 	constexpr std::uint32_t kScratchSlots = 32;
 	// LayerOpsCS's LayerRow: eight words, one per face (six used). The gather's rows, then the scatter's, one per layer.
@@ -432,7 +448,7 @@ struct ORGCloudShadows::LayerOps
 {
 	// Made at setup, then only read (the passes read them on the graph host's thread).
 	std::shared_ptr<const ComputeProgram> gather, scatter;
-	std::shared_ptr<RenderGraph::RunGate> gate;  // entries 0-31: the gather of layer l; 32-63: the scatter into layer l
+	std::shared_ptr<RenderGraph::RunGate> gate;  // per anchor (LayerSlot): the gather of layer l at l, the scatter into layer l at kLayers + l
 	std::shared_ptr<org::LatchBlock> latch;
 	std::unique_ptr<GraphResources::Texture2D> scratch;
 	std::array<FrameAnchors::Texture, kLayers> layers;
@@ -473,6 +489,7 @@ namespace
 	{
 		std::shared_ptr<const LayerOps> ops;
 		bool scatter = false;
+		std::uint32_t base = 0;  // the pass's anchor's first gate entry
 	};
 
 	/**
@@ -482,8 +499,8 @@ namespace
 	class LayerOpsPass final : public org::TypedRenderGraphPass<LayerOpsPass, LayerFrame, LayerBindings>
 	{
 	public:
-		LayerOpsPass(std::shared_ptr<const LayerOps> a_ops, bool a_scatter) :
-			ops(std::move(a_ops)), scatter(a_scatter), scratch(ops->scratch->Graph()) {}
+		LayerOpsPass(std::shared_ptr<const LayerOps> a_ops, bool a_scatter, std::uint32_t a_base) :
+			ops(std::move(a_ops)), scatter(a_scatter), base(a_base), scratch(ops->scratch->Graph()) {}
 
 		LayerBindings Declare(org::PassBuilder& a_builder)
 		{
@@ -513,9 +530,10 @@ namespace
 		{
 			a_out.push_back(reinterpret_cast<std::uintptr_t>(ops.get()));
 			a_out.push_back(scatter);
+			a_out.push_back(base);
 		}
 
-		LayerFrame Prepare(const LayerBindings&, const org::PassPrepareContext&) const { return { ops, scatter }; }
+		LayerFrame Prepare(const LayerBindings&, const org::PassPrepareContext&) const { return { ops, scatter, base }; }
 
 		static void Record(const LayerBindings& a_bindings, const LayerFrame& a_frame, org::PassRecordContext& a_recording)
 		{
@@ -527,7 +545,7 @@ namespace
 					const LayerScatterBlock block{ .scratch = scratch,
 						.layer = a_recording.Index(a_bindings.layers[l]),
 						.row = ShaderBindings::LatchOf(*ops.latch, a_recording.Run(), kScatterRows + l * kRowBytes) };
-					ops.gate->Dispatch(a_recording, program, ShaderBindings::Data(block), kLayers + l);
+					ops.gate->Dispatch(a_recording, program, ShaderBindings::Data(block), a_frame.base + kLayers + l);
 					continue;
 				}
 				LayerGatherBlock block{};
@@ -535,13 +553,14 @@ namespace
 					block.faces[f] = a_recording.Index(a_bindings.faces[l][f]);
 				block.scratch = scratch;
 				block.row = ShaderBindings::LatchOf(*ops.latch, a_recording.Run(), l * kRowBytes);
-				ops.gate->Dispatch(a_recording, program, ShaderBindings::Data(block), l);
+				ops.gate->Dispatch(a_recording, program, ShaderBindings::Data(block), a_frame.base + l);
 			}
 		}
 
 	private:
 		std::shared_ptr<const LayerOps> ops;
 		bool scatter = false;
+		std::uint32_t base = 0;
 		std::shared_ptr<org::Resource> scratch;
 	};
 
@@ -549,7 +568,7 @@ namespace
 	 * @brief The client's commit: the queue as the run's rows (a scratch slot for each face read, then each face written: its slot
 	 * or zero) and the gate entries of the layers with work, opened for every face. The queue is empty afterwards.
 	 */
-	void CommitLayerOps(LayerOps& a_ops)
+	void CommitLayerOps(LayerOps& a_ops, FrameAnchors::Anchor a_anchor)
 	{
 		if (a_ops.ops.empty())
 			return;
@@ -582,11 +601,12 @@ namespace
 		a_ops.latch->Write(run, kScatterRows, std::as_bytes(std::span(scatterRows)));
 		const std::uint32_t groupsX = (a_ops.width + kGroupSize - 1) / kGroupSize;
 		const std::uint32_t groupsY = (a_ops.height + kGroupSize - 1) / kGroupSize;
+		const std::uint32_t base = LayerSlot(a_anchor) * kLayerEntries;
 		for (std::uint32_t l = 0; l < kLayers; ++l) {
 			if (gatherLayers & (1u << l))
-				a_ops.gate->OpenDispatch(l, groupsX, groupsY, kFaces);
+				a_ops.gate->OpenDispatch(base + l, groupsX, groupsY, kFaces);
 			if (scatterLayers & (1u << l))
-				a_ops.gate->OpenDispatch(kLayers + l, groupsX, groupsY, kFaces);
+				a_ops.gate->OpenDispatch(base + kLayers + l, groupsX, groupsY, kFaces);
 		}
 		a_ops.Reset();
 	}
@@ -618,7 +638,7 @@ bool ORGCloudShadows::SetupLayerOps()
 	next->gather = ComputeProgram::Load(host->Device(),
 		{ .source = kLayerShader, .constantWords = ShaderBindings::Words<LayerGatherBlock>(), .defines = { { L"LAYER_GATHER", L"" } } });
 	next->scatter = ComputeProgram::Load(host->Device(), { .source = kLayerShader, .constantWords = ShaderBindings::Words<LayerScatterBlock>() });
-	next->gate = RenderGraph::RunGate::Create("CloudShadows::LayerOpsGate", 2 * kLayers);
+	next->gate = RenderGraph::RunGate::Create("CloudShadows::LayerOpsGate", static_cast<std::uint32_t>(kLayerAnchors.size()) * kLayerEntries);
 	next->latch = std::make_shared<org::LatchBlock>(std::string(kLayersClientId) + ".latch", kLatchBytes);
 	if (!next->gather || !next->scatter || !next->gate) {
 		logger::error("[ORG] Cloud Shadows: {} or its run gate could not be made", kLayerShader);
@@ -649,18 +669,21 @@ bool ORGCloudShadows::SetupLayerOps()
 			 std::pair{ FrameAnchors::Anchor::SkyReflections, "sky-reflections" }, std::pair{ FrameAnchors::Anchor::EarlyPrepass, "early-prepass" } }) {
 		if (!FrameAnchors::HasEpoch(anchor))
 			continue;
+		const std::uint32_t base = LayerSlot(anchor) * kLayerEntries;
 		for (const bool scatter : { false, true }) {
 			client.passes.push_back({ .name = std::format("{}.{}.{}", kLayersClientId, label, scatter ? "scatter" : "gather"),
 				.anchor = anchor,
 				.order = scatter ? -1 : -2,
 				.kind = FrameAnchors::PassKind::Compute,
-				.make = [next, scatter]() -> std::shared_ptr<org::RenderPass> { return std::make_shared<LayerOpsPass>(next, scatter); } });
+				.make = [next, scatter, base]() -> std::shared_ptr<org::RenderPass> { return std::make_shared<LayerOpsPass>(next, scatter, base); },
+				// Gated: every dispatch goes through the anchor's own gate entries.
+				.gated = true });
 		}
 	}
 	if (client.passes.empty())
 		return false;
 	client.registerResources = [next](org::RenderGraph& a_graph) { next->scratch->Register(a_graph); };
-	client.commit = [next](const FrameAnchors::Point&) { CommitLayerOps(*next); };
+	client.commit = [next](const FrameAnchors::Point& a_point) { CommitLayerOps(*next, a_point.anchor); };
 	client.active = [next] { return !next->ops.empty(); };
 	client.gates = { next->gate };
 	client.onFailed = [next] {

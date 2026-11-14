@@ -131,6 +131,20 @@ namespace DCLF::Features::Water::WaterDraws
 				return { atExecution ? nullptr : std::atomic_load(&client->run), client };
 			}
 
+			/** @brief Recorded at execution: a run whose commit opened none of the draws' gate entries records only the pass's barriers. */
+			static bool SkipsAtExecution(const Bindings&, const Frame& a_frame, const org::PassRecordContext& a_recording)
+			{
+				if (!a_frame.client)
+					return true;
+				const auto run = a_frame.run ? a_frame.run : std::atomic_load(&a_frame.client->run);
+				if (!run)
+					return true;
+				for (std::uint32_t i = 0; i < run->draws.size(); ++i)
+					if (a_frame.client->gate->IsOpen(a_recording.Run(), i))
+						return false;
+				return true;
+			}
+
 			static void Record(const Bindings& a_bindings, const Frame& a_frame, org::PassRecordContext& a_recording)
 			{
 				if (!a_frame.client)
@@ -302,7 +316,9 @@ namespace DCLF::Features::Water::WaterDraws
 					return std::make_shared<WaterPass>(client, FrameAnchors::RecordsAtExecution(FrameAnchors::Anchor::EngineDraws));
 				},
 				// The run's draws are known after its commit: recorded then, the pass reads them without a ticket prepared again.
-				.atExecution = true });
+				.atExecution = true,
+				// Gated (FrameAnchors::PassDesc::gated): every draw takes its count from the client's gate entry, and nothing clears.
+				.gated = true });
 			desc.commit = [client](const FrameAnchors::Point&) {
 				const auto run = std::atomic_load(&client->run);
 				auto* host = RenderGraphRuntime::Get().Host();

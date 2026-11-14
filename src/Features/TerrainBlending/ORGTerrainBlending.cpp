@@ -28,6 +28,7 @@ ORGTerrainBlending::~ORGTerrainBlending() = default;
 #	include "RenderGraph/AnchorPasses.h"
 #	include "RenderGraph/ComputeProgram.h"
 #	include "RenderGraph/FrameAnchors.h"
+#	include "RenderGraph/RunGate.h"
 #	include "RenderGraph/GraphResources.h"
 #	include "RenderGraph/PublishedResources.h"
 #	include "RenderGraph/RenderGraphRuntime.h"
@@ -118,6 +119,8 @@ namespace
 	{
 		std::uint32_t width = 0, height = 0;
 		rhi::Format format = rhi::Format::Unknown;
+		// One entry, opened by the client's commit: the clear is recorded at execution and skips a run that left it closed (gated).
+		std::shared_ptr<const RenderGraph::RunGate> gate;
 	};
 
 	struct DepthClearBindings
@@ -129,8 +132,9 @@ namespace
 	class TerrainDepthClearPass final : public org::TypedRenderGraphPass<TerrainDepthClearPass, DepthClearFrame, DepthClearBindings>
 	{
 	public:
-		TerrainDepthClearPass(std::shared_ptr<org::ExternalTextureResource> a_depth, std::uint32_t a_width, std::uint32_t a_height) :
-			depth(std::move(a_depth)), frame{ a_width, a_height, depth->GetFormat() } {}
+		TerrainDepthClearPass(std::shared_ptr<org::ExternalTextureResource> a_depth, std::uint32_t a_width, std::uint32_t a_height,
+			std::shared_ptr<const RenderGraph::RunGate> a_gate) :
+			depth(std::move(a_depth)), frame{ a_width, a_height, depth->GetFormat(), std::move(a_gate) } {}
 
 		DepthClearBindings Declare(org::PassBuilder& a_builder) { return { a_builder.DepthReadWrite(depth).View() }; }
 
@@ -142,6 +146,12 @@ namespace
 		}
 
 		DepthClearFrame Prepare(const DepthClearBindings&, const org::PassPrepareContext&) const { return frame; }
+
+		// Recorded at execution: a run whose commit left the gate closed records only the pass's barriers.
+		static bool SkipsAtExecution(const DepthClearBindings&, const DepthClearFrame& a_frame, const org::PassRecordContext& a_recording)
+		{
+			return a_frame.gate && !a_frame.gate->IsOpen(a_recording.Run(), 0);
+		}
 
 		static void Record(const DepthClearBindings& a_bindings, const DepthClearFrame& a_frame, org::PassRecordContext& a_recording)
 		{
@@ -177,15 +187,24 @@ namespace
 	 */
 	bool RegisterTerrainDepthClear(std::shared_ptr<org::ExternalTextureResource> a_depth, std::uint32_t a_width, std::uint32_t a_height)
 	{
+		std::shared_ptr<RenderGraph::RunGate> gate = RenderGraph::RunGate::Create(kClearClientId, 1);
+		if (!gate)
+			return false;
 		FrameAnchors::ClientDesc client{};
 		client.id = kClearClientId;
 		client.passes.push_back({ .name = kClearClientId,
 			.anchor = FrameAnchors::Anchor::EarlyPrepass,
 			.order = -100,
 			.kind = FrameAnchors::PassKind::Render,
-			.make = [a_depth, a_width, a_height]() -> std::shared_ptr<org::RenderPass> { return std::make_shared<TerrainDepthClearPass>(a_depth, a_width, a_height); } });
+			.make = [a_depth, a_width, a_height, gate]() -> std::shared_ptr<org::RenderPass> {
+				return std::make_shared<TerrainDepthClearPass>(a_depth, a_width, a_height, gate);
+			},
+			.atExecution = true,
+			.gated = true });
+		client.gates = { gate };
 		client.active = [] { return globals::features::terrainBlending.settings.Enabled != 0; };
-		client.commit = [](const FrameAnchors::Point&) {
+		client.commit = [gate](const FrameAnchors::Point&) {
+			gate->OpenDispatch(0, 1);
 			if (FrameAnchors::InBuiltGraph(kClearClientId, FrameAnchors::Anchor::EarlyPrepass))
 				ClearedFrame() = globals::state->frameCount;
 		};
@@ -338,12 +357,20 @@ bool ORGTerrainBlending::RegisterClient()
 	// path's dispatch and copy. The whole texture: DepthBlend skips the threads past its edge. A smaller dynamic-resolution
 	// viewport only leaves pixels nothing reads.
 	const auto& desc = impl->blendedDepth->Desc();
-	RenderGraph::AnchorPasses::Builder builder(FrameAnchors::Anchor::DepthDone, kClientId, 0);
+	// The dispatch's counts come from a run gate entry the commit opens: gated, so the anchor can run in a frame phase.
+	std::shared_ptr<RenderGraph::RunGate> gate = RenderGraph::RunGate::Create(kClientId, 1);
+	if (!gate) {
+		logger::error("[ORG] Terrain Blending: its run gate could not be created");
+		return false;
+	}
+	const std::uint32_t groupsX = (desc.Width + kGroupSize - 1) / kGroupSize;
+	const std::uint32_t groupsY = (desc.Height + kGroupSize - 1) / kGroupSize;
+	RenderGraph::AnchorPasses::Builder builder(FrameAnchors::Anchor::DepthDone, kClientId, 0, {}, gate);
 	builder.Add(RenderGraph::AnchorPasses::Dispatch{ .name = "depth-blend",
 		.program = impl->program,
 		.bindings = { Bind::Uav(*impl->blendedDepth), Bind::Uav(*impl->blendedDepth16), Bind::Uav(*impl->mask), Bind::Srv(impl->mainDepth),
 			Bind::Srv(impl->terrainDepth) },
-		.groups = { (desc.Width + kGroupSize - 1) / kGroupSize, (desc.Height + kGroupSize - 1) / kGroupSize, 1 } });
+		.gate = 0u });
 	if (builder.Failed()) {
 		logger::error("[ORG] Terrain Blending: {}", builder.Failure());
 		return false;
@@ -357,6 +384,8 @@ bool ORGTerrainBlending::RegisterClient()
 			texture->Register(a_graph);
 	};
 	client.active = [] { return globals::features::terrainBlending.settings.Enabled != 0; };
+	client.gates = { gate };
+	client.commit = [gate, groupsX, groupsY](const FrameAnchors::Point&) { gate->OpenDispatch(0, groupsX, groupsY, 1); };
 	client.onFailed = [] { Get().Fail("the render graph failed"); };
 	return FrameAnchors::Register(std::move(client));
 }

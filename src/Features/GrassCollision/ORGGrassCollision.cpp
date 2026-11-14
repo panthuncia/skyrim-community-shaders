@@ -94,13 +94,15 @@ namespace
 	{
 		std::shared_ptr<const org::LatchBlock> latch;
 		Layout layout;
+		std::shared_ptr<const RenderGraph::RunGate> gate;  // the update's entry: the copy goes with it
 	};
 
 	class CopyCollidersPass final : public org::TypedRenderGraphPass<CopyCollidersPass, CopyFrame, CopyBindings>
 	{
 	public:
 		explicit CopyCollidersPass(const Resources& a_resources) :
-			latch(a_resources.latch), layout(a_resources.layout), boxes(a_resources.boxes->Graph()), instances(a_resources.instances->Graph()) {}
+			latch(a_resources.latch), gate(a_resources.gate), layout(a_resources.layout), boxes(a_resources.boxes->Graph()),
+			instances(a_resources.instances->Graph()) {}
 
 		CopyBindings Declare(org::PassBuilder& a_builder)
 		{
@@ -115,7 +117,13 @@ namespace
 			a_out.push_back(reinterpret_cast<std::uintptr_t>(instances.get()));
 		}
 
-		CopyFrame Prepare(const CopyBindings&, const org::PassPrepareContext&) const { return { latch, layout }; }
+		CopyFrame Prepare(const CopyBindings&, const org::PassPrepareContext&) const { return { latch, layout, gate }; }
+
+		// Recorded at execution: a run whose commit staged nothing (the update's gate entry closed) copies nothing.
+		static bool SkipsAtExecution(const CopyBindings&, const CopyFrame& a_frame, const org::PassRecordContext& a_recording)
+		{
+			return a_frame.gate && !a_frame.gate->IsOpen(a_recording.Run(), 0);
+		}
 
 		static void Record(const CopyBindings& a_bindings, const CopyFrame& a_frame, org::PassRecordContext& a_recording)
 		{
@@ -133,6 +141,7 @@ namespace
 
 	private:
 		std::shared_ptr<const org::LatchBlock> latch;
+		std::shared_ptr<const RenderGraph::RunGate> gate;
 		Layout layout;
 		std::shared_ptr<org::Resource> boxes;
 		std::shared_ptr<org::Resource> instances;
@@ -281,12 +290,17 @@ bool ORGGrassCollision::Setup(const Limits& a_limits, std::function<void()> a_on
 		.anchor = FrameAnchors::Anchor::EarlyPrepass,
 		.order = kOrder,
 		.kind = FrameAnchors::PassKind::Copy,
-		.make = [resources]() -> std::shared_ptr<org::RenderPass> { return std::make_shared<CopyCollidersPass>(*resources); } });
+		.make = [resources]() -> std::shared_ptr<org::RenderPass> { return std::make_shared<CopyCollidersPass>(*resources); },
+		// Gated: recorded at execution, it skips a run that left the update's gate entry closed.
+		.atExecution = true,
+		.gated = true });
 	client.passes.push_back({ .name = "cs.grass-collision.update",
 		.anchor = FrameAnchors::Anchor::EarlyPrepass,
 		.order = kOrder + 1,
 		.kind = FrameAnchors::PassKind::Compute,
-		.make = [resources]() -> std::shared_ptr<org::RenderPass> { return std::make_shared<UpdateCollisionPass>(*resources); } });
+		.make = [resources]() -> std::shared_ptr<org::RenderPass> { return std::make_shared<UpdateCollisionPass>(*resources); },
+		// Gated: its dispatch takes its counts from the client's gate entry.
+		.gated = true });
 	client.gates = { resources->gate };
 	client.registerResources = [resources](org::RenderGraph& a_graph) {
 		resources->boxes->Register(a_graph);

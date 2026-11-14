@@ -215,7 +215,9 @@ namespace DCLF::Features::BloodSplatter::BloodSplatterDraws
 			.anchor = FrameAnchors::Anchor::EngineDraws,
 			.order = 2,
 			.kind = FrameAnchors::PassKind::Render,
-			.make = [client]() -> std::shared_ptr<org::RenderPass> { return std::make_shared<BloodPass>(client); } });
+			.make = [client]() -> std::shared_ptr<org::RenderPass> { return std::make_shared<BloodPass>(client); },
+			// Gated (FrameAnchors::PassDesc::gated): every draw takes its count from the client's gate entry, and nothing clears.
+			.gated = true });
 		desc.commit = [client](const FrameAnchors::Point&) {
 			const auto run = std::atomic_load(&client->run);
 			auto* host = RenderGraphRuntime::Get().Host();

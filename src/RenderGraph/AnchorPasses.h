@@ -154,12 +154,16 @@ namespace RenderGraph::AnchorPasses
 		std::optional<std::uint32_t> latchArgs;  // three uints at this offset of the builder's latch (replace groups)
 	};
 
-	/** @brief A copy of a whole texture's first mip into another of the same size and format. */
+	/**
+	 * @brief A copy of a whole texture's first mip into another of the same size and format. With a gate entry, the copy happens only on
+	 * runs whose commit opened it (any Open call with work): the pass is recorded at execution and records nothing else (gated).
+	 */
 	struct Copy
 	{
 		std::string name;
 		FrameAnchors::Texture source, target;
 		std::uint32_t width = 0, height = 0;
+		std::optional<std::uint32_t> gate;  // the builder's run gate entry
 	};
 
 	/** @brief A clear of a whole texture through its UAV (UnorderedAccessClear) to a float or uint value. */
@@ -223,8 +227,12 @@ namespace RenderGraph::AnchorPasses
 		/** @brief An upload, always a one-shot pass: it runs at the anchor's next run, and again after FrameAnchors::Rearm. */
 		void Add(Upload a_upload);
 
-		/** @brief A custom pass: make is called at each graph build of the anchor, as FrameAnchors::PassDesc::make. */
-		void Add(std::string_view a_name, FrameAnchors::PassKind a_kind, std::function<std::shared_ptr<org::RenderPass>()> a_make, bool a_once = false);
+		/**
+		 * @brief A custom pass: make is called at each graph build of the anchor, as FrameAnchors::PassDesc::make. a_gated: its work all goes
+		 * through the client's run gate (FrameAnchors::PassDesc::gated); the caller vouches for it.
+		 */
+		void Add(std::string_view a_name, FrameAnchors::PassKind a_kind, std::function<std::shared_ptr<org::RenderPass>()> a_make, bool a_once = false,
+			bool a_gated = false);
 
 		/** @brief Marks the builder failed with a reason (the first one is kept). */
 		void Fail(std::string_view a_reason);
@@ -241,7 +249,7 @@ namespace RenderGraph::AnchorPasses
 	private:
 		bool Check(std::string_view a_name, const std::vector<Bind>& a_bindings, std::uint32_t a_programWords, std::optional<std::uint32_t> a_gate);
 		void Push(std::string_view a_step, FrameAnchors::PassKind a_kind, std::function<std::shared_ptr<org::RenderPass>()> a_make, bool a_once,
-			bool a_gated = false);
+			bool a_gated = false, bool a_atExecution = false);
 
 		FrameAnchors::Anchor anchor;
 		std::string prefix;

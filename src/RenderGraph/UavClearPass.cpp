@@ -7,6 +7,7 @@
 
 #	include "RenderGraph/AnchorPasses.h"
 #	include "RenderGraph/GraphResources.h"
+#	include "RenderGraph/RunGate.h"
 
 #	include <Render/PassBuilders.h>
 #	include <RenderPasses/Base/TypedRenderGraphPass.h>
@@ -28,16 +29,17 @@ namespace
 		std::array<float, 4> value{};
 		std::array<std::uint32_t, 4> uintValue{};
 		bool asUint = false;
+		GraphPasses::ClearGate gate;
 	};
 
 	class UavClearPass final : public org::TypedRenderGraphPass<UavClearPass, ClearFrame, ClearBindings>
 	{
 	public:
-		UavClearPass(FrameAnchors::Texture a_texture, std::array<float, 4> a_value) :
-			texture(std::move(a_texture)), value(a_value) {}
+		UavClearPass(FrameAnchors::Texture a_texture, std::array<float, 4> a_value, GraphPasses::ClearGate a_gate) :
+			texture(std::move(a_texture)), value(a_value), gate(std::move(a_gate)) {}
 
-		UavClearPass(FrameAnchors::Texture a_texture, std::array<std::uint32_t, 4> a_value) :
-			texture(std::move(a_texture)), uintValue(a_value), asUint(true) {}
+		UavClearPass(FrameAnchors::Texture a_texture, std::array<std::uint32_t, 4> a_value, GraphPasses::ClearGate a_gate) :
+			texture(std::move(a_texture)), uintValue(a_value), asUint(true), gate(std::move(a_gate)) {}
 
 		ClearBindings Declare(org::PassBuilder& a_builder)
 		{
@@ -59,7 +61,13 @@ namespace
 			a_out.push_back(asUint ? 1 : 0);
 		}
 
-		ClearFrame Prepare(const ClearBindings&, const org::PassPrepareContext&) const { return { value, uintValue, asUint }; }
+		ClearFrame Prepare(const ClearBindings&, const org::PassPrepareContext&) const { return { value, uintValue, asUint, gate }; }
+
+		// Recorded at execution: a clear with a gate entry the run's commit left closed is not recorded.
+		static bool SkipsAtExecution(const ClearBindings&, const ClearFrame& a_frame, const org::PassRecordContext& a_recording)
+		{
+			return a_frame.gate.gate && !a_frame.gate.gate->IsOpen(a_recording.Run(), a_frame.gate.entry);
+		}
 
 		static void Record(const ClearBindings& a_bindings, const ClearFrame& a_frame, org::PassRecordContext& a_recording)
 		{
@@ -78,24 +86,25 @@ namespace
 		std::array<float, 4> value{};
 		std::array<std::uint32_t, 4> uintValue{};
 		bool asUint = false;
+		GraphPasses::ClearGate gate;
 	};
 }
 
 namespace GraphPasses
 {
-	std::shared_ptr<org::RenderPass> MakeUavClear(FrameAnchors::Texture a_texture, std::array<float, 4> a_value)
+	std::shared_ptr<org::RenderPass> MakeUavClear(FrameAnchors::Texture a_texture, std::array<float, 4> a_value, ClearGate a_gate)
 	{
-		return std::make_shared<UavClearPass>(std::move(a_texture), a_value);
+		return std::make_shared<UavClearPass>(std::move(a_texture), a_value, std::move(a_gate));
 	}
 
-	std::shared_ptr<org::RenderPass> MakeUavClearUint(FrameAnchors::Texture a_texture, std::array<std::uint32_t, 4> a_value)
+	std::shared_ptr<org::RenderPass> MakeUavClearUint(FrameAnchors::Texture a_texture, std::array<std::uint32_t, 4> a_value, ClearGate a_gate)
 	{
-		return std::make_shared<UavClearPass>(std::move(a_texture), a_value);
+		return std::make_shared<UavClearPass>(std::move(a_texture), a_value, std::move(a_gate));
 	}
 
-	std::shared_ptr<org::RenderPass> MakeUavClear(const GraphResources::Resource& a_twin, std::array<float, 4> a_value)
+	std::shared_ptr<org::RenderPass> MakeUavClear(const GraphResources::Resource& a_twin, std::array<float, 4> a_value, ClearGate a_gate)
 	{
-		return MakeUavClear(RenderGraph::AnchorPasses::TextureOf(a_twin), a_value);
+		return MakeUavClear(RenderGraph::AnchorPasses::TextureOf(a_twin), a_value, std::move(a_gate));
 	}
 }
 

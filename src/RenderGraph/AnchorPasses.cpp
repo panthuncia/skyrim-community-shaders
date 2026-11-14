@@ -302,6 +302,14 @@ namespace RenderGraph::AnchorPasses
 
 			SpecFrame<Copy> Prepare(const CopyBindings&, const org::PassPrepareContext&) const { return { spec }; }
 
+			// Recorded at execution (FrameAnchors::PassDesc::atExecution): a gated copy whose entry the run's commit left closed is not
+			// recorded.
+			static bool SkipsAtExecution(const CopyBindings&, const SpecFrame<Copy>& a_frame, const org::PassRecordContext& a_recording)
+			{
+				const auto& spec = *a_frame.spec;
+				return spec.step.gate && spec.gate && !spec.gate->IsOpen(a_recording.Run(), *spec.step.gate);
+			}
+
 			static void Record(const CopyBindings& a_bindings, const SpecFrame<Copy>& a_frame, org::PassRecordContext& a_recording)
 			{
 				const auto& copy = a_frame.spec->step;
@@ -425,7 +433,7 @@ namespace RenderGraph::AnchorPasses
 	}
 
 	void Builder::Push(std::string_view a_step, FrameAnchors::PassKind a_kind, std::function<std::shared_ptr<org::RenderPass>()> a_make, bool a_once,
-		bool a_gated)
+		bool a_gated, bool a_atExecution)
 	{
 		passes.push_back({ .name = std::format("{}.{}", prefix, a_step),
 			.anchor = anchor,
@@ -433,6 +441,7 @@ namespace RenderGraph::AnchorPasses
 			.kind = a_kind,
 			.make = std::move(a_make),
 			.once = a_once,
+			.atExecution = a_atExecution,
 			.gated = a_gated });
 	}
 
@@ -483,9 +492,16 @@ namespace RenderGraph::AnchorPasses
 			Fail(std::format("{}: the copy's textures or size are missing", a_copy.name));
 			return;
 		}
+		if (a_copy.gate && (!gate || *a_copy.gate >= gate->Entries())) {
+			Fail(std::format("{}: gate entry {} is not one of the client's gate", a_copy.name, *a_copy.gate));
+			return;
+		}
 		const std::string step = a_copy.name;
+		// Gated: recorded at execution, where it skips a run that did not open its entry. A copy cannot take its work from the gate.
+		const bool gated = a_copy.gate.has_value();
 		auto spec = std::make_shared<const Spec<Copy>>(Spec<Copy>{ std::move(a_copy), latch, gate });
-		Push(step, FrameAnchors::PassKind::Copy, [spec]() -> std::shared_ptr<org::RenderPass> { return std::make_shared<CopyPass>(spec); }, false);
+		Push(step, FrameAnchors::PassKind::Copy, [spec]() -> std::shared_ptr<org::RenderPass> { return std::make_shared<CopyPass>(spec); }, false, gated,
+			gated);
 	}
 
 	void Builder::Add(Clear a_clear, bool a_once)
@@ -514,13 +530,14 @@ namespace RenderGraph::AnchorPasses
 		Push(step, FrameAnchors::PassKind::Copy, [spec]() -> std::shared_ptr<org::RenderPass> { return std::make_shared<UploadPass>(spec); }, true);
 	}
 
-	void Builder::Add(std::string_view a_name, FrameAnchors::PassKind a_kind, std::function<std::shared_ptr<org::RenderPass>()> a_make, bool a_once)
+	void Builder::Add(std::string_view a_name, FrameAnchors::PassKind a_kind, std::function<std::shared_ptr<org::RenderPass>()> a_make, bool a_once,
+		bool a_gated)
 	{
 		if (!a_make) {
 			Fail(std::format("{}: no pass", a_name));
 			return;
 		}
-		Push(a_name, a_kind, std::move(a_make), a_once);
+		Push(a_name, a_kind, std::move(a_make), a_once, a_gated && !a_once);
 	}
 
 	void Builder::Fail(std::string_view a_reason)

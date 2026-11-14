@@ -33,6 +33,7 @@ bool ORGIBL::Requested()
 #	include "RenderGraph/GraphResources.h"
 #	include "RenderGraph/PublishedResources.h"
 #	include "RenderGraph/RenderGraphRuntime.h"
+#	include "RenderGraph/RunGate.h"
 #	include "RenderGraph/ShaderBindings.h"
 #	include "RenderGraph/UavClearPass.h"
 
@@ -76,10 +77,16 @@ namespace
 		org::DeclaredViewToken source, target;
 	};
 
+	// Run gate entries: the environment's projection (or clear), then the sky's. Every commit opens both.
+	constexpr std::uint32_t kEnvEntry = 0;
+	constexpr std::uint32_t kSkyEntry = 1;
+
 	struct ProjectFrame
 	{
 		std::shared_ptr<const ComputeProgram> program;
 		ShaderBindings::Handle sampler = 0;
+		std::shared_ptr<const RenderGraph::RunGate> gate;
+		std::uint32_t entry = 0;
 	};
 
 	/** @brief A projection's source cubemap: an imported texture, or another feature's published graph texture by its id. */
@@ -95,8 +102,9 @@ namespace
 	class ProjectPass final : public org::TypedRenderGraphPass<ProjectPass, ProjectFrame, ProjectBindings>
 	{
 	public:
-		ProjectPass(std::shared_ptr<const ComputeProgram> a_program, ShaderBindings::Handle a_sampler, Source a_source, std::shared_ptr<org::Resource> a_target) :
-			program(std::move(a_program)), sampler(a_sampler), source(std::move(a_source)), target(std::move(a_target)) {}
+		ProjectPass(std::shared_ptr<const ComputeProgram> a_program, ShaderBindings::Handle a_sampler, Source a_source, std::shared_ptr<org::Resource> a_target,
+			std::shared_ptr<const RenderGraph::RunGate> a_gate, std::uint32_t a_entry) :
+			program(std::move(a_program)), sampler(a_sampler), source(std::move(a_source)), target(std::move(a_target)), gate(std::move(a_gate)), entry(a_entry) {}
 
 		ProjectBindings Declare(org::PassBuilder& a_builder)
 		{
@@ -116,14 +124,15 @@ namespace
 			a_out.push_back(reinterpret_cast<std::uintptr_t>(target.get()));
 		}
 
-		ProjectFrame Prepare(const ProjectBindings&, const org::PassPrepareContext&) const { return { program, sampler }; }
+		ProjectFrame Prepare(const ProjectBindings&, const org::PassPrepareContext&) const { return { program, sampler, gate, entry }; }
 
 		static void Record(const ProjectBindings& a_bindings, const ProjectFrame& a_frame, org::PassRecordContext& a_recording)
 		{
-			if (!a_frame.program)
+			if (!a_frame.program || !a_frame.gate)
 				return;
 			const DiffuseIBLBlock block{ a_recording.Index(a_bindings.source), a_recording.Index(a_bindings.target), a_frame.sampler };
-			a_frame.program->Dispatch(a_recording, ShaderBindings::Data(block), 1, 1, 1);
+			// One group, when the commit opened the entry.
+			a_frame.gate->Dispatch(a_recording, *a_frame.program, ShaderBindings::Data(block), a_frame.entry);
 		}
 
 	private:
@@ -131,6 +140,8 @@ namespace
 		ShaderBindings::Handle sampler;
 		Source source;
 		std::shared_ptr<org::Resource> target;
+		std::shared_ptr<const RenderGraph::RunGate> gate;
+		std::uint32_t entry = 0;
 	};
 }
 
@@ -144,6 +155,7 @@ struct ORGIBL::Impl
 	Source envSource;
 	Source skySource;
 	bool useEnvironment = false;
+	std::shared_ptr<RenderGraph::RunGate> gate;  // kEnvEntry and kSkyEntry, opened by every commit
 	std::function<void()> onFailed;
 };
 
@@ -175,8 +187,9 @@ bool ORGIBL::Setup(std::function<void()> a_onFailed)
 	const GraphResources::Options options{ .lifetime = GraphResources::Lifetime::History, .d3d11 = GraphResources::Export::SRV };
 	state->env = std::make_unique<GraphResources::Texture2D>(ShTextureDesc(), std::string(kEnvId), options);
 	state->sky = std::make_unique<GraphResources::Texture2D>(ShTextureDesc(), std::string(kSkyId), options);
-	if (!state->program || !state->sampler || !*state->env || !*state->sky || !state->env->SRV() || !state->sky->SRV()) {
-		logger::error("[ORG] IBL: its program, sampler or SH textures could not be made; IBL stays on D3D11");
+	state->gate = RenderGraph::RunGate::Create(kClientId, 2);
+	if (!state->program || !state->sampler || !*state->env || !*state->sky || !state->env->SRV() || !state->sky->SRV() || !state->gate) {
+		logger::error("[ORG] IBL: its program, sampler, SH textures or run gate could not be made; IBL stays on D3D11");
 		return false;
 	}
 	state->onFailed = std::move(a_onFailed);
@@ -192,14 +205,32 @@ bool ORGIBL::Setup(std::function<void()> a_onFailed)
 		if (a_env && !current->useEnvironment)
 			return nullptr;
 		// A missing cubemap: the D3D11 path projects a null view, which samples zero, so the SH is zero.
+		const std::uint32_t entry = a_env ? kEnvEntry : kSkyEntry;
 		if (!source)
-			return GraphPasses::MakeUavClear(target->Graph(), {});
-		return std::make_shared<ProjectPass>(current->program, current->sampler.Index(), source, target->Graph());
+			return GraphPasses::MakeUavClear(target->Graph(), {}, { current->gate, entry });
+		return std::make_shared<ProjectPass>(current->program, current->sampler.Index(), source, target->Graph(), current->gate, entry);
 	};
 	FrameAnchors::ClientDesc client{};
 	client.id = kClientId;
-	client.passes.push_back({ .name = "cs.ibl.env-sh", .anchor = FrameAnchors::Anchor::Prepass, .kind = FrameAnchors::PassKind::Compute, .make = [makePass] { return makePass(true); } });
-	client.passes.push_back({ .name = "cs.ibl.sky-sh", .anchor = FrameAnchors::Anchor::Prepass, .order = 1, .kind = FrameAnchors::PassKind::Compute, .make = [makePass] { return makePass(false); } });
+	// Gated: a projection dispatches through its gate entry, and a clear (recorded at execution) skips a run that left it closed.
+	client.passes.push_back({ .name = "cs.ibl.env-sh",
+		.anchor = FrameAnchors::Anchor::Prepass,
+		.kind = FrameAnchors::PassKind::Compute,
+		.make = [makePass] { return makePass(true); },
+		.atExecution = true,
+		.gated = true });
+	client.passes.push_back({ .name = "cs.ibl.sky-sh",
+		.anchor = FrameAnchors::Anchor::Prepass,
+		.order = 1,
+		.kind = FrameAnchors::PassKind::Compute,
+		.make = [makePass] { return makePass(false); },
+		.atExecution = true,
+		.gated = true });
+	client.gates = { state->gate };
+	client.commit = [gate = state->gate](const FrameAnchors::Point&) {
+		gate->OpenDispatch(kEnvEntry, 1);
+		gate->OpenDispatch(kSkyEntry, 1);
+	};
 	client.registerResources = [self](org::RenderGraph& a_graph) {
 		if (self->impl) {
 			self->impl->env->Register(a_graph);

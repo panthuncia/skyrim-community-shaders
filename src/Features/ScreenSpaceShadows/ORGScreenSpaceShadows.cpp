@@ -44,6 +44,8 @@ namespace
 	constexpr std::string_view kBlendedDepthName = "terrain-blending.blended-depth";
 	constexpr std::string_view kBlendedDepthImportId = "cs.d3d11.terrain-blending.blended-depth";
 	constexpr std::uint32_t kMaxDispatches = ScreenSpaceShadows::Dispatches::kMax;
+	// The clear's run gate entry, after the dispatches': every commit opens it, as the D3D11 path clears on every run.
+	constexpr std::uint32_t kClearEntry = kMaxDispatches;
 
 	// RaymarchCS's push block under ORG, in list order: three handles, then PerFrame's latch region.
 	struct RaymarchBlock
@@ -314,7 +316,7 @@ bool ORGScreenSpaceShadows::Setup(const D3D11_TEXTURE2D_DESC& a_desc, std::funct
 			GraphResources::Options{ .lifetime = GraphResources::Lifetime::Transient, .d3d11 = GraphResources::Export::SRV, .versioned = true });
 		state->latch = std::make_shared<org::LatchBlock>("cs.screen-space-shadows.latch", static_cast<std::uint32_t>(sizeof(RaymarchLatchData)));
 		// One entry per dispatch of Bend's list: the commit opens those this frame uses.
-		state->gate = RenderGraph::RunGate::Create("cs.screen-space-shadows.dispatches", kMaxDispatches);
+		state->gate = RenderGraph::RunGate::Create("cs.screen-space-shadows.dispatches", kMaxDispatches + 1);
 		state->depth = CurrentDepth();
 		if (!state->program || !state->sampler || !*state->output || !state->output->SRV() || !state->output->Versioned() || !state->gate || !state->depth) {
 			logger::warn("[ORG] Screen Space Shadows stays on D3D11: its program, sampler, texture, gate or depth input could not be made");
@@ -328,16 +330,22 @@ bool ORGScreenSpaceShadows::Setup(const D3D11_TEXTURE2D_DESC& a_desc, std::funct
 			.anchor = FrameAnchors::Anchor::Prepass,
 			.order = 100,
 			.kind = FrameAnchors::PassKind::Compute,
-			// The clear to white (no shadow), as the D3D11 path clears before its dispatches.
-			.make = [state] { return GraphPasses::MakeUavClear(*state->output, { 1.0f, 1.0f, 1.0f, 1.0f }); } });
+			// The clear to white (no shadow), as the D3D11 path clears before its dispatches. Gated: recorded at execution, it skips a run
+			// that left its entry closed.
+			.make = [state] { return GraphPasses::MakeUavClear(*state->output, { 1.0f, 1.0f, 1.0f, 1.0f }, { state->gate, kClearEntry }); },
+			.atExecution = true,
+			.gated = true });
 		client.passes.push_back({ .name = "cs.screen-space-shadows.raymarch",
 			.anchor = FrameAnchors::Anchor::Prepass,
 			.order = 101,
 			.kind = FrameAnchors::PassKind::Compute,
-			.make = [state]() -> std::shared_ptr<org::RenderPass> { return std::make_shared<RaymarchPass>(*state); } });
+			.make = [state]() -> std::shared_ptr<org::RenderPass> { return std::make_shared<RaymarchPass>(*state); },
+			// Gated: every dispatch takes its counts from the gate.
+			.gated = true });
 		client.registerResources = [state](org::RenderGraph& a_graph) { state->output->Register(a_graph); };
 		client.gates = { state->gate };
 		client.commit = [state](const FrameAnchors::Point&) {
+			state->gate->OpenDispatch(kClearEntry, 1);
 			auto& feature = globals::features::screenSpaceShadows;
 			// The gate is closed for this run: a frame without the full sky dispatches nothing.
 			if (!feature.ShouldDraw())

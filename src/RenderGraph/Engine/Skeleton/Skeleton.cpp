@@ -261,6 +261,7 @@ namespace RenderGraph::Engine::Skeleton
 		struct CopyState
 		{
 			FrameAnchors::Texture source, target;
+			std::shared_ptr<RunGate> gate;  // one entry, opened by the commit: the copy is gated, so it can run in a frame phase
 			const void* sourceTexture = nullptr;
 			const void* targetTexture = nullptr;
 			bool registered = false;
@@ -829,16 +830,30 @@ namespace RenderGraph::Engine::Skeleton
 				logger::warn("[ORG] engine skeleton: {}: the textures differ in size or format; it stays on D3D11", kCopyNames[index]);
 				return;
 			}
-			AnchorPasses::Builder builder(kCopyAnchors[index], kCopyIds[index], 0);
+			if (!copy.gate)
+				copy.gate = RunGate::Create(kCopyIds[index], 1);
+			if (!copy.gate) {
+				copy.failed = true;
+				logger::warn("[ORG] engine skeleton: {}: no run gate; it stays on D3D11", kCopyNames[index]);
+				return;
+			}
+			AnchorPasses::Builder builder(kCopyAnchors[index], kCopyIds[index], 0, {}, copy.gate);
 			builder.Add(AnchorPasses::Copy{
 				.name = kCopySteps[index],
 				.source = copy.source,
 				.target = copy.target,
 				.width = copy.source.Width(),
-				.height = copy.source.Height() });
+				.height = copy.source.Height(),
+				.gate = 0u });
 			FrameAnchors::ClientDesc client{};
 			client.id = kCopyIds[index];
 			client.passes = builder.Take();
+			client.gates = { copy.gate };
+			// The run wants the copy (RunCopy): its entry opens.
+			client.commit = [a_kind](const FrameAnchors::Point&) {
+				if (const auto& gate = CopyOf(a_kind).gate)
+					gate->OpenDispatch(0, 1);
+			};
 			client.active = [a_kind] { return CopyOf(a_kind).wanted; };
 			client.executed = [a_kind](const FrameAnchors::Point&) { CopyOf(a_kind).executed = true; };
 			client.onFailed = [a_kind] {

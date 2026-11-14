@@ -29,6 +29,7 @@ bool ORGDynamicCubemaps::Requested()
 #	include "RenderGraph/GraphResources.h"
 #	include "RenderGraph/PublishedResources.h"
 #	include "RenderGraph/RenderGraphRuntime.h"
+#	include "RenderGraph/RunGate.h"
 #	include "RenderGraph/ShaderBindings.h"
 #	include "RenderGraph/SharedConstants.h"
 
@@ -355,9 +356,16 @@ namespace
 		std::vector<org::ResourceBindingToken> sources, targets;
 	};
 
+	// The copies' run gate entries (ORGDynamicCubemaps::Impl::copyGate): every commit opens them, as the copies ran at every run.
+	constexpr std::uint32_t kFilteredMipZeroEntry = 0;
+	constexpr std::uint32_t kBC6HEntry = 1;  // + the cubemap
+	constexpr std::uint32_t kCopyEntries = 3;
+
 	struct CopyFrame
 	{
 		std::shared_ptr<const CopyPlan> plan;
+		std::shared_ptr<const RenderGraph::RunGate> gate;
+		std::uint32_t entry = 0;
 	};
 
 	/**
@@ -367,8 +375,8 @@ namespace
 	class CopyPass final : public org::TypedRenderGraphPass<CopyPass, CopyFrame, CopyBindings>
 	{
 	public:
-		explicit CopyPass(std::shared_ptr<const CopyPlan> a_plan) :
-			plan(std::move(a_plan)) {}
+		CopyPass(std::shared_ptr<const CopyPlan> a_plan, std::shared_ptr<const RenderGraph::RunGate> a_gate, std::uint32_t a_entry) :
+			plan(std::move(a_plan)), gate(std::move(a_gate)), entry(a_entry) {}
 
 		CopyBindings Declare(org::PassBuilder& a_builder)
 		{
@@ -383,7 +391,13 @@ namespace
 
 		void Revision(std::vector<std::uint64_t>& a_out) const { a_out.push_back(reinterpret_cast<std::uintptr_t>(plan.get())); }
 
-		CopyFrame Prepare(const CopyBindings&, const org::PassPrepareContext&) const { return { plan }; }
+		CopyFrame Prepare(const CopyBindings&, const org::PassPrepareContext&) const { return { plan, gate, entry }; }
+
+		// Recorded at execution: a run whose commit left the copy's gate entry closed records only its barriers.
+		static bool SkipsAtExecution(const CopyBindings&, const CopyFrame& a_frame, const org::PassRecordContext& a_recording)
+		{
+			return a_frame.gate && !a_frame.gate->IsOpen(a_recording.Run(), a_frame.entry);
+		}
 
 		static void Record(const CopyBindings& a_bindings, const CopyFrame& a_frame, org::PassRecordContext& a_recording)
 		{
@@ -399,6 +413,8 @@ namespace
 
 	private:
 		std::shared_ptr<const CopyPlan> plan;
+		std::shared_ptr<const RenderGraph::RunGate> gate;
+		std::uint32_t entry = 0;
 	};
 
 	/** @brief The engine's and the feature's textures the passes read, imported (FrameAnchors). */
@@ -448,6 +464,7 @@ struct ORGDynamicCubemaps::Impl
 	bool programsDirty = false;
 	org::OwnedDescriptorBinding sampler;
 	std::shared_ptr<org::LatchBlock> latch;
+	std::shared_ptr<RenderGraph::RunGate> copyGate;  // the copies' entries (kCopyEntries), opened by every commit
 	Imports imports;
 
 	// Graph-only, read in later frames (History). The capture textures per cubemap; the filtered one is a plain array, which the
@@ -671,6 +688,9 @@ struct ORGDynamicCubemaps::Impl
 			if (encoded[i] && copying[i])
 				feature.cubemapValid[i] = true;
 		latch->WriteValue(RenderGraphRuntime::Get().Host()->CurrentRun(), 0, data);
+		if (copyGate)
+			for (std::uint32_t entry = 0; entry < kCopyEntries; ++entry)
+				copyGate->OpenDispatch(entry, 1);
 	}
 };
 
@@ -824,14 +844,28 @@ bool ORGDynamicCubemaps::RegisterClient()
 		return [self, a_cubemap]() -> std::shared_ptr<org::RenderPass> {
 			const auto& current = self->impl;
 			// From the frame after the cubemap's first encode: before it, its encoder outputs hold nothing.
-			return current && current->copying[a_cubemap] ? std::make_shared<CopyPass>(current->BC6HPlan(a_cubemap)) : nullptr;
+			return current && current->copying[a_cubemap] ? std::make_shared<CopyPass>(current->BC6HPlan(a_cubemap), current->copyGate, kBC6HEntry + a_cubemap) :
+			                                                nullptr;
 		};
 	};
+	if (impl && !impl->copyGate)
+		impl->copyGate = RenderGraph::RunGate::Create("cs.dyncubemaps.copies", kCopyEntries);
+	if (!impl || !impl->copyGate)
+		return false;
 	FrameAnchors::ClientDesc client{};
 	client.id = kClientId;
 	client.sharedConstants = true;
+	client.gates = { impl->copyGate };
+	// Gated: the compute passes take their group counts from the latch (zero in a run the commit did not write), and the copies are
+	// recorded at execution, where they skip a run that left their gate entries closed. So the anchor can run in a frame phase.
 	const auto pass = [&client](const char* a_name, std::int32_t a_order, FrameAnchors::PassKind a_kind, std::function<std::shared_ptr<org::RenderPass>()> a_make) {
-		client.passes.push_back({ .name = a_name, .anchor = FrameAnchors::Anchor::DeferredPasses, .order = kOrder + a_order, .kind = a_kind, .make = std::move(a_make) });
+		client.passes.push_back({ .name = a_name,
+			.anchor = FrameAnchors::Anchor::DeferredPasses,
+			.order = kOrder + a_order,
+			.kind = a_kind,
+			.make = std::move(a_make),
+			.atExecution = a_kind == FrameAnchors::PassKind::Copy,
+			.gated = true });
 	};
 	using Kind = FrameAnchors::PassKind;
 	// Once, before everything else: the exported cubemaps' zeros.
@@ -846,7 +880,7 @@ bool ORGDynamicCubemaps::RegisterClient()
 	pass("cs.dyncubemaps.capture-mips-reflections", 2, Kind::Compute, mips(false, 1));
 	pass("cs.dyncubemaps.infer", 3, Kind::Compute, gated(&Impl::InferPlan));
 	pass("cs.dyncubemaps.filtered-mip0", 4, Kind::Copy, [self]() -> std::shared_ptr<org::RenderPass> {
-		return self->impl ? std::make_shared<CopyPass>(self->impl->FilteredMipZeroPlan()) : nullptr;
+		return self->impl ? std::make_shared<CopyPass>(self->impl->FilteredMipZeroPlan(), self->impl->copyGate, kFilteredMipZeroEntry) : nullptr;
 	});
 	pass("cs.dyncubemaps.inferred-mips", 5, Kind::Compute, mips(true, 0));
 	pass("cs.dyncubemaps.irradiance", 6, Kind::Compute, gated(&Impl::IrradiancePlan));

@@ -314,8 +314,16 @@ struct ORGSubsurfaceScattering::Impl
 		client.sharedConstants = true;
 		client.gates = { state->gate };
 		// After SSGI's passes (whose orders are below 200) and before the composite, as the D3D11 path runs.
-		const auto pass = [](const char* a_name, std::int32_t a_order, MakePass a_make) {
-			return FrameAnchors::PassDesc{ .name = a_name, .anchor = FrameAnchors::Anchor::DeferredPasses, .order = a_order, .kind = FrameAnchors::PassKind::Compute, .make = std::move(a_make) };
+		const auto pass = [](const char* a_name, std::int32_t a_order, MakePass a_make, bool a_atExecution = false) {
+			// Every pass waits for the run gate's entry: the dispatches take their counts from it, the clear is recorded at execution and
+			// skips a run that left it closed. Gated, so the anchor can run in a frame phase.
+			return FrameAnchors::PassDesc{ .name = a_name,
+				.anchor = FrameAnchors::Anchor::DeferredPasses,
+				.order = a_order,
+				.kind = FrameAnchors::PassKind::Compute,
+				.make = std::move(a_make),
+				.atExecution = a_atExecution,
+				.gated = true };
 		};
 		client.passes.push_back(pass("cs.subsurface.extract", 200, InMode(state, kAnyMode, [](const ScatterState& a_state) -> std::shared_ptr<org::RenderPass> {
 			return std::make_shared<ExtractionPass>(a_state);
@@ -329,8 +337,8 @@ struct ORGSubsurfaceScattering::Impl
 		// Burley's extraction writes only the masked pixels, and the blur reads the others weighted by a zero mask. D3D11 reads the
 		// previous frames' values there; the graph texture is cleared to zero first, which also keeps it aliasable.
 		client.passes.push_back(pass("cs.subsurface.clear", 199, InMode(state, kBurley, [](const ScatterState& a_state) {
-			return GraphPasses::MakeUavClear(a_state.diffuseNoAlbedo->Graph(), { 0.0f, 0.0f, 0.0f, 0.0f });
-		})));
+			return GraphPasses::MakeUavClear(a_state.diffuseNoAlbedo->Graph(), { 0.0f, 0.0f, 0.0f, 0.0f }, { a_state.gate, kGateEntry });
+		}), true));
 		client.passes.push_back(pass("cs.subsurface.burley", 201, InMode(state, kBurley, [main](const ScatterState& a_state) -> std::shared_ptr<org::RenderPass> {
 			return std::make_shared<BlurPass>(a_state, a_state.programs->burley, a_state.diffuseNoAlbedo->Graph(), main(a_state));
 		})));
