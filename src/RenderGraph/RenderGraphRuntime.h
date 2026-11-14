@@ -122,14 +122,13 @@ public:
 		AnchorDecalQueries,
 		AnchorMovieTiles,
 		AnchorEngineCopy,
-		// The frame regions' epochs (native mode; FrameAnchors.h, "Regions"): one per region, holding the passes of
-		// its anchors whose work is all behind run gates. Consecutive runs of those anchors share one execution.
-		RegionShadows,
-		RegionPreMain,
-		RegionDeferred,
-		RegionEngineDraws,
-		RegionPost,
-		RegionInterface,
+		// The frame phases' epochs (native mode; FrameAnchors.h, "Phases"): one per stretch of the frame between Drawcall Limit Fix's
+		// epochs, holding the passes of the anchors whose work is all behind run gates. The runs of a phase share one execution.
+		PhaseFrameStart,  // before the shadow view epoch: the reflection faces, the shadow clears
+		PhasePreDepth,    // between the shadow view and the Z-prepass: the early prepass, the main depth's clear
+		PhasePreMain,     // between the Z-prepass and the main opaque epoch: depth done, the prepass, the sky
+		PhaseDeferred,    // between the main opaque and the forward epochs: the deferred passes, the composite, the water
+		PhasePost,        // after the first-person epoch: the sun queries, post-processing, ImageSpace, the interface, the present
 		Count
 	};
 

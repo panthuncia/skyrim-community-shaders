@@ -2963,6 +2963,7 @@ std::shared_ptr<org::ExternalEpochExecution> RenderGraphRuntime::ExecuteExternal
 	if (!IsActive() || !impl->asyncEpochs)
 		return nullptr;
 	FrameAnchors::FlushRegions("another epoch", static_cast<std::uint32_t>(a_segment));
+	FrameAnchors::NoteEpochSubmitted(static_cast<std::uint32_t>(a_segment));
 	impl->CloseLeftOpenExternal();
 	impl->TakeCompletedEpochs();
 	std::function<void(org::RenderGraph&)> beforePrepare;
@@ -3057,6 +3058,7 @@ RenderGraphRuntime::EpochResult RenderGraphRuntime::TryExecuteEpoch(Segment a_se
 		return EpochResult::Stopped;
 	// Regions (FrameAnchors.h): the anchor runs a region holds come before this epoch's work.
 	FrameAnchors::FlushRegions("another epoch", static_cast<std::uint32_t>(a_segment));
+	FrameAnchors::NoteEpochSubmitted(static_cast<std::uint32_t>(a_segment));
 	RenderGraph::FrameSequence::NoteEpoch(Impl::SegmentLabel(a_segment));
 	impl->CloseLeftOpenExternal();
 	// Diagnostics (dclf:epochs=0): Drawcall Limit Fix's epochs report submitted without submitting anything, so a run times the frame

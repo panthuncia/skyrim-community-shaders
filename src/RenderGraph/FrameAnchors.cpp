@@ -116,11 +116,12 @@ namespace FrameAnchors
 		constexpr std::array<Segment, static_cast<std::size_t>(Segment::Count)> kTimeline{
 			Segment::AnchorDecalQueries,       // the decal occlusion tests, at the frame's start before Main::Draw
 			Segment::AnchorEngineShadowClear,  // each shadow map slice's clear, before its draws (nominally here)
-			Segment::RegionShadows,            // the shadows region: submitted before the next other GPU work
+			Segment::PhaseFrameStart,          // the frame-start phase: submitted at the shadow view epoch
 			Segment::ShadowView,
 			Segment::SkyOcclusion,
 			Segment::AnchorEarlyPrepass,      // Main::RenderShadowMaps returned
 			Segment::AnchorEngineFrameClear,  // the main depth's clear in Main::RenderDepth (and the frame's other clears)
+			Segment::PhasePreDepth,           // the pre-depth phase: submitted at the Z-prepass
 			Segment::ZPrepass,                // Main::RenderDepth
 			Segment::FirstPersonDepth,
 			Segment::AnchorEngineDepthCopy,  // Main::RenderDepth's end (and the later copies of the same depth)
@@ -132,16 +133,15 @@ namespace FrameAnchors
 			Segment::LightCulling,              // Light Limit Fix's Prepass
 			Segment::AnchorPrepass,             // after every feature's Prepass
 			Segment::AnchorSky,                 // the main pass's sky batch, before Drawcall Limit Fix's colour epoch
-			Segment::RegionPreMain,             // the pre-main region
+			Segment::PhasePreMain,              // the pre-main phase: submitted at the main opaque epoch
 			Segment::MainOpaque,
 			Segment::AnchorDeferredPasses,     // EndDeferred, after the blended decals
 			Segment::AnchorDeferredComposite,  // DeferredPasses, after the D3D11 SSGI and SSS
 			Segment::AnchorPostComposite,      // DeferredPasses' end, after the composite
-			Segment::RegionDeferred,           // the deferred region
 			Segment::AnchorEngineDraws,        // the water, before the forward epoch (nominally here: the shadow masks and the water mask run before, the blood after)
+			Segment::PhaseDeferred,            // the deferred phase: submitted at the forward epoch
 			Segment::Forward,
 			Segment::AnchorEngineQueries,  // the sun's occlusion queries, after Main::RenderWorld's accumulator (nominally here: a second runs later in the frame)
-			Segment::RegionEngineDraws,    // the engine draws and water region
 			Segment::FirstPerson,
 			Segment::AnchorVolumetricLighting,  // RenderWorldPostProcess's VL apply and blur, before the composites and Main_PostProcessing
 			Segment::AnchorPostProcessing,      // Main_PostProcessing, before the upscaler
@@ -150,14 +150,13 @@ namespace FrameAnchors
 			Segment::AnchorEngineCopy,          // the engine's kMAIN copy, between the chain's batches (nominally here; native mode only)
 			Segment::AnchorTonemap,             // in the ImageSpace chain after it
 			Segment::AnchorFrameGeneration,     // after the ImageSpace chain, before frame generation
-			Segment::RegionPost,                // the post region
 			Segment::AnchorMovieTiles,          // a Bink movie inside another frame, at its tile draw (nominally here: the frame's UI time)
 			Segment::AnchorInterface,           // Scaleform's displays (UI::DrawInterface), several times a frame
 			Segment::AnchorPresent,
 			Segment::AnchorOverlay,    // the overlay's ImGui draw, inside HDRDisplay's present chain
 			Segment::AnchorHDROutput,  // HDRDisplay's output composite, after the overlay
 			Segment::AnchorCapture,    // the screenshot capture, at the end of HDRDisplay's present chain
-			Segment::RegionInterface,  // the interface and present region
+			Segment::PhasePost,        // the post phase: after the first-person epoch (which does not submit it), submitted at the present
 		};
 
 		std::uint32_t RankOf(std::uint32_t a_segment)
@@ -173,82 +172,100 @@ namespace FrameAnchors
 		std::uint32_t EpochOfAnchor(Anchor a_anchor) { return RenderGraphRuntime::EpochOf(static_cast<Segment>(SegmentOf(a_anchor))); }
 
 		/**
-		 * @brief The frame regions: each anchor's, in engine order. An anchor that runs at several places of the frame
-		 * (the engine's clears and copies, its draw families) belongs to the region of its main place. Membership alone changes nothing:
-		 * an anchor's passes move to the region's epoch only when they are all gated (Snapshot::merged), and a run joins the held
-		 * execution only when nothing else reached the GPU since its last run (FlushRegions).
+		 * @brief The frame phases (native mode): the stretches of the frame between Drawcall Limit Fix's epochs. Each phase is one epoch whose
+		 * graph holds the passes of its member anchors. Every run of a member in that stretch writes into the phase's one held execution, which
+		 * is submitted when the frame reaches the next epoch (or the present). A run's phase is the stretch it runs in: the DCLF epoch submitted
+		 * last this frame (PhaseOfGap). Membership starts from the census (kPhaseOrder) and is learned: a gated anchor that runs in a phase
+		 * whose graph lacks it runs in its own epoch, and the phase's graph is built again with it.
 		 */
-		enum class Region : std::uint8_t
+		enum class Phase : std::uint8_t
 		{
-			Shadows,      // the engine's shadow map clears, the decal occlusion tests at the frame's start
-			PreMain,      // the early prepass, the reflection faces (cube clears, their sky, the reflections prepass), the depth's clears and copies, depth done, the prepass, the sky
-			Deferred,     // the deferred passes, the composite, the post-composite
-			EngineDraws,  // the engine's draw families (shadow masks, water, precipitation, blood, menu scenes) and the sun queries
-			Post,         // volumetric lighting, post-processing, the upscale, ImageSpace, the kMAIN copy, the tonemap, frame generation
-			Interface,    // Scaleform, Bink inside a frame, the present, the overlay, HDR output, the capture
+			FrameStart,  // before the shadow view: the reflection faces, the shadow clears (and every run of a frame without DCLF epochs)
+			PreDepth,    // between the shadow view and the Z-prepass: the early prepass, the main depth's clear
+			PreMain,     // between the Z-prepass and the main opaque epoch
+			Deferred,    // between the main opaque and the forward epochs
+			Post,        // after the forward epoch: placed after the first-person epoch, which does not submit it
 			Count,
 			None = Count,
 		};
-		constexpr std::uint32_t kRegions = static_cast<std::uint32_t>(Region::Count);
+		constexpr std::uint32_t kPhases = static_cast<std::uint32_t>(Phase::Count);
 
-		// By Anchor, in its order.
-		constexpr std::array<Region, kAnchors> kRegionOf{ {
-			Region::PreMain,      // ReflectionsPrepass
-			Region::PreMain,      // SkyReflections
-			Region::PreMain,      // EarlyPrepass
-			Region::PreMain,      // DepthDone
-			Region::PreMain,      // Prepass
-			Region::PreMain,      // Sky
-			Region::Deferred,     // DeferredPasses
-			Region::Deferred,     // DeferredComposite
-			Region::Deferred,     // PostComposite
-			Region::Post,         // PostProcessing
-			Region::Post,         // Upscale
-			Region::Post,         // Tonemap
-			Region::Post,         // FrameGeneration
-			Region::Interface,    // Present
-			Region::Interface,    // Overlay
-			Region::Interface,    // HDROutput
-			Region::Interface,    // Capture
-			Region::Shadows,      // EngineShadowClear
-			Region::PreMain,      // EngineCubeClear
-			Region::PreMain,      // EngineFrameClear
-			Region::PreMain,      // EngineDepthCopy
-			Region::Interface,    // Interface
-			Region::Post,         // ImageSpace
-			Region::EngineDraws,  // EngineDraws
-			Region::EngineDraws,  // EngineQueries
-			Region::Post,         // VolumetricLighting
-			Region::Shadows,      // DecalQueries
-			Region::Interface,    // MovieTiles
-			Region::Post,         // EngineCopy
+		constexpr std::array<SegmentNames, kPhases> kPhaseNames{ {
+			{ "CS phase: frame start", "CS phase: frame start inputs", "FramePhases::FrameStart / ", "cs.phase.frame-start" },
+			{ "CS phase: pre-depth", "CS phase: pre-depth inputs", "FramePhases::PreDepth / ", "cs.phase.pre-depth" },
+			{ "CS phase: pre-main", "CS phase: pre-main inputs", "FramePhases::PreMain / ", "cs.phase.pre-main" },
+			{ "CS phase: deferred", "CS phase: deferred inputs", "FramePhases::Deferred / ", "cs.phase.deferred" },
+			{ "CS phase: post", "CS phase: post inputs", "FramePhases::Post / ", "cs.phase.post" },
 		} };
 
-		constexpr std::array<SegmentNames, kRegions> kRegionNames{ {
-			{ "CS region: shadows", "CS region: shadows inputs", "FrameRegions::Shadows / ", "cs.region.shadows" },
-			{ "CS region: pre-main", "CS region: pre-main inputs", "FrameRegions::PreMain / ", "cs.region.pre-main" },
-			{ "CS region: deferred", "CS region: deferred inputs", "FrameRegions::Deferred / ", "cs.region.deferred" },
-			{ "CS region: engine draws", "CS region: engine draws inputs", "FrameRegions::EngineDraws / ", "cs.region.engine-draws" },
-			{ "CS region: post", "CS region: post inputs", "FrameRegions::Post / ", "cs.region.post" },
-			{ "CS region: interface", "CS region: interface inputs", "FrameRegions::Interface / ", "cs.region.interface" },
+		std::uint32_t PhaseIndex(Phase a_phase) { return static_cast<std::uint32_t>(a_phase); }
+		Segment PhaseSegment(Phase a_phase) { return static_cast<Segment>(static_cast<std::uint32_t>(Segment::PhaseFrameStart) + PhaseIndex(a_phase)); }
+		std::uint32_t EpochOfPhase(Phase a_phase) { return RenderGraphRuntime::EpochOf(PhaseSegment(a_phase)); }
+
+		/**
+		 * @brief Each phase's anchors in the order they run there, from the frame sequence census (CS_ORG_FRAME_SEQUENCE, a world frame).
+		 * It is the seed of the phase's membership, and the order of its graph's passes. An anchor not listed comes after the listed ones, in
+		 * kTimeline's order. A run out of this order starts another execution of the phase.
+		 */
+		constexpr std::array<std::array<Anchor, 16>, kPhases> kPhaseOrder{ {
+			{ Anchor::DecalQueries, Anchor::ReflectionsPrepass, Anchor::EngineCubeClear, Anchor::SkyReflections, Anchor::EngineShadowClear, Anchor::Count,
+				Anchor::Count, Anchor::Count, Anchor::Count, Anchor::Count, Anchor::Count, Anchor::Count, Anchor::Count, Anchor::Count, Anchor::Count,
+				Anchor::Count },
+			{ Anchor::EarlyPrepass, Anchor::EngineFrameClear, Anchor::Count, Anchor::Count, Anchor::Count, Anchor::Count, Anchor::Count, Anchor::Count,
+				Anchor::Count, Anchor::Count, Anchor::Count, Anchor::Count, Anchor::Count, Anchor::Count, Anchor::Count, Anchor::Count },
+			{ Anchor::EngineDepthCopy, Anchor::DepthDone, Anchor::EngineFrameClear, Anchor::EngineDraws, Anchor::Prepass, Anchor::Sky, Anchor::Count,
+				Anchor::Count, Anchor::Count, Anchor::Count, Anchor::Count, Anchor::Count, Anchor::Count, Anchor::Count, Anchor::Count, Anchor::Count },
+			{ Anchor::EngineDepthCopy, Anchor::DeferredPasses, Anchor::DeferredComposite, Anchor::PostComposite, Anchor::EngineFrameClear, Anchor::EngineDraws,
+				Anchor::ImageSpace, Anchor::EngineCopy, Anchor::Count, Anchor::Count, Anchor::Count, Anchor::Count, Anchor::Count, Anchor::Count, Anchor::Count,
+				Anchor::Count },
+			{ Anchor::EngineQueries, Anchor::EngineDraws, Anchor::VolumetricLighting, Anchor::PostProcessing, Anchor::Upscale, Anchor::ImageSpace,
+				Anchor::EngineCopy, Anchor::EngineFrameClear, Anchor::Tonemap, Anchor::FrameGeneration, Anchor::MovieTiles, Anchor::Interface, Anchor::Present,
+				Anchor::Overlay, Anchor::HDROutput, Anchor::Capture },
 		} };
 
-		std::uint32_t RegionIndex(Region a_region) { return static_cast<std::uint32_t>(a_region); }
-		Segment RegionSegment(Region a_region) { return static_cast<Segment>(static_cast<std::uint32_t>(Segment::RegionShadows) + RegionIndex(a_region)); }
-		std::uint32_t EpochOfRegion(Region a_region) { return RenderGraphRuntime::EpochOf(RegionSegment(a_region)); }
-
-		/** @brief The anchors of a region, one bit per anchor. */
-		std::uint32_t MembersOf(Region a_region)
+		/** @brief The anchors kPhaseOrder lists for a phase, a bit each: its first members. */
+		std::uint32_t PhaseSeed(Phase a_phase)
 		{
 			std::uint32_t mask = 0;
-			for (std::uint32_t i = 0; i < kAnchors; ++i)
-				if (kRegionOf[i] == a_region)
-					mask |= 1u << i;
+			for (const Anchor anchor : kPhaseOrder[PhaseIndex(a_phase)])
+				if (anchor != Anchor::Count)
+					mask |= 1u << static_cast<std::uint32_t>(anchor);
 			return mask;
 		}
 
-		/** @brief Where an anchor's runs sit in its region's order (its segment's place in the frame): a held execution's passes run in it. */
-		std::uint32_t AnchorRank(std::uint32_t a_index) { return RankOf(SegmentOf(static_cast<Anchor>(a_index))); }
+		/**
+		 * @brief The phase of the stretch after DCLF epoch a_gap (a Segment value; UINT32_MAX before any this frame). The forward epoch's
+		 * stretch belongs to the post phase: its runs (the sun queries) go after the first-person epoch.
+		 */
+		Phase PhaseOfGap(std::uint32_t a_gap)
+		{
+			switch (static_cast<Segment>(a_gap)) {
+			case Segment::ShadowView:
+			case Segment::SkyOcclusion:
+				return Phase::PreDepth;
+			case Segment::ZPrepass:
+			case Segment::FirstPersonDepth:
+			case Segment::Reflection:
+				return Phase::PreMain;
+			case Segment::MainOpaque:
+				return Phase::Deferred;
+			case Segment::Forward:
+			case Segment::FirstPerson:
+				return Phase::Post;
+			default:
+				return Phase::FrameStart;
+			}
+		}
+
+		/** @brief Where anchor a_index's passes and runs sit in a_phase: its place in kPhaseOrder, or after those in kTimeline's order. */
+		std::uint32_t PhaseRank(Phase a_phase, std::uint32_t a_index)
+		{
+			const auto& order = kPhaseOrder[PhaseIndex(a_phase)];
+			for (std::uint32_t i = 0; i < order.size(); ++i)
+				if (order[i] != Anchor::Count && static_cast<std::uint32_t>(order[i]) == a_index)
+					return i;
+			return static_cast<std::uint32_t>(order.size()) + RankOf(SegmentOf(static_cast<Anchor>(a_index)));
+		}
 
 		/** @brief D3D11 textures the imports let go of on any thread, released on the render thread (ServiceRetiredTextures). */
 		struct RetiredTextures
@@ -332,8 +349,10 @@ namespace FrameAnchors
 			std::vector<std::shared_ptr<const ClientDesc>> clients;  // registration order, the ones in the graphs
 			std::vector<ScheduledPass> passes;                       // by anchor, then order key, then registration
 			std::vector<std::pair<std::string, std::shared_ptr<org::VersionedTexture>>> imports;  // each id's slot
-			// Regions: the anchors whose passes are in their region's epoch, not their own (every pass gated, regions on). A bit per anchor.
+			// Phases: the anchors whose passes are all gated, which can run in a phase's epoch (phases on). A bit per anchor.
 			std::uint32_t merged = 0;
+			// Each phase's members in its graph: the learned members that are merged.
+			std::array<std::uint32_t, kPhases> members{};
 		};
 
 		/** @brief A registered client and what the anchors keep about it. Render thread. */
@@ -359,14 +378,14 @@ namespace FrameAnchors
 			std::uint64_t serial = 0;  // the first snapshot without them
 		};
 
-		/** @brief Regions: the execution a region holds now, which FlushRegions submits. Render owner. */
+		/** @brief Phases: the execution a phase holds now, which FlushRegions submits. Render owner. */
 		struct Held
 		{
-			Region region = Region::None;
+			Phase phase = Phase::None;
 			std::uint32_t epoch = 0;
-			std::shared_ptr<const Snapshot> built;  // the region graph's snapshot when the hold began: the graph the held ticket is of
+			std::shared_ptr<const Snapshot> built;  // the phase graph's snapshot when the hold began: the graph the held ticket is of
 			std::uint32_t anchors = 0;              // the anchors whose runs committed into it, a bit each
-			std::uint32_t lastRank = 0;             // the rank of the last of them (AnchorRank)
+			std::uint32_t lastRank = 0;             // the rank of the last of them (PhaseRank)
 			// The clients whose commits wrote into the run, with the anchor of each commit.
 			std::vector<std::pair<std::uint32_t, std::shared_ptr<const ClientDesc>>> committed;
 			bool sharedConstants = false;    // CS's shared constants were written into the run
@@ -375,10 +394,10 @@ namespace FrameAnchors
 			std::uint64_t externalWork = 0;  // ExternalWork's submissions when the hold began
 		};
 
-		/** @brief Regions: what the executions held and why they were submitted, since the last report (LogRunStats). Render owner. */
-		struct RegionStats
+		/** @brief Phases: what the executions held and why they were submitted, since the last report (LogRunStats). Render owner. */
+		struct PhaseStats
 		{
-			std::uint64_t executions = 0;                               // region executions submitted, once each however many runs joined
+			std::uint64_t executions = 0;                               // phase executions submitted, once each however many runs joined
 			std::uint64_t runs = 0;                                     // anchor runs they held
 			std::uint64_t lost = 0;                                     // held runs a build gave back before their submission
 			std::uint64_t failed = 0;                                   // held executions whose submission failed (not in executions)
@@ -418,15 +437,22 @@ namespace FrameAnchors
 			// failed build (OnEpochFailed); a failed build that kept the old graph puts the one before back.
 			std::array<std::atomic<std::shared_ptr<const Snapshot>>, kAnchors> builtSnapshots{};
 			std::array<std::atomic<std::shared_ptr<const Snapshot>>, kAnchors> previousSnapshots{};
-			// Regions: which have an epoch (AddToFrame), and each region graph's snapshots, as for the anchors above.
-			std::array<bool, kRegions> regionEpochs{};
-			std::array<std::atomic<std::shared_ptr<const Snapshot>>, kRegions> regionSnapshots{};
-			std::array<std::atomic<std::shared_ptr<const Snapshot>>, kRegions> regionPrevious{};
+			// Phases: whether they have epochs (AddToFrame), and each phase graph's snapshots, as for the anchors above.
+			std::array<bool, kPhases> phaseEpochs{};
+			std::array<std::atomic<std::shared_ptr<const Snapshot>>, kPhases> phaseSnapshots{};
+			std::array<std::atomic<std::shared_ptr<const Snapshot>>, kPhases> phasePrevious{};
+			// Each phase's members, a bit per anchor: kPhaseOrder's at first, and every gated anchor seen running in it since (Run). Only
+			// ever added to. Publish copies them into the snapshot.
+			std::array<std::uint32_t, kPhases> learned{};
+			// The DCLF epoch submitted last this frame (a Segment value, UINT32_MAX for none), and the host seal it was noted under:
+			// the stretch of the frame a run is in (PhaseOfGap).
+			std::uint32_t gap = UINT32_MAX;
+			std::uint64_t gapSeal = 0;
 			std::optional<Held> held;
 			std::atomic<bool> holding{ false };  // held has a value: FlushRegions' check without the mutex
 			bool flushing = false;               // FlushRegions is submitting the held execution
 			bool committing = false;             // a run's commits are writing into the held run
-			RegionStats regionStats;
+			PhaseStats phaseStats;
 		};
 
 		State& Anchors()
@@ -490,57 +516,45 @@ namespace FrameAnchors
 			return Anchor::Count;
 		}
 
-		/** @brief The region of a region epoch's graph, or None. */
-		Region RegionOfEpoch(std::uint32_t a_epoch)
+		/** @brief The phase of a phase epoch's graph, or None. */
+		Phase PhaseOfEpoch(std::uint32_t a_epoch)
 		{
-			for (std::uint32_t r = 0; r < kRegions; ++r)
-				if (Anchors().regionEpochs[r] && a_epoch == EpochOfRegion(static_cast<Region>(r)))
-					return static_cast<Region>(r);
-			return Region::None;
+			for (std::uint32_t p = 0; p < kPhases; ++p)
+				if (Anchors().phaseEpochs[p] && a_epoch == EpochOfPhase(static_cast<Phase>(p)))
+					return static_cast<Phase>(p);
+			return Phase::None;
 		}
 
 		/**
-		 * @brief The snapshot the graph that holds the anchor's passes was built from: its region's graph when that one merged it, else
-		 * its own graph when that one did not. Null when neither holds them yet (a move between the two not attached yet, or no build).
-		 * a_region: the region whose graph holds them, or None.
+		 * @brief The snapshot the anchor's own graph was built from. Its own graph always holds its passes: a merged anchor that runs in a
+		 * phase whose graph lacks it runs there.
 		 */
-		std::shared_ptr<const Snapshot> HolderSnapshot(const State& a_state, std::uint32_t a_index, Region* a_region = nullptr)
+		std::shared_ptr<const Snapshot> OwnSnapshot(const State& a_state, std::uint32_t a_index)
 		{
-			if (a_region)
-				*a_region = Region::None;
-			const auto region = kRegionOf[a_index];
-			if (region != Region::None && a_state.regionEpochs[RegionIndex(region)])
-				if (auto built = a_state.regionSnapshots[RegionIndex(region)].load(std::memory_order_acquire); built && (built->merged >> a_index & 1u)) {
-					if (a_region)
-						*a_region = region;
-					return built;
-				}
-			auto own = a_state.builtSnapshots[a_index].load(std::memory_order_acquire);
-			return own && !(own->merged >> a_index & 1u) ? own : nullptr;
+			return a_state.builtSnapshots[a_index].load(std::memory_order_acquire);
 		}
 
-		/** @brief HolderSnapshot's serial: a client registered (or refreshed) at that serial or before is in the anchor's built graph. */
+		/** @brief OwnSnapshot's serial: a client registered (or refreshed) at that serial or before is in the anchor's built graph. */
 		std::uint64_t BuiltSerial(const State& a_state, std::uint32_t a_index)
 		{
-			const auto built = HolderSnapshot(a_state, a_index);
+			const auto built = OwnSnapshot(a_state, a_index);
 			return built ? built->serial : 0;
 		}
 
-		/** @brief The epochs whose graphs hold (or will hold) the passes of the anchors in a_mask: each one's own, and its region's. */
+		/** @brief The epochs whose graphs hold (or will hold) the passes of the anchors in a_mask: each one's own, and the phases they are in. */
 		std::vector<std::uint32_t> EpochsOf(const State& a_state, std::uint32_t a_mask)
 		{
 			std::vector<std::uint32_t> epochs;
-			std::array<bool, kRegions> regions{};
+			std::uint32_t anchors = 0;
 			for (std::uint32_t i = 0; i < kAnchors; ++i) {
 				if (!(a_mask >> i & 1u) || !a_state.reserved[i])
 					continue;
 				epochs.push_back(EpochOfAnchor(static_cast<Anchor>(i)));
-				if (const auto region = kRegionOf[i]; region != Region::None && a_state.regionEpochs[RegionIndex(region)])
-					regions[RegionIndex(region)] = true;
+				anchors |= 1u << i;
 			}
-			for (std::uint32_t r = 0; r < kRegions; ++r)
-				if (regions[r])
-					epochs.push_back(EpochOfRegion(static_cast<Region>(r)));
+			for (std::uint32_t p = 0; p < kPhases; ++p)
+				if (a_state.phaseEpochs[p] && (a_state.learned[p] & anchors))
+					epochs.push_back(EpochOfPhase(static_cast<Phase>(p)));
 			return epochs;
 		}
 
@@ -568,13 +582,10 @@ namespace FrameAnchors
 			});
 			for (const auto& [id, import] : a_state.imports)
 				snapshot->imports.emplace_back(id, import->slot);
-			// Regions: an anchor whose passes are all gated moves them into its region's epoch. A one-shot pass is never gated: it
-			// would run at every execution of the region.
-			if (RegionsOn())
+			// Phases: an anchor whose passes are all gated can run in a phase's epoch. A one-shot pass is never gated: it would run at
+			// every execution of the phase.
+			if (RegionsOn()) {
 				for (std::uint32_t i = 0; i < kAnchors; ++i) {
-					const auto region = kRegionOf[i];
-					if (region == Region::None || !a_state.regionEpochs[RegionIndex(region)])
-						continue;
 					bool any = false;
 					bool gated = true;
 					for (const auto& scheduled : snapshot->passes)
@@ -585,6 +596,10 @@ namespace FrameAnchors
 					if (any && gated)
 						snapshot->merged |= 1u << i;
 				}
+				for (std::uint32_t p = 0; p < kPhases; ++p)
+					if (a_state.phaseEpochs[p])
+						snapshot->members[p] = a_state.learned[p] & snapshot->merged;
+			}
 			a_state.snapshot.store(std::move(snapshot), std::memory_order_release);
 		}
 
@@ -654,10 +669,11 @@ namespace FrameAnchors
 						continue;
 					if (a_state.built[i].load(std::memory_order_acquire) < a_retired.serial)
 						return false;
-					// Regions: the region's graph may hold the old passes too.
-					if (const auto region = kRegionOf[i]; region != Region::None && a_state.regionEpochs[RegionIndex(region)] &&
-														  builtFrom(a_state.regionSnapshots[RegionIndex(region)].load(std::memory_order_acquire)) < a_retired.serial)
-						return false;
+					// Phases: a phase's graph may hold the old passes too.
+					for (std::uint32_t p = 0; p < kPhases; ++p)
+						if (a_state.phaseEpochs[p] && (a_state.learned[p] >> i & 1u) &&
+							builtFrom(a_state.phaseSnapshots[p].load(std::memory_order_acquire)) < a_retired.serial)
+							return false;
 				}
 				return true;
 			});
@@ -739,8 +755,8 @@ namespace FrameAnchors
 		}
 
 		/**
-		 * @brief The anchors' passes in each graph: an anchor epoch's graph takes its anchor's passes, a region epoch's graph the passes of
-		 * its merged anchors (Snapshot::merged); each registers the clients' resources and the engine imports. Every other epoch's graph
+		 * @brief The anchors' passes in each graph: an anchor epoch's graph takes its anchor's passes, a phase epoch's graph the passes of
+		 * its members (Snapshot::members); each registers the clients' resources and the engine imports. Every other epoch's graph
 		 * gets nothing from it.
 		 */
 		class AnchorExtension final : public org::RenderGraph::IRenderGraphExtension
@@ -755,8 +771,8 @@ namespace FrameAnchors
 					return;
 				const std::uint32_t epoch = a_graph.PassEpochFilter();
 				const Anchor anchor = AnchorOfEpoch(epoch);
-				const Region region = anchor == Anchor::Count ? RegionOfEpoch(epoch) : Region::None;
-				if (anchor == Anchor::Count && region == Region::None)
+				const Phase phase = anchor == Anchor::Count ? PhaseOfEpoch(epoch) : Phase::None;
+				if (anchor == Anchor::Count && phase == Phase::None)
 					return;
 				// What the run that submits this graph reads (ClientDesc::executed, one-shot passes): the graph holds this snapshot's passes.
 				// Recorded when the graph is installed: at its attach for a build the build manager makes (on its own thread, and possibly
@@ -773,14 +789,14 @@ namespace FrameAnchors
 					if (!RenderGraph::Builds::Defer(commit, onFailed))
 						commit();
 				} else {
-					const auto r = RegionIndex(region);
+					const auto r = PhaseIndex(phase);
 					const auto commit = [r, built = snapshot] {
 						auto& anchors = Anchors();
-						anchors.regionPrevious[r].store(anchors.regionSnapshots[r].load(std::memory_order_acquire), std::memory_order_release);
-						anchors.regionSnapshots[r].store(built, std::memory_order_release);
+						anchors.phasePrevious[r].store(anchors.phaseSnapshots[r].load(std::memory_order_acquire), std::memory_order_release);
+						anchors.phaseSnapshots[r].store(built, std::memory_order_release);
 					};
-					const auto onFailed = [region, built = snapshot](const std::string& a_error) {
-						DropFailedClients(MembersOf(region) & built->merged, kRegionNames[RegionIndex(region)].label, built, a_error);
+					const auto onFailed = [r, built = snapshot](const std::string& a_error) {
+						DropFailedClients(built->members[r], kPhaseNames[r].label, built, a_error);
 					};
 					if (!RenderGraph::Builds::Defer(commit, onFailed))
 						commit();
@@ -792,7 +808,7 @@ namespace FrameAnchors
 				for (const auto& client : snapshot->clients)
 					if (client->registerResources)
 						client->registerResources(a_graph);
-				if (UsesSharedConstantsIn(snapshot->clients, AnchorsIn(anchor, region)))
+				if (UsesSharedConstantsIn(snapshot->clients, AnchorsIn(anchor, phase)))
 					SharedConstants::Register(a_graph);
 			}
 
@@ -802,8 +818,8 @@ namespace FrameAnchors
 					return;
 				const std::uint32_t epoch = a_graph.PassEpochFilter();
 				const Anchor anchor = AnchorOfEpoch(epoch);
-				const Region region = anchor == Anchor::Count ? RegionOfEpoch(epoch) : Region::None;
-				const std::uint32_t anchors = AnchorsIn(anchor, region);
+				const Phase phase = anchor == Anchor::Count ? PhaseOfEpoch(epoch) : Phase::None;
+				const std::uint32_t anchors = AnchorsIn(anchor, phase);
 				if (!anchors)
 					return;
 				// The shared constants' upload first: the passes that read them follow it (the graph orders them by the buffers).
@@ -816,10 +832,12 @@ namespace FrameAnchors
 				for (const auto& scheduled : snapshot->passes)
 					if (anchors >> IndexOf(scheduled.pass->anchor) & 1u)
 						passes.push_back(scheduled.pass);
-				// A region's graph runs its anchors in the frame's order (a held execution only ever holds runs in that order), each
+				// A phase's graph runs its anchors in the phase's order (a held execution only ever holds runs in that order), each
 				// anchor's passes by their order keys.
-				if (region != Region::None)
-					std::ranges::stable_sort(passes, [](const PassDesc* a, const PassDesc* b) { return AnchorRank(IndexOf(a->anchor)) < AnchorRank(IndexOf(b->anchor)); });
+				if (phase != Phase::None)
+					std::ranges::stable_sort(passes, [phase](const PassDesc* a, const PassDesc* b) {
+						return PhaseRank(phase, IndexOf(a->anchor)) < PhaseRank(phase, IndexOf(b->anchor));
+					});
 				for (const auto* scheduled : passes) {
 					const auto& pass = *scheduled;
 					auto made = pass.make ? pass.make() : nullptr;
@@ -842,13 +860,16 @@ namespace FrameAnchors
 			}
 
 		private:
-			/** @brief The anchors whose passes this snapshot puts in the graph: an anchor's own unless merged, a region's merged ones. */
-			std::uint32_t AnchorsIn(Anchor a_anchor, Region a_region) const
+			/**
+			 * @brief The anchors whose passes this snapshot puts in the graph: an anchor's own always (a merged anchor's runs fall back to it in
+			 * a phase whose graph lacks it), a phase's members.
+			 */
+			std::uint32_t AnchorsIn(Anchor a_anchor, Phase a_phase) const
 			{
 				if (a_anchor != Anchor::Count)
-					return (1u << IndexOf(a_anchor)) & ~snapshot->merged;
-				if (a_region != Region::None)
-					return MembersOf(a_region) & snapshot->merged;
+					return 1u << IndexOf(a_anchor);
+				if (a_phase != Phase::None)
+					return snapshot->members[PhaseIndex(a_phase)];
 				return 0;
 			}
 
@@ -1338,9 +1359,9 @@ namespace FrameAnchors
 
 	const SegmentNames* NamesOf(std::uint32_t a_segment)
 	{
-		const std::uint32_t regions = static_cast<std::uint32_t>(Segment::RegionShadows);
-		if (a_segment >= regions && a_segment - regions < kRegions)
-			return &kRegionNames[a_segment - regions];
+		const std::uint32_t phases = static_cast<std::uint32_t>(Segment::PhaseFrameStart);
+		if (a_segment >= phases && a_segment - phases < kPhases)
+			return &kPhaseNames[a_segment - phases];
 		const std::uint32_t first = static_cast<std::uint32_t>(Segment::AnchorReflectionsPrepass);
 		if (a_segment < first || a_segment - first >= kAnchors)
 			return nullptr;
@@ -1349,10 +1370,10 @@ namespace FrameAnchors
 
 	bool IsUnusedSegment(std::uint32_t a_segment)
 	{
-		const std::uint32_t regions = static_cast<std::uint32_t>(Segment::RegionShadows);
-		if (a_segment >= regions && a_segment - regions < kRegions) {
+		const std::uint32_t phases = static_cast<std::uint32_t>(Segment::PhaseFrameStart);
+		if (a_segment >= phases && a_segment - phases < kPhases) {
 			const auto& state = Anchors();
-			return !state.frozen || !state.regionEpochs[a_segment - regions];
+			return !state.frozen || !state.phaseEpochs[a_segment - phases];
 		}
 		const std::uint32_t first = static_cast<std::uint32_t>(Segment::AnchorReflectionsPrepass);
 		if (a_segment < first || a_segment - first >= kAnchors)
@@ -1659,7 +1680,7 @@ namespace FrameAnchors
 			if (!RenderGraph::Engine::Native::Requested())
 				return false;
 			if (!RenderGraphRuntime::EpochsEnabled() || Switches::Equals("CS_ORG_ASYNC_EPOCHS", "0")) {
-				logger::warn("[ORG] frame regions need epochs and async epochs; every anchor keeps its own epoch");
+				logger::warn("[ORG] frame phases need epochs and async epochs; every anchor keeps its own epoch");
 				return false;
 			}
 			return true;
@@ -1682,7 +1703,7 @@ namespace FrameAnchors
 			try {
 				(void)a_state.host->ReleaseHeldEpochTicket(epoch);
 			} catch (const std::exception& e) {
-				logger::error("[ORG] frame regions: a held run could not be given back: {}", e.what());
+				logger::error("[ORG] frame phases: a held run could not be given back: {}", e.what());
 			}
 		}
 
@@ -1702,7 +1723,7 @@ namespace FrameAnchors
 
 		/**
 		 * @brief Submits the held execution: every run it holds reaches the GPU now, ahead of the work that asked for it (a_why, counted
-		 * in the region statistics). Render owner, under the anchors' mutex.
+		 * in the phase statistics). Render owner, under the anchors' mutex.
 		 */
 		void SubmitHeld(State& a_state, const char* a_why)
 		{
@@ -1712,7 +1733,7 @@ namespace FrameAnchors
 				// A commit asked for GPU work while it wrote into the held run: the execution is submitted after the commits instead.
 				static std::atomic_flag logged;
 				if (!logged.test_and_set())
-					logger::warn("[ORG] frame regions: GPU work was submitted from inside a commit ({}); the held execution goes after it (logged once)", a_why);
+					logger::warn("[ORG] frame phases: GPU work was submitted from inside a commit ({}); the held execution goes after it (logged once)", a_why);
 				return;
 			}
 			Held held = std::move(*a_state.held);
@@ -1721,15 +1742,15 @@ namespace FrameAnchors
 			auto& runtime = RenderGraphRuntime::Get();
 			if (!runtime.IsActive() || !a_state.host)
 				return;
-			const char* name = kRegionNames[RegionIndex(held.region)].label;
+			const char* name = kPhaseNames[PhaseIndex(held.phase)].label;
 			// A build of the region's epoch gave the ticket back (the build points submit first, so this should not happen): what its
 			// runs wrote is gone, and a new ticket would run their passes with nothing opened.
 			if (!a_state.host->HoldsEpochTicket(held.epoch)) {
-				++a_state.regionStats.lost;
+				++a_state.phaseStats.lost;
 				static std::atomic_flag logged;
 				if (!logged.test_and_set())
 					logger::error(
-						"[ORG] frame regions: a build gave the {} execution's held run back before its submission; its {} anchor runs are lost "
+						"[ORG] frame phases: a build gave the {} execution's held run back before its submission; its {} anchor runs are lost "
 						"(logged once)",
 						name, held.runs);
 				return;
@@ -1737,7 +1758,7 @@ namespace FrameAnchors
 			RenderGraphRuntime::EpochResult result = RenderGraphRuntime::EpochResult::Stopped;
 			a_state.flushing = true;
 			try {
-				result = runtime.TryExecuteEpoch(RegionSegment(held.region));
+				result = runtime.TryExecuteEpoch(PhaseSegment(held.phase));
 			} catch (...) {
 				a_state.flushing = false;
 				throw;
@@ -1745,13 +1766,13 @@ namespace FrameAnchors
 			a_state.flushing = false;
 			if (result != RenderGraphRuntime::EpochResult::Submitted) {
 				// It did not reach the GPU: counted as failed, not as an execution.
-				++a_state.regionStats.failed;
+				++a_state.phaseStats.failed;
 				// Nothing was submitted; a ticket still held goes back.
 				if (a_state.host->HoldsEpochTicket(held.epoch)) {
 					try {
 						(void)a_state.host->ReleaseHeldEpochTicket(held.epoch);
 					} catch (const std::exception& e) {
-						logger::error("[ORG] frame regions: a held run could not be given back: {}", e.what());
+						logger::error("[ORG] frame phases: a held run could not be given back: {}", e.what());
 					}
 				}
 				// Only the region's epoch failed: its clients are dropped at the next poll (OnEpochFailed). Otherwise the graph stopped.
@@ -1760,9 +1781,9 @@ namespace FrameAnchors
 				return;
 			}
 			// An execution counts once, with all the runs that joined it.
-			++a_state.regionStats.executions;
-			a_state.regionStats.runs += held.runs;
-			a_state.regionStats.Count(a_why);
+			++a_state.phaseStats.executions;
+			a_state.phaseStats.runs += held.runs;
+			a_state.phaseStats.Count(a_why);
 			// An epoch must not be the last GPU work before a third-party Vulkan consumer (render-graph.md, "Hazard: external Vulkan
 			// work directly after a graph epoch").
 			if (held.late && a_state.lateHook)
@@ -1774,10 +1795,10 @@ namespace FrameAnchors
 
 		/**
 		 * @brief Why a run of anchor a_index cannot write into the held execution (null: it can). Its passes must come after every
-		 * pass the execution's runs opened (the region's graph runs anchors in frame order, each one's passes by order key), and no
+		 * pass the execution's runs opened (the phase's graph runs anchors in its order, each one's passes by order key), and no
 		 * latch region or gate entry may be written twice.
 		 */
-		/** @brief A lasting copy of a_text, for RegionStats' causes (which keep pointers). Render owner. */
+		/** @brief A lasting copy of a_text, for PhaseStats' causes (which keep pointers). Render owner. */
 		const char* Interned(std::string a_text)
 		{
 			static std::set<std::string> texts;
@@ -1800,8 +1821,9 @@ namespace FrameAnchors
 		{
 			const bool repeat = (a_held.anchors >> a_index & 1u) != 0;
 			// A new anchor comes after the last one; a repeat only directly after itself.
-			if (repeat ? AnchorRank(a_index) != a_held.lastRank : AnchorRank(a_index) <= a_held.lastRank)
-				return "an anchor out of the region's order";
+			const std::uint32_t rank = PhaseRank(a_held.phase, a_index);
+			if (repeat ? rank != a_held.lastRank : rank <= a_held.lastRank)
+				return Interned(fmt::format("an anchor out of the phase's order ({})", kInfo[a_index].name));
 			const auto committed = [&](const std::shared_ptr<const ClientDesc>& a_desc) {
 				return std::ranges::any_of(a_held.committed, [&](const auto& a_entry) { return a_entry.second == a_desc; });
 			};
@@ -1825,36 +1847,58 @@ namespace FrameAnchors
 				static std::atomic_flag logged;
 				if (!logged.test_and_set())
 					logger::warn(
-						"[ORG] frame regions: external work (RenderGraph::ExternalWork) was submitted while a region held anchor runs; it ran "
+						"[ORG] frame phases: external work (RenderGraph::ExternalWork) was submitted while a phase held anchor runs; it ran "
 						"ahead of them (logged once)");
 				return "external work";
 			}
 			return nullptr;
 		}
 
+		/** @brief The phase of the frame's stretch now: after the DCLF epoch submitted last since the host's last seal. Render owner. */
+		Phase CurrentPhase(const State& a_state)
+		{
+			if (!a_state.host || a_state.gapSeal != a_state.host->Seals())
+				return Phase::FrameStart;
+			return PhaseOfGap(a_state.gap);
+		}
+
 		/**
-		 * @brief A run of a merged anchor (its passes in a_region's built graph): its commits write into the region's held run, which is
+		 * @brief A merged anchor ran in a phase whose members lack it: it joins them, and the phase's graph is built again (off the render
+		 * thread, attached at a frame boundary). Until then its runs there take its own epoch. Render owner, under the anchors' mutex.
+		 */
+		void LearnMember(State& a_state, Phase a_phase, std::uint32_t a_index)
+		{
+			const auto p = PhaseIndex(a_phase);
+			a_state.learned[p] |= 1u << a_index;
+			logger::info("[ORG] frame phases: {} ran in the {} phase; its graph is built again with it (until then the anchor's runs there take its own epoch)",
+				kInfo[a_index].name, kPhaseNames[p].label);
+			Publish(a_state);
+			RenderGraph::Builds::Request(EpochOfPhase(a_phase), fmt::format("frame phases: {} joins {}", kInfo[a_index].name, kPhaseNames[p].label));
+		}
+
+		/**
+		 * @brief A run of a merged anchor (its passes in a_phase's built graph): its commits write into the phase's held run, which is
 		 * submitted later (SubmitHeld). Returns Ran once they did: the passes reach the GPU before any later GPU work, so the clients'
 		 * executed callbacks run now.
 		 */
-		RunResult Capture(State& a_state, const Point& a_point, Region a_region, const std::shared_ptr<const Snapshot>& a_built,
+		RunResult Capture(State& a_state, const Point& a_point, Phase a_phase, const std::shared_ptr<const Snapshot>& a_built,
 			const std::vector<RunClient>& a_clients)
 		{
 			const std::uint32_t index = IndexOf(a_point.anchor);
-			const char* name = kRegionNames[RegionIndex(a_region)].label;
+			const char* name = kPhaseNames[PhaseIndex(a_phase)].label;
 			const bool sharedConstants = std::ranges::any_of(a_clients, [&](const RunClient& a_client) { return a_client.desc->sharedConstants; });
 			// The held execution takes this run, or is submitted first.
-			if (a_state.held && a_state.held->region != a_region)
-				SubmitHeld(a_state, "another region's anchor");
+			if (a_state.held && a_state.held->phase != a_phase)
+				SubmitHeld(a_state, "another phase");
 			if (a_state.held && a_state.held->built != a_built)
-				SubmitHeld(a_state, "a new graph of the region");
+				SubmitHeld(a_state, "a new graph of the phase");
 			if (a_state.held)
 				if (const char* why = JoinRefusal(*a_state.held, index, a_clients, sharedConstants))
 					SubmitHeld(a_state, why);
 			if (!RenderGraphRuntime::Get().IsActive())
 				return { RunStatus::Failed };
 			auto& host = *a_state.host;
-			const std::uint32_t epoch = EpochOfRegion(a_region);
+			const std::uint32_t epoch = EpochOfPhase(a_phase);
 			if (!a_state.held) {
 				try {
 					(void)host.HoldEpochTicket(epoch);
@@ -1862,16 +1906,16 @@ namespace FrameAnchors
 					// Only the region's epoch failed: its clients are dropped at the next poll (OnEpochFailed).
 					static std::atomic_flag logged;
 					if (!logged.test_and_set())
-						logger::error("[ORG] frame regions: the {} epoch did not run, its graph failed: {} (logged once)", name, e.what());
+						logger::error("[ORG] frame phases: the {} epoch did not run, its graph failed: {} (logged once)", name, e.what());
 					return { RunStatus::Failed };
 				} catch (const std::exception& e) {
-					logger::error("[ORG] frame regions: the {} execution could not take its run: {}", name, e.what());
+					logger::error("[ORG] frame phases: the {} execution could not take its run: {}", name, e.what());
 					StopAll(a_state, name);
 					return { RunStatus::Failed };
 				}
 				a_state.held.emplace();
 				auto& held = *a_state.held;
-				held.region = a_region;
+				held.phase = a_phase;
 				held.epoch = epoch;
 				held.built = a_built;
 				held.externalWork = RenderGraph::ExternalWork::Submissions();
@@ -1879,7 +1923,7 @@ namespace FrameAnchors
 				// Every gate of the graph's passes closed first: the execution does work only where its runs' commits open it. That
 				// includes the gates of registrations whose passes the graph still holds after they left (RetiredGates).
 				host.UseHeldRun(epoch);
-				const std::uint32_t merged = MembersOf(a_region) & a_built->merged;
+				const std::uint32_t merged = a_built->members[PhaseIndex(a_phase)];
 				for (const auto& client : a_built->clients)
 					if (AnchorMask(*client) & merged)
 						for (const auto& gate : client->gates)
@@ -1926,7 +1970,7 @@ namespace FrameAnchors
 			for (auto& desc : committed)
 				held.committed.emplace_back(index, std::move(desc));
 			held.anchors |= 1u << index;
-			held.lastRank = AnchorRank(index);
+			held.lastRank = PhaseRank(a_phase, index);
 			held.late = held.late || kInfo[index].late;
 			++held.runs;
 			// The run is counted, and the peak reported (LogRunStats).
@@ -1959,9 +2003,28 @@ namespace FrameAnchors
 		auto lock = Guard();
 		if (!state.held || state.flushing)
 			return;
-		if (a_segment != UINT32_MAX && a_segment == static_cast<std::uint32_t>(RegionSegment(state.held->region)))
-			return;
+		if (a_segment != UINT32_MAX) {
+			const auto held = static_cast<std::uint32_t>(PhaseSegment(state.held->phase));
+			if (a_segment == held)
+				return;
+			// A DCLF epoch that comes before the held phase in the frame (the first-person epoch, for the post phase's sun queries) runs
+			// first: the phase's work goes after it.
+			if (RenderGraphRuntime::IsDclfSegment(static_cast<Segment>(a_segment)) && RankOf(held) > RankOf(a_segment))
+				return;
+		}
 		SubmitHeld(state, a_why);
+	}
+
+	void NoteEpochSubmitted(std::uint32_t a_segment)
+	{
+		if (!RegionsOn() || !RenderGraphRuntime::IsDclfSegment(static_cast<Segment>(a_segment)) || !IsRenderOwner())
+			return;
+		auto lock = Guard();
+		auto& state = Anchors();
+		if (!state.host)
+			return;
+		state.gap = a_segment;
+		state.gapSeal = state.host->Seals();
 	}
 
 	RunResult Run(const Point& a_point)
@@ -1997,10 +2060,22 @@ namespace FrameAnchors
 		}
 		if (!work)
 			return { RunStatus::Idle };
-		// Regions: an anchor whose passes are in its region's built graph writes into the region's held run.
-		Region holder = Region::None;
-		if (auto holderBuilt = HolderSnapshot(state, index, &holder); holder != Region::None)
-			return Capture(state, a_point, holder, holderBuilt, clients);
+		// Phases: a merged anchor whose passes are in its phase's built graph writes into the phase's held run.
+		if (RegionsOn()) {
+			const Phase phase = CurrentPhase(state);
+			const auto p = PhaseIndex(phase);
+			const auto snapshot = state.snapshot.load(std::memory_order_acquire);
+			if (state.phaseEpochs[p] && snapshot && (snapshot->merged >> index & 1u)) {
+				const auto phaseBuilt = state.phaseSnapshots[p].load(std::memory_order_acquire);
+				const bool member = phaseBuilt && (phaseBuilt->members[p] >> index & 1u);
+				// Every active client is in the phase's graph: one registered since it was built runs in the anchor's own graph until then.
+				const bool current = member && std::ranges::all_of(clients, [&](const RunClient& a_client) { return !a_client.active || a_client.serial <= phaseBuilt->serial; });
+				if (current)
+					return Capture(state, a_point, phase, phaseBuilt, clients);
+				if (!(state.learned[p] >> index & 1u))
+					LearnMember(state, phase, index);
+			}
+		}
 		// Every run takes a run lease of the host's: an anchor may run any number of times a frame without waiting for one of its
 		// runs of the same frame, which DXVK has not submitted yet. The runs are counted for the report alone (LogRunStats).
 		auto& runs = RunsSinceSeal(state, index);
@@ -2020,9 +2095,6 @@ namespace FrameAnchors
 			result = runtime.TryExecuteEpoch(segment, [&](org::RenderGraph&) {
 				// The graph this run submits is built by now.
 				built = state.built[index].load(std::memory_order_acquire);
-				// Regions: a graph built after the anchor's passes moved to its region's epoch holds none of them.
-				if (const auto own = state.builtSnapshots[index].load(std::memory_order_acquire); own && (own->merged >> index & 1u))
-					built = 0;
 				RenderGraph::RunShapes::BeginRun();
 				if (sharedConstants)
 					SharedConstants::Commit();
@@ -2160,28 +2232,45 @@ namespace FrameAnchors
 
 	namespace
 	{
-		/** @brief The regions' report since the last one: executions, the runs they held, and why each was submitted. */
+		/** @brief The phases' report since the last one: executions, the runs they held, and why each was submitted. */
 		void LogRegionStats()
 		{
 			auto lock = Guard();
 			auto& state = Anchors();
-			if (!RegionsOn() || std::ranges::none_of(state.regionEpochs, [](bool a_epoch) { return a_epoch; }))
+			if (!RegionsOn() || std::ranges::none_of(state.phaseEpochs, [](bool a_epoch) { return a_epoch; }))
 				return;
-			auto& stats = state.regionStats;
+			auto& stats = state.phaseStats;
 			std::string causes;
 			for (const auto& [why, count] : stats.causes)
 				causes += fmt::format("{}{} {}", causes.empty() ? "" : ", ", why, count);
-			std::string merged;
+			std::string members;
 			if (const auto snapshot = state.snapshot.load(std::memory_order_acquire))
-				for (std::uint32_t i = 0; i < kAnchors; ++i)
-					if (snapshot->merged >> i & 1u)
-						merged += fmt::format("{}{}", merged.empty() ? "" : ", ", kInfo[i].name);
+				for (std::uint32_t p = 0; p < kPhases; ++p) {
+					std::string names;
+					for (std::uint32_t i = 0; i < kAnchors; ++i)
+						if (snapshot->members[p] >> i & 1u)
+							names += fmt::format("{}{}", names.empty() ? "" : " ", kInfo[i].name);
+					members += fmt::format("{}{} [{}]", members.empty() ? "" : "; ", kPhaseNames[p].label, names);
+				}
+			// Each anchor that keeps its own epoch, with the passes that keep it there (not gated, or one-shot).
+			std::string ungated;
+			if (const auto snapshot = state.snapshot.load(std::memory_order_acquire))
+				for (std::uint32_t i = 0; i < kAnchors; ++i) {
+					if (!state.reserved[i] || (snapshot->merged >> i & 1u))
+						continue;
+					std::string passes;
+					for (const auto& scheduled : snapshot->passes)
+						if (IndexOf(scheduled.pass->anchor) == i && (!scheduled.pass->gated || scheduled.pass->once))
+							passes += fmt::format("{}{}{}", passes.empty() ? "" : " ", scheduled.pass->name, scheduled.pass->once ? "(once)" : "");
+					if (!passes.empty())
+						ungated += fmt::format("{}{} [{}]", ungated.empty() ? "" : "; ", kInfo[i].name, passes);
+				}
 			// Joins: runs that went into an execution another run had opened (runs minus executions).
 			logger::info(
-				"[ORG] frame regions: {} executions held {} anchor runs ({:.2f} each, {} joins); {} lost to a build, {} failed; submitted before: {}; "
-				"anchors in their region's epoch: {}",
+				"[ORG] frame phases: {} executions held {} anchor runs ({:.2f} each, {} joins); {} lost to a build, {} failed; submitted before: {}; "
+				"members: {}; anchors with ungated passes (their own epochs): {}",
 				stats.executions, stats.runs, stats.executions ? double(stats.runs) / double(stats.executions) : 0.0, stats.runs - stats.executions,
-				stats.lost, stats.failed, causes.empty() ? std::string("nothing") : causes, merged.empty() ? std::string("none") : merged);
+				stats.lost, stats.failed, causes.empty() ? std::string("nothing") : causes, members, ungated.empty() ? std::string("none") : ungated);
 			stats = {};
 		}
 	}
@@ -2335,17 +2424,17 @@ namespace FrameAnchors
 		auto& state = Anchors();
 		const Anchor anchor = AnchorOfEpoch(a_epoch);
 		if (anchor == Anchor::Count) {
-			// A region's epoch: the clients of its merged anchors in the failed build are dropped, as for an anchor's.
-			const Region region = RegionOfEpoch(a_epoch);
-			if (region == Region::None)
+			// A phase's epoch: the clients of its members in the failed build are dropped, as for an anchor's.
+			const Phase phase = PhaseOfEpoch(a_epoch);
+			if (phase == Phase::None)
 				return;
-			const auto r = RegionIndex(region);
-			const auto failed = state.regionSnapshots[r].load(std::memory_order_acquire);
+			const auto r = PhaseIndex(phase);
+			const auto failed = state.phaseSnapshots[r].load(std::memory_order_acquire);
 			if (a_keptGraph)
-				state.regionSnapshots[r].store(state.regionPrevious[r].load(std::memory_order_acquire), std::memory_order_release);
-			if (state.held && state.held->region == region)
+				state.phaseSnapshots[r].store(state.phasePrevious[r].load(std::memory_order_acquire), std::memory_order_release);
+			if (state.held && state.held->phase == phase)
 				DropHeld(state);
-			DropFailedClients(MembersOf(region) & (failed ? failed->merged : 0u), kRegionNames[r].label, failed, a_error);
+			DropFailedClients(failed ? failed->members[r] : 0u, kPhaseNames[r].label, failed, a_error);
 			return;
 		}
 		const std::uint32_t index = IndexOf(anchor);
@@ -2377,16 +2466,13 @@ namespace FrameAnchors
 			const auto after = std::ranges::find_if(a_epochs, [&](std::uint32_t a_epoch) { return RankOf(a_epoch) > RankOf(segment); });
 			a_epochs.insert(after, epoch);
 		}
-		// Regions: an epoch for each region with a reserved anchor, placed after its last anchor in the frame.
+		// Phases: an epoch for each, at its place in the frame, with the census's members to start with.
 		if (!RegionsOn())
 			return;
-		for (std::uint32_t i = 0; i < kAnchors; ++i)
-			if (state.reserved[i] && kRegionOf[i] != Region::None)
-				state.regionEpochs[RegionIndex(kRegionOf[i])] = true;
-		for (std::uint32_t r = 0; r < kRegions; ++r) {
-			if (!state.regionEpochs[r])
-				continue;
-			const auto segment = static_cast<std::uint32_t>(RegionSegment(static_cast<Region>(r)));
+		for (std::uint32_t r = 0; r < kPhases; ++r) {
+			state.phaseEpochs[r] = true;
+			state.learned[r] = PhaseSeed(static_cast<Phase>(r));
+			const auto segment = static_cast<std::uint32_t>(PhaseSegment(static_cast<Phase>(r)));
 			const std::uint32_t epoch = RenderGraphRuntime::EpochOf(static_cast<Segment>(segment));
 			if (std::ranges::find(a_epochs, epoch) != a_epochs.end())
 				continue;
@@ -2406,14 +2492,14 @@ namespace FrameAnchors
 			if (state.reserved[i])
 				a_host.SetEpochTicketsAhead(EpochOfAnchor(static_cast<Anchor>(i)), most);
 		std::string regions;
-		for (std::uint32_t r = 0; r < kRegions; ++r)
-			if (state.regionEpochs[r]) {
-				a_host.SetEpochTicketsAhead(EpochOfRegion(static_cast<Region>(r)), most);
-				regions += fmt::format("{}{} (epoch {})", regions.empty() ? "" : ", ", kRegionNames[r].label, EpochOfRegion(static_cast<Region>(r)));
+		for (std::uint32_t r = 0; r < kPhases; ++r)
+			if (state.phaseEpochs[r]) {
+				a_host.SetEpochTicketsAhead(EpochOfPhase(static_cast<Phase>(r)), most);
+				regions += fmt::format("{}{} (epoch {})", regions.empty() ? "" : ", ", kPhaseNames[r].label, EpochOfPhase(static_cast<Phase>(r)));
 			}
 		if (!regions.empty())
 			logger::info(
-				"[ORG] frame regions: {}; an anchor whose passes are all gated runs in its region's epoch, and consecutive "
+				"[ORG] frame phases: {}; an anchor whose passes are all gated runs in the epoch of the phase it runs in, and a phase's "
 				"runs share one execution",
 				regions);
 	}
@@ -2455,6 +2541,7 @@ namespace FrameAnchors
 	bool InRun() { return false; }
 	bool RegionsOn() { return false; }
 	void FlushRegions(const char*, std::uint32_t) {}
+	void NoteEpochSubmitted(std::uint32_t) {}
 	void LatchMainThread() {}
 	bool IsRenderOwner() { return true; }
 	void ClaimRenderOwnership() {}

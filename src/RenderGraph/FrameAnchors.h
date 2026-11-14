@@ -541,17 +541,23 @@ namespace FrameAnchors
 	 */
 	void ReleaseImport(std::string_view a_id);
 
-	/** @brief Whether regions are on (native mode, with epochs and async epochs). Any thread. */
+	/** @brief Whether the frame phases are on (native mode, with epochs and async epochs). Any thread. */
 	bool RegionsOn();
 
 	/**
-	 * @brief Regions: the region execution held now (if any) is submitted, because GPU work that must follow it is about to be
-	 * submitted (a_why, a static string, counted in the region statistics). a_segment: the epoch about to be submitted, which is not
-	 * flushed when it is the held region's own. Render owner only; nothing elsewhere or when nothing is held. Cheap when regions are
-	 * off. RenderGraphRuntime calls it before every epoch, external epoch and external commands and at build points; the present
-	 * hook calls it before the present.
+	 * @brief Phases: the phase execution held now (if any) is submitted, because GPU work that must follow it is about to be
+	 * submitted (a_why, a static string, counted in the phase statistics). a_segment: the epoch about to be submitted. The held
+	 * execution is not submitted when that is the held phase's own epoch, or a DCLF epoch the held phase comes after in the frame.
+	 * Render owner only; nothing elsewhere or when nothing is held. Cheap when phases are off. RenderGraphRuntime calls it before
+	 * every epoch, external epoch and external commands and at build points; the present hook calls it before the present.
 	 */
 	void FlushRegions(const char* a_why, std::uint32_t a_segment = UINT32_MAX);
+
+	/**
+	 * @brief Phases: epoch a_segment was submitted. A DCLF epoch moves the frame into the next phase: the anchor runs after it go to
+	 * that phase's execution. Render owner. RenderGraphRuntime calls it after FlushRegions for every epoch.
+	 */
+	void NoteEpochSubmitted(std::uint32_t a_segment);
 
 	// What RenderGraphRuntime asks of the anchors.
 
