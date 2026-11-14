@@ -37,7 +37,7 @@ namespace DCLF::Features::BloodSplatter
 
 		// RE::RENDER_TARGETS::kFRAMEBUFFER: the back buffer, which Main::RenderScreenSplatter binds.
 		constexpr std::int32_t kFramebuffer = 0;
-		// The most draws one batch latches (BloodSplatterDraws' latch has room for this many). A hit draws a few splatters.
+		// The most draws one run latches (BloodSplatterDraws' latch has room for this many); a batch with more draws in several runs.
 		constexpr std::size_t kMaxLatched = 32;
 
 		/** @brief The inherent refusals, each logged once per reason. */
@@ -86,9 +86,12 @@ namespace DCLF::Features::BloodSplatter
 		/** @brief A splatter draw latched (null); the reason when it cannot be (the engine draws it then). */
 		const char* TryLatchDraw(Capture& a_capture, const Family::TriShape* a_shape, std::uint32_t a_start, std::uint32_t a_triangles)
 		{
+			// A full run is drawn now and the batch goes on in a new one: no draw is refused for the count.
+			if (a_capture.run->draws.size() >= kMaxLatched) {
+				FlushLatched(a_capture);
+				a_capture.run = std::make_shared<Run>();
+			}
 			auto& run = *a_capture.run;
-			if (run.draws.size() >= kMaxLatched)
-				return "more draws than the batch latches";
 			const auto& rss = RE::BSGraphics::RendererShadowState::GetSingleton()->GetRuntimeData();
 			const auto* vs = rss.currentVertexShader;
 			const auto* ps = rss.currentPixelShader;

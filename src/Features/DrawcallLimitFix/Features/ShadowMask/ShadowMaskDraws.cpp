@@ -36,7 +36,7 @@ namespace DCLF::Features::ShadowMask::ShadowMaskDraws
 	namespace
 	{
 		constexpr const char* kShader = "Utility.hlsl";
-		// The most draws a batch latches (ShadowMaskCapture's kMaxLatched).
+		// The most draws a run latches (ShadowMaskCapture's kMaxLatched).
 		constexpr std::uint32_t kMaxDraws = 32;
 		constexpr std::uint32_t kDrawStride = static_cast<std::uint32_t>(sizeof(DrawConstants));
 		constexpr std::size_t kViews = static_cast<std::size_t>(View::Count);

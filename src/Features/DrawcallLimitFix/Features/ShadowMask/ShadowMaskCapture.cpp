@@ -36,8 +36,8 @@ namespace DCLF::Features::ShadowMask
 		using ::RenderGraph::Engine::Tripwire::Unwrap;
 		using Stage = Family::Constants::Stage;
 
-		// The most draws one batch latches (ShadowMaskDraws' latch has room for this many): one per shadow-casting light, which the
-		// engine caps far below this.
+		// The most draws one run latches (ShadowMaskDraws' latch has room for this many): one per shadow-casting light, which the
+		// engine caps far below this. A batch with more draws in several runs.
 		constexpr std::size_t kMaxLatched = 32;
 
 		/** @brief The inherent refusals, each logged once per reason. */
@@ -100,9 +100,14 @@ namespace DCLF::Features::ShadowMask
 		 */
 		const char* TryLatchDraw(Capture& a_capture, const Family::TriShape* a_shape, std::uint32_t a_start, std::uint32_t a_triangles, std::string& a_detail)
 		{
+			// A full run is drawn now and the batch goes on in a new one: no draw is refused for the count.
+			if (a_capture.run->draws.size() >= kMaxLatched) {
+				const auto view = a_capture.run->view;
+				FlushLatched(a_capture);
+				a_capture.run = std::make_shared<Run>();
+				a_capture.run->view = view;
+			}
 			auto& run = *a_capture.run;
-			if (run.draws.size() >= kMaxLatched)
-				return "more draws than the batch latches";
 			const auto& rss = RE::BSGraphics::RendererShadowState::GetSingleton()->GetRuntimeData();
 			const auto* vs = rss.currentVertexShader;
 			const auto* ps = rss.currentPixelShader;
