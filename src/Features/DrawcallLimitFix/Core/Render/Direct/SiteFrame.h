@@ -237,7 +237,9 @@ namespace DCLF::Direct::detail
 		std::atomic<std::uint32_t> nextWorker{ 0 };
 		WindowCounters window;
 		bool loggedNoCallback = false, loggedNotAdopted = false, loggedNoLatePass = false, loggedExternal = false;
-		rhi::CommandSignaturePtr indirectSignature;  // one indexed draw at IndirectDraw's stride
+		rhi::CommandSignaturePtr indirectSignature;  // Vulkan's: one indexed draw at IndirectDraw's stride, read past its instance word
+		// D3D12's, by the layout they were made for (IndirectSignatureFor): the instance word, then the indexed draw.
+		std::vector<std::pair<rhi::PipelineLayoutHandle, rhi::CommandSignaturePtr>> layoutSignatures;
 		// Emit's scratch (render thread): a site's waits and signals for DXVK's submission.
 		std::vector<rhi::TimelinePoint> emitWaits, emitSignals;
 	};

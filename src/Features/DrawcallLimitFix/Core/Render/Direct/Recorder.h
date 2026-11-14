@@ -32,11 +32,14 @@ namespace DCLF::Direct
 	class CullArena;
 
 	/**
-	 * @brief A draw in a frame slot's draw buffer: an indexed draw's arguments, which a cull job writes, then what its stages read through
-	 * its instance (firstInstance: its own index in the buffer; DCLFObjects.hlsli, DCLFDrawSequence). The stride of an indirect run.
+	 * @brief A draw in a frame slot's draw buffer: its instance word, an indexed draw's arguments, which a cull job writes, then what its
+	 * stages read through its instance (its own index in the buffer; DCLFObjects.hlsli, DCLFDrawSequence). The stride of an indirect run.
+	 * D3D12's SV_InstanceID does not count the first instance, so D3D12's signature writes the instance word into the draw push word the
+	 * pulled stages add (kDrawPushInstance) before the arguments; Vulkan's signature reads the arguments alone (IndirectBuffer::argumentsOffset).
 	 */
 	struct IndirectDraw
 	{
+		std::uint32_t instance;  // its index in the buffer, as firstInstance
 		std::uint32_t indexCount;
 		std::uint32_t instanceCount;
 		std::uint32_t firstIndex;
@@ -45,7 +48,7 @@ namespace DCLF::Direct
 		std::uint32_t sequence;    // the resident sequence's index
 		std::uint32_t objectWord;  // with its per-frame bits
 	};
-	static_assert(sizeof(IndirectDraw) == 28 && offsetof(IndirectDraw, sequence) == 20);
+	static_assert(sizeof(IndirectDraw) == 32 && offsetof(IndirectDraw, indexCount) == 4 && offsetof(IndirectDraw, sequence) == 24);  // DCLFDrawSequence's
 
 	/** @brief Consecutive draws in the buffer with one pipeline: one indirect draw. */
 	struct IndirectRun
@@ -59,7 +62,10 @@ namespace DCLF::Direct
 	/** @brief A frame slot's draw buffer, as its recordings read it (null in RecordContext::indirect: draw directly). */
 	struct IndirectBuffer
 	{
-		rhi::CommandSignatureHandle signature{};
+		rhi::CommandSignatureHandle signature{};  // Vulkan's: the arguments alone, for every layout
+		// D3D12's: the instance word then the arguments, made for the layout the list has bound (a root signature's own); null on Vulkan.
+		rhi::CommandSignatureHandle (*signatureFor)(rhi::PipelineLayoutHandle a_layout) = nullptr;
+		std::uint64_t argumentsOffset = 0;  // where in a draw the signature starts reading (Vulkan: past the instance word)
 		rhi::ResourceHandle buffer{};
 		RenderGraph::BufferRef ref;  // the draws' buffer view ref, which the pulled stages read their records through
 		// The cull jobs': the mapped draws, the capacity, and the draws reserved so far (past capacity: those batches draw directly, and
@@ -152,6 +158,7 @@ namespace DCLF::Direct
 
 		// Set by BeginList; RecordBatch's.
 		RecordPass pass = RecordPass::Colour;
+		rhi::PipelineLayoutHandle layout{};  // the layout the list's draws bind (an indirect run's D3D12 signature is made for it)
 		std::uint32_t boundBucket = ~0u;
 		rhi::PipelineHandle boundPipeline{};
 		std::uint64_t boundVertexLayout = 0;  // a shadow bucket's (ShadowIndirectState::vertexLayouts), pushed with each of its draws

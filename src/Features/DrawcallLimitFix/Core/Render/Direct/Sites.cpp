@@ -22,6 +22,7 @@
 #include "Features/DrawcallLimitFix/Core/Runtime/SceneScheduler.h"
 #include "Features/DrawcallLimitFix/Core/Settings/Switches.h"
 #include "Features/DrawcallLimitFix/Core/Settings/Toggles.h"
+#include "RenderGraph/Backend.h"
 
 #include <ORGModuleServices/BackingPool.h>
 #include <Render/RenderGraph/ExternalEpochExecution.h>
@@ -1322,6 +1323,33 @@ namespace DCLF::Direct::detail
 		constexpr std::uint32_t kMinimumIndirectDraws = 1u << 15;
 
 		/**
+		 * @brief Render thread (D3D12 records only in native mode, inline): D3D12's indirect draw signature for a_layout, made once a layout:
+		 * the draw's instance word into kDrawPushInstance, then its arguments. A root constant argument names the layout's root signature,
+		 * so each layout the runs draw under (the Z-prepass's, the shadow views') has its own. Null when it cannot be made (logged once).
+		 */
+		rhi::CommandSignatureHandle IndirectSignatureFor(rhi::PipelineLayoutHandle a_layout)
+		{
+			auto& s = S();
+			const auto same = [&](const auto& a_entry) { return a_entry.first.index == a_layout.index && a_entry.first.generation == a_layout.generation; };
+			if (const auto found = std::find_if(s.layoutSignatures.begin(), s.layoutSignatures.end(), same); found != s.layoutSignatures.end())
+				return found->second ? found->second->GetHandle() : rhi::CommandSignatureHandle{};
+			rhi::IndirectArg args[2]{};
+			args[0].kind = rhi::IndirectArgKind::Constant;
+			args[0].u.rootConstants = { 0, kDrawPushInstance, 1 };
+			args[1].kind = rhi::IndirectArgKind::DrawIndexed;
+			rhi::CommandSignatureDesc desc{};
+			desc.args = { args, 2 };
+			desc.byteStride = sizeof(IndirectDraw);
+			auto& entry = s.layoutSignatures.emplace_back(a_layout, rhi::CommandSignaturePtr{});
+			if (s.device.CreateCommandSignature(desc, a_layout, entry.second) != rhi::Result::Ok || !entry.second) {
+				entry.second = {};
+				logger::error("[DCLF] CPU pipeline: a D3D12 indirect draws' signature could not be made; those runs draw nothing");
+				return {};
+			}
+			return entry.second->GetHandle();
+		}
+
+		/**
 		 * @brief Render thread, a CPU frame's start, its slot retired: the slot's draw buffer, large enough for what its last frame reserved
 		 * with room to spare, or none (its draws direct) outside Indirect mode.
 		 */
@@ -1359,7 +1387,9 @@ namespace DCLF::Direct::detail
 				logger::error("[DCLF] CPU pipeline: the indirect draws' buffer has no {}; its views draw directly", mapped ? "buffer view ref" : "mapping");
 				return;
 			}
-			a_slot.indirect = { s.indirectSignature->GetHandle(), resource.GetHandle(), ref, static_cast<IndirectDraw*>(mapped), capacity, &a_slot.drawCursor };
+			const bool d3d12 = ::RenderGraph::Backend::IsD3D12();
+			a_slot.indirect = { s.indirectSignature->GetHandle(), d3d12 ? &IndirectSignatureFor : nullptr, d3d12 ? 0u : offsetof(IndirectDraw, indexCount), resource.GetHandle(),
+				ref, static_cast<IndirectDraw*>(mapped), capacity, &a_slot.drawCursor };
 		}
 	}
 

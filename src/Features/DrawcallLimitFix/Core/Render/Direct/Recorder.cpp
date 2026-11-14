@@ -9,6 +9,7 @@
 #include "Features/DrawcallLimitFix/Core/Render/Resources/IndexPool.h"
 #include "Features/DrawcallLimitFix/Core/Scene/Model/Records.h"
 #include "Features/DrawcallLimitFix/Core/Shading/LightingConstants.h"
+#include "RenderGraph/Backend.h"
 
 #include <rhi.h>
 
@@ -215,7 +216,11 @@ namespace DCLF::Direct
 				list.DrawIndexed(args.indexCount, 1, poolFirst + args.firstIndex, 0, 0);
 				return true;
 			}
-			a_context.runWordsPushed = false;
+			// After a D3D12 run, whose signature left its last draw's instance in the instance word: 0 again, the direct draws' instance.
+			if (std::exchange(a_context.runWordsPushed, false) && a_context.indirect && a_context.indirect->signatureFor) {
+				const std::uint32_t zero = 0;
+				list.PushConstants(rhi::ShaderStage::AllGraphics, 0, kDrawPushBinding, kDrawPushInstance, 1, &zero);
+			}
 			std::uint32_t words[kDirectDrawWords]{};
 			Split(words + kZDrawPushSequences, set.sequencesRef + std::uint64_t(a_sequence) * sizeof(DrawSequence));
 			switch (a_context.pass) {
@@ -339,6 +344,9 @@ namespace DCLF::Direct
 		{
 			auto& list = a_context.list;
 			const IndirectBuffer& buffer = *a_context.indirect;
+			const rhi::CommandSignatureHandle signature = buffer.signatureFor ? buffer.signatureFor(a_context.layout) : buffer.signature;
+			if (!signature.valid())
+				return;
 			const auto sameHandle = [](rhi::PipelineHandle a, rhi::PipelineHandle b) { return a.index == b.index && a.generation == b.generation; };
 			std::uint32_t drawn = 0;
 			for (std::uint32_t r = a_batch.runStart[a_part]; r < a_batch.runStart[a_part + 1]; ++r) {
@@ -365,7 +373,7 @@ namespace DCLF::Direct
 				a_context.boundBucket = ~0u;
 				a_context.boundPipeline = run.pipeline;
 				a_context.boundVertexLayout = run.vertexLayout;
-				list.ExecuteIndirect(buffer.signature, buffer.buffer, std::uint64_t(run.first) * sizeof(IndirectDraw), {}, 0, run.count);
+				list.ExecuteIndirect(signature, buffer.buffer, std::uint64_t(run.first) * sizeof(IndirectDraw) + buffer.argumentsOffset, {}, 0, run.count);
 				++a_context.indirects;
 				drawn += run.count;
 			}
@@ -409,14 +417,16 @@ namespace DCLF::Direct
 		                                                                                    bindings.main->zLayout;
 		if (!layout.valid() || (a_context.pass == RecordPass::Refraction && !bindings.main->refraction.valid()))
 			return false;
+		a_context.layout = layout;
 		auto& list = a_context.list;
 		list.SetDescriptorHeaps(bindings.resourceHeap, bindings.samplerHeap);
 		list.SetPrimitiveTopology(rhi::PrimitiveTopology::TriangleList);
 		// A colour list binds the main layout at its first bucket with a colour pipeline (BindBucket). The pushed pipelines are the main
 		// set's, built for the main pass's formats: the reflection's faces draw into the cube's (R16G16B16A16 against the main target's
 		// R11G11B10), so they keep their own view pipelines (VUID-vkCmdDrawIndexed-dynamicRenderingUnusedAttachments-08911), as does a
-		// rendering without every main target (RecordContext::mainTargets).
-		a_context.pushedColour = !a_context.indirect && bindings.main && bindings.main->layout.valid() &&
+		// rendering without every main target (RecordContext::mainTargets). Vulkan only: D3D12 builds no unpulled pipelines, so the
+		// pushed experiments are no-ops there.
+		a_context.pushedColour = !a_context.indirect && !::RenderGraph::Backend::IsD3D12() && bindings.main && bindings.main->layout.valid() &&
 		                         ((a_context.pass == RecordPass::Colour && a_context.view != ViewType::Reflection && a_context.mainTargets && ExperimentOn(kExpPushedColour) &&
 		                              !bindings.main->colour.empty()) ||
 		                          (a_context.pass == RecordPass::Depth && ExperimentOn(kExpPushedDepth) && !bindings.offsetDepth && !bindings.main->depth.empty()));
@@ -518,6 +528,7 @@ namespace DCLF::Direct
 				++open->count;
 				// Write-combined memory: written in order, never read.
 				IndirectDraw& draw = mapped[at];
+				draw.instance = at;
 				draw.indexCount = args->indexCount;
 				indices += args->indexCount;
 				draw.instanceCount = 1;
