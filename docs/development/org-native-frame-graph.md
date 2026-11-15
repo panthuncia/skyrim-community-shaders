@@ -2094,3 +2094,152 @@ Not run: the RX 6600, a frozen-world capture frame (no tour reached one), a Bink
 - A segment's late batch is recorded inline at every submission. The composite and IBL SH are the candidates for latched instances
   recorded ahead (2x2 composite variants by interior and normals parity); the normals parity must then be checked against the engine's
   choice at the tap.
+
+## The declared frame, stage 4: the post description (2026-11-15, `org-native/phases`)
+
+Stage 4 of the declared-frame plan asked for the post chain as a declared segment (S4). This stage did the three items that come
+before it: the river tap errors, per-instance taps, and the post description, checked against every world post chain the engine
+draws. The declared chain itself (S4 drawing from declared instances) and S3's tail are not built; "What is left" says why and what
+they need.
+
+**The river tap errors** (commit `fix(org): age ImageSpace shapes by effect runs`). The 51 to 56 `host skipped` errors in the
+`coc Riverwood` load frames had nothing to do with segments. They appear exactly in the river runs whose log says "ISWaterBlend into
+rt1 is a shape this session did not register" (every river run since 2026-11-14 that had them; none of those without). The shape
+manifest dropped a shape after sixteen sessions that did not draw it, whatever those sessions showed, so the water shapes (the water
+blend into kMAIN_COPY, the displacement and wading shapes) fell out after a run of sessions without water. The next river session drew
+them on first sight: each stayed with the engine until its late pass was built (about 60 frames), no ImageSpace run followed the
+kWATER clear that waits for one as its host, and the TAA mask's own ticket went first. The run with segments off that had none ran
+right after a river run, which had put the shapes back. Fix: a shape ages only in sessions in which its effect drew something (the
+manifest keeps a session count per effect; an old manifest loads with every shape fresh). Checked with the manifest's session number
+moved on by 20: all 107 shapes kept, 0 tap errors in the river run. In native mode the shape manifest goes away with the declared
+chain; guest keeps it.
+
+**Per-instance taps** (`FrameAnchors.h`: `ClientDesc::maxInstances`, `ClientDesc::instances`, `PassDesc::makeInstance`,
+`TapInstance`, `InstanceEntry`). A hook that repeats inside one segment run (each ImageSpace effect call, each reflection face) is a
+declared instance:
+- A client with `maxInstances` above 1 has each pass made once per instance in a segment's graph (`<name>.i<k>`); its own anchor
+  epoch makes instance 0 only.
+- `instances`, read at Begin like `declared`, is how many do work this frame. It is part of the segment's description
+  (`SegmentFields::instances`, one byte per client, in the hash and the diff), and the passes of the instances past it record only
+  their barriers (`SetSkipWhen`).
+- The segment counts each step's taps in its held run. The k-th tap is instance k: the client's commit reads `TapInstance()` and
+  writes instance k's gate entries and latch regions (`InstanceEntry(k, perInstance, entry)`), never the anchor's single set.
+- A tap past the declared count is a tap error (`instance not declared`) and its commit is not called. That includes a second tap
+  of a client without instances in one segment run, which before this silently wrote over the first tap's regions. None of the runs
+  below had one.
+No client uses instances yet: they are for the declared chain (one instance per effect step) and S0 (one per reflection face).
+
+**The post description** (`RenderGraph/Frame/PostChain.*`, `Description::post`, `PostFields`; switch `CS_ORG_SEGMENT_POST`, default
+on where the ImageSpace hooks are installed, that is native mode). The world post chain is `ImageSpaceManager::RenderWorldPostProcess`
+(SE 100430, AE 107148): the volumetric lighting, then `RenderPreTonemapComposites` (99024 / 105675), then, inside Upscaling's wrapper,
+`RenderEndOfFrameEffects` (99023 / 105674). Its order is fixed in the engine's code; what varies is read from the engine's own state:
+
+| Field | Engine state (SE / AE IDs; offsets are the same on both) | What it selects |
+|---|---|---|
+| volumetric | the VL switch (527940 / 414913) and the VL effect's active flag (manager +0x170, +0x08) | the VL apply and blur (Volumetric Lighting's port takes them) and the VL composite |
+| sil, silParity | the SIL helper (manager +0x1d8): active +0x10; its counter +0x14, incremented and wrapped at 2 before each draw (100528) | ISSILRawInd then ISSILComposite |
+| lensFlares | the lens flare helper (manager +0x180): active +0x30 (100481) | the IB lens flares (a group, below) and the composite form |
+| (composite form) | volumetric and lensFlares (100493) | ISCompositeVolumetricLighting, ISCompositeLensFlare or ISCompositeLensFlareVolumetricLighting (manager +0x190, entries 0 to 2) |
+| eof | gEnableEOFImageSpace (513299 / 391055) | whether the end-of-frame slots run at all (`CountActiveEOFEffects`) |
+| slots | each slot effect's `IsActive` (vfunc 6), as 99023 calls it: world map (active flag), refraction (a global byte), FXAA, depth of field (active, manager +0x14c or the +0xb8 data, its +0x148), radial blur (manager +0x130 and a global byte), full-screen blur (+0x128), get hit (+0x12c) | which slot effects run, in slot order |
+| ldr | usesLDR (manager +0x210) | slots 3 to 7 after the tonemap |
+| hdr | the HDR switch (513463 / 391301) | the HDR effect, else ISCopy |
+| effects11 | `State::PeekTonemapOwner` (new: the owner without resolving it) | Effects11 replaces the whole tonemap call |
+| bloom | manager +0xcc (ImageSpaceData bloom radius), clamp(radius - 1, 0, 6) | which bloom composite (effects[23 + index]), drawn as its children (ISBrightPassBlur, ISBlur) |
+| fade | manager +0x118 above 0 | the tonemap or its fade form (HDR children 2 and 3) |
+| adapt | the adapted-luminance target (513465 / 391303) at or above 0, and its reset flag (528108 / 415053) off | the light adaptation draws the last level (HDR child 8) instead of the luminance shader |
+| lumLevels | kHDR_DOWNSAMPLE0's size (RenderTargetManager, 524970 / 411451: a static object, not the pointer CommonLib reads), divided by 4 until 1x1, or 2x2 with the option (513488 / 391336) and without its override (528106 / 415051) | the luminance draws (HDR child 5, then child 6) |
+| lumParity | the last level's parity (528109 / 415054), flipped by each HDR render | which target the last level writes (+2) |
+| taa, taaMode, taaWater, taaParity | the TAA helper (manager +0x1f0): enabled +0x18, form +0x2c, water flag +0x38, history +0x34 (flipped per render unless the form is 2) | ISTemporalAA, its UI form or its water form; the history pair |
+| dynres | the dynamic-resolution lock (525027 / 411509) off and a scale (525023, 525024 / 411505, 411506) not 1, and the upsample helper (manager +0x1f8) active | ISUpsampleDynamicResolution |
+| screenshot | manager +0x211 | a copy after TAA |
+| upscaler | CS: Upscaling's method is DLSS, FSR or XeSS and the window is usable | (what CS's wrapper does to taa and dynres) |
+
+What the description could not settle yet, so the prediction treats it as a group (one or more draws of the group's shaders, any
+order): the IB lens flares' own chain (100481, 889 lines of decompile, compute or raster downsamples by an option), and the depth of
+field, full-screen blur, get hit, world map, radial blur and refraction slots' internal draws. For the depth of field the choice
+(raster or compute blur, depth of field or distant blur, fogged or masked) is made inside its own Render: `BorrowTextures` (vfunc 4,
+its first call) fills a five-step flag array at +0x98 that the Render then reads (`ImageSpaceEffectDepthOfField::Render`, SE
+0x1412f90d0), so it is not readable before the effect runs without reimplementing that function. The volumetric lighting's group may
+be empty: Volumetric Lighting's port takes its draws before the ImageSpace hooks.
+
+**When it is read.** At Begin (the description) and at two decision events, which the census showed are needed:
+- `RenderWorldPostProcess`'s entry (detoured): the slot effects' activity (the depth of field's state is set after Begin in most
+  frames: 2110 of 2231 river chains), and TAA's form (set to 1 after Begin, back to 0 by each TAA render).
+- `RenderEndOfFrameEffects`' entry (detoured; inside Upscaling's wrapper): TAA and dynamic resolution as CS's upscaler leaves them.
+  Upscaling turns the engine's TAA on for every method in `Main_UpdateJitter` (after Begin), then to "method is TAA" just before
+  the end-of-frame effects and off after them, and the dynamic-resolution lock moves the same way (the precipitation hook leaves it
+  open). These are CS's own decisions: a later version can compute them at Begin from the upscaler's method.
+`UI3DSceneManager::Render` (51855) calls the end-of-frame effects for a menu's 3D scene too; only the call inside the world chain is
+checked.
+
+**The check.** The ImageSpace hooks (BSImagespaceShader::Render, the explicit Render, DispatchComputeShader) note each shader the
+chain draws by its index in `ImageSpaceManager::effects`. At the chain's end the sequence is compared with the prediction; a difference
+is a tap error (`post not declared`) that logs both sequences. Prediction reads the composites' children where the engine renders a
+list (the HDR effect's children, the bloom composite's), so a variant the engine selects by object is read, not assumed. Nothing is
+drawn differently: this stage does not change rendering.
+
+| Runs (this build, all native unless named) | World post chains checked | Matched | Tap errors |
+|---|---|---|---|
+| native-quick x4 (DLSS registered in each) | 2,611 | 2,611 | 0 |
+| native-upscalers (DLSS, FSR, TAA, XeSS; the TAA run draws the engine's ISTemporalAA) | 1,833 | 1,833 | 0 |
+| native-river x2 | 4,461 | 4,461 | 0 |
+| native-validation x2 (Whiterun, inventory, map, a save and its load, Dragonsreach; validation layer on; only the known 20x `VUID-vkCmdDraw-None-09600`) | 7,488 | 7,488 | 0 |
+| first and third person | 1,135 | 1,135 | 0 |
+| the loading-thread run (`CS_ORG_LOADING_THREAD=1`) | 706 | 706 | 0 |
+| native-d3d12-quick | 458 | 458 | 0 |
+| guest-quick (no ImageSpace hooks: not checked) | - | - | 0 |
+
+A steady perf-taa chain is: ISCompositeVolumetricLighting, ISHDRDownSample4, ISHDRDownSample4RGB2Lum, ISHDRDownSample16Lum x2,
+ISHDRDownSample16LightAdapt, ISBrightPassBlur15, ISBlur15, ISHDRTonemapBlendCinematic, then the depth-of-field slot after the
+tonemap (usesLDR): ISHDRDownSample4, ISDepthOfFieldBlurHCS, ISDepthOfFieldBlurVCS, ISDistantBlur. With DLSS the engine's TAA is off at
+the end-of-frame effects; with CS's TAA method it draws ISTemporalAA.
+
+**How often the description changes.** Counted at Begin against the same frame slot's description four frames earlier (a slot's
+kept recording is what a change would record again; the parity fields alternate with the frame, so they stay equal per slot):
+
+| Run | World frames | Frames whose description changed for their slot | Fields |
+|---|---|---|---|
+| native-quick x3 | 2,157 | 3 (one a run, the first world frames) | adapt, taa, taa form |
+| native-river (walking along the river) | 2,232 | 7 | adapt 5, luminance parity 4, taa, taa form |
+| native-upscalers (four method switches) | 1,834 | 5 | upscaler 4, taa form 5, taa parity 2, adapt, taa |
+| native-validation (loads, menus, an interior) | 3,704 | 48 | slots 21, bloom 12, volumetric 12, adapt 11, luminance parity 8, taa 3, taa form |
+
+The validation tour's changes come with its loads and Dragonsreach (bloom, volumetric lighting and the slots differ indoors). A
+luminance-parity change for a slot means the HDR effect rendered a different number of times than frames between two of that slot's
+frames (a load).
+
+**Measurements** (perf-taa, native Vulkan, Perf-Fast, Tracy, one run each, the same DLL; off = `CS_ORG_SEGMENT_POST=0`). Nothing is
+drawn differently, so the frame's work is the same; this shows the check costs nothing measurable.
+
+| perf-taa (measured) | Check off | Check on |
+|---|---|---|
+| fps between the marks | 125.7 | 125.3 |
+| Tickets a frame (census) | 33.91 | 33.93 |
+| Render thread `SubmitEpoch`, ms a frame | 0.819 | 0.819 |
+| Render thread busy, ms a frame | 3.34 | 3.28 |
+| Submission thread busy, ms a frame (of it `FinishTicket`) | 3.19 (2.93) | 3.01 (2.70) |
+| Host thread busy, ms a frame | 2.34 | 2.18 |
+| Tap errors | 0 | 0 |
+
+The submission and host differences are run-to-run noise (stage 3's notes: up to 0.4 ms on the submission thread); tickets, lists and
+`SubmitEpoch` are unchanged, as expected with no change to the frame's graph work.
+
+**What is left, and what it needs.**
+- **The declared chain (S4).** The description now predicts every world post chain's effect sequence. Drawing from it needs each
+  declared instance to be a concrete pass: an ORG pass declares its render targets, reads, samplers, blend state and viewport when it is
+  built (docs/development/p5/imagespace.md, "Why the shapes stay passes"). The targets follow from the description (the HDR chain's are
+  fixed by code, the source and destination alternate with each active slot as 99023's loop swaps them, the parities pick the pairs);
+  the samplers, blend states and viewports are what each effect's SetupMaterial and Render bind, which today are read from the shadow
+  state at the draw (`ReadShape`) and remembered in the shape manifest. Deriving them per effect from the effect objects is the
+  remaining RE, and without it the declared instances would still be the manifest's shapes. The per-instance taps above are the
+  mechanism the chain's commits use: instance k of the chain client is the k-th declared step.
+- **S4's members and end tap** (designed, not built). With an upscaler, its evaluate (external work with a drain, inside Upscaling's
+  wrapper before the end-of-frame effects) cannot run while a segment holds its ticket: work submitted meanwhile runs ahead of the
+  held segment's earlier work on the GPU. So S4 is two segments when an upscaler evaluates: S4a from the Volumetric Lighting anchor
+  through the pre-tonemap composites to the PostProcessing anchor (its end tap, reserved so its hook always runs), and S4b from the
+  Upscale anchor through the end-of-frame effects and the Tonemap anchor to FrameGeneration. Without one, one segment. The upscaler
+  stays external work unless it becomes a live pass in S4b.
+- **RenderWorld scopes and S3's tail (item 5).** SSAO (RenderSSAO 100520 / 107245: its minify loop, temporal or not, and the
+  composite form by fog and SAO switches and the portal graph), SSR and snow are not described yet; S3 still ends at PostComposite.
+- **Guest** keeps the shape manifest and the per-anchor ImageSpace runs.
