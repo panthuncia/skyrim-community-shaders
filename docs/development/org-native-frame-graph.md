@@ -1420,3 +1420,55 @@ open admissions by how they found their plan, handoff cache misses, and the sequ
 What is left on the render thread (5.3 ms): queue submissions 1.4 (58 calls), at-execution recording 1.4, commit inputs 0.5,
 admission 0.5, `ORG.Persistent.Commit` 0.35, the revision check (`CheckTicket`) 0.3, handoff 0.23. The submission count and
 the at-execution recording need the submission thread and segment lists.
+
+## Submission thread (2026-11-14, `org-native/phases`)
+
+`CS_ORG_SUBMIT_THREAD` (native mode; off with `CS_ORG_PHASES=1`; guest mode and external epochs keep submitting on the render
+thread): ORG `Desc::submissionThread`. `SubmitEpoch` is split in two (`GraphHost::CommitTicket`, `FinishTicket`).
+
+- **Render thread** (`CommitTicket`): the lease and services, the deferred releases, the caller's commit (`beforeSubmit`), the
+  recording choice, the revision check and, for a stale ticket, its re-preparation. The check and the re-preparation stay here
+  because each pass's revision and preparation read the caller's state as the commit left it. Then the commit's uploads are taken
+  from the upload service (`RenderGraph::TakePendingUploads`) and the ticket is pushed onto the thread's queue.
+- **Submission thread** (`FinishTicket`): the upload lists, the admission, the passes recorded at execution, the queue
+  submissions and the completion message. The queue is FIFO and bounded (64 entries; a full one makes the render thread wait).
+  `DrainSubmissions(why)` blocks until everything pushed so far is on its queue. A failure on the thread is sticky: the next
+  `SubmitEpoch` throws it (the graph stops as for a failed submission) and `PollEpochFailures` reports it.
+- **Merging tickets' queue submissions was tried and reverted.** The thread finished the tickets queued together as one group,
+  held a ticket's last group of batches and let the next ticket's first group join its `vkQueueSubmit` (same queue, no new
+  waits). Queue submissions fell from about 57 to 32 a frame, but every run that joined tickets showed the same corruption:
+  32-pixel tiles of sky and fog colour over the sky and the foliage, with DLSS on. Committing the held batches early, a full
+  barrier at the join, and leaving out groups with batches recorded at execution did not remove it. The cause is not known; the
+  attempt is not in the tree. Stage C's one list per segment replaces it anyway.
+
+What the thread changed elsewhere:
+- The host's mailbox takes a post lock (two threads post).
+- `SubmittedPoint` taken while tickets are queued has a pending part (`GpuPoint::Pending`): a marker in the queue that the thread
+  fills in. It is not reached, and its waits wait, until the thread passes it. `GpuPoint::Resolve` gives the values, waiting first.
+  `SealSubmitted` drains first, so `SealedPoint` never has one.
+- Uploads: a commit's uploads are taken at its end (recorded lists, the upload pass's copies, the staged batches), and recorded
+  with its ticket on the thread. Uploads queued later belong to later tickets.
+- Releases: a queued ticket holds a `Runtime::AssignmentScope` until its values are published. Deferred deletions already waited for
+  no open scope before sealing; descriptor releases and freed pinned arena regions now do too. Without this, a release on the
+  render thread after a ticket was pushed would take a frontier that misses the ticket.
+- The render owner drains where it flushes regions for its own queue work (external work, the immediate context, `EmitCommands`,
+  a wait for the GPU), at the present, and before render ownership moves. Other threads' work needs no drain: it is admitted
+  under the same sequencer, against the ledgers as they are.
+- Passes recorded at execution now record after the render thread moved on. Those that read a slot the commit wrote (the sky and
+  water draws' `client->run`, the deferred composite's execution, DCLF's CPU site runs) now read the value stored for their own run
+  (`RenderGraph::RunSlots::Find`, `Direct::AdoptSiteRun`).
+
+**Results** (perf-taa, native Vulkan, Perf-Fast, one run each; fps between the marks):
+
+| | Thread off | Thread on |
+|---|---|---|
+| fps, no capture | 84.5 | 113.6 |
+| fps, Tracy capture | 85.8 | 118.6 |
+| Render thread graph time (`SubmitEpoch`), ms a frame | 5.33 | 0.93 (commit 0.84, enqueue 0.03) |
+| Submission thread busy, ms a frame | - | 3.98 (submit 3.28: at-execution recording 1.45, `vkQueueSubmit` 1.19, admission 0.42, handoff 0.19) |
+| Host thread busy, ms a frame | 2.87 | 4.06 |
+| `vkQueueSubmit` calls a frame | 64 | 62 |
+| Render thread blocked in drains, ms a frame | - | 0.75 (the present, once a frame) |
+
+The queue's peak depth was 17 entries; backpressure never waited. With DLSS the Streamline evaluate drains once a frame too
+(about 1 ms), and a few frames drain for the HDR UI texture's clear on the immediate context.
