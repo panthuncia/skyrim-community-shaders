@@ -98,6 +98,9 @@ namespace
 		std::shared_ptr<const ComputeProgram> cull;
 		std::shared_ptr<org::LatchBlock> latch;
 		std::atomic<std::shared_ptr<const Shape>> shape;
+		// Native mode with declared segments: the shape the last tap needed, applied at the next frame's start (BeginFrame). A shape
+		// changes the passes' revisions, which the frame's schedule was recorded with, so it changes only between frames. Render thread.
+		std::shared_ptr<const Shape> pending;
 	};
 
 	// The shape the passes record against. With epochs, these passes run only in the light culling epoch;
@@ -471,7 +474,12 @@ bool ORGLightCulling::Setup(uint32_t a_clusterCount, uint32_t a_maxLights, uint3
 			[resources](std::uint32_t a_epoch, void* a_passes) {
 				LightCullingExtension::GatherPasses(resources, a_epoch, *static_cast<std::vector<org::RenderGraph::ExternalPassDesc>*>(a_passes));
 			},
-			[] { return ORGLightCulling::Get().IsActive(); });
+			[] {
+				// Read at the frame's start, before the segment's description: a new shape the last tap asked for applies here.
+				auto& culling = ORGLightCulling::Get();
+				culling.BeginFrame();
+				return culling.IsActive();
+			});
 		// Other epochs' passes (Exponential Height Fog, Drawcall Limit Fix's colour passes) read them by id, ordered after the culling.
 		if (!PublishedResources::Publish(kLightsId, *resources->lights) || !PublishedResources::Publish(kLightIndexListId, *resources->lightIndexList) ||
 			!PublishedResources::Publish(kLightGridId, *resources->lightGrid)) {
@@ -510,8 +518,20 @@ bool ORGLightCulling::Execute(const FrameInputs& a_inputs)
 		shape.lightBytes = current ? current->lightBytes : 0u;
 		if (bytes > shape.lightBytes)
 			shape.lightBytes = (std::min)(capacity, (std::max)(4096u, std::bit_ceil(bytes)));
-		if (!current || !(*current == shape))
+		if (FrameAnchors::HoldsForeign(static_cast<std::uint32_t>(RenderGraphRuntime::Segment::LightCulling))) {
+			// A declared segment holds the passes: the copy always moves the whole capacity (a few hundred KB), so the light count never
+			// changes a recorded pass. Only a new grid (a new render size) is a new shape, and it applies at the next frame's start
+			// (BeginFrame). This frame still culls with the grid its schedule was recorded for.
+			shape.lightBytes = capacity;
+			if (!current || !(*current == shape)) {
+				if (!resources->pending || !(*resources->pending == shape))
+					resources->pending = std::make_shared<const Shape>(shape);
+			} else {
+				resources->pending.reset();
+			}
+		} else if (!current || !(*current == shape)) {
 			resources->shape.store(std::make_shared<const Shape>(shape), std::memory_order_release);
+		}
 	}
 	const auto commit = [&] {
 		// This run's latch region, which nothing else reads.
@@ -538,6 +558,14 @@ bool ORGLightCulling::Execute(const FrameInputs& a_inputs)
 		impl.reset();
 	}
 	return ok;
+}
+
+void ORGLightCulling::BeginFrame()
+{
+	if (!impl || !impl->resources || !impl->resources->pending)
+		return;
+	impl->resources->shape.store(std::move(impl->resources->pending), std::memory_order_release);
+	impl->resources->pending.reset();
 }
 
 bool ORGLightCulling::IsActive() const

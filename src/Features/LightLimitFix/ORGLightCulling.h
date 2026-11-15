@@ -59,6 +59,13 @@ public:
 
 	bool IsActive() const;
 
+	/**
+	 * @brief The frame's start (native mode, a declared segment holding the passes): the shape the last Execute asked for (a new
+	 * cluster grid) is applied, so the passes' revisions change only between frames. The pre-main segment's description reads the
+	 * culling's declared predicate at Renderer::Begin, which calls this first. Render thread.
+	 */
+	void BeginFrame();
+
 	/** @brief The graph's lights buffer (t35), which the culling epoch fills from its latch; null when inactive. */
 	ID3D11ShaderResourceView* GetLightsSRV() const;
 	ID3D11ShaderResourceView* GetLightIndexListSRV() const;
