@@ -293,6 +293,8 @@ bool ORGScreenshot::Capture(const Source& a_source, OnPixels a_onPixels)
 	// The pass is in the graph already: arming the request is enough for this run's preparation to copy for it.
 	state.shared->armed.store(request, std::memory_order_release);
 	const bool ran = FrameAnchors::Run(FrameAnchors::Anchor::Capture);
+	// With a submission thread the epoch is submitted later: its copy's submission (OnCopySubmitted) is read below.
+	RenderGraphRuntime::Get().DrainSubmissions("a screenshot capture");
 	request->closed.store(true, std::memory_order_release);
 	state.shared->armed.store(nullptr, std::memory_order_release);
 	state.ranThisPoint = true;

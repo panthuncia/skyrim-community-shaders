@@ -2322,10 +2322,10 @@ bool RenderGraphRuntime::Initialize()
 		// CS_ORG_COALESCE_SUBMITS (native mode, default on, =0 off): an epoch's consecutive batches on one queue go to it in one
 		// queue submission (Desc::coalesceSubmissions). Guest mode hands each batch to DXVK's stream as before.
 		desc.coalesceSubmissions = state->native && Switches::Number("CS_ORG_COALESCE_SUBMITS", 1) != 0;
-		// CS_ORG_SUBMIT_THREAD (native mode, default off, =1 on): an epoch's commit runs on the render thread, and the rest of its
+		// CS_ORG_SUBMIT_THREAD (native mode, default on, =0 off): an epoch's commit runs on the render thread, and the rest of its
 		// submission (admission, passes recorded at execution, queue submissions) on a submission thread of the host's
 		// (Desc::submissionThread). Off with the phase epochs (CS_ORG_PHASES=1). Guest mode submits on the render thread.
-		desc.submissionThread = state->native && Switches::Number("CS_ORG_SUBMIT_THREAD", 0) != 0 && Switches::Number("CS_ORG_PHASES", 0) == 0;
+		desc.submissionThread = state->native && Switches::Number("CS_ORG_SUBMIT_THREAD", 1) != 0 && Switches::Number("CS_ORG_PHASES", 0) == 0;
 		if (desc.submissionThread)
 			logger::info("[ORG] native: epochs submit on a submission thread (CS_ORG_SUBMIT_THREAD=0 turns it off)");
 		// CS_ORG_QUEUE_UPLOADS (default on, =0 off): an async epoch's staged uploads whose destination it first uses on the compute
