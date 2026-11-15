@@ -11,6 +11,7 @@
 #include "RenderGraph/Engine/Constants/EngineConstants.h"
 #include "RenderGraph/Engine/ImageSpace/ImageSpace.h"
 #include "Utils/Logging.h"
+#include "RenderGraph/Frame/FrameDriver.h"
 #include "RenderGraph/FrameAnchors.h"
 #include "RenderGraph/FrameStaging.h"
 #include "RenderGraph/RasterProgram.h"
@@ -39,6 +40,9 @@ namespace DCLF::Features::Water::WaterDraws
 		constexpr const char* kShader = "Water.hlsl";
 		// The most draws a run latches (WaterCapture's kMaxLatched); a batch with more draws in several runs.
 		constexpr std::uint32_t kMaxDraws = 64;
+		// The most draws one execution holds: a declared segment (FrameAnchors::SegmentsOn) commits all of a view's runs of a frame into
+		// its one run (ClientDesc::repeats), each after the earlier ones' entries.
+		constexpr std::uint32_t kExecutionDraws = 4 * kMaxDraws;
 		constexpr std::uint32_t kDrawStride = static_cast<std::uint32_t>(sizeof(DrawLatch));
 		constexpr std::size_t kViews = static_cast<std::size_t>(View::Count);
 
@@ -74,6 +78,9 @@ namespace DCLF::Features::Water::WaterDraws
 			// The run each commit drew, by the epoch's run: what the pass recorded at execution reads. It may record on the submission
 			// thread after the render thread published the next run.
 			::RenderGraph::RunSlots<Run> runs;
+			// The draws committed into the declared segment's run this frame so far (a later run of the same frame follows them), and its frame.
+			std::shared_ptr<const Run> committed;
+			std::uint64_t committedFrame = UINT64_MAX;
 			bool pending = false;
 			std::atomic<std::uint64_t> executed{ 0 };  // runs submitted with this client's pass (its executed callback)
 		};
@@ -285,8 +292,8 @@ namespace DCLF::Features::Water::WaterDraws
 			auto client = std::make_shared<Client>();
 			client->shape = a_shape;
 			client->id = a_shape.view == View::Mask ? "cs.water.mask" : "cs.water.surface";
-			client->latch = std::make_shared<org::LatchBlock>(client->id + ".latch", kMaxDraws * kDrawStride);
-			client->gate = ::RenderGraph::RunGate::Create(client->id + ".gate", kMaxDraws);
+			client->latch = std::make_shared<org::LatchBlock>(client->id + ".latch", kExecutionDraws * kDrawStride);
+			client->gate = ::RenderGraph::RunGate::Create(client->id + ".gate", kExecutionDraws);
 			if (!client->gate) {
 				logger::warn("[DCLF] water: the {} run gate could not be made; the water stays the engine's", client->id);
 				return nullptr;
@@ -329,17 +336,42 @@ namespace DCLF::Features::Water::WaterDraws
 				if (!host)
 					return;
 				const org::RunRef latchRun = host->CurrentRun();
+				// A later tap of a declared segment's run this frame (a batch of more than kMaxDraws draws is several runs): its draws follow
+				// the ones committed before, and the pass records them all.
+				const auto frame = ::RenderGraph::Frame::Driver::Current().frame;
+				std::uint32_t first = 0;
+				if (run && FrameAnchors::TapInstance() > 0 && client->committedFrame == frame && client->committed) {
+					const auto& earlier = *client->committed;
+					if (earlier.headerIndices != run->headerIndices || earlier.draws.size() + run->draws.size() > kExecutionDraws) {
+						logger::error("[DCLF] water: a second {} run in one segment run {}; it draws nothing", client->id,
+							earlier.headerIndices != run->headerIndices ? "reads other headers" : "has too many draws");
+						return;
+					}
+					auto merged = std::make_shared<Run>();
+					merged->view = run->view;
+					merged->headerIndices = run->headerIndices;
+					merged->revision = run->revision;
+					merged->draws = earlier.draws;
+					merged->draws.insert(merged->draws.end(), run->draws.begin(), run->draws.end());
+					first = static_cast<std::uint32_t>(earlier.draws.size());
+					client->committed = merged;
+				} else {
+					client->committed = run;
+				}
+				client->committedFrame = frame;
 				// For the pass recorded at execution, by this run (null: nothing drawn).
-				client->runs.Store(latchRun, run);
+				client->runs.Store(latchRun, client->committed);
 				if (!run)
 					return;
 				for (std::uint32_t i = 0; i < run->draws.size(); ++i) {
 					const auto& draw = run->draws[i];
-					client->latch->WriteValue(latchRun, i * kDrawStride, draw.latch);
+					client->latch->WriteValue(latchRun, (first + i) * kDrawStride, draw.latch);
 					if (draw.program)
-						client->gate->OpenDraw(i, draw.indexCount, 1);
+						client->gate->OpenDraw(first + i, draw.indexCount, 1);
 				}
 			};
+			// In a declared segment both views may commit more than once into its run (above).
+			desc.repeats = true;
 			desc.executed = [client](const FrameAnchors::Point&) {
 				if (client->executed.fetch_add(1, std::memory_order_relaxed) == 0)
 					logger::info("[DCLF] water: the first {} run drawn by the graph", client->id);

@@ -649,7 +649,9 @@ namespace RenderGraph::Engine::ImageSpace
 			// for the frame; a registration asked for at the next frame (a row made for another size).
 			bool postOn = false;
 			bool postRegister = false;
-			std::array<PostClient, 3> post{};
+			std::array<PostClient, 5> post{};
+			// The RenderWorld scope running now draws from the pass-state table into the world segment (OnWorldScope).
+			bool scopeDrawing = false;
 			std::array<bool, 2> partDrawing{};
 			// The composites part cannot draw from the table this frame: the post composites segment is cut at the composites' call, after
 			// the volumetric lighting (whose anchor is the segment's), so that work is submitted before today's path draws the composites.
@@ -3143,10 +3145,12 @@ namespace RenderGraph::Engine::ImageSpace
 			Composites,
 			Hdr,
 			Final,
+			WorldScopes,  // the world segment's RenderWorld scopes: the reflections, the SAO, the snow pass or its copy
+			WorldWater,   // the world segment's water blend, after the water's draws
 			Count
 		};
 		constexpr std::array<const char*, static_cast<std::size_t>(PostPart::Count)> kPostIds{ "cs.engine.imagespace.post.composites", "cs.engine.imagespace.post.hdr",
-			"cs.engine.imagespace.post.final" };
+			"cs.engine.imagespace.post.final", "cs.engine.imagespace.world.scopes", "cs.engine.imagespace.world.water" };
 
 		/** @brief The client that draws a row: by its step (the slots 0 to 2 run before the tonemap; the LDR slots after it). */
 		PostPart PostPartOf(const PostRow& a_row)
@@ -3176,8 +3180,9 @@ namespace RenderGraph::Engine::ImageSpace
 			case Step::SsrDownsample:
 			case Step::SsrRayMarch:
 			case Step::SsrBlur:
+				return PostPart::WorldScopes;
 			case Step::WaterBlend:
-				return PostPart::Count;  // the RenderWorld scopes' rows: not the post segments'
+				return PostPart::WorldWater;
 			default:
 				return PostPart::Final;
 			}
@@ -3209,6 +3214,19 @@ namespace RenderGraph::Engine::ImageSpace
 			case Step::Taa: rank = 10; break;
 			case Step::Screenshot: rank = 11; break;
 			case Step::Upsample: rank = 13; break;
+			// The RenderWorld scopes, in Main::RenderWorld's order: the reflections, the SAO's generation, the snow pass or its copy (which
+			// writes the composite's source), the composite, and the water blend later.
+			case Step::SsrDownsample: rank = 16; break;
+			case Step::SsrRayMarch: rank = 17; break;
+			case Step::SsrBlur: rank = 18; sub = key.index; break;
+			case Step::SaoCameraZ: rank = 19; break;
+			case Step::SaoMinify: rank = 20; sub = key.index & 0x3f; break;
+			case Step::SaoRawAo: rank = 21; break;
+			case Step::SaoBlur: rank = 22; sub = key.index & 0x1f; break;
+			case Step::SnowSss:
+			case Step::SnowCopy: rank = 23; break;
+			case Step::SaoComposite: rank = 24; break;
+			case Step::WaterBlend: rank = 25; break;
 			default: rank = 14; break;
 			}
 			return static_cast<std::int32_t>((rank << 20) | ((sub & 0xfff) << 8) | (a_index & 0xff));
@@ -3244,7 +3262,9 @@ namespace RenderGraph::Engine::ImageSpace
 		{
 			auto& state = IS();
 			const auto part = Frame::PostChain::CurrentPart();
-			if (!PostOn() || part == Frame::PostChain::Part::All || !state.partDrawing[part == Frame::PostChain::Part::Composites ? 0 : 1])
+			const bool drawing = part != Frame::PostChain::Part::All ? state.partDrawing[part == Frame::PostChain::Part::Composites ? 0 : 1] :
+			                                                          Frame::PostChain::CurrentScope() != Frame::PostChain::Scope::None && state.scopeDrawing;
+			if (!PostOn() || !drawing)
 				return {};
 			PostTake take{ .post = true };
 			if (!a_row) {
@@ -3279,6 +3299,67 @@ namespace RenderGraph::Engine::ImageSpace
 		}
 
 		void RegisterPost();
+
+		/** @brief Whether a table row's pass would draw a predicted draw now: a row, a built pass for the sizes now, in a segment graph that holds it. */
+		bool RowDrawable(const Frame::PostChain::Draw& a_draw, std::string& a_why)
+		{
+			auto& state = IS();
+			const auto* row = FindPostRow(a_draw.row);
+			if (!row) {
+				a_why = fmt::format("the table has no row for {}", Frame::PostChain::RowName(a_draw.row));
+				return false;
+			}
+			const auto index = RowIndexOf(*row);
+			const auto part = PostPartOf(*row);
+			if (part == PostPart::Count) {
+				a_why = fmt::format("{} has no client", Frame::PostChain::RowName(a_draw.row));
+				return false;
+			}
+			auto& client = state.post[static_cast<std::size_t>(part)];
+			const Spec* spec = client.byRow[index];
+			if (!spec || !client.made[index]) {
+				a_why = fmt::format("{} has no built pass", Frame::PostChain::RowName(a_draw.row));
+				return false;
+			}
+			ShapeKey now;
+			std::string error;
+			if (!RowShape(*row, now, error) || !(now == spec->key)) {
+				a_why = fmt::format("{}'s pass was made for another size; it registers again", Frame::PostChain::RowName(a_draw.row));
+				state.postRegister = true;
+				return false;
+			}
+			if (!FrameAnchors::CanTap(client.id)) {
+				a_why = fmt::format("the segment's graph does not hold {} yet", client.id);
+				return false;
+			}
+			return true;
+		}
+
+		/**
+		 * @brief PostChain's scope hook: a RenderWorld scope draws from the table into the world segment when every draw the description
+		 * declares for it is drawable there (RowDrawable). Otherwise the world segment is cut here, before the scope's draws, and the scope
+		 * draws on the ImageSpace anchor as before (counted by reason). Outside the world segment's window the scope draws as before.
+		 */
+		void OnWorldScope(Frame::PostChain::Scope a_scope, const std::vector<Frame::PostChain::Draw>& a_draws)
+		{
+			auto& state = IS();
+			state.scopeDrawing = false;
+			if (!PostOn() || !Usable())
+				return;
+			const auto client = kPostIds[static_cast<std::size_t>(a_scope == Frame::PostChain::Scope::WaterBlend ? PostPart::WorldWater : PostPart::WorldScopes)];
+			if (!FrameAnchors::CanTap(client))
+				return;
+			std::string why;
+			for (const auto& draw : a_draws)
+				if (!RowDrawable(draw, why))
+					break;
+			if (!why.empty()) {
+				(void)FrameAnchors::CutSegment(static_cast<std::uint32_t>(RenderGraphRuntime::Segment::DeclaredWorld),
+					fmt::format("the {} scope: {}", Frame::PostChain::ScopeName(a_scope), why));
+				return;
+			}
+			state.scopeDrawing = true;
+		}
 
 		/**
 		 * @brief PostChain's decision events: a part of the world chain (the composites at RenderWorldPostProcess' entry, the end-of-frame
@@ -3399,10 +3480,29 @@ namespace RenderGraph::Engine::ImageSpace
 				desc.executed = [](const FrameAnchors::Point&) { IS().executed = true; };
 				desc.declared = [] { return Frame::PostChain::On(); };
 				// The rows this frame's description selects for this client: from the chain's fields once its decision events ran, else
-				// the slot's last chain's (the decisions made after Begin repeat from frame to frame).
+				// the slot's last chain's (the decisions made after Begin repeat from frame to frame). The world scopes' from the world
+				// fields the same way. The water blend's rows are all on: water comes into view and leaves it often, and its passes are
+				// gated on the GPU, so a frame without it records nothing again.
 				desc.rows = [p](std::array<std::uint64_t, 4>& a_rows) {
 					const auto& current = IS().post[p];
-					for (const auto& draw : Frame::PostChain::PredictDraws(Frame::PostChain::DeclaredFields()))
+					std::vector<Frame::PostChain::Draw> draws;
+					if (p == static_cast<std::size_t>(PostPart::WorldWater)) {
+						for (std::size_t index = 0; index < current.byRow.size() && index < 256; ++index)
+							if (current.byRow[index])
+								a_rows[index / 64] |= 1ull << (index % 64);
+						return;
+					}
+					if (p == static_cast<std::size_t>(PostPart::WorldScopes)) {
+						const auto world = Frame::PostChain::DeclaredWorld();
+						for (const auto scope : { Frame::PostChain::Scope::Reflections, Frame::PostChain::Scope::Ssao, Frame::PostChain::Scope::Snow,
+								 Frame::PostChain::Scope::SsaoComposite }) {
+							const auto more = Frame::PostChain::PredictScope(scope, world);
+							draws.insert(draws.end(), more.begin(), more.end());
+						}
+					} else {
+						draws = Frame::PostChain::PredictDraws(Frame::PostChain::DeclaredFields());
+					}
+					for (const auto& draw : draws)
 						if (draw.row.step != Frame::PostChain::Step::None)
 							if (const auto* row = FindPostRow(draw.row); row && static_cast<std::size_t>(PostPartOf(*row)) == p) {
 								const auto index = RowIndexOf(*row);
@@ -3425,8 +3525,9 @@ namespace RenderGraph::Engine::ImageSpace
 					return;
 				}
 			}
-			logger::info("[ORG] ImageSpace: the post segments draw from the pass-state table: {} composites, {} HDR and {} final passes of {} rows",
-				state.post[0].specs.size(), state.post[1].specs.size(), state.post[2].specs.size(), rows.size());
+			logger::info("[ORG] ImageSpace: the post and world segments draw from the pass-state table: {} composites, {} HDR, {} final, {} world scope and {} "
+						 "water blend passes of {} rows",
+				state.post[0].specs.size(), state.post[1].specs.size(), state.post[2].specs.size(), state.post[3].specs.size(), state.post[4].specs.size(), rows.size());
 		}
 
 		/** @brief Where a withheld draw goes: its pass, and the client built on first sight it belongs to (null: the main batch). */
@@ -4300,6 +4401,7 @@ namespace RenderGraph::Engine::ImageSpace
 			RegisterPost();
 			if (state.postOn)
 				Frame::PostChain::SetPartHook(OnPostPart);
+				Frame::PostChain::SetScopeHook(OnWorldScope);
 		}
 	}
 

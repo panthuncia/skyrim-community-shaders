@@ -2406,3 +2406,69 @@ batches never flush for order (their entries rise by row within a part).
   downsample, the ray march, the compute blur pair); snow (ISSnowSSS and the snow copy). Then S3's tail as a segment: the water stencil
   clear and mask (water in view as a field), those scopes, the kMAIN copy, the water surface and water-target clears, the water blend.
   These are the five ImageSpace tickets left a frame.
+
+## The declared frame, stage 5: the RenderWorld scopes and S3's tail (2026-11-15, `org-native/phases`)
+
+Parts 1 and 2 of the stage-5 list. Parts 3 to 6 (S0, the sun queries, the remaining post groups, the leftover clears) were not
+started. Native mode; guest is unchanged.
+
+### Part 1: the RenderWorld scopes as table rows
+
+`PostChain::Scope` (Reflections, Ssao, Snow, SsaoComposite, WaterBlend). Each scope is predicted at its entry from
+`WorldFields`, read from the engine there, and its draws are checked against the pass-state table as the post chain's are
+(`CheckRow`; a scope that draws other effects than predicted is a `post not declared` tap error). The hooks: the reflections
+pass and RenderSSAO detours, and the own-scope calls of ISSnowSSS, ISWaterBlend and the copy-subregion effect between RenderSSAO's
+two calls.
+
+| Field | Engine state (SE / AE) |
+|---|---|
+| which RenderSSAO call | the pass flag Main::RenderWorld (100424 / 107142) sets: 528126 / 415071 |
+| saoLevels | the camera-Z level count, 528105 / 415050 |
+| saoContrast | the contrast option 528124 / 415069; the level is the first whose kMAIN height >> (level - 1) is at most 16 |
+| saoTemporal | the temporal raw AO setting 513569 / 391450 |
+| saoHalf | the half-resolution set 528122 / 415067 |
+| saoParity | the SAO helper's counter (manager +0x1c8, +0x54), plus one and wrapped at 2 as RenderSSAO does |
+| saoForm | the helper's +0x50 and fog: 528125 / 415070 with GetPortalGraph (98984 / 105637) of the index 513241 / 390982 |
+| ssr, ssrDownsample, ssrBlur | the reflections helper's active flag (+0x1c0, +0x10); 513568 / 391448 with the mode 513454 / 391287 (above 1, 4 compute); 528114 / 415059 |
+| normals | GetImageSpaceRenderTarget_TAAMASK_SSRMASK_SWAP (100460): (~gFrameCounter & 1) \| 4 with SSR on (525008 / 411489), else 4 |
+| snow | 513332 / 391105 and the snow helper's active flag (+0x1e8, +0x08) |
+| waterHistory, waterAddress | gFrameCounter's parity; the shadow state's third and fifth sampler addresses at the water blend's call (it sets neither) |
+
+Rows: 32 (30 seen in river, validation and upscalers runs with `CS_ORG_POST_TABLE_DUMP=1`, 2 implied raw-AO parities seen as
+errors in a later river run). The table has 187 rows. Every scope of every run since matched its prediction, and every declared
+draw its row.
+
+### Part 2: S3's tail, a segment of its own (`SegmentId::World`)
+
+A new segment after the deferred one, not a longer S3: the deferred segment's end (PostComposite) always fires, while the tail's
+steps depend on water in view, and S3 had no room for the tail's steps. Steps: EngineDraws (the hosted stencil clear and
+`cs.water.mask`), ImageSpace (`cs.engine.imagespace.world.scopes`: reflections, SAO, snow or its copy, the SAO composite), EngineCopy
+(shared: the kMAIN copy, a gated late-batch copy), EngineDraws (`cs.water.surface`), ImageSpace (the hosted kWATER clear and
+`cs.engine.imagespace.world.water`), and a point end. The end is `TapPoint` from `FlushRegions` before the next epoch that follows the
+tail in every frame (DCLF's forward or first-person epoch, the sun queries, VL, post-processing, upscale, interface, present, the post
+segments). Switch `CS_ORG_SEGMENT_WORLD` (default on; `=0` off).
+
+- Water in view is not a description field: the water draws are late-batch passes and the kMAIN copy a gated late-batch copy, so
+  a frame without water records nothing for them. The water blend's rows are always on (GPU-gated), so water entering view records
+  nothing again. The scope rows follow the world fields of the slot's last frame.
+- The water views commit more than once into one segment run (a batch of more than 64 draws is several runs): the water clients
+  now `repeat`, appending to the run's draws (up to 256).
+- A non-repeating client active at a second run of its step cuts the segment (`the <anchor> step ran again in one segment run`).
+- A scope whose draws are not all drawable rows cuts the world segment at its entry (reason logged); only at startup and size
+  changes was this seen ("made for another size").
+- First build drew the scopes in table order: the SAO composite read kMAIN's copy before the snow copy wrote it (river shots fogged).
+  The world rows now have order keys in Main::RenderWorld's order (`PostOrderOf`).
+
+Measured (native-quick, Vulkan, `CS_ORG_EPOCH_STATS=1`): 20.0 tickets a frame in that scene; no ImageSpace, EngineDraws or EngineCopy
+ticket in a steady world frame; the world segment 1.00 ticket, entry 36 and body 78 barriers. GPU work inside a held segment each
+frame: the TAA-mask clear's own ticket (EngineFrameClear; part 6) inside the world segment. Recordings in steady windows: 0.
+
+Checks (final build, `CS_TEST_BACKGROUND=1`, 0 tap errors in each, no `lost to a build`):
+- native-quick x3, DLSS registered in each, clean by eye against stage 4b's q6.
+- native-river: shots match stage 4b's r2 by eye (water, reflections, water blend); world cut only at the first frames.
+- native-validation (Whiterun, inventory, map, save and load, Dragonsreach): known messages only; shots as before. Cuts: the
+  post end-of-frame segment for the world map and radial blur (part 5).
+- native-upscalers (4 registered), native-d3d12-quick, the loading-thread run, first and third person, guest-quick: passed.
+
+Not done: the perf-taa off/on Tracy pair, the off-switch image run (the switch was not in the test registry; fixed after), the
+per-segment cost table, the ORG tests (ORG unchanged), underwater, snow, DOF, a hit, a weather change.

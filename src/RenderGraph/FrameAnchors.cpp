@@ -149,6 +149,7 @@ namespace FrameAnchors
 			Segment::AnchorDeferredPasses,     // EndDeferred, after the blended decals
 			Segment::AnchorDeferredComposite,  // DeferredPasses, after the D3D11 SSGI and SSS
 			Segment::AnchorPostComposite,      // DeferredPasses' end, after the composite
+			Segment::DeclaredWorld,            // the declared world segment (SegmentsOn): it ends just before DCLF's forward epoch
 			Segment::AnchorEngineDraws,        // the water, before the forward epoch (nominally here: the shadow masks and the water mask run before, the blood after)
 			Segment::PhaseDeferred,            // the deferred phase: submitted at the forward epoch
 			Segment::Forward,
@@ -326,6 +327,19 @@ namespace FrameAnchors
 			// composite, and the end of the deferred passes. The water mask and the ImageSpace chain come after the end tap.
 			{ Segment::DeclaredDeferred, { { { Anchor::DeferredPasses }, { Anchor::DeferredComposite }, { Anchor::PostComposite } } }, 3,
 				{ "CS segment: deferred", "CS segment: deferred inputs", "FrameSegments::Deferred / ", "cs.segment.deferred" } },
+			// S3's tail, in Main::RenderWorld (100424 / 107142) after the deferred segment: the water stencil's clear and the water mask
+			// (FinishAccumulating's stencil batch), the reflections, RenderSSAO's two calls with the snow pass or its copy between them
+			// (drawn from the pass-state table), the engine's kMAIN copy, the water, the water targets' clear and the water blend. Its end is
+			// a point just before DCLF's forward epoch is submitted (FlushRegions), the next GPU work after the water blend. The water's
+			// draws, the kMAIN copy and the scopes' rows are gated: a step that does not fire this frame (no water in view) does nothing.
+			{ Segment::DeclaredWorld,
+				{ { { Anchor::EngineDraws, { "cs.engine.skeleton.frame@engine-draws", "cs.water.mask" } },
+					{ Anchor::ImageSpace, { "cs.engine.imagespace.world.scopes", nullptr } },
+					{ Anchor::EngineCopy, { nullptr, nullptr }, Segment::Count, true },
+					{ Anchor::EngineDraws, { "cs.water.surface", nullptr } },
+					{ Anchor::ImageSpace, { "cs.engine.skeleton.frame@image-space", "cs.engine.imagespace.world.water" } },
+					{ Anchor::Count, { nullptr, nullptr }, Segment::Count, false, true } } },
+				6, { "CS segment: world", "CS segment: world inputs", "FrameSegments::World / ", "cs.segment.world" } },
 			// ImageSpaceManager::RenderWorldPostProcess (SE 100430, AE 107148) up to Upscaling's wrapper of the end-of-frame effects: the
 			// volumetric lighting (whole: its hook runs only there), the pre-tonemap composites drawn from the pass-state table, and the
 			// PostProcessing anchor (its end tap, reserved so its hook always runs). The upscaler's evaluate comes after the end tap: it is
@@ -2496,9 +2510,36 @@ namespace FrameAnchors
 		}
 	}
 
+	namespace
+	{
+		/** @brief Whether epoch a_segment, submitted now, ends the world segment (FlushRegions): GPU work that follows it in every frame. */
+		bool EndsWorld(Segment a_segment)
+		{
+			switch (a_segment) {
+			case Segment::Forward:
+			case Segment::FirstPerson:
+			case Segment::AnchorEngineQueries:
+			case Segment::AnchorVolumetricLighting:
+			case Segment::AnchorPostProcessing:
+			case Segment::AnchorUpscale:
+			case Segment::AnchorInterface:
+			case Segment::AnchorPresent:
+			case Segment::DeclaredPostComposites:
+			case Segment::DeclaredPostEnd:
+				return true;
+			default:
+				return false;
+			}
+		}
+	}
+
 	void FlushRegions(const char* a_why, std::uint32_t a_segment)
 	{
 		auto& state = Anchors();
+		// The world segment ends just before the next GPU work that comes after it in the frame is submitted: DCLF's forward epoch in
+		// a world frame, else the sun's queries (the end of Main::RenderWorld), the first-person epoch or a later segment. Its end point.
+		if (a_segment != UINT32_MAX && state.host && SegmentsOn() && EndsWorld(static_cast<Segment>(a_segment)) && IsRenderOwner())
+			(void)TapPoint(static_cast<std::uint32_t>(Segment::DeclaredWorld));
 		// A declared segment holding its ticket: other GPU work submitted now runs ahead of the segment's work, which the end tap
 		// submits. Counted by why, for the census; its first lines are logged.
 		if (state.segmentHeld.load(std::memory_order_acquire) && IsRenderOwner()) {
@@ -3127,6 +3168,13 @@ namespace FrameAnchors
 					static const bool on = !Switches::Off("CS_ORG_SEGMENT_DEFERRED");
 					return on;
 				}
+			case Segment::DeclaredWorld:
+				{
+					// S3's tail (default on; CS_ORG_SEGMENT_WORLD=0 off). Its scopes draw from the pass-state table, so it needs the post
+					// description too.
+					static const bool on = !Switches::Off("CS_ORG_SEGMENT_WORLD") && !Switches::Equals("CS_ORG_SEGMENT_POST", "0");
+					return on;
+				}
 			case Segment::DeclaredPostComposites:
 			case Segment::DeclaredPostEnd:
 				{
@@ -3405,6 +3453,17 @@ namespace FrameAnchors
 						} else {
 							++it;
 						}
+					}
+					// A client that commits once per segment run, active at a second run of its step (the water drawn in two batches): the
+					// segment is cut here, and this run and the rest of the frame's steps draw on their anchors' own epochs.
+					const bool again = state.heldFrame[declared] == Driver::Current().frame && state.stepTaps[declared][k] > 0 &&
+					                   std::ranges::any_of(stepMembers, [](const RunClient& a_client) {
+										   return a_client.active && !a_client.desc->repeats && a_client.desc->maxInstances <= 1;
+									   });
+					if (again) {
+						(void)CutSegment(static_cast<std::uint32_t>(kDeclaredInfo[declared].segment), fmt::format("the {} step ran again in one segment run", kInfo[index].name));
+						others.insert(others.end(), stepMembers.begin(), stepMembers.end());
+						break;
 					}
 					if (std::ranges::any_of(stepMembers, [](const RunClient& a_client) { return a_client.active; })) {
 						const auto result = TapDeclared(state, a_point, declared, k, stepMembers);

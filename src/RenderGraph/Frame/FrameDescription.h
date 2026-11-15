@@ -40,6 +40,7 @@ namespace RenderGraph::Frame
 		PreDepth,
 		PreMain,
 		Deferred,
+		World,           // S3's tail: the water mask, the RenderWorld scopes, the kMAIN copy, the water and its blend
 		PostComposites,  // S4a: the volumetric lighting, the pre-tonemap composites, the PostProcessing anchor
 		PostEnd,         // S4b: the upscale, the end-of-frame effects with the tonemap, to RenderEndOfFrameEffects' return
 		Count

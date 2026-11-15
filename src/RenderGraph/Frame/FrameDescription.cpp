@@ -31,6 +31,8 @@ namespace RenderGraph::Frame
 			return "pre-main";
 		case SegmentId::Deferred:
 			return "deferred";
+		case SegmentId::World:
+			return "world";
 		case SegmentId::PostComposites:
 			return "post composites";
 		case SegmentId::PostEnd:
