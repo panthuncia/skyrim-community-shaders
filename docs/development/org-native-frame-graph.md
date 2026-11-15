@@ -1434,12 +1434,8 @@ thread): ORG `Desc::submissionThread`. `SubmitEpoch` is split in two (`GraphHost
   submissions and the completion message. The queue is FIFO and bounded (64 entries; a full one makes the render thread wait).
   `DrainSubmissions(why)` blocks until everything pushed so far is on its queue. A failure on the thread is sticky: the next
   `SubmitEpoch` throws it (the graph stops as for a failed submission) and `PollEpochFailures` reports it.
-- **Merging tickets' queue submissions was tried and reverted.** The thread finished the tickets queued together as one group,
-  held a ticket's last group of batches and let the next ticket's first group join its `vkQueueSubmit` (same queue, no new
-  waits). Queue submissions fell from about 57 to 32 a frame, but every run that joined tickets showed the same corruption:
-  32-pixel tiles of sky and fog colour over the sky and the foliage, with DLSS on. Committing the held batches early, a full
-  barrier at the join, and leaving out groups with batches recorded at execution did not remove it. The cause is not known; the
-  attempt is not in the tree. Stage C's one list per segment replaces it anyway.
+- **Merging tickets' queue submissions** is in the next section. A first attempt was reverted for a corruption whose cause
+  was then found there.
 
 What the thread changed elsewhere:
 - The host's mailbox takes a post lock (two threads post).
@@ -1472,3 +1468,48 @@ What the thread changed elsewhere:
 
 The queue's peak depth was 17 entries; backpressure never waited. With DLSS the Streamline evaluate drains once a frame too
 (about 1 ms), and a few frames drain for the HDR UI texture's clear on the immediate context.
+
+## Merged ticket submissions (2026-11-14, `org-native/phases`)
+
+`CS_ORG_MERGE_TICKETS` (native mode, default on, with the submission thread and coalesced submits; ORG
+`Desc::mergeTicketSubmissions`). The submission thread finishes the tickets queued together as one group. A ticket's last group
+of batches is held, and the next ticket's first group joins its `vkQueueSubmit` when both are on one queue and the new group
+waits for nothing the held one did not.
+- Any other submission of the next ticket submits the held group first. So does recording a batch at execution: a pass recorded
+  there may submit work of its own.
+- The sequencer stays held across the group, so no other submitter comes between a held group and the ticket that joins it.
+- Completion messages are posted once the group's last submission is on its queue.
+- A wait on a value the held group signals becomes a full barrier in the joined submission.
+- Only what is already queued is grouped: the thread never waits for more tickets.
+
+**The corruption of the first attempt** (tiles of sky and fog colour over the tree and the sky) was a missing barrier in ORG's
+admission, not in the merge.
+- An execution's entry barrier was left out when the state an earlier execution left matched the one it needs: a render target
+  written as a render target, a depth written as a depth. Nothing then ordered the second write after the first. Queue order does
+  not order two render passes on one target. Separate `vkQueueSubmit` calls hid it on NVIDIA.
+- The smallest failing join: one EngineFrameClear execution joined to the one before it. Each records every frame-group view's
+  clear pass (a gated indirect draw with load and store), so their render passes on the same targets raced. A full barrier at
+  that one join removed it (3 of 3 runs with DLSS clean). A barrier at the frame clear's other joins (after DepthDone, ImageSpace
+  or the shadow clears) did not.
+- The fix: entry barriers between identical states are kept when either side writes (ORG `fix(admission): order writes across
+  executions`). Reads between identical states still need none.
+- With the fix and merging on, 5 of 5 native-quick runs with DLSS were clean.
+- Why it was hard to see: without the fix the corruption showed in 14 of 18 runs with DLSS and stayed for the whole run. About
+  half the runs never register `cs.upscaling` before the shot, and those unantialiased frames also score as tiled on a grid
+  detector. So every conclusion needs runs whose log has `cs.upscaling registered` before the shot, and several of them: the
+  earlier bisect judged single runs. Synchronization validation saw nothing (it cannot see bindless accesses).
+
+**Results** (perf-taa, native Vulkan, Perf-Fast, Tracy capture, one run each; both with the admission fix):
+
+| | Merge off | Merge on |
+|---|---|---|
+| fps between the marks (capture) | 118.0 | 121.8 |
+| `vkQueueSubmit` calls a frame, all threads | 62.2 | 43.6 |
+| Tickets joined into the previous ticket's submission, a frame | 0 | 18.6 (50 tickets in 20.8 groups) |
+| Submission thread busy, ms a frame (Tracy zones) | 3.79 | 3.80 |
+| of it `vkQueueSubmit` (with held flushes) | 1.20 | 0.99 + 0.34 |
+| of it recording at execution | 1.20 | 1.46 |
+| Render thread graph time (`SubmitEpoch`), ms a frame | 0.96 | 0.91 |
+| Render thread blocked in drains, ms a frame | 0.61 | 0.60 |
+
+The submission thread spends what it saves in `vkQueueSubmit` on recording at execution and the flushes; the frame gains a little.

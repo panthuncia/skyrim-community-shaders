@@ -132,6 +132,7 @@ namespace Testing::SwitchRegistry
 			"CS_ORG_LOADING_THREAD",
 			"CS_ORG_MAP",
 			"CS_ORG_MENU3D",
+			"CS_ORG_MERGE_TICKETS",
 			"CS_ORG_NATIVE",
 			"CS_ORG_NATIVE_BACKEND",
 			"CS_ORG_NATIVE_OP_CENSUS",

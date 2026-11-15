@@ -1535,9 +1535,11 @@ struct RenderGraphRuntime::Impl
 				std::string callers;
 				for (const auto& [why, counts] : t.drainsByCaller)
 					callers += fmt::format("{}{} {:.2f}/frame {:.3f} ms", callers.empty() ? "" : ", ", why, double(counts.first) / frames, counts.second / 1000.0 / frames);
-				logger::info("[ORG] Submission thread: busy {:.3f} ms a frame, {:.1f} tickets a frame ({} given back after a failure), peak depth {}; "
+				logger::info("[ORG] Submission thread: busy {:.3f} ms a frame, {:.1f} tickets a frame in {:.1f} groups, {:.1f} a frame joined by the next "
+							 "ticket's queue submission ({} given back after a failure), peak depth {}; "
 							 "backpressure {:.2f} waits a frame ({:.3f} ms); drains that waited {:.2f} a frame ({:.3f} ms): {}",
-					t.busyUs / 1000.0 / frames, double(t.tickets) / frames, t.discarded, t.peakDepth, double(t.backpressureWaits) / frames,
+					t.busyUs / 1000.0 / frames, double(t.tickets) / frames, double(t.groups) / frames, double(t.joined) / frames, t.discarded, t.peakDepth,
+					double(t.backpressureWaits) / frames,
 					t.backpressureUs / 1000.0 / frames, double(t.drains) / frames, t.drainUs / 1000.0 / frames, callers.empty() ? "-" : callers);
 			}
 			statFrames = statExecutions = statEpochs = 0;
@@ -2328,6 +2330,9 @@ bool RenderGraphRuntime::Initialize()
 		desc.submissionThread = state->native && Switches::Number("CS_ORG_SUBMIT_THREAD", 1) != 0 && Switches::Number("CS_ORG_PHASES", 0) == 0;
 		if (desc.submissionThread)
 			logger::info("[ORG] native: epochs submit on a submission thread (CS_ORG_SUBMIT_THREAD=0 turns it off)");
+		// CS_ORG_MERGE_TICKETS (native mode, default on, =0 off): with the submission thread and coalesced submissions, the tickets
+		// queued together share queue submissions where they can (Desc::mergeTicketSubmissions).
+		desc.mergeTicketSubmissions = desc.submissionThread && desc.coalesceSubmissions && Switches::Number("CS_ORG_MERGE_TICKETS", 1) != 0;
 		// CS_ORG_QUEUE_UPLOADS (default on, =0 off): an async epoch's staged uploads whose destination it first uses on the compute
 		// queue are recorded there, just ahead of its first compute batch, and a compute batch waits for the graphics queue's
 		// uploads only when a pass in it declares what they write. Off: every upload on the graphics queue, and every compute batch
