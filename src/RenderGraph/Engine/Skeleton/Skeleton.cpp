@@ -195,6 +195,9 @@ namespace RenderGraph::Engine::Skeleton
 
 			ClearFrame Prepare(const ClearBindings&, const org::PassPrepareContext&) const { return { spec }; }
 
+			// Its commands depend on the run only through SkipsAtExecution: a kept late batch keeps its list while the answer holds.
+			static constexpr bool kRecordKeyedBySkip = true;
+
 			// Recorded at execution (FrameAnchors::PassDesc::atExecution): a view none of whose clears the run's commit opened is not
 			// recorded.
 			static bool SkipsAtExecution(const ClearBindings&, const ClearFrame& a_frame, const org::PassRecordContext& a_recording)

@@ -147,6 +147,9 @@ namespace
 
 		DepthClearFrame Prepare(const DepthClearBindings&, const org::PassPrepareContext&) const { return frame; }
 
+		// Its commands depend on the run only through SkipsAtExecution: a kept late batch keeps its list while the answer holds.
+		static constexpr bool kRecordKeyedBySkip = true;
+
 		// Recorded at execution: a run whose commit left the gate closed records only the pass's barriers.
 		static bool SkipsAtExecution(const DepthClearBindings&, const DepthClearFrame& a_frame, const org::PassRecordContext& a_recording)
 		{

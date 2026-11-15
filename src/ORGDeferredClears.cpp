@@ -101,6 +101,9 @@ namespace
 
 		ClearFrame Prepare(const ClearBindings&, const org::PassPrepareContext&) const { return { CurrentColour(), width, height }; }
 
+		// Its commands depend on the run only through SkipsAtExecution: a kept late batch keeps its list while the answer holds.
+		static constexpr bool kRecordKeyedBySkip = true;
+
 		// Recorded at execution: a run whose commit left the gate closed records only the pass's barriers.
 		static bool SkipsAtExecution(const ClearBindings&, const ClearFrame&, const org::PassRecordContext& a_recording)
 		{

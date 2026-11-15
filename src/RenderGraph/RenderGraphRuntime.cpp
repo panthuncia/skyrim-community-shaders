@@ -1453,6 +1453,12 @@ struct RenderGraphRuntime::Impl
 			list(Census::List::HandoffReused), list(Census::List::Release), list(Census::List::HomeAcquire), list(Census::List::Upload),
 			list(Census::List::UploadEmpty), list(Census::List::QueueUpload), list(Census::List::QueueUploadEmpty),
 			f(c.handoffMisses[0]), f(c.handoffMisses[1]), f(c.handoffMisses[2]));
+		std::string recordedInline;
+		for (const auto& [why, count] : c.inlineRecorded)
+			if (f(count) >= 0.05)
+				recordedInline += fmt::format("{}{} {:.2f}", recordedInline.empty() ? "" : ", ", why, f(count));
+		logger::info("[ORG] Submission census, inline lists a frame: {:.1f} recorded, {:.1f} kept by their gates; recorded because of: {}",
+			list(Census::List::Inline), list(Census::List::InlineKept), recordedInline.empty() ? "-" : recordedInline);
 		logger::info("[ORG] Submission census, open admissions a frame: {:.1f} predicted, {:.1f} predicted by an earlier plan, {:.1f} not entry-only, {:.1f} alias "
 					 "invalidated, {:.1f} new prediction slot, {:.1f} states differ",
 			f(c.admissions[0]), f(c.admissions[1]), f(c.admissions[2]), f(c.admissions[3]), f(c.admissions[4]), f(c.admissions[5]));
@@ -2328,6 +2334,10 @@ bool RenderGraphRuntime::Initialize()
 		// CS_ORG_COALESCE_SUBMITS (native mode, default on, =0 off): an epoch's consecutive batches on one queue go to it in one
 		// queue submission (Desc::coalesceSubmissions). Guest mode hands each batch to DXVK's stream as before.
 		desc.coalesceSubmissions = state->native && Switches::Number("CS_ORG_COALESCE_SUBMITS", 1) != 0;
+		// CS_ORG_KEEP_GATED (native mode, default on, =0 off): a kept recording's late batch made only of gated copies and clears
+		// (passes keyed by their skip answer, kRecordKeyedBySkip) submits its list again while the run's gate answers are unchanged,
+		// instead of recording it at each submission (Desc::keepGatedInline).
+		desc.keepGatedInline = state->native && Switches::Number("CS_ORG_KEEP_GATED", 1) != 0;
 		// CS_ORG_SUBMIT_THREAD (native mode, default on, =0 off): an epoch's commit runs on the render thread, and the rest of its
 		// submission (admission, passes recorded at execution, queue submissions) on a submission thread of the host's
 		// (Desc::submissionThread). Off with the phase epochs (CS_ORG_PHASES=1). Guest mode submits on the render thread.

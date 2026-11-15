@@ -302,6 +302,9 @@ namespace RenderGraph::AnchorPasses
 
 			SpecFrame<Copy> Prepare(const CopyBindings&, const org::PassPrepareContext&) const { return { spec }; }
 
+			// Its commands depend on the run only through SkipsAtExecution: a kept late batch keeps its list while the answer holds.
+			static constexpr bool kRecordKeyedBySkip = true;
+
 			// Recorded at execution (FrameAnchors::PassDesc::atExecution): a gated copy whose entry the run's commit left closed is not
 			// recorded.
 			static bool SkipsAtExecution(const CopyBindings&, const SpecFrame<Copy>& a_frame, const org::PassRecordContext& a_recording)

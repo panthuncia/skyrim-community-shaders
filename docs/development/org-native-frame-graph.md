@@ -1545,3 +1545,33 @@ submission thread at the present.
 | Submission thread: the queued present, ms a frame | - | 0.28 |
 
 native-quick with DLSS registered: 3 runs on and 1 off, all clean by eye. `CS_ORG_LOADING_THREAD=1` passes.
+
+## Gated copies and clears kept by their gate answers (2026-11-15, `org-native/phases`)
+
+`CS_ORG_KEEP_GATED` (native mode, default on, `=0` off; ORG `Desc::keepGatedInline`).
+- **What.** A gated copy or clear is recorded at execution only so that a closed gate can skip it. Its commands do not depend on the
+  run otherwise. Such passes now say so (`static constexpr bool kRecordKeyedBySkip = true`): AnchorPasses' copies, Dynamic
+  Cubemaps' copies, Grass Collision's copy, the skeleton's clears, Terrain Blending's depth clear, the deferred G-buffer clear and
+  the UAV clears (Screen Space Shadows, Subsurface Scattering, IBL).
+- **Mechanism.** A kept recording's inline late batch made only of such passes keeps its list. At each submission the submission
+  thread asks each pass's skip answer for the run (`SkipsAgain`, after the commit). When the answers equal those the list was
+  recorded with, the list is submitted again as it is. Otherwise it is recorded again, once, for the new answers.
+- **Why not recorded ahead with the early batches.** The early batches are recorded on the host's thread before the run's commit,
+  when the gates are not known yet. Putting the answers into the passes' revisions would make the render thread's revision check
+  fail on every pattern change, and that path waits for the host's thread to prepare the ticket again. Keeping the late list by
+  answers records on the submission thread only when the answers change, and never waits. The answers are also what a segment
+  list's signature needs.
+- **Not covered.** A late batch with a live pass in it (the sky and water draws, Scaleform, ImGui, the deferred composite, DCLF's
+  direct sites, the IBL sky SH dispatch, the sun occlusion) is recorded at every submission as before. The census line
+  `inline lists a frame` names the first live pass of each recorded batch.
+
+| perf-taa, native Vulkan, Perf-Fast, Tracy (measured) | Off | On |
+|---|---|---|
+| fps between the marks | 121.2 | 123.8 |
+| Inline lists recorded a frame (census) | 25.0 | 12.5 (9.2 kept, 0 re-recorded for changed answers) |
+| Passes recorded at execution a frame (`RecordOwned.Pass` on the submission thread) | 46.9 | 35.8 |
+| Submission thread `RecordInline`, ms a frame | 1.17 | 1.00 |
+| Submission thread busy (zone union), ms a frame | 3.69 | 3.54 |
+| Inline batches submitted a frame | 23.9 | 23.9 (13.9 of them recorded) |
+
+native-quick with DLSS registered: 3 runs on and 1 off, all clean by eye.

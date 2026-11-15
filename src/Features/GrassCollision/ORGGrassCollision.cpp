@@ -119,6 +119,9 @@ namespace
 
 		CopyFrame Prepare(const CopyBindings&, const org::PassPrepareContext&) const { return { latch, layout, gate }; }
 
+		// Its commands depend on the run only through SkipsAtExecution: a kept late batch keeps its list while the answer holds.
+		static constexpr bool kRecordKeyedBySkip = true;
+
 		// Recorded at execution: a run whose commit staged nothing (the update's gate entry closed) copies nothing.
 		static bool SkipsAtExecution(const CopyBindings&, const CopyFrame& a_frame, const org::PassRecordContext& a_recording)
 		{
