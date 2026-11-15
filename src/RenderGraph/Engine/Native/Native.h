@@ -197,6 +197,12 @@ namespace RenderGraph::Engine::Native
 	bool SetSwapChainColorSpace(bool a_hdr);
 
 	/**
+	 * @brief Statistics, any thread: the queued presents (CS_ORG_QUEUE_PRESENT) whose render thread waited for the present before
+	 * them, and the time those waited, in microseconds, since the last call.
+	 */
+	void TakePresentPace(std::uint64_t& a_waits, std::uint64_t& a_us);
+
+	/**
 	 * @name The profilers' view of the native Vulkan device (GPU counters, RenderGraphRuntime::Initialize), what DXVK's
 	 * dxvkGetInteropDeviceInfo and dxvkEnqueueQueueCallback give them in guest mode.
 	 */

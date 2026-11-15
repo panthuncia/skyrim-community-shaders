@@ -394,6 +394,19 @@ public:
 	 */
 	void DrainSubmissions(const char* a_why, bool a_anyThread = false);
 
+	/**
+	 * @brief Native mode with a submission thread and CS_ORG_QUEUE_PRESENT (default on): whether the present goes onto the
+	 * submission thread's queue (QueueOnSubmitThread) instead of draining it. Render owner only: another thread presents
+	 * synchronously after a drain.
+	 */
+	bool QueuesPresent() const;
+
+	/**
+	 * @brief Render owner: runs a_closure on the submission thread, in order after the epochs queued so far
+	 * (GraphHost::EnqueueOnSubmitThread). Without a submission thread it runs at once.
+	 */
+	void QueueOnSubmitThread(std::function<void()> a_closure);
+
 	/** @brief Render thread: the segments submitted since the last call, one bit per Segment. */
 	std::uint64_t TakeSubmittedSegments();
 

@@ -656,7 +656,7 @@ struct RenderGraphRuntime::Impl
 			static_cast<VkSemaphore>(info.timeline) == a_semaphore)
 			return "frameWait";
 		if (host)
-			for (const auto& [timeline, value] : host->SealedPoint().points) {
+			for (const auto& [timeline, value] : host->PassedSealedPoint().points) {
 				rhi::VulkanTimelineInfo hostInfo{};
 				if (timeline && *timeline && rhi::QueryNativeTimeline(timeline->Get(), rhi::RHI_IID_VK_TIMELINE, &hostInfo, sizeof(hostInfo)) &&
 					static_cast<VkSemaphore>(hostInfo.timeline) == a_semaphore)
@@ -759,7 +759,7 @@ struct RenderGraphRuntime::Impl
 		std::vector<std::pair<VkSemaphore, std::uint64_t>> sealed;
 		std::vector<std::uint32_t> sealedIndex;  // each sealed timeline's BasicRHI index: t<index> in GraphHost::DescribeAsyncState
 		if (host)
-			for (const auto& [timeline, value] : host->SealedPoint().points) {
+			for (const auto& [timeline, value] : host->PassedSealedPoint().points) {
 				rhi::VulkanTimelineInfo info{};
 				if (timeline && *timeline && rhi::QueryNativeTimeline(timeline->Get(), rhi::RHI_IID_VK_TIMELINE, &info, sizeof(info))) {
 					sealed.emplace_back(static_cast<VkSemaphore>(info.timeline), value);
@@ -1541,6 +1541,10 @@ struct RenderGraphRuntime::Impl
 					t.busyUs / 1000.0 / frames, double(t.tickets) / frames, double(t.groups) / frames, double(t.joined) / frames, t.discarded, t.peakDepth,
 					double(t.backpressureWaits) / frames,
 					t.backpressureUs / 1000.0 / frames, double(t.drains) / frames, t.drainUs / 1000.0 / frames, callers.empty() ? "-" : callers);
+				std::uint64_t paceWaits = 0, paceUs = 0;
+				RenderGraph::Engine::Native::TakePresentPace(paceWaits, paceUs);
+				logger::info("[ORG] Queued presents: the render thread waited for the previous present {:.2f} times a frame ({:.3f} ms a frame)",
+					double(paceWaits) / frames, double(paceUs) / 1000.0 / frames);
 			}
 			statFrames = statExecutions = statEpochs = 0;
 		}
@@ -2333,6 +2337,10 @@ bool RenderGraphRuntime::Initialize()
 		// CS_ORG_MERGE_TICKETS (native mode, default on, =0 off): with the submission thread and coalesced submissions, the tickets
 		// queued together share queue submissions where they can (Desc::mergeTicketSubmissions).
 		desc.mergeTicketSubmissions = desc.submissionThread && desc.coalesceSubmissions && Switches::Number("CS_ORG_MERGE_TICKETS", 1) != 0;
+		// CS_ORG_QUEUE_PRESENT (native mode, default on, =0 off): with the submission thread, the frame's seal and the native present
+		// are entries on the thread's queue, after the frame's epochs (Desc::queuedSeals, Native's present). The render thread does
+		// not drain the thread for them. It waits only when the previous frame's present is still queued (Native's present pacing).
+		desc.queuedSeals = desc.submissionThread && Switches::Number("CS_ORG_QUEUE_PRESENT", 1) != 0;
 		// CS_ORG_QUEUE_UPLOADS (default on, =0 off): an async epoch's staged uploads whose destination it first uses on the compute
 		// queue are recorded there, just ahead of its first compute batch, and a compute batch waits for the graphics queue's
 		// uploads only when a pass in it declares what they write. Off: every upload on the graphics queue, and every compute batch
@@ -2972,6 +2980,20 @@ void RenderGraphRuntime::DrainSubmissions(const char* a_why, bool a_anyThread)
 	if (!a_anyThread && !FrameAnchors::IsRenderOwner())
 		return;
 	impl->host->DrainSubmissions(a_why);
+}
+
+bool RenderGraphRuntime::QueuesPresent() const
+{
+	return impl && impl->host && impl->host->SubmissionThreadOn() && impl->host->GetDesc().queuedSeals && FrameAnchors::IsRenderOwner();
+}
+
+void RenderGraphRuntime::QueueOnSubmitThread(std::function<void()> a_closure)
+{
+	if (!impl || !impl->host) {
+		a_closure();
+		return;
+	}
+	impl->host->EnqueueOnSubmitThread(std::move(a_closure));
 }
 
 void RenderGraphRuntime::MoveOwnerThread()
@@ -4028,6 +4050,8 @@ void RenderGraphRuntime::SignalFramePace(bool) {}
 void RenderGraphRuntime::SealPresented() {}
 void RenderGraphRuntime::MoveOwnerThread() {}
 void RenderGraphRuntime::DrainSubmissions(const char*, bool) {}
+bool RenderGraphRuntime::QueuesPresent() const { return false; }
+void RenderGraphRuntime::QueueOnSubmitThread(std::function<void()> a_closure) { a_closure(); }
 void RenderGraphRuntime::WaitFramePace() {}
 org::services::PipelineRegistry* RenderGraphRuntime::PipelineRegistry() { return nullptr; }
 void RenderGraphRuntime::RequestShaderReload(std::string_view, bool) {}

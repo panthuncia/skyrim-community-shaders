@@ -1513,3 +1513,35 @@ admission, not in the merge.
 | Render thread blocked in drains, ms a frame | 0.61 | 0.60 |
 
 The submission thread spends what it saves in `vkQueueSubmit` on recording at execution and the flushes; the frame gains a little.
+
+## The present as a queue entry (2026-11-14, `org-native/phases`)
+
+`CS_ORG_QUEUE_PRESENT` (native mode with the submission thread, default on, `=0` off): the render thread no longer drains the
+submission thread at the present.
+- **Seal.** ORG `Desc::queuedSeals`: `SealSubmitted` queues the seal behind the tickets already queued. Until the thread passes it,
+  `SealedPoint` has a pending part, so its waits wait for the thread first (it never waits for the render thread). `Seals()`
+  counts the queued seal at once, so the render thread's later commits are behind it. The lease logic keeps counting the seals the
+  thread passed. `PassedSealedPoint` is the last passed seal, for checks that must not wait (DCLF's `Sealed`, diagnostics).
+- **Present.** `Native::QueuePresent` on the render owner takes what the render thread's state decides: the version the frame drew
+  into, and for the graph present's tail the move to the next version. The copy, the swap chain's present and the frame-latency
+  wait run on the submission thread, as a closure in queue order (`GraphHost::EnqueueOnSubmitThread`).
+- **Pacing.** The render thread queues a present only once the one before it has finished. So it runs at most one frame ahead
+  of the submission thread, and the swap chain's own wait paces that thread. The statistics report counts these waits.
+- **What needs the present's result.** A resize, a colour-space change and the window closing drain the thread before they take
+  the present lock. A failed present sets the device's `lost` or `resizeRequested` flag on the submission thread. The next present
+  reads them there, as before. `WaitPresents` runs after those drains, so it sees every queued copy.
+- **Other threads.** A loading screen's thread that does not own rendering presents synchronously after a drain, as before.
+  Ownership moves drain first. The present probe (`CS_ORG_NATIVE_PRESENT_PROBE`) keeps the present on the render thread: it
+  copies through the immediate context.
+- **Not moved:** the Streamline evaluate (DLSS) still drains. It records through Streamline on the calling thread with that
+  frame's constants, and moving it needs the constants and the evaluate call itself on the submission thread.
+
+| perf-taa, native Vulkan, Perf-Fast, Tracy (measured) | Off | On |
+|---|---|---|
+| fps between the marks | 119.8 | 122.5 |
+| Render thread blocked at the present (drain, then pacing), ms a frame | 0.60 | 0.00 |
+| Render thread `CS.Present`, ms a frame | 1.24 | 0.40 |
+| Render thread busy (zone union), ms a frame | 4.25 | 3.44 |
+| Submission thread: the queued present, ms a frame | - | 0.28 |
+
+native-quick with DLSS registered: 3 runs on and 1 off, all clean by eye. `CS_ORG_LOADING_THREAD=1` passes.

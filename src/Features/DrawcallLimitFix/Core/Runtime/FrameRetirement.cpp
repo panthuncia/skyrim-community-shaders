@@ -106,6 +106,10 @@ namespace DCLF
 	bool Sealed(const org::GraphHost::GpuPoint& a_point)
 	{
 		const auto sealed = SealedGpuPoint();
+		// A seal still queued on the submission thread (GraphHost::Desc::queuedSeals) has no values yet. It will cover the work queued
+		// before it, so nothing can be said until the thread passes it.
+		if (!sealed.Passed())
+			return true;
 		// Before the first present nothing is sealed, and nothing can be said.
 		if (sealed.points.empty())
 			return true;

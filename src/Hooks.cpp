@@ -603,15 +603,21 @@ struct IDXGISwapChain_Present
 						FrameAnchors::FlushRegions("the present");
 						// The frame's epochs still on the submission thread reach the queue before the present. A loading screen's thread
 						// presenting without owning rendering drains too: it copies what the owner's epochs draw.
-						RenderGraphRuntime::Get().DrainSubmissions("the present", true);
+						// Native mode with CS_ORG_QUEUE_PRESENT: the render owner's present is an entry on the submission thread's queue,
+						// after the frame's epochs, so it does not drain (Native's QueuePresent).
+						const bool holdsPresent = globals::features::drawcallLimitFix.loaded && globals::features::drawcallLimitFix.LoadHoldsPresents() &&
+						                          !globals::features::upscaling.IsFrameGenerationActive();
+						const bool queuedPresent = !holdsPresent && RenderGraph::Engine::Native::Active() && !globals::features::upscaling.IsFrameGenerationActive() &&
+						                           RenderGraphRuntime::Get().QueuesPresent();
+						if (!queuedPresent)
+							RenderGraphRuntime::Get().DrainSubmissions("the present", true);
 						RenderGraph::FrameSequence::NoteBoundary("the present");
 						GpuEventTimers::BeginEvent("mark before native present");
 						GpuEventTimers::EndEvent();
 						// A load without a loading menu (or a re-entry), held until Drawcall Limit Fix draws its objects: the previous frame
 						// stays on screen. The frame's work is sent on as a present would send it: the owned frame ends the guest frame and
 						// queues nothing. Not with frame generation, which presents itself.
-						if (globals::features::drawcallLimitFix.loaded && globals::features::drawcallLimitFix.LoadHoldsPresents() &&
-							!globals::features::upscaling.IsFrameGenerationActive()) {
+						if (holdsPresent) {
 							if (RenderGraph::Engine::OwnedFrame::Active())
 								return RenderGraph::Engine::OwnedFrame::Get().EndGuestFrame(sc, si, f, [](IDXGISwapChain* a_sc, unsigned a_si, unsigned a_f) { return func(a_sc, a_si, a_f); });
 							globals::d3d::context->Flush();

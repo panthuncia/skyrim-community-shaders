@@ -1204,6 +1204,11 @@ namespace RenderGraph::Engine::Native
 			} graph;
 			std::atomic<bool> lost = false;
 			std::mutex presentLock;
+			// Presents queued on the submission thread (CS_ORG_QUEUE_PRESENT) and those it has finished. The render thread queues the
+			// next one only once the one before has finished (QueuePresent).
+			std::atomic<uint64_t> queuedPresents = 0, donePresents = 0;
+			// Render thread: the presents that waited for the one before, and the time they waited.
+			std::atomic<uint64_t> presentPaceWaits = 0, presentPaceUs = 0;
 
 			// CS_ORG_NATIVE_VALIDATION=1: BasicRHI queues the validation layer's messages; each present drains them into the log.
 			bool validation = false;
@@ -2122,7 +2127,72 @@ namespace RenderGraph::Engine::Native
 
 			HRESULT Present(UINT a_syncInterval, UINT a_flags)
 			{
+				static const bool probeOn = Switches::On("CS_ORG_NATIVE_PRESENT_PROBE");
+				// The probe copies through the immediate context, which is the render thread's: it keeps the present on this thread.
+				if (!(a_flags & DXGI_PRESENT_TEST) && !probeOn && RenderGraphRuntime::Get().QueuesPresent())
+					return QueuePresent(a_syncInterval);
+				// The frame's epochs still on the submission thread reach the queue before this present.
+				RenderGraphRuntime::Get().DrainSubmissions("the present", true);
 				std::lock_guard guard(presentLock);
+				return PresentLocked(a_syncInterval, a_flags, nullptr, false);
+			}
+
+			/**
+			 * @brief Render owner, with CS_ORG_QUEUE_PRESENT: the present as an entry on the submission thread's queue, after the
+			 * frame's epochs. What the render thread's state decides is taken here: the version the frame drew into, and for the
+			 * graph present's tail the move to the next version, so the next frame draws into that one. The copy and the swap chain's
+			 * present run on the submission thread (PresentLocked).
+			 * Pacing: the render thread queues a present only once the one before it has finished. So it runs at most one frame ahead
+			 * of the submission thread, and the swap chain's own wait paces that thread.
+			 */
+			HRESULT QueuePresent(UINT a_syncInterval)
+			{
+				std::shared_ptr<NativeResource> source;
+				bool tail = false;
+				{
+					std::lock_guard guard(presentLock);
+					if (lost.load(std::memory_order_relaxed) || !backBuffer)
+						return S_OK;
+					source = CurrentOf(backBufferRecord);
+					if (!source)
+						return S_OK;
+					tail = graph.slot && source->graphOwned;
+					if (tail) {
+						++graph.tails;
+						NextGraphVersion();
+					}
+				}
+				const uint64_t queued = queuedPresents.load(std::memory_order_relaxed);
+				if (donePresents.load(std::memory_order_acquire) < queued) {
+					ZoneScopedN("CS.Native.PresentPace");
+					const auto start = std::chrono::steady_clock::now();
+					// The submission thread finishes the present without this thread, so the wait ends.
+					for (auto done = donePresents.load(std::memory_order_acquire); done < queued; done = donePresents.load(std::memory_order_acquire))
+						donePresents.wait(done, std::memory_order_acquire);
+					presentPaceWaits.fetch_add(1, std::memory_order_relaxed);
+					presentPaceUs.fetch_add(static_cast<uint64_t>(std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - start).count()),
+						std::memory_order_relaxed);
+				}
+				queuedPresents.store(queued + 1, std::memory_order_relaxed);
+				RenderGraphRuntime::Get().QueueOnSubmitThread([this, source = std::move(source), tail, a_syncInterval] {
+					ZoneScopedN("CS.Native.QueuedPresent");
+					{
+						std::lock_guard guard(presentLock);
+						(void)PresentLocked(a_syncInterval, 0, source, tail);
+					}
+					donePresents.fetch_add(1, std::memory_order_release);
+					donePresents.notify_all();
+				});
+				return S_OK;
+			}
+
+			/**
+			 * @brief The present under presentLock. a_queued: the version QueuePresent took on the render thread (then this runs on the
+			 * submission thread), and a_queuedTail whether it goes through the graph present's tail. Null: the present on the calling
+			 * thread, which takes the current version itself.
+			 */
+			HRESULT PresentLocked(UINT a_syncInterval, UINT a_flags, const std::shared_ptr<NativeResource>& a_queued, bool a_queuedTail)
+			{
 				if (a_flags & DXGI_PRESENT_TEST)
 					return S_OK;
 				if (lost.load(std::memory_order_relaxed))
@@ -2158,12 +2228,22 @@ namespace RenderGraph::Engine::Native
 				const uint32_t index = swapchain->CurrentImageIndex();
 				const rhi::ResourceHandle target = swapchain->Image(index);
 				// What the frame drew into: the graph present's current version, or the back buffer itself.
-				const auto source = CurrentOf(backBufferRecord);
+				const auto source = a_queued ? a_queued : CurrentOf(backBufferRecord);
 				if (!source)
 					return S_OK;
-				// The graph present's tail. Only the render owner moves to the next version. A loading screen or the logo
-				// presenting from another thread copies the current version below, and it stays current.
-				if (graph.slot && source->graphOwned) {
+				if (a_queued) {
+					// QueuePresent moved to the next version already.
+					if (a_queuedTail) {
+						const HRESULT result = PresentThroughLedger(*source->graphOwned, source, slot, target, a_syncInterval, true, false);
+						if (result != E_PENDING)
+							return result;
+						static std::atomic_flag logged;
+						if (!logged.test_and_set())
+							logger::warn("[ORG native] graph present: ORG's external client refused a queued present's tail; it copies on its own path (logged once)");
+					}
+				} else if (graph.slot && source->graphOwned) {
+					// The graph present's tail. Only the render owner moves to the next version. A loading screen or the logo
+					// presenting from another thread copies the current version below, and it stays current.
 					if (::FrameAnchors::IsRenderOwner()) {
 						const HRESULT result = PresentThroughLedger(*source->graphOwned, source, slot, target, a_syncInterval, true);
 						if (result != E_PENDING)
@@ -2262,7 +2342,7 @@ namespace RenderGraph::Engine::Native
 			 * Returns E_PENDING, with nothing submitted, when the client refused: the caller copies on its own path.
 			 */
 			HRESULT PresentThroughLedger(org::Resource& a_backBuffer, const std::shared_ptr<NativeResource>& a_record, uint32_t a_slot,
-				rhi::ResourceHandle a_target, UINT a_syncInterval, bool a_tail)
+				rhi::ResourceHandle a_target, UINT a_syncInterval, bool a_tail, bool a_nextVersion = true)
 			{
 				const auto source = a_backBuffer.GetAPIResource().GetHandle();
 				// The same size as the swap chain image, unless a mode change made the swap chain again alone (then the smaller one).
@@ -2306,7 +2386,8 @@ namespace RenderGraph::Engine::Native
 					return E_PENDING;
 				slotValues[a_slot] = ++presentValue;
 				const HRESULT result = FinishPresent(signal, a_syncInterval, a_record);
-				if (a_tail) {
+				// A queued present's version moved on the render thread already (QueuePresent).
+				if (a_tail && a_nextVersion) {
 					// After the present, so the probe in it read the version this frame drew.
 					++graph.tails;
 					NextGraphVersion();
@@ -2644,6 +2725,8 @@ namespace RenderGraph::Engine::Native
 
 		HRESULT SwapChainResizeBuffers(UINT a_count, UINT a_width, UINT a_height, DXGI_FORMAT a_format, UINT)
 		{
+			// A queued present uses the swap chain and the back buffer: it finishes first, outside the lock it takes.
+			RenderGraphRuntime::Get().DrainSubmissions("a swap chain resize", true);
 			std::lock_guard guard(g_device->presentLock);
 			return g_device->Resize(a_count, a_width, a_height, a_format == DXGI_FORMAT_UNKNOWN ? DXGI_FORMAT_UNKNOWN : BackBufferFormat(a_format));
 		}
@@ -4978,10 +5061,18 @@ namespace RenderGraph::Engine::Native
 		return 0;
 	}
 
+	void TakePresentPace(std::uint64_t& a_waits, std::uint64_t& a_us)
+	{
+		a_waits = g_device ? g_device->presentPaceWaits.exchange(0, std::memory_order_relaxed) : 0;
+		a_us = g_device ? g_device->presentPaceUs.exchange(0, std::memory_order_relaxed) : 0;
+	}
+
 	bool SetSwapChainColorSpace(bool a_hdr)
 	{
 		if (!g_device || !g_device->swapchain)
 			return false;
+		// A queued present uses the swap chain: it finishes first, outside the lock it takes.
+		RenderGraphRuntime::Get().DrainSubmissions("a swap chain colour space change", true);
 		std::lock_guard guard(g_device->presentLock);
 		const auto wanted = a_hdr ? rhi::SwapchainColorSpace::Hdr10St2084 : rhi::SwapchainColorSpace::SrgbNonlinear;
 		if (g_device->swapchain->ColorSpace() == wanted)
@@ -5166,6 +5257,7 @@ namespace RenderGraph::Engine::Native
 	{
 		if (!g_device)
 			return;
+		RenderGraphRuntime::Get().DrainSubmissions("the window closing", true);
 		std::lock_guard guard(g_device->presentLock);
 		g_device->WaitPresents();
 		g_device->lost = true;  // nothing more is presented
@@ -5205,6 +5297,7 @@ namespace RenderGraph::Engine::Native
 	winrt::com_ptr<ID3D11Buffer> WrapBuffer(const rhi::Resource&, const D3D11_BUFFER_DESC&, const char*) { return nullptr; }
 	void Shutdown() {}
 	bool SetSwapChainColorSpace(bool) { return false; }
+	void TakePresentPace(std::uint64_t& a_waits, std::uint64_t& a_us) { a_waits = a_us = 0; }
 	bool DescribeVulkanDevice(DxvkOrgInteropDeviceInfo&) { return false; }
 	uint64_t AdapterLuid() { return 0; }
 	bool RunExternal(const std::string&, std::span<const ExternalImage>, const std::function<void(void*, std::span<const ExternalImageInfo>)>&, std::shared_ptr<const void>)
