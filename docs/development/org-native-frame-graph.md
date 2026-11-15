@@ -1575,3 +1575,44 @@ native-quick with DLSS registered: 3 runs on and 1 off, all clean by eye. `CS_OR
 | Inline batches submitted a frame | 23.9 | 23.9 (13.9 of them recorded) |
 
 native-quick with DLSS registered: 3 runs on and 1 off, all clean by eye.
+
+## Segment census: what one list per segment would meet (2026-11-15, `org-native/phases`)
+
+Step 3 of the plan (one command list per frame segment) stopped at its first part, as a measurement. With `CS_ORG_EPOCH_STATS=1`
+the host groups each frame's admitted tickets by segment on the submission thread (ORG `GraphHost::SetSubmissionSegment`,
+`SetSegmentCensus`, `TakeSegmentStats`) and compares each segment's signature with the segment's last four: the ordered epochs,
+each ticket's recordings and its admission plans. CS names the segment at each `SubmitEpoch`: the ten segments of the plan, cut
+at DCLF's epochs (`FrameSegmentOf` in RenderGraphRuntime.cpp). No list is built and nothing is held.
+
+perf-taa, native Vulkan, one window (measured, per frame):
+
+| Segment | Runs | Executions | Signature not among its last four | Admissions without a predicted plan |
+|---|---|---|---|---|
+| pre-shadow | 1 | 8.2 | 0 | 0 |
+| DCLF shadows | 1 | 0.9 | 0 | 0 |
+| pre-depth | 1 | 1.8 | 0.92 (recordings, plans) | 0.92 |
+| DCLF depth | 1 | 0.9 | 0 | 0 |
+| pre-main | 1 | 8.2 | 0.92 (recordings, plans) | 2.75 |
+| DCLF main | 1 | 0.9 | 0 | 0 |
+| deferred and water | 1 | 14.0 | 1.0 (recordings, plans) | 4.0 |
+| DCLF forward and first person | 2 | 2.0 | 1.0 (order) | 0 |
+| post | 2 | 11.0 | 1.0 (order, recordings, plans) | 1.0 |
+| interface | 1 | 2.0 | 1.0 (recordings) | 0 |
+
+What it shows:
+- **Four segments are already stable** (pre-shadow and DCLF's shadow, depth and main epochs). A kept list per signature would be
+  recorded once for them.
+- **Copies are not pinned by occurrence.** The anchors that run many times a frame take whichever kept copy is idle first
+  (`TakeLiveCopy`): image space 12.75 times a frame, the frame clear 6.6, the shadow clear 3.8, the engine draws 2.8, the cube
+  clear, the reflection sky and the depth copy about 2. So the set of recordings in a segment differs from frame to frame, though
+  each copy keeps its recording. A segment list needs each occurrence of an epoch in a segment to take the same copy every frame
+  of the same frame slot.
+- **About 8.7 admissions a frame miss their predicted plan** (pre-main 2.75, deferred and water 4, post 1, pre-depth 0.9). Each
+  would change a segment's barriers. They must reach stable plans, or stay out of kept segments.
+- **The cut table is not quite the frame's order.** DCLF's forward and first-person epochs are apart (post work runs between
+  them), and post runs as two pieces around them. The table needs a cut there.
+- **Holding a segment until its cut** is what one list per segment needs: the list can only be chosen once the segment's last
+  ticket is admitted. The current group merge holds the device's sequencer across a group. Held across a whole segment it would
+  block other threads' submissions for the render thread's time, and a wait on the render thread for such a submission would
+  deadlock. Held submissions were dropped earlier for device loss. So a segment list needs a hold without the sequencer, or
+  submission ahead with a GPU wait on a CPU timeline. Neither was attempted here.

@@ -960,6 +960,8 @@ struct RenderGraphRuntime::Impl
 	// A frame holds a varying number of epochs (regions), so a window of presents is steadier than one of epochs.
 	static constexpr uint64_t kNativeStatsFrames = 300;
 	bool epochStats = false;
+	// The segment census (with CS_ORG_EPOCH_STATS): the furthest DCLF stage the frame's epochs reached so far (FrameSegmentOf).
+	std::uint32_t frameStage = 0;
 	// CS_ORG_EARLY_FLUSH (default on, =0 off): hand DXVK's pending D3D11 work to the GPU when an epoch starts.
 	bool earlyFlush = false;
 	// RenderGraphRuntime::InStreamEpochs: the async epochs executed in DXVK's own command stream.
@@ -1547,6 +1549,31 @@ struct RenderGraphRuntime::Impl
 					t.busyUs / 1000.0 / frames, double(t.tickets) / frames, double(t.groups) / frames, double(t.joined) / frames, t.discarded, t.peakDepth,
 					double(t.backpressureWaits) / frames,
 					t.backpressureUs / 1000.0 / frames, double(t.drains) / frames, t.drainUs / 1000.0 / frames, callers.empty() ? "-" : callers);
+				const auto segments = host->TakeSegmentStats();
+				if (segments.frames) {
+					static constexpr const char* kSegmentNames[] = { "pre-shadow", "DCLF shadows", "pre-depth", "DCLF depth", "pre-main", "DCLF main",
+						"deferred+water", "DCLF forward+1st", "post", "interface" };
+					const double segmentFrames = double(segments.frames);
+					std::string text;
+					double changed = 0.0, runs = 0.0;
+					for (std::size_t i = 0; i < std::size(kSegmentNames); ++i) {
+						const auto& s = segments.segments[i];
+						if (!s.runs)
+							continue;
+						changed += double(s.changed) / segmentFrames;
+						runs += double(s.runs) / segmentFrames;
+						text += fmt::format("; {} {:.2f} runs, {:.1f} executions, {:.2f} changed (order {:.2f}, recordings {:.2f}, plans {:.2f}), {:.2f} unplanned",
+							kSegmentNames[i], double(s.runs) / segmentFrames, double(s.executions) / segmentFrames, double(s.changed) / segmentFrames,
+							double(s.order) / segmentFrames, double(s.recordings) / segmentFrames, double(s.plans) / segmentFrames, double(s.unplanned) / segmentFrames);
+					}
+					std::string fresh;
+					for (std::size_t e = 0; e < segments.newRecordings.size(); ++e)
+						if (double(segments.newRecordings[e]) / segmentFrames >= 0.05)
+							fresh += fmt::format("{}{} {:.2f}", fresh.empty() ? "" : ", ", Impl::SegmentLabel(static_cast<Segment>(e)), double(segments.newRecordings[e]) / segmentFrames);
+					logger::info("[ORG] Segment census, a frame: {:.2f} segment runs, {:.2f} with a changed signature{}; epochs with a recording none of "
+								 "their last four: {}",
+						runs, changed, text, fresh.empty() ? "-" : fresh);
+				}
 				std::uint64_t paceWaits = 0, paceUs = 0;
 				RenderGraph::Engine::Native::TakePresentPace(paceWaits, paceUs);
 				logger::info("[ORG] Queued presents: the render thread waited for the previous present {:.2f} times a frame ({:.3f} ms a frame)",
@@ -2402,6 +2429,7 @@ bool RenderGraphRuntime::Initialize()
 		state->orgRuntime = org::Runtime::Create({ .device = state->device->Get(), .backend = RenderGraph::Backend::Active(), .slots = kRunCapacity });
 		desc.runtime = state->orgRuntime;
 		state->host = std::make_unique<org::GraphHost>(std::move(desc));
+		state->host->SetSegmentCensus(state->epochStats && state->native);
 		// Every rebuild waits for the build manager (BuildManager.h), which builds it off the render thread and attaches it at a frame
 		// boundary. An epoch with no graph is still built at its first submission: the startup builds.
 		state->host->SetExplicitBuilds(true);
@@ -2948,6 +2976,7 @@ void RenderGraphRuntime::SealPresented()
 	if (impl) {
 		impl->frameExecutions = 0;
 		impl->frameEpochs = 0;
+		impl->frameStage = 0;
 	}
 	// The native frame graph diagnostics close their frame (cheap when their switches are off).
 	RenderGraph::Engine::Native::OpCensus::EndFrame();
@@ -2990,6 +3019,44 @@ void RenderGraphRuntime::DrainSubmissions(const char* a_why, bool a_anyThread)
 	if (!a_anyThread && !FrameAnchors::IsRenderOwner())
 		return;
 	impl->host->DrainSubmissions(a_why);
+}
+
+/**
+ * @brief The segment census's frame segment for an epoch about to be submitted: the plan's ten segments, cut at DCLF's epochs.
+ * 0 pre-shadow, 1 DCLF shadows, 2 pre-depth, 3 DCLF depth, 4 pre-main, 5 DCLF main opaque, 6 deferred and water, 7 DCLF forward
+ * and first person, 8 post, 9 interface. Anchor epochs take the gap after the furthest DCLF stage the frame reached.
+ */
+static std::uint32_t FrameSegmentOf(RenderGraphRuntime::Segment a_segment, std::uint32_t& a_stage)
+{
+	std::uint32_t stage = 0;
+	switch (a_segment) {
+	case RenderGraphRuntime::Segment::ShadowView:
+	case RenderGraphRuntime::Segment::SkyOcclusion:
+	case RenderGraphRuntime::Segment::Reflection:
+		stage = 1;
+		break;
+	case RenderGraphRuntime::Segment::ZPrepass:
+	case RenderGraphRuntime::Segment::FirstPersonDepth:
+		stage = 2;
+		break;
+	case RenderGraphRuntime::Segment::MainOpaque:
+		stage = 3;
+		break;
+	case RenderGraphRuntime::Segment::Forward:
+	case RenderGraphRuntime::Segment::FirstPerson:
+		stage = 4;
+		break;
+	case RenderGraphRuntime::Segment::AnchorInterface:
+	case RenderGraphRuntime::Segment::AnchorOverlay:
+	case RenderGraphRuntime::Segment::AnchorHDROutput:
+	case RenderGraphRuntime::Segment::AnchorCapture:
+	case RenderGraphRuntime::Segment::AnchorPresent:
+		return 9;
+	default:
+		return a_stage * 2;
+	}
+	a_stage = (std::max)(a_stage, stage);
+	return stage * 2 - 1;
 }
 
 bool RenderGraphRuntime::QueuesPresent() const
@@ -3087,6 +3154,8 @@ std::shared_ptr<org::ExternalEpochExecution> RenderGraphRuntime::ExecuteExternal
 	const char* label = Impl::SegmentLabel(a_segment);
 	RenderGraph::UndeclaredAccess::EpochScope undeclaredScope(label);
 	try {
+		if (impl->epochStats)
+			impl->host->SetSubmissionSegment(FrameSegmentOf(a_segment, impl->frameStage));
 		impl->host->SubmitEpoch(EpochOf(a_segment), beforePrepare, std::move(a_resourceOwner));
 	} catch (...) {
 		// The ticket may have submitted its compute work before the throw. Its execution, if the host made one, is signalled
@@ -3314,6 +3383,8 @@ RenderGraphRuntime::EpochResult RenderGraphRuntime::TryExecuteEpoch(Segment a_se
 		}
 		std::shared_ptr<org::ExternalEpochExecution> execution;
 		if (async) {
+			if (impl->epochStats)
+				impl->host->SetSubmissionSegment(FrameSegmentOf(a_segment, impl->frameStage));
 			impl->host->SubmitEpoch(EpochOf(a_segment), beforePrepare, a_resourceOwner);
 			impl->MarkEpoch(impl->host->LastHostFrame(), a_segment);
 			// An in-stream epoch: its graphics work into DXVK's own command stream, here.
