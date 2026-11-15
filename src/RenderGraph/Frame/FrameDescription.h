@@ -127,6 +127,35 @@ namespace RenderGraph::Frame
 		friend bool operator==(const PostFields&, const PostFields&) = default;
 	};
 
+	/**
+	 * @brief The RenderWorld scopes the pass-state table also describes (RenderGraph/Frame/PostChain.h, Scope): the SAO generation and
+	 * composite (RenderSSAO, SE 100520 / AE 107245), the snow pass or its copy (Main::RenderWorld, 100424 / 107142), the screen-space
+	 * reflections (100428 / 107146) and the water blend. Every field is read from the engine's own state at the scope's entry, named
+	 * where it is read (PostChain.cpp).
+	 */
+	struct WorldFields
+	{
+		bool read = false;             // the ImageSpace manager exists
+		std::uint8_t saoLevels = 0;    // the camera-Z chain's levels: the minify loop draws levels 1 to saoLevels - 1
+		std::uint8_t saoContrast = 0;  // the level the minify loop draws with ISMinifyContrast (the first at most 16 pixels high), 0 for none
+		bool saoTemporal = false;      // the raw AO's temporal form
+		bool saoHalf = false;          // the SAO targets' half-resolution set
+		std::uint8_t saoParity = 0;    // the raw AO target this frame (the helper's counter after RenderSSAO's increment)
+		std::uint8_t saoForm = 0;      // the composite: 0 SAO, 1 SAO and fog, 2 fog, 3 a copy
+		bool ssr = false;              // the reflections helper is active
+		std::uint8_t ssrDownsample = 0;  // the normal mask's downsample: 0 none, 1 raster, 2 compute
+		bool ssrBlur = false;          // the reflections' compute blur runs (the composite then reads its output)
+		std::uint8_t normals = 4;      // the SSR mask target the engine reads this frame (GetImageSpaceRenderTarget_TAAMASK_SSRMASK_SWAP)
+		bool snow = false;             // the snow pass runs (else the copy of kMAIN into its copy target)
+		std::uint8_t waterHistory = 0;  // the water blend's history pair this frame
+		std::uint8_t waterAddress = 0;  // the water blend's third and fifth samplers' address modes (third * 16 + fifth), which it does not set: read at its call
+
+		friend bool operator==(const WorldFields&, const WorldFields&) = default;
+	};
+
+	/** @brief The world fields that differ, as DiffPost gives them. a_parity: the parity fields too. */
+	std::string DiffWorld(const WorldFields& a_before, const WorldFields& a_after, bool a_parity = true);
+
 	/** @brief The post fields that differ, as "name old -> new" joined by ", "; empty when equal. a_parity: the parity fields too. */
 	std::string DiffPost(const PostFields& a_before, const PostFields& a_after, bool a_parity = true);
 

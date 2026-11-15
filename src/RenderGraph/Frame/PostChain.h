@@ -82,6 +82,18 @@ namespace RenderGraph::Frame::PostChain
 		Screenshot,    // the screenshot copy
 		Upsample,      // the dynamic-resolution upsample
 		Dof,           // a depth-of-field draw (index: its step * 8 + its draw in the step, + 0x80 after the tonemap)
+		// The RenderWorld scopes (Scope, below).
+		SaoCameraZ,     // ISSAOCameraZ (index: + 0x20 for the half-resolution set)
+		SaoMinify,      // a camera-Z level (index: the level, + 0x40 for ISMinifyContrast)
+		SaoRawAo,       // the raw AO (index: 0 temporal, 1 not, + 0x20 half; parity: its target, + 2 when the SSR mask target is the swap)
+		SaoBlur,        // the AO blur (index: 0 horizontal, 1 vertical, + 0x20 half; parity: the raw target the horizontal reads)
+		SaoComposite,   // the SAO composite into kMAIN (index: its form, + 0x10 reading the blurred reflections, + 0x20 half; parity: the SSR mask swap)
+		SnowSss,        // the snow's subsurface scattering into kMAIN's copy
+		SnowCopy,       // the copy of kMAIN into its copy when there is no snow
+		SsrDownsample,  // the SSR mask's downsample (index: 1 raster, 2 compute; parity: the mask swap)
+		SsrRayMarch,    // the reflections' ray march (index: 1 from the downsampled mask; parity: the mask swap when not)
+		SsrBlur,        // the reflections' compute blur (index: 0 horizontal, 1 vertical)
+		WaterBlend,     // the water's temporal blend (index: its third sampler's address * 16 + its fifth's; parity: its history, + 2 for the mask swap)
 		Count
 	};
 
@@ -128,6 +140,51 @@ namespace RenderGraph::Frame::PostChain
 	 * followed as the engine follows it (eofSource, eofSwap, eofDest), so each step knows the targets it reads and writes.
 	 */
 	std::vector<Draw> PredictDraws(const PostFields& a_fields, Part a_part = Part::All);
+
+	/**
+	 * @brief The RenderWorld scopes the table describes too (docs/development/org-native-frame-graph.md, "The declared frame, stage 5"):
+	 * each is predicted from the world fields read at its entry, its own decision event, and its draws are checked against their rows as
+	 * the chain's are. Main::RenderWorld (SE 100424, AE 107142) runs them in this order, the reflections inside FinishAccumulating before
+	 * it returns to the SAO, and the water blend later, after the water's draws.
+	 */
+	enum class Scope : std::uint8_t
+	{
+		Reflections,    // the screen-space reflections (100428 / 107146)
+		Ssao,           // RenderSSAO's first call: the camera depth, its levels, the raw AO and its blur
+		Snow,           // the snow pass (RenderSnowSSS, 100537 / 107267) or the copy of kMAIN into its copy target
+		SsaoComposite,  // RenderSSAO's second call: the composite into kMAIN
+		WaterBlend,     // the water's temporal blend (ISWaterBlend)
+		Count,
+		None = Count
+	};
+
+	/** @brief "reflections". */
+	const char* ScopeName(Scope a_scope);
+
+	/** @brief Reads the world fields a_scope selects from the engine now (its entry). Render owner. */
+	WorldFields ReadWorld(Scope a_scope, const WorldFields& a_base);
+
+	/** @brief The draws a_scope makes for a_fields, each with its row. */
+	std::vector<Draw> PredictScope(Scope a_scope, const WorldFields& a_fields);
+
+	/**
+	 * @brief The ImageSpace port at a scope's entry and exit: the scope's draws are predicted (CurrentRow then gives their rows) and,
+	 * at its end, compared with what it drew (a "post not declared" tap error on a difference). Render owner.
+	 */
+	void ScopeStart(Scope a_scope);
+	void ScopeEnd();
+
+	/** @brief The scope running now, or Scope::None. Render owner. */
+	Scope CurrentScope();
+
+	/** @brief As SetPartHook, for each scope's decision event (its entry), with its predicted draws. Render owner. */
+	void SetScopeHook(void (*a_hook)(Scope a_scope, const std::vector<Draw>& a_draws));
+
+	/**
+	 * @brief The world fields this frame's scopes are declared with: this frame's, as far as its scopes read them, completed by the
+	 * slot's last frame's (the decisions repeat from frame to frame). What the world segment's rows are selected from. Render owner.
+	 */
+	WorldFields DeclaredWorld();
 
 	/**
 	 * @brief Inside the world post chain, after NoteShader for the draw or dispatch in progress: the row the description declared for

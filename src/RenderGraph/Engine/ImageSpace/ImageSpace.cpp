@@ -654,6 +654,8 @@ namespace RenderGraph::Engine::ImageSpace
 			// The composites part cannot draw from the table this frame: the post composites segment is cut at the composites' call, after
 			// the volumetric lighting (whose anchor is the segment's), so that work is submitted before today's path draws the composites.
 			std::string compositesCut;
+			// Between RenderSSAO's two calls in Main::RenderWorld: an own-scope copy-subregion call there is the snow scope's copy.
+			bool snowWindow = false;
 			std::vector<std::shared_ptr<const org::LatchBlock>> postKeep;
 			// Counters.
 			std::uint64_t taken = 0, engineDrawn = 0, batches = 0, lost = 0;
@@ -3164,6 +3166,18 @@ namespace RenderGraph::Engine::ImageSpace
 			case Step::Adapt:
 			case Step::Bloom:
 				return PostPart::Hdr;
+			case Step::SaoCameraZ:
+			case Step::SaoMinify:
+			case Step::SaoRawAo:
+			case Step::SaoBlur:
+			case Step::SaoComposite:
+			case Step::SnowSss:
+			case Step::SnowCopy:
+			case Step::SsrDownsample:
+			case Step::SsrRayMarch:
+			case Step::SsrBlur:
+			case Step::WaterBlend:
+				return PostPart::Count;  // the RenderWorld scopes' rows: not the post segments'
 			default:
 				return PostPart::Final;
 			}
@@ -3881,12 +3895,28 @@ namespace RenderGraph::Engine::ImageSpace
 			}
 			if (!OwnsScope(a_shader))
 				return false;
-			const bool flowCopy = kEffects[static_cast<std::size_t>(EffectOf(a_shader))].id == Effects::ISCopySubRegionCS && FlowCopyBound();
+			const auto id = kEffects[static_cast<std::size_t>(EffectOf(a_shader))].id;
+			const bool flowCopy = id == Effects::ISCopySubRegionCS && FlowCopyBound();
 			EnterScope(flowCopy ? ScopeKind::FlowMap : ScopeKind::Effect);
 			if (state.scopeDepth == 0)
 				return false;
+			// The RenderWorld scopes the pass-state table describes: the snow pass (or its copy, between RenderSSAO's two calls) and the
+			// water blend. Each is its own call's scope.
+			using Frame::PostChain::Scope;
+			const Scope world = id == Effects::ISWaterBlend                                         ? Scope::WaterBlend :
+			                    id == Effects::ISSnowSSS || (id == Effects::ISCopySubRegionCS && !flowCopy && state.snowWindow) ? Scope::Snow :
+			                                                                                          Scope::None;
+			if (world == Scope::Snow)
+				state.snowWindow = false;
+			if (world != Scope::None) {
+				Frame::PostChain::ScopeStart(world);
+				// The hook noted the shader before its scope started: note it again inside it.
+				Frame::PostChain::NoteShader(a_shader);
+			}
 			a_call();
 			LeaveScope();
+			if (world != Scope::None)
+				Frame::PostChain::ScopeEnd();
 			return true;
 		}
 
@@ -4027,9 +4057,18 @@ namespace RenderGraph::Engine::ImageSpace
 		{
 			static std::uint64_t thunk(void* a_helper, std::int32_t a_source, std::uint64_t a_destination)
 			{
+				// Main::RenderWorld (100424 / 107142) sets this flag to 0 for its first call (the camera depth, its levels, the raw AO and
+				// its blur) and to 1 for the second (the composite); the snow pass or its copy runs between them.
+				static REL::Relocation<const bool*> composite{ REL::RelocationID(528126, 415071) };
+				using Frame::PostChain::Scope;
+				const bool second = *composite.get();
 				EnterScope(ScopeKind::SSAO);
+				IS().snowWindow = false;
+				Frame::PostChain::ScopeStart(second ? Scope::SsaoComposite : Scope::Ssao);
 				const auto result = func(a_helper, a_source, a_destination);
 				LeaveScope();
+				Frame::PostChain::ScopeEnd();
+				IS().snowWindow = !second;
 				return result;
 			}
 			static inline REL::Relocation<decltype(thunk)> func;
@@ -4044,8 +4083,10 @@ namespace RenderGraph::Engine::ImageSpace
 			static void thunk()
 			{
 				EnterScope(ScopeKind::Reflections);
+				Frame::PostChain::ScopeStart(Frame::PostChain::Scope::Reflections);
 				func();
 				LeaveScope();
+				Frame::PostChain::ScopeEnd();
 			}
 			static inline REL::Relocation<decltype(thunk)> func;
 		};
