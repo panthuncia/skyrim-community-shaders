@@ -1640,6 +1640,9 @@ namespace FrameAnchors
 		// Every engine frame begins here: most claims are by the thread that already owns rendering.
 		if (Owner() == self)
 			return;
+		// The last owner's epochs still on the submission thread reach the queue before this thread's work. Before the anchors' lock:
+		// a pass recorded on that thread may take it.
+		RenderGraphRuntime::Get().DrainSubmissions("render ownership moved", true);
 		// Under the anchors' mutex: no claim lands inside another thread's anchor run, and the main thread's calls outside a frame
 		// (Register, imports) never interleave with it.
 		auto lock = Guard();

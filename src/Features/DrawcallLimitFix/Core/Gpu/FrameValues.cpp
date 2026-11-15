@@ -892,7 +892,9 @@ namespace DCLF
 			const auto sampledAt = std::chrono::steady_clock::now();
 			sampleUs += static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(sampledAt - start).count());
 			// The copies reused from frames in flight: this producer's uploads wait for them on the GPU, not here.
-			if (!a_job.writeAfter.points.empty() && !a_job.uploads->QueueStreamingWait(a_job.writeAfter.points))
+			// A point still in the submission thread's queue is resolved first (GpuPoint::Resolve waits for the thread to pass it).
+			const auto writeAfter = a_job.writeAfter.Resolve();
+			if (!writeAfter.empty() && !a_job.uploads->QueueStreamingWait(writeAfter))
 				throw std::runtime_error("the dedicated uploader cannot wait for the frame its copies were bound to");
 			Upload(a_job);
 			uploadUs += static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - sampledAt).count());

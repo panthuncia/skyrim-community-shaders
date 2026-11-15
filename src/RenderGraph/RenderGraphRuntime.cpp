@@ -2724,6 +2724,8 @@ std::uint64_t RenderGraphRuntime::FlushPendingStreamWork()
 		return 0;
 	// Regions: a region's held execution is GPU work the wait may depend on.
 	FrameAnchors::FlushRegions("a wait for the GPU");
+	// So are the epochs still on the submission thread: the wait is for work on the device's queues.
+	DrainSubmissions("a wait for the GPU");
 	RenderGraph::FrameSequence::NoteBoundary("a wait for the GPU");
 	const uint64_t enqueued = impl->streamEnqueued.load(std::memory_order_acquire);
 	const uint64_t submitted = impl->streamSubmitted.load(std::memory_order_acquire);
@@ -2956,6 +2958,15 @@ void RenderGraphRuntime::SealPresented()
 		buildPointsAtSeal = buildPoints;
 		impl->builds->NoteFrameEnd();
 	}
+}
+
+void RenderGraphRuntime::DrainSubmissions(const char* a_why, bool a_anyThread)
+{
+	if (!impl || !impl->host || !impl->host->SubmissionThreadOn())
+		return;
+	if (!a_anyThread && !FrameAnchors::IsRenderOwner())
+		return;
+	impl->host->DrainSubmissions(a_why);
 }
 
 void RenderGraphRuntime::MoveOwnerThread()
@@ -3752,6 +3763,8 @@ bool RenderGraphRuntime::EmitCommands(void (*a_record)(void* a_user, rhi::Comman
 	if (impl->native) {
 		// Regions: commands submitted now come after the anchor runs a region holds.
 		FrameAnchors::FlushRegions("commands");
+		// And after the epochs still on the submission thread.
+		DrainSubmissions("commands");
 		RenderGraph::FrameSequence::NoteBoundary(a_label ? a_label : "commands");
 		return RenderGraph::Engine::Native::EmitCommands(a_record, a_user, a_waits, a_waitCount, a_signals, a_signalCount, a_label);
 	}
@@ -4009,6 +4022,7 @@ RenderGraph::BuildManager* RenderGraphRuntime::Builds() { return nullptr; }
 void RenderGraphRuntime::SignalFramePace(bool) {}
 void RenderGraphRuntime::SealPresented() {}
 void RenderGraphRuntime::MoveOwnerThread() {}
+void RenderGraphRuntime::DrainSubmissions(const char*, bool) {}
 void RenderGraphRuntime::WaitFramePace() {}
 org::services::PipelineRegistry* RenderGraphRuntime::PipelineRegistry() { return nullptr; }
 void RenderGraphRuntime::RequestShaderReload(std::string_view, bool) {}

@@ -385,6 +385,15 @@ public:
 	 */
 	void MoveOwnerThread();
 
+	/**
+	 * @brief Native mode with a submission thread (CS_ORG_SUBMIT_THREAD): blocks until every epoch handed to the thread so far is on
+	 * its queue (GraphHost::DrainSubmissions). Call it before the render owner's own queue work that must follow them: external
+	 * work, the immediate context, a present, a wait for the GPU. Other threads need none: their work is admitted under the same
+	 * sequencer, and nothing they submit depends on the order against the render thread's epochs. a_anyThread: drain for a caller
+	 * that is not the render owner yet (an ownership move). Free when nothing is queued.
+	 */
+	void DrainSubmissions(const char* a_why, bool a_anyThread = false);
+
 	/** @brief Render thread: the segments submitted since the last call, one bit per Segment. */
 	std::uint64_t TakeSubmittedSegments();
 

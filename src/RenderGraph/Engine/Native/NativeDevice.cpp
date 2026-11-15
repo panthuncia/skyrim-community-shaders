@@ -640,6 +640,9 @@ namespace RenderGraph::Engine::Native
 				// A region's held anchor runs go first, before this context's lock: submitting them can run CS code that uses the context
 				// again (Route from inside Route threw "resource deadlock would occur"). ExternalWork::Submit's own flush then finds nothing.
 				::FrameAnchors::FlushRegions("native context");
+				// The epochs still on the submission thread go first too, before this context's lock (a pass recorded there may use the
+				// context). Only the render owner drains: another thread's operation has no order against the render thread's epochs.
+				RenderGraphRuntime::Get().DrainSubmissions("native context");
 				std::lock_guard guard(lock);
 				const uint32_t index = AcquireSlotLocked();
 				auto& slot = slots[index];

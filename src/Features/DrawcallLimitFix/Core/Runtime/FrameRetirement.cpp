@@ -109,7 +109,10 @@ namespace DCLF
 		// Before the first present nothing is sealed, and nothing can be said.
 		if (sealed.points.empty())
 			return true;
-		for (const auto& [timeline, value] : a_point.points) {
+		// A point still in the submission thread's queue names work that is not on the device yet (GpuPoint::Pending).
+		if (!a_point.Passed())
+			return false;
+		for (const auto& [timeline, value] : a_point.Resolve()) {
 			if (!timeline || !*timeline || (*timeline)->GetCompletedValue() >= value)
 				continue;
 			const auto known = std::ranges::find_if(sealed.points, [&](const auto& a_sealed) { return a_sealed.first.get() == timeline.get(); });
