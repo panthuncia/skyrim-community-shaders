@@ -461,6 +461,13 @@ namespace RenderGraph::Frame::PostChain
 			fields.eofDest = static_cast<std::int8_t>(a_destination);
 			if (auto* manager = RE::ImageSpaceManager::GetSingleton())
 				fields.eofSwap = static_cast<std::int8_t>(Member<std::int32_t>(reinterpret_cast<std::uintptr_t>(manager), kSwapTarget));
+			// Decided at a step's own call (NoteShader), not here: TAA's sixth sampler and the depth of field's steps. Until then the part
+			// is predicted with the slot's last chain's values (the frame's schedule has them); the composite's sampler as this chain found it.
+			fields.compositeAddress = state.chainFields.compositeAddress;
+			fields.taaAddress = state.haveChain[Driver::Current().slot] ? state.chainBySlot[Driver::Current().slot].taaAddress : state.chainFields.taaAddress;
+			// The depth of field's steps only when the slot's last chain read them at its first draw (nonzero); else the read here.
+			if (const auto& last = state.chainBySlot[Driver::Current().slot]; state.haveChain[Driver::Current().slot] && (fields.slots >> kDofSlot & 1u) && last.dofSteps)
+				fields.dofSteps = last.dofSteps;
 			state.lastSource = fields.eofSource;
 			state.lastDest = fields.eofDest;
 			state.lastSwap = fields.eofSwap;
@@ -1250,6 +1257,15 @@ namespace RenderGraph::Frame::PostChain
 	void SetScopeHook(void (*a_hook)(Scope a_scope, const std::vector<Draw>& a_draws))
 	{
 		Get().scopeHook = a_hook;
+	}
+
+	WorldFields WorldSlotFields(std::uint32_t a_slot, bool* a_have)
+	{
+		const auto& state = Get();
+		const bool have = a_slot < state.haveWorld.size() && state.haveWorld[a_slot];
+		if (a_have)
+			*a_have = have;
+		return have ? state.worldBySlot[a_slot] : WorldFields{};
 	}
 
 	WorldFields DeclaredWorld()

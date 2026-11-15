@@ -7,7 +7,9 @@
 #include "Features/DrawcallLimitFix/Diagnostics/Zones.h"
 
 #include "Deferred.h"
+#include "Features/DrawcallLimitFix.h"
 #include "Globals.h"
+#include "RenderGraph/Frame/FrameDriver.h"
 #include "RenderGraph/RenderGraphRuntime.h"
 #include "Testing/Testing.h"
 #include "Features/DrawcallLimitFix/Diagnostics/Hooks.h"
@@ -57,6 +59,21 @@ namespace DCLF
 		}
 	}
 
+	namespace
+	{
+		// The frame (RenderGraph::Frame::Driver's number) whose build point already ran at Renderer::Begin (BuildPointAtFrameStart).
+		std::uint64_t s_buildPointFrame = 0;
+	}
+
+	void BuildPointAtFrameStart(std::uint64_t a_frame)
+	{
+		// Only where the scene-frame hook would run it: Drawcall Limit Fix's hooks are installed.
+		if (!globals::features::drawcallLimitFix.HooksInstalled())
+			return;
+		IndirectDraws::Get().BuildPoint();
+		s_buildPointFrame = a_frame;
+	}
+
 	FrameDriver& FrameDriver::Get()
 	{
 		static FrameDriver driver;
@@ -73,8 +90,10 @@ namespace DCLF
 		// The occlusion maps the last frame took and drew are its own.
 		occlusionWanted = occlusionDrawn = 0;
 		// The graph's build point, every frame (loaded or not): an extension added or removed during the last frame is built here, before
-		// anything decides what the frame's recordings cover.
-		IndirectDraws::Get().BuildPoint();
+		// anything decides what the frame's recordings cover. In native mode with segments it ran at Renderer::Begin already
+		// (BuildPointAtFrameStart), before the frame's schedule was chosen: no build may attach after that.
+		if (s_buildPointFrame != RenderGraph::Frame::Driver::Current().frame)
+			IndirectDraws::Get().BuildPoint();
 		auto& scene = Scene::Coordinator::Get();
 		auto& view = Scene::FrameView::Get();
 		// The scene work on the render thread (Policy::ScenePassInline): the pump's wakes are dropped then, and the frame's start runs the

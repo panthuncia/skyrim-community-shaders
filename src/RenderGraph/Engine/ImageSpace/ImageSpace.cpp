@@ -3261,6 +3261,8 @@ namespace RenderGraph::Engine::ImageSpace
 		 * row's pass in its client, or nothing (a tap error) when the draw left the description or does not match its row's pass. Outside
 		 * such a part: not the post segments' (today's path).
 		 */
+		bool RowScheduled(PostPart a_part, std::size_t a_index);
+
 		PostTake TakePost(const ShapeKey& a_key, const PostRow* a_row)
 		{
 			auto& state = IS();
@@ -3286,6 +3288,24 @@ namespace RenderGraph::Engine::ImageSpace
 						!spec ? "was not registered" : !client.made[index] ? "was left out of the build" : "is for another size", index));
 				return take;
 			}
+			if (!RowScheduled(PostPartOf(*a_row), index)) {
+				// A step decided at its own call (a sampler the step finds, the depth of field's composites) took a row this frame's
+				// schedule has off. The segment is cut here: what it holds is submitted, and this draw and the rest of the part draw on
+				// the ImageSpace anchor, after it. The slot's next schedule has the row (its last chain's fields).
+				const auto partOf = PostPartOf(*a_row);
+				const auto segment = partOf == PostPart::Composites                        ? RenderGraphRuntime::Segment::DeclaredPostComposites :
+				                     partOf == PostPart::Hdr || partOf == PostPart::Final ? RenderGraphRuntime::Segment::DeclaredPostEnd :
+				                                                                            RenderGraphRuntime::Segment::DeclaredWorld;
+				// The draws the part took so far are committed into the segment's run first (the anchor's tap), then the segment ends.
+				Flush();
+				(void)FrameAnchors::CutSegment(static_cast<std::uint32_t>(segment),
+					fmt::format("{} was decided at its call and is off in this frame's schedule", Frame::PostChain::RowName(a_row->key)));
+				if (part != Frame::PostChain::Part::All)
+					state.partDrawing[part == Frame::PostChain::Part::Composites ? 0 : 1] = false;
+				else
+					state.scopeDrawing = false;
+				return {};
+			}
 			take.client = &client;
 			take.spec = spec;
 			return take;
@@ -3302,6 +3322,20 @@ namespace RenderGraph::Engine::ImageSpace
 		}
 
 		void RegisterPost();
+
+		/**
+		 * @brief Whether this frame's schedule has a row's pass on: its bit in the rows of the segment that holds its client, as the frame
+		 * took them at Begin. A row the schedule has off records only its barriers, so a frame that draws it cuts the segment instead.
+		 */
+		bool RowScheduled(PostPart a_part, std::size_t a_index)
+		{
+			using Frame::SegmentId;
+			const auto segment = a_part == PostPart::Composites                         ? SegmentId::PostComposites :
+			                     a_part == PostPart::Hdr || a_part == PostPart::Final ? SegmentId::PostEnd :
+			                                                                            SegmentId::World;
+			const auto& rows = Frame::Driver::Current().Segment(segment).rows;
+			return a_index < 256 && (rows[a_index / 64] >> (a_index % 64) & 1u) != 0;
+		}
 
 		/** @brief Whether a table row's pass would draw a predicted draw now: a row, a built pass for the sizes now, in a segment graph that holds it. */
 		bool RowDrawable(const Frame::PostChain::Draw& a_draw, std::string& a_why)
@@ -3333,6 +3367,10 @@ namespace RenderGraph::Engine::ImageSpace
 			}
 			if (!FrameAnchors::CanTap(client.id)) {
 				a_why = fmt::format("the segment's graph does not hold {} yet", client.id);
+				return false;
+			}
+			if (!RowScheduled(part, index)) {
+				a_why = fmt::format("{} is off in this frame's schedule; the schedule of a later frame has it", Frame::PostChain::RowName(a_draw.row));
 				return false;
 			}
 			return true;
@@ -3412,6 +3450,10 @@ namespace RenderGraph::Engine::ImageSpace
 					why = fmt::format("the segment's graph does not hold {} yet", client.id);
 					break;
 				}
+				if (!RowScheduled(PostPartOf(*row), index)) {
+					why = fmt::format("{} is off in this frame's schedule; the schedule of a later frame has it", Frame::PostChain::RowName(draw.row));
+					break;
+				}
 			}
 			if (!why.empty()) {
 				if (which == 0)
@@ -3489,21 +3531,39 @@ namespace RenderGraph::Engine::ImageSpace
 				desc.rows = [p](std::array<std::uint64_t, 4>& a_rows) {
 					const auto& current = IS().post[p];
 					std::vector<Frame::PostChain::Draw> draws;
-					if (p == static_cast<std::size_t>(PostPart::WorldWater)) {
+					// The composites' rows are all on too: the composite's first sampler is the one it finds (wrap or clamp, by what drew
+					// before it), which flips from frame to frame with no pattern a slot's last chain predicts. Gated on the GPU, the rows a
+					// frame does not draw do nothing, so the schedule does not switch with it.
+					if (p == static_cast<std::size_t>(PostPart::WorldWater) || p == static_cast<std::size_t>(PostPart::Composites)) {
 						for (std::size_t index = 0; index < current.byRow.size() && index < 256; ++index)
 							if (current.byRow[index])
 								a_rows[index / 64] |= 1ull << (index % 64);
 						return;
 					}
+					// The rows of every frame slot's last chain (and scopes), not only this slot's: a variant the engine picks without a
+					// period of four frames (the depth of field's output, a step decided at its call) is then already on when it comes back,
+					// and the schedule does not switch with it. Rows a frame does not draw do nothing (gated on the GPU).
+					const auto add = [&](std::vector<Frame::PostChain::Draw> a_more) { draws.insert(draws.end(), a_more.begin(), a_more.end()); };
 					if (p == static_cast<std::size_t>(PostPart::WorldScopes)) {
-						const auto world = Frame::PostChain::DeclaredWorld();
-						for (const auto scope : { Frame::PostChain::Scope::Reflections, Frame::PostChain::Scope::Ssao, Frame::PostChain::Scope::Snow,
-								 Frame::PostChain::Scope::SsaoComposite }) {
-							const auto more = Frame::PostChain::PredictScope(scope, world);
-							draws.insert(draws.end(), more.begin(), more.end());
+						const auto scopes = [&](const Frame::WorldFields& a_world) {
+							for (const auto scope : { Frame::PostChain::Scope::Reflections, Frame::PostChain::Scope::Ssao, Frame::PostChain::Scope::Snow,
+									 Frame::PostChain::Scope::SsaoComposite })
+								add(Frame::PostChain::PredictScope(scope, a_world));
+						};
+						scopes(Frame::PostChain::DeclaredWorld());
+						for (std::uint32_t slot = 0; slot < RenderGraphRuntime::kGameFramesInFlight; ++slot)
+						{
+							bool have = false;
+							if (const auto world = Frame::PostChain::WorldSlotFields(slot, &have); have)
+								scopes(world);
 						}
 					} else {
-						draws = Frame::PostChain::PredictDraws(Frame::PostChain::DeclaredFields());
+						add(Frame::PostChain::PredictDraws(Frame::PostChain::DeclaredFields()));
+						for (std::uint32_t slot = 0; slot < RenderGraphRuntime::kGameFramesInFlight; ++slot) {
+							bool have = false;
+							if (const auto fields = Frame::PostChain::SlotFields(slot, &have); have)
+								add(Frame::PostChain::PredictDraws(fields));
+						}
 					}
 					for (const auto& draw : draws)
 						if (draw.row.step != Frame::PostChain::Step::None)

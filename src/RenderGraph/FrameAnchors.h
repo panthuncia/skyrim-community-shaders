@@ -327,7 +327,8 @@ namespace FrameAnchors
 		// Declared segments (SegmentsOn): whether the client's passes do work in this frame. Read at the frame's start
 		// (BeginFrame), from the client's settings and the scene state it holds, never from what this frame's hooks deliver. Off: its
 		// passes record only their barriers in the segment's recording, and its commit is not called; an active client at the tap is
-		// then a tap error. Its per-run work is still behind its run gates. Null: on whenever registered.
+		// then a mismatch (Frame::Driver::NoteTapError), unless the frame's schedule lags its description (then its work waits for the
+		// new schedule). Its per-run work is still behind its run gates. Null: on whenever registered.
 		std::function<bool()> declared;
 		// Declared segments: a client whose hook repeats inside one segment run (each ImageSpace effect call, each reflection face) has
 		// instances. maxInstances is how many instances its passes are made for at a build (PassDesc::makeInstance); instances, read
@@ -338,8 +339,9 @@ namespace FrameAnchors
 		std::uint32_t maxInstances = 1;
 		std::function<std::uint32_t()> instances;
 		// Declared segments: the rows of the client's passes (PassDesc::row) that do work this frame, a bit per row, ORed into the
-		// segment's description. Read at the frame's start and again at the segment's end tap, where the engine's decisions made after
-		// Begin are known (the post chain's decision events). Null: every row on.
+		// segment's description. Read at the frame's start only, from what the slot's last frame observed (the post chain's decision
+		// events after Begin do not change the frame's schedule; a draw whose row the schedule has off cuts the segment). Null: every
+		// row on.
 		std::function<void(std::array<std::uint64_t, 4>&)> rows;
 		// Declared segments: the client's commit may run at several taps of one segment run, each writing gate entries and latch regions
 		// no earlier tap of the run wrote (the post chain's batches, one per ImageSpace scope). Without it a second tap of a client
@@ -426,7 +428,9 @@ namespace FrameAnchors
 
 	/**
 	 * @brief Whether a run of a_anchor now would draw a_id's work: the caller owns rendering, the runtime is active, this
-	 * registration is in the anchor's built graph (InBuiltGraph). An anchor may run any number of times a frame. Call
+	 * registration is in the anchor's built graph (InBuiltGraph), and for an anchor a declared segment holds wholly, the frame's
+	 * schedule of that segment holds the client and has it on (false while the segment is absent). An anchor may run any number of
+	 * times a frame. Call
 	 * it before withholding the engine's work for the anchor; when false, leave the work to the engine. Render thread. Run can
 	 * still fail afterwards (RunStatus::Failed): the client's executed callback is how it knows the work was submitted.
 	 */
@@ -655,9 +659,12 @@ namespace FrameAnchors
 	std::uint32_t RunSegment(Anchor a_anchor);
 
 	/**
-	 * @brief The frame driver, at Renderer::Begin (RenderGraph/Frame/FrameDriver.h): fills a_frame's segment fields from the clients'
-	 * declared predicates and the segments' built graphs, and asks the host's thread for the recording of every declared segment
-	 * whose description has none yet. Off the render owner, and with segments off, nothing is declared.
+	 * @brief The frame driver, at Renderer::Begin (RenderGraph/Frame/FrameDriver.h): each declared segment takes its frame slot's
+	 * schedule, the description and recording its frames run on to the frame's end. The frame's own description is made from the
+	 * clients' declared predicates and the segments' built graphs; when it differs from the schedule, its recordings are asked for on
+	 * the host's thread, and the schedule switches to it at the first Begin of the slot after they are ready. Nothing waits. A
+	 * segment with no schedule on the attached build is absent from the frame (a_frame's fields with graph 0). Off the render owner,
+	 * and with segments off, nothing is declared.
 	 */
 	void BeginFrame(RenderGraph::Frame::Description& a_frame);
 

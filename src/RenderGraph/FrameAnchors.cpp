@@ -451,7 +451,6 @@ namespace FrameAnchors
 		{
 			static constexpr std::size_t kKeep = 6 * RenderGraphRuntime::kGameFramesInFlight;
 			std::mutex mutex;  // the host's thread completes requests under it
-			std::condition_variable ready;
 			std::vector<std::shared_ptr<SegmentRecording>> entries;
 			RenderGraph::Frame::SegmentFields last{};  // the fields of the last description asked for, for the reason a new one logs
 			bool any = false;
@@ -647,9 +646,28 @@ namespace FrameAnchors
 			// from then, and the frame its end tap submitted it in. Render owner.
 			std::array<std::uint64_t, kDeclared> heldFrame{};
 			std::array<std::shared_ptr<const Snapshot>, kDeclared> heldBuilt{};
-			// The segment's fields the held ticket's taps use: the frame's, or read again at the first tap when a build attached since
-			// the frame began (the client bits name the built graph's clients).
+			// The segment's fields the held ticket's taps use: the frame's schedule, taken at Begin (the client bits name the clients of
+			// the graph it was recorded on).
 			std::array<RenderGraph::Frame::SegmentFields, kDeclared> heldFields{};
+			// The schedule (docs/development/org-native-frame-graph.md, "Recipe plan, stage 1"): per segment and frame slot, the
+			// description the slot's frames run on, its recording (made on the host's thread for the attached build) and the segment
+			// graph's snapshot it was made on. A frame takes its slot's schedule at Begin and keeps it to its end. Render owner.
+			struct Scheduled
+			{
+				RenderGraph::Frame::SegmentFields fields;
+				std::shared_ptr<const org::GraphHost::EpochRecording> recording;
+				std::shared_ptr<const Snapshot> built;
+			};
+			std::array<std::array<Scheduled, RenderGraphRuntime::kGameFramesInFlight>, kDeclared> schedule{};
+			// This frame's: the schedule's recording and snapshot (null when the segment is absent), and the frame's own description of
+			// the segment, which the taps compare a lagging schedule with. Render owner.
+			std::array<std::shared_ptr<const org::GraphHost::EpochRecording>, kDeclared> frameRecording{};
+			std::array<std::shared_ptr<const Snapshot>, kDeclared> frameBuilt{};
+			std::array<RenderGraph::Frame::SegmentFields, kDeclared> frameWanted{};
+			// The description a slot last began to wait for, per segment, and the frame it did: a switch's lag counts from it.
+			std::array<std::uint64_t, kDeclared> waitHash{};
+			std::array<std::uint64_t, kDeclared> waitFrame{};
+			bool inBegin = false;  // BeginFrame is choosing the schedules: a recording asked for outside it is a mid-frame re-record
 			std::array<std::uint64_t, kDeclared> endedFrame{};
 			// The frame in which a segment was cut (CutSegment): it ended before its end tap, and its later taps that frame do nothing.
 			std::array<std::uint64_t, kDeclared> cutFrame{};
@@ -2684,7 +2702,8 @@ namespace FrameAnchors
 		/**
 		 * @brief The recording of a declared segment for a_fields: the one kept for them, or a new request to the host's thread (logged
 		 * with the fields that changed since the last request). A kept one that a build dropped is asked for again. A kept one that
-		 * failed stops the game (FailRecording). Render owner.
+		 * failed stops the game (FailRecording). Only BeginFrame asks (Schedule); a request at any other time is counted as a mid-frame
+		 * re-record. Never waits. Render owner.
 		 */
 		std::shared_ptr<SegmentRecording> RequestDeclared(State& a_state, std::uint32_t a_declared, const SegmentFields& a_fields, std::uint32_t a_slot,
 			std::uint64_t a_frame, std::string_view a_why)
@@ -2733,6 +2752,8 @@ namespace FrameAnchors
 				recordings.entries.push_back(entry);
 			}
 			Driver::NoteRecording(static_cast<SegmentId>(a_declared), a_frame, fmt::format("{}{}", reason, a_why));
+			if (!a_state.inBegin)
+				Driver::NoteLateRequest(static_cast<SegmentId>(a_declared));
 			auto data = std::make_shared<SegmentHostData>();
 			data->segment = a_declared;
 			data->fields = a_fields;
@@ -2761,7 +2782,6 @@ namespace FrameAnchors
 						entry->dropped = dropped;
 						entry->done = true;
 					}
-					recordings.ready.notify_all();
 				},
 				a_slot);
 			if (!posted) {
@@ -2773,48 +2793,73 @@ namespace FrameAnchors
 		}
 
 		/**
-		 * @brief Whether the finished recording kept for a_fields and a_slot binds a version that is no longer current: a slot of the
-		 * segment's graph published a new one since. Then the segment's version generation moves, which makes a new description.
-		 * Render owner.
+		 * @brief A declared segment's schedule for this frame (BeginFrame). The frame slot keeps its schedule until the recording of the
+		 * frame's own description for that slot is ready; then it switches, here, before any of the frame's work. The recordings of a
+		 * new description are asked for here (this slot's and the next slots'), on the host's thread. Nothing waits. Returns the fields
+		 * the frame runs on: the schedule's, or the frame's own description with graph 0 when the slot has no schedule on the attached
+		 * build (the segment is absent this frame: its taps draw nothing). Render owner.
 		 */
-		bool StaleVersions(State& a_state, std::uint32_t a_declared, const SegmentFields& a_fields, std::uint32_t a_slot)
+		SegmentFields Schedule(State& a_state, std::uint32_t a_declared, bool a_world, const RenderGraph::Frame::Description& a_frame)
 		{
+			const auto segment = static_cast<SegmentId>(a_declared);
+			auto& host = *a_state.host;
+			const std::uint32_t slot = a_frame.slot;
+			auto& active = a_state.schedule[a_declared][slot];
 			auto& recordings = a_state.declaredRecordings[a_declared];
-			const auto hash = RenderGraph::Frame::FieldsHash(a_fields);
-			std::shared_ptr<const org::GraphHost::EpochRecording> recording;
-			{
-				const std::lock_guard lock(recordings.mutex);
-				for (const auto& entry : recordings.entries)
-					if (entry->hash == hash && entry->slot == a_slot && entry->fields == a_fields && entry->done) {
-						recording = entry->recording;
-						break;
-					}
+			// A schedule of an older build is gone. Builds attach only at a frame boundary, before this.
+			if (active.recording && !host.EpochRecordingCurrent(*active.recording))
+				active = {};
+			// A schedule whose recording binds a version a slot replaced since is gone too: the segment's version generation moves, so the
+			// frame's description is a new one, recorded for the new version.
+			if (active.recording && !host.EpochRecordingVersionsCurrent(*active.recording, slot)) {
+				++recordings.versionGeneration;
+				active = {};
 			}
-			if (!recording || a_state.host->EpochRecordingVersionsCurrent(*recording, a_slot))
-				return false;
-			++recordings.versionGeneration;
-			return true;
-		}
-
-		/**
-		 * @brief Waits once for a requested recording on the render owner, at most two seconds. A description asked for at the frame's
-		 * start is normally recorded by the tap; a wait is counted. Null when it failed, was dropped or did not finish (the entry's error
-		 * says which).
-		 */
-		std::shared_ptr<const org::GraphHost::EpochRecording> AwaitDeclared(State& a_state, std::uint32_t a_declared, const std::shared_ptr<SegmentRecording>& a_entry)
-		{
-			auto& recordings = a_state.declaredRecordings[a_declared];
-			std::unique_lock lock(recordings.mutex);
-			if (!a_entry->done) {
-				ZoneScopedN("CS.ORG.Segment.WaitRecording");
-				const auto start = std::chrono::steady_clock::now();
-				recordings.ready.wait_for(lock, std::chrono::seconds(2), [&] { return a_entry->done; });
-				Driver::NoteRecordingWait(static_cast<SegmentId>(a_declared),
-					std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - start).count());
-				if (!a_entry->done)
-					a_entry->error = "its recording did not finish in two seconds";
+			SegmentFields wanted = DescribeDeclared(a_state, a_declared, a_world);
+			a_state.frameWanted[a_declared] = wanted;
+			if (!wanted.declared)
+				return wanted;
+			if (!wanted.graph) {
+				Driver::NoteScheduled(segment, Driver::Scheduled::Absent);
+				return wanted;
 			}
-			return a_entry->recording;
+			if (!(active.recording && active.fields == wanted)) {
+				std::shared_ptr<SegmentRecording> entry;
+				for (std::uint32_t ahead = 0; ahead < RenderGraphRuntime::kGameFramesInFlight; ++ahead) {
+					auto requested = RequestDeclared(a_state, a_declared, wanted, (slot + ahead) % RenderGraphRuntime::kGameFramesInFlight, a_frame.frame, "");
+					if (ahead == 0)
+						entry = std::move(requested);
+				}
+				const auto hash = RenderGraph::Frame::FieldsHash(wanted);
+				if (a_state.waitHash[a_declared] != hash) {
+					a_state.waitHash[a_declared] = hash;
+					a_state.waitFrame[a_declared] = a_frame.frame;
+				}
+				std::shared_ptr<const org::GraphHost::EpochRecording> ready;
+				{
+					const std::lock_guard lock(recordings.mutex);
+					if (entry->done)
+						ready = entry->recording;
+				}
+				if (ready && host.EpochRecordingCurrent(*ready) && host.EpochRecordingVersionsCurrent(*ready, slot)) {
+					const auto what = active.recording ? RenderGraph::Frame::DiffFields(active.fields, wanted) :
+					                                     fmt::format("the slot's first schedule on build {}", wanted.graph);
+					active = { wanted, std::move(ready), a_state.declaredSnapshots[a_declared].load(std::memory_order_acquire) };
+					Driver::NoteSwitch(segment, a_frame.frame, slot, a_frame.frame - a_state.waitFrame[a_declared], what);
+				} else if (ready && host.EpochRecordingCurrent(*ready)) {
+					// Recorded with a version a slot replaced while it was made: the next frame's description names the new version.
+					++recordings.versionGeneration;
+				}
+			}
+			if (!active.recording) {
+				Driver::NoteScheduled(segment, Driver::Scheduled::Absent);
+				wanted.graph = 0;
+				return wanted;
+			}
+			Driver::NoteScheduled(segment, active.fields == wanted ? Driver::Scheduled::Current : Driver::Scheduled::Lagging);
+			a_state.frameRecording[a_declared] = active.recording;
+			a_state.frameBuilt[a_declared] = active.built;
+			return active.fields;
 		}
 
 		/** @brief Whether any segment holds its ticket now. Render owner. */
@@ -2860,6 +2905,13 @@ namespace FrameAnchors
 				Driver::NoteTapError(Driver::TapError::LostToBuild, segment, "a build gave the segment's held ticket back before its end tap");
 				return false;
 			}
+			// The frame runs on the build its schedule was recorded on. Builds attach only at a frame boundary, before Begin chose it.
+			if (a_frame.Segment(segment).graph != host.BuildGeneration(epoch)) {
+				Driver::NoteTapError(Driver::TapError::LostToBuild, segment,
+					fmt::format("a build of the segment's graph attached after the frame's Begin (schedule build {}, attached {})", a_frame.Segment(segment).graph,
+						host.BuildGeneration(epoch)));
+				return false;
+			}
 			// A ticket an earlier frame took and never submitted (its end tap did not fire, a tap error then) goes back first.
 			ReleaseSegment(a_state, a_declared);
 			org::RunRef run{};
@@ -2884,8 +2936,6 @@ namespace FrameAnchors
 			a_state.heldBuilt[a_declared] = a_built;
 			a_state.stepTaps[a_declared].fill(0);
 			a_state.heldFields[a_declared] = a_frame.Segment(segment);
-			if (a_state.heldFields[a_declared].graph != host.BuildGeneration(epoch))
-				a_state.heldFields[a_declared] = DescribeDeclared(a_state, a_declared, true);
 			UpdateSegmentHeld(a_state);
 			struct HeldRun
 			{
@@ -2921,52 +2971,21 @@ namespace FrameAnchors
 			auto& host = *a_state.host;
 			auto& runtime = RenderGraphRuntime::Get();
 			const std::uint32_t epoch = EpochOfDeclared(a_declared);
-			SegmentFields fields = a_state.heldFields[a_declared];
-			// A pass's revision can change after the frame began (light culling grows its light copy at its tap): the recording is
-			// made for the revisions as they are now.
-			// The rows: the decisions the engine made after Begin (the post chain's decision events) are known by the end tap.
-			if (fields.graph == host.BuildGeneration(epoch)) {
-				const auto now = DescribeDeclared(a_state, a_declared, true);
-				fields.passes = now.passes;
-				fields.rows = now.rows;
-			}
-			// Two changes since Begin are not failures: a build of the segment's graph attached (its fields are read again), or a slot
-			// of its graph published a new version. Each makes another description, asked for here once.
-			std::string why;
-			if (fields.graph != host.BuildGeneration(epoch)) {
-				fields = DescribeDeclared(a_state, a_declared, true);
-				why = " (the segment's graph was built again since the frame began)";
-			} else if (StaleVersions(a_state, a_declared, fields, frame.slot)) {
-				fields = DescribeDeclared(a_state, a_declared, true);
-				why = " (a slot of the segment's graph published a new version since the frame began)";
-			}
-			const auto entry = RequestDeclared(a_state, a_declared, fields, frame.slot, frame.frame, why);
-			// One wait, for a recording still being made. A request that comes back without a recording failed, and that stops the
-			// game. There is no second attempt.
-			const auto recording = AwaitDeclared(a_state, a_declared, entry);
+			// The frame runs on the schedule it took at Begin: nothing is described, recorded or waited for here.
+			const auto recording = a_state.frameRecording[a_declared];
 			const auto built = a_state.heldBuilt[a_declared];
-			if (!recording) {
-				if (entry->dropped) {
-					// A build stopped the host's thread before it recorded the request. The build gave the held ticket back too.
-					Driver::NoteTapError(Driver::TapError::LostToBuild, segment, fmt::format("a build dropped its recording: {}", entry->error));
-					ReleaseSegment(a_state, a_declared);
-					return { RunStatus::Idle };
-				}
-				FailRecording(a_declared, fields, frame.slot, entry->error.empty() ? std::string("no recording") : entry->error);
-			}
-			if (!host.EpochRecordingCurrent(*recording)) {
-				// A build attached while it was recorded. The build gave the held ticket back.
-				Driver::NoteTapError(Driver::TapError::LostToBuild, segment, "its recording is of an older build of the segment's graph");
+			const auto mismatch = [&](Driver::TapError a_error, std::string_view a_what) {
+				Driver::NoteTapError(a_error, segment, a_what);
 				ReleaseSegment(a_state, a_declared);
-				return { RunStatus::Idle };
-			}
-			if (!host.EpochRecordingVersionsCurrent(*recording, frame.slot)) {
-				// A slot published a new version while it was recorded. The next frame's description names the new version.
-				++a_state.declaredRecordings[a_declared].versionGeneration;
-				Driver::NoteTapError(Driver::TapError::StaleRecording, segment, "a slot of the segment's graph published a new version while it was recorded");
-				ReleaseSegment(a_state, a_declared);
-				return { RunStatus::Idle };
-			}
+				return RunResult{ RunStatus::Idle };
+			};
+			if (!recording)
+				return mismatch(Driver::TapError::NotDeclared, "its end tap fired in a frame without a schedule for it");
+			if (!host.EpochRecordingCurrent(*recording))
+				return mismatch(Driver::TapError::LostToBuild, "a build of its graph attached after the frame's Begin; builds attach only at a frame boundary");
+			if (!host.EpochRecordingVersionsCurrent(*recording, frame.slot))
+				return mismatch(Driver::TapError::StaleRecording,
+					"a slot of its graph published a new version after the frame's Begin; versions are published only at a frame boundary");
 			RenderGraphRuntime::EpochResult result = RenderGraphRuntime::EpochResult::Stopped;
 			{
 				RenderGraphRuntime::EpochBodyScope body(kDeclaredInfo[a_declared].segment);
@@ -3045,11 +3064,12 @@ namespace FrameAnchors
 				return { RunStatus::Idle };
 			}
 			if (!fields.graph) {
-				// Its graph is not built yet: its clients wait to join, as an anchor's do before its first build.
-				static std::array<std::atomic_flag, kDeclared> logged;
-				if (!logged[a_declared].test_and_set())
-					logger::info("[ORG] frame segments: the {} tap fired before the {}'s graph was built; it draws nothing until the build (logged once)", tap,
-						info.names.label);
+				// No schedule for this frame slot yet (its graph's first build, or the frames after a build): the segment is absent
+				// from the frame, and its work is not drawn until its first schedule is ready. Its end tap still ends it, so the later
+				// segments' windows open where they would have.
+				Driver::NoteAbsentTap(segment);
+				if (end)
+					a_state.endedFrame[a_declared] = frame.frame;
 				return { RunStatus::Idle };
 			}
 			if (a_state.endedFrame[a_declared] == frame.frame) {
@@ -3059,8 +3079,7 @@ namespace FrameAnchors
 			}
 			if (end && !Driver::NoteTap(segment, tap))
 				return { RunStatus::Idle };
-			const auto built = a_state.heldFrame[a_declared] == frame.frame ? a_state.heldBuilt[a_declared] :
-			                                                                  a_state.declaredSnapshots[a_declared].load(std::memory_order_acquire);
+			const auto built = a_state.heldFrame[a_declared] == frame.frame ? a_state.heldBuilt[a_declared] : a_state.frameBuilt[a_declared];
 			if (!built || !OpenSegment(a_state, a_declared, frame, built)) {
 				if (end)
 					a_state.endedFrame[a_declared] = frame.frame;
@@ -3069,16 +3088,25 @@ namespace FrameAnchors
 			auto& host = *a_state.host;
 			const std::uint32_t epoch = EpochOfDeclared(a_declared);
 			const SegmentFields& held = a_state.heldFields[a_declared];
-			// The clients that commit: this step's clients in the built graph, on in the description, with work this frame. An active
-			// client the description turned off is a tap error, and its commit is not called.
+			// The frame's own description, when the schedule lags behind it: work it has on and the schedule off is left out this frame,
+			// not a mismatch (the same build, so the client bits name the same clients).
+			const SegmentFields& wanted = a_state.frameWanted[a_declared];
+			const bool comparable = wanted.graph == held.graph;
+			// The clients that commit: this step's clients in the built graph, on in the schedule, with work this frame. An active client
+			// the schedule turned off is a mismatch, unless the frame's description has it on (the schedule lags), and its commit is not
+			// called.
 			std::vector<std::shared_ptr<const ClientDesc>> committed;
 			bool foreignOn = false;
 			// This tap's instance: the step's earlier taps in the held run.
 			const std::uint32_t instance = a_state.stepTaps[a_declared][a_step]++;
 			if (a_foreign) {
 				foreignOn = (held.foreignOn >> a_step & 1u) != 0;
-				if (!foreignOn)
-					Driver::NoteTapError(Driver::TapError::NotInDescription, segment, fmt::format("{} had work at its tap", tap));
+				if (!foreignOn) {
+					if (comparable && (wanted.foreignOn >> a_step & 1u))
+						Driver::NoteLaggedWork(segment);
+					else
+						Driver::NoteTapError(Driver::TapError::NotInDescription, segment, fmt::format("{} had work at its tap, and the schedule has it off", tap));
+				}
 			} else {
 				const auto clients = SegmentClients(*built, a_declared);
 				for (std::size_t i = 0; i < clients.size(); ++i) {
@@ -3088,8 +3116,13 @@ namespace FrameAnchors
 					const bool active = found != a_clients.end() && found->active;
 					const bool on = i < RenderGraph::Frame::kSegmentClients && (held.clientsOn >> i & 1u);
 					if (!on) {
-						if (active)
-							Driver::NoteTapError(Driver::TapError::NotInDescription, segment, fmt::format("{} had work at the {} tap", clients[i]->id, tap));
+						if (active) {
+							if (comparable && i < RenderGraph::Frame::kSegmentClients && (wanted.clientsOn >> i & 1u))
+								Driver::NoteLaggedWork(segment);
+							else
+								Driver::NoteTapError(Driver::TapError::NotInDescription, segment,
+									fmt::format("{} had work at the {} tap, and the schedule has it off", clients[i]->id, tap));
+						}
 						continue;
 					}
 					if (!active)
@@ -3098,8 +3131,11 @@ namespace FrameAnchors
 					// as the description declared.
 					const std::uint32_t declaredInstances = clients[i]->maxInstances > 1 ? held.instances[i] : clients[i]->repeats ? UINT32_MAX : 1u;
 					if (instance >= declaredInstances) {
-						Driver::NoteTapError(Driver::TapError::InstanceNotDeclared, segment,
-							fmt::format("{} at the {} tap, instance {} of {} declared", clients[i]->id, tap, instance, declaredInstances));
+						if (clients[i]->maxInstances > 1 && comparable && instance < wanted.instances[i])
+							Driver::NoteLaggedWork(segment);
+						else
+							Driver::NoteTapError(Driver::TapError::InstanceNotDeclared, segment,
+								fmt::format("{} at the {} tap, instance {} of {} declared", clients[i]->id, tap, instance, declaredInstances));
 						continue;
 					}
 					committed.push_back(clients[i]);
@@ -3272,7 +3308,12 @@ namespace FrameAnchors
 			if (step == kMaxSteps)
 				continue;
 			if (!WindowOpen(state, d)) {
-				Driver::NoteTapError(Driver::TapError::NotDeclared, static_cast<SegmentId>(d), fmt::format("the tap of epoch {} fired outside the segment", a_segment));
+				// A segment absent from this frame (no schedule on the attached build yet) draws nothing; that is not a mismatch.
+				const auto& fields = Driver::Current().Segment(static_cast<SegmentId>(d));
+				if (fields.declared && !fields.graph && state.endedFrame[d] != Driver::Current().frame)
+					Driver::NoteAbsentTap(static_cast<SegmentId>(d));
+				else
+					Driver::NoteTapError(Driver::TapError::NotDeclared, static_cast<SegmentId>(d), fmt::format("the tap of epoch {} fired outside the segment", a_segment));
 				return { RunStatus::Idle };
 			}
 			return TapDeclared(state, Point{}, d, step, {}, &a_commit);
@@ -3298,7 +3339,7 @@ namespace FrameAnchors
 		for (std::uint32_t d = 0; d < kDeclared; ++d) {
 			if (!state.declaredEpochs[d] || !SegmentHolds(d, *client->desc) || !WindowOpen(state, d))
 				continue;
-			const auto built = state.heldFrame[d] == frame ? state.heldBuilt[d] : state.declaredSnapshots[d].load(std::memory_order_acquire);
+			const auto built = state.heldFrame[d] == frame ? state.heldBuilt[d] : state.frameBuilt[d];
 			if (built && std::ranges::find(built->clients, client->desc) != built->clients.end())
 				return true;
 		}
@@ -3348,8 +3389,13 @@ namespace FrameAnchors
 			if (!state.declaredEpochs[d] || static_cast<std::uint32_t>(kDeclaredInfo[d].segment) != a_segment)
 				continue;
 			for (std::uint32_t k = 0; k < kDeclaredInfo[d].stepCount; ++k)
-				if (kDeclaredInfo[d].steps[k].point)
+				if (kDeclaredInfo[d].steps[k].point) {
+					// An absent segment (no schedule this frame) ends here too, without drawing, so the later windows open.
+					const auto& fields = Driver::Current().Segment(static_cast<SegmentId>(d));
+					if (fields.declared && !fields.graph && state.endedFrame[d] != Driver::Current().frame)
+						return TapDeclared(state, Point{}, d, k, {});
 					return WindowOpen(state, d) ? TapDeclared(state, Point{}, d, k, {}) : RunResult{ RunStatus::Idle };
+				}
 		}
 		return { RunStatus::Idle };
 	}
@@ -3406,23 +3452,19 @@ namespace FrameAnchors
 						kDeclaredInfo[d].names.label);
 				ReleaseSegment(state, d);
 			}
-		// The segments a world frame draws: every one. A frozen world's capture frame draws the world once too.
+		// The segments a world frame draws: every one. A frozen world's capture frame draws the world once too. Each takes its frame
+		// slot's schedule here, switched to this frame's description when that description's recording is ready, and keeps it to the
+		// frame's end.
 		const bool world = a_frame.kind == Kind::World || (a_frame.kind == Kind::FrozenWorld && a_frame.capture);
+		state.inBegin = true;
 		for (std::uint32_t d = 0; d < kDeclared; ++d) {
-			if (!state.declaredEpochs[d])
-				continue;
-			auto& fields = a_frame.segments[d];
-			fields = DescribeDeclared(state, d, world);
-			// A version the kept recording binds was replaced since: a new description now, at the frame's start.
-			if (fields.declared && fields.graph && StaleVersions(state, d, fields, a_frame.slot))
-				fields = DescribeDeclared(state, d, world);
-			// Asked for now, so the host's thread records a new description while the engine draws the shadow maps: this slot's copy
-			// first, then the next slots', which the next frames take. Each copy is recorded once its last run is done, so only
-			// this frame's tap may wait for a recording.
-			if (fields.declared && fields.graph)
-				for (std::uint32_t ahead = 0; ahead < RenderGraphRuntime::kGameFramesInFlight; ++ahead)
-					(void)RequestDeclared(state, d, fields, (a_frame.slot + ahead) % RenderGraphRuntime::kGameFramesInFlight, a_frame.frame, "");
+			state.frameRecording[d].reset();
+			state.frameBuilt[d].reset();
+			state.frameWanted[d] = {};
+			if (state.declaredEpochs[d])
+				a_frame.segments[d] = Schedule(state, d, world, a_frame);
 		}
+		state.inBegin = false;
 	}
 
 	RunResult Run(const Point& a_point)
@@ -3470,8 +3512,7 @@ namespace FrameAnchors
 		};
 		if (SegmentsOn() && work) {
 			if (const auto [declared, first] = OpenStepAt(state, a_point.anchor); declared < kDeclared) {
-				const auto built = state.heldFrame[declared] == Driver::Current().frame ? state.heldBuilt[declared] :
-				                                                                         state.declaredSnapshots[declared].load(std::memory_order_acquire);
+				const auto built = state.heldFrame[declared] == Driver::Current().frame ? state.heldBuilt[declared] : state.frameBuilt[declared];
 				// Every step of the segment at this anchor takes its own clients (the post end-of-frame segment has two ImageSpace
 				// steps, either side of the Tonemap anchor), each tapped when one of them has work.
 				std::vector<RunClient> others = clients;
@@ -3668,6 +3709,18 @@ namespace FrameAnchors
 		const auto* client = FindClient(state, a_id);
 		if (!client || !InGraphs(*client->desc) || client->serial > BuiltSerial(state, index))
 			return false;
+		// An anchor a declared segment holds wholly draws only on the frame's schedule: the segment is present (not absent while its
+		// first schedule on this build is recorded), the schedule's graph holds this registration, and has the client on.
+		if (const auto declared = DeclaredOfAnchor(state, index); declared < kDeclared) {
+			const auto& fields = Driver::Current().Segment(static_cast<SegmentId>(declared));
+			const auto& built = state.frameBuilt[declared];
+			if (!fields.declared || !fields.graph || !built)
+				return false;
+			const auto clients = SegmentClients(*built, declared);
+			const auto found = std::ranges::find(clients, client->desc);
+			const auto i = static_cast<std::size_t>(found - clients.begin());
+			return found != clients.end() && i < RenderGraph::Frame::kSegmentClients && (fields.clientsOn >> i & 1u);
+		}
 		return true;
 	}
 

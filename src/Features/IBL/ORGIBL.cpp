@@ -239,6 +239,8 @@ bool ORGIBL::Setup(std::function<void()> a_onFailed)
 	};
 	// IBL::Prepass returns before computing anything while the scene disables IBL.
 	client.active = [] { return !globals::features::ibl.IsDisabledForCurrentScene(); };
+	// Known at the frame's start (the scene's setting): the declared segment's schedule has the passes on exactly when they have work.
+	client.declared = client.active;
 	client.onFailed = [self] { self->Fail("the render graph failed", false); };
 	impl = std::move(state);
 	if (!FrameAnchors::Register(std::move(client))) {

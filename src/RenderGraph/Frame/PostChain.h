@@ -216,6 +216,9 @@ namespace RenderGraph::Frame::PostChain
 	 */
 	PostFields SlotFields(std::uint32_t a_slot, bool* a_have = nullptr);
 
+	/** @brief The world fields frame slot a_slot's scopes last read (DeclaredWorld's per-slot part). a_have false when it had none. Render owner. */
+	WorldFields WorldSlotFields(std::uint32_t a_slot, bool* a_have = nullptr);
+
 	/** @brief The fields the running chain was predicted from (both parts read by now), else the current frame's Begin read. Render owner. */
 	PostFields ChainFields();
 

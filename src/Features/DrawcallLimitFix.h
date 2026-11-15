@@ -200,6 +200,9 @@ struct DrawcallLimitFix : Feature
 	/** @brief Render thread: the feature's state, for the diagnostic capture. */
 	CaptureInfo GetCaptureInfo() const { return { installed, switchedOn, Running(), faulted, pumpLagging, unavailableReason }; }
 
+	/** @brief Whether the hooks are installed: the scene-frame hook (Main_Draw_Early) runs the build point each world frame. Render thread. */
+	bool HooksInstalled() const { return installed; }
+
 private:
 	struct Hooks
 	{

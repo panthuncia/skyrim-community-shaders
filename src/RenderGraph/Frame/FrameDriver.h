@@ -79,8 +79,11 @@ namespace RenderGraph::Frame::Driver
 	const char* TapErrorName(TapError a_error);
 
 	/**
-	 * @brief Counts and logs a tap error (render owner). a_what names the tap or the client. a_segment SegmentId::Count: work hosted
-	 * in another epoch, outside the declared segments.
+	 * @brief The mismatch policy: the one place a mismatch between the frame's schedule and what the engine does is handled (render
+	 * owner). a_what names the tap or the client and the difference. a_segment SegmentId::Count: work hosted in another epoch, outside
+	 * the declared segments. Every kind of TapError is a mismatch. With MismatchFatal it stops the game with a message that names the
+	 * frame, the segment, the tap and the difference. Otherwise it is counted, logged once per kind for the session, and the caller
+	 * draws nothing of that work. A cut (FrameAnchors::CutSegment) is not a mismatch.
 	 */
 	void NoteTapError(TapError a_error, SegmentId a_segment, std::string_view a_what);
 
@@ -93,15 +96,50 @@ namespace RenderGraph::Frame::Driver
 	/** @brief A segment's recording was asked for, in frame a_frame (a_reason names what changed). */
 	void NoteRecording(SegmentId a_segment, std::uint64_t a_frame, std::string_view a_reason);
 
-	/** @brief A segment's tap waited a_waitUs for its recording. */
-	void NoteRecordingWait(SegmentId a_segment, double a_waitUs);
+	/**
+	 * @brief A segment's schedule for frame slot a_slot switched to a new description at this Begin (FrameAnchors::BeginFrame).
+	 * a_lag: frames since a slot of the segment began to wait for that description. a_what names what changed. Each switch is logged, at most 16 a
+	 * segment in 5 s; the rest are counted and logged once the window passes, so startup does not use up the lines.
+	 */
+	void NoteSwitch(SegmentId a_segment, std::uint64_t a_frame, std::uint32_t a_slot, std::uint64_t a_lag, std::string_view a_what);
+
+	/** @brief How a declared segment runs in a frame. */
+	enum class Scheduled : std::uint8_t
+	{
+		Current,  // on the schedule of the frame's description
+		Lagging,  // on the slot's older schedule, while the recording of the new description is made off the render thread
+		Absent,   // no schedule for the slot yet (the first frames, or the frames after a build of its graph): its work is not drawn
+		Count
+	};
+
+	/** @brief Counts how a declared segment runs this frame (render owner). */
+	void NoteScheduled(SegmentId a_segment, Scheduled a_how);
+
+	/**
+	 * @brief A client or module step had work at its tap that the running schedule leaves out, while the frame's own description has
+	 * it on: the schedule lags, the work is not drawn this frame. Counted, not a mismatch (render owner).
+	 */
+	void NoteLaggedWork(SegmentId a_segment);
+
+	/** @brief A tap of a segment that has no schedule this frame (Scheduled::Absent): it draws nothing (render owner). */
+	void NoteAbsentTap(SegmentId a_segment);
+
+	/** @brief A recording was asked for after the frame's Begin: a mid-frame re-record, which the schedule rule forbids (counted, render owner). */
+	void NoteLateRequest(SegmentId a_segment);
+
+	/**
+	 * @brief Whether a mismatch between the schedule and the engine stops the game (NoteTapError). Development builds: every build but
+	 * the Release profile (CS_RELEASE_PROFILE), so Dev-Fast, Perf-Fast and the test stages. CS_ORG_MISMATCH_FATAL=0 or =1 overrides.
+	 */
+	bool MismatchFatal();
 
 	/** @brief The tap errors so far, all kinds (any thread). */
 	std::uint64_t TapErrors();
 
 	/**
-	 * @brief The census line (CS_ORG_EPOCH_STATS's report): frames by kind, each segment's taps and recordings, and the tap errors
-	 * by kind, since the last report. "[ORG] declared frame: ...".
+	 * @brief The census line (CS_ORG_EPOCH_STATS's report): frames by kind; each segment's taps, recordings asked for, schedule switches
+	 * and how its frames ran (current, lagging, absent); the switches' lag; the tap errors by kind, since the last report. "[ORG] declared
+	 * frame: ...".
 	 */
 	void LogStats();
 }

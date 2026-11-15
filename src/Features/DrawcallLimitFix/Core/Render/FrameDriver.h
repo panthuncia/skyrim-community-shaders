@@ -22,6 +22,14 @@ namespace RE
 
 namespace DCLF
 {
+	/**
+	 * @brief Native mode with declared segments: the graph's build point (IndirectDraws::BuildPoint), run by RenderGraph's frame driver
+	 * at Renderer::Begin, before the frame's schedule is chosen, for a frame that draws the world. a_frame is the frame driver's number;
+	 * the scene-frame start (FrameDriver::BeginFrame) skips the build point for that frame. Nothing when DCLF's hooks are not installed.
+	 * Render thread.
+	 */
+	void BuildPointAtFrameStart(std::uint64_t a_frame);
+
 	class FrameDriver
 	{
 	public:
