@@ -2243,3 +2243,166 @@ The submission and host differences are run-to-run noise (stage 3's notes: up to
 - **RenderWorld scopes and S3's tail (item 5).** SSAO (RenderSSAO 100520 / 107245: its minify loop, temporal or not, and the
   composite form by fog and SAO switches and the portal graph), SSR and snow are not described yet; S3 still ends at PostComposite.
 - **Guest** keeps the shape manifest and the per-anchor ImageSpace runs.
+
+## The declared frame, stage 4b: the post chain from a pass-state table (2026-11-15, `org-native/phases`)
+
+Stage 4's second half: the world post chain drawn in two segments from a static pass-state table, checked against the engine at
+every draw. Native mode, default on (`CS_ORG_SEGMENT_POST_DRAW=0` gives the chain back to the ImageSpace anchor; the table check
+stays on with the post description, `CS_ORG_POST_TABLE_CHECK=0` turns it off). Guest mode is unchanged.
+
+**Outcome.** perf-taa: 33.9 to 26.9 tickets a frame. The end-of-frame chain makes no ImageSpace-anchor ticket in a steady world frame
+(13.0 to 5.0 ImageSpace tickets: the five left are the RenderWorld scopes, below). The two post segments cost the submission thread
+38 us a frame against 184 us for the nine tickets they replace. 0 tap errors in every run, and in the steady window 0 segment
+recordings, 0 cuts and 0 GPU work inside a held segment.
+
+### The table
+
+`src/RenderGraph/Engine/ImageSpace/PostTable.{h,cpp,inl}`. A row is a step and its variant (`PostChain::RowKey`: step, index,
+parity, and for the steps that follow RenderEndOfFrameEffects' ping-pong the target read and the target written) with what its pass
+is: the effect (its program), outputs, inputs, the samplers' address and filter modes, the engine blend state and a viewport rule
+(`Full`: the whole output; `Dynamic`: the output scaled by the engine's dynamic-resolution ratios). 155 rows: 49 seen in the scenes
+below and 106 implied by the RE of their steps (marked `// implied` until a run sees them).
+
+- **Generated.** `CS_ORG_POST_TABLE_DUMP=1` logs one row per distinct declared step drawn (from the existing shape capture,
+  `ReadShape`), and a conflict when a step draws a second shape or a viewport no rule gives. `tools/post-table.py <runs> [--keep]
+  [--imply] --write` merges the rows, refuses two rows for one key, and writes `PostTable.inl` sorted by key. `--imply` adds, from
+  rows seen: every luminance level and adaptation for 3 to 6 levels (720p to 4K), every bloom radius, the tonemap and its fade form
+  from kMAIN or kMAIN_COPY into the destination or kIMAGESPACE_TEMP_COPY for each luminance target, TAA into the destination and with
+  either sixth-sampler address, the depth of field's two temporary copies swapped, and refraction from kMAIN_COPY into kMAIN. The 26
+  seen rows the rules also make are all equal to them.
+- **Checked.** Each draw of a declared step is compared with its row (`CheckRow` in ImageSpace.cpp). Any difference, or no row, is
+  a tap error `post state mismatch` naming the fields that differ. In the final runs every declared draw matched its row (28,751 of
+  28,751 in the upscalers run; 6,000 to 9,000 in each native-quick run).
+- **Fields the table needed.** Each was found as a row whose state was not constant, and each is a value the engine itself reads,
+  now in `PostFields`:
+
+| Field | Engine state (SE / AE) | What varied |
+|---|---|---|
+| eofSource, eofDest, eofSwap | RenderEndOfFrameEffects' arguments (99023 / 105674) and the manager's +0x60, read at its entry | where each step reads and writes; the source is kMAIN or kMAIN_COPY from frame to frame |
+| dynScaled | the dynamic-resolution lock and scales, without the upsample's own flag | 99023 decides "final" from these alone |
+| vlParity | the VL state object (getter 100297 / 107014), +0x88: the VL writes and the composite reads 43 + (~counter & 1) | the composite's input alternates between kIMAGESPACE_VOLUMETRIC_LIGHTING and its PREVIOUS |
+| compositeAddress | the shadow state's first pixel sampler address, read at the composite's call (100493 does not set it) | wrap or clamp, by what drew before it |
+| normals | Deferred's `forwardRenderTargets[2]` (the normals target bound at StartDeferred) | TAA reads kNORMAL_TAAMASK_SSRMASK or its swap, alternating out of phase with its history |
+| taaAddress | the shadow state's sixth pixel sampler address, read at TAA's call | clamp for a few frames after an upscaler switch, wrap after |
+| dofSteps, dofCompute | the depth of field's step flags (its bool array at +0x98) and the compute-blur option (513727 / 391684); its composites read at its first draw | the depth of field's draws |
+| (luminance target) | the last level's target, 27 + levels - 1 + 2 x lumParity, as the parity of the adaptation, bright-pass and tonemap rows | rows that hold at any level count |
+
+The decision events after Begin: RenderWorldPostProcess' entry, RenderEndOfFrameEffects' entry, a step's own call for the two sampler
+fields (the rest of its part is predicted again from there), and the depth of field's first draw. Its Render picks its fogged,
+masked or distant composites as it runs: the first world frame drew ISDistantBlur where the read at RenderEndOfFrameEffects' entry
+said ISDepthOfField.
+
+**What draws from the table.** The volumetric lighting composite (the VL-only form; the lens flare forms have no seen rows), the HDR
+effect (downsample, luminance chain, adaptation, bright pass and blur at every radius, tonemap and its fade form), TAA (its plain
+form), refraction (one draw of its child: `ImageSpaceEffectRefraction::Render`, SE 100962 / AE 107744), and the depth of field after
+the tonemap with its compute blur (downsample, ISDepthOfFieldBlurHCS and VCS, ISDistantBlur, as `Step::Dof` rows read from its
+children).
+
+**What does not, and why.** A frame whose part holds any of these cuts that part's segment at its decision event and draws the part
+on the ImageSpace anchor as before, counted by reason (`[ORG] frame segments: segments cut short`):
+
+- the effects the description does not settle draw by draw yet: the IB lens flares (100481, two forms by an option), radial blur,
+  full-screen blur, get hit and the world map (the validation tour's map cut the end-of-frame segment for 692 frames);
+- FXAA (one shader, but off in every scene, so no row was seen), the depth of field's raster blur, pre-tonemap form and other
+  composites, the copy that replaces HDR when it is off, the screenshot copy and the dynamic-resolution upsample: no scene drew them,
+  so their rows are absent;
+- TAA's UI and water forms (the port has no CS source for them and leaves them to the engine), and SIL (off in every scene).
+
+### The segments
+
+`FrameAnchors.cpp`, `kDeclaredInfo`.
+
+| Segment | Steps | End | Why the end is safe |
+|---|---|---|---|
+| S4a post composites | VolumetricLighting (whole), ImageSpace (`cs.engine.imagespace.post.composites`), PostProcessing (whole, no clients) | the PostProcessing anchor's hook at Main_PostProcessing's start | VL and the composites run inside RenderWorldPostProcess before it; the upscaler's evaluate follows it |
+| S4b post end-of-frame | Upscale (whole), ImageSpace (`...post.hdr`: slots before the tonemap, the HDR effect up to the bloom), Tonemap (shared), ImageSpace (`...post.final`: the tonemap draw, TAA, the LDR slots, the upsample), a point | RenderEndOfFrameEffects' return (`FrameAnchors::TapPoint`) | every chain draw's scope has flushed by then; FrameGeneration's capture comes after |
+
+- **The upscaler's evaluate stays external work**, so S4 is two segments in every frame (one ticket more than needed without an
+  upscaler). Streamline, FidelityFX and XeSS record it on the interop command ring, with their own resource-state contract and a
+  drain. A live ORG pass would need each SDK to record into a list the segment owns, with its resources declared. Work submitted while
+  a segment holds its ticket runs ahead of that segment's earlier work, so the evaluate must sit between two segments.
+- **Three segment-only clients** (`ClientDesc::segmentOnly`): their passes are in the segments' graphs and never in the ImageSpace
+  anchor's. One pass per row, gated, numbered by its row index (gate entry, latch region, `PassDesc::row`), ordered by the engine's
+  step order (`PostOrderOf`: the LDR slots come after TAA though they sort before the tonemap). The HDR draws come before the Tonemap
+  step and the tonemap draw after it, so Post Processing's and Effects11's passes sit between them in the graph.
+- **Rows on and off.** `ClientDesc::rows` fills `SegmentFields::rows` (256 bits) from `PostChain::DeclaredFields()`: this frame's
+  chain fields once its decision events ran, else the slot's last chain's. A pass whose row bit is clear records only its barriers.
+  Read at Begin and again at the end tap; in steady frames they agree (0 recordings in the perf window).
+- **Taps.** Each ImageSpace batch flush commits the post batches into the held run (`ClientDesc::repeats`: a client may commit at
+  several taps of one run, each writing entries no earlier tap wrote). A segment with two steps at one anchor taps each step with its
+  own clients. A draw of a part that draws from the table and is not its row draws nothing (a tap error).
+- **Cuts** (`FrameAnchors::CutSegment`). At each part's decision event the part draws from the table only when every declared draw has
+  a row with a built pass, for the sizes now, in a segment graph that holds it. Otherwise the segment is cut: what its taps committed
+  is submitted, its later taps that frame do nothing, and its shared steps run their own epochs. The composites' cut waits for the
+  composites' call, so the volumetric lighting is submitted with it first. A row made for another dynamic-resolution size registers the
+  clients again (an async build) and cuts until that is built: two to four frames at the first world frame and at each upscaler switch.
+- **Volumetric Lighting is a whole member.** As a shared step its anchor kept an epoch of its own that never ran. At the first upscaler
+  switch that epoch ran once (its client was not yet in the segment's rebuilt graph) and failed with "Binding replacement requires a
+  structural alias edit". That unregistered Volumetric Lighting and broke the TAA image in an earlier build of this stage.
+
+### Measurements
+
+perf-taa, native Vulkan, Perf-Fast, Tracy, one run each; off = `CS_ORG_SEGMENT_POST_DRAW=0`; measured unless marked.
+
+| perf-taa | Off | On |
+|---|---|---|
+| fps between the marks | 124.2 | 123.3 |
+| Tickets a frame (census) | 33.90 | 26.94 |
+| Queue submissions a frame (batches, census) | 26.1 | 26.2 |
+| `vkQueueSubmit` calls a frame (Tracy, all threads) | 34.3 | 34.3 |
+| Batch lists a frame (lists in submissions) | 40.9 (122.1) | 34.9 (112.7) |
+| Tickets joined by the next ticket's submission | 9.2 | 3.0 |
+| Barriers a frame, entry / body (last census window) | 1189 / 1824 | 875 / 1243 |
+| Closed passes on the GPU a frame (estimated: ImageSpace runs x 170 manifest passes, less those opened) | about 2,180 | about 840 |
+| Render thread `ExecuteEpoch`, ms a frame | 0.888 | 0.694 |
+| Render thread busy, ms a frame | 3.29 | 3.24 |
+| Submission thread busy (of it `FinishTicket`), ms a frame | 2.96 (2.70) | 2.83 (2.48) |
+| Host thread busy, ms a frame | 2.14 | 1.76 |
+| Tap errors; recordings, cuts and GPU work inside held segments in the window | 0; 0, 0, 0 | 0; 0, 0, 0 |
+
+The removed tickets were already joined into their neighbours' queue submissions, so the submission count does not move. The frame
+rate difference is inside one sample's noise.
+
+| Per frame (measured, same build) | S4a + S4b | Replaced: 8 ImageSpace chain tickets and the VL anchor's |
+|---|---|---|
+| Tickets | 2 | 9 |
+| Submission thread (`FinishTicket`), us | 38.2 (17.4 + 20.8) | 184.2 (168.8 + 15.4) |
+| of it admission, us | 9.5 | 62.5 (58.0 + 4.5) |
+| of it inline recording, us | 1.4 | 1.2 |
+| Render thread (`ExecuteEpoch`), us | 14.6 | 215.5 (205.4 + 10.1) |
+| Barriers, entry / body | 42 / 119 | 353 / 684 (the ImageSpace anchor's 12.8 runs less its 5.1) + 8.5 / 17 |
+
+Segment cost stays flat at this size: 17 and 21 us a ticket on the submission thread with 4 and 134 passes in the graphs, most of
+them recorded as barriers only.
+
+**Checks** (the final build, default on, `CS_TEST_BACKGROUND=1`; each with 0 tap errors of any kind and every declared draw matching
+its row):
+- native-quick, Vulkan: 3 runs with DLSS registered before the shot (q4-q6), clean by eye against the switch-off run of the same
+  build; three earlier-build runs too.
+- native-upscalers (DLSS, FSR, XeSS, and TAA drawing the engine's ISTemporalAA from the table): all four shots clean. An earlier build
+  broke the TAA shot (the Volumetric Lighting failure above); the final build does not.
+- native-river, native-d3d12-quick, the loading-thread run (`CS_ORG_LOADING_THREAD=1`), first and third person (`pov` shots),
+  guest-quick (no post segments in guest): passed, shots as before by eye.
+- native-validation (Whiterun, inventory, map, a save and its load, Dragonsreach; validation layer on): the known 20x
+  `VUID-vkCmdDraw-None-09600` only; the map's radial blur and world map cut the end-of-frame segment (old path), as designed.
+- GPU work inside a held segment: none in steady frames; at loads one native-context operation and one external-work submission (as
+  in stage 3), the precipitation occlusion clear once, and at TAA switches the TAA mask clear (EngineFrameClear, still its own ticket).
+- Not reached: underwater, DOF from dialogue, a hit for radial blur, a weather change by console, a frozen-world menu. Not run: the
+  RX 6600. ORG was not changed, so its unit tests were not run.
+
+**What is still reachable on the old path in native.** The shape manifest and the main ImageSpace client (170 passes): the RenderWorld
+scopes (SSAO, SSR, snow, the water blend, the flow copies), the menus (local map, race menu, menu 3D) and every cut frame. Late
+clients: a shape outside the manifest among those. Rising-entry flushes: in the main client's batches as before; the post clients'
+batches never flush for order (their entries rise by row within a part).
+
+### What is left
+
+- Rows for the groups: the lens flares (RE of 100481, two forms by an option), radial blur, full-screen blur, get hit, the world map,
+  FXAA (one run with FXAA on gives its rows), the depth of field's raster blur and pre-tonemap form, the copy, the screenshot copy, the
+  upsample, and TAA's UI and water forms (which need CS sources).
+- The chain's shapes can leave the manifest client in native once no frame cuts.
+- **RenderWorld scopes and S3's tail** (not started): SSAO (RenderSSAO 100520 / 107245: its minify loop by level count, temporal or
+  not by its option, the composite form by the fog and SAO switches) as rows with fields for those; SSR (100428 / 107146: the mask
+  downsample, the ray march, the compute blur pair); snow (ISSnowSSS and the snow copy). Then S3's tail as a segment: the water stencil
+  clear and mask (water in view as a field), those scopes, the kMAIN copy, the water surface and water-target clears, the water blend.
+  These are the five ImageSpace tickets left a frame.
