@@ -3096,9 +3096,12 @@ namespace RenderGraph::Engine::ImageSpace
 		}
 
 		/**
-		 * @brief The check (with the post description, unless CS_ORG_POST_TABLE_CHECK=0): a draw or dispatch of the world post chain that
-		 * the description declared as a step is compared with its table row. A row the table lacks or any difference is a tap error ("post
-		 * state mismatch"), logged with what differs. Returns the row when the draw matches it.
+		 * @brief The table row of a draw or dispatch of the world post chain that the description declared as a step. A step the table
+		 * has no row for is a tap error ("post state mismatch") and returns null.
+		 *
+		 * The check (with the post description, unless CS_ORG_POST_TABLE_CHECK=0) also compares the draw with its row. Any difference is
+		 * a tap error, logged with what differs, and returns null. With the check off the row is returned without the comparison, so the
+		 * draw still happens from its row.
 		 */
 		const PostRow* CheckRow(const ShapeKey& a_key)
 		{
@@ -3106,9 +3109,6 @@ namespace RenderGraph::Engine::ImageSpace
 			if (!row)
 				return nullptr;
 			DumpRow(*row, a_key);
-			static const bool check = !Switches::Off("CS_ORG_POST_TABLE_CHECK");
-			if (!check)
-				return nullptr;
 			const auto* found = FindPostRow(*row);
 			if (!found) {
 				Frame::Driver::NoteTapError(Frame::Driver::TapError::PostStateMismatch, Frame::SegmentId::Count,
@@ -3116,6 +3116,9 @@ namespace RenderGraph::Engine::ImageSpace
 				Frame::PostChain::NoteRowCheck(false);
 				return nullptr;
 			}
+			static const bool check = !Switches::Off("CS_ORG_POST_TABLE_CHECK");
+			if (!check)
+				return found;
 			ShapeKey expected;
 			std::string error;
 			if (!RowShape(*found, expected, error)) {
