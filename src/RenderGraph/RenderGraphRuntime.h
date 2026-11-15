@@ -129,9 +129,11 @@ public:
 		PhasePreMain,     // between the Z-prepass and the main opaque epoch: depth done, the prepass, the sky
 		PhaseDeferred,    // between the main opaque and the forward epochs: the deferred passes, the composite, the water
 		PhasePost,        // after the first-person epoch: the sun queries, post-processing, ImageSpace, the interface, the present
-		// The declared frame's segments (native mode, CS_ORG_SEGMENTS; FrameAnchors.h, SegmentsOn): one revision-driven, closed epoch
+		// The declared frame's segments (native mode, CS_ORG_SEGMENTS; FrameAnchors.h, SegmentsOn): one revision-driven, open epoch
 		// each, holding the passes of the anchors it lists, recorded per description of the segment (RenderGraph/Frame).
 		DeclaredPreDepth,  // the EarlyPrepass clients, at Main::RenderShadowMaps' return
+		DeclaredPreMain,   // RenderDepth's depth copy to the Prepass clients, at the Prepass anchor's hook
+		DeclaredDeferred,  // the deferred passes and the composite, at the PostComposite anchor's hook
 		Count
 	};
 

@@ -7,6 +7,7 @@
 
 #include "Globals.h"
 #include "RenderGraph/ComputeProgram.h"
+#include "RenderGraph/FrameAnchors.h"
 #include "RenderGraph/GraphResources.h"
 #include "RenderGraph/PublishedResources.h"
 #include "RenderGraph/RenderGraphRuntime.h"
@@ -337,21 +338,29 @@ namespace
 
 		void GatherStructuralPasses(org::RenderGraph&, std::vector<org::RenderGraph::ExternalPassDesc>& a_out) override
 		{
-			const auto epoch = RenderGraphRuntime::EpochOf(RenderGraphRuntime::Segment::LightCulling);
+			// A declared segment (the pre-main segment, native mode) holds the culling's passes: it gathers them at its step.
+			if (FrameAnchors::HoldsForeign(static_cast<std::uint32_t>(RenderGraphRuntime::Segment::LightCulling)))
+				return;
+			GatherPasses(resources, RenderGraphRuntime::EpochOf(RenderGraphRuntime::Segment::LightCulling), a_out);
+		}
+
+		/** @brief The culling's three passes, tagged with a_epoch: the light copy, the cluster build and the cull. */
+		static void GatherPasses(const std::shared_ptr<Resources>& a_resources, std::uint32_t a_epoch, std::vector<org::RenderGraph::ExternalPassDesc>& a_out)
+		{
 			// On the graphics queue with the culling that reads it: on the copy queue it would only start the epoch with a wait on
 			// DXVK's stream, and split DXVK's command list for the culling's wait on it.
 			a_out.push_back(org::RenderGraph::ExternalPassDesc::Copy("cs.llf.latch-lights",
-				std::static_pointer_cast<org::RenderPass>(std::make_shared<LatchLightsPass>(resources)))
+				std::static_pointer_cast<org::RenderPass>(std::make_shared<LatchLightsPass>(a_resources)))
 					.PreferQueue(org::QueueKind::Graphics)
-					.Epoch(epoch));
+					.Epoch(a_epoch));
 			a_out.push_back(org::RenderGraph::ExternalPassDesc::Compute("cs.llf.build-clusters",
-				std::static_pointer_cast<org::RenderPass>(std::make_shared<BuildClustersPass>(resources)))
+				std::static_pointer_cast<org::RenderPass>(std::make_shared<BuildClustersPass>(a_resources)))
 					.PreferQueue(org::QueueKind::Graphics)
-					.Epoch(epoch));
+					.Epoch(a_epoch));
 			a_out.push_back(org::RenderGraph::ExternalPassDesc::Compute("cs.llf.cull-lights",
-				std::static_pointer_cast<org::RenderPass>(std::make_shared<CullLightsPass>(resources)))
+				std::static_pointer_cast<org::RenderPass>(std::make_shared<CullLightsPass>(a_resources)))
 					.PreferQueue(org::QueueKind::Graphics)
-					.Epoch(epoch));
+					.Epoch(a_epoch));
 		}
 
 	private:
@@ -455,6 +464,14 @@ bool ORGLightCulling::Setup(uint32_t a_clusterCount, uint32_t a_maxLights, uint3
 		// Registering (or replacing) the extension rebuilds the graph on the next epoch;
 		// the previous graph and its resources retire first.
 		host->AddExtension(kExtensionId, [resources] { return std::make_unique<LightCullingExtension>(resources); });
+		// Native mode with declared segments: the pre-main segment holds the passes, in their place among its steps. Its description
+		// has them on while the culling is active.
+		FrameAnchors::SetForeignPasses(
+			static_cast<std::uint32_t>(RenderGraphRuntime::Segment::LightCulling),
+			[resources](std::uint32_t a_epoch, void* a_passes) {
+				LightCullingExtension::GatherPasses(resources, a_epoch, *static_cast<std::vector<org::RenderGraph::ExternalPassDesc>*>(a_passes));
+			},
+			[] { return ORGLightCulling::Get().IsActive(); });
 		// Other epochs' passes (Exponential Height Fog, Drawcall Limit Fix's colour passes) read them by id, ordered after the culling.
 		if (!PublishedResources::Publish(kLightsId, *resources->lights) || !PublishedResources::Publish(kLightIndexListId, *resources->lightIndexList) ||
 			!PublishedResources::Publish(kLightGridId, *resources->lightGrid)) {
@@ -496,7 +513,7 @@ bool ORGLightCulling::Execute(const FrameInputs& a_inputs)
 		if (!current || !(*current == shape))
 			resources->shape.store(std::make_shared<const Shape>(shape), std::memory_order_release);
 	}
-	const bool ok = RenderGraphRuntime::Get().ExecuteEpoch(RenderGraphRuntime::Segment::LightCulling, [&](org::RenderGraph&) {
+	const auto commit = [&] {
 		// This run's latch region, which nothing else reads.
 		const org::RunRef run = RenderGraphRuntime::Get().Host()->CurrentRun();
 		LLFLatch latch{};
@@ -508,7 +525,13 @@ bool ORGLightCulling::Execute(const FrameInputs& a_inputs)
 		resources->latch->WriteValue(run, 0, latch);
 		if (bytes)
 			resources->latch->Write(run, kLatchLightsOffset, { reinterpret_cast<const std::byte*>(a_inputs.lights), bytes });
-	});
+	};
+	// A declared segment holds the culling: its values go into the segment's run at this tap, and the segment submits them at its end.
+	// A tap outside the segment is a tap error there and draws nothing.
+	const auto segment = static_cast<std::uint32_t>(RenderGraphRuntime::Segment::LightCulling);
+	if (FrameAnchors::HoldsForeign(segment))
+		return FrameAnchors::TapForeign(segment, commit).status != FrameAnchors::RunStatus::Failed;
+	const bool ok = RenderGraphRuntime::Get().ExecuteEpoch(RenderGraphRuntime::Segment::LightCulling, [&](org::RenderGraph&) { commit(); });
 	if (!ok) {
 		// The graph faulted: LLF returns to its D3D11 dispatches, and the buffers' readers to D3D11's.
 		WithdrawBuffers();

@@ -27,6 +27,10 @@ namespace RenderGraph::Frame
 		switch (a_segment) {
 		case SegmentId::PreDepth:
 			return "pre-depth";
+		case SegmentId::PreMain:
+			return "pre-main";
+		case SegmentId::Deferred:
+			return "deferred";
 		default:
 			return "?";
 		}
@@ -42,6 +46,8 @@ namespace RenderGraph::Frame
 		mix(a_fields.versions);
 		mix(a_fields.clients);
 		mix(a_fields.clientsOn);
+		mix(a_fields.foreignOn);
+		mix(a_fields.passes);
 		return hash ? hash : 1;
 	}
 
@@ -63,6 +69,8 @@ namespace RenderGraph::Frame
 		Append(out, "versions", std::to_string(a_before.versions), std::to_string(a_after.versions));
 		Append(out, "clients", std::to_string(a_before.clients), std::to_string(a_after.clients));
 		Append(out, "clientsOn", fmt::format("{:#x}", a_before.clientsOn), fmt::format("{:#x}", a_after.clientsOn));
+		Append(out, "foreignOn", fmt::format("{:#x}", a_before.foreignOn), fmt::format("{:#x}", a_after.foreignOn));
+		Append(out, "passes", fmt::format("{:#x}", a_before.passes), fmt::format("{:#x}", a_after.passes));
 		return out;
 	}
 

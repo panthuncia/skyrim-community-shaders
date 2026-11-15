@@ -2526,11 +2526,14 @@ bool RenderGraphRuntime::Initialize()
 			}
 			// The frame anchors' epochs are live async epochs, in DXVK's stream with the others.
 			FrameAnchors::AddToFrame(epochs);
-			// The declared frame's segments (CS_ORG_SEGMENTS): revision-driven, recorded per description of the segment, and closed so
-			// each one's entry plan stays the same (=2 leaves them open, to compare the barriers).
+			// The declared frame's segments (CS_ORG_SEGMENTS): revision-driven, recorded per description of the segment, and open: their
+			// entry barriers are recorded at each submission from the ledgers. A closed execution's recording holds its entry barriers,
+			// made from the ledgers when it was recorded. Next to open epochs (DCLF's, the anchors') those go stale whenever a neighbour
+			// leaves a resource in another state (DCLF's first drawn frame, a load), which the validation layer reported for the
+			// normals targets and the shadow mask. CS_ORG_SEGMENTS=3 closes them, for measuring once every neighbour is closed too.
 			if (const auto segments = FrameAnchors::SegmentEpochs(); !segments.empty()) {
 				revisionEpochs.insert(revisionEpochs.end(), segments.begin(), segments.end());
-				const bool closed = Switches::Number("CS_ORG_SEGMENTS", 1) != 2;
+				const bool closed = Switches::Number("CS_ORG_SEGMENTS", 1) == 3;
 				// Closed segments rest each resource where their last use left it (CS_ORG_SEGMENT_REST, default on; =0 goes home
 				// as before). Going home cost the pre-depth segment 279 exit barriers a run against 43 open.
 				const bool rest = closed && !Switches::Off("CS_ORG_SEGMENT_REST");
@@ -2541,9 +2544,12 @@ bool RenderGraphRuntime::Initialize()
 				// Their transients in pools of their own: in the shared arena another epoch's transients took their memory between two
 				// frames, so every admission found alias activations and planned against the ledgers (perf-taa: 63 us a submission
 				// closed, 27 open, against 12 with pools of their own).
-				state->host->SetPrivateAliasEpochs(segments);
+				// CS_ORG_SEGMENT_POOLS=0 leaves them in the shared arena: with repeated activations predicted (ORG), an admission there
+				// takes its predicted plan as long as the frame's epochs run in the same order.
+				if (!Switches::Off("CS_ORG_SEGMENT_POOLS"))
+					state->host->SetPrivateAliasEpochs(segments);
 				logger::info("[ORG] frame segments: epochs {} are revision-driven and {}", fmt::join(segments, ","),
-					closed ? (rest ? "closed, resting at last use" : "closed, going home (CS_ORG_SEGMENT_REST=0)") : "open (CS_ORG_SEGMENTS=2)");
+					closed ? (rest ? "closed, resting at last use (CS_ORG_SEGMENTS=3)" : "closed, going home (CS_ORG_SEGMENTS=3, CS_ORG_SEGMENT_REST=0)") : "open");
 			}
 			logger::info("[ORG] async epochs: {}; revision-driven: {}", fmt::join(epochs, ","), fmt::join(revisionEpochs, ","));
 			// In DXVK's own command stream unless CS_ORG_IN_STREAM=0 (or DXVK takes no external commands); a list of epochs (3,1) puts only

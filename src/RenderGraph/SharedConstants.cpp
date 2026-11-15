@@ -45,7 +45,9 @@ namespace SharedConstants
 			std::array<std::shared_ptr<org::Buffer>, kBlocks> buffers;
 			std::array<std::uint32_t, kBlocks> bytes{};    // each block's size
 			std::array<std::uint32_t, kBlocks> offsets{};  // each block's offset in a latch region
-			std::shared_ptr<org::LatchBlock> latch;
+			// One latch block per upload point. A run's region in a block is allocated only when something asks for it, so a point
+			// only declared segments use costs nothing elsewhere.
+			std::array<std::shared_ptr<org::LatchBlock>, kUploadPoints> latches;
 		};
 
 		struct Store
@@ -94,14 +96,15 @@ namespace SharedConstants
 		struct UploadFrame
 		{
 			std::shared_ptr<const Buffers> buffers;
+			std::uint32_t point = 0;
 		};
 
 		// The execution's latch region into the four buffers.
 		class UploadPass final : public org::TypedRenderGraphPass<UploadPass, UploadFrame, UploadBindings>
 		{
 		public:
-			explicit UploadPass(std::shared_ptr<const Buffers> a_buffers) :
-				buffers(std::move(a_buffers)) {}
+			UploadPass(std::shared_ptr<const Buffers> a_buffers, std::uint32_t a_point) :
+				buffers(std::move(a_buffers)), point(a_point) {}
 
 			UploadBindings Declare(org::PassBuilder& a_builder)
 			{
@@ -112,16 +115,20 @@ namespace SharedConstants
 				return bindings;
 			}
 
-			void Revision(std::vector<std::uint64_t>& a_out) const { a_out.push_back(reinterpret_cast<std::uintptr_t>(buffers.get())); }
+			void Revision(std::vector<std::uint64_t>& a_out) const
+			{
+				a_out.push_back(reinterpret_cast<std::uintptr_t>(buffers.get()));
+				a_out.push_back(point);
+			}
 
-			UploadFrame Prepare(const UploadBindings&, const org::PassPrepareContext&) const { return { buffers }; }
+			UploadFrame Prepare(const UploadBindings&, const org::PassPrepareContext&) const { return { buffers, point }; }
 
 			static void Record(const UploadBindings& a_bindings, const UploadFrame& a_frame, org::PassRecordContext& a_recording)
 			{
 				if (!a_frame.buffers)
 					return;
 				// The run's region of the latch: its arena chunk and its offset there.
-				const auto region = a_frame.buffers->latch->At(a_recording.Run());
+				const auto region = a_frame.buffers->latches[a_frame.point]->At(a_recording.Run());
 				const auto source = region.buffer->GetAPIResource().GetHandle();
 				for (std::uint32_t i = 0; i < kBlocks; ++i)
 					a_recording.Commands().CopyBufferRegion(a_recording.Resolve(a_bindings.targets[i]).GetHandle(), 0, source,
@@ -130,6 +137,7 @@ namespace SharedConstants
 
 		private:
 			std::shared_ptr<const Buffers> buffers;
+			std::uint32_t point = 0;
 		};
 
 		/** @brief A staging copy of a D3D11 buffer's contents now (stalls). Empty on failure. */
@@ -213,7 +221,8 @@ namespace SharedConstants
 				buffer->Materialize();
 				buffers->buffers[i] = std::move(buffer);
 			}
-			buffers->latch = std::make_shared<org::LatchBlock>("cs.shared.latch", regionBytes);
+			for (std::uint32_t point = 0; point < kUploadPoints; ++point)
+				buffers->latches[point] = std::make_shared<org::LatchBlock>(point ? fmt::format("cs.shared.latch.{}", point) : std::string("cs.shared.latch"), regionBytes);
 			state.buffers = std::move(buffers);
 			logger::info("[ORG] Shared constants for graph passes: FrameBuffer {} B, SharedData {} B, FeatureData {} B, Permutation {} B",
 				state.buffers->bytes[kFrameBuffer], state.buffers->bytes[kSharedData], state.buffers->bytes[kFeatureData],
@@ -245,18 +254,18 @@ namespace SharedConstants
 			a_graph.RegisterResource(org::ResourceIdentifier(kNames[i]), buffers->buffers[i]);
 	}
 
-	std::shared_ptr<org::RenderPass> MakeUploadPass()
+	std::shared_ptr<org::RenderPass> MakeUploadPass(std::uint32_t a_point)
 	{
 		const auto& buffers = Shared().buffers;
-		if (!buffers)
+		if (!buffers || a_point >= kUploadPoints)
 			return nullptr;
-		return std::static_pointer_cast<org::RenderPass>(std::make_shared<UploadPass>(buffers));
+		return std::static_pointer_cast<org::RenderPass>(std::make_shared<UploadPass>(buffers, a_point));
 	}
 
-	void Commit()
+	void Commit(std::uint32_t a_point)
 	{
 		auto& state = Shared();
-		if (!state.buffers)
+		if (!state.buffers || a_point >= kUploadPoints)
 			return;
 		const auto& buffers = *state.buffers;
 		// This run's region: its own, which nothing else reads.
@@ -266,7 +275,7 @@ namespace SharedConstants
 			// A block CS has not uploaded yet stays as it was; one that grew is cut to the buffer.
 			const auto bytes = sources[i].first((std::min)(sources[i].size(), std::size_t{ buffers.bytes[i] }));
 			if (!bytes.empty())
-				buffers.latch->Write(run, buffers.offsets[i], bytes);
+				buffers.latches[a_point]->Write(run, buffers.offsets[i], bytes);
 			// Kept for the check and for regions' CommittedMatches (a few KiB).
 			state.committed[i].assign(bytes.begin(), bytes.end());
 		}

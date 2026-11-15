@@ -68,11 +68,22 @@ namespace SharedConstants
 	/** @brief Registers the four buffers with an anchor's graph ("cs.shared.frame-buffer" and so on). */
 	void Register(org::RenderGraph& a_graph);
 
-	/** @brief A new upload pass: copies the execution's latch region into the four buffers. */
-	std::shared_ptr<org::RenderPass> MakeUploadPass();
+	/** @brief The upload points one execution can hold (a declared segment's steps): each has a latch block of its own. */
+	inline constexpr std::uint32_t kUploadPoints = 8;
 
-	/** @brief Inside an epoch (beforePrepare): this execution's values into its latch region. */
-	void Commit();
+	/**
+	 * @brief A new upload pass: copies the execution's latch region of upload point a_point into the four buffers. An anchor's epoch
+	 * has one, point 0. A declared segment has one before each step whose clients read the buffers, numbered by the step, so each
+	 * step's passes read the values its tap saw (the graph orders an upload after the reads of the one before it). Null for a point
+	 * out of range.
+	 */
+	std::shared_ptr<org::RenderPass> MakeUploadPass(std::uint32_t a_point = 0);
+
+	/**
+	 * @brief The values D3D11 would read now, into this execution's latch region of upload point a_point: inside an epoch
+	 * (beforePrepare), or inside a held run (GraphHost::UseHeldRun) for a declared segment's tap.
+	 */
+	void Commit(std::uint32_t a_point = 0);
 
 	/**
 	 * @brief Render thread: whether the values D3D11 would read now are the ones the last Commit wrote. A region execution holding

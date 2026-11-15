@@ -230,6 +230,8 @@ namespace RenderGraph::Frame::Driver
 			return "host skipped";
 		case TapError::HostMissing:
 			return "host missing";
+		case TapError::LostToBuild:
+			return "lost to a build";
 		default:
 			return "?";
 		}

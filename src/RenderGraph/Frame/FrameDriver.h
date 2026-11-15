@@ -68,6 +68,7 @@ namespace RenderGraph::Frame::Driver
 		NoRecording,       // the segment had no recording for its description at its tap
 		HostSkipped,       // a clear or copy waiting for its host epoch saw another epoch submitted first
 		HostMissing,       // a clear or copy waiting for its host epoch was still waiting at the next Begin (dropped)
+		LostToBuild,       // a build of a segment's graph gave its held ticket back between two of its taps (what they wrote is dropped)
 		Count
 	};
 

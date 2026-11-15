@@ -31,12 +31,15 @@ namespace RenderGraph::Frame
 	const char* KindName(Kind a_kind);
 
 	/**
-	 * @brief The declared frame's segments, in frame order. Stage 1 has the pre-depth segment alone (the plan's S1: the EarlyPrepass
-	 * clients). The others are added by later stages.
+	 * @brief The declared frame's segments, in frame order: the plan's S1 (pre-depth: the EarlyPrepass clients), S2 (pre-main: the
+	 * depth copy at Main::RenderDepth's end, Terrain Blending, the shadow mask, light culling and the Prepass clients) and S3
+	 * (deferred: the deferred passes and the composite). The others are added by later stages.
 	 */
 	enum class SegmentId : std::uint8_t
 	{
 		PreDepth,
+		PreMain,
+		Deferred,
 		Count
 	};
 	inline constexpr std::uint32_t kSegments = static_cast<std::uint32_t>(SegmentId::Count);
@@ -58,6 +61,11 @@ namespace RenderGraph::Frame
 		std::uint64_t versions = 0;
 		std::uint32_t clients = 0;    // the segment's clients in that graph
 		std::uint32_t clientsOn = 0;  // a bit per client, in the graph's client order: its passes do work this frame
+		// A bit per step of the segment that holds another module's epoch (light culling): its passes do work this frame.
+		std::uint32_t foreignOn = 0;
+		// A hash of the revisions of the segment's passes recorded ahead (RenderGraphPass::RevisionHash): a pass whose recording
+		// depends on something beyond its bindings and host data names it in its revision, and a kept recording binds it.
+		std::uint64_t passes = 0;
 
 		friend bool operator==(const SegmentFields&, const SegmentFields&) = default;
 	};

@@ -567,12 +567,14 @@ namespace FrameAnchors
 
 	/**
 	 * @brief Whether the declared frame's segments are on (docs/development/org-native-frame-graph.md, "The declared frame"): native
-	 * mode unless CS_ORG_SEGMENTS=0, with epochs, async epochs and replayable recordings, the phases off. CS_ORG_SEGMENTS=2 leaves the
-	 * segments' executions open instead of closed. Then the anchors a segment lists (stage 1: EarlyPrepass, the
-	 * pre-depth segment) have no epoch of their own. Their passes are in the segment's epoch, revision-driven and closed: one graph,
-	 * recorded on the host's thread for each description of the segment (RenderGraph::Frame::Description) and kept per frame slot.
-	 * The anchor's hook is the segment's tap: the clients' commits write this frame slot's latch regions and gates, and the segment's
-	 * recording for this frame's description is submitted there. Guest mode keeps the anchors' epochs. Any thread.
+	 * mode unless CS_ORG_SEGMENTS=0, with epochs, async epochs and replayable recordings, the phases off. The segments' executions are
+	 * open (CS_ORG_SEGMENTS=3 closes them). Each segment is one graph, revision-driven, recorded on the host's
+	 * thread for each description of the segment (RenderGraph::Frame::Description) and kept per frame slot. Its steps are hooks in
+	 * frame order: anchors it holds wholly (which then have no epoch of their own), named clients of shared anchors, and other
+	 * modules' epochs (SetForeignPasses). The frame's first tap of a segment takes its ticket; each tap's clients commit into its run
+	 * (this frame slot's latch regions and gates); the end tap submits it. Segments: pre-depth (EarlyPrepass), pre-main (RenderDepth's
+	 * depth copy to Prepass; CS_ORG_SEGMENT_PREMAIN=0 off) and deferred (DeferredPasses to PostComposite; CS_ORG_SEGMENT_DEFERRED=0
+	 * off). Guest mode keeps the anchors' epochs. Any thread.
 	 */
 	bool SegmentsOn();
 
@@ -594,6 +596,26 @@ namespace FrameAnchors
 
 	/** @brief Initialize: the declared segments' epochs, which the host makes revision-driven and closed. Empty with segments off. */
 	std::vector<std::uint32_t> SegmentEpochs();
+
+	/**
+	 * @brief Another module's epoch whose passes a declared segment holds (a_segment, a RenderGraphRuntime::Segment value: Light
+	 * Limit Fix's light culling, held by the pre-main segment). The module gives:
+	 * - a_gather: at each build of the segment's graph, appends its passes to a_passes, which is a
+	 *   `std::vector<org::RenderGraph::ExternalPassDesc>*` (this header stays free of ORG includes), each tagged with a_epoch.
+	 * - a_declared: at the frame's start, whether its passes do work this frame (from the state the module holds).
+	 * The segment's graph is built again with them. Render thread. Nothing when no segment holds a_segment (HoldsForeign).
+	 */
+	void SetForeignPasses(std::uint32_t a_segment, std::function<void(std::uint32_t a_epoch, void* a_passes)> a_gather, std::function<bool()> a_declared);
+
+	/** @brief Whether a declared segment holds the module epoch a_segment's passes: the module then gathers none itself. Any thread, after Initialize. */
+	bool HoldsForeign(std::uint32_t a_segment);
+
+	/**
+	 * @brief The module epoch a_segment's hook, when a declared segment holds it (HoldsForeign): a_commit writes its run's values
+	 * (GraphHost::CurrentRun is the segment's run), and the segment submits them at its end tap. A hook outside a frame whose
+	 * description holds the segment is a tap error and draws nothing. Render owner.
+	 */
+	RunResult TapForeign(std::uint32_t a_segment, const std::function<void()>& a_commit);
 
 	/**
 	 * @brief Phases: the phase execution held now (if any) is submitted, because GPU work that must follow it is about to be
