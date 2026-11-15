@@ -1915,3 +1915,182 @@ by 0.1 ms between the runs with nothing hosted that records there). The ticket a
 - **Private pools** cost 1.33 MB for S1; the sum across segments would be about 12.6 MB over the shared arena at 1080p output. The
   proposal above (one frame-wide placement, activations in the predicted plan) is the alternative to weigh before every segment
   gets pools.
+
+## The declared frame, stage 3: the pre-main and deferred segments (2026-11-15, `org-native/phases`)
+
+Stage 3 of the declared-frame plan: two more segments with several taps each, and the ORG fixes that keep a segment's ticket as cheap
+as the tickets it replaces. Native mode with segments on. Switches: `CS_ORG_SEGMENT_PREMAIN` and `CS_ORG_SEGMENT_DEFERRED` (default
+on; `=0` gives the anchors back their own epochs), `CS_ORG_SEGMENT_POOLS` (default on: segments' transients in pools of their own;
+`=0` leaves them in the shared arena), `CS_ORG_SEGMENTS=3` (segments closed; the default is now open, below). Guest mode is unchanged.
+The frame-start segment (S0) and the latched instances for live passes were not built (below).
+
+**Outcome.** perf-taa: 38.7 to 33.9 tickets and 37.6 to 34.3 queue submissions a frame against the same build with the two segments
+off. The two segments cost the submission thread 195 us a frame against 362 us for the tickets they replace, render-thread time 21
+against 75 us, and admission 16 against 34 us (measured, one sample each). Cost stayed flat as the segments grew once two ORG causes
+were fixed: alias activations planned against the ledger at every execution, and per-cell state commits.
+
+**Two checks first.**
+- *The upscaler stopped registering before the shot.* Not a regression. Upscaling stops while another process has the foreground
+  (`Upscaling::IsWindowUnusable`; `CS_UPSCALE_UNFOCUSED=1` lifts it). Stage 2's last runs were the first ones with
+  `CS_TEST_BACKGROUND=1`, which never focuses the game, so DLSS never ran and the Upscale client never registered (c2q1, the last run
+  without it, registered; every run after it did not, with the same build and config). cs-test now sets `CS_UPSCALE_UNFOCUSED=1` for
+  background runs unless the config sets it (commit `fix(cs-test): upscale in background runs`). Three native-quick runs of stage 2's
+  final build then registered DLSS before the shot and were clean by eye (k1q1-3).
+- *Submission-thread time.* Re-measured on stage 2's build, `CS_ORG_SEGMENT_CLEARS=0` against on: busy 3.72 against 3.49 ms a frame
+  (on cheaper by 0.23 ms; `FinishTicket` 3.47 against 3.20 ms, 51.9 against 38.8 tickets). The extra 0.66 ms of stage 2's single
+  sample was outside the tickets: the present closure (`ORG.Host.SubmitThread.Closure`, `CS.Native.QueuedPresent`'s own time) was
+  0.83 ms a frame in that run against 0.18 in its pair. That is the submission thread blocking in the present, and it moves from run to
+  run (0.25, 0.37, 0.61 ms in this stage's samples), so frame-level submission-thread totals are compared with it taken out.
+
+**Multi-tap segments** (`FrameAnchors.cpp`: `kDeclaredInfo`, `TapDeclared`, `OpenSegment`, `SubmitSegment`).
+- A segment is a list of steps in frame order. A step is one hook: an anchor the segment holds wholly (it then has no epoch of its
+  own), one or two named clients of an anchor that keeps its epoch for its other clients (a shared anchor), or another module's epoch
+  (`SetForeignPasses`, `TapForeign`). The last step is the end tap.
+- The segments are open: each submission records its entry barriers from the ledgers. Closed (stage 1's default), the validation
+  layer reported layout mismatches for the normals targets (S2's hosted clear) and the shadow mask from the first frame DCLF drew:
+  a closed execution's recording holds its entry barriers, made from the ledgers when it was recorded, and a neighbour that is
+  open (DCLF's epochs, the anchors) left the resource in another state than when the kept recording was made. Closing to home
+  (`CS_ORG_SEGMENT_REST=0`) showed it too; open showed none. Stage 1 and 2's pre-depth segment had the same exposure without a
+  neighbour that changed. Closed segments make sense only once every neighbour is closed (`CS_ORG_SEGMENTS=3` keeps them for that).
+- The frame's first tap takes the segment's ticket for the frame slot's copy (`SetEpochCopy`, then ORG's `HoldEpochTicket`, which now
+  works for a pinned revision-driven epoch). It zeroes the copy's latch regions and closes the gates of every client of the segment.
+  Every tap then commits its clients into that run inside `UseHeldRun`, and the end tap submits the ticket with the recording of the
+  frame's description. A shared anchor's other active clients still run its own epoch.
+- A shared anchor's named clients go to the segment only while its window is open: the frame declares it, its end tap has not
+  fired, and every segment before it that the frame declares has ended. Outside the window (a menu's 3D scene drawing shadow masks,
+  for example) they run in their anchor's epoch as before.
+- The fields the taps use are read against the build the ticket was taken from: a build that attached between `Renderer::Begin`
+  and the first tap renumbers the clients, so the first tap reads the fields again. A build that attaches between two taps gives the
+  held ticket back (tap error `lost to a build`; none seen).
+- Passes marked `atExecution` are the segment's late batch, recorded inline at its submission, unless they are GPU-gated (then
+  ahead). Stage 1 recorded gated `atExecution` passes ahead; that is wrong for a pass that reads its run's slots when it records
+  (the composite), so they are recorded at execution as on an anchor. A late batch of gated copies and clears alone keeps its list.
+- The description gains `foreignOn` (a module epoch's passes on this frame) and `passes`: a hash of the revisions of the passes
+  recorded ahead. A revision-driven recording is never checked against its passes' revisions at submission, so a pass whose recording
+  depends on something beyond its bindings (light culling's light copy size) would otherwise be kept stale. It is read at Begin and
+  again at the end tap.
+- GPU work submitted while a segment holds its ticket runs ahead of the segment's work. The census counts it by why
+  (`[ORG] frame segments: GPU work submitted while a segment held its ticket`): none in the steady scenes, and one native-context
+  operation and one external-work submission in the first world frame of a load.
+
+**The segments.**
+
+| Segment | Steps (taps, in order) | End tap | Why nothing that must follow its work comes before the end |
+|---|---|---|---|
+| S1 pre-depth | EarlyPrepass | EarlyPrepass | one tap (stage 1) |
+| S2 pre-main | the depth copy at Main::RenderDepth's end (`cs.engine.skeleton.depth-copy` at EngineDepthCopy), DepthDone, the shadow mask and its clear (`cs.shadow-mask.world`, `cs.engine.skeleton.frame@engine-draws` at EngineDraws), light culling (Light Limit Fix's epoch, held as a foreign step), Prepass (with its hosted normals and kMAIN clears) | Prepass | DCLF's Z-prepass epoch, which holds first person's depth too, is submitted before RenderDepth's copy; DCLF's main opaque epoch, the next GPU work that reads S2's results, is submitted after the Prepass hook. Between them no other epoch, external work or engine D3D11 draw is submitted (census) |
+| S3 deferred | DeferredPasses (with CS's depth copy it hosts), DeferredComposite, PostComposite | PostComposite (reserved for the segment, so its hook always runs) | Deferred::StartDeferred runs the three hooks back to back after DCLF's main opaque epoch. The water stencil clear and water mask come after PostComposite |
+
+The RenderDepth copy needs no first-person field: DCLF's first-person depth is a hosted part of the Z-prepass epoch now, so the copy
+always follows both views' depth. The copy runs on every S2 submission whose description has it on (a copy has no indirect form).
+
+What stayed outside:
+- **Sky** (the main pass's sky batch, live draws). Its batch does not run in every world frame (interiors), so it cannot end S2,
+  and after the end it keeps its ticket.
+- **The water mask and stencil clear, the ImageSpace scopes (SSR, SSAO, snow), the kMAIN copy and the water surface.** They follow
+  PostComposite, but the ImageSpace runs (stage 4) come between the water mask and the kMAIN copy. A segment ending at the water mask
+  has no fixed end tap (the mask is not drawn without water in view), so S3 ends at PostComposite.
+- **S0 (frame start).** Its reflection-sky anchor runs once per face, with live sky draws per face: each run's commit writes the
+  run's latch regions and gates. In one segment run the second face's commit would overwrite the first's. S0 needs per-instance passes
+  (face k's passes reading face k's region), a change to the anchor API and to the sky and cloud-shadow clients. Not built.
+- **Fixed-set live passes as latched instances.** Not built. The shadow-mask draws are GPU-gated already and are recorded ahead in S2.
+  The deferred composite and the IBL SH dispatch stay live, in the late batches of S3 and S2 (about 40 us of inline recording each
+  a frame).
+
+**Constants.** `SharedConstants` has eight upload points, each with a latch block of its own (a region is allocated only for runs
+that use it). A segment puts an upload before each step whose clients read the shared buffers, numbered by the step, and the step's
+tap writes that point's region with the values D3D11 would read at that hook. The graph orders each upload after the reads of the
+one before it, so each member reads what its hook saw, as it did on its own anchor. The permutation block is the same: each step's
+upload carries the permutation data as of its tap, which is what the anchor's commit captured before. No member reads per-draw
+permutation data (they are compute passes and gated clears; the engine draws that need it are DCLF's).
+
+**Light culling** (`ORGLightCulling.cpp`). With S2 on, its extension gathers no passes; S2 gathers them at their step
+(`SetForeignPasses`), and `Execute` commits its latch through `TapForeign`. Its passes are off in a description whose light culling
+is not active.
+
+**ORG** (persistent-epochs.md, "Segments"):
+- `HoldEpochTicket` for a revision-driven epoch with a pinned copy.
+- Repeated alias activations are part of a predicted plan (`StatePrediction::activations`). A graph whose transients share memory
+  activates the same backings at each execution, and was planned against the ledger every time: the deferred segment's admission was
+  103 us a run (closed, in its first form), 8 us after (closed and open alike).
+- A closed execution's exit commits are merged over mip runs, and seeds no longer push a batch onto the keyed commit path: the
+  closed deferred segment's `CommitStates` went from 71 to 15 us a run.
+- docs: a closed epoch's kept recording holds the entry barriers of its recording time.
+
+**Alias pools.** The segments keep pools of their own. S2 has no transients. S3's pool is the deferred passes' 53.57 MB (67.92
+independent). In the shared arena the deferred passes' memory also held Volumetric Lighting's 11.25 MB; with S3 in its own pool the
+arena holds Volumetric Lighting alone. So the frame holds 53.57 + 11.25 + 1.33 = 66.15 MB of transients against 54.90 with segments
+off: +11.25 MB at 1920x1080 output and 1280x720 render (measured from the alias plans), about +45 MB at 4K (estimated by area).
+With `CS_ORG_SEGMENT_POOLS=0` (shared arena, measured) the deferred segment's admission is 29.9 us a run against 8.0 with its own
+pool: its activations there are not the same every frame. The pools stay private: +11.25 MB for constant admission. The alternative
+proposed in stage 2 (one placement for the whole frame's segments in their fixed order) was not built.
+
+**Measurements** (perf-taa, native Vulkan, Perf-Fast, Tracy, one run each; measured unless marked).
+
+| perf-taa (measured) | Stage 2 final (old ORG) | This build, S2 and S3 off | This build, on |
+|---|---|---|---|
+| fps between the marks | 125.5 | 123.3 | 125.2 |
+| Tickets a frame | 38.86 | 38.67 | 33.92 |
+| `vkQueueSubmit` calls a frame (all threads) | 37.7 | 37.6 | 34.3 |
+| Batch lists a frame (census) | 44.9 | 45.7 | 40.9 |
+| Inline lists recorded a frame (census) | 13.9 | 13.7 | 12.9 |
+| Inline batches recorded a frame (`RecordInline`) | 21.8 | 23.7 | 22.9 |
+| Render thread `SubmitEpoch`, ms a frame | 0.882 | 0.904 | 0.812 |
+| Render thread busy, ms a frame | 3.22 | 3.32 | 3.19 |
+| Submission thread busy, ms a frame | 3.49 | 3.54 | 2.94 |
+| of it `FinishTicket` | 3.20 | 3.00 | 2.66 |
+| Host thread busy, ms a frame | 2.77 | 2.67 | 2.09 |
+| Barriers a frame, entry / body | 1229 / 1733 | 1197 / 1679 | 1202 / 1748 |
+| Tap errors | 0 | 0 | 0 |
+| Segment recordings in the steady window | 0 | 0 | 0 |
+| Transient memory (alias plans) | 54.9 MB | 54.9 MB | 66.2 MB |
+
+The frame rates are inside one sample's noise (121.8 to 125.7 fps across this stage's on samples). Per-epoch submission-thread
+time moves by up to 100 us between runs for epochs this stage did not touch (DCLF's forward epoch, the reflection sky), so the
+thread totals carry that noise; the per-segment table compares the same epochs' tickets.
+
+| Per frame (measured; same build) | Pre-main segment | Its replaced tickets | Deferred segment | Its replaced tickets |
+|---|---|---|---|---|
+| Tickets | 1 | 5 (depth copy, DepthDone, one EngineDraws run, light culling, Prepass) | 1 | 2 (DeferredPasses, DeferredComposite) |
+| Submission thread (`FinishTicket`), us | 87.5 | 222.3 (11.3 + 8.5 + 93.7 + 18.7 + 90.1) | 107.2 | 139.9 (66.0 + 73.9) |
+| of it admission, us | 8.1 | 22.5 (3.1 + 2.6 + 6.4 + 2.3 + 8.1) | 8.0 | 11.6 |
+| of it inline recording, us | 32.6 | 86.8 (1.4 + 46.9 + 38.5) | 28.9 | 30.6 |
+| Render thread (`ExecuteEpoch`), us | 14.9 | 54.0 (5.6 + 3.8 + 17.9 + 8.3 + 18.4) | 5.7 | 20.9 |
+| Barriers, entry / body | 35 / 23 | 51 / 16 (with one third of EngineDraws') | 53 / 84 | 60 / 69 |
+
+The EngineDraws share is the difference between its three runs with the segments off and its two with them on (346.2 against
+252.5 us; 72.1 against 54.2 us on the render thread). The deferred segment's first form (closed, before the ORG fixes) cost 265 us
+a run: 103 us admission (alias activations planned every time) and 71 us of state commits.
+
+**Checks** (the final build: segments open, private pools; `CS_TEST_BACKGROUND=1`):
+- native-quick, Vulkan: 3 runs with DLSS registered before the shot (h3q1-3), clean by eye against stage 2's k1q3; 0 tap errors.
+- native-d3d12-quick, the loading-thread run (`CS_ORG_LOADING_THREAD=1`), native-upscalers (DLSS, FSR, TAA, XeSS), first and third
+  person (`pov first` and `pov third` shots), guest-quick (segments stay off in guest): passed, 0 tap errors, shots as before by eye.
+- native-validation: the known messages only (the `SV_Target2` indirect-draw warning and the BackBuffer layout warning, each to the
+  layer's limit of ten), 0 tap errors, no `lost to a build`. Dragonsreach's composite and shadow-mask variants by eye: as before.
+  Recordings over the tour come from graph builds at the loads and one description change entering Dragonsreach: pre-main 44 copies
+  (10 tap waits, 148 ms in all), deferred 52 (12 waits, 174 ms), with the validation layer on; none in a steady stretch.
+- GPU work inside a held segment: one native-context operation and one external-work submission in the first world frame of a
+  load, and the precipitation occlusion map's own clear once at a load. None in the steady perf window.
+- native-river: shots match by eye (water, reflections). Open issue: both runs with the segments on logged host-skipped tap errors
+  (51 and 56) for the water targets' clears during the frames of the `coc Riverwood` load: the clear waits for its ImageSpace host,
+  and the engine-frame-clear epoch (the TAA mask's own ticket) is submitted first. The run with the two segments off had none; stage
+  2's builds had 33 in one of their two river runs and 0 in the other. Not resolved; the steady river frames have none.
+- The closed form of the segments (stage 1's default) failed validation: see "Multi-tap segments" above.
+- ORG: the suite passes but the three known lease hangs and `HeadlessBenchmark`'s Debug timeout; the segment case covers held
+  pinned tickets.
+
+Not run: the RX 6600, a frozen-world capture frame (no tour reached one), a Bink start.
+
+**What stage 4 should know.**
+- The post chain cannot reach back into S3: the water mask, the ImageSpace scopes before the water surface (SSR, SSAO, snow), the
+  kMAIN copy and the water surface sit between S3's end and DCLF's forward epoch. A declared post chain should take them as its first
+  instances, with the water mask's presence as a description field (water in view), or the mask as a GPU-gated instance.
+- Repeated hooks need instances. S0's reflection faces and ImageSpace's per-effect calls are both "the same anchor several times a
+  frame". The segment model commits each tap into one run, so a client that runs twice in a segment needs per-instance latch regions
+  and gate entries (an instance index in its commit, its passes made per instance).
+- The present closure's time on the submission thread moves by up to 0.4 ms between runs: compare the tickets' time, not the thread
+  total.
+- A segment's late batch is recorded inline at every submission. The composite and IBL SH are the candidates for latched instances
+  recorded ahead (2x2 composite variants by interior and normals parity); the normals parity must then be checked against the engine's
+  choice at the tap.
