@@ -438,7 +438,8 @@ namespace FrameAnchors
 			RenderGraph::Frame::SegmentFields fields;
 			std::shared_ptr<const org::GraphHost::EpochRecording> recording;  // set once the host's thread recorded every copy
 			bool done = false;                                               // the request completed (recorded, failed or dropped)
-			std::string error;                                               // why it failed or was dropped
+			bool dropped = false;  // a graph build dropped the request before it was recorded: no failure, it is asked for again
+			std::string error;     // why it failed or was dropped
 			std::uint64_t lastFrame = 0;                                     // the last frame that asked for it
 		};
 
@@ -663,6 +664,9 @@ namespace FrameAnchors
 			// segment's work on the GPU.
 			std::vector<std::pair<const char*, std::uint64_t>> insideHeld;
 			std::uint64_t insideHeldLines = 0;
+			// The epoch an anchor's run counted there already (Run, with the anchor's name). Its submission calls FlushRegions again
+			// for the same epoch, which then counts nothing. UINT32_MAX: none.
+			std::uint32_t insideHeldCounted = UINT32_MAX;
 			// Each phase's members, a bit per anchor: kPhaseOrder's at first, and every gated anchor seen running in it since (Run). Only
 			// ever added to. Publish copies them into the snapshot.
 			std::array<std::uint32_t, kPhases> learned{};
@@ -2547,7 +2551,11 @@ namespace FrameAnchors
 			bool own = false;
 			for (std::uint32_t d = 0; d < kDeclared; ++d)
 				own = own || (state.heldFrame[d] && a_segment == static_cast<std::uint32_t>(kDeclaredInfo[d].segment));
-			if (!own) {
+			// An anchor's run counted its epoch already (Run): its submission is the same GPU work.
+			const bool counted = a_segment != UINT32_MAX && state.insideHeldCounted == a_segment;
+			if (counted)
+				state.insideHeldCounted = UINT32_MAX;
+			if (!own && !counted) {
 				const char* why = a_segment != UINT32_MAX ? Interned(fmt::format("{} (epoch {})", a_why, a_segment)) : a_why;
 				auto found = std::ranges::find_if(state.insideHeld, [&](const auto& a_entry) { return std::string_view(a_entry.first) == why; });
 				if (found == state.insideHeld.end())
@@ -2659,8 +2667,24 @@ namespace FrameAnchors
 		}
 
 		/**
+		 * @brief Stops the game: a declared segment's recording failed. The frame cannot be drawn without it, and drawing it another way
+		 * would hide the defect. In every build.
+		 */
+		[[noreturn]] void FailRecording(std::uint32_t a_declared, const SegmentFields& a_fields, std::uint32_t a_slot, std::string_view a_cause)
+		{
+			const auto message = fmt::format(
+				"Community Shaders native mode: the {} could not be recorded, so the frame cannot be drawn. Description: graph build {}, "
+				"version generation {}, clients on {:#x} of {}, module steps on {:#x}, pass revisions {:#x}, frame slot {}. Cause: {}",
+				kDeclaredInfo[a_declared].names.label, a_fields.graph, a_fields.versions, a_fields.clientsOn, a_fields.clients, a_fields.foreignOn,
+				a_fields.passes, a_slot, a_cause);
+			logger::critical("[ORG] frame segments: {}", message);
+			stl::report_and_fail(message);
+		}
+
+		/**
 		 * @brief The recording of a declared segment for a_fields: the one kept for them, or a new request to the host's thread (logged
-		 * with the fields that changed since the last request). A failed or dropped one is asked for again. Render owner.
+		 * with the fields that changed since the last request). A kept one that a build dropped is asked for again. A kept one that
+		 * failed stops the game (FailRecording). Render owner.
 		 */
 		std::shared_ptr<SegmentRecording> RequestDeclared(State& a_state, std::uint32_t a_declared, const SegmentFields& a_fields, std::uint32_t a_slot,
 			std::uint64_t a_frame, std::string_view a_why)
@@ -2676,6 +2700,8 @@ namespace FrameAnchors
 					if (kept.hash != hash || kept.slot != a_slot || !(kept.fields == a_fields))
 						continue;
 					if (kept.done && !kept.recording) {
+						if (!kept.dropped)
+							FailRecording(a_declared, kept.fields, kept.slot, kept.error.empty() ? std::string("no recording") : kept.error);
 						recordings.entries.erase(it);
 						break;
 					}
@@ -2684,9 +2710,9 @@ namespace FrameAnchors
 				}
 				reason = recordings.any ? RenderGraph::Frame::DiffFields(recordings.last, a_fields) : std::string("the first description");
 				if (reason.empty()) {
-					// The description recorded for another slot already, or a recording of it that failed.
+					// The description recorded for another slot already, or a recording of it that a build dropped.
 					const bool other = std::ranges::any_of(recordings.entries, [&](const auto& a_entry) { return a_entry->hash == hash && a_entry->slot != a_slot; });
-					reason = other ? fmt::format("the same description, for slot {}", a_slot) : std::string("the same description, its last recording failed or was dropped");
+					reason = other ? fmt::format("the same description, for slot {}", a_slot) : std::string("the same description, a build dropped its last recording");
 				}
 				recordings.last = a_fields;
 				recordings.any = true;
@@ -2713,19 +2739,26 @@ namespace FrameAnchors
 			const bool posted = a_state.host->RequestEpochRecording(EpochOfDeclared(a_declared), std::move(data),
 				[&recordings, entry](std::shared_ptr<const org::GraphHost::EpochRecording> a_recording, std::exception_ptr a_error) {
 					std::string error;
+					bool dropped = false;
 					if (a_error) {
 						try {
 							std::rethrow_exception(a_error);
+						} catch (const org::GraphHost::EpochRecordingDropped& e) {
+							error = e.what();
+							dropped = true;
 						} catch (const std::exception& e) {
 							error = e.what();
 						} catch (...) {
 							error = "unknown error";
 						}
 					}
+					if (!a_recording && !a_error)
+						error = "the host's thread completed the request with neither a recording nor an error";
 					{
 						const std::lock_guard lock(recordings.mutex);
 						entry->recording = std::move(a_recording);
 						entry->error = std::move(error);
+						entry->dropped = dropped;
 						entry->done = true;
 					}
 					recordings.ready.notify_all();
@@ -2764,8 +2797,9 @@ namespace FrameAnchors
 		}
 
 		/**
-		 * @brief Waits for a requested recording on the render owner, at most two seconds. A description asked for at the frame's start
-		 * is normally recorded by the tap; a wait is counted. Null when it failed, was dropped or did not finish.
+		 * @brief Waits once for a requested recording on the render owner, at most two seconds. A description asked for at the frame's
+		 * start is normally recorded by the tap; a wait is counted. Null when it failed, was dropped or did not finish (the entry's error
+		 * says which).
 		 */
 		std::shared_ptr<const org::GraphHost::EpochRecording> AwaitDeclared(State& a_state, std::uint32_t a_declared, const std::shared_ptr<SegmentRecording>& a_entry)
 		{
@@ -2896,37 +2930,40 @@ namespace FrameAnchors
 				fields.passes = now.passes;
 				fields.rows = now.rows;
 			}
-			std::shared_ptr<const org::GraphHost::EpochRecording> recording;
-			std::string missing;
-			// A new version of a slot the graph binds, published since the frame began, makes another description: the fields are read
-			// again and recorded for, once. A build of the graph gives the held ticket back, so a new build never reaches here.
-			for (int attempt = 0; attempt < 2 && !recording; ++attempt) {
-				std::string why;
-				if (fields.graph != host.BuildGeneration(epoch)) {
-					fields = DescribeDeclared(a_state, a_declared, true);
-					why = " (the segment's graph was built again since the frame began)";
-				} else if (StaleVersions(a_state, a_declared, fields, frame.slot)) {
-					fields = DescribeDeclared(a_state, a_declared, true);
-					why = " (a slot of the segment's graph published a new version since the frame began)";
-				}
-				auto entry = RequestDeclared(a_state, a_declared, fields, frame.slot, frame.frame, why);
-				recording = AwaitDeclared(a_state, a_declared, entry);
-				if (recording && !host.EpochRecordingCurrent(*recording)) {
-					missing = "its recording is of an older build of the segment's graph";
-					recording.reset();
-					fields.graph = 0;
-				} else if (recording && !host.EpochRecordingVersionsCurrent(*recording, frame.slot)) {
-					missing = "a slot of the segment's graph published a new version while it was recorded";
-					++a_state.declaredRecordings[a_declared].versionGeneration;
-					recording.reset();
-					fields.graph = 0;
-				} else if (!recording) {
-					missing = entry->error.empty() ? std::string("no recording") : entry->error;
-				}
+			// Two changes since Begin are not failures: a build of the segment's graph attached (its fields are read again), or a slot
+			// of its graph published a new version. Each makes another description, asked for here once.
+			std::string why;
+			if (fields.graph != host.BuildGeneration(epoch)) {
+				fields = DescribeDeclared(a_state, a_declared, true);
+				why = " (the segment's graph was built again since the frame began)";
+			} else if (StaleVersions(a_state, a_declared, fields, frame.slot)) {
+				fields = DescribeDeclared(a_state, a_declared, true);
+				why = " (a slot of the segment's graph published a new version since the frame began)";
 			}
+			const auto entry = RequestDeclared(a_state, a_declared, fields, frame.slot, frame.frame, why);
+			// One wait, for a recording still being made. A request that comes back without a recording failed, and that stops the
+			// game. There is no second attempt.
+			const auto recording = AwaitDeclared(a_state, a_declared, entry);
 			const auto built = a_state.heldBuilt[a_declared];
 			if (!recording) {
-				Driver::NoteTapError(Driver::TapError::NoRecording, segment, missing);
+				if (entry->dropped) {
+					// A build stopped the host's thread before it recorded the request. The build gave the held ticket back too.
+					Driver::NoteTapError(Driver::TapError::LostToBuild, segment, fmt::format("a build dropped its recording: {}", entry->error));
+					ReleaseSegment(a_state, a_declared);
+					return { RunStatus::Idle };
+				}
+				FailRecording(a_declared, fields, frame.slot, entry->error.empty() ? std::string("no recording") : entry->error);
+			}
+			if (!host.EpochRecordingCurrent(*recording)) {
+				// A build attached while it was recorded. The build gave the held ticket back.
+				Driver::NoteTapError(Driver::TapError::LostToBuild, segment, "its recording is of an older build of the segment's graph");
+				ReleaseSegment(a_state, a_declared);
+				return { RunStatus::Idle };
+			}
+			if (!host.EpochRecordingVersionsCurrent(*recording, frame.slot)) {
+				// A slot published a new version while it was recorded. The next frame's description names the new version.
+				++a_state.declaredRecordings[a_declared].versionGeneration;
+				Driver::NoteTapError(Driver::TapError::StaleRecording, segment, "a slot of the segment's graph published a new version while it was recorded");
 				ReleaseSegment(a_state, a_declared);
 				return { RunStatus::Idle };
 			}
@@ -3322,7 +3359,7 @@ namespace FrameAnchors
 		static const bool on = [] {
 			if (!RenderGraph::Engine::Native::Requested())
 				return false;
-			// Native mode, default on (=0 off, =2 on with the segments' executions open).
+			// Native mode, default on. =0: off. =3: on, with the segments' executions closed. Any other value is the default (open).
 			if (Switches::Number("CS_ORG_SEGMENTS", 1) == 0) {
 				logger::info("[ORG] frame segments off (CS_ORG_SEGMENTS=0): every anchor keeps its own epoch");
 				return false;
@@ -3522,6 +3559,8 @@ namespace FrameAnchors
 		RenderGraphRuntime::EpochResult result = RenderGraphRuntime::EpochResult::Stopped;
 		// A region's held execution goes first: its runs came before this one (ExecuteEpoch would submit it too; here it is counted as this).
 		FlushRegions(Interned(fmt::format("an anchor with its own epoch ({})", kInfo[index].name)), static_cast<std::uint32_t>(segment));
+		// TryExecuteEpoch calls FlushRegions for the same submission: the census counts it once, here.
+		state.insideHeldCounted = static_cast<std::uint32_t>(segment);
 		NoteSequenceRun(a_point, false, clients);
 		{
 			RenderGraphRuntime::EpochBodyScope body(segment);
@@ -3546,6 +3585,7 @@ namespace FrameAnchors
 						client.desc->commit(a_point);
 			});
 		}
+		state.insideHeldCounted = UINT32_MAX;
 		if (result == RenderGraphRuntime::EpochResult::Skipped) {
 			// Only a revision-driven epoch is skipped (its published copies were all busy), never an anchor's live one: nothing ran,
 			// nothing is dropped.

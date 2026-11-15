@@ -8,6 +8,7 @@
 
 #include <array>
 #include <atomic>
+#include <chrono>
 #include <mutex>
 #include <vector>
 
@@ -55,6 +56,14 @@ namespace RenderGraph::Frame::Driver
 			std::atomic<std::uint64_t> errorsTotal{ 0 };
 			std::uint64_t kindChanges = 0;
 			std::uint32_t errorLines = 0;
+			// NoteRecording's log lines per segment in the current window: its start, the lines logged and those left out.
+			struct RecordingLog
+			{
+				std::chrono::steady_clock::time_point start{};
+				std::uint32_t lines = 0;
+				std::uint64_t dropped = 0;
+			};
+			std::array<RecordingLog, kSegments> recordingLog{};
 		};
 
 		State& Get()
@@ -227,8 +236,8 @@ namespace RenderGraph::Frame::Driver
 			return "missing";
 		case TapError::SlotMismatch:
 			return "slot mismatch";
-		case TapError::NoRecording:
-			return "no recording";
+		case TapError::StaleRecording:
+			return "stale recording";
 		case TapError::HostSkipped:
 			return "host skipped";
 		case TapError::HostMissing:
@@ -292,10 +301,23 @@ namespace RenderGraph::Frame::Driver
 		auto& counts = state.segments[static_cast<std::size_t>(a_segment)];
 		++counts.recordings;
 		// Every request names what changed. A steady scene asks for none, so this line is rare; a flapping field would show here.
-		static std::uint32_t lines = 0;
-		if (++lines <= 128 || lines % 1000 == 0)
+		// Each segment logs at most kLines requests in a window of kWindow, so startup cannot use up the lines for later: every
+		// re-record after it is logged. The requests over the limit are counted and logged once the window has passed.
+		constexpr std::uint32_t kLines = 16;
+		constexpr auto kWindow = std::chrono::seconds(5);
+		auto& log = state.recordingLog[static_cast<std::size_t>(a_segment)];
+		const auto now = std::chrono::steady_clock::now();
+		if (now - log.start >= kWindow) {
+			if (log.dropped)
+				logger::info("[ORG] declared frame: {} more recordings of the {} segment were not logged in the {} s before frame {}", log.dropped,
+					SegmentName(a_segment), std::chrono::duration_cast<std::chrono::seconds>(kWindow).count(), a_frame);
+			log = { now, 0, 0 };
+		}
+		if (++log.lines <= kLines)
 			logger::info("[ORG] declared frame: the {} segment is recorded for a new description (frame {}): {}", SegmentName(a_segment), a_frame,
 				a_reason);
+		else
+			++log.dropped;
 	}
 
 	void NoteRecordingWait(SegmentId a_segment, double a_waitUs)

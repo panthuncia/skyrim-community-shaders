@@ -65,7 +65,7 @@ namespace RenderGraph::Frame::Driver
 		NotInDescription,  // a client had work at the tap, but the description turned its passes off
 		Missing,           // the description declared a segment, and its tap did not fire by the next Begin
 		SlotMismatch,      // the segment's run was not the frame slot's published copy
-		NoRecording,       // the segment had no recording for its description at its tap
+		StaleRecording,    // the segment's recording bound a version that a slot replaced while it was made; its work that frame is dropped
 		HostSkipped,       // a clear or copy waiting for its host epoch saw another epoch submitted first
 		HostMissing,       // a clear or copy waiting for its host epoch was still waiting at the next Begin (dropped)
 		LostToBuild,       // a build of a segment's graph gave its held ticket back between two of its taps (what they wrote is dropped)
