@@ -76,7 +76,8 @@ namespace RenderGraph::Engine::ImageSpace
 		constexpr std::uint32_t kGateEntries = 256;
 		// Texture slots a shape names at most (t0..t15, the engine's PS slots): ISAlphaBlend reads all sixteen, ISLightingComposite eight.
 		constexpr std::uint32_t kMaxSlots = 16;
-		// The shape manifest: a shape not seen for this many sessions is dropped, and it is written at most this often.
+		// The shape manifest: a shape is dropped once its effect ran in this many sessions without it, and the file is written at
+		// most this often. Sessions in which the effect did not run do not count: a water shape is not dropped by sessions without water.
 		constexpr std::uint32_t kManifestSessions = 16;
 		constexpr std::uint32_t kManifestWriteFrames = 300;
 		// 2: the viewport as float bits with its depth range, the depth-stencil target and modes, and the scissor.
@@ -524,11 +525,15 @@ namespace RenderGraph::Engine::ImageSpace
 		 */
 		using ProgramKey = std::tuple<std::size_t, rhi::Format, rhi::Format, std::uint32_t, rhi::Format, std::uint32_t>;
 
-		/** @brief One shape of the manifest: where it is in the frame, and the last session that saw it. */
+		/**
+		 * @brief One shape of the manifest: where it is in the frame, the last session that saw it, and how many sessions its effect had
+		 * run in at that session (the effect's count in ImageSpaceState::effectSessions).
+		 */
 		struct ManifestEntry
 		{
 			std::uint32_t position = 0;  // scope << 16 | draw within the scope
 			std::uint32_t lastSession = 0;
+			std::uint32_t lastEffectSession = 0;
 		};
 
 		struct ImageSpaceState
@@ -576,6 +581,8 @@ namespace RenderGraph::Engine::ImageSpace
 			std::map<ShapeKey, ManifestEntry> manifest;
 			std::set<ShapeKey> seen;  // shapes drawn or refused this session
 			std::uint32_t session = 0;
+			// By effect: the sessions before this one in which the effect drew a shape. This session counts once it draws one.
+			std::map<std::size_t, std::uint32_t> effectSessions;
 			std::size_t seenAtWrite = 0;  // seen.size() when the manifest was last written
 			// Each effect's program defines as the session that saw it composed them: a pass whose engine effect object does not exist yet
 			// at the graph's build (the manager makes some late, ISCopySubRegionCS) builds its program from these.
@@ -2412,7 +2419,8 @@ namespace RenderGraph::Engine::ImageSpace
 				{ "scissored", a_key.scissored },
 				{ "scissor", a_key.scissor },
 				{ "position", a_entry.position },
-				{ "lastSession", a_entry.lastSession } };
+				{ "lastSession", a_entry.lastSession },
+				{ "lastEffectSession", a_entry.lastEffectSession } };
 		}
 
 		/** @brief A manifest shape, or nothing for an entry this build does not know (another version's effect, a malformed line). */
@@ -2449,7 +2457,10 @@ namespace RenderGraph::Engine::ImageSpace
 				if (key.compute != kEffects[key.effect].compute || key.depthMode >= kDepthModes || key.stencilMode >= kStencilModes ||
 					key.depth >= static_cast<std::int32_t>(RE::RENDER_TARGETS_DEPTHSTENCIL::kTOTAL))
 					return std::nullopt;
-				ManifestEntry entry{ .position = a_item.at("position").get<std::uint32_t>(), .lastSession = a_item.at("lastSession").get<std::uint32_t>() };
+				// lastEffectSession is UINT32_MAX in a manifest written before it existed: ReadManifest takes the effect's count then.
+				ManifestEntry entry{ .position = a_item.at("position").get<std::uint32_t>(),
+					.lastSession = a_item.at("lastSession").get<std::uint32_t>(),
+					.lastEffectSession = a_item.value("lastEffectSession", UINT32_MAX) };
 				return std::make_pair(key, entry);
 			} catch (const std::exception&) {
 				return std::nullopt;
@@ -2477,12 +2488,23 @@ namespace RenderGraph::Engine::ImageSpace
 					return;
 				}
 				state.session = root.value("session", 0u) + 1;
+				for (const auto& [name, count] : root.value("effectSessions", json::object()).items()) {
+					const auto effect = EffectNamed(name);
+					if (effect >= 0 && count.is_number_unsigned())
+						state.effectSessions[static_cast<std::size_t>(effect)] = count.get<std::uint32_t>();
+				}
 				std::uint32_t dropped = 0;
 				for (const auto& item : root.value("shapes", json::array())) {
 					auto shape = FromJson(item);
 					if (!shape)
 						continue;
-					if (state.session - shape->second.lastSession > kManifestSessions) {
+					// A shape ages only in sessions in which its effect ran. Counting every session dropped the river's water shapes
+					// after sixteen sessions elsewhere; the next river session then drew them on first sight (docs, "The declared
+					// frame, stage 4").
+					const auto effectCount = state.effectSessions[shape->first.effect];
+					if (shape->second.lastEffectSession == UINT32_MAX || shape->second.lastEffectSession > effectCount)
+						shape->second.lastEffectSession = effectCount;
+					if (effectCount - shape->second.lastEffectSession > kManifestSessions) {
 						++dropped;
 						continue;
 					}
@@ -2509,8 +2531,8 @@ namespace RenderGraph::Engine::ImageSpace
 					if (effect >= 0 && defines.is_array())
 						state.savedDefines[static_cast<std::size_t>(effect)] = defines.get<std::vector<std::pair<std::string, std::string>>>();
 				}
-				logger::info("[ORG] ImageSpace: the shape manifest holds {} shapes (session {}; {} not seen for {} sessions dropped)", state.manifest.size(),
-					state.session, dropped, kManifestSessions);
+				logger::info("[ORG] ImageSpace: the shape manifest holds {} shapes (session {}; {} dropped, their effect ran in {} sessions without them)",
+					state.manifest.size(), state.session, dropped, kManifestSessions);
 			} catch (const std::exception& e) {
 				state.manifest.clear();
 				state.session = 1;
@@ -2520,15 +2542,29 @@ namespace RenderGraph::Engine::ImageSpace
 
 		/**
 		 * @brief The manifest written: every shape with the last session that saw it, the shapes seen this session marked with this one.
-		 * At most kGateEntries shapes, the most recently seen first. Render thread; a small file.
+		 * At most kGateEntries shapes, those whose effect last ran with them first. Render thread; a small file.
 		 */
 		void WriteManifest()
 		{
 			auto& state = IS();
+			// The effects this session drew count this session once (the counts read at Setup plus one).
+			std::set<std::size_t> effectsSeen;
 			for (const auto& key : state.seen)
-				state.manifest[key].lastSession = state.session;
+				effectsSeen.insert(key.effect);
+			const auto effectCount = [&](std::size_t a_effect) {
+				const auto found = state.effectSessions.find(a_effect);
+				return (found != state.effectSessions.end() ? found->second : 0u) + (effectsSeen.contains(a_effect) ? 1u : 0u);
+			};
+			for (const auto& key : state.seen) {
+				auto& entry = state.manifest[key];
+				entry.lastSession = state.session;
+				entry.lastEffectSession = effectCount(key.effect);
+			}
 			std::vector<std::pair<ShapeKey, ManifestEntry>> shapes(state.manifest.begin(), state.manifest.end());
-			std::ranges::stable_sort(shapes, [](const auto& a_left, const auto& a_right) { return a_left.second.lastSession > a_right.second.lastSession; });
+			// Past the cap, the shapes whose effect ran most often without them go first.
+			std::ranges::stable_sort(shapes, [&](const auto& a_left, const auto& a_right) {
+				return effectCount(a_left.first.effect) - a_left.second.lastEffectSession < effectCount(a_right.first.effect) - a_right.second.lastEffectSession;
+			});
 			if (shapes.size() > kGateEntries)
 				shapes.resize(kGateEntries);
 			json items = json::array();
@@ -2553,7 +2589,12 @@ namespace RenderGraph::Engine::ImageSpace
 				if (const auto kept = state.depthDescs.find(index); key.depth >= 0 && kept != state.depthDescs.end())
 					depthStencils[std::to_string(index)] = DepthToJson(kept->second);
 			}
-			const json root{ { "version", kManifestVersion }, { "session", state.session }, { "shapes", std::move(items) }, { "defines", std::move(defines) },
+			json effectSessions = json::object();
+			for (std::size_t effect = 0; effect < kEffects.size(); ++effect)
+				if (const auto count = effectCount(effect))
+					effectSessions[std::string(kEffects[effect].effectName)] = count;
+			const json root{ { "version", kManifestVersion }, { "session", state.session }, { "effectSessions", std::move(effectSessions) },
+				{ "shapes", std::move(items) }, { "defines", std::move(defines) },
 				{ "blends", std::move(blends) }, { "depthStencils", std::move(depthStencils) } };
 			std::error_code error;
 			const auto path = ManifestPath();
@@ -2597,7 +2638,8 @@ namespace RenderGraph::Engine::ImageSpace
 				return;
 			if (state.manifest.contains(a_key))
 				return;
-			state.manifest.emplace(a_key, ManifestEntry{ .position = state.scope << 16 | std::min(state.drawIndex, 0xFFFFu), .lastSession = state.session });
+			state.manifest.emplace(a_key, ManifestEntry{ .position = state.scope << 16 | std::min(state.drawIndex, 0xFFFFu), .lastSession = state.session,
+											  .lastEffectSession = state.effectSessions[a_key.effect] + 1 });
 			if (state.logShapes) {
 				const auto viewport = ViewportOf(a_key);
 				logger::info("[ORG] ImageSpace: new shape {} into {}{}{} from {} {} {}, viewport {}x{} at ({}, {}){}{}", kEffects[a_key.effect].effectName,
