@@ -941,17 +941,37 @@ namespace DCLF::Direct::detail
 		return host && host->InlineAtExecution();
 	}
 
-	bool RecordExecutingSite(Site a_site, rhi::CommandList& a_list)
+	namespace
+	{
+		/** @brief The run AdoptSiteRun kept for a_run, taken. found: whether the commit of a_run kept an entry at all (null or not). */
+		SiteRun* TakeSiteRun(const org::RunRef& a_run, bool& a_found)
+		{
+			auto& s = S();
+			std::scoped_lock lock(s.siteRunsLock);
+			a_found = a_run.lease < s.siteRuns.size() && s.siteRuns[a_run.lease].first == a_run;
+			if (!a_found)
+				return nullptr;
+			return std::exchange(s.siteRuns[a_run.lease].second, nullptr);
+		}
+	}
+
+	bool RecordExecutingSite(Site a_site, rhi::CommandList& a_list, const org::RunRef* a_run)
 	{
 		auto& s = S();
 		auto* run = executing;
-		// Not inside a site callback (the guest's CPU frames): a native CPU frame records the run its epoch's commit opened, inline during
-		// the epoch's submission on the render thread (Direct::ExecuteEpoch); a GPU-driven frame's run came through the hand-off
-		// (ForwardReached, FirstPersonColourReached).
+		// Not inside a site callback (the guest's CPU frames): a native frame records the run its epoch's commit opened or was handed
+		// (AdoptSiteRun), found by the epoch's run, on the thread that submits the epoch. Without an adopted entry: the run the commit
+		// opened (a native CPU frame, Direct::ExecuteEpoch), or the one handed off (ForwardReached, FirstPersonColourReached).
 		const bool callback = run != nullptr;
-		if (!callback && SitesInline() && s.pending && s.pending->site == a_site && s.pending->slot->ownsEpochs)
+		bool adopted = false;
+		if (!callback && a_run) {
+			run = TakeSiteRun(*a_run, adopted);
+			if (run && run->site != a_site)
+				run = nullptr;
+		}
+		if (!callback && !adopted && SitesInline() && s.pending && s.pending->site == a_site && s.pending->slot->ownsEpochs)
 			run = s.pending;
-		if (!run) {
+		if (!run && !adopted) {
 			run = s.handedOff.load(std::memory_order_acquire);
 			if (run && run->site == a_site)
 				s.handedOff.store(nullptr, std::memory_order_release);
@@ -1421,6 +1441,23 @@ namespace DCLF::Direct
 {
 	using namespace detail;
 
+	void AdoptSiteRun()
+	{
+		auto& s = S();
+		auto* host = RenderGraphRuntime::Get().Host();
+		if (!host || !SitesInline())
+			return;
+		// The run this commit opened, else the one handed to the epoch. A commit that has neither clears its lease's entry, so its late
+		// pass never finds an older run of the same lease index.
+		SiteRun* run = s.pending && s.pending->slot->ownsEpochs ? s.pending : s.handedOff.exchange(nullptr, std::memory_order_acq_rel);
+		const org::RunRef key = host->CurrentRun();
+		std::scoped_lock lock(s.siteRunsLock);
+		if (s.siteRuns.size() <= key.lease)
+			s.siteRuns.resize(static_cast<std::size_t>(key.lease) + 1);
+		s.siteRuns[key.lease] = { key, run };
+	}
+
+
 	bool CpuFrame()
 	{
 		return Draws::GraphBuiltForCpu();
@@ -1695,7 +1732,10 @@ namespace DCLF::Direct
 			bool executed = true;
 			if (Draws::CpuPipelineSegmentRecords(a_segment)) {
 				try {
-					executed = RenderGraphRuntime::Get().ExecuteEpoch(a_segment, [&](org::RenderGraph&) { a_body(); }, std::move(a_owner));
+					executed = RenderGraphRuntime::Get().ExecuteEpoch(a_segment, [&](org::RenderGraph&) {
+						a_body();
+						AdoptSiteRun();
+					}, std::move(a_owner));
 				} catch (const std::exception& e) {
 					executed = false;
 					if (!std::exchange(s.loggedExternal, true))
@@ -1711,10 +1751,15 @@ namespace DCLF::Direct
 			auto* run = std::exchange(s.pending, nullptr);
 			if (!run)
 				return executed;
-			if (executed && run->valid && !run->recordedDraws && !std::exchange(s.loggedNoLatePass, true))
+			// With a submission thread the late pass may not have recorded yet: only a synchronous submission can tell.
+			const auto* host = RenderGraphRuntime::Get().Host();
+			const bool recordedBySubmission = !host || !host->SubmissionThreadOn();
+			if (recordedBySubmission && executed && run->valid && !run->recordedDraws && !std::exchange(s.loggedNoLatePass, true))
 				logger::error("[DCLF] CPU pipeline: the {} site's epoch was submitted without recording its late pass (no draws pass in its graph): it draws nothing",
 					static_cast<std::uint32_t>(run->site));
-			run->valid = run->valid && executed;
+			// Written only when nothing was submitted: a submitted run's late pass may be reading it on the submission thread.
+			if (!executed)
+				run->valid = false;
 			return executed;
 		}
 	}
@@ -1723,7 +1768,10 @@ namespace DCLF::Direct
 	{
 		auto& s = S();
 		if (!CpuFrame() || !s.current || !s.current->ownsEpochs)
-			return RenderGraphRuntime::Get().ExecuteEpoch(a_segment, [&](org::RenderGraph&) { a_body(); }, std::move(a_owner));
+			return RenderGraphRuntime::Get().ExecuteEpoch(a_segment, [&](org::RenderGraph&) {
+				a_body();
+				AdoptSiteRun();
+			}, std::move(a_owner));
 		s.pending = nullptr;
 		auto* host = RenderGraphRuntime::Get().Host();
 		auto* graph = host ? host->Graph() : nullptr;

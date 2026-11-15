@@ -377,6 +377,8 @@ namespace DCLF
 				drawn = impl->CommitView(*shape, a_faces, a_listed.inputs, trees ? &rows : nullptr);
 			impl->SubmitRevisionRecording(epoch, *revision.recordings, 0);
 			owners.Seal(impl->scene.get());
+			// First person's handed-off run, kept for the epoch's late pass by this run.
+			Direct::AdoptSiteRun();
 		}, owners.Handle());
 		if (!ok && handedOff)
 			Direct::ForwardHandOffCancel();

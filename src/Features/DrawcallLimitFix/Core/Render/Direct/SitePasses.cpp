@@ -79,7 +79,9 @@ namespace DCLF::Direct
 
 			static void Record(const SiteBindings& a_bindings, org::PassRecordContext& a_recording)
 			{
-				(void)detail::RecordExecutingSite(a_bindings.site, a_recording.Commands());
+				// The run its own commit opened, found by the epoch's run: the render thread may have opened the next site by now.
+				const org::RunRef run = a_recording.Run();
+				(void)detail::RecordExecutingSite(a_bindings.site, a_recording.Commands(), &run);
 			}
 
 		private:

@@ -642,7 +642,8 @@ namespace RenderGraph::Engine::Native
 				::FrameAnchors::FlushRegions("native context");
 				// The epochs still on the submission thread go first too, before this context's lock (a pass recorded there may use the
 				// context). Only the render owner drains: another thread's operation has no order against the render thread's epochs.
-				RenderGraphRuntime::Get().DrainSubmissions("native context");
+				// The statistics name the drain by the operation.
+				RenderGraphRuntime::Get().DrainSubmissions(a_label.c_str());
 				std::lock_guard guard(lock);
 				const uint32_t index = AcquireSlotLocked();
 				auto& slot = slots[index];

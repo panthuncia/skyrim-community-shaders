@@ -96,6 +96,14 @@ namespace RenderGraph
 				entries.resize(static_cast<std::size_t>(a_run.lease) + 1);
 			entries[a_run.lease] = { a_run, std::move(a_value) };
 		}
+		/** @brief The run's value, left in place: for a pass that reads it more than once (SkipsAtExecution, then Record). */
+		std::shared_ptr<const T> Find(const org::RunRef& a_run) const
+		{
+			std::scoped_lock lock(mutex);
+			if (a_run.lease >= entries.size() || !(entries[a_run.lease].run == a_run))
+				return nullptr;
+			return entries[a_run.lease].value;
+		}
 		std::shared_ptr<const T> Take(const org::RunRef& a_run) const
 		{
 			std::scoped_lock lock(mutex);

@@ -27,7 +27,11 @@ namespace org
 #include <deque>
 #include <functional>
 #include <memory>
+#include <mutex>
+#include <utility>
 #include <vector>
+
+#include <Render/RunRef.h>
 
 namespace org
 {
@@ -230,6 +234,11 @@ namespace DCLF::Direct::detail
 		SiteRun* pending = nullptr;    // the site the epoch body being run opened (ExecuteEpoch)
 		// A GPU-driven frame's forward run, on its way to its epoch's late pass (ForwardReached, in DXVK's stream; RecordExecutingSite).
 		std::atomic<SiteRun*> handedOff{ nullptr };
+		// Native: the run each site epoch's commit opened or was handed, by the epoch's run (AdoptSiteRun), for its late pass. The late
+		// pass may record on the submission thread after the render thread opened the next site, so pending and handedOff may hold
+		// another run by then. By lease index; each commit replaces its lease's entry, and the late pass takes it.
+		std::mutex siteRunsLock;
+		std::vector<std::pair<org::RunRef, SiteRun*>> siteRuns;
 		// The per-snapshot views' recordings of the newest set (PrepareSnapshotView; a released one's pool goes to ResetLater).
 		std::vector<std::shared_ptr<SnapshotRecording>> snapshots;
 		bool wasCpu = false;
@@ -398,12 +407,13 @@ namespace DCLF::Direct::detail
 	 * does not track, by address), records a_site's run's draws into a_list:
 	 * - guest: on DXVK's CS thread, inside a site's execution (ExternalEpochExecution::Execute), the run being executed; a_list is
 	 *   DXVK's buffer;
-	 * - native: on the render thread, during the epoch's submission, the run its commit opened (ExecuteEpoch); a_list is the epoch's
-	 *   own primary list;
+	 * - native: on the thread that submits the epoch (the render thread, or the host's submission thread), the run its commit opened
+	 *   (ExecuteEpoch); a_list is the epoch's own primary list;
 	 * - a GPU-driven frame's forward family: the run handed off (HandOffRun).
+	 * a_run: the epoch's run, whose commit kept its site run (AdoptSiteRun). Without an entry for it, the run open now is taken.
 	 * False: no run of a_site, or its inputs are incomplete.
 	 */
-	bool RecordExecutingSite(Site a_site, rhi::CommandList& a_list);
+	bool RecordExecutingSite(Site a_site, rhi::CommandList& a_list, const org::RunRef* a_run = nullptr);
 
 	// ---- The site files' hooks ----
 

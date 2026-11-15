@@ -114,6 +114,12 @@ namespace DCLF::Direct
 	 * opened (DepthCommitted, ColourCommitted, ForwardReached) queues its callback after it, with the uploads the commits staged. False:
 	 * the epoch failed (GPU), or no callback could be queued (CPU; logged once).
 	 */
+	/**
+	 * @brief Render thread, at the end of a site epoch's commit (native): the run the commit opened (pending), or the one handed to the
+	 * epoch before it (a GPU-driven frame's forward or first-person run), kept for the epoch's late pass by the epoch's run
+	 * (RecordExecutingSite). Direct::ExecuteEpoch calls it; an epoch with a late pass submitted otherwise calls it in its commit.
+	 */
+	void AdoptSiteRun();
 	bool ExecuteEpoch(RenderGraphRuntime::Segment a_segment, const std::function<void()>& a_body, std::shared_ptr<const void> a_owner);
 
 	/** @brief A main commit's inputs to its site (Payload/Uploads.cpp's CommitMainPayload, where the GPU path submits its recording). */

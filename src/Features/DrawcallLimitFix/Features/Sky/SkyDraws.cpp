@@ -15,6 +15,7 @@
 #include "RenderGraph/Engine/Constants/EngineConstants.h"
 #include "RenderGraph/Engine/Queries/OcclusionQueries.h"
 #include "RenderGraph/FrameAnchors.h"
+#include "RenderGraph/FrameStaging.h"
 #include "RenderGraph/RasterProgram.h"
 #include "RenderGraph/RenderGraphRuntime.h"
 #include "RenderGraph/RunGate.h"
@@ -100,6 +101,9 @@ namespace DCLF::Features::Sky::SkyDraws
 			Family::PublishedInputs inputs;
 			// Render thread writes, the host's thread reads.
 			std::shared_ptr<const Run> run;
+			// The run each commit drew, by the epoch's run: what the passes recorded at execution read. They may record on the submission
+			// thread after the render thread published the next run.
+			::RenderGraph::RunSlots<Run> runs;
 			bool pending = false;
 			bool shapeLogged = false;
 			std::atomic<std::uint64_t> executed{ 0 };  // runs submitted with this client's passes (its executed callback)
@@ -211,7 +215,7 @@ namespace DCLF::Features::Sky::SkyDraws
 			{
 				if (!a_frame.client)
 					return true;
-				const auto run = a_frame.run ? a_frame.run : std::atomic_load(&a_frame.client->run);
+				const auto run = a_frame.run ? a_frame.run : a_frame.client->runs.Find(a_recording.Run());
 				if (!run)
 					return true;
 				for (std::uint32_t i = 0; i < run->draws.size(); ++i)
@@ -224,7 +228,7 @@ namespace DCLF::Features::Sky::SkyDraws
 			{
 				if (!a_frame.client)
 					return;
-				const auto runRef = a_frame.run ? a_frame.run : std::atomic_load(&a_frame.client->run);
+				const auto runRef = a_frame.run ? a_frame.run : a_frame.client->runs.Find(a_recording.Run());
 				if (!runRef)
 					return;
 				const auto& run = *runRef;
@@ -513,9 +517,13 @@ namespace DCLF::Features::Sky::SkyDraws
 			desc.commit = [client](const FrameAnchors::Point&) {
 				const auto run = std::atomic_load(&client->run);
 				auto* host = RenderGraphRuntime::Get().Host();
-				if (!run || !host)
+				if (!host)
 					return;
 				const org::RunRef latchRun = host->CurrentRun();
+				// For the passes recorded at execution, by this run (null: nothing drawn).
+				client->runs.Store(latchRun, run);
+				if (!run)
+					return;
 				for (std::uint32_t i = 0; i < run->draws.size(); ++i) {
 					const auto& draw = run->draws[i];
 					client->latch->WriteValue(latchRun, i * kDrawStride, draw.constants);

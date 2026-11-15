@@ -601,8 +601,9 @@ struct IDXGISwapChain_Present
 						ZoneScopedN("CS.Present.NativeWait");
 						// Regions: what a region still holds (the overlay, HDR output, the capture) reaches the GPU before the present.
 						FrameAnchors::FlushRegions("the present");
-						// The frame's epochs still on the submission thread reach the queue before the present.
-						RenderGraphRuntime::Get().DrainSubmissions("the present");
+						// The frame's epochs still on the submission thread reach the queue before the present. A loading screen's thread
+						// presenting without owning rendering drains too: it copies what the owner's epochs draw.
+						RenderGraphRuntime::Get().DrainSubmissions("the present", true);
 						RenderGraph::FrameSequence::NoteBoundary("the present");
 						GpuEventTimers::BeginEvent("mark before native present");
 						GpuEventTimers::EndEvent();

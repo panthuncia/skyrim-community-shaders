@@ -1,6 +1,8 @@
 #include "ORGDeferredComposite.h"
 
 #include "RenderGraph/Switches.h"
+#include "RenderGraph/FrameStaging.h"
+#include "RenderGraph/RenderGraphRuntime.h"
 
 bool ORGDeferredComposite::Requested()
 {
@@ -142,6 +144,9 @@ namespace
 	{
 		Targets targets;
 		std::atomic<std::shared_ptr<const Execution>> execution;
+		// The execution each commit chose, by the epoch's run: what the pass recorded at execution reads. It may record on the
+		// submission thread after the render thread chose the next frame's.
+		::RenderGraph::RunSlots<Execution> executions;
 		// One entry, opened by the commit that chose an execution: the pass is gated, so it can run in a frame phase.
 		std::shared_ptr<const RenderGraph::RunGate> gate;
 	};
@@ -229,7 +234,7 @@ namespace
 		static void Record(const CompositeBindings& a_bindings, const CompositeFrame& a_frame, org::PassRecordContext& a_recording)
 		{
 			const auto executionRef = a_frame.execution ? a_frame.execution :
-			                          a_frame.shared    ? a_frame.shared->execution.load(std::memory_order_acquire) :
+			                          a_frame.shared    ? a_frame.shared->executions.Find(a_recording.Run()) :
 			                                              nullptr;
 			const auto* execution = executionRef.get();
 			if (!execution || !execution->program)
@@ -407,6 +412,10 @@ struct ORGDeferredComposite::Impl
 				.gated = true } },
 			.commit = [this](const FrameAnchors::Point&) {
 				Commit();
+				// The chosen execution, by this run, for the pass recorded at execution (null: none chosen).
+				if (shared)
+					if (auto* host = RenderGraphRuntime::Get().Host())
+						shared->executions.Store(host->CurrentRun(), composited ? shared->execution.load(std::memory_order_acquire) : nullptr);
 				if (composited)
 					gate->OpenDispatch(0, 1);
 			},
