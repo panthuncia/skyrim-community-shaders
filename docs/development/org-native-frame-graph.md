@@ -1616,3 +1616,132 @@ What it shows:
   block other threads' submissions for the render thread's time, and a wait on the render thread for such a submission would
   deadlock. Held submissions were dropped earlier for device loss. So a segment list needs a hold without the sequencer, or
   submission ahead with a GPU wait on a CPU timeline. Neither was attempted here.
+
+## The declared frame, stage 1: the frame driver and the pre-depth segment (2026-11-15, `org-native/phases`)
+
+Stage 1 of the declared-frame plan: CS decides what a frame contains at its start, and the EarlyPrepass clients run as one
+segment recorded per description. `CS_ORG_SEGMENTS` (native mode, default on; `=0` off; `=2` on with the segment's executions
+open instead of closed). Guest mode keeps the per-anchor path.
+
+**The frame driver** (`src/RenderGraph/Frame/FrameDriver.*`, `FrameDescription.*`).
+- At each `Renderer::Begin` (SE 75460, AE 77245; the detour in `Engine/LoadingScreen` is installed in every mode now) it builds
+  the frame's description: a plain value that hashes and diffs field by field.
+  - **Kind**, from state at Begin, never from the census flags (written after the present, one frame stale):
+    - a Begin inside `BSMoviePlayer::Tick` (SE 87890, AE 90259) is a **Bink movie**'s frame. The Bink hooks mark the tick; without
+      them the driver detours the tick itself.
+    - a Begin on another thread than the main one is a **loading screen**'s (the loop of `SetLoadingScreenActive`, SE 34552,
+      AE 35407, which the driver also follows).
+    - on the main thread, the engine's own test decides: Main's frame (SE 35556, AE 36555) calls `MenuManager` SE 79938 / AE
+      82075 right after Begin. It scans the menu stack under its lock for flag 0x20 (freeze background). Without such a menu
+      the world is drawn when the player's `Get3D2` is set (**world**), else not (**main menu**: the main menu, or any frame
+      before the player has 3D). With one, the world is drawn once (SE 35558 / AE 36558, which also needs the player's cell)
+      and composited after (**frozen world**, `capture` set on the frame that draws it). Found with Ghidra: `Main::Draw`
+      (SE 0x1405b1710) does not run at the main menu.
+  - **Frame number, slot** (frame modulo `kGameFramesInFlight`) **and parity**.
+  - **Segment fields** (`SegmentFields`), filled by `FrameAnchors::BeginFrame`: declared (world, or a frozen world's capture
+    frame), the segment graph's build, the segment's version generation (below, "Versions"), and a bit per client: on or
+    off this frame, from `ClientDesc::declared` (settings and scene state the client holds; null means on).
+- Each change of kind is logged (`[ORG] frame kind: kind world -> loading screen (frame N)`). With `CS_ORG_EPOCH_STATS=1` the
+  report adds `[ORG] declared frame: frames by kind: ...; pre-depth: declared, taps, recordings, waits; tap errors`.
+
+**The pre-depth segment** (`FrameAnchors.cpp`: `kDeclaredInfo`, `RunDeclared`, `BeginFrame`; `Segment::DeclaredPreDepth`).
+- One epoch, revision-driven and closed. Its graph holds the EarlyPrepass clients' passes (the phase code's composition, by
+  member anchors), all recorded ahead: the gated copy and clear that were recorded at execution only to skip run with their
+  client's bit instead. EarlyPrepass has no epoch of its own then.
+- **Recording.** A description's recording is asked for at Begin, for the frame slot's copy alone (`RequestEpochRecording`'s
+  copy), so the host's thread records it while the engine draws the shadow maps, and it waits for no GPU work. The last six
+  descriptions per slot are kept. The revision is the segment fields' hash, and the host data (`SegmentHostData`) turns each
+  off client's passes into barriers only (`RenderGraphPass::SetSkipWhen`). A build or a new version between Begin and the tap
+  is read again at the tap and recorded for.
+- **Slots.** The segment's runs take the published copy of their frame slot (`GraphHost::SetEpochCopy`); the copy's run
+  (`EpochCopyRun`) is the slot's, so its latch regions, gate entries and run slots are the slot's. They are zeroed before the
+  commits, as a new lease's are.
+- **Taps.** The EarlyPrepass hook is the segment's tap and its end. The clients' commits run there for the clients on in the
+  description, and the segment's one ticket is submitted. Tap errors (`[ORG] frame tap error (<kind>)`, counted in the census):
+  a tap in a frame whose description has no such segment, a second tap in a frame, an active client the description turned
+  off, a declared segment whose tap did not fire by the next Begin, a run that is not the slot's copy, and no recording.
+  Nothing else happens on an error: the tap draws nothing.
+- **Private alias pools.** The segment's transients are kept out of the shared alias arena (`SetPrivateAliasEpochs`). In the
+  shared arena another epoch's transients took their memory between frames, every admission found alias activations, and the
+  segment planned against the ledgers every frame: 63 us a submission closed and 27 open, against 12 with pools of its own.
+
+**What ORG got** (`extern/OpenRenderGraph`, documented in persistent-epochs.md, "Segments"): `SetEpochCopy`, `EpochCopyRun`,
+one-copy recordings, `SetClosedEpochs`, `SetPrivateAliasEpochs`, `EpochRecordingVersionsCurrent`, `RenderGraphPass::SetSkipWhen` with
+`PreparedPass::SkippedAhead`, and per-epoch barrier counts in the segment census (`SegmentStats::barriers`), printed as
+`[ORG] Barriers a frame, by epoch`. Test: `PersistentVulkanHostTests segment`. Reused as they were: revision-driven epochs,
+`EpochRecording::copies`, candidates and `UseEpochRecording`, closed admissions, pinned latch regions of published copies.
+
+**Measurements** (perf-taa, native Vulkan, Perf-Fast, Tracy capture, one run each; measured unless marked):
+
+| perf-taa, native Vulkan, Perf-Fast, Tracy (measured) | Off (`CS_ORG_SEGMENTS=0`) | On (default, closed) |
+|---|---|---|
+| fps between the marks | 123.3 | 123.4 |
+| Tickets a frame (census) | 51.8 | 52.0 |
+| `vkQueueSubmit` calls a frame (all threads) | 43.4 | 43.9 |
+| Batch lists a frame (census) | 56.9 | 55.9 |
+| Inline lists recorded a frame (`RecordInline`) | 23.8 | 22.0 |
+| Passes recorded at execution a frame (`RecordOwned.Pass`) | 41.5 | 38.9 |
+| Render thread graph time (`SubmitEpoch`), ms a frame | 0.867 | 0.868 |
+| Render thread busy (zone union), ms a frame | 3.19 | 3.19 |
+| Submission thread busy, ms a frame | 3.70 | 3.60 |
+| Host thread busy, ms a frame | 3.28 | 3.15 |
+
+The frame-level differences are inside one sample's noise (an earlier pair on another build read 124.0 against 126.3 fps).
+
+The per-segment cost against the per-anchor cost, for the same clients (EarlyPrepass's epoch with segments off, the segment's
+with them on):
+
+| Per run (measured) | EarlyPrepass's epoch (off) | Segment, closed, pools of its own (on) | Segment, open, shared arena (earlier build) | Segment, closed, shared arena (earlier build) |
+|---|---|---|---|---|
+| Render thread (`ExecuteEpoch`), us | 17.3 | 23.5 | 21.9 | 22.7 |
+| Submission thread (`FinishTicket`), us | 69.9 | 68.2 | 96.9 | 121.0 |
+| of it the admission | 13.1 | 13.2 | 27.5 | 62.8 |
+| of it recording at execution | 2.1 | 0 | 0 | 0 |
+| of it `vkQueueSubmit` | 29.8 | 28.7 | 25.3 | 31.4 |
+| Entry barriers | 42 | 41 | 42 | 41 |
+| Body barriers | 43 | 279, and 1 full barrier | 43 | 279, and 1 full barrier |
+
+The model holds on this segment: one ticket for the same clients costs what the anchor's did on the submission thread and 6 us
+more on the render thread (the recording lookups, the version check and zeroing the slot's latch regions), with nothing recorded
+at execution. The earlier attempt at larger graphs lost on admission; here the admission takes its predicted plan once the
+segment's transients have pools of their own.
+
+- **Barrier cost of closing.** The segment's body holds 279 barriers and one full barrier a run closed, against 43 open (the
+  per-anchor epoch's body also holds 43). Closing returns every resource it touches to its home state after its last use,
+  per subresource range. Its entry barriers do not drop yet (41 against 42): the epochs before it are still open. The GPU cost
+  of the extra barriers was not isolated; the frame rate does not show it at one sample.
+- **Re-records.** In the steady perf-taa window: 0 recordings and 0 waits over 901 frames, taps equal to declared frames, 0 tap
+  errors. A new description is recorded once per slot, all four asked for at the frame's start; only that frame's tap can wait.
+  The validation tour (loads, a save and its load, an interior) recorded 16 copies: the first description and two startup graph
+  builds, and Dragonsreach turning Volumetric Shadows off (no directional shadows). Two taps waited, 8.4 ms in all, both at
+  startup.
+- **Versions.** A recording binds the versions it was recorded with. The first version of this stage put the host-wide count of
+  `NoteNewVersions` in the description: Drawcall Limit Fix adopts grown buffers mid-frame, so the segment was recorded again 88
+  times in the validation tour, mostly at its tap, waiting up to 54 ms a window with the validation layer on. The description now
+  carries the segment's own version generation, moved only when a kept recording binds a version that is no longer current
+  (`GraphHost::EpochRecordingVersionsCurrent`, checked at Begin and at the tap).
+
+**Checks** (the final build, segments on by default):
+- native-quick, Vulkan: 3 runs with the upscaler registered before the shot, clean by eye against a run with segments off; 0 tap
+  errors.
+- native-d3d12-quick: matches its segments-off run by eye.
+- native-river, the loading-thread run (`CS_ORG_LOADING_THREAD=1`) and guest-quick (segments stay off in guest; the driver still
+  describes the frames): passed, 0 tap errors.
+- native-validation: the known 20x `VUID-vkCmdDraw-None-09600` and the BackBuffer layout warning, nothing else new.
+- Frame kinds against what ran: the startup logo (Bink movie), the main menu, the loading screens of the autoload and of the save's
+  load, and the world, matching the taps (the pre-depth tap fired in every world frame and in no other). A load
+  within the world (coc Dragonsreach) kept rendering the world on the main thread with the loading menu open: the driver calls
+  those frames world, and the taps agree; the census, which reads the menu flags, called them loading-screen frames.
+- ORG: the suite passes but the three known lease hangs and `HeadlessBenchmark`'s Debug timeout; `PersistentVulkanHostTests
+  segment` is new.
+
+**What stage 2 should know.**
+- The segment's exit barriers are many and their resting state is the resource's home, not what the next segment needs. A
+  declared resting state per resource (the state the next segment enters it in) would make closing nearly free once all
+  segments are closed.
+- A tap before the segment's end point (stage 3's segments with several anchors) must write the slot's regions only once the
+  slot's copy is free: take the segment's ticket at the first tap (`HoldEpochTicket` works for live epochs only today).
+- The world and the frozen world's capture frame declare the pre-depth segment. No tour reached a frozen-world frame (the
+  inventory and map in the validation tour did not freeze the background), so the capture frame's taps are unchecked.
+- Copies and clears that were recorded at execution only to skip now run on every frame their client is on. A later stage that
+  moves such a pass needs a description bit for it.
