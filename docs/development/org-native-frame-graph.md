@@ -2590,3 +2590,162 @@ What the barriers are for:
   planned first-use states can remove.
 - Predicted admissions trace nothing. Use the ledger commits to see a steady frame.
 - The frame-group clear graph is planned with every target it could clear, so its ticket touches 12 targets each frame for two clears.
+
+## Recipe plan, stage 1: frame-boundary discipline (2026-11-15, `org-native/phases`)
+
+The rule: a frame runs entirely on the schedule that was current at `Renderer::Begin`. A schedule is the set of built graphs,
+resource versions and kept recordings a frame uses. A change is asked for, recorded on the host's thread, and switched in at the
+first frame boundary after its recording is ready. Nothing is described, recorded, checked or waited for in the middle of a frame.
+Native mode with segments; guest is unchanged.
+
+### The schedule
+
+`FrameAnchors.cpp`: `State::schedule`, `Schedule`, `BeginFrame`.
+- Per declared segment and frame slot: the description the slot's frames run on, its recording, and the snapshot of the segment
+  graph it was recorded on.
+- At Begin each segment makes the frame's own description (`DescribeDeclared`: clients' `declared` predicates, rows, instances, module
+  steps, the passes' revisions, the version generation). If it equals the slot's schedule, the frame runs on it. If not, its
+  recordings are asked for (this slot and the next three, `RequestEpochRecording` for one copy each), and the slot switches to it at
+  this Begin if the slot's copy is already recorded, else at a later Begin of the slot. Until then the slot keeps its old schedule.
+- A schedule is dropped at Begin when its build is no longer attached, or when a slot it binds has a newer version (the segment's
+  version generation moves, so the description is new).
+- The frame keeps what Begin chose: `frameRecording`, `frameBuilt`. The taps and the end tap use them. `SubmitSegment` submits the
+  frame's recording; it no longer describes again, checks `StaleVersions`, asks for a recording or waits (`AwaitDeclared` is gone).
+  A build attached or a version published after Begin is a mismatch (below), not a re-record.
+- Every switch is logged with what changed and how many frames after the description was first asked for
+  (`[ORG] schedule: the <segment> segment switches in frame N (slot s, k frames after it was asked for): <diff>`), 16 lines a
+  segment in 5 s, the rest counted and logged when the window passes.
+- **Lagging.** While a slot runs on an older schedule than its description, a client the description has on and the schedule off
+  draws nothing at its tap (counted as lagged work, not a mismatch).
+- **The post and world rows.** The rows are read at Begin only, never again at the end tap. A segment's rows are the union of what
+  every frame slot's last chain (and last scopes) drew, so a variant the engine picks without a four-frame period (the depth of
+  field's output target, TAA's sixth sampler after a switch) is on already when it comes back. The composites' rows are all on (the
+  composite's first sampler is whatever drew before it, which flips from frame to frame), as the water blend's were. Rows a frame
+  does not draw do nothing (GPU-gated). The decision events (`ChainStart`, `EndOfFrameStart`, `ScopeStart`) no longer change the
+  frame's description: they predict the frame's draws, and a part whose rows the schedule has off is cut there (`RowScheduled` in
+  ImageSpace.cpp) and drawn on the ImageSpace anchor that frame. A step decided at its own call (`NoteShader`: TAA's sampler, the
+  depth of field's composites) whose row is off cuts the segment at that draw (`TakePost`): the part's earlier draws are committed
+  first (`Flush`), the rest draw on the anchor. The image is right in both cases; the slot's next schedule has the row.
+- `EndOfFrameStart` predicts TAA's sixth sampler and the depth of field's steps from the slot's last chain instead of 0 (they are
+  decided at the step's call); before, the end-tap re-read hid that the Begin prediction was wrong in every TAA frame.
+- **Absent.** A slot with no schedule on the attached build (the first world frames, and the frames after a build of the segment's
+  graph until its first recording for that slot is done) runs without the segment. Its fields carry graph 0. Its taps draw nothing
+  (counted), it holds no later segment's window, and `CanRun` is false for the clients of anchors it holds wholly, so those clients
+  and the skeleton's hosted clears keep their own paths (the engine's, D3D11's or the anchor's ticket). Shared anchors run their own
+  epochs; the post chain draws on the ImageSpace anchor. What is not drawn in such a frame: the work of the wholly held anchors whose
+  clients do not check `CanRun` (see the measurements for how many frames this is).
+
+### Builds attach before Begin
+
+Engine order (Ghidra, SE 0x1405b1020, Main's frame): `Renderer::Begin`, then the decal manager and UI work, then `Main::Draw`
+(0x1405b1710), whose first call is where Drawcall Limit Fix's scene frame starts (`Main_Draw_Early`, 35560 + 0xD3). DCLF's build
+point (`IndirectDraws::BuildPoint`: its builds handed out, the build manager's finished builds attached, `RefreshGraphConditions`)
+ran there, after Begin. It needs nothing from `Main::Draw`: the graph conditions read the cell and the toggles, and the revision
+inputs it posts are latest-wins. Native mode with segments now runs it from the frame driver at Begin, before the descriptions
+(`DCLF::BuildPointAtFrameStart`), for a frame that draws the world; the scene-frame start skips it for that frame. Guest keeps it at
+`Main::Draw`. The other attach points are the frame's end (`SealPresented`, `Attach::All`), DCLF's own wait for a snapshot and
+`BuildOwnerEpochsNow`, which attach only DCLF's epochs, and setup (`BuildPending`) before the first world frame.
+
+### Versions
+
+- DCLF's versioned buffers are grown by the snapshot builder off the render thread, for the snapshot it builds, and adopted whole
+  with that snapshot's revision at DCLF's frame start (`AdoptCurrentSnapshot`, `NamedVersions::AdoptAll`, then `NoteNewVersions`):
+  a frame never needs more capacity than the snapshot it draws was built with, and its versions change with its recordings. That
+  adoption is after `Renderer::Begin`, but before any DCLF epoch of the frame and on DCLF's own epochs only.
+- The segments do not bind DCLF's buffers: their recordings check `EpochRecordingVersionsCurrent` (stage 1 of the declared frame),
+  not the host-wide `NoteNewVersions` count, and no run below dropped a schedule for versions.
+- A version a segment binds that is published in the middle of a frame (an engine target made again, a feature twin resized) is a
+  mismatch at the end tap; at the next Begin the schedule is dropped and the new version recorded.
+
+### Sizes decided up front
+
+Light culling's light copy grew at its tap (powers of two), which changed a recorded pass's revision. With a segment holding the
+passes, the copy now always moves the whole capacity (1024 lights), and a new cluster grid (a new render size) is applied at the next
+frame's start (`ORGLightCulling::BeginFrame`, called from its declared predicate, which the pre-main description reads at Begin).
+The `passes` hash is read at Begin only.
+
+### The mismatch policy
+
+`Frame::Driver::NoteTapError` is the one place: every tap error kind (a tap the schedule does not have, a client it has off, a
+missing end tap, `host skipped`, `host missing`, `post not declared`, `post state mismatch`, a build or a version after Begin).
+- Development builds (every build but the Release profile, `CS_RELEASE_PROFILE`: Dev-Fast, Perf-Fast and the test stages) stop with
+  `stl::report_and_fail`, naming the frame, its kind and slot, the segment, the tap and the difference.
+- The Release profile logs one line per kind for the session and counts the rest; the work is not drawn.
+- `CS_ORG_MISMATCH_FATAL=0/1` overrides. A cut is not a mismatch; cuts are counted as before.
+
+### Clients declare
+
+Every segment client's `declared` predicate is read at Begin; null means on. The clients' `active()` at the tap still decides whether
+the commit runs, but that never changes the frame's recording: an on client that is idle at its tap leaves its GPU-gated passes
+closed. IBL now declares its passes from the scene setting it already reads (`IsDisabledForCurrentScene`). The others' activity is
+known only at their hooks (data staged by the hook: Terrain Shadows' and Cloud Shadows' pending work, SSGI's and the composite's
+frame inputs, Volumetric Lighting's run, the post batches, the water views), so they stay on whenever registered (Terrain Blending
+and Volumetric Shadows had predicates already).
+
+### Measurements
+
+perf-taa, native Vulkan, Perf-Fast, Tracy, one run each, measured. Before: stage 0's final run (`z0fix`, the build this stage started
+from). After: this stage's final build.
+
+| perf-taa | Before | After |
+|---|---|---|
+| fps between the marks | 122.0 | 123.2 |
+| Tickets a frame | 19.96 | 19.94 |
+| `vkQueueSubmit` calls a frame (RHI; plus 1 external) | 30.04 | 30.01 |
+| Batch lists a frame | 29.95 | 29.94 |
+| Entry / body barriers a frame | 630 / 852 | 630 / 852 |
+| Render thread busy, ms a frame | 2.86 | 2.76 |
+| Submission thread busy, ms a frame | 2.67 | 2.50 |
+| Host thread busy, ms a frame | 1.49 | 1.26 |
+| Segment tickets on the submission thread (`FinishTicket`, us a frame: pre-depth, pre-main, deferred, world, post composites, post end) | 68, 90, 121, 234, 17, 44 | 67, 88, 112, 205, 17, 38 |
+| Segment runs on the render thread (`ExecuteEpoch`, us a frame, the six summed) | 57 | 58 |
+
+The thread and frame-rate differences are inside one sample's noise; the frame's work is the same.
+
+The census (`CS_ORG_EPOCH_STATS=1`, final build, `CS_ORG_MISMATCH_FATAL` on, as in every run below):
+
+| Run | Render-thread waits for a recording | Recordings asked for after a Begin | Tap errors | Absent frames (worst segment) | Frames on a lagging schedule (worst) | Cuts (all segments) |
+|---|---|---|---|---|---|---|
+| perf-taa, the 900 marked frames | none (no wait in the code) | 0 | 0 | 0 | 0 | 0, and 0 recordings, 0 switches |
+| native-quick | none | 0 | 0 | 7 (deferred) | 4 (post end) | 5 |
+| native-river | none | 0 | 0 | 11 (deferred) | 6 (post end) | 10 |
+| native-upscalers | none | 0 | 0 | 7 | 6 (post end) | 15 |
+| native-validation | none | 0 | 0 | 15 (deferred) | 37 (post end) | 724 (719 the inventory's and map's post groups, as before: 693) |
+
+- Recordings are asked for only at Begin and switched in only when done, so each was made on the host's thread before its switch. The
+  switches' lag, in frames since a slot began to wait for the description (validation tour, all segments): 0: 12, 1: 47, 2: 45, 3:
+  37, 4-7: 30, none later. In the other runs no switch waited more than 7 frames.
+- What switches: each segment's first schedule on each build (the loads' and startup's builds), the post end-of-frame rows (luminance
+  levels, adaptation, the depth of field in menus), and pre-main and pre-depth client bits in Dragonsreach (Volumetric Shadows off
+  without directional shadows).
+- Absent frames are the frames right after a segment graph's build (startup and the loads' builds), 1 to 3 per build. In them the
+  segment's wholly held anchors report `CanRun` false, so their clients and the hosted clears keep their own paths, shared anchors
+  run their own epochs and the post chain draws on the ImageSpace anchor. No shot showed a missing effect; the absent frames are under
+  the loading menu's fade.
+- No mid-frame re-describe or re-record exists any more: `SubmitSegment` takes the frame's recording, `OpenSegment` fails (a
+  mismatch) on a build attached after Begin, and `lost to a build` and `stale recording` were 0 in every run.
+
+### Checks
+
+One run each, `CS_TEST_BACKGROUND=1`, mismatches fatal, the final build: native-quick (DLSS registered), native-d3d12-quick,
+native-river, native-upscalers (all four registered; DLSS, FSR, TAA and XeSS shots), native-validation (the known 20x
+`VUID-vkCmdDraw-None-09600` and the BackBuffer layout warning only), the loading-thread run, first and third person, guest-quick:
+all passed with 0 tap errors, shots as stage 0's by eye. The fatal path fired twice during development, both findings fixed before the
+final runs: a later segment's window opened while an earlier one was absent (a hosted clear then saw its host skipped), and the
+composite's sampler predicted from the slot's last chain did not take its call-time correction before its row check (the composite
+keeps the read at the chain's entry, and its rows are all on). ORG was not changed, so its unit tests were not run.
+
+### What stage 2 should know
+
+- A build still makes its segment absent for a frame or two: a recording can only be made for an attached graph. Recording a built,
+  not yet attached graph (`BuildEpochGraph`'s result) would let the build and its schedule switch in together.
+- The decision events and cuts remain for the post table; stage 3 removes both. The rows union is a stopgap for engine choices the
+  description cannot see ahead.
+- Clients' `active()` at the tap remains for staged hook data. A recipe pass that takes its inputs from the frame inputs block has no
+  such predicate.
+- DCLF's own adoption (`AdoptCurrentSnapshot`) is after Begin but before any DCLF epoch; moving it to Begin needs the frame inputs it
+  posts at `Main::Draw`'s start.
+- TAA and dynamic resolution are not computed at Begin from the upscaler's method. The schedule takes them from the slots' last
+  chains (what CS's upscaler left), which equal the frame's in steady play; an upscaler switch cuts the post end-of-frame segment for a
+  few frames while the new rows record (native-upscalers: 9 to 10 cuts for four switches). Computing them up front belongs with the
+  CS-owned post stage.
