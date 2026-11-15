@@ -173,6 +173,10 @@ def run(paths, spec, sets=(), label=None, stage=None, dry_run=False, lock=None, 
         run_dir = paths.runs / run_id
         (run_dir / "shots").mkdir(parents=True, exist_ok=True)
         contract["run_id"], contract["run_dir"] = run_id, str(run_dir)
+        # Upscaling stops while another process has the foreground (Upscaling::IsWindowUnusable). A background run never
+        # takes the foreground, so without this switch DLSS, FSR and XeSS never run and their Upscale client never registers.
+        if BACKGROUND:
+            contract["env"].setdefault("CS_UPSCALE_UNFOCUSED", "1")
         manifest = load_manifest(paths, stage)
         (run_dir / "resolved.json").write_text(json.dumps({**contract, "harness": harness, "stage": manifest}, indent=2), encoding="utf-8")
 
