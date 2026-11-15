@@ -2685,6 +2685,13 @@ family = "org"
 kind = "other"
 description = ""
 
+[key."org.segments"]
+env = "CS_ORG_SEGMENTS"
+type = "string"
+family = "org"
+kind = "other"
+description = "Native mode: the declared frame's segments (default 1: on and closed; 2: on and open; 0: off). Stage 1 moves the EarlyPrepass clients into the pre-depth segment."
+
 [key."org.pinned_imports"]
 env = "CS_ORG_PINNED_IMPORTS"
 type = "string"

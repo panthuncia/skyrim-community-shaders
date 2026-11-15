@@ -34,6 +34,9 @@ namespace RenderGraph::Engine::Bink
 	 */
 	void InstallHooks();
 
+	/** @brief Whether InstallHooks detoured BSMoviePlayer::Tick (CS_ORG_BINK or CS_ORG_BINK_SHOT). Any thread, after it. */
+	bool TickHooked();
+
 	/** @brief State::Setup, once the graph is up: the Present anchor's client, registered once for the session (CS_ORG_BINK only). */
 	void Setup();
 

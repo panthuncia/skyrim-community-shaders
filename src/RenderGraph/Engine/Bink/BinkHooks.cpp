@@ -6,6 +6,7 @@
 #include "RenderGraph/Engine/Bink/BinkGraph.h"
 #include "RenderGraph/Engine/LoadingScreen/LoadingScreen.h"
 #include "RenderGraph/Engine/MainTick.h"
+#include "RenderGraph/Frame/FrameDriver.h"
 #include "RenderGraph/FrameAnchors.h"
 #include "RenderGraph/Switches.h"
 #include "Utils/Logging.h"
@@ -26,6 +27,9 @@ namespace RenderGraph::Engine::Bink
 {
 	namespace
 	{
+		// InstallHooks detoured BSMoviePlayer::Tick (TickHooked).
+		bool tickHooked = false;
+
 		// BSMoviePlayer (0x30 bytes): the BINK handle, the tile set, the decoded frame count, the scale and offsets, the mode.
 		constexpr std::size_t kPlayerTiles = 0x08;
 		constexpr std::size_t kPlayerFrames = 0x10;
@@ -248,6 +252,8 @@ namespace RenderGraph::Engine::Bink
 		{
 			static std::uint64_t thunk(std::uintptr_t a_player, std::uintptr_t a_arg2, std::uintptr_t a_arg3, std::uintptr_t a_arg4)
 			{
+				// A frame this tick begins is a Bink movie's (the frame driver's kind).
+				const Frame::Driver::MovieTickScope frameKind;
 				Tick tick;
 				tick.player = a_player;
 				tick.set = a_player ? Read<const void*>(reinterpret_cast<const void*>(a_player), kPlayerTiles) : nullptr;
@@ -508,6 +514,11 @@ namespace RenderGraph::Engine::Bink
 		return requested;
 	}
 
+	bool TickHooked()
+	{
+		return tickHooked;
+	}
+
 	void InstallHooks()
 	{
 		if (REL::Module::IsVR())
@@ -522,6 +533,7 @@ namespace RenderGraph::Engine::Bink
 			logger::warn("[ORG] Bink: CS_ORG_BINK=1, but the Present anchor could not be reserved; the engine draws Bink");
 		logger::info("Hooking the Bink movie player ({})", Requested() ? "CS_ORG_BINK" : "CS_ORG_BINK_SHOT");
 		stl::detour_thunk<PlayerTick>(REL::RelocationID(87890, 90259));
+		tickHooked = true;
 		stl::detour_thunk<LockTexture>(REL::RelocationID(75514, 77306));
 		stl::detour_thunk<UnlockTexture>(REL::RelocationID(75515, 77307));
 		stl::detour_thunk<DrawTiles>(REL::RelocationID(87907, 90279));

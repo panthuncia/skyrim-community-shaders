@@ -6,6 +6,8 @@
 #	include "RenderGraph/FrameAnchors.h"
 
 #	include "Globals.h"
+#	include "RenderGraph/Frame/FrameDescription.h"
+#	include "RenderGraph/Frame/FrameDriver.h"
 #	include "RenderGraph/Engine/LoadingScreen/LoadingScreen.h"
 #	include "RenderGraph/Engine/Native/Native.h"
 #	include "RenderGraph/Engine/Targets/EngineTargets.h"
@@ -23,7 +25,10 @@
 #	include "RenderGraph/Switches.h"
 
 #	include <OpenRenderGraph/GraphHost.h>
+#	include <Render/LatchBlock.h>
+#	include <Render/PassExecutionContext.h>
 #	include <Render/RenderGraph/RenderGraph.h>
+#	include <RenderPasses/Base/RenderGraphPass.h>
 
 #	include <Resources/ExternalTextureResource.h>
 #	include <Resources/PixelBuffer.h>
@@ -34,9 +39,12 @@
 #	include <algorithm>
 #	include <array>
 #	include <atomic>
+#	include <chrono>
+#	include <condition_variable>
 #	include <map>
 #	include <mutex>
 #	include <optional>
+#	include <typeindex>
 
 namespace FrameAnchors
 {
@@ -120,6 +128,7 @@ namespace FrameAnchors
 			Segment::ShadowView,
 			Segment::SkyOcclusion,
 			Segment::AnchorEarlyPrepass,      // Main::RenderShadowMaps returned
+			Segment::DeclaredPreDepth,        // the declared pre-depth segment (SegmentsOn): its tap is EarlyPrepass's hook
 			Segment::AnchorEngineFrameClear,  // the main depth's clear in Main::RenderDepth (and the frame's other clears)
 			Segment::PhasePreDepth,           // the pre-depth phase: submitted at the Z-prepass
 			Segment::ZPrepass,                // Main::RenderDepth
@@ -266,6 +275,73 @@ namespace FrameAnchors
 					return i;
 			return static_cast<std::uint32_t>(order.size()) + RankOf(SegmentOf(static_cast<Anchor>(a_index)));
 		}
+
+		/**
+		 * @brief The declared frame's segments (SegmentsOn). Each is one epoch whose graph holds the passes of the anchors it lists,
+		 * each anchor's by order key, and its tap is its last anchor's hook, where its one ticket is committed. Stage 1 has the
+		 * pre-depth segment alone, whose one anchor is EarlyPrepass.
+		 */
+		constexpr std::uint32_t kDeclared = RenderGraph::Frame::kSegments;
+		struct DeclaredInfo
+		{
+			Segment segment;
+			std::uint32_t members;  // the anchors whose passes it holds, a bit each
+			Anchor tap;             // the anchor whose hook ends it
+			SegmentNames names;
+		};
+		constexpr std::array<DeclaredInfo, kDeclared> kDeclaredInfo{ {
+			{ Segment::DeclaredPreDepth, 1u << static_cast<std::uint32_t>(Anchor::EarlyPrepass), Anchor::EarlyPrepass,
+				{ "CS segment: pre-depth", "CS segment: pre-depth inputs", "FrameSegments::PreDepth / ", "cs.segment.pre-depth" } },
+		} };
+
+		std::uint32_t EpochOfDeclared(std::uint32_t a_declared) { return RenderGraphRuntime::EpochOf(kDeclaredInfo[a_declared].segment); }
+
+		/**
+		 * @brief What a declared segment's recording is made for: the segment's fields of the frame description. The host's thread
+		 * prepares the segment's passes with it (PassPrepareContext::preparationData), and each pass whose client is off in it records
+		 * only its barriers (org::RenderGraphPass::SetSkipWhen).
+		 */
+		struct SegmentHostData final : org::IHostExecutionData
+		{
+			std::uint32_t segment = 0;
+			RenderGraph::Frame::SegmentFields fields;
+			const void* TryGet(std::type_index a_type) const noexcept override
+			{
+				return a_type == std::type_index(typeid(SegmentHostData)) ? this : nullptr;
+			}
+		};
+
+		/**
+		 * @brief One recording of a declared segment, for one description of it (FieldsHash) and one frame slot: the published copy
+		 * that slot's runs take. Recording one copy waits for no GPU work, because the slot's last run is four frames old.
+		 */
+		struct SegmentRecording
+		{
+			std::uint64_t hash = 0;
+			std::uint32_t slot = 0;
+			RenderGraph::Frame::SegmentFields fields;
+			std::shared_ptr<const org::GraphHost::EpochRecording> recording;  // set once the host's thread recorded every copy
+			bool done = false;                                               // the request completed (recorded, failed or dropped)
+			std::string error;                                               // why it failed or was dropped
+			std::uint64_t lastFrame = 0;                                     // the last frame that asked for it
+		};
+
+		/**
+		 * @brief A declared segment's recordings: the last few descriptions' (kKeep) for each frame slot, so a field that toggles
+		 * records nothing new.
+		 */
+		struct SegmentRecordings
+		{
+			static constexpr std::size_t kKeep = 6 * RenderGraphRuntime::kGameFramesInFlight;
+			std::mutex mutex;  // the host's thread completes requests under it
+			std::condition_variable ready;
+			std::vector<std::shared_ptr<SegmentRecording>> entries;
+			RenderGraph::Frame::SegmentFields last{};  // the fields of the last description asked for, for the reason a new one logs
+			bool any = false;
+			// The segment's version generation (SegmentFields::versions): moved when a kept recording binds a version that is no
+			// longer current. Render owner.
+			std::uint64_t versionGeneration = 0;
+		};
 
 		/** @brief D3D11 textures the imports let go of on any thread, released on the render thread (ServiceRetiredTextures). */
 		struct RetiredTextures
@@ -441,6 +517,13 @@ namespace FrameAnchors
 			std::array<bool, kPhases> phaseEpochs{};
 			std::array<std::atomic<std::shared_ptr<const Snapshot>>, kPhases> phaseSnapshots{};
 			std::array<std::atomic<std::shared_ptr<const Snapshot>>, kPhases> phasePrevious{};
+			// Declared segments: whether each has an epoch (AddToFrame), the anchors they hold (which then have no epoch of their own),
+			// each segment graph's snapshots as for the anchors above, and each segment's recordings.
+			std::array<bool, kDeclared> declaredEpochs{};
+			std::uint32_t declaredMembers = 0;
+			std::array<std::atomic<std::shared_ptr<const Snapshot>>, kDeclared> declaredSnapshots{};
+			std::array<std::atomic<std::shared_ptr<const Snapshot>>, kDeclared> declaredPrevious{};
+			std::array<SegmentRecordings, kDeclared> declaredRecordings;
 			// Each phase's members, a bit per anchor: kPhaseOrder's at first, and every gated anchor seen running in it since (Run). Only
 			// ever added to. Publish copies them into the snapshot.
 			std::array<std::uint32_t, kPhases> learned{};
@@ -525,6 +608,26 @@ namespace FrameAnchors
 			return Phase::None;
 		}
 
+		/** @brief The declared segment of a segment epoch's graph, or kDeclared. */
+		std::uint32_t DeclaredOfEpoch(std::uint32_t a_epoch)
+		{
+			for (std::uint32_t d = 0; d < kDeclared; ++d)
+				if (Anchors().declaredEpochs[d] && a_epoch == EpochOfDeclared(d))
+					return d;
+			return kDeclared;
+		}
+
+		/** @brief The declared segment whose epoch holds anchor a_index's passes, or kDeclared when the anchor has its own epoch. */
+		std::uint32_t DeclaredOfAnchor(const State& a_state, std::uint32_t a_index)
+		{
+			if (!(a_state.declaredMembers >> a_index & 1u))
+				return kDeclared;
+			for (std::uint32_t d = 0; d < kDeclared; ++d)
+				if (a_state.declaredEpochs[d] && (kDeclaredInfo[d].members >> a_index & 1u))
+					return d;
+			return kDeclared;
+		}
+
 		/**
 		 * @brief The snapshot the anchor's own graph was built from. Its own graph always holds its passes: a merged anchor that runs in a
 		 * phase whose graph lacks it runs there.
@@ -549,6 +652,12 @@ namespace FrameAnchors
 			for (std::uint32_t i = 0; i < kAnchors; ++i) {
 				if (!(a_mask >> i & 1u) || !a_state.reserved[i])
 					continue;
+				// A declared segment's member has no epoch of its own: its passes are in the segment's.
+				if (const auto d = DeclaredOfAnchor(a_state, i); d < kDeclared) {
+					if (std::ranges::find(epochs, EpochOfDeclared(d)) == epochs.end())
+						epochs.push_back(EpochOfDeclared(d));
+					continue;
+				}
 				epochs.push_back(EpochOfAnchor(static_cast<Anchor>(i)));
 				anchors |= 1u << i;
 			}
@@ -669,6 +778,11 @@ namespace FrameAnchors
 						continue;
 					if (a_state.built[i].load(std::memory_order_acquire) < a_retired.serial)
 						return false;
+					// A declared segment's graph holds its members' passes.
+					for (std::uint32_t d = 0; d < kDeclared; ++d)
+						if (a_state.declaredEpochs[d] && (kDeclaredInfo[d].members >> i & 1u) &&
+							builtFrom(a_state.declaredSnapshots[d].load(std::memory_order_acquire)) < a_retired.serial)
+							return false;
 					// Phases: a phase's graph may hold the old passes too.
 					for (std::uint32_t p = 0; p < kPhases; ++p)
 						if (a_state.phaseEpochs[p] && (a_state.learned[p] >> i & 1u) &&
@@ -759,6 +873,16 @@ namespace FrameAnchors
 		 * its members (Snapshot::members); each registers the clients' resources and the engine imports. Every other epoch's graph
 		 * gets nothing from it.
 		 */
+		/** @brief A declared segment's clients in a snapshot, in registration order: the order of the description's clientsOn bits. */
+		std::vector<std::shared_ptr<const ClientDesc>> SegmentClients(const Snapshot& a_snapshot, std::uint32_t a_declared)
+		{
+			std::vector<std::shared_ptr<const ClientDesc>> clients;
+			for (const auto& client : a_snapshot.clients)
+				if (AnchorMask(*client) & kDeclaredInfo[a_declared].members)
+					clients.push_back(client);
+			return clients;
+		}
+
 		class AnchorExtension final : public org::RenderGraph::IRenderGraphExtension
 		{
 		public:
@@ -772,12 +896,31 @@ namespace FrameAnchors
 				const std::uint32_t epoch = a_graph.PassEpochFilter();
 				const Anchor anchor = AnchorOfEpoch(epoch);
 				const Phase phase = anchor == Anchor::Count ? PhaseOfEpoch(epoch) : Phase::None;
-				if (anchor == Anchor::Count && phase == Phase::None)
+				const std::uint32_t declared = anchor == Anchor::Count && phase == Phase::None ? DeclaredOfEpoch(epoch) : kDeclared;
+				if (anchor == Anchor::Count && phase == Phase::None && declared == kDeclared)
 					return;
 				// What the run that submits this graph reads (ClientDesc::executed, one-shot passes): the graph holds this snapshot's passes.
 				// Recorded when the graph is installed: at its attach for a build the build manager makes (on its own thread, and possibly
 				// dropped), at once for one the host makes on the owner thread. A failed managed build drops its clients (DropFailedClients).
-				if (anchor != Anchor::Count) {
+				if (declared != kDeclared) {
+					// A declared segment's graph: what it was built from is the segment's, and each member anchor's.
+					const auto commit = [declared, built = snapshot] {
+						auto& anchors = Anchors();
+						anchors.declaredPrevious[declared].store(anchors.declaredSnapshots[declared].load(std::memory_order_acquire), std::memory_order_release);
+						anchors.declaredSnapshots[declared].store(built, std::memory_order_release);
+						for (std::uint32_t i = 0; i < kAnchors; ++i)
+							if (kDeclaredInfo[declared].members >> i & 1u) {
+								anchors.built[i].store(built->serial, std::memory_order_release);
+								anchors.previousSnapshots[i].store(anchors.builtSnapshots[i].load(std::memory_order_acquire), std::memory_order_release);
+								anchors.builtSnapshots[i].store(built, std::memory_order_release);
+							}
+					};
+					const auto onFailed = [declared, built = snapshot](const std::string& a_error) {
+						DropFailedClients(kDeclaredInfo[declared].members, kDeclaredInfo[declared].names.label, built, a_error);
+					};
+					if (!RenderGraph::Builds::Defer(commit, onFailed))
+						commit();
+				} else if (anchor != Anchor::Count) {
 					const auto index = IndexOf(anchor);
 					const auto commit = [index, built = snapshot] {
 						auto& anchors = Anchors();
@@ -808,7 +951,7 @@ namespace FrameAnchors
 				for (const auto& client : snapshot->clients)
 					if (client->registerResources)
 						client->registerResources(a_graph);
-				if (UsesSharedConstantsIn(snapshot->clients, AnchorsIn(anchor, phase)))
+				if (UsesSharedConstantsIn(snapshot->clients, AnchorsIn(anchor, phase, declared)))
 					SharedConstants::Register(a_graph);
 			}
 
@@ -819,9 +962,14 @@ namespace FrameAnchors
 				const std::uint32_t epoch = a_graph.PassEpochFilter();
 				const Anchor anchor = AnchorOfEpoch(epoch);
 				const Phase phase = anchor == Anchor::Count ? PhaseOfEpoch(epoch) : Phase::None;
-				const std::uint32_t anchors = AnchorsIn(anchor, phase);
+				const std::uint32_t declared = anchor == Anchor::Count && phase == Phase::None ? DeclaredOfEpoch(epoch) : kDeclared;
+				const std::uint32_t anchors = AnchorsIn(anchor, phase, declared);
 				if (!anchors)
 					return;
+				if (declared != kDeclared) {
+					GatherDeclared(a_graph, declared, epoch, a_out);
+					return;
+				}
 				// The shared constants' upload first: the passes that read them follow it (the graph orders them by the buffers).
 				if (UsesSharedConstantsIn(snapshot->clients, anchors))
 					if (auto upload = SharedConstants::MakeUploadPass())
@@ -863,15 +1011,61 @@ namespace FrameAnchors
 		private:
 			/**
 			 * @brief The anchors whose passes this snapshot puts in the graph: an anchor's own always (a merged anchor's runs fall back to it in
-			 * a phase whose graph lacks it), a phase's members.
+			 * a phase whose graph lacks it), a phase's members, a declared segment's members.
 			 */
-			std::uint32_t AnchorsIn(Anchor a_anchor, Phase a_phase) const
+			std::uint32_t AnchorsIn(Anchor a_anchor, Phase a_phase, std::uint32_t a_declared) const
 			{
 				if (a_anchor != Anchor::Count)
 					return 1u << IndexOf(a_anchor);
 				if (a_phase != Phase::None)
 					return snapshot->members[PhaseIndex(a_phase)];
+				if (a_declared != kDeclared)
+					return kDeclaredInfo[a_declared].members;
 				return 0;
+			}
+
+			/**
+			 * @brief A declared segment's graph: its members' passes, each anchor's by order key, all recorded ahead on the host's thread.
+			 * Each pass is off in a recording whose description turns its client off (SetSkipWhen): it records only its barriers then.
+			 * A pass marked atExecution is recorded ahead too. For a gated copy or clear that only means it runs on every submission of
+			 * a description that has its client on. A pass that is recorded at execution for any other reason cannot be in a segment
+			 * yet: the build logs it as an error.
+			 */
+			void GatherDeclared(org::RenderGraph& a_graph, std::uint32_t a_declared, std::uint32_t a_epoch, std::vector<org::RenderGraph::ExternalPassDesc>& a_out) const
+			{
+				const std::uint32_t anchors = kDeclaredInfo[a_declared].members;
+				if (UsesSharedConstantsIn(snapshot->clients, anchors))
+					if (auto upload = SharedConstants::MakeUploadPass())
+						a_out.push_back(std::move(org::RenderGraph::ExternalPassDesc::Copy("cs.shared.upload", std::move(upload))
+								.PreferQueue(org::QueueKind::Graphics)
+								.Epoch(a_epoch)));
+				const auto clients = SegmentClients(*snapshot, a_declared);
+				for (const auto& scheduled : snapshot->passes) {
+					if (!(anchors >> IndexOf(scheduled.pass->anchor) & 1u))
+						continue;
+					const auto& pass = *scheduled.pass;
+					auto made = pass.make ? pass.make() : nullptr;
+					if (!made)
+						continue;
+					if (pass.atExecution && !pass.gated)
+						logger::error("[ORG] frame segments: {} is recorded at execution and not gated; in the {} it is recorded ahead, which it may not support",
+							pass.name, kDeclaredInfo[a_declared].names.label);
+					const auto found = std::ranges::find(clients, scheduled.client);
+					const auto bit = static_cast<std::uint32_t>(found - clients.begin());
+					made->SetSkipWhen([a_declared, bit](const org::IHostExecutionData* a_data) {
+						const auto* data = a_data ? a_data->Get<SegmentHostData>() : nullptr;
+						return data && data->segment == a_declared && bit < 32 && !(data->fields.clientsOn >> bit & 1u);
+					});
+					auto desc = pass.kind == PassKind::Compute ? org::RenderGraph::ExternalPassDesc::Compute(pass.name, std::move(made)) :
+					            pass.kind == PassKind::Copy    ? org::RenderGraph::ExternalPassDesc::Copy(pass.name, std::move(made)) :
+					                                             org::RenderGraph::ExternalPassDesc::Render(pass.name, std::move(made));
+					if (pass.queue == PassQueue::Compute)
+						desc.PreferQueue(org::QueueKind::Compute);
+					else if (pass.kind != PassKind::Render)
+						desc.PreferQueue(org::QueueKind::Graphics);
+					a_out.push_back(std::move(desc.Epoch(a_epoch)));
+				}
+				(void)a_graph;
 			}
 
 			std::shared_ptr<const Snapshot> snapshot;
@@ -1360,6 +1554,9 @@ namespace FrameAnchors
 
 	const SegmentNames* NamesOf(std::uint32_t a_segment)
 	{
+		for (const auto& declared : kDeclaredInfo)
+			if (a_segment == static_cast<std::uint32_t>(declared.segment))
+				return &declared.names;
 		const std::uint32_t phases = static_cast<std::uint32_t>(Segment::PhaseFrameStart);
 		if (a_segment >= phases && a_segment - phases < kPhases)
 			return &kPhaseNames[a_segment - phases];
@@ -1371,6 +1568,11 @@ namespace FrameAnchors
 
 	bool IsUnusedSegment(std::uint32_t a_segment)
 	{
+		for (std::uint32_t d = 0; d < kDeclared; ++d)
+			if (a_segment == static_cast<std::uint32_t>(kDeclaredInfo[d].segment)) {
+				const auto& state = Anchors();
+				return !state.frozen || !state.declaredEpochs[d];
+			}
 		const std::uint32_t phases = static_cast<std::uint32_t>(Segment::PhaseFrameStart);
 		if (a_segment >= phases && a_segment - phases < kPhases) {
 			const auto& state = Anchors();
@@ -1380,7 +1582,8 @@ namespace FrameAnchors
 		if (a_segment < first || a_segment - first >= kAnchors)
 			return false;
 		const auto& state = Anchors();
-		return !state.frozen || !state.reserved[a_segment - first];
+		// A declared segment's member has no epoch of its own.
+		return !state.frozen || !state.reserved[a_segment - first] || (state.declaredMembers >> (a_segment - first) & 1u);
 	}
 
 	bool Reserve(Anchor a_anchor)
@@ -1410,6 +1613,9 @@ namespace FrameAnchors
 
 	bool RecordsAtExecution(Anchor a_anchor)
 	{
+		// A declared segment records every pass ahead, on the host's thread.
+		if (IndexOf(a_anchor) < kAnchors && DeclaredOfAnchor(Anchors(), IndexOf(a_anchor)) < kDeclared)
+			return false;
 		return HasEpoch(a_anchor) && RenderGraphRuntime::Get().RecordsAtExecution(EpochOfAnchor(a_anchor));
 	}
 
@@ -1610,6 +1816,11 @@ namespace FrameAnchors
 	void LatchMainThread()
 	{
 		mainThread.store(::GetCurrentThreadId(), std::memory_order_release);
+	}
+
+	bool IsMainThread()
+	{
+		return ::GetCurrentThreadId() == mainThread.load(std::memory_order_acquire);
 	}
 
 	bool IsRenderOwner()
@@ -2045,6 +2256,379 @@ namespace FrameAnchors
 		state.gapSeal = state.host->Seals();
 	}
 
+
+	namespace
+	{
+		using RenderGraph::Frame::SegmentFields;
+		using RenderGraph::Frame::SegmentId;
+		namespace Driver = RenderGraph::Frame::Driver;
+
+		/** @brief A declared segment's fields for a frame: its built graph, the host's versions, and its clients' declared predicates. */
+		SegmentFields DescribeDeclared(State& a_state, std::uint32_t a_declared, bool a_declaredByKind)
+		{
+			SegmentFields fields;
+			fields.declared = a_declaredByKind;
+			if (!a_declaredByKind || !a_state.host)
+				return fields;
+			const auto built = a_state.declaredSnapshots[a_declared].load(std::memory_order_acquire);
+			if (!built)
+				return fields;  // graph 0: not built yet
+			fields.graph = a_state.host->BuildGeneration(EpochOfDeclared(a_declared));
+			fields.versions = a_state.declaredRecordings[a_declared].versionGeneration;
+			const auto clients = SegmentClients(*built, a_declared);
+			fields.clients = static_cast<std::uint32_t>(clients.size());
+			for (std::size_t i = 0; i < clients.size() && i < 32; ++i)
+				if (!clients[i]->declared || clients[i]->declared())
+					fields.clientsOn |= 1u << i;
+			return fields;
+		}
+
+		/**
+		 * @brief The recording of a declared segment for a_fields: the one kept for them, or a new request to the host's thread (logged
+		 * with the fields that changed since the last request). A failed or dropped one is asked for again. Render owner.
+		 */
+		std::shared_ptr<SegmentRecording> RequestDeclared(State& a_state, std::uint32_t a_declared, const SegmentFields& a_fields, std::uint32_t a_slot,
+			std::uint64_t a_frame, std::string_view a_why)
+		{
+			auto& recordings = a_state.declaredRecordings[a_declared];
+			const auto hash = RenderGraph::Frame::FieldsHash(a_fields);
+			std::string reason;
+			auto entry = std::make_shared<SegmentRecording>();
+			{
+				std::unique_lock lock(recordings.mutex);
+				for (auto it = recordings.entries.begin(); it != recordings.entries.end(); ++it) {
+					auto& kept = **it;
+					if (kept.hash != hash || kept.slot != a_slot || !(kept.fields == a_fields))
+						continue;
+					if (kept.done && !kept.recording) {
+						recordings.entries.erase(it);
+						break;
+					}
+					kept.lastFrame = a_frame;
+					return *it;
+				}
+				reason = recordings.any ? RenderGraph::Frame::DiffFields(recordings.last, a_fields) : std::string("the first description");
+				if (reason.empty()) {
+					// The description recorded for another slot already, or a recording of it that failed.
+					const bool other = std::ranges::any_of(recordings.entries, [&](const auto& a_entry) { return a_entry->hash == hash && a_entry->slot != a_slot; });
+					reason = other ? fmt::format("the same description, for slot {}", a_slot) : std::string("the same description, its last recording failed or was dropped");
+				}
+				recordings.last = a_fields;
+				recordings.any = true;
+				entry->hash = hash;
+				entry->slot = a_slot;
+				entry->fields = a_fields;
+				entry->lastFrame = a_frame;
+				// The least recently used of the finished ones goes when the list is full.
+				while (recordings.entries.size() >= SegmentRecordings::kKeep) {
+					auto oldest = recordings.entries.end();
+					for (auto it = recordings.entries.begin(); it != recordings.entries.end(); ++it)
+						if ((*it)->done && (oldest == recordings.entries.end() || (*it)->lastFrame < (*oldest)->lastFrame))
+							oldest = it;
+					if (oldest == recordings.entries.end())
+						break;
+					recordings.entries.erase(oldest);
+				}
+				recordings.entries.push_back(entry);
+			}
+			Driver::NoteRecording(static_cast<SegmentId>(a_declared), a_frame, fmt::format("{}{}", reason, a_why));
+			auto data = std::make_shared<SegmentHostData>();
+			data->segment = a_declared;
+			data->fields = a_fields;
+			const bool posted = a_state.host->RequestEpochRecording(EpochOfDeclared(a_declared), std::move(data),
+				[&recordings, entry](std::shared_ptr<const org::GraphHost::EpochRecording> a_recording, std::exception_ptr a_error) {
+					std::string error;
+					if (a_error) {
+						try {
+							std::rethrow_exception(a_error);
+						} catch (const std::exception& e) {
+							error = e.what();
+						} catch (...) {
+							error = "unknown error";
+						}
+					}
+					{
+						const std::lock_guard lock(recordings.mutex);
+						entry->recording = std::move(a_recording);
+						entry->error = std::move(error);
+						entry->done = true;
+					}
+					recordings.ready.notify_all();
+				},
+				a_slot);
+			if (!posted) {
+				const std::lock_guard lock(recordings.mutex);
+				entry->error = "the host takes no recording requests (async epochs are off)";
+				entry->done = true;
+			}
+			return entry;
+		}
+
+		/**
+		 * @brief Whether the finished recording kept for a_fields and a_slot binds a version that is no longer current: a slot of the
+		 * segment's graph published a new one since. Then the segment's version generation moves, which makes a new description.
+		 * Render owner.
+		 */
+		bool StaleVersions(State& a_state, std::uint32_t a_declared, const SegmentFields& a_fields, std::uint32_t a_slot)
+		{
+			auto& recordings = a_state.declaredRecordings[a_declared];
+			const auto hash = RenderGraph::Frame::FieldsHash(a_fields);
+			std::shared_ptr<const org::GraphHost::EpochRecording> recording;
+			{
+				const std::lock_guard lock(recordings.mutex);
+				for (const auto& entry : recordings.entries)
+					if (entry->hash == hash && entry->slot == a_slot && entry->fields == a_fields && entry->done) {
+						recording = entry->recording;
+						break;
+					}
+			}
+			if (!recording || a_state.host->EpochRecordingVersionsCurrent(*recording, a_slot))
+				return false;
+			++recordings.versionGeneration;
+			return true;
+		}
+
+		/**
+		 * @brief Waits for a requested recording on the render owner, at most two seconds. A description asked for at the frame's start
+		 * is normally recorded by the tap; a wait is counted. Null when it failed, was dropped or did not finish.
+		 */
+		std::shared_ptr<const org::GraphHost::EpochRecording> AwaitDeclared(State& a_state, std::uint32_t a_declared, const std::shared_ptr<SegmentRecording>& a_entry)
+		{
+			auto& recordings = a_state.declaredRecordings[a_declared];
+			std::unique_lock lock(recordings.mutex);
+			if (!a_entry->done) {
+				ZoneScopedN("CS.ORG.Segment.WaitRecording");
+				const auto start = std::chrono::steady_clock::now();
+				recordings.ready.wait_for(lock, std::chrono::seconds(2), [&] { return a_entry->done; });
+				Driver::NoteRecordingWait(static_cast<SegmentId>(a_declared),
+					std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - start).count());
+				if (!a_entry->done)
+					a_entry->error = "its recording did not finish in two seconds";
+			}
+			return a_entry->recording;
+		}
+
+		/**
+		 * @brief A declared segment's tap: its end anchor's hook. The clients' commits write this frame slot's latch regions and gates,
+		 * and the segment's one ticket is submitted with the recording of this frame's description of it. A tap the description does not
+		 * cover is a tap error and draws nothing. Render owner, under the anchors' mutex.
+		 */
+		RunResult RunDeclared(State& a_state, const Point& a_point, std::uint32_t a_declared, const std::vector<RunClient>& a_clients)
+		{
+			const auto segment = static_cast<SegmentId>(a_declared);
+			const char* tap = kInfo[IndexOf(a_point.anchor)].name;
+			const auto& frame = Driver::Current();
+			SegmentFields fields = frame.Segment(segment);
+			if (!fields.declared) {
+				Driver::NoteTapError(Driver::TapError::NotDeclared, segment, fmt::format("the {} tap fired", tap));
+				return { RunStatus::Idle };
+			}
+			if (!fields.graph) {
+				// Its graph is not built yet: its clients wait to join, as an anchor's do before its first build.
+				static std::atomic_flag logged;
+				if (!logged.test_and_set())
+					logger::info("[ORG] frame segments: the {} tap fired before the segment's graph was built; it draws nothing until the build (logged once)", tap);
+				return { RunStatus::Idle };
+			}
+			if (!Driver::NoteTap(segment, tap))
+				return { RunStatus::Idle };
+			auto& host = *a_state.host;
+			auto& runtime = RenderGraphRuntime::Get();
+			const std::uint32_t epoch = EpochOfDeclared(a_declared);
+			std::shared_ptr<const org::GraphHost::EpochRecording> recording;
+			std::string missing;
+			// A build attached since the frame began (or since the recording was asked for) makes the recording of another graph: the
+			// fields are read again and recorded for, once.
+			for (int attempt = 0; attempt < 2 && !recording; ++attempt) {
+				std::string why;
+				if (fields.graph != host.BuildGeneration(epoch)) {
+					fields = DescribeDeclared(a_state, a_declared, true);
+					why = " (the segment's graph was built again since the frame began)";
+				} else if (StaleVersions(a_state, a_declared, fields, frame.slot)) {
+					// A slot of the segment's graph published a new version since the frame began: a recording binds the versions it
+					// was made with.
+					fields = DescribeDeclared(a_state, a_declared, true);
+					why = " (a slot of the segment's graph published a new version since the frame began)";
+				}
+				auto entry = RequestDeclared(a_state, a_declared, fields, frame.slot, frame.frame, why);
+				recording = AwaitDeclared(a_state, a_declared, entry);
+				if (recording && !host.EpochRecordingCurrent(*recording)) {
+					missing = "its recording is of an older build of the segment's graph";
+					recording.reset();
+					fields.graph = 0;
+				} else if (recording && !host.EpochRecordingVersionsCurrent(*recording, frame.slot)) {
+					// Published while it was recorded: once more, with the generation moved.
+					missing = "a slot of the segment's graph published a new version while it was recorded";
+					++a_state.declaredRecordings[a_declared].versionGeneration;
+					recording.reset();
+					fields.graph = 0;
+				} else if (!recording) {
+					missing = entry->error.empty() ? std::string("no recording") : entry->error;
+				}
+			}
+			if (!recording) {
+				Driver::NoteTapError(Driver::TapError::NoRecording, segment, missing);
+				return { RunStatus::Idle };
+			}
+			const auto built = a_state.declaredSnapshots[a_declared].load(std::memory_order_acquire);
+			const auto members = kDeclaredInfo[a_declared].members;
+			const auto clients = SegmentClients(*built, a_declared);
+			const bool sharedConstants = UsesSharedConstantsIn(built->clients, members);
+			const auto expected = host.EpochCopyRun(epoch, frame.slot);
+			// The clients that commit: those in the built graph and on in the description, with work this frame. An active client the
+			// description turned off is a tap error, and its commit is not called.
+			std::vector<std::shared_ptr<const ClientDesc>> committed;
+			for (std::size_t i = 0; i < clients.size(); ++i) {
+				const auto found = std::ranges::find_if(a_clients, [&](const RunClient& a_client) { return a_client.desc == clients[i]; });
+				const bool active = found != a_clients.end() && found->active;
+				const bool on = i < 32 && (fields.clientsOn >> i & 1u);
+				if (!on) {
+					if (active)
+						Driver::NoteTapError(Driver::TapError::NotInDescription, segment, fmt::format("{} had work at the {} tap", clients[i]->id, tap));
+					continue;
+				}
+				if (active)
+					committed.push_back(clients[i]);
+			}
+			host.SetEpochCopy(epoch, frame.slot);
+			RenderGraphRuntime::EpochResult result = RenderGraphRuntime::EpochResult::Stopped;
+			NoteSequenceRun(a_point, false, a_clients);
+			{
+				RenderGraphRuntime::EpochBodyScope body(kDeclaredInfo[a_declared].segment);
+				result = runtime.TryExecuteEpoch(kDeclaredInfo[a_declared].segment, [&](org::RenderGraph&) {
+					const auto run = host.CurrentRun();
+					if (!(run == expected))
+						Driver::NoteTapError(Driver::TapError::SlotMismatch, segment,
+							fmt::format("the run is lease {} copy {}, the slot's copy is lease {} copy {}", run.lease, run.copy, expected.lease, expected.copy));
+					// The slot's latch regions still hold what its last run wrote: a block nobody writes this run reads zeros, as a new
+					// lease's would.
+					org::LatchBlock::ZeroStableRun(run.lease);
+					RenderGraph::RunShapes::BeginRun();
+					if (sharedConstants)
+						SharedConstants::Commit();
+					// Every gate closed first, those of registrations the graph still holds after they left too (RetiredGates).
+					for (const auto& client : built->clients)
+						if (AnchorMask(*client) & members)
+							for (const auto& gate : client->gates)
+								if (gate)
+									gate->Close();
+					for (const auto& retired : a_state.retired)
+						if ((retired.mask & members) && built->serial < retired.serial)
+							for (const auto& gate : retired.gates)
+								gate->Close();
+					for (const auto& client : committed)
+						if (client->commit)
+							client->commit(a_point);
+					host.UseEpochRecording(recording);
+				});
+			}
+			if (result == RenderGraphRuntime::EpochResult::Skipped)
+				return { RunStatus::Refused };
+			if (result == RenderGraphRuntime::EpochResult::EpochFailed)
+				return { RunStatus::Failed };
+			if (result != RenderGraphRuntime::EpochResult::Submitted) {
+				StopAll(a_state, kDeclaredInfo[a_declared].names.label);
+				return { RunStatus::Failed };
+			}
+			const std::uint32_t index = IndexOf(a_point.anchor);
+			auto& runs = RunsSinceSeal(a_state, index);
+			++runs;
+			if (runs > a_state.peakRuns[index].load(std::memory_order_relaxed))
+				a_state.peakRuns[index].store(runs, std::memory_order_relaxed);
+			if (RenderGraph::RunShapes::On()) {
+				std::uint64_t active = 0;
+				for (const auto& client : committed)
+					active += reinterpret_cast<std::uintptr_t>(client.get()) * 0x9E3779B97F4A7C15ull;
+				RenderGraph::RunShapes::EndRun(index, kInfo[index].name, a_point.input, a_point.output, active);
+			}
+			if (kInfo[index].late && a_state.lateHook)
+				a_state.lateHook();
+			if (sharedConstants)
+				SharedConstants::CheckAfterRun();
+			PruneRetired(a_state);
+			// One-shot passes in the graph this run submitted have run: the next build leaves them out, and the next frame's description
+			// names that build.
+			bool ranOnce = false;
+			for (auto& client : a_state.clients)
+				for (std::size_t i = 0; i < client.desc->passes.size(); ++i)
+					if (client.armed[i] && client.armed[i] <= built->serial && (members >> IndexOf(client.desc->passes[i].anchor) & 1u)) {
+						client.armed[i] = 0;
+						ranOnce = true;
+					}
+			if (ranOnce) {
+				Publish(a_state);
+				Rebuild(a_state, members, "one-shot passes ran");
+			}
+			// Last: an executed callback may register, refresh or rearm.
+			for (const auto& client : committed)
+				if (client->executed)
+					client->executed(a_point);
+			return { RunStatus::Ran };
+		}
+	}
+
+	bool SegmentsOn()
+	{
+		static const bool on = [] {
+			if (!RenderGraph::Engine::Native::Requested())
+				return false;
+			// Native mode, default on (=0 off, =2 on with the segments' executions open).
+			if (Switches::Number("CS_ORG_SEGMENTS", 1) == 0) {
+				logger::info("[ORG] frame segments off (CS_ORG_SEGMENTS=0): every anchor keeps its own epoch");
+				return false;
+			}
+			if (RegionsOn()) {
+				logger::warn("[ORG] frame segments: off, the frame phases are on (CS_ORG_PHASES=1)");
+				return false;
+			}
+			if (!RenderGraphRuntime::EpochsEnabled() || Switches::Equals("CS_ORG_ASYNC_EPOCHS", "0") || Switches::Equals("CS_ORG_REUSE_RECORDINGS", "0")) {
+				logger::warn("[ORG] frame segments need epochs, async epochs and replayable recordings; every anchor keeps its own epoch");
+				return false;
+			}
+			logger::info("[ORG] frame segments on (CS_ORG_SEGMENTS=0 turns them off): the pre-depth segment's anchors run in its epoch, recorded per description");
+			return true;
+		}();
+		return on;
+	}
+
+	std::vector<std::uint32_t> SegmentEpochs()
+	{
+		std::vector<std::uint32_t> epochs;
+		const auto& state = Anchors();
+		for (std::uint32_t d = 0; d < kDeclared; ++d)
+			if (state.declaredEpochs[d])
+				epochs.push_back(EpochOfDeclared(d));
+		return epochs;
+	}
+
+	void BeginFrame(RenderGraph::Frame::Description& a_frame)
+	{
+		auto& state = Anchors();
+		if (!SegmentsOn() || !state.host || !IsRenderOwner())
+			return;
+		auto lock = Guard();
+		if (!RenderGraphRuntime::Get().IsActive())
+			return;
+		using Kind = RenderGraph::Frame::Kind;
+		// The segments a world frame draws: every one in stage 1. A frozen world's capture frame draws the world once too.
+		const bool world = a_frame.kind == Kind::World || (a_frame.kind == Kind::FrozenWorld && a_frame.capture);
+		for (std::uint32_t d = 0; d < kDeclared; ++d) {
+			if (!state.declaredEpochs[d])
+				continue;
+			auto& fields = a_frame.segments[d];
+			fields = DescribeDeclared(state, d, world);
+			// A version the kept recording binds was replaced since: a new description now, at the frame's start.
+			if (fields.declared && fields.graph && StaleVersions(state, d, fields, a_frame.slot))
+				fields = DescribeDeclared(state, d, world);
+			// Asked for now, so the host's thread records a new description while the engine draws the shadow maps: this slot's copy
+			// first, then the next slots', which the next frames take. Each copy is recorded once its last run is done, so only
+			// this frame's tap may wait for a recording.
+			if (fields.declared && fields.graph)
+				for (std::uint32_t ahead = 0; ahead < RenderGraphRuntime::kGameFramesInFlight; ++ahead)
+					(void)RequestDeclared(state, d, fields, (a_frame.slot + ahead) % RenderGraphRuntime::kGameFramesInFlight, a_frame.frame, "");
+		}
+	}
+
 	RunResult Run(const Point& a_point)
 	{
 		const RunDepthScope depth;
@@ -2076,6 +2660,9 @@ namespace FrameAnchors
 			work = work || active || HasPendingOnce(client, a_point.anchor);
 			clients.push_back({ client.desc, client.serial, active });
 		}
+		// Declared segments: this hook is a segment's tap. The segment runs whenever the frame's description declares it.
+		if (const auto declared = DeclaredOfAnchor(state, index); declared < kDeclared)
+			return RunDeclared(state, a_point, declared, clients);
 		if (!work)
 			return { RunStatus::Idle };
 		// Phases: a merged anchor whose passes are in its phase's built graph writes into the phase's held run.
@@ -2441,6 +3028,14 @@ namespace FrameAnchors
 		auto lock = Guard();
 		auto& state = Anchors();
 		const Anchor anchor = AnchorOfEpoch(a_epoch);
+		if (const auto declared = anchor == Anchor::Count ? DeclaredOfEpoch(a_epoch) : kDeclared; declared != kDeclared) {
+			// A declared segment's epoch: the clients of its members in the failed build are dropped, as for an anchor's.
+			const auto failed = state.declaredSnapshots[declared].load(std::memory_order_acquire);
+			if (a_keptGraph)
+				state.declaredSnapshots[declared].store(state.declaredPrevious[declared].load(std::memory_order_acquire), std::memory_order_release);
+			DropFailedClients(kDeclaredInfo[declared].members, kDeclaredInfo[declared].names.label, failed, a_error);
+			return;
+		}
 		if (anchor == Anchor::Count) {
 			// A phase's epoch: the clients of its members in the failed build are dropped, as for an anchor's.
 			const Phase phase = PhaseOfEpoch(a_epoch);
@@ -2473,8 +3068,26 @@ namespace FrameAnchors
 		if (!RenderGraphRuntime::EpochsEnabled())
 			return;
 		state.frozen = true;
+		// Declared segments: an epoch for each whose anchors were reserved; those anchors have none of their own.
+		if (SegmentsOn())
+			for (std::uint32_t d = 0; d < kDeclared; ++d) {
+				std::uint32_t members = 0;
+				for (std::uint32_t i = 0; i < kAnchors; ++i)
+					if (state.reserved[i] && (kDeclaredInfo[d].members >> i & 1u))
+						members |= 1u << i;
+				if (!members)
+					continue;
+				state.declaredEpochs[d] = true;
+				state.declaredMembers |= members;
+				const auto segment = static_cast<std::uint32_t>(kDeclaredInfo[d].segment);
+				const std::uint32_t epoch = RenderGraphRuntime::EpochOf(kDeclaredInfo[d].segment);
+				if (std::ranges::find(a_epochs, epoch) != a_epochs.end())
+					continue;
+				const auto after = std::ranges::find_if(a_epochs, [&](std::uint32_t a_epoch) { return RankOf(a_epoch) > RankOf(segment); });
+				a_epochs.insert(after, epoch);
+			}
 		for (std::uint32_t i = 0; i < kAnchors; ++i) {
-			if (!state.reserved[i])
+			if (!state.reserved[i] || (state.declaredMembers >> i & 1u))
 				continue;
 			const std::uint32_t segment = SegmentOf(static_cast<Anchor>(i));
 			const std::uint32_t epoch = RenderGraphRuntime::EpochOf(static_cast<Segment>(segment));
@@ -2507,7 +3120,7 @@ namespace FrameAnchors
 		// An anchor that runs ten times a frame back to back would otherwise wait for a preparation at each run.
 		const auto most = static_cast<std::uint32_t>((std::min)(Switches::Number("CS_ORG_TICKETS_AHEAD", 16), std::uint64_t{ 64 }));
 		for (std::uint32_t i = 0; i < kAnchors; ++i)
-			if (state.reserved[i])
+			if (state.reserved[i] && !(state.declaredMembers >> i & 1u))
 				a_host.SetEpochTicketsAhead(EpochOfAnchor(static_cast<Anchor>(i)), most);
 		std::string regions;
 		for (std::uint32_t r = 0; r < kPhases; ++r)
@@ -2535,8 +3148,11 @@ namespace FrameAnchors
 		});
 		std::string reserved;
 		for (std::uint32_t i = 0; i < kAnchors; ++i)
-			if (state.reserved[i])
-				reserved += fmt::format("{}{} (epoch {})", reserved.empty() ? "" : ", ", kInfo[i].name, EpochOfAnchor(static_cast<Anchor>(i)));
+			if (state.reserved[i]) {
+				const auto d = DeclaredOfAnchor(state, i);
+				reserved += fmt::format("{}{} (epoch {}{})", reserved.empty() ? "" : ", ", kInfo[i].name, d < kDeclared ? EpochOfDeclared(d) : EpochOfAnchor(static_cast<Anchor>(i)),
+					d < kDeclared ? fmt::format(", in the {}", kDeclaredInfo[d].names.label) : std::string());
+			}
 		logger::info("[ORG] frame anchors with epochs: {}", reserved);
 	}
 }
@@ -2559,6 +3175,10 @@ namespace FrameAnchors
 	RunResult Run(const Point&) { return {}; }
 	bool InRun() { return false; }
 	bool RegionsOn() { return false; }
+	bool SegmentsOn() { return false; }
+	bool IsMainThread() { return true; }
+	void BeginFrame(RenderGraph::Frame::Description&) {}
+	std::vector<std::uint32_t> SegmentEpochs() { return {}; }
 	void FlushRegions(const char*, std::uint32_t) {}
 	void NoteEpochSubmitted(std::uint32_t) {}
 	void LatchMainThread() {}

@@ -1,5 +1,6 @@
 #include "RenderGraph/Engine/LoadingScreen/LoadingScreen.h"
 
+#include "RenderGraph/Frame/FrameDriver.h"
 #include "RenderGraph/FrameAnchors.h"
 #include "RenderGraph/Switches.h"
 
@@ -13,13 +14,16 @@ namespace RenderGraph::Engine::LoadingScreen
 		 * @brief Renderer::Begin (SE 75460 / 0x140d6a0c0, AE 77245): the start of every engine frame, inside Renderer::Lock, on the thread
 		 * that renders it. Its callers (Ghidra, SE) are the main frame (0x1405b1020), the loading loop (ServingThread::RunLoadingScreen,
 		 * 38085) and BSMoviePlayer::Tick when no frame is open (the startup logo, on the MoviePlayer thread). That thread owns rendering
-		 * from here until another thread begins a frame.
+		 * from here until another thread begins a frame (CS_ORG_LOADING_THREAD=1). The frame driver describes the frame here too
+		 * (RenderGraph/Frame/FrameDriver.h), after the claim, so the description is the new owner's.
 		 */
 		struct RendererBegin
 		{
 			static void thunk(RE::BSGraphics::Renderer* a_renderer, std::uint32_t a_flags)
 			{
-				FrameAnchors::ClaimRenderOwnership();
+				if (Requested())
+					FrameAnchors::ClaimRenderOwnership();
+				Frame::Driver::OnBegin();
 				func(a_renderer, a_flags);
 			}
 			static inline REL::Relocation<decltype(thunk)> func;
@@ -36,7 +40,14 @@ namespace RenderGraph::Engine::LoadingScreen
 			static void thunk(bool a_active)
 			{
 				const std::uint64_t before = FrameAnchors::RenderOwnerChanges();
+				// The frame driver: the loop's frames are a loading screen's from before the loop starts until after it ended.
+				if (a_active)
+					Frame::Driver::OnLoadingScreen(true);
 				func(a_active);
+				if (!a_active)
+					Frame::Driver::OnLoadingScreen(false);
+				if (!Requested())
+					return;
 				if (a_active) {
 					logger::info("[ORG] loading screen: the serving thread renders until the load ends");
 					return;
@@ -60,10 +71,12 @@ namespace RenderGraph::Engine::LoadingScreen
 
 	void Install()
 	{
-		if (!Requested())
-			return;
-		logger::info("[ORG] render ownership: the CS_ORG_LOADING_THREAD rule is on; hooking Renderer::Begin and ServingThread::SetLoadingScreenActive");
+		// Renderer::Begin and SetLoadingScreenActive are hooked for the frame driver in every mode; the render-owner rule acts only when
+		// requested.
+		if (Requested())
+			logger::info("[ORG] render ownership: the CS_ORG_LOADING_THREAD rule is on; Renderer::Begin claims rendering for its thread");
 		stl::detour_thunk<RendererBegin>(REL::RelocationID(75460, 77245));
 		stl::detour_thunk<SetLoadingScreenActive>(REL::RelocationID(34552, 35407));
+		Frame::Driver::Install();
 	}
 }

@@ -36,6 +36,10 @@ namespace rhi
 namespace RenderGraph
 {
 	class RunGate;
+	namespace Frame
+	{
+		struct Description;
+	}
 }
 
 /**
@@ -311,6 +315,11 @@ namespace FrameAnchors
 		// and writes does not overlap what the earlier commits of this execution opened and wrote, and its passes come after theirs.
 		// Null: never, and the region submits what it holds first.
 		std::function<bool()> joins;
+		// Declared segments (SegmentsOn): whether the client's passes do work in this frame. Read at the frame's start
+		// (BeginFrame), from the client's settings and the scene state it holds, never from what this frame's hooks deliver. Off: its
+		// passes record only their barriers in the segment's recording, and its commit is not called; an active client at the tap is
+		// then a tap error. Its per-run work is still behind its run gates. Null: on whenever registered.
+		std::function<bool()> declared;
 	};
 
 	/** @brief An anchor's name, as the logs and docs give it ("DeferredPasses"). */
@@ -555,6 +564,30 @@ namespace FrameAnchors
 
 	/** @brief Whether the frame phases are on (native mode, with epochs and async epochs). Any thread. */
 	bool RegionsOn();
+
+	/**
+	 * @brief Whether the declared frame's segments are on (docs/development/org-native-frame-graph.md, "The declared frame"): native
+	 * mode unless CS_ORG_SEGMENTS=0, with epochs, async epochs and replayable recordings, the phases off. CS_ORG_SEGMENTS=2 leaves the
+	 * segments' executions open instead of closed. Then the anchors a segment lists (stage 1: EarlyPrepass, the
+	 * pre-depth segment) have no epoch of their own. Their passes are in the segment's epoch, revision-driven and closed: one graph,
+	 * recorded on the host's thread for each description of the segment (RenderGraph::Frame::Description) and kept per frame slot.
+	 * The anchor's hook is the segment's tap: the clients' commits write this frame slot's latch regions and gates, and the segment's
+	 * recording for this frame's description is submitted there. Guest mode keeps the anchors' epochs. Any thread.
+	 */
+	bool SegmentsOn();
+
+	/** @brief Whether the calling thread is the engine's main thread (LatchMainThread). Any thread. */
+	bool IsMainThread();
+
+	/**
+	 * @brief The frame driver, at Renderer::Begin (RenderGraph/Frame/FrameDriver.h): fills a_frame's segment fields from the clients'
+	 * declared predicates and the segments' built graphs, and asks the host's thread for the recording of every declared segment
+	 * whose description has none yet. Off the render owner, and with segments off, nothing is declared.
+	 */
+	void BeginFrame(RenderGraph::Frame::Description& a_frame);
+
+	/** @brief Initialize: the declared segments' epochs, which the host makes revision-driven and closed. Empty with segments off. */
+	std::vector<std::uint32_t> SegmentEpochs();
 
 	/**
 	 * @brief Phases: the phase execution held now (if any) is submitted, because GPU work that must follow it is about to be

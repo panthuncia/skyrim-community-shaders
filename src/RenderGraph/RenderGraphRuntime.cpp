@@ -15,6 +15,7 @@
 #include "RenderGraph/BuildManager.h"
 #include "RenderGraph/DxvkOrgInterop.h"
 #include "RenderGraph/ExternalWork.h"
+#include "RenderGraph/Frame/FrameDriver.h"
 #include "RenderGraph/FrameAnchorSelfTest.h"
 #include "RenderGraph/FrameAnchors.h"
 #include "RenderGraph/GraphResources.h"
@@ -1573,6 +1574,20 @@ struct RenderGraphRuntime::Impl
 					logger::info("[ORG] Segment census, a frame: {:.2f} segment runs, {:.2f} with a changed signature{}; epochs with a recording none of "
 								 "their last four: {}",
 						runs, changed, text, fresh.empty() ? "-" : fresh);
+					// The barriers each epoch's tickets recorded a frame: the admission's entry barriers, the recordings' body barriers and
+					// a closed execution's full barriers (the declared frame's barrier cost, against the anchors' epochs).
+					std::string barriers;
+					double entryTotal = 0.0, bodyTotal = 0.0;
+					for (std::size_t e = 0; e < segments.barriers.size(); ++e) {
+						const auto& b = segments.barriers[e];
+						if (!b.tickets)
+							continue;
+						entryTotal += double(b.entry) / segmentFrames;
+						bodyTotal += double(b.body) / segmentFrames;
+						barriers += fmt::format("; {} {:.2f} tickets, entry {:.1f}, body {:.1f}, full {:.1f}", Impl::SegmentLabel(static_cast<Segment>(e)),
+							double(b.tickets) / segmentFrames, double(b.entry) / segmentFrames, double(b.body) / segmentFrames, double(b.full) / segmentFrames);
+					}
+					logger::info("[ORG] Barriers a frame, by epoch: entry {:.1f}, body {:.1f} in all{}", entryTotal, bodyTotal, barriers);
 				}
 				std::uint64_t paceWaits = 0, paceUs = 0;
 				RenderGraph::Engine::Native::TakePresentPace(paceWaits, paceUs);
@@ -1582,6 +1597,7 @@ struct RenderGraphRuntime::Impl
 			statFrames = statExecutions = statEpochs = 0;
 		}
 		FrameAnchors::LogRunStats();
+		RenderGraph::Frame::Driver::LogStats();
 		epochCount = 0;
 	}
 
@@ -2510,6 +2526,19 @@ bool RenderGraphRuntime::Initialize()
 			}
 			// The frame anchors' epochs are live async epochs, in DXVK's stream with the others.
 			FrameAnchors::AddToFrame(epochs);
+			// The declared frame's segments (CS_ORG_SEGMENTS): revision-driven, recorded per description of the segment, and closed so
+			// each one's entry plan stays the same (=2 leaves them open, to compare the barriers).
+			if (const auto segments = FrameAnchors::SegmentEpochs(); !segments.empty()) {
+				revisionEpochs.insert(revisionEpochs.end(), segments.begin(), segments.end());
+				const bool closed = Switches::Number("CS_ORG_SEGMENTS", 1) != 2;
+				if (closed)
+					state->host->SetClosedEpochs(segments);
+				// Their transients in pools of their own: in the shared arena another epoch's transients took their memory between two
+				// frames, so every admission found alias activations and planned against the ledgers (perf-taa: 63 us a submission
+				// closed, 27 open, against 12 with pools of their own).
+				state->host->SetPrivateAliasEpochs(segments);
+				logger::info("[ORG] frame segments: epochs {} are revision-driven and {}", fmt::join(segments, ","), closed ? "closed" : "open (CS_ORG_SEGMENTS=2)");
+			}
 			logger::info("[ORG] async epochs: {}; revision-driven: {}", fmt::join(epochs, ","), fmt::join(revisionEpochs, ","));
 			// In DXVK's own command stream unless CS_ORG_IN_STREAM=0 (or DXVK takes no external commands); a list of epochs (3,1) puts only
 			// those there.
