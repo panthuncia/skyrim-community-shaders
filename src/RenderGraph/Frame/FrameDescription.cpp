@@ -31,6 +31,10 @@ namespace RenderGraph::Frame
 			return "pre-main";
 		case SegmentId::Deferred:
 			return "deferred";
+		case SegmentId::PostComposites:
+			return "post composites";
+		case SegmentId::PostEnd:
+			return "post end-of-frame";
 		default:
 			return "?";
 		}
@@ -54,6 +58,8 @@ namespace RenderGraph::Frame
 		}
 		mix(a_fields.foreignOn);
 		mix(a_fields.passes);
+		for (const auto word : a_fields.rows)
+			mix(word);
 		return hash ? hash : 1;
 	}
 
@@ -85,6 +91,10 @@ namespace RenderGraph::Frame
 		Append(out, "instances", instances(a_before), instances(a_after));
 		Append(out, "foreignOn", fmt::format("{:#x}", a_before.foreignOn), fmt::format("{:#x}", a_after.foreignOn));
 		Append(out, "passes", fmt::format("{:#x}", a_before.passes), fmt::format("{:#x}", a_after.passes));
+		const auto rows = [](const SegmentFields& a_fields) {
+			return fmt::format("{:016x}{:016x}{:016x}{:016x}", a_fields.rows[3], a_fields.rows[2], a_fields.rows[1], a_fields.rows[0]);
+		};
+		Append(out, "rows", rows(a_before), rows(a_after));
 		return out;
 	}
 
@@ -112,8 +122,18 @@ namespace RenderGraph::Frame
 		flag("dynamic resolution", a_before.dynres, a_after.dynres);
 		flag("screenshot", a_before.screenshot, a_after.screenshot);
 		flag("upscaler", a_before.upscaler, a_after.upscaler);
+		flag("dynamic scale", a_before.dynScaled, a_after.dynScaled);
+		Append(out, "dof steps", fmt::format("{:#x}", a_before.dofSteps), fmt::format("{:#x}", a_after.dofSteps));
+		flag("dof compute", a_before.dofCompute, a_after.dofCompute);
+		Append(out, "eof source", std::to_string(a_before.eofSource), std::to_string(a_after.eofSource));
+		Append(out, "eof destination", std::to_string(a_before.eofDest), std::to_string(a_after.eofDest));
+		Append(out, "eof swap", std::to_string(a_before.eofSwap), std::to_string(a_after.eofSwap));
+		Append(out, "normals", std::to_string(a_before.normals), std::to_string(a_after.normals));
 		if (a_parity) {
 			number("sil parity", a_before.silParity, a_after.silParity);
+			number("vl parity", a_before.vlParity, a_after.vlParity);
+			number("composite address", a_before.compositeAddress, a_after.compositeAddress);
+			number("taa address", a_before.taaAddress, a_after.taaAddress);
 			number("luminance parity", a_before.lumParity, a_after.lumParity);
 			number("taa parity", a_before.taaParity, a_after.taaParity);
 		}

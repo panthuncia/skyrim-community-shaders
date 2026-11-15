@@ -40,6 +40,8 @@ namespace RenderGraph::Frame
 		PreDepth,
 		PreMain,
 		Deferred,
+		PostComposites,  // S4a: the volumetric lighting, the pre-tonemap composites, the PostProcessing anchor
+		PostEnd,         // S4b: the upscale, the end-of-frame effects with the tonemap, to RenderEndOfFrameEffects' return
 		Count
 	};
 	inline constexpr std::uint32_t kSegments = static_cast<std::uint32_t>(SegmentId::Count);
@@ -72,6 +74,9 @@ namespace RenderGraph::Frame
 		// A hash of the revisions of the segment's passes recorded ahead (RenderGraphPass::RevisionHash): a pass whose recording
 		// depends on something beyond its bindings and host data names it in its revision, and a kept recording binds it.
 		std::uint64_t passes = 0;
+		// A bit per declared row of the segment's clients (FrameAnchors::ClientDesc::rows, PassDesc::row: the post chain's pass-state
+		// table rows the description selects). A pass whose row bit is clear records only its barriers.
+		std::array<std::uint64_t, 4> rows{};
 
 		friend bool operator==(const SegmentFields&, const SegmentFields&) = default;
 	};
@@ -84,6 +89,9 @@ namespace RenderGraph::Frame
 	{
 		bool read = false;             // the ImageSpace manager exists
 		bool volumetric = false;       // the engine's volumetric lighting runs (VL enabled and its effect active)
+		std::uint8_t vlParity = 0;     // which of its two targets the volumetric lighting writes this frame (43 + parity), as the composite reads it
+		std::uint8_t compositeAddress = 0;  // the first pixel sampler's address mode the VL composite finds (it does not set it): read at its call
+		std::uint8_t taaAddress = 0;        // the sixth pixel sampler's address mode TAA finds (it does not set it): read at its call
 		bool sil = false;              // the SIL composite (+0x1d8)
 		std::uint8_t silParity = 0;    // the parity the SIL composite takes this frame (it alternates by its own counter)
 		bool lensFlares = false;       // the image-based lens flares (+0x180)
@@ -102,8 +110,19 @@ namespace RenderGraph::Frame
 		bool taaWater = false;         // its water form
 		std::uint8_t taaParity = 0;    // the history it writes this frame (it alternates per TAA render)
 		bool dynres = false;           // dynamic resolution scales the frame: the upsample runs
+		std::uint8_t dofSteps = 0;     // a bit per step of the depth of field's Render that runs (its step flags, +0x98): downsample, blur, three composites
+		bool dofCompute = false;       // its blur takes the compute form (the compute-blur option)
+		bool dynScaled = false;        // dynamic resolution is unlocked and scales (the upsample's own flag aside): the chain's last step is not final
 		bool screenshot = false;       // the manager's screenshot copy (+0x211) runs this frame
 		bool upscaler = false;         // CS's upscaler evaluates this frame (DLSS, FSR or XeSS)
+		// RenderEndOfFrameEffects' targets (RE::RENDER_TARGET values; -1 not known yet): its source and destination arguments and the
+		// manager's swap target (+0x60). Read at its entry; at Begin, the last chain's. They decide where each step reads and writes.
+		std::int8_t eofSource = -1;
+		std::int8_t eofDest = -1;
+		std::int8_t eofSwap = -1;
+		// The frame's normals target (kNORMAL_TAAMASK_SSRMASK or its swap, which the engine alternates every frame): the shadow state's
+		// third target at Deferred::StartDeferred. TAA reads it.
+		std::int8_t normals = -1;
 
 		friend bool operator==(const PostFields&, const PostFields&) = default;
 	};

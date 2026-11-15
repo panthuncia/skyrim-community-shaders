@@ -134,6 +134,8 @@ public:
 		DeclaredPreDepth,  // the EarlyPrepass clients, at Main::RenderShadowMaps' return
 		DeclaredPreMain,   // RenderDepth's depth copy to the Prepass clients, at the Prepass anchor's hook
 		DeclaredDeferred,  // the deferred passes and the composite, at the PostComposite anchor's hook
+		DeclaredPostComposites,  // the volumetric lighting and the pre-tonemap composites, at the PostProcessing anchor's hook
+		DeclaredPostEnd,         // the upscale, the end-of-frame effects and the tonemap, at RenderEndOfFrameEffects' return
 		Count
 	};
 

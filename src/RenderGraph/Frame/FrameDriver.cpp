@@ -239,6 +239,8 @@ namespace RenderGraph::Frame::Driver
 			return "instance not declared";
 		case TapError::PostNotDeclared:
 			return "post not declared";
+		case TapError::PostStateMismatch:
+			return "post state mismatch";
 		default:
 			return "?";
 		}

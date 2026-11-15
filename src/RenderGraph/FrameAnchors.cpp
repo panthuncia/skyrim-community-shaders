@@ -154,8 +154,10 @@ namespace FrameAnchors
 			Segment::Forward,
 			Segment::AnchorEngineQueries,  // the sun's occlusion queries, after Main::RenderWorld's accumulator (nominally here: a second runs later in the frame)
 			Segment::FirstPerson,
+			Segment::DeclaredPostComposites,    // the declared post composites segment (SegmentsOn): its end tap is the PostProcessing anchor's hook
 			Segment::AnchorVolumetricLighting,  // RenderWorldPostProcess's VL apply and blur, before the composites and Main_PostProcessing
 			Segment::AnchorPostProcessing,      // Main_PostProcessing, before the upscaler
+			Segment::DeclaredPostEnd,           // the declared post end-of-frame segment (SegmentsOn): its end is RenderEndOfFrameEffects' return
 			Segment::AnchorUpscale,             // after the upscaler's evaluate
 			Segment::AnchorImageSpace,          // the ImageSpace chain's batches (pre-tonemap composites, the HDR effect), a few times a frame
 			Segment::AnchorEngineCopy,          // the engine's kMAIN copy, between the chain's batches (nominally here; native mode only)
@@ -291,9 +293,14 @@ namespace FrameAnchors
 		constexpr std::uint32_t kMaxSteps = 8;
 		struct Step
 		{
-			Anchor anchor = Anchor::Count;                         // Count for a foreign step
+			Anchor anchor = Anchor::Count;                         // Count for a foreign or point step
 			std::array<const char*, 2> clients{ nullptr, nullptr };  // the named clients; none: the whole anchor
 			Segment foreign = Segment::Count;                        // a foreign step's module epoch
+			// With no client named: every client of the anchor while the segment's window is open, and the anchor keeps its own epoch for
+			// its runs outside the window (a menu's 3D scene runs the Tonemap anchor after the world's post chain).
+			bool shared = false;
+			// A CS point that is no anchor and no module epoch (TapPoint): it holds no passes and only ends the segment.
+			bool point = false;
 		};
 		struct DeclaredInfo
 		{
@@ -319,6 +326,25 @@ namespace FrameAnchors
 			// composite, and the end of the deferred passes. The water mask and the ImageSpace chain come after the end tap.
 			{ Segment::DeclaredDeferred, { { { Anchor::DeferredPasses }, { Anchor::DeferredComposite }, { Anchor::PostComposite } } }, 3,
 				{ "CS segment: deferred", "CS segment: deferred inputs", "FrameSegments::Deferred / ", "cs.segment.deferred" } },
+			// ImageSpaceManager::RenderWorldPostProcess (SE 100430, AE 107148) up to Upscaling's wrapper of the end-of-frame effects: the
+			// volumetric lighting (whole: its hook runs only there), the pre-tonemap composites drawn from the pass-state table, and the
+			// PostProcessing anchor (its end tap, reserved so its hook always runs). The upscaler's evaluate comes after the end tap: it is
+			// external work, and work submitted while a segment holds its ticket runs ahead of the segment's earlier work on the GPU.
+			{ Segment::DeclaredPostComposites,
+				{ { { Anchor::VolumetricLighting },
+					{ Anchor::ImageSpace, { "cs.engine.imagespace.post.composites", nullptr } },
+					{ Anchor::PostProcessing } } },
+				3, { "CS segment: post composites", "CS segment: post composites inputs", "FrameSegments::PostComposites / ", "cs.segment.post-composites" } },
+			// After the upscaler's evaluate: the Upscale anchor, RenderEndOfFrameEffects (99023 / 105674) drawn from the table, split
+			// at the Tonemap anchor (its passes replace or follow the tonemap draw, so they sit between the HDR effect's draws and the
+			// tonemap's), and its return as the end (a point: no anchor runs there).
+			{ Segment::DeclaredPostEnd,
+				{ { { Anchor::Upscale },
+					{ Anchor::ImageSpace, { "cs.engine.imagespace.post.hdr", nullptr } },
+					{ Anchor::Tonemap, { nullptr, nullptr }, Segment::Count, true },
+					{ Anchor::ImageSpace, { "cs.engine.imagespace.post.final", nullptr } },
+					{ Anchor::Count, { nullptr, nullptr }, Segment::Count, false, true } } },
+				5, { "CS segment: post end-of-frame", "CS segment: post end-of-frame inputs", "FrameSegments::PostEnd / ", "cs.segment.post-end" } },
 		} };
 
 		/** @brief The anchors whose every client a declared segment holds, a bit each: they have no epoch of their own. */
@@ -327,7 +353,7 @@ namespace FrameAnchors
 			std::uint32_t mask = 0;
 			for (std::uint32_t k = 0; k < kDeclaredInfo[a_declared].stepCount; ++k) {
 				const auto& step = kDeclaredInfo[a_declared].steps[k];
-				if (step.anchor != Anchor::Count && !step.clients[0])
+				if (step.anchor != Anchor::Count && !step.clients[0] && !step.shared)
 					mask |= 1u << static_cast<std::uint32_t>(step.anchor);
 			}
 			return mask;
@@ -610,6 +636,10 @@ namespace FrameAnchors
 			// the frame began (the client bits name the built graph's clients).
 			std::array<RenderGraph::Frame::SegmentFields, kDeclared> heldFields{};
 			std::array<std::uint64_t, kDeclared> endedFrame{};
+			// The frame in which a segment was cut (CutSegment): it ended before its end tap, and its later taps that frame do nothing.
+			std::array<std::uint64_t, kDeclared> cutFrame{};
+			std::array<std::uint64_t, kDeclared> cuts{};                  // cuts so far (the census)
+			std::array<std::vector<std::string>, kDeclared> cutReasons{};  // the first few reasons, logged once each
 			// Each segment's taps of each step in its held run so far: the next tap of a step is that instance (TapInstance). Reset
 			// when the frame's first tap takes the ticket.
 			std::array<std::array<std::uint32_t, kMaxSteps>, kDeclared> stepTaps{};
@@ -1144,7 +1174,7 @@ namespace FrameAnchors
 								.Epoch(epoch)));
 				std::vector<const PassDesc*> passes;
 				for (const auto& scheduled : snapshot->passes)
-					if (anchors >> IndexOf(scheduled.pass->anchor) & 1u)
+					if ((anchors >> IndexOf(scheduled.pass->anchor) & 1u) && !scheduled.client->segmentOnly)
 						passes.push_back(scheduled.pass);
 				// A phase's graph runs its anchors in the phase's order (a held execution only ever holds runs in that order), each
 				// anchor's passes by their order keys.
@@ -1249,10 +1279,13 @@ namespace FrameAnchors
 							auto made = instanced ? pass.makeInstance(instance) : pass.make ? pass.make() : pass.makeInstance ? pass.makeInstance(0) : nullptr;
 							if (!made)
 								continue;
-							made->SetSkipWhen([a_declared, bit, instanced, instance](const org::IHostExecutionData* a_data) {
+							made->SetSkipWhen([a_declared, bit, instanced, instance, row = pass.row](const org::IHostExecutionData* a_data) {
 								const auto* data = a_data ? a_data->Get<SegmentHostData>() : nullptr;
 								if (!data || data->segment != a_declared)
 									return false;
+								// A row the description did not select records only its barriers.
+								if (row >= 0 && row < 256 && !(data->fields.rows[static_cast<std::size_t>(row) / 64] >> (static_cast<std::uint32_t>(row) % 64) & 1u))
+									return true;
 								// A client past the described ones is always on, as before instances.
 								if (bit >= RenderGraph::Frame::kSegmentClients)
 									return false;
@@ -2540,6 +2573,13 @@ namespace FrameAnchors
 			fields.versions = a_state.declaredRecordings[a_declared].versionGeneration;
 			const auto clients = SegmentClients(*built, a_declared);
 			fields.clients = static_cast<std::uint32_t>(clients.size());
+			for (const auto& client : clients)
+				if (client->rows) {
+					std::array<std::uint64_t, 4> rows{};
+					client->rows(rows);
+					for (std::size_t w = 0; w < rows.size(); ++w)
+						fields.rows[w] |= rows[w];
+				}
 			for (std::size_t i = 0; i < clients.size() && i < RenderGraph::Frame::kSegmentClients; ++i) {
 				if (!clients[i]->declared || clients[i]->declared())
 					fields.clientsOn |= 1u << i;
@@ -2809,8 +2849,12 @@ namespace FrameAnchors
 			SegmentFields fields = a_state.heldFields[a_declared];
 			// A pass's revision can change after the frame began (light culling grows its light copy at its tap): the recording is
 			// made for the revisions as they are now.
-			if (fields.graph == host.BuildGeneration(epoch))
-				fields.passes = DescribeDeclared(a_state, a_declared, true).passes;
+			// The rows: the decisions the engine made after Begin (the post chain's decision events) are known by the end tap.
+			if (fields.graph == host.BuildGeneration(epoch)) {
+				const auto now = DescribeDeclared(a_state, a_declared, true);
+				fields.passes = now.passes;
+				fields.rows = now.rows;
+			}
 			std::shared_ptr<const org::GraphHost::EpochRecording> recording;
 			std::string missing;
 			// A new version of a slot the graph binds, published since the frame began, makes another description: the fields are read
@@ -2877,7 +2921,8 @@ namespace FrameAnchors
 				a_state.lateHook();
 			if (built && SegmentUsesSharedConstants(*built, a_declared))
 				SharedConstants::CheckAfterRun();
-			if (RenderGraph::RunShapes::On()) {
+			// A point step or a cut ends the segment at no anchor: no run shape.
+			if (RenderGraph::RunShapes::On() && a_point.anchor != Anchor::Count) {
 				const std::uint32_t index = IndexOf(a_point.anchor);
 				RenderGraph::RunShapes::EndRun(index, kInfo[index].name, a_point.input, a_point.output, 0);
 			}
@@ -2913,7 +2958,7 @@ namespace FrameAnchors
 			const auto segment = static_cast<SegmentId>(a_declared);
 			const auto& info = kDeclaredInfo[a_declared];
 			const auto& step = info.steps[a_step];
-			const char* tap = step.anchor != Anchor::Count ? kInfo[IndexOf(step.anchor)].name : "a module epoch";
+			const char* tap = step.anchor != Anchor::Count ? kInfo[IndexOf(step.anchor)].name : step.point ? "the segment's end point" : "a module epoch";
 			const bool end = a_step + 1 == info.stepCount;
 			const auto& frame = Driver::Current();
 			const SegmentFields& fields = frame.Segment(segment);
@@ -2930,7 +2975,8 @@ namespace FrameAnchors
 				return { RunStatus::Idle };
 			}
 			if (a_state.endedFrame[a_declared] == frame.frame) {
-				Driver::NoteTapError(Driver::TapError::Repeated, segment, fmt::format("the {} tap fired after the segment's end tap", tap));
+				if (a_state.cutFrame[a_declared] != frame.frame)
+					Driver::NoteTapError(Driver::TapError::Repeated, segment, fmt::format("the {} tap fired after the segment's end tap", tap));
 				return { RunStatus::Idle };
 			}
 			if (end && !Driver::NoteTap(segment, tap))
@@ -2972,7 +3018,7 @@ namespace FrameAnchors
 						continue;
 					// The k-th tap of the step writes instance k. A client without instances has one; one with instances has as many
 					// as the description declared.
-					const std::uint32_t declaredInstances = clients[i]->maxInstances > 1 ? held.instances[i] : 1u;
+					const std::uint32_t declaredInstances = clients[i]->maxInstances > 1 ? held.instances[i] : clients[i]->repeats ? UINT32_MAX : 1u;
 					if (instance >= declaredInstances) {
 						Driver::NoteTapError(Driver::TapError::InstanceNotDeclared, segment,
 							fmt::format("{} at the {} tap, instance {} of {} declared", clients[i]->id, tap, instance, declaredInstances));
@@ -3081,6 +3127,14 @@ namespace FrameAnchors
 					static const bool on = !Switches::Off("CS_ORG_SEGMENT_DEFERRED");
 					return on;
 				}
+			case Segment::DeclaredPostComposites:
+			case Segment::DeclaredPostEnd:
+				{
+					// The post chain drawn from the pass-state table (default on; CS_ORG_SEGMENT_POST_DRAW=0 off). It needs the post
+					// description (CS_ORG_SEGMENT_POST, not 0).
+					static const bool on = !Switches::Off("CS_ORG_SEGMENT_POST_DRAW") && !Switches::Equals("CS_ORG_SEGMENT_POST", "0");
+					return on;
+				}
 			default:
 				return true;
 			}
@@ -3144,6 +3198,75 @@ namespace FrameAnchors
 	std::uint32_t TapInstance()
 	{
 		return Anchors().tapInstance;
+	}
+
+	bool CanTap(std::string_view a_id)
+	{
+		auto& state = Anchors();
+		if (!SegmentsOn() || !state.host || !IsRenderOwner())
+			return false;
+		auto lock = Guard();
+		const auto* client = FindClient(state, a_id);
+		if (!client)
+			return false;
+		const auto frame = Driver::Current().frame;
+		for (std::uint32_t d = 0; d < kDeclared; ++d) {
+			if (!state.declaredEpochs[d] || !SegmentHolds(d, *client->desc) || !WindowOpen(state, d))
+				continue;
+			const auto built = state.heldFrame[d] == frame ? state.heldBuilt[d] : state.declaredSnapshots[d].load(std::memory_order_acquire);
+			if (built && std::ranges::find(built->clients, client->desc) != built->clients.end())
+				return true;
+		}
+		return false;
+	}
+
+	RunResult CutSegment(std::uint32_t a_segment, std::string_view a_why)
+	{
+		const RunDepthScope depth;
+		auto& state = Anchors();
+		if (!state.host)
+			return { RunStatus::Idle };
+		auto lock = Guard();
+		if (!IsRenderOwner() || !RenderGraphRuntime::Get().IsActive())
+			return { RunStatus::Refused };
+		const auto& frame = Driver::Current();
+		for (std::uint32_t d = 0; d < kDeclared; ++d) {
+			if (!state.declaredEpochs[d] || static_cast<std::uint32_t>(kDeclaredInfo[d].segment) != a_segment || !WindowOpen(state, d))
+				continue;
+			const auto segment = static_cast<SegmentId>(d);
+			state.cutFrame[d] = frame.frame;
+			state.endedFrame[d] = frame.frame;
+			++state.cuts[d];
+			if (state.cutReasons[d].size() < 8 && std::ranges::find(state.cutReasons[d], std::string(a_why)) == state.cutReasons[d].end()) {
+				state.cutReasons[d].emplace_back(a_why);
+				logger::info("[ORG] frame segments: the {} is cut short in frame {}: {}", kDeclaredInfo[d].names.label, frame.frame, a_why);
+			}
+			(void)Driver::NoteTap(segment, "a cut");
+			// Work its taps committed so far is submitted now; nothing tapped, nothing to submit.
+			if (state.heldFrame[d] != frame.frame)
+				return { RunStatus::Idle };
+			return SubmitSegment(state, Point{}, d);
+		}
+		return { RunStatus::Idle };
+	}
+
+	RunResult TapPoint(std::uint32_t a_segment)
+	{
+		const RunDepthScope depth;
+		auto& state = Anchors();
+		if (!state.host)
+			return { RunStatus::Idle };
+		auto lock = Guard();
+		if (!IsRenderOwner() || !RenderGraphRuntime::Get().IsActive())
+			return { RunStatus::Refused };
+		for (std::uint32_t d = 0; d < kDeclared; ++d) {
+			if (!state.declaredEpochs[d] || static_cast<std::uint32_t>(kDeclaredInfo[d].segment) != a_segment)
+				continue;
+			for (std::uint32_t k = 0; k < kDeclaredInfo[d].stepCount; ++k)
+				if (kDeclaredInfo[d].steps[k].point)
+					return WindowOpen(state, d) ? TapDeclared(state, Point{}, d, k, {}) : RunResult{ RunStatus::Idle };
+		}
+		return { RunStatus::Idle };
 	}
 
 	bool SegmentsOn()
@@ -3252,21 +3375,45 @@ namespace FrameAnchors
 		if (const auto declared = DeclaredOfAnchor(state, index); declared < kDeclared)
 			return TapDeclared(state, a_point, declared, StepAt(declared, a_point.anchor), clients);
 		// A shared anchor: the clients a segment names commit into it while its window is open. The others run the anchor's own epoch.
+		// A segment-only client (ClientDesc::segmentOnly) has no passes there: with work outside every open window it draws nothing.
+		const auto dropSegmentOnly = [&](std::vector<RunClient>& a_clients, std::string_view a_why) {
+			for (auto& client : a_clients)
+				if (client.active && client.desc->segmentOnly) {
+					Driver::NoteTapError(Driver::TapError::NotDeclared, SegmentId::Count, fmt::format("{} had work at the {} tap {}", client.desc->id, kInfo[index].name, a_why));
+					client.active = false;
+				}
+		};
 		if (SegmentsOn() && work) {
-			if (const auto [declared, step] = OpenStepAt(state, a_point.anchor); declared < kDeclared) {
+			if (const auto [declared, first] = OpenStepAt(state, a_point.anchor); declared < kDeclared) {
 				const auto built = state.heldFrame[declared] == Driver::Current().frame ? state.heldBuilt[declared] :
 				                                                                         state.declaredSnapshots[declared].load(std::memory_order_acquire);
-				const auto& stepInfo = kDeclaredInfo[declared].steps[step];
+				// Every step of the segment at this anchor takes its own clients (the post end-of-frame segment has two ImageSpace
+				// steps, either side of the Tonemap anchor), each tapped when one of them has work.
+				std::vector<RunClient> others = clients;
 				std::vector<RunClient> members;
-				std::vector<RunClient> others;
-				for (const auto& client : clients) {
-					const bool member = built && StepHolds(stepInfo, *client.desc) && std::ranges::find(built->clients, client.desc) != built->clients.end();
-					(member ? members : others).push_back(client);
-				}
-				const bool memberWork = std::ranges::any_of(members, [](const RunClient& a_client) { return a_client.active; });
 				RunResult tapped{ RunStatus::Idle };
-				if (memberWork)
-					tapped = TapDeclared(state, a_point, declared, step, members);
+				for (std::uint32_t k = first; k < kDeclaredInfo[declared].stepCount; ++k) {
+					const auto& stepInfo = kDeclaredInfo[declared].steps[k];
+					if (stepInfo.anchor != a_point.anchor)
+						continue;
+					std::vector<RunClient> stepMembers;
+					for (auto it = others.begin(); it != others.end();) {
+						const bool member = built && StepHolds(stepInfo, *it->desc) && std::ranges::find(built->clients, it->desc) != built->clients.end();
+						if (member) {
+							stepMembers.push_back(*it);
+							it = others.erase(it);
+						} else {
+							++it;
+						}
+					}
+					if (std::ranges::any_of(stepMembers, [](const RunClient& a_client) { return a_client.active; })) {
+						const auto result = TapDeclared(state, a_point, declared, k, stepMembers);
+						if (tapped.status == RunStatus::Idle || !result)
+							tapped = result;
+					}
+					members.insert(members.end(), stepMembers.begin(), stepMembers.end());
+				}
+				dropSegmentOnly(others, "outside its segment's built graph");
 				const bool otherWork = std::ranges::any_of(others, [&](const RunClient& a_client) {
 					return a_client.active || HasPendingOnce(*FindClient(state, a_client.desc->id), a_point.anchor);
 				});
@@ -3278,6 +3425,11 @@ namespace FrameAnchors
 					member.active = false;
 					clients.push_back(member);
 				}
+			} else {
+				dropSegmentOnly(clients, "outside its segment's window");
+				work = std::ranges::any_of(clients, [&](const RunClient& a_client) {
+					return a_client.active || HasPendingOnce(*FindClient(state, a_client.desc->id), a_point.anchor);
+				});
 			}
 		}
 		if (!work)
@@ -3507,6 +3659,11 @@ namespace FrameAnchors
 				if (count)
 					inside += fmt::format("{}{} {}", inside.empty() ? "" : ", ", why, std::exchange(count, 0));
 			logger::info("[ORG] frame segments: GPU work submitted while a segment held its ticket, since the last report: {}", inside.empty() ? "none" : inside);
+			std::string cuts;
+			for (std::uint32_t d = 0; d < kDeclared; ++d)
+				if (state.cuts[d])
+					cuts += fmt::format("{}{} {}", cuts.empty() ? "" : ", ", kDeclaredInfo[d].names.label, std::exchange(state.cuts[d], 0));
+			logger::info("[ORG] frame segments: segments cut short since the last report: {}", cuts.empty() ? "none" : cuts);
 		}
 		std::string runs;
 		for (std::uint32_t i = 0; i < kAnchors; ++i)
@@ -3709,9 +3866,10 @@ namespace FrameAnchors
 				}
 				if (!any)
 					continue;
-				const auto end = IndexOf(EndTap(d));
-				state.reserved[end] = true;
-				members |= 1u << end;
+				if (const auto end = EndTap(d); end != Anchor::Count) {
+					state.reserved[IndexOf(end)] = true;
+					members |= 1u << IndexOf(end);
+				}
 				state.declaredEpochs[d] = true;
 				state.declaredMembers |= members;
 				const auto segment = static_cast<std::uint32_t>(kDeclaredInfo[d].segment);
