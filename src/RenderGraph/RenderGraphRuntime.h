@@ -162,6 +162,21 @@ public:
 	/** @brief The ORG epoch a segment's passes declare (ExternalPassDesc::Epoch); every epoch when EpochsEnabled is off. */
 	static std::uint32_t EpochOf(Segment a_segment);
 
+	/**
+	 * @brief Calls into every epoch's submission (TryExecuteEpoch), for work another module keeps in some epochs' graphs (the engine
+	 * skeleton's clears and copies hosted in Drawcall Limit Fix's epochs and in anchors: org-native-frame-graph.md, "The declared
+	 * frame, stage 2"). Set once at setup, before the first frame.
+	 * - starting: before the epoch's submission, before any commit.
+	 * - commit: first inside the epoch's commit, before the caller's own: GraphHost::CurrentRun is the epoch's run. Only for a
+	 *   submission with a commit.
+	 */
+	struct EpochHooks
+	{
+		void (*starting)(Segment) = nullptr;
+		void (*commit)(Segment) = nullptr;
+	};
+	static void SetEpochHooks(EpochHooks a_hooks);
+
 	/** @brief Asks DXVK to enable the device features BasicRHI needs. Call before the D3D11 device exists. */
 	static void RequestDeviceFeatures(HMODULE a_dxvkD3D11);
 

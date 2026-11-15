@@ -61,6 +61,21 @@ namespace RenderGraph
 		/** @brief Commit: a_entry draws a_vertices vertices (the fullscreen triangle by default) a_instances times this run. */
 		void OpenDraw(std::uint32_t a_entry, std::uint32_t a_vertices = 3, std::uint32_t a_instances = 1) const;
 
+		// The same for a named run. A segment's end point writes what its taps gathered earlier in the frame into the run that
+		// submits it (GraphHost::CurrentRun there, or a frame slot's copy run: GraphHost::EpochCopyRun).
+
+		/** @brief Every entry closed for a_run. */
+		void Close(const org::RunRef& a_run) const;
+
+		/** @brief a_entry dispatches a_x x a_y x a_z groups in a_run. */
+		void OpenDispatch(const org::RunRef& a_run, std::uint32_t a_entry, std::uint32_t a_x, std::uint32_t a_y = 1, std::uint32_t a_z = 1) const;
+
+		/** @brief a_entry draws a_vertices vertices a_instances times in a_run. */
+		void OpenDraw(const org::RunRef& a_run, std::uint32_t a_entry, std::uint32_t a_vertices = 3, std::uint32_t a_instances = 1) const;
+
+		/** @brief The host's current run (GraphHost::CurrentRun): a commit's own. */
+		static org::RunRef Current();
+
 		/**
 		 * @brief Record, at execution only (a pass recorded after the run's commit: ExternalPassDesc::RecordAtExecution): whether the
 		 * commit opened a_entry for a_run with work to do. Read from the gate's own copy of what Close and the Open calls wrote this
@@ -78,8 +93,8 @@ namespace RenderGraph
 		RunGate(std::shared_ptr<org::LatchBlock> a_latch, std::uint32_t a_entries);
 
 	private:
-		/** @brief a_entry's words for the current run; a_work: they make the dispatch or draw do something. */
-		void Write(std::uint32_t a_entry, const std::array<std::uint32_t, 4>& a_words, bool a_work) const;
+		/** @brief a_entry's words for a_run; a_work: they make the dispatch or draw do something. */
+		void Write(const org::RunRef& a_run, std::uint32_t a_entry, const std::array<std::uint32_t, 4>& a_words, bool a_work) const;
 
 		std::shared_ptr<org::LatchBlock> latch;
 		std::uint32_t entries = 0;

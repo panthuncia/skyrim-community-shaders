@@ -1823,6 +1823,16 @@ namespace FrameAnchors
 		return ::GetCurrentThreadId() == mainThread.load(std::memory_order_acquire);
 	}
 
+	std::uint32_t RunSegment(Anchor a_anchor)
+	{
+		const auto index = IndexOf(a_anchor);
+		if (index >= kAnchors)
+			return static_cast<std::uint32_t>(Segment::Count);
+		if (const auto d = DeclaredOfAnchor(Anchors(), index); d < kDeclared)
+			return static_cast<std::uint32_t>(kDeclaredInfo[d].segment);
+		return SegmentOf(a_anchor);
+	}
+
 	bool IsRenderOwner()
 	{
 		const DWORD main = mainThread.load(std::memory_order_acquire);
@@ -3177,6 +3187,7 @@ namespace FrameAnchors
 	bool RegionsOn() { return false; }
 	bool SegmentsOn() { return false; }
 	bool IsMainThread() { return true; }
+	std::uint32_t RunSegment(Anchor) { return 0; }
 	void BeginFrame(RenderGraph::Frame::Description&) {}
 	std::vector<std::uint32_t> SegmentEpochs() { return {}; }
 	void FlushRegions(const char*, std::uint32_t) {}

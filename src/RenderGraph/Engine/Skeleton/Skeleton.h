@@ -27,6 +27,13 @@
  * site: the clears of kTEMPORAL_AA_MASK, kWATER_1 and kWATER_2 (three more views in the frame group), and the copy of kMAIN into its
  * copy texture at an anchor of its own (EngineCopy). The context hands each to the skeleton (SkeletonSites.h), which runs it now.
  *
+ * The declared frame, stage 2 (native mode with segments, CS_ORG_SEGMENT_CLEARS, default on; org-native-frame-graph.md): in a
+ * world frame a clear or copy is not a ticket of its own. Its pass is a member of the graph of the epoch that writes the target first
+ * after the engine's call (its host: a Drawcall Limit Fix epoch, at the start of its graph, or an anchor, first by order). The
+ * engine's call is a tap: it records the clear (its gate entry and colour) on the CPU, and the host's commit writes that into the
+ * host's run. Work its host does not take first, or at all by the next Begin, is a counted tap error. Every other frame kind keeps the
+ * per-anchor path below.
+ *
  * Default off: nothing is installed, and the engine's calls are unchanged.
  */
 namespace RenderGraph::Engine::Skeleton
@@ -42,6 +49,12 @@ namespace RenderGraph::Engine::Skeleton
 
 	/** @brief State::Setup, once the graph is up and the engine's targets moved: every clear pass and the depth copy, registered once. */
 	void Setup();
+
+	/**
+	 * @brief The frame driver, at each Renderer::Begin: a clear or copy still waiting for its host epoch from the frame before is a
+	 * tap error (host missing), and is dropped.
+	 */
+	void BeginFrame();
 
 	/**
 	 * @brief Deferred::DeferredPasses: the main depth copied into kPOST_ZPREPASS_COPY on the graph, here in the stream.

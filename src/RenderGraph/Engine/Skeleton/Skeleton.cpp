@@ -16,13 +16,17 @@ bool RenderGraph::Engine::Skeleton::Requested()
 
 #	include "Globals.h"
 #	include "RenderGraph/AnchorPasses.h"
+#	include "RenderGraph/BuildManager.h"
+#	include "RenderGraph/Frame/FrameDriver.h"
 #	include "RenderGraph/Engine/Native/Native.h"
 #	include "RenderGraph/Engine/Targets/EngineTargets.h"
 #	include "RenderGraph/FrameAnchors.h"
+#	include "RenderGraph/FrameSequence.h"
 #	include "RenderGraph/RasterProgram.h"
 #	include "RenderGraph/RenderGraphRuntime.h"
 #	include "RenderGraph/RunGate.h"
 #	include "RenderGraph/ShaderBindings.h"
+#	include "RenderGraph/Switches.h"
 
 #	include <OpenRenderGraph/GraphHost.h>
 #	include <Render/LatchBlock.h>
@@ -35,12 +39,24 @@ bool RenderGraph::Engine::Skeleton::Requested()
 
 #	include <algorithm>
 #	include <array>
+#	include <atomic>
 #	include <cstring>
+#	include <limits>
 #	include <map>
 #	include <optional>
 #	include <set>
 #	include <tuple>
 #	include <vector>
+
+namespace DCLF
+{
+	// Features/DrawcallLimitFix/Core/Render/Shadow/ShadowPoints.cpp: whether DCLF draws this frame's shadow views. Render thread.
+	bool DrawsShadowViews();
+	// Features/DrawcallLimitFix/Core/Scene/FrameView/FrameView.cpp: whether DCLF's epochs run from here on in this frame (no load hold).
+	bool EpochsRun();
+	// The same file: whether the engine is inside Main::RenderDepth.
+	bool InDepthPass();
+}
 
 namespace RenderGraph::Engine::Skeleton
 {
@@ -97,6 +113,74 @@ namespace RenderGraph::Engine::Skeleton
 		constexpr std::array<const char*, kCopies> kCopyIds{ "cs.engine.skeleton.depth-copy", "cs.engine.skeleton.main-copy" };
 		constexpr std::array<const char*, kCopies> kCopySteps{ "post-zprepass", "main" };
 		constexpr std::array<const char*, kCopies> kCopyNames{ "the depth copy (kMAIN into kPOST_ZPREPASS_COPY)", "the kMAIN copy (kMAIN into kMAIN Copy)" };
+
+		/**
+		 * @brief Where a world frame's clear or copy runs (org-native-frame-graph.md, "The declared frame, stage 2"). Own: on the
+		 * skeleton's own anchor, a ticket of its own (every other frame kind, and what has no host yet). Any other: the pass is a
+		 * member of the graph of the epoch that writes the target first after the engine's call, and that epoch's commit writes it
+		 * from what the tap gathered (an early tap). Drawcall Limit Fix's epochs hold theirs at the start of their graph
+		 * (HostedExtension); an anchor holds its as a client of its own, first by order.
+		 */
+		enum class Host : std::uint8_t
+		{
+			Own,
+			ShadowView,      // DCLF's shadow epoch: the shadow map slices (its casters are the slices' only writers)
+			ZPrepass,        // DCLF's Z-prepass: the main depth's clear at Main::RenderDepth's start
+			SkyReflections,  // the reflection faces' sky (cs.sky.faces): each face and the faces' depth, cleared just before
+			Prepass,         // the Prepass anchor: the normals target and kMAIN, cleared by Main::Draw (only light culling runs between)
+			EngineDraws,     // the engine draws anchor: the shadow mask and the water's stencil, each just before its draws
+			DeferredPasses,  // the DeferredPasses anchor: CS's own depth copy, made just before it in Deferred::DeferredPasses
+			ImageSpace,      // the ImageSpace anchor: the water targets, cleared after the water's draws for the chain's water blend
+			Count
+		};
+		constexpr std::size_t kHosts = static_cast<std::size_t>(Host::Count);
+
+		struct HostInfo
+		{
+			const char* name;
+			bool dclf;                           // a Drawcall Limit Fix epoch (segment), else an anchor
+			RenderGraphRuntime::Segment segment;  // the DCLF epoch
+			Anchor anchor;                       // the anchor
+		};
+		constexpr std::array<HostInfo, kHosts> kHostInfo{ {
+			{ "own", false, RenderGraphRuntime::Segment::Count, Anchor::Count },
+			{ "shadow-view", true, RenderGraphRuntime::Segment::ShadowView, Anchor::Count },
+			{ "z-prepass", true, RenderGraphRuntime::Segment::ZPrepass, Anchor::Count },
+			{ "sky-reflections", false, RenderGraphRuntime::Segment::Count, Anchor::SkyReflections },
+			{ "prepass", false, RenderGraphRuntime::Segment::Count, Anchor::Prepass },
+			{ "engine-draws", false, RenderGraphRuntime::Segment::Count, Anchor::EngineDraws },
+			{ "deferred-passes", false, RenderGraphRuntime::Segment::Count, Anchor::DeferredPasses },
+			{ "image-space", false, RenderGraphRuntime::Segment::Count, Anchor::ImageSpace },
+		} };
+
+		std::size_t HostIndex(Host a_host) { return static_cast<std::size_t>(a_host); }
+
+		/** @brief CS_ORG_SEGMENT_CLEARS (native mode with segments, default on; =0 every clear and copy keeps its own anchor's ticket). */
+		bool HostingOn()
+		{
+			static const bool on = [] {
+				const bool requested = Native::Requested() && FrameAnchors::SegmentsOn() && !Switches::Off("CS_ORG_SEGMENT_CLEARS");
+				logger::info("[ORG] engine skeleton: world frames' clears and copies run in the epochs that write their targets first: {}",
+					requested ? "on (CS_ORG_SEGMENT_CLEARS=0 turns it off)" : "off");
+				return requested;
+			}();
+			return on;
+		}
+
+		/** @brief Whether this frame's description draws the world (a world frame, or a frozen world's capture frame). Render owner. */
+		bool WorldFrame()
+		{
+			using RenderGraph::Frame::Kind;
+			const auto& frame = RenderGraph::Frame::Driver::Current();
+			return frame.kind == Kind::World || (frame.kind == Kind::FrozenWorld && frame.capture);
+		}
+
+		/** @brief The segment value a host's runs submit (what RenderGraphRuntime's epoch hooks are called with). */
+		std::uint32_t HostSegment(Host a_host)
+		{
+			const auto& info = kHostInfo[HostIndex(a_host)];
+			return info.dclf ? static_cast<std::uint32_t>(info.segment) : FrameAnchors::RunSegment(info.anchor);
+		}
 
 		/** @brief Which engine table a view comes from. */
 		enum class Kind : std::uint8_t
@@ -236,6 +320,9 @@ namespace RenderGraph::Engine::Skeleton
 		/** @brief A clear the engine asked for this flush, with what replays it on D3D11 when the pass did not run. */
 		struct Pending
 		{
+			Target target;  // the view's engine table entry (named in the frame sequence census)
+			Host host = Host::Own;
+			bool skipped = false;  // a host-skipped tap error was counted for it
 			std::uint32_t gateEntry = 0;
 			bool depth = false;
 			void* view = nullptr;
@@ -250,7 +337,12 @@ namespace RenderGraph::Engine::Skeleton
 			std::map<Target, std::shared_ptr<const ClearSpec>> specs;
 			std::shared_ptr<RunGate> gate;
 			std::shared_ptr<org::LatchBlock> colours;
-			std::vector<Pending> pending;
+			std::vector<Pending> pending;        // the clears for the group's own anchor, flushed at the engine's bind
+			std::vector<Pending> hostedPending;  // the clears waiting for their host's commit (a world frame's)
+			// Per host: the hosted passes (each a view's draws that host runs) and whether they are in the host's graph now.
+			std::array<std::vector<std::shared_ptr<const ClearSpec>>, kHosts> hosted;
+			std::array<bool, kHosts> hostedRegistered{};  // an anchor host's client is registered
+			std::array<std::atomic<std::uint32_t>, kHosts> hostedBuilt{};  // a DCLF host's graph was built with this registration
 			std::uint32_t generation = 0;
 			std::uint32_t committedLast = 0;  // the highest gate entry the last commit opened (regions: ClientDesc::joins)
 			bool registered = false;  // a registration is live
@@ -263,6 +355,12 @@ namespace RenderGraph::Engine::Skeleton
 
 		struct CopyState
 		{
+			// A world frame's copy runs in this host's next run (Host::Own: its own anchor's ticket).
+			Host host = Host::Own;
+			bool hostedRegistered = false;
+			bool hostedPending = false;
+			bool hostedSkipped = false;
+			std::shared_ptr<RunGate> hostedGate;
 			FrameAnchors::Texture source, target;
 			std::shared_ptr<RunGate> gate;  // one entry, opened by the commit: the copy is gated, so it can run in a frame phase
 			const void* sourceTexture = nullptr;
@@ -622,6 +720,281 @@ namespace RenderGraph::Engine::Skeleton
 		}
 
 		/**
+		 * @brief The host a world frame's clear of a_target with a_flags runs in (0 for colour). From the frame sequence census
+		 * (CS_ORG_FRAME_SEQUENCE): the epoch that runs next after the engine's call and writes the target first.
+		 */
+		Host HostFor(const Target& a_target, std::uint32_t a_flags)
+		{
+			if (a_target.kind == Kind::Cube)
+				return Host::SkyReflections;
+			if (a_target.kind == Kind::Depth) {
+				switch (a_target.index) {
+				case DepthTarget::kCUBEMAP_REFLECTIONS:
+					return Host::SkyReflections;
+				case DepthTarget::kSHADOWMAPS_ESRAM:
+				case DepthTarget::kVOLUMETRIC_LIGHTING_SHADOWMAPS_ESRAM:
+				case DepthTarget::kSHADOWMAPS:
+					return Host::ShadowView;
+				// The precipitation occlusion map is cleared by Precipitation::RenderOcclusion, at no fixed place before the shadow view.
+				// It keeps its own ticket.
+				case DepthTarget::kMAIN:
+					// Main::RenderDepth's start clears depth and stencil; FinishAccumulating clears the stencil for the water mask.
+					if (a_flags == (D3D11_CLEAR_DEPTH | D3D11_CLEAR_STENCIL))
+						return Host::ZPrepass;
+					if (a_flags == D3D11_CLEAR_STENCIL)
+						return Host::EngineDraws;
+					return Host::Own;
+				default:
+					return Host::Own;
+				}
+			}
+			switch (a_target.index) {
+			case ColourTarget::kSHADOW_MASK:
+				return Host::EngineDraws;
+			case ColourTarget::kMAIN:
+			case ColourTarget::kNORMAL_TAAMASK_SSRMASK:
+			case ColourTarget::kNORMAL_TAAMASK_SSRMASK_SWAP:
+				return Host::Prepass;
+			case ColourTarget::kWATER_1:
+			case ColourTarget::kWATER_2:
+				return Host::ImageSpace;
+			// The TAA mask and kMAIN_ONLY_ALPHA are cleared just before DCLF's forward epoch every frame, but the TAA mask also when TAA
+			// is turned on, inside the ImageSpace chain: one host cannot follow both. They keep their own ticket.
+			default:
+				return Host::Own;
+			}
+		}
+
+		/**
+		 * @brief Whether an epoch that may run between a hosted clear's tap and its host leaves the target alone:
+		 * - light culling, between Main::Draw's clears and the Prepass anchor (it reads the depth and writes its own lists);
+		 * - the kMAIN copy's own ticket, between the water targets' clear and the next ImageSpace batch (it reads kMAIN and writes its copy).
+		 */
+		bool AllowedBetween(Host a_host, std::uint32_t a_segment)
+		{
+			if (a_host == Host::Prepass)
+				return a_segment == static_cast<std::uint32_t>(RenderGraphRuntime::Segment::LightCulling);
+			if (a_host == Host::ImageSpace)
+				return a_segment == FrameAnchors::RunSegment(Anchor::EngineCopy);
+			return false;
+		}
+
+		/** @brief Whether the host can hold passes: a DCLF epoch in native mode, or an anchor with an epoch. */
+		bool HostAvailable(Host a_host)
+		{
+			const auto& info = kHostInfo[HostIndex(a_host)];
+			if (a_host == Host::Own || !HostingOn())
+				return false;
+			return info.dclf ? RenderGraphRuntime::EpochsEnabled() : FrameAnchors::HasEpoch(info.anchor);
+		}
+
+		std::string HostedClientId(std::size_t a_group, Host a_host)
+		{
+			return fmt::format("{}@{}", kGroupIds[a_group], kHostInfo[HostIndex(a_host)].name);
+		}
+
+		/** @brief What the hosted extension puts in Drawcall Limit Fix's graphs: each group's passes per DCLF host, and their registration. */
+		struct HostedSet
+		{
+			std::array<std::array<std::vector<std::shared_ptr<const ClearSpec>>, kHosts>, kGroups> specs;
+			std::array<std::uint32_t, kGroups> generation{};
+		};
+
+		constexpr const char* kHostedExtensionId = "cs.engine.skeleton.hosted";
+
+		/**
+		 * @brief The skeleton's clears in Drawcall Limit Fix's epochs: at the start of the graph of each DCLF host, before DCLF's own
+		 * passes that write the same views. Their gates and colours are written by the epoch's commit (EpochCommit). When the graph
+		 * attaches, the registration it holds is noted, so a tap hands a clear to it only once its graph holds the pass.
+		 */
+		class HostedExtension final : public org::RenderGraph::IRenderGraphExtension
+		{
+		public:
+			explicit HostedExtension(std::shared_ptr<const HostedSet> a_set) :
+				set(std::move(a_set)) {}
+
+			void GatherStructuralPasses(org::RenderGraph& a_graph, std::vector<org::RenderGraph::ExternalPassDesc>& a_out) override
+			{
+				if (!set)
+					return;
+				const std::uint32_t epoch = a_graph.PassEpochFilter();
+				for (std::size_t h = 0; h < kHosts; ++h) {
+					const auto& info = kHostInfo[h];
+					if (!info.dclf || RenderGraphRuntime::EpochOf(info.segment) != epoch)
+						continue;
+					std::array<std::uint32_t, kGroups> built{};
+					for (std::size_t g = 0; g < kGroups; ++g) {
+						for (const auto& spec : set->specs[g][h])
+							a_out.push_back(std::move(org::RenderGraph::ExternalPassDesc::Render(spec->name, std::make_shared<ClearPass>(spec))
+									.At(org::ExternalInsertPoint::Begin())
+									.Epoch(epoch)));
+						built[g] = set->specs[g][h].empty() ? 0 : set->generation[g];
+					}
+					const auto attached = [h, built] {
+						for (std::size_t g = 0; g < kGroups; ++g)
+							Skel().groups[g].hostedBuilt[h].store(built[g], std::memory_order_release);
+					};
+					if (!RenderGraph::Builds::Defer(attached))
+						attached();
+				}
+			}
+
+		private:
+			std::shared_ptr<const HostedSet> set;
+		};
+
+		/** @brief The hosted extension made again from every group's DCLF-hosted passes: their epochs' graphs are built again with them. */
+		void PublishHosted()
+		{
+			auto* host = RenderGraphRuntime::Get().Host();
+			if (!host || !HostingOn())
+				return;
+			auto set = std::make_shared<HostedSet>();
+			std::vector<std::uint32_t> epochs;
+			for (std::size_t g = 0; g < kGroups; ++g) {
+				set->generation[g] = Skel().groups[g].generation;
+				for (std::size_t h = 0; h < kHosts; ++h)
+					if (kHostInfo[h].dclf) {
+						set->specs[g][h] = Skel().groups[g].hosted[h];
+						if (std::ranges::find(epochs, RenderGraphRuntime::EpochOf(kHostInfo[h].segment)) == epochs.end())
+							epochs.push_back(RenderGraphRuntime::EpochOf(kHostInfo[h].segment));
+					}
+			}
+			std::shared_ptr<const HostedSet> published = std::move(set);
+			host->AddExtension(kHostedExtensionId, [published]() -> std::unique_ptr<org::RenderGraph::IRenderGraphExtension> {
+				return std::make_unique<HostedExtension>(published);
+			}, epochs);
+		}
+
+		bool HasHostedPending(Group a_group, Host a_host)
+		{
+			return std::ranges::any_of(GroupOf(a_group).hostedPending, [&](const Pending& a_pending) { return a_pending.host == a_host; });
+		}
+
+		/**
+		 * @brief The host's commit: the clears the taps handed to it since its last run are written into its run (each colour into
+		 * the group's colour latch, each draw's gate entry opened), and leave the waiting list. a_close: the run's gate entries are
+		 * closed first (a DCLF host's; an anchor closes its clients' gates itself).
+		 */
+		void CommitHosted(Group a_group, Host a_host, bool a_close)
+		{
+			auto& group = GroupOf(a_group);
+			if (!group.gate || !group.colours)
+				return;
+			const org::RunRef run = RunGate::Current();
+			if (a_close)
+				group.gate->Close(run);
+			std::uint32_t count = 0;
+			std::erase_if(group.hostedPending, [&](const Pending& a_pending) {
+				if (a_pending.host != a_host)
+					return false;
+				if (!a_pending.depth)
+					group.colours->WriteValue(run, a_pending.gateEntry * RunGate::kEntryBytes, a_pending.colour);
+				group.gate->OpenDraw(run, a_pending.gateEntry);
+				++count;
+				return true;
+			});
+			if (count) {
+				group.taken += count;
+				RenderGraph::Frame::Driver::NoteHosted(kHostInfo[HostIndex(a_host)].name, count);
+			}
+		}
+
+		/**
+		 * @brief The group's hosted passes, made from its registered ones: for each host, each view's draws that host runs in a world
+		 * frame. An anchor host gets a client of its own; the DCLF hosts get the hosted extension.
+		 */
+		void RegisterHosted(Group a_group)
+		{
+			auto& group = GroupOf(a_group);
+			const auto index = IndexOf(a_group);
+			for (auto& specs : group.hosted)
+				specs.clear();
+			if (HostingOn()) {
+				for (const auto& [target, spec] : group.specs) {
+					std::array<std::vector<ClearDraw>, kHosts> draws;
+					for (const auto& draw : spec->draws)
+						if (const auto host = HostFor(target, draw.flags); HostAvailable(host))
+							draws[HostIndex(host)].push_back(draw);
+					for (std::size_t h = 0; h < kHosts; ++h) {
+						if (draws[h].empty())
+							continue;
+						auto hosted = std::make_shared<ClearSpec>(*spec);
+						hosted->draws = std::move(draws[h]);
+						hosted->name = fmt::format("{}@{}", spec->name, kHostInfo[h].name);
+						group.hosted[h].push_back(std::move(hosted));
+					}
+				}
+			}
+			for (std::size_t h = 0; h < kHosts; ++h) {
+				const auto host = static_cast<Host>(h);
+				if (kHostInfo[h].dclf || host == Host::Own)
+					continue;
+				const auto id = HostedClientId(index, host);
+				if (group.hosted[h].empty()) {
+					if (std::exchange(group.hostedRegistered[h], false))
+						FrameAnchors::Unregister(id);
+					continue;
+				}
+				FrameAnchors::ClientDesc client{};
+				client.id = id;
+				for (const auto& spec : group.hosted[h]) {
+					std::shared_ptr<const ClearSpec> pass = spec;
+					client.passes.push_back({ .name = spec->name,
+						.anchor = kHostInfo[h].anchor,
+						// First at the anchor: the host's own passes write the cleared view after it.
+						.order = std::numeric_limits<std::int32_t>::min() + static_cast<std::int32_t>(spec->draws.front().entry),
+						.kind = FrameAnchors::PassKind::Render,
+						.make = [pass] { return std::static_pointer_cast<org::RenderPass>(std::make_shared<ClearPass>(pass)); },
+						.atExecution = true,
+						.gated = true,
+						.gpuGated = true });
+				}
+				client.active = [a_group, host] { return HasHostedPending(a_group, host); };
+				client.commit = [a_group, host](const FrameAnchors::Point&) { CommitHosted(a_group, host, false); };
+				client.gates = { group.gate };
+				group.hostedRegistered[h] = FrameAnchors::Register(std::move(client));
+				if (!group.hostedRegistered[h]) {
+					group.hosted[h].clear();
+					logger::warn("[ORG] engine skeleton: the {} anchor refused the {} clears it hosts; they run on the {} anchor", FrameAnchors::Name(kHostInfo[h].anchor),
+						kGroupNames[index], FrameAnchors::Name(kGroupAnchors[index]));
+				}
+			}
+			for (std::size_t h = 0; h < kHosts; ++h)
+				if (kHostInfo[h].dclf)
+					group.hostedBuilt[h].store(0, std::memory_order_release);
+			std::string summary;
+			for (std::size_t h = 0; h < kHosts; ++h)
+				if (!group.hosted[h].empty())
+					summary += fmt::format("{}{} {}", summary.empty() ? "" : ", ", kHostInfo[h].name, group.hosted[h].size());
+			if (!summary.empty())
+				logger::info("[ORG] engine skeleton: a world frame's {} clears run in their hosts' epochs (views by host: {})", kGroupNames[index], summary);
+		}
+
+		/** @brief Whether a world frame's clear can go to a_host now: its graph holds this registration's passes. */
+		bool HostReady(Group a_group, Host a_host)
+		{
+			if (a_host == Host::Own || !HostingOn() || !WorldFrame())
+				return false;
+			const auto& group = GroupOf(a_group);
+			const auto h = HostIndex(a_host);
+			if (group.hosted[h].empty())
+				return false;
+			// A Drawcall Limit Fix epoch runs only once DCLF draws the world (the frame's description says so). Its shadow epoch draws
+			// the views only when DCLF's coverage decision for the frame, made before the first shadow map clear, took them.
+			if (kHostInfo[h].dclf && (!RenderGraph::Frame::Driver::Current().dclfDraws || !DCLF::EpochsRun()))
+				return false;
+			if (a_host == Host::ShadowView && !DCLF::DrawsShadowViews())
+				return false;
+			// The main depth is cleared outside Main::RenderDepth too (a menu's 3D scene); only RenderDepth's clear is the Z-prepass's.
+			if (a_host == Host::ZPrepass && !DCLF::InDepthPass())
+				return false;
+			if (kHostInfo[h].dclf)
+				return group.hostedBuilt[h].load(std::memory_order_acquire) == group.generation;
+			return group.hostedRegistered[h] && FrameAnchors::CanRun(HostedClientId(IndexOf(a_group), a_host), kHostInfo[h].anchor);
+		}
+
+		/**
 		 * @brief The group's passes made from the engine's tables as they are now and registered: one pass per view, a new gate and
 		 * colour latch, so a recording of an older registration (its retired gates stay closed) can never clear the wrong view.
 		 * Called at Setup, and again only when the engine made one of the group's targets again (a resize).
@@ -724,6 +1097,8 @@ namespace RenderGraph::Engine::Skeleton
 			}
 			logger::info("[ORG] engine skeleton: the {} clears registered at the {} anchor ({} views, {} gate entries, registration {})", kGroupNames[index],
 				FrameAnchors::Name(kGroupAnchors[index]), passes, entries, group.generation);
+			RegisterHosted(a_group);
+			PublishHosted();
 		}
 
 		/**
@@ -766,6 +1141,13 @@ namespace RenderGraph::Engine::Skeleton
 			if (!draw)
 				return false;
 			a_pending.gateEntry = draw->entry;
+			a_pending.target = a_target;
+			// A world frame's clear waits for the epoch that writes the view first (an early tap: its host's commit writes it).
+			if (const auto host = HostFor(a_target, a_flags); HostReady(group, host)) {
+				a_pending.host = host;
+				state.hostedPending.push_back(a_pending);
+				return true;
+			}
 			state.pending.push_back(a_pending);
 			return true;
 		}
@@ -806,6 +1188,8 @@ namespace RenderGraph::Engine::Skeleton
 				copy = FrameAnchors::D3D11Texture("engine.kMAIN.copy", main.textureCopy, main.SRVCopy, nullptr);
 			return { FrameAnchors::EngineTarget(ColourTarget::kMAIN), std::move(copy) };
 		}
+
+		void RegisterHostedCopy(CopyKind a_kind);
 
 		/**
 		 * @brief A copy's client registered for the engine's textures as they are now. Setup, and again only when the engine made
@@ -872,16 +1256,88 @@ namespace RenderGraph::Engine::Skeleton
 			if (!copy.registered) {
 				copy.failed = true;
 				logger::warn("[ORG] engine skeleton: the {} anchor refused {}; it stays on D3D11", FrameAnchors::Name(kCopyAnchors[index]), kCopyNames[index]);
+				return;
 			}
+			RegisterHostedCopy(a_kind);
 		}
 
-		/** @brief The copy on the graph at this point; false when it did not run (the caller copies). */
-		bool RunCopy(CopyKind a_kind)
+		/**
+		 * @brief The copy in a world frame's host: CS's own depth copy runs first in the DeferredPasses anchor (Deferred::DeferredPasses
+		 * makes it just before that anchor's run). The copy is gated there: the tap opens it for the host's next run.
+		 */
+		void RegisterHostedCopy(CopyKind a_kind)
+		{
+			auto& copy = CopyOf(a_kind);
+			const auto index = static_cast<std::size_t>(a_kind);
+			// The kMAIN copy keeps its own ticket: outdoors the water surface's draws follow it, indoors the ImageSpace chain does, and one
+			// host cannot follow both.
+			const Host host = a_kind == CopyKind::Depth ? Host::DeferredPasses : Host::Own;
+			if (host == Host::Own)
+				return;
+			const auto& info = kHostInfo[HostIndex(host)];
+			const auto id = fmt::format("{}@{}", kCopyIds[index], info.name);
+			if (!HostAvailable(host)) {
+				if (std::exchange(copy.hostedRegistered, false))
+					FrameAnchors::Unregister(id);
+				copy.host = Host::Own;
+				return;
+			}
+			if (!copy.hostedGate)
+				copy.hostedGate = RunGate::Create(id, 1);
+			if (!copy.hostedGate)
+				return;
+			AnchorPasses::Builder builder(info.anchor, id, std::numeric_limits<std::int32_t>::min(), {}, copy.hostedGate);
+			builder.Add(AnchorPasses::Copy{
+				.name = fmt::format("{}@{}", kCopySteps[index], info.name),
+				.source = copy.source,
+				.target = copy.target,
+				.width = copy.source.Width(),
+				.height = copy.source.Height(),
+				.gate = 0u });
+			FrameAnchors::ClientDesc client{};
+			client.id = id;
+			client.passes = builder.Take();
+			client.gates = { copy.hostedGate };
+			client.active = [a_kind] { return CopyOf(a_kind).hostedPending; };
+			client.commit = [a_kind, host](const FrameAnchors::Point&) {
+				auto& state = CopyOf(a_kind);
+				if (!state.hostedPending)
+					return;
+				state.hostedGate->OpenDispatch(RunGate::Current(), 0, 1);
+				state.hostedPending = false;
+				RenderGraph::Frame::Driver::NoteHosted(kHostInfo[HostIndex(host)].name, 1);
+			};
+			copy.hostedRegistered = FrameAnchors::Register(std::move(client));
+			copy.host = copy.hostedRegistered ? host : Host::Own;
+			if (copy.hostedRegistered)
+				logger::info("[ORG] engine skeleton: in a world frame {} runs first at the {} anchor", kCopyNames[index], FrameAnchors::Name(info.anchor));
+		}
+
+		/** @brief Whether a world frame's copy can go to its host now: the host anchor's graph holds this registration's pass. */
+		bool CopyHostReady(CopyKind a_kind)
+		{
+			const auto& copy = CopyOf(a_kind);
+			if (copy.host == Host::Own || !copy.hostedRegistered || !HostingOn() || !WorldFrame())
+				return false;
+			const auto& info = kHostInfo[HostIndex(copy.host)];
+			return FrameAnchors::CanRun(fmt::format("{}@{}", kCopyIds[static_cast<std::size_t>(a_kind)], info.name), info.anchor);
+		}
+
+		/**
+		 * @brief The copy on the graph at this point; false when it did not run (the caller copies). a_hostable: the call site is
+		 * the one the copy's host follows (CS's own depth copy, the kMAIN copy), so a world frame's copy waits for its host.
+		 */
+		bool RunCopy(CopyKind a_kind, bool a_hostable = false)
 		{
 			const auto index = static_cast<std::size_t>(a_kind);
 			auto& copy = CopyOf(a_kind);
 			if (copy.failed || !Usable())
 				return false;
+			if (a_hostable && EngineTexturesOf(a_kind) == std::pair{ copy.sourceTexture, copy.targetTexture } && CopyHostReady(a_kind)) {
+				copy.hostedPending = true;
+				copy.hostedSkipped = false;
+				return true;
+			}
 			if (EngineTexturesOf(a_kind) != std::pair{ copy.sourceTexture, copy.targetTexture }) {
 				logger::info("[ORG] engine skeleton: {}: a texture was made again; it registers again", kCopyNames[index]);
 				RegisterCopy(a_kind);
@@ -916,6 +1372,13 @@ namespace RenderGraph::Engine::Skeleton
 			auto& state = Skel();
 			auto& group = state.groups[a_index];
 			if (!group.pending.empty()) {
+				// The frame sequence census (CS_ORG_FRAME_SEQUENCE) names the views each flush clears.
+				if (RenderGraph::FrameSequence::On()) {
+					std::string views;
+					for (const auto& pending : group.pending)
+						views += fmt::format("{}{}{}", views.empty() ? "" : ",", TargetName(pending.target), pending.depth ? fmt::format("/{}", pending.flags) : std::string());
+					RenderGraph::FrameSequence::NoteBoundary(fmt::format("skeleton {} clears: {}", kGroupNames[a_index], views));
+				}
 				bool done = false;
 				auto status = FrameAnchors::RunStatus::Failed;
 				if (!group.failed) {
@@ -967,6 +1430,82 @@ namespace RenderGraph::Engine::Skeleton
 		}
 	}
 
+	namespace
+	{
+		/** @brief Before every epoch's submission: hosted work still waiting for another host saw this epoch go first (a tap error). */
+		void EpochStarting(RenderGraphRuntime::Segment a_segment)
+		{
+			// A load that started in this frame ends its world work: what waits for it is abandoned at the next Begin.
+			if (!FrameAnchors::IsRenderOwner() || RenderGraph::Frame::Driver::LoadStartedThisFrame())
+				return;
+			const auto segment = static_cast<std::uint32_t>(a_segment);
+			auto& state = Skel();
+			for (std::size_t g = 0; g < kGroups; ++g)
+				for (auto& pending : state.groups[g].hostedPending) {
+					if (pending.skipped || HostSegment(pending.host) == segment || AllowedBetween(pending.host, segment))
+						continue;
+					pending.skipped = true;
+					RenderGraph::Frame::Driver::NoteTapError(RenderGraph::Frame::Driver::TapError::HostSkipped, RenderGraph::Frame::SegmentId::Count,
+						fmt::format("the {} clear of {} waits for its host ({}), and segment {} was submitted first", kGroupNames[g], TargetName(pending.target),
+							kHostInfo[HostIndex(pending.host)].name, segment));
+				}
+			for (std::size_t c = 0; c < kCopies; ++c) {
+				auto& copy = state.copies[c];
+				if (!copy.hostedPending || copy.hostedSkipped || HostSegment(copy.host) == segment)
+					continue;
+				copy.hostedSkipped = true;
+				RenderGraph::Frame::Driver::NoteTapError(RenderGraph::Frame::Driver::TapError::HostSkipped, RenderGraph::Frame::SegmentId::Count,
+					fmt::format("{} waits for its host ({}), and segment {} was submitted first", kCopyNames[c], kHostInfo[HostIndex(copy.host)].name, segment));
+			}
+		}
+
+		/** @brief First in a Drawcall Limit Fix host's commit: the clears its graph holds are written into its run. */
+		void EpochCommit(RenderGraphRuntime::Segment a_segment)
+		{
+			if (!FrameAnchors::IsRenderOwner())
+				return;
+			for (std::size_t h = 0; h < kHosts; ++h) {
+				if (!kHostInfo[h].dclf || kHostInfo[h].segment != a_segment)
+					continue;
+				for (std::size_t g = 0; g < kGroups; ++g) {
+					auto& group = Skel().groups[g];
+					if (!group.hosted[h].empty() && group.hostedBuilt[h].load(std::memory_order_acquire) == group.generation)
+						CommitHosted(static_cast<Group>(g), static_cast<Host>(h), true);
+				}
+			}
+		}
+	}
+
+	void BeginFrame()
+	{
+		auto& state = Skel();
+		if (!state.setUp || !HostingOn() || !FrameAnchors::IsRenderOwner())
+			return;
+		// The frame that ends here was cut short by a loading screen: its waiting work is abandoned with the rest of its world work.
+		if (RenderGraph::Frame::Driver::LoadStartedThisFrame()) {
+			std::uint32_t abandoned = 0;
+			for (auto& group : state.groups)
+				abandoned += static_cast<std::uint32_t>(std::exchange(group.hostedPending, {}).size());
+			for (auto& copy : state.copies)
+				abandoned += std::exchange(copy.hostedPending, false) ? 1u : 0u;
+			if (abandoned)
+				RenderGraph::Frame::Driver::NoteHosted("abandoned at a load's start", abandoned);
+			return;
+		}
+		for (std::size_t g = 0; g < kGroups; ++g) {
+			auto& group = state.groups[g];
+			for (const auto& pending : group.hostedPending)
+				RenderGraph::Frame::Driver::NoteTapError(RenderGraph::Frame::Driver::TapError::HostMissing, RenderGraph::Frame::SegmentId::Count,
+					fmt::format("the {} clear of {} waited for its host ({}) until the frame ended; dropped", kGroupNames[g], TargetName(pending.target),
+						kHostInfo[HostIndex(pending.host)].name));
+			group.hostedPending.clear();
+		}
+		for (std::size_t c = 0; c < kCopies; ++c)
+			if (std::exchange(state.copies[c].hostedPending, false))
+				RenderGraph::Frame::Driver::NoteTapError(RenderGraph::Frame::Driver::TapError::HostMissing, RenderGraph::Frame::SegmentId::Count,
+					fmt::format("{} waited for its host ({}) until the frame ended; dropped", kCopyNames[c], kHostInfo[HostIndex(state.copies[c].host)].name));
+	}
+
 	void Reserve()
 	{
 		if (!Requested())
@@ -1010,12 +1549,14 @@ namespace RenderGraph::Engine::Skeleton
 				RegisterCopy(kind);
 		}
 		state.setUp = true;
+		if (HostingOn())
+			RenderGraphRuntime::SetEpochHooks({ .starting = &EpochStarting, .commit = &EpochCommit });
 		logger::info("[ORG] engine skeleton: on (CS_ORG_ENGINE_SKELETON); the engine's clears and its main depth copy are registered with the graph");
 	}
 
 	bool CopyPostZPrepassDepth()
 	{
-		return Requested() && RunCopy(CopyKind::Depth);
+		return Requested() && RunCopy(CopyKind::Depth, true);
 	}
 
 	void MarkInstalled()
@@ -1112,7 +1653,7 @@ namespace RenderGraph::Engine::Skeleton
 			for (std::size_t i = 0; i < kCopies; ++i) {
 				const auto kind = static_cast<CopyKind>(i);
 				if (EngineTexturesOf(kind) == std::pair<const void*, const void*>{ a_source, a_destination })
-					return RunCopy(kind);
+					return RunCopy(kind, kind == CopyKind::Main);
 			}
 			return false;
 		}
@@ -1127,6 +1668,7 @@ namespace RenderGraph::Engine::Skeleton
 {
 	void Reserve() {}
 	void Setup() {}
+	void BeginFrame() {}
 	bool CopyPostZPrepassDepth() { return false; }
 	void MarkInstalled() {}
 

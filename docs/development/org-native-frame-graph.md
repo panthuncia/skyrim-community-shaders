@@ -1745,3 +1745,173 @@ segment's transients have pools of their own.
   inventory and map in the validation tour did not freeze the background), so the capture frame's taps are unchecked.
 - Copies and clears that were recorded at execution only to skip now run on every frame their client is on. A later stage that
   moves such a pass needs a description bit for it.
+
+## The declared frame, stage 2: clears and copies (2026-11-15, `org-native/phases`)
+
+Stage 2 of the declared-frame plan: the engine's clears and copies stop being tickets of their own in a world frame, and the
+pre-depth segment closes without its exit barriers. Native mode with segments on. Switches: `CS_ORG_SEGMENT_CLEARS` (default on;
+`=0` keeps every clear and copy on its own anchor's ticket) and `CS_ORG_SEGMENT_REST` (default on; `=0` closes segments to home as
+in stage 1). Guest mode is unchanged: its skeleton keeps the per-anchor path.
+
+**Resting states** (ORG `GraphHost::SetRestAtLastUseEpochs`; persistent-epochs.md, "Segments"). A closed segment now leaves each
+resource in the state its last use left it, instead of going home. The resting state is a function of the segment's graph alone,
+so the next execution finds the same states whenever the same description ran, and the segment has no exit barriers.
+
+| Pre-depth segment, per run (census, measured) | Stage 1 (closed, home) | Stage 2 (closed, resting at last use) |
+|---|---|---|
+| Body barriers | 279, and 1 full barrier | 43, and 1 full barrier |
+| Entry barriers | 41 | 42 |
+
+The entry barriers stay: the epochs before the segment are still open, so what it enters from depends on them. The full barrier at
+a closed execution's entry stays too. A per-resource resting state chosen by the next segment's first use (rather than the last use
+here) is the next step once neighbouring segments are closed; with only one closed segment it would only move barriers from the
+next epoch's entry into this segment's body.
+
+**Early taps.** A tap that fires before its segment's end point writes into the frame's tap record on the CPU (the clear or copy it
+saw, its colour and its gate entry), not into the slot's latch regions. The end point's commit writes the record into the run that
+submits it (`RunGate::Close/OpenDraw/OpenDispatch(run, ...)`, the explicit-run forms added here, with `GraphHost::CurrentRun()` in
+the commit). This is the defined answer for "the slot's copy may still be in flight": the slot's regions are touched only inside its
+ticket's commit, after the host's thread took the copy (it waits there, on its own thread, only when the copy's last run is not
+done; four frames back, that is not the case in a steady scene). The render thread never waits for it. A tap's record that no host
+commit takes by the next `Renderer::Begin` is a tap error (`host missing`) and is dropped; a record whose host sees another epoch
+submitted first is a tap error (`host skipped`).
+
+**Private alias pools.** The pre-depth segment's pool is 1.33 MB (one transient; 1920x1080 output, 1280x720 render, perf-taa
+scene). The shared arena is 53.6 MB, sized by the DeferredPasses epoch (53.6 MB of 67.9 MB independent), with VolumetricLighting
+(11.3 MB) and nothing else aliased. If every segment had pools of its own, the frame would hold the sum instead of the largest:
+53.6 + 11.3 + 1.3 = 66.2 MB, 12.6 MB more at this size, about 50 MB more at 4K. Proposed instead of private pools (not built): one
+placement for the whole frame's segments in their fixed order, so each frame's alias activations are the same, and an admission
+that treats a planned activation (entry from Undefined at the same placement every frame) as part of its predicted plan instead of
+planning against the ledgers.
+
+**Clears and copies.** Ghidra first (SE 1.5.97):
+- The renderer's clear colour is `RendererData::clearColor` (renderer +0x2778). `Renderer::SetClearColors` (SE 0x140d6a6d0) pushes
+  it and `SetClearColorFromArray` (SE 0x140d6a740) pops it. `Main::Draw` (SE 0x1405b1710) sets it once a frame to
+  (sky colour x scale, alpha 1): `DAT_1431d0f90..98`, written every frame by the sky's update (SE 0x1403b1670, from Sky +0x138..0x140
+  times `DAT_1415ab290`). Shadow maps push (1,1,1,1); the shadow mask pushes its own. So the kMAIN and G-buffer clear colour changes
+  per frame with the sky: latched data, not a description field.
+- The frame sequence census (`CS_ORG_FRAME_SEQUENCE`) now names each skeleton flush's views (`skeleton <group> clears: ...`). A world
+  frame clears: four shadow slices before DCLF's shadow view; a reflection face and the faces' depth before each face sky; the main
+  depth (flags 3) at Main::RenderDepth's start; kSHADOW_MASK before the shadow mask draws; kNORMAL_TAAMASK_SSRMASK and kMAIN in
+  Main::Draw (then only light culling before the Prepass anchor); the main stencil (flags 2) before the water mask; kWATER_2 after
+  the water surface, before the next ImageSpace batch; kTEMPORAL_AA_MASK and kMAIN_ONLY_ALPHA just before DCLF's forward epoch. The
+  copies: kMAIN depth into kPOST_ZPREPASS_COPY at RenderDepth's end and in Deferred::DeferredPasses; kMAIN into its copy before the
+  water surface.
+- kWATER_1/2 and the TAA mask are cleared through the native immediate context, not a patched site; their first writers are the
+  ImageSpace chain's water blend and DCLF's forward draws.
+- The kMAIN clear is not redundant in general: the sky draws over it, but interiors have no sky and the clear colour shows where
+  nothing draws.
+
+| Clear or copy (engine call) | Before: native, every frame | Now: a world frame | Colour |
+|---|---|---|---|
+| Shadow slices, depth targets 2, 3, 4 (RenderShadowmap, about 4 a frame) | an EngineShadowClear ticket each | a gated depth-clear pass per slice view at the start of DCLF's shadow view graph | depth 1 |
+| Precipitation occlusion map, depth target 10 (Precipitation::RenderOcclusion, rare) | an EngineShadowClear ticket | unchanged: a ticket (below) | depth 1 |
+| Reflection face and the faces' depth (RenderFaces, 2 a frame) | an EngineCubeClear ticket each | first passes of the SkyReflections anchor (the face sky), its next run | renderer clear colour, latched by the tap |
+| Main depth, flags 3 (RenderDepth's start) | an EngineFrameClear ticket | at the start of DCLF's Z-prepass graph | depth 1, stencil 0 |
+| kSHADOW_MASK (RenderShadowMasks) | a ticket | first pass at EngineDraws (the shadow mask draws) | latched: (1,0,0,0) exterior, 0 interior |
+| kNORMAL_TAAMASK_SSRMASK(_SWAP) and kMAIN (Main::Draw's ClearColor) | 2 tickets | first passes at the Prepass anchor (light culling, which runs between, does not touch them) | latched: (0.5,0.5,0,0); the sky colour |
+| G-buffer 2-7 (Deferred's SRTM_CLEAR) | a pass in Prepass (ORGDeferredClears) | unchanged | renderer clear colour |
+| Main stencil, flags 2 (FinishAccumulating) | a ticket | first pass at EngineDraws (the water mask) | 0 |
+| kWATER_1/2 (native context) | a ticket | first pass at ImageSpace (the chain's water blend) | latched |
+| kTEMPORAL_AA_MASK and kMAIN_ONLY_ALPHA (native context) | a ticket | unchanged: a ticket (below) | latched |
+| Depth copy in Deferred::DeferredPasses | an EngineDepthCopy ticket | a gated copy, first at DeferredPasses (run just after it) | - |
+| kMAIN into its copy (native context CopyResource) | an EngineCopy ticket | unchanged: a ticket (below) | - |
+| Depth copy at RenderDepth's end | an EngineDepthCopy ticket | unchanged: a ticket (below) | - |
+
+Why gated clear draws in the host and not load operations: the set of slices, faces and targets cleared, and their colours, change
+from frame to frame (shadow lights come and go, the clear colour follows the sky). As load operations they would be baked into the
+host's recording, which would then be recorded again whenever the set changed (DCLF's epochs are revision-driven). A gated
+fullscreen draw per view is recorded once and does work only when the frame's tap opened it.
+
+DCLF's epochs do not run in every world frame, so a DCLF host is used only when they will:
+- `Description::dclfDraws`, read at Begin: DCLF's first claims are installed (it never goes back). Before that the engine draws the
+  world itself, and every clear keeps its own ticket.
+- DCLF's per-frame decisions, made before the frame's first clear and read at each tap: no load hold is on (`DCLF::EpochsRun`; a
+  re-entry hold after a graph rebuild starts inside a frame, at the shadow coverage decision) and, for the shadow slices, DCLF draws
+  this frame's shadow views (`DCLF::DrawsShadowViews`, decided at the start of CalculateAndDrawShadowCasterLights). This is the
+  plan's shadow decision event: it completes the frame's description before the slices are cleared.
+- The main depth's clear goes to the Z-prepass only inside Main::RenderDepth (`DCLF::InDepthPass`). The engine clears the main depth
+  with the same flags elsewhere too: the inventory's 3D item and Dragonsreach both did it once more each frame (the validation tour
+  showed them as `host skipped` before this check).
+- A loading screen that starts inside a world frame ends that frame's world work (`Driver::LoadStartedThisFrame`): work still
+  waiting for its host then is abandoned with it (counted as "abandoned at a load's start", not a tap error).
+
+**What stays a ticket.** The TAA mask and kMAIN_ONLY_ALPHA clears (about one EngineFrameClear ticket a frame): cleared before DCLF's
+forward epoch every frame, but the TAA mask is also cleared when TAA is turned on, inside the ImageSpace chain, so no one host follows
+both call sites (the upscalers run showed it as `host skipped`). The kMAIN copy (about one a frame outdoors): outdoors the water
+surface's draws follow it, in Dragonsreach the ImageSpace chain does. The precipitation occlusion map's clear: Precipitation renders
+it at no fixed place before the shadow view (seen once in the validation tour). The depth copy at RenderDepth's end (about one a frame): its readers come after the first-person depth when
+the view is first person, so its host would be the last of two DCLF epochs, and an ungated copy cannot be placed after DCLF's own
+passes there reliably (the hosted passes go first; extension order is not stable). Every clear and copy outside a world frame (the
+loading screen, the main menu, a Bink movie, a frozen world's composite frames) keeps its anchor's ticket until stage 5 gives those
+frame kinds their segments.
+
+**Measurements** (perf-taa, native Vulkan, Perf-Fast, Tracy capture, one run each; off = `CS_ORG_SEGMENT_CLEARS=0
+CS_ORG_SEGMENT_REST=0`, which is stage 1; measured unless marked):
+
+| perf-taa | Off (stage 1) | On, every host (first build) | On (final) |
+|---|---|---|---|
+| fps between the marks | 123.9 | 125.6 | 124.8 |
+| Tickets a frame (census) | 51.95 | 36.91 | 40.31 |
+| `vkQueueSubmit` calls a frame (all threads) | 44.0 | 36.5 | 37.4 |
+| Batch lists a frame (census) | 55.9 | 47.9 | 46.3 |
+| Handoff lists recorded a frame | 14.1 | 9.3 | 9.2 |
+| Render thread graph time (`SubmitEpoch`), ms a frame | 0.881 | 0.867 | 0.950 |
+| Render thread busy, ms a frame | 3.32 | 3.26 | 3.37 |
+| Submission thread busy, ms a frame | 3.44 | 3.53 | 4.10 |
+| of it `FinishTicket`, ms a frame | 3.21 | 3.26 | 3.23 |
+| Host thread busy, ms a frame | 3.03 | 2.78 | 3.03 |
+| Pre-depth segment body barriers a run | 279 + 1 full | 43 + 1 full | 43 + 1 full |
+| Tap errors | 0 | 0 | 0 |
+| Segment recordings in the steady window | 0 | 0 | 0 |
+
+The first build hosted the TAA mask, kMAIN_ONLY_ALPHA, the kMAIN copy and the precipitation occlusion map too; the checks showed
+those cannot follow one host (below), and the final build keeps them on tickets: about 3.4 more tickets a frame than the first
+build, 11.6 fewer than stage 1. The final run's submission-thread busy time rose by 0.66 ms while its `FinishTicket` time did not
+move; the difference is outside the tickets and was not explained in one sample.
+
+The submission thread did not get cheaper. The removed tickets cost it about 0.47 ms a frame (per epoch, from `FinishTicket`); their
+hosts grew by about 0.41 ms (admission of the extra resources in every run of the host, ImageSpace's 13 runs above all, and the
+hosted passes recorded at execution in the live anchors), and the rest is inside one sample's noise (DCLF's forward recording moved
+by 0.1 ms between the runs with nothing hosted that records there). The ticket and submission counts fall as expected (15 tickets,
+7.5 submissions); the frame-rate difference is inside one sample's noise.
+
+**Checks** (the final build; earlier builds where marked):
+- native-validation: the known 20x `VUID-vkCmdDraw-None-09600` and the BackBuffer layout warning, nothing else; 0 tap errors over
+  the tour (loads, the inventory, the map, a save and its load, Dragonsreach). Shots by eye against stage 1's: the same; Dragonsreach's
+  brightness varies between runs in stage 1 too (86 to 99 mean over ten runs).
+- native-river: 0 tap errors, shots match stage 1's by eye (water, reflections). native-upscalers: 0 tap errors, DLSS, FSR, TAA and
+  XeSS shots match by eye. native-d3d12-quick, the loading-thread run (`CS_ORG_LOADING_THREAD=1`) and guest-quick: passed, 0 tap
+  errors (guest has no hosting).
+- native-quick: none of the final build's ten 400-frame runs registered the upscaler before the shot (`cs.upscaling registered`
+  never appears in them), so they prove nothing for the image beyond 0 tap errors. Two runs of the first hosting build did register
+  it (h2, c2q1) and were clean by eye; that build hosted more than the final one. No "clean" claim on three registered runs of the
+  final build.
+- The census found what each guard is for: DCLF's epochs not running before its first claims and in load holds, the main depth
+  cleared by the inventory's 3D item and in Dragonsreach outside RenderDepth, the TAA mask cleared at a TAA switch, the kMAIN copy
+  indoors, and the precipitation occlusion map, each at first as `host skipped`/`host missing`.
+- ORG: the suite passes but the three known lease hangs and `HeadlessBenchmark`'s Debug timeout (Nsight layer disabled); the new
+  `PersistentGraphTests` case passes.
+
+**What stage 3 should know.**
+- **Hosts are anchors that stage 3 moves.** The skeleton registers clients first at SkyReflections, Prepass, EngineDraws,
+  ImageSpace and DeferredPasses (`<group>@<host>` ids). When those anchors become members of S0, S2 and S3 their hosted clients go
+  with them: they are gated draws (`gpuGated`), so they work recorded ahead. The hosted depth copy (at DeferredPasses) is a gated
+  copy, which has no indirect form: in a recorded-ahead segment it would run every frame. It happens in every world frame, so that
+  is correct, but it needs a description bit if a frame can lack it.
+- **Still tickets in a world frame:** the TAA mask and kMAIN_ONLY_ALPHA clears, the kMAIN copy, the depth copy at RenderDepth's end
+  and the rare precipitation occlusion clear. Each needs its segment (S3, S4) or a description field to pick its place.
+- **The copy at RenderDepth's end** is the one clear or copy left as a ticket in a world frame. Its place is S2's start, after the
+  last depth writer (the first-person depth epoch when the view is first person): a description field for the first-person view
+  decides which.
+- **`RenderGraphRuntime::SetEpochHooks`** is where another module writes its run data into a DCLF epoch's commit, and where the
+  order guard (`host skipped`) looks at every submission. `AllowedBetween` lists the epochs that may run between a tap and its host
+  (light culling before Prepass); a new segment that moves an epoch between a tap and its host shows as a `host skipped` error.
+- **Hosting costs admission in every run of the host.** ImageSpace (13 runs) pays for the kWATER clear's resources in each. Once
+  the post chain is declared (stage 4) the clear belongs to the water blend's instance alone.
+- **The description has `dclfDraws`.** A segment whose clients DCLF's epochs replace should read it at Begin as the hosts do.
+- **Resting at last use** is on for every closed segment. Once two neighbouring segments are closed, a resting state chosen by the
+  next segment's first use is the next step for the entry barriers.
+- **Private pools** cost 1.33 MB for S1; the sum across segments would be about 12.6 MB over the shared arena at 1080p output. The
+  proposal above (one frame-wide placement, activations in the predicted plan) is the alternative to weigh before every segment
+  gets pools.

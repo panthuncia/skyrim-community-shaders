@@ -67,6 +67,10 @@ namespace RenderGraph::Frame
 	{
 		Kind kind = Kind::MainMenu;
 		bool capture = false;      // FrozenWorld: this frame draws the world once, for the frozen background
+		// Drawcall Limit Fix draws the world (its first claims are installed; it never stops once started). Its epochs then run in a
+		// world frame, so the clears they host run there. Before that the engine draws the world itself, and every clear keeps its
+		// own ticket at the engine's call.
+		bool dclfDraws = false;
 		std::uint64_t frame = 0;   // frames begun so far (every Renderer::Begin, any thread)
 		std::uint32_t slot = 0;    // frame modulo the frames in flight: the published copy and latch regions this frame uses
 		std::uint32_t parity = 0;  // frame modulo 2: a slot always has the same parity
@@ -82,6 +86,6 @@ namespace RenderGraph::Frame
 	/** @brief The fields that differ, as "name old -> new" joined by ", "; empty when equal. */
 	std::string DiffFields(const SegmentFields& a_before, const SegmentFields& a_after);
 
-	/** @brief The frame-level fields that differ (kind, capture), the same way. The frame number, slot and parity are left out. */
+	/** @brief The frame-level fields that differ (kind, capture, DCLF draws), the same way. The frame number, slot and parity are left out. */
 	std::string DiffFrame(const Description& a_before, const Description& a_after);
 }

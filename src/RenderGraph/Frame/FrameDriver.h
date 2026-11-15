@@ -35,6 +35,12 @@ namespace RenderGraph::Frame::Driver
 	/** @brief ServingThread::SetLoadingScreenActive's detour: a_active before the loop starts, false once it ended. */
 	void OnLoadingScreen(bool a_active);
 
+	/**
+	 * @brief Whether a loading screen started during the current frame (OnLoadingScreen). The engine then leaves the rest of the frame's
+	 * world work undone: work waiting for an epoch of that world work is abandoned with it, not a tap error. Any thread.
+	 */
+	bool LoadStartedThisFrame();
+
 	/** @brief Marks the calling thread as inside BSMoviePlayer::Tick: a Begin from there begins a Bink frame. */
 	class MovieTickScope
 	{
@@ -60,14 +66,22 @@ namespace RenderGraph::Frame::Driver
 		Missing,           // the description declared a segment, and its tap did not fire by the next Begin
 		SlotMismatch,      // the segment's run was not the frame slot's published copy
 		NoRecording,       // the segment had no recording for its description at its tap
+		HostSkipped,       // a clear or copy waiting for its host epoch saw another epoch submitted first
+		HostMissing,       // a clear or copy waiting for its host epoch was still waiting at the next Begin (dropped)
 		Count
 	};
 
 	/** @brief "not declared", "repeated", ... */
 	const char* TapErrorName(TapError a_error);
 
-	/** @brief Counts and logs a tap error (render owner). a_what names the tap or the client. */
+	/**
+	 * @brief Counts and logs a tap error (render owner). a_what names the tap or the client. a_segment SegmentId::Count: work hosted
+	 * in another epoch, outside the declared segments.
+	 */
 	void NoteTapError(TapError a_error, SegmentId a_segment, std::string_view a_what);
+
+	/** @brief a_count clears or copies a tap handed to host a_host (a static name) were written at its commit (render owner). */
+	void NoteHosted(const char* a_host, std::uint32_t a_count);
 
 	/** @brief A segment's end tap fired this frame (render owner). Returns false when it already had: a Repeated tap error. */
 	bool NoteTap(SegmentId a_segment, std::string_view a_tap);

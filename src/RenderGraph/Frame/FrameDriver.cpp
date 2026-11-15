@@ -1,12 +1,20 @@
 #include "RenderGraph/Frame/FrameDriver.h"
 
 #include "RenderGraph/Engine/Bink/Bink.h"
+#include "RenderGraph/Engine/Skeleton/Skeleton.h"
 #include "RenderGraph/FrameAnchors.h"
 #include "RenderGraph/RenderGraphRuntime.h"
 
 #include <array>
 #include <atomic>
 #include <mutex>
+#include <vector>
+
+namespace DCLF
+{
+	// Features/DrawcallLimitFix/Core/Scene/FrameView: whether Drawcall Limit Fix draws the world now. Render thread.
+	bool DrawsWorld();
+}
 
 namespace RenderGraph::Frame::Driver
 {
@@ -40,6 +48,9 @@ namespace RenderGraph::Frame::Driver
 			std::array<std::uint64_t, kKinds> frames{};
 			std::array<SegmentCounts, kSegments> segments{};
 			std::array<std::uint64_t, kErrors> errors{};
+			std::vector<std::pair<const char*, std::uint64_t>> hosted;  // NoteHosted, by host name, since the last report
+			std::atomic<std::uint64_t> currentFrame{ 0 };  // current.frame, for other threads
+			std::atomic<std::uint64_t> loadStart{ 0 };     // the frame a loading screen started in, plus one (0: none yet)
 			std::atomic<std::uint64_t> errorsTotal{ 0 };
 			std::uint64_t kindChanges = 0;
 			std::uint32_t errorLines = 0;
@@ -140,7 +151,17 @@ namespace RenderGraph::Frame::Driver
 
 	void OnLoadingScreen(bool a_active)
 	{
-		Get().loading.store(a_active, std::memory_order_release);
+		auto& state = Get();
+		state.loading.store(a_active, std::memory_order_release);
+		// A load that starts inside a world frame ends that frame's world work where it is (LoadStartedThisFrame).
+		if (a_active)
+			state.loadStart.store(state.currentFrame.load(std::memory_order_acquire) + 1, std::memory_order_release);
+	}
+
+	bool LoadStartedThisFrame()
+	{
+		auto& state = Get();
+		return state.loadStart.load(std::memory_order_acquire) == state.currentFrame.load(std::memory_order_acquire) + 1;
 	}
 
 	void OnBegin()
@@ -160,14 +181,17 @@ namespace RenderGraph::Frame::Driver
 		next.slot = static_cast<std::uint32_t>(next.frame % RenderGraphRuntime::kGameFramesInFlight);
 		next.parity = static_cast<std::uint32_t>(next.frame & 1);
 		next.kind = DecideKind(state, next.capture);
+		next.dclfDraws = (next.kind == Kind::World || next.kind == Kind::FrozenWorld) && DCLF::DrawsWorld();
 		// The segments' fields, and a recording asked for each declared one that has none.
 		FrameAnchors::BeginFrame(next);
+		// Hosted clears and copies the last frame left waiting are tap errors.
+		RenderGraph::Engine::Skeleton::BeginFrame();
 		{
 			const std::lock_guard lock(state.mutex);
 			++state.frames[static_cast<std::size_t>(next.kind)];
 			for (std::uint32_t s = 0; s < kSegments; ++s)
 				state.segments[s].declared += next.segments[s].declared;
-			if (state.began && next.kind != state.current.kind) {
+			if (state.began && (next.kind != state.current.kind || next.dclfDraws != state.current.dclfDraws)) {
 				// Kinds change at a menu, a load or a movie: rare, but a flapping test would flood the log.
 				if (++state.kindChanges <= 256 || state.kindChanges % 1000 == 0)
 					logger::info("[ORG] frame kind: {} (frame {}{})", DiffFrame(state.current, next), next.frame, next.capture ? ", draws the frozen background" : "");
@@ -177,6 +201,7 @@ namespace RenderGraph::Frame::Driver
 		}
 		state.previous = state.current;
 		state.current = next;
+		state.currentFrame.store(next.frame, std::memory_order_release);
 		state.tapped.fill(false);
 		state.began = true;
 	}
@@ -201,6 +226,10 @@ namespace RenderGraph::Frame::Driver
 			return "slot mismatch";
 		case TapError::NoRecording:
 			return "no recording";
+		case TapError::HostSkipped:
+			return "host skipped";
+		case TapError::HostMissing:
+			return "host missing";
 		default:
 			return "?";
 		}
@@ -214,8 +243,21 @@ namespace RenderGraph::Frame::Driver
 		++state.errors[static_cast<std::size_t>(a_error)];
 		// The first 64 lines, then one in a thousand: a test greps "[ORG] frame tap error"; the census line has the counts.
 		if (++state.errorLines <= 64 || state.errorLines % 1000 == 0)
-			logger::error("[ORG] frame tap error ({}): {} segment, {}; frame {} ({}, slot {})", TapErrorName(a_error), SegmentName(a_segment), a_what,
-				state.current.frame, KindName(state.current.kind), state.current.slot);
+			logger::error("[ORG] frame tap error ({}): {}, {}; frame {} ({}, slot {})", TapErrorName(a_error),
+				a_segment < SegmentId::Count ? fmt::format("{} segment", SegmentName(a_segment)) : std::string("hosted work"), a_what, state.current.frame,
+				KindName(state.current.kind), state.current.slot);
+	}
+
+	void NoteHosted(const char* a_host, std::uint32_t a_count)
+	{
+		auto& state = Get();
+		const std::lock_guard lock(state.mutex);
+		for (auto& [host, count] : state.hosted)
+			if (host == a_host) {
+				count += a_count;
+				return;
+			}
+		state.hosted.emplace_back(a_host, a_count);
 	}
 
 	bool NoteTap(SegmentId a_segment, std::string_view a_tap)
@@ -282,8 +324,18 @@ namespace RenderGraph::Frame::Driver
 			if (state.errors[e])
 				errors += fmt::format("{}{} {}", errors.empty() ? "" : ", ", TapErrorName(static_cast<TapError>(e)), state.errors[e]);
 		}
-		logger::info("[ORG] declared frame: frames by kind: {}{}; tap errors {}{}{}{} (total {})", kinds.empty() ? "none" : kinds, segments, errorCount,
-			errors.empty() ? "" : " (", errors, errors.empty() ? "" : ")", state.errorsTotal.load(std::memory_order_relaxed));
+		std::uint64_t frames = 0;
+		for (const auto count : state.frames)
+			frames += count;
+		std::string hosted;
+		for (auto& [host, count] : state.hosted) {
+			if (count)
+				hosted += fmt::format("{}{} {:.2f}", hosted.empty() ? "" : ", ", host, frames ? static_cast<double>(count) / static_cast<double>(frames) : 0.0);
+			count = 0;
+		}
+		logger::info("[ORG] declared frame: frames by kind: {}{}; hosted clears and copies a frame: {}; tap errors {}{}{}{} (total {})", kinds.empty() ? "none" : kinds,
+			segments, hosted.empty() ? "none" : hosted, errorCount, errors.empty() ? "" : " (", errors, errors.empty() ? "" : ")",
+			state.errorsTotal.load(std::memory_order_relaxed));
 		state.frames = {};
 		state.segments = {};
 		state.errors = {};

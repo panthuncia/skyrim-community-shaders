@@ -37,11 +37,16 @@ namespace RenderGraph
 		open = std::make_unique<std::atomic<std::uint64_t>[]>(static_cast<std::size_t>(org::Runtime::kMaxSlots) * words);
 	}
 
-	void RunGate::Write(std::uint32_t a_entry, const std::array<std::uint32_t, 4>& a_words, bool a_work) const
+	org::RunRef RunGate::Current()
+	{
+		return RenderGraphRuntime::Get().Host()->CurrentRun();
+	}
+
+	void RunGate::Write(const org::RunRef& a_run, std::uint32_t a_entry, const std::array<std::uint32_t, 4>& a_words, bool a_work) const
 	{
 		if (a_entry >= entries)
 			return;
-		const auto run = RenderGraphRuntime::Get().Host()->CurrentRun();
+		const auto& run = a_run;
 		latch->Write(run, Offset(a_entry), std::as_bytes(std::span(a_words)));
 		if (run.lease >= org::Runtime::kMaxSlots)
 			return;
@@ -57,7 +62,12 @@ namespace RenderGraph
 
 	void RunGate::Close() const
 	{
-		const auto run = RenderGraphRuntime::Get().Host()->CurrentRun();
+		Close(Current());
+	}
+
+	void RunGate::Close(const org::RunRef& a_run) const
+	{
+		const auto& run = a_run;
 		const auto bytes = latch->Bytes(run);
 		std::memset(bytes.data(), 0, static_cast<std::size_t>(entries) * kEntryBytes);
 		if (run.lease >= org::Runtime::kMaxSlots)
@@ -76,12 +86,22 @@ namespace RenderGraph
 
 	void RunGate::OpenDispatch(std::uint32_t a_entry, std::uint32_t a_x, std::uint32_t a_y, std::uint32_t a_z) const
 	{
-		Write(a_entry, { a_x, a_y, a_z, 0 }, a_x && a_y && a_z);
+		OpenDispatch(Current(), a_entry, a_x, a_y, a_z);
 	}
 
 	void RunGate::OpenDraw(std::uint32_t a_entry, std::uint32_t a_vertices, std::uint32_t a_instances) const
 	{
-		Write(a_entry, { a_vertices, a_instances, 0, 0 }, a_vertices && a_instances);
+		OpenDraw(Current(), a_entry, a_vertices, a_instances);
+	}
+
+	void RunGate::OpenDispatch(const org::RunRef& a_run, std::uint32_t a_entry, std::uint32_t a_x, std::uint32_t a_y, std::uint32_t a_z) const
+	{
+		Write(a_run, a_entry, { a_x, a_y, a_z, 0 }, a_x && a_y && a_z);
+	}
+
+	void RunGate::OpenDraw(const org::RunRef& a_run, std::uint32_t a_entry, std::uint32_t a_vertices, std::uint32_t a_instances) const
+	{
+		Write(a_run, a_entry, { a_vertices, a_instances, 0, 0 }, a_vertices && a_instances);
 	}
 
 	void RunGate::Dispatch(org::RecordingContext& a_recording, const ComputeProgram& a_program, std::span<const std::uint32_t> a_constants, std::uint32_t a_entry) const

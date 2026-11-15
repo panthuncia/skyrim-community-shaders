@@ -71,6 +71,7 @@ namespace RenderGraph::Frame
 		std::string out;
 		Append(out, "kind", KindName(a_before.kind), KindName(a_after.kind));
 		Append(out, "capture", a_before.capture ? "yes" : "no", a_after.capture ? "yes" : "no");
+		Append(out, "DCLF draws", a_before.dclfDraws ? "yes" : "no", a_after.dclfDraws ? "yes" : "no");
 		return out;
 	}
 }

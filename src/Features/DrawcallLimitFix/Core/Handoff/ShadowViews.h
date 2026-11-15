@@ -262,6 +262,8 @@ namespace DCLF
 		 * false while the scene revision has no shape for their layout). When not, the engine draws every one whole; nothing is withheld.
 		 */
 		void SetDrawable(bool a_drawable);
+		/** @brief After SetDrawable: whether DCLF draws this frame's shadow views (its capacity is not zero and they are drawable). */
+		bool DclfDraws() const { return drawable && viewCapacity != 0; }
 		/**
 		 * @brief The engine kept a_light in a_slots slots from a_firstSlot (FUN_1414a3fb0) and accumulates it next: its views covered and
 		 * the renderers published with them, before its registrations.

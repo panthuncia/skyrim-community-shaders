@@ -580,6 +580,12 @@ namespace FrameAnchors
 	bool IsMainThread();
 
 	/**
+	 * @brief The segment (a RenderGraphRuntime::Segment value) whose epoch an anchor's runs submit: its own, or the declared segment
+	 * that holds it (SegmentsOn). Any thread, after Initialize.
+	 */
+	std::uint32_t RunSegment(Anchor a_anchor);
+
+	/**
 	 * @brief The frame driver, at Renderer::Begin (RenderGraph/Frame/FrameDriver.h): fills a_frame's segment fields from the clients'
 	 * declared predicates and the segments' built graphs, and asks the host's thread for the recording of every declared segment
 	 * whose description has none yet. Off the render owner, and with segments off, nothing is declared.

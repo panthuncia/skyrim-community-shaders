@@ -8,6 +8,19 @@
 #include "Features/DrawcallLimitFix/Core/Render/IndirectDraws.h"
 #include "Features/DrawcallLimitFix/Core/Settings/Toggles.h"
 
+namespace DCLF
+{
+	/**
+	 * @brief Whether Drawcall Limit Fix draws this frame's shadow views: decided at the start of CalculateAndDrawShadowCasterLights
+	 * (BeginShadowViews, DecideShadowCoverage), before the engine's first shadow map clear. The engine skeleton reads it there: the
+	 * shadow clears go into DCLF's shadow epoch only when that epoch draws the views. Render thread.
+	 */
+	bool DrawsShadowViews()
+	{
+		return ActiveToggles().shadows && ShadowViews::Get().DclfDraws();
+	}
+}
+
 namespace DCLF::Draws
 {
 	void BeginShadowViews()

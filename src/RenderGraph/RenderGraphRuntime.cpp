@@ -2531,13 +2531,19 @@ bool RenderGraphRuntime::Initialize()
 			if (const auto segments = FrameAnchors::SegmentEpochs(); !segments.empty()) {
 				revisionEpochs.insert(revisionEpochs.end(), segments.begin(), segments.end());
 				const bool closed = Switches::Number("CS_ORG_SEGMENTS", 1) != 2;
+				// Closed segments rest each resource where their last use left it (CS_ORG_SEGMENT_REST, default on; =0 goes home
+				// as before). Going home cost the pre-depth segment 279 exit barriers a run against 43 open.
+				const bool rest = closed && !Switches::Off("CS_ORG_SEGMENT_REST");
 				if (closed)
 					state->host->SetClosedEpochs(segments);
+				if (rest)
+					state->host->SetRestAtLastUseEpochs(segments);
 				// Their transients in pools of their own: in the shared arena another epoch's transients took their memory between two
 				// frames, so every admission found alias activations and planned against the ledgers (perf-taa: 63 us a submission
 				// closed, 27 open, against 12 with pools of their own).
 				state->host->SetPrivateAliasEpochs(segments);
-				logger::info("[ORG] frame segments: epochs {} are revision-driven and {}", fmt::join(segments, ","), closed ? "closed" : "open (CS_ORG_SEGMENTS=2)");
+				logger::info("[ORG] frame segments: epochs {} are revision-driven and {}", fmt::join(segments, ","),
+					closed ? (rest ? "closed, resting at last use" : "closed, going home (CS_ORG_SEGMENT_REST=0)") : "open (CS_ORG_SEGMENTS=2)");
 			}
 			logger::info("[ORG] async epochs: {}; revision-driven: {}", fmt::join(epochs, ","), fmt::join(revisionEpochs, ","));
 			// In DXVK's own command stream unless CS_ORG_IN_STREAM=0 (or DXVK takes no external commands); a list of epochs (3,1) puts only
@@ -3259,12 +3265,26 @@ bool RenderGraphRuntime::ExecuteEpoch(Segment a_segment, const std::function<voi
 	return TryExecuteEpoch(a_segment, a_beforePrepare, std::move(a_resourceOwner)) == EpochResult::Submitted;
 }
 
+namespace
+{
+	std::atomic<void (*)(RenderGraphRuntime::Segment)> epochStartingHook{ nullptr };
+	std::atomic<void (*)(RenderGraphRuntime::Segment)> epochCommitHook{ nullptr };
+}
+
+void RenderGraphRuntime::SetEpochHooks(EpochHooks a_hooks)
+{
+	epochStartingHook.store(a_hooks.starting, std::memory_order_release);
+	epochCommitHook.store(a_hooks.commit, std::memory_order_release);
+}
+
 RenderGraphRuntime::EpochResult RenderGraphRuntime::TryExecuteEpoch(Segment a_segment, const std::function<void(org::RenderGraph&)>& a_beforePrepare,
 	std::shared_ptr<const void> a_resourceOwner)
 {
 	ZoneScopedN("CS.ORG.ExecuteEpoch");
 	if (!IsActive())
 		return EpochResult::Stopped;
+	if (const auto starting = epochStartingHook.load(std::memory_order_acquire))
+		starting(a_segment);
 	// Regions (FrameAnchors.h): the anchor runs a region holds come before this epoch's work.
 	FrameAnchors::FlushRegions("another epoch", static_cast<std::uint32_t>(a_segment));
 	FrameAnchors::NoteEpochSubmitted(static_cast<std::uint32_t>(a_segment));
@@ -3407,6 +3427,9 @@ RenderGraphRuntime::EpochResult RenderGraphRuntime::TryExecuteEpoch(Segment a_se
 		if (a_beforePrepare) {
 			beforePrepare = [&](org::RenderGraph& a_graph) {
 				ScopedPerfEvent inputsEvent(Impl::InputsLabel(a_segment));
+				// Work other modules keep in this epoch's graph writes its run's data first (SetEpochHooks).
+				if (const auto commit = epochCommitHook.load(std::memory_order_acquire))
+					commit(a_segment);
 				a_beforePrepare(a_graph);
 			};
 		}
@@ -4119,6 +4142,7 @@ std::shared_ptr<const void> RenderGraphRuntime::DeviceOwner() const { return {};
 bool RenderGraphRuntime::ExecuteEpoch(Segment, const std::function<void(org::RenderGraph&)>&,
 	std::shared_ptr<const void>) { return false; }
 RenderGraphRuntime::EpochResult RenderGraphRuntime::TryExecuteEpoch(Segment, const std::function<void(org::RenderGraph&)>&, std::shared_ptr<const void>) { return EpochResult::Stopped; }
+void RenderGraphRuntime::SetEpochHooks(EpochHooks) {}
 bool RenderGraphRuntime::DescribeResource(IUnknown*, DxvkOrgInteropResourceInfo&) { return false; }
 bool RenderGraphRuntime::DescribeResources(std::span<IUnknown* const>, std::span<DxvkOrgInteropResourceInfo>, std::span<HRESULT>) { return false; }
 bool RenderGraphRuntime::PinlessImports() const { return false; }

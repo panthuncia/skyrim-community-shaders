@@ -3,6 +3,7 @@
 // shading fields') gathered for their adoption, and load screens noted. Render thread.
 
 #include "Features/DrawcallLimitFix/Core/Scene/FrameView/FrameView.h"
+#include "Features/DrawcallLimitFix/Core/Engine/ShellState.h"
 #include "Features/DrawcallLimitFix/Diagnostics/Zones.h"
 #include "Features/DrawcallLimitFix/Core/Settings/Toggles.h"
 #include "Features/DrawcallLimitFix/Diagnostics/Hooks.h"
@@ -16,6 +17,38 @@
 #include "Features/DrawcallLimitFix/Core/Extensions/ShadowViews.h"
 #include "Features/DrawcallLimitFix/Core/Shading/FrameGlobals.h"
 #include "Features/DrawcallLimitFix/Core/Extensions/ShadingFields.h"
+
+namespace DCLF
+{
+	/**
+	 * @brief Whether Drawcall Limit Fix draws the world now: its first claims are installed (FrameView::NotDrawingYet is false). The
+	 * frame driver reads it at Renderer::Begin (RenderGraph/Frame/FrameDescription.h, dclfDraws). Render thread.
+	 */
+	bool DrawsWorld()
+	{
+		return !Scene::FrameView::Get().NotDrawingYet();
+	}
+
+	/**
+	 * @brief Whether Drawcall Limit Fix's epochs run in this frame from here on: it draws the world and no load hold is on. A hold can
+	 * start inside a frame (a re-entry, decided at the shadow coverage decision, before the frame's first clear), and then DCLF's epochs
+	 * are not submitted. The engine skeleton reads it at each clear. Render thread.
+	 */
+	bool EpochsRun()
+	{
+		return DrawsWorld() && !LoadHold::Active();
+	}
+
+	/**
+	 * @brief Whether the engine is inside Main::RenderDepth (DrawcallLimitFix's hook), whose depth DCLF's Z-prepass draws. The main
+	 * depth is cleared elsewhere too (a menu's 3D scene, an interior's second view), and only RenderDepth's clear is the Z-prepass's.
+	 * Render thread.
+	 */
+	bool InDepthPass()
+	{
+		return ShellState::Passes().inDepthPass;
+	}
+}
 
 namespace DCLF::Scene
 {
