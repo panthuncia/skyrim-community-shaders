@@ -299,6 +299,19 @@ State::TonemapOwner State::GetTonemapOwner()
 	return *tonemapOwner;
 }
 
+State::TonemapOwner State::PeekTonemapOwner() const
+{
+	if (tonemapOwner)
+		return *tonemapOwner;
+	auto& effects11 = globals::features::effects11;
+	auto& postProcessing = globals::features::postProcessing;
+	if (effects11.loaded && !IsMainOrLoadingMenuOpen() && effects11.WantsTonemapOwnership())
+		return TonemapOwner::kEffects11;
+	if (postProcessing.loaded && postProcessing.WantsTonemapOwnership())
+		return TonemapOwner::kPostProcessing;
+	return TonemapOwner::kVanilla;
+}
+
 bool State::HandlePostProcessing(RE::RENDER_TARGET a_input, RE::RENDER_TARGET a_output)
 {
 	if (GetTonemapOwner() != TonemapOwner::kEffects11)

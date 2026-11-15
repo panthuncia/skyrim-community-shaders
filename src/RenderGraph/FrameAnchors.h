@@ -260,6 +260,11 @@ namespace FrameAnchors
 		PassKind kind = PassKind::Compute;
 		PassQueue queue = PassQueue::Default;
 		std::function<std::shared_ptr<org::RenderPass>()> make;
+		// In place of make, for a client with instances (ClientDesc::maxInstances above 1): the pass for one instance. A declared
+		// segment makes it once per instance, named "<name>.i<instance>"; an anchor's own epoch makes instance 0 only (its hook runs
+		// once per run there). Each instance reads its own gate entries and latch regions, which the commit of that instance's tap
+		// writes (TapInstance).
+		std::function<std::shared_ptr<org::RenderPass>(std::uint32_t a_instance)> makeInstance;
 		bool once = false;
 		bool atExecution = false;
 		// Every draw or dispatch the pass records goes through its client's run gate (or a latch the commit writes, which reads zero
@@ -320,6 +325,14 @@ namespace FrameAnchors
 		// passes record only their barriers in the segment's recording, and its commit is not called; an active client at the tap is
 		// then a tap error. Its per-run work is still behind its run gates. Null: on whenever registered.
 		std::function<bool()> declared;
+		// Declared segments: a client whose hook repeats inside one segment run (each ImageSpace effect call, each reflection face) has
+		// instances. maxInstances is how many instances its passes are made for at a build (PassDesc::makeInstance); instances, read
+		// at the frame's start like declared, is how many do work this frame. The segment's k-th tap of the client's step this frame
+		// is instance k: its commit writes instance k's gate entries and latch regions (TapInstance), never the anchor's single set.
+		// A tap past the declared count is a tap error and its commit is not called. Instances past the count record only their
+		// barriers. A client without instances (maxInstances 1) may be tapped once per segment run.
+		std::uint32_t maxInstances = 1;
+		std::function<std::uint32_t()> instances;
 	};
 
 	/** @brief An anchor's name, as the logs and docs give it ("DeferredPasses"). */
@@ -580,6 +593,19 @@ namespace FrameAnchors
 
 	/** @brief Whether the calling thread is the engine's main thread (LatchMainThread). Any thread. */
 	bool IsMainThread();
+
+	/**
+	 * @brief Inside a client's commit at a declared segment's tap: the instance the commit writes, that is how many earlier taps of
+	 * the same step the segment's run had this frame (0 for the first). A client with instances (ClientDesc::maxInstances) opens
+	 * instance k's gate entries and writes instance k's latch regions (InstanceEntry). 0 outside a segment's commit. Render owner.
+	 */
+	std::uint32_t TapInstance();
+
+	/** @brief The gate entry (or latch region index) of a_entry for instance a_instance, a_perInstance entries an instance. */
+	constexpr std::uint32_t InstanceEntry(std::uint32_t a_instance, std::uint32_t a_perInstance, std::uint32_t a_entry)
+	{
+		return a_instance * a_perInstance + a_entry;
+	}
 
 	/**
 	 * @brief The segment (a RenderGraphRuntime::Segment value) whose epoch an anchor's runs submit: its own, or the declared segment

@@ -24,6 +24,7 @@ bool RenderGraph::Engine::ImageSpace::Requested()
 #	include "RenderGraph/Engine/Pipeline/Descriptions.h"
 #	include "RenderGraph/Engine/Pipeline/StateConversion.h"
 #	include "RenderGraph/Engine/Tripwire/Tripwire.h"
+#	include "RenderGraph/Frame/PostChain.h"
 #	include "RenderGraph/FrameAnchors.h"
 #	include "RenderGraph/ProgramCache.h"
 #	include "RenderGraph/PublishedResources.h"
@@ -3363,6 +3364,7 @@ namespace RenderGraph::Engine::ImageSpace
 		{
 			static void thunk(void* a_effect, void* a_quad, void* a_param)
 			{
+				Frame::PostChain::NoteShader(a_effect);
 				if (!a_effect || !Usable()) {
 					func(a_effect, a_quad, a_param);
 					return;
@@ -3391,6 +3393,7 @@ namespace RenderGraph::Engine::ImageSpace
 		{
 			static void thunk(RE::BSImagespaceShader* a_shader, void* a_geometry)
 			{
+				Frame::PostChain::NoteShader(a_shader);
 				if (!a_shader || !Usable()) {
 					func(a_shader, a_geometry);
 					return;
@@ -3415,6 +3418,7 @@ namespace RenderGraph::Engine::ImageSpace
 		{
 			static void thunk(RE::BSImagespaceShader* a_shader, std::uint32_t a_x, std::uint32_t a_y, std::uint32_t a_z)
 			{
+				Frame::PostChain::NoteShader(a_shader);
 				if (!a_shader || !Usable()) {
 					func(a_shader, a_x, a_y, a_z);
 					return;

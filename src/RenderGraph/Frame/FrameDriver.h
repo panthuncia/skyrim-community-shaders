@@ -69,6 +69,8 @@ namespace RenderGraph::Frame::Driver
 		HostSkipped,       // a clear or copy waiting for its host epoch saw another epoch submitted first
 		HostMissing,       // a clear or copy waiting for its host epoch was still waiting at the next Begin (dropped)
 		LostToBuild,       // a build of a segment's graph gave its held ticket back between two of its taps (what they wrote is dropped)
+		InstanceNotDeclared,  // a step's hook fired more often in one segment run than the description declared instances of its client
+		PostNotDeclared,      // the world post chain drew other ImageSpace effects than its post description declared (PostChain.h)
 		Count
 	};
 

@@ -1,6 +1,7 @@
 #include "RenderGraph/Engine/LoadingScreen/LoadingScreen.h"
 
 #include "RenderGraph/Frame/FrameDriver.h"
+#include "RenderGraph/Frame/PostChain.h"
 #include "RenderGraph/FrameAnchors.h"
 #include "RenderGraph/Switches.h"
 
@@ -78,5 +79,6 @@ namespace RenderGraph::Engine::LoadingScreen
 		stl::detour_thunk<RendererBegin>(REL::RelocationID(75460, 77245));
 		stl::detour_thunk<SetLoadingScreenActive>(REL::RelocationID(34552, 35407));
 		Frame::Driver::Install();
+		Frame::PostChain::Install();
 	}
 }

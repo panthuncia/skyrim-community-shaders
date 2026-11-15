@@ -46,6 +46,12 @@ namespace RenderGraph::Frame
 		mix(a_fields.versions);
 		mix(a_fields.clients);
 		mix(a_fields.clientsOn);
+		for (std::size_t i = 0; i < a_fields.instances.size(); i += 8) {
+			std::uint64_t word = 0;
+			for (std::size_t k = 0; k < 8; ++k)
+				word |= static_cast<std::uint64_t>(a_fields.instances[i + k]) << (8 * k);
+			mix(word);
+		}
 		mix(a_fields.foreignOn);
 		mix(a_fields.passes);
 		return hash ? hash : 1;
@@ -69,8 +75,48 @@ namespace RenderGraph::Frame
 		Append(out, "versions", std::to_string(a_before.versions), std::to_string(a_after.versions));
 		Append(out, "clients", std::to_string(a_before.clients), std::to_string(a_after.clients));
 		Append(out, "clientsOn", fmt::format("{:#x}", a_before.clientsOn), fmt::format("{:#x}", a_after.clientsOn));
+		const auto instances = [](const SegmentFields& a_fields) {
+			std::string text;
+			for (std::size_t i = 0; i < a_fields.instances.size(); ++i)
+				if (a_fields.instances[i])
+					text += fmt::format("{}{}:{}", text.empty() ? "" : " ", i, a_fields.instances[i]);
+			return text.empty() ? std::string("none") : text;
+		};
+		Append(out, "instances", instances(a_before), instances(a_after));
 		Append(out, "foreignOn", fmt::format("{:#x}", a_before.foreignOn), fmt::format("{:#x}", a_after.foreignOn));
 		Append(out, "passes", fmt::format("{:#x}", a_before.passes), fmt::format("{:#x}", a_after.passes));
+		return out;
+	}
+
+	std::string DiffPost(const PostFields& a_before, const PostFields& a_after, bool a_parity)
+	{
+		std::string out;
+		const auto flag = [&](const char* a_name, bool a_old, bool a_new) { Append(out, a_name, a_old ? "yes" : "no", a_new ? "yes" : "no"); };
+		const auto number = [&](const char* a_name, std::uint32_t a_old, std::uint32_t a_new) { Append(out, a_name, std::to_string(a_old), std::to_string(a_new)); };
+		flag("read", a_before.read, a_after.read);
+		flag("volumetric", a_before.volumetric, a_after.volumetric);
+		flag("sil", a_before.sil, a_after.sil);
+		flag("lens flares", a_before.lensFlares, a_after.lensFlares);
+		flag("eof", a_before.eof, a_after.eof);
+		flag("ldr", a_before.ldr, a_after.ldr);
+		Append(out, "slots", fmt::format("{:#x}", a_before.slots), fmt::format("{:#x}", a_after.slots));
+		flag("hdr", a_before.hdr, a_after.hdr);
+		flag("effects11", a_before.effects11, a_after.effects11);
+		number("bloom", a_before.bloom, a_after.bloom);
+		flag("fade", a_before.fade, a_after.fade);
+		flag("adapt", a_before.adapt, a_after.adapt);
+		number("luminance levels", a_before.lumLevels, a_after.lumLevels);
+		flag("taa", a_before.taa, a_after.taa);
+		number("taa form", a_before.taaMode, a_after.taaMode);
+		flag("taa water", a_before.taaWater, a_after.taaWater);
+		flag("dynamic resolution", a_before.dynres, a_after.dynres);
+		flag("screenshot", a_before.screenshot, a_after.screenshot);
+		flag("upscaler", a_before.upscaler, a_after.upscaler);
+		if (a_parity) {
+			number("sil parity", a_before.silParity, a_after.silParity);
+			number("luminance parity", a_before.lumParity, a_after.lumParity);
+			number("taa parity", a_before.taaParity, a_after.taaParity);
+		}
 		return out;
 	}
 

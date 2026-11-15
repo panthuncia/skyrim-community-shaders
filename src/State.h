@@ -133,6 +133,13 @@ public:
 	TonemapOwner GetTonemapOwner();
 
 	/**
+	 * @brief The tonemap owner GetTonemapOwner resolves this frame, without resolving it: the cached owner when it was resolved, else
+	 * what it would resolve to now. Nothing is cached and no feature is told, so a reader earlier in the frame (the frame description)
+	 * changes nothing.
+	 */
+	TonemapOwner PeekTonemapOwner() const;
+
+	/**
 	 * @brief Dispatches the HDR tonemap pass to the resolved owner.
 	 * @param a_input Render target holding the scene color to tonemap.
 	 * @param a_output Render target receiving the tonemapped result.

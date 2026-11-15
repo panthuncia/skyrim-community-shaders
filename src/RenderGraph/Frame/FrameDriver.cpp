@@ -2,6 +2,7 @@
 
 #include "RenderGraph/Engine/Bink/Bink.h"
 #include "RenderGraph/Engine/Skeleton/Skeleton.h"
+#include "RenderGraph/Frame/PostChain.h"
 #include "RenderGraph/FrameAnchors.h"
 #include "RenderGraph/RenderGraphRuntime.h"
 
@@ -182,7 +183,9 @@ namespace RenderGraph::Frame::Driver
 		next.parity = static_cast<std::uint32_t>(next.frame & 1);
 		next.kind = DecideKind(state, next.capture);
 		next.dclfDraws = (next.kind == Kind::World || next.kind == Kind::FrozenWorld) && DCLF::DrawsWorld();
-		// The segments' fields, and a recording asked for each declared one that has none.
+		// The post chain's fields (read again at the chain's decision event), then the segments' fields, and a recording asked for each
+		// declared one that has none.
+		PostChain::OnBegin(next);
 		FrameAnchors::BeginFrame(next);
 		// Hosted clears and copies the last frame left waiting are tap errors.
 		RenderGraph::Engine::Skeleton::BeginFrame();
@@ -232,6 +235,10 @@ namespace RenderGraph::Frame::Driver
 			return "host missing";
 		case TapError::LostToBuild:
 			return "lost to a build";
+		case TapError::InstanceNotDeclared:
+			return "instance not declared";
+		case TapError::PostNotDeclared:
+			return "post not declared";
 		default:
 			return "?";
 		}

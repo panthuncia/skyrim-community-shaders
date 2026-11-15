@@ -610,6 +610,10 @@ namespace FrameAnchors
 			// the frame began (the client bits name the built graph's clients).
 			std::array<RenderGraph::Frame::SegmentFields, kDeclared> heldFields{};
 			std::array<std::uint64_t, kDeclared> endedFrame{};
+			// Each segment's taps of each step in its held run so far: the next tap of a step is that instance (TapInstance). Reset
+			// when the frame's first tap takes the ticket.
+			std::array<std::array<std::uint32_t, kMaxSteps>, kDeclared> stepTaps{};
+			std::uint32_t tapInstance = 0;  // the instance the commits running now write (TapInstance)
 			std::atomic<bool> segmentHeld{ false };  // a segment holds its ticket now: FlushRegions' check without the mutex
 			// GPU work submitted while a segment held its ticket (FlushRegions), by why, since the last report. It runs ahead of the
 			// segment's work on the GPU.
@@ -1150,7 +1154,7 @@ namespace FrameAnchors
 					});
 				for (const auto* scheduled : passes) {
 					const auto& pass = *scheduled;
-					auto made = pass.make ? pass.make() : nullptr;
+					auto made = pass.make ? pass.make() : pass.makeInstance ? pass.makeInstance(0) : nullptr;
 					if (!made)
 						continue;
 					auto desc = pass.kind == PassKind::Compute ? org::RenderGraph::ExternalPassDesc::Compute(pass.name, std::move(made)) :
@@ -1235,30 +1239,44 @@ namespace FrameAnchors
 						if (scheduled.pass->anchor != step.anchor || !StepHolds(step, *scheduled.client))
 							continue;
 						const auto& pass = *scheduled.pass;
-						auto made = pass.make ? pass.make() : nullptr;
-						if (!made)
-							continue;
 						const auto found = std::ranges::find(clients, scheduled.client);
 						const auto bit = static_cast<std::uint32_t>(found - clients.begin());
-						made->SetSkipWhen([a_declared, bit](const org::IHostExecutionData* a_data) {
-							const auto* data = a_data ? a_data->Get<SegmentHostData>() : nullptr;
-							return data && data->segment == a_declared && bit < 32 && !(data->fields.clientsOn >> bit & 1u);
-						});
-						// Recorded at execution as on an anchor: a gated pass whose draws are not indirect still reads its run's gate
-						// answers (and often its run's slots) when it records. A GPU-gated pass is recorded ahead.
-						const bool live = pass.atExecution && !(pass.gpuGated && GpuGates()) && pass.queue == PassQueue::Default && a_graph.PassEpochRecordsAtExecution();
-						if (!live)
-							note(made);
-						auto desc = pass.kind == PassKind::Compute ? org::RenderGraph::ExternalPassDesc::Compute(pass.name, std::move(made)) :
-						            pass.kind == PassKind::Copy    ? org::RenderGraph::ExternalPassDesc::Copy(pass.name, std::move(made)) :
-						                                             org::RenderGraph::ExternalPassDesc::Render(pass.name, std::move(made));
-						if (pass.queue == PassQueue::Compute)
-							desc.PreferQueue(org::QueueKind::Compute);
-						else if (pass.kind != PassKind::Render)
-							desc.PreferQueue(org::QueueKind::Graphics);
-						if (live)
-							desc.RecordAtExecution();
-						a_out.push_back(std::move(desc.Epoch(a_epoch)));
+						// A client with instances has its pass made once per instance. Instance k is off in a recording whose
+						// description declares k instances or fewer.
+						const bool instanced = scheduled.client->maxInstances > 1 && pass.makeInstance;
+						const std::uint32_t count = instanced ? std::min<std::uint32_t>(scheduled.client->maxInstances, 255) : 1;
+						for (std::uint32_t instance = 0; instance < count; ++instance) {
+							auto made = instanced ? pass.makeInstance(instance) : pass.make ? pass.make() : pass.makeInstance ? pass.makeInstance(0) : nullptr;
+							if (!made)
+								continue;
+							made->SetSkipWhen([a_declared, bit, instanced, instance](const org::IHostExecutionData* a_data) {
+								const auto* data = a_data ? a_data->Get<SegmentHostData>() : nullptr;
+								if (!data || data->segment != a_declared)
+									return false;
+								// A client past the described ones is always on, as before instances.
+								if (bit >= RenderGraph::Frame::kSegmentClients)
+									return false;
+								if (!(data->fields.clientsOn >> bit & 1u))
+									return true;
+								return instanced && instance >= data->fields.instances[bit];
+							});
+							// Recorded at execution as on an anchor: a gated pass whose draws are not indirect still reads its run's gate
+							// answers (and often its run's slots) when it records. A GPU-gated pass is recorded ahead.
+							const bool live = pass.atExecution && !(pass.gpuGated && GpuGates()) && pass.queue == PassQueue::Default && a_graph.PassEpochRecordsAtExecution();
+							if (!live)
+								note(made);
+							std::string name = instanced ? fmt::format("{}.i{}", pass.name, instance) : pass.name;
+							auto desc = pass.kind == PassKind::Compute ? org::RenderGraph::ExternalPassDesc::Compute(std::move(name), std::move(made)) :
+							            pass.kind == PassKind::Copy    ? org::RenderGraph::ExternalPassDesc::Copy(std::move(name), std::move(made)) :
+							                                             org::RenderGraph::ExternalPassDesc::Render(std::move(name), std::move(made));
+							if (pass.queue == PassQueue::Compute)
+								desc.PreferQueue(org::QueueKind::Compute);
+							else if (pass.kind != PassKind::Render)
+								desc.PreferQueue(org::QueueKind::Graphics);
+							if (live)
+								desc.RecordAtExecution();
+							a_out.push_back(std::move(desc.Epoch(a_epoch)));
+						}
 					}
 				}
 			}
@@ -1837,7 +1855,7 @@ namespace FrameAnchors
 		}
 		std::vector<std::string_view> names;
 		for (const auto& pass : a_client.passes) {
-			if (!HasEpoch(pass.anchor) || pass.name.empty() || !pass.make || std::ranges::find(names, pass.name) != names.end()) {
+			if (!HasEpoch(pass.anchor) || pass.name.empty() || (!pass.make && !pass.makeInstance) || std::ranges::find(names, pass.name) != names.end()) {
 				logger::warn("[ORG] frame anchors: {} not registered: its pass '{}' at {} {}", a_client.id, pass.name, Name(pass.anchor),
 					!HasEpoch(pass.anchor) ? "names an anchor without an epoch (reserve it before the graph initializes)" : "has no name, no make, or a repeated name");
 				return false;
@@ -2522,9 +2540,13 @@ namespace FrameAnchors
 			fields.versions = a_state.declaredRecordings[a_declared].versionGeneration;
 			const auto clients = SegmentClients(*built, a_declared);
 			fields.clients = static_cast<std::uint32_t>(clients.size());
-			for (std::size_t i = 0; i < clients.size() && i < 32; ++i)
+			for (std::size_t i = 0; i < clients.size() && i < RenderGraph::Frame::kSegmentClients; ++i) {
 				if (!clients[i]->declared || clients[i]->declared())
 					fields.clientsOn |= 1u << i;
+				if (clients[i]->maxInstances > 1)
+					fields.instances[i] = static_cast<std::uint8_t>(std::min<std::uint32_t>(
+						{ clients[i]->instances ? clients[i]->instances() : 1u, clients[i]->maxInstances, 255u }));
+			}
 			const auto& info = kDeclaredInfo[a_declared];
 			for (std::uint32_t k = 0; k < info.stepCount; ++k)
 				if (info.steps[k].foreign != Segment::Count)
@@ -2745,6 +2767,7 @@ namespace FrameAnchors
 					fmt::format("the run is lease {} copy {}, the slot's copy is lease {} copy {}", run.lease, run.copy, expected.lease, expected.copy));
 			a_state.heldFrame[a_declared] = a_frame.frame;
 			a_state.heldBuilt[a_declared] = a_built;
+			a_state.stepTaps[a_declared].fill(0);
 			a_state.heldFields[a_declared] = a_frame.Segment(segment);
 			if (a_state.heldFields[a_declared].graph != host.BuildGeneration(epoch))
 				a_state.heldFields[a_declared] = DescribeDeclared(a_state, a_declared, true);
@@ -2926,6 +2949,8 @@ namespace FrameAnchors
 			// client the description turned off is a tap error, and its commit is not called.
 			std::vector<std::shared_ptr<const ClientDesc>> committed;
 			bool foreignOn = false;
+			// This tap's instance: the step's earlier taps in the held run.
+			const std::uint32_t instance = a_state.stepTaps[a_declared][a_step]++;
 			if (a_foreign) {
 				foreignOn = (held.foreignOn >> a_step & 1u) != 0;
 				if (!foreignOn)
@@ -2937,14 +2962,23 @@ namespace FrameAnchors
 						continue;
 					const auto found = std::ranges::find_if(a_clients, [&](const RunClient& a_client) { return a_client.desc == clients[i]; });
 					const bool active = found != a_clients.end() && found->active;
-					const bool on = i < 32 && (held.clientsOn >> i & 1u);
+					const bool on = i < RenderGraph::Frame::kSegmentClients && (held.clientsOn >> i & 1u);
 					if (!on) {
 						if (active)
 							Driver::NoteTapError(Driver::TapError::NotInDescription, segment, fmt::format("{} had work at the {} tap", clients[i]->id, tap));
 						continue;
 					}
-					if (active)
-						committed.push_back(clients[i]);
+					if (!active)
+						continue;
+					// The k-th tap of the step writes instance k. A client without instances has one; one with instances has as many
+					// as the description declared.
+					const std::uint32_t declaredInstances = clients[i]->maxInstances > 1 ? held.instances[i] : 1u;
+					if (instance >= declaredInstances) {
+						Driver::NoteTapError(Driver::TapError::InstanceNotDeclared, segment,
+							fmt::format("{} at the {} tap, instance {} of {} declared", clients[i]->id, tap, instance, declaredInstances));
+						continue;
+					}
+					committed.push_back(clients[i]);
 				}
 			}
 			if (step.anchor != Anchor::Count)
@@ -2961,9 +2995,11 @@ namespace FrameAnchors
 					SharedConstants::Commit(a_step);
 				if (a_foreign && foreignOn)
 					(*a_foreign)();
+				a_state.tapInstance = instance;
 				for (const auto& client : committed)
 					if (client->commit)
 						client->commit(a_point);
+				a_state.tapInstance = 0;
 			}
 			if (step.anchor != Anchor::Count) {
 				const std::uint32_t index = IndexOf(step.anchor);
@@ -3103,6 +3139,11 @@ namespace FrameAnchors
 			return TapDeclared(state, Point{}, d, step, {}, &a_commit);
 		}
 		return { RunStatus::Idle };
+	}
+
+	std::uint32_t TapInstance()
+	{
+		return Anchors().tapInstance;
 	}
 
 	bool SegmentsOn()

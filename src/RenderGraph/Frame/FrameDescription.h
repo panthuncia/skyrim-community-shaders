@@ -44,6 +44,9 @@ namespace RenderGraph::Frame
 	};
 	inline constexpr std::uint32_t kSegments = static_cast<std::uint32_t>(SegmentId::Count);
 
+	/** @brief The most clients a segment describes one by one (SegmentFields::clientsOn, SegmentFields::instances). */
+	inline constexpr std::uint32_t kSegmentClients = 32;
+
 	/** @brief "pre-depth". */
 	const char* SegmentName(SegmentId a_segment);
 
@@ -61,6 +64,9 @@ namespace RenderGraph::Frame
 		std::uint64_t versions = 0;
 		std::uint32_t clients = 0;    // the segment's clients in that graph
 		std::uint32_t clientsOn = 0;  // a bit per client, in the graph's client order: its passes do work this frame
+		// Per client, in the same order: how many instances of its passes do work this frame, for a client whose hook repeats inside the
+		// segment (FrameAnchors::ClientDesc::instances). 0 for a client without instances.
+		std::array<std::uint8_t, kSegmentClients> instances{};
 		// A bit per step of the segment that holds another module's epoch (light culling): its passes do work this frame.
 		std::uint32_t foreignOn = 0;
 		// A hash of the revisions of the segment's passes recorded ahead (RenderGraphPass::RevisionHash): a pass whose recording
@@ -69,6 +75,41 @@ namespace RenderGraph::Frame
 
 		friend bool operator==(const SegmentFields&, const SegmentFields&) = default;
 	};
+
+	/**
+	 * @brief The world post chain's state (RenderGraph/Frame/PostChain.h): what selects which ImageSpace effects run and which variant
+	 * each takes. Every field is read from the engine's own state, named where it is read (PostChain.cpp).
+	 */
+	struct PostFields
+	{
+		bool read = false;             // the ImageSpace manager exists
+		bool volumetric = false;       // the engine's volumetric lighting runs (VL enabled and its effect active)
+		bool sil = false;              // the SIL composite (+0x1d8)
+		std::uint8_t silParity = 0;    // the parity the SIL composite takes this frame (it alternates by its own counter)
+		bool lensFlares = false;       // the image-based lens flares (+0x180)
+		bool eof = false;              // gEnableEOFImageSpace: the end-of-frame slots run at all
+		bool ldr = false;              // usesLDR (+0x210): slots 3 to 7 run after the tonemap
+		std::uint8_t slots = 0;        // a bit per end-of-frame slot 0 to 7 whose effect is active (its IsActive)
+		bool hdr = false;              // the HDR effect runs (else a copy takes its place)
+		bool effects11 = false;        // Effects11 owns the tonemap: the HDR effect is not called at all
+		std::uint8_t bloom = 0;        // the bloom radius index (0 to 6): which bright-pass blur
+		bool fade = false;             // the tonemap's fade form (the manager's fade above 0)
+		bool adapt = false;            // last frame's adapted luminance exists: the light adaptation draws the last level
+		std::uint8_t lumLevels = 0;    // the luminance chain's levels for kHDR_DOWNSAMPLE0's size
+		std::uint8_t lumParity = 0;    // the parity the chain's last level takes this frame (it alternates per HDR render)
+		bool taa = false;              // the engine's TAA runs (an upscaler that replaces it turns it off)
+		std::uint8_t taaMode = 0;      // its form: 0 the plain one, 1 with the mask swap, 2 the UI one
+		bool taaWater = false;         // its water form
+		std::uint8_t taaParity = 0;    // the history it writes this frame (it alternates per TAA render)
+		bool dynres = false;           // dynamic resolution scales the frame: the upsample runs
+		bool screenshot = false;       // the manager's screenshot copy (+0x211) runs this frame
+		bool upscaler = false;         // CS's upscaler evaluates this frame (DLSS, FSR or XeSS)
+
+		friend bool operator==(const PostFields&, const PostFields&) = default;
+	};
+
+	/** @brief The post fields that differ, as "name old -> new" joined by ", "; empty when equal. a_parity: the parity fields too. */
+	std::string DiffPost(const PostFields& a_before, const PostFields& a_after, bool a_parity = true);
 
 	/** @brief One frame's description. */
 	struct Description
@@ -83,6 +124,7 @@ namespace RenderGraph::Frame
 		std::uint32_t slot = 0;    // frame modulo the frames in flight: the published copy and latch regions this frame uses
 		std::uint32_t parity = 0;  // frame modulo 2: a slot always has the same parity
 		std::array<SegmentFields, kSegments> segments{};
+		PostFields post{};  // read at Begin; the post chain is predicted from its second read at the chain's decision event
 
 		const SegmentFields& Segment(SegmentId a_segment) const { return segments[static_cast<std::size_t>(a_segment)]; }
 		SegmentFields& Segment(SegmentId a_segment) { return segments[static_cast<std::size_t>(a_segment)]; }
