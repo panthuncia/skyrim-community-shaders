@@ -1620,8 +1620,8 @@ What it shows:
 ## The declared frame, stage 1: the frame driver and the pre-depth segment (2026-11-15, `org-native/phases`)
 
 Stage 1 of the declared-frame plan: CS decides what a frame contains at its start, and the EarlyPrepass clients run as one
-segment recorded per description. `CS_ORG_SEGMENTS` (native mode, default on; `=0` off; `=2` on with the segment's executions
-open instead of closed). Guest mode keeps the per-anchor path.
+segment recorded per description. `CS_ORG_SEGMENTS` (native mode, default on; `=0` off; in this stage `=2` meant open executions
+instead of closed; since stage 3 the default is open, `=3` closes them, and `=2` no longer differs from the default). Guest mode keeps the per-anchor path.
 
 **The frame driver** (`src/RenderGraph/Frame/FrameDriver.*`, `FrameDescription.*`).
 - At each `Renderer::Begin` (SE 75460, AE 77245; the detour in `Engine/LoadingScreen` is installed in every mode now) it builds
@@ -2248,7 +2248,8 @@ The submission and host differences are run-to-run noise (stage 3's notes: up to
 
 Stage 4's second half: the world post chain drawn in two segments from a static pass-state table, checked against the engine at
 every draw. Native mode, default on (`CS_ORG_SEGMENT_POST_DRAW=0` gives the chain back to the ImageSpace anchor; the table check
-stays on with the post description, `CS_ORG_POST_TABLE_CHECK=0` turns it off). Guest mode is unchanged.
+stays on with the post description; `CS_ORG_POST_TABLE_CHECK=0` turns off only the comparison of each draw with its row, and the draw
+still happens from its row: see stage 0 of the recipe plan below). Guest mode is unchanged.
 
 **Outcome.** perf-taa: 33.9 to 26.9 tickets a frame. The end-of-frame chain makes no ImageSpace-anchor ticket in a steady world frame
 (13.0 to 5.0 ImageSpace tickets: the five left are the RenderWorld scopes, below). The two post segments cost the submission thread
@@ -2472,3 +2473,120 @@ Checks (final build, `CS_TEST_BACKGROUND=1`, 0 tap errors in each, no `lost to a
 
 Not done: the perf-taa off/on Tracy pair, the off-switch image run (the switch was not in the test registry; fixed after), the
 per-segment cost table, the ORG tests (ORG unchanged), underwater, snow, DOF, a hit, a weather change.
+
+## Recipe plan, stage 0: baseline and correctness (2026-11-15, `org-native/phases`)
+
+The first stage of the plan that replaces the mirrored engine frame with a recipe of CS-owned stages: measurements of the current
+build, one barrier trace, and four narrow fixes. Nothing was redesigned.
+
+### Measurements
+
+perf-taa, native Vulkan, Perf-Fast, Tracy, one run each, all measured. The off-switch runs use the build before the fixes. "After" is
+the final build of this stage.
+
+| perf-taa | Segments off (`CS_ORG_SEGMENTS=0`) | World segment off (`CS_ORG_SEGMENT_WORLD=0`) | Default | Default, after the fixes |
+|---|---|---|---|---|
+| fps between the marks | 126.0 | 124.5 | 123.0 | 122.0 |
+| Tickets a frame | 51.8 | 26.9 | 20.0 | 20.0 |
+| Queue submissions a frame (batches + uploads + leading uploads) | 35.6 + 2 + 1 | 25.4 + 2 + 1 | 22.0 + 2 + 1 | 21.9 + 2 + 1 |
+| `vkQueueSubmit` calls a frame (RHI, all threads; plus 1 external-client submit) | 43.7 | 33.6 | 30.1 | 30.0 |
+| Batch lists, inline lists a frame | 56.9, 13.9 | 34.9, 12.9 | 30.0, 13.0 | 30.0, 13.0 |
+| Entry / body barriers a frame | 1356 / 1816 | 869 / 1235 | 628 / 852 | 630 / 852 |
+| Render thread busy, ms a frame | 3.24 | 2.97 | 2.81 | 2.86 |
+| Submission thread busy (of it the present closure), ms a frame | 3.80 (0.34) | 3.25 (0.35) | 2.48 (0.23) | 2.67 (0.21) |
+| Host thread busy (of it retirement), ms a frame | 3.36 (2.23) | 2.23 (1.59) | 1.28 (1.05) | 1.49 (1.26) |
+| GPU work inside a held segment, over the 900 frames | none | none | 1802 (901 clears, counted twice) | none |
+
+Why each queue submission is apart from the one before (census, default): another queue 1.0, the same ticket 6.2, an earlier ticket
+with a new wait 2.0, and an earlier ticket whose waits were already covered 12.8. In that last case the two could have been joined.
+
+The world segment against the tickets it replaced (same build): one ticket of 169 us on the submission thread (129 us of it inline
+recording of the water and late batches), against two EngineDraws runs (2 x 145 us), five ImageSpace runs (5 x 54 us) and the kMAIN copy
+(45 us). On the render thread: 6 us against about 170 us. The other segments cost per ticket on the submission thread: pre-depth 69 us,
+pre-main 89, deferred 117, post composites 17, post end-of-frame 40.
+
+### The barrier trace
+
+ORG's decision trace now names the execution of every event a host makes (`epoch`, `ticket`; decision-trace.md). A predicted
+admission traces no barriers. So a steady frame was rebuilt from `ORG_TRACE=barriers,handoff,admission`:
+- every execution's ledger commits (each frame) give the state it left each resource in;
+- each epoch's latest plan gives its first use of each resource.
+The script and the trace (`z0barriers.py`, `z0trace3.jsonl`) are in the session scratchpad, not in the repository.
+
+One steady perf-taa world frame has 370 texture entry barriers on 166 textures: 296 state changes and 74 same-state barriers that only
+order writes. There are also 216 buffer entries from another execution (buffer accesses are not traced). The census counts 628 entry
+barriers, buffers included. By group:
+- CS feature textures: 92 textures, 204 barriers;
+- engine render targets: 57 textures, 117 barriers;
+- engine textures made without a name on the native device (the G-buffer): 7 textures, 39 barriers;
+- transients: 10 textures, 10 barriers.
+
+What the barriers are for:
+- **Data that crosses stages** (written in one execution, read in a later, different one): 65 textures, 132 barriers. 32 of them are
+  CloudShadows' layers, written by the reflection prepass and both reflection-sky runs and read by the pre-depth segment and the sky.
+  The rest: the G-buffer, kMAIN and the motion vectors from DCLF's main opaque epoch into the deferred segment; the shadow mask,
+  Skylighting, screen-space shadows and terrain blending from pre-main into main opaque; terrain shadows, volumetric shadows and grass
+  collision from pre-depth into the Z-prepass; the dynamic cubemaps from the deferred segment into the world segment; kMAIN, its copy and
+  kMAIN_ONLY_ALPHA into the world segment; the refraction normals from forward into post; the TAA mask into post.
+- **Re-transitions with no data between them**, between different executions or an epoch's own previous run: a resource that was read
+  and is now written, written and written again (mostly same-state: kMAIN, the motion vectors and the G-buffer through every DCLF epoch),
+  or read and read again in another layout.
+- **An epoch's own cycle**: 52 barriers where a graph's last use of a resource differs from its first use (the deferred segment's SSGI
+  and dynamic-cubemap scratch, the world segment's SSR and SAO targets). A whole-frame graph pays these too, unless each resource rests in
+  the state of its first use.
+- **The TAA-mask clear's ticket** (the frame-group clear graph) moves every frame-group target it could clear (kMAIN, the main depth,
+  the normals, the shadow mask, the water targets) each frame, though only two clears do work: 12 entry barriers, and same-state barriers
+  on 6 of them in the world segment after it.
+
+### Fixes
+
+- **A failed recording is fatal.** `SubmitSegment` asks for its description's recording once and waits once.
+  - A request that comes back with an error (a pass's prepare or record threw, the graph failed, the host takes no requests), or does
+    not arrive in two seconds, stops the game. A `logger::critical` line and `stl::report_and_fail` name the segment, the description's
+    fields and the cause. A kept recording that failed is fatal where it is found (`RequestDeclared`, at Begin too).
+  - A request that a graph build dropped (`EpochRecordingDropped`) is not a failure. It is asked for again at the next request. At the
+    end tap the frame's segment work is dropped as `lost to a build`.
+  - A recording that went stale while it was made is dropped with a tap error: an older build (`lost to a build`), or a slot that
+    published a new version (`stale recording`, which replaces `no recording`).
+- **`CS_ORG_POST_TABLE_CHECK=0`** turns off only the comparison of a draw with its row. The row is still looked up and the draw happens
+  from it. A draw that differs from its built pass still draws nothing (`TakePost` checks the pass, for correctness).
+- **The TAA-mask clear.** The world segment's reflections read kMAIN_ONLY_ALPHA (the SSR ray-march row, input 3). The clear's ticket was
+  submitted while the segment held its ticket, so on the GPU the clear ran before the reflections. The skeleton now ends the world
+  segment (`TapPoint`) before a frame-group run that clears the TAA mask or kMAIN_ONLY_ALPHA. The water passes use neither target. The
+  census line counted each anchor run twice, because `Run` and `TryExecuteEpoch` both call `FlushRegions`. Now `Run` counts it and the
+  submission's call does not.
+- **Re-record lines.** Each segment logs up to 16 re-record reasons per 5 s window, then the number left out once the window passes.
+  Startup no longer uses up the lines for the rest of the run.
+
+### Paths that still drop a segment's work
+
+- A build drops the recording request, attaches while it is recorded, or attaches between two taps (`lost to a build`).
+- A slot publishes a new version while the recording is made (`stale recording`).
+- `TryExecuteEpoch` returns Skipped (every published copy busy), EpochFailed (the segment's graph failed at submission) or Stopped (the
+  runtime stops). The held ticket goes back.
+- `OpenSegment` cannot take the ticket: the graph failed, or another error, which stops the runtime.
+- Tap errors that draw nothing: a tap in a frame without the segment, a tap after the end, a client the description turned off, an
+  instance past the declared count.
+- A segment that holds its ticket at the frame's end without its end tap: released at the next Begin.
+- A cut (`CutSegment`): later taps that frame do nothing, and their parts draw on the anchor.
+- Hosted clears and copies whose host skips or misses them (`host skipped`, `host missing`).
+
+### Checks
+
+- native-quick on Vulkan: 3 runs with the upscaler registered, clean by eye against stage 5's final run. One run with
+  `CS_ORG_POST_TABLE_CHECK=0` matches the default.
+- native-d3d12-quick, native-river, native-upscalers (4 registered), native-validation (20x `VUID-vkCmdDraw-None-09600` and the
+  BackBuffer layout warning only), the loading-thread run and guest-quick: passed, shots as before by eye, 0 tap errors, no new `[E]`
+  kind.
+- native-river with `CS_ORG_SEGMENT_WORLD=0` against the default, on the build before the fixes: the same by eye.
+- The fatal path did not fire.
+- GPU work inside a held segment: none in steady frames. At loads one native-context operation and one external-work submission, and
+  in the first world frames ImageSpace runs while the world segment is cut, as before.
+- ORG tests: all pass but the three known lease hangs and `HeadlessBenchmark` (not run).
+
+### What later stages should know
+
+- About a third of the texture entry barriers carry data across stages. The rest are layout round trips and cycles that a recipe with
+  planned first-use states can remove.
+- Predicted admissions trace nothing. Use the ledger commits to see a steady frame.
+- The frame-group clear graph is planned with every target it could clear, so its ticket touches 12 targets each frame for two clears.
