@@ -2591,7 +2591,7 @@ env = "CS_ORG_UI_STAGE"
 type = "string"
 family = "org"
 kind = "other"
-description = "0: the UI stage is off; the overlay, HDR output and capture keep their anchors' tickets"
+description = "0: the UI stage is off; Scaleform, the overlay, HDR output and capture keep their anchors' tickets"
 
 [key."org.light_limit_fix_shadows"]
 env = "CS_ORG_LIGHT_LIMIT_FIX_SHADOWS"

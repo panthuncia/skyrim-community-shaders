@@ -46,7 +46,7 @@ namespace RenderGraph::Frame::Recipes
 		Forward,      // Drawcall Limit Fix's forward pass, with the frame-group clears' ticket and the sun queries around it
 		FirstPerson,  // Drawcall Limit Fix's first-person colour
 		Post,         // CS: the post chain, the upscaler's evaluate and the depth upscale, one stage
-		Ui,           // CS: the UI stage (the overlay); Scaleform, the movie tiles, the present, HDR output and the capture keep their tickets
+		Ui,           // CS: the UI stage (Scaleform's displays, the overlay); the movie tiles, the present, HDR output and the capture keep their tickets
 		Count
 	};
 	inline constexpr std::uint32_t kStages = static_cast<std::uint32_t>(StageId::Count);

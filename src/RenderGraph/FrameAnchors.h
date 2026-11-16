@@ -350,6 +350,16 @@ namespace FrameAnchors
 		// and the client may have work only while such a segment's window is open (CanTap); work outside it is a tap error and draws
 		// nothing.
 		bool segmentOnly = false;
+		// Declared segments, with instances: the passes are made instance by instance (every pass of instance 0, then of instance 1, ...)
+		// instead of pass by pass. The graph keeps declaration order between passes on one target, so the taps' order holds across passes
+		// of different targets (Scaleform: each display draws onto one of several surfaces, and a later display draws over an earlier one).
+		bool instanceMajor = false;
+		// Declared segments: a registration of this id that the frame's schedule does not hold yet taps as the registration it holds (that
+		// one's commit and executed callbacks). Only for a client whose commit writes state every registration's passes read (Scaleform: a
+		// registration for new reads keeps its surfaces, slots and gate).
+		bool matchesById = false;
+		// The client's own count, returned by HeldNow: which registration the frame's schedule holds.
+		std::uint64_t generation = 0;
 	};
 
 	/** @brief An anchor's name, as the logs and docs give it ("DeferredPasses"). */
@@ -434,6 +444,21 @@ namespace FrameAnchors
 	 * still fail afterwards (RunStatus::Failed): the client's executed callback is how it knows the work was submitted.
 	 */
 	bool CanRun(std::string_view a_id, Anchor a_anchor);
+
+	/** @brief HeldNow's answer. */
+	struct StageHold
+	{
+		bool held = false;       // a run of the anchor now taps a CS stage (an open stage has a step there for this frame kind)
+		bool scheduled = false;  // the frame's schedule of that stage holds a registration of the client (by id) and has it on
+		std::uint64_t generation = 0;  // that registration's ClientDesc::generation
+	};
+
+	/**
+	 * @brief Whether a run of a_anchor now would tap a CS stage that holds a_id at a shared step (rather than run the anchor's own epoch),
+	 * and which registration of a_id the frame's schedule of it holds. A client that changes what its passes draw onto compares the
+	 * generation with its own: until the schedule holds the new one, its work lags. Render owner.
+	 */
+	StageHold HeldNow(std::string_view a_id, Anchor a_anchor);
 
 	/** @brief The client's one-shot passes (PassDesc::once) pending again: each runs at its anchor's next run. Render thread. */
 	void Rearm(std::string_view a_id);

@@ -3562,10 +3562,8 @@ the overlay on the GPU.
   published in the middle of the frame: that frame draws no overlay, and the stage's recordings take the version from the next boundary.
 
 What it does not hold yet, and why:
-- **Scaleform's displays** (Interface anchor, a ticket in every kind). A display is drawn as one anchor run per 1024 commands, onto one of
-  several surfaces (the framebuffer, HDR's UI texture, scratch targets for pushed render targets), and a display the graph refuses falls back
-  to D3D11. Fixed instances need a pass pair per surface per instance (surfaces x 2 x the most runs a frame) and the commit writing a
-  per-instance run slot; the refusal path has to go first. Not done.
+- **Scaleform's displays**: in world-recipe frames since the stage 5 finish (below). In the other kinds they keep the Interface anchor's
+  ticket.
 - **HDR output and the capture** (tickets after the stage's commit). HDR output can copy into the back buffer through the swap chain's
   per-frame image, which a kept recording cannot bind; the capture checks its copy's submission right after its run.
 - **The movie tiles and the Present anchor's clients** (Bink; tickets before the stage).
@@ -3642,7 +3640,88 @@ The fatal paths fired three times during the work, each fixed before the final r
 - The ImageSpace main client and the shape manifest: they still draw the world's water effects at the frame's start, every ImageSpace
   call outside the world post chain (menus, the loading model's and the frozen frame's composites) and UI3DSceneManager's end-of-frame
   call. Not deleted: item 4's condition (the water effects the only user) does not hold while the other kinds' scenes are tickets.
-- Per-anchor epochs for Interface, Present, MovieTiles, HDROutput, Capture, EngineDraws, ImageSpace, EngineCopy, the engine clear anchors and
+- Per-anchor epochs for Interface (outside world-recipe frames since the stage 5 finish), Present, MovieTiles, HDROutput, Capture, EngineDraws, ImageSpace, EngineCopy, the engine clear anchors and
   the decal and sun queries; `CanRun`/`RequestJoin` for their clients; D3D11 replay of clears outside world frames.
 - The Overlay anchor's own epoch: none while the UI stage is on (`CS_ORG_UI_STAGE=0` brings it back).
 - `AttachEpochGraph` for CS stages: only with `CS_ORG_STAGED_BUILDS=0`, or for a stage with no graph yet (setup's builds attach).
+
+### Scaleform in the UI stage (stage 5 finish; 2026-11-16, `org-native/phases`)
+
+The UI stage's steps are now Interface (Scaleform's displays), Overlay, and the point end. In a world-recipe frame (the world, a frozen world's
+capture frame) Scaleform's displays are drawn by the UI stage: one graph, one kept recording per frame slot, one ticket with the overlay.
+The Interface anchor's own ticket is gone from those frames.
+
+- **Fixed instances.** Each display segment (a display, or each part of one between pushed render targets, filter passes and every 1024
+  commands) is one Interface run, and the k-th run of the frame is instance k of the Scaleform client. There are 8 instances
+  (`kInstances`, Scaleform/Passes.cpp), all declared every frame; the most runs any test frame had is 4 (the map). An instance has its own
+  1024 gate entries (one run gate of 8 x 1024 entries) and its own run slots per surface pass. A run the engine does not make stays closed:
+  its slots hold nothing and its draws read zero counts. A ninth run in one frame is a mismatch (`instance not declared`).
+- **Passes.** Every surface (the framebuffer, HDR's UI texture, kMAIN, the four book pages, the four scratch images) has a pass, and a masks
+  pass where its depth-stencil can be imported: 18 for each instance, 144 in all. They are made instance by instance
+  (`ClientDesc::instanceMajor`, new): every pass of instance 0, then of instance 1. The graph keeps declaration order between passes on one
+  target, so a later display draws over an earlier one on every surface, and a scratch image is written before the display that reads it.
+  Each pass records in the stage's late batch from its instance's slot (the display list is a frame input).
+- **A shared step for the world recipe only** (`Step::worldOnly`, new). In the loading screen and the menus the engine draws displays before
+  and after the 3D scene (the loading screen's sequence: two displays, the shadow clear, the menu model, its composite, then the text), and
+  those scenes are still anchor tickets: holding the displays until the UI stage's commit would draw them after the scene. So in those kinds
+  the Interface anchor keeps its own epoch, and the Scaleform client is off in the UI stage's description there (its passes skip ahead and
+  fold). The UI stage's description therefore differs between world-recipe frames and the others. Both are recorded ahead (the other one's
+  recordings are asked for at every Begin), and a switch between them changes every frame slot's schedule at once, so the first world frame
+  after a load draws its HUD (before that fix, 3 to 6 displays were left out at the switch). Only stages with a worldOnly step switch every
+  slot at once: a description that alternates by frame (the post rows' ping-pong) keeps one schedule per slot.
+- **Registrations.** A new texture read by a display registers the client again (to declare the read). That registration keeps the surfaces,
+  slots and gate, so the schedule's older registration still draws it (`ClientDesc::matchesById`, new): the stage taps it as the registration
+  its graph holds, and the anchor's own epoch counts it as executed. A surface made again (a resize, HDR's textures) is a new
+  `ClientDesc::generation`: until the stage's build with it switches in, the display lags (`FrameAnchors::HeldNow`, new, names the
+  generation the schedule holds). The client registers again only after a display's last run, never between two runs of one display
+  (that was the "client was not in the Interface epoch" left out 4 times a run before).
+- **No D3D11 fallback in native.** A display the graph refuses (no surface for its target, a mask on another depth-stencil, a run that did not
+  execute, the path off, no target bound) is a mismatch (`refused`, a new tap error): fatal in development builds, logged once in release.
+  The schedule's lag is not a refusal. In guest mode the D3D11 renderer still takes a refused display. Every run below: 0 displays left out.
+
+Barriers: the UI stage's 144 passes are recorded at execution, so the ones with no display still record their barriers (a scratch image
+moves between render target and shader read once per instance): its body barriers rise from 4 to 67 a frame, against the 10 entry and 7
+body barriers of the Interface ticket it replaces.
+
+perf-taa, native Vulkan, Perf-Fast, Tracy, one run each. Before: `st5perf` (the stage's first part). After: `s8perf2`. The machine was in use
+in both runs: frame rates and thread times are rough, and no conclusion is drawn from them.
+
+| perf-taa | Before (measured) | After (measured) |
+|---|---|---|
+| fps between the marks (rough) | 123.3 | 122.1 |
+| Tickets a frame | 13.91 | 12.90 |
+| `vkQueueSubmit` calls a frame (RHI; plus 1 external) | 24.01 | 22.97 |
+| Entry / body barriers a frame | 505 / 811 | 504 / 866 |
+| Interface ticket: entry / body barriers | 1.00 tickets, 10 / 7 | none |
+| UI stage: entry / body barriers | 5 / 4 | 14 / 67 |
+| Render `ExecuteEpoch`, Interface + UI, us a frame | 89.1 + 11.1 | 25.3 |
+| Render / submission / host thread busy, ms a frame (rough) | 3.15 / 2.71 / 1.39 | 2.95 / 2.71 / 1.38 |
+| Recordings, schedule switches, tap errors, recipe findings in the steady window | 0, 0, 0, 0 | 0, 0, 0, 0 (recipe: 628 passes) |
+
+One run each, `CS_TEST_BACKGROUND=1`, mismatches and recipe findings fatal: native-quick, native-d3d12-quick, native-river,
+native-upscalers, native-interior, native-validation (the same 21 validation lines as the build before: the known draw and back buffer
+layout messages), the loading-thread run, first and third person: all passed, 0 tap errors, 0 frames a stage was absent after it first ran,
+Scaleform census 0 left out. guest-quick passed. The main menu (Start On Save off): menu shot correct, 0 tap errors (the harness marks it
+failed because it expects a world). The Bink movie (startup logo), main menu, loading screen and world kinds were reached in every run; a menu
+over a frozen world was not reached (no background way to open one).
+
+What is still a ticket at a hook after this:
+- **World**: the sun's queries (1.91), the decal tests, the water effects (the ImageSpace main client) at the frame's start, HDR output and the
+  capture when they run.
+- **Loading screen, main menu, Bink movie, menu over a frozen world**: as in the first part, and Interface with them (see the worldOnly step
+  above for why).
+- **HDR output** could be a step of the UI stage in native mode (the back buffer is one graph-owned version there, so a kept recording can
+  copy into it), but its dispatch, copy and clear are not gated: in a frame where the step does not fire they would still run with zero
+  constants. They need gate entries and a declared predicate first. HDR is off in every test configuration, so it was not changed untested.
+- **The capture** stays its own ticket: its copy's readback is planned in the pass's preparation (the readback service takes the request
+  through a lifecycle effect when the copy is submitted), and a pass in a kept recording's late batch has no preparation per submission
+  (`PreparedPass::RecordAgain`), so the plan cannot be made there without an ORG addition. Separately, the capture's own check ("capture N
+  was not in the epoch submitted at its capture point; D3D11 copies it") fires in native runs before and after this change: the harness's
+  shots are taken by the D3D11 copy. Not investigated here.
+- **The movie tiles and the Present anchor's clients** (Bink): they run before the displays in the kinds whose displays keep their ticket, so
+  moving them into the UI stage would draw them after those displays. They follow the other kinds' stages.
+
+Not done in this stage (the plan's stage 5 items 3 to 5): the non-world kinds' scenes as CS stages (the menu scene, the frozen-world
+composite, the loading model, the movie), the world leftovers (the water effects as start-stage steps, the decal queries and the sun queries
+as fixed instances or stage passes), and so the ImageSpace main client, the shape manifest, the per-anchor epochs and `CanRun`/`RequestJoin`
+remain reachable as listed above.

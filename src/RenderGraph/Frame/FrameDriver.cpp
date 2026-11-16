@@ -304,6 +304,8 @@ namespace RenderGraph::Frame::Driver
 			return "instance not declared";
 		case TapError::NoPass:
 			return "no CS pass";
+		case TapError::Refused:
+			return "refused";
 		default:
 			return "?";
 		}

@@ -4,7 +4,9 @@
 #include "RenderGraph/Engine/Scaleform/Display.h"
 #include "RenderGraph/Engine/Scaleform/GRendererLayout.h"
 #include "RenderGraph/Engine/Scaleform/GfxTextures.h"
+#include "RenderGraph/Engine/Native/Native.h"
 #include "RenderGraph/Engine/Scaleform/Passes.h"
+#include "RenderGraph/Frame/FrameDriver.h"
 #include "RenderGraph/Engine/Tripwire/Tripwire.h"
 #include "RenderGraph/FrameAnchors.h"
 #include "RenderGraph/Switches.h"
@@ -316,21 +318,38 @@ namespace RenderGraph::Engine::Scaleform
 			NoteLost(a_reason);
 		}
 
-		/** @brief The segment drawn now by the graph; when it cannot be, it is left out (counted by the graph's reason). */
+		/**
+		 * @brief Native mode: a display the graph refused is a mismatch between the engine and CS's frame (Frame::Driver::NoteTapError,
+		 * fatal in development builds, logged once in release). No D3D11 renderer draws it in its place.
+		 */
+		void NoteRefused(const char* a_reason)
+		{
+			if (Engine::Native::Active())
+				Frame::Driver::NoteTapError(Frame::Driver::TapError::Refused, Frame::SegmentId::Count, fmt::format("a Scaleform display: {}", a_reason));
+		}
+
+		/**
+		 * @brief The segment drawn now by the graph; when it cannot be, it is left out (counted by the graph's reason). A refusal that is
+		 * not the schedule's lag is a mismatch in native mode.
+		 */
 		void Flush(void*)
 		{
 			auto& capture = Current();
 			if (capture.display.commands.empty() && !capture.display.clearTarget)
 				return;
 			const char* reason = nullptr;
-			if (Passes::Submit(capture.display, reason)) {
+			bool lagged = false;
+			if (Passes::Submit(capture.display, reason, lagged)) {
 				++capture.graphSegments;
 				auto& counters = Count();
 				std::scoped_lock lock(counters.mutex);
 				++counters.segments;
 				return;
 			}
-			NoteLeftOut(reason ? reason : "the graph did not draw a segment");
+			reason = reason ? reason : "the graph did not draw a segment";
+			NoteLeftOut(reason);
+			if (!lagged)
+				NoteRefused(reason);
 		}
 
 		/** @brief The display's fate, counted once its capture ends. */
@@ -853,6 +872,11 @@ namespace RenderGraph::Engine::Scaleform
 				EndDangling(a_renderer);
 			if (!Passes::Ready()) {
 				CountLost("a whole display while the graph path is off (not set up, or failed)");
+				// Native mode: no D3D11 renderer draws in the graph's place.
+				if (Engine::Native::Active()) {
+					NoteRefused("the graph path is off (not set up, or failed)");
+					return;
+				}
 				original(a_renderer, a_background, a_viewport, a_x0, a_x1, a_y0, a_y1);
 				return;
 			}
@@ -867,6 +891,10 @@ namespace RenderGraph::Engine::Scaleform
 				// Neither the shadow state nor the renderer has a target to draw onto.
 				capture.display.Reset();
 				CountLost("a whole display with no render target bound");
+				if (Engine::Native::Active()) {
+					NoteRefused("no render target bound");
+					return;
+				}
 				original(a_renderer, a_background, a_viewport, a_x0, a_x1, a_y0, a_y1);
 				return;
 			}

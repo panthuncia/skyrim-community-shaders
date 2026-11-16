@@ -60,8 +60,9 @@ namespace RenderGraph::Frame::Recipes
 			{ StageId::Post, Owner::Cs,
 				{ Segment::DeclaredPost, Segment::AnchorTonemap, Segment::AnchorFrameGeneration },
 				3, "RenderEndOfFrameEffects' return" },
-			// The UI stage holds the overlay (the Overlay anchor has no epoch of its own). Scaleform's displays, the movie tiles and the
-			// present's clients come before it and keep their tickets; HDR output and the capture follow its commit.
+			// The UI stage holds Scaleform's displays (fixed instances; the Interface anchor keeps its epoch for the other frame kinds) and
+			// the overlay (the Overlay anchor has no epoch of its own). The movie tiles and the present's clients come before it and keep their
+			// tickets; HDR output and the capture follow its commit.
 			{ StageId::Ui, Owner::Cs,
 				{ Segment::AnchorMovieTiles, Segment::AnchorInterface, Segment::AnchorPresent, Segment::DeclaredUi, Segment::AnchorHDROutput, Segment::AnchorCapture },
 				6, "just before the present (or HDR output, or the capture)" },

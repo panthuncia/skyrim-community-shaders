@@ -57,6 +57,10 @@ namespace RenderGraph::Engine::Scaleform::Passes
 		constexpr std::uint32_t kMinimumStaging = 256u << 10;
 		// The most commands one Interface run draws: one run gate entry each. A longer segment is drawn in several runs.
 		constexpr std::uint32_t kGateEntries = 1024;
+		// The UI stage's fixed instances (docs/development/org-native-frame-graph.md, "Frame kinds and the UI stage"): the k-th Interface run
+		// of a world frame is instance k, with its own gate entries and run slots. All are declared every frame; the ones the engine does not
+		// use stay closed. More runs in one frame are a mismatch (an instance not declared). The anchor's own epoch uses instance 0.
+		constexpr std::uint32_t kInstances = 8;
 		// The scratch images GFx's render targets are drawn into on the graph (PushRenderTarget: a filter's source, its passes): a
 		// blur's source and its two intermediates, and one more for a nested target.
 		constexpr std::uint32_t kScratchTargets = 4;
@@ -184,20 +188,31 @@ namespace RenderGraph::Engine::Scaleform::Passes
 			rhi::Format colourFormat = rhi::Format::Unknown;
 			rhi::Format depthFormat = rhi::Format::Unknown;
 			std::uint32_t width = 0, height = 0;
-			std::shared_ptr<const Slots> colourSlots;  // null for a surface the graph cannot draw onto (no passes)
-			std::shared_ptr<const Slots> depthSlots;   // null without an importable depth-stencil
+			// One per instance (kInstances): empty for a surface the graph cannot draw onto (no passes).
+			std::vector<std::shared_ptr<const Slots>> colourSlots;
+			std::vector<std::shared_ptr<const Slots>> depthSlots;  // empty without an importable depth-stencil
 
-			bool Drawable() const { return colourSlots != nullptr; }
+			bool Drawable() const { return !colourSlots.empty(); }
+			bool Masks() const { return !depthSlots.empty(); }
 
 			/** @brief Every slot emptied: a pass of an older build that still has this surface draws nothing more. */
 			void Clear() const
 			{
-				if (colourSlots)
-					colourSlots->Clear();
-				if (depthSlots)
-					depthSlots->Clear();
+				for (const auto& slots : colourSlots)
+					slots->Clear();
+				for (const auto& slots : depthSlots)
+					slots->Clear();
 			}
 		};
+
+		/** @brief A surface pass's slots, one per instance. */
+		std::vector<std::shared_ptr<const Slots>> MakeSlots()
+		{
+			std::vector<std::shared_ptr<const Slots>> slots;
+			for (std::uint32_t i = 0; i < kInstances; ++i)
+				slots.push_back(std::make_shared<const Slots>());
+			return slots;
+		}
 
 		struct PathState
 		{
@@ -218,6 +233,10 @@ namespace RenderGraph::Engine::Scaleform::Passes
 			std::uint32_t surfacesRegistration = 0;
 			std::uint32_t builtRegistration = 0;
 			std::uint32_t largestSegment = 0;
+			// Counts the times the surfaces were made (ClientDesc::generation): the stage's schedule draws a display only once it holds a
+			// registration with the surfaces as they are.
+			std::uint64_t surfacesGeneration = 0;
+			std::uint32_t peakTaps = 0;  // the most Interface runs one world frame had so far (logged at each new peak)
 			ProgramCache<RasterProgram, ProgramKey> programs{ "Scaleform" };
 			std::set<ProgramKey> failedPrograms;  // each logged once (NoteFailedProgram)
 			std::shared_ptr<RunGate> gate;
@@ -428,6 +447,7 @@ namespace RenderGraph::Engine::Scaleform::Passes
 		{
 			std::shared_ptr<const Slots> slots;
 			std::shared_ptr<const RunGate> gate;
+			std::uint32_t gateBase = 0;  // the instance's first gate entry
 		};
 
 		/**
@@ -442,9 +462,9 @@ namespace RenderGraph::Engine::Scaleform::Passes
 		{
 		public:
 			DisplayPass(std::shared_ptr<const Surface> a_surface, std::shared_ptr<const Slots> a_slots, std::shared_ptr<const RunGate> a_gate, bool a_withDepth,
-				std::shared_ptr<const Reads> a_reads, bool a_atExecution) :
+				std::shared_ptr<const Reads> a_reads, bool a_atExecution, std::uint32_t a_instance) :
 				surface(std::move(a_surface)), slots(std::move(a_slots)), gate(std::move(a_gate)), withDepth(a_withDepth), reads(std::move(a_reads)),
-				atExecution(a_atExecution) {}
+				atExecution(a_atExecution), gateBase(a_instance * kGateEntries) {}
 
 			PassBindings Declare(org::PassBuilder& a_builder)
 			{
@@ -464,7 +484,7 @@ namespace RenderGraph::Engine::Scaleform::Passes
 
 			void Revision(std::vector<std::uint64_t>& a_out) const { FrameAnchors::CommitReadRevision(atExecution, a_out); }
 
-			PassFrame Prepare(const PassBindings&, const org::PassPrepareContext&) const { return { slots, gate }; }
+			PassFrame Prepare(const PassBindings&, const org::PassPrepareContext&) const { return { slots, gate, gateBase }; }
 
 			static void Record(const PassBindings& a_bindings, const PassFrame& a_pass, org::PassRecordContext& a_recording)
 			{
@@ -553,7 +573,7 @@ namespace RenderGraph::Engine::Scaleform::Passes
 					}
 					commands.PushConstants(rhi::ShaderStage::AllGraphics, 0, 0, 0, kConstantWords, words);
 					// The vertex count is the gate entry's: zero unless this run's commit opened it.
-					commands.ExecuteIndirect(command.program->drawSignature->GetHandle(), latchBuffer, latchOffset + a_pass.gate->Offset(i), {}, 0, 1);
+					commands.ExecuteIndirect(command.program->drawSignature->GetHandle(), latchBuffer, latchOffset + a_pass.gate->Offset(a_pass.gateBase + i), {}, 0, 1);
 				}
 				commands.EndPass();
 			}
@@ -565,6 +585,7 @@ namespace RenderGraph::Engine::Scaleform::Passes
 			bool withDepth = false;
 			std::shared_ptr<const Reads> reads;
 			bool atExecution = false;  // FrameAnchors::RecordsAtExecution at the build
+			std::uint32_t gateBase = 0;
 		};
 
 		/**
@@ -636,19 +657,26 @@ namespace RenderGraph::Engine::Scaleform::Passes
 			if (!host)
 				return;
 			const org::RunRef run = host->CurrentRun();
+			// The tap's instance: the k-th Interface run of the UI stage this frame (0 on the anchor's own epoch).
+			const std::uint32_t instance = FrameAnchors::TapInstance();
+			if (instance >= kInstances) {
+				state.commitReason = "an Interface run past the UI stage's instances";
+				return;
+			}
 			for (const auto& surface : state.surfaces) {
-				if (surface->colourSlots)
-					surface->colourSlots->Store(run, nullptr);
-				if (surface->depthSlots)
-					surface->depthSlots->Store(run, nullptr);
+				if (surface->Drawable())
+					surface->colourSlots[instance]->Store(run, nullptr);
+				if (surface->Masks())
+					surface->depthSlots[instance]->Store(run, nullptr);
 			}
 			if (!state.pending || !state.pendingSurface)
 				return;
 			const Display& display = *state.pending;
 			const Surface& surface = *state.pendingSurface;
-			const auto& slots = state.pendingDepth ? surface.depthSlots : surface.colourSlots;
-			if (!slots)
+			const auto& slotSet = state.pendingDepth ? surface.depthSlots : surface.colourSlots;
+			if (slotSet.size() <= instance)
 				return;
+			const auto& slots = slotSet[instance];
 			auto frame = std::make_shared<Frame>();
 
 			++state.commits;
@@ -750,10 +778,10 @@ namespace RenderGraph::Engine::Scaleform::Passes
 				static_cast<std::uint32_t>(std::ceil(right) - std::floor(left)), static_cast<std::uint32_t>(std::ceil(bottom) - std::floor(top)) };
 
 			slots->Store(run, std::move(frame));
-			// The run's commands use the gate entries from 0, in order.
+			// The run's commands use the instance's gate entries from its first, in order.
 			for (std::size_t i = first; i < last; ++i)
 				if (display.commands[i].kind == Command::Kind::Draw && state.pendingPrograms[i])
-					state.gate->OpenDraw(static_cast<std::uint32_t>(i - first), display.commands[i].vertexCount);
+					state.gate->OpenDraw(instance * kGateEntries + static_cast<std::uint32_t>(i - first), display.commands[i].vertexCount);
 			state.committed = true;
 		}
 
@@ -776,23 +804,37 @@ namespace RenderGraph::Engine::Scaleform::Passes
 				std::shared_ptr<const Surface> surface = a_state.surfaces[i];
 				if (!surface->Drawable())
 					continue;
-				const auto add = [&](const std::shared_ptr<const Slots>& a_slots, bool a_withDepth, const char* a_suffix, std::int32_t a_order) {
-					client.passes.push_back({ .name = fmt::format("cs.scaleform.draw.{}{}", i, a_suffix),
+				const auto add = [&](const std::vector<std::shared_ptr<const Slots>>& a_slots, bool a_withDepth, const char* a_suffix, std::int32_t a_order) {
+					FrameAnchors::PassDesc pass{ .name = fmt::format("cs.scaleform.draw.{}{}", i, a_suffix),
 						.anchor = Anchor::Interface,
 						.order = a_order,
 						.kind = FrameAnchors::PassKind::Render,
-						.make = [surface, a_slots, gate, a_withDepth, reads] {
-							return std::make_shared<DisplayPass>(surface, a_slots, gate, a_withDepth, reads, FrameAnchors::RecordsAtExecution(Anchor::Interface));
-						},
 						// It reads the run's slot, which the commit stores: recorded then, without a ticket prepared again.
 						.atExecution = true,
 						// Gated: a run whose commit stored no frame in the slot records nothing (DisplayPass::Record), its clear included.
-						.gated = true });
+						.gated = true };
+					// One pass per instance (the k-th display segment of the frame), each reading its own slots and gate entries.
+					pass.makeInstance = [surface, a_slots, gate, a_withDepth, reads](std::uint32_t a_instance) -> std::shared_ptr<org::RenderPass> {
+						if (a_instance >= a_slots.size())
+							return nullptr;
+						// Recorded at execution in native mode (an anchor's own epoch) and in the UI stage's late batch alike.
+						return std::make_shared<DisplayPass>(surface, a_slots[a_instance], gate, a_withDepth, reads, FrameAnchors::RecordsAtExecution(Anchor::Interface),
+							a_instance);
+					};
+					client.passes.push_back(std::move(pass));
 				};
 				add(surface->colourSlots, false, "", 100 + 2 * static_cast<std::int32_t>(i));
-				if (surface->depthSlots)
+				if (surface->Masks())
 					add(surface->depthSlots, true, ".masks", 101 + 2 * static_cast<std::int32_t>(i));
 			}
+			// Fixed instances in the UI stage, all declared: how many displays the engine draws is its late decision. Made instance by
+			// instance, so a later display's passes follow an earlier one's on every surface.
+			client.maxInstances = kInstances;
+			client.instances = [] { return kInstances; };
+			client.instanceMajor = true;
+			// A registration for new reads keeps the surfaces, slots and gate: the schedule's older registration draws the displays.
+			client.matchesById = true;
+			client.generation = a_state.surfacesGeneration;
 			client.registerResources = [](org::RenderGraph& a_graph) {
 				for (const auto& surface : Path().surfaces)
 					if (!surface->ownId.empty() && surface->colour.Plain())
@@ -801,12 +843,11 @@ namespace RenderGraph::Engine::Scaleform::Passes
 			client.commit = [](const FrameAnchors::Point&) { Commit(); };
 			client.active = [] { return Path().pending != nullptr; };
 			client.gates = { a_state.gate };
+			// New reads register again once the display's last run is done (Submit), never between its runs.
 			client.executed = [](const FrameAnchors::Point&) {
 				auto& state = Path();
 				if (state.pending)
 					state.executed = true;
-				if (state.readsChanged)
-					RegisterReads(state);
 			};
 			client.onFailed = [] {
 				Path().failed = true;
@@ -1051,9 +1092,9 @@ namespace RenderGraph::Engine::Scaleform::Passes
 				!surface->ownId.empty() ? surface->ownId : (surface->colour.Id().empty() ? std::string("an engine target") : surface->colour.Id()), colourDesc.Width, colourDesc.Height, static_cast<int>(a_format),
 				surface->depth ? "an engine depth-stencil" : (a_depth ? "not importable" : "none"));
 			if (surface->colour && surface->colourFormat != rhi::Format::Unknown) {
-				surface->colourSlots = std::make_shared<const Slots>();
+				surface->colourSlots = MakeSlots();
 				if (surface->depth)
-					surface->depthSlots = std::make_shared<const Slots>();
+					surface->depthSlots = MakeSlots();
 			}
 			return surface;
 		}
@@ -1076,7 +1117,7 @@ namespace RenderGraph::Engine::Scaleform::Passes
 				}
 			};
 			queue(false);
-			if (a_surface.depthSlots)
+			if (a_surface.Masks())
 				queue(true);
 			logger::info("[ORG] Scaleform: {} pipelines queued for the {} surface", queued, RoleName(a_surface.role));
 		}
@@ -1177,7 +1218,7 @@ namespace RenderGraph::Engine::Scaleform::Passes
 					a_reason = "a render target view in another format than its surface's";
 					return nullptr;
 				}
-				if (a_needsDepth && (!surface->depthSlots || a_display.depth != surface->depthTexture.get())) {
+				if (a_needsDepth && (!surface->Masks() || a_display.depth != surface->depthTexture.get())) {
 					a_reason = "a mask on a depth-stencil other than kMAIN's, or one the graph cannot import";
 					return nullptr;
 				}
@@ -1191,8 +1232,11 @@ namespace RenderGraph::Engine::Scaleform::Passes
 					return refreshed;
 				logger::info("[ORG] Scaleform: the {} texture was made again as another graph resource; the Interface graph is built again with it",
 					RoleName(role));
-				if (DeclareSurface(a_state, role) && RegisterClient(a_state))
-					a_state.surfacesRegistration = a_state.registrations;
+				if (DeclareSurface(a_state, role)) {
+					++a_state.surfacesGeneration;
+					if (RegisterClient(a_state))
+						a_state.surfacesRegistration = a_state.registrations;
+				}
 				a_reason = "a surface made again (drawn once the Interface graph is built with it)";
 				return nullptr;
 			}
@@ -1288,7 +1332,7 @@ namespace RenderGraph::Engine::Scaleform::Passes
 				surface->colourFormat = kScratchFormat;
 				surface->width = a_state.scratchWidth;
 				surface->height = a_state.scratchHeight;
-				surface->colourSlots = std::make_shared<const Slots>();
+				surface->colourSlots = MakeSlots();
 				if (i == 0)
 					QueuePrograms(a_state, *surface);
 				a_state.surfaces.push_back(std::move(surface));
@@ -1347,11 +1391,12 @@ namespace RenderGraph::Engine::Scaleform::Passes
 				return;
 			}
 		}
-		state.gate = RunGate::Create("cs.scaleform.gate", kGateEntries);
+		// kGateEntries per instance (the UI stage's taps of one frame each have their own).
+		state.gate = RunGate::Create("cs.scaleform.gate", kGateEntries * kInstances);
 		state.staging = FrameStaging::Create({ .name = "cs.scaleform.staging",
 			.minimumBytes = kMinimumStaging,
 			// About the Interface anchor's runs a frame: a display, and one more per render target or filter pass in it.
-			.runsPerFrame = 6 });
+			.runsPerFrame = kInstances });
 		if (!state.gate || !state.staging) {
 			state.failed = true;
 			logger::error("[ORG] Scaleform: the run gate or the staging pool could not be made; the D3D11 renderer draws");
@@ -1360,6 +1405,7 @@ namespace RenderGraph::Engine::Scaleform::Passes
 		for (const auto role : kRoles)
 			(void)DeclareSurface(state, role);
 		MakeScratch(state);
+		state.surfacesGeneration = 1;
 		if (std::ranges::none_of(state.surfaces, [](const auto& a_surface) { return a_surface->Drawable(); })) {
 			state.failed = true;
 			logger::error("[ORG] Scaleform: none of the surfaces' targets can be imported; the D3D11 renderer draws");
@@ -1378,9 +1424,10 @@ namespace RenderGraph::Engine::Scaleform::Passes
 		return state.setUp && !state.failed && RenderGraphRuntime::Get().IsActive() && FrameAnchors::HasEpoch(Anchor::Interface);
 	}
 
-	bool Submit(Display& a_display, const char*& a_reason)
+	bool Submit(Display& a_display, const char*& a_reason, bool& a_lagged)
 	{
 		auto& state = Path();
+		a_lagged = false;
 		if (!Ready()) {
 			a_reason = "the graph path is off (not set up, or failed)";
 			return false;
@@ -1412,15 +1459,26 @@ namespace RenderGraph::Engine::Scaleform::Passes
 			if (!state.pendingPrograms[i])
 				NoteFailedProgram(state, key);
 		}
-		// The latest registration is in the built graph, or an older one with the same surfaces is: a registration for new reads alone
-		// does not wait for its build (the reads it adds keep their raw indices until then). Only new surfaces wait.
-		if (FrameAnchors::CanRun(kClientId, Anchor::Interface)) {
+		// The UI stage takes the run (a world frame): its schedule must hold a registration with the surfaces as they are. Until the stage's
+		// build with new surfaces switches in, the display lags (a schedule change takes effect at a frame boundary). A registration for new
+		// reads alone keeps the surfaces: the schedule's older registration draws it (the new reads through their raw indices until then).
+		const auto hold = FrameAnchors::HeldNow(kClientId, Anchor::Interface);
+		if (hold.held) {
+			if (!hold.scheduled || hold.generation != state.surfacesGeneration) {
+				state.pendingPrograms.clear();
+				a_reason = !hold.scheduled ? "the UI stage's schedule does not hold the client yet" : "a surface made again (drawn once the UI stage's build with it switches in)";
+				a_lagged = true;
+				return false;
+			}
+		} else if (FrameAnchors::CanRun(kClientId, Anchor::Interface)) {
+			// The anchor's own epoch: the latest registration is in its built graph, or an older one with the same surfaces is.
 			state.builtRegistration = state.registrations;
 		} else if (state.builtRegistration == 0 || state.builtRegistration < state.surfacesRegistration) {
 			state.pendingPrograms.clear();
 			a_reason = !FrameAnchors::IsRenderOwner()        ? "a segment off the render owner" :
 			           !RenderGraphRuntime::Get().IsActive() ? "the graph path is off (not set up, or failed)" :
 			                                                   "a surface made again (drawn once the Interface graph is built with it)";
+			a_lagged = FrameAnchors::IsRenderOwner() && RenderGraphRuntime::Get().IsActive();
 			return false;
 		}
 
@@ -1447,6 +1505,9 @@ namespace RenderGraph::Engine::Scaleform::Passes
 		state.pendingSurface = nullptr;
 		state.pendingFirst = state.pendingCount = 0;
 		state.pendingPrograms.clear();
+		// New tracked reads register the client again now that the display's runs are done.
+		if (state.readsChanged)
+			RegisterReads(state);
 		if (!a_reason)
 			return true;
 		Failure(a_reason);
@@ -1469,9 +1530,10 @@ namespace RenderGraph::Engine::Scaleform::Passes
 		return false;
 	}
 	std::uint32_t ScratchCount() { return 0; }
-	bool Submit(Display&, const char*& a_reason)
+	bool Submit(Display&, const char*& a_reason, bool& a_lagged)
 	{
 		a_reason = "built without the render graph";
+		a_lagged = false;
 		return false;
 	}
 }

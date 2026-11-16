@@ -306,6 +306,10 @@ namespace FrameAnchors
 			bool shared = false;
 			// A CS point that is no anchor and no module epoch (TapPoint): it holds no passes and only ends the segment.
 			bool point = false;
+			// A shared step held only in frames of the world recipe (and a frozen world's capture frame): in the other kinds the anchor's runs
+			// keep its own epoch, and the step's clients are off in the stage's description (Scaleform in the UI stage, until those kinds'
+			// scenes are stages: their displays draw before and after the scene).
+			bool worldOnly = false;
 		};
 		struct DeclaredInfo
 		{
@@ -376,8 +380,14 @@ namespace FrameAnchors
 			// The UI stage, in every frame kind's recipe: the overlay's ImGui draw (its draw list a frame input, recorded in the stage's late
 			// batch). It ends at a point: just before the present (Hooks.cpp), or before HDR output or the capture is submitted, which
 			// follow the overlay on the GPU and keep their anchors' tickets.
+			// Scaleform's displays come first (a shared step: world-recipe frames only). Each display segment is a tap and an instance of the
+			// Scaleform client (a fixed count, all declared, the draws' counts latched in its run gate); its draw list is a frame input recorded
+			// in the late batch.
 			{ Segment::DeclaredUi,
-				{ { { Anchor::Overlay }, { Anchor::Count, { nullptr, nullptr }, Segment::Count, false, true } } }, 2,
+				{ { { Anchor::Interface, { nullptr, nullptr }, Segment::Count, true, false, true },
+					{ Anchor::Overlay },
+					{ Anchor::Count, { nullptr, nullptr }, Segment::Count, false, true } } },
+				3,
 				{ "CS stage: UI", "CS stage: UI inputs", "FrameSegments::Ui / ", "cs.segment.ui" } },
 		} };
 
@@ -425,6 +435,31 @@ namespace FrameAnchors
 			if (!a_step.clients[0])
 				return true;
 			return std::ranges::any_of(a_step.clients, [&](const char* a_id) { return a_id && a_client.id == a_id; });
+		}
+
+		/** @brief Whether a declared segment has a worldOnly step: its description differs between world-recipe frames and the others. */
+		constexpr bool HasWorldOnlyStep(std::uint32_t a_declared)
+		{
+			for (std::uint32_t k = 0; k < kDeclaredInfo[a_declared].stepCount; ++k)
+				if (kDeclaredInfo[a_declared].steps[k].worldOnly)
+					return true;
+			return false;
+		}
+
+		/** @brief Whether the current frame runs the world recipe (a frozen world's capture frame too): worldOnly steps are held then. */
+		bool FrameIsWorld()
+		{
+			const auto& frame = RenderGraph::Frame::Driver::Current();
+			return RenderGraph::Frame::Recipes::KindHas(frame.kind, frame.capture, RenderGraph::Frame::SegmentId::Post);
+		}
+
+		/** @brief Whether a step takes its anchor's runs in this frame's kind (a worldOnly step only in world-recipe frames). */
+		bool StepInKind(const Step& a_step) { return !a_step.worldOnly || FrameIsWorld(); }
+
+		/** @brief Whether a client of a built snapshot is a_desc's registration: the same desc, or the same id for a matchesById client. */
+		bool SameClient(const std::shared_ptr<const ClientDesc>& a_built, const std::shared_ptr<const ClientDesc>& a_desc)
+		{
+			return a_built == a_desc || (a_built && a_desc && a_built->matchesById && a_built->id == a_desc->id);
 		}
 
 		/** @brief Whether a declared segment ends at a point (its last step is no anchor's hook). */
@@ -699,6 +734,7 @@ namespace FrameAnchors
 			// published before it lags until the new recording is ready.
 			std::array<bool, kDeclared> frameVersionsCurrent{};
 			bool inBegin = false;  // BeginFrame is choosing the schedules: a recording asked for outside it is a mid-frame re-record
+			bool describingWorld = false;  // the frame BeginFrame describes runs the world recipe (worldOnly steps' clients on)
 			std::array<std::uint64_t, kDeclared> endedFrame{};
 			// Each segment's taps of each step in its held run so far: the next tap of a step is that instance (TapInstance). Reset
 			// when the frame's first tap takes the ticket.
@@ -1334,51 +1370,66 @@ namespace FrameAnchors
 									.PreferQueue(org::QueueKind::Graphics)
 									.Epoch(a_epoch)));
 						}
-					for (const auto& scheduled : snapshot->passes) {
-						if (scheduled.pass->anchor != step.anchor || !StepHolds(step, *scheduled.client))
-							continue;
+					// One pass instance, in the graph's order.
+					const auto emit = [&](const ScheduledPass& scheduled, std::uint32_t instance, bool instanced) {
 						const auto& pass = *scheduled.pass;
 						const auto found = std::ranges::find(clients, scheduled.client);
 						const auto bit = static_cast<std::uint32_t>(found - clients.begin());
+						auto made = instanced ? pass.makeInstance(instance) : pass.make ? pass.make() : pass.makeInstance ? pass.makeInstance(0) : nullptr;
+						if (!made)
+							return;
+						made->SetSkipWhen([a_declared, bit, instanced, instance, row = pass.row](const org::IHostExecutionData* a_data) {
+							const auto* data = a_data ? a_data->Get<SegmentHostData>() : nullptr;
+							if (!data || data->segment != a_declared)
+								return false;
+							// A row the description did not select records only its barriers.
+							if (row >= 0 && row < 256 && !(data->fields.rows[static_cast<std::size_t>(row) / 64] >> (static_cast<std::uint32_t>(row) % 64) & 1u))
+								return true;
+							// A client past the described ones is always on, as before instances.
+							if (bit >= RenderGraph::Frame::kSegmentClients)
+								return false;
+							if (!(data->fields.clientsOn >> bit & 1u))
+								return true;
+							return instanced && instance >= data->fields.instances[bit];
+						});
+						// Recorded at execution as on an anchor: a gated pass whose draws are not indirect still reads its run's gate
+						// answers (and often its run's slots) when it records. A GPU-gated pass is recorded ahead.
+						const bool live = pass.atExecution && !(pass.gpuGated && GpuGates()) && pass.queue == PassQueue::Default && a_graph.PassEpochRecordsAtExecution();
+						if (!live)
+							note(made);
+						std::string name = instanced ? fmt::format("{}.i{}", pass.name, instance) : pass.name;
+						auto desc = pass.kind == PassKind::Compute ? org::RenderGraph::ExternalPassDesc::Compute(std::move(name), std::move(made)) :
+						            pass.kind == PassKind::Copy    ? org::RenderGraph::ExternalPassDesc::Copy(std::move(name), std::move(made)) :
+						                                             org::RenderGraph::ExternalPassDesc::Render(std::move(name), std::move(made));
+						if (pass.queue == PassQueue::Compute)
+							desc.PreferQueue(org::QueueKind::Compute);
+						else if (pass.kind != PassKind::Render)
+							desc.PreferQueue(org::QueueKind::Graphics);
+						if (live)
+							desc.RecordAtExecution();
+						a_out.push_back(std::move(desc.Epoch(a_epoch)));
+					};
+					std::vector<const ClientDesc*> major;  // instanceMajor clients already made at this step
+					for (const auto& scheduled : snapshot->passes) {
+						if (scheduled.pass->anchor != step.anchor || !StepHolds(step, *scheduled.client))
+							continue;
 						// A client with instances has its pass made once per instance. Instance k is off in a recording whose
 						// description declares k instances or fewer.
-						const bool instanced = scheduled.client->maxInstances > 1 && pass.makeInstance;
+						const bool instanced = scheduled.client->maxInstances > 1 && scheduled.pass->makeInstance;
 						const std::uint32_t count = instanced ? std::min<std::uint32_t>(scheduled.client->maxInstances, 255) : 1;
-						for (std::uint32_t instance = 0; instance < count; ++instance) {
-							auto made = instanced ? pass.makeInstance(instance) : pass.make ? pass.make() : pass.makeInstance ? pass.makeInstance(0) : nullptr;
-							if (!made)
+						if (instanced && scheduled.client->instanceMajor) {
+							// Every pass of instance 0 at this step, then of instance 1, ...: the taps' order across the client's passes.
+							if (std::ranges::find(major, scheduled.client.get()) != major.end())
 								continue;
-							made->SetSkipWhen([a_declared, bit, instanced, instance, row = pass.row](const org::IHostExecutionData* a_data) {
-								const auto* data = a_data ? a_data->Get<SegmentHostData>() : nullptr;
-								if (!data || data->segment != a_declared)
-									return false;
-								// A row the description did not select records only its barriers.
-								if (row >= 0 && row < 256 && !(data->fields.rows[static_cast<std::size_t>(row) / 64] >> (static_cast<std::uint32_t>(row) % 64) & 1u))
-									return true;
-								// A client past the described ones is always on, as before instances.
-								if (bit >= RenderGraph::Frame::kSegmentClients)
-									return false;
-								if (!(data->fields.clientsOn >> bit & 1u))
-									return true;
-								return instanced && instance >= data->fields.instances[bit];
-							});
-							// Recorded at execution as on an anchor: a gated pass whose draws are not indirect still reads its run's gate
-							// answers (and often its run's slots) when it records. A GPU-gated pass is recorded ahead.
-							const bool live = pass.atExecution && !(pass.gpuGated && GpuGates()) && pass.queue == PassQueue::Default && a_graph.PassEpochRecordsAtExecution();
-							if (!live)
-								note(made);
-							std::string name = instanced ? fmt::format("{}.i{}", pass.name, instance) : pass.name;
-							auto desc = pass.kind == PassKind::Compute ? org::RenderGraph::ExternalPassDesc::Compute(std::move(name), std::move(made)) :
-							            pass.kind == PassKind::Copy    ? org::RenderGraph::ExternalPassDesc::Copy(std::move(name), std::move(made)) :
-							                                             org::RenderGraph::ExternalPassDesc::Render(std::move(name), std::move(made));
-							if (pass.queue == PassQueue::Compute)
-								desc.PreferQueue(org::QueueKind::Compute);
-							else if (pass.kind != PassKind::Render)
-								desc.PreferQueue(org::QueueKind::Graphics);
-							if (live)
-								desc.RecordAtExecution();
-							a_out.push_back(std::move(desc.Epoch(a_epoch)));
+							major.push_back(scheduled.client.get());
+							for (std::uint32_t instance = 0; instance < count; ++instance)
+								for (const auto& other : snapshot->passes)
+									if (other.client == scheduled.client && other.pass->anchor == step.anchor && other.pass->makeInstance)
+										emit(other, instance, true);
+							continue;
 						}
+						for (std::uint32_t instance = 0; instance < count; ++instance)
+							emit(scheduled, instance, instanced);
 					}
 				}
 			}
@@ -2741,14 +2792,18 @@ namespace FrameAnchors
 					for (std::size_t w = 0; w < rows.size(); ++w)
 						fields.rows[w] |= rows[w];
 				}
+			const auto& info = kDeclaredInfo[a_declared];
 			for (std::size_t i = 0; i < clients.size() && i < RenderGraph::Frame::kSegmentClients; ++i) {
-				if (!clients[i]->declared || clients[i]->declared())
+				// A client held only at worldOnly steps is off outside world-recipe frames: the anchor's own epoch takes its runs there.
+				bool inKind = false;
+				for (std::uint32_t k = 0; k < info.stepCount; ++k)
+					inKind = inKind || (StepHolds(info.steps[k], *clients[i]) && (!info.steps[k].worldOnly || a_state.describingWorld));
+				if (inKind && (!clients[i]->declared || clients[i]->declared()))
 					fields.clientsOn |= 1u << i;
 				if (clients[i]->maxInstances > 1)
 					fields.instances[i] = static_cast<std::uint8_t>(std::min<std::uint32_t>(
 						{ clients[i]->instances ? clients[i]->instances() : 1u, clients[i]->maxInstances, 255u }));
 			}
-			const auto& info = kDeclaredInfo[a_declared];
 			for (std::uint32_t k = 0; k < info.stepCount; ++k)
 				if (info.steps[k].foreign != Segment::Count)
 					if (const auto foreign = ForeignOf(info.steps[k].foreign); foreign && (!foreign->declared || foreign->declared()))
@@ -2951,6 +3006,16 @@ namespace FrameAnchors
 			const bool stillStaged = a_world && host.StagedGeneration(epoch) != 0;
 			SegmentFields wanted = DescribeDeclared(a_state, a_declared, a_world);
 			a_state.frameWanted[a_declared] = wanted;
+			// A stage with worldOnly steps has a description per kind group (world recipe or not): the other one's recordings are asked for
+			// ahead too, so a kind switch finds them ready and the stage does not lag at the switch.
+			if (a_world && wanted.graph && !stillStaged && HasWorldOnlyStep(a_declared)) {
+				a_state.describingWorld = !a_state.describingWorld;
+				const SegmentFields other = DescribeDeclared(a_state, a_declared, a_world);
+				a_state.describingWorld = !a_state.describingWorld;
+				if (other.graph && !(other == wanted))
+					for (std::uint32_t s = 0; s < RenderGraphRuntime::kGameFramesInFlight; ++s)
+						(void)RequestDeclared(a_state, a_declared, other, s, a_frame.frame, " (the other frame kinds' description, ahead)");
+			}
 			if (!wanted.declared)
 				return wanted;
 			if (!wanted.graph) {
@@ -2981,6 +3046,23 @@ namespace FrameAnchors
 					                                     fmt::format("the slot's first schedule on build {}", wanted.graph);
 					active = { wanted, std::move(ready), a_state.declaredSnapshots[a_declared].load(std::memory_order_acquire) };
 					Driver::NoteSwitch(segment, a_frame.frame, slot, a_frame.frame - a_state.waitFrame[a_declared], what);
+					// A stage with worldOnly steps: the other slots switch at this boundary too when their recordings of the description are
+					// ready (a kind switch whose description was recorded ahead), so the next frames do not lag on an older schedule. Not for
+					// other stages: a description that alternates by frame (the post rows' ping-pong) keeps one schedule per slot.
+					for (std::uint32_t s = 0; s < RenderGraphRuntime::kGameFramesInFlight && HasWorldOnlyStep(a_declared); ++s) {
+						auto& other = a_state.schedule[a_declared][s];
+						if (s == slot || (other.recording && other.fields == wanted))
+							continue;
+						const auto otherEntry = RequestDeclared(a_state, a_declared, wanted, s, a_frame.frame, "");
+						std::shared_ptr<const org::GraphHost::EpochRecording> otherReady;
+						{
+							const std::lock_guard lock(recordings.mutex);
+							if (otherEntry->done)
+								otherReady = otherEntry->recording;
+						}
+						if (otherReady && host.EpochRecordingCurrent(*otherReady) && host.EpochRecordingVersionsCurrent(*otherReady, s))
+							other = { wanted, std::move(otherReady), active.built };
+					}
 				} else if (ready && host.EpochRecordingCurrent(*ready)) {
 					// Recorded with a version a slot replaced while it was made: the next frame's description names the new version.
 					++recordings.versionGeneration;
@@ -3249,7 +3331,7 @@ namespace FrameAnchors
 				for (std::size_t i = 0; i < clients.size(); ++i) {
 					if (!StepHolds(step, *clients[i]))
 						continue;
-					const auto found = std::ranges::find_if(a_clients, [&](const RunClient& a_client) { return a_client.desc == clients[i]; });
+					const auto found = std::ranges::find_if(a_clients, [&](const RunClient& a_client) { return SameClient(clients[i], a_client.desc); });
 					const bool active = found != a_clients.end() && found->active;
 					const bool on = i < RenderGraph::Frame::kSegmentClients && (held.clientsOn >> i & 1u);
 					if (!on) {
@@ -3347,11 +3429,10 @@ namespace FrameAnchors
 
 		std::pair<std::uint32_t, std::uint32_t> OpenStepAt(const State& a_state, Anchor a_anchor)
 		{
-			for (std::uint32_t d = 0; d < kDeclared; ++d) {
-				const auto step = StepAt(d, a_anchor);
-				if (step != kMaxSteps && WindowOpen(a_state, d))
-					return { d, step };
-			}
+			for (std::uint32_t d = 0; d < kDeclared; ++d)
+				for (std::uint32_t k = 0; k < kDeclaredInfo[d].stepCount; ++k)
+					if (kDeclaredInfo[d].steps[k].anchor == a_anchor && StepInKind(kDeclaredInfo[d].steps[k]) && WindowOpen(a_state, d))
+						return { d, k };
 			return { kDeclared, kMaxSteps };
 		}
 
@@ -3612,6 +3693,7 @@ namespace FrameAnchors
 		// frame's end.
 		// Each frame kind's recipe lists its CS stages (Recipes::KindHas): the world's every stage, the other kinds the UI stage.
 		state.inBegin = true;
+		state.describingWorld = RenderGraph::Frame::Recipes::KindHas(a_frame.kind, a_frame.capture, SegmentId::Post);
 		for (std::uint32_t d = 0; d < kDeclared; ++d) {
 			state.frameRecording[d].reset();
 			state.frameBuilt[d].reset();
@@ -3687,11 +3769,12 @@ namespace FrameAnchors
 					// tapped when one of them has work.
 					for (std::uint32_t k = first; k < kDeclaredInfo[declared].stepCount; ++k) {
 						const auto& stepInfo = kDeclaredInfo[declared].steps[k];
-						if (stepInfo.anchor != a_point.anchor)
+						if (stepInfo.anchor != a_point.anchor || !StepInKind(stepInfo))
 							continue;
 						std::vector<RunClient> stepMembers;
 						for (auto it = others.begin(); it != others.end();) {
-							const bool member = built && StepHolds(stepInfo, *it->desc) && std::ranges::find(built->clients, it->desc) != built->clients.end();
+							const bool member = built && StepHolds(stepInfo, *it->desc) &&
+							                    std::ranges::any_of(built->clients, [&](const auto& a_built) { return SameClient(a_built, it->desc); });
 							if (member) {
 								stepMembers.push_back(*it);
 								it = others.erase(it);
@@ -3839,9 +3922,15 @@ namespace FrameAnchors
 			Publish(state);
 			Rebuild(state, 1u << index, "one-shot passes ran");
 		}
-		// Last: an executed callback may register, refresh or rearm.
+		// Last: an executed callback may register, refresh or rearm. A matchesById client whose newer registration is not built yet ran
+		// through the registration the graph holds (its commit writes what every registration's passes read).
+		const auto ownBuilt = OwnSnapshot(state, index);
+		const auto heldById = [&](const RunClient& a_client) {
+			return a_client.desc->matchesById && ownBuilt &&
+			       std::ranges::any_of(ownBuilt->clients, [&](const auto& a_built) { return a_built->id == a_client.desc->id; });
+		};
 		for (const auto& client : clients)
-			if (client.active && client.desc->executed && client.serial <= built)
+			if (client.active && client.desc->executed && (client.serial <= built || heldById(client)))
 				client.desc->executed(a_point);
 		return { RunStatus::Ran };
 	}
@@ -3888,6 +3977,30 @@ namespace FrameAnchors
 			return found != clients.end() && i < RenderGraph::Frame::kSegmentClients && (fields.clientsOn >> i & 1u);
 		}
 		return true;
+	}
+
+	StageHold HeldNow(std::string_view a_id, Anchor a_anchor)
+	{
+		auto lock = Guard();
+		auto& state = Anchors();
+		StageHold hold;
+		if (!SegmentsOn() || !state.host || !IsRenderOwner())
+			return hold;
+		const auto [declared, step] = OpenStepAt(state, a_anchor);
+		if (declared >= kDeclared)
+			return hold;
+		hold.held = true;
+		const auto& fields = Driver::Current().Segment(static_cast<SegmentId>(declared));
+		const auto& built = state.frameBuilt[declared];
+		if (!fields.declared || !fields.graph || !built)
+			return hold;
+		const auto clients = SegmentClients(*built, declared);
+		for (std::size_t i = 0; i < clients.size() && i < RenderGraph::Frame::kSegmentClients; ++i)
+			if (clients[i]->id == a_id && StepHolds(kDeclaredInfo[declared].steps[step], *clients[i])) {
+				hold.scheduled = (fields.clientsOn >> i & 1u) != 0;
+				hold.generation = clients[i]->generation;
+			}
+		return hold;
 	}
 
 	std::uint32_t PeakRunsPerFrame(Anchor a_anchor)

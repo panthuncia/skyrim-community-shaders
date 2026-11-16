@@ -44,7 +44,8 @@ namespace RenderGraph::Engine::Scaleform::Passes
 	 * (the caller leaves the segment out and counts a_reason): an inherent refusal (a render target that is not a
 	 * surface, a mask on another depth-stencil), a surface made again as another graph resource (until the next build point), or a
 	 * failure (a texture whose view cannot be resolved, a run that did not execute: logged as an error). A pipeline not built yet is
-	 * built here; a draw whose pipeline failed is left out (logged once). Render thread.
+	 * built here; a draw whose pipeline failed is left out (logged once). a_lagged: the refusal is the schedule's lag (the stage's or
+	 * the anchor's build with a surface made again has not switched in yet), not a mismatch. Render thread.
 	 */
-	bool Submit(Display& a_display, const char*& a_reason);
+	bool Submit(Display& a_display, const char*& a_reason, bool& a_lagged);
 }

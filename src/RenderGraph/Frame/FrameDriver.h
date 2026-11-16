@@ -71,6 +71,7 @@ namespace RenderGraph::Frame::Driver
 		LostToBuild,       // a build of a segment's graph gave its held ticket back between two of its taps (what they wrote is dropped)
 		InstanceNotDeclared,  // a step's hook fired more often in one segment run than the description declared instances of its client
 		NoPass,               // an engine effect step fired its data-only hook, and CS has no pass for that step at all
+		Refused,              // a client could not draw the engine's work at its hook (a Scaleform display the graph cannot draw), in native mode
 		Count
 	};
 
