@@ -4519,6 +4519,8 @@ capture.
 
 ### The main menu's emblem: found, not fixed
 
+*Fixed in part by "Cleanup pass", item 2 (below): the shadow casters were not the cause.*
+
 The emblem (the main menu's 3D logo) is missing in native, and since the menu scenes' frame inputs the mist is missing too (both are drawn
 in guest; earlier native shots, `d1mm`, show the mist and the emblem as a black silhouette over it). What the runs show:
 - The menu scene's colour batch is latched whole every main-menu frame: one Lighting draw (8991 indices, three targets, the emblem) and
@@ -4538,6 +4540,8 @@ take.
 
 ### Not done in this pass
 
+*Updated by "Cleanup pass" and "State of the native frame" (below).*
+
 - **HDR output in the UI stage.** No harness setting or switch enables HDR without an HDR display (only the user's settings file, which the
   runs must not change), so it could only be built, not tested, in the present path; and the back buffer copy binds the swap chain's image
   of the frame, which a kept recording cannot bind. Left on the HDROutput anchor's own ticket (HDR is off in every test configuration). With
@@ -4553,6 +4557,8 @@ take.
 
 ### What is still a ticket at a hook, by frame kind (2026-11-16)
 
+*Updated by "Cleanup pass" and "State of the native frame" (below).*
+
 - **World**: none in a steady frame but the stages and Drawcall Limit Fix's graphs (start, shadow view, pre-depth, Z-prepass, pre-main,
   main opaque, deferred+water, forward, sun, first person, post, UI). Outside steady frames: the sun's query and the shadow and frame
   clears in world frames before Drawcall Limit Fix draws and during its load holds (the frame clear about one a frame then); a menu's scene
@@ -4564,6 +4570,8 @@ take.
 
 ### What of the old native paths is still reachable (2026-11-16)
 
+*Updated by "Cleanup pass" and "State of the native frame" (below).*
+
 - Per-anchor epochs: EngineDraws (blood, precipitation, a menu scene over the live world), ImageSpace (the menu composites in a world frame,
   the face tint at a load), EngineShadowClear and EngineFrameClear (world frames before Drawcall Limit Fix draws, its load holds, frame 0,
   views no place clears), EngineCubeClear (outside world frames), EngineCopy outside the stages' windows, EngineQueries (world frames before
@@ -4573,3 +4581,249 @@ take.
   skeleton's group clears (`DrawFor`), the upscaler evaluate's first frames (`FrameAnchors::CanRun` at the Upscale commit).
 - Guest mode keeps every anchor's own epoch, the main ImageSpace client and its manifest, and the D3D11 renderer for displays the graph
   refuses.
+
+## Cleanup pass (recipe plan, stage 7 without the final measurement; 2026-11-16, `org-native/phases`)
+
+The plan's stage 7 asked for the old native paths to be removed, and for six items before that. What was done, item by item.
+
+### 1. The shadow clears' churn and the first load hold
+
+**The churn was CS's.** Skylighting's `RenderSkyOcclusionMap` puts its sky occlusion map into the precipitation occlusion map's slot of
+the engine's depth table (depth target 10) while the engine's `Precipitation::RenderMask` renders into it, and puts the engine's map back
+after. A clear in that window (RenderMask's, or Skylighting's own D3D11 clear) found another texture in the slot, and the skeleton took
+the target for made again: the shadow clear group registered again (84 to 794 times a run). Each registration rebuilt the shadow clear
+anchor, Drawcall Limit Fix's shadow-view graph (its hosted clears, `extension 'cs.engine.skeleton.hosted' added again`, 161 times in one
+hold) and the menu UI stage, none of them staged. `RebuildRequestedUnstaged` was true nearly every frame, so DCLF's hold counted a held
+view in most frames ("a view not covered 263 frames") and ended with "no progress"; its re-entry hold followed for the same reason.
+
+**The fix** (Engine/Skeleton): a clear whose view is not the one its pass was made for stays on D3D11 for that call (counted, logged
+once), and a target made again is checked at the frame's start (`CheckMadeAgain`, from `BeginFrame`), when a lent slot holds its own view
+again. A real resize still registers the group again, once.
+
+**The first load hold** waited for that churn and nothing else: with it gone the hold settles. One short re-entry hold remains after the
+load (0.4 to 0.9 s, settled): a stage's one-shot passes ran, and `Rebuild` asks for every epoch of the stage's anchors, the per-anchor
+epochs of its shared anchors (engine depth copy, engine draws, image space, engine copy) among them, which are not staged. It goes with
+those epochs (item 5, not done).
+
+| Run (measured) | Before (`k2q`, `k2val`, `k3val`) | After (`a1q`, `a1val`) |
+|---|---|---|
+| shadow clear re-registrations (quick / validation tour) | 170 / 794 and 84 | 0 / 0 |
+| DCLF holds started (quick / validation tour) | 3 / 21 and 10 | 3 / 10 |
+| holds ended with "no progress" (quick / validation tour) | 2 / 19 and 2 | 0 / 0 |
+| first load hold, then its re-entry (quick) | 7.5 s, then 5.6 s, both "no progress" | 3.1 s, then 0.37 s, both settled |
+| first load hold, then its re-entry (validation tour) | 9.6 s and 9.5 s, then 6.1 s | 4.7 s, then 0.9 s, settled |
+| load start to the world on screen (quick: the loading screen's start to the end of the last hold of the first load) | 18.6 s | 10.0 s |
+
+**The capture fix found on the way.** The graph capture (the last pass of the UI stages, "The capture: a pass of the UI and menu UI
+stages") took its GPU point in its executed callback, which a stage runs at the tap, before the stage's commit submits the copy. Poll then
+mapped the readback before the copy ran: the main-menu shot was all black and the pause menu's shot repeated the previous capture. The
+point is now taken at the next capture point (`ORGScreenshot::Poll`), which always follows the commit of the run that took the capture.
+Every native shot of the earlier sections' last pass (`k2*`) was affected in light frames (menus); world shots were mostly right by timing.
+
+### 2. The main menu's emblem and mist
+
+**The mist.** A CS stage uploads CS's shared constants (FrameBuffer, SharedData, FeatureData, Permutation) once per step that reads them,
+at the step's upload point (`SharedConstants::MakeUploadPass(k)`), and there were 8 points for up to 16 steps. The menu UI stage's scene
+colour (step 8) and its composite (step 9) had no upload and no commit: they read what an earlier step's upload left, zeros from a step
+that did not tap this frame. There is now a point per step (`kUploadPoints = 16`, a static assert against `kMaxSteps`).
+
+**The emblem** was black with the menu scenes family on both backends (guest with `CS_ORG_MENU3D=1 CS_ORG_ENGINE_CONSTANTS=1` shows the
+same), so the shadow-caster draw skipped in native was not its cause: guest draws that shadow map with D3D11 and its emblem is black too.
+The latched pixel constants showed why: DirLightColor, DirectionalAmbient and the point lights' rows are zero while the light count is 2.
+Light Limit Fix replaces the engine's point light setup (its SetupGeometry hook): the engine leaves those rows empty and CS's D3D11 shader
+reads LLF's strict lights. The scene build has no Light Limit Fix. The strict lights of the pass are now written into the rows the build
+reads (`LatchPointLights`, MenuScenesCapture.cpp): position relative to the eye with the radius, colour with the fade.
+
+The emblem shows, lit by its two lights, but darker and flatter than guest's: the scene build falls off as the vanilla shader does
+(1 - (d/r)^2), not as Light Limit Fix's shader does. Matching it needs the scene build to take LLF's strict-light path (its constants as a
+latched block): not done.
+
+**The menu scene's shadow casters** (AE 52729, a Utility depth draw into the shadow maps from `UI3DSceneManager::Render`) are still
+skipped in native. The main menu's scene has no shadow mask run, so nothing there reads that shadow map; the loading screen's models read
+it through the shadow mask. A client for that draw (a menu scene batch with the shadow map slice as its depth target) is not built.
+
+**`CS_ORG_SHOT_TARGET=<n>`** (new, diagnostic): a harness shot copies engine render target n instead of the framebuffer. It found the
+fault above (kMAIN empty in native, the emblem's geometry present in the TAA mask, target 4).
+
+Shots (main menu, Start On Save off; guest is the reference): native before showed only the menus; now the mist and the emblem (darker).
+
+### 3. A menu's scene over the live world, blood and precipitation: not done
+
+What the tests reach of it: the validation tour's inventory draws no item model (`menu 3D scheme 1 (inventory): 0 geometries`), and no
+blood or precipitation ran in any test run; an item model needs a selected item, which needs foreground input. What the inventory does
+reach is one frame clear a frame on the EngineFrameClear anchor's own ticket while the menu is open, inside the UI stage's window (counted
+as "GPU work submitted between a stage's first tap and its commit", 11 to 47 a census window during the inventory). Moving the scene into
+the UI stage needs the menu UI stage's layout there (displays before and after the scene, the clear places in world frames, 16 Scaleform
+instances), which could not be checked by any background run, so it was not started.
+
+### 4. TAA without its copy back
+
+`ChainRoute` (ChainSteps.inl). A post stage build whose key has TAA, the HDR effect and CS's tonemap is routed: the tonemap draws into
+the LDR scratch, TAA draws from there into the final target, and nothing copies. Otherwise the direct forms (TAA from the final target into
+the scratch, then the copy back) are in the build.
+
+- **One routing per build.** The key's description picks the routing from the frame's fields; the routed and direct passes are rows of
+  their own (the tonemap's variant bit 14, TAA's bit 13, `ChainRoute::kRouted/kDirect`).
+- **A frame describes its build's routing.** `FrameAnchors::DescribedBuildHasRow` (new) answers, inside a client's rows callback, whether
+  the build the frame is described against has a row. So a frame whose wish differs from its build (TAA just turned on or off) is not a
+  lagging frame: it runs the build's routing whole. While a build holds both (the key keeps the other routing for its use window), the
+  frame's own wish decides.
+- **The frame stays whole while a build is pending.** In a routed build's frame without TAA, a pass-through copy (`taa.through`) moves the
+  scratch into the final target at RenderEndOfFrameEffects' return. A frame whose tonemap did not write the scratch (HDR off, Effects11's
+  tonemap) draws no TAA (lagged work); its tonemap or copy wrote the final target.
+- The hook takes the routed tonemap and TAA when the frame's schedule holds them (its rows).
+
+Other effects decided by the description that always draw when present: the dynamic-resolution upsample (it still copies back). It sits
+after the slots after the tonemap, so routing it would route those slots too; not done.
+
+Measured (perf-taa, before `k2perf`, after `d1perf`): the post stage's build now holds the routed tonemaps, routed TAA and the pass-through
+copy, and no `taa.copyback`; the TAA frame draws one full-screen copy fewer. Entry / body barriers of the post stage are unchanged as
+built (30 / 113: the copy's place is taken by the pass-through copy, which skips and folds), recorded body barriers unchanged within noise.
+native-upscalers (DLSS, FSR, TAA, XeSS: routing switches both ways in one run) passed with 0 tap errors; its TAA shot matches the previous
+build's.
+
+### 5. Deletions
+
+Done:
+- The A/B switches whose old side is no longer wanted, and their code: `CS_ORG_SEGMENTS` (`=0` off, `=3` closed), `CS_ORG_SEGMENT_REST`
+  (the closed segments' rest-at-last-use), `CS_ORG_SEGMENT_POOLS=0`, `CS_ORG_SEGMENT_START`, `_PREMAIN`, `_DEFERRED`, `_SUN`, `_POST`
+  (also the post chain's hooks), `CS_ORG_UI_STAGE`, `CS_ORG_STAGED_BUILDS`, `CS_ORG_SEGMENT_CLEARS`, and the stale `CS_ORG_SEGMENT_WORLD`
+  registry entry. Native mode with its requirements met always runs every CS stage, staged, open, with private alias pools. Kept for the
+  final measurement: `CS_ORG_ABSENT_PASSES` and `CS_ORG_KEEP_SKIPPED_BARRIERS`. ORG's `SetClosedEpochs` and `SetRestAtLastUseEpochs` stay in
+  ORG (a library feature, unit-tested there); CS no longer calls them.
+
+Not done, and why:
+- **Per-anchor epochs** (EngineDraws, ImageSpace, the shadow, frame and cube clears, EngineCopy, EngineQueries, DecalQueries, MovieTiles,
+  Tonemap, FrameGeneration) and `CanRun`/`RequestJoin` for their clients: still reached in native (below, "What of the old native paths is
+  still reachable"), and guest mode runs every anchor on its own epoch. They go when item 3 and the clears before DCLF draws are stages.
+- **Hosted clears, shared and point steps, `repeats`, held tickets from many taps**: all still used by the stages (DCLF's shadow-view and
+  Z-prepass hosts, the shared ImageSpace/EngineDraws/EngineCopy/Tonemap steps, every stage's end point, the menu composites and water
+  effects that tap more than once).
+- **D3D11 replay of clears and copies** (`Skeleton::Replay`, `RunCopy`'s D3D11 path): reached when a group anchor's run does not submit
+  (an error), and in guest mode.
+- **The phases and regions code** (`RegionsOn`, `CS_ORG_PHASES=1`, the `Segment::Phase*` epochs, held phase executions in `Run`): off by
+  default and unreachable without that switch, but woven through `Run`, the snapshot publisher, graph gathering and the runtime's epoch enum;
+  removing it safely needed more build cycles than this pass had. Left as it was.
+- `AllowedBetween` was already gone (stage 2).
+
+### 6. Expected warnings
+
+- **`PublishedResources used on thread …, not the render owner`** [C]: a graph build on the build manager's thread asked `IsPublished` /
+  `IsRegistered`, which read the live entries the render thread changes: a real race. They now answer from the snapshot the graph being
+  built registers, as `IsDeclarable` already did. That race is closed, but the line still comes once a run: the same build thread reads
+  the live entries again during the build's bootstrap (after its passes are gathered, before the persistent graph is prepared), most
+  likely a pass's Prepare calling `ShaderResourceIndex`, which needs an entry's current version and published flag that the build's
+  snapshot does not hold. Not fixed: the snapshot would have to carry them.
+- **16 "submitted between the first tap and the commit of the UI stage" at frame 1**: the first frame's initial layouts and zero fills of
+  the engine targets (external work, `initial layout Engine::kMAIN`, `zero Engine::kMAIN`, ...), made on first use, inside the UI stage's
+  window because the stage is present from frame 1 (its first schedule is recorded at setup). Harmless: they initialise images nothing has
+  written, before the stage's commit submits any work that reads them; the order between them and the stage's work cannot matter. Not
+  changed.
+
+### Measurements and checks (final build, DLL c60786c7b244)
+
+perf-taa, native Vulkan, Perf-Fast, census windows of 50 world frames, one run each; before `k2perf` (the sun stage and capture build),
+after `e1perf`. The machine was in use: fps is rough and no conclusion is drawn from it.
+
+| perf-taa | Before | After |
+|---|---|---|
+| Tickets a frame | 11.8 to 12.1 | 11.8 to 12.0 |
+| `vkQueueSubmit` a frame (batches) | 13.7 to 14.1 | 13.6 to 14.0 |
+| Entry / body barriers a frame, as built | 494 to 503 / 902 to 916 | 492 to 505 / 902 to 917 |
+| Late barriers folded at execution / body recorded | 97.1 / 818.9 | 98.0 / 815.1 |
+| Post stage passes (the recipe's last print) | 61 | 71 (both TAA routings' rows are registered; the build holds the routed ones) |
+| Steady window: builds, recordings, switches, lagged work | 0, 0, 0, 0 | 0, 0, 0, 0 |
+| Loading screen to world-ready (harness) | 21.6 s | 11.9 s |
+| fps (rough) | 122.6 | 121.8 |
+
+The world frame's counts do not move: the churn and the holds were load-time costs, and TAA's copy was one pass of about a hundred
+recorded in the post stage.
+
+Checks, one run each, `CS_TEST_BACKGROUND=1`, mismatches and recipe findings fatal: native-quick, native-d3d12-quick, native-river,
+native-upscalers, native-interior, native-validation (the same 21 validation lines as before), the loading-thread run, first and third
+person, the frozen-world run native and guest (the pause menu shot now differs from the world shot before it, and matches guest's), guest-quick,
+native-perf-taa: all passed, 0 tap errors, no `NoPass`, 0 recipe findings, 0 frames a stage was absent after it first ran, Scaleform 0
+displays left out, 0 shadow clear re-registrations, 0 holds ended with "no progress". The main menu native and guest (Start On Save off;
+the harness marks them failed because it expects a world): native shows the mist and the emblem, darker than guest's.
+ORG is unchanged in this pass.
+
+## State of the native frame (2026-11-16, after the cleanup pass)
+
+Native mode (`CS_ORG_NATIVE=1`), Vulkan or D3D12. Every CS stage is one ORG graph, built off the render thread, staged and recorded before
+it switches in at a frame's `Renderer::Begin`, one kept recording per frame slot, one ticket a frame. Drawcall Limit Fix's graphs (*) are
+stages of their own.
+
+### Stages per frame kind
+
+| Kind | Stages, in order |
+|---|---|
+| world, and a frozen world's capture frame | start, shadows*, pre-depth, depth*, pre-main, opaque*, deferred+water, forward*, sun, first person*, post, UI |
+| loading screen, main menu, menu over a frozen world | menu UI |
+| Bink movie | UI |
+
+A steady world frame is 11.8 to 12.0 tickets: the stages' and DCLF's (the sun stage takes 0.9 to 1.0; a frame without the first-person epoch
+puts both sun queries in it).
+
+### Always present, chosen per frame by gates
+
+Present in every build of their stage, recorded at execution with the CPU's gate answers (a pass that does not run skips, its barriers
+folded), because the engine decides them late or a lagging build would lose them:
+- start: the six reflection faces' sky, the water effects' instances (8 ripples and 4 heightmap steps per target, 32 flow copies);
+- post: the screenshot copy, the frozen background's copy (`capture.menubg`), refraction and the radial blur after the tonemap, both tonemap
+  forms, both forms of the last luminance level, the engine-counter parity variants (luminance, bright pass, the VL composite, the
+  normals target), TAA's and the raw AO's history pairs (by slot parity, in the description), and in a routed build the pass-through copy;
+- deferred+water: the snow pass and its copy, the world steps' variants by the engine's counters;
+- UI and menu UI: Scaleform's instances (8 in UI; 16 in menu UI), the capture's copy, the movie's tiles, the menu UI stage's three clear
+  places;
+- sun and post: the sun's two query instances.
+
+Absent by build key when off (a rebuild, staged, on change): the post slot effects, the HDR effect against its copy, the Effects11 tonemap
+owner, TAA (and its routing), the upscaler evaluate, the dynamic-resolution upsample, the VL composite, SSR, the SAO composite forms, IBL,
+Terrain Blending, Volumetric Shadows, light culling, the bloom radii.
+
+### Engine targets still used, and who reads them
+
+| Target | Writers | Readers |
+|---|---|---|
+| kMAIN | DCLF's opaque and forward graphs, deferred+water, the Upscale anchor's copy, Post Processing and Effects11 at the Tonemap anchor, the menu scenes | the post chain (in place before the tonemap), the menu composites, Scaleform (a menu drawn into kMAIN) |
+| kFRAMEBUFFER (the final target) | the post chain (tonemap or routed TAA, then in place), the menu composites, Scaleform, the overlay | the UI stages, the capture, HDR output, frame generation's hudless copy, the present |
+| main depth, kPOST_ZPREPASS_COPY | DCLF's Z-prepass, the pre-main and menu UI depth copies | deferred+water, post, the menu scenes' soft depth |
+| the normals targets, kMOTION_VECTOR, kTEMPORAL_AA_MASK, kSHADOW_MASK | DCLF's graphs, pre-main's clears, the menu scenes | deferred+water, post (SSR, SAO, TAA), the menu scenes' Lighting draws |
+| kMAIN_ONLY_ALPHA, kMAIN_COPY, kREFRACTION_NORMALS, kUNDERWATER_MASK, the water displacement pair and flow map | forward, deferred+water, the start stage | the next frame's start and deferred+water (`kPreviousFrame`) |
+| kHDR_DOWNSAMPLE0 and the luminance levels before the last | post, the menu composites | DCLF's character light |
+| the shadow maps, the precipitation occlusion map | DCLF's shadow view graph (and the engine at its occlusion point while DCLF does not draw a map) | DCLF's graphs, Skylighting (its own map lent into the slot), the precipitation |
+| kMENUBG | post's capture copy in a capture frame | the menu UI stage's frozen composite |
+| kSAVE_GAME_SCREENSHOT | post's screenshot copy | the save's thumbnail |
+| the reflection cubemap faces | the start stage | DCLF's graphs |
+
+### What guest mode (DXVK) still uses of the old path
+
+Guest runs no CS stage. It uses: every frame anchor's own epoch (per-anchor epochs, `CanRun`/`RequestJoin`), the main ImageSpace client,
+the clients built on first sight and the shape manifest (`ImageSpaceShapes.json`) with the per-draw shape capture, the D3D11 renderer for
+displays the graph refuses, D3D11 replay of clears and copies, the capture's D3D11 staging copy when the graph cannot take it, and the post
+chain's hooks (which only check and stage in native). This is the input for the guest port (plan stage 8).
+
+### Old native paths still reachable
+
+- Per-anchor epochs: EngineDraws (a menu's scene over the live world, blood, precipitation), ImageSpace (the menu composites over the live
+  world, the face tint at a load), EngineShadowClear and EngineFrameClear (world frames before DCLF draws and during its holds, a menu scene's
+  clears over the live world, frame 0), EngineCubeClear (outside world frames), EngineCopy outside the stages' windows, EngineDepthCopy
+  outside the stages, EngineQueries (world frames before DCLF draws), DecalQueries (its client is never made in these sessions), HDROutput
+  (HDR on), Tonemap and FrameGeneration (a menu scene's tonemap, frame generation), MovieTiles (no client). Their unstaged rebuilds still
+  start DCLF re-entry holds (the short hold after each load).
+- `CanRun`/`RequestJoin`: the sky and decal clients' setup joins, the menu composites over the live world, the skeleton's group clears, the
+  upscaler evaluate's first frames, the menu scenes family.
+- D3D11 replay of a group's clears when its anchor's run does not submit (an error), and clears of a lent target slot (Skylighting's map).
+- The phases and regions code, with `CS_ORG_PHASES=1` only.
+
+### Untested
+
+- HDR output (no background way to enable it), frame generation (needs the foreground), Post Processing and Effects11 at the Tonemap
+  anchor (Post Processing is off in this game's settings; Effects11's preset does not own the tonemap), so the routed TAA's interplay with
+  Effects11's tonemap is untested too.
+- A menu's item model over the live world, blood, precipitation (no test reaches them).
+- The menu scene's shadow casters (not built), the menu scenes' Light Limit Fix falloff (not matched).
+- The effects that are `NoPass` (not built): the rain ripple, rain heightmap, blend, smooth and normals water steps, ISSimpleColor's stencil
+  fill and the UI form of TAA in a menu scene, other slot effects inside a menu scene's end-of-frame call, the local map's edge pass, the
+  console screenshot's and the debug views' copies, the lens flare composite forms, the masked depth of field composites, the raster
+  depth of field blur.
