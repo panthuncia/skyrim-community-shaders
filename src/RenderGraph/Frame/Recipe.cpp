@@ -4,6 +4,7 @@
 
 #	include "RenderGraph/Frame/FrameDriver.h"
 #	include "RenderGraph/FrameAnchors.h"
+#	include "RenderGraph/GraphResources.h"
 #	include "RenderGraph/RenderGraphRuntime.h"
 #	include "RenderGraph/Switches.h"
 
@@ -176,10 +177,27 @@ namespace RenderGraph::Frame::Recipes
 		 * graph orders its own passes by what they declare, so the check is between stages. A read whose resource a stage written
 		 * earlier in the recipe (or the reading stage itself) writes is fine. One with no writer anywhere in the frame comes from outside
 		 * the graphs (uploads, files, the engine). One whose writers are all in later stages is the previous frame's: it must be declared
-		 * so (kPreviousFrame), else it is a finding.
+		 * so (kPreviousFrame), else it is a finding. A pass of a CS stage that reads a CS transient (GraphResources::IsTransientName) no
+		 * pass of its stage writes is a finding too: with absent passes, the transient's writer may be left out of the build while its
+		 * reader is present, and the reader would read memory nothing wrote this frame.
 		 */
 		void Validate(State& a_state, const std::vector<Pass>& a_passes, std::vector<std::string>& a_findings)
 		{
+			std::map<std::uint32_t, std::set<std::string>> stageWrites;  // what each stage's passes write
+			for (const auto& pass : a_passes)
+				for (const auto& name : pass.writes)
+					stageWrites[pass.stage].insert(name);
+			std::set<std::string> unwritten;
+			for (const auto& pass : a_passes) {
+				if (kWorld[pass.stage].owner != Owner::Cs)
+					continue;
+				for (const auto& name : pass.reads)
+					if (!stageWrites[pass.stage].contains(name) && GraphResources::IsTransientName(name) && unwritten.insert(name).second)
+						a_findings.push_back(fmt::format("{} ({}) reads the transient {}, which no present pass of its stage writes: a pass that writes it is absent "
+														 "from the build while its reader is present. Keep the writer present whenever a reader is, or give the "
+														 "resource a lifetime across frames",
+							pass.name, StageName(static_cast<StageId>(pass.stage)), name));
+			}
 			std::map<std::string, std::uint32_t> firstWriter;  // the first pass that writes each resource
 			for (std::uint32_t i = 0; i < a_passes.size(); ++i)
 				for (const auto& name : a_passes[i].writes)

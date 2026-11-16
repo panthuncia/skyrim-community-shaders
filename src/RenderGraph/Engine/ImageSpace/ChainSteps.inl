@@ -85,8 +85,9 @@ struct ChainSteps
 		std::uint32_t rowBase = 0;
 	};
 	std::array<Part, 3> parts;
-	// Groups a hook found off in the frame's schedule, kept on from then (the next description has them). Render owner.
-	std::array<bool, ChainGroup::kCount> requested{};
+	// Groups a hook found off in the frame's schedule (off, or absent from the stage's build): the frame each was last asked for at (0:
+	// never). The descriptions have a group on for kRequestFrames after its request. Render owner.
+	std::array<std::uint64_t, ChainGroup::kCount> requested{};
 	// The CS-owned targets: the bloom's blur and its scratch, the depth of field's downsample and blur scratch, TAA's history pair, the
 	// get-hit effect's two blur buffers and its blur swap, and the full-screen blur's downsample and its blur scratch.
 	OwnedTarget bloom, bloomSwap, dofDown, dofSwap;
@@ -529,7 +530,9 @@ void ChainRows(std::size_t a_part, std::array<std::uint64_t, 4>& a_rows)
 	const auto& chain = Chain();
 	const auto& frame = Frame::Driver::Current();
 	const auto& post = frame.post;
-	std::array<bool, ChainGroup::kCount> on = chain.requested;
+	std::array<bool, ChainGroup::kCount> on{};
+	for (std::size_t group = 0; group < on.size(); ++group)
+		on[group] = RequestHolds(chain.requested[group]);
 	on[ChainGroup::kComposite] |= post.volumetric;
 	for (std::uint32_t slot = 0; slot < 8; ++slot) {
 		if (!(post.slots >> slot & 1u))
@@ -545,13 +548,24 @@ void ChainRows(std::size_t a_part, std::array<std::uint64_t, 4>& a_rows)
 	on[ChainGroup::kTaa] |= post.taa;
 	on[ChainGroup::kScreenshot] |= post.screenshot;
 	on[ChainGroup::kUpsample] |= post.dynres;
+	// As a stage's key (FrameAnchors::DescribingKey), the passes that must answer on demand stay present: the screenshot copy (a save asks
+	// for it with at most a frame of notice, and a late copy leaves a stale thumbnail), both tonemap forms (the fade starts and ends on a
+	// frame) and both forms of the last luminance level (the adaptation's reset lasts one frame). TAA's history pair is chosen per frame.
+	const bool key = FrameAnchors::DescribingKey();
+	if (key) {
+		on[ChainGroup::kScreenshot] = true;
+		on[ChainGroup::kHdrLum] |= post.hdr;
+		on[ChainGroup::kHdrAdapt] |= post.hdr;
+		on[ChainGroup::kTonemap] |= post.hdr && !post.effects11;
+		on[ChainGroup::kTonemapFade] |= post.hdr && !post.effects11;
+	}
 	const auto& part = chain.parts[a_part];
 	for (std::uint32_t entry = 0; entry < part.count; ++entry) {
 		const auto group = part.group[entry];
 		if (!on[group])
 			continue;
 		// TAA's history pair is CS's, by the frame slot's parity: the slot's frames write one history and read the other.
-		if (group == ChainGroup::kTaa && ((part.keys[entry].variant >> 15) & 1u) != (frame.parity & 1u))
+		if (group == ChainGroup::kTaa && !key && ((part.keys[entry].variant >> 15) & 1u) != (frame.parity & 1u))
 			continue;
 		const auto row = part.rowBase + entry;
 		if (row < 256)
@@ -600,7 +614,9 @@ void RegisterChainSteps()
 	// Published, so Drawcall Limit Fix's graphs can declare a read of it by id (the character light). A new pair rebuilds every graph once.
 	for (const auto& target : chain.adapt)
 		(void)PublishedResources::Publish(*target.texture);
-	if (!MakeOwned(chain.bloom, T::kHDR_BLOOM, "ImageSpace::Bloom", Lifetime::Transient) ||
+	// The bloom is kept across frames: a frame whose bloom lags (its radius absent from the stage's build until the build with it switches
+	// in) leaves it unwritten, and the tonemap then reads the last bloom drawn, not an unwritten transient.
+	if (!MakeOwned(chain.bloom, T::kHDR_BLOOM, "ImageSpace::Bloom", Lifetime::History) ||
 		!MakeOwned(chain.bloomSwap, T::kHDR_BLURSWAP, "ImageSpace::BloomSwap", Lifetime::Transient) ||
 		!MakeOwned(chain.dofDown, T::kLDR_DOWNSAMPLE0, "ImageSpace::DofDownsample", Lifetime::Transient) ||
 		!MakeOwned(chain.dofSwap, T::kLDR_BLURSWAP, "ImageSpace::DofBlurSwap", Lifetime::Transient) ||
@@ -949,6 +965,13 @@ void RegisterChainSteps()
 		// The three clients share the post stage's rows, in order.
 		part.rowBase = rowBase;
 		std::vector<FrameAnchors::PassDesc> passes;
+		// The bloom's first clear, before any pass reads it.
+		if (p == 1) {
+			AnchorPasses::Builder builder(Anchor::ImageSpace, client.id, -5);
+			builder.Add(AnchorPasses::ClearOf("bloom.clear", *chain.bloom.texture), true);
+			for (auto& pass : builder.Take())
+				passes.push_back(std::move(pass));
+		}
 		// The adapted luminance pair's first clear, before any pass reads it.
 		if (p == 1)
 			for (std::uint32_t h = 0; h < 2; ++h) {
@@ -1224,7 +1247,7 @@ bool TakeChainStep(std::size_t a_effect, bool a_compute, std::array<std::uint32_
 	}
 	if (!planned) {
 		// CS's plan left the step out: its group is off in the frame's schedule. Nothing is drawn; the next description has it on.
-		chain.requested[group] = true;
+		chain.requested[group] = Frame::Driver::Current().frame;
 		Frame::Driver::NoteLaggedWork(segment);
 		return true;
 	}
@@ -1234,7 +1257,7 @@ bool TakeChainStep(std::size_t a_effect, bool a_compute, std::array<std::uint32_
 		// the new sizes: lagged work, not a mismatch.
 		constexpr std::uint64_t kRegistrationFrames = 300;
 		if (Frame::Driver::Current().frame - chain.registeredFrame < kRegistrationFrames) {
-			chain.requested[group] = true;
+			chain.requested[group] = Frame::Driver::Current().frame;
 			Frame::Driver::NoteLaggedWork(segment);
 			return true;
 		}
@@ -1251,10 +1274,13 @@ bool TakeChainStep(std::size_t a_effect, bool a_compute, std::array<std::uint32_
 	if (!part.made[entry] || !scheduled) {
 		// The frame's schedule (or CS's plan, which follows it) does not have it: nothing is drawn this frame, and the next
 		// description turns its group on.
-		chain.requested[group] = true;
+		chain.requested[group] = Frame::Driver::Current().frame;
 		Frame::Driver::NoteLaggedWork(segment);
 		return true;
 	}
+	// A group on by a hook's request stays on while the engine draws it (a field at Begin may not see it: the VL composite).
+	if (RequestHolds(chain.requested[group]))
+		chain.requested[group] = Frame::Driver::Current().frame;
 	return StageStep(client, entry, a_effect, a_compute, a_groups);
 }
 

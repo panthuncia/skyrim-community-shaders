@@ -486,6 +486,16 @@ namespace RenderGraph::Engine::Scaleform::Passes
 
 			PassFrame Prepare(const PassBindings&, const org::PassPrepareContext&) const { return { slots, gate, gateBase }; }
 
+			// Recorded at execution: a surface no display of this instance drew on this run skips it, and its barriers fold into the next
+			// pass that runs.
+			static bool SkipsAtExecution(const PassBindings&, const PassFrame& a_pass, const org::PassRecordContext& a_recording)
+			{
+				if (!a_pass.slots || !a_pass.gate)
+					return true;
+				const auto frame = a_pass.slots->Find(a_recording.Run());
+				return !frame || !frame->staging || (frame->commands.empty() && !frame->clear);
+			}
+
 			static void Record(const PassBindings& a_bindings, const PassFrame& a_pass, org::PassRecordContext& a_recording)
 			{
 				if (!a_pass.slots || !a_pass.gate)

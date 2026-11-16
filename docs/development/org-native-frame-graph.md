@@ -3336,10 +3336,10 @@ pass its description has off (`SetSkipWhen`: a row or client the description cle
 skipped ahead in the kept recording, but still recorded its before and after barriers, each its own barrier batch. The post stage
 holds 195 passes, most off in any one frame (the full-screen blur, get hit, the variants of other descriptions).
 
-Absent passes per description were considered first: a graph built per description, with only its on passes. It is not done,
-because a build of a stage's graph drops every slot's schedule until the new build's recordings are ready (the frames between draw
-nothing of the stage: `Scheduled::Absent`), and recording a build before it attaches needs a pending instance in the host (stage 2's
-note). Every description change (a slot turning on, the fade form, the screenshot copy) would then blank the stage for a few frames.
+Absent passes per description were considered first and not done here, because a build then dropped every slot's schedule until
+its recordings were ready. Staged builds (stage 5) removed that reason: a build switches in whole with its recordings and never blanks
+a stage. Off passes are now absent from the builds wherever a rebuild's latency is acceptable; see "Absent passes" below. Folding
+stays for what remains present and off in a frame (parity variants, a lagging description).
 
 What is done, in ORG (`FoldSkippedPassBarriers`, RhiExecution.h, applied by `BuildPersistentRecordingList`): when a list is built,
 the barriers of each run of passes skipped ahead are folded into the next pass that runs.
@@ -3529,10 +3529,10 @@ made: 1 to 3 frames without the stage after every build. Now a CS stage's build 
   before its first build, and its staged build switches in at once.
 - The census adds `build switches` and `absent after it first ran` per stage. Every run below: 0 absent frames after a stage first ran.
 
-**Description-off passes stay folded.** With staged builds a description could be a build of its own, its off passes absent. It is not
-done: folding (stage 4) already makes an off pass cost a few composed barriers, while a build per description costs a build off the thread
-(5 to 140 ms here) and a switch a frame or two later for each of the many description changes (rows, the fade form, the screenshot copy).
-Folding is the simpler correct one.
+**Description-off passes.** This stage kept them folded, arguing that a build per description costs a build and a switch for each
+of the many description changes. That argument held only for a build per description. A build key per stage that changes only when
+the set of passes a frame may want changes (not per frame) needs no build in a steady scene; see "Absent passes" below, which
+replaces this choice.
 
 ### Recipes for the other frame kinds
 
@@ -3902,3 +3902,199 @@ failed because it expects a world). One native loading shot showed the main menu
 either (timing, not reproducible). Not reached: a menu over a frozen world (the frozen copy), UI3DSceneManager with the engine's TAA on,
 ripples and heightmap steps past their first instances. The fatal path fired once during the work: the displacement target was first read
 from the wrong variable (the plan check named it), fixed before the final runs.
+
+## Absent passes (recipe plan, stage 6; 2026-11-16, `org-native/phases`)
+
+A pass that is off is not handed to ORG, wherever a rebuild's latency on enable or disable is acceptable. Builds are staged (stage 5), so
+a rebuild never blanks a stage: the old build keeps drawing until the new one switches in with its recordings. Only passes that must answer
+on demand stay present and are chosen per frame by their gates.
+
+### The build key
+
+Each CS stage has a build key (`BuildKey`, FrameAnchors.cpp): per client registration (by its desc, so a client registered again starts
+whole), whether its passes are present and which of its rows; and which module steps (light culling) are present. A client the key does not
+list (one registered since) is present whole. Instances are never cut: an instance count is a late engine decision, and an empty instance
+skips its run at execution (below).
+
+- **At the build.** A build reads the stage's `nextKeys` when it starts (`PrepareForBuild`) and keeps it with the build: the staged build's
+  key (`stagedKeys`) and the attached one's (`declaredKeys`). `GatherDeclared` leaves out every pass, module step and shared-constants upload
+  the key does not have.
+- **In the description.** `DescribeDeclaredFrom` cuts the frame's description to the build's key: a row, client or module step the key left
+  out is off. The frame's own description (uncut) is kept beside it (`frameWanted`): a tap whose work the build left out is lagged work, as a
+  lagging schedule's is, and the frame counts as lagging.
+- **At Begin** (`UpdateKey`, after the stages' schedules). The stage is described as a key (`FrameAnchors::DescribingKey()`): every variant
+  a frame may pick with the settings now (both parities), both kind groups (the UI stage), the rows a hook asked for, and the passes that
+  must always be present. It is described against the clients registered now (the published snapshot), so a new registration is seen at
+  once. Each wanted client, row and module step is stamped on the stage's own clock, which runs only in frames whose recipe has the stage
+  (at most 0.1 s a frame). The key keeps what was wanted within 10 s of that clock.
+- **When a build is asked for.** When the key wants something the stage's newest build (staged, else attached) left out: at once, from
+  that Begin; frames meanwhile lag as before. To drop unused passes, only when that build's key was provisional (the first key; a client
+  registered since), at a load, or at a frame-kind switch. Otherwise the key is only stored for the stage's next build, whatever asks for
+  it. A build already asked for with a key that covers the new one is not asked for again. The key is logged
+  (`[ORG] absent passes: the <stage> asks for a build at frame N (<why>): present now: ...; absent now: ...`), counted (`key builds` in the
+  declared frame's census line), and the switch line names the frames from the key's request to its switch-in.
+- **Per-frame fields stay out of the key.** A field that changes every frame (a parity, a ping-pong target) is in the key whole: the key
+  description sets both values. Otherwise each frame would ask for a build and builds would supersede each other forever.
+- `CS_ORG_ABSENT_PASSES=0` keeps every pass (A/B runs).
+
+Rows: each client of a stage has its own rows. The world water client's rows overlapped the scope rows (both started at 0), so the SSR
+downsample was never row-off; the water rows now follow the scopes' (`waterRowBase`).
+
+A hook's request (a step drawn while its row is off) keeps the row on in the descriptions for 300 frames after the last request
+(`kRequestFrames`), not until the next registration as before, so an unused effect can leave the key.
+
+### What is absent when off
+
+| Passes | Off when | How |
+|---|---|---|
+| post slot effects: world map, refraction, FXAA, depth of field, radial blur, full-screen blur, get hit (both places) | the slot's effect is not active, or not in its place (usesLDR) | rows (`ChainRows`) |
+| HDR effect against its copy | the HDR switch | rows |
+| the VL composite | volumetric lighting off | rows |
+| TAA | CS's method is not TAA | rows |
+| the dynamic-resolution upsample | no dynamic resolution | rows |
+| bloom radii other than the current one | the radius | rows |
+| the upscaler evaluate | the method is not an SDK upscaler | its own client `cs.upscaling.evaluate`, declared by `post.upscaler` |
+| the Effects11 tonemap owner | Effects11 does not own the tonemap | the client unregisters itself when inactive (as before) |
+| SSR (downsample, the ray march's two forms, blur) | the helper off; the downsample and blur switches pick the forms | rows (`WorldScopeRows`) |
+| the SAO composite forms, and its blurred or raw reflection inputs | the SAO and fog switches; the SSR blur switch | rows |
+| the raw AO's temporal or plain form | the temporal switch | rows |
+| IBL, Terrain Blending, Volumetric Shadows | their `declared` (active, directional shadows) | clients |
+| light culling | its declared | module step |
+
+While an upscaler was just chosen and the evaluate's pass is not in the schedule yet, the Upscale client does not copy the unwritten upscaled
+texture into kMAIN (`FrameAnchors::CanRun` on the evaluate client at the commit).
+
+### What stays present, chosen per frame by gates
+
+| Passes | Why present |
+|---|---|
+| the screenshot copy, for each of its three inputs (final, TEMP_COPY, TEMP_COPY2) | a save asks for it with at most a frame of notice; a late copy leaves a stale thumbnail. Its input depends on TAA, the LDR slots and dynamic resolution, so all three stay |
+| both tonemap forms (plain, fade) | the fade starts and ends on a frame |
+| both forms of the last luminance level (luminance, light adaptation) | the adaptation's reset lasts one frame |
+| the engine-counter parity variants: last luminance level and bright pass by luminance parity, the VL composite by the VL counter, the normals target (n0/n1) in SSR, SAO and TAA, the water blend's history | the engine picks them per frame |
+| TAA's and the raw AO's history pairs (both slot parities) | the frame slot's parity picks one; the other is off in the description (`SetSkipWhen`) and folds |
+| the ping-pong target variants of the post steps (pre-tonemap slots, HDR downsample, tonemap, TAA output, upsample input) | see "The post target plan" below |
+| the six reflection faces, Scaleform's 8 instances, the water effects' ripple, heightmap and flow copy instances | late engine decisions; an empty instance skips at execution |
+| the snow pass and its copy | the snow flag changes with the weather |
+
+**Bloom.** `ImageSpace::Bloom` is now a history (kept across frames, cleared once), not a transient. In a frame whose bloom lags (a new
+radius absent until its build switches in) nothing writes the bloom, and the always-present tonemap reads it. Keeping every radius present
+would cost 21 passes in every frame to cover a rare change; a history costs one target that is not aliased, and a lagging frame shows the
+last bloom drawn, which is almost the same image. `BloomSwap` stays transient: it is written and read only within the radius's own passes.
+
+### Empty instances record no barriers
+
+ORG (`FoldBarriersOfSkipped`, RhiExecution.h): a late batch (recorded at execution) asks each pass first whether it skips the run
+(`SkipsAtExecution`, `SkipsAgain`), and folds the barriers of the passes that skip into the next pass that runs, as a list built with passes
+skipped ahead does (stage 4's fold, now one function for both). Every backing still ends in the state the plan gives it, so the ledger's
+commits and the next stage's entry barriers are unchanged. A batch whose fold would compose an ownership transfer or overlapping different
+ranges keeps its barriers. A kept late batch keyed by its skip answers stays consistent: the fold depends on the answers alone. The census
+line counts what was left out (`late barriers folded at execution`).
+
+Passes that now skip at execution with their barriers folded: Scaleform's display passes (`SkipsAtExecution`, new: no display drew on the
+surface in this instance), the sky faces the engine did not draw, the upscaler evaluate, the gated copies and clears, and the start stage's
+water effect instances (ripples, heightmap steps, flow copies), which are no longer GPU-gated (`gpuGated = false`): recorded at execution with
+the CPU's gate answer, most instances empty.
+
+GPU-gated passes still record their barriers when empty, because the count is latched on the GPU and the CPU does not know it at record time:
+the deferred+water stage's world steps (SSR, SAO, snow, composite, water blend) and the post chain's steps. These are the passes whose variants
+are all present for the engine's per-frame choices.
+
+### The post target plan (not done)
+
+The plan asked for the ping-pong targets to be computed at Begin, so each post step is one present pass. It is not done, because the targets
+must agree with the engine's loop at the Tonemap anchor: the anchor's clients (Effects11, Post Processing) take the tonemap's input and output
+as the engine's target indices from the engine's call. A plan at Begin changes whenever an effect starts or stops (the world map, the
+inventory's depth of field: an LDR slot moves the HDR effect's output from the final target to TEMP_COPY). While the new plan's build or
+recording is pending, the schedule holds only the old plan's variants, the engine's loop asks for the new ones, and the tonemap (and every step
+after the changed one) would draw nothing for those frames: the frame, not just the new effect, would be wrong. Doing it soundly needs the
+tonemap ping-pong as CS targets (stage 3's "What is left"): the Tonemap anchor's interface, Effects11, Post Processing, TAA, the LDR slots,
+the screenshot copy and the upsample moving to CS's pair together, so CS's plan, not the engine's, decides what every reader sees. The
+engine's loop replay (`PlanEndOfFrame` at RenderEndOfFrameEffects' entry) remains the plan.
+
+### The recipe check
+
+A present pass of a CS stage that reads an aliasable CS transient (`GraphResources::IsTransientName`: Lifetime::Transient, not exported) no
+present pass of its stage writes is a recipe finding (fatal in development builds). Its first run caught Terrain Blending's
+`BlendedDepth16`, which is exported and so never aliased; the check counts only aliasable transients.
+
+### No cache of built graphs
+
+ORG holds one attached and one staged graph per epoch; a key change builds anew.
+
+### Measurements
+
+Passes per stage graph (the recipe's last print; before: the stage 5 build's runs `m4perf`, `m4val`; after: `k5perf`, `k6val`):
+
+| Stage | perf-taa before | perf-taa after | validation tour before | validation tour after |
+|---|---|---|---|---|
+| start | 84 | 84 | 84 | 84 |
+| pre-depth | 12 | 12 | 12 | 12 |
+| pre-main | 21 | 21 | 25 | 25 |
+| deferred+water | 87 | 74 | 85 | 68 |
+| post | 222 | 78 | 218 | 78 |
+| UI | 166 | 166 | 167 | 166 |
+
+The start and UI stages are fixed instances (water effects, faces, Scaleform), present by design; their empty instances fold at execution.
+
+perf-taa, native Vulkan, Perf-Fast, census averages between the marks, one run each, the machine in use (fps rough, no conclusion drawn):
+
+| perf-taa | Before (`m4perf`) | After (`k5perf`) |
+|---|---|---|
+| Tickets a frame | 12.89 | 12.92 |
+| Queue submissions a frame (batches + uploads + leading uploads) | 17.87 | 17.88 |
+| Entry barriers a frame | 508.4 | 506.6 |
+| Body barriers a frame, as the lists are built | 907.6 | 898.7 |
+| Late barriers folded at execution a frame | (none) | 92.0 |
+| Body barriers a frame, recorded | 907.6 | 806.7 |
+| post stage: entry / body (as built) | 33.0 / 104.0 | 31.0 / 97.0 |
+| deferred+water: entry / body (as built) | 79.0 / 165.0 | 79.0 / 163.0 |
+| fps between the marks (rough) | 121.3 | 123.4 |
+| Steady window: builds, recordings, switches, lagged work | 0, 0, 0, 0 | 0, 0, 0, 0 |
+
+The post stage's absent passes were already skipped ahead and folded, so they cost few barriers before; their absence shows in the pass
+counts and build sizes, not in the barriers. The recorded body barriers fall by about a hundred from the late batches' empty passes
+(Scaleform's instances, the water effect instances, the faces).
+
+The validation tour (Whiterun, inventory, map, save and load, Dragonsreach), per stage, before (`m4val`) and after (`k6val`):
+
+| Stage | Builds | Build switches | Slot switches | Recordings | Lagging frames | Lagged work (taps) | Key builds | Key request to switch-in, frames |
+|---|---|---|---|---|---|---|---|---|
+| start | 13 / 13 | 13 / 13 | 13 / 13 | 52 / 52 | 0 / 0 | 0 / 0 | 0 | - |
+| pre-depth | 4 / 4 | 4 / 4 | 8 / 8 | 24 / 24 | 1 / 1 | 0 / 0 | 0 | - |
+| pre-main | 13 / 13 | 12 / 12 | 28 / 28 | 68 / 68 | 4 / 4 | 3 / 3 | 2 | 2, 2 |
+| deferred+water | 17 / 17 | 14 / 15 | 31 / 31 | 140 / 136 | 13 / 16 | 168 / 231 | 4 | 3, 6 |
+| post | 13 / 19 | 11 / 15 | 28 / 59 | 84 / 120 | 21 / 38 | 138 / 183 | 9 | 2, 3, 3, 3, 5, 5, 6 |
+| UI | 5 / 5 | 5 / 5 | 8 / 8 | 48 / 48 | 0 / 0 | 0 / 0 | 0 | - |
+
+Key builds in the tour: the first key of each stage at the world's first frame and its repeat when the chain and world clients register
+there (provisional keys), the inventory's depth of field, the map's slots, the bloom radius indoors, IBL's start, and the registrations after
+the load. A key change reaches the screen 2 to 6 frames after the Begin that wanted it. Frames with a stage absent after it first ran: 0
+in every run.
+
+Effect onsets: shots 4 frames after the inventory and the map open (`k4on`) against the same build with `CS_ORG_ABSENT_PASSES=0`
+(`k4onoff`): the same images (inventory 83.3 both, the depth of field already drawn; the map's first frames are black in both, the engine's
+own fade). The tour's inventory, map and Dragonsreach shots match the stage 5 build's by eye.
+
+### Checks
+
+One run each, `CS_TEST_BACKGROUND=1`, mismatches and recipe findings fatal, the final build: native-quick, native-d3d12-quick, native-river,
+native-upscalers (DLSS, FSR, TAA, XeSS), native-interior, native-validation (the same 20 `VUID-vkCmdDraw-None-09600` as before), the
+loading-thread run, first and third person, guest-quick: all passed, 0 tap errors, 0 recipe findings, 0 frames a stage was absent after it
+first ran. The main menu (Start On Save off): menu shot correct, 0 tap errors (the harness marks it failed because it expects a world). ORG's
+unit tests pass (the lease tests and HeadlessBenchmark not run; ExternalOpen failed once in a parallel run and passed alone).
+
+The fatal path fired once during the work: the recipe check's first form counted Terrain Blending's exported transient (above).
+
+Two description problems surfaced and were fixed: a hook's request that expired while the engine still drew the step (the VL composite,
+which the description's volumetric field does not see) turned the row off every 300 frames and lagged it a few frames; a request is now kept
+while the step draws. And the stages' first keys at the session's first frame (a Bink frame) had dropped the module steps nothing had
+described yet; a key now changes outside the stage's frames only once the stage was described.
+
+### What SetSkipWhen, folding and gates are still used for
+
+- `SetSkipWhen` and the build-time fold: the slot-parity variants (TAA's and the raw AO's history pairs), passes present but off in a frame's
+  description (requests that lapsed, a description that changed before its build), and every pass with `CS_ORG_ABSENT_PASSES=0`.
+- The execution-time fold: late batches' passes that skip their run (instances, faces, the evaluate, gated copies and clears).
+- Run gates: the per-frame choices the engine makes late (variants, instances, the screenshot copy, the tonemap's fade form, the last
+  luminance level's form) and every pass's work in a run.

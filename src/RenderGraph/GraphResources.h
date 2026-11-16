@@ -101,6 +101,16 @@ namespace GraphResources
 	std::uint64_t StructuralRebuilds();
 
 	/**
+	 * @brief Whether a live aliasable twin (Lifetime::Transient, not exported) has this graph resource name: written before any read in the
+	 * frame, its memory shared with others otherwise. The recipe's
+	 * check finds a present pass that reads one no present pass of its stage writes. Any thread.
+	 */
+	bool IsTransientName(std::string_view a_name);
+
+	/** @brief Notes a transient twin's name while it lives (Resource's constructor and destructor). */
+	void NoteTransientName(const std::string& a_name, bool a_live);
+
+	/**
 	 * @brief What ExportTexture makes an image from: the D3D11 texture's shape and format, and the format of each view the graph
 	 * makes of it. DXGI_FORMAT_UNKNOWN leaves that view out.
 	 *
@@ -224,8 +234,17 @@ namespace GraphResources
 
 	protected:
 		Resource(std::string a_name, Options a_options) :
-			name(std::move(a_name)), options(a_options) {}
-		~Resource() { Reset(); }
+			name(std::move(a_name)), options(a_options)
+		{
+			if (Aliasable())
+				NoteTransientName(name, true);
+		}
+		~Resource()
+		{
+			Reset();
+			if (Aliasable())
+				NoteTransientName(name, false);
+		}
 
 		/** @brief The views' names, as Buffer.h's detail::SetD3DName gives them. */
 		void NameViews() const;

@@ -116,6 +116,9 @@ namespace RenderGraph::Frame::Driver
 	void NoteScheduled(SegmentId a_segment, Scheduled a_how);
 
 	/** @brief A staged build of the segment's graph switched in whole with its recordings at this Begin (render owner). */
+	/** @brief A stage asked for a build because its key changed (absent passes, FrameAnchors::UpdateKey). */
+	void NoteKeyBuild(SegmentId a_segment);
+
 	void NoteBuildSwitch(SegmentId a_segment);
 
 	/**

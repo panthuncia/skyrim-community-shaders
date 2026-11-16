@@ -74,6 +74,7 @@ namespace Testing::SwitchRegistry
 			"CS_NVPERF_START_FRAME",
 			"CS_NVPERF_TEMPLATE",
 			"CS_ORG",
+			"CS_ORG_ABSENT_PASSES",
 			"CS_ORG_ADAPT_READBACK",
 			"CS_ORG_ALIAS_LOG",
 			"CS_ORG_ANCHOR_SELFTEST",

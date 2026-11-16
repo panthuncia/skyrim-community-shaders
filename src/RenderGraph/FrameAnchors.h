@@ -643,6 +643,14 @@ namespace FrameAnchors
 	 */
 	bool SegmentsOn();
 
+	/**
+	 * @brief Render owner: whether the description being read is a stage's build key (docs/development/org-native-frame-graph.md,
+	 * "Absent passes"), not a frame's. A client's rows callback then sets every row a frame may pick with the settings now (both
+	 * parities, every target variant), the rows a hook asked for, and the rows that must always be present. A pass the key leaves out is
+	 * absent from the stage's build.
+	 */
+	bool DescribingKey();
+
 	/** @brief Whether the calling thread is the engine's main thread (LatchMainThread). Any thread. */
 	bool IsMainThread();
 

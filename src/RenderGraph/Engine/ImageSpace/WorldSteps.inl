@@ -201,8 +201,11 @@ struct WorldSteps
 	std::pair<float, float> ratios{ 1.0f, 1.0f };
 	std::map<StepKey, std::uint32_t> entries;                  // by key: the gate entry in its client (the scopes', or the water blend's)
 	std::array<bool, kGateEntries> scopesMade{}, waterMade{};  // the last build made the pass of each entry (set on the build thread)
-	// Entries a hook found off in the frame's schedule, kept on from then (the next description has them): the schedule's change request.
-	std::array<std::uint64_t, 4> requestedScopes{}, requestedWater{};
+	// Entries a hook found off in the frame's schedule: the frame each was last asked for at (0: never). The descriptions have an entry
+	// on for kRequestFrames after its request, and the stage's key keeps it present while it is asked for.
+	std::array<std::uint64_t, kGateEntries> requestedScopes{};
+	// The water client's first row in the stage: after the scopes' rows (each client of a stage has its own rows).
+	std::uint32_t waterRowBase = 0;
 	// What each entry's pass is for, so the description at Begin can turn on what the engine state selects.
 	std::array<StepKey, kGateEntries> scopesKey{}, waterKey{};
 	std::uint32_t scopesCount = 0, waterCount = 0;
@@ -219,6 +222,15 @@ WorldSteps& World()
 {
 	static WorldSteps world;
 	return world;
+}
+
+/** @brief How many frames a step a hook asked for stays on in the descriptions after the request. */
+constexpr std::uint64_t kRequestFrames = 300;
+
+/** @brief Whether a request made at frame a_at (0: none) still holds. */
+bool RequestHolds(std::uint64_t a_at)
+{
+	return a_at != 0 && Frame::Driver::Current().frame - a_at < kRequestFrames;
 }
 
 /** @brief The engine's frame counter (gFrameCounter, 525008 / 411489), whose parity picks the frame's normals target and water history. */
@@ -329,45 +341,70 @@ void SelectEntries(const std::array<StepKey, kGateEntries>& a_keys, std::uint32_
 
 /**
  * @brief The scopes' passes this frame's description has on, read at Begin from the engine state that selects them: SSR's when its
- * helper is active, the snow pass or its copy by the snow flag, the composite's form by the SAO and fog switches, and the history
- * pass of the frame's parity (CS's history pair alternates with the frame slot). Variants the engine picks per frame between two
- * known choices (which normals target, by its frame counter) are both on: the hook opens the one the engine drew. Plus every entry a
- * hook found off since the registration.
+ * helper is active (the mask's downsample and the ray march from it, or the ray march from the normals, by the downsample switch; the
+ * blur by its switch), the raw AO's temporal form or not, the history pass of the frame's parity (CS's history pair alternates with
+ * the frame slot), the snow pass or its copy by the snow flag, the composite's form by the SAO and fog switches and its reflections by
+ * the blur switch. Variants the engine picks per frame between two known choices (which normals target, by its frame counter) are both
+ * on: the hook opens the one the engine drew. Plus every entry a hook asked for lately. As a stage's key (FrameAnchors::DescribingKey):
+ * both history parities, and both the snow pass and its copy, which stay present.
  */
 void WorldScopeRows(std::array<std::uint64_t, 4>& a_rows)
 {
 	auto& world = World();
 	Frame::WorldFields fields{};
-	for (const auto scope : { Frame::PostChain::Scope::Reflections, Frame::PostChain::Scope::Snow, Frame::PostChain::Scope::SsaoComposite })
+	for (const auto scope : { Frame::PostChain::Scope::Reflections, Frame::PostChain::Scope::Ssao, Frame::PostChain::Scope::Snow, Frame::PostChain::Scope::SsaoComposite })
 		fields = Frame::PostChain::ReadWorld(scope, fields);
 	const auto parity = static_cast<std::uint16_t>(Frame::Driver::Current().parity);
+	const bool key = FrameAnchors::DescribingKey();
 	SelectEntries(world.scopesKey, world.scopesCount, a_rows, [&](const StepKey& a_key) {
 		switch (a_key.scope) {
 		case WorldScope::Reflections:
-			return fields.ssr;
+			if (!fields.ssr)
+				return false;
+			switch (a_key.effect) {
+			case Effects::ISDownsampleIgnoreBrightest:
+				return fields.ssrDownsample != 0;
+			case Effects::ISReflectionsRayTracing:
+				// Variant 2 reads the downsampled mask; 0 and 1 the normals of that parity.
+				return (a_key.variant == 2) == (fields.ssrDownsample != 0);
+			case Effects::ISReflectionBlurHCS:
+			case Effects::ISReflectionBlurVCS:
+				return fields.ssrBlur;
+			default:
+				return true;
+			}
 		case WorldScope::Ssao:
+			if ((a_key.effect == Effects::ISSAORawAO && !fields.saoTemporal) || (a_key.effect == Effects::ISSAORawAONoTemporal && fields.saoTemporal))
+				return false;
 			// The raw AO and the horizontal blur by the history they write and read (the variant's bit 1).
 			if (a_key.effect == Effects::ISSAORawAO || a_key.effect == Effects::ISSAORawAONoTemporal || a_key.effect == Effects::ISSAOBlurH)
-				return ((a_key.variant >> 1) & 1u) == parity;
+				return key || ((a_key.variant >> 1) & 1u) == parity;
 			return true;
 		case WorldScope::Snow:
-			return a_key.effect == Effects::ISSnowSSS ? fields.snow : !fields.snow;
+			return key || (a_key.effect == Effects::ISSnowSSS ? fields.snow : !fields.snow);
 		case WorldScope::SsaoComposite:
-			// The variant's high byte is the form: 0 SAO, 1 SAO and fog, 2 fog, 3 the copy.
-			return (a_key.variant >> 8) == fields.saoForm;
+			// The variant's high byte is the form: 0 SAO, 1 SAO and fog, 2 fog, 3 the copy. Bit 1: it reads the blurred reflections.
+			if ((a_key.variant >> 8) != fields.saoForm)
+				return false;
+			return (a_key.variant >> 8) == 3 || (((a_key.variant >> 1) & 1u) != 0) == fields.ssrBlur;
 		default:
 			return true;
 		}
 	});
-	for (std::size_t i = 0; i < a_rows.size(); ++i)
-		a_rows[i] |= world.requestedScopes[i];
+	for (std::uint32_t entry = 0; entry < world.scopesCount && entry < 256; ++entry)
+		if (RequestHolds(world.requestedScopes[entry]))
+			a_rows[entry / 64] |= 1ull << (entry % 64);
 }
 
 /** @brief The water blend's passes: both history parities (the engine's frame counter picks one per frame; the hook opens it). */
 void WorldWaterRows(std::array<std::uint64_t, 4>& a_rows)
 {
 	const auto& world = World();
-	SelectEntries(world.waterKey, world.waterCount, a_rows, [](const StepKey&) { return true; });
+	for (std::uint32_t entry = 0; entry < world.waterCount; ++entry) {
+		const auto row = world.waterRowBase + entry;
+		if (row < 256)
+			a_rows[row / 64] |= 1ull << (row % 64);
+	}
 }
 
 /**
@@ -385,7 +422,6 @@ void RegisterWorldSteps()
 	world.scopesMade.fill(false);
 	world.waterMade.fill(false);
 	world.requestedScopes = {};
-	world.requestedWater = {};
 	world.scopesCount = world.waterCount = 0;
 	const auto& main = globals::game::renderer->GetRuntimeData().renderTargets[RE::RENDER_TARGET::kMAIN];
 	if (!main.texture)
@@ -612,9 +648,12 @@ void RegisterWorldSteps()
 				.atExecution = true,
 				.gated = true,
 				.gpuGated = true,
-				.row = static_cast<std::int16_t>(entry) });
+				.row = static_cast<std::int16_t>((water ? world.waterRowBase : 0) + entry) });
 			client.specs.push_back(std::move(spec));
 		}
+		// The scopes are registered first: the water client's rows follow theirs.
+		if (!water)
+			world.waterRowBase = count;
 		FrameAnchors::ClientDesc desc{};
 		desc.id = client.id;
 		desc.passes = std::move(passes);
@@ -791,14 +830,19 @@ bool TakeWorldStep(WorldScope a_scope, std::size_t a_effect, bool a_compute, std
 	auto& client = state.post[static_cast<std::size_t>(water ? PostPart::WorldWater : PostPart::WorldScopes)];
 	const auto& made = water ? world.waterMade : world.scopesMade;
 	const auto& rows = Frame::Driver::Current().Segment(Frame::SegmentId::Deferred).rows;
-	const bool scheduled = entry < 256 && (rows[entry / 64] >> (entry % 64) & 1u) != 0 && FrameAnchors::CanTap(client.id);
+	const auto row = (water ? world.waterRowBase : 0) + entry;
+	const bool scheduled = row < 256 && (rows[row / 64] >> (row % 64) & 1u) != 0 && FrameAnchors::CanTap(client.id);
 	if (!made[entry] || !scheduled) {
-		// The frame's schedule does not have it: nothing is drawn this frame, and the next description turns it on.
-		auto& requested = water ? world.requestedWater : world.requestedScopes;
-		requested[entry / 64] |= 1ull << (entry % 64);
+		// The frame's schedule does not have it (off, or absent from the stage's build): nothing is drawn this frame, and the next
+		// description turns it on. The water blend's rows are always on.
+		if (!water)
+			world.requestedScopes[entry] = Frame::Driver::Current().frame;
 		Frame::Driver::NoteLaggedWork(Frame::SegmentId::Deferred);
 		return true;
 	}
+	// A step on by a hook's request stays on while the engine draws it.
+	if (!water && RequestHolds(world.requestedScopes[entry]))
+		world.requestedScopes[entry] = Frame::Driver::Current().frame;
 	return StageStep(client, entry, a_effect, a_compute, a_groups);
 }
 

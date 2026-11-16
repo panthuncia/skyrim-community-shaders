@@ -2572,6 +2572,13 @@ family = "org"
 kind = "other"
 description = ""
 
+[key."org.absent_passes"]
+env = "CS_ORG_ABSENT_PASSES"
+type = "string"
+family = "org"
+kind = "other"
+description = "0: CS stages keep every pass in their builds (off passes are present and skipped) instead of leaving them out"
+
 [key."org.keep_skipped_barriers"]
 env = "CS_ORG_KEEP_SKIPPED_BARRIERS"
 type = "string"

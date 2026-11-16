@@ -28,6 +28,7 @@
 #	include <atomic>
 #	include <bit>
 #	include <deque>
+#	include <map>
 #	include <mutex>
 #	include <shared_mutex>
 #	include <vector>
@@ -547,6 +548,40 @@ namespace GraphResources
 		return structuralRebuilds.load(std::memory_order_relaxed);
 	}
 
+	namespace
+	{
+		/** @brief The live transient twins' names, counted (two twins may share a name across a resize). */
+		struct TransientNames
+		{
+			std::mutex mutex;
+			std::map<std::string, std::uint32_t, std::less<>> names;
+		};
+
+		TransientNames& Transients()
+		{
+			// Never destroyed: twins are destroyed during static destruction too.
+			static auto* names = new TransientNames;
+			return *names;
+		}
+	}
+
+	void NoteTransientName(const std::string& a_name, bool a_live)
+	{
+		auto& transients = Transients();
+		const std::lock_guard lock(transients.mutex);
+		if (a_live)
+			++transients.names[a_name];
+		else if (const auto found = transients.names.find(a_name); found != transients.names.end() && --found->second == 0)
+			transients.names.erase(found);
+	}
+
+	bool IsTransientName(std::string_view a_name)
+	{
+		auto& transients = Transients();
+		const std::lock_guard lock(transients.mutex);
+		return transients.names.contains(a_name);
+	}
+
 	bool Resource::AdoptSlot(std::shared_ptr<org::VersionedTexture> a_previous, bool a_sameShape)
 	{
 		const bool joined = JoinSlot(std::move(a_previous), a_sameShape);
@@ -876,6 +911,8 @@ namespace GraphResources
 	ExportedTexture ExportTexture(const ExportDesc&, const std::string&) { return {}; }
 	void RequestStructuralRebuild(std::string_view, std::span<const std::uint32_t>) {}
 	std::uint64_t StructuralRebuilds() { return 0; }
+	bool IsTransientName(std::string_view) { return false; }
+	void NoteTransientName(const std::string&, bool) {}
 	bool Resource::AdoptSlot(std::shared_ptr<org::VersionedTexture>, bool) { return false; }
 	std::uint64_t Resource::ResizeGeneration() { return 0; }
 	std::string Resource::ResizeCauses(std::uint64_t) { return {}; }

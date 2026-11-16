@@ -10,6 +10,7 @@
 #	include "Globals.h"
 #	include "RenderGraph/AnchorPasses.h"
 #	include "RenderGraph/Backend.h"
+#	include "RenderGraph/Frame/FrameDriver.h"
 #	include "RenderGraph/FrameAnchors.h"
 #	include "RenderGraph/FrameStaging.h"
 #	include "RenderGraph/GraphResources.h"
@@ -39,6 +40,9 @@ namespace
 
 	constexpr const char* kClientId = "cs.upscaling";
 	constexpr const char* kHudlessClientId = "cs.upscaling.hudless";
+	// The evaluate's own client (native mode): on only while an SDK upscaler is the method, so the post stage's build leaves its pass out
+	// with TAA or no upscaler (docs/development/org-native-frame-graph.md, "Absent passes").
+	constexpr const char* kEvaluateClientId = "cs.upscaling.evaluate";
 	constexpr const char* kUpscaledName = "Upscaling::UpscaledTexture";
 	constexpr const char* kHudlessName = "Upscaling::HudlessTexture";
 	constexpr const char* kDepthShader = "Upscaling/DepthRefractionUpscalePS.hlsl";
@@ -493,18 +497,36 @@ namespace
 
 		FrameAnchors::ClientDesc client{};
 		client.id = kClientId;
-		// Native mode: the evaluate first, recorded at execution each frame (it is not gated: it reads the run's evaluate).
+		// Native mode: the evaluate first, recorded at execution each frame (it is not gated: it reads the run's evaluate, which this
+		// client's commit stores). Its own client, declared while an SDK upscaler is the method.
+		const std::weak_ptr<Impl> weakImpl = a_impl;
 		if (impl.evaluateShared && impl.upscaled && impl.inputs.main && impl.inputs.mainDepth && impl.inputs.motion) {
 			auto shared = impl.evaluateShared;
 			auto inputs = impl.inputs;
 			auto output = std::static_pointer_cast<org::Resource>(impl.upscaled->Graph());
-			client.passes.push_back({ .name = std::string(kClientId) + ".evaluate",
+			FrameAnchors::ClientDesc evaluate{};
+			evaluate.id = kEvaluateClientId;
+			evaluate.passes.push_back({ .name = std::string(kClientId) + ".evaluate",
 				.anchor = FrameAnchors::Anchor::Upscale,
 				.order = kOrderBase - 1,
 				.kind = FrameAnchors::PassKind::Compute,
 				.make = [shared, inputs, output]() -> std::shared_ptr<org::RenderPass> { return std::make_shared<EvaluatePass>(shared, inputs, output); },
 				.atExecution = true });
-		}
+			evaluate.declared = [] { return RenderGraph::Frame::Driver::Current().post.upscaler; };
+			evaluate.active = [weakImpl] {
+				const auto current = weakImpl.lock();
+				return current && (current->queued & kEvaluate) != 0;
+			};
+			evaluate.onFailed = [weakImpl] {
+				if (const auto current = weakImpl.lock())
+					MarkFailed(current, "the render graph failed");
+			};
+			if (!FrameAnchors::Register(std::move(evaluate))) {
+				logger::error("[ORG] Upscaling: the evaluate client was refused");
+				return false;
+			}
+		} else
+			FrameAnchors::Unregister(kEvaluateClientId);
 		for (auto& pass : builder.Take())
 			client.passes.push_back(std::move(pass));
 		// The depth upscale's own pass reads the shared constants too, beside the underwater draw the builder saw.
@@ -524,7 +546,10 @@ namespace
 			// The run's evaluate (null: none), for the evaluate pass recorded at execution.
 			if (impl->evaluateShared)
 				impl->evaluateShared->runs.Store(run, (impl->queued & kEvaluate) ? impl->evaluate : nullptr);
-			if (impl->queued & kCopyToMain)
+			// While the evaluate's pass is absent from the stage's schedule (an upscaler just chosen, its build not switched in yet), its
+			// output was not written: it is not copied into kMAIN.
+			const bool evaluated = !(impl->queued & kEvaluate) || !impl->evaluateShared || FrameAnchors::CanRun(kEvaluateClientId, FrameAnchors::Anchor::Upscale);
+			if ((impl->queued & kCopyToMain) && evaluated)
 				impl->upscaleGate->OpenDraw(kCopyEntry);
 			if (impl->queued & kDepthUpscale)
 				impl->upscaleGate->OpenDraw(kDepthEntry);
@@ -696,6 +721,7 @@ bool ORGUpscaling::ReleaseAfterFailure()
 		return false;
 	const bool heldUpscaled = impl->upscaled != nullptr;
 	FrameAnchors::Unregister(kClientId);
+	FrameAnchors::Unregister(kEvaluateClientId);
 	FrameAnchors::Unregister(kHudlessClientId);
 	impl->upscaled.reset();
 	impl->hudless.reset();

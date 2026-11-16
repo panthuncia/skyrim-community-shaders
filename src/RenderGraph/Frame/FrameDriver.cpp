@@ -46,6 +46,7 @@ namespace RenderGraph::Frame::Driver
 			std::uint64_t absentTaps = 0;  // taps in frames without a schedule
 			std::uint64_t lagged = 0;      // work left out because the schedule lagged
 			std::uint64_t buildSwitches = 0;  // staged builds switched in whole with their recordings
+			std::uint64_t keyBuilds = 0;      // builds asked for because the stage's key changed (absent passes)
 			std::uint64_t absentAfter = 0;    // absent frames after the segment first ran (a build or a switch blanked it)
 		};
 
@@ -426,6 +427,13 @@ namespace RenderGraph::Frame::Driver
 		++state.segments[static_cast<std::size_t>(a_segment)].buildSwitches;
 	}
 
+	void NoteKeyBuild(SegmentId a_segment)
+	{
+		auto& state = Get();
+		const std::lock_guard lock(state.mutex);
+		++state.segments[static_cast<std::size_t>(a_segment)].keyBuilds;
+	}
+
 	void NoteLaggedWork(SegmentId a_segment)
 	{
 		auto& state = Get();
@@ -466,10 +474,10 @@ namespace RenderGraph::Frame::Driver
 		for (std::uint32_t s = 0; s < kSegments; ++s) {
 			const auto& counts = state.segments[s];
 			segments += fmt::format("; {}: declared {}, taps {}, recordings {}, late requests {}, switches {}, current {}, lagging {}, absent {} ({} taps), "
-									"lagged work {}, build switches {}, absent after it first ran {} (session {})",
+									"lagged work {}, build switches {}, key builds {}, absent after it first ran {} (session {})",
 				SegmentName(static_cast<SegmentId>(s)), counts.declared, counts.taps, counts.recordings, counts.late, counts.switches,
 				counts.scheduled[static_cast<std::size_t>(Scheduled::Current)], counts.scheduled[static_cast<std::size_t>(Scheduled::Lagging)],
-				counts.scheduled[static_cast<std::size_t>(Scheduled::Absent)], counts.absentTaps, counts.lagged, counts.buildSwitches, counts.absentAfter,
+				counts.scheduled[static_cast<std::size_t>(Scheduled::Absent)], counts.absentTaps, counts.lagged, counts.buildSwitches, counts.keyBuilds, counts.absentAfter,
 				state.absentAfterTotal[s]);
 		}
 		const auto lagLine = [](const auto& a_lags) {

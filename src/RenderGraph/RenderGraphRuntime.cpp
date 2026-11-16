@@ -1589,7 +1589,15 @@ struct RenderGraphRuntime::Impl
 						barriers += fmt::format("; {} {:.2f} tickets, entry {:.1f}, body {:.1f}, full {:.1f}", Impl::SegmentLabel(static_cast<Segment>(e)),
 							double(b.tickets) / segmentFrames, double(b.entry) / segmentFrames, double(b.body) / segmentFrames, double(b.full) / segmentFrames);
 					}
-					logger::info("[ORG] Barriers a frame, by epoch: entry {:.1f}, body {:.1f} in all{}", entryTotal, bodyTotal, barriers);
+					// The body counts are the lists' as built. A late batch's passes that skip their run fold their barriers at execution
+					// (org::compiler::FoldBarriersOfSkipped); those left out are counted here.
+					static std::uint64_t foldedSeen = 0;
+					const auto folded = org::diagnostics::FoldedAtExecutionBarriers().load(std::memory_order_relaxed);
+					const double foldedFrame = double(folded - foldedSeen) / segmentFrames;
+					foldedSeen = folded;
+					logger::info("[ORG] Barriers a frame, by epoch: entry {:.1f}, body {:.1f} in all{}; late barriers folded at execution: {:.1f} a frame (body less "
+								 "these: {:.1f})",
+						entryTotal, bodyTotal, barriers, foldedFrame, bodyTotal - foldedFrame);
 				}
 				std::uint64_t paceWaits = 0, paceUs = 0;
 				RenderGraph::Engine::Native::TakePresentPace(paceWaits, paceUs);
