@@ -3972,48 +3972,10 @@ namespace FrameAnchors
 
 	namespace
 	{
-		/**
-		 * @brief Whether a declared segment is on (SegmentsOn): the pre-depth segment always; the pre-main and deferred segments unless
-		 * CS_ORG_SEGMENT_PREMAIN=0 or CS_ORG_SEGMENT_DEFERRED=0 (their anchors then keep their own epochs).
-		 */
-		bool DeclaredOn(std::uint32_t a_declared)
+		/** @brief Whether a declared segment is on (SegmentsOn): every CS stage is, in native mode with segments. */
+		bool DeclaredOn(std::uint32_t)
 		{
-			switch (kDeclaredInfo[a_declared].segment) {
-			case Segment::DeclaredStart:
-				{
-					static const bool on = !Switches::Off("CS_ORG_SEGMENT_START");
-					return on;
-				}
-			case Segment::DeclaredPreMain:
-				{
-					static const bool on = !Switches::Off("CS_ORG_SEGMENT_PREMAIN");
-					return on;
-				}
-			case Segment::DeclaredDeferred:
-				{
-					static const bool on = !Switches::Off("CS_ORG_SEGMENT_DEFERRED");
-					return on;
-				}
-			case Segment::DeclaredSun:
-				{
-					static const bool on = !Switches::Off("CS_ORG_SEGMENT_SUN");
-					return on;
-				}
-			case Segment::DeclaredPost:
-				{
-					// The post chain as CS passes (ImageSpace's ChainSteps.inl). It needs the chain's hooks (CS_ORG_SEGMENT_POST, not 0).
-					static const bool on = !Switches::Equals("CS_ORG_SEGMENT_POST", "0");
-					return on;
-				}
-			case Segment::DeclaredUi:
-			case Segment::DeclaredMenuUi:
-				{
-					static const bool on = !Switches::Equals("CS_ORG_UI_STAGE", "0");
-					return on;
-				}
-			default:
-				return true;
-			}
+			return true;
 		}
 	}
 
@@ -4241,11 +4203,6 @@ namespace FrameAnchors
 		static const bool on = [] {
 			if (!RenderGraph::Engine::Native::Requested())
 				return false;
-			// Native mode, default on. =0: off. =3: on, with the segments' executions closed. Any other value is the default (open).
-			if (Switches::Number("CS_ORG_SEGMENTS", 1) == 0) {
-				logger::info("[ORG] frame segments off (CS_ORG_SEGMENTS=0): every anchor keeps its own epoch");
-				return false;
-			}
 			if (RegionsOn()) {
 				logger::warn("[ORG] frame segments: off, the frame phases are on (CS_ORG_PHASES=1)");
 				return false;
@@ -4254,8 +4211,7 @@ namespace FrameAnchors
 				logger::warn("[ORG] frame segments need epochs, async epochs and replayable recordings; every anchor keeps its own epoch");
 				return false;
 			}
-			logger::info("[ORG] frame segments on (CS_ORG_SEGMENTS=0 turns them off): the pre-depth, pre-main and deferred segments' steps run in their "
-						 "epochs, recorded per description");
+			logger::info("[ORG] frame segments on: the CS stages' steps run in their epochs, recorded per description");
 			return true;
 		}();
 		return on;

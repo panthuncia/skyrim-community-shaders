@@ -226,14 +226,10 @@ namespace RenderGraph::Frame::PostChain
 		auto& state = Get();
 		if (state.installed || REL::Module::IsVR() || !Engine::ImageSpace::Requested())
 			return;
-		if (Switches::Equals("CS_ORG_SEGMENT_POST", "0")) {
-			logger::info("[ORG] post chain: off (CS_ORG_SEGMENT_POST=0)");
-			return;
-		}
 		stl::detour_thunk<RenderWorldPostProcess>(REL::RelocationID(100430, 107148));
 		stl::detour_thunk<RenderEndOfFrameEffects>(REL::RelocationID(99023, 105674));
 		state.installed = true;
-		logger::info("[ORG] post chain: the world post chain's entries are hooked (CS_ORG_SEGMENT_POST=0 turns it off)");
+		logger::info("[ORG] post chain: the world post chain's entries are hooked");
 	}
 
 	bool On()

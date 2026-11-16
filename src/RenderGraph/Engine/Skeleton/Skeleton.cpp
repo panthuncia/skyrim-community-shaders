@@ -186,13 +186,13 @@ namespace RenderGraph::Engine::Skeleton
 			return a_host == Host::Prepass || a_host == Host::EngineDraws || a_host == Host::DeferredPasses || a_host == Host::ImageSpace || a_host == Host::PostChain;
 		}
 
-		/** @brief CS_ORG_SEGMENT_CLEARS (native mode with segments, default on; =0 every clear and copy keeps its own anchor's ticket). */
+		/** @brief Native mode with segments: world frames' clears and copies run in the epochs that write their targets first. */
 		bool HostingOn()
 		{
 			static const bool on = [] {
-				const bool requested = Native::Requested() && FrameAnchors::SegmentsOn() && !Switches::Off("CS_ORG_SEGMENT_CLEARS");
+				const bool requested = Native::Requested() && FrameAnchors::SegmentsOn();
 				logger::info("[ORG] engine skeleton: world frames' clears and copies run in the epochs that write their targets first: {}",
-					requested ? "on (CS_ORG_SEGMENT_CLEARS=0 turns it off)" : "off");
+					requested ? "on" : "off");
 				return requested;
 			}();
 			return on;
