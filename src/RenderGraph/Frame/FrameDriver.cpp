@@ -62,6 +62,10 @@ namespace RenderGraph::Frame::Driver
 			bool began = false;
 			std::array<bool, kSegments> tapped{};
 			bool captured = false;  // the engine's frozen background is drawn (its gIsInMenuMode2): no more capture until no menu freezes it
+			// The freeze test's answer at Begin, for the main thread's frame (FreezeTestAtBegin). Main thread only.
+			bool freezes = false;
+			std::uint64_t freezesFrame = ~0ull;  // the frame number it was decided for
+			std::uint64_t freezeChanges = 0;     // frames where the engine's own test differed from Begin's (session)
 			std::atomic<bool> loading{ false };  // between SetLoadingScreenActive(true) and the end of SetLoadingScreenActive(false)
 			// The census since the last report, and the totals.
 			std::mutex mutex;
@@ -165,7 +169,9 @@ namespace RenderGraph::Frame::Driver
 			}
 			auto* player = RE::PlayerCharacter::GetSingleton();
 			const bool has3D = player && player->Get3D2();
-			if (!FreezesBackground()) {
+			a_state.freezes = FreezesBackground();
+			a_state.freezesFrame = a_state.current.frame + 1;
+			if (!a_state.freezes) {
 				a_state.captured = false;
 				return has3D ? Kind::World : Kind::MainMenu;
 			}
@@ -177,10 +183,34 @@ namespace RenderGraph::Frame::Driver
 		}
 	}
 
+	/**
+	 * @brief Main's frame (SE 35556 / AE 36555) runs the freeze test again right after Begin, and its answer picks the frame's work: the
+	 * world, or the capture and the frozen composite. The menu stack can change between the two tests: a menu shown through the UI message
+	 * queue is pushed by another thread. The frame was then described as a world frame and drew the capture. This call answers what Begin
+	 * decided, so the engine draws the frame the description has. A menu pushed after Begin is seen at the next frame's Begin.
+	 */
+	struct FreezeTestAtBegin
+	{
+		static bool thunk(RE::UI* a_ui)
+		{
+			const bool live = func(a_ui);
+			auto& state = Get();
+			if (!FrameAnchors::SegmentsOn() || state.freezesFrame != state.current.frame || !FrameAnchors::IsMainThread())
+				return live;
+			if (live != state.freezes && state.freezeChanges++ < 8)
+				logger::info("[ORG] frame: the menu stack's freeze flag changed after frame {}'s Begin ({} -> {}); the frame keeps Begin's answer",
+					state.current.frame, state.freezes, live);
+			return state.freezes;
+		}
+		static inline REL::Relocation<decltype(thunk)> func;
+	};
+
 	void Install()
 	{
 		auto& state = Get();
 		state.installed = true;
+		if (!REL::Module::IsVR())
+			stl::write_thunk_call<FreezeTestAtBegin>(REL::RelocationID(35556, 36555).address() + REL::Relocate(0x211, 0x217));
 		// The Bink hooks mark their ticks themselves; without them the driver detours the tick for the kind alone.
 		if (!REL::Module::IsVR() && !Engine::Bink::TickHooked())
 			stl::detour_thunk<PlayerTick>(REL::RelocationID(87890, 90259));
