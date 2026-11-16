@@ -28,6 +28,7 @@ bool RenderGraph::Engine::ImageSpace::Requested()
 #	include "RenderGraph/Frame/FrameDriver.h"
 #	include "RenderGraph/Frame/PostChain.h"
 #	include "RenderGraph/FrameAnchors.h"
+#	include "RenderGraph/FrameStaging.h"
 #	include "RenderGraph/ProgramCache.h"
 #	include "RenderGraph/PublishedResources.h"
 #	include "RenderGraph/RasterProgram.h"
@@ -577,11 +578,11 @@ namespace RenderGraph::Engine::ImageSpace
 			std::uint32_t noFogIndex = UINT32_MAX;
 			std::shared_ptr<const void> noFogOwner;
 			bool noFogTried = false;
-			// By run lease index: the sources a run's latched draws read by heap index (Pending::source), held until the next run of
-			// the index commits (the lease's last run retired before the index was opened again). Grown with the host's lease indices.
-			// heldRuns: the run each index's sources are for. With regions several commits write into one run, and add to its sources.
-			std::vector<std::vector<std::shared_ptr<const void>>> heldSources;
-			std::vector<org::RunRef> heldRuns;
+			// By run: the sources a run's latched draws read by heap index (Pending::source), held until the run's lease index runs
+			// again (its last run retired before the index was opened again). Several commits into one run (regions, a stage's taps)
+			// add to its list. A stage's commit moves its staging run's list onto the run that submits it (RunSlotsRegistry::MoveAll),
+			// so a staging run, which names the same run every frame, holds only the frame's own sources.
+			RunSlots<std::vector<std::shared_ptr<const void>>> heldSources;
 			// Regions: the last gate entry the last commit opened. A later batch joins the same run only with higher entries (its passes
 			// run after those already opened, and no entry is opened twice).
 			std::uint32_t committedLast = 0;
@@ -2246,19 +2247,19 @@ namespace RenderGraph::Engine::ImageSpace
 		{
 			auto& state = IS();
 			const org::RunRef run = RenderGraphRuntime::Get().Host()->CurrentRun();
-			if (state.heldSources.size() <= run.lease) {
-				state.heldSources.resize(static_cast<std::size_t>(run.lease) + 1);
-				state.heldRuns.resize(static_cast<std::size_t>(run.lease) + 1);
-			}
-			auto& held = state.heldSources[run.lease];
-			// A new run of the index lets the last one's sources go; another batch of the same run (regions) adds to them.
-			if (!(state.heldRuns[run.lease] == run)) {
-				held.clear();
-				state.heldRuns[run.lease] = run;
-			}
+			// Another batch of the same run adds to its sources; a new run of the index lets the last one's go.
+			std::shared_ptr<std::vector<std::shared_ptr<const void>>> held;
+			for (const auto& pending : a_batch)
+				if (pending.source) {
+					if (!held) {
+						const auto earlier = state.heldSources.Find(run);
+						held = earlier ? std::make_shared<std::vector<std::shared_ptr<const void>>>(*earlier) : std::make_shared<std::vector<std::shared_ptr<const void>>>();
+					}
+					held->push_back(pending.source);
+				}
+			if (held)
+				state.heldSources.Store(run, std::move(held));
 			for (const auto& pending : a_batch) {
-				if (pending.source)
-					held.push_back(pending.source);
 				a_latch.WriteValue(run, pending.entry * kLatchStride, pending.at);
 				if (pending.sources)
 					a_latch.WriteValue(run, pending.entry * kLatchStride + static_cast<std::uint32_t>(sizeof(ConstantsAt)), *pending.sources);
@@ -3295,7 +3296,7 @@ namespace RenderGraph::Engine::ImageSpace
 				const auto partOf = PostPartOf(*a_row);
 				const auto segment = partOf == PostPart::Composites                        ? RenderGraphRuntime::Segment::DeclaredPostComposites :
 				                     partOf == PostPart::Hdr || partOf == PostPart::Final ? RenderGraphRuntime::Segment::DeclaredPostEnd :
-				                                                                            RenderGraphRuntime::Segment::DeclaredWorld;
+				                                                                            RenderGraphRuntime::Segment::DeclaredDeferred;
 				// The draws the part took so far are committed into the segment's run first (the anchor's tap), then the segment ends.
 				Flush();
 				(void)FrameAnchors::CutSegment(static_cast<std::uint32_t>(segment),
@@ -3332,7 +3333,7 @@ namespace RenderGraph::Engine::ImageSpace
 			using Frame::SegmentId;
 			const auto segment = a_part == PostPart::Composites                         ? SegmentId::PostComposites :
 			                     a_part == PostPart::Hdr || a_part == PostPart::Final ? SegmentId::PostEnd :
-			                                                                            SegmentId::Water;
+			                                                                            SegmentId::Deferred;
 			const auto& rows = Frame::Driver::Current().Segment(segment).rows;
 			return a_index < 256 && (rows[a_index / 64] >> (a_index % 64) & 1u) != 0;
 		}
@@ -3395,7 +3396,7 @@ namespace RenderGraph::Engine::ImageSpace
 				if (!RowDrawable(draw, why))
 					break;
 			if (!why.empty()) {
-				(void)FrameAnchors::CutSegment(static_cast<std::uint32_t>(RenderGraphRuntime::Segment::DeclaredWorld),
+				(void)FrameAnchors::CutSegment(static_cast<std::uint32_t>(RenderGraphRuntime::Segment::DeclaredDeferred),
 					fmt::format("the {} scope: {}", Frame::PostChain::ScopeName(a_scope), why));
 				return;
 			}
@@ -4423,8 +4424,7 @@ namespace RenderGraph::Engine::ImageSpace
 			return off("Data/Shaders has no Common/OrgEngineConstants.hlsli: the staged shaders predate the ORG builds of ISHDR, ISBlur and the VL composite");
 		state.gate = RunGate::Create("ImageSpace", kGateEntries);
 		state.latch = org::LatchBlock::Create("ImageSpace::ConstantsAt", kGateEntries * kLatchStride);
-		state.heldSources.clear();
-		state.heldRuns.clear();
+		state.heldSources.Clear();
 		if (!state.gate || !state.latch)
 			return off("its run gate or latch could not be made");
 		SelectEffects();

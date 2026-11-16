@@ -133,8 +133,7 @@ public:
 		// each, holding the passes of the anchors it lists, recorded per description of the segment (RenderGraph/Frame).
 		DeclaredPreDepth,  // the EarlyPrepass clients, at Main::RenderShadowMaps' return
 		DeclaredPreMain,   // RenderDepth's depth copy to the Prepass clients, at the Prepass anchor's hook
-		DeclaredDeferred,  // the deferred passes and the composite, at the PostComposite anchor's hook
-		DeclaredWorld,     // the water mask, the RenderWorld scopes, the kMAIN copy, the water and its blend, before DCLF's forward epoch
+		DeclaredDeferred,  // deferred+water: the deferred passes, the composite, the water mask, the RenderWorld scopes, the water and its blend, before DCLF's forward epoch
 		DeclaredPostComposites,  // the volumetric lighting and the pre-tonemap composites, at the PostProcessing anchor's hook
 		DeclaredPostEnd,         // the upscale, the end-of-frame effects and the tonemap, at RenderEndOfFrameEffects' return
 		Count

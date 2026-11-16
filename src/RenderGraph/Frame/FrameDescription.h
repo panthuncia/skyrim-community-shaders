@@ -39,8 +39,7 @@ namespace RenderGraph::Frame
 	{
 		PreDepth,
 		PreMain,
-		Deferred,        // the deferred passes and the composite
-		Water,           // the water mask, the RenderWorld scopes, the kMAIN copy, the water and its blend
+		Deferred,        // deferred+water: the deferred passes and the composite, the water mask, the RenderWorld scopes, the kMAIN copy, the water and its blend
 		PostComposites,  // S4a: the volumetric lighting, the pre-tonemap composites, the PostProcessing anchor
 		PostEnd,         // S4b: the upscale, the end-of-frame effects with the tonemap, to RenderEndOfFrameEffects' return
 		Count

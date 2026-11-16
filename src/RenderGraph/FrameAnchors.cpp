@@ -146,11 +146,10 @@ namespace FrameAnchors
 			Segment::AnchorSky,                 // the main pass's sky batch, before Drawcall Limit Fix's colour epoch
 			Segment::PhasePreMain,              // the pre-main phase: submitted at the main opaque epoch
 			Segment::MainOpaque,
-			Segment::DeclaredDeferred,         // the deferred stage (SegmentsOn): its commit is the PostComposite anchor's hook
+			Segment::DeclaredDeferred,         // the deferred+water stage (SegmentsOn): it commits just before DCLF's forward epoch
 			Segment::AnchorDeferredPasses,     // EndDeferred, after the blended decals
 			Segment::AnchorDeferredComposite,  // DeferredPasses, after the D3D11 SSGI and SSS
 			Segment::AnchorPostComposite,      // DeferredPasses' end, after the composite
-			Segment::DeclaredWorld,            // the water stage (SegmentsOn): it commits just before DCLF's forward epoch
 			Segment::AnchorEngineDraws,        // the water, before the forward epoch (nominally here: the shadow masks and the water mask run before, the blood after)
 			Segment::PhaseDeferred,            // the deferred phase: submitted at the forward epoch
 			Segment::Forward,
@@ -326,24 +325,23 @@ namespace FrameAnchors
 					{ Anchor::Count, { nullptr, nullptr }, Segment::LightCulling },
 					{ Anchor::Prepass } } },
 				5, { "CS segment: pre-main", "CS segment: pre-main inputs", "FrameSegments::PreMain / ", "cs.segment.pre-main" } },
-			// Deferred::StartDeferred, after DCLF's main opaque epoch: the deferred passes (with CS's depth copy they host), the
-			// composite, and the end of the deferred passes. Its commit is the PostComposite hook: Deferred::StartDeferred runs the three
-			// hooks back to back, and the water mask and the ImageSpace chain come after it.
-			{ Segment::DeclaredDeferred, { { { Anchor::DeferredPasses }, { Anchor::DeferredComposite }, { Anchor::PostComposite } } }, 3,
-				{ "CS stage: deferred", "CS stage: deferred inputs", "FrameSegments::Deferred / ", "cs.segment.deferred" } },
-			// Main::RenderWorld (100424 / 107142) after the deferred stage: the water stencil's clear and the water mask (FinishAccumulating's
-			// stencil batch), the reflections, RenderSSAO's two calls with the snow pass or its copy between them (drawn from the pass-state
-			// table), the engine's kMAIN copy, the water, the water targets' clear and the water blend. Its commit is a point just before
-			// DCLF's forward epoch is submitted (FlushRegions), the next GPU work after the water blend: every tap has staged by then. The
-			// water's draws, the kMAIN copy and the scopes' rows are gated: a step that does not fire this frame (no water in view) does nothing.
-			{ Segment::DeclaredWorld,
-				{ { { Anchor::EngineDraws, { "cs.engine.skeleton.frame@engine-draws", "cs.water.mask" } },
+			// Deferred::StartDeferred, after DCLF's main opaque epoch: the deferred passes (with CS's depth copy they host), the composite
+			// and the end of the deferred passes; then the rest of Main::RenderWorld (100424 / 107142): the water stencil's clear and the
+			// water mask (FinishAccumulating's stencil batch), the reflections, RenderSSAO's two calls with the snow pass or its copy between
+			// them, the engine's kMAIN copy, the water, the water targets' clear and the water blend. Its commit is a point just before DCLF's
+			// forward epoch is submitted (FlushRegions), the next GPU work after the water blend: every tap has staged by then. The water's
+			// draws and the kMAIN copy are gated: a step that does not fire this frame (no water in view) does nothing.
+			{ Segment::DeclaredDeferred,
+				{ { { Anchor::DeferredPasses },
+					{ Anchor::DeferredComposite },
+					{ Anchor::PostComposite },
+					{ Anchor::EngineDraws, { "cs.engine.skeleton.frame@engine-draws", "cs.water.mask" } },
 					{ Anchor::ImageSpace, { "cs.engine.imagespace.world.scopes", nullptr } },
 					{ Anchor::EngineCopy, { nullptr, nullptr }, Segment::Count, true },
 					{ Anchor::EngineDraws, { "cs.water.surface", nullptr } },
 					{ Anchor::ImageSpace, { "cs.engine.skeleton.frame@image-space", "cs.engine.imagespace.world.water" } },
 					{ Anchor::Count, { nullptr, nullptr }, Segment::Count, false, true } } },
-				6, { "CS stage: water", "CS stage: water inputs", "FrameSegments::World / ", "cs.segment.world" } },
+				9, { "CS stage: deferred+water", "CS stage: deferred+water inputs", "FrameSegments::Deferred / ", "cs.segment.deferred" } },
 			// ImageSpaceManager::RenderWorldPostProcess (SE 100430, AE 107148) up to Upscaling's wrapper of the end-of-frame effects: the
 			// volumetric lighting (whole: its hook runs only there), the pre-tonemap composites drawn from the pass-state table, and the
 			// PostProcessing anchor (its end tap, reserved so its hook always runs). The upscaler's evaluate comes after the end tap: it is
@@ -2553,11 +2551,11 @@ namespace FrameAnchors
 	void FlushRegions(const char* a_why, std::uint32_t a_segment)
 	{
 		auto& state = Anchors();
-		// The water stage commits just before the next GPU work that comes after it in the frame is submitted: DCLF's forward epoch
+		// The deferred+water stage commits just before the next GPU work that comes after it in the frame is submitted: DCLF's forward epoch
 		// in a world frame, else the sun's queries (the end of Main::RenderWorld), the first-person epoch or a later segment. Its
 		// commit point.
 		if (a_segment != UINT32_MAX && state.host && SegmentsOn() && EndsWorld(static_cast<Segment>(a_segment)) && IsRenderOwner())
-			(void)TapPoint(static_cast<std::uint32_t>(Segment::DeclaredWorld));
+			(void)TapPoint(static_cast<std::uint32_t>(Segment::DeclaredDeferred));
 		// A declared segment holding its ticket: other GPU work submitted now runs ahead of the segment's work, which the end tap
 		// submits. Counted by why, for the census; its first lines are logged.
 		if (state.stagesOpen.load(std::memory_order_acquire) && IsRenderOwner()) {
@@ -3220,15 +3218,6 @@ namespace FrameAnchors
 			case Segment::DeclaredDeferred:
 				{
 					static const bool on = !Switches::Off("CS_ORG_SEGMENT_DEFERRED");
-					return on;
-				}
-			case Segment::DeclaredWorld:
-				{
-					// The water stage (default off; CS_ORG_SEGMENT_WORLD=1 on). With its taps staged, interiors lose their ambient light
-					// (Dragonsreach's mean brightness 40 to 63 against 93 with it off and 101 in guest mode); the cause is not found yet
-					// (docs/development/org-native-frame-graph.md, "The recipe"). Its scopes draw from the pass-state table, so it needs the
-					// post description too.
-					static const bool on = Switches::Equals("CS_ORG_SEGMENT_WORLD", "1") && !Switches::Equals("CS_ORG_SEGMENT_POST", "0");
 					return on;
 				}
 			case Segment::DeclaredPostComposites:

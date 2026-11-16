@@ -47,12 +47,13 @@ namespace RenderGraph::Frame::Recipes
 			{ StageId::Depth, Owner::Dclf, { Segment::ZPrepass, Segment::FirstPersonDepth }, 2, "Main::RenderDepth" },
 			{ StageId::PreMain, Owner::Cs, { Segment::DeclaredPreMain }, 1, "the Prepass hook (the main pass's first opaque batch)" },
 			{ StageId::Opaque, Owner::Dclf, { Segment::AnchorSky, Segment::MainOpaque }, 2, "the main pass's opaque batches" },
-			{ StageId::Deferred, Owner::Cs, { Segment::DeclaredDeferred }, 1, "the PostComposite hook (the end of Deferred::StartDeferred's passes)" },
-			// The ImageSpace and EngineCopy anchors are not listed: their epochs hold work of several places in the frame (the RenderWorld
-			// scopes here, the post chain's cut parts and menus later), so no one place in the recipe is theirs.
-			{ StageId::Water, Owner::Tickets, { Segment::DeclaredWorld, Segment::AnchorEngineDraws }, 2,
-				"just before the forward epoch as a stage (CS_ORG_SEGMENT_WORLD=1), else each anchor's hook" },
-			{ StageId::Forward, Owner::Dclf, { Segment::AnchorEngineFrameClear, Segment::Forward, Segment::AnchorEngineQueries }, 3, "the engine's blended draw" },
+			// The EngineDraws, ImageSpace and EngineCopy anchors are not listed: their epochs hold work of several places in the frame
+			// (menus, other frame kinds), so no one place in the recipe is theirs.
+			{ StageId::Deferred, Owner::Cs, { Segment::DeclaredDeferred }, 1, "just before DCLF's forward epoch (the water blend's end)" },
+			// The EngineDraws anchor's own epoch keeps the clients no stage holds (blood splatter, precipitation, the menu scenes): in a
+			// world frame they run after the water.
+			{ StageId::Forward, Owner::Dclf, { Segment::AnchorEngineDraws, Segment::AnchorEngineFrameClear, Segment::Forward, Segment::AnchorEngineQueries }, 4,
+				"the engine's blended draw" },
 			{ StageId::FirstPerson, Owner::Dclf, { Segment::FirstPerson }, 1, "Main::RenderFirstPersonView" },
 			{ StageId::Post, Owner::Cs,
 				{ Segment::DeclaredPostComposites, Segment::DeclaredPostEnd, Segment::AnchorTonemap, Segment::AnchorFrameGeneration },
@@ -228,9 +229,7 @@ namespace RenderGraph::Frame::Recipes
 		case StageId::Opaque:
 			return "opaque";
 		case StageId::Deferred:
-			return "deferred";
-		case StageId::Water:
-			return "water";
+			return "deferred+water";
 		case StageId::Forward:
 			return "forward";
 		case StageId::FirstPerson:

@@ -1393,15 +1393,15 @@ namespace RenderGraph::Engine::Skeleton
 				bool done = false;
 				auto status = FrameAnchors::RunStatus::Failed;
 				if (!group.failed) {
-					// The TAA mask and kMAIN_ONLY_ALPHA are cleared after the water blend, the world segment's last step. Their ticket
-					// must not be submitted while that segment holds its ticket: it would run on the GPU before the segment's work, and
-					// the segment's reflections read kMAIN_ONLY_ALPHA. So the segment ends here, before the clear's ticket.
+					// The TAA mask and kMAIN_ONLY_ALPHA are cleared after the water blend, the deferred+water stage's last step. Their
+					// ticket must not be submitted while that stage holds its inputs: it would run on the GPU before the stage's work,
+					// and the stage's reflections read kMAIN_ONLY_ALPHA. So the stage commits here, before the clear's ticket.
 					const bool afterWorld = a_index == IndexOf(Group::Frame) && std::ranges::any_of(group.pending, [](const Pending& a_pending) {
 						return a_pending.target.kind == Kind::Colour &&
 					           (a_pending.target.index == ColourTarget::kTEMPORAL_AA_MASK || a_pending.target.index == ColourTarget::kMAIN_ONLY_ALPHA);
 					});
 					if (afterWorld)
-						(void)FrameAnchors::TapPoint(static_cast<std::uint32_t>(RenderGraphRuntime::Segment::DeclaredWorld));
+						(void)FrameAnchors::TapPoint(static_cast<std::uint32_t>(RenderGraphRuntime::Segment::DeclaredDeferred));
 					group.executed = false;
 					state.flushing = true;
 					const auto result = FrameAnchors::Run(kGroupAnchors[a_index]);

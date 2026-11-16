@@ -30,9 +30,7 @@ namespace RenderGraph::Frame
 		case SegmentId::PreMain:
 			return "pre-main";
 		case SegmentId::Deferred:
-			return "deferred";
-		case SegmentId::Water:
-			return "water";
+			return "deferred+water";
 		case SegmentId::PostComposites:
 			return "post composites";
 		case SegmentId::PostEnd:
