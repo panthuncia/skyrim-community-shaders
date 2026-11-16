@@ -72,6 +72,7 @@ namespace RenderGraph::Frame::Driver
 		InstanceNotDeclared,  // a step's hook fired more often in one segment run than the description declared instances of its client
 		PostNotDeclared,      // the world post chain drew other ImageSpace effects than its post description declared (PostChain.h)
 		PostStateMismatch,    // a declared post-chain step drew with other state than its pass-state table row, or the table has no row for it
+		NoPass,               // an engine effect step fired its data-only hook, and CS has no pass for that step at all
 		Count
 	};
 

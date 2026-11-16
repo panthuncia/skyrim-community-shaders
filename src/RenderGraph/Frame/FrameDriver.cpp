@@ -299,6 +299,8 @@ namespace RenderGraph::Frame::Driver
 			return "post not declared";
 		case TapError::PostStateMismatch:
 			return "post state mismatch";
+		case TapError::NoPass:
+			return "no CS pass";
 		default:
 			return "?";
 		}

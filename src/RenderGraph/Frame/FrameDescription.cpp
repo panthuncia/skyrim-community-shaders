@@ -113,7 +113,6 @@ namespace RenderGraph::Frame
 		number("ssr downsample", a_before.ssrDownsample, a_after.ssrDownsample);
 		flag("ssr blur", a_before.ssrBlur, a_after.ssrBlur);
 		flag("snow", a_before.snow, a_after.snow);
-		number("water address", a_before.waterAddress, a_after.waterAddress);
 		if (a_parity) {
 			number("sao parity", a_before.saoParity, a_after.saoParity);
 			number("normals", a_before.normals, a_after.normals);

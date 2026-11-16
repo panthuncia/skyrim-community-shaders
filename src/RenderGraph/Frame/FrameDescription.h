@@ -148,7 +148,6 @@ namespace RenderGraph::Frame
 		std::uint8_t normals = 4;      // the SSR mask target the engine reads this frame (GetImageSpaceRenderTarget_TAAMASK_SSRMASK_SWAP)
 		bool snow = false;             // the snow pass runs (else the copy of kMAIN into its copy target)
 		std::uint8_t waterHistory = 0;  // the water blend's history pair this frame
-		std::uint8_t waterAddress = 0;  // the water blend's third and fifth samplers' address modes (third * 16 + fifth), which it does not set: read at its call
 
 		friend bool operator==(const WorldFields&, const WorldFields&) = default;
 	};

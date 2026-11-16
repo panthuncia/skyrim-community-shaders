@@ -86,8 +86,6 @@ namespace RenderGraph::Frame::PostChain
 		// temporal; +0x50 the SAO composites' flag, +0x54 its counter.
 		constexpr std::uintptr_t kSao = 0x1c8;
 		constexpr std::uintptr_t kSnowHelper = 0x1e8;     // the snow pass: ISSnowSSS at +0x00, active at +0x08
-		constexpr std::uint32_t kSsrDownsampleRaster = 120;  // effects[120]: ISDownsampleIgnoreBrightest
-		constexpr std::uint32_t kSsrDownsampleCompute = 122;
 
 		// ImageSpaceManager members, the same on SE and AE (RUNTIME_DATA; raw offsets where CommonLib's names are wrong).
 		constexpr std::uintptr_t kBloomRadius = 0xcc;        // ImageSpaceData: the bloom blur radius (float)
@@ -166,17 +164,6 @@ namespace RenderGraph::Frame::PostChain
 			std::map<std::string, std::uint64_t> eofDecisions;  // fields that differed at RenderEndOfFrameEffects' entry from the chain entry's
 			std::uint64_t eofDecisionFrames = 0;
 			std::uint64_t rowsChecked = 0, rowsMatched = 0;  // declared steps' draws checked against their table rows, and matched
-			// The RenderWorld scopes (ScopeStart): the one running now, this frame's world fields as its scopes read them, each slot's last.
-			bool inScope = false;
-			Scope scope = Scope::None;
-			std::uint64_t worldFrame = UINT64_MAX;
-			WorldFields worldFields{};
-			std::array<WorldFields, RenderGraphRuntime::kGameFramesInFlight> worldBySlot{};
-			std::array<bool, RenderGraphRuntime::kGameFramesInFlight> haveWorld{};
-			void (*scopeHook)(Scope, const std::vector<Draw>&) = nullptr;
-			std::array<std::uint64_t, static_cast<std::size_t>(Scope::Count)> scopesChecked{}, scopesMatched{};
-			std::uint64_t worldChanged = 0;
-			std::map<std::string, std::uint64_t> worldChanges;
 			std::uint32_t decisionLines = 0;
 			std::uint32_t mismatchLines = 0;
 		};
@@ -833,28 +820,6 @@ namespace RenderGraph::Frame::PostChain
 			return "upsample";
 		case Step::Dof:
 			return "dof";
-		case Step::SaoCameraZ:
-			return "sao camera z";
-		case Step::SaoMinify:
-			return "sao minify";
-		case Step::SaoRawAo:
-			return "sao raw ao";
-		case Step::SaoBlur:
-			return "sao blur";
-		case Step::SaoComposite:
-			return "sao composite";
-		case Step::SnowSss:
-			return "snow sss";
-		case Step::SnowCopy:
-			return "snow copy";
-		case Step::SsrDownsample:
-			return "ssr downsample";
-		case Step::SsrRayMarch:
-			return "ssr ray march";
-		case Step::SsrBlur:
-			return "ssr blur";
-		case Step::WaterBlend:
-			return "water blend";
 		default:
 			return "none";
 		}
@@ -917,7 +882,7 @@ namespace RenderGraph::Frame::PostChain
 	void NoteShader(const void* a_effect)
 	{
 		auto& state = Get();
-		if ((!state.inChain && !state.inScope) || !a_effect)
+		if (!state.inChain || !a_effect)
 			return;
 		const auto index = IndexOf(state, a_effect);
 		state.observed.push_back(index);
@@ -975,7 +940,7 @@ namespace RenderGraph::Frame::PostChain
 	const RowKey* CurrentRow()
 	{
 		const auto& state = Get();
-		return (state.inChain || state.inScope) && state.haveRow && !state.matchLost ? &state.currentRow : nullptr;
+		return state.inChain && state.haveRow && !state.matchLost ? &state.currentRow : nullptr;
 	}
 
 	void NoteRowCheck(bool a_matched)
@@ -1104,177 +1069,12 @@ namespace RenderGraph::Frame::PostChain
 		case Scope::WaterBlend:
 			{
 				fields.waterHistory = static_cast<std::uint8_t>(Global<std::uint32_t>(kFrameCounter) & 1u);
-				const auto& shadow = RE::BSGraphics::RendererShadowState::GetSingleton()->GetRuntimeData();
-				fields.waterAddress = static_cast<std::uint8_t>((shadow.PSTextureAddressMode[2].underlying() & 0xf) << 4 | (shadow.PSTextureAddressMode[4].underlying() & 0xf));
 				break;
 			}
 		default:
 			break;
 		}
 		return fields;
-	}
-
-	std::vector<Draw> PredictScope(Scope a_scope, const WorldFields& a_fields)
-	{
-		std::vector<Draw> out;
-		auto* manager = RE::ImageSpaceManager::GetSingleton();
-		if (!a_fields.read || !manager)
-			return out;
-		auto& state = Get();
-		RefreshIndex(state);
-		const auto base = reinterpret_cast<std::uintptr_t>(manager);
-		const auto step = [&](std::uint16_t a_effect, Step a_step, std::uint32_t a_index = 0, std::uint32_t a_parity = 0) {
-			out.push_back({ a_effect, { a_step, static_cast<std::uint8_t>(a_index), static_cast<std::uint8_t>(a_parity), -1, -1 } });
-		};
-		const auto effectOf = [&](std::uintptr_t a_object) { return IndexOf(state, reinterpret_cast<const void*>(a_object)); };
-		const auto memberEffect = [&](std::uintptr_t a_helper, std::uint32_t a_slot) { return effectOf(Member<std::uintptr_t>(a_helper, a_slot * 8)); };
-		const std::uint32_t half = a_fields.saoHalf ? 0x20u : 0u;
-		const std::uint32_t swap = a_fields.normals == 5 ? 1u : 0u;
-		switch (a_scope) {
-		case Scope::Reflections:
-			{
-				const auto helper = Member<std::uintptr_t>(base, kReflections);
-				if (!helper || !a_fields.ssr)
-					break;
-				if (a_fields.ssrDownsample)
-					step(IndexOf(state, EffectAt(a_fields.ssrDownsample == 2 ? kSsrDownsampleCompute : kSsrDownsampleRaster)), Step::SsrDownsample, a_fields.ssrDownsample, swap);
-				// The ray march reads the mask the downsample wrote, else the SSR mask target itself.
-				step(memberEffect(helper, 0), Step::SsrRayMarch, a_fields.ssrDownsample ? 1 : 0, a_fields.ssrDownsample ? 0 : swap);
-				if (const auto blur = Member<std::uintptr_t>(base, kComputeBlur); blur && a_fields.ssrBlur) {
-					step(effectOf(Member<std::uintptr_t>(blur, 0x10)), Step::SsrBlur, 0);
-					step(effectOf(Member<std::uintptr_t>(blur, 0x18)), Step::SsrBlur, 1);
-				}
-				break;
-			}
-		case Scope::Ssao:
-			{
-				const auto sao = Member<std::uintptr_t>(base, kSao);
-				if (!sao)
-					break;
-				step(memberEffect(sao, 2), Step::SaoCameraZ, half);
-				for (std::uint32_t level = 1; level < a_fields.saoLevels; ++level) {
-					const bool contrast = level == a_fields.saoContrast;
-					step(memberEffect(sao, contrast ? 7 : 6), Step::SaoMinify, level | (contrast ? 0x40u : 0u));
-				}
-				step(memberEffect(sao, a_fields.saoTemporal ? 8 : 9), Step::SaoRawAo, (a_fields.saoTemporal ? 0u : 1u) | half, a_fields.saoParity | (swap << 1));
-				step(memberEffect(sao, 0), Step::SaoBlur, 0 | half, a_fields.saoParity);
-				step(memberEffect(sao, 1), Step::SaoBlur, 1 | half, 0);
-				break;
-			}
-		case Scope::Snow:
-			if (a_fields.snow) {
-				if (const auto snow = Member<std::uintptr_t>(base, kSnowHelper))
-					step(memberEffect(snow, 0), Step::SnowSss);
-			} else {
-				step(IndexOf(state, EffectAt(RE::ImageSpaceManager::GetCurrentIndex(RE::ImageSpaceManager::ISCopySubRegionCS))), Step::SnowCopy);
-			}
-			break;
-		case Scope::SsaoComposite:
-			{
-				const auto sao = Member<std::uintptr_t>(base, kSao);
-				if (!sao)
-					break;
-				// Forms 0 to 2 are the helper's composites (SAO, SAO and fog, fog: its slots 3, 5 and 4); form 3 renders effects[34], a copy.
-				constexpr std::array<std::uint32_t, 3> kComposite{ 3, 5, 4 };
-				const auto effect = a_fields.saoForm < 3 ? memberEffect(sao, kComposite[a_fields.saoForm]) : IndexOf(state, EffectAt(kCopyEffect));
-				step(effect, Step::SaoComposite, a_fields.saoForm | (a_fields.ssrBlur ? 0x10u : 0u) | half, swap);
-				break;
-			}
-		case Scope::WaterBlend:
-			step(IndexOf(state, EffectAt(RE::ImageSpaceManager::GetCurrentIndex(RE::ImageSpaceManager::ISWaterBlend))), Step::WaterBlend, a_fields.waterAddress,
-				a_fields.waterHistory | (swap << 1));
-			break;
-		default:
-			break;
-		}
-		return out;
-	}
-
-	void ScopeStart(Scope a_scope)
-	{
-		auto& state = Get();
-		if (!On() || !FrameAnchors::IsRenderOwner() || state.inChain || a_scope == Scope::None)
-			return;
-		if (state.inScope)
-			ScopeEnd();
-		const auto& frame = Driver::Current();
-		if (state.worldFrame != frame.frame) {
-			// The frame's first scope: start from the slot's last fields, so the scopes not read yet keep what they had there.
-			state.worldFrame = frame.frame;
-			if (state.haveWorld[frame.slot])
-				state.worldFields = state.worldBySlot[frame.slot];
-		}
-		state.worldFields = ReadWorld(a_scope, state.worldFields);
-		if (state.haveWorld[frame.slot]) {
-			if (const auto diff = DiffWorld(state.worldBySlot[frame.slot], state.worldFields, true); !diff.empty()) {
-				const std::lock_guard lock(state.mutex);
-				++state.worldChanged;
-				CountFields(state.worldChanges, diff);
-			}
-		}
-		state.worldBySlot[frame.slot] = state.worldFields;
-		state.haveWorld[frame.slot] = true;
-		state.predictedDraws = PredictScope(a_scope, state.worldFields);
-		state.predicted.clear();
-		for (const auto& draw : state.predictedDraws)
-			state.predicted.push_back(draw.effect);
-		state.observed.clear();
-		state.matchAt = 0;
-		state.groupTaken = false;
-		state.matchLost = false;
-		state.haveRow = false;
-		state.inScope = true;
-		state.scope = a_scope;
-		if (state.scopeHook)
-			state.scopeHook(a_scope, state.predictedDraws);
-	}
-
-	void ScopeEnd()
-	{
-		auto& state = Get();
-		if (!state.inScope)
-			return;
-		state.inScope = false;
-		const auto scope = state.scope;
-		state.scope = Scope::None;
-		const bool match = Matches(state.predicted, state.observed);
-		{
-			const std::lock_guard lock(state.mutex);
-			++state.scopesChecked[static_cast<std::size_t>(scope)];
-			state.scopesMatched[static_cast<std::size_t>(scope)] += match;
-		}
-		if (!match)
-			Driver::NoteTapError(Driver::TapError::PostNotDeclared, SegmentId::Count,
-				fmt::format("the {} scope drew [{}], the description declared [{}]", ScopeName(scope), Names(state.observed), Names(state.predicted)));
-	}
-
-	Scope CurrentScope()
-	{
-		const auto& state = Get();
-		return state.inScope ? state.scope : Scope::None;
-	}
-
-	void SetScopeHook(void (*a_hook)(Scope a_scope, const std::vector<Draw>& a_draws))
-	{
-		Get().scopeHook = a_hook;
-	}
-
-	WorldFields WorldSlotFields(std::uint32_t a_slot, bool* a_have)
-	{
-		const auto& state = Get();
-		const bool have = a_slot < state.haveWorld.size() && state.haveWorld[a_slot];
-		if (a_have)
-			*a_have = have;
-		return have ? state.worldBySlot[a_slot] : WorldFields{};
-	}
-
-	WorldFields DeclaredWorld()
-	{
-		const auto& state = Get();
-		const auto& frame = Driver::Current();
-		if (state.worldFrame == frame.frame)
-			return state.worldFields;
-		return state.haveWorld[frame.slot] ? state.worldBySlot[frame.slot] : WorldFields{};
 	}
 
 	void LogStats()
@@ -1294,15 +1094,6 @@ namespace RenderGraph::Frame::PostChain
 					 "{} draws of declared steps checked against the pass-state table, {} matched",
 			state.frames, state.changedFrames, list(state.changes), state.chains, state.matched, state.decisionFrames, list(state.decisions),
 			state.eofDecisionFrames, list(state.eofDecisions), state.rowsChecked, state.rowsMatched);
-		std::string scopes;
-		for (std::size_t i = 0; i < state.scopesChecked.size(); ++i)
-			scopes += fmt::format("{}{} {}/{}", scopes.empty() ? "" : ", ", ScopeName(static_cast<Scope>(i)), state.scopesMatched[i], state.scopesChecked[i]);
-		logger::info("[ORG] world scopes: matched/checked {}; {} scope reads changed against their slot's last fields ({})", scopes, state.worldChanged,
-			list(state.worldChanges));
-		state.scopesChecked = {};
-		state.scopesMatched = {};
-		state.worldChanged = 0;
-		state.worldChanges.clear();
 		state.rowsChecked = state.rowsMatched = 0;
 		state.frames = state.chains = state.matched = state.changedFrames = state.decisionFrames = state.eofDecisionFrames = 0;
 		state.changes.clear();

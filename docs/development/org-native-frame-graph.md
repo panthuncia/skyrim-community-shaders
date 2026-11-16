@@ -2768,7 +2768,7 @@ Native mode with stages on (`CS_ORG_SEGMENTS`, default). Guest mode keeps its pe
 | 5 | pre-main | CS | `DeclaredPreMain` | the Prepass hook |
 | 6 | opaque | DCLF | sky's anchor, main opaque | the main pass |
 | 7 | deferred | CS | `DeclaredDeferred` | the PostComposite hook |
-| 8 | water | anchors' tickets (CS with `CS_ORG_SEGMENT_WORLD=1`) | `DeclaredWorld`, or the EngineDraws, ImageSpace and EngineCopy anchors | just before the forward epoch (`FlushRegions`), or each hook |
+| 8 | water (merged into deferred+water by stage 3) | anchors' tickets (CS with `CS_ORG_SEGMENT_WORLD=1`) | `DeclaredWorld`, or the EngineDraws, ImageSpace and EngineCopy anchors | just before the forward epoch (`FlushRegions`), or each hook |
 | 9 | forward | DCLF | frame-group clears' anchor, forward, sun queries | the blended draw |
 | 10 | first person | DCLF | first person | Main::RenderFirstPersonView |
 | 11 | post | CS (table) | the two post stages, the Tonemap and FrameGeneration anchors | PostProcessing, then RenderEndOfFrameEffects' return |
@@ -2841,6 +2841,8 @@ record, `host skipped` and `host missing` remain for the DCLF and reflection-fac
 path.
 
 ### The water stage is off by default
+
+*Superseded by recipe plan stage 3 (below): the darkness did not reproduce; the water stage is on and merged into the deferred stage.*
 
 With its taps staged, the water stage loses interiors' ambient light. Dragonsreach's mean brightness in the validation tour:
 
@@ -2941,3 +2943,151 @@ trace (a partial recipe misses writers), anchors that run at several places plac
   `BuildEpochGraph` leaves the alias placement to the graph's first preparation on the host's thread, against the running graph's
   shared transients, and `RequestEpochRecording` records only for an attached instance. Both would need a pending instance in the
   host.
+
+## Recipe plan, stage 3: deferred+water, and the RenderWorld scopes as CS passes (2026-11-15, `org-native/phases`)
+
+Stage 3 of the recipe plan asked for four parts: repair the water stage, the RenderWorld scopes as CS-owned passes, the
+end-of-frame chain as CS-owned passes in one post stage, and the deletions. Parts 1 and 2 are done. Parts 3 and 4 were not
+started: the post chain is still the two table-drawn stages of stage 2 (see "What is left" below).
+
+### Part 1: the water stage, and one deferred+water stage
+
+**The darkness did not reproduce.** Dragonsreach with the water stage on, on the stage 2 build (`CS_ORG_SEGMENT_WORLD=1`):
+
+| Run (measured, mean brightness of the shot) | Water stage on | Water stage off |
+|---|---|---|
+| `native-interior` (coc straight to Dragonsreach, two shots 300 frames apart) | 104.2 / 99.6, 104.1 / 99.2 | 104.0 / 98.9 |
+| `native-validation` (Dragonsreach after the save and load) | 91.9 | (stage 2: 93) |
+
+The shot with the stage on matches the guest shot by eye. The dark shots of stage 2 (40 to 63) were all in the validation tour,
+which earlier stages also saw spread from 86 to 99 with no code change. It is the known exposure-adaptation variance (a separate,
+later item), not lost lighting. The water stage is on in every native world frame now; `CS_ORG_SEGMENT_WORLD` is gone.
+
+**Merged.** The deferred and water stages are one stage, `deferred+water` (`SegmentId::Deferred`, `Segment::DeclaredDeferred`):
+nine steps from Deferred::StartDeferred's three hooks through the water stencil and mask, the scopes, the kMAIN copy, the water and
+the water blend, committed at the point just before DCLF's forward epoch (`FlushRegions`). The census saw no GPU work between its
+first tap and its commit. The recipe has eleven stages; the EngineDraws anchor's own epoch (blood splatter, precipitation, the menu
+scenes) is listed with the forward stage.
+
+**Held sources.** `CommitBatch` keeps the sources a run's latched draws read (`Pending::source`) in a `RunSlots`. A stage's commit
+moves its staging run's list onto the run that submits it (`RunSlotsRegistry::MoveAll`); the list is released when that run's lease
+index runs again. The per-lease vector it replaces only grew for a staging run.
+
+### Part 2: the RenderWorld scopes as CS passes
+
+`src/RenderGraph/Engine/ImageSpace/WorldSteps.inl` (included by ImageSpace.cpp). Native mode with the deferred+water stage.
+
+**The helper: an engine effect step as a CS pass.** `StepDesc` names the effect (CS's port of its shader and the effect's defines),
+its output or outputs (an engine target, or one CS owns), its inputs by slot with their samplers (the engine's mode numbers:
+`StepSampler`), its blend state (by the engine's four blend fields) and its viewport rule (`StepArea::Full`, or `Render`: the output
+scaled by the dynamic-resolution ratios at the build). `MakeStepSpec` resolves it into a `Spec` sized for the targets now, and the
+existing `MakePass` makes the ORG pass (program, bindings, samplers, gate, latch). The pass reads the engine's PerGeometry and
+PerFrame blocks (a dispatch: its CS b0 block) by the heap index and offset its latch region holds; the step's data-only hook writes
+them there. Nothing is read from the engine's device state: no `ReadShape`, no shape manifest, no table row.
+
+**The data-only hook** (`TakeWorldStep`). At the engine's draw or dispatch of a step, the bound constants are captured
+(`Constants::Capture`) and staged for the step's pass, and the engine's draw is withheld. The step is found by its scope (set by the
+RenderSSAO, reflections, snow and water-blend hooks: `WorldScopeGuard`), its effect, and the variant the engine picked:
+
+| Variant | How the hook knows it |
+|---|---|
+| the normals target (kNORMAL_TAAMASK_SSRMASK or its swap) | GetImageSpaceRenderTarget_TAAMASK_SSRMASK_SWAP's rule (100460): the engine frame counter's parity (525008 / 411489) with SSR on |
+| the water blend's history | the frame counter's parity, as the engine picks it |
+| the raw AO's history | CS's own pair: the frame slot's parity |
+| the minify level | the minify loop's iteration in RenderSSAO (levels 1 to count - 1, once each, in order) |
+| the composite's form | its effect (SAO, SAO and fog, fog), and the copy (ISCopy) for neither |
+| the ray march's source | the SSR downsample switch (513568 / 391448) and mode (513454 / 391287) |
+
+The scope's end runs the ImageSpace anchor once (`Flush`), which is the step's tap: the clients' commits write the staged entries
+and open their gates in the stage's staging run. A step CS has no pass for at all is a `no CS pass` tap error (a mismatch: fatal in
+development builds). One the frame's schedule has off draws nothing that frame, is counted as lagged work, and stays on in every
+later description (`requestedScopes`).
+
+**The passes**, in Main::RenderWorld's order, 45 scope passes (with 11 SAO levels) and 2 water-blend passes at 1920x1080:
+
+| Steps | Effect | Reads | Writes | Constants | Reached |
+|---|---|---|---|---|---|
+| SSR mask downsample, by normals | ISDownsampleIgnoreBrightest | the normals | CS: `ImageSpace::SSRMaskDownsampled` (transient) | captured | yes |
+| SSR ray march: from the mask, or from the normals by parity | ISReflectionsRayTracing | mask or normals, kMAIN, main depth, kMAIN_ONLY_ALPHA, reflection cube | kSSR_RAW | captured | yes (from the mask) |
+| SSR blur H, V | ISReflectionBlurHCS, VCS | kSSR_RAW, kSSR_BLURRED0 | kSSR_BLURRED0, kSSR | captured CS b0 | yes |
+| SAO camera Z | ISSAOCameraZ | depth target 7 | kSAO_CAMERAZ mip 0 | captured | yes |
+| SAO minify, levels 1 to count - 1, and the contrast form at its level | ISMinify, ISMinifyContrast | the level above | kSAO_CAMERAZ mip k | captured | yes |
+| SAO raw AO, temporal or not, by history and normals | ISSAORawAO(NoTemporal) | camera Z, normals, CS's other history (temporal), motion | CS: `ImageSpace::SAORawAO0/1` (history) | captured | temporal yes |
+| SAO blur H by history, V | ISSAOBlurH, V | CS history, CS scratch | CS: `ImageSpace::SAOBlurTemp` (transient), `ImageSpace::SAO` | captured | yes |
+| snow SSS | ISSnowSSS | camera Z mip 0, kMAIN, kSNOW_SPECALPHA (RenderSnowSSS, SE 0x1412ee8d0) | kSNOW_SWAP | captured | no (no snow scene) |
+| snow copy | ISCopySubRegionCS | kMAIN | kSNOW_SWAP | captured CS b0 | yes |
+| SAO composite, three forms, blurred or raw reflections, by normals | ISSAOCompositeSAO, SAOFog, Fog | kSNOW_SWAP, CS's blurred AO, depth 7, normals, kSNOW_SPECALPHA, shadow mask, kSSR or kSSR_RAW, CS's feature headers | kMAIN | captured | fog and SAO+fog yes |
+| SAO composite copy (neither SAO nor fog) | ISCopy | kSNOW_SWAP | kMAIN | none | no |
+| water blend, by history | ISWaterBlend | kRAW_WATER, the other kWATER, motion, main depth, the normals of that parity | kMAIN, kWATER_1 or kWATER_2 | captured | yes (river) |
+
+Samplers are those RenderSSAO and the effects set (SE 0x1412ebd70: minify point to level 4 and linear after, the raw AO trilinear
+then linear). Where the engine left a sampler unset (the water blend's third and fifth, the composite's first), the pass declares
+clamp; the row values those took from earlier draws are gone with the table.
+
+**Targets.** CS owns the SSR mask downsample (transient), the AO blur scratch (transient), the blurred AO (kept across frames: the
+fog-only composite reads it in frames whose generation drew nothing) and the raw AO history pair, cleared once by one-shot UAV clears.
+They replace kNORMAL_TAAMASK_SSRMASK_DOWNSAMPLED, kSAO_TEMP_BLUR, kSAO, kSAO_RAWAO and kSAO_RAWAO_PREVIOUS in native. Kept as engine
+targets, for readers outside the scopes: kSAO_CAMERAZ (Upscaling's depth upscale writes it), kSSR, kSSR_RAW and kSSR_BLURRED0 (the
+water surface reads them), kSNOW_SWAP and kSNOW_SPECALPHA (the snow targets Hooks.cpp makes), kWATER_1/2 and kRAW_WATER (the
+skeleton's clears, the water's draws), kMAIN.
+
+**Description.** The clients' rows are read at Begin (`WorldScopeRows`): SSR's passes when the reflections helper is active, the snow
+pass or its copy by the snow flag, the composite form by the SAO and fog switches (the portal graph), the history passes of the
+frame's parity; both normals variants are on (the hook opens the one the engine drew). The level count and the contrast level are
+fixed at the build for kMAIN's size; a new size, level count or dynamic-resolution ratio registers the clients again at the next
+world frame (an off-thread build; frames keep the old schedule). Registrations seen: one at the main menu, one per render ratio
+(DLSS, FSR, XeSS at 0.667; TAA at 1.0).
+
+**Deleted in native.** The scope rows of the pass-state table (32 rows), PostChain's scope prediction, check and per-slot world
+fields (`PredictScope`, `ScopeStart`, `ScopeEnd`, `CurrentScope`, `SetScopeHook`, `DeclaredWorld`, `WorldSlotFields`), ImageSpace's
+`OnWorldScope`, `RowDrawable`, the scopes' cut, and the water blend's shadow-state sampler read.
+
+### Measurements
+
+perf-taa, native Vulkan, Perf-Fast, Tracy, one run each, measured. Before: stage 2's final run (water stage off). After: this stage.
+
+| perf-taa | Before (stage 2) | After |
+|---|---|---|
+| fps between the marks | 120.9 | 126.0 |
+| Tickets a frame | 28.93 | 18.95 |
+| `vkQueueSubmit` calls a frame (RHI; plus 1 external) | 34.80 | 29.14 |
+| Entry / body barriers a frame | 899 / 1205 | 617 / 857 |
+| Render thread busy, ms a frame | 3.59 | 3.17 |
+| Submission thread busy, ms a frame | 3.69 | 2.94 |
+| Host thread busy, ms a frame | 2.34 | 1.72 |
+| Recordings, switches, cuts and tap errors in the steady window | 0, 0, 0, 0 | 0, 0, 0, 0 |
+
+The deferred+water ticket against what it replaces (measured):
+
+| Per frame | deferred+water (after) | Before: deferred stage + 5 ImageSpace + 2 EngineDraws + EngineCopy + 2 clear tickets |
+|---|---|---|
+| Tickets | 1 | 11 |
+| Submission thread `FinishTicket`, us | 351 (admission 14, inline recording 200, `vkQueueSubmit` 61) | 109 for the deferred stage, plus about 600 for the others (stage 0's figures: 2 x 145, 5 x 54, 45) |
+| Render thread `ExecuteEpoch`, us | 96 | 13 for the deferred stage, plus about 170 for the others |
+| Entry / body barriers | 76 / 164 | 36 / 78 for the world segment of stage 0, plus the deferred stage's |
+
+The 200 us of inline recording is the stage's late batch: the water draws, the deferred composite and the kMAIN copy are recorded at
+execution (their passes are not GPU-gated). The world steps are GPU-gated and recorded ahead.
+
+### Checks
+
+One run each, `CS_TEST_BACKGROUND=1`, mismatches and recipe findings fatal: native-quick (DLSS), native-d3d12-quick, native-river,
+native-upscalers (DLSS, FSR, TAA at 1920x1080 render, XeSS), native-validation (the known 20x `VUID-vkCmdDraw-None-09600` only;
+Dragonsreach 88.8, the same image as part 1's 98.1 with a whole-image exposure offset; inventory and map as before), the loading-thread
+run, first and third person, guest-quick: all passed, 0 tap errors, 0 recipe findings. Shots against the part 1 build: the same by
+eye; differences are foliage and character motion, and TAA's 4.0 mean difference is inside stage 2's own run-to-run 5.5. The fatal
+path did not fire. ORG was not changed.
+
+### What is left
+
+- **Part 3, the post stage, not started.** The end-of-frame chain is still drawn from the pass-state table in two stages around the
+  upscaler's evaluate, with its cuts and decision events. The helper above is what it needs: each chain step as a `StepDesc`, with a
+  data-only hook per effect step and CS-owned targets and histories. The HDR effect's luminance targets (kHDR_DOWNSAMPLE4/6) stay
+  engine targets for DCLF's character light; the upscaler evaluate as a pass needs each SDK recording into the stage's list.
+- **Part 4, the deletions**, follows part 3: the table and its generator, PostChain's prediction, `CutSegment`, shared and point
+  steps, `repeats`, the shape manifest's use.
+- Still reachable in native from ImageSpace.cpp: the post table clients and their cut path (the chain), the main client with the
+  shape manifest and late clients (flow copies, water displacement, menus, the chain's cut parts), and other frame kinds.
+- Constants are captured, not computed. RenderSSAO's constants are all computed in its body from globals (SE 0x1412ebd70: the
+  camera's planes, the level sizes, the SAO settings at 0x143233548 to 0x14323356c): computing them at Begin would drop the SAO hooks'
+  captures. Not done.
