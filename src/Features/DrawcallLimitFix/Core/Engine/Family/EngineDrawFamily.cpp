@@ -421,7 +421,7 @@ namespace DCLF::Family
 		GpuTextures::ResolveFailure* a_failure)
 	{
 		auto& textures = GpuTextures::Get();
-		if (a_view && !PublishedResources::ExportedId(a_view).empty())
+		if (a_view && PublishedResources::IsExport(a_view))
 			return SlotResult::Published;
 		auto binding = a_view ? textures.ResolveBinding(a_view, a_tag, a_failure) : textures.NullOf(a_kind);
 		if (binding.index == GpuTextures::kInvalid)

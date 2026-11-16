@@ -124,8 +124,8 @@ namespace RenderGraph::Engine::Pipeline
 		{
 			if (!a_object || !Tripwire::IsHandle(a_object))
 				return a_object;
-			const auto info = Tripwire::Describe(a_object);
-			return info.wrapped ? static_cast<T*>(info.wrapped) : a_object;
+			IUnknown* const wrapped = Tripwire::WrappedOf(a_object);
+			return wrapped ? static_cast<T*>(wrapped) : a_object;
 		}
 
 		// a_key is the pointer lookups pass (the interface the object was created as); a_object the same object as a device child.

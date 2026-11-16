@@ -447,6 +447,17 @@ namespace PublishedResources
 				return entry.id;
 		return {};
 	}
+
+	bool IsExport(const ID3D11ShaderResourceView* a_view)
+	{
+		if (!a_view)
+			return false;
+		CheckThread();
+		for (const auto& entry : Published().entries)
+			if (ExportOf(entry) == a_view && !entry.id.empty())
+				return true;
+		return false;
+	}
 }
 
 #else  // !CS_HAS_RENDER_GRAPH
@@ -470,6 +481,7 @@ namespace PublishedResources
 	bool ShaderResourceIndex(std::string_view, std::uint32_t&, std::source_location) { return false; }
 	std::uint32_t ShaderResourceVariant(std::string_view) { return UINT32_MAX; }
 	std::string ExportedId(const ID3D11ShaderResourceView*) { return {}; }
+	bool IsExport(const ID3D11ShaderResourceView*) { return false; }
 }
 
 #endif

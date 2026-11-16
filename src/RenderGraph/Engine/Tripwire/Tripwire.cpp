@@ -866,6 +866,18 @@ namespace RenderGraph::Engine::Tripwire
 		return info;
 	}
 
+	IUnknown* WrappedOf(const void* a_object)
+	{
+		const auto* core = Detail::CoreOf(a_object);
+		return core ? core->wrapped : nullptr;
+	}
+
+	Kind KindOf(const void* a_object)
+	{
+		const auto* core = Detail::CoreOf(a_object);
+		return core ? core->kind : Kind::Count;
+	}
+
 	namespace
 	{
 		/** @brief The native services for a native handle (nothing wrapped), null for a guest handle or before native mode set them. */

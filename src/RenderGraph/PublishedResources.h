@@ -129,4 +129,6 @@ namespace PublishedResources
 	 * writes, so it should read the id instead. Allocates: use IsExportOf on hot paths.
 	 */
 	std::string ExportedId(const ID3D11ShaderResourceView* a_view);
+	/** @brief Whether a_view is a published resource's export (ExportedId not empty), without copying the id. */
+	bool IsExport(const ID3D11ShaderResourceView* a_view);
 }

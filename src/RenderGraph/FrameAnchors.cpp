@@ -732,6 +732,8 @@ namespace FrameAnchors
 			std::vector<std::shared_ptr<const ClientDesc>> clients;  // registration order, the ones in the graphs
 			std::vector<ScheduledPass> passes;                       // by anchor, then order key, then registration
 			std::vector<std::pair<std::string, std::shared_ptr<org::VersionedTexture>>> imports;  // each id's slot
+			// Each declared segment's clients, in registration order (SegmentClients). Made once, at Publish.
+			std::array<std::vector<std::shared_ptr<const ClientDesc>>, kDeclared> segmentClients;
 		};
 
 		/** @brief A registered client and what the anchors keep about it. Render thread. */
@@ -743,6 +745,10 @@ namespace FrameAnchors
 			std::uint64_t serial = 0;
 			// Per pass: the snapshot a pending one-shot pass was armed in; 0 once it ran (always 0 for other passes).
 			std::vector<std::uint64_t> armed;
+			// The declared segments that hold it (a bit per segment), for the description heldOf. A tap asks this, not the steps'
+			// client ids by string.
+			const ClientDesc* heldOf = nullptr;
+			std::uint64_t held = 0;
 		};
 
 		/**
@@ -978,6 +984,8 @@ namespace FrameAnchors
 			return epochs;
 		}
 
+		bool SegmentHolds(std::uint32_t a_declared, const ClientDesc& a_client);
+
 		/** @brief Publishes the clients and imports as they are now, for the next builds. */
 		void Publish(State& a_state)
 		{
@@ -1002,6 +1010,10 @@ namespace FrameAnchors
 			});
 			for (const auto& [id, import] : a_state.imports)
 				snapshot->imports.emplace_back(id, import->slot);
+			for (std::uint32_t d = 0; d < kDeclared; ++d)
+				for (const auto& client : snapshot->clients)
+					if (SegmentHolds(d, *client))
+						snapshot->segmentClients[d].push_back(client);
 			a_state.snapshot.store(std::move(snapshot), std::memory_order_release);
 		}
 
@@ -1182,13 +1194,22 @@ namespace FrameAnchors
 		}
 
 		/** @brief A declared segment's clients in a snapshot, in registration order: the order of the description's clientsOn bits. */
-		std::vector<std::shared_ptr<const ClientDesc>> SegmentClients(const Snapshot& a_snapshot, std::uint32_t a_declared)
+		const std::vector<std::shared_ptr<const ClientDesc>>& SegmentClients(const Snapshot& a_snapshot, std::uint32_t a_declared)
 		{
-			std::vector<std::shared_ptr<const ClientDesc>> clients;
-			for (const auto& client : a_snapshot.clients)
-				if (SegmentHolds(a_declared, *client))
-					clients.push_back(client);
-			return clients;
+			return a_snapshot.segmentClients[a_declared];
+		}
+
+		/** @brief Whether a declared segment holds a registered client (SegmentHolds, kept per description). Render thread. */
+		bool ClientHolds(Client& a_client, std::uint32_t a_declared)
+		{
+			if (a_client.heldOf != a_client.desc.get()) {
+				a_client.held = 0;
+				for (std::uint32_t d = 0; d < kDeclared; ++d)
+					if (SegmentHolds(d, *a_client.desc))
+						a_client.held |= std::uint64_t{ 1 } << d;
+				a_client.heldOf = a_client.desc.get();
+			}
+			return (a_client.held >> a_declared & 1u) != 0;
 		}
 
 		/** @brief Whether a step's clients in a snapshot read CS's shared constants: the segment uploads them for that step. */
@@ -1374,7 +1395,7 @@ namespace FrameAnchors
 			 */
 			void GatherDeclared(org::RenderGraph& a_graph, std::uint32_t a_declared, std::uint32_t a_epoch, std::vector<org::RenderGraph::ExternalPassDesc>& a_out) const
 			{
-				const auto clients = SegmentClients(*snapshot, a_declared);
+				const auto& clients = SegmentClients(*snapshot, a_declared);
 				const auto& info = kDeclaredInfo[a_declared];
 				const auto note = [&](const std::shared_ptr<org::RenderPass>& a_pass) {
 					if (declaredPasses && a_pass)
@@ -2529,7 +2550,7 @@ namespace FrameAnchors
 				return fields;  // graph 0: not built yet
 			fields.graph = a_graph;
 			fields.versions = a_state.declaredRecordings[a_declared].versionGeneration;
-			const auto clients = SegmentClients(*built, a_declared);
+			const auto& clients = SegmentClients(*built, a_declared);
 			// A stage whose graph holds no client and no module step has nothing to record (the UI stage before the overlay registers):
 			// it is absent from the frame, as before its first build.
 			bool foreignStep = false;
@@ -2908,7 +2929,7 @@ namespace FrameAnchors
 			if (!snapshot)
 				return;
 			const auto& info = kDeclaredInfo[a_declared];
-			const auto clients = SegmentClients(*snapshot, a_declared);
+			const auto& clients = SegmentClients(*snapshot, a_declared);
 			std::erase_if(use.clients, [&](const KeyUse::Client& a_client) { return std::ranges::find(clients, a_client.desc) == clients.end(); });
 			const bool load = Driver::LoadStartedThisFrame();
 			if (a_inRecipe) {
@@ -3273,7 +3294,7 @@ namespace FrameAnchors
 						Driver::NoteTapError(Driver::TapError::NotInDescription, segment, fmt::format("{} had work at its tap, and the schedule has it off", tap));
 				}
 			} else {
-				const auto clients = SegmentClients(*built, a_declared);
+				const auto& clients = SegmentClients(*built, a_declared);
 				for (std::size_t i = 0; i < clients.size(); ++i) {
 					if (!StepHolds(step, *clients[i]))
 						continue;
@@ -3519,11 +3540,11 @@ namespace FrameAnchors
 		if (!SegmentsOn() || !state.host || !IsRenderOwner())
 			return false;
 		auto lock = Guard();
-		const auto* client = FindClient(state, a_id);
+		auto* client = FindClient(state, a_id);
 		if (!client)
 			return false;
 		for (std::uint32_t d = 0; d < kDeclared; ++d) {
-			if (!state.declaredEpochs[d] || !SegmentHolds(d, *client->desc) || !WindowOpen(state, d))
+			if (!state.declaredEpochs[d] || !ClientHolds(*client, d) || !WindowOpen(state, d))
 				continue;
 			const auto& built = state.frameBuilt[d];
 			if (built && std::ranges::find(built->clients, client->desc) != built->clients.end())
@@ -3538,18 +3559,18 @@ namespace FrameAnchors
 		if (!SegmentsOn() || !state.host || !IsRenderOwner())
 			return false;
 		auto lock = Guard();
-		const auto* client = FindClient(state, a_id);
+		auto* client = FindClient(state, a_id);
 		if (!client)
 			return false;
 		const auto& frame = Driver::Current();
 		for (std::uint32_t d = 0; d < kDeclared; ++d) {
-			if (!state.declaredEpochs[d] || !SegmentHolds(d, *client->desc) || !WindowOpen(state, d))
+			if (!state.declaredEpochs[d] || !ClientHolds(*client, d) || !WindowOpen(state, d))
 				continue;
 			const auto& built = state.frameBuilt[d];
 			if (!built || std::ranges::find(built->clients, client->desc) == built->clients.end())
 				continue;
 			// The client must be on in the frame's schedule: its passes do work only then.
-			const auto clients = SegmentClients(*built, d);
+			const auto& clients = SegmentClients(*built, d);
 			const auto i = static_cast<std::size_t>(std::ranges::find(clients, client->desc) - clients.begin());
 			if (i >= RenderGraph::Frame::kSegmentClients || !(frame.Segment(static_cast<SegmentId>(d)).clientsOn >> i & 1u))
 				continue;
@@ -3966,7 +3987,7 @@ namespace FrameAnchors
 			const auto& built = state.frameBuilt[declared];
 			if (!fields.declared || !fields.graph || !built)
 				return false;
-			const auto clients = SegmentClients(*built, declared);
+			const auto& clients = SegmentClients(*built, declared);
 			const auto found = std::ranges::find(clients, client->desc);
 			const auto i = static_cast<std::size_t>(found - clients.begin());
 			return found != clients.end() && i < RenderGraph::Frame::kSegmentClients && (fields.clientsOn >> i & 1u);
@@ -4021,7 +4042,7 @@ namespace FrameAnchors
 		const auto& built = state.frameBuilt[declared];
 		if (!fields.declared || !fields.graph || !built)
 			return hold;
-		const auto clients = SegmentClients(*built, declared);
+		const auto& clients = SegmentClients(*built, declared);
 		for (std::size_t i = 0; i < clients.size() && i < RenderGraph::Frame::kSegmentClients; ++i)
 			if (clients[i]->id == a_id && StepHolds(kDeclaredInfo[declared].steps[step], *clients[i])) {
 				hold.scheduled = (fields.clientsOn >> i & 1u) != 0;

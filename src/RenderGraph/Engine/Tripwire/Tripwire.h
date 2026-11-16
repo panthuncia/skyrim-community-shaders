@@ -185,6 +185,12 @@ namespace RenderGraph::Engine::Tripwire
 	/** @brief a_object's handle data, or an Info with kind Count when it is not a handle. */
 	Info Describe(const void* a_object);
 
+	/** @brief A handle's wrapped D3D11 object (Info::wrapped), without building the rest of Describe; null when there is none. */
+	IUnknown* WrappedOf(const void* a_object);
+
+	/** @brief A handle's kind (Info::kind), without building the rest of Describe; Count when a_object is not a handle. */
+	Kind KindOf(const void* a_object);
+
 	/**
 	 * @brief The ORG resource behind a_object, from an engine field that may or may not hold a handle. That is a handle's
 	 * Options::graph, or the resource AttachGraphResource tied to a D3D11 object (a guest handle's wrapped object carries its

@@ -2877,8 +2877,8 @@ namespace RenderGraph::Engine::Native
 				}
 			}
 			// A port's handle around a native one (its fields hold handles that wrap the object the native device made).
-			const auto info = Tripwire::Describe(a_object);
-			return info.wrapped && info.wrapped != a_object && Tripwire::IsHandle(info.wrapped) ? Resolve(info.wrapped) : nullptr;
+			IUnknown* const wrapped = Tripwire::WrappedOf(a_object);
+			return wrapped && wrapped != a_object && Tripwire::IsHandle(wrapped) ? Resolve(wrapped) : nullptr;
 		}
 
 		/** @brief A census name: the resource handle's debug name (a view's: its resource's), else the record's own. */
@@ -4815,8 +4815,7 @@ namespace RenderGraph::Engine::Native
 		a_info.kind = DXVK_ORG_INTEROP_RESOURCE_IMAGE;
 		a_info.image = record->image;
 		// A shader resource view is described as DXVK describes one: its mips and slices, and the depth aspect alone for a depth image.
-		const auto described = Tripwire::Describe(a_object);
-		if (described.kind == Tripwire::Kind::ShaderResourceView) {
+		if (Tripwire::KindOf(a_object) == Tripwire::Kind::ShaderResourceView) {
 			D3D11_SHADER_RESOURCE_VIEW_DESC view{};
 			static_cast<ID3D11ShaderResourceView*>(const_cast<IUnknown*>(a_object))->GetDesc(&view);
 			auto& range = a_info.image.subresourceRange;
