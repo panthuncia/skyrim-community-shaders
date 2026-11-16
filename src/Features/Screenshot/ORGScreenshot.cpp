@@ -84,8 +84,9 @@ namespace
 		ORGScreenshot::OnPixels onPixels;
 		std::size_t buffer = kBuffers;  // the readback buffer it copies into
 		std::uint32_t width = 0, height = 0, rowPitch = 0;
-		bool taken = false;      // a run committed it (the copy is in that run's recording)
-		bool submitted = false;  // that run was submitted: point is set
+		bool taken = false;          // a run committed it (the copy is in that run's recording)
+		std::uint64_t takenAt = 0;   // the capture point its run committed it at
+		bool submitted = false;      // that run was submitted: point is set
 		org::GraphHost::GpuPoint point;
 	};
 
@@ -98,9 +99,10 @@ namespace
 		std::array<std::shared_ptr<org::Buffer>, kBuffers> buffers;
 		// The capture each run copies, stored by the commit for the pass recorded at execution (a frame input).
 		RenderGraph::RunSlots<Request> runs;
-		// Render thread: the capture waiting for a run, and the one the last commit stored (its run's submission sets its point).
+		// Render thread: the capture waiting for a run.
 		std::shared_ptr<Request> armed;
-		std::shared_ptr<Request> committed;
+		// Render thread: capture points seen (Poll), read by the commit.
+		std::uint64_t points = 0;
 	};
 
 	struct CaptureBindings
@@ -230,18 +232,11 @@ namespace
 				return;
 			auto request = std::exchange(owner->armed, nullptr);
 			request->taken = true;
+			request->takenAt = owner->points;
 			owner->runs.Store(RenderGraphRuntime::Get().Host()->CurrentRun(), request);
-			owner->committed = std::move(request);
 		};
-		client.executed = [weak = std::weak_ptr<Shared>(a_shared)](const FrameAnchors::Point&) {
-			const auto owner = weak.lock();
-			auto* host = RenderGraphRuntime::Get().Host();
-			if (!owner || !owner->committed || !host)
-				return;
-			owner->committed->point = host->SubmittedPoint();
-			owner->committed->submitted = true;
-			owner->committed.reset();
-		};
+		// No executed callback: in a stage it runs at the tap, before the stage's commit submits the copy. The next capture point takes
+		// the GPU point instead (Poll): every capture point comes after the commit of the run that took the capture.
 		client.onFailed = [] {
 			logger::error("[ORG] Screenshot: the render graph failed with the capture's pass in it; captures use D3D11");
 			ORGScreenshot::Get().Fail();
@@ -393,10 +388,22 @@ void ORGScreenshot::Poll()
 		return;
 	auto& state = *impl;
 	auto& shared = *state.shared;
-	++state.points;
+	// The capture point's number moves on when this one ends: a capture its run commits from here on has this number.
+	const struct Next
+	{
+		Impl& state;
+		~Next() { state.shared->points = ++state.points; }
+	} next{ state };
 	TryTake(shared);
 	if (state.outstanding.empty())
 		return;
+	// A capture taken at an earlier capture point: its run was submitted since, so the point submitted by now covers its copy.
+	if (auto* host = RenderGraphRuntime::Get().Host())
+		for (const auto& request : state.outstanding)
+			if (request->taken && !request->submitted && request->takenAt < state.points) {
+				request->point = host->SubmittedPoint();
+				request->submitted = true;
+			}
 	std::vector<std::shared_ptr<Request>> done;
 	for (const auto& request : state.outstanding)
 		if (request->submitted && request->point.Reached())
