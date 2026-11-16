@@ -1580,16 +1580,26 @@ namespace DCLF::Direct
 			s.window.csBusyUs += csUs;
 			s.window.wallUs += wallUs;
 		}
-		PollRetirement();
+		{
+			DCLF_ZONE("CS.DCLF.Cpu.FrameStart.PollRetirement");
+			PollRetirement();
+		}
 		// A forward slot whose frame never reached EndFrame, then those done: every frame, or one left behind during CPU frames would hold
 		// its cull frame, and with it the tables and their retirement node.
-		if (s.current && !s.current->ownsEpochs) {
-			CloseForwardSlot(*s.current);
-			s.current = nullptr;
+		{
+			DCLF_ZONE("CS.DCLF.Cpu.FrameStart.ForwardSlots");
+			if (s.current && !s.current->ownsEpochs) {
+				CloseForwardSlot(*s.current);
+				s.current = nullptr;
+			}
+			ReleaseForwardSlots();
 		}
-		ReleaseForwardSlots();
 		auto* host = RenderGraphRuntime::Get().Host();
-		const bool cpu = CpuFrame() && host && EnsureDevice();
+		bool cpu = false;
+		{
+			DCLF_ZONE("CS.DCLF.Cpu.FrameStart.EnsureDevice");
+			cpu = CpuFrame() && host && EnsureDevice();
+		}
 		if (!cpu) {
 			// After CPU frames (a rebuild for the GPU pipeline): no CPU frame open, so the points are the host's submissions and the frames
 			// signalled; the latch regions are the host's own slots' again.
@@ -1597,7 +1607,10 @@ namespace DCLF::Direct
 				NoteCpuFrameOpened(s.signalled);
 				SubmitQueued();
 			}
-			ReleaseCompletedSlots();
+			{
+				DCLF_ZONE("CS.DCLF.Cpu.FrameStart.ReleaseCompleted");
+				ReleaseCompletedSlots();
+			}
 			// The GPU-driven graph's forward family, with its live spheres (GraphConditions::forwardDirect), and its roots' states, read-only:
 			// FadeStateCS stays the fades' authority.
 			std::shared_ptr<const ViewBatchSet> forward;
@@ -1609,10 +1622,19 @@ namespace DCLF::Direct
 				slot.sceneFrame = Scene::FrameView::Get().GetFrame();
 				s.current = &slot;
 			}
-			FrameValues::Get().SetViewBatches(forward);
-			// The sites declare the sequences: their version is the set's this frame.
-			Draws::PublishViewBatches(forward.get());
-			KickCpuFrameState(std::move(forward), true);
+			{
+				DCLF_ZONE("CS.DCLF.Cpu.FrameStart.SetViewBatches");
+				FrameValues::Get().SetViewBatches(forward);
+			}
+			{
+				// The sites declare the sequences: their version is the set's this frame.
+				DCLF_ZONE("CS.DCLF.Cpu.FrameStart.PublishViewBatches");
+				Draws::PublishViewBatches(forward.get());
+			}
+			{
+				DCLF_ZONE("CS.DCLF.Cpu.FrameStart.KickCpuFrameState");
+				KickCpuFrameState(std::move(forward), true);
+			}
 			return;
 		}
 		s.wasCpu = true;
