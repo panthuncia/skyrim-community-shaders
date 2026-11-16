@@ -4390,6 +4390,13 @@ expects kMENUBG as the final target in that frame and the final target in every 
 written in kMENUBG's format. A texel copy was tried first: the two targets have 4-byte texels of different formats, and the copied
 image was garbage. The step is opened at RenderEndOfFrameEffects' return in a capture frame (`OpenCapture`).
 
+**The engine tests the menu stack again after Begin** (Main's frame calls MenuManager's freeze test right after Renderer::Begin),
+and a menu shown through the UI message queue is pushed by another thread. About one frozen-world run in three, the menu landed
+between the two tests: the frame was described as a world frame while the engine drew the capture into kMENUBG, and the post
+stage's check stopped the game. That call site now answers what Begin decided (`FreezeTestAtBegin`, native mode with segments);
+the capture is the next frame, which Begin then sees. A log line names each frame where the two tests differed (3 of the 7 runs
+after the fix).
+
 It is **always present and gated**, not absent when unused. The engine gives no notice before the capture frame's own Begin, and that is
 too late for a build (2 to 6 frames) or for a recording of a new description (a frame or more): a lagging capture frame would leave
 kMENUBG unwritten for as long as the menu stays open. Every other frame skips the pass at execution, its barriers folded.
@@ -5095,3 +5102,76 @@ running from target 1 into target 14 where the description had CS's chain (frame
 held at 144 Hz (the saved divisor is cleared), so the capture frame's timing differs from earlier passes; not investigated further.
 ORG's unit tests pass run one at a time (the lease tests and HeadlessBenchmark not run); in parallel runs one host test fails at random
 (External, then AsyncOpen) and passes alone.
+
+### The present's wait and the threads (2026-11-16, measured)
+
+**What the mid-frame drain waited for.** At the present (DCLF's `FrameDriver::BeforePresent`), `FrameValues::WaitSignalSubmitted` waited
+until the frame values' signal was submitted: the copy-queue batch that signals the frame-wait timeline at the frame's value, which every
+batch of the frame waits for on the GPU. Before that it drained the submission thread's queue (`FlushPendingStreamWork`). The wait exists
+because a present can block until the frame's GPU work is done while it holds the submission lock the upload queue takes (DXVK presents
+under it; BasicRHI's Vulkan present holds its timeline lock across `vkQueuePresentKHR`; AMD's windowed present blocks). A signal not yet
+submitted then deadlocks. In native mode the drain made the render thread wait until the submission thread had submitted the whole frame
+(1.4 to 1.6 ms a frame). The copy batch itself waits on the CPU for its reused copy's point, which is sealed, so already on the queues.
+
+**What replaced it.** With a queued present, the present is an entry on the submission thread after the frame's epochs, so the wait moved
+there. `RenderGraphRuntime::WaitBeforePresent` keeps a closure that the queued present runs before the swap chain's present
+(`QueuePresent`); a present on the render thread runs it after its drain. Guest mode, held presents and frame generation keep the render
+thread's wait. `QueuePresent` now paces before it takes `presentLock`: the present before holds that lock through its frame latency
+wait, so the render thread used to wait there outside any zone.
+
+**Native is paced by the GPU.** After present N, the submission thread waits in `WaitPresentedFrames` until frame N-2 is done on the GPU
+(frame latency 2), 3.0 to 3.4 ms a frame, with frames N-1 and N already submitted: the GPU always has a frame queued. Guest's render
+thread waits the same way inside DXVK's present. `nvidia-smi` reads 62 to 67% in both modes, so it does not measure headroom here.
+Removing the drain did not move the steady period. The render thread's wait became the GPU's pacing (`CS.Native.PresentPace`,
+`ORG.Host.WaitTicket`), and the tail shrank. The rest of the gap to guest is GPU work per frame (earlier attribution: GENERAL resting
+layouts and the ports' cost), not measured further in this pass.
+
+| perf-taa, uncapped, 6 s windows | Native before (`xn1`, `xn2`) | Native after (`f8n1`, `f8n2`) | Guest before / after (`xg1`, `f8g1`) |
+|---|---|---|---|
+| frame period, steady / mean | 5.76-5.77 / 5.86-5.88 ms | 5.78-5.80 / 5.87-5.90 ms | 5.10 / 5.10-5.11 ms |
+| p95 / p99 | 9.11-9.15 / 10.4-10.6 ms | 6.67-6.69 / 9.6-11.7 ms | 5.80-5.89 / 6.29-6.35 ms |
+| frames over 20 ms in the window | 2 to 3 | 0 to 1 | 0 |
+| render thread CPU (cycles) | 3.79-3.87 ms | 3.64-3.85 ms | 2.70 ms |
+| render thread waiting | 1.80-1.90 ms (`DrainSubmissions` 1.39-1.56) | 1.89-2.10 ms (`PresentPace` 1.08-1.52, `WaitTicket` 0.52-0.76) | 0.09 ms |
+| `DrainSubmissions` on the render thread | 0.55 a frame | none | - |
+| submission thread busy / `WaitPresentedFrames` | 2.75-2.86 / 2.78-2.91 ms | 2.44-2.83 / 3.01-3.38 ms | - |
+| GPU utilization (`nvidia-smi`) | 69.5-71.0% | 64.5-67.4% | 63.7% / 62.4% |
+
+The machine was in use (2 to 4% spread between runs). The frames over 20 ms left are GPU stalls: every waiting thread (the copy
+uploader's host wait, `WaitPresentedFrames`, the host's completion wait) waits about 20 ms on GPU progress at once, about one frame in
+700. No CPU thread is the cause; not attributed further. The load capture (`f8load`) and the pause menu's switch (`f8menu`: longest frame
+116 ms against 99 to 114 ms in earlier passes, a GPU completion wait) show no new hitch.
+
+**Other waits (ms a frame, `f8n1`/`f8n2`).**
+- Render: `CS.Native.PresentPace` 1.08-1.52 and `ORG.Host.WaitTicket` 0.52-0.76, both the GPU's pacing (a present, or a ticket's
+  copy, waits for frames in flight). `CS.DCLF.ListJobsWait` 0.10-0.11, DCLF's list jobs, not changed.
+- Submission: `WaitPresentedFrames` 3.0-3.4. Frame latency 2 is the depth DXVK's latency wait gives guest. While the GPU bounds the frame,
+  a smaller latency would idle it and a larger one adds a frame of latency for no throughput.
+- Copy uploader: `TimelineHostWait` 3.9-4.0, its CPU wait for reused copies' points, off the critical path.
+- Host: `CompletionWait` 3.1-3.4, and in its busy time the sequencer's mutex in `SynchronousAdmission::Submitted`. The host thread bounds
+  nothing, so the mutex was left as it is.
+
+**Redundant state** (a temporary census in BasicRHI, steady perf-taa, a frame). 625 pipeline binds, 138 of them of the pipeline the list
+had bound already (22%). 227 pass begins: 66 with the same attachments as the list's previous pass, 57 of those adjacent with every
+attachment loaded and no barrier or dispatch between (candidates for one pass; approximate, copies and clears between were not counted).
+Viewports are set about once a frame outside the pass begins (all redundant, negligible). BasicRHI now skips a bind of the bound pipeline
+(not in adopted lists; `vkCmdExecuteCommands` and a reset clear it, so no skip crosses a secondary list). `BindPipeline` went from 0.25 to
+0.22-0.25 ms a frame and the submission thread's busy time from 2.75-2.86 to 2.44-2.83 ms, within the spread. Merging adjacent passes
+needs ORG to see them as one pass; not done.
+
+**The 16.3 `vkQueueSubmit` a frame for 12.3 tickets** (the submission census): 12.3 batch submissions (98 lists; apart from the one
+before because of another queue 1.0, the same ticket 3.4, a new wait after an earlier ticket 2.4, waits covered 5.5), 2.0 upload
+submissions (a ticket's uploads on the graphics queue, apart from its own batch), 1.0 leading upload (another queue), and the native
+present's copy (1.0). The uploads could ride their ticket's first graphics batch as its leading lists; not done.
+
+### Checks (2026-11-16, the present's wait)
+
+Final build, one background run each unless noted: native-quick, native-d3d12-quick, native-river, native-upscalers, native-interior,
+first and third person, guest-quick, the guest frozen-world run: passed, 0 tap errors, no `NoPass`, 0 recipe findings, 0 frames with a
+stage absent after it first ran. The frozen-world run: 7 in a row passed (6 on the build with the fix, 1 on the final build). The
+loading-thread run twice: passed, no copy-queue stall. native-validation three times: two passed with only the known 20
+`VUID-vkCmdDraw-None-09600` and back-buffer layout lines. One stopped at its load (`load recent`) on a new mismatch: a menu HDR downsample
+draw outside every CS step in a loading-screen frame, while the stages switched in after the load's structural rebuild, just after
+Streamline logged barriers whose access masks its stage masks do not support. Not reproduced, not investigated; of this pass's changes
+only the bind skip and the pace order run in loading frames. The steady scene: 0 recordings, 0 switches, 0 key builds, no graph build
+in the window. ORG's unit tests pass, run one at a time (HeadlessBenchmark not run).
