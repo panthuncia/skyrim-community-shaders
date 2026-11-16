@@ -702,6 +702,22 @@ namespace RenderGraph::Engine::Flush
 					chain += fmt::format(" <- {}", Tripwire::DescribeCaller(frame));
 			if (key.viaCs)
 				chain += fmt::format(" (via CS {})", Tripwire::DescribeCaller(key.viaCs));
+			// The game frames further up, and what the draw would have drawn (its technique and target), for the diagnosis.
+			{
+				std::array<void*, 48> frames{};
+				const USHORT count = RtlCaptureStackBackTrace(0, static_cast<DWORD>(frames.size()), frames.data(), nullptr);
+				std::size_t game = 0;
+				std::string further;
+				for (USHORT i = 0; i < count; ++i)
+					if (Tripwire::IsGameCode(frames[i]) && game++ >= 4 && game <= 12)
+						further += fmt::format(" <- {}", Tripwire::DescribeCaller(frames[i]));
+				if (!further.empty())
+					chain += fmt::format("; further up{}", further);
+			}
+			Technique(key);
+			View(key);
+			chain += fmt::format("; technique {} (type {}, vertex {:#x}, pixel {:#x}), target {} depth {}", key.shader ? key.shader : "none", key.shaderType, key.vertex,
+				key.pixel, key.target, key.depth);
 			const auto& config = GetConfig();
 			logger::error(
 				"[ORG] flush latch: engine {} in {} at {}{} reached D3D11 with the engine's state latched and nobody vouched for it "

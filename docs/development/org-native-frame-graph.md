@@ -4517,3 +4517,59 @@ capture points later; the first of a session waits for its source's build, 9 to 
 UI stage) and the pause menu's (the frozen kind). The UI stage gains one pass (the copy), which skips at execution in frames without a
 capture.
 
+### The main menu's emblem: found, not fixed
+
+The emblem (the main menu's 3D logo) is missing in native, and since the menu scenes' frame inputs the mist is missing too (both are drawn
+in guest; earlier native shots, `d1mm`, show the mist and the emblem as a black silhouette over it). What the runs show:
+- The menu scene's colour batch is latched whole every main-menu frame: one Lighting draw (8991 indices, three targets, the emblem) and
+  one Effect draw (600 indices, the mist). The scene's clears go to the menu UI stage's places as expected (kMAIN at the start and scene
+  places, the shadow map slice and the main depth at the scene place, the main depth again after the composite). The composite is the
+  HDR effect from kMAIN into the framebuffer (`UI3DSceneManager::Render`'s end-of-frame call).
+- One engine draw a main-menu frame reaches D3D11 with nobody to draw it and is skipped (the flush latch's line, now with the caller chain
+  further up and the draw's technique): a Utility depth-only draw into depth target 4 (the shadow maps), from AE 52729, which
+  `UI3DSceneManager::Render` (AE 52727 + 0x2b2) calls to render the menu scene's shadow-casting lights (their vtable + 0x48 and + 0x50,
+  down to BSBatchRenderer). So the scene's shadow map is never drawn in native mode, and the emblem is shaded against a shadow map that
+  holds only the scene place's clear.
+- The main menu frame has no depth batch and no shadow mask run (`UI3DSceneManager::Render`'s depth StartAccumulating block does not run
+  for this scheme), unlike the loading screen's.
+Not done: drawing the menu scene's shadow casters (a client for AE 52729's shadow light render, like the depth batch's), and finding why the
+mist's Effect draw shows nothing since the frame-input change. Both need a frame capture to confirm, which the background runs cannot
+take.
+
+### Not done in this pass
+
+- **HDR output in the UI stage.** No harness setting or switch enables HDR without an HDR display (only the user's settings file, which the
+  runs must not change), so it could only be built, not tested, in the present path; and the back buffer copy binds the swap chain's image
+  of the frame, which a kept recording cannot bind. Left on the HDROutput anchor's own ticket (HDR is off in every test configuration). With
+  HDR on, the capture now comes before HDR output (the capture point moved to the UI stages' commit); a capture of HDR's composite then
+  copies the previous frame's.
+- **A menu's scene over the live world** (inventory item model, local map): still the EngineDraws and ImageSpace anchors' own epochs.
+- **Deleting per-anchor epochs and `CanRun`/`RequestJoin`**: not started; the list below is what is still reachable.
+- **The shadow clears' churn** (older than this pass): depth target 10 (the precipitation occlusion map) is a new texture again and again
+  (84 to 794 times a run), each time the shadow clear group registers again and its anchor's graph is rebuilt (not staged), which starts a
+  DCLF re-entry hold. The validation tour's load once ran out of its 120 s under 19 such holds.
+- **DCLF's first load hold** ends with "no progress" after about 7.5 s plus one 5 s re-entry hold, in every native run (older than this
+  pass).
+
+### What is still a ticket at a hook, by frame kind (2026-11-16)
+
+- **World**: none in a steady frame but the stages and Drawcall Limit Fix's graphs (start, shadow view, pre-depth, Z-prepass, pre-main,
+  main opaque, deferred+water, forward, sun, first person, post, UI). Outside steady frames: the sun's query and the shadow and frame
+  clears in world frames before Drawcall Limit Fix draws and during its load holds (the frame clear about one a frame then); a menu's scene
+  over the live world (EngineDraws, ImageSpace); blood and precipitation (EngineDraws); HDR output when on; frame generation's hudless copy
+  when on (not exercised).
+- **Menu over a frozen world**: none; the menu UI stage is the frame's one ticket. The capture frame is a world frame.
+- **Main menu, loading screen**: none (the menu UI stage), but the main depth clear of frame 0, before the first Begin.
+- **Bink movie**: none (the UI stage).
+
+### What of the old native paths is still reachable (2026-11-16)
+
+- Per-anchor epochs: EngineDraws (blood, precipitation, a menu scene over the live world), ImageSpace (the menu composites in a world frame,
+  the face tint at a load), EngineShadowClear and EngineFrameClear (world frames before Drawcall Limit Fix draws, its load holds, frame 0,
+  views no place clears), EngineCubeClear (outside world frames), EngineCopy outside the stages' windows, EngineQueries (world frames before
+  Drawcall Limit Fix draws), DecalQueries (registered only when its client is made: not in these sessions), HDROutput (HDR on), Tonemap and
+  FrameGeneration (a menu scene's tonemap, frame generation), MovieTiles (no client). Capture: none in native mode with the UI stages.
+- `CanRun`/`RequestJoin`: the sky clients' and the decal client's setup joins, the menu composites in a world frame (`MenuClientDraws`), the
+  skeleton's group clears (`DrawFor`), the upscaler evaluate's first frames (`FrameAnchors::CanRun` at the Upscale commit).
+- Guest mode keeps every anchor's own epoch, the main ImageSpace client and its manifest, and the D3D11 renderer for displays the graph
+  refuses.

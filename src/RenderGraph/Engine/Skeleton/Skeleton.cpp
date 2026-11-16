@@ -1334,7 +1334,8 @@ namespace RenderGraph::Engine::Skeleton
 			const auto& spec = *found->second;
 			if (spec.view != a_view || spec.texture != TextureOf(a_target)) {
 				if (!std::exchange(group.stale, true))
-					logger::info("[ORG] engine skeleton: {} was made again; the {} clears register again", TargetName(a_target), kGroupNames[IndexOf(a_group)]);
+					logger::info("[ORG] engine skeleton: {} was made again ({}); the {} clears register again", TargetName(a_target),
+						spec.texture != TextureOf(a_target) ? "a new texture" : "the same texture, another view", kGroupNames[IndexOf(a_group)]);
 				return nullptr;
 			}
 			// Setup's build point put the group in its anchor's graph. CanRun is false only on a full ring (an inherent limit) or between
