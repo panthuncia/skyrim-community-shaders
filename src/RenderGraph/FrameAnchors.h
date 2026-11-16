@@ -606,7 +606,7 @@ namespace FrameAnchors
 	 * ticket is taken there. The stage's commit point (its last step) copies the staged values into the slot's copy and submits the one
 	 * ticket. Stages: pre-depth (EarlyPrepass), pre-main (RenderDepth's depth copy to Prepass; CS_ORG_SEGMENT_PREMAIN=0 off), deferred
 	 * and water (DeferredPasses to just before the forward epoch; CS_ORG_SEGMENT_DEFERRED=0 off), and the post chain's two
-	 * (CS_ORG_SEGMENT_POST=0 off): post composites and post end-of-frame, with the chain as CS passes. Guest mode keeps the
+	 * (CS_ORG_SEGMENT_POST=0 off): the post stage, with the chain and the upscaler's evaluate as CS passes. Guest mode keeps the
 	 * anchors' epochs. Any thread.
 	 */
 	bool SegmentsOn();

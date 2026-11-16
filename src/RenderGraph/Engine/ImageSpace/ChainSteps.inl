@@ -75,7 +75,7 @@ struct ChainSteps
 	};
 	std::map<StepKey, Entry> entries;
 	// Per part: each entry's key and group, whether the last build made its pass (set on the build thread), the entry count, and the
-	// part's first row in its stage's rows (the HDR and final parts share the post end-of-frame stage's rows).
+	// part's first row in the post stage's rows (the three parts share them, in order).
 	struct Part
 	{
 		std::array<StepKey, kGateEntries> keys{};
@@ -87,14 +87,26 @@ struct ChainSteps
 	std::array<Part, 3> parts;
 	// Groups a hook found off in the frame's schedule, kept on from then (the next description has them). Render owner.
 	std::array<bool, ChainGroup::kCount> requested{};
-	// The CS-owned targets: the bloom's blur and its scratch, the depth of field's downsample and blur scratch, and TAA's history pair.
+	// The CS-owned targets: the bloom's blur and its scratch, the depth of field's downsample and blur scratch, TAA's history pair, the
+	// get-hit effect's two blur buffers and its blur swap, and the full-screen blur's downsample and its blur scratch.
 	OwnedTarget bloom, bloomSwap, dofDown, dofSwap;
 	std::array<OwnedTarget, 2> taaHistory;
+	OwnedTarget getHitA, getHitB, getHitSwap, fullBlurDown, fullBlurSwap;
+	// The adapted luminance pair (the last luminance level of each parity, in place of the engine's 27 + levels - 1 + 2 * parity): a
+	// history, published (kAdaptedIds) for Drawcall Limit Fix's character light, which reads it in place of the engine's target.
+	std::array<OwnedTarget, 2> adapt;
+	// The blur shaders the engine's blur effects draw (ImageSpaceEffectBlur's HDR flag, +0x95, of effects[9 + radius index]), read at the
+	// registration: true for ISBlurN, false for ISNonHDRBlurN.
+	std::array<bool, 7> blurHdr{};
 	// The running chain (the hooks): inside the composites, inside RenderEndOfFrameEffects, inside its HDR effect, the luminance
 	// level so far there, whether the HDR copy drew, and the frame's plan.
 	bool inComposites = false, inEndOfFrame = false, inHdr = false, copyDrawn = false;
 	std::uint32_t lumLevel = 0;
 	ChainPlan plan;
+	// Inside the full-screen blur (slot 6) or the get-hit effect (slot 7) of RenderEndOfFrameEffects, -1 elsewhere; each effect's draws
+	// so far there.
+	std::int32_t slotScope = -1;
+	std::map<Effects::ImageSpaceEffectEnum, std::uint8_t> slotDraws;
 };
 
 ChainSteps& Chain()
@@ -103,10 +115,10 @@ ChainSteps& Chain()
 	return chain;
 }
 
-/** @brief The stage a chain part's passes are in. */
-Frame::SegmentId SegmentOfPart(std::size_t a_part)
+/** @brief The stage a chain part's passes are in: the post stage holds all three. */
+Frame::SegmentId SegmentOfPart(std::size_t)
 {
-	return a_part == 0 ? Frame::SegmentId::PostComposites : Frame::SegmentId::PostEnd;
+	return Frame::SegmentId::Post;
 }
 
 /** @brief Whether this frame's schedule has a chain group on: any of its passes' rows set, in a stage whose graph holds its client. */
@@ -265,6 +277,205 @@ void PlanEndOfFrame(std::int32_t a_source, std::int32_t a_final)
 		plan.upsample = { .on = true, .in = current, .out = a_final };
 }
 
+/** @brief The adapted luminance pair's published ids (ChainSteps::adapt). */
+constexpr std::array<std::string_view, 2> kAdaptedIds{ "ImageSpace::AdaptedLuminance0", "ImageSpace::AdaptedLuminance1" };
+
+/** @brief The full-screen blur's radius (manager +0x128): the effect's Render picks its blur step from it, and blends below 1. */
+float FullBlurRadius()
+{
+	auto* manager = RE::ImageSpaceManager::GetSingleton();
+	return manager ? *reinterpret_cast<const float*>(reinterpret_cast<std::uintptr_t>(manager) + 0x128) : 0.0f;
+}
+
+/**
+ * @brief The variant of a draw inside the full-screen blur (slot 6) or the get-hit effect (slot 7): which of the effect's draws it is (the
+ * occurrence of its shader in the slot's scope), the slot's input where that draw reads it, its output where it writes it, and whether
+ * the full-screen blur's last draw blends.
+ *
+ * ImageSpaceEffectGetHit (Setup SE 0x141328b80): the input copied into a buffer (ISCopy), blurred twice by effects[10] (an
+ * ImageSpaceEffectBlur of radius 5: a horizontal then a vertical draw each, through a second buffer and the blur swap), then the input
+ * and the blurred buffer drawn into the output (ISDoubleVision). ImageSpaceEffectFullScreenBlur (Setup 0x141329df0, Render 0x14132a370):
+ * the input downsampled (ISHDRDownSample4), blurred by the blur effect of the radius step (effects[9 + step]: horizontal, vertical),
+ * then, below radius 1, the input copied into the output (ISCopy, or ISCopyDynamicFetchDisabled with Legacy Graphics Compatibility's
+ * eleventh step); last the blurred image drawn into the output (ISHDRDownSample4 with the blur's parameters), blended over that copy
+ * below radius 1.
+ */
+std::uint16_t InnerVariant(std::int32_t a_slot, Effects::ImageSpaceEffectEnum a_effect, std::uint32_t a_occurrence, std::int32_t a_in, std::int32_t a_out, bool a_blended)
+{
+	using E = Effects;
+	bool readsIn = false, writesOut = false, blends = false;
+	if (a_slot == 7) {
+		readsIn = a_effect == E::ISCopy || a_effect == E::ISDoubleVision;
+		writesOut = a_effect == E::ISDoubleVision;
+	} else {
+		const bool copy = a_effect == E::ISCopy || a_effect == E::ISCopyDynamicFetchDisabled;
+		readsIn = (a_effect == E::ISHDRDownSample4 && a_occurrence == 0) || copy;
+		writesOut = (a_effect == E::ISHDRDownSample4 && a_occurrence == 1) || copy;
+		blends = a_blended && a_effect == E::ISHDRDownSample4 && a_occurrence == 1;
+	}
+	return static_cast<std::uint16_t>((blends ? 0x8000u : 0u) | (a_occurrence & 7u) << 12 | (readsIn ? static_cast<std::uint32_t>(a_in) & 0x3fu : 0u) << 6 |
+									  (writesOut ? static_cast<std::uint32_t>(a_out) & 0x3fu : 0u));
+}
+
+
+/**
+ * @brief CS_ORG_ADAPT_READBACK=1 (a diagnostic, native mode): each world frame the post stage copies the luminance chain's last input
+ * level and both adapted luminance targets into a readback ring, and CheckChainSteps logs their values five frames later (every 30th
+ * frame), to show the adaptation converging. The ring is outside the graph: written by a copy at the end of the post stage, read on the
+ * CPU once the frame's work has surely completed.
+ */
+struct AdaptReadback
+{
+	static constexpr std::uint32_t kSlots = 8;
+	static constexpr std::uint32_t kEntries = 3;    // the last input level, adapted parity 0, adapted parity 1
+	static constexpr std::uint32_t kEntryBytes = 4096;
+	std::shared_ptr<org::Buffer> buffer;
+	std::array<std::uint64_t, kSlots> frames{};    // the frame each slot holds (render owner)
+	RunSlots<std::uint64_t> runs;                   // the frame a run copies (the final part's commit stores it)
+	std::array<rhi::Format, kEntries> formats{};
+	std::array<std::pair<std::uint32_t, std::uint32_t>, kEntries> sizes{};
+	std::uint64_t logged = 0;
+};
+
+AdaptReadback& Readback()
+{
+	static AdaptReadback readback;
+	return readback;
+}
+
+bool ReadbackOn()
+{
+	static const bool on = Switches::On("CS_ORG_ADAPT_READBACK");
+	return on;
+}
+
+struct ReadbackBindings
+{
+	std::array<org::ResourceBindingToken, AdaptReadback::kEntries> sources{};
+};
+
+struct ReadbackFrame
+{
+	std::shared_ptr<const std::uint64_t> frame;
+};
+
+/** @brief The readback's copy: recorded at execution, into the ring slot of the frame its run belongs to. */
+class ReadbackPass final : public org::TypedRenderGraphPass<ReadbackPass, ReadbackFrame, ReadbackBindings>
+{
+public:
+	explicit ReadbackPass(std::array<FrameAnchors::Texture, AdaptReadback::kEntries> a_sources) : sources(std::move(a_sources)) {}
+
+	ReadbackBindings Declare(org::PassBuilder& a_builder)
+	{
+		a_builder.PreferQueue(org::QueueKind::Graphics);
+		ReadbackBindings bindings{};
+		for (std::size_t i = 0; i < sources.size(); ++i)
+			bindings.sources[i] = a_builder.CopySource(sources[i]);
+		return bindings;
+	}
+
+	void Revision(std::vector<std::uint64_t>&) const {}
+
+	ReadbackFrame Prepare(const ReadbackBindings&, const org::PassPrepareContext&) const { return {}; }
+
+	static bool SkipsAtExecution(const ReadbackBindings&, const ReadbackFrame&, const org::PassRecordContext& a_recording)
+	{
+		return !Readback().runs.Find(a_recording.Run()) || !Readback().buffer;
+	}
+
+	static void Record(const ReadbackBindings& a_bindings, const ReadbackFrame&, org::PassRecordContext& a_recording)
+	{
+		auto& readback = Readback();
+		const auto frame = readback.runs.Take(a_recording.Run());
+		if (!frame || !readback.buffer)
+			return;
+		const auto slot = static_cast<std::uint32_t>(*frame % AdaptReadback::kSlots);
+		for (std::uint32_t i = 0; i < AdaptReadback::kEntries; ++i) {
+			const auto [width, height] = readback.sizes[i];
+			rhi::BufferTextureCopyFootprint copy{};
+			copy.texture = a_recording.Resolve(a_bindings.sources[i]).GetHandle();
+			copy.buffer = readback.buffer->GetAPIResource().GetHandle();
+			copy.mip = 0;
+			copy.arraySlice = 0;
+			copy.footprint = { (static_cast<std::uint64_t>(slot) * AdaptReadback::kEntries + i) * AdaptReadback::kEntryBytes, 256, width, height, 1 };
+			a_recording.Commands().CopyTextureToBuffer(copy);
+		}
+	}
+
+private:
+	std::array<FrameAnchors::Texture, AdaptReadback::kEntries> sources;
+};
+
+/** @brief One texel's first channel as a float, for the formats the luminance chain uses. */
+float ReadTexel(const std::byte* a_texel, rhi::Format a_format)
+{
+	const auto half = [](std::uint16_t a_bits) { return DirectX::PackedVector::XMConvertHalfToFloat(a_bits); };
+	switch (a_format) {
+	case rhi::Format::R11G11B10_Float:
+		{
+			// The red channel: 6 mantissa bits, 5 exponent bits, no sign.
+			const auto bits = *reinterpret_cast<const std::uint32_t*>(a_texel) & 0x7ffu;
+			const auto exponent = static_cast<int>(bits >> 6);
+			const auto mantissa = static_cast<float>(bits & 0x3fu) / 64.0f;
+			if (exponent == 0)
+				return std::ldexp(mantissa, -14);
+			if (exponent == 31)
+				return std::numeric_limits<float>::infinity();
+			return std::ldexp(1.0f + mantissa, exponent - 15);
+		}
+	case rhi::Format::R32_Float:
+	case rhi::Format::R32G32_Float:
+	case rhi::Format::R32G32B32A32_Float:
+		return *reinterpret_cast<const float*>(a_texel);
+	default:
+		return half(*reinterpret_cast<const std::uint16_t*>(a_texel));
+	}
+}
+
+/** @brief The bytes of one texel of a_format (BasicRHI's size; 8 when it does not know the format). */
+std::uint32_t TexelBytes(rhi::Format a_format)
+{
+	const auto bytes = rhi::FormatByteSize(a_format);
+	return bytes ? bytes : 8;
+}
+
+/** @brief At a world frame's Begin: logs the readback of five frames ago, every 30th frame. Render owner. */
+void LogReadback(std::uint64_t a_frame)
+{
+	auto& readback = Readback();
+	if (!ReadbackOn() || !readback.buffer || a_frame < 5 || a_frame - readback.logged < 30)
+		return;
+	const auto frame = a_frame - 5;
+	const auto slot = static_cast<std::uint32_t>(frame % AdaptReadback::kSlots);
+	if (readback.frames[slot] != frame)
+		return;
+	void* mapped = nullptr;
+	readback.buffer->GetAPIResource().Map(&mapped);
+	if (!mapped)
+		return;
+	readback.logged = a_frame;
+	std::array<std::string, AdaptReadback::kEntries> text;
+	for (std::uint32_t i = 0; i < AdaptReadback::kEntries; ++i) {
+		const auto* base = static_cast<const std::byte*>(mapped) + (static_cast<std::uint64_t>(slot) * AdaptReadback::kEntries + i) * AdaptReadback::kEntryBytes;
+		const auto [width, height] = readback.sizes[i];
+		const auto texel = TexelBytes(readback.formats[i]);
+		double sum = 0.0;
+		float least = 1e30f, most = -1e30f;
+		for (std::uint32_t y = 0; y < height; ++y)
+			for (std::uint32_t x = 0; x < width; ++x) {
+				const float value = ReadTexel(base + y * 256 + x * texel, readback.formats[i]);
+				sum += value;
+				least = (std::min)(least, value);
+				most = (std::max)(most, value);
+			}
+		text[i] = fmt::format("mean {:.5g} (min {:.5g}, max {:.5g}, {}x{})", sum / (std::max)(1u, width * height), least, most, width, height);
+	}
+	readback.buffer->GetAPIResource().Unmap(0, 0);
+	logger::info("[ORG] adaptation readback, frame {} (luminance parity {}; formats {} {} {}): last input level {}; adapted 0 {}; adapted 1 {}", frame,
+		Frame::PostChain::LuminanceParity(), static_cast<int>(readback.formats[0]), static_cast<int>(readback.formats[1]), static_cast<int>(readback.formats[2]),
+		text[0], text[1], text[2]);
+}
+
 void RegisterChainSteps();
 
 /**
@@ -296,6 +507,8 @@ void CheckChainSteps()
 	const auto final = FinalSize();
 	constexpr std::uint64_t kRetryFrames = 120;
 	const auto frame = Frame::Driver::Current().frame;
+	if (chain.registered)
+		LogReadback(frame);
 	if (chain.registered && chain.retry && frame - chain.registeredFrame < kRetryFrames)
 		return;
 	if (chain.registered && !chain.retry && chain.width == main.Width && chain.height == main.Height && chain.finalWidth == final.first &&
@@ -347,8 +560,8 @@ void ChainRows(std::size_t a_part, std::array<std::uint64_t, 4>& a_rows)
 }
 
 /**
- * @brief Registers the chain's three clients (the composites at the post composites stage's ImageSpace step; the slots before the
- * tonemap and the HDR effect up to its bloom at the post end-of-frame stage's first ImageSpace step; the tonemap and after at its
+ * @brief Registers the chain's three clients (the composites at the post stage's first ImageSpace step; the slots before the
+ * tonemap and the HDR effect up to its bloom at its second ImageSpace step, after the Upscale anchor; the tonemap and after at its
  * second) for the sizes now. Their passes are a fixed list in the engine's order, with the luminance level count fixed for this size.
  */
 void RegisterChainSteps()
@@ -374,18 +587,46 @@ void RegisterChainSteps()
 	chain.levels = Frame::PostChain::LuminanceLevels();
 	using Lifetime = GraphResources::Lifetime;
 	using T = RE::RENDER_TARGET;
+	// The adapted luminance pair, made like the engine's last level of each parity.
+	bool adapted = chain.levels > 0 && T::kHDR_DOWNSAMPLE1 + static_cast<std::int32_t>(chain.levels) + 1 <= T::kHDR_DOWNSAMPLE13;
+	for (std::uint32_t p = 0; adapted && p < 2; ++p)
+		adapted = MakeOwned(chain.adapt[p], static_cast<T>(T::kHDR_DOWNSAMPLE1 + static_cast<std::int32_t>(chain.levels) - 1 + 2 * static_cast<std::int32_t>(p)),
+			kAdaptedIds[p], Lifetime::History);
+	if (!adapted) {
+		logger::warn("[ORG] ImageSpace: the adapted luminance pair could not be made for {} levels; registered again at a later frame", chain.levels);
+		chain.retry = true;
+		return;
+	}
+	// Published, so Drawcall Limit Fix's graphs can declare a read of it by id (the character light). A new pair rebuilds every graph once.
+	for (const auto& target : chain.adapt)
+		(void)PublishedResources::Publish(*target.texture);
 	if (!MakeOwned(chain.bloom, T::kHDR_BLOOM, "ImageSpace::Bloom", Lifetime::Transient) ||
 		!MakeOwned(chain.bloomSwap, T::kHDR_BLURSWAP, "ImageSpace::BloomSwap", Lifetime::Transient) ||
 		!MakeOwned(chain.dofDown, T::kLDR_DOWNSAMPLE0, "ImageSpace::DofDownsample", Lifetime::Transient) ||
 		!MakeOwned(chain.dofSwap, T::kLDR_BLURSWAP, "ImageSpace::DofBlurSwap", Lifetime::Transient) ||
 		!MakeOwned(chain.taaHistory[0], T::kTEMPORAL_AA_ACCUMULATION_1, "ImageSpace::TAAHistory0", Lifetime::History) ||
-		!MakeOwned(chain.taaHistory[1], T::kTEMPORAL_AA_ACCUMULATION_1, "ImageSpace::TAAHistory1", Lifetime::History)) {
+		!MakeOwned(chain.taaHistory[1], T::kTEMPORAL_AA_ACCUMULATION_1, "ImageSpace::TAAHistory1", Lifetime::History) ||
+		!MakeOwned(chain.getHitA, T::kGETHIT_BUFFER, "ImageSpace::GetHitA", Lifetime::Transient) ||
+		!MakeOwned(chain.getHitB, T::kGETHIT_BUFFER, "ImageSpace::GetHitB", Lifetime::Transient) ||
+		!MakeOwned(chain.getHitSwap, T::kGETHIT_BLURSWAP, "ImageSpace::GetHitSwap", Lifetime::Transient) ||
+		!MakeOwned(chain.fullBlurDown, T::kHDR_BLURSWAP, "ImageSpace::FullBlurDown", Lifetime::Transient) ||
+		!MakeOwned(chain.fullBlurSwap, T::kHDR_DOWNSAMPLE0, "ImageSpace::FullBlurSwap", Lifetime::Transient)) {
 		logger::warn("[ORG] ImageSpace: the post chain's targets could not be made; registered again at a later frame");
 		chain.retry = true;
 		return;
 	}
 
 	using E = Effects;
+	// The blur effects (effects[9] to [15], radius 3 to 15) draw ISBlurN with their HDR flag (+0x95), else ISNonHDRBlurN; none of them is
+	// a bright pass (+0x94).
+	if (auto* manager = RE::ImageSpaceManager::GetSingleton())
+		for (std::uint32_t r = 0; r < 7; ++r) {
+			const auto index = 9 + r;
+			auto* blur = index < manager->effects.free_idx() ? manager->effects[static_cast<std::uint16_t>(index)] : nullptr;
+			chain.blurHdr[r] = !blur || *reinterpret_cast<const bool*>(reinterpret_cast<std::uintptr_t>(blur) + 0x95);
+			if (blur && *reinterpret_cast<const bool*>(reinterpret_cast<std::uintptr_t>(blur) + 0x94))
+				logger::warn("[ORG] ImageSpace: the blur effect of radius {} is a bright pass; the full-screen blur and get-hit passes assume it is not", 3 + 2 * r);
+		}
 	const auto engine = [](std::int32_t a_target, std::uint32_t a_mip = AnchorPasses::kAllMips) {
 		return StepTexture::Engine(a_mip == AnchorPasses::kAllMips ? a_target : WithMip(a_target, a_mip));
 	};
@@ -493,6 +734,83 @@ void RegisterChainSteps()
 		single(a_part, 5, a_ldr, E::ISRadialBlurMedium, "radialblur.medium", kPoint);
 		single(a_part, 5, a_ldr, E::ISRadialBlurHigh, "radialblur.high", kPoint);
 	};
+	constexpr std::array<E::ImageSpaceEffectEnum, 7> kBlurHdr{ E::ISBlur3, E::ISBlur5, E::ISBlur7, E::ISBlur9, E::ISBlur11, E::ISBlur13, E::ISBlur15 };
+	constexpr std::array<E::ImageSpaceEffectEnum, 7> kBlurLdr{ E::ISNonHDRBlur3, E::ISNonHDRBlur5, E::ISNonHDRBlur7, E::ISNonHDRBlur9, E::ISNonHDRBlur11,
+		E::ISNonHDRBlur13, E::ISNonHDRBlur15 };
+	const auto blurOf = [&](std::uint32_t a_radiusIndex) { return chain.blurHdr[a_radiusIndex] ? kBlurHdr[a_radiusIndex] : kBlurLdr[a_radiusIndex]; };
+	// The slot's inputs, and its outputs, in its place.
+	const auto slotIns = [&](bool a_ldr) { return a_ldr ? std::vector<std::int32_t>{ kTemp, kTemp2 } : std::vector<std::int32_t>{ T::kMAIN, T::kMAIN_COPY }; };
+	const auto slotOuts = [&](bool a_ldr) {
+		return a_ldr ? std::vector<std::int32_t>{ kTemp, kTemp2, kFinal } : std::vector<std::int32_t>{ T::kMAIN, T::kMAIN_COPY };
+	};
+	// One draw of a slot effect's inner chain (InnerVariant), its viewport its output's size.
+	const auto inner = [&](std::uint8_t a_part, std::int32_t a_slot, bool a_ldr, E::ImageSpaceEffectEnum a_effect, std::uint32_t a_occurrence, std::int32_t a_in,
+						   std::int32_t a_out, bool a_blended, StepDesc a_desc) {
+		const auto variant = InnerVariant(a_slot, a_effect, a_occurrence, a_in, a_out, a_blended);
+		a_desc.name = fmt::format("{}.{:x}", a_desc.name, variant);
+		add(a_part, SlotGroup(static_cast<std::uint32_t>(a_slot), a_ldr), a_ldr ? WorldScope::LdrSlot : WorldScope::PreSlot, a_effect, variant, std::move(a_desc));
+	};
+	// The get-hit effect (slot 7, InnerVariant): copy, two blurs through CS's buffers, then the double vision of the input and the blur.
+	const auto getHit = [&](std::uint8_t a_part, bool a_ldr) {
+		for (const auto in : slotIns(a_ldr)) {
+			StepDesc d{ .name = fmt::format("gethit.copy.{}", in), .output = owned(chain.getHitA) };
+			d.inputs[0] = engine(in);
+			inner(a_part, 7, a_ldr, E::ISCopy, 0, in, 0, false, std::move(d));
+		}
+		const auto blur = blurOf(1);
+		const std::array<std::pair<const OwnedTarget*, const OwnedTarget*>, 4> kBlurs{ { { &chain.getHitA, &chain.getHitB }, { &chain.getHitB, &chain.getHitSwap },
+			{ &chain.getHitSwap, &chain.getHitB }, { &chain.getHitB, &chain.getHitA } } };
+		for (std::uint32_t k = 0; k < kBlurs.size(); ++k) {
+			StepDesc d{ .name = fmt::format("gethit.blur{}", k), .output = owned(*kBlurs[k].second) };
+			d.inputs[0] = owned(*kBlurs[k].first);
+			inner(a_part, 7, a_ldr, blur, k, 0, 0, false, std::move(d));
+		}
+		for (const auto in : slotIns(a_ldr))
+			for (const auto out : slotOuts(a_ldr)) {
+				if (in == out)
+					continue;
+				StepDesc d{ .name = fmt::format("gethit.doublevision.{}.{}", in, out), .output = engine(out) };
+				d.inputs[0] = engine(in);
+				d.inputs[1] = owned(chain.getHitA);
+				inner(a_part, 7, a_ldr, E::ISDoubleVision, 0, in, out, false, std::move(d));
+			}
+	};
+	// The full-screen blur (slot 6, InnerVariant): downsample, the radius step's two blurs, the copy below radius 1, and the upsample.
+	const auto fullBlur = [&](std::uint8_t a_part, bool a_ldr) {
+		for (const auto in : slotIns(a_ldr)) {
+			StepDesc d{ .name = fmt::format("fullblur.down.{}", in), .output = owned(chain.fullBlurDown) };
+			d.inputs[0] = engine(in);
+			d.samplers[0] = kLinear;
+			inner(a_part, 6, a_ldr, E::ISHDRDownSample4, 0, in, 0, false, std::move(d));
+		}
+		for (std::uint32_t r = 0; r < 7; ++r) {
+			StepDesc h{ .name = fmt::format("fullblur.blur{}.h", r), .output = owned(chain.fullBlurSwap) };
+			h.inputs[0] = owned(chain.fullBlurDown);
+			inner(a_part, 6, a_ldr, blurOf(r), 0, 0, 0, false, std::move(h));
+			StepDesc v{ .name = fmt::format("fullblur.blur{}.v", r), .output = owned(chain.fullBlurDown) };
+			v.inputs[0] = owned(chain.fullBlurSwap);
+			inner(a_part, 6, a_ldr, blurOf(r), 1, 0, 0, false, std::move(v));
+		}
+		for (const auto in : slotIns(a_ldr))
+			for (const auto out : slotOuts(a_ldr)) {
+				if (in == out)
+					continue;
+				// Legacy Graphics Compatibility's 1.7 stage draws this copy with ISCopyDynamicFetchDisabled.
+				for (const auto copy : { E::ISCopy, E::ISCopyDynamicFetchDisabled }) {
+					StepDesc d{ .name = fmt::format("fullblur.copy{}.{}.{}", static_cast<std::uint32_t>(copy), in, out), .output = engine(out) };
+					d.inputs[0] = engine(in);
+					inner(a_part, 6, a_ldr, copy, 0, in, out, false, std::move(d));
+				}
+			}
+		for (const auto out : slotOuts(a_ldr))
+			for (const bool blended : { false, true }) {
+				// Below radius 1 the engine blends with blend mode 1 (RendererShadowState's alpha blend) over the copy.
+				StepDesc d{ .name = fmt::format("fullblur.up.{}{}", out, blended ? ".blend" : ""), .output = engine(out), .blend = PackBlend(blended ? 1 : 0, 0, 2, 0) };
+				d.inputs[0] = owned(chain.fullBlurDown);
+				d.samplers[0] = kLinear;
+				inner(a_part, 6, a_ldr, E::ISHDRDownSample4, 1, 0, out, blended, std::move(d));
+			}
+	};
 
 	// The slots before the tonemap (part 1): the world map (both forms; t1 the main depth), refraction (t1 the refraction normals),
 	// FXAA, the depth of field and the radial blur when usesLDR is off. The full-screen blur, the get-hit effect and slot 4 have no CS
@@ -503,6 +821,8 @@ void RegisterChainSteps()
 	single(1, 2, false, E::ISFXAA, "fxaa", kLinear);
 	dof(1, false);
 	radial(1, false);
+	fullBlur(1, false);
+	getHit(1, false);
 
 	// The copy in the HDR effect's place (effects[34], when the HDR switch 513463 / 391301 is off).
 	for (const auto in : { T::kMAIN, T::kMAIN_COPY })
@@ -538,13 +858,13 @@ void RegisterChainSteps()
 		const auto lastLevel = levels - 1;
 		for (std::uint16_t p = 0; p < 2; ++p) {
 			const auto variant = static_cast<std::uint16_t>(lastLevel | (1u << 8) | (static_cast<std::uint32_t>(p) << 9));
-			StepDesc l{ .name = fmt::format("hdr.luminance{}.p{}", lastLevel, p), .output = engine(lastTarget(p)) };
+			StepDesc l{ .name = fmt::format("hdr.luminance{}.p{}", lastLevel, p), .output = owned(chain.adapt[p]) };
 			l.inputs[0] = engine(levelInput(lastLevel));
 			l.samplers[0] = lastLevel == 0 ? kLinear : kPoint;
 			add(1, ChainGroup::kHdrLum, WorldScope::Hdr, levelEffect(lastLevel), variant, std::move(l));
-			StepDesc a{ .name = fmt::format("hdr.adapt.p{}", p), .output = engine(lastTarget(p)) };
+			StepDesc a{ .name = fmt::format("hdr.adapt.p{}", p), .output = owned(chain.adapt[p]) };
 			a.inputs[0] = engine(levelInput(lastLevel));
-			a.inputs[1] = engine(lastTarget(1 - p));
+			a.inputs[1] = owned(chain.adapt[1 - p]);
 			a.samplers[0] = kLinear;
 			add(1, ChainGroup::kHdrAdapt, WorldScope::Hdr, E::ISHDRDownSample16LightAdapt, variant, std::move(a));
 		}
@@ -557,7 +877,7 @@ void RegisterChainSteps()
 		for (std::uint16_t p = 0; p < 2; ++p) {
 			StepDesc b{ .name = fmt::format("bloom{}.bright.p{}", r, p), .output = owned(chain.bloomSwap) };
 			b.inputs[0] = engine(kDownsample);
-			b.inputs[1] = engine(lastTarget(p));
+			b.inputs[1] = owned(chain.adapt[p]);
 			add(1, group, WorldScope::Hdr, kBright[r], p, std::move(b));
 		}
 		StepDesc d{ .name = fmt::format("bloom{}.blur", r), .output = owned(chain.bloom) };
@@ -574,7 +894,7 @@ void RegisterChainSteps()
 					StepDesc d{ .name = fmt::format("tonemap{}.{}.{}.p{}", fade ? ".fade" : "", static_cast<std::int32_t>(in), out, p), .output = engine(out) };
 					d.inputs[0] = owned(chain.bloom);
 					d.inputs[1] = engine(in);
-					d.inputs[2] = engine(lastTarget(p));
+					d.inputs[2] = owned(chain.adapt[p]);
 					d.samplers[0] = kLinear;
 					d.samplers[2] = kLinear;
 					add(2, fade ? ChainGroup::kTonemapFade : ChainGroup::kTonemap, WorldScope::Tonemap, fade ? E::ISHDRTonemapBlendCinematicFade : E::ISHDRTonemapBlendCinematic,
@@ -608,6 +928,8 @@ void RegisterChainSteps()
 	// The slots after the tonemap (usesLDR): the depth of field and the radial blur.
 	dof(2, true);
 	radial(2, true);
+	fullBlur(2, true);
+	getHit(2, true);
 	// The dynamic-resolution upsample (the helper at manager +0x1f8, 100548) into the final target.
 	for (const auto in : { kTemp, kTemp2 }) {
 		StepDesc d{ .name = fmt::format("upsample.{}", in), .output = engine(kFinal) };
@@ -624,9 +946,17 @@ void RegisterChainSteps()
 		auto& part = chain.parts[p];
 		client.specs.clear();
 		client.batch.clear();
-		// The post end-of-frame stage's two clients share its rows: the final part's start after the HDR part's.
-		part.rowBase = p == 2 ? rowBase : 0;
+		// The three clients share the post stage's rows, in order.
+		part.rowBase = rowBase;
 		std::vector<FrameAnchors::PassDesc> passes;
+		// The adapted luminance pair's first clear, before any pass reads it.
+		if (p == 1)
+			for (std::uint32_t h = 0; h < 2; ++h) {
+				AnchorPasses::Builder builder(Anchor::ImageSpace, client.id, -3 - static_cast<std::int32_t>(h));
+				builder.Add(AnchorPasses::ClearOf(fmt::format("hdr.adapted{}.clear", h), *chain.adapt[h].texture), true);
+				for (auto& pass : builder.Take())
+					passes.push_back(std::move(pass));
+			}
 		// TAA's history pair's first clear, before any pass reads it.
 		if (p == 2)
 			for (std::uint32_t h = 0; h < 2; ++h) {
@@ -671,24 +1001,63 @@ void RegisterChainSteps()
 				.row = static_cast<std::int16_t>(part.rowBase + entry) });
 			client.specs.push_back(std::move(spec));
 		}
-		if (p == 1)
-			rowBase = part.count;
+		rowBase += part.count;
 		FrameAnchors::ClientDesc desc{};
 		desc.id = client.id;
 		desc.passes = std::move(passes);
 		desc.sharedConstants = true;
 		desc.gates = { client.gate };
+		// CS_ORG_ADAPT_READBACK: the readback's copy, last in the stage.
+		if (p == 2 && ReadbackOn() && levels > 1) {
+			auto& readback = Readback();
+			if (!readback.buffer) {
+				readback.buffer = org::Buffer::CreateShared(rhi::HeapType::Readback, AdaptReadback::kSlots * AdaptReadback::kEntries * AdaptReadback::kEntryBytes);
+				if (readback.buffer)
+					readback.buffer->SetName("ImageSpace::AdaptReadback");
+			}
+			const auto inputLevel = levelInput(levels - 1);
+			static REL::Relocation<const RE::BSGraphics::RenderTargetManager*> manager{ REL::RelocationID(524970, 411451) };
+			const auto& input = manager.get()->renderTargetData[inputLevel];
+			readback.sizes = { std::pair{ input.width, input.height }, std::pair{ chain.adapt[0].texture->Desc().Width, chain.adapt[0].texture->Desc().Height },
+				std::pair{ chain.adapt[1].texture->Desc().Width, chain.adapt[1].texture->Desc().Height } };
+			readback.formats = { RtvFormatOf(inputLevel, ImportOf(inputLevel)), chain.adapt[0].format, chain.adapt[1].format };
+			std::array<FrameAnchors::Texture, AdaptReadback::kEntries> sources{ FrameAnchors::EngineTarget(static_cast<std::uint32_t>(inputLevel)), AnchorPasses::TextureOf(*chain.adapt[0].texture), AnchorPasses::TextureOf(*chain.adapt[1].texture) };
+			bool fits = readback.buffer != nullptr;
+			for (const auto& [width, height] : readback.sizes)
+				fits = fits && width * 16 <= 256 && height * 256 <= AdaptReadback::kEntryBytes;
+			if (fits) {
+				for (auto& source : sources)
+					if (!source)
+						fits = false;
+			}
+			if (fits)
+				desc.passes.push_back({ .name = fmt::format("{}.adapt-readback", client.id),
+					.anchor = Anchor::ImageSpace,
+					.order = 1 << 20,
+					.kind = FrameAnchors::PassKind::Compute,
+					.make = [sources] { return std::static_pointer_cast<org::RenderPass>(std::make_shared<ReadbackPass>(sources)); },
+					.atExecution = true });
+			else
+				logger::warn("[ORG] ImageSpace: the adaptation readback does not fit its ring; it is off");
+		}
 		if (p == 1)
 			desc.registerResources = [](org::RenderGraph& a_graph) {
 				const auto& current = Chain();
-				for (const auto* target : { &current.bloom, &current.bloomSwap, &current.dofDown, &current.dofSwap, &current.taaHistory[0], &current.taaHistory[1] })
+				for (const auto* target : { &current.bloom, &current.bloomSwap, &current.dofDown, &current.dofSwap, &current.taaHistory[0], &current.taaHistory[1],
+					 &current.getHitA, &current.getHitB, &current.getHitSwap, &current.fullBlurDown, &current.fullBlurSwap, &current.adapt[0], &current.adapt[1] })
 					if (*target)
 						target->texture->Register(a_graph);
 			};
 		desc.active = [partIndex] { return !IS().post[partIndex].batch.empty(); };
-		desc.commit = [partIndex](const FrameAnchors::Point&) {
+		desc.commit = [partIndex, p](const FrameAnchors::Point&) {
 			auto& current = IS().post[partIndex];
 			CommitBatch(current.batch, *current.latch, *current.gate);
+			// CS_ORG_ADAPT_READBACK: the frame this run's copy belongs to.
+			if (p == 2 && ReadbackOn() && Readback().buffer) {
+				const auto frame = Frame::Driver::Current().frame;
+				Readback().frames[frame % AdaptReadback::kSlots] = frame;
+				Readback().runs.Store(RenderGraphRuntime::Get().Host()->CurrentRun(), std::make_shared<const std::uint64_t>(frame));
+			}
 		};
 		desc.executed = [](const FrameAnchors::Point&) { IS().executed = true; };
 		desc.declared = [] { return Frame::PostChain::On(); };
@@ -740,6 +1109,16 @@ bool ChainKeyOf(Effects::ImageSpaceEffectEnum a_effect, StepKey& a_key, std::uin
 	}
 	if (!chain.inEndOfFrame || !plan.valid)
 		return false;
+	if (chain.slotScope >= 0) {
+		const auto slot = chain.slotScope;
+		const auto& step = plan.slots[static_cast<std::size_t>(slot)];
+		const bool ldr = SlotIsLdr(static_cast<std::uint32_t>(slot));
+		a_group = SlotGroup(static_cast<std::uint32_t>(slot), ldr);
+		a_planned = step.on;
+		const auto occurrence = chain.slotDraws[a_effect]++;
+		a_key = { ldr ? WorldScope::LdrSlot : WorldScope::PreSlot, a_effect, InnerVariant(slot, a_effect, occurrence, step.in, step.out, slot == 6 && FullBlurRadius() < 1.0f) };
+		return true;
+	}
 	const auto parity = static_cast<std::uint16_t>(Frame::PostChain::LuminanceParity());
 	if (chain.inHdr) {
 		switch (a_effect) {
@@ -834,7 +1213,7 @@ bool TakeChainStep(std::size_t a_effect, bool a_compute, std::array<std::uint32_
 	auto& state = IS();
 	auto& chain = Chain();
 	const auto id = kEffects[a_effect].id;
-	const auto segment = chain.inEndOfFrame ? Frame::SegmentId::PostEnd : Frame::SegmentId::PostComposites;
+	const auto segment = Frame::SegmentId::Post;
 	StepKey key{};
 	std::uint8_t group = 0;
 	bool planned = true;
@@ -889,8 +1268,13 @@ struct ChainCompositesGuard
 	}
 	~ChainCompositesGuard()
 	{
-		if (active)
-			Chain().inComposites = false;
+		if (!active)
+			return;
+		Chain().inComposites = false;
+		// The composites' step is tapped here, before the PostProcessing and Upscale anchors' steps that follow it in the post stage. A
+		// scope still open around the composites (so LeaveScope did not flush) would otherwise tap it after them, past its step.
+		if (!IS().post[static_cast<std::size_t>(PostPart::Composites)].batch.empty())
+			Flush();
 	}
 	bool active = false;
 };
@@ -912,3 +1296,51 @@ struct ChainHdrGuard
 	}
 	bool active = false;
 };
+
+/**
+ * @brief The full-screen blur's and the get-hit effect's Render hooks (their vtables' Render, ImageSpaceEffect slot 1): inside the world
+ * chain's end-of-frame effects, their draws are the slot's inner steps (InnerVariant), counted per shader.
+ */
+struct ChainSlotGuard
+{
+	explicit ChainSlotGuard(std::int32_t a_slot) : active(Chain().inEndOfFrame && !Chain().inHdr)
+	{
+		if (active) {
+			Chain().slotScope = a_slot;
+			Chain().slotDraws.clear();
+		}
+	}
+	~ChainSlotGuard()
+	{
+		if (active)
+			Chain().slotScope = -1;
+	}
+	bool active = false;
+};
+
+/**
+ * @brief The CS target that stands for the engine's adapted luminance target a_view is a view of (the last luminance level of either
+ * parity), or empty when CS does not own the pair or a_view is another target. Render owner.
+ */
+std::string_view AdaptedLuminanceIdOf(const ID3D11ShaderResourceView* a_view)
+{
+	const auto& chain = Chain();
+	if (!chain.on || !chain.registered || !chain.adapt[0] || !chain.adapt[1] || !a_view || chain.levels == 0)
+		return {};
+	auto* view = Tripwire::Unwrap(const_cast<ID3D11ShaderResourceView*>(a_view));
+	if (!view)
+		view = const_cast<ID3D11ShaderResourceView*>(a_view);
+	const auto& targets = globals::game::renderer->GetRuntimeData().renderTargets;
+	for (std::uint32_t p = 0; p < 2; ++p) {
+		const auto index = RE::RENDER_TARGET::kHDR_DOWNSAMPLE1 + static_cast<std::int32_t>(chain.levels) - 1 + 2 * static_cast<std::int32_t>(p);
+		if (index > RE::RENDER_TARGET::kHDR_DOWNSAMPLE13)
+			return {};
+		auto* engine = targets[index].SRV;
+		auto* engineView = Tripwire::Unwrap(engine);
+		if (!engineView)
+			engineView = engine;
+		if (engineView && engineView == view)
+			return kAdaptedIds[p];
+	}
+	return {};
+}

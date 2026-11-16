@@ -99,6 +99,16 @@ namespace RenderGraph::Engine::ImageSpace
 	 */
 	void OnEndOfFrame(bool a_begin, std::int32_t a_source, std::int32_t a_final);
 
+	/**
+	 * @brief The published id of the CS target that stands for the engine's adapted luminance target a_view is a view of (the post chain
+	 * draws the luminance chain's last level of each parity into a CS pair, "ImageSpace::AdaptedLuminance0/1"), or empty when CS does
+	 * not own the pair or a_view is another target. Drawcall Limit Fix's character light reads CS's target through it. Render owner.
+	 */
+	std::string_view AdaptedLuminanceOf(const ID3D11ShaderResourceView* a_view);
+
+	/** @brief The adapted luminance pair's published ids (AdaptedLuminanceOf), for a reader's declarations. */
+	std::span<const std::string_view> AdaptedLuminanceIds();
+
 	/** @brief One status line (passes, manifest, taken and refused draws). Main thread. */
 	std::string Status();
 }

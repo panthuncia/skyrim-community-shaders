@@ -212,7 +212,7 @@ def dclf_rows(root):
 def source_names(root):
     names, excluded = set(), set()
     for path in (root / "src").rglob("*"):
-        if path.suffix in (".cpp", ".h", ".hpp"):
+        if path.suffix in (".cpp", ".h", ".hpp", ".inl"):
             text = path.read_text(encoding="utf-8", errors="replace")
             # Shader define names are not switches.
             defines = set(re.findall(r'GetShaderDefineName\(\)[^{]*\{\s*return\s*"([A-Z0-9_]+)"', text))

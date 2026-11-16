@@ -45,7 +45,7 @@ namespace RenderGraph::Frame::Recipes
 		Deferred,     // CS: deferred+water: the deferred passes and the composite, the water mask, the RenderWorld scopes, the water and its blend
 		Forward,      // Drawcall Limit Fix's forward pass, with the frame-group clears' ticket and the sun queries around it
 		FirstPerson,  // Drawcall Limit Fix's first-person colour
-		Post,         // CS: the post chain's two table-drawn stages around the upscaler
+		Post,         // CS: the post chain, the upscaler's evaluate and the depth upscale, one stage
 		Ui,           // the interface, the present, the overlay and the capture (tickets until the UI stage is built)
 		Count
 	};

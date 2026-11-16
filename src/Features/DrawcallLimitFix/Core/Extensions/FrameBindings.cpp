@@ -5,6 +5,7 @@
 #include "Features/DrawcallLimitFix/Core/Extensions/FrameBindings.h"
 #include "Features/DrawcallLimitFix/Core/Extensions/Registry.h"
 #include "RenderGraph/DxvkImageImport.h"
+#include "RenderGraph/Engine/ImageSpace/ImageSpace.h"
 #include "RenderGraph/Engine/Targets/EngineTargets.h"
 #include "RenderGraph/Engine/Tripwire/Tripwire.h"
 #include "RenderGraph/FrameAnchors.h"
@@ -253,10 +254,34 @@ namespace DCLF::Extensions
 	std::span<const std::string_view> CharacterLightGraphTextureIds()
 	{
 		using Target = RE::RENDER_TARGET;
-		static const auto s_ids = EngineTargetIds({ Target::kHDR_DOWNSAMPLE0, Target::kHDR_DOWNSAMPLE1, Target::kHDR_DOWNSAMPLE2, Target::kHDR_DOWNSAMPLE3,
-			Target::kHDR_DOWNSAMPLE4, Target::kHDR_DOWNSAMPLE5, Target::kHDR_DOWNSAMPLE6, Target::kHDR_DOWNSAMPLE7, Target::kHDR_DOWNSAMPLE8,
-			Target::kHDR_DOWNSAMPLE9, Target::kHDR_DOWNSAMPLE10, Target::kHDR_DOWNSAMPLE11, Target::kHDR_DOWNSAMPLE12, Target::kHDR_DOWNSAMPLE13 });
+		static const auto s_ids = [] {
+			auto ids = EngineTargetIds({ Target::kHDR_DOWNSAMPLE0, Target::kHDR_DOWNSAMPLE1, Target::kHDR_DOWNSAMPLE2, Target::kHDR_DOWNSAMPLE3,
+				Target::kHDR_DOWNSAMPLE4, Target::kHDR_DOWNSAMPLE5, Target::kHDR_DOWNSAMPLE6, Target::kHDR_DOWNSAMPLE7, Target::kHDR_DOWNSAMPLE8,
+				Target::kHDR_DOWNSAMPLE9, Target::kHDR_DOWNSAMPLE10, Target::kHDR_DOWNSAMPLE11, Target::kHDR_DOWNSAMPLE12, Target::kHDR_DOWNSAMPLE13 });
+			// CS's adapted luminance pair, which the post chain draws in place of the engine's last luminance level (native mode).
+			for (const auto id : RenderGraph::Engine::ImageSpace::AdaptedLuminanceIds())
+				ids.push_back(id);
+			return ids;
+		}();
 		return s_ids;
+	}
+
+	bool AdaptedLuminanceTextureIndex(GraphTextureReader a_reader, std::uint32_t a_register, ID3D11ShaderResourceView* a_view, std::uint32_t& a_index)
+	{
+		const auto id = RenderGraph::Engine::ImageSpace::AdaptedLuminanceOf(a_view);
+		if (id.empty())
+			return false;
+		// Only a read a graph build declared (DeclareGraphTextures): its order against the post stage's write is then the graph's.
+		const auto declared = s_declared.load(std::memory_order_acquire);
+		if (!declared || std::ranges::find(*declared, id) == declared->end() || !PublishedResources::IsPublished(id))
+			return false;
+		RenderGraph::UndeclaredAccess::DeclaredIndexScope declaredIndex;
+		if (!PublishedResources::ShaderResourceIndex(id, a_index))
+			return false;
+		static std::array<bool, static_cast<std::size_t>(GraphTextureReader::Count)> s_logged{};
+		if (!std::exchange(s_logged[static_cast<std::size_t>(a_reader)], true))
+			logger::info("[DCLF] {} reads CS's adapted luminance '{}' in place of the engine's target", GraphTextureWho(a_reader, a_register, "character light"), id);
+		return true;
 	}
 
 	std::span<const std::string_view> ShadowMaskGraphTextureIds()

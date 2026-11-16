@@ -14,7 +14,7 @@
  * - at Renderer::Begin, the chain's structure (PostFields): which effects the post stage has on for the frame;
  * - the RenderWorld scopes' state (WorldFields) for the deferred+water stage's description;
  * - the chain's two entries (detoured): RenderWorldPostProcess, which brackets the world chain, and RenderEndOfFrameEffects, where
- *   ImageSpace plans the chain's targets and whose return ends the post end-of-frame stage.
+ *   ImageSpace plans the chain's targets and whose return ends the post stage.
  */
 namespace RenderGraph::Frame::PostChain
 {

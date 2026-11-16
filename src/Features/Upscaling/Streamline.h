@@ -7,7 +7,7 @@
 
 // Streamline and community upscalers. DXVK mode: on DXVK's Vulkan device through full interposition. Native mode: on the native
 // device (Vulkan or D3D12), which BasicRHI creates through Streamline's manual hooking (DeviceCreateInfo::streamlineHost), with the
-// evaluates as the native context's external work (RenderGraph::Engine::Native::RunExternal).
+// evaluate as a pass of the post stage (Upscaling's evaluate pass, ORGUpscaling::QueueEvaluate).
 
 class Streamline
 {

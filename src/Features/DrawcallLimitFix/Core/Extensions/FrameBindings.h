@@ -169,6 +169,13 @@ namespace DCLF::Extensions
 	 */
 	std::span<const std::string_view> CharacterLightGraphTextureIds();
 
+	/**
+	 * @brief The character light's read of the adapted luminance: when a_view is the engine's adapted luminance target and CS's post chain
+	 * draws that level into its own pair (ImageSpace::AdaptedLuminanceOf), the bindless index of CS's target of the same parity, if a graph
+	 * build declared it. False otherwise: the caller tries the engine's target (EngineTargetTextureIndex).
+	 */
+	bool AdaptedLuminanceTextureIndex(GraphTextureReader a_reader, std::uint32_t a_register, ID3D11ShaderResourceView* a_view, std::uint32_t& a_index);
+
 	/** @brief The published id of the engine's shadow mask (kSHADOW_MASK), which grass reads from its draw row. */
 	std::span<const std::string_view> ShadowMaskGraphTextureIds();
 

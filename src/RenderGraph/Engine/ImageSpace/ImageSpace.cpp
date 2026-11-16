@@ -44,6 +44,8 @@ bool RenderGraph::Engine::ImageSpace::Requested()
 
 #	include <OpenRenderGraph/GraphHost.h>
 #	include <Render/LatchBlock.h>
+#	include <RenderPasses/Base/TypedRenderGraphPass.h>
+#	include <Resources/Buffers/Buffer.h>
 #	include <Resources/ExternalTextureResource.h>
 #	include <rhi_helpers.h>
 
@@ -61,6 +63,8 @@ bool RenderGraph::Engine::ImageSpace::Requested()
 #	include <optional>
 #	include <set>
 #	include <span>
+
+#	include <DirectXPackedVector.h>
 #	include <stdexcept>
 #	include <string_view>
 #	include <tuple>
@@ -2941,9 +2945,9 @@ namespace RenderGraph::Engine::ImageSpace
 		}
 
 		/**
-		 * @brief The CS stages' ImageSpace clients: the post chain's three (ChainSteps.inl: the composites at the post composites stage,
-		 * the slots before the tonemap and the HDR effect up to its bloom, then the tonemap and after, either side of the post end-of-frame
-		 * stage's Tonemap step) and the deferred+water stage's two (WorldSteps.inl).
+		 * @brief The CS stages' ImageSpace clients: the post chain's three (ChainSteps.inl: the composites, the slots before the tonemap and
+		 * the HDR effect up to its bloom, then the tonemap and after, either side of the post stage's Tonemap step; all three in the post
+		 * stage) and the deferred+water stage's two (WorldSteps.inl).
 		 */
 		enum class PostPart : std::uint8_t
 		{
@@ -3562,6 +3566,21 @@ namespace RenderGraph::Engine::ImageSpace
 			static inline REL::Relocation<decltype(thunk)> func;
 		};
 
+		/**
+		 * @brief ImageSpaceEffectFullScreenBlur's and ImageSpaceEffectGetHit's Render (their vtables' slot 1; the get-hit effect uses the base
+		 * ImageSpaceEffect::Render): their draws inside the world chain are the slot's inner steps (ChainSlotGuard).
+		 */
+		template <std::int32_t Slot>
+		struct SlotEffectRender
+		{
+			static void thunk(void* a_effect, void* a_quad, void* a_param)
+			{
+				const ChainSlotGuard chain(Slot);
+				func(a_effect, a_quad, a_param);
+			}
+			static inline REL::Relocation<decltype(thunk)> func;
+		};
+
 		/** @brief ImageSpaceManager::RenderPreTonemapComposites (99024 / 105675): SIL, the lens flares, the VL / lens flare composite. */
 		struct PreTonemapComposites
 		{
@@ -3797,6 +3816,16 @@ namespace RenderGraph::Engine::ImageSpace
 				spdlog::level::err);
 		}
 		state.logShapes = Switches::On("CS_ORG_IMAGESPACE_LOG");
+		// The full-screen blur's and the get-hit effect's Render, wrapped here rather than at Install: Legacy Graphics Compatibility checks
+		// the full-screen blur's original vfunc when it patches it at load, and this wraps its patch.
+		static bool slotHooks = [] {
+			REL::Relocation<std::uintptr_t> fullBlur{ RE::VTABLE_ImageSpaceEffectFullScreenBlur[0] };
+			REL::Relocation<std::uintptr_t> getHit{ RE::VTABLE_ImageSpaceEffectGetHit[0] };
+			SlotEffectRender<6>::func = fullBlur.write_vfunc(1, SlotEffectRender<6>::thunk);
+			SlotEffectRender<7>::func = getHit.write_vfunc(1, SlotEffectRender<7>::thunk);
+			return true;
+		}();
+		(void)slotHooks;
 		state.on = true;
 		std::string selected;
 		for (std::size_t i = 0; i < kEffects.size(); ++i)
@@ -3817,7 +3846,7 @@ namespace RenderGraph::Engine::ImageSpace
 		// The post chain and the RenderWorld scopes are CS passes of the post and deferred+water stages when those exist and the post
 		// chain's hooks run, registered at the first world frame (CheckChainSteps, CheckWorldSteps).
 		const auto epochs = FrameAnchors::SegmentEpochs();
-		if (Frame::PostChain::On() && std::ranges::find(epochs, RenderGraphRuntime::EpochOf(RenderGraphRuntime::Segment::DeclaredPostEnd)) != epochs.end()) {
+		if (Frame::PostChain::On() && std::ranges::find(epochs, RenderGraphRuntime::EpochOf(RenderGraphRuntime::Segment::DeclaredPost)) != epochs.end()) {
 			for (std::size_t p = 0; p < state.post.size(); ++p) {
 				auto& client = state.post[p];
 				client.id = kPostIds[p];
@@ -3850,6 +3879,16 @@ namespace RenderGraph::Engine::ImageSpace
 		}
 	}
 
+	std::string_view AdaptedLuminanceOf(const ID3D11ShaderResourceView* a_view)
+	{
+		return AdaptedLuminanceIdOf(a_view);
+	}
+
+	std::span<const std::string_view> AdaptedLuminanceIds()
+	{
+		return kAdaptedIds;
+	}
+
 	std::string Status()
 	{
 		const auto& state = IS();
@@ -3872,6 +3911,8 @@ namespace RenderGraph::Engine::ImageSpace
 	void Reserve() {}
 	void Setup() {}
 	void OnEndOfFrame(bool, std::int32_t, std::int32_t) {}
+	std::string_view AdaptedLuminanceOf(const ID3D11ShaderResourceView*) { return {}; }
+	std::span<const std::string_view> AdaptedLuminanceIds() { return {}; }
 	std::string Status() { return "ImageSpace: no render graph in this build"; }
 }
 

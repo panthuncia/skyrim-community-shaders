@@ -9,7 +9,9 @@
 #	include "Features/Upscaling.h"
 #	include "Globals.h"
 #	include "RenderGraph/AnchorPasses.h"
+#	include "RenderGraph/Backend.h"
 #	include "RenderGraph/FrameAnchors.h"
+#	include "RenderGraph/FrameStaging.h"
 #	include "RenderGraph/GraphResources.h"
 #	include "RenderGraph/RasterProgram.h"
 #	include "RenderGraph/RenderGraphRuntime.h"
@@ -27,6 +29,7 @@
 
 #	include <array>
 #	include <map>
+#	include <mutex>
 #	include <utility>
 #	include <vector>
 
@@ -47,6 +50,7 @@ namespace
 	// What a frame queues for the Upscale anchor.
 	constexpr std::uint32_t kCopyToMain = 1u << 0;
 	constexpr std::uint32_t kDepthUpscale = 1u << 1;
+	constexpr std::uint32_t kEvaluate = 1u << 2;
 
 	// The Upscale client's run gate: the copy into kMAIN, and the depth upscale's two draws.
 	constexpr std::uint32_t kCopyEntry = 0;
@@ -104,6 +108,7 @@ namespace
 	{
 		FrameAnchors::Texture main;
 		rhi::Format mainFormat = rhi::Format::Unknown;  // kMAIN's view: the copy's target format
+		FrameAnchors::Texture mainDepth, motion;        // the evaluate's depth and motion vectors (native mode)
 		FrameAnchors::Texture depth, depthCopy;
 		FrameAnchors::Texture refraction, refractionCopy, saoCameraZ;
 		FrameAnchors::Texture underwater, underwaterCopy;
@@ -127,12 +132,22 @@ namespace
 		bool operator==(const DepthFormats&) const = default;
 	};
 
-	/** @brief kMAIN as the copy writes it, with its view's format. A null main when it cannot be imported. */
+	/**
+	 * @brief kMAIN as the copy writes it, with its view's format; in native mode also kMAIN's depth and the motion vectors, which the
+	 * evaluate reads. A null main when it cannot be imported.
+	 */
 	void CurrentMain(DepthInputs& a_inputs)
 	{
-		auto& main = globals::game::renderer->GetRuntimeData().renderTargets[RE::RENDER_TARGETS::kMAIN];
+		auto* renderer = globals::game::renderer;
+		auto& main = renderer->GetRuntimeData().renderTargets[RE::RENDER_TARGETS::kMAIN];
 		a_inputs.main = main.RTV ? FrameAnchors::EngineTarget(static_cast<std::uint32_t>(RE::RENDER_TARGETS::kMAIN)) : nullptr;
 		a_inputs.mainFormat = main.RTV ? FormatOf(main.RTV) : rhi::Format::Unknown;
+		if (!RenderGraph::Engine::Native::Active())
+			return;
+		const auto& depth = renderer->GetDepthStencilData().depthStencils[RE::RENDER_TARGETS_DEPTHSTENCIL::kMAIN];
+		const auto& motion = renderer->GetRuntimeData().renderTargets[RE::RENDER_TARGETS::kMOTION_VECTOR];
+		a_inputs.mainDepth = depth.texture ? FrameAnchors::EngineDepth(static_cast<std::uint32_t>(RE::RENDER_TARGETS_DEPTHSTENCIL::kMAIN)) : nullptr;
+		a_inputs.motion = motion.texture ? FrameAnchors::EngineTarget(static_cast<std::uint32_t>(RE::RENDER_TARGETS::kMOTION_VECTOR)) : nullptr;
 	}
 
 	/**
@@ -191,6 +206,9 @@ namespace
 												 .targets = { { .format = a_format } } });
 	}
 
+	struct EvaluateWork;
+	struct EvaluateShared;
+
 	/** @brief A texture description the graph twins accept: default usage, no CPU access, no misc flags. */
 	D3D11_TEXTURE2D_DESC Sanitized(D3D11_TEXTURE2D_DESC a_desc, UINT a_bindFlags)
 	{
@@ -218,6 +236,9 @@ struct ORGUpscaling::Impl
 	// Render thread: this frame's queued work, and the depth upscale's constants.
 	std::uint32_t queued = 0;
 	Upscaling::JitterCB jitter{};
+	// Native mode: the evaluate pass's work by run (the commit stores this frame's), and this frame's evaluate before the commit.
+	std::shared_ptr<const EvaluateShared> evaluateShared;
+	std::shared_ptr<const EvaluateWork> evaluate;
 
 	// Whether each client is registered, and whether the Upscale client holds the depth upscale's passes.
 	bool registered = false, hudlessRegistered = false;
@@ -299,6 +320,100 @@ namespace
 		std::shared_ptr<const DepthSpec> spec;
 	};
 
+
+	/** @brief One frame's evaluate: the SDK's commands, recorded by the evaluate pass. */
+	struct EvaluateWork
+	{
+		std::string label;
+		ORGUpscaling::EvaluateRecord record;
+	};
+
+	/** @brief What the evaluate pass shares with the render thread: each run's evaluate, stored by the Upscale client's commit. */
+	struct EvaluateShared
+	{
+		RenderGraph::RunSlots<EvaluateWork> runs;
+	};
+
+	struct EvaluateBindings
+	{
+		org::ResourceBindingToken colorIn, colorOut, depth, motion;
+	};
+
+	struct EvaluateFrame
+	{
+		std::shared_ptr<const EvaluateShared> shared;
+	};
+
+	/**
+	 * @brief The upscaler's evaluate (native mode): Streamline's tags and evaluate recorded on this pass's command list, as
+	 * BasicRenderer's UpscalingPass does. Its four images are legacy interop uses (the common state: GENERAL on Vulkan, COMMON on
+	 * D3D12), which is the state the tags name; on D3D12 the output is declared to leave the pass in the common state, as Streamline
+	 * leaves it. Recorded at execution each frame: it reads the run's evaluate, which the Upscale client's commit stored; a run with
+	 * none records only the barriers. The graph's descriptor heaps are bound again after the SDK.
+	 */
+	class EvaluatePass final : public org::TypedRenderGraphPass<EvaluatePass, EvaluateFrame, EvaluateBindings>
+	{
+	public:
+		EvaluatePass(std::shared_ptr<const EvaluateShared> a_shared, DepthInputs a_inputs, std::shared_ptr<org::Resource> a_output) :
+			shared(std::move(a_shared)), inputs(std::move(a_inputs)), output(std::move(a_output)) {}
+
+		EvaluateBindings Declare(org::PassBuilder& a_builder)
+		{
+			a_builder.PreferQueue(org::QueueKind::Graphics);
+			EvaluateBindings bindings{};
+			bindings.colorIn = a_builder.LegacyInteropUse(inputs.main).Resource();
+			bindings.colorOut = a_builder.LegacyInteropUse(output).Resource();
+			bindings.depth = a_builder.LegacyInteropUse(inputs.mainDepth).Resource();
+			bindings.motion = a_builder.LegacyInteropUse(inputs.motion).Resource();
+			if (RenderGraph::Backend::IsD3D12())
+				a_builder.InternalTransition(output, org::ResourceState{ rhi::ResourceAccessType::Common, rhi::ResourceLayout::Common, rhi::ResourceSyncState::All });
+			return bindings;
+		}
+
+		// Recorded at execution: what it records comes from the run's evaluate, so nothing here keeps a recording from being reused.
+		void Revision(std::vector<std::uint64_t>&) const {}
+
+		EvaluateFrame Prepare(const EvaluateBindings&, const org::PassPrepareContext&) const { return { shared }; }
+
+		static bool SkipsAtExecution(const EvaluateBindings&, const EvaluateFrame& a_frame, const org::PassRecordContext& a_recording)
+		{
+			return !a_frame.shared || !a_frame.shared->runs.Find(a_recording.Run());
+		}
+
+		static void Record(const EvaluateBindings& a_bindings, const EvaluateFrame& a_frame, org::PassRecordContext& a_recording)
+		{
+			const auto work = a_frame.shared ? a_frame.shared->runs.Take(a_recording.Run()) : nullptr;
+			if (!work || !work->record)
+				return;
+			const std::array<rhi::Resource, 4> images{ a_recording.Resolve(a_bindings.colorIn), a_recording.Resolve(a_bindings.colorOut),
+				a_recording.Resolve(a_bindings.depth), a_recording.Resolve(a_bindings.motion) };
+			void* nativeList = nullptr;
+			std::vector<RenderGraph::Engine::Native::ExternalImageInfo> infos;
+			std::shared_ptr<const void> views;
+			std::string why;
+			const bool described = RenderGraph::Engine::Native::DescribeForCommands(a_recording.Commands(), images, nativeList, infos, views, why);
+			if (views)
+				a_recording.Retain(std::move(views));
+			if (!described) {
+				static std::once_flag logged;
+				std::call_once(logged, [&] { logger::error("[ORG] Upscaling: {} cannot be recorded ({}); the frame keeps the previous output (logged once)", work->label, why); });
+				return;
+			}
+			const bool evaluated = work->record(nativeList, infos);
+			// Streamline may bind descriptor heaps of its own: the passes after this one read the frame's again.
+			a_recording.RestoreDescriptorHeaps();
+			if (!evaluated) {
+				static std::once_flag logged;
+				std::call_once(logged, [&] { logger::error("[ORG] Upscaling: {} was refused by the SDK; the frame keeps the previous output (logged once)", work->label); });
+			}
+		}
+
+	private:
+		std::shared_ptr<const EvaluateShared> shared;
+		DepthInputs inputs;
+		std::shared_ptr<org::Resource> output;
+	};
+
 	void MarkFailed(const std::shared_ptr<Impl>& a_impl, const char* a_why)
 	{
 		if (!a_impl->failed)
@@ -378,7 +493,20 @@ namespace
 
 		FrameAnchors::ClientDesc client{};
 		client.id = kClientId;
-		client.passes = builder.Take();
+		// Native mode: the evaluate first, recorded at execution each frame (it is not gated: it reads the run's evaluate).
+		if (impl.evaluateShared && impl.upscaled && impl.inputs.main && impl.inputs.mainDepth && impl.inputs.motion) {
+			auto shared = impl.evaluateShared;
+			auto inputs = impl.inputs;
+			auto output = std::static_pointer_cast<org::Resource>(impl.upscaled->Graph());
+			client.passes.push_back({ .name = std::string(kClientId) + ".evaluate",
+				.anchor = FrameAnchors::Anchor::Upscale,
+				.order = kOrderBase - 1,
+				.kind = FrameAnchors::PassKind::Compute,
+				.make = [shared, inputs, output]() -> std::shared_ptr<org::RenderPass> { return std::make_shared<EvaluatePass>(shared, inputs, output); },
+				.atExecution = true });
+		}
+		for (auto& pass : builder.Take())
+			client.passes.push_back(std::move(pass));
 		// The depth upscale's own pass reads the shared constants too, beside the underwater draw the builder saw.
 		client.sharedConstants = depth;
 		client.gates = { impl.upscaleGate };
@@ -391,7 +519,11 @@ namespace
 			const auto impl = weak.lock();
 			if (!impl)
 				return;
-			impl->latch->WriteValue(RenderGraphRuntime::Get().Host()->CurrentRun(), 0, impl->jitter);
+			const auto run = RenderGraphRuntime::Get().Host()->CurrentRun();
+			impl->latch->WriteValue(run, 0, impl->jitter);
+			// The run's evaluate (null: none), for the evaluate pass recorded at execution.
+			if (impl->evaluateShared)
+				impl->evaluateShared->runs.Store(run, (impl->queued & kEvaluate) ? impl->evaluate : nullptr);
 			if (impl->queued & kCopyToMain)
 				impl->upscaleGate->OpenDraw(kCopyEntry);
 			if (impl->queued & kDepthUpscale)
@@ -511,6 +643,8 @@ bool ORGUpscaling::Setup()
 		next->latch = std::make_shared<org::LatchBlock>("cs.upscaling.jitter", static_cast<std::uint32_t>(sizeof(Upscaling::JitterCB)));
 		next->upscaleGate = RenderGraph::RunGate::Create("cs.upscaling.gate", kUpscaleEntries);
 		next->hudlessGate = RenderGraph::RunGate::Create("cs.upscaling.hudless.gate");
+		if (RenderGraph::Engine::Native::Active())
+			next->evaluateShared = std::make_shared<const EvaluateShared>();
 		CurrentDepthInputs(next->inputs, next->formats);
 		if (next->inputs.DepthComplete()) {
 			next->depthProgram = LoadDepthProgram(host->Device(), next->formats);
@@ -634,6 +768,30 @@ const D3D11_TEXTURE2D_DESC* ORGUpscaling::Desc(Target a_target, const D3D11_TEXT
 	return &(a_target == Target::Upscaled ? impl->upscaled : impl->hudless)->Desc();
 }
 
+bool ORGUpscaling::QueueEvaluate(std::string a_label, EvaluateRecord a_record)
+{
+	if (!IsActive() || !impl->upscaled || !impl->evaluateShared)
+		return false;
+	// A new kMAIN, depth or motion target (a resolution change): the client is made again with them.
+	DepthInputs current{};
+	CurrentMain(current);
+	if (!current.main || !current.mainDepth || !current.motion)
+		return false;
+	if (current.main != impl->inputs.main || current.mainFormat != impl->inputs.mainFormat || current.mainDepth != impl->inputs.mainDepth ||
+		current.motion != impl->inputs.motion) {
+		if (!CopyProgram(*impl, current.mainFormat))
+			return false;
+		impl->inputs.main = std::move(current.main);
+		impl->inputs.mainFormat = current.mainFormat;
+		impl->inputs.mainDepth = std::move(current.mainDepth);
+		impl->inputs.motion = std::move(current.motion);
+		UpscaleChanged(impl);
+	}
+	impl->evaluate = std::make_shared<const EvaluateWork>(EvaluateWork{ std::move(a_label), std::move(a_record) });
+	impl->queued |= kEvaluate;
+	return true;
+}
+
 bool ORGUpscaling::QueueCopyToMain()
 {
 	if (!IsActive() || !impl->upscaled)
@@ -663,6 +821,8 @@ bool ORGUpscaling::QueueDepthUpscale(float2 a_jitter, float a_useWideKernel)
 		return false;
 	inputs.main = impl->inputs.main;
 	inputs.mainFormat = impl->inputs.mainFormat;
+	inputs.mainDepth = impl->inputs.mainDepth;
+	inputs.motion = impl->inputs.motion;
 	if (!(inputs == impl->inputs)) {
 		if (!(formats == impl->formats)) {
 			// New engine targets in other formats: the programs follow them, built now.
@@ -706,6 +866,7 @@ void ORGUpscaling::RunUpscale()
 	}
 	(void)FrameAnchors::Run(FrameAnchors::Anchor::Upscale);
 	impl->queued = 0;
+	impl->evaluate.reset();
 }
 
 bool ORGUpscaling::CopyHudless(ID3D11ShaderResourceView* a_source)
@@ -766,6 +927,7 @@ void ORGUpscaling::DestroyTexture(Target) {}
 bool ORGUpscaling::Holds(Target) const { return false; }
 ID3D11Texture2D* ORGUpscaling::Texture(Target, ID3D11Texture2D* a_d3d11) const { return a_d3d11; }
 const D3D11_TEXTURE2D_DESC* ORGUpscaling::Desc(Target, const D3D11_TEXTURE2D_DESC* a_d3d11) const { return a_d3d11; }
+bool ORGUpscaling::QueueEvaluate(std::string, EvaluateRecord) { return false; }
 bool ORGUpscaling::QueueCopyToMain() { return false; }
 bool ORGUpscaling::QueueDepthUpscale(float2, float) { return false; }
 void ORGUpscaling::RunUpscale() {}

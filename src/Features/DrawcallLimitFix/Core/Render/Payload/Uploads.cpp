@@ -432,8 +432,9 @@ namespace DCLF
 			}
 			// The character light's noise is an engine target (an HDR downsample level): the published target, which the colour passes
 			// declare (Draws::DeclareFrameBuffers).
-			if (t == kCharacterLightRegister && Extensions::EngineTargetTextureIndex(Extensions::GraphTextureReader::Colour, t, "character light", view,
-													Extensions::CharacterLightGraphTextureIds(), graphIndex)) {
+			if (t == kCharacterLightRegister && (Extensions::AdaptedLuminanceTextureIndex(Extensions::GraphTextureReader::Colour, t, view, graphIndex) ||
+													Extensions::EngineTargetTextureIndex(Extensions::GraphTextureReader::Colour, t, "character light", view,
+														Extensions::CharacterLightGraphTextureIds(), graphIndex))) {
 				HoldFrameTexture(held.view, held.binding, nullptr, t, 0u, a_commit.bindingOwners);
 				a_frameTextures[t] = graphIndex;
 				continue;

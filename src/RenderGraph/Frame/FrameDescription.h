@@ -40,8 +40,8 @@ namespace RenderGraph::Frame
 		PreDepth,
 		PreMain,
 		Deferred,        // deferred+water: the deferred passes and the composite, the water mask, the RenderWorld scopes, the kMAIN copy, the water and its blend
-		PostComposites,  // S4a: the volumetric lighting, the pre-tonemap composites, the PostProcessing anchor
-		PostEnd,         // S4b: the upscale, the end-of-frame effects with the tonemap, to RenderEndOfFrameEffects' return
+		Post,            // the post stage: the volumetric lighting, the pre-tonemap composites, the upscaler's evaluate and the depth upscale,
+		                 // the end-of-frame effects with the tonemap, to RenderEndOfFrameEffects' return
 		Count
 	};
 	inline constexpr std::uint32_t kSegments = static_cast<std::uint32_t>(SegmentId::Count);

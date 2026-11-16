@@ -31,10 +31,8 @@ namespace RenderGraph::Frame
 			return "pre-main";
 		case SegmentId::Deferred:
 			return "deferred+water";
-		case SegmentId::PostComposites:
-			return "post composites";
-		case SegmentId::PostEnd:
-			return "post end-of-frame";
+		case SegmentId::Post:
+			return "post";
 		default:
 			return "?";
 		}

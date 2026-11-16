@@ -11,7 +11,9 @@
 #	include "../../RenderGraph/Backend.h"
 #	include "../../RenderGraph/Engine/Native/Native.h"
 #endif
+#include "../../RenderGraph/Backend.h"
 #include "../../RenderGraph/RenderGraphRuntime.h"
+#include "ORGUpscaling.h"
 #include "../../RenderGraph/Switches.h"
 #include "../../State.h"
 #include "../../Utils/Game.h"
@@ -1554,118 +1556,106 @@ namespace InCbReadback
 
 #if defined(CS_HAS_RENDER_GRAPH)
 /**
- * @brief Native mode's evaluate: the frame's constants, then the tags and the evaluate on a list of their own, as the native context's
- * external work (Native::RunExternal): in queue order after the graph's work so far, with each image moved into its state by its
- * ledger. The upscaled output's copy into kMAIN is the Upscale anchor's (ORGUpscaling::QueueCopyToMain), which runs after.
+ * @brief Native mode's evaluate: the frame's constants now, then the tags and the evaluate as the evaluate pass at the Upscale anchor
+ * (ORGUpscaling::QueueEvaluate), which records them on its own command list in the post stage, on the thread that records it. The
+ * images are the pass's: kMAIN in, the upscaled texture out, kMAIN's depth and the motion vectors, each in the common state. The
+ * upscaled output's copy into kMAIN is the same anchor's next pass. The result is known only when the pass records: an evaluate the
+ * SDK refuses is logged there, and this frame's output is the previous one.
  */
 static sl::Result cs_EvaluateFeatureNative(sl::Feature a_feature, const sl::ViewportHandle& a_viewport,
 	ID3D11Resource* a_colorIn, ID3D11Resource* a_colorOut, ID3D11Resource* a_depth, ID3D11Resource* a_motionVectors,
 	uint32_t a_renderWidth, uint32_t a_renderHeight, uint32_t a_outputWidth, uint32_t a_outputHeight,
 	float a_jitterX, float a_jitterY, ID3D11Resource* a_hudlessColor, bool* a_outputReady, bool* a_skipped)
 {
-	using RenderGraph::Engine::Native::ExternalImage;
 	using RenderGraph::Engine::Native::ExternalImageInfo;
-	sl::FrameToken* token = RenderFrameToken();
-	if (!token) {
+	const auto skip = [&] {
 		if (a_skipped)
 			*a_skipped = true;
 		return sl::Result::eOk;
-	}
+	};
+	sl::FrameToken* token = RenderFrameToken();
+	if (!token)
+		return skip();
 	static uint32_t s_evalFrameByVp[2] = { UINT32_MAX, UINT32_MAX };
 	const uint32_t vpId = a_viewport;
 	const uint32_t frame = g_sl.renderFrameId.load(std::memory_order_acquire);
-	if (vpId < 2 && s_evalFrameByVp[vpId] == frame) {
-		if (a_skipped)
-			*a_skipped = true;
-		return sl::Result::eOk;
+	if (vpId < 2 && s_evalFrameByVp[vpId] == frame)
+		return skip();
+	// The pass's images are kMAIN, the upscaled texture, kMAIN's depth and the motion vectors: the only evaluate native mode makes.
+	if (!a_colorIn || !a_colorOut || !a_depth || !a_motionVectors || a_hudlessColor) {
+		static std::once_flag logged;
+		std::call_once(logged, [] { logger::error("[Streamline] native mode evaluates only colour, depth and motion vectors without a hudless colour; skipped (logged once)"); });
+		return skip();
 	}
 	sl::Constants consts;
-	if (!cs_BuildConstants(consts, a_outputWidth, a_outputHeight, a_jitterX, a_jitterY)) {
-		if (a_skipped)
-			*a_skipped = true;
-		return sl::Result::eOk;
-	}
+	if (!cs_BuildConstants(consts, a_outputWidth, a_outputHeight, a_jitterX, a_jitterY))
+		return skip();
 	if (const sl::Result constantsRes = g_sl.slSetConstants(consts, *token, a_viewport); constantsRes != sl::Result::eOk) {
 		logger::error("[Streamline] slSetConstants failed for viewport {} (result {})", vpId, static_cast<int>(constantsRes));
 		return constantsRes;
 	}
 
-	const bool haveColor = a_colorIn && a_colorOut;
-	const bool haveHudless = a_hudlessColor != nullptr;
-	// The images in the tags' order: colour in and out, depth, motion vectors, the hudless colour.
-	std::vector<ExternalImage> images;
-	if (haveColor) {
-		images.push_back({ a_colorIn, ExternalImage::Use::Read });
-		images.push_back({ a_colorOut, ExternalImage::Use::Write });
-	}
-	if (!a_depth || !a_motionVectors)
-		return sl::Result::eErrorMissingInputParameter;
-	images.push_back({ a_depth, ExternalImage::Use::Read });
-	images.push_back({ a_motionVectors, ExternalImage::Use::Read });
-	if (haveHudless)
-		images.push_back({ a_hudlessColor, ExternalImage::Use::Read });
-
 	const bool d3d12 = RenderGraph::Backend::IsD3D12();
-	sl::Result evalRes = sl::Result::eErrorNotInitialized;
-	const bool submitted = RenderGraph::Engine::Native::RunExternal(
-		a_feature == sl::kFeatureDLSS ? "Streamline DLSS" : a_feature == sl::kFeatureXeSS ? "Streamline XeSS" : "Streamline FSR", images,
-		[&](void* a_list, std::span<const ExternalImageInfo> a_infos) {
-			std::array<sl::Resource, 5> resources{};
-			std::array<sl::SubresourceRange, 5> ranges{};
-			for (std::size_t i = 0; i < a_infos.size(); ++i) {
-				const auto& info = a_infos[i];
-				if (d3d12) {
-					resources[i] = sl::Resource{ sl::ResourceType::eTex2d, info.native, static_cast<uint32_t>(info.state) };
-				} else {
-					resources[i] = sl::Resource{ sl::ResourceType::eTex2d, info.native, nullptr, reinterpret_cast<void*>(info.view), static_cast<uint32_t>(info.state) };
-					resources[i].width = info.width;
-					resources[i].height = info.height;
-					resources[i].nativeFormat = info.format;
-					resources[i].mipLevels = info.mips;
-					resources[i].arrayLayers = info.layers;
-					resources[i].usage = info.usage;
-					ranges[i].aspectMask = cs_ImageAspect(static_cast<VkFormat>(info.format));
-					ranges[i].baseMipLevel = 0;
-					ranges[i].levelCount = info.mips;
-					ranges[i].baseArrayLayer = 0;
-					ranges[i].layerCount = info.layers;
-					resources[i].next = &ranges[i];
-				}
+	const sl::ViewportHandle viewport = a_viewport;
+	const char* label = a_feature == sl::kFeatureDLSS ? "Streamline DLSS" : a_feature == sl::kFeatureXeSS ? "Streamline XeSS" : "Streamline FSR";
+	// Runs later, in the evaluate pass's Record: everything it uses is captured by value. The token stays valid: Streamline keeps a
+	// ring of them, and the pass records within the frames in flight.
+	auto record = [=](void* a_list, std::span<const ExternalImageInfo> a_infos) {
+		std::array<sl::Resource, 4> resources{};
+		std::array<sl::SubresourceRange, 4> ranges{};
+		for (std::size_t i = 0; i < a_infos.size() && i < resources.size(); ++i) {
+			const auto& info = a_infos[i];
+			if (d3d12) {
+				resources[i] = sl::Resource{ sl::ResourceType::eTex2d, info.native, static_cast<uint32_t>(info.state) };
+			} else {
+				resources[i] = sl::Resource{ sl::ResourceType::eTex2d, info.native, nullptr, reinterpret_cast<void*>(info.view), static_cast<uint32_t>(info.state) };
+				resources[i].width = info.width;
+				resources[i].height = info.height;
+				resources[i].nativeFormat = info.format;
+				resources[i].mipLevels = info.mips;
+				resources[i].arrayLayers = info.layers;
+				resources[i].usage = info.usage;
+				ranges[i].aspectMask = cs_ImageAspect(static_cast<VkFormat>(info.format));
+				ranges[i].baseMipLevel = 0;
+				ranges[i].levelCount = info.mips;
+				ranges[i].baseArrayLayer = 0;
+				ranges[i].layerCount = info.layers;
+				resources[i].next = &ranges[i];
 			}
-			sl::Extent renderExtent{ 0, 0, a_renderWidth, a_renderHeight };
-			sl::Extent outputExtent{ 0, 0, a_outputWidth, a_outputHeight };
-			std::array<sl::ResourceTag, 5> tags;
-			uint32_t nt = 0, next = 0;
-			if (haveColor) {
-				tags[nt++] = sl::ResourceTag{ &resources[next++], sl::kBufferTypeScalingInputColor, sl::ResourceLifecycle::eValidUntilEvaluate, &renderExtent };
-				tags[nt++] = sl::ResourceTag{ &resources[next++], sl::kBufferTypeScalingOutputColor, sl::ResourceLifecycle::eValidUntilEvaluate, &outputExtent };
-			}
-			const auto inputLifecycle = haveColor ? sl::ResourceLifecycle::eValidUntilEvaluate : sl::ResourceLifecycle::eOnlyValidNow;
-			tags[nt++] = sl::ResourceTag{ &resources[next++], sl::kBufferTypeDepth, inputLifecycle, &renderExtent };
-			tags[nt++] = sl::ResourceTag{ &resources[next++], sl::kBufferTypeMotionVectors, inputLifecycle, &renderExtent };
-			if (haveHudless)
-				tags[nt++] = sl::ResourceTag{ &resources[next++], sl::kBufferTypeHUDLessColor, sl::ResourceLifecycle::eOnlyValidNow, &outputExtent };
-			auto* commandBuffer = static_cast<sl::CommandBuffer*>(a_list);
-			if (const sl::Result tagRes = g_sl.slSetTagForFrame(*token, a_viewport, tags.data(), nt, commandBuffer); tagRes != sl::Result::eOk) {
-				logger::error("[Streamline] slSetTagForFrame failed for feature {} viewport {} (result {})", static_cast<uint32_t>(a_feature), vpId,
-					static_cast<int>(tagRes));
-				evalRes = tagRes;
-				return;
-			}
-			const sl::BaseStructure* inputs[] = { &a_viewport };
-			evalRes = g_sl.slEvaluateFeature(a_feature, *token, inputs, static_cast<uint32_t>(std::size(inputs)), commandBuffer);
-			if (evalRes == sl::Result::eWarnOutOfVRAM)
-				evalRes = sl::Result::eOk;
-		});
-	if (!submitted)
-		return evalRes == sl::Result::eOk ? sl::Result::eErrorExceptionHandler : evalRes;
-	if (evalRes == sl::Result::eOk) {
-		if (a_outputReady)
-			*a_outputReady = haveColor;
-		if (vpId < 2)
-			s_evalFrameByVp[vpId] = frame;
+		}
+		sl::Extent renderExtent{ 0, 0, a_renderWidth, a_renderHeight };
+		sl::Extent outputExtent{ 0, 0, a_outputWidth, a_outputHeight };
+		std::array<sl::ResourceTag, 4> tags{
+			sl::ResourceTag{ &resources[0], sl::kBufferTypeScalingInputColor, sl::ResourceLifecycle::eValidUntilEvaluate, &renderExtent },
+			sl::ResourceTag{ &resources[1], sl::kBufferTypeScalingOutputColor, sl::ResourceLifecycle::eValidUntilEvaluate, &outputExtent },
+			sl::ResourceTag{ &resources[2], sl::kBufferTypeDepth, sl::ResourceLifecycle::eValidUntilEvaluate, &renderExtent },
+			sl::ResourceTag{ &resources[3], sl::kBufferTypeMotionVectors, sl::ResourceLifecycle::eValidUntilEvaluate, &renderExtent }
+		};
+		auto* commandBuffer = static_cast<sl::CommandBuffer*>(a_list);
+		if (const sl::Result tagRes = g_sl.slSetTagForFrame(*token, viewport, tags.data(), static_cast<uint32_t>(tags.size()), commandBuffer); tagRes != sl::Result::eOk) {
+			logger::error("[Streamline] slSetTagForFrame failed for feature {} viewport {} (result {})", static_cast<uint32_t>(a_feature), static_cast<uint32_t>(viewport),
+				static_cast<int>(tagRes));
+			return false;
+		}
+		const sl::BaseStructure* inputs[] = { &viewport };
+		const sl::Result evalRes = g_sl.slEvaluateFeature(a_feature, *token, inputs, static_cast<uint32_t>(std::size(inputs)), commandBuffer);
+		if (evalRes != sl::Result::eOk && evalRes != sl::Result::eWarnOutOfVRAM) {
+			logger::error("[Streamline] slEvaluateFeature failed for feature {} viewport {} (result {})", static_cast<uint32_t>(a_feature), static_cast<uint32_t>(viewport),
+				static_cast<int>(evalRes));
+			return false;
+		}
+		return true;
+	};
+	if (!ORGUpscaling::Get().QueueEvaluate(label, std::move(record))) {
+		static std::once_flag logged;
+		std::call_once(logged, [label] { logger::error("[Streamline] {}: the evaluate pass cannot run (Upscaling's graph path or its inputs are missing); skipped (logged once)", label); });
+		return sl::Result::eErrorNotInitialized;
 	}
-	return evalRes;
+	if (a_outputReady)
+		*a_outputReady = true;
+	if (vpId < 2)
+		s_evalFrameByVp[vpId] = frame;
+	return sl::Result::eOk;
 }
 #endif
 

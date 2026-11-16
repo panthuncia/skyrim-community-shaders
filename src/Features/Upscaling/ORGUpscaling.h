@@ -1,16 +1,24 @@
 #pragma once
 
+#include "RenderGraph/Engine/Native/Native.h"
+
 #include <cstdint>
 #include <d3d11.h>
+#include <functional>
 #include <memory>
+#include <span>
+#include <string>
 
 /**
  * @brief Upscaling's own passes on the render graph (CS_ORG_UPSCALING=1). The vendor upscalers do not move: Streamline's FSR,
  * XeSS and DLSS evaluates, and frame generation, still run in the DXVK interop command ring (Upscaling/DXVKInterop.cpp).
  *
  * - The upscaler's output is a graph texture exported to D3D11 (SRV and UAV), because Streamline still writes it through its
- *   D3D11 image. At the Upscale anchor, which runs after the evaluate, CopyHudlessPS draws it into kMAIN (the D3D11 path's
- *   CopyResource). It is a draw so that a run gate can skip it on frames the evaluate wrote nothing.
+ *   D3D11 image in guest mode. At the Upscale anchor, which runs after the evaluate, CopyHudlessPS draws it into kMAIN (the D3D11
+ *   path's CopyResource). It is a draw so that a run gate can skip it on frames the evaluate wrote nothing.
+ * - Native mode: the evaluate itself is the Upscale anchor's first pass (QueueEvaluate). It is recorded at execution each frame:
+ *   its Record calls Streamline's tags and evaluate on the pass's own command list, with the four images declared as legacy interop
+ *   uses, then restores the graph's descriptor heaps.
  * - The depth upscale at the same anchor: kMAIN's depth into kMAIN_COPY and the refraction normals into their copy, then
  *   DepthRefractionUpscalePS into the refraction normals, kSAO_CAMERAZ and kMAIN's depth, then the underwater mask's copy and
  *   UnderwaterMaskUpscalePS at half size. The jitter constants come from a latch block, the shared constant buffers from
@@ -92,6 +100,20 @@ public:
 
 	/** @brief a_target's description, chosen as Texture chooses: the graph texture's, else a_d3d11. */
 	const D3D11_TEXTURE2D_DESC* Desc(Target a_target, const D3D11_TEXTURE2D_DESC* a_d3d11) const;
+
+	/**
+	 * @brief What the evaluate pass records for a frame: the SDK's commands on the native list (a VkCommandBuffer or an
+	 * ID3D12GraphicsCommandList), given its four images in order: colour in (kMAIN), colour out (the upscaled texture), depth (kMAIN's
+	 * depth) and motion vectors (kMOTION_VECTOR). Returns false when the SDK refused (logged by the caller's code).
+	 */
+	using EvaluateRecord = std::function<bool(void* a_nativeList, std::span<const RenderGraph::Engine::Native::ExternalImageInfo> a_images)>;
+
+	/**
+	 * @brief Native mode: this frame's upscaler evaluate, recorded by the evaluate pass at the Upscale anchor (which RunUpscale runs
+	 * after it). a_record runs once, in that pass's Record for this frame's run, on the thread that records it (the submission
+	 * thread). False when the graph path does not run, holds no upscaled texture, or the engine's inputs cannot be imported.
+	 */
+	bool QueueEvaluate(std::string a_label, EvaluateRecord a_record);
 
 	/** @brief After an evaluate that wrote the upscaled texture: the Upscale anchor copies it into kMAIN. False: copy with D3D11. */
 	bool QueueCopyToMain();

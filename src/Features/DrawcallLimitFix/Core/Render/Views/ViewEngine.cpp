@@ -182,8 +182,8 @@ namespace DCLF
 					continue;
 				}
 				// The character light's noise: the published HDR downsample level, which the faces declare.
-				if (t == kCharacterLightRegister &&
-					Extensions::EngineTargetTextureIndex(reader, t, "character light", view, Extensions::CharacterLightGraphTextureIds(), graphIndex)) {
+				if (t == kCharacterLightRegister && (Extensions::AdaptedLuminanceTextureIndex(reader, t, view, graphIndex) ||
+														Extensions::EngineTargetTextureIndex(reader, t, "character light", view, Extensions::CharacterLightGraphTextureIds(), graphIndex))) {
 					HoldFrameTexture(a_state.frameTextureViews[t], a_state.frameTextureBindings[t], nullptr, t, 0u, a_owners);
 					a_state.frameTextures[t] = graphIndex;
 					continue;

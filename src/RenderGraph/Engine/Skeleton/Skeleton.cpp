@@ -18,6 +18,7 @@ bool RenderGraph::Engine::Skeleton::Requested()
 #	include "RenderGraph/AnchorPasses.h"
 #	include "RenderGraph/BuildManager.h"
 #	include "RenderGraph/Frame/FrameDriver.h"
+#	include "RenderGraph/Frame/PostChain.h"
 #	include "RenderGraph/Engine/Native/Native.h"
 #	include "RenderGraph/Engine/Targets/EngineTargets.h"
 #	include "RenderGraph/FrameAnchors.h"
@@ -130,7 +131,9 @@ namespace RenderGraph::Engine::Skeleton
 			Prepass,         // the Prepass anchor: the normals target and kMAIN, cleared by Main::Draw (only light culling runs between)
 			EngineDraws,     // the engine draws anchor: the shadow mask and the water's stencil, each just before its draws
 			DeferredPasses,  // the DeferredPasses anchor: CS's own depth copy, made just before it in Deferred::DeferredPasses
-			ImageSpace,      // the ImageSpace anchor: the water targets, cleared after the water's draws for the chain's water blend
+			ImageSpace,      // the ImageSpace anchor: the water targets, cleared after the water's draws for the chain's water blend, and the TAA
+			                 // mask and kMAIN_ONLY_ALPHA, cleared after the water blend (the deferred+water stage's last ImageSpace step)
+			PostChain,       // the ImageSpace anchor in the post stage: the TAA mask, cleared inside the post chain when TAA is turned on
 			Count
 		};
 		constexpr std::size_t kHosts = static_cast<std::size_t>(Host::Count);
@@ -151,6 +154,7 @@ namespace RenderGraph::Engine::Skeleton
 			{ "engine-draws", false, RenderGraphRuntime::Segment::Count, Anchor::EngineDraws },
 			{ "deferred-passes", false, RenderGraphRuntime::Segment::Count, Anchor::DeferredPasses },
 			{ "image-space", false, RenderGraphRuntime::Segment::Count, Anchor::ImageSpace },
+			{ "post-chain", false, RenderGraphRuntime::Segment::Count, Anchor::ImageSpace },
 		} };
 
 		std::size_t HostIndex(Host a_host) { return static_cast<std::size_t>(a_host); }
@@ -163,7 +167,7 @@ namespace RenderGraph::Engine::Skeleton
 		 */
 		bool StageHost(Host a_host)
 		{
-			return a_host == Host::Prepass || a_host == Host::EngineDraws || a_host == Host::DeferredPasses || a_host == Host::ImageSpace;
+			return a_host == Host::Prepass || a_host == Host::EngineDraws || a_host == Host::DeferredPasses || a_host == Host::ImageSpace || a_host == Host::PostChain;
 		}
 
 		/** @brief CS_ORG_SEGMENT_CLEARS (native mode with segments, default on; =0 every clear and copy keeps its own anchor's ticket). */
@@ -766,8 +770,14 @@ namespace RenderGraph::Engine::Skeleton
 			case ColourTarget::kWATER_1:
 			case ColourTarget::kWATER_2:
 				return Host::ImageSpace;
-			// The TAA mask and kMAIN_ONLY_ALPHA are cleared just before DCLF's forward epoch every frame, but the TAA mask also when TAA
-			// is turned on, inside the ImageSpace chain: one host cannot follow both. They keep their own ticket.
+			// The TAA mask and kMAIN_ONLY_ALPHA are cleared after the water blend every frame, just before DCLF's forward epoch: passes of
+			// the deferred+water stage, first at its last ImageSpace step (the water blend reads neither; the reflections' ray march, an
+			// earlier step, reads kMAIN_ONLY_ALPHA). The TAA mask is cleared again inside the post chain when TAA is turned on: a pass of
+			// the post stage, first at its last ImageSpace step, before TAA reads it.
+			case ColourTarget::kTEMPORAL_AA_MASK:
+				return RenderGraph::Frame::PostChain::InChain() ? Host::PostChain : Host::ImageSpace;
+			case ColourTarget::kMAIN_ONLY_ALPHA:
+				return RenderGraph::Frame::PostChain::InChain() ? Host::Own : Host::ImageSpace;
 			default:
 				return Host::Own;
 			}
@@ -907,9 +917,13 @@ namespace RenderGraph::Engine::Skeleton
 			if (HostingOn()) {
 				for (const auto& [target, spec] : group.specs) {
 					std::array<std::vector<ClearDraw>, kHosts> draws;
-					for (const auto& draw : spec->draws)
+					for (const auto& draw : spec->draws) {
 						if (const auto host = HostFor(target, draw.flags); HostAvailable(host))
 							draws[HostIndex(host)].push_back(draw);
+						// The TAA mask's clear inside the post chain (HostFor answers it there only).
+						if (target.kind == Kind::Colour && target.index == ColourTarget::kTEMPORAL_AA_MASK && HostAvailable(Host::PostChain))
+							draws[HostIndex(Host::PostChain)].push_back(draw);
+					}
 					for (std::size_t h = 0; h < kHosts; ++h) {
 						if (draws[h].empty())
 							continue;

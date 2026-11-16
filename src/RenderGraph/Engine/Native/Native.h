@@ -10,6 +10,7 @@
 #include <functional>
 #include <span>
 #include <string_view>
+#include <vector>
 
 #include <winrt/base.h>
 
@@ -216,23 +217,11 @@ namespace RenderGraph::Engine::Native
 	/** @brief The LUID of the adapter the native device was made on (LowPart and HighPart as one 64-bit pattern), or 0. */
 	std::uint64_t AdapterLuid();
 
-	/** @brief An image external work (Streamline's evaluates) reads or writes: a D3D11 handle the native device made, and how. */
-	struct ExternalImage
-	{
-		enum class Use : std::uint8_t
-		{
-			Read,   // sampled
-			Write,  // unordered access
-		};
-		ID3D11Resource* resource = nullptr;
-		Use use = Use::Read;
-	};
-
 	/**
-	 * @brief What external work's commands get for each ExternalImage, in their order. native: the VkImage or the ID3D12Resource*.
-	 * view: on Vulkan a VkImageView of every mip and layer (a depth image's depth aspect), made for this work and destroyed after it;
-	 * 0 on D3D12. state: the layout the image is in for the commands (VkImageLayout, or the D3D12 legacy resource state Streamline's
-	 * tags take). format: VkFormat or DXGI_FORMAT.
+	 * @brief What a vendor SDK's commands (Streamline's evaluates) get for each image, in their order. native: the VkImage or the
+	 * ID3D12Resource*. view: on Vulkan a VkImageView of every mip and layer (a depth image's depth aspect), made for these commands and
+	 * destroyed after them; 0 on D3D12. state: the layout the image is in for the commands (VkImageLayout, or the D3D12 legacy resource
+	 * state Streamline's tags take). format: VkFormat or DXGI_FORMAT.
 	 */
 	struct ExternalImageInfo
 	{
@@ -245,14 +234,14 @@ namespace RenderGraph::Engine::Native
 	};
 
 	/**
-	 * @brief Runs external commands (a_record, given the native command list: a VkCommandBuffer, or the ID3D12GraphicsCommandList
-	 * Streamline's proxy device made) on a list of their own, on the context's route: in queue order after the graph's work so far,
-	 * each image moved into its state by its ledger (or from Common, an image no graph tracks). a_keep is held until the GPU is
-	 * past the work. False, logged once per label, when an image is not the native device's or nothing was submitted. Render
-	 * thread.
+	 * @brief In a pass's Record: the native command list of a_list (a VkCommandBuffer, or the ID3D12GraphicsCommandList Streamline's
+	 * proxy device made) and, for each image, what its commands need (a_infos, in a_images' order). The pass declares each image as a
+	 * legacy interop use, so each is in the common state: GENERAL on Vulkan, COMMON on D3D12. a_views holds the Vulkan views made for
+	 * the commands: the pass retains it (RecordingContext::Retain) so they live until the GPU is past them. False with a_why set when
+	 * the list or an image has no native object.
 	 */
-	bool RunExternal(const std::string& a_label, std::span<const ExternalImage> a_images,
-		const std::function<void(void* a_nativeList, std::span<const ExternalImageInfo> a_images)>& a_record, std::shared_ptr<const void> a_keep = nullptr);
+	bool DescribeForCommands(rhi::CommandList& a_list, std::span<const rhi::Resource> a_images, void*& a_nativeList, std::vector<ExternalImageInfo>& a_infos,
+		std::shared_ptr<const void>& a_views, std::string& a_why);
 
 	/**
 	 * @brief Runs a_callback now with the native graphics queue, holding the lock every queue access takes, so it lands between the

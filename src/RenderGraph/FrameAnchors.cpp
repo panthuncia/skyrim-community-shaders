@@ -155,10 +155,9 @@ namespace FrameAnchors
 			Segment::Forward,
 			Segment::AnchorEngineQueries,  // the sun's occlusion queries, after Main::RenderWorld's accumulator (nominally here: a second runs later in the frame)
 			Segment::FirstPerson,
-			Segment::DeclaredPostComposites,    // the declared post composites segment (SegmentsOn): its end tap is the PostProcessing anchor's hook
+			Segment::DeclaredPost,              // the post stage (SegmentsOn): its end is RenderEndOfFrameEffects' return
 			Segment::AnchorVolumetricLighting,  // RenderWorldPostProcess's VL apply and blur, before the composites and Main_PostProcessing
 			Segment::AnchorPostProcessing,      // Main_PostProcessing, before the upscaler
-			Segment::DeclaredPostEnd,           // the declared post end-of-frame segment (SegmentsOn): its end is RenderEndOfFrameEffects' return
 			Segment::AnchorUpscale,             // after the upscaler's evaluate
 			Segment::AnchorImageSpace,          // the ImageSpace chain's batches (pre-tonemap composites, the HDR effect), a few times a frame
 			Segment::AnchorEngineCopy,          // the engine's kMAIN copy, between the chain's batches (nominally here; native mode only)
@@ -342,25 +341,22 @@ namespace FrameAnchors
 					{ Anchor::ImageSpace, { "cs.engine.skeleton.frame@image-space", "cs.engine.imagespace.world.water" } },
 					{ Anchor::Count, { nullptr, nullptr }, Segment::Count, false, true } } },
 				9, { "CS stage: deferred+water", "CS stage: deferred+water inputs", "FrameSegments::Deferred / ", "cs.segment.deferred" } },
-			// ImageSpaceManager::RenderWorldPostProcess (SE 100430, AE 107148) up to Upscaling's wrapper of the end-of-frame effects: the
-			// volumetric lighting (whole: its hook runs only there), the pre-tonemap composite as CS passes (ChainSteps.inl), and the
-			// PostProcessing anchor (its end tap, reserved so its hook always runs). The upscaler's evaluate comes after the end tap: it is
-			// external work, and work submitted between a stage's taps and its commit runs ahead of the stage's work on the GPU.
-			{ Segment::DeclaredPostComposites,
+			// The post stage: ImageSpaceManager::RenderWorldPostProcess (SE 100430, AE 107148). The volumetric lighting (whole: its hook
+			// runs only there), the pre-tonemap composite as CS passes (ChainSteps.inl), the PostProcessing anchor (reserved so its hook
+			// always runs), the Upscale anchor (the upscaler's evaluate as a pass recorded at execution, the copy into kMAIN, the depth
+			// upscale), RenderEndOfFrameEffects (99023 / 105674) as CS passes split at the Tonemap anchor (its passes replace or follow the
+			// tonemap draw, so they sit between the HDR effect's draws and the tonemap's), and its return as the end (a point: no anchor
+			// runs there). Nothing else submits GPU work between the first tap and the end (the census counts any that does).
+			{ Segment::DeclaredPost,
 				{ { { Anchor::VolumetricLighting },
 					{ Anchor::ImageSpace, { "cs.engine.imagespace.post.composites", nullptr } },
-					{ Anchor::PostProcessing } } },
-				3, { "CS segment: post composites", "CS segment: post composites inputs", "FrameSegments::PostComposites / ", "cs.segment.post-composites" } },
-			// After the upscaler's evaluate: the Upscale anchor, RenderEndOfFrameEffects (99023 / 105674) as CS passes, split
-			// at the Tonemap anchor (its passes replace or follow the tonemap draw, so they sit between the HDR effect's draws and the
-			// tonemap's), and its return as the end (a point: no anchor runs there).
-			{ Segment::DeclaredPostEnd,
-				{ { { Anchor::Upscale },
+					{ Anchor::PostProcessing },
+					{ Anchor::Upscale },
 					{ Anchor::ImageSpace, { "cs.engine.imagespace.post.hdr", nullptr } },
 					{ Anchor::Tonemap, { nullptr, nullptr }, Segment::Count, true },
-					{ Anchor::ImageSpace, { "cs.engine.imagespace.post.final", nullptr } },
+					{ Anchor::ImageSpace, { "cs.engine.imagespace.post.final", "cs.engine.skeleton.frame@post-chain" } },
 					{ Anchor::Count, { nullptr, nullptr }, Segment::Count, false, true } } },
-				5, { "CS segment: post end-of-frame", "CS segment: post end-of-frame inputs", "FrameSegments::PostEnd / ", "cs.segment.post-end" } },
+				8, { "CS stage: post", "CS stage: post inputs", "FrameSegments::Post / ", "cs.segment.post" } },
 		} };
 
 		/** @brief The anchors whose every client a declared segment holds, a bit each: they have no epoch of their own. */
@@ -2535,8 +2531,7 @@ namespace FrameAnchors
 			case Segment::AnchorUpscale:
 			case Segment::AnchorInterface:
 			case Segment::AnchorPresent:
-			case Segment::DeclaredPostComposites:
-			case Segment::DeclaredPostEnd:
+			case Segment::DeclaredPost:
 				return true;
 			default:
 				return false;
@@ -3042,6 +3037,19 @@ namespace FrameAnchors
 				Driver::NoteTapError(Driver::TapError::Repeated, segment, fmt::format("the {} tap fired after the segment's end tap", tap));
 				return { RunStatus::Idle };
 			}
+			// A stage's first tap of the frame ends the earlier stages that staged and are still open, at their end point: their commit
+			// point did not come (the deferred+water stage's, in a frame Drawcall Limit Fix's forward epoch does not run). Their tickets go
+			// first, in recipe order, so this stage's work follows theirs on the GPU.
+			if (a_state.stagedFrame[a_declared] != frame.frame)
+				for (std::uint32_t before = 0; before < a_declared; ++before) {
+					if (a_state.stagedFrame[before] != frame.frame || a_state.endedFrame[before] == frame.frame)
+						continue;
+					for (std::uint32_t k = 0; k < kDeclaredInfo[before].stepCount; ++k)
+						if (kDeclaredInfo[before].steps[k].point) {
+							(void)TapDeclared(a_state, Point{}, before, k, {});
+							break;
+						}
+				}
 			if (end && !Driver::NoteTap(segment, tap))
 				return { RunStatus::Idle };
 			auto& host = *a_state.host;
@@ -3215,8 +3223,7 @@ namespace FrameAnchors
 					static const bool on = !Switches::Off("CS_ORG_SEGMENT_DEFERRED");
 					return on;
 				}
-			case Segment::DeclaredPostComposites:
-			case Segment::DeclaredPostEnd:
+			case Segment::DeclaredPost:
 				{
 					// The post chain as CS passes (ImageSpace's ChainSteps.inl). It needs the chain's hooks (CS_ORG_SEGMENT_POST, not 0).
 					static const bool on = !Switches::Equals("CS_ORG_SEGMENT_POST", "0");
@@ -3485,42 +3492,50 @@ namespace FrameAnchors
 				}
 		};
 		if (SegmentsOn() && work) {
-			if (const auto [declared, first] = OpenStepAt(state, a_point.anchor); declared < kDeclared) {
-				const auto& built = state.frameBuilt[declared];
-				// Every step of the segment at this anchor takes its own clients (the post end-of-frame segment has two ImageSpace
-				// steps, either side of the Tonemap anchor), each tapped when one of them has work.
+			if (OpenStepAt(state, a_point.anchor).first < kDeclared) {
 				std::vector<RunClient> others = clients;
 				std::vector<RunClient> members;
 				RunResult tapped{ RunStatus::Idle };
-				for (std::uint32_t k = first; k < kDeclaredInfo[declared].stepCount; ++k) {
-					const auto& stepInfo = kDeclaredInfo[declared].steps[k];
-					if (stepInfo.anchor != a_point.anchor)
+				// Every open segment with a step at this anchor takes its own clients. Two can be open at once: a stage whose commit
+				// point has not come yet (the deferred+water stage in a frame Drawcall Limit Fix's forward epoch does not run) and the
+				// post stage after it, which has staged this frame.
+				for (std::uint32_t declared = 0; declared < kDeclared; ++declared) {
+					const auto first = StepAt(declared, a_point.anchor);
+					if (first == kMaxSteps || !WindowOpen(state, declared))
 						continue;
-					std::vector<RunClient> stepMembers;
-					for (auto it = others.begin(); it != others.end();) {
-						const bool member = built && StepHolds(stepInfo, *it->desc) && std::ranges::find(built->clients, it->desc) != built->clients.end();
-						if (member) {
-							stepMembers.push_back(*it);
-							it = others.erase(it);
-						} else {
-							++it;
+					const auto& built = state.frameBuilt[declared];
+					// Every step of the segment at this anchor takes its own clients (the post stage has three ImageSpace steps), each
+					// tapped when one of them has work.
+					for (std::uint32_t k = first; k < kDeclaredInfo[declared].stepCount; ++k) {
+						const auto& stepInfo = kDeclaredInfo[declared].steps[k];
+						if (stepInfo.anchor != a_point.anchor)
+							continue;
+						std::vector<RunClient> stepMembers;
+						for (auto it = others.begin(); it != others.end();) {
+							const bool member = built && StepHolds(stepInfo, *it->desc) && std::ranges::find(built->clients, it->desc) != built->clients.end();
+							if (member) {
+								stepMembers.push_back(*it);
+								it = others.erase(it);
+							} else {
+								++it;
+							}
 						}
+						// A client that commits once per segment run, active at a second run of its step: a mismatch. That run draws nothing.
+						const bool again = state.stagedFrame[declared] == Driver::Current().frame && state.stepTaps[declared][k] > 0 &&
+						                   std::ranges::any_of(stepMembers, [](const RunClient& a_client) {
+											   return a_client.active && !a_client.desc->repeats && a_client.desc->maxInstances <= 1;
+										   });
+						if (again) {
+							Driver::NoteTapError(Driver::TapError::Repeated, static_cast<RenderGraph::Frame::SegmentId>(declared), fmt::format("the {} step ran again in one segment run", kInfo[index].name));
+							break;
+						}
+						if (std::ranges::any_of(stepMembers, [](const RunClient& a_client) { return a_client.active; })) {
+							const auto result = TapDeclared(state, a_point, declared, k, stepMembers);
+							if (tapped.status == RunStatus::Idle || !result)
+								tapped = result;
+						}
+						members.insert(members.end(), stepMembers.begin(), stepMembers.end());
 					}
-					// A client that commits once per segment run, active at a second run of its step: a mismatch. That run draws nothing.
-					const bool again = state.stagedFrame[declared] == Driver::Current().frame && state.stepTaps[declared][k] > 0 &&
-					                   std::ranges::any_of(stepMembers, [](const RunClient& a_client) {
-										   return a_client.active && !a_client.desc->repeats && a_client.desc->maxInstances <= 1;
-									   });
-					if (again) {
-						Driver::NoteTapError(Driver::TapError::Repeated, static_cast<RenderGraph::Frame::SegmentId>(declared), fmt::format("the {} step ran again in one segment run", kInfo[index].name));
-						break;
-					}
-					if (std::ranges::any_of(stepMembers, [](const RunClient& a_client) { return a_client.active; })) {
-						const auto result = TapDeclared(state, a_point, declared, k, stepMembers);
-						if (tapped.status == RunStatus::Idle || !result)
-							tapped = result;
-					}
-					members.insert(members.end(), stepMembers.begin(), stepMembers.end());
 				}
 				dropSegmentOnly(others, "outside its segment's built graph");
 				const bool otherWork = std::ranges::any_of(others, [&](const RunClient& a_client) {
