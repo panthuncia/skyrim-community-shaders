@@ -37,3 +37,6 @@ do = "exit"
 
 [expect]
 reach = "world-ready"
+
+[game]
+uncapped = true   # no vsync and no frame-rate limiter from SSE Display Tweaks: frame rates are not held at the display's 144 Hz

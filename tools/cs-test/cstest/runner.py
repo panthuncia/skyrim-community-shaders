@@ -17,6 +17,10 @@ from .paths import CONFIG_DIR, GAME_EXE, LEGACY_ENV_FILE, LOG_FILE, MO2_EXE, STA
 from .schema import ConfigError, load_schema
 from .stage import load_manifest
 
+# SSE Display Tweaks reads this file after its own ini; game.uncapped writes it for one run.
+DISPLAY_TWEAKS_FILE = "SSEDisplayTweaks_custom.ini"
+DISPLAY_TWEAKS_UNCAPPED = "[Render]\nEnableVSync=false\nEnableTearing=true\nFramerateLimit=0\n"
+
 POLL_S = 1.0
 EXIT_WAIT_S = 15  # how long a game that reported its outcome gets to exit by itself
 
@@ -200,6 +204,15 @@ def run(paths, spec, sets=(), label=None, stage=None, dry_run=False, lock=None, 
         if to_change:
             journal.add({"do": "mods_off", "mods": to_change})
             mo2.disable_mods(paths.modlist, to_change)
+
+        # game.uncapped: SSE Display Tweaks' override file in the staged mod, for this run only. It turns off its vsync and its
+        # frame-rate limiter, so a timing run is not held at the display's rate or at the limiter's.
+        if harness["uncapped"]:
+            tweaks = paths.mods / mo2.mod_for(paths, stage) / "SKSE" / "Plugins" / DISPLAY_TWEAKS_FILE
+            tweaks.parent.mkdir(parents=True, exist_ok=True)
+            journal.add({"do": "file", "path": str(tweaks)})
+            tweaks.write_text(DISPLAY_TWEAKS_UNCAPPED, encoding="utf-8")
+            log(f"Uncapped: wrote {tweaks} for this run")
 
         legacy_env = paths.skse / LEGACY_ENV_FILE
         if legacy_env.exists():

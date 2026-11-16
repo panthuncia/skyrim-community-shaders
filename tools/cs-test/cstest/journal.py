@@ -122,6 +122,12 @@ def _swap_back(paths, entry):
         return f"variant already {state['live']}, not {entry['to']}: nothing to swap back"
     back = entry["from"]
     mod = state["originalMod"] if back == "_original" else mo2.mod_for(paths, back)
+    if back == "_original" and not (paths.mods / mod).exists():
+        # The mod from before the first swap was deleted. Enabling a missing CS mod leaves its plugin (TerrainHelper.esp)
+        # absent, MO2 then turns that plugin off, and every save that uses it stops loading. Keep the variant instead.
+        state["originalMod"] = mo2.mod_for(paths, entry["to"])
+        mo2.set_state(paths, state)
+        return f"the original CS mod '{mod}' no longer exists: {entry['to']} stays enabled and is the original now"
     mo2.stash_live(paths, entry["to"])
     mo2.unstash(paths, back)
     mo2.set_enabled_mod(paths.modlist, mod)

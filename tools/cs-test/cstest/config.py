@@ -19,7 +19,7 @@ DEFAULT_TIMEOUTS = {"launch": 60, "compile": 600, "load": 120, "step_wait": 60}
 FIXED = {
     "run": {"timeout_s": int, "label": str, "stall_s": int},
     "build": {"stage": str, "shader_cache": str},
-    "game": {"save": str, "cell": str, "mods_off": list, "autoload_mod": str},
+    "game": {"save": str, "cell": str, "mods_off": list, "autoload_mod": str, "uncapped": bool},
     "timeouts": {"launch": int, "compile": int, "load": int, "step_wait": int},
     "expect": {"reach": str, "shots": list, "no_log": list},
 }
@@ -256,6 +256,7 @@ def flatten(merged, schema, name):
         "stage": build.get("stage", ""),
         "shader_cache": build.get("shader_cache", "warm"),
         "mods_off": mods_off,
+        "uncapped": bool(game.get("uncapped", False)),
         "autoload_off": autoload_mod if autoload_off else "",
         "timeout_s": run.get("timeout_s", 600),
         "stall_s": run.get("stall_s", 90),
