@@ -42,6 +42,7 @@
 #	include <array>
 #	include <atomic>
 #	include <chrono>
+#	include <thread>
 #	include <condition_variable>
 #	include <map>
 #	include <mutex>
@@ -325,8 +326,14 @@ namespace FrameAnchors
 			// are dropped. Its commit is a point just before the next GPU work that follows it in every world frame is submitted: DCLF's
 			// shadow view epoch, the shadow clears or a later stage (FlushRegions, and a later stage's first tap). The decal tests come
 			// before it and keep their anchor's own epoch (several a frame, each with its own query range).
+			// Main::RenderWaterEffects runs after the faces: the water displacement update and the flow copies are the start client's steps
+			// at the ImageSpace anchor (ImageSpace's StartSteps.inl), a tap per update and per copy, each with its own instances.
 			{ Segment::DeclaredStart,
-				{ { { Anchor::ReflectionsPrepass }, { Anchor::SkyReflections }, { Anchor::Count, { nullptr, nullptr }, Segment::Count, false, true } } }, 3,
+				{ { { Anchor::ReflectionsPrepass },
+					{ Anchor::SkyReflections },
+					{ Anchor::ImageSpace, { "cs.engine.imagespace.start", nullptr } },
+					{ Anchor::Count, { nullptr, nullptr }, Segment::Count, false, true } } },
+				4,
 				{ "CS stage: start", "CS stage: start inputs", "FrameSegments::Start / ", "cs.segment.start" } },
 			{ Segment::DeclaredPreDepth, { { { Anchor::EarlyPrepass } } }, 1,
 				{ "CS segment: pre-depth", "CS segment: pre-depth inputs", "FrameSegments::PreDepth / ", "cs.segment.pre-depth" } },
@@ -4059,6 +4066,74 @@ namespace FrameAnchors
 		return left == 0;
 	}
 
+	void PrimeStages(std::string_view a_caller)
+	{
+		auto& state = Anchors();
+		if (!SegmentsOn() || !state.host || !IsRenderOwner())
+			return;
+		using namespace std::chrono_literals;
+		std::uint32_t ui = kDeclared;
+		RenderGraph::Frame::SegmentFields wanted{};
+		std::shared_ptr<const Snapshot> built;
+		std::array<std::shared_ptr<SegmentRecording>, RenderGraphRuntime::kGameFramesInFlight> entries{};
+		{
+			auto lock = Guard();
+			if (!RenderGraphRuntime::Get().IsActive())
+				return;
+			for (std::uint32_t d = 0; d < kDeclared; ++d)
+				if (state.declaredEpochs[d] && kDeclaredInfo[d].segment == Segment::DeclaredUi)
+					ui = d;
+			if (ui == kDeclared || state.host->StagedGeneration(EpochOfDeclared(ui)) != 0)
+				return;
+			// The session's first frames are a Bink movie's or the main menu's: kinds whose displays the UI stage does not draw.
+			const bool displays = state.describingDisplays;
+			state.describingDisplays = false;
+			state.inBegin = true;
+			wanted = DescribeDeclared(state, ui, true);
+			built = state.declaredSnapshots[ui].load(std::memory_order_acquire);
+			if (wanted.graph)
+				for (std::uint32_t s = 0; s < RenderGraphRuntime::kGameFramesInFlight; ++s)
+					entries[s] = RequestDeclared(state, ui, wanted, s, 0, fmt::format(" (the first frame's, at {})", a_caller));
+			state.inBegin = false;
+			state.describingDisplays = displays;
+		}
+		if (!wanted.graph)
+			return;
+		// At setup, before the first frame: the host's thread records them; the first Begin finds them done and switches them in, so the
+		// first frame draws the stage (the session's first movie frame among it). The render thread never waits for a recording in a frame.
+		auto& recordings = state.declaredRecordings[ui];
+		const auto deadline = std::chrono::steady_clock::now() + 10s;
+		bool done = false;
+		while (!done && std::chrono::steady_clock::now() < deadline) {
+			{
+				const std::lock_guard lock(recordings.mutex);
+				done = std::ranges::all_of(entries, [](const auto& a_entry) { return a_entry && a_entry->done; });
+			}
+			if (!done)
+				std::this_thread::sleep_for(1ms);
+		}
+		auto lock = Guard();
+		std::uint32_t ready = 0;
+		for (std::uint32_t s = 0; s < RenderGraphRuntime::kGameFramesInFlight; ++s) {
+			std::shared_ptr<const org::GraphHost::EpochRecording> recording;
+			{
+				const std::lock_guard recordingsLock(recordings.mutex);
+				if (entries[s]->done)
+					recording = entries[s]->recording;
+			}
+			if (recording && state.host->EpochRecordingCurrent(*recording)) {
+				state.schedule[ui][s] = State::Scheduled{ wanted, std::move(recording), built };
+				++ready;
+			}
+		}
+		if (ready == RenderGraphRuntime::kGameFramesInFlight)
+			logger::info("[ORG] frame segments: the {}'s first schedule is recorded at {} for every frame slot (build {}); the first frame draws it", kDeclaredInfo[ui].names.label,
+				a_caller, wanted.graph);
+		else
+			logger::error("[ORG] frame segments: the {}'s first schedule was recorded for {} of {} frame slots at {}; the others switch in at their first Begin",
+				kDeclaredInfo[ui].names.label, ready, RenderGraphRuntime::kGameFramesInFlight, a_caller);
+	}
+
 	namespace
 	{
 		/** @brief The phases' report since the last one: executions, the runs they held, and why each was submitted. */
@@ -4433,6 +4508,7 @@ namespace FrameAnchors
 	bool HeldByStage(Anchor) { return false; }
 	std::uint32_t PeakRunsPerFrame(Anchor) { return 0; }
 	bool BuildPending(std::string_view) { return false; }
+	void PrimeStages(std::string_view) {}
 	void LogRunStats() {}
 	std::uint64_t RenderOwnerChanges() { return 0; }
 	Texture::Texture(std::string a_id, std::shared_ptr<org::VersionedTexture> a_slot) :

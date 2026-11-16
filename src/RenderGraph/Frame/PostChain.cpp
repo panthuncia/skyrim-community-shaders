@@ -176,7 +176,7 @@ namespace RenderGraph::Frame::PostChain
 		 * @brief ImageSpaceManager::RenderEndOfFrameEffects (SE 99023, AE 105674). Inside the world chain it runs within Upscaling's
 		 * wrapper (Upscaling::Main_PostProcessing), after the upscaler set TAA and dynamic resolution for the frame: ImageSpace plans the
 		 * chain's targets at its entry, and its return ends the post stage (a point step). UI3DSceneManager::Render (51855)
-		 * calls it for a menu's 3D scene too, outside the chain: nothing is done there.
+		 * calls it for a menu's 3D scene too, outside the chain: its draws are the menu composites' steps there (ImageSpace's MenuSteps.inl).
 		 */
 		struct RenderEndOfFrameEffects
 		{
@@ -188,7 +188,13 @@ namespace RenderGraph::Frame::PostChain
 					state.endOfFrame = true;
 					Engine::ImageSpace::OnEndOfFrame(true, static_cast<std::int32_t>(a_source), static_cast<std::int32_t>(a_final));
 				}
+				// A menu scene's call: its draws are the menu composites' steps.
+				const bool menu = !world && !state.endOfFrame && FrameAnchors::IsRenderOwner();
+				if (menu)
+					Engine::ImageSpace::OnMenuEndOfFrame(true, static_cast<std::int32_t>(a_source), static_cast<std::int32_t>(a_final));
 				func(a_manager, a_source, a_final, a_arg4, a_arg5);
+				if (menu)
+					Engine::ImageSpace::OnMenuEndOfFrame(false, 0, 0);
 				if (world) {
 					Engine::ImageSpace::OnEndOfFrame(false, 0, 0);
 					state.endOfFrame = false;

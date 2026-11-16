@@ -1,6 +1,7 @@
 #include "RenderGraph/Frame/FrameDriver.h"
 
 #include "RenderGraph/Engine/Bink/Bink.h"
+#include "RenderGraph/Engine/ImageSpace/ImageSpace.h"
 #include "RenderGraph/Engine/Skeleton/Skeleton.h"
 #include "RenderGraph/Frame/PostChain.h"
 #include "RenderGraph/Frame/Recipe.h"
@@ -265,6 +266,7 @@ namespace RenderGraph::Frame::Driver
 			if (auto* host = RenderGraphRuntime::Get().Host())
 				Recipes::Check(*host);
 		FrameAnchors::BeginFrame(state.current);
+		Engine::ImageSpace::OnFrameBegin();
 		{
 			const std::lock_guard lock(state.mutex);
 			for (std::uint32_t s = 0; s < kSegments; ++s)

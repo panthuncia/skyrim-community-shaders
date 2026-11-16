@@ -65,7 +65,10 @@ namespace RenderGraph::Engine
 		// then finds the client in the built graph instead of refreshing it.
 		Bink::Setup();
 		// Every client registered at setup joins its anchors' graphs now, not at the first frame's build point.
-		if (RenderGraphRuntime::Get().IsActive())
+		if (RenderGraphRuntime::Get().IsActive()) {
 			(void)FrameAnchors::BuildPending("CS's setup");
+			// The UI stage's first schedule, recorded now, so the first frame (the startup logo's first movie frame) draws it.
+			FrameAnchors::PrimeStages("CS's setup");
+		}
 	}
 }

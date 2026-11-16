@@ -3633,13 +3633,13 @@ The fatal paths fired three times during the work, each fixed before the final r
   epochs: no CS stage holds them.
 - **Main menu and Bink movie** (the startup window): the Present anchor 0.95 (the movie's tiles), engine frame clears 1.1, Interface, UI
   stage 0.98; the menu scene's anchors (EngineDraws, ImageSpace, EngineCopy) when it draws.
-- **Menu over a frozen world**: not reached; by code, the frozen composite (ImageSpace main client), the menu scene's anchors, Interface.
+- **Menu over a frozen world**: not reached; by code, the frozen composite (the menu composites' client since "What replaced the main
+  ImageSpace client", below), the menu scene's anchors, Interface.
 
 ### What of the old native paths is still reachable (for stage 6)
 
-- The ImageSpace main client and the shape manifest: they still draw the world's water effects at the frame's start, every ImageSpace
-  call outside the world post chain (menus, the loading model's and the frozen frame's composites) and UI3DSceneManager's end-of-frame
-  call. Not deleted: item 4's condition (the water effects the only user) does not hold while the other kinds' scenes are tickets.
+- The ImageSpace main client and the shape manifest: none in native mode with CS's stages since "What replaced the main ImageSpace client"
+  (below). Guest mode keeps them.
 - Per-anchor epochs for Interface (outside world-recipe frames since the stage 5 finish), Present (guest mode only since the movie part), MovieTiles, HDROutput, Capture, EngineDraws, ImageSpace, EngineCopy, the engine clear anchors and
   the decal and sun queries; `CanRun`/`RequestJoin` for their clients; D3D11 replay of clears outside world frames.
 - The Overlay anchor's own epoch: none while the UI stage is on (`CS_ORG_UI_STAGE=0` brings it back).
@@ -3782,7 +3782,8 @@ world kinds were reached in every run; a menu over a frozen world was not (no ba
 the first tap and the commit" at the world's first frames and the `PublishedResources` `[C]` line are in the stage 5 finish build's runs too.
 
 What is still a ticket at a hook, by kind, after this:
-- **World**: as before (the sun's queries, the decal tests, the water effects, HDR output and the capture when they run).
+- **World**: as before (the sun's queries, the decal tests, the water effects, HDR output and the capture when they run). The water
+  effects are the start stage's since "What replaced the main ImageSpace client" (below).
 - **Bink movie**: the engine's clear of the main depth (EngineFrameClear, 1 a frame).
 - **Main menu, loading screen, menu over a frozen world**: the scene (frame and shadow clears, EngineDraws, EngineCopy, ImageSpace) and
   Scaleform's displays (Interface), as before.
@@ -3802,3 +3803,102 @@ Why the menus' and the loading screen's scenes are not stages yet (stage 5 items
 
 What of the old native paths is still reachable: as listed in the stage's first part, without the Present anchor's own epoch (gone in native
 with the UI stage on; guest mode keeps it).
+
+## What replaced the main ImageSpace client (2026-11-16, `org-native/phases`)
+
+In native mode with CS's stages every ImageSpace draw is now a CS step's pass: the world steps and the post chain (as before), the start
+stage's water effects, and the menu composites. The main client (`cs.engine.imagespace`), the clients built on first sight, the shape
+manifest (`ImageSpaceShapes.json`) and the per-draw shape capture (ReadShape, ReadViewport, ReadComputeShape) are not set up there; any
+other ImageSpace draw or dispatch is `NoPass` (fatal in development builds, one log line in release), with what the engine bound named in
+the message for the diagnosis. To make that true for calls outside the hooked scopes, every ImageSpace call is a scope of its own in this
+mode (`OwnsScope`), so an effect CS does not cover reaches the check instead of D3D11. Guest mode keeps the main client, the clients built
+on first sight and the manifest unchanged.
+
+### Inventory: what the main client still drew
+
+From the manifest of the last sessions and the logs of the stage 5 runs (`a3*`, `u6*`), by frame kind:
+
+| Kind | Draws | Shader, targets |
+|---|---|---|
+| world (river) | the water displacement update (31385 / 32176) | ISWaterDisplacementTexOffset into one of kWATER_DISPLACEMENT / its swap from the other; ISWaterDisplacementWadingRipple into the same, one draw a ripple, its quad pulled by its vertex stage; ISWaterWadingHeightmap from one into the other, 0 or more a frame |
+| world (river, cell loads) | Main::RenderWaterEffects' flow copies (35561 / 36560) | ISCopySubRegionCS, a loaded flow texture into a rectangle of the flow map; up to about 24 in one frame seen |
+| world (a load) | the player's face tint | ISAlphaBlend into kPLAYER_FACEGEN_TINT, 16 tint masks; refused before (unset layers hold the black default texture, which the main client took for an engine target), so it drew nothing in native |
+| main menu, loading screen | UI3DSceneManager::Render's end-of-frame call (RenderEndOfFrameEffects with kMAIN as source and kFRAMEBUFFER as final, when the scheme has an ImageSpace override) | the HDR effect: ISHDRDownSample4 kMAIN into kHDR_DOWNSAMPLE0, the luminance levels, the last level (16Lum, either parity), ISBrightPassBlur15 into kHDR_BLURSWAP, ISBlur15 into kHDR_BLOOM, ISHDRTonemapBlendCinematic into kFRAMEBUFFER |
+| main menu, loading screen | the copy of kMAIN into the framebuffer (a menu scene without override, or UI's render after a menu drew into kMAIN, SE 0x140ebf510) | ISCopy kMAIN into kFRAMEBUFFER |
+| menu over a frozen world (by code, not reached) | Main::Render's frozen composite (SE 0x1412e2550) | ISCopy kMENUBG into kFRAMEBUFFER, alpha write mode 1 |
+
+Nothing else reached the main client or D3D11 in the test runs (the "left to D3D11" summaries name only the face tint).
+
+### The water effects: start stage steps (`StartSteps.inl`)
+
+One client, `cs.engine.imagespace.start`, at a new step of the start stage (the ImageSpace anchor, after SkyReflections, before the point
+end). RenderWaterEffects runs after the last face's sky in every world frame (frame sequence census), inside the stage's window.
+- **The displacement update** (ImageSpaceEffectWaterDisplacement's Render, SE 0x141303da0, AE 0x1414ef370, decompiled): each child effect
+  writes its texture 0 and reads its texture 1. The texture offset and every ripple write the pair's target held at SE 0x143283ae0 / AE
+  0x1433dcf10 (read at the update's first draw: the update may reset the pair before it renders); the pair swaps; each heightmap step then
+  writes the other target and swaps again. The hook keys each draw by effect, the target it writes (that plan) and its instance. A check
+  compares the plan with the target the engine binds, once a session: no difference in the final runs.
+- **The flow copies**: the k-th copy of the frame is instance k; its loaded texture is a frame input by heap index (the latch's Source).
+- **Fixed instances** (the counts are the engine's late decisions): 8 ripples per target, 4 heightmap steps per target, 32 flow copies;
+  58 passes. All are on in every description and gated: an instance the engine does not use stays closed and does nothing on the GPU. More
+  in one frame is `NoPass`. The client `repeats`: a tap per update and per copy, each opening only its own instances' entries.
+- Not built: the rain ripple, rain heightmap, blend, smooth and normals steps and the clear (shaders 86, 89, 91 to 94). The decompiled
+  Render does not draw them and no session's manifest has them. A draw of one is `NoPass`.
+
+The ImageSpace anchor's own ticket in world frames is gone (river windows with wading: 1.00 image space tickets a frame before, 0 after).
+The cost is the start stage's body barriers, 137 to 178 a frame: the gated passes record theirs every frame, and the 32 flow copies write one
+UAV. Description rows per frame would not do: a new description lags a frame or two, and a flow copy that lags is lost (the engine pops it
+from its queue).
+
+### The menu composites (`MenuSteps.inl`)
+
+One client, `cs.engine.imagespace.menu`, on the ImageSpace anchor's **own epoch**: the scenes of those kinds are still tickets on their
+anchors' epochs, and a run at the end of each engine call keeps today's GPU order with no new machinery. It registers at the session's first
+frame (`ImageSpace::OnFrameBegin`, from the frame driver), so its build is attached before the main menu. Passes (36 at 1920x1080 with 4
+luminance levels): the HDR effect on the engine's targets (downsample, levels, the last level by the luminance shader or the light
+adaptation of either parity, the bloom of each radius, the tonemap and its fade form of either parity into the final target); the copy of
+kMAIN into the framebuffer; the frozen copy of kMENUBG; the face tint. The variant comes from data only: RenderEndOfFrameEffects' source
+and final target (PostChain's detour calls `OnMenuEndOfFrame` outside the world chain), RenderEffect's source and destination (99025 /
+105676, hooked for its arguments), and the luminance parity global. The face tint's masks are frame inputs by heap index (the black default
+texture of an unset layer too); a slot holding an engine render target would read the null texture (none seen).
+
+Not built (`NoPass` if reached): ISSimpleColor's stencil fill and the UI form of TAA (UI3DSceneManager::Render with the engine's TAA on;
+CS has no port of ISTemporalAA_UI), other slot effects inside a menu scene's end-of-frame call, the local map's edge pass, and the console
+screenshot's and the debug views' copies.
+
+### The first movie frame
+
+The UI stage's first schedule is now recorded at setup (`FrameAnchors::PrimeStages`, after setup's build point): the description of the
+first frames' kind (no displays), recorded for every frame slot on the host's thread while setup waits, and installed as each slot's
+schedule. The first Begin finds it current, so frame 1 draws the stage, and the `[E] Bink: a movie frame queued for its anchor did not draw`
+line is gone. With the stage present at frame 1, the first frame's initial layouts count as "submitted between the first tap and the commit
+of the UI stage" (16 warning lines at frame 1).
+
+### Measurements
+
+perf-taa, native Vulkan, Perf-Fast, one run each, the machine in use (fps and thread times rough). Before: `a3perf2` (and `u6river`,
+`a3mm`). After: `m4perf` (and `m3riverseq`, `m4mm`).
+
+| Census | Before (measured) | After (measured) |
+|---|---|---|
+| world (perf-taa): tickets / `vkQueueSubmit` a frame | 13.0 / 15.0 | 13.0 / 15.0 |
+| world (perf-taa): entry / body barriers a frame | 505 / 867 | 510 / 912 |
+| start stage: entry / body barriers | 8 / 137 | 10 / 178 |
+| river, wading windows: tickets, image space tickets a frame | 14.0, 1.00 | 13.0, 0 |
+| main menu: entry / body barriers (tickets 10.9 both) | 164 / 109 | 132 / 58 |
+| loading screen: entry / body barriers (tickets 15.0 both) | 220 / 125 | 187 / 72 |
+| perf-taa fps (rough) | 122 to 124 | 122 |
+| steady window: recordings, switches, tap errors, recipe findings | 0, 0, 0, 0 | 0, 0, 0, 0 (recipe: 688 passes in the river) |
+
+The perf-taa scene has no water effects: its world tickets do not change, and its barriers rise by the start stage's new passes.
+
+### Checks
+
+One run each, `CS_TEST_BACKGROUND=1`, mismatches and recipe findings fatal: native-quick, native-d3d12-quick, native-river (with the frame
+sequence census), native-validation (the same 20 `VUID-vkCmdDraw-None-09600` as before), native-interior, the loading-thread run, the
+loading shot, first and third person, guest-quick and guest's loading shot, native-perf-taa: all passed, 0 tap errors, 0 recipe findings, 0
+frames a stage was absent after it first ran. The main menu (Start On Save off): menu shot as before, 0 tap errors (the harness marks it
+failed because it expects a world). One native loading shot showed the main menu's mist where guest's did not; a second pair showed none in
+either (timing, not reproducible). Not reached: a menu over a frozen world (the frozen copy), UI3DSceneManager with the engine's TAA on,
+ripples and heightmap steps past their first instances. The fatal path fired once during the work: the displacement target was first read
+from the wrong variable (the plan check named it), fixed before the final runs.

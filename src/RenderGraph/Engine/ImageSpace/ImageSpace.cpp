@@ -651,7 +651,7 @@ namespace RenderGraph::Engine::ImageSpace
 			// The CS stages' ImageSpace clients (the post chain's, the RenderWorld scopes'): on for the session once their gates and latches
 			// exist; the constant chunks their draws read, held for the frame.
 			bool postOn = false;
-			std::array<PostClient, 5> post{};
+			std::array<PostClient, 7> post{};
 			// Between RenderSSAO's two calls in Main::RenderWorld: an own-scope copy-subregion call there is the snow scope's copy.
 			bool snowWindow = false;
 			std::vector<std::shared_ptr<const org::LatchBlock>> postKeep;
@@ -2268,7 +2268,10 @@ namespace RenderGraph::Engine::ImageSpace
 		void NoteImports(const Spec& a_spec);
 		void CheckWorldSteps();
 		void CheckChainSteps();
+		void CheckStartSteps();
+		void CheckMenuSteps();
 		void ReregisterSteps();
+		bool StepsOnly();
 
 		/**
 		 * @brief Registers the client with a pass for every shape of a_keys (numbered from 0 by their place in the frame), replacing any
@@ -2743,7 +2746,8 @@ namespace RenderGraph::Engine::ImageSpace
 			}
 			state.late.clear();
 			state.refusedShapes.clear();
-			RegisterClient(keys);
+			if (!StepsOnly())
+				RegisterClient(keys);
 			ReregisterSteps();
 		}
 
@@ -2773,6 +2777,16 @@ namespace RenderGraph::Engine::ImageSpace
 			state.retryBuild = false;
 			logger::info("[ORG] ImageSpace: the engine's state tables are filled; the client's graph is built again (outside the world)");
 			FrameAnchors::Refresh(kClientId);
+		}
+
+		/**
+		 * @brief Native mode with CS's stages: every ImageSpace draw is a CS pass (the world steps, the post chain, the start stage's water
+		 * effects, the menu composites) or a mismatch (NoPass). The main client, the shapes built on first sight and the shape manifest are
+		 * guest mode's only.
+		 */
+		bool StepsOnly()
+		{
+			return IS().postOn;
 		}
 
 		bool Usable()
@@ -2907,12 +2921,16 @@ namespace RenderGraph::Engine::ImageSpace
 			state.runsThisFrame = 0;
 			// Last frame's post segments were submitted at their end taps: their draws' constant chunks are no longer read from here.
 			state.postKeep.clear();
-			QueuePrograms();
+			if (!StepsOnly()) {
+				QueuePrograms();
+				RetryBuild();
+				MaybeWriteManifest();
+			}
 			CheckImports();
-			RetryBuild();
 			CheckWorldSteps();
 			CheckChainSteps();
-			MaybeWriteManifest();
+			CheckStartSteps();
+			CheckMenuSteps();
 			LogEngineDraws();
 		}
 
@@ -2956,19 +2974,26 @@ namespace RenderGraph::Engine::ImageSpace
 			Final,
 			WorldScopes,  // the deferred+water stage's RenderWorld scopes: the reflections, the SAO, the snow pass or its copy
 			WorldWater,   // the deferred+water stage's water blend, after the water's draws
+			Start,        // the start stage's water effects: the displacement simulation and the flow copies (StartSteps.inl)
+			Menu,         // the menus' and the loading screen's composites, on the ImageSpace anchor's own epoch (MenuSteps.inl)
 			Count
 		};
 		constexpr std::array<const char*, static_cast<std::size_t>(PostPart::Count)> kPostIds{ "cs.engine.imagespace.post.composites", "cs.engine.imagespace.post.hdr",
-			"cs.engine.imagespace.post.final", "cs.engine.imagespace.world.scopes", "cs.engine.imagespace.world.water" };
+			"cs.engine.imagespace.post.final", "cs.engine.imagespace.world.scopes", "cs.engine.imagespace.world.water", "cs.engine.imagespace.start",
+			"cs.engine.imagespace.menu" };
 
 #	include "RenderGraph/Engine/ImageSpace/WorldSteps.inl"
 #	include "RenderGraph/Engine/ImageSpace/ChainSteps.inl"
+#	include "RenderGraph/Engine/ImageSpace/StartSteps.inl"
+#	include "RenderGraph/Engine/ImageSpace/MenuSteps.inl"
 
 		/** @brief The engine made its targets again: the stages' steps register again at the next frame, against the new imports. */
 		void ReregisterSteps()
 		{
 			World().registered = false;
 			Chain().registered = false;
+			Start().registered = false;
+			Menu().registered = false;
 		}
 
 		/** @brief Where a withheld draw goes: its pass, and the client built on first sight it belongs to (null: the main batch). */
@@ -3124,6 +3149,27 @@ namespace RenderGraph::Engine::ImageSpace
 		}
 
 		/**
+		 * @brief An ImageSpace draw or dispatch with no CS pass in native mode with CS's stages: a mismatch (NoPass; fatal in development
+		 * builds, logged once in release). It draws nothing. The message names the shader and, for the diagnosis only, what the engine bound.
+		 */
+		void NoPassDraw(const RE::BSImagespaceShader* a_shader, bool a_compute, std::string_view a_why)
+		{
+			const auto& shadow = RE::BSGraphics::RendererShadowState::GetSingleton()->GetRuntimeData();
+			std::string inputs;
+			for (std::uint32_t slot = 0; slot < kMaxSlots; ++slot) {
+				auto* view = a_compute ? shadow.CSTexture[slot] : shadow.PSTexture[slot];
+				if (!view)
+					continue;
+				const auto input = InputOfView(view);
+				inputs += fmt::format("{}t{} {}", inputs.empty() ? "" : ", ", slot, input >= 0 ? NameForLog(input) : std::string("a loaded texture"));
+			}
+			const char* name = a_shader && a_shader->name ? a_shader->name : "an unnamed ImageSpace shader";
+			Frame::Driver::NoteTapError(Frame::Driver::TapError::NoPass, Frame::SegmentId::Count,
+				fmt::format("{} {} has no CS pass ({}; {} rt{}, reads {}); it draws nothing", name, a_compute ? "dispatch" : "draw", a_why, a_compute ? "u0 of" : "into",
+					a_compute ? TargetOfUav(shadow.CSUAV[0]) : static_cast<std::int32_t>(shadow.renderTargets[0]), inputs.empty() ? std::string("nothing") : inputs));
+		}
+
+		/**
 		 * @brief The engine's draw of the current effect: taken into the batch (true; the caller skips the engine's draw) or left to the
 		 * engine (false, after running any pending batch so the engine's order holds).
 		 */
@@ -3142,11 +3188,20 @@ namespace RenderGraph::Engine::ImageSpace
 				++state.taken;
 				return true;
 			}
-			// A RenderWorld scope's or the world post chain's step: a CS pass; the hook only stages its constants.
+			// A RenderWorld scope's, the world post chain's, the start stage's or a menu composite's step: a CS pass; the hook only stages
+			// its constants.
+			if (StartStepScope() != WorldScope::None)
+				return TakeStartStep(scope.effect, false, {});
 			if (const auto world = WorldStepScope(); world != WorldScope::None)
 				return TakeWorldStep(world, scope.effect, false, {});
 			if (ChainStepNow())
 				return TakeChainStep(scope.effect, false, {});
+			if (StepsOnly() && MenuStepNow(scope.effect))
+				return TakeMenuStep(scope.effect, false, {});
+			if (StepsOnly()) {
+				NoPassDraw(scope.shader, false, "outside every CS step");
+				return true;
+			}
 			ShapeKey key{};
 			OutputView output;
 			std::string_view refusal;
@@ -3225,6 +3280,11 @@ namespace RenderGraph::Engine::ImageSpace
 			scope.drew = true;
 			const auto& effect = kEffects[scope.effect];
 			++state.drawIndex;
+			if (StartStepScope() != WorldScope::None) {
+				if (a_x == 0 || a_y == 0 || a_z == 0)
+					return true;  // nothing to dispatch: the engine's call would do nothing either
+				return TakeStartStep(scope.effect, true, { a_x, a_y, a_z });
+			}
 			if (const auto world = WorldStepScope(); world != WorldScope::None) {
 				if (a_x == 0 || a_y == 0 || a_z == 0)
 					return true;  // nothing to dispatch: the engine's call would do nothing either
@@ -3234,6 +3294,14 @@ namespace RenderGraph::Engine::ImageSpace
 				if (a_x == 0 || a_y == 0 || a_z == 0)
 					return true;  // nothing to dispatch: the engine's call would do nothing either
 				return TakeChainStep(scope.effect, true, { a_x, a_y, a_z });
+			}
+			if (StepsOnly()) {
+				if (a_x == 0 || a_y == 0 || a_z == 0)
+					return true;
+				if (MenuStepNow(scope.effect))
+					return TakeMenuStep(scope.effect, true, { a_x, a_y, a_z });
+				NoPassDraw(scope.shader, true, "outside every CS step");
+				return true;
 			}
 			ShapeKey key{};
 			std::string_view refusal;
@@ -3415,6 +3483,9 @@ namespace RenderGraph::Engine::ImageSpace
 		/** @brief Whether a_shader is a selected effect drawn outside every scope, whose call is a scope of its own (ScopeKind::Effect). */
 		bool OwnsScope(const RE::BSImagespaceShader* a_shader)
 		{
+			// Native mode with CS's stages: every call outside the scopes is one of its own, so its draw reaches a step or is a mismatch.
+			if (StepsOnly())
+				return true;
 			const auto index = EffectOf(a_shader);
 			return index >= 0 && kEffects[static_cast<std::size_t>(index)].ownScope && IS().enabled[static_cast<std::size_t>(index)];
 		}
@@ -3434,14 +3505,17 @@ namespace RenderGraph::Engine::ImageSpace
 			}
 			if (!OwnsScope(a_shader))
 				return false;
-			const auto id = kEffects[static_cast<std::size_t>(EffectOf(a_shader))].id;
-			const bool flowCopy = id == Effects::ISCopySubRegionCS && FlowCopyBound();
+			const auto index = EffectOf(a_shader);
+			const auto id = index >= 0 ? kEffects[static_cast<std::size_t>(index)].id : Effects::ISCopy;
+			const bool flowCopy = index >= 0 && id == Effects::ISCopySubRegionCS && FlowCopyBound();
 			EnterScope(flowCopy ? ScopeKind::FlowMap : ScopeKind::Effect);
 			if (state.scopeDepth == 0)
 				return false;
+			const FlowCopyGuard flow(flowCopy);
 			// The RenderWorld scopes drawn as CS passes: the snow pass (or its copy, between RenderSSAO's two calls) and the water
 			// blend, each its own call's scope.
-			const WorldScope world = id == Effects::ISWaterBlend                                                                 ? WorldScope::WaterBlend :
+			const WorldScope world = index < 0                     ? WorldScope::None :
+			                         id == Effects::ISWaterBlend                                                                 ? WorldScope::WaterBlend :
 			                         id == Effects::ISSnowSSS || (id == Effects::ISCopySubRegionCS && !flowCopy && state.snowWindow) ? WorldScope::Snow :
 			                                                                                                                  WorldScope::None;
 			if (world == WorldScope::Snow)
@@ -3559,6 +3633,7 @@ namespace RenderGraph::Engine::ImageSpace
 				EnterScope(ScopeKind::HDR);
 				{
 					const ChainHdrGuard chain;
+					const MenuHdrGuard menu;
 					func(a_effect, a_quad, a_param);
 					LeaveScope();
 				}
@@ -3647,8 +3722,25 @@ namespace RenderGraph::Engine::ImageSpace
 			static void thunk(void* a_system)
 			{
 				EnterScope(ScopeKind::Water);
-				func(a_system);
-				LeaveScope();
+				{
+					const WaterUpdateGuard water;
+					func(a_system);
+					LeaveScope();
+				}
+			}
+			static inline REL::Relocation<decltype(thunk)> func;
+		};
+
+		/**
+		 * @brief ImageSpaceManager::RenderEffect (99025 / 105676: manager, effect index, source, destination, a parameter): its source and
+		 * destination are the variant of a copy outside the world chain (MenuSteps.inl).
+		 */
+		struct RenderEffect
+		{
+			static void thunk(void* a_manager, std::uint32_t a_effect, std::uint64_t a_source, std::uint64_t a_destination, std::uint64_t a_param)
+			{
+				const MenuEffectCall call(a_effect, static_cast<std::int32_t>(a_source), static_cast<std::int32_t>(a_destination));
+				func(a_manager, a_effect, a_source, a_destination, a_param);
 			}
 			static inline REL::Relocation<decltype(thunk)> func;
 		};
@@ -3710,6 +3802,10 @@ namespace RenderGraph::Engine::ImageSpace
 						}
 						if (TakeDraw())
 							return;
+					} else if (StepsOnly() && (quad || geometry) && state.current && !state.current->compute) {
+						// An ImageSpace effect's draw no step takes (an effect CS does not cover, or one it cannot take): a mismatch.
+						NoPassDraw(state.current->shader, false, state.current->covered ? state.lastRefusal.empty() ? "not taken" : state.lastRefusal.c_str() : "an effect CS does not cover");
+						return;
 					} else
 						Flush();
 					EngineDraw(false, {}, [&] { func(a_renderer, a_shape, a_start, a_triangles); });
@@ -3737,6 +3833,9 @@ namespace RenderGraph::Engine::ImageSpace
 					if (state.scopeDepth > 0 && state.current && state.current->eligible && state.current->compute && !state.current->drew) {
 						if (TakeDispatch(a_x, a_y, a_z))
 							return;
+					} else if (StepsOnly() && state.current && state.current->compute) {
+						NoPassDraw(state.current->shader, true, state.current->covered ? "not taken" : "an effect CS does not cover");
+						return;
 					} else
 						Flush();
 					EngineDraw(true, {}, [&] { func(a_renderer, a_shader, a_x, a_y, a_z); });
@@ -3767,10 +3866,11 @@ namespace RenderGraph::Engine::ImageSpace
 		stl::detour_thunk<DrawTriShape>(REL::RelocationID(75477, 77263));
 		stl::detour_thunk<DispatchCSShader>(REL::RelocationID(75532, 77329));
 		stl::detour_thunk<Scissor>(REL::RelocationID(75564, 77365));
+		stl::detour_thunk<RenderEffect>(REL::RelocationID(99025, 105676));
 		auto& state = IS();
 		state.installed = ShaderRender::func.address() && HDRRender::func.address() && PreTonemapComposites::func.address() && ExplicitRender::func.address() &&
 		                  DispatchComputeShader::func.address() && RenderSSAO::func.address() && RenderReflections::func.address() && WaterDisplacement::func.address() &&
-		                  DrawTriShape::func.address() && DispatchCSShader::func.address() && Scissor::func.address();
+		                  DrawTriShape::func.address() && DispatchCSShader::func.address() && Scissor::func.address() && RenderEffect::func.address();
 		if (state.installed)
 			logger::info(
 				"[ORG] ImageSpace: hooks installed (BSImagespaceShader::Render and its explicit-target form, DispatchComputeShader, the HDR effect, the pre-tonemap "
@@ -3838,13 +3938,9 @@ namespace RenderGraph::Engine::ImageSpace
 			MakeFlowMap();
 			PublishFlowMap();
 		}
-		// The session's shapes, registered once: the manifest's, the flow copy's and the shapes they imply. Their programs are queued
-		// now when the engine's effects exist (else at the first ImageSpace call); each pass takes its own at the graph's first build.
-		ReadManifest();
-		RegisterClient(ShapesToRegister());
-		QueuePrograms();
 		// The post chain and the RenderWorld scopes are CS passes of the post and deferred+water stages when those exist and the post
-		// chain's hooks run, registered at the first world frame (CheckChainSteps, CheckWorldSteps).
+		// chain's hooks run, registered at the first world frame (CheckChainSteps, CheckWorldSteps); the water effects are the start
+		// stage's (CheckStartSteps), and the menus' composites a client on the anchor's own epoch, registered now (RegisterMenuSteps).
 		const auto epochs = FrameAnchors::SegmentEpochs();
 		if (Frame::PostChain::On() && std::ranges::find(epochs, RenderGraphRuntime::EpochOf(RenderGraphRuntime::Segment::DeclaredPost)) != epochs.end()) {
 			for (std::size_t p = 0; p < state.post.size(); ++p) {
@@ -3856,6 +3952,20 @@ namespace RenderGraph::Engine::ImageSpace
 			state.postOn = std::ranges::all_of(state.post, [](const PostClient& a_client) { return a_client.gate && a_client.latch; });
 			Chain().on = state.postOn;
 			World().on = state.postOn && std::ranges::find(epochs, RenderGraphRuntime::EpochOf(RenderGraphRuntime::Segment::DeclaredDeferred)) != epochs.end();
+			Start().on = state.postOn && std::ranges::find(epochs, RenderGraphRuntime::EpochOf(RenderGraphRuntime::Segment::DeclaredStart)) != epochs.end();
+			Menu().on = state.postOn;
+		}
+		if (StepsOnly()) {
+			// Native mode with CS's stages: no main client, no shape manifest. The menus' composites join the setup's build point.
+			if (globals::game::renderer->GetRuntimeData().renderTargets[RE::RENDER_TARGET::kMAIN].texture && RE::ImageSpaceManager::GetSingleton())
+				RegisterMenuSteps();
+			logger::info("[ORG] ImageSpace: native mode with CS's stages: every ImageSpace draw is a CS step's pass (no main client, no shape manifest)");
+		} else {
+			// The session's shapes, registered once: the manifest's, the flow copy's and the shapes they imply. Their programs are queued
+			// now when the engine's effects exist (else at the first ImageSpace call); each pass takes its own at the graph's first build.
+			ReadManifest();
+			RegisterClient(ShapesToRegister());
+			QueuePrograms();
 		}
 	}
 
@@ -3877,6 +3987,25 @@ namespace RenderGraph::Engine::ImageSpace
 			chain.inEndOfFrame = false;
 			chain.plan.valid = false;
 		}
+	}
+
+	void OnFrameBegin()
+	{
+		// The menu composites register at the first frame of the session (the startup logo's), so their build is ready for the main menu.
+		if (Usable() && StepsOnly())
+			CheckMenuSteps();
+	}
+
+	void OnMenuEndOfFrame(bool a_begin, std::int32_t a_source, std::int32_t a_final)
+	{
+		auto& menu = Menu();
+		if (!menu.on) {
+			menu.inEndOfFrame = false;
+			return;
+		}
+		menu.inEndOfFrame = a_begin;
+		menu.source = a_begin ? a_source : -1;
+		menu.final = a_begin ? a_final : -1;
 	}
 
 	std::string_view AdaptedLuminanceOf(const ID3D11ShaderResourceView* a_view)
@@ -3911,6 +4040,8 @@ namespace RenderGraph::Engine::ImageSpace
 	void Reserve() {}
 	void Setup() {}
 	void OnEndOfFrame(bool, std::int32_t, std::int32_t) {}
+	void OnMenuEndOfFrame(bool, std::int32_t, std::int32_t) {}
+	void OnFrameBegin() {}
 	std::string_view AdaptedLuminanceOf(const ID3D11ShaderResourceView*) { return {}; }
 	std::span<const std::string_view> AdaptedLuminanceIds() { return {}; }
 	std::string Status() { return "ImageSpace: no render graph in this build"; }

@@ -25,6 +25,12 @@ enum class WorldScope : std::uint8_t
 	Screenshot,  // the save-game screenshot's copy
 	LdrSlot,     // an end-of-frame slot's effect after the tonemap (usesLDR)
 	Upsample,    // the dynamic-resolution upsample
+	// The start stage's water effects (StartSteps.inl).
+	WaterDisplacement,  // the water displacement simulation (the water system's update, 31385 / 32176)
+	FlowCopy,           // one of Main::RenderWaterEffects' copies into the flow map (35561 / 36560)
+	// The menus' and the loading screen's composites (MenuSteps.inl).
+	MenuHdr,   // the HDR effect inside a menu scene's end-of-frame call (UI3DSceneManager::Render)
+	MenuCopy,  // a copy the engine makes outside the world chain (ImageSpaceManager::RenderEffect with ISCopy)
 };
 
 /** @brief How a step's viewport follows the resolution. */
@@ -80,6 +86,8 @@ struct StepDesc
 	std::array<StepSampler, kMaxSlots> samplers{};
 	std::uint32_t blend = PackBlend(0, 0, 2, 0);  // no blending, all channels written (the scopes' draws)
 	StepArea area = StepArea::Full;
+	// A bit per slot read by the heap index the latch holds (EffectInfo::latched: a loaded texture, a frame input), with its sampler.
+	std::uint32_t latched = 0;
 };
 
 /** @brief kEffects' index of an engine effect, or -1. */
@@ -137,6 +145,12 @@ std::shared_ptr<const Spec> MakeStepSpec(const StepDesc& a_desc, std::uint32_t a
 		}
 	}
 	for (std::uint32_t slot = 0; slot < kMaxSlots; ++slot) {
+		if (a_desc.latched & (1u << slot)) {
+			key.inputs[slot] = kLatchSourceInput;
+			key.address[slot] = a_desc.samplers[slot].address;
+			key.filter[slot] = a_desc.samplers[slot].filter;
+			continue;
+		}
 		if (!a_desc.inputs[slot])
 			continue;
 		key.inputs[slot] = name(a_desc.inputs[slot]);

@@ -67,6 +67,10 @@
  * their draws are not shapes of the manifest. CS declares each engine effect step as a pass of its own (WorldSteps.inl,
  * ChainSteps.inl), held by a CS stage (FrameAnchors::SegmentsOn); the engine's draw is withheld and its hook only stages the
  * constants the engine computed for that step. A step CS has no pass for is a mismatch (Frame::Driver::NoteTapError, NoPass).
+ * The water effects at the frame's start are steps of the start stage (StartSteps.inl), and the menus' and the loading screen's
+ * composites, the face tint and UI3DSceneManager's end-of-frame call are steps of a client on the ImageSpace anchor's own epoch
+ * (MenuSteps.inl). In native mode with CS's stages that is every ImageSpace draw: there is no main client, no shape built on first
+ * sight and no shape manifest, and any other ImageSpace draw is NoPass. The main client and the manifest above are guest mode's.
  *
  * Switches: CS_ORG_IMAGESPACE=1 (default off: nothing is hooked). Diagnostics: CS_ORG_IMAGESPACE_EFFECTS=<list> (engine names,
  * effect names or the groups hdr, bloom, composite, sao, ssr; unset or "all": every covered effect) narrows the port to bisect an
@@ -90,7 +94,10 @@ namespace RenderGraph::Engine::ImageSpace
 	/** @brief State::Setup, before the render graph initializes: the ImageSpace anchor is reserved. */
 	void Reserve();
 
-	/** @brief State::Setup, once the graph is up: the latch, the run gate, the manifest's shapes registered and their programs queued. */
+	/**
+	 * @brief State::Setup, once the graph is up: the latch and the run gates; in guest mode the manifest's shapes registered and their
+	 * programs queued, in native mode with CS's stages the step clients' state (no manifest).
+	 */
 	void Setup();
 
 	/**
@@ -98,6 +105,15 @@ namespace RenderGraph::Engine::ImageSpace
 	 * (its arguments), where CS plans the chain's targets for the frame; false at its return. Render owner.
 	 */
 	void OnEndOfFrame(bool a_begin, std::int32_t a_source, std::int32_t a_final);
+
+	/**
+	 * @brief RenderEndOfFrameEffects outside the world chain (a menu scene's, from UI3DSceneManager::Render): a_begin at its entry with its
+	 * source and final targets, false at its return. Its HDR effect's draws are the menu composites' steps. Render owner.
+	 */
+	void OnMenuEndOfFrame(bool a_begin, std::int32_t a_source, std::int32_t a_final);
+
+	/** @brief Renderer::Begin, after the frame's schedule was chosen (Frame::Driver): the menu composites' registration is checked. Render owner. */
+	void OnFrameBegin();
 
 	/**
 	 * @brief The published id of the CS target that stands for the engine's adapted luminance target a_view is a view of (the post chain

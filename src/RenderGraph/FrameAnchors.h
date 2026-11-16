@@ -769,6 +769,13 @@ namespace FrameAnchors
 	 */
 	bool BuildPending(std::string_view a_caller);
 
+	/**
+	 * @brief After setup's build point, before the first frame: the UI stage's recordings of the first frames' description (a Bink movie or
+	 * the main menu) are made on the host's thread for every frame slot and installed as their schedule, so the first frame draws the
+	 * stage (the session's first movie frame). Setup waits for them here; no frame does. Render owner.
+	 */
+	void PrimeStages(std::string_view a_caller);
+
 	/** @brief Logs each reserved anchor's peak runs a frame (CS_ORG_EPOCH_STATS's report). Render thread. */
 	void LogRunStats();
 
