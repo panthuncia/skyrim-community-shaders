@@ -2,6 +2,7 @@
 
 #include "Globals.h"
 #include "RenderGraph/DxvkOrgInterop.h"
+#include "RenderGraph/Engine/Native/Native.h"
 
 namespace Vram
 {
@@ -36,6 +37,9 @@ namespace Vram
 				return exports;
 
 			static const Exports none;
+			// Native mode never loads DXVK: no module lookup on every call (an owner scope is opened for each engine draw).
+			if (RenderGraph::Engine::Native::Active())
+				return none;
 			HMODULE d3d11 = ::GetModuleHandleW(L"dxvk_d3d11.dll");
 			if (!d3d11)
 				return none;

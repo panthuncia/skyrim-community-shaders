@@ -266,7 +266,8 @@ namespace RenderGraph::Engine::Constants
 			{
 				if (a_slot.chunk >= frameChunks.size())
 					return {};
-				return { frameChunks[a_slot.chunk]->Bytes().data() + a_slot.offset, a_slot.size };
+				// The CPU copy: the chunk itself is GPU-visible upload memory, slow to read back.
+				return { mirrors[a_slot.chunk].get() + a_slot.offset, a_slot.size };
 			}
 
 			Location Where(const SlotConstants& a_slot) const
@@ -468,7 +469,11 @@ namespace RenderGraph::Engine::Constants
 						return std::nullopt;
 					at = 0;
 				}
-				std::memcpy(frameChunks.back()->Bytes().data() + at, a_data, a_size);
+				// Into the chunk's CPU copy first, then from there into the chunk: the source is read once (it may be the engine's
+				// mapping, upload memory too), and Bytes reads the copy.
+				std::byte* mirror = mirrors[frameChunks.size() - 1].get() + at;
+				std::memcpy(mirror, a_data, a_size);
+				std::memcpy(frameChunks.back()->Bytes().data() + at, mirror, a_size);
 				offset = at + a_size;
 				return std::pair{ static_cast<std::uint16_t>(frameChunks.size() - 1), at };
 			}
@@ -497,6 +502,8 @@ namespace RenderGraph::Engine::Constants
 						logger::info("[ORG] engine constants: the ring has {} chunks ({} MiB)", chunksMade, (std::uint64_t(chunksMade) * kChunkBytes) >> 20);
 				}
 				frameChunks.push_back(std::move(chunk));
+				if (mirrors.size() < frameChunks.size())
+					mirrors.push_back(std::make_unique<std::byte[]>(kChunkBytes));
 				offset = 0;
 				peakChunksThisFrame = (std::max)(peakChunksThisFrame, static_cast<std::uint32_t>(frameChunks.size()));
 				return true;
@@ -621,6 +628,8 @@ namespace RenderGraph::Engine::Constants
 
 			// The ring.
 			std::vector<std::shared_ptr<org::LatchBlock>> frameChunks;
+			// Each frame chunk's CPU copy, by its index in the frame: what Bytes answers. Kept for the session (the frame's peak count).
+			std::vector<std::unique_ptr<std::byte[]>> mirrors;
 			std::uint32_t offset = 0;
 			std::mutex freeMutex;
 			std::vector<std::shared_ptr<org::LatchBlock>> freeChunks;
