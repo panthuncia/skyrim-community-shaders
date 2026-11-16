@@ -88,8 +88,8 @@ namespace RenderGraph::ExternalWork
 	bool Submit(std::string_view a_label, std::span<const Access> a_accesses, const std::function<void(rhi::CommandList&)>& a_record,
 		std::shared_ptr<const void> a_keepAlive, std::span<const rhi::TimelinePoint> a_signals)
 	{
-		// A region's held anchor runs go first: this work must follow them on the GPU.
-		::FrameAnchors::FlushRegions("external work");
+		// The stages whose commit point this is commit first: this work must follow them on the GPU.
+		::FrameAnchors::BeforeGpuWork("external work");
 		// So do the epochs still on the submission thread (the render owner's only: another thread's work has no order against them).
 		RenderGraphRuntime::Get().DrainSubmissions("external work");
 		::RenderGraph::FrameSequence::NoteBoundary(fmt::format("external work: {}", a_label));

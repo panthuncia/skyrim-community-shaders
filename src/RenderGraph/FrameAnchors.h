@@ -61,15 +61,6 @@ namespace RenderGraph
  * ("cs.org.frame-anchors") makes every client's passes at each build; a client change rebuilds only its anchors' epochs. The ordering
  * rule of each anchor is in docs/development/org-extension-api-notes.md, "Attaching passes to the frame".
  *
- * Regions (native mode only; docs/development/org-native-frame-graph.md, "Phase 4 items 1 and 2 lane"): each
- * anchor also belongs to one of six regions (shadows, pre-main, deferred, engine draws, post, interface), and each region has an
- * epoch of its own. An anchor whose passes are all gated (PassDesc::gated) has them in its region's epoch instead of its own. A run
- * of such an anchor does not submit: its commits write into the region's held run (org::GraphHost::HoldEpochTicket), and the
- * region submits once, just before any other GPU work (another epoch, external commands, a build point, the present). So
- * consecutive runs of a region's anchors share one execution, and the GPU still sees every run's work where it saw it before. A
- * run joins the held execution only when its anchor comes later in the region's order (or repeats, with every client agreeing
- * through ClientDesc::joins), none of its clients committed already (unless it joins), and CS's shared constants did not change.
- *
  * Threads: everything here is called on the render thread (IsRenderOwner: the main thread, or with CS_ORG_LOADING_THREAD=1 the
  * thread that last began an engine frame). With that switch the state is also under a mutex, so a feature's Register from the
  * main thread during a load never interleaves with a loading-screen run. A pass's Prepare and Record run on the graph host's
@@ -272,9 +263,7 @@ namespace FrameAnchors
 		bool atExecution = false;
 		// Every draw or dispatch the pass records goes through its client's run gate (or a latch the commit writes, which reads zero
 		// in a run whose commit did not write it), and it clears nothing by itself: in a run that did not open it, it does nothing.
-		// An anchor whose passes are all gated can run in a frame phase's execution with other anchors (phases, above). AnchorPasses'
-		// Builder sets it. A client with gated passes at several anchors gives each anchor its own gate entries: a phase may hold runs
-		// of two of them, and each anchor's passes must then do only their own run's work.
+		// AnchorPasses' Builder sets it. Nothing reads it since the frame phases were removed; it stays as the pass's description.
 		bool gated = false;
 		// With atExecution: every draw and dispatch of the pass takes its counts from its run gate (indirect), and it records no other
 		// work. Recorded ahead, it does nothing on a run whose commit left its entries closed. So native mode records it ahead, in the
@@ -321,11 +310,6 @@ namespace FrameAnchors
 		bool sharedConstants = false;
 		std::vector<std::shared_ptr<RenderGraph::RunGate>> gates;
 		std::function<void(const Point&)> executed;
-		// Regions only: asked at a run whose region execution already holds a commit of this client (an earlier run of the same
-		// anchor, or another of its anchors in the region). True lets this run's commit write into the same run as well: what it opens
-		// and writes does not overlap what the earlier commits of this execution opened and wrote, and its passes come after theirs.
-		// Null: never, and the region submits what it holds first.
-		std::function<bool()> joins;
 		// Declared segments (SegmentsOn): whether the client's passes do work in this frame. Read at the frame's start
 		// (BeginFrame), from the client's settings and the scene state it holds, never from what this frame's hooks deliver. Off: its
 		// passes record only their barriers in the segment's recording, and its commit is not called; an active client at the tap is
@@ -630,12 +614,9 @@ namespace FrameAnchors
 	 */
 	void ReleaseImport(std::string_view a_id);
 
-	/** @brief Whether the frame phases are on (native mode, with epochs and async epochs). Any thread. */
-	bool RegionsOn();
-
 	/**
 	 * @brief Whether the declared frame's stages are on (docs/development/org-native-frame-graph.md, "The recipe"): native mode unless
-	 * CS_ORG_SEGMENTS=0, with epochs, async epochs and replayable recordings, the phases off. Each CS stage is one graph, revision-driven,
+	 * CS_ORG_SEGMENTS=0, with epochs, async epochs and replayable recordings. Each CS stage is one graph, revision-driven,
 	 * recorded on the host's thread for each description of it (RenderGraph::Frame::Description) and kept per frame slot. Its steps are
 	 * hooks in frame order: anchors it holds wholly (which then have no epoch of their own), named clients of shared anchors, and other
 	 * modules' epochs (SetForeignPasses). A tap stages its clients' values into the frame slot's staging run (the frame inputs); no
@@ -757,19 +738,12 @@ namespace FrameAnchors
 	RunResult TapForeign(std::uint32_t a_segment, const std::function<void()>& a_commit);
 
 	/**
-	 * @brief Phases: the phase execution held now (if any) is submitted, because GPU work that must follow it is about to be
-	 * submitted (a_why, a static string, counted in the phase statistics). a_segment: the epoch about to be submitted. The held
-	 * execution is not submitted when that is the held phase's own epoch, or a DCLF epoch the held phase comes after in the frame.
-	 * Render owner only; nothing elsewhere or when nothing is held. Cheap when phases are off. RenderGraphRuntime calls it before
-	 * every epoch, external epoch and external commands and at build points; the present hook calls it before the present.
+	 * @brief GPU work is about to be submitted (a_why, a static string; a_segment: the epoch about to be submitted, if one). The stages
+	 * whose commit point it is commit first (the start, pre-main, deferred+water, sun and UI stages), and work submitted while a stage
+	 * holds staged values is counted for the census. Render owner only. RenderGraphRuntime calls it before every epoch, external epoch
+	 * and external commands and at build points; the present hook calls it before the present.
 	 */
-	void FlushRegions(const char* a_why, std::uint32_t a_segment = UINT32_MAX);
-
-	/**
-	 * @brief Phases: epoch a_segment was submitted. A DCLF epoch moves the frame into the next phase: the anchor runs after it go to
-	 * that phase's execution. Render owner. RenderGraphRuntime calls it after FlushRegions for every epoch.
-	 */
-	void NoteEpochSubmitted(std::uint32_t a_segment);
+	void BeforeGpuWork(const char* a_why, std::uint32_t a_segment = UINT32_MAX);
 
 	// What RenderGraphRuntime asks of the anchors.
 

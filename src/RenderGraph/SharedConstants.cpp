@@ -54,7 +54,7 @@ namespace SharedConstants
 		{
 			std::shared_ptr<const Buffers> buffers;
 			bool failed = false;
-			// What the last Commit wrote, for CheckAfterRun and CommittedMatches.
+			// What the last Commit wrote, for CheckAfterRun.
 			std::array<std::vector<std::byte>, kBlocks> committed;
 			bool committedThisRun = false;
 			std::uint32_t checks = 0;
@@ -276,27 +276,12 @@ namespace SharedConstants
 			const auto bytes = sources[i].first((std::min)(sources[i].size(), std::size_t{ buffers.bytes[i] }));
 			if (!bytes.empty())
 				buffers.latches[a_point]->Write(run, buffers.offsets[i], bytes);
-			// Kept for the check and for regions' CommittedMatches (a few KiB).
+			// Kept for the check (a few KiB).
 			state.committed[i].assign(bytes.begin(), bytes.end());
 		}
 		state.committedThisRun = true;
 	}
 
-	bool CommittedMatches()
-	{
-		auto& state = Shared();
-		if (!state.buffers)
-			return true;
-		const auto& buffers = *state.buffers;
-		const auto sources = Sources();
-		for (std::uint32_t i = 0; i < kBlocks; ++i) {
-			const auto bytes = sources[i].first((std::min)(sources[i].size(), std::size_t{ buffers.bytes[i] }));
-			const auto& committed = state.committed[i];
-			if (bytes.size() != committed.size() || (!bytes.empty() && std::memcmp(bytes.data(), committed.data(), bytes.size()) != 0))
-				return false;
-		}
-		return true;
-	}
 
 	void CheckAfterRun()
 	{

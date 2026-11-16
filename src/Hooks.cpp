@@ -628,8 +628,8 @@ struct IDXGISwapChain_Present
 							(void)FrameAnchors::TapPoint(static_cast<std::uint32_t>(RenderGraphRuntime::Segment::DeclaredUi));
 							(void)FrameAnchors::TapPoint(static_cast<std::uint32_t>(RenderGraphRuntime::Segment::DeclaredMenuUi));
 						}
-						// Regions: what a region still holds (the overlay, HDR output, the capture) reaches the GPU before the present.
-						FrameAnchors::FlushRegions("the present");
+						// The UI stages commit before the present (BeforeGpuWork).
+						FrameAnchors::BeforeGpuWork("the present");
 						// The frame's epochs still on the submission thread reach the queue before the present. A loading screen's thread
 						// presenting without owning rendering drains too: it copies what the owner's epochs draw.
 						// Native mode with CS_ORG_QUEUE_PRESENT: the render owner's present is an entry on the submission thread's queue,

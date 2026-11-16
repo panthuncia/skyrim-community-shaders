@@ -2400,8 +2400,8 @@ bool RenderGraphRuntime::Initialize()
 		desc.keepGatedInline = state->native && Switches::Number("CS_ORG_KEEP_GATED", 1) != 0;
 		// CS_ORG_SUBMIT_THREAD (native mode, default on, =0 off): an epoch's commit runs on the render thread, and the rest of its
 		// submission (admission, passes recorded at execution, queue submissions) on a submission thread of the host's
-		// (Desc::submissionThread). Off with the phase epochs (CS_ORG_PHASES=1). Guest mode submits on the render thread.
-		desc.submissionThread = state->native && Switches::Number("CS_ORG_SUBMIT_THREAD", 1) != 0 && Switches::Number("CS_ORG_PHASES", 0) == 0;
+		// (Desc::submissionThread). Guest mode submits on the render thread.
+		desc.submissionThread = state->native && Switches::Number("CS_ORG_SUBMIT_THREAD", 1) != 0;
 		if (desc.submissionThread)
 			logger::info("[ORG] native: epochs submit on a submission thread (CS_ORG_SUBMIT_THREAD=0 turns it off)");
 		// CS_ORG_MERGE_TICKETS (native mode, default on, =0 off): with the submission thread and coalesced submissions, the tickets
@@ -2825,8 +2825,8 @@ std::uint64_t RenderGraphRuntime::FlushPendingStreamWork()
 {
 	if (!IsActive())
 		return 0;
-	// Regions: a region's held execution is GPU work the wait may depend on.
-	FrameAnchors::FlushRegions("a wait for the GPU");
+	// A stage whose commit point this is commits before the wait (BeforeGpuWork).
+	FrameAnchors::BeforeGpuWork("a wait for the GPU");
 	// So are the epochs still on the submission thread: the wait is for work on the device's queues.
 	DrainSubmissions("a wait for the GPU");
 	RenderGraph::FrameSequence::NoteBoundary("a wait for the GPU");
@@ -2901,8 +2901,8 @@ void RenderGraphRuntime::PollEpochFailures()
 
 bool RenderGraphRuntime::GuardedBuild(const std::function<bool()>& a_build)
 {
-	// Regions: a build of a region's epoch gives its held run back, so a held execution is submitted first.
-	FrameAnchors::FlushRegions("a build point");
+	// The stage commit points and the open-stage census (BeforeGpuWork).
+	FrameAnchors::BeforeGpuWork("a build point");
 	RenderGraph::FrameSequence::NoteBoundary("a build point");
 	try {
 		return a_build();
@@ -3026,8 +3026,8 @@ void RenderGraphRuntime::SignalFramePace(bool a_active)
 
 void RenderGraphRuntime::SealPresented()
 {
-	// Regions: the present hook submitted what a region held; anything held since (a run after the present) goes before the seal.
-	FrameAnchors::FlushRegions("the frame's end");
+	// The stage commit points and the open-stage census (BeforeGpuWork), before the seal.
+	FrameAnchors::BeforeGpuWork("the frame's end");
 	if (impl && impl->epochStats) {
 		++impl->statFrames;
 		impl->statExecutions += impl->frameExecutions;
@@ -3204,8 +3204,7 @@ std::shared_ptr<org::ExternalEpochExecution> RenderGraphRuntime::ExecuteExternal
 	ZoneScopedN("CS.ORG.ExecuteExternalEpoch");
 	if (!IsActive() || !impl->asyncEpochs)
 		return nullptr;
-	FrameAnchors::FlushRegions("another epoch", static_cast<std::uint32_t>(a_segment));
-	FrameAnchors::NoteEpochSubmitted(static_cast<std::uint32_t>(a_segment));
+	FrameAnchors::BeforeGpuWork("another epoch", static_cast<std::uint32_t>(a_segment));
 	impl->CloseLeftOpenExternal();
 	impl->TakeCompletedEpochs();
 	std::function<void(org::RenderGraph&)> beforePrepare;
@@ -3314,9 +3313,8 @@ RenderGraphRuntime::EpochResult RenderGraphRuntime::TryExecuteEpoch(Segment a_se
 		return EpochResult::Stopped;
 	if (const auto starting = epochStartingHook.load(std::memory_order_acquire))
 		starting(a_segment);
-	// Regions (FrameAnchors.h): the anchor runs a region holds come before this epoch's work.
-	FrameAnchors::FlushRegions("another epoch", static_cast<std::uint32_t>(a_segment));
-	FrameAnchors::NoteEpochSubmitted(static_cast<std::uint32_t>(a_segment));
+	// The stages whose commit point this epoch is commit first (BeforeGpuWork).
+	FrameAnchors::BeforeGpuWork("another epoch", static_cast<std::uint32_t>(a_segment));
 	RenderGraph::FrameSequence::NoteEpoch(Impl::SegmentLabel(a_segment));
 	impl->CloseLeftOpenExternal();
 	// Diagnostics (dclf:epochs=0): Drawcall Limit Fix's epochs report submitted without submitting anything, so a run times the frame
@@ -3867,8 +3865,8 @@ bool RenderGraphRuntime::EmitExternalCommands(void (*a_record)(void* a_user, VkC
 	}
 	if (!impl->emitExternalCommands)
 		return false;
-	// Regions: commands put in the stream now come after the anchor runs a region holds.
-	FrameAnchors::FlushRegions("external commands");
+	// The stages whose commit point this is commit first (BeforeGpuWork).
+	FrameAnchors::BeforeGpuWork("external commands");
 	// DXVK copies the semaphores at the call: one scratch per calling thread (the render thread), reused.
 	thread_local std::vector<VkSemaphoreSubmitInfo> semaphores;
 	semaphores.clear();
@@ -3950,8 +3948,8 @@ bool RenderGraphRuntime::EmitCommands(void (*a_record)(void* a_user, rhi::Comman
 	if (!impl || !impl->host || (!impl->native && !impl->emitExternalCommands))
 		return false;
 	if (impl->native) {
-		// Regions: commands submitted now come after the anchor runs a region holds.
-		FrameAnchors::FlushRegions("commands");
+		// The stages whose commit point this is commit first (BeforeGpuWork).
+		FrameAnchors::BeforeGpuWork("commands");
 		// And after the epochs still on the submission thread.
 		DrainSubmissions("commands");
 		RenderGraph::FrameSequence::NoteBoundary(a_label ? a_label : "commands");

@@ -587,9 +587,6 @@ namespace RenderGraph::Engine::ImageSpace
 			// add to its list. A stage's commit moves its staging run's list onto the run that submits it (RunSlotsRegistry::MoveAll),
 			// so a staging run, which names the same run every frame, holds only the frame's own sources.
 			RunSlots<std::vector<std::shared_ptr<const void>>> heldSources;
-			// Regions: the last gate entry the last commit opened. A later batch joins the same run only with higher entries (its passes
-			// run after those already opened, and no entry is opened twice).
-			std::uint32_t committedLast = 0;
 			// The registration: every pass, by entry and by shape, and the engine objects its imports were made from (a resize check).
 			std::vector<std::shared_ptr<const Spec>> specs;
 			std::map<ShapeKey, const Spec*> specOf;
@@ -2325,14 +2322,6 @@ namespace RenderGraph::Engine::ImageSpace
 			client.commit = [](const FrameAnchors::Point&) {
 				auto& current = IS();
 				CommitBatch(current.batch, *current.latch, *current.gate);
-				if (!current.batch.empty())
-					current.committedLast = current.batch.back().entry;
-			};
-			// Regions: a batch joins the run an earlier batch of this frame committed into when its passes all come after that batch's
-			// (the batch's entries rise: AdmitShape starts a new batch at an entry at or before the last one).
-			client.joins = [] {
-				const auto& current = IS();
-				return !current.batch.empty() && current.batch.front().entry > current.committedLast;
 			};
 			client.executed = [](const FrameAnchors::Point&) { IS().executed = true; };
 			client.onFailed = [] {

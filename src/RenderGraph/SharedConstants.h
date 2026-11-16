@@ -88,11 +88,6 @@ namespace SharedConstants
 	 */
 	void Commit(std::uint32_t a_point = 0);
 
-	/**
-	 * @brief Render thread: whether the values D3D11 would read now are the ones the last Commit wrote. A region execution holding
-	 * several anchor runs (FrameAnchors.h, "Regions") uploads the shared constants once, so a run whose values differ starts another.
-	 */
-	bool CommittedMatches();
 
 	/**
 	 * @brief After an epoch that committed, on the render thread: CS_ORG_SHARED_CONSTANTS_CHECK=1 reads the D3D11 buffers back and

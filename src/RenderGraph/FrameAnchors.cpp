@@ -129,13 +129,11 @@ namespace FrameAnchors
 			Segment::DeclaredStart,            // the start stage (SegmentsOn): it commits just before DCLF's shadow view epoch
 			Segment::AnchorDecalQueries,       // the decal occlusion tests, at the frame's start before Main::Draw
 			Segment::AnchorEngineShadowClear,  // each shadow map slice's clear, before its draws (nominally here)
-			Segment::PhaseFrameStart,          // the frame-start phase: submitted at the shadow view epoch
 			Segment::ShadowView,
 			Segment::SkyOcclusion,
 			Segment::AnchorEarlyPrepass,      // Main::RenderShadowMaps returned
 			Segment::DeclaredPreDepth,        // the declared pre-depth segment (SegmentsOn): its tap is EarlyPrepass's hook
 			Segment::AnchorEngineFrameClear,  // the main depth's clear in Main::RenderDepth (and the frame's other clears)
-			Segment::PhasePreDepth,           // the pre-depth phase: submitted at the Z-prepass
 			Segment::ZPrepass,                // Main::RenderDepth
 			Segment::FirstPersonDepth,
 			Segment::AnchorEngineDepthCopy,  // Main::RenderDepth's end (and the later copies of the same depth)
@@ -148,14 +146,12 @@ namespace FrameAnchors
 			Segment::DeclaredPreMain,           // the declared pre-main segment (SegmentsOn): its end tap is the Prepass anchor's hook
 			Segment::AnchorPrepass,             // after every feature's Prepass
 			Segment::AnchorSky,                 // the main pass's sky batch, before Drawcall Limit Fix's colour epoch
-			Segment::PhasePreMain,              // the pre-main phase: submitted at the main opaque epoch
 			Segment::MainOpaque,
 			Segment::DeclaredDeferred,         // the deferred+water stage (SegmentsOn): it commits just before DCLF's forward epoch
 			Segment::AnchorDeferredPasses,     // EndDeferred, after the blended decals
 			Segment::AnchorDeferredComposite,  // DeferredPasses, after the D3D11 SSGI and SSS
 			Segment::AnchorPostComposite,      // DeferredPasses' end, after the composite
 			Segment::AnchorEngineDraws,        // the water, before the forward epoch (nominally here: the shadow masks and the water mask run before, the blood after)
-			Segment::PhaseDeferred,            // the deferred phase: submitted at the forward epoch
 			Segment::Forward,
 			Segment::DeclaredSun,          // the sun stage (SegmentsOn): the world's sun query, committed just before DCLF's first-person epoch
 			Segment::AnchorEngineQueries,  // the sun's occlusion queries, after Main::RenderWorld's accumulator (nominally here: a second runs later in the frame)
@@ -176,7 +172,6 @@ namespace FrameAnchors
 			Segment::AnchorOverlay,    // the overlay's ImGui draw, inside HDRDisplay's present chain
 			Segment::AnchorHDROutput,  // HDRDisplay's output composite, after the overlay
 			Segment::AnchorCapture,    // the screenshot capture, at the end of HDRDisplay's present chain
-			Segment::PhasePost,        // the post phase: after the first-person epoch (which does not submit it), submitted at the present
 		};
 
 		std::uint32_t RankOf(std::uint32_t a_segment)
@@ -190,102 +185,6 @@ namespace FrameAnchors
 		std::uint32_t IndexOf(Anchor a_anchor) { return static_cast<std::uint32_t>(a_anchor); }
 
 		std::uint32_t EpochOfAnchor(Anchor a_anchor) { return RenderGraphRuntime::EpochOf(static_cast<Segment>(SegmentOf(a_anchor))); }
-
-		/**
-		 * @brief The frame phases (native mode): the stretches of the frame between Drawcall Limit Fix's epochs. Each phase is one epoch whose
-		 * graph holds the passes of its member anchors. Every run of a member in that stretch writes into the phase's one held execution, which
-		 * is submitted when the frame reaches the next epoch (or the present). A run's phase is the stretch it runs in: the DCLF epoch submitted
-		 * last this frame (PhaseOfGap). Membership starts from the census (kPhaseOrder) and is learned: a gated anchor that runs in a phase
-		 * whose graph lacks it runs in its own epoch, and the phase's graph is built again with it.
-		 */
-		enum class Phase : std::uint8_t
-		{
-			FrameStart,  // before the shadow view: the reflection faces, the shadow clears (and every run of a frame without DCLF epochs)
-			PreDepth,    // between the shadow view and the Z-prepass: the early prepass, the main depth's clear
-			PreMain,     // between the Z-prepass and the main opaque epoch
-			Deferred,    // between the main opaque and the forward epochs
-			Post,        // after the forward epoch: placed after the first-person epoch, which does not submit it
-			Count,
-			None = Count,
-		};
-		constexpr std::uint32_t kPhases = static_cast<std::uint32_t>(Phase::Count);
-
-		constexpr std::array<SegmentNames, kPhases> kPhaseNames{ {
-			{ "CS phase: frame start", "CS phase: frame start inputs", "FramePhases::FrameStart / ", "cs.phase.frame-start" },
-			{ "CS phase: pre-depth", "CS phase: pre-depth inputs", "FramePhases::PreDepth / ", "cs.phase.pre-depth" },
-			{ "CS phase: pre-main", "CS phase: pre-main inputs", "FramePhases::PreMain / ", "cs.phase.pre-main" },
-			{ "CS phase: deferred", "CS phase: deferred inputs", "FramePhases::Deferred / ", "cs.phase.deferred" },
-			{ "CS phase: post", "CS phase: post inputs", "FramePhases::Post / ", "cs.phase.post" },
-		} };
-
-		std::uint32_t PhaseIndex(Phase a_phase) { return static_cast<std::uint32_t>(a_phase); }
-		Segment PhaseSegment(Phase a_phase) { return static_cast<Segment>(static_cast<std::uint32_t>(Segment::PhaseFrameStart) + PhaseIndex(a_phase)); }
-		std::uint32_t EpochOfPhase(Phase a_phase) { return RenderGraphRuntime::EpochOf(PhaseSegment(a_phase)); }
-
-		/**
-		 * @brief Each phase's anchors in the order they run there, from the frame sequence census (CS_ORG_FRAME_SEQUENCE, a world frame).
-		 * It is the seed of the phase's membership, and the order of its graph's passes. An anchor not listed comes after the listed ones, in
-		 * kTimeline's order. A run out of this order starts another execution of the phase.
-		 */
-		constexpr std::array<std::array<Anchor, 16>, kPhases> kPhaseOrder{ {
-			{ Anchor::DecalQueries, Anchor::ReflectionsPrepass, Anchor::EngineCubeClear, Anchor::SkyReflections, Anchor::EngineShadowClear, Anchor::Count,
-				Anchor::Count, Anchor::Count, Anchor::Count, Anchor::Count, Anchor::Count, Anchor::Count, Anchor::Count, Anchor::Count, Anchor::Count,
-				Anchor::Count },
-			{ Anchor::EarlyPrepass, Anchor::EngineFrameClear, Anchor::Count, Anchor::Count, Anchor::Count, Anchor::Count, Anchor::Count, Anchor::Count,
-				Anchor::Count, Anchor::Count, Anchor::Count, Anchor::Count, Anchor::Count, Anchor::Count, Anchor::Count, Anchor::Count },
-			{ Anchor::EngineDepthCopy, Anchor::DepthDone, Anchor::EngineFrameClear, Anchor::EngineDraws, Anchor::Prepass, Anchor::Sky, Anchor::Count,
-				Anchor::Count, Anchor::Count, Anchor::Count, Anchor::Count, Anchor::Count, Anchor::Count, Anchor::Count, Anchor::Count, Anchor::Count },
-			{ Anchor::EngineDepthCopy, Anchor::DeferredPasses, Anchor::DeferredComposite, Anchor::PostComposite, Anchor::EngineFrameClear, Anchor::EngineDraws,
-				Anchor::ImageSpace, Anchor::EngineCopy, Anchor::Count, Anchor::Count, Anchor::Count, Anchor::Count, Anchor::Count, Anchor::Count, Anchor::Count,
-				Anchor::Count },
-			{ Anchor::EngineQueries, Anchor::EngineDraws, Anchor::VolumetricLighting, Anchor::PostProcessing, Anchor::Upscale, Anchor::ImageSpace,
-				Anchor::EngineCopy, Anchor::EngineFrameClear, Anchor::Tonemap, Anchor::FrameGeneration, Anchor::MovieTiles, Anchor::Interface, Anchor::Present,
-				Anchor::Overlay, Anchor::HDROutput, Anchor::Capture },
-		} };
-
-		/** @brief The anchors kPhaseOrder lists for a phase, a bit each: its first members. */
-		std::uint32_t PhaseSeed(Phase a_phase)
-		{
-			std::uint32_t mask = 0;
-			for (const Anchor anchor : kPhaseOrder[PhaseIndex(a_phase)])
-				if (anchor != Anchor::Count)
-					mask |= 1u << static_cast<std::uint32_t>(anchor);
-			return mask;
-		}
-
-		/**
-		 * @brief The phase of the stretch after DCLF epoch a_gap (a Segment value; UINT32_MAX before any this frame). The forward epoch's
-		 * stretch belongs to the post phase: its runs (the sun queries) go after the first-person epoch.
-		 */
-		Phase PhaseOfGap(std::uint32_t a_gap)
-		{
-			switch (static_cast<Segment>(a_gap)) {
-			case Segment::ShadowView:
-			case Segment::SkyOcclusion:
-				return Phase::PreDepth;
-			case Segment::ZPrepass:
-			case Segment::FirstPersonDepth:
-			case Segment::Reflection:
-				return Phase::PreMain;
-			case Segment::MainOpaque:
-				return Phase::Deferred;
-			case Segment::Forward:
-			case Segment::FirstPerson:
-				return Phase::Post;
-			default:
-				return Phase::FrameStart;
-			}
-		}
-
-		/** @brief Where anchor a_index's passes and runs sit in a_phase: its place in kPhaseOrder, or after those in kTimeline's order. */
-		std::uint32_t PhaseRank(Phase a_phase, std::uint32_t a_index)
-		{
-			const auto& order = kPhaseOrder[PhaseIndex(a_phase)];
-			for (std::uint32_t i = 0; i < order.size(); ++i)
-				if (order[i] != Anchor::Count && static_cast<std::uint32_t>(order[i]) == a_index)
-					return i;
-			return static_cast<std::uint32_t>(order.size()) + RankOf(SegmentOf(static_cast<Anchor>(a_index)));
-		}
 
 		/**
 		 * @brief The declared frame's segments (SegmentsOn). Each is one epoch whose graph holds its steps' passes, in the steps'
@@ -335,7 +234,7 @@ namespace FrameAnchors
 			// the ReflectionsPrepass hook once, then each reflection face's sky batch (SkyReflections, once per face drawn: the faces' client
 			// has an instance per face). The faces are cleared by the load operations of their sky's first draw; the engine's clears of them
 			// are dropped. Its commit is a point just before the next GPU work that follows it in every world frame is submitted: DCLF's
-			// shadow view epoch, the shadow clears or a later stage (FlushRegions, and a later stage's first tap). The decal tests come
+			// shadow view epoch, the shadow clears or a later stage (BeforeGpuWork, and a later stage's first tap). The decal tests come
 			// before it and keep their anchor's own epoch (several a frame, each with its own query range).
 			// Main::RenderWaterEffects runs after the faces: the water displacement update and the flow copies are the start client's steps
 			// at the ImageSpace anchor (ImageSpace's StartSteps.inl), a tap per update and per copy, each with its own instances.
@@ -351,7 +250,7 @@ namespace FrameAnchors
 			// Main::RenderDepth's end to the main pass's sky. The depth copy comes after DCLF's Z-prepass epoch (which holds first
 			// person's depth too), and light culling, the Prepass clients and the main pass's sky batch come before DCLF's main opaque
 			// epoch: no other GPU work runs in between (the census counts any that does). The sky's batch does not run in every world frame,
-			// so the stage ends at a point: just before DCLF's main opaque epoch or a later stage is submitted (FlushRegions, and a later
+			// so the stage ends at a point: just before DCLF's main opaque epoch or a later stage is submitted (BeforeGpuWork, and a later
 			// stage's first tap).
 			{ Segment::DeclaredPreMain,
 				{ { { Anchor::EngineDepthCopy, { "cs.engine.skeleton.depth-copy", nullptr } },
@@ -366,7 +265,7 @@ namespace FrameAnchors
 			// and the end of the deferred passes; then the rest of Main::RenderWorld (100424 / 107142): the water stencil's clear and the
 			// water mask (FinishAccumulating's stencil batch), the reflections, RenderSSAO's two calls with the snow pass or its copy between
 			// them, the engine's kMAIN copy, the water, the water targets' clear and the water blend. Its commit is a point just before DCLF's
-			// forward epoch is submitted (FlushRegions), the next GPU work after the water blend: every tap has staged by then. The water's
+			// forward epoch is submitted (BeforeGpuWork), the next GPU work after the water blend: every tap has staged by then. The water's
 			// draws and the kMAIN copy are gated: a step that does not fire this frame (no water in view) does nothing.
 			{ Segment::DeclaredDeferred,
 				{ { { Anchor::DeferredPasses },
@@ -381,7 +280,7 @@ namespace FrameAnchors
 				9, { "CS stage: deferred+water", "CS stage: deferred+water inputs", "FrameSegments::Deferred / ", "cs.segment.deferred" } },
 			// The sun stage: Main::RenderWorld's sun occlusion query (Sun::SubmitOcclusionQuery, SE 0x1403bbf20), after DCLF's forward epoch. It
 			// must run on the GPU before the first-person geometry, which would occlude the sun: a stage of its own between DCLF's forward and
-			// first-person graphs, committed just before the first-person epoch is submitted (FlushRegions) or at a later stage's first tap.
+			// first-person graphs, committed just before the first-person epoch is submitted (BeforeGpuWork) or at a later stage's first tap.
 			// The sun's client has two instances (the world's and first person's query); a stage run's k-th tap is instance k.
 			{ Segment::DeclaredSun,
 				{ { { .anchor = Anchor::EngineQueries, .clients = { "cs.sky.sun", nullptr, nullptr, nullptr }, .instanceCount = 2 },
@@ -833,10 +732,6 @@ namespace FrameAnchors
 			std::vector<std::shared_ptr<const ClientDesc>> clients;  // registration order, the ones in the graphs
 			std::vector<ScheduledPass> passes;                       // by anchor, then order key, then registration
 			std::vector<std::pair<std::string, std::shared_ptr<org::VersionedTexture>>> imports;  // each id's slot
-			// Phases: the anchors whose passes are all gated, which can run in a phase's epoch (phases on). A bit per anchor.
-			std::uint32_t merged = 0;
-			// Each phase's members in its graph: the learned members that are merged.
-			std::array<std::uint32_t, kPhases> members{};
 		};
 
 		/** @brief A registered client and what the anchors keep about it. Render thread. */
@@ -860,41 +755,6 @@ namespace FrameAnchors
 			std::vector<std::shared_ptr<RenderGraph::RunGate>> gates;
 			std::uint32_t mask = 0;    // the anchors its passes were at
 			std::uint64_t serial = 0;  // the first snapshot without them
-		};
-
-		/** @brief Phases: the execution a phase holds now, which FlushRegions submits. Render owner. */
-		struct Held
-		{
-			Phase phase = Phase::None;
-			std::uint32_t epoch = 0;
-			std::shared_ptr<const Snapshot> built;  // the phase graph's snapshot when the hold began: the graph the held ticket is of
-			std::uint32_t anchors = 0;              // the anchors whose runs committed into it, a bit each
-			std::uint32_t lastRank = 0;             // the rank of the last of them (PhaseRank)
-			// The clients whose commits wrote into the run, with the anchor of each commit.
-			std::vector<std::pair<std::uint32_t, std::shared_ptr<const ClientDesc>>> committed;
-			bool sharedConstants = false;    // CS's shared constants were written into the run
-			bool late = false;               // a late anchor (AnchorInfo::late) committed
-			std::uint32_t runs = 0;          // the anchor runs it holds
-			std::uint64_t externalWork = 0;  // ExternalWork's submissions when the hold began
-		};
-
-		/** @brief Phases: what the executions held and why they were submitted, since the last report (LogRunStats). Render owner. */
-		struct PhaseStats
-		{
-			std::uint64_t executions = 0;                               // phase executions submitted, once each however many runs joined
-			std::uint64_t runs = 0;                                     // anchor runs they held
-			std::uint64_t lost = 0;                                     // held runs a build gave back before their submission
-			std::uint64_t failed = 0;                                   // held executions whose submission failed (not in executions)
-			std::vector<std::pair<const char*, std::uint64_t>> causes;  // why each was submitted, by static string
-			void Count(const char* a_why)
-			{
-				for (auto& [why, count] : causes)
-					if (std::string_view(why) == a_why) {
-						++count;
-						return;
-					}
-				causes.emplace_back(a_why, 1);
-			}
 		};
 
 		/** @brief The anchors' state. Render thread, but the snapshot and the built serials, which a build writes and reads. */
@@ -921,10 +781,6 @@ namespace FrameAnchors
 			// failed build (OnEpochFailed); a failed build that kept the old graph puts the one before back.
 			std::array<std::atomic<std::shared_ptr<const Snapshot>>, kAnchors> builtSnapshots{};
 			std::array<std::atomic<std::shared_ptr<const Snapshot>>, kAnchors> previousSnapshots{};
-			// Phases: whether they have epochs (AddToFrame), and each phase graph's snapshots, as for the anchors above.
-			std::array<bool, kPhases> phaseEpochs{};
-			std::array<std::atomic<std::shared_ptr<const Snapshot>>, kPhases> phaseSnapshots{};
-			std::array<std::atomic<std::shared_ptr<const Snapshot>>, kPhases> phasePrevious{};
 			// Declared segments: whether each has an epoch (AddToFrame), the anchors they hold (which then have no epoch of their own),
 			// each segment graph's snapshots as for the anchors above, and each segment's recordings.
 			std::array<bool, kDeclared> declaredEpochs{};
@@ -986,26 +842,14 @@ namespace FrameAnchors
 			// when the frame's first tap takes the ticket.
 			std::array<std::array<std::uint32_t, kMaxSteps>, kDeclared> stepTaps{};
 			std::uint32_t tapInstance = 0;  // the instance the commits running now write (TapInstance)
-			std::atomic<bool> stagesOpen{ false };  // a stage holds staged values not committed yet: FlushRegions' check without the mutex
-			// GPU work submitted between a stage's first tap and its commit (FlushRegions), by why, since the last report. It runs ahead of
+			std::atomic<bool> stagesOpen{ false };  // a stage holds staged values not committed yet: BeforeGpuWork's check without the mutex
+			// GPU work submitted between a stage's first tap and its commit (BeforeGpuWork), by why, since the last report. It runs ahead of
 			// the stage's work on the GPU.
 			std::vector<std::pair<const char*, std::uint64_t>> insideHeld;
 			std::uint64_t insideHeldLines = 0;
-			// The epoch an anchor's run counted there already (Run, with the anchor's name). Its submission calls FlushRegions again
+			// The epoch an anchor's run counted there already (Run, with the anchor's name). Its submission calls BeforeGpuWork again
 			// for the same epoch, which then counts nothing. UINT32_MAX: none.
 			std::uint32_t insideHeldCounted = UINT32_MAX;
-			// Each phase's members, a bit per anchor: kPhaseOrder's at first, and every gated anchor seen running in it since (Run). Only
-			// ever added to. Publish copies them into the snapshot.
-			std::array<std::uint32_t, kPhases> learned{};
-			// The DCLF epoch submitted last this frame (a Segment value, UINT32_MAX for none), and the host seal it was noted under:
-			// the stretch of the frame a run is in (PhaseOfGap).
-			std::uint32_t gap = UINT32_MAX;
-			std::uint64_t gapSeal = 0;
-			std::optional<Held> held;
-			std::atomic<bool> holding{ false };  // held has a value: FlushRegions' check without the mutex
-			bool flushing = false;               // FlushRegions is submitting the held execution
-			bool committing = false;             // a run's commits are writing into the held run
-			PhaseStats phaseStats;
 		};
 
 		State& Anchors()
@@ -1069,15 +913,6 @@ namespace FrameAnchors
 			return Anchor::Count;
 		}
 
-		/** @brief The phase of a phase epoch's graph, or None. */
-		Phase PhaseOfEpoch(std::uint32_t a_epoch)
-		{
-			for (std::uint32_t p = 0; p < kPhases; ++p)
-				if (Anchors().phaseEpochs[p] && a_epoch == EpochOfPhase(static_cast<Phase>(p)))
-					return static_cast<Phase>(p);
-			return Phase::None;
-		}
-
 		/** @brief The declared segment of a segment epoch's graph, or kDeclared. */
 		std::uint32_t DeclaredOfEpoch(std::uint32_t a_epoch)
 		{
@@ -1107,10 +942,7 @@ namespace FrameAnchors
 			return first;
 		}
 
-		/**
-		 * @brief The snapshot the anchor's own graph was built from. Its own graph always holds its passes: a merged anchor that runs in a
-		 * phase whose graph lacks it runs there.
-		 */
+		/** @brief The snapshot the anchor's own graph was built from. Its own graph always holds its passes. */
 		std::shared_ptr<const Snapshot> OwnSnapshot(const State& a_state, std::uint32_t a_index)
 		{
 			return a_state.builtSnapshots[a_index].load(std::memory_order_acquire);
@@ -1123,11 +955,10 @@ namespace FrameAnchors
 			return built ? built->serial : 0;
 		}
 
-		/** @brief The epochs whose graphs hold (or will hold) the passes of the anchors in a_mask: each one's own, and the phases they are in. */
+		/** @brief The epochs whose graphs hold (or will hold) the passes of the anchors in a_mask: each one's own, and the stages that hold them. */
 		std::vector<std::uint32_t> EpochsOf(const State& a_state, std::uint32_t a_mask)
 		{
 			std::vector<std::uint32_t> epochs;
-			std::uint32_t anchors = 0;
 			for (std::uint32_t i = 0; i < kAnchors; ++i) {
 				if (!(a_mask >> i & 1u) || !a_state.reserved[i])
 					continue;
@@ -1139,15 +970,11 @@ namespace FrameAnchors
 					continue;
 				}
 				epochs.push_back(EpochOfAnchor(static_cast<Anchor>(i)));
-				anchors |= 1u << i;
 				// A shared anchor whose named clients a segment holds: the segment's graph holds their passes too.
 				for (std::uint32_t d = 0; d < kDeclared; ++d)
 					if (a_state.declaredEpochs[d] && (StepAnchors(d) >> i & 1u) && std::ranges::find(epochs, EpochOfDeclared(d)) == epochs.end())
 						epochs.push_back(EpochOfDeclared(d));
 			}
-			for (std::uint32_t p = 0; p < kPhases; ++p)
-				if (a_state.phaseEpochs[p] && (a_state.learned[p] & anchors))
-					epochs.push_back(EpochOfPhase(static_cast<Phase>(p)));
 			return epochs;
 		}
 
@@ -1175,24 +1002,6 @@ namespace FrameAnchors
 			});
 			for (const auto& [id, import] : a_state.imports)
 				snapshot->imports.emplace_back(id, import->slot);
-			// Phases: an anchor whose passes are all gated can run in a phase's epoch. A one-shot pass is never gated: it would run at
-			// every execution of the phase.
-			if (RegionsOn()) {
-				for (std::uint32_t i = 0; i < kAnchors; ++i) {
-					bool any = false;
-					bool gated = true;
-					for (const auto& scheduled : snapshot->passes)
-						if (IndexOf(scheduled.pass->anchor) == i) {
-							any = true;
-							gated = gated && scheduled.pass->gated && !scheduled.pass->once;
-						}
-					if (any && gated)
-						snapshot->merged |= 1u << i;
-				}
-				for (std::uint32_t p = 0; p < kPhases; ++p)
-					if (a_state.phaseEpochs[p])
-						snapshot->members[p] = a_state.learned[p] & snapshot->merged;
-			}
 			a_state.snapshot.store(std::move(snapshot), std::memory_order_release);
 		}
 
@@ -1266,11 +1075,6 @@ namespace FrameAnchors
 					for (std::uint32_t d = 0; d < kDeclared; ++d)
 						if (a_state.declaredEpochs[d] && (StepAnchors(d) >> i & 1u) &&
 							builtFrom(a_state.declaredSnapshots[d].load(std::memory_order_acquire)) < a_retired.serial)
-							return false;
-					// Phases: a phase's graph may hold the old passes too.
-					for (std::uint32_t p = 0; p < kPhases; ++p)
-						if (a_state.phaseEpochs[p] && (a_state.learned[p] >> i & 1u) &&
-							builtFrom(a_state.phaseSnapshots[p].load(std::memory_order_acquire)) < a_retired.serial)
 							return false;
 				}
 				return true;
@@ -1353,8 +1157,8 @@ namespace FrameAnchors
 		}
 
 		/**
-		 * @brief The anchors' passes in each graph: an anchor epoch's graph takes its anchor's passes, a phase epoch's graph the passes of
-		 * its members (Snapshot::members); each registers the clients' resources and the engine imports. Every other epoch's graph
+		 * @brief The anchors' passes in each graph: an anchor epoch's graph takes its anchor's passes, a stage's graph its steps' passes;
+		 * each registers the clients' resources and the engine imports. Every other epoch's graph
 		 * gets nothing from it.
 		 */
 		/** @brief Whether a declared segment holds a client: one of its steps does. */
@@ -1443,9 +1247,8 @@ namespace FrameAnchors
 					return;
 				const std::uint32_t epoch = a_graph.PassEpochFilter();
 				const Anchor anchor = AnchorOfEpoch(epoch);
-				const Phase phase = anchor == Anchor::Count ? PhaseOfEpoch(epoch) : Phase::None;
-				const std::uint32_t declared = anchor == Anchor::Count && phase == Phase::None ? DeclaredOfEpoch(epoch) : kDeclared;
-				if (anchor == Anchor::Count && phase == Phase::None && declared == kDeclared)
+				const std::uint32_t declared = anchor == Anchor::Count ? DeclaredOfEpoch(epoch) : kDeclared;
+				if (anchor == Anchor::Count && declared == kDeclared)
 					return;
 				// What the run that submits this graph reads (ClientDesc::executed, one-shot passes): the graph holds this snapshot's passes.
 				// Recorded when the graph is installed: at its attach for a build the build manager makes (on its own thread, and possibly
@@ -1481,7 +1284,7 @@ namespace FrameAnchors
 					});
 					if (!RenderGraph::Builds::Defer(commit, onFailed))
 						commit();
-				} else if (anchor != Anchor::Count) {
+				} else {
 					const auto index = IndexOf(anchor);
 					const auto commit = [index, built = snapshot] {
 						auto& anchors = Anchors();
@@ -1492,18 +1295,6 @@ namespace FrameAnchors
 					const auto onFailed = [index, built = snapshot](const std::string& a_error) { DropFailedClients(1u << index, kInfo[index].name, built, a_error); };
 					if (!RenderGraph::Builds::Defer(commit, onFailed))
 						commit();
-				} else {
-					const auto r = PhaseIndex(phase);
-					const auto commit = [r, built = snapshot] {
-						auto& anchors = Anchors();
-						anchors.phasePrevious[r].store(anchors.phaseSnapshots[r].load(std::memory_order_acquire), std::memory_order_release);
-						anchors.phaseSnapshots[r].store(built, std::memory_order_release);
-					};
-					const auto onFailed = [r, built = snapshot](const std::string& a_error) {
-						DropFailedClients(built->members[r], kPhaseNames[r].label, built, a_error);
-					};
-					if (!RenderGraph::Builds::Defer(commit, onFailed))
-						commit();
 				}
 				// Each import's slot is the id's resolver, so a declaration by id follows its versions too.
 				for (const auto& [id, slot] : snapshot->imports)
@@ -1512,7 +1303,7 @@ namespace FrameAnchors
 				for (const auto& client : snapshot->clients)
 					if (client->registerResources)
 						client->registerResources(a_graph);
-				if (declared != kDeclared ? SegmentUsesSharedConstants(*snapshot, declared) : UsesSharedConstantsIn(snapshot->clients, AnchorsIn(anchor, phase, declared)))
+				if (declared != kDeclared ? SegmentUsesSharedConstants(*snapshot, declared) : UsesSharedConstantsIn(snapshot->clients, AnchorsIn(anchor, declared)))
 					SharedConstants::Register(a_graph);
 			}
 
@@ -1522,9 +1313,8 @@ namespace FrameAnchors
 					return;
 				const std::uint32_t epoch = a_graph.PassEpochFilter();
 				const Anchor anchor = AnchorOfEpoch(epoch);
-				const Phase phase = anchor == Anchor::Count ? PhaseOfEpoch(epoch) : Phase::None;
-				const std::uint32_t declared = anchor == Anchor::Count && phase == Phase::None ? DeclaredOfEpoch(epoch) : kDeclared;
-				const std::uint32_t anchors = AnchorsIn(anchor, phase, declared);
+				const std::uint32_t declared = anchor == Anchor::Count ? DeclaredOfEpoch(epoch) : kDeclared;
+				const std::uint32_t anchors = AnchorsIn(anchor, declared);
 				if (!anchors)
 					return;
 				if (declared != kDeclared) {
@@ -1541,12 +1331,6 @@ namespace FrameAnchors
 				for (const auto& scheduled : snapshot->passes)
 					if ((anchors >> IndexOf(scheduled.pass->anchor) & 1u) && !scheduled.client->segmentOnly)
 						passes.push_back(scheduled.pass);
-				// A phase's graph runs its anchors in the phase's order (a held execution only ever holds runs in that order), each
-				// anchor's passes by their order keys.
-				if (phase != Phase::None)
-					std::ranges::stable_sort(passes, [phase](const PassDesc* a, const PassDesc* b) {
-						return PhaseRank(phase, IndexOf(a->anchor)) < PhaseRank(phase, IndexOf(b->anchor));
-					});
 				for (const auto* scheduled : passes) {
 					const auto& pass = *scheduled;
 					auto made = pass.make ? pass.make() : pass.makeInstance ? pass.makeInstance(0) : nullptr;
@@ -1570,16 +1354,11 @@ namespace FrameAnchors
 			}
 
 		private:
-			/**
-			 * @brief The anchors whose passes this snapshot puts in the graph: an anchor's own always (a merged anchor's runs fall back to it in
-			 * a phase whose graph lacks it), a phase's members, a declared segment's members.
-			 */
-			std::uint32_t AnchorsIn(Anchor a_anchor, Phase a_phase, std::uint32_t a_declared) const
+			/** @brief The anchors whose passes this snapshot puts in the graph: an anchor's own, or a declared segment's members. */
+			std::uint32_t AnchorsIn(Anchor a_anchor, std::uint32_t a_declared) const
 			{
 				if (a_anchor != Anchor::Count)
 					return 1u << IndexOf(a_anchor);
-				if (a_phase != Phase::None)
-					return snapshot->members[PhaseIndex(a_phase)];
 				if (a_declared != kDeclared)
 					return StepAnchors(a_declared);
 				return 0;
@@ -2203,9 +1982,6 @@ namespace FrameAnchors
 		for (const auto& declared : kDeclaredInfo)
 			if (a_segment == static_cast<std::uint32_t>(declared.segment))
 				return &declared.names;
-		const std::uint32_t phases = static_cast<std::uint32_t>(Segment::PhaseFrameStart);
-		if (a_segment >= phases && a_segment - phases < kPhases)
-			return &kPhaseNames[a_segment - phases];
 		const std::uint32_t first = static_cast<std::uint32_t>(Segment::AnchorReflectionsPrepass);
 		if (a_segment < first || a_segment - first >= kAnchors)
 			return nullptr;
@@ -2219,11 +1995,6 @@ namespace FrameAnchors
 				const auto& state = Anchors();
 				return !state.frozen || !state.declaredEpochs[d];
 			}
-		const std::uint32_t phases = static_cast<std::uint32_t>(Segment::PhaseFrameStart);
-		if (a_segment >= phases && a_segment - phases < kPhases) {
-			const auto& state = Anchors();
-			return !state.frozen || !state.phaseEpochs[a_segment - phases];
-		}
 		const std::uint32_t first = static_cast<std::uint32_t>(Segment::AnchorReflectionsPrepass);
 		if (a_segment < first || a_segment - first >= kAnchors)
 			return false;
@@ -2448,9 +2219,6 @@ namespace FrameAnchors
 		std::atomic<DWORD> renderOwner{ 0 };
 		std::atomic<std::uint64_t> ownerChanges{ 0 };
 
-		// Regions: submits the held execution (defined with Run).
-		void SubmitHeld(State& a_state, const char* a_why);
-
 		/** @brief The thread that owns rendering now: the last claim's, or the main thread before any. */
 		DWORD Owner()
 		{
@@ -2519,9 +2287,6 @@ namespace FrameAnchors
 		renderOwner.store(self, std::memory_order_release);
 		const auto changes = ownerChanges.fetch_add(1, std::memory_order_acq_rel) + 1;
 		RenderGraphRuntime::Get().MoveOwnerThread();
-		// A region's execution held by the last owner (its present submits it, so this is a safety net) goes before this thread's work.
-		if (auto& state = Anchors(); state.held)
-			SubmitHeld(state, "render ownership moved");
 		if (changes <= 32 || changes % 1000 == 0)
 			logger::info("[ORG] render ownership: thread {} begins a frame and takes it from thread {} (change {})", self, previous, changes);
 	}
@@ -2551,52 +2316,12 @@ namespace FrameAnchors
 		return t_runDepth != 0;
 	}
 
-	bool RegionsOn()
-	{
-		// Native mode groups anchors into region subgraphs; guest mode keeps one epoch per anchor in DXVK's stream.
-		static const bool on = [] {
-			if (!RenderGraph::Engine::Native::Requested())
-				return false;
-			// Off by default (CS_ORG_PHASES=1 turns them on): with kept live recordings, per-anchor epochs run faster than phase
-			// epochs (perf-taa 73 against 52.5 fps). A phase execution records every gated pass of its larger graph again, and its
-			// admission covers more resources.
-			if (Switches::Number("CS_ORG_PHASES", 0) == 0) {
-				logger::info("[ORG] frame phases off (CS_ORG_PHASES=1 turns them on): every anchor keeps its own epoch");
-				return false;
-			}
-			if (!RenderGraphRuntime::EpochsEnabled() || Switches::Equals("CS_ORG_ASYNC_EPOCHS", "0")) {
-				logger::warn("[ORG] frame phases need epochs and async epochs; every anchor keeps its own epoch");
-				return false;
-			}
-			return true;
-		}();
-		return on;
-	}
-
 	namespace
 	{
-		/** @brief Gives the held execution's ticket back unsubmitted: what its runs wrote is dropped (the graph stopped). */
-		void DropHeld(State& a_state)
-		{
-			if (!a_state.held)
-				return;
-			const auto epoch = a_state.held->epoch;
-			a_state.held.reset();
-			a_state.holding.store(false, std::memory_order_release);
-			if (!a_state.host)
-				return;
-			try {
-				(void)a_state.host->ReleaseHeldEpochTicket(epoch);
-			} catch (const std::exception& e) {
-				logger::error("[ORG] frame phases: a held run could not be given back: {}", e.what());
-			}
-		}
-
 		/** @brief The graph failed and stopped (a_name's epoch said so): every client returns to its D3D11 path. */
 		void StopAll(State& a_state, const char* a_name)
 		{
 			logger::error("[ORG] frame anchors: the {} epoch failed; {} clients return to D3D11", a_name, a_state.clients.size());
-			DropHeld(a_state);
 			// What the stages staged is dropped uncommitted.
 			for (std::uint32_t d = 0; d < kDeclared; ++d) {
 				a_state.stagedFrame[d] = 0;
@@ -2612,84 +2337,7 @@ namespace FrameAnchors
 					client.desc->onFailed();
 		}
 
-		/**
-		 * @brief Submits the held execution: every run it holds reaches the GPU now, ahead of the work that asked for it (a_why, counted
-		 * in the phase statistics). Render owner, under the anchors' mutex.
-		 */
-		void SubmitHeld(State& a_state, const char* a_why)
-		{
-			if (!a_state.held || a_state.flushing)
-				return;
-			if (a_state.committing) {
-				// A commit asked for GPU work while it wrote into the held run: the execution is submitted after the commits instead.
-				static std::atomic_flag logged;
-				if (!logged.test_and_set())
-					logger::warn("[ORG] frame phases: GPU work was submitted from inside a commit ({}); the held execution goes after it (logged once)", a_why);
-				return;
-			}
-			Held held = std::move(*a_state.held);
-			a_state.held.reset();
-			a_state.holding.store(false, std::memory_order_release);
-			auto& runtime = RenderGraphRuntime::Get();
-			if (!runtime.IsActive() || !a_state.host)
-				return;
-			const char* name = kPhaseNames[PhaseIndex(held.phase)].label;
-			// A build of the region's epoch gave the ticket back (the build points submit first, so this should not happen): what its
-			// runs wrote is gone, and a new ticket would run their passes with nothing opened.
-			if (!a_state.host->HoldsEpochTicket(held.epoch)) {
-				++a_state.phaseStats.lost;
-				static std::atomic_flag logged;
-				if (!logged.test_and_set())
-					logger::error(
-						"[ORG] frame phases: a build gave the {} execution's held run back before its submission; its {} anchor runs are lost "
-						"(logged once)",
-						name, held.runs);
-				return;
-			}
-			RenderGraphRuntime::EpochResult result = RenderGraphRuntime::EpochResult::Stopped;
-			a_state.flushing = true;
-			try {
-				result = runtime.TryExecuteEpoch(PhaseSegment(held.phase));
-			} catch (...) {
-				a_state.flushing = false;
-				throw;
-			}
-			a_state.flushing = false;
-			if (result != RenderGraphRuntime::EpochResult::Submitted) {
-				// It did not reach the GPU: counted as failed, not as an execution.
-				++a_state.phaseStats.failed;
-				// Nothing was submitted; a ticket still held goes back.
-				if (a_state.host->HoldsEpochTicket(held.epoch)) {
-					try {
-						(void)a_state.host->ReleaseHeldEpochTicket(held.epoch);
-					} catch (const std::exception& e) {
-						logger::error("[ORG] frame phases: a held run could not be given back: {}", e.what());
-					}
-				}
-				// Only the region's epoch failed: its clients are dropped at the next poll (OnEpochFailed). Otherwise the graph stopped.
-				if (result != RenderGraphRuntime::EpochResult::EpochFailed)
-					StopAll(a_state, name);
-				return;
-			}
-			// An execution counts once, with all the runs that joined it.
-			++a_state.phaseStats.executions;
-			a_state.phaseStats.runs += held.runs;
-			a_state.phaseStats.Count(a_why);
-			// An epoch must not be the last GPU work before a third-party Vulkan consumer (render-graph.md, "Hazard: external Vulkan
-			// work directly after a graph epoch").
-			if (held.late && a_state.lateHook)
-				a_state.lateHook();
-			if (held.sharedConstants)
-				SharedConstants::CheckAfterRun();
-			PruneRetired(a_state);
-		}
-
-		/**
-		 * @brief Why a run of anchor a_index cannot write into the held execution (null: it can). Its passes must come after every
-		 * pass the execution's runs opened (the phase's graph runs anchors in its order, each one's passes by order key), and no
-		 * latch region or gate entry may be written twice.
-		 */
-		/** @brief A lasting copy of a_text, for PhaseStats' causes (which keep pointers). Render owner. */
+		/** @brief A lasting copy of a_text, for the census's causes (which keep pointers). Render owner. */
 		const char* Interned(std::string a_text)
 		{
 			static std::set<std::string> texts;
@@ -2708,187 +2356,11 @@ namespace FrameAnchors
 			RenderGraph::FrameSequence::NoteRun(kInfo[IndexOf(a_point.anchor)].name, a_held, ids, a_point.input, a_point.output);
 		}
 
-		const char* JoinRefusal(const Held& a_held, std::uint32_t a_index, const std::vector<RunClient>& a_clients, bool a_sharedConstants)
-		{
-			const bool repeat = (a_held.anchors >> a_index & 1u) != 0;
-			// A new anchor comes after the last one; a repeat only directly after itself.
-			const std::uint32_t rank = PhaseRank(a_held.phase, a_index);
-			if (repeat ? rank != a_held.lastRank : rank <= a_held.lastRank)
-				return Interned(fmt::format("an anchor out of the phase's order ({})", kInfo[a_index].name));
-			const auto committed = [&](const std::shared_ptr<const ClientDesc>& a_desc) {
-				return std::ranges::any_of(a_held.committed, [&](const auto& a_entry) { return a_entry.second == a_desc; });
-			};
-			if (repeat)
-				for (const auto& entry : a_held.committed)
-					if (entry.first == a_index &&
-						std::ranges::none_of(a_clients, [&](const RunClient& a_client) { return a_client.active && a_client.desc == entry.second; }))
-						return "an anchor run again with other clients";
-			for (const auto& client : a_clients) {
-				if (!client.active)
-					continue;
-				const bool before = committed(client.desc);
-				if (repeat && !before)
-					return "an anchor run again with other clients";
-				if (before && !(client.desc->joins && client.desc->joins()))
-					return Interned(fmt::format("a client's second commit ({} at {})", client.desc->id, kInfo[a_index].name));
-			}
-			if (a_sharedConstants && a_held.sharedConstants && !SharedConstants::CommittedMatches())
-				return "the shared constants changed";
-			if (RenderGraph::ExternalWork::Submissions() != a_held.externalWork) {
-				static std::atomic_flag logged;
-				if (!logged.test_and_set())
-					logger::warn(
-						"[ORG] frame phases: external work (RenderGraph::ExternalWork) was submitted while a phase held anchor runs; it ran "
-						"ahead of them (logged once)");
-				return "external work";
-			}
-			return nullptr;
-		}
-
-		/** @brief The phase of the frame's stretch now: after the DCLF epoch submitted last since the host's last seal. Render owner. */
-		Phase CurrentPhase(const State& a_state)
-		{
-			if (!a_state.host || a_state.gapSeal != a_state.host->Seals())
-				return Phase::FrameStart;
-			return PhaseOfGap(a_state.gap);
-		}
-
-		/**
-		 * @brief A merged anchor ran in a phase whose members lack it: it joins them, and the phase's graph is built again (off the render
-		 * thread, attached at a frame boundary). Until then its runs there take its own epoch. Render owner, under the anchors' mutex.
-		 */
-		void LearnMember(State& a_state, Phase a_phase, std::uint32_t a_index)
-		{
-			const auto p = PhaseIndex(a_phase);
-			a_state.learned[p] |= 1u << a_index;
-			logger::info("[ORG] frame phases: {} ran in the {} phase; its graph is built again with it (until then the anchor's runs there take its own epoch)",
-				kInfo[a_index].name, kPhaseNames[p].label);
-			Publish(a_state);
-			RenderGraph::Builds::Request(EpochOfPhase(a_phase), fmt::format("frame phases: {} joins {}", kInfo[a_index].name, kPhaseNames[p].label));
-		}
-
-		/**
-		 * @brief A run of a merged anchor (its passes in a_phase's built graph): its commits write into the phase's held run, which is
-		 * submitted later (SubmitHeld). Returns Ran once they did: the passes reach the GPU before any later GPU work, so the clients'
-		 * executed callbacks run now.
-		 */
-		RunResult Capture(State& a_state, const Point& a_point, Phase a_phase, const std::shared_ptr<const Snapshot>& a_built,
-			const std::vector<RunClient>& a_clients)
-		{
-			const std::uint32_t index = IndexOf(a_point.anchor);
-			const char* name = kPhaseNames[PhaseIndex(a_phase)].label;
-			const bool sharedConstants = std::ranges::any_of(a_clients, [&](const RunClient& a_client) { return a_client.desc->sharedConstants; });
-			// The held execution takes this run, or is submitted first.
-			if (a_state.held && a_state.held->phase != a_phase)
-				SubmitHeld(a_state, "another phase");
-			if (a_state.held && a_state.held->built != a_built)
-				SubmitHeld(a_state, "a new graph of the phase");
-			if (a_state.held)
-				if (const char* why = JoinRefusal(*a_state.held, index, a_clients, sharedConstants))
-					SubmitHeld(a_state, why);
-			if (!RenderGraphRuntime::Get().IsActive())
-				return { RunStatus::Failed };
-			auto& host = *a_state.host;
-			const std::uint32_t epoch = EpochOfPhase(a_phase);
-			if (!a_state.held) {
-				try {
-					(void)host.HoldEpochTicket(epoch);
-				} catch (const org::GraphHost::EpochFailedError& e) {
-					// Only the region's epoch failed: its clients are dropped at the next poll (OnEpochFailed).
-					static std::atomic_flag logged;
-					if (!logged.test_and_set())
-						logger::error("[ORG] frame phases: the {} epoch did not run, its graph failed: {} (logged once)", name, e.what());
-					return { RunStatus::Failed };
-				} catch (const std::exception& e) {
-					logger::error("[ORG] frame phases: the {} execution could not take its run: {}", name, e.what());
-					StopAll(a_state, name);
-					return { RunStatus::Failed };
-				}
-				a_state.held.emplace();
-				auto& held = *a_state.held;
-				held.phase = a_phase;
-				held.epoch = epoch;
-				held.built = a_built;
-				held.externalWork = RenderGraph::ExternalWork::Submissions();
-				a_state.holding.store(true, std::memory_order_release);
-				// Every gate of the graph's passes closed first: the execution does work only where its runs' commits open it. That
-				// includes the gates of registrations whose passes the graph still holds after they left (RetiredGates).
-				host.UseHeldRun(epoch);
-				const std::uint32_t merged = a_built->members[PhaseIndex(a_phase)];
-				for (const auto& client : a_built->clients)
-					if (AnchorMask(*client) & merged)
-						for (const auto& gate : client->gates)
-							if (gate)
-								gate->Close();
-				for (const auto& retired : a_state.retired)
-					if ((retired.mask & merged) && a_built->serial < retired.serial)
-						for (const auto& gate : retired.gates)
-							gate->Close();
-				host.EndHeldRun();
-			}
-			// The commits write into the held run. Nothing submits the held execution meanwhile (SubmitHeld waits for them), and the
-			// held state is read again after them: a commit that stopped the graph dropped it.
-			const bool writeShared = sharedConstants && !a_state.held->sharedConstants;
-			std::vector<std::shared_ptr<const ClientDesc>> committed;
-			{
-				struct Committing
-				{
-					State& state;
-					org::GraphHost& host;
-					~Committing()
-					{
-						host.EndHeldRun();
-						state.committing = false;
-					}
-				} committing{ a_state, host };
-				a_state.committing = true;
-				host.UseHeldRun(epoch);
-				RenderGraph::RunShapes::BeginRun();
-				// The upload of CS's shared constants runs once per execution: the first run writes them, and a later run joins only while
-				// they are unchanged (JoinRefusal).
-				if (writeShared)
-					SharedConstants::Commit();
-				for (const auto& client : a_clients)
-					if (client.active && client.desc->commit) {
-						client.desc->commit(a_point);
-						committed.push_back(client.desc);
-					}
-			}
-			if (!a_state.held)
-				return { RunStatus::Failed };
-			auto& held = *a_state.held;
-			held.sharedConstants = held.sharedConstants || writeShared;
-			for (auto& desc : committed)
-				held.committed.emplace_back(index, std::move(desc));
-			held.anchors |= 1u << index;
-			held.lastRank = PhaseRank(a_phase, index);
-			held.late = held.late || kInfo[index].late;
-			++held.runs;
-			// The run is counted, and the peak reported (LogRunStats).
-			auto& runs = RunsSinceSeal(a_state, index);
-			++runs;
-			if (runs > a_state.peakRuns[index].load(std::memory_order_relaxed))
-				a_state.peakRuns[index].store(runs, std::memory_order_relaxed);
-			if (RenderGraph::RunShapes::On()) {
-				std::uint64_t active = 0;
-				for (const auto& client : a_clients)
-					if (client.active)
-						active += reinterpret_cast<std::uintptr_t>(client.desc.get()) * 0x9E3779B97F4A7C15ull;
-				RenderGraph::RunShapes::EndRun(index, kInfo[index].name, a_point.input, a_point.output, active);
-			}
-			NoteSequenceRun(a_point, true, a_clients);
-			// Last: an executed callback may register, refresh or rearm. A merged anchor has no one-shot pass (Snapshot::merged).
-			const std::uint64_t built = a_built->serial;
-			for (const auto& client : a_clients)
-				if (client.active && client.desc->executed && client.serial <= built)
-					client.desc->executed(a_point);
-			return { RunStatus::Ran };
-		}
 	}
 
 	namespace
 	{
-		/** @brief Whether epoch a_segment, submitted now, ends the start stage (FlushRegions): GPU work that follows it in every world frame. */
+		/** @brief Whether epoch a_segment, submitted now, ends the start stage (BeforeGpuWork): GPU work that follows it in every world frame. */
 		bool EndsStart(Segment a_segment)
 		{
 			switch (a_segment) {
@@ -2907,7 +2379,7 @@ namespace FrameAnchors
 			}
 		}
 
-		/** @brief Whether epoch a_segment, submitted now, ends the pre-main stage (FlushRegions): GPU work that follows it in every world frame. */
+		/** @brief Whether epoch a_segment, submitted now, ends the pre-main stage (BeforeGpuWork): GPU work that follows it in every world frame. */
 		bool EndsPreMain(Segment a_segment)
 		{
 			switch (a_segment) {
@@ -2921,7 +2393,7 @@ namespace FrameAnchors
 		}
 
 		/**
-		 * @brief Whether epoch a_segment, submitted now, ends the sun stage (FlushRegions): DCLF's first-person epoch, or the work after it in a
+		 * @brief Whether epoch a_segment, submitted now, ends the sun stage (BeforeGpuWork): DCLF's first-person epoch, or the work after it in a
 		 * frame without it.
 		 */
 		bool EndsSun(Segment a_segment)
@@ -2940,7 +2412,7 @@ namespace FrameAnchors
 			}
 		}
 
-		/** @brief Whether epoch a_segment, submitted now, ends the world segment (FlushRegions): GPU work that follows it in every frame. */
+		/** @brief Whether epoch a_segment, submitted now, ends the world segment (BeforeGpuWork): GPU work that follows it in every frame. */
 		bool EndsWorld(Segment a_segment)
 		{
 			switch (a_segment) {
@@ -2960,7 +2432,7 @@ namespace FrameAnchors
 		}
 	}
 
-	void FlushRegions(const char* a_why, std::uint32_t a_segment)
+	void BeforeGpuWork(const char* a_why, std::uint32_t a_segment)
 	{
 		auto& state = Anchors();
 		// The deferred+water stage commits just before the next GPU work that comes after it in the frame is submitted: DCLF's forward epoch
@@ -3015,33 +2487,6 @@ namespace FrameAnchors
 				}
 			}
 		}
-		if (!state.holding.load(std::memory_order_acquire) || !IsRenderOwner())
-			return;
-		auto lock = Guard();
-		if (!state.held || state.flushing)
-			return;
-		if (a_segment != UINT32_MAX) {
-			const auto held = static_cast<std::uint32_t>(PhaseSegment(state.held->phase));
-			if (a_segment == held)
-				return;
-			// A DCLF epoch that comes before the held phase in the frame (the first-person epoch, for the post phase's sun queries) runs
-			// first: the phase's work goes after it.
-			if (RenderGraphRuntime::IsDclfSegment(static_cast<Segment>(a_segment)) && RankOf(held) > RankOf(a_segment))
-				return;
-		}
-		SubmitHeld(state, a_why);
-	}
-
-	void NoteEpochSubmitted(std::uint32_t a_segment)
-	{
-		if (!RegionsOn() || !RenderGraphRuntime::IsDclfSegment(static_cast<Segment>(a_segment)) || !IsRenderOwner())
-			return;
-		auto lock = Guard();
-		auto& state = Anchors();
-		if (!state.host)
-			return;
-		state.gap = a_segment;
-		state.gapSeal = state.host->Seals();
 	}
 
 
@@ -4205,10 +3650,6 @@ namespace FrameAnchors
 		static const bool on = [] {
 			if (!RenderGraph::Engine::Native::Requested())
 				return false;
-			if (RegionsOn()) {
-				logger::warn("[ORG] frame segments: off, the frame phases are on (CS_ORG_PHASES=1)");
-				return false;
-			}
 			if (!RenderGraphRuntime::EpochsEnabled() || Switches::Equals("CS_ORG_ASYNC_EPOCHS", "0") || Switches::Equals("CS_ORG_REUSE_RECORDINGS", "0")) {
 				logger::warn("[ORG] frame segments need epochs, async epochs and replayable recordings; every anchor keeps its own epoch");
 				return false;
@@ -4374,7 +3815,7 @@ namespace FrameAnchors
 				});
 				if (!otherWork)
 					return tapped;
-				// The rest run now in the anchor's own epoch: ahead of the segment's work on the GPU (counted, FlushRegions).
+				// The rest run now in the anchor's own epoch: ahead of the segment's work on the GPU (counted, BeforeGpuWork).
 				clients = std::move(others);
 				for (auto& member : members) {
 					member.active = false;
@@ -4389,22 +3830,6 @@ namespace FrameAnchors
 		}
 		if (!work)
 			return { RunStatus::Idle };
-		// Phases: a merged anchor whose passes are in its phase's built graph writes into the phase's held run.
-		if (RegionsOn()) {
-			const Phase phase = CurrentPhase(state);
-			const auto p = PhaseIndex(phase);
-			const auto snapshot = state.snapshot.load(std::memory_order_acquire);
-			if (state.phaseEpochs[p] && snapshot && (snapshot->merged >> index & 1u)) {
-				const auto phaseBuilt = state.phaseSnapshots[p].load(std::memory_order_acquire);
-				const bool member = phaseBuilt && (phaseBuilt->members[p] >> index & 1u);
-				// Every active client is in the phase's graph: one registered since it was built runs in the anchor's own graph until then.
-				const bool current = member && std::ranges::all_of(clients, [&](const RunClient& a_client) { return !a_client.active || a_client.serial <= phaseBuilt->serial; });
-				if (current)
-					return Capture(state, a_point, phase, phaseBuilt, clients);
-				if (!(state.learned[p] >> index & 1u))
-					LearnMember(state, phase, index);
-			}
-		}
 		// Every run takes a run lease of the host's: an anchor may run any number of times a frame without waiting for one of its
 		// runs of the same frame, which DXVK has not submitted yet. The runs are counted for the report alone (LogRunStats).
 		auto& runs = RunsSinceSeal(state, index);
@@ -4416,9 +3841,10 @@ namespace FrameAnchors
 		const bool sharedConstants = UsesSharedConstants(descs, a_point.anchor);
 		std::uint64_t built = 0;
 		RenderGraphRuntime::EpochResult result = RenderGraphRuntime::EpochResult::Stopped;
-		// A region's held execution goes first: its runs came before this one (ExecuteEpoch would submit it too; here it is counted as this).
-		FlushRegions(Interned(fmt::format("an anchor with its own epoch ({})", kInfo[index].name)), static_cast<std::uint32_t>(segment));
-		// TryExecuteEpoch calls FlushRegions for the same submission: the census counts it once, here.
+		// The stage commit points and the open-stage census see this epoch here, named for the anchor (TryExecuteEpoch's own call
+		// for it counts nothing then).
+		BeforeGpuWork(Interned(fmt::format("an anchor with its own epoch ({})", kInfo[index].name)), static_cast<std::uint32_t>(segment));
+		// TryExecuteEpoch calls BeforeGpuWork for the same submission: the census counts it once, here.
 		state.insideHeldCounted = static_cast<std::uint32_t>(segment);
 		NoteSequenceRun(a_point, false, clients);
 		{
@@ -4714,51 +4140,6 @@ namespace FrameAnchors
 		PrimeStage(state, Segment::DeclaredMenuUi, a_caller);
 	}
 
-	namespace
-	{
-		/** @brief The phases' report since the last one: executions, the runs they held, and why each was submitted. */
-		void LogRegionStats()
-		{
-			auto lock = Guard();
-			auto& state = Anchors();
-			if (!RegionsOn() || std::ranges::none_of(state.phaseEpochs, [](bool a_epoch) { return a_epoch; }))
-				return;
-			auto& stats = state.phaseStats;
-			std::string causes;
-			for (const auto& [why, count] : stats.causes)
-				causes += fmt::format("{}{} {}", causes.empty() ? "" : ", ", why, count);
-			std::string members;
-			if (const auto snapshot = state.snapshot.load(std::memory_order_acquire))
-				for (std::uint32_t p = 0; p < kPhases; ++p) {
-					std::string names;
-					for (std::uint32_t i = 0; i < kAnchors; ++i)
-						if (snapshot->members[p] >> i & 1u)
-							names += fmt::format("{}{}", names.empty() ? "" : " ", kInfo[i].name);
-					members += fmt::format("{}{} [{}]", members.empty() ? "" : "; ", kPhaseNames[p].label, names);
-				}
-			// Each anchor that keeps its own epoch, with the passes that keep it there (not gated, or one-shot).
-			std::string ungated;
-			if (const auto snapshot = state.snapshot.load(std::memory_order_acquire))
-				for (std::uint32_t i = 0; i < kAnchors; ++i) {
-					if (!state.reserved[i] || (snapshot->merged >> i & 1u))
-						continue;
-					std::string passes;
-					for (const auto& scheduled : snapshot->passes)
-						if (IndexOf(scheduled.pass->anchor) == i && (!scheduled.pass->gated || scheduled.pass->once))
-							passes += fmt::format("{}{}{}", passes.empty() ? "" : " ", scheduled.pass->name, scheduled.pass->once ? "(once)" : "");
-					if (!passes.empty())
-						ungated += fmt::format("{}{} [{}]", ungated.empty() ? "" : "; ", kInfo[i].name, passes);
-				}
-			// Joins: runs that went into an execution another run had opened (runs minus executions).
-			logger::info(
-				"[ORG] frame phases: {} executions held {} anchor runs ({:.2f} each, {} joins); {} lost to a build, {} failed; submitted before: {}; "
-				"members: {}; anchors with ungated passes (their own epochs): {}",
-				stats.executions, stats.runs, stats.executions ? double(stats.runs) / double(stats.executions) : 0.0, stats.runs - stats.executions,
-				stats.lost, stats.failed, causes.empty() ? std::string("nothing") : causes, members, ungated.empty() ? std::string("none") : ungated);
-			stats = {};
-		}
-	}
-
 	void LogRunStats()
 	{
 		auto& state = Anchors();
@@ -4776,7 +4157,6 @@ namespace FrameAnchors
 				runs += fmt::format("{}{} {}", runs.empty() ? "" : ", ", kInfo[i].name, state.peakRuns[i].load(std::memory_order_relaxed));
 		if (!runs.empty())
 			logger::info("[ORG] frame anchors, peak runs in one frame: {}", runs);
-		LogRegionStats();
 	}
 
 	Texture EngineTarget(std::uint32_t a_target)
@@ -4924,20 +4304,8 @@ namespace FrameAnchors
 			DropFailedClients(StepAnchors(declared), kDeclaredInfo[declared].names.label, failed, a_error);
 			return;
 		}
-		if (anchor == Anchor::Count) {
-			// A phase's epoch: the clients of its members in the failed build are dropped, as for an anchor's.
-			const Phase phase = PhaseOfEpoch(a_epoch);
-			if (phase == Phase::None)
-				return;
-			const auto r = PhaseIndex(phase);
-			const auto failed = state.phaseSnapshots[r].load(std::memory_order_acquire);
-			if (a_keptGraph)
-				state.phaseSnapshots[r].store(state.phasePrevious[r].load(std::memory_order_acquire), std::memory_order_release);
-			if (state.held && state.held->phase == phase)
-				DropHeld(state);
-			DropFailedClients(failed ? failed->members[r] : 0u, kPhaseNames[r].label, failed, a_error);
+		if (anchor == Anchor::Count)
 			return;
-		}
 		const std::uint32_t index = IndexOf(anchor);
 		// The host's own build or preparation failed (a build on the owner thread records its snapshot at once).
 		const auto failed = state.builtSnapshots[index].load(std::memory_order_acquire);
@@ -4995,19 +4363,6 @@ namespace FrameAnchors
 			const auto after = std::ranges::find_if(a_epochs, [&](std::uint32_t a_epoch) { return RankOf(a_epoch) > RankOf(segment); });
 			a_epochs.insert(after, epoch);
 		}
-		// Phases: an epoch for each, at its place in the frame, with the census's members to start with.
-		if (!RegionsOn())
-			return;
-		for (std::uint32_t r = 0; r < kPhases; ++r) {
-			state.phaseEpochs[r] = true;
-			state.learned[r] = PhaseSeed(static_cast<Phase>(r));
-			const auto segment = static_cast<std::uint32_t>(PhaseSegment(static_cast<Phase>(r)));
-			const std::uint32_t epoch = RenderGraphRuntime::EpochOf(static_cast<Segment>(segment));
-			if (std::ranges::find(a_epochs, epoch) != a_epochs.end())
-				continue;
-			const auto after = std::ranges::find_if(a_epochs, [&](std::uint32_t a_epoch) { return RankOf(a_epoch) > RankOf(segment); });
-			a_epochs.insert(after, epoch);
-		}
 	}
 
 	void SetTicketsAhead(org::GraphHost& a_host)
@@ -5020,17 +4375,6 @@ namespace FrameAnchors
 		for (std::uint32_t i = 0; i < kAnchors; ++i)
 			if (state.reserved[i] && !(state.declaredMembers >> i & 1u))
 				a_host.SetEpochTicketsAhead(EpochOfAnchor(static_cast<Anchor>(i)), most);
-		std::string regions;
-		for (std::uint32_t r = 0; r < kPhases; ++r)
-			if (state.phaseEpochs[r]) {
-				a_host.SetEpochTicketsAhead(EpochOfPhase(static_cast<Phase>(r)), most);
-				regions += fmt::format("{}{} (epoch {})", regions.empty() ? "" : ", ", kPhaseNames[r].label, EpochOfPhase(static_cast<Phase>(r)));
-			}
-		if (!regions.empty())
-			logger::info(
-				"[ORG] frame phases: {}; an anchor whose passes are all gated runs in the epoch of the phase it runs in, and a phase's "
-				"runs share one execution",
-				regions);
 	}
 
 	void Attach(org::GraphHost& a_host)
@@ -5072,7 +4416,6 @@ namespace FrameAnchors
 	void Refresh(std::string_view) {}
 	RunResult Run(const Point&) { return {}; }
 	bool InRun() { return false; }
-	bool RegionsOn() { return false; }
 	bool SegmentsOn() { return false; }
 	bool DescribingKey() { return false; }
 	std::optional<bool> DescribedBuildHasRow(std::uint32_t) { return std::nullopt; }
@@ -5080,8 +4423,7 @@ namespace FrameAnchors
 	std::uint32_t RunSegment(Anchor) { return 0; }
 	void BeginFrame(RenderGraph::Frame::Description&) {}
 	std::vector<std::uint32_t> SegmentEpochs() { return {}; }
-	void FlushRegions(const char*, std::uint32_t) {}
-	void NoteEpochSubmitted(std::uint32_t) {}
+	void BeforeGpuWork(const char*, std::uint32_t) {}
 	void LatchMainThread() {}
 	bool IsRenderOwner() { return true; }
 	void ClaimRenderOwnership() {}

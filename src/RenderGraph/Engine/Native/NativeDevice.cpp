@@ -637,9 +637,9 @@ namespace RenderGraph::Engine::Native
 				const std::function<void(rhi::CommandList&, const Descriptors&)>& a_record, std::vector<std::shared_ptr<const void>> a_keep,
 				std::span<NativeResource* const> a_used)
 			{
-				// A region's held anchor runs go first, before this context's lock: submitting them can run CS code that uses the context
-				// again (Route from inside Route threw "resource deadlock would occur"). ExternalWork::Submit's own flush then finds nothing.
-				::FrameAnchors::FlushRegions("native context");
+				// Stage commits first, before this context's lock: committing can run CS code that uses the context
+				// again (Route from inside Route threw "resource deadlock would occur"). ExternalWork::Submit's own call then finds nothing to do.
+				::FrameAnchors::BeforeGpuWork("native context");
 				// The epochs still on the submission thread go first too, before this context's lock (a pass recorded there may use the
 				// context). Only the render owner drains: another thread's operation has no order against the render thread's epochs.
 				// The statistics name the drain by the operation.

@@ -375,7 +375,6 @@ namespace RenderGraph::Engine::Skeleton
 			std::array<bool, kHosts> hostedRegistered{};  // an anchor host's client is registered
 			std::array<std::atomic<std::uint32_t>, kHosts> hostedBuilt{};  // a DCLF host's graph was built with this registration
 			std::uint32_t generation = 0;
-			std::uint32_t committedLast = 0;  // the highest gate entry the last commit opened (regions: ClientDesc::joins)
 			bool registered = false;  // a registration is live
 			bool stale = false;       // a view's texture was made again: registered again at the next flush with nothing pending
 			std::uint64_t lent = 0;   // clears that found another view in their target's slot (a lent slot), counted
@@ -1274,27 +1273,11 @@ namespace RenderGraph::Engine::Skeleton
 			client.commit = [a_group](const FrameAnchors::Point&) {
 				auto& state = GroupOf(a_group);
 				const org::RunRef run = RenderGraphRuntime::Get().Host()->CurrentRun();
-				std::uint32_t last = 0;
 				for (const auto& pending : state.pending) {
 					if (!pending.depth)
 						state.colours->WriteValue(run, pending.gateEntry * RunGate::kEntryBytes, pending.colour);
 					state.gate->OpenDraw(pending.gateEntry);
-					last = (std::max)(last, pending.gateEntry);
 				}
-				state.committedLast = last;
-			};
-			// Regions: a run's clears join the execution an earlier run of this group committed into when each comes after every entry
-			// that commit opened. Each view has its own entry and colour, and the passes run by entry, so they record in the
-			// engine's order and write nothing twice. Back-to-back clears of the shadow slices and the frame's targets then share
-			// one execution.
-			client.joins = [a_group] {
-				const auto& state = GroupOf(a_group);
-				if (state.pending.empty())
-					return false;
-				for (const auto& pending : state.pending)
-					if (pending.gateEntry <= state.committedLast)
-						return false;
-				return true;
 			};
 			client.executed = [a_group](const FrameAnchors::Point&) { GroupOf(a_group).executed = true; };
 			client.onFailed = [a_group] {
