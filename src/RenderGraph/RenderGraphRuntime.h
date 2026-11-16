@@ -425,6 +425,9 @@ public:
 	 */
 	bool QueuesPresent() const;
 
+	/** @brief For the in-process sampler (RtSampler): the host's submission thread's and host thread's native handles; null when one does not run. */
+	void HostThreadHandles(void*& a_submit, void*& a_host);
+
 	/**
 	 * @brief Render owner: runs a_closure on the submission thread, in order after the epochs queued so far
 	 * (GraphHost::EnqueueOnSubmitThread). Without a submission thread it runs at once.

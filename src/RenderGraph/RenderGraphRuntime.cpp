@@ -3128,6 +3128,12 @@ bool RenderGraphRuntime::QueuesPresent() const
 	return impl && impl->host && impl->host->SubmissionThreadOn() && impl->host->GetDesc().queuedSeals && FrameAnchors::IsRenderOwner();
 }
 
+void RenderGraphRuntime::HostThreadHandles(void*& a_submit, void*& a_host)
+{
+	a_submit = impl && impl->host ? impl->host->SubmitThreadNativeHandle() : nullptr;
+	a_host = impl && impl->host ? impl->host->HostThreadNativeHandle() : nullptr;
+}
+
 void RenderGraphRuntime::QueueOnSubmitThread(std::function<void()> a_closure)
 {
 	if (!impl || !impl->host) {
@@ -4213,6 +4219,7 @@ void RenderGraphRuntime::SealPresented() {}
 void RenderGraphRuntime::MoveOwnerThread() {}
 void RenderGraphRuntime::DrainSubmissions(const char*, bool) {}
 bool RenderGraphRuntime::QueuesPresent() const { return false; }
+void RenderGraphRuntime::HostThreadHandles(void*& a_submit, void*& a_host) { a_submit = a_host = nullptr; }
 void RenderGraphRuntime::QueueOnSubmitThread(std::function<void()> a_closure) { a_closure(); }
 void RenderGraphRuntime::WaitFramePace() {}
 org::services::PipelineRegistry* RenderGraphRuntime::PipelineRegistry() { return nullptr; }
