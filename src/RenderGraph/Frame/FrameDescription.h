@@ -41,6 +41,7 @@ namespace RenderGraph::Frame
 		PreDepth,
 		PreMain,
 		Deferred,        // deferred+water: the deferred passes and the composite, the water mask, the RenderWorld scopes, the kMAIN copy, the water and its blend
+		Sun,             // the sun stage: the sun's occlusion query after DCLF's forward epoch, before the first-person one
 		Post,            // the post stage: the volumetric lighting, the pre-tonemap composites, the upscaler's evaluate and the depth upscale,
 		                 // the end-of-frame effects with the tonemap, to RenderEndOfFrameEffects' return
 		Ui,              // the UI stage: the displays, the movie's tiles and the overlay, to just before the present; world and Bink frames

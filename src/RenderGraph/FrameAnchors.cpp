@@ -157,6 +157,7 @@ namespace FrameAnchors
 			Segment::AnchorEngineDraws,        // the water, before the forward epoch (nominally here: the shadow masks and the water mask run before, the blood after)
 			Segment::PhaseDeferred,            // the deferred phase: submitted at the forward epoch
 			Segment::Forward,
+			Segment::DeclaredSun,          // the sun stage (SegmentsOn): the world's sun query, committed just before DCLF's first-person epoch
 			Segment::AnchorEngineQueries,  // the sun's occlusion queries, after Main::RenderWorld's accumulator (nominally here: a second runs later in the frame)
 			Segment::FirstPerson,
 			Segment::DeclaredPost,              // the post stage (SegmentsOn): its end is RenderEndOfFrameEffects' return
@@ -376,14 +377,24 @@ namespace FrameAnchors
 					{ Anchor::ImageSpace, { "cs.engine.skeleton.frame@image-space", "cs.engine.imagespace.world.water" } },
 					{ Anchor::Count, { nullptr, nullptr }, Segment::Count, false, true } } },
 				9, { "CS stage: deferred+water", "CS stage: deferred+water inputs", "FrameSegments::Deferred / ", "cs.segment.deferred" } },
-			// The post stage: ImageSpaceManager::RenderWorldPostProcess (SE 100430, AE 107148). The volumetric lighting (whole: its hook
+			// The sun stage: Main::RenderWorld's sun occlusion query (Sun::SubmitOcclusionQuery, SE 0x1403bbf20), after DCLF's forward epoch. It
+			// must run on the GPU before the first-person geometry, which would occlude the sun: a stage of its own between DCLF's forward and
+			// first-person graphs, committed just before the first-person epoch is submitted (FlushRegions) or at a later stage's first tap.
+			// The sun's client has two instances (the world's and first person's query); a stage run's k-th tap is instance k.
+			{ Segment::DeclaredSun,
+				{ { { .anchor = Anchor::EngineQueries, .clients = { "cs.sky.sun", nullptr, nullptr, nullptr }, .instanceCount = 2 },
+					{ Anchor::Count, {}, Segment::Count, false, true } } },
+				2, { "CS stage: sun", "CS stage: sun inputs", "FrameSegments::Sun / ", "cs.segment.sun" } },
+			// The post stage: ImageSpaceManager::RenderWorldPostProcess (SE 100430, AE 107148). First the first person's sun query
+			// (Main::RenderFirstPersonView, after DCLF's first-person epoch), as the sun's client's instance 0 of this stage's run. The volumetric lighting (whole: its hook
 			// runs only there), the pre-tonemap composite as CS passes (ChainSteps.inl), the PostProcessing anchor (reserved so its hook
 			// always runs), the Upscale anchor (the upscaler's evaluate as a pass recorded at execution, the copy into kMAIN, the depth
 			// upscale), RenderEndOfFrameEffects (99023 / 105674) as CS passes split at the Tonemap anchor (its passes replace or follow the
 			// tonemap draw, so they sit between the HDR effect's draws and the tonemap's), and its return as the end (a point: no anchor
 			// runs there). Nothing else submits GPU work between the first tap and the end (the census counts any that does).
 			{ Segment::DeclaredPost,
-				{ { { Anchor::VolumetricLighting },
+				{ { { .anchor = Anchor::EngineQueries, .clients = { "cs.sky.sun", nullptr, nullptr, nullptr }, .instanceCount = 2 },
+					{ Anchor::VolumetricLighting },
 					{ Anchor::ImageSpace, { "cs.engine.imagespace.post.composites", nullptr } },
 					{ Anchor::PostProcessing },
 					{ Anchor::Upscale },
@@ -391,7 +402,7 @@ namespace FrameAnchors
 					{ Anchor::Tonemap, { nullptr, nullptr }, Segment::Count, true },
 					{ Anchor::ImageSpace, { "cs.engine.imagespace.post.final", "cs.engine.skeleton.frame@post-chain" } },
 					{ Anchor::Count, { nullptr, nullptr }, Segment::Count, false, true } } },
-				8, { "CS stage: post", "CS stage: post inputs", "FrameSegments::Post / ", "cs.segment.post" } },
+				9, { "CS stage: post", "CS stage: post inputs", "FrameSegments::Post / ", "cs.segment.post" } },
 			// The UI stage, in the world's and a Bink movie's recipes: the overlay's ImGui draw (its draw list a frame input, recorded in the
 			// stage's late batch). It ends at a point: just before the present (Hooks.cpp), or before HDR output or the capture is submitted,
 			// which follow the overlay on the GPU and keep their anchors' tickets.
@@ -2900,6 +2911,26 @@ namespace FrameAnchors
 			}
 		}
 
+		/**
+		 * @brief Whether epoch a_segment, submitted now, ends the sun stage (FlushRegions): DCLF's first-person epoch, or the work after it in a
+		 * frame without it.
+		 */
+		bool EndsSun(Segment a_segment)
+		{
+			switch (a_segment) {
+			case Segment::FirstPerson:
+			case Segment::AnchorVolumetricLighting:
+			case Segment::AnchorPostProcessing:
+			case Segment::AnchorUpscale:
+			case Segment::AnchorInterface:
+			case Segment::AnchorPresent:
+			case Segment::DeclaredPost:
+				return true;
+			default:
+				return false;
+			}
+		}
+
 		/** @brief Whether epoch a_segment, submitted now, ends the world segment (FlushRegions): GPU work that follows it in every frame. */
 		bool EndsWorld(Segment a_segment)
 		{
@@ -2938,6 +2969,9 @@ namespace FrameAnchors
 		}
 		if (a_segment != UINT32_MAX && state.host && SegmentsOn() && EndsWorld(static_cast<Segment>(a_segment)) && IsRenderOwner())
 			(void)TapPoint(static_cast<std::uint32_t>(Segment::DeclaredDeferred));
+		// The sun stage commits just before DCLF's first-person epoch is submitted, or before later GPU work in a frame without it.
+		if (a_segment != UINT32_MAX && state.host && SegmentsOn() && EndsSun(static_cast<Segment>(a_segment)) && IsRenderOwner())
+			(void)TapPoint(static_cast<std::uint32_t>(Segment::DeclaredSun));
 		// The UI stage commits just before the GPU work that follows the overlay: HDR output, the capture, or the present (Hooks.cpp).
 		if (a_segment != UINT32_MAX && state.host && SegmentsOn() && IsRenderOwner() &&
 			(a_segment == static_cast<std::uint32_t>(Segment::AnchorHDROutput) || a_segment == static_cast<std::uint32_t>(Segment::AnchorCapture))) {
@@ -3947,6 +3981,11 @@ namespace FrameAnchors
 					static const bool on = !Switches::Off("CS_ORG_SEGMENT_DEFERRED");
 					return on;
 				}
+			case Segment::DeclaredSun:
+				{
+					static const bool on = !Switches::Off("CS_ORG_SEGMENT_SUN");
+					return on;
+				}
 			case Segment::DeclaredPost:
 				{
 					// The post chain as CS passes (ImageSpace's ChainSteps.inl). It needs the chain's hooks (CS_ORG_SEGMENT_POST, not 0).
@@ -4034,6 +4073,22 @@ namespace FrameAnchors
 		const auto& state = Anchors();
 		const std::uint32_t index = IndexOf(a_anchor);
 		return SegmentsOn() && state.frozen && index < kAnchors && DeclaredOfAnchor(state, index) < kDeclared;
+	}
+
+	bool NamedByStage(std::string_view a_id)
+	{
+		const auto& state = Anchors();
+		if (!SegmentsOn() || !state.frozen)
+			return false;
+		for (std::uint32_t d = 0; d < kDeclared; ++d) {
+			if (!state.declaredEpochs[d])
+				continue;
+			for (std::uint32_t k = 0; k < kDeclaredInfo[d].stepCount; ++k)
+				for (const char* name : kDeclaredInfo[d].steps[k].clients)
+					if (name && a_id == name)
+						return true;
+		}
+		return false;
 	}
 
 	bool CanTap(std::string_view a_id)
@@ -5052,6 +5107,7 @@ namespace FrameAnchors
 	bool RequestJoin(std::string_view, Anchor) { return false; }
 	bool CanRun(std::string_view, Anchor) { return false; }
 	bool HeldByStage(Anchor) { return false; }
+	bool NamedByStage(std::string_view) { return false; }
 	std::uint32_t PeakRunsPerFrame(Anchor) { return 0; }
 	bool BuildPending(std::string_view) { return false; }
 	void PrimeStages(std::string_view) {}

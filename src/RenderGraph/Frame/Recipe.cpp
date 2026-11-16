@@ -55,8 +55,11 @@ namespace RenderGraph::Frame::Recipes
 			{ StageId::Deferred, Owner::Cs, { Segment::DeclaredDeferred }, 1, "just before DCLF's forward epoch (the water blend's end)" },
 			// The EngineDraws anchor's own epoch keeps the clients no stage holds (blood splatter, precipitation, the menu scenes): in a
 			// world frame they run after the water.
-			{ StageId::Forward, Owner::Dclf, { Segment::AnchorEngineDraws, Segment::AnchorEngineFrameClear, Segment::Forward, Segment::AnchorEngineQueries }, 4,
-				"the engine's blended draw" },
+			{ StageId::Forward, Owner::Dclf, { Segment::AnchorEngineDraws, Segment::AnchorEngineFrameClear, Segment::Forward }, 3, "the engine's blended draw" },
+			// The sun's query after the forward pass must run before the first-person geometry on the GPU: a stage of its own between the two
+			// DCLF graphs. The first person's query comes after the first-person graph: the post stage's first step. The anchor's own epoch
+			// keeps a query no stage's window takes (a world frame before Drawcall Limit Fix draws).
+			{ StageId::Sun, Owner::Cs, { Segment::DeclaredSun, Segment::AnchorEngineQueries }, 2, "just before DCLF's first-person epoch" },
 			{ StageId::FirstPerson, Owner::Dclf, { Segment::FirstPerson }, 1, "Main::RenderFirstPersonView" },
 			{ StageId::Post, Owner::Cs,
 				{ Segment::DeclaredPost, Segment::AnchorTonemap, Segment::AnchorFrameGeneration },
@@ -245,7 +248,7 @@ namespace RenderGraph::Frame::Recipes
 			SegmentId segment;
 		};
 
-		constexpr std::uint32_t kKindStages = 11;
+		constexpr std::uint32_t kKindStages = 12;
 
 		/** @brief A frame kind's recipe: its stages in frame order. */
 		struct KindRecipe
@@ -264,10 +267,11 @@ namespace RenderGraph::Frame::Recipes
 			{ "opaque", Owner::Dclf, SegmentId::Count },
 			{ "deferred+water", Owner::Cs, SegmentId::Deferred },
 			{ "forward", Owner::Dclf, SegmentId::Count },
+			{ "sun", Owner::Cs, SegmentId::Sun },
 			{ "first person", Owner::Dclf, SegmentId::Count },
 			{ "post", Owner::Cs, SegmentId::Post },
 			{ "UI", Owner::Cs, SegmentId::Ui },
-		} }, 11 };
+		} }, 12 };
 		// A menu over a frozen world (after its capture frame), the main menu (and any frame before the player has 3D) and a loading screen's
 		// frame: one stage, the menu UI stage. It holds, in the engine's order: the frozen frame's composite (a menu over a frozen world), the
 		// first clears, the displays before the scene, the scene's clears, its depth, shadow mask, depth and kMAIN copies, colour and composite,

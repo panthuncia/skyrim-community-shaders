@@ -47,6 +47,8 @@ namespace DCLF::Features::Sky::SkyDraws
 		// The faces' client in the start stage: one instance per face the engine may draw in a frame, each with its own gate entries,
 		// latch regions and run. An anchor's own epoch uses instance 0 alone.
 		constexpr std::uint32_t kFaceInstances = kFaces;
+		// The sun's client in CS stages: two queries a frame at most (the world's and first person's), each a tap of a stage run.
+		constexpr std::uint32_t kSunInstances = 2;
 		constexpr std::uint32_t kDrawStride = static_cast<std::uint32_t>(sizeof(DrawConstants));
 		constexpr std::size_t kViews = static_cast<std::size_t>(View::Count);
 
@@ -296,18 +298,22 @@ namespace DCLF::Features::Sky::SkyDraws
 					block.sharedDepth = block.depth;
 					block.cloudShadows = c.nullCube;
 					block.headers = { c.null2D, c.null2D, c.nullCube, c.nullCube };
-					// Each draw counted by its own query of the run's range: reset first, resolved after (every query available).
+					// Each draw counted by its own query of the instance's part of the run's range: reset first, resolved after (every query
+					// available).
 					const auto& queries = *c.queries;
 					auto& commands = a_recording.Commands();
-					queries.Reset(commands, latchRun);
+					const std::uint32_t perInstance = (std::max)(queries.PerRun() / c.instances, 1u);
+					const std::uint32_t first = a_frame.instance * perInstance;
+					queries.Reset(commands, latchRun, first, perInstance);
 					std::uint32_t begun = 0;
 					const RasterProgram::Colour colour{ .view = &a_bindings.colours[0] };
-					for (std::uint32_t i = 0; i < run.draws.size() && i < queries.PerRun(); ++i) {
+					for (std::uint32_t i = 0; i < run.draws.size() && i < perInstance; ++i) {
 						const auto& latched = run.draws[i];
-						if (latched.program && draw(*static_cast<const RasterProgram*>(latched.program.get()), i, { &colour, 1 }, queries.Pool(latchRun), queries.Index(latchRun, i)))
+						if (latched.program &&
+							draw(*static_cast<const RasterProgram*>(latched.program.get()), i, { &colour, 1 }, queries.Pool(latchRun), queries.Index(latchRun, first + i)))
 							begun |= 1u << i;
 					}
-					queries.Resolve(commands, latchRun, begun, a_bindings.queryReadbacks);
+					queries.Resolve(commands, latchRun, begun, a_bindings.queryReadbacks, first, perInstance);
 					return;
 				}
 
@@ -452,6 +458,11 @@ namespace DCLF::Features::Sky::SkyDraws
 				client->instances = kFaceInstances;
 				client->clearsFace = true;
 			}
+			// The sun's client in CS stages (the sun stage after DCLF's forward epoch, the post stage after the first-person one): an
+			// instance per query a stage run may take (Main::RenderWorld's and Main::RenderFirstPersonView's), each with its own query of
+			// the run's range. Its first tap in a stage run is instance 0.
+			if (a_shape.view == View::Sun && FrameAnchors::NamedByStage(client->id))
+				client->instances = kSunInstances;
 			client->latch = std::make_shared<org::LatchBlock>(client->id + ".latch", client->instances * kMaxDraws * kDrawStride);
 			client->gate = ::RenderGraph::RunGate::Create(client->id + ".gate", client->instances * kMaxDraws);
 			if (!client->gate) {
@@ -473,7 +484,7 @@ namespace DCLF::Features::Sky::SkyDraws
 				client->colours[0] = FrameAnchors::EngineTarget(static_cast<std::uint32_t>(RE::RENDER_TARGETS::kMAIN));
 				client->copyDepth = FrameAnchors::EngineDepth(static_cast<std::uint32_t>(kSceneDepth));
 				client->sceneDepth = client->copyDepth;
-				client->queries = ::RenderGraph::Engine::OcclusionQueries::QueryRing::Create(client->id + ".queries", 1);
+				client->queries = ::RenderGraph::Engine::OcclusionQueries::QueryRing::Create(client->id + ".queries", client->instances);
 				if (!client->colours[0] || !client->copyDepth || !client->queries) {
 					logger::warn("[DCLF] sky: the sun's occlusion client cannot be made (kMAIN, the Z-prepass copy or its query ring); the sun's queries stay the engine's");
 					return nullptr;
@@ -578,7 +589,7 @@ namespace DCLF::Features::Sky::SkyDraws
 						client->gate->OpenDraw(entry, draw.indexCount, 1);
 				}
 				// The engine ring slot the run's draw counts. A new readback is declared from the next build.
-				if (client->queries && client->queries->Commit(latchRun, std::span<const std::int32_t>(&run->query, 1)))
+				if (client->queries && client->queries->Commit(latchRun, std::span<const std::int32_t>(&run->query, 1), instance))
 					FrameAnchors::Refresh(client->id);
 			};
 			desc.executed = [client](const FrameAnchors::Point&) {

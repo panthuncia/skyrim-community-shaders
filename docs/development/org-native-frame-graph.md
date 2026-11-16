@@ -4433,3 +4433,61 @@ native-quick, native-d3d12-quick, native-river, native-upscalers, native-interio
 recipe findings, 0 frames a stage was absent after it first ran. The main menu (Start On Save off): menu shot as before (the emblem still
 missing); the harness marks it failed because it expects a world. The pause menu shot native against guest: the same menu and the same
 blurred frozen background. After the menu closes the world resumes (world frames, the stages current, 0 tap errors).
+
+## The sun stage, and the capture in the UI stages (2026-11-16, `org-native/phases`)
+
+### The sun's queries: a sun stage and the post stage's first step
+
+`Sun::SubmitOcclusionQuery` (SE 0x1403bbf20) has two callers: `Main::RenderWorld` (after Drawcall Limit Fix's forward epoch) and
+`Main::RenderFirstPersonView` (after the first-person epoch). Each was the EngineQueries anchor's own ticket (1.9 a frame).
+
+- **The world's query: the sun stage** (`SegmentId::Sun`, `Segment::DeclaredSun`, between deferred+water and post). The query must run on
+  the GPU before the first-person geometry, which would occlude the sun, and after DCLF's forward epoch; nothing of CS's runs between
+  those two DCLF graphs. So it is a stage of its own: one step (the sun's client at the EngineQueries anchor, a shared step naming
+  `cs.sky.sun`) and a point end. It commits just before DCLF's first-person epoch is submitted (FlushRegions, `EndsSun`), or before the
+  post stage's work in a frame without that epoch, or at a later stage's first tap. `CS_ORG_SEGMENT_SUN=0` turns it off.
+- **First person's query: the post stage's first step.** It comes after the first-person epoch, when the post stage's window is open
+  (the sun stage has ended), so it costs no ticket.
+- **Instances.** The sun's client has two instances in a stage run (`kSunInstances`): a stage run's k-th tap is instance k, with its own
+  gate entries, latch region, run and query. In a frame without the first-person epoch both queries fall in the sun stage (instances 0
+  and 1). The client takes instances only when a stage names it (`FrameAnchors::NamedByStage`).
+- **The query ring in a stage** (`OcclusionQueries.cpp`). A stage's taps commit into the frame slot's staging run, and the stage's commit
+  moves them onto the run that submits it. `QueryRing` now moves its runs the same way (a `RunSlotsRegistry` entry: the staging lease's
+  range, its engine slots and its generation move to the submitting run's lease). A second commit of one run adds its queries
+  (`Commit`'s first query), and the passes reset and resolve their instance's part of the range. A committed run that is not submitted
+  yet reads not-ready (the bracket no longer skips it at its end); a run whose lease comes round without a submission is skipped then.
+- The anchor's own epoch keeps a query no stage's window takes: a world frame before Drawcall Limit Fix draws (deferred+water is still
+  open), seen in the loading frames.
+
+The frame sequence census of a steady world frame: forward, the world's query (held), `submit CS stage: sun`, `submit CS DCLF: first
+person`, first person's query (held), the post stage's taps. The query answers are as before (the same counts at the same spot, a few
+more not-ready polls, since the answer comes after the stage's later commit).
+
+**The decal tests are not tickets in these sessions.** The decal occlusion client is never made: `kDECAL_OCCLUSION has no depth view to
+read its format and size from` at its setup, in every run; the DecalQueries anchor ran 0 times a frame in every run. Moving them into the
+start stage (fixed instances, a query range per instance, which the ring's per-instance ranges above now allow) is not done: there is
+nothing to test it on.
+
+perf-taa, native Vulkan, Perf-Fast, one run each (before: `i1perf`, the capture-frame build; after: `k2perf`, with the sun stage and the
+capture pass), the machine in use (fps rough):
+
+| perf-taa | Before | After |
+|---|---|---|
+| Tickets a frame | 12.8 to 13.0 | 11.8 to 12.0 |
+| Queue submissions a frame (batches + uploads + leading uploads) | 14.7 + 2.0 + 1.0 | 14.0 + 2.0 + 1.0 |
+| Entry barriers a frame | 501 to 508 | 494 to 503 |
+| Body barriers a frame, recorded (less those folded at execution) | 803 to 812 | 806 to 819 |
+| engine queries anchor: tickets, entry / body | 1.96, 12.7 / 9.8 | none |
+| sun stage: tickets, entry / body | - | 0.88 to 1.00, 5.3 to 6.0 / 4.4 to 5.0 |
+| fps (rough) | 124.8 | 122.6 |
+
+The world frame's tickets: start, shadow view, pre-depth, Z-prepass, pre-main, main opaque, deferred+water, forward, sun, first person,
+post, UI.
+
+Checks (one run each, `CS_TEST_BACKGROUND=1`, mismatches fatal; the build with the capture pass too): native-quick (with the frame sequence
+census), the frozen-world run native and guest, native-d3d12-quick, native-river, native-upscalers, native-interior, native-validation
+(the known 20 `VUID-vkCmdDraw-None-09600`), the loading-thread run, first and third person, guest-quick, native-perf-taa, the main menu:
+all passed (the main menu as before), 0 tap errors, 0 recipe findings, 0 frames a stage was absent after it first ran. The validation
+tour failed once to load within 120 s (`k2val`: 794 re-registrations of the shadow clears, each a DCLF re-entry hold, see below) and passed
+on the next run (84); the switch registry did not list `CS_ORG_SEGMENT_SUN` then, and does now.
+

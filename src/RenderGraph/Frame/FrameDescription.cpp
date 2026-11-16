@@ -33,6 +33,8 @@ namespace RenderGraph::Frame
 			return "pre-main";
 		case SegmentId::Deferred:
 			return "deferred+water";
+		case SegmentId::Sun:
+			return "sun";
 		case SegmentId::Post:
 			return "post";
 		case SegmentId::Ui:

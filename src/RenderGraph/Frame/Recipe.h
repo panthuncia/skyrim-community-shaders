@@ -43,7 +43,8 @@ namespace RenderGraph::Frame::Recipes
 		PreMain,      // CS: the depth copy, Terrain Blending, the shadow mask, light culling, the Prepass clients and the main pass's sky
 		Opaque,       // Drawcall Limit Fix's main opaque pass
 		Deferred,     // CS: deferred+water: the deferred passes and the composite, the water mask, the RenderWorld scopes, the water and its blend
-		Forward,      // Drawcall Limit Fix's forward pass, with the frame-group clears' ticket and the sun queries around it
+		Forward,      // Drawcall Limit Fix's forward pass, with the frame-group clears' ticket
+		Sun,          // CS: the sun's occlusion query after the forward pass (the first person's query is the post stage's)
 		FirstPerson,  // Drawcall Limit Fix's first-person colour
 		Post,         // CS: the post chain, the upscaler's evaluate and the depth upscale, one stage
 		Ui,           // CS: the UI stage (a Bink frame's depth clear, Scaleform's displays, the movie tiles, the overlay); HDR output and the capture

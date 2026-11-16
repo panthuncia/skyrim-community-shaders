@@ -677,6 +677,9 @@ namespace FrameAnchors
 	 */
 	bool HeldByStage(Anchor a_anchor);
 
+	/** @brief Whether a declared segment (a CS stage) names client a_id at one of its steps. Fixed once the render graph initialized. Any thread. */
+	bool NamedByStage(std::string_view a_id);
+
 	/**
 	 * @brief Writes frame inputs for client a_id outside its step's tap: a_write runs with GraphHost::CurrentRun the frame slot's staging
 	 * run of the stage that holds the client, while that stage's window is open and the frame's schedule has the client on. What it

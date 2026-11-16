@@ -132,23 +132,29 @@ namespace RenderGraph::Engine::OcclusionQueries
 		rhi::QueryPoolHandle Pool(const org::RunRef& a_run) const;
 		/** @brief Record time: query a_query of a_run's range, in Pool(a_run). */
 		std::uint32_t Index(const org::RunRef& a_run, std::uint32_t a_query) const;
-		/** @brief Record time, outside any render pass: a_run's range reset, before any of its queries is begun. */
-		void Reset(rhi::CommandList& a_commands, const org::RunRef& a_run) const;
+		/**
+		 * @brief Record time, outside any render pass: queries a_first to a_first + a_count of a_run's range reset (every one by default),
+		 * before any of them is begun. A client with instances in one run resets each instance's own queries.
+		 */
+		void Reset(rhi::CommandList& a_commands, const org::RunRef& a_run, std::uint32_t a_first = 0, std::uint32_t a_count = ~0u) const;
 		/**
 		 * @brief Record time, outside any render pass, after the range's draws: each query not in a_begun (a bit per query) begun and
 		 * ended with nothing in it, so all are available, then the range resolved into its chunk's readback. a_declared is how many
 		 * readbacks the recording's pass declared (Readbacks().size() at its build): a range whose readback is not among them is not
 		 * resolved, and its run's slots are skipped.
 		 */
-		void Resolve(rhi::CommandList& a_commands, const org::RunRef& a_run, std::uint32_t a_begun, std::size_t a_declared) const;
+		void Resolve(rhi::CommandList& a_commands, const org::RunRef& a_run, std::uint32_t a_begun, std::size_t a_declared, std::uint32_t a_first = 0,
+			std::uint32_t a_count = ~0u) const;
 
 		/**
-		 * @brief The client's commit (render thread, the host's CurrentRun): the run counts engine ring slot a_slots[i] with query i
-		 * (kNoSlot: none). A slot named by several queries answers their sum (the decal test's draws). Reads the counts of its lease
-		 * index's last run first. Makes the range's chunk when it is new.
+		 * @brief The client's commit (render thread, the host's CurrentRun): the run counts engine ring slot a_slots[i] with query
+		 * a_first + i (kNoSlot: none). A slot named by several queries answers their sum (the decal test's draws). A second commit of the
+		 * same run (another instance's tap in one CS stage run) adds its queries; the first reads the counts of its lease index's last run.
+		 * Makes the range's chunk when it is new. A commit into a CS stage's staging run moves to the run that submits it at the stage's
+		 * commit (FrameStaging's RunSlotsRegistry); until that run is submitted its slots read not-ready.
 		 * @return Whether a chunk was made: the client's passes declare its readback from their next build (FrameAnchors::Refresh).
 		 */
-		bool Commit(const org::RunRef& a_run, std::span<const std::int32_t> a_slots);
+		bool Commit(const org::RunRef& a_run, std::span<const std::int32_t> a_slots, std::uint32_t a_first = 0);
 		/** @brief The client's executed callback (render thread): the run last committed was submitted. */
 		void Executed();
 

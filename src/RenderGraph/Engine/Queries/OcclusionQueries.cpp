@@ -14,6 +14,7 @@
 #include <utility>
 
 #if defined(CS_HAS_RENDER_GRAPH)
+#	include "RenderGraph/FrameStaging.h"
 #	include "RenderGraph/RenderGraphRuntime.h"
 
 #	include <OpenRenderGraph/GraphHost.h>
@@ -166,6 +167,7 @@ namespace RenderGraph::Engine::OcclusionQueries
 		/** @brief A range's last run. */
 		struct Run
 		{
+			org::RunRef ref;                  // the run that committed it (a CS stage's staging run until the stage's commit moves it)
 			std::vector<std::int32_t> slots;  // the engine slot each query counts, kNoSlot for none
 			std::uint64_t generation = 0;
 			bool committed = false, submitted = false, harvested = false;
@@ -192,6 +194,23 @@ namespace RenderGraph::Engine::OcclusionQueries
 		std::vector<Run> runs;  // by range (lease index), grown at commit; guarded by the globals' mutex
 		std::uint32_t lastCommitted = ~0u;
 		std::uint64_t generations = 0;
+
+		/** @brief A CS stage's commit moves what its taps committed into the frame slot's staging run onto the run that submits it. */
+		struct Mover final : ::RenderGraph::RunSlotsRegistry::Entry
+		{
+			State* state = nullptr;
+			void MoveRun(const org::RunRef& a_from, const org::RunRef& a_to) const override;
+		};
+		Mover mover;
+
+		State()
+		{
+			mover.state = this;
+			::RenderGraph::RunSlotsRegistry::Add(&mover);
+		}
+		~State() { ::RenderGraph::RunSlotsRegistry::Remove(&mover); }
+		State(const State&) = delete;
+		State& operator=(const State&) = delete;
 
 		/** @brief The chunk index of a range. */
 		static std::uint32_t ChunkIndex(std::uint32_t a_range) { return a_range / QueryRing::kRunsPerChunk; }
@@ -251,6 +270,9 @@ namespace RenderGraph::Engine::OcclusionQueries
 				auto& slot = a_globals.slots[a_index];
 				return slot.ring.get() == &a_ring && slot.range == a_range && slot.generation == run.generation ? &slot : nullptr;
 			};
+			// Committed into a CS stage's run that is not submitted yet: not ready, until the stage submits it or its lease comes round again.
+			if (!run.submitted && !run.unresolved && !a_retired)
+				return false;
 			if (!run.submitted || run.unresolved) {
 				// Committed but never submitted (the run failed after its commit), or recorded by a pass built before its readback
 				// existed: nothing counted it into the readback.
@@ -354,14 +376,21 @@ namespace RenderGraph::Engine::OcclusionQueries
 		return state->First(a_run.lease) + (std::min)(a_query, state->perRun - 1);
 	}
 
-	void QueryRing::Reset(rhi::CommandList& a_commands, const org::RunRef& a_run) const
+	void QueryRing::Reset(rhi::CommandList& a_commands, const org::RunRef& a_run, std::uint32_t a_first, std::uint32_t a_count) const
 	{
+		if (a_first >= state->perRun)
+			return;
+		const auto count = (std::min)(a_count, state->perRun - a_first);
 		if (const auto pool = Pool(a_run); pool.valid())
-			a_commands.ResetQueries(pool, Index(a_run, 0), state->perRun);
+			a_commands.ResetQueries(pool, Index(a_run, a_first), count);
 	}
 
-	void QueryRing::Resolve(rhi::CommandList& a_commands, const org::RunRef& a_run, std::uint32_t a_begun, std::size_t a_declared) const
+	void QueryRing::Resolve(rhi::CommandList& a_commands, const org::RunRef& a_run, std::uint32_t a_begun, std::size_t a_declared, std::uint32_t a_first,
+		std::uint32_t a_count) const
 	{
+		if (a_first >= state->perRun)
+			return;
+		const auto count = (std::min)(a_count, state->perRun - a_first);
 		const auto* chunk = state->ChunkOf(a_run.lease);
 		if (!chunk)
 			return;
@@ -374,17 +403,17 @@ namespace RenderGraph::Engine::OcclusionQueries
 			return;
 		}
 		const auto pool = chunk->pool->GetHandle();
-		const auto first = Index(a_run, 0);
-		for (std::uint32_t i = 0; i < state->perRun; ++i) {
+		const auto first = Index(a_run, a_first);
+		for (std::uint32_t i = 0; i < count; ++i) {
 			if (a_begun & (1u << i))
 				continue;
 			a_commands.BeginQuery(pool, first + i);
 			a_commands.EndQuery(pool, first + i);
 		}
-		a_commands.ResolveQueryData(pool, first, state->perRun, chunk->readback->GetAPIResource().GetHandle(), std::uint64_t(first) * state->stride);
+		a_commands.ResolveQueryData(pool, first, count, chunk->readback->GetAPIResource().GetHandle(), std::uint64_t(first) * state->stride);
 	}
 
-	bool QueryRing::Commit(const org::RunRef& a_run, std::span<const std::int32_t> a_slots)
+	bool QueryRing::Commit(const org::RunRef& a_run, std::span<const std::int32_t> a_slots, std::uint32_t a_first)
 	{
 		const std::uint32_t range = a_run.lease;
 		// The range's chunk, and any before it, before the recording needs it: record time never makes one, so every readback a
@@ -396,15 +425,23 @@ namespace RenderGraph::Engine::OcclusionQueries
 		const std::scoped_lock lock(globals.mutex);
 		if (state->runs.size() <= range)
 			state->runs.resize(static_cast<std::size_t>(range) + 1);
-		// The lease index's last run retired before the index was opened again: its counts are there.
-		Harvest(globals, *state, range, true);
 		auto& run = state->runs[range];
-		run = {};
-		run.generation = ++state->generations;
-		run.committed = true;
-		for (std::uint32_t i = 0; i < a_slots.size() && i < state->perRun; ++i) {
+		// Another tap of the same run (an instance of a client in one CS stage run) adds its queries to it.
+		const bool same = run.committed && !run.submitted && run.ref == a_run;
+		if (!same) {
+			// The lease index's last run retired before the index was opened again: its counts are there.
+			Harvest(globals, *state, range, true);
+			run = {};
+			run.generation = ++state->generations;
+			run.committed = true;
+			run.ref = a_run;
+		}
+		for (std::uint32_t i = 0; i < a_slots.size() && a_first + i < state->perRun; ++i) {
+			const auto query = a_first + i;
 			const auto index = a_slots[i];
-			run.slots.push_back(index);
+			if (run.slots.size() <= query)
+				run.slots.resize(static_cast<std::size_t>(query) + 1, kNoSlot);
+			run.slots[query] = index;
 			if (index < 0 || index >= static_cast<std::int32_t>(kRingSlots))
 				continue;
 			auto& slot = globals.slots[index];
@@ -413,10 +450,38 @@ namespace RenderGraph::Engine::OcclusionQueries
 			slot.ring = state;
 			slot.range = range;
 			slot.generation = run.generation;
-			slot.query = i;
+			slot.query = query;
 		}
 		state->lastCommitted = range;
 		return made;
+	}
+
+	void QueryRing::State::Mover::MoveRun(const org::RunRef& a_from, const org::RunRef& a_to) const
+	{
+		auto& ring = *state;
+		if (a_from.lease == a_to.lease)
+			return;
+		auto& globals = Get();
+		{
+			const std::scoped_lock lock(globals.mutex);
+			if (a_from.lease >= ring.runs.size() || !ring.runs[a_from.lease].committed || !(ring.runs[a_from.lease].ref == a_from))
+				return;
+		}
+		// The submitting run's range and its chunk, made before any recording needs it (record time never makes one).
+		for (std::uint32_t chunk = 0; chunk <= State::ChunkIndex(a_to.lease); ++chunk)
+			ring.ChunkOf(chunk * QueryRing::kRunsPerChunk, true);
+		const std::scoped_lock lock(globals.mutex);
+		if (ring.runs.size() <= a_to.lease)
+			ring.runs.resize(static_cast<std::size_t>(a_to.lease) + 1);
+		Harvest(globals, ring, a_to.lease, true);
+		auto moved = std::exchange(ring.runs[a_from.lease], Run{});
+		moved.ref = a_to;
+		for (auto& slot : globals.slots)
+			if (slot.ring.get() == &ring && slot.range == a_from.lease && slot.generation == moved.generation)
+				slot.range = a_to.lease;
+		ring.runs[a_to.lease] = std::move(moved);
+		if (ring.lastCommitted == a_from.lease)
+			ring.lastCommitted = a_to.lease;
 	}
 
 	void QueryRing::Executed()
@@ -616,9 +681,11 @@ namespace RenderGraph::Engine::OcclusionQueries
 		// Begun and not counted by any run: neither committed, nor committed by a run that was then submitted.
 		bool submitted = false;
 #if defined(CS_HAS_RENDER_GRAPH)
+		// A run committed into a CS stage is submitted at the stage's commit, after the bracket: its count comes then, or its slot is
+		// skipped when its lease comes round without it.
 		if (entry.ring) {
 			const auto& run = entry.ring->runs[entry.range];
-			submitted = run.generation == entry.generation && run.submitted;
+			submitted = run.generation == entry.generation && run.committed;
 		}
 #endif
 		if (!submitted)
