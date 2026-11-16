@@ -12,6 +12,7 @@
 #include "Features/DrawcallLimitFix/Features/MenuViews/MenuScenes.h"
 #include "Features/DrawcallLimitFix/Features/MenuViews/MenuViews.h"
 
+#include "Features/LightLimitFix.h"
 #include "Globals.h"
 #include "RenderGraph/Engine/Pipeline/Descriptions.h"
 #include "RenderGraph/Engine/Tripwire/Tripwire.h"
@@ -287,6 +288,35 @@ namespace DCLF::Features::MenuViews::Scenes
 		 * Setup functions wrote them, CS's permutation block for the draw (State's SetupGeometry hooks filled it), the palettes of a
 		 * skinned one, t0-t15 and s0-s15 as the shadow state holds them, the geometry. Null when latched; otherwise why not.
 		 */
+		/**
+		 * @brief The point lights of the pass being drawn, in the PerGeometry rows the scene build reads (PointLightPosition c15, PointLightColor
+		 * c22, the count in c29.x). Light Limit Fix replaces the engine's point light setup (its SetupGeometry hook): the engine leaves those
+		 * rows empty and CS's D3D11 shader reads its strict lights instead. The scene build has no Light Limit Fix, so the strict lights of
+		 * this pass go into the rows: each position relative to the eye with its radius, and its colour with its fade.
+		 */
+		void LatchPointLights(LightingSceneConstants& a_constants)
+		{
+			auto& llf = globals::features::lightLimitFix;
+			if (!llf.loaded)
+				return;
+			constexpr std::uint32_t kPositions = 15, kColours = 22, kCount = 29, kMaxLights = 7;
+			const auto& strict = llf.strictLightDataTemp;
+			std::uint32_t count = 0;
+			for (std::uint32_t i = 0; i < strict.NumStrictLights && count < kMaxLights; ++i) {
+				const auto& light = strict.StrictLights[i];
+				if (light.lightFlags.any(LightLimitFix::LightFlags::Disabled))
+					continue;
+				const auto& position = light.positionWS.data;
+				std::array<float, 4> row{ position.x, position.y, position.z, light.radius };
+				std::memcpy(a_constants.psGeometry[kPositions + count], row.data(), sizeof(row));
+				row = { light.color.x * light.fade, light.color.y * light.fade, light.color.z * light.fade, 0.0f };
+				std::memcpy(a_constants.psGeometry[kColours + count], row.data(), sizeof(row));
+				++count;
+			}
+			if (count)
+				a_constants.psGeometry[kCount][0] = static_cast<float>(count);
+		}
+
 		const char* TryLatchLighting(Capture& a_capture, const Family::TriShape* a_shape, std::uint32_t a_start, std::uint32_t a_triangles, std::string& a_detail)
 		{
 			auto& run = *a_capture.run;
@@ -321,6 +351,7 @@ namespace DCLF::Features::MenuViews::Scenes
 			Family::CopyRows(use, Stage::Pixel, 0, constants.psTechnique, kLightingPSTechniqueRows);
 			Family::CopyRows(use, Stage::Pixel, 1, constants.psMaterial, kLightingPSMaterialRows);
 			Family::CopyRows(use, Stage::Pixel, 2, constants.psGeometry, kLightingPSGeometryRows);
+			LatchPointLights(constants);
 			constants.alphaTestRef = rss.alphaTestEnabled ? rss.alphaTestRef : 0.0f;
 			const auto& permutation = state->permutationData;
 			constants.descriptors[0] = permutation.VertexShaderDescriptor;

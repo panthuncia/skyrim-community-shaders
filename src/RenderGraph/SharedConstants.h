@@ -68,8 +68,11 @@ namespace SharedConstants
 	/** @brief Registers the four buffers with an anchor's graph ("cs.shared.frame-buffer" and so on). */
 	void Register(org::RenderGraph& a_graph);
 
-	/** @brief The upload points one execution can hold (a declared segment's steps): each has a latch block of its own. */
-	inline constexpr std::uint32_t kUploadPoints = 8;
+	/**
+	 * @brief The upload points one execution can hold: one per step of a declared segment (FrameAnchors' kMaxSteps), each with a latch
+	 * block of its own. A step past the last point would read another step's values.
+	 */
+	inline constexpr std::uint32_t kUploadPoints = 16;
 
 	/**
 	 * @brief A new upload pass: copies the execution's latch region of upload point a_point into the four buffers. An anchor's epoch

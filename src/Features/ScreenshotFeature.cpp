@@ -15,6 +15,7 @@
 #include "I18n/I18n.h"
 #include "Menu.h"
 #include "RenderGraph/Engine/OwnedFrame.h"
+#include "RenderGraph/Switches.h"
 #include "Utils/Clipboard.h"
 #include "Utils/D3D.h"
 #include "Utils/FileSystem.h"
@@ -333,6 +334,21 @@ namespace
 			return src;
 		}
 
+		// CS_ORG_SHOT_TARGET=<n> (a diagnostic): the shot copies engine render target n instead of the framebuffer, as it is at the
+		// capture point.
+		static const auto shotTarget = static_cast<std::int32_t>(Switches::Number("CS_ORG_SHOT_TARGET", RE::RENDER_TARGETS::kFRAMEBUFFER));
+		if (shotTarget != RE::RENDER_TARGETS::kFRAMEBUFFER && shotTarget >= 0 && shotTarget < RE::RENDER_TARGETS::kTOTAL) {
+			auto& target = renderer->GetRuntimeData().renderTargets[shotTarget];
+			if (auto* texture = ResolveSlotTexture(target, holder)) {
+				src.texture = texture;
+				src.srv = target.SRV;
+				src.needsPreviewCache = true;
+				src.description = "an engine target (CS_ORG_SHOT_TARGET)";
+				src.engineTarget = shotTarget;
+				src.importName = "screenshot.target";
+				return src;
+			}
+		}
 		auto& slot = renderer->GetRuntimeData().renderTargets[RE::RENDER_TARGETS::kFRAMEBUFFER];
 		src.texture = ResolveSlotTexture(slot, holder);
 		src.srv = slot.SRV;

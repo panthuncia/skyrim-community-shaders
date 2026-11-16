@@ -300,6 +300,8 @@ namespace FrameAnchors
 		 */
 		constexpr std::uint32_t kDeclared = RenderGraph::Frame::kSegments;
 		constexpr std::uint32_t kMaxSteps = 16;
+		// Each step that reads CS's shared constants uploads them at its own point.
+		static_assert(kMaxSteps <= SharedConstants::kUploadPoints, "a stage's steps need an upload point each");
 		struct Step
 		{
 			Anchor anchor = Anchor::Count;  // Count for a foreign or point step
