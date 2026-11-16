@@ -2206,7 +2206,12 @@ namespace RenderGraph::Engine::Native
 					ReadProbe();
 
 				const uint32_t slot = static_cast<uint32_t>(presents % kPresentSlots);
-				if (slotValues[slot] && presentTimeline->HostWait(slotValues[slot]) != rhi::Result::Ok) {
+				bool slotLost = false;
+				if (slotValues[slot]) {
+					ZoneScopedN("CS.Native.PresentSlotWait");
+					slotLost = presentTimeline->HostWait(slotValues[slot]) != rhi::Result::Ok;
+				}
+				if (slotLost) {
 					lost = true;
 					logger::error("[ORG native] a present's copy never finished on the GPU; nothing more is shown");
 					return S_OK;
@@ -2414,7 +2419,11 @@ namespace RenderGraph::Engine::Native
 				rhi::PresentSyncDesc sync{};
 				sync.queue = graphics;
 				sync.wait = a_signal;
-				const rhi::Result presented = swapchain->Present(a_syncInterval > 0, sync);
+				rhi::Result presented;
+				{
+					ZoneScopedN("CS.Native.SwapchainPresent");
+					presented = swapchain->Present(a_syncInterval > 0, sync);
+				}
 				if (presents == 1)
 					Stage("first present", fmt::format("{}x{}, result {}", width, height, static_cast<int>(presented)));
 				// BasicRHI only queues the validation layer's messages (its messenger callback); they reach the log when drained.

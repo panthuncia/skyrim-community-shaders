@@ -4,6 +4,7 @@
 #include "HangWatchdog.h"
 #include "Testing/Testing.h"
 #include "GpuIdleTrace.h"
+#include <intrin.h>
 #include "RenderGraph/Engine/Constants/EngineConstants.h"
 #include "RenderGraph/Engine/Engine.h"
 #include "RenderGraph/Engine/Flush/Flush.h"
@@ -540,6 +541,26 @@ struct IDXGISwapChain_Present
 		GpuCounters::OnPresentBegin();
 
 		ZoneScopedN("CS.Present");
+		{
+			// Instrumentation: the render thread's CPU time over the last Present-to-Present period (its thread cycles at the TSC's
+			// rate against the wall clock), plotted for Tracy. Less than the period means the thread slept or waited in it.
+			static ULONG64 lastCycles = 0;
+			static std::uint64_t lastTsc = 0;
+			static LARGE_INTEGER lastQpc{};
+			ULONG64 cycles = 0;
+			QueryThreadCycleTime(GetCurrentThread(), &cycles);
+			const std::uint64_t tsc = __rdtsc();
+			LARGE_INTEGER qpc, freq;
+			QueryPerformanceCounter(&qpc);
+			QueryPerformanceFrequency(&freq);
+			if (lastTsc && tsc > lastTsc) {
+				const double wallMs = static_cast<double>(qpc.QuadPart - lastQpc.QuadPart) * 1000.0 / static_cast<double>(freq.QuadPart);
+				TracyPlot("CS.RenderThread.CpuMs", wallMs * static_cast<double>(cycles - lastCycles) / static_cast<double>(tsc - lastTsc));
+			}
+			lastCycles = cycles;
+			lastTsc = tsc;
+			lastQpc = qpc;
+		}
 		{
 			ZoneScopedN("CS.Present.Begin");
 			GpuTimingSource::OnPresent();

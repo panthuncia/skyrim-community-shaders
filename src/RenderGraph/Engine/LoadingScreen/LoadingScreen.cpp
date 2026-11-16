@@ -22,9 +22,12 @@ namespace RenderGraph::Engine::LoadingScreen
 		{
 			static void thunk(RE::BSGraphics::Renderer* a_renderer, std::uint32_t a_flags)
 			{
-				if (Requested())
-					FrameAnchors::ClaimRenderOwnership();
-				Frame::Driver::OnBegin();
+				{
+					ZoneScopedN("CS.Frame.RendererBegin");
+					if (Requested())
+						FrameAnchors::ClaimRenderOwnership();
+					Frame::Driver::OnBegin();
+				}
 				func(a_renderer, a_flags);
 			}
 			static inline REL::Relocation<decltype(thunk)> func;
