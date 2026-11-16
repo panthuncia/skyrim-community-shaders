@@ -2,6 +2,11 @@
 
 #include <memory>
 
+namespace RenderGraph::Engine
+{
+	struct TonemapTargets;
+}
+
 /**
  * @brief Post Processing's tonemap chain on the render graph (CS_ORG_POST_PROCESSING=1; default 0: the D3D11 chain, unchanged).
  *
@@ -32,9 +37,11 @@ public:
 	/**
 	 * @brief At the tonemap hook, before the anchor runs: decides whether the graph runs the chain this frame, builds it again when
 	 * its shape changed, and leaves the frame's values for the epoch's commit.
-	 * @param a_readsMainCopy Whether the scene is in kMAIN_COPY this frame (PostProcessing::ReadsMainCopy), else kMAIN.
+	 * @param a_targets The tonemap's targets. With CS's native chain the chain reads its input and writes the result back there.
+	 * Otherwise (guest) it reads kMAIN or kMAIN_COPY, whichever the input is, and writes both.
+	 * @param a_refraction Guest: refraction routed the scene through kMAIN_COPY although the input does not say so.
 	 */
-	void BeforeTonemap(bool a_readsMainCopy);
+	void BeforeTonemap(const RenderGraph::Engine::TonemapTargets& a_targets, bool a_refraction);
 
 	/** @brief After the anchor ran: whether the graph ran the chain this frame (then PreProcess draws nothing). */
 	bool Ran() const;

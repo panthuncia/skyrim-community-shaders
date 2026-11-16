@@ -7,10 +7,14 @@
 // CS's port of the effect's shader with its inputs, outputs, samplers, blend and viewport written below, sized at the build. The
 // engine's draw is withheld; its hook only stages the constants the engine computed for the step (TakeChainStep).
 //
-// Which effects a frame's chain holds is the description's (ChainRows at Begin). Which targets each step reads and writes is CS's:
-// at RenderEndOfFrameEffects' entry CS plans the chain (PlanEndOfFrame) the way the engine's loop does, over the effects that are
-// both active in the engine and on in the frame's schedule. An effect the engine draws while the schedule has it off is left out of
-// the plan, so the steps around it still read what the step before them wrote; it shows a frame or two late.
+// Which effects a frame's chain holds is the description's (ChainRows at Begin). The targets are CS's and fixed: a step reads and
+// writes the same targets whichever other steps are present or run. The chain works in place on two images: kMAIN before the
+// tonemap (the scene colour the Upscale anchor writes) and the final target after it (the image the UI draws over). An effect that
+// cannot write the image it reads draws into its side's scratch target, and a copy, opened with the effect's last draw, puts the
+// result back. So an effect that is absent from the stage's build, or that the engine did not draw this frame, leaves the image as the
+// step before it left it: the frame is whole, only without that effect. The engine's own ping-pong targets (kMAIN_COPY and the two
+// temporary copies) are not used. At RenderEndOfFrameEffects' entry the engine's loop is replayed only to check it against the
+// description (CheckEndOfFrame).
 
 /** @brief The groups a frame's description turns on or off as one (ChainRows), and that a hook asks for when its pass is off. */
 namespace ChainGroup
@@ -31,30 +35,8 @@ namespace ChainGroup
 	constexpr std::uint8_t kCount = 30;
 }
 
-/** @brief One step of RenderEndOfFrameEffects in this frame's plan: on, and the targets it reads and writes. */
-struct PlannedStep
-{
-	bool on = false;
-	bool ldr = false;  // a slot drawn after the tonemap
-	std::int32_t in = -1;
-	std::int32_t out = -1;
-};
-
-/**
- * @brief RenderEndOfFrameEffects' targets for this frame, as CS planned them at its entry (PlanEndOfFrame): the slots, the HDR effect
- * or its copy, TAA, the screenshot copy and the upsample.
- */
-struct ChainPlan
-{
-	bool valid = false;
-	std::int32_t source = -1, final = -1;
-	std::array<PlannedStep, 8> slots{};
-	PlannedStep hdr;
-	bool hdrCopy = false;  // the copy draws in the HDR effect's place (the HDR switch is off)
-	PlannedStep taa;
-	PlannedStep screenshot;
-	PlannedStep upsample;
-};
+/** @brief An entry with no copy back after it (ChainSteps::Part::copyBack). */
+constexpr std::uint16_t kNoCopy = 0xffff;
 
 /** @brief The three post clients' parts the chain's passes live in, as PostPart values. */
 constexpr std::array<PostPart, 3> kChainParts{ PostPart::Composites, PostPart::Hdr, PostPart::Final };
@@ -74,13 +56,16 @@ struct ChainSteps
 		std::uint32_t entry = 0;
 	};
 	std::map<StepKey, Entry> entries;
-	// Per part: each entry's key and group, whether the last build made its pass (set on the build thread), the entry count, and the
-	// part's first row in the post stage's rows (the three parts share them, in order).
+	// Per part: each entry's key and group, whether the last build made its pass (set on the build thread), whether it is a copy back,
+	// the copy back its draw opens (kNoCopy: none), the entry count, and the part's first row in the post stage's rows (the three parts
+	// share them, in order).
 	struct Part
 	{
 		std::array<StepKey, kGateEntries> keys{};
 		std::array<std::uint8_t, kGateEntries> group{};
 		std::array<bool, kGateEntries> made{};
+		std::array<bool, kGateEntries> copy{};
+		std::array<std::uint16_t, kGateEntries> copyBack{};
 		std::uint32_t count = 0;
 		std::uint32_t rowBase = 0;
 	};
@@ -93,6 +78,9 @@ struct ChainSteps
 	OwnedTarget bloom, bloomSwap, dofDown, dofSwap;
 	std::array<OwnedTarget, 2> taaHistory;
 	OwnedTarget getHitA, getHitB, getHitSwap, fullBlurDown, fullBlurSwap;
+	// The scratch targets of the two images: an effect draws there, and its copy back puts the result into kMAIN (hdrScratch) or the
+	// final target (ldrScratch). Each is made with its image's size and format, so the copy is a plain texel copy.
+	OwnedTarget hdrScratch, ldrScratch;
 	// The adapted luminance pair (the last luminance level of each parity, in place of the engine's 27 + levels - 1 + 2 * parity): a
 	// history, published (kAdaptedIds) for Drawcall Limit Fix's character light, which reads it in place of the engine's target.
 	std::array<OwnedTarget, 2> adapt;
@@ -100,10 +88,9 @@ struct ChainSteps
 	// registration: true for ISBlurN, false for ISNonHDRBlurN.
 	std::array<bool, 7> blurHdr{};
 	// The running chain (the hooks): inside the composites, inside RenderEndOfFrameEffects, inside its HDR effect, the luminance
-	// level so far there, whether the HDR copy drew, and the frame's plan.
-	bool inComposites = false, inEndOfFrame = false, inHdr = false, copyDrawn = false;
+	// level so far there, whether the copy takes the HDR effect's place this frame and whether it drew.
+	bool inComposites = false, inEndOfFrame = false, inHdr = false, hdrCopy = false, copyDrawn = false;
 	std::uint32_t lumLevel = 0;
-	ChainPlan plan;
 	// Inside the full-screen blur (slot 6) or the get-hit effect (slot 7) of RenderEndOfFrameEffects, -1 elsewhere; each effect's draws
 	// so far there.
 	std::int32_t slotScope = -1;
@@ -188,94 +175,96 @@ bool SlotIsLdr(std::uint32_t a_slot)
 	return ldr && a_slot >= 3 && a_slot <= 7;
 }
 
-/** @brief A step variant's two targets: the one it reads and the one it writes (RE::RENDER_TARGET values below 256). */
+/** @brief A step variant's two targets: the one it reads and the one it writes (RE::RENDER_TARGET values below 256). The menu composites
+ * key their copies by it (MenuSteps.inl); the world chain's targets are fixed. */
 constexpr std::uint16_t InOut(std::int32_t a_in, std::int32_t a_out)
 {
 	return static_cast<std::uint16_t>(((a_in & 0x7f) << 8) | (a_out & 0xff));
 }
 
+std::array<bool, ChainGroup::kCount> ChainGroupsOn(const Frame::PostFields& a_post);
+
+/** @brief A chain group's name for the logs. */
+std::string ChainGroupName(std::uint8_t a_group)
+{
+	using namespace ChainGroup;
+	if (a_group >= kPreSlot && a_group < kLdrSlot)
+		return fmt::format("slot {} before the tonemap", a_group - kPreSlot);
+	if (a_group >= kLdrSlot && a_group < kHdrCopy)
+		return fmt::format("slot {} after the tonemap", a_group - kLdrSlot + 3);
+	if (a_group >= kBloom && a_group < kTonemap)
+		return fmt::format("bloom radius index {}", a_group - kBloom);
+	switch (a_group) {
+	case kComposite:
+		return "the VL composite";
+	case kHdrCopy:
+		return "the HDR copy";
+	case kHdr:
+		return "the HDR effect";
+	case kHdrLum:
+		return "the last luminance level";
+	case kHdrAdapt:
+		return "the light adaptation";
+	case kTonemap:
+		return "the tonemap";
+	case kTonemapFade:
+		return "the tonemap's fade form";
+	case kTaa:
+		return "TAA";
+	case kScreenshot:
+		return "the screenshot copy";
+	case kUpsample:
+		return "the dynamic-resolution upsample";
+	default:
+		return fmt::format("group {}", a_group);
+	}
+}
+
 /**
- * @brief Plans RenderEndOfFrameEffects for this frame at its entry, as its loop does (SE 0x141297410): the slots before the tonemap
- * alternate between a_source and the manager's swap target (+0x60); the HDR effect writes a_final when nothing follows it, else
- * kIMAGESPACE_TEMP_COPY; TAA writes a_final or kIMAGESPACE_TEMP_COPY2; the slots after the tonemap alternate between those two and
- * the last writes a_final unless the upsample follows. "Nothing follows" counts TAA, the slots after the tonemap and dynamic
- * resolution (its lock 525027 / 411509 off and a scale, 525023 / 525024, not 1). An effect is in the plan when the engine has it
- * active and the frame's schedule has it on.
+ * @brief RenderEndOfFrameEffects' entry: the engine's loop (SE 0x141297410) replayed against CS's description. CS's targets do not come
+ * from it: every step reads and writes fixed targets. The loop runs on a_source (kMAIN) and ends in a_final (the final target), the
+ * chain's two images; another target is a mismatch. An effect the engine has active that the frame's schedule does not hold is lagged
+ * work while the frame's own description has it (its build is pending; the step's hook counts it), or while the post fields read now
+ * have it (the engine or CS changed it after Begin: a setting, a method switch; the next description has it). Otherwise it is a
+ * mismatch: the description cannot see what the engine runs. Also notes whether the copy takes the HDR effect's place. Render owner.
  */
-void PlanEndOfFrame(std::int32_t a_source, std::int32_t a_final)
+void CheckEndOfFrame(std::int32_t a_source, std::int32_t a_final)
 {
 	auto& chain = Chain();
-	auto& plan = chain.plan;
-	plan = {};
+	static REL::Relocation<const bool*> hdrSwitch{ REL::RelocationID(513463, 391301) };
+	chain.hdrCopy = !*hdrSwitch.get();
 	auto* manager = RE::ImageSpaceManager::GetSingleton();
 	if (!manager)
 		return;
+	constexpr auto segment = Frame::SegmentId::Post;
+	if (a_source != RE::RENDER_TARGET::kMAIN || a_final != RE::RENDER_TARGET::kFRAMEBUFFER)
+		Frame::Driver::NoteTapError(Frame::Driver::TapError::NotInDescription, segment,
+			fmt::format("the engine's end-of-frame effects run from target {} into target {}; CS's chain runs from kMAIN into the final target", a_source, a_final));
 	const auto base = reinterpret_cast<std::uintptr_t>(manager);
 	const auto member = [&](std::uintptr_t a_offset) { return reinterpret_cast<const std::byte*>(base + a_offset); };
-	plan.valid = true;
-	plan.source = a_source;
-	plan.final = a_final;
-	std::int32_t source = a_source;
-	std::int32_t swap = *reinterpret_cast<const std::int32_t*>(member(0x60));
+	const auto wanted = ChainGroupsOn(Frame::Driver::Current().post);
+	const auto now = ChainGroupsOn(Frame::PostChain::Read());
+	const auto check = [&](std::uint8_t a_group) {
+		if (GroupScheduled(a_group) || wanted[a_group] || now[a_group])
+			return;
+		Frame::Driver::NoteTapError(Frame::Driver::TapError::NotInDescription, segment,
+			fmt::format("{} runs in the engine's end-of-frame effects, and the frame's description at Begin does not have it", ChainGroupName(a_group)));
+	};
 	const auto count = (std::min)(*reinterpret_cast<const std::int32_t*>(member(0x40)), 7);
-	std::int32_t lastLdr = -1;
 	for (std::int32_t slot = 0; slot <= count; ++slot) {
 		auto* effect = slot < static_cast<std::int32_t>(manager->effects.free_idx()) ? manager->effects[static_cast<std::uint16_t>(slot)] : nullptr;
-		if (!effect || !effect->IsActive())
-			continue;
-		const bool ldr = SlotIsLdr(static_cast<std::uint32_t>(slot));
-		if (!GroupScheduled(SlotGroup(static_cast<std::uint32_t>(slot), ldr)))
-			continue;
-		if (ldr) {
-			lastLdr = slot;
-			continue;
-		}
-		plan.slots[static_cast<std::size_t>(slot)] = { .on = true, .in = source, .out = swap };
-		std::swap(source, swap);
+		if (effect && effect->IsActive())
+			check(SlotGroup(static_cast<std::uint32_t>(slot), SlotIsLdr(static_cast<std::uint32_t>(slot))));
 	}
+	check(chain.hdrCopy ? ChainGroup::kHdrCopy : ChainGroup::kHdr);
 	static REL::Relocation<const std::int32_t*> dynamicLock{ REL::RelocationID(525027, 411509) };
 	static REL::Relocation<const float*> scaleX{ REL::RelocationID(525023, 411505) };
 	static REL::Relocation<const float*> scaleY{ REL::RelocationID(525024, 411506) };
 	const bool dynres = *dynamicLock.get() == 0 && (*scaleX.get() != 1.0f || *scaleY.get() != 1.0f);
-	const auto taaHelper = *reinterpret_cast<const std::uintptr_t*>(member(0x1f0));
-	const bool taa = taaHelper && *reinterpret_cast<const bool*>(taaHelper + 0x18) && GroupScheduled(ChainGroup::kTaa);
-	const bool anyLdr = lastLdr >= 0;
-	const bool hdrFinal = !taa && !anyLdr && !dynres;
-	constexpr std::int32_t kTemp = RE::RENDER_TARGET::kIMAGESPACE_TEMP_COPY;
-	constexpr std::int32_t kTemp2 = RE::RENDER_TARGET::kIMAGESPACE_TEMP_COPY2;
-	static REL::Relocation<const bool*> hdrSwitch{ REL::RelocationID(513463, 391301) };
-	plan.hdrCopy = !*hdrSwitch.get();
-	plan.hdr = { .on = true, .in = source, .out = hdrFinal ? a_final : kTemp };
-	if (hdrFinal)
-		return;
-	std::int32_t current = kTemp, next = kTemp2;
-	if (taa) {
-		const bool taaFinal = !anyLdr && !dynres;
-		plan.taa = { .on = true, .in = kTemp, .out = taaFinal ? a_final : kTemp2 };
-		if (taaFinal)
-			next = a_final;
-		else {
-			next = kTemp;
-			current = kTemp2;
-		}
-	}
-	if (*reinterpret_cast<const bool*>(member(0x211)) && GroupScheduled(ChainGroup::kScreenshot))
-		plan.screenshot = { .on = true, .in = next, .out = RE::RENDER_TARGET::kSAVE_GAME_SCREENSHOT };
-	for (std::int32_t slot = 3; slot <= 7 && slot <= count; ++slot) {
-		auto* effect = slot < static_cast<std::int32_t>(manager->effects.free_idx()) ? manager->effects[static_cast<std::uint16_t>(slot)] : nullptr;
-		if (!effect || !effect->IsActive() || !SlotIsLdr(static_cast<std::uint32_t>(slot)) || !GroupScheduled(SlotGroup(static_cast<std::uint32_t>(slot), true)))
-			continue;
-		const bool isLast = slot == lastLdr && !dynres;
-		const auto out = isLast ? a_final : next;
-		plan.slots[static_cast<std::size_t>(slot)] = { .on = true, .ldr = true, .in = current, .out = out };
-		if (!isLast) {
-			next = current;
-			current = out;
-		}
-	}
-	const auto upsample = *reinterpret_cast<const std::uintptr_t*>(member(0x1f8));
-	if (upsample && *reinterpret_cast<const bool*>(upsample + 0x08) && dynres && GroupScheduled(ChainGroup::kUpsample))
-		plan.upsample = { .on = true, .in = current, .out = a_final };
+	if (const auto taa = *reinterpret_cast<const std::uintptr_t*>(member(0x1f0)); taa && *reinterpret_cast<const bool*>(taa + 0x18))
+		check(ChainGroup::kTaa);
+	if (const auto upsample = *reinterpret_cast<const std::uintptr_t*>(member(0x1f8)); upsample && *reinterpret_cast<const bool*>(upsample + 0x08) && dynres)
+		check(ChainGroup::kUpsample);
 }
 
 /** @brief The adapted luminance pair's published ids (ChainSteps::adapt). */
@@ -290,8 +279,7 @@ float FullBlurRadius()
 
 /**
  * @brief The variant of a draw inside the full-screen blur (slot 6) or the get-hit effect (slot 7): which of the effect's draws it is (the
- * occurrence of its shader in the slot's scope), the slot's input where that draw reads it, its output where it writes it, and whether
- * the full-screen blur's last draw blends.
+ * occurrence of its shader in the slot's scope), and whether the full-screen blur's last draw blends.
  *
  * ImageSpaceEffectGetHit (Setup SE 0x141328b80): the input copied into a buffer (ISCopy), blurred twice by effects[10] (an
  * ImageSpaceEffectBlur of radius 5: a horizontal then a vertical draw each, through a second buffer and the blur swap), then the input
@@ -299,23 +287,13 @@ float FullBlurRadius()
  * the input downsampled (ISHDRDownSample4), blurred by the blur effect of the radius step (effects[9 + step]: horizontal, vertical),
  * then, below radius 1, the input copied into the output (ISCopy, or ISCopyDynamicFetchDisabled with Legacy Graphics Compatibility's
  * eleventh step); last the blurred image drawn into the output (ISHDRDownSample4 with the blur's parameters), blended over that copy
- * below radius 1.
+ * below radius 1. CS draws the full-screen blur in place, so its copy has nothing to do.
  */
-std::uint16_t InnerVariant(std::int32_t a_slot, Effects::ImageSpaceEffectEnum a_effect, std::uint32_t a_occurrence, std::int32_t a_in, std::int32_t a_out, bool a_blended)
+std::uint16_t InnerVariant(std::int32_t a_slot, Effects::ImageSpaceEffectEnum a_effect, std::uint32_t a_occurrence, bool a_blended)
 {
-	using E = Effects;
-	bool readsIn = false, writesOut = false, blends = false;
-	if (a_slot == 7) {
-		readsIn = a_effect == E::ISCopy || a_effect == E::ISDoubleVision;
-		writesOut = a_effect == E::ISDoubleVision;
-	} else {
-		const bool copy = a_effect == E::ISCopy || a_effect == E::ISCopyDynamicFetchDisabled;
-		readsIn = (a_effect == E::ISHDRDownSample4 && a_occurrence == 0) || copy;
-		writesOut = (a_effect == E::ISHDRDownSample4 && a_occurrence == 1) || copy;
-		blends = a_blended && a_effect == E::ISHDRDownSample4 && a_occurrence == 1;
-	}
-	return static_cast<std::uint16_t>((blends ? 0x8000u : 0u) | (a_occurrence & 7u) << 12 | (readsIn ? static_cast<std::uint32_t>(a_in) & 0x3fu : 0u) << 6 |
-									  (writesOut ? static_cast<std::uint32_t>(a_out) & 0x3fu : 0u));
+	const bool blends = a_slot == 6 && a_blended && a_effect == Effects::ISHDRDownSample4 && a_occurrence == 1;
+	// Bit 10 marks an inner draw, so none shares a key with a slot's own draws (the depth of field's downsample is variant 0).
+	return static_cast<std::uint16_t>((blends ? 0x8000u : 0u) | (a_occurrence & 7u) << 12 | (a_slot == 7 ? 0x800u : 0u) | 0x400u);
 }
 
 
@@ -519,17 +497,16 @@ void CheckChainSteps()
 }
 
 /**
- * @brief The chain's passes this frame's description has on, read at Begin from the post fields (Description::post): the composite
+ * @brief The chain's groups a description has on, from its post fields (Description::post, read at Begin): the composite
  * with the volumetric lighting, each slot in its place by its activity and usesLDR, the HDR effect or its copy, the last luminance
  * level's form by the adapted luminance, the bloom of the frame's radius, the tonemap or its fade form unless Effects11 owns it, TAA
- * by CS's upscaler method, the upsample by dynamic resolution. Variants the engine or CS's plan picks per frame (targets, parities)
- * are all on; TAA's history is CS's pair by the frame slot's parity, so only that history's passes. Plus every group a hook asked for.
+ * by CS's upscaler method, the upsample by dynamic resolution, and the screenshot copy, refraction and both forms of the tonemap and of
+ * the last luminance level always. Plus every group a hook asked for. The key (FrameAnchors::DescribingKey) is the same.
  */
-void ChainRows(std::size_t a_part, std::array<std::uint64_t, 4>& a_rows)
+std::array<bool, ChainGroup::kCount> ChainGroupsOn(const Frame::PostFields& a_post)
 {
 	const auto& chain = Chain();
-	const auto& frame = Frame::Driver::Current();
-	const auto& post = frame.post;
+	const auto& post = a_post;
 	std::array<bool, ChainGroup::kCount> on{};
 	for (std::size_t group = 0; group < on.size(); ++group)
 		on[group] = RequestHolds(chain.requested[group]);
@@ -546,31 +523,80 @@ void ChainRows(std::size_t a_part, std::array<std::uint64_t, 4>& a_rows)
 	on[ChainGroup::kBloom + (std::min)(post.bloom, std::uint8_t{ 6 })] |= post.hdr;
 	on[post.fade ? ChainGroup::kTonemapFade : ChainGroup::kTonemap] |= post.hdr && !post.effects11;
 	on[ChainGroup::kTaa] |= post.taa;
-	on[ChainGroup::kScreenshot] |= post.screenshot;
 	on[ChainGroup::kUpsample] |= post.dynres;
-	// As a stage's key (FrameAnchors::DescribingKey), the passes that must answer on demand stay present: the screenshot copy (a save asks
-	// for it with at most a frame of notice, and a late copy leaves a stale thumbnail), both tonemap forms (the fade starts and ends on a
-	// frame) and both forms of the last luminance level (the adaptation's reset lasts one frame). TAA's history pair is chosen per frame.
+	// The screenshot copy is always on: a save asks for it with at most a frame of notice, and the flag may be set after Begin read it.
+	// A late copy leaves a stale thumbnail. Its pass is gated: a frame that does not copy skips it at execution, its barriers folded.
+	on[ChainGroup::kScreenshot] = true;
+	// Refraction (slot 1) is always on: the engine turns its effect on during the frame, when it draws a refracting object, so Begin
+	// cannot know. Its pass and copy back are gated: a frame without refraction skips both at execution, their barriers folded.
+	on[SlotGroup(1, false)] = true;
+	// Both tonemap forms (the fade starts and ends on a frame) and both forms of the last luminance level (the adaptation's reset lasts
+	// one frame) are on, in the key and in every frame: the engine picks one late, and the other skips at execution, its barriers folded.
+	// TAA's history pair is chosen per frame (ChainRows).
+	on[ChainGroup::kHdrLum] |= post.hdr;
+	on[ChainGroup::kHdrAdapt] |= post.hdr;
+	on[ChainGroup::kTonemap] |= post.hdr && !post.effects11;
+	on[ChainGroup::kTonemapFade] |= post.hdr && !post.effects11;
+	return on;
+}
+
+/**
+ * @brief The chain's passes this frame's description has on (ChainGroupsOn), as the rows of part a_part. Variants the engine picks per
+ * frame (the parities) are all on; TAA's history is CS's pair by the frame slot's parity, so only that history's passes.
+ */
+void ChainRows(std::size_t a_part, std::array<std::uint64_t, 4>& a_rows)
+{
+	const auto& chain = Chain();
+	const auto& frame = Frame::Driver::Current();
 	const bool key = FrameAnchors::DescribingKey();
-	if (key) {
-		on[ChainGroup::kScreenshot] = true;
-		on[ChainGroup::kHdrLum] |= post.hdr;
-		on[ChainGroup::kHdrAdapt] |= post.hdr;
-		on[ChainGroup::kTonemap] |= post.hdr && !post.effects11;
-		on[ChainGroup::kTonemapFade] |= post.hdr && !post.effects11;
-	}
+	const auto on = ChainGroupsOn(frame.post);
 	const auto& part = chain.parts[a_part];
 	for (std::uint32_t entry = 0; entry < part.count; ++entry) {
 		const auto group = part.group[entry];
 		if (!on[group])
 			continue;
-		// TAA's history pair is CS's, by the frame slot's parity: the slot's frames write one history and read the other.
-		if (group == ChainGroup::kTaa && !key && ((part.keys[entry].variant >> 15) & 1u) != (frame.parity & 1u))
+		// TAA's history pair is CS's, by the frame slot's parity: the slot's frames write one history and read the other. Its copy back
+		// serves both.
+		if (group == ChainGroup::kTaa && !key && !part.copy[entry] && ((part.keys[entry].variant >> 15) & 1u) != (frame.parity & 1u))
 			continue;
 		const auto row = part.rowBase + entry;
 		if (row < 256)
 			a_rows[row / 64] |= 1ull << (row % 64);
 	}
+}
+
+/**
+ * @brief A CS target made with an engine target's size (its import's) and its render target view's format, for a plain texel copy
+ * between the two. The final target has no texture in the renderer's table in native mode, only its view: this works for it too.
+ */
+bool MakeOwnedLike(OwnedTarget& a_out, RE::RENDER_TARGET a_like, std::string_view a_name, GraphResources::Lifetime a_lifetime)
+{
+	const auto index = static_cast<std::int32_t>(a_like);
+	const auto& target = globals::game::renderer->GetRuntimeData().renderTargets[index];
+	const auto import = ImportOf(ImportOfName(index));
+	if (!target.RTV || !import || !import.Width() || !import.Height())
+		return false;
+	D3D11_RENDER_TARGET_VIEW_DESC view{};
+	target.RTV->GetDesc(&view);
+	D3D11_TEXTURE2D_DESC desc{};
+	desc.Width = import.Width();
+	desc.Height = import.Height();
+	desc.MipLevels = 1;
+	desc.ArraySize = 1;
+	desc.Format = view.Format;
+	desc.SampleDesc.Count = 1;
+	desc.Usage = D3D11_USAGE_DEFAULT;
+	desc.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET | D3D11_BIND_UNORDERED_ACCESS;
+	// A texel copy needs texels of the same size.
+	const auto bytes = rhi::FormatByteSize(rhi::helpers::ToRHI(view.Format));
+	if (!bytes || bytes != rhi::FormatByteSize(import.Format())) {
+		logger::warn("[ORG] ImageSpace: {}: target {}'s view format {} and its import's format {} differ in size; no copy between them", a_name, index,
+			static_cast<std::uint32_t>(view.Format), static_cast<std::uint32_t>(import.Format()));
+		return false;
+	}
+	a_out.texture = std::make_unique<GraphResources::Texture2D>(desc, std::string(a_name), GraphResources::Options{ .lifetime = a_lifetime });
+	a_out.format = RtvFormatOf(index, import);
+	return static_cast<bool>(a_out);
 }
 
 /**
@@ -589,6 +615,8 @@ void RegisterChainSteps()
 	chain.requested = {};
 	for (auto& part : chain.parts) {
 		part.made.fill(false);
+		part.copy.fill(false);
+		part.copyBack.fill(kNoCopy);
 		part.count = 0;
 	}
 	const auto& targets = globals::game::renderer->GetRuntimeData().renderTargets;
@@ -626,7 +654,9 @@ void RegisterChainSteps()
 		!MakeOwned(chain.getHitB, T::kGETHIT_BUFFER, "ImageSpace::GetHitB", Lifetime::Transient) ||
 		!MakeOwned(chain.getHitSwap, T::kGETHIT_BLURSWAP, "ImageSpace::GetHitSwap", Lifetime::Transient) ||
 		!MakeOwned(chain.fullBlurDown, T::kHDR_BLURSWAP, "ImageSpace::FullBlurDown", Lifetime::Transient) ||
-		!MakeOwned(chain.fullBlurSwap, T::kHDR_DOWNSAMPLE0, "ImageSpace::FullBlurSwap", Lifetime::Transient)) {
+		!MakeOwned(chain.fullBlurSwap, T::kHDR_DOWNSAMPLE0, "ImageSpace::FullBlurSwap", Lifetime::Transient) ||
+		!MakeOwnedLike(chain.hdrScratch, T::kMAIN, "ImageSpace::HdrScratch", Lifetime::Transient) ||
+		!MakeOwnedLike(chain.ldrScratch, T::kFRAMEBUFFER, "ImageSpace::LdrScratch", Lifetime::Transient)) {
 		logger::warn("[ORG] ImageSpace: the post chain's targets could not be made; registered again at a later frame");
 		chain.retry = true;
 		return;
@@ -649,11 +679,10 @@ void RegisterChainSteps()
 	const auto owned = [](const OwnedTarget& a_target) { return StepTexture::Owned(a_target); };
 	const auto mainDepth = StepTexture::Engine(kDepthInput | 0);
 	constexpr StepSampler kPoint{ 0, 0 }, kLinear{ 0, 1 }, kWrapPoint{ 3, 0 };
-	constexpr std::int32_t kFinal = T::kFRAMEBUFFER, kTemp = T::kIMAGESPACE_TEMP_COPY, kTemp2 = T::kIMAGESPACE_TEMP_COPY2;
-	// The targets the ping-pong can give a slot before the tonemap (kMAIN and kMAIN_COPY, either way round) and after it (the two
-	// temporary copies, and the final target for the last).
-	constexpr std::array<std::pair<std::int32_t, std::int32_t>, 2> kPre{ { { T::kMAIN, T::kMAIN_COPY }, { T::kMAIN_COPY, T::kMAIN } } };
-	constexpr std::array<std::pair<std::int32_t, std::int32_t>, 4> kLdr{ { { kTemp, kTemp2 }, { kTemp2, kTemp }, { kTemp, kFinal }, { kTemp2, kFinal } } };
+	constexpr std::int32_t kFinal = T::kFRAMEBUFFER;
+	// The chain's two images, before the tonemap and after it, and the scratch an effect draws into before its copy back.
+	const auto image = [&](bool a_ldr) { return engine(a_ldr ? kFinal : T::kMAIN); };
+	const auto scratch = [&](bool a_ldr) { return owned(a_ldr ? chain.ldrScratch : chain.hdrScratch); };
 
 	struct Pending
 	{
@@ -661,11 +690,21 @@ void RegisterChainSteps()
 		std::uint8_t group = 0;
 		StepKey key;
 		StepDesc desc;
+		bool final = false;  // it writes the scratch target: the next copy back of its group follows it
+		bool copy = false;   // a copy back of the scratch target into its image (desc.name only)
+		bool ldr = false;    // a copy back's side: the final target, else kMAIN
 	};
 	std::vector<Pending> steps;
-	const auto add = [&](std::uint8_t a_part, std::uint8_t a_group, WorldScope a_scope, E::ImageSpaceEffectEnum a_effect, std::uint16_t a_variant, StepDesc a_desc) {
+	const auto add = [&](std::uint8_t a_part, std::uint8_t a_group, WorldScope a_scope, E::ImageSpaceEffectEnum a_effect, std::uint16_t a_variant, StepDesc a_desc,
+						 bool a_final = false) {
 		a_desc.effect = a_effect;
-		steps.push_back({ a_part, a_group, { a_scope, a_effect, a_variant }, std::move(a_desc) });
+		steps.push_back({ .part = a_part, .group = a_group, .key = { a_scope, a_effect, a_variant }, .desc = std::move(a_desc), .final = a_final });
+	};
+	// The copy back of a group's scratch into its image, after the group's draws that write the scratch.
+	const auto copyBack = [&](std::uint8_t a_part, std::uint8_t a_group, bool a_ldr, std::string a_name) {
+		Pending pending{ .part = a_part, .group = a_group, .key = { WorldScope::None, E::ISCopy, 0 }, .copy = true, .ldr = a_ldr };
+		pending.desc.name = std::move(a_name);
+		steps.push_back(std::move(pending));
 	};
 
 	// The pre-tonemap composite (99024 / 105675; the VL form, 100493): the volumetric lighting's target of this frame's parity blended
@@ -677,26 +716,20 @@ void RegisterChainSteps()
 		add(0, ChainGroup::kComposite, WorldScope::Composite, E::ISCompositeVolumetricLighting, p, std::move(d));
 	}
 
-	// A slot's single-draw effect for each pair of targets.
+	// A slot's single-draw effect: the image into the scratch target.
 	const auto single = [&](std::uint8_t a_part, std::uint32_t a_slot, bool a_ldr, E::ImageSpaceEffectEnum a_effect, const char* a_name, StepSampler a_sampler,
 							StepTexture a_second = {}, StepSampler a_secondSampler = {}) {
-		const auto scope = a_ldr ? WorldScope::LdrSlot : WorldScope::PreSlot;
-		const auto add1 = [&](std::int32_t a_in, std::int32_t a_out) {
-			StepDesc d{ .name = fmt::format("{}.{}.{}", a_name, a_in, a_out), .output = engine(a_out) };
-			d.inputs[0] = engine(a_in);
-			d.samplers[0] = a_sampler;
-			if (a_second) {
-				d.inputs[1] = a_second;
-				d.samplers[1] = a_secondSampler;
-			}
-			add(a_part, SlotGroup(a_slot, a_ldr), scope, a_effect, InOut(a_in, a_out), std::move(d));
-		};
-		if (a_ldr)
-			for (const auto& [in, out] : kLdr)
-				add1(in, out);
-		else
-			for (const auto& [in, out] : kPre)
-				add1(in, out);
+		StepDesc d{ .name = a_name, .output = scratch(a_ldr) };
+		d.inputs[0] = image(a_ldr);
+		d.samplers[0] = a_sampler;
+		if (a_second) {
+			d.inputs[1] = a_second;
+			d.samplers[1] = a_secondSampler;
+		}
+		add(a_part, SlotGroup(a_slot, a_ldr), a_ldr ? WorldScope::LdrSlot : WorldScope::PreSlot, a_effect, 0, std::move(d), true);
+	};
+	const auto slotCopy = [&](std::uint8_t a_part, std::uint32_t a_slot, bool a_ldr, const char* a_name) {
+		copyBack(a_part, SlotGroup(a_slot, a_ldr), a_ldr, fmt::format("{}.copyback", a_name));
 	};
 	// The depth of field with its compute blur (ImageSpaceEffectDepthOfField::Render, SE 0x1412f90d0; ISBlurCS's depth-of-field build,
 	// 107734 <- 107209 <- 107208): the image downsampled into CS's target, blurred horizontally then vertically against the depth, and
@@ -705,16 +738,11 @@ void RegisterChainSteps()
 	const auto dof = [&](std::uint8_t a_part, bool a_ldr) {
 		const auto scope = a_ldr ? WorldScope::LdrSlot : WorldScope::PreSlot;
 		const auto group = SlotGroup(3, a_ldr);
-		std::vector<std::int32_t> ins;
-		if (a_ldr)
-			ins = { kTemp, kTemp2 };
-		else
-			ins = { T::kMAIN, T::kMAIN_COPY };
-		for (const auto in : ins) {
-			StepDesc d{ .name = fmt::format("dof.downsample.{}", in), .output = owned(chain.dofDown) };
-			d.inputs[0] = engine(in);
+		{
+			StepDesc d{ .name = "dof.downsample", .output = owned(chain.dofDown) };
+			d.inputs[0] = image(a_ldr);
 			d.samplers[0] = kLinear;
-			add(a_part, group, scope, E::ISHDRDownSample4, InOut(in, 0), std::move(d));
+			add(a_part, group, scope, E::ISHDRDownSample4, 0, std::move(d));
 		}
 		{
 			StepDesc h{ .name = "dof.blur.h", .output = owned(chain.dofSwap) };
@@ -727,51 +755,41 @@ void RegisterChainSteps()
 			add(a_part, group, scope, E::ISDepthOfFieldBlurVCS, 0, std::move(v));
 		}
 		constexpr std::array<E::ImageSpaceEffectEnum, 4> kComposites{ E::ISDepthOfField, E::ISDepthOfFieldFogged, E::ISDistantBlur, E::ISDistantBlurFogged };
-		const auto composite = [&](std::int32_t a_in, std::int32_t a_out) {
-			for (const auto effect : kComposites) {
-				StepDesc d{ .name = fmt::format("dof.composite{}.{}.{}", static_cast<std::uint32_t>(effect), a_in, a_out), .output = engine(a_out) };
-				d.inputs[0] = engine(a_in);
-				d.inputs[1] = owned(chain.dofDown);
-				d.inputs[2] = mainDepth;
-				d.inputs[3] = engine(T::kSAO_CAMERAZ, 10);  // the average depth: the camera depth's mip 10, as the engine binds it
-				d.samplers[1] = kLinear;
-				add(a_part, group, scope, effect, InOut(a_in, a_out), std::move(d));
-			}
-		};
-		if (a_ldr)
-			for (const auto& [in, out] : kLdr)
-				composite(in, out);
-		else
-			for (const auto& [in, out] : kPre)
-				composite(in, out);
+		for (const auto effect : kComposites) {
+			StepDesc d{ .name = fmt::format("dof.composite{}", static_cast<std::uint32_t>(effect)), .output = scratch(a_ldr) };
+			d.inputs[0] = image(a_ldr);
+			d.inputs[1] = owned(chain.dofDown);
+			d.inputs[2] = mainDepth;
+			d.inputs[3] = engine(T::kSAO_CAMERAZ, 10);  // the average depth: the camera depth's mip 10, as the engine binds it
+			d.samplers[1] = kLinear;
+			add(a_part, group, scope, effect, 0, std::move(d), true);
+		}
+		copyBack(a_part, group, a_ldr, "dof.copyback");
 	};
 	const auto radial = [&](std::uint8_t a_part, bool a_ldr) {
 		single(a_part, 5, a_ldr, E::ISRadialBlur, "radialblur", kPoint);
 		single(a_part, 5, a_ldr, E::ISRadialBlurMedium, "radialblur.medium", kPoint);
 		single(a_part, 5, a_ldr, E::ISRadialBlurHigh, "radialblur.high", kPoint);
+		slotCopy(a_part, 5, a_ldr, "radialblur");
 	};
 	constexpr std::array<E::ImageSpaceEffectEnum, 7> kBlurHdr{ E::ISBlur3, E::ISBlur5, E::ISBlur7, E::ISBlur9, E::ISBlur11, E::ISBlur13, E::ISBlur15 };
 	constexpr std::array<E::ImageSpaceEffectEnum, 7> kBlurLdr{ E::ISNonHDRBlur3, E::ISNonHDRBlur5, E::ISNonHDRBlur7, E::ISNonHDRBlur9, E::ISNonHDRBlur11,
 		E::ISNonHDRBlur13, E::ISNonHDRBlur15 };
 	const auto blurOf = [&](std::uint32_t a_radiusIndex) { return chain.blurHdr[a_radiusIndex] ? kBlurHdr[a_radiusIndex] : kBlurLdr[a_radiusIndex]; };
-	// The slot's inputs, and its outputs, in its place.
-	const auto slotIns = [&](bool a_ldr) { return a_ldr ? std::vector<std::int32_t>{ kTemp, kTemp2 } : std::vector<std::int32_t>{ T::kMAIN, T::kMAIN_COPY }; };
-	const auto slotOuts = [&](bool a_ldr) {
-		return a_ldr ? std::vector<std::int32_t>{ kTemp, kTemp2, kFinal } : std::vector<std::int32_t>{ T::kMAIN, T::kMAIN_COPY };
-	};
 	// One draw of a slot effect's inner chain (InnerVariant), its viewport its output's size.
-	const auto inner = [&](std::uint8_t a_part, std::int32_t a_slot, bool a_ldr, E::ImageSpaceEffectEnum a_effect, std::uint32_t a_occurrence, std::int32_t a_in,
-						   std::int32_t a_out, bool a_blended, StepDesc a_desc) {
-		const auto variant = InnerVariant(a_slot, a_effect, a_occurrence, a_in, a_out, a_blended);
-		a_desc.name = fmt::format("{}.{:x}", a_desc.name, variant);
-		add(a_part, SlotGroup(static_cast<std::uint32_t>(a_slot), a_ldr), a_ldr ? WorldScope::LdrSlot : WorldScope::PreSlot, a_effect, variant, std::move(a_desc));
+	const auto inner = [&](std::uint8_t a_part, std::int32_t a_slot, bool a_ldr, E::ImageSpaceEffectEnum a_effect, std::uint32_t a_occurrence, bool a_blended,
+						   StepDesc a_desc, bool a_final = false) {
+		const auto variant = InnerVariant(a_slot, a_effect, a_occurrence, a_blended);
+		add(a_part, SlotGroup(static_cast<std::uint32_t>(a_slot), a_ldr), a_ldr ? WorldScope::LdrSlot : WorldScope::PreSlot, a_effect, variant, std::move(a_desc),
+			a_final);
 	};
-	// The get-hit effect (slot 7, InnerVariant): copy, two blurs through CS's buffers, then the double vision of the input and the blur.
+	// The get-hit effect (slot 7, InnerVariant): copy, two blurs through CS's buffers, then the double vision of the image and the blur
+	// into the scratch target, and its copy back.
 	const auto getHit = [&](std::uint8_t a_part, bool a_ldr) {
-		for (const auto in : slotIns(a_ldr)) {
-			StepDesc d{ .name = fmt::format("gethit.copy.{}", in), .output = owned(chain.getHitA) };
-			d.inputs[0] = engine(in);
-			inner(a_part, 7, a_ldr, E::ISCopy, 0, in, 0, false, std::move(d));
+		{
+			StepDesc d{ .name = "gethit.copy", .output = owned(chain.getHitA) };
+			d.inputs[0] = image(a_ldr);
+			inner(a_part, 7, a_ldr, E::ISCopy, 0, false, std::move(d));
 		}
 		const auto blur = blurOf(1);
 		const std::array<std::pair<const OwnedTarget*, const OwnedTarget*>, 4> kBlurs{ { { &chain.getHitA, &chain.getHitB }, { &chain.getHitB, &chain.getHitSwap },
@@ -779,74 +797,62 @@ void RegisterChainSteps()
 		for (std::uint32_t k = 0; k < kBlurs.size(); ++k) {
 			StepDesc d{ .name = fmt::format("gethit.blur{}", k), .output = owned(*kBlurs[k].second) };
 			d.inputs[0] = owned(*kBlurs[k].first);
-			inner(a_part, 7, a_ldr, blur, k, 0, 0, false, std::move(d));
+			inner(a_part, 7, a_ldr, blur, k, false, std::move(d));
 		}
-		for (const auto in : slotIns(a_ldr))
-			for (const auto out : slotOuts(a_ldr)) {
-				if (in == out)
-					continue;
-				StepDesc d{ .name = fmt::format("gethit.doublevision.{}.{}", in, out), .output = engine(out) };
-				d.inputs[0] = engine(in);
-				d.inputs[1] = owned(chain.getHitA);
-				inner(a_part, 7, a_ldr, E::ISDoubleVision, 0, in, out, false, std::move(d));
-			}
+		{
+			StepDesc d{ .name = "gethit.doublevision", .output = scratch(a_ldr) };
+			d.inputs[0] = image(a_ldr);
+			d.inputs[1] = owned(chain.getHitA);
+			inner(a_part, 7, a_ldr, E::ISDoubleVision, 0, false, std::move(d), true);
+		}
+		slotCopy(a_part, 7, a_ldr, "gethit");
 	};
-	// The full-screen blur (slot 6, InnerVariant): downsample, the radius step's two blurs, the copy below radius 1, and the upsample.
+	// The full-screen blur (slot 6, InnerVariant), in place: downsample, the radius step's two blurs, and the upsample into the image,
+	// blended below radius 1. The engine's copy of the input into the output before that blend is the image itself here: no pass.
 	const auto fullBlur = [&](std::uint8_t a_part, bool a_ldr) {
-		for (const auto in : slotIns(a_ldr)) {
-			StepDesc d{ .name = fmt::format("fullblur.down.{}", in), .output = owned(chain.fullBlurDown) };
-			d.inputs[0] = engine(in);
+		{
+			StepDesc d{ .name = "fullblur.down", .output = owned(chain.fullBlurDown) };
+			d.inputs[0] = image(a_ldr);
 			d.samplers[0] = kLinear;
-			inner(a_part, 6, a_ldr, E::ISHDRDownSample4, 0, in, 0, false, std::move(d));
+			inner(a_part, 6, a_ldr, E::ISHDRDownSample4, 0, false, std::move(d));
 		}
 		for (std::uint32_t r = 0; r < 7; ++r) {
 			StepDesc h{ .name = fmt::format("fullblur.blur{}.h", r), .output = owned(chain.fullBlurSwap) };
 			h.inputs[0] = owned(chain.fullBlurDown);
-			inner(a_part, 6, a_ldr, blurOf(r), 0, 0, 0, false, std::move(h));
+			inner(a_part, 6, a_ldr, blurOf(r), 0, false, std::move(h));
 			StepDesc v{ .name = fmt::format("fullblur.blur{}.v", r), .output = owned(chain.fullBlurDown) };
 			v.inputs[0] = owned(chain.fullBlurSwap);
-			inner(a_part, 6, a_ldr, blurOf(r), 1, 0, 0, false, std::move(v));
+			inner(a_part, 6, a_ldr, blurOf(r), 1, false, std::move(v));
 		}
-		for (const auto in : slotIns(a_ldr))
-			for (const auto out : slotOuts(a_ldr)) {
-				if (in == out)
-					continue;
-				// Legacy Graphics Compatibility's 1.7 stage draws this copy with ISCopyDynamicFetchDisabled.
-				for (const auto copy : { E::ISCopy, E::ISCopyDynamicFetchDisabled }) {
-					StepDesc d{ .name = fmt::format("fullblur.copy{}.{}.{}", static_cast<std::uint32_t>(copy), in, out), .output = engine(out) };
-					d.inputs[0] = engine(in);
-					inner(a_part, 6, a_ldr, copy, 0, in, out, false, std::move(d));
-				}
-			}
-		for (const auto out : slotOuts(a_ldr))
-			for (const bool blended : { false, true }) {
-				// Below radius 1 the engine blends with blend mode 1 (RendererShadowState's alpha blend) over the copy.
-				StepDesc d{ .name = fmt::format("fullblur.up.{}{}", out, blended ? ".blend" : ""), .output = engine(out), .blend = PackBlend(blended ? 1 : 0, 0, 2, 0) };
-				d.inputs[0] = owned(chain.fullBlurDown);
-				d.samplers[0] = kLinear;
-				inner(a_part, 6, a_ldr, E::ISHDRDownSample4, 1, 0, out, blended, std::move(d));
-			}
+		for (const bool blended : { false, true }) {
+			// Below radius 1 the engine blends with blend mode 1 (RendererShadowState's alpha blend) over the copy.
+			StepDesc d{ .name = fmt::format("fullblur.up{}", blended ? ".blend" : ""), .output = image(a_ldr), .blend = PackBlend(blended ? 1 : 0, 0, 2, 0) };
+			d.inputs[0] = owned(chain.fullBlurDown);
+			d.samplers[0] = kLinear;
+			inner(a_part, 6, a_ldr, E::ISHDRDownSample4, 1, blended, std::move(d));
+		}
 	};
 
 	// The slots before the tonemap (part 1): the world map (both forms; t1 the main depth), refraction (t1 the refraction normals),
-	// FXAA, the depth of field and the radial blur when usesLDR is off. The full-screen blur, the get-hit effect and slot 4 have no CS
-	// pass.
+	// FXAA, the depth of field, the radial blur, the full-screen blur and the get-hit effect when usesLDR is off. Slot 4 has no effect.
 	single(1, 0, false, E::ISWorldMap, "worldmap", kLinear, mainDepth, kPoint);
 	single(1, 0, false, E::ISWorldMapNoSkyBlur, "worldmap.nosky", kLinear, mainDepth, kPoint);
+	slotCopy(1, 0, false, "worldmap");
 	single(1, 1, false, E::ISRefraction, "refraction", kLinear, engine(T::kREFRACTION_NORMALS), kPoint);
+	slotCopy(1, 1, false, "refraction");
 	single(1, 2, false, E::ISFXAA, "fxaa", kLinear);
+	slotCopy(1, 2, false, "fxaa");
 	dof(1, false);
 	radial(1, false);
 	fullBlur(1, false);
 	getHit(1, false);
 
-	// The copy in the HDR effect's place (effects[34], when the HDR switch 513463 / 391301 is off).
-	for (const auto in : { T::kMAIN, T::kMAIN_COPY })
-		for (const auto out : { kFinal, kTemp }) {
-			StepDesc d{ .name = fmt::format("hdr.copy.{}.{}", static_cast<std::int32_t>(in), out), .output = engine(out) };
-			d.inputs[0] = engine(in);
-			add(1, ChainGroup::kHdrCopy, WorldScope::HdrCopy, E::ISCopy, InOut(in, out), std::move(d));
-		}
+	// The copy in the HDR effect's place (effects[34], when the HDR switch 513463 / 391301 is off): kMAIN into the final target.
+	{
+		StepDesc d{ .name = "hdr.copy", .output = engine(kFinal) };
+		d.inputs[0] = engine(T::kMAIN);
+		add(1, ChainGroup::kHdrCopy, WorldScope::HdrCopy, E::ISCopy, 0, std::move(d));
+	}
 
 	// The HDR effect (ImageSpaceEffectHDR::Render, SE 0x1412e6fe0): the scene downsampled into kHDR_DOWNSAMPLE0, then the luminance
 	// levels, a quarter each, into kHDR_DOWNSAMPLE1 onwards; the last level into 27 + levels - 1 + 2 * parity, by the luminance shader
@@ -854,11 +860,11 @@ void RegisterChainSteps()
 	// engine's: Drawcall Limit Fix's character light reads them. Then the bloom of the frame's radius (effects[23 + radius]): the bright
 	// pass from the downsample and the adapted luminance into CS's scratch, its blur into CS's bloom.
 	constexpr std::int32_t kDownsample = T::kHDR_DOWNSAMPLE0, kFirstLevel = T::kHDR_DOWNSAMPLE1;
-	for (const auto in : { T::kMAIN, T::kMAIN_COPY }) {
-		StepDesc d{ .name = fmt::format("hdr.downsample.{}", static_cast<std::int32_t>(in)), .output = engine(kDownsample) };
-		d.inputs[0] = engine(in);
+	{
+		StepDesc d{ .name = "hdr.downsample", .output = engine(kDownsample) };
+		d.inputs[0] = engine(T::kMAIN);
 		d.samplers[0] = kLinear;
-		add(1, ChainGroup::kHdr, WorldScope::Hdr, E::ISHDRDownSample4, InOut(in, 0), std::move(d));
+		add(1, ChainGroup::kHdr, WorldScope::Hdr, E::ISHDRDownSample4, 0, std::move(d));
 	}
 	const auto levels = chain.levels;
 	const auto levelEffect = [](std::uint32_t a_level) { return a_level == 0 ? E::ISHDRDownSample4RGB2Lum : E::ISHDRDownSample16Lum; };
@@ -901,57 +907,57 @@ void RegisterChainSteps()
 		add(1, group, WorldScope::Hdr, kBlur[r], 0, std::move(d));
 	}
 
-	// After the Tonemap anchor's step (part 2). The tonemap or its fade form: t0 the bloom, t1 the scene, t2 the adapted luminance of
-	// the frame's parity; into the final target or kIMAGESPACE_TEMP_COPY.
+	// After the Tonemap anchor's step (part 2). The tonemap or its fade form: t0 the bloom, t1 kMAIN, t2 the adapted luminance of the
+	// frame's parity; into the final target.
 	for (const bool fade : { false, true })
-		for (const auto in : { T::kMAIN, T::kMAIN_COPY })
-			for (const auto out : { kFinal, kTemp })
-				for (std::uint16_t p = 0; p < 2; ++p) {
-					StepDesc d{ .name = fmt::format("tonemap{}.{}.{}.p{}", fade ? ".fade" : "", static_cast<std::int32_t>(in), out, p), .output = engine(out) };
-					d.inputs[0] = owned(chain.bloom);
-					d.inputs[1] = engine(in);
-					d.inputs[2] = owned(chain.adapt[p]);
-					d.samplers[0] = kLinear;
-					d.samplers[2] = kLinear;
-					add(2, fade ? ChainGroup::kTonemapFade : ChainGroup::kTonemap, WorldScope::Tonemap, fade ? E::ISHDRTonemapBlendCinematicFade : E::ISHDRTonemapBlendCinematic,
-						static_cast<std::uint16_t>((p << 15) | InOut(in, out)), std::move(d));
-				}
-	// TAA (the helper at manager +0x1f0, 100495): kIMAGESPACE_TEMP_COPY into the final target or kIMAGESPACE_TEMP_COPY2, with CS's
-	// history pair by the frame slot's parity in place of kTEMPORAL_AA_ACCUMULATION_1/2. t2 the motion vectors, t3 the main depth, t4
-	// the TAA mask, t5 the normals target of the frame (kNORMAL_TAAMASK_SSRMASK or its swap, as Deferred bound it). The UI and water
-	// forms have no CS source.
-	for (const auto out : { kFinal, kTemp2 })
-		for (std::uint16_t h = 0; h < 2; ++h)
-			for (std::uint16_t n = 0; n < 2; ++n) {
-				StepDesc d{ .name = fmt::format("taa.{}.h{}.n{}", out, h, n), .output = engine(out), .output1 = owned(chain.taaHistory[h]) };
-				d.inputs[0] = engine(kTemp);
-				d.inputs[1] = owned(chain.taaHistory[1 - h]);
-				d.inputs[2] = engine(T::kMOTION_VECTOR);
-				d.inputs[3] = mainDepth;
-				d.inputs[4] = engine(T::kTEMPORAL_AA_MASK);
-				d.inputs[5] = engine(n ? T::kNORMAL_TAAMASK_SSRMASK_SWAP : T::kNORMAL_TAAMASK_SSRMASK);
-				d.samplers[1] = kLinear;
-				d.samplers[4] = kWrapPoint;
-				d.samplers[5] = kWrapPoint;
-				add(2, ChainGroup::kTaa, WorldScope::Taa, E::ISTemporalAA, static_cast<std::uint16_t>((h << 15) | (n << 14) | InOut(kTemp, out)), std::move(d));
-			}
-	// The save-game screenshot's copy (manager +0x211; effects[34] into kSAVE_GAME_SCREENSHOT at its own size).
-	for (const auto in : { kFinal, kTemp, kTemp2 }) {
-		StepDesc d{ .name = fmt::format("screenshot.{}", in), .output = engine(T::kSAVE_GAME_SCREENSHOT) };
-		d.inputs[0] = engine(in);
-		add(2, ChainGroup::kScreenshot, WorldScope::Screenshot, E::ISCopy, InOut(in, T::kSAVE_GAME_SCREENSHOT), std::move(d));
+		for (std::uint16_t p = 0; p < 2; ++p) {
+			StepDesc d{ .name = fmt::format("tonemap{}.p{}", fade ? ".fade" : "", p), .output = engine(kFinal) };
+			d.inputs[0] = owned(chain.bloom);
+			d.inputs[1] = engine(T::kMAIN);
+			d.inputs[2] = owned(chain.adapt[p]);
+			d.samplers[0] = kLinear;
+			d.samplers[2] = kLinear;
+			add(2, fade ? ChainGroup::kTonemapFade : ChainGroup::kTonemap, WorldScope::Tonemap, fade ? E::ISHDRTonemapBlendCinematicFade : E::ISHDRTonemapBlendCinematic,
+				static_cast<std::uint16_t>(p << 15), std::move(d));
+		}
+	// TAA (the helper at manager +0x1f0, 100495): the final target into the LDR scratch, with CS's history pair by the frame slot's parity
+	// in place of kTEMPORAL_AA_ACCUMULATION_1/2, then the copy back. t2 the motion vectors, t3 the main depth, t4 the TAA mask, t5 the
+	// normals target of the frame (kNORMAL_TAAMASK_SSRMASK or its swap, as Deferred bound it). The UI and water forms have no CS source.
+	for (std::uint16_t h = 0; h < 2; ++h)
+		for (std::uint16_t n = 0; n < 2; ++n) {
+			StepDesc d{ .name = fmt::format("taa.h{}.n{}", h, n), .output = scratch(true), .output1 = owned(chain.taaHistory[h]) };
+			d.inputs[0] = engine(kFinal);
+			d.inputs[1] = owned(chain.taaHistory[1 - h]);
+			d.inputs[2] = engine(T::kMOTION_VECTOR);
+			d.inputs[3] = mainDepth;
+			d.inputs[4] = engine(T::kTEMPORAL_AA_MASK);
+			d.inputs[5] = engine(n ? T::kNORMAL_TAAMASK_SSRMASK_SWAP : T::kNORMAL_TAAMASK_SSRMASK);
+			d.samplers[1] = kLinear;
+			d.samplers[4] = kWrapPoint;
+			d.samplers[5] = kWrapPoint;
+			add(2, ChainGroup::kTaa, WorldScope::Taa, E::ISTemporalAA, static_cast<std::uint16_t>((h << 15) | (n << 14)), std::move(d), true);
+		}
+	copyBack(2, ChainGroup::kTaa, true, "taa.copyback");
+	// The save-game screenshot's copy (manager +0x211; effects[34] into kSAVE_GAME_SCREENSHOT at its own size): the final target as TAA
+	// left it, before the slots after the tonemap, as the engine copies it.
+	{
+		StepDesc d{ .name = "screenshot", .output = engine(T::kSAVE_GAME_SCREENSHOT) };
+		d.inputs[0] = engine(kFinal);
+		add(2, ChainGroup::kScreenshot, WorldScope::Screenshot, E::ISCopy, 0, std::move(d));
 	}
-	// The slots after the tonemap (usesLDR): the depth of field and the radial blur.
+	// The slots after the tonemap (usesLDR): the depth of field, the radial blur, the full-screen blur and the get-hit effect.
 	dof(2, true);
 	radial(2, true);
 	fullBlur(2, true);
 	getHit(2, true);
-	// The dynamic-resolution upsample (the helper at manager +0x1f8, 100548) into the final target.
-	for (const auto in : { kTemp, kTemp2 }) {
-		StepDesc d{ .name = fmt::format("upsample.{}", in), .output = engine(kFinal) };
-		d.inputs[0] = engine(in);
+	// The dynamic-resolution upsample (the helper at manager +0x1f8, 100548): the final target's render area into the LDR scratch at the
+	// final size, then the copy back.
+	{
+		StepDesc d{ .name = "upsample", .output = scratch(true) };
+		d.inputs[0] = engine(kFinal);
 		d.samplers[0] = kLinear;
-		add(2, ChainGroup::kUpsample, WorldScope::Upsample, E::ISUpsampleDynamicResolution, InOut(in, kFinal), std::move(d));
+		add(2, ChainGroup::kUpsample, WorldScope::Upsample, E::ISUpsampleDynamicResolution, 0, std::move(d), true);
+		copyBack(2, ChainGroup::kUpsample, true, "upsample.copyback");
 	}
 
 	// The three clients.
@@ -988,6 +994,8 @@ void RegisterChainSteps()
 				for (auto& pass : builder.Take())
 					passes.push_back(std::move(pass));
 			}
+		// The entries whose draws write the scratch target, until the copy back of their group gets its entry.
+		std::vector<std::uint32_t> finals;
 		for (auto& step : steps) {
 			if (step.part != p)
 				continue;
@@ -996,16 +1004,52 @@ void RegisterChainSteps()
 				logger::error("[ORG] ImageSpace: the post chain has more steps than a stage's rows hold; {} has no pass", step.desc.name);
 				continue;
 			}
+			if (step.copy) {
+				// A plain copy at its own gate entry: the draw that writes the scratch opens it with its own (TakeChainStep).
+				const auto& from = step.ldr ? chain.ldrScratch : chain.hdrScratch;
+				AnchorPasses::Builder builder(Anchor::ImageSpace, client.id, static_cast<std::int32_t>(entry), client.latch, client.gate);
+				builder.Add(AnchorPasses::Copy{ .name = step.desc.name,
+					.source = AnchorPasses::TextureOf(*from.texture),
+					.target = ImportOf(ImportOfName(step.ldr ? kFinal : T::kMAIN)),
+					.width = from.texture->Desc().Width,
+					.height = from.texture->Desc().Height,
+					.gate = entry });
+				auto made = builder.Take();
+				if (builder.Failed() || made.size() != 1) {
+					logger::error("[ORG] ImageSpace: post step {} has no pass ({}); the effects before it draw nothing", step.desc.name, builder.Failure());
+					finals.clear();
+					continue;
+				}
+				++part.count;
+				part.keys[entry] = step.key;
+				part.group[entry] = step.group;
+				part.copy[entry] = true;
+				part.made[entry] = true;
+				for (const auto writer : finals)
+					if (part.group[writer] == step.group)
+						part.copyBack[writer] = static_cast<std::uint16_t>(entry);
+				finals.clear();
+				auto pass = std::move(made.front());
+				pass.order = static_cast<std::int32_t>(entry);
+				pass.row = static_cast<std::int16_t>(part.rowBase + entry);
+				passes.push_back(std::move(pass));
+				continue;
+			}
 			std::string error;
 			auto spec = MakeStepSpec(step.desc, entry, error);
 			if (!spec) {
 				logger::info("[ORG] ImageSpace: post step {} has no pass ({})", step.desc.name, error);
 				continue;
 			}
+			if (chain.entries.contains(step.key))
+				logger::error("[ORG] ImageSpace: post step {} has the key of an earlier step (variant {:#x}); the hook finds only the earlier one", step.desc.name,
+					step.key.variant);
 			++part.count;
 			part.keys[entry] = step.key;
 			part.group[entry] = step.group;
-			chain.entries[step.key] = { p, entry };
+			chain.entries.try_emplace(step.key, ChainSteps::Entry{ p, entry });
+			if (step.final)
+				finals.push_back(entry);
 			NoteImports(*spec);
 			passes.push_back({ .name = fmt::format("{}.{}", client.id, spec->name),
 				.anchor = Anchor::ImageSpace,
@@ -1018,9 +1062,11 @@ void RegisterChainSteps()
 						Chain().retry = true;
 					return pass;
 				},
+				// Recorded at execution with the CPU's gate answer: every step's hook has run by the stage's commit (RenderEndOfFrameEffects'
+				// return), so a step the engine did not draw skips the run, and its barriers fold into the next pass that runs.
 				.atExecution = true,
 				.gated = true,
-				.gpuGated = true,
+				.gpuGated = false,
 				.row = static_cast<std::int16_t>(part.rowBase + entry) });
 			client.specs.push_back(std::move(spec));
 		}
@@ -1067,7 +1113,8 @@ void RegisterChainSteps()
 			desc.registerResources = [](org::RenderGraph& a_graph) {
 				const auto& current = Chain();
 				for (const auto* target : { &current.bloom, &current.bloomSwap, &current.dofDown, &current.dofSwap, &current.taaHistory[0], &current.taaHistory[1],
-					 &current.getHitA, &current.getHitB, &current.getHitSwap, &current.fullBlurDown, &current.fullBlurSwap, &current.adapt[0], &current.adapt[1] })
+					 &current.getHitA, &current.getHitB, &current.getHitSwap, &current.fullBlurDown, &current.fullBlurSwap, &current.hdrScratch, &current.ldrScratch,
+					 &current.adapt[0], &current.adapt[1] })
 					if (*target)
 						target->texture->Register(a_graph);
 			};
@@ -1111,44 +1158,51 @@ bool ChainStepNow()
 	return chain.on && chain.registered && (chain.inComposites || chain.inEndOfFrame);
 }
 
+/** @brief What a draw inside the world chain is to CS: a step with a pass, a draw CS's chain has nothing to do for, or unknown. */
+enum class ChainDraw : std::uint8_t
+{
+	Unknown,
+	Step,
+	Nothing,
+};
+
 /**
- * @brief The key of a chain step's draw: its scope, effect and the variant drawn, from CS's plan (the targets), the engine's
- * luminance parity global (the luminance, adaptation, bright pass and tonemap), the luminance level so far, the volumetric lighting's
- * parity, CS's TAA history pair (the frame slot's parity) and the frame's normals target. a_group gets the step's group even when
- * the plan has it off (the hook then asks for it). False when the draw is no step CS knows.
+ * @brief The key of a chain step's draw: its scope, effect and the variant drawn, from the engine's luminance parity global (the
+ * luminance, adaptation, bright pass and tonemap), the luminance level so far, the volumetric lighting's parity, CS's TAA history pair
+ * (the frame slot's parity) and the frame's normals target. No variant depends on a target: the chain's targets are fixed. a_group gets
+ * the step's group (the hook asks for it when its pass is off).
  */
-bool ChainKeyOf(Effects::ImageSpaceEffectEnum a_effect, StepKey& a_key, std::uint8_t& a_group, bool& a_planned)
+ChainDraw ChainKeyOf(Effects::ImageSpaceEffectEnum a_effect, StepKey& a_key, std::uint8_t& a_group)
 {
 	using E = Effects;
 	auto& chain = Chain();
-	const auto& plan = chain.plan;
-	a_planned = true;
 	if (chain.inComposites && !chain.inEndOfFrame) {
 		if (a_effect != E::ISCompositeVolumetricLighting)
-			return false;
+			return ChainDraw::Unknown;
 		a_group = ChainGroup::kComposite;
 		a_key = { WorldScope::Composite, a_effect, static_cast<std::uint16_t>(Frame::PostChain::VolumetricParity()) };
-		return true;
+		return ChainDraw::Step;
 	}
-	if (!chain.inEndOfFrame || !plan.valid)
-		return false;
+	if (!chain.inEndOfFrame)
+		return ChainDraw::Unknown;
 	if (chain.slotScope >= 0) {
 		const auto slot = chain.slotScope;
-		const auto& step = plan.slots[static_cast<std::size_t>(slot)];
 		const bool ldr = SlotIsLdr(static_cast<std::uint32_t>(slot));
 		a_group = SlotGroup(static_cast<std::uint32_t>(slot), ldr);
-		a_planned = step.on;
 		const auto occurrence = chain.slotDraws[a_effect]++;
-		a_key = { ldr ? WorldScope::LdrSlot : WorldScope::PreSlot, a_effect, InnerVariant(slot, a_effect, occurrence, step.in, step.out, slot == 6 && FullBlurRadius() < 1.0f) };
-		return true;
+		// In place, the full-screen blur's copy of its input into its output (below radius 1) is the image itself.
+		if (slot == 6 && (a_effect == E::ISCopy || a_effect == E::ISCopyDynamicFetchDisabled))
+			return ChainDraw::Nothing;
+		a_key = { ldr ? WorldScope::LdrSlot : WorldScope::PreSlot, a_effect, InnerVariant(slot, a_effect, occurrence, slot == 6 && FullBlurRadius() < 1.0f) };
+		return ChainDraw::Step;
 	}
 	const auto parity = static_cast<std::uint16_t>(Frame::PostChain::LuminanceParity());
 	if (chain.inHdr) {
 		switch (a_effect) {
 		case E::ISHDRDownSample4:
 			a_group = ChainGroup::kHdr;
-			a_key = { WorldScope::Hdr, a_effect, InOut(plan.hdr.in, 0) };
-			return true;
+			a_key = { WorldScope::Hdr, a_effect, 0 };
+			return ChainDraw::Step;
 		case E::ISHDRDownSample4RGB2Lum:
 		case E::ISHDRDownSample16Lum:
 		case E::ISHDRDownSample16LightAdapt:
@@ -1157,13 +1211,13 @@ bool ChainKeyOf(Effects::ImageSpaceEffectEnum a_effect, StepKey& a_key, std::uin
 				const bool isLast = level + 1 == chain.levels;
 				a_group = isLast ? (a_effect == E::ISHDRDownSample16LightAdapt ? ChainGroup::kHdrAdapt : ChainGroup::kHdrLum) : ChainGroup::kHdr;
 				a_key = { WorldScope::Hdr, a_effect, static_cast<std::uint16_t>(isLast ? (level | (1u << 8) | (static_cast<std::uint32_t>(parity) << 9)) : level) };
-				return true;
+				return ChainDraw::Step;
 			}
 		case E::ISHDRTonemapBlendCinematic:
 		case E::ISHDRTonemapBlendCinematicFade:
 			a_group = a_effect == E::ISHDRTonemapBlendCinematicFade ? ChainGroup::kTonemapFade : ChainGroup::kTonemap;
-			a_key = { WorldScope::Tonemap, a_effect, static_cast<std::uint16_t>((parity << 15) | InOut(plan.hdr.in, plan.hdr.out)) };
-			return true;
+			a_key = { WorldScope::Tonemap, a_effect, static_cast<std::uint16_t>(parity << 15) };
+			return ChainDraw::Step;
 		default:
 			break;
 		}
@@ -1174,62 +1228,51 @@ bool ChainKeyOf(Effects::ImageSpaceEffectEnum a_effect, StepKey& a_key, std::uin
 			if (a_effect == kBright[r] || a_effect == kBlur[r]) {
 				a_group = static_cast<std::uint8_t>(ChainGroup::kBloom + r);
 				a_key = { WorldScope::Hdr, a_effect, static_cast<std::uint16_t>(a_effect == kBright[r] ? parity : 0) };
-				return true;
+				return ChainDraw::Step;
 			}
 		}
-		return false;
+		return ChainDraw::Unknown;
 	}
 	switch (a_effect) {
 	case E::ISTemporalAA:
 		{
 			a_group = ChainGroup::kTaa;
-			a_planned = plan.taa.on;
 			const auto history = static_cast<std::uint16_t>(Frame::Driver::Current().parity & 1u);
 			const auto normals = static_cast<std::uint16_t>(globals::deferred && globals::deferred->forwardRenderTargets[2] == RE::RENDER_TARGET::kNORMAL_TAAMASK_SSRMASK_SWAP);
-			a_key = { WorldScope::Taa, a_effect, static_cast<std::uint16_t>((history << 15) | (normals << 14) | InOut(plan.taa.in, plan.taa.out)) };
-			return true;
+			a_key = { WorldScope::Taa, a_effect, static_cast<std::uint16_t>((history << 15) | (normals << 14)) };
+			return ChainDraw::Step;
 		}
 	case E::ISUpsampleDynamicResolution:
 		a_group = ChainGroup::kUpsample;
-		a_planned = plan.upsample.on;
-		a_key = { WorldScope::Upsample, a_effect, InOut(plan.upsample.in, plan.upsample.out) };
-		return true;
+		a_key = { WorldScope::Upsample, a_effect, 0 };
+		return ChainDraw::Step;
 	case E::ISCopy:
-		if (plan.hdrCopy && !chain.copyDrawn) {
+		if (chain.hdrCopy && !chain.copyDrawn) {
 			chain.copyDrawn = true;
 			a_group = ChainGroup::kHdrCopy;
-			a_key = { WorldScope::HdrCopy, a_effect, InOut(plan.hdr.in, plan.hdr.out) };
-			return true;
+			a_key = { WorldScope::HdrCopy, a_effect, 0 };
+			return ChainDraw::Step;
 		}
 		a_group = ChainGroup::kScreenshot;
-		a_planned = plan.screenshot.on;
-		a_key = { WorldScope::Screenshot, a_effect, InOut(plan.screenshot.in, plan.screenshot.out) };
-		return true;
+		a_key = { WorldScope::Screenshot, a_effect, 0 };
+		return ChainDraw::Step;
 	default:
 		break;
 	}
 	const auto slot = SlotOfEffect(a_effect);
 	if (slot < 0)
-		return false;
-	const auto& step = plan.slots[static_cast<std::size_t>(slot)];
+		return ChainDraw::Unknown;
 	const bool ldr = SlotIsLdr(static_cast<std::uint32_t>(slot));
 	a_group = SlotGroup(static_cast<std::uint32_t>(slot), ldr);
-	a_planned = step.on;
-	const auto scope = ldr ? WorldScope::LdrSlot : WorldScope::PreSlot;
-	std::uint16_t variant = InOut(step.in, step.out);
-	if (a_effect == E::ISHDRDownSample4)
-		variant = InOut(step.in, 0);
-	else if (a_effect == E::ISDepthOfFieldBlurHCS || a_effect == E::ISDepthOfFieldBlurVCS)
-		variant = 0;
-	a_key = { scope, a_effect, variant };
-	return true;
+	a_key = { ldr ? WorldScope::LdrSlot : WorldScope::PreSlot, a_effect, 0 };
+	return ChainDraw::Step;
 }
 
 /**
  * @brief A chain step's data-only hook: the engine computed this step's constants and bound them; they are captured and staged for
- * the step's pass, matched by its scope, effect and variant (ChainKeyOf). The engine's draw is withheld (true). A draw CS has no pass
- * for is a mismatch (NoPass). One whose group CS's plan or the frame's schedule has off draws nothing this frame and asks the next
- * description for its group.
+ * the step's pass, matched by its scope, effect and variant (ChainKeyOf), and the step's copy back is opened with it. The engine's draw
+ * is withheld (true). A draw CS has no pass for is a mismatch (NoPass). One whose group the frame's schedule has off draws nothing this
+ * frame (the image stays as the step before it left it) and asks the next description for its group.
  */
 bool TakeChainStep(std::size_t a_effect, bool a_compute, std::array<std::uint32_t, 3> a_groups)
 {
@@ -1239,16 +1282,12 @@ bool TakeChainStep(std::size_t a_effect, bool a_compute, std::array<std::uint32_
 	const auto segment = Frame::SegmentId::Post;
 	StepKey key{};
 	std::uint8_t group = 0;
-	bool planned = true;
-	if (!ChainKeyOf(id, key, group, planned)) {
+	const auto draw = ChainKeyOf(id, key, group);
+	if (draw == ChainDraw::Nothing)
+		return true;
+	if (draw == ChainDraw::Unknown) {
 		Frame::Driver::NoteTapError(Frame::Driver::TapError::NoPass, segment,
 			fmt::format("{} in the world post chain{} has no CS pass; it draws nothing", kEffects[a_effect].effectName, chain.inHdr ? " (the HDR effect)" : ""));
-		return true;
-	}
-	if (!planned) {
-		// CS's plan left the step out: its group is off in the frame's schedule. Nothing is drawn; the next description has it on.
-		chain.requested[group] = Frame::Driver::Current().frame;
-		Frame::Driver::NoteLaggedWork(segment);
 		return true;
 	}
 	const auto found = chain.entries.find(key);
@@ -1272,8 +1311,12 @@ bool TakeChainStep(std::size_t a_effect, bool a_compute, std::array<std::uint32_
 	const auto row = part.rowBase + entry;
 	const bool scheduled = row < 256 && (rows[row / 64] >> (row % 64) & 1u) != 0 && FrameAnchors::CanTap(client.id);
 	if (!part.made[entry] || !scheduled) {
-		// The frame's schedule (or CS's plan, which follows it) does not have it: nothing is drawn this frame, and the next
-		// description turns its group on.
+		// The frame's schedule does not have it: nothing is drawn this frame, and the next description turns its group on.
+		static std::array<std::uint64_t, ChainGroup::kCount> logged{};
+		if (Frame::Driver::Current().frame - logged[group] >= 600 && (logged[group] = Frame::Driver::Current().frame) != 0)
+			logger::info("[ORG] ImageSpace: post step {} (variant {:#x}, {}) lags at frame {}: made {}, row {} {}, client {}", kEffects[a_effect].effectName,
+				key.variant, ChainGroupName(group), Frame::Driver::Current().frame, part.made[entry], row, row < 256 && (rows[row / 64] >> (row % 64) & 1u) ? "on" : "off",
+				FrameAnchors::CanTap(client.id) ? "tappable" : "not tappable");
 		chain.requested[group] = Frame::Driver::Current().frame;
 		Frame::Driver::NoteLaggedWork(segment);
 		return true;
@@ -1281,7 +1324,12 @@ bool TakeChainStep(std::size_t a_effect, bool a_compute, std::array<std::uint32_
 	// A group on by a hook's request stays on while the engine draws it (a field at Begin may not see it: the VL composite).
 	if (RequestHolds(chain.requested[group]))
 		chain.requested[group] = Frame::Driver::Current().frame;
-	return StageStep(client, entry, a_effect, a_compute, a_groups);
+	const auto staged = client.batch.size();
+	const bool taken = StageStep(client, entry, a_effect, a_compute, a_groups);
+	// The step wrote the scratch target: its copy back runs with it. A step whose constants could not be staged opens nothing.
+	if (client.batch.size() > staged && part.copyBack[entry] != kNoCopy)
+		client.batch.push_back({ .entry = part.copyBack[entry] });
+	return taken;
 }
 
 /** @brief The pre-tonemap composites' hook: inside the world chain, their draws are chain steps. */

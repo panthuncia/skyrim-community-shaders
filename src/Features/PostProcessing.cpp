@@ -784,9 +784,9 @@ void PostProcessing::DrawBeforeUpscaling()
 	state->EndPerfEvent();
 }
 
-void PostProcessing::BeforeTonemapAnchor(RE::RENDER_TARGET a_input)
+void PostProcessing::BeforeTonemapAnchor(const RenderGraph::Engine::TonemapTargets& a_targets)
 {
-	ORGPostProcessing::Get().BeforeTonemap(ReadsMainCopy(a_input));
+	ORGPostProcessing::Get().BeforeTonemap(a_targets, isrefraction);
 }
 
 bool PostProcessing::ReadsMainCopy(RE::RENDER_TARGET a_input) const

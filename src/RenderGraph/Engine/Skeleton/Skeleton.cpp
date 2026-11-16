@@ -967,7 +967,9 @@ namespace RenderGraph::Engine::Skeleton
 						.make = [pass] { return std::static_pointer_cast<org::RenderPass>(std::make_shared<ClearPass>(pass)); },
 						.atExecution = true,
 						.gated = true,
-						.gpuGated = true });
+						// In the deferred+water and post stages the engine's clear call stages its entry before the stage commits: the
+						// pass is recorded at execution with the CPU's gate answer, and a clear not asked for folds its barriers.
+						.gpuGated = !(host == Host::DeferredPasses || host == Host::ImageSpace || host == Host::PostChain) });
 				}
 				if (StageHost(host)) {
 					// A pass of a CS stage: the engine's call stages its entry and colour (Take); its step's tap has nothing to commit.

@@ -31,6 +31,7 @@ ORGFxRuntime& ORGFxRuntime::Get()
 #	include "Features/Effects11/TextureManager.h"
 #	include "Globals.h"
 #	include "RenderGraph/AnchorPasses.h"
+#	include "RenderGraph/Engine/TonemapAnchor.h"
 #	include "RenderGraph/ComputeProgram.h"
 #	include "RenderGraph/FrameAnchors.h"
 #	include "RenderGraph/GraphResources.h"
@@ -1575,7 +1576,7 @@ struct ORGFxRuntime::Impl
 	}
 
 	/** @brief The frame's decision and plan (ORGFxRuntime::Prepare, which catches what it throws). */
-	void PrepareFrame(std::uint32_t a_input, std::uint32_t a_output);
+	void PrepareFrame(const RenderGraph::Engine::TonemapTargets& a_targets);
 
 	/** @brief After an exception: FX11 for the rest of the session. */
 	void Fail(const char* a_what)
@@ -1727,7 +1728,7 @@ void ORGFxRuntime::Invalidate()
 		effect = FxEffect{};
 }
 
-void ORGFxRuntime::Prepare(std::uint32_t a_input, std::uint32_t a_output)
+void ORGFxRuntime::Prepare(const RenderGraph::Engine::TonemapTargets& a_targets)
 {
 	if (!Requested())
 		return;
@@ -1747,7 +1748,7 @@ void ORGFxRuntime::Prepare(std::uint32_t a_input, std::uint32_t a_output)
 	}
 	// Nothing may leave the engine's tonemap call: an error returns Effects11 to FX11 for the session.
 	try {
-		impl->PrepareFrame(a_input, a_output);
+		impl->PrepareFrame(a_targets);
 	} catch (const std::exception& e) {
 		impl->Fail(e.what());
 	} catch (...) {
@@ -1755,7 +1756,7 @@ void ORGFxRuntime::Prepare(std::uint32_t a_input, std::uint32_t a_output)
 	}
 }
 
-void ORGFxRuntime::Impl::PrepareFrame(std::uint32_t a_input, std::uint32_t a_output)
+void ORGFxRuntime::Impl::PrepareFrame(const RenderGraph::Engine::TonemapTargets& a_targets)
 {
 	auto& self = *this;
 
@@ -1771,12 +1772,9 @@ void ORGFxRuntime::Impl::PrepareFrame(std::uint32_t a_input, std::uint32_t a_out
 	auto* renderer = globals::game::renderer;
 	auto& targets = renderer->GetRuntimeData().renderTargets;
 	const auto& main = targets[RE::RENDER_TARGETS::kMAIN];
-	if (a_input >= static_cast<std::uint32_t>(RE::RENDER_TARGETS::kTOTAL) || a_output >= static_cast<std::uint32_t>(RE::RENDER_TARGETS::kTOTAL))
-		return self.Inactive(fmt::format("the tonemap reads render target {} and writes {}, which are not both render targets", a_input, a_output));
-	const auto& input = targets[a_input];
-	const auto& output = targets[a_output];
-	if (!input.texture || !input.SRV || !output.texture || !output.RTV)
-		return self.Inactive(fmt::format("the tonemap input {} has no SRV or its output {} has no RTV", a_input, a_output));
+	// The tonemap's input and output as the anchor named them: CS's chain's images in native mode, the engine's call's targets else.
+	if (!a_targets.input || !a_targets.output)
+		return self.Inactive("the tonemap's input or output could not be imported");
 
 	Impl::Inputs inputs{};
 	for (std::size_t i = 0; i < kEffects; ++i) {
@@ -1793,11 +1791,11 @@ void ORGFxRuntime::Impl::PrepareFrame(std::uint32_t a_input, std::uint32_t a_out
 	if (!self.BuildCsPrograms(host->Device()))
 		return self.Inactive("Effects11's own shaders (colour correction, downsample, sun mask) could not be built for the render graph");
 
-	inputs.input = FrameAnchors::EngineTarget(a_input);
+	inputs.input = a_targets.input;
 	inputs.depth = FrameAnchors::EngineDepth(static_cast<std::uint32_t>(RE::RENDER_TARGETS_DEPTHSTENCIL::kMAIN));
-	inputs.output = FrameAnchors::EngineTarget(a_output);
-	if (!inputs.input || !inputs.depth || !inputs.output)
-		return self.Inactive(fmt::format("the tonemap input {}, kMAIN's depth or the output {} could not be imported", a_input, a_output));
+	inputs.output = a_targets.output;
+	if (!inputs.depth)
+		return self.Inactive("kMAIN's depth could not be imported");
 	// kMAIN gets FX11's corrected image too when it can be drawn to.
 	if (main.texture && main.RTV) {
 		inputs.main = FrameAnchors::EngineTarget(static_cast<std::uint32_t>(RE::RENDER_TARGETS::kMAIN));
@@ -1811,15 +1809,11 @@ void ORGFxRuntime::Impl::PrepareFrame(std::uint32_t a_input, std::uint32_t a_out
 		if (inputs.mainFormat == rhi::Format::Unknown)
 			inputs.main = nullptr;
 	}
-	D3D11_RENDER_TARGET_VIEW_DESC rtvDesc{};
-	output.RTV->GetDesc(&rtvDesc);
-	D3D11_TEXTURE2D_DESC outputDesc{};
-	output.texture->GetDesc(&outputDesc);
-	inputs.outputFormat = rhi::helpers::ToRHI(rtvDesc.Format);
-	inputs.outputWidth = outputDesc.Width;
-	inputs.outputHeight = outputDesc.Height;
-	if (inputs.outputFormat == rhi::Format::Unknown)
-		return self.Inactive(fmt::format("the tonemap output's format {} has no BasicRHI equivalent", static_cast<std::uint32_t>(rtvDesc.Format)));
+	inputs.outputFormat = a_targets.outputFormat;
+	inputs.outputWidth = a_targets.output.Width();
+	inputs.outputHeight = a_targets.output.Height();
+	if (inputs.outputFormat == rhi::Format::Unknown || !inputs.outputWidth || !inputs.outputHeight)
+		return self.Inactive("the tonemap output's format or size is not known");
 
 	// The textures follow the screen, as TextureManager's.
 	const std::uint32_t width = globals::game::graphicsState->screenWidth;
@@ -1835,7 +1829,7 @@ void ORGFxRuntime::Impl::PrepareFrame(std::uint32_t a_input, std::uint32_t a_out
 		a_texture->GetDesc(&desc);
 		return desc.Width == width && desc.Height == height && desc.Format == DXGI_FORMAT_R16G16B16A16_FLOAT && desc.SampleDesc.Count == 1;
 	};
-	inputs.inputCopies = copies(input.texture);
+	inputs.inputCopies = a_targets.input.Width() == width && a_targets.input.Height() == height && a_targets.inputFormat == rhi::Format::R16G16B16A16_Float;
 	inputs.mainCopies = inputs.main && copies(main.texture);
 
 	auto key = self.ShapeKey(inputs);
@@ -1876,7 +1870,7 @@ struct ORGFxRuntime::Impl
 ORGFxRuntime::~ORGFxRuntime() = default;
 void ORGFxRuntime::Reserve() {}
 void ORGFxRuntime::Invalidate() {}
-void ORGFxRuntime::Prepare(std::uint32_t, std::uint32_t) {}
+void ORGFxRuntime::Prepare(const RenderGraph::Engine::TonemapTargets&) {}
 bool ORGFxRuntime::RanThisFrame() const { return false; }
 
 #endif

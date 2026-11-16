@@ -3,6 +3,11 @@
 #include <cstdint>
 #include <memory>
 
+namespace RenderGraph::Engine
+{
+	struct TonemapTargets;
+}
+
 /**
  * @brief Effects11's ORG FX runtime (CS_ORG_FX=1): the preset's .fx passes run as render-graph passes at the Tonemap anchor,
  * in place of FX11's EffectManager::ExecuteEffects. Design and limits: docs/development/org-fx-runtime.md, section 5.
@@ -44,9 +49,9 @@ public:
 
 	/**
 	 * @brief At the tonemap hook, before FrameAnchors::Run(Tonemap): decides whether the graph runs this frame's chain and registers
-	 * its passes when the frame's shape changed. a_input and a_output are the hook's RE::RENDER_TARGET values.
+	 * its passes when the frame's shape changed. a_targets: the tonemap's input and output (CS's in native mode, the engine's else).
 	 */
-	void Prepare(std::uint32_t a_input, std::uint32_t a_output);
+	void Prepare(const RenderGraph::Engine::TonemapTargets& a_targets);
 
 	/** @brief Whether this frame's chain ran on the graph and wrote the tonemap's output: Effects11 then skips FX11. */
 	bool RanThisFrame() const;

@@ -22,6 +22,7 @@ ORGPostProcessing& ORGPostProcessing::Get()
 #	include "ORGPostEffect.h"
 
 #	include "Features/LinearLighting.h"
+#	include "RenderGraph/Engine/TonemapAnchor.h"
 #	include "Globals.h"
 #	include "RenderGraph/GraphResources.h"
 #	include "RenderGraph/RenderGraphRuntime.h"
@@ -496,6 +497,8 @@ struct ORGPostProcessing::Impl
 	bool Rebuild(const ORGPostChain::Shape& a_shape, const ORGPostChain::Image& a_main, const ORGPostChain::Image& a_mainCopy,
 		const std::vector<Index>& a_order, std::vector<std::uint64_t> a_key, std::string& a_failure)
 	{
+		// One image (CS's native chain): it is read, and the result goes back into it.
+		const auto& second = a_mainCopy ? a_mainCopy : a_main;
 		auto* host = RenderGraphRuntime::Get().Host();
 		if (!host) {
 			a_failure = "the render graph has no host";
@@ -514,7 +517,7 @@ struct ORGPostProcessing::Impl
 		ORGPostChain::LatchRegion<CopyLatch> nextInput, nextOutput;
 
 		// As BeginLinearProcessing: the scene in RGBA16F, linear unless Linear Lighting already is. Under ORG the input pass also
-		// picks kMAIN or kMAIN_COPY (CopyLatch::source), so one recording serves either.
+		// picks kMAIN or kMAIN_COPY (CopyLatch::source), so one recording serves either (guest; CS's native chain has one image).
 		{
 			ORGPostChain::Builder builder(*next, programs, a_shape, "input");
 			auto program = builder.Raster(ORGPostChain::kCopyShader, ShaderBindings::Words<CopyBlock>(), { ORGPostChain::kInputFormat });
@@ -522,7 +525,7 @@ struct ORGPostProcessing::Impl
 			nextInput = builder.Latch<CopyLatch>();
 			builder.Draw({ .name = "copy",
 				.program = std::move(program),
-				.bindings = { Bind::Srv(a_main), Bind::Srv(a_mainCopy), Bind::Latch(nextInput) },
+				.bindings = { Bind::Srv(a_main), Bind::Srv(second), Bind::Latch(nextInput) },
 				.target = image });
 			builder.SetCurrent(image);
 		}
@@ -543,6 +546,8 @@ struct ORGPostProcessing::Impl
 			const auto chainOutput = builder.Current();
 			nextOutput = builder.Latch<CopyLatch>();
 			for (const auto& [target, name] : { std::pair{ &a_main, "main" }, std::pair{ &a_mainCopy, "main-copy" } }) {
+				if (!*target)
+					continue;
 				builder.Draw({ .name = name,
 					.program = builder.Raster(ORGPostChain::kCopyShader, ShaderBindings::Words<CopyBlock>(), { target->format }),
 					.bindings = { Bind::Srv(chainOutput), Bind::Unused(), Bind::Latch(nextOutput) },
@@ -657,7 +662,7 @@ void ORGPostProcessing::Setup()
 	logger::info("[ORG] Post Processing: the tonemap chain runs on the render graph while every enabled effect is ported ({})", ported);
 }
 
-void ORGPostProcessing::BeforeTonemap(bool a_readsMainCopy)
+void ORGPostProcessing::BeforeTonemap(const RenderGraph::Engine::TonemapTargets& a_targets, bool a_refraction)
 {
 	if (!impl)
 		return;
@@ -703,21 +708,27 @@ void ORGPostProcessing::BeforeTonemap(bool a_readsMainCopy)
 	}
 
 	auto& targets = globals::game::renderer->GetRuntimeData().renderTargets;
-	auto mainTarget = FrameAnchors::EngineTarget(static_cast<std::uint32_t>(RE::RENDER_TARGETS::kMAIN));
-	auto mainCopyTarget = FrameAnchors::EngineTarget(static_cast<std::uint32_t>(RE::RENDER_TARGETS::kMAIN_COPY));
+	// CS's native chain: the tonemap's input is kMAIN, read and written back; kMAIN_COPY is not the chain's. Guest: either may hold the
+	// scene, and both get the result.
+	const bool single = a_targets.chain;
+	auto mainTarget = single ? a_targets.input : FrameAnchors::EngineTarget(static_cast<std::uint32_t>(RE::RENDER_TARGETS::kMAIN));
+	auto mainCopyTarget = single ? FrameAnchors::Texture{} : FrameAnchors::EngineTarget(static_cast<std::uint32_t>(RE::RENDER_TARGETS::kMAIN_COPY));
 	auto* mainTexture = targets[RE::RENDER_TARGETS::kMAIN].texture;
 	auto* mainCopyTexture = targets[RE::RENDER_TARGETS::kMAIN_COPY].texture;
-	if (!mainTarget || !mainCopyTarget || !mainTexture || !mainCopyTexture) {
+	if (!mainTarget || !mainTexture || (!single && (!mainCopyTarget || !mainCopyTexture))) {
 		s.SetReason("kMAIN or kMAIN_COPY cannot be imported");
 		return;
 	}
 	D3D11_TEXTURE2D_DESC mainDesc{}, mainCopyDesc{};
 	mainTexture->GetDesc(&mainDesc);
-	mainCopyTexture->GetDesc(&mainCopyDesc);
-	if (mainDesc.Width != mainCopyDesc.Width || mainDesc.Height != mainCopyDesc.Height) {
-		s.SetReason("kMAIN and kMAIN_COPY differ in size");
-		return;
-	}
+	if (!single) {
+		mainCopyTexture->GetDesc(&mainCopyDesc);
+		if (mainDesc.Width != mainCopyDesc.Width || mainDesc.Height != mainCopyDesc.Height) {
+			s.SetReason("kMAIN and kMAIN_COPY differ in size");
+			return;
+		}
+	} else
+		mainCopyDesc = mainDesc;
 	ORGPostChain::Shape shape{};
 	shape.width = mainDesc.Width;
 	shape.height = mainDesc.Height;
@@ -756,7 +767,7 @@ void ORGPostProcessing::BeforeTonemap(bool a_readsMainCopy)
 
 	s.order = std::move(order);
 	s.linear = linear;
-	s.readsMainCopy = a_readsMainCopy;
+	s.readsMainCopy = !single && (a_refraction || a_targets.input == mainCopyTarget);
 	s.colorGraded = colorGraded;
 	s.ready = true;
 	s.SetReason({});
@@ -791,7 +802,7 @@ struct ORGPostProcessing::Impl
 ORGPostProcessing::~ORGPostProcessing() = default;
 void ORGPostProcessing::Reserve() {}
 void ORGPostProcessing::Setup() {}
-void ORGPostProcessing::BeforeTonemap(bool) {}
+void ORGPostProcessing::BeforeTonemap(const RenderGraph::Engine::TonemapTargets&, bool) {}
 bool ORGPostProcessing::Ran() const { return false; }
 void ORGPostProcessing::ClearShaderCache() {}
 

@@ -76,6 +76,11 @@
  * effect names or the groups hdr, bloom, composite, sao, ssr; unset or "all": every covered effect) narrows the port to bisect an
  * effect; CS_ORG_IMAGESPACE_LOG=1 logs each shape new to the manifest and each effect's constant sizes.
  */
+namespace RenderGraph::Engine
+{
+	struct TonemapTargets;
+}
+
 namespace RenderGraph::Engine::ImageSpace
 {
 	/**
@@ -102,7 +107,8 @@ namespace RenderGraph::Engine::ImageSpace
 
 	/**
 	 * @brief RenderEndOfFrameEffects (99023 / 105674) of the world chain: a_begin at its entry, with its source and final targets
-	 * (its arguments), where CS plans the chain's targets for the frame; false at its return. Render owner.
+	 * (its arguments), where CS checks the engine's loop against the frame's description (the chain's targets are fixed); false at its
+	 * return. Render owner.
 	 */
 	void OnEndOfFrame(bool a_begin, std::int32_t a_source, std::int32_t a_final);
 
@@ -124,6 +130,13 @@ namespace RenderGraph::Engine::ImageSpace
 
 	/** @brief The adapted luminance pair's published ids (AdaptedLuminanceOf), for a reader's declarations. */
 	std::span<const std::string_view> AdaptedLuminanceIds();
+
+	/**
+	 * @brief The Tonemap anchor's targets while the world post chain's HDR effect runs in native mode: CS's fixed images, kMAIN before
+	 * the tonemap and the final target after it. False elsewhere (guest, a menu scene's tonemap): the engine's call names them. Render
+	 * owner.
+	 */
+	bool ChainTonemapTargets(TonemapTargets& a_out);
 
 	/** @brief One status line (passes, manifest, taken and refused draws). Main thread. */
 	std::string Status();

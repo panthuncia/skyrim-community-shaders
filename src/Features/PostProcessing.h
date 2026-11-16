@@ -2,6 +2,11 @@
 
 #include "PostProcessing/PostProcessFeature.h"
 
+namespace RenderGraph::Engine
+{
+	struct TonemapTargets;
+}
+
 #include "PostProcessing/BokehResources.h"
 #include "PostProcessing/Border.h"
 #include "PostProcessing/CODBloom.h"
@@ -155,7 +160,7 @@ struct PostProcessing : Feature
 	 * @brief At the tonemap hook, before the Tonemap anchor runs: lets the render graph take the chain this frame
 	 * (ORGPostProcessing, CS_ORG_POST_PROCESSING=1). PreProcess then draws nothing.
 	 */
-	void BeforeTonemapAnchor(RE::RENDER_TARGET a_input);
+	void BeforeTonemapAnchor(const RenderGraph::Engine::TonemapTargets& a_targets);
 
 	/** @brief Whether the scene is in kMAIN_COPY at the tonemap (its input, or refraction routed it there), else in kMAIN. */
 	bool ReadsMainCopy(RE::RENDER_TARGET a_input) const;

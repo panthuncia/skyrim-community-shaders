@@ -3116,20 +3116,19 @@ its per-anchor path.
   tonemap and after (third, after the Tonemap anchor). 2 + 92 + 101 passes at 1920x1080 with 4 luminance levels.
 - **Hooks.** Each draw or dispatch inside the world chain stages the constants the engine bound and is withheld
   (`TakeChainStep`). Its pass is found by scope, effect and variant (`ChainKeyOf`).
-- **Targets are CS's plan.** At RenderEndOfFrameEffects' entry (99023 / 105674, detoured in `PostChain.cpp`) CS plans the chain the
-  way the engine's loop does (`PlanEndOfFrame`, from the decompile of SE 0x141297410): the slots before the tonemap alternate between
-  the source argument and the manager's swap target (+0x60); the HDR effect writes the final argument when nothing follows it, else
-  kIMAGESPACE_TEMP_COPY; TAA, the screenshot copy, the LDR slots and the upsample follow the engine's rules. The plan covers only
-  effects that are active in the engine **and** on in the frame's schedule. An effect the engine draws while the schedule has it
-  off is left out of the plan: the steps around it read what the step before them wrote, and the effect shows a frame or two late.
+- **Targets are fixed** (since the fixed-targets pass below; before it, `PlanEndOfFrame` replayed the engine's loop at
+  RenderEndOfFrameEffects' entry and picked one of several in/out variants per step). Every step reads and writes the same targets
+  whichever other steps are present or run: the chain works in place on kMAIN before the tonemap and on the final target after it,
+  and an effect that cannot write the image it reads draws into its side's scratch target and a copy puts the result back
+  ("Fixed targets", below).
 - **Description at Begin** (`ChainRows`, from `Description::post`): the composite with the volumetric lighting, each slot in its
   place (usesLDR), the HDR effect or its copy, the last luminance level's form (adaptation or not), the bloom of the frame's radius,
   the tonemap or its fade form (off when Effects11 owns it), TAA from CS's upscaler method (`UpscaleMethod::kTAA`; without
-  Upscaling, the engine flag), the upsample from dynamic resolution, the screenshot from +0x211. Variants picked per frame (targets,
-  parities) are all on. TAA's history is CS's pair by the frame slot's parity, so a slot records only its own history's passes.
-- **Lag, not cuts.** A hook whose group the plan or the schedule has off draws nothing, counts lagged work, and turns the group on in
-  later descriptions (`requested`). A draw CS has no pass for is `NoPass` (fatal in development builds). Within 300 frames of a
-  registration (a new size), an unknown variant counts as lagged work instead.
+  Upscaling, the engine flag), the upsample from dynamic resolution, the screenshot copy always. Variants picked per frame
+  (parities) are all on. TAA's history is CS's pair by the frame slot's parity, so a slot records only its own history's passes.
+- **Lag, not cuts.** A hook whose group the schedule has off draws nothing, counts lagged work, and turns the group on in later
+  descriptions (`requested`). The image stays as the step before it left it. A draw CS has no pass for is `NoPass` (fatal in
+  development builds). Within 300 frames of a registration (a new size), an unknown variant counts as lagged work instead.
 - **Resizes.** kMAIN's size, the final target's size (from the render target manager: the renderer's own entry has no texture in
   native mode), the luminance level count and the dynamic-resolution ratios are checked at each world frame; a change registers the
   clients again (off-thread build).
@@ -3139,22 +3138,22 @@ its per-anchor path.
 | Step | Effect(s) | Reads | Writes | Variant chosen by | Reached |
 |---|---|---|---|---|---|
 | composite (VL form) | ISCompositeVolumetricLighting, blend mode 5, render-size viewport | kIMAGESPACE_VOLUMETRIC_LIGHTING + parity | kMAIN | VL state counter (100297 / 107014, +0x88) at the hook | yes |
-| world map (slot 0) | ISWorldMap, NoSkyBlur | image, main depth | swap | plan | yes (validation map) |
-| refraction (slot 1) | ISRefraction | image, kREFRACTION_NORMALS | swap | plan | yes |
-| FXAA (slot 2) | ISFXAA | image | swap | plan | no (unverified) |
-| depth of field (slot 3, both places) | ISHDRDownSample4, ISDepthOfFieldBlurH/VCS, ISDepthOfField(Fogged), ISDistantBlur(Fogged) | image, CS downsample, main depth, kSAO_CAMERAZ mip 10 | CS DofDownsample, DofBlurSwap; then the plan's target | plan; composite by its effect (the step flags) | after the tonemap yes (inventory, perf-taa); before it no |
-| radial blur (slot 5, both places) | ISRadialBlur, Medium, High | image | plan's target | plan | yes (validation map) |
-| HDR copy | ISCopy | source | final or kIMAGESPACE_TEMP_COPY | plan (HDR switch 513463 / 391301 off) | no |
-| HDR downsample | ISHDRDownSample4 | source | kHDR_DOWNSAMPLE0 | plan | yes |
+| world map (slot 0) | ISWorldMap, NoSkyBlur | kMAIN, main depth | HdrScratch, then its copy back into kMAIN | its form | yes (validation map) |
+| refraction (slot 1) | ISRefraction | kMAIN, kREFRACTION_NORMALS | HdrScratch; copy back | - | yes |
+| FXAA (slot 2) | ISFXAA | kMAIN | HdrScratch; copy back | - | no (unverified) |
+| depth of field (slot 3, both places) | ISHDRDownSample4, ISDepthOfFieldBlurH/VCS, ISDepthOfField(Fogged), ISDistantBlur(Fogged) | the image (kMAIN, or the final target after the tonemap), CS downsample, main depth, kSAO_CAMERAZ mip 10 | CS DofDownsample, DofBlurSwap; the side's scratch; copy back | composite by its effect (the step flags) | after the tonemap yes (inventory, perf-taa); before it no |
+| radial blur (slot 5, both places) | ISRadialBlur, Medium, High | the image | the side's scratch; copy back | its form | yes (validation map) |
+| HDR copy | ISCopy | kMAIN | the final target | (HDR switch 513463 / 391301 off) | no |
+| HDR downsample | ISHDRDownSample4 | kMAIN | kHDR_DOWNSAMPLE0 | - | yes |
 | luminance levels | ISHDRDownSample4RGB2Lum, 16Lum | the level above | kHDR_DOWNSAMPLE1.. | level index (count fixed at build) | yes |
 | last level | 16Lum or ISHDRDownSample16LightAdapt | the level above (and the other parity's target) | 27 + levels - 1 + 2 x parity | the parity global 528109 / 415054 at the hook (flipped by the engine before the draw) | yes |
 | bloom | ISBrightPassBlur(r), ISBlur(r) | kHDR_DOWNSAMPLE0 and the last level; CS scratch | CS BloomSwap, CS Bloom | radius at Begin (+0xcc); parity | radius 7 yes |
-| tonemap | ISHDRTonemapBlendCinematic(Fade) | CS Bloom, source, last level | final or kIMAGESPACE_TEMP_COPY | plan, parity, fade (+0x118) | plain yes, fade no |
-| TAA | ISTemporalAA | TEMP_COPY, CS history (other), motion, depth, TAA mask, normals | final or TEMP_COPY2, CS history | plan, frame slot parity, Deferred's normals target | yes (upscalers TAA) |
-| screenshot | ISCopy | final, TEMP_COPY or TEMP_COPY2 | kSAVE_GAME_SCREENSHOT | plan (+0x211) | no |
-| upsample | ISUpsampleDynamicResolution | TEMP_COPY or 2 | final | plan | no |
-| full-screen blur (slot 6, both places) | ISHDRDownSample4, ISBlurN (or ISNonHDRBlurN by the blur effect's HDR flag), ISCopy or ISCopyDynamicFetchDisabled, ISHDRDownSample4 | image; CS FullBlurDown, FullBlurSwap | CS FullBlurDown, FullBlurSwap; the plan's target (blended below radius 1) | the effect's draws in order (InnerVariant: shader and its occurrence), radius at the draw (+0x128) | no |
-| get hit (slot 7, both places) | ISCopy, ISBlur5 four times, ISDoubleVision | image; CS GetHitA, GetHitB, GetHitSwap | CS buffers; the plan's target | the same | no |
+| tonemap | ISHDRTonemapBlendCinematic(Fade) | CS Bloom, kMAIN, last level | the final target | parity, fade (+0x118) | plain yes, fade no |
+| TAA | ISTemporalAA | the final target, CS history (other), motion, depth, TAA mask, normals | LdrScratch and CS history; copy back into the final target | frame slot parity, Deferred's normals target | yes (upscalers TAA, perf-taa) |
+| screenshot | ISCopy | the final target (after TAA, before the LDR slots) | kSAVE_GAME_SCREENSHOT | - (+0x211 opens it) | no |
+| upsample | ISUpsampleDynamicResolution | the final target | LdrScratch; copy back | - | no |
+| full-screen blur (slot 6, both places) | ISHDRDownSample4, ISBlurN (or ISNonHDRBlurN by the blur effect's HDR flag), ISHDRDownSample4 | the image; CS FullBlurDown, FullBlurSwap | CS FullBlurDown, FullBlurSwap; the image itself (in place, blended below radius 1). The engine's copy of its input into its output (ISCopy or ISCopyDynamicFetchDisabled) is the image itself: its draw has no pass | the effect's draws in order (InnerVariant: shader, its occurrence, the slot), radius at the draw (+0x128) | no |
+| get hit (slot 7, both places) | ISCopy, ISBlur5 four times, ISDoubleVision | the image; CS GetHitA, GetHitB, GetHitSwap | CS buffers; the side's scratch; copy back | the same | no |
 
 Constants: every step's are captured (data-only hooks). None is computed yet.
 
@@ -3186,16 +3185,17 @@ No test reaches any of these, nor the full-screen blur or get hit.
 - The adapted luminance pair is published (`ImageSpace::AdaptedLuminance0/1`). Drawcall Limit Fix's character light, which reads the
   engine's adapted luminance target the engine binds, reads CS's target of the same parity instead (`AdaptedLuminanceTextureIndex`,
   `ImageSpace::AdaptedLuminanceOf`); its passes declare both ids.
-- Engine targets kept, each with the reader that needs it: kHDR_DOWNSAMPLE0 and the levels before the last (the character light may
-  still bind one of them; nothing else outside the chain reads them); kMAIN (the Upscale anchor's copy and depth upscale, the UI and
-  Scaleform composite over the final chain); kMAIN_COPY (the water surface and refraction read it, Upscaling's depth upscale writes
-  it); kIMAGESPACE_TEMP_COPY/2 and the final target (the Tonemap anchor's clients, Post Processing and Effects11, take the tonemap's
-  input and output as engine target indices; frame generation's hudless copy and the UI read the final target); the VL pair
-  (Volumetric Lighting's port writes it); kSAO_CAMERAZ mip 10 (the depth of field's average depth; the depth upscale writes it);
-  kMOTION_VECTOR, the main depth and kTEMPORAL_AA_MASK (TAA and the upscaler read them, the forward pass writes them).
-- Not done: the tonemap ping-pong (kIMAGESPACE_TEMP_COPY/2) as CS targets. The Tonemap anchor's `Run` carries engine target indices
-  (`TonemapAnchor.cpp`), and ORGPostProcessing and ORGFxRuntime resolve them with `FrameAnchors::EngineTarget`; both clients, the
-  anchor's interface, TAA, the LDR slots, the screenshot copy and the upsample would move to CS's pair together.
+- `HdrScratch` and `LdrScratch` (transients, made with kMAIN's and the final target's size and view format): an effect draws there
+  and its copy back moves the result into its image ("Fixed targets", below).
+- Engine targets kept, each with the reader that needs it: kMAIN (the image before the tonemap: the Upscale anchor writes it, the VL
+  composite blends into it, Post Processing writes its result back into it and Effects11 its corrected image); the final target (the
+  image after the tonemap: the UI stage draws over it, frame generation's hudless copy, HDR output and the present read it);
+  kHDR_DOWNSAMPLE0 and the levels before the last (the character light may still bind one of them; nothing else outside the chain
+  reads them); kSAVE_GAME_SCREENSHOT (the save's thumbnail); the VL pair (Volumetric Lighting's port writes it); kSAO_CAMERAZ mip 10
+  (the depth of field's average depth; the depth upscale writes it); kMOTION_VECTOR, the main depth, kTEMPORAL_AA_MASK and the normals
+  targets (TAA and the upscaler read them, earlier stages write them); kREFRACTION_NORMALS (the forward pass writes it).
+- No longer used by the post stage: kMAIN_COPY (the engine's swap target before the tonemap; the water surface and refraction still
+  read it, written outside the post stage), kIMAGESPACE_TEMP_COPY and kIMAGESPACE_TEMP_COPY2.
 
 ### Measurements
 
@@ -3318,7 +3318,6 @@ still open in a frame Drawcall Limit Fix did not draw); the two FrameAnchors rul
 
 ### What is left
 
-- The tonemap ping-pong as CS targets (Targets, above).
 - The lens flare forms, SIL, the depth of field's raster blur and masked composites, TAA's UI and water forms (The steps, above).
 - Constants: none computed yet. RenderSSAO's (SE 0x1412ebd70) are computable from globals; the HDR effect's are a few reciprocal
   sizes plus globals (0x1412e6fe0).
@@ -3968,12 +3967,11 @@ texture into kMAIN (`FrameAnchors::CanRun` on the evaluate client at the commit)
 
 | Passes | Why present |
 |---|---|
-| the screenshot copy, for each of its three inputs (final, TEMP_COPY, TEMP_COPY2) | a save asks for it with at most a frame of notice; a late copy leaves a stale thumbnail. Its input depends on TAA, the LDR slots and dynamic resolution, so all three stay |
+| the screenshot copy (one pass: the final target into kSAVE_GAME_SCREENSHOT) | a save asks for it with at most a frame of notice; a late copy leaves a stale thumbnail. Its row is on in every description, not only in the key, because the flag may be set after Begin read it. Recorded at execution: a frame that does not copy skips it, its barriers folded |
 | both tonemap forms (plain, fade) | the fade starts and ends on a frame |
 | both forms of the last luminance level (luminance, light adaptation) | the adaptation's reset lasts one frame |
 | the engine-counter parity variants: last luminance level and bright pass by luminance parity, the VL composite by the VL counter, the normals target (n0/n1) in SSR, SAO and TAA, the water blend's history | the engine picks them per frame |
 | TAA's and the raw AO's history pairs (both slot parities) | the frame slot's parity picks one; the other is off in the description (`SetSkipWhen`) and folds |
-| the ping-pong target variants of the post steps (pre-tonemap slots, HDR downsample, tonemap, TAA output, upsample input) | see "The post target plan" below |
 | the six reflection faces, Scaleform's 8 instances, the water effects' ripple, heightmap and flow copy instances | late engine decisions; an empty instance skips at execution |
 | the snow pass and its copy | the snow flag changes with the weather |
 
@@ -3996,21 +3994,15 @@ surface in this instance), the sky faces the engine did not draw, the upscaler e
 water effect instances (ripples, heightmap steps, flow copies), which are no longer GPU-gated (`gpuGated = false`): recorded at execution with
 the CPU's gate answer, most instances empty.
 
-GPU-gated passes still record their barriers when empty, because the count is latched on the GPU and the CPU does not know it at record time:
-the deferred+water stage's world steps (SSR, SAO, snow, composite, water blend) and the post chain's steps. These are the passes whose variants
-are all present for the engine's per-frame choices.
+GPU-gated passes still record their barriers when empty, because the count is latched on the GPU and the CPU does not know it at record time.
+The deferred+water stage's world steps (SSR, SAO, snow, composite, water blend), the post chain's steps and the hosted clears of those two
+stages (the TAA mask and kMAIN_ONLY_ALPHA) were GPU-gated until the fixed-targets pass; they are now recorded at execution with the CPU's
+answer, since every one of their hooks runs before its stage commits ("Fixed targets", below).
 
-### The post target plan (not done)
+### The post target plan
 
-The plan asked for the ping-pong targets to be computed at Begin, so each post step is one present pass. It is not done, because the targets
-must agree with the engine's loop at the Tonemap anchor: the anchor's clients (Effects11, Post Processing) take the tonemap's input and output
-as the engine's target indices from the engine's call. A plan at Begin changes whenever an effect starts or stops (the world map, the
-inventory's depth of field: an LDR slot moves the HDR effect's output from the final target to TEMP_COPY). While the new plan's build or
-recording is pending, the schedule holds only the old plan's variants, the engine's loop asks for the new ones, and the tonemap (and every step
-after the changed one) would draw nothing for those frames: the frame, not just the new effect, would be wrong. Doing it soundly needs the
-tonemap ping-pong as CS targets (stage 3's "What is left"): the Tonemap anchor's interface, Effects11, Post Processing, TAA, the LDR slots,
-the screenshot copy and the upsample moving to CS's pair together, so CS's plan, not the engine's, decides what every reader sees. The
-engine's loop replay (`PlanEndOfFrame` at RenderEndOfFrameEffects' entry) remains the plan.
+Done by the fixed-targets pass ("Fixed targets", below): the post chain's targets no longer depend on which effects run, so there is no
+plan to make, at Begin or at the end of frame. Each step is one present pass.
 
 ### The recipe check
 
@@ -4098,3 +4090,153 @@ described yet; a key now changes outside the stage's frames only once the stage 
 - The execution-time fold: late batches' passes that skip their run (instances, faces, the evaluate, gated copies and clears).
 - Run gates: the per-frame choices the engine makes late (variants, instances, the screenshot copy, the tonemap's fade form, the last
   luminance level's form) and every pass's work in a run.
+
+## Fixed post targets (recipe plan, stage 6 item; 2026-11-16, `org-native/phases`)
+
+The post chain's steps had one pass per possible pair of targets (the tonemap 8, the depth of field 20, refraction, the HDR downsample,
+TAA's output, the upsample's input), all present and gated, and `PlanEndOfFrame` picked the pair at RenderEndOfFrameEffects' entry by
+replaying the engine's loop. Now each step is one pass with fixed targets, and nothing about the targets is planned.
+
+### The design
+
+The chain works in place on two images:
+- **kMAIN** before the tonemap. It is the scene colour the Upscale anchor writes, and the VL composite already blended into it.
+- **The final target** after the tonemap. It is the image the UI stage draws over and frame generation, HDR output and the present read.
+
+A step that writes a separate target reads its image and writes that target (the HDR downsample, the luminance chain, the tonemap from
+kMAIN into the final target, the screenshot copy from the final target). An effect that cannot write the image it reads draws into its
+side's scratch target (`ImageSpace::HdrScratch` like kMAIN, `ImageSpace::LdrScratch` like the final target, transients), and a copy back
+moves the result into the image. The copy is a plain texel copy (`AnchorPasses::Copy`), so each scratch is made with its image's size and
+view format (`MakeOwnedLike`). The copy has its own gate entry; the hook of the effect's last draw that writes the scratch opens it
+(`TakeChainStep`, `Part::copyBack`). The full-screen blur needs no scratch: its last draw reads only its own blurred buffer, so it draws
+into the image, blended below radius 1; the engine's copy of its input into its output before that blend has no pass (`ChainDraw::Nothing`).
+
+| Steps | Reads | Writes |
+|---|---|---|
+| world map, refraction, FXAA, depth of field, radial blur, get hit (before the tonemap) | kMAIN | HdrScratch, then the copy back into kMAIN |
+| the same after the tonemap (depth of field, radial blur, get hit) | the final target | LdrScratch, then the copy back |
+| full-screen blur (both places) | the image | the image (in place) |
+| HDR copy | kMAIN | the final target |
+| tonemap (both forms, both parities) | kMAIN, bloom, adapted luminance | the final target |
+| TAA | the final target, history | LdrScratch and the history; the copy back |
+| screenshot | the final target (after TAA, before the slots after the tonemap, as the engine copies it) | kSAVE_GAME_SCREENSHOT |
+| upsample | the final target | LdrScratch; the copy back |
+
+Why this one: a step's inputs and outputs do not depend on which other steps are present or run, so no plan exists and none can be
+stale. An effect absent from the stage's build (its build pending) or one the engine did not draw this frame (its gate closed) leaves the
+image as the step before it left it: the frame is whole, only without that effect, and the frame its build switches in has it. A
+per-build routing (each effect writing the other of a pair, the roles resolved from the build's key) would save the copies but needs a
+pass-through when a present effect does not draw, and the routing in the key; the copy costs one full-screen copy per effect drawn. TAA
+pays one copy every frame it runs.
+
+### The Tonemap anchor's targets
+
+`RunTonemapAnchor` hands its clients a `TonemapTargets` (graph textures and view formats), not engine indices. In native mode, while the
+world chain's HDR effect runs (`ImageSpace::ChainTonemapTargets`), they are CS's: kMAIN in, the final target out, the same every frame.
+Elsewhere (guest mode, a menu scene's tonemap) they are the engine call's targets, imported as before.
+- **Effects11** (`ORGFxRuntime::Prepare`) takes them: its shape key no longer changes when an effect moves the engine's tonemap output
+  from the final target to a temporary copy. The output's size and format come from the texture handle and the anchor; the final target
+  has no texture in the renderer's table in native mode, which used to leave Effects11 inactive whenever the tonemap wrote it.
+- **Post Processing** (`ORGPostProcessing::BeforeTonemap`): with CS's targets it reads kMAIN and writes its result back into kMAIN only;
+  it no longer writes kMAIN_COPY. In guest mode it reads kMAIN or kMAIN_COPY, whichever the input is (or refraction routed it to), and
+  writes both, as before.
+
+### The check at the end of frame
+
+`PlanEndOfFrame` is gone. At RenderEndOfFrameEffects' entry, `CheckEndOfFrame` replays the engine's loop only to check it: the loop must
+run from kMAIN into the final target, and each effect the engine has active (the slots in their place, the HDR effect or its copy, TAA,
+the upsample) must be in the frame's schedule, or in the frame's own description (its build is pending: the step's hook counts lagged
+work), or in the post fields read again now (the engine or CS changed it after Begin: an upscaler switch, a setting; the next
+description has it). Anything else is a `NotInDescription` tap error, fatal in development builds.
+
+Two effects are on in every description, not only in the key, because Begin cannot know them:
+- refraction (slot 1): the engine turns its effect on during the frame, when it draws a refracting object. The first run of the check
+  stopped there;
+- the screenshot copy: a save can set its flag after Begin read it.
+Both tonemap forms and both forms of the last luminance level are also on in every description now (they were on only in the key): the
+engine picks one late, and the other skips at execution. This removed a lagged frame at each adaptation reset.
+
+A key collision surfaced in the work: the full-screen blur's first draw and the depth of field's downsample had the same key (the same
+effect and scope, variant 0), so the depth of field's downsample was looked up as the full-screen blur's and lagged every frame. Inner
+draws now carry bit 10 (`InnerVariant`), and a registration that finds a key twice logs an error.
+
+### CPU gates in post and deferred+water
+
+Every hook of the post stage runs before RenderEndOfFrameEffects' return, its commit, and every hook of deferred+water (the RenderWorld
+scopes, the water blend, the engine's clears there) before that stage's commit. So their passes are recorded at execution with the
+CPU's gate answer (`gpuGated = false`): the chain's steps, the world steps, and the hosted clears of those two stages (the TAA mask and
+kMAIN_ONLY_ALPHA clears, `Skeleton.cpp`). A step the engine did not draw skips the run and its barriers fold into the next pass that runs
+(ORG's `FoldBarriersOfSkipped`). Nothing in those two stages is GPU-gated any more. GPU-gated passes remain elsewhere: the menu
+composites (`MenuSteps.inl`), the main ImageSpace client and its late clients (guest and the non-stage path), and the hosted clears of the
+pre-main stage and the anchors.
+
+### Engine targets the post stage still uses
+
+| Target | Who outside CS's chain passes reads or writes it |
+|---|---|
+| kMAIN | the Upscale anchor writes it (the copy of the upscaled image); Post Processing and Effects11 read it and write into it at the Tonemap anchor |
+| the final target (kFRAMEBUFFER) | the UI stage draws over it; frame generation's hudless copy, HDR output and the present read it |
+| kSAVE_GAME_SCREENSHOT | the save's thumbnail |
+| kHDR_DOWNSAMPLE0 and the luminance levels before the last | Drawcall Limit Fix's character light may bind them |
+| the VL pair, kSAO_CAMERAZ mip 10, kMOTION_VECTOR, the main depth, kTEMPORAL_AA_MASK, the normals targets, kREFRACTION_NORMALS | written by earlier stages (Volumetric Lighting, the depth upscale, forward, Deferred) and read here |
+
+kMAIN_COPY, kIMAGESPACE_TEMP_COPY and kIMAGESPACE_TEMP_COPY2 are no longer read or written by the post stage.
+
+### Measurements
+
+perf-taa, native Vulkan, Perf-Fast, census averages between the marks, one run each, the machine in use (fps and thread times rough, no
+conclusion drawn). Before: the absent-passes build (`k5perf`); after: `f8perf`.
+
+| perf-taa | Before | After |
+|---|---|---|
+| post stage passes (the recipe's last print) | 78 | 51 |
+| deferred+water passes | 74 | 68 |
+| Tickets a frame | 12.92 | 12.91 |
+| Queue submissions a frame (`vkQueueSubmit`: batches + uploads + leading uploads) | 17.88 | 17.88 |
+| Entry barriers a frame | 506.6 | 503.2 |
+| Body barriers a frame, as built / folded at execution / recorded | 898.7 / 92.0 / 806.7 | 899.3 / 93.0 / 806.3 |
+| post stage: entry / body (as built) | 31.0 / 97.0 | 28.0 / 98.0 |
+| deferred+water: entry / body (as built) | 79.0 / 163.0 | 78.9 / 162.8 |
+| Steady window: builds, recordings, switches, lagged work, tap errors | 0, 0, 0, 0, 0 | 0, 0, 0, 0, 0 |
+| fps between the marks (rough) | 123.4 | 122.4 |
+| Submission thread busy, ms a frame (rough) | 2.02 | 2.34 |
+
+The barriers barely move: the variants a frame did not use were already left out of the description and folded at the build; now they are
+gone, and the ones the engine picks late skip at execution instead. TAA's copy back adds a pass and its barriers in every TAA frame.
+More passes are recorded at execution on the submission thread (every step that runs, not only instances).
+
+The validation tour (Whiterun, inventory, map, save and load, Dragonsreach), post stage, before (`k6val`) and after (`g1val`):
+
+| | Before | After |
+|---|---|---|
+| Builds | 19 | 19 |
+| Build switches | 15 | 16 |
+| Slot switches | 59 | 39 |
+| Recordings | 120 | 100 |
+| Lagging frames | 38 | 24 |
+| Lagged work (taps) | 183 | 139 |
+| Key request to switch-in, frames | 2, 3, 3, 3, 5, 5, 6 | 2, 3, 3, 3, 3, 4, 5 |
+
+Effect onsets: shots 1, 2 and 4 frames after the inventory and the map open (`g1on`), against the same build with
+`CS_ORG_ABSENT_PASSES=0` (`g1onoff`): every frame whole and the same in both (inventory 71.9 / 71.2 / 71.2 against 71.7 / 71.7 / 71.7,
+the depth of field drawn from the first frame: this save already uses it, so its passes are present). The map's first frames are black in
+both, the engine's own fade. The radial blur and the world map start one frame late in both runs: Begin does not see them yet (the
+check reads them again at the end of frame), the hook asks for them, and the next frame has them.
+
+### Checks
+
+One run each, `CS_TEST_BACKGROUND=1`, mismatches and recipe findings fatal, on the final build: native-quick, native-d3d12-quick,
+native-river, native-upscalers (DLSS, FSR, TAA, XeSS), native-interior, native-validation (the same 20 `VUID-vkCmdDraw-None-09600` as
+before), the loading-thread run, first and third person, guest-quick, the main menu (Start On Save off; the harness marks it failed
+because it expects a world), the onset pair: 0 tap errors, 0 recipe findings, 0 frames a stage was absent after it first ran. Shots match
+the previous build's by eye; Dragonsreach is a little darker in both interior shots (98.0 and 92.9 against 99.9 and 95.8), the known
+variance between runs, with the same drift between the two shots. Post Processing and Effects11 were not exercised: Post Processing is
+disabled at boot in this game's settings, and Effects11's preset does not own the tonemap, so the Tonemap anchor's clients ran only up to
+their ownership checks. ORG is unchanged.
+
+The fatal check fired three times during the work, each a real gap: refraction turned on during the frame (now always on), a TAA switch
+between Begin and the end of frame (now read again at the end of frame), and the key collision above.
+
+Not changed and still open: after a registration (a new size: an upscaler switch changes the dynamic-resolution ratios) the chain's
+passes are not tappable until the new build switches in, so the post chain draws nothing for those one or two frames. That is older than
+this change; a resize rebuilds every pass for the new size.

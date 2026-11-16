@@ -1,4 +1,5 @@
 #include "RenderGraph/Engine/ImageSpace/ImageSpace.h"
+#include "RenderGraph/Engine/TonemapAnchor.h"
 #include "RenderGraph/Switches.h"
 
 bool RenderGraph::Engine::ImageSpace::Requested()
@@ -3980,12 +3981,11 @@ namespace RenderGraph::Engine::ImageSpace
 			// The draws before this belong to the stage's earlier steps (the Upscale anchor's): their batch runs first.
 			if (Usable())
 				Flush();
-			PlanEndOfFrame(a_source, a_final);
+			CheckEndOfFrame(a_source, a_final);
 			chain.copyDrawn = false;
 			chain.inEndOfFrame = true;
 		} else {
 			chain.inEndOfFrame = false;
-			chain.plan.valid = false;
 		}
 	}
 
@@ -4018,6 +4018,20 @@ namespace RenderGraph::Engine::ImageSpace
 		return kAdaptedIds;
 	}
 
+	bool ChainTonemapTargets(TonemapTargets& a_out)
+	{
+		const auto& chain = Chain();
+		if (!chain.on || !chain.registered || !chain.inEndOfFrame || !chain.inHdr)
+			return false;
+		a_out = {};
+		a_out.input = ImportOf(ImportOfName(RE::RENDER_TARGET::kMAIN));
+		a_out.output = ImportOf(ImportOfName(RE::RENDER_TARGET::kFRAMEBUFFER));
+		a_out.inputFormat = RtvFormatOf(RE::RENDER_TARGET::kMAIN, a_out.input);
+		a_out.outputFormat = RtvFormatOf(RE::RENDER_TARGET::kFRAMEBUFFER, a_out.output);
+		a_out.chain = true;
+		return a_out.input && a_out.output;
+	}
+
 	std::string Status()
 	{
 		const auto& state = IS();
@@ -4044,6 +4058,7 @@ namespace RenderGraph::Engine::ImageSpace
 	void OnFrameBegin() {}
 	std::string_view AdaptedLuminanceOf(const ID3D11ShaderResourceView*) { return {}; }
 	std::span<const std::string_view> AdaptedLuminanceIds() { return {}; }
+	bool ChainTonemapTargets(TonemapTargets&) { return false; }
 	std::string Status() { return "ImageSpace: no render graph in this build"; }
 }
 
