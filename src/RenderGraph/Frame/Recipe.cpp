@@ -39,14 +39,16 @@ namespace RenderGraph::Frame::Recipes
 		// The world recipe. Recipe order is pass order. The CS stages are FrameAnchors' declared segments; their commit points and why
 		// each is safe are in FrameAnchors.cpp (kDeclaredInfo). Epochs of anchors not moved yet keep their tickets at their hooks.
 		constexpr std::array<StageDesc, kStages> kWorld{ {
-			{ StageId::Start, Owner::Tickets,
-				{ Segment::AnchorDecalQueries, Segment::AnchorReflectionsPrepass, Segment::AnchorEngineCubeClear, Segment::Reflection, Segment::AnchorSkyReflections }, 5,
-				"each anchor's hook" },
+			// The decal tests keep their anchor's own epoch, before the stage's first tap (several a frame, each with its own query range).
+			// The reflection faces' clears outside world frames keep the cube clear anchor's ticket.
+			{ StageId::Start, Owner::Cs, { Segment::AnchorDecalQueries, Segment::DeclaredStart, Segment::AnchorEngineCubeClear }, 3,
+				"just before DCLF's shadow view epoch (the last face's sky)" },
 			{ StageId::Shadows, Owner::Dclf, { Segment::AnchorEngineShadowClear, Segment::ShadowView, Segment::SkyOcclusion }, 3, "Drawcall Limit Fix's shadow views" },
 			{ StageId::PreDepth, Owner::Cs, { Segment::DeclaredPreDepth }, 1, "the EarlyPrepass hook (Main::RenderShadowMaps returned)" },
-			{ StageId::Depth, Owner::Dclf, { Segment::ZPrepass, Segment::FirstPersonDepth }, 2, "Main::RenderDepth" },
-			{ StageId::PreMain, Owner::Cs, { Segment::DeclaredPreMain }, 1, "the Prepass hook (the main pass's first opaque batch)" },
-			{ StageId::Opaque, Owner::Dclf, { Segment::AnchorSky, Segment::MainOpaque }, 2, "the main pass's opaque batches" },
+			// Drawcall Limit Fix's water reflection faces come after the Z-prepass (TESWaterReflections::Update).
+			{ StageId::Depth, Owner::Dclf, { Segment::ZPrepass, Segment::FirstPersonDepth, Segment::Reflection }, 3, "Main::RenderDepth" },
+			{ StageId::PreMain, Owner::Cs, { Segment::DeclaredPreMain }, 1, "just before DCLF's main opaque epoch (the main pass's sky)" },
+			{ StageId::Opaque, Owner::Dclf, { Segment::MainOpaque }, 1, "the main pass's opaque batches" },
 			// The EngineDraws, ImageSpace and EngineCopy anchors are not listed: their epochs hold work of several places in the frame
 			// (menus, other frame kinds), so no one place in the recipe is theirs.
 			{ StageId::Deferred, Owner::Cs, { Segment::DeclaredDeferred }, 1, "just before DCLF's forward epoch (the water blend's end)" },
@@ -67,16 +69,15 @@ namespace RenderGraph::Frame::Recipes
 		 * @brief Resources a stage reads before the stage that first writes them in the frame: the previous frame's contents, each
 		 * checked by hand against the stage that writes it. Exact graph resource names.
 		 * - written by forward or post and read earlier in the next frame: the refraction normals, the underwater mask, the water
-		 *   displacement pair and the water flow map (the water surface), kMAIN_ONLY_ALPHA (the reflections' ray march), kMAIN_COPY
-		 *   (the water surface);
+		 *   displacement pair and the water flow map (the water surface), kMAIN_COPY (the water surface);
 		 * - written by the deferred stages and read by the start stage's face sky: the sky's IBL and Terrain Blending's blended depth;
 		 * - the depth copy Volumetric Lighting makes in post, read by the menu scenes' local map fog (the EngineDraws anchor's own epoch);
 		 * - the dynamic cubemaps the deferred stage compresses, read by the start stage's face sky.
 		 * Drawcall Limit Fix's stages are not held to it: their graphs declare the whole binding table their shaders may read (the light
 		 * lists, the shadow mask, the luminance chain), so they "read" much that CS writes later; the check counts those apart.
 		 */
-		constexpr std::array<std::string_view, 12> kPreviousFrame{ "DynamicCubemaps::EnvTextureBC6H", "DynamicCubemaps::EnvReflectionsBC6H", "Engine::kREFRACTION_NORMALS", "Engine::kUNDERWATER_MASK", "Engine::kWATER_DISPLACEMENT",
-			"Engine::kWATER_DISPLACEMENT_SWAP", "Engine::Texture2D 320x320", "Engine::kMAIN_ONLY_ALPHA", "Engine::kMAIN_COPY", "IBL::SkyIBL",
+		constexpr std::array<std::string_view, 11> kPreviousFrame{ "DynamicCubemaps::EnvTextureBC6H", "DynamicCubemaps::EnvReflectionsBC6H", "Engine::kREFRACTION_NORMALS", "Engine::kUNDERWATER_MASK", "Engine::kWATER_DISPLACEMENT",
+			"Engine::kWATER_DISPLACEMENT_SWAP", "Engine::Texture2D 320x320", "Engine::kMAIN_COPY", "IBL::SkyIBL",
 			"TerrainBlending::BlendedDepth16", "Engine::Depth::kMAIN_COPY" };
 
 		const char* OwnerName(Owner a_owner)

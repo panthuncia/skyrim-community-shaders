@@ -36,12 +36,12 @@ namespace RenderGraph::Frame::Recipes
 	/** @brief The world recipe's stages, in frame order. */
 	enum class StageId : std::uint8_t
 	{
-		Start,        // the reflection prepass and the reflection faces (tickets until the start stage is built)
+		Start,        // CS: the reflections prepass and the reflection faces' sky (the decal tests before it keep their tickets)
 		Shadows,      // Drawcall Limit Fix's shadow views and Skylighting's occlusion
 		PreDepth,     // CS: the EarlyPrepass clients
 		Depth,        // Drawcall Limit Fix's Z-prepass and first-person depth
-		PreMain,      // CS: the depth copy, Terrain Blending, the shadow mask, light culling and the Prepass clients
-		Opaque,       // Drawcall Limit Fix's main opaque pass, with the sky's ticket before it
+		PreMain,      // CS: the depth copy, Terrain Blending, the shadow mask, light culling, the Prepass clients and the main pass's sky
+		Opaque,       // Drawcall Limit Fix's main opaque pass
 		Deferred,     // CS: deferred+water: the deferred passes and the composite, the water mask, the RenderWorld scopes, the water and its blend
 		Forward,      // Drawcall Limit Fix's forward pass, with the frame-group clears' ticket and the sun queries around it
 		FirstPerson,  // Drawcall Limit Fix's first-person colour

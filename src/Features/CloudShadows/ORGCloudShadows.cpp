@@ -5,6 +5,7 @@
 
 #include "Features/CloudShadows/ORGCloudShadows.h"
 
+#include "RenderGraph/Frame/FrameDriver.h"
 #include "RenderGraph/Switches.h"
 
 bool ORGCloudShadows::Requested()
@@ -454,6 +455,19 @@ struct ORGCloudShadows::LayerOps
 	std::array<FrameAnchors::Texture, kLayers> layers;
 	UINT width = 0;
 	UINT height = 0;
+	// The taps one anchor's gate entries and latch rows serve in one run: one per reflection face when the start stage holds
+	// SkyReflections (its k-th face writes entry set k), else 1. The passes dispatch every set; the sets no tap opened stay closed.
+	std::uint32_t instances = 1;
+	// The scratch slots earlier face taps of this frame gave out (the gathers of every tap run before the scatters, so the taps of
+	// one run take distinct slots), and the frame they were given in.
+	std::uint32_t slotsUsed = 0;
+	std::uint64_t slotsFrame = 0;
+
+	/** @brief The scratch slots earlier SkyReflections taps of this frame gave out. */
+	std::uint32_t SlotsTaken() const
+	{
+		return instances > 1 && slotsFrame == RenderGraph::Frame::Driver::Current().frame ? slotsUsed : 0;
+	}
 
 	// Render thread: the queue since the last run took it.
 	std::vector<LayerOp> ops;
@@ -490,6 +504,7 @@ namespace
 		std::shared_ptr<const LayerOps> ops;
 		bool scatter = false;
 		std::uint32_t base = 0;  // the pass's anchor's first gate entry
+		std::uint32_t sets = 1;  // the anchor's entry sets: one per tap of a run
 	};
 
 	/**
@@ -499,8 +514,8 @@ namespace
 	class LayerOpsPass final : public org::TypedRenderGraphPass<LayerOpsPass, LayerFrame, LayerBindings>
 	{
 	public:
-		LayerOpsPass(std::shared_ptr<const LayerOps> a_ops, bool a_scatter, std::uint32_t a_base) :
-			ops(std::move(a_ops)), scatter(a_scatter), base(a_base), scratch(ops->scratch->Graph()) {}
+		LayerOpsPass(std::shared_ptr<const LayerOps> a_ops, bool a_scatter, std::uint32_t a_base, std::uint32_t a_sets = 1) :
+			ops(std::move(a_ops)), scatter(a_scatter), base(a_base), sets(a_sets), scratch(ops->scratch->Graph()) {}
 
 		LayerBindings Declare(org::PassBuilder& a_builder)
 		{
@@ -531,29 +546,35 @@ namespace
 			a_out.push_back(reinterpret_cast<std::uintptr_t>(ops.get()));
 			a_out.push_back(scatter);
 			a_out.push_back(base);
+			a_out.push_back(sets);
 		}
 
-		LayerFrame Prepare(const LayerBindings&, const org::PassPrepareContext&) const { return { ops, scatter, base }; }
+		LayerFrame Prepare(const LayerBindings&, const org::PassPrepareContext&) const { return { ops, scatter, base, sets }; }
 
 		static void Record(const LayerBindings& a_bindings, const LayerFrame& a_frame, org::PassRecordContext& a_recording)
 		{
 			const auto& ops = *a_frame.ops;
 			const auto& program = a_frame.scatter ? *ops.scatter : *ops.gather;
 			const std::uint32_t scratch = a_recording.Index(a_bindings.scratch);
-			for (std::uint32_t l = 0; l < kLayers; ++l) {
-				if (a_frame.scatter) {
-					const LayerScatterBlock block{ .scratch = scratch,
-						.layer = a_recording.Index(a_bindings.layers[l]),
-						.row = ShaderBindings::LatchOf(*ops.latch, a_recording.Run(), kScatterRows + l * kRowBytes) };
-					ops.gate->Dispatch(a_recording, program, ShaderBindings::Data(block), a_frame.base + kLayers + l);
-					continue;
+			// Each entry set of the anchor (one per tap of a run), in tap order.
+			for (std::uint32_t k = 0; k < a_frame.sets; ++k) {
+				const std::uint32_t base = a_frame.base + k * kLayerEntries;
+				const std::uint32_t rows = k * kLatchBytes;
+				for (std::uint32_t l = 0; l < kLayers; ++l) {
+					if (a_frame.scatter) {
+						const LayerScatterBlock block{ .scratch = scratch,
+							.layer = a_recording.Index(a_bindings.layers[l]),
+							.row = ShaderBindings::LatchOf(*ops.latch, a_recording.Run(), rows + kScatterRows + l * kRowBytes) };
+						ops.gate->Dispatch(a_recording, program, ShaderBindings::Data(block), base + kLayers + l);
+						continue;
+					}
+					LayerGatherBlock block{};
+					for (std::uint32_t f = 0; f < kFaces; ++f)
+						block.faces[f] = a_recording.Index(a_bindings.faces[l][f]);
+					block.scratch = scratch;
+					block.row = ShaderBindings::LatchOf(*ops.latch, a_recording.Run(), rows + l * kRowBytes);
+					ops.gate->Dispatch(a_recording, program, ShaderBindings::Data(block), base + l);
 				}
-				LayerGatherBlock block{};
-				for (std::uint32_t f = 0; f < kFaces; ++f)
-					block.faces[f] = a_recording.Index(a_bindings.faces[l][f]);
-				block.scratch = scratch;
-				block.row = ShaderBindings::LatchOf(*ops.latch, a_recording.Run(), l * kRowBytes);
-				ops.gate->Dispatch(a_recording, program, ShaderBindings::Data(block), a_frame.base + l);
 			}
 		}
 
@@ -561,6 +582,7 @@ namespace
 		std::shared_ptr<const LayerOps> ops;
 		bool scatter = false;
 		std::uint32_t base = 0;
+		std::uint32_t sets = 1;
 		std::shared_ptr<org::Resource> scratch;
 	};
 
@@ -576,7 +598,12 @@ namespace
 		std::array<std::uint32_t, kLayers * kRowWords> scatterRows;
 		gatherRows.fill(kNoWord);
 		scatterRows.fill(kNoWord);
-		std::uint32_t gatherLayers = 0, scatterLayers = 0, slots = 0;
+		// The tap's entry set and its first scratch slot: a SkyReflections tap of the start stage takes the set of its face's instance and
+		// the slots after those the frame's earlier face taps took.
+		const bool faces = a_anchor == FrameAnchors::Anchor::SkyReflections && a_ops.instances > 1;
+		const std::uint32_t set = faces ? (std::min)(FrameAnchors::TapInstance(), a_ops.instances - 1) : 0;
+		const std::uint32_t first = faces && set > 0 ? a_ops.SlotsTaken() : 0;
+		std::uint32_t gatherLayers = 0, scatterLayers = 0, slots = first;
 		for (std::uint32_t l = 0; l < kLayers; ++l) {
 			for (std::uint32_t f = 0; f < kFaces; ++f) {
 				const std::uint8_t value = a_ops.value[l][f];
@@ -596,12 +623,16 @@ namespace
 				scatterRows[l * kRowWords + f] = slot;
 			}
 		}
+		if (faces) {
+			a_ops.slotsUsed = slots;
+			a_ops.slotsFrame = RenderGraph::Frame::Driver::Current().frame;
+		}
 		const auto run = RenderGraphRuntime::Get().Host()->CurrentRun();
-		a_ops.latch->Write(run, 0, std::as_bytes(std::span(gatherRows)));
-		a_ops.latch->Write(run, kScatterRows, std::as_bytes(std::span(scatterRows)));
+		a_ops.latch->Write(run, set * kLatchBytes, std::as_bytes(std::span(gatherRows)));
+		a_ops.latch->Write(run, set * kLatchBytes + kScatterRows, std::as_bytes(std::span(scatterRows)));
 		const std::uint32_t groupsX = (a_ops.width + kGroupSize - 1) / kGroupSize;
 		const std::uint32_t groupsY = (a_ops.height + kGroupSize - 1) / kGroupSize;
-		const std::uint32_t base = LayerSlot(a_anchor) * kLayerEntries;
+		const std::uint32_t base = (LayerSlot(a_anchor) * a_ops.instances + set) * kLayerEntries;
 		for (std::uint32_t l = 0; l < kLayers; ++l) {
 			if (gatherLayers & (1u << l))
 				a_ops.gate->OpenDispatch(base + l, groupsX, groupsY, kFaces);
@@ -638,8 +669,10 @@ bool ORGCloudShadows::SetupLayerOps()
 	next->gather = ComputeProgram::Load(host->Device(),
 		{ .source = kLayerShader, .constantWords = ShaderBindings::Words<LayerGatherBlock>(), .defines = { { L"LAYER_GATHER", L"" } } });
 	next->scatter = ComputeProgram::Load(host->Device(), { .source = kLayerShader, .constantWords = ShaderBindings::Words<LayerScatterBlock>() });
-	next->gate = RenderGraph::RunGate::Create("CloudShadows::LayerOpsGate", static_cast<std::uint32_t>(kLayerAnchors.size()) * kLayerEntries);
-	next->latch = std::make_shared<org::LatchBlock>(std::string(kLayersClientId) + ".latch", kLatchBytes);
+	// One entry set per reflection face a frame may draw when the start stage holds the faces' sky.
+	next->instances = FrameAnchors::HeldByStage(FrameAnchors::Anchor::SkyReflections) ? kFaces : 1;
+	next->gate = RenderGraph::RunGate::Create("CloudShadows::LayerOpsGate", static_cast<std::uint32_t>(kLayerAnchors.size()) * next->instances * kLayerEntries);
+	next->latch = std::make_shared<org::LatchBlock>(std::string(kLayersClientId) + ".latch", next->instances * kLatchBytes);
 	if (!next->gather || !next->scatter || !next->gate) {
 		logger::error("[ORG] Cloud Shadows: {} or its run gate could not be made", kLayerShader);
 		return false;
@@ -669,13 +702,14 @@ bool ORGCloudShadows::SetupLayerOps()
 			 std::pair{ FrameAnchors::Anchor::SkyReflections, "sky-reflections" }, std::pair{ FrameAnchors::Anchor::EarlyPrepass, "early-prepass" } }) {
 		if (!FrameAnchors::HasEpoch(anchor))
 			continue;
-		const std::uint32_t base = LayerSlot(anchor) * kLayerEntries;
+		const std::uint32_t base = LayerSlot(anchor) * next->instances * kLayerEntries;
+		const std::uint32_t sets = anchor == FrameAnchors::Anchor::SkyReflections ? next->instances : 1;
 		for (const bool scatter : { false, true }) {
 			client.passes.push_back({ .name = std::format("{}.{}.{}", kLayersClientId, label, scatter ? "scatter" : "gather"),
 				.anchor = anchor,
 				.order = scatter ? -1 : -2,
 				.kind = FrameAnchors::PassKind::Compute,
-				.make = [next, scatter, base]() -> std::shared_ptr<org::RenderPass> { return std::make_shared<LayerOpsPass>(next, scatter, base); },
+				.make = [next, scatter, base, sets]() -> std::shared_ptr<org::RenderPass> { return std::make_shared<LayerOpsPass>(next, scatter, base, sets); },
 				// Gated: every dispatch goes through the anchor's own gate entries.
 				.gated = true });
 		}
@@ -686,6 +720,8 @@ bool ORGCloudShadows::SetupLayerOps()
 	client.commit = [next](const FrameAnchors::Point& a_point) { CommitLayerOps(*next, a_point.anchor); };
 	client.active = [next] { return !next->ops.empty(); };
 	client.gates = { next->gate };
+	// The start stage: a tap per reflection face, each writing its own entry set and latch rows.
+	client.repeats = next->instances > 1;
 	client.onFailed = [next] {
 		logger::error("[ORG] Cloud Shadows: the render graph failed with the layer operations; they return to D3D11");
 		next->failed = true;
@@ -728,7 +764,8 @@ bool ORGCloudShadows::QueueLayerOp(LayerOpPoint a_point, LayerOp a_op)
 			target = kUntouched;  // the face's own contents again (or a copy onto itself)
 		} else {
 			if (value != kZero && !(ops->sources[a_op.face] & (1u << value))) {
-				if (ops->sourceCount == kScratchSlots)
+				// The slots this frame's earlier face taps took are not free: their gathers run with this tap's.
+				if (ops->sourceCount + (a_point == LayerOpPoint::SkyReflections ? ops->SlotsTaken() : 0) >= kScratchSlots)
 					return false;
 				ops->sources[a_op.face] |= 1u << value;
 				++ops->sourceCount;

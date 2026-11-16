@@ -25,6 +25,8 @@ namespace RenderGraph::Frame
 	const char* SegmentName(SegmentId a_segment)
 	{
 		switch (a_segment) {
+		case SegmentId::Start:
+			return "start";
 		case SegmentId::PreDepth:
 			return "pre-depth";
 		case SegmentId::PreMain:

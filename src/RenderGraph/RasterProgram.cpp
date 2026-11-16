@@ -341,11 +341,13 @@ bool RasterProgram::Draw(org::RecordingContext& a_recording, const DrawDesc& a_d
 		depth.readOnly = a_draw.depth->readOnly;
 		depth.depthLoad = a_draw.depth->load;
 		depth.depthStore = a_draw.depth->readOnly ? rhi::StoreOp::DontCare : rhi::StoreOp::Store;
-		// The stencil is loaded and stored: a program that writes it (Desc::depth's stencil ops) keeps what it wrote.
-		depth.stencilLoad = rhi::LoadOp::Load;
+		// The stencil is loaded and stored: a program that writes it (Desc::depth's stencil ops) keeps what it wrote. Depth::clearStencil
+		// clears it to 0 with a depth clear.
+		depth.stencilLoad = a_draw.depth->load == rhi::LoadOp::Clear && a_draw.depth->clearStencil ? rhi::LoadOp::Clear : rhi::LoadOp::Load;
 		depth.stencilStore = rhi::StoreOp::Store;
 		depth.clear.type = rhi::ClearValueType::DepthStencil;
 		depth.clear.depthStencil.depth = a_draw.depth->clear;
+		depth.clear.depthStencil.stencil = 0;
 	}
 	rhi::PassBeginInfo begin{};
 	begin.colors = { colours.data(), targetCount };

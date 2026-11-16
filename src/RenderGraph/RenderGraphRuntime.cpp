@@ -2561,6 +2561,12 @@ bool RenderGraphRuntime::Initialize()
 			// Native mode owns its queues: no external epochs. Every epoch submits directly, and a pass recorded at execution is
 			// recorded inline, into the epoch's own command list at its place in the graph's order, with the graph's barriers
 			// (org::GraphHost::SetInlineAtExecution), on Vulkan and D3D12 alike.
+			// A pass a description turns off records no barriers of its own: ORG folds them into the next pass that runs
+			// (FoldSkippedPassBarriers). CS_ORG_KEEP_SKIPPED_BARRIERS=1 keeps them where the plan put them, for A/B runs.
+			if (Switches::On("CS_ORG_KEEP_SKIPPED_BARRIERS")) {
+				org::diagnostics::DiagnosticKeepSkippedPassBarriers().store(true, std::memory_order_relaxed);
+				logger::info("[ORG] skipped passes keep their barriers (CS_ORG_KEEP_SKIPPED_BARRIERS=1)");
+			}
 			if (state->native) {
 				state->host->SetInlineAtExecution(true);
 				logger::info(

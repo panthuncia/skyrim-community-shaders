@@ -44,6 +44,9 @@ namespace DCLF::Features::Sky::SkyDraws
 		// The most draws a run latches; a batch with more draws in several runs (SkyCapture's Continue). A cloudy weather draws about 40.
 		constexpr std::uint32_t kMaxDraws = 128;
 		constexpr std::uint32_t kFaces = 6;
+		// The faces' client in the start stage: one instance per face the engine may draw in a frame, each with its own gate entries,
+		// latch regions and run. An anchor's own epoch uses instance 0 alone.
+		constexpr std::uint32_t kFaceInstances = kFaces;
 		constexpr std::uint32_t kDrawStride = static_cast<std::uint32_t>(sizeof(DrawConstants));
 		constexpr std::size_t kViews = static_cast<std::size_t>(View::Count);
 
@@ -101,9 +104,13 @@ namespace DCLF::Features::Sky::SkyDraws
 			Family::PublishedInputs inputs;
 			// Render thread writes, the host's thread reads.
 			std::shared_ptr<const Run> run;
-			// The run each commit drew, by the epoch's run: what the passes recorded at execution read. They may record on the submission
-			// thread after the render thread published the next run.
-			::RenderGraph::RunSlots<Run> runs;
+			// The run each commit drew, by the epoch's run and the tap's instance: what the passes recorded at execution read. They may
+			// record on the submission thread after the render thread published the next run.
+			std::array<::RenderGraph::RunSlots<Run>, kFaceInstances> runs;
+			std::uint32_t instances = 1;  // kFaceInstances for the faces' client, else 1
+			// The faces' client in a CS stage: each instance's first face draw clears the face and its depth (load operations), and the
+			// engine's clears of them are dropped (the engine skeleton). Fixed at setup.
+			bool clearsFace = false;
 			bool pending = false;
 			bool shapeLogged = false;
 			std::atomic<std::uint64_t> executed{ 0 };  // runs submitted with this client's passes (its executed callback)
@@ -125,14 +132,15 @@ namespace DCLF::Features::Sky::SkyDraws
 			std::shared_ptr<const Run> run;  // null when the pass records at execution: Record reads the client's run then
 			std::shared_ptr<const Client> client;
 			Part part = Part::Main;
+			std::uint32_t instance = 0;
 		};
 
 		/** @brief A run's draws of one part, recorded in the engine's order: a render pass and a draw each (RasterProgram::Draw). */
 		class SkyPass final : public org::TypedRenderGraphPass<SkyPass, Frame, Bindings>
 		{
 		public:
-			SkyPass(std::shared_ptr<Client> a_client, Part a_part, bool a_atExecution) :
-				client(std::move(a_client)), part(a_part), atExecution(a_atExecution) {}
+			SkyPass(std::shared_ptr<Client> a_client, Part a_part, bool a_atExecution, std::uint32_t a_instance = 0) :
+				client(std::move(a_client)), part(a_part), atExecution(a_atExecution), instance(a_instance) {}
 
 			Bindings Declare(org::PassBuilder& a_builder)
 			{
@@ -196,6 +204,7 @@ namespace DCLF::Features::Sky::SkyDraws
 			void Revision(std::vector<std::uint64_t>& a_out) const
 			{
 				a_out.push_back(static_cast<std::uint64_t>(part));
+				a_out.push_back(instance);
 				if (!atExecution) {
 					const auto run = std::atomic_load(&client->run);
 					a_out.push_back(run ? run->revision : 0);
@@ -204,7 +213,7 @@ namespace DCLF::Features::Sky::SkyDraws
 
 			Frame Prepare(const Bindings&, const org::PassPrepareContext&) const
 			{
-				return { atExecution ? nullptr : std::atomic_load(&client->run), client, part };
+				return { atExecution ? nullptr : std::atomic_load(&client->run), client, part, instance };
 			}
 
 			/**
@@ -215,11 +224,11 @@ namespace DCLF::Features::Sky::SkyDraws
 			{
 				if (!a_frame.client)
 					return true;
-				const auto run = a_frame.run ? a_frame.run : a_frame.client->runs.Find(a_recording.Run());
+				const auto run = a_frame.run ? a_frame.run : a_frame.client->runs[a_frame.instance].Find(a_recording.Run());
 				if (!run)
 					return true;
 				for (std::uint32_t i = 0; i < run->draws.size(); ++i)
-					if (a_frame.client->gate->IsOpen(a_recording.Run(), i))
+					if (a_frame.client->gate->IsOpen(a_recording.Run(), FrameAnchors::InstanceEntry(a_frame.instance, kMaxDraws, i)))
 						return false;
 				return true;
 			}
@@ -228,7 +237,7 @@ namespace DCLF::Features::Sky::SkyDraws
 			{
 				if (!a_frame.client)
 					return;
-				const auto runRef = a_frame.run ? a_frame.run : a_frame.client->runs.Find(a_recording.Run());
+				const auto runRef = a_frame.run ? a_frame.run : a_frame.client->runs[a_frame.instance].Find(a_recording.Run());
 				if (!runRef)
 					return;
 				const auto& run = *runRef;
@@ -252,12 +261,22 @@ namespace DCLF::Features::Sky::SkyDraws
 				const std::uint32_t face = run.face < kFaces ? run.face : 0;
 				const org::RunRef latchRun = a_recording.Run();
 
+				// The faces' client in a CS stage: the instance's first face draw clears the face and its depth (depth 1, stencil 0, as the
+				// engine clears them; the face's colour to zero: the sky draws its background).
+				bool clearFirst = part == Part::FaceSky && c.clearsFace;
 				const auto draw = [&](const RasterProgram& a_program, std::uint32_t a_index, std::span<const RasterProgram::Colour> a_colours,
 									  rhi::QueryPoolHandle a_queries = {}, std::uint32_t a_query = 0) {
 					const auto& latched = run.draws[a_index];
-					block.draw = ShaderBindings::LatchOf(*c.latch, latchRun, a_index * kDrawStride);
-					const RasterProgram::Depth depth{ .view = &a_bindings.depth, .readOnly = false };
-					return a_program.Draw(a_recording, { .colours = a_colours,
+					const std::uint32_t entry = FrameAnchors::InstanceEntry(a_frame.instance, kMaxDraws, a_index);
+					block.draw = ShaderBindings::LatchOf(*c.latch, latchRun, entry * kDrawStride);
+					const bool clears = std::exchange(clearFirst, false);
+					const RasterProgram::Depth depth{ .view = &a_bindings.depth, .readOnly = false, .load = clears ? rhi::LoadOp::Clear : rhi::LoadOp::Load,
+						.clear = 1.0f, .clearStencil = clears };
+					std::array<RasterProgram::Colour, 3> colours{};
+					std::copy(a_colours.begin(), a_colours.end(), colours.begin());
+					if (clears && !colours.empty())
+						colours[0].load = rhi::LoadOp::Clear;
+					return a_program.Draw(a_recording, { .colours = { colours.data(), a_colours.size() },
 													.depth = a_bindings.hasDepth ? &depth : nullptr,
 													.viewport = { .x = latched.viewport.rect[0], .y = latched.viewport.rect[1], .width = latched.viewport.rect[2],
 														.height = latched.viewport.rect[3], .minDepth = latched.viewport.depthRange[0], .maxDepth = latched.viewport.depthRange[1] },
@@ -266,7 +285,7 @@ namespace DCLF::Features::Sky::SkyDraws
 													.stencilReference = latched.stencilRef,
 													// The count comes from the draw's gate entry, which the client's commit opens for this run only.
 													.indirect = &c.gate->Latch(),
-													.indirectOffset = c.gate->Offset(a_index),
+													.indirectOffset = c.gate->Offset(entry),
 													.occlusionPool = a_queries,
 													.occlusionIndex = a_query });
 				};
@@ -332,7 +351,17 @@ namespace DCLF::Features::Sky::SkyDraws
 			std::shared_ptr<Client> client;
 			Part part;
 			bool atExecution = false;  // FrameAnchors::RecordsAtExecution at the build
+			std::uint32_t instance = 0;
 		};
+
+		/**
+		 * @brief Whether a view's passes record after their run's commit, reading the run's draws then: on an anchor's own epoch as it
+		 * records them (FrameAnchors::RecordsAtExecution), and in a CS stage, whose late batch records them at each submission.
+		 */
+		bool RecordsLate(FrameAnchors::Anchor a_anchor)
+		{
+			return FrameAnchors::RecordsAtExecution(a_anchor) || FrameAnchors::HeldByStage(a_anchor);
+		}
 
 		/** @brief ProgramKey::variant's defines: SKY_ORG_FACES for a face's programs. */
 		Family::Defines VariantDefines(std::uint32_t a_variant)
@@ -418,8 +447,13 @@ namespace DCLF::Features::Sky::SkyDraws
 			client->anchor = a_shape.view == View::Main ? FrameAnchors::Anchor::Sky :
 			                 a_shape.view == View::Face ? FrameAnchors::Anchor::SkyReflections :
 			                                              FrameAnchors::Anchor::EngineQueries;
-			client->latch = std::make_shared<org::LatchBlock>(client->id + ".latch", kMaxDraws * kDrawStride);
-			client->gate = ::RenderGraph::RunGate::Create(client->id + ".gate", kMaxDraws);
+			// The faces' client takes one instance per face a frame may draw when a CS stage holds its anchor (the start stage).
+			if (a_shape.view == View::Face && FrameAnchors::HeldByStage(client->anchor)) {
+				client->instances = kFaceInstances;
+				client->clearsFace = true;
+			}
+			client->latch = std::make_shared<org::LatchBlock>(client->id + ".latch", client->instances * kMaxDraws * kDrawStride);
+			client->gate = ::RenderGraph::RunGate::Create(client->id + ".gate", client->instances * kMaxDraws);
 			if (!client->gate) {
 				logger::warn("[DCLF] sky: the {} run gate could not be made; the sky stays the engine's", client->id);
 				return nullptr;
@@ -492,17 +526,27 @@ namespace DCLF::Features::Sky::SkyDraws
 			desc.sharedConstants = true;
 			desc.gates = { client->gate };
 			const auto addPass = [&](const char* a_name, Part a_part, std::int32_t a_order) {
-				desc.passes.push_back({ .name = client->id + "." + a_name,
+				FrameAnchors::PassDesc pass{ .name = client->id + "." + a_name,
 					.anchor = client->anchor,
 					.order = a_order,
 					.kind = FrameAnchors::PassKind::Render,
 					.make = [client, a_part]() -> std::shared_ptr<org::RenderPass> {
-						return std::make_shared<SkyPass>(client, a_part, FrameAnchors::RecordsAtExecution(client->anchor));
+						return std::make_shared<SkyPass>(client, a_part, RecordsLate(client->anchor));
 					},
 					// The run's draws are known after its commit: recorded then, the pass reads them without a ticket prepared again.
 					.atExecution = true,
-					// Gated (FrameAnchors::PassDesc::gated): every draw takes its count from the client's gate entry, and nothing clears.
-					.gated = true });
+					// Gated (FrameAnchors::PassDesc::gated): every draw takes its count from the client's gate entry. A face pass's clears are
+					// load operations of its first draw, which its gate entry holds back too: a pass recorded at execution records no draw for
+					// a run its commit did not open (SkipsAtExecution).
+					.gated = true };
+				if (client->instances > 1) {
+					// One pass per instance (the k-th face the frame draws), made in place of make.
+					pass.make = nullptr;
+					pass.makeInstance = [client, a_part](std::uint32_t a_instance) -> std::shared_ptr<org::RenderPass> {
+						return std::make_shared<SkyPass>(client, a_part, RecordsLate(client->anchor), a_instance);
+					};
+				}
+				desc.passes.push_back(std::move(pass));
 			};
 			if (a_shape.view == View::Sun) {
 				addPass("occlusion", Part::SunMain, 0);
@@ -520,15 +564,18 @@ namespace DCLF::Features::Sky::SkyDraws
 				if (!host)
 					return;
 				const org::RunRef latchRun = host->CurrentRun();
+				// The tap's instance: the k-th face the start stage's run draws this frame (0 on an anchor's own epoch).
+				const std::uint32_t instance = (std::min)(FrameAnchors::TapInstance(), client->instances - 1);
 				// For the passes recorded at execution, by this run (null: nothing drawn).
-				client->runs.Store(latchRun, run);
+				client->runs[instance].Store(latchRun, run);
 				if (!run)
 					return;
 				for (std::uint32_t i = 0; i < run->draws.size(); ++i) {
 					const auto& draw = run->draws[i];
-					client->latch->WriteValue(latchRun, i * kDrawStride, draw.constants);
+					const std::uint32_t entry = FrameAnchors::InstanceEntry(instance, kMaxDraws, i);
+					client->latch->WriteValue(latchRun, entry * kDrawStride, draw.constants);
 					if (draw.program)
-						client->gate->OpenDraw(i, draw.indexCount, 1);
+						client->gate->OpenDraw(entry, draw.indexCount, 1);
 				}
 				// The engine ring slot the run's draw counts. A new readback is declared from the next build.
 				if (client->queries && client->queries->Commit(latchRun, std::span<const std::int32_t>(&run->query, 1)))
@@ -541,6 +588,12 @@ namespace DCLF::Features::Sky::SkyDraws
 					logger::info("[DCLF] sky: the first {} run drawn by the graph", client->id);
 			};
 			desc.active = [client] { return client->pending; };
+			if (client->instances > 1) {
+				desc.maxInstances = client->instances;
+				// Every face instance is declared: how many faces the engine draws is its late decision, so the instances it does not
+				// draw stay closed (their gate entries and runs are not written).
+				desc.instances = [n = client->instances] { return n; };
+			}
 			desc.onFailed = [] { Fail("the render graph failed with the sky's passes in it"); };
 			if (!FrameAnchors::Register(std::move(desc))) {
 				logger::warn("[DCLF] sky: the {} client could not be registered; the sky stays the engine's", client->id);

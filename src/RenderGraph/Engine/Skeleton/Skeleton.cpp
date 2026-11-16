@@ -127,7 +127,6 @@ namespace RenderGraph::Engine::Skeleton
 			Own,
 			ShadowView,      // DCLF's shadow epoch: the shadow map slices (its casters are the slices' only writers)
 			ZPrepass,        // DCLF's Z-prepass: the main depth's clear at Main::RenderDepth's start
-			SkyReflections,  // the reflection faces' sky (cs.sky.faces): each face and the faces' depth, cleared just before
 			Prepass,         // the Prepass anchor: the normals target and kMAIN, cleared by Main::Draw (only light culling runs between)
 			EngineDraws,     // the engine draws anchor: the shadow mask and the water's stencil, each just before its draws
 			DeferredPasses,  // the DeferredPasses anchor: CS's own depth copy, made just before it in Deferred::DeferredPasses
@@ -149,7 +148,6 @@ namespace RenderGraph::Engine::Skeleton
 			{ "own", false, RenderGraphRuntime::Segment::Count, Anchor::Count },
 			{ "shadow-view", true, RenderGraphRuntime::Segment::ShadowView, Anchor::Count },
 			{ "z-prepass", true, RenderGraphRuntime::Segment::ZPrepass, Anchor::Count },
-			{ "sky-reflections", false, RenderGraphRuntime::Segment::Count, Anchor::SkyReflections },
 			{ "prepass", false, RenderGraphRuntime::Segment::Count, Anchor::Prepass },
 			{ "engine-draws", false, RenderGraphRuntime::Segment::Count, Anchor::EngineDraws },
 			{ "deferred-passes", false, RenderGraphRuntime::Segment::Count, Anchor::DeferredPasses },
@@ -366,6 +364,7 @@ namespace RenderGraph::Engine::Skeleton
 			bool failed = false;      // stays on D3D11 for the session
 			bool announced = false;   // the first clear on the graph was logged
 			std::uint64_t taken = 0, replayed = 0;
+			std::uint64_t dropped = 0;  // world frames' clears a stage's load operations replace (the reflection faces)
 		};
 
 		struct CopyState
@@ -737,12 +736,14 @@ namespace RenderGraph::Engine::Skeleton
 		 */
 		Host HostFor(const Target& a_target, std::uint32_t a_flags)
 		{
+			// The reflection faces and their depth: in a world frame the start stage's face sky clears them (load operations) and the
+			// engine's clears are dropped (Take). Elsewhere, and without the start stage (CS_ORG_SEGMENT_START=0), their own ticket.
 			if (a_target.kind == Kind::Cube)
-				return Host::SkyReflections;
+				return Host::Own;
 			if (a_target.kind == Kind::Depth) {
 				switch (a_target.index) {
 				case DepthTarget::kCUBEMAP_REFLECTIONS:
-					return Host::SkyReflections;
+					return Host::Own;
 				case DepthTarget::kSHADOWMAPS_ESRAM:
 				case DepthTarget::kVOLUMETRIC_LIGHTING_SHADOWMAPS_ESRAM:
 				case DepthTarget::kSHADOWMAPS:
@@ -781,6 +782,16 @@ namespace RenderGraph::Engine::Skeleton
 			default:
 				return Host::Own;
 			}
+		}
+
+		/**
+		 * @brief Whether a world frame's reflection faces are cleared by their sky: the start stage holds the faces' sky (SkyReflections),
+		 * whose first draw of each face clears the face and its depth with load operations (SkyDraws). The engine's clears of them are
+		 * then dropped in world frames.
+		 */
+		bool FacesClearedBySky()
+		{
+			return FrameAnchors::HeldByStage(Anchor::SkyReflections);
 		}
 
 		/** @brief Whether the host can hold passes: a DCLF epoch in native mode, or an anchor with an epoch. */
@@ -1148,6 +1159,12 @@ namespace RenderGraph::Engine::Skeleton
 		{
 			const Group group = GroupFor(a_target);
 			auto& state = GroupOf(group);
+			// A world frame's clear of a reflection face or the faces' depth: the start stage's sky clears them (FacesClearedBySky).
+			if (group == Group::Cube && WorldFrame() && FacesClearedBySky()) {
+				if (state.dropped++ == 0)
+					logger::info("[ORG] engine skeleton: world frames' reflection face clears are dropped; the start stage's face sky clears each face and its depth");
+				return true;
+			}
 			if (state.failed || state.stale || !state.registered)
 				return false;
 			const auto* draw = DrawFor(group, a_target, a_view, a_flags);
@@ -1171,7 +1188,7 @@ namespace RenderGraph::Engine::Skeleton
 					return true;
 				}
 			}
-			// A world frame's clear waits for the Drawcall Limit Fix epoch (or the reflection faces' anchor) that writes the view first.
+			// A world frame's clear waits for the Drawcall Limit Fix epoch that writes the view first.
 			if (HostReady(group, host)) {
 				a_pending.host = host;
 				state.hostedPending.push_back(a_pending);
@@ -1471,6 +1488,10 @@ namespace RenderGraph::Engine::Skeleton
 		{
 			// A load that started in this frame ends its world work: what waits for it is abandoned at the next Begin.
 			if (!FrameAnchors::IsRenderOwner() || RenderGraph::Frame::Driver::LoadStartedThisFrame())
+				return;
+			// The start stage commits just before the shadow view epoch, after the engine's shadow clears were handed to it: its work comes
+			// before them in the frame (its taps are all at the frame's start) and touches none of the hosted targets.
+			if (a_segment == RenderGraphRuntime::Segment::DeclaredStart)
 				return;
 			const auto segment = static_cast<std::uint32_t>(a_segment);
 			auto& state = Skel();

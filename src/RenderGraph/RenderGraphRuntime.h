@@ -131,6 +131,7 @@ public:
 		PhasePost,        // after the first-person epoch: the sun queries, post-processing, ImageSpace, the interface, the present
 		// The declared frame's segments (native mode, CS_ORG_SEGMENTS; FrameAnchors.h, SegmentsOn): one revision-driven, open epoch
 		// each, holding the passes of the anchors it lists, recorded per description of the segment (RenderGraph/Frame).
+		DeclaredStart,     // the start stage: the reflections prepass and the reflection faces' sky, before DCLF's shadow view
 		DeclaredPreDepth,  // the EarlyPrepass clients, at Main::RenderShadowMaps' return
 		DeclaredPreMain,   // RenderDepth's depth copy to the Prepass clients, at the Prepass anchor's hook
 		DeclaredDeferred,  // deferred+water: the deferred passes, the composite, the water mask, the RenderWorld scopes, the water and its blend, before DCLF's forward epoch

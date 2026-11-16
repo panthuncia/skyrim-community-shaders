@@ -123,6 +123,7 @@ namespace FrameAnchors
 		// segment's place only has to be right against the anchors next to it; the order names the frame,
 		// while the ledgers order the work whatever runs.
 		constexpr std::array<Segment, static_cast<std::size_t>(Segment::Count)> kTimeline{
+			Segment::DeclaredStart,            // the start stage (SegmentsOn): it commits just before DCLF's shadow view epoch
 			Segment::AnchorDecalQueries,       // the decal occlusion tests, at the frame's start before Main::Draw
 			Segment::AnchorEngineShadowClear,  // each shadow map slice's clear, before its draws (nominally here)
 			Segment::PhaseFrameStart,          // the frame-start phase: submitted at the shadow view epoch
@@ -312,18 +313,31 @@ namespace FrameAnchors
 			SegmentNames names;
 		};
 		constexpr std::array<DeclaredInfo, kDeclared> kDeclaredInfo{ {
+			// The frame's start (frame sequence census, a world frame): Main::Draw's cubemap render (BSCubeMapCamera::RenderCubemap) runs
+			// the ReflectionsPrepass hook once, then each reflection face's sky batch (SkyReflections, once per face drawn: the faces' client
+			// has an instance per face). The faces are cleared by the load operations of their sky's first draw; the engine's clears of them
+			// are dropped. Its commit is a point just before the next GPU work that follows it in every world frame is submitted: DCLF's
+			// shadow view epoch, the shadow clears or a later stage (FlushRegions, and a later stage's first tap). The decal tests come
+			// before it and keep their anchor's own epoch (several a frame, each with its own query range).
+			{ Segment::DeclaredStart,
+				{ { { Anchor::ReflectionsPrepass }, { Anchor::SkyReflections }, { Anchor::Count, { nullptr, nullptr }, Segment::Count, false, true } } }, 3,
+				{ "CS stage: start", "CS stage: start inputs", "FrameSegments::Start / ", "cs.segment.start" } },
 			{ Segment::DeclaredPreDepth, { { { Anchor::EarlyPrepass } } }, 1,
 				{ "CS segment: pre-depth", "CS segment: pre-depth inputs", "FrameSegments::PreDepth / ", "cs.segment.pre-depth" } },
-			// Main::RenderDepth's end to the Prepass anchor. The depth copy comes after DCLF's Z-prepass epoch (which holds first
-			// person's depth too), and light culling and the Prepass clients come before DCLF's main opaque epoch: no other GPU work
-			// runs in between (the census counts any that does). The sky stays out: its batch does not run in every world frame.
+			// Main::RenderDepth's end to the main pass's sky. The depth copy comes after DCLF's Z-prepass epoch (which holds first
+			// person's depth too), and light culling, the Prepass clients and the main pass's sky batch come before DCLF's main opaque
+			// epoch: no other GPU work runs in between (the census counts any that does). The sky's batch does not run in every world frame,
+			// so the stage ends at a point: just before DCLF's main opaque epoch or a later stage is submitted (FlushRegions, and a later
+			// stage's first tap).
 			{ Segment::DeclaredPreMain,
 				{ { { Anchor::EngineDepthCopy, { "cs.engine.skeleton.depth-copy", nullptr } },
 					{ Anchor::DepthDone },
 					{ Anchor::EngineDraws, { "cs.engine.skeleton.frame@engine-draws", "cs.shadow-mask.world" } },
 					{ Anchor::Count, { nullptr, nullptr }, Segment::LightCulling },
-					{ Anchor::Prepass } } },
-				5, { "CS segment: pre-main", "CS segment: pre-main inputs", "FrameSegments::PreMain / ", "cs.segment.pre-main" } },
+					{ Anchor::Prepass },
+					{ Anchor::Sky },
+					{ Anchor::Count, { nullptr, nullptr }, Segment::Count, false, true } } },
+				7, { "CS segment: pre-main", "CS segment: pre-main inputs", "FrameSegments::PreMain / ", "cs.segment.pre-main" } },
 			// Deferred::StartDeferred, after DCLF's main opaque epoch: the deferred passes (with CS's depth copy they host), the composite
 			// and the end of the deferred passes; then the rest of Main::RenderWorld (100424 / 107142): the water stencil's clear and the
 			// water mask (FinishAccumulating's stencil batch), the reflections, RenderSSAO's two calls with the snow pass or its copy between
@@ -404,6 +418,9 @@ namespace FrameAnchors
 				return true;
 			return std::ranges::any_of(a_step.clients, [&](const char* a_id) { return a_id && a_client.id == a_id; });
 		}
+
+		/** @brief Whether a declared segment ends at a point (its last step is no anchor's hook). */
+		constexpr bool PointEnded(std::uint32_t a_declared) { return kDeclaredInfo[a_declared].steps[kDeclaredInfo[a_declared].stepCount - 1].point; }
 
 		/** @brief The anchor whose hook ends a declared segment: its last step's. */
 		Anchor EndTap(std::uint32_t a_declared) { return kDeclaredInfo[a_declared].steps[kDeclaredInfo[a_declared].stepCount - 1].anchor; }
@@ -2519,6 +2536,38 @@ namespace FrameAnchors
 
 	namespace
 	{
+		/** @brief Whether epoch a_segment, submitted now, ends the start stage (FlushRegions): GPU work that follows it in every world frame. */
+		bool EndsStart(Segment a_segment)
+		{
+			switch (a_segment) {
+			case Segment::ShadowView:
+			case Segment::SkyOcclusion:
+			case Segment::AnchorEngineShadowClear:
+			case Segment::ZPrepass:
+			case Segment::FirstPersonDepth:
+			case Segment::LightCulling:
+			case Segment::MainOpaque:
+			case Segment::DeclaredPreDepth:
+			case Segment::DeclaredPreMain:
+				return true;
+			default:
+				return false;
+			}
+		}
+
+		/** @brief Whether epoch a_segment, submitted now, ends the pre-main stage (FlushRegions): GPU work that follows it in every world frame. */
+		bool EndsPreMain(Segment a_segment)
+		{
+			switch (a_segment) {
+			case Segment::MainOpaque:
+			case Segment::DeclaredDeferred:
+			case Segment::Forward:
+				return true;
+			default:
+				return false;
+			}
+		}
+
 		/** @brief Whether epoch a_segment, submitted now, ends the world segment (FlushRegions): GPU work that follows it in every frame. */
 		bool EndsWorld(Segment a_segment)
 		{
@@ -2545,6 +2594,16 @@ namespace FrameAnchors
 		// The deferred+water stage commits just before the next GPU work that comes after it in the frame is submitted: DCLF's forward epoch
 		// in a world frame, else the sun's queries (the end of Main::RenderWorld), the first-person epoch or a later segment. Its
 		// commit point.
+		// The start and pre-main stages commit the same way, before the next GPU work that follows them in every world frame.
+		if (a_segment != UINT32_MAX && state.host && SegmentsOn() && IsRenderOwner()) {
+			// Work that ends the world segment ends both too, in a frame whose usual commit point did not come (Drawcall Limit Fix not
+			// drawing yet).
+			const bool late = EndsWorld(static_cast<Segment>(a_segment)) || a_segment == static_cast<std::uint32_t>(Segment::DeclaredDeferred);
+			if (late || EndsStart(static_cast<Segment>(a_segment)))
+				(void)TapPoint(static_cast<std::uint32_t>(Segment::DeclaredStart));
+			if (late || EndsPreMain(static_cast<Segment>(a_segment)))
+				(void)TapPoint(static_cast<std::uint32_t>(Segment::DeclaredPreMain));
+		}
 		if (a_segment != UINT32_MAX && state.host && SegmentsOn() && EndsWorld(static_cast<Segment>(a_segment)) && IsRenderOwner())
 			(void)TapPoint(static_cast<std::uint32_t>(Segment::DeclaredDeferred));
 		// A declared segment holding its ticket: other GPU work submitted now runs ahead of the segment's work, which the end tap
@@ -3024,6 +3083,23 @@ namespace FrameAnchors
 				Driver::NoteTapError(Driver::TapError::NotDeclared, segment, fmt::format("the {} tap fired", tap));
 				return { RunStatus::Idle };
 			}
+			// A stage's first tap of the frame (present or absent) ends the earlier stages that staged and are still open, at their end point: their commit
+			// point did not come (the deferred+water stage's, in a frame Drawcall Limit Fix's forward epoch does not run). Their tickets go
+			// first, in recipe order, so this stage's work follows theirs on the GPU.
+			// One that ends at a point and staged nothing this frame ends there without a ticket (the start stage in a frame without
+			// reflection faces).
+			if (a_state.stagedFrame[a_declared] != frame.frame)
+				for (std::uint32_t before = 0; before < a_declared; ++before) {
+					if (a_state.endedFrame[before] == frame.frame || !a_state.declaredEpochs[before] || !frame.Segment(static_cast<SegmentId>(before)).declared)
+						continue;
+					if (a_state.stagedFrame[before] != frame.frame && !PointEnded(before))
+						continue;
+					for (std::uint32_t k = 0; k < kDeclaredInfo[before].stepCount; ++k)
+						if (kDeclaredInfo[before].steps[k].point) {
+							(void)TapDeclared(a_state, Point{}, before, k, {});
+							break;
+						}
+				}
 			if (!fields.graph) {
 				// No schedule for this frame slot yet (its graph's first build, or the frames after a build): the stage is absent from
 				// the frame, and its work is not drawn until its first schedule is ready. Its end tap still ends it, so the later stages'
@@ -3037,21 +3113,13 @@ namespace FrameAnchors
 				Driver::NoteTapError(Driver::TapError::Repeated, segment, fmt::format("the {} tap fired after the segment's end tap", tap));
 				return { RunStatus::Idle };
 			}
-			// A stage's first tap of the frame ends the earlier stages that staged and are still open, at their end point: their commit
-			// point did not come (the deferred+water stage's, in a frame Drawcall Limit Fix's forward epoch does not run). Their tickets go
-			// first, in recipe order, so this stage's work follows theirs on the GPU.
-			if (a_state.stagedFrame[a_declared] != frame.frame)
-				for (std::uint32_t before = 0; before < a_declared; ++before) {
-					if (a_state.stagedFrame[before] != frame.frame || a_state.endedFrame[before] == frame.frame)
-						continue;
-					for (std::uint32_t k = 0; k < kDeclaredInfo[before].stepCount; ++k)
-						if (kDeclaredInfo[before].steps[k].point) {
-							(void)TapDeclared(a_state, Point{}, before, k, {});
-							break;
-						}
-				}
 			if (end && !Driver::NoteTap(segment, tap))
 				return { RunStatus::Idle };
+			// An end point with nothing staged this frame: the stage has no work, and no ticket is submitted.
+			if (end && step.point && a_state.stagedFrame[a_declared] != frame.frame) {
+				a_state.endedFrame[a_declared] = frame.frame;
+				return { RunStatus::Idle };
+			}
 			auto& host = *a_state.host;
 			const std::uint32_t epoch = EpochOfDeclared(a_declared);
 			const auto built = a_state.frameBuilt[a_declared];
@@ -3178,8 +3246,10 @@ namespace FrameAnchors
 				return false;
 			if (a_state.stagedFrame[a_declared] == frame.frame)
 				return true;
+			// An earlier stage that ends at a point and has staged nothing yet does not hold this one back: this stage's first tap ends it.
 			for (std::uint32_t before = 0; before < a_declared; ++before)
-				if (a_state.declaredEpochs[before] && frame.Segment(static_cast<SegmentId>(before)).declared && a_state.endedFrame[before] != frame.frame)
+				if (a_state.declaredEpochs[before] && frame.Segment(static_cast<SegmentId>(before)).declared && a_state.endedFrame[before] != frame.frame &&
+					!(PointEnded(before) && a_state.stagedFrame[before] != frame.frame))
 					return false;
 			return true;
 		}
@@ -3213,6 +3283,11 @@ namespace FrameAnchors
 		bool DeclaredOn(std::uint32_t a_declared)
 		{
 			switch (kDeclaredInfo[a_declared].segment) {
+			case Segment::DeclaredStart:
+				{
+					static const bool on = !Switches::Off("CS_ORG_SEGMENT_START");
+					return on;
+				}
 			case Segment::DeclaredPreMain:
 				{
 					static const bool on = !Switches::Off("CS_ORG_SEGMENT_PREMAIN");
@@ -3297,6 +3372,13 @@ namespace FrameAnchors
 	std::uint32_t TapInstance()
 	{
 		return Anchors().tapInstance;
+	}
+
+	bool HeldByStage(Anchor a_anchor)
+	{
+		const auto& state = Anchors();
+		const std::uint32_t index = IndexOf(a_anchor);
+		return SegmentsOn() && state.frozen && index < kAnchors && DeclaredOfAnchor(state, index) < kDeclared;
 	}
 
 	bool CanTap(std::string_view a_id)
@@ -4114,6 +4196,7 @@ namespace FrameAnchors
 	void ClaimRenderOwnership() {}
 	bool RequestJoin(std::string_view, Anchor) { return false; }
 	bool CanRun(std::string_view, Anchor) { return false; }
+	bool HeldByStage(Anchor) { return false; }
 	std::uint32_t PeakRunsPerFrame(Anchor) { return 0; }
 	bool BuildPending(std::string_view) { return false; }
 	void LogRunStats() {}

@@ -31,12 +31,13 @@ namespace RenderGraph::Frame
 	const char* KindName(Kind a_kind);
 
 	/**
-	 * @brief The declared frame's segments, in frame order: the plan's S1 (pre-depth: the EarlyPrepass clients), S2 (pre-main: the
+	 * @brief The declared frame's segments, in frame order: the start stage, the plan's S1 (pre-depth: the EarlyPrepass clients), S2 (pre-main: the
 	 * depth copy at Main::RenderDepth's end, Terrain Blending, the shadow mask, light culling and the Prepass clients) and S3
 	 * (deferred: the deferred passes and the composite). The others are added by later stages.
 	 */
 	enum class SegmentId : std::uint8_t
 	{
+		Start,           // the frame's start: the reflections prepass, the reflection faces' sky (the faces cleared by its load operations), to DCLF's shadow view
 		PreDepth,
 		PreMain,
 		Deferred,        // deferred+water: the deferred passes and the composite, the water mask, the RenderWorld scopes, the kMAIN copy, the water and its blend

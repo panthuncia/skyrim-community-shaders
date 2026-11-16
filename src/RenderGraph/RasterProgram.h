@@ -129,6 +129,7 @@ struct RasterProgram
 		bool readOnly = true;
 		rhi::LoadOp load = rhi::LoadOp::Load;
 		float clear = 1.0f;  // with LoadOp::Clear
+		bool clearStencil = false;  // with LoadOp::Clear: the stencil is cleared to 0 too
 	};
 
 	/**

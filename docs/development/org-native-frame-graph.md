@@ -3326,3 +3326,179 @@ still open in a frame Drawcall Limit Fix did not draw); the two FrameAnchors rul
   barriers a frame.
 - Still reachable in native from ImageSpace.cpp: the main client, the shape manifest and late clients (flow copies, water
   displacement, menus and other frame kinds, UI3DSceneManager's end-of-frame call), until stages 4 and 5.
+
+## Off passes cost nothing, and the start stage (recipe plan, stage 4; 2026-11-15, `org-native/phases`)
+
+### Off passes: their barriers fold into the next pass that runs
+
+Frame rate fell 126.0 -> 123.0 -> 121.1 over the post stage's two steps while body barriers rose 857 -> 883 -> 996. The cause: a
+pass its description has off (`SetSkipWhen`: a row or client the description clears, an instance past the declared count) was
+skipped ahead in the kept recording, but still recorded its before and after barriers, each its own barrier batch. The post stage
+holds 195 passes, most off in any one frame (the full-screen blur, get hit, the variants of other descriptions).
+
+Absent passes per description were considered first: a graph built per description, with only its on passes. It is not done,
+because a build of a stage's graph drops every slot's schedule until the new build's recordings are ready (the frames between draw
+nothing of the stage: `Scheduled::Absent`), and recording a build before it attaches needs a pending instance in the host (stage 2's
+note). Every description change (a slot turning on, the fade form, the screenshot copy) would then blank the stage for a few frames.
+
+What is done, in ORG (`FoldSkippedPassBarriers`, RhiExecution.h, applied by `BuildPersistentRecordingList`): when a list is built,
+the barriers of each run of passes skipped ahead are folded into the next pass that runs.
+- The transitions a run plans on one subresource compose into one: from the state before the run to the state after it. They go into
+  the before batch of the next pass that runs, composed with that pass's own where they name the same subresource. A run at the end of
+  the list goes into the last pass's after batch.
+- A composed transition between equal states is dropped (the compiler's own test: same layout, and no access or sync change, or a
+  UAV).
+- Every backing ends in the state the plan gives it, so the ledger's commits and the next stage's entry barriers are unchanged.
+- An aliased backing's first use (from Undefined) has sync All in its before state, so it still waits for the memory's earlier
+  occupant when it shares a batch with other barriers.
+- The list is left as it is when a skipped pass's barrier transfers queue or device ownership, or when two barriers of one batch would
+  name overlapping but different ranges of a resource (barriers of one batch are unordered against each other).
+- Only passes skipped ahead (known when the list is built) fold. A pass that skips at execution (a late batch's closed gate) still
+  records its barriers: its answer changes per run, and a GPU-gated pass's barriers are needed whatever its count.
+
+The census's body barriers are now counted from the built lists (`PersistentSegmentRun::bodyBarriers`), not from the plan.
+`CS_ORG_KEEP_SKIPPED_BARRIERS=1` keeps the barriers where the plan put them (ORG's `DiagnosticKeepSkippedPassBarriers`), for A/B runs.
+
+perf-taa, native Vulkan, Perf-Fast, Tracy, one run each, measured:
+
+| perf-taa | Stage 3 finish (`s6perf` build's successor) | Folding only | Final build, folding on | Final build, `CS_ORG_KEEP_SKIPPED_BARRIERS=1` |
+|---|---|---|---|---|
+| fps between the marks | 121.1 | 124.1 | 123.3 (121.6 in an earlier run of a build one fix older) | 122.5 |
+| Body barriers a frame | 996 | 843 | 811 | 964 |
+| post stage body barriers | 257 | 104 | 104 | 257 |
+| Render thread busy, ms a frame | 3.32 | 2.95 | 3.04 | 2.92 |
+
+The barriers fall by 153 a frame, all in the post stage. The frame rate does not move outside the run-to-run spread: on one build,
+folding on against off is 123.3 against 122.5, and runs of one build have spread 2 to 3 fps (121.6 to 124.1 here). So the fall from
+126.0 to 121.1 was mostly that spread, not the barriers. The render thread's breakdown is the same in every run (Drawcall Limit Fix's
+claims 0.52 to 0.57 ms, the present 0.38 to 0.41, the reflections prepass 0.30 to 0.35, the frame values kick 0.28 to 0.33): it does not
+bound the frame (3 ms of 8), which is GPU-bound.
+
+### The start stage
+
+`SegmentId::Start`, `Segment::DeclaredStart` (FrameAnchors.cpp, kDeclaredInfo). Native mode with stages on; `CS_ORG_SEGMENT_START=0`
+turns it off (its anchors keep their tickets and the faces' clears their own anchor's ticket). Guest mode keeps its per-anchor path.
+
+The frame sequence census of a world frame (native-quick, before this stage):
+
+```
+build point (Renderer::Begin)
+run ReflectionsPrepass [cs.cloud-shadows]                                                   -> its ticket
+run SkyReflections [cs.engine.skeleton.cube@sky-reflections, cs.cloud-shadows.layers, cs.sky.faces] -> its ticket   (face 1)
+run SkyReflections [...]                                                                     -> its ticket   (face 2)
+submit CS DCLF: shadow view
+```
+
+The stage holds both anchors wholly (they have no epoch of their own): the ReflectionsPrepass step (Cloud Shadows' occlusion copy and
+layer operations, IBL and Terrain Shadows' reflection prepasses where they have passes), the SkyReflections step, and a point end. It
+is one graph, one kept recording per frame slot, one ticket.
+
+**Commit point.** The point just before the next GPU work that follows the stage in every world frame is submitted (FlushRegions):
+DCLF's shadow view, the sky occlusion, the shadow clears' anchor, the Z-prepass, or a later stage. A later stage's first tap also ends
+it (the rule stage 3 added). A stage that ends at a point and staged nothing this frame ends there without a ticket, and does not
+hold a later stage's window shut (`PointEnded`, WindowOpen).
+
+**Reflection faces as fixed instances.** How many faces the engine draws a frame, and which, is its late decision. The faces' sky
+client (`cs.sky.faces`) has six instances (one per face a frame may draw), all declared every frame: the description never changes
+with the engine's choice. The k-th SkyReflections tap of the frame is instance k: its commit writes instance k's gate entries, latch
+regions and run (`InstanceEntry`, `RunSlots` per instance). An instance the engine does not draw has its entries closed and records
+nothing. The face's draw list is a frame input: the pass is in the stage's late batch, recorded at each submission from the run its
+instance staged (`SkyPass` records late in a CS stage: `RecordsLate`), so the kept recording never changes with the face or the
+weather.
+
+**Clears as load operations.** The face sky's first draw of each instance clears the face (to zero; the sky draws its background)
+and the faces' depth (1, stencil 0, the engine's values) with its render pass's load operations (`RasterProgram::Depth::clearStencil`,
+new). The engine's clears of the faces and of kCUBEMAP_REFLECTIONS in a world frame are dropped (the engine skeleton's
+`FacesClearedBySky`), and the hosted face clears (`Host::SkyReflections`, its CPU record and its client at the anchor) are deleted.
+
+**Cloud Shadows' layer operations** run at both steps. At SkyReflections each face's tap writes its own entry set and latch rows
+(one set per face, `LayerOps::instances`), and takes scratch slots after those the frame's earlier face taps took, since every set's
+gathers run before the scatters. The client `repeats`.
+
+**What stays a ticket at the frame's start, and why.**
+- The decal occlusion tests (DecalQueries): several a frame, one per decal in the test state, each with its own query range of the
+  run (QueryRing per run). Instances would need a query range per instance; not done. They run before the stage's first tap.
+- The water's displacement update and flow copies (the main ImageSpace client, `cs.engine.imagespace`, built from the shape manifest):
+  in the river they run after the last face's sky, inside the stage's window, on the ImageSpace anchor's own ticket (0.47 a frame), and
+  run ahead of the stage's work (independent targets). Taking them into the stage needs their effects as CS steps (StepDesc, a
+  data-only hook each, the ripple and flow lists as frame inputs): the main client's commit reuses its gate entries per run, so it
+  cannot be a step that repeats. Not done.
+
+### The main pass's sky in pre-main
+
+The pre-main stage gains the Sky step (the main pass's sky batch, after the Prepass clients, before DCLF's main opaque epoch) and ends
+at a point: just before DCLF's main opaque epoch, the deferred+water stage or the forward epoch is submitted, or at the next stage's
+first tap. The sky's draw list is a frame input recorded in the stage's late batch. The sky anchor's ticket is gone.
+
+### The recipe
+
+Start: the decal queries' anchor, the start stage, the cube clear anchor (outside world frames). Depth gains Drawcall Limit Fix's water
+reflection faces (after the Z-prepass, where the epoch runs; the recipe had it in the start stage). Opaque is DCLF's main opaque alone.
+`kPreviousFrame` loses `Engine::kMAIN_ONLY_ALPHA`: since stage 3 its clear is a pass of the deferred+water stage, the stage whose ray
+march reads it, so the read is the stage's own (a read is fine when the reading stage writes the resource).
+
+perf-taa, native Vulkan, Perf-Fast, Tracy, one run each, measured. Before: stage 3 finish (`s6perf`'s successor, the doc's last table).
+
+| perf-taa | Before | After (final build) |
+|---|---|---|
+| fps between the marks | 121.1 | 123.3 |
+| Tickets a frame | 16.96 | 13.96 |
+| `vkQueueSubmit` calls a frame (RHI; plus 1 external) | 27.13 | 24.06 |
+| Entry / body barriers a frame | 596 / 996 | 506 / 811 |
+| Render / submission / host thread busy, ms a frame | 3.32 / 2.80 / 1.51 | 3.04 / 2.26 / 1.17 |
+| Recordings, switches, tap errors, recipe findings in the steady window | 0, 0, 0, 0 | 0, 0, 0, 0 |
+
+| Per frame (after, measured) | Tickets | Entry / body barriers | Render `ExecuteEpoch`, us |
+|---|---|---|---|
+| start stage | 1 | 8 / 137 | 41.9 |
+| it replaces: reflections prepass + 2 reflection sky (before) | 3 | 90 / 174 | 20.8 + 2 x 22.2 |
+| pre-main with the sky | 1 | 67 / 33 | 31.7 |
+| it replaces: pre-main + sky (before) | 2 | 75 / 27 | 26.8 + 14.9 |
+
+The entry barriers fall by 90: the faces' targets enter once a frame instead of once per face, and the face clears are load
+operations. The steady world frame's tickets: start, shadow view, pre-depth, Z-prepass, pre-main, main opaque, deferred+water,
+forward, the sun's queries (1.96), first person, post, interface, overlay.
+
+### Checks
+
+One run each, `CS_TEST_BACKGROUND=1`, mismatches and recipe findings fatal: native-quick (DLSS registered; with the frame sequence
+census), native-d3d12-quick, native-river (sequence census), native-upscalers (DLSS, FSR, TAA, XeSS), native-interior,
+native-validation (the known 20x `VUID-vkCmdDraw-None-09600` only), the loading-thread run, first and third person (with the `start`
+shot), guest-quick: all passed, 0 tap errors, 0 recipe findings. Shots match the previous build's by eye (native-quick 105.6 against
+105.5; river 76.6 / 77.4 against 77.0 / 77.0). The steady recipe: 484 passes, 8 inputs from the previous frame, 109 from outside the
+graphs, 0 findings. In the steady window: 0 recordings, 0 schedule switches, nothing submitted between a stage's first tap and its
+commit (in the river, the water effects' ImageSpace ticket is, see above).
+
+The fatal paths fired three times during the work, each fixed before the final runs:
+- `host skipped`: the engine's shadow clears are handed to DCLF's shadow view, and the start stage committed just before it. The skeleton
+  no longer counts the start stage's submission against waiting hosted work (its work is earlier in the frame and touches no hosted
+  target).
+- `missing` (pre-main's end, D3D12 and the validation tour at the world's first frames): DCLF's main opaque did not run and the deferred
+  stage was absent, so nothing ended pre-main. An absent stage's first tap now ends the earlier stages too, and work that ends the world
+  segment (forward, the interface, the present) ends the start and pre-main stages.
+- The cs-test plugin refused `CS_ORG_KEEP_SKIPPED_BARRIERS` until it was in the switch registry.
+
+### What is still a ticket at a hook in a world frame, and why
+
+- The sun's occlusion queries (EngineQueries, two a frame: after DCLF's forward epoch and after first person). Each is between two DCLF
+  epochs: taking them into a stage would move the first after the first-person epoch on the GPU, where the first-person geometry would
+  occlude the sun. They need a stage between forward and first person, or the queries as DCLF passes.
+- The decal tests and the water effects at the frame's start (above).
+- The interface and the overlay (the UI stage, stage 5).
+- Outside steady frames: the engine's clears that keep their own anchor (the precipitation occlusion map, the cube faces outside world
+  frames), the EngineDraws anchor's own clients (blood, precipitation, menu scenes), the ImageSpace main client.
+
+### What stage 5 should know
+
+- A stage that ends at a point commits just before the next GPU work that always follows it (FlushRegions' Ends* lists), and at a later
+  stage's first tap, present or absent. One that staged nothing ends without a ticket and does not hold later windows shut. The UI
+  stage can end at the present the same way.
+- A hook that repeats inside a stage with a late engine decision (faces, Scaleform displays, Bink tiles) takes fixed instances: declare
+  them all every frame, give each its own gate entries, latch regions and `RunSlots`, and let the ones the engine does not use stay
+  closed. Draw lists are frame inputs recorded in the late batch (pass constructed with "records late" in a CS stage).
+- A client at a repeated step that cannot have per-instance passes can `repeat` with an entry set per tap and one pass dispatching
+  every set (Cloud Shadows' layer operations); shared scratch must be split between the taps.
+- Clears as load operations need the clear to come with the first draw of the pass that writes the target; the engine's clear call is
+  then dropped in the frame kinds that have the stage (the skeleton's `FacesClearedBySky` pattern).
+- Barrier folding applies to every kept recording: passes a description has off cost a few composed barriers, not their own batches.
+- The main ImageSpace client and the shape manifest remain for the water effects at the frame's start, menus and other frame kinds.

@@ -629,6 +629,12 @@ namespace FrameAnchors
 	bool CanTap(std::string_view a_id);
 
 	/**
+	 * @brief Whether a declared segment (a CS stage) holds anchor a_anchor wholly: every run of it is one of the stage's taps, and it has
+	 * no epoch of its own. Fixed once the render graph initialized. Any thread.
+	 */
+	bool HeldByStage(Anchor a_anchor);
+
+	/**
 	 * @brief Writes frame inputs for client a_id outside its step's tap: a_write runs with GraphHost::CurrentRun the frame slot's staging
 	 * run of the stage that holds the client, while that stage's window is open and the frame's schedule has the client on. What it
 	 * writes (gate entries, latch values) reaches the GPU with the stage's one commit. For data the engine hands over at a call that is
