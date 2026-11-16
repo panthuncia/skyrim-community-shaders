@@ -23,6 +23,7 @@
 #include "Features/DrawcallLimitFix/Core/Settings/Switches.h"
 #include "Features/DrawcallLimitFix/Core/Settings/Toggles.h"
 #include "RenderGraph/Backend.h"
+#include "RenderGraph/Engine/Native/Native.h"
 
 #include <ORGModuleServices/BackingPool.h>
 #include <Render/RenderGraph/ExternalEpochExecution.h>
@@ -1499,7 +1500,9 @@ namespace DCLF::Direct
 		/**
 		 * @brief The render thread's and DXVK's CS thread's CPU time since the last frame start (QueryThreadCycleTime, in the TSC's
 		 * cycles, calibrated against the steady clock): Tracy plots every frame (CS.DCLF.Busy.Render, CS.DCLF.Busy.Cs, µs), and a CPU
-		 * frame's into the window ([CPU] line). The CS thread is found by its name (DXVK's "dxvk-cs"), looked for every 120 frames until found.
+		 * frame's into the window ([CPU] line). The CS thread is found by its name (DXVK's "dxvk-cs").
+		 * The search walks every thread in the process and costs tens of ms, so it never runs on the render thread. Native mode has no
+		 * DXVK and does not search. Guest mode searches on a helper thread, every 2 s until found (up to 30 tries).
 		 */
 		struct ThreadBusy
 		{
@@ -1507,7 +1510,9 @@ namespace DCLF::Direct
 			std::uint64_t renderCycles = 0, csCycles = 0;
 			std::uint64_t tsc0 = 0;
 			Clock::time_point t0{}, last{};
-			std::uint32_t search = 0;
+			// The helper thread's result. It owns the handle until the render thread takes it.
+			inline static std::atomic<HANDLE> searchResult{ nullptr };
+			bool searchStarted = false;
 
 			static HANDLE FindCsThread()
 			{
@@ -1545,8 +1550,20 @@ namespace DCLF::Direct
 					tsc0 = __rdtsc();
 					t0 = last = now;
 				}
-				if (!cs && search++ % 120 == 0)
-					cs = FindCsThread();
+				if (!cs && !std::exchange(searchStarted, true) && !RenderGraph::Engine::Native::Active()) {
+					// DXVK's device is made before the first frame, so the first try normally finds it.
+					std::thread([] {
+						for (int i = 0; i < 30; ++i) {
+							if (const HANDLE h = FindCsThread()) {
+								searchResult.store(h, std::memory_order_release);
+								return;
+							}
+							std::this_thread::sleep_for(std::chrono::seconds(2));
+						}
+					}).detach();
+				}
+				if (!cs)
+					cs = searchResult.load(std::memory_order_acquire);
 				const double us = std::chrono::duration<double, std::micro>(now - t0).count();
 				const double perUs = us > 1e5 ? static_cast<double>(__rdtsc() - tsc0) / us : 0.0;
 				ULONG64 r = 0, c = 0;
