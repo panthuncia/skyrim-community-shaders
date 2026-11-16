@@ -350,14 +350,32 @@ namespace PublishedResources
 			logger::info("[ORG] '{}' withdrawn: its readers return to D3D11", a_id);
 	}
 
+	namespace
+	{
+		/** @brief During a graph build on this thread: whether the snapshot that graph registers holds a_id. Empty outside a build. */
+		std::optional<bool> InBuildingSnapshot(std::string_view a_id)
+		{
+			const auto snapshot = t_building.lock();
+			if (!snapshot)
+				return std::nullopt;
+			return std::ranges::any_of(snapshot->resources, [&](const Snapshot::Registered& a_entry) { return a_entry.id == a_id; });
+		}
+	}
+
 	bool IsPublished(std::string_view a_id)
 	{
+		// A pass made while a graph is built, possibly on the build manager's thread, reads the snapshot that graph registers, never the
+		// entries the render thread changes.
+		if (const auto building = InBuildingSnapshot(a_id))
+			return *building && RenderGraphRuntime::Get().IsActive();
 		const auto* entry = Find(Published(), a_id);
 		return entry && entry->published && RenderGraphRuntime::Get().IsActive();
 	}
 
 	bool IsRegistered(std::string_view a_id)
 	{
+		if (const auto building = InBuildingSnapshot(a_id))
+			return *building && RenderGraphRuntime::Get().IsActive();
 		return Find(Published(), a_id) && RenderGraphRuntime::Get().IsActive();
 	}
 
