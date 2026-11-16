@@ -434,6 +434,16 @@ public:
 	 */
 	void QueueOnSubmitThread(std::function<void()> a_closure);
 
+	/**
+	 * @brief Render owner: a wait the next present runs just before the swap chain's present. A queued present runs it on the
+	 * submission thread, after the frame's epochs (Native's QueuePresent); a present on the render thread runs it there. For work
+	 * the present must follow on another queue: a present can block until the frame's GPU work is done while it holds the RHI's
+	 * submission lock, so whatever that work waits for must be submitted first.
+	 */
+	void WaitBeforePresent(std::function<void()> a_wait);
+	/** @brief The waits the next present runs (WaitBeforePresent), taken by the thread that queues or makes the present. */
+	std::vector<std::function<void()>> TakePresentWaits();
+
 	/** @brief Render thread: the segments submitted since the last call, one bit per Segment. */
 	std::uint64_t TakeSubmittedSegments();
 

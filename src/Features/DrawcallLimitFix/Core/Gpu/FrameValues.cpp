@@ -48,6 +48,9 @@
 #include "Features/DrawcallLimitFix/Core/Runtime/SceneScheduler.h"
 #include "Features/DrawcallLimitFix/Core/Settings/Switches.h"
 #include "Features/DrawcallLimitFix/Core/Engine/EngineReadWindow.h"
+#include "Features/DrawcallLimitFix/Core/Render/LoadHold.h"
+#include "Features/Upscaling.h"
+#include "RenderGraph/Engine/Native/Native.h"
 #include "RenderGraph/RenderGraphRuntime.h"
 #include <OpenRenderGraph/GraphHost.h>
 #include <Render/Runtime/IUploadService.h>
@@ -633,6 +636,7 @@ namespace DCLF
 		// The newest producer's signal (QueueStreamingSignal), written before its done: read by the render thread once done reaches the
 		// frame's sequence (the next producer is kicked only after that frame's EndFrame).
 		std::shared_ptr<org::TrackedUploadTicket> signal;
+		std::uint64_t presentWaitSeq = 0;  // the producer whose signal the next present waits for (WaitSignalSubmitted): render thread
 		std::atomic<std::uint64_t> sampledSeq{ 0 };  // the newest producer whose sampling is done (WaitSampled), before its done
 		void MarkSampled(std::uint64_t a_seq)
 		{
@@ -2987,36 +2991,63 @@ namespace DCLF
 		return { (*timeline)->GetHandle(), value };
 	}
 
+	namespace
+	{
+		/** @brief Blocks until a_ticket left the upload queue: submitted, completed or cancelled. */
+		void WaitTicketLeftQueue(org::TrackedUploadTicket& a_ticket)
+		{
+			const auto pending = [&] {
+				const auto state = a_ticket.state.load(std::memory_order_acquire);
+				return state == org::TrackedUploadTicketState::Queued || state == org::TrackedUploadTicketState::Claimed;
+			};
+			if (!pending())
+				return;
+			auto changes = std::make_shared<std::atomic<std::uint32_t>>(0u);
+			a_ticket.SetChangeCallback([changes] {
+				changes->fetch_add(1, std::memory_order_release);
+				changes->notify_all();
+			});
+			for (auto seen = changes->load(std::memory_order_acquire); pending(); seen = changes->load(std::memory_order_acquire))
+				changes->wait(seen, std::memory_order_acquire);
+		}
+	}
+
 	void FrameValues::WaitSignalSubmitted()
 	{
 		auto& s = *impl;
 		if (!s.kicked)
 			return;
-		// Before the frame's Present enters DXVK: its signal on the copy queue. DXVK presents under the submission lock the upload queue
-		// takes (RenderGraphRuntime's upload submissions), and a present that waits for the frame's GPU work (AMD's windowed present
-		// does) would hold that lock from the signal the work waits for: a deadlock. Usually long done here; else the GPU would wait too.
+		// The frame's signal on the copy queue must be submitted before the present. A present can block until the frame's GPU work is
+		// done while it holds the submission lock the upload queue takes (DXVK presents under it; BasicRHI's Vulkan present holds its
+		// timeline lock; AMD's windowed present blocks), and that work waits for the signal: a deadlock.
 		{
 			DCLF_ZONE("CS.DCLF.FrameValues.SignalSubmitted");
 			for (auto done = s.done.load(std::memory_order_acquire); done < s.seq; done = s.done.load(std::memory_order_acquire))
 				s.done.wait(done, std::memory_order_acquire);
-			if (const auto ticket = s.signal) {
-				const auto pending = [&] {
-					const auto state = ticket->state.load(std::memory_order_acquire);
-					return state == org::TrackedUploadTicketState::Queued || state == org::TrackedUploadTicketState::Claimed;
-				};
-				if (pending()) {
-					// The copy batch may wait for graph work whose entry point is still in DXVK's stream, which DXVK submits only once
-					// this thread moves on: push it out before waiting, or the wait never ends (copy-queue-sealed-stall).
-					RenderGraphRuntime::Get().FlushPendingStreamWork();
-					auto changes = std::make_shared<std::atomic<std::uint32_t>>(0u);
-					ticket->SetChangeCallback([changes] {
-						changes->fetch_add(1, std::memory_order_release);
-						changes->notify_all();
-					});
-					for (auto seen = changes->load(std::memory_order_acquire); pending(); seen = changes->load(std::memory_order_acquire))
-						changes->wait(seen, std::memory_order_acquire);
-				}
+			const auto ticket = s.signal;
+			if (!ticket || s.presentWaitSeq == s.seq)
+				return;
+			const auto state = ticket->state.load(std::memory_order_acquire);
+			if (state != org::TrackedUploadTicketState::Queued && state != org::TrackedUploadTicketState::Claimed)
+				return;
+			// Native mode with a queued present: the submission thread runs the present after the frame's epochs, and waits for the
+			// signal there (RenderGraphRuntime::WaitBeforePresent). The render thread goes on to the next frame. The copy batch waits
+			// only for sealed points (ReusedCopyPoint), which are on the device's queues before this present: nothing it waits for
+			// needs the submission thread to pass the present.
+			const bool queuedPresent = RenderGraph::Engine::Native::Active() && RenderGraphRuntime::Get().QueuesPresent() &&
+			                           !globals::features::upscaling.IsFrameGenerationActive() && !LoadHold::PresentsHeld();
+			if (queuedPresent) {
+				s.presentWaitSeq = s.seq;
+				RenderGraphRuntime::Get().WaitBeforePresent([ticket] {
+					DCLF_ZONE("CS.DCLF.FrameValues.PresentWaitsSignal");
+					WaitTicketLeftQueue(*ticket);
+				});
+				return;
 			}
+			// The copy batch may wait for graph work whose entry point is still in DXVK's stream, which DXVK submits only once
+			// this thread moves on: push it out before waiting, or the wait never ends (copy-queue-sealed-stall).
+			RenderGraphRuntime::Get().FlushPendingStreamWork();
+			WaitTicketLeftQueue(*ticket);
 		}
 	}
 
@@ -3025,7 +3056,7 @@ namespace DCLF
 		auto& s = *impl;
 		if (!s.kicked)
 			return;
-		// Done already when BeforePresent ran: the producers and the signal are past.
+		// Done already when BeforePresent ran: the producers are past, and the signal is past or the queued present waits for it.
 		WaitSignalSubmitted();
 		s.kicked = false;
 		BindFrameLeases(s.frameLeases, s.registeredFrameLeases, s.boundPoints);

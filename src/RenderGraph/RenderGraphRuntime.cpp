@@ -931,6 +931,7 @@ struct RenderGraphRuntime::Impl
 	uint64_t framePaceWaits = 0, framePaceWaited = 0;  // waits that blocked, and their total time (us)
 	uint32_t frameLatency = 2;    // CS_FRAME_LATENCY
 	bool framePaceSignalled = false;  // this frame enqueued one
+	std::vector<std::function<void()>> presentWaits;  // WaitBeforePresent: the next present's, render owner only
 	std::shared_ptr<rhi::DevicePtr> device = std::make_shared<rhi::DevicePtr>();
 	// ORG's runtime on the adopted device: outlives the host and the contributors, goes before the device.
 	std::shared_ptr<org::Runtime> orgRuntime;
@@ -3143,6 +3144,20 @@ void RenderGraphRuntime::QueueOnSubmitThread(std::function<void()> a_closure)
 	impl->host->EnqueueOnSubmitThread(std::move(a_closure));
 }
 
+void RenderGraphRuntime::WaitBeforePresent(std::function<void()> a_wait)
+{
+	if (!impl || !impl->host) {
+		a_wait();
+		return;
+	}
+	impl->presentWaits.push_back(std::move(a_wait));
+}
+
+std::vector<std::function<void()>> RenderGraphRuntime::TakePresentWaits()
+{
+	return impl ? std::exchange(impl->presentWaits, {}) : std::vector<std::function<void()>>{};
+}
+
 void RenderGraphRuntime::MoveOwnerThread()
 {
 	// The host's other state needs no move: it has no thread id of its own, and ExecuteEpoch takes the calling thread as DXVK's
@@ -4221,6 +4236,8 @@ void RenderGraphRuntime::DrainSubmissions(const char*, bool) {}
 bool RenderGraphRuntime::QueuesPresent() const { return false; }
 void RenderGraphRuntime::HostThreadHandles(void*& a_submit, void*& a_host) { a_submit = a_host = nullptr; }
 void RenderGraphRuntime::QueueOnSubmitThread(std::function<void()> a_closure) { a_closure(); }
+void RenderGraphRuntime::WaitBeforePresent(std::function<void()> a_wait) { a_wait(); }
+std::vector<std::function<void()>> RenderGraphRuntime::TakePresentWaits() { return {}; }
 void RenderGraphRuntime::WaitFramePace() {}
 org::services::PipelineRegistry* RenderGraphRuntime::PipelineRegistry() { return nullptr; }
 void RenderGraphRuntime::RequestShaderReload(std::string_view, bool) {}

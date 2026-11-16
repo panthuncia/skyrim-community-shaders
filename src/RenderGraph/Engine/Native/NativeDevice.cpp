@@ -2133,6 +2133,9 @@ namespace RenderGraph::Engine::Native
 					return QueuePresent(a_syncInterval);
 				// The frame's epochs still on the submission thread reach the queue before this present.
 				RenderGraphRuntime::Get().DrainSubmissions("the present", true);
+				if (!(a_flags & DXGI_PRESENT_TEST))
+					for (const auto& wait : RenderGraphRuntime::Get().TakePresentWaits())
+						wait();
 				std::lock_guard guard(presentLock);
 				return PresentLocked(a_syncInterval, a_flags, nullptr, false);
 			}
@@ -2147,6 +2150,19 @@ namespace RenderGraph::Engine::Native
 			 */
 			HRESULT QueuePresent(UINT a_syncInterval)
 			{
+				// The pace first: the present before holds presentLock on the submission thread until it returns, frame latency wait
+				// included, so taking the lock first would wait the same time outside this zone.
+				const uint64_t queued = queuedPresents.load(std::memory_order_relaxed);
+				if (donePresents.load(std::memory_order_acquire) < queued) {
+					ZoneScopedN("CS.Native.PresentPace");
+					const auto start = std::chrono::steady_clock::now();
+					// The submission thread finishes the present without this thread, so the wait ends.
+					for (auto done = donePresents.load(std::memory_order_acquire); done < queued; done = donePresents.load(std::memory_order_acquire))
+						donePresents.wait(done, std::memory_order_acquire);
+					presentPaceWaits.fetch_add(1, std::memory_order_relaxed);
+					presentPaceUs.fetch_add(static_cast<uint64_t>(std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - start).count()),
+						std::memory_order_relaxed);
+				}
 				std::shared_ptr<NativeResource> source;
 				bool tail = false;
 				{
@@ -2162,20 +2178,13 @@ namespace RenderGraph::Engine::Native
 						NextGraphVersion();
 					}
 				}
-				const uint64_t queued = queuedPresents.load(std::memory_order_relaxed);
-				if (donePresents.load(std::memory_order_acquire) < queued) {
-					ZoneScopedN("CS.Native.PresentPace");
-					const auto start = std::chrono::steady_clock::now();
-					// The submission thread finishes the present without this thread, so the wait ends.
-					for (auto done = donePresents.load(std::memory_order_acquire); done < queued; done = donePresents.load(std::memory_order_acquire))
-						donePresents.wait(done, std::memory_order_acquire);
-					presentPaceWaits.fetch_add(1, std::memory_order_relaxed);
-					presentPaceUs.fetch_add(static_cast<uint64_t>(std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - start).count()),
-						std::memory_order_relaxed);
-				}
 				queuedPresents.store(queued + 1, std::memory_order_relaxed);
-				RenderGraphRuntime::Get().QueueOnSubmitThread([this, source = std::move(source), tail, a_syncInterval] {
+				// What the present must follow on other queues (WaitBeforePresent), waited for on the submission thread.
+				RenderGraphRuntime::Get().QueueOnSubmitThread([this, source = std::move(source), tail, a_syncInterval,
+																  waits = RenderGraphRuntime::Get().TakePresentWaits()] {
 					ZoneScopedN("CS.Native.QueuedPresent");
+					for (const auto& wait : waits)
+						wait();
 					{
 						std::lock_guard guard(presentLock);
 						(void)PresentLocked(a_syncInterval, 0, source, tail);
