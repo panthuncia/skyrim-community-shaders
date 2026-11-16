@@ -378,6 +378,7 @@ namespace RenderGraph::Engine::Skeleton
 			std::uint32_t committedLast = 0;  // the highest gate entry the last commit opened (regions: ClientDesc::joins)
 			bool registered = false;  // a registration is live
 			bool stale = false;       // a view's texture was made again: registered again at the next flush with nothing pending
+			std::uint64_t lent = 0;   // clears that found another view in their target's slot (a lent slot), counted
 			bool executed = false;    // the current run's executed signal
 			bool failed = false;      // stays on D3D11 for the session
 			bool announced = false;   // the first clear on the graph was logged
@@ -1332,10 +1333,13 @@ namespace RenderGraph::Engine::Skeleton
 				return nullptr;
 			}
 			const auto& spec = *found->second;
+			// Another view in the target's slot: a slot lent for a while (Skylighting puts its sky occlusion map in the precipitation
+			// occlusion map's slot while the engine renders into it), or a target made again. Either way this clear is not the pass's.
+			// A target made again is noticed at the next frame's start (CheckMadeAgain), when a lent slot holds its own view again.
 			if (spec.view != a_view || spec.texture != TextureOf(a_target)) {
-				if (!std::exchange(group.stale, true))
-					logger::info("[ORG] engine skeleton: {} was made again ({}); the {} clears register again", TargetName(a_target),
-						spec.texture != TextureOf(a_target) ? "a new texture" : "the same texture, another view", kGroupNames[IndexOf(a_group)]);
+				if (group.lent++ == 0)
+					logger::info("[ORG] engine skeleton: a clear of {} found another view in its slot ({}); it stays on D3D11 while the slot holds it",
+						TargetName(a_target), spec.texture != TextureOf(a_target) ? "another texture" : "the same texture, another view");
 				return nullptr;
 			}
 			// Setup's build point put the group in its anchor's graph. CanRun is false only on a full ring (an inherent limit) or between
@@ -1694,6 +1698,27 @@ namespace RenderGraph::Engine::Skeleton
 				Build(static_cast<Group>(a_index));
 		}
 
+		/**
+		 * @brief At a frame's start: a group whose passes were made for a view the engine's table no longer holds (the engine made the
+		 * target again) registers again at its next flush. Checked here and not at a clear, since a slot can be lent within a frame.
+		 */
+		void CheckMadeAgain()
+		{
+			for (std::size_t g = 0; g < kGroups; ++g) {
+				auto& group = Skel().groups[g];
+				if (group.failed || group.stale || !group.registered)
+					continue;
+				for (const auto& [target, spec] : group.specs) {
+					if (spec->view == ViewOf(target) && spec->texture == TextureOf(target))
+						continue;
+					group.stale = true;
+					logger::info("[ORG] engine skeleton: {} was made again ({}); the {} clears register again", TargetName(target),
+						spec->texture != TextureOf(target) ? "a new texture" : "the same texture, another view", kGroupNames[g]);
+					break;
+				}
+			}
+		}
+
 		/** @brief The engine's immediate context (native mode's handle there). */
 		ID3D11DeviceContext* EngineContext()
 		{
@@ -1758,6 +1783,8 @@ namespace RenderGraph::Engine::Skeleton
 	void BeginFrame()
 	{
 		auto& state = Skel();
+		if (state.setUp && FrameAnchors::IsRenderOwner())
+			CheckMadeAgain();
 		if (!state.setUp || !HostingOn() || !FrameAnchors::IsRenderOwner())
 			return;
 		// The frame that ends here was cut short by a loading screen: its waiting work is abandoned with the rest of its world work.
