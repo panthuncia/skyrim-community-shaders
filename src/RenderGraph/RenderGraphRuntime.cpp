@@ -2957,6 +2957,16 @@ bool RenderGraphRuntime::DclfBuildsSettled() const
 	return !impl || !impl->builds || impl->builds->Settled();
 }
 
+bool RenderGraphRuntime::RebuildRequestedUnstaged() const
+{
+	if (!impl)
+		return false;
+	if (impl->builds)
+		return impl->builds->UnstagedRebuildRequested();
+	auto* host = const_cast<RenderGraphRuntime*>(this)->Host();
+	return host && host->RebuildRequested();
+}
+
 bool RenderGraphRuntime::BuildSetupGraphs(std::string_view a_caller)
 {
 	if (!IsActive())
@@ -4210,6 +4220,7 @@ bool RenderGraphRuntime::BuildIfRequested(std::string_view) { return false; }
 bool RenderGraphRuntime::BuildOwnerEpochsNow(std::string_view) { return false; }
 bool RenderGraphRuntime::AttachDclfBuilds(std::string_view) { return false; }
 bool RenderGraphRuntime::DclfBuildsSettled() const { return true; }
+bool RenderGraphRuntime::RebuildRequestedUnstaged() const { return false; }
 bool RenderGraphRuntime::BuildSetupGraphs(std::string_view) { return false; }
 RenderGraph::BuildManager* RenderGraphRuntime::Builds() { return nullptr; }
 void RenderGraphRuntime::SignalFramePace(bool) {}

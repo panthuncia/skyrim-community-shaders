@@ -124,6 +124,11 @@ namespace RenderGraph
 		 */
 		bool Settled() const;
 		/**
+		 * @brief Owner thread: a rebuild was asked for an epoch whose builds attach at once (not a staged CS stage). A staged epoch keeps
+		 * running its attached graph until its new build switches in whole, so its request never leaves a frame without its graph.
+		 */
+		bool UnstagedRebuildRequested() const;
+		/**
 		 * @brief Owner thread, at setup: before the first world frame every graph asked for is built now (GraphHost::BuildIfRequested);
 		 * after it, the same as Poll. Returns whether the builds were made now.
 		 */

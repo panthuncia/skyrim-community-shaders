@@ -32,7 +32,8 @@ namespace ChainGroup
 	constexpr std::uint8_t kTaa = 27;
 	constexpr std::uint8_t kScreenshot = 28;
 	constexpr std::uint8_t kUpsample = 29;
-	constexpr std::uint8_t kCount = 30;
+	constexpr std::uint8_t kCapture = 30;  // a frozen world's capture frame: the final target copied into kMENUBG
+	constexpr std::uint8_t kCount = 31;
 }
 
 /** @brief An entry with no copy back after it (ChainSteps::Part::copyBack). */
@@ -95,6 +96,10 @@ struct ChainSteps
 	// so far there.
 	std::int32_t slotScope = -1;
 	std::map<Effects::ImageSpaceEffectEnum, std::uint8_t> slotDraws;
+	// The frozen background's copy (the final target into kMENUBG): its entry in the final part (kNoCopy: not made), and whether this
+	// frame's end-of-frame effects run into kMENUBG (a frozen world's capture frame, checked at their entry).
+	std::uint16_t captureEntry = kNoCopy;
+	bool captureFrame = false;
 };
 
 ChainSteps& Chain()
@@ -215,6 +220,8 @@ std::string ChainGroupName(std::uint8_t a_group)
 		return "the screenshot copy";
 	case kUpsample:
 		return "the dynamic-resolution upsample";
+	case kCapture:
+		return "the frozen background's copy";
 	default:
 		return fmt::format("group {}", a_group);
 	}
@@ -237,9 +244,16 @@ void CheckEndOfFrame(std::int32_t a_source, std::int32_t a_final)
 	if (!manager)
 		return;
 	constexpr auto segment = Frame::SegmentId::Post;
-	if (a_source != RE::RENDER_TARGET::kMAIN || a_final != RE::RENDER_TARGET::kFRAMEBUFFER)
+	// A frozen world's capture frame (decided at Begin: a menu that freezes the background opened, Driver::DecideKind) runs the chain into
+	// kMENUBG. CS's chain still ends in the final target, and its last pass copies that into kMENUBG (the frozen background's copy).
+	const auto& frame = Frame::Driver::Current();
+	const bool capture = frame.kind == Frame::Kind::FrozenWorld && frame.capture;
+	chain.captureFrame = capture && a_final == RE::RENDER_TARGET::kMENUBG;
+	const auto expected = capture ? RE::RENDER_TARGET::kMENUBG : RE::RENDER_TARGET::kFRAMEBUFFER;
+	if (a_source != RE::RENDER_TARGET::kMAIN || a_final != expected)
 		Frame::Driver::NoteTapError(Frame::Driver::TapError::NotInDescription, segment,
-			fmt::format("the engine's end-of-frame effects run from target {} into target {}; CS's chain runs from kMAIN into the final target", a_source, a_final));
+			fmt::format("the engine's end-of-frame effects run from target {} into target {}; CS's chain runs from kMAIN into {}", a_source, a_final,
+				capture ? "the final target and copies it into kMENUBG (the frozen world's capture frame)" : "the final target"));
 	const auto base = reinterpret_cast<std::uintptr_t>(manager);
 	const auto member = [&](std::uintptr_t a_offset) { return reinterpret_cast<const std::byte*>(base + a_offset); };
 	const auto wanted = ChainGroupsOn(Frame::Driver::Current().post);
@@ -527,6 +541,14 @@ std::array<bool, ChainGroup::kCount> ChainGroupsOn(const Frame::PostFields& a_po
 	// The screenshot copy is always on: a save asks for it with at most a frame of notice, and the flag may be set after Begin read it.
 	// A late copy leaves a stale thumbnail. Its pass is gated: a frame that does not copy skips it at execution, its barriers folded.
 	on[ChainGroup::kScreenshot] = true;
+	// The frozen background's copy is always on: the capture frame is known only at its own Begin (a menu that freezes the background
+	// opened), too late for a build or for a recording of a new description. Its pass is gated: every other frame skips it at execution,
+	// its barriers folded.
+	on[ChainGroup::kCapture] = true;
+	// The radial blur after the tonemap (slot 5) is always on too: a menu that freezes the background starts its blur (the menu's
+	// ImageSpace modifier) in the capture frame itself, and the frozen background keeps that one frame for as long as the menu is open.
+	// A frame without it skips its pass and copy back at execution, their barriers folded.
+	on[SlotGroup(5, post.ldr)] = true;
 	// Refraction (slot 1) is always on: the engine turns its effect on during the frame, when it draws a refracting object, so Begin
 	// cannot know. Its pass and copy back are gated: a frame without refraction skips both at execution, their barriers folded.
 	on[SlotGroup(1, false)] = true;
@@ -600,6 +622,29 @@ bool MakeOwnedLike(OwnedTarget& a_out, RE::RENDER_TARGET a_like, std::string_vie
 }
 
 /**
+ * @brief The frozen background's copy program for kMENUBG's format (Upscaling's CopyHudlessPS: one texel loaded per pixel), built once per
+ * format and kept. Render thread, at the chain's registration.
+ */
+std::shared_ptr<const RasterProgram> CaptureProgram(rhi::Format a_format)
+{
+	struct CopyBlock
+	{
+		ShaderBindings::Handle colorInput;
+	};
+	static std::map<rhi::Format, std::shared_ptr<const RasterProgram>> programs;
+	if (const auto found = programs.find(a_format); found != programs.end())
+		return found->second;
+	auto* host = RenderGraphRuntime::Get().Host();
+	if (!host)
+		return nullptr;
+	auto program = RasterProgram::Load(host->Device(),
+		{ .pixelSource = "Upscaling/CopyHudlessPS.hlsl", .constantWords = ShaderBindings::Words<CopyBlock>(), .targets = { { .format = a_format } } });
+	if (program)
+		programs.emplace(a_format, program);
+	return program;
+}
+
+/**
  * @brief Registers the chain's three clients (the composites at the post stage's first ImageSpace step; the slots before the
  * tonemap and the HDR effect up to its bloom at its second ImageSpace step, after the Upscale anchor; the tonemap and after at its
  * second) for the sizes now. Their passes are a fixed list in the engine's order, with the luminance level count fixed for this size.
@@ -613,6 +658,7 @@ void RegisterChainSteps()
 	chain.registeredFrame = Frame::Driver::Current().frame;
 	chain.entries.clear();
 	chain.requested = {};
+	chain.captureEntry = kNoCopy;
 	for (auto& part : chain.parts) {
 		part.made.fill(false);
 		part.copy.fill(false);
@@ -693,6 +739,7 @@ void RegisterChainSteps()
 		bool final = false;  // it writes the scratch target: the next copy back of its group follows it
 		bool copy = false;   // a copy back of the scratch target into its image (desc.name only)
 		bool ldr = false;    // a copy back's side: the final target, else kMAIN
+		bool capture = false;  // the frozen background's copy: the final target into kMENUBG (desc.name only)
 	};
 	std::vector<Pending> steps;
 	const auto add = [&](std::uint8_t a_part, std::uint8_t a_group, WorldScope a_scope, E::ImageSpaceEffectEnum a_effect, std::uint16_t a_variant, StepDesc a_desc,
@@ -959,6 +1006,14 @@ void RegisterChainSteps()
 		add(2, ChainGroup::kUpsample, WorldScope::Upsample, E::ISUpsampleDynamicResolution, 0, std::move(d), true);
 		copyBack(2, ChainGroup::kUpsample, true, "upsample.copyback");
 	}
+	// A frozen world's capture frame: the engine runs its end-of-frame effects into kMENUBG, which the menus composite over later frames
+	// (MenuSteps.inl, the frozen composite). CS's chain ends in the final target; this copy puts the finished image into kMENUBG. Last,
+	// as the image is final here. Opened at RenderEndOfFrameEffects' return in a capture frame (OnEndOfFrame).
+	{
+		Pending pending{ .part = 2, .group = ChainGroup::kCapture, .key = { WorldScope::None, E::ISCopy, 1 }, .capture = true };
+		pending.desc.name = "capture.menubg";
+		steps.push_back(std::move(pending));
+	}
 
 	// The three clients.
 	std::uint32_t rowBase = 0;
@@ -1002,6 +1057,44 @@ void RegisterChainSteps()
 			const auto entry = part.count;
 			if (entry >= kGateEntries || part.rowBase + entry >= 256) {
 				logger::error("[ORG] ImageSpace: the post chain has more steps than a stage's rows hold; {} has no pass", step.desc.name);
+				continue;
+			}
+			if (step.capture) {
+				// A draw of the final target into kMENUBG at its own gate entry: a texel load per pixel, written in kMENUBG's format (the two
+				// are the same size, their formats may differ). A session where the sizes differ or the program cannot be built has no copy
+				// (logged).
+				const auto source = ImportOf(ImportOfName(kFinal));
+				const auto target = ImportOf(ImportOfName(T::kMENUBG));
+				const auto program = source && target ? CaptureProgram(RtvFormatOf(T::kMENUBG, target)) : nullptr;
+				if (!program || source.Width() != target.Width() || source.Height() != target.Height()) {
+					logger::error("[ORG] ImageSpace: the final target and kMENUBG differ in size, or the copy's program could not be built; a frozen "
+								  "world's capture frame has no frozen background");
+					continue;
+				}
+				AnchorPasses::Builder builder(Anchor::ImageSpace, client.id, static_cast<std::int32_t>(entry), client.latch, client.gate);
+				builder.Add(AnchorPasses::Draw{ .name = step.desc.name,
+					.program = program,
+					.bindings = { AnchorPasses::Bind::Srv(source) },
+					.target = target,
+					.viewport = { .width = target.Width(), .height = target.Height() },
+					.gate = entry });
+				auto made = builder.Take();
+				if (builder.Failed() || made.size() != 1) {
+					logger::error("[ORG] ImageSpace: post step {} has no pass ({}); a frozen world's capture frame has no frozen background", step.desc.name,
+						builder.Failure());
+					continue;
+				}
+				state.importedObjects[T::kMENUBG] = EngineObjectOf(T::kMENUBG);
+				++part.count;
+				part.keys[entry] = step.key;
+				part.group[entry] = step.group;
+				part.copy[entry] = true;
+				part.made[entry] = true;
+				chain.captureEntry = static_cast<std::uint16_t>(entry);
+				auto pass = std::move(made.front());
+				pass.order = static_cast<std::int32_t>(entry);
+				pass.row = static_cast<std::int16_t>(part.rowBase + entry);
+				passes.push_back(std::move(pass));
 				continue;
 			}
 			if (step.copy) {
@@ -1330,6 +1423,38 @@ bool TakeChainStep(std::size_t a_effect, bool a_compute, std::array<std::uint32_
 	if (client.batch.size() > staged && part.copyBack[entry] != kNoCopy)
 		client.batch.push_back({ .entry = part.copyBack[entry] });
 	return taken;
+}
+
+/**
+ * @brief A frozen world's capture frame, at RenderEndOfFrameEffects' return: the frozen background's copy (the final target into kMENUBG)
+ * runs last in the post stage. Without the copy in the frame's schedule (a registration whose build has not switched in yet) the frozen
+ * background is not written this time: lagged work, logged. Render owner.
+ */
+void OpenCapture()
+{
+	auto& chain = Chain();
+	auto& state = IS();
+	constexpr auto segment = Frame::SegmentId::Post;
+	constexpr std::size_t p = 2;
+	auto& part = chain.parts[p];
+	auto& client = state.post[static_cast<std::size_t>(kChainParts[p])];
+	const auto entry = chain.captureEntry;
+	const auto& rows = Frame::Driver::Current().Segment(segment).rows;
+	const auto row = entry == kNoCopy ? 256u : part.rowBase + entry;
+	const bool scheduled = row < 256 && (rows[row / 64] >> (row % 64) & 1u) != 0 && part.made[entry] && FrameAnchors::CanTap(client.id);
+	if (!scheduled) {
+		logger::warn("[ORG] ImageSpace: the frozen background's copy is not in frame {}'s schedule (made {}, row {}); kMENUBG keeps its last image",
+			Frame::Driver::Current().frame, entry != kNoCopy && part.made[entry], row);
+		Frame::Driver::NoteLaggedWork(segment);
+		return;
+	}
+	client.batch.push_back({ .entry = entry });
+	if (Usable())
+		Flush();
+	static std::uint64_t logged = 0;
+	if (logged++ < 4)
+		logger::info("[ORG] ImageSpace: frame {} is a frozen world's capture frame: the post stage copies the final target into kMENUBG",
+			Frame::Driver::Current().frame);
 }
 
 /** @brief The pre-tonemap composites' hook: inside the world chain, their draws are chain steps. */

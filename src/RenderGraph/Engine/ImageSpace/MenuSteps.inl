@@ -393,6 +393,10 @@ bool TakeMenuStep(std::size_t a_effect, bool a_compute, std::array<std::uint32_t
 		key = { WorldScope::MenuCopy, id, InOut(call.source, call.destination) };
 		known = call.source >= 0 && call.destination >= 0;
 	}
+	// A frozen world's capture frame composites the frame it just drew (kMENUBG) into the final target. CS's post stage drew it into the
+	// final target and copied that into kMENUBG (ChainSteps.inl, OpenCapture): the final target holds the image already. Nothing to draw.
+	if (known && key == FrozenKey() && Frame::Driver::Current().kind == Frame::Kind::FrozenWorld && Frame::Driver::Current().capture)
+		return true;
 	const bool isFrozen = known && key == FrozenKey() && !IS().post[static_cast<std::size_t>(PostPart::Frozen)].specs.empty();
 	const auto found = known && !isFrozen ? menu.entries.find(key) : menu.entries.end();
 	if (!isFrozen && found == menu.entries.end()) {

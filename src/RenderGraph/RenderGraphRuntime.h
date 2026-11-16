@@ -308,6 +308,12 @@ public:
 	bool DclfBuildsSettled() const;
 
 	/**
+	 * @brief Owner thread: a graph rebuild was asked for that leaves frames without the graph until it is built (any epoch but a staged
+	 * CS stage, whose attached graph runs until its build switches in whole). True with no build manager when any rebuild was asked for.
+	 */
+	bool RebuildRequestedUnstaged() const;
+
+	/**
 	 * @brief Owner thread, at setup: before the first world frame, every graph asked for is built now; after it, a build point
 	 * (BuildIfRequested). Returns whether the graphs were built now.
 	 */

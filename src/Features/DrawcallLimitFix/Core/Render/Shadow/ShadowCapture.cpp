@@ -252,7 +252,8 @@ namespace DCLF
 		// re-entry): the engine would draw every caster otherwise.
 		if (Scene::FrameView::Get().NotDrawingYet())
 			return 0;
-		if (auto* host = RenderGraphRuntime::Get().Host(); !host || host->RebuildRequested()) {
+		// A staged CS stage's build (a frame kind's or a key's) does not count: its attached graph keeps running.
+		if (auto* host = RenderGraphRuntime::Get().Host(); !host || RenderGraphRuntime::Get().RebuildRequestedUnstaged()) {
 			LoadHold::BeginReentry(host ? "a graph rebuild (re-imported shadow maps or other resources)" : "no graph host");
 			return 0;
 		}

@@ -200,7 +200,7 @@ namespace DCLF
 			return false;
 		// Not while the built graph lacks the map's import.
 		auto* host = RenderGraphRuntime::Get().Host();
-		if (!host || host->RebuildRequested())
+		if (!host || RenderGraphRuntime::Get().RebuildRequestedUnstaged())
 			return false;
 		std::optional<ShadowViewLayout> predicted;
 		for (const auto& layout : engine.PredictedOcclusion(&toggles))

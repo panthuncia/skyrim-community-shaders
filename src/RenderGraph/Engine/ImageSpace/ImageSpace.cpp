@@ -3988,6 +3988,8 @@ namespace RenderGraph::Engine::ImageSpace
 			chain.inEndOfFrame = true;
 		} else {
 			chain.inEndOfFrame = false;
+			if (std::exchange(chain.captureFrame, false))
+				OpenCapture();
 		}
 	}
 

@@ -333,7 +333,7 @@ namespace DCLF
 		coverage.targetImported = r && r->target;
 		coverage.rebuildPending = r && r->rebuildPending;
 		coverage.mainResourcesCurrent = r && r->main && r->main == resources && r->main->native[1];
-		coverage.rebuildRequested = a_host && a_host->RebuildRequested();
+		coverage.rebuildRequested = a_host && RenderGraphRuntime::Get().RebuildRequestedUnstaged();
 		coverage.frame = a_frame;
 		const bool covered = Extensions::ViewEntryOf(a_kind).covered(coverage);
 		SetViewCovered(a_kind, covered);

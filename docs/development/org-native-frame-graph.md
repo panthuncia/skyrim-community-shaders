@@ -3632,7 +3632,8 @@ The fatal paths fired three times during the work, each fixed before the final r
 - **Loading screen, main menu**: none in the test runs; the menu UI stage is the frame's one ticket. A clear of a view the menu UI stage's
   places do not clear keeps its group anchor's ticket (none seen).
 - **Bink movie**: none; the UI stage is the frame's one ticket.
-- **Menu over a frozen world**: the capture frame stops at the post stage's check (above); not measured.
+- **Menu over a frozen world**: the menu UI stage is the frame's one ticket (the frozen composite, the displays, the present's clients, the
+  overlay); its capture frame is a world frame (see "A frozen world's capture frame", the end of this document).
 
 ### What of the old native paths is still reachable (for stage 6)
 
@@ -3933,7 +3934,7 @@ and there the engine's end-of-frame effects run from kMAIN into kMENUBG (target 
 (`CheckEndOfFrame`, "Fixed post targets") stops the game in development builds. This predates this stage: the capture frame was never
 reached before. It needs the post stage to copy its final target into kMENUBG in a capture frame (a copy step opened at the end-of-frame
 entry when the final target is kMENUBG), and the check to accept that target. Not done; so the menu UI stage's frozen composite step (step 0)
-and the frozen kind's scene were not exercised.
+and the frozen kind's scene were not exercised. *Done since: see "A frozen world's capture frame" at the end of this document.*
 
 ## What replaced the main ImageSpace client (2026-11-16, `org-native/phases`)
 
@@ -4372,3 +4373,63 @@ between Begin and the end of frame (now read again at the end of frame), and the
 Not changed and still open: after a registration (a new size: an upscaler switch changes the dynamic-resolution ratios) the chain's
 passes are not tappable until the new build switches in, so the post chain draws nothing for those one or two frames. That is older than
 this change; a resize rebuilds every pass for the new size.
+
+## A frozen world's capture frame (2026-11-16, `org-native/phases`)
+
+Opening a menu that freezes the background (the pause menu, `Journal Menu`) used to stop the game in development builds. Its first frame
+is the capture frame: Main's frame (SE 0x1405b1020) calls SE 0x1405b1650, which draws the world once with kMENUBG (target 14) as the
+final target and sets the engine's captured flag (SE 0x142f26b75); the same frame then composites kMENUBG into the framebuffer (SE
+0x1412e2550). The post stage's check (`CheckEndOfFrame`) treated the final target 14 as a mismatch.
+
+**Decided at Begin.** `Driver::DecideKind` already marks the capture frame from the engine's own test (the menu stack's freeze flag, the
+player's cell and 3D, CS's captured flag, reset when no menu freezes the background): `Kind::FrozenWorld` with `capture`. The check now
+expects kMENUBG as the final target in that frame and the final target in every other; anything else is still a mismatch.
+
+**The post stage writes kMENUBG.** CS's chain still ends in the final target. A new last step of the post stage, `capture.menubg`
+(ChainSteps.inl, group `kCapture`), draws the final target into kMENUBG: one texel loaded per pixel (Upscaling's CopyHudlessPS) and
+written in kMENUBG's format. A texel copy was tried first: the two targets have 4-byte texels of different formats, and the copied
+image was garbage. The step is opened at RenderEndOfFrameEffects' return in a capture frame (`OpenCapture`).
+
+It is **always present and gated**, not absent when unused. The engine gives no notice before the capture frame's own Begin, and that is
+too late for a build (2 to 6 frames) or for a recording of a new description (a frame or more): a lagging capture frame would leave
+kMENUBG unwritten for as long as the menu stays open. Every other frame skips the pass at execution, its barriers folded.
+
+The same holds for the radial blur after the tonemap (slot 5): the pause menu starts its blur (its ImageSpace modifier) in the capture
+frame itself, and the first run showed the frozen background without it while the post stage's key build lagged. Slot 5 is now on in
+every description, like refraction.
+
+**The frozen composite in the capture frame** has nothing to draw: the final target already holds the image it would copy back. Its
+draw is withheld (MenuSteps.inl). In the frozen kind's later frames it is the menu UI stage's first step, as before.
+
+**DCLF's load hold no longer holds the presents for a staged build.** The capture frame asks for a post stage build (the radial blur's
+key, before the change above), and DCLF's re-entry hold (`ShadowCapture`, `OcclusionReady`, view coverage) started on any rebuild
+request: it held the presents through the whole menu, so the menu was never shown. They now ask
+`RenderGraphRuntime::RebuildRequestedUnstaged` (`BuildManager::UnstagedRebuildRequested`): a staged CS stage keeps running its attached
+graph until its build switches in whole, so its request leaves nothing undrawn. In the native-quick runs this also ended the back-to-back
+5-second re-entry holds after the load (6 in the previous build's run, 1 now).
+
+### Measurements
+
+The frozen kind (pause menu over the world, `h3fz`, a census window of 129 frozen frames and 34 world frames): the menu UI stage is the
+frozen frame's one ticket (1.0 a frame: the frozen composite, two display segments, the present's clients, the overlay, by the frame
+sequence census), about 40 entry and 200 body barriers as built a frame. The capture frame is a world frame (the world recipe) plus the
+gated copy. No clear runs on its own anchor's ticket in frozen frames (a new log line names any, with the frame kind, a few after each
+kind switch).
+
+perf-taa, native Vulkan, Perf-Fast, one run each, the machine in use (fps rough):
+
+| perf-taa | Before (`e2perf`) | After (`i1perf`) |
+|---|---|---|
+| Tickets a frame | 12.8 to 13.0 | 12.8 to 13.0 |
+| Queue submissions a frame (batches + uploads + leading uploads) | 14.7 + 2.0 + 1.0 | 14.7 + 2.0 + 1.0 |
+| Entry / body barriers a frame (body less folded) | 496 to 510 / 796 to 814 | 501 to 508 / 803 to 812 |
+| fps (rough) | 123.4 | 124.8 |
+
+### Checks
+
+One run each, `CS_TEST_BACKGROUND=1`, mismatches fatal: the frozen-world run native (`Journal Menu=show`, shot, hide, shot) and guest,
+native-quick, native-d3d12-quick, native-river, native-upscalers, native-interior, native-validation (the known 20
+`VUID-vkCmdDraw-None-09600`), the loading-thread run, first and third person, guest-quick, native-perf-taa: all passed, 0 tap errors, 0
+recipe findings, 0 frames a stage was absent after it first ran. The main menu (Start On Save off): menu shot as before (the emblem still
+missing); the harness marks it failed because it expects a world. The pause menu shot native against guest: the same menu and the same
+blurred frozen background. After the menu closes the world resumes (world frames, the stages current, 0 tap errors).

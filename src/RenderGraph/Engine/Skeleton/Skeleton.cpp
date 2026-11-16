@@ -1649,6 +1649,22 @@ namespace RenderGraph::Engine::Skeleton
 					if (afterWorld)
 						(void)FrameAnchors::TapPoint(static_cast<std::uint32_t>(RenderGraphRuntime::Segment::DeclaredDeferred));
 					group.executed = false;
+					// A clear outside every stage's places runs on the group anchor's own ticket: named by frame kind, a few times a session
+					// after each frame kind switch (a frame kind whose recipe should place it).
+					if (!FrameAnchors::HeldNow(kGroupIds[a_index], kGroupAnchors[a_index]).held) {
+						static std::uint32_t logged = 0;
+						static auto lastKind = RenderGraph::Frame::Kind::Count;
+						const auto& frame = RenderGraph::Frame::Driver::Current();
+						if (std::exchange(lastKind, frame.kind) != frame.kind)
+							logged = 0;
+						if (logged++ < 4) {
+							std::string views;
+							for (const auto& pending : group.pending)
+								views += fmt::format("{}{}", views.empty() ? "" : ",", TargetName(pending.target));
+							logger::info("[ORG] engine skeleton: {} clears of {} on the {} anchor's own ticket in a {} frame{} (frame {})", kGroupNames[a_index], views,
+								FrameAnchors::Name(kGroupAnchors[a_index]), RenderGraph::Frame::KindName(frame.kind), frame.capture ? " (capture)" : "", frame.frame);
+						}
+					}
 					state.flushing = true;
 					const auto result = FrameAnchors::Run(kGroupAnchors[a_index]);
 					state.flushing = false;

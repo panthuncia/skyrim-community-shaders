@@ -754,6 +754,15 @@ namespace RenderGraph
 		return impl->Settled();
 	}
 
+	bool BuildManager::UnstagedRebuildRequested() const
+	{
+		auto& host = *impl->desc.host;
+		for (std::size_t i = 0; i < host.GraphCount(); ++i)
+			if (const auto epoch = host.EpochAt(i); host.RebuildRequested(epoch) && !impl->staged.contains(epoch))
+				return true;
+		return false;
+	}
+
 	bool BuildManager::BuildOwnerEpochsNow(std::string_view a_caller)
 	{
 		impl->owner.store(std::this_thread::get_id(), std::memory_order_release);
