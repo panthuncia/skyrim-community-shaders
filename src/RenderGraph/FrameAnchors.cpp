@@ -343,7 +343,7 @@ namespace FrameAnchors
 					{ Anchor::Count, { nullptr, nullptr }, Segment::Count, false, true } } },
 				9, { "CS stage: deferred+water", "CS stage: deferred+water inputs", "FrameSegments::Deferred / ", "cs.segment.deferred" } },
 			// ImageSpaceManager::RenderWorldPostProcess (SE 100430, AE 107148) up to Upscaling's wrapper of the end-of-frame effects: the
-			// volumetric lighting (whole: its hook runs only there), the pre-tonemap composites drawn from the pass-state table, and the
+			// volumetric lighting (whole: its hook runs only there), the pre-tonemap composite as CS passes (ChainSteps.inl), and the
 			// PostProcessing anchor (its end tap, reserved so its hook always runs). The upscaler's evaluate comes after the end tap: it is
 			// external work, and work submitted between a stage's taps and its commit runs ahead of the stage's work on the GPU.
 			{ Segment::DeclaredPostComposites,
@@ -351,7 +351,7 @@ namespace FrameAnchors
 					{ Anchor::ImageSpace, { "cs.engine.imagespace.post.composites", nullptr } },
 					{ Anchor::PostProcessing } } },
 				3, { "CS segment: post composites", "CS segment: post composites inputs", "FrameSegments::PostComposites / ", "cs.segment.post-composites" } },
-			// After the upscaler's evaluate: the Upscale anchor, RenderEndOfFrameEffects (99023 / 105674) drawn from the table, split
+			// After the upscaler's evaluate: the Upscale anchor, RenderEndOfFrameEffects (99023 / 105674) as CS passes, split
 			// at the Tonemap anchor (its passes replace or follow the tonemap draw, so they sit between the HDR effect's draws and the
 			// tonemap's), and its return as the end (a point: no anchor runs there).
 			{ Segment::DeclaredPostEnd,
@@ -670,10 +670,6 @@ namespace FrameAnchors
 			std::array<std::uint64_t, kDeclared> waitFrame{};
 			bool inBegin = false;  // BeginFrame is choosing the schedules: a recording asked for outside it is a mid-frame re-record
 			std::array<std::uint64_t, kDeclared> endedFrame{};
-			// The frame in which a segment was cut (CutSegment): it ended before its end tap, and its later taps that frame do nothing.
-			std::array<std::uint64_t, kDeclared> cutFrame{};
-			std::array<std::uint64_t, kDeclared> cuts{};                  // cuts so far (the census)
-			std::array<std::vector<std::string>, kDeclared> cutReasons{};  // the first few reasons, logged once each
 			// Each segment's taps of each step in its held run so far: the next tap of a step is that instance (TapInstance). Reset
 			// when the frame's first tap takes the ticket.
 			std::array<std::array<std::uint32_t, kMaxSteps>, kDeclared> stepTaps{};
@@ -3043,8 +3039,7 @@ namespace FrameAnchors
 				return { RunStatus::Idle };
 			}
 			if (a_state.endedFrame[a_declared] == frame.frame) {
-				if (a_state.cutFrame[a_declared] != frame.frame)
-					Driver::NoteTapError(Driver::TapError::Repeated, segment, fmt::format("the {} tap fired after the segment's end tap", tap));
+				Driver::NoteTapError(Driver::TapError::Repeated, segment, fmt::format("the {} tap fired after the segment's end tap", tap));
 				return { RunStatus::Idle };
 			}
 			if (end && !Driver::NoteTap(segment, tap))
@@ -3223,9 +3218,8 @@ namespace FrameAnchors
 			case Segment::DeclaredPostComposites:
 			case Segment::DeclaredPostEnd:
 				{
-					// The post chain drawn from the pass-state table (default on; CS_ORG_SEGMENT_POST_DRAW=0 off). It needs the post
-					// description (CS_ORG_SEGMENT_POST, not 0).
-					static const bool on = !Switches::Off("CS_ORG_SEGMENT_POST_DRAW") && !Switches::Equals("CS_ORG_SEGMENT_POST", "0");
+					// The post chain as CS passes (ImageSpace's ChainSteps.inl). It needs the chain's hooks (CS_ORG_SEGMENT_POST, not 0).
+					static const bool on = !Switches::Equals("CS_ORG_SEGMENT_POST", "0");
 					return on;
 				}
 			default:
@@ -3350,36 +3344,6 @@ namespace FrameAnchors
 			return true;
 		}
 		return false;
-	}
-
-	RunResult CutSegment(std::uint32_t a_segment, std::string_view a_why)
-	{
-		const RunDepthScope depth;
-		auto& state = Anchors();
-		if (!state.host)
-			return { RunStatus::Idle };
-		auto lock = Guard();
-		if (!IsRenderOwner() || !RenderGraphRuntime::Get().IsActive())
-			return { RunStatus::Refused };
-		const auto& frame = Driver::Current();
-		for (std::uint32_t d = 0; d < kDeclared; ++d) {
-			if (!state.declaredEpochs[d] || static_cast<std::uint32_t>(kDeclaredInfo[d].segment) != a_segment || !WindowOpen(state, d))
-				continue;
-			const auto segment = static_cast<SegmentId>(d);
-			state.cutFrame[d] = frame.frame;
-			state.endedFrame[d] = frame.frame;
-			++state.cuts[d];
-			if (state.cutReasons[d].size() < 8 && std::ranges::find(state.cutReasons[d], std::string(a_why)) == state.cutReasons[d].end()) {
-				state.cutReasons[d].emplace_back(a_why);
-				logger::info("[ORG] frame segments: the {} is cut short in frame {}: {}", kDeclaredInfo[d].names.label, frame.frame, a_why);
-			}
-			(void)Driver::NoteTap(segment, "a cut");
-			// What its taps staged so far is committed now; nothing staged, nothing to submit.
-			if (state.stagedFrame[d] != frame.frame)
-				return { RunStatus::Idle };
-			return SubmitSegment(state, Point{}, d);
-		}
-		return { RunStatus::Idle };
 	}
 
 	RunResult TapPoint(std::uint32_t a_segment)
@@ -3542,15 +3506,13 @@ namespace FrameAnchors
 							++it;
 						}
 					}
-					// A client that commits once per segment run, active at a second run of its step (the water drawn in two batches): the
-					// segment is cut here, and this run and the rest of the frame's steps draw on their anchors' own epochs.
+					// A client that commits once per segment run, active at a second run of its step: a mismatch. That run draws nothing.
 					const bool again = state.stagedFrame[declared] == Driver::Current().frame && state.stepTaps[declared][k] > 0 &&
 					                   std::ranges::any_of(stepMembers, [](const RunClient& a_client) {
 										   return a_client.active && !a_client.desc->repeats && a_client.desc->maxInstances <= 1;
 									   });
 					if (again) {
-						(void)CutSegment(static_cast<std::uint32_t>(kDeclaredInfo[declared].segment), fmt::format("the {} step ran again in one segment run", kInfo[index].name));
-						others.insert(others.end(), stepMembers.begin(), stepMembers.end());
+						Driver::NoteTapError(Driver::TapError::Repeated, static_cast<RenderGraph::Frame::SegmentId>(declared), fmt::format("the {} step ran again in one segment run", kInfo[index].name));
 						break;
 					}
 					if (std::ranges::any_of(stepMembers, [](const RunClient& a_client) { return a_client.active; })) {
@@ -3821,11 +3783,6 @@ namespace FrameAnchors
 				if (count)
 					inside += fmt::format("{}{} {}", inside.empty() ? "" : ", ", why, std::exchange(count, 0));
 			logger::info("[ORG] frame segments: GPU work submitted between a stage's first tap and its commit, since the last report: {}", inside.empty() ? "none" : inside);
-			std::string cuts;
-			for (std::uint32_t d = 0; d < kDeclared; ++d)
-				if (state.cuts[d])
-					cuts += fmt::format("{}{} {}", cuts.empty() ? "" : ", ", kDeclaredInfo[d].names.label, std::exchange(state.cuts[d], 0));
-			logger::info("[ORG] frame segments: segments cut short since the last report: {}", cuts.empty() ? "none" : cuts);
 		}
 		std::string runs;
 		for (std::uint32_t i = 0; i < kAnchors; ++i)

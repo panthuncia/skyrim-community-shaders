@@ -74,61 +74,47 @@ namespace RenderGraph::Frame
 		// A hash of the revisions of the segment's passes recorded ahead (RenderGraphPass::RevisionHash): a pass whose recording
 		// depends on something beyond its bindings and host data names it in its revision, and a kept recording binds it.
 		std::uint64_t passes = 0;
-		// A bit per declared row of the segment's clients (FrameAnchors::ClientDesc::rows, PassDesc::row: the post chain's pass-state
-		// table rows the description selects). A pass whose row bit is clear records only its barriers.
+		// A bit per declared row of the segment's clients (FrameAnchors::ClientDesc::rows, PassDesc::row: the engine effect steps the
+		// description has on). A pass whose row bit is clear records only its barriers.
 		std::array<std::uint64_t, 4> rows{};
 
 		friend bool operator==(const SegmentFields&, const SegmentFields&) = default;
 	};
 
 	/**
-	 * @brief The world post chain's state (RenderGraph/Frame/PostChain.h): what selects which ImageSpace effects run and which variant
-	 * each takes. Every field is read from the engine's own state, named where it is read (PostChain.cpp).
+	 * @brief The world post chain's structure for the frame (RenderGraph/Frame/PostChain.h): which of the chain's effects the post
+	 * stage has on, read at Renderer::Begin from the engine's own state (PostChain.cpp names each). Variants the engine picks per
+	 * frame (the ping-pong targets, the parities) are not here: every variant of an effect that is on is recorded, and its hook opens
+	 * the one drawn (ChainSteps.inl).
 	 */
 	struct PostFields
 	{
-		bool read = false;             // the ImageSpace manager exists
-		bool volumetric = false;       // the engine's volumetric lighting runs (VL enabled and its effect active)
-		std::uint8_t vlParity = 0;     // which of its two targets the volumetric lighting writes this frame (43 + parity), as the composite reads it
-		std::uint8_t compositeAddress = 0;  // the first pixel sampler's address mode the VL composite finds (it does not set it): read at its call
-		std::uint8_t taaAddress = 0;        // the sixth pixel sampler's address mode TAA finds (it does not set it): read at its call
-		bool sil = false;              // the SIL composite (+0x1d8)
-		std::uint8_t silParity = 0;    // the parity the SIL composite takes this frame (it alternates by its own counter)
-		bool lensFlares = false;       // the image-based lens flares (+0x180)
-		bool eof = false;              // gEnableEOFImageSpace: the end-of-frame slots run at all
-		bool ldr = false;              // usesLDR (+0x210): slots 3 to 7 run after the tonemap
-		std::uint8_t slots = 0;        // a bit per end-of-frame slot 0 to 7 whose effect is active (its IsActive)
-		bool hdr = false;              // the HDR effect runs (else a copy takes its place)
-		bool effects11 = false;        // Effects11 owns the tonemap: the HDR effect is not called at all
-		std::uint8_t bloom = 0;        // the bloom radius index (0 to 6): which bright-pass blur
-		bool fade = false;             // the tonemap's fade form (the manager's fade above 0)
-		bool adapt = false;            // last frame's adapted luminance exists: the light adaptation draws the last level
-		std::uint8_t lumLevels = 0;    // the luminance chain's levels for kHDR_DOWNSAMPLE0's size
-		std::uint8_t lumParity = 0;    // the parity the chain's last level takes this frame (it alternates per HDR render)
-		bool taa = false;              // the engine's TAA runs (an upscaler that replaces it turns it off)
-		std::uint8_t taaMode = 0;      // its form: 0 the plain one, 1 with the mask swap, 2 the UI one
-		bool taaWater = false;         // its water form
-		std::uint8_t taaParity = 0;    // the history it writes this frame (it alternates per TAA render)
-		bool dynres = false;           // dynamic resolution scales the frame: the upsample runs
-		std::uint8_t dofSteps = 0;     // a bit per step of the depth of field's Render that runs (its step flags, +0x98): downsample, blur, three composites
-		bool dofCompute = false;       // its blur takes the compute form (the compute-blur option)
-		bool dynScaled = false;        // dynamic resolution is unlocked and scales (the upsample's own flag aside): the chain's last step is not final
-		bool screenshot = false;       // the manager's screenshot copy (+0x211) runs this frame
-		bool upscaler = false;         // CS's upscaler evaluates this frame (DLSS, FSR or XeSS)
-		// RenderEndOfFrameEffects' targets (RE::RENDER_TARGET values; -1 not known yet): its source and destination arguments and the
-		// manager's swap target (+0x60). Read at its entry; at Begin, the last chain's. They decide where each step reads and writes.
-		std::int8_t eofSource = -1;
-		std::int8_t eofDest = -1;
-		std::int8_t eofSwap = -1;
-		// The frame's normals target (kNORMAL_TAAMASK_SSRMASK or its swap, which the engine alternates every frame): the shadow state's
-		// third target at Deferred::StartDeferred. TAA reads it.
-		std::int8_t normals = -1;
+		bool read = false;          // the ImageSpace manager exists
+		bool volumetric = false;    // the engine's volumetric lighting runs (VL enabled and its effect active): its composite
+		bool sil = false;           // the SIL composite (+0x1d8)
+		bool lensFlares = false;    // the image-based lens flares (+0x180)
+		bool eof = false;           // gEnableEOFImageSpace: the end-of-frame slots run at all
+		bool ldr = false;           // usesLDR (+0x210): slots 3 to 7 run after the tonemap
+		std::uint8_t slots = 0;     // a bit per end-of-frame slot 0 to 7 whose effect is active (its IsActive)
+		bool hdr = false;           // the HDR effect runs (else a copy takes its place)
+		bool effects11 = false;     // Effects11 owns the tonemap: the HDR effect's tonemap is not called
+		std::uint8_t bloom = 0;     // the bloom radius index (0 to 6): which bright-pass blur and blur
+		bool fade = false;          // the tonemap's fade form (the manager's fade above 0)
+		bool adapt = false;         // last frame's adapted luminance exists: the light adaptation draws the last level
+		std::uint8_t lumLevels = 0; // the luminance chain's levels for kHDR_DOWNSAMPLE0's size
+		bool taa = false;           // the engine's TAA runs: CS's upscaler method is TAA (without Upscaling, the engine's flag)
+		std::uint8_t taaMode = 0;   // its form: 0 the plain one, 1 with the mask swap, 2 the UI one
+		bool taaWater = false;      // its water form
+		bool dynres = false;        // dynamic resolution scales the frame: the upsample runs
+		bool dofCompute = false;    // the depth of field's blur takes the compute form (the compute-blur option)
+		bool screenshot = false;    // the manager's screenshot copy (+0x211) runs this frame
+		bool upscaler = false;      // CS's upscaler evaluates this frame (DLSS, FSR or XeSS)
 
 		friend bool operator==(const PostFields&, const PostFields&) = default;
 	};
 
 	/**
-	 * @brief The RenderWorld scopes the pass-state table also describes (RenderGraph/Frame/PostChain.h, Scope): the SAO generation and
+	 * @brief The RenderWorld scopes' state (RenderGraph/Frame/PostChain.h, Scope): the SAO generation and
 	 * composite (RenderSSAO, SE 100520 / AE 107245), the snow pass or its copy (Main::RenderWorld, 100424 / 107142), the screen-space
 	 * reflections (100428 / 107146) and the water blend. Every field is read from the engine's own state at the scope's entry, named
 	 * where it is read (PostChain.cpp).
@@ -155,8 +141,8 @@ namespace RenderGraph::Frame
 	/** @brief The world fields that differ, as DiffPost gives them. a_parity: the parity fields too. */
 	std::string DiffWorld(const WorldFields& a_before, const WorldFields& a_after, bool a_parity = true);
 
-	/** @brief The post fields that differ, as "name old -> new" joined by ", "; empty when equal. a_parity: the parity fields too. */
-	std::string DiffPost(const PostFields& a_before, const PostFields& a_after, bool a_parity = true);
+	/** @brief The post fields that differ, as "name old -> new" joined by ", "; empty when equal. */
+	std::string DiffPost(const PostFields& a_before, const PostFields& a_after);
 
 	/** @brief One frame's description. */
 	struct Description
@@ -171,7 +157,7 @@ namespace RenderGraph::Frame
 		std::uint32_t slot = 0;    // frame modulo the frames in flight: the published copy and latch regions this frame uses
 		std::uint32_t parity = 0;  // frame modulo 2: a slot always has the same parity
 		std::array<SegmentFields, kSegments> segments{};
-		PostFields post{};  // read at Begin; the post chain is predicted from its second read at the chain's decision event
+		PostFields post{};  // read at Begin: the post stage's structure
 
 		const SegmentFields& Segment(SegmentId a_segment) const { return segments[static_cast<std::size_t>(a_segment)]; }
 		SegmentFields& Segment(SegmentId a_segment) { return segments[static_cast<std::size_t>(a_segment)]; }

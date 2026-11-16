@@ -12,6 +12,7 @@ bool RenderGraph::Engine::ImageSpace::Requested()
 // volk must precede every Vulkan header in this translation unit.
 #	include <rhi_interop_vulkan.h>
 
+#	include "Deferred.h"
 #	include "Features/DrawcallLimitFix/Core/Engine/Family/EngineDrawFamily.h"
 #	include "Features/DrawcallLimitFix/Core/Gpu/GpuTextures.h"
 #	include "Features/DynamicCubemaps/ORGDynamicCubemaps.h"
@@ -21,7 +22,6 @@ bool RenderGraph::Engine::ImageSpace::Requested()
 #	include "RenderGraph/AnchorPasses.h"
 #	include "RenderGraph/ComputeProgram.h"
 #	include "RenderGraph/Engine/Constants/EngineConstants.h"
-#	include "RenderGraph/Engine/ImageSpace/PostTable.h"
 #	include "RenderGraph/Engine/Pipeline/Descriptions.h"
 #	include "RenderGraph/Engine/Pipeline/StateConversion.h"
 #	include "RenderGraph/Engine/Tripwire/Tripwire.h"
@@ -506,8 +506,8 @@ namespace RenderGraph::Engine::ImageSpace
 		};
 
 		/**
-		 * @brief One of the post segments' clients (RegisterPost): its table rows' passes, by row index, with its own gate and latch
-		 * (a segment closes its clients' gates when its ticket is taken, and the two post segments' runs are different runs).
+		 * @brief One of the CS stages' ImageSpace clients (the post chain's three, the RenderWorld scopes' two): its steps' passes, with
+		 * its own gate and latch (a stage closes its clients' gates when it begins, and the post stages' runs are different runs).
 		 */
 		struct PostClient
 		{
@@ -515,9 +515,7 @@ namespace RenderGraph::Engine::ImageSpace
 			std::shared_ptr<RunGate> gate;
 			std::shared_ptr<org::LatchBlock> latch;
 			std::vector<std::shared_ptr<const Spec>> specs;
-			std::array<const Spec*, kGateEntries> byRow{};  // the pass of each table row this client draws, by row index
-			std::array<bool, kGateEntries> made{};          // the last build made it (set on the build thread)
-			std::vector<Pending> batch;                     // the draws its next tap commits
+			std::vector<Pending> batch;  // the draws its next tap commits
 		};
 
 		/** @brief At most this many shapes are built on first sight in a session: more means something draws a new shape each frame. */
@@ -646,16 +644,10 @@ namespace RenderGraph::Engine::ImageSpace
 			// mode says whether a draw uses it. scissorKnown: one was set this session.
 			std::array<std::int32_t, 4> scissor{};
 			bool scissorKnown = false;
-			// The post segments drawing from the pass-state table (RegisterPost): on for the session once registered; which part of this
-			// frame's chain draws from it (OnPostPart: the composites, the end-of-frame effects); the constant chunks their draws read, held
-			// for the frame; a registration asked for at the next frame (a row made for another size).
+			// The CS stages' ImageSpace clients (the post chain's, the RenderWorld scopes'): on for the session once their gates and latches
+			// exist; the constant chunks their draws read, held for the frame.
 			bool postOn = false;
-			bool postRegister = false;
 			std::array<PostClient, 5> post{};
-			std::array<bool, 2> partDrawing{};
-			// The composites part cannot draw from the table this frame: the post composites segment is cut at the composites' call, after
-			// the volumetric lighting (whose anchor is the segment's), so that work is submitted before today's path draws the composites.
-			std::string compositesCut;
 			// Between RenderSSAO's two calls in Main::RenderWorld: an own-scope copy-subregion call there is the snow scope's copy.
 			bool snowWindow = false;
 			std::vector<std::shared_ptr<const org::LatchBlock>> postKeep;
@@ -2270,8 +2262,9 @@ namespace RenderGraph::Engine::ImageSpace
 		}
 
 		void NoteImports(const Spec& a_spec);
-		void RegisterPost();
 		void CheckWorldSteps();
+		void CheckChainSteps();
+		void ReregisterSteps();
 
 		/**
 		 * @brief Registers the client with a pass for every shape of a_keys (numbered from 0 by their place in the frame), replacing any
@@ -2747,7 +2740,7 @@ namespace RenderGraph::Engine::ImageSpace
 			state.late.clear();
 			state.refusedShapes.clear();
 			RegisterClient(keys);
-			RegisterPost();
+			ReregisterSteps();
 		}
 
 		/**
@@ -2910,13 +2903,11 @@ namespace RenderGraph::Engine::ImageSpace
 			state.runsThisFrame = 0;
 			// Last frame's post segments were submitted at their end taps: their draws' constant chunks are no longer read from here.
 			state.postKeep.clear();
-			state.compositesCut.clear();
-			if (state.postRegister)
-				RegisterPost();
 			QueuePrograms();
 			CheckImports();
 			RetryBuild();
 			CheckWorldSteps();
+			CheckChainSteps();
 			MaybeWriteManifest();
 			LogEngineDraws();
 		}
@@ -2950,538 +2941,31 @@ namespace RenderGraph::Engine::ImageSpace
 		}
 
 		/**
-		 * @brief The shape a table row declares, for its output's size now (its viewport by its rule). False with a_error when its effect
-		 * is not covered or its output cannot be resolved.
-		 */
-		bool RowShape(const PostRow& a_row, ShapeKey& a_out, std::string& a_error)
-		{
-			const auto effect = CoveredIndexOf(a_row.effect);
-			if (effect < 0) {
-				a_error = fmt::format("its effect {} is not covered", a_row.effect);
-				return false;
-			}
-			a_out = ShapeKey{};
-			a_out.effect = static_cast<std::uint32_t>(effect);
-			a_out.output = a_row.output;
-			a_out.output1 = a_row.output1;
-			for (std::uint32_t slot = 0; slot < kPostSlots; ++slot) {
-				a_out.inputs[slot] = a_row.inputs[slot];
-				a_out.address[slot] = a_row.address[slot];
-				a_out.filter[slot] = a_row.filter[slot];
-			}
-			a_out.blend = a_row.blend;
-			a_out.compute = a_row.compute;
-			if (a_row.compute)
-				return true;
-			OutputView output;
-			std::string_view refusal;
-			if (!ResolveOutput(ImportOfName(a_row.output) & kInputIndexMask, output, refusal)) {
-				a_error = fmt::format("its output {}: {}", NameForLog(a_row.output), refusal);
-				return false;
-			}
-			const auto mip = MipOfName(a_row.output);
-			const float width = static_cast<float>(mip == AnchorPasses::kAllMips ? output.width : (std::max)(output.width >> mip, 1u));
-			const float height = static_cast<float>(mip == AnchorPasses::kAllMips ? output.height : (std::max)(output.height >> mip, 1u));
-			if (a_row.viewport == ViewportRule::Dynamic) {
-				const auto [x, y] = DynamicRatios();
-				a_out.viewport = OriginViewport(width * x, height * y);
-			} else {
-				a_out.viewport = OriginViewport(width, height);
-			}
-			return true;
-		}
-
-		/** @brief "effect, output, inputs, samplers, blend, viewport" fields of two shapes that differ, for the mismatch's log. */
-		std::string ShapeDiff(const ShapeKey& a_expected, const ShapeKey& a_seen)
-		{
-			std::string out;
-			const auto add = [&](std::string_view a_name, const std::string& a_want, const std::string& a_got) {
-				if (a_want != a_got)
-					out += fmt::format("{}{} {} (engine {})", out.empty() ? "" : ", ", a_name, a_want, a_got);
-			};
-			add("effect", std::string(kEffects[a_expected.effect].effectName), std::string(kEffects[a_seen.effect].effectName));
-			add("output", NameForLog(a_expected.output), NameForLog(a_seen.output));
-			add("output1", NameForLog(a_expected.output1), NameForLog(a_seen.output1));
-			for (std::uint32_t slot = 0; slot < kMaxSlots; ++slot) {
-				add(fmt::format("t{}", slot), NameForLog(a_expected.inputs[slot]), NameForLog(a_seen.inputs[slot]));
-				add(fmt::format("s{}", slot), fmt::format("{}/{}", a_expected.address[slot], a_expected.filter[slot]), fmt::format("{}/{}", a_seen.address[slot], a_seen.filter[slot]));
-			}
-			add("blend", fmt::format("{:#x}", a_expected.blend), fmt::format("{:#x}", a_seen.blend));
-			add("compute", a_expected.compute ? "yes" : "no", a_seen.compute ? "yes" : "no");
-			const auto viewport = [](const ShapeKey& a_key) {
-				const auto v = ViewportOf(a_key);
-				return fmt::format("{}x{} at ({}, {}) depth {}..{}", v.width, v.height, v.x, v.y, v.minDepth, v.maxDepth);
-			};
-			add("viewport", viewport(a_expected), viewport(a_seen));
-			add("depth", std::to_string(a_expected.depth), std::to_string(a_seen.depth));
-			add("scissor", a_expected.scissored ? "yes" : "no", a_seen.scissored ? "yes" : "no");
-			return out.empty() ? std::string("nothing") : out;
-		}
-
-		/**
-		 * @brief The generator (CS_ORG_POST_TABLE_DUMP=1): a table row for a declared step's draw, logged once per distinct row as the
-		 * C++ initializer tools/post-table.py collects into PostTable.inl. The viewport's rule is the one that gives the engine's viewport;
-		 * a viewport neither rule gives is logged as a conflict, as is a second shape for a key already logged.
-		 */
-		void DumpRow(const Frame::PostChain::RowKey& a_row, const ShapeKey& a_key)
-		{
-			static const bool dump = Switches::On("CS_ORG_POST_TABLE_DUMP");
-			if (!dump)
-				return;
-			// The rows logged so far, as rows: a later draw of the same step is compared through its row (the viewport by its rule).
-			static std::map<Frame::PostChain::RowKey, PostRow> logged;
-			if (const auto found = logged.find(a_row); found != logged.end()) {
-				ShapeKey expected;
-				std::string error;
-				if (!RowShape(found->second, expected, error) || !(expected == a_key)) {
-					static std::set<std::pair<Frame::PostChain::RowKey, ShapeKey>> conflicts;
-					if (conflicts.insert({ a_row, a_key }).second)
-						logger::warn("[ORG] post table conflict: {} drew another shape than its first row gives: {}", Frame::PostChain::RowName(a_row),
-							error.empty() ? ShapeDiff(expected, a_key) : error);
-				}
-				return;
-			}
-			const auto& effect = kEffects[a_key.effect];
-			const char* rule = nullptr;
-			std::string why;
-			for (const auto candidate : { ViewportRule::Full, ViewportRule::Dynamic }) {
-				PostRow row{ .key = a_row, .effect = static_cast<std::uint16_t>(effect.id), .output = a_key.output, .output1 = a_key.output1, .compute = a_key.compute, .viewport = candidate };
-				ShapeKey expected;
-				if (!RowShape(row, expected, why))
-					break;
-				if (a_key.compute || expected.viewport == a_key.viewport) {
-					rule = candidate == ViewportRule::Full ? "Full" : "Dynamic";
-					break;
-				}
-			}
-			{
-				PostRow row{ .key = a_row, .effect = static_cast<std::uint16_t>(effect.id), .output = a_key.output, .output1 = a_key.output1, .blend = a_key.blend,
-					.compute = a_key.compute, .viewport = rule && std::string_view(rule) == "Dynamic" ? ViewportRule::Dynamic : ViewportRule::Full };
-				for (std::uint32_t slot = 0; slot < kPostSlots; ++slot) {
-					row.inputs[slot] = a_key.inputs[slot];
-					row.address[slot] = static_cast<std::uint8_t>(a_key.address[slot]);
-					row.filter[slot] = static_cast<std::uint8_t>(a_key.filter[slot]);
-				}
-				logged.emplace(a_row, row);
-			}
-			if (!rule || a_key.depth >= 0 || a_key.scissored) {
-				logger::warn("[ORG] post table conflict: {} ({}) has a depth target, a scissor or a viewport no rule gives: {}x{} at ({}, {}) {}", Frame::PostChain::RowName(a_row),
-					effect.effectName, ViewportOf(a_key).width, ViewportOf(a_key).height, ViewportOf(a_key).x, ViewportOf(a_key).y, why);
-				rule = "Full";
-			}
-			const auto list = [](const auto& a_values, std::uint32_t a_count) {
-				std::string out;
-				for (std::uint32_t i = 0; i < a_count; ++i)
-					out += fmt::format("{}{}", i ? ", " : "", static_cast<std::int64_t>(a_values[i]));
-				return out;
-			};
-			for (std::uint32_t slot = kPostSlots; slot < kMaxSlots; ++slot)
-				if (a_key.inputs[slot] >= 0)
-					logger::warn("[ORG] post table conflict: {} reads slot {}, past the table's {}", Frame::PostChain::RowName(a_row), slot, kPostSlots);
-			logger::info("[ORG] post table row: {{ {{ Step::{}, {}, {}, {}, {} }}, Effects::{}, {}, {}, {{ {} }}, {{ {} }}, {{ {} }}, {:#x}, {}, {} }},",
-				[&] {
-					std::string name = Frame::PostChain::StepName(a_row.step);
-					std::string out;
-					bool upper = true;
-					for (const char c : name) {
-						if (c == ' ') {
-							upper = true;
-							continue;
-						}
-						out += upper ? static_cast<char>(std::toupper(static_cast<unsigned char>(c))) : c;
-						upper = false;
-					}
-					return out;
-				}(),
-				a_row.index, a_row.parity, a_row.in, a_row.out, effect.effectName, a_key.output, a_key.output1, list(a_key.inputs, kPostSlots), list(a_key.address, kPostSlots),
-				list(a_key.filter, kPostSlots), a_key.blend, a_key.compute ? "true" : "false", rule);
-		}
-
-		/**
-		 * @brief The table row of a draw or dispatch of the world post chain that the description declared as a step. A step the table
-		 * has no row for is a tap error ("post state mismatch") and returns null.
-		 *
-		 * The check (with the post description, unless CS_ORG_POST_TABLE_CHECK=0) also compares the draw with its row. Any difference is
-		 * a tap error, logged with what differs, and returns null. With the check off the row is returned without the comparison, so the
-		 * draw still happens from its row.
-		 */
-		const PostRow* CheckRow(const ShapeKey& a_key)
-		{
-			const auto* row = Frame::PostChain::CurrentRow();
-			if (!row)
-				return nullptr;
-			DumpRow(*row, a_key);
-			const auto* found = FindPostRow(*row);
-			if (!found) {
-				Frame::Driver::NoteTapError(Frame::Driver::TapError::PostStateMismatch, Frame::SegmentId::Count,
-					fmt::format("{} ({} into {}) has no table row", Frame::PostChain::RowName(*row), kEffects[a_key.effect].effectName, NameForLog(a_key.output)));
-				Frame::PostChain::NoteRowCheck(false);
-				return nullptr;
-			}
-			static const bool check = !Switches::Off("CS_ORG_POST_TABLE_CHECK");
-			if (!check)
-				return found;
-			ShapeKey expected;
-			std::string error;
-			if (!RowShape(*found, expected, error)) {
-				Frame::Driver::NoteTapError(Frame::Driver::TapError::PostStateMismatch, Frame::SegmentId::Count,
-					fmt::format("{}: its row's shape cannot be made: {}", Frame::PostChain::RowName(*row), error));
-				return nullptr;
-			}
-			if (!(expected == a_key)) {
-				Frame::Driver::NoteTapError(Frame::Driver::TapError::PostStateMismatch, Frame::SegmentId::Count,
-					fmt::format("{}: {}", Frame::PostChain::RowName(*row), ShapeDiff(expected, a_key)));
-				Frame::PostChain::NoteRowCheck(false);
-				return nullptr;
-			}
-			Frame::PostChain::NoteRowCheck(true);
-			return found;
-		}
-
-		/**
-		 * @brief The world post chain drawn from the pass-state table (CS_ORG_SEGMENT_POST_DRAW; docs, "The declared frame, stage 4b"):
-		 * three clients at the ImageSpace anchor, each held by a step of a post segment and by nothing else (segment-only), with one pass
-		 * per table row of its part of the chain, gated, numbered by the row's index in the table (gate entry, latch region, order key
-		 * and PassDesc::row). The composites' client is the post composites segment's; the HDR effect's draws up to the bloom and the
-		 * tonemap and after are the post end-of-frame segment's, either side of its Tonemap step.
+		 * @brief The CS stages' ImageSpace clients: the post chain's three (ChainSteps.inl: the composites at the post composites stage,
+		 * the slots before the tonemap and the HDR effect up to its bloom, then the tonemap and after, either side of the post end-of-frame
+		 * stage's Tonemap step) and the deferred+water stage's two (WorldSteps.inl).
 		 */
 		enum class PostPart : std::uint8_t
 		{
 			Composites,
 			Hdr,
 			Final,
-			WorldScopes,  // the world segment's RenderWorld scopes: the reflections, the SAO, the snow pass or its copy
-			WorldWater,   // the world segment's water blend, after the water's draws
+			WorldScopes,  // the deferred+water stage's RenderWorld scopes: the reflections, the SAO, the snow pass or its copy
+			WorldWater,   // the deferred+water stage's water blend, after the water's draws
 			Count
 		};
 		constexpr std::array<const char*, static_cast<std::size_t>(PostPart::Count)> kPostIds{ "cs.engine.imagespace.post.composites", "cs.engine.imagespace.post.hdr",
 			"cs.engine.imagespace.post.final", "cs.engine.imagespace.world.scopes", "cs.engine.imagespace.world.water" };
 
-		/** @brief The client that draws a row: by its step (the slots 0 to 2 run before the tonemap; the LDR slots after it). */
-		PostPart PostPartOf(const PostRow& a_row)
-		{
-			using Frame::PostChain::Step;
-			switch (a_row.key.step) {
-			case Step::SilRaw:
-			case Step::SilComposite:
-			case Step::Composite:
-				return PostPart::Composites;
-			case Step::Slot:
-			case Step::Dof:
-				return (a_row.key.index & 0x80) ? PostPart::Final : PostPart::Hdr;
-			case Step::Copy:
-			case Step::Downsample:
-			case Step::Luminance:
-			case Step::Adapt:
-			case Step::Bloom:
-				return PostPart::Hdr;
-			default:
-				return PostPart::Final;
-			}
-		}
-
-		/**
-		 * @brief A row's order key in its client: the engine's order of the steps (the LDR slots come after TAA and the screenshot copy,
-		 * though they sort before the tonemap in the table), then the step's own order, then the row's index for its variants (rows of one
-		 * step's variants never run in the same frame).
-		 */
-		std::int32_t PostOrderOf(const PostRow& a_row, std::uint32_t a_index)
-		{
-			using Frame::PostChain::Step;
-			const auto& key = a_row.key;
-			const bool late = (key.index & 0x80) != 0;
-			std::uint32_t rank = 0, sub = 0;
-			switch (key.step) {
-			case Step::SilRaw: rank = 0; break;
-			case Step::SilComposite: rank = 1; break;
-			case Step::Composite: rank = 2; break;
-			case Step::Slot: rank = late ? 12 : 3; sub = (key.index & 0x7f) << 5; break;
-			case Step::Dof: rank = late ? 12 : 3; sub = (3u << 5) | (key.index & 0x1f); break;
-			case Step::Copy: rank = 4; break;
-			case Step::Downsample: rank = 5; break;
-			case Step::Luminance: rank = 6; sub = key.index; break;
-			case Step::Adapt: rank = 7; break;
-			case Step::Bloom: rank = 8; sub = key.index; break;
-			case Step::Tonemap: rank = 9; break;
-			case Step::Taa: rank = 10; break;
-			case Step::Screenshot: rank = 11; break;
-			case Step::Upsample: rank = 13; break;
-			default: rank = 14; break;
-			}
-			return static_cast<std::int32_t>((rank << 20) | ((sub & 0xfff) << 8) | (a_index & 0xff));
-		}
-
-		/** @brief A row's index in the table (its gate entry and PassDesc::row). */
-		std::uint32_t RowIndexOf(const PostRow& a_row)
-		{
-			return static_cast<std::uint32_t>(&a_row - PostRows().data());
-		}
-
-		/** @brief Whether the post segments draw from the table this session: their clients are registered and none failed. */
-		bool PostOn()
-		{
-			const auto& state = IS();
-			return state.postOn && state.on;
-		}
-
-		/** @brief The ShapeKey of a draw that belongs to the post segments: the client and pass it goes to, or why it draws nothing. */
-		struct PostTake
-		{
-			bool post = false;  // the draw is the post segments' (taken, or dropped with a tap error)
-			PostClient* client = nullptr;
-			const Spec* spec = nullptr;
-		};
-
-		/**
-		 * @brief Where a draw of the world post chain goes when its part of the chain draws from the table this frame (OnPostPart): its
-		 * row's pass in its client, or nothing (a tap error) when the draw left the description or does not match its row's pass. Outside
-		 * such a part: not the post segments' (today's path).
-		 */
-		bool RowScheduled(PostPart a_part, std::size_t a_index);
-
-		PostTake TakePost(const ShapeKey& a_key, const PostRow* a_row)
-		{
-			auto& state = IS();
-			const auto part = Frame::PostChain::CurrentPart();
-			const bool drawing = part != Frame::PostChain::Part::All && state.partDrawing[part == Frame::PostChain::Part::Composites ? 0 : 1];
-			if (!PostOn() || !drawing)
-				return {};
-			PostTake take{ .post = true };
-			if (!a_row) {
-				// CheckRow counted it (no row, or another shape than its row), or the chain left its description (counted at the chain's end).
-				if (!Frame::PostChain::CurrentRow())
-					Frame::Driver::NoteTapError(Frame::Driver::TapError::PostNotDeclared, Frame::SegmentId::Count,
-						fmt::format("{} into {} is not a declared step of the chain; it draws nothing", kEffects[a_key.effect].effectName, NameForLog(a_key.output)));
-				return take;
-			}
-			const auto index = RowIndexOf(*a_row);
-			auto& client = state.post[static_cast<std::size_t>(PostPartOf(*a_row))];
-			const Spec* spec = index < client.byRow.size() ? client.byRow[index] : nullptr;
-			if (!spec || !client.made[index] || !(spec->key == a_key)) {
-				Frame::Driver::NoteTapError(Frame::Driver::TapError::PostStateMismatch, Frame::SegmentId::Count,
-					fmt::format("{}: its pass {} (row {}); it draws nothing", Frame::PostChain::RowName(a_row->key),
-						!spec ? "was not registered" : !client.made[index] ? "was left out of the build" : "is for another size", index));
-				return take;
-			}
-			if (!RowScheduled(PostPartOf(*a_row), index)) {
-				// A step decided at its own call (a sampler the step finds, the depth of field's composites) took a row this frame's
-				// schedule has off. The segment is cut here: what it holds is submitted, and this draw and the rest of the part draw on
-				// the ImageSpace anchor, after it. The slot's next schedule has the row (its last chain's fields).
-				const auto partOf = PostPartOf(*a_row);
-				const auto segment = partOf == PostPart::Composites ? RenderGraphRuntime::Segment::DeclaredPostComposites : RenderGraphRuntime::Segment::DeclaredPostEnd;
-				// The draws the part took so far are committed into the segment's run first (the anchor's tap), then the segment ends.
-				Flush();
-				(void)FrameAnchors::CutSegment(static_cast<std::uint32_t>(segment),
-					fmt::format("{} was decided at its call and is off in this frame's schedule", Frame::PostChain::RowName(a_row->key)));
-				state.partDrawing[part == Frame::PostChain::Part::Composites ? 0 : 1] = false;
-				return {};
-			}
-			take.client = &client;
-			take.spec = spec;
-			return take;
-		}
-
-		/** @brief A taken draw or dispatch of the post segments joins its client's batch; its constant chunks are held for the frame. */
-		void AddToPost(PostClient& a_client, const Spec& a_spec, Pending a_pending, std::span<const std::shared_ptr<const org::LatchBlock>> a_blocks)
-		{
-			auto& state = IS();
-			a_pending.entry = a_spec.entry;
-			a_client.batch.push_back(std::move(a_pending));
-			for (const auto& block : a_blocks)
-				state.postKeep.push_back(block);
-		}
-
-		void RegisterPost();
-
-		/**
-		 * @brief Whether this frame's schedule has a row's pass on: its bit in the rows of the segment that holds its client, as the frame
-		 * took them at Begin. A row the schedule has off records only its barriers, so a frame that draws it cuts the segment instead.
-		 */
-		bool RowScheduled(PostPart a_part, std::size_t a_index)
-		{
-			using Frame::SegmentId;
-			const auto segment = a_part == PostPart::Composites ? SegmentId::PostComposites : SegmentId::PostEnd;
-			const auto& rows = Frame::Driver::Current().Segment(segment).rows;
-			return a_index < 256 && (rows[a_index / 64] >> (a_index % 64) & 1u) != 0;
-		}
-
-		/**
-		 * @brief PostChain's decision events: a part of the world chain (the composites at RenderWorldPostProcess' entry, the end-of-frame
-		 * effects at RenderEndOfFrameEffects' entry) draws from the table this frame when every draw the description declares for it is a
-		 * row with a built pass for the sizes now, in a segment whose graph holds it. Otherwise its segment is cut here, before any of the
-		 * part's draws, and the part draws on today's path (FrameAnchors::CutSegment, counted by reason): an effect the table does not
-		 * describe yet (a group), a row the table lacks, a pass not built yet or made for another size (registered again, built off the
-		 * render thread).
-		 */
-		void OnPostPart(Frame::PostChain::Part a_part, const std::vector<Frame::PostChain::Draw>& a_draws)
-		{
-			auto& state = IS();
-			const std::size_t which = a_part == Frame::PostChain::Part::Composites ? 0 : 1;
-			state.partDrawing[which] = false;
-			if (!PostOn() || !Usable())
-				return;
-			const auto segment = static_cast<std::uint32_t>(which == 0 ? RenderGraphRuntime::Segment::DeclaredPostComposites : RenderGraphRuntime::Segment::DeclaredPostEnd);
-			std::string why;
-			for (const auto& draw : a_draws) {
-				if (draw.effect >= Frame::PostChain::kGroupBase) {
-					// The engine's volumetric lighting group is Volumetric Lighting's port (the VL anchor): no ImageSpace draw of its own.
-					if (draw.effect == Frame::PostChain::kGroupVolumetricLighting)
-						continue;
-					why = fmt::format("{} is not on the pass-state table", Frame::PostChain::EffectName(draw.effect));
-					break;
-				}
-				const auto* row = FindPostRow(draw.row);
-				if (!row) {
-					why = fmt::format("the table has no row for {}", Frame::PostChain::RowName(draw.row));
-					break;
-				}
-				const auto index = RowIndexOf(*row);
-				auto& client = state.post[static_cast<std::size_t>(PostPartOf(*row))];
-				const Spec* spec = client.byRow[index];
-				if (!spec || !client.made[index]) {
-					why = fmt::format("{} has no built pass", Frame::PostChain::RowName(draw.row));
-					break;
-				}
-				ShapeKey now;
-				std::string error;
-				if (!RowShape(*row, now, error) || !(now == spec->key)) {
-					why = fmt::format("{}'s pass was made for another size; it registers again", Frame::PostChain::RowName(draw.row));
-					state.postRegister = true;
-					break;
-				}
-				if (!FrameAnchors::CanTap(client.id)) {
-					why = fmt::format("the segment's graph does not hold {} yet", client.id);
-					break;
-				}
-				if (!RowScheduled(PostPartOf(*row), index)) {
-					why = fmt::format("{} is off in this frame's schedule; the schedule of a later frame has it", Frame::PostChain::RowName(draw.row));
-					break;
-				}
-			}
-			if (!why.empty()) {
-				if (which == 0)
-					state.compositesCut = std::move(why);
-				else
-					(void)FrameAnchors::CutSegment(segment, why);
-				return;
-			}
-			state.partDrawing[which] = true;
-		}
-
-		/**
-		 * @brief Registers the three post clients from the table, for the targets and sizes now (Setup, a resize, a row made for another
-		 * dynamic-resolution size). A row whose effect is not covered or whose targets cannot be imported has no pass: a frame that
-		 * selects it cuts its segment (OnPostPart).
-		 */
-		void RegisterPost()
-		{
-			auto& state = IS();
-			state.postRegister = false;
-			if (!state.postOn)
-				return;
-			const auto rows = PostRows();
-			// The chain's three clients; the world scopes' are CS's own passes (RegisterWorldSteps).
-			for (std::size_t p = 0; p < static_cast<std::size_t>(PostPart::WorldScopes); ++p) {
-				auto& client = state.post[p];
-				client.specs.clear();
-				client.byRow.fill(nullptr);
-				client.made.fill(false);
-				client.batch.clear();
-				std::vector<FrameAnchors::PassDesc> passes;
-				for (const auto& row : rows) {
-					if (row.key.step == Frame::PostChain::Step::None || static_cast<std::size_t>(PostPartOf(row)) != p)
-						continue;
-					const auto index = RowIndexOf(row);
-					ShapeKey key;
-					std::string error;
-					if (index >= kGateEntries || !RowShape(row, key, error) || !state.enabled[key.effect])
-						continue;
-					auto spec = MakeSpec(key, index, fmt::format("row{}", index));
-					if (!spec)
-						continue;
-					NoteImports(*spec);
-					client.byRow[index] = spec.get();
-					passes.push_back({ .name = fmt::format("{}.{}", client.id, spec->name),
-						.anchor = Anchor::ImageSpace,
-						.order = PostOrderOf(row, index),
-						.kind = key.compute ? FrameAnchors::PassKind::Compute : FrameAnchors::PassKind::Render,
-						.make = [spec, latch = std::shared_ptr<const org::LatchBlock>(client.latch), gate = std::shared_ptr<const RunGate>(client.gate), id = client.id, index] {
-							auto pass = MakePass(spec, latch, gate, id);
-							IS().post[static_cast<std::size_t>(PostPartOf(PostRows()[index]))].made[index] = pass != nullptr;
-							return pass;
-						},
-						.atExecution = true,
-						.gated = true,
-						.gpuGated = true,
-						.row = static_cast<std::int16_t>(index) });
-					client.specs.push_back(std::move(spec));
-				}
-				FrameAnchors::ClientDesc desc{};
-				desc.id = client.id;
-				desc.passes = std::move(passes);
-				desc.sharedConstants = true;
-				desc.gates = { client.gate };
-				desc.active = [p] { return !IS().post[p].batch.empty(); };
-				desc.commit = [p](const FrameAnchors::Point&) {
-					auto& current = IS().post[p];
-					CommitBatch(current.batch, *current.latch, *current.gate);
-				};
-				desc.executed = [](const FrameAnchors::Point&) { IS().executed = true; };
-				desc.declared = [] { return Frame::PostChain::On(); };
-				// The rows this frame's description selects for this client: from the chain's fields once its decision events ran, else
-				// the slot's last chain's (the decisions made after Begin repeat from frame to frame). The world scopes' from the world
-				// fields the same way. The water blend's rows are all on: water comes into view and leaves it often, and its passes are
-				// gated on the GPU, so a frame without it records nothing again.
-				desc.rows = [p](std::array<std::uint64_t, 4>& a_rows) {
-					const auto& current = IS().post[p];
-					std::vector<Frame::PostChain::Draw> draws;
-					// The composites' rows are all on too: the composite's first sampler is the one it finds (wrap or clamp, by what drew
-					// before it), which flips from frame to frame with no pattern a slot's last chain predicts. Gated on the GPU, the rows a
-					// frame does not draw do nothing, so the schedule does not switch with it.
-					if (p == static_cast<std::size_t>(PostPart::Composites)) {
-						for (std::size_t index = 0; index < current.byRow.size() && index < 256; ++index)
-							if (current.byRow[index])
-								a_rows[index / 64] |= 1ull << (index % 64);
-						return;
-					}
-					// The rows of every frame slot's last chain (and scopes), not only this slot's: a variant the engine picks without a
-					// period of four frames (the depth of field's output, a step decided at its call) is then already on when it comes back,
-					// and the schedule does not switch with it. Rows a frame does not draw do nothing (gated on the GPU).
-					const auto add = [&](std::vector<Frame::PostChain::Draw> a_more) { draws.insert(draws.end(), a_more.begin(), a_more.end()); };
-					add(Frame::PostChain::PredictDraws(Frame::PostChain::DeclaredFields()));
-					for (std::uint32_t slot = 0; slot < RenderGraphRuntime::kGameFramesInFlight; ++slot) {
-						bool have = false;
-						if (const auto fields = Frame::PostChain::SlotFields(slot, &have); have)
-							add(Frame::PostChain::PredictDraws(fields));
-					}
-					for (const auto& draw : draws)
-						if (draw.row.step != Frame::PostChain::Step::None)
-							if (const auto* row = FindPostRow(draw.row); row && static_cast<std::size_t>(PostPartOf(*row)) == p) {
-								const auto index = RowIndexOf(*row);
-								if (index < 256 && current.byRow[index])
-									a_rows[index / 64] |= 1ull << (index % 64);
-							}
-				};
-				desc.repeats = true;
-				desc.segmentOnly = true;
-				desc.onFailed = [] {
-					auto& current = IS();
-					if (current.postOn) {
-						current.postOn = false;
-						logger::error("[ORG] ImageSpace: a post segment's table passes failed; the post chain draws on the ImageSpace anchor for the session");
-					}
-				};
-				if (!FrameAnchors::Register(std::move(desc))) {
-					state.postOn = false;
-					logger::error("[ORG] ImageSpace: the post client {} was refused; the post chain draws on the ImageSpace anchor", client.id);
-					return;
-				}
-			}
-			logger::info("[ORG] ImageSpace: the post stages draw from the pass-state table: {} composites, {} HDR and {} final passes of {} rows", state.post[0].specs.size(),
-				state.post[1].specs.size(), state.post[2].specs.size(), rows.size());
-		}
-
 #	include "RenderGraph/Engine/ImageSpace/WorldSteps.inl"
+#	include "RenderGraph/Engine/ImageSpace/ChainSteps.inl"
+
+		/** @brief The engine made its targets again: the stages' steps register again at the next frame, against the new imports. */
+		void ReregisterSteps()
+		{
+			World().registered = false;
+			Chain().registered = false;
+		}
 
 		/** @brief Where a withheld draw goes: its pass, and the client built on first sight it belongs to (null: the main batch). */
 		struct Admission
@@ -3654,9 +3138,11 @@ namespace RenderGraph::Engine::ImageSpace
 				++state.taken;
 				return true;
 			}
-			// A RenderWorld scope's step: a CS pass; the hook only stages its constants.
+			// A RenderWorld scope's or the world post chain's step: a CS pass; the hook only stages its constants.
 			if (const auto world = WorldStepScope(); world != WorldScope::None)
 				return TakeWorldStep(world, scope.effect, false, {});
+			if (ChainStepNow())
+				return TakeChainStep(scope.effect, false, {});
 			ShapeKey key{};
 			OutputView output;
 			std::string_view refusal;
@@ -3678,16 +3164,9 @@ namespace RenderGraph::Engine::ImageSpace
 				Refuse(refusal, scope.effect, detail);
 				return false;
 			}
-			// A declared step of a post-chain part that draws from the table goes to its row's pass, or draws nothing (a tap error).
-			const auto take = TakePost(key, CheckRow(key));
-			if (take.post && !take.spec)
-				return true;
-			Admission admitted{};
-			if (!take.post) {
-				admitted = AdmitShape(key, scope.effect);
-				if (!admitted.spec)
-					return false;
-			}
+			const auto admitted = AdmitShape(key, scope.effect);
+			if (!admitted.spec)
+				return false;
 			// The capture records the draw's constants as a use: the draw is withheld, so no draw hook records it.
 			const auto use = Constants::Capture(Constants::kDrawStages);
 			const auto* slot = use.Valid() ? Constants::Find(use, Constants::Stage::Pixel, 2) : nullptr;
@@ -3720,9 +3199,7 @@ namespace RenderGraph::Engine::ImageSpace
 				return false;
 			if (effect.latched && !LatchSources(pending, scope.effect))
 				return false;
-			if (take.spec)
-				AddToPost(*take.client, *take.spec, std::move(pending), blocks);
-			else if (admitted.late)
+			if (admitted.late)
 				RunLate(*admitted.late, std::move(pending), blocks);
 			else
 				AddToBatch(*admitted.spec, std::move(pending), blocks);
@@ -3749,6 +3226,11 @@ namespace RenderGraph::Engine::ImageSpace
 					return true;  // nothing to dispatch: the engine's call would do nothing either
 				return TakeWorldStep(world, scope.effect, true, { a_x, a_y, a_z });
 			}
+			if (ChainStepNow()) {
+				if (a_x == 0 || a_y == 0 || a_z == 0)
+					return true;  // nothing to dispatch: the engine's call would do nothing either
+				return TakeChainStep(scope.effect, true, { a_x, a_y, a_z });
+			}
 			ShapeKey key{};
 			std::string_view refusal;
 			ID3D11ShaderResourceView* source = nullptr;
@@ -3763,16 +3245,9 @@ namespace RenderGraph::Engine::ImageSpace
 				Refuse("an empty dispatch", scope.effect);
 				return false;
 			}
-			// A declared step of a post-chain part that draws from the table goes to its row's pass, or draws nothing (a tap error).
-			const auto take = TakePost(key, CheckRow(key));
-			if (take.post && !take.spec)
-				return true;
-			Admission admitted{};
-			if (!take.post) {
-				admitted = AdmitShape(key, scope.effect);
-				if (!admitted.spec)
-					return false;
-			}
+			const auto admitted = AdmitShape(key, scope.effect);
+			if (!admitted.spec)
+				return false;
 			// A flow copy's source, a loaded texture (an ORG engine texture, or DXVK's imported), read by its heap index from the latch.
 			// It is a flow texture BGSAutoWater loaded from a file and never writes: the immutable class the graph exempts from
 			// declarations (org-native-frame-graph Phase 2), so a bindless index is its read.
@@ -3815,9 +3290,7 @@ namespace RenderGraph::Engine::ImageSpace
 			if (source)
 				where.source = sourceBinding.index;
 			Pending pending{ .at = where, .compute = true, .groups = { a_x, a_y, a_z }, .source = std::move(sourceBinding.owner) };
-			if (take.spec)
-				AddToPost(*take.client, *take.spec, std::move(pending), blocks);
-			else if (admitted.late)
+			if (admitted.late)
 				RunLate(*admitted.late, std::move(pending), blocks);
 			else
 				AddToBatch(*admitted.spec, std::move(pending), blocks);
@@ -4009,7 +3482,6 @@ namespace RenderGraph::Engine::ImageSpace
 		{
 			static void thunk(void* a_effect, void* a_quad, void* a_param)
 			{
-				Frame::PostChain::NoteShader(a_effect);
 				if (!a_effect || !Usable()) {
 					func(a_effect, a_quad, a_param);
 					return;
@@ -4038,7 +3510,6 @@ namespace RenderGraph::Engine::ImageSpace
 		{
 			static void thunk(RE::BSImagespaceShader* a_shader, void* a_geometry)
 			{
-				Frame::PostChain::NoteShader(a_shader);
 				if (!a_shader || !Usable()) {
 					func(a_shader, a_geometry);
 					return;
@@ -4063,7 +3534,6 @@ namespace RenderGraph::Engine::ImageSpace
 		{
 			static void thunk(RE::BSImagespaceShader* a_shader, std::uint32_t a_x, std::uint32_t a_y, std::uint32_t a_z)
 			{
-				Frame::PostChain::NoteShader(a_shader);
 				if (!a_shader || !Usable()) {
 					func(a_shader, a_x, a_y, a_z);
 					return;
@@ -4083,8 +3553,11 @@ namespace RenderGraph::Engine::ImageSpace
 			static void thunk(void* a_effect, void* a_quad, void* a_param)
 			{
 				EnterScope(ScopeKind::HDR);
-				func(a_effect, a_quad, a_param);
-				LeaveScope();
+				{
+					const ChainHdrGuard chain;
+					func(a_effect, a_quad, a_param);
+					LeaveScope();
+				}
 			}
 			static inline REL::Relocation<decltype(thunk)> func;
 		};
@@ -4094,14 +3567,12 @@ namespace RenderGraph::Engine::ImageSpace
 		{
 			static void thunk(void* a_manager, std::uintptr_t a_source, std::uintptr_t a_destination)
 			{
-				// The world chain's composites drawing on today's path: the post composites segment ends here, with the volumetric lighting.
-				if (auto& state = IS(); !state.compositesCut.empty()) {
-					(void)FrameAnchors::CutSegment(static_cast<std::uint32_t>(RenderGraphRuntime::Segment::DeclaredPostComposites), state.compositesCut);
-					state.compositesCut.clear();
-				}
 				EnterScope(ScopeKind::Composites);
-				func(a_manager, a_source, a_destination);
-				LeaveScope();
+				{
+					const ChainCompositesGuard chain;
+					func(a_manager, a_source, a_destination);
+					LeaveScope();
+				}
 			}
 			static inline REL::Relocation<decltype(thunk)> func;
 		};
@@ -4343,7 +3814,8 @@ namespace RenderGraph::Engine::ImageSpace
 		ReadManifest();
 		RegisterClient(ShapesToRegister());
 		QueuePrograms();
-		// The post segments draw from the pass-state table when they exist (CS_ORG_SEGMENT_POST_DRAW) and the post description runs.
+		// The post chain and the RenderWorld scopes are CS passes of the post and deferred+water stages when those exist and the post
+		// chain's hooks run, registered at the first world frame (CheckChainSteps, CheckWorldSteps).
 		const auto epochs = FrameAnchors::SegmentEpochs();
 		if (Frame::PostChain::On() && std::ranges::find(epochs, RenderGraphRuntime::EpochOf(RenderGraphRuntime::Segment::DeclaredPostEnd)) != epochs.end()) {
 			for (std::size_t p = 0; p < state.post.size(); ++p) {
@@ -4353,11 +3825,28 @@ namespace RenderGraph::Engine::ImageSpace
 				client.latch = org::LatchBlock::Create(fmt::format("{}::ConstantsAt", client.id), kGateEntries * kLatchStride);
 			}
 			state.postOn = std::ranges::all_of(state.post, [](const PostClient& a_client) { return a_client.gate && a_client.latch; });
-			RegisterPost();
-			if (state.postOn)
-				Frame::PostChain::SetPartHook(OnPostPart);
-			// The RenderWorld scopes are CS passes of the deferred+water stage, registered at the first world frame (CheckWorldSteps).
+			Chain().on = state.postOn;
 			World().on = state.postOn && std::ranges::find(epochs, RenderGraphRuntime::EpochOf(RenderGraphRuntime::Segment::DeclaredDeferred)) != epochs.end();
+		}
+	}
+
+	void OnEndOfFrame(bool a_begin, std::int32_t a_source, std::int32_t a_final)
+	{
+		auto& chain = Chain();
+		if (!chain.on || !chain.registered) {
+			chain.inEndOfFrame = false;
+			return;
+		}
+		if (a_begin) {
+			// The draws before this belong to the stage's earlier steps (the Upscale anchor's): their batch runs first.
+			if (Usable())
+				Flush();
+			PlanEndOfFrame(a_source, a_final);
+			chain.copyDrawn = false;
+			chain.inEndOfFrame = true;
+		} else {
+			chain.inEndOfFrame = false;
+			chain.plan.valid = false;
 		}
 	}
 
@@ -4382,6 +3871,7 @@ namespace RenderGraph::Engine::ImageSpace
 	}
 	void Reserve() {}
 	void Setup() {}
+	void OnEndOfFrame(bool, std::int32_t, std::int32_t) {}
 	std::string Status() { return "ImageSpace: no render graph in this build"; }
 }
 

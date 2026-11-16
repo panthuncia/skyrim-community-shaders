@@ -2716,20 +2716,6 @@ kind = "other"
 sweep = true
 description = ""
 
-[key."org.post_table_check"]
-env = "CS_ORG_POST_TABLE_CHECK"
-type = "string"
-family = "org"
-kind = "other"
-description = ""
-
-[key."org.post_table_dump"]
-env = "CS_ORG_POST_TABLE_DUMP"
-type = "string"
-family = "org"
-kind = "other"
-description = ""
-
 [key."org.precipitation"]
 env = "CS_ORG_PRECIPITATION"
 type = "bool"
@@ -2879,13 +2865,6 @@ description = ""
 
 [key."org.segment_post"]
 env = "CS_ORG_SEGMENT_POST"
-type = "string"
-family = "org"
-kind = "other"
-description = ""
-
-[key."org.segment_post_draw"]
-env = "CS_ORG_SEGMENT_POST_DRAW"
 type = "string"
 family = "org"
 kind = "other"

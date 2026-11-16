@@ -1,5 +1,5 @@
 // The RenderWorld scopes as CS passes (native mode). Included by ImageSpace.cpp inside its anonymous namespace, after the pieces it
-// uses: kEffects, Spec, MakePass, ImportOf, the post clients and Flush.
+// uses: kEffects, Spec, MakePass, ImportOf, the stages' clients and Flush. ChainSteps.inl uses its step helpers for the post chain.
 //
 // The engine's reflections, SAO, snow pass and water blend are drawn by passes CS declares here: each an engine effect step, made
 // from CS's port of the effect's shader, with its inputs, outputs, samplers, blend and viewport written below and sized at the build.
@@ -15,6 +15,16 @@ enum class WorldScope : std::uint8_t
 	Snow,           // the snow pass (RenderSnowSSS, 100537 / 107267) or the copy of kMAIN into kSNOW_SWAP, between RenderSSAO's calls
 	SsaoComposite,  // RenderSSAO's second call: the composite into kMAIN
 	WaterBlend,     // the water's temporal blend (ISWaterBlend), after the water's draws
+	// The world post chain's steps (ChainSteps.inl).
+	Composite,   // the pre-tonemap composite (RenderPreTonemapComposites, 99024 / 105675)
+	PreSlot,     // an end-of-frame slot's effect before the HDR effect (RenderEndOfFrameEffects, 99023 / 105674)
+	HdrCopy,     // the copy in the HDR effect's place when HDR is off
+	Hdr,         // the HDR effect up to its bloom: the downsample, the luminance levels, the adaptation, the bright pass and blur
+	Tonemap,     // the HDR effect's tonemap, after the Tonemap anchor's step
+	Taa,         // the engine's TAA
+	Screenshot,  // the save-game screenshot's copy
+	LdrSlot,     // an end-of-frame slot's effect after the tonemap (usesLDR)
+	Upsample,    // the dynamic-resolution upsample
 };
 
 /** @brief How a step's viewport follows the resolution. */
@@ -544,8 +554,6 @@ void RegisterWorldSteps()
 	for (const bool water : { false, true }) {
 		auto& client = state.post[static_cast<std::size_t>(water ? PostPart::WorldWater : PostPart::WorldScopes)];
 		client.specs.clear();
-		client.byRow.fill(nullptr);
-		client.made.fill(false);
 		client.batch.clear();
 		auto& keys = water ? world.waterKey : world.scopesKey;
 		auto& count = water ? world.waterCount : world.scopesCount;
@@ -645,6 +653,62 @@ WorldScope WorldStepScope()
 }
 
 /**
+ * @brief The data-only part of a step's hook: the constants the engine computed and bound for the step are captured and staged for
+ * the step's pass (gate entry a_entry of a_client), as its draw or dispatch would have used them. The engine's draw is withheld (true).
+ */
+bool StageStep(PostClient& a_client, std::uint32_t a_entry, std::size_t a_effect, bool a_compute, std::array<std::uint32_t, 3> a_groups)
+{
+	auto& state = IS();
+	// The constants the engine computed and bound for this step, as its draw or dispatch would have used them.
+	static REL::Relocation<void (*)(bool)> setDirtyStates{ REL::RelocationID(75580, 77386) };
+	Pending pending{ .entry = a_entry, .compute = a_compute, .groups = a_groups };
+	std::vector<std::shared_ptr<const org::LatchBlock>> blocks;
+	if (a_compute) {
+		setDirtyStates(true);
+		ID3D11Buffer* constants = Tripwire::Unwrap(Constants::EngineComputeBuffer());
+		if (!constants) {
+			Failure("no engine compute constant buffer", a_effect);
+			return true;
+		}
+		globals::d3d::context->CSSetConstantBuffers(0, 1, &constants);
+		const auto use = Constants::Capture(Constants::StageBit(Constants::Stage::Compute));
+		const auto* slot = use.Valid() ? Constants::Find(use, Constants::Stage::Compute, 0) : nullptr;
+		const auto at = slot ? Constants::Where(*slot) : Constants::Location{};
+		if (!slot || !at.block) {
+			Failure("the capture holds no compute constants for its dispatch", a_effect);
+			return true;
+		}
+		pending.at = { .srv = at.srvIndex, .offset = at.offset, .size = at.size };
+		blocks.push_back(at.block);
+	} else {
+		setDirtyStates(false);
+		const auto use = Constants::Capture(Constants::kDrawStages);
+		const auto* slot = use.Valid() ? Constants::Find(use, Constants::Stage::Pixel, 2) : nullptr;
+		const auto* frameSlot = use.Valid() ? Constants::Find(use, Constants::Stage::Pixel, 12) : nullptr;
+		if (!frameSlot) {
+			Failure("the capture holds no PerFrame constants for its draw", a_effect);
+			return true;
+		}
+		const auto frameAt = Constants::Where(*frameSlot);
+		const auto at = slot ? Constants::Where(*slot) : frameAt;
+		if (!at.block || !frameAt.block) {
+			Failure("its captured constants have no ring chunk", a_effect);
+			return true;
+		}
+		pending.at = { .srv = at.srvIndex, .offset = at.offset, .frameSrv = frameAt.srvIndex, .frameOffset = frameAt.offset, .size = slot ? at.size : 0u,
+			.frameSize = frameAt.size };
+		blocks.push_back(at.block);
+		blocks.push_back(frameAt.block);
+	}
+	a_client.batch.push_back(std::move(pending));
+	for (auto& block : blocks)
+		state.postKeep.push_back(std::move(block));
+	++state.taken;
+	return true;
+}
+
+
+/**
  * @brief A world step's data-only hook: the engine computed this step's constants and bound them; they are captured and staged for
  * the step's pass, matched by the scope, the effect and the variant the engine picked (the normals or history parity by its frame
  * counter, the minify level by the loop's iteration, the composite's form by its effect). The engine's draw is withheld (true). A
@@ -721,52 +785,7 @@ bool TakeWorldStep(WorldScope a_scope, std::size_t a_effect, bool a_compute, std
 		Frame::Driver::NoteLaggedWork(Frame::SegmentId::Deferred);
 		return true;
 	}
-	// The constants the engine computed and bound for this step, as its draw or dispatch would have used them.
-	static REL::Relocation<void (*)(bool)> setDirtyStates{ REL::RelocationID(75580, 77386) };
-	Pending pending{ .entry = entry, .compute = a_compute, .groups = a_groups };
-	std::vector<std::shared_ptr<const org::LatchBlock>> blocks;
-	if (a_compute) {
-		setDirtyStates(true);
-		ID3D11Buffer* constants = Tripwire::Unwrap(Constants::EngineComputeBuffer());
-		if (!constants) {
-			Failure("no engine compute constant buffer", a_effect);
-			return true;
-		}
-		globals::d3d::context->CSSetConstantBuffers(0, 1, &constants);
-		const auto use = Constants::Capture(Constants::StageBit(Constants::Stage::Compute));
-		const auto* slot = use.Valid() ? Constants::Find(use, Constants::Stage::Compute, 0) : nullptr;
-		const auto at = slot ? Constants::Where(*slot) : Constants::Location{};
-		if (!slot || !at.block) {
-			Failure("the capture holds no compute constants for its dispatch", a_effect);
-			return true;
-		}
-		pending.at = { .srv = at.srvIndex, .offset = at.offset, .size = at.size };
-		blocks.push_back(at.block);
-	} else {
-		setDirtyStates(false);
-		const auto use = Constants::Capture(Constants::kDrawStages);
-		const auto* slot = use.Valid() ? Constants::Find(use, Constants::Stage::Pixel, 2) : nullptr;
-		const auto* frameSlot = use.Valid() ? Constants::Find(use, Constants::Stage::Pixel, 12) : nullptr;
-		if (!frameSlot) {
-			Failure("the capture holds no PerFrame constants for its draw", a_effect);
-			return true;
-		}
-		const auto frameAt = Constants::Where(*frameSlot);
-		const auto at = slot ? Constants::Where(*slot) : frameAt;
-		if (!at.block || !frameAt.block) {
-			Failure("its captured constants have no ring chunk", a_effect);
-			return true;
-		}
-		pending.at = { .srv = at.srvIndex, .offset = at.offset, .frameSrv = frameAt.srvIndex, .frameOffset = frameAt.offset, .size = slot ? at.size : 0u,
-			.frameSize = frameAt.size };
-		blocks.push_back(at.block);
-		blocks.push_back(frameAt.block);
-	}
-	client.batch.push_back(std::move(pending));
-	for (auto& block : blocks)
-		state.postKeep.push_back(std::move(block));
-	++state.taken;
-	return true;
+	return StageStep(client, entry, a_effect, a_compute, a_groups);
 }
 
 /** @brief A world scope's hook: entering sets the scope its draws are steps of; leaving stages them (the ImageSpace step's tap). */

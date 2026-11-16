@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstdint>
 #include <string>
 #include <string_view>
 
@@ -62,12 +63,10 @@
  * the engine for the session. A covered effect's draw the engine still makes is not vouched for in the flush latch (no
  * Flush::Reason): under the latch it is skipped, and the residue census counts it.
  *
- * The world post chain in native mode (docs/development/org-native-frame-graph.md, "The declared frame, stage 4b"): its draws are not
- * shapes of the manifest but rows of the pass-state table (PostTable.h). Three clients hold one pass per row (the composites, the HDR
- * effect up to the bloom, the tonemap and after), each held by a step of a post segment (FrameAnchors::SegmentsOn) and by no anchor
- * epoch. At each part's decision event (RenderGraph/Frame/PostChain.h) the part draws from the table when every draw its description
- * declares has a built pass; otherwise its segment is cut there and the part draws as below. A draw of a part drawing from the table
- * that is not its row draws nothing (a tap error). CS_ORG_SEGMENT_POST_DRAW=0 turns this off.
+ * The world post chain and the RenderWorld scopes in native mode (docs/development/org-native-frame-graph.md, "The post stage"):
+ * their draws are not shapes of the manifest. CS declares each engine effect step as a pass of its own (WorldSteps.inl,
+ * ChainSteps.inl), held by a CS stage (FrameAnchors::SegmentsOn); the engine's draw is withheld and its hook only stages the
+ * constants the engine computed for that step. A step CS has no pass for is a mismatch (Frame::Driver::NoteTapError, NoPass).
  *
  * Switches: CS_ORG_IMAGESPACE=1 (default off: nothing is hooked). Diagnostics: CS_ORG_IMAGESPACE_EFFECTS=<list> (engine names,
  * effect names or the groups hdr, bloom, composite, sao, ssr; unset or "all": every covered effect) narrows the port to bisect an
@@ -93,6 +92,12 @@ namespace RenderGraph::Engine::ImageSpace
 
 	/** @brief State::Setup, once the graph is up: the latch, the run gate, the manifest's shapes registered and their programs queued. */
 	void Setup();
+
+	/**
+	 * @brief RenderEndOfFrameEffects (99023 / 105674) of the world chain: a_begin at its entry, with its source and final targets
+	 * (its arguments), where CS plans the chain's targets for the frame; false at its return. Render owner.
+	 */
+	void OnEndOfFrame(bool a_begin, std::int32_t a_source, std::int32_t a_final);
 
 	/** @brief One status line (passes, manifest, taken and refused draws). Main thread. */
 	std::string Status();

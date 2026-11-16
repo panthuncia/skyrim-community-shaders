@@ -70,8 +70,6 @@ namespace RenderGraph::Frame::Driver
 		HostMissing,       // a clear or copy waiting for its host epoch was still waiting at the next Begin (dropped)
 		LostToBuild,       // a build of a segment's graph gave its held ticket back between two of its taps (what they wrote is dropped)
 		InstanceNotDeclared,  // a step's hook fired more often in one segment run than the description declared instances of its client
-		PostNotDeclared,      // the world post chain drew other ImageSpace effects than its post description declared (PostChain.h)
-		PostStateMismatch,    // a declared post-chain step drew with other state than its pass-state table row, or the table has no row for it
 		NoPass,               // an engine effect step fired its data-only hook, and CS has no pass for that step at all
 		Count
 	};
@@ -84,7 +82,7 @@ namespace RenderGraph::Frame::Driver
 	 * owner). a_what names the tap or the client and the difference. a_segment SegmentId::Count: work hosted in another epoch, outside
 	 * the declared segments. Every kind of TapError is a mismatch. With MismatchFatal it stops the game with a message that names the
 	 * frame, the segment, the tap and the difference. Otherwise it is counted, logged once per kind for the session, and the caller
-	 * draws nothing of that work. A cut (FrameAnchors::CutSegment) is not a mismatch.
+	 * draws nothing of that work.
 	 */
 	void NoteTapError(TapError a_error, SegmentId a_segment, std::string_view a_what);
 

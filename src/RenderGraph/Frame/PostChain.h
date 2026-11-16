@@ -3,137 +3,33 @@
 #include "RenderGraph/Frame/FrameDescription.h"
 
 #include <cstdint>
-#include <string>
-#include <vector>
 
 /**
- * @brief The post chain's description: which ImageSpace effects the engine's world post chain runs this frame, read by CS from the
- * engine's own state (docs/development/org-native-frame-graph.md, "The declared frame, stage 4").
+ * @brief The world post chain's engine state, read by CS (docs/development/org-native-frame-graph.md, "The post stage").
  *
  * The chain is ImageSpaceManager::RenderWorldPostProcess (SE 100430, AE 107148): the volumetric lighting, then
- * RenderPreTonemapComposites (99024 / 105675: SIL, the image-based lens flares, the VL and lens flare composite), then
- * RenderEndOfFrameEffects (99023 / 105674: the end-of-frame slots, HDR or a copy, TAA, the LDR slots, the dynamic-resolution upsample).
- * Its order is fixed in the engine's code. What varies is which effects run and which variant each takes, and every one of those
- * decisions reads state CS can read too (PostFields).
- *
- * - **Read.** At Renderer::Begin (OnBegin fills Description::post) and again at the chain's decision event: the entry of
- *   RenderWorldPostProcess, after the game's update and the menus have set the ImageSpace data for the frame. The second read is
- *   the one the chain is predicted from; a field that differs from Begin's is counted by name (the engine decided it after Begin).
- * - **Predict.** PredictEffects turns the fields into the sequence of ImageSpace shaders the chain draws or dispatches, by their index
- *   in ImageSpaceManager::effects, reading the composites' children where the engine renders a list (the HDR effect's children, the
- *   bloom blur's).
- * - **Check.** The ImageSpace hooks note every shader the chain draws (NoteShader). At the chain's end the sequence is compared with
- *   the prediction. A difference is a tap error ("post not declared"): the description missed something the engine did.
- *
- * - **Rows.** Each predicted draw also names its step and variant (PredictDraws, RowKey): the row of the pass-state table
- *   (RenderGraph/Engine/ImageSpace/PostTable.h) that says what the draw's pass is. The ImageSpace port checks each draw against its row
- *   ("post state mismatch") and, in native mode, draws the chain from the rows in the two post segments (FrameAnchors::SegmentsOn).
- *   Decision events after Begin: RenderWorldPostProcess' entry, RenderEndOfFrameEffects' entry (its targets are its arguments), and
- *   the depth of field's first draw (its Render picks its composites as it runs).
- *
- * The check needs the ImageSpace hooks (CS_ORG_IMAGESPACE, which native mode turns on). CS_ORG_SEGMENT_POST=0 turns it off.
+ * RenderPreTonemapComposites (99024 / 105675), then RenderEndOfFrameEffects (99023 / 105674: the end-of-frame slots, HDR or a copy,
+ * TAA, the screenshot copy, the LDR slots, the dynamic-resolution upsample). CS draws it with passes of its own (ImageSpace's
+ * ChainSteps.inl). This file reads the engine state those passes need:
+ * - at Renderer::Begin, the chain's structure (PostFields): which effects the post stage has on for the frame;
+ * - the RenderWorld scopes' state (WorldFields) for the deferred+water stage's description;
+ * - the chain's two entries (detoured): RenderWorldPostProcess, which brackets the world chain, and RenderEndOfFrameEffects, where
+ *   ImageSpace plans the chain's targets and whose return ends the post end-of-frame stage.
  */
 namespace RenderGraph::Frame::PostChain
 {
-	/** @brief Installs the decision event's detour (RenderWorldPostProcess). With the ImageSpace hooks, native mode. */
+	/** @brief Installs the chain's detours (RenderWorldPostProcess, RenderEndOfFrameEffects). With the ImageSpace hooks, native mode. */
 	void Install();
 
-	/** @brief Whether the check runs (installed, CS_ORG_SEGMENT_POST not 0). Any thread. */
+	/** @brief Whether the detours are installed (CS_ORG_SEGMENT_POST not 0). Any thread. */
 	bool On();
 
 	/** @brief Reads the post fields from the engine now. Render owner. read is false when the ImageSpace manager does not exist yet. */
 	PostFields Read();
 
-	/** @brief The two parts of the world post chain, each predicted from the fields read at its own decision event. */
-	enum class Part : std::uint8_t
-	{
-		Composites,  // RenderWorldPostProcess up to RenderEndOfFrameEffects: the volumetric lighting and the pre-tonemap composites
-		EndOfFrame,  // RenderEndOfFrameEffects (99023 / 105674)
-		All,
-	};
-
 	/**
-	 * @brief The ImageSpace shaders the world post chain (or a_part of it) draws for a_fields, in order, by their index in
-	 * ImageSpaceManager::effects. An entry at or above kGroupBase is a group (kGroupVolumetricLighting and the others below): draws of
-	 * the group's shaders whose order and count the description does not settle yet (one or more; the volumetric lighting's zero or
-	 * more, since Volumetric Lighting's port takes its draws before the hooks see them).
-	 */
-	std::vector<std::uint16_t> PredictEffects(const PostFields& a_fields, Part a_part = Part::All);
-
-	/**
-	 * @brief A step of the world post chain that the static pass-state table describes (RenderGraph/Engine/ImageSpace/PostTable.h).
-	 * A step with its variant (RowKey) selects one table row: what that draw's pass is (its program, targets, samplers, blend and
-	 * viewport). Groups (kGroupBase and up) have no step: their draws are not declared one by one yet.
-	 */
-	enum class Step : std::uint8_t
-	{
-		None,
-		SilRaw,        // ISSILRawInd (parity: silParity)
-		SilComposite,  // ISSILComposite (parity: silParity)
-		Composite,     // the VL / lens flare composite (index: its form, 0 VL, 1 lens flare, 2 both, + its first sampler's address mode * 16; parity: vlParity with VL)
-		Slot,          // an end-of-frame slot's effect drawn as one shader (index: the slot, + 0x80 after the tonemap; FXAA)
-		Copy,          // the copy in the HDR effect's place when HDR is off
-		Downsample,    // the HDR effect's scene downsample
-		Luminance,     // a luminance level (index: the level; parity: lumParity on the last level, else 0)
-		Adapt,         // the light adaptation into the last level (parity: that level's target)
-		Bloom,         // a bloom composite's child (index: radius * 8 + child; parity: the luminance target the bright pass reads, 0 for the blur)
-		Tonemap,       // the HDR tonemap (index: 1 for the fade form; parity: the luminance target it reads)
-		Taa,           // the engine's TAA (index: its shader, 0 plain, 1 UI, 2 water, + 0x10 reading the normals' swap; parity: taaParity)
-		Screenshot,    // the screenshot copy
-		Upsample,      // the dynamic-resolution upsample
-		Dof,           // a depth-of-field draw (index: its step * 8 + its draw in the step, + 0x80 after the tonemap)
-		Count
-	};
-
-	/** @brief "luminance", for logs and the table. */
-	const char* StepName(Step a_step);
-
-	/**
-	 * @brief Which table row a step's draw takes: the step, its index and parity, and for the steps whose targets follow
-	 * RenderEndOfFrameEffects' ping-pong, the target it reads and the one it writes (RE::RENDER_TARGET values, -1 for the others).
-	 */
-	struct RowKey
-	{
-		Step step = Step::None;
-		std::uint8_t index = 0;
-		std::uint8_t parity = 0;
-		std::int8_t in = -1;
-		std::int8_t out = -1;
-
-		friend auto operator<=>(const RowKey&, const RowKey&) = default;
-	};
-
-	/** @brief "luminance 3 p1 27->28". */
-	std::string RowName(const RowKey& a_key);
-
-	/** @brief One draw the description predicts: its effect index (or a group), and the row it takes (Step::None for a group). */
-	struct Draw
-	{
-		std::uint16_t effect = 0;
-		RowKey row;
-	};
-
-	inline constexpr std::uint16_t kGroupBase = 0x8000;
-	inline constexpr std::uint16_t kGroupVolumetricLighting = kGroupBase + 0;  // the engine's VL apply and blur (Volumetric Lighting's port)
-	inline constexpr std::uint16_t kGroupLensFlares = kGroupBase + 1;          // the image-based lens flares (+0x180)
-	inline constexpr std::uint16_t kGroupDepthOfField = kGroupBase + 2;        // slot 3
-	inline constexpr std::uint16_t kGroupFullScreenBlur = kGroupBase + 3;      // slot 6
-	inline constexpr std::uint16_t kGroupGetHit = kGroupBase + 4;              // slot 7
-	inline constexpr std::uint16_t kGroupWorldMap = kGroupBase + 5;            // slot 0
-	inline constexpr std::uint16_t kGroupRadialBlur = kGroupBase + 6;          // slot 5
-	inline constexpr std::uint16_t kGroupRefraction = kGroupBase + 7;          // slot 1
-
-	/**
-	 * @brief PredictEffects with each draw's row: the 99023 / 105674 ping-pong between the source, the swap target and the destination is
-	 * followed as the engine follows it (eofSource, eofSwap, eofDest), so each step knows the targets it reads and writes.
-	 */
-	std::vector<Draw> PredictDraws(const PostFields& a_fields, Part a_part = Part::All);
-
-	/**
-	 * @brief The RenderWorld scopes (Main::RenderWorld, SE 100424 / AE 107142), in the order it runs them: the reflections inside
-	 * FinishAccumulating, RenderSSAO's first call, the snow pass or its copy, RenderSSAO's second call, and the water blend after the
-	 * water's draws. CS draws them as passes of the deferred+water stage (ImageSpace's world steps); ReadWorld reads the engine state
-	 * that selects their variants, for the stage's description at Begin.
+	 * @brief The RenderWorld scopes (Main::RenderWorld, SE 100424 / AE 107142), in the order it runs them. CS draws them as passes of
+	 * the deferred+water stage (ImageSpace's world steps); ReadWorld reads the engine state that selects their variants.
 	 */
 	enum class Scope : std::uint8_t
 	{
@@ -152,59 +48,30 @@ namespace RenderGraph::Frame::PostChain
 	/** @brief Reads the world fields a_scope selects from the engine now (its entry). Render owner. */
 	WorldFields ReadWorld(Scope a_scope, const WorldFields& a_base);
 
-	/**
-	 * @brief Inside the world post chain, after NoteShader for the draw or dispatch in progress: the row the description declared for
-	 * it. Null outside the chain, for a group's draw, and once the chain left its prediction (a "post not declared" error at its end).
-	 * Render owner.
-	 */
-	const RowKey* CurrentRow();
-
-	/** @brief The table check of one declared step's draw (ImageSpace's CheckRow): a_matched when it matched its row. Render owner. */
-	void NoteRowCheck(bool a_matched);
-
-	/** @brief The part of the world chain running now: Composites, EndOfFrame, or All outside the chain. Render owner. */
-	Part CurrentPart();
-
-	/**
-	 * @brief Called at each part's decision event (RenderWorldPostProcess' entry for the composites, RenderEndOfFrameEffects' entry for
-	 * the rest) with the draws predicted for that part, before any of them: the post segments decide there whether the part draws from
-	 * the pass-state table. One hook (ImageSpace's); installing another replaces it. Render owner.
-	 */
-	void SetPartHook(void (*a_hook)(Part a_part, const std::vector<Draw>& a_draws));
-
 	/** @brief Whether the world post chain is running now (RenderWorldPostProcess's entry to its return). Render owner. */
 	bool InChain();
 
 	/**
-	 * @brief The post fields the chain of this frame slot was last predicted from, completed at its decision events: the best
-	 * description of the slot's next chain at Begin (the decisions made after Begin repeat from frame to frame). a_have false when
-	 * the slot had no chain yet; then Begin's read. Render owner.
+	 * @brief The luminance chain's level count for kHDR_DOWNSAMPLE0's size now, as ImageSpaceEffectHDR::Render (100465 / 107183)
+	 * loops: a quarter per level down to 1x1, or 2x2 with the option (513488 / 391336) and without its override (528106 / 415051).
 	 */
-	PostFields SlotFields(std::uint32_t a_slot, bool* a_have = nullptr);
-
-	/** @brief The fields the running chain was predicted from (both parts read by now), else the current frame's Begin read. Render owner. */
-	PostFields ChainFields();
+	std::uint32_t LuminanceLevels();
 
 	/**
-	 * @brief The fields this frame's chain is declared with: the running (or finished) chain's, read at its decision events, once it
-	 * started this frame; before that, the slot's last chain's (SlotFields). What the post segments' rows are selected from, at Begin
-	 * and again at their end taps. Render owner.
+	 * @brief The luminance chain's last-level parity global (528109 / 415054). ImageSpaceEffectHDR::Render flips it just before it
+	 * draws the last level, which goes to target 27 + levels - 1 + 2 * parity; read at a draw after that, it is that draw's parity.
 	 */
-	PostFields DeclaredFields();
+	std::uint32_t LuminanceParity();
 
-	/** @brief "ISHDRDownSample4" for an effect index, a group's name for a group. */
-	std::string EffectName(std::uint16_t a_effect);
+	/**
+	 * @brief Which of its two targets the volumetric lighting writes this frame and the composite reads: kIMAGESPACE_VOLUMETRIC_LIGHTING
+	 * + (~counter & 1), the counter at +0x88 of the VL state (getter 100297 / 107014). 0 when the state does not exist.
+	 */
+	std::uint32_t VolumetricParity();
 
-	/** @brief Renderer::Begin (FrameDriver::OnBegin): fills a_frame.post and counts how often the description changes. Render owner. */
+	/** @brief Renderer::Begin (FrameDriver::OnBegin): fills a_frame.post and counts how often the structure changes. Render owner. */
 	void OnBegin(Description& a_frame);
 
-	/**
-	 * @brief The ImageSpace hooks: the engine is about to draw or dispatch an ImageSpace shader. a_effect is the shader's ImageSpaceEffect
-	 * (BSImagespaceShader::Render's this) or the BSImagespaceShader itself (the explicit Render and DispatchComputeShader). Counted only
-	 * inside the world post chain. Render owner.
-	 */
-	void NoteShader(const void* a_effect);
-
-	/** @brief The census line (CS_ORG_EPOCH_STATS's report): chains checked and matched, and the description's changes by field. */
+	/** @brief The census line (CS_ORG_EPOCH_STATS's report): world frames, and the structure's changes by field. */
 	void LogStats();
 }

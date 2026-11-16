@@ -121,7 +121,7 @@ namespace RenderGraph::Frame
 		return out;
 	}
 
-	std::string DiffPost(const PostFields& a_before, const PostFields& a_after, bool a_parity)
+	std::string DiffPost(const PostFields& a_before, const PostFields& a_after)
 	{
 		std::string out;
 		const auto flag = [&](const char* a_name, bool a_old, bool a_new) { Append(out, a_name, a_old ? "yes" : "no", a_new ? "yes" : "no"); };
@@ -143,23 +143,9 @@ namespace RenderGraph::Frame
 		number("taa form", a_before.taaMode, a_after.taaMode);
 		flag("taa water", a_before.taaWater, a_after.taaWater);
 		flag("dynamic resolution", a_before.dynres, a_after.dynres);
+		flag("dof compute", a_before.dofCompute, a_after.dofCompute);
 		flag("screenshot", a_before.screenshot, a_after.screenshot);
 		flag("upscaler", a_before.upscaler, a_after.upscaler);
-		flag("dynamic scale", a_before.dynScaled, a_after.dynScaled);
-		Append(out, "dof steps", fmt::format("{:#x}", a_before.dofSteps), fmt::format("{:#x}", a_after.dofSteps));
-		flag("dof compute", a_before.dofCompute, a_after.dofCompute);
-		Append(out, "eof source", std::to_string(a_before.eofSource), std::to_string(a_after.eofSource));
-		Append(out, "eof destination", std::to_string(a_before.eofDest), std::to_string(a_after.eofDest));
-		Append(out, "eof swap", std::to_string(a_before.eofSwap), std::to_string(a_after.eofSwap));
-		Append(out, "normals", std::to_string(a_before.normals), std::to_string(a_after.normals));
-		if (a_parity) {
-			number("sil parity", a_before.silParity, a_after.silParity);
-			number("vl parity", a_before.vlParity, a_after.vlParity);
-			number("composite address", a_before.compositeAddress, a_after.compositeAddress);
-			number("taa address", a_before.taaAddress, a_after.taaAddress);
-			number("luminance parity", a_before.lumParity, a_after.lumParity);
-			number("taa parity", a_before.taaParity, a_after.taaParity);
-		}
 		return out;
 	}
 

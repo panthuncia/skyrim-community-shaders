@@ -295,10 +295,6 @@ namespace RenderGraph::Frame::Driver
 			return "lost to a build";
 		case TapError::InstanceNotDeclared:
 			return "instance not declared";
-		case TapError::PostNotDeclared:
-			return "post not declared";
-		case TapError::PostStateMismatch:
-			return "post state mismatch";
 		case TapError::NoPass:
 			return "no CS pass";
 		default:

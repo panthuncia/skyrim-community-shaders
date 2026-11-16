@@ -278,8 +278,8 @@ namespace FrameAnchors
 		// work. Recorded ahead, it does nothing on a run whose commit left its entries closed. So native mode records it ahead, in the
 		// epoch's kept recording, when GPU gates are on (GpuGates). It is recorded at execution only to leave out the empty commands.
 		bool gpuGated = false;
-		// Declared segments: the pass's bit in its segment's declared rows (ClientDesc::rows; the post chain's pass-state table row, by
-		// its index in the table). Off in a recording whose description clears the bit: it records only its barriers. -1: no row.
+		// Declared segments: the pass's bit in its segment's declared rows (ClientDesc::rows; an engine effect step's pass, by its place
+		// in its stage). Off in a recording whose description clears the bit: it records only its barriers. -1: no row.
 		std::int16_t row = -1;
 	};
 
@@ -339,12 +339,11 @@ namespace FrameAnchors
 		std::uint32_t maxInstances = 1;
 		std::function<std::uint32_t()> instances;
 		// Declared segments: the rows of the client's passes (PassDesc::row) that do work this frame, a bit per row, ORed into the
-		// segment's description. Read at the frame's start only, from what the slot's last frame observed (the post chain's decision
-		// events after Begin do not change the frame's schedule; a draw whose row the schedule has off cuts the segment). Null: every
-		// row on.
+		// segment's description. Read at the frame's start only, from engine state there and what hooks asked for (a step whose row the
+		// schedule has off draws nothing that frame and asks for its row). Null: every row on.
 		std::function<void(std::array<std::uint64_t, 4>&)> rows;
 		// Declared segments: the client's commit may run at several taps of one segment run, each writing gate entries and latch regions
-		// no earlier tap of the run wrote (the post chain's batches, one per ImageSpace scope). Without it a second tap of a client
+		// no earlier tap of the run wrote (the stages' ImageSpace batches, one per ImageSpace scope). Without it a second tap of a client
 		// without instances is a tap error.
 		bool repeats = false;
 		// Declared segments: the client's passes are only in the declared segments that hold it. The anchor's own graph leaves them out,
@@ -607,7 +606,7 @@ namespace FrameAnchors
 	 * ticket is taken there. The stage's commit point (its last step) copies the staged values into the slot's copy and submits the one
 	 * ticket. Stages: pre-depth (EarlyPrepass), pre-main (RenderDepth's depth copy to Prepass; CS_ORG_SEGMENT_PREMAIN=0 off), deferred
 	 * and water (DeferredPasses to just before the forward epoch; CS_ORG_SEGMENT_DEFERRED=0 off), and the post chain's two
-	 * (CS_ORG_SEGMENT_POST_DRAW=0 off): post composites and post end-of-frame, drawn from the pass-state table. Guest mode keeps the
+	 * (CS_ORG_SEGMENT_POST=0 off): post composites and post end-of-frame, with the chain as CS passes. Guest mode keeps the
 	 * anchors' epochs. Any thread.
 	 */
 	bool SegmentsOn();
@@ -643,14 +642,6 @@ namespace FrameAnchors
 	 * nothing (the segment did not open this frame, or it is not declared). Render owner.
 	 */
 	RunResult TapPoint(std::uint32_t a_segment);
-
-	/**
-	 * @brief Ends a declared segment now, before its end tap, because the frame holds work the segment cannot hold (a post-chain
-	 * effect the pass-state table does not describe): what its taps committed is submitted now, its later taps this frame do nothing,
-	 * and its shared steps' anchors run their own epochs for the rest of the frame. a_segment is a RenderGraphRuntime::Segment value.
-	 * Nothing outside the segment's window. Counted by reason in the census. Render owner.
-	 */
-	RunResult CutSegment(std::uint32_t a_segment, std::string_view a_why);
 
 	/** @brief The gate entry (or latch region index) of a_entry for instance a_instance, a_perInstance entries an instance. */
 	constexpr std::uint32_t InstanceEntry(std::uint32_t a_instance, std::uint32_t a_perInstance, std::uint32_t a_entry)
