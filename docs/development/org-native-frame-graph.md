@@ -3107,9 +3107,13 @@ its per-anchor path.
 `src/RenderGraph/Engine/ImageSpace/ChainSteps.inl`, on the step helpers of `WorldSteps.inl` (`StepDesc`, `MakeStepSpec`, `StepKey`,
 `MakeOwned`, and `StageStep`, the data-only part of a hook, now shared by both files).
 
-- **Passes.** A fixed list in the engine's order, sized at the build. Three clients, as before: the composite (post composites
-  stage), the slots before the tonemap and the HDR effect up to its bloom (post end-of-frame, first ImageSpace step), the tonemap
-  and after (second ImageSpace step, after the Tonemap anchor). 2 + 60 + 61 passes at 1920x1080 with 4 luminance levels.
+- **One stage.** The post stage (`SegmentId::Post`, `Segment::DeclaredPost`) is one revision-driven epoch and one ticket: the
+  volumetric lighting, the composite, the PostProcessing anchor, the Upscale anchor (the upscaler's evaluate, the copy into kMAIN,
+  the depth upscale), the slots and the HDR effect, the Tonemap anchor, the tonemap and after, and RenderEndOfFrameEffects' return
+  as its end point. The post composites and post end-of-frame stages are gone.
+- **Passes.** A fixed list in the engine's order, sized at the build. Three clients share the stage's rows in order: the composite
+  (first ImageSpace step), the slots before the tonemap and the HDR effect up to its bloom (second, after the Upscale anchor), the
+  tonemap and after (third, after the Tonemap anchor). 2 + 92 + 101 passes at 1920x1080 with 4 luminance levels.
 - **Hooks.** Each draw or dispatch inside the world chain stages the constants the engine bound and is withheld
   (`TakeChainStep`). Its pass is found by scope, effect and variant (`ChainKeyOf`).
 - **Targets are CS's plan.** At RenderEndOfFrameEffects' entry (99023 / 105674, detoured in `PostChain.cpp`) CS plans the chain the
@@ -3149,21 +3153,49 @@ its per-anchor path.
 | TAA | ISTemporalAA | TEMP_COPY, CS history (other), motion, depth, TAA mask, normals | final or TEMP_COPY2, CS history | plan, frame slot parity, Deferred's normals target | yes (upscalers TAA) |
 | screenshot | ISCopy | final, TEMP_COPY or TEMP_COPY2 | kSAVE_GAME_SCREENSHOT | plan (+0x211) | no |
 | upsample | ISUpsampleDynamicResolution | TEMP_COPY or 2 | final | plan | no |
+| full-screen blur (slot 6, both places) | ISHDRDownSample4, ISBlurN (or ISNonHDRBlurN by the blur effect's HDR flag), ISCopy or ISCopyDynamicFetchDisabled, ISHDRDownSample4 | image; CS FullBlurDown, FullBlurSwap | CS FullBlurDown, FullBlurSwap; the plan's target (blended below radius 1) | the effect's draws in order (InnerVariant: shader and its occurrence), radius at the draw (+0x128) | no |
+| get hit (slot 7, both places) | ISCopy, ISBlur5 four times, ISDoubleVision | image; CS GetHitA, GetHitB, GetHitSwap | CS buffers; the plan's target | the same | no |
 
 Constants: every step's are captured (data-only hooks). None is computed yet.
 
-Not built (a hook for them is `NoPass`): the lens flare forms of the composite and the image-based lens flares, SIL, the full-screen
-blur, get hit, slot 4, the depth of field's raster blur and masked composites, TAA's UI and water forms. No test reaches them.
+The full-screen blur and get-hit effects (ImageSpaceEffectFullScreenBlur, Setup SE 0x141329df0, Render 0x14132a370;
+ImageSpaceEffectGetHit, Setup 0x141328b80) are composite effects: each Render draws a fixed chain of the manager's shader effects,
+wired by the effect's step table (shaders at +0x18, textures at +0x48, inputs at +0x60, outputs at +0x78). Their Render vfuncs are
+wrapped (at ImageSpace's Setup, after Legacy Graphics Compatibility patched the full-screen blur's) so a draw inside them is keyed by
+its shader and how many draws of that shader came before it in the effect (`InnerVariant`). The borrowed textures (kGETHIT_BUFFER
+twice, kGETHIT_BLURSWAP; kHDR_BLURSWAP, kHDR_DOWNSAMPLE0) are CS transients made like those targets.
+
+Not built (a hook for them is `NoPass`):
+- the lens flare forms of the composite and the image-based lens flares: ISCompositeLensFlare reads the output of the image-based
+  lens flare chain (manager +0x180), several passes over kIBLENSFLARES targets whose order and inputs are not decompiled;
+- SIL (ISSILRawInd, ISSILComposite, manager +0x1d8): off in the game's settings, and not decompiled;
+- slot 4: the effect list has no entry 4 on SE (CommonLib: "Missing SE 4"), so nothing draws there;
+- the depth of field's raster blur (the compute-blur option off) and its masked composites: the masked forms read a mask target
+  whose producer is not decompiled; the raster blur is an ImageSpaceEffectBlur chain like the full-screen blur's and could follow it;
+- TAA's UI and water forms (ISTemporalAA_UI, ISTemporalAA_Water, SE 0x1412eeb90): CS has no port of either shader, and the water
+  form writes a third target (kTEMPORAL_AA_WATER_1/2 by history) that StepDesc cannot express. The UI form (helper +0x2c = 2) uses its
+  own history pair (kTEMPORAL_AA_UI_ACCUMULATION_1/2).
+No test reaches any of these, nor the full-screen blur or get hit.
 
 ### Targets
 
 - CS-owned: `ImageSpace::Bloom`, `BloomSwap` (in place of kHDR_BLOOM, kHDR_BLURSWAP), `DofDownsample`, `DofBlurSwap` (kLDR_DOWNSAMPLE0,
-  kLDR_BLURSWAP), transients; `TAAHistory0/1` (kTEMPORAL_AA_ACCUMULATION_1/2), a history pair cleared once.
-- Engine targets kept, with their outside reader: the luminance chain kHDR_DOWNSAMPLE0..13 (Drawcall Limit Fix's character light,
-  `CharacterLightGraphTextureIds`; the adapted luminance pair is among them, so adaptation keeps the engine's pair); kMAIN, kMAIN_COPY
-  (the Upscale anchor writes kMAIN; water and refraction read kMAIN_COPY); kIMAGESPACE_TEMP_COPY/2 and the final target (the Tonemap
-  anchor's clients, Post Processing and Effects11, take the tonemap's input and output as engine targets; the UI draws over the final
-  target); the VL pair (Volumetric Lighting's port writes it).
+  kLDR_BLURSWAP), `GetHitA`, `GetHitB`, `GetHitSwap`, `FullBlurDown`, `FullBlurSwap`, transients; `TAAHistory0/1`
+  (kTEMPORAL_AA_ACCUMULATION_1/2) and `AdaptedLuminance0/1` (the luminance chain's last level of each parity, 27 + levels - 1 + 2 x
+  parity), history pairs cleared once.
+- The adapted luminance pair is published (`ImageSpace::AdaptedLuminance0/1`). Drawcall Limit Fix's character light, which reads the
+  engine's adapted luminance target the engine binds, reads CS's target of the same parity instead (`AdaptedLuminanceTextureIndex`,
+  `ImageSpace::AdaptedLuminanceOf`); its passes declare both ids.
+- Engine targets kept, each with the reader that needs it: kHDR_DOWNSAMPLE0 and the levels before the last (the character light may
+  still bind one of them; nothing else outside the chain reads them); kMAIN (the Upscale anchor's copy and depth upscale, the UI and
+  Scaleform composite over the final chain); kMAIN_COPY (the water surface and refraction read it, Upscaling's depth upscale writes
+  it); kIMAGESPACE_TEMP_COPY/2 and the final target (the Tonemap anchor's clients, Post Processing and Effects11, take the tonemap's
+  input and output as engine target indices; frame generation's hudless copy and the UI read the final target); the VL pair
+  (Volumetric Lighting's port writes it); kSAO_CAMERAZ mip 10 (the depth of field's average depth; the depth upscale writes it);
+  kMOTION_VECTOR, the main depth and kTEMPORAL_AA_MASK (TAA and the upscaler read them, the forward pass writes them).
+- Not done: the tonemap ping-pong (kIMAGESPACE_TEMP_COPY/2) as CS targets. The Tonemap anchor's `Run` carries engine target indices
+  (`TonemapAnchor.cpp`), and ORGPostProcessing and ORGFxRuntime resolve them with `FrameAnchors::EngineTarget`; both clients, the
+  anchor's interface, TAA, the LDR slots, the screenshot copy and the upsample would move to CS's pair together.
 
 ### Measurements
 
@@ -3196,17 +3228,101 @@ radial blur, which used to cut, are drawn. Adaptation: native-interior's two Dra
 96.5 against 99.8 and 95.3 (and 99.7 to 104 over other earlier runs): the same exposure and the same drift between the shots. The
 recipe shows each adaptation pass reading kHDR_DOWNSAMPLE3 and the other parity's target, as the decompile does.
 
+### The upscaler's evaluate as a pass (stage 3 finish)
+
+In native mode the evaluate is the Upscale anchor's first pass (`EvaluatePass`, ORGUpscaling.cpp), in the shape of BasicRenderer's
+`UpscalingPass`:
+- `cs_EvaluateFeatureNative` sets the frame's constants (`slSetConstants`) on the render thread, then hands the tags and the
+  evaluate to `ORGUpscaling::QueueEvaluate` as a closure that captures the frame token, viewport, feature and extents by value. The
+  Upscale client's commit stores it for the run (`RunSlots`), so the stage's commit moves it with the other staged inputs.
+- The pass is recorded at execution each frame (the stage's late batch, on the submission thread): `SkipsAtExecution` when the run has
+  no evaluate (TAA, no upscaler), else `Record` calls `slSetTagForFrame` and `slEvaluateFeature` on the pass's own command list, then
+  `RestoreDescriptorHeaps`. A kept recording cannot hold it: the token and the SDK's commands are new each frame.
+- Its four images (kMAIN in, the upscaled texture out, kMAIN's depth, kMOTION_VECTOR) are legacy interop uses
+  (`PassBuilder::LegacyInteropUse`, new in ORG: a common-state use with a token). The common state is GENERAL on Vulkan and COMMON on
+  D3D12, which is what the tags name. On D3D12 the output also declares an internal transition to the common state, as BasicRenderer
+  does. `Native::DescribeForCommands` turns the pass's list and resolved images into the native list, images, Vulkan views (retained
+  by the recording) and states.
+- `Native::RunExternal` and `ExternalImage` are deleted; nothing else used them.
+
+The post composites and post end-of-frame stages are merged into one post stage (above). What runs between the composite and
+RenderEndOfFrameEffects (Post Processing's `DrawBeforeUpscaling`, the frame generation border clear, the depth upscale) submits no
+GPU work of its own in a steady frame (the census line below).
+
+Two FrameAnchors rules came with the merge, both for frames where a stage's commit point did not come (Drawcall Limit Fix's forward
+epoch did not run while its programs compile, seen on D3D12 at the world's first frames): a stage's first tap ends the earlier stages
+that staged and are still open, at their end point (their tickets go first, in recipe order); and a tap is offered to every open stage
+with a step at its anchor, not only the first (the deferred+water and post stages both have ImageSpace steps).
+
+### The TAA mask and kMAIN_ONLY_ALPHA clears
+
+The engine's clears of the TAA mask and kMAIN_ONLY_ALPHA after the water blend are clear passes of the deferred+water stage, first at
+its last ImageSpace step (`Host::ImageSpace` in Skeleton.cpp): the engine's call stages their gate entries and colours, the stage's
+commit carries them. The TAA mask's clear inside the post chain, when TAA is turned on, is a clear pass of the post stage, first at its
+last ImageSpace step (`Host::PostChain`, the client `cs.engine.skeleton.frame@post-chain`). The frame group's clear ticket
+(EngineFrameClear) is gone from steady world frames: one ticket fewer.
+
+### Adaptation, read back
+
+`CS_ORG_ADAPT_READBACK=1` copies, at the end of the post stage, the luminance chain's last input level and both adapted luminance
+targets into a readback ring, and logs them five frames later every 30 frames (R11G11B10 decoded, red channel). native-interior
+(Whiterun, then `coc WhiterunDragonsreach` at frame 917, shots at 1517 and 1817), measured, every other line:
+
+| Frame | Last input level, mean | Adapted (parity 0 / 1), mean |
+|---|---|---|
+| 525 | 0.604 | 0.596 / 0 (not written yet) |
+| 645 | 0.600 | 0.594 / 0.594 |
+| 825 | 0.573 | 0.568 / 0.568 |
+| 885 (loading) | 0.360 | 0.358 |
+| 945 (Dragonsreach) | 0.453 | 0.451 |
+| 1125 | 0.389 | 0.385 |
+| 1365 | 0.373 | 0.369 |
+| 1605 | 0.359 | 0.355 |
+| 1785 | 0.349 | 0.347 |
+
+The adapted luminance follows the scene's luminance within about 1 % a few frames after each change, in both parities, and the
+character light reads the same targets. The scene's own luminance (the input, before any exposure) drifts down by about a quarter over
+the 840 frames in Dragonsreach while nothing moves: the drift between the two Dragonsreach shots is in the lit scene, not in the
+adaptation. That drift is the known brightness variance between runs (a separate item).
+
+### Measurements (stage 3 finish)
+
+perf-taa, native Vulkan, Perf-Fast, Tracy, one run each, measured. Before: the post stage's previous build (`s6perf`, this section).
+
+| perf-taa | Before | After |
+|---|---|---|
+| fps between the marks | 123.0 | 121.1 |
+| Tickets a frame | 18.91 | 16.96 |
+| `vkQueueSubmit` calls a frame (RHI; plus 1 external) | 29.00 | 27.13 |
+| Entry / body barriers a frame | 612 / 883 | 596 / 996 |
+| post stage(s): entry / body barriers | 28 / 120 (end-of-frame) plus the composites stage's | 33 / 257 |
+| Render / submission / host thread busy, ms a frame | 3.01 / 2.91 / 1.68 | 3.32 / 2.80 / 1.51 |
+| Post stage ticket: submission us (admission, inline recording, `vkQueueSubmit`); render `ExecuteEpoch` us | 18.5 + 49.9; 13.8 + 17.4 (two stages) | 52.8 (12.8, 13.8, 0.9); 24.3 |
+| Recordings, switches, lagged work, tap errors, recipe findings in the steady window | 0, 0, 0, 0, 0 | 0, 0, 0, 0, 0 |
+
+Two tickets fewer: the post stages merged, and the frame group's clear ticket left. The body barriers rise by 113: the passes a
+description has off still record their barriers, and the stage holds 66 more passes (the full-screen blur, get hit, the adapted pair's
+clears). The frame rate is 1.9 fps below the last run, inside the 2 to 3 fps spread pairs of one build have shown; not confirmed
+either way with one run each. In the steady window no GPU work is submitted between a stage's first tap and its commit; at the world's
+first frames one ImageSpace anchor run and one native context operation are (both seen on the previous build too).
+
+### Checks (stage 3 finish)
+
+One run each, `CS_TEST_BACKGROUND=1`, mismatches and recipe findings fatal, on the final build: native-quick (DLSS registered, the
+evaluate pass on Vulkan), native-d3d12-quick (the evaluate pass on D3D12), native-river, native-upscalers (DLSS, FSR, XeSS, TAA),
+native-interior, native-validation (the known 20x `VUID-vkCmdDraw-None-09600` only), the loading-thread run, first and third person
+(with the `start` shot), guest-quick: all passed, 0 tap errors, 0 recipe findings, no `NoPass`, no evaluate errors. Shots match the
+previous build by eye: the differences are foliage in the wind, NPCs and the volumetric light's shafts in Dragonsreach (mean 101.8
+against 99.4). The D3D12 run failed fatally twice during the work (the composite's tap offered to the deferred+water stage, which was
+still open in a frame Drawcall Limit Fix did not draw); the two FrameAnchors rules above fixed it.
+
 ### What is left
 
-- **The upscaler's evaluate as a pass** (not started). Every SDK goes through Streamline in native mode (`cs_EvaluateFeatureNative`,
-  `Native::RunExternal`). A pass needs: a pass recorded at execution each frame (not GPU-gated) in the post stage whose Record calls
-  `slSetTagForFrame` and `slEvaluateFeature` on the stage's command list, with the frame token and constants latched per run; the
-  native image, a view and its layout for colour in, depth, motion and output (on Vulkan from the pass's declared states; on D3D12
-  `LegacyInterop` and an internal transition of the output, as BasicRenderer's `UpscalingPass`); and descriptor heaps restored after.
-  Until then the post chain stays two stages.
-- **The TAA-mask / kMAIN_ONLY_ALPHA clear** keeps its frame-group ticket; it belongs at the end of the deferred+water stage (staged by
-  the engine's clear call), and the in-chain TAA-mask clear at TAA's switch-on in the post stage.
-- **Computed constants**: none yet. RenderSSAO's (SE 0x1412ebd70) are computable from globals; the HDR effect's are a few
-  reciprocal sizes plus globals (0x1412e6fe0).
+- The tonemap ping-pong as CS targets (Targets, above).
+- The lens flare forms, SIL, the depth of field's raster blur and masked composites, TAA's UI and water forms (The steps, above).
+- Constants: none computed yet. RenderSSAO's (SE 0x1412ebd70) are computable from globals; the HDR effect's are a few reciprocal
+  sizes plus globals (0x1412e6fe0).
+- A description's off passes record their barriers; with many variants in one stage (the post stage's 195) that is a few hundred
+  barriers a frame.
 - Still reachable in native from ImageSpace.cpp: the main client, the shape manifest and late clients (flow copies, water
   displacement, menus and other frame kinds, UI3DSceneManager's end-of-frame call), until stages 4 and 5.
