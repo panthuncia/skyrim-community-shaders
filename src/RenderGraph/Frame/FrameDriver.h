@@ -114,6 +114,9 @@ namespace RenderGraph::Frame::Driver
 	/** @brief Counts how a declared segment runs this frame (render owner). */
 	void NoteScheduled(SegmentId a_segment, Scheduled a_how);
 
+	/** @brief A staged build of the segment's graph switched in whole with its recordings at this Begin (render owner). */
+	void NoteBuildSwitch(SegmentId a_segment);
+
 	/**
 	 * @brief A client or module step had work at its tap that the running schedule leaves out, while the frame's own description has
 	 * it on: the schedule lags, the work is not drawn this frame. Counted, not a mismatch (render owner).

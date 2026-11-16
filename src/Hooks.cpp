@@ -599,6 +599,9 @@ struct IDXGISwapChain_Present
 					swapChain, syncInterval, presentFlags,
 					[&](IDXGISwapChain* sc, UINT si, UINT f) {
 						ZoneScopedN("CS.Present.NativeWait");
+						// The UI stage's commit point: just before the present.
+						if (FrameAnchors::SegmentsOn())
+							(void)FrameAnchors::TapPoint(static_cast<std::uint32_t>(RenderGraphRuntime::Segment::DeclaredUi));
 						// Regions: what a region still holds (the overlay, HDR output, the capture) reaches the GPU before the present.
 						FrameAnchors::FlushRegions("the present");
 						// The frame's epochs still on the submission thread reach the queue before the present. A loading screen's thread

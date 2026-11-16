@@ -3502,3 +3502,147 @@ The fatal paths fired three times during the work, each fixed before the final r
   then dropped in the frame kinds that have the stage (the skeleton's `FacesClearedBySky` pattern).
 - Barrier folding applies to every kept recording: passes a description has off cost a few composed barriers, not their own batches.
 - The main ImageSpace client and the shape manifest remain for the water effects at the frame's start, menus and other frame kinds.
+
+## Frame kinds and the UI stage (recipe plan, stage 5; 2026-11-16, `org-native/phases`)
+
+### Builds switch in with their recordings
+
+Before this stage an attach dropped every frame slot's schedule of the stage (`Scheduled::Absent`) until the new build's recordings were
+made: 1 to 3 frames without the stage after every build. Now a CS stage's build is staged, recorded, and switched in whole.
+
+- **ORG** (`GraphHost::StageEpochGraph`, `AttachStagedEpochGraph`; persistent-epochs.md, "Staged graphs"). The host's thread records a
+  built graph before it runs, for recording requests that name its generation. The attached graph keeps submitting meanwhile, with its
+  aliased bindings frozen (the staged graph's placement may move its transients), and takes no new recording.
+- **Build manager** (`BuildManager::Desc::staged`: every CS stage's epoch; `CS_ORG_STAGED_BUILDS=0` attaches at once). A finished build of
+  a stage is staged, not attached. What the build defers to its staging (`Builds::DeferStaged`) runs then: FrameAnchors keeps the staged
+  build's snapshot and passes. What it defers to its attach runs at the switch (`BuildManager::SwitchStaged`).
+- **The switch** (`Schedule` in FrameAnchors.cpp, at `Renderer::Begin`). While a build is staged, each Begin describes the frame against
+  the staged snapshot and asks for that description's recording for every frame slot (`RequestEpochRecording` with the staged generation).
+  When all four are done, the staged graph is attached and every slot's schedule switches to its recording, at that Begin. Until then
+  every slot keeps the attached build's schedule; a description change in that time lags (the attached graph records nothing new). This
+  runs in frames of every kind, so a build made during a load or a menu is in place for the next world frame. Logged as
+  `[ORG] schedule: the <stage> segment switches in frame N (...): build B switched in whole with its recordings for every frame slot`.
+- **Versions lag too.** A slot whose recording binds a version that was replaced keeps that recording (it holds the old version) until the
+  recording of the new description is ready: the stage lags a frame, it is not blanked. A version published after Begin is still a
+  mismatch (`StaleRecording`), checked only for a recording that was current at Begin.
+- **A stage with nothing to record** (no client and no module step in its graph: the UI stage before the overlay registers) is absent, as
+  before its first build, and its staged build switches in at once.
+- The census adds `build switches` and `absent after it first ran` per stage. Every run below: 0 absent frames after a stage first ran.
+
+**Description-off passes stay folded.** With staged builds a description could be a build of its own, its off passes absent. It is not
+done: folding (stage 4) already makes an off pass cost a few composed barriers, while a build per description costs a build off the thread
+(5 to 140 ms here) and a switch a frame or two later for each of the many description changes (rows, the fade form, the screenshot copy).
+Folding is the simpler correct one.
+
+### Recipes for the other frame kinds
+
+`Recipes::KindHas`, `DescribeKind`, `DiffKinds` (Recipe.cpp). Each kind has its own ordered list of stages; a CS stage a kind does not list is
+absent from its frames (not declared). The kind is decided at `Renderer::Begin` from events (stage 1 of the declared frame: the movie tick,
+the loading screen's start, the thread, the engine's own freeze-background test and the player's 3D), never asked mid-frame.
+
+| Kind | Recipe (* Drawcall Limit Fix's graphs; "tickets": anchors' own epochs) |
+|---|---|
+| world, and a frozen world's capture frame | start, shadows*, pre-depth, depth*, pre-main, opaque*, deferred+water, forward*, first person*, post, UI |
+| menu over a frozen world | frozen composite and menu scene (tickets), UI |
+| main menu | menu scene (tickets), UI |
+| loading screen | loading model (tickets), UI |
+| Bink movie | movie (tickets), UI |
+
+The frame-kind line names the recipes and what changed: `[ORG] frame kind: kind loading screen -> world (frame 571); recipe loading model
+(tickets) | UI -> start | shadows* | ... | UI; stages added: ...; removed: loading model`. Every stage is built at setup; a kind switch
+changes which stages a frame declares, and the stages it keeps (UI) keep their schedules, so a switch blanks nothing.
+
+### The UI stage
+
+`SegmentId::Ui`, `Segment::DeclaredUi` (FrameAnchors.cpp, kDeclaredInfo), in every kind's recipe; `CS_ORG_UI_STAGE=0` turns it off. It holds the
+Overlay anchor wholly (the ImGui overlay: its upload and draw passes, recorded in the stage's late batch from the run's draw list, a frame
+input). It ends at a point: just before the present (Hooks.cpp), or just before HDR output or the capture is submitted, since both draw after
+the overlay on the GPU.
+- A new overlay target, or a font atlas page made or dropped (`ImGuiBasicRHI::PublishTextures`, answered before the run), is a new version
+  published in the middle of the frame: that frame draws no overlay, and the stage's recordings take the version from the next boundary.
+
+What it does not hold yet, and why:
+- **Scaleform's displays** (Interface anchor, a ticket in every kind). A display is drawn as one anchor run per 1024 commands, onto one of
+  several surfaces (the framebuffer, HDR's UI texture, scratch targets for pushed render targets), and a display the graph refuses falls back
+  to D3D11. Fixed instances need a pass pair per surface per instance (surfaces x 2 x the most runs a frame) and the commit writing a
+  per-instance run slot; the refusal path has to go first. Not done.
+- **HDR output and the capture** (tickets after the stage's commit). HDR output can copy into the back buffer through the swap chain's
+  per-frame image, which a kept recording cannot bind; the capture checks its copy's submission right after its run.
+- **The movie tiles and the Present anchor's clients** (Bink; tickets before the stage).
+
+### Measurements
+
+perf-taa, native Vulkan, Perf-Fast, Tracy, one run each. Before: stage 4's final run (`s7fin2`). After: this stage's final build
+(`st5perf`). The machine was in use during the after run: its frame rate and thread times are rough, and no conclusion is drawn from them.
+
+| perf-taa | Before (measured) | After (measured, machine in use) |
+|---|---|---|
+| fps between the marks | 123.3 | 123.3 |
+| Tickets a frame | 13.96 | 13.91 |
+| `vkQueueSubmit` calls a frame (RHI; plus 1 external) | 24.06 | 24.01 |
+| Entry / body barriers a frame | 506 / 811 | 505 / 811 |
+| Render / submission / host thread busy, ms a frame | 3.04 / 2.26 / 1.17 | 3.15 / 2.71 / 1.39 |
+| Overlay: ticket, entry / body barriers | anchor 1.00, 5 / 4 | UI stage 1.00, 5 / 4 |
+| Recordings, schedule switches, tap errors, recipe findings in the steady window | 0, 0, 0, 0 | 0, 0, 0, 0 (recipe: 490 passes) |
+
+The world frame's tickets are unchanged in number: the overlay's anchor ticket is the UI stage's ticket. The stage's value is in the other
+kinds' frames and in the switch (below).
+
+### Checks
+
+One run each, `CS_TEST_BACKGROUND=1`, mismatches and recipe findings fatal, the final build:
+
+| Run | Result |
+|---|---|
+| native-quick (DLSS registered) | passed, 0 tap errors |
+| native-d3d12-quick | passed, 0 tap errors |
+| native-river | passed, 0 tap errors |
+| native-upscalers (DLSS, FSR, TAA, XeSS) | passed, 0 tap errors |
+| native-interior | passed, 0 tap errors |
+| native-validation (Whiterun, inventory, map, save and load, Dragonsreach) | passed, 0 tap errors; the known 20x `VUID-vkCmdDraw-None-09600` only |
+| the loading-thread run | passed, 0 tap errors |
+| first and third person (with the `start` shot) | passed, 0 tap errors |
+| guest-quick | passed |
+| main menu (Start On Save off, shot at main-menu + 300 frames) | menu shot correct, 0 tap errors; the harness marks it failed because it expects a world |
+| a menu over a frozen world (JournalMenu through the harness's menu message) | passed, but the menu did not open: frozen world not reached |
+
+Shots match stage 4's by eye. ORG's unit tests: all pass but HeadlessBenchmark (times out in Debug) and the lease tests (known to hang);
+Pipelines timed out once while a CS build ran beside it and passed alone.
+
+Frame kinds reached: Bink movie (the startup logo, frames 1 to 166 of every run), main menu (10 frames in every run; held 300 frames with
+Start On Save off, shot `menu`), loading screen (every run; the validation tour's save and load too), world. Not reached: **a menu over a
+frozen world**. The validation tour's inventory and map do not freeze the background, and a journal menu opened through the test harness's
+menu message did not open (the shot shows the world); a menu opened by key would need focus, so it was not run.
+
+Staged switches and absent frames (every run): every stage's build after setup was staged and switched in whole, 1 to 4 frames after its
+recordings were first asked for; 0 frames a stage was absent after it first ran (`absent after it first ran 0 (session 0)` in every census
+line of every run). The UI stage is absent only before the overlay registers (3 frames at startup).
+
+The fatal paths fired three times during the work, each fixed before the final runs:
+- The UI stage with no client recorded an empty graph (not replayable): a stage with no client and no module step is now absent.
+- A font atlas page made in the middle of a frame (a new version after Begin): the overlay is not drawn that frame (`PublishTextures`).
+- The validation tour's load: a staged post build bootstrapped while the staged build before it placed a transient, and kept that
+  placement; its first recording found the binding moved (`Binding replacement requires a structural alias edit`). Fixed in ORG: a
+  transient another graph placed is placed again by the next plan (persistent-epochs.md, "Staged graphs").
+
+### What is still a ticket at a hook, by frame kind
+
+- **World**: the sun's queries (1.91), the decal tests, the water effects (ImageSpace main client) at the frame's start, Scaleform's
+  displays (Interface, 1.00), HDR output and the capture when they run (all as stage 4 left them; see there for why). The overlay is the
+  UI stage's.
+- **Loading screen** (validation tour, a window of 41 frames): engine frame clears 5, Interface 3, EngineDraws 3 (the loading model's
+  draws), ImageSpace 1, EngineCopy 1, shadow clear 1; UI stage 1. The loading model and its post are the engine's draws on the anchors'
+  epochs: no CS stage holds them.
+- **Main menu and Bink movie** (the startup window): the Present anchor 0.95 (the movie's tiles), engine frame clears 1.1, Interface, UI
+  stage 0.98; the menu scene's anchors (EngineDraws, ImageSpace, EngineCopy) when it draws.
+- **Menu over a frozen world**: not reached; by code, the frozen composite (ImageSpace main client), the menu scene's anchors, Interface.
+
+### What of the old native paths is still reachable (for stage 6)
+
+- The ImageSpace main client and the shape manifest: they still draw the world's water effects at the frame's start, every ImageSpace
+  call outside the world post chain (menus, the loading model's and the frozen frame's composites) and UI3DSceneManager's end-of-frame
+  call. Not deleted: item 4's condition (the water effects the only user) does not hold while the other kinds' scenes are tickets.
+- Per-anchor epochs for Interface, Present, MovieTiles, HDROutput, Capture, EngineDraws, ImageSpace, EngineCopy, the engine clear anchors and
+  the decal and sun queries; `CanRun`/`RequestJoin` for their clients; D3D11 replay of clears outside world frames.
+- The Overlay anchor's own epoch: none while the UI stage is on (`CS_ORG_UI_STAGE=0` brings it back).
+- `AttachEpochGraph` for CS stages: only with `CS_ORG_STAGED_BUILDS=0`, or for a stage with no graph yet (setup's builds attach).

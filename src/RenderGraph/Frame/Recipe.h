@@ -46,7 +46,7 @@ namespace RenderGraph::Frame::Recipes
 		Forward,      // Drawcall Limit Fix's forward pass, with the frame-group clears' ticket and the sun queries around it
 		FirstPerson,  // Drawcall Limit Fix's first-person colour
 		Post,         // CS: the post chain, the upscaler's evaluate and the depth upscale, one stage
-		Ui,           // the interface, the present, the overlay and the capture (tickets until the UI stage is built)
+		Ui,           // CS: the UI stage (the overlay); Scaleform, the movie tiles, the present, HDR output and the capture keep their tickets
 		Count
 	};
 	inline constexpr std::uint32_t kStages = static_cast<std::uint32_t>(StageId::Count);
@@ -61,6 +61,18 @@ namespace RenderGraph::Frame::Recipes
 
 	/** @brief "pre-main". */
 	const char* StageName(StageId a_stage);
+
+	/**
+	 * @brief The recipes of the other frame kinds (docs/development/org-native-frame-graph.md, "Frame kinds and the UI stage"). Each kind
+	 * has its own ordered list of stages, all built ahead: the world (and a frozen world's capture frame), a menu over a frozen world,
+	 * the main menu, a loading screen, a Bink movie. A CS stage a kind does not list is absent from its frames.
+	 * Whether kind a_kind's recipe (a_capture: a frozen world's capture frame) has CS stage a_segment.
+	 */
+	bool KindHas(Kind a_kind, bool a_capture, SegmentId a_segment);
+	/** @brief The kind's recipe as one line: "menu scene (tickets) | UI". */
+	std::string DescribeKind(Kind a_kind, bool a_capture);
+	/** @brief What changes between two kinds' recipes (empty when it is the same recipe), for the frame-kind switch's log line. */
+	std::string DiffKinds(Kind a_from, bool a_fromCapture, Kind a_to, bool a_toCapture);
 
 	/** @brief An epoch graph's schedule as it was built: its split for a_epoch, or its whole executable. Null before one is selected. */
 	std::shared_ptr<const org::ScheduleTrace> TraceEpochGraph(org::RenderGraph& a_graph, std::uint32_t a_epoch);

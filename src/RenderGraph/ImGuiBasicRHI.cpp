@@ -773,6 +773,24 @@ namespace ImGuiBasicRHI
 
 	bool Prepare(std::uint32_t a_format) { return ProgramFor(Backend(), a_format) != nullptr; }
 
+	bool PublishTextures(ImDrawData* a_drawData)
+	{
+		auto& state = Backend();
+		if (!a_drawData || !a_drawData->Textures || !state.shared || !state.shared->atlas)
+			return false;
+		bool changed = false;
+		std::vector<PendingUpload> none;
+		for (ImTextureData* texture : *a_drawData->Textures) {
+			const bool create = texture->Status == ImTextureStatus_WantCreate;
+			const bool destroy = texture->Status == ImTextureStatus_WantDestroy && texture->UnusedFrames > 0 && texture->BackendUserData;
+			if (!create && !destroy)
+				continue;
+			UpdateTexture(state, *texture, none);
+			changed = true;
+		}
+		return changed;
+	}
+
 	bool Commit(ImDrawData* a_drawData, const Target& a_target, const Resolver& a_resolve)
 	{
 		auto& state = Backend();
@@ -930,7 +948,9 @@ namespace ImGuiBasicRHI
 		auto& state = Backend();
 		if (!a_target || !RenderGraphRuntime::Get().Host() || !EnsureAtlas(state))
 			return nullptr;
-		return std::make_shared<OverlayPass>(std::move(a_target), state.shared, state.shared->atlas, FrameAnchors::RecordsAtExecution(FrameAnchors::Anchor::Overlay));
+		// The draw list is the run's: recorded after its commit, by the anchor's epoch or by the UI stage's late batch at each submission.
+		const bool late = FrameAnchors::RecordsAtExecution(FrameAnchors::Anchor::Overlay) || FrameAnchors::HeldByStage(FrameAnchors::Anchor::Overlay);
+		return std::make_shared<OverlayPass>(std::move(a_target), state.shared, state.shared->atlas, late);
 	}
 
 	std::shared_ptr<org::RenderPass> MakeUploadPass()
@@ -938,7 +958,8 @@ namespace ImGuiBasicRHI
 		auto& state = Backend();
 		if (!RenderGraphRuntime::Get().Host() || !EnsureAtlas(state))
 			return nullptr;
-		return std::make_shared<UploadPass>(state.shared, state.shared->atlas, FrameAnchors::RecordsAtExecution(FrameAnchors::Anchor::Overlay));
+		const bool late = FrameAnchors::RecordsAtExecution(FrameAnchors::Anchor::Overlay) || FrameAnchors::HeldByStage(FrameAnchors::Anchor::Overlay);
+		return std::make_shared<UploadPass>(state.shared, state.shared->atlas, late);
 	}
 }
 
@@ -960,6 +981,7 @@ namespace ImGuiBasicRHI
 	Binding BindingOf(const std::shared_ptr<Texture>&, int) { return {}; }
 	bool Prepare(std::uint32_t) { return false; }
 	bool Commit(ImDrawData*, const Target&, const Resolver&) { return false; }
+	bool PublishTextures(ImDrawData*) { return false; }
 	std::shared_ptr<org::RenderPass> MakePass(FrameAnchors::Texture) { return nullptr; }
 	std::shared_ptr<org::RenderPass> MakeUploadPass() { return nullptr; }
 }

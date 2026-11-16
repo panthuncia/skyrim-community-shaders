@@ -44,6 +44,8 @@ namespace RenderGraph::Frame::Driver
 			std::array<std::uint64_t, kScheduled> scheduled{};  // frames by how the segment ran (Scheduled)
 			std::uint64_t absentTaps = 0;  // taps in frames without a schedule
 			std::uint64_t lagged = 0;      // work left out because the schedule lagged
+			std::uint64_t buildSwitches = 0;  // staged builds switched in whole with their recordings
+			std::uint64_t absentAfter = 0;    // absent frames after the segment first ran (a build or a switch blanked it)
 		};
 
 		/** @brief The switches' lag, in frames since a slot began to wait for the description: 0, 1, 2, 3, 4-7, 8-15, 16 and more. */
@@ -82,6 +84,8 @@ namespace RenderGraph::Frame::Driver
 			std::array<std::uint64_t, kLagBuckets.size()> lags{};       // since the last report
 			std::array<std::uint64_t, kLagBuckets.size()> lagsTotal{};  // the session's
 			std::array<bool, kErrors> errorLogged{};  // the mismatch policy's one line per kind for the session
+			std::array<bool, kSegments> everPresent{};  // the segment ran on a schedule once (session)
+			std::array<std::uint64_t, kSegments> absentAfterTotal{};  // absent frames after that (session)
 		};
 
 		/** @brief Logs a line within a_log's window (16 a segment in 5 s), else counts it; the count is logged once the window passes. */
@@ -240,8 +244,11 @@ namespace RenderGraph::Frame::Driver
 			++state.frames[static_cast<std::size_t>(next.kind)];
 			if (state.began && (next.kind != state.current.kind || next.dclfDraws != state.current.dclfDraws)) {
 				// Kinds change at a menu, a load or a movie: rare, but a flapping test would flood the log.
-				if (++state.kindChanges <= 256 || state.kindChanges % 1000 == 0)
-					logger::info("[ORG] frame kind: {} (frame {}{})", DiffFrame(state.current, next), next.frame, next.capture ? ", draws the frozen background" : "");
+				if (++state.kindChanges <= 256 || state.kindChanges % 1000 == 0) {
+					const auto recipe = Recipes::DiffKinds(state.current.kind, state.current.capture, next.kind, next.capture);
+					logger::info("[ORG] frame kind: {} (frame {}{}){}{}", DiffFrame(state.current, next), next.frame, next.capture ? ", draws the frozen background" : "",
+						recipe.empty() ? "" : "; ", recipe);
+				}
 			}
 			if (!state.began)
 				logger::info("[ORG] frame kind: {} (frame {}, the first frame described)", KindName(next.kind), next.frame);
@@ -398,7 +405,21 @@ namespace RenderGraph::Frame::Driver
 	{
 		auto& state = Get();
 		const std::lock_guard lock(state.mutex);
-		++state.segments[static_cast<std::size_t>(a_segment)].scheduled[static_cast<std::size_t>(a_how)];
+		const auto s = static_cast<std::size_t>(a_segment);
+		++state.segments[s].scheduled[static_cast<std::size_t>(a_how)];
+		if (a_how != Scheduled::Absent)
+			state.everPresent[s] = true;
+		else if (state.everPresent[s]) {
+			++state.segments[s].absentAfter;
+			++state.absentAfterTotal[s];
+		}
+	}
+
+	void NoteBuildSwitch(SegmentId a_segment)
+	{
+		auto& state = Get();
+		const std::lock_guard lock(state.mutex);
+		++state.segments[static_cast<std::size_t>(a_segment)].buildSwitches;
 	}
 
 	void NoteLaggedWork(SegmentId a_segment)
@@ -441,10 +462,11 @@ namespace RenderGraph::Frame::Driver
 		for (std::uint32_t s = 0; s < kSegments; ++s) {
 			const auto& counts = state.segments[s];
 			segments += fmt::format("; {}: declared {}, taps {}, recordings {}, late requests {}, switches {}, current {}, lagging {}, absent {} ({} taps), "
-									"lagged work {}",
+									"lagged work {}, build switches {}, absent after it first ran {} (session {})",
 				SegmentName(static_cast<SegmentId>(s)), counts.declared, counts.taps, counts.recordings, counts.late, counts.switches,
 				counts.scheduled[static_cast<std::size_t>(Scheduled::Current)], counts.scheduled[static_cast<std::size_t>(Scheduled::Lagging)],
-				counts.scheduled[static_cast<std::size_t>(Scheduled::Absent)], counts.absentTaps, counts.lagged);
+				counts.scheduled[static_cast<std::size_t>(Scheduled::Absent)], counts.absentTaps, counts.lagged, counts.buildSwitches, counts.absentAfter,
+				state.absentAfterTotal[s]);
 		}
 		const auto lagLine = [](const auto& a_lags) {
 			std::string line;

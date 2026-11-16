@@ -35,6 +35,8 @@ namespace RenderGraph::Frame
 			return "deferred+water";
 		case SegmentId::Post:
 			return "post";
+		case SegmentId::Ui:
+			return "UI";
 		default:
 			return "?";
 		}

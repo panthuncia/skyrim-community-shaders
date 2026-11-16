@@ -1890,6 +1890,8 @@ struct RenderGraphRuntime::Impl
 	static const char* SegmentLabel(Segment a_segment)
 	{
 		switch (a_segment) {
+		case Segment::DeclaredUi:
+			return "CS stage: UI";
 		case Segment::LightCulling:
 			return "CS LLF: light culling";
 		case Segment::ZPrepass:
@@ -2617,6 +2619,10 @@ bool RenderGraphRuntime::Initialize()
 					if (std::ranges::find(list, epoch) == list.end())
 						list.push_back(epoch);
 				}
+		// CS's stages: a finished build is staged and recorded on the host's thread, then switched in whole with its recordings at a frame
+		// boundary (FrameAnchors::BeginFrame), so a build never blanks a stage. CS_ORG_STAGED_BUILDS=0 attaches them at once (A/B runs).
+		if (!Switches::Equals("CS_ORG_STAGED_BUILDS", "0"))
+			builds.staged = FrameAnchors::SegmentEpochs();
 		builds.label = [](std::uint32_t a_epoch) -> std::string {
 			return a_epoch < static_cast<std::uint32_t>(Segment::Count) ? std::string(Impl::SegmentLabel(static_cast<Segment>(a_epoch))) :
 			                                                              fmt::format("epoch {}", a_epoch);

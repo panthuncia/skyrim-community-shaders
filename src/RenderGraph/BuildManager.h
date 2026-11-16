@@ -62,6 +62,9 @@ namespace RenderGraph
 			std::vector<std::uint32_t> ownerBuilt;
 			// Epochs the external builder builds (Drawcall Limit Fix's), attached only at Attach::All and Attach::External polls.
 			std::vector<std::uint32_t> external;
+			// Epochs whose finished builds are staged, not attached (GraphHost::StageEpochGraph): the host's thread records them before
+			// they run, and their owner switches them in at a frame boundary with SwitchStaged (CS's stages).
+			std::vector<std::uint32_t> staged;
 			// An epoch's name in the log lines.
 			std::function<std::string(std::uint32_t)> label;
 			// A build that failed and whose extensions left no handler of their own (Builds::Defer): the epoch's owner hears of it as of
@@ -94,6 +97,12 @@ namespace RenderGraph
 		 * ownership) that must not race a build in progress.
 		 */
 		void Change(std::function<void()> a_change, std::string_view a_reason);
+
+		/**
+		 * @brief Owner thread, at a frame boundary: attaches the epoch's staged graph (GraphHost::AttachStagedEpochGraph) and runs what its
+		 * build deferred to its attach (Builds::Defer). False when nothing is staged or the attach was refused.
+		 */
+		bool SwitchStaged(std::uint32_t a_epoch);
 
 		/** @brief Owner thread: the external epochs' builder (replaces the last one). */
 		void SetExternalBuilder(ExternalBuilder a_builder);
@@ -159,6 +168,13 @@ namespace RenderGraph
 		 * as soon as it is built: the caller applies its change at once.
 		 */
 		bool Defer(std::function<void()> a_attached, std::function<void(const std::string&)> a_failed = {});
+		/**
+		 * @brief Inside an extension's build: a_staged runs on the render thread when the graph being built is staged (BuildManager::Desc::
+		 * staged), before its attach. Not called for a graph that is attached at once. False outside a managed build.
+		 */
+		bool DeferStaged(std::function<void()> a_staged);
+		/** @brief Render thread, at a frame boundary: switches in the epoch's staged graph (BuildManager::SwitchStaged). */
+		bool SwitchStaged(std::uint32_t a_epoch);
 		/** @brief Whether the calling thread is inside a build the manager makes (the build thread, or an owner-built epoch's build). */
 		bool InManagedBuild();
 	}

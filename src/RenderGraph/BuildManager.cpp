@@ -37,6 +37,7 @@ namespace RenderGraph
 		{
 			std::vector<std::function<void()>> attached;
 			std::vector<std::function<void(const std::string&)>> failed;
+			std::vector<std::function<void()>> staged;  // Builds::DeferStaged: run when the graph is staged
 		};
 
 		thread_local BuildContext* t_context = nullptr;
@@ -125,6 +126,9 @@ namespace RenderGraph
 		Desc desc;
 		std::unordered_set<std::uint32_t> ownerBuilt;
 		std::unordered_set<std::uint32_t> external;
+		std::unordered_set<std::uint32_t> staged;
+		// Owner thread: what each staged build deferred to its attach (Builds::Defer), run by SwitchStaged.
+		std::unordered_map<std::uint32_t, std::vector<std::function<void()>>> stagedAttach;
 		ExternalBuilder externalBuilder;  // owner thread
 		std::shared_ptr<ExternalLife> externalLife = std::make_shared<ExternalLife>();
 
@@ -159,7 +163,8 @@ namespace RenderGraph
 		std::vector<PendingRequest> pending;
 
 		explicit Impl(Desc a_desc) :
-			desc(std::move(a_desc)), ownerBuilt(desc.ownerBuilt.begin(), desc.ownerBuilt.end()), external(desc.external.begin(), desc.external.end())
+			desc(std::move(a_desc)), ownerBuilt(desc.ownerBuilt.begin(), desc.ownerBuilt.end()), external(desc.external.begin(), desc.external.end()),
+			staged(desc.staged.begin(), desc.staged.end())
 		{
 			thread = std::thread([this] { Run(); });
 		}
@@ -374,7 +379,31 @@ namespace RenderGraph
 				return false;
 			}
 			const auto begin = Clock::now();
-			const auto result = host.AttachEpochGraph(a_done.graph);
+			// A staged epoch: the host's thread records the graph before it runs, and its owner switches it in (SwitchStaged).
+			if (staged.contains(epoch) && !a_synchronous) {
+				const auto stagedResult = host.StageEpochGraph(a_done.graph);
+				if (stagedResult.staged) {
+					supersededInARow.erase(epoch);
+					rejectedInARow.erase(epoch);
+					failedAt.erase(epoch);
+					for (auto& fn : a_done.context.staged)
+						if (fn)
+							fn();
+					stagedAttach[epoch] = std::move(a_done.context.attached);
+					logger::info("[ORG] build manager: {} staged as build {}: built in {:.2f} ms off the render thread, staged in {:.3f} ms, {} frames after it was "
+								 "asked for; it switches in with its recordings; why: {}",
+						Label(epoch), stagedResult.generation, buildMs, MillisecondsSince(begin), frames - a_done.job.frame, a_done.job.reason);
+					return true;
+				}
+				if (!stagedResult.attached) {
+					++window.rejected;
+					logger::info("[ORG] build manager: {}'s build rejected at its staging ({}); built again", Label(epoch), stagedResult.reason);
+					host.RequestRebuild(epoch, "its last build was rejected at its staging");
+					return false;
+				}
+				// Attached at once (nothing ran that a staging would keep): as an attach below.
+			}
+			const auto result = a_done.graph ? host.AttachEpochGraph(a_done.graph) : org::GraphHost::AttachResult{ true, {} };
 			const double attachMs = MillisecondsSince(begin);
 			if (!result.attached) {
 				++window.rejected;
@@ -663,6 +692,30 @@ namespace RenderGraph
 		impl->Submit(std::move(request));
 	}
 
+	bool BuildManager::SwitchStaged(std::uint32_t a_epoch)
+	{
+		auto& m = *impl;
+		auto& host = *m.desc.host;
+		if (!host.StagedGeneration(a_epoch))
+			return false;
+		const auto begin = Clock::now();
+		const auto result = host.AttachStagedEpochGraph(a_epoch);
+		auto deferred = std::move(m.stagedAttach[a_epoch]);
+		m.stagedAttach.erase(a_epoch);
+		if (!result.attached) {
+			logger::info("[ORG] build manager: {}'s staged graph was refused at its switch ({}); built again", m.Label(a_epoch), result.reason);
+			return false;
+		}
+		++m.window.attached;
+		const double ms = MillisecondsSince(begin);
+		m.window.attachMs += ms;
+		m.window.attachMaxMs = (std::max)(m.window.attachMaxMs, ms);
+		for (auto& fn : deferred)
+			if (fn)
+				fn();
+		return true;
+	}
+
 	void BuildManager::SetExternalBuilder(ExternalBuilder a_builder)
 	{
 		impl->externalBuilder = std::move(a_builder);
@@ -798,6 +851,21 @@ namespace RenderGraph
 			return true;
 		}
 
+		bool DeferStaged(std::function<void()> a_staged)
+		{
+			if (!t_context)
+				return false;
+			if (a_staged)
+				t_context->staged.push_back(std::move(a_staged));
+			return true;
+		}
+
+		bool SwitchStaged(std::uint32_t a_epoch)
+		{
+			auto* manager = Manager();
+			return manager && manager->SwitchStaged(a_epoch);
+		}
+
 		bool InManagedBuild()
 		{
 			return t_context != nullptr;
@@ -820,6 +888,8 @@ namespace RenderGraph::Builds
 			a_change();
 	}
 	bool Defer(std::function<void()>, std::function<void(const std::string&)>) { return false; }
+	bool DeferStaged(std::function<void()>) { return false; }
+	bool SwitchStaged(std::uint32_t) { return false; }
 	bool InManagedBuild() { return false; }
 }
 

@@ -46,6 +46,7 @@ namespace ImGuiRenderer
 			winrt::com_ptr<ID3D11Texture2D> targetTexture;
 			FrameAnchors::Texture target;
 			bool ownImport = false;  // not the framebuffer: imported for this client (the anchors register it)
+			bool targetChanged = false;  // UpdateTarget took a new target this frame
 			ImGuiBasicRHI::Target targetInfo;
 			ImDrawData* pending = nullptr;  // the frame RenderDrawData is drawing, for the commit
 #endif
@@ -127,6 +128,7 @@ namespace ImGuiRenderer
 			a_state.targetTexture = texture;
 			a_state.target = target;
 			a_state.ownImport = own;
+			a_state.targetChanged = true;
 			a_state.targetInfo = { textureDesc.Width, textureDesc.Height, static_cast<std::uint32_t>(format) };
 			if (!target) {
 				// The menu must not stay invisible: the next NewFrame falls back to imgui_impl_dx11.
@@ -306,6 +308,14 @@ namespace ImGuiRenderer
 		if (!state.org || state.failed || !a_drawData || a_drawData->DisplaySize.x <= 0.0f || a_drawData->DisplaySize.y <= 0.0f)
 			return;
 		if (!UpdateTarget(state))
+			return;
+		// A new target is a new version of the UI stage's graph, published in the middle of the frame: the stage's recordings take it from
+		// the next frame boundary, so this frame draws no overlay.
+		const bool newTarget = std::exchange(state.targetChanged, false);
+		// So does a font atlas page made or dropped: a new version too.
+		const bool held = FrameAnchors::HeldByStage(FrameAnchors::Anchor::Overlay);
+		const bool newPages = held && ImGuiBasicRHI::PublishTextures(a_drawData);
+		if (held && (newTarget || newPages))
 			return;
 		state.pending = a_drawData;
 		FrameAnchors::Run(FrameAnchors::Anchor::Overlay);

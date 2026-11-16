@@ -8,6 +8,7 @@
 #	include "Globals.h"
 #	include "RenderGraph/Frame/FrameDescription.h"
 #	include "RenderGraph/Frame/FrameDriver.h"
+#	include "RenderGraph/Frame/Recipe.h"
 #	include "RenderGraph/Engine/LoadingScreen/LoadingScreen.h"
 #	include "RenderGraph/Engine/Native/Native.h"
 #	include "RenderGraph/Engine/Targets/EngineTargets.h"
@@ -167,6 +168,7 @@ namespace FrameAnchors
 			Segment::AnchorMovieTiles,          // a Bink movie inside another frame, at its tile draw (nominally here: the frame's UI time)
 			Segment::AnchorInterface,           // Scaleform's displays (UI::DrawInterface), several times a frame
 			Segment::AnchorPresent,
+			Segment::DeclaredUi,       // the UI stage (SegmentsOn): the overlay, ending just before the present, HDR output or the capture
 			Segment::AnchorOverlay,    // the overlay's ImGui draw, inside HDRDisplay's present chain
 			Segment::AnchorHDROutput,  // HDRDisplay's output composite, after the overlay
 			Segment::AnchorCapture,    // the screenshot capture, at the end of HDRDisplay's present chain
@@ -371,6 +373,12 @@ namespace FrameAnchors
 					{ Anchor::ImageSpace, { "cs.engine.imagespace.post.final", "cs.engine.skeleton.frame@post-chain" } },
 					{ Anchor::Count, { nullptr, nullptr }, Segment::Count, false, true } } },
 				8, { "CS stage: post", "CS stage: post inputs", "FrameSegments::Post / ", "cs.segment.post" } },
+			// The UI stage, in every frame kind's recipe: the overlay's ImGui draw (its draw list a frame input, recorded in the stage's late
+			// batch). It ends at a point: just before the present (Hooks.cpp), or before HDR output or the capture is submitted, which
+			// follow the overlay on the GPU and keep their anchors' tickets.
+			{ Segment::DeclaredUi,
+				{ { { Anchor::Overlay }, { Anchor::Count, { nullptr, nullptr }, Segment::Count, false, true } } }, 2,
+				{ "CS stage: UI", "CS stage: UI inputs", "FrameSegments::Ui / ", "cs.segment.ui" } },
 		} };
 
 		/** @brief The anchors whose every client a declared segment holds, a bit each: they have no epoch of their own. */
@@ -657,6 +665,10 @@ namespace FrameAnchors
 			std::array<SegmentRecordings, kDeclared> declaredRecordings;
 			// Each segment graph's passes recorded ahead, from its last attached build: their revisions go into its description.
 			std::array<std::atomic<std::shared_ptr<std::vector<std::weak_ptr<org::RenderPass>>>>, kDeclared> declaredPasses{};
+			// A stage's staged build (GraphHost::StageEpochGraph, BuildManager::Desc::staged): the snapshot it was built from and its passes
+			// recorded ahead, set when it is staged. BeginFrame records it for every frame slot and switches it in whole.
+			std::array<std::atomic<std::shared_ptr<const Snapshot>>, kDeclared> stagedSnapshots{};
+			std::array<std::atomic<std::shared_ptr<std::vector<std::weak_ptr<org::RenderPass>>>>, kDeclared> stagedPasses{};
 			// Each stage's frame inputs (docs/development/org-native-frame-graph.md, "The recipe"): the frame its taps staged values in
 			// and have not committed yet (0: none), the frame slot's staging run they wrote (GraphHost::EpochStagingRun, set at Begin),
 			// and the clients whose executed callbacks the commit calls, with each tap's point. Render owner.
@@ -681,6 +693,11 @@ namespace FrameAnchors
 			// The description a slot last began to wait for, per segment, and the frame it did: a switch's lag counts from it.
 			std::array<std::uint64_t, kDeclared> waitHash{};
 			std::array<std::uint64_t, kDeclared> waitFrame{};
+			// The frame a stage's staged build was first seen at Begin (0: none): its switch's lag counts from it.
+			std::array<std::uint64_t, kDeclared> stagedSince{};
+			// Whether this frame's recording bound the current versions at Begin: a version published after Begin is a mismatch, one
+			// published before it lags until the new recording is ready.
+			std::array<bool, kDeclared> frameVersionsCurrent{};
 			bool inBegin = false;  // BeginFrame is choosing the schedules: a recording asked for outside it is a mid-frame re-record
 			std::array<std::uint64_t, kDeclared> endedFrame{};
 			// Each segment's taps of each step in its held run so far: the next tap of a step is that instance (TapInstance). Reset
@@ -1160,6 +1177,12 @@ namespace FrameAnchors
 					const auto onFailed = [declared, built = snapshot](const std::string& a_error) {
 						DropFailedClients(StepAnchors(declared), kDeclaredInfo[declared].names.label, built, a_error);
 					};
+					// A staged build: its snapshot and passes describe the frames it is recorded for before its attach.
+					(void)RenderGraph::Builds::DeferStaged([declared, built = snapshot, passes = declaredPasses] {
+						auto& anchors = Anchors();
+						anchors.stagedSnapshots[declared].store(built, std::memory_order_release);
+						anchors.stagedPasses[declared].store(passes, std::memory_order_release);
+					});
 					if (!RenderGraph::Builds::Defer(commit, onFailed))
 						commit();
 				} else if (anchor != Anchor::Count) {
@@ -2606,6 +2629,10 @@ namespace FrameAnchors
 		}
 		if (a_segment != UINT32_MAX && state.host && SegmentsOn() && EndsWorld(static_cast<Segment>(a_segment)) && IsRenderOwner())
 			(void)TapPoint(static_cast<std::uint32_t>(Segment::DeclaredDeferred));
+		// The UI stage commits just before the GPU work that follows the overlay: HDR output, the capture, or the present (Hooks.cpp).
+		if (a_segment != UINT32_MAX && state.host && SegmentsOn() && IsRenderOwner() &&
+			(a_segment == static_cast<std::uint32_t>(Segment::AnchorHDROutput) || a_segment == static_cast<std::uint32_t>(Segment::AnchorCapture)))
+			(void)TapPoint(static_cast<std::uint32_t>(Segment::DeclaredUi));
 		// A declared segment holding its ticket: other GPU work submitted now runs ahead of the segment's work, which the end tap
 		// submits. Counted by why, for the census; its first lines are logged.
 		if (state.stagesOpen.load(std::memory_order_acquire) && IsRenderOwner()) {
@@ -2671,18 +2698,41 @@ namespace FrameAnchors
 		namespace Driver = RenderGraph::Frame::Driver;
 
 		/** @brief A declared segment's fields for a frame: its built graph, the host's versions, and its clients' declared predicates. */
+		SegmentFields DescribeDeclaredFrom(State& a_state, std::uint32_t a_declared, bool a_declaredByKind, const std::shared_ptr<const Snapshot>& a_built,
+			const std::shared_ptr<std::vector<std::weak_ptr<org::RenderPass>>>& a_passes, std::uint64_t a_graph);
+
+		/** @brief A declared segment's fields for a frame, against its attached build. */
 		SegmentFields DescribeDeclared(State& a_state, std::uint32_t a_declared, bool a_declaredByKind)
+		{
+			if (!a_declaredByKind || !a_state.host)
+				return DescribeDeclaredFrom(a_state, a_declared, a_declaredByKind, nullptr, nullptr, 0);
+			return DescribeDeclaredFrom(a_state, a_declared, a_declaredByKind, a_state.declaredSnapshots[a_declared].load(std::memory_order_acquire),
+				a_state.declaredPasses[a_declared].load(std::memory_order_acquire), a_state.host->BuildGeneration(EpochOfDeclared(a_declared)));
+		}
+
+		/** @brief A declared segment's fields for a frame against a build (a_built its snapshot, a_passes its passes, a_graph its generation). */
+		SegmentFields DescribeDeclaredFrom(State& a_state, std::uint32_t a_declared, bool a_declaredByKind, const std::shared_ptr<const Snapshot>& a_built,
+			const std::shared_ptr<std::vector<std::weak_ptr<org::RenderPass>>>& a_passes, std::uint64_t a_graph)
 		{
 			SegmentFields fields;
 			fields.declared = a_declaredByKind;
 			if (!a_declaredByKind || !a_state.host)
 				return fields;
-			const auto built = a_state.declaredSnapshots[a_declared].load(std::memory_order_acquire);
+			const auto& built = a_built;
 			if (!built)
 				return fields;  // graph 0: not built yet
-			fields.graph = a_state.host->BuildGeneration(EpochOfDeclared(a_declared));
+			fields.graph = a_graph;
 			fields.versions = a_state.declaredRecordings[a_declared].versionGeneration;
 			const auto clients = SegmentClients(*built, a_declared);
+			// A stage whose graph holds no client and no module step has nothing to record (the UI stage before the overlay registers):
+			// it is absent from the frame, as before its first build.
+			bool foreignStep = false;
+			for (std::uint32_t k = 0; k < kDeclaredInfo[a_declared].stepCount; ++k)
+				foreignStep = foreignStep || kDeclaredInfo[a_declared].steps[k].foreign != Segment::Count;
+			if (clients.empty() && !foreignStep) {
+				fields.graph = 0;
+				return fields;
+			}
 			fields.clients = static_cast<std::uint32_t>(clients.size());
 			for (const auto& client : clients)
 				if (client->rows) {
@@ -2705,7 +2755,7 @@ namespace FrameAnchors
 						fields.foreignOn |= 1u << k;
 			// The passes recorded ahead name what their recordings depend on beyond their bindings: a kept recording binds those
 			// revisions, so they are part of the description. A pass that cannot tell is logged once a build.
-			if (const auto passes = a_state.declaredPasses[a_declared].load(std::memory_order_acquire)) {
+			if (const auto& passes = a_passes) {
 				std::uint64_t hash = 1469598103934665603ull;
 				std::uint32_t untold = 0;
 				for (const auto& weak : *passes) {
@@ -2827,7 +2877,7 @@ namespace FrameAnchors
 						entry->done = true;
 					}
 				},
-				a_slot);
+				a_slot, a_fields.graph);
 			if (!posted) {
 				const std::lock_guard lock(recordings.mutex);
 				entry->error = "the host takes no recording requests (async epochs are off)";
@@ -2853,12 +2903,52 @@ namespace FrameAnchors
 			// A schedule of an older build is gone. Builds attach only at a frame boundary, before this.
 			if (active.recording && !host.EpochRecordingCurrent(*active.recording))
 				active = {};
-			// A schedule whose recording binds a version a slot replaced since is gone too: the segment's version generation moves, so the
-			// frame's description is a new one, recorded for the new version.
+			// A schedule whose recording binds a version a slot replaced since: the segment's version generation moves, so the frame's
+			// description is a new one, recorded for the new version. Until that recording is ready the slot keeps its schedule, which
+			// binds (and holds) the old version: the stage lags a frame or two, it is never blank.
+			a_state.frameVersionsCurrent[a_declared] = true;
 			if (active.recording && !host.EpochRecordingVersionsCurrent(*active.recording, slot)) {
-				++recordings.versionGeneration;
-				active = {};
+				if (active.fields.versions == recordings.versionGeneration)
+					++recordings.versionGeneration;
+				a_state.frameVersionsCurrent[a_declared] = false;
 			}
+			// A staged build (docs/development/org-native-frame-graph.md, "Builds switch in with their recordings"): recorded on the host's
+			// thread for every frame slot, for the frame's description of it, and switched in whole here, at a frame boundary, once every
+			// slot's recording is ready. Until then every slot keeps the attached build's schedule.
+			const auto epoch = EpochOfDeclared(a_declared);
+			// Recorded and switched in frames of any kind, so a build made during a load or a menu is in place for the next world frame.
+			const std::uint64_t stagedGeneration = host.StagedGeneration(epoch);
+			if (stagedGeneration)
+				if (const auto stagedBuilt = a_state.stagedSnapshots[a_declared].load(std::memory_order_acquire)) {
+					const auto staged = DescribeDeclaredFrom(a_state, a_declared, true, stagedBuilt, a_state.stagedPasses[a_declared].load(std::memory_order_acquire),
+						stagedGeneration);
+					std::array<std::shared_ptr<const org::GraphHost::EpochRecording>, RenderGraphRuntime::kGameFramesInFlight> ready{};
+					bool all = true;
+					// A staged build with nothing to record (no client) switches in at once; the stage is absent on it.
+					for (std::uint32_t s = 0; s < RenderGraphRuntime::kGameFramesInFlight && staged.graph; ++s) {
+						const auto entry = RequestDeclared(a_state, a_declared, staged, s, a_frame.frame, " (staged build)");
+						const std::lock_guard lock(recordings.mutex);
+						if (entry->done && entry->recording)
+							ready[s] = entry->recording;
+						else
+							all = false;
+					}
+					if (a_state.stagedSince[a_declared] == 0)
+						a_state.stagedSince[a_declared] = a_frame.frame;
+					if (all && RenderGraph::Builds::SwitchStaged(epoch)) {
+						const auto built = a_state.declaredSnapshots[a_declared].load(std::memory_order_acquire);
+						const auto what = fmt::format("build {} switched in whole with its recordings for every frame slot{}", stagedGeneration,
+							active.recording ? fmt::format(" ({})", RenderGraph::Frame::DiffFields(active.fields, staged)) : std::string());
+						for (std::uint32_t s = 0; s < RenderGraphRuntime::kGameFramesInFlight; ++s)
+							a_state.schedule[a_declared][s] = staged.graph ? State::Scheduled{ staged, ready[s], built } : State::Scheduled{};
+						Driver::NoteSwitch(segment, a_frame.frame, slot, a_frame.frame - a_state.stagedSince[a_declared], what);
+						Driver::NoteBuildSwitch(segment);
+						a_state.stagedSince[a_declared] = 0;
+						a_state.stagedSnapshots[a_declared].store(nullptr, std::memory_order_release);
+						a_state.stagedPasses[a_declared].store(nullptr, std::memory_order_release);
+					}
+				}
+			const bool stillStaged = a_world && host.StagedGeneration(epoch) != 0;
 			SegmentFields wanted = DescribeDeclared(a_state, a_declared, a_world);
 			a_state.frameWanted[a_declared] = wanted;
 			if (!wanted.declared)
@@ -2867,7 +2957,8 @@ namespace FrameAnchors
 				Driver::NoteScheduled(segment, Driver::Scheduled::Absent);
 				return wanted;
 			}
-			if (!(active.recording && active.fields == wanted)) {
+			// While a build is staged the attached graph records nothing new (its bindings are frozen): the slots keep what they have.
+			if (!(active.recording && active.fields == wanted) && !stillStaged) {
 				std::shared_ptr<SegmentRecording> entry;
 				for (std::uint32_t ahead = 0; ahead < RenderGraphRuntime::kGameFramesInFlight; ++ahead) {
 					auto requested = RequestDeclared(a_state, a_declared, wanted, (slot + ahead) % RenderGraphRuntime::kGameFramesInFlight, a_frame.frame, "");
@@ -2985,7 +3076,7 @@ namespace FrameAnchors
 				return mismatch(Driver::TapError::NotDeclared, "its commit came in a frame without a schedule for it");
 			if (!host.EpochRecordingCurrent(*recording))
 				return mismatch(Driver::TapError::LostToBuild, "a build of its graph attached after the frame's Begin; builds attach only at a frame boundary");
-			if (!host.EpochRecordingVersionsCurrent(*recording, frame.slot))
+			if (a_state.frameVersionsCurrent[a_declared] && !host.EpochRecordingVersionsCurrent(*recording, frame.slot))
 				return mismatch(Driver::TapError::StaleRecording,
 					"a slot of its graph published a new version after the frame's Begin; versions are published only at a frame boundary");
 			const auto expected = host.EpochCopyRun(epoch, frame.slot);
@@ -3304,6 +3395,11 @@ namespace FrameAnchors
 					static const bool on = !Switches::Equals("CS_ORG_SEGMENT_POST", "0");
 					return on;
 				}
+			case Segment::DeclaredUi:
+				{
+					static const bool on = !Switches::Equals("CS_ORG_UI_STAGE", "0");
+					return on;
+				}
 			default:
 				return true;
 			}
@@ -3514,14 +3610,15 @@ namespace FrameAnchors
 		// The segments a world frame draws: every one. A frozen world's capture frame draws the world once too. Each takes its frame
 		// slot's schedule here, switched to this frame's description when that description's recording is ready, and keeps it to the
 		// frame's end.
-		const bool world = a_frame.kind == Kind::World || (a_frame.kind == Kind::FrozenWorld && a_frame.capture);
+		// Each frame kind's recipe lists its CS stages (Recipes::KindHas): the world's every stage, the other kinds the UI stage.
 		state.inBegin = true;
 		for (std::uint32_t d = 0; d < kDeclared; ++d) {
 			state.frameRecording[d].reset();
 			state.frameBuilt[d].reset();
 			state.frameWanted[d] = {};
 			if (state.declaredEpochs[d]) {
-				a_frame.segments[d] = Schedule(state, d, world, a_frame);
+				const bool inRecipe = RenderGraph::Frame::Recipes::KindHas(a_frame.kind, a_frame.capture, static_cast<SegmentId>(d));
+				a_frame.segments[d] = Schedule(state, d, inRecipe, a_frame);
 				// A present stage's frame inputs start empty for this frame.
 				if (state.frameRecording[d])
 					OpenInputs(state, d, a_frame.slot);

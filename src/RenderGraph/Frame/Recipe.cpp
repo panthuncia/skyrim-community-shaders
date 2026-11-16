@@ -60,9 +60,11 @@ namespace RenderGraph::Frame::Recipes
 			{ StageId::Post, Owner::Cs,
 				{ Segment::DeclaredPost, Segment::AnchorTonemap, Segment::AnchorFrameGeneration },
 				3, "RenderEndOfFrameEffects' return" },
-			{ StageId::Ui, Owner::Tickets,
-				{ Segment::AnchorMovieTiles, Segment::AnchorInterface, Segment::AnchorPresent, Segment::AnchorOverlay, Segment::AnchorHDROutput, Segment::AnchorCapture },
-				6, "each anchor's hook" },
+			// The UI stage holds the overlay (the Overlay anchor has no epoch of its own). Scaleform's displays, the movie tiles and the
+			// present's clients come before it and keep their tickets; HDR output and the capture follow its commit.
+			{ StageId::Ui, Owner::Cs,
+				{ Segment::AnchorMovieTiles, Segment::AnchorInterface, Segment::AnchorPresent, Segment::DeclaredUi, Segment::AnchorHDROutput, Segment::AnchorCapture },
+				6, "just before the present (or HDR output, or the capture)" },
 		} };
 
 		/**
@@ -212,6 +214,120 @@ namespace RenderGraph::Frame::Recipes
 			a_state.findings = static_cast<std::uint32_t>(a_findings.size());
 			a_state.dclfLater = static_cast<std::uint32_t>(dclfLater.size());
 		}
+	}
+
+	namespace
+	{
+		/** @brief One stage of a frame kind's recipe: a name, its owner, and the CS stage it is (SegmentId::Count for none). */
+		struct KindStage
+		{
+			const char* name;
+			Owner owner;
+			SegmentId segment;
+		};
+
+		constexpr std::uint32_t kKindStages = 11;
+
+		/** @brief A frame kind's recipe: its stages in frame order. */
+		struct KindRecipe
+		{
+			std::array<KindStage, kKindStages> stages;
+			std::uint32_t count;
+		};
+
+		// The world recipe (kWorld above), by CS stage. A frozen world's capture frame draws the world once, with the same recipe.
+		constexpr KindRecipe kWorldKind{ { {
+			{ "start", Owner::Cs, SegmentId::Start },
+			{ "shadows", Owner::Dclf, SegmentId::Count },
+			{ "pre-depth", Owner::Cs, SegmentId::PreDepth },
+			{ "depth", Owner::Dclf, SegmentId::Count },
+			{ "pre-main", Owner::Cs, SegmentId::PreMain },
+			{ "opaque", Owner::Dclf, SegmentId::Count },
+			{ "deferred+water", Owner::Cs, SegmentId::Deferred },
+			{ "forward", Owner::Dclf, SegmentId::Count },
+			{ "first person", Owner::Dclf, SegmentId::Count },
+			{ "post", Owner::Cs, SegmentId::Post },
+			{ "UI", Owner::Cs, SegmentId::Ui },
+		} }, 11 };
+		// A menu over a frozen world (after its capture frame): the engine composites the frozen frame (ImageSpace), a menu's 3D scene
+		// (the EngineDraws and Tonemap anchors' own epochs), then the UI.
+		constexpr KindRecipe kFrozenKind{ { {
+			{ "frozen composite and menu scene", Owner::Tickets, SegmentId::Count },
+			{ "UI", Owner::Cs, SegmentId::Ui },
+		} }, 2 };
+		// The main menu (and any frame before the player has 3D): the menu's 3D scene, then the UI.
+		constexpr KindRecipe kMainMenuKind{ { {
+			{ "menu scene", Owner::Tickets, SegmentId::Count },
+			{ "UI", Owner::Cs, SegmentId::Ui },
+		} }, 2 };
+		// A loading screen's frame: its 3D model (the menu scene's anchors), then the UI.
+		constexpr KindRecipe kLoadingKind{ { {
+			{ "loading model", Owner::Tickets, SegmentId::Count },
+			{ "UI", Owner::Cs, SegmentId::Ui },
+		} }, 2 };
+		// A Bink movie's own frame: the movie's tiles (the Present anchor's Bink client), then the UI.
+		constexpr KindRecipe kBinkKind{ { {
+			{ "movie", Owner::Tickets, SegmentId::Count },
+			{ "UI", Owner::Cs, SegmentId::Ui },
+		} }, 2 };
+
+		const KindRecipe& RecipeOf(Kind a_kind, bool a_capture)
+		{
+			switch (a_kind) {
+			case Kind::World:
+				return kWorldKind;
+			case Kind::FrozenWorld:
+				return a_capture ? kWorldKind : kFrozenKind;
+			case Kind::MainMenu:
+				return kMainMenuKind;
+			case Kind::Loading:
+				return kLoadingKind;
+			case Kind::Bink:
+			default:
+				return kBinkKind;
+			}
+		}
+
+		const char* OwnerMark(Owner a_owner) { return a_owner == Owner::Dclf ? "*" : a_owner == Owner::Tickets ? " (tickets)" : ""; }
+	}
+
+	bool KindHas(Kind a_kind, bool a_capture, SegmentId a_segment)
+	{
+		const auto& recipe = RecipeOf(a_kind, a_capture);
+		for (std::uint32_t i = 0; i < recipe.count; ++i)
+			if (recipe.stages[i].segment == a_segment)
+				return true;
+		return false;
+	}
+
+	std::string DescribeKind(Kind a_kind, bool a_capture)
+	{
+		const auto& recipe = RecipeOf(a_kind, a_capture);
+		std::string line;
+		for (std::uint32_t i = 0; i < recipe.count; ++i)
+			line += fmt::format("{}{}{}", i ? " | " : "", recipe.stages[i].name, OwnerMark(recipe.stages[i].owner));
+		return line;
+	}
+
+	std::string DiffKinds(Kind a_from, bool a_fromCapture, Kind a_to, bool a_toCapture)
+	{
+		const auto& from = RecipeOf(a_from, a_fromCapture);
+		const auto& to = RecipeOf(a_to, a_toCapture);
+		if (&from == &to)
+			return {};
+		const auto names = [](const KindRecipe& a_recipe, const KindRecipe& a_other) {
+			std::string list;
+			for (std::uint32_t i = 0; i < a_recipe.count; ++i) {
+				bool shared = false;
+				for (std::uint32_t j = 0; j < a_other.count; ++j)
+					shared = shared || std::string_view(a_recipe.stages[i].name) == a_other.stages[j].name;
+				if (!shared)
+					list += fmt::format("{}{}", list.empty() ? "" : ", ", a_recipe.stages[i].name);
+			}
+			return list.empty() ? std::string("none") : list;
+		};
+		return fmt::format("recipe {} -> {}; stages added: {}; removed: {}", DescribeKind(a_from, a_fromCapture), DescribeKind(a_to, a_toCapture), names(to, from),
+			names(from, to));
 	}
 
 	const char* StageName(StageId a_stage)
@@ -370,6 +486,9 @@ namespace RenderGraph::Frame::Recipes
 namespace RenderGraph::Frame::Recipes
 {
 	const char* StageName(StageId) { return "?"; }
+	bool KindHas(Kind a_kind, bool a_capture, SegmentId) { return a_kind == Kind::World || (a_kind == Kind::FrozenWorld && a_capture); }
+	std::string DescribeKind(Kind, bool) { return {}; }
+	std::string DiffKinds(Kind, bool, Kind, bool) { return {}; }
 	std::shared_ptr<const org::ScheduleTrace> TraceEpochGraph(org::RenderGraph&, std::uint32_t) { return {}; }
 	bool Traced(std::uint32_t) { return false; }
 	void NoteTrace(std::uint32_t, std::uint64_t, std::shared_ptr<const org::ScheduleTrace>) {}
