@@ -445,6 +445,13 @@ namespace FrameAnchors
 	 */
 	bool CanRun(std::string_view a_id, Anchor a_anchor);
 
+	/**
+	 * @brief Whether the stage that holds anchor a_anchor wholly has client a_id's current registration in its schedule: the last frame's
+	 * (or, before the first frame, its attached build). For a client that queues work before the frame's Begin (a Bink tick between two
+	 * frames), where HeldNow's open window is not known yet. False when no stage holds the anchor. Render owner.
+	 */
+	bool InStage(std::string_view a_id, Anchor a_anchor);
+
 	/** @brief HeldNow's answer. */
 	struct StageHold
 	{

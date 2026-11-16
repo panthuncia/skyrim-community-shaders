@@ -306,10 +306,10 @@ namespace FrameAnchors
 			bool shared = false;
 			// A CS point that is no anchor and no module epoch (TapPoint): it holds no passes and only ends the segment.
 			bool point = false;
-			// A shared step held only in frames of the world recipe (and a frozen world's capture frame): in the other kinds the anchor's runs
-			// keep its own epoch, and the step's clients are off in the stage's description (Scaleform in the UI stage, until those kinds'
-			// scenes are stages: their displays draw before and after the scene).
-			bool worldOnly = false;
+			// A shared step held only in the kinds whose displays the UI stage draws (Recipes::UiDrawsDisplays: the world recipe): in the
+			// others the anchor's runs keep its own epoch, and the step's clients are off in the stage's description (Scaleform in the UI
+			// stage, until the loading screen's and the menus' scenes are stages: their displays draw before and after the scene).
+			bool displayKindsOnly = false;
 		};
 		struct DeclaredInfo
 		{
@@ -380,14 +380,18 @@ namespace FrameAnchors
 			// The UI stage, in every frame kind's recipe: the overlay's ImGui draw (its draw list a frame input, recorded in the stage's late
 			// batch). It ends at a point: just before the present (Hooks.cpp), or before HDR output or the capture is submitted, which
 			// follow the overlay on the GPU and keep their anchors' tickets.
-			// Scaleform's displays come first (a shared step: world-recipe frames only). Each display segment is a tap and an instance of the
+			// Scaleform's displays come first (a shared step, in the kinds whose displays no scene on tickets splits: the world recipe). Each display segment is a tap and an instance of the
 			// Scaleform client (a fixed count, all declared, the draws' counts latched in its run gate); its draw list is a frame input recorded
 			// in the late batch.
+			// The Present anchor is the stage's in every kind (its clients: a Bink movie's tiles, queued by the movie's tick and drawn from the
+			// run's slot in the late batch, and the GPU load diagnostic). The swap chain's Present hook taps it after the displays and before
+			// the overlay, as the engine draws them.
 			{ Segment::DeclaredUi,
 				{ { { Anchor::Interface, { nullptr, nullptr }, Segment::Count, true, false, true },
+					{ Anchor::Present },
 					{ Anchor::Overlay },
 					{ Anchor::Count, { nullptr, nullptr }, Segment::Count, false, true } } },
-				3,
+				4,
 				{ "CS stage: UI", "CS stage: UI inputs", "FrameSegments::Ui / ", "cs.segment.ui" } },
 		} };
 
@@ -437,24 +441,24 @@ namespace FrameAnchors
 			return std::ranges::any_of(a_step.clients, [&](const char* a_id) { return a_id && a_client.id == a_id; });
 		}
 
-		/** @brief Whether a declared segment has a worldOnly step: its description differs between world-recipe frames and the others. */
-		constexpr bool HasWorldOnlyStep(std::uint32_t a_declared)
+		/** @brief Whether a declared segment has a displayKindsOnly step: its description differs between those kinds and the others. */
+		constexpr bool HasKindStep(std::uint32_t a_declared)
 		{
 			for (std::uint32_t k = 0; k < kDeclaredInfo[a_declared].stepCount; ++k)
-				if (kDeclaredInfo[a_declared].steps[k].worldOnly)
+				if (kDeclaredInfo[a_declared].steps[k].displayKindsOnly)
 					return true;
 			return false;
 		}
 
-		/** @brief Whether the current frame runs the world recipe (a frozen world's capture frame too): worldOnly steps are held then. */
-		bool FrameIsWorld()
+		/** @brief Whether the UI stage draws the displays in this frame's kind (Recipes::UiDrawsDisplays): displayKindsOnly steps are held then. */
+		bool FrameDrawsDisplays()
 		{
 			const auto& frame = RenderGraph::Frame::Driver::Current();
-			return RenderGraph::Frame::Recipes::KindHas(frame.kind, frame.capture, RenderGraph::Frame::SegmentId::Post);
+			return RenderGraph::Frame::Recipes::UiDrawsDisplays(frame.kind, frame.capture);
 		}
 
-		/** @brief Whether a step takes its anchor's runs in this frame's kind (a worldOnly step only in world-recipe frames). */
-		bool StepInKind(const Step& a_step) { return !a_step.worldOnly || FrameIsWorld(); }
+		/** @brief Whether a step takes its anchor's runs in this frame's kind (a displayKindsOnly step only where the UI stage draws the displays). */
+		bool StepInKind(const Step& a_step) { return !a_step.displayKindsOnly || FrameDrawsDisplays(); }
 
 		/** @brief Whether a client of a built snapshot is a_desc's registration: the same desc, or the same id for a matchesById client. */
 		bool SameClient(const std::shared_ptr<const ClientDesc>& a_built, const std::shared_ptr<const ClientDesc>& a_desc)
@@ -734,7 +738,7 @@ namespace FrameAnchors
 			// published before it lags until the new recording is ready.
 			std::array<bool, kDeclared> frameVersionsCurrent{};
 			bool inBegin = false;  // BeginFrame is choosing the schedules: a recording asked for outside it is a mid-frame re-record
-			bool describingWorld = false;  // the frame BeginFrame describes runs the world recipe (worldOnly steps' clients on)
+			bool describingDisplays = false;  // the frame BeginFrame describes is of a kind whose displays the UI stage draws (displayKindsOnly steps on)
 			std::array<std::uint64_t, kDeclared> endedFrame{};
 			// Each segment's taps of each step in its held run so far: the next tap of a step is that instance (TapInstance). Reset
 			// when the frame's first tap takes the ticket.
@@ -2794,10 +2798,10 @@ namespace FrameAnchors
 				}
 			const auto& info = kDeclaredInfo[a_declared];
 			for (std::size_t i = 0; i < clients.size() && i < RenderGraph::Frame::kSegmentClients; ++i) {
-				// A client held only at worldOnly steps is off outside world-recipe frames: the anchor's own epoch takes its runs there.
+				// A client held only at displayKindsOnly steps is off in the other kinds: the anchor's own epoch takes its runs there.
 				bool inKind = false;
 				for (std::uint32_t k = 0; k < info.stepCount; ++k)
-					inKind = inKind || (StepHolds(info.steps[k], *clients[i]) && (!info.steps[k].worldOnly || a_state.describingWorld));
+					inKind = inKind || (StepHolds(info.steps[k], *clients[i]) && (!info.steps[k].displayKindsOnly || a_state.describingDisplays));
 				if (inKind && (!clients[i]->declared || clients[i]->declared()))
 					fields.clientsOn |= 1u << i;
 				if (clients[i]->maxInstances > 1)
@@ -3006,12 +3010,12 @@ namespace FrameAnchors
 			const bool stillStaged = a_world && host.StagedGeneration(epoch) != 0;
 			SegmentFields wanted = DescribeDeclared(a_state, a_declared, a_world);
 			a_state.frameWanted[a_declared] = wanted;
-			// A stage with worldOnly steps has a description per kind group (world recipe or not): the other one's recordings are asked for
-			// ahead too, so a kind switch finds them ready and the stage does not lag at the switch.
-			if (a_world && wanted.graph && !stillStaged && HasWorldOnlyStep(a_declared)) {
-				a_state.describingWorld = !a_state.describingWorld;
+			// A stage with displayKindsOnly steps has a description per kind group (the UI stage draws the displays or not): the other one's
+			// recordings are asked for ahead too, so a kind switch finds them ready and the stage does not lag at the switch.
+			if (a_world && wanted.graph && !stillStaged && HasKindStep(a_declared)) {
+				a_state.describingDisplays = !a_state.describingDisplays;
 				const SegmentFields other = DescribeDeclared(a_state, a_declared, a_world);
-				a_state.describingWorld = !a_state.describingWorld;
+				a_state.describingDisplays = !a_state.describingDisplays;
 				if (other.graph && !(other == wanted))
 					for (std::uint32_t s = 0; s < RenderGraphRuntime::kGameFramesInFlight; ++s)
 						(void)RequestDeclared(a_state, a_declared, other, s, a_frame.frame, " (the other frame kinds' description, ahead)");
@@ -3046,10 +3050,10 @@ namespace FrameAnchors
 					                                     fmt::format("the slot's first schedule on build {}", wanted.graph);
 					active = { wanted, std::move(ready), a_state.declaredSnapshots[a_declared].load(std::memory_order_acquire) };
 					Driver::NoteSwitch(segment, a_frame.frame, slot, a_frame.frame - a_state.waitFrame[a_declared], what);
-					// A stage with worldOnly steps: the other slots switch at this boundary too when their recordings of the description are
+					// A stage with displayKindsOnly steps: the other slots switch at this boundary too when their recordings of the description are
 					// ready (a kind switch whose description was recorded ahead), so the next frames do not lag on an older schedule. Not for
 					// other stages: a description that alternates by frame (the post rows' ping-pong) keeps one schedule per slot.
-					for (std::uint32_t s = 0; s < RenderGraphRuntime::kGameFramesInFlight && HasWorldOnlyStep(a_declared); ++s) {
+					for (std::uint32_t s = 0; s < RenderGraphRuntime::kGameFramesInFlight && HasKindStep(a_declared); ++s) {
 						auto& other = a_state.schedule[a_declared][s];
 						if (s == slot || (other.recording && other.fields == wanted))
 							continue;
@@ -3693,7 +3697,7 @@ namespace FrameAnchors
 		// frame's end.
 		// Each frame kind's recipe lists its CS stages (Recipes::KindHas): the world's every stage, the other kinds the UI stage.
 		state.inBegin = true;
-		state.describingWorld = RenderGraph::Frame::Recipes::KindHas(a_frame.kind, a_frame.capture, SegmentId::Post);
+		state.describingDisplays = RenderGraph::Frame::Recipes::UiDrawsDisplays(a_frame.kind, a_frame.capture);
 		for (std::uint32_t d = 0; d < kDeclared; ++d) {
 			state.frameRecording[d].reset();
 			state.frameBuilt[d].reset();
@@ -3977,6 +3981,26 @@ namespace FrameAnchors
 			return found != clients.end() && i < RenderGraph::Frame::kSegmentClients && (fields.clientsOn >> i & 1u);
 		}
 		return true;
+	}
+
+	bool InStage(std::string_view a_id, Anchor a_anchor)
+	{
+		auto lock = Guard();
+		auto& state = Anchors();
+		const std::uint32_t index = IndexOf(a_anchor);
+		if (!SegmentsOn() || !state.host || index >= kAnchors)
+			return false;
+		const auto declared = DeclaredOfAnchor(state, index);
+		if (declared >= kDeclared)
+			return false;
+		const auto* client = FindClient(state, a_id);
+		if (!client)
+			return false;
+		const auto holds = [&](const std::shared_ptr<const Snapshot>& a_built) {
+			return a_built && std::ranges::any_of(a_built->clients, [&](const auto& a_held) { return SameClient(a_held, client->desc); });
+		};
+		const auto& last = state.frameBuilt[declared];
+		return last ? holds(last) : holds(state.declaredSnapshots[declared].load(std::memory_order_acquire));
 	}
 
 	StageHold HeldNow(std::string_view a_id, Anchor a_anchor)

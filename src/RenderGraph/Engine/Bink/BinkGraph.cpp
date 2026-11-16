@@ -281,10 +281,19 @@ namespace RenderGraph::Engine::Bink::Graph
 		class DrawPass final : public org::TypedRenderGraphPass<DrawPass, PassFrame, DrawBindings>
 		{
 		public:
-			DrawPass(FrameAnchors::Texture a_target, std::shared_ptr<org::Resource> a_atlas, std::shared_ptr<const RunSlots<Frame>> a_slots) :
-				target(std::move(a_target)), atlas(std::move(a_atlas)), slots(std::move(a_slots)) {}
+			DrawPass(FrameAnchors::Texture a_target, std::shared_ptr<org::Resource> a_atlas, std::shared_ptr<const RunSlots<Frame>> a_slots, bool a_late) :
+				target(std::move(a_target)), atlas(std::move(a_atlas)), slots(std::move(a_slots)), late(a_late) {}
 
 			DrawBindings Declare(org::PassBuilder& a_builder) { return { a_builder.RenderTarget(target).View(), a_builder.ShaderResource(atlas).View() }; }
+
+			// Recorded late (the UI stage), the recording depends on nothing but the bindings: the run's slot is read when it records, so
+			// the stage's kept recording stays current. Recorded ahead (an anchor's own epoch), every run is a new revision: the slot is
+			// read at each preparation.
+			void Revision(std::vector<std::uint64_t>& a_out) const
+			{
+				if (!late)
+					a_out.push_back(++preparations);
+			}
 
 			PassFrame Prepare(const DrawBindings&, const org::PassPrepareContext&) const { return { slots }; }
 
@@ -352,6 +361,8 @@ namespace RenderGraph::Engine::Bink::Graph
 			FrameAnchors::Texture target;
 			std::shared_ptr<org::Resource> atlas;
 			std::shared_ptr<const RunSlots<Frame>> slots;
+			bool late = false;
+			mutable std::uint64_t preparations = 0;
 		};
 
 		FrameAnchors::ClientDesc MakeClient()
@@ -360,6 +371,9 @@ namespace RenderGraph::Engine::Bink::Graph
 			FrameAnchors::ClientDesc client{};
 			client.id = kClientId;
 			// First in the Present anchor: the movie frame is the image the other Present clients draw over.
+			// In the UI stage the pass reads the run's slot, which the commit stores: it records in the stage's late batch, at each
+			// submission. Its own epoch (guest mode) prepares it again every run as before.
+			const bool late = FrameAnchors::HeldByStage(FrameAnchors::Anchor::Present);
 			const auto add = [&](const DrawTarget& a_target, const char* a_name, std::int32_t a_order) {
 				if (!a_target.resource)
 					return;
@@ -367,9 +381,10 @@ namespace RenderGraph::Engine::Bink::Graph
 					.anchor = FrameAnchors::Anchor::Present,
 					.order = a_order,
 					.kind = FrameAnchors::PassKind::Render,
-					.make = [resource = a_target.resource, atlas = state.atlas->Graph(), slots = a_target.slots] {
-						return std::make_shared<DrawPass>(resource, atlas, slots);
-					} });
+					.make = [resource = a_target.resource, atlas = state.atlas->Graph(), slots = a_target.slots, late] {
+						return std::make_shared<DrawPass>(resource, atlas, slots, late);
+					},
+					.atExecution = late });
 			};
 			add(state.framebuffer, "cs.bink.tiles", -1000);
 			add(state.hdrUi, "cs.bink.tiles.hdr", -999);
@@ -661,8 +676,17 @@ namespace RenderGraph::Engine::Bink::Graph
 		state.pending.reset();
 		if (!UpdateTargets(state, a_betweenFrames))
 			return refuse("the framebuffer cannot be imported, or its tile program cannot be made");
-		// The setup's build point put the client in the Present graph. Only HDR's UI texture appearing after setup changes it, and a
-		// blocking tick builds that between two frames (UpdateTargets): this waits only for an attach after the first world frame.
+		// The UI stage holds the Present anchor (native mode): its schedule must hold this registration. A tick can come between two
+		// frames, before the frame's Begin, so the last schedule is asked. A build with HDR's new UI texture switches in at a frame
+		// boundary; until then the tick stays the engine's.
+		if (FrameAnchors::HeldByStage(FrameAnchors::Anchor::Present)) {
+			if (!FrameAnchors::InStage(kClientId, FrameAnchors::Anchor::Present))
+				return refuse("the UI stage's schedule does not hold the Bink client yet");
+			return true;
+		}
+		// The anchor's own epoch (guest mode). The setup's build point put the client in the Present graph. Only HDR's UI texture
+		// appearing after setup changes it, and a blocking tick builds that between two frames (UpdateTargets): this waits only for an
+		// attach after the first world frame.
 		if (!FrameAnchors::CanRun(kClientId, FrameAnchors::Anchor::Present))
 			return refuse("the Present graph with HDR's new UI texture is not attached yet");
 		return true;

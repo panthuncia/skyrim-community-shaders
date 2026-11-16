@@ -60,9 +60,9 @@ namespace RenderGraph::Frame::Recipes
 			{ StageId::Post, Owner::Cs,
 				{ Segment::DeclaredPost, Segment::AnchorTonemap, Segment::AnchorFrameGeneration },
 				3, "RenderEndOfFrameEffects' return" },
-			// The UI stage holds Scaleform's displays (fixed instances; the Interface anchor keeps its epoch for the other frame kinds) and
-			// the overlay (the Overlay anchor has no epoch of its own). The movie tiles and the present's clients come before it and keep their
-			// tickets; HDR output and the capture follow its commit.
+			// The UI stage holds Scaleform's displays (fixed instances; the Interface anchor keeps its epoch for the other frame kinds), the
+			// Present anchor's clients (a Bink movie's tiles) and the overlay (the Present and Overlay anchors have no epoch of their own).
+			// HDR output and the capture follow its commit. The MovieTiles anchor has no client.
 			{ StageId::Ui, Owner::Cs,
 				{ Segment::AnchorMovieTiles, Segment::AnchorInterface, Segment::AnchorPresent, Segment::DeclaredUi, Segment::AnchorHDROutput, Segment::AnchorCapture },
 				6, "just before the present (or HDR output, or the capture)" },
@@ -266,9 +266,10 @@ namespace RenderGraph::Frame::Recipes
 			{ "loading model", Owner::Tickets, SegmentId::Count },
 			{ "UI", Owner::Cs, SegmentId::Ui },
 		} }, 2 };
-		// A Bink movie's own frame: the movie's tiles (the Present anchor's Bink client), then the UI.
+		// A Bink movie's own frame: the engine's clear (its anchor's ticket), then the UI stage, which draws the movie's tiles (the Present
+		// anchor's Bink client) and the overlay. The startup logo's frames draw no displays.
 		constexpr KindRecipe kBinkKind{ { {
-			{ "movie", Owner::Tickets, SegmentId::Count },
+			{ "clears", Owner::Tickets, SegmentId::Count },
 			{ "UI", Owner::Cs, SegmentId::Ui },
 		} }, 2 };
 
@@ -300,6 +301,8 @@ namespace RenderGraph::Frame::Recipes
 				return true;
 		return false;
 	}
+
+	bool UiDrawsDisplays(Kind a_kind, bool a_capture) { return KindHas(a_kind, a_capture, SegmentId::Post); }
 
 	std::string DescribeKind(Kind a_kind, bool a_capture)
 	{
@@ -488,6 +491,7 @@ namespace RenderGraph::Frame::Recipes
 {
 	const char* StageName(StageId) { return "?"; }
 	bool KindHas(Kind a_kind, bool a_capture, SegmentId) { return a_kind == Kind::World || (a_kind == Kind::FrozenWorld && a_capture); }
+	bool UiDrawsDisplays(Kind a_kind, bool a_capture) { return KindHas(a_kind, a_capture, SegmentId::Post); }
 	std::string DescribeKind(Kind, bool) { return {}; }
 	std::string DiffKinds(Kind, bool, Kind, bool) { return {}; }
 	std::shared_ptr<const org::ScheduleTrace> TraceEpochGraph(org::RenderGraph&, std::uint32_t) { return {}; }

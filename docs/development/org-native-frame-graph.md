@@ -3546,7 +3546,7 @@ the loading screen's start, the thread, the engine's own freeze-background test 
 | menu over a frozen world | frozen composite and menu scene (tickets), UI |
 | main menu | menu scene (tickets), UI |
 | loading screen | loading model (tickets), UI |
-| Bink movie | movie (tickets), UI |
+| Bink movie | the engine's clear (ticket), UI (the movie's tiles and the overlay since the stage 5 movie part) |
 
 The frame-kind line names the recipes and what changed: `[ORG] frame kind: kind loading screen -> world (frame 571); recipe loading model
 (tickets) | UI -> start | shadows* | ... | UI; stages added: ...; removed: loading model`. Every stage is built at setup; a kind switch
@@ -3566,7 +3566,7 @@ What it does not hold yet, and why:
   ticket.
 - **HDR output and the capture** (tickets after the stage's commit). HDR output can copy into the back buffer through the swap chain's
   per-frame image, which a kept recording cannot bind; the capture checks its copy's submission right after its run.
-- **The movie tiles and the Present anchor's clients** (Bink; tickets before the stage).
+- **The movie tiles and the Present anchor's clients** (Bink): in the stage since the stage 5 movie part (below).
 
 ### Measurements
 
@@ -3640,7 +3640,7 @@ The fatal paths fired three times during the work, each fixed before the final r
 - The ImageSpace main client and the shape manifest: they still draw the world's water effects at the frame's start, every ImageSpace
   call outside the world post chain (menus, the loading model's and the frozen frame's composites) and UI3DSceneManager's end-of-frame
   call. Not deleted: item 4's condition (the water effects the only user) does not hold while the other kinds' scenes are tickets.
-- Per-anchor epochs for Interface (outside world-recipe frames since the stage 5 finish), Present, MovieTiles, HDROutput, Capture, EngineDraws, ImageSpace, EngineCopy, the engine clear anchors and
+- Per-anchor epochs for Interface (outside world-recipe frames since the stage 5 finish), Present (guest mode only since the movie part), MovieTiles, HDROutput, Capture, EngineDraws, ImageSpace, EngineCopy, the engine clear anchors and
   the decal and sun queries; `CanRun`/`RequestJoin` for their clients; D3D11 replay of clears outside world frames.
 - The Overlay anchor's own epoch: none while the UI stage is on (`CS_ORG_UI_STAGE=0` brings it back).
 - `AttachEpochGraph` for CS stages: only with `CS_ORG_STAGED_BUILDS=0`, or for a stage with no graph yet (setup's builds attach).
@@ -3718,10 +3718,87 @@ What is still a ticket at a hook after this:
   (`PreparedPass::RecordAgain`), so the plan cannot be made there without an ORG addition. Separately, the capture's own check ("capture N
   was not in the epoch submitted at its capture point; D3D11 copies it") fires in native runs before and after this change: the harness's
   shots are taken by the D3D11 copy. Not investigated here.
-- **The movie tiles and the Present anchor's clients** (Bink): they run before the displays in the kinds whose displays keep their ticket, so
-  moving them into the UI stage would draw them after those displays. They follow the other kinds' stages.
+- **The movie tiles and the Present anchor's clients** (Bink): moved into the UI stage by the stage 5 movie part (below). The Present hook
+  fires after the displays (the frame sequence census), so the stage keeps their order.
 
 Not done in this stage (the plan's stage 5 items 3 to 5): the non-world kinds' scenes as CS stages (the menu scene, the frozen-world
 composite, the loading model, the movie), the world leftovers (the water effects as start-stage steps, the decal queries and the sun queries
 as fixed instances or stage passes), and so the ImageSpace main client, the shape manifest, the per-anchor epochs and `CanRun`/`RequestJoin`
 remain reachable as listed above.
+
+### The movie's tiles in the UI stage (stage 5, movie part; 2026-11-16, `org-native/phases`)
+
+The UI stage's steps are now Interface (Scaleform's displays, world-recipe frames), Present, Overlay and the point end. The Present anchor is a
+whole step: it has no epoch of its own in native mode with the UI stage on. Its clients are a Bink movie's tiles (`cs.bink`) and the GPU load
+diagnostic (`CS_GPU_LOAD`). The swap chain's Present hook taps it after the displays and before the overlay, as before.
+
+- **The tiles as a frame input.** The movie's tick queues the decoded frame; the Present tap's commit stores it in the run's slot (`RunSlots`,
+  moved to the submitted run by the stage's commit); the tile pass records in the stage's late batch from that slot. The pass now has a
+  revision (empty when it records late): a pass without one made the stage's recording not replayable, which is fatal (the first build's
+  first run hit it). Guest mode keeps the anchor's own epoch, with the pass prepared again every run as before.
+- **The tick asks the stage, not the anchor.** A blocking tick runs between two frames, before the frame's Begin, so `HeldNow` (an open
+  window) cannot answer there. `FrameAnchors::InStage(id, anchor)` (new) says whether the last frame's schedule of the stage that holds the
+  anchor holds this registration (before the first frame, its attached build). Bink's `CanRun` check is guest mode's only.
+- **The session's first movie frame is not drawn.** The UI stage's first schedule switches in at frame 2 (frame 1's Begin asks for its
+  recordings), so the frame the first tick queued has no stage to draw it: one `[E] Bink: a movie frame queued for its anchor did not draw`
+  per session. Before, the Present anchor's own epoch drew it. 166 of the logo's 167 frames are drawn by the graph.
+- **Bink frames keep Scaleform off.** The step that holds the displays is now `displayKindsOnly` (was `worldOnly`), held where
+  `Recipes::UiDrawsDisplays` says the UI stage draws the displays: the world recipe only. Adding the Bink kind was measured and undone: the
+  logo's frames draw no displays, and with the displays' 144 passes on the startup window's body barriers rose from 11 to 73 a frame.
+
+The frame sequence census of a Bink frame (startup logo, `CS_ORG_FRAME_SEQUENCE`):
+
+```
+before: clear Native::BackBuffer | EngineFrameClear (depth0) -> its ticket | Present [cs.bink] -> its ticket | Overlay -> its ticket
+after:  clear Native::BackBuffer | EngineFrameClear (depth0) -> its ticket | Present [cs.bink], Overlay (held) -> CS stage: UI
+```
+
+The main menu's frame (held 300 frames with Start On Save off) has the loading screen's shape: kMAIN's clear, a display, the shadow clear,
+kMAIN's and depth0's clears, the depth copy (EngineCopy), the menu scene's colour (EngineDraws), its composite (ImageSpace), depth0's
+clear, two displays, then the UI stage. So the menus and the loading screen need the same work to become one stage (below).
+
+Per frame kind, census windows (one run each, the machine in use; fps and thread times rough). Before: `u7q`/`u6mm`/`s8perf2` (the stage 5
+finish build). After: `a3q`/`a3mm`/`a3perf2` (this build). The startup window mixes the Bink frames with the first main-menu frames.
+
+| Window (frames by kind) | Tickets a frame | `vkQueueSubmit` a frame | Entry / body barriers a frame |
+|---|---|---|---|
+| startup, before (Bink 166, main menu 10) | 3.4 | 3.4 | 35.5 / 10.9 |
+| startup, after (Bink 166, main menu 25) | 3.2 | 3.1 | 44.2 / 18.8 |
+| one Bink frame (sequence census) | 3 -> 2 | | |
+| main menu, before / after | 10.9 / 10.9 | 10.3 / 10.0 | 164.2 / 109.5 both |
+| loading screen, before / after | 15.0 / 15.0 | 13.1 / 13.3 | 220.0 / 125.0 both |
+| world (perf-taa), before / after | 13.0 / 13.0 | 15.0 / 15.0 | 507 / 871 -> 505 / 867 |
+| perf-taa fps between the marks (rough) | 122.6 -> 123.5 | | |
+
+The startup window's entry barriers rise because the UI stage enters the movie texture and the framebuffer every Bink frame, and the window
+holds more main-menu frames. The main menu, loading screen and world are unchanged: no Bink there.
+
+Checks, final build, one run each, `CS_TEST_BACKGROUND=1`, mismatches and recipe findings fatal: native-quick, native-d3d12-quick,
+native-validation, native-interior, the loading-thread run (with a `loading` shot at loading-screen + 400 frames), first and third person,
+guest-quick and guest's loading shot, native-perf-taa: all passed, 0 tap errors, 0 recipe findings, 0 frames a stage was absent after it first
+ran, Scaleform census 0 left out. The main menu (Start On Save off): menu shot correct, 0 tap errors (the harness marks it failed because it
+expects a world). The native and guest loading shots match (the text and the level bar). The startup logo, main menu, loading screen and
+world kinds were reached in every run; a menu over a frozen world was not (no background way to open one). The lines "submitted between
+the first tap and the commit" at the world's first frames and the `PublishedResources` `[C]` line are in the stage 5 finish build's runs too.
+
+What is still a ticket at a hook, by kind, after this:
+- **World**: as before (the sun's queries, the decal tests, the water effects, HDR output and the capture when they run).
+- **Bink movie**: the engine's clear of the main depth (EngineFrameClear, 1 a frame).
+- **Main menu, loading screen, menu over a frozen world**: the scene (frame and shadow clears, EngineDraws, EngineCopy, ImageSpace) and
+  Scaleform's displays (Interface), as before.
+
+Why the menus' and the loading screen's scenes are not stages yet (stage 5 items 1 and 2, not done):
+- Their displays are drawn before and after the scene. One stage for the whole kind (the UI stage with the scene's steps between a
+  before-scene and an after-scene Interface step) is the simplest layout that keeps the order. It needs a step that takes taps only until a
+  later step tapped (the before-scene displays), and per-step instance ranges for the Scaleform client (instances 8-11 before the scene, 0-7
+  after, the first range off in world frames so its passes fold).
+- The scene's ImageSpace composite runs through the main ImageSpace client, built from the shape manifest, in batches that reuse their gate
+  entries per run: it cannot be a step of a stage. It needs CS passes of its own, as the post chain has (ChainSteps.inl).
+- The menu scenes' draws (`cs.menu-scenes.*`) are recorded ahead from the latest run (a revision): as frame inputs they need a per-run store
+  and the late batch, as the water's draws have.
+- The engine's clears repeat inside the scene (depth0 three times, kMAIN twice). As load operations of the first writing pass they need
+  changes in those passes (DCLF's menu scene and shadow mask, Scaleform's masks); as clear passes of the stage the repeats collapse to the
+  first, and the last depth0 clear (before the after-scene displays) is then left to Scaleform's own stencil clears.
+
+What of the old native paths is still reachable: as listed in the stage's first part, without the Present anchor's own epoch (gone in native
+with the UI stage on; guest mode keeps it).
