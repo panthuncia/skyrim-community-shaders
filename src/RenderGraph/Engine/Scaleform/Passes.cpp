@@ -57,10 +57,12 @@ namespace RenderGraph::Engine::Scaleform::Passes
 		constexpr std::uint32_t kMinimumStaging = 256u << 10;
 		// The most commands one Interface run draws: one run gate entry each. A longer segment is drawn in several runs.
 		constexpr std::uint32_t kGateEntries = 1024;
-		// The UI stage's fixed instances (docs/development/org-native-frame-graph.md, "Frame kinds and the UI stage"): the k-th Interface run
-		// of a world frame is instance k, with its own gate entries and run slots. All are declared every frame; the ones the engine does not
-		// use stay closed. More runs in one frame are a mismatch (an instance not declared). The anchor's own epoch uses instance 0.
-		constexpr std::uint32_t kInstances = 8;
+		// The UI stages' fixed instances (docs/development/org-native-frame-graph.md, "Frame kinds and the UI stage"), each with its own gate
+		// entries and run slots: the UI stage's Interface step makes instances 0 to 7 (the k-th Interface run of the frame is instance k); the
+		// menu UI stage's step before its scene makes 8 to 15, its step after the scene 0 to 7. All are declared every frame; the ones the
+		// engine does not use stay closed. More runs at one step in one frame are a mismatch (an instance not declared). The anchor's own
+		// epoch (guest mode) uses instance 0.
+		constexpr std::uint32_t kInstances = 16;
 		// The scratch images GFx's render targets are drawn into on the graph (PushRenderTarget: a filter's source, its passes): a
 		// blur's source and its two intermediates, and one more for a nested target.
 		constexpr std::uint32_t kScratchTargets = 4;
@@ -667,7 +669,7 @@ namespace RenderGraph::Engine::Scaleform::Passes
 			if (!host)
 				return;
 			const org::RunRef run = host->CurrentRun();
-			// The tap's instance: the k-th Interface run of the UI stage this frame (0 on the anchor's own epoch).
+			// The tap's instance: the step's first instance plus its earlier runs this frame (0 on the anchor's own epoch).
 			const std::uint32_t instance = FrameAnchors::TapInstance();
 			if (instance >= kInstances) {
 				state.commitReason = "an Interface run past the UI stage's instances";

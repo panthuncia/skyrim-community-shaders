@@ -652,7 +652,7 @@ namespace RenderGraph::Engine::ImageSpace
 			// The CS stages' ImageSpace clients (the post chain's, the RenderWorld scopes'): on for the session once their gates and latches
 			// exist; the constant chunks their draws read, held for the frame.
 			bool postOn = false;
-			std::array<PostClient, 7> post{};
+			std::array<PostClient, 8> post{};
 			// Between RenderSSAO's two calls in Main::RenderWorld: an own-scope copy-subregion call there is the snow scope's copy.
 			bool snowWindow = false;
 			std::vector<std::shared_ptr<const org::LatchBlock>> postKeep;
@@ -2976,12 +2976,14 @@ namespace RenderGraph::Engine::ImageSpace
 			WorldScopes,  // the deferred+water stage's RenderWorld scopes: the reflections, the SAO, the snow pass or its copy
 			WorldWater,   // the deferred+water stage's water blend, after the water's draws
 			Start,        // the start stage's water effects: the displacement simulation and the flow copies (StartSteps.inl)
-			Menu,         // the menus' and the loading screen's composites, on the ImageSpace anchor's own epoch (MenuSteps.inl)
+			Menu,         // the menus' and the loading screen's composites: the menu UI stage's (MenuSteps.inl); in a world frame the anchor's own epoch
+			Frozen,       // a frozen world's composite, first in the menu UI stage (MenuSteps.inl)
 			Count
 		};
 		constexpr std::array<const char*, static_cast<std::size_t>(PostPart::Count)> kPostIds{ "cs.engine.imagespace.post.composites", "cs.engine.imagespace.post.hdr",
 			"cs.engine.imagespace.post.final", "cs.engine.imagespace.world.scopes", "cs.engine.imagespace.world.water", "cs.engine.imagespace.start",
-			"cs.engine.imagespace.menu" };
+			"cs.engine.imagespace.menu", "cs.engine.imagespace.frozen" };
+		static_assert(sizeof(IS().post) / sizeof(PostClient) == static_cast<std::size_t>(PostPart::Count), "a post client per part");
 
 #	include "RenderGraph/Engine/ImageSpace/WorldSteps.inl"
 #	include "RenderGraph/Engine/ImageSpace/ChainSteps.inl"

@@ -4030,6 +4030,13 @@ namespace RenderGraph::Engine::Native
 				NoteRouted(OpCensus::Op::CopySource, *source, OpCensus::Route::GraphPass);
 				return;
 			}
+			// Diagnostics: the main depth's copy that the skeleton did not take (logged once).
+			if (destination->name == "Engine::Depth::kPOST_ZPREPASS_COPY") {
+				static std::atomic_flag loggedDepthCopy;
+				if (!loggedDepthCopy.test_and_set())
+					logger::warn("[ORG native] the main depth's copy reached the native context untaken (in a run: {}; destination {}, source {})", FrameAnchors::InRun(),
+						static_cast<const void*>(a_destination), static_cast<const void*>(a_source));
+			}
 			// Every subresource, through the ledgers for each side the graph tracks.
 			bool recorded = false, routed = false;
 			CopyRhi("copy " + source->name + " to " + destination->name, destination, source, true, 0, 0, 0, 0, 0, nullptr, recorded, &routed);

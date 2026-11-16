@@ -137,6 +137,7 @@ public:
 		DeclaredDeferred,  // deferred+water: the deferred passes, the composite, the water mask, the RenderWorld scopes, the water and its blend, before DCLF's forward epoch
 		DeclaredPost,      // the post stage: the volumetric lighting to the end-of-frame effects with the upscaler's evaluate, at RenderEndOfFrameEffects' return
 		DeclaredUi,        // the UI stage: the overlay, ending just before the present (or HDR output and the capture, which follow it)
+		DeclaredMenuUi,    // the menu UI stage: a menu's 3D scene between its displays, ending just before the present like the UI stage
 		Count
 	};
 

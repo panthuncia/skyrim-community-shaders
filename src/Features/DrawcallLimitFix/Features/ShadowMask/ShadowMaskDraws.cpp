@@ -12,6 +12,7 @@
 #include "ShaderCache.h"
 #include "Utils/Logging.h"
 #include "RenderGraph/FrameAnchors.h"
+#include "RenderGraph/FrameStaging.h"
 #include "RenderGraph/RasterProgram.h"
 #include "RenderGraph/RenderGraphRuntime.h"
 #include "RenderGraph/RunGate.h"
@@ -66,6 +67,8 @@ namespace DCLF::Features::ShadowMask::ShadowMaskDraws
 			Family::PublishedInputs inputs;
 			// Render thread writes, the host's thread reads.
 			std::shared_ptr<const Run> run;
+			// Each run's draws, stored by the commit for the pass recorded at execution (a frame input).
+			::RenderGraph::RunSlots<Run> runs;
 			bool pending = false;
 
 			FrameAnchors::Texture Target() const
@@ -93,8 +96,8 @@ namespace DCLF::Features::ShadowMask::ShadowMaskDraws
 		class ShadowMaskPass final : public org::TypedRenderGraphPass<ShadowMaskPass, Frame, Bindings>
 		{
 		public:
-			explicit ShadowMaskPass(std::shared_ptr<Client> a_client) :
-				client(std::move(a_client)) {}
+			ShadowMaskPass(std::shared_ptr<Client> a_client, bool a_atExecution) :
+				client(std::move(a_client)), atExecution(a_atExecution) {}
 
 			Bindings Declare(org::PassBuilder& a_builder)
 			{
@@ -107,9 +110,12 @@ namespace DCLF::Features::ShadowMask::ShadowMaskDraws
 				return bindings;
 			}
 
-			// The run's draws (their programs and viewports).
+			// The run's draws (their programs and viewports). Recorded at execution, the pass reads the run its commit stored when it records:
+			// a recording made ahead stays current when the draws change.
 			void Revision(std::vector<std::uint64_t>& a_out) const
 			{
+				if (atExecution)
+					return;
 				const auto run = std::atomic_load(&client->run);
 				a_out.push_back(run ? run->revision : 0);
 			}
@@ -117,19 +123,36 @@ namespace DCLF::Features::ShadowMask::ShadowMaskDraws
 			Frame Prepare(const Bindings& a_bindings, const org::PassPrepareContext& a_preparation) const
 			{
 				Extensions::CheckDeclaredReads(a_bindings.inputs, a_preparation, client->id);
-				return { std::atomic_load(&client->run), client };
+				return { atExecution ? nullptr : std::atomic_load(&client->run), client };
+			}
+
+			/** @brief Recorded at execution: a run whose commit opened none of the draws' gate entries records only the pass's barriers. */
+			static bool SkipsAtExecution(const Bindings&, const Frame& a_frame, const org::PassRecordContext& a_recording)
+			{
+				if (!a_frame.client)
+					return true;
+				const auto run = a_frame.run ? a_frame.run : a_frame.client->runs.Find(a_recording.Run());
+				if (!run)
+					return true;
+				for (std::uint32_t i = 0; i < run->draws.size(); ++i)
+					if (a_frame.client->gate->IsOpen(a_recording.Run(), i))
+						return false;
+				return true;
 			}
 
 			static void Record(const Bindings& a_bindings, const Frame& a_frame, org::PassRecordContext& a_recording)
 			{
-				if (!a_frame.run || !a_frame.client)
+				if (!a_frame.client)
+					return;
+				const auto runRef = a_frame.run ? a_frame.run : a_frame.client->runs.Find(a_recording.Run());
+				if (!runRef)
 					return;
 				const auto& c = *a_frame.client;
 				const auto shared = SharedConstants::Index(a_recording, a_bindings.shared);
 				const org::RunRef latchRun = a_recording.Run();
 				const RasterProgram::Colour colour{ .view = &a_bindings.target };
-				for (std::uint32_t i = 0; i < a_frame.run->draws.size(); ++i) {
-					const auto& draw = a_frame.run->draws[i];
+				for (std::uint32_t i = 0; i < runRef->draws.size(); ++i) {
+					const auto& draw = runRef->draws[i];
 					if (!draw.program)
 						continue;
 					const auto& program = *static_cast<const RasterProgram*>(draw.program.get());
@@ -146,6 +169,7 @@ namespace DCLF::Features::ShadowMask::ShadowMaskDraws
 
 		private:
 			std::shared_ptr<Client> client;
+			bool atExecution = false;  // FrameAnchors::RecordsAtExecution at the build
 		};
 
 		/**
@@ -245,15 +269,23 @@ namespace DCLF::Features::ShadowMask::ShadowMaskDraws
 				.anchor = FrameAnchors::Anchor::EngineDraws,
 				.order = a_shape.view == View::World ? 3 : 4,
 				.kind = FrameAnchors::PassKind::Render,
-				.make = [client]() -> std::shared_ptr<org::RenderPass> { return std::make_shared<ShadowMaskPass>(client); },
+				.make = [client]() -> std::shared_ptr<org::RenderPass> {
+					return std::make_shared<ShadowMaskPass>(client, FrameAnchors::RecordsAtExecution(FrameAnchors::Anchor::EngineDraws));
+				},
+				// The run's draws are known after its commit (a frame input): recorded then.
+				.atExecution = true,
 				// Gated (FrameAnchors::PassDesc::gated): every draw takes its count from the client's gate entry, and nothing clears.
 				.gated = true });
 			desc.commit = [client](const FrameAnchors::Point&) {
 				const auto run = std::atomic_load(&client->run);
 				auto* host = RenderGraphRuntime::Get().Host();
-				if (!run || !host)
+				if (!host)
 					return;
 				const org::RunRef latchRun = host->CurrentRun();
+				// For the pass recorded at execution, by this run (null: nothing drawn).
+				client->runs.Store(latchRun, run);
+				if (!run)
+					return;
 				for (std::uint32_t i = 0; i < run->draws.size(); ++i) {
 					const auto& draw = run->draws[i];
 					client->latch->WriteValue(latchRun, i * kDrawStride, draw.constants);

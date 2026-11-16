@@ -1900,6 +1900,8 @@ struct RenderGraphRuntime::Impl
 		switch (a_segment) {
 		case Segment::DeclaredUi:
 			return "CS stage: UI";
+		case Segment::DeclaredMenuUi:
+			return "CS stage: menu UI";
 		case Segment::LightCulling:
 			return "CS LLF: light culling";
 		case Segment::ZPrepass:

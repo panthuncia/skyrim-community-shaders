@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <functional>
 #include <memory>
+#include <span>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -461,8 +462,10 @@ namespace FrameAnchors
 	};
 
 	/**
-	 * @brief Whether a run of a_anchor now would tap a CS stage that holds a_id at a shared step (rather than run the anchor's own epoch),
-	 * and which registration of a_id the frame's schedule of it holds. A client that changes what its passes draw onto compares the
+	 * @brief Whether a run of a_anchor now would tap a CS stage that holds a_id at a step (rather than run the anchor's own epoch), and which
+	 * registration of a_id the frame's schedule of it holds. A client that hands work to an anchor some stages hold asks this before it takes
+	 * the engine's work: held and scheduled, the stage draws it; held and not scheduled, the work lags; not held, the anchor's own epoch
+	 * (CanRun). A client that changes what its passes draw onto compares the
 	 * generation with its own: until the schedule holds the new one, its work lags. Render owner.
 	 */
 	StageHold HeldNow(std::string_view a_id, Anchor a_anchor);
@@ -681,6 +684,14 @@ namespace FrameAnchors
 	 * not the step's hook (the renderer clear colour at its clear call). False, and a_write not called, otherwise. Render owner.
 	 */
 	bool StageInputs(std::string_view a_id, const std::function<void()>& a_write);
+
+	/**
+	 * @brief Where in an open stage work the engine hands over outside a tap belongs (a clear: the menu UI stage clears at three places). Of the
+	 * stage's steps that name one of a_ids, the latest at most one step after the stage's last tapped step this frame, else the first of them:
+	 * the index in a_ids of the client that step names. -1 when no open stage names any of them. Hand the work to that client with StageInputs.
+	 * Render owner.
+	 */
+	std::int32_t StagePlace(std::span<const std::string_view> a_ids);
 
 	/**
 	 * @brief A CS point that ends a declared segment and is no anchor (a point step: RenderEndOfFrameEffects' return ends the post

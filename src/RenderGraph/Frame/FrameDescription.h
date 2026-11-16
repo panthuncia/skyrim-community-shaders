@@ -43,7 +43,9 @@ namespace RenderGraph::Frame
 		Deferred,        // deferred+water: the deferred passes and the composite, the water mask, the RenderWorld scopes, the kMAIN copy, the water and its blend
 		Post,            // the post stage: the volumetric lighting, the pre-tonemap composites, the upscaler's evaluate and the depth upscale,
 		                 // the end-of-frame effects with the tonemap, to RenderEndOfFrameEffects' return
-		Ui,              // the UI stage: the overlay, to just before the present; in every frame kind's recipe
+		Ui,              // the UI stage: the displays, the movie's tiles and the overlay, to just before the present; world and Bink frames
+		MenuUi,          // the menu UI stage: the displays before and after a menu's 3D scene, the scene, its composite, the overlay;
+		                 // the loading screen, the main menu and a menu over a frozen world
 		Count
 	};
 	inline constexpr std::uint32_t kSegments = static_cast<std::uint32_t>(SegmentId::Count);

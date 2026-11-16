@@ -1,6 +1,8 @@
 // The menu scenes family's render graph side: a client per batch at the EngineDraws anchor, made once at setup, whose pass draws a
 // batch's latched draws into the view's imported targets with kMAIN's depth, in the engine's order, with CS's shaders built for ORG
-// (Utility.hlsl's UTILITY_ORG_SCENE, Lighting.hlsl's LIGHTING_ORG, Effect.hlsl's EFFECT_ORG).
+// (Utility.hlsl's UTILITY_ORG_SCENE, Lighting.hlsl's LIGHTING_ORG, Effect.hlsl's EFFECT_ORG). In the loading screen's and the menus' frames
+// the clients are steps of the menu UI stage; a run's draw list is a frame input: the commit stores it for its run (RunSlots) and the pass
+// records it at execution, so the stage's kept recording never changes with the draws.
 
 // volk must precede every Vulkan header in this translation unit.
 #include <rhi_interop_vulkan.h>
@@ -12,6 +14,7 @@
 #include "RenderGraph/Engine/Constants/EngineConstants.h"
 #include "RenderGraph/Engine/Tripwire/Tripwire.h"
 #include "RenderGraph/FrameAnchors.h"
+#include "RenderGraph/FrameStaging.h"
 #include "RenderGraph/RasterProgram.h"
 #include "RenderGraph/RenderGraphRuntime.h"
 #include "RenderGraph/RunGate.h"
@@ -75,6 +78,8 @@ namespace DCLF::Features::MenuViews::Scenes::SceneDraws
 			Family::PublishedInputs inputs;
 			// Render thread writes, the host's thread reads.
 			std::shared_ptr<const Run> run;
+			// Each run's draws, stored by the commit for the pass recorded at execution (a frame input).
+			::RenderGraph::RunSlots<Run> runs;
 			bool pending = false;
 			bool targetLogged = false;
 			std::atomic<std::uint64_t> executed{ 0 };
@@ -112,8 +117,8 @@ namespace DCLF::Features::MenuViews::Scenes::SceneDraws
 		class ScenePass final : public org::TypedRenderGraphPass<ScenePass, Frame, Bindings>
 		{
 		public:
-			explicit ScenePass(std::shared_ptr<Client> a_client) :
-				client(std::move(a_client)) {}
+			ScenePass(std::shared_ptr<Client> a_client, bool a_atExecution) :
+				client(std::move(a_client)), atExecution(a_atExecution) {}
 
 			Bindings Declare(org::PassBuilder& a_builder)
 			{
@@ -129,9 +134,12 @@ namespace DCLF::Features::MenuViews::Scenes::SceneDraws
 				return bindings;
 			}
 
-			// The run's draws (their programs, targets, stencil references and viewports).
+			// The run's draws (their programs, targets, stencil references and viewports). Recorded at execution, the pass reads the run
+			// its commit stored when it records: the run is not part of it, so a recording made ahead stays current when the draws change.
 			void Revision(std::vector<std::uint64_t>& a_out) const
 			{
+				if (atExecution)
+					return;
 				const auto run = std::atomic_load(&client->run);
 				a_out.push_back(run ? run->revision : 0);
 			}
@@ -139,19 +147,36 @@ namespace DCLF::Features::MenuViews::Scenes::SceneDraws
 			Frame Prepare(const Bindings& a_bindings, const org::PassPrepareContext& a_preparation) const
 			{
 				Extensions::CheckDeclaredReads(a_bindings.inputs, a_preparation, client->id);
-				return { std::atomic_load(&client->run), client };
+				return { atExecution ? nullptr : std::atomic_load(&client->run), client };
+			}
+
+			/** @brief Recorded at execution: a run whose commit opened none of the draws' gate entries records only the pass's barriers. */
+			static bool SkipsAtExecution(const Bindings&, const Frame& a_frame, const org::PassRecordContext& a_recording)
+			{
+				if (!a_frame.client)
+					return true;
+				const auto run = a_frame.run ? a_frame.run : a_frame.client->runs.Find(a_recording.Run());
+				if (!run)
+					return true;
+				for (std::uint32_t i = 0; i < run->draws.size(); ++i)
+					if (a_frame.client->gate->IsOpen(a_recording.Run(), i))
+						return false;
+				return true;
 			}
 
 			static void Record(const Bindings& a_bindings, const Frame& a_frame, org::PassRecordContext& a_recording)
 			{
-				if (!a_frame.run || !a_frame.client)
+				if (!a_frame.client)
+					return;
+				const auto runRef = a_frame.run ? a_frame.run : a_frame.client->runs.Find(a_recording.Run());
+				if (!runRef)
 					return;
 				const auto& c = *a_frame.client;
 				const auto shared = SharedConstants::Index(a_recording, a_bindings.shared);
 				const org::RunRef latchRun = a_recording.Run();
 				const RasterProgram::Depth depth{ .view = &a_bindings.depth, .readOnly = false };
-				for (std::uint32_t i = 0; i < a_frame.run->draws.size(); ++i) {
-					const auto& draw = a_frame.run->draws[i];
+				for (std::uint32_t i = 0; i < runRef->draws.size(); ++i) {
+					const auto& draw = runRef->draws[i];
 					if (!draw.program)
 						continue;
 					const auto& program = *static_cast<const RasterProgram*>(draw.program.get());
@@ -181,6 +206,7 @@ namespace DCLF::Features::MenuViews::Scenes::SceneDraws
 
 		private:
 			std::shared_ptr<Client> client;
+			bool atExecution = false;  // FrameAnchors::RecordsAtExecution at the build
 		};
 
 		/**
@@ -319,15 +345,23 @@ namespace DCLF::Features::MenuViews::Scenes::SceneDraws
 				.anchor = FrameAnchors::Anchor::EngineDraws,
 				.order = 5 + static_cast<int>(a_view),
 				.kind = FrameAnchors::PassKind::Render,
-				.make = [client]() -> std::shared_ptr<org::RenderPass> { return std::make_shared<ScenePass>(client); },
+				.make = [client]() -> std::shared_ptr<org::RenderPass> {
+					return std::make_shared<ScenePass>(client, FrameAnchors::RecordsAtExecution(FrameAnchors::Anchor::EngineDraws));
+				},
+				// The run's draws are known after its commit: recorded then, the pass reads them without a recording made again.
+				.atExecution = true,
 				// Gated (FrameAnchors::PassDesc::gated): every draw takes its count from the client's gate entry, and nothing clears.
 				.gated = true });
 			desc.commit = [client](const FrameAnchors::Point&) {
 				const auto run = std::atomic_load(&client->run);
 				auto* host = RenderGraphRuntime::Get().Host();
-				if (!run || !host)
+				if (!host)
 					return;
 				const org::RunRef latchRun = host->CurrentRun();
+				// For the pass recorded at execution, by this run (null: nothing drawn).
+				client->runs.Store(latchRun, run);
+				if (!run)
+					return;
 				if (!run->latch.empty())
 					client->latch->Write(latchRun, 0, std::span<const std::byte>(run->latch));
 				for (std::uint32_t i = 0; i < run->draws.size(); ++i)

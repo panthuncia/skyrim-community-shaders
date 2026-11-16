@@ -37,6 +37,8 @@ namespace RenderGraph::Frame
 			return "post";
 		case SegmentId::Ui:
 			return "UI";
+		case SegmentId::MenuUi:
+			return "menu UI";
 		default:
 			return "?";
 		}

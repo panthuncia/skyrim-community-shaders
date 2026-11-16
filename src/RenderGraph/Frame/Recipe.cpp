@@ -61,9 +61,9 @@ namespace RenderGraph::Frame::Recipes
 			{ StageId::Post, Owner::Cs,
 				{ Segment::DeclaredPost, Segment::AnchorTonemap, Segment::AnchorFrameGeneration },
 				3, "RenderEndOfFrameEffects' return" },
-			// The UI stage holds Scaleform's displays (fixed instances; the Interface anchor keeps its epoch for the other frame kinds), the
-			// Present anchor's clients (a Bink movie's tiles) and the overlay (the Present and Overlay anchors have no epoch of their own).
-			// HDR output and the capture follow its commit. The MovieTiles anchor has no client.
+			// The UI stage holds Scaleform's displays (fixed instances), the Present anchor's clients (a Bink movie's tiles) and the overlay (the
+			// Interface, Present and Overlay anchors have no epoch of their own: the UI and menu UI stages hold them). HDR output and the capture
+			// follow its commit. The MovieTiles anchor has no client.
 			{ StageId::Ui, Owner::Cs,
 				{ Segment::AnchorMovieTiles, Segment::AnchorInterface, Segment::AnchorPresent, Segment::DeclaredUi, Segment::AnchorHDROutput, Segment::AnchorCapture },
 				6, "just before the present (or HDR output, or the capture)" },
@@ -268,28 +268,24 @@ namespace RenderGraph::Frame::Recipes
 			{ "post", Owner::Cs, SegmentId::Post },
 			{ "UI", Owner::Cs, SegmentId::Ui },
 		} }, 11 };
-		// A menu over a frozen world (after its capture frame): the engine composites the frozen frame (ImageSpace), a menu's 3D scene
-		// (the EngineDraws and Tonemap anchors' own epochs), then the UI.
+		// A menu over a frozen world (after its capture frame), the main menu (and any frame before the player has 3D) and a loading screen's
+		// frame: one stage, the menu UI stage. It holds, in the engine's order: the frozen frame's composite (a menu over a frozen world), the
+		// first clears, the displays before the scene, the scene's clears, its depth, shadow mask, depth and kMAIN copies, colour and composite,
+		// the main depth's last clear, the displays after the scene, the present's clients and the overlay.
 		constexpr KindRecipe kFrozenKind{ { {
-			{ "frozen composite and menu scene", Owner::Tickets, SegmentId::Count },
-			{ "UI", Owner::Cs, SegmentId::Ui },
-		} }, 2 };
-		// The main menu (and any frame before the player has 3D): the menu's 3D scene, then the UI.
+			{ "menu UI (frozen composite, menu scene, displays)", Owner::Cs, SegmentId::MenuUi },
+		} }, 1 };
 		constexpr KindRecipe kMainMenuKind{ { {
-			{ "menu scene", Owner::Tickets, SegmentId::Count },
-			{ "UI", Owner::Cs, SegmentId::Ui },
-		} }, 2 };
-		// A loading screen's frame: its 3D model (the menu scene's anchors), then the UI.
+			{ "menu UI (menu scene, displays)", Owner::Cs, SegmentId::MenuUi },
+		} }, 1 };
 		constexpr KindRecipe kLoadingKind{ { {
-			{ "loading model", Owner::Tickets, SegmentId::Count },
-			{ "UI", Owner::Cs, SegmentId::Ui },
-		} }, 2 };
-		// A Bink movie's own frame: the engine's clear (its anchor's ticket), then the UI stage, which draws the movie's tiles (the Present
-		// anchor's Bink client) and the overlay. The startup logo's frames draw no displays.
+			{ "menu UI (loading model, displays)", Owner::Cs, SegmentId::MenuUi },
+		} }, 1 };
+		// A Bink movie's own frame: the UI stage alone, which clears the main depth (the engine's call stages it), draws the movie's tiles (the
+		// Present anchor's Bink client) and the overlay. The startup logo's frames draw no displays.
 		constexpr KindRecipe kBinkKind{ { {
-			{ "clears", Owner::Tickets, SegmentId::Count },
 			{ "UI", Owner::Cs, SegmentId::Ui },
-		} }, 2 };
+		} }, 1 };
 
 		const KindRecipe& RecipeOf(Kind a_kind, bool a_capture)
 		{
@@ -319,8 +315,6 @@ namespace RenderGraph::Frame::Recipes
 				return true;
 		return false;
 	}
-
-	bool UiDrawsDisplays(Kind a_kind, bool a_capture) { return KindHas(a_kind, a_capture, SegmentId::Post); }
 
 	std::string DescribeKind(Kind a_kind, bool a_capture)
 	{
@@ -509,7 +503,6 @@ namespace RenderGraph::Frame::Recipes
 {
 	const char* StageName(StageId) { return "?"; }
 	bool KindHas(Kind a_kind, bool a_capture, SegmentId) { return a_kind == Kind::World || (a_kind == Kind::FrozenWorld && a_capture); }
-	bool UiDrawsDisplays(Kind a_kind, bool a_capture) { return KindHas(a_kind, a_capture, SegmentId::Post); }
 	std::string DescribeKind(Kind, bool) { return {}; }
 	std::string DiffKinds(Kind, bool, Kind, bool) { return {}; }
 	std::shared_ptr<const org::ScheduleTrace> TraceEpochGraph(org::RenderGraph&, std::uint32_t) { return {}; }

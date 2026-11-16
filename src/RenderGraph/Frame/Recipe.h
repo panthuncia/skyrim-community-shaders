@@ -46,7 +46,8 @@ namespace RenderGraph::Frame::Recipes
 		Forward,      // Drawcall Limit Fix's forward pass, with the frame-group clears' ticket and the sun queries around it
 		FirstPerson,  // Drawcall Limit Fix's first-person colour
 		Post,         // CS: the post chain, the upscaler's evaluate and the depth upscale, one stage
-		Ui,           // CS: the UI stage (Scaleform's displays, the movie tiles, the overlay); HDR output and the capture keep their tickets
+		Ui,           // CS: the UI stage (a Bink frame's depth clear, Scaleform's displays, the movie tiles, the overlay); HDR output and the capture
+		              // keep their tickets
 		Count
 	};
 	inline constexpr std::uint32_t kStages = static_cast<std::uint32_t>(StageId::Count);
@@ -69,13 +70,6 @@ namespace RenderGraph::Frame::Recipes
 	 * Whether kind a_kind's recipe (a_capture: a frozen world's capture frame) has CS stage a_segment.
 	 */
 	bool KindHas(Kind a_kind, bool a_capture, SegmentId a_segment);
-	/**
-	 * @brief Whether the UI stage draws Scaleform's displays in kind a_kind's frames: the world recipe's (the scene is the earlier stages).
-	 * In the loading screen and the menus the engine draws displays before and after a 3D scene that is still on its anchors' tickets, so
-	 * the displays keep the Interface anchor's own epoch there. A Bink movie's frames draw no displays: with the displays' 144 passes on,
-	 * each such frame would record their barriers for nothing (measured: 11 -> 73 body barriers a frame at startup).
-	 */
-	bool UiDrawsDisplays(Kind a_kind, bool a_capture);
 	/** @brief The kind's recipe as one line: "menu scene (tickets) | UI". */
 	std::string DescribeKind(Kind a_kind, bool a_capture);
 	/** @brief What changes between two kinds' recipes (empty when it is the same recipe), for the frame-kind switch's log line. */

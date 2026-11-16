@@ -171,6 +171,7 @@ namespace FrameAnchors
 			Segment::AnchorInterface,           // Scaleform's displays (UI::DrawInterface), several times a frame
 			Segment::AnchorPresent,
 			Segment::DeclaredUi,       // the UI stage (SegmentsOn): the overlay, ending just before the present, HDR output or the capture
+			Segment::DeclaredMenuUi,   // the menu UI stage (SegmentsOn): a menu's scene between its displays, ending as the UI stage does
 			Segment::AnchorOverlay,    // the overlay's ImGui draw, inside HDRDisplay's present chain
 			Segment::AnchorHDROutput,  // HDRDisplay's output composite, after the overlay
 			Segment::AnchorCapture,    // the screenshot capture, at the end of HDRDisplay's present chain
@@ -297,21 +298,27 @@ namespace FrameAnchors
 		 * "The recipe").
 		 */
 		constexpr std::uint32_t kDeclared = RenderGraph::Frame::kSegments;
-		constexpr std::uint32_t kMaxSteps = 10;
+		constexpr std::uint32_t kMaxSteps = 16;
 		struct Step
 		{
-			Anchor anchor = Anchor::Count;                         // Count for a foreign or point step
-			std::array<const char*, 2> clients{ nullptr, nullptr };  // the named clients; none: the whole anchor
-			Segment foreign = Segment::Count;                        // a foreign step's module epoch
+			Anchor anchor = Anchor::Count;  // Count for a foreign or point step
+			// The named clients; none: the whole anchor. A name ending in '*' names every client whose id starts with what comes before it.
+			std::array<const char*, 4> clients{ nullptr, nullptr, nullptr, nullptr };
+			Segment foreign = Segment::Count;  // a foreign step's module epoch
 			// With no client named: every client of the anchor while the segment's window is open, and the anchor keeps its own epoch for
 			// its runs outside the window (a menu's 3D scene runs the Tonemap anchor after the world's post chain).
 			bool shared = false;
 			// A CS point that is no anchor and no module epoch (TapPoint): it holds no passes and only ends the segment.
 			bool point = false;
-			// A shared step held only in the kinds whose displays the UI stage draws (Recipes::UiDrawsDisplays: the world recipe): in the
-			// others the anchor's runs keep its own epoch, and the step's clients are off in the stage's description (Scaleform in the UI
-			// stage, until the loading screen's and the menus' scenes are stages: their displays draw before and after the scene).
-			bool displayKindsOnly = false;
+			// The step takes taps only until a later step of its stage has tapped this frame; then its anchor's taps go to the stage's next
+			// step at the anchor. The menu UI stage's displays before the scene: the first display after the scene's first tap is drawn
+			// after the scene.
+			bool untilLater = false;
+			// The instances of a client with instances (ClientDesc::maxInstances) this step makes and taps: from firstInstance, instanceCount
+			// of them (0: every instance from firstInstance). The step's k-th tap this frame is instance firstInstance + k. Two steps at one
+			// anchor give the same client disjoint ranges (Scaleform's displays before and after a menu's scene).
+			std::uint8_t firstInstance = 0;
+			std::uint8_t instanceCount = 0;
 		};
 		struct DeclaredInfo
 		{
@@ -385,22 +392,53 @@ namespace FrameAnchors
 					{ Anchor::ImageSpace, { "cs.engine.imagespace.post.final", "cs.engine.skeleton.frame@post-chain" } },
 					{ Anchor::Count, { nullptr, nullptr }, Segment::Count, false, true } } },
 				8, { "CS stage: post", "CS stage: post inputs", "FrameSegments::Post / ", "cs.segment.post" } },
-			// The UI stage, in every frame kind's recipe: the overlay's ImGui draw (its draw list a frame input, recorded in the stage's late
-			// batch). It ends at a point: just before the present (Hooks.cpp), or before HDR output or the capture is submitted, which
-			// follow the overlay on the GPU and keep their anchors' tickets.
-			// Scaleform's displays come first (a shared step, in the kinds whose displays no scene on tickets splits: the world recipe). Each display segment is a tap and an instance of the
-			// Scaleform client (a fixed count, all declared, the draws' counts latched in its run gate); its draw list is a frame input recorded
-			// in the late batch.
-			// The Present anchor is the stage's in every kind (its clients: a Bink movie's tiles, queued by the movie's tick and drawn from the
-			// run's slot in the late batch, and the GPU load diagnostic). The swap chain's Present hook taps it after the displays and before
-			// the overlay, as the engine draws them.
+			// The UI stage, in the world's and a Bink movie's recipes: the overlay's ImGui draw (its draw list a frame input, recorded in the
+			// stage's late batch). It ends at a point: just before the present (Hooks.cpp), or before HDR output or the capture is submitted,
+			// which follow the overlay on the GPU and keep their anchors' tickets.
+			// First Scaleform's displays: each display segment is a tap and an instance of the Scaleform client (instances 0 to 7, all declared,
+			// the draws' counts latched in its run gate); its draw list is a frame input recorded in the late batch. (A Bink frame's clear of the
+			// main depth comes before its Begin and has no reader: dropped, Engine/Skeleton.)
+			// The Present anchor's clients: a Bink movie's tiles, queued by the movie's tick and drawn from the run's slot in the late batch,
+			// and the GPU load diagnostic. The swap chain's Present hook taps it after the displays and before the overlay, as the engine
+			// draws them.
 			{ Segment::DeclaredUi,
-				{ { { Anchor::Interface, { nullptr, nullptr }, Segment::Count, true, false, true },
+				{ { { .anchor = Anchor::Interface, .firstInstance = 0, .instanceCount = 8 },
 					{ Anchor::Present },
 					{ Anchor::Overlay },
-					{ Anchor::Count, { nullptr, nullptr }, Segment::Count, false, true } } },
+					{ Anchor::Count, {}, Segment::Count, false, true } } },
 				4,
 				{ "CS stage: UI", "CS stage: UI inputs", "FrameSegments::Ui / ", "cs.segment.ui" } },
+			// The menu UI stage: the loading screen, the main menu and a menu over a frozen world (frame sequence census). The engine draws,
+			// in this order: the frozen frame's composite (Main::Render; a menu over a frozen world only), the frame's first clears, displays,
+			// the shadow map's and the scene's clears, the scene's depth (Drawcall Limit Fix's menu depth batch), the shadow mask, the depth
+			// copy and the kMAIN copy, the scene's colour, its composite (UI3DSceneManager::Render's end-of-frame call, ImageSpace's
+			// MenuSteps.inl), the main depth's clear again, more displays, the present's clients and the overlay.
+			// - Clears are passes at three places, each a client of the frame and shadow clear groups (Engine/Skeleton): the stage's start,
+			//   the scene's start and after the composite. The engine clears the main depth three times a frame (for the displays' masks
+			//   before the scene, for the scene's depth, for the displays' masks after it) and kMAIN twice; the engine's call stages each
+			//   clear into the place it comes at.
+			// - The displays before the scene are instances 8 to 15 of the Scaleform client; once a later step tapped, the displays are
+			//   instances 0 to 7, after the scene.
+			// - The scene's draw lists and the composite's constants are frame inputs, recorded in the stage's late batch.
+			// It ends at a point, as the UI stage does.
+			{ Segment::DeclaredMenuUi,
+				{ { { Anchor::ImageSpace, { "cs.engine.imagespace.frozen" } },
+					{ Anchor::EngineFrameClear, { "cs.engine.skeleton.frame@menu-start", "cs.engine.skeleton.shadow@menu-start" }, Segment::Count, true },
+					{ .anchor = Anchor::Interface, .untilLater = true, .firstInstance = 8, .instanceCount = 8 },
+					{ Anchor::EngineFrameClear, { "cs.engine.skeleton.frame@menu-scene", "cs.engine.skeleton.shadow@menu-scene" }, Segment::Count, true },
+					{ Anchor::EngineDraws, { "cs.menu-scenes.menu-depth" } },
+					{ Anchor::EngineDraws, { "cs.shadow-mask.menu" } },
+					{ Anchor::EngineDepthCopy, { "cs.engine.skeleton.depth-copy" } },
+					{ Anchor::EngineCopy, {}, Segment::Count, true },
+					{ Anchor::EngineDraws, { "cs.menu-scenes.menu-colour", "cs.menu-scenes.local-map*" } },
+					{ Anchor::ImageSpace, { "cs.engine.imagespace.menu" } },
+					{ Anchor::EngineFrameClear, { "cs.engine.skeleton.frame@menu-after", "cs.engine.skeleton.shadow@menu-after" }, Segment::Count, true },
+					{ .anchor = Anchor::Interface, .firstInstance = 0, .instanceCount = 8 },
+					{ Anchor::Present },
+					{ Anchor::Overlay },
+					{ Anchor::Count, {}, Segment::Count, false, true } } },
+				15,
+				{ "CS stage: menu UI", "CS stage: menu UI inputs", "FrameSegments::MenuUi / ", "cs.segment.menu-ui" } },
 		} };
 
 		/** @brief The anchors whose every client a declared segment holds, a bit each: they have no epoch of their own. */
@@ -446,27 +484,33 @@ namespace FrameAnchors
 				return false;
 			if (!a_step.clients[0])
 				return true;
-			return std::ranges::any_of(a_step.clients, [&](const char* a_id) { return a_id && a_client.id == a_id; });
+			return std::ranges::any_of(a_step.clients, [&](const char* a_id) {
+				if (!a_id)
+					return false;
+				const std::string_view name(a_id);
+				if (!name.empty() && name.back() == '*')
+					return a_client.id.starts_with(name.substr(0, name.size() - 1));
+				return a_client.id == name;
+			});
 		}
 
-		/** @brief Whether a declared segment has a displayKindsOnly step: its description differs between those kinds and the others. */
-		constexpr bool HasKindStep(std::uint32_t a_declared)
+		/**
+		 * @brief Whether a stage's schedules are kept current in frames whose recipe lacks it: the UI stages. A frame-kind switch then finds
+		 * the stage's recordings of its description ready, and no display is left out at the switch.
+		 */
+		constexpr bool KeptAhead(std::uint32_t a_declared)
 		{
-			for (std::uint32_t k = 0; k < kDeclaredInfo[a_declared].stepCount; ++k)
-				if (kDeclaredInfo[a_declared].steps[k].displayKindsOnly)
-					return true;
-			return false;
+			return kDeclaredInfo[a_declared].segment == Segment::DeclaredUi || kDeclaredInfo[a_declared].segment == Segment::DeclaredMenuUi;
 		}
 
-		/** @brief Whether the UI stage draws the displays in this frame's kind (Recipes::UiDrawsDisplays): displayKindsOnly steps are held then. */
-		bool FrameDrawsDisplays()
+		/** @brief Whether a step's client a_client has instances this step makes: its range, or every instance from its first. */
+		std::pair<std::uint32_t, std::uint32_t> StepInstances(const Step& a_step, const ClientDesc& a_client)
 		{
-			const auto& frame = RenderGraph::Frame::Driver::Current();
-			return RenderGraph::Frame::Recipes::UiDrawsDisplays(frame.kind, frame.capture);
+			const std::uint32_t max = std::min<std::uint32_t>(a_client.maxInstances, 255);
+			const std::uint32_t first = std::min<std::uint32_t>(a_step.firstInstance, max);
+			const std::uint32_t count = a_step.instanceCount ? std::min<std::uint32_t>(a_step.instanceCount, max - first) : max - first;
+			return { first, count };
 		}
-
-		/** @brief Whether a step takes its anchor's runs in this frame's kind (a displayKindsOnly step only where the UI stage draws the displays). */
-		bool StepInKind(const Step& a_step) { return !a_step.displayKindsOnly || FrameDrawsDisplays(); }
 
 		/** @brief Whether a client of a built snapshot is a_desc's registration: the same desc, or the same id for a matchesById client. */
 		bool SameClient(const std::shared_ptr<const ClientDesc>& a_built, const std::shared_ptr<const ClientDesc>& a_desc)
@@ -917,7 +961,6 @@ namespace FrameAnchors
 			// published before it lags until the new recording is ready.
 			std::array<bool, kDeclared> frameVersionsCurrent{};
 			bool inBegin = false;  // BeginFrame is choosing the schedules: a recording asked for outside it is a mid-frame re-record
-			bool describingDisplays = false;  // the frame BeginFrame describes is of a kind whose displays the UI stage draws (displayKindsOnly steps on)
 			std::array<std::uint64_t, kDeclared> endedFrame{};
 			// Each segment's taps of each step in its held run so far: the next tap of a step is that instance (TapInstance). Reset
 			// when the frame's first tap takes the ticket.
@@ -1024,15 +1067,24 @@ namespace FrameAnchors
 			return kDeclared;
 		}
 
-		/** @brief The declared segment whose epoch holds anchor a_index's passes, or kDeclared when the anchor has its own epoch. */
+		/**
+		 * @brief The declared segment whose epoch holds anchor a_index's passes, or kDeclared when the anchor has its own epoch. Two stages may
+		 * hold an anchor wholly (the UI and menu UI stages: Interface, Present, Overlay): the one in this frame's recipe, else the first.
+		 */
 		std::uint32_t DeclaredOfAnchor(const State& a_state, std::uint32_t a_index)
 		{
 			if (!(a_state.declaredMembers >> a_index & 1u))
 				return kDeclared;
+			const auto& frame = RenderGraph::Frame::Driver::Current();
+			std::uint32_t first = kDeclared;
 			for (std::uint32_t d = 0; d < kDeclared; ++d)
-				if (a_state.declaredEpochs[d] && (WholeMembers(d) >> a_index & 1u))
-					return d;
-			return kDeclared;
+				if (a_state.declaredEpochs[d] && (WholeMembers(d) >> a_index & 1u)) {
+					if (RenderGraph::Frame::Recipes::KindHas(frame.kind, frame.capture, static_cast<RenderGraph::Frame::SegmentId>(d)))
+						return d;
+					if (first == kDeclared)
+						first = d;
+				}
+			return first;
 		}
 
 		/**
@@ -1059,10 +1111,11 @@ namespace FrameAnchors
 			for (std::uint32_t i = 0; i < kAnchors; ++i) {
 				if (!(a_mask >> i & 1u) || !a_state.reserved[i])
 					continue;
-				// A declared segment's member has no epoch of its own: its passes are in the segment's.
-				if (const auto d = DeclaredOfAnchor(a_state, i); d < kDeclared) {
-					if (std::ranges::find(epochs, EpochOfDeclared(d)) == epochs.end())
-						epochs.push_back(EpochOfDeclared(d));
+				// A declared segment's member has no epoch of its own: its passes are in the segments' that hold it.
+				if (a_state.declaredMembers >> i & 1u) {
+					for (std::uint32_t d = 0; d < kDeclared; ++d)
+						if (a_state.declaredEpochs[d] && (StepAnchors(d) >> i & 1u) && std::ranges::find(epochs, EpochOfDeclared(d)) == epochs.end())
+							epochs.push_back(EpochOfDeclared(d));
 					continue;
 				}
 				epochs.push_back(EpochOfAnchor(static_cast<Anchor>(i)));
@@ -1530,6 +1583,15 @@ namespace FrameAnchors
 				};
 				// The build's key: a pass it leaves out is not handed to ORG at all.
 				const BuildKey* const buildKey = key.get();
+				const auto firstPass = a_out.size();
+				// The stage's pass count, once per build (the per-kind check: a frame kind's stage carries only its own passes).
+				struct CountLine
+				{
+					const std::vector<org::RenderGraph::ExternalPassDesc>& out;
+					std::size_t first;
+					const char* label;
+					~CountLine() { logger::info("[ORG] frame segments: a build of the {} holds {} passes", label, out.size() - first); }
+				} countLine{ a_out, firstPass, info.names.label };
 				for (std::uint32_t k = 0; k < info.stepCount; ++k) {
 					const auto& step = info.steps[k];
 					if (step.foreign != Segment::Count) {
@@ -1610,19 +1672,20 @@ namespace FrameAnchors
 						// A client with instances has its pass made once per instance. Instance k is off in a recording whose
 						// description declares k instances or fewer.
 						const bool instanced = scheduled.client->maxInstances > 1 && scheduled.pass->makeInstance;
-						const std::uint32_t count = instanced ? std::min<std::uint32_t>(scheduled.client->maxInstances, 255) : 1;
+						// The step's instances of the client: its range (StepInstances).
+						const auto [first, count] = instanced ? StepInstances(step, *scheduled.client) : std::pair<std::uint32_t, std::uint32_t>{ 0, 1 };
 						if (instanced && scheduled.client->instanceMajor) {
-							// Every pass of instance 0 at this step, then of instance 1, ...: the taps' order across the client's passes.
+							// Every pass of the step's first instance, then of the next, ...: the taps' order across the client's passes.
 							if (std::ranges::find(major, scheduled.client.get()) != major.end())
 								continue;
 							major.push_back(scheduled.client.get());
-							for (std::uint32_t instance = 0; instance < count; ++instance)
+							for (std::uint32_t instance = first; instance < first + count; ++instance)
 								for (const auto& other : snapshot->passes)
 									if (other.client == scheduled.client && other.pass->anchor == step.anchor && other.pass->makeInstance)
 										emit(other, instance, true);
 							continue;
 						}
-						for (std::uint32_t instance = 0; instance < count; ++instance)
+						for (std::uint32_t instance = first; instance < first + count; ++instance)
 							emit(scheduled, instance, instanced);
 					}
 				}
@@ -2877,8 +2940,10 @@ namespace FrameAnchors
 			(void)TapPoint(static_cast<std::uint32_t>(Segment::DeclaredDeferred));
 		// The UI stage commits just before the GPU work that follows the overlay: HDR output, the capture, or the present (Hooks.cpp).
 		if (a_segment != UINT32_MAX && state.host && SegmentsOn() && IsRenderOwner() &&
-			(a_segment == static_cast<std::uint32_t>(Segment::AnchorHDROutput) || a_segment == static_cast<std::uint32_t>(Segment::AnchorCapture)))
+			(a_segment == static_cast<std::uint32_t>(Segment::AnchorHDROutput) || a_segment == static_cast<std::uint32_t>(Segment::AnchorCapture))) {
 			(void)TapPoint(static_cast<std::uint32_t>(Segment::DeclaredUi));
+			(void)TapPoint(static_cast<std::uint32_t>(Segment::DeclaredMenuUi));
+		}
 		// A declared segment holding its ticket: other GPU work submitted now runs ahead of the segment's work, which the end tap
 		// submits. Counted by why, for the census; its first lines are logged.
 		if (state.stagesOpen.load(std::memory_order_acquire) && IsRenderOwner()) {
@@ -2996,11 +3061,7 @@ namespace FrameAnchors
 				}
 			const auto& info = kDeclaredInfo[a_declared];
 			for (std::size_t i = 0; i < clients.size() && i < RenderGraph::Frame::kSegmentClients; ++i) {
-				// A client held only at displayKindsOnly steps is off in the other kinds: the anchor's own epoch takes its runs there.
-				bool inKind = false;
-				for (std::uint32_t k = 0; k < info.stepCount; ++k)
-					inKind = inKind || (StepHolds(info.steps[k], *clients[i]) && (!info.steps[k].displayKindsOnly || a_state.describingDisplays));
-				if (inKind && (!clients[i]->declared || clients[i]->declared()))
+				if (!clients[i]->declared || clients[i]->declared())
 					fields.clientsOn |= 1u << i;
 				if (clients[i]->maxInstances > 1)
 					fields.instances[i] = static_cast<std::uint8_t>(std::min<std::uint32_t>(
@@ -3233,15 +3294,37 @@ namespace FrameAnchors
 			SegmentFields wanted = DescribeDeclared(a_state, a_declared, a_world);
 			a_state.frameWanted[a_declared] = DescribeDeclared(a_state, a_declared, a_world, false);
 			const bool keyLags = !(a_state.frameWanted[a_declared] == wanted);
-			// A stage with displayKindsOnly steps has a description per kind group (the UI stage draws the displays or not): the other one's
-			// recordings are asked for ahead too, so a kind switch finds them ready and the stage does not lag at the switch.
-			if (a_world && wanted.graph && !stillStaged && HasKindStep(a_declared)) {
-				a_state.describingDisplays = !a_state.describingDisplays;
-				const SegmentFields other = DescribeDeclared(a_state, a_declared, a_world);
-				a_state.describingDisplays = !a_state.describingDisplays;
-				if (other.graph && !(other == wanted))
-					for (std::uint32_t s = 0; s < RenderGraphRuntime::kGameFramesInFlight; ++s)
-						(void)RequestDeclared(a_state, a_declared, other, s, a_frame.frame, " (the other frame kinds' description, ahead)");
+			// A stage outside its kinds' frames: the frame does not declare it, but its schedules are recorded ahead, so the frame-kind switch to its
+			// kinds finds a schedule in every frame slot and no frame has the stage absent. A UI stage (KeptAhead) keeps every slot on the
+			// description its frames would have (no display is left out at the switch); any other stage only gets a first schedule for a slot
+			// that has none (its first frames lag at worst, they are never blank).
+			if (!a_world && host.StagedGeneration(epoch) == 0) {
+				const SegmentFields ahead = DescribeDeclared(a_state, a_declared, true);
+				for (std::uint32_t s = 0; s < RenderGraphRuntime::kGameFramesInFlight && ahead.graph; ++s) {
+					auto& kept = a_state.schedule[a_declared][s];
+					if (!KeptAhead(a_declared) && kept.recording && host.EpochRecordingCurrent(*kept.recording))
+						continue;
+					// The description is this frame's: its parity fields (the slot-parity variants) fit only the slots of this frame's parity.
+					if (s % 2 != a_frame.parity)
+						continue;
+					if (kept.recording && kept.fields == ahead && host.EpochRecordingCurrent(*kept.recording)) {
+						// A version replaced since: the next frame's description names the new one, and its recording replaces this.
+						if (!host.EpochRecordingVersionsCurrent(*kept.recording, s) && kept.fields.versions == recordings.versionGeneration)
+							++recordings.versionGeneration;
+						continue;
+					}
+					const auto entry = RequestDeclared(a_state, a_declared, ahead, s, a_frame.frame, " (ahead, for the next frame of its kinds)");
+					std::shared_ptr<const org::GraphHost::EpochRecording> ready;
+					{
+						const std::lock_guard lock(recordings.mutex);
+						if (entry->done)
+							ready = entry->recording;
+					}
+					if (ready && host.EpochRecordingCurrent(*ready) && host.EpochRecordingVersionsCurrent(*ready, s))
+						kept = { ahead, std::move(ready), a_state.declaredSnapshots[a_declared].load(std::memory_order_acquire) };
+					else if (ready && host.EpochRecordingCurrent(*ready) && ahead.versions == recordings.versionGeneration)
+						++recordings.versionGeneration;
+				}
 			}
 			if (!wanted.declared)
 				return wanted;
@@ -3273,10 +3356,10 @@ namespace FrameAnchors
 					                                     fmt::format("the slot's first schedule on build {}", wanted.graph);
 					active = { wanted, std::move(ready), a_state.declaredSnapshots[a_declared].load(std::memory_order_acquire) };
 					Driver::NoteSwitch(segment, a_frame.frame, slot, a_frame.frame - a_state.waitFrame[a_declared], what);
-					// A stage with displayKindsOnly steps: the other slots switch at this boundary too when their recordings of the description are
-					// ready (a kind switch whose description was recorded ahead), so the next frames do not lag on an older schedule. Not for
-					// other stages: a description that alternates by frame (the post rows' ping-pong) keeps one schedule per slot.
-					for (std::uint32_t s = 0; s < RenderGraphRuntime::kGameFramesInFlight && HasKindStep(a_declared); ++s) {
+					// A UI stage: the other slots switch at this boundary too when their recordings of the description are ready, so the next
+					// frames do not lag on an older schedule. Not for other stages: a description that alternates by frame (the post rows'
+					// ping-pong) keeps one schedule per slot.
+					for (std::uint32_t s = 0; s < RenderGraphRuntime::kGameFramesInFlight && KeptAhead(a_declared); ++s) {
 						auto& other = a_state.schedule[a_declared][s];
 						if (s == slot || (other.recording && other.fields == wanted))
 							continue;
@@ -3343,12 +3426,7 @@ namespace FrameAnchors
 				use.last = now;
 				a_state.describingKey = true;
 				const SegmentFields wanted = DescribeDeclaredFrom(a_state, a_declared, true, snapshot, nullptr, 1, nullptr, false);
-				SegmentFields other{};
-				if (HasKindStep(a_declared)) {
-					a_state.describingDisplays = !a_state.describingDisplays;
-					other = DescribeDeclaredFrom(a_state, a_declared, true, snapshot, nullptr, 1, nullptr, false);
-					a_state.describingDisplays = !a_state.describingDisplays;
-				}
+				const SegmentFields other{};
 				a_state.describingKey = false;
 				if (wanted.graph) {
 					for (std::size_t i = 0; i < clients.size(); ++i) {
@@ -3689,8 +3767,9 @@ namespace FrameAnchors
 			// called.
 			std::vector<std::shared_ptr<const ClientDesc>> committed;
 			bool foreignOn = false;
-			// This tap's instance: the step's earlier taps this frame.
-			const std::uint32_t instance = a_state.stepTaps[a_declared][a_step]++;
+			// This tap's instance: the step's first instance and its earlier taps this frame.
+			const std::uint32_t local = a_state.stepTaps[a_declared][a_step]++;
+			const std::uint32_t instance = step.firstInstance + local;
 			if (a_foreign) {
 				foreignOn = (held.foreignOn >> a_step & 1u) != 0;
 				if (!foreignOn) {
@@ -3722,7 +3801,8 @@ namespace FrameAnchors
 					// The k-th tap of the step writes instance k. A client without instances has one; one with instances has as many
 					// as the description declared.
 					const std::uint32_t declaredInstances = clients[i]->maxInstances > 1 ? held.instances[i] : clients[i]->repeats ? UINT32_MAX : 1u;
-					if (instance >= declaredInstances) {
+					const bool inRange = clients[i]->maxInstances <= 1 || local < StepInstances(step, *clients[i]).second;
+					if (instance >= declaredInstances || !inRange) {
 						if (clients[i]->maxInstances > 1 && comparable && instance < wanted.instances[i])
 							Driver::NoteLaggedWork(segment);
 						else
@@ -3800,11 +3880,35 @@ namespace FrameAnchors
 			return true;
 		}
 
+		/**
+		 * @brief Whether step a_step of a declared segment takes its anchor's taps now: an untilLater step only until a later step of its stage
+		 * tapped this frame. Render owner.
+		 */
+		bool StepTakesTaps(const State& a_state, std::uint32_t a_declared, std::uint32_t a_step)
+		{
+			const auto& info = kDeclaredInfo[a_declared];
+			if (!info.steps[a_step].untilLater || a_state.stagedFrame[a_declared] != Driver::Current().frame)
+				return true;
+			for (std::uint32_t k = a_step + 1; k < info.stepCount; ++k)
+				if (a_state.stepTaps[a_declared][k])
+					return false;
+			return true;
+		}
+
+		/** @brief The step of a declared segment that takes a tap of anchor a_anchor now (StepTakesTaps), the first such; kMaxSteps for none. */
+		std::uint32_t TapStepAt(const State& a_state, std::uint32_t a_declared, Anchor a_anchor)
+		{
+			for (std::uint32_t k = 0; k < kDeclaredInfo[a_declared].stepCount; ++k)
+				if (kDeclaredInfo[a_declared].steps[k].anchor == a_anchor && StepTakesTaps(a_state, a_declared, k))
+					return k;
+			return kMaxSteps;
+		}
+
 		std::pair<std::uint32_t, std::uint32_t> OpenStepAt(const State& a_state, Anchor a_anchor)
 		{
 			for (std::uint32_t d = 0; d < kDeclared; ++d)
-				for (std::uint32_t k = 0; k < kDeclaredInfo[d].stepCount; ++k)
-					if (kDeclaredInfo[d].steps[k].anchor == a_anchor && StepInKind(kDeclaredInfo[d].steps[k]) && WindowOpen(a_state, d))
+				if (WindowOpen(a_state, d))
+					if (const auto k = TapStepAt(a_state, d, a_anchor); k < kMaxSteps)
 						return { d, k };
 			return { kDeclared, kMaxSteps };
 		}
@@ -3850,6 +3954,7 @@ namespace FrameAnchors
 					return on;
 				}
 			case Segment::DeclaredUi:
+			case Segment::DeclaredMenuUi:
 				{
 					static const bool on = !Switches::Equals("CS_ORG_UI_STAGE", "0");
 					return on;
@@ -3985,6 +4090,46 @@ namespace FrameAnchors
 		return false;
 	}
 
+	std::int32_t StagePlace(std::span<const std::string_view> a_ids)
+	{
+		auto& state = Anchors();
+		if (!SegmentsOn() || !state.host || !IsRenderOwner())
+			return -1;
+		auto lock = Guard();
+		const auto named = [&](const Step& a_step) -> std::int32_t {
+			for (const char* id : a_step.clients)
+				if (id)
+					for (std::size_t i = 0; i < a_ids.size(); ++i)
+						if (a_ids[i] == id)
+							return static_cast<std::int32_t>(i);
+			return -1;
+		};
+		for (std::uint32_t d = 0; d < kDeclared; ++d) {
+			if (!WindowOpen(state, d))
+				continue;
+			const auto& info = kDeclaredInfo[d];
+			// The stage's last tapped step this frame (-1: none yet).
+			std::int32_t last = -1;
+			if (state.stagedFrame[d] == Driver::Current().frame)
+				for (std::uint32_t k = 0; k < info.stepCount; ++k)
+					if (state.stepTaps[d][k])
+						last = static_cast<std::int32_t>(k);
+			std::int32_t first = -1, chosen = -1;
+			for (std::uint32_t k = 0; k < info.stepCount; ++k) {
+				const auto id = named(info.steps[k]);
+				if (id < 0)
+					continue;
+				if (first < 0)
+					first = id;
+				if (static_cast<std::int32_t>(k) <= last + 1)
+					chosen = id;
+			}
+			if (first >= 0)
+				return chosen >= 0 ? chosen : first;
+		}
+		return -1;
+	}
+
 	RunResult TapPoint(std::uint32_t a_segment)
 	{
 		const RunDepthScope depth;
@@ -4071,7 +4216,6 @@ namespace FrameAnchors
 		// frame's end.
 		// Each frame kind's recipe lists its CS stages (Recipes::KindHas): the world's every stage, the other kinds the UI stage.
 		state.inBegin = true;
-		state.describingDisplays = RenderGraph::Frame::Recipes::UiDrawsDisplays(a_frame.kind, a_frame.capture);
 		for (std::uint32_t d = 0; d < kDeclared; ++d) {
 			state.frameRecording[d].reset();
 			state.frameBuilt[d].reset();
@@ -4125,8 +4269,14 @@ namespace FrameAnchors
 			clients.push_back({ client.desc, client.serial, active });
 		}
 		// Declared segments: an anchor a segment holds wholly is one of its taps whenever it fires.
-		if (const auto declared = DeclaredOfAnchor(state, index); declared < kDeclared)
-			return TapDeclared(state, a_point, declared, StepAt(declared, a_point.anchor), clients);
+		if (const auto declared = DeclaredOfAnchor(state, index); declared < kDeclared) {
+			const auto step = TapStepAt(state, declared, a_point.anchor);
+			if (step >= kMaxSteps) {
+				Driver::NoteTapError(Driver::TapError::Repeated, static_cast<SegmentId>(declared), fmt::format("the {} tap fired after its steps took their last tap", kInfo[index].name));
+				return { RunStatus::Idle };
+			}
+			return TapDeclared(state, a_point, declared, step, clients);
+		}
 		// A shared anchor: the clients a segment names commit into it while its window is open. The others run the anchor's own epoch.
 		// A segment-only client (ClientDesc::segmentOnly) has no passes there: with work outside every open window it draws nothing.
 		const auto dropSegmentOnly = [&](std::vector<RunClient>& a_clients, std::string_view a_why) {
@@ -4153,7 +4303,7 @@ namespace FrameAnchors
 					// tapped when one of them has work.
 					for (std::uint32_t k = first; k < kDeclaredInfo[declared].stepCount; ++k) {
 						const auto& stepInfo = kDeclaredInfo[declared].steps[k];
-						if (stepInfo.anchor != a_point.anchor || !StepInKind(stepInfo))
+						if (stepInfo.anchor != a_point.anchor || !StepTakesTaps(state, declared, k))
 							continue;
 						std::vector<RunClient> stepMembers;
 						for (auto it = others.begin(); it != others.end();) {
@@ -4390,7 +4540,19 @@ namespace FrameAnchors
 		StageHold hold;
 		if (!SegmentsOn() || !state.host || !IsRenderOwner())
 			return hold;
-		const auto [declared, step] = OpenStepAt(state, a_anchor);
+		// The open stage's step at the anchor that takes taps now and holds the client (a shared anchor has a step per client group).
+		const auto* registered = FindClient(state, a_id);
+		std::uint32_t declared = kDeclared, step = kMaxSteps;
+		for (std::uint32_t d = 0; d < kDeclared && declared == kDeclared; ++d) {
+			if (!WindowOpen(state, d))
+				continue;
+			for (std::uint32_t k = 0; k < kDeclaredInfo[d].stepCount; ++k)
+				if (kDeclaredInfo[d].steps[k].anchor == a_anchor && StepTakesTaps(state, d, k) && registered && StepHolds(kDeclaredInfo[d].steps[k], *registered->desc)) {
+					declared = d;
+					step = k;
+					break;
+				}
+		}
 		if (declared >= kDeclared)
 			return hold;
 		hold.held = true;
@@ -4439,72 +4601,82 @@ namespace FrameAnchors
 		return left == 0;
 	}
 
+	namespace
+	{
+		/**
+		 * @brief PrimeStages for one UI stage (a_segment): its description now, recorded for every frame slot on the host's thread while setup
+		 * waits, installed as each slot's schedule.
+		 */
+		void PrimeStage(State& state, Segment a_segment, std::string_view a_caller)
+		{
+			using namespace std::chrono_literals;
+			std::uint32_t ui = kDeclared;
+			RenderGraph::Frame::SegmentFields wanted{};
+			std::shared_ptr<const Snapshot> built;
+			std::array<std::shared_ptr<SegmentRecording>, RenderGraphRuntime::kGameFramesInFlight> entries{};
+			{
+				auto lock = Guard();
+				if (!RenderGraphRuntime::Get().IsActive())
+					return;
+				for (std::uint32_t d = 0; d < kDeclared; ++d)
+					if (state.declaredEpochs[d] && kDeclaredInfo[d].segment == a_segment)
+						ui = d;
+				if (ui == kDeclared || state.host->StagedGeneration(EpochOfDeclared(ui)) != 0)
+					return;
+				state.inBegin = true;
+				wanted = DescribeDeclared(state, ui, true);
+				built = state.declaredSnapshots[ui].load(std::memory_order_acquire);
+				if (wanted.graph)
+					for (std::uint32_t s = 0; s < RenderGraphRuntime::kGameFramesInFlight; ++s)
+						entries[s] = RequestDeclared(state, ui, wanted, s, 0, fmt::format(" (the first frame's, at {})", a_caller));
+				state.inBegin = false;
+			}
+			if (!wanted.graph)
+				return;
+			// At setup, before the first frame: the host's thread records them; the first Begin finds them done and switches them in, so the
+			// first frame draws the stage (the session's first movie frame among it). The render thread never waits for a recording in a frame.
+			auto& recordings = state.declaredRecordings[ui];
+			const auto deadline = std::chrono::steady_clock::now() + 10s;
+			bool done = false;
+			while (!done && std::chrono::steady_clock::now() < deadline) {
+				{
+					const std::lock_guard lock(recordings.mutex);
+					done = std::ranges::all_of(entries, [](const auto& a_entry) { return a_entry && a_entry->done; });
+				}
+				if (!done)
+					std::this_thread::sleep_for(1ms);
+			}
+			auto lock = Guard();
+			std::uint32_t ready = 0;
+			for (std::uint32_t s = 0; s < RenderGraphRuntime::kGameFramesInFlight; ++s) {
+				std::shared_ptr<const org::GraphHost::EpochRecording> recording;
+				{
+					const std::lock_guard recordingsLock(recordings.mutex);
+					if (entries[s]->done)
+						recording = entries[s]->recording;
+				}
+				if (recording && state.host->EpochRecordingCurrent(*recording)) {
+					state.schedule[ui][s] = State::Scheduled{ wanted, std::move(recording), built };
+					++ready;
+				}
+			}
+			if (ready == RenderGraphRuntime::kGameFramesInFlight)
+				logger::info("[ORG] frame segments: the {}'s first schedule is recorded at {} for every frame slot (build {}); the first frame of its kinds draws it",
+					kDeclaredInfo[ui].names.label, a_caller, wanted.graph);
+			else
+				logger::error("[ORG] frame segments: the {}'s first schedule was recorded for {} of {} frame slots at {}; the others switch in at their first Begin",
+					kDeclaredInfo[ui].names.label, ready, RenderGraphRuntime::kGameFramesInFlight, a_caller);
+		}
+	}
+
 	void PrimeStages(std::string_view a_caller)
 	{
 		auto& state = Anchors();
 		if (!SegmentsOn() || !state.host || !IsRenderOwner())
 			return;
-		using namespace std::chrono_literals;
-		std::uint32_t ui = kDeclared;
-		RenderGraph::Frame::SegmentFields wanted{};
-		std::shared_ptr<const Snapshot> built;
-		std::array<std::shared_ptr<SegmentRecording>, RenderGraphRuntime::kGameFramesInFlight> entries{};
-		{
-			auto lock = Guard();
-			if (!RenderGraphRuntime::Get().IsActive())
-				return;
-			for (std::uint32_t d = 0; d < kDeclared; ++d)
-				if (state.declaredEpochs[d] && kDeclaredInfo[d].segment == Segment::DeclaredUi)
-					ui = d;
-			if (ui == kDeclared || state.host->StagedGeneration(EpochOfDeclared(ui)) != 0)
-				return;
-			// The session's first frames are a Bink movie's or the main menu's: kinds whose displays the UI stage does not draw.
-			const bool displays = state.describingDisplays;
-			state.describingDisplays = false;
-			state.inBegin = true;
-			wanted = DescribeDeclared(state, ui, true);
-			built = state.declaredSnapshots[ui].load(std::memory_order_acquire);
-			if (wanted.graph)
-				for (std::uint32_t s = 0; s < RenderGraphRuntime::kGameFramesInFlight; ++s)
-					entries[s] = RequestDeclared(state, ui, wanted, s, 0, fmt::format(" (the first frame's, at {})", a_caller));
-			state.inBegin = false;
-			state.describingDisplays = displays;
-		}
-		if (!wanted.graph)
-			return;
-		// At setup, before the first frame: the host's thread records them; the first Begin finds them done and switches them in, so the
-		// first frame draws the stage (the session's first movie frame among it). The render thread never waits for a recording in a frame.
-		auto& recordings = state.declaredRecordings[ui];
-		const auto deadline = std::chrono::steady_clock::now() + 10s;
-		bool done = false;
-		while (!done && std::chrono::steady_clock::now() < deadline) {
-			{
-				const std::lock_guard lock(recordings.mutex);
-				done = std::ranges::all_of(entries, [](const auto& a_entry) { return a_entry && a_entry->done; });
-			}
-			if (!done)
-				std::this_thread::sleep_for(1ms);
-		}
-		auto lock = Guard();
-		std::uint32_t ready = 0;
-		for (std::uint32_t s = 0; s < RenderGraphRuntime::kGameFramesInFlight; ++s) {
-			std::shared_ptr<const org::GraphHost::EpochRecording> recording;
-			{
-				const std::lock_guard recordingsLock(recordings.mutex);
-				if (entries[s]->done)
-					recording = entries[s]->recording;
-			}
-			if (recording && state.host->EpochRecordingCurrent(*recording)) {
-				state.schedule[ui][s] = State::Scheduled{ wanted, std::move(recording), built };
-				++ready;
-			}
-		}
-		if (ready == RenderGraphRuntime::kGameFramesInFlight)
-			logger::info("[ORG] frame segments: the {}'s first schedule is recorded at {} for every frame slot (build {}); the first frame draws it", kDeclaredInfo[ui].names.label,
-				a_caller, wanted.graph);
-		else
-			logger::error("[ORG] frame segments: the {}'s first schedule was recorded for {} of {} frame slots at {}; the others switch in at their first Begin",
-				kDeclaredInfo[ui].names.label, ready, RenderGraphRuntime::kGameFramesInFlight, a_caller);
+		// The session's first frames are a Bink movie's (the UI stage), then the main menu's (the menu UI stage): both are ready before them.
+		PrimeStage(state, Segment::DeclaredUi, a_caller);
+		PrimeStage(state, Segment::DeclaredMenuUi, a_caller);
 	}
 
 	namespace

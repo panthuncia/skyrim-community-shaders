@@ -17,6 +17,7 @@ bool RenderGraph::Engine::Skeleton::Requested()
 #	include "Globals.h"
 #	include "RenderGraph/AnchorPasses.h"
 #	include "RenderGraph/BuildManager.h"
+#	include "RenderGraph/DxvkOrgInterop.h"
 #	include "RenderGraph/Frame/FrameDriver.h"
 #	include "RenderGraph/Frame/PostChain.h"
 #	include "RenderGraph/Engine/Native/Native.h"
@@ -28,6 +29,7 @@ bool RenderGraph::Engine::Skeleton::Requested()
 #	include "RenderGraph/RunGate.h"
 #	include "RenderGraph/ShaderBindings.h"
 #	include "RenderGraph/Switches.h"
+#	include "Utils/Logging.h"
 
 #	include <OpenRenderGraph/GraphHost.h>
 #	include <Render/LatchBlock.h>
@@ -156,6 +158,22 @@ namespace RenderGraph::Engine::Skeleton
 		} };
 
 		std::size_t HostIndex(Host a_host) { return static_cast<std::size_t>(a_host); }
+
+		/**
+		 * @brief The places in the menu UI stage where the clears of the loading screen's and the menus' frames run (org-native-frame-graph.md,
+		 * "The menu UI stage"): the stage's start, the scene's start and after the scene's composite. Each place has a client per group with a
+		 * pass per view it clears, and gate entries of its own (place * entries + entry): the stage clears the main depth at all three places
+		 * in one frame. The engine's call stages its clear into the place FrameAnchors::StagePlace names (the place after the stage's last tap).
+		 */
+		enum class Place : std::uint8_t
+		{
+			MenuStart,
+			MenuScene,
+			MenuAfter,
+			Count
+		};
+		constexpr std::size_t kPlaces = static_cast<std::size_t>(Place::Count);
+		constexpr std::array<const char*, kPlaces> kPlaceNames{ "menu-start", "menu-scene", "menu-after" };
 
 		/**
 		 * @brief Whether a host is an anchor a CS stage holds (pre-main's EngineDraws and Prepass steps, the deferred stage's DeferredPasses
@@ -365,6 +383,14 @@ namespace RenderGraph::Engine::Skeleton
 			bool announced = false;   // the first clear on the graph was logged
 			std::uint64_t taken = 0, replayed = 0;
 			std::uint64_t dropped = 0;  // world frames' clears a stage's load operations replace (the reflection faces)
+			// The UI stages' places (Place): each place's passes by view, their gate and colour latch (kPlaces * entries entries), whether
+			// each place's client is registered, and the group's own entry count.
+			std::array<std::map<Target, std::shared_ptr<const ClearSpec>>, kPlaces> placeSpecs;
+			std::shared_ptr<RunGate> placeGate;
+			std::shared_ptr<org::LatchBlock> placeColours;
+			std::array<bool, kPlaces> placeRegistered{};
+			std::uint32_t entries = 0;
+			std::uint64_t placed = 0;  // clears staged into a place
 		};
 
 		struct CopyState
@@ -997,6 +1023,169 @@ namespace RenderGraph::Engine::Skeleton
 				logger::info("[ORG] engine skeleton: a world frame's {} clears run in their hosts' epochs (views by host: {})", kGroupNames[index], summary);
 		}
 
+		std::string PlaceClientId(std::size_t a_group, std::size_t a_place) { return fmt::format("{}@{}", kGroupIds[a_group], kPlaceNames[a_place]); }
+
+		/**
+		 * @brief Whether a place clears a view: what the loading screen's and the main menu's frames clear (frame sequence census): kMAIN, the
+		 * motion vectors, both normals targets, the shadow mask, the main depth, and the shadow maps' slices. Any other clear in those frames
+		 * keeps its group anchor's ticket.
+		 */
+		bool PlaceClears(Place, const Target& a_target)
+		{
+			if (a_target.kind == Kind::Depth)
+				return a_target.index == DepthTarget::kMAIN || a_target.index == DepthTarget::kSHADOWMAPS;
+			if (a_target.kind != Kind::Colour)
+				return false;
+			switch (a_target.index) {
+			case ColourTarget::kMAIN:
+			case ColourTarget::kMOTION_VECTOR:
+			case ColourTarget::kNORMAL_TAAMASK_SSRMASK:
+			case ColourTarget::kNORMAL_TAAMASK_SSRMASK_SWAP:
+			case ColourTarget::kSHADOW_MASK:
+				return true;
+			default:
+				return false;
+			}
+		}
+
+		/** @brief The place stages' anchor and its use: CS's stages hold the UI stages' clear steps (native mode with hosting). */
+		bool PlacesOn()
+		{
+			return HostingOn() && FrameAnchors::HasEpoch(Anchor::EngineFrameClear);
+		}
+
+		/**
+		 * @brief The group's place clients, made from its registered passes: a copy of each view's spec per place that clears it, its draws on
+		 * the place's own gate entries. Segment-only: the group anchor's own graph leaves them out.
+		 */
+		void RegisterPlaces(Group a_group)
+		{
+			auto& group = GroupOf(a_group);
+			const auto index = IndexOf(a_group);
+			for (auto& specs : group.placeSpecs)
+				specs.clear();
+			const auto unregisterAll = [&] {
+				for (std::size_t place = 0; place < kPlaces; ++place)
+					if (std::exchange(group.placeRegistered[place], false))
+						FrameAnchors::Unregister(PlaceClientId(index, place));
+			};
+			if (!PlacesOn() || !group.entries) {
+				unregisterAll();
+				return;
+			}
+			group.placeGate = RunGate::Create(fmt::format("{}.places", kGroupIds[index]), group.entries * static_cast<std::uint32_t>(kPlaces));
+			auto* host = RenderGraphRuntime::Get().Host();
+			group.placeColours = host ? org::LatchBlock::Create(fmt::format("{}.places.colours", kGroupIds[index]), group.entries * static_cast<std::uint32_t>(kPlaces) * RunGate::kEntryBytes) : nullptr;
+			if (!group.placeGate || !group.placeColours) {
+				unregisterAll();
+				logger::warn("[ORG] engine skeleton: the {} clears' places have no run gate; those frames' clears keep the {} anchor's ticket", kGroupNames[index],
+					FrameAnchors::Name(kGroupAnchors[index]));
+				return;
+			}
+			std::string summary;
+			for (std::size_t place = 0; place < kPlaces; ++place) {
+				FrameAnchors::ClientDesc client{};
+				client.id = PlaceClientId(index, place);
+				for (const auto& [target, spec] : group.specs) {
+					if (!PlaceClears(static_cast<Place>(place), target))
+						continue;
+					auto placed = std::make_shared<ClearSpec>(*spec);
+					placed->name = fmt::format("{}@{}", spec->name, kPlaceNames[place]);
+					placed->gate = group.placeGate;
+					placed->colours = group.placeColours;
+					for (auto& draw : placed->draws)
+						draw.entry += static_cast<std::uint32_t>(place) * group.entries;
+					std::shared_ptr<const ClearSpec> pass = placed;
+					client.passes.push_back({ .name = placed->name,
+						.anchor = Anchor::EngineFrameClear,
+						.order = static_cast<std::int32_t>(placed->draws.front().entry),
+						.kind = FrameAnchors::PassKind::Render,
+						.make = [pass] { return std::static_pointer_cast<org::RenderPass>(std::make_shared<ClearPass>(pass)); },
+						// The engine's call stages its entry before the stage commits: recorded at execution with the CPU's gate answer; a
+						// clear not asked for skips and folds its barriers.
+						.atExecution = true,
+						.gated = true });
+					group.placeSpecs[place].emplace(target, std::move(pass));
+				}
+				if (client.passes.empty()) {
+					if (std::exchange(group.placeRegistered[place], false))
+						FrameAnchors::Unregister(client.id);
+					continue;
+				}
+				// A pass of a CS stage: the engine's call stages its entry and colour (Take); the step has no tap.
+				client.active = [] { return false; };
+				client.segmentOnly = true;
+				client.gates = { group.placeGate };
+				const auto views = client.passes.size();
+				group.placeRegistered[place] = FrameAnchors::Register(std::move(client));
+				if (group.placeRegistered[place])
+					summary += fmt::format("{}{} {}", summary.empty() ? "" : ", ", kPlaceNames[place], views);
+				else
+					group.placeSpecs[place].clear();
+			}
+			if (!summary.empty())
+				logger::info("[ORG] engine skeleton: the loading screen's and the menus' {} clears run in the menu UI stage (views by place: {})", kGroupNames[index], summary);
+		}
+
+		/**
+		 * @brief A clear of a frame kind whose UI stage holds the group's places: staged into the place FrameAnchors::StagePlace names, on the
+		 * place's own gate entry. False when no open stage has a place for it (its group anchor's ticket takes it).
+		 */
+		bool TakeIntoPlace(Group a_group, const Target& a_target, const Pending& a_pending)
+		{
+			auto& group = GroupOf(a_group);
+			const auto index = IndexOf(a_group);
+			// Why a clear outside a world frame kept its group anchor's ticket, once per reason.
+			static Util::ReasonLog s_kept("[ORG] engine skeleton: a clear outside a world frame keeps its group anchor's ticket");
+			if (!group.placeGate)
+				return s_kept.Report("the group has no places"), false;
+			std::array<std::string, kPlaces> ids;
+			std::array<std::string_view, kPlaces> views;
+			for (std::size_t place = 0; place < kPlaces; ++place) {
+				ids[place] = PlaceClientId(index, place);
+				views[place] = ids[place];
+			}
+			const auto place = FrameAnchors::StagePlace(views);
+			if (place < 0)
+				return s_kept.Report(fmt::format("{}: no open stage has a place for the {} clears", RenderGraph::Frame::KindName(RenderGraph::Frame::Driver::Current().kind), kGroupNames[index])), false;
+			if (!group.placeRegistered[static_cast<std::size_t>(place)])
+				return s_kept.Report(fmt::format("the {} place is not registered", kPlaceNames[static_cast<std::size_t>(place)])), false;
+			const auto& specs = group.placeSpecs[static_cast<std::size_t>(place)];
+			if (!specs.contains(a_target))
+				return s_kept.Report(fmt::format("the {} place does not clear {}", kPlaceNames[static_cast<std::size_t>(place)], TargetName(a_target))), false;
+			const std::uint32_t entry = static_cast<std::uint32_t>(place) * group.entries + a_pending.gateEntry;
+			const bool staged = FrameAnchors::StageInputs(ids[static_cast<std::size_t>(place)], [&] {
+				const org::RunRef run = RunGate::Current();
+				if (!a_pending.depth)
+					group.placeColours->WriteValue(run, entry * RunGate::kEntryBytes, a_pending.colour);
+				group.placeGate->OpenDraw(run, entry);
+			});
+			if (!staged)
+				return s_kept.Report(fmt::format("the stage's schedule does not have the {} place's client on", kPlaceNames[static_cast<std::size_t>(place)])), false;
+			++group.taken;
+			if (group.placed++ == 0)
+				logger::info("[ORG] engine skeleton: the first {} clear outside a world frame runs at the menu UI stage's {} place", kGroupNames[index], kPlaceNames[static_cast<std::size_t>(place)]);
+			RenderGraph::Frame::Driver::NoteHosted(kPlaceNames[static_cast<std::size_t>(place)], 1);
+			return true;
+		}
+
+		/**
+		 * @brief Whether an engine table's texture and a call's resource are the same image: the same handle, or in native mode the same graph
+		 * texture behind both (the menus' depth copy reaches the native context with another handle of the main depth).
+		 */
+		bool SameImage(const void* a_engine, const void* a_call)
+		{
+			if (a_engine == a_call)
+				return true;
+			if (!a_engine || !a_call || !Native::Active())
+				return false;
+			// Two handles of one image: the same image native mode made behind both.
+			DxvkOrgInteropResourceInfo engine{}, call{};
+			engine.version = call.version = DXVK_ORG_INTEROP_VERSION;
+			return Native::DescribeResource(static_cast<const IUnknown*>(a_engine), engine) && Native::DescribeResource(static_cast<const IUnknown*>(a_call), call) &&
+			       engine.image.image && engine.image.image == call.image.image;
+		}
+
 		/** @brief Whether a world frame's clear can go to a_host now: its graph holds this registration's passes. */
 		bool HostReady(Group a_group, Host a_host)
 		{
@@ -1055,6 +1244,7 @@ namespace RenderGraph::Engine::Skeleton
 				return;
 			}
 			++group.generation;
+			group.entries = entries;
 			FrameAnchors::ClientDesc client{};
 			client.id = kGroupIds[index];
 			std::uint32_t entry = 0;
@@ -1124,6 +1314,7 @@ namespace RenderGraph::Engine::Skeleton
 			logger::info("[ORG] engine skeleton: the {} clears registered at the {} anchor ({} views, {} gate entries, registration {})", kGroupNames[index],
 				FrameAnchors::Name(kGroupAnchors[index]), passes, entries, group.generation);
 			RegisterHosted(a_group);
+			RegisterPlaces(a_group);
 			PublishHosted();
 		}
 
@@ -1174,6 +1365,18 @@ namespace RenderGraph::Engine::Skeleton
 				return false;
 			a_pending.gateEntry = draw->entry;
 			a_pending.target = a_target;
+			// A Bink movie's frame clears the main depth before its Renderer::Begin, outside every stage's window. Nothing reads the main depth
+			// in a Bink frame (the movie's tiles and the overlay draw without it), and every other kind clears it before its first read (the
+			// menu UI stage's places, Drawcall Limit Fix's Z-prepass): native mode drops the clear between Bink frames.
+			if (a_target.kind == Kind::Depth && a_target.index == DepthTarget::kMAIN && PlacesOn() &&
+				RenderGraph::Frame::Driver::Current().kind == RenderGraph::Frame::Kind::Bink) {
+				if (state.dropped++ == 0)
+					logger::info("[ORG] engine skeleton: a Bink frame's clear of the main depth is dropped (no reader before the next kind's own clear)");
+				return true;
+			}
+			// A clear in a loading screen's or a menu's frame, at a place of the menu UI stage: staged into the stage's frame inputs.
+			if (!WorldFrame() && TakeIntoPlace(group, a_target, a_pending))
+				return true;
 			const auto host = HostFor(a_target, a_flags);
 			// A world frame's clear of a target a CS stage clears: its entry and colour are staged into the stage's frame inputs now.
 			if (StageHost(host) && HostingOn() && WorldFrame() && !GroupOf(group).hosted[HostIndex(host)].empty()) {
@@ -1360,8 +1563,18 @@ namespace RenderGraph::Engine::Skeleton
 		bool CopyDeclared(CopyKind a_kind, bool a_hostable)
 		{
 			const auto& copy = CopyOf(a_kind);
-			if (a_kind != CopyKind::Depth || !HostingOn() || !WorldFrame())
+			if (a_kind != CopyKind::Depth || !HostingOn())
 				return false;
+			// The menu UI stage's depth copy (the loading screen's and the menus' scenes copy the main depth after its depth batch): an ungated
+			// pass of the stage, as in pre-main.
+			if (!WorldFrame()) {
+				static Util::ReasonLog s_notDeclared("[ORG] engine skeleton: a depth copy outside a world frame is not the menu UI stage's pass");
+				if (!copy.registered)
+					return s_notDeclared.Report("the copy is not registered"), false;
+				if (!FrameAnchors::CanTap(kCopyIds[static_cast<std::size_t>(a_kind)]))
+					return s_notDeclared.Report(fmt::format("{}: no open stage holds it", RenderGraph::Frame::KindName(RenderGraph::Frame::Driver::Current().kind))), false;
+				return true;
+			}
 			if (a_hostable)
 				return copy.host != Host::Own && copy.hostedRegistered &&
 				       FrameAnchors::CanTap(fmt::format("{}@{}", kCopyIds[static_cast<std::size_t>(a_kind)], kHostInfo[HostIndex(copy.host)].name));
@@ -1655,7 +1868,7 @@ namespace RenderGraph::Engine::Skeleton
 			if (!renderer || !Requested())
 				return false;
 			const auto& depths = renderer->GetDepthStencilData().depthStencils;
-			if (a_destination != depths[DepthTarget::kPOST_ZPREPASS_COPY].texture || a_source != depths[DepthTarget::kMAIN].texture)
+			if (!SameImage(depths[DepthTarget::kPOST_ZPREPASS_COPY].texture, a_destination) || !SameImage(depths[DepthTarget::kMAIN].texture, a_source))
 				return false;
 			return RunCopy(CopyKind::Depth);
 		}
@@ -1695,7 +1908,8 @@ namespace RenderGraph::Engine::Skeleton
 				return false;
 			for (std::size_t i = 0; i < kCopies; ++i) {
 				const auto kind = static_cast<CopyKind>(i);
-				if (EngineTexturesOf(kind) == std::pair<const void*, const void*>{ a_source, a_destination })
+				const auto [source, target] = EngineTexturesOf(kind);
+				if (SameImage(source, a_source) && SameImage(target, a_destination))
 					return RunCopy(kind, kind == CopyKind::Main);
 			}
 			return false;
