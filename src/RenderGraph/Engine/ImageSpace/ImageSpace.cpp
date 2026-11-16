@@ -3985,9 +3985,12 @@ namespace RenderGraph::Engine::ImageSpace
 				Flush();
 			CheckEndOfFrame(a_source, a_final);
 			chain.copyDrawn = false;
+			chain.scratchWritten = false;
+			chain.taaRouted = false;
 			chain.inEndOfFrame = true;
 		} else {
 			chain.inEndOfFrame = false;
+			OpenThrough();
 			if (std::exchange(chain.captureFrame, false))
 				OpenCapture();
 		}

@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <functional>
 #include <memory>
+#include <optional>
 #include <span>
 #include <string>
 #include <string_view>
@@ -653,6 +654,13 @@ namespace FrameAnchors
 	 * absent from the stage's build.
 	 */
 	bool DescribingKey();
+
+	/**
+	 * @brief Render owner, inside a client's rows callback while a frame is described: whether the build the frame is described against
+	 * has row a_row of that client present. Empty when that is not known (a key being described, no key, a build with every pass): the
+	 * caller decides from the frame. For a choice the build fixes (a pass's targets), so the frame describes what its build can run.
+	 */
+	std::optional<bool> DescribedBuildHasRow(std::uint32_t a_row);
 
 	/** @brief Whether the calling thread is the engine's main thread (LatchMainThread). Any thread. */
 	bool IsMainThread();

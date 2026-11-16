@@ -67,6 +67,8 @@ struct ChainSteps
 		std::array<bool, kGateEntries> made{};
 		std::array<bool, kGateEntries> copy{};
 		std::array<std::uint16_t, kGateEntries> copyBack{};
+		// The TAA routing an entry belongs to (ChainRoute): any, direct or routed.
+		std::array<std::uint8_t, kGateEntries> route{};
 		std::uint32_t count = 0;
 		std::uint32_t rowBase = 0;
 	};
@@ -100,7 +102,28 @@ struct ChainSteps
 	// frame's end-of-frame effects run into kMENUBG (a frozen world's capture frame, checked at their entry).
 	std::uint16_t captureEntry = kNoCopy;
 	bool captureFrame = false;
+	// The TAA routing (ChainRoute): the pass-through copy's entry in the final part (kNoCopy: not made), and this frame's end-of-frame
+	// effects so far: whether a routed tonemap wrote the LDR scratch, and whether routed TAA read it.
+	std::uint16_t throughEntry = kNoCopy;
+	bool scratchWritten = false, taaRouted = false;
 };
+
+/**
+ * @brief The TAA routing of a step. TAA cannot write the image it reads. Direct, it draws the final target into the LDR scratch and a
+ * copy back puts the result into the final target, every frame it runs. Routed, the tonemap draws into the LDR scratch and TAA draws from
+ * there into the final target, with no copy. The stage's build key picks the routing (TAA, the HDR effect and CS's tonemap: routed), so a
+ * build holds one routing, and a frame is described with the routing its build holds (FrameAnchors::DescribedBuildHasRow). In a routed
+ * build's frame without TAA (its build pending, or TAA off since), a pass-through copy moves the scratch into the final target instead.
+ * A frame whose tonemap did not write the scratch (the HDR effect off, Effects11's tonemap) draws no TAA.
+ */
+namespace ChainRoute
+{
+	constexpr std::uint8_t kAny = 0;
+	constexpr std::uint8_t kDirect = 1;
+	constexpr std::uint8_t kRouted = 2;
+	constexpr std::uint16_t kTonemapBit = 1u << 14;  // in the tonemap's variant (bit 15 is the parity)
+	constexpr std::uint16_t kTaaBit = 1u << 13;      // in TAA's variant (bits 15 and 14 are the history and the normals target)
+}
 
 ChainSteps& Chain()
 {
@@ -563,6 +586,29 @@ std::array<bool, ChainGroup::kCount> ChainGroupsOn(const Frame::PostFields& a_po
 }
 
 /**
+ * @brief Whether part a_part's description takes the routed forms (ChainRoute). A key's: when the frame has TAA, the HDR effect and CS's
+ * tonemap. A frame's: the routing its build holds; while a build holds both (the key kept the other for its use window), the frame's own.
+ */
+bool ChainRouted(std::size_t a_part, const Frame::PostFields& a_post, bool a_key)
+{
+	const bool wanted = a_post.taa && a_post.hdr && !a_post.effects11;
+	if (a_key)
+		return wanted;
+	const auto& part = Chain().parts[a_part];
+	std::optional<bool> routed, direct;
+	for (std::uint32_t entry = 0; entry < part.count && (!routed || !direct); ++entry) {
+		if (part.route[entry] == ChainRoute::kAny)
+			continue;
+		auto& known = part.route[entry] == ChainRoute::kRouted ? routed : direct;
+		if (!known)
+			known = FrameAnchors::DescribedBuildHasRow(part.rowBase + entry);
+	}
+	if (!routed || !direct)
+		return wanted;
+	return *routed && (wanted || !*direct);
+}
+
+/**
  * @brief The chain's passes this frame's description has on (ChainGroupsOn), as the rows of part a_part. Variants the engine picks per
  * frame (the parities) are all on; TAA's history is CS's pair by the frame slot's parity, so only that history's passes.
  */
@@ -573,9 +619,12 @@ void ChainRows(std::size_t a_part, std::array<std::uint64_t, 4>& a_rows)
 	const bool key = FrameAnchors::DescribingKey();
 	const auto on = ChainGroupsOn(frame.post);
 	const auto& part = chain.parts[a_part];
+	const bool routed = ChainRouted(a_part, frame.post, key);
 	for (std::uint32_t entry = 0; entry < part.count; ++entry) {
 		const auto group = part.group[entry];
 		if (!on[group])
+			continue;
+		if (part.route[entry] != ChainRoute::kAny && (part.route[entry] == ChainRoute::kRouted) != routed)
 			continue;
 		// TAA's history pair is CS's, by the frame slot's parity: the slot's frames write one history and read the other. Its copy back
 		// serves both.
@@ -663,8 +712,10 @@ void RegisterChainSteps()
 		part.made.fill(false);
 		part.copy.fill(false);
 		part.copyBack.fill(kNoCopy);
+		part.route.fill(ChainRoute::kAny);
 		part.count = 0;
 	}
+	chain.throughEntry = kNoCopy;
 	const auto& targets = globals::game::renderer->GetRuntimeData().renderTargets;
 	D3D11_TEXTURE2D_DESC main{};
 	targets[RE::RENDER_TARGET::kMAIN].texture->GetDesc(&main);
@@ -740,6 +791,8 @@ void RegisterChainSteps()
 		bool copy = false;   // a copy back of the scratch target into its image (desc.name only)
 		bool ldr = false;    // a copy back's side: the final target, else kMAIN
 		bool capture = false;  // the frozen background's copy: the final target into kMENUBG (desc.name only)
+		bool through = false;  // the pass-through copy of a routed build (ChainRoute)
+		std::uint8_t route = ChainRoute::kAny;
 	};
 	std::vector<Pending> steps;
 	const auto add = [&](std::uint8_t a_part, std::uint8_t a_group, WorldScope a_scope, E::ImageSpaceEffectEnum a_effect, std::uint16_t a_variant, StepDesc a_desc,
@@ -956,35 +1009,55 @@ void RegisterChainSteps()
 
 	// After the Tonemap anchor's step (part 2). The tonemap or its fade form: t0 the bloom, t1 kMAIN, t2 the adapted luminance of the
 	// frame's parity; into the final target.
-	for (const bool fade : { false, true })
-		for (std::uint16_t p = 0; p < 2; ++p) {
-			StepDesc d{ .name = fmt::format("tonemap{}.p{}", fade ? ".fade" : "", p), .output = engine(kFinal) };
-			d.inputs[0] = owned(chain.bloom);
-			d.inputs[1] = engine(T::kMAIN);
-			d.inputs[2] = owned(chain.adapt[p]);
-			d.samplers[0] = kLinear;
-			d.samplers[2] = kLinear;
-			add(2, fade ? ChainGroup::kTonemapFade : ChainGroup::kTonemap, WorldScope::Tonemap, fade ? E::ISHDRTonemapBlendCinematicFade : E::ISHDRTonemapBlendCinematic,
-				static_cast<std::uint16_t>(p << 15), std::move(d));
-		}
+	// Routed (ChainRoute): into the LDR scratch, which TAA reads.
+	for (const bool routed : { false, true })
+		for (const bool fade : { false, true })
+			for (std::uint16_t p = 0; p < 2; ++p) {
+				StepDesc d{ .name = fmt::format("tonemap{}.p{}{}", fade ? ".fade" : "", p, routed ? ".taa" : ""), .output = routed ? scratch(true) : engine(kFinal) };
+				d.inputs[0] = owned(chain.bloom);
+				d.inputs[1] = engine(T::kMAIN);
+				d.inputs[2] = owned(chain.adapt[p]);
+				d.samplers[0] = kLinear;
+				d.samplers[2] = kLinear;
+				add(2, fade ? ChainGroup::kTonemapFade : ChainGroup::kTonemap, WorldScope::Tonemap, fade ? E::ISHDRTonemapBlendCinematicFade : E::ISHDRTonemapBlendCinematic,
+					static_cast<std::uint16_t>((p << 15) | (routed ? ChainRoute::kTonemapBit : 0)), std::move(d));
+				steps.back().route = routed ? ChainRoute::kRouted : ChainRoute::kDirect;
+			}
 	// TAA (the helper at manager +0x1f0, 100495): the final target into the LDR scratch, with CS's history pair by the frame slot's parity
 	// in place of kTEMPORAL_AA_ACCUMULATION_1/2, then the copy back. t2 the motion vectors, t3 the main depth, t4 the TAA mask, t5 the
 	// normals target of the frame (kNORMAL_TAAMASK_SSRMASK or its swap, as Deferred bound it). The UI and water forms have no CS source.
-	for (std::uint16_t h = 0; h < 2; ++h)
-		for (std::uint16_t n = 0; n < 2; ++n) {
-			StepDesc d{ .name = fmt::format("taa.h{}.n{}", h, n), .output = scratch(true), .output1 = owned(chain.taaHistory[h]) };
-			d.inputs[0] = engine(kFinal);
-			d.inputs[1] = owned(chain.taaHistory[1 - h]);
-			d.inputs[2] = engine(T::kMOTION_VECTOR);
-			d.inputs[3] = mainDepth;
-			d.inputs[4] = engine(T::kTEMPORAL_AA_MASK);
-			d.inputs[5] = engine(n ? T::kNORMAL_TAAMASK_SSRMASK_SWAP : T::kNORMAL_TAAMASK_SSRMASK);
-			d.samplers[1] = kLinear;
-			d.samplers[4] = kWrapPoint;
-			d.samplers[5] = kWrapPoint;
-			add(2, ChainGroup::kTaa, WorldScope::Taa, E::ISTemporalAA, static_cast<std::uint16_t>((h << 15) | (n << 14)), std::move(d), true);
+	// Routed (ChainRoute): from the LDR scratch the routed tonemap wrote, into the final target, with no copy back.
+	for (const bool routed : { false, true }) {
+		for (std::uint16_t h = 0; h < 2; ++h)
+			for (std::uint16_t n = 0; n < 2; ++n) {
+				StepDesc d{ .name = fmt::format("taa.h{}.n{}{}", h, n, routed ? ".routed" : ""), .output = routed ? engine(kFinal) : scratch(true),
+					.output1 = owned(chain.taaHistory[h]) };
+				d.inputs[0] = routed ? scratch(true) : engine(kFinal);
+				d.inputs[1] = owned(chain.taaHistory[1 - h]);
+				d.inputs[2] = engine(T::kMOTION_VECTOR);
+				d.inputs[3] = mainDepth;
+				d.inputs[4] = engine(T::kTEMPORAL_AA_MASK);
+				d.inputs[5] = engine(n ? T::kNORMAL_TAAMASK_SSRMASK_SWAP : T::kNORMAL_TAAMASK_SSRMASK);
+				d.samplers[1] = kLinear;
+				d.samplers[4] = kWrapPoint;
+				d.samplers[5] = kWrapPoint;
+				add(2, ChainGroup::kTaa, WorldScope::Taa, E::ISTemporalAA, static_cast<std::uint16_t>((h << 15) | (n << 14) | (routed ? ChainRoute::kTaaBit : 0)),
+					std::move(d), !routed);
+				steps.back().route = routed ? ChainRoute::kRouted : ChainRoute::kDirect;
+			}
+		if (!routed) {
+			copyBack(2, ChainGroup::kTaa, true, "taa.copyback");
+			steps.back().route = ChainRoute::kDirect;
 		}
-	copyBack(2, ChainGroup::kTaa, true, "taa.copyback");
+	}
+	{
+		// The pass-through copy of a routed build: the LDR scratch into the final target, in a frame whose tonemap wrote the scratch and
+		// that drew no TAA. On with the tonemap.
+		Pending pending{ .part = 2, .group = ChainGroup::kTonemap, .key = { WorldScope::None, E::ISCopy, 2 }, .copy = true, .ldr = true, .through = true,
+			.route = ChainRoute::kRouted };
+		pending.desc.name = "taa.through";
+		steps.push_back(std::move(pending));
+	}
 	// The save-game screenshot's copy (manager +0x211; effects[34] into kSAVE_GAME_SCREENSHOT at its own size): the final target as TAA
 	// left it, before the slots after the tonemap, as the engine copies it.
 	{
@@ -1118,9 +1191,13 @@ void RegisterChainSteps()
 				part.group[entry] = step.group;
 				part.copy[entry] = true;
 				part.made[entry] = true;
-				for (const auto writer : finals)
-					if (part.group[writer] == step.group)
-						part.copyBack[writer] = static_cast<std::uint16_t>(entry);
+				part.route[entry] = step.route;
+				if (step.through)
+					chain.throughEntry = static_cast<std::uint16_t>(entry);
+				else
+					for (const auto writer : finals)
+						if (part.group[writer] == step.group)
+							part.copyBack[writer] = static_cast<std::uint16_t>(entry);
 				finals.clear();
 				auto pass = std::move(made.front());
 				pass.order = static_cast<std::int32_t>(entry);
@@ -1140,6 +1217,7 @@ void RegisterChainSteps()
 			++part.count;
 			part.keys[entry] = step.key;
 			part.group[entry] = step.group;
+			part.route[entry] = step.route;
 			chain.entries.try_emplace(step.key, ChainSteps::Entry{ p, entry });
 			if (step.final)
 				finals.push_back(entry);
@@ -1383,6 +1461,35 @@ bool TakeChainStep(std::size_t a_effect, bool a_compute, std::array<std::uint32_
 			fmt::format("{} in the world post chain{} has no CS pass; it draws nothing", kEffects[a_effect].effectName, chain.inHdr ? " (the HDR effect)" : ""));
 		return true;
 	}
+	// The TAA routing the frame's schedule holds (ChainRoute): the routed tonemap writes the LDR scratch, and routed TAA reads it.
+	const auto heldOn = [&](const StepKey& a_key) {
+		const auto at = chain.entries.find(a_key);
+		if (at == chain.entries.end())
+			return false;
+		const auto row = chain.parts[at->second.part].rowBase + at->second.entry;
+		const auto& held = Frame::Driver::Current().Segment(segment).rows;
+		return row < 256 && (held[row / 64] >> (row % 64) & 1u) != 0;
+	};
+	if (key.scope == WorldScope::Tonemap) {
+		auto routedKey = key;
+		routedKey.variant |= ChainRoute::kTonemapBit;
+		if (heldOn(routedKey)) {
+			key = routedKey;
+			chain.scratchWritten = true;
+		}
+	} else if (key.scope == WorldScope::Taa) {
+		auto routedKey = key;
+		routedKey.variant |= ChainRoute::kTaaBit;
+		// Routed TAA reads the scratch the routed tonemap wrote this frame; without it the frame draws no TAA (lagged work).
+		if (heldOn(routedKey)) {
+			if (!chain.scratchWritten) {
+				Frame::Driver::NoteLaggedWork(segment);
+				return true;
+			}
+			key = routedKey;
+			chain.taaRouted = true;
+		}
+	}
 	const auto found = chain.entries.find(key);
 	if (found == chain.entries.end()) {
 		// Shortly after a registration (a new size or level count), the frame may still run on the old build while the engine draws for
@@ -1423,6 +1530,34 @@ bool TakeChainStep(std::size_t a_effect, bool a_compute, std::array<std::uint32_
 	if (client.batch.size() > staged && part.copyBack[entry] != kNoCopy)
 		client.batch.push_back({ .entry = part.copyBack[entry] });
 	return taken;
+}
+
+/**
+ * @brief At RenderEndOfFrameEffects' return: in a routed build's frame whose tonemap wrote the LDR scratch and that drew no TAA, the
+ * pass-through copy moves the scratch into the final target (ChainRoute). Render owner.
+ */
+void OpenThrough()
+{
+	auto& chain = Chain();
+	const bool written = std::exchange(chain.scratchWritten, false);
+	const bool taa = std::exchange(chain.taaRouted, false);
+	if (!written || taa || chain.throughEntry == kNoCopy)
+		return;
+	constexpr std::size_t p = 2;
+	auto& part = chain.parts[p];
+	auto& client = IS().post[static_cast<std::size_t>(kChainParts[p])];
+	const auto entry = chain.throughEntry;
+	const auto row = part.rowBase + entry;
+	const auto& rows = Frame::Driver::Current().Segment(Frame::SegmentId::Post).rows;
+	if (row >= 256 || !(rows[row / 64] >> (row % 64) & 1u) || !part.made[entry] || !FrameAnchors::CanTap(client.id)) {
+		// The routed tonemap ran, so its build has the copy: a schedule without it is a mismatch.
+		Frame::Driver::NoteTapError(Frame::Driver::TapError::NotInDescription, Frame::SegmentId::Post,
+			"the routed tonemap wrote the LDR scratch, and the pass-through copy is not in the frame's schedule");
+		return;
+	}
+	client.batch.push_back({ .entry = entry });
+	if (Usable())
+		Flush();
 }
 
 /**

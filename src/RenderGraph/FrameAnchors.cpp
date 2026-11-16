@@ -947,6 +947,9 @@ namespace FrameAnchors
 			std::array<KeyUse, kDeclared> keyUse;
 			std::uint64_t keySerial = 0;
 			bool describingKey = false;  // BeginFrame describes a stage's key: every variant a frame may pick, and the passes always present
+			// While a client's rows are described for a frame: the build's key the frame is described against, and the client (KeyHasRow).
+			const BuildKey* describingAgainst = nullptr;
+			const ClientDesc* describingClient = nullptr;
 			RenderGraph::Frame::Kind keyKind = RenderGraph::Frame::Kind::Count;  // the last frame's kind, for the key's kind switch
 			// Each stage's frame inputs (docs/development/org-native-frame-graph.md, "The recipe"): the frame its taps staged values in
 			// and have not committed yet (0: none), the frame slot's staging run they wrote (GraphHost::EpochStagingRun, set at Begin),
@@ -3095,7 +3098,11 @@ namespace FrameAnchors
 			for (const auto& client : clients)
 				if (client->rows) {
 					std::array<std::uint64_t, 4> rows{};
+					a_state.describingAgainst = a_key;
+					a_state.describingClient = client.get();
 					client->rows(rows);
+					a_state.describingAgainst = nullptr;
+					a_state.describingClient = nullptr;
 					for (std::size_t w = 0; w < rows.size(); ++w)
 						fields.rows[w] |= rows[w];
 				}
@@ -4220,6 +4227,15 @@ namespace FrameAnchors
 		return Anchors().describingKey;
 	}
 
+	std::optional<bool> DescribedBuildHasRow(std::uint32_t a_row)
+	{
+		const auto& state = Anchors();
+		if (state.describingKey || !state.describingClient || !state.describingAgainst || state.describingAgainst->all || a_row >= 256)
+			return std::nullopt;
+		const auto [present, rows] = KeyPart(state.describingAgainst, *state.describingClient);
+		return present && (rows[a_row / 64] >> (a_row % 64) & 1u) != 0;
+	}
+
 	bool SegmentsOn()
 	{
 		static const bool on = [] {
@@ -5101,6 +5117,7 @@ namespace FrameAnchors
 	bool RegionsOn() { return false; }
 	bool SegmentsOn() { return false; }
 	bool DescribingKey() { return false; }
+	std::optional<bool> DescribedBuildHasRow(std::uint32_t) { return std::nullopt; }
 	bool IsMainThread() { return true; }
 	std::uint32_t RunSegment(Anchor) { return 0; }
 	void BeginFrame(RenderGraph::Frame::Description&) {}
