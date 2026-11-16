@@ -4747,7 +4747,7 @@ displays left out, 0 shadow clear re-registrations, 0 holds ended with "no progr
 the harness marks them failed because it expects a world): native shows the mist and the emblem, darker than guest's.
 ORG is unchanged in this pass.
 
-## State of the native frame (2026-11-16, after the cleanup pass)
+## State of the native frame (2026-11-16, after the cleanup pass and the render-thread pass)
 
 Native mode (`CS_ORG_NATIVE=1`), Vulkan or D3D12. Every CS stage is one ORG graph, built off the render thread, staged and recorded before
 it switches in at a frame's `Renderer::Begin`, one kept recording per frame slot, one ticket a frame. Drawcall Limit Fix's graphs (*) are
@@ -4809,12 +4809,14 @@ chain's hooks (which only check and stage in native). This is the input for the 
   world, the face tint at a load), EngineShadowClear and EngineFrameClear (world frames before DCLF draws and during its holds, a menu scene's
   clears over the live world, frame 0), EngineCubeClear (outside world frames), EngineCopy outside the stages' windows, EngineDepthCopy
   outside the stages, EngineQueries (world frames before DCLF draws), DecalQueries (its client is never made in these sessions), HDROutput
-  (HDR on), Tonemap and FrameGeneration (a menu scene's tonemap, frame generation), MovieTiles (no client). Their unstaged rebuilds still
-  start DCLF re-entry holds (the short hold after each load).
+  (HDR on), Tonemap and FrameGeneration (a menu scene's tonemap, frame generation), MovieTiles (no client). A stage's one-shot passes now
+  rebuild only the anchors they sit at (the ImageSpace epoch for the histogram reset), so the re-entry hold after each load is gone
+  ("Render-thread cost").
 - `CanRun`/`RequestJoin`: the sky and decal clients' setup joins, the menu composites over the live world, the skeleton's group clears, the
   upscaler evaluate's first frames, the menu scenes family.
 - D3D11 replay of a group's clears when its anchor's run does not submit (an error), and clears of a lent target slot (Skylighting's map).
-- The phases and regions code, with `CS_ORG_PHASES=1` only.
+- The phases and regions code is removed (`CS_ORG_PHASES` with it). `FrameAnchors::FlushRegions` kept its other jobs, the stages'
+  commit points and the open-stage census, as `BeforeGpuWork`. `PassDesc::gated` has no reader left.
 
 ### Untested
 
@@ -4827,3 +4829,111 @@ chain's hooks (which only check and stage in native). This is the input for the 
   fill and the UI form of TAA in a menu scene, other slot effects inside a menu scene's end-of-frame call, the local map's edge pass, the
   console screenshot's and the debug views' copies, the lens flare composite forms, the masked depth of field composites, the raster
   depth of field blur.
+
+## Render-thread cost (2026-11-16, `org-native/phases`)
+
+The timing pass found native perf-taa CPU-bound on the render thread: steady frame 7.5 ms against guest's 6.95 ms, with about 4.0 ms of
+render-thread CPU outside any Tracy zone (guest: about 1.4 ms), and a hitch every 120 frames.
+
+### The hitch
+
+Drawcall Limit Fix's `ThreadBusy::Sample` looked for DXVK's `dxvk-cs` thread every 120 frames until it found it, by walking every thread
+in the process: 60 to 80 ms on the render thread each time. Native mode has no DXVK, so the search never ended. Native mode no longer
+searches; guest mode searches on a helper thread (every 2 s, up to 30 tries) and the render thread only reads the result.
+perf-taa native: 6 frames over 20 ms in each 750-frame window before, none after.
+
+### Two diagnostics
+
+- `CS_ORG_D3D11_METER=1` meters every tripwire handle method on the thread that ends frames: calls and exclusive time per method,
+  summed into families. Tracy plots `CS.D3D11.<family>.calls` and `.us`; the log has the families and the 20 largest methods every 600
+  frames, with the thread's CPU time (TripwireMeter.cpp).
+- `CS_ORG_RT_SAMPLE=<seconds>` is a sampling profile of the render thread inside the process, without ETW or elevation (neither Tracy's
+  sampling nor xperf works here: they need an elevated session). A helper thread suspends the render thread about once a millisecond,
+  unwinds its stack and resumes it; the test step `mark start` begins it. The log has leaf and inclusive functions, and for each system leaf
+  its first CS or game caller, with the share of samples and ms a frame (RtSampler.cpp). A sample counts when the thread used CPU since
+  the last one, so a thread that just went to wait counts too: the engine's `WaitForFrameJobs` shows up in both modes (about 1.5 ms a
+  frame); it is not CPU time.
+
+### Attribution (perf-taa, native Vulkan, measured, one run each)
+
+The guess was the tripwire handles. They are cheap:
+
+| Family (tripwire handles, render thread) | Calls a frame | ms a frame |
+|---|---|---|
+| state sets (IA/VS/PS/CS/OM/RS Set*, ClearState) | 1,056 | 0.032 |
+| state gets | 62 | 0.003 |
+| maps and updates (Map 245, Unmap 245) | 490 | 0.078 |
+| COM and private data (GetPrivateData 100) | 120 | 0.005 |
+| clears and copies | 1 | 0.006 |
+| draws and dispatches | 1 | 0.003 |
+| swap chain, creates, queries | 2 | 0.001 |
+| total | 1,730 | 0.13 of 6.0 ms thread CPU |
+
+The sampling profile put the cost elsewhere (share of on-CPU samples, ms a frame scaled by the thread's 6.0 ms; one 5 s run):
+
+| Where | ms a frame | What |
+|---|---|---|
+| `DCLF::Family::CopyConstants` from the water and sky families' `TryLatchDraw` | 1.45 | memcpy reading the engine constants ring back |
+| `Constants::Tracker::Capture` | 0.20 | memcpy from the engine's mapping into the ring |
+| `Vram::OwnerScope` | 0.30 | `GetModuleHandleW("dxvk_d3d11.dll")` on every scope (native has no DXVK) |
+| `LatchBlock::CopyStableRun` | 0.10 | the stages' latch copy (zoned: `CS.Stage.CopyLatch`) |
+| `operator new` / heap | 0.2 | spread |
+
+The engine constants ring (`EngineConstants.cpp`) is GPU-visible upload memory, slow to read back. Every captured constant a family read
+went through it. Each ring chunk now has a CPU copy: a capture writes the copy and then the chunk from it, and `Bytes` answers the copy.
+`Vram`'s DXVK export lookup answers "none" at once in native mode.
+
+| Render thread (native perf-taa) | Before | After |
+|---|---|---|
+| thread CPU (sampled run) | 6.0 ms | 3.6 ms |
+| thread CPU (Tracy, cycles) | 6.66 ms | 4.17 ms |
+| in zones | 2.43 ms | 1.96 ms |
+| outside zones (CPU minus zones) | 4.2 ms | 2.2 ms (guest 1.4 ms) |
+| `Main_RenderWorld` inclusive (sampled) | 2.16 ms | 0.48 ms |
+
+Native is no longer render-thread bound in this scene: the render thread is off the CPU about 2.8 ms a frame (the engine's frame jobs).
+The rest of the gap outside zones (about 0.8 ms against guest) is spread: the stages' taps and commits (`TapDeclared`, `SubmitSegment`),
+`FrameAnchors::SegmentHolds` and `StepHolds` (string compares, 0.1 ms), the capture's read of the engine's mapping (0.1 ms), heap traffic.
+
+### Before and after (all.sh, perf-taa, measured)
+
+Before: `rn1`, `rn2` (native), `rg1` (guest), at CS `f8fddc4da`. After: `fn1`, `fn2`, `fg1`, at the commit before this doc. One run each, 6 s
+Tracy windows; run-to-run spread of the two native runs is given as a range. The machine was in use.
+
+| | Native before | Native after | Guest before | Guest after |
+|---|---|---|---|---|
+| frame period, mean | 8.06 to 8.25 ms | 6.97 to 6.99 ms | 6.95 ms | 6.95 ms |
+| frame period, steady | 7.49 to 7.57 ms | 6.96 to 6.98 ms | 6.95 ms | 6.95 ms |
+| render thread busy in zones | 2.33 to 2.35 ms | 1.85 to 1.90 ms | 1.40 ms | 1.37 ms |
+| render thread CPU (cycles) | 6.44 to 6.45 ms | 3.96 to 4.02 ms | 2.77 ms | 2.74 ms |
+| submission thread busy | 2.38 to 2.41 ms | 2.32 to 2.34 ms | - | - |
+| host thread busy | 1.26 ms | 1.71 to 1.73 ms | 0.30 ms | 0.28 ms |
+| frames over 20 ms | 6 per window, every 120 frames | 0 | 0 | 0 |
+| Begin to last submit, p50 | 6.54 to 6.58 ms | 4.24 to 4.30 ms | - | - |
+
+Both modes now run at 6.95 ms, which is the display's 144 Hz: native is no longer the slower mode here, and its headroom is hidden by
+the cap. The host thread's `ORG.Persistent.Retire` grew from 1.13 to 1.60 ms a frame (24 calls): off the critical path, not
+investigated. The load and pause-menu transitions (`fload`, `fmenu`) show no new hitch; the menu switch's longest frame is 99 ms (114
+before).
+
+### Native cleanup in the same pass
+
+- A stage's one-shot passes rebuilt every anchor of the stage, the per-anchor epochs of its shared anchors among them (unstaged), which
+  started Drawcall Limit Fix's short re-entry hold after each load. Now only the anchors those passes sit at are rebuilt. native-quick:
+  the first load's hold ends settled (2.6 s) and no re-entry hold follows.
+- The phases and regions code is removed (see "State of the native frame").
+- Not moved into stages, and left on their current path: the clears before DCLF draws and during its holds, EngineCopy and
+  EngineDepthCopy outside the stages' windows, EngineQueries before DCLF draws, the face tint at a load. They run only outside steady
+  world frames (a steady world frame is the twelve stage tickets). A menu scene over the live world, blood, precipitation, HDR output and
+  frame generation cannot be checked in a background run and stay as they were.
+
+### Left on the render thread (judgement)
+
+- The stages' taps and commits: `CS.Stage.CopyLatch` (0.15 ms, 7 a frame: `LatchBlock::CopyStableRun` copies every block's region and
+  sorts a block list each time; copying only the regions a tap wrote needs a written mark per block and run), `CS.Stage.OpenInputs`
+  (0.11 ms, zeroes every region), `CS.Stage.MoveSlots` (0.09 ms).
+- `CS.Frame.RendererBegin` (0.2 ms self).
+- `FrameAnchors::SegmentHolds`/`StepHolds`: client ids compared as strings per tap (0.1 ms); a per-build table of which steps hold which
+  client would remove them.
+- `ORG.Host.CommitTicket` (about 0.24 ms for 12 commits after this pass) and `CS.DCLF.Texture.ResolveBinding` (0.12 ms, 1,333 calls) were
+  not changed.
