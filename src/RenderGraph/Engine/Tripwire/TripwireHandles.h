@@ -209,6 +209,59 @@ namespace RenderGraph::Engine::Tripwire
 		/** @brief The core of a handle, or null when a_object is not one. */
 		HandleCore* CoreOf(const void* a_object);
 
+		/** @brief One meter cell: a method's calls and its exclusive TSC cycles. */
+		struct MeterCell
+		{
+			std::uint64_t calls = 0;
+			std::uint64_t cycles = 0;
+		};
+
+		/**
+		 * @brief The metered thread (CS_ORG_D3D11_METER=1): the one that last ended a frame (MeterFrame). 0 when off. Every other thread
+		 * skips the meter.
+		 */
+		inline std::atomic<std::uint32_t> g_meterThread{ 0 };
+		/** @brief This thread's id, read once. */
+		inline thread_local const std::uint32_t t_threadId = static_cast<std::uint32_t>(::GetCurrentThreadId());
+		/** @brief The cycles of handle methods nested in the current one (they are taken out of its time). */
+		inline thread_local std::uint64_t t_meterChild = 0;
+		/** @brief Calls and cycles per interface and vtable slot. Only the metered thread writes and reads them. */
+		inline MeterCell g_meter[static_cast<std::size_t>(Kind::Count)][WatchSet::kMaxSlots]{};
+
+		/**
+		 * @brief Meters one handle method on the metered thread: its calls and its own time, without the handle methods it calls.
+		 * Costs one thread-local test on other threads and when the meter is off.
+		 */
+		class MeterScope
+		{
+		public:
+			MeterScope(Kind a_kind, std::uint16_t a_slot) noexcept
+			{
+				if (g_meterThread.load(std::memory_order_relaxed) != t_threadId || a_kind >= Kind::Count || a_slot >= WatchSet::kMaxSlots)
+					return;
+				cell = &g_meter[static_cast<std::size_t>(a_kind)][a_slot];
+				outer = t_meterChild;
+				t_meterChild = 0;
+				start = __rdtsc();
+			}
+			~MeterScope()
+			{
+				if (!cell)
+					return;
+				const std::uint64_t elapsed = __rdtsc() - start;
+				++cell->calls;
+				cell->cycles += elapsed > t_meterChild ? elapsed - t_meterChild : 0;
+				t_meterChild = outer + elapsed;
+			}
+			MeterScope(const MeterScope&) = delete;
+			MeterScope& operator=(const MeterScope&) = delete;
+
+		private:
+			MeterCell* cell = nullptr;
+			std::uint64_t outer = 0;
+			std::uint64_t start = 0;
+		};
+
 		/** @brief The self-test: the calls counted for a_kind's a_method (every site), and clearing every site afterwards. */
 		std::uint64_t Calls(Kind a_kind, std::string_view a_method);
 		void ClearSites();
@@ -233,6 +286,7 @@ namespace RenderGraph::Engine::Tripwire
 	Ret STDMETHODCALLTYPE Name Params override                                                         \
 	{                                                                                                  \
 		void* const twCaller = _ReturnAddress();                                                       \
+		const ::RenderGraph::Engine::Tripwire::Detail::MeterScope twMeter{ core.kind, static_cast<std::uint16_t>(Slot::Name) }; \
 		if (core.Enter(static_cast<std::uint16_t>(Slot::Name), #Name, twCaller)) {                     \
 			[[maybe_unused]] const ::RenderGraph::Engine::Tripwire::Detail::CallSite twSite{ &core,    \
 				static_cast<std::uint16_t>(Slot::Name), #Name, twCaller };                             \
@@ -309,6 +363,7 @@ namespace RenderGraph::Engine::Tripwire
 
 		HRESULT STDMETHODCALLTYPE QueryInterface(REFIID a_riid, void** a_out) override
 		{
+			const Detail::MeterScope meter{ this->core.kind, static_cast<std::uint16_t>(Slot::QueryInterface) };
 			return Detail::QueryInterface(this->core, static_cast<Interface*>(this), Trips::kIids, a_riid, a_out, _ReturnAddress());
 		}
 		ULONG STDMETHODCALLTYPE AddRef() override { return ++this->core.refs; }
@@ -321,14 +376,17 @@ namespace RenderGraph::Engine::Tripwire
 		}
 		HRESULT STDMETHODCALLTYPE SetPrivateData(REFGUID a_guid, UINT a_size, const void* a_data) override
 		{
+			const Detail::MeterScope meter{ this->core.kind, static_cast<std::uint16_t>(Slot::SetPrivateData) };
 			return Detail::SetPrivateData(this->core, static_cast<std::uint16_t>(Slot::SetPrivateData), a_guid, a_size, a_data, _ReturnAddress());
 		}
 		HRESULT STDMETHODCALLTYPE GetPrivateData(REFGUID a_guid, UINT* a_size, void* a_data) override
 		{
+			const Detail::MeterScope meter{ this->core.kind, static_cast<std::uint16_t>(Slot::GetPrivateData) };
 			return Detail::GetPrivateData(this->core, static_cast<std::uint16_t>(Slot::GetPrivateData), a_guid, a_size, a_data, _ReturnAddress());
 		}
 		HRESULT STDMETHODCALLTYPE SetPrivateDataInterface(REFGUID a_guid, const IUnknown* a_data) override
 		{
+			const Detail::MeterScope meter{ this->core.kind, static_cast<std::uint16_t>(Slot::SetPrivateDataInterface) };
 			return Detail::SetPrivateDataInterface(this->core, static_cast<std::uint16_t>(Slot::SetPrivateDataInterface), a_guid, a_data, _ReturnAddress());
 		}
 

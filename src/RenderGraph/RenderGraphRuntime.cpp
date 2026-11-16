@@ -25,6 +25,7 @@
 #include "RenderGraph/DxvkImageImport.h"
 #include "RenderGraph/Engine/Native/Native.h"
 #include "RenderGraph/Engine/Native/OpCensus.h"
+#include "RenderGraph/Engine/Native/RtSampler.h"
 #include "RenderGraph/Engine/OwnedFrame.h"
 #include "RenderGraph/Engine/Targets/EngineTargets.h"
 #include "RenderGraph/Engine/Tripwire/Tripwire.h"
@@ -3041,6 +3042,8 @@ void RenderGraphRuntime::SealPresented()
 	}
 	// The native frame graph diagnostics close their frame (cheap when their switches are off).
 	RenderGraph::Engine::Native::OpCensus::EndFrame();
+	RenderGraph::Engine::Tripwire::MeterFrame();
+	RenderGraph::Engine::Native::RtSampler::Frame();
 	RenderGraph::RunShapes::EndFrame();
 	RenderGraph::FrameSequence::EndFrame();
 	RenderGraph::UndeclaredAccess::EndFrame();

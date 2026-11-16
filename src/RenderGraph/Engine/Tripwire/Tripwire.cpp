@@ -1232,6 +1232,7 @@ namespace RenderGraph::Engine::Tripwire
 	// call, and a native handle without a service records it at its caller and fails it, as every tripwire does.
 #define TW_DEVICE_SITE(Name)                                                                                                     \
 	void* const twCaller = _ReturnAddress();                                                                                     \
+	const Detail::MeterScope twMeter{ core.kind, static_cast<std::uint16_t>(Slot::Name) }; \
 	[[maybe_unused]] const Detail::CallSite twSite{ &core, static_cast<std::uint16_t>(Slot::Name), #Name, twCaller };           \
 	const NativeServices* const twNative = NativeOf(core)
 #define TW_FORWARD_OR_FAIL(Name, Out, ...)                                         \
@@ -1448,6 +1449,7 @@ namespace RenderGraph::Engine::Tripwire
 	// The swap chain: native mode's services, else a tripwire (the forwarding branch serves a wrapping swap chain handle).
 #define TW_SWAP_CHAIN_SITE(Name)                       \
 	void* const twCaller = _ReturnAddress();           \
+	const Detail::MeterScope twMeter{ core.kind, static_cast<std::uint16_t>(Slot::Name) }; \
 	const NativeServices* const twNative = NativeOf(core); \
 	constexpr auto twSlot = static_cast<std::uint16_t>(Slot::Name)
 
@@ -1576,6 +1578,7 @@ namespace RenderGraph::Engine::Tripwire
 	// through Enter, so its filter sees the real caller as with every generated method.
 #define TW_CONTEXT_SITE(Name)                                                                                                    \
 	void* const twCaller = _ReturnAddress();                                                                                     \
+	const Detail::MeterScope twMeter{ core.kind, static_cast<std::uint16_t>(Slot::Name) }; \
 	[[maybe_unused]] const Detail::CallSite twSite{ &core, static_cast<std::uint16_t>(Slot::Name), #Name, twCaller };           \
 	const NativeServices* const twNative = NativeOf(core)
 #define TW_CONTEXT_FORWARD(Name, ...)                                                    \

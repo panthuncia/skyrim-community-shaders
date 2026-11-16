@@ -266,6 +266,13 @@ namespace RenderGraph::Engine::Tripwire
 	void Stop();
 
 	/**
+	 * @brief CS_ORG_D3D11_METER=1, render thread, once a frame: meters the handle methods called on this thread. Each family's calls and
+	 * exclusive time go to Tracy plots (CS.D3D11.<family>.calls and .us) every frame, and to the log every 600 frames with the 20
+	 * largest methods and the thread's CPU time. Nothing when the switch is off. TripwireMeter.cpp.
+	 */
+	void MeterFrame();
+
+	/**
 	 * @brief How a code address is named in tripwire logs: "SkyrimSE.exe+0xd6a8f2 (ID 75467+0x82)" for the game (the Address Library
 	 * ID of the function that contains it), "Module.dll+0x1234" for any other module, the bare address when no module holds it.
 	 */

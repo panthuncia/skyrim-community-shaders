@@ -11,6 +11,7 @@
 #include "Globals.h"
 #include "Menu.h"
 #include "RenderGraph/Engine/Bink/Bink.h"
+#include "RenderGraph/Engine/Native/RtSampler.h"
 #include "ShaderCache.h"
 #include "State.h"
 #include "Vram/MemProbe.h"
@@ -343,6 +344,9 @@ namespace Testing
 			});
 			RegisterCommand("mark", [](const std::string& a_arg, std::string&) {
 				MemProbe::Mark(a_arg, Run().frame);
+				// CS_ORG_RT_SAMPLE: the render thread's sampling profile starts with the measured window.
+				if (a_arg == "start")
+					RenderGraph::Engine::Native::RtSampler::Begin();
 				return true;
 			});
 			RegisterCommand("vram-json", [](const std::string&, std::string&) {
