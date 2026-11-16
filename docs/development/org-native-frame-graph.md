@@ -4830,7 +4830,10 @@ chain's hooks (which only check and stage in native). This is the input for the 
   console screenshot's and the debug views' copies, the lens flare composite forms, the masked depth of field composites, the raster
   depth of field blur.
 
-## Render-thread cost (2026-11-16, `org-native/phases`)
+## Per-thread cost (2026-11-16, `org-native/phases`)
+
+The first part (to "Left on the render thread") is the render-thread pass; the parts after it are the per-thread pass: the frame cap,
+the uncapped comparison, the attribution by thread and what was cut.
 
 The timing pass found native perf-taa CPU-bound on the render thread: steady frame 7.5 ms against guest's 6.95 ms, with about 4.0 ms of
 render-thread CPU outside any Tracy zone (guest: about 1.4 ms), and a hitch every 120 frames.
@@ -4937,3 +4940,158 @@ before).
   client would remove them.
 - `ORG.Host.CommitTicket` (about 0.24 ms for 12 commits after this pass) and `CS.DCLF.Texture.ResolveBinding` (0.12 ms, 1,333 calls) were
   not changed.
+
+### The frame cap (2026-11-16)
+
+The 6.95 ms both modes ran at was the display's 144 Hz, from two limiters in the test instance:
+- Community Shaders' own: the saved Upscaling `frameRateLimitDivisor` was 1 (refresh / 1 = 144 fps), handed to Reflex as a 6,944 us
+  frame limit in both modes. The code's default is already 0 (unlocked); only the instance's saved setting pinned it. It is cleared in
+  the instance (`overwrite/SKSE/Plugins/CommunityShaders/SettingsUser.json`).
+- SSE Display Tweaks: `EnableVSync=true`, `FramerateLimit=240`, its present hook installed. A test config's `game.uncapped = true`
+  (cs-test) writes `SSEDisplayTweaks_custom.ini` (vsync off, tearing on, no limit) into the staged mod for that run only; `perf-taa`
+  sets it. The user's ini is not touched.
+
+Not limiters here: CS forces the present's sync interval from its own `vsync` setting (off), so the game's `iVSyncPresentInterval=1`
+does not reach either mode; native presents IMMEDIATE (the swap chain allows tearing); `dxvk.conf` sets no frame rate or sync
+interval; no `iFPSClamp` or `bLockFramerate`. `CS.Native.PresentSlotWait` is 0.014 ms a frame. The game keeps running unfocused
+(`bAlwaysActive=1`), so nothing needs the foreground.
+
+A leftover broke the autoload in between: cs-test's "original" CS mod (`CS AB p35`) had been deleted, every swap back enabled the
+missing mod, MO2 then turned `TerrainHelper.esp` off, and the save (which uses it) sat at the loading menu. The swap back now keeps the
+variant when the original is gone, and the instance has `CS AB nfg` enabled and the plugin on again.
+
+### Uncapped, native against guest (perf-taa, RTX 5080, measured)
+
+`all.sh` with `PERF_ONLY=1` at CS `7a00afcb9`: `xn1`, `xn2` (native), `xg1` (guest), 6 s Tracy windows, GPU utilization from
+`nvidia-smi` in the same window. One guest run; the native spread is the range of the two. The machine was in use.
+
+| | Native | Guest |
+|---|---|---|
+| frame period, mean | 5.86 to 5.88 ms (170 fps) | 5.10 ms (196 fps) |
+| frame period, steady | 5.76 to 5.77 ms | 5.10 ms |
+| p50 / p95 / p99 | 5.53-5.72 / 9.11-9.15 / 10.4-10.6 ms | 5.08 / 5.80 / 6.29 ms |
+| frames over 20 ms in the window | 2 to 3 | 0 |
+| render thread CPU (cycles) | 3.79 to 3.87 ms | 2.72 ms |
+| render thread in CS/ORG/DCLF zones | 1.72 to 1.77 ms | 3.40 ms (DCLF's immediate draws) |
+| render thread waiting | 1.80 to 1.90 ms (`DrainSubmissions` 1.39-1.56, `WaitTicket` 0.25-0.30) | 0.11 ms |
+| submission thread busy / waiting | 2.75 to 2.86 / 2.78 to 2.91 ms (`WaitPresentedFrames`) | - |
+| host thread busy (zones) / CPU (sampled) | 2.31 to 2.42 / 0.54 ms | 0.36 ms |
+| DCLF scene, workers | 0.65 to 0.66, 1.93 to 1.97 ms | 0.69, 1.92 ms |
+| GPU utilization | 69.5 to 71.0% | 63.7% |
+
+Before this pass's cuts (`u1n1`, the cap lifted, one run): native 5.80 ms steady, guest (`u1g1`) 5.11 ms.
+
+What bounds each mode: neither is GPU-bound (64 to 71% busy). Native's chain is render thread -> submission thread -> present: the
+submission thread waits about 2.9 ms a frame for presented frames (frame latency 2), and the render thread waits 1.4 to 1.6 ms a frame
+in `DrainSubmissions`, called from DCLF's `FrameValues::WaitSignalSubmitted` (the frame values' copy-queue signal waits for graph work
+still in the submission thread's queue; the render thread flushes it, which drains that queue). That wait serializes the threads and
+leaves the GPU idle part of each frame; it is the likely source of native's 9 to 10 ms periods (p95), not proven. Guest's render
+thread is off the CPU 2.4 ms a frame inside the engine's present (DXVK's frame latency wait): it is paced by the GPU and present the same
+way, without a mid-frame drain.
+
+### Attribution by thread (native perf-taa, the in-process sampler, measured)
+
+`CS_ORG_RT_SAMPLE=5` now samples the render, submission and host threads (and `dxvk-cs` in guest mode). A sample in a kernel wait is
+counted apart; ms a frame below are each class's share of the running samples times the thread's CPU time a frame (cycles). Owner is
+the first CS frame from the leaf up by namespace (`rhi::` BasicRHI, `org::` ORG, else CS), unless a driver or API module comes first.
+Heap counts come from `AllocCounter`, which replaces CommunityShaders.dll's `operator new`/`delete` (CS, ORG and BasicRHI; the driver's
+own heap is not seen); every 16th allocation of a sampled thread keeps its stack, logged as allocation sites. The sampled runs carry the
+counter's cost (about 0.1 ms a frame on the submission thread for the stack captures); Tracy runs do not enable it. Run `s6`, the final
+build, 848 frames.
+
+Render thread, 3.68 ms CPU a frame (36% of its samples in a wait, nearly all `DrainSubmissions`):
+
+| Owner / kind | ms a frame | Notes |
+|---|---|---|
+| CS code (hooks, FrameAnchors, stages, tripwire) | 1.59 | `CS.Frame.RendererBegin`, the stage taps and latch copies, the engine constants capture |
+| game code | 0.61 | |
+| CS DCLF code | 0.40 | the families' latches, landscape seams, texture registry |
+| ORG code | 0.29 | `CommitTicket`, `LatchBlock` |
+| CS heap | 0.27 | 3,823 allocations, 1.55 MB a frame (before: 5,509, 1.64 MB) |
+| hashing, shared_ptr, locks, memcpy, strings | 0.33 | |
+| driver/API | 0.06 | |
+
+Submission thread, 2.40 ms CPU a frame (63% of its samples in a wait, nearly all `WaitPresentedFrames`):
+
+| Owner / kind | ms a frame | Share |
+|---|---|---|
+| driver and API (nvoglv64 1.01, kernel submits 0.20, Streamline and overlay layers 0.05) | 1.26 | 53% |
+| ORG (admission and ledger commits, barrier folding, per-pass record dispatch, uploads) | 0.45 | 19% |
+| CS and DCLF pass `Record` bodies | 0.34 | 14% |
+| BasicRHI wrappers (around `vkCmd*`, submit, present) | 0.18 | 8% |
+| heap | 0.10 | 4% (1,310 allocations, 110 KB a frame; before 2,643, 265 KB) |
+
+The submission thread's Tracy zones at the same build (`xn1`): `vkQueueSubmit` 0.37 ms for 16.3 a frame, `BeginPass` 0.24 ms for 225,
+`BindPipeline` 0.25 ms for 604, `ResetClaimed` 0.22 to 0.25 ms (driver pool resets). The present path carries OBS's
+`graphics-hook64.dll` and the Steam overlay layer (about 0.08 ms each in `vkQueuePresentKHR`).
+
+Host thread, 0.54 ms CPU a frame (94% of its samples in a wait):
+
+| Owner / kind | ms a frame | Notes |
+|---|---|---|
+| ORG code | 0.20 | retire, ticket completion, preparation |
+| CS code (completion callbacks) | 0.13 | |
+| heap, strings, std::function, shared_ptr | 0.08 | 476 allocations, 318 KB a frame |
+| driver/API | 0.06 | |
+
+`ORG.Persistent.Retire`'s 2.2 ms a frame in Tracy is wall time, not CPU: 23% of the host's samples are blocked in
+`SynchronousAdmission::Submitted` (and 5% in `LowestRetainedCompletions`) on the sequencer's mutex, which the submission thread holds
+through `PrepareFrame`. It is off the critical path; the host thread does not bound the frame.
+
+### What was cut (largest allocation sites first)
+
+| Where | Thread | Before (allocations a frame) | Change |
+|---|---|---|---|
+| BasicRHI `cl_barrier` (five vectors per call) | submission | about 330 | per-thread scratch |
+| BasicRHI crash markers (a string per marker, `"end: "` per label) | submission | about 380 | look up first; end names interned once |
+| BasicRHI `BeginPass` attachments vector | submission | about 240 | on the stack |
+| ORG `FoldBarriersOfSkipped`, the late batch's skips and folded batches | submission | about 140 | per-thread buffers kept between recordings |
+| ORG barrier range names | submission | about 110 | built in a per-thread buffer, found by view |
+| ORG `TypedRenderGraphPass::RevisionHash` | render | about 300 | per-thread vector |
+| FrameAnchors `SegmentClients` (a vector of shared_ptr copies per call) and the taps' string compares | render | about 260 | per snapshot, made at Publish; a per-client mask |
+| Tripwire `Describe` for the wrapped object (name string, shared_ptr) | render | about 230 | `WrappedOf` and `KindOf` |
+| Landscape seams' owner list growth | render | about 600 | reserved once |
+| `PublishedResources::ExportedId` to test for an export | render | about 90 | `IsExport` |
+
+| Measured (sampler, one run each) | Before (`s2`/`s3`) | After (`s6`) |
+|---|---|---|
+| render thread allocations a frame | 5,509 (1.64 MB) | 3,823 (1.55 MB) |
+| submission thread allocations a frame | 2,643 (265 KB) | 1,310 (110 KB) |
+| host thread allocations a frame | 458 (314 KB) | 476 (318 KB) |
+| render thread CPU a frame | 3.92 ms | 3.68 ms |
+| submission thread CPU a frame | 2.71 ms | 2.40 ms |
+| `CS.Frame.RendererBegin` self (Tracy) | 0.21 ms (`u1n1`) | 0.11 ms (`xn1`, `xn2`) |
+| `RecordOwned.BeforeBarriers` (Tracy) | 0.13 ms | 0.10 ms |
+
+The frame period did not move (5.80 ms before, 5.76 to 5.77 after): neither mode is bound by these threads' CPU. Other submission zones
+moved up by about 0.1 ms between runs (`ResetClaimed`, a driver pool reset this pass did not touch, by 0.08 to 0.11 ms), which is the
+run-to-run spread.
+
+### Left, ranked (estimates)
+
+1. Native's mid-frame drain: `FrameValues::WaitSignalSubmitted` flushes and drains the submission thread's queue so the frame values'
+   copy batch can be submitted; the render thread waits 1.4 to 1.6 ms a frame and the GPU idles. Signalling the frame values from the
+   submission thread after the graph work it waits for (or letting the copy batch wait on the GPU instead of the CPU) would remove the
+   wait. Estimate: the native frame toward guest's 5.1 ms (0.5 to 0.7 ms), and most of native's p95 tail.
+2. `SynchronousAdmission::Submitted` takes the sequencer's mutex per queue on the host thread: per-timeline atomics would end the
+   contention (the host's 2.2 ms of wall time in `Retire`); no frame-time gain expected.
+3. `PublicationBindingBundle` per landscape-seams row and per DCLF texture seal (about 600 allocations a frame on the render thread):
+   rows re-put every frame because an unresolved view keeps them changed; a pooled owner list or a retry only on texture-registry
+   change. Estimate 0.05 to 0.1 ms render CPU.
+4. Native state descriptions (`FindOrDescribe`, about 230 allocations a frame): a native handle is described on every lookup because
+   it has no private data; a per-handle cache with release on destroy. Estimate 0.03 to 0.05 ms.
+5. BasicRHI `buf_map` maps and unmaps the memory (and a map node) on every `Map` (about 240 a frame on the render thread): persistent
+   mapping per memory object, unmapped at free. Estimate 0.05 ms render, plus driver map calls.
+6. The submission thread's driver time (1.26 ms) is mostly `vkCmd*` for 225 pass begins and 604 pipeline binds; merging adjacent
+   passes with the same targets and skipping a rebind of the bound pipeline would cut calls. Not measured how many are redundant.
+
+### Checks
+
+One background run each, the final build: native-quick, native-d3d12-quick, native-river, native-upscalers, native-interior,
+native-validation (the known 20 `VUID-vkCmdDraw-None-09600` only), the loading-thread run, first and third person, guest-quick: passed,
+0 tap errors, no `NoPass`, recipe checks 0 findings, 0 frames with a stage absent after it first ran. The frozen-world run
+(`Journal Menu=show`) hit the fatal mismatch once in three runs: the capture frame's post segment found the engine's end-of-frame effects
+running from target 1 into target 14 where the description had CS's chain (frame 888); the other two passed. These runs are no longer
+held at 144 Hz (the saved divisor is cleared), so the capture frame's timing differs from earlier passes; not investigated further.
+ORG's unit tests pass run one at a time (the lease tests and HeadlessBenchmark not run); in parallel runs one host test fails at random
+(External, then AsyncOpen) and passes alone.
