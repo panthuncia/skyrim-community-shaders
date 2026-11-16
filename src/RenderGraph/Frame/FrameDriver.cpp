@@ -3,6 +3,7 @@
 #include "RenderGraph/Engine/Bink/Bink.h"
 #include "RenderGraph/Engine/Skeleton/Skeleton.h"
 #include "RenderGraph/Frame/PostChain.h"
+#include "RenderGraph/Frame/Recipe.h"
 #include "RenderGraph/FrameAnchors.h"
 #include "RenderGraph/RenderGraphRuntime.h"
 #include "RenderGraph/Switches.h"
@@ -252,6 +253,10 @@ namespace RenderGraph::Frame::Driver
 		state.tapped.fill(false);
 		// The post chain's fields (read again at the chain's decision event), then each segment's schedule for the frame.
 		PostChain::OnBegin(state.current);
+		// The recipe is checked again when a build of one of its epochs attached (render owner, before the stages' schedules).
+		if (FrameAnchors::SegmentsOn() && FrameAnchors::IsRenderOwner())
+			if (auto* host = RenderGraphRuntime::Get().Host())
+				Recipes::Check(*host);
 		FrameAnchors::BeginFrame(state.current);
 		{
 			const std::lock_guard lock(state.mutex);

@@ -78,6 +78,53 @@ namespace RenderGraph
 	};
 
 	/**
+	 * @brief Every RunSlots alive, so a stage's commit can move what its taps stored for the frame slot's staging run onto the run that
+	 * submits it (FrameAnchors: a stage's taps commit into its staging run, org::GraphHost::EpochStagingRun). Thread-safe.
+	 */
+	class RunSlotsRegistry
+	{
+	public:
+		struct Entry
+		{
+			virtual void MoveRun(const org::RunRef& a_from, const org::RunRef& a_to) const = 0;
+		};
+
+		/** @brief Each live RunSlots' value stored at a_from is stored at a_to instead. */
+		static void MoveAll(const org::RunRef& a_from, const org::RunRef& a_to)
+		{
+			auto& registry = Get();
+			std::scoped_lock lock(registry.mutex);
+			for (const auto* entry : registry.entries)
+				entry->MoveRun(a_from, a_to);
+		}
+
+		static void Add(const Entry* a_entry)
+		{
+			auto& registry = Get();
+			std::scoped_lock lock(registry.mutex);
+			registry.entries.push_back(a_entry);
+		}
+
+		static void Remove(const Entry* a_entry)
+		{
+			auto& registry = Get();
+			std::scoped_lock lock(registry.mutex);
+			std::erase(registry.entries, a_entry);
+		}
+
+	private:
+		static RunSlotsRegistry& Get()
+		{
+			// Never destroyed: RunSlots in static objects remove themselves during static destruction.
+			static auto* registry = new RunSlotsRegistry;
+			return *registry;
+		}
+
+		std::mutex mutex;
+		std::vector<const Entry*> entries;
+	};
+
+	/**
 	 * @brief One value per run, handed from a client's commit to the pass that records that run: the commit Stores at the host's
 	 * CurrentRun, the pass Takes at its PassRecordContext::Run. A pass without a revision is never current, so its ticket is prepared
 	 * again after the commit, for the same run: that preparation's Take finds the value. A value is found only by its own run (lease
@@ -86,9 +133,26 @@ namespace RenderGraph
 	 * Thread-safe. The entries grow with the host's lease indices (the most runs in flight).
 	 */
 	template <class T>
-	class RunSlots
+	class RunSlots final : public RunSlotsRegistry::Entry
 	{
 	public:
+		RunSlots() { RunSlotsRegistry::Add(this); }
+		~RunSlots() { RunSlotsRegistry::Remove(this); }
+		RunSlots(const RunSlots&) = delete;
+		RunSlots& operator=(const RunSlots&) = delete;
+
+		/** @brief A stage's commit: the value stored at a_from (its staging run) is stored at a_to (the run that submits it). */
+		void MoveRun(const org::RunRef& a_from, const org::RunRef& a_to) const override
+		{
+			std::scoped_lock lock(mutex);
+			if (a_from.lease >= entries.size() || !(entries[a_from.lease].run == a_from))
+				return;
+			auto value = std::exchange(entries[a_from.lease].value, nullptr);
+			if (entries.size() <= a_to.lease)
+				entries.resize(static_cast<std::size_t>(a_to.lease) + 1);
+			entries[a_to.lease] = { a_to, std::move(value) };
+		}
+
 		void Store(const org::RunRef& a_run, std::shared_ptr<const T> a_value) const
 		{
 			std::scoped_lock lock(mutex);

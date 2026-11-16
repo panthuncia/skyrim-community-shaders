@@ -155,6 +155,17 @@ namespace RenderGraph::Engine::Skeleton
 
 		std::size_t HostIndex(Host a_host) { return static_cast<std::size_t>(a_host); }
 
+		/**
+		 * @brief Whether a host is an anchor a CS stage holds (pre-main's EngineDraws and Prepass steps, the deferred stage's DeferredPasses
+		 * step, the water stage's EngineDraws and ImageSpace steps). Its clears are passes of the stage: the engine's call stages their gate entry
+		 * and colour into the stage's frame inputs (FrameAnchors::StageInputs), and the stage's one commit carries them. Nothing waits for
+		 * a host epoch, so no order between the call and the host's tap matters.
+		 */
+		bool StageHost(Host a_host)
+		{
+			return a_host == Host::Prepass || a_host == Host::EngineDraws || a_host == Host::DeferredPasses || a_host == Host::ImageSpace;
+		}
+
 		/** @brief CS_ORG_SEGMENT_CLEARS (native mode with segments, default on; =0 every clear and copy keeps its own anchor's ticket). */
 		bool HostingOn()
 		{
@@ -358,9 +369,6 @@ namespace RenderGraph::Engine::Skeleton
 			// A world frame's copy runs in this host's next run (Host::Own: its own anchor's ticket).
 			Host host = Host::Own;
 			bool hostedRegistered = false;
-			bool hostedPending = false;
-			bool hostedSkipped = false;
-			std::shared_ptr<RunGate> hostedGate;
 			FrameAnchors::Texture source, target;
 			std::shared_ptr<RunGate> gate;  // one entry, opened by the commit: the copy is gated, so it can run in a frame phase
 			const void* sourceTexture = nullptr;
@@ -765,20 +773,6 @@ namespace RenderGraph::Engine::Skeleton
 			}
 		}
 
-		/**
-		 * @brief Whether an epoch that may run between a hosted clear's tap and its host leaves the target alone:
-		 * - light culling, between Main::Draw's clears and the Prepass anchor (it reads the depth and writes its own lists);
-		 * - the kMAIN copy's own ticket, between the water targets' clear and the next ImageSpace batch (it reads kMAIN and writes its copy).
-		 */
-		bool AllowedBetween(Host a_host, std::uint32_t a_segment)
-		{
-			if (a_host == Host::Prepass)
-				return a_segment == static_cast<std::uint32_t>(RenderGraphRuntime::Segment::LightCulling);
-			if (a_host == Host::ImageSpace)
-				return a_segment == FrameAnchors::RunSegment(Anchor::EngineCopy);
-			return false;
-		}
-
 		/** @brief Whether the host can hold passes: a DCLF epoch in native mode, or an anchor with an epoch. */
 		bool HostAvailable(Host a_host)
 		{
@@ -950,8 +944,13 @@ namespace RenderGraph::Engine::Skeleton
 						.gated = true,
 						.gpuGated = true });
 				}
-				client.active = [a_group, host] { return HasHostedPending(a_group, host); };
-				client.commit = [a_group, host](const FrameAnchors::Point&) { CommitHosted(a_group, host, false); };
+				if (StageHost(host)) {
+					// A pass of a CS stage: the engine's call stages its entry and colour (Take); its step's tap has nothing to commit.
+					client.active = [] { return false; };
+				} else {
+					client.active = [a_group, host] { return HasHostedPending(a_group, host); };
+					client.commit = [a_group, host](const FrameAnchors::Point&) { CommitHosted(a_group, host, false); };
+				}
 				client.gates = { group.gate };
 				group.hostedRegistered[h] = FrameAnchors::Register(std::move(client));
 				if (!group.hostedRegistered[h]) {
@@ -974,7 +973,7 @@ namespace RenderGraph::Engine::Skeleton
 		/** @brief Whether a world frame's clear can go to a_host now: its graph holds this registration's passes. */
 		bool HostReady(Group a_group, Host a_host)
 		{
-			if (a_host == Host::Own || !HostingOn() || !WorldFrame())
+			if (a_host == Host::Own || StageHost(a_host) || !HostingOn() || !WorldFrame())
 				return false;
 			const auto& group = GroupOf(a_group);
 			const auto h = HostIndex(a_host);
@@ -1142,8 +1141,24 @@ namespace RenderGraph::Engine::Skeleton
 				return false;
 			a_pending.gateEntry = draw->entry;
 			a_pending.target = a_target;
-			// A world frame's clear waits for the epoch that writes the view first (an early tap: its host's commit writes it).
-			if (const auto host = HostFor(a_target, a_flags); HostReady(group, host)) {
+			const auto host = HostFor(a_target, a_flags);
+			// A world frame's clear of a target a CS stage clears: its entry and colour are staged into the stage's frame inputs now.
+			if (StageHost(host) && HostingOn() && WorldFrame() && !GroupOf(group).hosted[HostIndex(host)].empty()) {
+				const auto* spec = &state;
+				const bool staged = FrameAnchors::StageInputs(HostedClientId(IndexOf(group), host), [&] {
+					const org::RunRef run = RunGate::Current();
+					if (!a_pending.depth)
+						spec->colours->WriteValue(run, a_pending.gateEntry * RunGate::kEntryBytes, a_pending.colour);
+					spec->gate->OpenDraw(run, a_pending.gateEntry);
+				});
+				if (staged) {
+					++state.taken;
+					RenderGraph::Frame::Driver::NoteHosted(kHostInfo[HostIndex(host)].name, 1);
+					return true;
+				}
+			}
+			// A world frame's clear waits for the Drawcall Limit Fix epoch (or the reflection faces' anchor) that writes the view first.
+			if (HostReady(group, host)) {
 				a_pending.host = host;
 				state.hostedPending.push_back(a_pending);
 				return true;
@@ -1227,13 +1242,16 @@ namespace RenderGraph::Engine::Skeleton
 				return;
 			}
 			AnchorPasses::Builder builder(kCopyAnchors[index], kCopyIds[index], 0, {}, copy.gate);
+			// With hosting the depth copy is a pass of the pre-main stage, which runs it in every execution (Main::RenderDepth always
+			// copies there): ungated. Its own anchor's epoch runs only when the engine's call asks for it, so ungated is right there too.
+			const bool declared = a_kind == CopyKind::Depth && HostingOn();
 			builder.Add(AnchorPasses::Copy{
 				.name = kCopySteps[index],
 				.source = copy.source,
 				.target = copy.target,
 				.width = copy.source.Width(),
 				.height = copy.source.Height(),
-				.gate = 0u });
+				.gate = declared ? std::nullopt : std::optional<std::uint32_t>(0u) });
 			FrameAnchors::ClientDesc client{};
 			client.id = kCopyIds[index];
 			client.passes = builder.Take();
@@ -1282,45 +1300,39 @@ namespace RenderGraph::Engine::Skeleton
 				copy.host = Host::Own;
 				return;
 			}
-			if (!copy.hostedGate)
-				copy.hostedGate = RunGate::Create(id, 1);
-			if (!copy.hostedGate)
-				return;
-			AnchorPasses::Builder builder(info.anchor, id, std::numeric_limits<std::int32_t>::min(), {}, copy.hostedGate);
+			// A declared pass of the deferred stage, first at its DeferredPasses step: ungated, it runs in every execution of
+			// the stage (Deferred::DeferredPasses copies in every world frame). The engine's call only checks that the stage holds it.
+			AnchorPasses::Builder builder(info.anchor, id, std::numeric_limits<std::int32_t>::min(), {}, nullptr);
 			builder.Add(AnchorPasses::Copy{
 				.name = fmt::format("{}@{}", kCopySteps[index], info.name),
 				.source = copy.source,
 				.target = copy.target,
 				.width = copy.source.Width(),
 				.height = copy.source.Height(),
-				.gate = 0u });
+				.gate = std::nullopt });
 			FrameAnchors::ClientDesc client{};
 			client.id = id;
 			client.passes = builder.Take();
-			client.gates = { copy.hostedGate };
-			client.active = [a_kind] { return CopyOf(a_kind).hostedPending; };
-			client.commit = [a_kind, host](const FrameAnchors::Point&) {
-				auto& state = CopyOf(a_kind);
-				if (!state.hostedPending)
-					return;
-				state.hostedGate->OpenDispatch(RunGate::Current(), 0, 1);
-				state.hostedPending = false;
-				RenderGraph::Frame::Driver::NoteHosted(kHostInfo[HostIndex(host)].name, 1);
-			};
+			client.active = [] { return false; };
 			copy.hostedRegistered = FrameAnchors::Register(std::move(client));
 			copy.host = copy.hostedRegistered ? host : Host::Own;
 			if (copy.hostedRegistered)
 				logger::info("[ORG] engine skeleton: in a world frame {} runs first at the {} anchor", kCopyNames[index], FrameAnchors::Name(info.anchor));
 		}
 
-		/** @brief Whether a world frame's copy can go to its host now: the host anchor's graph holds this registration's pass. */
-		bool CopyHostReady(CopyKind a_kind)
+		/**
+		 * @brief Whether a world frame's depth copy is a declared pass of the stage open now: the pre-main stage's (Main::RenderDepth's
+			 * copy) or the deferred stage's (CS's own in Deferred::DeferredPasses). The engine's call then does nothing more.
+		 */
+		bool CopyDeclared(CopyKind a_kind, bool a_hostable)
 		{
 			const auto& copy = CopyOf(a_kind);
-			if (copy.host == Host::Own || !copy.hostedRegistered || !HostingOn() || !WorldFrame())
+			if (a_kind != CopyKind::Depth || !HostingOn() || !WorldFrame())
 				return false;
-			const auto& info = kHostInfo[HostIndex(copy.host)];
-			return FrameAnchors::CanRun(fmt::format("{}@{}", kCopyIds[static_cast<std::size_t>(a_kind)], info.name), info.anchor);
+			if (a_hostable)
+				return copy.host != Host::Own && copy.hostedRegistered &&
+				       FrameAnchors::CanTap(fmt::format("{}@{}", kCopyIds[static_cast<std::size_t>(a_kind)], kHostInfo[HostIndex(copy.host)].name));
+			return copy.registered && FrameAnchors::CanTap(kCopyIds[static_cast<std::size_t>(a_kind)]);
 		}
 
 		/**
@@ -1333,9 +1345,8 @@ namespace RenderGraph::Engine::Skeleton
 			auto& copy = CopyOf(a_kind);
 			if (copy.failed || !Usable())
 				return false;
-			if (a_hostable && EngineTexturesOf(a_kind) == std::pair{ copy.sourceTexture, copy.targetTexture } && CopyHostReady(a_kind)) {
-				copy.hostedPending = true;
-				copy.hostedSkipped = false;
+			if (EngineTexturesOf(a_kind) == std::pair{ copy.sourceTexture, copy.targetTexture } && CopyDeclared(a_kind, a_hostable)) {
+				RenderGraph::Frame::Driver::NoteHosted(a_hostable ? "deferred stage" : "pre-main stage", 1);
 				return true;
 			}
 			if (EngineTexturesOf(a_kind) != std::pair{ copy.sourceTexture, copy.targetTexture }) {
@@ -1451,21 +1462,13 @@ namespace RenderGraph::Engine::Skeleton
 			auto& state = Skel();
 			for (std::size_t g = 0; g < kGroups; ++g)
 				for (auto& pending : state.groups[g].hostedPending) {
-					if (pending.skipped || HostSegment(pending.host) == segment || AllowedBetween(pending.host, segment))
+					if (pending.skipped || HostSegment(pending.host) == segment)
 						continue;
 					pending.skipped = true;
 					RenderGraph::Frame::Driver::NoteTapError(RenderGraph::Frame::Driver::TapError::HostSkipped, RenderGraph::Frame::SegmentId::Count,
 						fmt::format("the {} clear of {} waits for its host ({}), and segment {} was submitted first", kGroupNames[g], TargetName(pending.target),
 							kHostInfo[HostIndex(pending.host)].name, segment));
 				}
-			for (std::size_t c = 0; c < kCopies; ++c) {
-				auto& copy = state.copies[c];
-				if (!copy.hostedPending || copy.hostedSkipped || HostSegment(copy.host) == segment)
-					continue;
-				copy.hostedSkipped = true;
-				RenderGraph::Frame::Driver::NoteTapError(RenderGraph::Frame::Driver::TapError::HostSkipped, RenderGraph::Frame::SegmentId::Count,
-					fmt::format("{} waits for its host ({}), and segment {} was submitted first", kCopyNames[c], kHostInfo[HostIndex(copy.host)].name, segment));
-			}
 		}
 
 		/** @brief First in a Drawcall Limit Fix host's commit: the clears its graph holds are written into its run. */
@@ -1495,8 +1498,6 @@ namespace RenderGraph::Engine::Skeleton
 			std::uint32_t abandoned = 0;
 			for (auto& group : state.groups)
 				abandoned += static_cast<std::uint32_t>(std::exchange(group.hostedPending, {}).size());
-			for (auto& copy : state.copies)
-				abandoned += std::exchange(copy.hostedPending, false) ? 1u : 0u;
 			if (abandoned)
 				RenderGraph::Frame::Driver::NoteHosted("abandoned at a load's start", abandoned);
 			return;
@@ -1509,10 +1510,6 @@ namespace RenderGraph::Engine::Skeleton
 						kHostInfo[HostIndex(pending.host)].name));
 			group.hostedPending.clear();
 		}
-		for (std::size_t c = 0; c < kCopies; ++c)
-			if (std::exchange(state.copies[c].hostedPending, false))
-				RenderGraph::Frame::Driver::NoteTapError(RenderGraph::Frame::Driver::TapError::HostMissing, RenderGraph::Frame::SegmentId::Count,
-					fmt::format("{} waited for its host ({}) until the frame ended; dropped", kCopyNames[c], kHostInfo[HostIndex(state.copies[c].host)].name));
 	}
 
 	void Reserve()

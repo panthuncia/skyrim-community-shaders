@@ -599,17 +599,15 @@ namespace FrameAnchors
 	bool RegionsOn();
 
 	/**
-	 * @brief Whether the declared frame's segments are on (docs/development/org-native-frame-graph.md, "The declared frame"): native
-	 * mode unless CS_ORG_SEGMENTS=0, with epochs, async epochs and replayable recordings, the phases off. The segments' executions are
-	 * open (CS_ORG_SEGMENTS=3 closes them). Each segment is one graph, revision-driven, recorded on the host's
-	 * thread for each description of the segment (RenderGraph::Frame::Description) and kept per frame slot. Its steps are hooks in
-	 * frame order: anchors it holds wholly (which then have no epoch of their own), named clients of shared anchors, and other
-	 * modules' epochs (SetForeignPasses). The frame's first tap of a segment takes its ticket; each tap's clients commit into its run
-	 * (this frame slot's latch regions and gates); the end tap submits it. Segments: pre-depth (EarlyPrepass), pre-main (RenderDepth's
-	 * depth copy to Prepass; CS_ORG_SEGMENT_PREMAIN=0 off), deferred (DeferredPasses to PostComposite; CS_ORG_SEGMENT_DEFERRED=0
-	 * off), and the post chain's two (CS_ORG_SEGMENT_POST_DRAW=0 off): post composites (the VolumetricLighting anchor, the
-	 * pre-tonemap composites from the pass-state table, the PostProcessing anchor) and post end-of-frame (the Upscale anchor, the
-	 * end-of-frame effects from the table around the Tonemap anchor, to RenderEndOfFrameEffects' return). Guest mode keeps the
+	 * @brief Whether the declared frame's stages are on (docs/development/org-native-frame-graph.md, "The recipe"): native mode unless
+	 * CS_ORG_SEGMENTS=0, with epochs, async epochs and replayable recordings, the phases off. Each CS stage is one graph, revision-driven,
+	 * recorded on the host's thread for each description of it (RenderGraph::Frame::Description) and kept per frame slot. Its steps are
+	 * hooks in frame order: anchors it holds wholly (which then have no epoch of their own), named clients of shared anchors, and other
+	 * modules' epochs (SetForeignPasses). A tap stages its clients' values into the frame slot's staging run (the frame inputs); no
+	 * ticket is taken there. The stage's commit point (its last step) copies the staged values into the slot's copy and submits the one
+	 * ticket. Stages: pre-depth (EarlyPrepass), pre-main (RenderDepth's depth copy to Prepass; CS_ORG_SEGMENT_PREMAIN=0 off), deferred
+	 * and water (DeferredPasses to just before the forward epoch; CS_ORG_SEGMENT_DEFERRED=0 off), and the post chain's two
+	 * (CS_ORG_SEGMENT_POST_DRAW=0 off): post composites and post end-of-frame, drawn from the pass-state table. Guest mode keeps the
 	 * anchors' epochs. Any thread.
 	 */
 	bool SegmentsOn();
@@ -630,6 +628,14 @@ namespace FrameAnchors
 	 * A segment-only client (ClientDesc::segmentOnly) takes work only then. Render owner.
 	 */
 	bool CanTap(std::string_view a_id);
+
+	/**
+	 * @brief Writes frame inputs for client a_id outside its step's tap: a_write runs with GraphHost::CurrentRun the frame slot's staging
+	 * run of the stage that holds the client, while that stage's window is open and the frame's schedule has the client on. What it
+	 * writes (gate entries, latch values) reaches the GPU with the stage's one commit. For data the engine hands over at a call that is
+	 * not the step's hook (the renderer clear colour at its clear call). False, and a_write not called, otherwise. Render owner.
+	 */
+	bool StageInputs(std::string_view a_id, const std::function<void()>& a_write);
 
 	/**
 	 * @brief A CS point that ends a declared segment and is no anchor (a point step: RenderEndOfFrameEffects' return ends the post

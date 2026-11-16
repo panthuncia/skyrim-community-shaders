@@ -3332,7 +3332,7 @@ namespace RenderGraph::Engine::ImageSpace
 			using Frame::SegmentId;
 			const auto segment = a_part == PostPart::Composites                         ? SegmentId::PostComposites :
 			                     a_part == PostPart::Hdr || a_part == PostPart::Final ? SegmentId::PostEnd :
-			                                                                            SegmentId::World;
+			                                                                            SegmentId::Water;
 			const auto& rows = Frame::Driver::Current().Segment(segment).rows;
 			return a_index < 256 && (rows[a_index / 64] >> (a_index % 64) & 1u) != 0;
 		}

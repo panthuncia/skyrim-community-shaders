@@ -2891,12 +2891,12 @@ family = "org"
 kind = "other"
 description = ""
 
-[key."org.segment_world"]
-env = "CS_ORG_SEGMENT_WORLD"
+[key."org.recipe_fatal"]
+env = "CS_ORG_RECIPE_FATAL"
 type = "string"
 family = "org"
 kind = "other"
-description = ""
+description = "World recipe findings stop the game (default: as CS_ORG_MISMATCH_FATAL)"
 
 [key."org.segments"]
 env = "CS_ORG_SEGMENTS"
@@ -3347,5 +3347,19 @@ description = ""
 env = "VK_LOADER_LAYERS_ENABLE"
 type = "string"
 family = "vk"
+kind = "other"
+description = ""
+
+[key."org.mismatch_fatal"]
+env = "CS_ORG_MISMATCH_FATAL"
+type = "string"
+family = "org"
+kind = "other"
+description = "A mismatch between the frame's schedule and the engine stops the game (default: on in development builds)"
+
+[key."org.segment_world"]
+env = "CS_ORG_SEGMENT_WORLD"
+type = "string"
+family = "org"
 kind = "other"
 description = ""

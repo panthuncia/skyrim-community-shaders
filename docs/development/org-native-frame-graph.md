@@ -2749,3 +2749,195 @@ keeps the read at the chain's entry, and its rows are all on). ORG was not chang
   chains (what CS's upscaler left), which equal the frame's in steady play; an upscaler switch cuts the post end-of-frame segment for a
   few frames while the new rows record (native-upscalers: 9 to 10 cuts for four switches). Computing them up front belongs with the
   CS-owned post stage.
+
+## The recipe (recipe plan, stage 2; 2026-11-15, `org-native/phases`)
+
+Native mode with stages on (`CS_ORG_SEGMENTS`, default). Guest mode keeps its per-anchor path.
+
+### What a recipe is
+
+`src/RenderGraph/Frame/Recipe.{h,cpp}`. The world frame is a fixed list of stages, in the shape of BasicRenderer's
+`PipelineRecipe`: recipe order is pass order.
+
+| # | Stage | Owner | Epochs | Commit point |
+|---|---|---|---|---|
+| 1 | start | tickets at hooks | decal queries, reflection prepass, cube clears, DCLF reflection, face sky | each hook |
+| 2 | shadows | DCLF | shadow clears' anchor, shadow view, sky occlusion | DCLF's shadow views |
+| 3 | pre-depth | CS | `DeclaredPreDepth` | the EarlyPrepass hook |
+| 4 | depth | DCLF | Z-prepass, first-person depth | Main::RenderDepth |
+| 5 | pre-main | CS | `DeclaredPreMain` | the Prepass hook |
+| 6 | opaque | DCLF | sky's anchor, main opaque | the main pass |
+| 7 | deferred | CS | `DeclaredDeferred` | the PostComposite hook |
+| 8 | water | anchors' tickets (CS with `CS_ORG_SEGMENT_WORLD=1`) | `DeclaredWorld`, or the EngineDraws, ImageSpace and EngineCopy anchors | just before the forward epoch (`FlushRegions`), or each hook |
+| 9 | forward | DCLF | frame-group clears' anchor, forward, sun queries | the blended draw |
+| 10 | first person | DCLF | first person | Main::RenderFirstPersonView |
+| 11 | post | CS (table) | the two post stages, the Tonemap and FrameGeneration anchors | PostProcessing, then RenderEndOfFrameEffects' return |
+| 12 | UI | tickets at hooks | movie tiles, interface, present, overlay, HDR output, capture | each hook |
+
+A CS stage is a FrameAnchors declared segment: one revision-driven epoch, one kept recording per frame slot, the schedule of
+stage 1 of this plan, one ticket a frame. A feature contributes passes as before (`ClientDesc::passes`); the stage that holds its
+anchor holds them, ordered by step and order key, and the stage's graph orders them by what they declare.
+
+Anchors that run at several places a frame (ImageSpace, EngineDraws, EngineCopy, the frame-group clears) are placed where they
+run in a steady world frame. Their real order varies, so the check below treats their place as nominal.
+
+### The check and the print
+
+Each epoch's schedule is read as its graph was built (`org::RenderGraph::TraceSelectedSchedule`): on the build thread when the
+build manager builds it, taken at its attach; else, once per build, on the render owner at `Renderer::Begin` (setup builds), at
+most two a frame. When every epoch of the recipe has a trace of its current build, the recipe is checked and printed:
+
+- Within a stage, its graph orders its passes; the check is between stages.
+- A read is fine when the reading stage or an earlier one writes the resource. A read of something no graph writes comes from
+  outside the graphs (uploads, files, the engine), counted.
+- A read whose writers are all in later stages is the previous frame's. It must be listed in `kPreviousFrame` (12 names, each
+  checked by hand: the refraction normals, underwater mask, water displacement pair and flow map, kMAIN_ONLY_ALPHA and kMAIN_COPY
+  written by forward or post; the sky IBL, Terrain Blending's blended depth and the dynamic cubemaps read by the start stage;
+  Volumetric Lighting's depth copy read by the menu scenes' fog).
+- DCLF's stages are counted apart: their graphs declare the whole binding table their shaders may read (the light lists, the
+  shadow mask, the luminance chain).
+- Anything else is a finding: fatal in development builds, logged in release (`CS_ORG_RECIPE_FATAL=0/1` overrides; default as
+  `CS_ORG_MISMATCH_FATAL`).
+
+The print (`[ORG] world recipe: <n> <stage> (...): pass [reads ...; writes ...]; ...`) is one line per stage, logged when the
+recipe's passes change (12 times a session at most), and `CS_ORG_EPOCH_STATS=1` adds a census line.
+
+### Frame inputs and the one commit
+
+ORG gives each revision-driven epoch one staging run per published copy (`GraphHost::EpochStagingRun`): a lease index no run
+opens and no recording reads.
+- At Begin each present CS stage zeroes its frame slot's staging run, clears every run gate's record of it and closes its
+  clients' gates there.
+- A tap (a step's hook) runs its clients' commits with `CurrentRun()` the staging run (`GraphHost::UseRun`). Latch values, gate
+  words, shared constants and `RunSlots` values all land there. No ticket is taken.
+- The stage's last step is its commit. `SubmitSegment` pins the slot's copy, and inside the ticket's `beforeSubmit` copies the
+  staging run onto the copy's run: `LatchBlock::CopyStableRun` (latch regions), `RunGate::CopyOpenAll` (every gate's open
+  record, including gates a client does not list), `RunSlotsRegistry::MoveAll`. Then the kept recording is submitted.
+- A staged tap still counts as run for its callers: its executed callbacks run at the tap, as an early tap of a held ticket did.
+- `FrameAnchors::StageInputs(id, write)` stages data for a stage client from a call that is not its step's hook (an engine clear
+  call, below).
+
+Why each commit point is complete and nothing that must follow the stage is submitted before it: the same hooks as before (the
+segments' table in the declared frame's stage 3 and 5). What runs between a stage's first tap and its commit is counted
+(`GPU work submitted between a stage's first tap and its commit`): none in steady frames.
+
+The staged values are plain bytes and handles. A later render thread can keep a staging run per slot as its input block.
+
+### Clears and copies
+
+| Clear or copy | Now, a native world frame |
+|---|---|
+| kSHADOW_MASK, the normals targets and kMAIN (pre-main) | a clear pass of the stage; the engine's call stages its gate entry and colour into the stage's frame inputs (`StageInputs`) |
+| The water stencil, kWATER_1/2 (water) | the same with the water stage on; with it off (the default) the frame-group anchor's ticket |
+| Depth copy at RenderDepth's end (pre-main) | a declared, ungated copy pass of the stage; the engine's call does nothing more |
+| CS's depth copy in Deferred::DeferredPasses (deferred) | a declared, ungated copy pass, first in the stage |
+| kMAIN into its copy (water) | unchanged: a gated copy at the EngineCopy anchor (a step of the water stage when it is on) |
+| Shadow slices, main depth | unchanged: gated clears hosted at the start of DCLF's shadow-view and Z-prepass graphs |
+| Reflection faces | unchanged: hosted at the face sky's anchor (start stage) |
+| TAA mask, kMAIN_ONLY_ALPHA, precipitation occlusion | unchanged: the frame-group or shadow-group anchor's ticket |
+
+`AllowedBetween` is gone (only the stage hosts used it); the copies' hosted CPU record (`hostedPending`) is gone. The hosted
+record, `host skipped` and `host missing` remain for the DCLF and reflection-face hosts. Other frame kinds keep the per-anchor
+path.
+
+### The water stage is off by default
+
+With its taps staged, the water stage loses interiors' ambient light. Dragonsreach's mean brightness in the validation tour:
+
+| Build and switches (validation tour, measured) | Dragonsreach |
+|---|---|
+| guest mode | 101.3 |
+| stage 1 of this plan (held tickets) | 89.8 to 98.0 over 6 runs |
+| staged, deferred and water merged | 39.6, 40.3 |
+| staged, merged, `CS_ORG_SEGMENT_CLEARS=0` | 39.5 |
+| staged, merged stage off | 92.7 |
+| staged, split, before the gate fix | 47.1 |
+| staged, split, after the gate fix | 63.4, 44.8 (deferred off), 59.3 (`CS_ORG_SEGMENT_CLEARS=0`) |
+| staged, water stage off | 92.9 |
+| staged, deferred on, water stage off (the default) | 93.0 |
+
+Exteriors match in every run. One cause was found and fixed on the way: the deferred composite's run gate is not in its client's
+`gates`, so its open record never reached the submitted run (`RunGate::CopyOpenAll` now copies every live gate's). The water stage's
+remaining fault is not found: no GPU work runs between its taps and its commit, and the clears are not it. Its clients are the
+water draws, the RenderWorld scopes drawn from the pass-state table (SAO, SSR, snow, the SAO and fog composite), the kMAIN copy and the
+hosted clears; the scopes' commits (`ImageSpace.cpp`, `CommitBatch`) are the next suspects. So `CS_ORG_SEGMENT_WORLD` defaults off
+(its anchors keep their tickets, as before the declared frame's stage 5) and `=1` turns it on.
+
+The deferred and water work can be one stage once the water stage is right: every tap has staged by the forward epoch, and the census
+saw no GPU work between them. Merged, it showed the water stage's fault, so it was split.
+
+`CommitBatch` also keeps the sources of a run until the run's lease index runs again; a staging run (and a held copy run before it)
+names the same run every frame, so those lists only grow. Not fixed here.
+
+### ORG
+
+- `GraphHost::EpochStagingRun`, `GraphHost::UseRun`, `LatchBlock::CopyStableRun` (persistent-epochs.md, "Segments"); test in
+  `PersistentVulkanHostTests` (Segment).
+- `RenderGraph::TraceSelectedSchedule(epoch)`: an epoch's schedule traced on demand.
+
+### Measurements
+
+perf-taa, native Vulkan, Perf-Fast, Tracy, one run each. Before: stage 1's final run (measured then, the same machine). After:
+this stage's final build (water stage off by default).
+
+| perf-taa | Before (stage 1) | After |
+|---|---|---|
+| fps between the marks | 123.2 | 120.9 |
+| Tickets a frame | 19.94 | 28.93 |
+| `vkQueueSubmit` calls a frame (RHI; plus 1 external) | 30.01 | 34.80 |
+| Entry / body barriers a frame | 630 / 852 | 899 / 1205 |
+| Render thread busy, ms a frame | 2.76 | 3.59 |
+| Submission thread busy, ms a frame (of it the present closure) | 2.50 | 3.69 (0.58) |
+| Host thread busy, ms a frame | 1.26 | 2.34 |
+| Recordings and schedule switches in the steady window | 0, 0 | 0, 0 |
+
+The ticket, barrier and thread differences come from the water stage being off: its work is back on five ImageSpace, two
+EngineDraws, one EngineCopy and two more frame-group clear tickets, as before the declared frame's stage 5 (stage 0 measured that
+configuration at 26.9 tickets and 869 / 1235 barriers). The stages themselves cost what their segments did:
+
+| Per ticket (after, measured) | Submission thread `FinishTicket`, us | of it admission | of it inline recording | Render thread `ExecuteEpoch`, us | Stage 1's segment (submission, us) |
+|---|---|---|---|---|---|
+| pre-depth | 71.4 | 7.8 | 2.6 | 21.9 | 67 |
+| pre-main | 96.0 | 9.5 | 37.6 | 30.7 | 88 |
+| deferred | 108.7 | 8.7 | 38.2 | 12.6 | 112 |
+| post composites | 19.9 | 5.7 | 1.3 | 16.9 | 17 |
+| post end-of-frame | 21.2 | 6.0 | 0.0 | 19.9 | 38 |
+
+The commit's copy (`CS.Stage.CopyLatch`, `CopyGates`, `MoveSlots`) is a few microseconds a stage once the staging run lives in
+host memory; in the GPU-visible arena it was 0.8 ms a stage (88 fps).
+
+### Checks
+
+The final build, one run each, `CS_TEST_BACKGROUND=1`, mismatches and recipe findings fatal: native-quick (DLSS registered),
+native-d3d12-quick, native-river, native-upscalers (four registered), native-validation (the known 20x `VUID-vkCmdDraw-None-09600`
+only; Dragonsreach 97.0, inventory and map equal to stage 1's), the loading-thread run, first and third person, guest-quick: all
+passed, 0 tap errors, 0 recipe findings. The steady recipe: 329 passes, 8 inputs from the previous frame, 81 from outside the graphs.
+
+The fatal paths fired during development, each a finding fixed before the final runs: the recipe checked before every epoch had a
+trace (a partial recipe misses writers), anchors that run at several places placed in one stage, and the cross-stage reads now in
+`kPreviousFrame`.
+
+### What is left of the old segment API, and who uses it
+
+- Shared steps (the EngineDraws, ImageSpace, EngineCopy and Tonemap anchors' named clients), the point steps (the water stage's and
+  post end-of-frame's ends), `repeats` (the water draws and the post table's batches), instances, `CutSegment` (the post table and
+  the water stage's scopes): used by the post stages and the water stage, which stage 3 replaces.
+- `CanRun` and `RequestJoin`: every anchor client outside the stages, the skeleton's per-anchor path, and the clients of absent
+  stages.
+- Hosted clears (`HostReady`, the CPU record, `host skipped`/`host missing`): the DCLF shadow-view and Z-prepass hosts and the
+  reflection faces' anchor.
+- D3D11 `Replay` and `RunCopy`'s anchor run: other frame kinds, absent frames, and the clears that keep tickets in world frames.
+- Guest mode: every anchor's own epoch, unchanged.
+
+### What stage 3 should know
+
+- A stage commits with one copy from its staging run. Anything a commit stores per run must go through a `LatchBlock`, a `RunGate`
+  or `RunSlots`: the commit moves those. A gate a client does not list is handled now; other per-run state keyed by `CurrentRun()`
+  is not (ImageSpace's `CommitBatch` keeps sources per run index, and a stable run names the same run every frame, so its list
+  grows).
+- The water stage's interior fault is the open item that blocks merging deferred and water into one stage.
+- The recipe check reads each epoch's built schedule. A post stage that owns its targets will show its reads and writes there.
+- Recording a built graph before its attach (so a build and its recordings switch in together) was not done:
+  `BuildEpochGraph` leaves the alias placement to the graph's first preparation on the host's thread, against the running graph's
+  shared transients, and `RequestEpochRecording` records only for an attached instance. Both would need a pending instance in the
+  host.

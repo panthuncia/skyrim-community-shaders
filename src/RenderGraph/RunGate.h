@@ -73,6 +73,21 @@ namespace RenderGraph
 		/** @brief a_entry draws a_vertices vertices a_instances times in a_run. */
 		void OpenDraw(const org::RunRef& a_run, std::uint32_t a_entry, std::uint32_t a_vertices = 3, std::uint32_t a_instances = 1) const;
 
+		/**
+		 * @brief A stage's commit (FrameAnchors): which entries a_to has open becomes what a_from had open (IsOpen's copy). The latch
+		 * words travel with the run's latch regions (org::LatchBlock::CopyStableRun); this copies the gate's own record of them.
+		 */
+		void CopyOpen(const org::RunRef& a_from, const org::RunRef& a_to) const;
+
+		/**
+		 * @brief CopyOpen for every live gate, whether or not its client lists it (ClientDesc::gates): a stage's commit moves every
+		 * gate's record of its staging run onto the run it submits. Render thread.
+		 */
+		static void CopyOpenAll(const org::RunRef& a_from, const org::RunRef& a_to);
+
+		/** @brief Every live gate's record of a_run closed (Close's record, not its latch words). Render thread. */
+		static void ClearOpenAll(const org::RunRef& a_run);
+
 		/** @brief The host's current run (GraphHost::CurrentRun): a commit's own. */
 		static org::RunRef Current();
 
@@ -91,6 +106,9 @@ namespace RenderGraph
 		std::uint32_t Offset(std::uint32_t a_entry) const { return a_entry * kEntryBytes; }
 
 		RunGate(std::shared_ptr<org::LatchBlock> a_latch, std::uint32_t a_entries);
+		~RunGate();
+		RunGate(const RunGate&) = delete;
+		RunGate& operator=(const RunGate&) = delete;
 
 	private:
 		/** @brief a_entry's words for a_run; a_work: they make the dispatch or draw do something. */

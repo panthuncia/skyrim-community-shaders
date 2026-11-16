@@ -3,9 +3,11 @@
 #	include "RenderGraph/BuildManager.h"
 
 #	include "RenderGraph/CensusWindow.h"
+#	include "RenderGraph/Frame/Recipe.h"
 #	include "RenderGraph/RenderGraphRuntime.h"
 
 #	include <OpenRenderGraph/GraphHost.h>
+#	include <Render/RenderGraph/RenderGraph.h>
 #	include <Resources/ResourceIdentifier.h>
 
 #	include <algorithm>
@@ -196,6 +198,15 @@ namespace RenderGraph
 			ContextScope scope(done->context);
 			try {
 				done->graph = desc.host->BuildEpochGraph(done->job.epoch, done->job.reason);
+				// The recipe check reads the schedule the build made, here on the build thread; the recipe takes it at the attach.
+				if (done->graph && done->graph->Built() && Frame::Recipes::Traced(done->job.epoch))
+					if (auto trace = Frame::Recipes::TraceEpochGraph(*done->graph->Graph(), done->job.epoch)) {
+						auto* host = desc.host;
+						const auto epoch = done->job.epoch;
+						done->context.attached.push_back([host, epoch, trace = std::move(trace)]() mutable {
+							Frame::Recipes::NoteTrace(epoch, host->BuildGeneration(epoch), std::move(trace));
+						});
+					}
 			} catch (const std::exception& e) {
 				done->error = e.what();
 			} catch (...) {

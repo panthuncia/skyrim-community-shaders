@@ -1,0 +1,380 @@
+#include "RenderGraph/Frame/Recipe.h"
+
+#if defined(CS_HAS_RENDER_GRAPH)
+
+#	include "RenderGraph/Frame/FrameDriver.h"
+#	include "RenderGraph/FrameAnchors.h"
+#	include "RenderGraph/RenderGraphRuntime.h"
+#	include "RenderGraph/Switches.h"
+
+#	include <OpenRenderGraph/GraphHost.h>
+#	include <Render/RenderGraph/RenderGraph.h>
+#	include <Render/RenderGraph/ScheduleTrace.h>
+
+#	include <algorithm>
+#	include <map>
+#	include <mutex>
+#	include <set>
+#	include <string>
+#	include <vector>
+
+namespace RenderGraph::Frame::Recipes
+{
+	namespace
+	{
+		using Segment = RenderGraphRuntime::Segment;
+
+		constexpr std::uint32_t kMaxEpochs = 8;
+
+		/** @brief One stage of the world recipe: its owner, its epochs in frame order, and where it commits. */
+		struct StageDesc
+		{
+			StageId id;
+			Owner owner;
+			std::array<Segment, kMaxEpochs> epochs;
+			std::uint32_t epochCount;
+			const char* commit;
+		};
+
+		// The world recipe. Recipe order is pass order. The CS stages are FrameAnchors' declared segments; their commit points and why
+		// each is safe are in FrameAnchors.cpp (kDeclaredInfo). Epochs of anchors not moved yet keep their tickets at their hooks.
+		constexpr std::array<StageDesc, kStages> kWorld{ {
+			{ StageId::Start, Owner::Tickets,
+				{ Segment::AnchorDecalQueries, Segment::AnchorReflectionsPrepass, Segment::AnchorEngineCubeClear, Segment::Reflection, Segment::AnchorSkyReflections }, 5,
+				"each anchor's hook" },
+			{ StageId::Shadows, Owner::Dclf, { Segment::AnchorEngineShadowClear, Segment::ShadowView, Segment::SkyOcclusion }, 3, "Drawcall Limit Fix's shadow views" },
+			{ StageId::PreDepth, Owner::Cs, { Segment::DeclaredPreDepth }, 1, "the EarlyPrepass hook (Main::RenderShadowMaps returned)" },
+			{ StageId::Depth, Owner::Dclf, { Segment::ZPrepass, Segment::FirstPersonDepth }, 2, "Main::RenderDepth" },
+			{ StageId::PreMain, Owner::Cs, { Segment::DeclaredPreMain }, 1, "the Prepass hook (the main pass's first opaque batch)" },
+			{ StageId::Opaque, Owner::Dclf, { Segment::AnchorSky, Segment::MainOpaque }, 2, "the main pass's opaque batches" },
+			{ StageId::Deferred, Owner::Cs, { Segment::DeclaredDeferred }, 1, "the PostComposite hook (the end of Deferred::StartDeferred's passes)" },
+			// The ImageSpace and EngineCopy anchors are not listed: their epochs hold work of several places in the frame (the RenderWorld
+			// scopes here, the post chain's cut parts and menus later), so no one place in the recipe is theirs.
+			{ StageId::Water, Owner::Tickets, { Segment::DeclaredWorld, Segment::AnchorEngineDraws }, 2,
+				"just before the forward epoch as a stage (CS_ORG_SEGMENT_WORLD=1), else each anchor's hook" },
+			{ StageId::Forward, Owner::Dclf, { Segment::AnchorEngineFrameClear, Segment::Forward, Segment::AnchorEngineQueries }, 3, "the engine's blended draw" },
+			{ StageId::FirstPerson, Owner::Dclf, { Segment::FirstPerson }, 1, "Main::RenderFirstPersonView" },
+			{ StageId::Post, Owner::Cs,
+				{ Segment::DeclaredPostComposites, Segment::DeclaredPostEnd, Segment::AnchorTonemap, Segment::AnchorFrameGeneration },
+				4, "the PostProcessing hook, then RenderEndOfFrameEffects' return" },
+			{ StageId::Ui, Owner::Tickets,
+				{ Segment::AnchorMovieTiles, Segment::AnchorInterface, Segment::AnchorPresent, Segment::AnchorOverlay, Segment::AnchorHDROutput, Segment::AnchorCapture },
+				6, "each anchor's hook" },
+		} };
+
+		/**
+		 * @brief Resources a stage reads before the stage that first writes them in the frame: the previous frame's contents, each
+		 * checked by hand against the stage that writes it. Exact graph resource names.
+		 * - written by forward or post and read earlier in the next frame: the refraction normals, the underwater mask, the water
+		 *   displacement pair and the water flow map (the water surface), kMAIN_ONLY_ALPHA (the reflections' ray march), kMAIN_COPY
+		 *   (the water surface);
+		 * - written by the deferred stages and read by the start stage's face sky: the sky's IBL and Terrain Blending's blended depth;
+		 * - the depth copy Volumetric Lighting makes in post, read by the menu scenes' local map fog (the EngineDraws anchor's own epoch);
+		 * - the dynamic cubemaps the deferred stage compresses, read by the start stage's face sky.
+		 * Drawcall Limit Fix's stages are not held to it: their graphs declare the whole binding table their shaders may read (the light
+		 * lists, the shadow mask, the luminance chain), so they "read" much that CS writes later; the check counts those apart.
+		 */
+		constexpr std::array<std::string_view, 12> kPreviousFrame{ "DynamicCubemaps::EnvTextureBC6H", "DynamicCubemaps::EnvReflectionsBC6H", "Engine::kREFRACTION_NORMALS", "Engine::kUNDERWATER_MASK", "Engine::kWATER_DISPLACEMENT",
+			"Engine::kWATER_DISPLACEMENT_SWAP", "Engine::Texture2D 320x320", "Engine::kMAIN_ONLY_ALPHA", "Engine::kMAIN_COPY", "IBL::SkyIBL",
+			"TerrainBlending::BlendedDepth16", "Engine::Depth::kMAIN_COPY" };
+
+		const char* OwnerName(Owner a_owner)
+		{
+			switch (a_owner) {
+			case Owner::Cs:
+				return "CS, one ticket";
+			case Owner::Dclf:
+				return "Drawcall Limit Fix";
+			default:
+				return "tickets at hooks";
+			}
+		}
+
+		struct Traced
+		{
+			std::uint64_t generation = 0;
+			std::shared_ptr<const org::ScheduleTrace> trace;
+		};
+
+		struct State
+		{
+			std::mutex mutex;
+			std::map<std::uint32_t, Traced> traces;  // by epoch
+			std::map<std::uint32_t, std::uint64_t> checked;  // by epoch: the generation the last check saw
+			std::uint64_t printedHash = 0;
+			std::uint32_t prints = 0, unprinted = 0;
+			std::uint32_t passes = 0, previousInputs = 0, outsideInputs = 0, findings = 0, fallbackTraces = 0;
+			std::uint32_t dclfLater = 0;  // resources Drawcall Limit Fix's stages declare and only later stages write
+			std::set<std::string> loggedFindings;
+		};
+
+		State& Get()
+		{
+			static State state;
+			return state;
+		}
+
+		bool PreviousFrame(std::string_view a_name)
+		{
+			return std::ranges::find(kPreviousFrame, a_name) != kPreviousFrame.end();
+		}
+
+		std::uint32_t EpochOfSegment(Segment a_segment) { return RenderGraphRuntime::EpochOf(a_segment); }
+
+		/** @brief One pass of the recipe as the check reads it. */
+		struct Pass
+		{
+			std::uint32_t stage = 0;
+			std::string name;
+			std::vector<std::string> reads, writes;
+		};
+
+		std::string ResourceName(const org::ScheduleTrace& a_trace, std::uint32_t a_index)
+		{
+			if (a_index >= a_trace.resources.size())
+				return fmt::format("#{}", a_index);
+			const auto& resource = a_trace.resources[a_index];
+			return resource.name.empty() ? fmt::format("#{}", resource.id) : resource.name;
+		}
+
+		/** @brief The passes of a_trace in their plan order (batch, then position). */
+		void AppendPasses(std::uint32_t a_stage, const org::ScheduleTrace& a_trace, std::vector<Pass>& a_out)
+		{
+			std::vector<const org::ScheduleTrace::Pass*> ordered;
+			for (const auto& pass : a_trace.passes)
+				ordered.push_back(&pass);
+			std::ranges::stable_sort(ordered, [](const auto* a_left, const auto* a_right) {
+				return std::tie(a_left->batch, a_left->position) < std::tie(a_right->batch, a_right->position);
+			});
+			for (const auto* pass : ordered) {
+				Pass out{ .stage = a_stage, .name = pass->name };
+				for (const auto& access : pass->accesses) {
+					auto name = ResourceName(a_trace, access.resource);
+					auto& list = access.write ? out.writes : out.reads;
+					if (std::ranges::find(list, name) == list.end())
+						list.push_back(std::move(name));
+				}
+				a_out.push_back(std::move(out));
+			}
+		}
+
+		std::string Join(const std::vector<std::string>& a_items)
+		{
+			std::string text;
+			for (const auto& item : a_items)
+				text += fmt::format("{}{}", text.empty() ? "" : ", ", item);
+			return text;
+		}
+
+		/**
+		 * @brief The check (BasicRenderer's PipelineRecipe::Validate): walks the passes in recipe order. Within one stage the stage's
+		 * graph orders its own passes by what they declare, so the check is between stages. A read whose resource a stage written
+		 * earlier in the recipe (or the reading stage itself) writes is fine. One with no writer anywhere in the frame comes from outside
+		 * the graphs (uploads, files, the engine). One whose writers are all in later stages is the previous frame's: it must be declared
+		 * so (kPreviousFrame), else it is a finding.
+		 */
+		void Validate(State& a_state, const std::vector<Pass>& a_passes, std::vector<std::string>& a_findings)
+		{
+			std::map<std::string, std::uint32_t> firstWriter;  // the first pass that writes each resource
+			for (std::uint32_t i = 0; i < a_passes.size(); ++i)
+				for (const auto& name : a_passes[i].writes)
+					firstWriter.try_emplace(name, i);
+			std::set<std::string> previous, outside, found, dclfLater;
+			for (std::uint32_t i = 0; i < a_passes.size(); ++i)
+				for (const auto& name : a_passes[i].reads) {
+					const auto writer = firstWriter.find(name);
+					if (writer == firstWriter.end()) {
+						outside.insert(name);
+						continue;
+					}
+					if (a_passes[writer->second].stage <= a_passes[i].stage)
+						continue;
+					if (PreviousFrame(name)) {
+						previous.insert(name);
+						continue;
+					}
+					if (kWorld[a_passes[i].stage].owner == Owner::Dclf) {
+						dclfLater.insert(name);
+						continue;
+					}
+					if (!found.insert(name).second)
+						continue;
+					a_findings.push_back(fmt::format("{} ({}) reads {}, which no earlier stage writes; its first writer is {} ({}). Declare it as the previous "
+													 "frame's (Recipe.cpp, kPreviousFrame) once checked, or move the stage",
+						a_passes[i].name, StageName(static_cast<StageId>(a_passes[i].stage)), name, a_passes[writer->second].name,
+						StageName(static_cast<StageId>(a_passes[writer->second].stage))));
+				}
+			a_state.passes = static_cast<std::uint32_t>(a_passes.size());
+			a_state.previousInputs = static_cast<std::uint32_t>(previous.size());
+			a_state.outsideInputs = static_cast<std::uint32_t>(outside.size());
+			a_state.findings = static_cast<std::uint32_t>(a_findings.size());
+			a_state.dclfLater = static_cast<std::uint32_t>(dclfLater.size());
+		}
+	}
+
+	const char* StageName(StageId a_stage)
+	{
+		switch (a_stage) {
+		case StageId::Start:
+			return "start";
+		case StageId::Shadows:
+			return "shadows";
+		case StageId::PreDepth:
+			return "pre-depth";
+		case StageId::Depth:
+			return "depth";
+		case StageId::PreMain:
+			return "pre-main";
+		case StageId::Opaque:
+			return "opaque";
+		case StageId::Deferred:
+			return "deferred";
+		case StageId::Water:
+			return "water";
+		case StageId::Forward:
+			return "forward";
+		case StageId::FirstPerson:
+			return "first person";
+		case StageId::Post:
+			return "post";
+		case StageId::Ui:
+			return "UI";
+		default:
+			return "?";
+		}
+	}
+
+	std::shared_ptr<const org::ScheduleTrace> TraceEpochGraph(org::RenderGraph& a_graph, std::uint32_t a_epoch)
+	{
+		// A host epoch's own graph holds that epoch's passes alone: its whole executable is the epoch's when it has no split for it.
+		if (auto trace = a_graph.TraceSelectedSchedule(a_epoch))
+			return trace;
+		return a_graph.TraceSelectedSchedule(UINT32_MAX);
+	}
+
+	bool Traced(std::uint32_t a_epoch)
+	{
+		for (const auto& stage : kWorld)
+			for (std::uint32_t e = 0; e < stage.epochCount; ++e)
+				if (EpochOfSegment(stage.epochs[e]) == a_epoch && !FrameAnchors::IsUnusedSegment(static_cast<std::uint32_t>(stage.epochs[e])))
+					return true;
+		return false;
+	}
+
+	void NoteTrace(std::uint32_t a_epoch, std::uint64_t a_generation, std::shared_ptr<const org::ScheduleTrace> a_trace)
+	{
+		if (!a_trace)
+			return;
+		auto& state = Get();
+		const std::lock_guard lock(state.mutex);
+		state.traces[a_epoch] = { a_generation, std::move(a_trace) };
+	}
+
+	void Check(org::GraphHost& a_host)
+	{
+		auto& state = Get();
+		const std::lock_guard lock(state.mutex);
+		// The epochs whose build changed since the last check. One without a trace of its build (a build the host made itself, at
+		// setup) is traced here, at most two a frame.
+		bool changed = false;
+		bool complete = true;  // every epoch's current build is traced: the recipe is checked only whole
+		std::uint32_t traced = 0;
+		for (const auto& stage : kWorld)
+			for (std::uint32_t e = 0; e < stage.epochCount; ++e) {
+				if (FrameAnchors::IsUnusedSegment(static_cast<std::uint32_t>(stage.epochs[e])))
+					continue;
+				const auto epoch = EpochOfSegment(stage.epochs[e]);
+				auto* graph = a_host.Graph(epoch);
+				if (!graph)
+					continue;
+				const auto generation = a_host.BuildGeneration(epoch);
+				if (const auto seen = state.checked.find(epoch); seen != state.checked.end() && seen->second == generation)
+					continue;
+				auto& entry = state.traces[epoch];
+				if (entry.generation != generation || !entry.trace) {
+					auto trace = traced < 2 ? TraceEpochGraph(*graph, epoch) : nullptr;
+					if (!trace) {
+						complete = false;  // no schedule selected yet, or two traced this frame already: the next frame tries again
+						continue;
+					}
+					++traced;
+					++state.fallbackTraces;
+					entry = { generation, std::move(trace) };
+				}
+				state.checked[epoch] = generation;
+				changed = true;
+			}
+		if (!changed || !complete)
+			return;
+		std::vector<Pass> passes;
+		for (std::uint32_t s = 0; s < kWorld.size(); ++s)
+			for (std::uint32_t e = 0; e < kWorld[s].epochCount; ++e) {
+				const auto found = state.traces.find(EpochOfSegment(kWorld[s].epochs[e]));
+				if (found != state.traces.end() && found->second.trace)
+					AppendPasses(s, *found->second.trace, passes);
+			}
+		std::vector<std::string> findings;
+		Validate(state, passes, findings);
+		for (const auto& finding : findings) {
+			if (!state.loggedFindings.insert(finding).second)
+				continue;
+			const bool fatal = Switches::Number("CS_ORG_RECIPE_FATAL", Driver::MismatchFatal() ? 1 : 0) != 0;
+			logger::error("[ORG] world recipe: {}", finding);
+			if (fatal) {
+				const auto message = fmt::format("Community Shaders native mode: the world recipe reads a resource before the pass that writes it: {}", finding);
+				logger::critical("[ORG] world recipe: {}", message);
+				stl::report_and_fail(message);
+			}
+		}
+		// Printed when its passes changed: every stage, its passes in order, what each reads and writes.
+		std::uint64_t hash = 1469598103934665603ull;
+		for (const auto& pass : passes)
+			for (const char c : pass.name)
+				hash = (hash ^ static_cast<std::uint8_t>(c)) * 1099511628211ull;
+		if (hash == state.printedHash)
+			return;
+		state.printedHash = hash;
+		if (++state.prints > 12) {
+			++state.unprinted;
+			return;
+		}
+		logger::info("[ORG] world recipe ({} passes; {} inputs from the previous frame, {} from outside the graphs, {} declared by Drawcall Limit Fix's stages "
+					 "and written later; {} findings):",
+			passes.size(), state.previousInputs, state.outsideInputs, state.dclfLater, findings.size());
+		for (std::uint32_t s = 0; s < kWorld.size(); ++s) {
+			std::string text;
+			std::uint32_t count = 0;
+			for (const auto& pass : passes) {
+				if (pass.stage != s)
+					continue;
+				++count;
+				text += fmt::format("{}{} [reads {}; writes {}]", text.empty() ? "" : "; ", pass.name, Join(pass.reads), Join(pass.writes));
+			}
+			logger::info("[ORG] world recipe: {} {} ({}; commits at {}; {} passes): {}", s + 1, StageName(kWorld[s].id), OwnerName(kWorld[s].owner), kWorld[s].commit, count,
+				text);
+		}
+	}
+
+	void LogStats()
+	{
+		auto& state = Get();
+		const std::lock_guard lock(state.mutex);
+		logger::info("[ORG] world recipe: {} passes, {} inputs from the previous frame, {} from outside the graphs, {} declared by Drawcall Limit Fix's stages and "
+					 "written later, {} findings; {} schedules traced on the render owner; {} changed recipes not printed",
+			state.passes, state.previousInputs, state.outsideInputs, state.dclfLater, state.findings, state.fallbackTraces, state.unprinted);
+	}
+}
+
+#else
+
+namespace RenderGraph::Frame::Recipes
+{
+	const char* StageName(StageId) { return "?"; }
+	std::shared_ptr<const org::ScheduleTrace> TraceEpochGraph(org::RenderGraph&, std::uint32_t) { return {}; }
+	bool Traced(std::uint32_t) { return false; }
+	void NoteTrace(std::uint32_t, std::uint64_t, std::shared_ptr<const org::ScheduleTrace>) {}
+	void Check(org::GraphHost&) {}
+	void LogStats() {}
+}
+
+#endif

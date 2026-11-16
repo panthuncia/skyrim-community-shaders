@@ -16,6 +16,7 @@
 #	include "RenderGraph/DxvkImageImport.h"
 #	include "RenderGraph/ExternalWork.h"
 #	include "RenderGraph/FrameSequence.h"
+#	include "RenderGraph/FrameStaging.h"
 #	include "RenderGraph/GraphResources.h"
 #	include "RenderGraph/PublishedResources.h"
 #	include "RenderGraph/RenderGraphRuntime.h"
@@ -145,11 +146,11 @@ namespace FrameAnchors
 			Segment::AnchorSky,                 // the main pass's sky batch, before Drawcall Limit Fix's colour epoch
 			Segment::PhasePreMain,              // the pre-main phase: submitted at the main opaque epoch
 			Segment::MainOpaque,
-			Segment::DeclaredDeferred,         // the declared deferred segment (SegmentsOn): its end tap is the PostComposite anchor's hook
+			Segment::DeclaredDeferred,         // the deferred stage (SegmentsOn): its commit is the PostComposite anchor's hook
 			Segment::AnchorDeferredPasses,     // EndDeferred, after the blended decals
 			Segment::AnchorDeferredComposite,  // DeferredPasses, after the D3D11 SSGI and SSS
 			Segment::AnchorPostComposite,      // DeferredPasses' end, after the composite
-			Segment::DeclaredWorld,            // the declared world segment (SegmentsOn): it ends just before DCLF's forward epoch
+			Segment::DeclaredWorld,            // the water stage (SegmentsOn): it commits just before DCLF's forward epoch
 			Segment::AnchorEngineDraws,        // the water, before the forward epoch (nominally here: the shadow masks and the water mask run before, the blood after)
 			Segment::PhaseDeferred,            // the deferred phase: submitted at the forward epoch
 			Segment::Forward,
@@ -287,11 +288,13 @@ namespace FrameAnchors
 		 * - an anchor that is wholly the segment's (no client named): every client of it, and the anchor has no epoch of its own;
 		 * - one or two named clients of an anchor that keeps its epoch for its other clients (a shared anchor);
 		 * - another module's epoch (foreign), whose passes the module hands to the segment (SetForeignPasses).
-		 * The last step is the end tap, where the segment's one ticket is submitted. The first tap of a frame takes the ticket
-		 * (GraphHost::HoldEpochTicket), and every tap commits into its run.
+		 * The last step is the end tap: the stage's one commit. Earlier taps only stage their clients' values: their commits write
+		 * into the frame slot's staging run (the frame inputs, GraphHost::EpochStagingRun), never into the ticket's. The end tap
+		 * copies the staged values into the slot's copy and submits the stage's one ticket (docs/development/org-native-frame-graph.md,
+		 * "The recipe").
 		 */
 		constexpr std::uint32_t kDeclared = RenderGraph::Frame::kSegments;
-		constexpr std::uint32_t kMaxSteps = 8;
+		constexpr std::uint32_t kMaxSteps = 10;
 		struct Step
 		{
 			Anchor anchor = Anchor::Count;                         // Count for a foreign or point step
@@ -324,14 +327,15 @@ namespace FrameAnchors
 					{ Anchor::Prepass } } },
 				5, { "CS segment: pre-main", "CS segment: pre-main inputs", "FrameSegments::PreMain / ", "cs.segment.pre-main" } },
 			// Deferred::StartDeferred, after DCLF's main opaque epoch: the deferred passes (with CS's depth copy they host), the
-			// composite, and the end of the deferred passes. The water mask and the ImageSpace chain come after the end tap.
+			// composite, and the end of the deferred passes. Its commit is the PostComposite hook: Deferred::StartDeferred runs the three
+			// hooks back to back, and the water mask and the ImageSpace chain come after it.
 			{ Segment::DeclaredDeferred, { { { Anchor::DeferredPasses }, { Anchor::DeferredComposite }, { Anchor::PostComposite } } }, 3,
-				{ "CS segment: deferred", "CS segment: deferred inputs", "FrameSegments::Deferred / ", "cs.segment.deferred" } },
-			// S3's tail, in Main::RenderWorld (100424 / 107142) after the deferred segment: the water stencil's clear and the water mask
-			// (FinishAccumulating's stencil batch), the reflections, RenderSSAO's two calls with the snow pass or its copy between them
-			// (drawn from the pass-state table), the engine's kMAIN copy, the water, the water targets' clear and the water blend. Its end is
-			// a point just before DCLF's forward epoch is submitted (FlushRegions), the next GPU work after the water blend. The water's
-			// draws, the kMAIN copy and the scopes' rows are gated: a step that does not fire this frame (no water in view) does nothing.
+				{ "CS stage: deferred", "CS stage: deferred inputs", "FrameSegments::Deferred / ", "cs.segment.deferred" } },
+			// Main::RenderWorld (100424 / 107142) after the deferred stage: the water stencil's clear and the water mask (FinishAccumulating's
+			// stencil batch), the reflections, RenderSSAO's two calls with the snow pass or its copy between them (drawn from the pass-state
+			// table), the engine's kMAIN copy, the water, the water targets' clear and the water blend. Its commit is a point just before
+			// DCLF's forward epoch is submitted (FlushRegions), the next GPU work after the water blend: every tap has staged by then. The
+			// water's draws, the kMAIN copy and the scopes' rows are gated: a step that does not fire this frame (no water in view) does nothing.
 			{ Segment::DeclaredWorld,
 				{ { { Anchor::EngineDraws, { "cs.engine.skeleton.frame@engine-draws", "cs.water.mask" } },
 					{ Anchor::ImageSpace, { "cs.engine.imagespace.world.scopes", nullptr } },
@@ -339,11 +343,11 @@ namespace FrameAnchors
 					{ Anchor::EngineDraws, { "cs.water.surface", nullptr } },
 					{ Anchor::ImageSpace, { "cs.engine.skeleton.frame@image-space", "cs.engine.imagespace.world.water" } },
 					{ Anchor::Count, { nullptr, nullptr }, Segment::Count, false, true } } },
-				6, { "CS segment: world", "CS segment: world inputs", "FrameSegments::World / ", "cs.segment.world" } },
+				6, { "CS stage: water", "CS stage: water inputs", "FrameSegments::World / ", "cs.segment.world" } },
 			// ImageSpaceManager::RenderWorldPostProcess (SE 100430, AE 107148) up to Upscaling's wrapper of the end-of-frame effects: the
 			// volumetric lighting (whole: its hook runs only there), the pre-tonemap composites drawn from the pass-state table, and the
 			// PostProcessing anchor (its end tap, reserved so its hook always runs). The upscaler's evaluate comes after the end tap: it is
-			// external work, and work submitted while a segment holds its ticket runs ahead of the segment's earlier work on the GPU.
+			// external work, and work submitted between a stage's taps and its commit runs ahead of the stage's work on the GPU.
 			{ Segment::DeclaredPostComposites,
 				{ { { Anchor::VolumetricLighting },
 					{ Anchor::ImageSpace, { "cs.engine.imagespace.post.composites", nullptr } },
@@ -642,13 +646,12 @@ namespace FrameAnchors
 			std::array<SegmentRecordings, kDeclared> declaredRecordings;
 			// Each segment graph's passes recorded ahead, from its last attached build: their revisions go into its description.
 			std::array<std::atomic<std::shared_ptr<std::vector<std::weak_ptr<org::RenderPass>>>>, kDeclared> declaredPasses{};
-			// Each segment's ticket this frame: the frame its first tap took it in (0: none held), the snapshot its graph was built
-			// from then, and the frame its end tap submitted it in. Render owner.
-			std::array<std::uint64_t, kDeclared> heldFrame{};
-			std::array<std::shared_ptr<const Snapshot>, kDeclared> heldBuilt{};
-			// The segment's fields the held ticket's taps use: the frame's schedule, taken at Begin (the client bits name the clients of
-			// the graph it was recorded on).
-			std::array<RenderGraph::Frame::SegmentFields, kDeclared> heldFields{};
+			// Each stage's frame inputs (docs/development/org-native-frame-graph.md, "The recipe"): the frame its taps staged values in
+			// and have not committed yet (0: none), the frame slot's staging run they wrote (GraphHost::EpochStagingRun, set at Begin),
+			// and the clients whose executed callbacks the commit calls, with each tap's point. Render owner.
+			std::array<std::uint64_t, kDeclared> stagedFrame{};
+			std::array<org::RunRef, kDeclared> stagingRun{};
+			std::array<std::vector<std::pair<std::shared_ptr<const ClientDesc>, Point>>, kDeclared> stagedExecuted{};
 			// The schedule (docs/development/org-native-frame-graph.md, "Recipe plan, stage 1"): per segment and frame slot, the
 			// description the slot's frames run on, its recording (made on the host's thread for the attached build) and the segment
 			// graph's snapshot it was made on. A frame takes its slot's schedule at Begin and keeps it to its end. Render owner.
@@ -677,9 +680,9 @@ namespace FrameAnchors
 			// when the frame's first tap takes the ticket.
 			std::array<std::array<std::uint32_t, kMaxSteps>, kDeclared> stepTaps{};
 			std::uint32_t tapInstance = 0;  // the instance the commits running now write (TapInstance)
-			std::atomic<bool> segmentHeld{ false };  // a segment holds its ticket now: FlushRegions' check without the mutex
-			// GPU work submitted while a segment held its ticket (FlushRegions), by why, since the last report. It runs ahead of the
-			// segment's work on the GPU.
+			std::atomic<bool> stagesOpen{ false };  // a stage holds staged values not committed yet: FlushRegions' check without the mutex
+			// GPU work submitted between a stage's first tap and its commit (FlushRegions), by why, since the last report. It runs ahead of
+			// the stage's work on the GPU.
 			std::vector<std::pair<const char*, std::uint64_t>> insideHeld;
 			std::uint64_t insideHeldLines = 0;
 			// The epoch an anchor's run counted there already (Run, with the anchor's name). Its submission calls FlushRegions again
@@ -2235,20 +2238,12 @@ namespace FrameAnchors
 		{
 			logger::error("[ORG] frame anchors: the {} epoch failed; {} clients return to D3D11", a_name, a_state.clients.size());
 			DropHeld(a_state);
-			// Declared segments' held tickets go back unsubmitted.
+			// What the stages staged is dropped uncommitted.
 			for (std::uint32_t d = 0; d < kDeclared; ++d) {
-				if (!a_state.heldFrame[d])
-					continue;
-				a_state.heldFrame[d] = 0;
-				a_state.heldBuilt[d].reset();
-				try {
-					if (a_state.host)
-						(void)a_state.host->ReleaseHeldEpochTicket(EpochOfDeclared(d));
-				} catch (const std::exception& e) {
-					logger::error("[ORG] frame segments: a held ticket could not be given back: {}", e.what());
-				}
+				a_state.stagedFrame[d] = 0;
+				a_state.stagedExecuted[d].clear();
 			}
-			a_state.segmentHeld.store(false, std::memory_order_release);
+			a_state.stagesOpen.store(false, std::memory_order_release);
 			auto failed = std::move(a_state.clients);
 			a_state.clients.clear();
 			a_state.retired.clear();
@@ -2558,17 +2553,18 @@ namespace FrameAnchors
 	void FlushRegions(const char* a_why, std::uint32_t a_segment)
 	{
 		auto& state = Anchors();
-		// The world segment ends just before the next GPU work that comes after it in the frame is submitted: DCLF's forward epoch in
-		// a world frame, else the sun's queries (the end of Main::RenderWorld), the first-person epoch or a later segment. Its end point.
+		// The water stage commits just before the next GPU work that comes after it in the frame is submitted: DCLF's forward epoch
+		// in a world frame, else the sun's queries (the end of Main::RenderWorld), the first-person epoch or a later segment. Its
+		// commit point.
 		if (a_segment != UINT32_MAX && state.host && SegmentsOn() && EndsWorld(static_cast<Segment>(a_segment)) && IsRenderOwner())
 			(void)TapPoint(static_cast<std::uint32_t>(Segment::DeclaredWorld));
 		// A declared segment holding its ticket: other GPU work submitted now runs ahead of the segment's work, which the end tap
 		// submits. Counted by why, for the census; its first lines are logged.
-		if (state.segmentHeld.load(std::memory_order_acquire) && IsRenderOwner()) {
+		if (state.stagesOpen.load(std::memory_order_acquire) && IsRenderOwner()) {
 			auto lock = Guard();
 			bool own = false;
 			for (std::uint32_t d = 0; d < kDeclared; ++d)
-				own = own || (state.heldFrame[d] && a_segment == static_cast<std::uint32_t>(kDeclaredInfo[d].segment));
+				own = own || (state.stagedFrame[d] && a_segment == static_cast<std::uint32_t>(kDeclaredInfo[d].segment));
 			// An anchor's run counted its epoch already (Run): its submission is the same GPU work.
 			const bool counted = a_segment != UINT32_MAX && state.insideHeldCounted == a_segment;
 			if (counted)
@@ -2583,9 +2579,9 @@ namespace FrameAnchors
 				if (++state.insideHeldLines <= 32) {
 					std::string held;
 					for (std::uint32_t d = 0; d < kDeclared; ++d)
-						if (state.heldFrame[d])
+						if (state.stagedFrame[d])
 							held += fmt::format("{}{}", held.empty() ? "" : ", ", kDeclaredInfo[d].names.label);
-					logger::warn("[ORG] frame segments: {} was submitted while the {} held its ticket; it runs ahead of the segment's work (frame {})", why, held,
+					logger::warn("[ORG] frame segments: {} was submitted between the first tap and the commit of the {}; it runs ahead of the stage's work (frame {})", why, held,
 						RenderGraph::Frame::Driver::Current().frame);
 				}
 			}
@@ -2862,107 +2858,63 @@ namespace FrameAnchors
 			return active.fields;
 		}
 
-		/** @brief Whether any segment holds its ticket now. Render owner. */
-		void UpdateSegmentHeld(State& a_state)
+		/** @brief Whether any stage holds staged values not committed yet. Render owner. */
+		void UpdateStagesOpen(State& a_state)
 		{
-			a_state.segmentHeld.store(std::ranges::any_of(a_state.heldFrame, [](std::uint64_t a_frame) { return a_frame != 0; }), std::memory_order_release);
+			a_state.stagesOpen.store(std::ranges::any_of(a_state.stagedFrame, [](std::uint64_t a_frame) { return a_frame != 0; }), std::memory_order_release);
 		}
 
-		/** @brief Gives a segment's held ticket back unsubmitted: what its taps wrote is dropped. Render owner. */
-		void ReleaseSegment(State& a_state, std::uint32_t a_declared)
+		/** @brief Drops what a stage's taps staged this frame without committing it. Render owner. */
+		void DropStaged(State& a_state, std::uint32_t a_declared)
 		{
-			if (!a_state.heldFrame[a_declared])
-				return;
-			a_state.heldFrame[a_declared] = 0;
-			a_state.heldBuilt[a_declared].reset();
-			UpdateSegmentHeld(a_state);
-			if (!a_state.host)
-				return;
-			try {
-				(void)a_state.host->ReleaseHeldEpochTicket(EpochOfDeclared(a_declared));
-			} catch (const std::exception& e) {
-				logger::error("[ORG] frame segments: the {}'s held ticket could not be given back: {}", kDeclaredInfo[a_declared].names.label, e.what());
-			}
+			a_state.stagedFrame[a_declared] = 0;
+			a_state.stagedExecuted[a_declared].clear();
+			UpdateStagesOpen(a_state);
 		}
 
-		/**
-		 * @brief A segment's ticket for this frame. The frame's first tap of the segment takes it, for the frame slot's published copy,
-		 * and zeroes the copy's latch regions and closes its run gates. Later taps of the frame find it held. False (with a tap error, or
-		 * the graph stopped) when it cannot be taken, or when a build gave it back since. Render owner.
-		 */
-		bool OpenSegment(State& a_state, std::uint32_t a_declared, const RenderGraph::Frame::Description& a_frame, const std::shared_ptr<const Snapshot>& a_built)
+		/** @brief Every run gate a stage's graph holds: its clients' and those of registrations it still holds after they left. */
+		template <class F>
+		void ForEachStageGate(const State& a_state, std::uint32_t a_declared, const Snapshot& a_built, F&& a_do)
 		{
-			const auto segment = static_cast<SegmentId>(a_declared);
-			auto& host = *a_state.host;
-			const std::uint32_t epoch = EpochOfDeclared(a_declared);
-			if (a_state.heldFrame[a_declared] == a_frame.frame) {
-				if (host.HoldsEpochTicket(epoch))
-					return true;
-				// A build of the segment's graph gave the ticket back: what the earlier taps wrote is gone.
-				a_state.heldFrame[a_declared] = 0;
-				a_state.heldBuilt[a_declared].reset();
-				UpdateSegmentHeld(a_state);
-				Driver::NoteTapError(Driver::TapError::LostToBuild, segment, "a build gave the segment's held ticket back before its end tap");
-				return false;
-			}
-			// The frame runs on the build its schedule was recorded on. Builds attach only at a frame boundary, before Begin chose it.
-			if (a_frame.Segment(segment).graph != host.BuildGeneration(epoch)) {
-				Driver::NoteTapError(Driver::TapError::LostToBuild, segment,
-					fmt::format("a build of the segment's graph attached after the frame's Begin (schedule build {}, attached {})", a_frame.Segment(segment).graph,
-						host.BuildGeneration(epoch)));
-				return false;
-			}
-			// A ticket an earlier frame took and never submitted (its end tap did not fire, a tap error then) goes back first.
-			ReleaseSegment(a_state, a_declared);
-			org::RunRef run{};
-			try {
-				host.SetEpochCopy(epoch, a_frame.slot);
-				run = host.HoldEpochTicket(epoch);
-			} catch (const org::GraphHost::EpochFailedError& e) {
-				static std::atomic_flag logged;
-				if (!logged.test_and_set())
-					logger::error("[ORG] frame segments: the {} did not run, its graph failed: {} (logged once)", kDeclaredInfo[a_declared].names.label, e.what());
-				return false;
-			} catch (const std::exception& e) {
-				logger::error("[ORG] frame segments: the {} could not take its ticket: {}", kDeclaredInfo[a_declared].names.label, e.what());
-				StopAll(a_state, kDeclaredInfo[a_declared].names.label);
-				return false;
-			}
-			const auto expected = host.EpochCopyRun(epoch, a_frame.slot);
-			if (!(run == expected))
-				Driver::NoteTapError(Driver::TapError::SlotMismatch, segment,
-					fmt::format("the run is lease {} copy {}, the slot's copy is lease {} copy {}", run.lease, run.copy, expected.lease, expected.copy));
-			a_state.heldFrame[a_declared] = a_frame.frame;
-			a_state.heldBuilt[a_declared] = a_built;
-			a_state.stepTaps[a_declared].fill(0);
-			a_state.heldFields[a_declared] = a_frame.Segment(segment);
-			UpdateSegmentHeld(a_state);
-			struct HeldRun
-			{
-				org::GraphHost& host;
-				~HeldRun() { host.EndHeldRun(); }
-			} held{ host };
-			host.UseHeldRun(epoch);
-			// The slot's latch regions still hold what its last run wrote: a block nobody writes this run reads zeros, as a new
-			// lease's would.
-			org::LatchBlock::ZeroStableRun(run.lease);
-			RenderGraph::RunShapes::BeginRun();
-			// Every gate closed first, those of registrations the graph still holds after they left too (RetiredGates).
 			const auto anchors = StepAnchors(a_declared);
-			for (const auto& client : SegmentClients(*a_built, a_declared))
+			for (const auto& client : SegmentClients(a_built, a_declared))
 				for (const auto& gate : client->gates)
 					if (gate)
-						gate->Close();
+						a_do(*gate);
 			for (const auto& retired : a_state.retired)
-				if ((retired.mask & anchors) && a_built->serial < retired.serial)
+				if ((retired.mask & anchors) && a_built.serial < retired.serial)
 					for (const auto& gate : retired.gates)
-						gate->Close();
-			return true;
+						if (gate)
+							a_do(*gate);
 		}
 
 		/**
-		 * @brief A segment's end tap: its held ticket is submitted with the recording of this frame's description of it. Render owner,
-		 * under the anchors' mutex.
+		 * @brief Begin: a present stage's frame inputs for this frame slot are made empty. Its staging run's latch regions are zeroed and
+		 * every gate of its graph is closed there, so a tap's commit writes only what this frame staged. The GPU never reads the staging
+		 * run, so this waits for nothing. Render owner.
+		 */
+		void OpenInputs(State& a_state, std::uint32_t a_declared, std::uint32_t a_slot)
+		{
+			auto& host = *a_state.host;
+			const auto& built = a_state.frameBuilt[a_declared];
+			a_state.stepTaps[a_declared].fill(0);
+			a_state.stagedExecuted[a_declared].clear();
+			if (!built)
+				return;
+			ZoneScopedN("CS.Stage.OpenInputs");
+			const auto staging = host.EpochStagingRun(EpochOfDeclared(a_declared), a_slot);
+			a_state.stagingRun[a_declared] = staging;
+			// Every latch region and every gate's record of the staging run cleared: a gate its client does not list (ClientDesc::gates)
+			// reads closed too unless a tap opens it.
+			org::LatchBlock::ZeroStableRun(staging.lease);
+			RenderGraph::RunGate::ClearOpenAll(staging);
+			ForEachStageGate(a_state, a_declared, *built, [&](const RenderGraph::RunGate& a_gate) { a_gate.Close(staging); });
+		}
+
+		/**
+		 * @brief A stage's one commit, at its commit point: the values its taps staged this frame are copied into the frame slot's copy,
+		 * and its one ticket is submitted with the recording of the frame's schedule. Then the executed callbacks of every client that
+		 * staged. Render owner, under the anchors' mutex.
 		 */
 		RunResult SubmitSegment(State& a_state, const Point& a_point, std::uint32_t a_declared)
 		{
@@ -2973,35 +2925,54 @@ namespace FrameAnchors
 			const std::uint32_t epoch = EpochOfDeclared(a_declared);
 			// The frame runs on the schedule it took at Begin: nothing is described, recorded or waited for here.
 			const auto recording = a_state.frameRecording[a_declared];
-			const auto built = a_state.heldBuilt[a_declared];
+			const auto built = a_state.frameBuilt[a_declared];
+			const auto staging = a_state.stagingRun[a_declared];
+			auto executed = std::exchange(a_state.stagedExecuted[a_declared], {});
 			const auto mismatch = [&](Driver::TapError a_error, std::string_view a_what) {
 				Driver::NoteTapError(a_error, segment, a_what);
-				ReleaseSegment(a_state, a_declared);
+				DropStaged(a_state, a_declared);
 				return RunResult{ RunStatus::Idle };
 			};
-			if (!recording)
-				return mismatch(Driver::TapError::NotDeclared, "its end tap fired in a frame without a schedule for it");
+			if (!recording || !built)
+				return mismatch(Driver::TapError::NotDeclared, "its commit came in a frame without a schedule for it");
 			if (!host.EpochRecordingCurrent(*recording))
 				return mismatch(Driver::TapError::LostToBuild, "a build of its graph attached after the frame's Begin; builds attach only at a frame boundary");
 			if (!host.EpochRecordingVersionsCurrent(*recording, frame.slot))
 				return mismatch(Driver::TapError::StaleRecording,
 					"a slot of its graph published a new version after the frame's Begin; versions are published only at a frame boundary");
+			const auto expected = host.EpochCopyRun(epoch, frame.slot);
 			RenderGraphRuntime::EpochResult result = RenderGraphRuntime::EpochResult::Stopped;
-			{
+			try {
+				host.SetEpochCopy(epoch, frame.slot);
 				RenderGraphRuntime::EpochBodyScope body(kDeclaredInfo[a_declared].segment);
-				result = runtime.TryExecuteEpoch(kDeclaredInfo[a_declared].segment, [&](org::RenderGraph&) { host.UseEpochRecording(recording); });
+				result = runtime.TryExecuteEpoch(kDeclaredInfo[a_declared].segment, [&](org::RenderGraph&) {
+					// The copy's last run is done once its ticket is taken: the staged values become its run's.
+					const auto run = host.CurrentRun();
+					if (!(run == expected))
+						Driver::NoteTapError(Driver::TapError::SlotMismatch, segment,
+							fmt::format("the run is lease {} copy {}, the slot's copy is lease {} copy {}", run.lease, run.copy, expected.lease, expected.copy));
+					RenderGraph::RunShapes::BeginRun();
+					{
+						ZoneScopedN("CS.Stage.CopyLatch");
+						org::LatchBlock::CopyStableRun(staging.lease, run.lease);
+					}
+					{
+						ZoneScopedN("CS.Stage.CopyGates");
+						RenderGraph::RunGate::CopyOpenAll(staging, run);
+					}
+					{
+						ZoneScopedN("CS.Stage.MoveSlots");
+						RenderGraph::RunSlotsRegistry::MoveAll(staging, run);
+					}
+					host.UseEpochRecording(recording);
+				});
+			} catch (const std::exception& e) {
+				logger::error("[ORG] frame segments: the {} could not be submitted: {}", kDeclaredInfo[a_declared].names.label, e.what());
+				result = RenderGraphRuntime::EpochResult::Stopped;
 			}
-			// Submitted or not, the ticket is no longer this frame's to write into.
-			a_state.heldFrame[a_declared] = 0;
-			a_state.heldBuilt[a_declared].reset();
-			UpdateSegmentHeld(a_state);
-			if (result != RenderGraphRuntime::EpochResult::Submitted && host.HoldsEpochTicket(epoch)) {
-				try {
-					(void)host.ReleaseHeldEpochTicket(epoch);
-				} catch (const std::exception& e) {
-					logger::error("[ORG] frame segments: the {}'s held ticket could not be given back: {}", kDeclaredInfo[a_declared].names.label, e.what());
-				}
-			}
+			// Submitted or not, the frame's inputs of the stage are spent.
+			a_state.stagedFrame[a_declared] = 0;
+			UpdateStagesOpen(a_state);
 			if (result == RenderGraphRuntime::EpochResult::Skipped)
 				return { RunStatus::Refused };
 			if (result == RenderGraphRuntime::EpochResult::EpochFailed)
@@ -3016,7 +2987,7 @@ namespace FrameAnchors
 				late = late || ((anchors >> i & 1u) && kInfo[i].late);
 			if (late && a_state.lateHook)
 				a_state.lateHook();
-			if (built && SegmentUsesSharedConstants(*built, a_declared))
+			if (SegmentUsesSharedConstants(*built, a_declared))
 				SharedConstants::CheckAfterRun();
 			// A point step or a cut ends the segment at no anchor: no run shape.
 			if (RenderGraph::RunShapes::On() && a_point.anchor != Anchor::Count) {
@@ -3027,27 +2998,28 @@ namespace FrameAnchors
 			// One-shot passes in the graph this run submitted have run: the next build leaves them out, and the next frame's description
 			// names that build.
 			bool ranOnce = false;
-			if (built)
-				for (auto& client : a_state.clients)
-					for (std::size_t i = 0; i < client.desc->passes.size(); ++i)
-						if (client.armed[i] && client.armed[i] <= built->serial && SegmentHoldsPass(a_declared, *client.desc, client.desc->passes[i])) {
-							client.armed[i] = 0;
-							ranOnce = true;
-						}
+			for (auto& client : a_state.clients)
+				for (std::size_t i = 0; i < client.desc->passes.size(); ++i)
+					if (client.armed[i] && client.armed[i] <= built->serial && SegmentHoldsPass(a_declared, *client.desc, client.desc->passes[i])) {
+						client.armed[i] = 0;
+						ranOnce = true;
+					}
 			if (ranOnce) {
 				Publish(a_state);
 				Rebuild(a_state, StepAnchors(a_declared), "one-shot passes ran");
 			}
+			// Last: an executed callback may register, refresh or rearm. What each staged commit wrote is in the submitted run now.
+			for (const auto& [client, point] : executed)
+				if (client->executed)
+					client->executed(point);
 			return { RunStatus::Ran };
 		}
 
 		/**
-		 * @brief A declared segment's tap: one of its steps' hooks.
-		 * - The frame's first tap of the segment takes its ticket (OpenSegment).
-		 * - Each tap's clients commit into its run (this frame slot's latch regions and gates), with the step's shared constants.
-		 * - The end tap submits it (SubmitSegment).
-		 * A tap the description does not cover is a tap error and draws nothing. a_foreign: a foreign step's commit (TapForeign), in
-		 * place of the clients'. Render owner, under the anchors' mutex.
+		 * @brief A declared stage's tap: one of its steps' hooks. The tap's clients stage their values: their commits write into the
+		 * frame slot's staging run (the frame inputs), with the step's shared constants. No ticket is taken here. The last step's tap is
+		 * the stage's one commit (SubmitSegment). A tap the description does not cover is a tap error and stages nothing. a_foreign: a
+		 * foreign step's commit (TapForeign), in place of the clients'. Render owner, under the anchors' mutex.
 		 */
 		RunResult TapDeclared(State& a_state, const Point& a_point, std::uint32_t a_declared, std::uint32_t a_step, const std::vector<RunClient>& a_clients,
 			const std::function<void()>* a_foreign = nullptr)
@@ -3064,9 +3036,9 @@ namespace FrameAnchors
 				return { RunStatus::Idle };
 			}
 			if (!fields.graph) {
-				// No schedule for this frame slot yet (its graph's first build, or the frames after a build): the segment is absent
-				// from the frame, and its work is not drawn until its first schedule is ready. Its end tap still ends it, so the later
-				// segments' windows open where they would have.
+				// No schedule for this frame slot yet (its graph's first build, or the frames after a build): the stage is absent from
+				// the frame, and its work is not drawn until its first schedule is ready. Its end tap still ends it, so the later stages'
+				// windows open where they would have.
 				Driver::NoteAbsentTap(segment);
 				if (end)
 					a_state.endedFrame[a_declared] = frame.frame;
@@ -3079,25 +3051,30 @@ namespace FrameAnchors
 			}
 			if (end && !Driver::NoteTap(segment, tap))
 				return { RunStatus::Idle };
-			const auto built = a_state.heldFrame[a_declared] == frame.frame ? a_state.heldBuilt[a_declared] : a_state.frameBuilt[a_declared];
-			if (!built || !OpenSegment(a_state, a_declared, frame, built)) {
+			auto& host = *a_state.host;
+			const std::uint32_t epoch = EpochOfDeclared(a_declared);
+			const auto built = a_state.frameBuilt[a_declared];
+			// The frame runs on the build its schedule was recorded on. Builds attach only at a frame boundary, before Begin chose it.
+			if (!built || fields.graph != host.BuildGeneration(epoch)) {
+				Driver::NoteTapError(Driver::TapError::LostToBuild, segment,
+					fmt::format("a build of the segment's graph attached after the frame's Begin (schedule build {}, attached {})", fields.graph,
+						host.BuildGeneration(epoch)));
+				DropStaged(a_state, a_declared);
 				if (end)
 					a_state.endedFrame[a_declared] = frame.frame;
 				return { RunStatus::Failed };
 			}
-			auto& host = *a_state.host;
-			const std::uint32_t epoch = EpochOfDeclared(a_declared);
-			const SegmentFields& held = a_state.heldFields[a_declared];
+			const SegmentFields& held = fields;
 			// The frame's own description, when the schedule lags behind it: work it has on and the schedule off is left out this frame,
 			// not a mismatch (the same build, so the client bits name the same clients).
 			const SegmentFields& wanted = a_state.frameWanted[a_declared];
 			const bool comparable = wanted.graph == held.graph;
-			// The clients that commit: this step's clients in the built graph, on in the schedule, with work this frame. An active client
+			// The clients that stage: this step's clients in the built graph, on in the schedule, with work this frame. An active client
 			// the schedule turned off is a mismatch, unless the frame's description has it on (the schedule lags), and its commit is not
 			// called.
 			std::vector<std::shared_ptr<const ClientDesc>> committed;
 			bool foreignOn = false;
-			// This tap's instance: the step's earlier taps in the held run.
+			// This tap's instance: the step's earlier taps this frame.
 			const std::uint32_t instance = a_state.stepTaps[a_declared][a_step]++;
 			if (a_foreign) {
 				foreignOn = (held.foreignOn >> a_step & 1u) != 0;
@@ -3143,14 +3120,17 @@ namespace FrameAnchors
 			}
 			if (step.anchor != Anchor::Count)
 				NoteSequenceRun(a_point, !end, a_clients);
+			// Stage the tap's values into the frame inputs: the commits write the staging run, which nothing on the GPU reads.
+			a_state.stagedFrame[a_declared] = frame.frame;
+			UpdateStagesOpen(a_state);
 			{
-				struct HeldRun
+				struct StagingScope
 				{
 					org::GraphHost& host;
-					~HeldRun() { host.EndHeldRun(); }
-				} heldRun{ host };
+					~StagingScope() { host.EndHeldRun(); }
+				} scope{ host };
 				RenderGraphRuntime::EpochBodyScope body(info.segment);
-				host.UseHeldRun(epoch);
+				host.UseRun(a_state.stagingRun[a_declared]);
 				if (!a_foreign && StepUsesSharedConstants(*built, a_declared, a_step))
 					SharedConstants::Commit(a_step);
 				if (a_foreign && foreignOn)
@@ -3168,23 +3148,24 @@ namespace FrameAnchors
 				if (runs > a_state.peakRuns[index].load(std::memory_order_relaxed))
 					a_state.peakRuns[index].store(runs, std::memory_order_relaxed);
 			}
-			RunResult result{ RunStatus::Ran };
-			if (end) {
-				a_state.endedFrame[a_declared] = frame.frame;
-				result = SubmitSegment(a_state, a_point, a_declared);
-			}
-			// Last: an executed callback may register, refresh or rearm. An early tap's commits reach the GPU before any later GPU work
-			// that reads them, as long as nothing else is submitted before the end tap (the census counts what is).
-			if (result)
+			if (!end) {
+				// A staged tap counts as run for its callers, as an early tap of a held ticket did: what it staged reaches the GPU with
+				// the stage's commit, before any later GPU work that reads it (the census counts work submitted in between). Last: an
+				// executed callback may register, refresh or rearm.
 				for (const auto& client : committed)
 					if (client->executed)
 						client->executed(a_point);
-			return result;
+				return { RunStatus::Ran };
+			}
+			for (const auto& client : committed)
+				a_state.stagedExecuted[a_declared].emplace_back(client, a_point);
+			a_state.endedFrame[a_declared] = frame.frame;
+			return SubmitSegment(a_state, a_point, a_declared);
 		}
 
 		/**
 		 * @brief The segment that holds a shared anchor's named clients now, and its step there. Its window must be open: the frame
-		 * declares it, its end tap has not fired, and every segment before it that the frame declares has ended (or it holds its ticket
+		 * declares it, its end tap has not fired, and every segment before it that the frame declares has ended (or it staged values already
 		 * already). kDeclared when none. Render owner.
 		 */
 		/** @brief Whether a declared segment's window is open now (OpenStepAt). Render owner. */
@@ -3194,7 +3175,7 @@ namespace FrameAnchors
 			const auto& fields = frame.Segment(static_cast<SegmentId>(a_declared));
 			if (!a_state.declaredEpochs[a_declared] || !fields.declared || !fields.graph || a_state.endedFrame[a_declared] == frame.frame)
 				return false;
-			if (a_state.heldFrame[a_declared] == frame.frame)
+			if (a_state.stagedFrame[a_declared] == frame.frame)
 				return true;
 			for (std::uint32_t before = 0; before < a_declared; ++before)
 				if (a_state.declaredEpochs[before] && frame.Segment(static_cast<SegmentId>(before)).declared && a_state.endedFrame[before] != frame.frame)
@@ -3243,9 +3224,11 @@ namespace FrameAnchors
 				}
 			case Segment::DeclaredWorld:
 				{
-					// S3's tail (default on; CS_ORG_SEGMENT_WORLD=0 off). Its scopes draw from the pass-state table, so it needs the post
-					// description too.
-					static const bool on = !Switches::Off("CS_ORG_SEGMENT_WORLD") && !Switches::Equals("CS_ORG_SEGMENT_POST", "0");
+					// The water stage (default off; CS_ORG_SEGMENT_WORLD=1 on). With its taps staged, interiors lose their ambient light
+					// (Dragonsreach's mean brightness 40 to 63 against 93 with it off and 101 in guest mode); the cause is not found yet
+					// (docs/development/org-native-frame-graph.md, "The recipe"). Its scopes draw from the pass-state table, so it needs the
+					// post description too.
+					static const bool on = Switches::Equals("CS_ORG_SEGMENT_WORLD", "1") && !Switches::Equals("CS_ORG_SEGMENT_POST", "0");
 					return on;
 				}
 			case Segment::DeclaredPostComposites:
@@ -3335,13 +3318,47 @@ namespace FrameAnchors
 		const auto* client = FindClient(state, a_id);
 		if (!client)
 			return false;
-		const auto frame = Driver::Current().frame;
 		for (std::uint32_t d = 0; d < kDeclared; ++d) {
 			if (!state.declaredEpochs[d] || !SegmentHolds(d, *client->desc) || !WindowOpen(state, d))
 				continue;
-			const auto built = state.heldFrame[d] == frame ? state.heldBuilt[d] : state.frameBuilt[d];
+			const auto& built = state.frameBuilt[d];
 			if (built && std::ranges::find(built->clients, client->desc) != built->clients.end())
 				return true;
+		}
+		return false;
+	}
+
+	bool StageInputs(std::string_view a_id, const std::function<void()>& a_write)
+	{
+		auto& state = Anchors();
+		if (!SegmentsOn() || !state.host || !IsRenderOwner())
+			return false;
+		auto lock = Guard();
+		const auto* client = FindClient(state, a_id);
+		if (!client)
+			return false;
+		const auto& frame = Driver::Current();
+		for (std::uint32_t d = 0; d < kDeclared; ++d) {
+			if (!state.declaredEpochs[d] || !SegmentHolds(d, *client->desc) || !WindowOpen(state, d))
+				continue;
+			const auto& built = state.frameBuilt[d];
+			if (!built || std::ranges::find(built->clients, client->desc) == built->clients.end())
+				continue;
+			// The client must be on in the frame's schedule: its passes do work only then.
+			const auto clients = SegmentClients(*built, d);
+			const auto i = static_cast<std::size_t>(std::ranges::find(clients, client->desc) - clients.begin());
+			if (i >= RenderGraph::Frame::kSegmentClients || !(frame.Segment(static_cast<SegmentId>(d)).clientsOn >> i & 1u))
+				continue;
+			struct StagingScope
+			{
+				org::GraphHost& host;
+				~StagingScope() { host.EndHeldRun(); }
+			} scope{ *state.host };
+			state.host->UseRun(state.stagingRun[d]);
+			state.stagedFrame[d] = frame.frame;
+			UpdateStagesOpen(state);
+			a_write();
+			return true;
 		}
 		return false;
 	}
@@ -3368,8 +3385,8 @@ namespace FrameAnchors
 				logger::info("[ORG] frame segments: the {} is cut short in frame {}: {}", kDeclaredInfo[d].names.label, frame.frame, a_why);
 			}
 			(void)Driver::NoteTap(segment, "a cut");
-			// Work its taps committed so far is submitted now; nothing tapped, nothing to submit.
-			if (state.heldFrame[d] != frame.frame)
+			// What its taps staged so far is committed now; nothing staged, nothing to submit.
+			if (state.stagedFrame[d] != frame.frame)
 				return { RunStatus::Idle };
 			return SubmitSegment(state, Point{}, d);
 		}
@@ -3444,13 +3461,13 @@ namespace FrameAnchors
 		if (!RenderGraphRuntime::Get().IsActive())
 			return;
 		using Kind = RenderGraph::Frame::Kind;
-		// A ticket the last frame took and never submitted (its end tap did not fire, which the driver counts) goes back unsubmitted.
+		// Values the last frame staged and never committed (its commit point did not come, which the driver counts) are dropped.
 		for (std::uint32_t d = 0; d < kDeclared; ++d)
-			if (state.heldFrame[d] && state.heldFrame[d] != a_frame.frame) {
+			if (state.stagedFrame[d] && state.stagedFrame[d] != a_frame.frame) {
 				if (!Driver::LoadStartedThisFrame())
-					logger::warn("[ORG] frame segments: the {} held its ticket at the frame's end without its end tap; what its taps wrote is dropped",
+					logger::warn("[ORG] frame segments: the {} staged values that its commit never took by the frame's end; they are dropped",
 						kDeclaredInfo[d].names.label);
-				ReleaseSegment(state, d);
+				DropStaged(state, d);
 			}
 		// The segments a world frame draws: every one. A frozen world's capture frame draws the world once too. Each takes its frame
 		// slot's schedule here, switched to this frame's description when that description's recording is ready, and keeps it to the
@@ -3461,8 +3478,12 @@ namespace FrameAnchors
 			state.frameRecording[d].reset();
 			state.frameBuilt[d].reset();
 			state.frameWanted[d] = {};
-			if (state.declaredEpochs[d])
+			if (state.declaredEpochs[d]) {
 				a_frame.segments[d] = Schedule(state, d, world, a_frame);
+				// A present stage's frame inputs start empty for this frame.
+				if (state.frameRecording[d])
+					OpenInputs(state, d, a_frame.slot);
+			}
 		}
 		state.inBegin = false;
 	}
@@ -3512,7 +3533,7 @@ namespace FrameAnchors
 		};
 		if (SegmentsOn() && work) {
 			if (const auto [declared, first] = OpenStepAt(state, a_point.anchor); declared < kDeclared) {
-				const auto built = state.heldFrame[declared] == Driver::Current().frame ? state.heldBuilt[declared] : state.frameBuilt[declared];
+				const auto& built = state.frameBuilt[declared];
 				// Every step of the segment at this anchor takes its own clients (the post end-of-frame segment has two ImageSpace
 				// steps, either side of the Tonemap anchor), each tapped when one of them has work.
 				std::vector<RunClient> others = clients;
@@ -3534,7 +3555,7 @@ namespace FrameAnchors
 					}
 					// A client that commits once per segment run, active at a second run of its step (the water drawn in two batches): the
 					// segment is cut here, and this run and the rest of the frame's steps draw on their anchors' own epochs.
-					const bool again = state.heldFrame[declared] == Driver::Current().frame && state.stepTaps[declared][k] > 0 &&
+					const bool again = state.stagedFrame[declared] == Driver::Current().frame && state.stepTaps[declared][k] > 0 &&
 					                   std::ranges::any_of(stepMembers, [](const RunClient& a_client) {
 										   return a_client.active && !a_client.desc->repeats && a_client.desc->maxInstances <= 1;
 									   });
@@ -3810,7 +3831,7 @@ namespace FrameAnchors
 			for (auto& [why, count] : state.insideHeld)
 				if (count)
 					inside += fmt::format("{}{} {}", inside.empty() ? "" : ", ", why, std::exchange(count, 0));
-			logger::info("[ORG] frame segments: GPU work submitted while a segment held its ticket, since the last report: {}", inside.empty() ? "none" : inside);
+			logger::info("[ORG] frame segments: GPU work submitted between a stage's first tap and its commit, since the last report: {}", inside.empty() ? "none" : inside);
 			std::string cuts;
 			for (std::uint32_t d = 0; d < kDeclared; ++d)
 				if (state.cuts[d])
@@ -3967,7 +3988,7 @@ namespace FrameAnchors
 			const auto failed = state.declaredSnapshots[declared].load(std::memory_order_acquire);
 			if (a_keptGraph)
 				state.declaredSnapshots[declared].store(state.declaredPrevious[declared].load(std::memory_order_acquire), std::memory_order_release);
-			ReleaseSegment(state, declared);
+			DropStaged(state, declared);
 			DropFailedClients(StepAnchors(declared), kDeclaredInfo[declared].names.label, failed, a_error);
 			return;
 		}

@@ -17,6 +17,7 @@
 #include "RenderGraph/ExternalWork.h"
 #include "RenderGraph/Frame/FrameDriver.h"
 #include "RenderGraph/Frame/PostChain.h"
+#include "RenderGraph/Frame/Recipe.h"
 #include "RenderGraph/FrameAnchorSelfTest.h"
 #include "RenderGraph/FrameAnchors.h"
 #include "RenderGraph/GraphResources.h"
@@ -1599,6 +1600,7 @@ struct RenderGraphRuntime::Impl
 		}
 		FrameAnchors::LogRunStats();
 		RenderGraph::Frame::Driver::LogStats();
+		RenderGraph::Frame::Recipes::LogStats();
 		RenderGraph::Frame::PostChain::LogStats();
 		epochCount = 0;
 	}
