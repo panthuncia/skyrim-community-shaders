@@ -3716,16 +3716,18 @@ namespace FrameAnchors
 			PruneRetired(a_state);
 			// One-shot passes in the graph this run submitted have run: the next build leaves them out, and the next frame's description
 			// names that build.
-			bool ranOnce = false;
+			// Only the anchors those passes sit at are built again: the epochs that hold them. Rebuilding every anchor of the stage also
+			// rebuilt the per-anchor epochs of its shared anchors, unstaged, which held Drawcall Limit Fix after each load.
+			std::uint32_t ranOnce = 0;
 			for (auto& client : a_state.clients)
 				for (std::size_t i = 0; i < client.desc->passes.size(); ++i)
 					if (client.armed[i] && client.armed[i] <= built->serial && SegmentHoldsPass(a_declared, *client.desc, client.desc->passes[i])) {
 						client.armed[i] = 0;
-						ranOnce = true;
+						ranOnce |= 1u << IndexOf(client.desc->passes[i].anchor);
 					}
 			if (ranOnce) {
 				Publish(a_state);
-				Rebuild(a_state, StepAnchors(a_declared), "one-shot passes ran");
+				Rebuild(a_state, ranOnce, "one-shot passes ran");
 			}
 			// Last: an executed callback may register, refresh or rearm. What each staged commit wrote is in the submitted run now.
 			for (const auto& [client, point] : executed)
