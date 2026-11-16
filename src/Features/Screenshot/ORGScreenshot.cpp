@@ -54,13 +54,13 @@ bool ORGScreenshot::Crop(const Pixels& a_pixels, std::uint32_t a_x, std::uint32_
 #	include "Globals.h"
 #	include "RenderGraph/AnchorPasses.h"
 #	include "RenderGraph/FrameAnchors.h"
+#	include "RenderGraph/FrameStaging.h"
 #	include "RenderGraph/RenderGraphRuntime.h"
 
 #	include <OpenRenderGraph/GraphHost.h>
 #	include <OpenRenderGraph/Runtime.h>
 #	include <Render/RenderGraph/RenderGraph.h>
-#	include <Render/Runtime/IReadbackService.h>
-#	include <Render/Runtime/ReadbackCapturePlan.h>
+#	include <Resources/Buffers/Buffer.h>
 #	include <RenderPasses/Base/TypedRenderGraphPass.h>
 #	include <Resources/ExternalTextureResource.h>
 
@@ -71,104 +71,99 @@ bool ORGScreenshot::Crop(const Pixels& a_pixels, std::uint32_t a_x, std::uint32_
 namespace
 {
 	constexpr const char* kClientId = "cs.screenshot";
-	// Capture points a readback may take before it is reported lost (a dropped ticket takes its copy with it).
+	// Capture points a capture may wait for its copy and its readback before it is reported lost.
 	constexpr std::uint64_t kPatience = 600;
+	// The readback buffers: a capture takes a free one; more captures in flight wait for one.
+	constexpr std::size_t kBuffers = 2;
 
-	/** @brief One capture: armed at a capture point, copied by the pass built for it, answered by the readback. */
+	/** @brief One capture: armed at a capture point, copied by the pass of the run that took it, read back once that run's work is done. */
 	struct Request
 	{
 		std::uint64_t id = 0;
 		std::uint64_t armedAt = 0;  // the capture point's number
 		ORGScreenshot::OnPixels onPixels;
-		std::atomic<bool> submitted = false;  // a submission held its copy
-		std::atomic<bool> closed = false;     // its capture point passed: later preparations copy nothing for it
-		std::atomic<bool> withdrawn = false;  // its capture point passed without the copy: D3D11 took it
-		std::atomic<bool> delivered = false;  // its first readback arrived: any later one is dropped
+		std::size_t buffer = kBuffers;  // the readback buffer it copies into
+		std::uint32_t width = 0, height = 0, rowPitch = 0;
+		bool taken = false;      // a run committed it (the copy is in that run's recording)
+		bool submitted = false;  // that run was submitted: point is set
+		org::GraphHost::GpuPoint point;
 	};
 
-	void OnCopySubmitted(Request& a_request, org::SubmissionContext) { a_request.submitted.store(true, std::memory_order_release); }
-
-	/** @brief What the render thread, the graph host's thread and the readback callback share. */
+	/** @brief What the render thread and the passes' recordings share. */
 	struct Shared
 	{
-		std::mutex mutex;
-		std::vector<std::pair<std::shared_ptr<Request>, org::ReadbackCaptureResult>> done;  // guarded: finished readbacks
-		std::shared_ptr<org::runtime::IReadbackService> service;
-		// Render thread: what the pass copies (a change rebuilds the client). The capture armed at this capture point, which the pass's
-		// preparation reads (any thread that prepares the run).
+		// Render thread: what the pass copies, and the readback buffers sized for it (a change rebuilds the client).
 		FrameAnchors::Texture source;
-		std::atomic<std::shared_ptr<Request>> armed;
+		std::uint32_t width = 0, height = 0, texelBytes = 0, rowPitch = 0;
+		std::array<std::shared_ptr<org::Buffer>, kBuffers> buffers;
+		// The capture each run copies, stored by the commit for the pass recorded at execution (a frame input).
+		RenderGraph::RunSlots<Request> runs;
+		// Render thread: the capture waiting for a run, and the one the last commit stored (its run's submission sets its point).
+		std::shared_ptr<Request> armed;
+		std::shared_ptr<Request> committed;
+	};
+
+	struct CaptureBindings
+	{
+		org::ResourceBindingToken source;
 	};
 
 	struct CaptureFrame
 	{
-		org::PreparedResourceReference source;
-		org::runtime::ReadbackCapturePlan plan;
+		std::shared_ptr<Shared> shared;
 	};
 
 	/**
-	 * @brief The source's first subresource into a readback buffer, for the capture armed when the run is prepared. The pass is in the
-	 * graph for good: a capture needs no build, so its copy is in the epoch submitted at its own capture point. A readback plan cannot
-	 * be part of a kept recording, so the pass has no revision and is prepared for each ticket; AnchorPasses' copy cannot express it.
+	 * @brief The source's first subresource copied into the capture's readback buffer. Recorded at execution from the capture its run's
+	 * commit stored; a run without one skips, its barriers folded. The buffers are CS's, declared as copy destinations at the build, so a
+	 * kept recording needs nothing prepared again for a capture.
 	 */
-	class CapturePass final : public org::TypedRenderGraphPass<CapturePass, CaptureFrame>
+	class CapturePass final : public org::TypedRenderGraphPass<CapturePass, CaptureFrame, CaptureBindings>
 	{
 	public:
-		// At the build, on the render thread: the source as it is now.
-		CapturePass(std::shared_ptr<Shared> a_shared, FrameAnchors::Texture a_source) :
-			shared(std::move(a_shared)), source(std::move(a_source)) {}
+		CapturePass(std::shared_ptr<Shared> a_shared, FrameAnchors::Texture a_source, std::array<std::shared_ptr<org::Buffer>, kBuffers> a_buffers) :
+			shared(std::move(a_shared)), source(std::move(a_source)), buffers(std::move(a_buffers)) {}
 
-		void Declare(org::PassBuilder& a_builder)
+		CaptureBindings Declare(org::PassBuilder& a_builder)
 		{
-			binding = a_builder.CopySource(source);
 			a_builder.PreferQueue(org::QueueKind::Graphics);
+			CaptureBindings bindings{};
+			bindings.source = a_builder.CopySource(source);
+			for (const auto& buffer : buffers)
+				if (buffer)
+					a_builder.CopyDestination(buffer);
+			return bindings;
 		}
 
-		CaptureFrame Prepare(const org::PassPrepareContext& a_preparation)
+		void Revision(std::vector<std::uint64_t>&) const {}
+
+		CaptureFrame Prepare(const CaptureBindings&, const org::PassPrepareContext&) const { return { shared }; }
+
+		static bool SkipsAtExecution(const CaptureBindings&, const CaptureFrame& a_frame, const org::PassRecordContext& a_recording)
 		{
-			const auto request = shared->armed.load(std::memory_order_acquire);
-			if (!request || request->closed.load(std::memory_order_acquire) || !shared->service)
-				return {};
-			CaptureFrame data{};
-			// The version this preparation binds: captured by the declaration's binding, so a slot's current version is the one read.
-			const auto current = source.Current();
-			if (!current)
-				return {};
-			data.source = a_preparation.CaptureResource(binding);
-			// The readback service's thread (any submitting or host thread): Poll hands it on.
-			org::ReadbackCaptureCallback onDone = [weak = std::weak_ptr<Shared>(shared), request = request](org::ReadbackCaptureResult&& a_result) {
-				if (request->withdrawn.load(std::memory_order_acquire) || request->delivered.exchange(true, std::memory_order_acq_rel))
-					return;
-				if (const auto owner = weak.lock()) {
-					std::scoped_lock lock(owner->mutex);
-					owner->done.emplace_back(request, std::move(a_result));
-				}
-			};
-			data.plan = org::runtime::PlanReadbackCapture(a_preparation.device, shared->service, *current, a_preparation.ResolveCapturedResource(data.source),
-				{}, std::move(onDone), org::QueueKind::Graphics, "cs.screenshot.readback");
-			if (!data.plan)
-				return {};
-			if (data.plan.destinationLease)
-				a_preparation.Retain(data.plan.destinationLease);
-			a_preparation.Reserve(data.plan.reservation);
-			// Whether the submission at the capture point held this copy (ORGScreenshot::Capture checks after the run).
-			a_preparation.Reserve(request, &OnCopySubmitted);
-			data.plan.destinationLease.reset();
-			data.plan.reservation.reset();
-			return data;
+			return !a_frame.shared || !a_frame.shared->runs.Find(a_recording.Run());
 		}
 
-		static void Record(const CaptureFrame& a_frame, org::PassRecordContext& a_recording)
+		static void Record(const CaptureBindings& a_bindings, const CaptureFrame& a_frame, org::PassRecordContext& a_recording)
 		{
-			if (!a_frame.plan)
+			if (!a_frame.shared)
 				return;
-			org::runtime::RecordReadbackCapture(a_frame.plan, a_recording.Commands(), a_recording.Resolve(a_frame.source).GetHandle());
+			const auto request = a_frame.shared->runs.Take(a_recording.Run());
+			if (!request || request->buffer >= kBuffers || !a_frame.shared->buffers[request->buffer])
+				return;
+			rhi::BufferTextureCopyFootprint copy{};
+			copy.texture = a_recording.Resolve(a_bindings.source).GetHandle();
+			copy.buffer = a_frame.shared->buffers[request->buffer]->GetAPIResource().GetHandle();
+			copy.mip = 0;
+			copy.arraySlice = 0;
+			copy.footprint = { 0, request->rowPitch, request->width, request->height, 1 };
+			a_recording.Commands().CopyTextureToBuffer(copy);
 		}
 
 	private:
 		std::shared_ptr<Shared> shared;
 		FrameAnchors::Texture source;
-		org::ResourceBindingToken binding;  // the source's declaration
+		std::array<std::shared_ptr<org::Buffer>, kBuffers> buffers;
 	};
 
 	FrameAnchors::Texture Import(const ORGScreenshot::Source& a_source)
@@ -193,10 +188,10 @@ struct ORGScreenshot::Impl
 	std::function<void()> onFailed;
 	bool registered = false;
 	bool importWarned = false;
-	bool ranThisPoint = false;
 	std::uint64_t nextId = 0;
 	std::uint64_t points = 0;                           // capture points seen
-	std::vector<std::shared_ptr<Request>> outstanding;  // submitted, not read back yet
+	std::vector<std::shared_ptr<Request>> outstanding;  // taken, not read back yet
+	std::uint64_t built = 0;                            // the registration the client's passes were made for
 };
 
 ORGScreenshot::~ORGScreenshot() = default;
@@ -205,6 +200,67 @@ void ORGScreenshot::Reserve()
 {
 	if (Requested() && !FrameAnchors::Reserve(FrameAnchors::Anchor::Capture))
 		logger::warn("[ORG] Screenshot: CS_ORG_SCREENSHOT=1, but the Capture anchor could not be reserved; captures use D3D11");
+}
+
+namespace
+{
+	/**
+	 * @brief Registers the capture client for the shared source and buffers: one copy pass, recorded at execution. In native mode with the
+	 * UI stages the Capture anchor is their step (after the overlay); otherwise it runs its own epoch.
+	 */
+	bool RegisterClient(const std::shared_ptr<Shared>& a_shared)
+	{
+		RenderGraph::AnchorPasses::Builder builder(FrameAnchors::Anchor::Capture, kClientId, 100);
+		builder.Add("copy", FrameAnchors::PassKind::Copy, [a_shared, source = a_shared->source, buffers = a_shared->buffers]() -> std::shared_ptr<org::RenderPass> {
+			return source ? std::make_shared<CapturePass>(a_shared, source, buffers) : nullptr;
+		});
+		FrameAnchors::ClientDesc client{};
+		client.id = kClientId;
+		client.passes = builder.Take();
+		for (auto& pass : client.passes)
+			pass.atExecution = true;
+		// The anchor's step has work only while a capture waits for a run.
+		client.active = [weak = std::weak_ptr<Shared>(a_shared)] {
+			const auto owner = weak.lock();
+			return owner && owner->armed != nullptr;
+		};
+		client.commit = [weak = std::weak_ptr<Shared>(a_shared)](const FrameAnchors::Point&) {
+			const auto owner = weak.lock();
+			if (!owner || !owner->armed)
+				return;
+			auto request = std::exchange(owner->armed, nullptr);
+			request->taken = true;
+			owner->runs.Store(RenderGraphRuntime::Get().Host()->CurrentRun(), request);
+			owner->committed = std::move(request);
+		};
+		client.executed = [weak = std::weak_ptr<Shared>(a_shared)](const FrameAnchors::Point&) {
+			const auto owner = weak.lock();
+			auto* host = RenderGraphRuntime::Get().Host();
+			if (!owner || !owner->committed || !host)
+				return;
+			owner->committed->point = host->SubmittedPoint();
+			owner->committed->submitted = true;
+			owner->committed.reset();
+		};
+		client.onFailed = [] {
+			logger::error("[ORG] Screenshot: the render graph failed with the capture's pass in it; captures use D3D11");
+			ORGScreenshot::Get().Fail();
+		};
+		return FrameAnchors::Register(std::move(client));
+	}
+}
+
+void ORGScreenshot::Fail()
+{
+	if (!impl)
+		return;
+	auto& state = *impl;
+	logger::error("[ORG] Screenshot: {} readbacks lost", state.outstanding.size());
+	state.registered = false;
+	state.outstanding.clear();
+	state.shared->armed.reset();
+	if (state.onFailed)
+		state.onFailed();
 }
 
 bool ORGScreenshot::Setup(std::function<void()> a_onFailed)
@@ -218,41 +274,16 @@ bool ORGScreenshot::Setup(std::function<void()> a_onFailed)
 		return false;
 	}
 	auto state = std::make_unique<Impl>();
-	auto shared = state->shared;
-	shared->service = host->GetRuntime().Readbacks();
-	if (!shared->service) {
-		logger::warn("[ORG] Screenshot: the render graph has no readback service; captures use D3D11");
-		return false;
-	}
-	RenderGraph::AnchorPasses::Builder builder(FrameAnchors::Anchor::Capture, kClientId, 100);
-	// In the graph for good (a gated pass, not a one-shot): it copies only while a capture is armed.
-	builder.Add("copy", FrameAnchors::PassKind::Copy, [shared]() -> std::shared_ptr<org::RenderPass> {
-		return shared->source ? std::make_shared<CapturePass>(shared, shared->source) : nullptr;
-	});
-	FrameAnchors::ClientDesc client{};
-	client.id = kClientId;
-	client.passes = builder.Take();
-	// The anchor runs the copy only while a capture is armed.
-	client.active = [weak = std::weak_ptr<Shared>(shared)] {
-		const auto owner = weak.lock();
-		return owner && owner->armed.load(std::memory_order_acquire) != nullptr;
-	};
-	client.onFailed = [] {
-		auto& impl = *Get().impl;
-		logger::error("[ORG] Screenshot: the render graph failed; captures use D3D11 ({} readbacks lost)", impl.outstanding.size());
-		impl.registered = false;
-		impl.outstanding.clear();
-		if (impl.onFailed)
-			impl.onFailed();
-	};
 	state->onFailed = std::move(a_onFailed);
 	impl = std::move(state);
-	if (!FrameAnchors::Register(std::move(client))) {
+	// No source yet: the client has no pass until the first capture names one (SetSource), and its build switches in before the copy.
+	if (!RegisterClient(impl->shared)) {
 		logger::warn("[ORG] Screenshot: the Capture anchor refused the client; captures use D3D11");
 		return false;
 	}
 	impl->registered = true;
-	logger::info("[ORG] Screenshot: captures are read back through the render graph (Capture anchor)");
+	logger::info("[ORG] Screenshot: captures are read back through the render graph ({})",
+		FrameAnchors::HeldByStage(FrameAnchors::Anchor::Capture) ? "a pass of the UI and menu UI stages" : "the Capture anchor");
 	return true;
 }
 
@@ -264,16 +295,60 @@ bool ORGScreenshot::IsActive() const
 bool ORGScreenshot::SetSource(const Source& a_source)
 {
 	auto& state = *impl;
+	auto& shared = *state.shared;
 	auto source = Import(a_source);
 	if (!source)
 		return false;
-	if (source != state.shared->source) {
-		state.shared->source = std::move(source);
-		// The pass reads the new source from the client's next build.
-		FrameAnchors::Refresh(kClientId);
-		logger::info("[ORG] Screenshot: the copy now reads {}", a_source.importName ? a_source.importName : "the source");
+	D3D11_TEXTURE2D_DESC desc{};
+	a_source.texture->GetDesc(&desc);
+	const auto bytes = rhi::FormatByteSize(source.Format());
+	if (!bytes)
+		return false;
+	const auto rowPitch = (desc.Width * bytes + 255u) & ~255u;
+	if (source == shared.source && shared.width == desc.Width && shared.height == desc.Height && shared.texelBytes == bytes)
+		return true;
+	shared.source = std::move(source);
+	shared.width = desc.Width;
+	shared.height = desc.Height;
+	shared.texelBytes = bytes;
+	shared.rowPitch = rowPitch;
+	for (std::size_t i = 0; i < kBuffers; ++i) {
+		shared.buffers[i] = org::Buffer::CreateShared(rhi::HeapType::Readback, std::uint64_t(rowPitch) * desc.Height);
+		if (!shared.buffers[i])
+			return false;
+		shared.buffers[i]->SetName(fmt::format("cs.screenshot.readback{}", i));
 	}
+	// The pass copies the new source into the new buffers from the client's next build; a capture waits for it.
+	if (!RegisterClient(state.shared))
+		return false;
+	logger::info("[ORG] Screenshot: the copy now reads {} ({}x{}, {} bytes a texel); its build switches in before the next capture copies",
+		a_source.importName ? a_source.importName : "the source", desc.Width, desc.Height, bytes);
 	return true;
+}
+
+namespace
+{
+	/** @brief A readback buffer no capture in flight holds, or kBuffers. */
+	std::size_t FreeBuffer(const std::vector<std::shared_ptr<Request>>& a_outstanding, const std::shared_ptr<Request>& a_armed)
+	{
+		for (std::size_t i = 0; i < kBuffers; ++i) {
+			const bool used = (a_armed && a_armed->buffer == i) ||
+			                  std::ranges::any_of(a_outstanding, [&](const std::shared_ptr<Request>& a_request) { return a_request->buffer == i; });
+			if (!used)
+				return i;
+		}
+		return kBuffers;
+	}
+
+	/** @brief Taps the Capture anchor for the armed capture when a tap now commits (the UI stage open, or the anchor's own epoch). */
+	void TryTake(Shared& a_shared)
+	{
+		if (!a_shared.armed)
+			return;
+		if (FrameAnchors::HeldByStage(FrameAnchors::Anchor::Capture) && !FrameAnchors::CanTap(kClientId))
+			return;
+		(void)FrameAnchors::Run(FrameAnchors::Anchor::Capture);
+	}
 }
 
 bool ORGScreenshot::Capture(const Source& a_source, OnPixels a_onPixels)
@@ -281,36 +356,34 @@ bool ORGScreenshot::Capture(const Source& a_source, OnPixels a_onPixels)
 	if (!a_source.texture || !a_onPixels || !IsActive())
 		return false;
 	auto& state = *impl;
+	auto& shared = *state.shared;
 	if (!SetSource(a_source)) {
 		if (!std::exchange(state.importWarned, true))
 			logger::warn("[ORG] Screenshot: the capture source cannot be imported into the graph; this capture uses D3D11");
+		return false;
+	}
+	if (shared.armed) {
+		logger::warn("[ORG] Screenshot: a capture is still waiting for its copy; this capture uses D3D11");
+		return false;
+	}
+	const auto buffer = FreeBuffer(state.outstanding, nullptr);
+	if (buffer >= kBuffers) {
+		logger::warn("[ORG] Screenshot: every readback buffer holds a capture in flight; this capture uses D3D11");
 		return false;
 	}
 	auto request = std::make_shared<Request>();
 	request->id = ++state.nextId;
 	request->armedAt = state.points;
 	request->onPixels = std::move(a_onPixels);
-	// The pass is in the graph already: arming the request is enough for this run's preparation to copy for it.
-	state.shared->armed.store(request, std::memory_order_release);
-	const bool ran = FrameAnchors::Run(FrameAnchors::Anchor::Capture);
-	// With a submission thread the epoch is submitted later: its copy's submission (OnCopySubmitted) is read below.
-	RenderGraphRuntime::Get().DrainSubmissions("a screenshot capture");
-	request->closed.store(true, std::memory_order_release);
-	state.shared->armed.store(nullptr, std::memory_order_release);
-	state.ranThisPoint = true;
-	if (!ran || !state.registered) {
-		request->withdrawn.store(true, std::memory_order_release);
-		logger::warn("[ORG] Screenshot: the Capture anchor's epoch did not run; this capture uses D3D11");
-		return false;
-	}
-	// The submission at this point did not hold the copy: no later readback may stand for it.
-	if (!request->submitted.load(std::memory_order_acquire)) {
-		request->withdrawn.store(true, std::memory_order_release);
-		logger::warn("[ORG] Screenshot: capture {} was not in the epoch submitted at its capture point; D3D11 copies it", request->id);
-		return false;
-	}
-	logger::info("[ORG] Screenshot: capture {} copied on the render graph", request->id);
-	state.outstanding.push_back(std::move(request));
+	request->buffer = buffer;
+	request->width = shared.width;
+	request->height = shared.height;
+	request->rowPitch = shared.rowPitch;
+	shared.armed = request;
+	state.outstanding.push_back(request);
+	// Taken now when the stage's schedule has the pass; otherwise at a later capture point (its build switching in, or the stage's next run).
+	TryTake(shared);
+	logger::info("[ORG] Screenshot: capture {} {}", request->id, request->taken ? "copied on the render graph" : "waits for a run that holds its copy");
 	return true;
 }
 
@@ -319,41 +392,44 @@ void ORGScreenshot::Poll()
 	if (!impl)
 		return;
 	auto& state = *impl;
-	// The anchor runs at every capture point (for its other clients, the anchor self-test, a copy still pending), once.
-	if (!std::exchange(state.ranThisPoint, false))
-		FrameAnchors::Run(FrameAnchors::Anchor::Capture);
+	auto& shared = *state.shared;
 	++state.points;
+	TryTake(shared);
 	if (state.outstanding.empty())
 		return;
-	// Other epochs poll the readbacks at their submissions; this one submits only when it captures, so it polls too.
-	if (state.shared->service)
-		state.shared->service->ProcessReadbackRequests();
-	std::vector<std::pair<std::shared_ptr<Request>, org::ReadbackCaptureResult>> done;
-	{
-		std::scoped_lock lock(state.shared->mutex);
-		done.swap(state.shared->done);
-	}
-	for (auto& [request, result] : done) {
+	std::vector<std::shared_ptr<Request>> done;
+	for (const auto& request : state.outstanding)
+		if (request->submitted && request->point.Reached())
+			done.push_back(request);
+	for (const auto& request : done) {
 		std::erase(state.outstanding, request);
-		if (result.layouts.empty() || result.data.empty()) {
-			logger::error("[ORG] Screenshot: capture {} came back without a texture layout", request->id);
+		const auto& buffer = shared.buffers[request->buffer];
+		void* mapped = nullptr;
+		if (buffer)
+			buffer->GetAPIResource().Map(&mapped);
+		if (!mapped) {
+			logger::error("[ORG] Screenshot: capture {}'s readback could not be mapped; it is lost", request->id);
 			continue;
 		}
-		const auto& layout = result.layouts.front();
 		Pixels pixels{};
-		pixels.offset = layout.offset;
-		pixels.rowPitch = layout.rowPitch;
-		pixels.width = layout.width;
-		pixels.height = layout.height;
-		pixels.data = std::move(result.data);
-		logger::info("[ORG] Screenshot: capture {} read back ({}x{}, {} bytes) after {} capture points", request->id, pixels.width, pixels.height,
-			pixels.data.size(), state.points - request->armedAt);
+		pixels.offset = 0;
+		pixels.rowPitch = request->rowPitch;
+		pixels.width = request->width;
+		pixels.height = request->height;
+		const auto size = std::size_t(request->rowPitch) * request->height;
+		pixels.data.resize(size);
+		std::memcpy(pixels.data.data(), mapped, size);
+		buffer->GetAPIResource().Unmap(0, 0);
+		logger::info("[ORG] Screenshot: capture {} read back ({}x{}, {} bytes) after {} capture points", request->id, pixels.width, pixels.height, size,
+			state.points - request->armedAt);
 		request->onPixels(std::move(pixels));
 	}
 	std::erase_if(state.outstanding, [&](const std::shared_ptr<Request>& a_request) {
 		if (state.points - a_request->armedAt < kPatience)
 			return false;
-		logger::error("[ORG] Screenshot: capture {} was not read back after {} frames; it is lost", a_request->id, kPatience);
+		logger::error("[ORG] Screenshot: capture {} was not read back after {} capture points; it is lost", a_request->id, kPatience);
+		if (shared.armed == a_request)
+			shared.armed.reset();
 		return true;
 	});
 }
@@ -372,5 +448,6 @@ bool ORGScreenshot::IsActive() const { return false; }
 bool ORGScreenshot::SetSource(const Source&) { return false; }
 bool ORGScreenshot::Capture(const Source&, OnPixels) { return false; }
 void ORGScreenshot::Poll() {}
+void ORGScreenshot::Fail() {}
 
 #endif

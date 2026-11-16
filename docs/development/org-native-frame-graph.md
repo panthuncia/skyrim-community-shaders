@@ -4491,3 +4491,29 @@ all passed (the main menu as before), 0 tap errors, 0 recipe findings, 0 frames 
 tour failed once to load within 120 s (`k2val`: 794 re-registrations of the shadow clears, each a DCLF re-entry hold, see below) and passed
 on the next run (84); the switch registry did not list `CS_ORG_SEGMENT_SUN` then, and does now.
 
+### The capture: a pass of the UI and menu UI stages
+
+The harness's shots were D3D11 copies in native mode: `capture N was not in the epoch submitted at its capture point; D3D11 copies it`.
+The capture's pass made its readback plan in its preparation, and a kept recording is not prepared again, so the Capture anchor's ticket
+held no copy.
+
+Now (`ORGScreenshot.cpp`):
+- The Capture anchor is the last step of the UI and menu UI stages, after the overlay (wholly held: no epoch of its own in native mode).
+- Native mode's capture point moves to just before those stages' commit at the present (`Hooks.cpp`, before the stages' `TapPoint`); the
+  capture point inside HDR Display's present chain still runs, and takes no copy then.
+- The pass is recorded at execution from the capture its run's commit stored (`RunSlots`, a frame input). A run without a capture skips
+  it, its barriers folded.
+- The readback buffers are CS's (two, sized for the source, row pitch aligned to 256), declared as copy destinations at the build. The
+  stage's executed callback takes the run's GPU point; a later capture point maps the buffer once the point is reached and hands the bytes
+  to the encoder.
+- A capture that finds no run holding its copy (the first capture names a source, and the build with it switches in a few frames later)
+  waits and is taken at a later capture point; the first capture of a session waits about 6 frames.
+- The D3D11 staging copy is used only when the graph cannot take a capture at all: inactive, a source it cannot import, or both readback
+  buffers in flight. No run fell back.
+
+Frame generation's hudless copy (the FrameGeneration anchor) is not a ticket in the test runs: frame generation is off.
+Captures in the checks: every harness shot of the runs above came through the graph (`capture N copied on the render graph`, read back 3
+capture points later; the first of a session waits for its source's build, 9 to 13 capture points), including the main menu's (the menu
+UI stage) and the pause menu's (the frozen kind). The UI stage gains one pass (the copy), which skips at execution in frames without a
+capture.
+

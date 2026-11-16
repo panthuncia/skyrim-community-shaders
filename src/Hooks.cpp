@@ -599,7 +599,10 @@ struct IDXGISwapChain_Present
 					swapChain, syncInterval, presentFlags,
 					[&](IDXGISwapChain* sc, UINT si, UINT f) {
 						ZoneScopedN("CS.Present.NativeWait");
-						// The UI stage's commit point: just before the present.
+						// The UI stage's commit point: just before the present. The capture point comes first in native mode with the UI stages, so
+						// a screenshot is a pass of the stage (its Capture step, after the overlay).
+						if (FrameAnchors::SegmentsOn() && FrameAnchors::HeldByStage(FrameAnchors::Anchor::Capture))
+							globals::features::screenshotFeature.ProcessCaptureRequest();
 						if (FrameAnchors::SegmentsOn()) {
 							(void)FrameAnchors::TapPoint(static_cast<std::uint32_t>(RenderGraphRuntime::Segment::DeclaredUi));
 							(void)FrameAnchors::TapPoint(static_cast<std::uint32_t>(RenderGraphRuntime::Segment::DeclaredMenuUi));

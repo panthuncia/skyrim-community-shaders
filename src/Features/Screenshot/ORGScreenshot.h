@@ -17,15 +17,15 @@ namespace DirectX
 /**
  * @brief The Screenshot feature's GPU readback on the render graph (CS_ORG_SCREENSHOT=1).
  *
- * One copy pass at the Capture anchor, at the end of HDRDisplay's present chain, where the D3D11 path copies into its staging
- * texture. The pass copies the capture source (the framebuffer, the back buffer, or HDR's clean composite) into one of ORG's
- * readback buffers. The readback service hands the bytes back once the GPU copy is done; the frame never waits for it.
+ * One copy pass at the Capture anchor: in native mode with the UI stages, a step of the UI and menu UI stages after the overlay
+ * (the capture point moves to just before their commit); otherwise the anchor's own epoch. The pass copies the capture source (the
+ * framebuffer, the back buffer, or HDR's clean composite) into one of CS's readback buffers, declared at the build. It is recorded at
+ * execution from the capture its run's commit stored, so a kept recording needs nothing prepared again; a run without a capture skips
+ * it. The bytes are handed back at a later capture point once that run's GPU work is done; the frame never waits for it. A capture that
+ * finds no run holding its copy now (a new source's build pending) is taken at a later capture point.
  *
- * The copy is a one-shot pass (FrameAnchors::PassDesc::once). Other frames do not have it in the anchor's graph, so they submit
- * nothing for it. A capture arms it (FrameAnchors::Rearm) with that capture's request and source, then runs the anchor. A
- * capture whose copy was not in the epoch submitted at its capture point is withdrawn, and the caller copies it with D3D11.
- *
- * On any failure the feature uses its D3D11 staging copy. Render thread throughout, except Crop.
+ * Captures use the D3D11 staging copy only when the graph cannot take them at all (inactive, a source it cannot import, every readback
+ * buffer in use). Render thread throughout, except Crop.
  *
  * Header deliberately free of ORG/Vulkan includes (see RenderGraphRuntime.h).
  */
@@ -79,8 +79,11 @@ public:
 	 */
 	bool Capture(const Source& a_source, OnPixels a_onPixels);
 
-	/** @brief Every capture point, after any Capture: hands finished readbacks to their callbacks, and runs the anchor. */
+	/** @brief Every capture point, after any Capture: takes a capture still waiting for a run, and hands finished readbacks to their callbacks. */
 	void Poll();
+
+	/** @brief The graph failed with the capture's pass in it: the readbacks in flight are lost and captures use D3D11 (render thread). */
+	void Fail();
 
 	/**
 	 * @brief Copies the a_width x a_height crop at a_x, a_y of a readback into a_image, in a_format. Any thread: the encoding

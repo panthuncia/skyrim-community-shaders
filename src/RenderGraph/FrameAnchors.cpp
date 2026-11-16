@@ -412,12 +412,15 @@ namespace FrameAnchors
 			// The Present anchor's clients: a Bink movie's tiles, queued by the movie's tick and drawn from the run's slot in the late batch,
 			// and the GPU load diagnostic. The swap chain's Present hook taps it after the displays and before the overlay, as the engine
 			// draws them.
+			// Last the capture (the Screenshot feature's copy into a readback buffer, CS_ORG_SCREENSHOT): native mode's capture point is just
+			// before the stage's commit at the present (Hooks.cpp), after the overlay.
 			{ Segment::DeclaredUi,
 				{ { { .anchor = Anchor::Interface, .firstInstance = 0, .instanceCount = 8 },
 					{ Anchor::Present },
 					{ Anchor::Overlay },
+					{ Anchor::Capture },
 					{ Anchor::Count, {}, Segment::Count, false, true } } },
-				4,
+				5,
 				{ "CS stage: UI", "CS stage: UI inputs", "FrameSegments::Ui / ", "cs.segment.ui" } },
 			// The menu UI stage: the loading screen, the main menu and a menu over a frozen world (frame sequence census). The engine draws,
 			// in this order: the frozen frame's composite (Main::Render; a menu over a frozen world only), the frame's first clears, displays,
@@ -447,8 +450,9 @@ namespace FrameAnchors
 					{ .anchor = Anchor::Interface, .firstInstance = 0, .instanceCount = 8 },
 					{ Anchor::Present },
 					{ Anchor::Overlay },
+					{ Anchor::Capture },
 					{ Anchor::Count, {}, Segment::Count, false, true } } },
-				15,
+				16,
 				{ "CS stage: menu UI", "CS stage: menu UI inputs", "FrameSegments::MenuUi / ", "cs.segment.menu-ui" } },
 		} };
 
