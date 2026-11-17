@@ -2688,6 +2688,11 @@ namespace FrameAnchors
 				entry->slot = a_slot;
 				entry->fields = a_fields;
 				entry->lastFrame = a_frame;
+				// Recordings of an older build are never used again, and each keeps that build's graph alive with its private alias
+				// pools (tens of MB a build).
+				std::erase_if(recordings.entries, [&](const auto& a_kept) {
+					return a_kept->done && a_kept->recording && !a_state.host->EpochRecordingCurrent(*a_kept->recording);
+				});
 				// The least recently used of the finished ones goes when the list is full.
 				while (recordings.entries.size() >= SegmentRecordings::kKeep) {
 					auto oldest = recordings.entries.end();
