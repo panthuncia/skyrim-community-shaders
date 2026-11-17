@@ -114,7 +114,9 @@ To match DXVK, native needs what DXVK's CS thread gives it: the GPU work off the
   - ImageSpace: `ISTemporalAA_UI`/`_Water`, raster lens flares, Perlin noise, the dynamic-resolution quad.
   - Scaleform: masks inside pushed render targets; engine targets other than the book's.
   - FX: geometry shaders, null UAVs.
-- **Dead native branches** (the `Native::Active()` "empty input" cases in the fog, SSS, VL, Sun Rays, the deferred composite and
-  IBL): they go with WS6, since guest still imports producers on D3D11 there.
-- **WS6-WS8, after the parity gate:** guest runs the same ports as native and the port switches go; the declaration and
-  registry cleanup; the submission seam and the `NativeDevice.cpp` split.
+- **WS6, first half done (Guest B0, 2026-11-18):** guest runs the same ports as native by default, with the flush latch and the
+  guest context (`Native::ApplySwitches`); the dead native branches (fog, screen-space shadows, VL, Sun Rays, the deferred composite,
+  IBL) are gone. Left: the port switches themselves (after guest runs on stages), and guest's first-sight ImageSpace shapes, which
+  the latch drops (a frozen-world menu's background is black in the session that first sees its shapes; see
+  `org-native-frame-graph.md`, "Guest B0").
+- **WS7-WS8:** the declaration and registry cleanup; the submission seam and the `NativeDevice.cpp` split.

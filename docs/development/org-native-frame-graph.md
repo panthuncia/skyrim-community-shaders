@@ -4842,11 +4842,15 @@ Terrain Blending, Volumetric Shadows, light culling, the bloom radii.
 
 ### What guest mode (DXVK) still uses of the old path
 
-Guest runs no CS stage. It uses: every frame anchor's own epoch (per-anchor epochs, `FrameAnchors::Scheduled` on the anchor's own built
+Since Guest B0 (2026-11-18) guest runs every port native runs, with the flush latch and the guest context: the engine's subsystems
+and CS's features draw on ORG in both modes, and the engine's binds and draws are withheld from DXVK. Guest still runs no CS stage.
+It uses: every frame anchor's own epoch (per-anchor epochs, `FrameAnchors::Scheduled` on the anchor's own built
 graph, the skeleton's group anchors and Skylighting's lent slot with its D3D11 clear), the main ImageSpace client,
 the clients built on first sight and the shape manifest (`ImageSpaceShapes.json`) with the per-draw shape capture, the D3D11 renderer for
 displays the graph refuses, the capture's D3D11 staging copy when the graph cannot take it, and the post
-chain's hooks (which only check and stage in native). This is the input for the guest port (plan stage 8).
+chain's hooks (which only check and stage in native). With the latch, an ImageSpace draw the main client leaves to the engine (a shape
+first seen this session, a registration the graph does not hold yet) draws nothing. What still reaches DXVK is in "Guest B0" (the
+residue census). This is the input for the guest port (plan stage 8).
 
 ### Old native paths still reachable
 
@@ -7152,3 +7156,121 @@ Riverwood), native-quick with Volumetric Lighting off, guest-quick, and guest-qu
 stopped at the plugin load while a build ran on the same machine (no error in its log); run again alone, it passed. The perf runs above
 are on the final DLL and passed. The only `[C]` line is the known `PublishedResources` one. The main menu run was skipped (it moves the
 Start On Save DLL aside).
+
+## Guest B0: native's ports in guest (2026-11-18)
+
+Plan piece B0. Guest mode (DXVK) now runs every port native runs, by default. Code and this text on `org-native/phases` (no submodule
+change). RX 6600, Perf-Fast, background runs with `DXVK_DEBUG=hang`. The D3D11 baselines were taken on the unchanged build (DLL
+`65afa962dbd9`); every other run is on DLL `551bc1c207b9`.
+
+### The defaults
+
+- `Native::ApplySwitches` applies the port list (`kPortSwitches`: the 43 ports and the flush latch) in every ORG mode. Guest mode
+  adds `kGuestSwitches` (`CS_ORG_TRIPWIRE_GUEST`, the guest context the latch needs). Guest is DXVK with the graph on: not
+  `CS_ORG=0` or `CS_ORG=features`, not `CS_NATIVE_D3D11=1`, not `CS_ORG_OWNED_FRAME=1`. Native's conflict and narrowing checks
+  stay native only. In guest a switch the environment sets is kept, so `0` keeps that subsystem on D3D11; in native a `0` is
+  still a startup error. A port switch read before this point is a startup error in both modes. The port `Requested()` functions
+  and switches stay (a later piece deletes them).
+- Plain D3D11 mode (`CS_ORG=0`) is unchanged: no ports, every feature on its D3D11 path.
+- cs-test: the port keys default to true in `schema.toml`; `org.ports` has `all` (written out), `off` (every port and the guest
+  context 0: guest as it was) and `none` (nothing set). `guest.toml` means the new default. New configs: `guest-interior`
+  (`native-interior`'s steps) and `d3d11` (`CS_ORG=0`, compose it as `d3d11+quick`). `sky-river-org0` and `vram-menu-B` set
+  `ports = "off"` to keep their meaning; `green` and `latch-census-short` no longer set `ports = "all"`.
+
+### The black first shot
+
+The capture's client is registered again when the first capture names its source (`ORGScreenshot::SetSource`), and the capture was
+armed and taken at once. In native the Capture anchor is a step of the UI stage, and `CanTap` waits for the stage's schedule to hold
+the new registration. In guest the anchor runs its own epoch with whatever graph it has built: the first capture ran the old graph,
+which had no copy pass (no source yet), and read back a buffer nothing wrote. Every later capture had the new build. Now a capture is
+taken, and the commit stores it, only once the run's graph holds the client's current registration (`FrameAnchors::Scheduled` in
+guest, the stage's schedule in native). The first shot waits one or two capture points and is the frame's image in every run.
+
+### Dead native branches
+
+With every producer on ORG in both modes, the guest-only imports of D3D11 producers are gone: Exponential Height Fog (`Published`, the
+IBL fallback: the fog runs without IBL when IBL's SH is not published, as native did), Sun Rays (`ImportView`: the scene depth,
+Terrain Shadows' heights and Cloud Shadows' texture are published ids or missing), Screen-Space Shadows (Terrain Blending's blended
+depth import), Volumetric Lighting (`FeatureInput`), IBL (Dynamic Cubemaps' environment) and the deferred composite (`InputOf`). A
+producer whose port is switched off now gives an empty input in guest too.
+
+### Shots
+
+Guest with every port against guest's D3D11 baseline and native (mean absolute difference over 0-255, share of pixels off by more
+than 24). Moving trees, grass, NPCs and the light shafts make some difference in every pair; native's frames also differ by the camera
+(Improved Camera is off in native runs) and a known brighter exposure.
+
+| Run, shot | vs D3D11 guest | vs native |
+|---|---|---|
+| quick, start | 15.5, 23.9% (trees in the wind) | 21.0, 28.7% |
+| river, river / river-east | 29.7, 51.8% (an NPC, grass) / 5.4, 5.5% | 26.5, 47.6% / 15.1, 20.3% |
+| rain, rain / rain-later | 1.7, 0.2% / 1.7, 0.2% | 10.2, 11.2% / 10.1, 11.2% |
+| under water, uw420 / uw560 | 6.5, 9.9% / 2.4, 2.1% | 17.7, 27.7% / 12.8, 11.2% |
+| interior, dragonsreach / dragonsreach2 | 9.0, 10.6% / 10.3, 16.2% | 17.7, 28.1% / 21.7, 42.1% |
+| upscalers, fsr / xess / taa | 1.4, 1.1% / 1.8, 1.0% / 4.3, 4.3% | 22.3, 30.1% / 21.2, 29.8% / 22.9, 29.7% |
+| worldspace, tamriel / solstheim / riverwood | 1.8, 1.5% / 17.7, 32.1% / 10.7, 16.9% | 22.2, 30.0% / 20.0, 35.4% / 20.3, 35.9% |
+| Journal Menu, pre / menu / post65 (third run) | 4.8, 4.0% / 0.6, 0.0% / 3.9, 3.1% | 22.9, 29.6% / 10.0, 12.4% / 22.8, 29.5% |
+
+Every shot was looked at side by side: the same image, no missing effect. Riverwood in the worldspace run is a little brighter than
+the D3D11 baseline (eye adaptation; it sits between the baseline and native).
+
+**The frozen world's background is black in a session that first sees its shapes.** The capture frame draws ISRadialBlurHigh into
+kMENUBG (and ISDistantBlur into rt41) with shapes guest's ImageSpace client has not registered. A first-seen shape's draw stays with
+the engine while its pass is built, and with the latch on an engine draw nobody vouched for is dropped, so kMENUBG keeps nothing and
+the menu shows black. The manifest has the shapes from the next written session: the first two Journal runs were black, the third
+matched the baseline. Before B0 ImageSpace was D3D11 in guest; native has the post stage's `capture.menubg` step. Not fixed here:
+vouching those draws would be a D3D11 fallback; the post stage in guest removes the first-sight path.
+
+### The residue census
+
+`latch-census-short` (Whiterun, the inventory, map and journal, a save and load, Dragonsreach), census windows of 300 frames:
+
+- **Engine draws reaching DXVK** (each skipped by the latch, so nothing is drawn): 0 in 10 of 15 windows, every steady world window
+  included. The other five are the first window after the load (8.0 a frame), the map (6.1), the journal (7.3), its close (1.5) and the
+  save's load (4.1). They are DrawTriShape from the shadow-map batch walk (Utility into kSHADOWMAPS, about 7 a frame in those windows:
+  the load-window shadow draws), Lighting and Effect draws into kMAIN at a few hundredths a frame (refused objects), and
+  DrawInstancedTriShape in the journal's close. The latch logs 7 to 11 first-seen unvouched call sites a run (native's runs log 4 to 12
+  of the same classes).
+- **State flushes and shader binds:** 62 to 101 flushes a frame, 56 to 97 vertex and pixel shader binds, nearly all followed by no draw.
+  25 flushes and 130 shader binds a frame are latched; 38 to 40 flushes a frame come from CS's own D3D11 code and apply the owed state
+  on DXVK (173 binds a frame dropped in steady windows). The CS code that still flushes is the next item.
+- **Clears:** the skeleton's clears of views it does not hold stay on D3D11 (rt12, rt85, rt88, rt89, rt90, rt75 in a frozen world, and
+  depth slots 0 and 10 when another view is in the slot): 7 to 13 distinct lines a run.
+- **ImageSpace draws left to the engine** (dropped by the latch): while the anchor's graph does not hold a registration yet (at the main
+  menu and the load), first-seen shapes, and ISAlphaBlend (it reads an engine target by heap index), 8 to 19 effect and reason pairs a run.
+- Not counted by the census: Map/Unmap, copies and queries through the guest context.
+
+### Fallbacks
+
+No `onFailed` site fired and no "returned to D3D11" line appeared in any run. Logged refusals per run: the ImageSpace ones above, and
+Texture Streaming's "left to the engine: N loads, 0 of them failed" summary (the engine's own loads, not a fallback). The skeleton's
+"stays on D3D11" clears are counted above.
+
+### Performance and memory
+
+perf-taa, uncapped, VRAM Budget off, alternating guest (all ports), guest with `org.ports=off` (the old default), native:
+
+| | Guest, all ports | Guest, ports off | Native |
+|---|---|---|---|
+| frame period between the marks | 19.20 / 19.21 ms | 19.15 / 19.14 ms | 19.07 / 19.15 ms |
+| GPU 3D engine busy | 98.5 / 98.4% | 98.3 / 98.2% | 99.5 / 99.5% |
+| render thread CPU | 270 / 302 ms a second | 121 / 146 | 202 / 196 |
+| graph host thread | 410 / 451 ms a second | 43 / 47 | 100 / 93 (the submission thread) |
+| DXVK worker | 146 / 152 ms a second | 146 / 143 | none |
+| process dedicated VRAM | 3,948 / 3,887 MiB | 3,038 / 3,034 MiB | 2,935 / 2,929 MiB |
+
+The frame is GPU-bound in all three, and guest with every port is within 0.07 ms of the old guest. Its CPU cost is real but hidden:
+about 3 ms more a frame on the render thread and about 8 ms a frame on the graph host's thread (each epoch prepared and recorded
+ahead there, one per anchor), against the old guest. The stage pieces are expected to cut both (one block per stage). VRAM is about
+870 MiB above the old guest. In the census run's VRAM report DXVK holds only 159 MiB of device-local memory; ORG holds 2.7 GB (1.98 GB
+of it the engine's textures and buffers, untracked by resource), and 1.4 GB is accounted by neither (pools, pipelines, the driver).
+Where the 870 MiB sits is not attributed yet.
+
+### Checks
+
+One background run each on DLL `551bc1c207b9`. Guest (new default): quick, river, rain, under water, interior, upscalers (FSR and
+XeSS through Streamline; DLSS is not available on the RX 6600), worldspace (Tamriel, Solstheim, Riverwood), the frozen-world Journal
+Menu run (three times, see above), `latch-census-short`: all passed, 0 tap errors, 0 recipe findings, no failed build. The loading
+thread is on by default in guest now, so every guest run covers it. `d3d11+quick` passed ("Render graph disabled: CS_ORG=0", no
+port set up). Native: quick, river, interior, validation: passed, the same 20 `VUID-vkCmdDraw-None-09600` as before, 0 recipe findings, shots as A11's. The only `[C]` line is the
+known `PublishedResources` one.
