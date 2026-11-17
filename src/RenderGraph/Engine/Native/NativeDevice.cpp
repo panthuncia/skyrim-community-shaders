@@ -1017,7 +1017,7 @@ namespace RenderGraph::Engine::Native
 		 */
 		struct FrameGroup
 		{
-			Frame::Transients::Group group{};
+			std::string label;
 			std::vector<std::shared_ptr<org::PixelBuffer>> textures;
 			std::vector<std::function<bool()>> finish;
 			std::vector<std::shared_ptr<NativeResource>> records;
@@ -5203,12 +5203,12 @@ namespace RenderGraph::Engine::Native
 		return Tripwire::CreateTexture3D(desc, std::move(options));
 	}
 
-	FrameTransientScope::FrameTransientScope(Frame::Transients::Group a_group)
+	FrameTransientScope::FrameTransientScope(const char* a_label)
 	{
 		// One group at a time on a thread; a scope inside another adds to the outer group.
 		if (t_frameGroup || !g_device || !Frame::Transients::On())
 			return;
-		m_group = new FrameGroup{ a_group, {}, {} };
+		m_group = new FrameGroup{ a_label ? a_label : "frame transients", {}, {}, {} };
 		t_frameGroup = static_cast<FrameGroup*>(m_group);
 	}
 
@@ -5222,9 +5222,9 @@ namespace RenderGraph::Engine::Native
 			return;
 		std::shared_ptr<const void> placement;
 		try {
-			placement = Frame::Transients::Place(group->group, group->textures);
+			placement = Frame::Transients::Place(group->label, group->textures);
 		} catch (const std::exception& e) {
-			logger::error("[ORG native] frame arena: {} could not be placed ({}); its textures get memory of their own", Frame::Transients::NameOf(group->group), e.what());
+			logger::error("[ORG native] frame arena: {} could not be placed ({}); its textures get memory of their own", group->label, e.what());
 		}
 		if (!placement)
 			for (const auto& texture : group->textures)
@@ -5235,8 +5235,8 @@ namespace RenderGraph::Engine::Native
 		// Each record keeps the group's placement while it lives.
 		for (const auto& record : group->records)
 			record->arenaPlacement = placement;
-		logger::info("[ORG native] frame arena: {} placed, {} of {} textures ({})", Frame::Transients::NameOf(group->group), made, group->textures.size(),
-			placement ? "in the frame arena" : "memory of their own");
+		logger::info("[ORG native] frame arena: {} placed, {} of {} textures ({})", group->label, made, group->textures.size(),
+			placement ? "in the frame arena, span derived from the graphs that use them" : "memory of their own");
 	}
 
 	bool IsUnbacked(const void* a_object)
@@ -5536,7 +5536,7 @@ namespace RenderGraph::Engine::Native
 	winrt::com_ptr<ID3D11Texture2D> MakeUnbackedTexture2D(const D3D11_TEXTURE2D_DESC&, const char*, bool) { return nullptr; }
 	winrt::com_ptr<ID3D11Texture3D> MakeUnbackedTexture3D(const D3D11_TEXTURE3D_DESC&, const char*) { return nullptr; }
 	bool IsUnbacked(const void*) { return false; }
-	FrameTransientScope::FrameTransientScope(Frame::Transients::Group) {}
+	FrameTransientScope::FrameTransientScope(const char*) {}
 	FrameTransientScope::~FrameTransientScope() {}
 	HRESULT __stdcall StreamEnableView(ID3D11ShaderResourceView*, void(__stdcall*)(std::uint64_t), void(__stdcall*)(std::uint64_t),
 		const D3D11_SUBRESOURCE_DATA*(__stdcall*)(std::uint64_t, BOOL), std::uint64_t)

@@ -6,6 +6,7 @@
 #include <cstdint>
 #include <memory>
 #include <string_view>
+#include <vector>
 
 namespace org
 {
@@ -62,6 +63,20 @@ namespace RenderGraph::Frame::Recipes
 
 	/** @brief "pre-main". */
 	const char* StageName(StageId a_stage);
+
+	/** @brief One epoch of the world recipe at its stage's place in the frame. */
+	struct PositionedEpoch
+	{
+		std::uint32_t epoch = 0;
+		StageId stage = StageId::Count;
+		Owner owner = Owner::Cs;
+	};
+	/**
+	 * @brief Every epoch of the world recipe's stages, CS's and Drawcall Limit Fix's, with its stage. HDR output's and frame
+	 * generation's anchors are left out: they keep tickets of their own outside the stages. Any thread, after the render graph
+	 * initialized.
+	 */
+	std::vector<PositionedEpoch> PositionedEpochs();
 
 	/**
 	 * @brief The recipes of the other frame kinds (docs/development/org-native-frame-graph.md, "Frame kinds and the UI stage"). Each kind

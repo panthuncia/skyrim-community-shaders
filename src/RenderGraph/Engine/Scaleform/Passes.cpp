@@ -1352,9 +1352,10 @@ namespace RenderGraph::Engine::Scaleform::Passes
 				texture->SetName(fmt::format("cs.scaleform.scratch.{}", i));
 				textures.push_back(std::move(texture));
 			}
-			// Guest mode, or the arena off (CS_ORG_FRAME_ARENA=0): memory of their own.
+			// Frame transients: ORG derives their span from the graphs that use them (the UI stage's). Guest mode, or the arena off
+			// (CS_ORG_FRAME_ARENA=0): memory of their own.
 			try {
-				a_state.scratchPlacement = RenderGraph::Frame::Transients::Place(RenderGraph::Frame::Transients::Group::ScaleformScratch, textures);
+				a_state.scratchPlacement = RenderGraph::Frame::Transients::Place("Scaleform's scratch images", textures);
 			} catch (const std::exception& e) {
 				stl::report_and_fail(fmt::format("Community Shaders: Scaleform's scratch images could not be placed in the frame arena: {}", e.what()));
 			}
@@ -1376,7 +1377,7 @@ namespace RenderGraph::Engine::Scaleform::Passes
 				a_state.surfaces.push_back(std::move(surface));
 			}
 			logger::info("[ORG] Scaleform: {} scratch images of {}x{} for GFx's render targets ({})", kScratchTargets, a_state.scratchWidth, a_state.scratchHeight,
-				a_state.scratchPlacement ? "in the frame arena, the UI stage's span" : "memory of their own");
+				a_state.scratchPlacement ? "in the frame arena, span derived from the graphs that use them" : "memory of their own");
 		}
 	}
 

@@ -216,24 +216,25 @@ namespace RenderGraph::Frame::Recipes
 						a_passes[i].name, StageName(static_cast<StageId>(a_passes[i].stage)), name, a_passes[writer->second].name,
 						StageName(static_cast<StageId>(a_passes[writer->second].stage))));
 				}
-			// The frame arena's groups (Frame/Transients.h): resources several stages use, whose memory other stages' transients share
-			// outside the group's span. A pass outside the span would use bytes another resource holds then. The first pass of the frame
-			// that uses one must write it: the bytes come in holding another resource's data.
+			// The frame transients (Frame/Transients.h): resources several stages use, whose memory other stages' transients share
+			// outside their span. ORG derives the span from the graphs that declare them, so this checks the derivation against the
+			// traces: a pass outside the span would use bytes another resource holds then. The first pass of the frame that uses one
+			// must write it: the bytes come in holding another resource's data.
 			std::set<std::string> groupFindings, groupSeen;
 			for (const auto& pass : a_passes) {
 				const auto check = [&](const std::string& a_name, bool a_write) {
-					const auto group = Transients::GroupOf(a_name);
-					if (!group)
+					const auto transient = Transients::FrameTransientOf(a_name);
+					if (!transient)
 						return;
-					const auto span = group->second;
-					if ((pass.stage < span.first || pass.stage > span.last) && groupFindings.insert(a_name + "@" + pass.name).second)
-						a_findings.push_back(fmt::format("{} ({}) uses {} of {}, whose span in the frame arena is {} (Frame/Transients.cpp): other stages' "
-														 "transients hold its memory there. Widen the span or move the pass",
-							pass.name, StageName(static_cast<StageId>(pass.stage)), a_name, Transients::NameOf(group->first), Transients::Describe(span)));
+					const auto span = transient->second;
+					if ((span.Empty() || pass.stage < span.first || pass.stage > span.last) && groupFindings.insert(a_name + "@" + pass.name).second)
+						a_findings.push_back(fmt::format("{} ({}) uses {} of {}, whose derived span in the frame arena is {}: other stages' transients may "
+														 "hold its memory there. ORG's derivation missed this graph's use (org::GraphHost::AddFrameTransients)",
+							pass.name, StageName(static_cast<StageId>(pass.stage)), a_name, transient->first, Transients::Describe(span)));
 					if (groupSeen.insert(a_name).second && !a_write)
 						a_findings.push_back(fmt::format("{} ({}) reads {} of {} first in the frame: its memory comes in holding another resource's data. "
 														 "Its first pass must write it",
-							pass.name, StageName(static_cast<StageId>(pass.stage)), a_name, Transients::NameOf(group->first)));
+							pass.name, StageName(static_cast<StageId>(pass.stage)), a_name, transient->first));
 				};
 				for (const auto& name : pass.writes)
 					check(name, true);
@@ -368,6 +369,22 @@ namespace RenderGraph::Frame::Recipes
 		default:
 			return "?";
 		}
+	}
+
+	std::vector<PositionedEpoch> PositionedEpochs()
+	{
+		std::vector<PositionedEpoch> out;
+		for (const auto& stage : kWorld)
+			for (std::uint32_t e = 0; e < stage.epochCount; ++e) {
+				const auto segment = stage.epochs[e];
+				// HDR output and frame generation keep tickets of their own: what they use stays outside the frame arena.
+				if (segment == Segment::AnchorHDROutput || segment == Segment::AnchorFrameGeneration)
+					continue;
+				if (FrameAnchors::IsUnusedSegment(static_cast<std::uint32_t>(segment)))
+					continue;
+				out.push_back({ EpochOfSegment(segment), stage.id, stage.owner });
+			}
+		return out;
 	}
 
 	std::shared_ptr<const org::ScheduleTrace> TraceEpochGraph(org::RenderGraph& a_graph, std::uint32_t a_epoch)
@@ -525,6 +542,7 @@ namespace RenderGraph::Frame::Recipes
 namespace RenderGraph::Frame::Recipes
 {
 	const char* StageName(StageId) { return "?"; }
+	std::vector<PositionedEpoch> PositionedEpochs() { return {}; }
 	bool KindHas(Kind a_kind, bool a_capture, SegmentId) { return a_kind == Kind::World || (a_kind == Kind::FrozenWorld && a_capture); }
 	std::string DescribeKind(Kind, bool) { return {}; }
 	std::string DiffKinds(Kind, bool, Kind, bool) { return {}; }

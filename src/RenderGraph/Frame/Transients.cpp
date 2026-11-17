@@ -9,8 +9,6 @@
 #	include <Resources/PixelBuffer.h>
 
 #	include <atomic>
-#	include <map>
-#	include <mutex>
 
 namespace RenderGraph::Frame::Transients
 {
@@ -20,31 +18,10 @@ namespace RenderGraph::Frame::Transients
 
 		constexpr std::uint32_t Pos(StageId a_stage) { return static_cast<std::uint32_t>(a_stage); }
 
-		struct GroupInfo
-		{
-			Group group;
-			const char* name;
-			Span span;
-			const char* uses;  // who uses it, first to last: why the span is what it is
-		};
-
-		// The groups several stages use. A span covers every stage whose graph declares the resource, not only those that need its
-		// content: a stage that binds it as a render target writes it, so nothing else may hold those bytes then.
-		constexpr std::array<GroupInfo, static_cast<std::size_t>(Group::Count)> kGroups{ {
-			{ Group::GBuffer, "Deferred's G-buffer", { Pos(StageId::Depth), Pos(StageId::FirstPerson) },
-				"DCLF's Z-prepass binds it; pre-main clears it; DCLF's opaque pass draws it; deferred+water reads it (SSGI, subsurface, the "
-				"composite, its last read); DCLF's forward and first-person passes bind it" },
-			{ Group::ScaleformScratch, "Scaleform's scratch images", { Pos(StageId::Ui), Pos(StageId::Ui) },
-				"the UI stage's displays: a GFx render target or filter pass clears one and draws into it, a later display segment of the same "
-				"display reads it; nothing reads them in another frame" },
-		} };
-
 		struct State
 		{
 			std::atomic<bool> on{ false };
 			org::GraphHost* host = nullptr;
-			std::mutex mutex;
-			std::map<std::string, Group, std::less<>> names;  // placed resources by graph name
 		};
 
 		State& Get()
@@ -52,6 +29,8 @@ namespace RenderGraph::Frame::Transients
 			static State state;
 			return state;
 		}
+
+		Span FromAlias(org::AliasSpan a_span) { return { a_span.first, a_span.last }; }
 	}
 
 	std::uint32_t PositionOf(SegmentId a_segment)
@@ -77,64 +56,58 @@ namespace RenderGraph::Frame::Transients
 
 	std::string Describe(Span a_span)
 	{
+		if (a_span.Empty())
+			return "none (nothing uses it yet)";
 		const auto name = [](std::uint32_t a_position) -> std::string { return Recipes::StageName(static_cast<StageId>(a_position)); };
 		return a_span.first == a_span.last ? name(a_span.first) : fmt::format("{} to {}", name(a_span.first), name(a_span.last));
 	}
 
-	const char* NameOf(Group a_group) { return kGroups[static_cast<std::size_t>(a_group)].name; }
-
-	Span SpanOf(Group a_group) { return kGroups[static_cast<std::size_t>(a_group)].span; }
-
 	bool On() { return Get().on.load(std::memory_order_acquire); }
 
-	bool Install(org::GraphHost& a_host, std::span<const std::pair<SegmentId, std::uint32_t>> a_epochs)
+	bool Install(org::GraphHost& a_host)
 	{
 		if (Switches::Off("CS_ORG_FRAME_ARENA")) {
 			logger::info("[ORG] frame arena off (CS_ORG_FRAME_ARENA=0): each CS stage keeps its transients in pools of its own");
 			return false;
 		}
-		std::vector<std::pair<std::uint32_t, org::AliasSpan>> spans;
+		// Every world recipe epoch at its stage's position: the frame transients' spans count Drawcall Limit Fix's graphs too (they
+		// bind the G-buffer from the Z-prepass to first person). Only CS's stages put their own transients in the arena: Drawcall
+		// Limit Fix's epochs run a varying number of times a frame and keep the shared arena.
+		std::vector<org::GraphHost::FramePosition> positions;
 		std::string list;
-		for (const auto& [segment, epoch] : a_epochs) {
-			const auto position = PositionOf(segment);
-			spans.push_back({ epoch, org::AliasSpan{ position, position } });
-			list += fmt::format("{}{} (epoch {}, position {})", list.empty() ? "" : ", ", SegmentName(segment), epoch, position);
+		for (const auto& entry : Recipes::PositionedEpochs()) {
+			const bool own = entry.owner == Recipes::Owner::Cs;
+			positions.push_back({ entry.epoch, Pos(entry.stage), own });
+			list += fmt::format("{}{} (epoch {}, position {}{})", list.empty() ? "" : ", ", Recipes::StageName(entry.stage), entry.epoch, Pos(entry.stage),
+				own ? "" : ", shared arena");
 		}
-		a_host.SetFrameAliasSpans(std::move(spans));
+		a_host.SetFramePositions(std::move(positions));
 		auto& state = Get();
 		state.host = &a_host;
 		state.on.store(true, std::memory_order_release);
-		logger::info("[ORG] frame arena: the CS stages' transients share one arena by their place in the frame: {}", list);
-		for (const auto& group : kGroups)
-			logger::info("[ORG] frame arena: group {} spans {}: {}", group.name, Describe(group.span), group.uses);
+		logger::info("[ORG] frame arena: epochs by their place in the frame (CS stages' transients share one arena by it; every graph counts for "
+					 "the frame transients' derived spans): {}",
+			list);
 		return true;
 	}
 
-	std::shared_ptr<const void> Place(Group a_group, std::span<const std::shared_ptr<org::PixelBuffer>> a_textures)
+	std::shared_ptr<const void> Place(std::string a_label, std::span<const std::shared_ptr<org::PixelBuffer>> a_textures)
 	{
 		auto& state = Get();
 		if (!On() || !state.host)
 			return nullptr;
-		const auto arena = state.host->FrameArena();
-		if (!arena)
-			return nullptr;
-		const auto span = SpanOf(a_group);
-		auto placed = arena->ReserveTextures(org::AliasSpan{ span.first, span.last }, a_textures, NameOf(a_group));
-		std::lock_guard lock(state.mutex);
-		for (const auto& texture : a_textures)
-			if (texture)
-				state.names[texture->GetName()] = a_group;
-		return placed;
+		return state.host->AddFrameTransients(a_textures, std::move(a_label));
 	}
 
-	std::optional<std::pair<Group, Span>> GroupOf(std::string_view a_name)
+	std::optional<std::pair<std::string, Span>> FrameTransientOf(std::string_view a_name)
 	{
 		auto& state = Get();
-		std::lock_guard lock(state.mutex);
-		const auto found = state.names.find(a_name);
-		if (found == state.names.end())
+		if (!On() || !state.host)
 			return std::nullopt;
-		return std::pair{ found->second, SpanOf(found->second) };
+		const auto found = state.host->FrameTransientOf(a_name);
+		if (!found)
+			return std::nullopt;
+		return std::pair{ found->label, FromAlias(found->span) };
 	}
 
 	void LogStats()
@@ -151,8 +124,15 @@ namespace RenderGraph::Frame::Transients
 			std::string ranges;
 			for (const auto& range : block.ranges)
 				ranges += fmt::format("{}{} [{:.1f}, {:.1f}) MiB {}", ranges.empty() ? "" : "; ", range.name, range.begin / (1024.0 * 1024.0),
-					range.end / (1024.0 * 1024.0), Describe({ range.span.first, range.span.last }));
+					range.end / (1024.0 * 1024.0), Describe(FromAlias(range.span)));
 			logger::info("[ORG] frame arena: block {:#x} class {} {:.1f} MiB: {}", block.poolID, block.resourceClass, block.capacity / (1024.0 * 1024.0), ranges);
+		}
+		for (const auto& group : state.host->FrameTransientGroups()) {
+			std::string members;
+			for (const auto& member : group.members)
+				members += fmt::format("{}{}", members.empty() ? "" : ", ", member);
+			logger::info("[ORG] frame arena: frame transients {} span {} (derived from the graphs that use them): {}", group.label, Describe(FromAlias(group.span)),
+				members);
 		}
 	}
 }
@@ -163,12 +143,10 @@ namespace RenderGraph::Frame::Transients
 {
 	std::uint32_t PositionOf(SegmentId) { return 0; }
 	std::string Describe(Span) { return {}; }
-	const char* NameOf(Group) { return ""; }
-	Span SpanOf(Group) { return {}; }
 	bool On() { return false; }
-	bool Install(org::GraphHost&, std::span<const std::pair<SegmentId, std::uint32_t>>) { return false; }
-	std::shared_ptr<const void> Place(Group, std::span<const std::shared_ptr<org::PixelBuffer>>) { return nullptr; }
-	std::optional<std::pair<Group, Span>> GroupOf(std::string_view) { return std::nullopt; }
+	bool Install(org::GraphHost&) { return false; }
+	std::shared_ptr<const void> Place(std::string, std::span<const std::shared_ptr<org::PixelBuffer>>) { return nullptr; }
+	std::optional<std::pair<std::string, Span>> FrameTransientOf(std::string_view) { return std::nullopt; }
 	void LogStats() {}
 }
 

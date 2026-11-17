@@ -2575,11 +2575,9 @@ bool RenderGraphRuntime::Initialize()
 				// (Frame/Transients.h): stages whose places differ share memory, and each frame's alias activations are the same, so
 				// admissions keep their predicted plans. With the arena off, pools of their own: in the shared arena another epoch's
 				// transients took their memory between two frames, so every admission found alias activations and planned against
-				// the ledgers (perf-taa: 27 us a submission against 12 with pools of their own).
-				std::vector<std::pair<RenderGraph::Frame::SegmentId, std::uint32_t>> byId;
-				for (const auto& [declared, epoch] : FrameAnchors::SegmentEpochsById())
-					byId.push_back({ static_cast<RenderGraph::Frame::SegmentId>(declared), epoch });
-				if (!state->native || !RenderGraph::Frame::Transients::Install(*state->host, byId))
+				// the ledgers (perf-taa: 27 us a submission against 12 with pools of their own). Drawcall Limit Fix's epochs get their
+				// places too: the frame transients' spans count every graph that uses them.
+				if (!state->native || !RenderGraph::Frame::Transients::Install(*state->host))
 					state->host->SetPrivateAliasEpochs(segments);
 				logger::info("[ORG] frame segments: epochs {} are revision-driven and open", fmt::join(segments, ","));
 			}

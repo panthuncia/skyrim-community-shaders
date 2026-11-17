@@ -34,11 +34,6 @@ namespace org
 	class GloballyIndexedResource;
 }
 
-namespace RenderGraph::Frame::Transients
-{
-	enum class Group : std::uint8_t;
-}
-
 /**
  * @brief Native mode (org-full-port.md Phase 6, CS_ORG_NATIVE=1): no DXVK. CS creates a BasicRHI Vulkan device itself, the engine's
  * device, immediate context and swap chain are tripwire handles over it, the render graph runs natively (its epochs submit to the
@@ -296,16 +291,17 @@ namespace RenderGraph::Engine::Native
 	/** @} */
 
 	/**
-	 * @brief While one lives on a thread, the tracked textures the native device makes on that thread are one frame arena group
-	 * (Frame/Transients.h): each is made without memory, and when the scope ends the group is placed in the arena together and each
-	 * texture is finished. Until then a texture has no image, so GPU work that reaches it is a recipe mismatch (as for an unbacked
-	 * target); making its views is fine. Textures with initial data or another usage than DEFAULT are made as before. Off native
-	 * mode or with the arena off, nothing changes.
+	 * @brief While one lives on a thread, the tracked textures the native device makes on that thread are frame transients
+	 * (Frame/Transients.h), placed together: each is made without memory, and when the scope ends they are placed in the arena and
+	 * each texture is finished. Their span is derived by ORG from the graphs that use them. Until the scope ends a texture has no
+	 * image, so GPU work that reaches it is a recipe mismatch (as for an unbacked target); making its views is fine. Textures with
+	 * initial data or another usage than DEFAULT are made as before. Off native mode or with the arena off, nothing changes.
+	 * a_label: what made them, for the log (a resize's textures under the same label start where the last ones' span reached).
 	 */
 	class FrameTransientScope
 	{
 	public:
-		explicit FrameTransientScope(Frame::Transients::Group a_group);
+		explicit FrameTransientScope(const char* a_label);
 		~FrameTransientScope();
 		FrameTransientScope(const FrameTransientScope&) = delete;
 		FrameTransientScope& operator=(const FrameTransientScope&) = delete;
