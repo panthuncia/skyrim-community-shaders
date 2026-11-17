@@ -6228,16 +6228,16 @@ pre-main, deferred+water (dw), sun, post, UI, menu UI; DCLF = Drawcall Limit Fix
 | `kBOOK_TEXT_0..3`, `kBOOK_TEXT` depth | 45.0 | engine targets | declared by every Scaleform pass of UI and menu UI; drawn only in the book menu | no | on-demand |
 | `kWATER_1/2` | 31.6 | engine targets | cleared by the frame clear group and dw; the water TAA form (`NoPass`) would draw them | yes (water TAA) | on-demand |
 | `HDR::HdrTexture`, `HDR::OutputTexture` | 23.7 | CS feature | HDR output only (off here); made at setup so the switch needs no setup | no | on-demand |
-| `ImageSpace::GetHitA/B/Swap`, `FullBlurDown/Swap` | 24.7 | frame (transients) | post's get-hit and full-screen blur steps, absent by key here | no | on-demand (still backed: see above) |
+| `ImageSpace::GetHitA/B/Swap`, `FullBlurDown/Swap` | 24.7 | frame (transients) | post's get-hit and full-screen blur steps, absent by key here | no | on-demand: GetHit given back and freed now ("Unbacked engine targets"); FullBlur's 1 MiB stays (a standalone transient no graph end gives back) |
 | `kMENUBG` | 7.9 | engine target | post's capture copy (capture frames); menu UI's frozen composite | while a menu freezes the world | on-demand |
 | `kSCREENSHOT`, `kLOCAL_MAP`, `kLOCAL_MAP_SWAP`, lens-flare targets | 13.4 | engine targets | console screenshot (`NoPass`), the local map (map menu), lens flares (`NoPass`) | no | on-demand |
 | `Bink::Movie` | 9.0 | CS (Bink port) | UI and menu UI, movie frames only | no | on-demand (kept for the session so a movie never rebuilds the Present graph) |
-| engine `kSAO`, `kSAO_RAWAO`, `kSAO_RAWAO_PREVIOUS`, `kSAO_TEMP_BLUR`, `kTEMPORAL_AA_ACCUMULATION_1/2` | 47.5 | engine targets | none: the port draws into its own | - | remove (item 4: the port's image is the one) |
-| engine `VOLUMETRIC_LIGHTING_ACCUMULATION`, `_COPY` (two of each: the engine makes them twice and both stay) | 45.0 | engine 3D targets | none: ORG's `VolumetricLighting::Volume` replaces them | - | remove |
-| `kIMAGESPACE_TEMP_COPY/2`, `kTEMPORAL_AA_UI_ACCUMULATION_1/2` | 63.3 | engine targets | none (the post chain works in place; TAA's UI form is `NoPass`) | - | remove |
-| `kGETHIT_BUFFER`, `kGETHIT_BLURSWAP`, `kLDR_BLURSWAP`, `kLDR_DOWNSAMPLE0` | 17.8 | engine targets | none: the port's get-hit and depth of field steps draw into CS transients | - | remove |
-| `kNORMAL_TAAMASK_SSRMASK_DOWNSAMPLED` | 2.0 | engine target | the frame clear group clears it; SSR reads CS's `SSRMaskDownsampled` | - | remove (with its clear) |
-| `cs.native.texture.261` (1024x1024, 3 mips, RGBA16F) | 5.3 | made through the native device | not in any graph | ? | remove once its owner is found |
+| engine `kSAO`, `kSAO_RAWAO`, `kSAO_RAWAO_PREVIOUS`, `kSAO_TEMP_BLUR`, `kTEMPORAL_AA_ACCUMULATION_1/2` | 47.5 | engine targets | none: the port draws into its own | - | unbacked (2026-11-17): the port's image is the one; the engine's TAA history clears are declared dropped |
+| engine `VOLUMETRIC_LIGHTING_ACCUMULATION`, `_COPY` (two of each: the engine makes them twice and both stay) | 45.0 | engine 3D targets | none: ORG's `VolumetricLighting::Volume` replaces them | - | unbacked (2026-11-17) |
+| `kIMAGESPACE_TEMP_COPY/2`, `kTEMPORAL_AA_UI_ACCUMULATION_1/2` | 63.3 | engine targets | none (the post chain works in place; TAA's UI form is `NoPass`) | - | unbacked (2026-11-17); the Tonemap anchor's engine fallback names no unbacked target |
+| `kGETHIT_BUFFER`, `kGETHIT_BLURSWAP`, `kLDR_BLURSWAP`, `kLDR_DOWNSAMPLE0` | 17.8 | engine targets | none: the port's get-hit and depth of field steps draw into CS transients | - | unbacked (2026-11-17) |
+| `kNORMAL_TAAMASK_SSRMASK_DOWNSAMPLED` | 2.0 | engine target | the frame clear group clears it; SSR reads CS's `SSRMaskDownsampled` | - | unbacked (2026-11-17); its clear pass is gone and the engine's clear is declared dropped |
+| `cs.native.texture.261` (1024x1024, 3 mips, R11G11B10) | 5.3 | Effects11's `TextureManager` shared downsample texture (made at its setup) | Effects11's D3D11 downsample, when an effect reads it | yes | keep (a CS feature's texture, not an engine target; identified 2026-11-17) |
 | Deferred's G-buffer `cs.native.texture.270..275` | 43.5 | CS (Deferred, native) | pre-main (clear), DCLF opaque, dw (composite, last read) | no | transient: pre-main to dw |
 | `cs.scaleform.scratch.0..3` | 31.6 | CS (Scaleform port) | UI and menu UI (GFx filters) | no | transient: UI stage only |
 | SSGI and SSS transients (`IlYBlurInput`, `Radiance`, `RadianceTemp`, `IlCoCgBlurInput`, `Normal`, `WorkingDepth`, `AccumFramesScratch`, `SSS::DiffuseNoAlbedo`) | 62.7 (one pool) | CS feature (port) | dw | no | transient (aliased inside dw now; can share with other stages) |
@@ -6290,3 +6290,81 @@ passed), guest-quick (106.1), and a frozen-world run with TAA on (`Journal Menu=
 opened (a frozen-world capture frame and menu UI frames), and the world before and after reads 104.1, 103.8, 104.4: TAA, SAO and the
 adaptation carry across the menu. Pre-existing, not from this pass: one `[C] PublishedResources used on thread ..., not the render owner`
 line in every native run, the state before this pass included.
+
+## Unbacked engine targets (2026-11-17)
+
+The "remove" rows of the survey: engine targets nothing in native mode uses, and the copies where the image-space port draws into its
+own image. RX 6600, perf-taa at 1920x1080, background runs with `DXVK_DEBUG=hang`, VRAM Budget off. CS build `4487cdf39372`.
+
+### The mechanism
+
+- **The table.** `src/RenderGraph/Frame/EngineTargetUse.cpp` lists each engine target native mode keeps without memory, with what
+  replaced its use (usually the port's own image). Every target not listed is backed. Guest mode backs every target (DXVK owns them).
+  The goal stays one table of every engine target with its users; for now the backed ones are described in "Engine targets still used".
+- **A record without an image.** `Engine::Targets` makes a listed target through `Native::MakeUnbackedTexture2D` / `3D`: a native
+  texture handle whose record (`NativeResource::Kind::Unbacked`) has no BasicRHI image and no memory. The engine keeps the pointer, reads
+  the description, and makes views on it as on any native texture. No sparse or reserved resources: nothing needs a bindable handle.
+- **Any GPU use is a recipe mismatch** (`TapError::Unbacked`, through `Frame::Driver::NoteUnbackedUse`): a native context clear, copy,
+  map, update or mip build on the record, an importer's `DescribeResource`, or a graph reader asking `Engine::Targets` for the target's
+  slot (`Serve`). Fatal in development builds. In release (`CS_ORG_MISMATCH_FATAL=0`) the operation is skipped, the importer gets no
+  texture, and each target's first use is logged; nothing touches a null image.
+- **Declared-dropped clears.** The engine still clears some of these targets: `kNORMAL_TAAMASK_SSRMASK_DOWNSAMPLED` at the frame clear,
+  and the four TAA histories when TAA resets. Their table lines say so (`dropClears`), and the native context drops those clears. The
+  skeleton's frame clear group no longer has a pass for `kNORMAL_TAAMASK_SSRMASK_DOWNSAMPLED`.
+- **Shape queries.** The image-space port's `MakeOwned` took the format from a graph import of the engine target; it reads the engine's
+  description now. The Tonemap anchor's engine fallback (the frames before the chain registers, a menu scene's tonemap) names no unbacked
+  target: the first run with the table stopped there, on `kIMAGESPACE_TEMP_COPY` at frame 598.
+
+### What has no memory now
+
+| Targets | MiB (g5n) | Why |
+|---|---|---|
+| `kSAO`, `kSAO_RAWAO`, `kSAO_RAWAO_PREVIOUS`, `kSAO_TEMP_BLUR` | 31.6 | the port draws into `ImageSpace::SAO*`, `SAOBlurTemp` (one image now) |
+| `kTEMPORAL_AA_ACCUMULATION_1/2` | 15.8 | TAA's history is `ImageSpace::TAAHistory0/1` (one image now); the engine's reset clears are dropped |
+| `kTEMPORAL_AA_UI_ACCUMULATION_1/2` | 31.6 | TAA's UI form has no CS pass; reset clears dropped |
+| `kIMAGESPACE_TEMP_COPY/2` | 31.6 | the post chain works in place, with `Hdr/LdrScratch` |
+| `kGETHIT_BUFFER`, `kGETHIT_BLURSWAP`, `kLDR_BLURSWAP`, `kLDR_DOWNSAMPLE0` | 17.8 | the get-hit and depth of field steps draw into CS transients |
+| `kNORMAL_TAAMASK_SSRMASK_DOWNSAMPLED` | 2.0 | only the engine's clear wrote it (dropped); SSR reads `ImageSpace::SSRMaskDownsampled` |
+| 3D `VOLUMETRIC_LIGHTING_ACCUMULATION`, `_COPY` (two of each) | 45.0 | the volumetric lighting port draws `VolumetricLighting::Volume` |
+| `ImageSpace::GetHitA/B/Swap` (the defect below) | 23.7 | given back, and now freed |
+
+No still-reachable engine path reads the engine's copy of SAO, TAA or the volumetric lighting volume, so no read had to be routed to
+the port's image (a read would have stopped the runs).
+
+### The GetHit re-backing (fixed in ORG)
+
+The get-hit textures were not backed again: the give-back at the TAA switch build's end ran (`Dematerialize`), and nothing took a new
+backing (ORG's new trace, `ORG_TRACE_STANDALONE=<name part>`, logs every backing a texture takes or gives back). The memory stayed because
+`BackedResource` caches its last publication snapshot (`CapturePublishedBackingAllocation`), which holds a lease on the allocation. A
+resource no graph uses is never published again, so the cache kept the old memory for the session. A dematerialized resource now drops
+the cache (`ForgetPublishedAllocation`); publications already captured keep their own reference.
+
+Left: `FullBlurDown/Swap` (1.0 MiB). The first post build backs them standalone (their score is below the alias threshold), and a
+graph's end gives back only its alias placements, not its standalone backings. Giving those back needs an owner per standalone backing
+across graphs (a later build may use the same backing); not done for 1 MiB.
+
+### Measured
+
+- The survey's resources: 200.2 MiB (g5n) to 1.0 MiB (dump of run u5n). Every live resource in the dump: 2,909 to 2,701 MiB.
+- Process dedicated VRAM, perf-taa (plain runs): native 3,020 / 3,024 MiB, guest 3,033 (before: native 3,254 to 3,261, guest 3,035 to
+  3,077). Native is at guest's level now.
+- Frame period between the marks: native 19.11 / 19.04 ms, guest 19.09 ms.
+
+### On-demand targets (not changed)
+
+The build-key mechanism for targets (backing while a live or staged build has a pass that uses it) is not built. The targets stay
+backed:
+- waiting on a foreground session (their paths need input a background run cannot give): `kBOOK_TEXT_0..3` and its depth (book
+  menu), `kLOCAL_MAP`, `kLOCAL_MAP_SWAP` (map menu), `kSCREENSHOT` (console screenshot), the get-hit blur steps;
+- reachable by background runs, next for this mechanism: `kMENUBG` (the frozen-world menu run), `kWATER_1/2` (the water blend steps);
+- lens-flare targets: their composite forms are `NoPass`, so they could be unbacked outright once a run with lens flares confirms no
+  other reader.
+`cs.native.texture.261` is Effects11's `TextureManager` downsample texture (R11G11B10, not RGBA16F): a CS feature's, kept.
+
+### Checks (build `4487cdf39372`)
+
+One background run each, all passed: native-quick, native-river (river-east mean difference 3.3 against the previous pass's run),
+native-interior (100.6 / 97.2, within the known variance), native-validation (the same messages as the previous pass's run), the
+loading-thread run, the frozen-world menu run with TAA (world before and after the Journal Menu 104.1, 103.7, 104.3, as before), the
+worldspace run (Tamriel, Solstheim, Riverwood), guest-quick. No `[C]` line but the known `PublishedResources` one (in guest runs too).
+The native D3D12 run was not taken (it loses the device on the RX 6600 for an unrelated reason).
