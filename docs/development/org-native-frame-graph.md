@@ -4765,11 +4765,12 @@ stages of their own.
 | Kind | Stages, in order |
 |---|---|
 | world, and a frozen world's capture frame | start, shadows*, pre-depth, depth*, pre-main, opaque*, deferred+water, forward*, sun, first person*, post, UI |
-| loading screen, main menu, menu over a frozen world | menu UI |
-| Bink movie | UI |
+| loading screen, main menu, menu over a frozen world, Bink movie | UI |
 
-A steady world frame is 11.8 to 12.0 tickets: the stages' and DCLF's (the sun stage takes 0.9 to 1.0; a frame without the first-person epoch
-puts both sun queries in it).
+One UI stage for every kind since Cleanup A4: it holds the menu UI stage's old layout (the frozen composite, three clear places,
+Scaleform's instances 8 to 15 and 0 to 7, a menu scene's steps, the present's clients, the overlay and the capture). A steady world
+frame is about 11.2 to 12.0 tickets: the stages' and DCLF's (the sun stage takes 0.2 to 1.0; a frame without the first-person epoch puts
+both sun queries in it).
 
 ### Always present, chosen per frame by gates
 
@@ -4780,8 +4781,8 @@ folded), because the engine decides them late or a lagging build would lose them
   forms, both forms of the last luminance level, the engine-counter parity variants (luminance, bright pass, the VL composite, the
   normals target), TAA's and the raw AO's history pairs (by slot parity, in the description), and in a routed build the pass-through copy;
 - deferred+water: the snow pass and its copy, the world steps' variants by the engine's counters;
-- UI and menu UI: Scaleform's instances (8 in UI; 16 in menu UI), the capture's copy, the movie's tiles, the menu UI stage's three clear
-  places;
+- UI: Scaleform's 16 instances, the capture's copy, the movie's tiles, the three clear places, a menu scene's draws, composites and
+  depth copy;
 - sun and post: the sun's two query instances.
 
 Absent by build key when off (a rebuild, staged, on change): the post slot effects, the HDR effect against its copy, the Effects11 tonemap
@@ -4794,12 +4795,12 @@ Terrain Blending, Volumetric Shadows, light culling, the bloom radii.
 |---|---|---|
 | kMAIN | DCLF's opaque and forward graphs, deferred+water, the Upscale anchor's copy, Post Processing and Effects11 at the Tonemap anchor, the menu scenes | the post chain (in place before the tonemap), the menu composites, Scaleform (a menu drawn into kMAIN) |
 | kFRAMEBUFFER (the final target) | the post chain (tonemap or routed TAA, then in place), the menu composites, Scaleform, the overlay | the UI stages, the capture, HDR output, frame generation's hudless copy, the present |
-| main depth, kPOST_ZPREPASS_COPY | DCLF's Z-prepass, the pre-main and menu UI depth copies | deferred+water, post, the menu scenes' soft depth |
+| main depth, kPOST_ZPREPASS_COPY | DCLF's Z-prepass, the pre-main and UI depth copies | deferred+water, post, the menu scenes' soft depth |
 | the normals targets, kMOTION_VECTOR, kTEMPORAL_AA_MASK, kSHADOW_MASK | DCLF's graphs, pre-main's clears, the menu scenes | deferred+water, post (SSR, SAO, TAA), the menu scenes' Lighting draws |
 | kMAIN_ONLY_ALPHA, kMAIN_COPY, kREFRACTION_NORMALS, kUNDERWATER_MASK, the water displacement pair and flow map | forward, deferred+water, the start stage | the next frame's start and deferred+water (`kPreviousFrame`) |
 | kHDR_DOWNSAMPLE0 and the luminance levels before the last | post, the menu composites | DCLF's character light |
 | the shadow maps, the precipitation occlusion map | DCLF's shadow view graph (and the engine at its occlusion point while DCLF does not draw a map) | DCLF's graphs, Skylighting (its own map lent into the slot), the precipitation |
-| kMENUBG | post's capture copy in a capture frame | the menu UI stage's frozen composite |
+| kMENUBG | post's capture copy in a capture frame | the UI stage's frozen composite |
 | kSAVE_GAME_SCREENSHOT | post's screenshot copy | the save's thumbnail |
 | the reflection cubemap faces | the start stage | DCLF's graphs |
 
@@ -4812,15 +4813,16 @@ chain's hooks (which only check and stage in native). This is the input for the 
 
 ### Old native paths still reachable
 
-- Per-anchor epochs: EngineDraws (a menu's scene over the live world, blood, precipitation), ImageSpace (the menu composites over the live
-  world, the face tint at a load), EngineShadowClear and EngineFrameClear (world frames before DCLF draws and during its holds, a menu scene's
-  clears over the live world, frame 0), EngineCubeClear (outside world frames), EngineCopy outside the stages' windows, EngineDepthCopy
-  outside the stages, EngineQueries (world frames before DCLF draws), DecalQueries (its client is never made in these sessions), HDROutput
-  (HDR on), Tonemap and FrameGeneration (a menu scene's tonemap, frame generation). The MovieTiles anchor is removed (Cleanup A2). A stage's one-shot passes now
+- Per-anchor epochs: EngineDraws (blood, precipitation), ImageSpace (the face tint at a load, its own client since Cleanup A4),
+  EngineShadowClear and EngineFrameClear (world frames before DCLF draws and during its holds, frame 0), EngineCubeClear (outside world
+  frames), EngineCopy outside the stages' windows, EngineDepthCopy outside the stages, EngineQueries (world frames before DCLF draws),
+  DecalQueries (its client is never made in these sessions), HDROutput (HDR on), Tonemap and FrameGeneration (a menu scene's tonemap,
+  frame generation). A menu's scene over the live world is the UI stage's since Cleanup A4. The MovieTiles anchor is removed (Cleanup A2). A stage's one-shot passes now
   rebuild only the anchors they sit at (the ImageSpace epoch for the histogram reset), so the re-entry hold after each load is gone
   ("Render-thread cost").
-- `CanRun`/`RequestJoin`: the sky and decal clients' setup joins, the menu composites over the live world, the skeleton's group clears and
-  copies, the menu scenes family. At anchors a stage holds wholly, the upscaler's evaluate, Deferred clears, Skylighting, Cloud Shadows and
+- `CanRun`/`RequestJoin`: the sky and decal clients' setup joins, the skeleton's group clears and copies, the shadow masks family (its
+  menu view is a step of the UI stage, reached through the shared anchor), the face tint. The menu scenes and the menu composites are
+  segment-only since Cleanup A4. At anchors a stage holds wholly, the upscaler's evaluate, Deferred clears, Skylighting, Cloud Shadows and
   Volumetric Lighting ask `FrameAnchors::Scheduled` instead: the frame's schedule of that stage (Cleanup A2).
 - Clears of a lent target slot (Skylighting's map) stay on D3D11: the skeleton does not take them. A skeleton clear or copy run that does
   not execute is now a tap error (`NotExecuted`, the mismatch policy); nothing replays it on D3D11 (Cleanup A1).
@@ -6520,3 +6522,109 @@ guest's (sky 170.4 against 170.2, left hill 150.8 against 149.7, right town 162.
 Still there: the first world frame's volumetric lighting is skipped once in every mode ("the frame's schedule does not hold the client
 yet"). The client registers at the first VL render, because the sky's noise gradient texture is not loaded at setup. This is the same as
 before A3 (logged as "the anchor's graph does not hold the client yet" then).
+
+## Cleanup A4 (2026-11-18)
+
+Piece A4 of the native cleanup plan and one Scaleform defect, two commits on `org-native/phases` (no submodule change). RX 6600,
+native Vulkan, Perf-Fast, background runs with `DXVK_DEBUG=hang`.
+
+### One UI stage for every frame kind
+
+The menu UI stage's layout is now the UI stage's, and every frame kind runs it (the table in "State of the native frame"). The world's
+UI graph carries the menu scene's steps, so a menu scene over the live world (an inventory item model, the local map) is a step of the
+UI stage, not the EngineDraws and ImageSpace anchors' own epochs.
+
+- Deleted: `Segment::DeclaredMenuUi`, `SegmentId::MenuUi`, the frame arena's menu UI position (12), the menu UI kind recipes (one
+  `kUiKind`), the second UI `TapPoint` and `PrimeStage`, `KeptAhead` (now `SwitchesEverySlot`, the UI stage only), the per-kind choice
+  in `DeclaredOfAnchor`, the menu composites' `MenuClientDraws` and its `CanRun` fallback, `MenuScenesDraws`' `RequestJoin` and `CanRun`.
+  The commit: 19 files, 256 lines in and 212 out (the merged stage table and its comment, the gated depth copy, the face tint client).
+- **The UI stage opens last** (`DeclaredInfo::opensLast`). A stage's window opened while every earlier stage that ends at a point had
+  staged nothing yet. With shared and named steps in the UI stage, that let it take work between two world stages (between pre-depth's
+  end and pre-main's first tap, every later stage qualified). Its window now opens only once every earlier stage of the frame ended
+  (or its own first tap ended them).
+- **Clears at places in any kind.** The skeleton stages a clear into a UI place whenever `StagePlace` finds one (it did only outside
+  world frames). A world stage's clear never finds one, since the UI stage opens last. The inventory's main depth clear now runs at the
+  menu-scene place (1.0 a frame while the inventory is open), and the census shows no GPU work submitted between a stage's first tap and
+  its commit during the inventory (11 to 47 a window before).
+- **The depth copy.** The menu UI stage's depth copy was the pre-main stage's ungated pass: in the merged stage it would copy the main
+  depth every world frame. The UI stage has its own gated client now (`cs.engine.skeleton.depth-copy@ui`), opened by the engine's call
+  through `StageInputs`.
+- **Segment-only clients.** The menu scenes (native) and the menu composites are in the UI stage only. A batch or a composite while no
+  open stage holds the client is a `NotDeclared` tap error; one the schedule does not hold yet lags. Guest keeps the menu scenes on the
+  anchor's own epoch (`Scheduled`).
+- **The face tint** (ISAlphaBlend into `kPLAYER_FACEGEN_TINT`) took the `CanRun` fallback too: the first native-quick run stopped in the
+  session's first world frame (`ISAlphaBlend ... came while no open stage holds the client`). It is its own client now
+  (`cs.engine.imagespace.facetint`), on the ImageSpace anchor's own epoch, until a stage has a place for it (plan 2.2).
+- Builds of the UI stage hold 381 passes (Scaleform's 16 instances of 18 passes, the clear places, the scene, the composites, the copy,
+  the tiles, the overlay, the capture): the old menu UI graph's count.
+
+### What the empty UI passes cost in a world frame (measured)
+
+They skip at execution, but they do not fold to nothing. native-interior, census windows, before (`c3i`, A1-A3) and after (`a4i`):
+
+| | Before | After |
+|---|---|---|
+| UI stage entry / body barriers as built a frame | 14 / 68 | 40 / 216 |
+| late barriers folded at execution, all stages | 67.5 to 69.0 | 141.0 |
+| body barriers recorded a frame, all stages (less folded) | 351 to 354 | 425 to 430 |
+| UI stage epoch body on the render thread | 80 us | 287 to 292 us |
+
+perf-taa (`a4p5s`): UI 40 / 215 a frame, 170 folded in all, epoch body 259 to 261 us; 11.2 to 11.3 tickets a frame; the steady window
+between the marks has 0 builds, recordings and switches. The rest that does not fold: the fold composes each resource's skipped
+transitions and keeps the plan's final state, so a resource only the menu passes use (kMAIN read by the composites, the shadow mask,
+the motion vectors, the normals, the menu depth copy's targets) still gets its entry barrier and a net transition. Folding them to
+nothing needs ORG to leave a resource no running pass touched in its entry state (the ledger not moved). Not done. The frame period
+does not move (below): the RX 6600 is GPU-bound and the extra 0.2 ms is on the render thread.
+
+### Scaleform's scratch images
+
+Every Scaleform draw pass declared a read of every scratch image, and the role targets' passes came before the scratch images' passes
+in each instance, so a scratch image's first use in the frame was a read. A scratch image is used only inside one display (its
+redirects are dropped at the display's end): a render target or filter pass clears it and draws into it, and a later segment of the same
+display reads it. Each segment is its own instance, and instances come in graph order.
+
+- The passes of the instance the UI stage's graph makes first (`FrameAnchors::FirstGraphInstance`: 8, the first Interface step's)
+  declare no scratch reads: no earlier tap of the frame could have written one. Every other instance declares the scratch images but
+  its own target, as before. In guest (the anchor's own epoch, one instance a run) every pass declares them.
+- Within an instance the scratch images' passes come first, in GFx's order. One instance draws onto one surface, so this keeps the
+  declarations in order; the reads that matter cross instances.
+- The scratch images are a frame arena group spanning the UI stage (`Transients::Group::ScaleformScratch`, placed by `Transients::Place`
+  at setup). The arena's census: they sit at [0, 31.6) MiB of the render-target block that holds the G-buffer [0, 43.5) MiB (depth to
+  first person) and post's 7.9 MiB range. The arena stays 103.0 MiB; the 31.6 MiB they had of their own is saved. The recipe check's
+  group rule (first use writes) passes: 0 findings in every run.
+- The Scaleform census counts segments drawn into scratch images. Every run below shows 0: no menu the tests reach uses a GFx render
+  target or filter (HUD, inventory, map, journal over a frozen world, main menu, loading screen; the journal's blurred background is the
+  engine's radial blur, an ImageSpace effect). Vanilla menus showed none in earlier runs either; SkyUI's menus (drop shadows, glows) would,
+  and SkyUI is not installed in the test instance. So the reorder and the arena placement are verified by the recipe check and the
+  declarations in the recipe print, not by a drawn filter.
+
+### Measured (perf-taa, RX 6600, uncapped, VRAM Budget off, alternating)
+
+| | Native | Guest |
+|---|---|---|
+| frame period between the marks | 19.08 / 19.08 ms | 18.94 / 19.07 ms |
+| process dedicated VRAM | 2,936 / 2,932 MiB | 3,077 / 3,037 MiB |
+
+Before (One arena, same machine): native 19.06 to 19.12 against guest 19.08 to 19.12 ms; native 2,996 to 2,999 MiB. About 63 MiB less:
+the scratch images' 31.6 MiB, and the menu UI graph's own build and recordings (the second UI graph) gone.
+
+### Checks
+
+One background run each on DLL `11d30aa364ab` (both commits), all passed with 0 tap errors, no `NoPass`, 0 recipe findings and no failed
+build: native-quick (the Bink start movie: 166 frames drawn by the render graph, 0 by the engine, no `[E] Bink`), native-river,
+native-interior, native-validation (the same message classes and counts as before: 20 `VUID-vkCmdDraw-None-09600`, the back-buffer layout
+and unused-output lines; inventory and map shots within 0.2 and 0.25 of the A1-A3 run's mean channel difference), the loading-thread run
+(Bink, main menu, loading screen and world kinds), the frozen-world Journal Menu run with TAA (the menu shot within 0.7, the world shots
+before and after 104.4), the main menu (Start On Save moved aside for the run and restored; the menu, the emblem and the mist as before),
+native-upscalers (DLSS, FSR, TAA, XeSS within 1.2), guest-quick, guest-quick with `org.ports=all`, an inventory census run (`a4inv`).
+The A4 commit alone (DLL `18aff6bcc955`) passed native-quick and the main menu. The only `[C]` line is the known `PublishedResources` one.
+
+### Waiting on a foreground session
+
+- An inventory item model: the scene's depth, shadow mask, depth copy, colour and composite as UI stage steps, with its displays split
+  into instances 8 to 15 before the scene and 0 to 7 after. The validation tour's inventory draws no model (0 geometries); its clear at
+  the menu-scene place is the only part a background run reaches.
+- The local map (needs input): its two batches as the UI stage's `cs.menu-scenes.local-map*` step. `LocalMapRenderer::Render` runs from
+  the LocalMapMenu inside `UI::Render`, after the post stage (inferred from menus.md, not traced): if it ran before the post stage ended,
+  its batches would be `NotDeclared` tap errors.
+- A GFx filter or render target (SkyUI's menus).
