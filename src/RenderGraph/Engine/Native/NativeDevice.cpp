@@ -5085,6 +5085,24 @@ namespace RenderGraph::Engine::Native
 		return 0;
 	}
 
+	void PaceHeldPresent()
+	{
+		if (!g_device || !g_device->graphics)
+			return;
+		// The graphics queue's progress after each held frame; the frame the latency back is waited for.
+		static std::deque<rhi::QueueProgress> frames;
+		const auto progress = g_device->graphics.Progress();
+		if (!progress.timeline || !progress.submitted)
+			return;
+		frames.push_back(progress);
+		while (frames.size() > g_device->frameLatency) {
+			auto oldest = frames.front();
+			frames.pop_front();
+			ZoneScopedN("CS.Native.HeldPresentPace");
+			(void)oldest.timeline.HostWait(oldest.submitted, 250);
+		}
+	}
+
 	void TakePresentPace(std::uint64_t& a_waits, std::uint64_t& a_us)
 	{
 		a_waits = g_device ? g_device->presentPaceWaits.exchange(0, std::memory_order_relaxed) : 0;
@@ -5296,6 +5314,7 @@ namespace RenderGraph::Engine::Native
 	void Shutdown() {}
 	bool SetSwapChainColorSpace(bool) { return false; }
 	void TakePresentPace(std::uint64_t& a_waits, std::uint64_t& a_us) { a_waits = a_us = 0; }
+	void PaceHeldPresent() {}
 	bool DescribeVulkanDevice(DxvkOrgInteropDeviceInfo&) { return false; }
 	uint64_t AdapterLuid() { return 0; }
 	bool DescribeForCommands(rhi::CommandList&, std::span<const rhi::Resource>, void*&, std::vector<ExternalImageInfo>&, std::shared_ptr<const void>&, std::string& a_why)

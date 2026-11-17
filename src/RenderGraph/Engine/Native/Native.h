@@ -204,6 +204,14 @@ namespace RenderGraph::Engine::Native
 	void TakePresentPace(std::uint64_t& a_waits, std::uint64_t& a_us);
 
 	/**
+	 * @brief A frame whose present is held (Drawcall Limit Fix's load hold) ends here instead: the CPU waits until the GPU has
+	 * finished the frame the frame latency back, as a present would. Without it nothing paces such frames, the CPU runs ahead
+	 * of the GPU by as many frames as the graph has slots, and work that keeps resources for a fixed number of frames (the
+	 * upscaler's views) frees them while the GPU still reads them. Render thread, after the frame's work is submitted.
+	 */
+	void PaceHeldPresent();
+
+	/**
 	 * @name The profilers' view of the native Vulkan device (GPU counters, RenderGraphRuntime::Initialize), what DXVK's
 	 * dxvkGetInteropDeviceInfo and dxvkEnqueueQueueCallback give them in guest mode.
 	 */

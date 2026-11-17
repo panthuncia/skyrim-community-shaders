@@ -650,6 +650,9 @@ struct IDXGISwapChain_Present
 							if (RenderGraph::Engine::OwnedFrame::Active())
 								return RenderGraph::Engine::OwnedFrame::Get().EndGuestFrame(sc, si, f, [](IDXGISwapChain* a_sc, unsigned a_si, unsigned a_f) { return func(a_sc, a_si, a_f); });
 							globals::d3d::context->Flush();
+							// Native: the held frame is paced as a present would pace it.
+							if (RenderGraph::Engine::Native::Active())
+								RenderGraph::Engine::Native::PaceHeldPresent();
 							return S_OK;
 						}
 						// The owned frame: DXVK's headless Present ends the guest frame, ORG presents behind it.
