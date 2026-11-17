@@ -18,6 +18,8 @@ namespace Testing::SwitchRegistry
 		// The switches outside DCLF's registry. No table of them exists in the code: these are the names the sources read.
 		// A name read at run time that is in no table is logged (NoteRead), so a new switch shows up.
 		constexpr std::string_view kOther[] = {
+			"BASICRHI_BARRIER_PROBE",
+			"BASICRHI_BARRIER_PROBE_FILE",
 			"BASICRHI_COMMAND_POOL_PROBE",
 			"BASICRHI_COMMAND_POOL_PROBE_SHARED",
 			"BASICRHI_D3D12_RESET_TRACE",

@@ -50,6 +50,20 @@ family = "basicrhi"
 kind = "other"
 description = ""
 
+[key."basicrhi.barrier_probe"]
+env = "BASICRHI_BARRIER_PROBE"
+type = "string"
+family = "basicrhi"
+kind = "other"
+description = "Times each image barrier of lists whose census label holds this text (* for all); needs CS_RHI_CENSUS"
+
+[key."basicrhi.barrier_probe_file"]
+env = "BASICRHI_BARRIER_PROBE_FILE"
+type = "string"
+family = "basicrhi"
+kind = "other"
+description = "File the barrier probe appends its table to every 300 presents"
+
 [key."basicrhi.pad_lists"]
 env = "BASICRHI_PAD_LISTS"
 type = "string"
