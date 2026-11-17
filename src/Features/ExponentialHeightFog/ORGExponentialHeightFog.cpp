@@ -28,7 +28,6 @@ ORGExponentialHeightFog& ORGExponentialHeightFog::Get()
 #	include "Features/LightLimitFix.h"
 #	include "Features/LightLimitFix/ORGLightCulling.h"
 #	include "Features/LightLimitFix/ORGLocalShadows.h"
-#	include "RenderGraph/Engine/Native/Native.h"
 #	include "RenderGraph/Engine/Tripwire/Tripwire.h"
 #	include "Features/Skylighting.h"
 #	include "Features/Skylighting/ORGSkylighting.h"
@@ -597,32 +596,16 @@ namespace
 	// Inputs
 	// - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
 
-	/** @brief A D3D11 feature's 2D texture behind a_view, imported (FrameAnchors::D3D11Texture). Empty without one. */
-	Source ImportView(std::string_view a_name, ID3D11ShaderResourceView* a_view)
-	{
-		if (!a_view)
-			return {};
-		winrt::com_ptr<ID3D11Resource> resource;
-		a_view->GetResource(resource.put());
-		auto texture = resource.try_as<ID3D11Texture2D>();
-		if (!texture)
-			return {};
-		return { FrameAnchors::D3D11Texture(a_name, texture.get(), a_view, nullptr), {} };
-	}
-
 	/**
 	 * @brief A producer's texture, as a_view (the view its feature binds) names it: by its published id while a_view is that id's
-	 * export, so the read is ordered after the producer's write; else the D3D11 texture behind a_view, imported under the id. Native
-	 * mode never imports it, since nothing orders the import after its producer: empty there instead. Guest keeps the import for
-	 * producers on D3D11.
+	 * export, so the read is ordered after the producer's write. Empty otherwise: nothing would order an import of a D3D11 texture
+	 * after its producer.
 	 */
 	Source Published(std::string_view a_id, ID3D11ShaderResourceView* a_view)
 	{
 		if (PublishedResources::IsExportOf(a_view, a_id))
 			return { nullptr, std::string(a_id) };
-		if (RenderGraph::Engine::Native::Active())
-			return {};
-		return ImportView(a_id, a_view);
+		return {};
 	}
 
 	/** @brief A depth texture behind a_view: the engine's depth-stencil import when it is one of the engine's, else its own. */
@@ -1017,12 +1000,11 @@ bool ORGExponentialHeightFog::Prepass()
 		shape.inputs[kSkyIBL] = Published(ORGIBL::kSkyId, ibl.SkyIBLSRV());
 		if (shape.inputs[kEnvIBL] && shape.inputs[kSkyIBL])
 			inputs.ibl = true;
-		else if (RenderGraph::Engine::Native::Active()) {
-			// Native mode: IBL's SH is not published. The fog runs without IBL, which its constants turn off.
+		else {
+			// IBL's SH is not published (its views are not the exports): the fog runs without IBL, which its constants turn off.
 			shape.inputs[kEnvIBL] = {};
 			shape.inputs[kSkyIBL] = {};
-		} else
-			return fallback("IBL's SH textures cannot be imported");
+		}
 	}
 
 	auto& skylighting = globals::features::skylighting;

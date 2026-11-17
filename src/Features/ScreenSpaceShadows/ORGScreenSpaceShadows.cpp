@@ -10,7 +10,6 @@
 #	include "Features/TerrainBlending/ORGTerrainBlending.h"
 #	include "Globals.h"
 #	include "RenderGraph/ComputeProgram.h"
-#	include "RenderGraph/Engine/Native/Native.h"
 #	include "RenderGraph/FrameAnchors.h"
 #	include "RenderGraph/GraphResources.h"
 #	include "RenderGraph/PublishedResources.h"
@@ -41,8 +40,6 @@ namespace
 	// The shadow texture's name, which it is published under: Drawcall Limit Fix's t45.
 	constexpr std::string_view kTextureName = ORGScreenSpaceShadows::kShadowTextureId;
 	// Terrain Blending's D3D11 blended depth, imported while its graph path is off (FrameAnchors::D3D11Texture adds "cs.d3d11.").
-	constexpr std::string_view kBlendedDepthName = "terrain-blending.blended-depth";
-	constexpr std::string_view kBlendedDepthImportId = "cs.d3d11.terrain-blending.blended-depth";
 	constexpr std::uint32_t kMaxDispatches = ScreenSpaceShadows::Dispatches::kMax;
 	// The clear's run gate entry, after the dispatches': every commit opens it, as the D3D11 path clears on every run.
 	constexpr std::uint32_t kClearEntry = kMaxDispatches;
@@ -72,12 +69,11 @@ namespace
 	/** @brief The raymarch programs by sample count. */
 	using ProgramSet = std::map<std::uint32_t, std::shared_ptr<const Program>>;
 
-	/** @brief The depth the raymarch reads: an import, or Terrain Blending's published blended depth by its id. */
+	/** @brief The depth the raymarch reads: the z-prepass copy, or Terrain Blending's published blended depth by its id. */
 	struct DepthSource
 	{
 		FrameAnchors::Texture resource;
 		std::string_view published;
-		bool blendImport = false;  // the import of Terrain Blending's D3D11 blended depth
 
 		explicit operator bool() const { return resource || !published.empty(); }
 		bool operator==(const DepthSource&) const = default;
@@ -127,9 +123,8 @@ namespace
 
 	/**
 	 * @brief The depth the D3D11 path reads at Prepass (Util::GetCurrentSceneDepthSRV(false)), as a graph texture: on Terrain
-	 * Blending's ORG path its published blended depth, which the graph orders after the blend. Native mode never imports the D3D11
-	 * texture, which nothing orders after its writer: without the published depth it reads the z-prepass copy. Guest keeps the
-	 * import for Terrain Blending on D3D11.
+	 * Blending's ORG path its published blended depth, which the graph orders after the blend. Without it, the z-prepass copy: an
+	 * import of the D3D11 texture is not ordered after its writer.
 	 */
 	DepthSource CurrentDepth()
 	{
@@ -137,20 +132,16 @@ namespace
 		if (terrainBlending.loaded && terrainBlending.settings.Enabled) {
 			if (PublishedResources::IsPublished(ORGTerrainBlending::kBlendedDepthId))
 				return { nullptr, ORGTerrainBlending::kBlendedDepthId };
-			if (terrainBlending.blendedDepthTexture && !RenderGraph::Engine::Native::Active())
-				return { FrameAnchors::D3D11Texture(kBlendedDepthName, terrainBlending.blendedDepthTexture->resource.get(),
-							 terrainBlending.blendedDepthTexture->srv.get(), nullptr),
-					{}, true };
 		}
-		return { FrameAnchors::EngineDepth(RE::RENDER_TARGETS_DEPTHSTENCIL::kPOST_ZPREPASS_COPY), {}, false };
+		return { FrameAnchors::EngineDepth(RE::RENDER_TARGETS_DEPTHSTENCIL::kPOST_ZPREPASS_COPY), {} };
 	}
 
 	const char* DepthLabel(const DepthSource& a_depth)
 	{
 		auto& terrainBlending = globals::features::terrainBlending;
-		if (!terrainBlending.loaded || !terrainBlending.settings.Enabled || (a_depth.published.empty() && !a_depth.blendImport))
+		if (!terrainBlending.loaded || !terrainBlending.settings.Enabled || a_depth.published.empty())
 			return "the z-prepass copy";
-		return a_depth.published.empty() ? "Terrain Blending" : "Terrain Blending's graph texture";
+		return "Terrain Blending's graph texture";
 	}
 
 	// Every dispatch of the list's capacity, each reading its constants from the execution's latch region and its group counts
@@ -244,12 +235,6 @@ namespace
 		return std::pair{ desc.Width, desc.Height };
 	}
 
-	/** @brief Drops the import of Terrain Blending's D3D11 blended depth when the raymarch stops reading it. */
-	void ReleaseBlendImport(const DepthSource& a_previous, const DepthSource& a_next)
-	{
-		if (a_previous.blendImport && !a_next.blendImport)
-			FrameAnchors::ReleaseImport(kBlendedDepthImportId);
-	}
 }
 
 struct ORGScreenSpaceShadows::Impl
@@ -320,7 +305,6 @@ bool ORGScreenSpaceShadows::Setup(const D3D11_TEXTURE2D_DESC& a_desc, std::funct
 		state->depth = CurrentDepth();
 		if (!state->program || !state->sampler || !*state->output || !state->output->SRV() || !state->output->Versioned() || !state->gate || !state->depth) {
 			logger::warn("[ORG] Screen Space Shadows stays on D3D11: its program, sampler, texture, gate or depth input could not be made");
-			ReleaseBlendImport(state->depth, {});
 			return false;
 		}
 
@@ -365,14 +349,12 @@ bool ORGScreenSpaceShadows::Setup(const D3D11_TEXTURE2D_DESC& a_desc, std::funct
 				onFailed();
 		};
 		if (!FrameAnchors::Register(std::move(client))) {
-			ReleaseBlendImport(state->depth, {});
 			return false;
 		}
 		// Drawcall Limit Fix's colour passes read it by name, ordered after the raymarch (Integrations/ScreenSpaceShadows).
 		if (!PublishedResources::Publish(*state->output)) {
 			logger::warn("[ORG] Screen Space Shadows stays on D3D11: the shadow texture could not be published");
 			FrameAnchors::Unregister(kClientId);
-			ReleaseBlendImport(state->depth, {});
 			return false;
 		}
 		impl = std::make_unique<Impl>();
@@ -396,8 +378,6 @@ void ORGScreenSpaceShadows::Stop()
 {
 	FrameAnchors::Unregister(kClientId);
 	PublishedResources::Withdraw(kTextureName);
-	if (impl)
-		ReleaseBlendImport(impl->state->depth, {});
 	impl.reset();
 }
 
@@ -435,7 +415,6 @@ ID3D11ShaderResourceView* ORGScreenSpaceShadows::Prepass()
 			Stop();
 			return nullptr;
 		}
-		ReleaseBlendImport(state.depth, depth);
 		state.depth = std::move(depth);
 		logger::info("[ORG] Screen Space Shadows: depth now from {}", DepthLabel(state.depth));
 		changed = true;

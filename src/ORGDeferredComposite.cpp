@@ -33,7 +33,6 @@ ORGDeferredComposite& ORGDeferredComposite::Get()
 #	include "Features/TerrainBlending.h"
 #	include "Globals.h"
 #	include "RenderGraph/ComputeProgram.h"
-#	include "RenderGraph/Engine/Native/Native.h"
 #	include "RenderGraph/FrameAnchors.h"
 #	include "RenderGraph/PublishedResources.h"
 #	include "RenderGraph/RenderGraphRuntime.h"
@@ -96,14 +95,12 @@ namespace
 
 	/**
 	 * @brief What the composite reads at one of kViewSlots: the producer's published resource by its id (ordered after its writes
-	 * in any epoch), or in guest mode the D3D11 texture of a producer that is on D3D11, imported and declared. Neither: the null
-	 * descriptor, as D3D11 binds nothing there.
+	 * in any epoch). Without one: the null descriptor, as D3D11 binds nothing there.
 	 */
 	struct SlotInput
 	{
 		std::string_view published;
 		bool cube = false;
-		FrameAnchors::Texture imported;
 
 		bool operator==(const SlotInput&) const = default;
 	};
@@ -195,11 +192,7 @@ namespace
 			bindings.motionVectors = a_builder.UnorderedAccess(t.motionVectors).View();
 			for (std::size_t i = 0; i < t.inputs.size(); ++i) {
 				const auto& input = t.inputs[i];
-				if (input.imported) {
-					// An import's default view follows its D3D11 SRV (a cube's TextureCube view).
-					bindings.inputs[i] = a_builder.ShaderResource(input.imported).View();
-					bindings.declared[i] = true;
-				} else if (!input.published.empty() && PublishedResources::IsDeclarable(input.published)) {
+				if (!input.published.empty() && PublishedResources::IsDeclarable(input.published)) {
 					const org::SrvView view{ .variant = input.cube ? static_cast<std::uint32_t>(org::SRVViewType::TextureCube) : UINT32_MAX };
 					bindings.inputs[i] = a_builder.ShaderResource(org::ResourceIdentifier(input.published), view).View();
 					bindings.declared[i] = true;
@@ -345,22 +338,17 @@ struct ORGDeferredComposite::Impl
 		}
 		if (!t.specular || !t.albedo || !t.normalRoughness || !t.masks || !t.masks2 || !t.main || !t.normals[0] || !t.normals[1] || !t.motionVectors)
 			return std::nullopt;
-		for (std::size_t i = 0; i < kViewSlots.size(); ++i) {
-			const auto input = InputOf(i, a_frame.views[kViewSlots[i]]);
-			if (!input)
-				return std::nullopt;
-			t.inputs[i] = *input;
-		}
+		for (std::size_t i = 0; i < kViewSlots.size(); ++i)
+			t.inputs[i] = InputOf(i, a_frame.views[kViewSlots[i]]);
 		return t;
 	}
 
 	/**
 	 * @brief The input of kViewSlots[a_slot] for a_view, the view the D3D11 composite binds there: its producer's published id
-	 * while a_view is that id's export. Otherwise the producer is on D3D11: guest mode imports its texture under the id, and native
-	 * mode, which needs the producers on the graph, binds the null descriptor. Nothing when guest mode cannot import it (a 3D
-	 * texture: Skylighting's probes on D3D11): Deferred composites with D3D11 that frame.
+	 * while a_view is that id's export. Otherwise the producer is not on the graph, and the slot binds the null descriptor: an
+	 * import of its D3D11 texture is not ordered after its producer.
 	 */
-	static std::optional<SlotInput> InputOf(std::size_t a_slot, ID3D11ShaderResourceView* a_view)
+	static SlotInput InputOf(std::size_t a_slot, ID3D11ShaderResourceView* a_view)
 	{
 		const auto& source = kSlotSources[a_slot];
 		SlotInput input{ .cube = source.cube };
@@ -371,16 +359,6 @@ struct ORGDeferredComposite::Impl
 				input.published = id;
 				return input;
 			}
-		if (RenderGraph::Engine::Native::Active())
-			return input;
-		winrt::com_ptr<ID3D11Resource> resource;
-		a_view->GetResource(resource.put());
-		auto texture = resource.try_as<ID3D11Texture2D>();
-		if (!texture)
-			return std::nullopt;
-		input.imported = FrameAnchors::D3D11Texture(source.ids[0], texture.get(), a_view, nullptr);
-		if (!input.imported)
-			return std::nullopt;
 		return input;
 	}
 

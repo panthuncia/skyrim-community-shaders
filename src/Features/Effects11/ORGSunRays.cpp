@@ -28,7 +28,6 @@ ORGSunRays& ORGSunRays::Get()
 #	include "RenderGraph/AnchorPasses.h"
 #	include "RenderGraph/ComputeProgram.h"
 #	include "RenderGraph/FrameAnchors.h"
-#	include "RenderGraph/Engine/Native/Native.h"
 #	include "RenderGraph/Engine/Tripwire/Tripwire.h"
 #	include "RenderGraph/GraphResources.h"
 #	include "RenderGraph/RasterProgram.h"
@@ -405,25 +404,9 @@ namespace
 	// - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
 
 	/**
-	 * @brief A D3D11 feature's 2D texture behind a_view, imported (FrameAnchors::D3D11Texture). Empty without one, and always empty in
-	 * native mode: nothing orders the import after its producer there, so only published ids are read. Guest keeps it for
-	 * producers on D3D11.
-	 */
-	Source ImportView(std::string_view a_name, ID3D11ShaderResourceView* a_view)
-	{
-		if (!a_view || RenderGraph::Engine::Native::Active())
-			return {};
-		winrt::com_ptr<ID3D11Resource> resource;
-		a_view->GetResource(resource.put());
-		auto texture = resource.try_as<ID3D11Texture2D>();
-		if (!texture)
-			return {};
-		return { FrameAnchors::D3D11Texture(a_name, texture.get(), a_view, nullptr), {} };
-	}
-
-	/**
 	 * @brief The scene depth the D3D11 passes read at PS t17 (VanillaBinding::LastSceneDepth): the engine's depth-stencil import when
-	 * it is one of the engine's, else Terrain Blending's published blended depth.
+	 * it is one of the engine's, else Terrain Blending's published blended depth. Only published ids are read: nothing would order an
+	 * import of a D3D11 texture after its producer.
 	 */
 	Source SceneDepth(ID3D11ShaderResourceView* a_view)
 	{
@@ -443,7 +426,7 @@ namespace
 			return { nullptr, std::string(ORGTerrainBlending::kBlendedDepthId) };
 		if (a_view == graphBlending.BlendedDepthSRV(true))
 			return { nullptr, std::string(ORGTerrainBlending::kBlendedDepth16Id) };
-		return ImportView("Effects11::SceneDepth", a_view);
+		return {};
 	}
 
 	/** @brief A program's own defines, each without a value. The programs add the D3D11 build's common defines themselves. */
@@ -789,8 +772,6 @@ bool ORGSunRays::PrepareFrame(const Sizes& a_sizes)
 		const auto& graphTerrain = ORGTerrainShadows::Get();
 		if (view && graphTerrain.IsActive() && view == graphTerrain.ShadowHeightSRV())
 			shape.shadowHeights = { nullptr, std::string(ORGTerrainShadows::kShadowHeightId) };
-		else
-			shape.shadowHeights = ImportView(ORGTerrainShadows::kShadowHeightId, view);
 		// The raymarch reads the heights whenever terrain shadows are on.
 		if (!shape.shadowHeights)
 			return fallback("Terrain Shadows' heights are missing");
@@ -803,8 +784,6 @@ bool ORGSunRays::PrepareFrame(const Sizes& a_sizes)
 		const auto& graphClouds = ORGCloudShadows::Get();
 		if (view && graphClouds.IsActive() && view == graphClouds.OcclusionSRV())
 			shape.cloudShadows = { nullptr, std::string(ORGCloudShadows::kOcclusionId) };
-		else
-			shape.cloudShadows = ImportView(ORGCloudShadows::kOcclusionId, view);
 		if (!shape.cloudShadows)
 			return fallback("Cloud Shadows' texture is missing");
 	}

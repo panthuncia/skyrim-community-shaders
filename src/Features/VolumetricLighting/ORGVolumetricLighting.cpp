@@ -385,31 +385,17 @@ struct ORGVolumetricLighting::Impl
 	}
 
 	/**
-	 * @brief Terrain or Cloud Shadows' texture the generate reads through ShadowSampling: its published id on the feature's ORG path,
-	 * else the D3D11 texture behind the view the feature binds, imported. Empty when the feature is off, or its texture missing.
-	 * Native mode reads only the published id: an import is not ordered after its producer. With nothing published there it is
-	 * empty, as for a feature that is off: an id nobody publishes would hold the generate back for good. Guest keeps the import
-	 * for a producer on D3D11.
+	 * @brief Terrain or Cloud Shadows' texture the generate reads through ShadowSampling: its published id on the feature's ORG path.
+	 * Empty when the feature is off or not on the graph: an import of a D3D11 texture is not ordered after its producer, and an id
+	 * nobody publishes would hold the generate back for good.
 	 */
-	static VLSource FeatureInput(bool a_loaded, bool a_orgPath, std::string_view a_id, ID3D11ShaderResourceView* a_view, std::string_view a_importName, bool& a_missing)
+	static VLSource FeatureInput(bool a_loaded, bool a_orgPath, std::string_view a_id)
 	{
 		if (!a_loaded)
 			return {};
 		if (a_orgPath || PublishedResources::IsRegistered(a_id))
 			return { nullptr, std::string(a_id) };
-		if (RenderGraph::Engine::Native::Active())
-			return {};
-		if (!a_view) {
-			a_missing = true;
-			return {};
-		}
-		winrt::com_ptr<ID3D11Resource> resource;
-		a_view->GetResource(resource.put());
-		const auto texture = resource.try_as<ID3D11Texture2D>();
-		auto imported = texture ? FrameAnchors::D3D11Texture(a_importName, texture.get(), a_view, nullptr) : nullptr;
-		if (!imported)
-			a_missing = true;
-		return { imported, {} };
+		return {};
 	}
 
 	/** @brief A pass made at a graph build from the step a_add adds: the AnchorPasses pass, or null (logged) when it cannot be made. */
@@ -492,17 +478,10 @@ struct ORGVolumetricLighting::Impl
 			a_missing = "the sky's noise gradient texture is not loaded yet";
 			return false;
 		}
-		bool missing = false;
 		auto& terrainShadows = globals::features::terrainShadows;
 		auto& cloudShadows = globals::features::cloudShadows;
-		made->shadowHeights = FeatureInput(!fixed->vanilla && terrainShadows.loaded, ORGTerrainShadows::Requested(), ORGTerrainShadows::kShadowHeightId,
-			terrainShadows.loaded ? terrainShadows.GetShadowHeightSRV() : nullptr, "volumetric-lighting.terrain-shadows", missing);
-		made->cloudShadows = FeatureInput(!fixed->vanilla && cloudShadows.loaded, ORGCloudShadows::Requested(), ORGCloudShadows::kOcclusionId,
-			cloudShadows.loaded ? cloudShadows.OcclusionSRV() : nullptr, "volumetric-lighting.cloud-shadows", missing);
-		if (missing) {
-			a_missing = "Terrain or Cloud Shadows' texture is not made yet";
-			return false;
-		}
+		made->shadowHeights = FeatureInput(!fixed->vanilla && terrainShadows.loaded, ORGTerrainShadows::Requested(), ORGTerrainShadows::kShadowHeightId);
+		made->cloudShadows = FeatureInput(!fixed->vanilla && cloudShadows.loaded, ORGCloudShadows::Requested(), ORGCloudShadows::kOcclusionId);
 		for (const auto& size : a_sizes) {
 			D3D11_TEXTURE3D_DESC desc{};
 			desc.Width = size.width;

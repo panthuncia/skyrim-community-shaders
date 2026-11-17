@@ -28,7 +28,6 @@ bool ORGIBL::Requested()
 #if defined(CS_HAS_RENDER_GRAPH)
 
 #	include "RenderGraph/ComputeProgram.h"
-#	include "RenderGraph/Engine/Native/Native.h"
 #	include "RenderGraph/FrameAnchors.h"
 #	include "RenderGraph/GraphResources.h"
 #	include "RenderGraph/PublishedResources.h"
@@ -290,20 +289,15 @@ bool ORGIBL::Prepass(bool a_useEnvironment)
 	Source env;
 	const auto& dynamicCubemaps = globals::features::dynamicCubemaps;
 	if (a_useEnvironment && dynamicCubemaps.loaded && dynamicCubemaps.envTexture) {
-		const auto* texture = dynamicCubemaps.envTexture;
 		// On Dynamic Cubemaps' ORG path its texture is the graph twin's export: read the published twin, ordered after its writes.
-		// Importing the export would make a second graph resource of the same image, which nothing orders after them.
-		// Native mode reads only the published twin: an import is not ordered after its producer. Without it the source stays
-		// empty and the SH is cleared to zero, as a null view samples. Guest keeps the import for Dynamic Cubemaps on D3D11.
-		if (PublishedResources::IsExportOf(texture->srv.get(), ORGDynamicCubemaps::kEnvId) || RenderGraph::Engine::Native::Active()) {
-			if (PublishedResources::IsPublished(ORGDynamicCubemaps::kEnvId))
-				env.published = ORGDynamicCubemaps::kEnvId;
-		} else
-			env.resource = FrameAnchors::D3D11Texture(ORGDynamicCubemaps::kEnvId, texture->resource.get(), texture->srv.get(), texture->uav.get());
+		// Only the published twin is read: an import is not ordered after its producer. Without it the source stays empty and the
+		// SH is cleared to zero, as a null view samples.
+		if (PublishedResources::IsPublished(ORGDynamicCubemaps::kEnvId))
+			env.published = ORGDynamicCubemaps::kEnvId;
 	}
 	if (sky != state.skySource || env != state.envSource || a_useEnvironment != state.useEnvironment) {
 		if (env.published != state.envSource.published)
-			logger::info("[ORG] IBL: the environment SH reads {}", env.published.empty() ? "Dynamic Cubemaps' D3D11 texture" : "Dynamic Cubemaps' published cubemap");
+			logger::info("[ORG] IBL: the environment SH reads {}", env.published.empty() ? "nothing (Dynamic Cubemaps' cubemap is not published)" : "Dynamic Cubemaps' published cubemap");
 		state.skySource = sky;
 		state.envSource = std::move(env);
 		state.useEnvironment = a_useEnvironment;
