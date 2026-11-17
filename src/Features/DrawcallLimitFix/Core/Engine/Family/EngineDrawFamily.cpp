@@ -17,6 +17,7 @@
 #include "RenderGraph/PublishedResources.h"
 #include "RenderGraph/RenderGraphRuntime.h"
 #include "RenderGraph/Engine/Tripwire/Tripwire.h"
+#include "RenderGraph/Frame/FrameDriver.h"
 #include "RenderGraph/UndeclaredAccess.h"
 #include "Utils/Logging.h"
 
@@ -642,6 +643,31 @@ namespace DCLF::Family
 		static Util::ReasonLog log("[DCLF] engine draw families: latched draws were not drawn this frame (their anchor's run did not submit)", spdlog::level::err);
 		log.Report(std::format("{} {}: {}", a_family, a_client, why));
 		return false;
+	}
+
+	bool HeldForBatch(std::string_view a_family, std::string_view a_client, std::uint32_t a_segment)
+	{
+		namespace Driver = ::RenderGraph::Frame::Driver;
+		if (FrameAnchors::SegmentsOn()) {
+			const auto hold = FrameAnchors::HeldNow(a_client, FrameAnchors::Anchor::EngineDraws);
+			if (!hold.held) {
+				Driver::NoteTapError(Driver::TapError::NotDeclared, static_cast<::RenderGraph::Frame::SegmentId>(a_segment),
+					std::format("the {} batch of {} came while no open stage holds the client; it draws nothing", a_family, a_client));
+				return false;
+			}
+			if (!hold.scheduled) {
+				static Util::ReasonLog log("[DCLF] engine draw families: a batch lags (its stage's schedule does not hold its client yet); nothing is drawn");
+				log.Report(std::format("{} {}", a_family, a_client));
+				return false;
+			}
+			return true;
+		}
+		if (!FrameAnchors::Scheduled(a_client, FrameAnchors::Anchor::EngineDraws)) {
+			static Util::ReasonLog log("[DCLF] engine draw families: the engine draws a batch (the anchor's built graph does not hold its client yet)", spdlog::level::err);
+			log.Report(std::format("{} {}", a_family, a_client));
+			return false;
+		}
+		return true;
 	}
 
 	void KeptOwners::Keep(Owners&& a_owners)

@@ -51,23 +51,24 @@ namespace RenderGraph::Frame::Recipes
 			{ StageId::Depth, Owner::Dclf, { Segment::ZPrepass, Segment::FirstPersonDepth, Segment::Reflection }, 3, "Main::RenderDepth" },
 			{ StageId::PreMain, Owner::Cs, { Segment::DeclaredPreMain }, 1, "just before DCLF's main opaque epoch (the main pass's sky)" },
 			{ StageId::Opaque, Owner::Dclf, { Segment::MainOpaque }, 1, "the main pass's opaque batches" },
-			// The EngineDraws, ImageSpace and EngineCopy anchors are not listed: their epochs hold work of several places in the frame
-			// (menus, other frame kinds), so no one place in the recipe is theirs.
+			// The ImageSpace and EngineCopy anchors are not listed: their epochs hold work of several places in the frame (menus, other frame
+			// kinds), so no one place in the recipe is theirs.
 			{ StageId::Deferred, Owner::Cs, { Segment::DeclaredDeferred }, 1, "just before DCLF's forward epoch (the water blend's end)" },
-			// The EngineDraws anchor's own epoch keeps the clients no stage holds (blood splatter, precipitation, the menu scenes): in a
-			// world frame they run after the water.
+			// Every client of the EngineDraws anchor is a stage's step. Its own epoch keeps a water batch no stage's window takes: under
+			// water the engine's blended draw, and with it Drawcall Limit Fix's forward epoch, comes before the water (Features/Forward).
 			{ StageId::Forward, Owner::Dclf, { Segment::AnchorEngineDraws, Segment::AnchorEngineFrameClear, Segment::Forward }, 3, "the engine's blended draw" },
-			// The sun's query after the forward pass must run before the first-person geometry on the GPU: a stage of its own between the two
-			// DCLF graphs. The first person's query comes after the first-person graph: the post stage's first step. The anchor's own epoch
-			// keeps a query no stage's window takes (a world frame before Drawcall Limit Fix draws).
+			// The engine's blended draws after DCLF's forward epoch hold the precipitation: the sun stage's first step. The sun's query after
+			// the forward pass must run before the first-person geometry on the GPU: the same stage, between the two DCLF graphs. The first
+			// person's query comes after the first-person graph: the post stage's first step. The anchor's own epoch keeps a query no stage's
+			// window takes (a world frame before Drawcall Limit Fix draws).
 			{ StageId::Sun, Owner::Cs, { Segment::DeclaredSun, Segment::AnchorEngineQueries }, 2, "just before DCLF's first-person epoch" },
 			{ StageId::FirstPerson, Owner::Dclf, { Segment::FirstPerson }, 1, "Main::RenderFirstPersonView" },
 			{ StageId::Post, Owner::Cs,
 				{ Segment::DeclaredPost, Segment::AnchorTonemap, Segment::AnchorFrameGeneration },
 				3, "RenderEndOfFrameEffects' return" },
-			// The UI stage holds Scaleform's displays (fixed instances), a menu's scene over the live world, the Present anchor's clients (a Bink
-			// movie's tiles), the overlay and the capture (the Interface, Present, Overlay and Capture anchors have no epoch of their own). HDR
-			// output follows its commit.
+			// The UI stage holds the screen blood, Scaleform's displays (fixed instances), a menu's scene over the live world, the Present
+			// anchor's clients (a Bink movie's tiles), the overlay and the capture (the Interface, Present, Overlay and Capture anchors have no
+			// epoch of their own). HDR output follows its commit.
 			{ StageId::Ui, Owner::Cs,
 				{ Segment::AnchorInterface, Segment::AnchorPresent, Segment::DeclaredUi, Segment::AnchorHDROutput, Segment::AnchorCapture },
 				5, "just before the present (or HDR output, or the capture)" },

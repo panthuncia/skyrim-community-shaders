@@ -1,6 +1,8 @@
 // The precipitation family's render graph side: one client at the EngineDraws anchor, made once at setup, whose pass draws a run's
 // latched draws (one each: a run is a draw at its place in the grouped alphas) with CS's Particle.hlsl built for ORG, with the
-// engine's depth-stencil state and reference per draw.
+// engine's depth-stencil state and reference per draw. Native mode: the client is the sun stage's first step (the engine's blended
+// draws come after Drawcall Limit Fix's forward epoch and before the sun query); each draw of a frame is a tap of that step, appended
+// to the frame's earlier ones, and the pass records them all at execution. Guest mode: the anchor's own epoch, a run per draw.
 
 // volk must precede every Vulkan header in this translation unit.
 #include <rhi_interop_vulkan.h>
@@ -10,7 +12,9 @@
 
 #include "Globals.h"
 #include "RenderGraph/Engine/Constants/EngineConstants.h"
+#include "RenderGraph/Frame/FrameDriver.h"
 #include "RenderGraph/FrameAnchors.h"
+#include "RenderGraph/FrameStaging.h"
 #include "RenderGraph/RasterProgram.h"
 #include "RenderGraph/RenderGraphRuntime.h"
 #include "RenderGraph/RunGate.h"
@@ -37,8 +41,8 @@ namespace DCLF::Features::Precipitation::PrecipitationDraws
 	{
 		constexpr const char* kShader = "Particle.hlsl";
 		constexpr const char* kClientId = "cs.precipitation";
-		// The most draws a run holds: one (a run is one draw), with room for a few.
-		constexpr std::uint32_t kMaxDraws = 4;
+		// The most draws a stage run holds: a frame's draws, each a tap appended to the earlier ones (a run is one draw), with room for a few.
+		constexpr std::uint32_t kMaxDraws = 8;
 		constexpr std::uint32_t kDrawStride = static_cast<std::uint32_t>(sizeof(DrawLatch));
 
 		/** @brief Particle.hlsl's push block (PARTICLE_ORG_RESOURCES), in list order: Water.hlsl's layout. */
@@ -66,6 +70,12 @@ namespace DCLF::Features::Precipitation::PrecipitationDraws
 			Family::PublishedInputs inputs;
 			// Render thread writes, the host's thread reads.
 			std::shared_ptr<const Run> run;
+			// The draws each commit committed, by the epoch's run: what the pass recorded at execution reads. It may record on the
+			// submission thread after the render thread published the next run.
+			::RenderGraph::RunSlots<Run> runs;
+			// The draws committed into the sun stage's run this frame so far (a later draw of the same frame follows them), and its frame.
+			std::shared_ptr<const Run> committed;
+			std::uint64_t committedFrame = UINT64_MAX;
 			bool pending = false;
 			std::atomic<std::uint64_t> executed{ 0 };  // runs submitted with this client's pass (its executed callback)
 		};
@@ -81,7 +91,7 @@ namespace DCLF::Features::Precipitation::PrecipitationDraws
 
 		struct Frame
 		{
-			std::shared_ptr<const Run> run;
+			std::shared_ptr<const Run> run;  // null when the pass records at execution: Record reads the client's run then
 			std::shared_ptr<const Client> client;
 		};
 
@@ -89,8 +99,8 @@ namespace DCLF::Features::Precipitation::PrecipitationDraws
 		class PrecipitationPass final : public org::TypedRenderGraphPass<PrecipitationPass, Frame, Bindings>
 		{
 		public:
-			explicit PrecipitationPass(std::shared_ptr<Client> a_client) :
-				client(std::move(a_client)) {}
+			PrecipitationPass(std::shared_ptr<Client> a_client, bool a_atExecution) :
+				client(std::move(a_client)), atExecution(a_atExecution) {}
 
 			Bindings Declare(org::PassBuilder& a_builder)
 			{
@@ -109,9 +119,12 @@ namespace DCLF::Features::Precipitation::PrecipitationDraws
 				return bindings;
 			}
 
-			// The run's draws (their programs, targets, stencil references and viewports) and the headers' indices.
+			// The run's draws (their programs, targets, stencil references and viewports) and the headers' indices. Recorded at execution,
+			// the pass reads the run its commit published when it records: the run is not part of it.
 			void Revision(std::vector<std::uint64_t>& a_out) const
 			{
+				if (atExecution)
+					return;
 				const auto run = std::atomic_load(&client->run);
 				a_out.push_back(run ? run->revision : 0);
 			}
@@ -119,14 +132,31 @@ namespace DCLF::Features::Precipitation::PrecipitationDraws
 			Frame Prepare(const Bindings& a_bindings, const org::PassPrepareContext& a_preparation) const
 			{
 				Extensions::CheckDeclaredReads(a_bindings.inputs, a_preparation, kClientId);
-				return { std::atomic_load(&client->run), client };
+				return { atExecution ? nullptr : std::atomic_load(&client->run), client };
+			}
+
+			/** @brief Recorded at execution: a run whose commits opened none of the draws' gate entries records only the pass's barriers. */
+			static bool SkipsAtExecution(const Bindings&, const Frame& a_frame, const org::PassRecordContext& a_recording)
+			{
+				if (!a_frame.client)
+					return true;
+				const auto run = a_frame.run ? a_frame.run : a_frame.client->runs.Find(a_recording.Run());
+				if (!run)
+					return true;
+				for (std::uint32_t i = 0; i < run->draws.size(); ++i)
+					if (a_frame.client->gate->IsOpen(a_recording.Run(), i))
+						return false;
+				return true;
 			}
 
 			static void Record(const Bindings& a_bindings, const Frame& a_frame, org::PassRecordContext& a_recording)
 			{
-				if (!a_frame.run || !a_frame.client)
+				if (!a_frame.client)
 					return;
-				const auto& run = *a_frame.run;
+				const auto runRef = a_frame.run ? a_frame.run : a_frame.client->runs.Find(a_recording.Run());
+				if (!runRef)
+					return;
+				const auto& run = *runRef;
 				const auto& c = *a_frame.client;
 				const auto shared = SharedConstants::Index(a_recording, a_bindings.shared);
 				const auto& headers = run.headerIndices;
@@ -171,6 +201,7 @@ namespace DCLF::Features::Precipitation::PrecipitationDraws
 
 		private:
 			std::shared_ptr<Client> client;
+			bool atExecution = false;  // FrameAnchors::RecordsAtExecution at the build
 		};
 
 		/** @brief The ENVCUBE pixel descriptors CS loads for BSParticleShader are programs' (both stages take their defines). */
@@ -310,20 +341,54 @@ namespace DCLF::Features::Precipitation::PrecipitationDraws
 			.anchor = FrameAnchors::Anchor::EngineDraws,
 			.order = 3,
 			.kind = FrameAnchors::PassKind::Render,
-			.make = [client]() -> std::shared_ptr<org::RenderPass> { return std::make_shared<PrecipitationPass>(client); } });
+			.make = [client]() -> std::shared_ptr<org::RenderPass> {
+				return std::make_shared<PrecipitationPass>(client, FrameAnchors::RecordsAtExecution(FrameAnchors::Anchor::EngineDraws));
+			},
+			// The run's draws are known after its commit: recorded then, the pass reads them without a ticket prepared again.
+			.atExecution = true });
 		desc.commit = [client](const FrameAnchors::Point&) {
 			const auto run = std::atomic_load(&client->run);
 			auto* host = RenderGraphRuntime::Get().Host();
-			if (!run || !host)
+			if (!host)
 				return;
 			const org::RunRef latchRun = host->CurrentRun();
+			// A later tap of the sun stage's run this frame (each draw is a run): its draws follow the ones committed before, and the pass
+			// records them all.
+			const auto frame = ::RenderGraph::Frame::Driver::Current().frame;
+			std::uint32_t first = 0;
+			if (run && FrameAnchors::TapInstance() > 0 && client->committedFrame == frame && client->committed) {
+				const auto& earlier = *client->committed;
+				if (earlier.headerIndices != run->headerIndices || earlier.draws.size() + run->draws.size() > kMaxDraws) {
+					logger::error("[DCLF] precipitation: a draw in one stage run {}; it draws nothing",
+						earlier.headerIndices != run->headerIndices ? "reads other headers than the frame's earlier ones" : "is past the draws a run holds");
+					return;
+				}
+				auto merged = std::make_shared<Run>();
+				merged->headerIndices = run->headerIndices;
+				merged->revision = run->revision;
+				merged->draws = earlier.draws;
+				merged->draws.insert(merged->draws.end(), run->draws.begin(), run->draws.end());
+				first = static_cast<std::uint32_t>(earlier.draws.size());
+				client->committed = merged;
+			} else {
+				client->committed = run;
+			}
+			client->committedFrame = frame;
+			// For the pass recorded at execution, by this run (null: nothing drawn).
+			client->runs.Store(latchRun, client->committed);
+			if (!run)
+				return;
 			for (std::uint32_t i = 0; i < run->draws.size(); ++i) {
 				const auto& draw = run->draws[i];
-				client->latch->WriteValue(latchRun, i * kDrawStride, draw.latch);
+				client->latch->WriteValue(latchRun, (first + i) * kDrawStride, draw.latch);
 				if (draw.program)
-					client->gate->OpenDraw(i, draw.indexCount, 1);
+					client->gate->OpenDraw(first + i, draw.indexCount, 1);
 			}
 		};
+		// In the sun stage each draw of the frame commits into its run (above).
+		desc.repeats = true;
+		// Native mode: a step of the sun stage only (the anchor has no epoch there).
+		desc.segmentOnly = FrameAnchors::SegmentsOn();
 		desc.executed = [client](const FrameAnchors::Point&) {
 			if (client->executed.fetch_add(1, std::memory_order_relaxed) == 0)
 				logger::info("[DCLF] precipitation: the first precipitation run drawn by the graph");
@@ -334,12 +399,11 @@ namespace DCLF::Features::Precipitation::PrecipitationDraws
 			logger::warn("[DCLF] precipitation: the {} client could not be registered; the precipitation stays the engine's", kClientId);
 			return true;
 		}
+		// Register asked for the builds that hold the client: the sun stage's in native mode, the anchor's own graph in guest mode.
 		const auto late = client->inputs.Unregistered();
 		logger::info("[DCLF] precipitation: the {} client registered at setup (published inputs it may read: {}{})", kClientId, client->inputs.Describe(),
 			late.empty() ? std::string() : std::format("; not published yet: {}", late));
 		state.client = std::move(client);
-		// The one build request: the next build point (a menu frame's end) builds the graph with the client, before any world frame.
-		FrameAnchors::RequestJoin(kClientId, FrameAnchors::Anchor::EngineDraws);
 		return true;
 	}
 
@@ -348,12 +412,7 @@ namespace DCLF::Features::Precipitation::PrecipitationDraws
 		auto& state = GetState();
 		if (state.failed || !state.client)
 			return false;
-		if (!FrameAnchors::CanRun(kClientId, FrameAnchors::Anchor::EngineDraws)) {
-			static Util::ReasonLog log("[DCLF] precipitation: the engine draws a draw", spdlog::level::err);
-			log.Report("its anchor cannot run now (not in the built graph, or its ring is full)");
-			return false;
-		}
-		return true;
+		return Family::HeldForBatch("precipitation", kClientId, static_cast<std::uint32_t>(::RenderGraph::Frame::SegmentId::Sun));
 	}
 
 	Family::InputResult ReadPublished(std::string_view a_id, std::uint32_t& a_index)

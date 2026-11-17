@@ -55,6 +55,7 @@ The shipped configs:
 | `quick` | a shot 60 frames after world-ready, then exit; compose it, `native-vulkan+quick` |
 | `guest-quick`, `native-quick`, `native-d3d12-quick` | the old quick scenarios |
 | `boot` | exits at shaders-ready (`--set build.shader_cache=cold` for a cold compile) |
+| `rain` | Riverwood's river in a forced rain storm (`fw`), two shots while it falls; compose it, `native-vulkan+rain`, `guest+rain` |
 | `latch-census-short`, `vram-all`, `vram-menu-B`, `native-tour`, `native-d3d12-tour`, `native-validation` | ORG tours |
 | `rx6600-*`, `sky-river-org0`, `sky-river-org1` | the perf and sky scenarios |
 

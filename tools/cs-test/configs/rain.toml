@@ -1,0 +1,76 @@
+# Riverwood's river around noon in a rain storm: the precipitation (rain particles, its occlusion map) over the water. Two shots along
+# the river, taken apart so the rain has fallen for a while, then exit. Compose it: guest+rain, native-vulkan+rain.
+extends = ["base"]
+
+[run]
+timeout_s = 420
+
+[[steps]]
+at = "world-ready"
+frames = 200
+do = "console"
+arg = "set gamehour to 13"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "console"
+arg = "coc Riverwood"
+
+[[steps]]
+at = "previous"
+frames = 900
+do = "console"
+arg = "player.setpos x 19300"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "console"
+arg = "player.setpos y -45300"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "console"
+arg = "player.setpos z -80"
+
+[[steps]]
+at = "previous"
+frames = 8
+do = "console"
+arg = "player.setangle x 0"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "console"
+arg = "player.setangle z 90"
+
+# The rain storm forced in the cell (fw, no transition), then left to fall a while. Game time runs: precipitation needs it.
+[[steps]]
+at = "previous"
+frames = 10
+do = "console"
+arg = "fw 000C8220"
+
+[[steps]]
+at = "previous"
+frames = 600
+do = "shot"
+arg = "rain"
+
+[[steps]]
+at = "previous"
+frames = 120
+do = "shot"
+arg = "rain-later"
+
+[[steps]]
+at = "previous"
+frames = 10
+do = "exit"
+
+[expect]
+reach = "world-ready"
+shots = ["rain", "rain-later"]

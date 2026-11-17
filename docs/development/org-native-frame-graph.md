@@ -4754,7 +4754,7 @@ displays left out, 0 shadow clear re-registrations, 0 holds ended with "no progr
 the harness marks them failed because it expects a world): native shows the mist and the emblem, darker than guest's.
 ORG is unchanged in this pass.
 
-## State of the native frame (2026-11-16, after the cleanup pass and the render-thread pass)
+## State of the native frame (2026-11-18, after Cleanup A5)
 
 Native mode (`CS_ORG_NATIVE=1`), Vulkan or D3D12. Every CS stage is one ORG graph, built off the render thread, staged and recorded before
 it switches in at a frame's `Renderer::Begin`, one kept recording per frame slot, one ticket a frame. Drawcall Limit Fix's graphs (*) are
@@ -4768,9 +4768,13 @@ stages of their own.
 | loading screen, main menu, menu over a frozen world, Bink movie | UI |
 
 One UI stage for every kind since Cleanup A4: it holds the menu UI stage's old layout (the frozen composite, three clear places,
-Scaleform's instances 8 to 15 and 0 to 7, a menu scene's steps, the present's clients, the overlay and the capture). A steady world
+Scaleform's instances 8 to 15 and 0 to 7, a menu scene's steps, the present's clients, the overlay and the capture), and since Cleanup
+A5 the screen blood as its first step. The sun stage holds the precipitation's draws before the sun query (Cleanup A5). A steady world
 frame is about 11.2 to 12.0 tickets: the stages' and DCLF's (the sun stage takes 0.2 to 1.0; a frame without the first-person epoch puts
-both sun queries in it).
+both sun queries in it; a frame with rain or snow always has it).
+
+A pass that skips its run costs nothing for the resources no running pass touches: no entry or body barrier records for them and the
+ledger keeps their state (Cleanup A5). A stage's commit copies only the latch bytes its taps staged.
 
 ### Always present, chosen per frame by gates
 
@@ -4781,8 +4785,9 @@ folded), because the engine decides them late or a lagging build would lose them
   forms, both forms of the last luminance level, the engine-counter parity variants (luminance, bright pass, the VL composite, the
   normals target), TAA's and the raw AO's history pairs (by slot parity, in the description), and in a routed build the pass-through copy;
 - deferred+water: the snow pass and its copy, the world steps' variants by the engine's counters;
-- UI: Scaleform's 16 instances, the capture's copy, the movie's tiles, the three clear places, a menu scene's draws, composites and
-  depth copy;
+- UI: the screen blood, Scaleform's 16 instances, the capture's copy, the movie's tiles, the three clear places, a menu scene's draws,
+  composites and depth copy;
+- sun: the precipitation's draws (a frame's draws appended, each a tap);
 - sun and post: the sun's two query instances.
 
 Absent by build key when off (a rebuild, staged, on change): the post slot effects, the HDR effect against its copy, the Effects11 tonemap
@@ -4793,8 +4798,8 @@ Terrain Blending, Volumetric Shadows, light culling, the bloom radii.
 
 | Target | Writers | Readers |
 |---|---|---|
-| kMAIN | DCLF's opaque and forward graphs, deferred+water, the Upscale anchor's copy, Post Processing and Effects11 at the Tonemap anchor, the menu scenes | the post chain (in place before the tonemap), the menu composites, Scaleform (a menu drawn into kMAIN) |
-| kFRAMEBUFFER (the final target) | the post chain (tonemap or routed TAA, then in place), the menu composites, Scaleform, the overlay | the UI stages, the capture, HDR output, frame generation's hudless copy, the present |
+| kMAIN | DCLF's opaque and forward graphs, deferred+water, the precipitation (sun), the Upscale anchor's copy, Post Processing and Effects11 at the Tonemap anchor, the menu scenes | the post chain (in place before the tonemap), the menu composites, Scaleform (a menu drawn into kMAIN) |
+| kFRAMEBUFFER (the final target) | the post chain (tonemap or routed TAA, then in place), the screen blood, the menu composites, Scaleform, the overlay | the UI stages, the capture, HDR output, frame generation's hudless copy, the present |
 | main depth, kPOST_ZPREPASS_COPY | DCLF's Z-prepass, the pre-main and UI depth copies | deferred+water, post, the menu scenes' soft depth |
 | the normals targets, kMOTION_VECTOR, kTEMPORAL_AA_MASK, kSHADOW_MASK | DCLF's graphs, pre-main's clears, the menu scenes | deferred+water, post (SSR, SAO, TAA), the menu scenes' Lighting draws |
 | kMAIN_ONLY_ALPHA, kMAIN_COPY, kREFRACTION_NORMALS, kUNDERWATER_MASK, the water displacement pair and flow map | forward, deferred+water, the start stage | the next frame's start and deferred+water (`kPreviousFrame`) |
@@ -4813,16 +4818,18 @@ chain's hooks (which only check and stage in native). This is the input for the 
 
 ### Old native paths still reachable
 
-- Per-anchor epochs: EngineDraws (blood, precipitation), ImageSpace (the face tint at a load, its own client since Cleanup A4),
+- Per-anchor epochs: EngineDraws (only a water batch no stage's window takes: under water the blended draw, and DCLF's forward epoch
+  with it, comes before the water; inferred from the hook sites, not seen in a test), ImageSpace (the face tint at a load, its own client
+  since Cleanup A4),
   EngineShadowClear and EngineFrameClear (world frames before DCLF draws and during its holds, frame 0), EngineCubeClear (outside world
   frames), EngineCopy outside the stages' windows, EngineDepthCopy outside the stages, EngineQueries (world frames before DCLF draws),
   DecalQueries (its client is never made in these sessions), HDROutput (HDR on), Tonemap and FrameGeneration (a menu scene's tonemap,
   frame generation). A menu's scene over the live world is the UI stage's since Cleanup A4. The MovieTiles anchor is removed (Cleanup A2). A stage's one-shot passes now
   rebuild only the anchors they sit at (the ImageSpace epoch for the histogram reset), so the re-entry hold after each load is gone
   ("Render-thread cost").
-- `CanRun`/`RequestJoin`: the sky and decal clients' setup joins, the skeleton's group clears and copies, the shadow masks family (its
-  menu view is a step of the UI stage, reached through the shared anchor), the face tint. The menu scenes and the menu composites are
-  segment-only since Cleanup A4. At anchors a stage holds wholly, the upscaler's evaluate, Deferred clears, Skylighting, Cloud Shadows and
+- `CanRun`/`RequestJoin`: the sky and decal clients' setup joins, the water family, the skeleton's group clears and copies, the face
+  tint. The menu scenes and the menu composites are segment-only since Cleanup A4; the blood, precipitation and shadow mask families since
+  Cleanup A5 (`Family::HeldForBatch`: the stage step holds the batch, or it is a `NotDeclared` tap error). At anchors a stage holds wholly, the upscaler's evaluate, Deferred clears, Skylighting, Cloud Shadows and
   Volumetric Lighting ask `FrameAnchors::Scheduled` instead: the frame's schedule of that stage (Cleanup A2).
 - Clears of a lent target slot (Skylighting's map) stay on D3D11: the skeleton does not take them. A skeleton clear or copy run that does
   not execute is now a tap error (`NotExecuted`, the mismatch policy); nothing replays it on D3D11 (Cleanup A1).
@@ -4836,7 +4843,7 @@ chain's hooks (which only check and stage in native). This is the input for the 
 - HDR output (no background way to enable it), frame generation (needs the foreground), Post Processing and Effects11 at the Tonemap
   anchor (Post Processing is off in this game's settings; Effects11's preset does not own the tonemap), so the routed TAA's interplay with
   Effects11's tonemap is untested too.
-- A menu's item model over the live world, blood, precipitation (no test reaches them).
+- A menu's item model over the live world, the screen blood (needs a hit). Precipitation is covered by the `rain` config since Cleanup A5.
 - The menu scene's shadow casters (not built), the menu scenes' Light Limit Fix falloff (not matched).
 - The effects that are `NoPass` (not built): the rain ripple, rain heightmap, blend, smooth and normals water steps, ISSimpleColor's stencil
   fill and the UI form of TAA in a menu scene, other slot effects inside a menu scene's end-of-frame call, the local map's edge pass, the
@@ -6628,3 +6635,126 @@ The A4 commit alone (DLL `18aff6bcc955`) passed native-quick and the main menu. 
   the LocalMapMenu inside `UI::Render`, after the post stage (inferred from menus.md, not traced): if it ran before the post stage ended,
   its batches would be `NotDeclared` tap errors.
 - A GFx filter or render target (SkyUI's menus).
+
+## Cleanup A5 (2026-11-18)
+
+Two parts, committed apart: ORG makes skipped passes cost nothing (two ORG commits and the CS commit that bumps them), and plan piece
+A5 moves the blood and the precipitation into stages (one CS commit). RX 6600, native Vulkan, Perf-Fast, background runs with
+`DXVK_DEBUG=hang`.
+
+### Part 1: a resource no running pass touches stays put (ORG)
+
+After A4, a world frame's UI stage recorded the menu-only passes' barriers and its epoch body took about 290 us of the render thread.
+A Tracy capture of perf-taa split the epoch body: 247 us of the 270 were `CS.Stage.CopyLatch`, the copy of the staging run's latch
+regions into the slot's copy (`LatchBlock::CopyStableRun`). It copied every block's whole region, the menu scenes' large draw blocks
+among them, though nothing was staged in them. The barriers and the walk of the skipped passes are on the submission thread, not in
+the epoch body. Two ORG changes:
+
+- **Latch copies move only staged bytes** (`perf(latch)`). Each pinned region keeps how far from its start it may be non-zero:
+  `Write` extends it; `At` and `Bytes` on a host-only run (a staging run) mark the whole region, since the caller may write through the
+  pointer. `ZeroStableRun` clears a host-only region only that far, and `CopyStableRun` copies the written part and clears what an
+  earlier copy or write left beyond it. A block written at neither costs nothing. The copy's target is written only by `Write` and the
+  copy, as the contract already said. The host test ("segment" mode) stages, clears and copies again and checks the target reads
+  exactly what was staged.
+- **Untouched resources** (`perf(execution)`). The fold of a skipped pass's barriers kept the plan's final state, so a resource only
+  skipped passes use still got its entry barrier and a net transition, and the ledger moved. Now a resource no running pass of an
+  execution touches stays in its entry state. `compiler::FindUntouched` marks the resources whose every user skips (skipped ahead, or
+  skipped at execution by a late batch); a list recorded ahead counts its passes as running unless every use of the resource was
+  skipped ahead, and those resources are left out of the lists when they are built. An open ticket the graph submits itself (every
+  native stage) asks its late batches' skip answers once, before the handoff, and passes them to the recording
+  (`ExecutionBatchTimeline::skips`, `RecordingContext::ForSkipQuestions`). The handoff leaves out the untouched resources' entry
+  barriers, acquires and releases; the lists their body barriers (`FoldBarriersOfSkipped`'s untouched set, or `DropUntouchedBarriers`
+  where the fold cannot apply); the commit their ledger entries (`FrameAdmission::unmoved`, `CommitBatch`'s unmoved), so the next
+  admission plans from the state the ledger really holds. A recording keeps its last answers and result, so a repeated frame finds
+  them without a walk. External and closed executions and external home states are unchanged. The handoff cache keys on the set.
+  Tests: the fold with an untouched set and `DropUntouchedBarriers` (RecordingTests), `FindUntouched` (late, ahead, exempt, device
+  handles) and a ledger commit whose unmoved resource enters the next plan from its old state (AsyncCompileTests). Recording, async
+  compile, persistent and the Vulkan host modes async, revision, segment, reuse and reuse inline pass.
+
+The census line also prints the entry barriers left out (`ORG::diagnostics::UntouchedEntryBarriers`).
+
+Measured (one run each, the A4 runs for before):
+
+| | A1-A3 | A4 | A5 |
+|---|---|---|---|
+| native-interior: UI stage epoch body | 80 us | 287 to 292 us | 77 to 84 us (part 1 build), 93 to 105 us (final) |
+| native-interior: body barriers recorded a frame, all stages | 351 to 354 | 425 to 430 | 382.5 to 385.6 |
+| native-interior: entry barriers left out a frame | | | 41.6 to 44.1 |
+| perf-taa: UI stage epoch body | | 259 to 261 us | 61 to 71 us |
+| perf-taa: body barriers recorded a frame (less folded) | | 842.2 | 801.5 |
+| perf-taa: entry barriers recorded a frame | | 557.5 | 521.7 (34.0 left out) |
+
+Over all stages, perf-taa's `CS.ORG.ExecuteEpoch` fell from 510.9 to 355.2 ms in a 6 s capture (about 0.5 ms a frame of the render
+thread: the latch copies of every stage, and `CS.Stage.OpenInputs` from 23 to 7 us a call).
+
+What is left of the merge's barriers: per world frame the UI stage records about 27 barriers in five late lists. Three of the lists
+are menu-only passes that skip whole (the menu scene's depth, the kMAIN copy, the scene's colour); each still records the composed
+transitions of resources that running passes elsewhere touch: four buffers every late list names, and the main depth (to shader read
+in one list, back in the next). Folding across lists (a list that skips whole handing its transitions to the next list on its queue)
+would remove them; not done: it must not defer a transition another queue's batch waits for.
+
+The walk of the skipped passes: about 360 skipped pass records a world frame in the UI ticket, 32 us of its 225 us on the submission
+thread (Tracy on), and 25 us to ask their skip answers. It is not part of the render thread's epoch body, so the range skip was not
+built.
+
+### Part 2: blood and precipitation as stage steps (plan piece A5)
+
+- **Precipitation: the sun stage's first step**, not deferred+water as the plan said. The engine draws its rain and snow in the main
+  pass's blended draws (the grouped alphas), and Drawcall Limit Fix submits its forward epoch at that draw's start, before the engine's
+  own blended draws (`Features/Forward/ForwardHooks.cpp`); deferred+water commits just before that. So every precipitation draw comes
+  after deferred+water's commit and before the sun query. The frame sequence census in rain (`rain`, `org.frame_sequence=200`) shows:
+  water surface, water blend, submit deferred+water, submit DCLF forward, two `run EngineDraws (held) clients [cs.precipitation]`,
+  submit sun, submit DCLF first person. The client is segment-only in native, `repeats`: each draw of a frame is a tap whose draws are
+  appended to the frame's earlier ones (as the water's), at most 8 a stage run; the pass records at execution from the run's slot
+  (`RunSlots`).
+- **Blood: the UI stage's first step.** `Main::Draw` calls `Main::RenderScreenSplatter` after `RenderWorldPostProcess` returned
+  (docs/development/p5/blood-splatter.md), so after the post stage's end (RenderEndOfFrameEffects' return, inside it) and before
+  `UI::Render`'s displays. The UI stage opens last, so its window is open by then. The pass draws into the back buffer before the
+  displays, recorded at execution from the run's slot. The UI stage has 17 steps now (`kMaxSteps` and `SharedConstants::kUploadPoints`
+  are 17).
+- **Shadow mask: segment-only too.** Its world view is a pre-main step, its menu view a UI step; every run in the censuses was held.
+- Deleted: the three families' `RequestJoin` (Register asks for the builds) and `CanRun`. `Family::HeldForBatch` is their check, and the
+  menu scenes'. In native a batch the stage step does not hold is a `NotDeclared` tap error; one its schedule does not hold yet lags.
+  Guest keeps the anchor's own epoch (`FrameAnchors::Scheduled`).
+- **The EngineDraws epoch stays in native**, for the water alone: under water the engine's blended draw, and DCLF's forward epoch with
+  it, comes before the water (the blended draw's first call site, +0x51), so the water's batches come after deferred+water committed and
+  take the anchor's own epoch. No background test reaches it. Its recipe entry stays.
+- **Found and fixed: rain was not drawn in native.** The precipitation family refused every rain draw in the river scene ("more colour
+  targets than the pixel stage writes": the grouped alphas leave a third target bound), so the engine drew it, and in native the engine's
+  draws reach nothing. Particle.hlsl writes two outputs, so the engine's draw leaves a third target as it was: the graph's draw now names
+  the two it writes, logged once. Before the fix the native rain shot had no precipitation runs at all ("the first precipitation run
+  drawn by the graph" never logged).
+- Precipitation's occlusion map does not block this: the precipitation reads it in the sun stage, after DCLF's shadow views and
+  Skylighting wrote it, and the recipe check finds nothing.
+
+Rain in a background run: `tools/cs-test/configs/rain.toml` (new): Riverwood's river, `coc`, `fw 000C8220` (SkyrimStormRain), 600
+frames, two shots. The cs-test `weather` step with timescale 0 gave the rain weather's light but no precipitation draws. Shots, region
+means (sky and trees, house, water, right side):
+
+| | Native | Guest (D3D11 rain) | Guest, `org.ports=all` (graph rain) |
+|---|---|---|---|
+| rain-later | 90.0, 46.2, 34.9, 61.2 | 90.3, 46.5, 35.7, 61.0 | 90.8, 46.7, 35.3, 61.3 |
+
+Guest with the graph's rain against guest's D3D11 rain: mean difference 1.67 (the water 4.1: the drops move). Native against guest: 7.9,
+the same with and without native's precipitation (native's frame is sharper; the difference is everywhere, not in the rain); native with
+its rain drawn against native before the fix: 1.45, the water 4.2.
+
+### Checks
+
+One background run each on DLL `cfa3024ea86a` (both parts), all passed with 0 tap errors, no `NoPass`, 0 recipe findings and no failed
+build: native-quick (the Bink start movie: 166 frames drawn by the render graph, 0 by the engine, no `[E] Bink`), native-river, native-interior, native-validation (20
+`VUID-vkCmdDraw-None-09600`, the same message classes and counts as A4's), the loading-thread run, the frozen-world Journal Menu run
+with TAA (the menu shot within 0.8 of A4's), native-upscalers (DLSS, FSR, XeSS within 1.0 of A4's, TAA 3.4 with the wind), guest-quick,
+guest-quick with `org.ports=all`, native+rain, guest+rain, guest+rain with `org.ports=all`. Part 1 alone passed native-validation, guest-quick
+and native+rain (DLL `a8f0c8185183`) and native-interior (its build before the census line, `070969fa48a6`). The only `[C]` line is the known `PublishedResources` one. guest with
+`org.ports=all` saves its first shot black, as in every earlier run (A1-A4).
+
+perf-taa, alternating, uncapped, VRAM Budget off: native 19.07 / 19.10 ms against guest 19.06 / 19.06 ms (A4: 19.08 against 18.94 to
+19.07); native 2,936 / 2,996 MiB, guest 3,040 / 3,024 MiB. With the census on: 11.2 tickets a frame, and the steady window between the
+marks has 0 builds, recordings and switches.
+
+### Waiting on a foreground session
+
+- The screen blood (needs a hit): the UI stage's first step, its pass at execution into the back buffer before the displays.
+- Under water: the water's batches on the EngineDraws epoch (inferred from the hook sites), and a rain draw there (inferred: it would
+  tap the sun stage before the water's batches).

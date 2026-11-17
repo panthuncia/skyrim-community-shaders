@@ -469,28 +469,8 @@ namespace DCLF::Features::MenuViews::Scenes::SceneDraws
 				logger::warn("[DCLF] menu scenes: a target changed since the {} client registered; that batch stays the engine's", client->id);
 			return false;
 		}
-		// Native mode: the UI stage holds the batch in every frame kind. One while no open stage holds the client is a mismatch; one the
-		// stage's schedule does not have yet (its first build) lags: nothing is drawn.
-		if (FrameAnchors::SegmentsOn()) {
-			const auto hold = FrameAnchors::HeldNow(client->id, FrameAnchors::Anchor::EngineDraws);
-			if (!hold.held) {
-				::RenderGraph::Frame::Driver::NoteTapError(::RenderGraph::Frame::Driver::TapError::NotDeclared, ::RenderGraph::Frame::SegmentId::Ui,
-					std::format("the menu scenes' {} batch came while no open stage holds the client; it draws nothing", client->id));
-				return false;
-			}
-			if (!hold.scheduled) {
-				static Util::ReasonLog log("[DCLF] menu scenes: a batch lags (the UI stage's schedule does not hold its client yet); nothing is drawn");
-				log.Report(client->id);
-				return false;
-			}
-			return true;
-		}
-		if (!FrameAnchors::Scheduled(client->id, FrameAnchors::Anchor::EngineDraws)) {
-			static Util::ReasonLog log("[DCLF] menu scenes: the engine draws a batch", spdlog::level::err);
-			log.Report(std::format("{}: the anchor's built graph does not hold it yet", client->id));
-			return false;
-		}
-		return true;
+		// Native mode: the UI stage holds the batch in every frame kind.
+		return Family::HeldForBatch("menu scenes", client->id, static_cast<std::uint32_t>(::RenderGraph::Frame::SegmentId::Ui));
 	}
 
 	Family::InputResult ReadPublished(View a_view, std::string_view a_id, std::uint32_t& a_index)

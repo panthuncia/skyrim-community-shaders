@@ -164,8 +164,12 @@ namespace DCLF::Features::Precipitation
 			}
 			if (draw.colourCount == 0)
 				return "no colour target";
-			if (draw.colourCount == kMaxColours && static_cast<std::int32_t>(rss.renderTargets[kMaxColours]) >= 0)
-				return "more colour targets than the pixel stage writes";
+			// A third target the grouped alphas left bound (the river's water seen in rain): Particle.hlsl writes two outputs, so the engine's
+			// draw leaves any further target as it was. The graph's draw names the two it writes.
+			if (draw.colourCount == kMaxColours && static_cast<std::int32_t>(rss.renderTargets[kMaxColours]) >= 0) {
+				static Util::ReasonLog extra("[DCLF] precipitation: a draw's targets past the pixel stage's two outputs are left out (the engine's draw leaves them as they were)");
+				extra.Report(std::format("colour target {}", static_cast<std::int32_t>(rss.renderTargets[kMaxColours])));
+			}
 			const auto& depths = globals::game::renderer->GetDepthStencilData().depthStencils;
 			draw.key.depthFormat = FormatOf(depths[main].views[0]);
 			if (!draw.key.depthFormat)

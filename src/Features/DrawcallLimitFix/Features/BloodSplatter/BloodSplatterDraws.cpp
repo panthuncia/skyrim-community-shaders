@@ -1,5 +1,7 @@
 // The blood splatter family's render graph side: one client at the EngineDraws anchor, made once at setup (the first main-thread tick
-// the graph runs), whose pass draws a batch's latched draws into the back buffer with CS's BloodSplatter.hlsl built for ORG.
+// the graph runs), whose pass draws a batch's latched draws into the back buffer with CS's BloodSplatter.hlsl built for ORG. Native
+// mode: the client is the UI stage's first step (Main::RenderScreenSplatter comes after the post stage's end and before the displays),
+// and its pass records the batch at execution. Guest mode: the anchor's own epoch.
 
 // volk must precede every Vulkan header in this translation unit.
 #include <rhi_interop_vulkan.h>
@@ -8,7 +10,9 @@
 
 #include "Globals.h"
 #include "RenderGraph/Engine/Constants/EngineConstants.h"
+#include "RenderGraph/Frame/FrameDriver.h"
 #include "RenderGraph/FrameAnchors.h"
+#include "RenderGraph/FrameStaging.h"
 #include "RenderGraph/RasterProgram.h"
 #include "RenderGraph/RenderGraphRuntime.h"
 #include "RenderGraph/RunGate.h"
@@ -52,6 +56,9 @@ namespace DCLF::Features::BloodSplatter::BloodSplatterDraws
 			FrameAnchors::Texture target;
 			mutable std::mutex targetMutex;  // the render thread replaces target, a build reads it
 			std::shared_ptr<const Run> run;
+			// The run each commit drew, by the epoch's run: what the pass recorded at execution reads. It may record on the submission
+			// thread after the render thread published the next run.
+			::RenderGraph::RunSlots<Run> runs;
 			bool pending = false;
 
 			FrameAnchors::Texture Target() const
@@ -69,7 +76,7 @@ namespace DCLF::Features::BloodSplatter::BloodSplatterDraws
 
 		struct Frame
 		{
-			std::shared_ptr<const Run> run;
+			std::shared_ptr<const Run> run;  // null when the pass records at execution: Record reads the client's run then
 			std::shared_ptr<const Client> client;
 		};
 
@@ -77,27 +84,50 @@ namespace DCLF::Features::BloodSplatter::BloodSplatterDraws
 		class BloodPass final : public org::TypedRenderGraphPass<BloodPass, Frame, Bindings>
 		{
 		public:
-			explicit BloodPass(std::shared_ptr<Client> a_client) :
-				client(std::move(a_client)) {}
+			BloodPass(std::shared_ptr<Client> a_client, bool a_atExecution) :
+				client(std::move(a_client)), atExecution(a_atExecution) {}
 
 			Bindings Declare(org::PassBuilder& a_builder) { return { a_builder.RenderTarget(client->Target()).View() }; }
 
+			// Recorded at execution, the pass reads the run its commit published when it records: the run is not part of it.
 			void Revision(std::vector<std::uint64_t>& a_out) const
 			{
+				if (atExecution)
+					return;
 				const auto run = std::atomic_load(&client->run);
 				a_out.push_back(run ? run->revision : 0);
 			}
 
-			Frame Prepare(const Bindings&, const org::PassPrepareContext&) const { return { std::atomic_load(&client->run), client }; }
+			Frame Prepare(const Bindings&, const org::PassPrepareContext&) const
+			{
+				return { atExecution ? nullptr : std::atomic_load(&client->run), client };
+			}
+
+			/** @brief Recorded at execution: a run whose commit opened none of the draws' gate entries records only the pass's barriers. */
+			static bool SkipsAtExecution(const Bindings&, const Frame& a_frame, const org::PassRecordContext& a_recording)
+			{
+				if (!a_frame.client)
+					return true;
+				const auto run = a_frame.run ? a_frame.run : a_frame.client->runs.Find(a_recording.Run());
+				if (!run)
+					return true;
+				for (std::uint32_t i = 0; i < run->draws.size(); ++i)
+					if (a_frame.client->gate->IsOpen(a_recording.Run(), i))
+						return false;
+				return true;
+			}
 
 			static void Record(const Bindings& a_bindings, const Frame& a_frame, org::PassRecordContext& a_recording)
 			{
-				if (!a_frame.run || !a_frame.client)
+				if (!a_frame.client)
+					return;
+				const auto run = a_frame.run ? a_frame.run : a_frame.client->runs.Find(a_recording.Run());
+				if (!run)
 					return;
 				const auto& c = *a_frame.client;
 				const org::RunRef latchRun = a_recording.Run();
-				for (std::uint32_t i = 0; i < a_frame.run->draws.size(); ++i) {
-					const auto& draw = a_frame.run->draws[i];
+				for (std::uint32_t i = 0; i < run->draws.size(); ++i) {
+					const auto& draw = run->draws[i];
 					if (!draw.program)
 						continue;
 					const auto& program = *static_cast<const RasterProgram*>(draw.program.get());
@@ -115,6 +145,7 @@ namespace DCLF::Features::BloodSplatter::BloodSplatterDraws
 
 		private:
 			std::shared_ptr<Client> client;
+			bool atExecution = false;  // FrameAnchors::RecordsAtExecution at the build
 		};
 
 		/** @brief Every pixel descriptor of BSBloodSplatterShader CS loads is a program's (the splatter and the flare). */
@@ -215,13 +246,21 @@ namespace DCLF::Features::BloodSplatter::BloodSplatterDraws
 			.anchor = FrameAnchors::Anchor::EngineDraws,
 			.order = 2,
 			.kind = FrameAnchors::PassKind::Render,
-			.make = [client]() -> std::shared_ptr<org::RenderPass> { return std::make_shared<BloodPass>(client); } });
+			.make = [client]() -> std::shared_ptr<org::RenderPass> {
+				return std::make_shared<BloodPass>(client, FrameAnchors::RecordsAtExecution(FrameAnchors::Anchor::EngineDraws));
+			},
+			// The run's draws are known after its commit (a frame input of the UI stage): recorded then.
+			.atExecution = true });
 		desc.commit = [client](const FrameAnchors::Point&) {
 			const auto run = std::atomic_load(&client->run);
 			auto* host = RenderGraphRuntime::Get().Host();
-			if (!run || !host)
+			if (!host)
 				return;
 			const org::RunRef latchRun = host->CurrentRun();
+			// For the pass recorded at execution, by this run (null: nothing drawn).
+			client->runs.Store(latchRun, run);
+			if (!run)
+				return;
 			for (std::uint32_t i = 0; i < run->draws.size(); ++i) {
 				const auto& draw = run->draws[i];
 				client->latch->WriteValue(latchRun, i * kDrawStride, draw.constants);
@@ -234,14 +273,15 @@ namespace DCLF::Features::BloodSplatter::BloodSplatterDraws
 				logger::info("[DCLF] blood splatter: the first screen blood run drawn by the graph");
 		};
 		desc.active = [client] { return client->pending; };
+		// Native mode: a step of the UI stage only (the anchor has no epoch there).
+		desc.segmentOnly = FrameAnchors::SegmentsOn();
 		desc.onFailed = [] { Fail("the render graph failed with the screen blood's pass in it"); };
 		if (!FrameAnchors::Register(std::move(desc))) {
 			logger::warn("[DCLF] blood splatter: the {} client could not be registered; the screen blood stays the engine's", kClientId);
 			return true;
 		}
 		state.client = std::move(client);
-		// The one build request: the next build point (a menu frame's end) builds the graph with the client, before the first hit.
-		FrameAnchors::RequestJoin(kClientId, FrameAnchors::Anchor::EngineDraws);
+		// Register asked for the builds that hold the client: the UI stage's in native mode, the anchor's own graph in guest mode.
 		logger::info("[DCLF] blood splatter: the {} client registered at setup", kClientId);
 		return true;
 	}
@@ -263,12 +303,7 @@ namespace DCLF::Features::BloodSplatter::BloodSplatterDraws
 			FrameAnchors::Refresh(kClientId);
 			logger::info("[DCLF] blood splatter: the back buffer is another graph resource (a format change); the client is built again with it");
 		}
-		if (!FrameAnchors::CanRun(kClientId, FrameAnchors::Anchor::EngineDraws)) {
-			static Util::ReasonLog log("[DCLF] blood splatter: the engine draws a batch", spdlog::level::err);
-			log.Report("its anchor cannot run now (not in the built graph, or its ring is full)");
-			return false;
-		}
-		return true;
+		return Family::HeldForBatch("blood splatter", kClientId, static_cast<std::uint32_t>(::RenderGraph::Frame::SegmentId::Ui));
 	}
 
 	std::shared_ptr<const void> Program(const Family::ProgramKey& a_key, const RE::BSShader& a_shader)

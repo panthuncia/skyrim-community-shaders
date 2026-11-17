@@ -11,6 +11,7 @@
 #include "RenderGraph/Engine/Constants/EngineConstants.h"
 #include "ShaderCache.h"
 #include "Utils/Logging.h"
+#include "RenderGraph/Frame/FrameDescription.h"
 #include "RenderGraph/FrameAnchors.h"
 #include "RenderGraph/FrameStaging.h"
 #include "RenderGraph/RasterProgram.h"
@@ -296,16 +297,18 @@ namespace DCLF::Features::ShadowMask::ShadowMaskDraws
 					logger::info("[DCLF] shadow mask: the first {} run drawn by the graph", client->id);
 			};
 			desc.active = [client] { return client->pending; };
+			// Native mode: a step of its stage only (pre-main for the world's, the UI stage for a menu scene's): the anchor's own graph
+			// leaves it out, and a batch outside its stage's window is a tap error (CanTake).
+			desc.segmentOnly = FrameAnchors::SegmentsOn();
 			desc.onFailed = [] { Fail("the render graph failed with the shadow masks' passes in it"); };
 			if (!FrameAnchors::Register(std::move(desc))) {
 				logger::warn("[DCLF] shadow mask: the {} client could not be registered; those shadow masks stay the engine's", client->id);
 				return nullptr;
 			}
+			// Register asked for the builds that hold the client: its stage's in native mode, the anchor's own graph in guest mode.
 			const auto late = client->inputs.Unregistered();
 			logger::info("[DCLF] shadow mask: the {} client registered at setup (published inputs it may read: {}{})", client->id, client->inputs.Describe(),
 				late.empty() ? std::string() : std::format("; not published yet: {}", late));
-			// The one build request: the next build point (a menu frame's end) builds the graph with the client, before any world frame.
-			FrameAnchors::RequestJoin(client->id, FrameAnchors::Anchor::EngineDraws);
 			return client;
 		}
 
@@ -381,12 +384,8 @@ namespace DCLF::Features::ShadowMask::ShadowMaskDraws
 			FrameAnchors::Refresh(client->id);
 			logger::info("[DCLF] shadow mask: kSHADOW_MASK is another graph resource (a format change); the {} client is built again with it", client->id);
 		}
-		if (!FrameAnchors::CanRun(client->id, FrameAnchors::Anchor::EngineDraws)) {
-			static Util::ReasonLog log("[DCLF] shadow mask: the engine draws a batch", spdlog::level::err);
-			log.Report(std::format("{}: its anchor cannot run now (not in the built graph, or its ring is full)", client->id));
-			return false;
-		}
-		return true;
+		const auto segment = a_view == View::World ? ::RenderGraph::Frame::SegmentId::PreMain : ::RenderGraph::Frame::SegmentId::Ui;
+		return Family::HeldForBatch("shadow mask", client->id, static_cast<std::uint32_t>(segment));
 	}
 
 	Family::InputResult ReadPublished(View a_view, std::string_view a_id, std::uint32_t& a_index)

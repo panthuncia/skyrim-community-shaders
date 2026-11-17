@@ -195,7 +195,7 @@ namespace FrameAnchors
 		 * "The recipe").
 		 */
 		constexpr std::uint32_t kDeclared = RenderGraph::Frame::kSegments;
-		constexpr std::uint32_t kMaxSteps = 16;
+		constexpr std::uint32_t kMaxSteps = 17;
 		// Each step that reads CS's shared constants uploads them at its own point.
 		static_assert(kMaxSteps <= SharedConstants::kUploadPoints, "a stage's steps need an upload point each");
 		struct Step
@@ -279,14 +279,19 @@ namespace FrameAnchors
 					{ Anchor::ImageSpace, { "cs.engine.skeleton.frame@image-space", "cs.engine.imagespace.world.water" } },
 					{ Anchor::Count, { nullptr, nullptr }, Segment::Count, false, true } } },
 				9, { "CS stage: deferred+water", "CS stage: deferred+water inputs", "FrameSegments::Deferred / ", "cs.segment.deferred" } },
-			// The sun stage: Main::RenderWorld's sun occlusion query (Sun::SubmitOcclusionQuery, SE 0x1403bbf20), after DCLF's forward epoch. It
-			// must run on the GPU before the first-person geometry, which would occlude the sun: a stage of its own between DCLF's forward and
-			// first-person graphs, committed just before the first-person epoch is submitted (BeforeGpuWork) or at a later stage's first tap.
-			// The sun's client has two instances (the world's and first person's query); a stage run's k-th tap is instance k.
+			// The sun stage: the rest of Main::RenderWorld after DCLF's forward epoch. First the precipitation: the engine draws its rain and
+			// snow in the main pass's blended draws (FinishAccumulatingPostResolveDepth's blended draw, the grouped alphas), and DCLF's forward
+			// epoch is submitted at that draw's start, before the engine's own blended draws (Features/Forward's ForwardHooks.cpp). So each
+			// precipitation draw comes after the deferred+water stage's commit, and before the sun query. Then the sun occlusion query
+			// (Sun::SubmitOcclusionQuery, SE 0x1403bbf20), which must run on the GPU before the first-person geometry, which would occlude the
+			// sun: a stage of its own between DCLF's forward and first-person graphs, committed just before the first-person epoch is submitted
+			// (BeforeGpuWork) or at a later stage's first tap. The sun's client has two instances (the world's and first person's query); a
+			// stage run's k-th tap is instance k. The precipitation's draws are frame inputs, recorded in the stage's late batch.
 			{ Segment::DeclaredSun,
-				{ { { .anchor = Anchor::EngineQueries, .clients = { "cs.sky.sun", nullptr, nullptr, nullptr }, .instanceCount = 2 },
+				{ { { Anchor::EngineDraws, { "cs.precipitation", nullptr } },
+					{ .anchor = Anchor::EngineQueries, .clients = { "cs.sky.sun", nullptr, nullptr, nullptr }, .instanceCount = 2 },
 					{ Anchor::Count, {}, Segment::Count, false, true } } },
-				2, { "CS stage: sun", "CS stage: sun inputs", "FrameSegments::Sun / ", "cs.segment.sun" } },
+				3, { "CS stage: sun", "CS stage: sun inputs", "FrameSegments::Sun / ", "cs.segment.sun" } },
 			// The post stage: ImageSpaceManager::RenderWorldPostProcess (SE 100430, AE 107148). First the first person's sun query
 			// (Main::RenderFirstPersonView, after DCLF's first-person epoch), as the sun's client's instance 0 of this stage's run. The volumetric lighting (whole: its hook
 			// runs only there), the pre-tonemap composite as CS passes (ChainSteps.inl), the PostProcessing anchor (reserved so its hook
@@ -305,8 +310,10 @@ namespace FrameAnchors
 					{ Anchor::ImageSpace, { "cs.engine.imagespace.post.final", "cs.engine.skeleton.frame@post-chain" } },
 					{ Anchor::Count, { nullptr, nullptr }, Segment::Count, false, true } } },
 				9, { "CS stage: post", "CS stage: post inputs", "FrameSegments::Post / ", "cs.segment.post" } },
-			// The UI stage, in every frame kind's recipe. The engine draws, in this order (frame sequence census): the frozen frame's composite
-			// (Main::Render; a menu over a frozen world only), the frame's first clears, displays, the shadow map's and a menu scene's clears,
+			// The UI stage, in every frame kind's recipe. The engine draws, in this order (frame sequence census): the screen blood (a world
+			// frame's Main::RenderScreenSplatter, which Main::Draw calls after RenderWorldPostProcess returned, so after the post stage's end:
+			// docs/development/p5/blood-splatter.md), the frozen frame's composite (Main::Render; a menu over a frozen world only, which has no
+			// screen blood), the frame's first clears, displays, the shadow map's and a menu scene's clears,
 			// the scene's depth (Drawcall Limit Fix's menu depth batch), the shadow mask, the depth copy and the kMAIN copy, the scene's colour,
 			// its composite (UI3DSceneManager::Render's end-of-frame call, ImageSpace's MenuSteps.inl), the main depth's clear again, more
 			// displays, the present's clients, the overlay and the capture. A world frame's menu scene (an inventory item model, the local map)
@@ -318,15 +325,16 @@ namespace FrameAnchors
 			// - Scaleform's displays: each display segment is a tap and an instance of the Scaleform client, its draw list a frame input
 			//   recorded in the late batch. The displays before a scene are instances 8 to 15; once a later step tapped, they are instances 0
 			//   to 7, after the scene. A frame without a scene draws every display as instances 8 to 15.
-			// - The scene's draw lists, the composites' constants, a Bink movie's tiles (queued by the movie's tick) and the capture (native
-			//   mode's capture point is just before the stage's commit, Hooks.cpp) are frame inputs, recorded in the stage's late batch. What a
-			//   frame does not use skips at execution, its barriers folded.
+			// - The screen blood's draw list, the scene's draw lists, the composites' constants, a Bink movie's tiles (queued by the movie's
+			//   tick) and the capture (native mode's capture point is just before the stage's commit, Hooks.cpp) are frame inputs, recorded in
+			//   the stage's late batch. What a frame does not use skips at execution, its barriers folded.
 			// - The depth copy is the stage's own gated client (cs.engine.skeleton.depth-copy@ui): the pre-main stage copies the main depth
 			//   in every world frame, this one only when the engine's call asks.
 			// It ends at a point: just before the present (Hooks.cpp), or before HDR output, which follows the overlay on the GPU and keeps its
 			// anchor's ticket. (A Bink frame's clear of the main depth comes before its Begin and has no reader: dropped, Engine/Skeleton.)
 			{ Segment::DeclaredUi,
-				{ { { Anchor::ImageSpace, { "cs.engine.imagespace.frozen" } },
+				{ { { Anchor::EngineDraws, { "cs.blood-splatter" } },
+					{ Anchor::ImageSpace, { "cs.engine.imagespace.frozen" } },
 					{ Anchor::EngineFrameClear, { "cs.engine.skeleton.frame@menu-start", "cs.engine.skeleton.shadow@menu-start" }, Segment::Count, true },
 					{ .anchor = Anchor::Interface, .untilLater = true, .firstInstance = 8, .instanceCount = 8 },
 					{ Anchor::EngineFrameClear, { "cs.engine.skeleton.frame@menu-scene", "cs.engine.skeleton.shadow@menu-scene" }, Segment::Count, true },
@@ -342,7 +350,7 @@ namespace FrameAnchors
 					{ Anchor::Overlay },
 					{ Anchor::Capture },
 					{ Anchor::Count, {}, Segment::Count, false, true } } },
-				16,
+				17,
 				{ "CS stage: UI", "CS stage: UI inputs", "FrameSegments::Ui / ", "cs.segment.ui" },
 				true },
 		} };
