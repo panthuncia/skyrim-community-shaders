@@ -349,7 +349,7 @@ namespace RenderGraph::Engine::Skeleton
 			std::shared_ptr<const ClearSpec> spec;
 		};
 
-		/** @brief A clear the engine asked for this flush, with what replays it on D3D11 when the pass did not run. */
+		/** @brief A clear the engine asked for this flush. */
 		struct Pending
 		{
 			Target target;  // the view's engine table entry (named in the frame sequence census)
@@ -357,11 +357,8 @@ namespace RenderGraph::Engine::Skeleton
 			bool skipped = false;  // a host-skipped tap error was counted for it
 			std::uint32_t gateEntry = 0;
 			bool depth = false;
-			void* view = nullptr;
 			std::array<float, 4> colour{};
-			UINT flags = 0;
-			FLOAT depthValue = 1.0f;
-			UINT8 stencil = 0;
+			UINT flags = 0;  // a depth clear's flags (named in the frame sequence census)
 		};
 
 		struct GroupState
@@ -382,7 +379,7 @@ namespace RenderGraph::Engine::Skeleton
 			bool executed = false;    // the current run's executed signal
 			bool failed = false;      // stays on D3D11 for the session
 			bool announced = false;   // the first clear on the graph was logged
-			std::uint64_t taken = 0, replayed = 0;
+			std::uint64_t taken = 0;
 			std::uint64_t dropped = 0;  // world frames' clears a stage's load operations replace (the reflection faces)
 			// The UI stages' places (Place): each place's passes by view, their gate and colour latch (kPlaces * entries entries), whether
 			// each place's client is registered, and the group's own entry count.
@@ -626,16 +623,13 @@ namespace RenderGraph::Engine::Skeleton
 		}
 
 		/**
-		 * @brief A run that did not draw what it took (no executed signal): an error, logged once per kind of work and status, not a
-		 * readiness state. The caller makes the engine's calls for that run.
+		 * @brief A run that did not draw what it took (no executed signal). This is an error, handled by the frame driver's mismatch
+		 * policy: development builds stop. Otherwise the work is not drawn; nothing makes the engine's calls instead.
 		 */
 		void FailedRun(const char* a_what, FrameAnchors::RunStatus a_status)
 		{
-			static std::set<std::pair<std::string, int>> logged;
-			if (!logged.emplace(a_what, static_cast<int>(a_status)).second)
-				return;
-			logger::error("[ORG] engine skeleton: a run of {} did not execute (run status {}); the engine's calls were made for it", a_what,
-				static_cast<int>(a_status));
+			RenderGraph::Frame::Driver::NoteTapError(RenderGraph::Frame::Driver::TapError::NotExecuted, RenderGraph::Frame::SegmentId::Count,
+				fmt::format("a run of the skeleton's {} did not execute (run status {})", a_what, static_cast<int>(a_status)));
 		}
 
 		/** @brief The view's format and its array slice, from its D3D11 description; false when it is not one mip-0 slice. */
@@ -995,7 +989,6 @@ namespace RenderGraph::Engine::Skeleton
 						.kind = FrameAnchors::PassKind::Render,
 						.make = [pass] { return std::static_pointer_cast<org::RenderPass>(std::make_shared<ClearPass>(pass)); },
 						.atExecution = true,
-						.gated = true,
 						// In the deferred+water and post stages the engine's clear call stages its entry before the stage commits: the
 						// pass is recorded at execution with the CPU's gate answer, and a clear not asked for folds its barriers.
 						.gpuGated = !(host == Host::DeferredPasses || host == Host::ImageSpace || host == Host::PostChain) });
@@ -1106,8 +1099,7 @@ namespace RenderGraph::Engine::Skeleton
 						.make = [pass] { return std::static_pointer_cast<org::RenderPass>(std::make_shared<ClearPass>(pass)); },
 						// The engine's call stages its entry before the stage commits: recorded at execution with the CPU's gate answer; a
 						// clear not asked for skips and folds its barriers.
-						.atExecution = true,
-						.gated = true });
+						.atExecution = true });
 					group.placeSpecs[place].emplace(target, std::move(pass));
 				}
 				if (client.passes.empty()) {
@@ -1266,8 +1258,6 @@ namespace RenderGraph::Engine::Skeleton
 					.make = [pass] { return std::static_pointer_cast<org::RenderPass>(std::make_shared<ClearPass>(pass)); },
 					// A run clears a few of the group's views: recorded after the commit, the others record nothing.
 					.atExecution = true,
-					// Its clears are gated draws that load the view: a region execution may hold the pass unopened.
-					.gated = true,
 					// Every clear is an indirect draw through the gate, so native mode records it ahead.
 					.gpuGated = true });
 				group.specs.emplace(spec->target, std::move(pass));
@@ -1392,16 +1382,6 @@ namespace RenderGraph::Engine::Skeleton
 			}
 			state.pending.push_back(a_pending);
 			return true;
-		}
-
-		void Replay(ID3D11DeviceContext* a_context, const std::vector<Pending>& a_pending)
-		{
-			for (const auto& pending : a_pending) {
-				if (pending.depth)
-					a_context->ClearDepthStencilView(static_cast<ID3D11DepthStencilView*>(pending.view), pending.flags, pending.depthValue, pending.stencil);
-				else
-					a_context->ClearRenderTargetView(static_cast<ID3D11RenderTargetView*>(pending.view), pending.colour.data());
-			}
 		}
 
 		/** @brief A copy's engine textures now: its source and its target (D3D11 handles, compared to see a target made again). */
@@ -1573,8 +1553,9 @@ namespace RenderGraph::Engine::Skeleton
 		}
 
 		/**
-		 * @brief The copy on the graph at this point; false when it did not run (the caller copies). a_hostable: the call site is
-		 * the one the copy's host follows (CS's own depth copy, the kMAIN copy), so a world frame's copy waits for its host.
+		 * @brief The copy on the graph at this point; false when the skeleton does not take it (the caller copies). A run that does not
+		 * execute is an error (FailedRun), and the copy is not made. a_hostable: the call site is the one the copy's host follows (CS's
+		 * own depth copy, the kMAIN copy), so a world frame's copy waits for its host.
 		 */
 		bool RunCopy(CopyKind a_kind, bool a_hostable = false)
 		{
@@ -1608,14 +1589,14 @@ namespace RenderGraph::Engine::Skeleton
 				logger::info("[ORG] engine skeleton: {} runs on the graph ({} anchor)", kCopyNames[index], FrameAnchors::Name(kCopyAnchors[index]));
 			if (!done)
 				FailedRun(kCopyNames[index], result.status);
-			return done;
+			return true;
 		}
 
 		/**
-		 * @brief One group's clears taken so far, on the graph now. When its run did not draw them, the engine's D3D11 calls are made
-		 * in order through a_context. Then the group registers again if one of its targets was made again.
+		 * @brief One group's clears taken so far, on the graph now. A run that does not draw them is an error (FailedRun). Then the
+		 * group registers again if one of its targets was made again.
 		 */
-		void FlushGroup(ID3D11DeviceContext* a_context, std::size_t a_index)
+		void FlushGroup(std::size_t a_index)
 		{
 			auto& state = Skel();
 			auto& group = state.groups[a_index];
@@ -1660,8 +1641,7 @@ namespace RenderGraph::Engine::Skeleton
 					const auto result = FrameAnchors::Run(kGroupAnchors[a_index]);
 					state.flushing = false;
 					status = result.status;
-					// The executed signal says the run's graph held this registration's passes. Without it the run failed (an error,
-					// logged): the engine's clears are made here, in their order, so the frame stays whole.
+					// The executed signal says the run's graph held this registration's passes. Without it the run failed: an error.
 					done = result && group.executed;
 				}
 				if (done) {
@@ -1669,13 +1649,7 @@ namespace RenderGraph::Engine::Skeleton
 					if (!std::exchange(group.announced, true))
 						logger::info("[ORG] engine skeleton: the first {} clears ran on the graph ({} anchor)", kGroupNames[a_index], FrameAnchors::Name(kGroupAnchors[a_index]));
 				} else {
-					group.replayed += group.pending.size();
 					FailedRun(kGroupNames[a_index], status);
-					// Still flushing while the calls are made. In native mode they reach the immediate context, which must not hand
-					// them back here.
-					state.flushing = true;
-					Replay(a_context, group.pending);
-					state.flushing = false;
 				}
 				group.pending.clear();
 			}
@@ -1705,12 +1679,6 @@ namespace RenderGraph::Engine::Skeleton
 			}
 		}
 
-		/** @brief The engine's immediate context (native mode's handle there). */
-		ID3D11DeviceContext* EngineContext()
-		{
-			return reinterpret_cast<ID3D11DeviceContext*>(globals::game::renderer->GetRuntimeData().context);
-		}
-
 		/**
 		 * @brief A clear the native immediate context was asked for outside the patched sites. It is taken and run on the graph now,
 		 * at its place in the stream. False when the skeleton does not take it: the context records it itself.
@@ -1719,7 +1687,7 @@ namespace RenderGraph::Engine::Skeleton
 		{
 			if (FrameAnchors::InRun() || !Take(a_target, a_view, a_flags, a_pending))
 				return false;
-			FlushGroup(EngineContext(), IndexOf(GroupFor(a_target)));
+			FlushGroup(IndexOf(GroupFor(a_target)));
 			return true;
 		}
 	}
@@ -1859,7 +1827,7 @@ namespace RenderGraph::Engine::Skeleton
 			const auto target = FindColour(a_view);
 			if (!target)
 				return false;
-			Pending pending{ .depth = false, .view = a_view };
+			Pending pending{ .depth = false };
 			std::memcpy(pending.colour.data(), a_colour, sizeof(pending.colour));
 			return Take(*target, a_view, 0, pending);
 		}
@@ -1879,17 +1847,17 @@ namespace RenderGraph::Engine::Skeleton
 				flags &= D3D11_CLEAR_DEPTH;
 			if (flags == 0)
 				return false;  // nothing a pass would clear: the D3D11 call does nothing either
-			return Take(*target, a_view, flags, Pending{ .depth = true, .view = a_view, .flags = a_flags, .depthValue = a_depth, .stencil = a_stencil });
+			return Take(*target, a_view, flags, Pending{ .depth = true, .flags = a_flags });
 		}
 
-		void Flush(ID3D11DeviceContext* a_context)
+		void Flush()
 		{
 			auto& state = Skel();
 			// Clears are taken on the render owner only (FrameAnchors::IsRenderOwner); another thread has none to flush.
 			if (!state.setUp || state.flushing || !FrameAnchors::IsRenderOwner())
 				return;
 			for (std::size_t i = 0; i < kGroups; ++i)
-				FlushGroup(a_context, i);
+				FlushGroup(i);
 		}
 
 		bool TakeDepthCopy(ID3D11Resource* a_destination, ID3D11Resource* a_source)
@@ -1910,7 +1878,7 @@ namespace RenderGraph::Engine::Skeleton
 			const auto target = FindColour(a_view);
 			if (!target)
 				return false;
-			Pending pending{ .depth = false, .view = a_view };
+			Pending pending{ .depth = false };
 			std::memcpy(pending.colour.data(), a_colour, sizeof(pending.colour));
 			return TakeNow(*target, a_view, 0, pending);
 		}
@@ -1929,7 +1897,7 @@ namespace RenderGraph::Engine::Skeleton
 				flags &= D3D11_CLEAR_DEPTH;
 			if (flags == 0)
 				return false;
-			return TakeNow(*target, a_view, flags, Pending{ .depth = true, .view = a_view, .flags = a_flags, .depthValue = a_depth, .stencil = a_stencil });
+			return TakeNow(*target, a_view, flags, Pending{ .depth = true, .flags = a_flags });
 		}
 
 		bool TakeContextCopy(ID3D11Resource* a_destination, ID3D11Resource* a_source)
@@ -1963,7 +1931,7 @@ namespace RenderGraph::Engine::Skeleton
 	{
 		bool TakeColourClear(ID3D11DeviceContext*, ID3D11RenderTargetView*, const FLOAT[4]) { return false; }
 		bool TakeDepthClear(ID3D11DeviceContext*, ID3D11DepthStencilView*, UINT, FLOAT, UINT8) { return false; }
-		void Flush(ID3D11DeviceContext*) {}
+		void Flush() {}
 		bool TakeDepthCopy(ID3D11Resource*, ID3D11Resource*) { return false; }
 		bool TakeContextColourClear(ID3D11RenderTargetView*, const FLOAT[4]) { return false; }
 		bool TakeContextDepthClear(ID3D11DepthStencilView*, UINT, FLOAT, UINT8) { return false; }

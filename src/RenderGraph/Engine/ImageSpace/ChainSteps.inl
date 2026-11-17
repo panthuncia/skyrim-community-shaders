@@ -1242,7 +1242,6 @@ void RegisterChainSteps()
 				// Recorded at execution with the CPU's gate answer: every step's hook has run by the stage's commit (RenderEndOfFrameEffects'
 				// return), so a step the engine did not draw skips the run, and its barriers fold into the next pass that runs.
 				.atExecution = true,
-				.gated = true,
 				.gpuGated = false,
 				.row = static_cast<std::int16_t>(part.rowBase + entry) });
 			client.specs.push_back(std::move(spec));

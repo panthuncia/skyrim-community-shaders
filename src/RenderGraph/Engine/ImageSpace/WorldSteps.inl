@@ -657,7 +657,6 @@ void RegisterWorldSteps()
 				// Recorded at execution with the CPU's gate answer: the scopes' and the water blend's hooks have run by the stage's
 				// commit, so a step the engine did not draw skips the run, and its barriers fold into the next pass that runs.
 				.atExecution = true,
-				.gated = true,
 				.gpuGated = false,
 				.row = static_cast<std::int16_t>((water ? world.waterRowBase : 0) + entry) });
 			client.specs.push_back(std::move(spec));

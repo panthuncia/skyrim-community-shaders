@@ -333,15 +333,12 @@ bool ORGScreenSpaceShadows::Setup(const D3D11_TEXTURE2D_DESC& a_desc, std::funct
 			// The clear to white (no shadow), as the D3D11 path clears before its dispatches. Gated: recorded at execution, it skips a run
 			// that left its entry closed.
 			.make = [state] { return GraphPasses::MakeUavClear(*state->output, { 1.0f, 1.0f, 1.0f, 1.0f }, { state->gate, kClearEntry }); },
-			.atExecution = true,
-			.gated = true });
+			.atExecution = true });
 		client.passes.push_back({ .name = "cs.screen-space-shadows.raymarch",
 			.anchor = FrameAnchors::Anchor::Prepass,
 			.order = 101,
 			.kind = FrameAnchors::PassKind::Compute,
-			.make = [state]() -> std::shared_ptr<org::RenderPass> { return std::make_shared<RaymarchPass>(*state); },
-			// Gated: every dispatch takes its counts from the gate.
-			.gated = true });
+			.make = [state]() -> std::shared_ptr<org::RenderPass> { return std::make_shared<RaymarchPass>(*state); } });
 		client.registerResources = [state](org::RenderGraph& a_graph) { state->output->Register(a_graph); };
 		client.gates = { state->gate };
 		client.commit = [state](const FrameAnchors::Point&) {

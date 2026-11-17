@@ -310,9 +310,7 @@ namespace DCLF::Features::Precipitation::PrecipitationDraws
 			.anchor = FrameAnchors::Anchor::EngineDraws,
 			.order = 3,
 			.kind = FrameAnchors::PassKind::Render,
-			.make = [client]() -> std::shared_ptr<org::RenderPass> { return std::make_shared<PrecipitationPass>(client); },
-			// Gated (FrameAnchors::PassDesc::gated): every draw takes its count from the client's gate entry, and nothing clears.
-			.gated = true });
+			.make = [client]() -> std::shared_ptr<org::RenderPass> { return std::make_shared<PrecipitationPass>(client); } });
 		desc.commit = [client](const FrameAnchors::Point&) {
 			const auto run = std::atomic_load(&client->run);
 			auto* host = RenderGraphRuntime::Get().Host();

@@ -202,8 +202,7 @@ namespace
 			.make = [a_depth, a_width, a_height, gate]() -> std::shared_ptr<org::RenderPass> {
 				return std::make_shared<TerrainDepthClearPass>(a_depth, a_width, a_height, gate);
 			},
-			.atExecution = true,
-			.gated = true });
+			.atExecution = true });
 		client.gates = { gate };
 		client.active = [] { return globals::features::terrainBlending.settings.Enabled != 0; };
 		// The declared frame (FrameAnchors::SegmentsOn): the clear is recorded ahead, so the setting turns it off in the description.

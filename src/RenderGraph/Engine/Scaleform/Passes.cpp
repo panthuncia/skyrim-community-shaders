@@ -822,9 +822,7 @@ namespace RenderGraph::Engine::Scaleform::Passes
 						.order = a_order,
 						.kind = FrameAnchors::PassKind::Render,
 						// It reads the run's slot, which the commit stores: recorded then, without a ticket prepared again.
-						.atExecution = true,
-						// Gated: a run whose commit stored no frame in the slot records nothing (DisplayPass::Record), its clear included.
-						.gated = true };
+						.atExecution = true };
 					// One pass per instance (the k-th display segment of the frame), each reading its own slots and gate entries.
 					pass.makeInstance = [surface, a_slots, gate, a_withDepth, reads](std::uint32_t a_instance) -> std::shared_ptr<org::RenderPass> {
 						if (a_instance >= a_slots.size())

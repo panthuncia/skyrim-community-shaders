@@ -261,10 +261,6 @@ namespace FrameAnchors
 		std::function<std::shared_ptr<org::RenderPass>(std::uint32_t a_instance)> makeInstance;
 		bool once = false;
 		bool atExecution = false;
-		// Every draw or dispatch the pass records goes through its client's run gate (or a latch the commit writes, which reads zero
-		// in a run whose commit did not write it), and it clears nothing by itself: in a run that did not open it, it does nothing.
-		// AnchorPasses' Builder sets it. Nothing reads it since the frame phases were removed; it stays as the pass's description.
-		bool gated = false;
 		// With atExecution: every draw and dispatch of the pass takes its counts from its run gate (indirect), and it records no other
 		// work. Recorded ahead, it does nothing on a run whose commit left its entries closed. So native mode records it ahead, in the
 		// epoch's kept recording, when GPU gates are on (GpuGates). It is recorded at execution only to leave out the empty commands.

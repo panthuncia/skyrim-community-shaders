@@ -2309,9 +2309,8 @@ namespace RenderGraph::Engine::ImageSpace
 					},
 					// A run opens a few of the shapes' gate entries: recorded after the commit, the closed ones record nothing.
 					.atExecution = true,
-					// Every draw and dispatch goes through the gate, and none clears: a region execution may hold the pass unopened.
-					.gated = true,
-					// So native mode records it ahead, and a closed entry draws or dispatches nothing on the GPU.
+					// Every draw and dispatch goes through the gate and none clears: native mode records it ahead, and a closed entry draws
+					// or dispatches nothing on the GPU.
 					.gpuGated = true });
 			}
 			FrameAnchors::ClientDesc client{};
@@ -2399,7 +2398,6 @@ namespace RenderGraph::Engine::ImageSpace
 					return pass;
 				},
 				.atExecution = true,
-				.gated = true,
 				.gpuGated = true });
 			client.sharedConstants = true;
 			client.gates = { late->gate };

@@ -84,6 +84,7 @@ namespace RenderGraph::Frame::Driver
 		Untappable,           // a step's client is not in the build its stage runs, the stage's schedule is current, and no build of it is on its way
 		Starved,              // a staged build's recordings were asked for again and again: it would never switch in
 		Unbacked,             // GPU work reached an engine target native mode keeps without memory (Frame/EngineTargetUse.h)
+		NotExecuted,          // a skeleton clear or copy run did not execute what it took (nothing draws it another way)
 		Count
 	};
 

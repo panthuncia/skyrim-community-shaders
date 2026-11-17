@@ -407,9 +407,7 @@ struct ORGDeferredComposite::Impl
 						std::make_shared<CompositePass>(next, FrameAnchors::RecordsAtExecution(FrameAnchors::Anchor::DeferredComposite)));
 				},
 				// Its execution is chosen by the commit: recorded then, the pass reads it without a ticket prepared again.
-				.atExecution = true,
-				// Gated: it skips a run whose commit did not open its gate entry (SkipsAtExecution).
-				.gated = true } },
+				.atExecution = true } },
 			.commit = [this](const FrameAnchors::Point&) {
 				Commit();
 				// The chosen execution, by this run, for the pass recorded at execution (null: none chosen).

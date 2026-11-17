@@ -255,8 +255,7 @@ namespace
 				.anchor = FrameAnchors::Anchor::EarlyPrepass,
 				.order = kOrder + a_order,
 				.kind = FrameAnchors::PassKind::Compute,
-				.make = std::move(a_make),
-				.gated = true });
+				.make = std::move(a_make) });
 		};
 		for (std::uint32_t mip = 0; mip < kMips; ++mip) {
 			const std::int32_t order = static_cast<std::int32_t>(mip) * 3;

@@ -185,8 +185,7 @@ namespace ORGDeferredClears
 				const std::uint32_t width = targets[0].Width(), height = targets[0].Height();
 				return std::make_shared<ClearPass>(std::move(targets), width, height);
 			},
-			.atExecution = true,
-			.gated = true });
+			.atExecution = true });
 		client.gates = { shared.gate };
 		client.commit = [](const FrameAnchors::Point&) {
 			Get().gate->OpenDispatch(0, 1);

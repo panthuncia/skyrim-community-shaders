@@ -337,9 +337,7 @@ bool ORGCloudShadows::Setup(std::function<void()> a_onFailed)
 		.anchor = FrameAnchors::Anchor::ReflectionsPrepass,
 		.order = 0,
 		.kind = FrameAnchors::PassKind::Compute,
-		.make = [next]() -> std::shared_ptr<org::RenderPass> { return std::make_shared<OcclusionCopyPass>(next); },
-		// Gated: every dispatch goes through the client's gate entries.
-		.gated = true });
+		.make = [next]() -> std::shared_ptr<org::RenderPass> { return std::make_shared<OcclusionCopyPass>(next); } });
 	client.registerResources = [next](org::RenderGraph& a_graph) { next->occlusion->Register(a_graph); };
 	client.commit = [next](const FrameAnchors::Point&) { Commit(*next); };
 	// The anchor runs at every cubemap render; only the run after the frame's first reflections prepass copies, as on D3D11.
@@ -704,9 +702,7 @@ bool ORGCloudShadows::SetupLayerOps()
 				.anchor = anchor,
 				.order = scatter ? -1 : -2,
 				.kind = FrameAnchors::PassKind::Compute,
-				.make = [next, scatter, base, sets]() -> std::shared_ptr<org::RenderPass> { return std::make_shared<LayerOpsPass>(next, scatter, base, sets); },
-				// Gated: every dispatch goes through the anchor's own gate entries.
-				.gated = true });
+				.make = [next, scatter, base, sets]() -> std::shared_ptr<org::RenderPass> { return std::make_shared<LayerOpsPass>(next, scatter, base, sets); } });
 		}
 	}
 	if (client.passes.empty())

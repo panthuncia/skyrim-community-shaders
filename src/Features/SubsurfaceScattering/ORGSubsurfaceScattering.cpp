@@ -322,8 +322,7 @@ struct ORGSubsurfaceScattering::Impl
 				.order = a_order,
 				.kind = FrameAnchors::PassKind::Compute,
 				.make = std::move(a_make),
-				.atExecution = a_atExecution,
-				.gated = true };
+				.atExecution = a_atExecution };
 		};
 		client.passes.push_back(pass("cs.subsurface.extract", 200, InMode(state, kAnyMode, [](const ScatterState& a_state) -> std::shared_ptr<org::RenderPass> {
 			return std::make_shared<ExtractionPass>(a_state);

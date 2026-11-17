@@ -217,15 +217,13 @@ bool ORGIBL::Setup(std::function<void()> a_onFailed)
 		.anchor = FrameAnchors::Anchor::Prepass,
 		.kind = FrameAnchors::PassKind::Compute,
 		.make = [makePass] { return makePass(true); },
-		.atExecution = true,
-		.gated = true });
+		.atExecution = true });
 	client.passes.push_back({ .name = "cs.ibl.sky-sh",
 		.anchor = FrameAnchors::Anchor::Prepass,
 		.order = 1,
 		.kind = FrameAnchors::PassKind::Compute,
 		.make = [makePass] { return makePass(false); },
-		.atExecution = true,
-		.gated = true });
+		.atExecution = true });
 	client.gates = { state->gate };
 	client.commit = [gate = state->gate](const FrameAnchors::Point&) {
 		gate->OpenDispatch(kEnvEntry, 1);

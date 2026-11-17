@@ -4807,7 +4807,7 @@ Terrain Blending, Volumetric Shadows, light culling, the bloom radii.
 
 Guest runs no CS stage. It uses: every frame anchor's own epoch (per-anchor epochs, `CanRun`/`RequestJoin`), the main ImageSpace client,
 the clients built on first sight and the shape manifest (`ImageSpaceShapes.json`) with the per-draw shape capture, the D3D11 renderer for
-displays the graph refuses, D3D11 replay of clears and copies, the capture's D3D11 staging copy when the graph cannot take it, and the post
+displays the graph refuses, the capture's D3D11 staging copy when the graph cannot take it, and the post
 chain's hooks (which only check and stage in native). This is the input for the guest port (plan stage 8).
 
 ### Old native paths still reachable
@@ -4821,9 +4821,10 @@ chain's hooks (which only check and stage in native). This is the input for the 
   ("Render-thread cost").
 - `CanRun`/`RequestJoin`: the sky and decal clients' setup joins, the menu composites over the live world, the skeleton's group clears, the
   upscaler evaluate's first frames, the menu scenes family.
-- D3D11 replay of a group's clears when its anchor's run does not submit (an error), and clears of a lent target slot (Skylighting's map).
+- Clears of a lent target slot (Skylighting's map) stay on D3D11: the skeleton does not take them. A skeleton clear or copy run that does
+  not execute is now a tap error (`NotExecuted`, the mismatch policy); nothing replays it on D3D11 (Cleanup A1).
 - The phases and regions code is removed (`CS_ORG_PHASES` with it). `FrameAnchors::FlushRegions` kept its other jobs, the stages'
-  commit points and the open-stage census, as `BeforeGpuWork`. `PassDesc::gated` has no reader left.
+  commit points and the open-stage census, as `BeforeGpuWork`. `PassDesc::gated` is removed (Cleanup A1).
 
 ### Untested
 

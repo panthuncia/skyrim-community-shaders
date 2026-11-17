@@ -364,6 +364,8 @@ namespace RenderGraph::Frame::Driver
 			return "staged build starved";
 		case TapError::Unbacked:
 			return "unbacked engine target used";
+		case TapError::NotExecuted:
+			return "run not executed";
 		default:
 			return "?";
 		}

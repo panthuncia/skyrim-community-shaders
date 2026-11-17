@@ -890,8 +890,7 @@ bool ORGDynamicCubemaps::RegisterClient()
 			.order = kOrder + a_order,
 			.kind = a_kind,
 			.make = std::move(a_make),
-			.atExecution = a_kind == FrameAnchors::PassKind::Copy,
-			.gated = true });
+			.atExecution = a_kind == FrameAnchors::PassKind::Copy });
 	};
 	using Kind = FrameAnchors::PassKind;
 	// Once, before everything else: the exported cubemaps' zeros.

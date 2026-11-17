@@ -28,7 +28,7 @@ namespace GraphPasses
 {
 	/**
 	 * @brief A run gate entry a clear waits for: the clear happens only on runs whose commit opened it (any Open call with work). Such a
-	 * pass is recorded at execution (FrameAnchors::PassDesc::atExecution), where it skips the other runs, and is gated (PassDesc::gated).
+	 * pass is recorded at execution (FrameAnchors::PassDesc::atExecution), where it skips the other runs.
 	 */
 	struct ClearGate
 	{

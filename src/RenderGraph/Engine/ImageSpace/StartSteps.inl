@@ -185,7 +185,6 @@ void RegisterStartSteps()
 			// Recorded at execution with the CPU's gate answer, not GPU-gated: an instance the engine did not use skips the run, and its
 			// barriers fold into the next pass that runs (most instances are empty in most frames).
 			.atExecution = true,
-			.gated = true,
 			.gpuGated = false,
 			.row = static_cast<std::int16_t>(entry) });
 		client.specs.push_back(std::move(spec));

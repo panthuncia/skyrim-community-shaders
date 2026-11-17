@@ -379,12 +379,12 @@ void ORGTerrainShadows::Switch()
 	// Gated: its dispatches take their counts from the registration's gate entries, which the commit opens.
 	builder.Add(
 		"update", FrameAnchors::PassKind::Compute,
-		[spec = next->spec]() -> std::shared_ptr<org::RenderPass> { return std::make_shared<ShadowUpdatePass<false>>(spec); }, false, true);
+		[spec = next->spec]() -> std::shared_ptr<org::RenderPass> { return std::make_shared<ShadowUpdatePass<false>>(spec); });
 	// Recorded at execution: it records nothing in a run that is not a refresh.
 	if (maxDispatches > 1)
 		builder.Add(
 			"refresh", FrameAnchors::PassKind::Compute,
-			[spec = next->spec]() -> std::shared_ptr<org::RenderPass> { return std::make_shared<ShadowUpdatePass<true>>(spec); }, false, true, true);
+			[spec = next->spec]() -> std::shared_ptr<org::RenderPass> { return std::make_shared<ShadowUpdatePass<true>>(spec); }, false, true);
 	if (builder.Failed())
 		return fail(builder.Failure());
 

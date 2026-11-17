@@ -33,7 +33,7 @@ namespace RenderGraph::Engine::Skeleton
 
 		void BindTargetsSite(ID3D11DeviceContext* a_context, UINT a_count, ID3D11RenderTargetView* const* a_views, ID3D11DepthStencilView* a_depth)
 		{
-			Sites::Flush(a_context);
+			Sites::Flush();
 			a_context->OMSetRenderTargets(a_count, a_views, a_depth);
 		}
 
@@ -41,7 +41,7 @@ namespace RenderGraph::Engine::Skeleton
 		void ClearDepthNowSite(ID3D11DeviceContext* a_context, ID3D11DepthStencilView* a_view, UINT a_flags, FLOAT a_depth, UINT8 a_stencil)
 		{
 			if (Sites::TakeDepthClear(a_context, a_view, a_flags, a_depth, a_stencil))
-				Sites::Flush(a_context);
+				Sites::Flush();
 			else
 				a_context->ClearDepthStencilView(a_view, a_flags, a_depth, a_stencil);
 		}
@@ -69,7 +69,7 @@ namespace RenderGraph::Engine::Skeleton
 						auto* view = a_renderer->GetRuntimeData().renderTargets[index].RTV;
 						auto* context = reinterpret_cast<ID3D11DeviceContext*>(a_renderer->GetRuntimeData().context);
 						if (view && context && Sites::TakeColourClear(context, view, a_renderer->GetRendererData().clearColor)) {
-							Sites::Flush(context);
+							Sites::Flush();
 							return;
 						}
 					}

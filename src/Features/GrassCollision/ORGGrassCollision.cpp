@@ -295,15 +295,12 @@ bool ORGGrassCollision::Setup(const Limits& a_limits, std::function<void()> a_on
 		.kind = FrameAnchors::PassKind::Copy,
 		.make = [resources]() -> std::shared_ptr<org::RenderPass> { return std::make_shared<CopyCollidersPass>(*resources); },
 		// Gated: recorded at execution, it skips a run that left the update's gate entry closed.
-		.atExecution = true,
-		.gated = true });
+		.atExecution = true });
 	client.passes.push_back({ .name = "cs.grass-collision.update",
 		.anchor = FrameAnchors::Anchor::EarlyPrepass,
 		.order = kOrder + 1,
 		.kind = FrameAnchors::PassKind::Compute,
-		.make = [resources]() -> std::shared_ptr<org::RenderPass> { return std::make_shared<UpdateCollisionPass>(*resources); },
-		// Gated: its dispatch takes its counts from the client's gate entry.
-		.gated = true });
+		.make = [resources]() -> std::shared_ptr<org::RenderPass> { return std::make_shared<UpdateCollisionPass>(*resources); } });
 	client.gates = { resources->gate };
 	client.registerResources = [resources](org::RenderGraph& a_graph) {
 		resources->boxes->Register(a_graph);

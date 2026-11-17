@@ -502,8 +502,7 @@ struct ORGVolumetricLighting::Impl
 				.order = order++,
 				.kind = a_kind,
 				.make = std::move(a_make),
-				.atExecution = a_kind == FrameAnchors::PassKind::Copy,
-				.gated = true });
+				.atExecution = a_kind == FrameAnchors::PassKind::Copy });
 		};
 		add("noise", FrameAnchors::PassKind::Compute, [this] {
 			return MakeStep(kNoiseEntry, "noise", [&](AnchorPasses::Builder& a_builder) {

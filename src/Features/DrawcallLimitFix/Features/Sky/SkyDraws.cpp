@@ -544,12 +544,9 @@ namespace DCLF::Features::Sky::SkyDraws
 					.make = [client, a_part]() -> std::shared_ptr<org::RenderPass> {
 						return std::make_shared<SkyPass>(client, a_part, RecordsLate(client->anchor));
 					},
-					// The run's draws are known after its commit: recorded then, the pass reads them without a ticket prepared again.
-					.atExecution = true,
-					// Gated (FrameAnchors::PassDesc::gated): every draw takes its count from the client's gate entry. A face pass's clears are
-					// load operations of its first draw, which its gate entry holds back too: a pass recorded at execution records no draw for
-					// a run its commit did not open (SkipsAtExecution).
-					.gated = true };
+					// The run's draws are known after its commit: recorded then, the pass reads them without a ticket prepared again. A face
+					// pass's clears are load operations of its first draw, which its gate entry holds back too.
+					.atExecution = true };
 				if (client->instances > 1) {
 					// One pass per instance (the k-th face the frame draws), made in place of make.
 					pass.make = nullptr;

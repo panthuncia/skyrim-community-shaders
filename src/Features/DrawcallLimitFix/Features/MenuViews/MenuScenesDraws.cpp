@@ -349,9 +349,7 @@ namespace DCLF::Features::MenuViews::Scenes::SceneDraws
 					return std::make_shared<ScenePass>(client, FrameAnchors::RecordsAtExecution(FrameAnchors::Anchor::EngineDraws));
 				},
 				// The run's draws are known after its commit: recorded then, the pass reads them without a recording made again.
-				.atExecution = true,
-				// Gated (FrameAnchors::PassDesc::gated): every draw takes its count from the client's gate entry, and nothing clears.
-				.gated = true });
+				.atExecution = true });
 			desc.commit = [client](const FrameAnchors::Point&) {
 				const auto run = std::atomic_load(&client->run);
 				auto* host = RenderGraphRuntime::Get().Host();

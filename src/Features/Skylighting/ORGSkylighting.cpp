@@ -400,16 +400,14 @@ struct ORGSkylighting::Impl
 			if (!resources->occlusion || !resources->shadowCascades || !resources->esramShadows)
 				return nullptr;
 			return std::make_shared<UpdateProbesPass>(*resources);
-		},
-			false, true);  // gated: its dispatch takes its counts from the gate's update entry
+		});  // its dispatch takes its counts from the gate's update entry
 		// After the update read the map: the twin cleared for Drawcall Limit Fix's next shadow epoch. Left out without a twin or program.
 		a_builder.Add("clear-occlusion", FrameAnchors::PassKind::Render, [resources = resources]() -> std::shared_ptr<org::RenderPass> {
 			auto map = ORGSkylighting::Get().OcclusionMap();
 			if (!map || !resources->clearProgram)
 				return nullptr;
 			return std::make_shared<OcclusionClearPass>(std::move(map), *resources);
-		},
-			false, true);  // gated: its draw takes its count from the gate's clear entry, and its depth loads
+		});  // its draw takes its count from the gate's clear entry, and its depth loads
 
 		FrameAnchors::ClientDesc client{};
 		client.id = kClientId;

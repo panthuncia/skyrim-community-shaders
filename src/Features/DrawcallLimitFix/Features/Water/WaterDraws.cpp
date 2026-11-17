@@ -327,9 +327,7 @@ namespace DCLF::Features::Water::WaterDraws
 					return std::make_shared<WaterPass>(client, FrameAnchors::RecordsAtExecution(FrameAnchors::Anchor::EngineDraws));
 				},
 				// The run's draws are known after its commit: recorded then, the pass reads them without a ticket prepared again.
-				.atExecution = true,
-				// Gated (FrameAnchors::PassDesc::gated): every draw takes its count from the client's gate entry, and nothing clears.
-				.gated = true });
+				.atExecution = true });
 			desc.commit = [client](const FrameAnchors::Point&) {
 				const auto run = std::atomic_load(&client->run);
 				auto* host = RenderGraphRuntime::Get().Host();

@@ -247,7 +247,6 @@ void RegisterMenuSteps()
 					return pass;
 				},
 				.atExecution = true,
-				.gated = true,
 				// Every hook of the menu UI stage runs before its commit (the present): recorded at execution with the CPU's gate answer, and a
 				// step the engine did not draw skips and folds its barriers.
 				.gpuGated = false });

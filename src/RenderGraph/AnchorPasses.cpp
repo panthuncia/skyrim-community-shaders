@@ -582,7 +582,7 @@ namespace RenderGraph::AnchorPasses
 	}
 
 	void Builder::Push(std::string_view a_step, FrameAnchors::PassKind a_kind, std::function<std::shared_ptr<org::RenderPass>()> a_make, bool a_once,
-		bool a_gated, bool a_atExecution)
+		bool a_atExecution)
 	{
 		passes.push_back({ .name = std::format("{}.{}", prefix, a_step),
 			.anchor = anchor,
@@ -590,8 +590,7 @@ namespace RenderGraph::AnchorPasses
 			.kind = a_kind,
 			.make = std::move(a_make),
 			.once = a_once,
-			.atExecution = a_atExecution,
-			.gated = a_gated });
+			.atExecution = a_atExecution });
 	}
 
 	void Builder::Add(Draw a_draw)
@@ -609,10 +608,8 @@ namespace RenderGraph::AnchorPasses
 			return;
 		const std::string step = a_draw.name;
 		a_draw.name = std::format("{}.{}", prefix, step);
-		// Gated (FrameAnchors::PassDesc::gated): its draw goes through the run gate, and its render pass clears nothing.
-		const bool gated = a_draw.gate.has_value() && a_draw.load != rhi::LoadOp::Clear;
 		auto spec = std::make_shared<const Spec<Draw>>(Spec<Draw>{ std::move(a_draw), latch, gate });
-		Push(step, FrameAnchors::PassKind::Render, [spec]() -> std::shared_ptr<org::RenderPass> { return std::make_shared<FullscreenPass>(spec); }, false, gated);
+		Push(step, FrameAnchors::PassKind::Render, [spec]() -> std::shared_ptr<org::RenderPass> { return std::make_shared<FullscreenPass>(spec); }, false);
 	}
 
 	void Builder::Add(Dispatch a_dispatch)
@@ -628,11 +625,8 @@ namespace RenderGraph::AnchorPasses
 			return;
 		}
 		const std::string step = a_dispatch.name;
-		// Gated (FrameAnchors::PassDesc::gated): its groups come from the run gate, or from the latch, which reads zero in a run whose
-		// commit did not write it.
-		const bool gated = a_dispatch.gate.has_value() || a_dispatch.latchArgs.has_value();
 		auto spec = std::make_shared<const Spec<Dispatch>>(Spec<Dispatch>{ std::move(a_dispatch), latch, gate });
-		Push(step, FrameAnchors::PassKind::Compute, [spec]() -> std::shared_ptr<org::RenderPass> { return std::make_shared<DispatchPass>(spec); }, false, gated);
+		Push(step, FrameAnchors::PassKind::Compute, [spec]() -> std::shared_ptr<org::RenderPass> { return std::make_shared<DispatchPass>(spec); }, false);
 	}
 
 	void Builder::Add(Copy a_copy)
@@ -646,8 +640,8 @@ namespace RenderGraph::AnchorPasses
 			return;
 		}
 		const std::string step = a_copy.name;
-		// Gated: recorded at execution, where it skips a run that did not open its entry. A copy cannot take its work from the gate.
-		const bool gated = a_copy.gate.has_value();
+		// A gated copy is recorded at execution, where it skips a run that did not open its entry. A copy cannot take its work from the gate.
+		const bool atExecution = a_copy.gate.has_value();
 		// A copy between depth textures is drawn where the device can (DepthCopyPass), so both stay in depth layouts.
 		const auto depthFormat = DepthCopyFormat(a_copy.target);
 		auto program = depthFormat != rhi::Format::Unknown && DepthCopyFormat(a_copy.source) == depthFormat ? DepthCopyProgram(depthFormat) : nullptr;
@@ -655,11 +649,11 @@ namespace RenderGraph::AnchorPasses
 		if (program) {
 			DepthCopyFrame frame{ spec, std::move(program), HasStencil(depthFormat) };
 			Push(step, FrameAnchors::PassKind::Render, [frame]() -> std::shared_ptr<org::RenderPass> { return std::make_shared<DepthCopyPass>(frame); }, false,
-				gated, gated);
+				atExecution);
 			return;
 		}
-		Push(step, FrameAnchors::PassKind::Copy, [spec]() -> std::shared_ptr<org::RenderPass> { return std::make_shared<CopyPass>(spec); }, false, gated,
-			gated);
+		Push(step, FrameAnchors::PassKind::Copy, [spec]() -> std::shared_ptr<org::RenderPass> { return std::make_shared<CopyPass>(spec); }, false,
+			atExecution);
 	}
 
 	void Builder::Add(Clear a_clear, bool a_once)
@@ -689,13 +683,13 @@ namespace RenderGraph::AnchorPasses
 	}
 
 	void Builder::Add(std::string_view a_name, FrameAnchors::PassKind a_kind, std::function<std::shared_ptr<org::RenderPass>()> a_make, bool a_once,
-		bool a_gated, bool a_atExecution)
+		bool a_atExecution)
 	{
 		if (!a_make) {
 			Fail(std::format("{}: no pass", a_name));
 			return;
 		}
-		Push(a_name, a_kind, std::move(a_make), a_once, a_gated && !a_once, a_atExecution);
+		Push(a_name, a_kind, std::move(a_make), a_once, a_atExecution);
 	}
 
 	void Builder::Fail(std::string_view a_reason)
