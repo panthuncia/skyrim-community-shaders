@@ -125,15 +125,6 @@ namespace DCLF
 			return Direct::RecordMode::Indirect;
 		}
 
-		/**
-		 * @brief The cull mode with no CS_DCLF_CULL: frustum and occlusion, but frustum alone on AMD. On an RX 6600 (driver 2.0.353) the
-		 * HZB read back as 0 under nearly every footprint, so occlusion culled nearly every object in view (dclf-open-defects.md).
-		 */
-		std::uint8_t DefaultCullMode()
-		{
-			return LargestAdapterVendor() == 0x1002 ? 1 : 2;
-		}
-
 		ToggleSet FromSwitches()
 		{
 			ToggleSet set;
@@ -247,6 +238,11 @@ namespace DCLF
 			}
 			Table() = std::move(table);
 		}
+	}
+
+	std::uint8_t DefaultCullMode()
+	{
+		return LargestAdapterVendor() == 0x1002 ? 1 : 2;
 	}
 
 	Direct::Mode ModeOf(const ToggleSet& a_set)

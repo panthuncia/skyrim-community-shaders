@@ -943,7 +943,12 @@ void DrawcallLimitFix::SaveSettings(json& o_json)
 	for (const auto& toggle : DCLF::ToggleTable())
 		toggles[std::string(toggle.name)] = DCLF::ToggleValue(requested, toggle);
 	o_json["Toggles"] = std::move(toggles);
-	o_json["CullMode"] = requested.cullMode;
+	// The cull mode is saved only when it is not this machine's default. A saved default would pin it on another GPU,
+	// whose default may differ (frustum alone on AMD).
+	if (requested.cullMode != DCLF::DefaultCullMode())
+		o_json["CullMode"] = requested.cullMode;
+	else
+		o_json.erase("CullMode");
 	o_json["Pipeline"] = requested.pipelineMode == DCLF::PipelineMode::Manual ? "manual" : "auto";
 	o_json["InteriorPipeline"] = requested.interiorCpu ? "cpu" : "gpu";
 	o_json["ExteriorPipeline"] = requested.exteriorCpu ? "cpu" : "gpu";
@@ -975,8 +980,15 @@ void DrawcallLimitFix::ApplySavedSettings()
 		}
 	if (const auto cull = savedSettings.find("CullMode"); cull != savedSettings.end() && cull->is_number_unsigned() && DCLF::SwitchValue(DCLF::Switch::Cull).empty() &&
 														  cull->get<std::uint32_t>() <= 2 && cull->get<std::uint8_t>() != requested.cullMode) {
-		requested.cullMode = cull->get<std::uint8_t>();
-		applied += fmt::format("{}cull {}", applied.empty() ? "" : ", ", requested.cullMode);
+		// Occlusion is not taken from the saved settings where the default leaves it out (AMD: the HZB reads 0 there and
+		// occlusion culls nearly everything in view). CS_DCLF_CULL=occlusion still turns it on.
+		if (cull->get<std::uint8_t>() > DCLF::DefaultCullMode())
+			logger::warn("[DCLF] saved cull mode {} not applied: occlusion culling is off by default on this GPU (CS_DCLF_CULL=occlusion forces it)",
+				cull->get<std::uint32_t>());
+		else {
+			requested.cullMode = cull->get<std::uint8_t>();
+			applied += fmt::format("{}cull {}", applied.empty() ? "" : ", ", requested.cullMode);
+		}
 	}
 	// The pipeline choice, unless CS_DCLF_PIPELINE set it.
 	if (DCLF::SwitchValue(DCLF::Switch::CpuPipeline).empty()) {

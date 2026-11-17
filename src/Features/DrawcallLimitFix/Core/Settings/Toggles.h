@@ -74,6 +74,12 @@ namespace DCLF
 		bool operator==(const ToggleSet&) const = default;
 	};
 
+	/**
+	 * @brief The cull mode with no CS_DCLF_CULL: 2 (frustum and occlusion), but 1 (frustum alone) on AMD. On an RX 6600 (driver 2.0.353)
+	 * the HZB read back as 0 under nearly every footprint, so occlusion culled nearly every object in view (dclf-open-defects.md).
+	 */
+	std::uint8_t DefaultCullMode();
+
 	/** @brief The CPU pipeline's state in a_set (Direct::Mode): its record mode and cadences (Main's always per frame; cpu: the graph's). */
 	Direct::Mode ModeOf(const ToggleSet& a_set);
 
