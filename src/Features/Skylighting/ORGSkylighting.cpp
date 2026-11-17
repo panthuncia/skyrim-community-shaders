@@ -19,6 +19,7 @@ bool ORGSkylighting::Requested()
 #	include "Globals.h"
 #	include "RenderGraph/AnchorPasses.h"
 #	include "RenderGraph/ComputeProgram.h"
+#	include "RenderGraph/Engine/Native/Native.h"
 #	include "RenderGraph/Engine/Tripwire/Tripwire.h"
 #	include "RenderGraph/FrameAnchors.h"
 #	include "RenderGraph/GraphResources.h"
@@ -170,6 +171,8 @@ namespace
 		// The next run clears the map after the update read it (Update queued it); the commit opened that clear (TakeOcclusionCleared).
 		bool clearOcclusion = false;
 		bool occlusionCleared = false;
+		// Native mode: a run with the map's clear executed, so the map holds no memory nothing wrote: the probe update may read it.
+		bool mapCleared = false;
 	};
 
 	struct ProbeBindings
@@ -294,7 +297,10 @@ namespace
 		{
 			if (!a_frame.program || !a_frame.gate)
 				return;
-			const RasterProgram::Depth depth{ .view = &a_bindings.depth, .readOnly = false, .load = rhi::LoadOp::Load };
+			// Native mode: the map is Skylighting's alone (no slot of the engine's is lent), cleared by its render pass's load operation in
+			// every run, after the probe update read it. Guest mode: the draw clears it when the gate entry is open.
+			const bool native = RenderGraph::Engine::Native::Active();
+			const RasterProgram::Depth depth{ .view = &a_bindings.depth, .readOnly = false, .load = native ? rhi::LoadOp::Clear : rhi::LoadOp::Load, .clear = 1.0f };
 			RasterProgram::DrawDesc draw{};
 			draw.depth = &depth;
 			draw.viewport = { .x = 0, .y = 0, .width = a_frame.width, .height = a_frame.height };
@@ -424,6 +430,7 @@ struct ORGSkylighting::Impl
 			if (std::exchange(state->clearOcclusion, false)) {
 				resources->gate->OpenDraw(kClearEntry);
 				state->occlusionCleared = true;
+				state->mapCleared = true;
 			}
 			if (!state->pending)
 				return;
@@ -590,11 +597,18 @@ bool ORGSkylighting::Update(const Skylighting& a_feature)
 {
 	if (!IsActive())
 		return false;
-	// Without an input the gate stays closed: the graph's volumes hold this frame as they are.
-	if (impl->ResolveInputs(MakeInputs(a_feature)))
-		impl->state->pending = MakeShadows(a_feature);
-	// The map Drawcall Limit Fix drew is read now: cleared after the update for its next draw, when the frame's schedule holds the clear.
 	auto& state = *impl->state;
+	// Native mode: the map is cleared after every update (its pass's load operation); until a run with that clear executed, it holds memory
+	// nothing wrote, and the update waits.
+	const bool native = RenderGraph::Engine::Native::Active();
+	// Without an input the gate stays closed: the graph's volumes hold this frame as they are.
+	if (impl->ResolveInputs(MakeInputs(a_feature)) && (!native || state.mapCleared))
+		state.pending = MakeShadows(a_feature);
+	if (native) {
+		state.clearOcclusion = impl->resources->clearProgram != nullptr;
+		return true;
+	}
+	// The map Drawcall Limit Fix drew is read now: cleared after the update for its next draw, when the frame's schedule holds the clear.
 	if (state.occlusionDrawn && impl->resources->clearProgram && FrameAnchors::Scheduled(kClientId, FrameAnchors::Anchor::Prepass)) {
 		state.occlusionDrawn = false;
 		state.occlusionCleared = false;

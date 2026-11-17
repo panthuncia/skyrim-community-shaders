@@ -4,6 +4,7 @@
 #include "DrawcallLimitFix.h"
 #include "Features/Skylighting/ORGSkylighting.h"
 #include "I18n/I18n.h"
+#include "RenderGraph/Engine/Native/Native.h"
 #include "RenderGraph/Engine/Tripwire/Tripwire.h"
 #include "ShaderCache.h"
 #include "State.h"
@@ -649,12 +650,18 @@ void Skylighting::RenderSkyOcclusionMap(RE::Precipitation* a_precip, bool a_dclf
 	[[maybe_unused]] auto state = globals::state;  // Tracy only
 	auto renderer = globals::game::renderer;
 
+	// Native mode: nothing the engine draws reaches the GPU, so the engine has nothing to draw into the map: no slot of its depth table is
+	// lent to it, the engine culls nothing for it, and nothing clears it here. Drawcall Limit Fix draws the map, and ORGSkylighting clears it
+	// with its own pass's load operation after the probe update read it. RenderMask still sets the camera and the projection.
+	const bool native = RenderGraph::Engine::Native::Active();
 	auto& precipitation = renderer->GetDepthStencilData().depthStencils[RE::RENDER_TARGETS_DEPTHSTENCIL::kPRECIPITATION_OCCLUSION_MAP];
 	RE::BSGraphics::DepthStencilData precipitationCopy = precipitation;
 
-	precipitation.depthSRV = texOcclusion->srv.get();
-	precipitation.texture = texOcclusion->resource.get();
-	precipitation.views[0] = texOcclusion->dsv.get();
+	if (!native) {
+		precipitation.depthSRV = texOcclusion->srv.get();
+		precipitation.texture = texOcclusion->resource.get();
+		precipitation.views[0] = texOcclusion->dsv.get();
+	}
 
 	static float& PrecipitationShaderCubeSize = (*(float*)REL::RelocationID(515451, 401590).address());
 	float originalPrecipitationShaderCubeSize = PrecipitationShaderCubeSize;
@@ -676,10 +683,10 @@ void Skylighting::RenderSkyOcclusionMap(RE::Precipitation* a_precip, bool a_dclf
 	// GPU-culled, in its shadow epoch, so the engine's cull and registration (SetupMask) are skipped and RenderMask only sets the camera
 	// and clears the map. Otherwise, or on a frame DCLF did not draw it, the engine does.
 	auto& dclf = globals::features::drawcallLimitFix;
-	const bool reference = a_dclf && dclf.OcclusionReferenceFrame(DrawcallLimitFix::kSkyOcclusion);
+	const bool reference = !native && a_dclf && dclf.OcclusionReferenceFrame(DrawcallLimitFix::kSkyOcclusion);
 	// Held by a Drawcall Limit Fix load hold: rendered here without the engine's cull, as DCLF's own variant is.
 	const bool held = !a_dclf && dclf.OcclusionHeld(DrawcallLimitFix::kSkyOcclusion);
-	const bool engine = (!a_dclf && !held) || reference;
+	const bool engine = !native && ((!a_dclf && !held) || reference);
 	// Engine-only occluders: the engine draws them into DCLF's map at RenderMask.
 	bool engineOnly = false;
 	{
@@ -694,7 +701,7 @@ void Skylighting::RenderSkyOcclusionMap(RE::Precipitation* a_precip, bool a_dclf
 		_computeProjection(a_precip, a_precip->occlusionData.camera);
 		if (engine)
 			a_precip->SetupMask();
-		else if ((engineOnly = dclf.OcclusionEngineOnlyMask(a_precip)))
+		else if (!native && (engineOnly = dclf.OcclusionEngineOnlyMask(a_precip)))
 			;  // DCLF's map, the engine's cull for its engine-only occluders alone (SetupMask set the camera)
 		else if (auto* accumulator = a_precip->occlusionData.accumulator.get())
 			accumulator->camera = a_precip->occlusionData.camera.get();  // what SetupMask sets
@@ -721,7 +728,7 @@ void Skylighting::RenderSkyOcclusionMap(RE::Precipitation* a_precip, bool a_dclf
 		auto& graph = ORGSkylighting::Get();
 		const bool clearedOnGraph = graph.TakeOcclusionCleared();
 		if (a_dclf) {
-			if (!clearedOnGraph || reference || engineOnly)
+			if (!native && (!clearedOnGraph || reference || engineOnly))
 				globals::d3d::context->ClearDepthStencilView(texOcclusion->dsv.get(), D3D11_CLEAR_DEPTH, 1.0f, 0);
 			graph.NoteOcclusionDrawn();
 		}
@@ -741,7 +748,8 @@ void Skylighting::RenderSkyOcclusionMap(RE::Precipitation* a_precip, bool a_dclf
 
 	PrecipitationShaderDirection = originalParticleShaderDirection;
 
-	precipitation = precipitationCopy;
+	if (!native)
+		precipitation = precipitationCopy;
 
 	{
 		ZoneScopedN("Skylighting - Restore Projection");
