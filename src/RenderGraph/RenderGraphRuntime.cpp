@@ -2399,6 +2399,12 @@ bool RenderGraphRuntime::Initialize()
 		// CS_ORG_COALESCE_SUBMITS (native mode, default on, =0 off): an epoch's consecutive batches on one queue go to it in one
 		// queue submission (Desc::coalesceSubmissions). Guest mode hands each batch to DXVK's stream as before.
 		desc.coalesceSubmissions = state->native && Switches::Number("CS_ORG_COALESCE_SUBMITS", 1) != 0;
+		// CS_ORG_MERGE_HANDOFFS (native mode, default on, =0 off): one list of entry barriers per queue submission instead of one
+		// per batch (Desc::mergeHandoffs).
+		desc.mergeHandoffs = desc.coalesceSubmissions && Switches::Number("CS_ORG_MERGE_HANDOFFS", 1) != 0;
+		// CS_ORG_UPLOADS_WITH_BATCHES (native mode, default on, =0 off): a ticket's uploads go in its first queue submission instead
+		// of one of their own (Desc::uploadsWithBatches).
+		desc.uploadsWithBatches = desc.coalesceSubmissions && Switches::Number("CS_ORG_UPLOADS_WITH_BATCHES", 1) != 0;
 		// CS_ORG_KEEP_GATED (native mode, default on, =0 off): a kept recording's late batch made only of gated copies and clears
 		// (passes keyed by their skip answer, kRecordKeyedBySkip) submits its list again while the run's gate answers are unchanged,
 		// instead of recording it at each submission (Desc::keepGatedInline).
