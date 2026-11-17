@@ -7,7 +7,10 @@
 
 #	include "Globals.h"
 #	include "RenderGraph/BuildManager.h"
+#	include "RenderGraph/Engine/Native/Native.h"
 #	include "RenderGraph/Engine/Tripwire/Tripwire.h"
+#	include "RenderGraph/Frame/EngineTargetUse.h"
+#	include "RenderGraph/Frame/FrameDriver.h"
 #	include "RenderGraph/FrameAnchors.h"
 #	include "RenderGraph/GraphResources.h"
 #	include "RenderGraph/PublishedResources.h"
@@ -127,11 +130,30 @@ namespace RenderGraph::Engine::Targets
 				image = a_image.image;
 			}
 
+			/**
+			 * @brief Takes an unbacked texture (native mode, Frame/EngineTargetUse.h): a handle with no image. The record keeps it so
+			 * Find knows it, and has no graph resource and no slot.
+			 */
+			void AdoptUnbacked(winrt::com_ptr<ID3D11Resource> a_texture, std::string_view a_why)
+			{
+				Drop();
+				d3d11 = std::move(a_texture);
+				unbacked = true;
+				why = a_why;
+			}
+
+			/** @brief Whether the target is an unbacked record (AdoptUnbacked). */
+			bool Unbacked() const { return unbacked; }
+
+			/** @brief Why an unbacked target has no memory: its EngineTargetUse line. */
+			const std::string& Why() const { return why; }
+
 			/** @brief Lets the image go: nothing of it is kept here any more. */
 			void Drop()
 			{
 				external.reset();
 				image = 0;
+				unbacked = false;
 				Reset();
 			}
 
@@ -147,7 +169,9 @@ namespace RenderGraph::Engine::Targets
 		private:
 			std::shared_ptr<org::ExternalTextureResource> external;
 			std::uint64_t image = 0;
-			bool served = false;  // a reader was handed the current image (Serve)
+			bool served = false;    // a reader was handed the current image (Serve)
+			bool unbacked = false;  // a record with no image (AdoptUnbacked)
+			std::string why;        // an unbacked target's reason
 		};
 
 		/** @brief A render target's shape: the engine's properties, a plan, or Recreate's description. */
@@ -430,6 +454,10 @@ namespace RenderGraph::Engine::Targets
 		/** @brief Withdraws a target's id and lets its image go, when ORG made it before and D3D11 makes it now. */
 		void Forget(std::unique_ptr<EngineTexture>& a_texture)
 		{
+			if (a_texture && a_texture->Unbacked()) {
+				a_texture->Drop();
+				return;
+			}
 			if (!a_texture || !a_texture->Graph())
 				return;
 			PublishedResources::Withdraw(a_texture->Name());
@@ -446,6 +474,13 @@ namespace RenderGraph::Engine::Targets
 		/** @brief The slot of a_texture, published on the first request. */
 		FrameAnchors::Texture Serve(const std::unique_ptr<EngineTexture>& a_texture)
 		{
+			// A reader asks for an unbacked target's image: a graph would use it. A recipe mismatch; release gives the reader nothing.
+			if (a_texture && a_texture->Unbacked()) {
+				Frame::Driver::NoteUnbackedUse(a_texture->Name(),
+					fmt::format("a graph import of {}, an engine target native mode keeps without memory ({}); the reader gets no texture",
+						a_texture->Name(), a_texture->Why()));
+				return {};
+			}
 			if (!a_texture || !a_texture->External() || !a_texture->Versioned())
 				return {};
 			if (!PublishedResources::Publish(a_texture->Name(), *a_texture))
@@ -544,7 +579,17 @@ namespace RenderGraph::Engine::Targets
 			desc.srv = a_shape.srv ? a_shape.format : DXGI_FORMAT_UNKNOWN;
 			desc.rtv = a_shape.rtv ? a_shape.format : DXGI_FORMAT_UNKNOWN;
 			desc.uav = a_shape.uav ? a_shape.format : DXGI_FORMAT_UNKNOWN;
-			const auto main = Export(desc, name);
+			// Native mode: a target nothing uses (Frame/EngineTargetUse.h) is a record with no image. Its copy texture too.
+			const bool unbacked = Frame::EngineTargetUse::ColourUnbacked(a_index);
+			const auto make = [&](const GraphResources::ExportDesc& a_desc, const std::string& a_name) {
+				if (!unbacked)
+					return Export(a_desc, a_name);
+				const D3D11_TEXTURE2D_DESC unbackedDesc{ a_desc.width, a_desc.height, 1, 1, a_desc.format, { 1, 0 }, D3D11_USAGE_DEFAULT, a_desc.bindFlags, 0, 0 };
+				GraphResources::ExportedTexture made;
+				made.d3d11 = Native::MakeUnbackedTexture2D(unbackedDesc, a_name.c_str(), Frame::EngineTargetUse::ColourClearsDropped(a_index));
+				return made;
+			};
+			const auto main = make(desc, name);
 			auto texture = main.d3d11 ? main.d3d11.try_as<ID3D11Texture2D>() : nullptr;
 			if (!texture || !device)
 				return false;
@@ -574,7 +619,7 @@ namespace RenderGraph::Engine::Targets
 				copyDesc.srv = copyFormat;
 				copyDesc.rtv = DXGI_FORMAT_UNKNOWN;
 				copyDesc.uav = DXGI_FORMAT_UNKNOWN;
-				copy = Export(copyDesc, name + " Copy");
+				copy = make(copyDesc, name + " Copy");
 				copyTexture = copy.d3d11 ? copy.d3d11.try_as<ID3D11Texture2D>() : nullptr;
 				if (!copyTexture || FAILED(device->CreateShaderResourceView(copyTexture.get(), nullptr, copySrv.put())))
 					return false;
@@ -594,11 +639,18 @@ namespace RenderGraph::Engine::Targets
 			// The records first: they keep their own references; the fields then take the ones made here.
 			if (!a_record.texture)
 				a_record.texture = std::make_unique<EngineTexture>(name);
-			a_record.texture->Adopt(main, srv.get());
+			const auto why = Frame::EngineTargetUse::ColourReason(a_index);
+			if (unbacked)
+				a_record.texture->AdoptUnbacked(main.d3d11, why);
+			else
+				a_record.texture->Adopt(main, srv.get());
 			if (makeCopy) {
 				if (!a_record.copy)
 					a_record.copy = std::make_unique<EngineTexture>(name + " Copy");
-				a_record.copy->Adopt(copy, copySrv.get());
+				if (unbacked)
+					a_record.copy->AdoptUnbacked(copy.d3d11, why);
+				else
+					a_record.copy->Adopt(copy, copySrv.get());
 			} else if (a_fields != Fields::KeepCopy) {
 				Forget(a_record.copy);
 			}
@@ -908,7 +960,16 @@ namespace RenderGraph::Engine::Targets
 			desc.bindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS;
 			desc.srv = a_format;
 			desc.uav = a_format;
-			const auto image = Export(desc, name);
+			// Native mode: a volume nothing uses (Frame/EngineTargetUse.h) is a record with no image.
+			const std::string_view label = a_label ? a_label : "";
+			const bool unbacked = Frame::EngineTargetUse::VolumeUnbacked(label);
+			GraphResources::ExportedTexture image;
+			if (unbacked) {
+				const D3D11_TEXTURE3D_DESC unbackedDesc{ a_width, a_height, a_depth, 1, a_format, D3D11_USAGE_DEFAULT, desc.bindFlags, 0, 0 };
+				image.d3d11 = Native::MakeUnbackedTexture3D(unbackedDesc, name.c_str());
+			} else {
+				image = Export(desc, name);
+			}
 			auto texture = image.d3d11 ? image.d3d11.try_as<ID3D11Texture3D>() : nullptr;
 			if (!texture)
 				return false;
@@ -931,7 +992,10 @@ namespace RenderGraph::Engine::Targets
 			auto& data = *reinterpret_cast<VolumeFields*>(&VolumeData(a_index));
 			if (!a_record.texture)
 				a_record.texture = std::make_unique<EngineTexture>(name);
-			a_record.texture->Adopt(image, srv.get());
+			if (unbacked)
+				a_record.texture->AdoptUnbacked(image.d3d11, Frame::EngineTargetUse::VolumeReason(label));
+			else
+				a_record.texture->Adopt(image, srv.get());
 			const bool handles = UseHandles();
 			data.texture = Give(std::move(texture), name, image.graph, handles);
 			data.srv = Give(std::move(srv), data.texture, name + " SRV", image.graph, handles);
@@ -988,10 +1052,13 @@ namespace RenderGraph::Engine::Targets
 			return true;
 		}
 
-		/** @brief Whether ORG made the record's image (only those get handles, as UseHandles gives them at creation). */
+		/**
+		 * @brief Whether ORG made the record's image, or native mode made it an unbacked record (only those get handles, as UseHandles
+		 * gives them at creation).
+		 */
 		bool Owned(const std::unique_ptr<EngineTexture>& a_texture)
 		{
-			return a_texture && a_texture->Graph();
+			return a_texture && (a_texture->Graph() || a_texture->Unbacked());
 		}
 
 		/** @brief Calls f on every target record's graph textures. */
@@ -1062,11 +1129,12 @@ namespace RenderGraph::Engine::Targets
 			logger::warn("[ORG] engine targets: the render graph is not active ({}); the engine's targets stay on D3D11", RenderGraphRuntime::Get().GetDisabledReason());
 			return;
 		}
+		Frame::EngineTargetUse::LogOnce();
 		auto& state = Targets();
 		std::uint32_t taken = 0, kept = 0, mipViews = 0;
 		for (std::uint32_t i = 0; i < kColourSlots; ++i) {
 			auto& record = state.colours[i];
-			if (!record.known || (record.texture && record.texture->Graph()) || !CanOwnColour(i, record.props))
+			if (!record.known || Owned(record.texture) || !CanOwnColour(i, record.props))
 				continue;
 			if (MakeColour(i, record, PlannedShape(i, record.props), Fields::Replace)) {
 				++taken;
@@ -1082,7 +1150,7 @@ namespace RenderGraph::Engine::Targets
 		for (std::uint32_t i = 0; i < kColourSlots; ++i) {
 			auto& record = state.colours[i];
 			const auto source = record.props.textureTarget;
-			if (!record.known || record.props.mipLevel == -1 || source >= kColourSlots || !state.colours[source].texture || !state.colours[source].texture->Graph())
+			if (!record.known || record.props.mipLevel == -1 || source >= kColourSlots || !Owned(state.colours[source].texture))
 				continue;
 			auto& data = ColourData(i);
 			ReleaseField(data.UAV);
@@ -1202,7 +1270,7 @@ namespace RenderGraph::Engine::Targets
 		if (!Enabled() || a_target >= kColourSlots)
 			return false;
 		const auto& texture = Targets().colours[a_target].texture;
-		return texture && texture->Graph();
+		return Owned(texture);
 	}
 
 	bool Recreate(std::uint32_t a_target, const D3D11_TEXTURE2D_DESC& a_desc, const char* a_name, bool a_keepCopy)

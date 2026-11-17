@@ -28,6 +28,7 @@
 #	include "RenderGraph/Engine/Native/OpCensus.h"
 #	include "RenderGraph/Engine/Skeleton/SkeletonSites.h"
 #	include "RenderGraph/ExternalWork.h"
+#	include "RenderGraph/Frame/FrameDriver.h"
 #	include "RenderGraph/FrameAnchors.h"
 #	include "RenderGraph/GenerateMips.h"
 #	include "RenderGraph/GraphResources.h"
@@ -389,6 +390,7 @@ namespace RenderGraph::Engine::Native
 				Image,    // a texture the GPU uses (DEFAULT, IMMUTABLE, DYNAMIC)
 				Staging,  // a STAGING texture: a buffer laid out by subresource
 				Shell,    // a streamed texture's shell: no storage, read through its window (CreateStreamShell)
+				Unbacked,  // an engine target nothing in native mode uses: no image, no memory (MakeUnbackedTexture2D)
 			};
 			/**
 			 * @brief Who keeps an image's state (org-native-frame-graph.md, Phase 2).
@@ -439,6 +441,8 @@ namespace RenderGraph::Engine::Native
 			std::mutex windowLock;
 			winrt::com_ptr<ID3D11ShaderResourceView> window;
 			bool streamEnabled = false;
+			// An unbacked target whose engine clears are declared dropped (EngineTargetUse): nothing reads what they would write.
+			bool dropClears = false;
 			// What the censuses and the undeclared-access validator read (OpCensus, DescribeForCensus): the D3D11 description's bind
 			// flags, usage and dimension, whether it was made with data, and whether the context wrote it since (marked only while
 			// one of them is on).
@@ -3068,6 +3072,20 @@ namespace RenderGraph::Engine::Native
 					a_object ? Tripwire::Describe(a_object).name : std::string("null"));
 		}
 
+		/**
+		 * @brief GPU work that reached an unbacked engine target: a recipe mismatch (Frame::Driver's policy). Fatal in development
+		 * builds. In release the caller skips the operation, and the first of each kind is logged. False for any other record.
+		 */
+		bool RefuseUnbacked(const NativeResource& a_record, std::string_view a_operation)
+		{
+			if (a_record.kind != NativeResource::Kind::Unbacked)
+				return false;
+			::RenderGraph::Frame::Driver::NoteUnbackedUse(a_record.name,
+				fmt::format("{} on \"{}\", an engine target native mode keeps without memory (Frame/EngineTargetUse.cpp lists no user of it)",
+					a_operation, a_record.name));
+			return true;
+		}
+
 		/** @brief The whole extent of a subresource's mip. */
 		VkExtent3D MipExtent(const Shape& a_shape, uint32_t a_mip)
 		{
@@ -3796,6 +3814,8 @@ namespace RenderGraph::Engine::Native
 				Unknown(logged, "Map", a_resource);
 				return E_INVALIDARG;
 			}
+			if (RefuseUnbacked(*record, "Map"))
+				return E_INVALIDARG;
 			NativeResource* cpu = CpuSide(*record);
 			if (!cpu) {
 				static std::atomic_flag logged;
@@ -3871,6 +3891,8 @@ namespace RenderGraph::Engine::Native
 				Unknown(logged, "UpdateSubresource", a_resource);
 				return;
 			}
+			if (RefuseUnbacked(*record, "UpdateSubresource"))
+				return;
 			const auto op = record->kind == NativeResource::Kind::Buffer ? OpCensus::Op::UpdateBuffer : OpCensus::Op::UpdateTexture;
 			// A texture's update is counted where it runs (NoteRun).
 			if (OpCensus::Flags() && record->kind != NativeResource::Kind::Image)
@@ -4031,6 +4053,8 @@ namespace RenderGraph::Engine::Native
 				Unknown(logged, "CopySubresourceRegion", destination ? static_cast<const void*>(a_source) : a_destination);
 				return;
 			}
+			if (RefuseUnbacked(*destination, "CopySubresourceRegion into") || RefuseUnbacked(*source, "CopySubresourceRegion from"))
+				return;
 			// A subresource onto itself: D3D11's runtime drops the call, and Vulkan's copies must not overlap.
 			if (destination == source && a_destinationSub == a_sourceSub)
 				return;
@@ -4057,6 +4081,8 @@ namespace RenderGraph::Engine::Native
 				Unknown(logged, "CopyResource", destination ? static_cast<const void*>(a_source) : a_destination);
 				return;
 			}
+			if (RefuseUnbacked(*destination, "CopyResource into") || RefuseUnbacked(*source, "CopyResource from"))
+				return;
 			// A resource onto itself: D3D11's runtime drops the call.
 			if (destination == source)
 				return;
@@ -4226,6 +4252,8 @@ namespace RenderGraph::Engine::Native
 		void ContextGenerateMips(ID3D11ShaderResourceView* a_view)
 		{
 			const auto record = Resolve(a_view);
+			if (record && RefuseUnbacked(*record, "GenerateMips"))
+				return;
 			if (!record || record->kind != NativeResource::Kind::Image) {
 				static std::atomic_flag logged;
 				Unknown(logged, "GenerateMips", a_view);
@@ -4280,6 +4308,11 @@ namespace RenderGraph::Engine::Native
 		void ContextClearRenderTargetView(ID3D11RenderTargetView* a_view, const FLOAT a_color[4])
 		{
 			const auto record = Resolve(a_view);
+			// The engine's clear of an unbacked target the table declares dropped: nothing reads what it would write.
+			if (record && record->kind == NativeResource::Kind::Unbacked && record->dropClears)
+				return;
+			if (record && RefuseUnbacked(*record, "ClearRenderTargetView"))
+				return;
 			if (!record || record->kind != NativeResource::Kind::Image || !a_color) {
 				static std::atomic_flag logged;
 				Unknown(logged, "ClearRenderTargetView", a_view);
@@ -4334,6 +4367,8 @@ namespace RenderGraph::Engine::Native
 				Unknown(logged, a_operation, a_view);
 				return;
 			}
+			if (RefuseUnbacked(*record, a_operation))
+				return;
 			const auto op = a_float ? OpCensus::Op::ClearUavFloat : OpCensus::Op::ClearUavUint;
 			D3D11_UNORDERED_ACCESS_VIEW_DESC desc{};
 			a_view->GetDesc(&desc);
@@ -4376,6 +4411,8 @@ namespace RenderGraph::Engine::Native
 		void ContextClearDepthStencilView(ID3D11DepthStencilView* a_view, UINT a_flags, FLOAT a_depth, UINT8 a_stencil)
 		{
 			const auto record = Resolve(a_view);
+			if (record && RefuseUnbacked(*record, "ClearDepthStencilView"))
+				return;
 			if (!record || record->kind != NativeResource::Kind::Image) {
 				static std::atomic_flag logged;
 				Unknown(logged, "ClearDepthStencilView", a_view);
@@ -4829,6 +4866,9 @@ namespace RenderGraph::Engine::Native
 			}
 			return window && DescribeResource(window.get(), a_info);
 		}
+		// An importer wants its image: a graph would use it.
+		if (RefuseUnbacked(*record, "an import (DescribeResource)"))
+			return false;
 		a_info = {};
 		a_info.version = DXVK_ORG_INTEROP_VERSION;
 		if (record->kind == NativeResource::Kind::Buffer) {
@@ -5060,6 +5100,53 @@ namespace RenderGraph::Engine::Native
 		*a_texture = texture.detach();
 		*a_view = view.detach();
 		return true;
+	}
+
+	namespace
+	{
+		/** @brief The record of an unbacked engine target: its name and D3D11 facts, no image. */
+		std::shared_ptr<NativeResource> MakeUnbackedRecord(const char* a_name, D3D11_RESOURCE_DIMENSION a_dimension, UINT a_bindFlags, bool a_dropClears)
+		{
+			auto record = std::make_shared<NativeResource>();
+			record->kind = NativeResource::Kind::Unbacked;
+			record->name = a_name ? a_name : "Native::Unbacked";
+			record->dimension = a_dimension;
+			record->bindFlags = a_bindFlags;
+			record->dropClears = a_dropClears;
+			return record;
+		}
+	}
+
+	winrt::com_ptr<ID3D11Texture2D> MakeUnbackedTexture2D(const D3D11_TEXTURE2D_DESC& a_desc, const char* a_name, bool a_dropClears)
+	{
+		if (!g_device)
+			return nullptr;
+		D3D11_TEXTURE2D_DESC desc = a_desc;
+		if (!desc.MipLevels)
+			desc.MipLevels = FullMipCount(desc.Width, desc.Height, 1);
+		Tripwire::Options options;
+		options.name = a_name ? a_name : "Native::Unbacked";
+		options.owner = MakeUnbackedRecord(a_name, D3D11_RESOURCE_DIMENSION_TEXTURE2D, desc.BindFlags, a_dropClears);
+		return Tripwire::CreateTexture2D(desc, std::move(options));
+	}
+
+	winrt::com_ptr<ID3D11Texture3D> MakeUnbackedTexture3D(const D3D11_TEXTURE3D_DESC& a_desc, const char* a_name)
+	{
+		if (!g_device)
+			return nullptr;
+		D3D11_TEXTURE3D_DESC desc = a_desc;
+		if (!desc.MipLevels)
+			desc.MipLevels = FullMipCount(desc.Width, desc.Height, desc.Depth);
+		Tripwire::Options options;
+		options.name = a_name ? a_name : "Native::Unbacked";
+		options.owner = MakeUnbackedRecord(a_name, D3D11_RESOURCE_DIMENSION_TEXTURE3D, desc.BindFlags, false);
+		return Tripwire::CreateTexture3D(desc, std::move(options));
+	}
+
+	bool IsUnbacked(const void* a_object)
+	{
+		const auto record = a_object && g_device ? Resolve(a_object) : nullptr;
+		return record && record->kind == NativeResource::Kind::Unbacked;
 	}
 
 	HRESULT __stdcall StreamEnableView(ID3D11ShaderResourceView* a_shell, void(__stdcall*)(std::uint64_t), void(__stdcall* a_gone)(std::uint64_t),
@@ -5350,6 +5437,9 @@ namespace RenderGraph::Engine::Native
 	}
 	HRESULT __stdcall RunOnGraphicsQueue(ID3D11Device*, void (*)(void*, VkQueue_T*), void*) { return E_FAIL; }
 	bool CreateStreamShell(const D3D11_TEXTURE2D_DESC&, ID3D11Texture2D**, ID3D11ShaderResourceView**) { return false; }
+	winrt::com_ptr<ID3D11Texture2D> MakeUnbackedTexture2D(const D3D11_TEXTURE2D_DESC&, const char*, bool) { return nullptr; }
+	winrt::com_ptr<ID3D11Texture3D> MakeUnbackedTexture3D(const D3D11_TEXTURE3D_DESC&, const char*) { return nullptr; }
+	bool IsUnbacked(const void*) { return false; }
 	HRESULT __stdcall StreamEnableView(ID3D11ShaderResourceView*, void(__stdcall*)(std::uint64_t), void(__stdcall*)(std::uint64_t),
 		const D3D11_SUBRESOURCE_DATA*(__stdcall*)(std::uint64_t, BOOL), std::uint64_t)
 	{

@@ -14,6 +14,7 @@
 #include <chrono>
 #include <functional>
 #include <mutex>
+#include <set>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -361,6 +362,8 @@ namespace RenderGraph::Frame::Driver
 			return "not tappable";
 		case TapError::Starved:
 			return "staged build starved";
+		case TapError::Unbacked:
+			return "unbacked engine target used";
 		default:
 			return "?";
 		}
@@ -403,6 +406,18 @@ namespace RenderGraph::Frame::Driver
 		if (!std::exchange(state.errorLogged[static_cast<std::size_t>(a_error)], true))
 			logger::error("[ORG] frame tap error ({}): {}, {}; frame {} ({}, slot {}); its work is not drawn (later errors of this kind are counted, not logged)",
 				TapErrorName(a_error), where, a_what, state.current.frame, KindName(state.current.kind), state.current.slot);
+	}
+
+	void NoteUnbackedUse(std::string_view a_target, std::string_view a_what)
+	{
+		if (!MismatchFatal()) {
+			static std::mutex lock;
+			static std::set<std::string, std::less<>> logged;
+			std::scoped_lock guard(lock);
+			if (logged.size() < 64 && logged.emplace(a_target).second)
+				logger::error("[ORG] unbacked engine target used: {}; the operation is skipped (logged once per target)", a_what);
+		}
+		NoteTapError(TapError::Unbacked, SegmentId::Count, a_what);
 	}
 
 	void NoteHosted(const char* a_host, std::uint32_t a_count)

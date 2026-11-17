@@ -83,6 +83,7 @@ namespace RenderGraph::Frame::Driver
 		Refused,              // a client could not draw the engine's work at its hook (a Scaleform display the graph cannot draw), in native mode
 		Untappable,           // a step's client is not in the build its stage runs, the stage's schedule is current, and no build of it is on its way
 		Starved,              // a staged build's recordings were asked for again and again: it would never switch in
+		Unbacked,             // GPU work reached an engine target native mode keeps without memory (Frame/EngineTargetUse.h)
 		Count
 	};
 
@@ -97,6 +98,12 @@ namespace RenderGraph::Frame::Driver
 	 * draws nothing of that work.
 	 */
 	void NoteTapError(TapError a_error, SegmentId a_segment, std::string_view a_what);
+
+	/**
+	 * @brief GPU work reached an engine target that has no memory (TapError::Unbacked, Frame/EngineTargetUse.h): the mismatch policy.
+	 * When the mismatch is not fatal (release), each target's first use is logged too, not only the first of the kind. Any thread.
+	 */
+	void NoteUnbackedUse(std::string_view a_target, std::string_view a_what);
 
 	/** @brief a_count clears or copies a tap handed to host a_host (a static name) were written at its commit (render owner). */
 	void NoteHosted(const char* a_host, std::uint32_t a_count);

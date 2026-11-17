@@ -18,6 +18,7 @@ bool RenderGraph::Engine::Skeleton::Requested()
 #	include "RenderGraph/AnchorPasses.h"
 #	include "RenderGraph/BuildManager.h"
 #	include "RenderGraph/DxvkOrgInterop.h"
+#	include "RenderGraph/Frame/EngineTargetUse.h"
 #	include "RenderGraph/Frame/FrameDriver.h"
 #	include "RenderGraph/Frame/PostChain.h"
 #	include "RenderGraph/Engine/Native/Native.h"
@@ -677,8 +678,10 @@ namespace RenderGraph::Engine::Skeleton
 			auto* renderer = globals::game::renderer;
 			if (!renderer)
 				return targets;
+			// An unbacked target (native mode, Frame/EngineTargetUse.h) gets no clear pass: its engine clear is declared dropped.
 			for (const auto index : kColourTargets)
-				targets.push_back({ Kind::Colour, index, 0 });
+				if (!Frame::EngineTargetUse::ColourUnbacked(index))
+					targets.push_back({ Kind::Colour, index, 0 });
 			if (Native::Requested())
 				for (const auto index : kNativeColourTargets)
 					targets.push_back({ Kind::Colour, index, 0 });

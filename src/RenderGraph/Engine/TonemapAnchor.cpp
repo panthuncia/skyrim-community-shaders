@@ -4,6 +4,7 @@
 #include "Features/PostProcessing.h"
 #include "Globals.h"
 #include "RenderGraph/Engine/ImageSpace/ImageSpace.h"
+#include "RenderGraph/Frame/EngineTargetUse.h"
 
 #if defined(CS_HAS_RENDER_GRAPH)
 #	include <rhi_helpers.h>
@@ -22,13 +23,25 @@ namespace RenderGraph::Engine
 			if (a_input >= total || a_output >= total)
 				return targets;
 			const auto& engine = globals::game::renderer->GetRuntimeData().renderTargets;
-			if (engine[a_input].texture && engine[a_input].SRV) {
+			// Native mode: an engine target without memory (Frame/EngineTargetUse.h) is not named. The engine's tonemap outside CS's
+			// chain (the frames before the chain registers, a menu scene's tonemap) then has no CS form for that target, and its
+			// clients draw nothing there, as for a target the engine has not made.
+			const auto unbacked = [](std::uint32_t a_target) {
+				if (!Frame::EngineTargetUse::ColourUnbacked(a_target))
+					return false;
+				static std::atomic_flag logged;
+				if (!logged.test_and_set())
+					logger::info("[ORG] Tonemap anchor: the engine's tonemap names {}, which has no memory in native mode; the anchor names no target for it (logged once)",
+						magic_enum::enum_name(static_cast<RE::RENDER_TARGET>(a_target)));
+				return true;
+			};
+			if (engine[a_input].texture && engine[a_input].SRV && !unbacked(a_input)) {
 				targets.input = FrameAnchors::EngineTarget(a_input);
 				D3D11_TEXTURE2D_DESC desc{};
 				engine[a_input].texture->GetDesc(&desc);
 				targets.inputFormat = rhi::helpers::ToRHI(desc.Format);
 			}
-			if (engine[a_output].texture && engine[a_output].RTV) {
+			if (engine[a_output].texture && engine[a_output].RTV && !unbacked(a_output)) {
 				targets.output = FrameAnchors::EngineTarget(a_output);
 				D3D11_RENDER_TARGET_VIEW_DESC view{};
 				engine[a_output].RTV->GetDesc(&view);

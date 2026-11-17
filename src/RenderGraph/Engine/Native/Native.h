@@ -276,6 +276,21 @@ namespace RenderGraph::Engine::Native
 	winrt::com_ptr<ID3D11Buffer> WrapBuffer(const rhi::Resource& a_buffer, const D3D11_BUFFER_DESC& a_desc, const char* a_name);
 
 	/**
+	 * @name Unbacked engine targets (Frame/EngineTargetUse.h): a texture handle with no image and no memory, for an engine target
+	 * nothing in native mode draws, reads or copies. The engine keeps the pointer and reads its description, and views are made on
+	 * it as on any native texture. GPU work that reaches it (a context clear, copy, map or mip build, or an import) is a recipe
+	 * mismatch, TapError::Unbacked: fatal in development builds; in release the operation is skipped and the first one logged.
+	 * a_dropClears: the engine's own clears of it are declared dropped, not mismatches (nothing reads what they write). Null off
+	 * native mode.
+	 */
+	/** @{ */
+	winrt::com_ptr<ID3D11Texture2D> MakeUnbackedTexture2D(const D3D11_TEXTURE2D_DESC& a_desc, const char* a_name, bool a_dropClears);
+	winrt::com_ptr<ID3D11Texture3D> MakeUnbackedTexture3D(const D3D11_TEXTURE3D_DESC& a_desc, const char* a_name);
+	/** @brief Whether a_object (a texture or view handle, or a port's handle around one) is an unbacked engine target. Any thread. */
+	bool IsUnbacked(const void* a_object);
+	/** @} */
+
+	/**
 	 * @brief RenderGraphRuntime::EmitCommands in native mode, on Vulkan and D3D12: a_record (BasicRHI commands, nothing bound at the
 	 * start) into a command list of its own on the graphics queue, submitted now with a_waits and a_signals (the device's
 	 * timelines), between full memory barriers. a_record runs exactly once when this returns true, never when it returns false.

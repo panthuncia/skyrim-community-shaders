@@ -281,7 +281,9 @@ bool MakeOwned(OwnedTarget& a_out, RE::RENDER_TARGET a_like, std::string_view a_
 	auto made = Frame::Resources::Texture2D(a_name, desc, a_lifetime);
 	a_out.texture = std::move(made.texture);
 	a_out.fresh = made.fresh;
-	a_out.format = RtvFormatOf(index, ImportOf(index));
+	// The format from the engine's description, not from a graph import: the engine target may have no memory in native mode
+	// (Frame/EngineTargetUse.h), and only its shape is wanted here.
+	a_out.format = rhi::helpers::ToRHI(desc.Format);
 	return static_cast<bool>(a_out);
 }
 
