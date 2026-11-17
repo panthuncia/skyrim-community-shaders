@@ -2812,6 +2812,14 @@ namespace FrameAnchors
 							active.recording ? fmt::format(" ({})", RenderGraph::Frame::DiffFields(active.fields, staged)) : std::string(), keyNote);
 						for (std::uint32_t s = 0; s < RenderGraphRuntime::kGameFramesInFlight; ++s)
 							a_state.schedule[a_declared][s] = staged.graph ? State::Scheduled{ staged, ready[s], built } : State::Scheduled{};
+						// The replaced build's recordings are never used again. Each keeps that build's graph alive, with its private alias
+						// pools and the placements in them: a second copy of every transient of the stage until the next request.
+						{
+							const std::lock_guard lock(recordings.mutex);
+							std::erase_if(recordings.entries, [&](const auto& a_kept) {
+								return a_kept->done && a_kept->recording && a_kept->recording->buildGeneration != stagedGeneration;
+							});
+						}
 						Driver::NoteSwitch(segment, a_frame.frame, slot, a_frame.frame - a_state.stagedSince[a_declared], what);
 						Driver::NoteBuildSwitch(segment);
 						a_state.stagedSince[a_declared] = 0;

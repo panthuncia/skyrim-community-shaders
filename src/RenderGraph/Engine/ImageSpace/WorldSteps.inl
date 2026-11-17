@@ -53,8 +53,10 @@ struct StepSampler
 /** @brief A render target CS owns in place of an engine one: its graph texture and its view format. */
 struct OwnedTarget
 {
-	std::unique_ptr<GraphResources::Texture2D> texture;
+	// The frame's texture of this name (Frame::Resources): one for every registration and every stage.
+	std::shared_ptr<GraphResources::Texture2D> texture;
 	rhi::Format format = rhi::Format::Unknown;
+	bool fresh = false;  // made or resized by the last registration: a history needs its first clear again
 	explicit operator bool() const { return texture && *texture; }
 };
 
@@ -276,7 +278,9 @@ bool MakeOwned(OwnedTarget& a_out, RE::RENDER_TARGET a_like, std::string_view a_
 	desc.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET | D3D11_BIND_UNORDERED_ACCESS;
 	desc.CPUAccessFlags = 0;
 	desc.MiscFlags = 0;
-	a_out.texture = std::make_unique<GraphResources::Texture2D>(desc, std::string(a_name), GraphResources::Options{ .lifetime = a_lifetime });
+	auto made = Frame::Resources::Texture2D(a_name, desc, a_lifetime);
+	a_out.texture = std::move(made.texture);
+	a_out.fresh = made.fresh;
 	a_out.format = RtvFormatOf(index, ImportOf(index));
 	return static_cast<bool>(a_out);
 }
@@ -433,7 +437,8 @@ void RegisterWorldSteps()
 	world.ratios = DynamicRatios();
 	world.saoLevels = EngineSaoLevels();
 	world.contrastLevel = ContrastLevel(world.saoLevels);
-	// CS's targets, made again at each registration (the sizes may have changed). The history is cleared once by its first pass.
+	// CS's targets: the frame's textures of these names, the same ones at every registration while their shape holds (a new size is a
+	// new version). A history is cleared by its first pass when it is new.
 	using Lifetime = GraphResources::Lifetime;
 	if (!MakeOwned(world.ssrMask, RE::RENDER_TARGET::kNORMAL_TAAMASK_SSRMASK_DOWNSAMPLED, "ImageSpace::SSRMaskDownsampled", Lifetime::Transient) ||
 		!MakeOwned(world.saoTemp, RE::RENDER_TARGET::kSAO_TEMP_BLUR, "ImageSpace::SAOBlurTemp", Lifetime::Transient) ||
@@ -608,9 +613,11 @@ void RegisterWorldSteps()
 		auto& keys = water ? world.waterKey : world.scopesKey;
 		auto& count = water ? world.waterCount : world.scopesCount;
 		std::vector<FrameAnchors::PassDesc> passes;
-		// The history pair's first clear, before any pass reads it.
+		// The history pair's first clear, before any pass reads it: only when the registration made it new.
 		if (!water) {
 			for (std::uint32_t h = 0; h < 2; ++h) {
+				if (!world.saoHistory[h].fresh)
+					continue;
 				AnchorPasses::Builder builder(Anchor::ImageSpace, client.id, -1 - static_cast<std::int32_t>(h));
 				auto clear = AnchorPasses::ClearOf(fmt::format("sao.history{}.clear", h), *world.saoHistory[h].texture);
 				builder.Add(std::move(clear), true);
@@ -665,7 +672,8 @@ void RegisterWorldSteps()
 			if (water)
 				return;
 			const auto& current = World();
-			for (const auto* target : { &current.ssrMask, &current.saoTemp, &current.sao, &current.saoHistory[0], &current.saoHistory[1] })
+			// The targets kept across frames only (the chain's registration says why).
+			for (const auto* target : { &current.sao, &current.saoHistory[0], &current.saoHistory[1] })
 				if (*target)
 					target->texture->Register(a_graph);
 		};

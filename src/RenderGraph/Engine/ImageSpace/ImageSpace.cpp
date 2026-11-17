@@ -27,6 +27,7 @@ bool RenderGraph::Engine::ImageSpace::Requested()
 #	include "RenderGraph/Engine/Pipeline/StateConversion.h"
 #	include "RenderGraph/Engine/Tripwire/Tripwire.h"
 #	include "RenderGraph/Frame/FrameDriver.h"
+#	include "RenderGraph/Frame/FrameResources.h"
 #	include "RenderGraph/Frame/PostChain.h"
 #	include "RenderGraph/FrameAnchors.h"
 #	include "RenderGraph/FrameStaging.h"

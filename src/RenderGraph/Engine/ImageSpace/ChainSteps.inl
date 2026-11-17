@@ -665,7 +665,9 @@ bool MakeOwnedLike(OwnedTarget& a_out, RE::RENDER_TARGET a_like, std::string_vie
 			static_cast<std::uint32_t>(view.Format), static_cast<std::uint32_t>(import.Format()));
 		return false;
 	}
-	a_out.texture = std::make_unique<GraphResources::Texture2D>(desc, std::string(a_name), GraphResources::Options{ .lifetime = a_lifetime });
+	auto made = Frame::Resources::Texture2D(a_name, desc, a_lifetime);
+	a_out.texture = std::move(made.texture);
+	a_out.fresh = made.fresh;
 	a_out.format = RtvFormatOf(index, import);
 	return static_cast<bool>(a_out);
 }
@@ -1099,8 +1101,8 @@ void RegisterChainSteps()
 		// The three clients share the post stage's rows, in order.
 		part.rowBase = rowBase;
 		std::vector<FrameAnchors::PassDesc> passes;
-		// The bloom's first clear, before any pass reads it.
-		if (p == 1) {
+		// The bloom's first clear, before any pass reads it: only when the registration made it new (the same for the pairs below).
+		if (p == 1 && chain.bloom.fresh) {
 			AnchorPasses::Builder builder(Anchor::ImageSpace, client.id, -5);
 			builder.Add(AnchorPasses::ClearOf("bloom.clear", *chain.bloom.texture), true);
 			for (auto& pass : builder.Take())
@@ -1109,6 +1111,8 @@ void RegisterChainSteps()
 		// The adapted luminance pair's first clear, before any pass reads it.
 		if (p == 1)
 			for (std::uint32_t h = 0; h < 2; ++h) {
+				if (!chain.adapt[h].fresh)
+					continue;
 				AnchorPasses::Builder builder(Anchor::ImageSpace, client.id, -3 - static_cast<std::int32_t>(h));
 				builder.Add(AnchorPasses::ClearOf(fmt::format("hdr.adapted{}.clear", h), *chain.adapt[h].texture), true);
 				for (auto& pass : builder.Take())
@@ -1117,6 +1121,8 @@ void RegisterChainSteps()
 		// TAA's history pair's first clear, before any pass reads it.
 		if (p == 2)
 			for (std::uint32_t h = 0; h < 2; ++h) {
+				if (!chain.taaHistory[h].fresh)
+					continue;
 				AnchorPasses::Builder builder(Anchor::ImageSpace, client.id, -1 - static_cast<std::int32_t>(h));
 				builder.Add(AnchorPasses::ClearOf(fmt::format("taa.history{}.clear", h), *chain.taaHistory[h].texture), true);
 				for (auto& pass : builder.Take())
@@ -1281,11 +1287,11 @@ void RegisterChainSteps()
 				logger::warn("[ORG] ImageSpace: the adaptation readback does not fit its ring; it is off");
 		}
 		if (p == 1)
+			// The targets kept across frames, by name. The transients are not: a registered resource gets a backing of its own in every
+			// graph that holds the client, used or not, and their passes declare them directly.
 			desc.registerResources = [](org::RenderGraph& a_graph) {
 				const auto& current = Chain();
-				for (const auto* target : { &current.bloom, &current.bloomSwap, &current.dofDown, &current.dofSwap, &current.taaHistory[0], &current.taaHistory[1],
-					 &current.getHitA, &current.getHitB, &current.getHitSwap, &current.fullBlurDown, &current.fullBlurSwap, &current.hdrScratch, &current.ldrScratch,
-					 &current.adapt[0], &current.adapt[1] })
+				for (const auto* target : { &current.bloom, &current.taaHistory[0], &current.taaHistory[1], &current.adapt[0], &current.adapt[1] })
 					if (*target)
 						target->texture->Register(a_graph);
 			};
