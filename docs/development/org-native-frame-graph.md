@@ -5916,3 +5916,81 @@ earlier ones (105.7 against 106.1, 107.1 against 105.8 mean).
 | Engine `VOLUMETRIC_LIGHTING_ACCUMULATION` and `_COPY`, next to ORG's `VolumetricLighting::Volume` (two copies) | 22.5 + 22.5 | the ORG client draws the volumetric lighting; guest's feature replaces the engine's |
 | `cs.scaleform.scratch.0..3` | 31.6 | GFx filters in menus; the UI stage runs after post |
 | Deferred's G-buffer (`cs.native.texture.270..275`) | 46 | written and read within the frame |
+
+### VRAM, second pass (2026-11-17)
+
+Same measurement as above (RX 6600, perf-taa 1920x1080, background, `DXVK_DEBUG=hang`, VRAM Budget off). Native's table comes
+from BasicRHI's dump, guest's from CS's VRAM json; both by `cat.py`, which files resources by name (MiB of driver device-local
+usage).
+
+| Category | Native | Guest | Native minus guest |
+|---|---|---|---|
+| Driver's own memory (no vkAllocateMemory) | 586 | 562 | +23 |
+| Engine render targets (with Deferred's and HDR's) | 531 | 237 + 75 + 65 | +154 |
+| ORG alias pools (SSGI, SSS, VL, image-space transients) | 202 | 0 | +202 |
+| ORG image-space port targets (SAO, TAA history, scratch) | 117 | 0 | +117 |
+| Scaleform scratch, Bink's movie texture, Scaleform and ImGui staging | 41 | 0 | +41 |
+| ORG frame arena | 28 | 0 | +28 |
+| Terrain Shadows | 49 | 49 | 0 |
+| Game textures | 734 | 750 | -16 |
+| Engine shadow maps | 330 | 330 | 0 |
+| Engine vertex and index buffers | 99 | 108 | -8 |
+| DCLF buffers | 107 | 155 | -49 |
+| Allocator slack, free in DXVK's chunks | 255 | 333 | -77 |
+| Other CS features, descriptor heaps, DXVK internal | 386 | 437 | -51 |
+| Sum (driver device-local usage) | 3,465 | 3,079 | +386 |
+| Process dedicated (Windows), with the VRAM debug dumps | 3,514 | 3,121 | +393 |
+| Process dedicated, a plain perf-taa run | 3,447 | | |
+
+Before this pass the sums were 3,697 and 3,096, and process dedicated 3,686 to 3,754 against 3,032 to 3,131.
+
+**Fixed.**
+- *Terrain Shadows (measured: 216 to 49).* The ORG path's textures were made once at the largest installed heightmap. Now the
+  heightmap texture is made per heightmap, at its size and in its DDS format (BC4 kept; the staged upload copies block rows), in a
+  client registration of its own, and the shadow height map is a versioned twin that each heightmap resizes as a new version
+  (Drawcall Limit Fix's graphs follow the slot with no build). A worldspace change registers the client again, so the EarlyPrepass
+  graphs rebuild, staged. The resize must wait for a frame boundary: the first build resized at EarlyPrepass and failed fatally
+  ("a slot of its graph published a new version after the frame's Begin"). `Driver::AtNextBegin` runs such work in the next
+  `OnBegin`, before the schedules are chosen. Until a full refresh was committed in a graph that holds the new registration,
+  `NeedsRefresh` keeps the feature asking for refreshes and keeps terrain shadows off, so no frame reads the new version unwritten.
+  CS `f8cee2525`.
+- *Bink staging (measured: 72 to 0).* The UI stage's kept recordings retained the movie's last frames: an inline late batch keeps
+  what it retained until it is recorded again, and the movie frames' descriptions never come back. The returned blocks then stayed
+  as the pool's spares. At a movie's end the stages that hold the Present anchor drop their finished kept recordings
+  (`FrameAnchors::DropKeptRecordings`; the slots' schedules keep the ones they run on), and the staging pool lives per movie. CS
+  `15504655a`.
+- *CS's VRAM ledger (item 5).* It reads BasicRHI's live ledger (`Device::LiveMemoryStats`, BasicRHI `270ade8`) in every mode,
+  listed by site and kind; CS's own `vkAllocateMemory` hook is gone. Native's "not accounted" line is now the driver's own memory
+  (586 MiB); the committed textures (about 1.5 GiB) had landed there. CS `575133931`.
+
+**Attributed, not changed.**
+- Scaleform scratch (31.6): four 1920x1080 RGBA8 images, declared by every Scaleform pass of the UI stages, so none is unused by a
+  built graph. The aliasing piece's.
+- Bink's movie texture (9.0): one for the session, so a movie never rebuilds the Present graph. Freeing it between movies would
+  rebuild at the next movie's start, and its first frames would be lost.
+- ORG frame arena (27.9): 70 pinned chunks with 22.7 MiB live in 564 regions, the latch regions of the published copies (52 copy
+  leases). The rest (about 5 MiB) is the bump allocator's holes: a pinned chunk is reused only once it is wholly empty.
+- Scaleform staging (6.8, 27 blocks) and ImGui staging (2.2, 9 blocks): the pools keep up to frames in flight times runs a frame
+  spares, and kept recordings of descriptions that do not come back retain their last blocks, as Bink's did. The general fix is in
+  ORG: a late batch recorded at every submission could drop what it retained once that submission completes. Not done: whether
+  the completion can race the next submission's recording was not established.
+
+**Not done: engine targets' memory at first use (about 125).** In native, the stage graphs declare (and put barriers on) many of
+those targets every frame whether or not anything draws: the UI stage's Scaleform passes declare `kBOOK_TEXT_0..3` and its depth,
+DCLF's skeleton declares `kWATER_1/2`, the start stage the water displacement pair, the menu UI stage `kMENUBG` and
+`kLOCAL_MAP_SWAP` (from the recipe log). Memory bound at the first declaration would save nothing for them. The world recipe never
+declares `kIMAGESPACE_TEMP_COPY/2`, `kTEMPORAL_AA_UI_ACCUMULATION_1/2`, `kGETHIT_*`, `kSCREENSHOT` and `kLOCAL_MAP` (about 87 MiB),
+nor the engine `kSAO*`, `kTEMPORAL_AA_ACCUMULATION_*` and volumetric lighting targets the aliasing piece owns (about 83 MiB). What it
+would take: images whose memory is bound later with their views made now (Vulkan sparse binding, D3D12 reserved resources) in
+BasicRHI; the creation-time layout and clear moved to the binding; and a binding at the first native context operation on the
+texture or the first graph build that declares its slot. The paths that would bind them (the book and map menus, a hit, a
+screenshot) cannot be reached by a background run without input, so they could not be checked here.
+
+**Checks (build `10dea1066fb0`).** native-quick, guest-quick, native-river, native-interior passed; the river shots match the
+earlier native run (river-east mean channel difference 3.1). A run that goes Tamriel, Solstheim, Riverwood (`cow
+DLC2SolstheimWorld 40 -10`, then `coc Riverwood`) passed in both modes: the shadow height map went 3808x3008, 6144x6144, 3808x3008
+as versions, each registration's graphs switched in, no tap error. Its Riverwood shots against guest differ by exposure only (known).
+Native perf-taa between the marks: 16.43 ms.
+
+**For the aliasing piece.** Native's ORG alias pools are 202 MiB and the image-space port's own targets 117 MiB, against guest's
+none; the engine targets the port duplicates are still allocated (above).
