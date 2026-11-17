@@ -2362,6 +2362,10 @@ bool RenderGraphRuntime::Initialize()
 	state->epochStats = Switches::Equals("CS_ORG_EPOCH_STATS", "1");
 	// The submission census (command lists and queue submissions by kind) counts only with the statistics on.
 	org::diagnostics::Census().enabled.store(state->epochStats, std::memory_order_relaxed);
+	// CS_SUBMIT_TRACE=<file>: BasicRHI's submission trace, on before any list is recorded, so every kept list's range names its
+	// handle (GpuIdleTrace writes the file).
+	if (char path[8]{}; GetEnvironmentVariableA("CS_SUBMIT_TRACE", path, sizeof(path)))
+		rhi::submittrace::Enable(true);
 	if ((*state->device)->CreateTimeline(state->nativeTimelines, 0, "CS native timeline lookup") != rhi::Result::Ok || !state->nativeTimelines)
 		return disable("BasicRHI could not create a timeline on DXVK's Vulkan device");
 

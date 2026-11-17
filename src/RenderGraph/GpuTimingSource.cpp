@@ -370,14 +370,16 @@ namespace GpuTimingSource
 			const double frames = interval;
 			std::string text = fmt::format("[RhiCensus] {} frames, per frame by list label: lists, pass begins, same attachments (no barrier between), "
 										   "colour / depth attachments, load L/C/D, store S/D, GENERAL attachments, barrier commands, image barriers "
-										   "(layout changes, same state, onto the previous pass's attachments), buffer, memory, dispatches",
+										   "(layout changes, same state, onto the previous pass's attachments), buffer, memory, dispatches, copies, barrier commands "
+										   "before the list's first work / right after another barrier command",
 				interval);
 			const auto line = [&](const rhi::census::Counts& c, std::string_view name) {
-				text += fmt::format("\n    {:5.1f} {:6.1f} {:5.1f} ({:5.1f}) {:6.1f}/{:5.1f} {:6.1f}/{:5.1f}/{:5.1f} {:6.1f}/{:5.1f} {:6.1f} {:6.1f} {:6.1f} ({:6.1f} {:5.1f} {:5.1f}) {:5.1f} {:5.1f} {:6.1f}  {}",
+				text += fmt::format("\n    {:5.1f} {:6.1f} {:5.1f} ({:5.1f}) {:6.1f}/{:5.1f} {:6.1f}/{:5.1f}/{:5.1f} {:6.1f}/{:5.1f} {:6.1f} {:6.1f} {:6.1f} ({:6.1f} {:5.1f} {:5.1f}) {:5.1f} {:5.1f} {:6.1f} {:5.1f} {:5.1f}/{:5.1f}  {}",
 					c.lists / frames, c.passBegins / frames, c.sameAttachmentPasses / frames, c.sameAttachmentNoBarrier / frames, c.colorAttachments / frames,
 					c.depthAttachments / frames, c.loadOpLoad / frames, c.loadOpClear / frames, c.loadOpDontCare / frames, c.storeOpStore / frames,
 					c.storeOpDontCare / frames, c.generalAttachments / frames, c.barrierCalls / frames, c.imageBarriers / frames, c.imageLayoutChanges / frames,
-					c.imageSameState / frames, c.imageOntoPreviousPass / frames, c.bufferBarriers / frames, c.memoryBarriers / frames, c.dispatches / frames, name);
+					c.imageSameState / frames, c.imageOntoPreviousPass / frames, c.bufferBarriers / frames, c.memoryBarriers / frames, c.dispatches / frames, c.copies / frames,
+					c.leadingBarrierCalls / frames, c.adjacentBarrierCalls / frames, name);
 			};
 			for (const auto& [label, counts] : sorted) {
 				total.Add(counts);

@@ -5,8 +5,13 @@
 #include "RenderGraph/DxvkOrgInterop.h"
 #include "RenderGraph/GpuTimingSource.h"
 
+#if defined(CS_HAS_RENDER_GRAPH)
+#	include <rhi.h>
+#endif
+
 #include <algorithm>
 #include <deque>
+#include <fstream>
 #include <map>
 #include <mutex>
 #include <string>
@@ -96,6 +101,108 @@ namespace GpuIdleTrace
 
 		// Analysed frames per summary line; at CS_GPU_IDLE_TRACE=30 that is one line per 300 frames.
 		constexpr std::uint32_t kSummaryFrames = 10;
+
+#if defined(CS_HAS_RENDER_GRAPH)
+		/**
+		 * CS_SUBMIT_TRACE=<file> (with CS_GPU_IDLE_TRACE in native mode): at each analysed frame, the graph's ranges of that frame
+		 * and the next few, then every queue submission of the last moments (BasicRHI's rhi::submittrace), are appended to the file
+		 * as JSON lines. A list's range name ends with its handle, which the submissions name too, so a reader can tell which
+		 * submission ran each range, what it waited for, and when the CPU submitted it (the calibrations map GPU ticks to it).
+		 */
+		struct SubmitTrace
+		{
+			static constexpr std::uint32_t kFrames = 6;      // frames written per analysis
+			static constexpr double kKeepMs = 400.0;         // submissions kept between analyses
+			std::ofstream out;
+			std::deque<rhi::submittrace::Record> recent;
+			std::vector<rhi::submittrace::Calibration> calibrations;
+			std::uint32_t framesLeft = 0;
+		};
+
+		SubmitTrace* GetSubmitTrace()
+		{
+			static SubmitTrace* trace = [] () -> SubmitTrace* {
+				char path[MAX_PATH] = {};
+				const DWORD length = GetEnvironmentVariableA("CS_SUBMIT_TRACE", path, sizeof(path));
+				if (!length || length >= sizeof(path))
+					return nullptr;
+				auto* made = new SubmitTrace();
+				made->out.open(path, std::ios::out | std::ios::app);
+				if (!made->out) {
+					logger::warn("[GpuIdle] CS_SUBMIT_TRACE: cannot open {}", path);
+					delete made;
+					return nullptr;
+				}
+				logger::info("[GpuIdle] Writing the submission trace to {}", path);
+				return made;
+			}();
+			return trace;
+		}
+
+		// Takes BasicRHI's new records and drops those older than kKeepMs.
+		void CollectSubmissions(SubmitTrace& a_trace, double a_qpcToMs)
+		{
+			std::vector<rhi::submittrace::Record> records;
+			std::vector<rhi::submittrace::Calibration> calibrations;
+			rhi::submittrace::Take(records, calibrations);
+			for (auto& record : records)
+				a_trace.recent.push_back(std::move(record));
+			a_trace.calibrations.insert(a_trace.calibrations.end(), calibrations.begin(), calibrations.end());
+			if (a_trace.calibrations.size() > 64)
+				a_trace.calibrations.erase(a_trace.calibrations.begin(), a_trace.calibrations.end() - 64);
+			LARGE_INTEGER now;
+			QueryPerformanceCounter(&now);
+			const auto horizon = now.QuadPart - static_cast<std::int64_t>(SubmitTrace::kKeepMs / a_qpcToMs);
+			while (!a_trace.recent.empty() && a_trace.recent.front().cpuBegin < horizon)
+				a_trace.recent.pop_front();
+		}
+
+		void WriteFrame(SubmitTrace& a_trace, const GpuTimingSource::Frame& a_frame)
+		{
+			json ranges = json::array();
+			for (const auto& range : a_frame.ranges) {
+				if (range.queue != GpuTimingSource::Queue::Graphics || range.kind == GpuTimingSource::RangeKind::Sub || !range.beginTick)
+					continue;
+				ranges.push_back(json::array({ range.name, range.beginTick, range.endTick, range.stage ? range.stage : "" }));
+			}
+			a_trace.out << json{ { "type", "frame" }, { "present", a_frame.present }, { "msPerTick", a_frame.graphicsMsPerTick }, { "ranges", std::move(ranges) } }.dump() << "\n";
+		}
+
+		void WriteSubmissions(SubmitTrace& a_trace)
+		{
+			LARGE_INTEGER frequency;
+			QueryPerformanceFrequency(&frequency);
+			json calibrations = json::array();
+			for (const auto& c : a_trace.calibrations)
+				calibrations.push_back(json::array({ c.gpu, c.cpu, c.deviation }));
+			json names = json::object();
+			for (const auto& [index, name] : rhi::submittrace::TimelineNames())
+				names[std::to_string(index)] = name;
+			json records = json::array();
+			for (const auto& r : a_trace.recent) {
+				json waits = json::array(), signals = json::array();
+				for (const auto& w : r.waits)
+					waits.push_back(json::array({ w.timeline, w.value }));
+				for (const auto& w : r.signals)
+					signals.push_back(json::array({ w.timeline, w.value }));
+				// With CS_RHI_CENSUS on: each list's label, and its barrier commands, image barriers, layout changes, buffer and memory
+				// barriers, render passes, draws, dispatches, copies, and barrier commands before the list's first work and right after
+				// another barrier command.
+				json counts = json::array();
+				for (const auto& c : r.counts)
+					counts.push_back(json::array({ c.barrierCalls, c.imageBarriers, c.imageLayoutChanges, c.bufferBarriers, c.memoryBarriers, c.passBegins,
+						c.draws, c.dispatches, c.copies, c.leadingBarrierCalls, c.adjacentBarrierCalls }));
+				records.push_back(json{ { "b", r.cpuBegin }, { "e", r.cpuEnd }, { "q", r.queueKind }, { "f", r.queueFamily }, { "t", r.thread },
+					{ "k", static_cast<int>(r.kind) }, { "l", r.lists }, { "n", r.labels }, { "c", std::move(counts) }, { "w", std::move(waits) },
+					{ "s", std::move(signals) } });
+			}
+			a_trace.out << json{ { "type", "submissions" }, { "qpcFrequency", frequency.QuadPart }, { "calibrations", std::move(calibrations) },
+							   { "timelines", std::move(names) }, { "records", std::move(records) } }
+							   .dump()
+						<< "\n";
+			a_trace.out.flush();
+		}
+#endif
 
 		void Summarise(State& a_state)
 		{
@@ -521,8 +628,22 @@ namespace GpuIdleTrace
 		}
 
 		if (state.graph) {
+#if defined(CS_HAS_RENDER_GRAPH)
+			auto* trace = GetSubmitTrace();
+			if (trace)
+				CollectSubmissions(*trace, state.qpcToMs);
+#endif
 			// Each Present whose epochs have all completed: its graph ranges are the frame's submissions.
 			for (const auto& frame : GpuTimingSource::CompletedFrames()) {
+#if defined(CS_HAS_RENDER_GRAPH)
+				if (trace && !trace->framesLeft && state.analysePending && state.presents > 0)
+					trace->framesLeft = SubmitTrace::kFrames;
+				if (trace && trace->framesLeft) {
+					WriteFrame(*trace, frame);
+					if (--trace->framesLeft == 0)
+						WriteSubmissions(*trace);
+				}
+#endif
 				if (state.analysePending && state.presents > 0) {
 					state.frameSpans.clear();
 					for (const auto& range : frame.ranges) {
