@@ -2689,9 +2689,13 @@ namespace FrameAnchors
 				entry->fields = a_fields;
 				entry->lastFrame = a_frame;
 				// Recordings of an older build are never used again, and each keeps that build's graph alive with its private alias
-				// pools (tens of MB a build).
+				// pools (tens of MB a build). The staged build's are kept: it switches in only once every slot's recording is ready, and a
+				// description that alternates by frame (TAA's history rows) asks again each frame. Dropping them there kept the staged
+				// build from ever switching in.
+				const auto staged = a_state.host->StagedGeneration(EpochOfDeclared(a_declared));
 				std::erase_if(recordings.entries, [&](const auto& a_kept) {
-					return a_kept->done && a_kept->recording && !a_state.host->EpochRecordingCurrent(*a_kept->recording);
+					return a_kept->done && a_kept->recording && !a_state.host->EpochRecordingCurrent(*a_kept->recording) &&
+					       (staged == 0 || a_kept->recording->buildGeneration != staged);
 				});
 				// The least recently used of the finished ones goes when the list is full.
 				while (recordings.entries.size() >= SegmentRecordings::kKeep) {
