@@ -224,8 +224,12 @@ static float4 MatProj[3] = { EffectDraw.VSGeometry[6], EffectDraw.VSGeometry[7],
 static float4 EyePosition = EffectDraw.VSGeometry[12];
 static float4 PosAdjust = EffectDraw.VSGeometry[13];
 static float4 TexcoordOffsetMembrane = EffectDraw.VSGeometry[14];
-// The indexed texture coordinates (b11) follow the draw's latched values: main loads the row its vertex names.
-static float4 IndexedTexCoord[128];
+// The indexed texture coordinates (b11) follow the draw's latched values. A vertex loads the row it names from the latch.
+// A static array written and read at a per-vertex index lives in scratch memory on AMD.
+float4 EffectIndexedTexCoord(uint a_index)
+{
+	return asfloat(OrgLatch_EffectDraw.Load4(OrgOffset_EffectDraw + EFFECT_ORG_INDEXED_TEXCOORDS + min(a_index, 127u) * 16));
+}
 #	else
 #	if defined(__hlsl_dx_compiler) && !defined(__spirv__)
 // DXIL refuses two blocks at one register, and FrameBuffer's PerFrame is b12 too (SPIR-V lets both read the frame's VS b12). Space 1
@@ -289,6 +293,11 @@ cbuffer PerGeometry : register(b2)
 cbuffer IndexedTexcoordBuffer : register(b11)
 {
 	float4 IndexedTexCoord[128] : packoffset(c0);
+}
+
+float4 EffectIndexedTexCoord(uint a_index)
+{
+	return IndexedTexCoord[a_index];
 }
 #	endif  // !DCLF_PARTICLE_PULL
 #	endif  // EFFECT_ORG
@@ -542,7 +551,8 @@ VS_OUTPUT main(VS_INPUT input)
 #		if defined(TEXTURE)
 	float u = input.TexCoord0.x;
 #			if defined(TEXCOORD_INDEX) && !defined(DCLF_PARTICLE_PULL)
-	u = IndexedTexCoord[index].y * u + IndexedTexCoord[index].x;
+	const float4 indexedTexCoord = EffectIndexedTexCoord(index);
+	u = indexedTexCoord.y * u + indexedTexCoord.x;
 #			endif
 	texCoord.x = u * texCoordOffset.z + texCoordOffset.x;
 #		endif
@@ -557,7 +567,8 @@ VS_OUTPUT main(VS_INPUT input)
 #		if defined(TEXTURE)
 	float v = input.TexCoord0.y;
 #			if defined(TEXCOORD_INDEX) && !defined(DCLF_PARTICLE_PULL)
-	v = IndexedTexCoord[index].w * v + IndexedTexCoord[index].z;
+	const float4 indexedTexCoordV = EffectIndexedTexCoord(index);
+	v = indexedTexCoordV.w * v + indexedTexCoordV.z;
 #			endif
 	texCoord.y = v * texCoordOffset.w + texCoordOffset.y;
 #		endif
@@ -763,14 +774,6 @@ VS_OUTPUT main(uint a_vertexID : SV_VertexID)
 	DCLFStream first = { EffectDraw.VertexAddress, EffectDraw.VertexStride };
 	DCLFStream second = { EffectDraw.StreamAddress, EffectDraw.StreamStride };
 	const VS_INPUT input = DCLFPulledInput(index, first, second);
-#			if defined(TEXCOORD_INDEX)
-#				if defined(NORMALS)
-	const uint texCoordIndex = min((uint)input.TexCoord0.z, 127u);
-#				else
-	const uint texCoordIndex = min((uint)input.Position.w, 127u);
-#				endif
-	IndexedTexCoord[texCoordIndex] = asfloat(OrgLatch_EffectDraw.Load4(OrgOffset_EffectDraw + EFFECT_ORG_INDEXED_TEXCOORDS + texCoordIndex * 16));
-#			endif
 	return DCLFShade(input);
 }
 #		else
