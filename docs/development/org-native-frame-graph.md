@@ -5555,3 +5555,138 @@ the world on its own. The quick
 run's shot matches the earlier one (105.6 against 105.3 mean). ORG's unit tests pass, run one at a time, and the Vulkan host test's
 modes sync, async, reuse, revision, segment, external, external-reuse, split, built, stream, arena, rebinding, contributor, inline
 and pipelines (the lease modes and HeadlessBenchmark not run).
+
+### RX 6600 (2026-11-17, `org-native/phases`)
+
+Measured on the RX 6600 (driver 32.0.21045.16010, Vulkan 1.4.315), perf-taa at 1920x1080, uncapped, background runs with
+`DXVK_DEBUG=hang`, VRAM Budget off in both modes (`features.VRAMBudget=false`: it unloaded cells in native, which used more memory).
+The RTX 5080 is no longer in the machine; the AMD iGPU is, with no display on it. Native's BasicRHI device prefers the discrete GPU
+and guest's DXVK picks it too; every run's log names `AMD Radeon RX 6600`. The one display (2560x1440, 60 Hz) is on the RX 6600; the
+game runs borderless at 1080p and presents IMMEDIATE in both modes. Frame periods are not quantized to 16.67 ms, so no vsync applies.
+GPU busy comes from the Windows `GPU Engine` counters for Skyrim's process (nvidia-smi does not apply).
+
+**Missing geometry first (all earlier RX 6600 numbers of this session are void).** The first runs drew almost nothing in the mid
+field: buildings, fences and trees beyond the nearest one were gone, in native and guest alike, from the first frame. With DCLF off,
+or with `CS_DCLF_CULL=frustum`, the scene was whole. The test instance's saved settings held `CullMode: 2` (occlusion): DCLF wrote
+the cull mode back on every save, so the RTX 5080 sessions stored that GPU's default. On the RX 6600 the saved value overrode the
+AMD default (frustum only), and the HZB reads about 0 on this driver (still open, `dclf-open-defects.md`), so occlusion culled
+nearly everything in view. Now the cull mode is saved only when it is not the machine's default, and a saved occlusion mode is not
+applied where the default leaves it out (a warning says so; `CS_DCLF_CULL=occlusion` still forces it). CS `733de3045`. The RTX 5080
+numbers above are not affected: occlusion works there, and its shots show the mid field.
+
+**Baseline (Tracy, 6 s windows, alternating runs; native twice, guest twice).**
+
+| | Native, before the fixes (`b2n*`) | Native, after (`b3n*`) | Guest (`b3g*`) |
+|---|---|---|---|
+| frame period, mean | 20.99 / 21.09 ms | 19.66 / 19.49 ms | 19.33 / 19.30 ms |
+| steady mean | 20.99 / 20.99 ms | 19.53 / 19.49 ms | 19.33 / 19.30 ms |
+| p50 / p95 / p99 | 20.86-21.01 / 22.8-22.9 / 24.9 ms | 19.44-19.55 / 20.56-20.58 / 21.4-21.7 ms | 19.29-19.31 / 22.04-22.10 / 23.8-24.2 ms |
+| frames over twice the median | 0 / 1 | 1 (57.8 ms) / 0 | 0 / 0 |
+| render thread CPU (cycles) | 4.56 / 4.66 ms | 4.51 / 4.47 ms | 3.82 / 3.88 ms |
+| submission thread busy | 2.17 / 2.24 ms | 2.23 / 2.22 ms | - |
+| GPU busy (Skyrim's 3D engine) | 99.5% | 98.2-98.9% | 98.0-98.2% |
+| dedicated VRAM (process) | 6.39-6.41 GB | 4.19 GB | 3.04-3.13 GB |
+
+Both modes are GPU-bound on this card (native's render thread waits about 16 ms a frame in `PresentPace`, its submission thread
+about 18.8 ms in `WaitPresentedFrames`). The gap went from 1.8-1.9 ms to 0.16-0.36 ms; native's p95 and p99 are now below guest's.
+perf-taa is heavy enough here (about 52 fps), so the earlier RX 6600 save was not needed.
+
+**Per stage, GPU ms (native list timestamps, mean of 5 blocks; guest D3D11 event timers `g2gd` and graph timers `g2gt`).** Guest
+mappings marked "est." are sums of its events; its Player View self time (1.89 ms) holds the VL generate and raymarch and other work
+outside named events.
+
+| Stage | Native before (`g2nt`) | Native after (`g5nt`) | Guest |
+|---|---|---|---|
+| start | 0.16 | 0.16 | 0.34 (Water Effects' cubemaps) |
+| DCLF shadows | 2.33 | 2.36 | 2.26 (event), 2.10 (graph) |
+| pre-depth | 0.57 | 0.58 | about 0.5 (est.: terrain shadows 0.04, skylighting probes 0.44 under World) |
+| DCLF Z-prepass | 2.98 | 2.99 | 3.12 (Depth event), 2.87 + 0.04 async (graph) |
+| pre-main | 1.41 | 1.41 | about 1.2 (est.: Shadowmasks 0.73, SSS raymarch 0.32, terrain blending 0.09) |
+| DCLF opaque | 4.08 | 4.13 | 4.08 |
+| deferred+water | 3.66 | 3.68 | about 4.0 (est.: World less DCLF 4.80, less the prepasses counted above) |
+| DCLF forward | 0.49 | 0.50 | 0.50 |
+| post | 4.40 | 2.81 | about 3.1 (est.: image-space events 0.84, outside events 0.40, Player View self 1.89) |
+| UI, first person, anchors | 0.07 | 0.07 | 0.03 (first person) |
+| sum / graphics span | 20.11 / 20.99 | 18.65 / 19.57 | GPU frame 19.23 |
+
+Native's GPU work is now below guest's GPU frame; what is left of the gap is idle on the graphics queue (span less busy 0.92 ms with
+list timing on, against 0.37-0.48 ms on the RTX 5080).
+
+**Fixed: the VL generate in scratch memory (measured).** Native's `cs.volumetric-lighting.generate.0` took 2.20 ms (0.22 ms on the
+RTX 5080). Its ISA (`BASICRHI_VK_DUMP_ISA`) had 48 scratch operations a thread: the ORG build made a static array of the three
+cascade matrices from the latched block and indexed it per thread, and indexed a local step table, which AMD's compiler keeps in
+scratch. The cascade's rows are now read from the latch buffer by offset and the step comes from the index's bits (the same values).
+0.64 ms after; post 4.40 to 2.81 ms. CS `f5d75bfab`. A scan of every native pipeline's ISA found scratch in two more: one DCLF
+Effect vertex pipeline (1,036 scratch operations; the forward stage costs the same as guest's, so it is not hot here) and Exponential
+Height Fog's `VolumetricFogLightScatteringCS` (80; it does not run in this scene). None of guest's 145 dumped pipelines use scratch.
+
+**Fixed: a staging leak of 2.1 GB (measured).** Native held 6.4 GB against guest's 3.1 GB. CS's VRAM ledger (`vram-json`,
+`org.vram_source=org`) put 2.2 GB in staging buffers: `cs.bink.staging` 166 x 8 MB, `cs.scaleform.staging` 2,116, `cs.imgui.staging`
+1,325, growing by one Scaleform and one ImGui buffer a frame (ReBAR memory, so it counts as VRAM). ORG's recording retention kept
+everything a re-recorded inline late batch retained, so each frame's staging buffer stayed until the batch went away. The list's last
+submission is done before it records again, so the retention is released there. ORG `f3557aa`, CS `2bd3c4740`. After: 45, 9 and 22
+buffers, flat over 300 frames; device-local use 6,260 to 4,147 MiB. At about 0.5 MB a frame the old build would have passed the
+6.75 GB budget within minutes of play (estimated); in these 60 s runs it stayed under it, so no frame-time change is attributed to
+it. Left against guest: about 1.1 GB (ORG alias pools 275 MB; 414 MB of buffers and textures outside the ledger's owners, among them
+the engine's vertex and index buffers and terrain shadows' 72 MB heightmap; not analysed further).
+
+**The user's hypotheses on this card.**
+- Pass count (i): not supported. The start stage, with the 129 reflection-sky passes, is 0.16 ms in all (the sky faces' list
+  0.10 ms); the UI stage with Scaleform's instances 0.015-0.021 ms. The census counts a native frame at 272 render passes, 73 lists,
+  694 image barriers (492 layout changes) and 602 buffer barriers, as on the RTX 5080. The batching experiment was not run: the
+  passes it would merge cost too little to move the frame.
+- Barriers and layout changes (ii): they cost more here. In per-pass mode the barrier batches inside lists add up to 0.25 ms a frame
+  (largest 0.08 ms before the shadow-mask draws, 0.04 before SSGI's depth prefilter, 0.03 + 0.03 at the upscaler's depth copies);
+  on the RTX 5080 none reached 0.01 ms. `CS_ORG_KEEP_SKIPPED_BARRIERS=1` changed the span by 0.02 ms.
+- Images in the wrong layout (iii): not shown; the census has no GENERAL attachments in native. The handoff below is the suspect.
+- Boundaries: a queue submission costs much more on this GPU. Every list in a submission of its own (`BASICRHI_SPLIT_SUBMITS=1`)
+  added 0.91 ms of graphics span (about 64 more submissions, about 14 us each; 1.3 us on the RTX 5080). Eight command buffers per
+  list (`BASICRHI_PAD_LISTS=8`) added only 0.12 ms of span (about 0.2 us each, as on NVIDIA) but took the frame from 19.6 to 24-28
+  ms: on AMD the empty command buffers cost the submission thread, not the GPU. `CS_ORG_MERGE_HANDOFFS=0` with
+  `CS_ORG_UPLOADS_WITH_BATCHES=0`: span 19.66 to 19.76 ms.
+
+**Where the GPU idles (submission trace, steady frames, timing on; RTX 5080 values from the third pass).**
+
+| Previous list -> next list | RX 6600 | RTX 5080 | Between them |
+|---|---|---|---|
+| Scaleform -> next frame's first list | 761 us | 21 us | present relay, present, acquire, handoff (waits on the present and the frame values) |
+| post capture.menubg -> Scaleform | 483 us | about 7 us | one handoff list: 14 image barriers, 8 layout changes (untimed) |
+| SSS raymarch -> shared upload | 143 us | 16 us | the G-buffer clears (untimed) |
+| shared upload 1 -> 2 | 54 us | 31 us | the VL depth copy (untimed) |
+| 39 list boundaries inside a submission | 1.2-6 us each | 3.6-5.9 us | list, drain |
+
+The waits these submissions carry were signalled by submissions made 38 to 59 ms earlier, so the CPU is not the cause. The frame
+boundary also holds whatever DWM and other processes run on the GPU between frames (the game's window is covered); guest's
+equivalent was not measured. The 483 us handoff is most likely a decompression at a layout change (an estimate: handoff lists are
+not timed).
+
+**RGP** was not used in this pass: its CLI capture works, but the analysis is GUI-only and decoding the SQTT markers by hand was not
+worth the time against the timestamps above.
+
+**Other findings on this card.**
+- native-validation reports two lifetime hazards the RTX 5080 runs did not: `VUID-vkDestroyImage-image-01000` (2, an image destroyed
+  during the loading screen while an ORG list still used it) and `VUID-vkDestroyImageView-imageView-01026` (8, during gameplay,
+  views still in a descriptor of an in-flight list). Not fixed.
+- With the VolumetricLighting feature off, native stops at a fatal schedule mismatch: the engine's `ISPerlinNoiseCS` dispatch has
+  no CS pass. Not fixed (a feature-off configuration).
+- Every launch logs the render thread watchdog's 15 s Present stall during startup (shader and pipeline compiles); a cold guest run
+  stopped once on it at the loading screen (`ShaderCompiler::Compile` from DCLF's portal setup) and passed when run again.
+
+**Left, ranked (estimates).**
+1. The frame boundary (0.76 ms with timing on), part of it possibly other processes' GPU work.
+2. The handoff before Scaleform (0.48 ms): find which layout change decompresses, and keep that image in a layout that needs none.
+3. Barrier batches inside lists (0.25 ms) and the untimed G-buffer clears (0.14 ms).
+4. Submission boundaries: about 14 us each, 9 a frame (about 0.13 ms).
+5. VRAM: native about 1.1 GB above guest.
+6. The two lifetime hazards, and DCLF's HZB reading 0 on AMD (occlusion culling stays off there).
+
+**Checks (RX 6600).** Final build (DLL 58268e228901 and the VL shader), one background run each: native-quick, native-river,
+native-interior, native-validation, the loading-thread run, the frozen-world run, guest-quick: passed, 0 tap errors, no `NoPass`,
+recipe checks 0 findings, no failed build; native-validation shows the known 20 `VUID-vkCmdDraw-None-09600` and back-buffer layout
+lines and the 2 `vkDestroyImage` hazards above (the view hazard did not show in this run). Shots match the earlier RX 6600 shots of
+this session (means within 1.4) and the RTX 5080's quick shot in content; native and guest shots of the same view differ by the same
+amount before and after the changes. ORG's unit tests pass, run one at a time, and the Vulkan host test's modes inline, sync, async,
+reuse, revision, segment, external, external-reuse, split, built, stream, arena, rebinding and contributor on the RX 6600; pipelines
+timed out once after "input layout build" (where it hung once before on the RTX 5080) and passed when run again (the lease modes
+and HeadlessBenchmark not run). The MO2 instance keeps `+CS AB nfg` and `*TerrainHelper.esp`, and every run loaded into the
+world on its own.
