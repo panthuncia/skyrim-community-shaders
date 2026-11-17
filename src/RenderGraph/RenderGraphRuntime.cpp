@@ -1600,9 +1600,15 @@ struct RenderGraphRuntime::Impl
 					const auto folded = org::diagnostics::FoldedAtExecutionBarriers().load(std::memory_order_relaxed);
 					const double foldedFrame = double(folded - foldedSeen) / segmentFrames;
 					foldedSeen = folded;
+					// The entry counts are the admissions' plans. A submission leaves out the entry barriers of resources no running pass
+					// of the execution touched (org::compiler::UntouchedResources); those are counted here.
+					static std::uint64_t untouchedSeen = 0;
+					const auto untouched = org::diagnostics::UntouchedEntryBarriers().load(std::memory_order_relaxed);
+					const double untouchedFrame = double(untouched - untouchedSeen) / segmentFrames;
+					untouchedSeen = untouched;
 					logger::info("[ORG] Barriers a frame, by epoch: entry {:.1f}, body {:.1f} in all{}; late barriers folded at execution: {:.1f} a frame (body less "
-								 "these: {:.1f})",
-						entryTotal, bodyTotal, barriers, foldedFrame, bodyTotal - foldedFrame);
+								 "these: {:.1f}); entry barriers left out (untouched): {:.1f} a frame (entry less these: {:.1f})",
+						entryTotal, bodyTotal, barriers, foldedFrame, bodyTotal - foldedFrame, untouchedFrame, entryTotal - untouchedFrame);
 				}
 				std::uint64_t paceWaits = 0, paceUs = 0;
 				RenderGraph::Engine::Native::TakePresentPace(paceWaits, paceUs);
