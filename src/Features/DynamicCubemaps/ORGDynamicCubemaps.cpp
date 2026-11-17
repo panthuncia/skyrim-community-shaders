@@ -356,27 +356,37 @@ namespace
 		std::vector<org::ResourceBindingToken> sources, targets;
 	};
 
-	// The copies' run gate entries (ORGDynamicCubemaps::Impl::copyGate): every commit opens them, as the copies ran at every run.
+	// The copies' run gate entries (ORGDynamicCubemaps::Impl::copyGate). A commit opens an entry while its copy has a new source
+	// to take (CopyDirty).
 	constexpr std::uint32_t kFilteredMipZeroEntry = 0;
 	constexpr std::uint32_t kBC6HEntry = 1;  // + the cubemap
 	constexpr std::uint32_t kCopyEntries = 3;
+
+	// Per copy entry: its source changed since the copy last recorded. A commit sets it when a pass writes the source (the inference
+	// for the filtered mip 0, a publish for a BC6H cubemap), and the copy pass clears it when it records the copy. A run whose gate
+	// entry is open runs the copy, from a new recording or from a kept one, so one run after the change is enough. An entry stays
+	// open while its copy is not in the running graph yet (a BC6H copy is added after its cubemap's first publish).
+	using CopyDirty = std::array<std::atomic<bool>, kCopyEntries>;
 
 	struct CopyFrame
 	{
 		std::shared_ptr<const CopyPlan> plan;
 		std::shared_ptr<const RenderGraph::RunGate> gate;
 		std::uint32_t entry = 0;
+		std::shared_ptr<CopyDirty> dirty;
 	};
 
 	/**
-	 * @brief Whole subresource copies, every execution. Only copies whose result does not change between the frames that need them:
-	 * the inferred cubemap's mip 0 into the filtered one, and each encoder's output into its BC6H cubemap.
+	 * @brief Whole subresource copies, in the runs after their source changed (CopyDirty). Only copies whose result does not change
+	 * between the frames that need them: the inferred cubemap's mip 0 into the filtered one, and each encoder's output into its BC6H
+	 * cubemap.
 	 */
 	class CopyPass final : public org::TypedRenderGraphPass<CopyPass, CopyFrame, CopyBindings>
 	{
 	public:
-		CopyPass(std::shared_ptr<const CopyPlan> a_plan, std::shared_ptr<const RenderGraph::RunGate> a_gate, std::uint32_t a_entry) :
-			plan(std::move(a_plan)), gate(std::move(a_gate)), entry(a_entry) {}
+		CopyPass(std::shared_ptr<const CopyPlan> a_plan, std::shared_ptr<const RenderGraph::RunGate> a_gate, std::uint32_t a_entry,
+			std::shared_ptr<CopyDirty> a_dirty) :
+			plan(std::move(a_plan)), gate(std::move(a_gate)), entry(a_entry), dirty(std::move(a_dirty)) {}
 
 		CopyBindings Declare(org::PassBuilder& a_builder)
 		{
@@ -391,7 +401,7 @@ namespace
 
 		void Revision(std::vector<std::uint64_t>& a_out) const { a_out.push_back(reinterpret_cast<std::uintptr_t>(plan.get())); }
 
-		CopyFrame Prepare(const CopyBindings&, const org::PassPrepareContext&) const { return { plan, gate, entry }; }
+		CopyFrame Prepare(const CopyBindings&, const org::PassPrepareContext&) const { return { plan, gate, entry, dirty }; }
 
 		// Its commands depend on the run only through SkipsAtExecution: a kept late batch keeps its list while the answer holds.
 		static constexpr bool kRecordKeyedBySkip = true;
@@ -412,12 +422,15 @@ namespace
 				commands.CopyTextureRegion(
 					{ .texture = a_recording.Resolve(a_bindings.targets[region.target]).GetHandle(), .mip = region.targetMip, .arraySlice = region.targetSlice },
 					{ .texture = a_recording.Resolve(a_bindings.sources[region.source]).GetHandle(), .mip = region.sourceMip, .arraySlice = region.sourceSlice });
+			if (a_frame.dirty)
+				(*a_frame.dirty)[a_frame.entry].store(false, std::memory_order_release);
 		}
 
 	private:
 		std::shared_ptr<const CopyPlan> plan;
 		std::shared_ptr<const RenderGraph::RunGate> gate;
 		std::uint32_t entry = 0;
+		std::shared_ptr<CopyDirty> dirty;
 	};
 
 	/** @brief The engine's and the feature's textures the passes read, imported (FrameAnchors). */
@@ -467,7 +480,13 @@ struct ORGDynamicCubemaps::Impl
 	bool programsDirty = false;
 	org::OwnedDescriptorBinding sampler;
 	std::shared_ptr<org::LatchBlock> latch;
-	std::shared_ptr<RenderGraph::RunGate> copyGate;  // the copies' entries (kCopyEntries), opened by every commit
+	std::shared_ptr<RenderGraph::RunGate> copyGate;  // the copies' entries (kCopyEntries), opened while their source is new
+	std::shared_ptr<CopyDirty> copyDirty = [] {
+		auto dirty = std::make_shared<CopyDirty>();
+		for (auto& entry : *dirty)
+			entry.store(true);
+		return dirty;
+	}();
 	Imports imports;
 
 	// Graph-only, read in later frames (History). The capture textures per cubemap; the filtered one is a plain array, which the
@@ -628,7 +647,7 @@ struct ORGDynamicCubemaps::Impl
 		return plan;
 	}
 
-	/** @brief The inferred cubemap's mip 0 into the filtered one's, every frame: the same between the inference frames. */
+	/** @brief The inferred cubemap's mip 0 into the filtered one's, after an inference (the same between the inference frames). */
 	std::shared_ptr<const CopyPlan> FilteredMipZeroPlan() const
 	{
 		auto plan = std::make_shared<CopyPlan>();
@@ -639,7 +658,7 @@ struct ORGDynamicCubemaps::Impl
 		return plan;
 	}
 
-	/** @brief A cubemap's encoder outputs into its BC6H cubemap, every frame: the same between its publish frames. */
+	/** @brief A cubemap's encoder outputs into its BC6H cubemap, after a publish (the same between its publish frames). */
 	std::shared_ptr<const CopyPlan> BC6HPlan(std::uint32_t a_cubemap) const
 	{
 		auto plan = std::make_shared<CopyPlan>();
@@ -663,6 +682,8 @@ struct ORGDynamicCubemaps::Impl
 		// The D3D11 path's ceil(size / 8) groups on each face.
 		const std::uint32_t faceGroups = (size + 7) / 8;
 		if (step.capture) {
+			// The inference writes the inferred cubemap's mip 0, which the filtered mip 0 copies.
+			(*copyDirty)[kFilteredMipZeroEntry].store(true, std::memory_order_release);
 			const Variant variant = !step.reflections ? kBase : (feature.fakeReflections ? kFake : kReflections);
 			data.capture = feature.NextCaptureConstants(step.reflections);
 			data.detect[cubemap] = { 1, 1, 1, 0 };
@@ -685,6 +706,7 @@ struct ORGDynamicCubemaps::Impl
 				data.publish[cubemap][mip] = { publishGroups, publishGroups, kFaces, 0 };
 			}
 			encoded[cubemap] = true;
+			(*copyDirty)[kBC6HEntry + cubemap].store(true, std::memory_order_release);
 		}
 		// The BC6H cubemap is valid once its copy runs: on its first publish only from the next frame (AfterUpdate adds the copy).
 		for (std::uint32_t i = 0; i < 2; ++i)
@@ -693,7 +715,8 @@ struct ORGDynamicCubemaps::Impl
 		latch->WriteValue(RenderGraphRuntime::Get().Host()->CurrentRun(), 0, data);
 		if (copyGate)
 			for (std::uint32_t entry = 0; entry < kCopyEntries; ++entry)
-				copyGate->OpenDispatch(entry, 1);
+				if ((*copyDirty)[entry].load(std::memory_order_acquire))
+					copyGate->OpenDispatch(entry, 1);
 	}
 };
 
@@ -847,7 +870,7 @@ bool ORGDynamicCubemaps::RegisterClient()
 		return [self, a_cubemap]() -> std::shared_ptr<org::RenderPass> {
 			const auto& current = self->impl;
 			// From the frame after the cubemap's first encode: before it, its encoder outputs hold nothing.
-			return current && current->copying[a_cubemap] ? std::make_shared<CopyPass>(current->BC6HPlan(a_cubemap), current->copyGate, kBC6HEntry + a_cubemap) :
+			return current && current->copying[a_cubemap] ? std::make_shared<CopyPass>(current->BC6HPlan(a_cubemap), current->copyGate, kBC6HEntry + a_cubemap, current->copyDirty) :
 			                                                nullptr;
 		};
 	};
@@ -883,7 +906,7 @@ bool ORGDynamicCubemaps::RegisterClient()
 	pass("cs.dyncubemaps.capture-mips-reflections", 2, Kind::Compute, mips(false, 1));
 	pass("cs.dyncubemaps.infer", 3, Kind::Compute, gated(&Impl::InferPlan));
 	pass("cs.dyncubemaps.filtered-mip0", 4, Kind::Copy, [self]() -> std::shared_ptr<org::RenderPass> {
-		return self->impl ? std::make_shared<CopyPass>(self->impl->FilteredMipZeroPlan(), self->impl->copyGate, kFilteredMipZeroEntry) : nullptr;
+		return self->impl ? std::make_shared<CopyPass>(self->impl->FilteredMipZeroPlan(), self->impl->copyGate, kFilteredMipZeroEntry, self->impl->copyDirty) : nullptr;
 	});
 	pass("cs.dyncubemaps.inferred-mips", 5, Kind::Compute, mips(true, 0));
 	pass("cs.dyncubemaps.irradiance", 6, Kind::Compute, gated(&Impl::IrradiancePlan));
