@@ -3580,6 +3580,18 @@ namespace FrameAnchors
 			logger::info("[ORG] frame segments: dropped {} kept recordings of the stages that hold the {} anchor ({})", dropped, kInfo[index].name, a_why);
 	}
 
+	std::optional<std::uint32_t> FirstGraphInstance(Anchor a_anchor)
+	{
+		const std::uint32_t index = IndexOf(a_anchor);
+		if (!SegmentsOn() || index >= kAnchors)
+			return std::nullopt;
+		for (std::uint32_t d = 0; d < kDeclared; ++d)
+			if (WholeMembers(d) >> index & 1u)
+				if (const auto k = StepAt(d, a_anchor); k < kMaxSteps)
+					return kDeclaredInfo[d].steps[k].firstInstance;
+		return std::nullopt;
+	}
+
 	bool NamedByStage(std::string_view a_id)
 	{
 		const auto& state = Anchors();

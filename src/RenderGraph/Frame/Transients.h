@@ -59,6 +59,7 @@ namespace RenderGraph::Frame::Transients
 	{
 		GBuffer,           // Deferred's G-buffer: cleared in pre-main, read by the composite in deferred+water; DCLF's passes bind it from
 		                   // the Z-prepass to first person
+		ScaleformScratch,  // Scaleform's scratch images (GFx's render targets and filter passes): the UI stage only
 		Count
 	};
 

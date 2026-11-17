@@ -136,6 +136,7 @@ namespace RenderGraph::Engine::Scaleform
 			std::uint64_t mixed = 0;
 			std::uint64_t lost = 0;
 			std::uint64_t segments = 0;                    // graph segments drawn
+			std::uint64_t scratchSegments = 0;             // of them, into a scratch image (a GFx render target or a filter pass)
 			std::map<std::string, std::uint64_t> reasons;  // left out (a whole display counts once)
 		};
 
@@ -153,8 +154,10 @@ namespace RenderGraph::Engine::Scaleform
 			std::string reasons;
 			for (const auto& [reason, count] : a_counters.reasons)
 				reasons += fmt::format("{}{} {}", reasons.empty() ? "" : ", ", count, reason);
-			logger::info("[ORG] Scaleform census: {} displays: {} on the graph, {} with draws left out, {} not on the graph; {} graph segments; left out: {}",
-				total, a_counters.graph, a_counters.mixed, a_counters.lost, a_counters.segments, reasons.empty() ? "none" : reasons);
+			logger::info(
+				"[ORG] Scaleform census: {} displays: {} on the graph, {} with draws left out, {} not on the graph; {} graph segments ({} into scratch images: GFx "
+				"render targets and filter passes); left out: {}",
+				total, a_counters.graph, a_counters.mixed, a_counters.lost, a_counters.segments, a_counters.scratchSegments, reasons.empty() ? "none" : reasons);
 		}
 
 		/** @brief Something of a display (or a whole one) the graph does not draw, and why: logged the first time a reason comes up. */
@@ -344,6 +347,8 @@ namespace RenderGraph::Engine::Scaleform
 				auto& counters = Count();
 				std::scoped_lock lock(counters.mutex);
 				++counters.segments;
+				if (capture.display.scratch >= 0)
+					++counters.scratchSegments;
 				return;
 			}
 			reason = reason ? reason : "the graph did not draw a segment";

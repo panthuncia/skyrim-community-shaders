@@ -34,6 +34,9 @@ namespace RenderGraph::Frame::Transients
 			{ Group::GBuffer, "Deferred's G-buffer", { Pos(StageId::Depth), Pos(StageId::FirstPerson) },
 				"DCLF's Z-prepass binds it; pre-main clears it; DCLF's opaque pass draws it; deferred+water reads it (SSGI, subsurface, the "
 				"composite, its last read); DCLF's forward and first-person passes bind it" },
+			{ Group::ScaleformScratch, "Scaleform's scratch images", { Pos(StageId::Ui), Pos(StageId::Ui) },
+				"the UI stage's displays: a GFx render target or filter pass clears one and draws into it, a later display segment of the same "
+				"display reads it; nothing reads them in another frame" },
 		} };
 
 		struct State

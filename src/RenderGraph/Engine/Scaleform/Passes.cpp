@@ -13,6 +13,7 @@
 #	include "RenderGraph/Engine/Native/Native.h"
 #	include "RenderGraph/Engine/Scaleform/Display.h"
 #	include "RenderGraph/Engine/Tripwire/Tripwire.h"
+#	include "RenderGraph/Frame/Transients.h"
 #	include "RenderGraph/FrameAnchors.h"
 #	include "RenderGraph/FrameStaging.h"
 #	include "RenderGraph/ProgramCache.h"
@@ -224,6 +225,7 @@ namespace RenderGraph::Engine::Scaleform::Passes
 			std::array<org::OwnedDescriptorBinding, 4> samplers;  // the renderer's, by wrap * 2 + sample
 			std::vector<std::shared_ptr<Surface>> surfaces;       // one per role that has a texture, then the scratch images
 			std::uint32_t scratchWidth = 0, scratchHeight = 0;    // every scratch image's size (the largest role surface's)
+			std::shared_ptr<const void> scratchPlacement;        // the scratch images' bytes in the frame arena (null: memory of their own)
 			// Native mode: the tracked textures the displays read (graph-owned, or exempt ones the context wrote since). The passes
 			// declare each, and a draw binds its declared view. A new one registers the client again after the run (readsChanged).
 			std::vector<Read> reads;
@@ -807,11 +809,18 @@ namespace RenderGraph::Engine::Scaleform::Passes
 			auto declared = std::make_shared<Reads>();
 			for (const auto& read : a_state.reads)
 				declared->push_back(read.texture);
-			// The scratch images, read by any pass but their own (DisplayPass::Declare leaves its own target out).
+			// The scratch images are read only by a later display segment of the display that drew into them: a pass of any instance but the
+			// one the UI stage's graph makes first declares them (DisplayPass::Declare leaves its own target out). No earlier tap of the frame
+			// wrote anything that first instance could read, so each scratch image's first use in the frame is a draw into it, which clears it:
+			// its bytes may hold another stage's transients before (the frame arena). The anchor's own epoch (guest mode) runs one instance a
+			// run, and a scratch image there keeps what an earlier run drew: every pass declares them.
+			auto withScratch = std::make_shared<Reads>(*declared);
 			for (const auto& surface : a_state.surfaces)
 				if (surface->scratch >= 0 && surface->Drawable())
-					declared->push_back(surface->colour);
-			std::shared_ptr<const Reads> reads = std::move(declared);
+					withScratch->push_back(surface->colour);
+			std::shared_ptr<const Reads> reads = std::move(withScratch);
+			std::shared_ptr<const Reads> firstReads = std::move(declared);
+			const auto firstInstance = FrameAnchors::FirstGraphInstance(Anchor::Interface);
 			for (std::size_t i = 0; i < a_state.surfaces.size(); ++i) {
 				std::shared_ptr<const Surface> surface = a_state.surfaces[i];
 				if (!surface->Drawable())
@@ -824,18 +833,21 @@ namespace RenderGraph::Engine::Scaleform::Passes
 						// It reads the run's slot, which the commit stores: recorded then, without a ticket prepared again.
 						.atExecution = true };
 					// One pass per instance (the k-th display segment of the frame), each reading its own slots and gate entries.
-					pass.makeInstance = [surface, a_slots, gate, a_withDepth, reads](std::uint32_t a_instance) -> std::shared_ptr<org::RenderPass> {
+					pass.makeInstance = [surface, a_slots, gate, a_withDepth, reads, firstReads, firstInstance](std::uint32_t a_instance) -> std::shared_ptr<org::RenderPass> {
 						if (a_instance >= a_slots.size())
 							return nullptr;
 						// Recorded at execution in native mode (an anchor's own epoch) and in the UI stage's late batch alike.
-						return std::make_shared<DisplayPass>(surface, a_slots[a_instance], gate, a_withDepth, reads, FrameAnchors::RecordsAtExecution(Anchor::Interface),
-							a_instance);
+						return std::make_shared<DisplayPass>(surface, a_slots[a_instance], gate, a_withDepth, firstInstance == a_instance ? firstReads : reads,
+							FrameAnchors::RecordsAtExecution(Anchor::Interface), a_instance);
 					};
 					client.passes.push_back(std::move(pass));
 				};
-				add(surface->colourSlots, false, "", 100 + 2 * static_cast<std::int32_t>(i));
+				// Within an instance the scratch images' passes come first, as GFx draws a render target or a filter pass before the segment
+				// that reads it. One instance draws onto one surface, so this order only keeps the declarations in GFx's order.
+				const std::int32_t order = surface->scratch >= 0 ? 2 * surface->scratch : 100 + 2 * static_cast<std::int32_t>(i);
+				add(surface->colourSlots, false, "", order);
 				if (surface->Masks())
-					add(surface->depthSlots, true, ".masks", 101 + 2 * static_cast<std::int32_t>(i));
+					add(surface->depthSlots, true, ".masks", order + 1);
 			}
 			// Fixed instances in the UI stage, all declared: how many displays the engine draws is its late decision. Made instance by
 			// instance, so a later display's passes follow an earlier one's on every surface.
@@ -1320,10 +1332,8 @@ namespace RenderGraph::Engine::Scaleform::Passes
 				}
 			if (!a_state.scratchWidth || !a_state.scratchHeight)
 				return;
-			// Memory of their own, not the frame arena (Frame/Transients.h): every draw pass declares a read of every scratch image,
-			// and the stage's plan puts the role targets' draws, which read them, before the scratch images' own draws. So the first
-			// use in the frame is a read, and in the arena its bytes would hold another stage's data then. Placing them needs the
-			// draws ordered by what each really reads.
+			// Frame transients of the UI stage (Frame/Transients.h, group ScaleformScratch): their bytes are shared with other stages'
+			// transients. A draw into one clears it first, and no pass reads one before that draw in the frame (MakeClient).
 			std::vector<std::shared_ptr<org::PixelBuffer>> textures;
 			for (std::uint32_t i = 0; i < kScratchTargets; ++i) {
 				org::TextureDescription desc{};
@@ -1342,8 +1352,15 @@ namespace RenderGraph::Engine::Scaleform::Passes
 				texture->SetName(fmt::format("cs.scaleform.scratch.{}", i));
 				textures.push_back(std::move(texture));
 			}
-			for (const auto& texture : textures)
-				texture->Materialize();
+			// Guest mode, or the arena off (CS_ORG_FRAME_ARENA=0): memory of their own.
+			try {
+				a_state.scratchPlacement = RenderGraph::Frame::Transients::Place(RenderGraph::Frame::Transients::Group::ScaleformScratch, textures);
+			} catch (const std::exception& e) {
+				stl::report_and_fail(fmt::format("Community Shaders: Scaleform's scratch images could not be placed in the frame arena: {}", e.what()));
+			}
+			if (!a_state.scratchPlacement)
+				for (const auto& texture : textures)
+					texture->Materialize();
 			for (std::uint32_t i = 0; i < textures.size(); ++i) {
 				auto& texture = textures[i];
 				auto surface = std::make_shared<Surface>();
@@ -1358,7 +1375,8 @@ namespace RenderGraph::Engine::Scaleform::Passes
 					QueuePrograms(a_state, *surface);
 				a_state.surfaces.push_back(std::move(surface));
 			}
-			logger::info("[ORG] Scaleform: {} scratch images of {}x{} for GFx's render targets", kScratchTargets, a_state.scratchWidth, a_state.scratchHeight);
+			logger::info("[ORG] Scaleform: {} scratch images of {}x{} for GFx's render targets ({})", kScratchTargets, a_state.scratchWidth, a_state.scratchHeight,
+				a_state.scratchPlacement ? "in the frame arena, the UI stage's span" : "memory of their own");
 		}
 	}
 

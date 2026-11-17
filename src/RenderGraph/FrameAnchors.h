@@ -684,6 +684,14 @@ namespace FrameAnchors
 	 */
 	void DropKeptRecordings(Anchor a_anchor, std::string_view a_why);
 
+	/**
+	 * @brief Native mode with CS's stages: for a client with instances at an anchor a stage holds wholly, the instance whose passes come first
+	 * in the stage's graph (the first step at the anchor makes its range from there; the UI stage's Interface steps make 8 to 15, then 0 to 7).
+	 * No earlier tap of the frame can have written anything that instance's passes read. Empty without stages, or when no stage holds the
+	 * anchor wholly. Any thread, after the render graph initialized.
+	 */
+	std::optional<std::uint32_t> FirstGraphInstance(Anchor a_anchor);
+
 	/** @brief Whether a declared segment (a CS stage) names client a_id at one of its steps. Fixed once the render graph initialized. Any thread. */
 	bool NamedByStage(std::string_view a_id);
 
