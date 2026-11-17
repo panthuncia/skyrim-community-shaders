@@ -348,8 +348,9 @@ namespace DCLF::Features::Water
 				Family::BeginBatch();
 				auto run = std::make_shared<Run>();
 				run->view = kView;
-				// The view's client and an anchor that can run now, then the batch's shape: otherwise the engine draws it (logged once each).
-				if (!WaterDraws::CanTake(kView) || !CurrentShape(a_accumulator, kView, *run, capture)) {
+				// The batch's shape (the main camera's accumulator), then its client and the stage that holds it: otherwise the engine
+				// draws it (logged once each).
+				if (!CurrentShape(a_accumulator, kView, *run, capture) || !WaterDraws::CanTake(kView)) {
 					WaterDraws::Keep(std::move(run->owners));
 					func(a_accumulator, a_first, a_last, a_flags, a_group);
 					return;

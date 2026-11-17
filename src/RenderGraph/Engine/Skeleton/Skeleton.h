@@ -16,7 +16,7 @@
  * tables. Its clears are draws through a run gate, one per set of depth flags, and a colour clear's colour is latched, so the
  * recording is kept and a run does only the clears the engine asked for. A group registers again only when the engine made one
  * of its targets again (a resize). The engine's call is withheld only when the anchor can run the pass now
- * (FrameAnchors::CanRun), and made at the flush when the run did not submit it. The binds stay with D3D11: draws DCLF does not
+ * (guest mode: FrameAnchors::Scheduled; native mode: a stage place takes it, Take). The binds stay with D3D11: draws DCLF does not
  * claim yet still read them.
  *
  * Fallback, per call: a view the skeleton has no pass for, a format the clear programs cannot draw (integer formats), a clear
@@ -31,8 +31,11 @@
  * world frame a clear or copy is not a ticket of its own. Its pass is a member of the graph of the epoch that writes the target first
  * after the engine's call (its host: a Drawcall Limit Fix epoch, at the start of its graph, or an anchor, first by order). The
  * engine's call is a tap: it records the clear (its gate entry and colour) on the CPU, and the host's commit writes that into the
- * host's run. Work its host does not take first, or at all by the next Begin, is a counted tap error. Every other frame kind keeps the
- * per-anchor path below.
+ * host's run. Work its host does not take first, or at all by the next Begin, is a counted tap error. A clear Drawcall Limit Fix's
+ * graph does not draw this frame (before DCLF draws, its load holds) is a pass at a place of the start stage (the shadow slices) or the
+ * pre-depth stage (RenderDepth's main depth clear). Every other frame kind's clears are places of the UI stage. A clear or copy with no
+ * stage place is a mismatch (native mode has no per-anchor path); the reflection faces' clears, frame 0's and a Bink frame's main depth
+ * clear and the cubemap render's depth copy are dropped (no reader). Guest mode keeps the per-anchor path.
  *
  * Default off: nothing is installed, and the engine's calls are unchanged.
  */

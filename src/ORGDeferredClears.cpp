@@ -208,7 +208,7 @@ namespace ORGDeferredClears
 			return;
 		}
 		shared.setUp = true;
-		FrameAnchors::RequestJoin(kClientId, FrameAnchors::Anchor::Prepass);
+
 		logger::info("[ORG] Deferred clears: the GBuffer targets are cleared at the Prepass anchor (CS_ORG_DEFERRED_CLEARS=0 leaves them to the engine)");
 	}
 

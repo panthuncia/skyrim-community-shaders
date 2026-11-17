@@ -1908,7 +1908,7 @@ namespace RenderGraph::Engine::ImageSpace
 		/**
 		 * @brief The graph pass of a spec, made at a build of the anchor's graph (render thread): its program taken now (built, waited
 		 * for, or built here and logged), then the pass AnchorPasses makes for its draw or dispatch. Null leaves it out of that build
-		 * (logged): its shape's draws are refused by the commit's caller, since the gate entry stays closed and CanRun still holds.
+		 * (logged): its shape's draws are refused by the commit's caller, since the gate entry stays closed and Scheduled still holds.
 		 */
 		std::shared_ptr<org::RenderPass> MakePass(const std::shared_ptr<const Spec>& a_spec, const std::shared_ptr<const org::LatchBlock>& a_latch,
 			const std::shared_ptr<const RunGate>& a_gate, const char* a_clientId = kClientId)
@@ -2275,7 +2275,7 @@ namespace RenderGraph::Engine::ImageSpace
 		/**
 		 * @brief Registers the client with a pass for every shape of a_keys (numbered from 0 by their place in the frame), replacing any
 		 * earlier registration. Setup's, and again on the same shapes when the engine made its targets again. The anchor's graph is
-		 * built with it at the next build point; FrameAnchors::CanRun says when.
+		 * built with it at the next build point; FrameAnchors::Scheduled says when.
 		 */
 		void RegisterClient(const std::vector<ShapeKey>& a_keys)
 		{
@@ -2710,7 +2710,7 @@ namespace RenderGraph::Engine::ImageSpace
 		/**
 		 * @brief Once a frame: when the engine made a registered target again (a resize), the client registers the same shapes on the
 		 * new imports. FrameAnchors::EngineTarget's new import already asks every anchor's graph to be built again; this registration
-		 * joins that build. Until it is built, CanRun refuses the draws.
+		 * joins that build. Until it is built, Scheduled refuses the draws.
 		 */
 		void CheckImports()
 		{
@@ -2787,7 +2787,7 @@ namespace RenderGraph::Engine::ImageSpace
 		/**
 		 * @brief Runs the pending batch at the ImageSpace anchor, here in the D3D11 stream.
 		 *
-		 * Its draws were taken only while FrameAnchors::CanRun said the run would draw them, so a run that did not submit is an epoch
+		 * Its draws were taken only while FrameAnchors::Scheduled said the run would draw them, so a run that did not submit is an epoch
 		 * failure (its onFailed returns ImageSpace to the engine at the next poll). The engine's state for those draws is gone by
 		 * now, so they cannot be drawn by the engine any more: they are counted and logged as an error.
 		 */
@@ -2966,7 +2966,7 @@ namespace RenderGraph::Engine::ImageSpace
 			Start,        // the start stage's water effects: the displacement simulation and the flow copies (StartSteps.inl)
 			Menu,         // a menu scene's composites (the loading screen, the menus, an item over the live world): the UI stage's (MenuSteps.inl)
 			Frozen,       // a frozen world's composite, first in the UI stage (MenuSteps.inl)
-			FaceTint,     // the player's face tint at a load (MenuSteps.inl): no stage's yet, the ImageSpace anchor's own epoch
+			FaceTint,     // the player's face tint at a load (MenuSteps.inl): the start stage's in a world frame, the UI stage's at a loading screen
 			Count
 		};
 		constexpr std::array<const char*, static_cast<std::size_t>(PostPart::Count)> kPostIds{ "cs.engine.imagespace.post.composites", "cs.engine.imagespace.post.hdr",
@@ -3018,7 +3018,7 @@ namespace RenderGraph::Engine::ImageSpace
 					Refuse("its pass, built on first sight, failed with the anchor", a_effect);
 					return {};
 				}
-				if (!FrameAnchors::CanRun(late->id, Anchor::ImageSpace)) {
+				if (!FrameAnchors::Scheduled(late->id, Anchor::ImageSpace)) {
 					Flush();
 					Refuse("a shape first seen this session, whose pass is being built off the render thread", a_effect);
 					return {};
@@ -3046,7 +3046,7 @@ namespace RenderGraph::Engine::ImageSpace
 			// A new batch is a new run: withheld only when the run can draw it now (owner, built graph). An anchor makes as many runs a
 			// frame as its batches need (run leases), so no scope runs out of them.
 			if (state.batch.empty()) {
-				if (!FrameAnchors::CanRun(kClientId, Anchor::ImageSpace)) {
+				if (!FrameAnchors::Scheduled(kClientId, Anchor::ImageSpace)) {
 					// Before the first build after Setup or after a resize's registration (one build point).
 					Refuse("the ImageSpace anchor's graph does not hold this registration yet", a_effect);
 					return {};

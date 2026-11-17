@@ -366,6 +366,8 @@ namespace RenderGraph::Frame::Driver
 			return "unbacked engine target used";
 		case TapError::NotExecuted:
 			return "run not executed";
+		case TapError::OwnEpoch:
+			return "own epoch in native mode";
 		default:
 			return "?";
 		}

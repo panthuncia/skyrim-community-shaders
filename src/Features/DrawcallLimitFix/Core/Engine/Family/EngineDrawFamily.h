@@ -437,7 +437,7 @@ namespace DCLF::Family
 	std::uint32_t KeptFrames();
 
 	/**
-	 * @brief Runs a_anchor for a client whose latched draws are ready (CanRun said it would draw): a_pending, which the client's active
+	 * @brief Runs a_anchor for a client whose latched draws are ready (HeldForBatch said it would draw): a_pending, which the client's active
 	 * callback returns, is set for the run. True when the run was submitted (RunStatus::Ran). Any other status is an error: the latched
 	 * draws were not drawn this frame, logged once per status as an error (with a_family and a_client). Nothing is retried. The client's
 	 * executed callback counts the runs that drew.
@@ -445,11 +445,11 @@ namespace DCLF::Family
 	bool RunWithheld(std::string_view a_family, std::string_view a_client, FrameAnchors::Anchor a_anchor, bool& a_pending);
 
 	/**
-	 * @brief Whether a batch of a family's client at the EngineDraws anchor is drawn by the graph now (the batch is taken).
+	 * @brief Whether a batch of a family's client at a_anchor is drawn by the graph now (the batch is taken).
 	 * Native mode: the stage step that names the client holds it (FrameAnchors::HeldNow). A batch while no open stage holds the client
 	 * is a tap error (NotDeclared, in a_segment: the stage the client belongs to); one the stage's schedule does not hold yet lags (its
 	 * first build): nothing is drawn. Guest mode: the anchor's own built graph holds the client (FrameAnchors::Scheduled). a_family names
 	 * the family in the messages.
 	 */
-	bool HeldForBatch(std::string_view a_family, std::string_view a_client, std::uint32_t a_segment);
+	bool HeldForBatch(std::string_view a_family, std::string_view a_client, std::uint32_t a_segment, FrameAnchors::Anchor a_anchor = FrameAnchors::Anchor::EngineDraws);
 }

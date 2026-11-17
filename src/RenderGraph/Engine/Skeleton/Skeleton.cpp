@@ -139,6 +139,8 @@ namespace RenderGraph::Engine::Skeleton
 			ImageSpace,      // the ImageSpace anchor: the water targets, cleared after the water's draws for the chain's water blend, and the TAA
 			                 // mask and kMAIN_ONLY_ALPHA, cleared after the water blend (the deferred+water stage's last ImageSpace step)
 			PostChain,       // the ImageSpace anchor in the post stage: the TAA mask, cleared inside the post chain when TAA is turned on
+			Start,           // the start stage's place: the shadow maps' slices when DCLF's shadow view does not host them (before DCLF draws, its holds)
+			PreDepth,        // the pre-depth stage's place: Main::RenderDepth's main depth clear when DCLF's Z-prepass does not host it
 			Count
 		};
 		constexpr std::size_t kHosts = static_cast<std::size_t>(Host::Count);
@@ -159,6 +161,8 @@ namespace RenderGraph::Engine::Skeleton
 			{ "deferred-passes", false, RenderGraphRuntime::Segment::Count, Anchor::DeferredPasses },
 			{ "image-space", false, RenderGraphRuntime::Segment::Count, Anchor::ImageSpace },
 			{ "post-chain", false, RenderGraphRuntime::Segment::Count, Anchor::ImageSpace },
+			{ "start", false, RenderGraphRuntime::Segment::Count, Anchor::EngineShadowClear },
+			{ "pre-depth", false, RenderGraphRuntime::Segment::Count, Anchor::EngineFrameClear },
 		} };
 
 		std::size_t HostIndex(Host a_host) { return static_cast<std::size_t>(a_host); }
@@ -181,13 +185,28 @@ namespace RenderGraph::Engine::Skeleton
 
 		/**
 		 * @brief Whether a host is an anchor a CS stage holds (pre-main's EngineDraws and Prepass steps, the deferred stage's DeferredPasses
-		 * step, the water stage's EngineDraws and ImageSpace steps). Its clears are passes of the stage: the engine's call stages their gate entry
-		 * and colour into the stage's frame inputs (FrameAnchors::StageInputs), and the stage's one commit carries them. Nothing waits for
-		 * a host epoch, so no order between the call and the host's tap matters.
+		 * step, the water stage's EngineDraws and ImageSpace steps, the start and pre-depth stages' places). Its clears are passes of the stage:
+		 * the engine's call stages their gate entry and colour into the stage's frame inputs (FrameAnchors::StageInputs), and the stage's one
+		 * commit carries them. Nothing waits for a host epoch, so no order between the call and the host's tap matters.
 		 */
 		bool StageHost(Host a_host)
 		{
-			return a_host == Host::Prepass || a_host == Host::EngineDraws || a_host == Host::DeferredPasses || a_host == Host::ImageSpace || a_host == Host::PostChain;
+			return a_host == Host::Prepass || a_host == Host::EngineDraws || a_host == Host::DeferredPasses || a_host == Host::ImageSpace || a_host == Host::PostChain ||
+			       a_host == Host::Start || a_host == Host::PreDepth;
+		}
+
+		/**
+		 * @brief The CS stage place a Drawcall Limit Fix host's clears take when that host does not draw them this frame: the start stage for the
+		 * shadow view's slices, the pre-depth stage for the Z-prepass's main depth clear (every world frame before DCLF draws, and its load
+		 * holds). Host::Own for the others.
+		 */
+		Host StagePlaceFor(Host a_host)
+		{
+			if (a_host == Host::ShadowView)
+				return Host::Start;
+			if (a_host == Host::ZPrepass)
+				return Host::PreDepth;
+			return StageHost(a_host) ? a_host : Host::Own;
 		}
 
 		/** @brief Native mode with segments: world frames' clears and copies run in the epochs that write their targets first. */
@@ -411,6 +430,7 @@ namespace RenderGraph::Engine::Skeleton
 			bool executed = false;
 			bool failed = false;
 			bool announced = false;
+			std::uint64_t dropped = 0;  // native mode: copies with no reader, dropped
 		};
 
 		struct SkeletonState
@@ -802,15 +822,23 @@ namespace RenderGraph::Engine::Skeleton
 				return Host::ImageSpace;
 			// The TAA mask and kMAIN_ONLY_ALPHA are cleared after the water blend every frame, just before DCLF's forward epoch: passes of
 			// the deferred+water stage, first at its last ImageSpace step (the water blend reads neither; the reflections' ray march, an
-			// earlier step, reads kMAIN_ONLY_ALPHA). The TAA mask is cleared again inside the post chain when TAA is turned on: a pass of
-			// the post stage, first at its last ImageSpace step, before TAA reads it.
+			// earlier step, reads kMAIN_ONLY_ALPHA). The TAA mask is cleared again inside the post chain when TAA is turned on, and in that
+			// frame the motion vectors and kMAIN_ONLY_ALPHA too (after the volumetric lighting): passes of the post stage, first at its last
+			// ImageSpace step, before TAA reads them.
 			case ColourTarget::kTEMPORAL_AA_MASK:
-				return RenderGraph::Frame::PostChain::InChain() ? Host::PostChain : Host::ImageSpace;
 			case ColourTarget::kMAIN_ONLY_ALPHA:
-				return RenderGraph::Frame::PostChain::InChain() ? Host::Own : Host::ImageSpace;
+				return RenderGraph::Frame::PostChain::InChain() ? Host::PostChain : Host::ImageSpace;
+			case ColourTarget::kMOTION_VECTOR:
+				return RenderGraph::Frame::PostChain::InChain() ? Host::PostChain : Host::Own;
 			default:
 				return Host::Own;
 			}
+		}
+
+		/** @brief The colour targets the engine clears inside the post chain (HostFor's Host::PostChain), registered with that host at Setup. */
+		bool InChainClears(std::uint32_t a_target)
+		{
+			return a_target == ColourTarget::kTEMPORAL_AA_MASK || a_target == ColourTarget::kMOTION_VECTOR || a_target == ColourTarget::kMAIN_ONLY_ALPHA;
 		}
 
 		/**
@@ -960,8 +988,12 @@ namespace RenderGraph::Engine::Skeleton
 					for (const auto& draw : spec->draws) {
 						if (const auto host = HostFor(target, draw.flags); HostAvailable(host))
 							draws[HostIndex(host)].push_back(draw);
-						// The TAA mask's clear inside the post chain (HostFor answers it there only).
-						if (target.kind == Kind::Colour && target.index == ColourTarget::kTEMPORAL_AA_MASK && HostAvailable(Host::PostChain))
+						// The stage place the DCLF host's clears take in a frame it does not draw them.
+						if (const auto host = HostFor(target, draw.flags); kHostInfo[HostIndex(host)].dclf && HostAvailable(StagePlaceFor(host)))
+							draws[HostIndex(StagePlaceFor(host))].push_back(draw);
+						// The clears inside the post chain (HostFor answers them there only): the TAA mask, and the motion vectors and kMAIN_ONLY_ALPHA
+						// in the frame TAA is turned on.
+						if (target.kind == Kind::Colour && InChainClears(target.index) && HostAvailable(Host::PostChain))
 							draws[HostIndex(Host::PostChain)].push_back(draw);
 					}
 					for (std::size_t h = 0; h < kHosts; ++h) {
@@ -995,13 +1027,14 @@ namespace RenderGraph::Engine::Skeleton
 						.kind = FrameAnchors::PassKind::Render,
 						.make = [pass] { return std::static_pointer_cast<org::RenderPass>(std::make_shared<ClearPass>(pass)); },
 						.atExecution = true,
-						// In the deferred+water and post stages the engine's clear call stages its entry before the stage commits: the
-						// pass is recorded at execution with the CPU's gate answer, and a clear not asked for folds its barriers.
-						.gpuGated = !(host == Host::DeferredPasses || host == Host::ImageSpace || host == Host::PostChain) });
+						// In the deferred+water, post, start and pre-depth stages the engine's clear call stages its entry before the stage
+						// commits: the pass is recorded at execution with the CPU's gate answer, and a clear not asked for folds its barriers.
+						.gpuGated = !(host == Host::DeferredPasses || host == Host::ImageSpace || host == Host::PostChain || host == Host::Start || host == Host::PreDepth) });
 				}
 				if (StageHost(host)) {
 					// A pass of a CS stage: the engine's call stages its entry and colour (Take); its step's tap has nothing to commit.
 					client.active = [] { return false; };
+					client.segmentOnly = true;
 				} else {
 					client.active = [a_group, host] { return HasHostedPending(a_group, host); };
 					client.commit = [a_group, host](const FrameAnchors::Point&) { CommitHosted(a_group, host, false); };
@@ -1207,9 +1240,7 @@ namespace RenderGraph::Engine::Skeleton
 			// The main depth is cleared outside Main::RenderDepth too (a menu's 3D scene); only RenderDepth's clear is the Z-prepass's.
 			if (a_host == Host::ZPrepass && !DCLF::InDepthPass())
 				return false;
-			if (kHostInfo[h].dclf)
-				return group.hostedBuilt[h].load(std::memory_order_acquire) == group.generation;
-			return group.hostedRegistered[h] && FrameAnchors::CanRun(HostedClientId(IndexOf(a_group), a_host), kHostInfo[h].anchor);
+			return kHostInfo[h].dclf && group.hostedBuilt[h].load(std::memory_order_acquire) == group.generation;
 		}
 
 		/**
@@ -1326,9 +1357,9 @@ namespace RenderGraph::Engine::Skeleton
 						TargetName(a_target), spec.texture != TextureOf(a_target) ? "another texture" : "the same texture, another view");
 				return nullptr;
 			}
-			// Setup's build point put the group in its anchor's graph. CanRun is false only on a full ring (an inherent limit) or between
-			// a re-registration after a resize and the next build point.
-			if (!FrameAnchors::CanRun(kGroupIds[IndexOf(a_group)], kGroupAnchors[IndexOf(a_group)]))
+			// Guest mode: setup's build point put the group in its anchor's graph; between a re-registration after a resize and the next build
+			// point it is not. Native mode places the clear in a stage (Take), whose schedule decides.
+			if (!HostingOn() && !FrameAnchors::Scheduled(kGroupIds[IndexOf(a_group)], kGroupAnchors[IndexOf(a_group)]))
 				return nullptr;
 			for (const auto& draw : spec.draws)
 				if (draw.flags == a_flags)
@@ -1337,14 +1368,30 @@ namespace RenderGraph::Engine::Skeleton
 			return nullptr;
 		}
 
+		/**
+		 * @brief Native mode: a clear no stage has a place for is a mismatch (the frame driver's policy). It draws nothing. True: the engine's
+		 * call is taken.
+		 */
+		bool NoPlace(const Target& a_target, std::uint32_t a_flags, std::string_view a_why)
+		{
+			const auto& frame = RenderGraph::Frame::Driver::Current();
+			RenderGraph::FrameSequence::NoteUnplaced(fmt::format("skeleton clear of {}/{}", TargetName(a_target), a_flags));
+			RenderGraph::Frame::Driver::NoteTapError(RenderGraph::Frame::Driver::TapError::NotDeclared, RenderGraph::Frame::SegmentId::Count,
+				fmt::format("a clear of {} (flags {}) in a {} frame{}: {}", TargetName(a_target), a_flags, RenderGraph::Frame::KindName(frame.kind),
+					frame.capture ? " (capture)" : "", a_why));
+			return true;
+		}
+
 		bool Take(const Target& a_target, ID3D11View* a_view, std::uint32_t a_flags, Pending a_pending)
 		{
 			const Group group = GroupFor(a_target);
 			auto& state = GroupOf(group);
-			// A world frame's clear of a reflection face or the faces' depth: the start stage's sky clears them (FacesClearedBySky).
-			if (group == Group::Cube && WorldFrame() && FacesClearedBySky()) {
+			// A reflection face or the faces' depth. A world frame's: the start stage's sky clears them (FacesClearedBySky). Native mode, any other
+			// frame kind: no stage of those kinds reads the faces (only the start stage and Drawcall Limit Fix's world graphs do), and the next
+			// world frame's face sky clears each face it draws first.
+			if (group == Group::Cube && ((WorldFrame() && FacesClearedBySky()) || HostingOn())) {
 				if (state.dropped++ == 0)
-					logger::info("[ORG] engine skeleton: world frames' reflection face clears are dropped; the start stage's face sky clears each face and its depth");
+					logger::info("[ORG] engine skeleton: reflection face clears are dropped; the start stage's face sky clears each face and its depth");
 				return true;
 			}
 			if (state.failed || state.stale || !state.registered)
@@ -1354,13 +1401,14 @@ namespace RenderGraph::Engine::Skeleton
 				return false;
 			a_pending.gateEntry = draw->entry;
 			a_pending.target = a_target;
-			// A Bink movie's frame clears the main depth before its Renderer::Begin, outside every stage's window. Nothing reads the main depth
-			// in a Bink frame (the movie's tiles and the overlay draw without it), and every other kind clears it before its first read (the
-			// menu UI stage's places, Drawcall Limit Fix's Z-prepass): native mode drops the clear between Bink frames.
+			// A Bink movie's frame clears the main depth before its Renderer::Begin, outside every stage's window, and so does the session's first
+			// frame (frame 0, before the first Begin; the next frames are the Bink start movie's). Nothing reads the main depth in a Bink frame (the
+			// movie's tiles and the overlay draw without it), and every other kind clears it before its first read (the UI stage's places, the
+			// pre-depth stage's place or Drawcall Limit Fix's Z-prepass): native mode drops these clears.
 			if (a_target.kind == Kind::Depth && a_target.index == DepthTarget::kMAIN && PlacesOn() &&
-				RenderGraph::Frame::Driver::Current().kind == RenderGraph::Frame::Kind::Bink) {
+				(RenderGraph::Frame::Driver::Current().kind == RenderGraph::Frame::Kind::Bink || RenderGraph::Frame::Driver::Current().frame == 0)) {
 				if (state.dropped++ == 0)
-					logger::info("[ORG] engine skeleton: a Bink frame's clear of the main depth is dropped (no reader before the next kind's own clear)");
+					logger::info("[ORG] engine skeleton: a Bink frame's (or frame 0's) clear of the main depth is dropped (no reader before the next kind's own clear)");
 				return true;
 			}
 			// A clear while the UI stage's window is open (a menu's scene in any frame kind; the loading screen's and the menus' frames), at a
@@ -1369,28 +1417,45 @@ namespace RenderGraph::Engine::Skeleton
 			if (TakeIntoPlace(group, a_target, a_pending))
 				return true;
 			const auto host = HostFor(a_target, a_flags);
-			// A world frame's clear of a target a CS stage clears: its entry and colour are staged into the stage's frame inputs now.
-			if (StageHost(host) && HostingOn() && WorldFrame() && !GroupOf(group).hosted[HostIndex(host)].empty()) {
-				const auto* spec = &state;
-				const bool staged = FrameAnchors::StageInputs(HostedClientId(IndexOf(group), host), [&] {
-					const org::RunRef run = RunGate::Current();
-					if (!a_pending.depth)
-						spec->colours->WriteValue(run, a_pending.gateEntry * RunGate::kEntryBytes, a_pending.colour);
-					spec->gate->OpenDraw(run, a_pending.gateEntry);
-				});
-				if (staged) {
-					++state.taken;
-					RenderGraph::Frame::Driver::NoteHosted(kHostInfo[HostIndex(host)].name, 1);
-					return true;
-				}
-			}
-			// A world frame's clear waits for the Drawcall Limit Fix epoch that writes the view first.
+			// A world frame's clear waits for the Drawcall Limit Fix epoch that writes the view first, when that epoch draws it this frame.
 			if (HostReady(group, host)) {
 				a_pending.host = host;
 				state.hostedPending.push_back(a_pending);
 				return true;
 			}
-			state.pending.push_back(a_pending);
+			if (!HostingOn()) {
+				// Guest mode: the group anchor's own ticket at the engine's next bind.
+				state.pending.push_back(a_pending);
+				return true;
+			}
+			if (!WorldFrame())
+				return NoPlace(a_target, a_flags, "no open stage has a place for it");
+			// A world frame's clear of a target a CS stage clears, or one the DCLF host does not draw this frame: its entry and colour are staged
+			// into the stage's frame inputs now.
+			const auto place = StagePlaceFor(host);
+			if (place == Host::Own || GroupOf(group).hosted[HostIndex(place)].empty())
+				return NoPlace(a_target, a_flags, "no stage of the world recipe clears it");
+			const auto id = HostedClientId(IndexOf(group), place);
+			const auto hold = FrameAnchors::HeldNow(id, kHostInfo[HostIndex(place)].anchor);
+			if (!hold.held)
+				return NoPlace(a_target, a_flags, fmt::format("the {} stage place is not open", kHostInfo[HostIndex(place)].name));
+			if (!hold.scheduled) {
+				// The stage's schedule does not hold the place's client yet (its first build after a registration): the clear lags.
+				static Util::ReasonLog s_lag("[ORG] engine skeleton: a clear lags (its stage's schedule does not hold the place yet); nothing clears it this frame");
+				s_lag.Report(fmt::format("{} at the {} place", TargetName(a_target), kHostInfo[HostIndex(place)].name));
+				return true;
+			}
+			const auto* spec = &state;
+			const bool staged = FrameAnchors::StageInputs(id, [&] {
+				const org::RunRef run = RunGate::Current();
+				if (!a_pending.depth)
+					spec->colours->WriteValue(run, a_pending.gateEntry * RunGate::kEntryBytes, a_pending.colour);
+				spec->gate->OpenDraw(run, a_pending.gateEntry);
+			});
+			if (!staged)
+				return NoPlace(a_target, a_flags, fmt::format("the {} stage place did not take it", kHostInfo[HostIndex(place)].name));
+			++state.taken;
+			RenderGraph::Frame::Driver::NoteHosted(kHostInfo[HostIndex(place)].name, 1);
 			return true;
 		}
 
@@ -1615,6 +1680,14 @@ namespace RenderGraph::Engine::Skeleton
 			auto& copy = CopyOf(a_kind);
 			if (copy.failed || !Usable())
 				return false;
+			// Main::RenderDepth's copy is its last act: the pre-depth stage (which holds RenderDepth's main depth clear) commits here at the latest,
+			// in a frame without Drawcall Limit Fix's Z-prepass too, so the pre-main stage that holds the copy is open.
+			if (a_kind == CopyKind::Depth && !a_hostable && HostingOn() && WorldFrame())
+				(void)FrameAnchors::TapPoint(static_cast<std::uint32_t>(RenderGraphRuntime::Segment::DeclaredPreDepth));
+			// CS's own depth copy (Deferred::DeferredPasses) is the deferred+water stage's first pass, just before its DeferredPasses tap: the
+			// pre-main stage ends here at the latest (in a frame without Drawcall Limit Fix's main opaque epoch, whose submission ends it).
+			if (a_kind == CopyKind::Depth && a_hostable && HostingOn() && WorldFrame())
+				(void)FrameAnchors::TapPoint(static_cast<std::uint32_t>(RenderGraphRuntime::Segment::DeclaredPreMain));
 			const char* where = nullptr;
 			if (EngineTexturesOf(a_kind) == std::pair{ copy.sourceTexture, copy.targetTexture } && CopyDeclared(a_kind, a_hostable, where)) {
 				RenderGraph::Frame::Driver::NoteHosted(where, 1);
@@ -1627,7 +1700,51 @@ namespace RenderGraph::Engine::Skeleton
 			}
 			if (!copy.registered)
 				return false;
-			if (!FrameAnchors::CanRun(kCopyIds[index], kCopyAnchors[index]))
+			if (HostingOn()) {
+				// Native mode: every copy is a stage's pass, or dropped here.
+				const auto& frame = RenderGraph::Frame::Driver::Current();
+				if (a_kind == CopyKind::Depth) {
+					// The reflection cubemap's render copies the main depth while the start stage is open (the session's first world frames): the
+					// pre-main stage's copy writes kPOST_ZPREPASS_COPY again before any pass reads it (the recipe: its readers are pre-main's after its
+					// copy, deferred+water, post and the UI stage's scene), so nothing reads this one.
+					using RenderGraph::Frame::SegmentId;
+					const auto start = static_cast<std::uint32_t>(SegmentId::Start);
+					if (WorldFrame() && (FrameAnchors::StageOpen(start) || FrameAnchors::StageAbsent(start))) {
+						if (copy.dropped++ == 0)
+							logger::info("[ORG] engine skeleton: {} while the start stage is open (the cubemap's render) is dropped: pre-main's copy writes it again before any reader",
+								kCopyNames[index]);
+						return true;
+					}
+					// The stage that holds the copy has no schedule yet (its first build): the copy lags.
+					auto holder = static_cast<std::uint32_t>(SegmentId::Ui);
+					if (WorldFrame())
+						holder = static_cast<std::uint32_t>(a_hostable ? SegmentId::Deferred : SegmentId::PreMain);
+					if (FrameAnchors::StageAbsent(holder)) {
+						static Util::ReasonLog s_lag("[ORG] engine skeleton: a copy lags (its stage has no schedule yet); nothing copies this frame");
+						s_lag.Report(kCopyNames[index]);
+						return true;
+					}
+					RenderGraph::Frame::Driver::NoteTapError(RenderGraph::Frame::Driver::TapError::NotDeclared, RenderGraph::Frame::SegmentId::Count,
+						fmt::format("{} in a {} frame came while no open stage holds it (open: start {}, pre-depth {}, pre-main {}, deferred+water {}; hostable {})",
+							kCopyNames[index], RenderGraph::Frame::KindName(frame.kind), FrameAnchors::StageOpen(start),
+							FrameAnchors::StageOpen(static_cast<std::uint32_t>(SegmentId::PreDepth)), FrameAnchors::StageOpen(static_cast<std::uint32_t>(SegmentId::PreMain)),
+							FrameAnchors::StageOpen(static_cast<std::uint32_t>(SegmentId::Deferred)), a_hostable));
+					return true;
+				}
+				// The kMAIN copy: the EngineCopy step of the open stage (deferred+water, the sun stage under water, the UI stage's menu scene).
+				const auto hold = FrameAnchors::HeldNow(kCopyIds[index], kCopyAnchors[index]);
+				if (!hold.held) {
+					RenderGraph::FrameSequence::NoteUnplaced(fmt::format("skeleton copy {}", kCopySteps[index]));
+					RenderGraph::Frame::Driver::NoteTapError(RenderGraph::Frame::Driver::TapError::NotDeclared, RenderGraph::Frame::SegmentId::Count,
+						fmt::format("{} in a {} frame came while no open stage holds it", kCopyNames[index], RenderGraph::Frame::KindName(frame.kind)));
+					return true;
+				}
+				if (!hold.scheduled) {
+					static Util::ReasonLog s_lag("[ORG] engine skeleton: a copy lags (its stage's schedule does not hold it yet); nothing copies this frame");
+					s_lag.Report(kCopyNames[index]);
+					return true;
+				}
+			} else if (!FrameAnchors::Scheduled(kCopyIds[index], kCopyAnchors[index]))
 				return false;
 			copy.wanted = true;
 			copy.executed = false;
@@ -1664,32 +1781,8 @@ namespace RenderGraph::Engine::Skeleton
 				bool done = false;
 				auto status = FrameAnchors::RunStatus::Failed;
 				if (!group.failed) {
-					// The TAA mask and kMAIN_ONLY_ALPHA are cleared after the water blend, the deferred+water stage's last step. Their
-					// ticket must not be submitted while that stage holds its inputs: it would run on the GPU before the stage's work,
-					// and the stage's reflections read kMAIN_ONLY_ALPHA. So the stage commits here, before the clear's ticket.
-					const bool afterWorld = a_index == IndexOf(Group::Frame) && std::ranges::any_of(group.pending, [](const Pending& a_pending) {
-						return a_pending.target.kind == Kind::Colour &&
-					           (a_pending.target.index == ColourTarget::kTEMPORAL_AA_MASK || a_pending.target.index == ColourTarget::kMAIN_ONLY_ALPHA);
-					});
-					if (afterWorld)
-						(void)FrameAnchors::TapPoint(static_cast<std::uint32_t>(RenderGraphRuntime::Segment::DeclaredDeferred));
+					// Guest mode only: native mode places every clear in a stage or drops it (Take), so nothing is pending there.
 					group.executed = false;
-					// A clear outside every stage's places runs on the group anchor's own ticket: named by frame kind, a few times a session
-					// after each frame kind switch (a frame kind whose recipe should place it).
-					if (!FrameAnchors::HeldNow(kGroupIds[a_index], kGroupAnchors[a_index]).held) {
-						static std::uint32_t logged = 0;
-						static auto lastKind = RenderGraph::Frame::Kind::Count;
-						const auto& frame = RenderGraph::Frame::Driver::Current();
-						if (std::exchange(lastKind, frame.kind) != frame.kind)
-							logged = 0;
-						if (logged++ < 4) {
-							std::string views;
-							for (const auto& pending : group.pending)
-								views += fmt::format("{}{}", views.empty() ? "" : ",", TargetName(pending.target));
-							logger::info("[ORG] engine skeleton: {} clears of {} on the {} anchor's own ticket in a {} frame{} (frame {})", kGroupNames[a_index], views,
-								FrameAnchors::Name(kGroupAnchors[a_index]), RenderGraph::Frame::KindName(frame.kind), frame.capture ? " (capture)" : "", frame.frame);
-						}
-					}
 					state.flushing = true;
 					const auto result = FrameAnchors::Run(kGroupAnchors[a_index]);
 					state.flushing = false;
@@ -1754,8 +1847,11 @@ namespace RenderGraph::Engine::Skeleton
 			if (!FrameAnchors::IsRenderOwner() || RenderGraph::Frame::Driver::LoadStartedThisFrame())
 				return;
 			// The start stage commits just before the shadow view epoch, after the engine's shadow clears were handed to it: its work comes
-			// before them in the frame (its taps are all at the frame's start) and touches none of the hosted targets.
-			if (a_segment == RenderGraphRuntime::Segment::DeclaredStart)
+			// before them in the frame (its taps are all at the frame's start) and touches none of the hosted targets (its shadow clears are the
+			// ones the shadow view does not host). The pre-depth stage commits just before the Z-prepass the same way, after RenderDepth's main
+			// depth clear was handed to the Z-prepass: no pre-depth pass reads or writes the main depth (its place clears it only when the
+			// Z-prepass does not).
+			if (a_segment == RenderGraphRuntime::Segment::DeclaredStart || a_segment == RenderGraphRuntime::Segment::DeclaredPreDepth)
 				return;
 			const auto segment = static_cast<std::uint32_t>(a_segment);
 			auto& state = Skel();
@@ -1818,8 +1914,11 @@ namespace RenderGraph::Engine::Skeleton
 		if (!Requested())
 			return;
 		bool reserved = true;
-		for (const auto anchor : { Anchor::EngineShadowClear, Anchor::EngineCubeClear, Anchor::EngineFrameClear, Anchor::EngineDepthCopy })
+		for (const auto anchor : { Anchor::EngineShadowClear, Anchor::EngineFrameClear, Anchor::EngineDepthCopy })
 			reserved = FrameAnchors::Reserve(anchor) && reserved;
+		// Native mode drops the reflection faces' clears (Take): the cube group has no anchor there.
+		if (!Native::Requested())
+			reserved = FrameAnchors::Reserve(Anchor::EngineCubeClear) && reserved;
 		// The kMAIN copy reaches the skeleton only from native mode's immediate context.
 		if (Native::Requested())
 			reserved = FrameAnchors::Reserve(Anchor::EngineCopy) && reserved;

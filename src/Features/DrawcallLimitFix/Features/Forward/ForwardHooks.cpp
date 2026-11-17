@@ -1,6 +1,8 @@
 // The forward epoch's engine hooks: the main pass's blended draw (FUN_1414b39d0) at both its call sites in FUN_1414b3390, where the
 // epoch runs and the refraction normals it drew are marked for the engine, and Main::Draw's refraction point (FUN_1414b4840's call).
 // Installed from the feature's install; they read the shell's state (ShellState: whether DCLF runs).
+// The blended draw is also where CS's deferred+water stage commits (native mode), in every world frame: the GPU work after it (DCLF's
+// forward epoch, the precipitation, the sun's query; under water also the water) comes after that stage's work.
 
 #include "Features/DrawcallLimitFix/Features/Forward/Forward.h"
 
@@ -11,8 +13,11 @@
 #include "Features/DrawcallLimitFix/Core/Render/IndirectDraws.h"
 #include "Features/DrawcallLimitFix/Diagnostics/Hooks.h"
 #include "Globals.h"
+#include "RenderGraph/FrameAnchors.h"
+#include "RenderGraph/RenderGraphRuntime.h"
 
 #include <cstdint>
+#include <utility>
 
 namespace DCLF::Features::Forward
 {
@@ -65,8 +70,17 @@ namespace DCLF::Features::Forward
 				// forward epoch"), for the main camera's accumulator alone (the same function draws every render mode 0 accumulator's).
 				static REL::Relocation<void**> mainAccumulator{ REL::Offset(Engine::Address::kMainAccumulator) };
 				const bool main = a_accumulator && a_accumulator == *mainAccumulator;
-				if (main)
+				if (main) {
 					Diagnostics::Notify(Diagnostics::TargetPoint{ "before forward" });
+					// The deferred+water stage's commit point, whether DCLF's forward epoch runs this frame or not. Under water (the call at +0x51) the
+					// water comes after it: the sun stage's water steps take it.
+					if constexpr (N == 0) {
+						static bool logged = false;
+						if (!std::exchange(logged, true))
+							logger::info("[DCLF] forward: the main pass's blended draw came before the water (the camera is under water)");
+					}
+					(void)FrameAnchors::TapPoint(static_cast<std::uint32_t>(RenderGraphRuntime::Segment::DeclaredDeferred));
+				}
 				if (main && ShellState::Running()) {
 					Extensions::TriggerScope trigger(blendedDraw);
 					IndirectDraws::Get().NoteBlendedFrameParams(globals::game::frameBufferCached.GetFrameParams().z);

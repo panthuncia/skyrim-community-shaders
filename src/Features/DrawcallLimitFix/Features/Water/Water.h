@@ -228,7 +228,7 @@ namespace DCLF::Features::Water
 		 */
 		bool Setup();
 		/**
-		 * @brief Whether a_view's batch is taken: its client exists and a run of the anchor now would draw (FrameAnchors::CanRun). False is
+		 * @brief Whether a_view's batch is taken: its client exists and a run of the anchor now would draw (Family::HeldForBatch). False is
 		 * logged once; the engine draws the batch.
 		 */
 		bool CanTake(View a_view);

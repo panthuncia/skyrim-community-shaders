@@ -14,6 +14,7 @@
 #include "Globals.h"
 #include "RenderGraph/Engine/Constants/EngineConstants.h"
 #include "RenderGraph/Engine/Queries/OcclusionQueries.h"
+#include "RenderGraph/Frame/FrameDriver.h"
 #include "RenderGraph/FrameAnchors.h"
 #include "RenderGraph/FrameStaging.h"
 #include "RenderGraph/RasterProgram.h"
@@ -611,8 +612,6 @@ namespace DCLF::Features::Sky::SkyDraws
 			logger::info("[DCLF] sky: the {} client registered at setup (targets {} {} {}, depth {}, cloud shadows {}, cloud layers {}, published inputs it may read: {}{})",
 				client->id, a_shape.colours[0], a_shape.colours[1], a_shape.colours[2], a_shape.depth, a_shape.cloudShadows ? "on" : "off",
 				a_shape.clouds ? "the graph's" : "the engine's", client->inputs.Describe(), late.empty() ? std::string() : std::format("; not published yet: {}", late));
-			// The one build request: the next build point (a menu frame's end) builds the graph with the client, before any world frame.
-			FrameAnchors::RequestJoin(client->id, client->anchor);
 			return client;
 		}
 
@@ -723,12 +722,9 @@ namespace DCLF::Features::Sky::SkyDraws
 					client->id, a_shape.colours[0], a_shape.colours[1], a_shape.colours[2], a_shape.depth, a_shape.cloudShadows, a_shape.clouds);
 			return false;
 		}
-		if (!FrameAnchors::CanRun(client->id, client->anchor)) {
-			static Util::ReasonLog log("[DCLF] sky: the engine draws a batch", spdlog::level::err);
-			log.Report(std::format("{}: its anchor cannot run now (not in the built graph, or its ring is full)", client->id));
-			return false;
-		}
-		return true;
+		// The faces' sky is the start stage's, the main pass's sky the pre-main stage's.
+		return Family::HeldForBatch("sky", client->id,
+			static_cast<std::uint32_t>(a_shape.view == View::Face ? ::RenderGraph::Frame::SegmentId::Start : ::RenderGraph::Frame::SegmentId::PreMain), client->anchor);
 	}
 
 	bool HasSunClient()
@@ -743,12 +739,8 @@ namespace DCLF::Features::Sky::SkyDraws
 		const auto& client = state.clients[static_cast<std::size_t>(View::Sun)];
 		if (state.failed || !client)
 			return false;
-		if (!FrameAnchors::CanRun(client->id, client->anchor)) {
-			static Util::ReasonLog log("[DCLF] sky: a sun occlusion query answers its last count", spdlog::level::err);
-			log.Report(std::format("{}: its anchor cannot run now (not in the built graph, or its ring is full)", client->id));
-			return false;
-		}
-		return true;
+		// The world's query is the sun stage's, the first person's the post stage's (or the sun stage's in a frame without the first-person epoch).
+		return Family::HeldForBatch("sun", client->id, static_cast<std::uint32_t>(::RenderGraph::Frame::SegmentId::Sun), client->anchor);
 	}
 
 	Family::InputResult ReadPublished(View a_view, std::string_view a_id, std::uint32_t& a_index)

@@ -405,31 +405,13 @@ namespace FrameAnchors
 	bool InBuiltGraph(std::string_view a_id, Anchor a_anchor);
 
 	/**
-	 * @brief The one way to join an anchor's graph: true once a_anchor's built graph holds this registration of a_id (InBuiltGraph);
-	 * false meanwhile, and the build that adds it is asked for. Render thread. Never builds on the caller's path: the build manager
-	 * builds the graph off the render thread and attaches it at a frame boundary (Drawcall Limit Fix's build point in a world frame,
-	 * or the frame's end, RenderGraphRuntime::SealPresented, in a frame that had none: a menu, a loading screen, a blocking movie).
-	 * Register and Refresh ask for the same build, so a client only polls this until it is true, and keeps the engine's or D3D11's
-	 * path meanwhile. False for an unknown id.
-	 */
-	bool RequestJoin(std::string_view a_id, Anchor a_anchor);
-
-	/**
-	 * @brief Whether a run of a_anchor now would draw a_id's work: the caller owns rendering, the runtime is active, this
-	 * registration is in the anchor's built graph (InBuiltGraph), and for an anchor a declared segment holds wholly, the frame's
-	 * schedule of that segment holds the client and has it on (false while the segment is absent). An anchor may run any number of
-	 * times a frame. Call
-	 * it before withholding the engine's work for the anchor; when false, leave the work to the engine. Render thread. Run can
-	 * still fail afterwards (RunStatus::Failed): the client's executed callback is how it knows the work was submitted.
-	 */
-	bool CanRun(std::string_view a_id, Anchor a_anchor);
-
-	/**
-	 * @brief For an anchor a CS stage holds wholly (no client named at its step): whether this frame's schedule draws a_id's work there.
-	 * Native mode: the schedule of the stage that holds the anchor in this frame's kind holds this registration of a_id and has it on
-	 * (false while the stage is absent, and when no stage of the frame's kind holds the anchor). It does not depend on where the frame is
-	 * now, so a caller may ask before the stage's window opens. Guest mode runs no stage: the anchor's own built graph holds this
-	 * registration. Render thread.
+	 * @brief Whether a run of a_anchor now would draw a_id's work: the one question a client asks before it takes the engine's work. Native
+	 * mode: for an anchor a CS stage holds wholly (no client named at its step), the schedule of the stage that holds the anchor in this
+	 * frame's kind holds this registration of a_id and has it on (false while the stage is absent, and when no stage of the frame's kind
+	 * holds the anchor); that does not depend on where the frame is now, so a caller may ask before the stage's window opens. For a shared
+	 * anchor, the open stage whose step takes the anchor's taps now holds a_id, and its schedule has it on (HeldNow). Guest mode runs no
+	 * stage: the anchor's own built graph holds this registration. Render thread. Run can still fail afterwards: the client's executed
+	 * callback is how it knows the work was submitted.
 	 */
 	bool Scheduled(std::string_view a_id, Anchor a_anchor);
 
@@ -451,8 +433,8 @@ namespace FrameAnchors
 	/**
 	 * @brief Whether a run of a_anchor now would tap a CS stage that holds a_id at a step (rather than run the anchor's own epoch), and which
 	 * registration of a_id the frame's schedule of it holds. A client that hands work to an anchor some stages hold asks this before it takes
-	 * the engine's work: held and scheduled, the stage draws it; held and not scheduled, the work lags; not held, the anchor's own epoch
-	 * (CanRun). A client that changes what its passes draw onto compares the
+	 * the engine's work: held and scheduled, the stage draws it; held and not scheduled, the work lags; not held, no stage has a place for
+	 * it now (native mode: a mismatch). A client that changes what its passes draw onto compares the
 	 * generation with its own: until the schedule holds the new one, its work lags. Render owner.
 	 */
 	StageHold HeldNow(std::string_view a_id, Anchor a_anchor);
@@ -678,6 +660,18 @@ namespace FrameAnchors
 	bool HeldByStage(Anchor a_anchor);
 
 	/**
+	 * @brief Whether CS stage a_segment (a RenderGraph::Frame::SegmentId value) is open now: the frame declares it, it has not ended, and the
+	 * stages before it have (WindowOpen). Native mode, render owner; false otherwise.
+	 */
+	bool StageOpen(std::uint32_t a_segment);
+
+	/**
+	 * @brief Whether CS stage a_segment is declared by the frame and has no schedule yet (its first build), and has not ended: its work this
+	 * frame lags. Native mode, render owner; false otherwise.
+	 */
+	bool StageAbsent(std::uint32_t a_segment);
+
+	/**
 	 * @brief Drops the finished recordings the stages that hold a_anchor wholly keep for reuse. A late batch keeps what its last
 	 * recording retained (a movie's staging buffers) until it is recorded again, and a kept recording of a description that does
 	 * not come back is never recorded again. Call when such work ends (Bink's movie). A frame slot's schedule keeps the recording
@@ -796,7 +790,7 @@ namespace FrameAnchors
 	/**
 	 * @brief Setup's build point (the primary path, docs/development/p5/primary-path.md rule 3): on the render owner, between frames,
 	 * the graphs that registered clients wait to join are built now, so those clients are in their anchors' graphs before the first
-	 * frame that needs them and never poll RequestJoin. a_caller names the caller in the log. Returns whether every registered client
+	 * frame that needs them and never wait for a build at their first tap. a_caller names the caller in the log. Returns whether every registered client
 	 * is in its anchors' built graphs afterwards; false (logged) off the render owner, with the runtime inactive, or when a build failed.
 	 * After the first world frame nothing is built here: the builds are handed to the build manager, the clients join when they are
 	 * attached, and this returns false.

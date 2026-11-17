@@ -33,8 +33,8 @@
 
 namespace DCLF::Features::DecalOcclusion
 {
-	/** @brief The most draws one test counts (queries a run). A test with more is skipped. */
-	inline constexpr std::uint32_t kMaxDraws = 16;
+	/** @brief The most draws one test counts (queries a test). A test with more is skipped. */
+	inline constexpr std::uint32_t kMaxDraws = 8;
 
 	/** @brief What a skipped test's query answers: a count above 0, so the engine places the decal. */
 	inline constexpr std::uint32_t kSkipAnswer = 1;
@@ -94,7 +94,7 @@ namespace DCLF::Features::DecalOcclusion
 		bool Setup();
 		/** @brief Whether the client was made at setup and has not failed: the graph answers the tests' queries. */
 		bool HasClient();
-		/** @brief Whether a run of the anchor now would draw (FrameAnchors::CanRun). False is logged once. */
+		/** @brief Whether the test is drawn by the graph now (Family::HeldForBatch): the start stage's step holds the client. */
 		bool CanTake();
 		/** @brief Keeps a test's leases as long as a run's when it ran nothing. */
 		void Keep(Family::Owners&& a_owners);

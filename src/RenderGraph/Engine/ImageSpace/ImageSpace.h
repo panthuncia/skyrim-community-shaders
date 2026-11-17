@@ -57,7 +57,7 @@
  *
  * Inherent refusals, per draw: an effect not selected, a target outside the engine's table, dynamic resolution's quad, a viewport
  * entirely outside its target, a draw that reads the depth target it tests against, a shape whose pass is still being built
- * (first sight), an anchor whose built graph does not hold the registration yet (FrameAnchors::CanRun). A draw whose target is
+ * (first sight), an anchor whose built graph does not hold the registration yet (FrameAnchors::Scheduled). A draw whose target is
  * cleared at the bind is taken after the pending batch runs (the clear goes between). Constants the capture missed are failures,
  * logged as errors. A batch that is pending when the engine draws something else is run first, so the engine's order is kept. A failed graph returns every effect to
  * the engine for the session. A covered effect's draw the engine still makes is not vouched for in the flush latch (no

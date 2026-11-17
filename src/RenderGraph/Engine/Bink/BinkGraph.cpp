@@ -681,7 +681,7 @@ namespace RenderGraph::Engine::Bink::Graph
 		// The anchor's own epoch (guest mode). The setup's build point put the client in the Present graph. Only HDR's UI texture
 		// appearing after setup changes it, and a blocking tick builds that between two frames (UpdateTargets): this waits only for an
 		// attach after the first world frame.
-		if (!FrameAnchors::CanRun(kClientId, FrameAnchors::Anchor::Present))
+		if (!FrameAnchors::Scheduled(kClientId, FrameAnchors::Anchor::Present))
 			return refuse("the Present graph with HDR's new UI texture is not attached yet");
 		return true;
 	}

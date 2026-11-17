@@ -196,7 +196,7 @@ namespace DCLF::Features::Sky
 		bool Setup();
 		/**
 		 * @brief Whether a_shape's batch is taken: its view's client was made for a_shape's targets, and a run of its anchor now would
-		 * draw (FrameAnchors::CanRun). False is logged once per reason; the engine draws the batch. No client is made again during play.
+		 * draw (Family::HeldForBatch). False is logged once per reason; the engine draws the batch. No client is made again during play.
 		 */
 		bool CanTake(const Shape& a_shape);
 		/**
@@ -212,7 +212,7 @@ namespace DCLF::Features::Sky
 		bool Submit(std::shared_ptr<Run> a_run);
 		/** @brief Whether the sun's occlusion client was made at setup and the family has not failed: the graph answers its queries. */
 		bool HasSunClient();
-		/** @brief Whether a run of the sun's anchor now would draw (FrameAnchors::CanRun). False is logged once. */
+		/** @brief Whether a run of the sun's anchor now would draw (Family::HeldForBatch). False is logged once. */
 		bool CanTakeSun();
 		/** @brief One status line. */
 		std::string Status();

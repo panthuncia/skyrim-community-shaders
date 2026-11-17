@@ -83,7 +83,9 @@ namespace RenderGraph::FrameSequence
 			++state.ownTickets;
 			state.ownThisFrame = true;
 		}
-		const char* how = a_kind == RunKind::Held ? "held" : a_kind == RunKind::Commit ? "commit" : "own ticket";
+		const char* how = "own ticket";
+		if (a_kind != RunKind::Own)
+			how = a_kind == RunKind::Held ? "held" : "commit";
 		Add(fmt::format("run {} ({}) clients [{}] in {} out {}", a_anchor, how, a_clients, a_input, a_output), a_anchor);
 	}
 

@@ -645,11 +645,11 @@ namespace DCLF::Family
 		return false;
 	}
 
-	bool HeldForBatch(std::string_view a_family, std::string_view a_client, std::uint32_t a_segment)
+	bool HeldForBatch(std::string_view a_family, std::string_view a_client, std::uint32_t a_segment, FrameAnchors::Anchor a_anchor)
 	{
 		namespace Driver = ::RenderGraph::Frame::Driver;
 		if (FrameAnchors::SegmentsOn()) {
-			const auto hold = FrameAnchors::HeldNow(a_client, FrameAnchors::Anchor::EngineDraws);
+			const auto hold = FrameAnchors::HeldNow(a_client, a_anchor);
 			if (!hold.held) {
 				Driver::NoteTapError(Driver::TapError::NotDeclared, static_cast<::RenderGraph::Frame::SegmentId>(a_segment),
 					std::format("the {} batch of {} came while no open stage holds the client; it draws nothing", a_family, a_client));
@@ -662,7 +662,7 @@ namespace DCLF::Family
 			}
 			return true;
 		}
-		if (!FrameAnchors::Scheduled(a_client, FrameAnchors::Anchor::EngineDraws)) {
+		if (!FrameAnchors::Scheduled(a_client, a_anchor)) {
 			static Util::ReasonLog log("[DCLF] engine draw families: the engine draws a batch (the anchor's built graph does not hold its client yet)", spdlog::level::err);
 			log.Report(std::format("{} {}", a_family, a_client));
 			return false;

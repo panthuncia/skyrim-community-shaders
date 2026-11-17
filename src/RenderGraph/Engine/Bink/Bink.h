@@ -12,7 +12,7 @@
  *
  * With the switch on, a tick of the player that runs on the render thread (FrameAnchors::IsRenderOwner) and presents itself (the blocking play loop: console and
  * Papyrus PlayBink, the main menu's intro movie) decodes into a host-visible staging buffer (RenderGraph::FrameStaging) instead
- * of the engine's dynamic textures, and its tile draw is withheld when the Present anchor can run it (FrameAnchors::CanRun). The
+ * of the engine's dynamic textures, and its tile draw is withheld when the Present anchor can run it (FrameAnchors::Scheduled). The
  * Present anchor's epoch then copies the staging buffer into one graph texture holding the whole video and draws the tiles from
  * it with the same shaders built for ORG (package/Shaders/Bink/BinkCopy.hlsl), into the framebuffer the Present shows. One client,
  * registered at Setup, serves every movie of the session: a movie never rebuilds the graph.

@@ -21,8 +21,8 @@ namespace org
  *
  * - A **stage** is one or more graph epochs at a fixed place in the frame. A CS stage is one revision-driven epoch (a FrameAnchors
  *   declared segment): one graph built off the render thread, one kept recording per frame slot, one ticket a frame, submitted at its
- *   commit point. Drawcall Limit Fix's stages are its own graphs. A stage not moved onto the recipe yet still runs its anchors' tickets
- *   at their hooks; the recipe lists those epochs in their place so the check sees what they read and write.
+ *   commit point. Drawcall Limit Fix's stages are its own graphs. No anchor runs an epoch of its own in native mode but HDR output and
+ *   frame generation, which the recipe lists after the stage they follow.
  * - A **pass** is contributed by a feature (a FrameAnchors client's PassDesc) to the stage that holds its anchor. Its order in the
  *   stage is the stage's graph order: the step, then the order key.
  * - The check reads each epoch's schedule as its graph was built (org::RenderGraph::TraceSelectedSchedule, traced on the build thread
@@ -36,15 +36,15 @@ namespace RenderGraph::Frame::Recipes
 	/** @brief The world recipe's stages, in frame order. */
 	enum class StageId : std::uint8_t
 	{
-		Start,        // CS: the reflections prepass and the reflection faces' sky (the decal tests before it keep their tickets)
+		Start,        // CS: the decal tests, the face tint, the reflection faces' sky, the water effects, the shadow clears DCLF does not host
 		Shadows,      // Drawcall Limit Fix's shadow views and Skylighting's occlusion
-		PreDepth,     // CS: the EarlyPrepass clients
+		PreDepth,     // CS: the EarlyPrepass clients, the main depth's clear DCLF's Z-prepass does not host
 		Depth,        // Drawcall Limit Fix's Z-prepass and first-person depth
 		PreMain,      // CS: the depth copy, Terrain Blending, the shadow mask, light culling, the Prepass clients and the main pass's sky
 		Opaque,       // Drawcall Limit Fix's main opaque pass
 		Deferred,     // CS: deferred+water: the deferred passes and the composite, the water mask, the RenderWorld scopes, the water and its blend
-		Forward,      // Drawcall Limit Fix's forward pass, with the frame-group clears' ticket
-		Sun,          // CS: the sun's occlusion query after the forward pass (the first person's query is the post stage's)
+		Forward,      // Drawcall Limit Fix's forward pass
+		Sun,          // CS: the precipitation, under water the water, the sun's occlusion query (the first person's query is the post stage's)
 		FirstPerson,  // Drawcall Limit Fix's first-person colour
 		Post,         // CS: the post chain, the upscaler's evaluate and the depth upscale, one stage
 		Ui,           // CS: the UI stage, in every frame kind (Scaleform's displays, a menu's scene, the movie tiles, the overlay, the capture);
@@ -56,9 +56,8 @@ namespace RenderGraph::Frame::Recipes
 	/** @brief Who owns a stage's work. */
 	enum class Owner : std::uint8_t
 	{
-		Cs,       // a CS stage: one revision-driven epoch, recorded per description and frame slot, one ticket
-		Dclf,     // Drawcall Limit Fix's own graphs
-		Tickets,  // anchors' own epochs, a ticket at each hook (not moved onto the recipe yet)
+		Cs,    // a CS stage: one revision-driven epoch, recorded per description and frame slot, one ticket
+		Dclf,  // Drawcall Limit Fix's own graphs
 	};
 
 	/** @brief "pre-main". */

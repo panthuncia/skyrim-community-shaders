@@ -376,6 +376,8 @@ namespace DCLF::Features::Water::WaterDraws
 			};
 			desc.active = [client] { return client->pending; };
 			desc.onFailed = [] { Fail("the render graph failed with the water's passes in it"); };
+			// Native mode: passes of the deferred+water stage, or of the sun stage under water, only.
+			desc.segmentOnly = FrameAnchors::SegmentsOn();
 			if (!FrameAnchors::Register(std::move(desc))) {
 				logger::warn("[DCLF] water: the {} client could not be registered; the water stays the engine's", client->id);
 				return nullptr;
@@ -383,8 +385,6 @@ namespace DCLF::Features::Water::WaterDraws
 			const auto late = client->inputs.Unregistered();
 			logger::info("[DCLF] water: the {} client registered at setup (published inputs it may read: {}{})", client->id, client->inputs.Describe(),
 				late.empty() ? std::string() : std::format("; not published yet: {}", late));
-			// The one build request: the next build point (a menu frame's end) builds the graph with the client, before any world frame.
-			FrameAnchors::RequestJoin(client->id, FrameAnchors::Anchor::EngineDraws);
 			return client;
 		}
 
@@ -454,12 +454,8 @@ namespace DCLF::Features::Water::WaterDraws
 		const auto& client = state.clients[static_cast<std::size_t>(a_view)];
 		if (!client)
 			return false;
-		if (!FrameAnchors::CanRun(client->id, FrameAnchors::Anchor::EngineDraws)) {
-			static Util::ReasonLog log("[DCLF] water: the engine draws a batch", spdlog::level::err);
-			log.Report(std::format("{}: its anchor cannot run now (not in the built graph, or its ring is full)", client->id));
-			return false;
-		}
-		return true;
+		// The water mask and above water the surface are the deferred+water stage's; under water the surface is the sun stage's.
+		return Family::HeldForBatch("water", client->id, static_cast<std::uint32_t>(::RenderGraph::Frame::SegmentId::Deferred));
 	}
 
 	Family::InputResult ReadPublished(View a_view, std::string_view a_id, std::uint32_t& a_index)

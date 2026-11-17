@@ -1509,7 +1509,7 @@ namespace RenderGraph::Engine::Scaleform::Passes
 				a_lagged = true;
 				return false;
 			}
-		} else if (FrameAnchors::CanRun(kClientId, Anchor::Interface)) {
+		} else if (FrameAnchors::Scheduled(kClientId, Anchor::Interface)) {
 			// The anchor's own epoch: the latest registration is in its built graph, or an older one with the same surfaces is.
 			state.builtRegistration = state.registrations;
 		} else if (state.builtRegistration == 0 || state.builtRegistration < state.surfacesRegistration) {

@@ -39,39 +39,30 @@ namespace RenderGraph::Frame::Recipes
 		};
 
 		// The world recipe. Recipe order is pass order. The CS stages are FrameAnchors' declared segments; their commit points and why
-		// each is safe are in FrameAnchors.cpp (kDeclaredInfo). Epochs of anchors not moved yet keep their tickets at their hooks.
+		// each is safe are in FrameAnchors.cpp (kDeclaredInfo). In native mode no anchor runs an epoch of its own but HDR output and frame
+		// generation (separate pieces, not run by the tests).
 		constexpr std::array<StageDesc, kStages> kWorld{ {
-			// The decal tests keep their anchor's own epoch, before the stage's first tap (several a frame, each with its own query range).
-			// The reflection faces' clears outside world frames keep the cube clear anchor's ticket.
-			{ StageId::Start, Owner::Cs, { Segment::AnchorDecalQueries, Segment::DeclaredStart, Segment::AnchorEngineCubeClear }, 3,
-				"just before DCLF's shadow view epoch (the last face's sky)" },
-			{ StageId::Shadows, Owner::Dclf, { Segment::AnchorEngineShadowClear, Segment::ShadowView, Segment::SkyOcclusion }, 3, "Drawcall Limit Fix's shadow views" },
-			{ StageId::PreDepth, Owner::Cs, { Segment::DeclaredPreDepth }, 1, "the EarlyPrepass hook (Main::RenderShadowMaps returned)" },
+			// The decal tests, the face tint, the faces' sky, the water effects and the shadow maps' clears DCLF's shadow view does not host.
+			{ StageId::Start, Owner::Cs, { Segment::DeclaredStart }, 1, "just before DCLF's shadow view epoch or the pre-depth stage's first tap" },
+			{ StageId::Shadows, Owner::Dclf, { Segment::ShadowView, Segment::SkyOcclusion }, 2, "Drawcall Limit Fix's shadow views" },
+			{ StageId::PreDepth, Owner::Cs, { Segment::DeclaredPreDepth }, 1, "just before DCLF's Z-prepass, or Main::RenderDepth's depth copy" },
 			// Drawcall Limit Fix's water reflection faces come after the Z-prepass (TESWaterReflections::Update).
 			{ StageId::Depth, Owner::Dclf, { Segment::ZPrepass, Segment::FirstPersonDepth, Segment::Reflection }, 3, "Main::RenderDepth" },
 			{ StageId::PreMain, Owner::Cs, { Segment::DeclaredPreMain }, 1, "just before DCLF's main opaque epoch (the main pass's sky)" },
 			{ StageId::Opaque, Owner::Dclf, { Segment::MainOpaque }, 1, "the main pass's opaque batches" },
-			// The ImageSpace and EngineCopy anchors are not listed: their epochs hold work of several places in the frame (menus, other frame
-			// kinds), so no one place in the recipe is theirs.
-			{ StageId::Deferred, Owner::Cs, { Segment::DeclaredDeferred }, 1, "just before DCLF's forward epoch (the water blend's end)" },
-			// Every client of the EngineDraws anchor is a stage's step. Its own epoch keeps a water batch no stage's window takes: under
-			// water the engine's blended draw, and with it Drawcall Limit Fix's forward epoch, comes before the water (Features/Forward).
-			{ StageId::Forward, Owner::Dclf, { Segment::AnchorEngineDraws, Segment::AnchorEngineFrameClear, Segment::Forward }, 3, "the engine's blended draw" },
-			// The engine's blended draws after DCLF's forward epoch hold the precipitation: the sun stage's first step. The sun's query after
-			// the forward pass must run before the first-person geometry on the GPU: the same stage, between the two DCLF graphs. The first
-			// person's query comes after the first-person graph: the post stage's first step. The anchor's own epoch keeps a query no stage's
-			// window takes (a world frame before Drawcall Limit Fix draws).
-			{ StageId::Sun, Owner::Cs, { Segment::DeclaredSun, Segment::AnchorEngineQueries }, 2, "just before DCLF's first-person epoch" },
+			{ StageId::Deferred, Owner::Cs, { Segment::DeclaredDeferred }, 1, "the engine's blended draw (just before DCLF's forward epoch)" },
+			{ StageId::Forward, Owner::Dclf, { Segment::Forward }, 1, "the engine's blended draw" },
+			// The engine's blended draws after DCLF's forward epoch hold the precipitation: the sun stage's first step. Under water the water comes
+			// after them: the sun stage's water steps. The sun's query after the forward pass must run before the first-person geometry on the GPU:
+			// the same stage, between the two DCLF graphs. The first person's query comes after the first-person graph: the post stage's first step.
+			{ StageId::Sun, Owner::Cs, { Segment::DeclaredSun }, 1, "just before DCLF's first-person epoch" },
 			{ StageId::FirstPerson, Owner::Dclf, { Segment::FirstPerson }, 1, "Main::RenderFirstPersonView" },
-			{ StageId::Post, Owner::Cs,
-				{ Segment::DeclaredPost, Segment::AnchorTonemap, Segment::AnchorFrameGeneration },
-				3, "RenderEndOfFrameEffects' return" },
-			// The UI stage holds the screen blood, Scaleform's displays (fixed instances), a menu's scene over the live world, the Present
-			// anchor's clients (a Bink movie's tiles), the overlay and the capture (the Interface, Present, Overlay and Capture anchors have no
-			// epoch of their own). HDR output follows its commit.
-			{ StageId::Ui, Owner::Cs,
-				{ Segment::AnchorInterface, Segment::AnchorPresent, Segment::DeclaredUi, Segment::AnchorHDROutput, Segment::AnchorCapture },
-				5, "just before the present (or HDR output, or the capture)" },
+			// Frame generation's hudless copy keeps its anchor's ticket (frame generation is off in native mode).
+			{ StageId::Post, Owner::Cs, { Segment::DeclaredPost, Segment::AnchorFrameGeneration }, 2, "RenderEndOfFrameEffects' return" },
+			// The UI stage holds the screen blood, Scaleform's displays (fixed instances), a menu's scene over the live world, the face tint at a
+			// load, the Present anchor's clients (a Bink movie's tiles), the overlay and the capture. HDR output follows its commit on its anchor's
+			// ticket (HDR on only).
+			{ StageId::Ui, Owner::Cs, { Segment::DeclaredUi, Segment::AnchorHDROutput }, 2, "just before the present (or HDR output)" },
 		} };
 
 		/**
@@ -91,14 +82,7 @@ namespace RenderGraph::Frame::Recipes
 
 		const char* OwnerName(Owner a_owner)
 		{
-			switch (a_owner) {
-			case Owner::Cs:
-				return "CS, one ticket";
-			case Owner::Dclf:
-				return "Drawcall Limit Fix";
-			default:
-				return "tickets at hooks";
-			}
+			return a_owner == Owner::Cs ? "CS, one ticket" : "Drawcall Limit Fix";
 		}
 
 		struct Traced
@@ -312,7 +296,7 @@ namespace RenderGraph::Frame::Recipes
 			return a_kind == Kind::World || (a_kind == Kind::FrozenWorld && a_capture) ? kWorldKind : kUiKind;
 		}
 
-		const char* OwnerMark(Owner a_owner) { return a_owner == Owner::Dclf ? "*" : a_owner == Owner::Tickets ? " (tickets)" : ""; }
+		const char* OwnerMark(Owner a_owner) { return a_owner == Owner::Dclf ? "*" : ""; }
 	}
 
 	bool KindHas(Kind a_kind, bool a_capture, SegmentId a_segment)
@@ -373,6 +357,8 @@ namespace RenderGraph::Frame::Recipes
 			return "deferred+water";
 		case StageId::Forward:
 			return "forward";
+		case StageId::Sun:
+			return "sun";
 		case StageId::FirstPerson:
 			return "first person";
 		case StageId::Post:
