@@ -17,15 +17,16 @@ namespace org
 
 /**
  * @brief The recipe: CS's frame as a fixed, ordered list of stages, one recipe per frame kind (docs/development/org-native-frame-graph.md,
- * "The recipe"). The shape follows BasicRenderer's PipelineRecipe: recipe order is pass order, and a check proves that every resource a
- * pass reads is written earlier in the recipe, or comes from the previous frame or from outside the graphs.
+ * "The recipe"). The table itself is Frame/RecipeTable.h; this is what reads it. The shape follows BasicRenderer's PipelineRecipe: recipe
+ * order is pass order, and a check proves that every resource a pass reads is written earlier in the recipe, or comes from the previous
+ * frame or from outside the graphs.
  *
- * - A **stage** is one or more graph epochs at a fixed place in the frame. A CS stage is one revision-driven epoch (a FrameAnchors
- *   declared segment): one graph built off the render thread, one kept recording per frame slot, one ticket a frame, submitted at its
- *   commit point. Drawcall Limit Fix's stages are its own graphs. No anchor runs an epoch of its own in native mode but HDR output and
- *   frame generation, which the recipe lists after the stage they follow.
- * - A **pass** is contributed by a feature (a FrameAnchors client's PassDesc) to the stage that holds its anchor. Its order in the
- *   stage is the stage's graph order: the step, then the order key.
+ * - A **stage** is one or more graph epochs at a fixed place in the frame. A CS stage is one revision-driven epoch: one graph built off
+ *   the render thread, one kept recording per frame slot, one ticket a frame, submitted at its commit point. Drawcall Limit Fix's stages
+ *   are its own graphs. No anchor runs an epoch of its own in native mode but HDR output and frame generation, which the table lists
+ *   after the stage they follow.
+ * - A **pass** is contributed by a feature (a FrameAnchors client's PassDesc) to the step that names the client at the pass's anchor. Its
+ *   order in the stage is the stage's graph order: the step, then the order key.
  * - The check reads each epoch's schedule as its graph was built (org::RenderGraph::TraceSelectedSchedule, traced on the build thread
  *   when the build manager builds it, else once on the render owner when the frame starts), so the recipe printed and checked is the
  *   one the frames run.
@@ -52,6 +53,7 @@ namespace RenderGraph::Frame::Recipes
 		              // HDR output keeps its ticket
 		Count
 	};
+	// The table (RecipeTable.h) lists the stages in this order.
 	inline constexpr std::uint32_t kStages = static_cast<std::uint32_t>(StageId::Count);
 
 	/** @brief Who owns a stage's work. */

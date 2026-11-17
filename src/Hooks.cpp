@@ -625,7 +625,7 @@ struct IDXGISwapChain_Present
 						if (FrameAnchors::SegmentsOn() && FrameAnchors::HeldByStage(FrameAnchors::Anchor::Capture))
 							globals::features::screenshotFeature.ProcessCaptureRequest();
 						if (FrameAnchors::SegmentsOn())
-							(void)FrameAnchors::TapPoint(static_cast<std::uint32_t>(RenderGraphRuntime::Segment::DeclaredUi));
+							(void)FrameAnchors::TapPoint(RenderGraph::Frame::SegmentId::Ui);
 						// The UI stage commits before the present (BeforeGpuWork).
 						FrameAnchors::BeforeGpuWork("the present");
 						// The frame's epochs still on the submission thread reach the queue before the present. A loading screen's thread

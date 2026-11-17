@@ -4,6 +4,7 @@
 #if defined(CS_HAS_RENDER_GRAPH)
 
 #	include "RenderGraph/Frame/FrameDriver.h"
+#	include "RenderGraph/Frame/RecipeTable.h"
 #	include "RenderGraph/FrameAnchors.h"
 #	include "RenderGraph/GraphResources.h"
 #	include "RenderGraph/RenderGraphRuntime.h"
@@ -26,59 +27,19 @@ namespace RenderGraph::Frame::Recipes
 	{
 		using Segment = RenderGraphRuntime::Segment;
 
-		constexpr std::uint32_t kMaxEpochs = 8;
+		namespace Table = Recipes::Table;
 
-		/** @brief One stage of the world recipe: its owner, its epochs in frame order, and where it commits. */
-		struct StageDesc
+		/** @brief Calls a_visit(stage index, epoch) for each epoch of the recipe check: every stage's own graphs and the tickets after them. */
+		template <class F>
+		void ForCheckedEpochs(F&& a_visit)
 		{
-			StageId id;
-			Owner owner;
-			std::array<Segment, kMaxEpochs> epochs;
-			std::uint32_t epochCount;
-			const char* commit;
-		};
-
-		// The world recipe. Recipe order is pass order. The CS stages are FrameAnchors' declared segments; their commit points and why
-		// each is safe are in FrameAnchors.cpp (kDeclaredInfo). In native mode no anchor runs an epoch of its own but HDR output and frame
-		// generation (separate pieces, not run by the tests).
-		constexpr std::array<StageDesc, kStages> kWorld{ {
-			// The decal tests, the face tint, the faces' sky, the water effects and the shadow maps' clears DCLF's shadow view does not host.
-			{ StageId::Start, Owner::Cs, { Segment::DeclaredStart }, 1, "just before DCLF's shadow view epoch or the pre-depth stage's first tap" },
-			{ StageId::Shadows, Owner::Dclf, { Segment::ShadowView, Segment::SkyOcclusion }, 2, "Drawcall Limit Fix's shadow views" },
-			{ StageId::PreDepth, Owner::Cs, { Segment::DeclaredPreDepth }, 1, "just before DCLF's Z-prepass, or Main::RenderDepth's depth copy" },
-			// Drawcall Limit Fix's water reflection faces come after the Z-prepass (TESWaterReflections::Update).
-			{ StageId::Depth, Owner::Dclf, { Segment::ZPrepass, Segment::FirstPersonDepth, Segment::Reflection }, 3, "Main::RenderDepth" },
-			{ StageId::PreMain, Owner::Cs, { Segment::DeclaredPreMain }, 1, "just before DCLF's main opaque epoch (the main pass's sky)" },
-			{ StageId::Opaque, Owner::Dclf, { Segment::MainOpaque }, 1, "the main pass's opaque batches" },
-			{ StageId::Deferred, Owner::Cs, { Segment::DeclaredDeferred }, 1, "the engine's blended draw (just before DCLF's forward epoch)" },
-			{ StageId::Forward, Owner::Dclf, { Segment::Forward }, 1, "the engine's blended draw" },
-			// The engine's blended draws after DCLF's forward epoch hold the precipitation: the sun stage's first step. Under water the water comes
-			// after them: the sun stage's water steps. The sun's query after the forward pass must run before the first-person geometry on the GPU:
-			// the same stage, between the two DCLF graphs. The first person's query comes after the first-person graph: the post stage's first step.
-			{ StageId::Sun, Owner::Cs, { Segment::DeclaredSun }, 1, "just before DCLF's first-person epoch" },
-			{ StageId::FirstPerson, Owner::Dclf, { Segment::FirstPerson }, 1, "Main::RenderFirstPersonView" },
-			// Frame generation's hudless copy keeps its anchor's ticket (frame generation is off in native mode).
-			{ StageId::Post, Owner::Cs, { Segment::DeclaredPost, Segment::AnchorFrameGeneration }, 2, "RenderEndOfFrameEffects' return" },
-			// The UI stage holds the screen blood, Scaleform's displays (fixed instances), a menu's scene over the live world, the face tint at a
-			// load, the Present anchor's clients (a Bink movie's tiles), the overlay and the capture. HDR output follows its commit on its anchor's
-			// ticket (HDR on only).
-			{ StageId::Ui, Owner::Cs, { Segment::DeclaredUi, Segment::AnchorHDROutput }, 2, "just before the present (or HDR output)" },
-		} };
-
-		/**
-		 * @brief Resources a stage reads before the stage that first writes them in the frame: the previous frame's contents, each
-		 * checked by hand against the stage that writes it. Exact graph resource names.
-		 * - written by forward or post and read earlier in the next frame: the refraction normals, the underwater mask, the water
-		 *   displacement pair and the water flow map (the water surface), kMAIN_COPY (the water surface);
-		 * - written by the deferred stages and read by the start stage's face sky: the sky's IBL and Terrain Blending's blended depth;
-		 * - the depth copy Volumetric Lighting makes in post, read by the menu scenes' local map fog (the UI stage);
-		 * - the dynamic cubemaps the deferred stage compresses, read by the start stage's face sky.
-		 * Drawcall Limit Fix's stages are not held to it: their graphs declare the whole binding table their shaders may read (the light
-		 * lists, the shadow mask, the luminance chain), so they "read" much that CS writes later; the check counts those apart.
-		 */
-		constexpr std::array<std::string_view, 11> kPreviousFrame{ "DynamicCubemaps::EnvTextureBC6H", "DynamicCubemaps::EnvReflectionsBC6H", "Engine::kREFRACTION_NORMALS", "Engine::kUNDERWATER_MASK", "Engine::kWATER_DISPLACEMENT",
-			"Engine::kWATER_DISPLACEMENT_SWAP", "Engine::Texture2D 320x320", "Engine::kMAIN_COPY", "IBL::SkyIBL",
-			"TerrainBlending::BlendedDepth16", "Engine::Depth::kMAIN_COPY" };
+			for (std::uint32_t s = 0; s < kStages; ++s) {
+				const auto& stage = Table::kStageTable[s];
+				for (std::uint32_t e = 0; e < Table::EpochCount(stage); ++e)
+					if (stage.epochs[e].role != Table::Role::Placed)
+						a_visit(s, stage.epochs[e]);
+			}
+		}
 
 		const char* OwnerName(Owner a_owner)
 		{
@@ -111,7 +72,7 @@ namespace RenderGraph::Frame::Recipes
 
 		bool PreviousFrame(std::string_view a_name)
 		{
-			return std::ranges::find(kPreviousFrame, a_name) != kPreviousFrame.end();
+			return std::ranges::find(Table::kPreviousFrame, a_name) != Table::kPreviousFrame.end();
 		}
 
 		std::uint32_t EpochOfSegment(Segment a_segment) { return RenderGraphRuntime::EpochOf(a_segment); }
@@ -153,6 +114,40 @@ namespace RenderGraph::Frame::Recipes
 			}
 		}
 
+		/** @brief The recipe's passes in recipe order, from the traces held; epoch a_epoch's from a_trace instead when given. */
+		std::vector<Pass> RecipePasses(const State& a_state, std::uint32_t a_epoch, const org::ScheduleTrace* a_trace)
+		{
+			std::vector<Pass> passes;
+			ForCheckedEpochs([&](std::uint32_t a_stage, const Table::Epoch& a_entry) {
+				const auto epoch = EpochOfSegment(a_entry.segment);
+				if (a_trace && epoch == a_epoch) {
+					AppendPasses(a_stage, *a_trace, passes);
+					return;
+				}
+				const auto found = a_state.traces.find(epoch);
+				if (found != a_state.traces.end() && found->second.trace)
+					AppendPasses(a_stage, *found->second.trace, passes);
+			});
+			return passes;
+		}
+
+		/** @brief Each finding logged once; in a development build the first one stops the game (Frame::Driver::MismatchFatal). */
+		void Report(State& a_state, const std::vector<std::string>& a_findings, std::string_view a_when)
+		{
+			for (const auto& finding : a_findings) {
+				if (!a_state.loggedFindings.insert(finding).second)
+					continue;
+				const bool fatal = Switches::Number("CS_ORG_RECIPE_FATAL", Driver::MismatchFatal() ? 1 : 0) != 0;
+				logger::error("[ORG] world recipe{}: {}", a_when, finding);
+				if (fatal) {
+					const auto message = fmt::format("Community Shaders native mode: the world recipe reads a resource before the pass that writes it{}: {}", a_when, finding);
+					logger::critical("[ORG] world recipe: {}", message);
+					spdlog::default_logger()->flush();
+					stl::report_and_fail(message);
+				}
+			}
+		}
+
 		std::string Join(const std::vector<std::string>& a_items)
 		{
 			std::string text;
@@ -178,7 +173,7 @@ namespace RenderGraph::Frame::Recipes
 					stageWrites[pass.stage].insert(name);
 			std::set<std::string> unwritten;
 			for (const auto& pass : a_passes) {
-				if (kWorld[pass.stage].owner != Owner::Cs)
+				if (Table::kStageTable[pass.stage].owner != Owner::Cs)
 					continue;
 				for (const auto& name : pass.reads)
 					if (!stageWrites[pass.stage].contains(name) && GraphResources::IsTransientName(name) && unwritten.insert(name).second)
@@ -205,14 +200,14 @@ namespace RenderGraph::Frame::Recipes
 						previous.insert(name);
 						continue;
 					}
-					if (kWorld[a_passes[i].stage].owner == Owner::Dclf) {
+					if (Table::kStageTable[a_passes[i].stage].owner == Owner::Dclf) {
 						dclfLater.insert(name);
 						continue;
 					}
 					if (!found.insert(name).second)
 						continue;
 					a_findings.push_back(fmt::format("{} ({}) reads {}, which no earlier stage writes; its first writer is {} ({}). Declare it as the previous "
-													 "frame's (Recipe.cpp, kPreviousFrame) once checked, or move the stage",
+													 "frame's (RecipeTable.h, kPreviousFrame) once checked, or move the stage",
 						a_passes[i].name, StageName(static_cast<StageId>(a_passes[i].stage)), name, a_passes[writer->second].name,
 						StageName(static_cast<StageId>(a_passes[writer->second].stage))));
 				}
@@ -251,87 +246,53 @@ namespace RenderGraph::Frame::Recipes
 
 	namespace
 	{
-		/** @brief One stage of a frame kind's recipe: a name, its owner, and the CS stage it is (SegmentId::Count for none). */
-		struct KindStage
-		{
-			const char* name;
-			Owner owner;
-			SegmentId segment;
-		};
-
-		constexpr std::uint32_t kKindStages = 12;
-
-		/** @brief A frame kind's recipe: its stages in frame order. */
-		struct KindRecipe
-		{
-			std::array<KindStage, kKindStages> stages;
-			std::uint32_t count;
-		};
-
-		// The world recipe (kWorld above), by CS stage. A frozen world's capture frame draws the world once, with the same recipe.
-		constexpr KindRecipe kWorldKind{ { {
-			{ "start", Owner::Cs, SegmentId::Start },
-			{ "shadows", Owner::Dclf, SegmentId::Count },
-			{ "pre-depth", Owner::Cs, SegmentId::PreDepth },
-			{ "depth", Owner::Dclf, SegmentId::Count },
-			{ "pre-main", Owner::Cs, SegmentId::PreMain },
-			{ "opaque", Owner::Dclf, SegmentId::Count },
-			{ "deferred+water", Owner::Cs, SegmentId::Deferred },
-			{ "forward", Owner::Dclf, SegmentId::Count },
-			{ "sun", Owner::Cs, SegmentId::Sun },
-			{ "first person", Owner::Dclf, SegmentId::Count },
-			{ "post", Owner::Cs, SegmentId::Post },
-			{ "UI", Owner::Cs, SegmentId::Ui },
-		} }, 12 };
-		// Every other frame: a menu over a frozen world (after its capture frame), the main menu (and any frame before the player has 3D), a
-		// loading screen's frame and a Bink movie's. One stage, the UI stage, as in the world's recipe. It holds, in the engine's order: the
-		// frozen frame's composite (a menu over a frozen world), the first clears, the displays before a menu's scene, the scene's clears, its
-		// depth, shadow mask, depth and kMAIN copies, colour and composite, the main depth's last clear, the displays after the scene, the
-		// present's clients (a Bink movie's tiles), the overlay and the capture.
-		constexpr KindRecipe kUiKind{ { {
-			{ "UI", Owner::Cs, SegmentId::Ui },
-		} }, 1 };
-
-		const KindRecipe& RecipeOf(Kind a_kind, bool a_capture)
-		{
-			return a_kind == Kind::World || (a_kind == Kind::FrozenWorld && a_capture) ? kWorldKind : kUiKind;
-		}
-
 		const char* OwnerMark(Owner a_owner) { return a_owner == Owner::Dclf ? "*" : ""; }
+
+		bool SameStages(const Table::KindRecipe& a_left, const Table::KindRecipe& a_right)
+		{
+			if (a_left.count != a_right.count)
+				return false;
+			for (std::uint32_t i = 0; i < a_left.count; ++i)
+				if (a_left.stages[i] != a_right.stages[i])
+					return false;
+			return true;
+		}
 	}
 
 	bool KindHas(Kind a_kind, bool a_capture, SegmentId a_segment)
 	{
-		const auto& recipe = RecipeOf(a_kind, a_capture);
+		const auto& recipe = Table::KindOf(a_kind, a_capture);
 		for (std::uint32_t i = 0; i < recipe.count; ++i)
-			if (recipe.stages[i].segment == a_segment)
+			if (Table::StageOf(recipe.stages[i]).segment == a_segment)
 				return true;
 		return false;
 	}
 
 	std::string DescribeKind(Kind a_kind, bool a_capture)
 	{
-		const auto& recipe = RecipeOf(a_kind, a_capture);
+		const auto& recipe = Table::KindOf(a_kind, a_capture);
 		std::string line;
-		for (std::uint32_t i = 0; i < recipe.count; ++i)
-			line += fmt::format("{}{}{}", i ? " | " : "", recipe.stages[i].name, OwnerMark(recipe.stages[i].owner));
+		for (std::uint32_t i = 0; i < recipe.count; ++i) {
+			const auto& stage = Table::StageOf(recipe.stages[i]);
+			line += fmt::format("{}{}{}", i ? " | " : "", stage.name, OwnerMark(stage.owner));
+		}
 		return line;
 	}
 
 	std::string DiffKinds(Kind a_from, bool a_fromCapture, Kind a_to, bool a_toCapture)
 	{
-		const auto& from = RecipeOf(a_from, a_fromCapture);
-		const auto& to = RecipeOf(a_to, a_toCapture);
-		if (&from == &to)
+		const auto& from = Table::KindOf(a_from, a_fromCapture);
+		const auto& to = Table::KindOf(a_to, a_toCapture);
+		if (SameStages(from, to))
 			return {};
-		const auto names = [](const KindRecipe& a_recipe, const KindRecipe& a_other) {
+		const auto names = [](const Table::KindRecipe& a_recipe, const Table::KindRecipe& a_other) {
 			std::string list;
 			for (std::uint32_t i = 0; i < a_recipe.count; ++i) {
 				bool shared = false;
 				for (std::uint32_t j = 0; j < a_other.count; ++j)
-					shared = shared || std::string_view(a_recipe.stages[i].name) == a_other.stages[j].name;
+					shared = shared || a_recipe.stages[i] == a_other.stages[j];
 				if (!shared)
-					list += fmt::format("{}{}", list.empty() ? "" : ", ", a_recipe.stages[i].name);
+					list += fmt::format("{}{}", list.empty() ? "" : ", ", Table::StageOf(a_recipe.stages[i]).name);
 			}
 			return list.empty() ? std::string("none") : list;
 		};
@@ -341,49 +302,19 @@ namespace RenderGraph::Frame::Recipes
 
 	const char* StageName(StageId a_stage)
 	{
-		switch (a_stage) {
-		case StageId::Start:
-			return "start";
-		case StageId::Shadows:
-			return "shadows";
-		case StageId::PreDepth:
-			return "pre-depth";
-		case StageId::Depth:
-			return "depth";
-		case StageId::PreMain:
-			return "pre-main";
-		case StageId::Opaque:
-			return "opaque";
-		case StageId::Deferred:
-			return "deferred+water";
-		case StageId::Forward:
-			return "forward";
-		case StageId::Sun:
-			return "sun";
-		case StageId::FirstPerson:
-			return "first person";
-		case StageId::Post:
-			return "post";
-		case StageId::Ui:
-			return "UI";
-		default:
-			return "?";
-		}
+		// The table's names are string literals, so their data is terminated.
+		return static_cast<std::uint32_t>(a_stage) < kStages ? Table::StageOf(a_stage).name.data() : "?";
 	}
 
 	std::vector<PositionedEpoch> PositionedEpochs()
 	{
 		std::vector<PositionedEpoch> out;
-		for (const auto& stage : kWorld)
-			for (std::uint32_t e = 0; e < stage.epochCount; ++e) {
-				const auto segment = stage.epochs[e];
-				// HDR output and frame generation keep tickets of their own: what they use stays outside the frame arena.
-				if (segment == Segment::AnchorHDROutput || segment == Segment::AnchorFrameGeneration)
-					continue;
-				if (FrameAnchors::IsUnusedSegment(static_cast<std::uint32_t>(segment)))
-					continue;
-				out.push_back({ EpochOfSegment(segment), stage.id, stage.owner });
-			}
+		// A stage's own graphs only: HDR output and frame generation keep tickets of their own, and what they use stays outside the frame
+		// arena.
+		ForCheckedEpochs([&](std::uint32_t a_stage, const Table::Epoch& a_epoch) {
+			if (a_epoch.role == Table::Role::Graph && !FrameAnchors::IsUnusedSegment(static_cast<std::uint32_t>(a_epoch.segment)))
+				out.push_back({ EpochOfSegment(a_epoch.segment), Table::kStageTable[a_stage].id, Table::kStageTable[a_stage].owner });
+		});
 		return out;
 	}
 
@@ -397,11 +328,11 @@ namespace RenderGraph::Frame::Recipes
 
 	bool Traced(std::uint32_t a_epoch)
 	{
-		for (const auto& stage : kWorld)
-			for (std::uint32_t e = 0; e < stage.epochCount; ++e)
-				if (EpochOfSegment(stage.epochs[e]) == a_epoch && !FrameAnchors::IsUnusedSegment(static_cast<std::uint32_t>(stage.epochs[e])))
-					return true;
-		return false;
+		bool traced = false;
+		ForCheckedEpochs([&](std::uint32_t, const Table::Epoch& a_entry) {
+			traced = traced || (EpochOfSegment(a_entry.segment) == a_epoch && !FrameAnchors::IsUnusedSegment(static_cast<std::uint32_t>(a_entry.segment)));
+		});
+		return traced;
 	}
 
 	void NoteTrace(std::uint32_t a_epoch, std::uint64_t a_generation, std::shared_ptr<const org::ScheduleTrace> a_trace)
@@ -451,53 +382,36 @@ namespace RenderGraph::Frame::Recipes
 		bool changed = false;
 		bool complete = true;  // every epoch's current build is traced: the recipe is checked only whole
 		std::uint32_t traced = 0;
-		for (const auto& stage : kWorld)
-			for (std::uint32_t e = 0; e < stage.epochCount; ++e) {
-				if (FrameAnchors::IsUnusedSegment(static_cast<std::uint32_t>(stage.epochs[e])))
-					continue;
-				const auto epoch = EpochOfSegment(stage.epochs[e]);
-				auto* graph = a_host.Graph(epoch);
-				if (!graph)
-					continue;
-				const auto generation = a_host.BuildGeneration(epoch);
-				if (const auto seen = state.checked.find(epoch); seen != state.checked.end() && seen->second == generation)
-					continue;
-				auto& entry = state.traces[epoch];
-				if (entry.generation != generation || !entry.trace) {
-					auto trace = traced < 2 ? TraceEpochGraph(*graph, epoch) : nullptr;
-					if (!trace) {
-						complete = false;  // no schedule selected yet, or two traced this frame already: the next frame tries again
-						continue;
-					}
-					++traced;
-					++state.fallbackTraces;
-					entry = { generation, std::move(trace) };
+		ForCheckedEpochs([&](std::uint32_t, const Table::Epoch& a_entry) {
+			if (FrameAnchors::IsUnusedSegment(static_cast<std::uint32_t>(a_entry.segment)))
+				return;
+			const auto epoch = EpochOfSegment(a_entry.segment);
+			auto* graph = a_host.Graph(epoch);
+			if (!graph)
+				return;
+			const auto generation = a_host.BuildGeneration(epoch);
+			if (const auto seen = state.checked.find(epoch); seen != state.checked.end() && seen->second == generation)
+				return;
+			auto& entry = state.traces[epoch];
+			if (entry.generation != generation || !entry.trace) {
+				auto trace = traced < 2 ? TraceEpochGraph(*graph, epoch) : nullptr;
+				if (!trace) {
+					complete = false;  // no schedule selected yet, or two traced this frame already: the next frame tries again
+					return;
 				}
-				state.checked[epoch] = generation;
-				changed = true;
+				++traced;
+				++state.fallbackTraces;
+				entry = { generation, std::move(trace) };
 			}
+			state.checked[epoch] = generation;
+			changed = true;
+		});
 		if (!changed || !complete)
 			return;
-		std::vector<Pass> passes;
-		for (std::uint32_t s = 0; s < kWorld.size(); ++s)
-			for (std::uint32_t e = 0; e < kWorld[s].epochCount; ++e) {
-				const auto found = state.traces.find(EpochOfSegment(kWorld[s].epochs[e]));
-				if (found != state.traces.end() && found->second.trace)
-					AppendPasses(s, *found->second.trace, passes);
-			}
+		const auto passes = RecipePasses(state, UINT32_MAX, nullptr);
 		std::vector<std::string> findings;
 		Validate(state, passes, findings);
-		for (const auto& finding : findings) {
-			if (!state.loggedFindings.insert(finding).second)
-				continue;
-			const bool fatal = Switches::Number("CS_ORG_RECIPE_FATAL", Driver::MismatchFatal() ? 1 : 0) != 0;
-			logger::error("[ORG] world recipe: {}", finding);
-			if (fatal) {
-				const auto message = fmt::format("Community Shaders native mode: the world recipe reads a resource before the pass that writes it: {}", finding);
-				logger::critical("[ORG] world recipe: {}", message);
-				stl::report_and_fail(message);
-			}
-		}
+		Report(state, findings, "");
 		// Printed when its passes changed: every stage, its passes in order, what each reads and writes.
 		std::uint64_t hash = 1469598103934665603ull;
 		for (const auto& pass : passes)
@@ -513,7 +427,7 @@ namespace RenderGraph::Frame::Recipes
 		logger::info("[ORG] world recipe ({} passes; {} inputs from the previous frame, {} from outside the graphs, {} declared by Drawcall Limit Fix's stages "
 					 "and written later; {} findings):",
 			passes.size(), state.previousInputs, state.outsideInputs, state.dclfLater, findings.size());
-		for (std::uint32_t s = 0; s < kWorld.size(); ++s) {
+		for (std::uint32_t s = 0; s < kStages; ++s) {
 			std::string text;
 			std::uint32_t count = 0;
 			for (const auto& pass : passes) {
@@ -522,8 +436,8 @@ namespace RenderGraph::Frame::Recipes
 				++count;
 				text += fmt::format("{}{} [reads {}; writes {}]", text.empty() ? "" : "; ", pass.name, Join(pass.reads), Join(pass.writes));
 			}
-			logger::info("[ORG] world recipe: {} {} ({}; commits at {}; {} passes): {}", s + 1, StageName(kWorld[s].id), OwnerName(kWorld[s].owner), kWorld[s].commit, count,
-				text);
+			const auto& stage = Table::kStageTable[s];
+			logger::info("[ORG] world recipe: {} {} ({}; commits at {}; {} passes): {}", s + 1, stage.name, OwnerName(stage.owner), stage.commit, count, text);
 		}
 	}
 

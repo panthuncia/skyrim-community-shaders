@@ -3934,7 +3934,7 @@ namespace RenderGraph::Engine::ImageSpace
 		// chain's hooks run, registered at the first world frame (CheckChainSteps, CheckWorldSteps); the water effects are the start
 		// stage's (CheckStartSteps), and the menus' composites a client on the anchor's own epoch, registered now (RegisterMenuSteps).
 		const auto epochs = FrameAnchors::SegmentEpochs();
-		if (Frame::PostChain::On() && std::ranges::find(epochs, RenderGraphRuntime::EpochOf(RenderGraphRuntime::Segment::DeclaredPost)) != epochs.end()) {
+		if (Frame::PostChain::On() && std::ranges::find(epochs, RenderGraphRuntime::EpochOf(RenderGraphRuntime::StageSegment(static_cast<std::uint32_t>(Frame::SegmentId::Post)))) != epochs.end()) {
 			for (std::size_t p = 0; p < state.post.size(); ++p) {
 				auto& client = state.post[p];
 				client.id = kPostIds[p];
@@ -3943,8 +3943,8 @@ namespace RenderGraph::Engine::ImageSpace
 			}
 			state.postOn = std::ranges::all_of(state.post, [](const PostClient& a_client) { return a_client.gate && a_client.latch; });
 			Chain().on = state.postOn;
-			World().on = state.postOn && std::ranges::find(epochs, RenderGraphRuntime::EpochOf(RenderGraphRuntime::Segment::DeclaredDeferred)) != epochs.end();
-			Start().on = state.postOn && std::ranges::find(epochs, RenderGraphRuntime::EpochOf(RenderGraphRuntime::Segment::DeclaredStart)) != epochs.end();
+			World().on = state.postOn && std::ranges::find(epochs, RenderGraphRuntime::EpochOf(RenderGraphRuntime::StageSegment(static_cast<std::uint32_t>(Frame::SegmentId::Deferred)))) != epochs.end();
+			Start().on = state.postOn && std::ranges::find(epochs, RenderGraphRuntime::EpochOf(RenderGraphRuntime::StageSegment(static_cast<std::uint32_t>(Frame::SegmentId::Start)))) != epochs.end();
 			Menu().on = state.postOn;
 		}
 		if (StepsOnly()) {

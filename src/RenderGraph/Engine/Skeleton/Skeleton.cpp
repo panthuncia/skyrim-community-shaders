@@ -1320,7 +1320,9 @@ namespace RenderGraph::Engine::Skeleton
 			};
 			client.gates = { group.gate };
 			const auto passes = client.passes.size();
-			group.registered = FrameAnchors::Register(std::move(client));
+			// Native mode: no stage runs the group's own client. Its clears run at the hosts and places below, so it is not registered (the
+			// recipe table names it only as a client of its anchor's own epoch, which guest mode runs).
+			group.registered = HostingOn() || FrameAnchors::Register(std::move(client));
 			if (!group.registered) {
 				group.specs.clear();
 				group.failed = true;
@@ -1683,11 +1685,11 @@ namespace RenderGraph::Engine::Skeleton
 			// Main::RenderDepth's copy is its last act: the pre-depth stage (which holds RenderDepth's main depth clear) commits here at the latest,
 			// in a frame without Drawcall Limit Fix's Z-prepass too, so the pre-main stage that holds the copy is open.
 			if (a_kind == CopyKind::Depth && !a_hostable && HostingOn() && WorldFrame())
-				(void)FrameAnchors::TapPoint(static_cast<std::uint32_t>(RenderGraphRuntime::Segment::DeclaredPreDepth));
+				(void)FrameAnchors::TapPoint(RenderGraph::Frame::SegmentId::PreDepth);
 			// CS's own depth copy (Deferred::DeferredPasses) is the deferred+water stage's first pass, just before its DeferredPasses tap: the
 			// pre-main stage ends here at the latest (in a frame without Drawcall Limit Fix's main opaque epoch, whose submission ends it).
 			if (a_kind == CopyKind::Depth && a_hostable && HostingOn() && WorldFrame())
-				(void)FrameAnchors::TapPoint(static_cast<std::uint32_t>(RenderGraphRuntime::Segment::DeclaredPreMain));
+				(void)FrameAnchors::TapPoint(RenderGraph::Frame::SegmentId::PreMain);
 			const char* where = nullptr;
 			if (EngineTexturesOf(a_kind) == std::pair{ copy.sourceTexture, copy.targetTexture } && CopyDeclared(a_kind, a_hostable, where)) {
 				RenderGraph::Frame::Driver::NoteHosted(where, 1);
@@ -1851,7 +1853,8 @@ namespace RenderGraph::Engine::Skeleton
 			// ones the shadow view does not host). The pre-depth stage commits just before the Z-prepass the same way, after RenderDepth's main
 			// depth clear was handed to the Z-prepass: no pre-depth pass reads or writes the main depth (its place clears it only when the
 			// Z-prepass does not).
-			if (a_segment == RenderGraphRuntime::Segment::DeclaredStart || a_segment == RenderGraphRuntime::Segment::DeclaredPreDepth)
+			if (a_segment == RenderGraphRuntime::StageSegment(static_cast<std::uint32_t>(RenderGraph::Frame::SegmentId::Start)) ||
+				a_segment == RenderGraphRuntime::StageSegment(static_cast<std::uint32_t>(RenderGraph::Frame::SegmentId::PreDepth)))
 				return;
 			const auto segment = static_cast<std::uint32_t>(a_segment);
 			auto& state = Skel();

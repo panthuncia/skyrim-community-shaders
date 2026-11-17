@@ -79,7 +79,7 @@ namespace DCLF::Features::Forward
 						if (!std::exchange(logged, true))
 							logger::info("[DCLF] forward: the main pass's blended draw came before the water (the camera is under water)");
 					}
-					(void)FrameAnchors::TapPoint(static_cast<std::uint32_t>(RenderGraphRuntime::Segment::DeclaredDeferred));
+					(void)FrameAnchors::TapPoint(::RenderGraph::Frame::SegmentId::Deferred);
 				}
 				if (main && ShellState::Running()) {
 					Extensions::TriggerScope trigger(blendedDraw);

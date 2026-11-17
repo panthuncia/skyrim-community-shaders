@@ -1,5 +1,7 @@
 #pragma once
 
+#include "RenderGraph/Frame/FrameDescription.h"
+
 #include <d3d11.h>
 #include <chrono>
 #include <cstdint>
@@ -121,17 +123,14 @@ public:
 		AnchorVolumetricLighting,
 		AnchorDecalQueries,
 		AnchorEngineCopy,
-		// The declared frame's segments (native mode, CS_ORG_SEGMENTS; FrameAnchors.h, SegmentsOn): one revision-driven, open epoch
-		// each, holding the passes of the anchors it lists, recorded per description of the segment (RenderGraph/Frame).
-		DeclaredStart,     // the start stage: the reflections prepass and the reflection faces' sky, before DCLF's shadow view
-		DeclaredPreDepth,  // the EarlyPrepass clients, at Main::RenderShadowMaps' return
-		DeclaredPreMain,   // RenderDepth's depth copy to the Prepass clients, at the Prepass anchor's hook
-		DeclaredDeferred,  // deferred+water: the deferred passes, the composite, the water mask, the RenderWorld scopes, the water and its blend, before DCLF's forward epoch
-		DeclaredSun,       // the sun stage: the sun's occlusion query between DCLF's forward and first-person epochs
-		DeclaredPost,      // the post stage: the volumetric lighting to the end-of-frame effects with the upscaler's evaluate, at RenderEndOfFrameEffects' return
-		DeclaredUi,        // the UI stage, in every frame kind: the displays, a menu's 3D scene between them, the overlay, ending just before the present
-		Count
+		// The CS stages' epochs (native mode, CS_ORG_SEGMENTS; FrameAnchors.h, SegmentsOn), one per RenderGraph::Frame::SegmentId, in
+		// that order (StageSegment). Each is one revision-driven, open epoch holding its steps' passes (Frame/RecipeTable.h).
+		Declared,
+		Count = Declared + RenderGraph::Frame::kSegments
 	};
+
+	/** @brief The epoch's segment of CS stage a_segment (a RenderGraph::Frame::SegmentId value). */
+	static constexpr Segment StageSegment(std::uint32_t a_segment) { return static_cast<Segment>(static_cast<std::uint32_t>(Segment::Declared) + a_segment); }
 
 	static RenderGraphRuntime& Get();
 

@@ -9,6 +9,7 @@
 #	include "RenderGraph/Frame/FrameDescription.h"
 #	include "RenderGraph/Frame/FrameDriver.h"
 #	include "RenderGraph/Frame/Recipe.h"
+#	include "RenderGraph/Frame/RecipeTable.h"
 #	include "RenderGraph/Engine/LoadingScreen/LoadingScreen.h"
 #	include "RenderGraph/Engine/Native/Native.h"
 #	include "RenderGraph/Engine/Targets/EngineTargets.h"
@@ -47,6 +48,7 @@
 #	include <thread>
 #	include <condition_variable>
 #	include <map>
+#	include <set>
 #	include <mutex>
 #	include <optional>
 #	include <typeindex>
@@ -121,55 +123,12 @@ namespace FrameAnchors
 			{ "EngineCopy", { "CS anchor: engine copy", "CS anchor: engine copy inputs", "FrameAnchors::EngineCopy / ", "cs.anchor.engine-copy" }, true },
 		} };
 
-		// Where each segment runs in a frame: AddToFrame puts an anchor before the first epoch of the order that runs after it. A
-		// segment's place only has to be right against the anchors next to it; the order names the frame,
-		// while the ledgers order the work whatever runs.
-		constexpr std::array<Segment, static_cast<std::size_t>(Segment::Count)> kTimeline{
-			Segment::DeclaredStart,            // the start stage (SegmentsOn): it commits just before DCLF's shadow view epoch
-			Segment::AnchorDecalQueries,       // the decal occlusion tests, at the frame's start before Main::Draw
-			Segment::AnchorEngineShadowClear,  // each shadow map slice's clear, before its draws (nominally here)
-			Segment::ShadowView,
-			Segment::SkyOcclusion,
-			Segment::AnchorEarlyPrepass,      // Main::RenderShadowMaps returned
-			Segment::DeclaredPreDepth,        // the declared pre-depth segment (SegmentsOn): its tap is EarlyPrepass's hook
-			Segment::AnchorEngineFrameClear,  // the main depth's clear in Main::RenderDepth (and the frame's other clears)
-			Segment::ZPrepass,                // Main::RenderDepth
-			Segment::FirstPersonDepth,
-			Segment::AnchorEngineDepthCopy,  // Main::RenderDepth's end (and the later copies of the same depth)
-			Segment::AnchorDepthDone,        // Main::RenderDepth returned, with the first-person depth
-			Segment::AnchorEngineCubeClear,  // each reflection face's clear, before its draws (nominally here)
-			Segment::Reflection,
-			Segment::AnchorReflectionsPrepass,  // the cubemap render, nominally here (zero or more times a frame)
-			Segment::AnchorSkyReflections,      // its faces' sky, once per face drawn
-			Segment::LightCulling,              // Light Limit Fix's Prepass
-			Segment::DeclaredPreMain,           // the declared pre-main segment (SegmentsOn): its end tap is the Prepass anchor's hook
-			Segment::AnchorPrepass,             // after every feature's Prepass
-			Segment::AnchorSky,                 // the main pass's sky batch, before Drawcall Limit Fix's colour epoch
-			Segment::MainOpaque,
-			Segment::DeclaredDeferred,         // the deferred+water stage (SegmentsOn): it commits just before DCLF's forward epoch
-			Segment::AnchorDeferredPasses,     // EndDeferred, after the blended decals
-			Segment::AnchorDeferredComposite,  // DeferredPasses, after the D3D11 SSGI and SSS
-			Segment::AnchorPostComposite,      // DeferredPasses' end, after the composite
-			Segment::AnchorEngineDraws,        // the water, before the forward epoch (nominally here: the shadow masks and the water mask run before, the blood after)
-			Segment::Forward,
-			Segment::DeclaredSun,          // the sun stage (SegmentsOn): the world's sun query, committed just before DCLF's first-person epoch
-			Segment::AnchorEngineQueries,  // the sun's occlusion queries, after Main::RenderWorld's accumulator (nominally here: a second runs later in the frame)
-			Segment::FirstPerson,
-			Segment::DeclaredPost,              // the post stage (SegmentsOn): its end is RenderEndOfFrameEffects' return
-			Segment::AnchorVolumetricLighting,  // RenderWorldPostProcess's VL apply and blur, before the composites and Main_PostProcessing
-			Segment::AnchorPostProcessing,      // Main_PostProcessing, before the upscaler
-			Segment::AnchorUpscale,             // after the upscaler's evaluate
-			Segment::AnchorImageSpace,          // the ImageSpace chain's batches (pre-tonemap composites, the HDR effect), a few times a frame
-			Segment::AnchorEngineCopy,          // the engine's kMAIN copy, between the chain's batches (nominally here; native mode only)
-			Segment::AnchorTonemap,             // in the ImageSpace chain after it
-			Segment::AnchorFrameGeneration,     // after the ImageSpace chain, before frame generation
-			Segment::AnchorInterface,           // Scaleform's displays (UI::DrawInterface), several times a frame
-			Segment::AnchorPresent,
-			Segment::DeclaredUi,       // the UI stage (SegmentsOn): the displays, a menu's scene between them, the overlay, ending just before the present
-			Segment::AnchorOverlay,    // the overlay's ImGui draw, inside HDRDisplay's present chain
-			Segment::AnchorHDROutput,  // HDRDisplay's output composite, after the overlay
-			Segment::AnchorCapture,    // the screenshot capture, at the end of HDRDisplay's present chain
-		};
+		namespace Table = RenderGraph::Frame::Recipes::Table;
+
+		// Where each segment runs in a frame (the recipe table's epochs, in frame order): AddToFrame puts an anchor's own epoch before the
+		// first epoch of the order that runs after it. A segment's place only has to be right against the anchors next to it; the order
+		// names the frame, while the ledgers order the work whatever runs.
+		constexpr auto kTimeline = Table::Timeline();
 
 		std::uint32_t RankOf(std::uint32_t a_segment)
 		{
@@ -184,225 +143,43 @@ namespace FrameAnchors
 		std::uint32_t EpochOfAnchor(Anchor a_anchor) { return RenderGraphRuntime::EpochOf(static_cast<Segment>(SegmentOf(a_anchor))); }
 
 		/**
-		 * @brief The declared frame's segments (SegmentsOn). Each is one epoch whose graph holds its steps' passes, in the steps'
-		 * order. A step is one hook of the frame (a tap), in the order the engine reaches them:
-		 * - an anchor that is wholly the segment's (no client named): every client of it, and the anchor has no epoch of its own;
-		 * - one or two named clients of an anchor that keeps its epoch for its other clients (a shared anchor);
-		 * - another module's epoch (foreign), whose passes the module hands to the segment (SetForeignPasses).
-		 * The last step is the end tap: the stage's one commit. Earlier taps only stage their clients' values: their commits write
-		 * into the frame slot's staging run (the frame inputs, GraphHost::EpochStagingRun), never into the ticket's. The end tap
-		 * copies the staged values into the slot's copy and submits the stage's one ticket (docs/development/org-native-frame-graph.md,
-		 * "The recipe").
+		 * @brief The CS stages (SegmentsOn), as the recipe table declares them (Frame/RecipeTable.h). Each is one epoch whose graph holds its
+		 * steps' passes, in the steps' order. A step is one hook of the frame (a tap), in the order the engine reaches them: an anchor with the
+		 * clients it holds there (a whole step holds its anchor wholly: the anchor has no epoch of its own), another module's epoch (foreign),
+		 * whose passes the module hands to the stage (SetForeignPasses), or a point. The last step is the end tap: the stage's one commit.
+		 * Earlier taps only stage their clients' values: their commits write into the frame slot's staging run (the frame inputs,
+		 * GraphHost::EpochStagingRun), never into the ticket's. The end tap copies the staged values into the slot's copy and submits the
+		 * stage's one ticket (docs/development/org-native-frame-graph.md, "The recipe").
 		 */
 		constexpr std::uint32_t kDeclared = RenderGraph::Frame::kSegments;
-		constexpr std::uint32_t kMaxSteps = 18;
+		constexpr std::uint32_t kMaxSteps = static_cast<std::uint32_t>(Table::kMaxSteps);
 		// Each step that reads CS's shared constants uploads them at its own point.
 		static_assert(kMaxSteps <= SharedConstants::kUploadPoints, "a stage's steps need an upload point each");
-		struct Step
-		{
-			Anchor anchor = Anchor::Count;  // Count for a foreign or point step
-			// The named clients; none: the whole anchor. A name ending in '*' names every client whose id starts with what comes before it.
-			std::array<const char*, 4> clients{ nullptr, nullptr, nullptr, nullptr };
-			Segment foreign = Segment::Count;  // a foreign step's module epoch
-			// With no client named: every client of the anchor while the segment's window is open, and the anchor keeps its own epoch for
-			// its runs outside the window (a menu's 3D scene runs the Tonemap anchor after the world's post chain).
-			bool shared = false;
-			// A CS point that is no anchor and no module epoch (TapPoint): it holds no passes and only ends the segment.
-			bool point = false;
-			// The step takes taps only until a later step of its stage has tapped this frame; then its anchor's taps go to the stage's next
-			// step at the anchor. The UI stage's displays before a menu's scene: the first display after the scene's first tap is drawn
-			// after the scene.
-			bool untilLater = false;
-			// The instances of a client with instances (ClientDesc::maxInstances) this step makes and taps: from firstInstance, instanceCount
-			// of them (0: every instance from firstInstance). The step's k-th tap this frame is instance firstInstance + k. Two steps at one
-			// anchor give the same client disjoint ranges (Scaleform's displays before and after a menu's scene).
-			std::uint8_t firstInstance = 0;
-			std::uint8_t instanceCount = 0;
-		};
+		using Step = Table::Step;
+
+		/** @brief A CS stage's entry of the recipe table, as FrameAnchors reads it. */
 		struct DeclaredInfo
 		{
-			Segment segment;
-			std::array<Step, kMaxSteps> steps;
-			std::uint32_t stepCount;
-			SegmentNames names;
-			// The stage's window opens only once every earlier stage of the frame has ended (WindowOpen). Without it, an earlier stage
-			// that ends at a point and staged nothing yet does not hold the window back. The UI stage's shared and named steps hold work of
-			// the frame's end (a menu's scene, its clears and copies): work the engine does between two world stages is never theirs.
+			Segment segment = Segment::Count;
+			const Step* steps = nullptr;
+			std::uint32_t stepCount = 0;
+			SegmentNames names{};
 			bool opensLast = false;
+			bool switchesEverySlot = false;
+			Table::SegmentList commitBefore{};
 		};
-		constexpr std::array<DeclaredInfo, kDeclared> kDeclaredInfo{ {
-			// The frame's start (frame sequence census, a world frame). First the decal tests (SE 35563, AE 36562, before Main::Draw): a tap and
-			// an instance each, every instance with its own query range. Then the player's face tint at a load (the session's first world frames:
-			// ISAlphaBlend into kPLAYER_FACEGEN_TINT, before the cubemap render). Then Main::Draw's cubemap render (BSCubeMapCamera::RenderCubemap)
-			// runs the ReflectionsPrepass hook once, then each reflection face's sky batch (SkyReflections, once per face drawn: the faces' client
-			// has an instance per face). The faces are cleared by the load operations of their sky's first draw; the engine's clears of them are
-			// dropped. Main::RenderWaterEffects runs after the faces: the water displacement update and the flow copies are the start client's
-			// steps at the ImageSpace anchor (ImageSpace's StartSteps.inl), a tap per update and per copy, each with its own instances. Last, the
-			// shadow maps' clears (BSShadowLight::RenderShadowmap) that Drawcall Limit Fix's shadow view does not host: every world frame before
-			// DCLF draws and during its load holds. They are passes at a place (Engine/Skeleton): the engine's call stages each one. Pre-depth,
-			// pre-main and post read those maps. Its commit is a point just before the next GPU work that follows it in every world frame is
-			// submitted: DCLF's shadow view epoch or a later stage (BeforeGpuWork, and a later stage's first tap).
-			{ Segment::DeclaredStart,
-				{ { { .anchor = Anchor::DecalQueries },
-					{ Anchor::ImageSpace, { "cs.engine.imagespace.facetint", nullptr } },
-					{ Anchor::ReflectionsPrepass },
-					{ Anchor::SkyReflections },
-					{ Anchor::ImageSpace, { "cs.engine.imagespace.start", nullptr } },
-					{ Anchor::EngineShadowClear, { "cs.engine.skeleton.shadow@start", nullptr } },
-					{ Anchor::Count, { nullptr, nullptr }, Segment::Count, false, true } } },
-				7,
-				{ "CS stage: start", "CS stage: start inputs", "FrameSegments::Start / ", "cs.segment.start" } },
-			// The pre-depth stage: the EarlyPrepass clients (Main::RenderShadowMaps returned), then Main::RenderDepth's clear of the main depth when
-			// Drawcall Limit Fix's Z-prepass does not host it (every world frame before DCLF draws and during its load holds; no pre-depth pass
-			// reads the main depth). Its commit is a point just before DCLF's Z-prepass or a later stage (BeforeGpuWork, and a later stage's first
-			// tap): the clear must reach the GPU before the Z-prepass draws, which a load hold's frames submit.
-			{ Segment::DeclaredPreDepth,
-				{ { { Anchor::EarlyPrepass },
-					{ Anchor::EngineFrameClear, { "cs.engine.skeleton.frame@pre-depth", nullptr } },
-					{ Anchor::Count, { nullptr, nullptr }, Segment::Count, false, true } } },
-				3,
-				{ "CS segment: pre-depth", "CS segment: pre-depth inputs", "FrameSegments::PreDepth / ", "cs.segment.pre-depth" } },
-			// Main::RenderDepth's end to the main pass's sky. The depth copy comes after DCLF's Z-prepass epoch (which holds first
-			// person's depth too), and light culling, the Prepass clients and the main pass's sky batch come before DCLF's main opaque
-			// epoch: no other GPU work runs in between (the census counts any that does). The sky's batch does not run in every world frame,
-			// so the stage ends at a point: just before DCLF's main opaque epoch or a later stage is submitted (BeforeGpuWork, and a later
-			// stage's first tap).
-			{ Segment::DeclaredPreMain,
-				{ { { Anchor::EngineDepthCopy, { "cs.engine.skeleton.depth-copy", nullptr } },
-					{ Anchor::DepthDone },
-					{ Anchor::EngineDraws, { "cs.engine.skeleton.frame@engine-draws", "cs.shadow-mask.world" } },
-					{ Anchor::Count, { nullptr, nullptr }, Segment::LightCulling },
-					{ Anchor::Prepass },
-					{ Anchor::Sky },
-					{ Anchor::Count, { nullptr, nullptr }, Segment::Count, false, true } } },
-				7, { "CS segment: pre-main", "CS segment: pre-main inputs", "FrameSegments::PreMain / ", "cs.segment.pre-main" } },
-			// Deferred::StartDeferred, after DCLF's main opaque epoch: the deferred passes (with CS's depth copy they host), the composite
-			// and the end of the deferred passes; then the rest of Main::RenderWorld (100424 / 107142): the water stencil's clear and the
-			// water mask (FinishAccumulating's stencil batch), the reflections, RenderSSAO's two calls with the snow pass or its copy between
-			// them, the engine's kMAIN copy, the water, the water targets' clear and the water blend. Its commit is a point just before DCLF's
-			// forward epoch is submitted (BeforeGpuWork), the next GPU work after the water blend: every tap has staged by then. The water's
-			// draws and the kMAIN copy are gated: a step that does not fire this frame (no water in view) does nothing.
-			{ Segment::DeclaredDeferred,
-				{ { { Anchor::DeferredPasses },
-					{ Anchor::DeferredComposite },
-					{ Anchor::PostComposite },
-					{ Anchor::EngineDraws, { "cs.engine.skeleton.frame@engine-draws", "cs.water.mask" } },
-					{ Anchor::ImageSpace, { "cs.engine.imagespace.world.scopes", nullptr } },
-					{ Anchor::EngineCopy, { nullptr, nullptr }, Segment::Count, true },
-					{ Anchor::EngineDraws, { "cs.water.surface", nullptr } },
-					{ Anchor::ImageSpace, { "cs.engine.skeleton.frame@image-space", "cs.engine.imagespace.world.water" } },
-					{ Anchor::Count, { nullptr, nullptr }, Segment::Count, false, true } } },
-				9, { "CS stage: deferred+water", "CS stage: deferred+water inputs", "FrameSegments::Deferred / ", "cs.segment.deferred" } },
-			// The sun stage: the rest of Main::RenderWorld after DCLF's forward epoch. First the precipitation: the engine draws its rain and
-			// snow in the main pass's blended draws (FinishAccumulatingPostResolveDepth's blended draw, the grouped alphas), and DCLF's forward
-			// epoch is submitted at that draw's start, before the engine's own blended draws (Features/Forward's ForwardHooks.cpp). So each
-			// precipitation draw comes after the deferred+water stage's commit, and before the sun query. Then the sun occlusion query
-			// (Sun::SubmitOcclusionQuery, SE 0x1403bbf20), which must run on the GPU before the first-person geometry, which would occlude the
-			// sun: a stage of its own between DCLF's forward and first-person graphs, committed just before the first-person epoch is submitted
-			// (BeforeGpuWork) or at a later stage's first tap. The sun's client has two instances (the world's and first person's query); a
-			// stage run's k-th tap is instance k. The precipitation's draws are frame inputs, recorded in the stage's late batch.
-			// The deferred+water stage commits at the blended draw in every world frame (Features/Forward's hook), not only when DCLF's forward
-			// epoch runs, so this window is open for the sun's query in a frame before DCLF draws too.
-			// Under water the engine's blended draw comes first in FinishAccumulatingPostResolveDepth (its call at +0x51, before the water), so
-			// the deferred+water stage commits before the water: the kMAIN copy, the water's draws, the water targets' clears and the water blend
-			// are this stage's steps then (the same clients as the deferred+water stage's, after the precipitation). Above water that stage takes
-			// them, and these steps skip.
-			{ Segment::DeclaredSun,
-				{ { { Anchor::EngineDraws, { "cs.precipitation", nullptr } },
-					{ Anchor::EngineCopy, {}, Segment::Count, true },
-					{ Anchor::EngineDraws, { "cs.water.surface", nullptr } },
-					{ Anchor::ImageSpace, { "cs.engine.skeleton.frame@image-space", "cs.engine.imagespace.world.water" } },
-					{ .anchor = Anchor::EngineQueries, .clients = { "cs.sky.sun", nullptr, nullptr, nullptr }, .instanceCount = 2 },
-					{ Anchor::Count, {}, Segment::Count, false, true } } },
-				6, { "CS stage: sun", "CS stage: sun inputs", "FrameSegments::Sun / ", "cs.segment.sun" } },
-			// The post stage: ImageSpaceManager::RenderWorldPostProcess (SE 100430, AE 107148). First the first person's sun query
-			// (Main::RenderFirstPersonView, after DCLF's first-person epoch), as the sun's client's instance 0 of this stage's run. The volumetric lighting (whole: its hook
-			// runs only there), the pre-tonemap composite as CS passes (ChainSteps.inl), the PostProcessing anchor (reserved so its hook
-			// always runs), the Upscale anchor (the upscaler's evaluate as a pass recorded at execution, the copy into kMAIN, the depth
-			// upscale), RenderEndOfFrameEffects (99023 / 105674) as CS passes split at the Tonemap anchor (its passes replace or follow the
-			// tonemap draw, so they sit between the HDR effect's draws and the tonemap's), and its return as the end (a point: no anchor
-			// runs there). Nothing else submits GPU work between the first tap and the end (the census counts any that does).
-			// Before the query, the engine's kMAIN copy that Main::RenderFirstPersonView makes after DCLF's first-person epoch in some cells (every
-			// frame on Solstheim, the worldspace run): the stage's first step, shared as the deferred+water stage's.
-			{ Segment::DeclaredPost,
-				{ { { Anchor::EngineCopy, {}, Segment::Count, true },
-					{ .anchor = Anchor::EngineQueries, .clients = { "cs.sky.sun", nullptr, nullptr, nullptr }, .instanceCount = 2 },
-					{ Anchor::VolumetricLighting },
-					{ Anchor::ImageSpace, { "cs.engine.imagespace.post.composites", nullptr } },
-					{ Anchor::PostProcessing },
-					{ Anchor::Upscale },
-					{ Anchor::ImageSpace, { "cs.engine.imagespace.post.hdr", nullptr } },
-					{ Anchor::Tonemap, { nullptr, nullptr }, Segment::Count, true },
-					{ Anchor::ImageSpace, { "cs.engine.imagespace.post.final", "cs.engine.skeleton.frame@post-chain" } },
-					{ Anchor::Count, { nullptr, nullptr }, Segment::Count, false, true } } },
-				10, { "CS stage: post", "CS stage: post inputs", "FrameSegments::Post / ", "cs.segment.post" } },
-			// The UI stage, in every frame kind's recipe. The engine draws, in this order (frame sequence census): the screen blood (a world
-			// frame's Main::RenderScreenSplatter, which Main::Draw calls after RenderWorldPostProcess returned, so after the post stage's end:
-			// docs/development/p5/blood-splatter.md), the frozen frame's composite (Main::Render; a menu over a frozen world only, which has no
-			// screen blood), the frame's first clears, displays, the shadow map's and a menu scene's clears,
-			// the scene's depth (Drawcall Limit Fix's menu depth batch), the shadow mask, the depth copy and the kMAIN copy, the scene's colour,
-			// its composite (UI3DSceneManager::Render's end-of-frame call, ImageSpace's MenuSteps.inl), the main depth's clear again, more
-			// displays, the player's face tint at a load (in a loading screen's frame), the present's clients, the overlay and the capture. A world frame's menu scene (an inventory item model, the local map)
-			// comes after the post stage, between the menu's displays, and takes the same steps.
-			// - Clears are passes at three places, each a client of the frame and shadow clear groups (Engine/Skeleton): the stage's start,
-			//   the scene's start and after the composite. The engine clears the main depth three times a loading screen's frame (for the
-			//   displays' masks before the scene, for the scene's depth, for the displays' masks after it) and kMAIN twice; the engine's call
-			//   stages each clear into the place it comes at.
-			// - Scaleform's displays: each display segment is a tap and an instance of the Scaleform client, its draw list a frame input
-			//   recorded in the late batch. The displays before a scene are instances 8 to 15; once a later step tapped, they are instances 0
-			//   to 7, after the scene. A frame without a scene draws every display as instances 8 to 15.
-			// - The screen blood's draw list, the scene's draw lists, the composites' constants, a Bink movie's tiles (queued by the movie's
-			//   tick) and the capture (native mode's capture point is just before the stage's commit, Hooks.cpp) are frame inputs, recorded in
-			//   the stage's late batch. What a frame does not use skips at execution, its barriers folded.
-			// - The depth copy is the stage's own gated client (cs.engine.skeleton.depth-copy@ui): the pre-main stage copies the main depth
-			//   in every world frame, this one only when the engine's call asks.
-			// It ends at a point: just before the present (Hooks.cpp), or before HDR output, which follows the overlay on the GPU and keeps its
-			// anchor's ticket. (A Bink frame's clear of the main depth comes before its Begin and has no reader: dropped, Engine/Skeleton.)
-			{ Segment::DeclaredUi,
-				{ { { Anchor::EngineDraws, { "cs.blood-splatter" } },
-					{ Anchor::ImageSpace, { "cs.engine.imagespace.frozen" } },
-					{ Anchor::EngineFrameClear, { "cs.engine.skeleton.frame@menu-start", "cs.engine.skeleton.shadow@menu-start" }, Segment::Count, true },
-					{ .anchor = Anchor::Interface, .untilLater = true, .firstInstance = 8, .instanceCount = 8 },
-					{ Anchor::EngineFrameClear, { "cs.engine.skeleton.frame@menu-scene", "cs.engine.skeleton.shadow@menu-scene" }, Segment::Count, true },
-					{ Anchor::EngineDraws, { "cs.menu-scenes.menu-depth" } },
-					{ Anchor::EngineDraws, { "cs.shadow-mask.menu" } },
-					{ Anchor::EngineDepthCopy, { "cs.engine.skeleton.depth-copy@ui" } },
-					{ Anchor::EngineCopy, {}, Segment::Count, true },
-					{ Anchor::EngineDraws, { "cs.menu-scenes.menu-colour", "cs.menu-scenes.local-map*" } },
-					{ Anchor::ImageSpace, { "cs.engine.imagespace.menu" } },
-					{ Anchor::EngineFrameClear, { "cs.engine.skeleton.frame@menu-after", "cs.engine.skeleton.shadow@menu-after" }, Segment::Count, true },
-					{ .anchor = Anchor::Interface, .firstInstance = 0, .instanceCount = 8 },
-					{ Anchor::ImageSpace, { "cs.engine.imagespace.facetint" } },
-					{ Anchor::Present },
-					{ Anchor::Overlay },
-					{ Anchor::Capture },
-					{ Anchor::Count, {}, Segment::Count, false, true } } },
-				18,
-				{ "CS stage: UI", "CS stage: UI inputs", "FrameSegments::Ui / ", "cs.segment.ui" },
-				true },
-		} };
 
-		/** @brief The anchors whose every client a declared segment holds, a bit each: they have no epoch of their own. */
-		constexpr std::uint32_t WholeMembers(std::uint32_t a_declared)
+		constexpr std::array<DeclaredInfo, kDeclared> DeclaredFromTable()
 		{
-			std::uint32_t mask = 0;
-			for (std::uint32_t k = 0; k < kDeclaredInfo[a_declared].stepCount; ++k) {
-				const auto& step = kDeclaredInfo[a_declared].steps[k];
-				if (step.anchor != Anchor::Count && !step.clients[0] && !step.shared)
-					mask |= 1u << static_cast<std::uint32_t>(step.anchor);
+			std::array<DeclaredInfo, kDeclared> out{};
+			for (std::uint32_t d = 0; d < kDeclared; ++d) {
+				const auto& stage = Table::CsStage(d);
+				out[d] = { RenderGraphRuntime::StageSegment(d), stage.steps.data(), Table::StepCount(stage), stage.names, stage.opensLast, stage.switchesEverySlot,
+					stage.commitBefore };
 			}
-			return mask;
+			return out;
 		}
-
-		/** @brief Every anchor a declared segment has a step at, a bit each. */
-		constexpr std::uint32_t StepAnchors(std::uint32_t a_declared)
-		{
-			std::uint32_t mask = 0;
-			for (std::uint32_t k = 0; k < kDeclaredInfo[a_declared].stepCount; ++k)
-				if (const auto anchor = kDeclaredInfo[a_declared].steps[k].anchor; anchor != Anchor::Count)
-					mask |= 1u << static_cast<std::uint32_t>(anchor);
-			return mask;
-		}
+		constexpr auto kDeclaredInfo = DeclaredFromTable();
 
 		/** @brief The step of a declared segment at an anchor (the first one), or kMaxSteps. */
 		std::uint32_t StepAt(std::uint32_t a_declared, Anchor a_anchor)
@@ -418,31 +195,12 @@ namespace FrameAnchors
 			return std::ranges::any_of(a_client.passes, [&](const PassDesc& a_pass) { return a_pass.anchor == a_anchor; });
 		}
 
-		/** @brief Whether a step holds a client: every client of a whole anchor, or a named one. */
+		/** @brief Whether a step holds a client: the step names it and it has passes at the step's anchor (at a whole step, a diagnostic client too). */
 		bool StepHolds(const Step& a_step, const ClientDesc& a_client)
 		{
 			if (a_step.anchor == Anchor::Count || !HasPassesAt(a_client, a_step.anchor))
 				return false;
-			if (!a_step.clients[0])
-				return true;
-			return std::ranges::any_of(a_step.clients, [&](const char* a_id) {
-				if (!a_id)
-					return false;
-				const std::string_view name(a_id);
-				if (!name.empty() && name.back() == '*')
-					return a_client.id.starts_with(name.substr(0, name.size() - 1));
-				return a_client.id == name;
-			});
-		}
-
-		/**
-		 * @brief Whether a new description of a stage switches every frame slot at once, when each slot's recording of it is ready: the UI
-		 * stage. Its description changes with the frame kind, not by frame, so no slot lags on an older schedule and no display is left out
-		 * after a kind switch. Other stages keep one schedule per slot (the post rows' ping-pong alternates by frame).
-		 */
-		constexpr bool SwitchesEverySlot(std::uint32_t a_declared)
-		{
-			return kDeclaredInfo[a_declared].segment == Segment::DeclaredUi;
+			return Table::Has(a_step.clients, a_client.id) || (a_step.whole && Table::Has(Table::kDiagnosticClients, a_client.id));
 		}
 
 		/** @brief Whether a step's client a_client has instances this step makes: its range, or every instance from its first. */
@@ -969,7 +727,7 @@ namespace FrameAnchors
 			if (!(a_state.declaredMembers >> a_index & 1u))
 				return kDeclared;
 			for (std::uint32_t d = 0; d < kDeclared; ++d)
-				if (a_state.declaredEpochs[d] && (WholeMembers(d) >> a_index & 1u))
+				if (a_state.declaredEpochs[d] && (Table::WholeAnchors(d) >> a_index & 1u))
 					return d;
 			return kDeclared;
 		}
@@ -999,14 +757,14 @@ namespace FrameAnchors
 				// A declared segment's member has no epoch of its own: its passes are in the segments' that hold it.
 				if (a_state.declaredMembers >> i & 1u) {
 					for (std::uint32_t d = 0; d < kDeclared; ++d)
-						if (a_state.declaredEpochs[d] && (StepAnchors(d) >> i & 1u) && std::ranges::find(epochs, EpochOfDeclared(d)) == epochs.end())
+						if (a_state.declaredEpochs[d] && (Table::StepAnchors(d) >> i & 1u) && std::ranges::find(epochs, EpochOfDeclared(d)) == epochs.end())
 							epochs.push_back(EpochOfDeclared(d));
 					continue;
 				}
 				epochs.push_back(EpochOfAnchor(static_cast<Anchor>(i)));
 				// A shared anchor whose named clients a segment holds: the segment's graph holds their passes too.
 				for (std::uint32_t d = 0; d < kDeclared; ++d)
-					if (a_state.declaredEpochs[d] && (StepAnchors(d) >> i & 1u) && std::ranges::find(epochs, EpochOfDeclared(d)) == epochs.end())
+					if (a_state.declaredEpochs[d] && (Table::StepAnchors(d) >> i & 1u) && std::ranges::find(epochs, EpochOfDeclared(d)) == epochs.end())
 						epochs.push_back(EpochOfDeclared(d));
 			}
 			return epochs;
@@ -1113,7 +871,7 @@ namespace FrameAnchors
 						return false;
 					// A declared segment's graph holds its members' passes.
 					for (std::uint32_t d = 0; d < kDeclared; ++d)
-						if (a_state.declaredEpochs[d] && (StepAnchors(d) >> i & 1u) &&
+						if (a_state.declaredEpochs[d] && (Table::StepAnchors(d) >> i & 1u) &&
 							builtFrom(a_state.declaredSnapshots[d].load(std::memory_order_acquire)) < a_retired.serial)
 							return false;
 				}
@@ -1325,15 +1083,15 @@ namespace FrameAnchors
 						anchors.declaredPasses[declared].store(passes, std::memory_order_release);
 						anchors.declaredKeys[declared].store(built_key, std::memory_order_release);
 						for (std::uint32_t i = 0; i < kAnchors; ++i)
-							if (WholeMembers(declared) >> i & 1u) {
+							if (Table::WholeAnchors(declared) >> i & 1u) {
 								anchors.built[i].store(built->serial, std::memory_order_release);
 								anchors.previousSnapshots[i].store(anchors.builtSnapshots[i].load(std::memory_order_acquire), std::memory_order_release);
 								anchors.builtSnapshots[i].store(built, std::memory_order_release);
-							} else if ((StepAnchors(declared) >> i & 1u) && (anchors.declaredMembers >> i & 1u)) {
+							} else if ((Table::StepAnchors(declared) >> i & 1u) && (anchors.declaredMembers >> i & 1u)) {
 								// A shared anchor with no epoch of its own: its clients are in the graphs once every stage with a step there was built with them.
 								std::uint64_t serial = UINT64_MAX;
 								for (std::uint32_t d = 0; d < kDeclared; ++d)
-									if (anchors.declaredEpochs[d] && (StepAnchors(d) >> i & 1u)) {
+									if (anchors.declaredEpochs[d] && (Table::StepAnchors(d) >> i & 1u)) {
 										const auto snapshot = anchors.declaredSnapshots[d].load(std::memory_order_acquire);
 										serial = (std::min)(serial, snapshot ? snapshot->serial : 0);
 									}
@@ -1341,7 +1099,7 @@ namespace FrameAnchors
 							}
 					};
 					const auto onFailed = [declared, built = snapshot](const std::string& a_error) {
-						DropFailedClients(StepAnchors(declared), kDeclaredInfo[declared].names.label, built, a_error);
+						DropFailedClients(Table::StepAnchors(declared), kDeclaredInfo[declared].names.label, built, a_error);
 					};
 					// A staged build: its snapshot and passes describe the frames it is recorded for before its attach.
 					(void)RenderGraph::Builds::DeferStaged([declared, built = snapshot, passes = declaredPasses, built_key = key] {
@@ -1428,7 +1186,7 @@ namespace FrameAnchors
 				if (a_anchor != Anchor::Count)
 					return 1u << IndexOf(a_anchor);
 				if (a_declared != kDeclared)
-					return StepAnchors(a_declared);
+					return Table::StepAnchors(a_declared);
 				return 0;
 			}
 
@@ -2111,12 +1869,64 @@ namespace FrameAnchors
 		return on && RenderGraph::Engine::Native::Active();
 	}
 
+	namespace
+	{
+		/**
+		 * @brief Whether the recipe table names client a_id at anchor a_anchor (Frame/RecipeTable.h). At an anchor a CS stage has a step at
+		 * (native mode), one of those steps names it. At an anchor that runs its own epoch (guest mode's every anchor, native mode's frame
+		 * generation and HDR output), a step names it there (guest runs that step's clients on the anchor's epoch until the stage runs in
+		 * guest) or the anchor's epoch entry does. A diagnostic client is named everywhere.
+		 */
+		bool TableNames(const State& a_state, std::string_view a_id, Anchor a_anchor)
+		{
+			if (Table::Has(Table::kDiagnosticClients, a_id))
+				return true;
+			if (a_state.declaredMembers >> IndexOf(a_anchor) & 1u) {
+				for (std::uint32_t d = 0; d < kDeclared; ++d)
+					if (a_state.declaredEpochs[d])
+						for (std::uint32_t k = 0; k < kDeclaredInfo[d].stepCount; ++k)
+							if (kDeclaredInfo[d].steps[k].anchor == a_anchor && Table::Has(kDeclaredInfo[d].steps[k].clients, a_id))
+								return true;
+				return false;
+			}
+			for (const auto& stage : Table::kStageTable) {
+				for (const auto& step : stage.steps)
+					if (step.anchor == a_anchor && Table::Has(step.clients, a_id))
+						return true;
+				for (const auto& epoch : stage.epochs)
+					if (epoch.segment == Table::AnchorSegment(a_anchor) && epoch.role != Table::Role::Graph &&
+						(Table::Has(epoch.clients, a_id) || Table::InFamily(epoch.family, a_id)))
+						return true;
+			}
+			return false;
+		}
+	}
+
 	bool Register(ClientDesc a_client)
 	{
 		auto lock = Guard();
 		auto& state = Anchors();
 		if (!state.host || !RenderGraphRuntime::Get().IsActive()) {
 			logger::warn("[ORG] frame anchors: {} not registered, the render graph is not active", a_client.id);
+			return false;
+		}
+		// Membership is the recipe table's: a client's every pass must be at an anchor where the table names the client. Anything else is a
+		// recipe mismatch: fatal in development builds, refused and logged once per client in release builds.
+		for (const auto& pass : a_client.passes) {
+			if (IndexOf(pass.anchor) >= kAnchors || TableNames(state, a_client.id, pass.anchor))
+				continue;
+			const auto message = fmt::format(
+				"Community Shaders: the client '{}' registered a pass ('{}') at the {} anchor, and no step of the recipe table names it there "
+				"(src/RenderGraph/Frame/RecipeTable.h). Name the client at the step of the stage its work belongs to.",
+				a_client.id, pass.name, Name(pass.anchor));
+			if (RenderGraph::Frame::Driver::MismatchFatal()) {
+				logger::critical("[ORG] recipe mismatch: {}", message);
+				spdlog::default_logger()->flush();
+				stl::report_and_fail(message);
+			}
+			static std::set<std::string, std::less<>> logged;
+			if (logged.insert(a_client.id).second)
+				logger::error("[ORG] recipe mismatch: {} The client is refused.", message);
 			return false;
 		}
 		if (a_client.id.empty() || a_client.passes.empty()) {
@@ -2426,125 +2236,16 @@ namespace FrameAnchors
 
 	}
 
-	namespace
-	{
-		/** @brief Whether epoch a_segment, submitted now, ends the start stage (BeforeGpuWork): GPU work that follows it in every world frame. */
-		bool EndsStart(Segment a_segment)
-		{
-			switch (a_segment) {
-			case Segment::ShadowView:
-			case Segment::SkyOcclusion:
-			case Segment::ZPrepass:
-			case Segment::FirstPersonDepth:
-			case Segment::LightCulling:
-			case Segment::MainOpaque:
-			case Segment::DeclaredPreDepth:
-			case Segment::DeclaredPreMain:
-				return true;
-			default:
-				return false;
-			}
-		}
-
-		/**
-		 * @brief Whether epoch a_segment, submitted now, ends the pre-depth stage (BeforeGpuWork): GPU work that follows it in every world frame
-		 * (DCLF's Z-prepass, or the work after it in a frame without it).
-		 */
-		bool EndsPreDepth(Segment a_segment)
-		{
-			switch (a_segment) {
-			case Segment::ZPrepass:
-			case Segment::FirstPersonDepth:
-			case Segment::Reflection:
-			case Segment::LightCulling:
-			case Segment::MainOpaque:
-			case Segment::DeclaredPreMain:
-				return true;
-			default:
-				return false;
-			}
-		}
-
-		/** @brief Whether epoch a_segment, submitted now, ends the pre-main stage (BeforeGpuWork): GPU work that follows it in every world frame. */
-		bool EndsPreMain(Segment a_segment)
-		{
-			switch (a_segment) {
-			case Segment::MainOpaque:
-			case Segment::DeclaredDeferred:
-			case Segment::Forward:
-				return true;
-			default:
-				return false;
-			}
-		}
-
-		/**
-		 * @brief Whether epoch a_segment, submitted now, ends the sun stage (BeforeGpuWork): DCLF's first-person epoch, or the work after it in a
-		 * frame without it.
-		 */
-		bool EndsSun(Segment a_segment)
-		{
-			switch (a_segment) {
-			case Segment::FirstPerson:
-			case Segment::AnchorVolumetricLighting:
-			case Segment::AnchorPostProcessing:
-			case Segment::AnchorUpscale:
-			case Segment::AnchorInterface:
-			case Segment::AnchorPresent:
-			case Segment::DeclaredPost:
-				return true;
-			default:
-				return false;
-			}
-		}
-
-		/** @brief Whether epoch a_segment, submitted now, ends the world segment (BeforeGpuWork): GPU work that follows it in every frame. */
-		bool EndsWorld(Segment a_segment)
-		{
-			switch (a_segment) {
-			case Segment::Forward:
-			case Segment::FirstPerson:
-			case Segment::AnchorVolumetricLighting:
-			case Segment::AnchorPostProcessing:
-			case Segment::AnchorUpscale:
-			case Segment::AnchorInterface:
-			case Segment::AnchorPresent:
-			case Segment::DeclaredPost:
-				return true;
-			default:
-				return false;
-			}
-		}
-	}
-
 	void BeforeGpuWork(const char* a_why, std::uint32_t a_segment)
 	{
 		auto& state = Anchors();
-		// The deferred+water stage commits just before the next GPU work that comes after it in the frame is submitted: DCLF's forward epoch
-		// in a world frame, else the sun's queries (the end of Main::RenderWorld), the first-person epoch or a later segment. Its
-		// commit point.
-		// The start and pre-main stages commit the same way, before the next GPU work that follows them in every world frame.
-		if (a_segment != UINT32_MAX && state.host && SegmentsOn() && IsRenderOwner()) {
-			// Work that ends the world segment ends both too, in a frame whose usual commit point did not come (Drawcall Limit Fix not
-			// drawing yet).
-			const bool late = EndsWorld(static_cast<Segment>(a_segment)) || a_segment == static_cast<std::uint32_t>(Segment::DeclaredDeferred);
-			if (late || EndsStart(static_cast<Segment>(a_segment)))
-				(void)TapPoint(static_cast<std::uint32_t>(Segment::DeclaredStart));
-			if (late || EndsPreDepth(static_cast<Segment>(a_segment)))
-				(void)TapPoint(static_cast<std::uint32_t>(Segment::DeclaredPreDepth));
-			if (late || EndsPreMain(static_cast<Segment>(a_segment)))
-				(void)TapPoint(static_cast<std::uint32_t>(Segment::DeclaredPreMain));
-		}
-		if (a_segment != UINT32_MAX && state.host && SegmentsOn() && EndsWorld(static_cast<Segment>(a_segment)) && IsRenderOwner())
-			(void)TapPoint(static_cast<std::uint32_t>(Segment::DeclaredDeferred));
-		// The sun stage commits just before DCLF's first-person epoch is submitted, or before later GPU work in a frame without it.
-		if (a_segment != UINT32_MAX && state.host && SegmentsOn() && EndsSun(static_cast<Segment>(a_segment)) && IsRenderOwner())
-			(void)TapPoint(static_cast<std::uint32_t>(Segment::DeclaredSun));
-		// The UI stage commits just before the GPU work that follows the overlay: HDR output, the capture, or the present (Hooks.cpp).
-		if (a_segment != UINT32_MAX && state.host && SegmentsOn() && IsRenderOwner() &&
-			(a_segment == static_cast<std::uint32_t>(Segment::AnchorHDROutput) || a_segment == static_cast<std::uint32_t>(Segment::AnchorCapture))) {
-			(void)TapPoint(static_cast<std::uint32_t>(Segment::DeclaredUi));
-		}
+		// A stage that ends at a point commits just before the next GPU work that follows it in every world frame is submitted: the epochs
+		// its table entry lists (Frame/RecipeTable.h, Stage::commitBefore), in recipe order. The deferred+water stage's usual commit point is
+		// the engine's blended draw, the UI stage's the present (Hooks.cpp); these are the frames where that point did not come first.
+		if (a_segment != UINT32_MAX && state.host && SegmentsOn() && IsRenderOwner())
+			for (std::uint32_t d = 0; d < kDeclared; ++d)
+				if (std::ranges::find(kDeclaredInfo[d].commitBefore, static_cast<Segment>(a_segment)) != kDeclaredInfo[d].commitBefore.end())
+					(void)TapPoint(static_cast<RenderGraph::Frame::SegmentId>(d));
 		// A declared segment holding its ticket: other GPU work submitted now runs ahead of the segment's work, which the end tap
 		// submits. Counted by why, for the census; its first lines are logged.
 		if (state.stagesOpen.load(std::memory_order_acquire) && IsRenderOwner()) {
@@ -2977,7 +2678,7 @@ namespace FrameAnchors
 					Driver::NoteSwitch(segment, a_frame.frame, slot, a_frame.frame - a_state.waitFrame[a_declared], what);
 					// The UI stage: the other slots switch at this boundary too when their recordings of the description are ready
 					// (SwitchesEverySlot).
-					for (std::uint32_t s = 0; s < RenderGraphRuntime::kGameFramesInFlight && SwitchesEverySlot(a_declared); ++s) {
+					for (std::uint32_t s = 0; s < RenderGraphRuntime::kGameFramesInFlight && kDeclaredInfo[a_declared].switchesEverySlot; ++s) {
 						auto& other = a_state.schedule[a_declared][s];
 						if (s == slot || (other.recording && other.fields == wanted))
 							continue;
@@ -3166,7 +2867,7 @@ namespace FrameAnchors
 		template <class F>
 		void ForEachStageGate(const State& a_state, std::uint32_t a_declared, const Snapshot& a_built, F&& a_do)
 		{
-			const auto anchors = StepAnchors(a_declared);
+			const auto anchors = Table::StepAnchors(a_declared);
 			for (const auto& client : SegmentClients(a_built, a_declared))
 				for (const auto& gate : client->gates)
 					if (gate)
@@ -3271,7 +2972,7 @@ namespace FrameAnchors
 				StopAll(a_state, kDeclaredInfo[a_declared].names.label);
 				return { RunStatus::Failed };
 			}
-			const auto anchors = StepAnchors(a_declared);
+			const auto anchors = Table::StepAnchors(a_declared);
 			bool late = false;
 			for (std::uint32_t i = 0; i < kAnchors; ++i)
 				late = late || ((anchors >> i & 1u) && kInfo[i].late);
@@ -3653,7 +3354,7 @@ namespace FrameAnchors
 			return;
 		std::size_t dropped = 0;
 		for (std::uint32_t d = 0; d < kDeclared; ++d) {
-			if (!state.declaredEpochs[d] || !(WholeMembers(d) >> index & 1u))
+			if (!state.declaredEpochs[d] || !(Table::WholeAnchors(d) >> index & 1u))
 				continue;
 			// A frame slot's schedule holds its own reference, so the recordings a frame runs on stay until it switches.
 			auto& recordings = state.declaredRecordings[d];
@@ -3670,7 +3371,7 @@ namespace FrameAnchors
 		if (!SegmentsOn() || index >= kAnchors)
 			return std::nullopt;
 		for (std::uint32_t d = 0; d < kDeclared; ++d)
-			if (WholeMembers(d) >> index & 1u)
+			if (Table::WholeAnchors(d) >> index & 1u)
 				if (const auto k = StepAt(d, a_anchor); k < kMaxSteps)
 					return kDeclaredInfo[d].steps[k].firstInstance;
 		return std::nullopt;
@@ -3685,9 +3386,8 @@ namespace FrameAnchors
 			if (!state.declaredEpochs[d])
 				continue;
 			for (std::uint32_t k = 0; k < kDeclaredInfo[d].stepCount; ++k)
-				for (const char* name : kDeclaredInfo[d].steps[k].clients)
-					if (name && a_id == name)
-						return true;
+				if (Table::Has(kDeclaredInfo[d].steps[k].clients, a_id))
+					return true;
 		}
 		return false;
 	}
@@ -3788,11 +3488,9 @@ namespace FrameAnchors
 			return -1;
 		auto lock = Guard();
 		const auto named = [&](const Step& a_step) -> std::int32_t {
-			for (const char* id : a_step.clients)
-				if (id)
-					for (std::size_t i = 0; i < a_ids.size(); ++i)
-						if (a_ids[i] == id)
-							return static_cast<std::int32_t>(i);
+			for (std::size_t i = 0; i < a_ids.size(); ++i)
+				if (Table::Has(a_step.clients, a_ids[i]))
+					return static_cast<std::int32_t>(i);
 			return -1;
 		};
 		for (std::uint32_t d = 0; d < kDeclared; ++d) {
@@ -3821,7 +3519,7 @@ namespace FrameAnchors
 		return -1;
 	}
 
-	RunResult TapPoint(std::uint32_t a_segment)
+	RunResult TapPoint(RenderGraph::Frame::SegmentId a_segment)
 	{
 		const RunDepthScope depth;
 		auto& state = Anchors();
@@ -3831,7 +3529,7 @@ namespace FrameAnchors
 		if (!IsRenderOwner() || !RenderGraphRuntime::Get().IsActive())
 			return { RunStatus::Refused };
 		for (std::uint32_t d = 0; d < kDeclared; ++d) {
-			if (!state.declaredEpochs[d] || static_cast<std::uint32_t>(kDeclaredInfo[d].segment) != a_segment)
+			if (!state.declaredEpochs[d] || d != static_cast<std::uint32_t>(a_segment))
 				continue;
 			for (std::uint32_t k = 0; k < kDeclaredInfo[d].stepCount; ++k)
 				if (kDeclaredInfo[d].steps[k].point) {
@@ -4399,7 +4097,7 @@ namespace FrameAnchors
 		if (!SegmentsOn() || !state.host || !IsRenderOwner())
 			return;
 		// The session's first frames are a Bink movie's, then the main menu's: the UI stage is ready before them.
-		PrimeStage(state, Segment::DeclaredUi, a_caller);
+		PrimeStage(state, RenderGraphRuntime::StageSegment(static_cast<std::uint32_t>(RenderGraph::Frame::SegmentId::Ui)), a_caller);
 	}
 
 	void LogRunStats()
@@ -4564,7 +4262,7 @@ namespace FrameAnchors
 			if (a_keptGraph)
 				state.declaredSnapshots[declared].store(state.declaredPrevious[declared].load(std::memory_order_acquire), std::memory_order_release);
 			DropStaged(state, declared);
-			DropFailedClients(StepAnchors(declared), kDeclaredInfo[declared].names.label, failed, a_error);
+			DropFailedClients(Table::StepAnchors(declared), kDeclaredInfo[declared].names.label, failed, a_error);
 			return;
 		}
 		if (anchor == Anchor::Count)
@@ -4596,10 +4294,10 @@ namespace FrameAnchors
 				std::uint32_t members = 0;
 				bool any = false;
 				for (std::uint32_t i = 0; i < kAnchors; ++i) {
-					any = any || (state.reserved[i] && (StepAnchors(d) >> i & 1u));
+					any = any || (state.reserved[i] && (Table::StepAnchors(d) >> i & 1u));
 					// Native mode: an anchor any stage has a step at has no epoch of its own, a wholly held one or a shared one (its other
 					// clients' work outside the stages' steps is a mismatch, Run).
-					if (state.reserved[i] && (StepAnchors(d) >> i & 1u))
+					if (state.reserved[i] && (Table::StepAnchors(d) >> i & 1u))
 						members |= 1u << i;
 				}
 				if (!any)

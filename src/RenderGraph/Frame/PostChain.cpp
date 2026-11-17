@@ -198,7 +198,7 @@ namespace RenderGraph::Frame::PostChain
 				if (world) {
 					Engine::ImageSpace::OnEndOfFrame(false, 0, 0);
 					state.endOfFrame = false;
-					(void)FrameAnchors::TapPoint(static_cast<std::uint32_t>(RenderGraphRuntime::Segment::DeclaredPost));
+					(void)FrameAnchors::TapPoint(SegmentId::Post);
 				}
 			}
 			static inline REL::Relocation<decltype(thunk)> func;

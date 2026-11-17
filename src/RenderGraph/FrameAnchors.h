@@ -42,6 +42,7 @@ namespace RenderGraph
 	namespace Frame
 	{
 		struct Description;
+		enum class SegmentId : std::uint8_t;
 	}
 }
 
@@ -406,7 +407,7 @@ namespace FrameAnchors
 
 	/**
 	 * @brief Whether a run of a_anchor now would draw a_id's work: the one question a client asks before it takes the engine's work. Native
-	 * mode: for an anchor a CS stage holds wholly (no client named at its step), the schedule of the stage that holds the anchor in this
+	 * mode: for an anchor a CS stage holds wholly (a whole step in the recipe table), the schedule of the stage that holds the anchor in this
 	 * frame's kind holds this registration of a_id and has it on (false while the stage is absent, and when no stage of the frame's kind
 	 * holds the anchor); that does not depend on where the frame is now, so a caller may ask before the stage's window opens. For a shared
 	 * anchor, the open stage whose step takes the anchor's taps now holds a_id, and its schedule has it on (HeldNow). Guest mode runs no
@@ -602,8 +603,8 @@ namespace FrameAnchors
 	 * @brief Whether the declared frame's stages are on (docs/development/org-native-frame-graph.md, "The recipe"): native mode unless
 	 * CS_ORG_SEGMENTS=0, with epochs, async epochs and replayable recordings. Each CS stage is one graph, revision-driven,
 	 * recorded on the host's thread for each description of it (RenderGraph::Frame::Description) and kept per frame slot. Its steps are
-	 * hooks in frame order: anchors it holds wholly (which then have no epoch of their own), named clients of shared anchors, and other
-	 * modules' epochs (SetForeignPasses). A tap stages its clients' values into the frame slot's staging run (the frame inputs); no
+	 * hooks in frame order (Frame/RecipeTable.h): anchors it holds wholly (which then have no epoch of their own), named clients of shared
+	 * anchors, and other modules' epochs (SetForeignPasses). A tap stages its clients' values into the frame slot's staging run (the frame inputs); no
 	 * ticket is taken there. The stage's commit point (its last step) copies the staged values into the slot's copy and submits the one
 	 * ticket. Stages: pre-depth (EarlyPrepass), pre-main (RenderDepth's depth copy to Prepass; CS_ORG_SEGMENT_PREMAIN=0 off), deferred
 	 * and water (DeferredPasses to just before the forward epoch; CS_ORG_SEGMENT_DEFERRED=0 off), and the post chain's two
@@ -707,11 +708,11 @@ namespace FrameAnchors
 	std::int32_t StagePlace(std::span<const std::string_view> a_ids);
 
 	/**
-	 * @brief A CS point that ends a declared segment and is no anchor (a point step: RenderEndOfFrameEffects' return ends the post
-	 * end-of-frame segment). a_segment is the segment's RenderGraphRuntime::Segment value. Outside the segment's window it does
-	 * nothing (the segment did not open this frame, or it is not declared). Render owner.
+	 * @brief A CS point that ends CS stage a_segment and is no anchor (its point step: RenderEndOfFrameEffects' return ends the post
+	 * stage). The recipe table names each stage's commit sites (Frame/RecipeTable.h, Stage::commitSite). Outside the stage's window it
+	 * does nothing (the stage did not open this frame, or it is not declared). Render owner.
 	 */
-	RunResult TapPoint(std::uint32_t a_segment);
+	RunResult TapPoint(RenderGraph::Frame::SegmentId a_segment);
 
 	/** @brief The gate entry (or latch region index) of a_entry for instance a_instance, a_perInstance entries an instance. */
 	constexpr std::uint32_t InstanceEntry(std::uint32_t a_instance, std::uint32_t a_perInstance, std::uint32_t a_entry)
