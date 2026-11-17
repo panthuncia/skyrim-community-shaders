@@ -20,12 +20,15 @@ VL_GENERATE_RESOURCES(ORG_RESOURCE)
 
 static float4x4 CameraViewProj = float4x4(PerTechnique.Rows[0], PerTechnique.Rows[1], PerTechnique.Rows[2], PerTechnique.Rows[3]);
 static float4x4 CameraViewProjInverse = float4x4(PerTechnique.Rows[4], PerTechnique.Rows[5], PerTechnique.Rows[6], PerTechnique.Rows[7]);
-// Column-major in the engine's block: each cascade's three columns are three rows.
-static float4x3 ShadowMapProj[3] = {
-	transpose(float3x4(PerTechnique.Rows[8], PerTechnique.Rows[9], PerTechnique.Rows[10])),
-	transpose(float3x4(PerTechnique.Rows[11], PerTechnique.Rows[12], PerTechnique.Rows[13])),
-	transpose(float3x4(PerTechnique.Rows[14], PerTechnique.Rows[15], PerTechnique.Rows[16]))
-};
+// Column-major in the engine's block: each cascade's three columns are three rows (rows 8 to 16).
+// The cascade is picked per thread, so its rows are read from the latch buffer by offset. A static array of the three
+// matrices indexed per thread became a private array, which AMD's compiler keeps in scratch memory.
+float4x3 ShadowMapProjAt(uint a_cascade)
+{
+	const uint offset = OrgOffset_PerTechnique + 16 * (8 + 3 * a_cascade);
+	return transpose(float3x4(OrgLatch_PerTechnique.Load<float4>(offset), OrgLatch_PerTechnique.Load<float4>(offset + 16),
+		OrgLatch_PerTechnique.Load<float4>(offset + 32)));
+}
 static float3 EndSplitDistances = PerTechnique.Rows[17].xyz;
 static float ShadowMapCount = PerTechnique.Rows[17].w;
 static float EnableShadowCasting = PerTechnique.Rows[18].x;
@@ -88,22 +91,21 @@ cbuffer PerTechnique : register(b0)
 	float PhaseScattering : packoffset(c23.y);
 	float DensityContribution : packoffset(c23.z);
 }
+
+float4x3 ShadowMapProjAt(uint a_cascade)
+{
+	return ShadowMapProj[a_cascade];
+}
 #	endif
 
 [numthreads(32, 32, 1)] void main(uint3 dispatchID : SV_DispatchThreadID) {
-	const float3 StepCoefficients[] = {
-		{ 0, 0, 0 },
-		{ 0, 0, 0.001 },
-		{ 0, 0.001, 0 },
-		{ 0, 0.001, 0.001 },
-		{ 0.001, 0, 0 },
-		{ 0.001, 0, 0.001 },
-		{ 0.001, 0.001, 0 },
-		{ 0.001, 0.001, 0.001 }
-	};
+	// The engine's step table: entry i is 0.001 in x, y and z for bits 2, 1 and 0 of i. Computed from the bits, so no
+	// local array is indexed (one would go to scratch memory on AMD).
+	const uint stepIndex = (uint)IterationIndex;
+	const float3 stepCoefficient = 0.001 * float3((stepIndex >> 2) & 1, (stepIndex >> 1) & 1, stepIndex & 1);
 
 	float3 normalizedCoordinates = float3(dispatchID.xy + 0.5, dispatchID.z - 1.0) * rcp(TextureDimensions.xyz);
-	float3 depthUv = normalizedCoordinates + StepCoefficients[IterationIndex];
+	float3 depthUv = normalizedCoordinates + stepCoefficient;
 	float depth = VL_INVERSE_REPARTITION(depthUv.z);
 	float4 positionCS = float4(2 * depthUv.x - 1, 1 - 2 * depthUv.y, depth, 1);
 
@@ -120,7 +122,7 @@ cbuffer PerTechnique : register(b0)
 		uint cascadeIndex = ShadowMapCount >= 3.0f && shadowMapDepth > EndSplitDistances.y ? 2 : shadowMapDepth > EndSplitDistances.x ? 1 :
 		                                                                                                                                0;
 		float shadowMapThreshold = cascadeIndex == 0 ? 0.01f : 0.0f;
-		float4x3 lightProjectionMatrix = ShadowMapProj[cascadeIndex];
+		float4x3 lightProjectionMatrix = ShadowMapProjAt(cascadeIndex);
 
 		float3 positionLS = mul(transpose(lightProjectionMatrix), float4(positionWS.xyz, 1)).xyz;
 		float shadowMapValue = ShadowmapTex.SampleLevel(ShadowmapSampler, float3(positionLS.xy, cascadeIndex), 0);
