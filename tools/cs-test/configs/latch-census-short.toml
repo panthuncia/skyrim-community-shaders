@@ -9,7 +9,6 @@
 extends = ["guest"]
 
 [org]
-ports = "all"
 census = true
 
 [[steps]]

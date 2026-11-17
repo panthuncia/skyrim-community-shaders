@@ -9,6 +9,7 @@ extends = ["guest"]
 timeout_s = 45
 
 [org]
+ports = "off"          # only the ports named below
 census = true
 shadow_mask = true
 engine_constants = true

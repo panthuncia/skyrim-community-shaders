@@ -1,2 +1,4 @@
 # DXVK guest mode: DXVK runs the game on Vulkan and the render graph shares its device. The default; base as it is.
+# Guest mode turns on every port native mode runs, the flush latch and the guest context by itself (plan B0). Old guest, with the
+# engine and CS features on D3D11 and only DCLF's graphs on ORG: --set org.ports=off. Plain D3D11 mode (no render graph): d3d11.toml.
 extends = ["base"]

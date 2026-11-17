@@ -5,9 +5,6 @@ extends = ["guest"]
 [run]
 timeout_s = 300
 
-[org]
-ports = "all"   # guest mode runs a port on the graph only when its switch is on; the streaks need SSGI and Volumetric Lighting there
-
 [[steps]]
 at = "world-ready"
 frames = 30

@@ -6,6 +6,7 @@
 extends = ["guest"]
 
 [org]
+ports = "off"          # the engine draws the sky: guest mode's ports off but Cloud Shadows'
 cloud_shadows = true
 
 [[steps]]
