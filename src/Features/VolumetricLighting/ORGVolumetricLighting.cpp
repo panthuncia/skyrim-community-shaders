@@ -755,8 +755,8 @@ struct ORGVolumetricLighting::Impl
 			return clear();
 		}
 		const auto volume = static_cast<std::uint32_t>(found - registration->sizes.begin());
-		if (!FrameAnchors::CanRun(kClientId, kAnchor)) {
-			skipped.Report("the anchor's graph does not hold the client yet, or its ring is full");
+		if (!FrameAnchors::Scheduled(kClientId, kAnchor)) {
+			skipped.Report("the frame's schedule does not hold the client yet");
 			return clear();
 		}
 		const bool noise = !noiseDone;

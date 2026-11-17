@@ -67,10 +67,10 @@ namespace RenderGraph::Frame::Recipes
 				3, "RenderEndOfFrameEffects' return" },
 			// The UI stage holds Scaleform's displays (fixed instances), the Present anchor's clients (a Bink movie's tiles) and the overlay (the
 			// Interface, Present and Overlay anchors have no epoch of their own: the UI and menu UI stages hold them). HDR output and the capture
-			// follow its commit. The MovieTiles anchor has no client.
+			// follow its commit.
 			{ StageId::Ui, Owner::Cs,
-				{ Segment::AnchorMovieTiles, Segment::AnchorInterface, Segment::AnchorPresent, Segment::DeclaredUi, Segment::AnchorHDROutput, Segment::AnchorCapture },
-				6, "just before the present (or HDR output, or the capture)" },
+				{ Segment::AnchorInterface, Segment::AnchorPresent, Segment::DeclaredUi, Segment::AnchorHDROutput, Segment::AnchorCapture },
+				5, "just before the present (or HDR output, or the capture)" },
 		} };
 
 		/**

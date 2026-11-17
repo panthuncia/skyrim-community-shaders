@@ -4816,11 +4816,12 @@ chain's hooks (which only check and stage in native). This is the input for the 
   world, the face tint at a load), EngineShadowClear and EngineFrameClear (world frames before DCLF draws and during its holds, a menu scene's
   clears over the live world, frame 0), EngineCubeClear (outside world frames), EngineCopy outside the stages' windows, EngineDepthCopy
   outside the stages, EngineQueries (world frames before DCLF draws), DecalQueries (its client is never made in these sessions), HDROutput
-  (HDR on), Tonemap and FrameGeneration (a menu scene's tonemap, frame generation), MovieTiles (no client). A stage's one-shot passes now
+  (HDR on), Tonemap and FrameGeneration (a menu scene's tonemap, frame generation). The MovieTiles anchor is removed (Cleanup A2). A stage's one-shot passes now
   rebuild only the anchors they sit at (the ImageSpace epoch for the histogram reset), so the re-entry hold after each load is gone
   ("Render-thread cost").
-- `CanRun`/`RequestJoin`: the sky and decal clients' setup joins, the menu composites over the live world, the skeleton's group clears, the
-  upscaler evaluate's first frames, the menu scenes family.
+- `CanRun`/`RequestJoin`: the sky and decal clients' setup joins, the menu composites over the live world, the skeleton's group clears and
+  copies, the menu scenes family. At anchors a stage holds wholly, the upscaler's evaluate, Deferred clears, Skylighting, Cloud Shadows and
+  Volumetric Lighting ask `FrameAnchors::Scheduled` instead: the frame's schedule of that stage (Cleanup A2).
 - Clears of a lent target slot (Skylighting's map) stay on D3D11: the skeleton does not take them. A skeleton clear or copy run that does
   not execute is now a tap error (`NotExecuted`, the mismatch policy); nothing replays it on D3D11 (Cleanup A1).
 - The phases and regions code is removed (`CS_ORG_PHASES` with it). `FrameAnchors::FlushRegions` kept its other jobs, the stages'

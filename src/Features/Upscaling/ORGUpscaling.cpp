@@ -548,7 +548,7 @@ namespace
 				impl->evaluateShared->runs.Store(run, (impl->queued & kEvaluate) ? impl->evaluate : nullptr);
 			// While the evaluate's pass is absent from the stage's schedule (an upscaler just chosen, its build not switched in yet), its
 			// output was not written: it is not copied into kMAIN.
-			const bool evaluated = !(impl->queued & kEvaluate) || !impl->evaluateShared || FrameAnchors::CanRun(kEvaluateClientId, FrameAnchors::Anchor::Upscale);
+			const bool evaluated = !(impl->queued & kEvaluate) || !impl->evaluateShared || FrameAnchors::Scheduled(kEvaluateClientId, FrameAnchors::Anchor::Upscale);
 			if ((impl->queued & kCopyToMain) && evaluated)
 				impl->upscaleGate->OpenDraw(kCopyEntry);
 			if (impl->queued & kDepthUpscale)

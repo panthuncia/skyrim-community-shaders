@@ -193,10 +193,6 @@ namespace FrameAnchors
 		// placed. Not EngineQueries: an inactive client's passes run in another client's runs, and their query reset and resolve would
 		// overwrite counts its own last run left unread.
 		DecalQueries,
-		// Out of frame order (appended): a Bink movie drawn inside another frame (player mode 2, MoviePlayer::TickInFrame), at the
-		// point of its tile draw (BSMovie::DrawTiles, SE 87907, AE 90279; RenderGraph/Engine/Bink). Such a tick does not present,
-		// so the Present anchor would draw it out of order.
-		MovieTiles,
 		// Out of frame order (appended): native mode only (RenderGraph/Engine/Skeleton). The engine's copy of kMAIN into its copy
 		// texture ("kMAIN Copy"), at the native immediate context's CopyResource, inside the ImageSpace chain. Once or twice a frame.
 		EngineCopy,
@@ -426,6 +422,15 @@ namespace FrameAnchors
 	 * still fail afterwards (RunStatus::Failed): the client's executed callback is how it knows the work was submitted.
 	 */
 	bool CanRun(std::string_view a_id, Anchor a_anchor);
+
+	/**
+	 * @brief For an anchor a CS stage holds wholly (no client named at its step): whether this frame's schedule draws a_id's work there.
+	 * Native mode: the schedule of the stage that holds the anchor in this frame's kind holds this registration of a_id and has it on
+	 * (false while the stage is absent, and when no stage of the frame's kind holds the anchor). It does not depend on where the frame is
+	 * now, so a caller may ask before the stage's window opens. Guest mode runs no stage: the anchor's own built graph holds this
+	 * registration. Render thread.
+	 */
+	bool Scheduled(std::string_view a_id, Anchor a_anchor);
 
 	/**
 	 * @brief Whether the stage that holds anchor a_anchor wholly has client a_id's current registration in its schedule: the last frame's

@@ -741,7 +741,7 @@ bool ORGCloudShadows::QueueLayerOp(LayerOpPoint a_point, LayerOp a_op)
 	// Queued for another anchor whose run has not come: the caller sends those to D3D11 first.
 	if (!ops->ops.empty() && ops->point != a_point)
 		return false;
-	if (ops->ops.empty() && !FrameAnchors::CanRun(kLayersClientId, AnchorOf(a_point)))
+	if (ops->ops.empty() && !FrameAnchors::Scheduled(kLayersClientId, AnchorOf(a_point)))
 		return false;
 	auto& target = ops->value[a_op.dst][a_op.face];
 	if (a_op.src == kClearOp) {

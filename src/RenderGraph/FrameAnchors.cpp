@@ -117,8 +117,6 @@ namespace FrameAnchors
 			{ "VolumetricLighting", { "CS anchor: volumetric lighting", "CS anchor: volumetric lighting inputs", "FrameAnchors::VolumetricLighting / ", "cs.anchor.volumetric-lighting" }, false },
 			// Runs a frame: one per decal occlusion test (the decals the engine places this frame; none in most frames)
 			{ "DecalQueries", { "CS anchor: decal queries", "CS anchor: decal queries inputs", "FrameAnchors::DecalQueries / ", "cs.anchor.decal-queries" }, false },
-			// Runs a frame: one per Bink tick inside another frame (player mode 2; none in most frames)
-			{ "MovieTiles", { "CS anchor: movie tiles", "CS anchor: movie tiles inputs", "FrameAnchors::MovieTiles / ", "cs.anchor.movie-tiles" }, true },
 			// Runs a frame: one per copy of kMAIN into its copy texture the engine makes (native mode only)
 			{ "EngineCopy", { "CS anchor: engine copy", "CS anchor: engine copy inputs", "FrameAnchors::EngineCopy / ", "cs.anchor.engine-copy" }, true },
 		} };
@@ -165,7 +163,6 @@ namespace FrameAnchors
 			Segment::AnchorEngineCopy,          // the engine's kMAIN copy, between the chain's batches (nominally here; native mode only)
 			Segment::AnchorTonemap,             // in the ImageSpace chain after it
 			Segment::AnchorFrameGeneration,     // after the ImageSpace chain, before frame generation
-			Segment::AnchorMovieTiles,          // a Bink movie inside another frame, at its tile draw (nominally here: the frame's UI time)
 			Segment::AnchorInterface,           // Scaleform's displays (UI::DrawInterface), several times a frame
 			Segment::AnchorPresent,
 			Segment::DeclaredUi,       // the UI stage (SegmentsOn): the overlay, ending just before the present, HDR output or the capture
@@ -4094,6 +4091,25 @@ namespace FrameAnchors
 		return false;
 	}
 
+	namespace
+	{
+		/**
+		 * @brief Whether the frame's schedule of declared segment a_declared holds this registration of a client and has it on. False while
+		 * the segment is absent (its first schedule on a build is still being recorded). Under the lock.
+		 */
+		bool ScheduleHolds(const State& a_state, std::uint32_t a_declared, const std::shared_ptr<const ClientDesc>& a_client)
+		{
+			const auto& fields = Driver::Current().Segment(static_cast<SegmentId>(a_declared));
+			const auto& built = a_state.frameBuilt[a_declared];
+			if (!fields.declared || !fields.graph || !built)
+				return false;
+			const auto& clients = SegmentClients(*built, a_declared);
+			const auto found = std::ranges::find(clients, a_client);
+			const auto i = static_cast<std::size_t>(found - clients.begin());
+			return found != clients.end() && i < RenderGraph::Frame::kSegmentClients && (fields.clientsOn >> i & 1u);
+		}
+	}
+
 	bool CanRun(std::string_view a_id, Anchor a_anchor)
 	{
 		auto lock = Guard();
@@ -4104,19 +4120,29 @@ namespace FrameAnchors
 		const auto* client = FindClient(state, a_id);
 		if (!client || !InGraphs(*client->desc) || client->serial > BuiltSerial(state, index))
 			return false;
-		// An anchor a declared segment holds wholly draws only on the frame's schedule: the segment is present (not absent while its
-		// first schedule on this build is recorded), the schedule's graph holds this registration, and has the client on.
-		if (const auto declared = DeclaredOfAnchor(state, index); declared < kDeclared) {
-			const auto& fields = Driver::Current().Segment(static_cast<SegmentId>(declared));
-			const auto& built = state.frameBuilt[declared];
-			if (!fields.declared || !fields.graph || !built)
-				return false;
-			const auto& clients = SegmentClients(*built, declared);
-			const auto found = std::ranges::find(clients, client->desc);
-			const auto i = static_cast<std::size_t>(found - clients.begin());
-			return found != clients.end() && i < RenderGraph::Frame::kSegmentClients && (fields.clientsOn >> i & 1u);
-		}
+		// An anchor a declared segment holds wholly draws only on the frame's schedule.
+		if (const auto declared = DeclaredOfAnchor(state, index); declared < kDeclared)
+			return ScheduleHolds(state, declared, client->desc);
 		return true;
+	}
+
+	bool Scheduled(std::string_view a_id, Anchor a_anchor)
+	{
+		auto lock = Guard();
+		auto& state = Anchors();
+		const std::uint32_t index = IndexOf(a_anchor);
+		if (index >= kAnchors || !state.host || !IsRenderOwner() || !RenderGraphRuntime::Get().IsActive())
+			return false;
+		const auto* client = FindClient(state, a_id);
+		if (!client)
+			return false;
+		// Native mode: the stage that holds the anchor wholly in this frame's kind. No such stage: nothing draws the client's work.
+		if (SegmentsOn()) {
+			const auto declared = DeclaredOfAnchor(state, index);
+			return declared < kDeclared && ScheduleHolds(state, declared, client->desc);
+		}
+		// Guest mode runs no stage: the anchor's own built graph holds this registration.
+		return state.reserved[index] && InGraphs(*client->desc) && client->serial <= BuiltSerial(state, index);
 	}
 
 	bool InStage(std::string_view a_id, Anchor a_anchor)
@@ -4575,6 +4601,7 @@ namespace FrameAnchors
 	void ClaimRenderOwnership() {}
 	bool RequestJoin(std::string_view, Anchor) { return false; }
 	bool CanRun(std::string_view, Anchor) { return false; }
+	bool Scheduled(std::string_view, Anchor) { return false; }
 	bool HeldByStage(Anchor) { return false; }
 	void DropKeptRecordings(Anchor, std::string_view) {}
 	bool NamedByStage(std::string_view) { return false; }

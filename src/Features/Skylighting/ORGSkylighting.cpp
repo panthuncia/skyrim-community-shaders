@@ -593,9 +593,9 @@ bool ORGSkylighting::Update(const Skylighting& a_feature)
 	// Without an input the gate stays closed: the graph's volumes hold this frame as they are.
 	if (impl->ResolveInputs(MakeInputs(a_feature)))
 		impl->state->pending = MakeShadows(a_feature);
-	// The map Drawcall Limit Fix drew is read now: cleared after the update for its next draw, when the clear is in the built graph.
+	// The map Drawcall Limit Fix drew is read now: cleared after the update for its next draw, when the frame's schedule holds the clear.
 	auto& state = *impl->state;
-	if (state.occlusionDrawn && impl->resources->clearProgram && FrameAnchors::CanRun(kClientId, FrameAnchors::Anchor::Prepass)) {
+	if (state.occlusionDrawn && impl->resources->clearProgram && FrameAnchors::Scheduled(kClientId, FrameAnchors::Anchor::Prepass)) {
 		state.occlusionDrawn = false;
 		state.occlusionCleared = false;
 		state.clearOcclusion = true;

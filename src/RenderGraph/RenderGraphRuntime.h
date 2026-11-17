@@ -120,7 +120,6 @@ public:
 		AnchorEngineQueries,
 		AnchorVolumetricLighting,
 		AnchorDecalQueries,
-		AnchorMovieTiles,
 		AnchorEngineCopy,
 		// The declared frame's segments (native mode, CS_ORG_SEGMENTS; FrameAnchors.h, SegmentsOn): one revision-driven, open epoch
 		// each, holding the passes of the anchors it lists, recorded per description of the segment (RenderGraph/Frame).

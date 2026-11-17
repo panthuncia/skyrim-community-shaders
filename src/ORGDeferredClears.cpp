@@ -214,7 +214,7 @@ namespace ORGDeferredClears
 
 	bool TakeClears()
 	{
-		return Get().setUp && FrameAnchors::CanRun(kClientId, FrameAnchors::Anchor::Prepass);
+		return Get().setUp && FrameAnchors::Scheduled(kClientId, FrameAnchors::Anchor::Prepass);
 	}
 }
 
