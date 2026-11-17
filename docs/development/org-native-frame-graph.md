@@ -5416,3 +5416,142 @@ counterpart over 0.01 ms was found.
 3. The engine's shadow-map clears as separate passes in DCLF's shadow view list (about 0.05 ms), and start's sky faces.
 4. pre-main and deferred+water against guest (about 0.05 and 0.1 ms, with estimated guest mappings).
 5. The menu UI stage was not timed in a steady menu.
+
+### Third pass (2026-11-16, where the GPU goes idle)
+
+Measured, perf-taa, RTX 5080, uncapped, background runs, the machine in use. "Before" is CS `73763c806` with the trace tooling
+added (no change in behaviour), "after" the final build (DLL 7d3dbc609994). Native and guest were taken in the same session.
+
+**The tool.** `CS_SUBMIT_TRACE=<file>` with `CS_GPU_IDLE_TRACE=<frames>` (native) turns on BasicRHI's submission trace
+(`rhi::submittrace`). At each analysed frame it appends six frames of list ranges and every queue submission of the last 400 ms:
+the CPU time around the driver call (QueryPerformanceCounter), the queue, the command lists by handle, the timeline waits and
+signals, and the present relay, present and acquire. A kept list's range name ends with its handle, so each range is matched to
+the submission that ran it. Calibrated timestamps (now enabled whenever the device has them) map GPU ticks onto the CPU clock.
+With `CS_RHI_CENSUS` on as well, each list carries its census label and counts, so the lists between two timed ranges are named.
+The analysis is a script (`subtrace.py`, in the session's scratchpad): per gap, the lists and submissions between the two ranges,
+the waits of the next submission, when the signal of each wait was submitted, and when the CPU submitted the next list.
+
+**What the gaps are.** Steady perf-taa, 18 frames, timing on. 46 gaps a frame between timed ranges.
+- (c), the GPU starved by the CPU: none. Every list was submitted 11 to 20 ms before the GPU reached it. With frame latency 2 and a
+  GPU-bound frame the submission thread is always more than a frame ahead.
+- (b), waits on other queues: none that blocks. The batches wait on the copy queue's frame values ("CS frame values") and on the
+  external work slots, all signalled by submissions made 11 to 19 ms earlier.
+- The 0.08 ms "wait before `cs.dyncubemaps.publish`" was not a wait. The lists between `cs.dyncubemaps.inferred-mips` and the publish
+  were two handoff lists and the BC6H copies, a kept late list with no timing range: 96 copy regions and 18 layout changes a frame,
+  69 us (timed with `CS_ORG_KEEP_GATED=0`). The same held for the filtered mip 0 copy before `inferred-mips` (17 us).
+- Kept gated late lists are untimed. Their work shows as idle: the volumetric lighting depth copy (23 us), the G-buffer clears
+  (8 us), the grass colliders' copy (5 us), the terrain depth clear, subsurface clear and terrain shadows' refresh (2 to 3 us each).
+- What is left is the cost of a boundary. Measured in place:
+  - an extra empty command buffer per list (`BASICRHI_PAD_LISTS=1`, timing on) adds 0.4 us a boundary; eight per list
+    (`=8`, timing off) add 0.17 ms a frame for about 800 lists, 0.2 us each;
+  - every list in a submission of its own (`BASICRHI_SPLIT_SUBMITS=1`) adds 2 to 3 us a boundary with timing on, and 0.11 ms a
+    frame for about 85 extra submissions with timing off, 1.3 us each;
+  - binding the descriptor heaps five times per list (`BASICRHI_HEAP_BIND_REPEAT=4`) changes nothing (5.54 against 5.48-5.54 ms);
+  - the timestamps themselves: 5.59 ms with list timing against 5.48 to 5.54 ms without, 0.05 to 0.1 ms.
+  So of the 3.6 to 5 us between two adjacent timed lists, the command buffer is 0.2 to 0.4 us and the timestamps about 1 to 2 us.
+  The rest is the pipeline draining at the boundary and filling again (each list ends after a drain when timed, and a handoff's
+  barrier drains too).
+
+The gap table (mean us a frame, timing on; before `t2`, after `t8off`; "submits" counts the queue submission boundaries crossed).
+Cause: (a) boundary, or the work named.
+
+| Previous list -> next list | Before | After | Between them | Cause |
+|---|---|---|---|---|
+| dyncubemaps.inferred-mips -> dyncubemaps.publish | 80.2 | 9.2 | handoff, BC6H copies, handoff | untimed copies (gated now; in copy frames the copies are timed: 4.3 + 4.4 us gaps) |
+| grass-collision.update -> skeleton.frame.depth0.0@z-prepass | 33.4 | 32.1 | 2 submits: upload (27 copies), handoff (64 buffer, 16 image barriers) | the ticket's uploads and entry barriers (1 submit after) |
+| shared.upload.1 -> shared.upload.2 | 30.9 | 31.3 | volumetric lighting depth copy | untimed copy, 23 us |
+| subsurface.extract -> dyncubemaps.inferred-mips | 27.3 | 9.5 | handoff, filtered mip 0 copy, handoff | untimed copy (gated now) |
+| scaleform.draw.0.i0 -> cloud-shadows reflections-prepass gather | 20.7 | 21.5 | 5 submits: Scaleform's kept lists, present relay, present, acquire, handoff | the frame boundary |
+| imagespace.start.water.texoffset.8 -> skeleton.shadow.depth2.0@shadow-view | 19.6 | 17.7 | 2 submits: upload, handoff (105 buffer, 14 image barriers) | uploads and entry barriers (1 submit after) |
+| skeleton.shadow.depth2.0@shadow-view -> cloud-shadows early-prepass gather | 19.0 | 17.0 | 1 submit: handoff, terrain depth clear, handoff (37 layout changes) | entry barriers, untimed clear |
+| screen-space-shadows.raymarch -> shared.upload.5 | 18.3 | 16.2 | handoff, G-buffer clears | untimed clears |
+| volumetric-shadows.blur-v-mip0 -> grass-collision.update | 15.3 | 12.9 | handoff, colliders' copy, handoff | untimed copy |
+| shared.upload.0 -> subsurface.extract | 12.0 | 11.2 | subsurface clear, handoff | untimed clear |
+| cloud-shadows early-prepass gather -> volumetric-shadows.blur-v-mip0 | 10.8 | 10.3 | terrain shadows' refresh, handoff | untimed late list |
+| dclf.latched-copies -> shared.upload.0 | 10.7 | 10.1 | 1 submit: handoff | (a) submit and entry barriers |
+| skeleton.frame.depth0.0@z-prepass -> skeleton.depth-copy | 10.3 | 10.3 | 1 submit: handoff | (a) |
+| 7 more ticket boundaries (forward, first person, sun, capture -> Scaleform) | 7.4 to 8.0 each | 7.0 to 8.4 | 1 submit: handoff | (a) submit, handoff, drain |
+| 22 boundaries inside a submission with a handoff between | 4.8 to 6.7 each | 3.6 to 5.9 | handoff | (a) list, handoff, drain |
+| 9 boundaries inside a submission, adjacent lists | 3.6 to 5.0 each | 3.7 to 4.9 | nothing | (a) list and drain, timestamps |
+| sum | 0.49 ms | 0.37 ms | | span less busy |
+
+**Changes.**
+- Dynamic Cubemaps (CS `95a96582e`): the filtered mip 0 and the two BC6H copies ran at every run though their sources change only
+  at an inference or a publish. A commit now opens a copy's gate entry only while its source changed since the copy last recorded,
+  and keeps it open while the copy is not yet in the running graph. About 0.09 ms of GPU work a frame, in guest too (the same pass).
+- Merged handoffs (ORG `937a2e1`, CS `0fc36c324`, `CS_ORG_MERGE_HANDOFFS`): with coalesced submissions the entry barriers of a queue
+  submission's batches go into one handoff list ahead of its first batch. A batch's entry barriers touch only resources the earlier
+  batches of the ticket do not use, and every wait of the submission comes before its lists. Barriers that discard, start from
+  Undefined or transfer a queue family stay with their batch. Handoff lists 40.5 to 11.2 a frame.
+- Uploads with batches (same commits, `CS_ORG_UPLOADS_WITH_BATCHES`): a ticket's upload lists go in its first queue submission
+  when all its batches are on the graphics queue (in native, all of them since the compute work moved there), instead of a
+  submission of their own. Upload submissions 2.0 to 0 a frame.
+- Together: graphics `vkQueueSubmit` 13.2 to 9.2 a frame (plus the present relay), command lists 98.7 to 69.7. The merge pair
+  alone (A/B in one session, `t7off` and `t7b`): span less busy 0.42 to 0.38 ms with timing on, the period inside the spread.
+- Not done: merging consecutive tickets' submissions further. The census still counts 4.8 submissions a frame that could have
+  joined the one before (no new wait) had they been queued together; they are submitted as they are committed, and the submission
+  thread never holds one back. 1.3 us each.
+- Not done: one command list per ticket (secondaries for the kept batches, the late passes and handoffs recorded into one primary).
+  A command buffer boundary measured 0.2 us; the 70 left cost about 14 us a frame.
+
+**Clears as load operations (part 3): not sound on this GPU.** The shadow map slices' clears (a gated fullscreen draw each) were
+turned into a render pass whose load operation clears (`CS_ORG_LOAD_OP_CLEARS`, tried and reverted). The clear itself got cheaper,
+but every later reader of the shadow maps got slower: DCLF's opaque list +0.33 ms, the water surface +0.17, DCLF forward +0.10,
+the sky +0.09; the frame +0.6 ms (A/B `t8off`, `t8on`). A fast-cleared depth image is decompressed when it moves to a read layout.
+The cloud layers' load-operation clears of the second pass got slower the same way (0.03 to 0.11 ms). The menu scene's case
+(first writers that can be empty) was not revisited. Left: every engine clear stays a gated draw; DXVK keeps its clears in its own
+way and was not changed.
+
+**Cloud Shadows (part 4): not changed.** The 28 face clears a frame come from `NoteGraphCloudLayer`: each layer the graph draws on a
+face is cleared first, because the graph draws the face's earlier layers into it again, where the D3D11 path copies the layer below.
+They are needed every frame the layer is drawn, the cloud draws blend, so the scatter cannot skip texels, and a load-operation clear
+is the slow path above. Copying the layer below (the D3D11 algorithm) needs the layers' draws reordered. About 0.14 ms over guest
+remains.
+
+**Before and after, same session (timing off, Tracy, steady frames).** Native before 5.48 to 5.54 ms (`n0`, `n0b`, `n1`), guest
+5.07 ms (`g0`). Native after 5.40 to 5.58 ms (`an1` to `an4`), guest 5.10 to 5.19 ms (`ag1`, `ag2`), taken an hour later with the
+machine busier (guest's own period moved by 0.12 ms). The merge pair off in the same window (`anoff`): 5.62 ms. The period did not
+move outside the spread: the changes remove about 0.1 ms of GPU time with timing on (the cubemap copies 0.09, the boundaries
+0.04), which the 2 to 4% run-to-run spread hides. The gap to guest is 0.21 to 0.48 ms across the windows.
+
+| | Native before | Native after | Guest |
+|---|---|---|---|
+| frame period, steady | 5.48-5.54 ms | 5.40-5.58 ms | 5.07 ms before, 5.10-5.19 ms after |
+| graphics `vkQueueSubmit` a frame (and the present relay) | 13.2 + 1 | 9.2 + 1 | - |
+| command lists a frame | 98.7 | 69.7 | - |
+| span less busy, timing on | 0.49 ms | 0.37 ms | - |
+| idle with timing off (estimated) | about 0.3 ms | about 0.2 ms | - |
+
+Per stage, GPU ms (list ranges from the traces, timing on; the cubemap copies were untimed before, so the stages do not show them):
+
+| Stage | Before (`t2`) | After (`t8off`) |
+|---|---|---|
+| deferred+water | 1.04 | 1.05 |
+| DCLF opaque | 0.99 | 0.94 |
+| DCLF Z-prepass | 0.89 | 0.88 |
+| post | 0.78 | 0.78 |
+| DCLF shadows | 0.59 | 0.57 |
+| pre-main | 0.39 | 0.39 |
+| start | 0.30 | 0.29 |
+| pre-depth | 0.16 | 0.16 |
+| DCLF forward | 0.08 | 0.08 |
+| sum / span | 5.23 / 5.73 | 5.17 / 5.54 |
+
+**Left, ranked (estimates).**
+1. Drains at list boundaries (about 46 a frame, 1 to 3 us each with timing off): fewer, longer lists would need ORG to put a ticket's
+   batches into one command list and to merge a list's leading entry barriers with the previous list's tail.
+2. Untimed kept late lists' work (the volumetric lighting depth copy 23 us, clears 15 us): real work, partly avoidable (the G-buffer
+   and subsurface clears could be skipped where the first writer covers the target, not checked).
+3. Cloud Shadows' clears and layer barriers (0.14 ms over guest).
+4. Submission and command buffer overhead now about 0.03 ms a frame (9 submissions at 1.3 us, 70 lists at 0.2 us).
+5. The frame boundary (present relay, present, acquire: 21 us) and the uploads' entry barriers (17 to 32 us at two tickets).
+
+**Checks.** Final build, one background run each: native-quick, native-d3d12-quick, native-river, native-upscalers,
+native-interior, the loading-thread run twice, first and third person, the frozen-world run, guest-quick: passed, 0 tap errors,
+no `NoPass`, recipe checks 0 findings, 0 frames with a stage absent after it first ran, no failed build. native-validation: passed, only the known 20 `VUID-vkCmdDraw-None-09600` and back-buffer layout lines;
+again with `VK_KHRONOS_VALIDATION_VALIDATE_SYNC=true`: passed, no `SYNC-HAZARD`, the same lines. Steady scene: 0 recordings,
+0 switches, no graph build in the window. The MO2 instance keeps `+CS AB nfg` and `*TerrainHelper.esp`, and every run loaded into
+the world on its own. The quick
+run's shot matches the earlier one (105.6 against 105.3 mean). ORG's unit tests pass, run one at a time, and the Vulkan host test's
+modes sync, async, reuse, revision, segment, external, external-reuse, split, built, stream, arena, rebinding, contributor, inline
+and pipelines (the lease modes and HeadlessBenchmark not run).
