@@ -591,10 +591,14 @@ namespace RenderGraph::Engine::Native
 				     heap(rhi::DescriptorHeapType::DSV, false, "CS native immediate DSVs", dsvHeap) &&
 				     heapOf(rhi::DescriptorHeapType::CbvSrvUav, kSlots * kUavsPerSlot, true, "CS native immediate UAVs", uavHeap) &&
 				     heapOf(rhi::DescriptorHeapType::CbvSrvUav, kSlots * kUavsPerSlot, false, "CS native immediate UAVs (CPU)", uavCpuHeap);
+				// Each command pool costs the driver about 2 MB (RX 6600): the slots' lists share one where the backend allows it.
+				ok = ok && device.CreateCommandAllocator(rhi::QueueKind::Graphics, sharedAllocator) == rhi::Result::Ok && sharedAllocator;
+				const bool shared = ok && sharedAllocator->SupportsSharedLists();
 				for (uint32_t i = 0; i < kSlots; ++i) {
 					auto& slot = slots[i];
-					ok = ok && device.CreateCommandAllocator(rhi::QueueKind::Graphics, slot.allocator) == rhi::Result::Ok && slot.allocator &&
-					     device.CreateCommandList(rhi::QueueKind::Graphics, slot.allocator.Get(), slot.list) == rhi::Result::Ok && slot.list;
+					if (ok && !shared)
+						ok = device.CreateCommandAllocator(rhi::QueueKind::Graphics, slot.allocator) == rhi::Result::Ok && slot.allocator;
+					ok = ok && device.CreateCommandList(rhi::QueueKind::Graphics, AllocatorOf(slot), slot.list) == rhi::Result::Ok && slot.list;
 					if (ok) {
 						slot.list->SetName(fmt::format("CS native immediate {}", i).c_str());
 						// A list is made recording; it begins again at its first use.
@@ -703,11 +707,13 @@ namespace RenderGraph::Engine::Native
 
 			struct Slot
 			{
-				rhi::CommandAllocatorPtr allocator;
+				rhi::CommandAllocatorPtr allocator;  // only where lists cannot share one (D3D12)
 				rhi::CommandListPtr list;
 				uint64_t value = 0;
 				std::vector<std::shared_ptr<const void>> keep;
 			};
+
+			rhi::CommandAllocator& AllocatorOf(Slot& a_slot) { return a_slot.allocator ? a_slot.allocator.Get() : sharedAllocator.Get(); }
 
 			/** @brief The next slot, once the GPU is done with its last work; what that work kept is released. With the lock. */
 			uint32_t AcquireSlotLocked()
@@ -746,8 +752,10 @@ namespace RenderGraph::Engine::Native
 				std::lock_guard guard(lock);
 				const uint32_t index = AcquireSlotLocked();
 				auto& slot = slots[index];
-				slot.allocator->Recycle();
-				slot.list->Recycle(slot.allocator.Get());
+				// A shared allocator resets only this list; a slot's own resets whole.
+				if (slot.allocator)
+					slot.allocator->Recycle();
+				slot.list->Recycle(AllocatorOf(slot));
 				// The operation's name and its resource, so a device fault's crash markers name the work that ran.
 				BeginLabel(slot.list.Get(), a_label);
 				// An exempt texture rests in the shader-read state, and the operations expect Common: it goes there for the operation and
@@ -804,6 +812,8 @@ namespace RenderGraph::Engine::Native
 			rhi::Device device;
 			rhi::Queue queue;
 			rhi::DescriptorHeapPtr rtvHeap, dsvHeap, uavHeap, uavCpuHeap;
+			// Before the slots, so it outlives their lists.
+			rhi::CommandAllocatorPtr sharedAllocator;
 			std::array<Slot, kSlots> slots;
 			uint64_t next = 0;
 			rhi::TimelinePtr timeline;
@@ -1066,9 +1076,14 @@ namespace RenderGraph::Engine::Native
 			bool Init(rhi::Device a_device)
 			{
 				queue = a_device.GetQueue(rhi::QueueKind::Graphics);
+				// The slots' lists share one allocator where the backend allows it (a command pool costs the driver about 2 MB).
+				if (a_device.CreateCommandAllocator(rhi::QueueKind::Graphics, sharedAllocator) != rhi::Result::Ok || !sharedAllocator)
+					return false;
+				const bool shared = sharedAllocator->SupportsSharedLists();
 				for (auto& slot : slots) {
-					if (a_device.CreateCommandAllocator(rhi::QueueKind::Graphics, slot.allocator) != rhi::Result::Ok || !slot.allocator ||
-						a_device.CreateCommandList(rhi::QueueKind::Graphics, slot.allocator.Get(), slot.list) != rhi::Result::Ok || !slot.list)
+					if (!shared && (a_device.CreateCommandAllocator(rhi::QueueKind::Graphics, slot.allocator) != rhi::Result::Ok || !slot.allocator))
+						return false;
+					if (a_device.CreateCommandList(rhi::QueueKind::Graphics, AllocatorOf(slot), slot.list) != rhi::Result::Ok || !slot.list)
 						return false;
 					slot.list->SetName("CS native commands");
 					// A list is made recording; it begins again at its first use (D3D12 resets only a closed list).
@@ -1088,8 +1103,9 @@ namespace RenderGraph::Engine::Native
 				auto& slot = slots[next++ % kSlots];
 				if (slot.value && timeline->GetCompletedValue() < slot.value && timeline->HostWait(slot.value) != rhi::Result::Ok)
 					return false;
-				slot.allocator->Recycle();
-				slot.list->Recycle(slot.allocator.Get());
+				if (slot.allocator)
+					slot.allocator->Recycle();
+				slot.list->Recycle(AllocatorOf(slot));
 				auto list = slot.list.Get();
 				BeginLabel(list, a_label ? a_label : "CS native commands");
 				// The work lands between the graph's submissions before and after it, as DXVK's stream would put it: ordered by the
@@ -1129,13 +1145,17 @@ namespace RenderGraph::Engine::Native
 
 			struct Slot
 			{
-				rhi::CommandAllocatorPtr allocator;
+				rhi::CommandAllocatorPtr allocator;  // only where lists cannot share one (D3D12)
 				rhi::CommandListPtr list;
 				uint64_t value = 0;
 			};
 
+			rhi::CommandAllocator& AllocatorOf(Slot& a_slot) { return a_slot.allocator ? a_slot.allocator.Get() : sharedAllocator.Get(); }
+
 			std::mutex lock;
 			rhi::Queue queue;
+			// Before the slots, so it outlives their lists.
+			rhi::CommandAllocatorPtr sharedAllocator;
 			std::array<Slot, kSlots> slots;
 			rhi::TimelinePtr timeline;
 			uint64_t value = 0;
