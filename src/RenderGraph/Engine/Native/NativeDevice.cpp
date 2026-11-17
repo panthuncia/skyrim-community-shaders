@@ -5085,6 +5085,11 @@ namespace RenderGraph::Engine::Native
 		return 0;
 	}
 
+	rhi::QueueProgress GraphicsProgress()
+	{
+		return g_device && g_device->graphics ? g_device->graphics.Progress() : rhi::QueueProgress{};
+	}
+
 	void PaceHeldPresent()
 	{
 		if (!g_device || !g_device->graphics)
@@ -5315,6 +5320,7 @@ namespace RenderGraph::Engine::Native
 	bool SetSwapChainColorSpace(bool) { return false; }
 	void TakePresentPace(std::uint64_t& a_waits, std::uint64_t& a_us) { a_waits = a_us = 0; }
 	void PaceHeldPresent() {}
+	rhi::QueueProgress GraphicsProgress() { return {}; }
 	bool DescribeVulkanDevice(DxvkOrgInteropDeviceInfo&) { return false; }
 	uint64_t AdapterLuid() { return 0; }
 	bool DescribeForCommands(rhi::CommandList&, std::span<const rhi::Resource>, void*&, std::vector<ExternalImageInfo>&, std::shared_ptr<const void>&, std::string& a_why)

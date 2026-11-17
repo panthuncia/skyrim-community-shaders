@@ -25,6 +25,7 @@ namespace rhi
 	class DevicePtr;
 	class Resource;
 	struct TimelinePoint;
+	struct QueueProgress;
 }
 
 namespace org
@@ -210,6 +211,9 @@ namespace RenderGraph::Engine::Native
 	 * upscaler's views) frees them while the GPU still reads them. Render thread, after the frame's work is submitted.
 	 */
 	void PaceHeldPresent();
+
+	/** @brief The native graphics queue's progress now (its timeline and the value its last submission signals); empty off native. */
+	rhi::QueueProgress GraphicsProgress();
 
 	/**
 	 * @name The profilers' view of the native Vulkan device (GPU counters, RenderGraphRuntime::Initialize), what DXVK's

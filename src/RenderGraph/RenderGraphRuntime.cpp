@@ -294,9 +294,12 @@ struct RenderGraphRuntime::Impl
 	// Native mode (CS_ORG_NATIVE=1): BasicRHI's own device, no DXVK. Releases then wait for the graph's submissions instead of a
 	// D3D11 event query: an owner is freed once every graph submission made before its release is complete on the GPU.
 	bool native = false;
+	// The graphics queue's progress at the release too: work on it that the host does not number (the loading screen's thread,
+	// external work, the immediate context) must also be done before the owner goes.
 	struct NativeRelease
 	{
 		std::uint64_t submissions = 0;
+		rhi::QueueProgress queue{};
 		std::shared_ptr<const void> owner;
 	};
 	std::deque<NativeRelease> nativeReleases;
@@ -4132,7 +4135,7 @@ void RenderGraphRuntime::ReleaseAfterD3D11(std::shared_ptr<const void> a_owner)
 	if (!impl)
 		return;  // shut down: DXVK's device is gone or going, and nothing of the graph's runs any more
 	if (impl->native) {
-		impl->nativeReleases.push_back({ impl->host ? impl->host->SubmissionsMade() : 0, std::move(a_owner) });
+		impl->nativeReleases.push_back({ impl->host ? impl->host->SubmissionsMade() : 0, RenderGraph::Engine::Native::GraphicsProgress(), std::move(a_owner) });
 		ServiceD3D11Releases();
 		return;
 	}
@@ -4148,8 +4151,12 @@ void RenderGraphRuntime::ServiceD3D11Releases()
 		return;
 	if (impl->native) {
 		const std::uint64_t retired = impl->retiredSubmissions.load(std::memory_order_acquire);
-		while (!impl->nativeReleases.empty() && impl->nativeReleases.front().submissions <= retired)
+		while (!impl->nativeReleases.empty() && impl->nativeReleases.front().submissions <= retired) {
+			auto& queue = impl->nativeReleases.front().queue;
+			if (queue.timeline && queue.submitted && queue.timeline.GetCompletedValue() < queue.submitted)
+				break;
 			impl->nativeReleases.pop_front();
+		}
 		return;
 	}
 	auto& releases = impl->d3d11Releases;
