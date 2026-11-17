@@ -389,7 +389,7 @@ namespace
 	// execution, and each pass then dispatches only for its own anchor's commit.
 	constexpr std::array<FrameAnchors::Anchor, 3> kLayerAnchors{ FrameAnchors::Anchor::ReflectionsPrepass, FrameAnchors::Anchor::SkyReflections,
 		FrameAnchors::Anchor::EarlyPrepass };
-	constexpr std::uint32_t kLayerEntries = 2 * kLayers;  // per anchor: the gathers, then the scatters
+	constexpr std::uint32_t kLayerEntries = 2;  // per anchor and tap: the gather, then the scatter
 
 	/** @brief a_anchor's place in kLayerAnchors (its range of the gate's entries); 0 for another anchor. */
 	std::uint32_t LayerSlot(FrameAnchors::Anchor a_anchor)
@@ -401,33 +401,44 @@ namespace
 	}
 	// The scratch array's slots: the most distinct faces one run's copies may read. More, and the queue sends the rest to D3D11.
 	constexpr std::uint32_t kScratchSlots = 32;
-	// LayerOpsCS's LayerRow: eight words, one per face (six used). The gather's rows, then the scatter's, one per layer.
-	constexpr std::uint32_t kRowWords = 8;
-	constexpr std::uint32_t kRowBytes = kRowWords * sizeof(std::uint32_t);
-	constexpr std::uint32_t kScatterRows = kLayers * kRowBytes;
-	constexpr std::uint32_t kLatchBytes = 2 * kScatterRows;
-	// A row word: nothing for this face, or (scatter) a clear; else the scratch slot.
+	// A tap's rows (LayerOpsCS): the gather's entries (one per scratch slot at most), then the scatter's (one per layer face at most).
+	constexpr std::uint32_t kGatherWords = kScratchSlots;
+	constexpr std::uint32_t kScatterWords = kLayers * kFaces;
+	constexpr std::uint32_t kScatterRow = kGatherWords * sizeof(std::uint32_t);
+	constexpr std::uint32_t kLatchBytes = (kGatherWords + kScatterWords) * sizeof(std::uint32_t);
+	// An entry: the layer in bits 24 to 28, the face in bits 16 to 18, and the scratch slot or (scatter) a clear in the low half.
 	constexpr std::uint32_t kNoWord = 0xFFFFFFFFu;
-	constexpr std::uint32_t kZeroWord = 0xFFFFFFFEu;
+	constexpr std::uint32_t kZeroWord = 0xFFFEu;
+	constexpr std::uint32_t Entry(std::uint32_t a_layer, std::uint32_t a_face, std::uint32_t a_value) { return a_layer << 24 | a_face << 16 | a_value; }
 	// What a layer face holds once the queued operations are done: untouched, zero, or else the layer whose face (as it was before
 	// the run) it is a copy of.
 	constexpr std::uint8_t kUntouched = 0xFF;
 	constexpr std::uint8_t kZero = 0xFE;
+	// LayerOpsCS's layer handles are 24 bits each (the descriptor heap holds about a million).
+	constexpr std::uint32_t kHandleBits = 24;
+	constexpr std::uint32_t kPackedWords = kLayers * kHandleBits / 32;
 
-	/** @brief LayerOpsCS's gather push block (LAYER_OPS_RESOURCES with LAYER_GATHER): the layer's six faces, the scratch, the row. */
-	struct LayerGatherBlock
+	/**
+	 * @brief LayerOpsCS's push block (written by hand there): the 32 layers' whole-array UAV handles packed in 24 words, the scratch
+	 * (its UAV in the gather, its SRV in the scatter), and the tap's row.
+	 */
+	struct LayerOpsBlock
 	{
-		std::array<ShaderBindings::Handle, kFaces> faces;
-		ShaderBindings::Handle scratch;
+		std::array<std::uint32_t, kPackedWords> layers{};
+		ShaderBindings::Handle scratch = 0;
 		ShaderBindings::Latch row;
 	};
+	static_assert(kLayers == 32 && kPackedWords == 24, "LayerOpsCS packs 32 layer handles in 24 words");
 
-	/** @brief LayerOpsCS's scatter push block: the scratch, the layer's face array, the row. */
-	struct LayerScatterBlock
+	/** @brief The layer handles as LayerOpsCS unpacks them: layer i below 24 in word i's low 24 bits, layer 24 + j in the top bytes of words 3j to 3j + 2. */
+	void PackLayers(const std::array<std::uint32_t, kLayers>& a_handles, std::array<std::uint32_t, kPackedWords>& a_out)
 	{
-		ShaderBindings::Handle scratch, layer;
-		ShaderBindings::Latch row;
-	};
+		for (std::uint32_t i = 0; i < kPackedWords; ++i)
+			a_out[i] = a_handles[i] & 0xFFFFFFu;
+		for (std::uint32_t j = 0; j < kLayers - kPackedWords; ++j)
+			for (std::uint32_t b = 0; b < 3; ++b)
+				a_out[3 * j + b] |= ((a_handles[kPackedWords + j] >> (8 * b)) & 0xFFu) << 24;
+	}
 
 	FrameAnchors::Anchor AnchorOf(ORGCloudShadows::LayerOpPoint a_point)
 	{
@@ -494,8 +505,7 @@ namespace
 
 	struct LayerBindings
 	{
-		std::array<org::DeclaredViewToken, kLayers> layers;                       // scatter: each layer's face array (mip 0)
-		std::array<std::array<org::DeclaredViewToken, kFaces>, kLayers> faces{};  // gather: each layer's faces, one view each (mip 0)
+		std::array<org::DeclaredViewToken, kLayers> layers;  // each layer's face array (mip 0)
 		org::DeclaredViewToken scratch;
 	};
 
@@ -509,7 +519,8 @@ namespace
 
 	/**
 	 * @brief The gather (the faces the run's copies read, into scratch slots) or the scatter (every face the run writes, from its slot
-	 * or zero): one dispatch per layer through the gate, a group's z its face. The recording depends only on what the pass was made with.
+	 * or zero): one dispatch per tap through the gate, a group's z an entry of the tap's row. Every layer is bound by its whole-array
+	 * UAV, so a single dispatch reaches the faces of any layer. The recording depends only on what the pass was made with.
 	 */
 	class LayerOpsPass final : public org::TypedRenderGraphPass<LayerOpsPass, LayerFrame, LayerBindings>
 	{
@@ -520,23 +531,12 @@ namespace
 		LayerBindings Declare(org::PassBuilder& a_builder)
 		{
 			a_builder.PreferQueue(org::QueueKind::Graphics);
-			// The views ORG makes of a single cube: TextureCube, one Texture2DArray view per face (as the occlusion copy reads), and a
-			// Texture2DArrayFull UAV; no Texture2DArrayFull SRV, which only a 2D array has (the scratch). So the gather reads a layer's
-			// faces one view each, and the scatter writes its faces through the whole-array UAV.
+			// A single cube has a Texture2DArrayFull UAV (its six faces) and no such SRV, so the gather reads a layer through its UAV too.
 			const org::SrvView arraySrv{ .variant = static_cast<std::uint32_t>(org::SRVViewType::Texture2DArrayFull) };
 			const org::UavView arrayUav{ .variant = static_cast<std::uint32_t>(org::UAVViewType::Texture2DArrayFull) };
-			std::array<org::SrvView, kFaces> faceViews;
-			for (std::uint32_t f = 0; f < kFaces; ++f)
-				faceViews[f] = { .variant = static_cast<std::uint32_t>(org::SRVViewType::Texture2DArray), .mip = 0, .slice = f };
 			LayerBindings bindings;
-			for (std::uint32_t l = 0; l < kLayers; ++l) {
-				if (scatter) {
-					bindings.layers[l] = a_builder.UnorderedAccess(ops->layers[l], arrayUav).View();
-					continue;
-				}
-				const auto views = a_builder.ShaderResource(ops->layers[l], std::span<const org::SrvView>(faceViews)).views;
-				std::copy_n(views.begin(), kFaces, bindings.faces[l].begin());
-			}
+			for (std::uint32_t l = 0; l < kLayers; ++l)
+				bindings.layers[l] = a_builder.UnorderedAccess(ops->layers[l], arrayUav).View();
 			bindings.scratch = scatter ? a_builder.ShaderResource(scratch, arraySrv).View() : a_builder.UnorderedAccess(scratch, arrayUav).View();
 			return bindings;
 		}
@@ -555,26 +555,20 @@ namespace
 		{
 			const auto& ops = *a_frame.ops;
 			const auto& program = a_frame.scatter ? *ops.scatter : *ops.gather;
-			const std::uint32_t scratch = a_recording.Index(a_bindings.scratch);
+			std::array<std::uint32_t, kLayers> handles{};
+			for (std::uint32_t l = 0; l < kLayers; ++l) {
+				handles[l] = a_recording.Index(a_bindings.layers[l]);
+				if (handles[l] >> kHandleBits)
+					logger::error("[ORG] Cloud Shadows: layer {}'s descriptor index {} does not fit LayerOpsCS's 24 bits", l, handles[l]);
+			}
+			LayerOpsBlock block{};
+			PackLayers(handles, block.layers);
+			block.scratch = a_recording.Index(a_bindings.scratch);
 			// Each entry set of the anchor (one per tap of a run), in tap order.
 			for (std::uint32_t k = 0; k < a_frame.sets; ++k) {
-				const std::uint32_t base = a_frame.base + k * kLayerEntries;
-				const std::uint32_t rows = k * kLatchBytes;
-				for (std::uint32_t l = 0; l < kLayers; ++l) {
-					if (a_frame.scatter) {
-						const LayerScatterBlock block{ .scratch = scratch,
-							.layer = a_recording.Index(a_bindings.layers[l]),
-							.row = ShaderBindings::LatchOf(*ops.latch, a_recording.Run(), rows + kScatterRows + l * kRowBytes) };
-						ops.gate->Dispatch(a_recording, program, ShaderBindings::Data(block), base + kLayers + l);
-						continue;
-					}
-					LayerGatherBlock block{};
-					for (std::uint32_t f = 0; f < kFaces; ++f)
-						block.faces[f] = a_recording.Index(a_bindings.faces[l][f]);
-					block.scratch = scratch;
-					block.row = ShaderBindings::LatchOf(*ops.latch, a_recording.Run(), rows + l * kRowBytes);
-					ops.gate->Dispatch(a_recording, program, ShaderBindings::Data(block), base + l);
-				}
+				const std::uint32_t rows = k * kLatchBytes + (a_frame.scatter ? kScatterRow : 0);
+				block.row = ShaderBindings::LatchOf(*ops.latch, a_recording.Run(), rows);
+				ops.gate->Dispatch(a_recording, program, ShaderBindings::Data(block), a_frame.base + k * kLayerEntries + (a_frame.scatter ? 1 : 0));
 			}
 		}
 
@@ -588,39 +582,42 @@ namespace
 
 	/**
 	 * @brief The client's commit: the queue as the run's rows (a scratch slot for each face read, then each face written: its slot
-	 * or zero) and the gate entries of the layers with work, opened for every face. The queue is empty afterwards.
+	 * or zero) and the tap's gather and scatter gate entries, opened for the entries in their rows. The queue is empty afterwards.
 	 */
 	void CommitLayerOps(LayerOps& a_ops, FrameAnchors::Anchor a_anchor)
 	{
 		if (a_ops.ops.empty())
 			return;
-		std::array<std::uint32_t, kLayers * kRowWords> gatherRows;
-		std::array<std::uint32_t, kLayers * kRowWords> scatterRows;
-		gatherRows.fill(kNoWord);
-		scatterRows.fill(kNoWord);
+		// The faces read, each with its scratch slot, and the faces written: a slot, or zero.
+		std::array<std::uint32_t, kGatherWords> gatherRow;
+		std::array<std::uint32_t, kScatterWords> scatterRow;
+		gatherRow.fill(kNoWord);
+		scatterRow.fill(kNoWord);
+		std::uint32_t gatherCount = 0, scatterCount = 0;
+		std::array<std::uint32_t, kLayers * kFaces> slotOf;
+		slotOf.fill(kNoWord);
 		// The tap's entry set and its first scratch slot: a SkyReflections tap of the start stage takes the set of its face's instance and
 		// the slots after those the frame's earlier face taps took.
 		const bool faces = a_anchor == FrameAnchors::Anchor::SkyReflections && a_ops.instances > 1;
 		const std::uint32_t set = faces ? (std::min)(FrameAnchors::TapInstance(), a_ops.instances - 1) : 0;
 		const std::uint32_t first = faces && set > 0 ? a_ops.SlotsTaken() : 0;
-		std::uint32_t gatherLayers = 0, scatterLayers = 0, slots = first;
+		std::uint32_t slots = first;
 		for (std::uint32_t l = 0; l < kLayers; ++l) {
 			for (std::uint32_t f = 0; f < kFaces; ++f) {
 				const std::uint8_t value = a_ops.value[l][f];
 				if (value == kUntouched)
 					continue;
-				scatterLayers |= 1u << l;
 				if (value == kZero) {
-					scatterRows[l * kRowWords + f] = kZeroWord;
+					scatterRow[scatterCount++] = Entry(l, f, kZeroWord);
 					continue;
 				}
 				// The face read: its slot, given the first time (the queue counted every face read, so the slots suffice).
-				auto& slot = gatherRows[value * kRowWords + f];
+				auto& slot = slotOf[value * kFaces + f];
 				if (slot == kNoWord) {
 					slot = slots++;
-					gatherLayers |= 1u << value;
+					gatherRow[gatherCount++] = Entry(value, f, slot);
 				}
-				scatterRows[l * kRowWords + f] = slot;
+				scatterRow[scatterCount++] = Entry(l, f, slot);
 			}
 		}
 		if (faces) {
@@ -628,17 +625,15 @@ namespace
 			a_ops.slotsFrame = RenderGraph::Frame::Driver::Current().frame;
 		}
 		const auto run = RenderGraphRuntime::Get().Host()->CurrentRun();
-		a_ops.latch->Write(run, set * kLatchBytes, std::as_bytes(std::span(gatherRows)));
-		a_ops.latch->Write(run, set * kLatchBytes + kScatterRows, std::as_bytes(std::span(scatterRows)));
+		a_ops.latch->Write(run, set * kLatchBytes, std::as_bytes(std::span(gatherRow)));
+		a_ops.latch->Write(run, set * kLatchBytes + kScatterRow, std::as_bytes(std::span(scatterRow)));
 		const std::uint32_t groupsX = (a_ops.width + kGroupSize - 1) / kGroupSize;
 		const std::uint32_t groupsY = (a_ops.height + kGroupSize - 1) / kGroupSize;
 		const std::uint32_t base = (LayerSlot(a_anchor) * a_ops.instances + set) * kLayerEntries;
-		for (std::uint32_t l = 0; l < kLayers; ++l) {
-			if (gatherLayers & (1u << l))
-				a_ops.gate->OpenDispatch(base + l, groupsX, groupsY, kFaces);
-			if (scatterLayers & (1u << l))
-				a_ops.gate->OpenDispatch(base + kLayers + l, groupsX, groupsY, kFaces);
-		}
+		if (gatherCount)
+			a_ops.gate->OpenDispatch(base, groupsX, groupsY, gatherCount);
+		if (scatterCount)
+			a_ops.gate->OpenDispatch(base + 1, groupsX, groupsY, scatterCount);
 		a_ops.Reset();
 	}
 }
@@ -667,8 +662,8 @@ bool ORGCloudShadows::SetupLayerOps()
 	next->height = layerDesc.Height;
 
 	next->gather = ComputeProgram::Load(host->Device(),
-		{ .source = kLayerShader, .constantWords = ShaderBindings::Words<LayerGatherBlock>(), .defines = { { L"LAYER_GATHER", L"" } } });
-	next->scatter = ComputeProgram::Load(host->Device(), { .source = kLayerShader, .constantWords = ShaderBindings::Words<LayerScatterBlock>() });
+		{ .source = kLayerShader, .constantWords = ShaderBindings::Words<LayerOpsBlock>(), .defines = { { L"LAYER_GATHER", L"" } } });
+	next->scatter = ComputeProgram::Load(host->Device(), { .source = kLayerShader, .constantWords = ShaderBindings::Words<LayerOpsBlock>() });
 	// One entry set per reflection face a frame may draw when the start stage holds the faces' sky.
 	next->instances = FrameAnchors::HeldByStage(FrameAnchors::Anchor::SkyReflections) ? kFaces : 1;
 	next->gate = RenderGraph::RunGate::Create("CloudShadows::LayerOpsGate", static_cast<std::uint32_t>(kLayerAnchors.size()) * next->instances * kLayerEntries);
