@@ -5690,3 +5690,141 @@ reuse, revision, segment, external, external-reuse, split, built, stream, arena,
 timed out once after "input layout build" (where it hung once before on the RTX 5080) and passed when run again (the lease modes
 and HeadlessBenchmark not run). The MO2 instance keeps `+CS AB nfg` and `*TerrainHelper.esp`, and every run loaded into the
 world on its own.
+
+**Second pass (2026-11-17, the frame's end, barriers, lifetime hazards).** Measured on the RX 6600 as above, background runs with
+`DXVK_DEBUG=hang`, the machine in use (VS Code and DWM on the same GPU).
+
+*The 483 us handoff and the 761 us frame boundary were not steady-state costs.* The submission trace analyses seven groups of six
+frames, one every 300 frames; the first world group (about frame 600, just after the load, while textures and buffers are still being
+made) had gaps of about 2.6 ms before Scaleform and 2 ms at the frame boundary, and the means over all groups carried them. Over the
+last five groups only (`subtrace.py --last 5`), in every trace taken (the one of the first pass included):
+
+| Gap | All groups (first pass) | Last 5 groups, 8 traces of this pass |
+|---|---|---|
+| post `capture.menubg` -> Scaleform (handoff, 14 image barriers, 8 layout changes) | 483 us | 12 to 24 us |
+| Scaleform -> next frame's first list (the frame boundary) | 761 us | 331 to 440 us (577 with the lazy acquire below) |
+
+In those settling frames the device made about 1,100 to 2,800 memory allocations per 300 frames (buffers, textures and heaps, 0.6 to
+1.3 GiB; BasicRHI now logs them), against 89 (13 MiB) in the last window of a perf-taa run.
+
+*Barrier probe.* `BASICRHI_BARRIER_PROBE=<list label part or *>` with `CS_RHI_CENSUS` records each image barrier of the matching lists
+as a command of its own between bottom-of-pipe timestamps; the table (mean us a frame, per list, image, layouts and range) goes to
+`BASICRHI_BARRIER_PROBE_FILE` every 300 presents. Handoff lists are now labelled with their batch's first pass (`handoff > <pass>`).
+Splitting the barriers adds about 0.5 us of drain each, so the per-barrier numbers are upper bounds. The layout changes over 5 us a
+sample in a steady perf-taa frame (all others are 0.5 to 2 us):
+
+| Image (list) | From -> to | us | Cause |
+|---|---|---|---|
+| main depth copy, `kPOST_ZPREPASS_COPY` (`cs.shadow-mask.world.draws`, first reader after pre-main's depth copy) | TRANSFER_DST -> DEPTH_READ | 81 | a copy into a depth image leaves its HTILE uncompressed; the move to a depth layout re-initialises it (estimate of the mechanism) |
+| a depth image written by a copy (`cs.shared.upload.0`, deferred+water) | TRANSFER_DST -> DEPTH_READ | 38 | as above |
+| the upscaler's depth copy (`cs.upscaling.copy-to-main`) | TRANSFER_DST -> DEPTH_READ | 27 | as above |
+| the upscaler's source (`cs.upscaling.copy-to-main`) | GENERAL -> TRANSFER_SRC | 26 | a storage image read by a copy |
+| the upscaler's input (`cs.upscaling.evaluate`) | TRANSFER_SRC -> GENERAL | 18 (x1.5) | back to storage after the copy |
+| VL depth copy (`cs.volumetric-lighting.depth-copy`) | DEPTH_READ -> TRANSFER_DST | 12 | depth decompression before a copy |
+| main depth (`handoff > cs.engine.skeleton.depth-copy.post-zprepass`) | DEPTH_ATT -> TRANSFER_DST | 11 | as above |
+| main depth (`handoff > cs.shared.upload.0`) | DEPTH_READ -> TRANSFER_DST | 9 | as above |
+| Cloud Shadows' 32 layer cubes (`handoff > cs.cloud-shadows...reflections-prepass.gather`, then in the list) | SHADER_READ -> GENERAL x33, GENERAL -> GENERAL x95, GENERAL -> COLOR_ATT x32 | 1 to 2 each, about 0.1 to 0.3 ms a frame in all | per-frame layout round trips of every layer cube |
+
+The costly ones are all depth images going through transfer layouts: the depth copies (pre-main's, the VL depth copy, the upscaler's)
+are `vkCmdCopyImage`s, about 0.2 ms a frame together. DXVK copies depth with a draw where it can keep compression; that was not tried
+here. The 0.08 ms "before the shadow-mask draws" of the first pass is the first of these.
+
+*The frame boundary (steady, 0.33 to 0.44 ms with list timing on).* Between Scaleform's range and the next frame's first range: Scaleform's
+two kept lists (one with the present copy into the swap chain image), the present relay, the present, the acquire, and the next
+frame's handoff (38 layout changes, 33 of them Cloud Shadows' cubes). Estimated split:
+- ours: the next frame's handoff (about 30 to 60 us, probe), five submission boundaries (about 70 us at 14 us each), the present copy
+  and the Scaleform lists (about 30 us, not timed): about 0.15 ms;
+- not ours: other processes' work on the 3D engine. The Windows `GPU Engine` counters over a steady window gave VS Code 0.7 to 1.4%
+  and DWM 0.3 to 0.4% of the 3D engine (about 0.2 to 0.35 ms a frame at 19.5 ms), against Skyrim's own; guest sees the same
+  processes. The window could not be uncovered without taking focus, so this was not measured with it uncovered.
+- The `System` process's copy engine read 8.4% in one native sample (0.15 to 0.16% in the others and in guest): paging, seen once.
+
+Tried and reverted (no gain outside the spread):
+- the acquire made lazily, just before the present copy instead of right after the present (BasicRHI had the acquire's wait batch
+  order the whole next frame): boundary 486 to 577 us against 331 to 440 us;
+- timeline waits on values the same queue signalled (the Scaleform kept lists' wait on the graph timeline, the relay's) replaced by a
+  full barrier: boundary 345 to 380 us against 357 to 411 us (two runs each);
+- a list probe (a timestamp command buffer between every list): AMD's bottom-of-pipe timestamp in a command buffer of its own does
+  not wait for the previous command buffer's draws, so it misplaced whole lists into the boundaries; removed.
+
+The native present is not the difference to DXVK: both use an A2B10G10R10 swap chain (the Upscaling feature asks for R10G10B10A2 in
+SDR), IMMEDIATE, three images; native copies the back buffer into the image, DXVK draws it.
+
+*G-buffer clears and the in-list barriers.* The clears list (`cs.deferred.clears.gbuffer`, 1 pass, 1 memory barrier) is 125 to 141 us
+between the SSS raymarch and the next upload in every trace, steady. Not changed: no per-clear timing was taken, and the first pass
+on the RTX 5080 showed load-operation clears making later readers slower. The in-list barrier cost is the table above.
+
+*Submissions.* 9 graphics submissions a frame as before; not changed (see "Left").
+
+*Lifetime hazards.*
+- `VUID-vkDestroyImageView-imageView-01026` (8 at once, 3 of 6 validation runs before): the stack (now logged with the message) is
+  FidelityFX's Vulkan backend under `sl.fsr`, inside CS's upscaler evaluate recorded at execution, freeing the image views of an earlier
+  dispatch. It came right after "load hold: started (... the map menu closed ...)": while Drawcall Limit Fix holds presents, the native
+  present path returned without presenting and nothing paced the frames, so the CPU ran as many frames ahead as the graph has slots,
+  more than FidelityFX keeps views for. Held frames are now paced as a present would pace them (`Native::PaceHeldPresent`: the graphics
+  queue's progress the frame latency back). CS `d546f2b42`.
+- `VUID-vkDestroyImage-image-01000` (2 per run in 5 of 10 validation runs before, always in the loading screen's load hold): a
+  `Native::Texture2D` freed by `RenderGraphRuntime::ServiceD3D11Releases` on the loading screen's thread, which owned rendering then.
+  The native release protocol freed an owner once the host's retired submission count passed the count at its release; work on the
+  graphics queue the host does not number (the loading screen's thread, external work, the immediate context) was not covered. The
+  pacing fix alone did not remove it (it came back once, in the synchronization-validation run). A release now also notes the
+  graphics queue's progress and waits for it as well. CS `33a65a65a`. Which list held the image was not named: the command buffer's
+  label lookup (new in BasicRHI) found nothing for it, so the exact submitter is inferred, not shown.
+- After both fixes: 3 validation runs (one with `VK_KHRONOS_VALIDATION_VALIDATE_SYNC=1`) with only the known 20
+  `VUID-vkCmdDraw-None-09600` and back-buffer layout lines, no destroy hazard, no `SYNC-HAZARD`.
+- ORG `f3557aa`'s claim (an inline late batch's last submission has completed before it records again) holds on the paths read:
+  `GraphHost::TakeLiveCopy` hands out a live copy only once its lease is retired (its queue points reached), and revision-driven copies
+  wait for their points (`TakeCopyLease`).
+
+*Volumetric Lighting off.* With `features.VolumetricLighting=false` and `CS_ORG_MISMATCH_FATAL=0`, native logs `ISPerlinNoiseCS` once
+and then about 3 more "no CS pass" errors every world frame (138 in 46 frames): the whole vanilla volumetric lighting (noise, generate,
+raymarch, apply, blur) has no pass, because the ORG volumetric lighting client and its detours are installed only by the feature. Not
+fixed: a noise pass alone would only move the stop to the generate. The likely fix is to install the client in native mode whatever the
+feature's state, with the shaders built without the feature's defines, and to check its output against guest with the feature off.
+
+*Scratch memory.* `VolumetricFogLightScatteringCS`: the cascade matrix is read from the structured buffer by index and the engine
+local shadows from the latch by offset; the RX 6600's ISA has no scratch operation left (80 before). CS `937686330`. DCLF's Effect
+vertex pipeline still has 1,036 (`graphics_Effect__main_`); not changed.
+
+*VRAM.* Not changed. The device's allocation report shows the settling churn above; the 1.1 GB against guest stays unattributed beyond
+the first pass.
+
+*Before and after (Tracy, 6 s windows, alternating runs in one session; timing off).* No change here touches a steady world frame (the
+pacing and the release gate act only in held frames and at releases; the probes are off by default), and none was expected.
+
+| | Native first pass (`b3n*`) | Native after (`b4n*`) | Guest (`b4g*`) |
+|---|---|---|---|
+| frame period, mean | 19.66 / 19.49 ms | 19.47 / 19.48 ms | 19.24 / 19.26 ms |
+| p50 / p95 / p99 | 19.44-19.55 / 20.56-20.58 / 21.4-21.7 ms | 19.38-19.44 / 20.60-20.72 / 21.6-21.8 ms | 18.92-19.12 / 22.25-22.28 / 24.1-25.0 ms |
+| GPU busy, Skyrim's 3D engine / all processes | 98.2-98.9% | 98.6-99.0% / 99.3-99.6% | 98.0-98.1% / 98.8-98.9% |
+| dedicated VRAM (process) | 4.19 GB | 4.19 GB | 3.03 GB |
+| graphics submissions a frame | 9 | 9 | - |
+| idle at the frame boundary, list timing on, steady | (761 us, all groups) | 331 to 440 us | - |
+
+Native trails guest by 0.21 to 0.23 ms (1.1 to 1.2%), outside the 0.02 ms spread of each mode in this session; native's p95 and p99
+stay below guest's.
+
+*Checks (second pass).* Final build (DLL 89db065ea036), background runs: native-quick (twice), native-river, native-interior, the
+loading-thread run (twice), the frozen-world run, first and third person, guest-quick: passed, no `NoPass`, recipe checks 0 findings,
+no failed build; every log names the RX 6600. native-validation three times on the final build (one with synchronization
+validation): only the known 20 `VUID-vkCmdDraw-None-09600` and back-buffer layout lines, no destroy hazard, no `SYNC-HAZARD`. The quick
+run's shot matches the first pass's (106.5 against 106.8 mean). Volumetric Lighting off: still stops (see above). ORG's unit tests pass
+run one at a time (AliasPacking, AsyncCompile, ContributorRegistry, ContributorHeaderC, DeviceRegistry, GoldenSchedule, Persistent,
+Rebinding, Recording, ResourceUse, Token, TrackingWorld) and the Vulkan host test's modes inline, sync, async, reuse, revision, segment,
+external, external-reuse, split, built, stream, arena, rebinding and contributor. `pipelines` hung (Debug, no ORG change in that area):
+the main thread waits in `org::PipelineLibrary::Wait` from `TestPermutations` while every thread-pool worker idles in its condition
+variable, so a permutation's completion was never signalled or its job never queued (stacks from a procdump; HeadlessBenchmark and the
+lease modes not run). The MO2 instance keeps `+CS AB nfg`, `+Start On Save` and `*TerrainHelper.esp`, and every run loaded into the
+world on its own.
+
+*Left, ranked (estimates).*
+1. The depth copies through transfer layouts (about 0.2 ms a frame of layout changes, table above): copy depth with a draw, as DXVK
+   does, or keep the copies' targets out of transfer layouts.
+2. The frame boundary's own part (about 0.15 ms): the next frame's handoff (Cloud Shadows' cube round trips), five submission
+   boundaries, the present copy.
+3. Cloud Shadows' per-frame layout round trips of its 32 layer cubes (0.1 to 0.3 ms with the probe's overhead): keep the cubes in
+   one layout across the frame.
+4. The G-buffer clears list (0.13 ms), not split by clear.
+5. Volumetric Lighting off in native (a stop, not a cost).
+6. DCLF's Effect vertex pipeline in scratch memory (1,036 operations; the forward stage costs the same as guest's).
+7. VRAM: about 1.1 GB over guest, and the settling frames' allocation churn.
