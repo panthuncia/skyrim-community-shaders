@@ -9,6 +9,7 @@
 #include "Features/DrawcallLimitFix/Core/Gpu/Pipelines/DrawPipelinesRhi.h"
 #include "Features/DrawcallLimitFix/Core/Settings/Switches.h"
 #include "RenderGraph/ComputeProgram.h"
+#include "RenderGraph/Switches.h"
 
 #include <RenderPasses/Base/TypedRenderGraphPass.h>
 #include <Resources/Buffers/Buffer.h>
@@ -40,11 +41,16 @@ namespace DCLF::Draws
 	// samples (in place of the rotation), the sun views counting their drawn casters by size.
 	inline std::atomic<int> shadowSizeProbe{ -1 };
 	// The queue of a pass that prefers async compute: the compute queue, or the graphics queue under CS_DCLF_ASYNC_COMPUTE=0. Read at
-	// the graph's build.
+	// the graph's build. Native mode (CS_ORG_NATIVE=1) defaults to the graphics queue: these passes take about 0.03 ms, but the
+	// graphics queue waited about 0.13 ms a frame for them before the Z-prepass's depth pass (two cross-queue waits around the compute
+	// batch). CS_DCLF_ASYNC_COMPUTE=1 puts them on the compute queue there.
 	inline org::QueueKind AsyncComputeQueue()
 	{
 		const int forced = asyncComputeOverride.load(std::memory_order_relaxed);
-		return (forced < 0 ? SwitchOnUnlessZero(Switch::AsyncCompute) : forced != 0) ? org::QueueKind::Compute : org::QueueKind::Graphics;
+		const auto& value = SwitchValue(Switch::AsyncCompute);
+		static const bool native = ::Switches::On("CS_ORG_NATIVE");
+		const bool compute = forced >= 0 ? forced != 0 : value.empty() ? !native : value != "0";
+		return compute ? org::QueueKind::Compute : org::QueueKind::Graphics;
 	}
 
 	// The format that reads a depth resource's depth aspect in a shader, as DXGI names it.

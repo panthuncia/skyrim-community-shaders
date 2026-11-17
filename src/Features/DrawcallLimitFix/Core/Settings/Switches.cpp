@@ -56,7 +56,7 @@ namespace DCLF
 			{ Dclf, "CS_DCLF", F, Reduced::Zero, false, "0: DCLF does not install" },
 			{ AsyncPriority, "CS_DCLF_ASYNC_PRIORITY", F, N, false, "normal: the coordinator and scene threads keep normal priority instead of above normal (and frame-critical jobs run at normal); noboost: workers are not raised to a ParallelFor caller's priority while they hold its chunks, nor for frame-critical jobs (the CPU pipeline's culls)" },
 			{ AsyncCompute, "CS_DCLF_ASYNC_COMPUTE", F, Reduced::Zero, false,
-				"0: the passes that prefer the compute queue (build-draws' queries, fades, portal batches, tree wind) run on the graphics queue" },
+				"0: the passes that prefer the compute queue (build-draws' queries, fades, portal batches, tree wind) run on the graphics queue; unset: on in guest mode, off in native mode (1 turns it on there)" },
 			{ ForwardPlain, "CS_DCLF_FORWARD_PLAIN", F, Reduced::Zero, false,
 				"0: the forward epoch draws its range device-generated, a call per state class, instead of a plain draw per pipeline" },
 			{ ForwardDirect, "CS_DCLF_FORWARD_DIRECT", F, Reduced::Zero, false,

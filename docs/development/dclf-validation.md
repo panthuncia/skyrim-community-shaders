@@ -201,7 +201,7 @@ Each compares a live path with a reference built from scratch and flags every mi
 | `CS_DCLF_TEX_STREAM_RATE_MB` | 256 | Texture upgrades started per second, in MiB. |
 | `CS_DCLF_TEX_STREAM_VISIBLE_OFFSET` | 0 | Over the budget, how many mips what is on screen may step down (0: it loads what it asks for). |
 | `CS_DCLF_TEX_STREAM_DISTANCE_SCALE` | 1 | The distance floor's sharpness: above 1, finer mips. |
-| `CS_DCLF_ASYNC_COMPUTE` | on | `0`: the passes that prefer the compute queue (build-draws' queries, fades, portal batches, tree wind) run on the graphics queue, for timing them in the graphics queue's order. |
+| `CS_DCLF_ASYNC_COMPUTE` | on in guest, off in native | `0`: the passes that prefer the compute queue (build-draws' queries, fades, portal batches, tree wind) run on the graphics queue, for timing them in the graphics queue's order. `1` puts them on the compute queue in native mode too. |
 
 ### Other switches DCLF runs depend on
 
