@@ -2758,6 +2758,12 @@ keeps the read at the chain's entry, and its rows are all on). ORG was not chang
 
 Native mode with stages on (`CS_ORG_SEGMENTS`, default). Guest mode keeps its per-anchor path.
 
+**Since Cleanup A11 (2026-11-18) the recipe is one constexpr table, `src/RenderGraph/Frame/RecipeTable.h`:** frame kinds → ordered
+stages (CS stage or Drawcall Limit Fix graph) → ordered steps → explicit client ids. FrameAnchors' stage and step lookups, the kinds'
+stage lists, the epochs' frame positions for ORG, the host's epoch order, the stages' commit lists, the recipe print and the check all
+read it. A client registers only where a step names it (a recipe mismatch otherwise). The table below and the stage-by-stage text are
+the history of how the stages got there; the table file and "Cleanup A11" are the current form.
+
 ### What a recipe is
 
 `src/RenderGraph/Frame/Recipe.{h,cpp}`. The world frame is a fixed list of stages, in the shape of BasicRenderer's
@@ -2794,7 +2800,8 @@ most two a frame. When every epoch of the recipe has a trace of its current buil
 - Within a stage, its graph orders its passes; the check is between stages.
 - A read is fine when the reading stage or an earlier one writes the resource. A read of something no graph writes comes from
   outside the graphs (uploads, files, the engine), counted.
-- A read whose writers are all in later stages is the previous frame's. It must be listed in `kPreviousFrame` (12 names, each
+- A read whose writers are all in later stages is the previous frame's. It must be listed in `kPreviousFrame` (in `RecipeTable.h`
+  since Cleanup A11; 12 names then, 11 now, each
   checked by hand: the refraction normals, underwater mask, water displacement pair and flow map, kMAIN_ONLY_ALPHA and kMAIN_COPY
   written by forward or post; the sky IBL, Terrain Blending's blended depth and the dynamic cubemaps read by the start stage;
   Volumetric Lighting's depth copy read by the menu scenes' fog).
@@ -2805,6 +2812,10 @@ most two a frame. When every epoch of the recipe has a trace of its current buil
 
 The print (`[ORG] world recipe: <n> <stage> (...): pass [reads ...; writes ...]; ...`) is one line per stage, logged when the
 recipe's passes change (12 times a session at most), and `CS_ORG_EPOCH_STATS=1` adds a census line.
+
+Since Cleanup A11 a build the build manager makes is also checked before it attaches (`Recipes::Accept`, on the build thread): the
+recipe with that build's schedule in place of its epoch's current one. A finding stops a development build before any frame runs the
+build. Only once one whole check has run; the first frames' builds are covered by the check at `Renderer::Begin` as before.
 
 ### Frame inputs and the one commit
 
@@ -4754,11 +4765,17 @@ displays left out, 0 shadow clear re-registrations, 0 holds ended with "no progr
 the harness marks them failed because it expects a world): native shows the mist and the emblem, darker than guest's.
 ORG is unchanged in this pass.
 
-## State of the native frame (2026-11-18, after Cleanup A6)
+## State of the native frame (2026-11-18, after Cleanup A11)
 
 Native mode (`CS_ORG_NATIVE=1`), Vulkan or D3D12. Every CS stage is one ORG graph, built off the render thread, staged and recorded before
 it switches in at a frame's `Renderer::Begin`, one kept recording per frame slot, one ticket a frame. Drawcall Limit Fix's graphs (*) are
 stages of their own.
+
+The whole frame is one table, `src/RenderGraph/Frame/RecipeTable.h` (Cleanup A11): the kinds, their stages in order, each CS stage's
+steps with the client ids they hold, the anchors' own epochs in their place (guest mode's, and HDR output's and frame generation's
+tickets), the stages' commit points and window rules, and the previous frame's resources. Membership is explicit: a client whose pass
+sits at an anchor where no step (or own-epoch entry) names it is refused at registration, a recipe mismatch (fatal in development
+builds). Every stage has a "runs in guest" field, false for all.
 
 ### Stages per frame kind
 
@@ -6989,3 +7006,149 @@ interior 4.6 / 10.7 (the earlier pair of runs differed by 4.6 / 10.4); validatio
 the world 3.5 to 3.8; upscalers DLSS 0.6, FSR 0.7, XeSS 1.2, TAA 3.9; worldspace Tamriel 0.7, Solstheim 16.2 and Riverwood 22.2 (the
 earlier pair: 4.4 and 24.9; the Solstheim shots show the same picture with the foliage moved); guest 2.4. Image means are within 2
 everywhere. No artefact.
+
+## Cleanup A11: one recipe table (2026-11-18)
+
+Plan piece A11. The frame was described in four places that had to agree: `kDeclaredInfo` in `FrameAnchors.cpp` (the CS stages' steps,
+what runs), `kWorld` and the kind recipes in `Frame/Recipe.cpp` (the check, the print, the frame positions), the declared values of
+`RenderGraphRuntime::Segment`, and implicit membership (whatever registered at an anchor a step held, with `*` id patterns). Now one
+constexpr table, `src/RenderGraph/Frame/RecipeTable.h`, describes it, and everything else reads it. Code commits and this text on
+`org-native/phases` (no submodule change). RX 6600, native Vulkan, Perf-Fast, background runs with `DXVK_DEBUG=hang`.
+
+### The table
+
+Frame kinds → ordered stages → ordered steps → explicit client ids.
+
+- `Table::Stage`: the `StageId`, the owner (CS or Drawcall Limit Fix), the name, and for a CS stage its `SegmentId`, its names, its steps,
+  `opensLast`, `switchesEverySlot`, `runsInGuest` (plan decision D7; false for every stage), `commitBefore` (the epochs whose submission
+  commits a point-ended stage: these were the `EndsStart`, `EndsPreDepth`, `EndsPreMain`, `EndsSun` and `EndsWorld` switches and the UI
+  stage's HDR output and capture test in `BeforeGpuWork`), `commit` (the print's text) and `commitSite` (the engine call that commits
+  it: the blended draw for deferred+water, RenderEndOfFrameEffects' return for post, the present for UI, the skeleton's depth copies
+  for pre-depth and pre-main at the latest).
+- `Table::Step`: an anchor with the ids it holds (`whole`: the stage holds the anchor wholly, and it has no epoch of its own), a foreign
+  module epoch (light culling), or a point; `untilLater` and the instance range as before.
+- Each stage's `epochs`: every epoch in its part of the frame, in order. `Graph` is the stage's own graph (a CS stage's epoch, or
+  DCLF's), `Ticket` an anchor that keeps its ticket after the stage in native mode (frame generation after post, HDR output in UI),
+  `Placed` an anchor's own epoch placed there for the host's epoch order (guest mode's per-anchor epochs). An anchor epoch entry names
+  the clients that run only on that epoch: `cs.engine.imagespace` and its late family, the skeleton's group clients, `cs.hdr`,
+  `cs.upscaling.hudless`.
+- `kKinds`: the world (and a frozen world's capture frame) has the twelve stages; every other kind has the UI stage.
+- `kPreviousFrame` moved here from `Recipe.cpp` (11 names).
+
+The world kind's start stage, as written:
+
+```cpp
+{ .id = StageId::Start, .owner = Owner::Cs, .name = "start", .segment = SegmentId::Start,
+	.steps = { {
+		{ .anchor = Anchor::DecalQueries, .clients = { "cs.decals.occlusion" }, .whole = true },
+		{ .anchor = Anchor::ImageSpace, .clients = { "cs.engine.imagespace.facetint" } },
+		{ .anchor = Anchor::ReflectionsPrepass, .clients = { "cs.cloud-shadows", "cs.cloud-shadows.layers" }, .whole = true },
+		{ .anchor = Anchor::SkyReflections, .clients = { "cs.sky.faces", "cs.cloud-shadows.layers" }, .whole = true },
+		{ .anchor = Anchor::ImageSpace, .clients = { "cs.engine.imagespace.start" } },
+		{ .anchor = Anchor::EngineShadowClear, .clients = { "cs.engine.skeleton.shadow@start" } },
+		{ .point = true },
+	} },
+	.commitBefore = Segments({ Segment::ShadowView, /* ... */ }),
+	.epochs = { Own(StageSegment(SegmentId::Start)), Placed(Anchor::DecalQueries),
+		Placed(Anchor::EngineShadowClear, { "cs.engine.skeleton.shadow" }) } },
+```
+
+`static_assert(Valid())` checks the table at compile time: the stages in `StageId` order and the CS stages in `SegmentId` order, every
+CS stage ends at a point or an anchor, one own graph per CS stage, a whole anchor has no step in another stage and every step at it is
+whole, and the epochs cover every `Segment` value exactly once.
+
+### What is derived from it
+
+- FrameAnchors' `kDeclaredInfo` (a view of the CS stages: steps, names, window rules, commit lists), the step and whole-anchor masks
+  (`Table::StepAnchors`, `Table::WholeAnchors`), and `StepHolds` (an exact id match; a whole step also holds the diagnostic client).
+- The host's epoch order (`kTimeline` is `Table::Timeline()`; a one-off `static_assert` proved it equal to the old literal before the
+  literal was deleted).
+- The point-ended stages' commits in `BeforeGpuWork`: one loop over `commitBefore`, in recipe order, as the old chain of tests.
+- `Recipes::KindHas`, `DescribeKind`, `DiffKinds`, `StageName`, `PositionedEpochs` (ORG's frame positions), `Traced`, and the check's
+  and the print's epoch lists.
+- The CS stages' `Segment` values: `Segment::Declared + SegmentId` (`RenderGraphRuntime::StageSegment`). The numbers are the old
+  `DeclaredStart` to `DeclaredUi` values, so `EpochOf` and DCLF's frame orders see the same numbers. `TapPoint` takes a `SegmentId`.
+
+Deleted: the literals of `kDeclaredInfo` and `kTimeline`, the five `Ends*` predicates, `WholeMembers`, `StepAnchors` and the `*` id
+patterns, `Step::shared`, `SwitchesEverySlot`'s segment test, `kWorld`, `StageDesc`, both `KindRecipe` tables, `StageName`'s switch,
+and the seven `Segment::Declared*` enumerators. About 650 lines left `FrameAnchors.cpp`, `Recipe.cpp` and the headers; the table is
+600 lines, most of them the stage comments that moved with the stages.
+
+### Membership is explicit
+
+`FrameAnchors::Register` refuses a client when one of its passes sits at an anchor where the table does not name it: a recipe mismatch,
+fatal in development builds (`Frame::Driver::MismatchFatal`), refused and logged once per client in release. At an anchor a CS stage
+has a step at (native mode), one of those steps must name it. At an anchor that runs its own epoch (every anchor in guest mode; frame
+generation and HDR output in native), a step naming it there counts (guest runs that step's clients on the anchor's epoch until the
+stage runs in guest), or the anchor's epoch entry.
+
+Families: every id is listed, including the skeleton's host and place clients (`cs.engine.skeleton.frame@pre-depth` and the rest: a
+fixed set of group and host, or group and place, each named at its step), the menu scenes' four views and the shadow masks' two. One
+family has a variable set: ImageSpace's clients built on first sight in guest mode, `cs.engine.imagespace.late.<n>`, named on the
+ImageSpace anchor's epoch entry as `{ "cs.engine.imagespace.late.", 64 }`: exactly serials 1 to 64 (`kMaxLateClients`). One diagnostic
+client, the anchor self-test (`CS_ORG_ANCHOR_SELFTEST`, a pass at every anchor), is named once in `kDiagnosticClients`.
+
+One code change came with it: the skeleton's group clients (`cs.engine.skeleton.shadow`, `.cube`, `.frame`) no longer register in
+native mode. No stage named them and their anchors have no epoch there, so their passes were in no graph; the host and place clients
+carry the clears. A discovery run with mismatches non-fatal (native-validation, and guest with `org.ports=all`) found no other client
+without a name. A deliberate negative build (the overlay's client renamed `cs.imgui.unnamed`) stopped at registration with:
+`the client 'cs.imgui.unnamed' registered a pass ('cs.imgui.upload') at the Overlay anchor, and no step of the recipe table names it
+there (src/RenderGraph/Frame/RecipeTable.h)`.
+
+### Validation before the build is accepted
+
+The check now also runs on the build thread before a managed build attaches (`Recipes::Accept`, called by the build manager where it
+traces the schedule): the recipe with the new build in place of its epoch's current one. A finding stops a development build before any
+frame runs that build. It runs only once a whole check has seen every epoch's build, so the session's first builds are still checked at
+`Renderer::Begin` (after their attach, before a frame runs them). The interior run checked 33 builds this way. No run had a finding.
+
+This is not the plan's "check from the clients' declared reads and writes as they register": `PassDesc` carries no access list, and the
+first point where a pass's reads and writes are known is its graph's build. Giving every client's passes declared accesses at
+registration (about 40 clients, several making passes per instance or per engine shape) is a piece of its own.
+
+### What still separates it from BasicRenderer's form
+
+Against the eight differences in the plan (2.4):
+1. Closed: one table describes the frame, as stages, with no ticket owners in it (the two tickets left are named as such).
+2. Closed as data, open in kind: each stage's commit point and window rules are fields, and the engine call sites that commit it are
+   named. The boundary is still an engine hook sequence and the commit an engine call (`TapPoint` at the blended draw,
+   RenderEndOfFrameEffects' return, the present, the skeleton's depth copies), not a GPU dependency.
+3. Closed: membership is explicit and checked at registration. Feature code still registers its clients at runtime; the table decides
+   whether they are allowed and where they go.
+4. Open: presence is still inferred per frame from the clients' callbacks and the build key, not declared from settings.
+5. Half: a managed build is validated before it attaches. The first builds are validated after their attach, and nothing is validated
+   from declared accesses before a build. The previous-frame list is still kept by hand (now in the table).
+6. Open: the engine's late decisions still shape the graphs (fixed instance counts, parity variants, both tonemap forms).
+7. Open: inputs are captured at the engine's draws.
+8. Open: engine targets have no ownership contract per resource.
+
+Also unlike BasicRenderer: the recipe is not replaced as a whole at a frame boundary (stages are rebuilt one by one as clients change),
+and its entries have no options or contracts of their own.
+
+### Measured (perf-taa, RX 6600, uncapped, VRAM Budget off, alternating; DLL `65afa962dbd9`)
+
+| | Native | Guest |
+|---|---|---|
+| frame period between the marks | 19.14 / 19.08 ms | 19.17 / 19.08 ms |
+| process dedicated VRAM | 2,935 / 2,933 MiB | 3,036 / 3,039 MiB |
+
+Before (engine targets in the frame arena): native 19.20 to 19.28 ms, guest 19.13 to 19.19 ms. No change beyond run noise, as expected
+for tables and lookups. A native run with the census on (19.14 ms): 11.2 to 11.3 tickets a frame, and every census window between the
+marks has 0 tap errors, recordings, switches, build switches and key builds.
+
+### Checks
+
+The recipe prints were taken first on the unchanged build (DLL `e70c805793d2`) and again on this one, in every run below. Every print of
+the new runs, pass names, order and each pass's reads and writes, is one the old build printed; the steady (last) print is the same in
+every config. The order of names inside a pass's read or write list varies from run to run on either build, so the diff compares them as
+sets. Load-time intermediate prints differ in which of two orders they come in (both seen on the old build); the stage build pass counts
+and the frame-kind switch lines match.
+
+One background run each on DLL `977c8ecd41f6` (the final code but two header comments), all passed with 0 tap errors, no `NoPass`, 0
+recipe findings, no failed build and 0 own tickets: native-quick, native-river, native-vulkan+rain, the under-water run, native-interior,
+native-validation (the same message classes and counts as before: 20 `VUID-vkCmdDraw-None-09600`, 50 validation lines on both builds),
+the loading-thread run, the frozen-world Journal Menu run with TAA, native-upscalers, the worldspace run (Tamriel, Solstheim,
+Riverwood), native-quick with Volumetric Lighting off, guest-quick, and guest-quick with `org.ports=all`. The first Journal Menu run
+stopped at the plugin load while a build ran on the same machine (no error in its log); run again alone, it passed. The perf runs above
+are on the final DLL and passed. The only `[C]` line is the known `PublishedResources` one. The main menu run was skipped (it moves the
+Start On Save DLL aside).
