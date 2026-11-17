@@ -129,6 +129,9 @@ def check_expectations(contract, run_dir, status, final):
     reach = expect.get("reach")
     if reach and reach not in ((status or {}).get("milestones") or {}):
         return Final("failed", f"never reached {reach} (harness)", "harness")
+    live = collect.live_image(run_dir, expect)
+    if live.get("failure"):
+        return Final("failed", f"{live['failure']} (harness)", "harness")
     return final
 
 
@@ -281,6 +284,7 @@ def run(paths, spec, sets=(), label=None, stage=None, dry_run=False, lock=None, 
         "resolved": contract,
         "harness": harness,
         "shots": shots,
+        "live_image": collect.live_image(run_dir, contract["expect"]),
         "first_error": scan["first_error"] or (status or {}).get("last_error", ""),
         "fault": (status or {}).get("fault") or ({"address": fault} if fault else {}),
         "errors": scan["errors"],

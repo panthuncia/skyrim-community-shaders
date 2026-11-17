@@ -1,6 +1,8 @@
 """run() end to end against a fake game: no MO2, no game, temp folders only."""
 
 import json
+import struct
+import zlib
 
 import pytest
 from conftest import FIXTURES
@@ -9,9 +11,18 @@ from cstest import procs, runner
 from cstest.paths import GAME_EXE, STATUS_FILE, TEST_FILE
 
 
+def tiny_png(value):
+    """A 2x1 grey PNG whose pixels are value."""
+    def chunk(kind, body):
+        return struct.pack(">I", len(body)) + kind + body + struct.pack(">I", zlib.crc32(kind + body))
+    header = struct.pack(">IIBBBBB", 2, 1, 8, 0, 0, 0, 0)
+    return bytes([0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]) + chunk(b"IHDR", header) + chunk(b"IDAT", zlib.compress(bytes([0, value, value]))) + chunk(b"IEND", b"")
+
+
 class FakeGame:
-    def __init__(self, paths, status_name="passed", shots=("start",), exit_after_outcome=True, die=False):
+    def __init__(self, paths, status_name="passed", shots=("start",), exit_after_outcome=True, die=False, live=(10, 20)):
         self.paths = paths
+        self.live = live  # the two live-image shots' pixel values; None: not written
         self.running = False
         self.status_name = status_name
         self.shots = shots
@@ -32,6 +43,9 @@ class FakeGame:
         (paths.skse / "CommunityShaders.log").write_text("[15:22:16.927] [1] [I] CommunityShaders v1-9-0-0\n")
         for shot in self.shots:
             (paths.runs / contract["run_id"] / "shots" / f"{shot}.png").write_bytes(b"png")
+        if self.live:
+            for name, value in zip(("_live-a", "_live-b"), self.live):
+                (paths.runs / contract["run_id"] / "shots" / f"{name}.png").write_bytes(tiny_png(value))
     def find(self, image):
         found = [111] if self.running and image == GAME_EXE else []
         if self.die and found:
@@ -65,10 +79,11 @@ def test_run_passed_and_cleaned_up(fake, game):
     before = fake.modlist.read_text()
     (fake.skse / "CommunityShaders.env").write_text("MANUAL=1\n")
     result = runner.run(fake, "native-vulkan+quick", ["dclf.shadows=false"], label="t", stage="p35", log=lambda *_: None)
-    assert result["outcome"] == "passed", result
+    assert result["outcome"] == "passed", result["reason"]
     # What the game saw while it ran.
     assert game.seen_test_file["env"]["CS_DCLF_SHADOWS"] == "0"
-    assert game.seen_test_file["features_disabled"] == ["Upscaling"]
+    assert game.seen_test_file["features_disabled"] == []
+    assert game.seen_test_file["expect"]["live_frames"] == 30
     assert "-ImprovedCameraSE" in game.seen_modlist and "+CS AB p35" in game.seen_modlist
     # Everything undone afterwards.
     assert not (fake.skse / TEST_FILE).exists()
@@ -78,6 +93,7 @@ def test_run_passed_and_cleaned_up(fake, game):
     run_dir = fake.runs / result["run_id"]
     saved = json.loads((run_dir / "result.json").read_text())
     assert saved["shots"] == ["start"] and saved["milestones"]["world-ready"]["frame"] == 352
+    assert saved["live_image"]["checked"] and not saved["live_image"]["same"]
     assert (run_dir / "resolved.json").exists() and (run_dir / "CommunityShaders.log").exists()
     assert result["summary"] == "native-vulkan+quick [t]: passed; shots: start"
 
@@ -86,6 +102,25 @@ def test_missing_shot_fails(fake, game):
     game.shots = ()
     result = runner.run(fake, "guest+quick", [], stage="p35", log=lambda *_: None)
     assert result["outcome"] == "failed" and "start" in result["reason"]
+
+
+def test_frozen_image_fails(fake, game):
+    game.live = (10, 10)
+    result = runner.run(fake, "guest+quick", [], stage="p35", log=lambda *_: None)
+    assert result["outcome"] == "failed" and "frozen final target" in result["reason"]
+    assert result["live_image"]["same"]
+
+
+def test_missing_live_shots_fail(fake, game):
+    game.live = None
+    result = runner.run(fake, "guest+quick", [], stage="p35", log=lambda *_: None)
+    assert result["outcome"] == "failed" and "live-image shots missing" in result["reason"]
+
+
+def test_live_check_off(fake, game):
+    game.live = None
+    result = runner.run(fake, "guest+quick", ["expect.live_frames=0"], stage="p35", log=lambda *_: None)
+    assert result["outcome"] == "passed", result["reason"]
 
 
 def test_device_lost(fake, game):

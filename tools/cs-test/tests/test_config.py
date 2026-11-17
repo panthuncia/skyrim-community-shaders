@@ -92,6 +92,8 @@ def test_set_steps_replaces(configs):
     (["features.NoSuchFeature=false"], "unknown key"),
     (["build.shader_cache=lukewarm"], "warm or cold"),
     (["expect.reach=somewhere"], "milestone"),
+    (["expect.live_frames=-1"], "at least 0"),
+    (["expect.live_frames=soon"], "whole number"),
     (["noequals"], "key=value"),
 ])
 def test_errors_before_launch(configs, sets, message):
@@ -151,7 +153,7 @@ def test_contract_shape(configs):
     contract, _ = r("b", configs)
     assert set(contract) == {"version", "name", "run_id", "run_dir", "env", "features_disabled", "dclf_ini", "game", "timeouts", "steps", "expect"}
     assert contract["timeouts"] == {"launch": 60, "compile": 600, "load": 120, "step_wait": 60}
-    assert contract["expect"] == {"reach": "", "shots": [], "no_log": []}
+    assert contract["expect"] == {"reach": "", "shots": [], "no_log": [], "live_frames": 0}
 
 
 def test_label_argument(configs):
@@ -181,7 +183,8 @@ def test_every_shipped_config_resolves():
     for name in names:
         resolve(name, ["build.stage=x"], schema=schema)
     contract, _ = resolve("native-vulkan+quick", (), schema=schema)
-    assert contract["env"]["CS_ORG_NATIVE"] == "1" and contract["features_disabled"] == ["Upscaling"]
+    assert contract["env"]["CS_ORG_NATIVE"] == "1" and contract["features_disabled"] == []
+    assert contract["expect"]["live_frames"] == 30
     contract, _ = resolve("native-d3d12-quick", (), schema=schema)
     assert contract["env"]["CS_ORG_NATIVE_BACKEND"] == "d3d12"
 

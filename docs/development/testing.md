@@ -70,6 +70,7 @@ do = "exit"
 reach = "world-ready"
 shots = ["start"]
 no_log = ["device fault"]     # substrings that fail the run if they are logged
+live_frames = 30              # base's: two shots this many frames apart at the exit must differ (0: off)
 ```
 
 `cs-test run a+b --set dclf.shadows=false --set org.backend=d3d12` merges `a`, then `b`, then each `--set` in order. A `--set` always wins over the files. A key that isn't in `tools/cs-test/schema.toml` is an error before launch.
@@ -103,6 +104,10 @@ The harness writes this file. All keys are present; empty means none.
 - **`steps[].wait`** (optional) holds the step until a condition is true: `"settled"`, `"shaders"`, `"reload"`, `"signal:<n>"`. **`steps[].wait_s`** overrides `timeouts.step_wait`. A wait that times out fails the run.
 - **`game.save`**, when it names a save, is loaded from the main menu once the shaders are ready; a missing file fails the run ("save '<name>' not found"). **`game.cell`** is a coc once that save's world is ready. Both count as step boundaries, so a step at `world-ready` waits for the world after them. Load milestones count only after `main-menu`: the startup loading screen is not a load.
 - **Shots** are written to `<run_dir>\shots\<arg>.png`.
+- **`expect.live_frames`** (base sets 30): when the `exit` step runs in the world phase, the game first takes `_live-a.png`, then
+  `_live-b.png` that many frames later, then exits. In a run that expects `world-ready`, the harness fails the run when the two have
+  the same pixels (a frozen final target: the screen kept one frame) or are missing. `result.json`'s `live_image` holds what it found.
+  A config whose last steps leave a still image on screen (a menu that pauses the world) sets it to 0.
 - **A malformed configuration or an unknown name** ends the game at once with `config-error`, after the status file is written.
 - **`at`** anchors a step at the first time its milestone is reached at or after the previous step ran. So a step after a `load` waits for that load's `world-ready`. `"previous"` is the frame the previous step ran at.
 

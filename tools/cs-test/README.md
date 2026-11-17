@@ -50,7 +50,7 @@ The shipped configs:
 
 | Config | What |
 |---|---|
-| `base` | what every run shares: autoload save (`game.autoload_mod`, turned off when `game.save` names a save), Telemetry off, `DXVK_DEBUG=hang`, Nsight layer off |
+| `base` | what every run shares: autoload save (`game.autoload_mod`, turned off when `game.save` names a save), Telemetry off, `DXVK_DEBUG=hang`, Nsight layer off, the live-image check (`expect.live_frames = 30`) |
 | `guest`, `native-vulkan`, `native-d3d12` | the three modes |
 | `quick` | a shot 60 frames after world-ready, then exit; compose it, `native-vulkan+quick` |
 | `guest-quick`, `native-quick`, `native-d3d12-quick` | the old quick scenarios |
@@ -83,6 +83,9 @@ It reads DCLF's registry and `RegisterSwitch` calls, every other `CS_*` switch n
 5. Watches `CommunityShaders-Test.status.json` until an outcome: the game's own, or `never-launched`, `crashed`, `never-loaded`, `hang` (a stalled status file) or `timeout`.
 6. Kills the game and closes MO2. Then it undoes the journal, editing single lines of `modlist.txt` only after MO2 has exited.
 7. Collects this run's files (logs by time, first and last 64 MB at most), checks the expectations, and writes `result.json`.
+   - The live-image check (`expect.live_frames`): in a run that expects `world-ready`, the game's two shots `_live-a` and `_live-b`,
+     taken that many frames apart at the exit, must differ in their pixels. Two identical ones mean a frozen final target and fail
+     the run. They are not listed among the run's shots; `result.json`'s `live_image` has the comparison.
 
 The undo also runs on Ctrl+C, Ctrl+Break and at exit. If the harness itself is killed, the next command undoes it.
 

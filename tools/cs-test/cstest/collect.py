@@ -6,6 +6,7 @@ chunks, and only their first and last 64 MB when they are bigger.
 
 import re
 import shutil
+import zlib
 from collections import Counter
 from pathlib import Path
 
@@ -195,8 +196,55 @@ def collect(skse, run_dir, start_ts, game_dir=None, log=print):
     return collected
 
 
+def png_pixels(path):
+    """A PNG's header and its decompressed image data. Two files with the same pixels and filters give the same bytes, whatever the
+    compression did."""
+    data = Path(path).read_bytes()
+    if data[:8] != b"\x89PNG\r\n\x1a\n":
+        raise ValueError(f"{path} is not a PNG")
+    header, idat, at = b"", [], 8
+    while at + 8 <= len(data):
+        length = int.from_bytes(data[at:at + 4], "big")
+        kind = data[at + 4:at + 8]
+        body = data[at + 8:at + 8 + length]
+        if kind == b"IHDR":
+            header = body
+        elif kind == b"IDAT":
+            idat.append(body)
+        at += 12 + length
+    return header, zlib.decompress(b"".join(idat))
+
+
+LIVE_SHOTS = ("_live-a", "_live-b")
+
+
+def live_image(run_dir, expect):
+    """expect.live_frames: the game's two shots that many frames apart must differ. A frozen final target gives the same image twice.
+    Checked only for a run that expects the world. Returns what was found; "failure" is set when the check fails."""
+    frames = expect.get("live_frames", 0)
+    if not frames or expect.get("reach") != "world-ready":
+        return {"checked": False}
+    folder = Path(run_dir) / "shots"
+    paths = [folder / f"{name}.png" for name in LIVE_SHOTS]
+    missing = [p.stem for p in paths if not p.exists()]
+    if missing:
+        return {"checked": True, "frames": frames, "failure": f"live-image shots missing: {', '.join(missing)}"}
+    try:
+        a, b = (png_pixels(p) for p in paths)
+    except (OSError, ValueError, zlib.error) as error:
+        return {"checked": True, "frames": frames, "failure": f"live-image shots unreadable: {error}"}
+    if a[0] != b[0]:
+        return {"checked": True, "frames": frames, "same": False, "note": "the two shots differ in size or format"}
+    changed = sum(1 for x, y in zip(a[1], b[1]) if x != y)
+    result = {"checked": True, "frames": frames, "same": changed == 0, "changed_bytes": changed, "bytes": len(a[1])}
+    if changed == 0:
+        result["failure"] = f"the final image did not change in {frames} frames (_live-a and _live-b are the same image): a frozen final target"
+    return result
+
+
 def shots_in(run_dir):
     folder = Path(run_dir) / "shots"
     if not folder.exists():
         return []
-    return sorted(p.stem for p in folder.iterdir() if p.is_file() and p.suffix.lower() in (".png", ".jpg", ".dds", ".bmp"))
+    # The live-image shots are the check's own (live_image), not the config's.
+    return sorted(p.stem for p in folder.iterdir() if p.is_file() and p.suffix.lower() in (".png", ".jpg", ".dds", ".bmp") and p.stem not in LIVE_SHOTS)

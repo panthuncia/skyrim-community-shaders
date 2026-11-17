@@ -21,7 +21,7 @@ FIXED = {
     "build": {"stage": str, "shader_cache": str},
     "game": {"save": str, "cell": str, "mods_off": list, "autoload_mod": str, "uncapped": bool},
     "timeouts": {"launch": int, "compile": int, "load": int, "step_wait": int},
-    "expect": {"reach": str, "shots": list, "no_log": list},
+    "expect": {"reach": str, "shots": list, "no_log": list, "live_frames": int},
 }
 STEP_FIELDS = {"at": str, "frames": int, "do": str, "arg": str, "wait": str, "wait_s": int}
 RAW_TABLES = ("env", "dclf_ini")
@@ -125,6 +125,9 @@ def check_fixed(merged):
     shader_cache = merged.get("build", {}).get("shader_cache", "warm")
     if shader_cache not in ("warm", "cold"):
         raise ConfigError(f"build.shader_cache takes warm or cold, not {shader_cache!r}")
+    live = merged.get("expect", {}).get("live_frames", 0)
+    if live < 0:
+        raise ConfigError(f"expect.live_frames takes a whole number of at least 0, not {live!r}")
     reach = merged.get("expect", {}).get("reach", "")
     if reach and reach not in MILESTONES:
         raise ConfigError(f"expect.reach takes a milestone ({', '.join(MILESTONES)}), not {reach!r}")
@@ -244,7 +247,8 @@ def flatten(merged, schema, name):
         "game": {"save": game.get("save", "autoload"), "cell": game.get("cell", "")},
         "timeouts": timeouts,
         "steps": check_steps(merged.get("steps", [])),
-        "expect": {"reach": expect.get("reach", ""), "shots": list(expect.get("shots", [])), "no_log": list(expect.get("no_log", []))},
+        "expect": {"reach": expect.get("reach", ""), "shots": list(expect.get("shots", [])), "no_log": list(expect.get("no_log", [])),
+                   "live_frames": expect.get("live_frames", 0)},
     }
     # A named save: the autoload mod would load its own save first, so it is turned off too.
     mods_off = list(game.get("mods_off", []))
