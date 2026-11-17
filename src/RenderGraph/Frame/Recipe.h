@@ -29,7 +29,7 @@ namespace org
  *   order in the stage is the stage's graph order: the step, then the order key.
  * - The check reads each epoch's schedule as its graph was built (org::RenderGraph::TraceSelectedSchedule, traced on the build thread
  *   when the build manager builds it, else once on the render owner when the frame starts), so the recipe printed and checked is the
- *   one the frames run.
+ *   one the frames run. A build the build manager makes is checked with the rest of the recipe before it attaches (Accept).
  *
  * Header deliberately free of ORG includes.
  */
@@ -100,6 +100,13 @@ namespace RenderGraph::Frame::Recipes
 	 * initialized.
 	 */
 	bool Traced(std::uint32_t a_epoch);
+
+	/**
+	 * @brief On the build thread, before a build of epoch a_epoch attaches: the recipe with that build's schedule in place of the epoch's
+	 * current one is checked, so a build that reads a resource before its writer stops a development build before any frame runs it. Only
+	 * once a whole check has seen every epoch's build (before that, the frame's first check at Begin covers it). Any thread.
+	 */
+	void Accept(std::uint32_t a_epoch, const std::shared_ptr<const org::ScheduleTrace>& a_trace);
 
 	/**
 	 * @brief An epoch's schedule as a build made it (a_generation: the build generation the epoch runs once the build is attached).

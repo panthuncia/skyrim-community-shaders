@@ -206,6 +206,8 @@ namespace RenderGraph
 				// The recipe check reads the schedule the build made, here on the build thread; the recipe takes it at the attach.
 				if (done->graph && done->graph->Built() && Frame::Recipes::Traced(done->job.epoch))
 					if (auto trace = Frame::Recipes::TraceEpochGraph(*done->graph->Graph(), done->job.epoch)) {
+						// Checked with the rest of the recipe before it attaches.
+						Frame::Recipes::Accept(done->job.epoch, trace);
 						auto* host = desc.host;
 						const auto epoch = done->job.epoch;
 						done->context.attached.push_back([host, epoch, trace = std::move(trace)]() mutable {

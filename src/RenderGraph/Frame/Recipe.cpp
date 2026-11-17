@@ -61,7 +61,9 @@ namespace RenderGraph::Frame::Recipes
 			std::uint32_t prints = 0, unprinted = 0;
 			std::uint32_t passes = 0, previousInputs = 0, outsideInputs = 0, findings = 0, fallbackTraces = 0;
 			std::uint32_t dclfLater = 0;  // resources Drawcall Limit Fix's stages declare and only later stages write
+			std::uint32_t accepted = 0;   // builds the check accepted before their attach
 			std::set<std::string> loggedFindings;
+			bool complete = false;  // a check has seen every epoch's build traced
 		};
 
 		State& Get()
@@ -408,6 +410,7 @@ namespace RenderGraph::Frame::Recipes
 		});
 		if (!changed || !complete)
 			return;
+		state.complete = true;
 		const auto passes = RecipePasses(state, UINT32_MAX, nullptr);
 		std::vector<std::string> findings;
 		Validate(state, passes, findings);
@@ -441,13 +444,29 @@ namespace RenderGraph::Frame::Recipes
 		}
 	}
 
+	void Accept(std::uint32_t a_epoch, const std::shared_ptr<const org::ScheduleTrace>& a_trace)
+	{
+		if (!a_trace)
+			return;
+		auto& state = Get();
+		const std::lock_guard lock(state.mutex);
+		// Before the first whole check the other stages' builds are not all known: a later stage's writer could look like the first one.
+		if (!state.complete)
+			return;
+		State scratch;
+		std::vector<std::string> findings;
+		Validate(scratch, RecipePasses(state, a_epoch, a_trace.get()), findings);
+		++state.accepted;
+		Report(state, findings, fmt::format(" (epoch {}'s new build, before its attach)", a_epoch));
+	}
+
 	void LogStats()
 	{
 		auto& state = Get();
 		const std::lock_guard lock(state.mutex);
 		logger::info("[ORG] world recipe: {} passes, {} inputs from the previous frame, {} from outside the graphs, {} declared by Drawcall Limit Fix's stages and "
-					 "written later, {} findings; {} schedules traced on the render owner; {} changed recipes not printed",
-			state.passes, state.previousInputs, state.outsideInputs, state.dclfLater, state.findings, state.fallbackTraces, state.unprinted);
+					 "written later, {} findings; {} schedules traced on the render owner; {} changed recipes not printed; {} builds checked before their attach",
+			state.passes, state.previousInputs, state.outsideInputs, state.dclfLater, state.findings, state.fallbackTraces, state.unprinted, state.accepted);
 	}
 }
 
@@ -463,6 +482,7 @@ namespace RenderGraph::Frame::Recipes
 	std::shared_ptr<const org::ScheduleTrace> TraceEpochGraph(org::RenderGraph&, std::uint32_t) { return {}; }
 	bool Traced(std::uint32_t) { return false; }
 	void NoteTrace(std::uint32_t, std::uint64_t, std::shared_ptr<const org::ScheduleTrace>) {}
+	void Accept(std::uint32_t, const std::shared_ptr<const org::ScheduleTrace>&) {}
 	void Check(org::GraphHost&) {}
 	void LogStats() {}
 }
