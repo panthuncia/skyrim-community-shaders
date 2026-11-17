@@ -49,6 +49,9 @@ namespace RenderGraph::FrameSequence
 			std::vector<std::string> events;  // this frame's, in order
 			std::uint64_t hash = 0;           // this frame's anchors and epochs in order (not clients or targets)
 			std::uint64_t frame = 0;
+			std::uint64_t ownTickets = 0;  // in the session
+			bool ownThisFrame = false;
+			std::uint32_t ownPrints = 0;  // frames logged for an own ticket
 			CensusWindow::PerWindow<Window> windows;
 		};
 
@@ -70,11 +73,18 @@ namespace RenderGraph::FrameSequence
 
 	bool On() { return Every() != 0; }
 
-	void NoteRun(const char* a_anchor, bool a_held, const std::string& a_clients, std::int32_t a_input, std::int32_t a_output)
+	void NoteRun(const char* a_anchor, RunKind a_kind, const std::string& a_clients, std::int32_t a_input, std::int32_t a_output)
 	{
 		if (!On())
 			return;
-		Add(fmt::format("run {} ({}) clients [{}] in {} out {}", a_anchor, a_held ? "held" : "own epoch", a_clients, a_input, a_output), a_anchor);
+		if (a_kind == RunKind::Own) {
+			auto& state = Get();
+			std::scoped_lock lock(state.lock);
+			++state.ownTickets;
+			state.ownThisFrame = true;
+		}
+		const char* how = a_kind == RunKind::Held ? "held" : a_kind == RunKind::Commit ? "commit" : "own ticket";
+		Add(fmt::format("run {} ({}) clients [{}] in {} out {}", a_anchor, how, a_clients, a_input, a_output), a_anchor);
 	}
 
 	void NoteEpoch(const char* a_label)
@@ -91,6 +101,18 @@ namespace RenderGraph::FrameSequence
 		Add(fmt::format("boundary: {}", a_what), a_what);
 	}
 
+	void NoteUnplaced(std::string_view a_what)
+	{
+		if (!On())
+			return;
+		{
+			auto& state = Get();
+			std::scoped_lock lock(state.lock);
+			state.ownThisFrame = true;
+		}
+		Add(fmt::format("unplaced: {}", a_what), a_what);
+	}
+
 	void EndFrame()
 	{
 		if (!On())
@@ -100,16 +122,27 @@ namespace RenderGraph::FrameSequence
 		++state.frame;
 		auto& window = state.windows.Active();
 		window.sequences.insert(state.hash);
-		// One frame's list every Every() frames of the world, the menu, the map or a loading screen.
+		// One frame's list every Every() frames of the world, the menu, the map or a loading screen, and every frame with an own ticket
+		// (the first ones of the session).
 		const auto kind = state.windows.ActiveKind();
+		const auto print = [&](const char* a_window, std::size_t a_distinct, std::uint64_t a_frames) {
+			logger::info("[ORG] frame sequence ({}, frame {}, {} distinct sequences in {} frames, {} own tickets in the session): {} events", a_window, state.frame,
+				a_distinct, a_frames, state.ownTickets, state.events.size());
+			for (std::size_t i = 0; i < state.events.size(); ++i)
+				logger::info("[ORG] frame sequence {:3}: {}", i, state.events[i]);
+		};
+		bool printed = false;
 		state.windows.EndFrame(Every(), [&](CensusWindow::Kind a_kind, Window& a_window, std::uint64_t a_frames) {
 			if (a_kind != kind)
 				return;
-			logger::info("[ORG] frame sequence ({}, frame {}, {} distinct sequences in {} frames): {} events", CensusWindow::Name(a_kind), state.frame,
-				a_window.sequences.size(), a_frames, state.events.size());
-			for (std::size_t i = 0; i < state.events.size(); ++i)
-				logger::info("[ORG] frame sequence {:3}: {}", i, state.events[i]);
+			print(CensusWindow::Name(a_kind), a_window.sequences.size(), a_frames);
+			printed = true;
 		});
+		if (state.ownThisFrame && !printed && state.ownPrints < 32) {
+			++state.ownPrints;
+			print("a frame with an own ticket or unplaced work", 0, 1);
+		}
+		state.ownThisFrame = false;
 		state.events.clear();
 		state.hash = 0;
 	}

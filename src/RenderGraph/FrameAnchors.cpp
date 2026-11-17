@@ -2375,7 +2375,7 @@ namespace FrameAnchors
 		}
 
 		/** @brief The frame sequence census: a run's active clients' ids, comma separated. */
-		void NoteSequenceRun(const Point& a_point, bool a_held, const std::vector<RunClient>& a_clients)
+		void NoteSequenceRun(const Point& a_point, RenderGraph::FrameSequence::RunKind a_kind, const std::vector<RunClient>& a_clients)
 		{
 			if (!RenderGraph::FrameSequence::On())
 				return;
@@ -2383,7 +2383,7 @@ namespace FrameAnchors
 			for (const auto& client : a_clients)
 				if (client.active)
 					ids += (ids.empty() ? "" : ",") + client.desc->id;
-			RenderGraph::FrameSequence::NoteRun(kInfo[IndexOf(a_point.anchor)].name, a_held, ids, a_point.input, a_point.output);
+			RenderGraph::FrameSequence::NoteRun(kInfo[IndexOf(a_point.anchor)].name, a_kind, ids, a_point.input, a_point.output);
 		}
 
 	}
@@ -3377,7 +3377,7 @@ namespace FrameAnchors
 				}
 			}
 			if (step.anchor != Anchor::Count)
-				NoteSequenceRun(a_point, !end, a_clients);
+				NoteSequenceRun(a_point, end ? RenderGraph::FrameSequence::RunKind::Commit : RenderGraph::FrameSequence::RunKind::Held, a_clients);
 			// Stage the tap's values into the frame inputs: the commits write the staging run, which nothing on the GPU reads.
 			a_state.stagedFrame[a_declared] = frame.frame;
 			UpdateStagesOpen(a_state);
@@ -3994,7 +3994,7 @@ namespace FrameAnchors
 		BeforeGpuWork(Interned(fmt::format("an anchor with its own epoch ({})", kInfo[index].name)), static_cast<std::uint32_t>(segment));
 		// TryExecuteEpoch calls BeforeGpuWork for the same submission: the census counts it once, here.
 		state.insideHeldCounted = static_cast<std::uint32_t>(segment);
-		NoteSequenceRun(a_point, false, clients);
+		NoteSequenceRun(a_point, RenderGraph::FrameSequence::RunKind::Own, clients);
 		{
 			RenderGraphRuntime::EpochBodyScope body(segment);
 			result = runtime.TryExecuteEpoch(segment, [&](org::RenderGraph&) {
