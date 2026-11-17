@@ -165,8 +165,7 @@ namespace FrameAnchors
 			Segment::AnchorFrameGeneration,     // after the ImageSpace chain, before frame generation
 			Segment::AnchorInterface,           // Scaleform's displays (UI::DrawInterface), several times a frame
 			Segment::AnchorPresent,
-			Segment::DeclaredUi,       // the UI stage (SegmentsOn): the overlay, ending just before the present, HDR output or the capture
-			Segment::DeclaredMenuUi,   // the menu UI stage (SegmentsOn): a menu's scene between its displays, ending as the UI stage does
+			Segment::DeclaredUi,       // the UI stage (SegmentsOn): the displays, a menu's scene between them, the overlay, ending just before the present
 			Segment::AnchorOverlay,    // the overlay's ImGui draw, inside HDRDisplay's present chain
 			Segment::AnchorHDROutput,  // HDRDisplay's output composite, after the overlay
 			Segment::AnchorCapture,    // the screenshot capture, at the end of HDRDisplay's present chain
@@ -211,7 +210,7 @@ namespace FrameAnchors
 			// A CS point that is no anchor and no module epoch (TapPoint): it holds no passes and only ends the segment.
 			bool point = false;
 			// The step takes taps only until a later step of its stage has tapped this frame; then its anchor's taps go to the stage's next
-			// step at the anchor. The menu UI stage's displays before the scene: the first display after the scene's first tap is drawn
+			// step at the anchor. The UI stage's displays before a menu's scene: the first display after the scene's first tap is drawn
 			// after the scene.
 			bool untilLater = false;
 			// The instances of a client with instances (ClientDesc::maxInstances) this step makes and taps: from firstInstance, instanceCount
@@ -226,6 +225,10 @@ namespace FrameAnchors
 			std::array<Step, kMaxSteps> steps;
 			std::uint32_t stepCount;
 			SegmentNames names;
+			// The stage's window opens only once every earlier stage of the frame has ended (WindowOpen). Without it, an earlier stage
+			// that ends at a point and staged nothing yet does not hold the window back. The UI stage's shared and named steps hold work of
+			// the frame's end (a menu's scene, its clears and copies): work the engine does between two world stages is never theirs.
+			bool opensLast = false;
 		};
 		constexpr std::array<DeclaredInfo, kDeclared> kDeclaredInfo{ {
 			// The frame's start (frame sequence census, a world frame): Main::Draw's cubemap render (BSCubeMapCamera::RenderCubemap) runs
@@ -302,46 +305,34 @@ namespace FrameAnchors
 					{ Anchor::ImageSpace, { "cs.engine.imagespace.post.final", "cs.engine.skeleton.frame@post-chain" } },
 					{ Anchor::Count, { nullptr, nullptr }, Segment::Count, false, true } } },
 				9, { "CS stage: post", "CS stage: post inputs", "FrameSegments::Post / ", "cs.segment.post" } },
-			// The UI stage, in the world's and a Bink movie's recipes: the overlay's ImGui draw (its draw list a frame input, recorded in the
-			// stage's late batch). It ends at a point: just before the present (Hooks.cpp), or before HDR output or the capture is submitted,
-			// which follow the overlay on the GPU and keep their anchors' tickets.
-			// First Scaleform's displays: each display segment is a tap and an instance of the Scaleform client (instances 0 to 7, all declared,
-			// the draws' counts latched in its run gate); its draw list is a frame input recorded in the late batch. (A Bink frame's clear of the
-			// main depth comes before its Begin and has no reader: dropped, Engine/Skeleton.)
-			// The Present anchor's clients: a Bink movie's tiles, queued by the movie's tick and drawn from the run's slot in the late batch,
-			// and the GPU load diagnostic. The swap chain's Present hook taps it after the displays and before the overlay, as the engine
-			// draws them.
-			// Last the capture (the Screenshot feature's copy into a readback buffer, CS_ORG_SCREENSHOT): native mode's capture point is just
-			// before the stage's commit at the present (Hooks.cpp), after the overlay.
-			{ Segment::DeclaredUi,
-				{ { { .anchor = Anchor::Interface, .firstInstance = 0, .instanceCount = 8 },
-					{ Anchor::Present },
-					{ Anchor::Overlay },
-					{ Anchor::Capture },
-					{ Anchor::Count, {}, Segment::Count, false, true } } },
-				5,
-				{ "CS stage: UI", "CS stage: UI inputs", "FrameSegments::Ui / ", "cs.segment.ui" } },
-			// The menu UI stage: the loading screen, the main menu and a menu over a frozen world (frame sequence census). The engine draws,
-			// in this order: the frozen frame's composite (Main::Render; a menu over a frozen world only), the frame's first clears, displays,
-			// the shadow map's and the scene's clears, the scene's depth (Drawcall Limit Fix's menu depth batch), the shadow mask, the depth
-			// copy and the kMAIN copy, the scene's colour, its composite (UI3DSceneManager::Render's end-of-frame call, ImageSpace's
-			// MenuSteps.inl), the main depth's clear again, more displays, the present's clients and the overlay.
+			// The UI stage, in every frame kind's recipe. The engine draws, in this order (frame sequence census): the frozen frame's composite
+			// (Main::Render; a menu over a frozen world only), the frame's first clears, displays, the shadow map's and a menu scene's clears,
+			// the scene's depth (Drawcall Limit Fix's menu depth batch), the shadow mask, the depth copy and the kMAIN copy, the scene's colour,
+			// its composite (UI3DSceneManager::Render's end-of-frame call, ImageSpace's MenuSteps.inl), the main depth's clear again, more
+			// displays, the present's clients, the overlay and the capture. A world frame's menu scene (an inventory item model, the local map)
+			// comes after the post stage, between the menu's displays, and takes the same steps.
 			// - Clears are passes at three places, each a client of the frame and shadow clear groups (Engine/Skeleton): the stage's start,
-			//   the scene's start and after the composite. The engine clears the main depth three times a frame (for the displays' masks
-			//   before the scene, for the scene's depth, for the displays' masks after it) and kMAIN twice; the engine's call stages each
-			//   clear into the place it comes at.
-			// - The displays before the scene are instances 8 to 15 of the Scaleform client; once a later step tapped, the displays are
-			//   instances 0 to 7, after the scene.
-			// - The scene's draw lists and the composite's constants are frame inputs, recorded in the stage's late batch.
-			// It ends at a point, as the UI stage does.
-			{ Segment::DeclaredMenuUi,
+			//   the scene's start and after the composite. The engine clears the main depth three times a loading screen's frame (for the
+			//   displays' masks before the scene, for the scene's depth, for the displays' masks after it) and kMAIN twice; the engine's call
+			//   stages each clear into the place it comes at.
+			// - Scaleform's displays: each display segment is a tap and an instance of the Scaleform client, its draw list a frame input
+			//   recorded in the late batch. The displays before a scene are instances 8 to 15; once a later step tapped, they are instances 0
+			//   to 7, after the scene. A frame without a scene draws every display as instances 8 to 15.
+			// - The scene's draw lists, the composites' constants, a Bink movie's tiles (queued by the movie's tick) and the capture (native
+			//   mode's capture point is just before the stage's commit, Hooks.cpp) are frame inputs, recorded in the stage's late batch. What a
+			//   frame does not use skips at execution, its barriers folded.
+			// - The depth copy is the stage's own gated client (cs.engine.skeleton.depth-copy@ui): the pre-main stage copies the main depth
+			//   in every world frame, this one only when the engine's call asks.
+			// It ends at a point: just before the present (Hooks.cpp), or before HDR output, which follows the overlay on the GPU and keeps its
+			// anchor's ticket. (A Bink frame's clear of the main depth comes before its Begin and has no reader: dropped, Engine/Skeleton.)
+			{ Segment::DeclaredUi,
 				{ { { Anchor::ImageSpace, { "cs.engine.imagespace.frozen" } },
 					{ Anchor::EngineFrameClear, { "cs.engine.skeleton.frame@menu-start", "cs.engine.skeleton.shadow@menu-start" }, Segment::Count, true },
 					{ .anchor = Anchor::Interface, .untilLater = true, .firstInstance = 8, .instanceCount = 8 },
 					{ Anchor::EngineFrameClear, { "cs.engine.skeleton.frame@menu-scene", "cs.engine.skeleton.shadow@menu-scene" }, Segment::Count, true },
 					{ Anchor::EngineDraws, { "cs.menu-scenes.menu-depth" } },
 					{ Anchor::EngineDraws, { "cs.shadow-mask.menu" } },
-					{ Anchor::EngineDepthCopy, { "cs.engine.skeleton.depth-copy" } },
+					{ Anchor::EngineDepthCopy, { "cs.engine.skeleton.depth-copy@ui" } },
 					{ Anchor::EngineCopy, {}, Segment::Count, true },
 					{ Anchor::EngineDraws, { "cs.menu-scenes.menu-colour", "cs.menu-scenes.local-map*" } },
 					{ Anchor::ImageSpace, { "cs.engine.imagespace.menu" } },
@@ -352,7 +343,8 @@ namespace FrameAnchors
 					{ Anchor::Capture },
 					{ Anchor::Count, {}, Segment::Count, false, true } } },
 				16,
-				{ "CS stage: menu UI", "CS stage: menu UI inputs", "FrameSegments::MenuUi / ", "cs.segment.menu-ui" } },
+				{ "CS stage: UI", "CS stage: UI inputs", "FrameSegments::Ui / ", "cs.segment.ui" },
+				true },
 		} };
 
 		/** @brief The anchors whose every client a declared segment holds, a bit each: they have no epoch of their own. */
@@ -409,12 +401,13 @@ namespace FrameAnchors
 		}
 
 		/**
-		 * @brief Whether a stage's schedules are kept current in frames whose recipe lacks it: the UI stages. A frame-kind switch then finds
-		 * the stage's recordings of its description ready, and no display is left out at the switch.
+		 * @brief Whether a new description of a stage switches every frame slot at once, when each slot's recording of it is ready: the UI
+		 * stage. Its description changes with the frame kind, not by frame, so no slot lags on an older schedule and no display is left out
+		 * after a kind switch. Other stages keep one schedule per slot (the post rows' ping-pong alternates by frame).
 		 */
-		constexpr bool KeptAhead(std::uint32_t a_declared)
+		constexpr bool SwitchesEverySlot(std::uint32_t a_declared)
 		{
-			return kDeclaredInfo[a_declared].segment == Segment::DeclaredUi || kDeclaredInfo[a_declared].segment == Segment::DeclaredMenuUi;
+			return kDeclaredInfo[a_declared].segment == Segment::DeclaredUi;
 		}
 
 		/** @brief Whether a step's client a_client has instances this step makes: its range, or every instance from its first. */
@@ -933,23 +926,17 @@ namespace FrameAnchors
 		}
 
 		/**
-		 * @brief The declared segment whose epoch holds anchor a_index's passes, or kDeclared when the anchor has its own epoch. Two stages may
-		 * hold an anchor wholly (the UI and menu UI stages: Interface, Present, Overlay): the one in this frame's recipe, else the first.
+		 * @brief The declared segment whose epoch holds anchor a_index's passes, or kDeclared when the anchor has its own epoch. One stage at
+		 * most holds an anchor wholly.
 		 */
 		std::uint32_t DeclaredOfAnchor(const State& a_state, std::uint32_t a_index)
 		{
 			if (!(a_state.declaredMembers >> a_index & 1u))
 				return kDeclared;
-			const auto& frame = RenderGraph::Frame::Driver::Current();
-			std::uint32_t first = kDeclared;
 			for (std::uint32_t d = 0; d < kDeclared; ++d)
-				if (a_state.declaredEpochs[d] && (WholeMembers(d) >> a_index & 1u)) {
-					if (RenderGraph::Frame::Recipes::KindHas(frame.kind, frame.capture, static_cast<RenderGraph::Frame::SegmentId>(d)))
-						return d;
-					if (first == kDeclared)
-						first = d;
-				}
-			return first;
+				if (a_state.declaredEpochs[d] && (WholeMembers(d) >> a_index & 1u))
+					return d;
+			return kDeclared;
 		}
 
 		/** @brief The snapshot the anchor's own graph was built from. Its own graph always holds its passes. */
@@ -2492,7 +2479,6 @@ namespace FrameAnchors
 		if (a_segment != UINT32_MAX && state.host && SegmentsOn() && IsRenderOwner() &&
 			(a_segment == static_cast<std::uint32_t>(Segment::AnchorHDROutput) || a_segment == static_cast<std::uint32_t>(Segment::AnchorCapture))) {
 			(void)TapPoint(static_cast<std::uint32_t>(Segment::DeclaredUi));
-			(void)TapPoint(static_cast<std::uint32_t>(Segment::DeclaredMenuUi));
 		}
 		// A declared segment holding its ticket: other GPU work submitted now runs ahead of the segment's work, which the end tap
 		// submits. Counted by why, for the census; its first lines are logged.
@@ -2863,15 +2849,14 @@ namespace FrameAnchors
 			SegmentFields wanted = DescribeDeclared(a_state, a_declared, a_world);
 			a_state.frameWanted[a_declared] = DescribeDeclared(a_state, a_declared, a_world, false);
 			const bool keyLags = !(a_state.frameWanted[a_declared] == wanted);
-			// A stage outside its kinds' frames: the frame does not declare it, but its schedules are recorded ahead, so the frame-kind switch to its
-			// kinds finds a schedule in every frame slot and no frame has the stage absent. A UI stage (KeptAhead) keeps every slot on the
-			// description its frames would have (no display is left out at the switch); any other stage only gets a first schedule for a slot
-			// that has none (its first frames lag at worst, they are never blank).
+			// A stage outside its kinds' frames (a world stage in a menu's frames): the frame does not declare it, but a first schedule is
+			// recorded ahead for a slot that has none, so the frame-kind switch to its kinds finds a schedule in every frame slot. Its first
+			// frames lag at worst, they are never blank. The UI stage is in every kind's recipe.
 			if (!a_world && host.StagedGeneration(epoch) == 0) {
 				const SegmentFields ahead = DescribeDeclared(a_state, a_declared, true);
 				for (std::uint32_t s = 0; s < RenderGraphRuntime::kGameFramesInFlight && ahead.graph; ++s) {
 					auto& kept = a_state.schedule[a_declared][s];
-					if (!KeptAhead(a_declared) && kept.recording && host.EpochRecordingCurrent(*kept.recording))
+					if (kept.recording && host.EpochRecordingCurrent(*kept.recording))
 						continue;
 					// The description is this frame's: its parity fields (the slot-parity variants) fit only the slots of this frame's parity.
 					if (s % 2 != a_frame.parity)
@@ -2925,10 +2910,9 @@ namespace FrameAnchors
 					                                     fmt::format("the slot's first schedule on build {}", wanted.graph);
 					active = { wanted, std::move(ready), a_state.declaredSnapshots[a_declared].load(std::memory_order_acquire) };
 					Driver::NoteSwitch(segment, a_frame.frame, slot, a_frame.frame - a_state.waitFrame[a_declared], what);
-					// A UI stage: the other slots switch at this boundary too when their recordings of the description are ready, so the next
-					// frames do not lag on an older schedule. Not for other stages: a description that alternates by frame (the post rows'
-					// ping-pong) keeps one schedule per slot.
-					for (std::uint32_t s = 0; s < RenderGraphRuntime::kGameFramesInFlight && KeptAhead(a_declared); ++s) {
+					// The UI stage: the other slots switch at this boundary too when their recordings of the description are ready
+					// (SwitchesEverySlot).
+					for (std::uint32_t s = 0; s < RenderGraphRuntime::kGameFramesInFlight && SwitchesEverySlot(a_declared); ++s) {
 						auto& other = a_state.schedule[a_declared][s];
 						if (s == slot || (other.recording && other.fields == wanted))
 							continue;
@@ -3444,9 +3428,11 @@ namespace FrameAnchors
 			if (a_state.stagedFrame[a_declared] == frame.frame)
 				return true;
 			// An earlier stage that ends at a point and has staged nothing yet does not hold this one back: this stage's first tap ends it.
+			// A stage that opens last (the UI stage) waits until every earlier stage of the frame ended.
+			const bool last = kDeclaredInfo[a_declared].opensLast;
 			for (std::uint32_t before = 0; before < a_declared; ++before)
 				if (a_state.declaredEpochs[before] && frame.Segment(static_cast<SegmentId>(before)).declared && a_state.endedFrame[before] != frame.frame &&
-					!(PointEnded(before) && a_state.stagedFrame[before] != frame.frame))
+					(last || !(PointEnded(before) && a_state.stagedFrame[before] != frame.frame)))
 					return false;
 			return true;
 		}
@@ -4236,7 +4222,7 @@ namespace FrameAnchors
 	namespace
 	{
 		/**
-		 * @brief PrimeStages for one UI stage (a_segment): its description now, recorded for every frame slot on the host's thread while setup
+		 * @brief PrimeStages for one stage (a_segment): its description now, recorded for every frame slot on the host's thread while setup
 		 * waits, installed as each slot's schedule.
 		 */
 		void PrimeStage(State& state, Segment a_segment, std::string_view a_caller)
@@ -4306,9 +4292,8 @@ namespace FrameAnchors
 		auto& state = Anchors();
 		if (!SegmentsOn() || !state.host || !IsRenderOwner())
 			return;
-		// The session's first frames are a Bink movie's (the UI stage), then the main menu's (the menu UI stage): both are ready before them.
+		// The session's first frames are a Bink movie's, then the main menu's: the UI stage is ready before them.
 		PrimeStage(state, Segment::DeclaredUi, a_caller);
-		PrimeStage(state, Segment::DeclaredMenuUi, a_caller);
 	}
 
 	void LogRunStats()

@@ -65,9 +65,9 @@ namespace RenderGraph::Frame::Recipes
 			{ StageId::Post, Owner::Cs,
 				{ Segment::DeclaredPost, Segment::AnchorTonemap, Segment::AnchorFrameGeneration },
 				3, "RenderEndOfFrameEffects' return" },
-			// The UI stage holds Scaleform's displays (fixed instances), the Present anchor's clients (a Bink movie's tiles) and the overlay (the
-			// Interface, Present and Overlay anchors have no epoch of their own: the UI and menu UI stages hold them). HDR output and the capture
-			// follow its commit.
+			// The UI stage holds Scaleform's displays (fixed instances), a menu's scene over the live world, the Present anchor's clients (a Bink
+			// movie's tiles), the overlay and the capture (the Interface, Present, Overlay and Capture anchors have no epoch of their own). HDR
+			// output follows its commit.
 			{ StageId::Ui, Owner::Cs,
 				{ Segment::AnchorInterface, Segment::AnchorPresent, Segment::DeclaredUi, Segment::AnchorHDROutput, Segment::AnchorCapture },
 				5, "just before the present (or HDR output, or the capture)" },
@@ -79,7 +79,7 @@ namespace RenderGraph::Frame::Recipes
 		 * - written by forward or post and read earlier in the next frame: the refraction normals, the underwater mask, the water
 		 *   displacement pair and the water flow map (the water surface), kMAIN_COPY (the water surface);
 		 * - written by the deferred stages and read by the start stage's face sky: the sky's IBL and Terrain Blending's blended depth;
-		 * - the depth copy Volumetric Lighting makes in post, read by the menu scenes' local map fog (the EngineDraws anchor's own epoch);
+		 * - the depth copy Volumetric Lighting makes in post, read by the menu scenes' local map fog (the UI stage);
 		 * - the dynamic cubemaps the deferred stage compresses, read by the start stage's face sky.
 		 * Drawcall Limit Fix's stages are not held to it: their graphs declare the whole binding table their shaders may read (the light
 		 * lists, the shadow mask, the luminance chain), so they "read" much that CS writes later; the check counts those apart.
@@ -297,40 +297,18 @@ namespace RenderGraph::Frame::Recipes
 			{ "post", Owner::Cs, SegmentId::Post },
 			{ "UI", Owner::Cs, SegmentId::Ui },
 		} }, 12 };
-		// A menu over a frozen world (after its capture frame), the main menu (and any frame before the player has 3D) and a loading screen's
-		// frame: one stage, the menu UI stage. It holds, in the engine's order: the frozen frame's composite (a menu over a frozen world), the
-		// first clears, the displays before the scene, the scene's clears, its depth, shadow mask, depth and kMAIN copies, colour and composite,
-		// the main depth's last clear, the displays after the scene, the present's clients and the overlay.
-		constexpr KindRecipe kFrozenKind{ { {
-			{ "menu UI (frozen composite, menu scene, displays)", Owner::Cs, SegmentId::MenuUi },
-		} }, 1 };
-		constexpr KindRecipe kMainMenuKind{ { {
-			{ "menu UI (menu scene, displays)", Owner::Cs, SegmentId::MenuUi },
-		} }, 1 };
-		constexpr KindRecipe kLoadingKind{ { {
-			{ "menu UI (loading model, displays)", Owner::Cs, SegmentId::MenuUi },
-		} }, 1 };
-		// A Bink movie's own frame: the UI stage alone, which clears the main depth (the engine's call stages it), draws the movie's tiles (the
-		// Present anchor's Bink client) and the overlay. The startup logo's frames draw no displays.
-		constexpr KindRecipe kBinkKind{ { {
+		// Every other frame: a menu over a frozen world (after its capture frame), the main menu (and any frame before the player has 3D), a
+		// loading screen's frame and a Bink movie's. One stage, the UI stage, as in the world's recipe. It holds, in the engine's order: the
+		// frozen frame's composite (a menu over a frozen world), the first clears, the displays before a menu's scene, the scene's clears, its
+		// depth, shadow mask, depth and kMAIN copies, colour and composite, the main depth's last clear, the displays after the scene, the
+		// present's clients (a Bink movie's tiles), the overlay and the capture.
+		constexpr KindRecipe kUiKind{ { {
 			{ "UI", Owner::Cs, SegmentId::Ui },
 		} }, 1 };
 
 		const KindRecipe& RecipeOf(Kind a_kind, bool a_capture)
 		{
-			switch (a_kind) {
-			case Kind::World:
-				return kWorldKind;
-			case Kind::FrozenWorld:
-				return a_capture ? kWorldKind : kFrozenKind;
-			case Kind::MainMenu:
-				return kMainMenuKind;
-			case Kind::Loading:
-				return kLoadingKind;
-			case Kind::Bink:
-			default:
-				return kBinkKind;
-			}
+			return a_kind == Kind::World || (a_kind == Kind::FrozenWorld && a_capture) ? kWorldKind : kUiKind;
 		}
 
 		const char* OwnerMark(Owner a_owner) { return a_owner == Owner::Dclf ? "*" : a_owner == Owner::Tickets ? " (tickets)" : ""; }

@@ -48,9 +48,6 @@ namespace RenderGraph::Frame::Transients
 		std::uint32_t first = 0, last = 0;
 	};
 
-	/** @brief The menu UI stage's position: after the world recipe's stages (it runs in frames of other kinds). */
-	inline constexpr std::uint32_t kMenuUiPosition = Recipes::kStages;
-
 	/** @brief The frame position of a CS stage. */
 	std::uint32_t PositionOf(SegmentId a_segment);
 

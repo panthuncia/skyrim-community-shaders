@@ -47,8 +47,8 @@ namespace RenderGraph::Frame::Recipes
 		Sun,          // CS: the sun's occlusion query after the forward pass (the first person's query is the post stage's)
 		FirstPerson,  // Drawcall Limit Fix's first-person colour
 		Post,         // CS: the post chain, the upscaler's evaluate and the depth upscale, one stage
-		Ui,           // CS: the UI stage (a Bink frame's depth clear, Scaleform's displays, the movie tiles, the overlay); HDR output and the capture
-		              // keep their tickets
+		Ui,           // CS: the UI stage, in every frame kind (Scaleform's displays, a menu's scene, the movie tiles, the overlay, the capture);
+		              // HDR output keeps its ticket
 		Count
 	};
 	inline constexpr std::uint32_t kStages = static_cast<std::uint32_t>(StageId::Count);

@@ -44,9 +44,8 @@ namespace RenderGraph::Frame
 		Sun,             // the sun stage: the sun's occlusion query after DCLF's forward epoch, before the first-person one
 		Post,            // the post stage: the volumetric lighting, the pre-tonemap composites, the upscaler's evaluate and the depth upscale,
 		                 // the end-of-frame effects with the tonemap, to RenderEndOfFrameEffects' return
-		Ui,              // the UI stage: the displays, the movie's tiles and the overlay, to just before the present; world and Bink frames
-		MenuUi,          // the menu UI stage: the displays before and after a menu's 3D scene, the scene, its composite, the overlay;
-		                 // the loading screen, the main menu and a menu over a frozen world
+		Ui,              // the UI stage, in every frame kind: the frozen composite, the displays before and after a menu's 3D scene, the
+		                 // scene and its composite, the movie's tiles, the overlay and the capture, to just before the present
 		Count
 	};
 	inline constexpr std::uint32_t kSegments = static_cast<std::uint32_t>(SegmentId::Count);

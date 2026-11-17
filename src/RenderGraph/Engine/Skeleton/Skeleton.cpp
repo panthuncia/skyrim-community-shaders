@@ -117,6 +117,9 @@ namespace RenderGraph::Engine::Skeleton
 		constexpr std::array<const char*, kCopies> kCopyIds{ "cs.engine.skeleton.depth-copy", "cs.engine.skeleton.main-copy" };
 		constexpr std::array<const char*, kCopies> kCopySteps{ "post-zprepass", "main" };
 		constexpr std::array<const char*, kCopies> kCopyNames{ "the depth copy (kMAIN into kPOST_ZPREPASS_COPY)", "the kMAIN copy (kMAIN into kMAIN Copy)" };
+		// The UI stage's depth copy (a menu's scene copies the main depth after its depth batch): a client of its own, gated, since the stage
+		// runs in every frame and the engine copies only when a scene draws. The pre-main stage's copy (kCopyIds) runs in every world frame.
+		constexpr const char* kUiDepthCopyId = "cs.engine.skeleton.depth-copy@ui";
 
 		/**
 		 * @brief Where a world frame's clear or copy runs (org-native-frame-graph.md, "The declared frame, stage 2"). Own: on the
@@ -161,8 +164,8 @@ namespace RenderGraph::Engine::Skeleton
 		std::size_t HostIndex(Host a_host) { return static_cast<std::size_t>(a_host); }
 
 		/**
-		 * @brief The places in the menu UI stage where the clears of the loading screen's and the menus' frames run (org-native-frame-graph.md,
-		 * "The menu UI stage"): the stage's start, the scene's start and after the scene's composite. Each place has a client per group with a
+		 * @brief The places in the UI stage where a menu scene's clears run, in every frame kind (org-native-frame-graph.md, "The menu UI stage",
+		 * "Cleanup A4"): the stage's start, the scene's start and after the scene's composite. Each place has a client per group with a
 		 * pass per view it clears, and gate entries of its own (place * entries + entry): the stage clears the main depth at all three places
 		 * in one frame. The engine's call stages its clear into the place FrameAnchors::StagePlace names (the place after the stage's last tap).
 		 */
@@ -381,7 +384,7 @@ namespace RenderGraph::Engine::Skeleton
 			bool announced = false;   // the first clear on the graph was logged
 			std::uint64_t taken = 0;
 			std::uint64_t dropped = 0;  // world frames' clears a stage's load operations replace (the reflection faces)
-			// The UI stages' places (Place): each place's passes by view, their gate and colour latch (kPlaces * entries entries), whether
+			// The UI stage's places (Place): each place's passes by view, their gate and colour latch (kPlaces * entries entries), whether
 			// each place's client is registered, and the group's own entry count.
 			std::array<std::map<Target, std::shared_ptr<const ClearSpec>>, kPlaces> placeSpecs;
 			std::shared_ptr<RunGate> placeGate;
@@ -398,6 +401,9 @@ namespace RenderGraph::Engine::Skeleton
 			bool hostedRegistered = false;
 			FrameAnchors::Texture source, target;
 			std::shared_ptr<RunGate> gate;  // one entry, opened by the commit: the copy is gated, so it can run in a frame phase
+			// The depth copy's UI stage client (kUiDepthCopyId): its gate's one entry is opened in the stage's frame inputs by the engine's call.
+			std::shared_ptr<RunGate> uiGate;
+			bool uiRegistered = false;
 			const void* sourceTexture = nullptr;
 			const void* targetTexture = nullptr;
 			bool registered = false;
@@ -1044,7 +1050,7 @@ namespace RenderGraph::Engine::Skeleton
 			}
 		}
 
-		/** @brief The place stages' anchor and its use: CS's stages hold the UI stages' clear steps (native mode with hosting). */
+		/** @brief The place stages' anchor and its use: the UI stage holds the clear steps (native mode with hosting). */
 		bool PlacesOn()
 		{
 			return HostingOn() && FrameAnchors::HasEpoch(Anchor::EngineFrameClear);
@@ -1119,21 +1125,22 @@ namespace RenderGraph::Engine::Skeleton
 					group.placeSpecs[place].clear();
 			}
 			if (!summary.empty())
-				logger::info("[ORG] engine skeleton: the loading screen's and the menus' {} clears run in the menu UI stage (views by place: {})", kGroupNames[index], summary);
+				logger::info("[ORG] engine skeleton: a menu scene's {} clears run in the UI stage (views by place: {})", kGroupNames[index], summary);
 		}
 
 		/**
-		 * @brief A clear of a frame kind whose UI stage holds the group's places: staged into the place FrameAnchors::StagePlace names, on the
-		 * place's own gate entry. False when no open stage has a place for it (its group anchor's ticket takes it).
+		 * @brief A clear while the UI stage's window is open (a menu's scene, in any frame kind): staged into the place FrameAnchors::StagePlace
+		 * names, on the place's own gate entry. False when no open stage has a place for it: in a world frame the stage that writes the target
+		 * takes it, in any other its group anchor's ticket does.
 		 */
 		bool TakeIntoPlace(Group a_group, const Target& a_target, const Pending& a_pending)
 		{
 			auto& group = GroupOf(a_group);
 			const auto index = IndexOf(a_group);
-			// Why a clear outside a world frame kept its group anchor's ticket, once per reason.
-			static Util::ReasonLog s_kept("[ORG] engine skeleton: a clear outside a world frame keeps its group anchor's ticket");
+			// Why a clear outside a world frame, or one at a place, kept its group anchor's ticket, once per reason.
+			static Util::ReasonLog s_kept("[ORG] engine skeleton: a clear at no place of the UI stage keeps its group anchor's ticket");
 			if (!group.placeGate)
-				return s_kept.Report("the group has no places"), false;
+				return !WorldFrame() && s_kept.Report("the group has no places"), false;
 			std::array<std::string, kPlaces> ids;
 			std::array<std::string_view, kPlaces> views;
 			for (std::size_t place = 0; place < kPlaces; ++place) {
@@ -1142,7 +1149,7 @@ namespace RenderGraph::Engine::Skeleton
 			}
 			const auto place = FrameAnchors::StagePlace(views);
 			if (place < 0)
-				return s_kept.Report(fmt::format("{}: no open stage has a place for the {} clears", RenderGraph::Frame::KindName(RenderGraph::Frame::Driver::Current().kind), kGroupNames[index])), false;
+				return !WorldFrame() && s_kept.Report(fmt::format("{}: no open stage has a place for the {} clears", RenderGraph::Frame::KindName(RenderGraph::Frame::Driver::Current().kind), kGroupNames[index])), false;
 			if (!group.placeRegistered[static_cast<std::size_t>(place)])
 				return s_kept.Report(fmt::format("the {} place is not registered", kPlaceNames[static_cast<std::size_t>(place)])), false;
 			const auto& specs = group.placeSpecs[static_cast<std::size_t>(place)];
@@ -1159,7 +1166,8 @@ namespace RenderGraph::Engine::Skeleton
 				return s_kept.Report(fmt::format("the stage's schedule does not have the {} place's client on", kPlaceNames[static_cast<std::size_t>(place)])), false;
 			++group.taken;
 			if (group.placed++ == 0)
-				logger::info("[ORG] engine skeleton: the first {} clear outside a world frame runs at the menu UI stage's {} place", kGroupNames[index], kPlaceNames[static_cast<std::size_t>(place)]);
+				logger::info("[ORG] engine skeleton: the first {} clear at a place runs at the UI stage's {} place ({} frame)", kGroupNames[index],
+					kPlaceNames[static_cast<std::size_t>(place)], RenderGraph::Frame::KindName(RenderGraph::Frame::Driver::Current().kind));
 			RenderGraph::Frame::Driver::NoteHosted(kPlaceNames[static_cast<std::size_t>(place)], 1);
 			return true;
 		}
@@ -1355,8 +1363,10 @@ namespace RenderGraph::Engine::Skeleton
 					logger::info("[ORG] engine skeleton: a Bink frame's clear of the main depth is dropped (no reader before the next kind's own clear)");
 				return true;
 			}
-			// A clear in a loading screen's or a menu's frame, at a place of the menu UI stage: staged into the stage's frame inputs.
-			if (!WorldFrame() && TakeIntoPlace(group, a_target, a_pending))
+			// A clear while the UI stage's window is open (a menu's scene in any frame kind; the loading screen's and the menus' frames), at a
+			// place of the stage: staged into the stage's frame inputs. The UI stage opens after every world stage ended, so a world stage's
+			// clear never finds a place.
+			if (TakeIntoPlace(group, a_target, a_pending))
 				return true;
 			const auto host = HostFor(a_target, a_flags);
 			// A world frame's clear of a target a CS stage clears: its entry and colour are staged into the stage's frame inputs now.
@@ -1412,6 +1422,7 @@ namespace RenderGraph::Engine::Skeleton
 		}
 
 		void RegisterHostedCopy(CopyKind a_kind);
+		void RegisterUiCopy(CopyKind a_kind);
 
 		/**
 		 * @brief A copy's client registered for the engine's textures as they are now. Setup, and again only when the engine made
@@ -1484,6 +1495,42 @@ namespace RenderGraph::Engine::Skeleton
 				return;
 			}
 			RegisterHostedCopy(a_kind);
+			RegisterUiCopy(a_kind);
+		}
+
+		/**
+		 * @brief The depth copy's UI stage client (native mode with hosting): a gated copy, a pass of the UI stage only (segment-only). The
+		 * engine's call opens its entry in the stage's frame inputs (CopyDeclared); a frame without a menu scene skips it, its barriers folded.
+		 */
+		void RegisterUiCopy(CopyKind a_kind)
+		{
+			auto& copy = CopyOf(a_kind);
+			if (a_kind != CopyKind::Depth || !HostingOn())
+				return;
+			if (!copy.uiGate)
+				copy.uiGate = RunGate::Create(kUiDepthCopyId, 1);
+			if (!copy.uiGate) {
+				logger::error("[ORG] engine skeleton: {}: no run gate for the UI stage's copy", kCopyNames[static_cast<std::size_t>(a_kind)]);
+				return;
+			}
+			AnchorPasses::Builder builder(Anchor::EngineDepthCopy, kUiDepthCopyId, 0, {}, copy.uiGate);
+			builder.Add(AnchorPasses::Copy{
+				.name = "post-zprepass@ui",
+				.source = copy.source,
+				.target = copy.target,
+				.width = copy.source.Width(),
+				.height = copy.source.Height(),
+				.gate = 0u });
+			FrameAnchors::ClientDesc client{};
+			client.id = kUiDepthCopyId;
+			client.passes = builder.Take();
+			client.gates = { copy.uiGate };
+			// A pass of the UI stage: the engine's call stages its entry (CopyDeclared); the step has no tap.
+			client.active = [] { return false; };
+			client.segmentOnly = true;
+			copy.uiRegistered = FrameAnchors::Register(std::move(client));
+			if (!copy.uiRegistered)
+				logger::error("[ORG] engine skeleton: the UI stage's {} was refused", kCopyNames[static_cast<std::size_t>(a_kind)]);
 		}
 
 		/**
@@ -1528,24 +1575,29 @@ namespace RenderGraph::Engine::Skeleton
 		}
 
 		/**
-		 * @brief Whether a world frame's depth copy is a declared pass of the stage open now: the pre-main stage's (Main::RenderDepth's
-			 * copy) or the deferred stage's (CS's own in Deferred::DeferredPasses). The engine's call then does nothing more.
+		 * @brief Whether a depth copy is a declared pass of the stage open now: the UI stage's (a menu's scene, any frame kind; its gate entry
+		 * opened here), the pre-main stage's (Main::RenderDepth's copy) or the deferred stage's (CS's own in Deferred::DeferredPasses). The
+		 * engine's call then does nothing more. a_where names the stage for the census.
 		 */
-		bool CopyDeclared(CopyKind a_kind, bool a_hostable)
+		bool CopyDeclared(CopyKind a_kind, bool a_hostable, const char*& a_where)
 		{
-			const auto& copy = CopyOf(a_kind);
+			auto& copy = CopyOf(a_kind);
 			if (a_kind != CopyKind::Depth || !HostingOn())
 				return false;
-			// The menu UI stage's depth copy (the loading screen's and the menus' scenes copy the main depth after its depth batch): an ungated
-			// pass of the stage, as in pre-main.
-			if (!WorldFrame()) {
-				static Util::ReasonLog s_notDeclared("[ORG] engine skeleton: a depth copy outside a world frame is not the menu UI stage's pass");
-				if (!copy.registered)
-					return s_notDeclared.Report("the copy is not registered"), false;
-				if (!FrameAnchors::CanTap(kCopyIds[static_cast<std::size_t>(a_kind)]))
-					return s_notDeclared.Report(fmt::format("{}: no open stage holds it", RenderGraph::Frame::KindName(RenderGraph::Frame::Driver::Current().kind))), false;
+			// The UI stage's depth copy. The UI stage opens after every world stage ended, so the pre-main stage's copy never finds it open.
+			if (copy.uiRegistered && FrameAnchors::StageInputs(kUiDepthCopyId, [&] { copy.uiGate->OpenDispatch(RunGate::Current(), 0, 1); })) {
+				a_where = "UI stage";
 				return true;
 			}
+			if (!WorldFrame()) {
+				static Util::ReasonLog s_notDeclared("[ORG] engine skeleton: a depth copy outside a world frame is not the UI stage's pass");
+				const auto reason = copy.uiRegistered ? fmt::format("{}: the UI stage is not open, or its schedule does not have the copy on",
+															RenderGraph::Frame::KindName(RenderGraph::Frame::Driver::Current().kind)) :
+				                                        std::string("the UI stage's copy is not registered");
+				s_notDeclared.Report(reason);
+				return false;
+			}
+			a_where = a_hostable ? "deferred stage" : "pre-main stage";
 			if (a_hostable)
 				return copy.host != Host::Own && copy.hostedRegistered &&
 				       FrameAnchors::CanTap(fmt::format("{}@{}", kCopyIds[static_cast<std::size_t>(a_kind)], kHostInfo[HostIndex(copy.host)].name));
@@ -1563,8 +1615,9 @@ namespace RenderGraph::Engine::Skeleton
 			auto& copy = CopyOf(a_kind);
 			if (copy.failed || !Usable())
 				return false;
-			if (EngineTexturesOf(a_kind) == std::pair{ copy.sourceTexture, copy.targetTexture } && CopyDeclared(a_kind, a_hostable)) {
-				RenderGraph::Frame::Driver::NoteHosted(a_hostable ? "deferred stage" : "pre-main stage", 1);
+			const char* where = nullptr;
+			if (EngineTexturesOf(a_kind) == std::pair{ copy.sourceTexture, copy.targetTexture } && CopyDeclared(a_kind, a_hostable, where)) {
+				RenderGraph::Frame::Driver::NoteHosted(where, 1);
 				return true;
 			}
 			if (EngineTexturesOf(a_kind) != std::pair{ copy.sourceTexture, copy.targetTexture }) {

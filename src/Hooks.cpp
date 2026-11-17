@@ -620,15 +620,13 @@ struct IDXGISwapChain_Present
 					swapChain, syncInterval, presentFlags,
 					[&](IDXGISwapChain* sc, UINT si, UINT f) {
 						ZoneScopedN("CS.Present.NativeWait");
-						// The UI stage's commit point: just before the present. The capture point comes first in native mode with the UI stages, so
+						// The UI stage's commit point: just before the present. The capture point comes first in native mode with the UI stage, so
 						// a screenshot is a pass of the stage (its Capture step, after the overlay).
 						if (FrameAnchors::SegmentsOn() && FrameAnchors::HeldByStage(FrameAnchors::Anchor::Capture))
 							globals::features::screenshotFeature.ProcessCaptureRequest();
-						if (FrameAnchors::SegmentsOn()) {
+						if (FrameAnchors::SegmentsOn())
 							(void)FrameAnchors::TapPoint(static_cast<std::uint32_t>(RenderGraphRuntime::Segment::DeclaredUi));
-							(void)FrameAnchors::TapPoint(static_cast<std::uint32_t>(RenderGraphRuntime::Segment::DeclaredMenuUi));
-						}
-						// The UI stages commit before the present (BeforeGpuWork).
+						// The UI stage commits before the present (BeforeGpuWork).
 						FrameAnchors::BeforeGpuWork("the present");
 						// The frame's epochs still on the submission thread reach the queue before the present. A loading screen's thread
 						// presenting without owning rendering drains too: it copies what the owner's epochs draw.

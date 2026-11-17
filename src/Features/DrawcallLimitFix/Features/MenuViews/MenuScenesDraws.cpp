@@ -1,8 +1,9 @@
 // The menu scenes family's render graph side: a client per batch at the EngineDraws anchor, made once at setup, whose pass draws a
 // batch's latched draws into the view's imported targets with kMAIN's depth, in the engine's order, with CS's shaders built for ORG
-// (Utility.hlsl's UTILITY_ORG_SCENE, Lighting.hlsl's LIGHTING_ORG, Effect.hlsl's EFFECT_ORG). In the loading screen's and the menus' frames
-// the clients are steps of the menu UI stage; a run's draw list is a frame input: the commit stores it for its run (RunSlots) and the pass
-// records it at execution, so the stage's kept recording never changes with the draws.
+// (Utility.hlsl's UTILITY_ORG_SCENE, Lighting.hlsl's LIGHTING_ORG, Effect.hlsl's EFFECT_ORG). In native mode the clients are steps of the UI
+// stage in every frame kind (a world frame's inventory item and local map too) and only there (segment-only); a run's draw list is a frame
+// input: the commit stores it for its run (RunSlots) and the pass records it at execution, so the stage's kept recording never changes with
+// the draws. Guest mode runs them on the EngineDraws anchor's own epoch.
 
 // volk must precede every Vulkan header in this translation unit.
 #include <rhi_interop_vulkan.h>
@@ -13,6 +14,7 @@
 #include "RenderGraph/Engine/Buffers/EngineBuffers.h"
 #include "RenderGraph/Engine/Constants/EngineConstants.h"
 #include "RenderGraph/Engine/Tripwire/Tripwire.h"
+#include "RenderGraph/Frame/FrameDriver.h"
 #include "RenderGraph/FrameAnchors.h"
 #include "RenderGraph/FrameStaging.h"
 #include "RenderGraph/RasterProgram.h"
@@ -371,14 +373,15 @@ namespace DCLF::Features::MenuViews::Scenes::SceneDraws
 					logger::info("[DCLF] menu scenes: the first {} run drawn by the graph", client->id);
 			};
 			desc.active = [client] { return client->pending; };
+			// Native mode: passes of the UI stage only. A batch while no open stage holds the client is a mismatch (CanTake).
+			desc.segmentOnly = FrameAnchors::SegmentsOn();
 			desc.onFailed = [] { Fail("the render graph failed with the menu scenes' passes in it"); };
 			if (!FrameAnchors::Register(std::move(desc))) {
 				logger::warn("[DCLF] menu scenes: the {} client could not be registered; that batch stays the engine's", client->id);
 				return nullptr;
 			}
+			// Register asked for the builds that hold the client: the UI stage's in native mode, the anchor's own graph in guest mode.
 			logger::info("[DCLF] menu scenes: the {} client registered at setup", client->id);
-			// The one build request: the next build point (a menu frame's end) builds the graph with the client, before any world frame.
-			FrameAnchors::RequestJoin(client->id, FrameAnchors::Anchor::EngineDraws);
 			return client;
 		}
 
@@ -466,9 +469,25 @@ namespace DCLF::Features::MenuViews::Scenes::SceneDraws
 				logger::warn("[DCLF] menu scenes: a target changed since the {} client registered; that batch stays the engine's", client->id);
 			return false;
 		}
-		if (!FrameAnchors::CanRun(client->id, FrameAnchors::Anchor::EngineDraws)) {
+		// Native mode: the UI stage holds the batch in every frame kind. One while no open stage holds the client is a mismatch; one the
+		// stage's schedule does not have yet (its first build) lags: nothing is drawn.
+		if (FrameAnchors::SegmentsOn()) {
+			const auto hold = FrameAnchors::HeldNow(client->id, FrameAnchors::Anchor::EngineDraws);
+			if (!hold.held) {
+				::RenderGraph::Frame::Driver::NoteTapError(::RenderGraph::Frame::Driver::TapError::NotDeclared, ::RenderGraph::Frame::SegmentId::Ui,
+					std::format("the menu scenes' {} batch came while no open stage holds the client; it draws nothing", client->id));
+				return false;
+			}
+			if (!hold.scheduled) {
+				static Util::ReasonLog log("[DCLF] menu scenes: a batch lags (the UI stage's schedule does not hold its client yet); nothing is drawn");
+				log.Report(client->id);
+				return false;
+			}
+			return true;
+		}
+		if (!FrameAnchors::Scheduled(client->id, FrameAnchors::Anchor::EngineDraws)) {
 			static Util::ReasonLog log("[DCLF] menu scenes: the engine draws a batch", spdlog::level::err);
-			log.Report(std::format("{}: its anchor cannot run now (not in the built graph, or its ring is full)", client->id));
+			log.Report(std::format("{}: the anchor's built graph does not hold it yet", client->id));
 			return false;
 		}
 		return true;

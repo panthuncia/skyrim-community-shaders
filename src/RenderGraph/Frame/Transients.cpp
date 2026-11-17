@@ -67,17 +67,14 @@ namespace RenderGraph::Frame::Transients
 		case SegmentId::Post:
 			return Pos(StageId::Post);
 		case SegmentId::Ui:
-			return Pos(StageId::Ui);
 		default:
-			return kMenuUiPosition;
+			return Pos(StageId::Ui);
 		}
 	}
 
 	std::string Describe(Span a_span)
 	{
-		const auto name = [](std::uint32_t a_position) -> std::string {
-			return a_position == kMenuUiPosition ? "menu UI" : Recipes::StageName(static_cast<StageId>(a_position));
-		};
+		const auto name = [](std::uint32_t a_position) -> std::string { return Recipes::StageName(static_cast<StageId>(a_position)); };
 		return a_span.first == a_span.last ? name(a_span.first) : fmt::format("{} to {}", name(a_span.first), name(a_span.last));
 	}
 

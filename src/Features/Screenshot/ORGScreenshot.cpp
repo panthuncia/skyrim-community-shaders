@@ -208,7 +208,7 @@ namespace
 {
 	/**
 	 * @brief Registers the capture client for the shared source and buffers: one copy pass, recorded at execution. In native mode with the
-	 * UI stages the Capture anchor is their step (after the overlay); otherwise it runs its own epoch.
+	 * UI stage the Capture anchor is its step (after the overlay); otherwise it runs its own epoch.
 	 */
 	bool RegisterClient(const std::shared_ptr<Shared>& a_shared)
 	{
@@ -278,7 +278,7 @@ bool ORGScreenshot::Setup(std::function<void()> a_onFailed)
 	}
 	impl->registered = true;
 	logger::info("[ORG] Screenshot: captures are read back through the render graph ({})",
-		FrameAnchors::HeldByStage(FrameAnchors::Anchor::Capture) ? "a pass of the UI and menu UI stages" : "the Capture anchor");
+		FrameAnchors::HeldByStage(FrameAnchors::Anchor::Capture) ? "a pass of the UI stage" : "the Capture anchor");
 	return true;
 }
 

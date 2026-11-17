@@ -696,7 +696,7 @@ namespace FrameAnchors
 	bool StageInputs(std::string_view a_id, const std::function<void()>& a_write);
 
 	/**
-	 * @brief Where in an open stage work the engine hands over outside a tap belongs (a clear: the menu UI stage clears at three places). Of the
+	 * @brief Where in an open stage work the engine hands over outside a tap belongs (a clear: the UI stage clears at three places). Of the
 	 * stage's steps that name one of a_ids, the latest at most one step after the stage's last tapped step this frame, else the first of them:
 	 * the index in a_ids of the client that step names. -1 when no open stage names any of them. Hand the work to that client with StageInputs.
 	 * Render owner.

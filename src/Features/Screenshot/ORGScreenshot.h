@@ -17,8 +17,8 @@ namespace DirectX
 /**
  * @brief The Screenshot feature's GPU readback on the render graph (CS_ORG_SCREENSHOT=1).
  *
- * One copy pass at the Capture anchor: in native mode with the UI stages, a step of the UI and menu UI stages after the overlay
- * (the capture point moves to just before their commit); otherwise the anchor's own epoch. The pass copies the capture source (the
+ * One copy pass at the Capture anchor: in native mode with the UI stage, a step of the UI stage after the overlay (the capture
+ * point moves to just before its commit); otherwise the anchor's own epoch. The pass copies the capture source (the
  * framebuffer, the back buffer, or HDR's clean composite) into one of CS's readback buffers, declared at the build. It is recorded at
  * execution from the capture its run's commit stored, so a kept recording needs nothing prepared again; a run without a capture skips
  * it. The bytes are handed back at a later capture point once that run's GPU work is done; the frame never waits for it. A capture that
