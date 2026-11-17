@@ -5994,3 +5994,92 @@ Native perf-taa between the marks: 16.43 ms.
 
 **For the aliasing piece.** Native's ORG alias pools are 202 MiB and the image-space port's own targets 117 MiB, against guest's
 none; the engine targets the port duplicates are still allocated (above).
+
+### RX 6600, third pass (2026-11-17)
+
+Measured on the RX 6600 as above: perf-taa at 1920x1080, uncapped, background runs with `DXVK_DEBUG=hang`, VRAM Budget off. "Period"
+is the frame period between the start and end marks (900 frames), no Tracy. Native and guest alternate in one session.
+
+**Step 0: why native got 2 ms faster than guest.** The VRAM pass's numbers held: native 17.04 ms, guest 19.05 ms, both 98.6 to
+99.5% busy. The GPU work itself did not change:
+- Per stage, with list timestamps (`CS_GPU_EVENT_TIMERS=300`), native summed 18.68 ms against 18.78 ms in the morning's `g5nt`, every
+  stage and every list within 0.01 to 0.04 ms. The graphics span with timing on was 19.40 ms against 19.57.
+- The census of a steady frame has the same 71 lists, 505 colour and 100 depth attachments and 677 image barriers as before. It counts
+  32 render passes fewer: five lists recorded at execution (the post chain, SSR's downsample, the refraction copy, the VL composite,
+  the image-space frame clears) now count no pass begin. Their list times are unchanged (SSR's downsample 0.97 against 0.98 ms), so
+  this is the census missing them, not missing work. Not fixed.
+- Shots: the geometry matches guest's at the perf-taa view. Native's perf-view shots are darker in most runs (means 40 to 66, once
+  106; guest 104 every time); the quick shots at world-ready + 60 match guest (106). Likely the known exposure variance, but one-sided
+  at this view; not investigated.
+- The cause is the shared command pools (ORG `8596c63`). A temporary switch that gave every graph its own pools and every list its own
+  allocator again took native to 19.31 ms (16.51 without it, same build, alternating). Either half alone did nothing (16.48 and 16.75
+  ms). So on this driver the lists of a frame submitted from many command pools cost about 2.8 ms of GPU time (about 38 us a list over
+  about 73 lists); from a few pools they do not. The mechanism inside the driver is not known (estimate: command buffers from one pool
+  are chained, from different pools each starts and ends with a flush). The morning's 19.47 ms was this cost, not Tracy: Tracy now
+  reads 17.07 ms, the same as without it.
+- List timing hides it: each timed list ends with a drain, so with timing on the period is 19.4 ms in both builds. The morning's per
+  stage comparison with guest (native about equal) was inflated by those drains, about 2.2 ms. Native's GPU work is about 2.5 ms
+  below guest's in this scene; guest's D3D11 timers do not drain and its period matches its GPU frame.
+
+The barrier probe (`BASICRHI_BARRIER_PROBE=*`) was re-taken first. Its floor is the drain it adds, 0.5 us a barrier.
+
+**1. Depth copies through transfer layouts (done).** The depth layout changes around the copies took 211 us a frame in the probe
+(`kPOST_ZPREPASS_COPY` TRANSFER_DST -> DEPTH_READ 118 us in the shadow-mask list, the DeferredPasses copy 38, the upscaler's 27, the
+VL copy 12, two handoffs 17). An `AnchorPasses::Copy` between two depth textures of one format is now a fullscreen draw
+(`RenderGraph/DepthCopy.hlsl`): the source read through its depth and stencil views, the target the depth attachment with an Always
+test, the stencil written through `SV_StencilRef`. No image leaves a depth layout. Where the device cannot write stencil from a shader
+(NVIDIA's D3D12), a depth-stencil copy stays a transfer copy.
+- BasicRHI: a depth-stencil SRV of plane 1 reads the stencil (Vulkan's stencil aspect; D3D12's X24G8 or X32G8X24 format), and
+  `FixedFunctionFeatureInfo::stencilExport` (Vulkan enables `VK_EXT_shader_stencil_export`). BasicRHI `4d819d4`.
+- ORG: a 2D depth-stencil texture also gets `SRVViewType::Texture2DStencil`. ORG `dd53ed9`. CS `88f303838`.
+- After: none of those layout changes is left in the probe. List timestamps: shadow-mask list 0.26 to 0.17 ms, DeferredPasses' upload
+  list 1.70 to 1.67, the upscaler's copy list 0.18 to 0.15, the depth-copy list 0.17 to 0.15; stages' sum 18.68 to 18.57 ms, graphics
+  span 19.40 to 19.24 ms (measured). In the frame period this is inside the spread.
+- Left: the upscaler's depth source sits in GENERAL and goes GENERAL -> DEPTH_READ -> GENERAL around the copy (26 + 20 us); it used to
+  go through TRANSFER_SRC the same way. Not changed.
+
+**2. Cloud Shadows' layer cubes (dropped).** Their 290 or so layout changes a frame read 0.55 to 0.78 us each in the probe, against the
+probe's 0.5 us drain. The list that holds 95 of them (`reflections-prepass.gather`) is 0.04 ms in all with list timing. About 0.05 ms
+a frame in all (estimated), below what a run can show. Not changed.
+
+**3. The G-buffer clears (measured, not changed).** With a temporary mask of which targets the clears list clears, the gap it leaves
+in the submission trace was 130 us with all six, 4.3 us with none and 31 us with NormalRoughness alone: about 25 us a 1920x1080 32-bit
+target. Each clear writes its whole target (about 330 GB/s); none is a fast clear. A faster clear would need these images to be
+compressed by the driver in a way that allows fast clears (their creation flags and the clear colour); not done.
+
+**4. The frame boundary (analysed, not changed).** It is 331 us with timing on: Scaleform's submission (its two lists, one with the
+present copy), the present relay, the present, the acquire, and the next frame's handoff. Two of the five boundaries are the present
+and the acquire. The other submissions inside the frame are epoch boundaries, and merging them means holding submissions back, which is
+ruled out. What is left is folding the relay into the last graph submission (one submission, about 14 us), which needs the swap
+chain's semaphore passed down to that submission. Not done.
+
+**5. DCLF's Effect vertex pipeline in scratch memory (done).** The ORG build of `Effect.hlsl` copied the draw's indexed texture
+coordinate row into a `static float4 IndexedTexCoord[128]` at the vertex's index and read it back there. The row is now read from the
+latch where it is used (`EffectIndexedTexCoord`). An ISA dump of a native quick run has no scratch instruction in any of its 3,561
+pipelines and no 128-entry indexed array. CS `0057a2193`.
+
+**6. DCLF's HZB on AMD (fixed).** `HzbTest` returned early on `a_view.Index == 0 || a_view.Mips == 0`: the RDNA2 miscompile in
+AGENTS.md, which folds `Index` to 0 past the guard, so the taps read heap slot 0. Now one unsigned relational compare. With
+occlusion forced on, perf-taa reads 0 of 2,693 footprints all-near (before: nearly all), about 460 draws a window are occluded, phase 2
+brings back 19, and the mid field is whole. Occlusion is the default cull mode on AMD again (the AMD exception and the saved-setting
+check built on it are removed). CS `f6566f342`.
+
+**Native against guest, final build (DLL 55e5af235c20; occlusion on in both).**
+
+| | Native | Guest |
+|---|---|---|
+| period, run 1 / run 2 | 16.50 / 16.33 ms | 19.01 / 19.06 ms |
+| Skyrim's 3D engine busy | 99.6 / 99.6% | 98.5 / 98.0% |
+| process dedicated VRAM | 3,447 / 3,395 MiB | 3,035 / 3,043 MiB |
+
+Native's periods at the start of this pass (same session, before these changes): 17.04, 16.51, 16.78, 16.48 and 16.75 ms.
+
+**Checks.** Build with items 1, 5 and 6 (DLL 3570c64034a3), one background run each: native-quick, native-river, native-interior,
+guest-quick passed, recipe checks 0 findings, no `NoPass`, no failed build, no device loss; native-validation shows only the known 20
+`VUID-vkCmdDraw-None-09600` and back-buffer layout lines. The final DLL (same sources) passed native-quick. The quick shot matches the
+morning's (105.9 against 105.8 mean).
+
+**Found and not fixed: native D3D12 on the RX 6600 loses the device** about 10 s into the world (`0x887A0006`, a page fault at an
+address in no allocation, DRED's first incomplete list unnamed). It was never run on this card before (all earlier native-d3d12 runs
+were on the RTX 5080). It happens with the depth-copy draw, the stencil views and occlusion all switched off, so it is not from this
+pass.
