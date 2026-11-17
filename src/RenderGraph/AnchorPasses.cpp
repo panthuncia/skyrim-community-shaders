@@ -534,13 +534,13 @@ namespace RenderGraph::AnchorPasses
 	}
 
 	void Builder::Add(std::string_view a_name, FrameAnchors::PassKind a_kind, std::function<std::shared_ptr<org::RenderPass>()> a_make, bool a_once,
-		bool a_gated)
+		bool a_gated, bool a_atExecution)
 	{
 		if (!a_make) {
 			Fail(std::format("{}: no pass", a_name));
 			return;
 		}
-		Push(a_name, a_kind, std::move(a_make), a_once, a_gated && !a_once);
+		Push(a_name, a_kind, std::move(a_make), a_once, a_gated && !a_once, a_atExecution);
 	}
 
 	void Builder::Fail(std::string_view a_reason)

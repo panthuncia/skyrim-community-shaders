@@ -229,10 +229,11 @@ namespace RenderGraph::AnchorPasses
 
 		/**
 		 * @brief A custom pass: make is called at each graph build of the anchor, as FrameAnchors::PassDesc::make. a_gated: its work all goes
-		 * through the client's run gate (FrameAnchors::PassDesc::gated); the caller vouches for it.
+		 * through the client's run gate (FrameAnchors::PassDesc::gated); the caller vouches for it. a_atExecution: recorded after the run's
+		 * commit (FrameAnchors::PassDesc::atExecution), where its SkipsAtExecution may leave the run out.
 		 */
 		void Add(std::string_view a_name, FrameAnchors::PassKind a_kind, std::function<std::shared_ptr<org::RenderPass>()> a_make, bool a_once = false,
-			bool a_gated = false);
+			bool a_gated = false, bool a_atExecution = false);
 
 		/** @brief Marks the builder failed with a reason (the first one is kept). */
 		void Fail(std::string_view a_reason);

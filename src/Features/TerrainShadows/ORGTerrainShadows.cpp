@@ -115,8 +115,13 @@ namespace
 	/**
 	 * @brief The heightmap's stripes, one gated dispatch a stripe. The commit opens as many entries as this run updates, so the
 	 * recording stays the same whatever the run does.
+	 *
+	 * Two passes: the update (stripe 0, the one a steady frame runs) is recorded ahead. The refresh (stripes 1 and up, which only a
+	 * refresh opens) is recorded at execution and skips a run that did not open stripe 1. Each refresh stripe waits for the one
+	 * before it with a full barrier, so a steady frame no longer runs those barriers around empty dispatches.
 	 */
-	class ShadowUpdatePass final : public org::TypedRenderGraphPass<ShadowUpdatePass, UpdateFrame, UpdateBindings>
+	template <bool Refresh>
+	class ShadowUpdatePass final : public org::TypedRenderGraphPass<ShadowUpdatePass<Refresh>, UpdateFrame, UpdateBindings>
 	{
 	public:
 		// At the build, on the render thread: the textures as they are now (GraphResources' rule).
@@ -134,13 +139,24 @@ namespace
 
 		UpdateFrame Prepare(const UpdateBindings&, const org::PassPrepareContext&) const { return { spec }; }
 
+		// The refresh's commands depend on the run only through this answer, so a kept late batch keeps its list while it holds.
+		static constexpr bool kRecordKeyedBySkip = true;
+
+		// Recorded at execution (the refresh only): a run that did not open stripe 1 is not a refresh.
+		static bool SkipsAtExecution(const UpdateBindings&, const UpdateFrame& a_frame, const org::PassRecordContext& a_recording)
+		{
+			return Refresh && !a_frame.spec->gate->IsOpen(a_recording.Run(), 1);
+		}
+
 		static void Record(const UpdateBindings& a_bindings, const UpdateFrame& a_frame, org::PassRecordContext& a_recording)
 		{
 			const auto& spec = *a_frame.spec;
 			const org::RunRef run = a_recording.Run();
-			for (std::uint32_t i = 0; i < spec.textures->maxDispatches; ++i) {
-				// Each stripe reads the one before it.
-				if (i) {
+			const std::uint32_t first = Refresh ? 1 : 0;
+			const std::uint32_t end = Refresh ? spec.textures->maxDispatches : (std::min)(1u, spec.textures->maxDispatches);
+			for (std::uint32_t i = first; i < end; ++i) {
+				// Each stripe reads the one before it. The graph orders the refresh's first stripe after the update's.
+				if (i > first) {
 					const rhi::GlobalBarrier global = rhi::FullMemoryBarrier();
 					a_recording.Commands().Barriers(rhi::BarrierBatch{ {}, {}, { &global, 1 } });
 				}
@@ -278,8 +294,13 @@ bool ORGTerrainShadows::Setup(std::uint32_t a_maxWidth, std::uint32_t a_maxHeigh
 		true);
 	// Gated: its dispatches take their counts from the client's gate entries, which the commit opens.
 	builder.Add(
-		"update", FrameAnchors::PassKind::Compute, [spec]() -> std::shared_ptr<org::RenderPass> { return std::make_shared<ShadowUpdatePass>(spec); }, false,
-		true);
+		"update", FrameAnchors::PassKind::Compute, [spec]() -> std::shared_ptr<org::RenderPass> { return std::make_shared<ShadowUpdatePass<false>>(spec); },
+		false, true);
+	// Recorded at execution: it records nothing in a run that is not a refresh.
+	if (textures->maxDispatches > 1)
+		builder.Add(
+			"refresh", FrameAnchors::PassKind::Compute,
+			[spec]() -> std::shared_ptr<org::RenderPass> { return std::make_shared<ShadowUpdatePass<true>>(spec); }, false, true, true);
 	if (builder.Failed()) {
 		logger::error("[ORG] Terrain Shadows: {}; it stays on D3D11", builder.Failure());
 		return false;
