@@ -1434,8 +1434,8 @@ namespace RenderGraph::Engine::Skeleton
 		 * @brief A copy's client registered for the engine's textures as they are now. Setup, and again only when the engine made
 		 * either texture again (a resize).
 		 *
-		 * The copy has no run gate: a copy has no indirect form, and a raster copy can write neither the stencil the engine's
-		 * CopyResource copies nor a copy texture (it has no render target view). It needs none: its anchor is the skeleton's own,
+		 * The copy has no run gate: a transfer copy has no indirect form (AnchorPasses draws the depth copy where the device can
+		 * write stencil from a shader, but kMAIN's copy texture has no render target view). It needs none: its anchor is the skeleton's own,
 		 * nothing else registers there, and the anchor runs only from RunCopy, whose run always wants the copy (an inactive client
 		 * submits nothing).
 		 */

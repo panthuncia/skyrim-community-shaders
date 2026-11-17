@@ -8,11 +8,14 @@
 #	include "RenderGraph/ComputeProgram.h"
 #	include "RenderGraph/GraphResources.h"
 #	include "RenderGraph/PublishedResources.h"
+#	include "RenderGraph/RasterProgram.h"
+#	include "RenderGraph/RenderGraphRuntime.h"
 #	include "RenderGraph/RunGate.h"
 #	include "RenderGraph/ShaderBindings.h"
 #	include "RenderGraph/SharedConstants.h"
 #	include "RenderGraph/UavClearPass.h"
 
+#	include <OpenRenderGraph/GraphHost.h>
 #	include <Render/LatchBlock.h>
 #	include <Render/RenderGraph/RenderGraph.h>
 #	include <RenderPasses/Base/TypedRenderGraphPass.h>
@@ -23,6 +26,8 @@
 
 #	include <algorithm>
 #	include <format>
+#	include <map>
+#	include <mutex>
 #	include <span>
 
 namespace RenderGraph::AnchorPasses
@@ -325,6 +330,147 @@ namespace RenderGraph::AnchorPasses
 			std::shared_ptr<const Spec<Copy>> spec;
 		};
 
+		/**
+		 * @brief The depth format a copy into a_texture draws with: its depth-stencil view's format when it is a single-sample 2D depth
+		 * texture, else Unknown.
+		 */
+		rhi::Format DepthCopyFormat(const FrameAnchors::Texture& a_texture)
+		{
+			const auto current = a_texture.Current();
+			rhi::ResourceDesc desc{};
+			if (!current || !current->TryGetRHIResourceDesc(desc) || desc.type != rhi::ResourceType::Texture2D ||
+				(desc.resourceFlags & rhi::RF_AllowDepthStencil) == 0 || desc.texture.depthOrLayers != 1 || desc.texture.sampleCount != 1)
+				return rhi::Format::Unknown;
+			switch (desc.texture.format) {
+			case rhi::Format::R24G8_Typeless:
+			case rhi::Format::D24_UNorm_S8_UInt:
+				return rhi::Format::D24_UNorm_S8_UInt;
+			case rhi::Format::R32G8X24_Typeless:
+			case rhi::Format::D32_Float_S8X24_UInt:
+				return rhi::Format::D32_Float_S8X24_UInt;
+			case rhi::Format::R32_Typeless:
+			case rhi::Format::D32_Float:
+				return rhi::Format::D32_Float;
+			case rhi::Format::R16_Typeless:
+			case rhi::Format::D16_UNorm:
+				return rhi::Format::D16_UNorm;
+			default:
+				return rhi::Format::Unknown;
+			}
+		}
+
+		bool HasStencil(rhi::Format a_depthFormat)
+		{
+			return a_depthFormat == rhi::Format::D24_UNorm_S8_UInt || a_depthFormat == rhi::Format::D32_Float_S8X24_UInt;
+		}
+
+		/**
+		 * @brief The depth copy program for a depth format (RenderGraph/DepthCopy.hlsl), made once per format. Null when the device
+		 * cannot write stencil from a shader and the format has stencil: such a copy stays a transfer copy.
+		 */
+		std::shared_ptr<const RasterProgram> DepthCopyProgram(rhi::Format a_depthFormat)
+		{
+			static std::mutex mutex;
+			static std::map<rhi::Format, std::shared_ptr<const RasterProgram>> programs;
+			const std::scoped_lock lock(mutex);
+			if (const auto found = programs.find(a_depthFormat); found != programs.end())
+				return found->second;
+			const auto device = RenderGraphRuntime::Get().Host()->Device();
+			const bool stencil = HasStencil(a_depthFormat);
+			::FixedFunctionFeatureInfo features{};
+			if (stencil && (!rhi::IsOk(device.QueryFeatureInfo(&features.header)) || !features.stencilExport))
+				return programs[a_depthFormat] = nullptr;
+			RasterProgram::Desc desc{ .pixelSource = "RenderGraph/DepthCopy.hlsl",
+				.pixelEntry = L"PSMain",
+				.vertexSource = "RenderGraph/DepthCopy.hlsl",
+				.vertexEntry = L"VSMain",
+				.constantWords = stencil ? 2u : 1u,
+				.depthFormat = a_depthFormat,
+				.commonDefines = false };
+			if (stencil)
+				desc.defines.emplace_back(L"DEPTH_COPY_STENCIL", L"1");
+			desc.depth = { .depthEnable = true, .depthWrite = true, .depthFunc = rhi::CompareOp::Always };
+			if (stencil) {
+				const rhi::StencilFaceState replace{ .passOp = rhi::StencilOp::Replace, .func = rhi::CompareOp::Always };
+				desc.depth.stencilEnable = true;
+				desc.depth.front = replace;
+				desc.depth.back = replace;
+			}
+			auto program = RasterProgram::Load(device, desc);
+			if (!program)
+				throw std::runtime_error(std::format("the depth copy program for format {} failed to load", static_cast<int>(a_depthFormat)));
+			return programs[a_depthFormat] = program;
+		}
+
+		struct DepthCopyBindings
+		{
+			org::DeclaredViewToken depth, stencil, target;
+		};
+
+		struct DepthCopyFrame
+		{
+			std::shared_ptr<const Spec<Copy>> spec;
+			std::shared_ptr<const RasterProgram> program;
+			bool stencil = false;
+		};
+
+		/**
+		 * @brief A whole depth texture's copy as a fullscreen draw (Copy between depth textures). The source is read through its depth
+		 * and stencil views and the target is the depth attachment, so neither leaves a depth layout. A transfer copy into or out of a
+		 * depth image makes AMD's driver decompress it and rebuild its compression after (about 60 us a copy on the RX 6600).
+		 */
+		class DepthCopyPass final : public org::TypedRenderGraphPass<DepthCopyPass, DepthCopyFrame, DepthCopyBindings>
+		{
+		public:
+			explicit DepthCopyPass(DepthCopyFrame a_frame) :
+				frame(std::move(a_frame)) {}
+
+			DepthCopyBindings Declare(org::PassBuilder& a_builder)
+			{
+				const auto& copy = frame.spec->step;
+				DepthCopyBindings bindings{};
+				if (frame.stencil) {
+					const std::array<org::SrvView, 2> views{ org::SrvView{}, org::SrvView{ .variant = static_cast<std::uint32_t>(org::SRVViewType::Texture2DStencil) } };
+					const auto use = a_builder.ShaderResource(copy.source, std::span<const org::SrvView>(views));
+					bindings.depth = use.View(0);
+					bindings.stencil = use.View(1);
+				} else {
+					bindings.depth = a_builder.ShaderResource(copy.source).View();
+				}
+				bindings.target = a_builder.DepthReadWrite(copy.target).View();
+				return bindings;
+			}
+
+			void Revision(std::vector<std::uint64_t>& a_out) const { a_out.push_back(reinterpret_cast<std::uintptr_t>(frame.spec.get())); }
+
+			DepthCopyFrame Prepare(const DepthCopyBindings&, const org::PassPrepareContext&) const { return frame; }
+
+			// Its commands depend on the run only through SkipsAtExecution, as CopyPass's.
+			static constexpr bool kRecordKeyedBySkip = true;
+
+			static bool SkipsAtExecution(const DepthCopyBindings&, const DepthCopyFrame& a_frame, const org::PassRecordContext& a_recording)
+			{
+				const auto& spec = *a_frame.spec;
+				return spec.step.gate && spec.gate && !spec.gate->IsOpen(a_recording.Run(), *spec.step.gate);
+			}
+
+			static void Record(const DepthCopyBindings& a_bindings, const DepthCopyFrame& a_frame, org::PassRecordContext& a_recording)
+			{
+				const auto& copy = a_frame.spec->step;
+				const std::array<std::uint32_t, 2> words{ a_recording.Index(a_bindings.depth), a_frame.stencil ? a_recording.Index(a_bindings.stencil) : 0u };
+				// Every texel is written, so the old contents are not loaded.
+				const RasterProgram::Depth depth{ .view = &a_bindings.target, .readOnly = false, .load = rhi::LoadOp::DontCare };
+				const RasterProgram::DrawDesc desc{ .depth = &depth,
+					.viewport = { .width = copy.width, .height = copy.height },
+					.constants = std::span<const std::uint32_t>(words.data(), a_frame.stencil ? 2u : 1u),
+					.debugName = copy.name.c_str() };
+				a_frame.program->Draw(a_recording, desc);
+			}
+
+		private:
+			DepthCopyFrame frame;
+		};
+
 		struct UploadBindings
 		{
 			org::ResourceBindingToken target;
@@ -502,7 +648,16 @@ namespace RenderGraph::AnchorPasses
 		const std::string step = a_copy.name;
 		// Gated: recorded at execution, where it skips a run that did not open its entry. A copy cannot take its work from the gate.
 		const bool gated = a_copy.gate.has_value();
+		// A copy between depth textures is drawn where the device can (DepthCopyPass), so both stay in depth layouts.
+		const auto depthFormat = DepthCopyFormat(a_copy.target);
+		auto program = depthFormat != rhi::Format::Unknown && DepthCopyFormat(a_copy.source) == depthFormat ? DepthCopyProgram(depthFormat) : nullptr;
 		auto spec = std::make_shared<const Spec<Copy>>(Spec<Copy>{ std::move(a_copy), latch, gate });
+		if (program) {
+			DepthCopyFrame frame{ spec, std::move(program), HasStencil(depthFormat) };
+			Push(step, FrameAnchors::PassKind::Render, [frame]() -> std::shared_ptr<org::RenderPass> { return std::make_shared<DepthCopyPass>(frame); }, false,
+				gated, gated);
+			return;
+		}
 		Push(step, FrameAnchors::PassKind::Copy, [spec]() -> std::shared_ptr<org::RenderPass> { return std::make_shared<CopyPass>(spec); }, false, gated,
 			gated);
 	}
