@@ -57,6 +57,7 @@ namespace Testing::SwitchRegistry
 			"CS_GPU_LOAD",
 			"CS_GPU_OP_PROBE",
 			"CS_GPU_TIMERS",
+			"CS_RHI_CENSUS",
 			"CS_GRASS_COLLISION_STATS",
 			"CS_HAIR",
 			"CS_HANG_WATCHDOG",

@@ -23,6 +23,10 @@ namespace org::runtime
  *   submission trace. The default, dxvk, keeps the trace.
  * Native mode (CS_ORG_NATIVE=1) has neither D3D11 queries nor DXVK's trace: both read the graph there, with no switch.
  *
+ * Recordings kept across frames (every native stage) are timed only while this collects: one range per list by default
+ * (CS_ORG_RECORDING_TIMESTAMPS=lists), per pass and barrier batch with CS_ORG_RECORDING_TIMESTAMPS=1. Each range is
+ * charged to the stage (epoch) it was submitted in; the log has a row per stage before the rows per range.
+ *
  * What the graph sees: every pass's timestamp pair on each queue, the barrier batches of kept recordings, and the sub-ranges a
  * pass times inside itself. Each range belongs to the Present its epoch was submitted before. A Present's ranges are handed on
  * once every epoch submitted in it has completed.
@@ -70,6 +74,7 @@ namespace GpuTimingSource
 		std::uint64_t endTick = 0;
 		double ms = 0.0;               // end - begin at the queue's calibration
 		std::int64_t submitQpc = 0;    // QueryPerformanceCounter when the render thread submitted the range's epoch
+		const char* stage = nullptr;   // the epoch's label (RenderGraphRuntime's segment label), for the per-stage rows
 	};
 
 	/** @brief The graph's ranges of one Present: every epoch the render thread submitted between it and the one before. */
@@ -86,7 +91,7 @@ namespace GpuTimingSource
 	bool Collecting();
 
 	/** @brief Render thread, after the runtime submitted the epoch of a host frame (RenderGraphRuntime's MarkEpoch). */
-	void OnEpochSubmitted(std::uint64_t a_hostFrame);
+	void OnEpochSubmitted(std::uint64_t a_hostFrame, const char* a_stage);
 
 	/** @brief The host's completed-frame callback (host thread with async epochs): the frame's timestamps, read back. */
 	void OnCompletedFrame(std::uint64_t a_hostFrame, const org::runtime::IStatisticsService& a_stats);

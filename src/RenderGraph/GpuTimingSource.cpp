@@ -38,6 +38,7 @@ namespace GpuTimingSource
 			std::uint64_t hostFrame = ~0ull;
 			std::uint64_t present = 0;
 			std::int64_t qpc = 0;
+			const char* stage = nullptr;
 		};
 
 		struct Pending
@@ -62,6 +63,10 @@ namespace GpuTimingSource
 			std::vector<std::string> names;  // in the order first seen
 			std::unordered_map<std::string, std::size_t> index;
 			std::vector<Totals> totals;
+			// Per stage (the epoch's label), every queue: self time along its queue, and the ranges' summed time.
+			std::vector<std::string> stageNames;
+			std::unordered_map<std::string, std::size_t> stageIndex;
+			std::vector<Totals> stageTotals;
 			std::array<double, 3> busyMs{};
 			double graphicsSpanMs = 0.0;
 			std::uint32_t frames = 0;
@@ -122,6 +127,10 @@ namespace GpuTimingSource
 				total.inclusive = total.self = 0.0;
 				total.count = 0;
 			}
+			for (auto& total : a_events.stageTotals) {
+				total.inclusive = total.self = 0.0;
+				total.count = 0;
+			}
 			a_events.busyMs = {};
 			a_events.graphicsSpanMs = 0.0;
 			a_events.frames = 0;
@@ -137,6 +146,17 @@ namespace GpuTimingSource
 				"compute queue {:.2f} ms, copy queue {:.2f} ms in graph ranges; per frame, inclusive / self ms, calls:",
 				label.empty() ? std::string{} : fmt::format("window '{}': ", label), a_events.frames, a_events.dropped, a_events.graphicsSpanMs / frames,
 				a_events.busyMs[0] / frames, a_events.busyMs[1] / frames, a_events.busyMs[2] / frames);
+			// Stages first: self ms along the queue (what the queue spent there), summed range ms, ranges a frame.
+			double stageSelf = 0.0;
+			for (std::size_t i = 0; i < a_events.stageNames.size(); ++i) {
+				const auto& total = a_events.stageTotals[i];
+				if (!total.count)
+					continue;
+				stageSelf += total.queue == Queue::Graphics ? total.self : 0.0;
+				text += fmt::format("\n    stage {:>6.3f} {:>6.3f} {:>5.1f}  [{}] {}", total.self / frames, total.inclusive / frames,
+					static_cast<double>(total.count) / frames, QueueName(total.queue), a_events.stageNames[i]);
+			}
+			text += fmt::format("\n    stages on the graphics queue, self: {:.3f} ms a frame", stageSelf / frames);
 			for (std::size_t i = 0; i < a_events.names.size(); ++i) {
 				const auto& total = a_events.totals[i];
 				if (total.inclusive / frames < kMinLoggedMs)
@@ -192,6 +212,18 @@ namespace GpuTimingSource
 					total.inclusive += static_cast<double>(range->endTick - range->beginTick) * msPerTick;
 					total.self += self;
 					++total.count;
+					{
+						const std::string stage = fmt::format("{}{}", range->stage ? range->stage : "(no stage)", queue == Queue::Graphics ? "" : " (async)");
+						const auto [at, inserted] = a_events.stageIndex.try_emplace(stage, a_events.stageNames.size());
+						if (inserted) {
+							a_events.stageNames.push_back(stage);
+							a_events.stageTotals.push_back({ queue, RangeKind::Pass });
+						}
+						auto& stageTotal = a_events.stageTotals[at->second];
+						stageTotal.inclusive += static_cast<double>(range->endTick - range->beginTick) * msPerTick;
+						stageTotal.self += self;
+						++stageTotal.count;
+					}
 					busy += self;
 					previousEnd = std::max(previousEnd, range->endTick);
 				}
@@ -255,7 +287,7 @@ namespace GpuTimingSource
 		return collecting;
 	}
 
-	void OnEpochSubmitted(std::uint64_t a_hostFrame)
+	void OnEpochSubmitted(std::uint64_t a_hostFrame, const char* a_stage)
 	{
 		if (!Collecting())
 			return;
@@ -263,7 +295,7 @@ namespace GpuTimingSource
 		QueryPerformanceCounter(&now);
 		auto& state = Get();
 		std::lock_guard lock(state.mutex);
-		state.epochs[a_hostFrame % kEpochRing] = { a_hostFrame, state.present, now.QuadPart };
+		state.epochs[a_hostFrame % kEpochRing] = { a_hostFrame, state.present, now.QuadPart, a_stage };
 		auto& pending = state.pending[state.present];
 		pending.frame.present = state.present;
 		pending.frame.window = state.window;
@@ -306,14 +338,60 @@ namespace GpuTimingSource
 		frame.graphicsMsPerTick = a_stats.GetGpuTicksToMilliseconds();
 		for (auto& range : ranges) {
 			range.submitQpc = slot.qpc;
+			range.stage = slot.stage;
 			frame.ranges.push_back(std::move(range));
 		}
 		++pending->second.completed;
 #endif
 	}
 
+	namespace
+	{
+		// CS_RHI_CENSUS=<frames>: BasicRHI's command census (rhi::census), logged every that many Presents, per frame, by list label
+		// (ORG labels a list with its first pass). Render thread.
+		void CensusOnPresent()
+		{
+#if defined(CS_HAS_RENDER_GRAPH)
+			static const std::uint32_t interval = [] {
+				const auto frames = static_cast<std::uint32_t>(Switches::Number("CS_RHI_CENSUS"));
+				if (frames)
+					rhi::census::Enable(true);
+				return frames;
+			}();
+			if (!interval)
+				return;
+			static std::uint32_t presents = 0;
+			if (++presents % interval)
+				return;
+			const auto rows = rhi::census::Take();
+			std::vector<std::pair<std::string, rhi::census::Counts>> sorted(rows.begin(), rows.end());
+			std::ranges::sort(sorted, [](const auto& a, const auto& b) { return a.first < b.first; });
+			rhi::census::Counts total;
+			const double frames = interval;
+			std::string text = fmt::format("[RhiCensus] {} frames, per frame by list label: lists, pass begins, same attachments (no barrier between), "
+										   "colour / depth attachments, load L/C/D, store S/D, GENERAL attachments, barrier commands, image barriers "
+										   "(layout changes, same state, onto the previous pass's attachments), buffer, memory, dispatches",
+				interval);
+			const auto line = [&](const rhi::census::Counts& c, std::string_view name) {
+				text += fmt::format("\n    {:5.1f} {:6.1f} {:5.1f} ({:5.1f}) {:6.1f}/{:5.1f} {:6.1f}/{:5.1f}/{:5.1f} {:6.1f}/{:5.1f} {:6.1f} {:6.1f} {:6.1f} ({:6.1f} {:5.1f} {:5.1f}) {:5.1f} {:5.1f} {:6.1f}  {}",
+					c.lists / frames, c.passBegins / frames, c.sameAttachmentPasses / frames, c.sameAttachmentNoBarrier / frames, c.colorAttachments / frames,
+					c.depthAttachments / frames, c.loadOpLoad / frames, c.loadOpClear / frames, c.loadOpDontCare / frames, c.storeOpStore / frames,
+					c.storeOpDontCare / frames, c.generalAttachments / frames, c.barrierCalls / frames, c.imageBarriers / frames, c.imageLayoutChanges / frames,
+					c.imageSameState / frames, c.imageOntoPreviousPass / frames, c.bufferBarriers / frames, c.memoryBarriers / frames, c.dispatches / frames, name);
+			};
+			for (const auto& [label, counts] : sorted) {
+				total.Add(counts);
+				line(counts, label.empty() ? std::string_view("(unlabelled)") : std::string_view(label));
+			}
+			line(total, "TOTAL");
+			logger::info("{}", text);
+#endif
+		}
+	}
+
 	void OnPresent()
 	{
+		CensusOnPresent();
 		if (!Collecting())
 			return;
 		auto& state = Get();

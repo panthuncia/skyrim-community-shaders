@@ -1411,7 +1411,7 @@ struct RenderGraphRuntime::Impl
 		frameSegments[a_hostFrame % kSegmentRing].store(a_segment, std::memory_order_release);
 		if (timestampFrame)
 			GpuCounters::Timestamps::Submitted(timestampFrame);
-		GpuTimingSource::OnEpochSubmitted(a_hostFrame);
+		GpuTimingSource::OnEpochSubmitted(a_hostFrame, SegmentLabel(a_segment));
 	}
 
 	void RecordEpoch(Segment a_segment, std::chrono::steady_clock::duration a_elapsed)
@@ -2491,8 +2491,14 @@ bool RenderGraphRuntime::Initialize()
 		state->setTeardownCallback(&Impl::OnDxvkTeardown, nullptr);
 	// CS_ORG_RECORDING_TIMESTAMPS=1: the recordings kept across frames are timed too (the others always are), as a timestamp trace
 	// turns them on (NvPerf timestamps).
-	if (Switches::Equals("CS_ORG_RECORDING_TIMESTAMPS", "1"))
+	// While the graph's GPU timings are collected (CS_GPU_EVENT_TIMERS on the graph, native's idle trace), the kept recordings are
+	// timed one range per list (=lists), unless =1 asks for every pass and barrier batch (each range ends in a drain). Native's stages
+	// are all kept recordings: without this they report nothing. Off otherwise, so it costs nothing.
+	if (Switches::Equals("CS_ORG_RECORDING_TIMESTAMPS", "1") || Switches::EqualsNoCase("CS_ORG_RECORDING_TIMESTAMPS", "passes"))
 		state->host->SetRecordingTimestamps(true);
+	else if (Switches::EqualsNoCase("CS_ORG_RECORDING_TIMESTAMPS", "lists") ||
+			 (!Switches::Equals("CS_ORG_RECORDING_TIMESTAMPS", "0") && GpuTimingSource::Collecting()))
+		state->host->SetRecordingTimestampMode(org::RenderGraph::RecordingTimestampMode::Lists);
 	state->host->SetCompletedFrameCallback([self = state.get()](std::uint64_t a_frameNumber, const org::runtime::IStatisticsService& a_stats) {
 		self->OnCompletedFrame(a_frameNumber, a_stats);
 	});
