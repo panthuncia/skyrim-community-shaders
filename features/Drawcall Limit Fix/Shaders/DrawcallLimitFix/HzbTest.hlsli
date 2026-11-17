@@ -75,7 +75,9 @@ struct HzbResult
 HzbResult HzbTest(HzbView a_view, float3 boundCentre, float boundRadius)
 {
 	HzbResult result = (HzbResult)0;
-	if (a_view.Index == 0 || a_view.Mips == 0)
+	// One unsigned relational compare, not `Index == 0 || Mips == 0`: AMD's RDNA2 compiler folds Index to 0 past such a guard
+	// (AGENTS.md), and the taps then read heap slot 0.
+	if (min(a_view.Index, a_view.Mips) < 1u)
 		return result;
 	float2 uvMin, uvMax;
 	float nearestZ;

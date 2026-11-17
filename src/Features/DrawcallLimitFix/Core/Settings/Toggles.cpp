@@ -5,7 +5,6 @@
 
 #include <algorithm>
 #include <deque>
-#include <dxgi.h>
 #include <string>
 #include <vector>
 
@@ -88,28 +87,6 @@ namespace DCLF
 		const std::string& SeedValue(const ToggleInfo& a_info)
 		{
 			return a_info.member ? SwitchValue(a_info.seed) : SwitchValue(a_info.registeredSeed);
-		}
-
-		/** @brief The PCI vendor of the adapter with the most dedicated memory (DXGI: toggles seed before the game's device exists). */
-		UINT LargestAdapterVendor()
-		{
-			static const UINT vendor = [] {
-				winrt::com_ptr<IDXGIFactory1> factory;
-				if (FAILED(CreateDXGIFactory1(IID_PPV_ARGS(factory.put()))))
-					return 0u;
-				UINT largestVendor = 0;
-				SIZE_T largest = 0;
-				winrt::com_ptr<IDXGIAdapter1> adapter;
-				for (UINT i = 0; factory->EnumAdapters1(i, adapter.put()) != DXGI_ERROR_NOT_FOUND; ++i, adapter = nullptr) {
-					DXGI_ADAPTER_DESC1 desc{};
-					if (SUCCEEDED(adapter->GetDesc1(&desc)) && desc.DedicatedVideoMemory > largest) {
-						largest = desc.DedicatedVideoMemory;
-						largestVendor = desc.VendorId;
-					}
-				}
-				return largestVendor;
-			}();
-			return vendor;
 		}
 
 		/**
@@ -242,7 +219,7 @@ namespace DCLF
 
 	std::uint8_t DefaultCullMode()
 	{
-		return LargestAdapterVendor() == 0x1002 ? 1 : 2;
+		return 2;
 	}
 
 	Direct::Mode ModeOf(const ToggleSet& a_set)

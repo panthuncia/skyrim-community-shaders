@@ -75,8 +75,8 @@ namespace DCLF
 	};
 
 	/**
-	 * @brief The cull mode with no CS_DCLF_CULL: 2 (frustum and occlusion), but 1 (frustum alone) on AMD. On an RX 6600 (driver 2.0.353)
-	 * the HZB read back as 0 under nearly every footprint, so occlusion culled nearly every object in view (dclf-open-defects.md).
+	 * @brief The cull mode with no CS_DCLF_CULL: 2 (frustum and occlusion) on every GPU. It was 1 on AMD while the HZB read back as 0
+	 * there: HzbTest's null guard was miscompiled (fixed 2026-11-17, dclf-open-defects.md).
 	 */
 	std::uint8_t DefaultCullMode();
 
