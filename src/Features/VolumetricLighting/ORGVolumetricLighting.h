@@ -22,6 +22,10 @@
  * Nothing falls back to the engine at runtime: a frame the graph cannot run is skipped, logged once per reason. A failed setup or
  * a failed graph leaves the D3D11 path (the detours pass through).
  *
+ * The engine subsystems (RenderGraph/Engine) install it, not the feature. With the feature on, it draws the feature's volumetric
+ * lighting. In native mode it is installed with the feature off too, since native mode has no D3D11 path for it: it then draws the
+ * engine's own volumetric lighting, with the shaders built without feature defines and the engine's volume size.
+ *
  * Render thread throughout. Header deliberately free of ORG/Vulkan includes (see RenderGraphRuntime.h).
  */
 class ORGVolumetricLighting
@@ -32,14 +36,14 @@ public:
 
 	static ORGVolumetricLighting& Get();
 
-	/** @brief The VolumetricLighting anchor, when requested. Before the render graph initializes (the feature's PostPostLoad). */
+	/** @brief The VolumetricLighting anchor, when installed. Before the render graph initializes (RenderGraph::Engine::Reserve). */
 	static void Reserve();
 
-	/** @brief The engine's VL render, apply and blur detoured, when requested (the feature's PostPostLoad). */
+	/** @brief The engine's VL render, apply and blur detoured, when installed (RenderGraph::Engine::InstallGameHooks). */
 	static void Install();
 
 	/**
-	 * @brief At the feature's SetupResources, with the runtime active: the programs, the latch, the run gate and the noise volume,
+	 * @brief After the features' SetupResources (RenderGraph::Engine::PostSetup), with the runtime active: the programs, the latch, the run gate and the noise volume,
 	 * and the client registered with a volume for the exterior and interior sizes. An input missing now (the noise gradient
 	 * texture before the sky loads it) registers it at the first VL render instead.
 	 * @return Whether the GPU work runs on the render graph; false keeps the D3D11 path.

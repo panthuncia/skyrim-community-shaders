@@ -38,6 +38,7 @@ ORGVolumetricLighting& ORGVolumetricLighting::Get()
 #	include "RenderGraph/RunGate.h"
 #	include "RenderGraph/ShaderBindings.h"
 #	include "RenderGraph/SharedConstants.h"
+#	include "Utils/Game.h"
 #	include "Utils/Logging.h"
 
 #	include <OpenRenderGraph/GraphHost.h>
@@ -229,6 +230,35 @@ namespace
 			setting("iVolumetricLightingNoiseTextureDepth:Display") };
 	}
 
+	/** @brief Whether the Volumetric Lighting feature is loaded. Off, the client draws the engine's own volumetric lighting. */
+	bool FeatureOn()
+	{
+		return globals::features::volumetricLighting.loaded;
+	}
+
+	/**
+	 * @brief Whether the client is installed: CS_ORG_VOLUMETRIC_LIGHTING, with the feature on, or in native mode whatever the feature's
+	 * state (native mode has no D3D11 path for the engine's volumetric lighting).
+	 */
+	bool Wanted()
+	{
+		return ORGVolumetricLighting::Requested() && (FeatureOn() || RenderGraph::Engine::Native::Requested());
+	}
+
+	/** @brief The blurs' render area: the dynamic resolution part of the screen, and its last pixel (the blurs' VLData). */
+	std::array<std::int32_t, 4> BlurArea()
+	{
+		const float2 size = Util::ConvertToDynamic(float2{ static_cast<float>(globals::game::graphicsState->screenWidth),
+			static_cast<float>(globals::game::graphicsState->screenHeight) });
+		const auto x = (std::max)(1, static_cast<std::int32_t>(size.x));
+		const auto y = (std::max)(1, static_cast<std::int32_t>(size.y));
+		return { x, y, x - 1, y - 1 };
+	}
+
+	// The blurs' thread group width and the window on each side (ISVolumetricLightingBlurHCS/VCS's TG_DIM and WINDOW).
+	constexpr std::uint32_t kBlurGroup = 256;
+	constexpr std::uint32_t kBlurWindow = 12;
+
 	/** @brief The defines the D3D11 build of an ImageSpace shader gets from the features (ShaderCache's GetImagespaceShaderDefines). */
 	std::vector<std::pair<std::string, std::string>> FeatureDefines()
 	{
@@ -257,6 +287,9 @@ namespace
 		std::unique_ptr<GraphResources::Texture3D> noiseVolume;
 		VolumeSize noiseSize;
 		rhi::Format outputFormat = rhi::Format::Unknown;
+		// The feature is off: the engine's own volumetric lighting. The shaders get no feature define, the generate reads no Terrain or
+		// Cloud Shadows, and the volume is the engine's size.
+		bool vanilla = false;
 		// The engine's samplers as graph samplers, taken when a graph is built (the engine fills its table after CS's Setup).
 		std::map<SamplerModes, org::OwnedDescriptorBinding> samplers;
 	};
@@ -462,9 +495,9 @@ struct ORGVolumetricLighting::Impl
 		bool missing = false;
 		auto& terrainShadows = globals::features::terrainShadows;
 		auto& cloudShadows = globals::features::cloudShadows;
-		made->shadowHeights = FeatureInput(terrainShadows.loaded, ORGTerrainShadows::Requested(), ORGTerrainShadows::kShadowHeightId,
+		made->shadowHeights = FeatureInput(!fixed->vanilla && terrainShadows.loaded, ORGTerrainShadows::Requested(), ORGTerrainShadows::kShadowHeightId,
 			terrainShadows.loaded ? terrainShadows.GetShadowHeightSRV() : nullptr, "volumetric-lighting.terrain-shadows", missing);
-		made->cloudShadows = FeatureInput(cloudShadows.loaded, ORGCloudShadows::Requested(), ORGCloudShadows::kOcclusionId,
+		made->cloudShadows = FeatureInput(!fixed->vanilla && cloudShadows.loaded, ORGCloudShadows::Requested(), ORGCloudShadows::kOcclusionId,
 			cloudShadows.loaded ? cloudShadows.OcclusionSRV() : nullptr, "volumetric-lighting.cloud-shadows", missing);
 		if (missing) {
 			a_missing = "Terrain or Cloud Shadows' texture is not made yet";
@@ -640,13 +673,20 @@ struct ORGVolumetricLighting::Impl
 		return true;
 	}
 
-	/** @brief a_also (the descriptor's size now, when given), then the sizes SetupVL gives the engine for exteriors and interiors. */
-	static std::vector<VolumeSize> SettingsSizes(std::optional<VolumeSize> a_also = std::nullopt)
+	/**
+	 * @brief a_also (the descriptor's size now, when given), then the sizes SetupVL gives the engine for exteriors and interiors. With
+	 * the feature off, the descriptor's size: the engine's quality preset, the same indoors and out.
+	 */
+	std::vector<VolumeSize> SettingsSizes(std::optional<VolumeSize> a_also = std::nullopt) const
 	{
 		auto& feature = globals::features::volumetricLighting;
 		std::vector<VolumeSize> sizes;
 		if (a_also)
 			sizes.push_back(*a_also);
+		if (fixed->vanilla) {
+			sizes.push_back(DescriptorSize());
+			return sizes;
+		}
 		for (const bool interior : { false, true }) {
 			const auto size = feature.VolumeSize(interior);
 			sizes.push_back({ static_cast<std::uint32_t>((std::max)(size.Width, 0)), static_cast<std::uint32_t>((std::max)(size.Height, 0)),
@@ -775,12 +815,15 @@ struct ORGVolumetricLighting::Impl
 		const auto& noiseSize = fixed->noiseSize;
 		data.noise = { static_cast<float>(noiseSize.width), static_cast<float>(noiseSize.height), static_cast<float>(noiseSize.depth), 0.0f };
 		data.raymarch = { static_cast<float>(pending.size.width), static_cast<float>(pending.size.height), static_cast<float>(pending.size.depth), 0.0f };
-		data.blur = globals::features::volumetricLighting.BlurData();
+		data.blur = BlurArea();
 		data.applyIntensityTemporal = { pending.intensity, pending.temporal, 0.0f, 0.0f };
 		data.applyRepartition = { pending.rangeFactor, 0.0f, 0.0f, 0.0f };
 		data.generate = pending.generateConstants;
-		globals::features::volumetricLighting.SetGroupCountsHCS(next.blurHGroups[0], next.blurHGroups[1]);
-		globals::features::volumetricLighting.SetGroupCountsVCS(next.blurVGroups[0], next.blurVGroups[1]);
+		// One group per row (or column) of the render area, each covering kBlurGroup - 2 * kBlurWindow pixels along it.
+		const auto width = static_cast<std::uint32_t>(data.blur[0]), height = static_cast<std::uint32_t>(data.blur[1]);
+		constexpr std::uint32_t span = kBlurGroup - 2 * kBlurWindow;
+		next.blurHGroups = { (width + span - 1) / span, height };
+		next.blurVGroups = { width, (height + span - 1) / span };
 		run = next;
 		const auto result = FrameAnchors::Run(kAnchor);
 		run.reset();
@@ -886,13 +929,13 @@ struct ORGVolumetricLightingDetours
 
 void ORGVolumetricLighting::Reserve()
 {
-	if (Requested() && !FrameAnchors::Reserve(Anchor::VolumetricLighting))
+	if (Wanted() && !FrameAnchors::Reserve(Anchor::VolumetricLighting))
 		logger::warn("{} stays on D3D11: the VolumetricLighting anchor could not be reserved", kLogPrefix);
 }
 
 void ORGVolumetricLighting::Install()
 {
-	if (!Requested())
+	if (!Wanted())
 		return;
 	stl::detour_thunk<ORGVolumetricLightingDetours::Render>(REL::RelocationID(100306, 107023));
 	stl::detour_thunk<ORGVolumetricLightingDetours::Apply>(REL::RelocationID(100475, 107193));
@@ -902,7 +945,7 @@ void ORGVolumetricLighting::Install()
 
 bool ORGVolumetricLighting::Setup()
 {
-	if (!Requested() || impl)
+	if (!Wanted() || impl)
 		return impl != nullptr;
 	auto& runtime = RenderGraphRuntime::Get();
 	auto* host = runtime.Host();
@@ -929,8 +972,10 @@ bool ORGVolumetricLighting::Setup()
 		if (fixed->outputFormat == rhi::Format::Unknown || fixed->outputFormat != formatOf(kPreviousTarget))
 			return off("the VL targets have no render target view, or two formats");
 
-		// The programs, with the defines the D3D11 builds get (CSHADER for the generate's guard; the features' ImageSpace defines).
-		auto defines = FeatureDefines();
+		// The programs, with the defines the D3D11 builds get (CSHADER for the generate's guard; the features' ImageSpace defines). With
+		// the feature off, the engine's own shaders run on D3D11: no feature define.
+		fixed->vanilla = !FeatureOn();
+		auto defines = fixed->vanilla ? std::vector<std::pair<std::string, std::string>>{} : FeatureDefines();
 		auto computeDefines = defines;
 		computeDefines.emplace_back("CSHADER", "");
 		const auto compute = [&](const char* a_source, std::uint32_t a_words) {
@@ -976,7 +1021,8 @@ bool ORGVolumetricLighting::Setup()
 
 		impl = std::make_unique<Impl>();
 		impl->fixed = std::move(fixed);
-		logger::info("{}: on (CS_ORG_VOLUMETRIC_LIGHTING); noise volume {}x{}x{}", kLogPrefix, impl->fixed->noiseSize.width, impl->fixed->noiseSize.height,
+		logger::info("{}: on (CS_ORG_VOLUMETRIC_LIGHTING{}); noise volume {}x{}x{}", kLogPrefix,
+			impl->fixed->vanilla ? ", the feature off: the engine's volumetric lighting" : "", impl->fixed->noiseSize.width, impl->fixed->noiseSize.height,
 			impl->fixed->noiseSize.depth);
 		impl->EnsureRegistered();
 		return true;

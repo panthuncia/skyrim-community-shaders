@@ -118,9 +118,6 @@ public:
 	 */
 	TextureSize VolumeSize(bool a_interior) const;
 
-	/** @brief This frame's blur data (EarlyPrepass): the dynamic resolution render area and its last pixel, as the blurs' VLData. */
-	std::array<int32_t, 4> BlurData() const { return { vlData.screenX, vlData.screenY, vlData.screenXMin1, vlData.screenYMin1 }; }
-
 private:
 	struct VolumetricLightingDescriptor
 	{};

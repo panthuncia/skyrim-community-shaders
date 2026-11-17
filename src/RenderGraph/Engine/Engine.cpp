@@ -1,5 +1,7 @@
 #include "RenderGraph/Engine/Engine.h"
 
+#include "Features/VolumetricLighting/ORGVolumetricLighting.h"
+
 #include "RenderGraph/Engine/Bink/Bink.h"
 #include "RenderGraph/Engine/Buffers/EngineBuffers.h"
 #include "RenderGraph/Engine/Constants/EngineConstants.h"
@@ -38,12 +40,15 @@ namespace RenderGraph::Engine
 		Scaleform::Install();
 		// CS_ORG_OCCLUSION_QUERIES: the engine's BeginQuery, EndQuery and GetQueryData; a port's bracket answers its query from the graph.
 		OcclusionQueries::Install();
+		// CS_ORG_VOLUMETRIC_LIGHTING: the engine's VL render, apply and blur (native mode installs it with the feature off too).
+		ORGVolumetricLighting::Install();
 	}
 
 	void Reserve()
 	{
 		Skeleton::Reserve();
 		ImageSpace::Reserve();
+		ORGVolumetricLighting::Reserve();
 	}
 
 	void Setup()
@@ -64,6 +69,8 @@ namespace RenderGraph::Engine
 		// SetupResources, so HDR's UI texture exists and its pass is in the client from the start: the startup logo's first tick
 		// then finds the client in the built graph instead of refreshing it.
 		Bink::Setup();
+		// CS_ORG_VOLUMETRIC_LIGHTING: after the features' SetupResources, which make Terrain and Cloud Shadows' inputs.
+		(void)ORGVolumetricLighting::Get().Setup();
 		// Every client registered at setup joins its anchors' graphs now, not at the first frame's build point.
 		if (RenderGraphRuntime::Get().IsActive()) {
 			(void)FrameAnchors::BuildPending("CS's setup");

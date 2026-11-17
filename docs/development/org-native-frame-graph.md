@@ -4826,6 +4826,8 @@ chain's hooks (which only check and stage in native). This is the input for the 
   not execute is now a tap error (`NotExecuted`, the mismatch policy); nothing replays it on D3D11 (Cleanup A1).
 - The phases and regions code is removed (`CS_ORG_PHASES` with it). `FrameAnchors::FlushRegions` kept its other jobs, the stages'
   commit points and the open-stage census, as `BeforeGpuWork`. `PassDesc::gated` is removed (Cleanup A1).
+- Volumetric Lighting off no longer stops native: the engine subsystems install its client whatever the feature's state, and with the
+  feature off it draws the engine's own volumetric lighting (Cleanup A3).
 
 ### Untested
 
@@ -5783,6 +5785,7 @@ and then about 3 more "no CS pass" errors every world frame (138 in 46 frames): 
 raymarch, apply, blur) has no pass, because the ORG volumetric lighting client and its detours are installed only by the feature. Not
 fixed: a noise pass alone would only move the stop to the generate. The likely fix is to install the client in native mode whatever the
 feature's state, with the shaders built without the feature's defines, and to check its output against guest with the feature off.
+Fixed in "Cleanup A1-A3 (2026-11-18)".
 
 *Scratch memory.* `VolumetricFogLightScatteringCS`: the cascade matrix is read from the structured buffer by index and the engine
 local shadows from the latch by offset; the RX 6600's ISA has no scratch operation left (80 before). CS `937686330`. DCLF's Effect
@@ -6480,3 +6483,40 @@ river shot differs by an NPC and the wind), native-interior, native-validation (
 with TAA (the world before and after 104.5, 104.0, 104.5), the worldspace run (Tamriel, Solstheim, Riverwood), native-upscalers (DLSS,
 FSR, TAA and XeSS, clean by eye against the 11-16 run), guest-quick. No `[C]` line but the known `PublishedResources` one. ORG's alias
 packing tests pass.
+
+## Cleanup A1-A3 (2026-11-18)
+
+Three pieces of the native cleanup plan, one commit each, on `org-native/phases`.
+
+- **A1.** `PassDesc::gated` had no reader. It is removed with its writers and the `a_gated` parameters of `AnchorPasses::Builder`.
+  A gated copy still records at execution. A skeleton clear or copy run that does not execute is now a tap error (`NotExecuted`) through
+  the mismatch policy: development builds stop, release logs it and draws nothing. The D3D11 replay of a group's clears is gone, with
+  `Replay`, the pending clears' D3D11 fields and `Flush`'s context parameter. The plan said to keep `Replay` for the lent slot, but the
+  lent slot never used it: the skeleton refuses that clear and the engine makes it.
+- **A2.** The `MovieTiles` anchor (no client) is removed with its epoch and its place in the recipe. The anchor and segment values after
+  it shift by one. Every user goes through `EpochOf` or the enum names, and DCLF's segments sit before the anchors, so its frame orders do
+  not change. `FrameAnchors::Scheduled(id, anchor)` answers, for an anchor a stage holds wholly, whether this frame's schedule of that
+  stage holds the client and has it on. It does not depend on the open window, so a caller may ask before the stage's first tap (Deferred
+  clears ask at `StartDeferred`). Guest runs no stage, so there it asks the anchor's own built graph. The upscaler's evaluate, Deferred
+  clears, Skylighting, Cloud Shadows and Volumetric Lighting use it. The menu composites (`MenuSteps.inl`) keep `HeldNow` and `CanRun`:
+  ImageSpace is not wholly a stage's anchor, and their per-anchor fallback goes with A4. `CanRun` stays for the anchors with epochs of
+  their own and for the skeleton.
+- **A3.** The engine subsystems install the Volumetric Lighting client (`Engine::InstallGameHooks`, `Reserve`, `PostSetup`), not the
+  feature. In native mode it is installed with the feature off too. Then it draws the engine's own volumetric lighting: the shaders get no
+  feature define, the generate reads no Terrain or Cloud Shadows, and the volume is the engine's descriptor size. The blurs' render area
+  and group counts are computed by the client (the same formula as the feature's), so the client reads nothing of the feature but its
+  volume sizes. Guest with the feature off is unchanged (D3D11).
+
+Checks, one background run each on the final DLL (`289ee9e7e65e`), all passed with 0 tap errors, no `NoPass`, 0 recipe findings and no
+failed build: native-quick, native-river, native-interior, native-validation (the same message classes and counts as before: 20
+`VUID-vkCmdDraw-None-09600`, the back-buffer layout and unused-output lines), the loading-thread run, the frozen-world Journal Menu run,
+guest-quick, guest-quick with `org.ports=all` (with the skeleton on: no clear run failed). A1 and A2 passed the same set on their own
+build before A3. native-quick's log shows the Bink start movie drawn (166 frames by the render graph, 0 by the engine) and no `[E] Bink`
+line. native-quick with `features.VolumetricLighting=false` passes: "the feature off: the engine's volumetric lighting", registered with
+the 320x192x90 volume, Terrain and Cloud Shadows off. Its shot against guest-quick with the same setting: region means within 1.6 of
+guest's (sky 170.4 against 170.2, left hill 150.8 against 149.7, right town 162.9 against 161.3), the same spread as the default pair
+(native against guest, within 1.1). The tree in front moves with the wind, so whole-image differences are not a measure here.
+
+Still there: the first world frame's volumetric lighting is skipped once in every mode ("the frame's schedule does not hold the client
+yet"). The client registers at the first VL render, because the sky's noise gradient texture is not loaded at setup. This is the same as
+before A3 (logged as "the anchor's graph does not hold the client yet" then).
