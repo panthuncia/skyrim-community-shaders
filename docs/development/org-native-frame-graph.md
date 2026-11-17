@@ -5888,6 +5888,12 @@ against 19.47 ms before. Without Tracy, between the marks: native 16.49 and 17.1
 command buffers, 1,636 to 955, or the replaced builds) was not isolated. native-quick and guest-quick pass; their shots match the
 earlier ones (105.7 against 106.1, 107.1 against 105.8 mean).
 
+*Correction (2026-11-17, later).* The native periods in this paragraph (16.49, 16.53, 17.12 ms) were taken with a frozen post chain:
+CS `a16f37081`, the second fix above, kept the post stage's staged build from switching in after the TAA switch, so the chain drew
+nothing and the screen kept one frame ("Aliasing survey", first item). Neither fix made the GPU work shorter. Re-taken on the fixed
+build: native 19.02 to 19.08 ms, guest 18.98 to 19.10 ms ("Frozen post chain: re-taken numbers" below). The VRAM figures here stand: a
+frozen chain does not change what is allocated.
+
 **Left (native about 600 MiB over guest), with what each would take.**
 - Terrain Shadows (+167): ORG makes its textures once, at the largest installed heightmap's size (6144x6144: `ShadowHeight` R16G16,
   144 MiB, and the heightmap as R16, 72 MiB). Guest makes them for the current worldspace (3808x3008: 43.7 MiB, and the heightmap
@@ -5992,6 +5998,9 @@ DLC2SolstheimWorld 40 -10`, then `coc Riverwood`) passed in both modes: the shad
 as versions, each registration's graphs switched in, no tap error. Its Riverwood shots against guest differ by exposure only (known).
 Native perf-taa between the marks: 16.43 ms.
 
+*Correction (2026-11-17, later).* That 16.43 ms was taken with a frozen post chain (CS `a16f37081`, fixed in `811e509a0`); the real
+period is about 19.05 ms, the same as guest's.
+
 **For the aliasing piece.** Native's ORG alias pools are 202 MiB and the image-space port's own targets 117 MiB, against guest's
 none; the engine targets the port duplicates are still allocated (above).
 
@@ -6021,6 +6030,17 @@ is the frame period between the start and end marks (900 frames), no Tracy. Nati
   stage comparison with guest (native about equal) was inflated by those drains, about 2.2 ms. Native's GPU work is about 2.5 ms
   below guest's in this scene; guest's D3D11 timers do not drain and its period matches its GPU frame.
 
+*Correction (2026-11-17, later): step 0 is wrong.* Every native period in this pass (17.04, 16.51, 16.78, 16.48, 16.75, 16.50, 16.33
+ms) was taken with a frozen post chain (CS `a16f37081`, fixed in `811e509a0`; "Aliasing survey", first item). Native is not 2 ms faster
+than guest, and the darker perf-view shots were the frozen frame. The shared command pools (ORG `8596c63`) do not change the frame
+period: the A/B re-taken on the fixed build with the same temporary switch (each graph its own pool, each list its own claim; 53 command
+pools against 19) read 19.06 and 19.02 ms against 19.08 and 19.02 ms without it, alternating. What they save is VRAM: process dedicated
+3,277 and 3,283 MiB with own pools against 3,254 to 3,261 MiB, about 25 MiB. Why the old A/B read 19.31 ms with the switch is not
+known (estimate: the slower command pools let the staged post build switch in before its recordings were dropped, so those runs drew
+the chain; not checked). With list timing on
+the graphics span is 19.22 ms, the period without timing 19.02 to 19.08: list timing's drains cost about 0.15 ms, not 2.2, and native's
+GPU work is about guest's in this scene, not 2.5 ms below it. Re-taken numbers: "Frozen post chain: re-taken numbers" below.
+
 The barrier probe (`BASICRHI_BARRIER_PROBE=*`) was re-taken first. Its floor is the drain it adds, 0.5 us a barrier.
 
 **1. Depth copies through transfer layouts (done).** The depth layout changes around the copies took 211 us a frame in the probe
@@ -6037,6 +6057,9 @@ test, the stencil written through `SV_StencilRef`. No image leaves a depth layou
   span 19.40 to 19.24 ms (measured). In the frame period this is inside the spread.
 - Left: the upscaler's depth source sits in GENERAL and goes GENERAL -> DEPTH_READ -> GENERAL around the copy (26 + 20 us); it used to
   go through TRANSFER_SRC the same way. Not changed.
+- *Re-read with the post chain running (2026-11-17, later).* The claim holds: the probe has no depth layout change through a transfer
+  layout around these copies, and the list timestamps read shadow-mask 0.17 ms, DeferredPasses' upload 1.67, the upscaler's copy 0.15,
+  the depth copy 0.15; stages' sum 18.52 ms, graphics span 19.22 ms.
 
 **2. Cloud Shadows' layer cubes (dropped).** Their 290 or so layout changes a frame read 0.55 to 0.78 us each in the probe, against the
 probe's 0.5 us drain. The list that holds 95 of them (`reflections-prepass.gather`) is 0.04 ms in all with list timing. About 0.05 ms
@@ -6063,8 +6086,13 @@ AGENTS.md, which folds `Index` to 0 past the guard, so the taps read heap slot 0
 occlusion forced on, perf-taa reads 0 of 2,693 footprints all-near (before: nearly all), about 460 draws a window are occluded, phase 2
 brings back 19, and the mid field is whole. Occlusion is the default cull mode on AMD again (the AMD exception and the saved-setting
 check built on it are removed). CS `f6566f342`.
+*Re-checked with the post chain running (2026-11-17, later):* the default stands. Native perf-taa with occlusion read 19.02 to 19.08
+ms, with `dclf.cull=frustum` 19.10 and 19.14 ms: about 0.05 ms gained, inside the spread. The perf shots with and without occlusion
+have the same means (91.6, 112.0, 108.7) and differ only by animation (mean difference 3.5); the mid field is whole in both.
 
-**Native against guest, final build (DLL 55e5af235c20; occlusion on in both).**
+**Native against guest, final build (DLL 55e5af235c20; occlusion on in both).** *Correction (2026-11-17, later): the native periods in
+this table and the line below it were taken with a frozen post chain; the native VRAM was before the aliasing pass. The re-taken table
+is in "Frozen post chain: re-taken numbers" below.*
 
 | | Native | Guest |
 |---|---|---|
@@ -6105,7 +6133,47 @@ Fixed in CS `811e509a0`: the staged build's recordings are kept. perf-taa's shot
 **This changes the frame period.** Native perf-taa between the marks is now 19.07 ms, guest 19.11 ms (same session, one run each). The
 16.3 to 17.1 ms native periods of the VRAM passes and the RX 6600 third pass were measured on builds with `a16f37081`, so with no post
 chain after the TAA switch: native is not 2 ms faster than guest in this scene. The command-pool A/B in the third pass (19.31 against
-16.51 ms) was probably the same artifact and should be taken again.
+16.51 ms) was probably the same artifact and should be taken again. Re-taken: shared pools do not change the period (below).
+
+### Frozen post chain: why it was silent, and the guards (2026-11-17)
+
+Why nothing failed: every chain step that its schedule left out went through `NoteLaggedWork`, which only counts. Lagged work is
+allowed while a build or recording is on its way, but nothing bounded it, so a staged build that never switched in kept the stage on
+the old build for good, its chain steps lagging every frame. The shots were compared only by eye.
+
+Now:
+- **Starved staged build (fatal in development builds, logged in release).** `FrameAnchors::Schedule` counts, per staged build, the
+  recordings asked for again after a finished one was dropped. Past 16 (four a frame slot) it is `TapError::Starved`: the build would
+  never switch in. A count, not a timer; the census line has the highest count per stage ("staged recordings asked again").
+- **Untappable client (same policy).** A chain, water or world step whose client is not in the build its stage runs goes through
+  `Driver::NoteStepLag`. It lags while `FrameAnchors::TapMayLag` finds something on its way: a build holding the client's registration,
+  a staged build, a key build (absent passes), a lagging or absent schedule. The first frame the engine draws a pass the build left out
+  also lags (its request makes the next Begin ask for the key's build). Nothing on its way in the next frame is `TapError::Untappable`.
+- **cs-test's live-image check.** `base.toml` sets `expect.live_frames = 30`: at the exit, in the world phase, the game takes two shots
+  30 frames apart, and the harness fails a run whose two have the same pixels (testing.md).
+
+Proof, on a build with a temporary switch that reverted `811e509a0` (not committed): native perf-taa stopped at frame 178 (the loading
+screen) with "staged build starved" in the deferred+water stage (20 recordings asked again). With `CS_ORG_MISMATCH_FATAL=0` the run went
+on, its period read 16.61 ms, and cs-test failed it: "the final image did not change in 30 frames ... a frozen final target". A fatal
+mismatch reaches the harness as `hang` (the failure's message box stops the render thread); the reason is in the log's `[C]` line.
+
+### Frozen post chain: re-taken numbers (2026-11-17)
+
+RX 6600, perf-taa at 1920x1080, uncapped, background runs with `DXVK_DEBUG=hang`, VRAM Budget off, alternating in one session; build
+with the guards (DLL `d151eedae364`, the temporary A/B switches in it but off). Period between the marks (900 frames); GPU busy is
+Skyrim's 3D engine utilisation and VRAM the process dedicated usage, both sampled six times from the start mark.
+
+| | Native | Guest |
+|---|---|---|
+| period | 19.08 / 19.02 / 19.06 ms | 19.10 / 18.98 ms |
+| Skyrim's 3D engine busy | 99.1 / 99.5 / 99.4% | 98.4 / 98.3% |
+| process dedicated VRAM | 3,261 / 3,254 / 3,260 MiB | 3,077 / 3,035 MiB |
+
+- Shared command pools (ORG `8596c63`), temporary switch on: 19.06 / 19.02 ms, 3,277 / 3,283 MiB, 53 command pools against 19. No frame
+  period effect; about 25 MiB of VRAM.
+- Occlusion off (`dclf.cull=frustum`): 19.14 / 19.10 ms; the default (occlusion) gains about 0.05 ms, inside the spread.
+- List timing on (`cs.gpu_event_timers=300`): 19.19 ms period, graphics span 19.22 ms, stages' sum 18.52 ms. The barrier probe run:
+  19.67 ms.
 
 ### Second: every image-space and SSGI image existed two or three times (fixed)
 
