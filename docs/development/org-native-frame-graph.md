@@ -6083,3 +6083,142 @@ morning's (105.9 against 105.8 mean).
 address in no allocation, DRED's first incomplete list unnamed). It was never run on this card before (all earlier native-d3d12 runs
 were on the RTX 5080). It happens with the depth-copy draw, the stencil views and occlusion all switched off, so it is not from this
 pass.
+
+## Aliasing survey (2026-11-17)
+
+RX 6600, perf-taa at 1920x1080, native Vulkan, background runs with `DXVK_DEBUG=hang`, VRAM Budget off. Sources: BasicRHI's memory dump
+(`BASICRHI_MEMORY_DUMP`, every live resource with its memory and offset) and, from the same run, every attached epoch graph's resources
+(`CS_ORG_GRAPH_RESOURCES_FRAME=<n>`, new: one log line per graph, as its schedule names them). Run `g1n` is the state before this pass
+(with the post fix below), `g5n` after. Game textures, DCLF's buffers under 1 MiB and resources under 0.25 MiB are left out.
+
+### First: the post stage froze after TAA was switched on (fixed)
+
+Native's perf-taa shots were darker than guest's because the screen was frozen. Since CS `a16f37081` (drop recordings of older builds)
+a new recording request dropped every finished recording not on the attached build, the staged build's too. With TAA the post stage's
+description alternates by frame (its history rows by slot parity), so it asks again every frame, and its staged build never had all four
+slots recorded. The post stage stayed on the build from before the TAA switch, whose chain client was no longer tappable: the chain drew
+nothing from then on, and the final target kept the last frame drawn (two shots 900 frames apart were pixel-identical). The darkness was
+that frozen frame, taken mid-adaptation after the load; it varied by run. Adaptation itself was fine, and it never existed twice.
+
+Fixed in CS `811e509a0`: the staged build's recordings are kept. perf-taa's shot now matches guest's (104.5 against 104.5 mean).
+
+**This changes the frame period.** Native perf-taa between the marks is now 19.07 ms, guest 19.11 ms (same session, one run each). The
+16.3 to 17.1 ms native periods of the VRAM passes and the RX 6600 third pass were measured on builds with `a16f37081`, so with no post
+chain after the TAA switch: native is not 2 ms faster than guest in this scene. The command-pool A/B in the third pass (19.31 against
+16.51 ms) was probably the same artifact and should be taken again.
+
+### Second: every image-space and SSGI image existed two or three times (fixed)
+
+Not two graphs' private pools, as the VRAM passes guessed. The graph log showed each of these images used by one stage only
+(`ImageSpace::SAO*` by deferred+water, `TAAHistory*`, `Hdr/LdrScratch`, `Dof*`, `Bloom*`, `VolumetricLighting::Volume` by post, SSGI and
+SSS by deferred+water). The copies were older generations:
+- the image-space port made its targets again at every registration (each TAA switch, size or ratio change). Builds still alive held
+  the old ones: the replaced build's kept recordings (dropped only at the next request, which in a steady stage never comes), and graphs
+  outside the frame's kind;
+- each held build kept its private alias pool, with its own placement of every transient it used (the second SSGI and SSS pool, 62.7
+  MiB, was the replaced deferred+water build's);
+- a history made again started over: TAA, SAO and the adaptation reset at each registration, and the new adapted luminance pair
+  rebuilt every graph ("published resource replaced").
+
+Fixed (CS `9ffda6521`, ORG `fddf84c`):
+- **One owner above the stages.** `Frame::Resources` (`src/RenderGraph/Frame/FrameResources.h`) keeps one texture per name for the
+  whole frame. The same shape returns the same texture, whoever registers. A history or persistent texture is a versioned slot: a new
+  size is its next version, so no graph is built again and every stage follows it; the passes declare the slot. Each stage's graph
+  imports the texture; no graph makes it. A history's first clear is added only when the texture is new. The image-space port's targets
+  (`MakeOwned`, `MakeOwnedLike`) come from it; a future port's cross-stage targets should too.
+- At a staged build's switch-in the replaced build's recordings go, with its graph and pools.
+- Only targets kept across frames are registered by name. A registered resource got a backing in every graph holding the client.
+- ORG: a graph's end gives back the alias placements it made that no later graph or standalone backing replaced
+  (`ReleaseOwnAliasPlacements`).
+
+Measured: the resources listed here 1,642 to 1,471 MiB (g1n to g5n); process dedicated VRAM native 3,254 MiB (plain perf-taa run, against
+3,395 to 3,514 before this pass), guest 3,036.
+
+Left: `ImageSpace::GetHitA/B/Swap` and `FullBlurDown/Swap` (24.7 MiB) are still backed with no pass in any live graph. The give-back
+runs for them (logged, 3 given back at the TAA switch build's end), but something gives them a standalone backing again afterwards; not
+found. One transient object placed by two live graphs would still be placed twice; no such case is left in this scene.
+
+### The survey
+
+Verdicts: **keep** (needed as is), **remove** (nothing in native reads it), **transient** (written and read within a known span of the
+frame: aliasable by the next agent), **on-demand** (only a rare path uses it), **one copy** (a duplicate). Stages: start, pre-depth,
+pre-main, deferred+water (dw), sun, post, UI, menu UI; DCLF = Drawcall Limit Fix's graphs. Sizes are after this pass (g5n), MiB.
+
+| Resource | MiB | Owner | Written / read by | Survives the frame | Verdict |
+|---|---|---|---|---|---|
+| `Engine::Depth::kSHADOWMAPS`, `_ESRAM` | 264 + 66 | engine target | DCLF shadow views; pre-depth, pre-main, post, menu UI, DCLF | yes (cached cascades) | keep |
+| `Skylighting::ProbeArray`, `ShadowBitmask`, `AccumFramesArray`, `ShadowVisibility`, `Occlusion` | 112.5 | CS feature | pre-main; dw, DCLF | yes (accumulation) | keep |
+| `TerrainShadows::ShadowHeight`, `HeightMap` | 49.2 | CS feature | pre-depth (a stripe a frame); dw, post, DCLF | yes | keep |
+| main depth, `kMAIN_COPY` depth, `TerrainBlending::BlendedDepth16`, `kREFRACTION_NORMALS`, `kUNDERWATER_MASK`, `kMAIN_COPY`, the water displacement pair | 41.6 | engine targets | see "Engine targets still used"; read by the next frame | yes | keep |
+| `kMAIN`, `Upscaling::UpscaledTexture`, `HDR::UiTexture` | 23.7 | engine / CS | every world stage; post; the UI stages | `kMAIN` read by Scaleform and menus | keep (Upscaled: Streamline submissions ORG does not track) |
+| SSGI history (`IlY`, `GiSpecular`, `IlCoCg`, `PrevGeo`, `AO`, `AccumFrames`) | 59.4 | CS feature (port) | dw | yes (ping-pong) | keep |
+| `ImageSpace::SAO`, `SAORawAO0/1`, `TAAHistory0/1`, `Bloom`, `AdaptedLuminance0/1` | 40.1 | frame (`Frame::Resources`) | dw (SAO), post (TAA, bloom, adaptation); DCLF reads the adaptation | yes | keep (one copy now) |
+| normals targets (`kNORMAL_TAAMASK_SSRMASK`, `_SWAP`) | 15.8 | engine targets | pre-main, dw; post, menu UI (by the engine's frame counter) | one of the pair, yes | keep |
+| VL pair `kIMAGESPACE_VOLUMETRIC_LIGHTING`, `_PREVIOUS` | 7.9 | engine targets | post | yes (by parity) | keep |
+| Dynamic Cubemaps, Cloud Shadows layers, LLF lists, Volumetric Shadows copy, Grass Collision, `kREFLECTIONS` cube, other CS feature state | ~70 | CS features | start to dw, DCLF | yes | keep |
+| unnamed native textures (`Native::Texture2D` x9: 1920x1080 R32 with mips, 2048x2048, 720x1071, ...) | 24.7 | made through the native device | not in any graph | ? | keep (owners not identified) |
+| `kBOOK_TEXT_0..3`, `kBOOK_TEXT` depth | 45.0 | engine targets | declared by every Scaleform pass of UI and menu UI; drawn only in the book menu | no | on-demand |
+| `kWATER_1/2` | 31.6 | engine targets | cleared by the frame clear group and dw; the water TAA form (`NoPass`) would draw them | yes (water TAA) | on-demand |
+| `HDR::HdrTexture`, `HDR::OutputTexture` | 23.7 | CS feature | HDR output only (off here); made at setup so the switch needs no setup | no | on-demand |
+| `ImageSpace::GetHitA/B/Swap`, `FullBlurDown/Swap` | 24.7 | frame (transients) | post's get-hit and full-screen blur steps, absent by key here | no | on-demand (still backed: see above) |
+| `kMENUBG` | 7.9 | engine target | post's capture copy (capture frames); menu UI's frozen composite | while a menu freezes the world | on-demand |
+| `kSCREENSHOT`, `kLOCAL_MAP`, `kLOCAL_MAP_SWAP`, lens-flare targets | 13.4 | engine targets | console screenshot (`NoPass`), the local map (map menu), lens flares (`NoPass`) | no | on-demand |
+| `Bink::Movie` | 9.0 | CS (Bink port) | UI and menu UI, movie frames only | no | on-demand (kept for the session so a movie never rebuilds the Present graph) |
+| engine `kSAO`, `kSAO_RAWAO`, `kSAO_RAWAO_PREVIOUS`, `kSAO_TEMP_BLUR`, `kTEMPORAL_AA_ACCUMULATION_1/2` | 47.5 | engine targets | none: the port draws into its own | - | remove (item 4: the port's image is the one) |
+| engine `VOLUMETRIC_LIGHTING_ACCUMULATION`, `_COPY` (two of each: the engine makes them twice and both stay) | 45.0 | engine 3D targets | none: ORG's `VolumetricLighting::Volume` replaces them | - | remove |
+| `kIMAGESPACE_TEMP_COPY/2`, `kTEMPORAL_AA_UI_ACCUMULATION_1/2` | 63.3 | engine targets | none (the post chain works in place; TAA's UI form is `NoPass`) | - | remove |
+| `kGETHIT_BUFFER`, `kGETHIT_BLURSWAP`, `kLDR_BLURSWAP`, `kLDR_DOWNSAMPLE0` | 17.8 | engine targets | none: the port's get-hit and depth of field steps draw into CS transients | - | remove |
+| `kNORMAL_TAAMASK_SSRMASK_DOWNSAMPLED` | 2.0 | engine target | the frame clear group clears it; SSR reads CS's `SSRMaskDownsampled` | - | remove (with its clear) |
+| `cs.native.texture.261` (1024x1024, 3 mips, RGBA16F) | 5.3 | made through the native device | not in any graph | ? | remove once its owner is found |
+| Deferred's G-buffer `cs.native.texture.270..275` | 43.5 | CS (Deferred, native) | pre-main (clear), DCLF opaque, dw (composite, last read) | no | transient: pre-main to dw |
+| `cs.scaleform.scratch.0..3` | 31.6 | CS (Scaleform port) | UI and menu UI (GFx filters) | no | transient: UI stage only |
+| SSGI and SSS transients (`IlYBlurInput`, `Radiance`, `RadianceTemp`, `IlCoCgBlurInput`, `Normal`, `WorkingDepth`, `AccumFramesScratch`, `SSS::DiffuseNoAlbedo`) | 62.7 (one pool) | CS feature (port) | dw | no | transient (aliased inside dw now; can share with other stages) |
+| SSGI `IlYScratch`, `GiSpecularScratch`, `IlCoCgScratch`, `AOScratch` (committed, not pooled) | 43.5 | CS feature (port) | dw | check: the history split's scratch halves | transient if nothing reads them next frame |
+| `ImageSpace::HdrScratch`, `LdrScratch`, `SAOBlurTemp`, `SSRMaskDownsampled`, `DofDownsample`, `DofBlurSwap`, `BloomSwap` | 28.6 | frame (transients) | post (scratch, depth of field, bloom); dw (SAO blur, SSR mask) | no | transient (pooled per stage) |
+| `VolumetricLighting::Volume320x192x90` | 11.3 | CS feature (port) | post | no | transient (pooled) |
+| `kSHADOW_MASK`, `kMOTION_VECTOR`, `kTEMPORAL_AA_MASK`, `kMAIN_ONLY_ALPHA` | 23.7 | engine targets | pre-main or DCLF write; dw, post read (TAA, SSR, SAO) | no | transient: pre-main to post |
+| `TerrainBlending::TerrainDepth`, `BlendedDepth`, `Mask`, `ScreenSpaceShadows::ShadowTexture` | 31.0 | CS features | pre-depth, pre-main; DCLF opaque, menu UI | no (BlendedDepth16 is the next frame's) | transient: pre-depth to opaque |
+| `kPOST_ZPREPASS_COPY` depth | 11.1 | engine target | pre-main's copy; dw, post, sun, DCLF | no | transient: pre-main to post |
+| `kRAW_WATER`, `kSNOW_SWAP`, `kSNOW_SPECALPHA`, `kSSR`, `kSSR_RAW`, `kSSR_BLURRED0` | 27.7 | engine targets | dw (water, snow, SSR) | no | transient: dw only |
+| `kREFRACTION_NORMALS Copy`, `kUNDERWATER_MASK Copy`, `kMAIN Copy`, `kIMAGESPACE_VOLUMETRIC_LIGHTING_COPY` | 20.3 | engine copy textures | post (refraction, underwater), dw | no | transient: within one stage |
+| `VolumetricShadows::ShadowBlurTemp` | 1.3 | CS feature | pre-depth | no | transient (pooled) |
+
+Summary (g5n, the resources above): keep 119 resources, 783 MiB; transient 51, 352 MiB; on-demand 22, 155 MiB; remove 18, 181 MiB; one
+copy none left. Before this pass (g1n): one copy 6 resources and 80 MiB of history, and 131 MiB more of transient copies.
+
+### For the second agent (transient aliasing across stages)
+
+Each CS stage's transients sit in its own private alias pool, and engine and feature targets that live only part of the frame are
+committed images. Candidates, with the span each needs:
+- Deferred's G-buffer (43.5): pre-main to dw. Never live with Scaleform's scratch (UI stage) or post's transients.
+- Scaleform scratch (31.6): UI only. Can take the G-buffer's or the SSGI pool's memory.
+- SSGI and SSS pool (62.7) and SSGI's committed scratch halves (43.5, if they hold nothing across frames): dw only.
+- Post's transients (`Hdr/LdrScratch`, depth of field, bloom swap, the VL volume: about 30): post only.
+- Engine targets with a known span: dw-only water, snow and SSR targets (27.7), the copy textures (20.3), `kSHADOW_MASK`,
+  `kMOTION_VECTOR`, `kTEMPORAL_AA_MASK`, `kMAIN_ONLY_ALPHA` (pre-main to post, 23.7), Terrain Blending and Screen Space Shadows (pre-depth
+  to opaque, 31.0), `kPOST_ZPREPASS_COPY` (pre-main to post, 11.1). These are engine targets or exported twins: aliasing them needs the
+  recipe's span as their lifetime, not one graph's.
+- One arena for every stage: each CS stage's transients are kept out of the shared arena (`SetPrivateAliasEpochs`) because another
+  epoch's transients took their memory between two runs. A shared arena placed by the recipe's spans would avoid that.
+
+### Not done in this pass (items 3 and 4)
+
+Engine targets nothing in native uses (the "remove" rows, 181 MiB) still have memory. The clean form needs:
+- BasicRHI: images whose memory is bound later or never, with views made now (Vulkan sparse binding, D3D12 reserved resources), or
+  native device records without an image (`NativeResource::Kind::Shell` is the model);
+- the native device: such a record is a fatal recipe mismatch at its first GPU use (a draw, clear or copy that reaches it), not at a bind
+  the engine makes before a withheld draw;
+- EngineTargets: the recipe's set of targets any stage or reachable old path can touch, and the others made unbacked in native.
+Rare-path targets (book, local map, screenshot, lens flares) would take memory while a build that uses them is live; the book and map
+menus and a screenshot cannot be reached by a background run, so those stay backed until a test reaches them. Item 4 (one image where the
+port draws into its own copy: SAO, TAA, VL accumulation) follows from item 3: the engine's are unbacked, the port's stay.
+
+### Checks (build `46485926fbab`)
+
+One background run each: native-quick (105.7), native-river (river-east mean difference 3.5 against the earlier run), native-interior
+(99.3 / 94.9, within the known variance), native-validation (the known 20 `VUID-vkCmdDraw-None-09600`, back-buffer layout lines and the
+known unused-output warnings only), the loading-thread run, the worldspace run (Tamriel, Solstheim, Riverwood: shadow height map versions,
+passed), guest-quick (106.1), and a frozen-world run with TAA on (`Journal Menu=show`, shot, hide, shots 5 and 65 frames after): the menu
+opened (a frozen-world capture frame and menu UI frames), and the world before and after reads 104.1, 103.8, 104.4: TAA, SAO and the
+adaptation carry across the menu. Pre-existing, not from this pass: one `[C] PublishedResources used on thread ..., not the render owner`
+line in every native run, the state before this pass included.
