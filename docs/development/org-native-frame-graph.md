@@ -4754,7 +4754,7 @@ displays left out, 0 shadow clear re-registrations, 0 holds ended with "no progr
 the harness marks them failed because it expects a world): native shows the mist and the emblem, darker than guest's.
 ORG is unchanged in this pass.
 
-## State of the native frame (2026-11-18, after Cleanup A5)
+## State of the native frame (2026-11-18, after Cleanup A6)
 
 Native mode (`CS_ORG_NATIVE=1`), Vulkan or D3D12. Every CS stage is one ORG graph, built off the render thread, staged and recorded before
 it switches in at a frame's `Renderer::Begin`, one kept recording per frame slot, one ticket a frame. Drawcall Limit Fix's graphs (*) are
@@ -4769,9 +4769,17 @@ stages of their own.
 
 One UI stage for every kind since Cleanup A4: it holds the menu UI stage's old layout (the frozen composite, three clear places,
 Scaleform's instances 8 to 15 and 0 to 7, a menu scene's steps, the present's clients, the overlay and the capture), and since Cleanup
-A5 the screen blood as its first step. The sun stage holds the precipitation's draws before the sun query (Cleanup A5). A steady world
-frame is about 11.2 to 12.0 tickets: the stages' and DCLF's (the sun stage takes 0.2 to 1.0; a frame without the first-person epoch puts
-both sun queries in it; a frame with rain or snow always has it).
+A5 the screen blood as its first step, since Cleanup A6 the face tint at a load after the displays. The sun stage holds the
+precipitation's draws before the sun query (Cleanup A5), and when the water comes after the blended draw (under water, Cleanup A6) the
+water. A steady world frame is about 11.2 to
+12.0 tickets: the stages' and DCLF's (the sun stage takes 0.2 to 1.0; a frame without the first-person epoch puts both sun queries in it;
+a frame with rain or snow always has it).
+
+No anchor runs an epoch of its own in native mode but HDR output and frame generation (Cleanup A6): every anchor a stage has a step at
+has no epoch of its own, and work at one outside every stage's step is an `own epoch in native mode` tap error (the mismatch policy). The
+frame sequence census counts own tickets in the session on each window's line, and prints every frame that has one (or engine work no
+stage had a place for, `unplaced:`), the first 32. Every engine clear and copy has a stage's place in every frame kind, or is dropped
+where it is taken with a stated reason (Cleanup A6, the table there).
 
 A pass that skips its run costs nothing for the resources no running pass touches: no entry or body barrier records for them and the
 ledger keeps their state (Cleanup A5). A stage's commit copies only the latch bytes its taps staged.
@@ -4780,14 +4788,19 @@ ledger keeps their state (Cleanup A5). A stage's commit copies only the latch by
 
 Present in every build of their stage, recorded at execution with the CPU's gate answers (a pass that does not run skips, its barriers
 folded), because the engine decides them late or a lagging build would lose them:
-- start: the six reflection faces' sky, the water effects' instances (8 ripples and 4 heightmap steps per target, 32 flow copies);
+- start: the decal tests' 4 instances (8 draws each), the face tint, the six reflection faces' sky, the water effects' instances (8
+  ripples and 4 heightmap steps per target, 32 flow copies), the shadow maps' clears DCLF's shadow view does not host;
+- pre-depth: the main depth's clear DCLF's Z-prepass does not host;
 - post: the screenshot copy, the frozen background's copy (`capture.menubg`), refraction and the radial blur after the tonemap, both tonemap
   forms, both forms of the last luminance level, the engine-counter parity variants (luminance, bright pass, the VL composite, the
   normals target), TAA's and the raw AO's history pairs (by slot parity, in the description), and in a routed build the pass-through copy;
 - deferred+water: the snow pass and its copy, the world steps' variants by the engine's counters;
 - UI: the screen blood, Scaleform's 16 instances, the capture's copy, the movie's tiles, the three clear places, a menu scene's draws,
-  composites and depth copy;
-- sun: the precipitation's draws (a frame's draws appended, each a tap);
+  composites and depth copy, the face tint;
+- sun: the precipitation's draws (a frame's draws appended, each a tap), and the water's steps for frames whose water comes after the
+  blended draw (the kMAIN copy, the water's draws, the water targets' clears, the water blend);
+- post: the kMAIN copy Main::RenderFirstPersonView makes in some cells, the clears of the motion vectors, kMAIN_ONLY_ALPHA and the TAA
+  mask in the frame TAA is turned on;
 - sun and post: the sun's two query instances.
 
 Absent by build key when off (a rebuild, staged, on change): the post slot effects, the HDR effect against its copy, the Effects11 tonemap
@@ -4804,35 +4817,30 @@ Terrain Blending, Volumetric Shadows, light culling, the bloom radii.
 | the normals targets, kMOTION_VECTOR, kTEMPORAL_AA_MASK, kSHADOW_MASK | DCLF's graphs, pre-main's clears, the menu scenes | deferred+water, post (SSR, SAO, TAA), the menu scenes' Lighting draws |
 | kMAIN_ONLY_ALPHA, kMAIN_COPY, kREFRACTION_NORMALS, kUNDERWATER_MASK, the water displacement pair and flow map | forward, deferred+water, the start stage | the next frame's start and deferred+water (`kPreviousFrame`) |
 | kHDR_DOWNSAMPLE0 and the luminance levels before the last | post, the menu composites | DCLF's character light |
-| the shadow maps, the precipitation occlusion map | DCLF's shadow view graph (and the engine at its occlusion point while DCLF does not draw a map) | DCLF's graphs, Skylighting (its own map lent into the slot), the precipitation |
+| the shadow maps, the precipitation occlusion map | DCLF's shadow view graph, the start stage's clears in frames DCLF does not draw them | DCLF's graphs, pre-depth, pre-main, post, the precipitation |
+| Skylighting's sky occlusion map (its own, no slot lent in native) | DCLF's shadow view graph; cleared by Skylighting's own pass (a load operation) after the probe update | the probe update (pre-main) |
 | kMENUBG | post's capture copy in a capture frame | the UI stage's frozen composite |
 | kSAVE_GAME_SCREENSHOT | post's screenshot copy | the save's thumbnail |
 | the reflection cubemap faces | the start stage | DCLF's graphs |
 
 ### What guest mode (DXVK) still uses of the old path
 
-Guest runs no CS stage. It uses: every frame anchor's own epoch (per-anchor epochs, `CanRun`/`RequestJoin`), the main ImageSpace client,
+Guest runs no CS stage. It uses: every frame anchor's own epoch (per-anchor epochs, `FrameAnchors::Scheduled` on the anchor's own built
+graph, the skeleton's group anchors and Skylighting's lent slot with its D3D11 clear), the main ImageSpace client,
 the clients built on first sight and the shape manifest (`ImageSpaceShapes.json`) with the per-draw shape capture, the D3D11 renderer for
 displays the graph refuses, the capture's D3D11 staging copy when the graph cannot take it, and the post
 chain's hooks (which only check and stage in native). This is the input for the guest port (plan stage 8).
 
 ### Old native paths still reachable
 
-- Per-anchor epochs: EngineDraws (only a water batch no stage's window takes: under water the blended draw, and DCLF's forward epoch
-  with it, comes before the water; inferred from the hook sites, not seen in a test), ImageSpace (the face tint at a load, its own client
-  since Cleanup A4),
-  EngineShadowClear and EngineFrameClear (world frames before DCLF draws and during its holds, frame 0), EngineCubeClear (outside world
-  frames), EngineCopy outside the stages' windows, EngineDepthCopy outside the stages, EngineQueries (world frames before DCLF draws),
-  DecalQueries (its client is never made in these sessions), HDROutput (HDR on), Tonemap and FrameGeneration (a menu scene's tonemap,
-  frame generation). A menu's scene over the live world is the UI stage's since Cleanup A4. The MovieTiles anchor is removed (Cleanup A2). A stage's one-shot passes now
-  rebuild only the anchors they sit at (the ImageSpace epoch for the histogram reset), so the re-entry hold after each load is gone
-  ("Render-thread cost").
-- `CanRun`/`RequestJoin`: the sky and decal clients' setup joins, the water family, the skeleton's group clears and copies, the face
-  tint. The menu scenes and the menu composites are segment-only since Cleanup A4; the blood, precipitation and shadow mask families since
-  Cleanup A5 (`Family::HeldForBatch`: the stage step holds the batch, or it is a `NotDeclared` tap error). At anchors a stage holds wholly, the upscaler's evaluate, Deferred clears, Skylighting, Cloud Shadows and
-  Volumetric Lighting ask `FrameAnchors::Scheduled` instead: the frame's schedule of that stage (Cleanup A2).
-- Clears of a lent target slot (Skylighting's map) stay on D3D11: the skeleton does not take them. A skeleton clear or copy run that does
-  not execute is now a tap error (`NotExecuted`, the mismatch policy); nothing replays it on D3D11 (Cleanup A1).
+- Per-anchor epochs: HDR output (HDR on) and frame generation's hudless copy (frame generation is off in native mode), both pieces of
+  their own. Every other anchor has no epoch in native mode (Cleanup A6): an anchor with a step in any stage is a stage's only, and work
+  outside the steps is an `own epoch in native mode` tap error.
+- `CanRun` and `RequestJoin` are deleted (Cleanup A6). A client asks `FrameAnchors::Scheduled` (a stage-held anchor's schedule; for a
+  shared anchor the open stage's step that takes its taps now) or `HeldNow`/`Family::HeldForBatch` (held, scheduled, or a mismatch).
+- A menu scene's tonemap with Post Processing or Effects11 owning the tonemap (the Tonemap anchor outside the post stage) would be an `own
+  epoch` mismatch: both are off in this game's settings, and their passes are built for the world chain's targets, so no UI stage step
+  takes them yet.
 - The phases and regions code is removed (`CS_ORG_PHASES` with it). `FrameAnchors::FlushRegions` kept its other jobs, the stages'
   commit points and the open-stage census, as `BeforeGpuWork`. `PassDesc::gated` is removed (Cleanup A1).
 - Volumetric Lighting off no longer stops native: the engine subsystems install its client whatever the feature's state, and with the
@@ -4844,6 +4852,8 @@ chain's hooks (which only check and stage in native). This is the input for the 
   anchor (Post Processing is off in this game's settings; Effects11's preset does not own the tonemap), so the routed TAA's interplay with
   Effects11's tonemap is untested too.
 - A menu's item model over the live world, the screen blood (needs a hit). Precipitation is covered by the `rain` config since Cleanup A5.
+- The decal tests (decals waiting to be placed need combat; the client is not made in these sessions: kDECAL_OCCLUSION has no view at
+  setup), a rain draw under water.
 - The menu scene's shadow casters (not built), the menu scenes' Light Limit Fix falloff (not matched).
 - The effects that are `NoPass` (not built): the rain ripple, rain heightmap, blend, smooth and normals water steps, ISSimpleColor's stencil
   fill and the UI form of TAA in a menu scene, other slot effects inside a menu scene's end-of-frame call, the local map's edge pass, the
@@ -6758,3 +6768,114 @@ marks has 0 builds, recordings and switches.
 - The screen blood (needs a hit): the UI stage's first step, its pass at execution into the back buffer before the displays.
 - Under water: the water's batches on the EngineDraws epoch (inferred from the hook sites), and a rain draw there (inferred: it would
   tap the sun stage before the water's batches).
+
+## Cleanup A6 (2026-11-18)
+
+Plan piece A6: no anchor runs an epoch of its own in native mode, but HDR output and frame generation (pieces of their own, not run by
+the tests). Three code commits and this text on `org-native/phases` (no submodule change). RX 6600, native Vulkan, Perf-Fast,
+background runs with `DXVK_DEBUG=hang`.
+
+### What still ran its own epoch (the inventory)
+
+A diagnostic build counted every own-epoch run in native mode by anchor, frame kind and Drawcall Limit Fix's state, and the frame
+sequence census printed every frame that had one (now permanent, below). Eleven runs (quick, dense quick, river, rain, interior,
+validation, loading thread, frozen world with TAA, upscalers, main menu) found most of these; the first build with the mismatch fatal
+found the rest (the worldspace run's Solstheim, the frame TAA is turned on, the save's start under water). None is in a steady frame:
+
+| Old path | When, and the engine's order (census) | Now |
+|---|---|---|
+| EngineShadowClear: the sun's cascades (depth2.0, 2.1) and the volumetric lighting's (depth3.0, 3.1); an interior's kSHADOWMAPS (4.0 to 4.3) once | every world frame before DCLF draws (a quick load: frames 541 to 589) and its load hold (590 to 598): after the start stage's taps, before EarlyPrepass | the start stage's last step, a place (`cs.engine.skeleton.shadow@start`). Pre-depth (Volumetric Shadows), pre-main (shadow mask, Skylighting) and post (VL) read those maps in those frames. Frames DCLF's shadow view draws keep its hosted clears |
+| EngineFrameClear: the main depth (depth0.0, flags 3) at Main::RenderDepth's start | the same frames: after pre-depth's tap, before DCLF's Z-prepass, which a hold's frames submit | the pre-depth stage's place (`cs.engine.skeleton.frame@pre-depth`), so the clear reaches the GPU before the Z-prepass. No pre-depth pass reads or writes the main depth |
+| EngineFrameClear: the main depth at frame 0 | before the first `Renderer::Begin`; frames 1 to 166 are the Bink start movie | dropped, as a Bink frame's: nothing reads the main depth before the next kind clears it |
+| EngineQueries: the world's sun query | frames before DCLF draws: the deferred+water stage committed only at DCLF's forward epoch, so the sun stage's window was still closed at the query | the deferred+water stage commits at the main pass's blended draw in every world frame (Features/Forward's hook, both call sites); the sun's commit point needed no change. The plan's "commit point for the sun stage" was the wrong stage |
+| EngineDepthCopy: twice in the first world frame | inside the cubemap's render (between the faces' sky), while the start stage is open | dropped: pre-main's copy writes kPOST_ZPREPASS_COPY again before any pass reads it (its readers in the recipe: pre-main after the copy, deferred+water, post, the UI stage's scene) |
+| EngineDepthCopy: CS's own (Deferred::DeferredPasses) and RenderDepth's | frames before DCLF draws: pre-main (and pre-depth) still open, their commit points (DCLF's main opaque and Z-prepass) did not come | each call ends the stage before it: RenderDepth's copy ends pre-depth, CS's copy ends pre-main (it is just before the DeferredPasses tap, which would end it) |
+| ImageSpace: one-shot clears (bloom, adapted luminance, TAA history) | the first main menu frames: the post chain's first clears ran when a menu composite ran the ImageSpace anchor | a stage-held client's one-shot passes wait for their stage |
+| ImageSpace: the face tint (`cs.engine.imagespace.facetint`) | a loading screen's frame after its displays; the first world frame before the cubemap render | a step of the UI stage (after the second Interface step) and of the start stage (its second step); segment-only |
+| EngineCopy: the kMAIN copy | Solstheim (the worldspace run), every frame: Main::RenderFirstPersonView copies kMAIN after DCLF's first-person epoch, before the first person's sun query | the post stage's first step (shared, as deferred+water's and the UI stage's). Before, every Solstheim frame ran it on its own ticket |
+| EngineFrameClear: the motion vectors and kMAIN_ONLY_ALPHA (rt7, rt3) | the frame TAA is turned on: inside the post chain, after the volumetric lighting | the post stage's chain clears (`cs.engine.skeleton.frame@post-chain`, with the TAA mask's), first at its last ImageSpace step, before TAA reads them |
+| EngineCubeClear outside world frames | not seen in any run | dropped in every kind: only the start stage and DCLF's world graphs read the faces, and the next world frame's face sky clears each face it draws first. The anchor is not reserved in native mode |
+| EngineCopy outside the stages' windows | once (an own frame clear of the TAA mask had ended deferred+water early) | gone with the own clears; the sun (the water after the blended draw) and post stages have a kMAIN copy step |
+| DecalQueries | its client is not made in these sessions (kDECAL_OCCLUSION has no view at setup) | the start stage's first step, the anchor wholly: 4 instances of 8 draws, each with its own part of the query range, recorded at execution from the instance's run (built, not run) |
+| EngineDraws: the water under water (Cleanup A5 kept the epoch for it) | reached (below): under water the water's batches come after the blended draw's first call site (+0x51) in some frames, and before it in others | the sun stage's steps after the precipitation: the kMAIN copy, `cs.water.surface`, the water targets' clears and the water blend (the same clients as the deferred+water stage's). Deferred+water commits at the blended draw, so a later water tap finds only the sun stage open. Above water deferred+water takes them; the sun stage's steps skip |
+| Skylighting's lent-slot clear | the explicit D3D11 clear of its map while lent into the precipitation slot (the first frames): an immediate operation of the native context, outside every stage | native mode lends no slot, culls nothing for the engine, and clears nothing on D3D11; the clear pass after the probe update is a load operation in every run, and the update waits for the first run with it |
+| Tonemap: a menu scene's tonemap | Post Processing and Effects11 are off in this game's settings | not moved: their passes are built for the world chain's targets. It would now be an `own epoch` mismatch |
+| HDROutput, FrameGeneration | HDR off; frame generation off in native mode | keep their anchors' tickets (allowed in Run) |
+
+### The mechanism
+
+- **An anchor with a step anywhere has no epoch of its own** in native mode: every anchor any stage names (wholly or by client) is a
+  member (`declaredMembers`), so no graph is built for it. A shared anchor's clients are in the graphs once every stage with a step there
+  was built with them (`BuiltSerial`, the oldest of those stages).
+- **An own epoch in native is a mismatch.** Work at an anchor outside every stage's step is the new tap error `OwnEpoch` ("own epoch in
+  native mode"): fatal in development builds, logged once in release, and nothing is drawn. Run's own-epoch tail is not reached in native
+  but for HDR output and frame generation.
+- **`CanRun` and `RequestJoin` are deleted.** `FrameAnchors::Scheduled` answers for a shared anchor too (the open stage's step that takes
+  the anchor's taps now, and its schedule), and a client asks it or `Family::HeldForBatch` (now with an anchor: the sky's faces, main
+  sky and sun, the water, the decal tests). Register already asks for the builds, so the setup joins (sky, decal, water, Deferred clears)
+  are gone. The water family is segment-only, and its batch's shape is checked before its stage (a menu scene's accumulator draws a water
+  batch in the main menu, which is not the family's).
+- **A stage with no schedule yet** (the first frames after its first build is asked for): `HeldNow` answers held, not scheduled, so the
+  work lags instead of being a mismatch; `FrameAnchors::StageAbsent` and `StageOpen` say the same for the skeleton's copies.
+- **Skeleton (Engine/Skeleton).** In native mode a clear goes to Drawcall Limit Fix's host when it draws the view this frame, else to a
+  stage place (`StagePlaceFor`: the start stage for the shadow slices, pre-depth for RenderDepth's main depth clear, or the anchor stage
+  hosts as before); with no place it is a `NotDeclared` tap error, never a ticket. The group clears' own path and `FlushGroup`'s commit of
+  deferred+water before a clear's ticket are guest-only now. `EpochStarting` lets the pre-depth stage commit before the Z-prepass as the
+  start stage commits before the shadow view.
+- **Commit points.** The pre-depth stage ends at a point: just before DCLF's Z-prepass (or later GPU work), at RenderDepth's depth copy,
+  or at pre-main's first tap. Deferred+water commits at the blended draw, at both its call sites (above water after the water, under
+  water first at +0x51).
+- **The recipe** (`Recipe.cpp`): the ticket epochs left the world recipe's stages (decal queries, cube, shadow and frame clears, engine
+  draws, engine queries, Tonemap, Interface, Present, Capture); `Owner::Tickets` is removed. Post keeps frame generation's epoch, UI HDR
+  output's. The sun stage's name is printed (it was "?").
+- **The census** (`FrameSequence`): an end tap is marked `commit`, an own run `own ticket`; each window's line has the session's own
+  tickets, and frames with one or with `unplaced:` work (a skeleton clear or copy no stage had a place for) are printed, the first 32.
+- Deleted: `CanRun`, `RequestJoin` and their seven callers' uses, the native own path for skeleton clears and copies, the A5 note's
+  EngineDraws water epoch, the cube anchor in native, `Owner::Tickets`, the face tint's own-epoch path, the Skylighting lent slot and
+  D3D11 clear in native. The three commits: 32 source files, 613 lines in and 357 out (most of what came in is comments: the stage
+  table's, the places', the census').
+
+### Checks
+
+Final build `ee2874830775`. One background run each, all passed with 0 tap errors, no `NoPass`, 0 recipe findings, no failed build,
+and 0 own tickets in the session on every census line: native-quick (the Bink start movie drawn by the graph), native-river, native-vulkan+rain (the first precipitation run drawn by the graph), native-interior,
+native-validation (the same message classes and counts as Cleanup A5's: the storage image format, the indirect draw's unused output
+and the queue submit's layout lines, 9 each), the loading-thread run, the frozen-world Journal Menu run with TAA, native-upscalers
+(DLSS, FSR, TAA, XeSS), the worldspace run (Tamriel, Solstheim, Riverwood), the under-water run, guest-quick, guest-quick with
+`org.ports=all`, guest+rain, guest under water. The main menu (Start On Save moved aside for the run and restored, the instance checked
+before every other run): 0 tap errors, 0 own tickets; the harness marks it never-loaded, as it expects a world. A build without the
+sun stage's water steps failed two of them (Underwater, below). The census lines of every native run with it print 0 own tickets in
+the session, and no run's log has a `submit CS anchor` line. The only `[C]` line is the known `PublishedResources` one.
+
+Shots against Cleanup A5's runs: within the few units the eye adaptation moves between runs (journal menu 1.4, upscalers 2.7 to 4.8,
+quick 2.7, interior 4.4, river 6.7 with the wind; region means within 2 to 3).
+
+### Measured (perf-taa, RX 6600, uncapped, VRAM Budget off, alternating)
+
+| | Native | Guest |
+|---|---|---|
+| frame period between the marks | 19.29 / 19.24 ms | 19.21 / 19.30 ms |
+| process dedicated VRAM | 2,931 / 2,936 MiB | 3,072 / 3,034 MiB |
+
+Before (Cleanup A5, same machine): native 19.07 / 19.10 against guest 19.06 / 19.06 ms. Both sides are about 0.15 ms slower in this
+session; native against guest is unchanged. With the census on (`org.epoch_stats`, `org.census_frames=300`): 11.2 to 11.3 tickets a
+frame (11.2 before), and the steady window between the marks has 0 builds, recordings, switches and lagged work. No world frame's ticket
+count moves: the own tickets were all in frames before DCLF draws, its holds, a load's first frames, the TAA switch frame and Solstheim.
+
+### Underwater
+
+`tcl`, then `player.setpos z -420` at Riverwood's river (x 19300, y -45300) keeps the camera under water in a background run (the shot
+shows the water's surface from below; z -200 and -330 were above it), and the blended draw's under-water call site fires; it fires also at
+the autoload save's start position in the session's first world frames. Both orders occur there: a periodic census frame under water had
+the water as deferred+water's taps before DCLF's forward epoch, as above water. A build without the sun stage's water steps then stopped
+twice with `NotDeclared` water batches after the deferred+water commit: under water (frame 1757, 14 frames after the `setpos`) and at the
+save's start (frame 656, the worldspace run). With the steps the same two runs pass (`f0uw`, `f9ws`). Shots against guest
+(`uw420`, `uw560`): native is brighter than guest by about 12 (means 74.0 against 62.0, 72.5 against 61.1) with the same picture; not
+looked into (there is no earlier native under-water shot to compare with, and eye adaptation moves a few units between runs, less than
+this). The tests' configs are unchanged; the steps are in the scratch script `uw2.sh`.
+
+### Waiting on a foreground session
+
+- Rain under water (a precipitation draw and a water batch in the same frame, both in the sun stage: not seen).
+- The decal tests (decals waiting to be placed; the client is not made in these sessions).
+- HDR output and frame generation keep their tickets; a menu scene's tonemap with Post Processing or Effects11 would stop as a mismatch.
