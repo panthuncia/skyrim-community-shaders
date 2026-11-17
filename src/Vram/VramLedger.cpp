@@ -50,7 +50,7 @@ namespace Vram
 			std::uint64_t blockBytes = 0;
 			std::uint64_t allocationBytes = 0;
 			bool hasLedger = false;
-			std::uint64_t ledgerBytes = 0;  // device-local vkAllocateMemory, exact (debug mode)
+			std::uint64_t ledgerBytes = 0;  // device-local vkAllocateMemory, exact (BasicRHI's live ledger)
 		};
 
 		// This DLL's file name, lower case: frames in it are CS's.
@@ -130,37 +130,45 @@ namespace Vram
 			}
 		}
 
-		// Debug mode: ORG's device memory by vkAllocateMemory call site, listed (not counted: the resources' rows count it).
+#if defined(CS_HAS_RENDER_GRAPH)
+		// BasicRHI's live ledger: every vkAllocateMemory it made and has not freed, by site and memory kind. It is the one count of the
+		// graph's device memory, in native and guest mode alike. Listed by site (not counted: the resources' rows count it).
 		void ReadOrgLedger(OrgPart& a_part)
 		{
-			if (!Debug::HasOrgLedger())
+			auto* host = RenderGraphRuntime::Get().Host();
+			if (!host)
+				return;
+			const auto live = host->Device().LiveMemoryStats();
+			if (!live.counted)
 				return;
 			a_part.hasLedger = true;
-			std::unordered_map<std::string, Row> bySite;
-			for (const auto& allocation : Debug::OrgAllocations()) {
-				if (allocation.deviceLocal)
-					a_part.ledgerBytes += allocation.bytes;
-				auto& row = bySite[allocation.site + (allocation.deviceLocal ? "" : " (host)")];
-				if (row.name.empty()) {
-					row.name = "vkAllocateMemory at " + allocation.site;
+			static constexpr const char* kSites[] = { "root-constant pages", "preprocess pages", "descriptor heaps", "buffers", "textures", "heaps", "imports", "other" };
+			static constexpr const char* kKinds[] = { "device-local", "ReBAR", "system memory" };
+			static_assert(std::size(kSites) == static_cast<std::size_t>(LiveMemorySite::Count));
+			static_assert(std::size(kKinds) == static_cast<std::size_t>(LiveMemoryKind::Count));
+			for (std::size_t site = 0; site < std::size(kSites); ++site)
+				for (std::size_t kind = 0; kind < std::size(kKinds); ++kind) {
+					const auto bytes = live.bytes[site][kind];
+					if (!bytes)
+						continue;
+					// Device-local and ReBAR memory are both in the device-local heap.
+					const bool deviceLocal = kind != static_cast<std::size_t>(LiveMemoryKind::System);
+					if (deviceLocal)
+						a_part.ledgerBytes += bytes;
+					Row row;
+					row.name = fmt::format("BasicRHI {} ({})", kSites[site], kKinds[kind]);
 					row.owner = "ORG/Device memory";
 					row.type = "Device memory";
 					row.source = "ORG";
 					row.category = "ORG/Device memory";
-					row.callsite = allocation.site;
-					row.deviceLocal = allocation.deviceLocal;
+					row.detail = fmt::format("{} allocations", live.allocations[site][kind]);
+					row.bytes = bytes;
+					row.deviceLocal = deviceLocal;
 					row.flags = kRowNotCounted | kRowInternal;
+					a_part.rows.push_back(std::move(row));
 				}
-				row.bytes += allocation.bytes;
-				++row.uid;  // the allocation count
-			}
-			for (auto& [site, row] : bySite) {
-				row.detail = fmt::format("{} allocations", row.uid);
-				a_part.rows.push_back(std::move(row));
-			}
 		}
 
-#if defined(CS_HAS_RENDER_GRAPH)
 		const char* OrgType(rhi::ResourceType a_type)
 		{
 			switch (a_type) {
@@ -233,6 +241,8 @@ namespace Vram
 			return part;
 		}
 #else
+		void ReadOrgLedger(OrgPart&) {}
+
 		OrgPart ReadOrg()
 		{
 			return {};
@@ -474,7 +484,7 @@ namespace Vram
 
 			if (a_org.present) {
 				lines.push_back({ "ORG allocated", orgAllocated, Kind::Total, 1,
-					a_org.hasLedger      ? "every device-local vkAllocateMemory the graph made (CS_VRAM_DEBUG's ledger)" :
+					a_org.hasLedger      ? "every device-local vkAllocateMemory BasicRHI made and has not freed (its live ledger)" :
 					a_org.allocatorValid ? "its allocator's blocks, plus tracked resources outside them" :
 										   "tracked resources (no allocator statistics)" });
 				lines.push_back({ "ORG resources", orgCounted - orgAliasPools, Kind::Attributed, 2, {} });
@@ -483,7 +493,7 @@ namespace Vram
 					if (a_org.allocatorValid)
 						lines.push_back({ "Allocator slack", orgSlack, Kind::Residual, 2, "free space in the allocator's blocks" });
 					lines.push_back({ "Allocations not tracked", orgUntracked, Kind::Residual, 2,
-						a_org.hasLedger ? "device memory no tracked resource claims; the list's ORG/Device memory rows give each call site" :
+						a_org.hasLedger ? "device memory no tracked resource claims (in native mode, the engine's textures and buffers); the list's ORG/Device memory rows give each site" :
 										  "allocator allocations without a tracked resource (descriptor heaps, scratch, ...); CS_VRAM_DEBUG lists them" });
 					if (orgOutside)
 						lines.push_back({ "Tracked outside the allocator", orgOutside, Kind::Attributed, 2, "committed resources" });
