@@ -264,6 +264,63 @@ namespace Testing
 	namespace
 	{
 		std::optional<std::chrono::steady_clock::time_point> exitRequested;  // render thread: the exit command's time
+
+		// The live-image shots (expect.live_frames). Render thread only.
+		enum class LiveProbe : std::uint8_t
+		{
+			None,   // not started
+			First,  // _live-a asked for at liveFirst
+			Done,   // both asked for, or skipped
+		};
+		LiveProbe liveProbe = LiveProbe::None;
+		std::uint32_t liveFirst = 0;
+
+		/**
+		 * @brief expect.live_frames: before the exit, two shots of the final image that many frames apart. A frozen final target gives
+		 * two identical files, which the harness fails. Skipped outside the world phase (a run that exits at a menu or at boot).
+		 * Returns true once the exit may go on.
+		 */
+		bool LiveProbeDone(std::uint32_t a_frame)
+		{
+			if (liveProbe == LiveProbe::Done)
+				return true;
+			auto& run = Run();
+			std::uint32_t frames = 0;
+			std::filesystem::path directory;
+			bool world = false;
+			{
+				std::scoped_lock lock(run.mutex);
+				frames = run.config.expectLiveFrames;
+				directory = run.config.runDir;
+				world = run.phase == "world";
+			}
+			if (!frames || directory.empty()) {
+				liveProbe = LiveProbe::Done;
+				return true;
+			}
+			directory /= "shots";
+			if (liveProbe == LiveProbe::None) {
+				if (!world) {
+					logger::info("[TEST] live image: skipped, the exit is not in the world phase");
+					liveProbe = LiveProbe::Done;
+					return true;
+				}
+				std::error_code error;
+				std::filesystem::create_directories(directory, error);
+				globals::features::screenshotFeature.RequestCapture(directory / "_live-a.png");
+				liveFirst = a_frame;
+				liveProbe = LiveProbe::First;
+				return false;
+			}
+			if (a_frame - liveFirst < frames)
+				return false;
+			globals::features::screenshotFeature.RequestCapture(directory / "_live-b.png");
+			logger::info("[TEST] live image: shots at frames {} and {}", liveFirst, a_frame);
+			liveProbe = LiveProbe::Done;
+			// The exit's wait for the shots starts now.
+			exitRequested = std::chrono::steady_clock::now();
+			return true;
+		}
 	}
 
 	void RequestExit()
@@ -300,7 +357,7 @@ namespace Testing
 		RunLegacy(frame);
 		TickCommands();
 		// The exit waits for the shots still being read back or encoded: a process ended mid-write leaves a broken PNG.
-		if (exitRequested) {
+		if (exitRequested && LiveProbeDone(frame)) {
 			const bool pending = globals::features::screenshotFeature.ScriptedCapturesPending();
 			const bool late = std::chrono::steady_clock::now() - *exitRequested > std::chrono::seconds(10);
 			if (!pending || late) {

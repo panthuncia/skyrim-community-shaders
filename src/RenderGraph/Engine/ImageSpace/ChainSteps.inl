@@ -1524,7 +1524,7 @@ bool TakeChainStep(std::size_t a_effect, bool a_compute, std::array<std::uint32_
 				key.variant, ChainGroupName(group), Frame::Driver::Current().frame, part.made[entry], row, row < 256 && (rows[row / 64] >> (row % 64) & 1u) ? "on" : "off",
 				FrameAnchors::CanTap(client.id) ? "tappable" : "not tappable");
 		chain.requested[group] = Frame::Driver::Current().frame;
-		Frame::Driver::NoteLaggedWork(segment);
+		Frame::Driver::NoteStepLag(segment, client.id, fmt::format("post step {} (variant {:#x})", kEffects[a_effect].effectName, key.variant));
 		return true;
 	}
 	// A group on by a hook's request stays on while the engine draws it (a field at Begin may not see it: the VL composite).

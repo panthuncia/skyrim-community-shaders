@@ -138,6 +138,12 @@ namespace Testing
 					a_errors.push_back(fmt::format("expect.reach = '{}' is no milestone", a_config.expectReach));
 				a_config.expectShots = Strings(expect->value("shots", json()), "expect.shots", a_errors);
 				a_config.expectNoLog = Strings(expect->value("no_log", json()), "expect.no_log", a_errors);
+				if (const auto live = expect->find("live_frames"); live != expect->end()) {
+					if (live->is_number_unsigned())
+						a_config.expectLiveFrames = live->get<std::uint32_t>();
+					else if (!(live->is_number_integer() && live->get<std::int64_t>() == 0))
+						a_errors.push_back("expect.live_frames is not a whole number of at least 0");
+				}
 			}
 		}
 

@@ -14,6 +14,8 @@
 #include <chrono>
 #include <functional>
 #include <mutex>
+#include <string>
+#include <unordered_map>
 #include <vector>
 
 namespace DCLF
@@ -48,6 +50,7 @@ namespace RenderGraph::Frame::Driver
 			std::uint64_t buildSwitches = 0;  // staged builds switched in whole with their recordings
 			std::uint64_t keyBuilds = 0;      // builds asked for because the stage's key changed (absent passes)
 			std::uint64_t absentAfter = 0;    // absent frames after the segment first ran (a build or a switch blanked it)
+			std::uint64_t stagedAskedAgain = 0;  // the most recordings of one staged build asked for again (the starvation rule's count)
 		};
 
 		/** @brief The switches' lag, in frames since a slot began to wait for the description: 0, 1, 2, 3, 4-7, 8-15, 16 and more. */
@@ -93,6 +96,7 @@ namespace RenderGraph::Frame::Driver
 			std::array<bool, kErrors> errorLogged{};  // the mismatch policy's one line per kind for the session
 			std::array<bool, kSegments> everPresent{};  // the segment ran on a schedule once (session)
 			std::array<std::uint64_t, kSegments> absentAfterTotal{};  // absent frames after that (session)
+			std::unordered_map<std::string, std::uint64_t> untappable;  // NoteStepLag: per client, the frame its work last lagged with nothing on its way
 		};
 
 		/** @brief Logs a line within a_log's window (16 a segment in 5 s), else counts it; the count is logged once the window passes. */
@@ -353,6 +357,10 @@ namespace RenderGraph::Frame::Driver
 			return "no CS pass";
 		case TapError::Refused:
 			return "refused";
+		case TapError::Untappable:
+			return "not tappable";
+		case TapError::Starved:
+			return "staged build starved";
 		default:
 			return "?";
 		}
@@ -485,6 +493,38 @@ namespace RenderGraph::Frame::Driver
 		++state.segments[static_cast<std::size_t>(a_segment)].lagged;
 	}
 
+	void NoteStepLag(SegmentId a_segment, std::string_view a_client, std::string_view a_what)
+	{
+		auto& state = Get();
+		auto& seen = state.untappable[std::string(a_client)];
+		if (FrameAnchors::TapMayLag(a_client)) {
+			seen = 0;
+			NoteLaggedWork(a_segment);
+			return;
+		}
+		// The first frame the engine draws a pass the stage's build left out asks the next description for it, and the next Begin asks
+		// the stage's key for a build. So the work lags one frame. Still nothing on its way in the next frame: it would never be drawn.
+		const auto frame = state.current.frame;
+		if (seen + 1 != frame) {
+			if (seen != frame)
+				seen = frame;
+			NoteLaggedWork(a_segment);
+			return;
+		}
+		NoteTapError(TapError::Untappable, a_segment,
+			fmt::format("{}: its client {} is not in the build the stage runs, and in the frame after the engine first drew it the stage runs its "
+						"current schedule with no build of the client on its way; it would never be drawn",
+				a_what, a_client));
+	}
+
+	void NoteStagedAskedAgain(SegmentId a_segment, std::uint32_t a_count)
+	{
+		auto& state = Get();
+		const std::lock_guard lock(state.mutex);
+		auto& counts = state.segments[static_cast<std::size_t>(a_segment)];
+		counts.stagedAskedAgain = std::max<std::uint64_t>(counts.stagedAskedAgain, a_count);
+	}
+
 	void NoteAbsentTap(SegmentId a_segment)
 	{
 		auto& state = Get();
@@ -518,11 +558,11 @@ namespace RenderGraph::Frame::Driver
 		for (std::uint32_t s = 0; s < kSegments; ++s) {
 			const auto& counts = state.segments[s];
 			segments += fmt::format("; {}: declared {}, taps {}, recordings {}, late requests {}, switches {}, current {}, lagging {}, absent {} ({} taps), "
-									"lagged work {}, build switches {}, key builds {}, absent after it first ran {} (session {})",
+									"lagged work {}, build switches {}, key builds {}, staged recordings asked again {}, absent after it first ran {} (session {})",
 				SegmentName(static_cast<SegmentId>(s)), counts.declared, counts.taps, counts.recordings, counts.late, counts.switches,
 				counts.scheduled[static_cast<std::size_t>(Scheduled::Current)], counts.scheduled[static_cast<std::size_t>(Scheduled::Lagging)],
-				counts.scheduled[static_cast<std::size_t>(Scheduled::Absent)], counts.absentTaps, counts.lagged, counts.buildSwitches, counts.keyBuilds, counts.absentAfter,
-				state.absentAfterTotal[s]);
+				counts.scheduled[static_cast<std::size_t>(Scheduled::Absent)], counts.absentTaps, counts.lagged, counts.buildSwitches, counts.keyBuilds,
+				counts.stagedAskedAgain, counts.absentAfter, state.absentAfterTotal[s]);
 		}
 		const auto lagLine = [](const auto& a_lags) {
 			std::string line;

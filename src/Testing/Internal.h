@@ -38,6 +38,9 @@ namespace Testing
 		std::string expectReach;
 		std::vector<std::string> expectShots;
 		std::vector<std::string> expectNoLog;
+		// expect.live_frames: at the exit, in a world frame, two shots this many frames apart (_live-a, _live-b). The harness fails a
+		// run whose two are the same image: a frozen final target. 0: no such shots.
+		std::uint32_t expectLiveFrames = 0;
 	};
 
 	/** @brief A milestone's time (seconds since the plugin loaded) and frame. */

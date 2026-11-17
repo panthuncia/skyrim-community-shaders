@@ -847,7 +847,7 @@ bool TakeWorldStep(WorldScope a_scope, std::size_t a_effect, bool a_compute, std
 		// description turns it on. The water blend's rows are always on.
 		if (!water)
 			world.requestedScopes[entry] = Frame::Driver::Current().frame;
-		Frame::Driver::NoteLaggedWork(Frame::SegmentId::Deferred);
+		Frame::Driver::NoteStepLag(Frame::SegmentId::Deferred, client.id, fmt::format("world step {} (variant {:#x})", kEffects[a_effect].effectName, variant));
 		return true;
 	}
 	// A step on by a hook's request stays on while the engine draws it.

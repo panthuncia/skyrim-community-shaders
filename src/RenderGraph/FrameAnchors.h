@@ -661,6 +661,15 @@ namespace FrameAnchors
 	bool CanTap(std::string_view a_id);
 
 	/**
+	 * @brief Whether work of client a_id that the frame's schedule leaves out may lag (Frame::Driver::NoteStepLag): a build that holds its
+	 * registration is on its way (asked for, building or staged), its stage has no schedule this frame or runs an older description while
+	 * the frame's own is recorded, its stage's window is not open, or the build the stage runs holds it (the row is off: the next
+	 * description turns it on). False when the stage runs the schedule of its current description on a build without the client and no
+	 * build of the client is coming: that work would never be drawn. Render owner.
+	 */
+	bool TapMayLag(std::string_view a_id);
+
+	/**
 	 * @brief Whether a declared segment (a CS stage) holds anchor a_anchor wholly: every run of it is one of the stage's taps, and it has
 	 * no epoch of its own. Fixed once the render graph initialized. Any thread.
 	 */

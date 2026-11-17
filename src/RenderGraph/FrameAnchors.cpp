@@ -37,6 +37,7 @@
 #	include <Resources/TextureDescription.h>
 #	include <Resources/VersionedTexture.h>
 #	include <rhi_helpers.h>
+#	include <unordered_set>
 
 #	include <algorithm>
 #	include <array>
@@ -839,6 +840,12 @@ namespace FrameAnchors
 			std::array<std::uint64_t, kDeclared> waitFrame{};
 			// The frame a stage's staged build was first seen at Begin (0: none): its switch's lag counts from it.
 			std::array<std::uint64_t, kDeclared> stagedSince{};
+			// A staged build's recordings so far (the starvation rule in Schedule): the build they count for, the descriptions asked for (fields hash and slot),
+			// and how many of those were asked for again because their recording was gone. A staged build switches in once every slot's
+			// recording is ready; requests that keep replacing its recordings starve it.
+			std::array<std::uint64_t, kDeclared> stagedCounted{};
+			std::array<std::unordered_set<std::uint64_t>, kDeclared> stagedAsked{};
+			std::array<std::uint32_t, kDeclared> stagedAskedAgain{};
 			// Whether this frame's recording bound the current versions at Begin: a version published after Begin is a mismatch, one
 			// published before it lags until the new recording is ready.
 			std::array<bool, kDeclared> frameVersionsCurrent{};
@@ -2655,8 +2662,10 @@ namespace FrameAnchors
 		 * re-record. Never waits. Render owner.
 		 */
 		std::shared_ptr<SegmentRecording> RequestDeclared(State& a_state, std::uint32_t a_declared, const SegmentFields& a_fields, std::uint32_t a_slot,
-			std::uint64_t a_frame, std::string_view a_why)
+			std::uint64_t a_frame, std::string_view a_why, bool* a_asked = nullptr)
 		{
+			if (a_asked)
+				*a_asked = false;
 			auto& recordings = a_state.declaredRecordings[a_declared];
 			const auto hash = RenderGraph::Frame::FieldsHash(a_fields);
 			std::string reason;
@@ -2709,6 +2718,8 @@ namespace FrameAnchors
 				}
 				recordings.entries.push_back(entry);
 			}
+			if (a_asked)
+				*a_asked = true;
 			Driver::NoteRecording(static_cast<SegmentId>(a_declared), a_frame, fmt::format("{}{}", reason, a_why));
 			if (!a_state.inBegin)
 				Driver::NoteLateRequest(static_cast<SegmentId>(a_declared));
@@ -2789,9 +2800,18 @@ namespace FrameAnchors
 						stagedGeneration, stagedKey.get(), true);
 					std::array<std::shared_ptr<const org::GraphHost::EpochRecording>, RenderGraphRuntime::kGameFramesInFlight> ready{};
 					bool all = true;
+					if (a_state.stagedCounted[a_declared] != stagedGeneration) {
+						a_state.stagedCounted[a_declared] = stagedGeneration;
+						a_state.stagedAsked[a_declared].clear();
+						a_state.stagedAskedAgain[a_declared] = 0;
+					}
 					// A staged build with nothing to record (no client) switches in at once; the stage is absent on it.
 					for (std::uint32_t s = 0; s < RenderGraphRuntime::kGameFramesInFlight && staged.graph; ++s) {
-						const auto entry = RequestDeclared(a_state, a_declared, staged, s, a_frame.frame, " (staged build)");
+						bool asked = false;
+						const auto entry = RequestDeclared(a_state, a_declared, staged, s, a_frame.frame, " (staged build)", &asked);
+						// A description of this build asked for again: its finished recording was dropped before the build switched in.
+						if (asked && !a_state.stagedAsked[a_declared].insert(RenderGraph::Frame::FieldsHash(staged) * 31 + s).second)
+							++a_state.stagedAskedAgain[a_declared];
 						const std::lock_guard lock(recordings.mutex);
 						if (entry->done && entry->recording)
 							ready[s] = entry->recording;
@@ -2800,6 +2820,18 @@ namespace FrameAnchors
 					}
 					if (a_state.stagedSince[a_declared] == 0)
 						a_state.stagedSince[a_declared] = a_frame.frame;
+					// The starvation rule: a staged build's recordings may be asked for again a few times (a build drops one), never
+					// without end. Past the limit the build would never switch in and the stage would run the replaced build's
+					// schedule for good: a schedule bug, a mismatch (fatal in development builds).
+					constexpr std::uint32_t kAskedAgainLimit = 4 * RenderGraphRuntime::kGameFramesInFlight;
+					if (!all && a_state.stagedAskedAgain[a_declared] > kAskedAgainLimit) {
+						Driver::NoteTapError(Driver::TapError::Starved, segment,
+							fmt::format("staged build {} was staged at frame {} and has not switched in: {} of its recordings were asked for again after "
+										"they were dropped, {} descriptions asked for in all; requests keep replacing its recordings",
+								stagedGeneration, a_state.stagedSince[a_declared], a_state.stagedAskedAgain[a_declared], a_state.stagedAsked[a_declared].size()));
+						a_state.stagedAskedAgain[a_declared] = 0;
+					}
+					Driver::NoteStagedAskedAgain(segment, a_state.stagedAskedAgain[a_declared]);
 					if (all && RenderGraph::Builds::SwitchStaged(epoch)) {
 						const auto built = a_state.declaredSnapshots[a_declared].load(std::memory_order_acquire);
 						// A build asked for by a new key: how many frames its passes took from the Begin that wanted them to this one.
@@ -3598,6 +3630,41 @@ namespace FrameAnchors
 				return true;
 		}
 		return false;
+	}
+
+	bool TapMayLag(std::string_view a_id)
+	{
+		auto& state = Anchors();
+		if (!SegmentsOn() || !state.host || !IsRenderOwner())
+			return true;
+		auto lock = Guard();
+		auto* client = FindClient(state, a_id);
+		if (!client)
+			return false;
+		if (WaitsToJoin(state, *client))
+			return true;
+		const auto& frame = Driver::Current();
+		bool held = false;
+		for (std::uint32_t d = 0; d < kDeclared; ++d) {
+			if (!state.declaredEpochs[d] || !ClientHolds(*client, d))
+				continue;
+			held = true;
+			if (state.host->StagedGeneration(EpochOfDeclared(d)) != 0 || !WindowOpen(state, d) || !state.frameRecording[d])
+				return true;
+			// A build asked for by the stage's key (absent passes) and not in place yet.
+			const auto& use = state.keyUse[d];
+			const auto builtKey = state.declaredKeys[d].load(std::memory_order_acquire);
+			if (use.requestedSerial && (!builtKey || builtKey->serial < use.requestedSerial))
+				return true;
+			// A lagging schedule: the frame's own description is being recorded.
+			if (!(frame.Segment(static_cast<SegmentId>(d)) == state.frameWanted[d]))
+				return true;
+			const auto& built = state.frameBuilt[d];
+			if (built && std::ranges::find(built->clients, client->desc) != built->clients.end())
+				return true;
+		}
+		// A client no stage holds is not this rule's.
+		return !held;
 	}
 
 	bool StageInputs(std::string_view a_id, const std::function<void()>& a_write)
@@ -4502,6 +4569,7 @@ namespace FrameAnchors
 	bool NamedByStage(std::string_view) { return false; }
 	std::uint32_t PeakRunsPerFrame(Anchor) { return 0; }
 	bool BuildPending(std::string_view) { return false; }
+	bool TapMayLag(std::string_view) { return true; }
 	void PrimeStages(std::string_view) {}
 	void LogRunStats() {}
 	std::uint64_t RenderOwnerChanges() { return 0; }

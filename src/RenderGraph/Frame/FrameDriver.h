@@ -81,6 +81,8 @@ namespace RenderGraph::Frame::Driver
 		InstanceNotDeclared,  // a step's hook fired more often in one segment run than the description declared instances of its client
 		NoPass,               // an engine effect step fired its data-only hook, and CS has no pass for that step at all
 		Refused,              // a client could not draw the engine's work at its hook (a Scaleform display the graph cannot draw), in native mode
+		Untappable,           // a step's client is not in the build its stage runs, the stage's schedule is current, and no build of it is on its way
+		Starved,              // a staged build's recordings were asked for again and again: it would never switch in
 		Count
 	};
 
@@ -135,6 +137,16 @@ namespace RenderGraph::Frame::Driver
 	 * it on: the schedule lags, the work is not drawn this frame. Counted, not a mismatch (render owner).
 	 */
 	void NoteLaggedWork(SegmentId a_segment);
+
+	/**
+	 * @brief A step's client had work at its tap that the running schedule leaves out (render owner). Lagged work (NoteLaggedWork) when
+	 * FrameAnchors::TapMayLag allows it: the client's build or its stage's recording is on its way. Otherwise the work would never be
+	 * drawn: TapError::Untappable, named by a_what.
+	 */
+	void NoteStepLag(SegmentId a_segment, std::string_view a_client, std::string_view a_what);
+
+	/** @brief A staged build of the segment's graph has had a_count of its recordings asked for again so far (the census keeps the highest). */
+	void NoteStagedAskedAgain(SegmentId a_segment, std::uint32_t a_count);
 
 	/** @brief A tap of a segment that has no schedule this frame (Scheduled::Absent): it draws nothing (render owner). */
 	void NoteAbsentTap(SegmentId a_segment);

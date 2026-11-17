@@ -339,7 +339,7 @@ bool TakeStartStep(std::size_t a_effect, bool a_compute, std::array<std::uint32_
 	const bool scheduled = entry < 256 && (rows[entry / 64] >> (entry % 64) & 1u) != 0 && FrameAnchors::CanTap(client.id);
 	if (!start.made[entry] || !scheduled) {
 		// The frame's schedule does not hold the client yet (its first build): nothing is drawn this frame.
-		Frame::Driver::NoteLaggedWork(segment);
+		Frame::Driver::NoteStepLag(segment, client.id, fmt::format("water step {} (variant {:#x})", kEffects[a_effect].effectName, variant));
 		return true;
 	}
 	const auto before = client.batch.size();
