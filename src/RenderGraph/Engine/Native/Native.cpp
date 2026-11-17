@@ -18,9 +18,9 @@ namespace RenderGraph::Engine::Native
 	namespace
 	{
 		/**
-		 * @brief The port switches native mode turns on: every engine subsystem and CS feature on ORG (the set of
-		 * tools/cs-ab/scenarios/latch-census-short.env, without its diagnostics), and the flush latch, so no engine draw is left to
-		 * D3D11. Without one of them its subsystem would call the native handles, which do nothing.
+		 * @brief The port switches every ORG mode turns on: every engine subsystem and CS feature on ORG, and the flush latch, so no
+		 * engine draw is left to D3D11. In native mode a subsystem without its port would call the native handles, which do nothing.
+		 * Guest mode (DXVK) runs the same ports (plan B0); there a switch set to 0 keeps that subsystem on D3D11.
 		 */
 		constexpr std::array kPortSwitches{
 			"CS_ORG_ENGINE_FLUSH_LATCH",
@@ -67,6 +67,14 @@ namespace RenderGraph::Engine::Native
 			"CS_ORG_SCALEFORM",
 			"CS_ORG_BINK",
 			"CS_ORG_LOADING_THREAD",
+		};
+
+		/**
+		 * @brief The switches guest mode needs besides the ports: the guest context, through which the flush latch withholds the
+		 * engine's binds and draws from DXVK. Native mode's handles do that job there.
+		 */
+		constexpr std::array kGuestSwitches{
+			"CS_ORG_TRIPWIRE_GUEST",
 		};
 
 		/** @brief Switches that select a DXVK path native mode does not have: each one set is a startup error. */
@@ -172,10 +180,105 @@ namespace RenderGraph::Engine::Native
 		stl::report_and_fail(message);
 	}
 
+	namespace
+	{
+		/** @brief The value of an environment switch, read directly (Switches caches its reads); empty when unset or too long. */
+		std::string Environment(const char* a_name)
+		{
+			char value[32]{};
+			const DWORD length = ::GetEnvironmentVariableA(a_name, value, sizeof(value));
+			return length != 0 && length < sizeof(value) ? std::string(value) : std::string();
+		}
+
+		/**
+		 * @brief Guest mode is DXVK with the render graph on: not native, not CS_ORG=0 or CS_ORG=features (no graph), not the system
+		 * D3D11 runtime, not the owned frame. Read from the environment: this runs before the first cached read.
+		 */
+		bool GuestMode()
+		{
+#if defined(CS_HAS_RENDER_GRAPH)
+			const auto org = Environment("CS_ORG");
+			if (org == "0" || org == "features")
+				return false;
+			return Environment("CS_NATIVE_D3D11") != "1" && Environment("CS_ORG_OWNED_FRAME") != "1";
+#else
+			return false;
+#endif
+		}
+
+		/**
+		 * @brief Sets each switch of a_names to 1 that the environment does not set. A switch set already keeps its value: in native
+		 * mode a 0 is a startup error (a_zeroFails). Returns the names it turned on.
+		 */
+		template <std::size_t N>
+		std::string TurnOn(const std::array<const char*, N>& a_names, bool a_zeroFails)
+		{
+			std::string turnedOn;
+			for (const char* name : a_names) {
+				char value[16]{};
+				const DWORD length = ::GetEnvironmentVariableA(name, value, sizeof(value));
+				if (length != 0 && length < sizeof(value)) {
+					if (a_zeroFails && std::string_view(value) == "0")
+						Fail(fmt::format("{}=0", name), "its subsystem would draw through D3D11");
+					continue;
+				}
+				::SetEnvironmentVariableA(name, "1");
+				// std::getenv reads the C runtime's own copy, which SetEnvironmentVariable does not change.
+				_putenv_s(name, "1");
+				turnedOn += turnedOn.empty() ? name : fmt::format(", {}", name);
+			}
+			return turnedOn;
+		}
+
+		/** @brief The switches a_names that some code read before this point: they are cached without the value set here. */
+		template <std::size_t N>
+		std::string ReadEarly(const std::array<const char*, N>& a_names)
+		{
+			std::string early;
+			for (const char* name : a_names)
+				if (Switches::Value(name).empty())
+					early += early.empty() ? name : fmt::format(", {}", name);
+			return early;
+		}
+
+		/** @brief Guest mode's ports: every port native mode runs, the latch and the guest context. Explicit values are kept. */
+		void ApplyGuestSwitches()
+		{
+			if (!GuestMode())
+				return;
+			auto turnedOn = TurnOn(kPortSwitches, false);
+			const auto guest = TurnOn(kGuestSwitches, false);
+			if (!guest.empty())
+				turnedOn += turnedOn.empty() ? guest : fmt::format(", {}", guest);
+			std::string kept;
+			for (const char* name : kPortSwitches)
+				if (Environment(name) == "0")
+					kept += kept.empty() ? name : fmt::format(", {}", name);
+			for (const char* name : kGuestSwitches)
+				if (Environment(name) == "0")
+					kept += kept.empty() ? name : fmt::format(", {}", name);
+			auto early = ReadEarly(kPortSwitches);
+			const auto earlyGuest = ReadEarly(kGuestSwitches);
+			if (!earlyGuest.empty())
+				early += early.empty() ? earlyGuest : fmt::format(", {}", earlyGuest);
+			if (!early.empty()) {
+				const auto message = fmt::format("Community Shaders: the port switches {} were read before guest mode could turn them on, so those "
+												 "subsystems would stay on D3D11. Fix the early read.",
+					early);
+				logger::critical("[ORG guest] {}", message);
+				stl::report_and_fail(message);
+			}
+			logger::info("[ORG guest] port switches: {}; kept off by the environment: {}", turnedOn.empty() ? std::string("every one was set already") : fmt::format("turned on {}", turnedOn),
+				kept.empty() ? std::string("none") : kept);
+		}
+	}
+
 	void ApplySwitches()
 	{
-		if (!Requested())
+		if (!Requested()) {
+			ApplyGuestSwitches();
 			return;
+		}
 		for (const auto& conflict : kConflicts) {
 			if (Switches::Equals(conflict.name, conflict.value))
 				Fail(fmt::format("{}={}", conflict.name, conflict.value), conflict.why);
@@ -189,21 +292,7 @@ namespace RenderGraph::Engine::Native
 			Fail("CS_DISABLE_FEATURES naming DrawcallLimitFix", "the world's draws it takes would stay the engine's");
 		if (Util::SwitchFile::Value("CS_DCLF", false) == "0")
 			Fail("CS_DCLF=0", "the world's draws Drawcall Limit Fix takes would stay the engine's");
-		std::string turnedOn;
-		for (const char* name : kPortSwitches) {
-			// Read the environment directly: a switch read through Switches is cached, and this must run before the first read.
-			char value[16]{};
-			const DWORD length = ::GetEnvironmentVariableA(name, value, sizeof(value));
-			if (length != 0 && length < sizeof(value)) {
-				if (std::string_view(value) == "0")
-					Fail(fmt::format("{}=0", name), "its subsystem would draw through D3D11");
-				continue;
-			}
-			::SetEnvironmentVariableA(name, "1");
-			// std::getenv reads the C runtime's own copy, which SetEnvironmentVariable does not change.
-			_putenv_s(name, "1");
-			turnedOn += turnedOn.empty() ? name : fmt::format(", {}", name);
-		}
+		const auto turnedOn = TurnOn(kPortSwitches, true);
 		// A switch some code read before this point is cached without the value set here: that subsystem would stay on D3D11.
 		for (const char* name : kPortSwitches) {
 			if (Switches::Value(name).empty())

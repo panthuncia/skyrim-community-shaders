@@ -71,7 +71,7 @@ extern "C" DLLEXPORT bool SKSEAPI SKSEPlugin_Load(const SKSE::LoadInterface* a_s
 	Testing::LoadConfig();
 	// The graphics API (DXVK Vulkan, native Vulkan or native D3D12): sets CS_ORG_NATIVE and CS_ORG_NATIVE_BACKEND for it.
 	GraphicsAPI::ApplyAtBoot();
-	// CS_ORG_NATIVE=1: the port switches native mode needs, before anything reads them.
+	// The port switches native and guest mode turn on, before anything reads them.
 	RenderGraph::Engine::Native::ApplySwitches();
 	SKSE::Init(a_skse);
 	// SKSE::Init replaced the log with CommonLib's; its sinks go behind the fan-out sink, so a diagnostic capture can copy the lines

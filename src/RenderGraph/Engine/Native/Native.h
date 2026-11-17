@@ -71,7 +71,9 @@ namespace RenderGraph::Engine::Native
 
 	/**
 	 * @brief Stage 1, right after CommunityShaders.env is applied and before any other switch is read: turns on every port switch
-	 * native mode needs (in the process environment), and fails on a switch that conflicts. Does nothing without CS_ORG_NATIVE=1.
+	 * native mode needs (in the process environment), and fails on a switch that conflicts. Guest mode (DXVK with the render graph
+	 * on) turns on the same ports, the flush latch and the guest context; a switch the environment sets to 0 is kept there. Nothing
+	 * with CS_ORG=0, CS_ORG=features, CS_NATIVE_D3D11=1 or CS_ORG_OWNED_FRAME=1.
 	 */
 	void ApplySwitches();
 
