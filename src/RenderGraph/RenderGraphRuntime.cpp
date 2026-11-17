@@ -18,6 +18,7 @@
 #include "RenderGraph/Frame/FrameDriver.h"
 #include "RenderGraph/Frame/PostChain.h"
 #include "RenderGraph/Frame/Recipe.h"
+#include "RenderGraph/Frame/Transients.h"
 #include "RenderGraph/FrameAnchorSelfTest.h"
 #include "RenderGraph/FrameAnchors.h"
 #include "RenderGraph/GraphResources.h"
@@ -1613,6 +1614,7 @@ struct RenderGraphRuntime::Impl
 		FrameAnchors::LogRunStats();
 		RenderGraph::Frame::Driver::LogStats();
 		RenderGraph::Frame::Recipes::LogStats();
+		RenderGraph::Frame::Transients::LogStats();
 		RenderGraph::Frame::PostChain::LogStats();
 		epochCount = 0;
 	}
@@ -2565,10 +2567,16 @@ bool RenderGraphRuntime::Initialize()
 			// submission from the ledgers.
 			if (const auto segments = FrameAnchors::SegmentEpochs(); !segments.empty()) {
 				revisionEpochs.insert(revisionEpochs.end(), segments.begin(), segments.end());
-				// Their transients in pools of their own: in the shared arena another epoch's transients took their memory between two
-				// frames, so every admission found alias activations and planned against the ledgers (perf-taa: 27 us a submission
-				// against 12 with pools of their own).
-				state->host->SetPrivateAliasEpochs(segments);
+				// Their transients in the frame arena, each stage's in a range reserved for its place in the frame
+				// (Frame/Transients.h): stages whose places differ share memory, and each frame's alias activations are the same, so
+				// admissions keep their predicted plans. With the arena off, pools of their own: in the shared arena another epoch's
+				// transients took their memory between two frames, so every admission found alias activations and planned against
+				// the ledgers (perf-taa: 27 us a submission against 12 with pools of their own).
+				std::vector<std::pair<RenderGraph::Frame::SegmentId, std::uint32_t>> byId;
+				for (const auto& [declared, epoch] : FrameAnchors::SegmentEpochsById())
+					byId.push_back({ static_cast<RenderGraph::Frame::SegmentId>(declared), epoch });
+				if (!state->native || !RenderGraph::Frame::Transients::Install(*state->host, byId))
+					state->host->SetPrivateAliasEpochs(segments);
 				logger::info("[ORG] frame segments: epochs {} are revision-driven and open", fmt::join(segments, ","));
 			}
 			logger::info("[ORG] async epochs: {}; revision-driven: {}", fmt::join(epochs, ","), fmt::join(revisionEpochs, ","));

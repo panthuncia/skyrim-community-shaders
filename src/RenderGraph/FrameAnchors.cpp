@@ -3805,6 +3805,16 @@ namespace FrameAnchors
 		return epochs;
 	}
 
+	std::vector<std::pair<std::uint8_t, std::uint32_t>> SegmentEpochsById()
+	{
+		std::vector<std::pair<std::uint8_t, std::uint32_t>> epochs;
+		const auto& state = Anchors();
+		for (std::uint32_t d = 0; d < kDeclared; ++d)
+			if (state.declaredEpochs[d])
+				epochs.push_back({ static_cast<std::uint8_t>(d), EpochOfDeclared(d) });
+		return epochs;
+	}
+
 	void BeginFrame(RenderGraph::Frame::Description& a_frame)
 	{
 		auto& state = Anchors();
@@ -4558,6 +4568,7 @@ namespace FrameAnchors
 	std::uint32_t RunSegment(Anchor) { return 0; }
 	void BeginFrame(RenderGraph::Frame::Description&) {}
 	std::vector<std::uint32_t> SegmentEpochs() { return {}; }
+	std::vector<std::pair<std::uint8_t, std::uint32_t>> SegmentEpochsById() { return {}; }
 	void BeforeGpuWork(const char*, std::uint32_t) {}
 	void LatchMainThread() {}
 	bool IsRenderOwner() { return true; }

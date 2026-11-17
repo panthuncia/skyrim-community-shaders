@@ -21,9 +21,11 @@
 #include "Hooks.h"
 #include "ORGDeferredClears.h"
 #include "ORGDeferredComposite.h"
+#include "RenderGraph/Engine/Native/Native.h"
 #include "RenderGraph/Engine/Skeleton/Skeleton.h"
 #include "RenderGraph/Engine/Targets/EngineTargets.h"
 #include "RenderGraph/Engine/Tripwire/Tripwire.h"
+#include "RenderGraph/Frame/Transients.h"
 #include "RenderGraph/FrameAnchors.h"
 
 struct DepthStates
@@ -171,8 +173,20 @@ void Deferred::SetupResources()
 		// TEMPORAL_AA_WATER_2
 
 		// The GBuffer and the water targets. With CS_ORG_ENGINE_TARGETS, ORG made them in these shapes already (PlanTargets).
+		// Native mode: the GBuffer is one frame arena group (Frame/Transients.h), placed when the scope ends. Its content lives
+		// within a frame. The water targets keep memory of their own: they are the water's TAA history.
+		const auto water = [](const DeferredTarget& a_target) {
+			return a_target.target == RE::RENDER_TARGETS::kWATER_1 || a_target.target == RE::RENDER_TARGETS::kWATER_2;
+		};
+		{
+			RenderGraph::Engine::Native::FrameTransientScope gbuffer(RenderGraph::Frame::Transients::Group::GBuffer);
+			for (const auto& target : kDeferredTargets)
+				if (!water(target))
+					SetupRenderTarget(target.target, target.name, texDesc, srvDesc, rtvDesc, uavDesc, target.format, kDeferredTargetBinds);
+		}
 		for (const auto& target : kDeferredTargets)
-			SetupRenderTarget(target.target, target.name, texDesc, srvDesc, rtvDesc, uavDesc, target.format, kDeferredTargetBinds);
+			if (water(target))
+				SetupRenderTarget(target.target, target.name, texDesc, srvDesc, rtvDesc, uavDesc, target.format, kDeferredTargetBinds);
 	}
 
 	{

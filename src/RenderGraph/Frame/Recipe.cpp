@@ -1,4 +1,5 @@
 #include "RenderGraph/Frame/Recipe.h"
+#include "RenderGraph/Frame/Transients.h"
 
 #if defined(CS_HAS_RENDER_GRAPH)
 
@@ -230,6 +231,30 @@ namespace RenderGraph::Frame::Recipes
 						a_passes[i].name, StageName(static_cast<StageId>(a_passes[i].stage)), name, a_passes[writer->second].name,
 						StageName(static_cast<StageId>(a_passes[writer->second].stage))));
 				}
+			// The frame arena's groups (Frame/Transients.h): resources several stages use, whose memory other stages' transients share
+			// outside the group's span. A pass outside the span would use bytes another resource holds then. The first pass of the frame
+			// that uses one must write it: the bytes come in holding another resource's data.
+			std::set<std::string> groupFindings, groupSeen;
+			for (const auto& pass : a_passes) {
+				const auto check = [&](const std::string& a_name, bool a_write) {
+					const auto group = Transients::GroupOf(a_name);
+					if (!group)
+						return;
+					const auto span = group->second;
+					if ((pass.stage < span.first || pass.stage > span.last) && groupFindings.insert(a_name + "@" + pass.name).second)
+						a_findings.push_back(fmt::format("{} ({}) uses {} of {}, whose span in the frame arena is {} (Frame/Transients.cpp): other stages' "
+														 "transients hold its memory there. Widen the span or move the pass",
+							pass.name, StageName(static_cast<StageId>(pass.stage)), a_name, Transients::NameOf(group->first), Transients::Describe(span)));
+					if (groupSeen.insert(a_name).second && !a_write)
+						a_findings.push_back(fmt::format("{} ({}) reads {} of {} first in the frame: its memory comes in holding another resource's data. "
+														 "Its first pass must write it",
+							pass.name, StageName(static_cast<StageId>(pass.stage)), a_name, Transients::NameOf(group->first)));
+				};
+				for (const auto& name : pass.writes)
+					check(name, true);
+				for (const auto& name : pass.reads)
+					check(name, std::ranges::find(pass.writes, name) != pass.writes.end());
+			}
 			a_state.passes = static_cast<std::uint32_t>(a_passes.size());
 			a_state.previousInputs = static_cast<std::uint32_t>(previous.size());
 			a_state.outsideInputs = static_cast<std::uint32_t>(outside.size());

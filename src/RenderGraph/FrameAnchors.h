@@ -734,6 +734,9 @@ namespace FrameAnchors
 	/** @brief Initialize: the declared segments' epochs, which the host makes revision-driven and closed. Empty with segments off. */
 	std::vector<std::uint32_t> SegmentEpochs();
 
+	/** @brief SegmentEpochs with each epoch's segment (a RenderGraph::Frame::SegmentId value), for the frame arena's spans. */
+	std::vector<std::pair<std::uint8_t, std::uint32_t>> SegmentEpochsById();
+
 	/**
 	 * @brief Another module's epoch whose passes a declared segment holds (a_segment, a RenderGraphRuntime::Segment value: Light
 	 * Limit Fix's light culling, held by the pre-main segment). The module gives:

@@ -1322,6 +1322,11 @@ namespace RenderGraph::Engine::Scaleform::Passes
 				}
 			if (!a_state.scratchWidth || !a_state.scratchHeight)
 				return;
+			// Memory of their own, not the frame arena (Frame/Transients.h): every draw pass declares a read of every scratch image,
+			// and the stage's plan puts the role targets' draws, which read them, before the scratch images' own draws. So the first
+			// use in the frame is a read, and in the arena its bytes would hold another stage's data then. Placing them needs the
+			// draws ordered by what each really reads.
+			std::vector<std::shared_ptr<org::PixelBuffer>> textures;
 			for (std::uint32_t i = 0; i < kScratchTargets; ++i) {
 				org::TextureDescription desc{};
 				desc.imageDimensions = { { a_state.scratchWidth, a_state.scratchHeight, 0, 0 } };
@@ -1331,15 +1336,21 @@ namespace RenderGraph::Engine::Scaleform::Passes
 				desc.rtvFormat = kScratchFormat;
 				desc.hasSRV = true;
 				desc.srvFormat = kScratchFormat;
-				auto texture = org::PixelBuffer::CreateShared(desc);
+				auto texture = org::PixelBuffer::CreateSharedUnmaterialized(desc);
 				if (!texture) {
 					logger::warn("[ORG] Scaleform: scratch image {} could not be made; GFx's render targets beyond it are not drawn", i);
 					break;
 				}
+				texture->SetName(fmt::format("cs.scaleform.scratch.{}", i));
+				textures.push_back(std::move(texture));
+			}
+			for (const auto& texture : textures)
+				texture->Materialize();
+			for (std::uint32_t i = 0; i < textures.size(); ++i) {
+				auto& texture = textures[i];
 				auto surface = std::make_shared<Surface>();
 				surface->scratch = static_cast<std::int32_t>(i);
-				surface->ownId = fmt::format("cs.scaleform.scratch.{}", i);
-				texture->SetName(surface->ownId);
+				surface->ownId = texture->GetName();
 				surface->colour = FrameAnchors::Texture(std::static_pointer_cast<org::Resource>(texture));
 				surface->colourFormat = kScratchFormat;
 				surface->width = a_state.scratchWidth;

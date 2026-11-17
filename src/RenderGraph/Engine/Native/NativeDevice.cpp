@@ -29,6 +29,7 @@
 #	include "RenderGraph/Engine/Skeleton/SkeletonSites.h"
 #	include "RenderGraph/ExternalWork.h"
 #	include "RenderGraph/Frame/FrameDriver.h"
+#	include "RenderGraph/Frame/Transients.h"
 #	include "RenderGraph/FrameAnchors.h"
 #	include "RenderGraph/GenerateMips.h"
 #	include "RenderGraph/GraphResources.h"
@@ -464,6 +465,8 @@ namespace RenderGraph::Engine::Native
 			// answers it for every handle of this record, so the context's work and the imports follow the version. Read and
 			// written with the registry's lock.
 			std::shared_ptr<NativeResource> renamed;
+			// A frame arena group's texture (FrameTransientScope): its place in the arena, shared with the group's other textures.
+			std::shared_ptr<const void> arenaPlacement;
 
 			NativeResource();
 			~NativeResource();
@@ -1008,6 +1011,19 @@ namespace RenderGraph::Engine::Native
 			std::string name;
 		};
 
+		/**
+		 * @brief The frame arena group a FrameTransientScope collects on this thread: the textures made without memory, and for each
+		 * the rest of its making once it is placed.
+		 */
+		struct FrameGroup
+		{
+			Frame::Transients::Group group{};
+			std::vector<std::shared_ptr<org::PixelBuffer>> textures;
+			std::vector<std::function<bool()>> finish;
+			std::vector<std::shared_ptr<NativeResource>> records;
+		};
+		thread_local FrameGroup* t_frameGroup = nullptr;
+
 		/** @brief The request's description as the censuses read it (NativeResource::bindFlags and the rest). */
 		void NoteRequest(NativeResource& a_record, const TextureRequest& a_request)
 		{
@@ -1447,9 +1463,54 @@ namespace RenderGraph::Engine::Native
 				auto record = std::make_shared<NativeResource>();
 				record->name = a_request.name;
 				NoteRequest(*record, a_request);
+				// Inside a frame arena group (FrameTransientScope): made without memory now, placed with the group's other textures
+				// when the scope ends. Until then the record has no image, so any GPU use of it is a recipe mismatch.
+				const bool grouped = t_frameGroup && !a_request.data && a_request.usage == D3D11_USAGE_DEFAULT && Frame::Transients::On();
+				if (grouped) {
+					try {
+						auto texture = org::PixelBuffer::CreateSharedUnmaterialized(desc);
+						texture->SetName(fmt::format("cs.native.texture.{}", record->serial));
+						record->kind = NativeResource::Kind::Unbacked;
+						record->graphOwned = texture;
+						t_frameGroup->textures.push_back(texture);
+						t_frameGroup->records.push_back(record);
+						TextureRequest request = a_request;
+						request.data = nullptr;
+						t_frameGroup->finish.push_back([this, record, request, a_dxgiFormat, a_format, a_viewFormat, a_support, a_mips, a_layers, a_depth] {
+							return FinishGraphOwned(record, request, a_dxgiFormat, a_format, a_viewFormat, a_support, a_mips, a_layers, a_depth);
+						});
+					} catch (const std::exception& e) {
+						LogHostMade(fmt::format("ORG could not make it ({})", e.what()), a_request.name);
+						return false;
+					}
+					a_out = std::move(record);
+					return true;
+				}
 				try {
-					auto texture = org::PixelBuffer::CreateShared(desc);
-					texture->SetName(fmt::format("cs.native.texture.{}", record->serial));
+					record->graphOwned = org::PixelBuffer::CreateShared(desc);
+					record->graphOwned->SetName(fmt::format("cs.native.texture.{}", record->serial));
+				} catch (const std::exception& e) {
+					LogHostMade(fmt::format("ORG could not make it ({})", e.what()), a_request.name);
+					return false;
+				}
+				if (!FinishGraphOwned(record, a_request, a_dxgiFormat, a_format, a_viewFormat, a_support, a_mips, a_layers, a_depth))
+					return false;
+				a_out = std::move(record);
+				return true;
+			}
+
+			/**
+			 * @brief The rest of MakeGraphOwned once the PixelBuffer has its memory: the record imports its image for the context's
+			 * operations and the D3D11 views, its contents and layout go in through ORG's external client, and the record becomes
+			 * tracked. False (logged) when one step fails.
+			 */
+			bool FinishGraphOwned(const std::shared_ptr<NativeResource>& a_record, const TextureRequest& a_request, DXGI_FORMAT a_dxgiFormat, rhi::Format a_format,
+				rhi::Format a_viewFormat, const rhi::FormatSupport& a_support, uint32_t a_mips, uint32_t a_layers, uint32_t a_depth)
+			{
+				const auto& record = a_record;
+				try {
+					auto texture = record->graphOwned;
+					record->graphOwned = nullptr;
 					if (!FillImage(*record, texture->GetAPIResource(), a_request, a_dxgiFormat, a_format, a_support, a_mips, a_layers, a_depth, VK_IMAGE_LAYOUT_GENERAL)) {
 						LogHostMade("BasicRHI did not describe the image ORG made", a_request.name);
 						return false;
@@ -1482,7 +1543,6 @@ namespace RenderGraph::Engine::Native
 					if (FAILED(MakeStaging(cpu, true, record->upload)))
 						return false;
 				}
-				a_out = std::move(record);
 				return true;
 			}
 
@@ -5143,6 +5203,42 @@ namespace RenderGraph::Engine::Native
 		return Tripwire::CreateTexture3D(desc, std::move(options));
 	}
 
+	FrameTransientScope::FrameTransientScope(Frame::Transients::Group a_group)
+	{
+		// One group at a time on a thread; a scope inside another adds to the outer group.
+		if (t_frameGroup || !g_device || !Frame::Transients::On())
+			return;
+		m_group = new FrameGroup{ a_group, {}, {} };
+		t_frameGroup = static_cast<FrameGroup*>(m_group);
+	}
+
+	FrameTransientScope::~FrameTransientScope()
+	{
+		if (!m_group)
+			return;
+		std::unique_ptr<FrameGroup> group(static_cast<FrameGroup*>(m_group));
+		t_frameGroup = nullptr;
+		if (group->textures.empty())
+			return;
+		std::shared_ptr<const void> placement;
+		try {
+			placement = Frame::Transients::Place(group->group, group->textures);
+		} catch (const std::exception& e) {
+			logger::error("[ORG native] frame arena: {} could not be placed ({}); its textures get memory of their own", Frame::Transients::NameOf(group->group), e.what());
+		}
+		if (!placement)
+			for (const auto& texture : group->textures)
+				texture->Materialize();
+		std::uint32_t made = 0;
+		for (const auto& finish : group->finish)
+			made += finish() ? 1 : 0;
+		// Each record keeps the group's placement while it lives.
+		for (const auto& record : group->records)
+			record->arenaPlacement = placement;
+		logger::info("[ORG native] frame arena: {} placed, {} of {} textures ({})", Frame::Transients::NameOf(group->group), made, group->textures.size(),
+			placement ? "in the frame arena" : "memory of their own");
+	}
+
 	bool IsUnbacked(const void* a_object)
 	{
 		const auto record = a_object && g_device ? Resolve(a_object) : nullptr;
@@ -5440,6 +5536,8 @@ namespace RenderGraph::Engine::Native
 	winrt::com_ptr<ID3D11Texture2D> MakeUnbackedTexture2D(const D3D11_TEXTURE2D_DESC&, const char*, bool) { return nullptr; }
 	winrt::com_ptr<ID3D11Texture3D> MakeUnbackedTexture3D(const D3D11_TEXTURE3D_DESC&, const char*) { return nullptr; }
 	bool IsUnbacked(const void*) { return false; }
+	FrameTransientScope::FrameTransientScope(Frame::Transients::Group) {}
+	FrameTransientScope::~FrameTransientScope() {}
 	HRESULT __stdcall StreamEnableView(ID3D11ShaderResourceView*, void(__stdcall*)(std::uint64_t), void(__stdcall*)(std::uint64_t),
 		const D3D11_SUBRESOURCE_DATA*(__stdcall*)(std::uint64_t, BOOL), std::uint64_t)
 	{
