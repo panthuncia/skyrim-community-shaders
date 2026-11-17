@@ -1123,6 +1123,16 @@ namespace FrameAnchors
 		 */
 		void DropFailedClients(std::uint32_t a_anchors, const char* a_name, const std::shared_ptr<const Snapshot>& a_failed, const std::string& a_error)
 		{
+			// Native mode has no D3D11 path to drop clients to: their work would reach the frame with no pass and stop it later as a
+			// mismatch that hides this error. Stop here with the build's own error (the mismatch rule's switch).
+			if (RenderGraph::Engine::Native::Active() && RenderGraph::Frame::Driver::MismatchFatal()) {
+				const auto message = fmt::format("Community Shaders native mode: the {} graph failed to build: {}. Development builds stop here "
+												 "(CS_ORG_MISMATCH_FATAL=0 drops its clients instead).",
+					a_name, a_error);
+				logger::critical("[ORG] frame anchors: {}", message);
+				spdlog::default_logger()->flush();
+				stl::report_and_fail(message);
+			}
 			auto lock = Guard();
 			auto& state = Anchors();
 			std::vector<std::shared_ptr<const ClientDesc>> dropped;
