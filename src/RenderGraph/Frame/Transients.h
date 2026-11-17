@@ -19,7 +19,7 @@ namespace org
 
 /**
  * @brief The frame's transient memory: one arena for the whole frame (docs/development/org-native-frame-graph.md, "One arena for
- * the frame's transients (2026-11-17)" and "Derived spans (2026-11-18)").
+ * the frame's transients (2026-11-17)" and "Engine targets in the frame arena (2026-11-18)").
  *
  * The recipe knows the stage order, so a transient's lifetime is a span of frame positions: the stages from its first use to its
  * last. ORG's frame alias arena (org::FrameAliasArena) gives each user a range of memory for its span. Ranges whose spans do not
