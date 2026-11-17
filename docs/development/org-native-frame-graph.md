@@ -5828,3 +5828,91 @@ world on its own.
 5. Volumetric Lighting off in native (a stop, not a cost).
 6. DCLF's Effect vertex pipeline in scratch memory (1,036 operations; the forward stage costs the same as guest's).
 7. VRAM: about 1.1 GB over guest, and the settling frames' allocation churn.
+
+### VRAM, native against guest (2026-11-17)
+
+Measured on the RX 6600 as above: perf-taa at 1920x1080, background runs with `DXVK_DEBUG=hang`, VRAM Budget off in both modes.
+"Process" is Windows' `GPU Process Memory` dedicated usage for Skyrim's process, sampled six times from the start mark (MiB).
+It reads about 45 MiB above the driver's device-local heap usage (`VK_EXT_memory_budget`) in both modes; the table sums to the
+driver's figure.
+
+**How it was read.** Guest: CS's VRAM ledger (`vram-json`, `cs.vram_debug`, `org.vram_source=org`), which lists DXVK's D3D11
+resources by owner and ORG's allocations. Native: that ledger counts only ORG's allocator blocks, so the 1.5 GiB of committed
+textures fell into its "not accounted" line. BasicRHI now keeps a ledger of every live `vkAllocateMemory` by site and kind
+(device-local, ReBAR, system), logged with the allocation report every 300 presents. `BASICRHI_MEMORY_DUMP=<file>` writes every
+live allocation, and to `<file>.resources.csv` every live resource with its memory, offset and name, so the heaps' contents are named
+and aliased placements show as overlaps. `BASICRHI_COMMAND_POOL_SITES=1` logs the live command pools by the call stack that made
+them (resolve the offsets with `llvm-symbolizer --obj=build/Perf-Fast/CommunityShaders.dll --relative-address`). The driver's own
+memory is the heap usage less every live allocation. `VK_EXT_device_memory_report` (`BASICRHI_DEVICE_MEMORY_REPORT=1`,
+`DXVK_DEVICE_MEMORY_REPORT=1`) is not offered by this driver.
+
+**By category (MiB of driver device-local usage; measured, except that a few resources were put in a category by their name).**
+
+| Category | Native before | Guest before | Native after | Guest after |
+|---|---|---|---|---|
+| Driver's own memory (command pools, pipelines, query pools, swap chain) | 972 | 575 | 582 | 572 |
+| Engine render targets, with the Deferred G-buffer and HDR's copies | 562 | 377 | 562 | 377 |
+| SSGI, SSS, volumetric lighting and image-space transients and history | 482 | 145 | 432 | 145 |
+| Terrain Shadows | 216 | 49 | 216 | 49 |
+| Staging and upload (ReBAR) | 89 | 0 | 81 | 5 |
+| Scaleform scratch images, Bink's movie texture | 41 | 0 | 41 | 0 |
+| ORG frame arena | 28 | 0 | 29 | 0 |
+| Game textures | 740 | 750 | 735 | 750 |
+| Engine shadow maps | 330 | 330 | 330 | 330 |
+| Engine vertex and index buffers | 99 | 108 | 99 | 108 |
+| DCLF buffers | 117 | 146 | 107 | 146 |
+| Allocator slack, free space in DXVK's chunks | 218 | 248 | 240 | 341 |
+| Descriptor heaps, DXVK internal, ORG unlisted | 31 | 53 | 31 | 53 |
+| Other CS features (Skylighting, Terrain Blending, Dynamic Cubemaps, ...) | 214 | 218 | 213 | 218 |
+| Sum (driver device-local usage) | 4,137 | 2,999 | 3,697 | 3,096 |
+| Process dedicated (Windows) | 4,189 | 3,033 | 3,686 to 3,754 | 3,032 to 3,131 |
+
+Guest's two runs differ only by one more DXVK chunk (free space, 94 MiB). In native, the "engine render targets" row holds engine
+targets that no world frame writes, about 125 MiB; guest's DXVK never allocates those.
+
+**Fixed.**
+- *Command pools (measured: about 340 MiB).* Each `VkCommandPool` costs this driver about 2 MiB. Native had 226: 32 for the
+  immediate context's slots and 64 for the out-of-graph commands' slots (one allocator each), and about 120 in ORG's pools (every
+  epoch graph had pools of its own, each keeping at least one allocator, and a batch claimed one allocator per list). The slots now
+  share one allocator per context (Vulkan; D3D12 keeps one per slot): 4,189 to 4,000. ORG's graphs on the host's timelines share the
+  device's pool for each queue kind, a batch begins its lists under one claim (`CommandListPool::BeginGroup`), and the background
+  warm-up makes no new allocator: 132 pools to 19, about 4,030 to 3,880. ORG `8596c63`, CS `b73cf0f07`.
+- *Recordings of replaced builds (measured: 132 MiB).* A CS stage keeps the recordings of its last 24 descriptions. A recording of a
+  replaced build is never used again, but it kept that build's graph alive, with its private alias pools (three copies of the SSGI
+  and SSS transient pool after a load). A new request now drops them. 3,879 to 3,747. CS `a16f37081`.
+- BasicRHI's ledger and dumps: BasicRHI `070abc4`.
+
+**Frame time (same session).** Native perf-taa under a Tracy capture, as the baseline was taken: 18.18 ms mean over 332 frames,
+against 19.47 ms before. Without Tracy, between the marks: native 16.49 and 17.12 ms (16.53 with `CS_ORG_EPOCH_STATS=1`), guest
+19.15 ms. Skyrim's 3D engine stays 99.4 to 100% busy, so the GPU work itself got shorter. Which fix did it (fewer command pools and
+command buffers, 1,636 to 955, or the replaced builds) was not isolated. native-quick and guest-quick pass; their shots match the
+earlier ones (105.7 against 106.1, 107.1 against 105.8 mean).
+
+**Left (native about 600 MiB over guest), with what each would take.**
+- Terrain Shadows (+167): ORG makes its textures once, at the largest installed heightmap's size (6144x6144: `ShadowHeight` R16G16,
+  144 MiB, and the heightmap as R16, 72 MiB). Guest makes them for the current worldspace (3808x3008: 43.7 MiB, and the heightmap
+  kept BC4, 5.5 MiB). Keeping the heightmap in its DDS format would save 54 MiB (the upload must then copy block rows). Sizing to the
+  current worldspace needs a rebuild at a worldspace change, which the "rebuilds during play" rule keeps out.
+- Bink's staging (64 of the 81): eight 8 MiB blocks stay after the menu movie ends. The UI stage's kept recordings retain the last
+  frames (`PassRecordContext::Retain`), and nothing records that pass again. Freeing the pool's spares alone did not help.
+- Image-space history and transients in two copies (part of the +287): `ImageSpace::SAO`, `SAORawAO0/1`, `TAAHistory0/1`,
+  `SAOBlurTemp`, the SSGI and SSS transient pool and `VolumetricLighting::Volume` each exist twice, in two graphs' private alias
+  pools (the stages' private arenas, `SetPrivateAliasEpochs`). If two graphs each keep a history copy, they may also disagree about
+  its contents: not checked.
+- ORG frame arena (29), Scaleform and ImGui staging (17): not analysed.
+- Engine targets no world frame writes (about 125): DXVK allocates an image's memory at its first use; native allocates at creation.
+
+**Candidates for the aliasing piece (MiB, measured).**
+
+| Resources | Size | Why they could alias |
+|---|---|---|
+| `kBOOK_TEXT` depth and `kBOOK_TEXT_0..3` | 27.3 + 17.8 | written only in the book menu; or allocated at first use |
+| `kWATER_1/2` (R16G16B16A16) | 31.6 | never written in this scene; guest has none |
+| `kGETHIT_BUFFER`, `kGETHIT_BLURSWAP`, `kMENUBG`, `kSCREENSHOT` | 31.6 | effects and menus only |
+| `kLOCAL_MAP/_SWAP`, `kWATER_DISPLACEMENT/_SWAP`, the lens-flare targets | about 11 | map menu, water, lens flares only |
+| Engine `kSAO`, `kSAO_RAWAO`, `kSAO_RAWAO_PREVIOUS`, `kSAO_TEMP_BLUR`, `kTEMPORAL_AA_ACCUMULATION_1/2` | 47 | the image-space port draws into its own copies, of the same sizes and formats |
+| The port's own `ImageSpace::SAO*`, `TAAHistory*`, `SAOBlurTemp`, `Hdr/LdrScratch` (second copies) | about 70 | one copy could serve the post and menu UI graphs |
+| SSGI and SSS transient pool, second copy | 49.5 | one arena shared by the stages (cost about 15 us a submission when measured before) |
+| Engine `VOLUMETRIC_LIGHTING_ACCUMULATION` and `_COPY`, next to ORG's `VolumetricLighting::Volume` (two copies) | 22.5 + 22.5 | the ORG client draws the volumetric lighting; guest's feature replaces the engine's |
+| `cs.scaleform.scratch.0..3` | 31.6 | GFx filters in menus; the UI stage runs after post |
+| Deferred's G-buffer (`cs.native.texture.270..275`) | 46 | written and read within the frame |
