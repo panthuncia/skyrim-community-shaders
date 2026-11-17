@@ -70,7 +70,17 @@ struct EngineLocalShadowConstants
 	LightLimitFix::LocalShadowData Shadows[4];
 };
 ENGINE_LOCAL_SHADOW_RESOURCES(ORG_RESOURCE)
-#	define EngineLocalShadows EngineLocalShadow.Shadows
+// One engine local shadow by index. Under ORG it is read from the latch buffer by offset: indexing the latched
+// array per thread made it a private array, which AMD's compiler keeps in scratch memory.
+LightLimitFix::LocalShadowData EngineLocalShadowAt(uint a_index)
+{
+#	if defined(CS_ORG_BINDLESS)
+	// LocalShadowData is 112 bytes: a float4x4 and three float4.
+	return OrgLatch_EngineLocalShadow.Load<LightLimitFix::LocalShadowData>(OrgOffset_EngineLocalShadow + 112 * a_index);
+#	else
+	return EngineLocalShadow.Shadows[a_index];
+#	endif
+}
 #endif
 #define SKYLIGHTING_PROBE_REGISTER t50
 #include "Skylighting/Skylighting.hlsli"
@@ -205,17 +215,20 @@ float SampleDirectionalShadow(float3 positionWS)
 	if (!VolumetricFogHasDirectionalShadowMap)
 		return 1.0f;
 
-	DirectionalShadowLightData directionalShadowLightData = DirectionalShadowLights[0];
+	// The cascade's matrix is read from the buffer by index. A local copy of the whole entry indexed per thread became a
+	// private array, which AMD's compiler keeps in scratch memory.
+	const float2 endSplitDistances = DirectionalShadowLights[0].EndSplitDistances;
+	const float2 startSplitDistances = DirectionalShadowLights[0].StartSplitDistances;
 	float shadowMapDepth = SharedData::GetScreenDepth(FrameBuffer::GetShadowDepth(positionWS));
-	if (shadowMapDepth >= directionalShadowLightData.EndSplitDistances.y)
+	if (shadowMapDepth >= endSplitDistances.y)
 		return 1.0f;
 
-	float splitDenom = max(directionalShadowLightData.EndSplitDistances.x - directionalShadowLightData.StartSplitDistances.y, 1e-4f);
-	float cascadeSelect = smoothstep(0.0f, 1.0f, saturate((shadowMapDepth - directionalShadowLightData.StartSplitDistances.y) / splitDenom));
+	float splitDenom = max(endSplitDistances.x - startSplitDistances.y, 1e-4f);
+	float cascadeSelect = smoothstep(0.0f, 1.0f, saturate((shadowMapDepth - startSplitDistances.y) / splitDenom));
 	uint primaryCascade = (uint)cascadeSelect;
 
 	float3 absolutePositionWS = positionWS + FrameBuffer::CameraPosAdjust.xyz;
-	float3 positionLS = mul(directionalShadowLightData.ShadowProj[primaryCascade], float4(absolutePositionWS, 1.0f)).xyz;
+	float3 positionLS = mul(DirectionalShadowLights[0].ShadowProj[primaryCascade], float4(absolutePositionWS, 1.0f)).xyz;
 	if (any(positionLS.xy < 0.0f) || any(positionLS.xy > 1.0f))
 		return 1.0f;
 
@@ -224,14 +237,14 @@ float SampleDirectionalShadow(float3 positionWS)
 	[branch] if (cascadeSelect > 0.0f && cascadeSelect < 1.0f)
 	{
 		uint secondaryCascade = 1u - primaryCascade;
-		float3 secondaryLS = mul(directionalShadowLightData.ShadowProj[secondaryCascade], float4(absolutePositionWS, 1.0f)).xyz;
+		float3 secondaryLS = mul(DirectionalShadowLights[0].ShadowProj[secondaryCascade], float4(absolutePositionWS, 1.0f)).xyz;
 		if (!any(secondaryLS.xy < 0.0f) && !any(secondaryLS.xy > 1.0f)) {
 			float secondaryShadow = SampleDirectionalShadowPCF(secondaryLS, secondaryCascade);
 			shadow = lerp(shadow, secondaryShadow, cascadeSelect);
 		}
 	}
 
-	float fade = saturate(shadowMapDepth / max(directionalShadowLightData.EndSplitDistances.y, 1.0f));
+	float fade = saturate(shadowMapDepth / max(endSplitDistances.y, 1.0f));
 	float fadeFactor = 1.0f - pow(fade * fade, 8.0f);
 	return lerp(1.0f, shadow, fadeFactor);
 }
@@ -285,7 +298,7 @@ float SampleLocalLightShadow(LightLimitFix::Light light, float3 positionWS, floa
 	if (light.lightFlags & LightLimitFix::LightFlags::Shadow) {
 		if (!VolumetricFogHasEngineLocalShadows || light.shadowLightIndex >= 4u)
 			return 0.0f;
-		LightLimitFix::LocalShadowData data = EngineLocalShadows[light.shadowLightIndex];
+		LightLimitFix::LocalShadowData data = EngineLocalShadowAt(light.shadowLightIndex);
 		if (data.Params.y <= 0.0f)
 			return 0.0f;
 		return LightLimitFix::GetLocalShadow(EngineLocalShadowMaps, LinearSampler, data, (uint)data.Params2.z, positionWS, FrameBuffer::CameraPosAdjust.xyz, towardLight, false, noise, data.Params2.w, 1u, 0.0f);
