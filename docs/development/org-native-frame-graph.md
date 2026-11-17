@@ -5326,3 +5326,93 @@ three times: passed, only the known 20 `VUID-vkCmdDraw-None-09600` and back-buff
 switches, 0 key builds. The quick run's shot matches the earlier one (same brightness). ORG's unit tests pass run one at a time, and the
 Vulkan host tests' `rebinding` (with the new capture test) and `split` modes; `pipelines` did not finish in 240 s (HeadlessBenchmark
 not run).
+
+### Second pass (2026-11-16, Cloud Shadows, terrain shadows, async compute)
+
+Measured, perf-taa, RTX 5080, uncapped, background runs, the machine in use. "Before" is the build of the section above
+(DLL f8c2f5c2d391) re-taken in this session (`a0*`), "after" the final build (DLL 434e083dc9d4, `f1*`).
+
+**Cloud Shadows' layer operations.** What native did that guest does not: the queue of clears and copies became a gathered and a
+scatter dispatch per layer and per face tap, each over all six faces (the rows marked the faces with no work, which still got
+their groups): 6 taps x 32 layers x 2 = 384 indirect dispatches in the start stage, plus 64 at each of the two other anchors.
+The gather pass took 0.17 ms with one or two layers open per tap (per-pass mode); the scatter 0.12 ms. A frame here queues about
+34 face writes (28 of them clears, about 13 cloud layers a face in this weather) and 3 face reads, on 2 face taps.
+- Now each tap's commit writes one list of entries (layer, face, scratch slot or clear), and the gather and the scatter are one
+  dispatch each per tap, a group's z picking an entry (`LayerOpsCS.hlsl`). Every layer is bound by its whole-array UAV, so one
+  dispatch reaches any layer; the 32 handles are packed into 24 push words (the block's limit is 32 words). Commit `927baf26d`.
+- Gather 0.17 to 0.01 ms, scatter 0.12 to 0.05-0.10 ms (it varies with the weather's layers). Start stage 0.36 to 0.28 ms.
+- Tried and reverted: a 4x4 block of texels per thread (no change); clearing a layer face as the load operation of the sky
+  family's first draw into it, in place of the scatter's clear (the cloud passes went from 0.03 to 0.11 ms, start to 0.37 ms).
+- Cloud Shadows' cost by removal (`features.CloudShadows=false`, GPU time): native 0.30 ms (graphics sum 5.17 to 4.87; start
+  0.28 to 0.06), guest 0.16 ms (GPU frame 5.03 to 4.87; its cubemaps 0.19 to 0.04). Before: native 0.2 to 0.35 ms by frame
+  period. What is left in native is the scatter's clears (UAV writes over whole faces; guest's D3D11 clears are DXVK's) and the
+  layers' barriers: about 0.14 ms over guest.
+
+**Terrain shadows' update.** Native recorded every stripe a refresh may need (up to 32), each behind a full memory barrier, in the
+kept recording; a steady frame opens one stripe, so it ran 31 full barriers around empty indirect dispatches. The R16 heightmap
+was not the cause. Now the update pass records stripe 0 ahead, and a refresh pass with the other stripes is recorded at execution
+and skips a run that did not open stripe 1 (its late batch is kept while the answer holds: 8.0 inline lists kept a frame against
+7.0, 0 recordings in the steady scene). Commit `f7da0d38c`. Update 0.11 to 0.02 ms (guest 0.01), pre-depth 0.27 to 0.16 ms.
+
+**The two cross-queue waits.** The 0.13 ms wait before `cs.dclf.z.depth` was DCLF's compute-queue passes (tree wind, the fade and
+portal batches: 0.03 ms of work): the graphics queue waited for the compute batch, which ran only after its own cross-queue
+waits. With them on the graphics queue the gap is gone from the idle trace and the period drops (alternating runs: 5.51 and 5.56
+ms against 5.66 and 5.63 ms). Native mode now defaults `CS_DCLF_ASYNC_COMPUTE` to the graphics queue (`1` keeps the compute
+queue; guest unchanged). Commit `678056f3d`. The 0.08 ms wait before `cs.dyncubemaps.publish` remains: it is not DCLF's compute
+queue (it stays with async compute off); cause not found.
+
+**Submissions.** `vkQueueSubmit` a frame: 12.3 batches + 2.0 uploads + 1.0 leading upload + 1 present copy (16.3) before, 10.2 +
+2.0 + 0 + 1 (13.2) after: the leading upload and the compute batches went with the compute queue. Letting a ticket's 2.0 graphics
+uploads ride its first graphics batch was not done: batches on other queues wait on the uploads' own signal, which a merged
+submission would move to the end of the first group.
+
+**Idle.** Span less busy (idle trace, timing on): 5.91 - 5.32 = 0.59 ms before, 5.58 to 5.67 - 5.10 to 5.19 = 0.48 ms after, one
+gap over 0.05 ms left (the 0.08 ms above), the rest list boundaries. With timing off the graphics span is the frame period, 5.47
+to 5.54 ms, against a busy time of about 5.1 ms: about 0.3 to 0.4 ms of idle (estimated).
+
+**Per stage, GPU ms (list timestamps, same session):**
+
+| Stage | Native before (`a0gt`) | Native after (`f1gt`) | Guest (`f1ggt`, `f1ggd`) |
+|---|---|---|---|
+| start | 0.36 | 0.28 | 0.19 (Water Effects' cubemaps, Cloud Shadows in them) |
+| DCLF shadows | 0.59 | 0.60 | 0.48 |
+| pre-depth | 0.27 | 0.16 | about 0.02, and 0.07 skylighting (estimated mapping) |
+| DCLF Z-prepass (graphics + async) | 0.86 + 0.03 | 0.89 + 0 | 0.73 + 0.02 |
+| pre-main | 0.39 | 0.39 | about 0.33 (estimated) |
+| DCLF opaque | 0.94 | 0.93 | 0.94 |
+| deferred+water | 1.04 | 1.04 | about 0.9 (estimated) |
+| DCLF forward | 0.08 | 0.08 | 0.09 |
+| post | 0.78 | 0.78 | about 0.8 (estimated) |
+| graphics sum / span | 5.34 / 6.02 | 5.17 / 5.73 | GPU frame 5.03 |
+
+Frame period (Tracy, steady): native 5.84 and 5.80 ms, guest 5.11 ms before; native 5.54 and 5.47 ms, guest 5.07 ms after. The
+gap went from 0.69-0.73 to 0.40-0.47 ms.
+
+**DCLF Z-prepass and shadow view (not changed).** Same draws in both modes, but not the same ranges: native's shadow view list
+holds the engine's shadow-map clears as render passes of their own (`cs.engine.skeleton.shadow.depth2.0/1@shadow-view`, 0.02 ms
+each, about 0.05 ms in all), which guest does as D3D11 clears outside DCLF's timer (DXVK folds a whole-image clear into the next
+render pass's load operation). That is most of the shadow view's +0.07 to +0.12 ms. The Z-prepass now also holds the 0.03 ms of
+compute passes. Folding the engine clears into DCLF's first pass's load operation was not done.
+
+**start, pre-depth, deferred+water by pass (per-pass mode, not changed).** Start's rest is the sky faces and their cloud draws
+(0.01 to 0.04 ms a pass) and the water instances (under 0.01 ms each). deferred+water's largest passes have guest counterparts
+doing the same work (SSGI 0.22, VL generate 0.22, skylighting probes 0.09, deferred composite 0.07); no pass without a
+counterpart over 0.01 ms was found.
+
+**Checks left open.**
+- Synchronization validation: the validation tour with `VK_KHRONOS_VALIDATION_VALIDATE_SYNC=true` (layer 1.4.357) passed with no
+  `SYNC-HAZARD` message and only the known 20 `VUID-vkCmdDraw-None-09600` and back-buffer layout lines. ORG omits a barrier
+  between two passes of one list that use an attachment in the same layout and access (render target after render target, depth
+  write after depth write); it relies on queue order and rasterization-order attachment writes. Syncval did not flag those
+  boundaries. It cannot see shader accesses through the descriptor heap, so this covers attachments and transfers only.
+- ORG's Vulkan host test `pipelines`: it hung once in this session (after "input layout build", in "permutations"), during a full
+  CS build, as the earlier 240 s timeout did; 46 later runs passed in 1 to 4 s, under CPU, disk and GPU load. Not reproduced, so
+  no dump and no fix; not caused by this pass (no ORG change).
+
+**Left, ranked (estimates).**
+1. Idle between lists and the one cross-queue wait (0.3 to 0.4 ms with timing off): 46 list boundaries, the 0.08 ms wait before
+   `cs.dyncubemaps.publish`.
+2. Cloud Shadows' scatter clears and the layers' barriers (about 0.14 ms over guest).
+3. The engine's shadow-map clears as separate passes in DCLF's shadow view list (about 0.05 ms), and start's sky faces.
+4. pre-main and deferred+water against guest (about 0.05 and 0.1 ms, with estimated guest mappings).
+5. The menu UI stage was not timed in a steady menu.
