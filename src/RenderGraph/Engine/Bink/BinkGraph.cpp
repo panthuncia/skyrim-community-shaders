@@ -615,11 +615,6 @@ namespace RenderGraph::Engine::Bink::Graph
 		atlas.BindFlags = D3D11_BIND_SHADER_RESOURCE;
 		// One texture for the session, filled again by every frame's chunks.
 		state.atlas = std::make_unique<GraphResources::Texture2D>(atlas, "Bink::Movie", GraphResources::Options{ .lifetime = GraphResources::Lifetime::Persistent });
-		state.staging = FrameStaging::Create({ .name = "cs.bink.staging",
-			.minimumBytes = 1u << 20,
-			// Spares for each frame in flight's block and the last decoded frame (kept for ticks that decode nothing). No cap: a
-			// larger movie makes larger blocks, and a burst makes more (logged once by the pool).
-			.runsPerFrame = 2 });
 		for (auto* target : { &state.framebuffer, &state.hdrUi })
 			target->slots = std::make_shared<const RunSlots<Frame>>();
 		// The engine's PS sampler for this draw: address mode 0, filter mode 2 (CreateSamplerStates, SE 75831): trilinear, clamped, no
@@ -634,7 +629,6 @@ namespace RenderGraph::Engine::Bink::Graph
 		state.sampler = ShaderBindings::CreateSamplerFromD3D11(sampler);
 		// Each part named: a sampler needs the runtime's descriptor service, the framebuffer the engine's targets.
 		const char* missing = !*state.atlas ? "its movie texture could not be made" :
-		                      !state.staging ? "its staging pool could not be made" :
 		                      !state.sampler ? "its sampler could not be made (no descriptor service)" :
 		                      !UpdateTargets(state, false) ? "the framebuffer cannot be imported, or its tile program cannot be built" :
 		                                                     nullptr;
@@ -712,6 +706,14 @@ namespace RenderGraph::Engine::Bink::Graph
 		}
 		movie->stagingBytes = bytes;
 		MakeChunks(*movie, a_tileSize);
+		// The staging pool lives while movies play: MovieEnded lets it go.
+		auto& state = Get();
+		if (!state.staging)
+			state.staging = FrameStaging::Create({ .name = "cs.bink.staging",
+				.minimumBytes = 1u << 20,
+				// Spares for each frame in flight's block and the last decoded frame (kept for ticks that decode nothing). No cap: a
+				// larger movie makes larger blocks, and a burst makes more (logged once by the pool).
+				.runsPerFrame = 2 });
 		logger::info("[ORG] Bink: a {}x{} movie in {} tiles ({} chunks of the movie texture), {} bytes of staging a frame", a_layout.videoWidth,
 			a_layout.videoHeight, movie->tiles.size(), movie->chunks.size(), bytes);
 		return movie;
@@ -721,7 +723,7 @@ namespace RenderGraph::Engine::Bink::Graph
 	{
 		if (a_tile >= a_movie.tiles.size())
 			return nullptr;
-		if (!a_movie.decoding)
+		if (!a_movie.decoding && Get().staging)
 			a_movie.decoding = Get().staging->Acquire(a_movie.stagingBytes);
 		if (!a_movie.decoding)
 			return nullptr;
@@ -770,6 +772,11 @@ namespace RenderGraph::Engine::Bink::Graph
 		state.pending.reset();
 		// The client stays registered for the next movie; the next movie starts from a clean count.
 		state.queued = state.committed = state.executed = 0;
+		// The movie's staging goes with it. Blocks still out are freed when their last holder lets go, not kept as spares.
+		state.staging.reset();
+		// The stages' kept recordings retained the last frames they drew (their staging buffers), and a movie's descriptions may
+		// not come back: they are dropped, so those frames go once the GPU is past them.
+		FrameAnchors::DropKeptRecordings(FrameAnchors::Anchor::Present, "a Bink movie ended");
 	}
 }
 

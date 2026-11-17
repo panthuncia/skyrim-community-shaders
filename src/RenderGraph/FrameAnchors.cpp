@@ -3533,6 +3533,26 @@ namespace FrameAnchors
 		return SegmentsOn() && state.frozen && index < kAnchors && DeclaredOfAnchor(state, index) < kDeclared;
 	}
 
+	void DropKeptRecordings(Anchor a_anchor, std::string_view a_why)
+	{
+		auto lock = Guard();
+		auto& state = Anchors();
+		const std::uint32_t index = IndexOf(a_anchor);
+		if (!SegmentsOn() || !state.frozen || index >= kAnchors)
+			return;
+		std::size_t dropped = 0;
+		for (std::uint32_t d = 0; d < kDeclared; ++d) {
+			if (!state.declaredEpochs[d] || !(WholeMembers(d) >> index & 1u))
+				continue;
+			// A frame slot's schedule holds its own reference, so the recordings a frame runs on stay until it switches.
+			auto& recordings = state.declaredRecordings[d];
+			const std::lock_guard recordingsLock(recordings.mutex);
+			dropped += std::erase_if(recordings.entries, [](const auto& a_kept) { return a_kept->done; });
+		}
+		if (dropped)
+			logger::info("[ORG] frame segments: dropped {} kept recordings of the stages that hold the {} anchor ({})", dropped, kInfo[index].name, a_why);
+	}
+
 	bool NamedByStage(std::string_view a_id)
 	{
 		const auto& state = Anchors();
@@ -4466,6 +4486,7 @@ namespace FrameAnchors
 	bool RequestJoin(std::string_view, Anchor) { return false; }
 	bool CanRun(std::string_view, Anchor) { return false; }
 	bool HeldByStage(Anchor) { return false; }
+	void DropKeptRecordings(Anchor, std::string_view) {}
 	bool NamedByStage(std::string_view) { return false; }
 	std::uint32_t PeakRunsPerFrame(Anchor) { return 0; }
 	bool BuildPending(std::string_view) { return false; }

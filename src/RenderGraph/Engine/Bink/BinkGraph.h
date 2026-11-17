@@ -46,7 +46,7 @@ namespace RenderGraph::Engine::Bink
 		class Movie;
 
 		/**
-		 * @brief State::Setup, once the graph is up: the movie texture, the staging pool and the sampler, the targets (the framebuffer,
+		 * @brief State::Setup, once the graph is up: the movie texture and the sampler, the targets (the framebuffer,
 		 * and HDR's UI texture while HDR has one) with their tile programs, and the Present anchor's client, registered once for the
 		 * session. Nothing when CS_ORG_BINK is off; logged and off when anything cannot be made, naming the part.
 		 */
@@ -89,7 +89,10 @@ namespace RenderGraph::Engine::Bink
 		/** @brief Render thread: the engine's tile textures hold a newer frame than the graph's (a tick decoded on the engine's path). */
 		void MarkStale(Movie& a_movie);
 
-		/** @brief Render thread, when a movie's tiles are freed: the next movie starts from a clean count. The client stays registered. */
+		/**
+		 * @brief Render thread, when a movie's tiles are freed: the next movie starts from a clean count, the staging pool goes (CreateMovie
+		 * makes the next), and the stages drop the kept recordings that retained the movie's frames. The client stays registered.
+		 */
 		void MovieEnded();
 	}
 }

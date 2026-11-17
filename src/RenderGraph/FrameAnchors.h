@@ -666,6 +666,14 @@ namespace FrameAnchors
 	 */
 	bool HeldByStage(Anchor a_anchor);
 
+	/**
+	 * @brief Drops the finished recordings the stages that hold a_anchor wholly keep for reuse. A late batch keeps what its last
+	 * recording retained (a movie's staging buffers) until it is recorded again, and a kept recording of a description that does
+	 * not come back is never recorded again. Call when such work ends (Bink's movie). A frame slot's schedule keeps the recording
+	 * it runs on until it switches; a description seen again is recorded again. a_why is logged. Render owner.
+	 */
+	void DropKeptRecordings(Anchor a_anchor, std::string_view a_why);
+
 	/** @brief Whether a declared segment (a CS stage) names client a_id at one of its steps. Fixed once the render graph initialized. Any thread. */
 	bool NamedByStage(std::string_view a_id);
 
