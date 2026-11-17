@@ -6238,18 +6238,18 @@ pre-main, deferred+water (dw), sun, post, UI, menu UI; DCLF = Drawcall Limit Fix
 | `kGETHIT_BUFFER`, `kGETHIT_BLURSWAP`, `kLDR_BLURSWAP`, `kLDR_DOWNSAMPLE0` | 17.8 | engine targets | none: the port's get-hit and depth of field steps draw into CS transients | - | unbacked (2026-11-17) |
 | `kNORMAL_TAAMASK_SSRMASK_DOWNSAMPLED` | 2.0 | engine target | the frame clear group clears it; SSR reads CS's `SSRMaskDownsampled` | - | unbacked (2026-11-17); its clear pass is gone and the engine's clear is declared dropped |
 | `cs.native.texture.261` (1024x1024, 3 mips, R11G11B10) | 5.3 | Effects11's `TextureManager` shared downsample texture (made at its setup) | Effects11's D3D11 downsample, when an effect reads it | yes | keep (a CS feature's texture, not an engine target; identified 2026-11-17) |
-| Deferred's G-buffer `cs.native.texture.270..275` | 43.5 | CS (Deferred, native) | pre-main (clear), DCLF opaque, dw (composite, last read) | no | transient: pre-main to dw |
-| `cs.scaleform.scratch.0..3` | 31.6 | CS (Scaleform port) | UI and menu UI (GFx filters) | no | transient: UI stage only |
-| SSGI and SSS transients (`IlYBlurInput`, `Radiance`, `RadianceTemp`, `IlCoCgBlurInput`, `Normal`, `WorkingDepth`, `AccumFramesScratch`, `SSS::DiffuseNoAlbedo`) | 62.7 (one pool) | CS feature (port) | dw | no | transient (aliased inside dw now; can share with other stages) |
-| SSGI `IlYScratch`, `GiSpecularScratch`, `IlCoCgScratch`, `AOScratch` (committed, not pooled) | 43.5 | CS feature (port) | dw | check: the history split's scratch halves | transient if nothing reads them next frame |
-| `ImageSpace::HdrScratch`, `LdrScratch`, `SAOBlurTemp`, `SSRMaskDownsampled`, `DofDownsample`, `DofBlurSwap`, `BloomSwap` | 28.6 | frame (transients) | post (scratch, depth of field, bloom); dw (SAO blur, SSR mask) | no | transient (pooled per stage) |
-| `VolumetricLighting::Volume320x192x90` | 11.3 | CS feature (port) | post | no | transient (pooled) |
+| Deferred's G-buffer `cs.native.texture.270..275` | 43.5 | CS (Deferred, native) | pre-main (clear), DCLF opaque, dw (composite, last read); DCLF's Z-prepass, forward and first-person passes bind it | no | frame arena (2026-11-17): group placed for depth to first person; post's transients share its block |
+| `cs.scaleform.scratch.0..3` | 31.6 | CS (Scaleform port) | UI and menu UI (GFx filters) | no | kept out (2026-11-17): every draw declares a read of them, and the role targets' draws come before the scratch draws, so the first use in the frame is a read |
+| SSGI and SSS transients (`IlYBlurInput`, `Radiance`, `RadianceTemp`, `IlCoCgBlurInput`, `Normal`, `WorkingDepth`, `AccumFramesScratch`, `SSS::DiffuseNoAlbedo`) | 62.7 (one pool) | CS feature (port) | dw | no | frame arena (2026-11-17): dw's range, shared with post's and pre-depth's |
+| SSGI `IlYScratch`, `GiSpecularScratch`, `IlCoCgScratch`, `AOScratch` (committed, not pooled) | 43.5 | CS feature (port) | dw | no (written and read in dw) | transient, kept committed (2026-11-17): exported to D3D11, and dw is the peak of their memory class, so the arena would save nothing |
+| `ImageSpace::HdrScratch`, `LdrScratch`, `SAOBlurTemp`, `SSRMaskDownsampled`, `DofDownsample`, `DofBlurSwap`, `BloomSwap` | 28.6 | frame (transients) | post (scratch, depth of field, bloom); dw (SAO blur, SSR mask) | no | frame arena (2026-11-17): in post's and dw's ranges |
+| `VolumetricLighting::Volume320x192x90` | 11.3 | CS feature (port) | post | no | frame arena (2026-11-17): post's range, inside dw's bytes |
 | `kSHADOW_MASK`, `kMOTION_VECTOR`, `kTEMPORAL_AA_MASK`, `kMAIN_ONLY_ALPHA` | 23.7 | engine targets | pre-main or DCLF write; dw, post read (TAA, SSR, SAO) | no | transient: pre-main to post |
 | `TerrainBlending::TerrainDepth`, `BlendedDepth`, `Mask`, `ScreenSpaceShadows::ShadowTexture` | 31.0 | CS features | pre-depth, pre-main; DCLF opaque, menu UI | no (BlendedDepth16 is the next frame's) | transient: pre-depth to opaque |
 | `kPOST_ZPREPASS_COPY` depth | 11.1 | engine target | pre-main's copy; dw, post, sun, DCLF | no | transient: pre-main to post |
 | `kRAW_WATER`, `kSNOW_SWAP`, `kSNOW_SPECALPHA`, `kSSR`, `kSSR_RAW`, `kSSR_BLURRED0` | 27.7 | engine targets | dw (water, snow, SSR) | no | transient: dw only |
 | `kREFRACTION_NORMALS Copy`, `kUNDERWATER_MASK Copy`, `kMAIN Copy`, `kIMAGESPACE_VOLUMETRIC_LIGHTING_COPY` | 20.3 | engine copy textures | post (refraction, underwater), dw | no | transient: within one stage |
-| `VolumetricShadows::ShadowBlurTemp` | 1.3 | CS feature | pre-depth | no | transient (pooled) |
+| `VolumetricShadows::ShadowBlurTemp` | 1.3 | CS feature | pre-depth | no | frame arena (2026-11-17): pre-depth's range |
 
 Summary (g5n, the resources above): keep 119 resources, 783 MiB; transient 51, 352 MiB; on-demand 22, 155 MiB; remove 18, 181 MiB; one
 copy none left. Before this pass (g1n): one copy 6 resources and 80 MiB of history, and 131 MiB more of transient copies.
@@ -6368,3 +6368,113 @@ native-interior (100.6 / 97.2, within the known variance), native-validation (th
 loading-thread run, the frozen-world menu run with TAA (world before and after the Journal Menu 104.1, 103.7, 104.3, as before), the
 worldspace run (Tamriel, Solstheim, Riverwood), guest-quick. No `[C]` line but the known `PublishedResources` one (in guest runs too).
 The native D3D12 run was not taken (it loses the device on the RX 6600 for an unrelated reason).
+
+## One arena for the frame's transients (2026-11-17)
+
+Each CS stage's transients sat in a private alias pool, so the frame held the sum of the stages' peaks. Now one arena holds every CS
+stage's transients and Deferred's G-buffer, placed by their span of the frame. RX 6600, perf-taa at 1920x1080, native Vulkan,
+background runs with `DXVK_DEBUG=hang`, VRAM Budget off. CS DLL `5242f7b0ed1d`.
+
+### The mechanism
+
+- **ORG: `FrameAliasArena`** (`include/Render/RenderGraph/FrameAliasArena.h`). A frame position is a stage's place in the frame. A user
+  reserves a byte range for a span of positions. Ranges whose spans overlap get disjoint bytes; the others share bytes. Ranges of one
+  lane (an epoch's builds, which never run in the same frame) may share bytes whatever their spans. The search is a first fit
+  (`alias::PlaceSpanned`, covered by the alias packing tests). Memory comes in blocks: a range goes in the first block of its memory
+  class where it fits, else in a new block of its size. Reservations never move, so a block never grows. A block is freed with its
+  last range.
+- **A stage's transients.** `GraphHost::SetFrameAliasSpans` gives each CS stage's epoch its position. Its graph's planner packs each
+  pool as before (the same packer, so aliasing inside the stage stays) and reserves one range of the arena for the packed size, with
+  the stage's span and lane. Each plan reserves again and gives back the previous ranges. A graph's end gives back its last ones. The
+  memory classes stay apart as the pools kept them (render targets and depth, other textures, buffers).
+- **Groups.** Resources several stages use are declared in `src/RenderGraph/Frame/Transients.cpp` with their span, and placed once at
+  a fixed offset (`FrameAliasArena::ReserveTextures`). The only group is Deferred's G-buffer: depth to first person, the stages whose
+  graphs bind it. DCLF's Z-prepass, forward and first-person passes declare it as a render target too, so the span covers them. The
+  native device makes a group's textures without memory inside a `Native::FrameTransientScope` (Deferred's setup) and places them
+  together when the scope ends. Until then a record has no image, so a GPU use is `TapError::Unbacked`.
+- **Positions** are the world recipe's stages in order (`Recipes::StageId`), then the menu UI stage. A stage's transients span its own
+  position. A group's span is declared, and the recipe check holds the passes to it.
+- `CS_ORG_FRAME_ARENA=0` (cs-test `org.frame_arena`) restores the private pools and the committed G-buffer, for A/B runs. Guest mode
+  runs no CS stage and is unchanged. The declarations are per stage position, so guest can adopt them when it moves onto the stages.
+
+### Hand-over and non-overlap
+
+- **The alias ledger orders every hand-over.** A placed resource whose bytes another occupant used since its own last use enters its
+  next execution from Undefined, and its first batch waits for that occupant's last use on every queue (ORG's
+  `AliasAccessAdmissionLedger`, the same mechanism the shared arena used between epochs). It works for any placed resource, a group's
+  included, so the layouts and barriers at a hand-over come from the ledger, not from a table. Async compute is covered: the waits
+  cross timelines.
+- **The spans keep content apart.** Stages commit in recipe order on the render thread, so the ledger sees the frame's uses in recipe
+  order. A group's bytes are shared only with ranges whose spans lie outside its span, so nothing commits into them between its first
+  and last stage, and its content survives within its span. A stage's transients live within one execution of its graph, so they need
+  nothing beyond the ledger's ordering.
+- **The recipe check** (`Recipe.cpp`, `Validate`) fails a pass that uses a group's resource outside the group's span, and a group whose
+  first use in the frame is a read (its bytes come in holding another resource's data). Fatal in development builds, logged once in
+  release, as the recipe's other findings. The first build caught Scaleform's scratch images this way (below).
+- Each frame's alias activations are the same while the frame kind is the same, so admissions keep their predicted plans. The frame
+  period is unchanged (below).
+
+### Rebuilds
+
+A stage's build (a key change, a resize) plans in its own state: its new ranges are reserved while the old build's are still held.
+Two builds of one epoch share a lane, so the new build may take the old build's bytes. The two never run in the same frame, and the
+ledger orders the old build's last execution before the new one's first. No placement a live build uses ever moves: a new packing is
+the new build's own ranges and takes effect when that build switches in. A group is placed when it is made and goes with its textures
+(a resize makes it again). Nothing waits on the render thread. In the runs the deferred+water stage reserved 5 to 7 times during the
+load (the TAA switch and key builds), then not again.
+
+### What shares memory (perf-taa, from the arena's census line and the alias plans)
+
+| Block (class) | MiB | Ranges |
+|---|---|---|
+| render targets | 43.6 | G-buffer 43.5 (depth to first person); post's range 7.9 (`Hdr/LdrScratch`; 31.6 while TAA was being set up) |
+| render targets | 9.9 | deferred+water's range |
+| other textures | 49.5 | deferred+water's range 49.5 (SSGI and SSS transients); post's range 11.2 (the VL volume); pre-depth's range 1.2 (Volumetric Shadows' blur) |
+| total | 103.0 | against 123.3 with the arena off on the same build: the same pools as private pools, and the G-buffer committed |
+
+Saved: 20.3 MiB of transient memory at 1080p: post's 7.9 MiB render-target range and 11.2 MiB volume, and pre-depth's 1.2 MiB, all
+inside other stages' bytes. The live-allocation dump agrees (device-local 2,227.8 against 2,248.6 MiB, runs c1n and c2n). Process
+dedicated VRAM moves a little less (about 17 MiB): BasicRHI's allocator sub-allocates from 64 MiB heaps, so space freed inside a heap is
+not returned.
+
+### What stayed out, and why
+
+- **Scaleform's scratch images (31.6 MiB).** Every draw pass declares a read of every scratch image, and the UI stage's plan puts the
+  role targets' draws (surfaces 0 to 3) before the scratch images' own draws in each instance. So the first use in the frame is a read.
+  In the arena those bytes would hold another stage's data then, and a filter's composite would show it. Placing them needs the draws
+  ordered by what each really reads. Found, not fixed: the same order means a GFx filter's composite reads its scratch image before
+  this instance's scratch draw writes it, so a filter shows earlier content even without aliasing.
+- **SSGI's committed scratch halves (43.5 MiB).** Written and read in deferred+water only, but exported to D3D11 (an external import
+  with no placement the ledger sees), and deferred+water is the peak of their memory class: the arena would save nothing.
+- **Engine targets.** Most of the survey's span candidates are reached by old native paths (EngineDraws, the frame clear group, the
+  ImageSpace anchor, the menu UI stage's scenes), which run at places in the frame the recipe does not fix, so they stay backed and
+  out of the arena: `kSHADOW_MASK`, `kMOTION_VECTOR`, `kTEMPORAL_AA_MASK`, `kMAIN_ONLY_ALPHA`, `kPOST_ZPREPASS_COPY`, `kRAW_WATER`, the
+  SSR targets, `kMAIN Copy`. `kSNOW_SPECALPHA` has no writer in the world recipe. Terrain Blending's mask and Screen Space Shadows'
+  texture are read by DCLF's depth stage before pre-main writes them, so they are not transient. `TerrainBlending::TerrainDepth`
+  (pre-depth to pre-main) would need a block of its own: no saving. Left: the post-only copies (`kREFRACTION_NORMALS Copy`,
+  `kUNDERWATER_MASK Copy`, `kIMAGESPACE_VOLUMETRIC_LIGHTING_COPY`, 12.4 MiB), which fit beside post's ranges. They are host-made images
+  imported as `ExternalTextureResource`. Placing them needs ORG to give such an import the alias identity the ledger orders (heap,
+  offset, size), and Engine::Targets to place its take-over set as one group. Not done.
+- **On-demand backing (`kMENUBG`, `kWATER_1/2`).** Not built. `kWATER_1/2` are cleared by passes present in every build (the frame clear
+  group and deferred+water), so a build-key rule alone would never unback them.
+- **DCLF's graphs** keep the shared arena: their epochs run a varying number of times a frame, so their activations would change from
+  frame to frame.
+
+### Measured (perf-taa, RX 6600, uncapped, alternating)
+
+| | Native, arena | Native, arena off | Guest |
+|---|---|---|---|
+| frame period between the marks | 19.12 / 19.06 ms | 19.08 ms | 19.12 / 19.08 ms |
+| process dedicated VRAM | 2,996 / 2,997 / 2,999 MiB | 3,015 / 3,016 MiB | 3,023 to 3,038 MiB |
+
+Before this pass: native 3,020 to 3,024 MiB, guest 3,033; periods 19.04 to 19.11 against 19.09 ms. No frame-time cost: the hand-over
+barriers are entries from Undefined that the ledger made inside each stage's pool before, and no clear was added.
+
+### Checks
+
+One background run each, all passed (DLL `dced173c1f74`; the perf and A/B runs on `5242f7b0ed1d`, which only adds the switch to the test registry): native-quick, native-river (river-east mean difference 3.3 against the previous pass's run; the
+river shot differs by an NPC and the wind), native-interior, native-validation (the same message classes and counts as before: 20
+`VUID-vkCmdDraw-None-09600`, the back-buffer layout and unused-output lines), the loading-thread run, the frozen-world Journal Menu run
+with TAA (the world before and after 104.5, 104.0, 104.5), the worldspace run (Tamriel, Solstheim, Riverwood), native-upscalers (DLSS,
+FSR, TAA and XeSS, clean by eye against the 11-16 run), guest-quick. No `[C]` line but the known `PublishedResources` one. ORG's alias
+packing tests pass.
