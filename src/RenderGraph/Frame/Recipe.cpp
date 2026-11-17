@@ -406,8 +406,37 @@ namespace RenderGraph::Frame::Recipes
 		state.traces[a_epoch] = { a_generation, std::move(a_trace) };
 	}
 
+	/**
+	 * @brief CS_ORG_GRAPH_RESOURCES_FRAME=<n> (a diagnostic): at frame n, logs every attached epoch graph's resources, as its schedule
+	 * names them. With a memory dump of the same run it shows which graphs hold which image.
+	 */
+	static void LogGraphResources(org::GraphHost& a_host)
+	{
+		static const auto at = Switches::Number("CS_ORG_GRAPH_RESOURCES_FRAME", 0);
+		if (!at || Driver::Current().frame != at)
+			return;
+		for (std::size_t i = 0; i < a_host.GraphCount(); ++i) {
+			auto* graph = a_host.GraphAt(i);
+			const auto epoch = a_host.EpochAt(i);
+			if (!graph)
+				continue;
+			const auto trace = TraceEpochGraph(*graph, epoch);
+			if (!trace)
+				continue;
+			std::set<std::string> names;
+			for (const auto& resource : trace->resources)
+				names.insert(resource.name.empty() ? fmt::format("#{}", resource.id) : resource.name);
+			std::string text;
+			for (const auto& name : names)
+				text += fmt::format("{}{}", text.empty() ? "" : ", ", name);
+			logger::info("[ORG] graph resources: epoch {} build {} ({} passes, {} resources): {}", epoch, a_host.BuildGeneration(epoch), trace->passes.size(), names.size(),
+				text);
+		}
+	}
+
 	void Check(org::GraphHost& a_host)
 	{
+		LogGraphResources(a_host);
 		auto& state = Get();
 		const std::lock_guard lock(state.mutex);
 		// The epochs whose build changed since the last check. One without a trace of its build (a build the host made itself, at
