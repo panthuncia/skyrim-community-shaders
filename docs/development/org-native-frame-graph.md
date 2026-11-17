@@ -5175,3 +5175,154 @@ draw outside every CS step in a loading-screen frame, while the stages switched 
 Streamline logged barriers whose access masks its stage masks do not support. Not reproduced, not investigated; of this pass's changes
 only the bind skip and the pace order run in loading frames. The steady scene: 0 recordings, 0 switches, 0 key builds, no graph build
 in the window. ORG's unit tests pass, run one at a time (HeadlessBenchmark not run).
+
+## The load's fatal mismatch: a torn binding capture (2026-11-16, `org-native/phases`)
+
+The validation tour stopped once in three runs at `load recent` on a menu `HDRDownSample4` draw outside every CS step (run
+`1116-172731-nfg-native-validation-f5val`). The mismatch was the last link of a chain:
+- 30 ms earlier a build of the deferred+water stage (a "one-shot passes ran" rebuild after the load) failed in ORG with
+  "Replacement lost a required descriptor snapshot": a slot was bound to a live allocation with no descriptor views.
+- The frame anchors' failure handler dropped every client of that build (the menu composites among them) "back to D3D11". Native mode
+  has no D3D11 path, so the next menu scene's end-of-frame draw reached the frame with no pass: the fatal tap error. The frame kind
+  (loading screen) and its recipe (menu UI) were right; the stage's schedule was not lost to the rebuild.
+
+The cause is a race between graphs of the shared alias arena. The failing build's bootstrap ran on the build thread (it gathered 85
+passes at 27.172 and never logged its bootstrap) while the host thread placed the previous deferred+water build (`alias plan epoch=41
+... rematerialized=8`, 27.174 to 27.176). A re-placement dematerializes a transient (its descriptor slots rotate away) and materializes
+it again. `PublicationBindingBundle::Capture` took the allocation under the resource's materialization lock, then read its views
+without it, so a capture between the two halves paired the old allocation with no views (this failure), or with the next backing's
+views (a silent wrong binding). `BufferBase` did not lock its dematerialize or its capture at all.
+
+The fix (ORG):
+- `BackedResource::BackingMutex`: the materialization lock (now recursive) of `PixelBuffer` and `BufferBase`. A publication capture
+  holds it across the allocation, the views and the descriptor owner; `BufferBase` locks its dematerialize and capture; the rotation
+  keys read a backing's generation and views under it.
+- A regression test (`RunCaptureDuringReplacementScenario` in RebindingGpuTests, Vulkan host tests `rebinding`): one thread
+  dematerializes and materializes a texture 400 times while another captures it; no capture may have an allocation without views.
+
+And CS: in native mode a failed stage build stops the game with the build's own error (development builds, the mismatch rule's switch
+`CS_ORG_MISMATCH_FATAL`), instead of dropping its clients to a D3D11 path native mode does not have and failing later on a mismatch
+that hides the cause.
+
+Checks: 8 `load recent` loads clean (4 without validation, 4 with), plus their startup loads; 126 one-shot rebuilds and 52
+rematerializing alias plans ran during them.
+
+## GPU cost (2026-11-16, `org-native/phases`)
+
+### GPU timing in native
+
+The graph's GPU timestamps were empty in native because every native stage is a recording kept across frames, and kept recordings are
+timed only with `CS_ORG_RECORDING_TIMESTAMPS=1`, which nothing set: `CS_GPU_EVENT_TIMERS` and the idle trace got frames with no
+ranges. Per-pass timing in kept recordings also ends every range with a drain (NVIDIA's bottom-of-pipe timestamp otherwise lands before
+a preceding ExecuteIndirect), which distorts a frame of 600 ranges.
+
+Now (ORG `RenderGraph::RecordingTimestampMode`): `Lists` times each kept list once, from before its entry barriers to after its exit
+barrier, one drain per list; `Passes` is the old per-pass and per-barrier mode. CS turns `Lists` on whenever the graph's timings are
+collected (`CS_GPU_EVENT_TIMERS` on the graph, which native always is, or native's idle trace); `CS_ORG_RECORDING_TIMESTAMPS=1` asks
+for `Passes`, `=0` for none. Off otherwise: kept recordings carry no queries. The timestamps are part of the kept recording; each
+submission resolves them and its frame slot's completion reads them. Each range is charged to the stage whose epoch submitted it
+(`GpuTimingSource`), and the `[GpuEvents]` log has a row per stage before the rows per range. The cost of list mode is inside the
+run-to-run spread (5.91 ms with it, 5.77 to 5.98 ms without).
+
+`CS_RHI_CENSUS=<frames>` logs BasicRHI's command census (`rhi::census`), per frame by list (labelled with its first pass): render
+passes, attachments and their load and store operations, adjacent passes on the same attachments, barrier commands, image barriers
+(layout changes, same state, onto the previous pass's attachments), buffer and memory barriers.
+
+### Per stage (perf-taa, RTX 5080, uncapped, background runs)
+
+Native: list timestamps, mean of 5 blocks of 300 frames, one run (`gt1`; `gt2` within 0.03 ms on every row). Guest: its D3D11 event
+timers (`ggt1`) for the engine's work, and its graph ranges (`ggt2`, `CS_GPU_TIMERS=graph`) for DCLF's epochs, one run each. Guest runs
+terrain shadows and Cloud Shadows' layer copies on D3D11, so its D3D11 timers cover them. Measured unless marked.
+
+| Stage | Native GPU ms | Guest GPU ms |
+|---|---|---|
+| start (reflection faces' sky, water effects, Cloud Shadows' layer copies) | 0.37 | 0.20 (Water Effects, CloudShadows' reflections prepass) |
+| DCLF shadows | 0.55 | 0.48 |
+| pre-depth (terrain shadows, cloud layers, skylighting probes) | 0.26 | about 0.02, and 0.07 skylighting under World (estimated mapping) |
+| DCLF depth (Z-prepass) | 0.82 + 0.03 async | 0.74 + 0.02 async |
+| pre-main (depth copy, shadow mask, LLF, SSS raymarch, sky) | 0.39 | about 0.33 (estimated from its events) |
+| DCLF opaque | 0.90 | 0.94 |
+| deferred+water | 1.02 | about 0.9 (World less DCLF's and the prepasses; estimated) |
+| DCLF forward | 0.08 | 0.09 |
+| sun | 0.004 | - |
+| DCLF first person | 0.02 | 0.02 |
+| post (TAA, upscale copy, tonemap, VL composite, chain) | 0.80 | about 0.8 (post events 0.3, TAA and present 0.5; estimated) |
+| UI (Scaleform) | 0.01 | - |
+| engine anchors (shadow clears, frame clear, queries) | 0.02 | - |
+| sum of stages, graphics queue | 5.23 | |
+| graphics queue busy / first to last range | 5.28 / 5.94 | GPU frame 5.08 |
+
+Frame period on the same build (Tracy, steady): native 5.77 and 5.98 ms (`b1n1`, `b1n2`), guest 5.26 ms (`b1g1`). Both are GPU-bound:
+guest's GPU frame (5.08) is its period, and native's graphics span (5.94) is its period.
+
+Largest native passes (per-pass mode, inflated by its drains): DCLF colour 0.76, DCLF shadow view 0.43, DCLF Z depth 0.40, VL generate
+0.22, SSGI 0.22, Cloud Shadows' sky-reflection gather 0.17 and scatter 0.11, terrain shadows' update 0.11, skylighting probes 0.09,
+DCLF reflection faces 0.09. Every barrier batch range reads 0.00.
+
+### What makes up the gap (about 0.6 ms a frame on this build)
+
+| Cause | Cost | How |
+|---|---|---|
+| Cloud Shadows' native path (layer copies as compute: 6 face taps x 32 layers, gather and scatter) | 0.2 to 0.35 ms | measured by removal: native 5.55 and 5.61 ms without Cloud Shadows (4 runs with it: 5.77 to 5.98), guest 5.27 against 5.26 |
+| GPU idle between lists on the graphics queue | 0.66 ms span less busy, of which about 0.2 is the timestamps' own drains (estimated) | measured, idle trace (`idle1`): 47 lists, two cross-queue waits (0.13 ms before DCLF's Z depth, 0.08 ms before the cubemap publish) and 44 list boundaries of median 6 us |
+| DCLF Z-prepass and shadow view slower than in guest | +0.08 and +0.07 ms | measured, the same graph timers in both modes |
+| terrain shadows' update | 0.12 ms against guest's 0.01 | measured, the same dispatch on both paths; cause not found |
+
+These overlap (the idle and the removal both include Cloud Shadows' list boundaries), so they are not added up. Not causes (measured):
+- DCLF's async compute: with `CS_DCLF_ASYNC_COMPUTE=0` native runs 5.92 ms (inside the spread); the 0.13 ms wait moves, as found
+  before.
+- GPU gates: with `CS_ORG_GPU_GATES=0` (gated passes recorded at execution, closed ones left out) native runs 5.89 ms.
+- Recording only the open entries of Cloud Shadows' layer copies and terrain shadows' stripes (at execution; tried and reverted):
+  start and pre-depth did not move (0.38 and 0.28 ms). Their cost is the work of the entries that run, not the empty dispatches.
+
+### The pass count (the user's hypothesis)
+
+Census, steady perf-taa frame (measured, `cen1`, `gcen1`):
+
+| A frame | Native | Guest (DXVK's `DXVK_BARRIER_STATS`) |
+|---|---|---|
+| render passes | 274 (129 of them the reflection faces' sky, 21 water, 17 shadow cascades, 17 SSR) | 75 |
+| ... on the same attachments as the list's pass before, no barrier between | 75 | - |
+| colour / depth attachments | 457 / 103, all loaded and stored but 18 clears | - |
+| attachments in GENERAL | 0 | - |
+| barrier commands | 297 | 166 |
+| image barriers (layout changes) | 663 (589) | 74 (64) |
+| same-state image barriers (unordered access after unordered access, entry write after write) | 72 | - |
+| buffer barriers | 653 | (in the 166 commands) |
+
+The counts are much higher in native, but the GPU time says they do not carry the gap in this scene: the 129 sky passes take 0.054 ms
+together (list timestamp), the UI stage (Scaleform's instances, one display drawn) 0.01 ms, the post chain matches guest's, and no
+barrier batch range reaches 0.01 ms. Merging the 75 mergeable passes would save about 0.03 ms at most (75 x about 0.4 us, estimated).
+Keeping a render pass open across such a boundary was not tried: BasicRHI drops commands that need the pass closed (a dispatch inside
+an open pass returns), so a deferred end needs every such command audited first. Batching Scaleform and the post chain was not done
+for the same reason: the passes it would merge cost too little to move the frame. The menu UI stage (340 to 380 passes) was not timed
+in a steady menu.
+
+Same-state attachment barriers: ORG already records no barrier between two passes of one list that use an image in the same layout,
+access and sync (render target after render target, depth write after depth write: `NeedsTextureBarrier`). Same-state barriers are
+kept only for unordered access after unordered access, and at an execution's entry for a write after a write
+(`NeedsEntryTextureBarrier`). Nothing was elided further: across render passes Vulkan requires a dependency for an attachment write
+after a write (submission order does not order them), so the existing in-list elision is itself worth a run with synchronization
+validation.
+
+### Left, ranked (estimates)
+
+1. Cloud Shadows' layer copies in native (0.2 to 0.35 ms): a few copies of a 256x256 face per layer each face tap, done as compute
+   dispatches over all six faces through a scratch array. Plain texture copies of only the faces that change (recorded at execution
+   from the commit's rows) would bring it toward guest's cost.
+2. GPU idle at list and submission boundaries (0.2 to 0.45 ms): 16 submissions a frame; the uploads riding their ticket's first
+   graphics batch would remove 3; the two cross-queue waits (0.21 ms) need DCLF's async work to start earlier, not to be turned off.
+3. Terrain shadows' update (0.1 ms): the same stripe costs 12 times guest's D3D11 dispatch; the R16 heightmap the ORG path makes is
+   the first suspect.
+4. DCLF Z-prepass and shadow view in native (0.15 ms together).
+5. Image layout changes (589 a frame against 64): not measured as a cost on NVIDIA; likely to matter on AMD.
+
+### Checks (2026-11-16, GPU cost)
+
+Final build (DLL f8c2f5c2d391), one background run each unless noted: native-quick, native-d3d12-quick, native-river,
+native-upscalers, native-interior, the loading-thread run, first and third person, the frozen-world run, guest-quick: passed, 0 tap
+errors, no `NoPass`, recipe checks 0 findings, 0 frames with a stage absent after it first ran, no failed build. native-validation
+three times: passed, only the known 20 `VUID-vkCmdDraw-None-09600` and back-buffer layout lines. Steady scene: 0 recordings, 0
+switches, 0 key builds. The quick run's shot matches the earlier one (same brightness). ORG's unit tests pass run one at a time, and the
+Vulkan host tests' `rebinding` (with the new capture test) and `split` modes; `pipelines` did not finish in 240 s (HeadlessBenchmark
+not run).
