@@ -1,5 +1,7 @@
 #pragma once
 
+#include <functional>
+
 #include "RenderGraph/Frame/FrameDescription.h"
 
 #include <cstdint>
@@ -31,6 +33,13 @@ namespace RenderGraph::Frame::Driver
 
 	/** @brief Renderer::Begin's detour, before the engine's Begin, after the render owner was claimed. */
 	void OnBegin();
+
+	/**
+	 * @brief Runs a_work at the next frame boundary: in the next OnBegin, before the frame's schedules are chosen, on the thread that
+	 * begins the frame. For work that publishes a new version of a slot (a Resize of a versioned texture), which only a frame boundary
+	 * may do. Runs a_work now when the driver is not installed. Render owner.
+	 */
+	void AtNextBegin(std::function<void()> a_work);
 
 	/** @brief ServingThread::SetLoadingScreenActive's detour: a_active before the loop starts, false once it ended. */
 	void OnLoadingScreen(bool a_active);

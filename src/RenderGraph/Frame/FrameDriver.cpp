@@ -78,6 +78,7 @@ namespace RenderGraph::Frame::Driver
 			std::atomic<std::uint64_t> errorsTotal{ 0 };
 			std::uint64_t kindChanges = 0;
 			std::uint32_t errorLines = 0;
+			std::vector<std::function<void()>> atNextBegin;  // AtNextBegin's work, run by the next OnBegin (render owner)
 			// NoteRecording's log lines per segment in the current window: its start, the lines logged and those left out.
 			struct RecordingLog
 			{
@@ -246,11 +247,24 @@ namespace RenderGraph::Frame::Driver
 		return state.loadStart.load(std::memory_order_acquire) == state.currentFrame.load(std::memory_order_acquire) + 1;
 	}
 
+	void AtNextBegin(std::function<void()> a_work)
+	{
+		auto& state = Get();
+		if (!state.installed) {
+			a_work();
+			return;
+		}
+		state.atNextBegin.push_back(std::move(a_work));
+	}
+
 	void OnBegin()
 	{
 		auto& state = Get();
 		if (!state.installed)
 			return;
+		// Work that waited for a frame boundary, before the frame's kind and schedules are decided.
+		for (auto& work : std::exchange(state.atNextBegin, {}))
+			work();
 		// The frame before it: a declared segment whose tap never fired is a tap error.
 		if (state.began)
 			for (std::uint32_t s = 0; s < kSegments; ++s) {
