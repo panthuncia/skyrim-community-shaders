@@ -207,6 +207,16 @@ void ORGScreenshot::Reserve()
 namespace
 {
 	/**
+	 * @brief Whether the run now copies with the client's current registration (its source and buffers). A stage commits only
+	 * clients its schedule holds. The anchor's own epoch (guest mode) runs whatever graph it has built: until the new registration's
+	 * build switches in, that graph has the old copy or none, and a capture taken then reads back an unwritten buffer (all black).
+	 */
+	bool CopyBuilt()
+	{
+		return FrameAnchors::HeldByStage(FrameAnchors::Anchor::Capture) || FrameAnchors::Scheduled(kClientId, FrameAnchors::Anchor::Capture);
+	}
+
+	/**
 	 * @brief Registers the capture client for the shared source and buffers: one copy pass, recorded at execution. In native mode with the
 	 * UI stage the Capture anchor is its step (after the overlay); otherwise it runs its own epoch.
 	 */
@@ -228,7 +238,7 @@ namespace
 		};
 		client.commit = [weak = std::weak_ptr<Shared>(a_shared)](const FrameAnchors::Point&) {
 			const auto owner = weak.lock();
-			if (!owner || !owner->armed)
+			if (!owner || !owner->armed || !CopyBuilt())
 				return;
 			auto request = std::exchange(owner->armed, nullptr);
 			request->taken = true;
@@ -340,7 +350,7 @@ namespace
 	{
 		if (!a_shared.armed)
 			return;
-		if (FrameAnchors::HeldByStage(FrameAnchors::Anchor::Capture) && !FrameAnchors::CanTap(kClientId))
+		if (FrameAnchors::HeldByStage(FrameAnchors::Anchor::Capture) ? !FrameAnchors::CanTap(kClientId) : !CopyBuilt())
 			return;
 		(void)FrameAnchors::Run(FrameAnchors::Anchor::Capture);
 	}
