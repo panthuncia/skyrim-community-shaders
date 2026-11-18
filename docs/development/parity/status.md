@@ -117,13 +117,12 @@ To match DXVK, native needs what DXVK's CS thread gives it: the GPU work off the
 - **Residue:** the reflection cube face draws; load-window shadow draws; the refused occlusion-query draw; the sun occlusion
   draw skipped when its depth is neither kMAIN's nor the Z-prepass copy.
 - **Map:** native shows flat white patches on the world map's terrain. Compare with guest. 2026-11-18 (`map` config, RX 6600):
-  the flat white areas are in plain `d3d11` too (the Throat of the World's LOD), so they are the game's. What only guest and native
-  Vulkan show is a long thin white triangle from under the map's centre (the player's place) down to the left, the same on both
-  and in consecutive frames. It stays with DCLF's actors and skins native, with tree LOD native, with `dclf.pipeline=cpu` and with
-  the sky port off. It goes with `dclf.lod_objects=false` (then neither DCLF nor the engine draws object LOD on the map), so it is
-  DCLF's object LOD draw with the map camera. The segment ranges DCLF captures for object LOD stay inside each shape's index buffer
-  (a logged run), so it is not a range overrun. Shots are in `runs\1118-135959-nfg-guest-map-bug9` (guest),
-  `1118-140106-nfg-d3d11-map-bug9`, `1118-140227-nfg-native-vulkan-map-bug9` and `1118-142545-nfg-guest-map-bug9-noobjlod`. Not fixed.
+  the flat white areas are in plain `d3d11` too (the Throat of the World's LOD), so they are the game's. The long thin white
+  triangle only guest and native Vulkan showed is fixed (org-native-frame-graph.md, "The map's white triangle"). It was the last
+  triangle of a level-32 object LOD block whose index list has an odd count. The index pool read the list's last word past the end
+  of the buffer's raw view, got 0, and the triangle ran to vertex 0. Engine buffers are now padded to whole words and the imported
+  views cover the last word. After the fix the map matches `d3d11` there: `runs\1118-152847-nfg-guest-map-bug10-final` (guest),
+  `1118-153004-nfg-native-vulkan-map-bug10-final` (native Vulkan).
 - **Unified Water** (2026-11-18): turned on through cs-test (`--set features.UnifiedWater=true`), the river flicker bursts
   (`river-flicker`, 2 x 30 consecutive frames) show no flicker on guest or native Vulkan (no tile spikes) after the flow map fix
   (org-native-frame-graph.md, "Unified Water's flow map"). No Engine Fixes complaint about a flowmap in its log. The user's flicker

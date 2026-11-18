@@ -8320,3 +8320,41 @@ takes its slot (`CheckFlowMap`), so the water surface reads Unified Water's map.
 With `--set features.UnifiedWater=true` (a new cs-test switch, `CS_ENABLE_FEATURES`), `river-flicker` passes on guest and native
 Vulkan with no tile spikes in either burst. The log shows "0 flow copies", and the surface draws read the Tamriel flowmap. Quick runs
 pass on guest and native Vulkan (DLL 4339388478ce).
+
+## The map's white triangle (2026-11-18)
+
+### Cause
+
+The long thin white triangle on the world map (guest and native Vulkan, not `d3d11`) was the last triangle of one level-32 object
+LOD block (`objsnow` at (0, -65536), 9,261 triangles, a 55,566-byte index buffer). Its index count is odd, so the buffer ends
+halfway through its last 4-byte word. DCLF's draws index from the index pool, whose copy (`IndexPoolCS.hlsl`) loads the source
+through a raw view one word at a time. The view covered the buffer's exact size, so the last word was out of range and read as 0.
+The last triangle's third index became 0 and the triangle ran from its two real vertices to vertex 0, across the map.
+
+- Guest: the engine's static vertex and index buffers are ORG buffers (`Engine/Buffers/EngineBuffers.cpp`), made at the exact
+  `ByteWidth`, and their ref is a view of the whole buffer.
+- Native: `NativeDevice` made each buffer at the exact `ByteWidth`, and `ImportBufferRef` imported that size.
+- DXVK buffers were safe by luck only. A view of a shared VkBuffer usually reaches past one slice because other slices were
+  imported, but `ImportBufferRef` still ended the view at the slice's last byte.
+
+Every DCLF-drawn mesh with an odd index count had this. The map made one visible because that block's vertex 0 is far from its
+last triangle. Elsewhere vertex 0 is usually near, behind the camera or the triangle faces away.
+
+### How it was found
+
+- An object index tint on DCLF's object LOD draws put the triangle in the block's colour.
+- Projecting each block's last triangle with its third index read as 0 matched the triangle on screen for that block alone.
+- Mesh data, segment ranges, pool ranges (no overlaps) and a recopy of the pool ranges later in the map were all fine.
+- Taking only the last word of each odd-sized shape from the engine's CPU copy of the indices removed the triangle.
+
+### Fix
+
+- `EngineBuffers.cpp` (`MakeBacking`): the ORG buffer is padded to whole words, the padding zeroed.
+- `NativeDevice.cpp` (`MakeBufferResource`): the buffer is padded to whole words. `record->size` stays the engine's size.
+- `DxvkImageImport.cpp` (`ImportBufferRef`): an import covers each range to its last whole word. DXVK pads every slice to 256 bytes.
+
+### Results
+
+DLL 1f2f029d2217. The map matches `d3d11` where the triangle was: `runs\1118-152847-nfg-guest-map-bug10-final` (guest) and
+`1118-153004-nfg-native-vulkan-map-bug10-final` (native Vulkan), against `1118-140106-nfg-d3d11-map-bug9`. Error lines are the
+baseline's. Quick runs pass on guest and native Vulkan.
