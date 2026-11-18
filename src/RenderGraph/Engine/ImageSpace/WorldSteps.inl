@@ -198,6 +198,7 @@ struct WorldSteps
 	bool on = false;          // the deferred+water stage runs in this mode: the scopes are CS passes
 	bool registered = false;  // registered for the sizes below
 	bool retry = false;       // a pass was left out at a build (an effect not made yet): register again at a later frame
+	bool pending = false;     // a registration waits for the next frame boundary
 	std::uint64_t registeredFrame = 0;  // the frame of the last registration: a retry waits kRetryFrames after it
 	std::uint32_t saoLevels = 0, contrastLevel = 0, width = 0, height = 0;
 	std::pair<float, float> ratios{ 1.0f, 1.0f };
@@ -333,7 +334,7 @@ void CheckWorldSteps()
 		return;
 	if (world.registered && !world.retry && world.width == desc.Width && world.height == desc.Height && world.saoLevels == EngineSaoLevels() && world.ratios == ratios)
 		return;
-	RegisterWorldSteps();
+	RegisterAtBoundary(world.pending, [] { return World().on && StepTargetsReady(); }, RegisterWorldSteps);
 }
 
 /** @brief Sets a_bits' bit of every entry of a_count whose key a_on selects. */
@@ -829,6 +830,11 @@ bool TakeWorldStep(WorldScope a_scope, std::size_t a_effect, bool a_compute, std
 	const StepKey key{ a_scope, id, variant };
 	const auto found = world.entries.find(key);
 	if (found == world.entries.end()) {
+		// The engine may draw for new sizes before the registration for them at the next Begin.
+		if (world.pending) {
+			Frame::Driver::NoteLaggedWork(Frame::SegmentId::Deferred);
+			return true;
+		}
 		Frame::Driver::NoteTapError(Frame::Driver::TapError::NoPass, Frame::SegmentId::Deferred,
 			fmt::format("{} (variant {:#x}) in a RenderWorld scope has no CS pass; it draws nothing", kEffects[a_effect].effectName, variant));
 		return true;

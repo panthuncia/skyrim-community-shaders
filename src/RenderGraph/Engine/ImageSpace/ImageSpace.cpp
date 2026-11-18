@@ -1544,6 +1544,27 @@ namespace RenderGraph::Engine::ImageSpace
 		void CheckMenuSteps();
 		void ReregisterSteps();
 
+		/**
+		 * @brief Registers a stage's steps again at the next frame boundary, once while one is pending. A frame keeps the step layout
+		 * its schedule was described with, so a new size or setting seen during a frame takes effect at the next Begin.
+		 */
+		void RegisterAtBoundary(bool& a_pending, bool (*a_ready)(), void (*a_register)())
+		{
+			if (std::exchange(a_pending, true))
+				return;
+			Frame::Driver::AtNextBegin([&a_pending, a_ready, a_register] {
+				a_pending = false;
+				if (a_ready())
+					a_register();
+			});
+		}
+
+		/** @brief Whether the engine has what the steps' registrations read, kMAIN and the ImageSpace manager. */
+		bool StepTargetsReady()
+		{
+			return IS().on && RE::ImageSpaceManager::GetSingleton() && globals::game::renderer->GetRuntimeData().renderTargets[RE::RENDER_TARGET::kMAIN].texture;
+		}
+
 		/** @brief Notes the engine objects a spec's imports were made from, for the resize check (CheckImports). */
 		void NoteImports(const Spec& a_spec)
 		{

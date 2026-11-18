@@ -48,6 +48,7 @@ struct ChainSteps
 	bool on = false;          // native mode with the post stages: the chain is CS passes
 	bool registered = false;  // registered for the sizes below
 	bool retry = false;       // a pass was left out at a build: register again at a later frame
+	bool pending = false;     // a registration waits for the next frame boundary
 	std::uint64_t registeredFrame = 0;
 	std::uint32_t width = 0, height = 0, finalWidth = 0, finalHeight = 0, levels = 0;
 	std::pair<float, float> ratios{ 1.0f, 1.0f };
@@ -539,7 +540,7 @@ void CheckChainSteps()
 	if (chain.registered && !chain.retry && chain.width == main.Width && chain.height == main.Height && chain.finalWidth == final.first &&
 		chain.finalHeight == final.second && chain.final == FinalName() && chain.finalObject == EngineObjectOf(chain.final) && chain.levels == Frame::PostChain::LuminanceLevels() && chain.ratios == DynamicRatios())
 		return;
-	RegisterChainSteps();
+	RegisterAtBoundary(chain.pending, [] { return Chain().on && StepTargetsReady(); }, RegisterChainSteps);
 }
 
 /**
@@ -1486,12 +1487,13 @@ bool TakeChainStep(std::size_t a_effect, bool a_compute, std::array<std::uint32_
 		const auto& held = Frame::Driver::Current().Segment(segment).rows;
 		return row < 256 && (held[row / 64] >> (row % 64) & 1u) != 0;
 	};
+	bool routedTonemap = false, routedTaa = false;
 	if (key.scope == WorldScope::Tonemap) {
 		auto routedKey = key;
 		routedKey.variant |= ChainRoute::kTonemapBit;
 		if (heldOn(routedKey)) {
 			key = routedKey;
-			chain.scratchWritten = true;
+			routedTonemap = true;
 		}
 	} else if (key.scope == WorldScope::Taa) {
 		auto routedKey = key;
@@ -1503,7 +1505,7 @@ bool TakeChainStep(std::size_t a_effect, bool a_compute, std::array<std::uint32_
 				return true;
 			}
 			key = routedKey;
-			chain.taaRouted = true;
+			routedTaa = true;
 		}
 	}
 	const auto found = chain.entries.find(key);
@@ -1511,7 +1513,7 @@ bool TakeChainStep(std::size_t a_effect, bool a_compute, std::array<std::uint32_
 		// Shortly after a registration (a new size or level count), the frame may still run on the old build while the engine draws for
 		// the new sizes: lagged work, not a mismatch.
 		constexpr std::uint64_t kRegistrationFrames = 300;
-		if (Frame::Driver::Current().frame - chain.registeredFrame < kRegistrationFrames) {
+		if (chain.pending || Frame::Driver::Current().frame - chain.registeredFrame < kRegistrationFrames) {
 			chain.requested[group] = Frame::Driver::Current().frame;
 			Frame::Driver::NoteLaggedWork(segment);
 			return true;
@@ -1545,6 +1547,11 @@ bool TakeChainStep(std::size_t a_effect, bool a_compute, std::array<std::uint32_
 	// The step wrote the scratch target: its copy back runs with it. A step whose constants could not be staged opens nothing.
 	if (client.batch.size() > staged && part.copyBack[entry] != kNoCopy)
 		client.batch.push_back({ .entry = part.copyBack[entry] });
+	// Only a routed tonemap that drew wrote the scratch, so a lagging one leaves the pass-through copy and TAA out.
+	if (client.batch.size() > staged) {
+		chain.scratchWritten |= routedTonemap;
+		chain.taaRouted |= routedTaa;
+	}
 	return taken;
 }
 

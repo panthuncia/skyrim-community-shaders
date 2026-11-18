@@ -24,6 +24,7 @@ struct StartSteps
 	bool on = false;          // native mode with the start stage: the water effects are CS passes
 	bool registered = false;  // registered for the targets below
 	bool retry = false;       // a pass was left out at a build (an effect not made yet): register again at a later frame
+	bool pending = false;     // a registration waits for the next frame boundary
 	std::uint64_t registeredFrame = 0;
 	std::uint32_t displacementSize = 0, flowSize = 0;
 	std::map<StepKey, std::uint32_t> entries;
@@ -81,7 +82,10 @@ void CheckStartSteps()
 		return;
 	if (start.registered && !start.retry && start.displacementSize == desc.Width && start.flowSize == flowDesc.Width)
 		return;
-	RegisterStartSteps();
+	RegisterAtBoundary(start.pending, [] {
+		return Start().on && IS().on && RE::ImageSpaceManager::GetSingleton() &&
+		       globals::game::renderer->GetRuntimeData().renderTargets[RE::RENDER_TARGET::kWATER_DISPLACEMENT].texture;
+	}, RegisterStartSteps);
 }
 
 /** @brief Every pass of the start client is on: each does work only where its gate entry opens (the engine's late decisions). */

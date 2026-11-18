@@ -25,6 +25,7 @@ struct MenuSteps
 	bool on = false;          // native mode with CS's stages: the composites are CS passes
 	bool registered = false;  // registered for the sizes below
 	bool retry = false;       // a pass was left out at a build (an effect or a blend state not made yet): register again later
+	bool pending = false;     // a registration waits for the next frame boundary
 	std::uint64_t registeredFrame = 0;
 	std::uint32_t width = 0, height = 0, finalWidth = 0, finalHeight = 0, levels = 0;
 	std::map<StepKey, std::uint32_t> entries;
@@ -76,7 +77,7 @@ void CheckMenuSteps()
 	if (menu.registered && !menu.retry && menu.width == main.Width && menu.height == main.Height && menu.finalWidth == final.first &&
 		menu.finalHeight == final.second && menu.levels == Frame::PostChain::LuminanceLevels())
 		return;
-	RegisterMenuSteps();
+	RegisterAtBoundary(menu.pending, [] { return Menu().on && StepTargetsReady(); }, RegisterMenuSteps);
 }
 
 /** @brief The frozen world's composite: its own client, first in the UI stage. */
@@ -403,6 +404,11 @@ bool TakeMenuStep(std::size_t a_effect, bool a_compute, std::array<std::uint32_t
 	const bool isTint = known && key == TintKey() && !IS().post[static_cast<std::size_t>(PostPart::FaceTint)].specs.empty();
 	const auto found = known && !isFrozen && !isTint ? menu.entries.find(key) : menu.entries.end();
 	if (!isFrozen && !isTint && found == menu.entries.end()) {
+		// The engine may draw for new sizes before the registration for them at the next Begin.
+		if (menu.pending) {
+			Frame::Driver::NoteLaggedWork(Frame::SegmentId::Ui);
+			return true;
+		}
 		const auto& call = menu.calls.empty() ? MenuSteps::EffectCall{} : menu.calls.back();
 		Frame::Driver::NoteTapError(Frame::Driver::TapError::NoPass, Frame::SegmentId::Count,
 			fmt::format("{} (variant {:#x}){} outside the world chain has no CS pass; it draws nothing", kEffects[a_effect].effectName, key.variant,
