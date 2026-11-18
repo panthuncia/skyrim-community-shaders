@@ -8304,7 +8304,7 @@ Quick runs pass on native D3D12, native Vulkan and guest.
 ### Cause
 
 Unified Water puts its own flow map in the engine's FlowMap slot at data load. It is a texture loaded from
-`textures\waterlowmaps\Tamriel-Flowmap.*.dds` and has no UAV. Unified Water also removes the engine's flow copies. The ImageSpace
+`textures\water\flowmaps\Tamriel-Flowmap.*.dds` and has no UAV. Unified Water also removes the engine's flow copies. The ImageSpace
 port made its own flow map at Setup and published it. When the slot's texture changed, the start stage registered its steps again
 with 32 flow copies writing the new texture. That build failed ("does not publish the requested bindless view; kind=1", the UAV).
 Development builds stop there at the first loading screen, and a release build drops the start stage's clients (the water
