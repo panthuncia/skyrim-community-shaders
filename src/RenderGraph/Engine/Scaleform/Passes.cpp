@@ -812,7 +812,7 @@ namespace RenderGraph::Engine::Scaleform::Passes
 			// The scratch images are read only by a later display segment of the display that drew into them: a pass of any instance but the
 			// one the UI stage's graph makes first declares them (DisplayPass::Declare leaves its own target out). No earlier tap of the frame
 			// wrote anything that first instance could read, so each scratch image's first use in the frame is a draw into it, which clears it:
-			// its bytes may hold another stage's transients before (the frame arena). The anchor's own epoch (guest mode) runs one instance a
+			// its bytes may hold another stage's transients before (the frame arena). The anchor's own epoch (without the stages) runs one instance a
 			// run, and a scratch image there keeps what an earlier run drew: every pass declares them.
 			auto withScratch = std::make_shared<Reads>(*declared);
 			for (const auto& surface : a_state.surfaces)

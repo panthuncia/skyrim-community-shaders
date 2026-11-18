@@ -372,7 +372,7 @@ namespace RenderGraph::Engine::Bink::Graph
 			client.id = kClientId;
 			// First in the Present anchor: the movie frame is the image the other Present clients draw over.
 			// In the UI stage the pass reads the run's slot, which the commit stores: it records in the stage's late batch, at each
-			// submission. Its own epoch (guest mode) prepares it again every run as before.
+			// submission. Its own epoch (without the stages) prepares it again every run as before.
 			const bool late = FrameAnchors::HeldByStage(FrameAnchors::Anchor::Present);
 			const auto add = [&](const DrawTarget& a_target, const char* a_name, std::int32_t a_order) {
 				if (!a_target.resource)
@@ -678,7 +678,7 @@ namespace RenderGraph::Engine::Bink::Graph
 				return refuse("the UI stage's schedule does not hold the Bink client yet");
 			return true;
 		}
-		// The anchor's own epoch (guest mode). The setup's build point put the client in the Present graph. Only HDR's UI texture
+		// The anchor's own epoch (without the stages). The setup's build point put the client in the Present graph. Only HDR's UI texture
 		// appearing after setup changes it, and a blocking tick builds that between two frames (UpdateTargets): this waits only for an
 		// attach after the first world frame.
 		if (!FrameAnchors::Scheduled(kClientId, FrameAnchors::Anchor::Present))

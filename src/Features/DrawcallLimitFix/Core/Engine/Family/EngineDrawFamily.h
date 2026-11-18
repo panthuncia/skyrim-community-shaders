@@ -446,9 +446,9 @@ namespace DCLF::Family
 
 	/**
 	 * @brief Whether a batch of a family's client at a_anchor is drawn by the graph now (the batch is taken).
-	 * Native mode: the stage step that names the client holds it (FrameAnchors::HeldNow). A batch while no open stage holds the client
+	 * A client a stage names: the stage step that names it holds it (FrameAnchors::HeldNow). A batch while no open stage holds the client
 	 * is a tap error (NotDeclared, in a_segment: the stage the client belongs to); one the stage's schedule does not hold yet lags (its
-	 * first build): nothing is drawn. Guest mode: the anchor's own built graph holds the client (FrameAnchors::Scheduled). a_family names
+	 * first build): nothing is drawn. Any other client: the anchor's own built graph holds it (FrameAnchors::Scheduled). a_family names
 	 * the family in the messages.
 	 */
 	bool HeldForBatch(std::string_view a_family, std::string_view a_client, std::uint32_t a_segment, FrameAnchors::Anchor a_anchor = FrameAnchors::Anchor::EngineDraws);

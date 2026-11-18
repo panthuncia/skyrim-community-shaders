@@ -1,8 +1,8 @@
 // The precipitation family's render graph side: one client at the EngineDraws anchor, made once at setup, whose pass draws a run's
 // latched draws (one each: a run is a draw at its place in the grouped alphas) with CS's Particle.hlsl built for ORG, with the
-// engine's depth-stencil state and reference per draw. Native mode: the client is the sun stage's first step (the engine's blended
-// draws come after Drawcall Limit Fix's forward epoch and before the sun query); each draw of a frame is a tap of that step, appended
-// to the frame's earlier ones, and the pass records them all at execution. Guest mode: the anchor's own epoch, a run per draw.
+// engine's depth-stencil state and reference per draw. The client is the sun stage's first step (the engine's blended draws come
+// after Drawcall Limit Fix's forward epoch and before the sun query); each draw of a frame is a tap of that step, appended to the
+// frame's earlier ones, and the pass records them all at execution.
 
 // volk must precede every Vulkan header in this translation unit.
 #include <rhi_interop_vulkan.h>
@@ -387,8 +387,8 @@ namespace DCLF::Features::Precipitation::PrecipitationDraws
 		};
 		// In the sun stage each draw of the frame commits into its run (above).
 		desc.repeats = true;
-		// Native mode: a step of the sun stage only (the anchor has no epoch there).
-		desc.segmentOnly = FrameAnchors::StagesOnly(desc.id);
+		// A step of the sun stage only (the anchor has no epoch of its own).
+		desc.segmentOnly = FrameAnchors::NamedByStage(desc.id);
 		desc.executed = [client](const FrameAnchors::Point&) {
 			if (client->executed.fetch_add(1, std::memory_order_relaxed) == 0)
 				logger::info("[DCLF] precipitation: the first precipitation run drawn by the graph");

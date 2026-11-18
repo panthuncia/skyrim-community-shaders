@@ -1,9 +1,9 @@
 // The menu scenes family's render graph side: a client per batch at the EngineDraws anchor, made once at setup, whose pass draws a
 // batch's latched draws into the view's imported targets with kMAIN's depth, in the engine's order, with CS's shaders built for ORG
-// (Utility.hlsl's UTILITY_ORG_SCENE, Lighting.hlsl's LIGHTING_ORG, Effect.hlsl's EFFECT_ORG). In native mode the clients are steps of the UI
-// stage in every frame kind (a world frame's inventory item and local map too) and only there (segment-only); a run's draw list is a frame
-// input: the commit stores it for its run (RunSlots) and the pass records it at execution, so the stage's kept recording never changes with
-// the draws. Guest mode runs them on the EngineDraws anchor's own epoch.
+// (Utility.hlsl's UTILITY_ORG_SCENE, Lighting.hlsl's LIGHTING_ORG, Effect.hlsl's EFFECT_ORG). The clients are steps of the UI stage in every
+// frame kind (a world frame's inventory item and local map too) and only there (segment-only); a run's draw list is a frame input: the
+// commit stores it for its run (RunSlots) and the pass records it at execution, so the stage's kept recording never changes with the
+// draws.
 
 // volk must precede every Vulkan header in this translation unit.
 #include <rhi_interop_vulkan.h>
@@ -373,8 +373,8 @@ namespace DCLF::Features::MenuViews::Scenes::SceneDraws
 					logger::info("[DCLF] menu scenes: the first {} run drawn by the graph", client->id);
 			};
 			desc.active = [client] { return client->pending; };
-			// Native mode: passes of the UI stage only. A batch while no open stage holds the client is a mismatch (CanTake).
-			desc.segmentOnly = FrameAnchors::StagesOnly(desc.id);
+			// Passes of the UI stage only. A batch while no open stage holds the client is a mismatch (CanTake).
+			desc.segmentOnly = FrameAnchors::NamedByStage(desc.id);
 			desc.onFailed = [] { Fail("the render graph failed with the menu scenes' passes in it"); };
 			if (!FrameAnchors::Register(std::move(desc))) {
 				logger::warn("[DCLF] menu scenes: the {} client could not be registered; that batch stays the engine's", client->id);

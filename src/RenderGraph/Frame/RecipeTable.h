@@ -25,7 +25,7 @@
  *   One family registers a variable set of ids: ImageSpace's late clients in guest mode, named below with their serial range.
  * - A stage's **epochs** list, in frame order, every epoch that sits in its part of the frame: its own graph (Graph), an anchor that
  *   keeps its own ticket after it in native mode (Ticket: frame generation, HDR output), and the anchors' own epochs placed there for the
- *   host's epoch order (Placed: guest mode runs every anchor as its own epoch, and native mode an anchor no step holds).
+ *   host's epoch order (Placed: the anchors' own epochs, which run only without the stages).
  *
  * Header deliberately free of ORG includes.
  */
@@ -108,7 +108,7 @@ namespace RenderGraph::Frame::Recipes::Table
 	{
 		Segment segment = Segment::Count;
 		Role role = Role::Graph;
-		Names clients{};  // an anchor's own epoch: the clients that run on it there (guest mode, or an anchor no step holds)
+		Names clients{};  // an anchor's own epoch: the clients that run on it there (without the stages)
 		Family family{};  // and a family of them
 	};
 
@@ -142,10 +142,6 @@ namespace RenderGraph::Frame::Recipes::Table
 		// A new description switches every frame slot at once, when each slot's recording of it is ready (the UI stage: its description
 		// changes with the frame kind, not by frame). Other stages keep one schedule per slot.
 		bool switchesEverySlot = false;
-		// Guest mode runs this stage (plan decision D7): one block in DXVK's stream. The anchors of a stage without it keep their own epochs
-		// in guest, and the skeleton's clears and copies at its steps run on their group anchors' own epochs there. A migration bit: it goes
-		// once every stage runs in guest.
-		bool runsInGuest = false;
 		// A point-ended stage commits just before any of these epochs is submitted (FrameAnchors::BeforeGpuWork), if it has not ended yet.
 		SegmentList commitBefore = Segments({});
 		std::string_view commit;      // where it commits, for the recipe print
@@ -206,7 +202,6 @@ namespace RenderGraph::Frame::Recipes::Table
 				{ .anchor = Anchor::EngineShadowClear, .clients = { "cs.engine.skeleton.shadow@start" } },
 				{ .point = true },
 			} },
-			.runsInGuest = true,
 			.commitBefore = Segments({ Segment::ShadowView, Segment::SkyOcclusion, Segment::ZPrepass, Segment::FirstPersonDepth, Segment::LightCulling, Segment::MainOpaque,
 				StageSegment(SegmentId::PreDepth), StageSegment(SegmentId::PreMain), StageSegment(SegmentId::Deferred), kEndsWorld[0], kEndsWorld[1], kEndsWorld[2],
 				kEndsWorld[3], kEndsWorld[4], kEndsWorld[5], kEndsWorld[6], kEndsWorld[7] }),
@@ -222,8 +217,6 @@ namespace RenderGraph::Frame::Recipes::Table
 		// Drawcall Limit Fix's Z-prepass does not host it (every world frame before DCLF draws and during its load holds; no pre-depth pass
 		// reads the main depth). Its commit is a point just before DCLF's Z-prepass or a later stage (BeforeGpuWork, and a later stage's first
 		// tap): the clear must reach the GPU before the Z-prepass draws, which a load hold's frames submit.
-	// Guest mode runs the EarlyPrepass step alone and commits at its hook: the depth clear is the skeleton's, which hosts nothing in guest
-	// yet (the clear keeps the EngineFrameClear anchor's own epoch there).
 		{ .id = StageId::PreDepth,
 			.owner = Owner::Cs,
 			.name = "pre-depth",
@@ -237,7 +230,6 @@ namespace RenderGraph::Frame::Recipes::Table
 				{ .anchor = Anchor::EngineFrameClear, .clients = { "cs.engine.skeleton.frame@pre-depth" } },
 				{ .point = true },
 			} },
-			.runsInGuest = true,
 			.commitBefore = Segments({ Segment::ZPrepass, Segment::FirstPersonDepth, Segment::Reflection, Segment::LightCulling, Segment::MainOpaque, StageSegment(SegmentId::PreMain),
 				StageSegment(SegmentId::Deferred), kEndsWorld[0], kEndsWorld[1], kEndsWorld[2], kEndsWorld[3], kEndsWorld[4], kEndsWorld[5], kEndsWorld[6], kEndsWorld[7] }),
 			.commit = "just before DCLF's Z-prepass, or Main::RenderDepth's depth copy",
@@ -271,7 +263,6 @@ namespace RenderGraph::Frame::Recipes::Table
 				{ .anchor = Anchor::Sky, .clients = { "cs.sky.main" }, .whole = true },
 				{ .point = true },
 			} },
-			.runsInGuest = true,
 			.commitBefore = Segments({ Segment::MainOpaque, StageSegment(SegmentId::Deferred), kEndsWorld[0], kEndsWorld[1], kEndsWorld[2], kEndsWorld[3], kEndsWorld[4],
 				kEndsWorld[5], kEndsWorld[6], kEndsWorld[7] }),
 			.commit = "just before DCLF's main opaque epoch (the main pass's sky)",
@@ -302,7 +293,6 @@ namespace RenderGraph::Frame::Recipes::Table
 				{ .anchor = Anchor::ImageSpace, .clients = { "cs.engine.skeleton.frame@image-space", "cs.engine.imagespace.world.water" } },
 				{ .point = true },
 			} },
-			.runsInGuest = true,
 			.commitBefore = Segments({ kEndsWorld[0], kEndsWorld[1], kEndsWorld[2], kEndsWorld[3], kEndsWorld[4], kEndsWorld[5], kEndsWorld[6], kEndsWorld[7] }),
 			.commit = "the engine's blended draw (just before DCLF's forward epoch)",
 			.commitSite = "the engine's blended draw for the main accumulator (Features/Forward's ForwardHooks.cpp), else BeforeGpuWork",
@@ -335,7 +325,6 @@ namespace RenderGraph::Frame::Recipes::Table
 				{ .anchor = Anchor::EngineQueries, .clients = { "cs.sky.sun" }, .instanceCount = 2 },
 				{ .point = true },
 			} },
-			.runsInGuest = true,
 			.commitBefore = Segments({ Segment::FirstPerson, Segment::AnchorVolumetricLighting, Segment::AnchorPostProcessing, Segment::AnchorUpscale, Segment::AnchorInterface,
 				Segment::AnchorPresent, StageSegment(SegmentId::Post) }),
 			.commit = "just before DCLF's first-person epoch, or RenderWorldPostProcess' entry",
@@ -370,7 +359,6 @@ namespace RenderGraph::Frame::Recipes::Table
 				{ .anchor = Anchor::ImageSpace, .clients = { "cs.engine.imagespace.post.final", "cs.engine.skeleton.frame@post-chain" } },
 				{ .point = true },
 			} },
-			.runsInGuest = true,
 			.commit = "RenderEndOfFrameEffects' return",
 			.commitSite = "RenderEndOfFrameEffects' return (Frame/PostChain.cpp)",
 			.epochs = { Own(StageSegment(SegmentId::Post)), Placed(Anchor::VolumetricLighting), Placed(Anchor::PostProcessing), Placed(Anchor::Upscale),
@@ -424,7 +412,6 @@ namespace RenderGraph::Frame::Recipes::Table
 			} },
 			.opensLast = true,
 			.switchesEverySlot = true,
-			.runsInGuest = true,
 			.commitBefore = Segments({ Segment::AnchorHDROutput, Segment::AnchorCapture }),
 			.commit = "just before the present (or HDR output)",
 			.commitSite = "the present hook, before the capture and the present (Hooks.cpp); BeforeGpuWork before HDR output or the Capture anchor",

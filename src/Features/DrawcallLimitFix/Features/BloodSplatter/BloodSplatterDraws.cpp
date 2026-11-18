@@ -1,7 +1,7 @@
 // The blood splatter family's render graph side: one client at the EngineDraws anchor, made once at setup (the first main-thread tick
-// the graph runs), whose pass draws a batch's latched draws into the back buffer with CS's BloodSplatter.hlsl built for ORG. Native
-// mode: the client is the UI stage's first step (Main::RenderScreenSplatter comes after the post stage's end and before the displays),
-// and its pass records the batch at execution. Guest mode: the anchor's own epoch.
+// the graph runs), whose pass draws a batch's latched draws into the back buffer with CS's BloodSplatter.hlsl built for ORG. The
+// client is the UI stage's first step (Main::RenderScreenSplatter comes after the post stage's end and before the displays), and its
+// pass records the batch at execution.
 
 // volk must precede every Vulkan header in this translation unit.
 #include <rhi_interop_vulkan.h>
@@ -273,8 +273,8 @@ namespace DCLF::Features::BloodSplatter::BloodSplatterDraws
 				logger::info("[DCLF] blood splatter: the first screen blood run drawn by the graph");
 		};
 		desc.active = [client] { return client->pending; };
-		// Native mode: a step of the UI stage only (the anchor has no epoch there).
-		desc.segmentOnly = FrameAnchors::StagesOnly(desc.id);
+		// A step of the UI stage only (the anchor has no epoch of its own).
+		desc.segmentOnly = FrameAnchors::NamedByStage(desc.id);
 		desc.onFailed = [] { Fail("the render graph failed with the screen blood's pass in it"); };
 		if (!FrameAnchors::Register(std::move(desc))) {
 			logger::warn("[DCLF] blood splatter: the {} client could not be registered; the screen blood stays the engine's", kClientId);

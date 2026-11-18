@@ -208,7 +208,7 @@ namespace
 {
 	/**
 	 * @brief Whether the run now copies with the client's current registration (its source and buffers). A stage commits only
-	 * clients its schedule holds. The anchor's own epoch (guest mode) runs whatever graph it has built: until the new registration's
+	 * clients its schedule holds. The anchor's own epoch (without the stages) runs whatever graph it has built: until the new registration's
 	 * build switches in, that graph has the old copy or none, and a capture taken then reads back an unwritten buffer (all black).
 	 */
 	bool CopyBuilt()

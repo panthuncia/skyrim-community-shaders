@@ -212,8 +212,7 @@ namespace RenderGraph::Engine::Skeleton
 
 		/**
 		 * @brief With the frame's stages (both modes): world frames' clears and copies run in the epochs that write their targets first, the
-		 * stages' places and Drawcall Limit Fix's shadow view and Z-prepass. Guest mode takes a place only in a stage that runs there; a clear
-		 * or copy no stage takes there runs on its anchor's own epoch while that anchor has one (OwnEpochTakes).
+		 * stages' places and Drawcall Limit Fix's shadow view and Z-prepass. A clear or copy no stage takes is a mismatch (NoPlace).
 		 */
 		bool HostingOn()
 		{
@@ -1327,9 +1326,9 @@ namespace RenderGraph::Engine::Skeleton
 			};
 			client.gates = { group.gate };
 			const auto passes = client.passes.size();
-			// The group's own client runs only on its anchor's own epoch (the recipe table names it there). Native mode has none: its clears run
-			// at the hosts and places below, so it is not registered. Guest mode keeps it for the clears no stage that runs there takes.
-			group.registered = (HostingOn() && !FrameAnchors::HasOwnEpoch(kGroupAnchors[index])) || FrameAnchors::Register(std::move(client));
+			// The group's own client runs only on its anchor's own epoch (the recipe table names it there), which the anchor has only without
+			// the stages: with them its clears run at the hosts and places below, so it is not registered.
+			group.registered = HostingOn() || FrameAnchors::Register(std::move(client));
 			if (!group.registered) {
 				group.specs.clear();
 				group.failed = true;
@@ -1387,23 +1386,6 @@ namespace RenderGraph::Engine::Skeleton
 			return true;
 		}
 
-		/**
-		 * @brief A clear no stage that runs in this mode takes, on the group anchor's own epoch at the engine's next bind (Flush), while that
-		 * anchor has one: guest mode, for the clears of the stages that do not run there yet. Migration scaffolding: once every stage runs in
-		 * guest, no group anchor has an epoch of its own and this path is never taken. False: the engine's call stays on D3D11 (the group's
-		 * registration is not in its anchor's built graph yet). Empty when the anchor has no own epoch (a mismatch then, NoPlace).
-		 */
-		std::optional<bool> OwnEpochTakes(Group a_group, const Pending& a_pending)
-		{
-			const auto index = IndexOf(a_group);
-			if (!FrameAnchors::HasOwnEpoch(kGroupAnchors[index]))
-				return std::nullopt;
-			if (!FrameAnchors::Scheduled(kGroupIds[index], kGroupAnchors[index]))
-				return false;
-			GroupOf(a_group).pending.push_back(a_pending);
-			return true;
-		}
-
 		bool Take(const Target& a_target, ID3D11View* a_view, std::uint32_t a_flags, Pending a_pending)
 		{
 			const Group group = GroupFor(a_target);
@@ -1445,11 +1427,15 @@ namespace RenderGraph::Engine::Skeleton
 				state.hostedPending.push_back(a_pending);
 				return true;
 			}
-			// No stage takes it: the group anchor's own epoch where it has one (guest mode, until every stage runs there), else a mismatch.
+			// No stage takes it: a mismatch. Without the stages (HostingOn off) the group anchor has its own epoch, which takes every clear at
+			// the engine's next bind (Flush); false keeps the call on D3D11 until its built graph holds the group's registration.
 			const auto unplaced = [&](std::string_view a_why) {
-				if (const auto own = OwnEpochTakes(group, a_pending))
-					return *own;
-				return NoPlace(a_target, a_flags, a_why);
+				if (HostingOn())
+					return NoPlace(a_target, a_flags, a_why);
+				if (!FrameAnchors::Scheduled(kGroupIds[IndexOf(group)], kGroupAnchors[IndexOf(group)]))
+					return false;
+				state.pending.push_back(a_pending);
+				return true;
 			};
 			if (!HostingOn() || !WorldFrame())
 				return unplaced("no open stage has a place for it");
@@ -1656,8 +1642,8 @@ namespace RenderGraph::Engine::Skeleton
 			client.id = id;
 			client.passes = builder.Take();
 			client.active = [] { return false; };
-			// A pass of the deferred stage only: where the anchor keeps its own epoch (guest mode, until the stage runs there), that epoch's graph
-			// leaves it out, and the copy runs on the depth copy's own anchor.
+			// A pass of the deferred stage only. Without the stages the anchor's own graph leaves it out, and the copy runs on the depth copy's
+			// own anchor.
 			client.segmentOnly = true;
 			copy.hostedRegistered = FrameAnchors::Register(std::move(client));
 			copy.host = copy.hostedRegistered ? host : Host::Own;
@@ -1738,16 +1724,19 @@ namespace RenderGraph::Engine::Skeleton
 						kCopyNames[index]);
 				return true;
 			}
-			if (HostingOn() && !FrameAnchors::HasOwnEpoch(kCopyAnchors[index])) {
-				// No own epoch for the copy's anchor (native mode): every copy is a stage's pass, or dropped here. Guest mode keeps the anchor's
-				// own epoch for the copies of the stages that do not run there yet (migration scaffolding, as OwnEpochTakes for the clears).
+			if (HostingOn()) {
+				// With the stages the copy's anchor has no own epoch: every copy is a stage's pass, or dropped here.
 				const auto& frame = RenderGraph::Frame::Driver::Current();
 				if (a_kind == CopyKind::Depth) {
-					// The stage that holds the copy has no schedule yet (its first build): the copy lags.
+					// The stage that holds the copy has no schedule yet (its first build), or a build with this registration is on its way (a
+					// texture made again, as at the first world frame after a load): the copy lags.
 					auto holder = static_cast<std::uint32_t>(SegmentId::Ui);
-					if (WorldFrame())
+					std::string holderId(kUiDepthCopyId);
+					if (WorldFrame()) {
 						holder = static_cast<std::uint32_t>(a_hostable ? SegmentId::Deferred : SegmentId::PreMain);
-					if (FrameAnchors::StageAbsent(holder)) {
+						holderId = a_hostable ? fmt::format("{}@{}", kCopyIds[index], kHostInfo[HostIndex(Host::DeferredPasses)].name) : std::string(kCopyIds[index]);
+					}
+					if (FrameAnchors::StageAbsent(holder) || FrameAnchors::TapMayLag(holderId)) {
 						static Util::ReasonLog s_lag("[ORG] engine skeleton: a copy lags (its stage has no schedule yet); nothing copies this frame");
 						s_lag.Report(kCopyNames[index]);
 						return true;
@@ -1767,7 +1756,9 @@ namespace RenderGraph::Engine::Skeleton
 						fmt::format("{} in a {} frame came while no open stage holds it", kCopyNames[index], RenderGraph::Frame::KindName(frame.kind)));
 					return true;
 				}
-				if (!hold.scheduled) {
+				// The schedule holds the client by id; a registration made since (a texture made again, as at the main menu's first frame)
+				// is not in its graph until that stage's next build switches in (CanTap): it lags too.
+				if (!hold.scheduled || !FrameAnchors::CanTap(kCopyIds[index])) {
 					static Util::ReasonLog s_lag("[ORG] engine skeleton: a copy lags (its stage's schedule does not hold it yet); nothing copies this frame");
 					s_lag.Report(kCopyNames[index]);
 					return true;

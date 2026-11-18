@@ -355,16 +355,16 @@ namespace FrameAnchors
 	bool HasEpoch(Anchor a_anchor);
 
 	/**
-	 * @brief Whether the anchor runs an epoch of its own in this mode: it has an epoch, and no stage that runs in this mode takes it (native
-	 * mode: no stage has a step there; guest mode: no guest stage holds it wholly). Guest mode keeps these for the stages that do not run
-	 * there yet. Any thread, after the render graph initialized.
+	 * @brief Whether the anchor runs an epoch of its own: it has an epoch, and no stage has a step there (with the stages on). Any thread,
+	 * after the render graph initialized.
 	 */
 	bool HasOwnEpoch(Anchor a_anchor);
 
 	/**
-	 * @brief Whether a PassDesc::atExecution pass of the anchor's own epoch is recorded after the run's commit (native: always;
-	 * guest: when the epoch runs in DXVK's stream). Such a pass can read what the commit wrote when it records, so its revision need
-	 * not name the run: a ticket prepared ahead stays current. Render thread, at a build (a pass's make).
+	 * @brief Whether a PassDesc::atExecution pass at the anchor is recorded after the run's commit (native: always; guest: when the epoch
+	 * that runs it is in DXVK's stream, the stages' epochs for an anchor a stage shares). Such a pass can read what the commit wrote when
+	 * it records, so its revision need not name the run: a ticket prepared ahead stays current. False for an anchor a stage holds wholly.
+	 * Render thread, at a build (a pass's make).
 	 */
 	bool RecordsAtExecution(Anchor a_anchor);
 
@@ -413,12 +413,12 @@ namespace FrameAnchors
 	bool InBuiltGraph(std::string_view a_id, Anchor a_anchor);
 
 	/**
-	 * @brief Whether a run of a_anchor now would draw a_id's work: the one question a client asks before it takes the engine's work. Native
-	 * mode: for an anchor a CS stage holds wholly (a whole step in the recipe table), the schedule of the stage that holds the anchor in this
+	 * @brief Whether a run of a_anchor now would draw a_id's work: the one question a client asks before it takes the engine's work. For
+	 * an anchor a CS stage holds wholly (a whole step in the recipe table), the schedule of the stage that holds the anchor in this
 	 * frame's kind holds this registration of a_id and has it on (false while the stage is absent, and when no stage of the frame's kind
 	 * holds the anchor); that does not depend on where the frame is now, so a caller may ask before the stage's window opens. For a shared
-	 * anchor, the open stage whose step takes the anchor's taps now holds a_id, and its schedule has it on (HeldNow). Guest mode, for an
-	 * anchor no guest stage takes now: the anchor's own built graph holds this registration. Render thread. Run can still fail afterwards:
+	 * anchor, the open stage whose step takes the anchor's taps now holds a_id, and its schedule has it on (HeldNow). An anchor with an
+	 * epoch of its own (the stages off): its own built graph holds this registration. Render thread. Run can still fail afterwards:
 	 * the client's executed callback is how it knows the work was submitted.
 	 */
 	bool Scheduled(std::string_view a_id, Anchor a_anchor);
@@ -616,8 +616,7 @@ namespace FrameAnchors
 	 * ticket. Stages: pre-depth (EarlyPrepass), pre-main (RenderDepth's depth copy to Prepass; CS_ORG_SEGMENT_PREMAIN=0 off), deferred
 	 * and water (DeferredPasses to just before the forward epoch; CS_ORG_SEGMENT_DEFERRED=0 off), and the post chain's two
 	 * (CS_ORG_SEGMENT_POST=0 off): the post stage, with the chain and the upscaler's evaluate as CS passes. Guest mode (DXVK with the
-	 * graph) runs the stages the recipe table marks runsInGuest, each one block in DXVK's stream; the other stages' anchors keep their
-	 * own epochs there. Any thread.
+	 * graph) runs the same stages, each one block in DXVK's stream. Any thread.
 	 */
 	bool SegmentsOn();
 
@@ -718,26 +717,10 @@ namespace FrameAnchors
 	bool NamedByStage(std::string_view a_id);
 
 	/**
-	 * @brief Whether a CS stage that runs in this mode has a step at a_anchor (the recipe table). Answers before the anchors are reserved,
-	 * so a module can reserve an anchor only where a stage of this mode uses it. Any thread.
+	 * @brief Whether a CS stage has a step at a_anchor (the recipe table), with the stages on (SegmentsOn). Answers before the anchors are
+	 * reserved, so a module can reserve an anchor only where a stage uses it. Any thread.
 	 */
 	bool StageStepsAt(Anchor a_anchor);
-
-	/**
-	 * @brief Whether every CS stage that names client a_id runs in this mode, and one does: the client's passes belong to stages alone
-	 * (ClientDesc::segmentOnly). Guest mode, while a stage that does not run there names it too, it is false: the client keeps its passes on
-	 * its anchor's own epoch for that stage's part of the frame (OwnEpochHolds). Migration scaffolding: once every stage runs in guest, it
-	 * is NamedByStage. Any thread, after the render graph initialized.
-	 */
-	bool StagesOnly(std::string_view a_id);
-
-	/**
-	 * @brief Guest mode, migration scaffolding: client a_id has work at a_anchor while no open stage of this mode holds it there, a stage
-	 * that does not run in guest yet names it, and the anchor's own epoch has a built graph that holds the registration. The work then runs
-	 * on that own epoch, as it did before the client's other stage ran in guest (the skeleton's OwnEpochTakes is the same rule for its
-	 * clears). Always false in native mode, and once every stage runs in guest. Render owner.
-	 */
-	bool OwnEpochHolds(std::string_view a_id, Anchor a_anchor);
 
 	/**
 	 * @brief Writes frame inputs for client a_id outside its step's tap: a_write runs with GraphHost::CurrentRun the frame slot's staging

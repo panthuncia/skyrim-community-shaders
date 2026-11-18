@@ -179,7 +179,7 @@ namespace FrameAnchors
 			}
 			return out;
 		}
-		// The CS stages as FrameAnchors reads them (the same in both modes; DeclaredOn says which run in this mode).
+		// The CS stages as FrameAnchors reads them (the same in both modes).
 		constexpr std::array<DeclaredInfo, kDeclared> declaredInfo = DeclaredFromTable();
 
 		/** @brief The anchors a declared segment has a step at in this mode, a bit each. */
@@ -1889,9 +1889,20 @@ namespace FrameAnchors
 	bool RecordsAtExecution(Anchor a_anchor)
 	{
 		// A declared segment records every pass ahead, on the host's thread.
-		if (IndexOf(a_anchor) < kAnchors && DeclaredOfAnchor(Anchors(), IndexOf(a_anchor)) < kDeclared)
+		const auto& state = Anchors();
+		const std::uint32_t index = IndexOf(a_anchor);
+		if (index < kAnchors && DeclaredOfAnchor(state, index) < kDeclared)
 			return false;
-		return HasEpoch(a_anchor) && RenderGraphRuntime::Get().RecordsAtExecution(EpochOfAnchor(a_anchor));
+		if (!HasEpoch(a_anchor))
+			return false;
+		// A shared anchor's passes record in the stages' epochs, since it has no epoch of its own.
+		if (state.declaredMembers >> index & 1u) {
+			for (std::uint32_t d = 0; d < kDeclared; ++d)
+				if (state.declaredEpochs[d] && (StepAnchorsOf(d) >> index & 1u))
+					return RenderGraphRuntime::Get().RecordsAtExecution(EpochOfDeclared(d));
+			return false;
+		}
+		return RenderGraphRuntime::Get().RecordsAtExecution(EpochOfAnchor(a_anchor));
 	}
 
 	bool GpuGates()
@@ -1904,10 +1915,9 @@ namespace FrameAnchors
 	namespace
 	{
 		/**
-		 * @brief Whether the recipe table names client a_id at anchor a_anchor (Frame/RecipeTable.h). At an anchor a CS stage has a step at
-		 * (native mode), one of those steps names it. At an anchor that runs its own epoch (guest mode's every anchor, native mode's frame
-		 * generation and HDR output), a step names it there (guest runs that step's clients on the anchor's epoch until the stage runs in
-		 * guest) or the anchor's epoch entry does. A diagnostic client is named everywhere.
+		 * @brief Whether the recipe table names client a_id at anchor a_anchor (Frame/RecipeTable.h). At an anchor a CS stage has a step at,
+		 * one of those steps names it. At an anchor that runs its own epoch (frame generation and HDR output, or every anchor without the
+		 * stages), a step names it there or the anchor's epoch entry does. A diagnostic client is named everywhere.
 		 */
 		bool TableNames(const State& a_state, std::string_view a_id, Anchor a_anchor)
 		{
@@ -3306,18 +3316,6 @@ namespace FrameAnchors
 		}
 	}
 
-	namespace
-	{
-		/**
-		 * @brief Whether a declared segment is on (SegmentsOn): every CS stage in native mode, and in guest mode the stages the recipe table
-		 * runs there (Table::Stage::runsInGuest).
-		 */
-		bool DeclaredOn(std::uint32_t a_declared)
-		{
-			return RenderGraph::Engine::Native::Requested() || Table::CsStage(a_declared).runsInGuest;
-		}
-	}
-
 	void SetForeignPasses(std::uint32_t a_segment, std::function<void(std::uint32_t, void*)> a_gather, std::function<bool()> a_declared)
 	{
 		if (!HoldsForeign(a_segment))
@@ -3461,56 +3459,9 @@ namespace FrameAnchors
 		if (index >= kAnchors || !SegmentsOn())
 			return false;
 		for (std::uint32_t d = 0; d < kDeclared; ++d)
-			if (DeclaredOn(d) && (StepAnchorsOf(d) >> index & 1u))
+			if (StepAnchorsOf(d) >> index & 1u)
 				return true;
 		return false;
-	}
-
-	namespace
-	{
-		/** @brief A CS stage that does not run in this mode names client a_id at one of its steps (guest mode, until every stage runs there). */
-		bool NamedOutsideMode(std::string_view a_id)
-		{
-			if (!SegmentsOn())
-				return false;
-			for (std::uint32_t d = 0; d < kDeclared; ++d) {
-				if (DeclaredOn(d))
-					continue;
-				const auto& stage = Table::CsStage(d);
-				for (std::uint32_t k = 0; k < Table::StepCount(stage); ++k)
-					if (Table::Has(stage.steps[k].clients, a_id))
-						return true;
-			}
-			return false;
-		}
-	}
-
-	bool StagesOnly(std::string_view a_id)
-	{
-		return NamedByStage(a_id) && !NamedOutsideMode(a_id);
-	}
-
-	bool OwnEpochHolds(std::string_view a_id, Anchor a_anchor)
-	{
-		if (!NamedOutsideMode(a_id))
-			return false;
-		auto lock = Guard();
-		auto& state = Anchors();
-		const std::uint32_t index = IndexOf(a_anchor);
-		if (index >= kAnchors || !state.host || !IsRenderOwner())
-			return false;
-		const auto* client = FindClient(state, a_id);
-		if (!client)
-			return false;
-		// An open stage of this mode with a step there that holds the client takes the work instead.
-		for (std::uint32_t d = 0; d < kDeclared; ++d) {
-			if (!WindowOpen(state, d))
-				continue;
-			for (std::uint32_t k = 0; k < declaredInfo[d].stepCount; ++k)
-				if (declaredInfo[d].steps[k].anchor == a_anchor && StepTakesTaps(state, d, k) && StepHolds(declaredInfo[d].steps[k], *client->desc))
-					return false;
-		}
-		return state.reserved[index] && !(state.declaredMembers >> index & 1u) && InGraphs(*client->desc) && client->serial <= BuiltSerial(state, index);
 	}
 
 	bool CanTap(std::string_view a_id)
@@ -3694,8 +3645,7 @@ namespace FrameAnchors
 			if (native)
 				logger::info("[ORG] frame segments on: the CS stages' steps run in their epochs, recorded per description");
 			else
-				logger::info("[ORG] frame segments on in guest mode: the stages the recipe table runs in guest are one block each in DXVK's stream; the "
-							 "other stages' anchors keep their own epochs");
+				logger::info("[ORG] frame segments on in guest mode: every CS stage is one block in DXVK's stream");
 			return true;
 		}();
 		return on;
@@ -3907,12 +3857,10 @@ namespace FrameAnchors
 		}
 		if (!work)
 			return { RunStatus::Idle };
-		// Native mode: every engine operation has a stage's place or is dropped where it is taken, so no anchor runs an epoch of its own. Work
-		// here is a mismatch: the frame did something its recipe has no place for. It draws nothing. HDR output and frame generation keep
-		// their anchors' tickets (pieces of their own; neither runs in the tests: HDR off, frame generation off in native mode). Guest mode: only
-		// an anchor a guest stage holds has no epoch of its own; the others run theirs.
-		const bool ownEpochError = RenderGraph::Engine::Native::Requested() ? a_point.anchor != Anchor::HDROutput && a_point.anchor != Anchor::FrameGeneration :
-		                                                                     (state.declaredMembers >> index & 1u) != 0;
+		// Every engine operation has a stage's place or is dropped where it is taken, so no anchor runs an epoch of its own, in both modes.
+		// Work here is a mismatch: the frame did something its recipe has no place for. It draws nothing. HDR output and frame generation
+		// keep their anchors' tickets (pieces of their own; neither runs in the tests: HDR off, frame generation needs the foreground).
+		const bool ownEpochError = a_point.anchor != Anchor::HDROutput && a_point.anchor != Anchor::FrameGeneration;
 		if (SegmentsOn() && ownEpochError) {
 			std::string ids;
 			for (const auto& client : clients)
@@ -4064,10 +4012,9 @@ namespace FrameAnchors
 					if (declaredInfo[d].steps[k].anchor == a_anchor && StepTakesTaps(state, d, k) && StepHolds(declaredInfo[d].steps[k], *client->desc))
 						return ScheduleHolds(state, d, client->desc);
 			}
-			if (RenderGraph::Engine::Native::Requested())
-				return false;
+			return false;
 		}
-		// An anchor with an epoch of its own (guest mode, outside the guest stages): its own built graph holds this registration.
+		// An anchor with an epoch of its own (the stages off): its own built graph holds this registration.
 		return state.reserved[index] && !(state.declaredMembers >> index & 1u) && InGraphs(*client->desc) && client->serial <= BuiltSerial(state, index);
 	}
 
@@ -4439,18 +4386,13 @@ namespace FrameAnchors
 		// own. Its end tap's anchor is reserved with it, so the hook that ends it always runs.
 		if (SegmentsOn())
 			for (std::uint32_t d = 0; d < kDeclared; ++d) {
-				if (!DeclaredOn(d))
-					continue;
 				std::uint32_t members = 0;
 				bool any = false;
-				const bool native = RenderGraph::Engine::Native::Requested();
 				for (std::uint32_t i = 0; i < kAnchors; ++i) {
 					any = any || (state.reserved[i] && (StepAnchorsOf(d) >> i & 1u));
-					// Native mode: an anchor any stage has a step at has no epoch of its own, a wholly held one or a shared one (its other
-					// clients' work outside the stages' steps is a mismatch, Run). Guest mode: only a wholly held one. A shared anchor keeps
-					// its epoch there for the clients of the stages that do not run in guest yet.
-					const auto held = native ? StepAnchorsOf(d) : WholeAnchorsOf(d);
-					if (state.reserved[i] && (held >> i & 1u))
+					// An anchor any stage has a step at has no epoch of its own, a wholly held one or a shared one (its other clients' work
+					// outside the stages' steps is a mismatch, Run), in both modes.
+					if (state.reserved[i] && (StepAnchorsOf(d) >> i & 1u))
 						members |= 1u << i;
 				}
 				if (!any)
@@ -4553,8 +4495,6 @@ namespace FrameAnchors
 	void DropKeptRecordings(Anchor, std::string_view) {}
 	bool NamedByStage(std::string_view) { return false; }
 	bool StageStepsAt(Anchor) { return false; }
-	bool StagesOnly(std::string_view) { return false; }
-	bool OwnEpochHolds(std::string_view, Anchor) { return false; }
 	std::uint32_t PeakRunsPerFrame(Anchor) { return 0; }
 	bool BuildPending(std::string_view) { return false; }
 	bool TapMayLag(std::string_view) { return true; }

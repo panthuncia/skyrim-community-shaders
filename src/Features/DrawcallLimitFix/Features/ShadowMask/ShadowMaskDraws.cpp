@@ -297,9 +297,9 @@ namespace DCLF::Features::ShadowMask::ShadowMaskDraws
 					logger::info("[DCLF] shadow mask: the first {} run drawn by the graph", client->id);
 			};
 			desc.active = [client] { return client->pending; };
-			// Native mode: a step of its stage only (pre-main for the world's, the UI stage for a menu scene's): the anchor's own graph
-			// leaves it out, and a batch outside its stage's window is a tap error (CanTake).
-			desc.segmentOnly = FrameAnchors::StagesOnly(desc.id);
+			// A step of its stage only (pre-main for the world's, the UI stage for a menu scene's): a batch outside its stage's window is a
+			// tap error (CanTake).
+			desc.segmentOnly = FrameAnchors::NamedByStage(desc.id);
 			desc.onFailed = [] { Fail("the render graph failed with the shadow masks' passes in it"); };
 			if (!FrameAnchors::Register(std::move(desc))) {
 				logger::warn("[DCLF] shadow mask: the {} client could not be registered; those shadow masks stay the engine's", client->id);
