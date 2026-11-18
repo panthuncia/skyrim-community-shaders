@@ -43,10 +43,16 @@ Phase 2:
   - D3D12: the CPU pipeline's indirect buffer has no unordered access (an upload buffer cannot; it had no mapping).
   - D3D12: depth formats in shader resource views (the reflection's depth SRV removed the device).
   - D3D12: root constants set again after an ExecuteIndirect whose signature sets one (the spec leaves them undefined).
+  - D3D12 (RX 6600, 2026-11-18): the CPU pipeline's refraction draws pushed device addresses where the D3D12 stage reads heap
+    indices (the frame blocks and LodFadeFrame). AMD faults on the descriptor load and lost the device at the first world frame.
+  - D3D12: texture streaming's feedback buffer is a committed HostCached buffer (an UPLOAD buffer cannot have unordered access).
   - ORG: a barrier between unordered-access (and copy) uses of one resource in consecutive passes.
 - **Screenshots** are a gated pass, in the graph for good: a capture needs no build, so it no longer misses its capture point.
 
 ## Tested
+
+On the RX 6600 (2026-11-18): native D3D12 quick and river runs pass. The debug layer shows no errors in a quick run, only warnings
+(clear values, a pixel stage writing an unbound target).
 
 On the RTX 5080 (background runs):
 - Quick runs pass on native Vulkan, native D3D12 and guest.
@@ -98,6 +104,9 @@ To match DXVK, native needs what DXVK's CS thread gives it: the GPU work off the
     copies, root constants after ExecuteIndirect, UAV hazards between declared passes, the upscaler, shadow pipeline merging
     (`CS_DCLF_SHADOW_MERGE=0`), depth clamp (`CS_DCLF_SHADOW_DEPTH_CLAMP=0`), and races on memory reused across frames
     (`CS_ORG_NATIVE_SYNC_PRESENT=1`, a GPU wait at every present, still flickers).
+  - RX 6600 (2026-11-18): flickers too (`native-d3d12-flicker-taa`), and the steady state is the wrong one. Most frames lack the
+    foliage casters (a tree's leaves cast no shadow on its branches or the ground), and a spike frame has them, matching Vulkan. The
+    CPU pipeline (`dclf.pipeline=cpu`) draws them every frame. Indexing the shadow alpha test's diffuse as non-uniform changed nothing.
   - Leads: BuildDrawsCS writes an object's caster row (`StoreCasterRow`, indexed by the object's caster first) from every shadow
     view that draws it, in one dispatch; and the fade root states are read undeclared. Vulkan's global barriers can hide an
     undeclared access that D3D12's per-resource barriers do not.
@@ -106,7 +115,7 @@ To match DXVK, native needs what DXVK's CS thread gives it: the GPU work off the
 - **Residue:** the reflection cube face draws; load-window shadow draws; the refused occlusion-query draw; the sun occlusion
   draw skipped when its depth is neither kMAIN's nor the Z-prepass copy.
 - **Map:** native shows flat white patches on the world map's terrain. Compare with guest.
-- **D3D12:** texture streaming's feedback buffer (unordered access on a host-visible heap); shader reload loses the device;
+- **D3D12:** shader reload loses the device;
   GPU-based validation shows a Scaleform draw sampling a texture still in COPY_DEST (a streamed texture's upload).
 - **Re-recording every frame** (`CS_ORG_REUSE_RECORDINGS=0`) crashes at startup in native D3D12.
 - **Held deletion:** FX11 execution in ORG modes (par-fx `ed559b2b7`). It needs a preset A/B (`tools/cs-test/data/fx-parity`).

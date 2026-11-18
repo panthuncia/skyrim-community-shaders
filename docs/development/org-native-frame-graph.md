@@ -8147,3 +8147,36 @@ Final build, one run each: forced Nord with a load, the hold and a reload in gue
 guest-quick; native-quick; the guest Journal Menu run (menu shot 0.6 from the first part's); native-validation (the same 20
 `VUID-vkCmdDraw-None-09600`). All passed with 0 tap errors and no failed build; the only `[C]` line is the known `PublishedResources`
 one. 24 launches.
+
+## Native D3D12 on the RX 6600 (2026-11-18)
+
+The first quick run lost the device (`0x887A0006`) at the first world frame after the load hold. The debug layer was clean.
+
+### Cause: refraction draws pushed addresses for heap indices
+
+An RGD dump, parsed offline, put the page fault in Utility's refraction vertex stage. The stage loaded a buffer descriptor at an index far
+past the heap. That load was the LodFadeFrame read through the material rows' push words. The CPU pipeline's refraction draws
+(Sites.cpp, Recorder.cpp) pushed the frame constants' device addresses there and in the frame block words. D3D12's stage reads heap
+indices there (the GPU-driven RefractionDrawPass already pushed refs). The draws now push the ref and MainShadowLayoutViews' words on D3D12.
+
+### Cause: the feedback buffer had no mapping
+
+The debug layer's one error (id 638) was texture streaming's feedback buffer: unordered access on an UPLOAD heap. On D3D12 it is a
+committed buffer in the HostCached heap now, as the ref trace's.
+
+### DRED
+
+BasicRHI writes the page fault before the breadcrumbs and lists only unfinished nodes. The process died in the middle of a long list.
+
+### Do not arm RGD around a game run
+
+A crash capture armed (`RadeonDeveloperPanelCLI -m crash`) around the hanging run locked the whole machine after the dump was written.
+The dump itself was readable: `rgd.exe --parse <file>.rgd -o <file>.txt` gives the marker tree, the hung waves' ISA and the page fault.
+
+### State
+
+- Quick (with and without the debug layer) and river pass. Debug-layer warnings left: clear values not given at creation or not
+  matching, and a pixel stage writing a target the pipeline does not bind.
+- perf-taa, one run each: D3D12 44 fps, Vulkan 52 fps (steady samples).
+- Shadow flicker: see status.md. The foliage casters are missing in most D3D12 frames.
+- The HUD compass shows on every other frame in the flicker bursts on both native backends. It was not seen on 2026-11-14.
