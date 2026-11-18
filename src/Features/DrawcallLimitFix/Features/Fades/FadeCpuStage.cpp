@@ -353,6 +353,8 @@ namespace DCLF::Features::Fades
 			const std::uint32_t step = fade == 1u && !(a_rootBits & kFadeRootStoodIn) ? std::min(static_cast<std::uint32_t>(a_state.currentFade * 32.0f), 31u) : 0u;
 			return fade | ((a_state.levels & 0xFu) << 2) | (((a_state.levels >> 12) & 0x7u) << 6) | (step << 9);
 		}
+		// No milestone Milestone returns, so the next one always differs.
+		constexpr std::uint32_t kNoMilestone = ~0u;
 
 		/** @brief The cull test without a program (FrustumInView): always-draw passes untested, else the camera's planes. */
 		bool CameraInView(const CpuStageInput& a_input, std::uint32_t a_bits, const float a_centre[3], float a_radius)
@@ -425,8 +427,9 @@ namespace DCLF::Features::Fades
 		void Report(StepContext& a_context, std::uint32_t a_root, const FadeRootStatic& a_row, const FadeNodeState& a_state)
 		{
 			auto& last = reported[a_root];
+			// A new listing always writes its first update. The engine may still step the node after the seed was copied from it.
 			if (last.first != a_row.generation)
-				last = { a_row.generation, Milestone(a_row.initial, a_row.bits) };
+				last = { a_row.generation, kNoMilestone };
 			const std::uint32_t milestone = Milestone(a_state, a_row.bits);
 			if ((a_row.bits & kFadeRootWritten) && last.second != milestone) {
 				FadeEvent event;

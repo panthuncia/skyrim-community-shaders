@@ -471,9 +471,9 @@ void ReportMilestone(uint a_index, FadeRootStatic a_root, FadeNodeState a_state)
 		return;
 	RWStructuredBuffer<uint2> reported = ResourceDescriptorHeap[ReportedIndex];
 	uint2 last = reported[a_index];
-	// A new listing seeds the state from the node (FadeState::ReadNode): the node holds that milestone.
+	// A new listing always writes its first update. The engine may still step the node after the seed was copied from it.
 	if (last.x != a_root.Generation)
-		last = uint2(a_root.Generation, FadeMilestone(a_root.Initial, a_root.Bits));
+		last = uint2(a_root.Generation, 0xFFFFFFFFu);
 	const uint milestone = FadeMilestone(a_state, a_root.Bits);
 	if ((a_root.Bits & kFadeRootWritten) == 0 || last.y == milestone) {
 		reported[a_index] = uint2(a_root.Generation, milestone);
