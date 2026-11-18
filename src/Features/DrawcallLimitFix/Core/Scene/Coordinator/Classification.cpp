@@ -620,6 +620,22 @@ namespace DCLF::Scene
 		if (inserted) {
 			entry.trackedFrame = sceneFrame;
 			entry.trackedBy = addSource;
+			if (const auto erased = erasedByDetach.find(a_geometry); erased != erasedByDetach.end()) {
+				// A load moves many at once, so the lines are capped by reference and window and each carries the running count.
+				constexpr std::uint32_t kSplitMoveLines = 2, kSplitMoveWindow = 600;
+				static std::uint32_t splitWindow = ~0u;
+				static ankerl::unordered_dense::map<const void*, std::uint32_t> splitLines;
+				if (sceneFrame / kSplitMoveWindow != splitWindow) {
+					splitWindow = sceneFrame / kSplitMoveWindow;
+					splitLines.clear();
+				}
+				++splitMoves;
+				if (splitLines[a_prep.ownerReference]++ < kSplitMoveLines)
+					logger::warn("[DCLF] split move: '{}' {} (reference {}) erased by a detach at frame {} and tracked again at frame {} ({} so far)",
+						a_geometry->name.c_str() ? a_geometry->name.c_str() : "", static_cast<const void*>(a_geometry), static_cast<const void*>(a_prep.ownerReference),
+						erased->second, sceneFrame, splitMoves);
+				erasedByDetach.erase(erased);
+			}
 		}
 		entry.identity = identity.member;
 		entry.groupIdentity = identity.group;

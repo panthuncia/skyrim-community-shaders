@@ -229,6 +229,13 @@ that a repeat is recognised. They are not chased unless one recurs with a DCLF o
     on demand, about 100 frames in guest and up to 260 in native (runs fxg, fxn, fig). The `drawn by nobody` count's first window
     after a coc reads about 30,000 passes in guest. **Fix direction:** the hold also waits for the nearby actors' parts, and their
     keys are asked for from the attach records during the load (Phase 5.5.1's sixth step).
+-   **A re-equip split across scene passes erased and re-added the item (fixed 2026-11-18).** NPCs re-equip by a `DetachChild`
+    and an `AttachChild` of the same node on the engine's actor threads (scabbard and dagger, bow, arrow and quiver after a load and
+    when an NPC's 3D finishes loading). The detach woke the scene pass, which erased the geometry before the attach tracked it
+    again: 5 to 10 in every Riverwood run (`[DCLF] split move`). `SceneTracker` now holds a plain detach outside loads, pinned, until
+    an attach of the same child pushes both (applied as a move) or the next frame's start pushes it as a removal. Runs fxg and fig
+    had none. Run fxn had two static ones at startup and fqn two 'Land' blocks detached at frame 59 and attached at frame 61, which
+    stay a removal and an add.
 
 ## Memory retention
 

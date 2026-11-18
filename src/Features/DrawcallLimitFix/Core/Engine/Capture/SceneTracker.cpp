@@ -9,7 +9,11 @@
 #include "Features/DrawcallLimitFix/Core/Handoff/PrimaryCull.h"
 #include "Features/DrawcallLimitFix/Core/Scene/SceneWake.h"
 
+#include <algorithm>
+#include <atomic>
 #include <chrono>
+#include <mutex>
+#include <vector>
 
 namespace DCLF
 {
@@ -30,6 +34,30 @@ namespace DCLF
 			std::uint32_t wakes = 0;  // SceneWake bits of the grouped events
 		};
 		thread_local MoveGroup t_move;
+
+		// The engine update's plain detaches by child, on any thread. Each waits for an attach of the same child or the frame's start.
+		struct HeldDetach
+		{
+			const RE::NiAVObject* child = nullptr;
+			SceneTracker::Event* oldest = nullptr;
+			SceneTracker::Event* newest = nullptr;
+		};
+		std::mutex heldDetachLock;
+		std::vector<HeldDetach> heldDetaches;
+		std::atomic<std::uint32_t> heldDetachCount{ 0 };
+
+		// A load's detaches are not held, since no frame starts until it ends.
+		bool LoadingMenuOpen()
+		{
+			auto* ui = RE::UI::GetSingleton();
+			return ui && ui->IsMenuOpen(RE::LoadingMenu::MENU_NAME);
+		}
+
+		void StampWoken(SceneTracker::Event* a_event)
+		{
+			a_event->stampNs = static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count());
+			a_event->stampFrame = SceneCapture::Frame();
+		}
 
 		void OnChildAttached(const SWF_EventHeader* a_event, std::uintptr_t*, void*)
 		{
@@ -140,16 +168,10 @@ namespace DCLF
 			break;
 		}
 		// Only what wakes is stamped: the latencies measure what is meant to reach the frame at once, not what the frame's own pass takes.
-		if (source != SceneWake::Count) {
-			a_event->stampNs = static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count());
-			a_event->stampFrame = SceneCapture::Frame();
-		}
+		if (source != SceneWake::Count)
+			StampWoken(a_event);
 		if (!t_move.child) {
-			a_event->next = head.load(std::memory_order_relaxed);
-			while (!head.compare_exchange_weak(a_event->next, a_event, std::memory_order_release, std::memory_order_relaxed)) {
-			}
-			if (source != SceneWake::Count)
-				WakeScenePass(source);
+			PushChain(a_event, a_event, source != SceneWake::Count ? 1u << static_cast<std::uint32_t>(source) : 0u);
 			return;
 		}
 		// A move open on this thread holds its events until its attach pushes them all at once.
@@ -162,12 +184,37 @@ namespace DCLF
 		if (a_event->type != EventType::Attached || a_event->node.get() != t_move.child)
 			return;
 		const MoveGroup move = std::exchange(t_move, {});
-		move.oldest->next = head.load(std::memory_order_relaxed);
-		while (!head.compare_exchange_weak(move.oldest->next, move.newest, std::memory_order_release, std::memory_order_relaxed)) {
+		PushChain(move.oldest, move.newest, move.wakes);
+	}
+
+	void SceneTracker::PushChain(Event* a_oldest, Event* a_newest, std::uint32_t a_wakes)
+	{
+		a_oldest->next = head.load(std::memory_order_relaxed);
+		while (!head.compare_exchange_weak(a_oldest->next, a_newest, std::memory_order_release, std::memory_order_relaxed)) {
 		}
 		for (std::uint32_t wake = 0; wake < static_cast<std::uint32_t>(SceneWake::Count); ++wake)
-			if (move.wakes & (1u << wake))
+			if (a_wakes & (1u << wake))
 				WakeScenePass(static_cast<SceneWake>(wake));
+	}
+
+	void SceneTracker::PushHeldDetaches()
+	{
+		if (!heldDetachCount.load(std::memory_order_acquire))
+			return;
+		std::vector<HeldDetach> taken;
+		{
+			std::scoped_lock lock(heldDetachLock);
+			taken.swap(heldDetaches);
+			heldDetachCount.store(0, std::memory_order_release);
+		}
+		for (const auto& held : taken) {
+			if (stopped.load(std::memory_order_acquire)) {
+				held.oldest->next = nullptr;
+				FreeEvents(held.newest);
+				continue;
+			}
+			PushChain(held.oldest, held.newest, 1u << static_cast<std::uint32_t>(SceneWake::Detach));
+		}
 	}
 
 	void SceneTracker::PushCaptured(Event* a_event, bool a_fillOnly)
@@ -210,6 +257,7 @@ namespace DCLF
 		}
 		auto* event = new Event{};
 		event->type = EventType::Attached;
+		event->thread = static_cast<std::uint32_t>(::GetCurrentThreadId());
 		event->node.reset(a_child);
 		CollectAncestors(a_child, event->ancestors);
 		// The mirror's records, on this thread after the engine's attach: only what is in the world.
@@ -218,6 +266,29 @@ namespace DCLF
 		NoteEdit(a_child, a_parent ? a_parent : a_child->parent, event->captured != nullptr);
 		if (const auto* root = watchedRoot.load(std::memory_order_acquire); root && a_child != root && Under(a_child, root))
 			SubtreeEvents().Push(SubtreeEvent{ a_child, SubtreeEvent::Kind::Attached });
+		// The held detach of this child goes with its attach, so the scene pass applies them together as a move.
+		HeldDetach detach;
+		if (heldDetachCount.load(std::memory_order_acquire)) {
+			std::scoped_lock lock(heldDetachLock);
+			if (const auto held = std::ranges::find(heldDetaches, static_cast<const RE::NiAVObject*>(a_child), &HeldDetach::child); held != heldDetaches.end()) {
+				detach = *held;
+				heldDetaches.erase(held);
+				heldDetachCount.fetch_sub(1, std::memory_order_release);
+			}
+		}
+		if (detach.oldest) {
+			if (!t_move.child) {
+				std::uint32_t wakes = 1u << static_cast<std::uint32_t>(SceneWake::Detach);
+				if (event->captured) {
+					StampWoken(event);
+					wakes |= 1u << static_cast<std::uint32_t>(SceneWake::Attach);
+				}
+				event->next = detach.newest;
+				PushChain(detach.oldest, event, wakes);
+				return;
+			}
+			PushChain(detach.oldest, detach.newest, 1u << static_cast<std::uint32_t>(SceneWake::Detach));
+		}
 		Push(event);
 	}
 
@@ -234,6 +305,7 @@ namespace DCLF
 			Engine::ForEachLive(a_child, [](RE::NiAVObject& a_object, std::uint32_t) { SubtreeEvents().Push(SubtreeEvent{ &a_object, SubtreeEvent::Kind::Removed }); });
 		auto* event = new Event{};
 		event->type = EventType::Detached;
+		event->thread = static_cast<std::uint32_t>(::GetCurrentThreadId());
 		event->unheldExit = unheldExit;
 		CollectAncestors(a_child, event->ancestors);
 		// In the world: the mirror drops every record under it.
@@ -242,6 +314,23 @@ namespace DCLF
 			event->detachedRoot = a_child;
 		if (event->removed.empty() && !inWorld) {
 			delete event;
+			return;
+		}
+		// The engine's update re-equips by a detach and an attach of the same child on its actor threads, which no scene pass may take
+		// apart. So a plain detach waits for that attach or the frame's start, pinned so no new object takes its address meanwhile.
+		if (!t_move.child && !LoadingMenuOpen()) {
+			event->pins.emplace_back(a_child);
+			StampWoken(event);
+			std::scoped_lock lock(heldDetachLock);
+			auto held = std::ranges::find(heldDetaches, static_cast<const RE::NiAVObject*>(a_child), &HeldDetach::child);
+			if (held == heldDetaches.end()) {
+				held = heldDetaches.insert(held, HeldDetach{ a_child });
+				heldDetachCount.fetch_add(1, std::memory_order_release);
+			}
+			event->next = held->newest;
+			held->newest = event;
+			if (!held->oldest)
+				held->oldest = event;
 			return;
 		}
 		Push(event);
@@ -391,7 +480,8 @@ namespace DCLF
 
 	void SceneTracker::WatchCategoryNodes(std::vector<const void*> a_nodes)
 	{
-		renderThread.store(static_cast<std::uint32_t>(::GetCurrentThreadId()), std::memory_order_relaxed);
+		if (const auto thread = static_cast<std::uint32_t>(::GetCurrentThreadId()); renderThread.exchange(thread, std::memory_order_relaxed) != thread)
+			logger::info("[DCLF] scene tracker: the render thread is {}", thread);
 		std::erase(a_nodes, nullptr);
 		std::ranges::sort(a_nodes);
 		a_nodes.erase(std::unique(a_nodes.begin(), a_nodes.end()), a_nodes.end());

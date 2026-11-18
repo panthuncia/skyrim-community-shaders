@@ -65,6 +65,7 @@ namespace DCLF
 			// (SceneCapture::Frame): the event-to-publication and event-to-adoption latencies.
 			std::uint64_t stampNs = 0;
 			std::uint32_t stampFrame = 0;
+			std::uint32_t thread = 0;  // an attach's or detach's pushing thread, for the cell trace
 			// A Stacked event's (Api::Stacked): its channel, whether it wakes the pass (the channel's Api::WakeSource), its token (from 1),
 			// the pinned roots (keys, each held by a pin in `pins` until the batch is released on the render thread) and the named roots
 			// (keys alone: the pushing side holds them).
@@ -97,6 +98,8 @@ namespace DCLF
 		static void CollectAncestors(const RE::NiAVObject* a_node, std::vector<const void*>& a_out);
 		/** @brief A detach, before the engine's (the child still in its array). a_parent as PushAttached's. */
 		void PushDetached(RE::NiAVObject* a_child, const RE::NiAVObject* a_parent = nullptr);
+		/** @brief Render thread, at the frame's start: pushes the detaches its update held for an attach of the same child (PushDetached). */
+		void PushHeldDetaches();
 		/** @brief A hook's values (after its write, on the writer's thread): one stack with the attaches and detaches, so an address a
 		 * detach let go and an attach took again is never given an earlier object's values. */
 		void PushUpdate(SceneCapture::Update&& a_update, std::vector<RE::NiPointer<RE::NiRefObject>>&& a_pins = {});
@@ -196,6 +199,8 @@ namespace DCLF
 
 	private:
 		void Push(Event* a_event);
+		/** @brief Links a_oldest to a_newest (a chain through next) onto the stack at once, then wakes the pump for a_wakes (SceneWake bits). */
+		void PushChain(Event* a_oldest, Event* a_newest, std::uint32_t a_wakes);
 		/** @brief Counts a_child's edit under a_parent; returns whether a_parent is the unheld roots' owner (WatchUnheldOwner). */
 		static bool NoteEdit(const RE::NiAVObject* a_child, const RE::NiAVObject* a_parent, bool a_inWorld);
 

@@ -4,6 +4,7 @@
 #include "RenderGraph/Engine/Native/Native.h"
 #include "Features/DrawcallLimitFix/Core/Handoff/EngineOnlyCull.h"
 #include "Features/DrawcallLimitFix/Core/Render/LoadHold.h"
+#include "Features/DrawcallLimitFix/Core/Engine/Capture/SceneTracker.h"
 #include "Features/DrawcallLimitFix/Diagnostics/Zones.h"
 
 #include "Deferred.h"
@@ -82,6 +83,8 @@ namespace DCLF
 
 	bool FrameDriver::BeginFrame(bool a_running, bool a_installed)
 	{
+		// The engine's update is over, so a detach it held for a re-attach that never came is a removal.
+		SceneTracker::Get().PushHeldDetaches();
 		// A load's hold (LoadHold.h): the world's first frame under the kept loading menu starts it, before anything reads whether a load
 		// is up (FrameView::IsLoadingScreenUp: not for the hold's frames).
 		if (a_installed)

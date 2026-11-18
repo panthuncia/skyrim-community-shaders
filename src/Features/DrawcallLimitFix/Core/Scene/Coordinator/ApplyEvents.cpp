@@ -11,6 +11,7 @@
 #include "Features/DrawcallLimitFix/Core/Shading/MaterialWrites.h"
 #include "Features/DrawcallLimitFix/Core/Engine/ShellState.h"
 #include "Features/DrawcallLimitFix/Core/Render/LoadHold.h"
+#include "Features/DrawcallLimitFix/Core/Scene/FrameView/FrameView.h"
 
 #include "TextureStreaming/Streamer.h"
 #include "Utils/SwitchFile.h"
@@ -502,10 +503,11 @@ namespace DCLF::Scene
 					continue;
 				auto& ref = traceRefs[owner];
 				if (event->type == SceneTracker::EventType::Attached)
-					ref.events += fmt::format(" #{} attach {} under {}", i, static_cast<const void*>(event->node.get()), mirror.Parent(event->node.get()));
+					ref.events += fmt::format(" #{} attach {} under {} (thread {} frame {})", i, static_cast<const void*>(event->node.get()), mirror.Parent(event->node.get()),
+						event->thread, event->stampFrame);
 				else
-					ref.events += fmt::format(" #{} detach {} from {} ({} geometries)", i, event->detachedRoot, event->ancestors.empty() ? nullptr : event->ancestors.front(),
-						event->removed.size());
+					ref.events += fmt::format(" #{} detach {} from {} ({} geometries, thread {} frame {})", i, event->detachedRoot, event->ancestors.empty() ? nullptr : event->ancestors.front(),
+						event->removed.size(), event->thread, event->stampFrame);
 			}
 		}
 		ApplyDetaches(detached);
@@ -531,6 +533,11 @@ namespace DCLF::Scene
 		auto& a = attachStats;
 		const auto detachStart = std::chrono::steady_clock::now();
 		a.detachedGeometries += a_detached.size();
+		// A geometry tracked again within two frames of its detach was moved by a detach and an attach in separate passes. A load's
+		// moves are not counted, since nothing shows until it ends.
+		for (auto it = erasedByDetach.begin(); it != erasedByDetach.end();)
+			it = sceneFrame - it->second > 2 ? erasedByDetach.erase(it) : std::next(it);
+		const bool noteSplits = !FrameView::LoadShown();
 		for (auto* geometry : a_detached) {
 			// Only a tracked geometry is known alive (its entry holds it), so safe to walk up from.
 			if (!tracked.contains(geometry))
@@ -541,6 +548,8 @@ namespace DCLF::Scene
 			}
 			++a.detachedErased;
 			EraseTracked(geometry);
+			if (noteSplits)
+				erasedByDetach.insert_or_assign(geometry, sceneFrame);
 		}
 		a.detachMs += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - detachStart).count();
 	}

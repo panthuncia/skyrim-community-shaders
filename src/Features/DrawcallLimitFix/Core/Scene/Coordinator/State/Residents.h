@@ -85,6 +85,9 @@ namespace DCLF::Scene
 		SlotMembers stagedPipelineMembers;
 		// This pass's drawn members whose joins decide whether their new binding is ready.
 		ankerl::unordered_dense::set<std::uint32_t> rebindingMembers;
+		// Geometry a detach erased lately, by scene frame, to catch a move split across passes.
+		ankerl::unordered_dense::map<const RE::BSGeometry*, std::uint32_t> erasedByDetach;
+		std::uint64_t splitMoves = 0;
 		ankerl::unordered_dense::set<const RE::BSGeometry*> residentJoining;  // this pass's resident passes, until patched
 		ankerl::unordered_dense::set<const RE::BSGeometry*> residentLayerJoining;  // the layers'
 	};
