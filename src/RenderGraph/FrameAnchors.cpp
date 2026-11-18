@@ -927,25 +927,47 @@ namespace FrameAnchors
 			return false;
 		}
 
-		/**
-		 * @brief The clients with passes at the anchor in a failed build (a_failed: the snapshot it was built from), still registered as
-		 * they were then, are dropped and return to D3D11; the anchor, and their other anchors, are built again without them. A client
-		 * registered again since is not in that build, and its rebuild is already asked for. Render thread.
-		 */
-		void DropFailedClients(std::uint32_t a_anchors, const char* a_name, const std::shared_ptr<const Snapshot>& a_failed, const std::string& a_error,
-			bool a_stage = false)
+		/** @brief The ids of a_clients, comma separated, for a failure's message. */
+		std::string IdsOf(const std::vector<std::shared_ptr<const ClientDesc>>& a_clients)
 		{
-			// Native mode has no D3D11 path to drop clients to: their work would reach the frame with no pass and stop it later as a
-			// mismatch that hides this error. Neither has a stage in guest mode. Stop here with the build's own error (the mismatch rule's
-			// switch).
-			if ((RenderGraph::Engine::Native::Active() || a_stage) && RenderGraph::Frame::Driver::MismatchFatal()) {
-				const auto message = fmt::format("Community Shaders: the {} graph failed to build: {}. Development builds stop here "
-												 "(CS_ORG_MISMATCH_FATAL=0 drops its clients instead).",
-					a_name, a_error);
-				logger::critical("[ORG] frame anchors: {}", message);
+			std::string ids;
+			for (const auto& client : a_clients)
+				ids += fmt::format("{}{}", ids.empty() ? "" : ", ", client->id);
+			return ids.empty() ? std::string("none still registered") : ids;
+		}
+
+		/**
+		 * @brief The one report of failed clients. A graph mode has no D3D11 path to return them to, so development builds stop here
+		 * with a_what and a_why (Frame::Driver::MismatchFatal). Release builds log it, and the clients, already removed, draw nothing.
+		 */
+		void FailClients(std::string_view a_what, std::string_view a_why)
+		{
+			const auto message = fmt::format("Community Shaders: {}: {}", a_what, a_why);
+			if (RenderGraph::Frame::Driver::MismatchFatal()) {
+				logger::critical("[ORG] frame anchors: {}. Development builds stop here (CS_ORG_MISMATCH_FATAL=0 logs it instead).", message);
 				spdlog::default_logger()->flush();
 				stl::report_and_fail(message);
 			}
+			logger::error("[ORG] frame anchors: {}. The clients are removed and draw nothing.", message);
+		}
+
+		/**
+		 * @brief Whether passes marked PassDesc::gpuGated are recorded ahead instead of at execution: native mode, unless
+		 * CS_ORG_GPU_GATES=0. Their gate then decides on the GPU, through their indirect counts.
+		 */
+		bool GpuGates()
+		{
+			static const bool on = Switches::Number("CS_ORG_GPU_GATES", 1) != 0;
+			return on && RenderGraph::Engine::Native::Active();
+		}
+
+		/**
+		 * @brief Fails the clients with passes at the anchor in a failed build that are still registered as they were in a_failed, the
+		 * snapshot it was built from (FailClients). In release builds they are removed and their anchors built again without them. A
+		 * client registered again since is not in that build, and its rebuild is already asked for. Render thread.
+		 */
+		void DropFailedClients(std::uint32_t a_anchors, const char* a_name, const std::shared_ptr<const Snapshot>& a_failed, const std::string& a_error)
+		{
 			auto lock = Guard();
 			auto& state = Anchors();
 			std::vector<std::shared_ptr<const ClientDesc>> dropped;
@@ -961,28 +983,13 @@ namespace FrameAnchors
 					dropped.push_back(client);
 					state.clients.erase(found);
 				}
-			if (dropped.empty()) {
-				logger::error(
-					"[ORG] frame anchors: the {} epoch failed and none of its build's clients is still registered; it runs nothing new until a "
-					"client registers or changes. Why: {}",
-					a_name, a_error);
+			FailClients(fmt::format("the {} graph failed to build with the clients [{}]", a_name, IdsOf(dropped)), a_error);
+			if (dropped.empty())
 				return;
-			}
-			// The anchor, and the dropped clients' other anchors, built again without them.
 			Publish(state);
 			for (const auto& client : dropped)
 				RetireGates(state, *client);
 			Rebuild(state, mask, "clients dropped after a failed build");
-			std::string ids;
-			for (const auto& client : dropped)
-				ids += fmt::format("{}{}", ids.empty() ? "" : ", ", client->id);
-			logger::error(
-				"[ORG] frame anchors: the {} epoch failed; its clients {} are dropped and return to D3D11, and the anchor is built again "
-				"without them. Why: {}",
-				a_name, ids, a_error);
-			for (const auto& client : dropped)
-				if (client->onFailed)
-					client->onFailed();
 		}
 
 		/** @brief Whether a client with passes at one of the anchors in a_mask reads the shared constants. */
@@ -1126,7 +1133,7 @@ namespace FrameAnchors
 							}
 					};
 					const auto onFailed = [declared, built = snapshot](const std::string& a_error) {
-						DropFailedClients(StepAnchorsOf(declared), declaredInfo[declared].names.label, built, a_error, true);
+						DropFailedClients(StepAnchorsOf(declared), declaredInfo[declared].names.label, built, a_error);
 					};
 					// A staged build: its snapshot and passes describe the frames it is recorded for before its attach.
 					(void)RenderGraph::Builds::DeferStaged([declared, built = snapshot, passes = declaredPasses, built_key = key] {
@@ -1891,13 +1898,6 @@ namespace FrameAnchors
 		return RenderGraphRuntime::Get().RecordsAtExecution(EpochOfAnchor(a_anchor));
 	}
 
-	bool GpuGates()
-	{
-		// CS_ORG_GPU_GATES (native mode, default on, =0 off).
-		static const bool on = Switches::Number("CS_ORG_GPU_GATES", 1) != 0;
-		return on && RenderGraph::Engine::Native::Active();
-	}
-
 	namespace
 	{
 		/**
@@ -2089,12 +2089,9 @@ namespace FrameAnchors
 					return true;
 				});
 				Publish(a_state);
-				for (const auto& client : failed) {
+				for (const auto& client : failed)
 					RetireGates(a_state, *client);
-					logger::error("[ORG] frame anchors: {} is removed: the shared constants it reads could not be made", client->id);
-					if (client->onFailed)
-						client->onFailed();
-				}
+				FailClients(fmt::format("the clients [{}] could not join the graphs", IdsOf(failed)), "the shared constants they read could not be made");
 			}
 			const std::uint64_t generation = GraphResources::Resource::ResizeGeneration();
 			if (generation != a_state.resizeGeneration) {
@@ -2224,10 +2221,9 @@ namespace FrameAnchors
 
 	namespace
 	{
-		/** @brief The graph failed and stopped (a_name's epoch said so): every client returns to its D3D11 path. */
+		/** @brief Fails every client after the graph stopped at a_name's epoch (FailClients). */
 		void StopAll(State& a_state, const char* a_name)
 		{
-			logger::error("[ORG] frame anchors: the {} epoch failed; {} clients return to D3D11", a_name, a_state.clients.size());
 			// What the stages staged is dropped uncommitted.
 			for (std::uint32_t d = 0; d < kDeclared; ++d) {
 				a_state.stagedFrame[d] = 0;
@@ -2239,9 +2235,11 @@ namespace FrameAnchors
 			a_state.clients.clear();
 			a_state.retired.clear();
 			Publish(a_state);
+			std::vector<std::shared_ptr<const ClientDesc>> descs;
 			for (const auto& client : failed)
-				if (client.desc->onFailed)
-					client.desc->onFailed();
+				descs.push_back(client.desc);
+			FailClients(fmt::format("the render graph stopped at the {} epoch with the clients [{}]", a_name, IdsOf(descs)),
+				RenderGraphRuntime::Get().GetDisabledReason());
 		}
 
 		/** @brief A lasting copy of a_text, for the census's causes (which keep pointers). Render owner. */
@@ -3869,9 +3867,9 @@ namespace FrameAnchors
 		}
 		state.insideHeldCounted = UINT32_MAX;
 		if (result == RenderGraphRuntime::EpochResult::Skipped) {
-			// Only a revision-driven epoch is skipped (its published copies were all busy), never an anchor's live one: nothing ran,
-			// nothing is dropped.
-			return { RunStatus::Refused };
+			// Only a revision-driven epoch is skipped (its published copies were all busy), never an anchor's live one.
+			FailClients(fmt::format("the {} anchor's epoch was skipped", kInfo[index].name), "its published copies were all busy, and an anchor's live epoch never skips");
+			return { RunStatus::Failed };
 		}
 		if (result == RenderGraphRuntime::EpochResult::EpochFailed) {
 			// Only this anchor's epoch failed (ExecuteEpoch logged why). Its clients are dropped at the next poll (OnEpochFailed); the
@@ -3879,7 +3877,6 @@ namespace FrameAnchors
 			return { RunStatus::Failed };
 		}
 		if (result != RenderGraphRuntime::EpochResult::Submitted) {
-			// The graph failed and stopped (ExecuteEpoch logged why): every client returns to its D3D11 path.
 			StopAll(state, Name(a_point.anchor));
 			return { RunStatus::Failed };
 		}
@@ -4291,7 +4288,7 @@ namespace FrameAnchors
 			if (a_keptGraph)
 				state.declaredSnapshots[declared].store(state.declaredPrevious[declared].load(std::memory_order_acquire), std::memory_order_release);
 			DropStaged(state, declared);
-			DropFailedClients(StepAnchorsOf(declared), declaredInfo[declared].names.label, failed, a_error, true);
+			DropFailedClients(StepAnchorsOf(declared), declaredInfo[declared].names.label, failed, a_error);
 			return;
 		}
 		if (anchor == Anchor::Count)
@@ -4395,7 +4392,6 @@ namespace FrameAnchors
 	bool Reserve(Anchor) { return false; }
 	bool HasEpoch(Anchor) { return false; }
 	bool RecordsAtExecution(Anchor) { return false; }
-	bool GpuGates() { return false; }
 	bool Register(ClientDesc) { return false; }
 	void Unregister(std::string_view) {}
 	void Refresh(std::string_view) {}

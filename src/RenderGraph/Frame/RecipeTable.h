@@ -379,7 +379,7 @@ namespace RenderGraph::Frame::Recipes::Table
 				{ .anchor = Anchor::EngineFrameClear, .clients = { "cs.engine.skeleton.frame@menu-after", "cs.engine.skeleton.shadow@menu-after" } },
 				{ .anchor = Anchor::Interface, .clients = { "cs.scaleform" }, .whole = true, .firstInstance = 0, .instanceCount = 8 },
 				{ .anchor = Anchor::ImageSpace, .clients = { "cs.engine.imagespace.facetint" } },
-				{ .anchor = Anchor::Present, .clients = { "cs.bink", "cs.gpu-load", "cs.org.anchor-selftest-fail" }, .whole = true },
+				{ .anchor = Anchor::Present, .clients = { "cs.bink", "cs.gpu-load" }, .whole = true },
 				{ .anchor = Anchor::Overlay, .clients = { "cs.imgui" }, .whole = true },
 				{ .anchor = Anchor::Capture, .clients = { "cs.screenshot" }, .whole = true },
 				{ .point = true },

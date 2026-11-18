@@ -276,8 +276,6 @@ namespace FrameAnchors
 	 * - active: at the hook, before the epoch: whether the client has work this frame. When no client of an anchor is active, the
 	 *   anchor submits nothing. Null: always active. An inactive client's passes still run when another client keeps the epoch,
 	 *   with its commit not called: put its per-run dispatches and draws behind its run gates (gates), which the run closes.
-	 * - onFailed: the graph failed and stopped, or the epoch of one of the client's anchors failed to build or prepare with the
-	 *   client in it (OnEpochFailed). The client is unregistered; it returns to its D3D11 path.
 	 * - sharedConstants: the client's passes read CS's shared constant buffers (SharedConstants.h). Each of its anchors' epochs
 	 *   then writes their values at the hook and uploads them before the anchor's first pass. Such a client may register before
 	 *   CS's first upload sized them: its passes join the graphs once the buffers can be made.
@@ -297,7 +295,6 @@ namespace FrameAnchors
 		std::function<void(org::RenderGraph&)> registerResources;
 		std::function<void(const Point&)> commit;
 		std::function<bool()> active;
-		std::function<void()> onFailed;
 		bool sharedConstants = false;
 		std::vector<std::shared_ptr<RenderGraph::RunGate>> gates;
 		std::function<void(const Point&)> executed;
@@ -360,12 +357,6 @@ namespace FrameAnchors
 	bool RecordsAtExecution(Anchor a_anchor);
 
 	/**
-	 * @brief Whether passes marked PassDesc::gpuGated are recorded ahead instead of at execution: native mode, unless
-	 * CS_ORG_GPU_GATES=0. Their gate then decides on the GPU, through their indirect counts.
-	 */
-	bool GpuGates();
-
-	/**
 	 * @brief The Revision of a pass whose Record reads what its run's commit stored (a run slot): recorded at execution
 	 * (a_atExecution, RecordsAtExecution at the build), nothing changes it, so a ticket prepared ahead stays current. Recorded ahead,
 	 * every call gives a new word: the ticket is prepared again after the commit, which is when its Record can read the slot.
@@ -380,7 +371,7 @@ namespace FrameAnchors
 	 * @brief Registers (or replaces) a client. Render thread, with the runtime active. False, logged, when the runtime is not active,
 	 * a pass names an anchor without an epoch, a pass has no name or no make, or a name repeats. The anchors' graphs are built again
 	 * at their next execution. A client that reads the shared constants before CS's first upload is held until they can be made,
-	 * then joins the graphs; when they cannot be made at all, its onFailed is called.
+	 * then joins the graphs. When they cannot be made at all the client fails like a failed build's (OnEpochFailed).
 	 */
 	bool Register(ClientDesc a_client);
 
@@ -821,10 +812,11 @@ namespace FrameAnchors
 	void SetTicketsAhead(org::GraphHost& a_host);
 
 	/**
-	 * @brief Render thread (RenderGraphRuntime::PollEpochFailures): an anchor's epoch failed to build or prepare. Every client with
-	 * passes at that anchor in the failed build is unregistered, its onFailed called, and the anchor (and the dropped clients' other
-	 * anchors) built again without them. One error line names the clients and the error. a_keptGraph: the build failed and the
-	 * anchor's previous graph still runs. Nothing for an epoch that is not an anchor's.
+	 * @brief Render thread (RenderGraphRuntime::PollEpochFailures): an anchor's epoch failed to build or prepare. The clients with passes
+	 * at that anchor in the failed build fail, since a graph mode has no D3D11 path for them. Development builds stop with a message that
+	 * names the clients and the error (Frame::Driver::MismatchFatal). Release builds log it, unregister the clients and build the anchor
+	 * (and their other anchors) again without them. a_keptGraph: the build failed and the anchor's previous graph still runs. Nothing for
+	 * an epoch that is not an anchor's.
 	 */
 	void OnEpochFailed(std::uint32_t a_epoch, const std::string& a_error, bool a_keptGraph);
 
