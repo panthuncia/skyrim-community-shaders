@@ -52,7 +52,7 @@ namespace Testing
 	};
 
 	/** @brief The milestones in the order they are reached. */
-	inline constexpr const char* kMilestones[] = { "plugin", "data-loaded", "shaders-ready", "main-menu", "load-start", "loading-screen", "world-ready" };
+	inline constexpr const char* kMilestones[] = { "plugin", "data-loaded", "shaders-ready", "main-menu", "load-start", "loading-screen", "held-frame", "world-ready" };
 
 	/** @brief Whether a_name is a milestone. */
 	bool IsMilestone(std::string_view a_name);

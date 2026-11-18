@@ -19,6 +19,7 @@
 #include <array>
 #include <atomic>
 #include <format>
+#include <string>
 #include <vector>
 
 namespace DCLF::Features::MenuViews
@@ -61,6 +62,7 @@ namespace DCLF::Features::MenuViews
 			bool installed = false;    // DCLF's scene has an installed publication
 			std::uint32_t geometry = 0, lighting = 0, skinned = 0, tracked = 0, claimed = 0;
 			std::uint64_t signature = 0;  // the root's geometry
+			std::string model;            // the first geometry's name, which names the loading screen's model
 
 			bool SameShape(const Probe& a_other) const
 			{
@@ -119,6 +121,8 @@ namespace DCLF::Features::MenuViews
 				SceneTracker::CollectGeometry(a_root, geometry);
 			a_probe.geometry = static_cast<std::uint32_t>(geometry.size());
 			std::uint64_t signature = 0xcbf29ce484222325ull;
+			if (!geometry.empty() && geometry.front()->name.c_str())
+				a_probe.model = geometry.front()->name.c_str();
 			for (auto* g : geometry) {
 				signature = (signature ^ reinterpret_cast<std::uintptr_t>(g)) * 0x100000001b3ull;
 				const auto& data = g->GetGeometryRuntimeData();
@@ -181,8 +185,8 @@ namespace DCLF::Features::MenuViews
 			const auto stencil = a_probe.stencilMode ? std::format("stencil mode {} ref {:#x}", a_probe.stencilMode, a_probe.stencilRef) : std::string("no stencil");
 			std::string scheme;
 			if (a_probe.scene == MenuScene::Menu3D)
-				scheme = std::format(" scheme {} ({}): {} geometries ({} Lighting, {} skinned), {} tracked by DCLF's scene, {} claimed;", a_probe.scheme,
-					SchemeName(a_probe.scheme), a_probe.geometry, a_probe.lighting, a_probe.skinned, a_probe.tracked, a_probe.claimed);
+				scheme = std::format(" scheme {} ({}): {} geometries ({} Lighting, {} skinned, first '{}'), {} tracked by DCLF's scene, {} claimed;", a_probe.scheme,
+					SchemeName(a_probe.scheme), a_probe.geometry, a_probe.lighting, a_probe.skinned, a_probe.model, a_probe.tracked, a_probe.claimed);
 			logger::info("[DCLF] menu views: {}{} targets {} {} {}, depth {}, {}, {} camera; world frame {}{}; {}", NameOf(a_probe.scene), scheme, a_probe.targets[0],
 				a_probe.targets[1], a_probe.targets[2], a_probe.depth, stencil, a_probe.ortho ? "orthographic" : "perspective", a_probe.worldFrame ? "yes" : "no",
 				a_probe.freezeFrame ? " (freeze-frame menu open)" : "", Verdict(a_probe));

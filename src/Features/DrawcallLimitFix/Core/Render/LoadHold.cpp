@@ -48,7 +48,12 @@ namespace DCLF::LoadHold
 		std::atomic<bool> withMenu{ false };
 
 		// The test runner sees any state but Idle as a hold: the world is not ready while it lasts (Testing::Holds).
-		void ReportHold(HoldState a_state) { Testing::Holds::Set("dclf:load-hold", a_state != HoldState::Idle); }
+		void ReportHold(HoldState a_state)
+		{
+			Testing::Holds::Set("dclf:load-hold", a_state != HoldState::Idle);
+			if (a_state == HoldState::Idle)
+				Testing::Holds::Set("dclf:load-hold-world", false);
+		}
 
 		void StoreState(HoldState a_state)
 		{
@@ -400,6 +405,8 @@ namespace DCLF::LoadHold
 		// The world's first frame under the kept menu: the load is done, and the tables are built from here (IsLoadingScreenUp: false).
 		if (now == HoldState::Closing) {
 			StoreState(HoldState::Holding);
+			// The test runner's held-frame milestone starts here.
+			Testing::Holds::Set("dclf:load-hold-world", true);
 			logger::info("[DCLF] load hold: the world's first frame under the kept loading menu, {:.0f} ms after the load's end", MillisecondsSince(hold.start));
 		}
 	}

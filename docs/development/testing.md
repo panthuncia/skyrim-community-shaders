@@ -115,7 +115,7 @@ The harness writes this file. All keys are present; empty means none.
 
 `do` names a registered command and `arg` is its argument. An unregistered command fails the step (outcome `failed`).
 
-- **Generic** (`src/Testing/Commands.cpp`, any feature set): `shot`, `exit`, `console` (a console line), `menu` (`<menu name>=show|hide`), `cs-menu` (`open|close`), `save`, `load` (`<name>|recent`), `weather` (`<editor id or form id>|off`), `mark`, `vram-json`, `window`, `capture`, `telemetry`, `feature` (`<ShortName>=0|1`), `pov`, `draw`, `face-npc`, `face-female`, `morph-female`, `npc-alpha`, `cast`, `fg`, `pp`, `hdr`, `bink`, `signal`, `move` and `turn` (`<frames>:<amount per frame>`), `spill`, `demote`, `frame-window`, `ballast`.
+- **Generic** (`src/Testing/Commands.cpp`, any feature set): `shot`, `exit`, `console` (a console line), `loadscreen` (`<model path substring>`: every load screen shows that model), `menu` (`<menu name>=show|hide`), `cs-menu` (`open|close`), `save`, `load` (`<name>|recent`), `weather` (`<editor id or form id>|off`), `mark`, `vram-json`, `window`, `capture`, `telemetry`, `feature` (`<ShortName>=0|1`), `pov`, `draw`, `face-npc`, `face-female`, `morph-female`, `npc-alpha`, `cast`, `fg`, `pp`, `hdr`, `bink`, `signal`, `move` and `turn` (`<frames>:<amount per frame>`), `spill`, `demote`, `frame-window`, `ballast`.
 - **DCLF's** keep their old names, `dclf:<name>` (`dclf:cull` with arg `frustum`, `dclf:shadows` with arg `0` for a toggle). They exist only when DCLF installs.
 - **Waits:** `shaders` and `signal:<n>` always; `settled`, `reload` and `nvperf` only when DCLF installs. An unknown wait fails the step.
 
@@ -157,6 +157,7 @@ The game rewrites this file about once a second and at every milestone and outco
 - **`phase`** is one of `boot`, `compiling`, `menu`, `loading`, `world` and `exiting`.
 - **Milestones** are recorded the first time each is reached. A save loaded after the first world-ready records `load-start` and `world-ready` again, in a `loads` array of the same shape.
 - **`config.unchecked`** lists `CS_DCLF_*` names that may be DCLF feature switches but could not be checked, because DCLF did not install.
+- **held-frame** is recorded at the first world frame of a load drawn under the loading menu DCLF's load hold keeps up.
 - **world-ready** is recorded when all of these hold:
   - the loading menu is closed and no hold is active;
   - the player's parent cell is attached and their 3D is loaded;

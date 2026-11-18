@@ -11,7 +11,7 @@ from pathlib import Path
 from .paths import CONFIG_DIR
 from .schema import ConfigError
 
-MILESTONES = ["plugin", "data-loaded", "shaders-ready", "main-menu", "load-start", "loading-screen", "world-ready"]
+MILESTONES = ["plugin", "data-loaded", "shaders-ready", "main-menu", "load-start", "loading-screen", "held-frame", "world-ready"]
 WAITS = ("settled", "shaders", "reload", "nvperf")
 DEFAULT_TIMEOUTS = {"launch": 60, "compile": 600, "load": 120, "step_wait": 60}
 

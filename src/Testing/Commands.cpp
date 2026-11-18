@@ -225,12 +225,74 @@ namespace Testing
 			return true;
 		}
 
+		/** @brief The model path of a load screen's object, or empty. */
+		std::string LoadScreenModel(const RE::TESLoadScreen::LoadNIFData* a_data)
+		{
+			const auto* nif = a_data ? a_data->loadNIF : nullptr;
+			const auto* model = nif ? nif->As<RE::TESModel>() : nullptr;
+			return model && model->GetModel() ? std::string(model->GetModel()) : std::string{};
+		}
+
+		/** @brief The open loading menu's load screen model, or empty. */
+		std::string ShownLoadScreenModel()
+		{
+			auto* ui = RE::UI::GetSingleton();
+			const auto menu = ui ? ui->GetMenu<RE::LoadingMenu>() : nullptr;
+			const auto* screen = menu ? menu->GetRuntimeData().loadScreen : nullptr;
+			return screen ? LoadScreenModel(screen->loadNIFData) : std::string{};
+		}
+
+		/**
+		 * @brief The "loadscreen" command with a model path substring. Every load screen shows the object of the first one whose model holds
+		 * it, so the next loads show that model whichever screen the game picks.
+		 */
+		bool ForceLoadScreen(const std::string& a_arg, std::string& a_error)
+		{
+			auto* data = RE::TESDataHandler::GetSingleton();
+			if (!data || a_arg.empty()) {
+				a_error = "a load screen needs a model substring and loaded data";
+				return false;
+			}
+			const auto lower = [](std::string a_text) {
+				std::ranges::transform(a_text, a_text.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+				return a_text;
+			};
+			auto& screens = data->GetFormArray<RE::TESLoadScreen>();
+			// Each screen's own object is kept from the first call so a later call can find any model again.
+			static std::map<RE::TESLoadScreen*, RE::TESLoadScreen::LoadNIFData*> own;
+			if (own.empty())
+				for (auto* screen : screens)
+					if (screen)
+						own[screen] = screen->loadNIFData;
+			RE::TESLoadScreen::LoadNIFData* chosen = nullptr;
+			std::string model;
+			for (auto* screen : screens) {
+				if (!screen)
+					continue;
+				if (lower(model = LoadScreenModel(own[screen])).find(lower(a_arg)) != std::string::npos) {
+					chosen = own[screen];
+					break;
+				}
+			}
+			if (!chosen) {
+				a_error = fmt::format("no load screen's model holds '{}'", a_arg);
+				return false;
+			}
+			for (auto* screen : screens)
+				if (screen)
+					screen->loadNIFData = chosen;
+			logger::info("[TEST] loadscreen: {} load screens show {}", screens.size(), model);
+			return true;
+		}
+
 		bool Shot(const std::string& a_arg, std::string& a_error)
 		{
 			if (a_arg.empty()) {
 				a_error = "a shot needs a name";
 				return false;
 			}
+			if (const auto model = ShownLoadScreenModel(); !model.empty())
+				logger::info("[TEST] shot {} with the loading menu showing {}", a_arg, model);
 			auto directory = RunDirectory();
 			directory = directory.empty() ? logger::log_directory().value_or(std::filesystem::path{}) / "dclf-shots" : directory / "shots";
 			std::error_code error;
@@ -330,6 +392,7 @@ namespace Testing
 				return true;
 			});
 			RegisterCommand("shot", Shot);
+			RegisterCommand("loadscreen", ForceLoadScreen);
 			RegisterCommand("window", Window);
 			RegisterCommand("weather", Weather);
 			RegisterCommand("feature", SetFeature);

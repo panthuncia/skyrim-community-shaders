@@ -15,6 +15,7 @@ namespace Testing
 		// Lifecycle state, guarded by the run's lock.
 		bool inLoad = false;             // a load started and the world is not ready yet
 		bool loadingScreenSeen = false;  // this load showed the loading menu
+		bool heldFrameSeen = false;      // this load drew a world frame under the kept loading menu
 		bool worldReady = false;
 		std::uint32_t readyFrames = 0;
 		double loadTimerStart = -1.0;  // when the wait for world-ready started; below zero: none
@@ -59,6 +60,7 @@ namespace Testing
 				return;
 			inLoad = true;
 			loadingScreenSeen = false;
+			heldFrameSeen = false;
 			worldReady = false;
 			readyFrames = 0;
 			loadTimerStart = Now();
@@ -152,6 +154,11 @@ namespace Testing
 			if (!loadingScreenSeen) {
 				loadingScreenSeen = true;
 				RecordMilestone("loading-screen", a_frame);
+			}
+			// DCLF's load hold names the world frames it keeps the loading menu over.
+			if (held && !heldFrameSeen && std::ranges::contains(Holds::List(), std::string("dclf:load-hold-world"))) {
+				heldFrameSeen = true;
+				RecordMilestone("held-frame", a_frame);
 			}
 		}
 		const bool ready = !loading && !mainMenu && !held && playerReady;
