@@ -8448,3 +8448,32 @@ One background run each on DLL `4db1ff436732`: `guest-quick`, `native-quick`, `d
 `native-d3d12-quick`. All passed, and the `[E]`/`[C]` line kinds match the C1/C2 runs. Shots against those runs: 0.1 to 1.7 apart, apart
 from `d3d11+quick` (7.4, the tree in the wind) and the census's Dragonsreach (26: its bright windows, which earlier runs show as well).
 The first census run stopped at plugin load: `org.census` still set the latch switch. 7 launches.
+
+## Opening the CS menu (2026-11-18)
+
+A user's native D3D12 session with HDR Display on stopped when the CS menu opened: `stale recording`, UI segment, "a slot of its graph
+published a new version after the frame's Begin".
+
+**Cause.** ImGui makes its font atlas texture when the menu first draws. Each ImGui texture is a version of an atlas page, a versioned
+texture the overlay's passes declare in the UI stage's graph. `ImGuiBasicRHI::SetPage` published it at the overlay, in the middle of
+the frame. The overlay skipped its draw that frame, but the stage's whole recording binds the page, so its commit found the recording
+stale. The error now names the slot (ORG `GraphHost::EpochRecordingStaleVersion`): `slot 'ImGui::Texture 3' (slot 398, version 2,
+recorded with 1)`.
+
+**Fix.** `SetPage` keeps the page's next version and publishes it at the next frame boundary (`Driver::AtNextBegin`, `PublishPages`).
+The stage keeps its schedule until a recording for the new version is ready. Until then the upload pass and the draws leave out a texture
+its page does not bind, and the whole contents are staged again each frame, as they were. The font reload (`InvalidateTextures`) goes
+the same way. `PublishTextures` and the overlay's skipped frame are gone. CS `75f0892d8`, ORG `6028568`.
+
+**Test.** The `menu` config opens the menu as the hotkey does (`cs-menu open`), reloads the font (`cs-menu font=20`, then `font=saved`,
+put back before the close saves the settings) and closes it. Background runs with `--set features.HDRDisplay=true`, HDR10 on the
+desktop:
+- Before the fix, native D3D12 stopped the frame after `cs-menu open` (`runsI8-164534-nfg-native-d3d12-menu-bug11-diag`).
+- After it, `native-d3d12+menu`, `native-vulkan+menu` and `guest+menu` passed with no tap error, the menu drawn with its text and icons
+  in each (`1118-165525-nfg-native-d3d12-menu-bug11-d3d12`, `1118-165638-nfg-native-vulkan-menu-bug11-vk`,
+  `1118-165728-nfg-guest-menu-bug11-guest`).
+- With the menu open on native D3D12: HDR off and on (`hdr`), an upscaler switch, Screen Space GI off and on. No tap error
+  (`1118-165857-nfg-native-d3d12-menu-bug11-actions`).
+
+**Not changed.** Feature prepasses that resize their versioned textures in the middle of a frame (Exponential Height Fog's grid
+sliders, Screen Space GI, Screen Space Shadows, Terrain Blending on a size change) would stop the same way. Listed in `parity/status.md`.

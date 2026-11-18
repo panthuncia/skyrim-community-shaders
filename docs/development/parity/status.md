@@ -108,6 +108,13 @@ To match DXVK, native needs what DXVK's CS thread gives it: the GPU work off the
 - **Render thread blocked on compiles**: with a cold shader store the main menu stalls 15 s and more while Lighting compiles (the
   whole compile took 90 s), and after a DCLF compute shader changes the first world frame creates its driver pipelines on the render
   thread (VisibilityEventsCS took the frame past 15 s on guest). Both trip the hang watchdog. 2026-11-18.
+  Also in a user's native D3D12 session (RX 6600, 2026-11-18), on the loading screen:
+  `[DCLF] menu scenes (Lighting): the first draw waited 9564 ms for its prebuilt program (descriptor 0x1)`, then the watchdog's
+  "has not presented for 15.0 s".
+- **Mid-frame resizes in feature prepasses**: Exponential Height Fog (`ORGExponentialHeightFog::Prepass`, its Grid Depth Slices
+  sliders), Screen Space GI, Screen Space Shadows and Terrain Blending resize their versioned textures in the middle of a frame when
+  their size changes. A new version there is the fatal `stale recording` the menu's font atlas had (org-native-frame-graph.md, "Opening
+  the CS menu"). Not reproduced, not changed. The fix is the same: resize at the next frame boundary (`Driver::AtNextBegin`).
 - **Screenshots in native**: the UI stage's capture comes out without the HUD; the D3D11 copies taken when its readback buffers are busy
   have it, so the flicker bursts show the compass on every other shot. Not the import (all resolve to `Native::BackBuffer`).
 - **D3D12 views**: `CreateWords` buffers read as ByteAddressBuffer have structured views. A raw GetDimensions on them returns the element
