@@ -3283,12 +3283,23 @@ void RenderGraphRuntime::ConfigureFrame(FrameConfig a_config)
 	runtime.frameConfigured = true;
 }
 
+namespace
+{
+	// SetEpochHooks: the skeleton's work hosted in another module's epoch, for every submission path (ExecuteEpoch, ExecuteExternalEpoch).
+	std::atomic<void (*)(RenderGraphRuntime::Segment)> epochStartingHook{ nullptr };
+	std::atomic<void (*)(RenderGraphRuntime::Segment)> epochCommitHook{ nullptr };
+}
+
 std::shared_ptr<org::ExternalEpochExecution> RenderGraphRuntime::ExecuteExternalEpoch(Segment a_segment,
 	const std::function<void(org::RenderGraph&)>& a_beforePrepare, std::shared_ptr<const void> a_resourceOwner)
 {
 	ZoneScopedN("CS.ORG.ExecuteExternalEpoch");
 	if (!IsActive() || !impl->asyncEpochs)
 		return nullptr;
+	// As ExecuteEpoch: the hosted work sees the submission first, and its commit writes the run's data first. Drawcall Limit Fix's graphs are
+	// external epochs in guest mode and host the skeleton's clears there too.
+	if (const auto starting = epochStartingHook.load(std::memory_order_acquire))
+		starting(a_segment);
 	FrameAnchors::BeforeGpuWork("another epoch", static_cast<std::uint32_t>(a_segment));
 	impl->CloseLeftOpenExternal();
 	impl->TakeCompletedEpochs();
@@ -3296,6 +3307,8 @@ std::shared_ptr<org::ExternalEpochExecution> RenderGraphRuntime::ExecuteExternal
 	if (a_beforePrepare) {
 		beforePrepare = [&](org::RenderGraph& a_graph) {
 			ScopedPerfEvent inputsEvent(Impl::InputsLabel(a_segment));
+			if (const auto commit = epochCommitHook.load(std::memory_order_acquire))
+				commit(a_segment);
 			a_beforePrepare(a_graph);
 		};
 	}
@@ -3376,12 +3389,6 @@ bool RenderGraphRuntime::ExecuteEpoch(Segment a_segment, const std::function<voi
 	std::shared_ptr<const void> a_resourceOwner)
 {
 	return TryExecuteEpoch(a_segment, a_beforePrepare, std::move(a_resourceOwner)) == EpochResult::Submitted;
-}
-
-namespace
-{
-	std::atomic<void (*)(RenderGraphRuntime::Segment)> epochStartingHook{ nullptr };
-	std::atomic<void (*)(RenderGraphRuntime::Segment)> epochCommitHook{ nullptr };
 }
 
 void RenderGraphRuntime::SetEpochHooks(EpochHooks a_hooks)

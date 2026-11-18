@@ -309,6 +309,22 @@ namespace globals
 		mappedFrameBuffer = nullptr;
 	}
 
+	void OnContextMap(ID3D11Resource* a_resource, D3D11_MAP a_type, D3D11_MAPPED_SUBRESOURCE* a_mapped)
+	{
+		if (*globals::game::perFrame.get() == a_resource)
+			globals::game::mappedFrameBuffer = a_mapped;
+		DrawcallLimitFix::OnMap(a_resource, a_mapped->pData);
+		RenderGraph::Engine::Constants::OnMap(a_resource, a_type, a_mapped->pData);
+	}
+
+	void OnContextUnmap(ID3D11Resource* a_resource)
+	{
+		if (*globals::game::perFrame.get() == a_resource && globals::game::mappedFrameBuffer)
+			CacheFramebuffer();
+		DrawcallLimitFix::OnUnmap(a_resource);
+		RenderGraph::Engine::Constants::OnUnmap(a_resource);
+	}
+
 	/**
  * @brief Hooks the ID3D11DeviceContext::Map method to track mapping of the per-frame resource.
  *
@@ -321,12 +337,8 @@ namespace globals
 		static HRESULT thunk(ID3D11DeviceContext* This, ID3D11Resource* pResource, UINT Subresource, D3D11_MAP MapType, UINT MapFlags, D3D11_MAPPED_SUBRESOURCE* pMappedResource)
 		{
 			HRESULT hr = func(This, pResource, Subresource, MapType, MapFlags, pMappedResource);
-			if (hr == S_OK) {
-				if (*globals::game::perFrame.get() == pResource)
-					globals::game::mappedFrameBuffer = pMappedResource;
-				DrawcallLimitFix::OnMap(pResource, pMappedResource->pData);
-				RenderGraph::Engine::Constants::OnMap(pResource, MapType, pMappedResource->pData);
-			}
+			if (hr == S_OK)
+				OnContextMap(pResource, MapType, pMappedResource);
 			return hr;
 		}
 		static inline REL::Relocation<decltype(thunk)> func;
@@ -341,11 +353,7 @@ namespace globals
 	{
 		static void thunk(ID3D11DeviceContext* This, ID3D11Resource* pResource, UINT Subresource)
 		{
-			if (*globals::game::perFrame.get() == pResource && globals::game::mappedFrameBuffer) {
-				CacheFramebuffer();
-			}
-			DrawcallLimitFix::OnUnmap(pResource);
-			RenderGraph::Engine::Constants::OnUnmap(pResource);
+			OnContextUnmap(pResource);
 			func(This, pResource, Subresource);
 		}
 		static inline REL::Relocation<decltype(thunk)> func;

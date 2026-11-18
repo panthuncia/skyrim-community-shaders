@@ -209,11 +209,15 @@ namespace RenderGraph::Engine::Skeleton
 			return StageHost(a_host) ? a_host : Host::Own;
 		}
 
-		/** @brief Native mode with segments: world frames' clears and copies run in the epochs that write their targets first. */
+		/**
+		 * @brief With the frame's stages (both modes): world frames' clears and copies run in the epochs that write their targets first, the
+		 * stages' places and Drawcall Limit Fix's shadow view and Z-prepass. Guest mode takes a place only in a stage that runs there; a clear
+		 * or copy no stage takes there runs on its anchor's own epoch while that anchor has one (OwnEpochTakes).
+		 */
 		bool HostingOn()
 		{
 			static const bool on = [] {
-				const bool requested = Native::Requested() && FrameAnchors::SegmentsOn();
+				const bool requested = FrameAnchors::SegmentsOn();
 				logger::info("[ORG] engine skeleton: world frames' clears and copies run in the epochs that write their targets first: {}",
 					requested ? "on" : "off");
 				return requested;
@@ -1083,10 +1087,10 @@ namespace RenderGraph::Engine::Skeleton
 			}
 		}
 
-		/** @brief The place stages' anchor and its use: the UI stage holds the clear steps (native mode with hosting). */
+		/** @brief The UI stage's places: the UI stage runs in this mode and holds the clear steps (with hosting). */
 		bool PlacesOn()
 		{
-			return HostingOn() && FrameAnchors::HasEpoch(Anchor::EngineFrameClear);
+			return HostingOn() && FrameAnchors::HasEpoch(Anchor::EngineFrameClear) && FrameAnchors::NamedByStage(PlaceClientId(IndexOf(Group::Frame), 0));
 		}
 
 		/**
@@ -1320,9 +1324,9 @@ namespace RenderGraph::Engine::Skeleton
 			};
 			client.gates = { group.gate };
 			const auto passes = client.passes.size();
-			// Native mode: no stage runs the group's own client. Its clears run at the hosts and places below, so it is not registered (the
-			// recipe table names it only as a client of its anchor's own epoch, which guest mode runs).
-			group.registered = HostingOn() || FrameAnchors::Register(std::move(client));
+			// The group's own client runs only on its anchor's own epoch (the recipe table names it there). Native mode has none: its clears run
+			// at the hosts and places below, so it is not registered. Guest mode keeps it for the clears no stage that runs there takes.
+			group.registered = (HostingOn() && !FrameAnchors::HasOwnEpoch(kGroupAnchors[index])) || FrameAnchors::Register(std::move(client));
 			if (!group.registered) {
 				group.specs.clear();
 				group.failed = true;
@@ -1359,10 +1363,6 @@ namespace RenderGraph::Engine::Skeleton
 						TargetName(a_target), spec.texture != TextureOf(a_target) ? "another texture" : "the same texture, another view");
 				return nullptr;
 			}
-			// Guest mode: setup's build point put the group in its anchor's graph; between a re-registration after a resize and the next build
-			// point it is not. Native mode places the clear in a stage (Take), whose schedule decides.
-			if (!HostingOn() && !FrameAnchors::Scheduled(kGroupIds[IndexOf(a_group)], kGroupAnchors[IndexOf(a_group)]))
-				return nullptr;
 			for (const auto& draw : spec.draws)
 				if (draw.flags == a_flags)
 					return &draw;
@@ -1384,14 +1384,31 @@ namespace RenderGraph::Engine::Skeleton
 			return true;
 		}
 
+		/**
+		 * @brief A clear no stage that runs in this mode takes, on the group anchor's own epoch at the engine's next bind (Flush), while that
+		 * anchor has one: guest mode, for the clears of the stages that do not run there yet. Migration scaffolding: once every stage runs in
+		 * guest, no group anchor has an epoch of its own and this path is never taken. False: the engine's call stays on D3D11 (the group's
+		 * registration is not in its anchor's built graph yet). Empty when the anchor has no own epoch (a mismatch then, NoPlace).
+		 */
+		std::optional<bool> OwnEpochTakes(Group a_group, const Pending& a_pending)
+		{
+			const auto index = IndexOf(a_group);
+			if (!FrameAnchors::HasOwnEpoch(kGroupAnchors[index]))
+				return std::nullopt;
+			if (!FrameAnchors::Scheduled(kGroupIds[index], kGroupAnchors[index]))
+				return false;
+			GroupOf(a_group).pending.push_back(a_pending);
+			return true;
+		}
+
 		bool Take(const Target& a_target, ID3D11View* a_view, std::uint32_t a_flags, Pending a_pending)
 		{
 			const Group group = GroupFor(a_target);
 			auto& state = GroupOf(group);
-			// A reflection face or the faces' depth. A world frame's: the start stage's sky clears them (FacesClearedBySky). Native mode, any other
-			// frame kind: no stage of those kinds reads the faces (only the start stage and Drawcall Limit Fix's world graphs do), and the next
-			// world frame's face sky clears each face it draws first.
-			if (group == Group::Cube && ((WorldFrame() && FacesClearedBySky()) || HostingOn())) {
+			// A reflection face or the faces' depth, when the start stage holds the faces' sky (FacesClearedBySky). A world frame's: that sky
+			// clears them. Any other frame kind: no stage of those kinds reads the faces (only the start stage and Drawcall Limit Fix's world
+			// graphs do), and the next world frame's face sky clears each face it draws first.
+			if (group == Group::Cube && FacesClearedBySky()) {
 				if (state.dropped++ == 0)
 					logger::info("[ORG] engine skeleton: reflection face clears are dropped; the start stage's face sky clears each face and its depth");
 				return true;
@@ -1406,7 +1423,7 @@ namespace RenderGraph::Engine::Skeleton
 			// A Bink movie's frame clears the main depth before its Renderer::Begin, outside every stage's window, and so does the session's first
 			// frame (frame 0, before the first Begin; the next frames are the Bink start movie's). Nothing reads the main depth in a Bink frame (the
 			// movie's tiles and the overlay draw without it), and every other kind clears it before its first read (the UI stage's places, the
-			// pre-depth stage's place or Drawcall Limit Fix's Z-prepass): native mode drops these clears.
+			// pre-depth stage's place or Drawcall Limit Fix's Z-prepass): dropped where the UI stage runs.
 			if (a_target.kind == Kind::Depth && a_target.index == DepthTarget::kMAIN && PlacesOn() &&
 				(RenderGraph::Frame::Driver::Current().kind == RenderGraph::Frame::Kind::Bink || RenderGraph::Frame::Driver::Current().frame == 0)) {
 				if (state.dropped++ == 0)
@@ -1425,22 +1442,23 @@ namespace RenderGraph::Engine::Skeleton
 				state.hostedPending.push_back(a_pending);
 				return true;
 			}
-			if (!HostingOn()) {
-				// Guest mode: the group anchor's own ticket at the engine's next bind.
-				state.pending.push_back(a_pending);
-				return true;
-			}
-			if (!WorldFrame())
-				return NoPlace(a_target, a_flags, "no open stage has a place for it");
+			// No stage takes it: the group anchor's own epoch where it has one (guest mode, until every stage runs there), else a mismatch.
+			const auto unplaced = [&](std::string_view a_why) {
+				if (const auto own = OwnEpochTakes(group, a_pending))
+					return *own;
+				return NoPlace(a_target, a_flags, a_why);
+			};
+			if (!HostingOn() || !WorldFrame())
+				return unplaced("no open stage has a place for it");
 			// A world frame's clear of a target a CS stage clears, or one the DCLF host does not draw this frame: its entry and colour are staged
 			// into the stage's frame inputs now.
 			const auto place = StagePlaceFor(host);
 			if (place == Host::Own || GroupOf(group).hosted[HostIndex(place)].empty())
-				return NoPlace(a_target, a_flags, "no stage of the world recipe clears it");
+				return unplaced("no stage of the world recipe clears it");
 			const auto id = HostedClientId(IndexOf(group), place);
 			const auto hold = FrameAnchors::HeldNow(id, kHostInfo[HostIndex(place)].anchor);
 			if (!hold.held)
-				return NoPlace(a_target, a_flags, fmt::format("the {} stage place is not open", kHostInfo[HostIndex(place)].name));
+				return unplaced(fmt::format("the {} stage place is not open", kHostInfo[HostIndex(place)].name));
 			if (!hold.scheduled) {
 				// The stage's schedule does not hold the place's client yet (its first build after a registration): the clear lags.
 				static Util::ReasonLog s_lag("[ORG] engine skeleton: a clear lags (its stage's schedule does not hold the place yet); nothing clears it this frame");
@@ -1635,6 +1653,9 @@ namespace RenderGraph::Engine::Skeleton
 			client.id = id;
 			client.passes = builder.Take();
 			client.active = [] { return false; };
+			// A pass of the deferred stage only: where the anchor keeps its own epoch (guest mode, until the stage runs there), that epoch's graph
+			// leaves it out, and the copy runs on the depth copy's own anchor.
+			client.segmentOnly = true;
 			copy.hostedRegistered = FrameAnchors::Register(std::move(client));
 			copy.host = copy.hostedRegistered ? host : Host::Own;
 			if (copy.hostedRegistered)
@@ -1702,8 +1723,9 @@ namespace RenderGraph::Engine::Skeleton
 			}
 			if (!copy.registered)
 				return false;
-			if (HostingOn()) {
-				// Native mode: every copy is a stage's pass, or dropped here.
+			if (HostingOn() && !FrameAnchors::HasOwnEpoch(kCopyAnchors[index])) {
+				// No own epoch for the copy's anchor (native mode): every copy is a stage's pass, or dropped here. Guest mode keeps the anchor's
+				// own epoch for the copies of the stages that do not run there yet (migration scaffolding, as OwnEpochTakes for the clears).
 				const auto& frame = RenderGraph::Frame::Driver::Current();
 				if (a_kind == CopyKind::Depth) {
 					// The reflection cubemap's render copies the main depth while the start stage is open (the session's first world frames): the

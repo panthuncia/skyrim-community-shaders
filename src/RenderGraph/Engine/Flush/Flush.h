@@ -58,6 +58,13 @@ namespace RenderGraph::Engine::Flush
 	bool Latched();
 
 	/**
+	 * @brief CS's own write of a whole dynamic constant buffer (a_size bytes from a_data; ConstantBuffer::Update asks first): inside a CS
+	 * stage's window, guest mode with the latch on, it is kept in CS memory and reaches DXVK when the window closes, as the engine's are (the
+	 * write-behind; DXVK's stream takes no work inside a window). True when kept; false: write it now.
+	 */
+	bool WriteBehind(ID3D11Buffer* a_buffer, const void* a_data, std::size_t a_size);
+
+	/**
 	 * @brief Main thread, Engine::InstallGameHooks, after Hooks.cpp's SetDirtyStates detour and before any other DispatchCSShader
 	 * detour: the four detours, the guest context's filter and the main-thread report. Nothing when neither switch is on, or when
 	 * CS_ORG_TRIPWIRE_GUEST is off (logged).

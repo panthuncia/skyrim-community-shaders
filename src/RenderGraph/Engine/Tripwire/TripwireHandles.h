@@ -24,6 +24,9 @@ namespace RenderGraph::Engine::Tripwire
 
 		/** @brief The native services (SetNativeServices), null before they are installed. */
 		extern std::atomic<const NativeServices*> nativeServices;
+
+		/** @brief The guest context's Map and Unmap hooks (SetGuestMapHooks), null when none. */
+		extern std::atomic<const GuestMapHooks*> guestMapHooks;
 	}
 
 	/** @brief The state every handle has, whatever its interface. */

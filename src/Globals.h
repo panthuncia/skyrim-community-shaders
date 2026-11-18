@@ -277,6 +277,13 @@ namespace globals
 	 * @param a_context The D3D11 device context to hook.
 	 */
 	void InstallD3DHooks(ID3D11DeviceContext* a_context);
+	/**
+	 * @brief What the Map hook does after a successful Map (a_mapped: the caller's output): the per-frame buffer's pointer, Drawcall Limit
+	 * Fix's constant mirror and the engine-constants capture. Also called for a Map the flush latch answers itself (Engine/Flush).
+	 */
+	void OnContextMap(ID3D11Resource* a_resource, D3D11_MAP a_type, D3D11_MAPPED_SUBRESOURCE* a_mapped);
+	/** @brief What the Unmap hook does before the Unmap: the per-frame cache, the mirror and the capture. As OnContextMap. */
+	void OnContextUnmap(ID3D11Resource* a_resource);
 	/** @brief Opt-in DCLF diagnostic: record D3D11 operations affecting main depth between the two epochs. */
 	void BeginDCLFDepthTrace(ID3D11Texture2D* a_depth);
 	void EndDCLFDepthTrace();

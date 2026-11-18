@@ -20,6 +20,7 @@
 #include <mutex>
 #include <set>
 #include <string>
+#include <tuple>
 #include <string_view>
 #include <unordered_map>
 #include <vector>
@@ -29,6 +30,11 @@ namespace RenderGraph::Engine::Flush
 	namespace StageWindow
 	{
 		void Install();
+		void Report();
+	}
+
+	namespace KeptWrites
+	{
 		void Report();
 	}
 
@@ -659,6 +665,7 @@ namespace RenderGraph::Engine::Flush
 				if (++latch.frames >= config.frames) {
 					const double frames = static_cast<double>(latch.frames);
 					latch.frames = 0;
+					KeptWrites::Report();
 					auto& reasons = GetReasons();
 					std::size_t count = 0;
 					{
@@ -940,10 +947,13 @@ namespace RenderGraph::Engine::Flush
 		 * reaches DXVK's stream before the stage's block, so it runs ahead of the stage's work on the GPU. Engine and CS calls alike: both
 		 * end at DXVK's context. Counted by method and caller, reported with the census window.
 		 */
+		/** @brief A counted call: its method, its caller and the frame above that (the engine's call site behind the guest context's forwarder). */
+		using CallKey = std::tuple<const char*, const void*, const void*>;
+
 		struct Counts
 		{
 			std::mutex lock;
-			std::map<std::pair<const char*, const void*>, std::uint64_t> calls;
+			std::map<CallKey, std::uint64_t> calls;
 			std::uint64_t total = 0, sessionTotal = 0;
 			std::atomic<std::uint64_t> seen{ 0 };  // every hooked call, inside a window or not: the hooks are live
 		};
@@ -960,8 +970,17 @@ namespace RenderGraph::Engine::Flush
 			counts.seen.fetch_add(1, std::memory_order_relaxed);
 			if (!FrameAnchors::StagesHoldValues())
 				return;
+			// The frame above the caller: who called the guest context's forwarder, or CS's helper (ConstantBuffer::Update).
+			void* frames[8]{};
+			const USHORT count = RtlCaptureStackBackTrace(0, 8, frames, nullptr);
+			const void* above = nullptr;
+			for (USHORT i = 0; i + 1 < count; ++i)
+				if (frames[i] == a_caller) {
+					above = frames[i + 1];
+					break;
+				}
 			const std::lock_guard guard(counts.lock);
-			++counts.calls[{ a_method, a_caller }];
+			++counts.calls[{ a_method, a_caller, above }];
 			++counts.total;
 			++counts.sessionTotal;
 		}
@@ -1039,7 +1058,7 @@ namespace RenderGraph::Engine::Flush
 		void Report()
 		{
 			auto& counts = GetCounts();
-			std::map<std::pair<const char*, const void*>, std::uint64_t> calls;
+			std::map<CallKey, std::uint64_t> calls;
 			std::uint64_t total = 0, session = 0;
 			{
 				const std::lock_guard guard(counts.lock);
@@ -1050,11 +1069,131 @@ namespace RenderGraph::Engine::Flush
 			logger::info("[ORG] residue census: D3D11 calls reaching DXVK inside a stage's window: {} this window, {} since the start (of {} work calls "
 						 "DXVK's immediate context took this window)",
 				total, session, counts.seen.exchange(0, std::memory_order_relaxed));
-			std::vector<std::pair<std::pair<const char*, const void*>, std::uint64_t>> sorted(calls.begin(), calls.end());
+			std::vector<std::pair<CallKey, std::uint64_t>> sorted(calls.begin(), calls.end());
 			std::ranges::sort(sorted, [](const auto& a, const auto& b) { return a.second > b.second; });
-			for (std::size_t i = 0; i < sorted.size() && i < 16; ++i)
-				logger::info("[ORG] residue census: inside a stage's window #{}: {} {} at {}", i + 1, sorted[i].second, sorted[i].first.first,
-					Tripwire::DescribeCaller(sorted[i].first.second));
+			for (std::size_t i = 0; i < sorted.size() && i < 16; ++i) {
+				const auto& [method, caller, above] = sorted[i].first;
+				logger::info("[ORG] residue census: inside a stage's window #{}: {} {} at {} <- {}", i + 1, sorted[i].second, method, Tripwire::DescribeCaller(caller),
+					above ? Tripwire::DescribeCaller(above) : std::string("?"));
+			}
+		}
+	}
+
+	namespace KeptWrites
+	{
+		/**
+		 * @brief An engine constant buffer written inside a CS stage's window: its bytes as the engine wrote them (CS memory), whether the
+		 * engine has it mapped, and whether DXVK's buffer still lacks them.
+		 */
+		struct Buffer
+		{
+			winrt::com_ptr<ID3D11Resource> resource;
+			std::vector<std::byte> data;
+			bool mapped = false;
+			bool pending = false;
+		};
+
+		struct Buffers
+		{
+			std::unordered_map<const ID3D11Resource*, Buffer> buffers;
+			std::uint64_t taken = 0;    // maps answered from CS memory, since the last report
+			std::uint64_t applied = 0;  // buffers written into DXVK after a window closed, since the last report
+			bool installed = false;     // guest mode with the latch: the guest context's hooks and the windows' hook are installed
+		};
+
+		/** @brief Render owner only (the guest context's calls and the stages' commits run there). */
+		Buffers& Get()
+		{
+			static Buffers s_buffers;
+			return s_buffers;
+		}
+
+		/** @brief Writes a buffer's bytes into DXVK's buffer (a discard map of CS's context, outside every window). */
+		void ApplyOne(Buffer& a_buffer)
+		{
+			auto* context = globals::d3d::context;
+			D3D11_MAPPED_SUBRESOURCE mapped{};
+			if (context && SUCCEEDED(context->Map(a_buffer.resource.get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped)) && mapped.pData) {
+				std::memcpy(mapped.pData, a_buffer.data.data(), a_buffer.data.size());
+				context->Unmap(a_buffer.resource.get(), 0);
+			}
+			a_buffer.pending = false;
+			++Get().applied;
+		}
+
+		/**
+		 * @brief The guest context's Map, with the latch on: inside a CS stage's window, a discard map of an engine dynamic constant buffer
+		 * (outside an EngineDraws scope) is answered from CS memory. Nothing in the window reads DXVK's buffer (no engine draw reaches DXVK
+		 * there), and DXVK's stream must take no work inside a window (the residue census): the bytes reach DXVK when the window closes
+		 * (Apply). The capture and Drawcall Limit Fix's mirror see the write as before (globals::OnContextMap).
+		 */
+		bool Map(ID3D11Resource* a_resource, UINT a_subresource, D3D11_MAP a_type, UINT, D3D11_MAPPED_SUBRESOURCE* a_out)
+		{
+			if (!a_resource || a_subresource != 0 || !Get().installed || !Latched() || InEngineDraws() || !FrameAnchors::IsRenderOwner() ||
+				!FrameAnchors::StagesHoldValues())
+				return false;
+			auto& buffers = Get().buffers;
+			auto found = buffers.find(a_resource);
+			const bool pending = found != buffers.end() && found->second.pending;
+			if (a_type != D3D11_MAP_WRITE_DISCARD && !(pending && a_type == D3D11_MAP_WRITE_NO_OVERWRITE))
+				return false;
+			if (found == buffers.end()) {
+				D3D11_RESOURCE_DIMENSION dimension{};
+				a_resource->GetType(&dimension);
+				if (dimension != D3D11_RESOURCE_DIMENSION_BUFFER)
+					return false;
+				D3D11_BUFFER_DESC desc{};
+				static_cast<ID3D11Buffer*>(a_resource)->GetDesc(&desc);
+				if (!(desc.BindFlags & D3D11_BIND_CONSTANT_BUFFER) || desc.Usage != D3D11_USAGE_DYNAMIC || desc.ByteWidth == 0)
+					return false;
+				Buffer buffer;
+				buffer.resource.copy_from(a_resource);
+				buffer.data.resize(desc.ByteWidth);
+				found = buffers.emplace(a_resource, std::move(buffer)).first;
+			}
+			auto& buffer = found->second;
+			buffer.mapped = true;
+			buffer.pending = true;
+			a_out->pData = buffer.data.data();
+			a_out->RowPitch = a_out->DepthPitch = static_cast<UINT>(buffer.data.size());
+			++Get().taken;
+			globals::OnContextMap(a_resource, a_type, a_out);
+			return true;
+		}
+
+		/** @brief The guest context's Unmap of a buffer Map answered: nothing reaches DXVK while a window is open. */
+		bool Unmap(ID3D11Resource* a_resource, UINT a_subresource)
+		{
+			if (!a_resource || a_subresource != 0)
+				return false;
+			auto& buffers = Get().buffers;
+			const auto found = buffers.find(a_resource);
+			if (found == buffers.end() || !found->second.mapped)
+				return false;
+			globals::OnContextUnmap(a_resource);
+			found->second.mapped = false;
+			// The window closed while the engine had it mapped: written now.
+			if (!FrameAnchors::StagesHoldValues())
+				ApplyOne(found->second);
+			return true;
+		}
+
+		/** @brief The last stage window closed (FrameAnchors::SetWindowsClosedHook): every buffer written inside it reaches DXVK now. */
+		void Apply()
+		{
+			for (auto& [resource, buffer] : Get().buffers)
+				if (buffer.pending && !buffer.mapped)
+					ApplyOne(buffer);
+		}
+
+		/** @brief The report's line, with the census. */
+		void Report()
+		{
+			auto& buffers = Get();
+			if (!buffers.installed)
+				return;
+			logger::info("[ORG] flush latch: engine constant buffers written inside a stage's window from CS memory: {} maps, {} buffers written into DXVK after the window; {} buffers seen",
+				std::exchange(buffers.taken, 0), std::exchange(buffers.applied, 0), buffers.buffers.size());
 		}
 	}
 
@@ -1074,6 +1213,16 @@ namespace RenderGraph::Engine::Flush
 	{
 		const auto& config = GetConfig();
 		return config.latch && config.installed && Tripwire::GuestContextInstalled();
+	}
+
+	bool WriteBehind(ID3D11Buffer* a_buffer, const void* a_data, std::size_t a_size)
+	{
+		D3D11_MAPPED_SUBRESOURCE mapped{};
+		if (!a_buffer || !KeptWrites::Map(a_buffer, 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped))
+			return false;
+		std::memcpy(mapped.pData, a_data, (std::min)(a_size, static_cast<std::size_t>(mapped.RowPitch)));
+		KeptWrites::Unmap(a_buffer, 0);
+		return true;
 	}
 
 	void Install()
@@ -1142,6 +1291,11 @@ namespace RenderGraph::Engine::Flush
 			GetMarks().reset();
 		}
 		Tripwire::SetContextFilter(&ContextFilter);
+		if (config.latch && !Native::Requested()) {
+			Tripwire::SetGuestMapHooks({ .map = &KeptWrites::Map, .unmap = &KeptWrites::Unmap });
+			FrameAnchors::SetWindowsClosedHook(&KeptWrites::Apply);
+			KeptWrites::Get().installed = true;
+		}
 		MainTick::Add("Engine flush census", [] { Tick(); });
 		config.installed = true;
 		logger::info("[ORG] engine flush: {}{}{}, reports every {} frames", config.census ? "residue census on (CS_ORG_RESIDUE_CENSUS=1)" : "",

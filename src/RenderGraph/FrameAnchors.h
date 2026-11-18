@@ -355,6 +355,13 @@ namespace FrameAnchors
 	bool HasEpoch(Anchor a_anchor);
 
 	/**
+	 * @brief Whether the anchor runs an epoch of its own in this mode: it has an epoch, and no stage that runs in this mode takes it (native
+	 * mode: no stage has a step there; guest mode: no guest stage holds it wholly). Guest mode keeps these for the stages that do not run
+	 * there yet. Any thread, after the render graph initialized.
+	 */
+	bool HasOwnEpoch(Anchor a_anchor);
+
+	/**
 	 * @brief Whether a PassDesc::atExecution pass of the anchor's own epoch is recorded after the run's commit (native: always;
 	 * guest: when the epoch runs in DXVK's stream). Such a pass can read what the commit wrote when it records, so its revision need
 	 * not name the run: a ticket prepared ahead stays current. Render thread, at a build (a pass's make).
@@ -609,8 +616,8 @@ namespace FrameAnchors
 	 * ticket. Stages: pre-depth (EarlyPrepass), pre-main (RenderDepth's depth copy to Prepass; CS_ORG_SEGMENT_PREMAIN=0 off), deferred
 	 * and water (DeferredPasses to just before the forward epoch; CS_ORG_SEGMENT_DEFERRED=0 off), and the post chain's two
 	 * (CS_ORG_SEGMENT_POST=0 off): the post stage, with the chain and the upscaler's evaluate as CS passes. Guest mode (DXVK with the
-	 * graph) runs the stages the recipe table marks runsInGuest, each one block in DXVK's stream, with their guest steps only; the
-	 * other stages' anchors keep their own epochs there. Any thread.
+	 * graph) runs the stages the recipe table marks runsInGuest, each one block in DXVK's stream; the other stages' anchors keep their
+	 * own epochs there. Any thread.
 	 */
 	bool SegmentsOn();
 
@@ -619,6 +626,12 @@ namespace FrameAnchors
 	 * ahead of the stage's block on the GPU (guest mode's residue census counts it). Any thread, without the anchors' lock.
 	 */
 	bool StagesHoldValues();
+
+	/**
+	 * @brief Called on the render owner each time the last open stage window closes (a commit, or staged values dropped): what was kept from
+	 * DXVK inside the windows is applied then (the flush latch's write-behind of the engine's constant buffers, Engine/Flush). One hook.
+	 */
+	void SetWindowsClosedHook(void (*a_hook)());
 
 	/**
 	 * @brief Render owner: whether the description being read is a stage's build key (docs/development/org-native-frame-graph.md,

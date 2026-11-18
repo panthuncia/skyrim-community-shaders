@@ -376,4 +376,18 @@ namespace RenderGraph::Engine::Tripwire
 	 * time; only the guest context's calls reach it, not other handles' and not CS's own calls on globals::d3d::context.
 	 */
 	void SetContextFilter(ContextFilter a_filter);
+
+	/**
+	 * @brief Asked by the guest context before it forwards a Map or an Unmap, with the resource as DXVK sees it. True: the hook took the
+	 * call (a Map's output filled) and nothing reaches DXVK. The flush latch's write-behind of the engine's constant buffers inside a CS
+	 * stage's window (Flush.h). Must not call the guest context. Render owner.
+	 */
+	struct GuestMapHooks
+	{
+		bool (*map)(ID3D11Resource* a_resource, UINT a_subresource, D3D11_MAP a_type, UINT a_flags, D3D11_MAPPED_SUBRESOURCE* a_out) = nullptr;
+		bool (*unmap)(ID3D11Resource* a_resource, UINT a_subresource) = nullptr;
+	};
+
+	/** @brief Installs the guest context's Map and Unmap hooks (copied), once. */
+	void SetGuestMapHooks(const GuestMapHooks& a_hooks);
 }

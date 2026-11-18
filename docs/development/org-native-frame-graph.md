@@ -4775,7 +4775,7 @@ The whole frame is one table, `src/RenderGraph/Frame/RecipeTable.h` (Cleanup A11
 steps with the client ids they hold, the anchors' own epochs in their place (guest mode's, and HDR output's and frame generation's
 tickets), the stages' commit points and window rules, and the previous frame's resources. Membership is explicit: a client whose pass
 sits at an anchor where no step (or own-epoch entry) names it is refused at registration, a recipe mismatch (fatal in development
-builds). Every stage has a "runs in guest" field, false for all.
+builds). Every stage has a "runs in guest" field (a migration field): pre-depth and pre-main have it since Guest B1 and B2.
 
 ### Stages per frame kind
 
@@ -4844,9 +4844,12 @@ Terrain Blending, Volumetric Shadows, light culling, the bloom radii.
 
 Since Guest B0 (2026-11-18) guest runs every port native runs, with the flush latch and the guest context: the engine's subsystems
 and CS's features draw on ORG in both modes, and the engine's binds and draws are withheld from DXVK. Since Guest B1 guest runs the
-frame driver, schedules, staged builds, keys and the recipe check, and one stage: pre-depth (its EarlyPrepass step) is one block in
-DXVK's stream. It still uses: every other frame anchor's own epoch (per-anchor epochs, `FrameAnchors::Scheduled` on the anchor's own built
-graph, the skeleton's group anchors and Skylighting's lent slot with its D3D11 clear), the main ImageSpace client,
+frame driver, schedules, staged builds, keys and the recipe check; since Guest B2 two stages, pre-depth and pre-main, are one block each
+in DXVK's stream, the skeleton hosts its clears in Drawcall Limit Fix's graphs and the guest stages' places as in native, and the engine's
+constant-buffer writes inside a stage's window reach DXVK after the window (the latch's write-behind). It still uses: the own epochs of
+every anchor the guest stages do not hold (per-anchor epochs, `FrameAnchors::Scheduled` on the anchor's own built graph; the skeleton's
+group anchors for the clears and copies of the stages not in guest, `OwnEpochTakes`; Skylighting's lent slot with its D3D11 clear), the
+main ImageSpace client,
 the clients built on first sight and the shape manifest (`ImageSpaceShapes.json`) with the per-draw shape capture, the D3D11 renderer for
 displays the graph refuses, the capture's D3D11 staging copy when the graph cannot take it, and the post
 chain's hooks (which only check and stage in native). With the latch, an ImageSpace draw the main client leaves to the engine (a shape
@@ -7406,3 +7409,133 @@ worldspace run, the frozen-world Journal Menu run. Native: quick, river, interio
 `VUID-vkCmdDraw-None-09600`). `d3d11+quick`. All passed with 0 tap errors, 0 recipe findings, no failed build; the only `[C]` line is
 the known `PublishedResources` one. ORG: `segment-external` (also under the validation layer), `segment`, `revision`, `external` and
 `external-reuse` pass.
+
+## Guest B2: pre-main in guest, the skeleton hosting there (2026-11-18)
+
+Plan piece B2. Guest mode now runs two stages as blocks in DXVK's stream: pre-depth (all of it now) and pre-main. The skeleton hosts its
+clears in guest as in native, wherever the stage or Drawcall Limit Fix graph that takes them runs there. Code and this text on
+`org-native/phases` (no submodule change). RX 6600, Perf-Fast, background runs with `DXVK_DEBUG=hang`.
+
+### What runs in guest
+
+- Pre-main has `runsInGuest`: the depth copy, Terrain Blending at DepthDone, the shadow mask and the shadow mask's clear at EngineDraws,
+  light culling as its foreign step (it followed by itself, `HoldsForeign`), the Prepass clients with kMAIN's and the normals' clears,
+  and the sky. DepthDone, Prepass and Sky are held wholly, so they have no epoch of their own in guest any more. EngineDepthCopy and
+  EngineDraws are shared: their own epochs stay for the other stages' clients (the UI stage's copy, CS's depth copy in
+  Deferred::DeferredPasses, FinishAccumulating's copy, the water and the rest at EngineDraws).
+- Pre-depth holds all its steps in guest: `Stage::guestSteps` is deleted (pre-depth was its only user), so the main depth's clear is its
+  place and the stage ends at its point (before the Z-prepass, or Main::RenderDepth's depth copy at the latest), as in native.
+  FrameAnchors reads one view of the table in both modes (`declaredInfo`); `DeclaredOn` alone says which stages run in this mode.
+- The commit points are the recipe's in both modes: pre-main commits before DCLF's main opaque epoch, or at CS's depth copy in
+  Deferred::DeferredPasses (`RunCopy`'s `TapPoint`).
+
+### The skeleton in guest
+
+- `Skeleton::HostingOn()` is the frame's stages (`FrameAnchors::SegmentsOn()`), in both modes. Every host and place registers as in
+  native: Drawcall Limit Fix's shadow view and Z-prepass graphs host their clears (the hosted extension), and the stage places are
+  clients of their steps.
+- A clear goes where native sends it: a DCLF host that draws its view this frame, else the place of the stage that clears the target
+  (`StagePlaceFor`, `HeldNow`). Where no stage of this mode takes it, it runs on its group anchor's own epoch while that anchor has one
+  (`OwnEpochTakes`, the new `FrameAnchors::HasOwnEpoch`): guest mode, for the start stage's shadow clears, the cube faces, the water
+  stencil's clear and the deferred and post clears. In native no group anchor has an own epoch, so the same code path is `NoPlace`, as
+  before. The copies follow the same rule (`RunCopy`: the anchor's own epoch only where it has one).
+- The group clients (`cs.engine.skeleton.shadow`, `.cube`, `.frame`) register only where their anchor has its own epoch: in guest, not in
+  native. The cube faces' clears are dropped where the start stage holds the faces' sky (`FacesClearedBySky`), the same answer as before in
+  both modes. The UI stage's places register only where the UI stage runs (`PlacesOn` asks the recipe), and with them the Bink and frame 0
+  main depth drop.
+- CS's own depth copy at DeferredPasses (`cs.engine.skeleton.depth-copy@deferred-passes`) is segment-only now: in guest the DeferredPasses
+  anchor's own graph leaves it out, and the copy runs on the depth copy's anchor until deferred+water runs in guest.
+- **Migration scaffolding** (goes when the last stage runs in guest): `Stage::runsInGuest`, `OwnEpochTakes` and `RunCopy`'s own-epoch
+  branch. With every stage in guest no group or copy anchor keeps an own epoch, and both paths are dead.
+
+### Drawcall Limit Fix's hosted clears in guest
+
+DCLF's graphs are external epochs in guest (`RenderGraphRuntime::ExecuteExternalEpoch`), and that path did not call the skeleton's epoch
+hooks (`SetEpochHooks`): the clears handed to the shadow view or the Z-prepass were never committed, and the next stage's submission
+found them waiting. The first census run stopped in Dragonsreach's first frame after the load hold ("the shadow clear of depth4.0
+waits for its host (shadow-view), and segment 39 was submitted first"). `ExecuteExternalEpoch` now calls the starting hook before the
+submission and the commit hook first in the epoch's commit, as `ExecuteEpoch` does.
+
+### Residue in the windows, and the write-behind
+
+The first census with pre-main in guest read about 28,000 D3D11 calls reaching DXVK inside the windows (94 a frame). The census now
+names the caller's caller as well (`<-`), so a call through the guest context's forwarder names the engine's site:
+
+| Calls a frame | What |
+|---|---|
+| 56 | the sky's SetupGeometry (100640 / 107403): two maps and two unmaps for each of its 14 draws |
+| 13 | UpdateCameraData (75472 / 77258): the per-frame constants for a camera inside the window |
+| 6 | Renderer::SetComputeShaderConstants (75562 / 77363) |
+| 4 | SetDirtyStates' alpha-test constant (75580 / 77386) |
+| 2 | 100979 / 107762 |
+| 6 | CS: State::Draw's permutation buffer at a flush CS asks for, State::UpdateSharedData's shared and feature buffers |
+
+All are writes of dynamic constant buffers, and nothing inside a window reads DXVK's copy of them: no engine draw reaches DXVK there
+(the latch), and the ORG passes read the engine's constants from the capture's ring. With the latch on, the guest context's Map and
+Unmap now ask the latch first (`Tripwire::SetGuestMapHooks`): inside a CS stage's window, outside an EngineDraws scope, a discard map of
+a dynamic constant buffer is answered from CS memory (`Flush.cpp`, `KeptWrites`). The capture, Drawcall Limit Fix's mirror and the
+per-frame cache see the write as before (`globals::OnContextMap`/`OnContextUnmap`, the bodies of the DXVK hooks, moved out). When the
+last window closes (`FrameAnchors::SetWindowsClosedHook`, called from `UpdateStagesOpen`) each buffer written inside it is written into
+DXVK once, with its last bytes, after the stage's block. CS's own constant buffers go the same way: `ConstantBuffer::Update` (Buffer.h)
+asks `Flush::WriteBehind` first (State's permutation, shared and feature buffers, and Light Limit Fix's strict lights at a refused
+Lighting draw's SetupGeometry were the callers seen). Census: about 42 to 55 maps a frame are kept, 12 to 13 buffers a frame are written
+after the window, 25 buffers in all. Native mode is not affected (the hooks are
+installed in guest only).
+
+After that, `latch-census-short` reads **0 calls inside a stage's window in all 15 windows**, and no GPU work was submitted inside a
+window in any report.
+
+### Shots
+
+Each guest shot against Guest B1's (mean absolute difference over 0-255, share of pixels off by more than 24): quick 1.6, 0.1%; river
+3.2, 1.6% and 21.2, 37.3% (an NPC walking into the frame, the camera a little to the side, grass in the wind; looked at side by side: the
+same image); rain 1.5 and 1.7, at most 0.2%; under water 1.4 and 2.0, at most 1.8%; interior 2.8 and 5.5, at most 6.7%; upscalers 0.8
+to 3.7, at most 2.6%; worldspace Tamriel 0.6, Riverwood 1.4, Solstheim 16.6, 29.6% (B1's was 16.2: the trees in the wind);
+`latch-census-short` at most 0.8, 0.4% (Dragonsreach's light shafts move from run to run: two earlier runs of this branch were 13.2 and
+17.0 off, this one 0.6). Journal Menu: pre, post5 and post65 at most 3.8, 3.8%; the menu shot is 7.1 off, its background less blurred:
+the session drew ISDistantBlur into rt41 on first sight (B0's "black first shot" path), because the shape manifest had dropped that
+shape (a shape leaves after 16 sessions in which its effect ran without it, and only a frozen-menu session draws this one; about 20
+sessions ran since B1's journal run). Not this piece's: the post stage in guest removes the first-sight path. Native's shots against B1's
+native ones: quick 1.3, interior 2.6 and 6.0, river 3.6 and 19.7 (the NPC again).
+
+### Performance and memory
+
+perf-taa, uncapped, VRAM Budget off, alternating guest and native (DLL `3a543b32bf35`):
+
+| | Guest | Native | Guest in B1 |
+|---|---|---|---|
+| frame period between the marks | 19.26 / 19.23 ms | 19.30 / 19.26 ms | 19.23 / 19.29 ms |
+| GPU 3D engine busy | 98.3 / 98.0% | 98.9 / 99.0% | 98.3 / 98.5% |
+| render thread CPU | 299 / 308 ms a second | 199 / 199 | 280 / 277 |
+| graph host thread | 429 / 379 ms a second | 106 / 127 (the submission thread) | 451 / 461 |
+| DXVK worker | 121 / 115 ms a second | none | 112 / 140 |
+| process dedicated VRAM | 3,626 / 3,788 MiB | 2,942 / 2,934 MiB | 3,853 / 3,852 MiB |
+
+The guest census run (`org.epoch_stats`, 19.27 ms): epochs a steady frame fell from 50 (B1) to 36. Pre-main is one ticket a frame and
+the DepthDone, Prepass, Sky and light culling epochs never ran; the skeleton's own epochs fell from 15 a frame to 5 (shadow clears 5 to
+0: Drawcall Limit Fix's shadow view hosts them; frame clears 6 to 2; the depth copy 2 to 1); EngineDraws 3 to 2 (the shadow mask is
+pre-main's). Every report: pre-depth and pre-main declared and current every frame, 0 recordings, 0 switches, 0 build switches, 0 key
+builds, 0 lagged work, 0 tap errors, no copy waited for or skipped. The graph host thread falls by 30 to 80 ms a second with the
+fewer epochs; the render thread is 20 to 30 ms a second above B1's runs, inside the 270 to 302 that B0's two runs spanned; the frame
+stays GPU-bound and equal.
+
+### For the next stage pieces
+
+- Start (B4): the shadow clears' start place takes over from the shadow group's own epoch by itself (`OwnEpochTakes` stops finding an own
+  epoch once start holds EngineShadowClear). The cube group still reserves its anchor in guest (`Skeleton::Reserve` asks the mode): with
+  the faces' sky in a guest stage `FacesClearedBySky` drops the faces' clears, so that reservation should follow the recipe. The cubemap
+  render's depth copy runs on EngineDepthCopy's own epoch in guest; native drops it while start is open.
+- Deferred+water (B3): its skeleton clients are registered in guest already (the water stencil's clear at the EngineDraws place, the
+  ImageSpace place's clears, CS's depth copy at DeferredPasses, now segment-only). The kMAIN copy is the one missing: `Skeleton::Reserve`
+  reserves EngineCopy in native only and `Setup` fails the copy in guest; the guest context's CopyResource needs a hook like
+  `SetGuestMapHooks` that hands kMAIN's copy to `RunCopy`.
+- The write-behind covers dynamic constant buffers. Later windows may name other writes (dynamic vertex or index buffers of the
+  precipitation, particles or Scaleform, staging copies, queries): the census names the engine's site behind the guest context now.
+- External epochs call the skeleton's hooks now; any new hosted work in Drawcall Limit Fix's guest graphs commits as in native.
+
+### Checks
+
+One background run each on DLL `3a543b32bf35`. Guest: `latch-census-short` (0 calls inside a stage's window in all 15 windows, no GPU
+work inside a window), quick, river, rain, under water, interior, upscalers, the worldspace run, the frozen-world Journal Menu run.
+Native: quick, river, rain, interior, validation (the same 20 `VUID-vkCmdDraw-None-09600` as B1's run, nothing else). `d3d11+quick`.
+All passed with 0 tap errors, 0 recipe findings, no failed build; the only `[C]` line is the known `PublishedResources` one.

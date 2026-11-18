@@ -169,21 +169,18 @@ namespace FrameAnchors
 			Table::SegmentList commitBefore{};
 		};
 
-		constexpr std::array<DeclaredInfo, kDeclared> DeclaredFromTable(bool a_guest)
+		constexpr std::array<DeclaredInfo, kDeclared> DeclaredFromTable()
 		{
 			std::array<DeclaredInfo, kDeclared> out{};
 			for (std::uint32_t d = 0; d < kDeclared; ++d) {
 				const auto& stage = Table::CsStage(d);
-				out[d] = { RenderGraphRuntime::StageSegment(d), stage.steps.data(), a_guest ? Table::GuestStepCount(stage) : Table::StepCount(stage), stage.names,
-					stage.opensLast, stage.switchesEverySlot, stage.commitBefore };
+				out[d] = { RenderGraphRuntime::StageSegment(d), stage.steps.data(), Table::StepCount(stage), stage.names, stage.opensLast, stage.switchesEverySlot,
+					stage.commitBefore };
 			}
 			return out;
 		}
-		constexpr auto kNativeInfo = DeclaredFromTable(false);
-		constexpr auto kGuestInfo = DeclaredFromTable(true);
-		// The stages as this mode runs them: native mode's every step, guest mode's guest steps (Table::Stage::guestSteps). Native's until
-		// AddToFrame picks the mode, before any stage exists.
-		std::array<DeclaredInfo, kDeclared> declaredInfo = kNativeInfo;
+		// The CS stages as FrameAnchors reads them (the same in both modes; DeclaredOn says which run in this mode).
+		constexpr std::array<DeclaredInfo, kDeclared> declaredInfo = DeclaredFromTable();
 
 		/** @brief The anchors a declared segment has a step at in this mode, a bit each. */
 		std::uint32_t StepAnchorsOf(std::uint32_t a_declared)
@@ -1883,6 +1880,11 @@ namespace FrameAnchors
 		return IndexOf(a_anchor) < kAnchors && state.frozen && state.reserved[IndexOf(a_anchor)] && state.host && RenderGraphRuntime::Get().IsActive();
 	}
 
+	bool HasOwnEpoch(Anchor a_anchor)
+	{
+		return HasEpoch(a_anchor) && !(Anchors().declaredMembers >> IndexOf(a_anchor) & 1u);
+	}
+
 	bool RecordsAtExecution(Anchor a_anchor)
 	{
 		// A declared segment records every pass ahead, on the host's thread.
@@ -2879,9 +2881,16 @@ namespace FrameAnchors
 		}
 
 		/** @brief Whether any stage holds staged values not committed yet. Render owner. */
+		/** @brief SetWindowsClosedHook's hook. */
+		std::atomic<void (*)()> windowsClosedHook{ nullptr };
+
 		void UpdateStagesOpen(State& a_state)
 		{
-			a_state.stagesOpen.store(std::ranges::any_of(a_state.stagedFrame, [](std::uint64_t a_frame) { return a_frame != 0; }), std::memory_order_release);
+			const bool open = std::ranges::any_of(a_state.stagedFrame, [](std::uint64_t a_frame) { return a_frame != 0; });
+			if (!a_state.stagesOpen.exchange(open, std::memory_order_acq_rel) || open)
+				return;
+			if (const auto hook = windowsClosedHook.load(std::memory_order_acquire))
+				hook();
 		}
 
 		/** @brief Drops what a stage's taps staged this frame without committing it. Render owner. */
@@ -3633,6 +3642,11 @@ namespace FrameAnchors
 		return state.stagesOpen.load(std::memory_order_acquire) && !state.submittingStage.load(std::memory_order_acquire);
 	}
 
+	void SetWindowsClosedHook(void (*a_hook)())
+	{
+		windowsClosedHook.store(a_hook, std::memory_order_release);
+	}
+
 	std::vector<std::uint32_t> SegmentEpochs()
 	{
 		std::vector<std::uint32_t> epochs;
@@ -4349,9 +4363,6 @@ namespace FrameAnchors
 		auto& state = Anchors();
 		if (!RenderGraphRuntime::EpochsEnabled())
 			return;
-		// Guest mode's stages hold only their guest steps (Table::Stage::guestSteps). Picked once, before any stage exists.
-		if (!state.frozen && SegmentsOn() && !RenderGraph::Engine::Native::Requested())
-			declaredInfo = kGuestInfo;
 		state.frozen = true;
 		// Declared segments: an epoch for each that is on and has a reserved anchor; the anchors it holds wholly have none of their
 		// own. Its end tap's anchor is reserved with it, so the hook that ends it always runs.
@@ -4443,6 +4454,7 @@ namespace FrameAnchors
 	const char* Name(Anchor) { return "unknown"; }
 	bool Reserve(Anchor) { return false; }
 	bool HasEpoch(Anchor) { return false; }
+	bool HasOwnEpoch(Anchor) { return false; }
 	bool RecordsAtExecution(Anchor) { return false; }
 	bool GpuGates() { return false; }
 	bool Register(ClientDesc) { return false; }
@@ -4452,6 +4464,7 @@ namespace FrameAnchors
 	bool InRun() { return false; }
 	bool SegmentsOn() { return false; }
 	bool StagesHoldValues() { return false; }
+	void SetWindowsClosedHook(void (*)()) {}
 	bool DescribingKey() { return false; }
 	std::optional<bool> DescribedBuildHasRow(std::uint32_t) { return std::nullopt; }
 	bool IsMainThread() { return true; }

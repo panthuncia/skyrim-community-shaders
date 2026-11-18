@@ -473,11 +473,19 @@ namespace RenderGraph::Engine::Tripwire
 	{
 		std::atomic<ContextFilter> contextFilter{ nullptr };
 		std::atomic<const NativeServices*> nativeServices{ nullptr };
+		std::atomic<const GuestMapHooks*> guestMapHooks{ nullptr };
 	}
 
 	void SetContextFilter(ContextFilter a_filter)
 	{
 		Detail::contextFilter.store(a_filter, std::memory_order_release);
+	}
+
+	void SetGuestMapHooks(const GuestMapHooks& a_hooks)
+	{
+		// Kept for the process: the guest context reads it without a lock.
+		static const GuestMapHooks hooks = a_hooks;
+		Detail::guestMapHooks.store(&hooks, std::memory_order_release);
 	}
 
 	void SetNativeServices(const NativeServices& a_services)
@@ -1610,6 +1618,9 @@ namespace RenderGraph::Engine::Tripwire
 		TW_CONTEXT_SITE(Map);
 		if (twNative && twNative->map)
 			return twNative->map(a_resource, a_subresource, a_type, a_flags, a_out);
+		if (const auto* hooks = Detail::guestMapHooks.load(std::memory_order_acquire); hooks && hooks->map && core.wrapped && a_out &&
+			hooks->map(Unwrap(a_resource), a_subresource, a_type, a_flags, a_out))
+			return S_OK;
 		TW_CONTEXT_FORWARD(Map, Detail::UnwrapAt(a_resource, twSite), a_subresource, a_type, a_flags, a_out);
 		Detail::Zero(a_out);
 		return E_FAIL;
@@ -1620,6 +1631,9 @@ namespace RenderGraph::Engine::Tripwire
 		TW_CONTEXT_SITE(Unmap);
 		if (twNative && twNative->unmap)
 			return twNative->unmap(a_resource, a_subresource);
+		if (const auto* hooks = Detail::guestMapHooks.load(std::memory_order_acquire); hooks && hooks->unmap && core.wrapped &&
+			hooks->unmap(Unwrap(a_resource), a_subresource))
+			return;
 		TW_CONTEXT_FORWARD(Unmap, Detail::UnwrapAt(a_resource, twSite), a_subresource);
 	}
 
