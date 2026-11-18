@@ -1,0 +1,69 @@
+# The world map at noon in clear weather, opened from Whiterun through the UI message queue (no input), two shots a few frames
+# apart, then the map closed and exit. Compose it: guest+map, native-vulkan+map, d3d11+map.
+extends = ["base"]
+
+[run]
+timeout_s = 420
+
+[[steps]]
+at = "world-ready"
+frames = 200
+do = "console"
+arg = "set timescale to 0"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "console"
+arg = "set gamehour to 13"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "weather"
+arg = "SkyrimClear"
+
+[[steps]]
+at = "previous"
+frames = 20
+do = "console"
+arg = "coc Whiterun"
+
+[[steps]]
+at = "previous"
+frames = 600
+do = "shot"
+arg = "whiterun"
+
+[[steps]]
+at = "previous"
+frames = 10
+do = "menu"
+arg = "MapMenu=show"
+
+[[steps]]
+at = "previous"
+frames = 300
+do = "shot"
+arg = "map"
+
+[[steps]]
+at = "previous"
+frames = 3
+do = "shot"
+arg = "map-b"
+
+[[steps]]
+at = "previous"
+frames = 20
+do = "menu"
+arg = "MapMenu=hide"
+
+[[steps]]
+at = "previous"
+frames = 100
+do = "exit"
+
+[expect]
+reach = "world-ready"
+shots = ["whiterun", "map", "map-b"]
