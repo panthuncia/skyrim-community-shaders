@@ -199,10 +199,6 @@ namespace ORGDeferredClears
 				Get().colour[i].store(bits, std::memory_order_relaxed);
 			}
 		};
-		client.onFailed = [] {
-			Get().setUp = false;
-			logger::error("[ORG] Deferred clears: the render graph failed with the clears in it; the engine clears the GBuffer");
-		};
 		if (!FrameAnchors::Register(std::move(client))) {
 			logger::warn("[ORG] Deferred clears: the client could not be registered; the engine clears the GBuffer");
 			return;

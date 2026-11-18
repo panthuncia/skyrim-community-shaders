@@ -204,10 +204,6 @@ void RegisterStartSteps()
 	// A tap per water update and per flow copy: each commits its own instances' entries, so the frame's taps add up.
 	desc.repeats = true;
 	desc.segmentOnly = true;
-	desc.onFailed = [] {
-		logger::error("[ORG] ImageSpace: the start steps' passes failed; the water effects draw nothing for the session");
-		Start().on = false;
-	};
 	if (!FrameAnchors::Register(std::move(desc))) {
 		logger::error("[ORG] ImageSpace: the start step client was refused");
 		start.on = false;

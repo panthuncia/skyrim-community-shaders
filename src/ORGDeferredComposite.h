@@ -17,8 +17,8 @@ struct ID3D11ShaderResourceView;
  * after its writes. A producer on D3D11 is imported (FrameAnchors::D3D11Texture) and declared in guest mode; native mode binds null. The shared constant buffers come from SharedConstants. The shader is the same DeferredCompositeCS.hlsl, built by DXC
  * with the defines Util::CompileShader would give it.
  *
- * When the ORG path cannot run a frame (an input it cannot import, a failed graph), Deferred runs the D3D11 composite instead. A
- * failed graph turns the ORG path off for the session.
+ * When the ORG path cannot run a frame (an input it cannot import, programs that failed to build), Deferred runs the D3D11
+ * composite instead.
  *
  * Render thread. Header deliberately free of ORG/Vulkan includes (see RenderGraphRuntime.h).
  */

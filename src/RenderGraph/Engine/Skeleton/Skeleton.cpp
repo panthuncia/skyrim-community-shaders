@@ -1502,13 +1502,6 @@ namespace RenderGraph::Engine::Skeleton
 			};
 			client.active = [a_kind] { return CopyOf(a_kind).wanted; };
 			client.executed = [a_kind](const FrameAnchors::Point&) { CopyOf(a_kind).executed = true; };
-			client.onFailed = [a_kind] {
-				const auto failed = static_cast<std::size_t>(a_kind);
-				auto& state = CopyOf(a_kind);
-				state.failed = true;
-				state.registered = false;
-				logger::error("[ORG] engine skeleton: the {} anchor failed; {} returns to D3D11", FrameAnchors::Name(kCopyAnchors[failed]), kCopyNames[failed]);
-			};
 			copy.registered = FrameAnchors::Register(std::move(client));
 			if (!copy.registered) {
 				copy.failed = true;

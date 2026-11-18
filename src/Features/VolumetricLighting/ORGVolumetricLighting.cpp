@@ -348,7 +348,6 @@ struct ORGVolumetricLighting::Impl
 	std::string lastMissing;  // why the last registration attempt could not be made, logged when it changes
 	VLPending pending;
 	std::optional<VLRun> run;
-	bool failed = false;
 	bool inRender = false;
 	bool noiseDone = false;
 	bool announced = false;
@@ -631,11 +630,6 @@ struct ORGVolumetricLighting::Impl
 		client.commit = [this](const FrameAnchors::Point&) { Commit(); };
 		client.active = [this] { return run.has_value(); };
 		client.executed = [this](const FrameAnchors::Point&) { Executed(); };
-		client.onFailed = [this] {
-			logger::error("{} returns to D3D11: the render graph failed", kLogPrefix);
-			failed = true;
-			inRender = false;
-		};
 		client.sharedConstants = true;
 		client.gates = { fixed->gate };
 		passMade.fill(false);
@@ -1014,7 +1008,7 @@ bool ORGVolumetricLighting::Setup()
 
 bool ORGVolumetricLighting::IsActive() const
 {
-	return impl && !impl->failed && RenderGraphRuntime::Get().IsActive();
+	return impl && RenderGraphRuntime::Get().IsActive();
 }
 
 bool ORGVolumetricLighting::TakeEngineDispatch(std::string_view a_computeShader)

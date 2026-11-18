@@ -692,10 +692,6 @@ void RegisterWorldSteps()
 		desc.repeats = true;
 		// A pass of the stages that name it.
 		desc.segmentOnly = FrameAnchors::NamedByStage(client.id);
-		desc.onFailed = [] {
-			logger::error("[ORG] ImageSpace: the world steps' passes failed; the RenderWorld scopes draw nothing for the session");
-			World().on = false;
-		};
 		if (!FrameAnchors::Register(std::move(desc))) {
 			logger::error("[ORG] ImageSpace: the world step client {} was refused", client.id);
 			world.on = false;

@@ -2169,13 +2169,6 @@ family = "org"
 kind = "other"
 description = ""
 
-[key."org.anchor_selftest_fail"]
-env = "CS_ORG_ANCHOR_SELFTEST_FAIL"
-type = "string"
-family = "org"
-kind = "other"
-description = ""
-
 [key."org.async_epochs"]
 env = "CS_ORG_ASYNC_EPOCHS"
 type = "bool"

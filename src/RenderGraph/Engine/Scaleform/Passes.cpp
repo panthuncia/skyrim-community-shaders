@@ -871,10 +871,6 @@ namespace RenderGraph::Engine::Scaleform::Passes
 				if (state.pending)
 					state.executed = true;
 			};
-			client.onFailed = [] {
-				Path().failed = true;
-				logger::error("[ORG] Scaleform: the render graph failed; the D3D11 renderer draws every display from now on");
-			};
 			return client;
 		}
 

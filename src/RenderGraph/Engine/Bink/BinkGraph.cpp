@@ -419,7 +419,6 @@ namespace RenderGraph::Engine::Bink::Graph
 				auto& current = Get();
 				current.executed = current.committed;
 			};
-			client.onFailed = [] { Fail(Get(), "the render graph failed"); };
 			return client;
 		}
 

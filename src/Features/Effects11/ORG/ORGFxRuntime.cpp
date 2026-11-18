@@ -1547,17 +1547,6 @@ struct ORGFxRuntime::Impl
 				if (const auto shape = weak.lock())
 					self.impl->Executed(shape);
 		};
-		client.onFailed = [] {
-			logger::error("[ORG] Effects11 returns to FX11: the render graph failed");
-			if (auto& self = ORGFxRuntime::Get(); self.impl) {
-				self.impl->failed = true;
-				self.impl->registered = false;
-				self.impl->activeNow = false;
-				self.impl->ranFrame = UINT32_MAX;
-				self.impl->frame.reset();
-				self.impl->running.reset();
-			}
-		};
 		if (!FrameAnchors::Register(std::move(client))) {
 			// The last shape's client must not run with a latch nothing fills.
 			FrameAnchors::Unregister(kClientId);

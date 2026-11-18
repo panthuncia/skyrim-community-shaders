@@ -180,10 +180,6 @@ namespace ImGuiRenderer
 					state.failed = true;
 			};
 			client.active = [] { return Renderer().pending != nullptr; };
-			client.onFailed = [] {
-				Renderer().failed = true;
-				logger::error("[ORG] ImGui: the render graph failed; the D3D11 backend draws from the next frame");
-			};
 			return client;
 		}
 

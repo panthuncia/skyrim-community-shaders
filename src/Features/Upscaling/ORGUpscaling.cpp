@@ -527,10 +527,6 @@ namespace
 				const auto current = weakImpl.lock();
 				return current && (current->queued & kEvaluate) != 0;
 			};
-			evaluate.onFailed = [weakImpl] {
-				if (const auto current = weakImpl.lock())
-					MarkFailed(current, "the render graph failed");
-			};
 			if (!FrameAnchors::Register(std::move(evaluate))) {
 				logger::error("[ORG] Upscaling: the evaluate client was refused");
 				return false;
@@ -567,10 +563,6 @@ namespace
 		client.active = [weak] {
 			const auto impl = weak.lock();
 			return impl && impl->queued != 0;
-		};
-		client.onFailed = [weak] {
-			if (const auto impl = weak.lock())
-				MarkFailed(impl, "the render graph failed");
 		};
 		impl.registered = FrameAnchors::Register(std::move(client));
 		impl.depthRegistered = impl.registered && depth;
@@ -612,10 +604,6 @@ namespace
 		client.commit = [weak](const FrameAnchors::Point&) {
 			if (const auto impl = weak.lock())
 				impl->hudlessGate->OpenDraw(0);
-		};
-		client.onFailed = [weak] {
-			if (const auto impl = weak.lock())
-				MarkFailed(impl, "the render graph failed");
 		};
 		impl.hudlessRegistered = FrameAnchors::Register(std::move(client));
 		return impl.hudlessRegistered;

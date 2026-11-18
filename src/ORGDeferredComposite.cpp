@@ -397,10 +397,6 @@ struct ORGDeferredComposite::Impl
 					gate->OpenDispatch(0, 1);
 			},
 			.active = [this] { return frameReady; },
-			.onFailed = [this] {
-				logger::error("[ORG] Deferred composite: the render graph failed; the composite returns to D3D11");
-				failed = true;
-				registered = false; },
 			.sharedConstants = true,
 			.gates = { gate },
 		});

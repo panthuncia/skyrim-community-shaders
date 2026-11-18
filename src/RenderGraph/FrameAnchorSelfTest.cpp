@@ -35,12 +35,6 @@ namespace FrameAnchors::SelfTest
 
 		constexpr const char* kShader = "RenderGraph/AnchorSelfTest.hlsl";
 		constexpr const char* kClientId = "cs.org.anchor-selftest";
-		// CS_ORG_ANCHOR_SELFTEST_FAIL: a second client whose pass fails to prepare at kFailAnchor. The main client leaves that anchor
-		// out, so only the failing client should be dropped. Present runs every frame, in menus too.
-		constexpr const char* kFailClientId = "cs.org.anchor-selftest-fail";
-		constexpr auto kFailAnchor = Anchor::Present;
-		// Runs of the main client before the test reports that the failing client was never dropped.
-		constexpr std::uint32_t kFailPatience = 600;
 		constexpr std::uint32_t kAnchors = static_cast<std::uint32_t>(Anchor::Count);
 		constexpr std::uint32_t kTextureSize = 16;
 		constexpr std::uint32_t kOutputWords = 64;  // word a: the check; word 32 + a: kMAIN's texel
@@ -74,9 +68,6 @@ namespace FrameAnchors::SelfTest
 			std::shared_ptr<org::Buffer> output;                 // uint[kOutputWords]
 			std::shared_ptr<org::Buffer> readback;               // host copy of output
 			Texture main;  // the engine's kMAIN, or null
-			// CS_ORG_ANCHOR_SELFTEST_FAIL: a texture with a shader UAV and no CPU-side UAV, which a UAV clear needs. Its clear fails
-			// to prepare, as the HDR output anchor's import once did.
-			std::shared_ptr<org::PixelBuffer> failTexture;
 		};
 
 		struct Status
@@ -86,12 +77,6 @@ namespace FrameAnchors::SelfTest
 			std::array<std::uint32_t, kAnchors> runs{};
 			std::array<bool, kAnchors> reported{};
 			std::uint32_t passed = 0;  // a bit per anchor
-			// CS_ORG_ANCHOR_SELFTEST_FAIL: the failing client was registered, it was dropped, the main client ran after the drop, and the
-			// main client's runs since the failing client was registered.
-			bool failRegistered = false;
-			bool failDropped = false;
-			bool isolationReported = false;
-			std::uint32_t runsSinceFail = 0;
 		};
 
 		Status& Test()
@@ -100,11 +85,7 @@ namespace FrameAnchors::SelfTest
 			return s_status;
 		}
 
-		bool FailRequested()
-		{
-			static const bool requested = Switches::On("CS_ORG_ANCHOR_SELFTEST_FAIL");
-			return requested;
-		}
+
 
 		std::string Lowercase(std::string_view a_name)
 		{
@@ -298,18 +279,6 @@ namespace FrameAnchors::SelfTest
 			readback.Unmap(0, kOutputWords * sizeof(std::uint32_t));
 			// The engine target import: a missing kMAIN only leaves its texel out.
 			resources->main = EngineTarget(static_cast<std::uint32_t>(RE::RENDER_TARGET::kMAIN));
-			if (FailRequested()) {
-				org::TextureDescription desc{};
-				desc.imageDimensions = { { kTextureSize, kTextureSize, 0, 0 } };
-				desc.channels = 1;
-				desc.format = rhi::Format::R32_UInt;
-				desc.hasUAV = true;
-				desc.uavFormat = desc.format;
-				// No CPU-side UAV on purpose: the clear below asks for one, and its preparation fails.
-				desc.hasNonShaderVisibleUAV = false;
-				resources->failTexture = org::PixelBuffer::CreateShared(desc);
-				resources->failTexture->SetName(fmt::format("{}.texture", kFailClientId));
-			}
 			return resources;
 		}
 
@@ -319,8 +288,7 @@ namespace FrameAnchors::SelfTest
 			client.id = kClientId;
 			for (std::uint32_t i = 0; i < kAnchors; ++i) {
 				const auto anchor = static_cast<Anchor>(i);
-				// With the failing client, its anchor is left to it: the main client must not be dropped with it.
-				if (!HasEpoch(anchor) || (FailRequested() && anchor == kFailAnchor))
+				if (!HasEpoch(anchor))
 					continue;
 				const std::string prefix = fmt::format("{}.{}", kClientId, Lowercase(Name(anchor)));
 				client.passes.push_back({ .name = prefix + ".draw", .anchor = anchor, .order = 0, .kind = PassKind::Render, .make = [a_resources, i] { return std::static_pointer_cast<org::RenderPass>(std::make_shared<DrawPass>(a_resources, i)); } });
@@ -332,34 +300,7 @@ namespace FrameAnchors::SelfTest
 					a_graph.RegisterResource(org::ResourceIdentifier(a_resources->textures[i]->GetName()), a_resources->textures[i]);
 				a_graph.RegisterResource(org::ResourceIdentifier(a_resources->output->GetName()), a_resources->output);
 			};
-			client.onFailed = [] {
-				Test().resources.reset();
-				if (FailRequested())
-					logger::error("[ORG] anchor self-test: isolation FAILED, the main client was dropped (the render graph failed, or the failing client's "
-								  "failure reached it)");
-				else
-					logger::error("[ORG] anchor self-test: stopped, the render graph failed");
-			};
 			client.executed = [](const Point& a_point) { Check(a_point.anchor); };
-			return client;
-		}
-
-		/** @brief CS_ORG_ANCHOR_SELFTEST_FAIL's client: one UAV clear at kFailAnchor, which fails to prepare. */
-		ClientDesc MakeFailClient(const std::shared_ptr<Resources>& a_resources)
-		{
-			ClientDesc client{};
-			client.id = kFailClientId;
-			const auto texture = a_resources->failTexture;
-			client.passes.push_back({ .name = fmt::format("{}.clear", kFailClientId), .anchor = kFailAnchor, .order = 0, .kind = PassKind::Compute,
-				.make = [texture] { return GraphPasses::MakeUavClearUint(texture, { 0, 0, 0, 0 }); } });
-			client.registerResources = [texture](org::RenderGraph& a_graph) {
-				a_graph.RegisterResource(org::ResourceIdentifier(texture->GetName()), texture);
-			};
-			client.onFailed = [] {
-				Test().failDropped = true;
-				logger::info("[ORG] anchor self-test: the failing client was dropped as expected (CS_ORG_ANCHOR_SELFTEST_FAIL); the other anchors "
-							 "must keep running");
-			};
 			return client;
 		}
 	}
@@ -397,11 +338,6 @@ namespace FrameAnchors::SelfTest
 		test.resources = std::move(resources);
 		logger::info("[ORG] anchor self-test: on; each anchor logs once when its value comes back (kMAIN import {})",
 			test.resources->main ? "made" : "unavailable");
-		if (test.resources->failTexture) {
-			test.failRegistered = Register(MakeFailClient(test.resources));
-			logger::info("[ORG] anchor self-test: the failing client {} at {} (CS_ORG_ANCHOR_SELFTEST_FAIL); only it should be dropped",
-				test.failRegistered ? "registered" : "could not be registered", Name(kFailAnchor));
-		}
 	}
 
 	namespace
@@ -412,16 +348,6 @@ namespace FrameAnchors::SelfTest
 			const auto anchor = static_cast<std::uint32_t>(a_anchor);
 			if (!test.resources || anchor >= kAnchors)
 				return;
-			// CS_ORG_ANCHOR_SELFTEST_FAIL: this anchor ran with the main client after the failing client was dropped.
-			if (test.failRegistered && !test.isolationReported) {
-				if (test.failDropped) {
-					test.isolationReported = true;
-					logger::info("[ORG] anchor self-test: isolation OK, {} ran with the main client after the failing client was dropped", Name(a_anchor));
-				} else if (++test.runsSinceFail == kFailPatience) {
-					test.isolationReported = true;
-					logger::warn("[ORG] anchor self-test: the failing client was not dropped after {} runs of the main client", kFailPatience);
-				}
-			}
 			if (test.reported[anchor])
 				return;
 			++test.runs[anchor];
@@ -445,9 +371,7 @@ namespace FrameAnchors::SelfTest
 					test.runs[anchor], ValueOf(anchor), got,
 					test.resources->main ? fmt::format("{:.4f}", std::bit_cast<float>(words[kMainWord + anchor])) : std::string("not read"), globals::state->frameCount,
 					globals::state->IsMainOrLoadingMenuOpen() ? ", main or loading menu open" : "");
-				// With the failing client, the main client does not run at its anchor.
-				const std::uint32_t wanted = ((1u << kAnchors) - 1) & ~(FailRequested() ? 1u << static_cast<std::uint32_t>(kFailAnchor) : 0u);
-				if (test.passed == wanted)
+				if (test.passed == (1u << kAnchors) - 1)
 					logger::info("[ORG] anchor self-test: every anchor OK");
 			} else if (got != 0) {
 				test.reported[anchor] = true;

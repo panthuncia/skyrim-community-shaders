@@ -470,7 +470,6 @@ struct ORGPostProcessing::Impl
 	std::vector<std::uint64_t> key;
 	std::vector<std::uint64_t> failedKey;
 	ORGPostChain::LatchRegion<CopyLatch> input, output;
-	bool failed = false;
 
 	// This frame's, from BeforeTonemap, for the commit.
 	bool ready = false;
@@ -578,14 +577,6 @@ struct ORGPostProcessing::Impl
 		client.commit = [this](const FrameAnchors::Point&) { Commit(); };
 		client.executed = [this](const FrameAnchors::Point&) { Executed(); };
 		client.active = [this] { return ready; };
-		client.onFailed = [this] {
-			logger::error("[ORG] Post Processing: the render graph failed; the chain returns to D3D11 for the session");
-			failed = true;
-			ready = false;
-			ran = false;
-			build.reset();
-			key.clear();
-		};
 		if (!FrameAnchors::Register(std::move(client))) {
 			a_failure = "the Tonemap anchor refused the client";
 			return false;
@@ -670,7 +661,7 @@ void ORGPostProcessing::BeforeTonemap(const RenderGraph::Engine::TonemapTargets&
 	auto& s = *impl;
 	s.ready = false;
 	s.ran = false;
-	if (s.failed || !RenderGraphRuntime::Get().IsActive())
+	if (!RenderGraphRuntime::Get().IsActive())
 		return;
 
 	auto& pp = globals::features::postProcessing;

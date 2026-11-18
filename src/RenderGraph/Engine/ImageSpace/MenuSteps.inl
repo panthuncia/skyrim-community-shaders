@@ -272,10 +272,6 @@ void RegisterMenuSteps()
 		// Passes of the stages only: a composite or the tint outside their windows is a mismatch (TakeMenuStep).
 		desc.segmentOnly = true;
 		desc.executed = [](const FrameAnchors::Point&) { IS().executed = true; };
-		desc.onFailed = [] {
-			logger::error("[ORG] ImageSpace: the menu composites' passes failed; they draw nothing for the session");
-			Menu().on = false;
-		};
 		return desc;
 	};
 	if (!FrameAnchors::Register(makeDesc(PostPart::Menu, std::move(passes)))) {

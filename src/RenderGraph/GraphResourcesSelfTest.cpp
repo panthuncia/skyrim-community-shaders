@@ -162,10 +162,6 @@ namespace GraphResources::SelfTest
 					return std::make_shared<WritePass>(*a_resources);
 				} });
 			client.registerResources = [a_resources](org::RenderGraph& a_graph) { a_resources->texture->Register(a_graph); };
-			client.onFailed = [] {
-				Test().resources.reset();
-				logger::error("[ORG] graph resource self-test: stopped, the render graph failed");
-			};
 			client.executed = [](const FrameAnchors::Point&) { Check(); };
 			return client;
 		}

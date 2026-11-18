@@ -146,10 +146,6 @@ namespace GpuLoadPass
 		};
 		// Armed for one Present at a time: a frame that did not arm it submits nothing.
 		client.active = [] { return std::exchange(Get().armed, false); };
-		client.onFailed = [] {
-			Get().resources.reset();
-			logger::error("[PassSkip] the GPU load stopped: the render graph failed");
-		};
 		if (!FrameAnchors::Register(std::move(client)))
 			return false;
 		state.resources = std::move(resources);

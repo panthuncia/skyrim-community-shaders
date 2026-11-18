@@ -1325,10 +1325,6 @@ void RegisterChainSteps()
 		desc.rows = [p](std::array<std::uint64_t, 4>& a_rows) { ChainRows(p, a_rows); };
 		desc.repeats = true;
 		desc.segmentOnly = true;
-		desc.onFailed = [] {
-			logger::error("[ORG] ImageSpace: the post chain's passes failed; the post chain draws nothing for the session");
-			Chain().on = false;
-		};
 		if (!FrameAnchors::Register(std::move(desc))) {
 			logger::error("[ORG] ImageSpace: the post chain client {} was refused", client.id);
 			chain.on = false;
