@@ -4855,7 +4855,7 @@ Since Guest B8 the migration scaffolding is gone: no anchor a stage has a step a
 outside every stage's step is the `own epoch` mismatch, as in native. Only frame generation's hudless copy and HDR output keep their
 anchors' tickets (as in native). The frame arena (`Frame::Transients`) is on in guest too.
 
-What is still guest's own: the main ImageSpace client, the shape manifest, `onFailed` fallbacks, the port switches and the anchors'
+What is still guest's own: `onFailed` fallbacks, the port switches and the anchors'
 own-epoch paths for a run without the stages remain in the code (a later deletion piece); Skylighting's lent slot with its D3D11 clear
 (Guest B4); the capture's D3D11 staging copy when the graph cannot take it; DXVK's interop ring for frame generation's evaluates; the
 engine targets native keeps without memory are backed in guest (Guest B8, about 150 MiB). What still reaches DXVK inside a window is
@@ -8358,3 +8358,55 @@ last triangle. Elsewhere vertex 0 is usually near, behind the camera or the tria
 DLL 1f2f029d2217. The map matches `d3d11` where the triangle was: `runs\1118-152847-nfg-guest-map-bug10-final` (guest) and
 `1118-153004-nfg-native-vulkan-map-bug10-final` (native Vulkan), against `1118-140106-nfg-d3d11-map-bug9`. Error lines are the
 baseline's. Quick runs pass on guest and native Vulkan.
+
+## Cleanup C1 and C2 (2026-11-18)
+
+Plan pieces C1 and C2: code the old guest path needed. CS on `org-native/phases`, RX 6600, Perf-Fast, background runs with
+`DXVK_DEBUG=hang`.
+
+### C2: ImageSpace's guest client (deleted)
+
+Every ImageSpace draw is a CS stage's step in both graph modes since Guest B7 (`StepsOnly` was true in both). Deleted from
+`ImageSpace.cpp` (about 1,700 lines net): the main client `cs.engine.imagespace`, the clients built on first sight, the shape manifest
+(`ImageSpaceShapes.json`, its read, write and saved defines), the per-draw shape capture (`ReadShape`, `ReadInputs`, `ReadViewport`,
+`ReadComputeShape`, `ResolveOutput`), the scissor hook, the state JSON, the implied shapes, `MakeSpec`, `RegisterClient`, `AdmitShape`,
+`AddToBatch`, `RunLate`, `RetryBuild`, `QueuePrograms`, ImageSpace's own `LatchGeometry` and `LatchSources`, and the generic tails of
+`TakeDraw` and `TakeDispatch` (a draw outside every step is `NoPass`). The recipe's id family (`Table::Family`), which only named the
+clients built on first sight, went with it. Setup now turns the port off when a stage with ImageSpace steps does not run in the mode
+(the stage switches of C4), instead of falling back to the main client.
+
+Stayed, because the steps use them: `MakePass` and the program, sampler, blend and depth helpers behind it, `CommitBatch`, `Flush` and
+`RunAnchor` (a step's draws reach their stage through `FrameAnchors::Run` of the ImageSpace anchor), `NoteImports` and the resize check.
+
+### C1: anchor epochs (mostly not deletable yet)
+
+Deleted: `HasOwnEpoch` and `PeakRunsPerFrame` (no callers). `RequestJoin` and `CanRun` were already gone (B8).
+
+Stayed, with what keeps them alive:
+
+- **Per-anchor epochs, `Run`'s own-epoch tail, the anchor part of `AddToFrame`, the anchor `Segment` values, `EpochOf` and the late
+  epoch hook.** Frame generation's hudless copy and HDR output keep their anchors' tickets in both modes (epochs 21 and 24 in a guest
+  run's epoch order). Every other anchor's own epoch runs only when `SegmentsOn()` is false: `CS_ORG_EPOCHS=0`,
+  `CS_ORG_ASYNC_EPOCHS=0` or `CS_ORG_REUSE_RECORDINGS=0`, which are C4's switches.
+- **The same switches keep** the skeleton's `FlushGroup` run (its `pending` clears exist only without `HostingOn`), `RunCopy`'s
+  `Scheduled` branch, Bink's and Scaleform's own-anchor paths, `Scheduled`'s own-graph answer and the recipe's `Placed` epochs. They
+  go with C4.
+- **`Reserve` and `HasEpoch`.** A stage gets its epoch only when an anchor it has a step at is reserved, and about 40 features check
+  `HasEpoch` at setup. Turning anchors into tap points needs a design (a rename across those files), not a deletion.
+- **One-shot passes** (`once`, `Rearm`, `armed`): Skylighting's and Screen Space GI's resets run them inside stages (`SubmitSegment`).
+- **`InBuiltGraph`**: Terrain Blending's clear commit asks it at the EarlyPrepass step. **`RunShapes`**: the stages' runs report to it
+  too. **Retired gates**: closed by the stages' runs as well as the own tail.
+- **`RecordsAtExecution`** still answers no for wholly held anchors (the deferred composite's known gap). Nothing deleted here
+  changes the question.
+
+So C1's remaining deletions are one piece with C4: once `SegmentsOn()` is always true in the graph modes, the own-epoch paths for
+anchors a stage holds, the skeleton's pending clears and the Bink and Scaleform own-anchor paths have no caller left.
+
+### Checks
+
+One background run each on DLL `0037854a87e1`: guest `guest-quick`, `latch-census-short` (the Journal Menu, two loads) and `guest+map`
+(the world map over the world); native Vulkan `native-quick`; `d3d11+quick`; `native-d3d12-quick`. All passed; the `[E]`/`[C]` line
+kinds match today's earlier runs of the same configs (flush latch residue and the known `PublishedResources` line). Shots against those
+runs: guest quick 1.7, native quick 1.1, D3D12 quick 1.8, map 0.2, census 0.2 to 1.0 apart from Dragonsreach (26, its light shafts
+and blown windows in the older run), map config's Whiterun 9.0 (brighter, same image). 6 launches.
+

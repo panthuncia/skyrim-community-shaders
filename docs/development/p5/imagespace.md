@@ -124,6 +124,9 @@ is where the set of shapes comes from: it is known before the session's first fr
 
 ### Where the shapes come from: the shape manifest
 
+Deleted on 2026-11-18 (org-native-frame-graph.md, "Cleanup C1 and C2"): every ImageSpace draw is now a CS stage's step, in
+both graph modes. This section is the history of the guest client.
+
 - **Value keys.** A shape names everything by value: the effect by its `kEffects` index (never the engine's shader object), targets
   by `RE::RENDER_TARGET` (with the mip, the depth or cube bit), samplers by their address and filter modes, the blend state by its
   four engine table fields (mode, alpha to coverage, write mode, extra), the viewport in pixels. Two sessions name the same shape the
