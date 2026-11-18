@@ -526,12 +526,27 @@ namespace Testing
 				});
 				return true;
 			});
-			// "cs-menu": open|close, Community Shaders' own menu.
-			RegisterCommand("cs-menu", [](const std::string& a_arg, std::string&) {
-				if (a_arg == "open")
+			// "cs-menu": open|close, Community Shaders' own menu. font=<px> sets a fixed font size (a font reload) and font=saved puts the
+			// saved size back, so closing the menu saves the user's settings unchanged.
+			RegisterCommand("cs-menu", [](const std::string& a_arg, std::string& a_error) {
+				static std::optional<std::pair<bool, float>> savedFont;
+				auto& settings = Menu::GetSingleton()->GetSettings();
+				if (a_arg == "open") {
 					Menu::GetSingleton()->Open();
-				else
+				} else if (a_arg == "close") {
 					Menu::GetSingleton()->Close();
+				} else if (a_arg == "font=saved") {
+					if (savedFont)
+						std::tie(settings.UseResolutionFont, settings.Theme.FontSize) = *std::exchange(savedFont, std::nullopt);
+				} else if (a_arg.starts_with("font=")) {
+					if (!savedFont)
+						savedFont = std::pair{ settings.UseResolutionFont, settings.Theme.FontSize };
+					settings.UseResolutionFont = false;
+					settings.Theme.FontSize = std::strtof(a_arg.c_str() + 5, nullptr);
+				} else {
+					a_error = "cs-menu takes open, close, font=<px> or font=saved";
+					return false;
+				}
 				return true;
 			});
 			// "menu": <menu name>=show|hide, through the UI message queue ("Journal Menu" is the one Escape opens).
