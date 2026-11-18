@@ -580,6 +580,7 @@ namespace DCLF
 			}
 			// D3D12 on AMD: device refs indexed as uniform (Common/DeviceRef.hlsli). The driver turns a non-uniform index into a loop around
 			// every load (the colour pass took 17 ms against 9), and its waves never mix draws, so the refs are uniform in a wave anyway.
+			// A ref that differs between the instances of one draw stays non-uniform in its stage (DistantTree.hlsl's mesh loads).
 			if (!::RenderGraph::ShaderTarget::IsSpirv() && RenderGraphRuntime::VendorId() == 0x1002)
 				request.defines.push_back({ L"DEVICE_REF_ASSUME_UNIFORM", L"1" });
 			// The device-generated draws' vertex stages (Program::vertex, both variants'; a program family's) pull their attributes

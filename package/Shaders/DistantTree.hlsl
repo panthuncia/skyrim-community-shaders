@@ -38,6 +38,13 @@ DeviceRef DCLFTreeTable(uint a_offset) { return DeviceLoad(uint2, DCLFTreeDrawAt
 static const uint kDCLFTreeInstances = 0, kDCLFTreeShapes = 8, kDCLFTreeMeshes = 16, kDCLFTreeVisible = 24;
 static const uint kDCLFTreeTexture = 32, kDCLFTreeSampler = 36, kDCLFTreeAlphaRef = 40;
 static const uint kDCLFTreeGroupInstances = 75;
+// One draw holds every tree type, so the lanes of a vertex wave read different meshes' buffers.
+// Their index stays non-uniform even where DEVICE_REF_ASSUME_UNIFORM makes other refs uniform.
+ByteAddressBuffer DCLFTreeMeshBuffer(DeviceRef a_ref)
+{
+	return ResourceDescriptorHeap[NonUniformResourceIndex(a_ref.x)];
+}
+#	define DCLFTreeMeshLoad(T, a_ref) DCLFTreeMeshBuffer(a_ref).Load<T>((a_ref).y)
 // TreeLod::VisibleHeader, before the visible list: phase 1's instance count, where phase 2's instances start.
 static const uint kDCLFTreeHeaderBytes = 64, kDCLFTreePhaseOneInstances = 4;
 // CS_DCLF_TREE_LOD_STAGES (TreeInstancesLayout.h, kStageSlots): the draw row's stamps buffer (0: none) and frame; a stage stores the
@@ -123,12 +130,12 @@ VS_OUTPUT main(uint a_vertex : SV_VertexID, uint a_instance : SV_InstanceID)
 	// Past the mesh's indices (the draw draws the largest mesh's count): a degenerate triangle.
 	if (a_vertex >= meshLayout.y)
 		return vsout;
-	const uint indexWord = DeviceLoad(uint, DeviceRefAdd(meshWords.zw, 4 * (a_vertex / 2)), 4);
+	const uint indexWord = DCLFTreeMeshLoad(uint, DeviceRefAdd(meshWords.zw, 4 * (a_vertex / 2)));
 	const uint vertexIndex = (a_vertex & 1) ? (indexWord >> 16) : (indexWord & 0xFFFF);
 	const DeviceRef vertex = DeviceRefAdd(meshWords.xy, vertexIndex * meshLayout.x);
 	VS_INPUT input = (VS_INPUT)0;
-	input.Position = asfloat(DeviceLoad(uint3, vertex, 4));
-	const uint texcoord = DeviceLoad(uint, DeviceRefAdd(vertex, meshLayout.z), 4);
+	input.Position = asfloat(DCLFTreeMeshLoad(uint3, vertex));
+	const uint texcoord = DCLFTreeMeshLoad(uint, DeviceRefAdd(vertex, meshLayout.z));
 	input.TexCoord0 = float2(f16tof32(texcoord), f16tof32(texcoord >> 16));
 	const uint4 record = DeviceLoad(uint4, DeviceRefAdd(DCLFTreeTable(kDCLFTreeInstances), 32 * index), 16);
 	input.InstanceData1 = float4(f16tof32(record.x), f16tof32(record.x >> 16), f16tof32(record.y), f16tof32(record.y >> 16));

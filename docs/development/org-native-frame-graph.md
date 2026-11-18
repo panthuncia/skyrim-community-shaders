@@ -8267,3 +8267,34 @@ another frame's list or a partly written one. The draw row and the list are sing
 show one append per frame, and the stage stamps (`dclf.tree_lod_stages`) do not reach the readback on D3D12. Not fixed: a fixed-slot
 list would only mask the cause, and with the HZB on its contents change every frame too.
 
+
+## D3D12 tree LOD read the wrong meshes (2026-11-18)
+
+### Cause: mesh refs indexed as uniform
+
+DCLF's builds for D3D12 on AMD define `DEVICE_REF_ASSUME_UNIFORM` (Common/DeviceRef.hlsli), which indexes every ref's buffer as
+uniform because pixel waves never mix draws. The tree LOD is one instanced draw for every tree type, and each type's mesh has its own
+vertex and index buffers (engine leases, one heap slot each). A vertex wave spans several instances, so its lanes need different
+buffers. With a uniform index the compiler takes the first lane's slot, and every vertex in the wave is read from that lane's mesh.
+
+Which instances share a wave, and so which mesh they all read, follows the visible list's order. The atomic append changes that order
+every frame, which changed the trees' shapes and coverage. Fixed slots hid it because the order then stayed the same. The depth and
+colour passes read the same list and pack the same waves, so EQUAL still matched and only the shapes moved. Vulkan never defines the
+switch and was correct, not lucky. The list's order does not matter to the design.
+
+### Fix
+
+DistantTree.hlsl loads the mesh's indices and vertices through `NonUniformResourceIndex`. Every other ref in the draw is the draw
+row's and stays uniform. Grass draws one bucket tier per draw, so its mesh is uniform in a draw and needs nothing.
+
+### Results
+
+Temporal std of the tree area (`treestd.py`, mean / pixels above 4), build 9c4a6afbda9e:
+
+| Config | Before | After |
+|---|---|---|
+| native-d3d12-flicker | 1.25 to 1.42 / 5,900 to 8,000 | 0.34 / 15 |
+| native-flicker (Vulkan) | 0.30 / 11 | 0.30 / 12 |
+
+With upscaling off both backends score 4.2 to 4.3 there, and 4.4 to 4.6 over the whole frame. That is not D3D12's and not the trees'.
+Quick runs pass on native D3D12, native Vulkan and guest.

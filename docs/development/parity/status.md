@@ -48,6 +48,8 @@ Phase 2:
   - D3D12: texture streaming's feedback buffer is a committed HostCached buffer (an UPLOAD buffer cannot have unordered access).
   - D3D12 (2026-11-18): the shadow caster rows' capacity is the host's, not a raw GetDimensions of a structured view (a quarter of
     the rows on AMD, so most foliage casters were dropped). VisibilityEventsCS drops the same read.
+  - D3D12 on AMD (2026-11-18): the tree LOD draw's mesh loads index their buffers as non-uniform. One draw holds every tree type,
+    and `DEVICE_REF_ASSUME_UNIFORM` made a wave read all its vertices from its first lane's mesh, so coverage followed the list order.
   - ORG: a barrier between unordered-access (and copy) uses of one resource in consecutive passes.
 - **Screenshots** are a gated pass, in the graph for good: a capture needs no build, so it no longer misses its capture point.
 
@@ -99,11 +101,10 @@ To match DXVK, native needs what DXVK's CS thread gives it: the GPU work off the
 
 ## Open
 
-- **D3D12 shadow flicker** (the `flicker` configs): the steady loss of foliage casters is fixed (caster rows, 2026-11-18, below). Left:
-  the hazy far trees at the top left are DCLF's tree LOD, and their coverage changes from frame to frame on D3D12 only. The cull
-  gives the same set every frame. The image follows the order of the visible list, which the atomic append changes every frame:
-  with each record at a fixed slot the trees are steady. Why the order changes coverage is not found (org-native-frame-graph.md,
-  "D3D12 tree LOD follows its list order"). The tile detector misses most of it. Measure the temporal std of the tree area instead.
+- **Flicker with upscaling off** (`native-flicker-none`, `native-d3d12-flicker-none`): the whole frame's temporal std is 4.4 to 4.6 on
+  both native backends (0.8 with the default method). Not D3D12's. Not looked into (org-native-frame-graph.md, "D3D12 tree LOD read
+  the wrong meshes").
+- **Tree LOD stage stamps** (`dclf.tree_lod_stages`) read back all zeros on D3D12. Not needed for the tree LOD fix, not looked into.
 - **Render thread blocked on compiles**: with a cold shader store the main menu stalls 15 s and more while Lighting compiles (the
   whole compile took 90 s), and after a DCLF compute shader changes the first world frame creates its driver pipelines on the render
   thread (VisibilityEventsCS took the frame past 15 s on guest). Both trip the hang watchdog. 2026-11-18.
