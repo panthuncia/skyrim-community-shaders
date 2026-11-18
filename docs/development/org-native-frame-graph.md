@@ -8079,3 +8079,71 @@ during the load hold) in guest (`f1g`), native (`f2n`) and D3D11 (`f3d`): the mo
 native-quick, the guest Journal Menu run (menu shot 0.6 from B8's), native-validation (the same 20 `VUID-vkCmdDraw-None-09600`).
 All passed with 0 tap errors, 0 recipe findings, no `NoPass`, no failed build; the only `[C]` line is the known `PublishedResources`
 one. 22 launches.
+
+## Loading screens, part 2 (2026-11-19)
+
+The open items of the first part: the loading model lit darker than in D3D11, the flicker, the hold frames without the model, the
+skinned Effect key. CS on `org-native/phases`, RX 6600, Perf-Fast, background runs with `DXVK_DEBUG=hang`. Model area: the crop
+(450, 150) to (1250, 1080) of the forced Nord, mean of 30 consecutive shots at the same point of the first load (loading screen + 100
+frames).
+
+### Cause 3: menu Lighting draws compiled with VC from the pixel descriptor
+
+Compared for every Lighting draw of one render: the latched constants against a D3D11 readback of the bound buffers, the bound views
+(formats, sizes, dimensions), the permutation block and Light Limit Fix's strict lights. They matched (rows the engine does not write
+hold stale ring data on both sides). A debug output written by both builds then compared the shader's terms per band of the screen:
+the base colour, the normal, the lights' diffuse, the specular and the fog matched, the vertex colour did not (D3D11 about 0.7 grey,
+ORG near 0). The armour draws have vertex descriptor 0x1000000 or 0x1000002 (no VC) and pixel descriptor 0x1000001 (VC). The engine's
+vertex shader without VC writes white; the ORG program took VC from the pixel descriptor, its vertex stage pulled a colour the layout
+does not have, and the colour multiplied the lighting by zero. VC now comes from the vertex descriptor, as SKINNED does (the pixel
+stage does not read VC).
+
+Model area mean: D3D11 15.2; ORG 9.9 before, 14.1 to 14.3 after (guest and native alike). The rest of the difference is in D3D11
+itself: Wetness Effects darkens the menu model there (D3D11 with Wetness Effects off: 21.1 at the same shot point as a run with it on
+at 16.2). The shore term reads the world's water table at the menu scene's coordinates and is not gated by `inWorld`; the ORG build has
+no wetness. The pale war paint of the first part is the same effect. Not changed.
+
+### Cause 4: stale views in Lighting slots refused a whole loading screen
+
+The colour batch of a reload's loading screen was refused in every frame: t5 held a depth plane (format 47, 1920x1080) left by the
+last world frame, which cannot be imported. A refusal ends the latched part, and the engine's rest is skipped, so the model and the
+mist were missing for the whole screen. `LightingSlotRead` follows Lighting.hlsl's declarations per descriptor; an undeclared slot
+latches a null view.
+
+### Cause 5: the hold closed the Mist Menu
+
+The load coordinator (SE 13214 / AE 13363) starts the Mist Menu's fade-out (+0x2E5, SE 51456 / AE 52317: the menu hides itself
+once faded) or hides it (+0x3C0, SE 80077 / AE 82180) right after it posts the loading menu's close. The hold kept the close only, so
+its frames showed the loading text over black. Both are now kept with the close and posted when the hold ends. In the held frames
+MistMenu::PostDisplay renders the model on the main thread (the menu shadow and colour batches; the depth batch does not run there).
+The forced Nord stays on screen steadily until the world appears, in guest and native.
+
+### Cause 6: skinned Effect draws keyed by the pixel descriptor
+
+The Effect key takes SKINNED from the vertex descriptor now. Unskinned draws build the same programs.
+
+### The flicker: what was measured
+
+- The second to fifth shots of a burst use the D3D11 capture path (`a capture is still waiting for its copy; this capture uses
+  D3D11`) and the rest the graph's: the 4 to 5 times larger change at those shots of the first part is that switch.
+- One held frame in each guest burst showed the world (sky and water): it was a D3D11 capture (`every readback buffer holds a capture
+  in flight`), which reads a target without ORG's UI. Native bursts do not have it.
+- Bursts of 30 to 40 consecutive frames during the first load, the hold and a reload show only the model's turn (0.1 to 0.3% of the
+  pixels a frame) apart from the above. No brightness or shadow change from frame to frame.
+- What a person would see: the hold frames without the model (cause 5), a reload's loading screen with no model (cause 4), and the
+  dark armour (cause 3). A `coc` from the save's cell to Whiterun stays in the worldspace and shows no loading screen.
+
+### Not fixed
+
+- Pop-in at a load's start: a draw whose streamed texture has no full window yet is refused (PinFull), the rest of the batch goes
+  with it, and the model appears in parts over about 10 frames of a reload (head, then armour, sword, gauntlets). The engine draws
+  with the window it has. Drawing the current window instead was tried: the imports did not follow the later swap (the model stayed
+  at its base window for seconds), so it was not kept.
+- Wetness Effects on menu models in D3D11 (above).
+
+### Checks
+
+Final build, one run each: forced Nord with a load, the hold and a reload in guest and native; the draugr (unskinned) in guest;
+guest-quick; native-quick; the guest Journal Menu run (menu shot 0.6 from the first part's); native-validation (the same 20
+`VUID-vkCmdDraw-None-09600`). All passed with 0 tap errors and no failed build; the only `[C]` line is the known `PublishedResources`
+one. 24 launches.
