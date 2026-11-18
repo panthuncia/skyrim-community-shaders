@@ -563,11 +563,6 @@ namespace RenderGraph::Frame::Driver
 		++state.segments[static_cast<std::size_t>(a_segment)].late;
 	}
 
-	std::uint64_t TapErrors()
-	{
-		return Get().errorsTotal.load(std::memory_order_relaxed);
-	}
-
 	void LogStats()
 	{
 		auto& state = Get();

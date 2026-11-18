@@ -48,9 +48,6 @@ namespace RenderGraph::ExternalWork
 	bool Submit(std::string_view a_label, std::span<const Access> a_accesses, const std::function<void(rhi::CommandList&)>& a_record,
 		std::shared_ptr<const void> a_keepAlive = {}, std::span<const rhi::TimelinePoint> a_signals = {});
 
-	/** @brief How many submissions went through the client so far. Any thread. */
-	std::uint64_t Submissions();
-
 	/** @brief Waits for the client's submissions and drops it. RenderGraphRuntime::Shutdown calls it before the host goes. */
 	void Shutdown();
 }

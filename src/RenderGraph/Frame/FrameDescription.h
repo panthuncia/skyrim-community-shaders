@@ -123,9 +123,6 @@ namespace RenderGraph::Frame
 		friend bool operator==(const WorldFields&, const WorldFields&) = default;
 	};
 
-	/** @brief The world fields that differ, as DiffPost gives them. a_parity: the parity fields too. */
-	std::string DiffWorld(const WorldFields& a_before, const WorldFields& a_after, bool a_parity = true);
-
 	/** @brief The post fields that differ, as "name old -> new" joined by ", "; empty when equal. */
 	std::string DiffPost(const PostFields& a_before, const PostFields& a_after);
 

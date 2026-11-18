@@ -169,9 +169,6 @@ namespace RenderGraph::Frame::Driver
 	 */
 	bool MismatchFatal();
 
-	/** @brief The tap errors so far, all kinds (any thread). */
-	std::uint64_t TapErrors();
-
 	/**
 	 * @brief The census line (CS_ORG_EPOCH_STATS's report): frames by kind; each segment's taps, recordings asked for, schedule switches
 	 * and how its frames ran (current, lagging, absent); the switches' lag; the tap errors by kind, since the last report. "[ORG] declared

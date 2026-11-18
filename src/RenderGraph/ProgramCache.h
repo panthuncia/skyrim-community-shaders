@@ -22,7 +22,7 @@ namespace RenderGraph
 		Missing,   // never asked for
 		Building,  // queued or compiling on the build thread
 		Ready,     // built: Get returns it
-		Failed,    // the build failed (logged once); never built again until ClearFailed
+		Failed,    // the build failed (logged once); never built again
 	};
 
 	namespace ProgramCacheDetail
@@ -62,9 +62,9 @@ namespace RenderGraph
 	 * label; the compile's own error is logged by Load), and the key stays Failed: it is not built again on every call.
 	 *
 	 * Hot reload is the programs' own (RasterProgram/ComputeProgram register with the pipeline registry): a built program's pipeline
-	 * is swapped in place. ClearFailed lets a reload retry the keys that failed.
+	 * is swapped in place.
 	 *
-	 * Threads: Get, StatusOf, ClearFailed and Clear on the render thread (the cache's map is under a mutex anyway). The build thread
+	 * Threads: Get, StatusOf and Clear on the render thread (the cache's map is under a mutex anyway). The build thread
 	 * only fills the key's entry.
 	 *
 	 * Usage:
@@ -156,13 +156,6 @@ namespace RenderGraph
 			std::scoped_lock lock(mutex);
 			const auto found = entries.find(a_key);
 			return found == entries.end() ? ProgramStatus::Missing : found->second->status.load(std::memory_order_acquire);
-		}
-
-		/** @brief The failed keys forgotten: their next Get builds them again (after a shader reload fixed them). */
-		void ClearFailed()
-		{
-			std::scoped_lock lock(mutex);
-			std::erase_if(entries, [](const auto& a_entry) { return a_entry.second->status.load(std::memory_order_acquire) == ProgramStatus::Failed; });
 		}
 
 		/** @brief Every key forgotten. A build in progress completes into an entry nobody reads. Programs callers hold stay valid. */

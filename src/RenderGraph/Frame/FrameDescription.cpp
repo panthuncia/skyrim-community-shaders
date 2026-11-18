@@ -102,29 +102,6 @@ namespace RenderGraph::Frame
 		return out;
 	}
 
-	std::string DiffWorld(const WorldFields& a_before, const WorldFields& a_after, bool a_parity)
-	{
-		std::string out;
-		const auto flag = [&](const char* a_name, bool a_old, bool a_new) { Append(out, a_name, a_old ? "yes" : "no", a_new ? "yes" : "no"); };
-		const auto number = [&](const char* a_name, std::uint32_t a_old, std::uint32_t a_new) { Append(out, a_name, std::to_string(a_old), std::to_string(a_new)); };
-		flag("read", a_before.read, a_after.read);
-		number("sao levels", a_before.saoLevels, a_after.saoLevels);
-		number("sao contrast level", a_before.saoContrast, a_after.saoContrast);
-		flag("sao temporal", a_before.saoTemporal, a_after.saoTemporal);
-		flag("sao half", a_before.saoHalf, a_after.saoHalf);
-		number("sao form", a_before.saoForm, a_after.saoForm);
-		flag("ssr", a_before.ssr, a_after.ssr);
-		number("ssr downsample", a_before.ssrDownsample, a_after.ssrDownsample);
-		flag("ssr blur", a_before.ssrBlur, a_after.ssrBlur);
-		flag("snow", a_before.snow, a_after.snow);
-		if (a_parity) {
-			number("sao parity", a_before.saoParity, a_after.saoParity);
-			number("normals", a_before.normals, a_after.normals);
-			number("water history", a_before.waterHistory, a_after.waterHistory);
-		}
-		return out;
-	}
-
 	std::string DiffPost(const PostFields& a_before, const PostFields& a_after)
 	{
 		std::string out;

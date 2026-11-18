@@ -804,11 +804,6 @@ namespace RenderGraph
 			m.LogWindow();
 	}
 
-	bool BuildManager::WorldStarted() const
-	{
-		return impl->worldStarted;
-	}
-
 	void BuildManager::WarnSynchronous(std::string_view a_what, std::string_view a_caller)
 	{
 		impl->WarnSynchronous(a_what, a_caller);

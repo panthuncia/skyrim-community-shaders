@@ -3,9 +3,9 @@
 #include "RenderGraph/FrameAnchors.h"
 
 /**
- * @brief The frame anchors' self-test (CS_ORG_ANCHOR_SELFTEST=1): every anchor gets an epoch, and at each one a raster pass writes a
- * texture, a compute pass reads it (and one texel of the engine's kMAIN) into a buffer, and a copy pass reads that back. Each anchor
- * logs once when its value came back. Render thread, from FrameAnchors.
+ * @brief The frame anchors' self-test (CS_ORG_ANCHOR_SELFTEST=1): every anchor is reserved, and at each one with an epoch (the
+ * stage that holds it) a raster pass writes a texture, a compute pass reads it (and one texel of the engine's kMAIN) into a
+ * buffer, and a copy pass reads that back. Each anchor logs once when its value came back. Render thread, from FrameAnchors.
  */
 namespace FrameAnchors::SelfTest
 {

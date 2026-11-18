@@ -85,8 +85,6 @@ namespace FrameAnchors::SelfTest
 			return s_status;
 		}
 
-
-
 		std::string Lowercase(std::string_view a_name)
 		{
 			std::string out(a_name);

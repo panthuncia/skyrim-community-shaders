@@ -114,16 +114,6 @@ namespace RenderGraph::Engine::Flush
 	};
 
 	/**
-	 * @brief The rest of a batch the engine draws on purpose, from a point inside it: a draw family that refuses a draw partway
-	 * (Features/DrawcallLimitFix/Core/Engine/Family) begins it at the refusal and ends it when the engine's batch call returns. Unlike an
-	 * EngineDraws scope it does not nest, so the scopes a pass opens and closes inside the batch (RenderPassImmediately's for a vouched
-	 * pass) do not end it; an open scope's reason counts first. Thread-local; nothing is checked with the latch off. Begin while one is
-	 * open replaces its reason.
-	 */
-	void BeginEngineRest(const Reason& a_reason);
-	void EndEngineRest();
-
-	/**
 	 * @brief globals::InstallD3DHooks, on DXVK's immediate context: the state readers' trace (StateTrace.cpp), with the census
 	 * (CS_ORG_RESIDUE_CENSUS=1, CS_ORG_TRIPWIRE_GUEST=1) only. DXVK drops a shader resource bind whose resource is bound as an output,
 	 * and a target bind unbinds the shader resources of its resource. With the latch on, DXVK keeps the targets the last real flush
@@ -138,9 +128,6 @@ namespace RenderGraph::Engine::Flush
 	 * it was lost. Nothing without the trace.
 	 */
 	void NoteRead(const char* a_reader, std::uint32_t a_register, ID3D11ShaderResourceView* a_view);
-
-	/** @brief Whether VouchPass records anything (the latch is on). Test it before work that only feeds VouchPass. Any thread. */
-	bool Vouching();
 
 	/**
 	 * @brief Any thread, where the engine registers a_pass with a batch renderer: the pass is the engine's to draw on purpose. When the

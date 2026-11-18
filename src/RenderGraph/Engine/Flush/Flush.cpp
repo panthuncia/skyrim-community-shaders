@@ -131,12 +131,8 @@ namespace RenderGraph::Engine::Flush
 		// Inside an EngineDraws scope: the reason's id, else -1. The engine draws here on purpose.
 		thread_local int t_engineReason = -1;
 
-		// A draw family's rest of a batch left to the engine (BeginEngineRest): not part of the scopes' nesting, so a pass's own scope
-		// (RenderPassImmediately's for a vouched pass) restoring its previous reason never ends it.
-		thread_local int t_restReason = -1;
-
-		/** @brief The reason the engine draws now: the innermost scope's, else a family's rest of a batch; -1 for none. */
-		int CurrentReason() { return t_engineReason >= 0 ? t_engineReason : t_restReason; }
+		/** @brief The reason the engine draws now: the innermost scope's, -1 for none. */
+		int CurrentReason() { return t_engineReason; }
 
 		bool InEngineDraws() { return CurrentReason() >= 0; }
 
@@ -1359,21 +1355,6 @@ namespace RenderGraph::Engine::Flush
 	{
 		if (active)
 			t_engineReason = previous;
-	}
-
-	void BeginEngineRest(const Reason& a_reason)
-	{
-		t_restReason = static_cast<int>(a_reason.Id());
-	}
-
-	void EndEngineRest()
-	{
-		t_restReason = -1;
-	}
-
-	bool Vouching()
-	{
-		return GetMarks() != nullptr;
 	}
 
 	void VouchPass(const RE::BSRenderPass* a_pass, const Reason& a_reason)

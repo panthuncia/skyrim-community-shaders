@@ -42,9 +42,6 @@ namespace RenderGraph::Frame::PostChain
 		None = Count
 	};
 
-	/** @brief "reflections". */
-	const char* ScopeName(Scope a_scope);
-
 	/** @brief Reads the world fields a_scope selects from the engine now (its entry). Render owner. */
 	WorldFields ReadWorld(Scope a_scope, const WorldFields& a_base);
 

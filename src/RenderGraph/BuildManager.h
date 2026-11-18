@@ -138,8 +138,6 @@ namespace RenderGraph
 		bool Idle() const;
 		/** @brief Owner thread, at every frame's end: the first-world-frame latch and the periodic statistics line. */
 		void NoteFrameEnd();
-		/** @brief Whether a world frame was seen: from then on a build on the render thread is a violation, and is logged. */
-		bool WorldStarted() const;
 		/** @brief Logs a build on the render thread after the first world frame (rate-limited): what was built, and by whom. */
 		void WarnSynchronous(std::string_view a_what, std::string_view a_caller);
 

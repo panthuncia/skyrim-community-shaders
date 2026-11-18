@@ -110,11 +110,6 @@ namespace RenderGraph::ExternalWork
 		return true;
 	}
 
-	std::uint64_t Submissions()
-	{
-		return Get().submissions.load(std::memory_order_relaxed);
-	}
-
 	void Shutdown()
 	{
 		auto& state = Get();

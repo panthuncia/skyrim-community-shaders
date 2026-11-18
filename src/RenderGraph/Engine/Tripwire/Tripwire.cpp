@@ -3,10 +3,10 @@
 #include <d3d11_4.h>
 #include <dxgi1_6.h>
 
+#include "RenderGraph/Engine/Native/Native.h"
 #include "RenderGraph/Engine/Tripwire/TripwireSelfTest.h"
 #include "RenderGraph/Switches.h"
 #include "Utils/D3D.h"
-#include "RenderGraph/Engine/Native/Native.h"
 
 #if defined(CS_HAS_RENDER_GRAPH)
 #	include "RenderGraph/RenderGraphRuntime.h"

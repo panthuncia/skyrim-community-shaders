@@ -66,15 +66,6 @@ namespace RenderGraph::Engine::Scaleform::Layout
 		kVertexXY16iCF32 = 4,
 	};
 
-	/**
-	 * @brief SetIndexData's format argument (GRenderer::IndexFormat: 0 none, 1 16-bit, 2 32-bit) for the DXGI format it stores at
-	 * kIndexFormat (SetIndexData SE 82921 / AE 85037). SetVertexData stores its format argument as it is.
-	 */
-	inline constexpr std::int32_t IndexFormatOf(std::uint32_t a_dxgiFormat)
-	{
-		return a_dxgiFormat == 0x39 ? 1 : (a_dxgiFormat == 0x2A ? 2 : 0);  // DXGI_FORMAT_R16_UINT, DXGI_FORMAT_R32_UINT
-	}
-
 	/** @brief GRenderer::FillTexture. */
 	struct FillTexture
 	{

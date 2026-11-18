@@ -302,9 +302,6 @@ public:
 	 */
 	bool BuildSetupGraphs(std::string_view a_caller);
 
-	/** @brief How many times BuildIfRequested was called (a build point ran), built or not. Render thread. */
-	std::uint64_t BuildPoints() const { return buildPoints; }
-
 	/**
 	 * @brief Render thread: an external epoch (org::GraphHost::SetExternalEpochs) submitted at the current point of the
 	 * D3D11 stream, as ExecuteEpoch submits one, but executed by the caller: its ticket's recording comes back to be executed in
@@ -368,9 +365,6 @@ public:
 		Segment segment;
 		std::chrono::steady_clock::time_point start;
 	};
-
-	/** @brief Time the render thread spent waiting on a worker inside the current EpochBodyScope. */
-	static void AddEpochJoinWait(std::chrono::steady_clock::duration a_waited);
 
 	/**
 	 * @brief The render thread's pacing point. DXVK's own frame-latency wait is off (D3D11SwapChain::SyncFrameLatency, for the

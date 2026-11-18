@@ -117,9 +117,6 @@ namespace RenderGraph::Engine::Targets
 			/** @brief A reader was handed the image (Serve): a graph may hold it from now on. */
 			void MarkServed() { served = true; }
 
-			/** @brief Whether a reader was handed the current image. */
-			bool Served() const { return served; }
-
 			void AdoptImage(const GraphResources::ExportedTexture& a_image, ID3D11ShaderResourceView* a_srv)
 			{
 				Drop();

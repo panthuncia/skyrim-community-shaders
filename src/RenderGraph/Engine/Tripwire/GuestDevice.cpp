@@ -95,14 +95,4 @@ namespace RenderGraph::Engine::Tripwire
 	{
 		return GetGuest().context.load(std::memory_order_acquire) != nullptr;
 	}
-
-	ID3D11Device* GuestDeviceHandle()
-	{
-		return GetGuest().device.load(std::memory_order_acquire);
-	}
-
-	ID3D11DeviceContext* GuestContextHandle()
-	{
-		return GetGuest().context.load(std::memory_order_acquire);
-	}
 }

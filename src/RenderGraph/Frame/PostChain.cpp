@@ -331,23 +331,6 @@ namespace RenderGraph::Frame::PostChain
 		state.haveSlot[a_frame.slot] = true;
 	}
 
-	const char* ScopeName(Scope a_scope)
-	{
-		switch (a_scope) {
-		case Scope::Reflections:
-			return "reflections";
-		case Scope::Ssao:
-			return "SAO";
-		case Scope::Snow:
-			return "snow";
-		case Scope::SsaoComposite:
-			return "SAO composite";
-		case Scope::WaterBlend:
-			return "water blend";
-		default:
-			return "none";
-		}
-	}
 
 	WorldFields ReadWorld(Scope a_scope, const WorldFields& a_base)
 	{
