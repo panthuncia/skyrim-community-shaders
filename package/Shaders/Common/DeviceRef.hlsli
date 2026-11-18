@@ -86,7 +86,7 @@ void DeviceRefTraceNote(uint2 a_sample, uint a_line, uint a_store, uint a_kind)
 			trace.InterlockedCompareExchange(16 * slot, 0u, key, previous);
 			if (previous == 0u)
 				trace.Store2(16 * slot + 4, a_sample);
-			if (previous == 0u || previous == key) {
+			if (min(previous, previous ^ key) == 0u) {
 				trace.InterlockedAdd(16 * slot + 12, 1u);
 				break;
 			}

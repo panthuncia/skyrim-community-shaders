@@ -103,7 +103,8 @@ bool InView(float4x4 a_viewProj, float3 a_centre, float a_radius)
 bool Occluded(float4x4 a_viewProj, float3 a_centre, float a_radius, uint a_cullFlags)
 {
 	ByteAddressBuffer latch = ResourceDescriptorHeap[LatchIndex];
-	if ((latch.Load(LatchOffset + 16) & 0xFu) < 2 || (a_cullFlags & kCullOcclusion) == 0)
+	const uint hzbState = (a_cullFlags & kCullOcclusion) != 0 ? (latch.Load(LatchOffset + 16) & 0xFu) : 0u;
+	if (hzbState < 2)
 		return false;
 	HzbView view;
 	view.ViewProj = a_viewProj;

@@ -85,9 +85,10 @@ bool PortalPlaneBitsRun(ByteAddressBuffer a_programs, uint a_program, uint4 a_en
 		if (op >= a_entry.y)
 			return false;
 		const uint4 record = a_programs.Load4(records + op * kPortalOpBytes);
-		if (record.x == 2u || record.x == 3u)
+		// Ops 2 and 3 end the program. Range compares keep these guards free of equality tests.
+		if (record.x - 2u < 2u)
 			return record.x == 2u;
-		if ((record.x != 7u && record.x != 8u) || record.y >= a_entry.z)
+		if (record.x - 7u >= 2u || record.y >= a_entry.z)
 			return false;
 		const uint2 mask = aux.Load2((header.z + 2u * (info.z + record.y)) * 4u);
 		const bool result = record.x == 7u ? !any((outside & mask) != 0u) : any((notContained & mask) != 0u);
@@ -99,15 +100,17 @@ bool PortalPlaneBitsRun(ByteAddressBuffer a_programs, uint a_program, uint4 a_en
 
 bool PortalProgramEvaluate(ByteAddressBuffer a_programs, uint a_base, uint a_program, uint4 a_entry, uint4 a_entry2, uint a_recordsBase, uint a_setsBase, float3 a_centre, float a_radius)
 {
-	if (a_base != 0u || PortalAuxIndex == 0u)
-		return PortalProgramRun(a_programs, a_entry, a_entry2, a_recordsBase, a_setsBase, a_centre, a_radius);
-#if defined(DCLF_PORTAL_FLAT)
-	return PortalFlatRun(a_programs, a_program, a_entry, a_entry2, a_recordsBase, a_setsBase, a_centre, a_radius);
-#elif defined(DCLF_PORTAL_PLANE_BITS)
-	return PortalPlaneBitsRun(a_programs, a_program, a_entry, a_entry2, a_recordsBase, a_centre, a_radius, a_setsBase);
-#else
-	return PortalProgramRun(a_programs, a_entry, a_entry2, a_recordsBase, a_setsBase, a_centre, a_radius);
+#if defined(DCLF_PORTAL_FLAT) || defined(DCLF_PORTAL_PLANE_BITS)
+	const bool auxRun = a_base == 0u && PortalAuxIndex != 0u;
+	if (auxRun) {
+#	if defined(DCLF_PORTAL_FLAT)
+		return PortalFlatRun(a_programs, a_program, a_entry, a_entry2, a_recordsBase, a_setsBase, a_centre, a_radius);
+#	else
+		return PortalPlaneBitsRun(a_programs, a_program, a_entry, a_entry2, a_recordsBase, a_centre, a_radius, a_setsBase);
+#	endif
+	}
 #endif
+	return PortalProgramRun(a_programs, a_entry, a_entry2, a_recordsBase, a_setsBase, a_centre, a_radius);
 }
 
 #endif

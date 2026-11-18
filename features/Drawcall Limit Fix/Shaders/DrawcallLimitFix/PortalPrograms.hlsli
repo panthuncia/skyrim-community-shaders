@@ -128,9 +128,10 @@ bool PortalProgramRun(ByteAddressBuffer a_programs, uint4 a_entry, uint4 a_entry
 		if (op >= operators)
 			return false;
 		const uint4 record = a_programs.Load4(records + op * kPortalOpBytes);
-		if (record.x == 2u || record.x == 3u)
+		// Ops 2 and 3 end the program. Range compares keep these guards free of equality tests.
+		if (record.x - 2u < 2u)
 			return record.x == 2u;
-		if ((record.x != 7u && record.x != 8u) || record.y >= a_entry.z)
+		if (record.x - 7u >= 2u || record.y >= a_entry.z)
 			return false;
 		const bool result = PortalPlaneSetTest(a_programs, sets + record.y * kPortalSetBytes, record.x, a_centre, a_radius);
 		op = result ? record.z : record.w;
@@ -192,14 +193,16 @@ int PortalTestAtSteps(ByteAddressBuffer a_programs, uint a_base, uint a_program,
 	PORTAL_TRACE_STEP(kPortalTraceCullMode);
 	if (cullMode == 2u)
 		return 0;
-	if (cullMode == 1u || a_alwaysDraw)
+	const uint drawMode = a_alwaysDraw ? 1u : cullMode;
+	if (drawMode == 1u)
 		return 1;
 	PORTAL_TRACE_STEP(kPortalTracePreprocessed);
 	if (a_preprocessed && cullMode != 4u)
 		return a_preprocessHidden ? 0 : 1;
 	const bool view = PortalViewTest(a_programs, a_base, a_centre, a_radius);
 	PORTAL_TRACE_STEP(kPortalTraceViewOnly);
-	if (cullMode == 3u || entry.y == 0u)
+	const uint operators = cullMode == 3u ? 0u : entry.y;
+	if (operators == 0u)
 		return view ? 1 : 0;
 	PORTAL_TRACE_STEP(kPortalTraceViewRejected);
 	if ((entry.x & kPortalSkipView) == 0u && !view)
@@ -257,13 +260,15 @@ bool StrictProgramPass(ByteAddressBuffer a_atlas, uint a_base, uint a_program, f
 // Whether a strict light (a_context: its atlas entry) culls object a_object of bound (a_centre, a_radius).
 bool StrictGateRejects(uint a_gatesIndex, uint a_atlasIndex, uint a_objectGatesIndex, uint a_context, uint a_object, float3 a_centre, float a_radius)
 {
-	if (a_gatesIndex == 0u || a_atlasIndex == 0u || a_objectGatesIndex == 0u)
+	if (min(min(a_gatesIndex, a_atlasIndex), a_objectGatesIndex) == 0u)
 		return false;
 	ByteAddressBuffer gates = ResourceDescriptorHeap[a_gatesIndex];
 	ByteAddressBuffer atlas = ResourceDescriptorHeap[a_atlasIndex];
 	const uint4 head = gates.Load4(0);  // gates, contexts, atlas identity low, high
 	const uint4 atlasHead = atlas.Load4(0);  // contexts, buckets, identity low, high
-	if (head.z != atlasHead.z || head.w != atlasHead.w || a_context >= head.y || a_context >= atlasHead.x || head.x == 0u)
+	// Another atlas's publication or no gates leaves no context to test.
+	const uint contexts = all(head.zw == atlasHead.zw) && head.x != 0u ? min(head.y, atlasHead.x) : 0u;
+	if (a_context >= contexts)
 		return false;
 	StructuredBuffer<uint> column = ResourceDescriptorHeap[a_objectGatesIndex];
 	uint objects, stride;

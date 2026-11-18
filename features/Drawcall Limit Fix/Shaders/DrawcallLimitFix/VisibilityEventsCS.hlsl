@@ -153,11 +153,12 @@ bool Append(uint a_slot, uint a_generation, uint a_kind, uint a_bits)
 void RootSlot(uint a_slot, FadeFrame a_frame)
 {
 	// No camera this frame: FadeStateCS updated nothing, so nothing is known (the words stand).
-	if (a_slot >= a_frame.RootCount || a_frame.LodAdjust == 0.0f)
+	const uint rootCount = a_frame.LodAdjust != 0.0f ? a_frame.RootCount : 0u;
+	if (a_slot >= rootCount)
 		return;
 	StructuredBuffer<FadeRootStatic> roots = ResourceDescriptorHeap[RootsIndex];
 	const FadeRootStatic root = roots[a_slot];
-	if (root.Object == kNoObject || root.Generation == 0)
+	if (min(root.Object ^ kNoObject, root.Generation) == 0u)
 		return;
 	StructuredBuffer<FadeNodeState> states = ResourceDescriptorHeap[StatesIndex];
 	const FadeNodeState state = states[a_slot];

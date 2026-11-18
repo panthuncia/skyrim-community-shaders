@@ -164,7 +164,8 @@ bool RootFading(uint a_root)
 uint LodPartitions(uint a_partitions, uint a_lod, uint a_root, bool a_main, out uint a_copy)
 {
 	a_copy = 0;
-	if (a_lod == 0 || a_root == 0xFFFFFFFFu || FadeRootsIndex == 0 || FadeStatesIndex == 0)
+	// One compare for every null guard (AGENTS.md shader rule). ~a_root is zero only for the no-root sentinel.
+	if (min(min(a_lod, ~a_root), min(FadeRootsIndex, FadeStatesIndex)) == 0u)
 		return a_partitions;
 	StructuredBuffer<FadeRootStatic> fadeRoots = ResourceDescriptorHeap[FadeRootsIndex];
 	const FadeRootStatic row = fadeRoots[a_root];
@@ -370,7 +371,8 @@ uint LocalShadowMask(float3 a_centre, float a_radius, bool a_landscape, uint a_o
 	{
 		const uint record = LocalShadowOffset + kSunRegionHeader + v * kShadowVolumeBytes;
 		const uint4 head = latch.Load4(record);  // plane masks, mask bit, landscape
-		if ((mask & head.z) != 0 || (a_landscape && head.w == 0))
+		const uint landscapeSkip = a_landscape && head.w == 0 ? 1u : 0u;
+		if (((mask & head.z) | landscapeSkip) != 0u)
 			continue;
 		const float4 sphere = asfloat(latch.Load4(record + 16));
 		const float3 offset = a_centre - sphere.xyz;
@@ -860,9 +862,10 @@ uint CasterSpan(uint a_mask)
 // A partition's place among those rows.
 uint CasterOrdinal(uint a_mask, uint a_partition)
 {
-	if ((a_mask & kPartitionChain) != 0 || a_mask == 0)
+	const uint counted = (a_mask & kPartitionChain) != 0 ? 0u : a_mask;
+	if (counted == 0u)
 		return a_partition;
-	return countbits(a_mask & ((1u << a_partition) - 1u));
+	return countbits(counted & ((1u << a_partition) - 1u));
 }
 
 // ---- MaterialRowAddress: the one place a draw's material row address is computed (its sequence's VS b1 address and, from it,
@@ -1337,7 +1340,7 @@ void BuildInput(uint draw, DrawInputWords a_words)
 			[loop] for (uint c = 0; c < classes; ++c)
 			{
 				const uint2 range = ClassRange(c, decalGroup);
-				if (range.y == 0 || decalOrdinal + k >= range.y)
+				if (decalOrdinal + k >= range.y)
 					continue;  // no sub-range of the group (or, never, one short of the slot)
 				const bool own = decalPlanned && c == decalClass;
 				StoreSequence(sequences, range.x + decalOrdinal + k, own ? decalIndex : 0u, rows, objectWord, vertexBuffer, decalStream, indexBuffer,
@@ -1360,7 +1363,8 @@ void BuildInput(uint draw, DrawInputWords a_words)
 	// The first-person view's forward input is culled below with its other inputs.
 	const bool firstPersonForward = forwardInput && !refractionInput && phase == kPhaseSingle && (ViewBits & kViewFirstPerson) != 0;
 	if (forwardInput && !firstPersonForward) {
-		if (phase != kPhaseColour || (refractionInput ? RefractionCapacity == 0 || PoolFirstsIndex == 0 : ForwardCapacity == 0))
+		const uint forwardCapacity = phase != kPhaseColour ? 0u : (refractionInput ? min(RefractionCapacity, PoolFirstsIndex) : ForwardCapacity);
+		if (forwardCapacity == 0u)
 			return;  // the depth segment never submits one; a shape without the range has no forward (or refraction) draws
 		bool forwardCulled = !drawable;
 		if (drawable && CullMode() != 0) {
@@ -1471,7 +1475,7 @@ void BuildInput(uint draw, DrawInputWords a_words)
 		ByteAddressBuffer latch = ResourceDescriptorHeap[LatchIndex];
 		bucketKey = latch.Load(BucketMapOffset + (rowsWord >> 16) * 4);
 	}
-	if (pipeline == kNoPipeline || bucketKey == kNoPipeline)
+	if (min(pipeline ^ kNoPipeline, bucketKey ^ kNoPipeline) == 0u)
 		return;
 	if (SizeProbe()) {
 		const float radius = ObjectRow(objectIndex, kObjectBoundRow).w;

@@ -72,7 +72,7 @@ void Pack(RWByteAddressBuffer a_draws, uint a_counter, uint a_array, uint a_vert
 	ByteAddressBuffer buckets = ResourceDescriptorHeap[BucketsIndex];
 	const uint bucketBase = bucket * kBucketRowBytes;
 	const uint mesh = buckets.Load(bucketBase + tier * 4);
-	if (buckets.Load(bucketBase + 28) == 0 || mesh == kNoMesh)
+	if (min(buckets.Load(bucketBase + 28), mesh ^ kNoMesh) == 0u)
 		return;
 	ByteAddressBuffer meshes = ResourceDescriptorHeap[MeshesIndex];
 	const uint vertices = meshes.Load(mesh * kMeshRowBytes + 24);

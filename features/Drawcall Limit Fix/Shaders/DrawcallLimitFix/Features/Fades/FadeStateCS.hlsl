@@ -511,7 +511,7 @@ void ReportMilestone(uint a_index, FadeRootStatic a_root, FadeNodeState a_state)
 	RWStructuredBuffer<FadeNodeState> published = ResourceDescriptorHeap[(F.SceneFrame & 1u) != 0 ? OutIndex1 : OutIndex0];
 	FadeNodeState state = states[index];
 	// No root, or its seed not sampled yet: not updated this frame.
-	if (root.Object == kNoObject || root.Generation == 0 || !MergeSeed(index, root)) {
+	if (min(root.Object ^ kNoObject, root.Generation) == 0u || !MergeSeed(index, root)) {
 		published[index] = state;
 		return;
 	}
@@ -522,7 +522,8 @@ void ReportMilestone(uint a_index, FadeRootStatic a_root, FadeNodeState a_state)
 		state.Frame = 0;
 	}
 	// Once a frame, and only with a camera.
-	if (state.Frame == F.SceneFrame || F.LodAdjust == 0.0f) {
+	// One compare for both tests (AGENTS.md shader rule). abs clears the sign so -0 counts as no camera.
+	if (min(state.Frame ^ F.SceneFrame, asuint(abs(F.LodAdjust))) == 0u) {
 		published[index] = state;
 		return;
 	}

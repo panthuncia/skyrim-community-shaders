@@ -222,7 +222,8 @@ void Sample(RWByteAddressBuffer a_results, uint a_counter, uint a_base, uint a_c
 		return;
 	results.InterlockedAdd(kind * 4, 1);
 	// The samples are the colour changes' (a moving camera's vanished pixels are its own edges).
-	if (kind == kVanished || kind == kAppeared)
+	// kind is not 0 here, so this is kVanished or kAppeared as one compare.
+	if (kind <= kAppeared)
 		return;
 	Sample(results, kFrameSampleCount, kFrameSampleBase, kFrameSamples, pixel, true, uint4(position, kind, object, colours.y),
 		uint4(best.y, colours.z, best.z, colours.w));
