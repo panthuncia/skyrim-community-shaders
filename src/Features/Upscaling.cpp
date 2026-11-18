@@ -10,6 +10,7 @@
 #include "State.h"
 #include "Upscaling/DXVKInterop.h"
 #include "RenderGraph/FrameAnchors.h"
+#include "RenderGraph/Frame/FrameDriver.h"
 #include "RenderGraph/Engine/GuestDevice.h"
 #include "RenderGraph/Engine/Native/Native.h"
 #include "RenderGraph/Engine/OwnedFrame.h"
@@ -653,18 +654,21 @@ bool Upscaling::IsFrameGenerationActive() const
 
 void Upscaling::BeginRenderFrame()
 {
-	// A test run's upscale method (RequestUpscaleTest), as the menu's stepper sets it.
-	if (const int request = s_upscaleTestRequest.exchange(-1, std::memory_order_relaxed); request >= 0) {
-		settings.upscaleMethod = static_cast<uint>(request);
-		logger::info("[UPTEST] upscale method {} (now {})", magic_enum::enum_name(static_cast<UpscaleMethod>(request)), magic_enum::enum_name(GetUpscaleMethod()));
-	}
-	// A test run's frame generation switch (RequestFrameGenTest), as the menu's stepper makes it.
-	if (const int request = s_frameGenTestRequest.exchange(-1, std::memory_order_relaxed); request >= 0) {
-		settings.frameGeneration = request != 0;
-		if (request != 0)
-			settings.frameGenMethod = static_cast<uint>(request == 2 ? FrameGenMethod::kDLSSG : FrameGenMethod::kFSR);
-		logger::info("[FGTEST] switch: frame generation {}", request == 0 ? "off" : request == 2 ? "DLSS-G" : "FSR-FG");
-	}
+	// A test run's upscale method (RequestUpscaleTest), as the menu's stepper sets it. The menu writes between frames, so this
+	// waits for the frame boundary too.
+	if (const int request = s_upscaleTestRequest.exchange(-1, std::memory_order_relaxed); request >= 0)
+		RenderGraph::Frame::Driver::AtNextBegin([this, request] {
+			settings.upscaleMethod = static_cast<uint>(request);
+			logger::info("[UPTEST] upscale method {} (now {})", magic_enum::enum_name(static_cast<UpscaleMethod>(request)), magic_enum::enum_name(GetUpscaleMethod()));
+		});
+	// A test run's frame generation switch (RequestFrameGenTest), as the menu's stepper makes it, at the frame boundary as well.
+	if (const int request = s_frameGenTestRequest.exchange(-1, std::memory_order_relaxed); request >= 0)
+		RenderGraph::Frame::Driver::AtNextBegin([this, request] {
+			settings.frameGeneration = request != 0;
+			if (request != 0)
+				settings.frameGenMethod = static_cast<uint>(request == 2 ? FrameGenMethod::kDLSSG : FrameGenMethod::kFSR);
+			logger::info("[FGTEST] switch: frame generation {}", request == 0 ? "off" : request == 2 ? "DLSS-G" : "FSR-FG");
+		});
 	{  // TEMP-FG-TEST
 		static uint64_t secondTick = 0, lastTick = 0;
 		static uint32_t frames = 0, worst = 0, stalls = 0;

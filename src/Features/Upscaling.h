@@ -93,11 +93,11 @@ public:
 
 	static void NotifyWindowFocus(bool a_focused);        // WM_ACTIVATEAPP / WM_ACTIVATE
 	/**
-	 * @brief Any thread (a test run's dclf:fg command): frame generation set as the menu's method stepper sets it, at the next render
-	 * frame's start. 0: off, 1: FSR-FG, 2: DLSS-G.
+	 * @brief Any thread (a test run's dclf:fg command): frame generation set as the menu's method stepper sets it, at the frame
+	 * boundary after the next render frame's start. 0: off, 1: FSR-FG, 2: DLSS-G.
 	 */
 	static void RequestFrameGenTest(int a_method);
-	/** @brief A test run's upscale method (the "upscale" command: an UpscaleMethod), applied at the next render frame's start. */
+	/** @brief A test run's upscale method (the "upscale" command: an UpscaleMethod), applied at the frame boundary after the next render frame's start. */
 	static void RequestUpscaleTest(int a_method);
 	static void NotifyWindowModifying(bool a_modifying);  // WM_ENTERSIZEMOVE / WM_EXITSIZEMOVE
 	static void NotifyDisplayState(bool a_on);            // GUID_CONSOLE_DISPLAY_STATE
