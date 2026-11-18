@@ -39,8 +39,8 @@ namespace org
  * another one used since its own last use enters from Undefined, after that use on every queue. So the next span's first pass
  * must write what it reads (the recipe check finds a frame transient whose first use is a read).
  *
- * Native mode only: guest mode runs no CS stage. CS_ORG_FRAME_ARENA=0 keeps each stage's transients in pools of its own and the
- * frame transients committed, for A/B runs.
+ * Both modes. CS_ORG_FRAME_ARENA=0 keeps each stage's transients in pools of its own and the frame transients committed, for A/B
+ * runs.
  */
 namespace RenderGraph::Frame::Transients
 {

@@ -2591,7 +2591,7 @@ bool RenderGraphRuntime::Initialize()
 				// transients took their memory between two frames, so every admission found alias activations and planned against
 				// the ledgers (perf-taa: 27 us a submission against 12 with pools of their own). Drawcall Limit Fix's epochs get their
 				// places too: the frame transients' spans count every graph that uses them.
-				if (!state->native || !RenderGraph::Frame::Transients::Install(*state->host))
+				if (!RenderGraph::Frame::Transients::Install(*state->host))
 					state->host->SetPrivateAliasEpochs(segments);
 				logger::info("[ORG] frame segments: epochs {} are revision-driven and open", fmt::join(segments, ","));
 			}
