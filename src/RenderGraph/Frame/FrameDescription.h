@@ -1,5 +1,7 @@
 #pragma once
 
+#include "RenderGraph/Frame/SegmentId.h"
+
 #include <array>
 #include <cstdint>
 #include <string>
@@ -30,31 +32,10 @@ namespace RenderGraph::Frame
 	/** @brief "world", "frozen world", "main menu", "loading screen" or "Bink movie". */
 	const char* KindName(Kind a_kind);
 
-	/**
-	 * @brief The declared frame's segments, in frame order: the start stage, the plan's S1 (pre-depth: the EarlyPrepass clients), S2 (pre-main: the
-	 * depth copy at Main::RenderDepth's end, Terrain Blending, the shadow mask, light culling and the Prepass clients) and S3
-	 * (deferred: the deferred passes and the composite). The others are added by later stages.
-	 */
-	enum class SegmentId : std::uint8_t
-	{
-		Start,           // the frame's start: the reflections prepass, the reflection faces' sky (the faces cleared by its load operations), to DCLF's shadow view
-		PreDepth,
-		PreMain,
-		Deferred,        // deferred+water: the deferred passes and the composite, the water mask, the RenderWorld scopes, the kMAIN copy, the water and its blend
-		Sun,             // the sun stage: the sun's occlusion query after DCLF's forward epoch, before the first-person one
-		Post,            // the post stage: the volumetric lighting, the pre-tonemap composites, the upscaler's evaluate and the depth upscale,
-		                 // the end-of-frame effects with the tonemap, to RenderEndOfFrameEffects' return
-		Ui,              // the UI stage, in every frame kind: the frozen composite, the displays before and after a menu's 3D scene, the
-		                 // scene and its composite, the movie's tiles, the overlay and the capture, to just before the present
-		Count
-	};
-	inline constexpr std::uint32_t kSegments = static_cast<std::uint32_t>(SegmentId::Count);
+	// SegmentId, kSegments and SegmentName are in SegmentId.h.
 
 	/** @brief The most clients a segment describes one by one (SegmentFields::clientsOn, SegmentFields::instances). */
 	inline constexpr std::uint32_t kSegmentClients = 32;
-
-	/** @brief "pre-depth". */
-	const char* SegmentName(SegmentId a_segment);
 
 	/**
 	 * @brief What a segment's recording depends on. Its hash is the revision the segment's recording is made for (FieldsHash), so
