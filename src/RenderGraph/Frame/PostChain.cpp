@@ -211,8 +211,13 @@ namespace RenderGraph::Frame::PostChain
 			{
 				auto& state = Get();
 				const bool owner = FrameAnchors::IsRenderOwner();
-				if (owner)
+				if (owner) {
 					state.inChain = true;
+					// Main::RenderFirstPersonView came before: every step of the sun stage has tapped (its last, the first person's query in a frame
+					// without Drawcall Limit Fix's first-person epoch). The stage ends here at the latest, before the chain's D3D11 work (the
+					// upscalers' separator in guest mode) reaches the GPU.
+					(void)FrameAnchors::TapPoint(SegmentId::Sun);
+				}
 				func(a_target);
 				if (owner)
 					state.inChain = false;

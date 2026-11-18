@@ -335,10 +335,11 @@ namespace RenderGraph::Frame::Recipes::Table
 				{ .anchor = Anchor::EngineQueries, .clients = { "cs.sky.sun" }, .instanceCount = 2 },
 				{ .point = true },
 			} },
+			.runsInGuest = true,
 			.commitBefore = Segments({ Segment::FirstPerson, Segment::AnchorVolumetricLighting, Segment::AnchorPostProcessing, Segment::AnchorUpscale, Segment::AnchorInterface,
 				Segment::AnchorPresent, StageSegment(SegmentId::Post) }),
-			.commit = "just before DCLF's first-person epoch",
-			.commitSite = "BeforeGpuWork, before DCLF's first-person epoch or later GPU work",
+			.commit = "just before DCLF's first-person epoch, or RenderWorldPostProcess' entry",
+			.commitSite = "BeforeGpuWork, before DCLF's first-person epoch or later GPU work; at the latest RenderWorldPostProcess' entry (Frame/PostChain.cpp)",
 			.epochs = { Own(StageSegment(SegmentId::Sun)), Placed(Anchor::EngineQueries) } },
 		{ .id = StageId::FirstPerson, .owner = Owner::Dclf, .name = "first person", .commit = "Main::RenderFirstPersonView", .epochs = { Own(Segment::FirstPerson) } },
 		// The post stage: ImageSpaceManager::RenderWorldPostProcess (SE 100430, AE 107148). First the first person's sun query

@@ -4846,7 +4846,10 @@ Since Guest B0 (2026-11-18) guest runs every port native runs, with the flush la
 and CS's features draw on ORG in both modes, and the engine's binds and draws are withheld from DXVK. Since Guest B1 guest runs the
 frame driver, schedules, staged builds, keys and the recipe check; since Guest B2 two stages, pre-depth and pre-main, are one block each
 in DXVK's stream, the skeleton hosts its clears in Drawcall Limit Fix's graphs and the guest stages' places as in native, and the engine's
-constant-buffer writes inside a stage's window reach DXVK after the window (the latch's write-behind). It still uses: the own epochs of
+constant-buffer writes inside a stage's window reach DXVK after the window (the latch's write-behind). Since Guest B3 to B5 deferred+water,
+start and sun run as guest stages too (five of seven CS stages; post and UI remain), the kMAIN copy reaches the skeleton through the guest
+context's CopyResource hook, and a client named by a guest stage and by one not in guest uses its anchor's own epoch for the other's part
+(`StagesOnly`, `OwnEpochHolds`). It still uses: the own epochs of
 every anchor the guest stages do not hold (per-anchor epochs, `FrameAnchors::Scheduled` on the anchor's own built graph; the skeleton's
 group anchors for the clears and copies of the stages not in guest, `OwnEpochTakes`; Skylighting's lent slot with its D3D11 clear), the
 main ImageSpace client,
@@ -7655,3 +7658,81 @@ river, rain, interior, under water. Native: quick. All passed with 0 tap errors,
 is the known `PublishedResources` one. Shots against Guest B2's: quick 2.0; river 21.8 (the NPC) and 3.0; rain 1.7 and 1.5; interior 1.5
 and 1.8; under water 6.6 and 2.2; census shots at most 0.9 apart from Dragonsreach (12.6, its light shafts). Native quick against B3's
 native run 0.9.
+
+## Guest B5: sun in guest (2026-11-18)
+
+Plan piece B5. Guest mode now runs five stages as blocks in DXVK's stream: start, pre-depth, pre-main, deferred+water and sun. Post and UI
+keep their anchors' own epochs. Code and this text on `org-native/phases` (no submodule change). RX 6600, Perf-Fast, background runs with
+`DXVK_DEBUG=hang`.
+
+### What runs in guest
+
+- Sun has `runsInGuest`: the precipitation (Drawcall Limit Fix's precipitation family, its draws frame inputs), the kMAIN copy, the water's
+  draws, the water targets' clear and the water blend under water, and the sun's occlusion query. EngineDraws, EngineCopy, ImageSpace and
+  EngineQueries stay shared. The sun client takes two instances now (`NamedByStage`). The first person's query in a frame with Drawcall
+  Limit Fix's first-person epoch is the post stage's step, so in guest it runs on EngineQueries' own epoch (`OwnEpochHolds`, instance 0
+  there). The queries' answers are CS's in both modes (Engine/Queries' bracket); the ring's counts were the same as in B3's runs.
+- **The sun stage's commit at the latest.** In a frame without the first-person epoch (the map, the journal), the stage stayed open until
+  the post chain's anchors' epochs. The upscalers' separator clear (`Upscaling::SeparateFromGraphEpochs`, a guest-only D3D11 UAV clear)
+  reached DXVK inside the window (72 to 78 calls in those windows). `RenderWorldPostProcess`' entry (Frame/PostChain.cpp) now ends the
+  stage first: Main::RenderFirstPersonView came before, so every sun step has tapped. The same point in both modes.
+- **Dynamic ring chunks.** `DynamicRing::Retire` released a full chunk behind D3D11's stream at once in guest, and parked it until the
+  frame's end in native. Since Guest B0 the graph reads latched draws from those chunks in guest too, and a stage's block reaches DXVK's
+  stream only at its commit: a release fence ended inside the sun window completed before the block that reads the chunk. The chunk is
+  parked until the frame ends in both modes now.
+
+### Residue
+
+`latch-census-short` (DLL `ea046345aeed`): steady exterior windows read 150 calls each (0.5 a frame): ID3D11DeviceContext::End of the
+release fences (`RenderGraphRuntime::ReleaseAfterD3D11`) issued inside the sun window, now for chunks of ended frames (safe). The interior
+windows read 0. The first load window also has the before-water depth copy (2), Skylighting's guest occlusion clear (2) and one skeleton
+clear (B3, B4). `latch-census-short+rain` (DLL `6f266421cb1d`): 0 in every steady window; nothing of the precipitation reached DXVK.
+
+Not fixed: parking every guest release fence while a stage's window holds values (issuing it from `ServiceD3D11Releases` outside the
+windows) removed those calls but changed the image: after some frames trees lit brighter and hazier (the upscalers run's TAA and XeSS
+shots 10 to 16 off, the worldspace run's Tamriel 11.7), reproduced twice, gone with that change reverted. The likely cause: the parked
+fences were not issued for long stretches (the frame-end service found a window holding values, or ran too rarely), so the engine
+constants' chunks or other owners did not come back and a capture went stale. When `StagesHoldValues` is true at the frame end in guest
+needs a look before the release fences can follow the blocks.
+
+### Performance and memory
+
+perf-taa, uncapped, VRAM Budget off, alternating guest and native (DLL `ea046345aeed`):
+
+| | Guest | Native | Guest in B2 |
+|---|---|---|---|
+| frame period between the marks | 18.95 / 18.96 ms | 19.34 / 19.18 ms | 19.26 / 19.23 ms |
+| GPU 3D engine busy | 98.2 / 98.1% | 99.1 / 99.4% | 98.3 / 98.0% |
+| render thread CPU | 261 / 249 ms a second | 202 / 199 | 299 / 308 |
+| graph host thread | 183 / 180 ms a second | 121 / 112 (the submission thread) | 429 / 379 |
+| DXVK worker | 100 ms a second (first run) | none | 121 / 115 |
+| process dedicated VRAM | 3,514 / 3,587 MiB | 2,994 / 2,929 MiB | 3,626 / 3,788 MiB |
+
+The guest census run (`org.epoch_stats`, 18.97 ms): 14.0 epochs and 21.0 executions a steady frame. Every report has start, pre-depth,
+pre-main, deferred+water and sun declared, tapped once and current every frame, 0 recordings, 0 switches, 0 build switches, 0 key builds,
+0 lagged work, 0 tap errors. The thread costs fall toward native's as stages replace anchor epochs: the graph host thread halved against
+B2 (about 180 against 380 to 430 ms a second; native's submission thread 112 to 121), the render thread fell by 40 to 60 ms a second
+(native 199 to 202), VRAM by about 150 MiB. The frame stays GPU-bound; guest is 0.2 to 0.4 ms faster than native in this scene.
+
+### Checks
+
+On DLL `ea046345aeed` (the final build), one background run each: guest `latch-census-short`, quick, river, rain, under water, interior,
+upscalers, the worldspace run, the Journal Menu run; native quick, river, rain, under water, interior, validation (the same 20
+`VUID-vkCmdDraw-None-09600` as B2); `d3d11+quick`; perf-taa as above. All passed with 0 tap errors, 0 recipe findings, no failed build;
+the only `[C]` line is the known `PublishedResources` one. Shots against Guest B2's: quick 2.4; river 11.4 and 3.0; rain 1.7 and 1.4;
+under water 6.3 and 2.2; interior 4.1 and 9.5 (Dragonsreach's light shafts); upscalers 0.8 to 3.6; worldspace Tamriel 0.9, Riverwood
+3.4, Solstheim 10.2; census shots at most 1.0 apart; Journal Menu pre and post at most 4.0, the menu shot 7.1 (blurred background, as in
+B3). Native against B2's native shots: quick 1.2, river 6.7 and 3.2, interior 0.6 and 0.7, rain 4.8 and 1.7; native under water 7.0 and
+2.2 against an earlier native run. Guest under water is darker than native (62 against 74 mean), as in B2's runs: not this piece's.
+
+### For the remaining pieces (post, UI)
+
+- Post holds the first person's kMAIN copy and sun query, the volumetric lighting, the chain and the Upscale anchor. With it in guest the
+  sun query's own-epoch run loses its use, and ImageSpace's `postOn` (main client and manifest off) follows. The chain's guest D3D11 work
+  (the upscalers' separator) then sits inside the post window and needs a graph-side answer.
+- UI holds the face tint's other step: with it the menu steps (`Menu().on`) can follow the UI and start stages, and the face tint at a
+  load stops reaching the main client.
+- Once both run in guest: delete `Stage::runsInGuest`, `OwnEpochTakes`, `RunCopy`'s own-epoch branch, `StagesOnly` (becomes
+  `NamedByStage`) and `OwnEpochHolds`.
+- Open residue: the release fences (above), Skylighting's guest occlusion clear (B4), the before-water depth copy in a frame without
+  `DeferredPasses`, and a one-off skeleton clear of a view it does not hold.

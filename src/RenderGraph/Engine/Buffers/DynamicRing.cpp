@@ -153,17 +153,14 @@ namespace RenderGraph::Engine::Buffers::detail
 			}
 
 			/**
-			 * @brief A full chunk. In guest mode it goes back to the free list once the GPU is past every D3D11 command issued until now.
-			 * In native mode the graph reads it: draws latched from it run in executions submitted later in the same frame. So it is
-			 * parked until the frame ends (ReleaseParked), and then waits for the graph's submissions up to that point.
+			 * @brief A full chunk. The graph reads it: draws latched from it run in executions submitted later in the same frame (in guest
+			 * mode a stage's block reaches DXVK's stream only at the stage's commit, after the chunk filled). So it is parked until the frame
+			 * ends (ReleaseParked), and then waits for the work submitted up to that point: the graph's submissions in native mode, D3D11's
+			 * stream with the frame's blocks in it in guest mode.
 			 */
 			void Retire(Chunk& a_chunk)
 			{
-				if (Engine::Native::Active()) {
-					parked.push_back({ &a_chunk, RenderGraph::RefFrame() });
-					return;
-				}
-				ReleaseAfterWork(a_chunk);
+				parked.push_back({ &a_chunk, RenderGraph::RefFrame() });
 			}
 
 			/** @brief Hands a_chunk back to the free list once the GPU is past the work submitted until now (ReleaseAfterD3D11). */
@@ -177,9 +174,9 @@ namespace RenderGraph::Engine::Buffers::detail
 			}
 
 			/**
-			 * @brief Native mode: the parked chunks of frames that have ended. A frame ends at its present (SealPresented advances
-			 * RefFrame), after every graph execution of that frame was submitted. So the native release, which waits for the graph's
-			 * submissions made until now to retire, covers every execution that may read the chunk.
+			 * @brief The parked chunks of frames that have ended. A frame ends at its present (SealPresented advances RefFrame), after every
+			 * graph execution of that frame was submitted. So the release, which waits for the work submitted until now, covers every
+			 * execution that may read the chunk.
 			 */
 			void ReleaseParked()
 			{
