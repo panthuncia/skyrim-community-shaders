@@ -12,11 +12,11 @@
 [submodule "extern/OpenRenderGraph"]
 	path = extern/OpenRenderGraph
 	url = https://github.com/panthuncia/OpenRenderGraph.git
-	branch = backend_interop
+	branch = dev
 [submodule "extern/BasicRHI"]
 	path = extern/BasicRHI
 	url = https://github.com/panthuncia/BasicRHI.git
-	branch = main
+	branch = dev
 [submodule "extern/BasicTelemetry"]
 	path = extern/BasicTelemetry
 	url = https://github.com/panthuncia/BasicTelemetry.git
