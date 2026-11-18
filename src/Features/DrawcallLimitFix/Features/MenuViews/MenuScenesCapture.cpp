@@ -399,10 +399,10 @@ namespace DCLF::Features::MenuViews::Scenes
 			constants.nullTexture = null.index;
 			if (null.owner)
 				owners.push_back(std::move(null.owner));
-			// Every slot as the shadow state holds it (a bound view's import, in its own dimension; an empty slot a null 2D view) and
-			// its sampler.
+			// Every slot the build declares as the shadow state holds it (a bound view's import, in its own dimension; an empty or undeclared
+			// slot a null 2D view) and its sampler.
 			for (std::uint32_t t = 0; t < kLightingSlots; ++t) {
-				auto* view = Unwrap(rss.PSTexture[t]);
+				auto* view = LightingSlotRead(draw.key.descriptor, t) ? Unwrap(rss.PSTexture[t]) : nullptr;
 				GpuTextures::ResolveFailure failure = GpuTextures::ResolveFailure::None;
 				const auto slot = Family::SlotTexture(view, Kind::Texture2D, GpuTextures::Tag(GpuTextures::Source::FrameSlot, t), constants.textures[t], owners, &failure);
 				if (slot == Family::SlotResult::Published) {

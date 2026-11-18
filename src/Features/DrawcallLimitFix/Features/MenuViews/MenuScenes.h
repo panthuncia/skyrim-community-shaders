@@ -122,6 +122,55 @@ namespace DCLF::Features::MenuViews::Scenes
 	/** @brief The texture and sampler slots a Lighting draw's latch holds (t0-t15, s0-s15). */
 	inline constexpr std::uint32_t kLightingSlots = 16;
 
+	/**
+	 * @brief Whether Lighting.hlsl declares slot a_slot for a_descriptor (a Lighting pixel descriptor: the technique in bits 24 to 29,
+	 * LightingShaderFlags below), as its LIGHTING_SRV list does. The engine leaves the last draw's views in the slots a material does not
+	 * set, so an undeclared slot can hold anything (a depth plane after a world frame). It is latched as a null view.
+	 */
+	constexpr bool LightingSlotRead(std::uint32_t a_descriptor, std::uint32_t a_slot)
+	{
+		enum : std::uint32_t
+		{
+			kEnvmap = 1,
+			kParallax = 3,
+			kFacegen = 4,
+			kParallaxOcc = 7,
+			kMultiTexLand = 8,
+			kLodLand = 9,
+			kMultilayerParallax = 11,
+			kEye = 16,
+			kLodLandNoise = 18,
+			kMultiTexLandLodBlend = 19,
+		};
+		const std::uint32_t technique = (a_descriptor >> 24) & 0x3F;
+		const auto flag = [&](std::uint32_t a_bit) { return (a_descriptor & (1u << a_bit)) != 0; };
+		// TRUE_PBR (bit 3) and the land techniques declare most slots: all are latched.
+		if (flag(3) || technique == kMultiTexLand || technique == kLodLand || technique == kLodLandNoise || technique == kMultiTexLandLodBlend)
+			return true;
+		const bool projected = flag(15);
+		const bool envmap = technique == kEnvmap || technique == kMultilayerParallax || technique == kEye || flag(19) || flag(21);
+		switch (a_slot) {
+		case 2:
+			return flag(2);
+		case 3:
+			return technique == kFacegen || technique == kParallax || technique == kParallaxOcc || projected;
+		case 4:
+		case 5:
+			return envmap || technique == kFacegen;
+		case 7:
+		case 15:
+			return false;
+		case 8:
+			return technique == kMultilayerParallax || projected;
+		case 10:
+			return projected;
+		case 13:
+			return flag(18);
+		default:
+			return true;
+		}
+	}
+
 	/** @brief LightingOrgDraw in Lighting.hlsl: a Lighting draw's latched values, 1376 bytes. */
 	struct LightingSceneConstants
 	{
