@@ -46,6 +46,8 @@ Phase 2:
   - D3D12 (RX 6600, 2026-11-18): the CPU pipeline's refraction draws pushed device addresses where the D3D12 stage reads heap
     indices (the frame blocks and LodFadeFrame). AMD faults on the descriptor load and lost the device at the first world frame.
   - D3D12: texture streaming's feedback buffer is a committed HostCached buffer (an UPLOAD buffer cannot have unordered access).
+  - D3D12 (2026-11-18): the shadow caster rows' capacity is the host's, not a raw GetDimensions of a structured view (a quarter of
+    the rows on AMD, so most foliage casters were dropped). VisibilityEventsCS drops the same read.
   - ORG: a barrier between unordered-access (and copy) uses of one resource in consecutive passes.
 - **Screenshots** are a gated pass, in the graph for good: a capture needs no build, so it no longer misses its capture point.
 
@@ -97,19 +99,13 @@ To match DXVK, native needs what DXVK's CS thread gives it: the GPU work off the
 
 ## Open
 
-- **D3D12 shadow flicker** (the `flicker` configs, scored by tile spikes over 60 consecutive frames): D3D12 only, GPU-driven shadow
-  path only (`CS_DCLF_PIPELINE=cpu` and `CS_DCLF_SHADOWS=0` show none; Vulkan scores 0 on the same build). In a spike frame some
-  casters (a tree's branches) are missing from the shadow map for one frame.
-  - Ruled out: barrier sync scopes (`BASICRHI_DX12_FULL_BARRIERS`), the compute and copy queues, occlusion culling, scene value
-    copies, root constants after ExecuteIndirect, UAV hazards between declared passes, the upscaler, shadow pipeline merging
-    (`CS_DCLF_SHADOW_MERGE=0`), depth clamp (`CS_DCLF_SHADOW_DEPTH_CLAMP=0`), and races on memory reused across frames
-    (`CS_ORG_NATIVE_SYNC_PRESENT=1`, a GPU wait at every present, still flickers).
-  - RX 6600 (2026-11-18): flickers too (`native-d3d12-flicker-taa`), and the steady state is the wrong one. Most frames lack the
-    foliage casters (a tree's leaves cast no shadow on its branches or the ground), and a spike frame has them, matching Vulkan. The
-    CPU pipeline (`dclf.pipeline=cpu`) draws them every frame. Indexing the shadow alpha test's diffuse as non-uniform changed nothing.
-  - Leads: BuildDrawsCS writes an object's caster row (`StoreCasterRow`, indexed by the object's caster first) from every shadow
-    view that draws it, in one dispatch; and the fade root states are read undeclared. Vulkan's global barriers can hide an
-    undeclared access that D3D12's per-resource barriers do not.
+- **D3D12 shadow flicker** (the `flicker` configs): the steady loss of foliage casters is fixed (caster rows, 2026-11-18, below). Left:
+  a hazy far tree at the top left of the flicker view drawn in some D3D12 frames and not the next (main view), 2 spikes without an
+  upscaler and 14 with taa. Vulkan scores 0.
+- **Screenshots in native**: the UI stage's capture comes out without the HUD; the D3D11 copies taken when its readback buffers are busy
+  have it, so the flicker bursts show the compass on every other shot. Not the import (all resolve to `Native::BackBuffer`).
+- **D3D12 views**: `CreateWords` buffers read as ByteAddressBuffer have structured views. A raw GetDimensions on them returns the element
+  count on AMD. None is left in the shaders, but the views do not match the reads.
 - **Frame generation in native**: the native presenter needs the frame-generation controls DXVK exports (swap chain recreate,
   sync present, queue depth, tearing, the torn-down callback). Until then DLSS-G and FSR-FG stay off in native.
 - **Residue:** the reflection cube face draws; load-window shadow draws; the refused occlusion-query draw; the sun occlusion

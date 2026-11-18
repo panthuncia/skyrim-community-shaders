@@ -8180,3 +8180,54 @@ The dump itself was readable: `rgd.exe --parse <file>.rgd -o <file>.txt` gives t
 - perf-taa, one run each: D3D12 44 fps, Vulkan 52 fps (steady samples).
 - Shadow flicker: see status.md. The foliage casters are missing in most D3D12 frames.
 - The HUD compass shows on every other frame in the flicker bursts on both native backends. It was not seen on 2026-11-14.
+
+## D3D12 shadow casters lost for want of caster rows (2026-11-18)
+
+### Cause: a raw GetDimensions of a structured view
+
+ShadowCasterRows (BuildDrawsCS) hands every caster its rows and gives none to a caster past the rows' capacity, which it read with
+`GetDimensions` on the caster rows' RWByteAddressBuffer. `CreateWords` makes those buffers with structured views (stride 4). On D3D12
+AMD's raw GetDimensions returns the descriptor's record count, which for a structured view is its element count: a quarter of the bytes.
+So only about a fifth of the casters got rows. The rest were counted as lost and not drawn, whichever got there first.
+
+Evidence (a temporary per-epoch log of the sun views' cull counters, same save, timescale 0):
+
+| View | Vulkan drawn / rows lost | D3D12 before | D3D12 after |
+|---|---|---|---|
+| cascade 0 | 76 / 0 | 9 to 25 / 51 to 67 | 76 / 0 |
+| cascade 1 | 1430 / 0 | 166 to 325 / 1090 to 1250 | 1430 / 0 |
+
+Fade states were checked on the way and are not involved: every caster under a root read its published state, none fading. The RGA
+ISA of ShadowCasterRows (gfx1032, D3D12) reads descriptor word 2 and divides by the row stride, with no stride term.
+
+### Fix
+
+The pass passes the caster rows' units from the revision's version (`NamedUnitsOf`) as a constant and the shader bounds the rows with
+it. VisibilityEventsCS had the same read on the frustum stamps, already bounded by `ObjectSlots`, so that check is gone.
+
+The general hazard is left: `CreateWords` buffers bound as ByteAddressBuffer have structured views on D3D12. Loads and stores work on
+AMD and NVIDIA, but the spec does not allow it. Several of these buffers are also read as StructuredBuffer<uint>, so they cannot just
+become raw.
+
+### Results
+
+Flicker detector (tile spikes over 60 frames, build b6d496b84ca9, same source as the final build):
+
+| Config | Before (d8a6e85d63c9) | After |
+|---|---|---|
+| native-flicker (Vulkan) | 0 | 0 |
+| native-d3d12-flicker | 2 | 2 |
+| native-d3d12-flicker-taa | 99 over 19 frames | 70 over 8 frames |
+
+The taa runs' biggest frame is the switch to taa itself (66 before, 56 after; Vulkan's native-flicker-taa has 58 there and nothing else).
+Without it D3D12 taa has 14 spikes left over 7 frames. Those and the two of native-d3d12-flicker are a hazy far tree at the top left of
+the view that is drawn in some frames and not in the next (main view, not shadows). That one is still open.
+
+The tree's mean luminance in the flicker shots is 73 on D3D12 and Vulkan now (79 on D3D12 before, no self-shadow).
+
+### HUD compass on every other shot
+
+It is the capture, not the frame. The shots alternate between the graph's capture (the UI stage's Capture step, since 2026-11-16) and
+the D3D11 copy taken when every readback buffer is busy or a capture still waits. The graph's captures lack the HUD, the D3D11 copies
+have it. Importing the source as engine target kFRAMEBUFFER changed nothing: every import resolves to `Native::BackBuffer`. Why the
+UI stage's copy comes out without the displays is not found.
