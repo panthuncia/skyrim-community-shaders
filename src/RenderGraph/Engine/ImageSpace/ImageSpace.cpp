@@ -154,8 +154,6 @@ namespace RenderGraph::Engine::ImageSpace
 			std::uint32_t samplers;            // the source's sampler count (s0..s(n-1)): a read slot below it has its sampler
 			std::uint32_t cubes = 0;           // bit per slot CS binds the reflection cubemap to itself (VanillaBinding.cpp)
 			bool compute = false;              // a compute shader (BSImagespaceShader::DispatchComputeShader): one UAV, CS b0
-			// Drawn outside every scope (ScopeKind::Effect): the effect's own call is its scope, and its batch runs at the call's end.
-			bool ownScope = false;
 			std::uint32_t targets = 1;  // render targets it writes (SV_Target0..): 2 for ISWaterBlend
 			// The SAO composite: after its samplers, s9 (Exponential Height Fog's SampColorSampler) and the five feature handles its
 			// headers read (IBL's environment and sky SH, the fog's near and far volumes, Dynamic Cubemaps' environment).
@@ -186,7 +184,7 @@ namespace RenderGraph::Engine::ImageSpace
 		constexpr auto kEffects = std::to_array<EffectInfo>({
 			{ Effects::ISHDRDownSample16, "ISHDRDownSample16", "hdr", "ISHDR.hlsl", 3, 0b001, 3 },
 			// Also drawn outside the HDR effect, into kLDR_DOWNSAMPLE0 (Render, 107732): a scope of its own there.
-			{ Effects::ISHDRDownSample4, "ISHDRDownSample4", "hdr", "ISHDR.hlsl", 3, 0b001, 3, 0, false, true },
+			{ Effects::ISHDRDownSample4, "ISHDRDownSample4", "hdr", "ISHDR.hlsl", 3, 0b001, 3, 0, false },
 			{ Effects::ISHDRDownSample16Lum, "ISHDRDownSample16Lum", "hdr", "ISHDR.hlsl", 3, 0b001, 3 },
 			{ Effects::ISHDRDownSample4RGB2Lum, "ISHDRDownSample4RGB2Lum", "hdr", "ISHDR.hlsl", 3, 0b001, 3 },
 			{ Effects::ISHDRDownSample4LumClamp, "ISHDRDownSample4LumClamp", "hdr", "ISHDR.hlsl", 3, 0b001, 3 },
@@ -203,20 +201,20 @@ namespace RenderGraph::Engine::ImageSpace
 			// The blur composites' draws (the bright-pass composite's vertical draw into kHDR_BLOOM, the full-screen, depth-of-field and
 			// get-hit blurs): t0 only, without BRIGHTPASS. One shader per radius, as the bright-pass blurs. Outside every scope (the
 			// end-of-frame chain's composites) each draw is a scope of its own.
-			{ Effects::ISBlur3, "ISBlur3", "blur", "ISBlur.hlsl", 2, 0b01, 2, 0, false, true },
-			{ Effects::ISBlur5, "ISBlur5", "blur", "ISBlur.hlsl", 2, 0b01, 2, 0, false, true },
-			{ Effects::ISBlur7, "ISBlur7", "blur", "ISBlur.hlsl", 2, 0b01, 2, 0, false, true },
-			{ Effects::ISBlur9, "ISBlur9", "blur", "ISBlur.hlsl", 2, 0b01, 2, 0, false, true },
-			{ Effects::ISBlur11, "ISBlur11", "blur", "ISBlur.hlsl", 2, 0b01, 2, 0, false, true },
-			{ Effects::ISBlur13, "ISBlur13", "blur", "ISBlur.hlsl", 2, 0b01, 2, 0, false, true },
-			{ Effects::ISBlur15, "ISBlur15", "blur", "ISBlur.hlsl", 2, 0b01, 2, 0, false, true },
-			{ Effects::ISNonHDRBlur3, "ISNonHDRBlur3", "nonhdrblur", "ISBlur.hlsl", 2, 0b01, 2, 0, false, true },
-			{ Effects::ISNonHDRBlur5, "ISNonHDRBlur5", "nonhdrblur", "ISBlur.hlsl", 2, 0b01, 2, 0, false, true },
-			{ Effects::ISNonHDRBlur7, "ISNonHDRBlur7", "nonhdrblur", "ISBlur.hlsl", 2, 0b01, 2, 0, false, true },
-			{ Effects::ISNonHDRBlur9, "ISNonHDRBlur9", "nonhdrblur", "ISBlur.hlsl", 2, 0b01, 2, 0, false, true },
-			{ Effects::ISNonHDRBlur11, "ISNonHDRBlur11", "nonhdrblur", "ISBlur.hlsl", 2, 0b01, 2, 0, false, true },
-			{ Effects::ISNonHDRBlur13, "ISNonHDRBlur13", "nonhdrblur", "ISBlur.hlsl", 2, 0b01, 2, 0, false, true },
-			{ Effects::ISNonHDRBlur15, "ISNonHDRBlur15", "nonhdrblur", "ISBlur.hlsl", 2, 0b01, 2, 0, false, true },
+			{ Effects::ISBlur3, "ISBlur3", "blur", "ISBlur.hlsl", 2, 0b01, 2, 0, false },
+			{ Effects::ISBlur5, "ISBlur5", "blur", "ISBlur.hlsl", 2, 0b01, 2, 0, false },
+			{ Effects::ISBlur7, "ISBlur7", "blur", "ISBlur.hlsl", 2, 0b01, 2, 0, false },
+			{ Effects::ISBlur9, "ISBlur9", "blur", "ISBlur.hlsl", 2, 0b01, 2, 0, false },
+			{ Effects::ISBlur11, "ISBlur11", "blur", "ISBlur.hlsl", 2, 0b01, 2, 0, false },
+			{ Effects::ISBlur13, "ISBlur13", "blur", "ISBlur.hlsl", 2, 0b01, 2, 0, false },
+			{ Effects::ISBlur15, "ISBlur15", "blur", "ISBlur.hlsl", 2, 0b01, 2, 0, false },
+			{ Effects::ISNonHDRBlur3, "ISNonHDRBlur3", "nonhdrblur", "ISBlur.hlsl", 2, 0b01, 2, 0, false },
+			{ Effects::ISNonHDRBlur5, "ISNonHDRBlur5", "nonhdrblur", "ISBlur.hlsl", 2, 0b01, 2, 0, false },
+			{ Effects::ISNonHDRBlur7, "ISNonHDRBlur7", "nonhdrblur", "ISBlur.hlsl", 2, 0b01, 2, 0, false },
+			{ Effects::ISNonHDRBlur9, "ISNonHDRBlur9", "nonhdrblur", "ISBlur.hlsl", 2, 0b01, 2, 0, false },
+			{ Effects::ISNonHDRBlur11, "ISNonHDRBlur11", "nonhdrblur", "ISBlur.hlsl", 2, 0b01, 2, 0, false },
+			{ Effects::ISNonHDRBlur13, "ISNonHDRBlur13", "nonhdrblur", "ISBlur.hlsl", 2, 0b01, 2, 0, false },
+			{ Effects::ISNonHDRBlur15, "ISNonHDRBlur15", "nonhdrblur", "ISBlur.hlsl", 2, 0b01, 2, 0, false },
 			// The HDR effect's tonemap (step 5 of its Render): t0 the bloom, t1 the scene, t2 the luminance. With Post Processing on it is
 			// ISHDR's passthrough (POSTPROCESS); with Effects11 owning the tonemap the engine never calls it. The fade form when the
 			// manager's fade is above 0.
@@ -224,16 +222,16 @@ namespace RenderGraph::Engine::ImageSpace
 			{ Effects::ISHDRTonemapBlendCinematicFade, "ISHDRTonemapBlendCinematicFade", "tonemap", "ISHDR.hlsl", 3, 0b111, 3 },
 			// The copies whose vertex shader passes the coordinates through: back to the chain's destination in the pre-tonemap composites, and the main
 			// frame's, the menus' and the end-of-frame chain's copies outside every scope (each call a scope of its own).
-			{ Effects::ISCopy, "ISCopy", "iscopy", "ISCopy.hlsl", 1, 0b1, 1, 0, false, true },
-			{ Effects::ISCopyDynamicFetchDisabled, "ISCopyDynamicFetchDisabled", "iscopy", "ISCopy.hlsl", 1, 0b1, 1, 0, false, true },
-			{ Effects::ISCopyCustomViewport, "ISCopyCustomViewport", "iscopy", "ISCopy.hlsl", 1, 0b1, 1, 0, false, true },
-			{ Effects::ISCopyGrayScale, "ISCopyGrayScale", "iscopy", "ISCopy.hlsl", 1, 0b1, 1, 0, false, true },
+			{ Effects::ISCopy, "ISCopy", "iscopy", "ISCopy.hlsl", 1, 0b1, 1, 0, false },
+			{ Effects::ISCopyDynamicFetchDisabled, "ISCopyDynamicFetchDisabled", "iscopy", "ISCopy.hlsl", 1, 0b1, 1, 0, false },
+			{ Effects::ISCopyCustomViewport, "ISCopyCustomViewport", "iscopy", "ISCopy.hlsl", 1, 0b1, 1, 0, false },
+			{ Effects::ISCopyGrayScale, "ISCopyGrayScale", "iscopy", "ISCopy.hlsl", 1, 0b1, 1, 0, false },
 			// The copies that move the coordinates in their vertex shader (a scale and bias, or a turn about the centre): ISCopy.hlsl's
 			// ORG vertex stage makes the same change over the fullscreen triangle (EffectInfo::vertexStage).
-			{ Effects::ISCopyScaleBias, "ISCopyScaleBias", "iscopy", "ISCopy.hlsl", 1, 0b1, 1, 0, false, true, 1, false, false, false, true },
-			{ Effects::ISCopyTextureMask, "ISCopyTextureMask", "iscopy", "ISCopy.hlsl", 1, 0b1, 1, 0, false, true, 1, false, false, false, true },
+			{ Effects::ISCopyScaleBias, "ISCopyScaleBias", "iscopy", "ISCopy.hlsl", 1, 0b1, 1, 0, false, 1, false, false, false, true },
+			{ Effects::ISCopyTextureMask, "ISCopyTextureMask", "iscopy", "ISCopy.hlsl", 1, 0b1, 1, 0, false, 1, false, false, false, true },
 			// The get-hit effect's last draw (end-of-frame chain slot 7): t0 the image, t1 its blurred copy (kGETHIT_BUFFER's blur).
-			{ Effects::ISDoubleVision, "ISDoubleVision", "gethit", "ISDoubleVision.hlsl", 2, 0b11, 2, 0, false, true },
+			{ Effects::ISDoubleVision, "ISDoubleVision", "gethit", "ISDoubleVision.hlsl", 2, 0b11, 2, 0, false },
 			// The water's displacement simulation (the WaterDisplacement effect, slot 31, from the water system's update: ScopeKind::Water)
 			// into kWATER_DISPLACEMENT and its swap. The ripple makers draw their own geometry (one quad per ripple), pulled by its
 			// vertex stage (EffectInfo::geometry).
@@ -244,9 +242,9 @@ namespace RenderGraph::Engine::ImageSpace
 			{ Effects::ISWaterBlendHeightmaps, "ISWaterBlendHeightmaps", "waterdisplacement", "ISWaterDisplacement.hlsl", 2, 0b11, 2 },
 			{ Effects::ISWaterSmoothHeightmap, "ISWaterSmoothHeightmap", "waterdisplacement", "ISWaterDisplacement.hlsl", 1, 0b1, 1 },
 			{ Effects::ISWaterDisplacementNormals, "ISWaterDisplacementNormals", "waterdisplacement", "ISWaterDisplacement.hlsl", 1, 0b1, 1 },
-			{ Effects::ISWaterDisplacementWadingRipple, "ISWaterDisplacementWadingRipple", "waterdisplacement", "ISWaterDisplacement.hlsl", 0, 0, 0, 0, false, false, 1, false,
+			{ Effects::ISWaterDisplacementWadingRipple, "ISWaterDisplacementWadingRipple", "waterdisplacement", "ISWaterDisplacement.hlsl", 0, 0, 0, 0, false, 1, false,
 				false, true },
-			{ Effects::ISWaterDisplacementRainRipple, "ISWaterDisplacementRainRipple", "waterdisplacement", "ISWaterDisplacement.hlsl", 0, 0, 0, 0, false, false, 1, false,
+			{ Effects::ISWaterDisplacementRainRipple, "ISWaterDisplacementRainRipple", "waterdisplacement", "ISWaterDisplacement.hlsl", 0, 0, 0, 0, false, 1, false,
 				false, true },
 			{ Effects::ISCompositeVolumetricLighting, "ISCompositeVolumetricLighting", "composite", "ISCompositeLensFlareVolumetricLighting.hlsl", 2, 0b01, 2 },
 			{ Effects::ISCompositeLensFlare, "ISCompositeLensFlare", "composite", "ISCompositeLensFlareVolumetricLighting.hlsl", 2, 0b10, 2 },
@@ -254,9 +252,9 @@ namespace RenderGraph::Engine::ImageSpace
 			// The image-based lens flares (the pre-tonemap composites' +0x180): the brightest-pick downsample with its jitter
 			// compensation (t0 the source, t1 the last frame's, t2 the motion vectors), the plain blur (its radius a constant), and the
 			// flares from the blurred image. Own scopes outside the composites.
-			{ Effects::ISDownsample, "ISDownsample", "iblensflare", "ISDownsample.hlsl", 3, 0b111, 3, 0, false, true },
-			{ Effects::ISBlur, "ISBlur", "iblensflare", "ISBlur.hlsl", 2, 0b01, 2, 0, false, true },
-			{ Effects::ISIBLensFlares, "ISIBLensFlares", "iblensflare", "ISIBLensFlare.hlsl", 1, 0b1, 1, 0, false, true },
+			{ Effects::ISDownsample, "ISDownsample", "iblensflare", "ISDownsample.hlsl", 3, 0b111, 3, 0, false },
+			{ Effects::ISBlur, "ISBlur", "iblensflare", "ISBlur.hlsl", 2, 0b01, 2, 0, false },
+			{ Effects::ISIBLensFlares, "ISIBLensFlares", "iblensflare", "ISIBLensFlare.hlsl", 1, 0b1, 1, 0, false },
 			// The SIL composite (the pre-tonemap composites' +0x1d8): t0 the source, t1 the indirect lighting.
 			{ Effects::ISSILComposite, "ISSILComposite", "composite", "ISSILComposite.hlsl", 2, 0b11, 2 },
 			// The SIL raw indirect lighting before it: t0 the camera depth, t1 the normals, t2 the motion vectors, t3 the emissive colour,
@@ -273,9 +271,9 @@ namespace RenderGraph::Engine::ImageSpace
 			// RenderSSAO's composite into the destination (kMAIN): t0 the source, t1 kSAO, t2 the depth, t3 the normals' SSR mask, t4 the
 			// snow's specular alpha, t5 the shadow mask, t6 the reflections (all engine targets, SE 0x1412ebd70). CS's IBL and Exponential
 			// Height Fog headers read their features' outputs too: by published id (EffectInfo::features).
-			{ Effects::ISSAOCompositeSAO, "ISSAOCompositeSAO", "sao", "ISSAOComposite.hlsl", 7, 0b1111111, 7, 0, false, false, 1, true },
-			{ Effects::ISSAOCompositeFog, "ISSAOCompositeFog", "sao", "ISSAOComposite.hlsl", 7, 0b1111111, 7, 0, false, false, 1, true },
-			{ Effects::ISSAOCompositeSAOFog, "ISSAOCompositeSAOFog", "sao", "ISSAOComposite.hlsl", 7, 0b1111111, 7, 0, false, false, 1, true },
+			{ Effects::ISSAOCompositeSAO, "ISSAOCompositeSAO", "sao", "ISSAOComposite.hlsl", 7, 0b1111111, 7, 0, false, 1, true },
+			{ Effects::ISSAOCompositeFog, "ISSAOCompositeFog", "sao", "ISSAOComposite.hlsl", 7, 0b1111111, 7, 0, false, 1, true },
+			{ Effects::ISSAOCompositeSAOFog, "ISSAOCompositeSAOFog", "sao", "ISSAOComposite.hlsl", 7, 0b1111111, 7, 0, false, 1, true },
 			// The screen-space reflections pass (100428 / 107146): the normal mask's downsample, the ray march (t4: the reflection
 			// cubemap CS binds) and the separable compute blur (107207: horizontal, then vertical, each through 107734).
 			{ Effects::ISDownsampleIgnoreBrightest, "ISDownsampleIgnoreBrightest", "ssr", "ISDownsample.hlsl", 3, 0b001, 3 },
@@ -285,69 +283,69 @@ namespace RenderGraph::Engine::ImageSpace
 			// The end-of-frame chain's effects (ImageSpaceManager 99023 / 105674): depth of field and the distant blur (t0 the image,
 			// t1 the blurred image, t2 the depth, t3 the average depth unless MASKED, t4 the mask with MASKED), refraction (t1 the
 			// refraction normals) and the radial blur. Each is a scope of its own. The chain's last effect draws into kFRAMEBUFFER.
-			{ Effects::ISDepthOfField, "ISDepthOfField", "dof", "ISDepthOfField.hlsl", 5, 0b01111, 5, 0, false, true },
-			{ Effects::ISDepthOfFieldFogged, "ISDepthOfFieldFogged", "dof", "ISDepthOfField.hlsl", 5, 0b01111, 5, 0, false, true },
-			{ Effects::ISDepthOfFieldMaskedFogged, "ISDepthOfFieldMaskedFogged", "dof", "ISDepthOfField.hlsl", 5, 0b10111, 5, 0, false, true },
-			{ Effects::ISDistantBlur, "ISDistantBlur", "dof", "ISDepthOfField.hlsl", 5, 0b01111, 5, 0, false, true, 1, false, true },
-			{ Effects::ISDistantBlurFogged, "ISDistantBlurFogged", "dof", "ISDepthOfField.hlsl", 5, 0b01111, 5, 0, false, true, 1, false, true },
-			{ Effects::ISDistantBlurMaskedFogged, "ISDistantBlurMaskedFogged", "dof", "ISDepthOfField.hlsl", 5, 0b10111, 5, 0, false, true, 1, false, true },
-			{ Effects::ISRefraction, "ISRefraction", "refraction", "ISRefraction.hlsl", 2, 0b11, 2, 0, false, true, 1, false, true },
-			{ Effects::ISRadialBlur, "ISRadialBlur", "radialblur", "ISRadialBlur.hlsl", 1, 0b1, 1, 0, false, true },
-			{ Effects::ISRadialBlurMedium, "ISRadialBlurMedium", "radialblur", "ISRadialBlur.hlsl", 1, 0b1, 1, 0, false, true },
-			{ Effects::ISRadialBlurHigh, "ISRadialBlurHigh", "radialblur", "ISRadialBlur.hlsl", 1, 0b1, 1, 0, false, true },
+			{ Effects::ISDepthOfField, "ISDepthOfField", "dof", "ISDepthOfField.hlsl", 5, 0b01111, 5, 0, false },
+			{ Effects::ISDepthOfFieldFogged, "ISDepthOfFieldFogged", "dof", "ISDepthOfField.hlsl", 5, 0b01111, 5, 0, false },
+			{ Effects::ISDepthOfFieldMaskedFogged, "ISDepthOfFieldMaskedFogged", "dof", "ISDepthOfField.hlsl", 5, 0b10111, 5, 0, false },
+			{ Effects::ISDistantBlur, "ISDistantBlur", "dof", "ISDepthOfField.hlsl", 5, 0b01111, 5, 0, false, 1, false, true },
+			{ Effects::ISDistantBlurFogged, "ISDistantBlurFogged", "dof", "ISDepthOfField.hlsl", 5, 0b01111, 5, 0, false, 1, false, true },
+			{ Effects::ISDistantBlurMaskedFogged, "ISDistantBlurMaskedFogged", "dof", "ISDepthOfField.hlsl", 5, 0b10111, 5, 0, false, 1, false, true },
+			{ Effects::ISRefraction, "ISRefraction", "refraction", "ISRefraction.hlsl", 2, 0b11, 2, 0, false, 1, false, true },
+			{ Effects::ISRadialBlur, "ISRadialBlur", "radialblur", "ISRadialBlur.hlsl", 1, 0b1, 1, 0, false },
+			{ Effects::ISRadialBlurMedium, "ISRadialBlurMedium", "radialblur", "ISRadialBlur.hlsl", 1, 0b1, 1, 0, false },
+			{ Effects::ISRadialBlurHigh, "ISRadialBlurHigh", "radialblur", "ISRadialBlur.hlsl", 1, 0b1, 1, 0, false },
 			// FXAA (the end-of-frame chain's slot 2, with the game's FXAA setting): t0 the image. Each call a scope of its own.
-			{ Effects::ISFXAA, "ISFXAA", "fxaa", "ISFXAA.hlsl", 1, 0b1, 1, 0, false, true },
+			{ Effects::ISFXAA, "ISFXAA", "fxaa", "ISFXAA.hlsl", 1, 0b1, 1, 0, false },
 			// The world map's depth blur (the map menu's view, outside the frame's scopes: each call a scope of its own): t0 the image,
 			// t1 the depth. The NoSkyBlur form leaves the sky sharp (NO_SKY).
-			{ Effects::ISWorldMap, "ISWorldMap", "worldmap", "ISWorldMap.hlsl", 2, 0b11, 2, 0, false, true },
-			{ Effects::ISWorldMapNoSkyBlur, "ISWorldMapNoSkyBlur", "worldmap", "ISWorldMap.hlsl", 2, 0b11, 2, 0, false, true },
+			{ Effects::ISWorldMap, "ISWorldMap", "worldmap", "ISWorldMap.hlsl", 2, 0b11, 2, 0, false },
+			{ Effects::ISWorldMapNoSkyBlur, "ISWorldMapNoSkyBlur", "worldmap", "ISWorldMap.hlsl", 2, 0b11, 2, 0, false },
 			// The depth-of-field compute blur (107734 <- 107209 <- 107208, inside 99023): ISBlurCS's depth-of-field build, which reads
 			// the depth at t1 (DEPTH_THRESHOLD). Horizontal, then vertical, each call a scope of its own.
-			{ Effects::ISDepthOfFieldBlurHCS, "ISDepthOfFieldBlurHCS", "dof", "ISBlurCS.hlsl", 2, 0b11, 2, 0, true, true },
-			{ Effects::ISDepthOfFieldBlurVCS, "ISDepthOfFieldBlurVCS", "dof", "ISBlurCS.hlsl", 2, 0b11, 2, 0, true, true },
+			{ Effects::ISDepthOfFieldBlurHCS, "ISDepthOfFieldBlurHCS", "dof", "ISBlurCS.hlsl", 2, 0b11, 2, 0, true },
+			{ Effects::ISDepthOfFieldBlurVCS, "ISDepthOfFieldBlurVCS", "dof", "ISBlurCS.hlsl", 2, 0b11, 2, 0, true },
 			// The parallax mask's separable compute blur (ISBlurCS's parallax-mask build, the horizontal pass reading alpha): t0 only. Its
 			// own scope outside the other scopes.
-			{ Effects::ISParallaxMaskBlurHCS, "ISParallaxMaskBlurHCS", "parallaxmask", "ISBlurCS.hlsl", 2, 0b01, 2, 0, true, true },
-			{ Effects::ISParallaxMaskBlurVCS, "ISParallaxMaskBlurVCS", "parallaxmask", "ISBlurCS.hlsl", 2, 0b01, 2, 0, true, true },
+			{ Effects::ISParallaxMaskBlurHCS, "ISParallaxMaskBlurHCS", "parallaxmask", "ISBlurCS.hlsl", 2, 0b01, 2, 0, true },
+			{ Effects::ISParallaxMaskBlurVCS, "ISParallaxMaskBlurVCS", "parallaxmask", "ISBlurCS.hlsl", 2, 0b01, 2, 0, true },
 			// The sub-rectangle copy, t0 to u0, no sampler: the snow pass's (107734 <- 107217 <- Main::RenderWorld, engine targets) and
 			// Main::RenderWaterEffects' (35561 / 36560: each queued flow texture into the flow map, the source by heap index).
-			{ Effects::ISCopySubRegionCS, "ISCopySubRegionCS", "copy", "ISCopySubRegionCS.hlsl", 1, 0b1, 0, 0, true, true },
+			{ Effects::ISCopySubRegionCS, "ISCopySubRegionCS", "copy", "ISCopySubRegionCS.hlsl", 1, 0b1, 0, 0, true },
 			// The water's temporal blend (the explicit-target Render, outside the other scopes): t0 the image, t1 the water history,
 			// t2 the motion vectors, t3 the depth, t4 the water mask; into kMAIN (SV_Target0) and the next history (SV_Target1).
-			{ Effects::ISWaterBlend, "ISWaterBlend", "waterblend", "ISWaterBlend.hlsl", 5, 0b11111, 5, 0, false, true, 2 },
+			{ Effects::ISWaterBlend, "ISWaterBlend", "waterblend", "ISWaterBlend.hlsl", 5, 0b11111, 5, 0, false, 2 },
 			// The underwater mask (the manager's +0x208): Water.hlsl's UNDERWATERMASK form over the engine's own geometry, pulled by its
 			// vertex stage (EffectInfo::geometry), usually with the main depth test. Its own scope outside the other scopes.
-			{ Effects::ISUnderwaterMask, "ISUnderwaterMask", "underwatermask", "Water.hlsl", 0, 0, 0, 0, false, true, 1, false, false, true },
+			{ Effects::ISUnderwaterMask, "ISUnderwaterMask", "underwatermask", "Water.hlsl", 0, 0, 0, 0, false, 1, false, false, true },
 			// The vanilla TAA (ImageSpaceManager+0x1f0 in the end-of-frame chain, when Upscaling does not replace it): t0 the image, t1
 			// the history, t2 the motion vectors, t3 the depth, t4 the TAA mask, t5 the alpha; into the image (SV_Target0) and the next
 			// history (SV_Target1). Each call outside a scope is a scope of its own. The UI and water forms have no CS source path
 			// (imagespace-shaders.md) and stay the engine's.
-			{ Effects::ISTemporalAA, "ISTemporalAA", "taa", "ISTemporalAA.hlsl", 6, 0b111111, 6, 0, false, true, 2 },
+			{ Effects::ISTemporalAA, "ISTemporalAA", "taa", "ISTemporalAA.hlsl", 6, 0b111111, 6, 0, false, 2 },
 			// The local map's edge pass (16094: kLOCAL_MAP_SWAP into kLOCAL_MAP, outside the frame's scopes: each call a scope of its own).
-			{ Effects::ISLocalMap, "ISLocalMap", "localmap", "ISLocalMap.hlsl", 1, 0b1, 1, 0, false, true },
+			{ Effects::ISLocalMap, "ISLocalMap", "localmap", "ISLocalMap.hlsl", 1, 0b1, 1, 0, false },
 			// The snow's subsurface scattering (Main::RenderWorld, outside the frame's scopes: each call a scope of its own): t0 the depth,
 			// t1 the snow's diffuse, t2 its alpha and specular.
-			{ Effects::ISSnowSSS, "ISSnowSSS", "snow", "ISSnowSSS.hlsl", 3, 0b111, 3, 0, false, true },
+			{ Effects::ISSnowSSS, "ISSnowSSS", "snow", "ISSnowSSS.hlsl", 3, 0b111, 3, 0, false },
 			// A colour fill (menu 3D's clear among others), with menu 3D's stencil test and scissor when the engine sets them.
-			{ Effects::ISSimpleColor, "ISSimpleColor", "simplecolor", "ISSimpleColor.hlsl", 0, 0, 0, 0, false, true },
+			{ Effects::ISSimpleColor, "ISSimpleColor", "simplecolor", "ISSimpleColor.hlsl", 0, 0, 0, 0, false },
 			// The race menu's face tint (outside the frame's scopes: each call a scope of its own): sixteen loaded tint masks, each read
 			// by its heap index from the draw's latch (EffectInfo::latched), blended over grey.
-			{ Effects::ISAlphaBlend, "ISAlphaBlend", "alphablend", "ISAlphaBlend.hlsl", 16, 0xFFFF, 16, 0, false, true, 1, false, false, false, false, false, 0xFFFF },
+			{ Effects::ISAlphaBlend, "ISAlphaBlend", "alphablend", "ISAlphaBlend.hlsl", 16, 0xFFFF, 16, 0, false, 1, false, false, false, false, false, 0xFFFF },
 			// The screen-space reflections' apply (t0 the blurred reflections, t1 the water mask, t2 the image). Its own scope outside the
 			// other scopes, part of the enclosing one inside them.
-			{ Effects::ISApplyReflections, "ISApplyReflections", "applyreflections", "ISApplyReflections.hlsl", 3, 0b111, 3, 0, false, true },
+			{ Effects::ISApplyReflections, "ISApplyReflections", "applyreflections", "ISApplyReflections.hlsl", 3, 0b111, 3, 0, false },
 			// The lighting composite (albedo, diffuse, specular, SAO, fog, the directional light's diffuse and specular, the shadow mask):
 			// the directional-light form reads all eight, the plain form no directional light, the menu form no SAO or shadow mask.
-			{ Effects::ISLightingComposite, "ISLightingComposite", "lightingcomposite", "ISLightingComposite.hlsl", 8, 0xFF, 8, 0, false, true },
+			{ Effects::ISLightingComposite, "ISLightingComposite", "lightingcomposite", "ISLightingComposite.hlsl", 8, 0xFF, 8, 0, false },
 			{ Effects::ISLightingCompositeNoDirectionalLight, "ISLightingCompositeNoDirectionalLight", "lightingcomposite", "ISLightingComposite.hlsl", 8, 0b10011111, 8, 0,
-				false, true },
-			{ Effects::ISLightingCompositeMenu, "ISLightingCompositeMenu", "lightingcomposite", "ISLightingComposite.hlsl", 8, 0b01110111, 8, 0, false, true },
+				false},
+			{ Effects::ISLightingCompositeMenu, "ISLightingCompositeMenu", "lightingcomposite", "ISLightingComposite.hlsl", 8, 0b01110111, 8, 0, false },
 			// The dynamic-resolution upsample (the end-of-frame chain's +0x1f8): the full quad, its coordinates scaled in the shader.
-			{ Effects::ISUpsampleDynamicResolution, "ISUpsampleDynamicResolution", "upsample", "ISUpsampleDynamicResolution.hlsl", 1, 0b1, 1, 0, false, true },
+			{ Effects::ISUpsampleDynamicResolution, "ISUpsampleDynamicResolution", "upsample", "ISUpsampleDynamicResolution.hlsl", 1, 0b1, 1, 0, false },
 			// The effects whose vertex shader writes no SV_Position (EffectInfo::rastersNothing): no pass, nothing drawn.
-			{ Effects::ISMap, "ISMap", "nodraw", "ISMap.hlsl", 0, 0, 0, 0, false, true, 1, false, false, false, false, true },
-			{ Effects::ISNoiseScrollAndBlend, "ISNoiseScrollAndBlend", "nodraw", "ISNoise.hlsl", 0, 0, 0, 0, false, true, 1, false, false, false, false, true },
-			{ Effects::ISNoiseNormalmap, "ISNoiseNormalmap", "nodraw", "ISNoise.hlsl", 0, 0, 0, 0, false, true, 1, false, false, false, false, true },
+			{ Effects::ISMap, "ISMap", "nodraw", "ISMap.hlsl", 0, 0, 0, 0, false, 1, false, false, false, false, true },
+			{ Effects::ISNoiseScrollAndBlend, "ISNoiseScrollAndBlend", "nodraw", "ISNoise.hlsl", 0, 0, 0, 0, false, 1, false, false, false, false, true },
+			{ Effects::ISNoiseNormalmap, "ISNoiseNormalmap", "nodraw", "ISNoise.hlsl", 0, 0, 0, 0, false, 1, false, false, false, false, true },
 		});
 
 		/**
@@ -517,7 +515,7 @@ namespace RenderGraph::Engine::ImageSpace
 			HDR,          // ImageSpaceEffectHDR::Render (100465 / 107183)
 			SSAO,         // RenderSSAO (100520 / 107245)
 			Reflections,  // the screen-space reflections pass (100428 / 107146)
-			Effect,       // one call of an effect drawn outside every other scope (EffectInfo::ownScope)
+			Effect,       // one call of an effect drawn outside every other scope
 			FlowMap,      // one of Main::RenderWaterEffects' copies into the water's flow map (an own-scope ISCopySubRegionCS call)
 			Water,        // the water system's displacement update (31385 / 32176): the WaterDisplacement effect's simulation draws
 			Count
