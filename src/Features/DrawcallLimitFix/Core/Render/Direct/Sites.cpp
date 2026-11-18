@@ -275,8 +275,17 @@ namespace DCLF::Direct::detail
 		a_run.refractionBindings = b;
 		std::uint32_t push[kShadowPushWords]{};
 		Draws::MainShadowLayoutPush(a_inputs.resources->frameConstantsAddress, a_inputs.resources->frameConstantsRef, push);
-		std::copy(std::begin(push), std::end(push), a_run.refractionBindings.shadowPush.begin());
 		a_run.refractionBindings.lodFadeFrame = Draws::LodFadeFrameAddress(a_inputs.resources->frameConstantsAddress);
+		// D3D12's refraction stage reads its blocks and LodFadeFrame through heap indices, so device addresses there fault on AMD.
+		if (::RenderGraph::Backend::IsD3D12()) {
+			if (!a_inputs.resources->frameConstantsRef || !a_inputs.resources->frameBlocks)
+				logger::critical("[DCLF] D3D12 refraction draws: the frame constants have no buffer view ref or block views");
+			else {
+				Draws::MainShadowLayoutViews(a_inputs.resources->frameConstantsRef, *a_inputs.resources->frameBlocks, push);
+				a_run.refractionBindings.lodFadeFrameRef = a_inputs.resources->frameConstantsRef + Draws::LodFadeFrameAddress(0);
+			}
+		}
+		std::copy(std::begin(push), std::end(push), a_run.refractionBindings.shadowPush.begin());
 	}
 
 	SiteRun& NewBareRun(FrameSlot& a_slot, Site a_site)
@@ -443,7 +452,7 @@ namespace DCLF::Direct::detail
 			id.AddAll(std::span<const rhi::Format>(inheritance.colorFormats.data, inheritance.colorFormats.size)).Add(inheritance.depthFormat).Add(inheritance.stencilFormat).Add(inheritance.x).Add(inheritance.y);
 			id.Add(inheritance.width).Add(inheritance.height).Add(inheritance.minDepth).Add(inheritance.maxDepth);
 			id.Add(a_bindings.resourceHeap).Add(a_bindings.samplerHeap).Add(a_bindings.indexPool).Add(a_bindings.framePush).Add(a_bindings.shadowPush);
-			id.AddAll(a_bindings.shadowMapRow).Add(a_bindings.lodFadeFrame).Add(a_bindings.offsetDepth).Add(a_bindings.animatedRows);
+			id.AddAll(a_bindings.shadowMapRow).Add(a_bindings.lodFadeFrame).Add(a_bindings.lodFadeFrameRef.viewSlot).Add(a_bindings.lodFadeFrameRef.byteOffset).Add(a_bindings.offsetDepth).Add(a_bindings.animatedRows);
 			if (const auto* main = a_bindings.main) {
 				id.Add(main->version.get()).Add(main->zLayout).Add(main->refraction);
 				id.AddAll(main->zGroups).AddAll(main->zPipelines);

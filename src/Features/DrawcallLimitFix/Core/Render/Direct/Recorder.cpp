@@ -229,7 +229,10 @@ namespace DCLF::Direct
 				Split(words + kShadowDrawPushVertexLayout, a_context.boundVertexLayout);
 				break;
 			case RecordPass::Refraction:
-				Split(words + kShadowDrawPushMaterialRows, bindings.lodFadeFrame);
+				if (bindings.lodFadeFrameRef)
+					Split(words + kShadowDrawPushMaterialRows, bindings.lodFadeFrameRef);
+				else
+					Split(words + kShadowDrawPushMaterialRows, bindings.lodFadeFrame);
 				break;
 			default:
 				words[kZDrawPushOffsetDepth] = bindings.offsetDepth ? 1u : 0u;

@@ -120,6 +120,8 @@ namespace DCLF::Direct
 		std::span<const std::uint32_t> shadowMapRow;
 		// The refraction draws' second address: the frame's LodFadeFrame (LodFadeFrameAddress), in the shadow layout's material rows' words.
 		std::uint64_t lodFadeFrame = 0;
+		// D3D12 pushes its ref instead, as no layout turns the address into a view there.
+		RenderGraph::BufferRef lodFadeFrameRef;
 		// The frame's copy of the animated material rows (the latch's animatedRows; 0: the installed rows): its device address, which a
 		// pushed colour draw's material row is (the layout reads it), and its ref (kDirectDrawPushAnimatedRows, which the pulled stages
 		// read). Per frame: a per-snapshot recording's bindings keep 0.
