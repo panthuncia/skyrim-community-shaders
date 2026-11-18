@@ -8410,3 +8410,41 @@ kinds match today's earlier runs of the same configs (flush latch residue and th
 runs: guest quick 1.7, native quick 1.1, D3D12 quick 1.8, map 0.2, census 0.2 to 1.0 apart from Dragonsreach (26, its light shafts
 and blown windows in the older run), map config's Whiterun 9.0 (brighter, same image). 6 launches.
 
+
+## Cleanup C4 and the rest of C1 (2026-11-18)
+
+Plan piece C4 (mode switches) and what of C1 it kept alive. CS on `org-native/phases`, RX 6600, Perf-Fast, background runs with
+`DXVK_DEBUG=hang`.
+
+### Deleted
+
+- **Execution-path switches.** `CS_ORG_EPOCHS`, `CS_ORG_ASYNC_EPOCHS`, `CS_ORG_REUSE_RECORDINGS`, `CS_ORG_IN_STREAM`, `CS_ORG_SUBMIT=flush`,
+  `CS_ORG_ABSENT_PASSES` and `CS_ORG_KEEP_SKIPPED_BARRIERS`, with `RenderGraphRuntime::EpochsEnabled`, the runtime's `asyncEpochs` flag and
+  the synchronous `ExecuteFrame` branch of `TryExecuteEpoch`. A failure to set up async epochs now disables the graph.
+- **Port switches.** The 45 `CS_ORG_<port>` switches, `CS_ORG_TRIPWIRE_GUEST`, `kPortSwitches`, the guest switch turn-on and its
+  early-read checks. Every port runs in both graph modes and none in plain D3D11 mode: each port's `Requested()` asks
+  `Native::GraphMode()` (native, or DXVK with the graph on). cs-test lost `PORTS_ALL`, the `org.ports` preset, the latch line of
+  `org.census`, `sky-river-org0` and `vram-menu-B` (both split ports off onto D3D11) and the stale preset test.
+- **`SegmentsOn` and the skeleton's `HostingOn`.** FrameAnchors' guards keep their host and frozen checks. With them went the skeleton's
+  group anchor client, its pending clears and `FlushGroup`'s run, `RunCopy`'s `Scheduled` branch, Bink's own-anchor wait and `Scheduled`'s
+  own-graph answer. `Texture::SameBacking` and `ReleaseImport` had no callers.
+
+### Stayed
+
+- **The anchors' own epochs, `Run`'s own-epoch tail, the anchor part of `AddToFrame`, `EpochOf` and the late-epoch hook:** frame
+  generation's hudless copy and HDR output still run on their anchors' tickets (plan piece A7). Every other anchor's work outside a step
+  is the `OwnEpoch` tap error before the tail.
+- **The recipe's `Placed` epochs:** `Table::Timeline` ranks the anchors' own epochs from them, so they go with A7.
+- **The per-port `Requested()` functions** now all answer `GraphMode()`; folding about 300 call sites into one question is a rename
+  across 150 files.
+- **Scaleform's `Scheduled` branch:** a wholly held Interface anchor can answer there while no stage window is open.
+- **`Texture::DeclaredResolver` and `DeclaredResource`:** ORG's `SelfDeclaringResource` concept calls them. **`GpuGates`:** FrameAnchors
+  calls it. **`EffectInfo::ownScope`:** set positionally in `kEffects`, never read.
+- **The older-DXVK paths** without `dxvkEnqueueInteropSubmission` or `dxvkEmitExternalCommands` (DXVK interop).
+
+### Checks
+
+One background run each on DLL `4db1ff436732`: `guest-quick`, `native-quick`, `d3d11+quick`, `latch-census-short`, `guest+map`,
+`native-d3d12-quick`. All passed, and the `[E]`/`[C]` line kinds match the C1/C2 runs. Shots against those runs: 0.1 to 1.7 apart, apart
+from `d3d11+quick` (7.4, the tree in the wind) and the census's Dragonsreach (26: its bright windows, which earlier runs show as well).
+The first census run stopped at plugin load: `org.census` still set the latch switch. 7 launches.

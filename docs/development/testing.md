@@ -194,7 +194,7 @@ With `CS_TEST_LIST_SWITCHES=1` the game writes every switch it knows and exits. 
 ```
 
 - **`kind`** is DCLF's kind in lower case (`feature`, `parity`, `diagnostic`, `test`, `other`); `other` for switches outside DCLF's registry.
-- **`family`** is the owner: `dclf` (DCLF's registry and its features' `RegisterSwitch` rows, `CS_ORG_EPOCHS` among them), `org` (other `CS_ORG_*`), `cs` (other `CS_*`), `basicrhi`, `dxvk`, `vk`.
+- **`family`** is the owner: `dclf` (DCLF's registry and its features' `RegisterSwitch` rows), `org` (other `CS_ORG_*`), `cs` (other `CS_*`), `basicrhi`, `dxvk`, `vk`.
 - **`description`** is the registry's text, or empty.
 - DCLF's features register their switches only when DCLF installs, so dump with DCLF on.
 

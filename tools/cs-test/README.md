@@ -70,7 +70,7 @@ The converted scenarios map old frame N to world-ready + (N - 100) for their fir
 python tools/cs-test/gen_schema.py
 ```
 
-It reads DCLF's registry and `RegisterSwitch` calls, every other `CS_*` switch named in `src`, the switches the cs-ab scenarios set, and the feature short names. Hand-written parts (the typed ORG keys, the `org.ports` and `org.census` presets) are tables in `gen_schema.py`. Edit those and regenerate; do not edit `schema.toml` by hand.
+It reads DCLF's registry and `RegisterSwitch` calls, every other `CS_*` switch named in `src`, the switches the cs-ab scenarios set, and the feature short names. Hand-written parts (the typed ORG keys, the `org.census` preset) are tables in `gen_schema.py`. Edit those and regenerate; do not edit `schema.toml` by hand.
 
 ## What a run does
 

@@ -197,9 +197,8 @@ DCLF is persistent: once a frame installs claims, no frame hands drawing back to
 -   **Tickets for recordings.** A live epoch's recording waits for the slot its unsubmitted ticket holds. The build point gives
     back the tickets of epochs the last frame did not submit (no water in view) while recordings are outstanding
     (`ReleaseTicketsForRecordings`, `GraphHost::ReleaseEpochTicket`); the frame-start wait does the same every 16 ms.
--   **Revision-driven epochs are required.** DCLF draws only from scene revisions' recordings, which need ORG's async,
-    revision-driven epochs (`CS_ORG_ASYNC_EPOCHS`, `CS_ORG_REUSE_RECORDINGS`). Without them `BuildPoint` sets `failed`
-    (`Core/Render/Revision/Coverage.cpp`).
+-   **Revision-driven epochs.** DCLF draws only from scene revisions' recordings, which ORG's async, revision-driven epochs
+    make. They are always on in the graph modes.
 -   **A toggle withdraws nothing.** It takes effect for the frames only when a publication committed under it is installed
     ([Ownership and withholding](#ownership-and-withholding)).
 
@@ -1204,7 +1203,7 @@ payload's parts by value. A commit builds nothing, prepares nothing and compares
 -   **The revision assembler** (`AssembleRevision`, ORG's `RevisionAssembler`): one fragment per slot (the versions, a shape per
     epoch and shadow or occlusion variant, a recording per epoch). An unchanged fragment is inherited, so an unchanged revision is
     cheap. A failed or dropped recording (dropped by a graph build) makes the revision again.
--   **Recording reuse** (ORG, `CS_ORG_REUSE_RECORDINGS`): an epoch's recordings are kept per frame slot and submitted again while
+-   **Recording reuse** (ORG): an epoch's recordings are kept per frame slot and submitted again while
     their shape holds; no code in a pass's `Record` runs per frame. Measured: host ticket preparation median 186 to 43 us. Kept
     recordings carry no Tracy GPU zones or ORG pass timestamps, so DCLF's GPU time is measured by frame time and Tracy.
 -   **The ticket rule.** A pass's prepared invocation holds only what its recording depends on; everything a commit knows goes into
@@ -1212,7 +1211,7 @@ payload's parts by value. A commit builds nothing, prepares nothing and compares
     stop at the row's count. A pass's revision is its buffers' named-version serials plus a shape, never a per-frame counter. A
     breach cost about 2.6 ms a frame of re-prepared tickets (`CS_ORG_EPOCH_STATS=1` reports "prepared again after the feature's
     inputs changed").
--   **A graph per epoch.** Each segment of the epoch order is a graph of its own (`CS_ORG_EPOCHS`; ORG's
+-   **A graph per epoch.** Each segment of the epoch order is a graph of its own (ORG's
     `extern/OpenRenderGraph/docs/persistent-epochs.md`), built from the same extensions with only its passes and their resources. A
     graph condition names the epochs it changes, so a cell or pipeline switch rebuilds those epochs alone, with no device wait. In
     the phase-2 tour, a condition change rebuilt epochs 3, 1, 2, 6 and 8 in 0.04-6.75 ms and kept light culling's.
@@ -1222,7 +1221,7 @@ payload's parts by value. A commit builds nothing, prepares nothing and compares
     -   The render thread's admission, handoff and commit cost about as much as closed epochs did. In the optimized build
         (2026-11-01, Whiterun), the submit phases sum to 79 us a frame over the five epochs, against 84 us closed.
     -   The handoff lists a predicted plan needs are recorded once per frame slot and submitted again.
--   **In-stream epochs.** The async epochs' graphics work runs inside DXVK's command list (`CS_ORG_IN_STREAM`; "Ordering against
+-   **In-stream epochs.** The async epochs' graphics work runs inside DXVK's command list ("Ordering against
     D3D11" in `render-graph.md`). DXVK's list is split only where a segment waits for compute work that waits for the stream: 1.3
     times a frame, the Z-prepass's compute entry, against 6 when every epoch was enqueued behind it.
 
@@ -2160,7 +2159,7 @@ Core keeps the ranges, the `kRasterForward` bits, `ForwardSortCS`, the shared ep
     draws, refraction and first person's forward part. Why: `core.forward-sort` can only sort within a pipeline (with
     `CS_DCLF_FORWARD_PLAIN=0`, a state class), because a draw's pipeline is fixed by the range it is in, and those lists then draw in
     creation order whatever their depth. Smoke drew over the log in front of it, and no fixed order of the lists is right: flames
-    in front of logs and smoke behind them interleave. Off, or with the epoch not recording at execution (guest with `CS_ORG_IN_STREAM=0`;
+    in front of logs and smoke behind them interleave. Off, or with the epoch not recording at execution (guest without DXVK's external commands;
     `RenderGraphRuntime::RecordsAtExecution`), the GPU path runs. Native mode records at execution inline, so the family runs there too.
     -   **What is shared.** `Direct::ColourCommitted` makes the views, pool jobs run `CullBatch`, `ForwardReached` is the trigger,
         `RecordForwardSite` sorts and records on DXVK's CS thread, and `core.forward-direct` is the late pass, in both modes.

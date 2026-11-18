@@ -121,9 +121,8 @@ SPECIAL = {
     },
 }
 
-# The census and latch lines the census scenarios repeat ("org.census = true").
+# The census lines the census scenarios repeat ("org.census = true").
 CENSUS = {
-    "CS_ORG_ENGINE_FLUSH_LATCH": "1",
     "CS_ORG_RESIDUE_CENSUS": "1",
     "CS_ORG_RESIDUE_CENSUS_FRAMES": "300",
     "CS_ORG_RESIDUE_CENSUS_TOP": "60",
@@ -303,7 +302,7 @@ def build(root):
         keys[f"features.{feature}"] = {"type": "bool", "default": True, "family": "features", "kind": "feature", "sweep": True,
                                        "description": f"false: {feature} is disabled at boot for this run (features_disabled); true: it loads at boot for this run even when the saved settings disable it (features_enabled)"}
     keys["org.census"] = {"type": "preset", "family": "org", "kind": "preset",
-                          "description": "true: the residue census and the flush latch (tools/cs-ab/census.py reads them)",
+                          "description": "true: the residue census (tools/cs-ab/census.py reads it)",
                           "values": {"true": CENSUS, "false": {}}}
     return keys
 

@@ -211,15 +211,11 @@ DCLF's registry, so DCLF's startup summary does not list them.
 
 | Switch | Where | Meaning |
 | --- | --- | --- |
-| `CS_ORG_EPOCHS` | `RenderGraphRuntime.cpp` | `0`: the render graph runs without epochs, and DCLF does not install. |
-| `CS_ORG_ASYNC_EPOCHS` | `RenderGraphRuntime.cpp` | `0`: epochs are recorded on the render thread. |
 | `CS_ORG_CLOSED` | `RenderGraphRuntime.cpp` | `1`: epochs return every resource to its home state and start with a full barrier (closed executions, an interop fallback). |
 | `CS_ORG_BATCH_SUBMIT` | `RenderGraphRuntime.cpp` | `0`: an epoch's submissions go to DXVK one at a time. |
 | `CS_ORG_EARLY_FLUSH` | `RenderGraphRuntime.cpp` | `1`: DXVK's pending work is flushed when an epoch starts (a second DXVK list per epoch). |
 | `CS_ORG_COMPUTE_QUEUE` | `RenderGraphRuntime.cpp` | `0`: BasicRHI's compute queue aliases the graphics one. |
 | `CS_ORG_UPLOAD_QUEUE` | `RenderGraphRuntime.cpp` | `0`: no spare transfer queue for uploads. |
-| `CS_ORG_SUBMIT` | `RenderGraphRuntime.cpp` | `flush`: each epoch flushes and waits for DXVK's command stream instead of enqueuing its submission. |
-| `CS_ORG_REUSE_RECORDINGS` | `RenderGraphRuntime.cpp` | `0`: epochs are prepared again instead of replaying kept recordings. Kept recordings carry no Tracy GPU zones, so turn it off to see the epochs' passes in Tracy. |
 | `CS_ORG_RECORDING_TIMESTAMPS` | `RenderGraphRuntime.cpp` | `1`: the recordings kept across frames carry pass and barrier timestamps (`GraphHost::SetRecordingTimestamps`), as a timestamp trace turns on; the others are always timed. |
 | `CS_ORG_EPOCH_STATS` | `RenderGraphRuntime.cpp` | `1`: render-thread CPU time per epoch, and the tickets prepared again after their inputs changed. |
 | `CS_ORG_FRAME_SEQUENCE` | `FrameSequence.cpp` | `N`: one frame's ordered anchor runs (with clients and targets), epoch submissions and boundaries, every N frames per window (`1` means 600). |
@@ -903,8 +899,7 @@ the accepted difference "Tree LOD instances the engine leaves hidden after `allV
 ### GPU timing
 
 -   DCLF's epochs replay kept recordings, which record no ORG pass timestamps, so ORG's GPU timing report is empty for them.
-    Compare whole frames (`[Perf] rendered N fps (N ms)` in the log) and Tracy's CPU zones; turn recordings off
-    (`CS_ORG_REUSE_RECORDINGS=0`) to see the epochs' passes as Tracy GPU zones.
+    Compare whole frames (`[Perf] rendered N fps (N ms)` in the log) and Tracy's CPU zones.
 -   `CS_GPU_EVENT_TIMERS=<frames>` times the engine's events; select them by exact name. `CS_GPU_IDLE_TRACE=<frames>` attributes GPU
     idle time. `CS_ORG_EPOCH_STATS=1` gives the render thread's time per epoch.
 -   Nsight Perf's range profiler drains around each range, so many small native ranges each pay a drain and DCLF's few large ones
@@ -1095,8 +1090,8 @@ and state); with the shadow site on it loses the device (dclf-architecture.md, "
     the main menu's frames), the game relaunched at once.
 -   **Bisect by arms and rates.** Run each arm until its first loss and compare counts; an intermittent fault needs many runs per
     arm before an arm is cleared. Re-run the control at the end.
--   **Reduce the configuration** with the feature toggles, `CS_DCLF=0`, `CS_ORG_COMPUTE_QUEUE=0`, `CS_ORG_SUBMIT=flush` or
-    `CS_ORG_ASYNC_EPOCHS=0` to tell DCLF's work from the render graph's submission paths.
+-   **Reduce the configuration** with the feature toggles, `CS_DCLF=0` or `CS_ORG_COMPUTE_QUEUE=0` to tell DCLF's work
+    from the render graph's submission paths.
 -   Open crashes are in [dclf-open-defects.md](./dclf-open-defects.md), "Open crashes".
 
 Not verified here: the crash logger's exact log format (it is a separate SKSE plugin), and that a release build of
