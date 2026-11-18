@@ -1159,8 +1159,8 @@ Bugs DCLF's parity checks found in other Community Shaders features, in the engi
 -   Evidence: the loading-screen model's mean luminance at the same shot point in plain D3D11 is 16.2 with Wetness Effects on and
     21.1 with it off. The pale war paint on loading-screen actors is the same effect.
 -   Found by the loading screen port's comparison against D3D11 (org-native-frame-graph.md, "Loading screens"). The ORG build has
-    no wetness on these draws, so it is brighter than D3D11 there: model area mean 14.1 to 14.3 against D3D11's 15.2 with other
-    terms included.
+    no wetness on these draws, so the two builds differ there. Model area mean in that comparison: ORG 14.1 to 14.3, D3D11 15.2
+    with Wetness Effects on.
 -   Proposed fix: gate the shore term by `inWorld`, as the rain term is. The D3D11 build then matches the ORG build on menu models.
 -   The ORG build's rule: no wetness on models outside the world. The difference against D3D11 is accepted until the fix.
 
