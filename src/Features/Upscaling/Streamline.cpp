@@ -1556,13 +1556,14 @@ namespace InCbReadback
 
 #if defined(CS_HAS_RENDER_GRAPH)
 /**
- * @brief Native mode's evaluate: the frame's constants now, then the tags and the evaluate as the evaluate pass at the Upscale anchor
- * (ORGUpscaling::QueueEvaluate), which records them on its own command list in the post stage, on the thread that records it. The
+ * @brief The evaluate as the post stage's pass (native mode, and guest mode since the post stage runs there): the frame's constants
+ * now, then the tags and the evaluate as the evaluate pass at the Upscale anchor (ORGUpscaling::QueueEvaluate), which records them on
+ * its own command list in the post stage, on the thread that records it (in guest, DXVK's command buffer inside the stage's block). The
  * images are the pass's: kMAIN in, the upscaled texture out, kMAIN's depth and the motion vectors, each in the common state. The
  * upscaled output's copy into kMAIN is the same anchor's next pass. The result is known only when the pass records: an evaluate the
  * SDK refuses is logged there, and this frame's output is the previous one.
  */
-static sl::Result cs_EvaluateFeatureNative(sl::Feature a_feature, const sl::ViewportHandle& a_viewport,
+static sl::Result cs_EvaluateFeatureAsPass(sl::Feature a_feature, const sl::ViewportHandle& a_viewport,
 	ID3D11Resource* a_colorIn, ID3D11Resource* a_colorOut, ID3D11Resource* a_depth, ID3D11Resource* a_motionVectors,
 	uint32_t a_renderWidth, uint32_t a_renderHeight, uint32_t a_outputWidth, uint32_t a_outputHeight,
 	float a_jitterX, float a_jitterY, ID3D11Resource* a_hudlessColor, bool* a_outputReady, bool* a_skipped)
@@ -1581,10 +1582,10 @@ static sl::Result cs_EvaluateFeatureNative(sl::Feature a_feature, const sl::View
 	const uint32_t frame = g_sl.renderFrameId.load(std::memory_order_acquire);
 	if (vpId < 2 && s_evalFrameByVp[vpId] == frame)
 		return skip();
-	// The pass's images are kMAIN, the upscaled texture, kMAIN's depth and the motion vectors: the only evaluate native mode makes.
+	// The pass's images are kMAIN, the upscaled texture, kMAIN's depth and the motion vectors: the only evaluate the post stage makes.
 	if (!a_colorIn || !a_colorOut || !a_depth || !a_motionVectors || a_hudlessColor) {
 		static std::once_flag logged;
-		std::call_once(logged, [] { logger::error("[Streamline] native mode evaluates only colour, depth and motion vectors without a hudless colour; skipped (logged once)"); });
+		std::call_once(logged, [] { logger::error("[Streamline] the evaluate pass takes only colour, depth and motion vectors without a hudless colour; skipped (logged once)"); });
 		return skip();
 	}
 	sl::Constants consts;
@@ -1670,8 +1671,9 @@ static sl::Result cs_EvaluateFeatureCore(sl::Feature a_feature, const sl::Viewpo
 	if (a_skipped)
 		*a_skipped = false;
 #if defined(CS_HAS_RENDER_GRAPH)
-	if (RenderGraph::Engine::Native::Active())
-		return cs_EvaluateFeatureNative(a_feature, a_viewport, a_colorIn, a_colorOut, a_depth, a_motionVectors, a_renderWidth, a_renderHeight, a_outputWidth,
+	// The upscalers' evaluate is the post stage's pass wherever that stage runs (the recipe); frame generation's stays in the ring.
+	if (RenderGraph::Engine::Native::Active() || (a_feature != sl::kFeatureFSR_G && ORGUpscaling::Get().EvaluatesInStage()))
+		return cs_EvaluateFeatureAsPass(a_feature, a_viewport, a_colorIn, a_colorOut, a_depth, a_motionVectors, a_renderWidth, a_renderHeight, a_outputWidth,
 			a_outputHeight, a_jitterX, a_jitterY, a_hudlessColor, a_outputReady, a_skipped);
 #endif
 

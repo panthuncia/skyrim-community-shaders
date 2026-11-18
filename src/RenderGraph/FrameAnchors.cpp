@@ -660,6 +660,7 @@ namespace FrameAnchors
 			std::array<std::array<std::uint32_t, kMaxSteps>, kDeclared> stepTaps{};
 			std::uint32_t tapInstance = 0;  // the instance the commits running now write (TapInstance)
 			std::atomic<bool> stagesOpen{ false };  // a stage holds staged values not committed yet: BeforeGpuWork's check without the mutex
+			std::atomic<std::uint32_t> stagesOpenMask{ 0 };  // which stages: a bit per declared segment (the residue census)
 			// A stage's commit is submitting its block (SubmitSegment). What that submission does is the block itself: the external commands
 			// that carry it into DXVK's stream, and DXVK's flush before a split. Neither the census nor StagesHoldValues counts it.
 			std::atomic<bool> submittingStage{ false };
@@ -2237,6 +2238,7 @@ namespace FrameAnchors
 				a_state.stagedExecuted[d].clear();
 			}
 			a_state.stagesOpen.store(false, std::memory_order_release);
+			a_state.stagesOpenMask.store(0, std::memory_order_release);
 			auto failed = std::move(a_state.clients);
 			a_state.clients.clear();
 			a_state.retired.clear();
@@ -2886,7 +2888,12 @@ namespace FrameAnchors
 
 		void UpdateStagesOpen(State& a_state)
 		{
-			const bool open = std::ranges::any_of(a_state.stagedFrame, [](std::uint64_t a_frame) { return a_frame != 0; });
+			std::uint32_t mask = 0;
+			for (std::uint32_t d = 0; d < kDeclared; ++d)
+				if (a_state.stagedFrame[d] != 0)
+					mask |= 1u << d;
+			a_state.stagesOpenMask.store(mask, std::memory_order_release);
+			const bool open = mask != 0;
 			if (!a_state.stagesOpen.exchange(open, std::memory_order_acq_rel) || open)
 				return;
 			if (const auto hook = windowsClosedHook.load(std::memory_order_acquire))
@@ -3698,6 +3705,12 @@ namespace FrameAnchors
 	{
 		const auto& state = Anchors();
 		return state.stagesOpen.load(std::memory_order_acquire) && !state.submittingStage.load(std::memory_order_acquire);
+	}
+
+	std::uint32_t StagesHoldingValues()
+	{
+		const auto& state = Anchors();
+		return state.submittingStage.load(std::memory_order_acquire) ? 0u : state.stagesOpenMask.load(std::memory_order_acquire);
 	}
 
 	void SetWindowsClosedHook(void (*a_hook)())
@@ -4522,6 +4535,7 @@ namespace FrameAnchors
 	bool InRun() { return false; }
 	bool SegmentsOn() { return false; }
 	bool StagesHoldValues() { return false; }
+	std::uint32_t StagesHoldingValues() { return 0; }
 	void SetWindowsClosedHook(void (*)()) {}
 	bool DescribingKey() { return false; }
 	std::optional<bool> DescribedBuildHasRow(std::uint32_t) { return std::nullopt; }

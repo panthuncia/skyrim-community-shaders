@@ -193,6 +193,12 @@ namespace RenderGraph::Engine::Buffers
 		stl::detour_vfunc<3, Device_CreateBuffer>(a_device);
 	}
 
+	void EndFrame()
+	{
+		if (Requested())
+			detail::ReleaseEndedFrames();
+	}
+
 	bool Owns(ID3D11Buffer* a_buffer)
 	{
 		return a_buffer && Requested() && std::dynamic_pointer_cast<org::Buffer>(Tripwire::GraphResourceOf(a_buffer)) != nullptr;
@@ -262,6 +268,7 @@ namespace RenderGraph::Engine::Buffers
 			logger::warn("[ORG] CS_ORG_ENGINE_BUFFERS=1 ignored: built without OpenRenderGraph");
 	}
 	void InstallDeviceHooks(ID3D11Device*) {}
+	void EndFrame() {}
 	std::optional<Direct> Resolve(ID3D11Buffer*) { return std::nullopt; }
 	bool Owns(ID3D11Buffer*) { return false; }
 	void DeclareRingRead(org::RenderPassBuilder&) {}

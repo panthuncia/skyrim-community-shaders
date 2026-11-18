@@ -1861,7 +1861,10 @@ void Upscaling::Upscale()
 
 		auto* upscaled = UpscaledResource();
 		DrawcallLimitFix::TargetDumpPoint("before upscale", upscaled);
-		SeparateFromGraphEpochs();
+		// The evaluate as the post stage's pass records inside the stage's block, after its earlier passes: there is nothing to separate,
+		// and a D3D11 clear here would sit inside the stage's window.
+		if (!ORGUpscaling::Get().EvaluatesInStage())
+			SeparateFromGraphEpochs();
 		if (upscaled) {
 			switch (method) {
 			case UpscaleMethod::kFSR:

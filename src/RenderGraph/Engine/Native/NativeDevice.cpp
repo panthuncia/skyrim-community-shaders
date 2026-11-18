@@ -5387,7 +5387,8 @@ namespace RenderGraph::Engine::Native
 			}
 #	endif
 			if (!d3d12) {
-				const VkDevice device = rhi::vulkan::get_device(g_device->Rhi());
+				// The graph's device: native mode's own, or in guest mode the one over DXVK's VkDevice.
+				const VkDevice device = rhi::vulkan::get_device(RenderGraphRuntime::Get().Host()->Device());
 				const auto getDeviceProc = rhi::vulkan::get_device_proc_addr();
 				auto create = getDeviceProc ? reinterpret_cast<PFN_vkCreateImageView>(getDeviceProc(device, "vkCreateImageView")) : nullptr;
 				a_views.device = device;
@@ -5433,8 +5434,9 @@ namespace RenderGraph::Engine::Native
 	bool DescribeForCommands(rhi::CommandList& a_list, std::span<const rhi::Resource> a_images, void*& a_nativeList, std::vector<ExternalImageInfo>& a_infos,
 		std::shared_ptr<const void>& a_views, std::string& a_why)
 	{
-		if (!g_device) {
-			a_why = "no native device";
+		// Native mode, and guest mode (the post stage's evaluate pass records into DXVK's command buffer): the graph's own list and images.
+		if (!RenderGraphRuntime::Get().Host()) {
+			a_why = "no render graph host";
 			return false;
 		}
 		// The common state: GENERAL on Vulkan, COMMON (0) on D3D12.

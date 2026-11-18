@@ -112,7 +112,7 @@ namespace
 	{
 		FrameAnchors::Texture main;
 		rhi::Format mainFormat = rhi::Format::Unknown;  // kMAIN's view: the copy's target format
-		FrameAnchors::Texture mainDepth, motion;        // the evaluate's depth and motion vectors (native mode)
+		FrameAnchors::Texture mainDepth, motion;        // the evaluate's depth and motion vectors (where it is a stage's pass)
 		FrameAnchors::Texture depth, depthCopy;
 		FrameAnchors::Texture refraction, refractionCopy, saoCameraZ;
 		FrameAnchors::Texture underwater, underwaterCopy;
@@ -137,8 +137,17 @@ namespace
 	};
 
 	/**
-	 * @brief kMAIN as the copy writes it, with its view's format; in native mode also kMAIN's depth and the motion vectors, which the
-	 * evaluate reads. A null main when it cannot be imported.
+	 * @brief Whether the upscaler's evaluate is a pass of a stage that runs in this mode: the post stage holds the Upscale anchor (the
+	 * recipe table). Native mode, and guest mode since the post stage runs there.
+	 */
+	bool EvaluateInStage()
+	{
+		return FrameAnchors::StageStepsAt(FrameAnchors::Anchor::Upscale);
+	}
+
+	/**
+	 * @brief kMAIN as the copy writes it, with its view's format; where the evaluate is a stage's pass also kMAIN's depth and the motion
+	 * vectors, which the evaluate reads. A null main when it cannot be imported.
 	 */
 	void CurrentMain(DepthInputs& a_inputs)
 	{
@@ -146,7 +155,7 @@ namespace
 		auto& main = renderer->GetRuntimeData().renderTargets[RE::RENDER_TARGETS::kMAIN];
 		a_inputs.main = main.RTV ? FrameAnchors::EngineTarget(static_cast<std::uint32_t>(RE::RENDER_TARGETS::kMAIN)) : nullptr;
 		a_inputs.mainFormat = main.RTV ? FormatOf(main.RTV) : rhi::Format::Unknown;
-		if (!RenderGraph::Engine::Native::Active())
+		if (!EvaluateInStage())
 			return;
 		const auto& depth = renderer->GetDepthStencilData().depthStencils[RE::RENDER_TARGETS_DEPTHSTENCIL::kMAIN];
 		const auto& motion = renderer->GetRuntimeData().renderTargets[RE::RENDER_TARGETS::kMOTION_VECTOR];
@@ -349,7 +358,7 @@ namespace
 	};
 
 	/**
-	 * @brief The upscaler's evaluate (native mode): Streamline's tags and evaluate recorded on this pass's command list, as
+	 * @brief The upscaler's evaluate (a pass of the post stage, in both modes): Streamline's tags and evaluate recorded on this pass's command list, as
 	 * BasicRenderer's UpscalingPass does. Its four images are legacy interop uses (the common state: GENERAL on Vulkan, COMMON on
 	 * D3D12), which is the state the tags name; on D3D12 the output is declared to leave the pass in the common state, as Streamline
 	 * leaves it. Recorded at execution each frame: it reads the run's evaluate, which the Upscale client's commit stored; a run with
@@ -497,7 +506,7 @@ namespace
 
 		FrameAnchors::ClientDesc client{};
 		client.id = kClientId;
-		// Native mode: the evaluate first, recorded at execution each frame (it is not gated: it reads the run's evaluate, which this
+		// Where the post stage runs: the evaluate first, recorded at execution each frame (it is not gated: it reads the run's evaluate, which this
 		// client's commit stores). Its own client, declared while an SDK upscaler is the method.
 		const std::weak_ptr<Impl> weakImpl = a_impl;
 		if (impl.evaluateShared && impl.upscaled && impl.inputs.main && impl.inputs.mainDepth && impl.inputs.motion) {
@@ -668,7 +677,7 @@ bool ORGUpscaling::Setup()
 		next->latch = std::make_shared<org::LatchBlock>("cs.upscaling.jitter", static_cast<std::uint32_t>(sizeof(Upscaling::JitterCB)));
 		next->upscaleGate = RenderGraph::RunGate::Create("cs.upscaling.gate", kUpscaleEntries);
 		next->hudlessGate = RenderGraph::RunGate::Create("cs.upscaling.hudless.gate");
-		if (RenderGraph::Engine::Native::Active())
+		if (EvaluateInStage())
 			next->evaluateShared = std::make_shared<const EvaluateShared>();
 		CurrentDepthInputs(next->inputs, next->formats);
 		if (next->inputs.DepthComplete()) {
@@ -687,8 +696,8 @@ bool ORGUpscaling::Setup()
 		}
 		impl = std::move(next);
 		setupFailed = false;
-		logger::info("[ORG] Upscaling's own passes run on the render graph ({}x{}); the upscalers stay in the interop command ring",
-			impl->inputs.width, impl->inputs.height);
+		logger::info("[ORG] Upscaling's own passes run on the render graph ({}x{}); {}", impl->inputs.width, impl->inputs.height,
+			impl->evaluateShared ? "the upscaler's evaluate is the post stage's pass" : "the upscalers stay in the interop command ring");
 		return true;
 	} catch (const std::exception& e) {
 		logger::error("[ORG] Upscaling setup failed, staying on D3D11: {}", e.what());
@@ -700,6 +709,11 @@ bool ORGUpscaling::Setup()
 bool ORGUpscaling::IsActive() const
 {
 	return impl && !impl->failed && RenderGraphRuntime::Get().IsActive();
+}
+
+bool ORGUpscaling::EvaluatesInStage() const
+{
+	return IsActive() && impl->evaluateShared;
 }
 
 void ORGUpscaling::ClearShaderCache()

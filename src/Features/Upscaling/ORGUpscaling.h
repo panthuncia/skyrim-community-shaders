@@ -10,15 +10,16 @@
 #include <string>
 
 /**
- * @brief Upscaling's own passes on the render graph (CS_ORG_UPSCALING=1). The vendor upscalers do not move: Streamline's FSR,
- * XeSS and DLSS evaluates, and frame generation, still run in the DXVK interop command ring (Upscaling/DXVKInterop.cpp).
+ * @brief Upscaling's own passes on the render graph (CS_ORG_UPSCALING=1). Streamline's FSR, XeSS and DLSS evaluates are the post
+ * stage's pass in both modes (below); frame generation still runs in the DXVK interop command ring (Upscaling/DXVKInterop.cpp).
  *
  * - The upscaler's output is a graph texture exported to D3D11 (SRV and UAV), because Streamline still writes it through its
  *   D3D11 image in guest mode. At the Upscale anchor, which runs after the evaluate, CopyHudlessPS draws it into kMAIN (the D3D11
  *   path's CopyResource). It is a draw so that a run gate can skip it on frames the evaluate wrote nothing.
- * - Native mode: the evaluate itself is the Upscale anchor's first pass (QueueEvaluate). It is recorded at execution each frame:
- *   its Record calls Streamline's tags and evaluate on the pass's own command list, with the four images declared as legacy interop
- *   uses, then restores the graph's descriptor heaps.
+ * - The evaluate itself is the Upscale anchor's first pass (QueueEvaluate), wherever the post stage runs (native mode, and guest mode
+ *   since Guest B6). It is recorded at execution each frame: its Record calls Streamline's tags and evaluate on the pass's own
+ *   command list (in guest, DXVK's command buffer inside the stage's block), with the four images declared as legacy interop uses,
+ *   then restores the graph's descriptor heaps.
  * - The depth upscale at the same anchor: kMAIN's depth into kMAIN_COPY and the refraction normals into their copy, then
  *   DepthRefractionUpscalePS into the refraction normals, kSAO_CAMERAZ and kMAIN's depth, then the underwater mask's copy and
  *   UnderwaterMaskUpscalePS at half size. The jitter constants come from a latch block, the shared constant buffers from
@@ -74,6 +75,12 @@ public:
 	/** @brief Whether the graph path runs: set up, not failed, and the runtime still up. */
 	bool IsActive() const;
 
+	/**
+	 * @brief Whether the upscaler's evaluate is the post stage's pass (QueueEvaluate): the graph path runs and a stage of this mode holds
+	 * the Upscale anchor. Native mode, and guest mode since the post stage runs there.
+	 */
+	bool EvaluatesInStage() const;
+
 	/** @brief Whether the graph failed and the textures it holds must go back to D3D11 (ReleaseAfterFailure). */
 	bool Failed() const;
 
@@ -109,9 +116,9 @@ public:
 	using EvaluateRecord = std::function<bool(void* a_nativeList, std::span<const RenderGraph::Engine::Native::ExternalImageInfo> a_images)>;
 
 	/**
-	 * @brief Native mode: this frame's upscaler evaluate, recorded by the evaluate pass at the Upscale anchor (which RunUpscale runs
-	 * after it). a_record runs once, in that pass's Record for this frame's run, on the thread that records it (the submission
-	 * thread). False when the graph path does not run, holds no upscaled texture, or the engine's inputs cannot be imported.
+	 * @brief This frame's upscaler evaluate, recorded by the evaluate pass at the Upscale anchor (which RunUpscale runs after it).
+	 * a_record runs once, in that pass's Record for this frame's run, on the thread that records it (native mode's submission thread,
+	 * guest mode's DXVK worker). False when the graph path does not run, holds no upscaled texture, or the engine's inputs cannot be imported.
 	 */
 	bool QueueEvaluate(std::string a_label, EvaluateRecord a_record);
 

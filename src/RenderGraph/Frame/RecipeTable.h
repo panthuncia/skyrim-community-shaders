@@ -351,6 +351,8 @@ namespace RenderGraph::Frame::Recipes::Table
 		// anchor runs there). Nothing else submits GPU work between the first tap and the end (the census counts any that does). Before the
 		// query, the engine's kMAIN copy that Main::RenderFirstPersonView makes after DCLF's first-person epoch in some cells (every frame on
 		// Solstheim, the worldspace run). Frame generation's hudless copy keeps its anchor's ticket (frame generation is off in native mode).
+		// The upscaler's evaluate is a pass recorded at execution in both modes: in guest it records into DXVK's command buffer inside the
+		// stage's block (ORGUpscaling's EvaluatePass).
 		{ .id = StageId::Post,
 			.owner = Owner::Cs,
 			.name = "post",
@@ -368,6 +370,7 @@ namespace RenderGraph::Frame::Recipes::Table
 				{ .anchor = Anchor::ImageSpace, .clients = { "cs.engine.imagespace.post.final", "cs.engine.skeleton.frame@post-chain" } },
 				{ .point = true },
 			} },
+			.runsInGuest = true,
 			.commit = "RenderEndOfFrameEffects' return",
 			.commitSite = "RenderEndOfFrameEffects' return (Frame/PostChain.cpp)",
 			.epochs = { Own(StageSegment(SegmentId::Post)), Placed(Anchor::VolumetricLighting), Placed(Anchor::PostProcessing), Placed(Anchor::Upscale),

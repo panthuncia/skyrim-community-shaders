@@ -137,7 +137,6 @@ namespace RenderGraph::Engine::Buffers::detail
 			 */
 			bool Advance(std::uint32_t a_size)
 			{
-				ReleaseParked();
 				if (current)
 					Retire(*std::exchange(current, nullptr));
 				Chunk* next = Take(a_size);
@@ -173,11 +172,20 @@ namespace RenderGraph::Engine::Buffers::detail
 				RenderGraphRuntime::Get().ReleaseAfterD3D11(std::move(token));
 			}
 
+		public:
 			/**
-			 * @brief The parked chunks of frames that have ended. A frame ends at its present (SealPresented advances RefFrame), after every
-			 * graph execution of that frame was submitted. So the release, which waits for the work submitted until now, covers every
-			 * execution that may read the chunk.
+			 * @brief After the present: the parked chunks of frames that have ended. A frame ends at its present (SealPresented advances
+			 * RefFrame), after every graph execution of that frame was submitted. So the release, which waits for the work submitted until
+			 * now, covers every execution that may read the chunk. Here, not when the next chunk fills: that is inside a stage's window, and
+			 * in guest mode the release's D3D11 query would reach DXVK's stream there.
 			 */
+			void ReleaseEndedFrames()
+			{
+				std::scoped_lock lock(mutex);
+				ReleaseParked();
+			}
+
+		private:
 			void ReleaseParked()
 			{
 				if (parked.empty())
@@ -329,6 +337,11 @@ namespace RenderGraph::Engine::Buffers::detail
 			}
 		});
 		return *versions;
+	}
+
+	void ReleaseEndedFrames()
+	{
+		Ring::Get().ReleaseEndedFrames();
 	}
 
 	bool IsRingChunk(const org::Buffer* a_buffer)

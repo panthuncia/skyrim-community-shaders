@@ -6,6 +6,7 @@
 #include "RenderGraph/Engine/Native/Native.h"
 #include "RenderGraph/Engine/Tripwire/GuestDevice.h"
 #include "RenderGraph/Engine/Tripwire/Tripwire.h"
+#include "RenderGraph/Frame/RecipeTable.h"
 #include "RenderGraph/FrameAnchors.h"
 #include "RenderGraph/Switches.h"
 #include "State.h"
@@ -947,8 +948,11 @@ namespace RenderGraph::Engine::Flush
 		 * reaches DXVK's stream before the stage's block, so it runs ahead of the stage's work on the GPU. Engine and CS calls alike: both
 		 * end at DXVK's context. Counted by method and caller, reported with the census window.
 		 */
-		/** @brief A counted call: its method, its caller and the frame above that (the engine's call site behind the guest context's forwarder). */
-		using CallKey = std::tuple<const char*, const void*, const void*>;
+		/**
+		 * @brief A counted call: its method, its caller, the two frames above that (the engine's call site behind the guest context's
+		 * forwarder, and its caller), and the stages whose windows were open (a bit per stage).
+		 */
+		using CallKey = std::tuple<const char*, const void*, const void*, const void*, std::uint32_t>;
 
 		struct Counts
 		{
@@ -968,19 +972,22 @@ namespace RenderGraph::Engine::Flush
 		{
 			auto& counts = GetCounts();
 			counts.seen.fetch_add(1, std::memory_order_relaxed);
-			if (!FrameAnchors::StagesHoldValues())
+			const auto stages = FrameAnchors::StagesHoldingValues();
+			if (!stages)
 				return;
-			// The frame above the caller: who called the guest context's forwarder, or CS's helper (ConstantBuffer::Update).
-			void* frames[8]{};
-			const USHORT count = RtlCaptureStackBackTrace(0, 8, frames, nullptr);
+			// The frames above the caller: who called the guest context's forwarder, or CS's helper (ConstantBuffer::Update), and its caller.
+			void* frames[10]{};
+			const USHORT count = RtlCaptureStackBackTrace(0, 10, frames, nullptr);
 			const void* above = nullptr;
+			const void* above2 = nullptr;
 			for (USHORT i = 0; i + 1 < count; ++i)
 				if (frames[i] == a_caller) {
 					above = frames[i + 1];
+					above2 = i + 2 < count ? frames[i + 2] : nullptr;
 					break;
 				}
 			const std::lock_guard guard(counts.lock);
-			++counts.calls[{ a_method, a_caller, above }];
+			++counts.calls[{ a_method, a_caller, above, above2, stages }];
 			++counts.total;
 			++counts.sessionTotal;
 		}
@@ -1072,9 +1079,14 @@ namespace RenderGraph::Engine::Flush
 			std::vector<std::pair<CallKey, std::uint64_t>> sorted(calls.begin(), calls.end());
 			std::ranges::sort(sorted, [](const auto& a, const auto& b) { return a.second > b.second; });
 			for (std::size_t i = 0; i < sorted.size() && i < 16; ++i) {
-				const auto& [method, caller, above] = sorted[i].first;
-				logger::info("[ORG] residue census: inside a stage's window #{}: {} {} at {} <- {}", i + 1, sorted[i].second, method, Tripwire::DescribeCaller(caller),
-					above ? Tripwire::DescribeCaller(above) : std::string("?"));
+				const auto& [method, caller, above, above2, stages] = sorted[i].first;
+				std::string windows;
+				for (std::uint32_t d = 0; d < static_cast<std::uint32_t>(RenderGraph::Frame::SegmentId::Count); ++d)
+					if (stages >> d & 1u)
+						windows += fmt::format("{}{}", windows.empty() ? "" : "+", RenderGraph::Frame::Recipes::Table::CsStage(d).name);
+				logger::info("[ORG] residue census: inside a stage's window #{}: {} {} at {} <- {} <- {} (window: {})", i + 1, sorted[i].second, method,
+					Tripwire::DescribeCaller(caller), above ? Tripwire::DescribeCaller(above) : std::string("?"),
+					above2 ? Tripwire::DescribeCaller(above2) : std::string("?"), windows);
 			}
 		}
 	}

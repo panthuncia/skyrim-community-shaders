@@ -685,6 +685,8 @@ struct IDXGISwapChain_Present
 			RenderGraphRuntime::Get().SealPresented();
 		// CS_ORG_ENGINE_CONSTANTS=1: every anchor of the frame has run, so the frame's captured constants can retire.
 		RenderGraph::Engine::Constants::EndFrame();
+		// CS_ORG_ENGINE_BUFFERS=1: the dynamic ring's full chunks of the ended frame go back, outside every stage's window.
+		RenderGraph::Engine::Buffers::EndFrame();
 		{
 			ZoneScopedN("CS.Present.FramePace");
 			RenderGraphRuntime::Get().WaitFramePace();

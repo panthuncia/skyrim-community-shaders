@@ -628,6 +628,12 @@ namespace FrameAnchors
 	bool StagesHoldValues();
 
 	/**
+	 * @brief The CS stages (a bit per RenderGraph::Frame::SegmentId value) that hold staged values now, for the residue census to name the
+	 * window a call came in. Any thread, without the anchors' lock.
+	 */
+	std::uint32_t StagesHoldingValues();
+
+	/**
 	 * @brief Called on the render owner each time the last open stage window closes (a commit, or staged values dropped): what was kept from
 	 * DXVK inside the windows is applied then (the flush latch's write-behind of the engine's constant buffers, Engine/Flush). One hook.
 	 */

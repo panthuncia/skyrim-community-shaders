@@ -4846,8 +4846,8 @@ Since Guest B0 (2026-11-18) guest runs every port native runs, with the flush la
 and CS's features draw on ORG in both modes, and the engine's binds and draws are withheld from DXVK. Since Guest B1 guest runs the
 frame driver, schedules, staged builds, keys and the recipe check; since Guest B2 two stages, pre-depth and pre-main, are one block each
 in DXVK's stream, the skeleton hosts its clears in Drawcall Limit Fix's graphs and the guest stages' places as in native, and the engine's
-constant-buffer writes inside a stage's window reach DXVK after the window (the latch's write-behind). Since Guest B3 to B5 deferred+water,
-start and sun run as guest stages too (five of seven CS stages; post and UI remain), the kMAIN copy reaches the skeleton through the guest
+constant-buffer writes inside a stage's window reach DXVK after the window (the latch's write-behind). Since Guest B3 to B6 deferred+water,
+start, sun and post run as guest stages too (six of seven CS stages; the UI remains; the upscaler's evaluate is the post stage's pass), the kMAIN copy reaches the skeleton through the guest
 context's CopyResource hook, and a client named by a guest stage and by one not in guest uses its anchor's own epoch for the other's part
 (`StagesOnly`, `OwnEpochHolds`). It still uses: the own epochs of
 every anchor the guest stages do not hold (per-anchor epochs, `FrameAnchors::Scheduled` on the anchor's own built graph; the skeleton's
@@ -7736,3 +7736,59 @@ B3). Native against B2's native shots: quick 1.2, river 6.7 and 3.2, interior 0.
   `NamedByStage`) and `OwnEpochHolds`.
 - Open residue: the release fences (above), Skylighting's guest occlusion clear (B4), the before-water depth copy in a frame without
   `DeferredPasses`, and a one-off skeleton clear of a view it does not hold.
+
+## Guest B6: post in guest (2026-11-18)
+
+Plan piece B6. Guest mode now runs six stages as blocks in DXVK's stream: start, pre-depth, pre-main, deferred+water, sun and post. The UI
+keeps its anchors' own epochs. Code and this text on `org-native/phases` (no submodule change). RX 6600, Perf-Fast, background runs with
+`DXVK_DEBUG=hang`.
+
+### What runs in guest
+
+- Post has `runsInGuest`: the first person's kMAIN copy and sun query (instance 0, no longer on EngineQueries' own epoch), the volumetric
+  lighting, the post chain (ImageSpace's chain steps), the PostProcessing and Upscale anchors, the Tonemap clients and the TAA mask's clear
+  place. VolumetricLighting, PostProcessing and Upscale have no own epoch in guest any more. Frame generation's hudless copy keeps its
+  anchor's ticket (as in native).
+- **ImageSpace.** The chain is on wherever the post stage runs (`Chain().on`, as before). The menus' composites and the face tint now
+  follow the UI stage (`Menu().on`), and the main client and the shape manifest are off only where every stage with ImageSpace steps runs
+  (`StepsOnly`: start, deferred+water, post and UI). Until B7 the main client keeps the menus' composites and the face tint in guest; it
+  no longer registers the chain's composite and HDR shapes. The capture frame of a menu over a frozen world is the post stage's (its
+  `capture.menubg` copy), so B0's first-sight path for that frame is gone: the Journal Menu's background matches native's (menu shot mean
+  60.1 against native's 60.6, 5.7 off; B5's guest and the D3D11 baseline were 51.8, darker and less blurred).
+- **Volumetric Lighting** is installed wherever a stage of this mode holds its anchor (`StageStepsAt`), whatever the feature's state, as
+  native did by mode.
+
+### The upscaler's evaluate (decision D1)
+
+Built as option (a): the evaluate is the post stage's pass recorded at execution, in both modes. The Upscale anchor is a whole step of
+the post stage in guest now, so `ORGUpscaling` makes the evaluate client wherever `StageStepsAt(Upscale)` (the recipe, not the mode).
+Streamline's evaluate for FSR, XeSS and DLSS takes the pass path where `EvaluatesInStage()`; frame generation's FSR-FG evaluate stays in
+DXVK's interop ring. In guest the pass records on DXVK's worker, inside the stage's block: ORG adopts DXVK's command buffer for passes
+recorded at execution, and `Native::DescribeForCommands` now takes the graph host's device (native's own, or the one over DXVK's
+VkDevice), so Streamline records into DXVK's primary command buffer with the images in GENERAL. The separator clear before the evaluate
+(`SeparateFromGraphEpochs`) is skipped there: the evaluate follows the stage's own passes in one command buffer, as in native. The late
+epoch hook still runs the separator after the post and UI blocks, for frame generation and the present. FSR and XeSS evaluate through
+the pass on the RX 6600 (upscalers run: shots within 3.7 of B5's final run; DLSS is not available). Not tested: NVIDIA (the descriptor
+heap hazard in render-graph.md was seen on separate command buffers; native runs the evaluate the same way on NVIDIA), frame generation
+(needs the foreground).
+
+### Residue
+
+`latch-census-short`: **0 calls inside a stage's window in every steady window** (B5: 150 a steady exterior window). The census now
+names the windows open at each call and two frames above the caller, which found the source of B5's release fences: not the ring but
+`RenderGraphRuntime::EmitCommands`' wrapper (Drawcall Limit Fix's forward hand-off, in the sun window), released behind a D3D11 query at
+the call. The wrappers are now kept until the frame's end and released together in `SealPresented`, after the present (one query a
+frame, outside every window). The dynamic ring's parked chunks also go back there (`Buffers::EndFrame`), not when the next chunk fills.
+Neither changed the image (census shots within 0.6 of B5's). Left, all in non-steady windows: Skylighting's guest occlusion clear in the
+start window of the two loads (145, 155; B4), the before-water depth copy (2, start window, first load) and the skeleton's one-off clears
+of views it does not hold (rt88 and rt12 at the first world frame, deferred+water and post windows; rt75 in the Journal Menu's capture
+frame, post window).
+
+### Checks
+
+One background run each on DLL `c6a456a58386`: guest `latch-census-short`, upscalers (FSR, XeSS, TAA), the Journal Menu run, quick,
+interior; native quick, validation (the same 20 `VUID-vkCmdDraw-None-09600`); `d3d11+quick`. All passed with 0 tap errors, 0 recipe
+findings, no `NoPass`, no failed build; the only `[C]` line is the known `PublishedResources` one. Shots against B5's final runs: quick
+2.2; interior 2.8 and 5.7 (Dragonsreach's light shafts); census at most 0.6; native quick 1.1, validation at most 0.9 apart from
+Dragonsreach (8.6, its light shafts). Two earlier census runs on the first builds (before the release fence change) passed too. Perf:
+with B7.

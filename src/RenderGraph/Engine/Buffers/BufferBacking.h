@@ -62,4 +62,7 @@ namespace RenderGraph::Engine::Buffers::detail
 
 	/** @brief Whether a_buffer is one of the ring's chunks. Any thread. */
 	bool IsRingChunk(const org::Buffer* a_buffer);
+
+	/** @brief EndFrame's part for the ring: the full chunks of ended frames go back behind the work submitted so far. */
+	void ReleaseEndedFrames();
 }

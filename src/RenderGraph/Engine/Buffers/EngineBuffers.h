@@ -40,6 +40,12 @@ namespace RenderGraph::Engine::Buffers
 	/** @brief After the game's device exists (InitD3D): when requested, detours the device's CreateBuffer. */
 	void InstallDeviceHooks(ID3D11Device* a_device);
 
+	/**
+	 * @brief After the present, on the presenting thread: the dynamic ring's full chunks of the ended frame are released behind the
+	 * work submitted so far (outside every stage's window).
+	 */
+	void EndFrame();
+
 	/** @brief An engine buffer the ORG owns, as a pass reads it directly. */
 	struct Direct
 	{

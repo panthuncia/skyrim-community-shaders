@@ -291,6 +291,10 @@ struct RenderGraphRuntime::Impl
 		std::shared_ptr<const void> owner;
 	};
 	std::deque<D3D11Release> d3d11Releases;
+	// EmitCommands' wrappers (guest mode), kept until the frame's end and then released behind the frame's work (SealPresented). Their
+	// release query issued at the call would reach DXVK's stream inside a stage's window (DCLF's forward hand-off is in the sun window).
+	std::mutex frameEndLock;
+	std::vector<std::shared_ptr<const void>> frameEndReleases;
 	// Native mode (CS_ORG_NATIVE=1): BasicRHI's own device, no DXVK. Releases then wait for the graph's submissions instead of a
 	// D3D11 event query: an owner is freed once every graph submission made before its release is complete on the GPU.
 	bool native = false;
@@ -3116,6 +3120,17 @@ void RenderGraphRuntime::SealPresented()
 	RenderGraph::AdvanceRefFrame();
 	if (impl && impl->host)
 		impl->host->SealSubmitted();
+	// EmitCommands' wrappers of the frame: every stage committed and the present sent the frame's work on, so the release is outside every
+	// stage's window and behind every command they recorded.
+	if (impl) {
+		auto released = std::make_shared<std::vector<std::shared_ptr<const void>>>();
+		{
+			const std::lock_guard lock(impl->frameEndLock);
+			released->swap(impl->frameEndReleases);
+		}
+		if (!released->empty())
+			ReleaseAfterD3D11(std::move(released));
+	}
 	// Native mode, while it is brought up: the host's runs in flight every 600 presents, so a run that never retires shows early.
 	if (impl && impl->native && impl->host) {
 		static std::uint64_t s_presents = 0;
@@ -4070,7 +4085,11 @@ bool RenderGraphRuntime::EmitCommands(void (*a_record)(void* a_user, rhi::Comman
 		delete commands;
 		return false;
 	}
-	ReleaseAfterD3D11(std::move(wrapper));
+	// Released at the frame's end, behind the frame's work: that covers these commands (SealPresented).
+	{
+		const std::lock_guard lock(impl->frameEndLock);
+		impl->frameEndReleases.push_back(std::move(wrapper));
+	}
 	return true;
 }
 

@@ -237,12 +237,13 @@ namespace
 	}
 
 	/**
-	 * @brief Whether the client is installed: CS_ORG_VOLUMETRIC_LIGHTING, with the feature on, or in native mode whatever the feature's
-	 * state (native mode has no D3D11 path for the engine's volumetric lighting).
+	 * @brief Whether the client is installed: CS_ORG_VOLUMETRIC_LIGHTING, with the feature on, or wherever a stage of this mode holds the
+	 * VolumetricLighting anchor (the post stage), whatever the feature's state: the engine's own volumetric lighting has no D3D11 path
+	 * inside a stage.
 	 */
 	bool Wanted()
 	{
-		return ORGVolumetricLighting::Requested() && (FeatureOn() || RenderGraph::Engine::Native::Requested());
+		return ORGVolumetricLighting::Requested() && (FeatureOn() || FrameAnchors::StageStepsAt(Anchor::VolumetricLighting));
 	}
 
 	/** @brief The blurs' render area: the dynamic resolution part of the screen, and its last pixel (the blurs' VLData). */

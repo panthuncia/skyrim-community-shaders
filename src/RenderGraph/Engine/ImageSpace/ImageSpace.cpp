@@ -650,6 +650,8 @@ namespace RenderGraph::Engine::ImageSpace
 			// The CS stages' ImageSpace clients (the post chain's, the RenderWorld scopes'): on for the session once their gates and latches
 			// exist; the constant chunks their draws read, held for the frame.
 			bool postOn = false;
+			// Every stage with ImageSpace steps runs in this mode: no main client, no shape manifest (StepsOnly).
+			bool stepsOnly = false;
 			std::array<PostClient, 9> post{};
 			// Between RenderSSAO's two calls in Main::RenderWorld: an own-scope copy-subregion call there is the snow scope's copy.
 			bool snowWindow = false;
@@ -2680,16 +2682,19 @@ namespace RenderGraph::Engine::ImageSpace
 		 */
 		/** @brief Whether the RenderWorld scopes are the deferred+water stage's passes (WorldSteps.inl). */
 		bool WorldStepsOn();
+		bool ChainStepsOn();
 
 		std::vector<ShapeKey> ShapesToRegister()
 		{
 			auto& state = IS();
 			std::vector<ShapeKey> keys;
 			std::map<ShapeKey, std::uint32_t> positions;
-			// The RenderWorld scopes are the deferred+water stage's passes where it runs (WorldSteps.inl): their shapes are not the main client's.
+			// The RenderWorld scopes are the deferred+water stage's passes where it runs (WorldSteps.inl), and the world chain's composites and
+			// HDR effect the post stage's (ChainSteps.inl): their shapes are not the main client's.
 			const auto worldScope = [](std::uint32_t a_position) {
 				const auto scope = static_cast<ScopeKind>(a_position >> 16);
-				return WorldStepsOn() && (scope == ScopeKind::SSAO || scope == ScopeKind::Reflections);
+				return (WorldStepsOn() && (scope == ScopeKind::SSAO || scope == ScopeKind::Reflections)) ||
+				       (ChainStepsOn() && (scope == ScopeKind::Composites || scope == ScopeKind::HDR));
 			};
 			for (const auto& [key, entry] : state.manifest) {
 				if (!state.enabled[key.effect] || worldScope(entry.position))
@@ -2777,13 +2782,13 @@ namespace RenderGraph::Engine::ImageSpace
 		}
 
 		/**
-		 * @brief Native mode with CS's stages: every ImageSpace draw is a CS pass (the world steps, the post chain, the start stage's water
-		 * effects, the menu composites) or a mismatch (NoPass). The main client, the shapes built on first sight and the shape manifest are
-		 * guest mode's only.
+		 * @brief Every stage with ImageSpace steps runs in this mode (start, deferred+water, post, UI): every ImageSpace draw is a CS pass
+		 * (the world steps, the post chain, the start stage's water effects, the menu composites) or a mismatch (NoPass). The main client,
+		 * the shapes built on first sight and the shape manifest are for a mode where one of those stages does not run yet.
 		 */
 		bool StepsOnly()
 		{
-			return IS().postOn;
+			return IS().stepsOnly;
 		}
 
 		bool Usable()
@@ -2986,6 +2991,7 @@ namespace RenderGraph::Engine::ImageSpace
 
 		bool WorldStepsOn() { return World().on; }
 #	include "RenderGraph/Engine/ImageSpace/ChainSteps.inl"
+		bool ChainStepsOn() { return Chain().on; }
 #	include "RenderGraph/Engine/ImageSpace/StartSteps.inl"
 #	include "RenderGraph/Engine/ImageSpace/MenuSteps.inl"
 
@@ -3944,8 +3950,8 @@ namespace RenderGraph::Engine::ImageSpace
 		// chain's hooks run, registered at the first world frame (CheckChainSteps, CheckWorldSteps); the water effects are the start
 		// stage's (CheckStartSteps), and the menus' composites a client on the anchor's own epoch, registered now (RegisterMenuSteps).
 		// Each part is on where its stage runs in this mode (the frame's stage epochs): the world steps with the deferred+water stage, the
-		// water effects with the start stage, the post chain and the menus' composites with the post stage. Guest mode runs some of the
-		// stages; the anchor's main client keeps the draws of the others.
+		// water effects with the start stage, the post chain with the post stage, and the menus' composites and the face tint with the UI
+		// stage. Guest mode runs some of the stages; the anchor's main client keeps the draws of the others.
 		const auto epochs = FrameAnchors::SegmentEpochs();
 		const auto runs = [&](Frame::SegmentId a_stage) {
 			return std::ranges::find(epochs, RenderGraphRuntime::EpochOf(RenderGraphRuntime::StageSegment(static_cast<std::uint32_t>(a_stage)))) != epochs.end();
@@ -3962,7 +3968,8 @@ namespace RenderGraph::Engine::ImageSpace
 			Chain().on = state.postOn;
 			World().on = clients && runs(Frame::SegmentId::Deferred);
 			Start().on = clients && runs(Frame::SegmentId::Start);
-			Menu().on = state.postOn;
+			Menu().on = clients && runs(Frame::SegmentId::Ui);
+			state.stepsOnly = Chain().on && World().on && Start().on && Menu().on;
 		}
 		if (StepsOnly()) {
 			// Native mode with CS's stages: no main client, no shape manifest. The menus' composites join the setup's build point.
