@@ -948,11 +948,12 @@ the ORG adoption observer (development check), the missed-writer check, `Setting
 | Q9 | How often `AttachStagedEpochGraph` is refused in practice. | Step 3's counter over the full test set. Any refusal after step 4 is fatal by design; if refusals occur in normal runs, find the configuration change that causes them. |
 | Q10 | A7 (HDR output as a UI-stage step) is in another plan. If it lands first, 7b shrinks. | Check `docs/development/org-native-frame-graph.md` and the cleanup plan for A7's state before 7b. |
 
-**Needs the user:** nothing blocks step 1. Two points to confirm when they come up:
-- **VRAM cost of decision 6a** on 8 GB cards at 4K with a low upscale ratio (measured in step 8). The decision is made; the number may
-  matter for defaults.
-- **Window resize support (Q4).** If Skyrim never recreates its targets mid-session, step 9a has no runtime test. Confirm that an
-  untested event path is acceptable, or that a mid-session `Create` should stay a fatal error.
+**Decided by the user (2026-11-18):**
+- **Mid-session target recreation (Q4).** A mid-session `Create` of the engine's targets stays a fatal error. Step 9a does not build
+  an event path for it. Revisit only when something is found that recreates them. Announced changes that do occur (the swap chain's
+  `ResizeBuffers`, colour-space changes) still go through events.
+- **VRAM cost of decision 6a.** Accepted for now. Step 8 still records the measured number in the dated doc, but it does not gate
+  the step and no default changes because of it.
 
 ---
 

@@ -492,6 +492,19 @@ D3D12 needs new plugin code. Steps 6 and 7 are independent after step 5; swap th
 
 ## 6. Open questions
 
+**All seven were decided by the user on 2026-11-18: option (a) for each.** The options are kept below for the record.
+
+| # | Decision |
+|---|---|
+| 1 | DLSS-G in native is in scope. It comes last, in a session on the RTX 5080. |
+| 2 | FSR frame generation on D3D12 goes through Streamline. `sl.fsr_g` gets a D3D12 backend. |
+| 3 | Native Vulkan comes first, native D3D12 second. |
+| 4 | Frame generation with HDR is required in native for the first version. |
+| 5 | One long frame when frame generation is toggled is acceptable. |
+| 6 | Guest moves onto the shared interface in the same effort and loses its fault-teardown retries. Faults are fatal in every mode. |
+| 7 | The tactical swap chain replacement (step 5) lands before the frame-revision system and is migrated in step 9. |
+
+
 1. **Is DLSS-G in native in scope?**
    (a) yes, last, in a session on the RTX 5080; (b) not now: build the interface so it fits, implement later; (c) D3D12 only.
    *Recommended: (a). The architecture is the same; only step 8 needs the card.*
