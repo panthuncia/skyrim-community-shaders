@@ -41,7 +41,7 @@ namespace org
  *
  * Startup, in order (each stage logs one "[ORG native] stage" line, so a failed bring-up shows how far it got):
  * 1. switches (SKSEPlugin_Load, after CommunityShaders.env): the port switches native mode needs are turned on. One set to 0, or
- *    a switch that conflicts (CS_NATIVE_D3D11, CS_ORG_OWNED_FRAME, CS_ORG=0), is a startup error that names it.
+ *    a switch that conflicts (CS_NATIVE_D3D11, CS_ORG=0), is a startup error that names it.
  * 2. checks (Hooks::InstallEarlyHooks): DXVK is not loaded; a feature that still needs DXVK is a startup error that names it.
  * 3. device, 4. swap chain, 5. handles (the game's D3D11CreateDeviceAndSwapChain, SE 75589 / AE 77396): BasicRHI's device, ORG's
  *    swap chain on the game's window with the back buffer, and the device, context and swap chain handles the engine stores
@@ -77,7 +77,7 @@ namespace RenderGraph::Engine::Native
 
 	/**
 	 * @brief Whether the frame runs on the render graph: native mode, or guest mode (DXVK with the graph on). Every engine and CS
-	 * port runs then, and none with CS_ORG=0, CS_ORG=features, CS_NATIVE_D3D11=1 or CS_ORG_OWNED_FRAME=1. Any thread.
+	 * port runs then, and none with CS_ORG=0, CS_ORG=features or CS_NATIVE_D3D11=1. Any thread.
 	 */
 	bool GraphMode();
 

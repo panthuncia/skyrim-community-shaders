@@ -9,7 +9,7 @@
 /**
  * @brief Which BasicRHI backend the render graph runs on, and what that changes for the rest of CS.
  *
- * CS_ORG_NATIVE_BACKEND picks it: "vulkan" (the default) or "d3d12". Vulkan runs on DXVK's device (adoption, the owned frame) or on
+ * CS_ORG_NATIVE_BACKEND picks it: "vulkan" (the default) or "d3d12". Vulkan runs on DXVK's device (adoption) or on
  * the native mode's own device (CS_ORG_NATIVE=1). D3D12 runs only in the native mode: DXVK translates the game's D3D11 into
  * Vulkan, so there is no D3D12 device to share with it. The native mode's device creation calls Engine::CreateD3D12Device
  * (Engine/D3D12Device.h) when D3D12 is requested, then SetActive.

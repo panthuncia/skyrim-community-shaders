@@ -80,13 +80,12 @@ SPECIAL = {
         "description": "false: the engine clears the six GBuffer targets itself, instead of one clear pass at the Prepass anchor",
     },
     # The epoch and submission switches (src/Testing/SwitchRegistry.cpp, kDescribed).
-    "CS_ORG_EPOCHS": {
-        "key": "org.epochs", "type": "bool", "default": True,
-        "description": "0: the render graph runs without epochs, and DCLF does not install",
-    },
-    "CS_ORG_ASYNC_EPOCHS": {
-        "key": "org.async_epochs", "type": "bool", "default": True,
-        "description": "0: epochs are recorded on the render thread",
+    "CS_ORG_COMPUTE_QUEUE": {"key": "org.compute_queue", "type": "bool", "default": True, "description": "0: no async compute queue"},
+    "CS_ORG_COPY_QUEUE": {"key": "org.copy_queue", "type": "bool", "default": True, "description": "0: no copy queue"},
+    "CS_ORG_UPLOAD_QUEUE": {"key": "org.upload_queue", "type": "bool", "default": True, "description": "0: no upload queue"},
+    "CS_ORG_CRASH_MARKERS": {
+        "key": "org.crash_markers", "type": "bool", "default": True,
+        "description": "0: native mode's device has no crash markers under DXVK_DEBUG=hang",
     },
     "CS_ORG_CLOSED": {
         "key": "org.closed", "type": "bool", "default": False,

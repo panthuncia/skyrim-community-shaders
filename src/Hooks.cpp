@@ -25,11 +25,11 @@
 #include "Aftermath.h"
 #include "D3DX9MathUpgrade.h"
 #include "DxvkLoader.h"
-#include "RenderGraph/Engine/Native/Native.h"
 #include "EngineFix.h"
 #include "Feature.h"
 #include "Globals.h"
 #include "Menu.h"
+#include "RenderGraph/Engine/Native/Native.h"
 #include "ShaderCache.h"
 #include "State.h"
 #include "TruePBR.h"
@@ -62,7 +62,6 @@
 #include "RenderGraph/Engine/Bink/Bink.h"
 #include "RenderGraph/Engine/LoadingScreen/LoadingScreen.h"
 #include "RenderGraph/Engine/Buffers/EngineBuffers.h"
-#include "RenderGraph/Engine/OwnedFrame.h"
 #include "RenderGraph/Engine/Scaleform/Scaleform.h"
 #include "RenderGraph/Engine/TonemapAnchor.h"
 #include "RenderGraph/RenderGraphRuntime.h"
@@ -647,21 +646,16 @@ struct IDXGISwapChain_Present
 						GpuEventTimers::BeginEvent("mark before native present");
 						GpuEventTimers::EndEvent();
 						// A load without a loading menu (or a re-entry), held until Drawcall Limit Fix draws its objects: the previous frame
-						// stays on screen. The frame's work is sent on as a present would send it: the owned frame ends the guest frame and
-						// queues nothing. Not with frame generation, which presents itself.
+						// stays on screen. The frame's work is sent on as a present would send it. Not with frame generation, which presents
+						// itself.
 						if (holdsPresent) {
-							if (RenderGraph::Engine::OwnedFrame::Active())
-								return RenderGraph::Engine::OwnedFrame::Get().EndGuestFrame(sc, si, f, [](IDXGISwapChain* a_sc, unsigned a_si, unsigned a_f) { return func(a_sc, a_si, a_f); });
 							globals::d3d::context->Flush();
 							// Native: the held frame is paced as a present would pace it.
 							if (RenderGraph::Engine::Native::Active())
 								RenderGraph::Engine::Native::PaceHeldPresent();
 							return S_OK;
 						}
-						// The owned frame: DXVK's headless Present ends the guest frame, ORG presents behind it.
-						const auto presented = RenderGraph::Engine::OwnedFrame::Active() ?
-						                           RenderGraph::Engine::OwnedFrame::Get().Present(sc, si, f, [](IDXGISwapChain* a_sc, unsigned a_si, unsigned a_f) { return func(a_sc, a_si, a_f); }) :
-						                           func(sc, si, f);
+						const auto presented = func(sc, si, f);
 						GpuEventTimers::BeginEvent("mark after native present");
 						GpuEventTimers::EndEvent();
 						return presented;

@@ -24,7 +24,6 @@ namespace FrameAnchors
  *   swap chain's back buffer, and the UI texture's clear after the composite (ClearUIBuffer's) are passes at the HDROutput anchor,
  *   which ApplyHDR runs (RenderGraph::AnchorPasses: a dispatch, a copy and a UAV clear, order keys from 100 up). Only Compose runs
  *   the anchor, so these run at every run; only the scene clear below goes through the client's run gate.
- * - The owned frame (CS_ORG_OWNED_FRAME=1) presents the output itself (OwnedFrame::SetFrameSource): no copy pass then.
  * - A Bink movie frame's scene clear (PrepareMovieDraw) is a gated dispatch before the composite at the same anchor (ClearSceneCS,
  *   through the client's run gate): Bink draws into the UI texture, so the scene is untouched until the composite reads it.
  * - The UI texture's clear when the engine starts its interface draw (SetUIBuffer) is skipped while the texture is still clean from
@@ -109,7 +108,7 @@ public:
 	 * @brief ApplyHDR on the graph: runs the HDROutput anchor with this frame's constants. Registers the client the first time,
 	 * and again when a texture or the screen size changed. Composed::None while not IsActive.
 	 * @param a_constants This frame's HDROutputCS constants (HDRDisplay::BuildHDRData).
-	 * @param a_backBuffer The back buffer to copy the output into, or null (the owned frame presents the output itself).
+	 * @param a_backBuffer The back buffer to copy the output into, or null (no copy pass).
 	 * @param a_clearScene Clear HDR's scene to black before the composite (a movie frame's clear). With Composed::None the caller
 	 * clears it with D3D11 before composing there.
 	 */

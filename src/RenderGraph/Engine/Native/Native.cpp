@@ -26,7 +26,6 @@ namespace RenderGraph::Engine::Native
 		};
 		constexpr std::array kConflicts{
 			Conflict{ "CS_NATIVE_D3D11", "1", "it runs the game on the system D3D11 runtime, not on ORG" },
-			Conflict{ "CS_ORG_OWNED_FRAME", "1", "the owned frame runs DXVK as a guest on BasicRHI's device; native mode has no DXVK" },
 			Conflict{ "CS_ORG", "0", "native mode is the render graph: it cannot be off" },
 			Conflict{ "CS_ORG", "features", "native mode is the render graph: it cannot be off" },
 		};
@@ -132,7 +131,7 @@ namespace RenderGraph::Engine::Native
 
 		/**
 		 * @brief Guest mode is DXVK with the render graph on: not native, not CS_ORG=0 or CS_ORG=features (no graph), not the system
-		 * D3D11 runtime, not the owned frame. Read from the environment: this runs before the first cached read.
+		 * D3D11 runtime. Read from the environment: this runs before the first cached read.
 		 */
 		bool GuestMode()
 		{
@@ -140,7 +139,7 @@ namespace RenderGraph::Engine::Native
 			const auto org = Environment("CS_ORG");
 			if (org == "0" || org == "features")
 				return false;
-			return Environment("CS_NATIVE_D3D11") != "1" && Environment("CS_ORG_OWNED_FRAME") != "1";
+			return Environment("CS_NATIVE_D3D11") != "1";
 #else
 			return false;
 #endif

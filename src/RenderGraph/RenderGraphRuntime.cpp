@@ -22,12 +22,10 @@
 #include "RenderGraph/FrameAnchorSelfTest.h"
 #include "RenderGraph/FrameAnchors.h"
 #include "RenderGraph/GraphResources.h"
-#include "RenderGraph/Engine/GuestDevice.h"
 #include "RenderGraph/DxvkImageImport.h"
 #include "RenderGraph/Engine/Native/Native.h"
 #include "RenderGraph/Engine/Native/OpCensus.h"
 #include "RenderGraph/Engine/Native/RtSampler.h"
-#include "RenderGraph/Engine/OwnedFrame.h"
 #include "RenderGraph/Engine/Targets/EngineTargets.h"
 #include "RenderGraph/Engine/Tripwire/Tripwire.h"
 #include "RenderGraph/GpuTimingSource.h"
@@ -1171,13 +1169,11 @@ struct RenderGraphRuntime::Impl
 		uint32_t bodies = 0;
 		double bodyUs = 0.0;
 		double bodyEpochUs = 0.0;
-		double bodyJoinUs = 0.0;
 	};
-	// The open EpochBodyScope (render thread only): whether an epoch ran inside it, its time, and its joins.
+	// The open EpochBodyScope (render thread only): whether an epoch ran inside it, and its time.
 	bool bodyOpen = false;
 	bool bodyRanEpoch = false;
 	double bodyEpochUs = 0.0;
-	double bodyJoinUs = 0.0;
 	std::array<EpochSegmentStats, static_cast<std::size_t>(Segment::Count)> epochSegmentStats{};
 
 	// ORG's pass timestamps, per segment. An epoch is one host frame; the segment it ran is remembered by
@@ -1510,10 +1506,10 @@ struct RenderGraphRuntime::Impl
 					phases += fmt::format("{}{} {:.1f}", p ? ", " : "", kAsyncEpochPhaseNames[p], stats.phaseUs[p] / stats.epochs);
 			if (stats.bodies) {
 				// Outside ExecuteEpoch: the feature's own render-thread work around it (inputs, frame blocks, the
-				// stale inline build, stats). Joins: waits on workers anywhere in the body, "inputs" included.
-				logger::info("[ORG] Epoch body {}: avg {:.1f} us over {} calls; ExecuteEpoch {:.1f}, outside it {:.1f}, joins {:.1f}",
+				// stale inline build, stats).
+				logger::info("[ORG] Epoch body {}: avg {:.1f} us over {} calls; ExecuteEpoch {:.1f}, outside it {:.1f}",
 					SegmentLabel(static_cast<Segment>(i)), stats.bodyUs / stats.bodies, stats.bodies, stats.bodyEpochUs / stats.bodies,
-					(stats.bodyUs - stats.bodyEpochUs) / stats.bodies, stats.bodyJoinUs / stats.bodies);
+					(stats.bodyUs - stats.bodyEpochUs) / stats.bodies);
 			}
 			logger::info("[ORG] Epoch CPU {} ({}): avg {:.1f} us, max {:.1f} us over {} epochs; {:.1f} batches, {:.1f} queue submissions ({:.1f} DXVK enqueues) each; {}/{} segment admissions cached; by phase (us): {}",
 				SegmentLabel(static_cast<Segment>(i)), native ? "native" : enqueueSubmission ? "stream" : "flush", stats.totalUs / stats.epochs, stats.maxUs, stats.epochs,
@@ -2358,15 +2354,7 @@ bool RenderGraphRuntime::Initialize()
 			state->computeQueue ? fmt::format("{}:{}", info.computeQueueFamily, info.computeQueueIndex) : std::string("shared with graphics"),
 			state->uploadQueue ? fmt::format("{}:{}", info.uploadQueueFamily, info.uploadQueueIndex) : std::string("none"),
 			!state->copyQueue ? std::string("shared with graphics") : state->copyQueue == state->uploadQueue ? std::string("shared with upload") : fmt::format("{}:{}", info.copyQueueFamily, info.copyQueueIndex));
-		if (auto& guest = RenderGraph::Engine::GuestDevice::Get(); guest.Active()) {
-			// The owned frame: BasicRHI created the device and DXVK is its guest. The graph shares that device, with the same hooks an
-			// adoption takes; the queue lock skips the owned frame's present, which runs inside DXVK's own lock.
-			state->device = guest.Device();
-			adopt.submissionHooks.lock = &RenderGraph::Engine::GuestDevice::LockQueue;
-			adopt.submissionHooks.unlock = &RenderGraph::Engine::GuestDevice::UnlockQueue;
-			if (rhi::vulkan::ShareVulkanDevice(state->device->Get(), adopt.submissionHooks) != rhi::Result::Ok)
-				return disable("BasicRHI could not share its Vulkan device with the render graph's hooks");
-		} else if (rhi::vulkan::AdoptVulkanDevice(adopt, *state->device) != rhi::Result::Ok || !*state->device)
+		if (rhi::vulkan::AdoptVulkanDevice(adopt, *state->device) != rhi::Result::Ok || !*state->device)
 			return disable("BasicRHI could not adopt DXVK's Vulkan device");
 	}
 	// Both modes. It was read only in the guest branch above, so native mode never kept statistics.
@@ -2691,8 +2679,6 @@ bool RenderGraphRuntime::Initialize()
 
 void RenderGraphRuntime::Shutdown()
 {
-	// The owned frame's swap chain and present objects first: they are on the same device, and DXVK's teardown follows.
-	RenderGraph::Engine::OwnedFrame::Get().Shutdown();
 	// No program build may create a pipeline on a device being torn down (ProgramCache).
 	RenderGraph::StopProgramBuilds();
 	if (!impl)
@@ -2866,7 +2852,7 @@ RenderGraphRuntime::EpochBodyScope::EpochBodyScope(Segment a_segment) :
 	auto& state = *runtime.impl;
 	state.bodyOpen = true;
 	state.bodyRanEpoch = false;
-	state.bodyEpochUs = state.bodyJoinUs = 0.0;
+	state.bodyEpochUs = 0.0;
 }
 
 RenderGraphRuntime::EpochBodyScope::~EpochBodyScope()
@@ -2883,7 +2869,6 @@ RenderGraphRuntime::EpochBodyScope::~EpochBodyScope()
 	++stats.bodies;
 	stats.bodyUs += std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - start).count();
 	stats.bodyEpochUs += state.bodyEpochUs;
-	stats.bodyJoinUs += state.bodyJoinUs;
 }
 
 std::uint64_t RenderGraphRuntime::TakeSubmittedSegments()
@@ -3232,13 +3217,6 @@ void RenderGraphRuntime::WaitFramePace()
 	if (state.framePaceWaits % 3000 == 0)
 		logger::info("[ORG] frame pacing: {} waits so far, {:.2f} ms average", state.framePaceWaits,
 			static_cast<double>(state.framePaceWaited) / 1000.0 / static_cast<double>(state.framePaceWaits));
-}
-
-void RenderGraphRuntime::AddEpochJoinWait(std::chrono::steady_clock::duration a_waited)
-{
-	auto& runtime = RenderGraphRuntime::Get();
-	if (runtime.impl && runtime.impl->bodyOpen)
-		runtime.impl->bodyJoinUs += std::chrono::duration<double, std::micro>(a_waited).count();
 }
 
 std::uint32_t RenderGraphRuntime::EpochOf(Segment a_segment)
