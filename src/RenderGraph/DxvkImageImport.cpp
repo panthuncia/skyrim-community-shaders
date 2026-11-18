@@ -477,7 +477,8 @@ namespace RenderGraph
 		a_keep.reset();
 		if (!a_device || !a_buffer || !a_bytes)
 			return {};
-		const std::uint64_t end = a_offset + a_bytes;
+		// A raw view loads whole words, so it covers the range's last partial word too. The buffers it imports are padded to whole words.
+		const std::uint64_t end = a_offset + ((a_bytes + 3) & ~std::uint64_t(3));
 		auto& imports = Imports();
 		std::shared_ptr<ImportedBuffer> imported;
 		{

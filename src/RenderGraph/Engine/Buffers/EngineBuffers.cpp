@@ -60,7 +60,9 @@ namespace RenderGraph::Engine::Buffers
 				// Made on loader threads too: the host's world is the render thread's (as DCLF's pooled backings).
 				org::Resource::ScopedECSRegistrationSuppression suppressECS;
 				// Device-local and host-visible with resizable BAR, host memory otherwise: the CPU fills it with no GPU copy.
-				auto buffer = org::Buffer::CreateShared(rhi::HeapType::GPUUpload, a_desc.ByteWidth);
+				// Whole words, since raw views load whole words. An odd-sized index list ends halfway through its last word.
+				const UINT bytes = (a_desc.ByteWidth + 3) & ~3u;
+				auto buffer = org::Buffer::CreateShared(rhi::HeapType::GPUUpload, bytes);
 				buffer->SetName(a_name);
 				void* data = nullptr;
 				auto api = buffer->GetAPIResource();
@@ -69,6 +71,7 @@ namespace RenderGraph::Engine::Buffers
 					WarnOnce(warnedMap, "an upload buffer has no mapping");
 					return std::nullopt;
 				}
+				std::memset(static_cast<std::uint8_t*>(data) + a_desc.ByteWidth, 0, bytes - a_desc.ByteWidth);
 				D3D11_BUFFER_DESC wrap{};
 				wrap.ByteWidth = a_desc.ByteWidth;
 				wrap.Usage = D3D11_USAGE_DEFAULT;

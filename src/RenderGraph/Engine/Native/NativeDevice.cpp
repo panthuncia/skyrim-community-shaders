@@ -1706,7 +1706,8 @@ namespace RenderGraph::Engine::Native
 				desc.heapType = a_heap;
 				desc.resourceFlags = a_unorderedAccess ? rhi::RF_AllowUnorderedAccess : rhi::RF_None;
 				desc.debugName = a_record.name.c_str();
-				desc.buffer.sizeBytes = a_size;
+				// Whole words, so that a raw view reaches an odd-sized index list's last index (ImportBufferRef covers the word).
+				desc.buffer.sizeBytes = (a_size + 3) & ~uint64_t(3);
 				if (Rhi().CreateCommittedResource(desc, a_record.resource) != rhi::Result::Ok || !a_record.resource || !DescribeBuffer(a_record, a_record.resource.Get())) {
 					LogOnce(loggedCreate, a_record.name, "BasicRHI could not create the buffer");
 					return false;
