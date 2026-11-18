@@ -136,7 +136,7 @@ namespace Testing
 				{ "fps", std::round(a_run.fps * 10.0) / 10.0 },
 				{ "milestones", std::move(milestones) },
 				{ "loads", std::move(loads) },
-				{ "config", { { "applied", a_run.applied }, { "features_off", a_run.config.featuresDisabled }, { "unknown", a_run.unknown }, { "unchecked", a_run.unchecked } } },
+				{ "config", { { "applied", a_run.applied }, { "features_off", a_run.config.featuresDisabled }, { "features_on", a_run.config.featuresEnabled }, { "unknown", a_run.unknown }, { "unchecked", a_run.unchecked } } },
 				{ "step", std::move(step) },
 				{ "compile", { { "done", compile.done }, { "total", compile.total } } },
 				{ "holds", Holds::List() },

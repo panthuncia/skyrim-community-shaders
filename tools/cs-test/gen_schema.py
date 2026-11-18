@@ -321,7 +321,7 @@ def build(root):
         keys[key_of(name)] = entry
     for feature in features(root):
         keys[f"features.{feature}"] = {"type": "bool", "default": True, "family": "features", "kind": "feature", "sweep": True,
-                                       "description": f"false: {feature} is disabled at boot for this run (features_disabled)"}
+                                       "description": f"false: {feature} is disabled at boot for this run (features_disabled); true: it loads at boot for this run even when the saved settings disable it (features_enabled)"}
     ports = PORTS_ALL + GUEST_ONLY
     keys["org.ports"] = {"type": "preset", "family": "org", "kind": "preset",
                          "description": "all: every port switch on, the default of guest and native mode, written out; "

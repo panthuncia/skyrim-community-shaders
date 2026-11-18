@@ -32,6 +32,7 @@ namespace Testing
 		std::string name, runId;
 		std::filesystem::path runDir;
 		std::vector<std::string> featuresDisabled;
+		std::vector<std::string> featuresEnabled;
 		std::string save, cell;
 		double launchTimeout = 60, compileTimeout = 600, loadTimeout = 120, stepWait = 60;
 		std::vector<Step> steps;

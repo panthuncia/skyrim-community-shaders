@@ -176,6 +176,7 @@ def flatten(merged, schema, name):
 
     env, origin = {}, {}
     features_disabled = []
+    features_enabled = []
     typed = []
     for table in sorted(merged):
         if table in FIXED or table in RAW_TABLES or table == "steps":
@@ -202,8 +203,8 @@ def flatten(merged, schema, name):
         if full.startswith("features."):
             if not isinstance(value, bool):
                 raise ConfigError(f"{full} takes true or false, not {value!r}")
-            if not value:
-                features_disabled.append(full.split(".", 1)[1])
+            # Set true, a feature loads even when the saved "Disable at Boot" settings disable it.
+            (features_enabled if value else features_disabled).append(full.split(".", 1)[1])
             continue
         if entry.get("use_instead"):
             raise ConfigError(f"{full}: write {entry['use_instead']} instead")
@@ -243,6 +244,7 @@ def flatten(merged, schema, name):
         "run_dir": "",
         "env": dict(sorted(env.items())),
         "features_disabled": sorted(set(features_disabled)),
+        "features_enabled": sorted(set(features_enabled)),
         "dclf_ini": dclf_ini,
         "game": {"save": game.get("save", "autoload"), "cell": game.get("cell", "")},
         "timeouts": timeouts,

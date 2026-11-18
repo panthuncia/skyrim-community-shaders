@@ -213,34 +213,39 @@ namespace Testing
 				}
 		}
 
-		// features_disabled: joins CS_DISABLE_FEATURES, which State reads at its first feature check.
-		const auto features = Strings(a_document.value("features_disabled", json()), "features_disabled", errors);
-		std::vector<std::string> featuresOff;
-		for (const auto& feature : features) {
-			const auto& list = Feature::GetFeatureList();
-			const bool known = std::ranges::any_of(list, [&](Feature* a_feature) { return a_feature && a_feature->GetShortName() == feature; });
-			if (!known) {
-				run.unknown.push_back("features." + feature);
-				logger::error("[TEST] config: no feature has the short name {}", feature);
-				continue;
+		// The features turned off and on join CS_DISABLE_FEATURES and CS_ENABLE_FEATURES, which State reads at its first feature check.
+		const auto joinFeatures = [&](const char* a_key, const char* a_switch) {
+			std::vector<std::string> named;
+			for (const auto& feature : Strings(a_document.value(a_key, json()), a_key, errors)) {
+				const auto& list = Feature::GetFeatureList();
+				const bool known = std::ranges::any_of(list, [&](Feature* a_feature) { return a_feature && a_feature->GetShortName() == feature; });
+				if (!known) {
+					run.unknown.push_back("features." + feature);
+					logger::error("[TEST] config: no feature has the short name {}", feature);
+					continue;
+				}
+				named.push_back(feature);
 			}
-			featuresOff.push_back(feature);
-		}
-		if (!featuresOff.empty()) {
-			char existing[4096]{};
-			const DWORD length = GetEnvironmentVariableA("CS_DISABLE_FEATURES", existing, sizeof(existing));
-			std::string list = length && length < sizeof(existing) ? std::string(existing, length) : std::string{};
-			for (const auto& feature : featuresOff)
-				list += (list.empty() ? "" : ",") + feature;
-			SetEnvironment("CS_DISABLE_FEATURES", list);
-		}
+			if (!named.empty()) {
+				char existing[4096]{};
+				const DWORD length = GetEnvironmentVariableA(a_switch, existing, sizeof(existing));
+				std::string list = length && length < sizeof(existing) ? std::string(existing, length) : std::string{};
+				for (const auto& feature : named)
+					list += (list.empty() ? "" : ",") + feature;
+				SetEnvironment(a_switch, list);
+			}
+			return named;
+		};
+		const auto featuresOff = joinFeatures("features_disabled", "CS_DISABLE_FEATURES");
+		const auto featuresOn = joinFeatures("features_enabled", "CS_ENABLE_FEATURES");
 
 		run.applied = applied;
 		run.config.featuresDisabled = featuresOff;
+		run.config.featuresEnabled = featuresOn;
 		run.unchecked = uncheckedAtLoad;
 		for (const auto& error : errors)
 			logger::error("[TEST] config: {}", error);
-		logger::info("[TEST] config '{}' applied: {} switches, {} features off{}{}", run.config.name, applied, featuresOff.size(),
+		logger::info("[TEST] config '{}' applied: {} switches, {} features off, {} on{}{}", run.config.name, applied, featuresOff.size(), featuresOn.size(),
 			run.unknown.empty() ? "" : fmt::format(", {} unknown ({})", run.unknown.size(), Join(run.unknown)),
 			uncheckedAtLoad.empty() ? "" : fmt::format(", {} checked once DCLF installs ({})", uncheckedAtLoad.size(), Join(uncheckedAtLoad)));
 		if (!run.unknown.empty())

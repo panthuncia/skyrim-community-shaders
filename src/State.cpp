@@ -75,6 +75,29 @@ namespace
 		static const std::vector<std::string> names = Switches::List("CS_DISABLE_FEATURES");
 		return std::ranges::find(names, a_featureName) != names.end();
 	}
+
+	/**
+	 * @brief Whether CS_ENABLE_FEATURES (short names, for test runs) names a_featureName. Such a feature loads at boot for this run
+	 * even when the saved "Disable at Boot" settings disable it, and the settings stay as they are.
+	 */
+	bool EnabledByEnvironment(const std::string& a_featureName)
+	{
+		static const std::vector<std::string> names = Switches::List("CS_ENABLE_FEATURES");
+		return std::ranges::find(names, a_featureName) != names.end();
+	}
+
+	/**
+	 * @brief Shaders compile on demand when a run turns a feature with shader defines on or off, because its startup precompile of a
+	 * cold cache would hold the main menu far longer than a test run. A feature without defines keeps the precompile.
+	 */
+	void CompileOnDemandForRunFeatureSet(Feature* a_feature, const char* a_switch)
+	{
+		const bool changesDefines = !a_feature->GetShaderDefineName().empty() || !a_feature->GetCommonShaderDefines().empty();
+		if (changesDefines && !globals::shaderCache->backgroundCompilation) {
+			globals::shaderCache->SetBackgroundCompilation(true);
+			logger::info("{}: shaders compile in the background, on demand (no startup precompile)", a_switch);
+		}
+	}
 }
 
 void State::UpdateLightingShaderPermutation(RE::BSRenderPass* a_pass)
@@ -666,15 +689,11 @@ void State::Load(bool a_allowReload)
 				if (!isDisabled && !feature->IsAlwaysEnabled() && DisabledByEnvironment(featureName)) {
 					isDisabled = true;
 					logger::info("Feature '{}' is disabled at boot by CS_DISABLE_FEATURES (this run only)", featureName);
-					// A feature with shader defines changes most shaders' defines when it is off, so the disk cache is cold for that
-					// feature set. The startup precompile then holds the main menu (kDataLoaded waits for it) for far longer than a test
-					// run: compile on demand instead. A feature without defines (VRAM Budget) leaves every cache key as it was, so the
-					// precompile stays: compiling on demand would stall the first world frames instead.
-					const bool changesDefines = !feature->GetShaderDefineName().empty() || !feature->GetCommonShaderDefines().empty();
-					if (changesDefines && !globals::shaderCache->backgroundCompilation) {
-						globals::shaderCache->SetBackgroundCompilation(true);
-						logger::info("CS_DISABLE_FEATURES: shaders compile in the background, on demand (no startup precompile)");
-					}
+					CompileOnDemandForRunFeatureSet(feature, "CS_DISABLE_FEATURES");
+				} else if (isDisabled && feature->installed && !DisabledByEnvironment(featureName) && EnabledByEnvironment(featureName)) {
+					isDisabled = false;
+					logger::info("Feature '{}' is enabled at boot by CS_ENABLE_FEATURES (this run only)", featureName);
+					CompileOnDemandForRunFeatureSet(feature, "CS_ENABLE_FEATURES");
 				}
 				if (!isDisabled) {
 					logger::info("Loading Feature: '{}'", featureName);

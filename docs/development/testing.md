@@ -36,7 +36,7 @@ autoload_mod = "Start On Save"   # the MO2 mod that loads a save at the main men
 cell = ""                     # if set, a coc to this cell once the save is loaded
 mods_off = ["Skyrim Engine Telemetry"]
 
-[features]                    # short names; false disables the feature at boot
+[features]                    # short names; false disables the feature at boot, true loads it even when the saved settings disable it
 Upscaling = false
 
 [dclf]                        # typed keys; the schema names each one's switch
@@ -87,6 +87,7 @@ The harness writes this file. All keys are present; empty means none.
   "run_dir": "C:\\Modding\\CS-AB\\runs\\1112-151815-p35-native-quick-refs2",
   "env": { "CS_ORG_NATIVE": "1", "CS_DCLF_SHADOWS": "0", "DXVK_DEBUG": "hang" },
   "features_disabled": ["Upscaling"],
+  "features_enabled": [],
   "dclf_ini": { },
   "game": { "save": "autoload", "cell": "" },
   "timeouts": { "launch": 60, "compile": 600, "load": 120, "step_wait": 60 },
@@ -99,7 +100,7 @@ The harness writes this file. All keys are present; empty means none.
 ```
 
 - **`env`** is applied before anything reads a switch, at the point the old `CommunityShaders.env` was. A variable already in the real environment wins, and that is logged. Every name is checked against the game's switch registry. An unknown name sets the outcome `config-error`.
-- **`features_disabled`** joins `CS_DISABLE_FEATURES`.
+- **`features_disabled`** joins `CS_DISABLE_FEATURES`. **`features_enabled`** joins `CS_ENABLE_FEATURES`: those features load at boot for this run even when the saved "Disable at Boot" settings disable them, and the settings are not changed. Either list turns the startup precompile off when a named feature has shader defines (its cache is cold); shaders then compile on demand.
 - **`dclf_ini`** values are served by `Util::SwitchFile` as though they were in `CommunityShaders-DCLF.ini`.
 - **`steps[].wait`** (optional) holds the step until a condition is true: `"settled"`, `"shaders"`, `"reload"`, `"signal:<n>"`. **`steps[].wait_s`** overrides `timeouts.step_wait`. A wait that times out fails the run.
 - **`game.save`**, when it names a save, is loaded from the main menu once the shaders are ready; a missing file fails the run ("save '<name>' not found"). **`game.cell`** is a coc once that save's world is ready. Both count as step boundaries, so a step at `world-ready` waits for the world after them. Load milestones count only after `main-menu`: the startup loading screen is not a load.
@@ -141,7 +142,7 @@ The game rewrites this file about once a second and at every milestone and outco
     "loading-screen": { "t": 12.1, "frame": 96 },
     "world-ready":    { "t": 31.5, "frame": 352 }
   },
-  "config": { "applied": 14, "features_off": ["Upscaling"], "unknown": [] },
+  "config": { "applied": 14, "features_off": ["Upscaling"], "features_on": [], "unknown": [] },
   "step": { "index": 1, "do": "exit", "state": "waiting" },
   "compile": { "done": 1544, "total": 1560 },
   "holds": ["dclf:load-hold"],

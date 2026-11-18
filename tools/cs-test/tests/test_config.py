@@ -136,6 +136,7 @@ def test_raw_env_allowed_by_pattern(configs):
 def test_features_disabled(configs):
     contract, _ = r("base", configs, ["features.Upscaling=false", "features.Skylighting=true"])
     assert contract["features_disabled"] == ["Upscaling"]
+    assert contract["features_enabled"] == ["Skylighting"]
     contract, _ = r("base", configs, ["features.*=false"])
     assert contract["features_disabled"] == ["Skylighting", "Upscaling"]
 
@@ -151,7 +152,7 @@ def test_step_rules(configs):
 
 def test_contract_shape(configs):
     contract, _ = r("b", configs)
-    assert set(contract) == {"version", "name", "run_id", "run_dir", "env", "features_disabled", "dclf_ini", "game", "timeouts", "steps", "expect"}
+    assert set(contract) == {"version", "name", "run_id", "run_dir", "env", "features_disabled", "features_enabled", "dclf_ini", "game", "timeouts", "steps", "expect"}
     assert contract["timeouts"] == {"launch": 60, "compile": 600, "load": 120, "step_wait": 60}
     assert contract["expect"] == {"reach": "", "shots": [], "no_log": [], "live_frames": 0}
 

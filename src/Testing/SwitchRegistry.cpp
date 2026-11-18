@@ -46,6 +46,7 @@ namespace Testing::SwitchRegistry
 			"CS_DCLF_SITE_STATS",
 			"CS_DISABLE_FEATURES",
 			"CS_EDITOR",
+			"CS_ENABLE_FEATURES",
 			"CS_FFT",
 			"CS_FG_DISPLAY_SUSPEND",
 			"CS_FORCE_FSR_FG",
