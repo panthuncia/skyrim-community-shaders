@@ -5,6 +5,7 @@
 #include "ShaderCache.h"
 #include "State.h"
 #include "Utils/D3D.h"
+#include "Utils/Logging.h"
 #include "VanillaBinding.h"
 
 #include "Features/CSEditor.h"
@@ -458,7 +459,10 @@ void Deferred::DeferredPasses()
 			.views = srvs });
 		FrameAnchors::Run(FrameAnchors::Anchor::DeferredComposite);
 
-		if (!orgComposite.Composited()) {
+		if (orgComposite.Lagged()) {
+			static Util::ReasonLog s_lag("[ORG] Deferred composite: the composite lags (its stage's schedule does not hold it yet); nothing composites this frame");
+			s_lag.Report("first build");
+		} else if (!orgComposite.Composited()) {
 			if (dynamicCubemaps.loaded)
 				context->CSSetSamplers(0, 1, &linearSampler);
 

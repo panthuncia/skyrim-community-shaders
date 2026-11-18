@@ -53,6 +53,13 @@ public:
 	/** @brief After the anchor ran: whether the ORG composite wrote this frame (else Deferred runs the D3D11 one). */
 	bool Composited() const;
 
+	/**
+	 * @brief After the anchor ran: the composite is the graph's this frame (registered, its frame imported) but its stage's schedule does
+	 * not hold it yet (the first build after a registration). Nothing composites this frame: the composite lags, as a stage's other work
+	 * does. Deferred does not run the D3D11 one then.
+	 */
+	bool Lagged() const;
+
 	/** @brief The shader defines changed (Deferred::ClearShaderCache): the programs are built again at the next frame. */
 	void ClearShaderCache();
 

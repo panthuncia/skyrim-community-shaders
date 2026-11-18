@@ -23,6 +23,7 @@ bool RenderGraph::Engine::Skeleton::Requested()
 #	include "RenderGraph/Frame/PostChain.h"
 #	include "RenderGraph/Engine/Native/Native.h"
 #	include "RenderGraph/Engine/Targets/EngineTargets.h"
+#	include "RenderGraph/Engine/Tripwire/Tripwire.h"
 #	include "RenderGraph/FrameAnchors.h"
 #	include "RenderGraph/FrameSequence.h"
 #	include "RenderGraph/RasterProgram.h"
@@ -79,10 +80,10 @@ namespace RenderGraph::Engine::Skeleton
 		constexpr std::array<std::uint32_t, 8> kColourTargets{ ColourTarget::kMAIN, ColourTarget::kMAIN_COPY, ColourTarget::kMAIN_ONLY_ALPHA,
 			ColourTarget::kNORMAL_TAAMASK_SSRMASK, ColourTarget::kNORMAL_TAAMASK_SSRMASK_SWAP, ColourTarget::kNORMAL_TAAMASK_SSRMASK_DOWNSAMPLED,
 			ColourTarget::kMOTION_VECTOR, ColourTarget::kSHADOW_MASK };
-		// Native mode only: colour views the engine clears that the RE list above leaves out. Their clears reach the native immediate
-		// context, which hands them here (Sites::TakeContextColourClear; org-native-frame-graph.md, Phase 3): the TAA mask in the
-		// ImageSpace chain and the two water targets at the water's draws. Guest mode keeps the engine's clears of them.
-		constexpr std::array<std::uint32_t, 3> kNativeColourTargets{ ColourTarget::kTEMPORAL_AA_MASK, ColourTarget::kWATER_1, ColourTarget::kWATER_2 };
+		// Colour views the engine clears that the RE list above leaves out (org-native-frame-graph.md, Phase 3): the TAA mask in the
+		// ImageSpace chain and the two water targets at the water's draws. Native mode's immediate context hands their clears here
+		// (Sites::TakeContextColourClear); guest mode's come through the patched sites, as the others' do.
+		constexpr std::array<std::uint32_t, 3> kMoreColourTargets{ ColourTarget::kTEMPORAL_AA_MASK, ColourTarget::kWATER_1, ColourTarget::kWATER_2 };
 		// Depth: the main depth, the shadow maps' slices and the reflection faces' depth.
 		constexpr std::array<std::uint32_t, 6> kDepthTargets{ DepthTarget::kMAIN, DepthTarget::kSHADOWMAPS_ESRAM, DepthTarget::kVOLUMETRIC_LIGHTING_SHADOWMAPS_ESRAM,
 			DepthTarget::kSHADOWMAPS, DepthTarget::kPRECIPITATION_OCCLUSION_MAP, DepthTarget::kCUBEMAP_REFLECTIONS };
@@ -109,7 +110,7 @@ namespace RenderGraph::Engine::Skeleton
 		enum class CopyKind : std::uint8_t
 		{
 			Depth,  // the main depth into kPOST_ZPREPASS_COPY (Main::RenderDepth, FinishAccumulating, Deferred::DeferredPasses)
-			Main,   // native mode only: kMAIN into its copy texture ("kMAIN Copy"), at the native immediate context's CopyResource
+			Main,   // kMAIN into its copy texture ("kMAIN Copy"), at the immediate context's CopyResource (native's, or the guest context's hook)
 			Count
 		};
 		constexpr std::size_t kCopies = static_cast<std::size_t>(CopyKind::Count);
@@ -706,9 +707,8 @@ namespace RenderGraph::Engine::Skeleton
 			for (const auto index : kColourTargets)
 				if (!Frame::EngineTargetUse::ColourUnbacked(index))
 					targets.push_back({ Kind::Colour, index, 0 });
-			if (Native::Requested())
-				for (const auto index : kNativeColourTargets)
-					targets.push_back({ Kind::Colour, index, 0 });
+			for (const auto index : kMoreColourTargets)
+				targets.push_back({ Kind::Colour, index, 0 });
 			const auto& depths = renderer->GetDepthStencilData().depthStencils;
 			for (const auto index : kDepthTargets) {
 				for (std::uint32_t slice = 0; slice < kDepthSlices; ++slice) {
@@ -1216,6 +1216,9 @@ namespace RenderGraph::Engine::Skeleton
 		bool SameImage(const void* a_engine, const void* a_call)
 		{
 			if (a_engine == a_call)
+				return true;
+			// Guest mode: an engine field may hold the guest context's handle, and a call the resource behind it.
+			if (a_engine && a_call && Tripwire::UnwrapObject(static_cast<IUnknown*>(const_cast<void*>(a_engine))) == a_call)
 				return true;
 			if (!a_engine || !a_call || !Native::Active())
 				return false;
@@ -1944,8 +1947,8 @@ namespace RenderGraph::Engine::Skeleton
 		// Native mode drops the reflection faces' clears (Take): the cube group has no anchor there.
 		if (!Native::Requested())
 			reserved = FrameAnchors::Reserve(Anchor::EngineCubeClear) && reserved;
-		// The kMAIN copy reaches the skeleton only from native mode's immediate context.
-		if (Native::Requested())
+		// The kMAIN copy: where a stage of this mode has its step (the immediate context's CopyResource reaches the skeleton in both modes).
+		if (FrameAnchors::StageStepsAt(Anchor::EngineCopy))
 			reserved = FrameAnchors::Reserve(Anchor::EngineCopy) && reserved;
 		if (!reserved)
 			logger::warn("[ORG] engine skeleton: CS_ORG_ENGINE_SKELETON=1, but not every anchor could be reserved; those clears stay on D3D11");
@@ -1975,11 +1978,15 @@ namespace RenderGraph::Engine::Skeleton
 		for (std::size_t i = 0; i < kCopies; ++i) {
 			const auto kind = static_cast<CopyKind>(i);
 			auto& copy = state.copies[i];
-			copy.failed = !FrameAnchors::HasEpoch(kCopyAnchors[i]) || (kind == CopyKind::Main && !Native::Requested());
+			copy.failed = !FrameAnchors::HasEpoch(kCopyAnchors[i]);
 			if (!copy.failed)
 				RegisterCopy(kind);
 		}
 		state.setUp = true;
+		// The guest context's CopyResource asks the skeleton first, as native's immediate context does (Sites::TakeContextCopy). Native
+		// mode answers its own copies before the hook is asked.
+		if (state.copies[static_cast<std::size_t>(CopyKind::Main)].registered)
+			Tripwire::SetGuestCopyHook(&Sites::TakeContextCopy);
 		if (HostingOn())
 			RenderGraphRuntime::SetEpochHooks({ .starting = &EpochStarting, .commit = &EpochCommit });
 		logger::info("[ORG] engine skeleton: on (CS_ORG_ENGINE_SKELETON); the engine's clears and its main depth copy are registered with the graph");

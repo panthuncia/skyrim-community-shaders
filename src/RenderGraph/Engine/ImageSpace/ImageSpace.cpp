@@ -2678,13 +2678,21 @@ namespace RenderGraph::Engine::ImageSpace
 		 * @brief The shapes to register at Setup: the manifest's (selected effects only), the water's flow copy (known from the RE, no
 		 * session needs to see it first: the flow map from its source by heap index), and the shapes they imply, in frame order.
 		 */
+		/** @brief Whether the RenderWorld scopes are the deferred+water stage's passes (WorldSteps.inl). */
+		bool WorldStepsOn();
+
 		std::vector<ShapeKey> ShapesToRegister()
 		{
 			auto& state = IS();
 			std::vector<ShapeKey> keys;
 			std::map<ShapeKey, std::uint32_t> positions;
+			// The RenderWorld scopes are the deferred+water stage's passes where it runs (WorldSteps.inl): their shapes are not the main client's.
+			const auto worldScope = [](std::uint32_t a_position) {
+				const auto scope = static_cast<ScopeKind>(a_position >> 16);
+				return WorldStepsOn() && (scope == ScopeKind::SSAO || scope == ScopeKind::Reflections);
+			};
 			for (const auto& [key, entry] : state.manifest) {
-				if (!state.enabled[key.effect])
+				if (!state.enabled[key.effect] || worldScope(entry.position))
 					continue;
 				keys.push_back(key);
 				positions.emplace(key, entry.position);
@@ -2975,6 +2983,8 @@ namespace RenderGraph::Engine::ImageSpace
 		static_assert(sizeof(IS().post) / sizeof(PostClient) == static_cast<std::size_t>(PostPart::Count), "a post client per part");
 
 #	include "RenderGraph/Engine/ImageSpace/WorldSteps.inl"
+
+		bool WorldStepsOn() { return World().on; }
 #	include "RenderGraph/Engine/ImageSpace/ChainSteps.inl"
 #	include "RenderGraph/Engine/ImageSpace/StartSteps.inl"
 #	include "RenderGraph/Engine/ImageSpace/MenuSteps.inl"
@@ -3933,18 +3943,25 @@ namespace RenderGraph::Engine::ImageSpace
 		// The post chain and the RenderWorld scopes are CS passes of the post and deferred+water stages when those exist and the post
 		// chain's hooks run, registered at the first world frame (CheckChainSteps, CheckWorldSteps); the water effects are the start
 		// stage's (CheckStartSteps), and the menus' composites a client on the anchor's own epoch, registered now (RegisterMenuSteps).
+		// Each part is on where its stage runs in this mode (the frame's stage epochs): the world steps with the deferred+water stage, the
+		// water effects with the start stage, the post chain and the menus' composites with the post stage. Guest mode runs some of the
+		// stages; the anchor's main client keeps the draws of the others.
 		const auto epochs = FrameAnchors::SegmentEpochs();
-		if (Frame::PostChain::On() && std::ranges::find(epochs, RenderGraphRuntime::EpochOf(RenderGraphRuntime::StageSegment(static_cast<std::uint32_t>(Frame::SegmentId::Post)))) != epochs.end()) {
+		const auto runs = [&](Frame::SegmentId a_stage) {
+			return std::ranges::find(epochs, RenderGraphRuntime::EpochOf(RenderGraphRuntime::StageSegment(static_cast<std::uint32_t>(a_stage)))) != epochs.end();
+		};
+		if (Frame::PostChain::On() && (runs(Frame::SegmentId::Post) || runs(Frame::SegmentId::Deferred) || runs(Frame::SegmentId::Start))) {
 			for (std::size_t p = 0; p < state.post.size(); ++p) {
 				auto& client = state.post[p];
 				client.id = kPostIds[p];
 				client.gate = RunGate::Create(client.id, kGateEntries);
 				client.latch = org::LatchBlock::Create(fmt::format("{}::ConstantsAt", client.id), kGateEntries * kLatchStride);
 			}
-			state.postOn = std::ranges::all_of(state.post, [](const PostClient& a_client) { return a_client.gate && a_client.latch; });
+			const bool clients = std::ranges::all_of(state.post, [](const PostClient& a_client) { return a_client.gate && a_client.latch; });
+			state.postOn = clients && runs(Frame::SegmentId::Post);
 			Chain().on = state.postOn;
-			World().on = state.postOn && std::ranges::find(epochs, RenderGraphRuntime::EpochOf(RenderGraphRuntime::StageSegment(static_cast<std::uint32_t>(Frame::SegmentId::Deferred)))) != epochs.end();
-			Start().on = state.postOn && std::ranges::find(epochs, RenderGraphRuntime::EpochOf(RenderGraphRuntime::StageSegment(static_cast<std::uint32_t>(Frame::SegmentId::Start)))) != epochs.end();
+			World().on = clients && runs(Frame::SegmentId::Deferred);
+			Start().on = clients && runs(Frame::SegmentId::Start);
 			Menu().on = state.postOn;
 		}
 		if (StepsOnly()) {

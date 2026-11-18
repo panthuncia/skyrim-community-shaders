@@ -474,6 +474,12 @@ namespace RenderGraph::Engine::Tripwire
 		std::atomic<ContextFilter> contextFilter{ nullptr };
 		std::atomic<const NativeServices*> nativeServices{ nullptr };
 		std::atomic<const GuestMapHooks*> guestMapHooks{ nullptr };
+		std::atomic<GuestCopyHook> guestCopyHook{ nullptr };
+	}
+
+	void SetGuestCopyHook(GuestCopyHook a_hook)
+	{
+		Detail::guestCopyHook.store(a_hook, std::memory_order_release);
 	}
 
 	void SetContextFilter(ContextFilter a_filter)
@@ -1651,6 +1657,8 @@ namespace RenderGraph::Engine::Tripwire
 		TW_CONTEXT_SITE(CopyResource);
 		if (twNative && twNative->copyResource)
 			return twNative->copyResource(a_destination, a_source);
+		if (const auto hook = Detail::guestCopyHook.load(std::memory_order_acquire); hook && core.wrapped && hook(a_destination, a_source))
+			return;
 		TW_CONTEXT_FORWARD(CopyResource, Detail::UnwrapAt(a_destination, twSite), Detail::UnwrapAt(a_source, twSite));
 	}
 

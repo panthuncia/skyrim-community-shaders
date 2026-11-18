@@ -712,6 +712,28 @@ namespace FrameAnchors
 	bool NamedByStage(std::string_view a_id);
 
 	/**
+	 * @brief Whether a CS stage that runs in this mode has a step at a_anchor (the recipe table). Answers before the anchors are reserved,
+	 * so a module can reserve an anchor only where a stage of this mode uses it. Any thread.
+	 */
+	bool StageStepsAt(Anchor a_anchor);
+
+	/**
+	 * @brief Whether every CS stage that names client a_id runs in this mode, and one does: the client's passes belong to stages alone
+	 * (ClientDesc::segmentOnly). Guest mode, while a stage that does not run there names it too, it is false: the client keeps its passes on
+	 * its anchor's own epoch for that stage's part of the frame (OwnEpochHolds). Migration scaffolding: once every stage runs in guest, it
+	 * is NamedByStage. Any thread, after the render graph initialized.
+	 */
+	bool StagesOnly(std::string_view a_id);
+
+	/**
+	 * @brief Guest mode, migration scaffolding: client a_id has work at a_anchor while no open stage of this mode holds it there, a stage
+	 * that does not run in guest yet names it, and the anchor's own epoch has a built graph that holds the registration. The work then runs
+	 * on that own epoch, as it did before the client's other stage ran in guest (the skeleton's OwnEpochTakes is the same rule for its
+	 * clears). Always false in native mode, and once every stage runs in guest. Render owner.
+	 */
+	bool OwnEpochHolds(std::string_view a_id, Anchor a_anchor);
+
+	/**
 	 * @brief Writes frame inputs for client a_id outside its step's tap: a_write runs with GraphHost::CurrentRun the frame slot's staging
 	 * run of the stage that holds the client, while that stage's window is open and the frame's schedule has the client on. What it
 	 * writes (gate entries, latch values) reaches the GPU with the stage's one commit. For data the engine hands over at a call that is

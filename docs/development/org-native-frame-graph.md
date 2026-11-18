@@ -7539,3 +7539,73 @@ One background run each on DLL `3a543b32bf35`. Guest: `latch-census-short` (0 ca
 work inside a window), quick, river, rain, under water, interior, upscalers, the worldspace run, the frozen-world Journal Menu run.
 Native: quick, river, rain, interior, validation (the same 20 `VUID-vkCmdDraw-None-09600` as B1's run, nothing else). `d3d11+quick`.
 All passed with 0 tap errors, 0 recipe findings, no failed build; the only `[C]` line is the known `PublishedResources` one.
+
+## Guest B3: deferred+water in guest (2026-11-18)
+
+Plan piece B3. Guest mode now runs three stages as blocks in DXVK's stream: pre-depth, pre-main and deferred+water. Code and this text
+on `org-native/phases` (no submodule change). RX 6600, Perf-Fast, background runs with `DXVK_DEBUG=hang`.
+
+### What runs in guest
+
+- Deferred+water has `runsInGuest`: the deferred passes with CS's depth copy, the composite, the PostComposite clients, the water
+  stencil's clear and the water mask at EngineDraws, the RenderWorld scopes at ImageSpace, the kMAIN copy at EngineCopy, the water's
+  draws, the water targets' clear and the water blend. It commits at the engine's blended draw (Features/Forward's hook, mode-free) or
+  before the next GPU work. DeferredPasses, DeferredComposite and PostComposite are held wholly and have no own epoch in guest any more.
+  EngineDraws, ImageSpace and EngineCopy are shared: their own epochs stay for the stages not in guest yet.
+- **The kMAIN copy.** The guest context's CopyResource asks the skeleton first (`Tripwire::SetGuestCopyHook`, the hook is
+  `Skeleton::Sites::TakeContextCopy`, as native's immediate context calls it). `Skeleton::Reserve` reserves EngineCopy where a stage of
+  this mode has a step there (`FrameAnchors::StageStepsAt`, the recipe, not the mode), and `Setup` no longer fails the copy in guest.
+  `SameImage` also matches a guest handle against the resource behind it. Inside the deferred window the copy is the stage's EngineCopy
+  step (`FrameAnchors::Run` routes it); the post stage's copy (first person, every frame on Solstheim), the UI stage's (a menu scene) and
+  the sun stage's (under water) run on EngineCopy's own epoch until their stages run in guest. Before B3 guest's kMAIN copy was DXVK's.
+- **ImageSpace.** The parts of the stages' clients are on where their stage runs in this mode (`SegmentEpochs`), no longer only with
+  the post stage: `World().on` with deferred+water, `Start().on` with start, the chain and the menus' composites with post (`postOn`,
+  which still means "the main client and the manifest are off"). The clients' gates and latches are made when any of the three runs.
+  With the world steps on, the manifest's RenderWorld scope shapes (ScopeKinds SSAO and Reflections) are not registered on the main
+  client (`ShapesToRegister`). The snow pass, its copy and the water blend are own-scope effects, so their calls reach the world steps
+  in guest too.
+- **The water targets' clears.** kWATER_1, kWATER_2 and the TAA mask were skeleton targets in native only (`kNativeColourTargets`);
+  in guest their clears came through the patched sites and stayed on DXVK, 2 calls a frame inside the deferred window (the first census
+  run read 600 a window). They are skeleton targets in both modes now (`kMoreColourTargets`): above water the deferred stage's
+  ImageSpace place clears them, as in native.
+- **The deferred composite's first frames.** Before the stage's first schedule holds the composite, Deferred ran the D3D11 composite (6
+  dispatches inside the first window). The composite now lags then, as a stage's other work does (`ORGDeferredComposite::Lagged`, both
+  modes): nothing composites until the schedule holds it.
+
+### Clients of a stage in guest and of one that is not (migration scaffolding)
+
+The water's draws, the kMAIN copy, the water targets' clear and the water blend are steps of deferred+water above water and of the sun
+stage under water (and in some interior frames: the first interior run stopped at "the water batch of cs.water.surface came while no
+open stage holds the client"). With deferred+water in guest and the sun stage not, such a client has work while no stage of this mode
+holds it. The rule is the skeleton's `OwnEpochTakes`, made general:
+
+- `FrameAnchors::StagesOnly(id)`: every stage that names the client runs in this mode. It replaces `NamedByStage` for
+  `ClientDesc::segmentOnly` (Drawcall Limit Fix's water, precipitation, shadow mask, menu scenes and blood; ImageSpace's world clients):
+  a client also named by a stage not in guest keeps its passes on its anchor's own epoch.
+- `FrameAnchors::OwnEpochHolds(id, anchor)`: no open stage of this mode holds the client there, a stage not in this mode names it, and
+  the anchor's own built graph holds the registration. `Family::HeldForBatch` and ImageSpace's `TakeWorldStep` then draw on the own
+  epoch, as guest did before.
+
+Both are migration scaffolding, listed with `Stage::runsInGuest`, `OwnEpochTakes` and `RunCopy`'s own-epoch branch: once every stage runs
+in guest `StagesOnly` is `NamedByStage` and `OwnEpochHolds` is always false. Native mode has no stage outside its mode, so neither
+changes anything there.
+
+### Residue
+
+`latch-census-short`: 0 calls inside a stage's window in 14 of 15 windows. The first window after the load has one
+ClearRenderTargetView from the skeleton's patched site (`ClearTargetSite`): a clear of a view the skeleton does not hold (rt12, the
+underwater mask, and rt88, kRAW_WATER, are the ones its log names; native mode's immediate context runs those as its own command work
+too). The engine's constant-buffer maps kept by the write-behind rose from 42-55 to about 100-130 a frame (the deferred window's
+cameras and ImageSpace setups); no other kind of call needed it. Old guest paths for the stage's anchors that lost their use: the
+DeferredPasses, DeferredComposite and PostComposite own epochs, CS's depth copy on EngineDepthCopy's own epoch, the main ImageSpace
+client's RenderWorld scope shapes, DXVK's kMAIN copy, and the engine's D3D11 clears of the water targets.
+
+### Checks
+
+One background run each on DLL `1ada3c88b59d`. Guest: `latch-census-short`, quick, river, rain (DLL `056bfc341fe3`, before the
+scaffolding), under water, interior, upscalers, the worldspace run, the Journal Menu run. Native: quick. All passed with 0 tap errors,
+0 recipe findings, no failed build; the only `[C]` line is the known `PublishedResources` one. Shots against Guest B2's: quick 1.9;
+river 25.0 and 3.1 (the NPC and the grass again, looked at side by side: the same image); rain 1.7 and 1.4; under water 6.1 and 2.0;
+interior 2.7 and 5.3; upscalers 0.8 to 3.6; worldspace Tamriel 1.0, Riverwood 3.5, Solstheim 17.1; census shots at most 0.9 apart from
+Dragonsreach (13.5, its light shafts); Journal Menu pre and post at most 4.3, the menu shot 7.1 off: its background is blurred again
+(the shape manifest holds ISDistantBlur again, B2's note). Perf and epochs: with the last piece (Guest B5).

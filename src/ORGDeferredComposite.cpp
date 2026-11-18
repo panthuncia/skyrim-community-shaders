@@ -525,6 +525,11 @@ bool ORGDeferredComposite::Composited() const
 	return impl && impl->composited;
 }
 
+bool ORGDeferredComposite::Lagged() const
+{
+	return impl && !impl->failed && impl->registered && impl->frameReady && !impl->composited;
+}
+
 void ORGDeferredComposite::ClearShaderCache()
 {
 	if (impl)
@@ -542,6 +547,7 @@ void ORGDeferredComposite::Reserve() {}
 void ORGDeferredComposite::Setup() {}
 void ORGDeferredComposite::SetFrame(const Frame&) {}
 bool ORGDeferredComposite::Composited() const { return false; }
+bool ORGDeferredComposite::Lagged() const { return false; }
 void ORGDeferredComposite::ClearShaderCache() {}
 
 #endif

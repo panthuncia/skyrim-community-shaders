@@ -1,4 +1,4 @@
-// The RenderWorld scopes as CS passes (native mode). Included by ImageSpace.cpp inside its anonymous namespace, after the pieces it
+// The RenderWorld scopes as CS passes (wherever the deferred+water stage runs: native mode, and guest mode since Guest B3). Included by ImageSpace.cpp inside its anonymous namespace, after the pieces it
 // uses: kEffects, Spec, MakePass, ImportOf, the stages' clients and Flush. ChainSteps.inl uses its step helpers for the post chain.
 //
 // The engine's reflections, SAO, snow pass and water blend are drawn by passes CS declares here: each an engine effect step, made
@@ -195,7 +195,7 @@ struct StepKey
 /** @brief The world steps' registration: their passes by key, the CS-owned targets, and what the build was made for. */
 struct WorldSteps
 {
-	bool on = false;          // native mode with the deferred+water stage: the scopes are CS passes
+	bool on = false;          // the deferred+water stage runs in this mode: the scopes are CS passes
 	bool registered = false;  // registered for the sizes below
 	bool retry = false;       // a pass was left out at a build (an effect not made yet): register again at a later frame
 	std::uint64_t registeredFrame = 0;  // the frame of the last registration: a retry waits kRetryFrames after it
@@ -690,7 +690,9 @@ void RegisterWorldSteps()
 		else
 			desc.rows = WorldScopeRows;
 		desc.repeats = true;
-		desc.segmentOnly = true;
+		// A pass of the stages that name it. Guest mode keeps the water blend on the anchor's own epoch too while the sun stage, which
+		// holds it under water, does not run there (FrameAnchors::StagesOnly).
+		desc.segmentOnly = FrameAnchors::StagesOnly(client.id);
 		desc.onFailed = [] {
 			logger::error("[ORG] ImageSpace: the world steps' passes failed; the RenderWorld scopes draw nothing for the session");
 			World().on = false;
@@ -843,6 +845,10 @@ bool TakeWorldStep(WorldScope a_scope, std::size_t a_effect, bool a_compute, std
 	const auto& rows = Frame::Driver::Current().Segment(Frame::SegmentId::Deferred).rows;
 	const auto row = (water ? world.waterRowBase : 0) + entry;
 	const bool scheduled = row < 256 && (rows[row / 64] >> (row % 64) & 1u) != 0 && FrameAnchors::CanTap(client.id);
+	// Guest mode, migration scaffolding: the water blend under water is the sun stage's step; until that stage runs in guest, the
+	// ImageSpace anchor's own epoch draws it (FrameAnchors::OwnEpochHolds).
+	if (made[entry] && !scheduled && FrameAnchors::OwnEpochHolds(client.id, Anchor::ImageSpace))
+		return StageStep(client, entry, a_effect, a_compute, a_groups);
 	if (!made[entry] || !scheduled) {
 		// The frame's schedule does not have it (off, or absent from the stage's build): nothing is drawn this frame, and the next
 		// description turns it on. The water blend's rows are always on.

@@ -3448,6 +3448,64 @@ namespace FrameAnchors
 		return false;
 	}
 
+	bool StageStepsAt(Anchor a_anchor)
+	{
+		const std::uint32_t index = IndexOf(a_anchor);
+		if (index >= kAnchors || !SegmentsOn())
+			return false;
+		for (std::uint32_t d = 0; d < kDeclared; ++d)
+			if (DeclaredOn(d) && (StepAnchorsOf(d) >> index & 1u))
+				return true;
+		return false;
+	}
+
+	namespace
+	{
+		/** @brief A CS stage that does not run in this mode names client a_id at one of its steps (guest mode, until every stage runs there). */
+		bool NamedOutsideMode(std::string_view a_id)
+		{
+			if (!SegmentsOn())
+				return false;
+			for (std::uint32_t d = 0; d < kDeclared; ++d) {
+				if (DeclaredOn(d))
+					continue;
+				const auto& stage = Table::CsStage(d);
+				for (std::uint32_t k = 0; k < Table::StepCount(stage); ++k)
+					if (Table::Has(stage.steps[k].clients, a_id))
+						return true;
+			}
+			return false;
+		}
+	}
+
+	bool StagesOnly(std::string_view a_id)
+	{
+		return NamedByStage(a_id) && !NamedOutsideMode(a_id);
+	}
+
+	bool OwnEpochHolds(std::string_view a_id, Anchor a_anchor)
+	{
+		if (!NamedOutsideMode(a_id))
+			return false;
+		auto lock = Guard();
+		auto& state = Anchors();
+		const std::uint32_t index = IndexOf(a_anchor);
+		if (index >= kAnchors || !state.host || !IsRenderOwner())
+			return false;
+		const auto* client = FindClient(state, a_id);
+		if (!client)
+			return false;
+		// An open stage of this mode with a step there that holds the client takes the work instead.
+		for (std::uint32_t d = 0; d < kDeclared; ++d) {
+			if (!WindowOpen(state, d))
+				continue;
+			for (std::uint32_t k = 0; k < declaredInfo[d].stepCount; ++k)
+				if (declaredInfo[d].steps[k].anchor == a_anchor && StepTakesTaps(state, d, k) && StepHolds(declaredInfo[d].steps[k], *client->desc))
+					return false;
+		}
+		return state.reserved[index] && !(state.declaredMembers >> index & 1u) && InGraphs(*client->desc) && client->serial <= BuiltSerial(state, index);
+	}
+
 	bool CanTap(std::string_view a_id)
 	{
 		auto& state = Anchors();
@@ -4480,6 +4538,9 @@ namespace FrameAnchors
 	bool HeldByStage(Anchor) { return false; }
 	void DropKeptRecordings(Anchor, std::string_view) {}
 	bool NamedByStage(std::string_view) { return false; }
+	bool StageStepsAt(Anchor) { return false; }
+	bool StagesOnly(std::string_view) { return false; }
+	bool OwnEpochHolds(std::string_view, Anchor) { return false; }
 	std::uint32_t PeakRunsPerFrame(Anchor) { return 0; }
 	bool BuildPending(std::string_view) { return false; }
 	bool TapMayLag(std::string_view) { return true; }

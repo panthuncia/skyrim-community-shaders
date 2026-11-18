@@ -651,6 +651,10 @@ namespace DCLF::Family
 		// A client a stage of this mode names (every one in native mode; in guest those of the stages that run there).
 		if (FrameAnchors::NamedByStage(a_client)) {
 			const auto hold = FrameAnchors::HeldNow(a_client, a_anchor);
+			// Guest mode, migration scaffolding: the part of the frame a stage that does not run there yet holds. The anchor's own epoch draws
+			// it, as before that client's other stage ran in guest.
+			if (!hold.held && FrameAnchors::OwnEpochHolds(a_client, a_anchor))
+				return true;
 			if (!hold.held) {
 				Driver::NoteTapError(Driver::TapError::NotDeclared, static_cast<::RenderGraph::Frame::SegmentId>(a_segment),
 					std::format("the {} batch of {} came while no open stage holds the client; it draws nothing", a_family, a_client));

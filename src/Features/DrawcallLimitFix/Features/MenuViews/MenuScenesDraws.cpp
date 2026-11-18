@@ -374,7 +374,7 @@ namespace DCLF::Features::MenuViews::Scenes::SceneDraws
 			};
 			desc.active = [client] { return client->pending; };
 			// Native mode: passes of the UI stage only. A batch while no open stage holds the client is a mismatch (CanTake).
-			desc.segmentOnly = FrameAnchors::NamedByStage(desc.id);
+			desc.segmentOnly = FrameAnchors::StagesOnly(desc.id);
 			desc.onFailed = [] { Fail("the render graph failed with the menu scenes' passes in it"); };
 			if (!FrameAnchors::Register(std::move(desc))) {
 				logger::warn("[DCLF] menu scenes: the {} client could not be registered; that batch stays the engine's", client->id);

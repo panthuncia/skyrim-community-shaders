@@ -27,6 +27,9 @@ namespace RenderGraph::Engine::Tripwire
 
 		/** @brief The guest context's Map and Unmap hooks (SetGuestMapHooks), null when none. */
 		extern std::atomic<const GuestMapHooks*> guestMapHooks;
+
+		/** @brief The guest context's CopyResource hook (SetGuestCopyHook), null when none. */
+		extern std::atomic<GuestCopyHook> guestCopyHook;
 	}
 
 	/** @brief The state every handle has, whatever its interface. */

@@ -390,4 +390,14 @@ namespace RenderGraph::Engine::Tripwire
 
 	/** @brief Installs the guest context's Map and Unmap hooks (copied), once. */
 	void SetGuestMapHooks(const GuestMapHooks& a_hooks);
+
+	/**
+	 * @brief Asked by the guest context before it forwards a CopyResource, with the resources as the caller passed them. True: the hook
+	 * made the copy (the engine skeleton's kMAIN copy on the graph) and nothing reaches DXVK. Must not call the guest context. Any thread
+	 * (the hook checks its own thread).
+	 */
+	using GuestCopyHook = bool (*)(ID3D11Resource* a_destination, ID3D11Resource* a_source);
+
+	/** @brief Installs the guest context's CopyResource hook. */
+	void SetGuestCopyHook(GuestCopyHook a_hook);
 }

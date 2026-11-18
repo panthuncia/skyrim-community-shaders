@@ -300,6 +300,7 @@ namespace RenderGraph::Frame::Recipes::Table
 				{ .anchor = Anchor::ImageSpace, .clients = { "cs.engine.skeleton.frame@image-space", "cs.engine.imagespace.world.water" } },
 				{ .point = true },
 			} },
+			.runsInGuest = true,
 			.commitBefore = Segments({ kEndsWorld[0], kEndsWorld[1], kEndsWorld[2], kEndsWorld[3], kEndsWorld[4], kEndsWorld[5], kEndsWorld[6], kEndsWorld[7] }),
 			.commit = "the engine's blended draw (just before DCLF's forward epoch)",
 			.commitSite = "the engine's blended draw for the main accumulator (Features/Forward's ForwardHooks.cpp), else BeforeGpuWork",

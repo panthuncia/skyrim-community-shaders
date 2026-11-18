@@ -388,7 +388,7 @@ namespace DCLF::Features::Precipitation::PrecipitationDraws
 		// In the sun stage each draw of the frame commits into its run (above).
 		desc.repeats = true;
 		// Native mode: a step of the sun stage only (the anchor has no epoch there).
-		desc.segmentOnly = FrameAnchors::NamedByStage(desc.id);
+		desc.segmentOnly = FrameAnchors::StagesOnly(desc.id);
 		desc.executed = [client](const FrameAnchors::Point&) {
 			if (client->executed.fetch_add(1, std::memory_order_relaxed) == 0)
 				logger::info("[DCLF] precipitation: the first precipitation run drawn by the graph");

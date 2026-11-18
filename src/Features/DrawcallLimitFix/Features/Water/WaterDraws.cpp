@@ -377,7 +377,7 @@ namespace DCLF::Features::Water::WaterDraws
 			desc.active = [client] { return client->pending; };
 			desc.onFailed = [] { Fail("the render graph failed with the water's passes in it"); };
 			// Native mode: passes of the deferred+water stage, or of the sun stage under water, only.
-			desc.segmentOnly = FrameAnchors::NamedByStage(desc.id);
+			desc.segmentOnly = FrameAnchors::StagesOnly(desc.id);
 			if (!FrameAnchors::Register(std::move(desc))) {
 				logger::warn("[DCLF] water: the {} client could not be registered; the water stays the engine's", client->id);
 				return nullptr;
