@@ -449,8 +449,10 @@ namespace DCLF::Features::MenuViews::Scenes
 			const auto engine = Pipeline::EngineDrawState::Latch();
 			Draw draw{};
 			draw.shader = Shader::Effect;
-			// The pixel descriptor holds the vertex descriptor's bits and the pixel stage's, so its defines serve both stages.
-			draw.key.descriptor = state->modifiedPixelDescriptor;
+			// The pixel descriptor's defines serve both stages. SKINNED comes from the vertex descriptor as for Lighting, or a skinned
+			// draw's vertex stage could be built without its bones.
+			constexpr auto kSkinned = static_cast<std::uint32_t>(EffectFlags::Skinned);
+			draw.key.descriptor = state->modifiedPixelDescriptor | (state->modifiedVertexDescriptor & kSkinned);
 			draw.key.defineStage = Family::DefineStage::Pixel;
 			if (const char* why = MapTargets(a_capture.view, kMaxColours, draw))
 				return why;
