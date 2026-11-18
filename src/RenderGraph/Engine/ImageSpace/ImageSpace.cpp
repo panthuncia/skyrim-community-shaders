@@ -1541,19 +1541,28 @@ namespace RenderGraph::Engine::ImageSpace
 		void CheckStartSteps();
 		void CheckMenuSteps();
 		void ReregisterSteps();
+		std::pair<float, float> DynamicRatios();
+
+		// The ratios a registration at a boundary sizes its passes for. Upscaling sets the engine's ratios inside each frame and resets
+		// them after it, so the frame that asked for the registration has them and the Begin that applies it does not.
+		std::optional<std::pair<float, float>> g_registrationRatios;
 
 		/**
 		 * @brief Registers a stage's steps again at the next frame boundary, once while one is pending. A frame keeps the step layout
-		 * its schedule was described with, so a new size or setting seen during a frame takes effect at the next Begin.
+		 * its schedule was described with, so a new size or setting seen during a frame takes effect at the next Begin. The
+		 * registration reads the asking frame's dynamic-resolution ratios, which its next check compares against.
 		 */
 		void RegisterAtBoundary(bool& a_pending, bool (*a_ready)(), void (*a_register)())
 		{
 			if (std::exchange(a_pending, true))
 				return;
-			Frame::Driver::AtNextBegin([&a_pending, a_ready, a_register] {
+			Frame::Driver::AtNextBegin([&a_pending, a_ready, a_register, ratios = DynamicRatios()] {
 				a_pending = false;
-				if (a_ready())
-					a_register();
+				if (!a_ready())
+					return;
+				g_registrationRatios = ratios;
+				a_register();
+				g_registrationRatios.reset();
 			});
 		}
 
@@ -1711,9 +1720,11 @@ namespace RenderGraph::Engine::ImageSpace
 			LogEngineDraws();
 		}
 
-		/** @brief The engine's dynamic-resolution ratios now (1 when there is no graphics state). */
+		/** @brief The engine's dynamic-resolution ratios now (1 when there is no graphics state), or the asking frame's in RegisterAtBoundary. */
 		std::pair<float, float> DynamicRatios()
 		{
+			if (g_registrationRatios)
+				return *g_registrationRatios;
 			if (!globals::game::graphicsState)
 				return { 1.0f, 1.0f };
 			const auto& data = globals::game::graphicsState->GetRuntimeData();

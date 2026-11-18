@@ -1996,6 +1996,22 @@ namespace FrameAnchors
 		Rebuild(state, mask, fmt::format("client '{}' registered{}", existing->desc->id, replaced ? " again" : ""));
 		logger::info("[ORG] frame anchors: {} registered ({} passes){}", existing->desc->id, existing->desc->passes.size(),
 			InGraphs(*existing->desc) ? "" : "; it joins the graphs once the shared constants exist");
+		// A client registered again every frame never gets a build that switches in, so its stages stay without it.
+		if (replaced) {
+			struct Streak
+			{
+				std::uint64_t frame = 0, length = 0, warnings = 0;
+			};
+			static std::map<std::string, Streak, std::less<>> streaks;
+			constexpr std::uint64_t kStreakFrames = 8;
+			const auto frame = RenderGraph::Frame::Driver::Current().frame;
+			auto& streak = streaks[existing->desc->id];
+			streak.length = streak.frame + 1 == frame ? streak.length + 1 : streak.frame == frame ? streak.length : 1;
+			streak.frame = frame;
+			if (streak.length % kStreakFrames == 0 && std::has_single_bit(streak.length / kStreakFrames))
+				logger::warn("[ORG] frame anchors: {} registered again on {} consecutive frames (frame {}, warning {}); its stages cannot switch in a "
+							 "build with it", existing->desc->id, streak.length, frame, ++streak.warnings);
+		}
 		return true;
 	}
 
