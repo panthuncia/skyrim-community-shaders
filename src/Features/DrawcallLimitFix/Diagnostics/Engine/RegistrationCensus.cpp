@@ -23,6 +23,8 @@
 #include "Features/DrawcallLimitFix/Diagnostics/Policy.h"
 #include "Features/DrawcallLimitFix/Core/Engine/Walkers.h"
 #include "Utils/SwitchFile.h"
+#include "RenderGraph/Engine/Flush/Flush.h"
+#include "RenderGraph/Engine/Native/Native.h"
 
 #include <array>
 #include <mutex>
@@ -751,6 +753,8 @@ namespace DCLF::RegistrationCensus
 		if (!lists || !player)
 			return;
 		const auto eye = player->GetPosition();
+		// A kept engine draw shows only where the engine's draws still reach the screen.
+		const bool engineDraws = !RenderGraph::Engine::Flush::Latched() && !RenderGraph::Engine::Native::Active();
 		for (const auto& handle : lists->highActorHandles) {
 			const auto actor = handle.get();
 			auto* root = actor ? actor->Get3D(false) : nullptr;
@@ -774,7 +778,7 @@ namespace DCLF::RegistrationCensus
 				counts[2] += member ? 1 : 0;
 				counts[3] += pending ? 1 : 0;
 				counts[4] += engine ? 1 : 0;
-				if (!member && !engine) {
+				if (!member && !(engine && engineDraws)) {
 					++counts[5];
 					if (missing.size() < 240)
 						missing += fmt::format(" '{}' {}{}", geometry->name.c_str() ? geometry->name.c_str() : "", static_cast<const void*>(geometry), pending ? " waiting" : "");
@@ -787,11 +791,12 @@ namespace DCLF::RegistrationCensus
 			const std::uint32_t cellId = cell ? cell->GetFormID() : 0;
 			auto& state = crossingActors[actor->GetFormID()];
 			const bool moved = state.frame && state.cell != cellId;
+			const auto* publication = Scene::FrameView::Get().InstalledPublication();
 			if (moved || state.counts != counts || !state.frame || counts[5])
-				logger::info("[DCLF] cell trace: frame {} actor {:08X} '{}' ref {} cell {:08X}{}: live {}, records {}, members {}, waiting {}, engine {}, drawn by nobody {}{} (held {}, root fade {:.3f})", a_frame,
+				logger::info("[DCLF] cell trace: frame {} actor {:08X} '{}' ref {} cell {:08X}{}: live {}, records {}, members {}, waiting {}, engine {}, drawn by nobody {}{} [publication of frame {}] (held {}, root fade {:.3f})", a_frame,
 					actor->GetFormID(), actor->GetName() ? actor->GetName() : "", static_cast<const void*>(actor.get()), cellId,
-					moved ? fmt::format(" (from {:08X})", state.cell) : std::string(), counts[0], counts[1], counts[2], counts[3], counts[4], counts[5], missing, held,
-					root->AsFadeNode() ? root->AsFadeNode()->GetRuntimeData().currentFade : -1.0f);
+					moved ? fmt::format(" (from {:08X})", state.cell) : std::string(), counts[0], counts[1], counts[2], counts[3], counts[4], counts[5], missing,
+					publication ? publication->commitFrame : 0u, held, root->AsFadeNode() ? root->AsFadeNode()->GetRuntimeData().currentFade : -1.0f);
 			state.cell = cellId;
 			state.counts = counts;
 			state.frame = a_frame;

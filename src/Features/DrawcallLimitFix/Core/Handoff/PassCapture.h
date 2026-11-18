@@ -70,6 +70,11 @@ namespace DCLF
 			std::uint32_t baseMipsWithheld = 0;
 			// Passes of DCLF's classes handed to the engine (KeepForEngine): refused objects and ones not bound yet. Menu scenes not counted.
 			std::uint32_t dclfKept = 0;
+			// Lit objects' passes into the main views that nobody draws. A waiting object's are withheld, and a kept one's engine draw
+			// draws nothing under the flush latch or in native mode.
+			std::uint32_t mainNobodyWaiting = 0;
+			std::uint32_t mainNobodyKept = 0;
+			const RE::BSGeometry* mainNobodyFirst = nullptr;
 			// By draw family: its engine shapes' passes into the main views while DCLF draws the family (tree LOD's).
 			std::array<std::uint32_t, static_cast<std::size_t>(Api::DrawFamily::Count)> familyWithheld{};
 			// By view, an OwnRenderers view's (the water reflection's faces): its members' passes, and by draw family its engine shapes'
@@ -329,6 +334,8 @@ namespace DCLF
 		std::atomic<std::uint32_t> mainWithheld{ 0 }, occlusionWithheld{ 0 }, holdWithheld{ 0 };
 		std::atomic<std::uint32_t> pendingWithheld{ 0 }, baseMipsWithheld{ 0 };
 		mutable std::atomic<std::uint32_t> dclfKept{ 0 };
+		mutable std::atomic<std::uint32_t> mainNobodyWaiting{ 0 }, mainNobodyKept{ 0 };
+		mutable std::atomic<const RE::BSGeometry*> mainNobodyFirst{ nullptr };
 		// The kept passes by geometry (KeepForEngine), at most kKeptSamples geometries a window.
 		static constexpr std::size_t kKeptSamples = 256;
 		mutable std::mutex keptLock;

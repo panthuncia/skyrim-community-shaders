@@ -59,6 +59,22 @@ void DCLF::Reports::Stats(std::uint32_t frame, FrameDriver::Counters& c)
 	auto& timing = c.timing;
 	const bool due = Due(frame);
 	DCLF::RegistrationCensus::TraceCrossings(frame);
+	// Lit passes into the main views that nobody drew, summed per frame over the report's window.
+	static struct
+	{
+		std::uint64_t waiting = 0, kept = 0;
+		std::uint32_t framesWith = 0, most = 0;
+		const void* first = nullptr;
+	} nobody;
+	{
+		const auto& capture = DCLF::PassCapture::Get().GetStats();
+		const std::uint32_t passes = capture.mainNobodyWaiting + capture.mainNobodyKept;
+		nobody.waiting += capture.mainNobodyWaiting;
+		nobody.kept += capture.mainNobodyKept;
+		nobody.framesWith += passes ? 1u : 0u;
+		nobody.most = (std::max)(nobody.most, passes);
+		nobody.first = nobody.first ? nobody.first : capture.mainNobodyFirst;
+	}
 	// CS_DCLF_CENSUS: the passes the engine kept since the last frame, classified here (Present), reported every interval.
 	if (DCLF::RegistrationCensus::Enabled()) {
 		DCLF::RegistrationCensus::Collect();
@@ -122,9 +138,11 @@ void DCLF::Reports::Stats(std::uint32_t frame, FrameDriver::Counters& c)
 			if (const auto& family = DCLF::Extensions::DrawFamilies()[f]; family.taken)
 				familiesWithheld += fmt::format("; {} {} passes withheld", capture.familyWithheld[f], family.label);
 		logger::info("[DCLF] main camera since the last report: {} native passes drawn, {} of them set members' ({} depth, {} opaque){}{}; last frame's registrations: {} "
-					 "member passes withheld{}",
+					 "member passes withheld{}; drawn by nobody: {} lit passes in {} frames, at most {} a frame ({} waiting, {} kept by the engine with nothing to draw them){}",
 			leaks.offered, leaked, leaks.leakedInDepth, leaks.leakedInOpaque, leaked ? " <- LEAK" : " <- OK", samples.empty() ? "" : "; first: " + samples,
-			capture.mainWithheld, familiesWithheld);
+			capture.mainWithheld, familiesWithheld, nobody.waiting + nobody.kept, nobody.framesWith, nobody.most, nobody.waiting, nobody.kept,
+			nobody.first ? fmt::format(" <- NOBODY (first geometry {})", nobody.first) : std::string());
+		nobody = {};
 		leaks = {};
 	}
 	// What the GPU spent on each segment, measured by the graph itself; the menu shows the latest window.

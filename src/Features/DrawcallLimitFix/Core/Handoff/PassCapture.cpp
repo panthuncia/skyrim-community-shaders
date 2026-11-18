@@ -18,6 +18,7 @@
 #include "Features/DrawcallLimitFix/Diagnostics/Hooks.h"
 #include "Features/DrawcallLimitFix/Diagnostics/Policy.h"
 #include "RenderGraph/Engine/Flush/Flush.h"
+#include "RenderGraph/Engine/Native/Native.h"
 #include "TextureStreaming/Streamer.h"
 
 namespace DCLF
@@ -71,6 +72,11 @@ namespace DCLF
 			return property && (netimmerse_cast<const RE::BSLightingShaderProperty*>(property) || netimmerse_cast<const RE::BSEffectShaderProperty*>(property) ||
 								   netimmerse_cast<const RE::BSDistantTreeShaderProperty*>(property));
 		}
+
+		bool LitPass(const RE::BSRenderPass* a_pass) { return a_pass->shaderProperty && netimmerse_cast<const RE::BSLightingShaderProperty*>(a_pass->shaderProperty); }
+
+		// No port takes the engine's lit draws, so under the flush latch and in native mode they draw nothing.
+		bool EngineLitDrawsVoid() { return RenderGraph::Engine::Flush::Latched() || RenderGraph::Engine::Native::Active(); }
 	}
 
 	PassCapture& PassCapture::Get()
@@ -150,6 +156,9 @@ namespace DCLF
 		stats.pendingWithheld = pendingWithheld.exchange(0, std::memory_order_relaxed);
 		stats.baseMipsWithheld = baseMipsWithheld.exchange(0, std::memory_order_relaxed);
 		stats.dclfKept = dclfKept.exchange(0, std::memory_order_relaxed);
+		stats.mainNobodyWaiting = mainNobodyWaiting.exchange(0, std::memory_order_relaxed);
+		stats.mainNobodyKept = mainNobodyKept.exchange(0, std::memory_order_relaxed);
+		stats.mainNobodyFirst = mainNobodyFirst.exchange(nullptr, std::memory_order_relaxed);
 		lastDrain = { entries.data(), count };
 		return lastDrain;
 	}
@@ -305,6 +314,11 @@ namespace DCLF
 		// draw's alpha takes its root's FadeStateCS fade, and BuildDraws adds the copy partitions while the root crosses).
 		mainWithheld.fetch_add(1, std::memory_order_relaxed);
 		NotePending(*set, a_pass->geometry, kSetMain);
+		if (!(set->PhasesOf(a_pass->geometry) & kSetMain) && LitPass(a_pass)) {
+			mainNobodyWaiting.fetch_add(1, std::memory_order_relaxed);
+			const RE::BSGeometry* none = nullptr;
+			mainNobodyFirst.compare_exchange_strong(none, a_pass->geometry, std::memory_order_relaxed);
+		}
 		return true;
 	}
 
@@ -709,6 +723,11 @@ namespace DCLF
 		// view, its owner and whether it is hidden or skinned, read while the engine registers it.
 		if (a_pass && a_pass->geometry && !t_menuScenes && !bypassed.load(std::memory_order_acquire) && DclfClass(a_pass)) {
 			dclfKept.fetch_add(1, std::memory_order_relaxed);
+			if (LitPass(a_pass) && (IsMainRenderer(a_batch) || (!t_shadowRegistration && MainRendererNow(a_batch))) && EngineLitDrawsVoid()) {
+				mainNobodyKept.fetch_add(1, std::memory_order_relaxed);
+				const RE::BSGeometry* none = nullptr;
+				mainNobodyFirst.compare_exchange_strong(none, a_pass->geometry, std::memory_order_relaxed);
+			}
 			std::scoped_lock lock(keptLock);
 			auto it = keptSamples.find(a_pass->geometry);
 			if (it == keptSamples.end() && keptSamples.size() < kKeptSamples) {

@@ -740,7 +740,9 @@ phase (`Core/Scene/Model/SceneSet.h`, `Core/Scene/Coordinator/SceneSet.cpp`).
     withhold it there as they withhold a member (`SetSnapshot::WithheldPhasesOf`), so it shows the frame DCLF draws it: a delay, never
     an engine draw. A draw family that waits for its pipelines is withheld the same way (`PassCapture::SetFamilyWithheld`). Until 5.5.1
     the engine drew such an object, vouched under the flush latch (`dclf: not claimed (...)`, deleted). What the engine still gets of
-    DCLF's classes: an object DCLF refuses, and one not bound yet (attached since the last publication).
+    DCLF's classes: an object DCLF refuses, and one not bound yet (attached since the last publication). In guest mode the flush latch
+    skips those engine draws and in native mode the engine's D3D11 calls do nothing, so there such an object is drawn by nobody until
+    DCLF draws it. The main camera's report line counts them (`drawn by nobody`).
 -   **A claim follows what the CPU submitted, not what the GPU rasterised.** An occluded member stays a member, and the engine
     still does not draw it.
 

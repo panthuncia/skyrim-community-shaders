@@ -218,6 +218,17 @@ that a repeat is recognised. They are not chased unless one recurs with a DCLF o
     no decals on it, and no shadow-casting lights, as in the engine's fading pass. A fading join also asks the pipeline lane for
     its settled key (`RequestSettledPipeline`), so the switch usually finds it built. Runs fxg and fxn: 19 crossings, none losing a
     part (Alvor's in fxn came while his parts still waited after the load, below).
+-   **A newly attached object shows 3 to 7 frames late (open).** In guest and native mode the engine's draw of a lit object draws
+    nothing (the flush latch skips it, native's D3D11 calls do nothing), so whether DCLF withholds it changes no pixel. An attached
+    object (a tankard, Alvor's hammer) joins the set in the scene pass that tracks it, but a publication is installed about every 2
+    to 3 frames and is 2 to 5 frames old by then (`[publication of frame N]` in the cell trace). The one frame of run x5g with no
+    engine pass for the hammer was its attach frame, before the stand-in walked the admitted entry again. **Fix direction:** a
+    shorter path from the scene pass to the installed snapshot.
+-   **Actors after a load are drawn by nobody for 1.5 to 4 seconds (open).** The load hold settles before the actors' 3D is
+    tracked (records 0 on its last frames), and their first bindings (the fade-in's blended keys) then wait for pipelines compiled
+    on demand, about 100 frames in guest and up to 260 in native (runs fxg, fxn, fig). The `drawn by nobody` count's first window
+    after a coc reads about 30,000 passes in guest. **Fix direction:** the hold also waits for the nearby actors' parts, and their
+    keys are asked for from the attach records during the load (Phase 5.5.1's sixth step).
 
 ## Memory retention
 

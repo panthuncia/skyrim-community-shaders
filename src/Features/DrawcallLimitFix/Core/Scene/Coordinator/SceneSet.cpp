@@ -620,6 +620,12 @@ namespace DCLF::Scene
 		MarkSetApply(a_slot);  // the record's kObjectMember and Tables::setPhases, at ApplySet
 		if (!before || !a_phases)
 			++(a_phases ? setStats.joined : setStats.left);
+		static const bool cellTrace = Util::SwitchFile::Enabled("CS_DCLF_CELL_TRACE");
+		if (cellTrace && (a_phases & kSetMain) && !(before & kSetMain))
+			if (auto* geometry = const_cast<RE::BSGeometry*>(tables.objectGeometry[a_slot]))
+				if (const auto it = tracked.find(geometry); it != tracked.end() && it->second.ownerReference)
+					logger::info("[DCLF] cell trace: pass {} frame {} ref {} slot {} {} joins the main phase (tracked since frame {})", passSerial, sceneFrame,
+						static_cast<const void*>(it->second.ownerReference), a_slot, static_cast<const void*>(geometry), it->second.trackedFrame);
 		if (before && !a_phases) {
 			const std::uint8_t participation = live ? SetParticipation(a_slot, drawn) : std::uint8_t{ 0 };
 			const std::size_t cause = !live                                                    ? 0 :
