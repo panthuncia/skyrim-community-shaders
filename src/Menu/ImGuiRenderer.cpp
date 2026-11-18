@@ -305,13 +305,8 @@ namespace ImGuiRenderer
 			return;
 		if (!UpdateTarget(state))
 			return;
-		// A new target is a new version of the UI stage's graph, published in the middle of the frame: the stage's recordings take it from
-		// the next frame boundary, so this frame draws no overlay.
-		const bool newTarget = std::exchange(state.targetChanged, false);
-		// So does a font atlas page made or dropped: a new version too.
-		const bool held = FrameAnchors::HeldByStage(FrameAnchors::Anchor::Overlay);
-		const bool newPages = held && ImGuiBasicRHI::PublishTextures(a_drawData);
-		if (held && (newTarget || newPages))
+		// A new target is a new build of the UI stage's graph, switched in at a frame boundary: this frame draws no overlay.
+		if (std::exchange(state.targetChanged, false) && FrameAnchors::HeldByStage(FrameAnchors::Anchor::Overlay))
 			return;
 		state.pending = a_drawData;
 		FrameAnchors::Run(FrameAnchors::Anchor::Overlay);

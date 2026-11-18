@@ -123,13 +123,6 @@ namespace ImGuiBasicRHI
 	bool Commit(ImDrawData* a_drawData, const Target& a_target, const Resolver& a_resolve);
 
 	/**
-	 * @brief Answers the draw data's texture creations and destructions now: each is a new version of an atlas page. Render thread, before
-	 * the overlay's run. True when a page took a new version: a CS stage that holds the overlay then draws no overlay this frame (its
-	 * recordings take the version from the next frame boundary).
-	 */
-	bool PublishTextures(ImDrawData* a_drawData);
-
-	/**
 	 * @brief A new instance of the draw pass, drawing onto a_target (declared as its render target) and reading every atlas page,
 	 * for a graph build. It records what Commit stored for its run, and nothing in an execution Commit did not run for. Null when
 	 * the atlas pages cannot be made.

@@ -2964,7 +2964,8 @@ namespace FrameAnchors
 				return mismatch(Driver::TapError::LostToBuild, "a build of its graph attached after the frame's Begin; builds attach only at a frame boundary");
 			if (a_state.frameVersionsCurrent[a_declared] && !host.EpochRecordingVersionsCurrent(*recording, frame.slot))
 				return mismatch(Driver::TapError::StaleRecording,
-					"a slot of its graph published a new version after the frame's Begin; versions are published only at a frame boundary");
+					fmt::format("slot {} of its graph published a new version after the frame's Begin; versions are published only at a frame boundary",
+						host.EpochRecordingStaleVersion(*recording, frame.slot)));
 			const auto expected = host.EpochCopyRun(epoch, frame.slot);
 			RenderGraphRuntime::EpochResult result = RenderGraphRuntime::EpochResult::Stopped;
 			try {

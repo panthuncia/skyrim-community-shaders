@@ -6,6 +6,7 @@
 #	include "RenderGraph/ImGuiBasicRHI.h"
 #	include "RenderGraph/FrameAnchors.h"
 #	include "RenderGraph/FrameStaging.h"
+#	include "RenderGraph/Frame/FrameDriver.h"
 
 #	include "RenderGraph/GraphResources.h"
 #	include "RenderGraph/RasterProgram.h"
@@ -29,6 +30,7 @@
 #	include <cstring>
 #	include <map>
 #	include <mutex>
+#	include <optional>
 #	include <unordered_map>
 #	include <unordered_set>
 #	include <vector>
@@ -137,7 +139,7 @@ namespace ImGuiBasicRHI
 		/**
 		 * @brief The font atlas pages both passes declare: a fixed set of versioned textures. Each ImGui texture is a version of one
 		 * page; a page no ImGui texture holds is its own 1x1 placeholder (never drawn). Every version is RGBA8 with one level, the
-		 * pages' shape class. Made once, before the passes; the versions change on the render thread (Commit).
+		 * pages' shape class. Made once, before the passes; the versions change at frame boundaries (PublishPages).
 		 */
 		struct Atlas
 		{
@@ -182,6 +184,9 @@ namespace ImGuiBasicRHI
 			std::unordered_map<std::uint64_t, std::shared_ptr<Texture>> textures;    // ImGui's, by ImTextureID
 			std::vector<std::weak_ptr<Texture>> made;                                // MakeTexture's, until uploaded
 			std::array<std::shared_ptr<Texture>, kAtlasPages> pages;                 // the ImGui texture each page holds
+			// Each page's next version, published at the next frame boundary (PublishPages). Null stands for its placeholder.
+			std::array<std::optional<std::shared_ptr<Texture>>, kAtlasPages> nextPages;
+			bool publishQueued = false;
 			bool pagesLogged = false;
 			std::map<std::uint32_t, std::shared_ptr<const RasterProgram>> programs;  // by target format
 			std::map<std::uint32_t, bool> failedPrograms;
@@ -301,22 +306,39 @@ namespace ImGuiBasicRHI
 			return true;
 		}
 
-		/**
-		 * @brief Page a_page's next version: a_texture, or its placeholder when null. The next preparation binds it: no graph build.
-		 * Render thread, with the atlas made.
-		 */
-		bool SetPage(State& a_state, std::size_t a_page, const std::shared_ptr<Texture>& a_texture)
+		/** @brief The pages' next versions published. Frame boundary, render thread. */
+		void PublishPages()
 		{
-			const auto& atlas = *a_state.shared->atlas;
-			const auto& backing = a_texture ? a_texture : atlas.placeholders[a_page];
-			try {
-				atlas.pages[a_page]->Publish(backing->image, backing);
-			} catch (const std::exception& e) {
-				logger::error("[ORG] ImGui: atlas page {} could not take a new version: {}", a_page, e.what());
-				return false;
+			auto& state = Backend();
+			state.publishQueued = false;
+			if (!state.installed || !state.shared->atlas)
+				return;
+			const auto& atlas = *state.shared->atlas;
+			for (std::size_t page = 0; page < kAtlasPages; ++page) {
+				auto next = std::exchange(state.nextPages[page], std::nullopt);
+				if (!next)
+					continue;
+				const auto& backing = *next ? *next : atlas.placeholders[page];
+				try {
+					atlas.pages[page]->Publish(backing->image, backing);
+				} catch (const std::exception& e) {
+					const auto message = fmt::format("Community Shaders: ImGui's atlas page {} could not take a new version: {}", page, e.what());
+					logger::critical("[ORG] {}", message);
+					stl::report_and_fail(message);
+				}
 			}
+		}
+
+		/**
+		 * @brief Page a_page's next version: a_texture, or its placeholder when null. It is published at the next frame boundary, and
+		 * until then a copy into the page or a draw from it of a texture the page does not bind is left out. Render thread.
+		 */
+		void SetPage(State& a_state, std::size_t a_page, const std::shared_ptr<Texture>& a_texture)
+		{
+			a_state.nextPages[a_page] = a_texture;
 			a_state.pages[a_page] = a_texture;
-			return true;
+			if (!std::exchange(a_state.publishQueued, true))
+				RenderGraph::Frame::Driver::AtNextBegin(PublishPages);
 		}
 
 		/** @brief One rectangle of ImGui's pixels to stage. */
@@ -370,8 +392,7 @@ namespace ImGuiBasicRHI
 				if (!texture)
 					return;  // asked for again next frame
 				texture->page = page;
-				if (!SetPage(a_state, page, texture))
-					return;
+				SetPage(a_state, page, texture);
 				if (previous != a_state.textures.end())
 					a_state.textures.erase(previous);
 				const auto id = IdOf(texture.get());
@@ -724,6 +745,7 @@ namespace ImGuiBasicRHI
 		state.sampler = {};
 		state.shared = std::make_shared<Shared>();
 		state.pages = {};
+		state.nextPages = {};
 		state.pagesLogged = false;
 		state.pool = std::make_shared<StagingPool>();
 		auto& io = ImGui::GetIO();
@@ -772,24 +794,6 @@ namespace ImGuiBasicRHI
 	}
 
 	bool Prepare(std::uint32_t a_format) { return ProgramFor(Backend(), a_format) != nullptr; }
-
-	bool PublishTextures(ImDrawData* a_drawData)
-	{
-		auto& state = Backend();
-		if (!a_drawData || !a_drawData->Textures || !state.shared || !state.shared->atlas)
-			return false;
-		bool changed = false;
-		std::vector<PendingUpload> none;
-		for (ImTextureData* texture : *a_drawData->Textures) {
-			const bool create = texture->Status == ImTextureStatus_WantCreate;
-			const bool destroy = texture->Status == ImTextureStatus_WantDestroy && texture->UnusedFrames > 0 && texture->BackendUserData;
-			if (!create && !destroy)
-				continue;
-			UpdateTexture(state, *texture, none);
-			changed = true;
-		}
-		return changed;
-	}
 
 	bool Commit(ImDrawData* a_drawData, const Target& a_target, const Resolver& a_resolve)
 	{
@@ -981,7 +985,6 @@ namespace ImGuiBasicRHI
 	Binding BindingOf(const std::shared_ptr<Texture>&, int) { return {}; }
 	bool Prepare(std::uint32_t) { return false; }
 	bool Commit(ImDrawData*, const Target&, const Resolver&) { return false; }
-	bool PublishTextures(ImDrawData*) { return false; }
 	std::shared_ptr<org::RenderPass> MakePass(FrameAnchors::Texture) { return nullptr; }
 	std::shared_ptr<org::RenderPass> MakeUploadPass() { return nullptr; }
 }
