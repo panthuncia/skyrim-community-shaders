@@ -642,6 +642,9 @@ file(
     "${CMAKE_CURRENT_SOURCE_DIR}/src/*.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/src/*.cxx"
 )
+# The generator skips Drawcall Limit Fix's tree (build_entries), so its files are not inputs.
+# Without this, every edit there reruns the generator before any object can compile.
+list(FILTER SCENE_SETTINGS_CATALOG_INPUTS EXCLUDE REGEX "/src/Features/DrawcallLimitFix/")
 
 # The generator rewrites only outputs whose text changed, so their objects survive an unrelated edit. The
 # stamp is the output instead, or MSBuild would see them older than the sources and rerun every build.
@@ -680,6 +683,9 @@ target_sources(
         "${SCENE_SETTINGS_CATALOG_SOURCE}"
         "${SCENE_SETTINGS_ADAPTERS_SOURCE}"
 )
+
+# Compile-time settings (module scanning off, unity builds for dev presets).
+include(cmake/BuildSpeed.cmake)
 
 # #######################################################################################################################
 # # clang-format
