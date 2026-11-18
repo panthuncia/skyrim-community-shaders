@@ -322,12 +322,21 @@ namespace RenderGraph::Engine::Scaleform
 		}
 
 		/**
-		 * @brief Native mode: a display the graph refused is a mismatch between the engine and CS's frame (Frame::Driver::NoteTapError,
-		 * fatal in development builds, logged once in release). No D3D11 renderer draws it in its place.
+		 * @brief Whether the UI stage holds the displays (the recipe: native mode, and guest mode since the UI stage runs there). Then no D3D11
+		 * renderer draws a display in the graph's place.
+		 */
+		bool StageDrawsDisplays()
+		{
+			return FrameAnchors::HeldByStage(FrameAnchors::Anchor::Interface);
+		}
+
+		/**
+		 * @brief Where a stage holds the displays: a display the graph refused is a mismatch between the engine and CS's frame
+		 * (Frame::Driver::NoteTapError, fatal in development builds, logged once in release). No D3D11 renderer draws it in its place.
 		 */
 		void NoteRefused(const char* a_reason)
 		{
-			if (Engine::Native::Active())
+			if (StageDrawsDisplays())
 				Frame::Driver::NoteTapError(Frame::Driver::TapError::Refused, Frame::SegmentId::Count, fmt::format("a Scaleform display: {}", a_reason));
 		}
 
@@ -877,8 +886,8 @@ namespace RenderGraph::Engine::Scaleform
 				EndDangling(a_renderer);
 			if (!Passes::Ready()) {
 				CountLost("a whole display while the graph path is off (not set up, or failed)");
-				// Native mode: no D3D11 renderer draws in the graph's place.
-				if (Engine::Native::Active()) {
+				// Where a stage holds the displays, no D3D11 renderer draws in the graph's place.
+				if (StageDrawsDisplays()) {
 					NoteRefused("the graph path is off (not set up, or failed)");
 					return;
 				}
@@ -896,7 +905,7 @@ namespace RenderGraph::Engine::Scaleform
 				// Neither the shadow state nor the renderer has a target to draw onto.
 				capture.display.Reset();
 				CountLost("a whole display with no render target bound");
-				if (Engine::Native::Active()) {
+				if (StageDrawsDisplays()) {
 					NoteRefused("no render target bound");
 					return;
 				}

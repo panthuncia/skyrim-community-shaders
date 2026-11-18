@@ -4844,20 +4844,19 @@ Terrain Blending, Volumetric Shadows, light culling, the bloom radii.
 
 Since Guest B0 (2026-11-18) guest runs every port native runs, with the flush latch and the guest context: the engine's subsystems
 and CS's features draw on ORG in both modes, and the engine's binds and draws are withheld from DXVK. Since Guest B1 guest runs the
-frame driver, schedules, staged builds, keys and the recipe check; since Guest B2 two stages, pre-depth and pre-main, are one block each
-in DXVK's stream, the skeleton hosts its clears in Drawcall Limit Fix's graphs and the guest stages' places as in native, and the engine's
-constant-buffer writes inside a stage's window reach DXVK after the window (the latch's write-behind). Since Guest B3 to B6 deferred+water,
-start, sun and post run as guest stages too (six of seven CS stages; the UI remains; the upscaler's evaluate is the post stage's pass), the kMAIN copy reaches the skeleton through the guest
-context's CopyResource hook, and a client named by a guest stage and by one not in guest uses its anchor's own epoch for the other's part
-(`StagesOnly`, `OwnEpochHolds`). It still uses: the own epochs of
-every anchor the guest stages do not hold (per-anchor epochs, `FrameAnchors::Scheduled` on the anchor's own built graph; the skeleton's
-group anchors for the clears and copies of the stages not in guest, `OwnEpochTakes`; Skylighting's lent slot with its D3D11 clear), the
-main ImageSpace client,
-the clients built on first sight and the shape manifest (`ImageSpaceShapes.json`) with the per-draw shape capture, the D3D11 renderer for
-displays the graph refuses, the capture's D3D11 staging copy when the graph cannot take it, and the post
-chain's hooks (which only check and stage in native). With the latch, an ImageSpace draw the main client leaves to the engine (a shape
-first seen this session, a registration the graph does not hold yet) draws nothing. What still reaches DXVK is in "Guest B0" (the
-residue census). This is the input for the guest port (plan stage 8).
+frame driver, schedules, staged builds, keys and the recipe check. Since Guest B7 every CS stage of every frame kind is one block in
+DXVK's stream, as in native: start, pre-depth, pre-main, deferred+water, sun, post (the upscaler's evaluate a pass of it, recorded into
+DXVK's command buffer) and UI, which writes DXVK's back buffer directly (one stable image, Guest B7). The skeleton hosts its clears in
+Drawcall Limit Fix's graphs and the stages' places; the kMAIN copy reaches it through the guest context's CopyResource hook; the
+engine's constant-buffer writes inside a stage's window reach DXVK after the window (the latch's write-behind). The main ImageSpace
+client, the shape manifest and the D3D11 renderer for refused displays are no longer set up or reached in guest.
+
+What is still guest's own: the anchors' own-epoch machinery is still compiled and reachable only for frame generation's hudless copy
+and HDR output (as in native); the main ImageSpace client, the shape manifest, `onFailed` fallbacks and the port switches remain in the
+code (a later deletion piece); Skylighting's lent slot with its D3D11 clear (Guest B4); the capture's D3D11 staging copy when the graph
+cannot take it; DXVK's interop ring for frame generation's evaluates; the frame arena (`Frame::Transients`), still off in guest (each
+stage keeps pools of its own). What still reaches DXVK inside a window is in Guest B6 and B7 (the residue census): none in steady
+frames from CS or the engine.
 
 ### Old native paths still reachable
 
@@ -7792,3 +7791,61 @@ findings, no `NoPass`, no failed build; the only `[C]` line is the known `Publis
 2.2; interior 2.8 and 5.7 (Dragonsreach's light shafts); census at most 0.6; native quick 1.1, validation at most 0.9 apart from
 Dragonsreach (8.6, its light shafts). Two earlier census runs on the first builds (before the release fence change) passed too. Perf:
 with B7.
+
+## Guest B7: UI in guest (2026-11-18)
+
+Plan piece B7. Guest mode now runs all seven CS stages as blocks in DXVK's stream, for every frame kind (world, a frozen world's capture
+frame, a menu over a frozen world, the main menu, the loading screen, a Bink movie). Code and this text on `org-native/phases` (no
+submodule change). RX 6600, Perf-Fast, background runs with `DXVK_DEBUG=hang`.
+
+### What runs in guest
+
+- The UI stage has `runsInGuest`: the screen blood, the frozen composite, the three clear places, Scaleform's displays (instances 8 to
+  15 and 0 to 7), a menu scene's depth, shadow mask, copies, colour and composite, the face tint, the present's clients (a Bink movie's
+  tiles), the overlay and the capture. It commits just before DXVK's Present (Hooks.cpp, `TapPoint(Ui)`), as in native. The Interface,
+  Present, Overlay and Capture anchors have no own epoch in guest any more; nor do the skeleton's group anchors.
+- **ImageSpace.** With the UI stage in guest the menu steps are on (`Menu().on`), and with them `StepsOnly`: the main client, the clients
+  built on first sight, the shape manifest and the per-draw shape capture are not set up in guest either. Every ImageSpace draw is a CS
+  step's pass or `NoPass`. The face tint at a load is the start or UI stage's step, no longer left to the engine.
+- **Scaleform.** A display the graph refuses is a `Refused` tap error wherever a stage holds the Interface anchor
+  (`StageDrawsDisplays`, the recipe), fatal in development builds; no D3D11 renderer draws in the graph's place in guest either.
+- A Bink movie's 166 frames are drawn by the graph from the first (the UI stage is primed at setup in guest too).
+
+### The final target (decision D4)
+
+Built: the UI stage (and the post stage before it) write DXVK's swap chain back buffer directly, as the anchors' own epochs did; no
+CS-owned final target and no copy. The swap chain is made with `DXGI_SWAP_EFFECT_FLIP_DISCARD` (Hooks.cpp), and DXVK's
+`D3D11SwapChain::CreateBackBuffers` makes one back buffer for every swap effect but the two sequential ones; `RotateBackBuffers`, which
+moves images between back buffers at each present, runs only with more than one. So kFRAMEBUFFER is one D3D11 texture with one DXVK
+image every frame until a resize (which makes a new texture, a new import and a structural rebuild, as for any engine target). The kept
+recordings bind it as an image DXVK made: it rests in DXVK's layout at each block's end (external home states), and DXVK's present blits
+from it after the UI block. A CS-owned target would need the engine's kFRAMEBUFFER entry, every reader of its RTV (Scaleform, Bink,
+ImGui, the capture, HDR output) and a copy into DXVK's image moved over, for no gain while the image is stable. If DXVK ever rotates
+(a sequential swap effect), this needs the CS-owned target.
+
+### The frame's end in the stream
+
+DCLF's `BeforePresent` (its CPU frame signal, and a flush of the pending stream work) and `SignalFramePace` (the render thread's pacing
+signal, and the per-frame release services) ran before the overlay was drawn, so inside the UI stage's window, and ahead of the UI
+block in DXVK's stream: the frame pace signal no longer covered the frame's last work. Both now run once a frame right after the UI
+stage's commit in the present (or after the present chain when it did not present). Same order in both modes.
+
+### Residue
+
+`latch-census-short`: **0 calls from CS or the engine inside a stage's window in every steady window.** Each steady window holds 1,800
+calls of Improved Camera SE's own Map and Unmap on DXVK's context (6 a frame, from its hook on the engine's Renderer::End, inside the UI
+window, which ends at the present): another plugin's D3D11 work, not routable by CS (org-extension-api-notes.md, Improved Camera SE,
+incompatible with native mode). The non-steady windows add, in the UI window: GFx's glyph cache updates (UpdateSubresource, 103 and 223
+in the load windows; the cache is a DXVK texture), CS's before-water depth copy on the raw context (Deferred.cpp, 315 in the first load's
+loading-screen frames), FaceGen's render target copy (1 a load) and one engine copy at a menu scene (4); in the other windows the
+items listed in Guest B6.
+
+### Checks
+
+One background run each on DLL `35dbf4497d9e`: guest `latch-census-short` (twice, before and after the frame end change), the Journal
+Menu run (menu shot 0.8 from B6's, 5.8 from native's), quick, interior; native quick; `d3d11+quick` (its shot is taken during the
+fade-in in every build: 13.3, 18.9 and 8.6 mean). All passed with 0 tap errors, 0 recipe findings, no `NoPass`, no failed build, 0
+Scaleform displays refused; the only `[C]` line is the known `PublishedResources` one. Bink, main menu, loading screen, world, frozen
+world capture and frozen world kinds were reached. Shots against B6's: quick 2.0, interior 3.6 and 7.9 (light shafts), census at most
+0.8 apart from Dragonsreach (16.7, its light shafts). Not tested: HDR output, frame generation (needs the foreground; its hudless copy
+keeps its anchor's ticket), a menu's item model, the local map, the screen blood.

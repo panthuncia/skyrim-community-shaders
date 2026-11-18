@@ -424,6 +424,7 @@ namespace RenderGraph::Frame::Recipes::Table
 			} },
 			.opensLast = true,
 			.switchesEverySlot = true,
+			.runsInGuest = true,
 			.commitBefore = Segments({ Segment::AnchorHDROutput, Segment::AnchorCapture }),
 			.commit = "just before the present (or HDR output)",
 			.commitSite = "the present hook, before the capture and the present (Hooks.cpp); BeforeGpuWork before HDR output or the Capture anchor",

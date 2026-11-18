@@ -598,15 +598,20 @@ struct IDXGISwapChain_Present
 
 		FrameAnchors::Run(FrameAnchors::Anchor::Present);
 
-		// What DCLF puts in DXVK's stream for the frame (its CPU frame signal), before the present sends the stream on; its features'
-		// Reset (EndFrame) runs after the present.
-		if (globals::features::drawcallLimitFix.loaded)
-			globals::features::drawcallLimitFix.BeforePresent();
-
-		// The render thread's pacing point (RenderGraphRuntime::SignalFramePace): the frame's end in DXVK's stream, unless frame
-		// generation paces the present itself.
+		// The frame's end in the stream, once a frame, after the UI stage's commit (in the present below; after the chain when it did not
+		// present): what DCLF puts in DXVK's stream for the frame (its CPU frame signal), before the present sends the stream on (its
+		// features' Reset, EndFrame, runs after the present); then the render thread's pacing point (RenderGraphRuntime::SignalFramePace),
+		// unless frame generation paces the present itself. After the commit, they follow the UI stage's block in stream order, and their
+		// D3D11 work (a flush, release queries) is outside the stage's window.
 		const bool pacedByCS = !globals::features::upscaling.IsFrameGenerationActive();
-		RenderGraphRuntime::Get().SignalFramePace(pacedByCS);
+		bool frameEndQueued = false;
+		const auto queueFrameEnd = [&] {
+			if (std::exchange(frameEndQueued, true))
+				return;
+			if (globals::features::drawcallLimitFix.loaded)
+				globals::features::drawcallLimitFix.BeforePresent();
+			RenderGraphRuntime::Get().SignalFramePace(pacedByCS);
+		};
 
 		HRESULT retval;
 		{
@@ -628,6 +633,7 @@ struct IDXGISwapChain_Present
 							(void)FrameAnchors::TapPoint(RenderGraph::Frame::SegmentId::Ui);
 						// The UI stage commits before the present (BeforeGpuWork).
 						FrameAnchors::BeforeGpuWork("the present");
+						queueFrameEnd();
 						// The frame's epochs still on the submission thread reach the queue before the present. A loading screen's thread
 						// presenting without owning rendering drains too: it copies what the owner's epochs draw.
 						// Native mode with CS_ORG_QUEUE_PRESENT: the render owner's present is an entry on the submission thread's queue,
@@ -664,6 +670,8 @@ struct IDXGISwapChain_Present
 			});
 		}
 
+		// A chain that returned without presenting (occluded, a failed frame generation present).
+		queueFrameEnd();
 		streamline->SetPCLMarker(Streamline::PclMarker::PresentEnd);
 
 		auto* dxvk = DXVKInterop::GetSingleton();
