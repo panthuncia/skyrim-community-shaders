@@ -50,9 +50,10 @@ namespace DCLF::Features::Fades
 		void OnFadeSnap(const SWF_EventHeader* a_event, std::uintptr_t*, void*)
 		{
 			if (auto* node = SceneWriter::Arg<RE::NiAVObject*>(a_event, 0)) {
-				fadeSnapEvents.Push(node);
+				// The mirror's update goes first, so the pass that takes the key has already applied it.
 				if (netimmerse_cast<RE::BSFadeNode*>(node))
 					Extensions::PushNodeUpdate(node, Scene::kFadeStatics | Scene::kFadeState);
+				fadeSnapEvents.Push(node);
 			}
 		}
 
@@ -71,9 +72,10 @@ namespace DCLF::Features::Fades
 		void PushFadeAmount(const void* a_key)
 		{
 			auto* root = static_cast<RE::NiAVObject*>(const_cast<void*>(a_key));
-			fadeAmountEvents.Push(a_key);
+			// The mirror's value goes first. A key applied before it left the row at an older alpha for good.
 			if (root->AsFadeNode())
-				Extensions::PushNodeUpdate(root, Api::kNodeFieldFadeAmount);  // the mirror's value
+				Extensions::PushNodeUpdate(root, Api::kNodeFieldFadeAmount);
+			fadeAmountEvents.Push(a_key);
 		}
 	}
 

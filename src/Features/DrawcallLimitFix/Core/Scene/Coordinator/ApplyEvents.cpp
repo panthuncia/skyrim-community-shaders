@@ -81,11 +81,12 @@ namespace DCLF::Scene
 		auto batch = std::make_shared<EventBatch>();
 		// A throw hands the batch (and its engine references) to the render thread, never destroys it here.
 		BatchUnwindGuard unwindGuard(*this, batch);
+		// The fade snap and fade amount keys come before the tracker's events. Their writers push the mirror update first, so it is
+		// always in this batch or an earlier one.
+		DrainChannels(Api::ChannelApply::BeforeStructural, batch->channelKeys);
 		// Only pointer moves here, in push order; walking and evaluating is ApplyEvents'.
 		auto* drained = tracker.Drain();
 		batch->Append(drained);
-		// The fade snaps and fade amounts first among them (Core's fade roots' channels, registered snaps then amounts).
-		DrainChannels(Api::ChannelApply::BeforeStructural, batch->channelKeys);
 		DrainPropertyEvents(batch->properties);
 		DrainNodeEvents(batch->nodes);
 		switchEvents.Drain([&](SwitchEvent&& a_event) { batch->switches.push_back(std::move(a_event)); });
