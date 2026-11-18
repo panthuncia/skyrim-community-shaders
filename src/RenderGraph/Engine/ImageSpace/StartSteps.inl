@@ -71,7 +71,7 @@ void CheckStartSteps()
 		return;
 	D3D11_TEXTURE2D_DESC desc{};
 	displacement->GetDesc(&desc);
-	auto* flow = FlowMapTexture();
+	auto* flow = FlowCopyTexture();
 	D3D11_TEXTURE2D_DESC flowDesc{};
 	if (flow)
 		flow->GetDesc(&flowDesc);
@@ -112,7 +112,7 @@ void RegisterStartSteps()
 		start.displacementSize = desc.Width;
 	}
 	start.flowSize = 0;
-	if (auto* flow = FlowMapTexture()) {
+	if (auto* flow = FlowCopyTexture()) {
 		D3D11_TEXTURE2D_DESC desc{};
 		flow->GetDesc(&desc);
 		start.flowSize = desc.Width;

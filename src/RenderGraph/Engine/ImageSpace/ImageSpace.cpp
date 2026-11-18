@@ -592,6 +592,8 @@ namespace RenderGraph::Engine::ImageSpace
 			std::vector<std::shared_ptr<const Spec>> specs;
 			std::map<ShapeKey, const Spec*> specOf;
 			std::map<std::int32_t, const void*> importedObjects;
+			// The flow map texture published under kFlowMapId, null before Setup publishes it.
+			const ID3D11Texture2D* publishedFlowMap = nullptr;
 			std::set<ShapeKey> refusedShapes;    // shapes no pass can be made for (logged once)
 			// Shapes first seen in play, each a client of its own built on first sight (LateClient), by shape.
 			std::map<ShapeKey, std::shared_ptr<LateClient>> late;
@@ -965,6 +967,16 @@ namespace RenderGraph::Engine::ImageSpace
 		}
 
 		/**
+		 * @brief The flow map the flow copies write, or null. Unified Water puts a loaded flow map without a UAV in the slot and removes
+		 * the copies, so a flow map without a UAV has none.
+		 */
+		ID3D11Texture2D* FlowCopyTexture()
+		{
+			const auto* map = FlowMap();
+			return map && map->UAV && map->texture ? static_cast<ID3D11Texture2D*>(map->texture) : nullptr;
+		}
+
+		/**
 		 * @brief Makes the water's flow map at Setup, as the engine makes it at the first cell with flowing water (SE 31234, inlined in AE
 		 * 1405195d0): a size x size R8G8B8A8_UNORM texture of zeros with a UAV, size a setting's value (SE 501245 / AE 359676, the int
 		 * the engine reads at +8 of its Setting) times 64, held by the NiSourceTexture "FlowMap". The engine makes it only while the
@@ -1031,8 +1043,24 @@ namespace RenderGraph::Engine::ImageSpace
 		{
 			auto* map = FlowMap();
 			const auto import = FlowMapImport();
-			if (!map || !import || !PublishedResources::PublishImport(kFlowMapId, import, Tripwire::Unwrap(map->resourceView)))
+			if (!map || !import || !PublishedResources::PublishImport(kFlowMapId, import, Tripwire::Unwrap(map->resourceView))) {
 				logger::warn("[ORG] ImageSpace: the flow map is not published; the water's draws import its view");
+				return;
+			}
+			IS().publishedFlowMap = FlowMapTexture();
+		}
+
+		/** @brief Publishes the flow map again when another texture takes its slot after Setup, as Unified Water's flow map does. */
+		void CheckFlowMap()
+		{
+			auto& state = IS();
+			const auto* texture = FlowMapTexture();
+			if (!state.publishedFlowMap || !texture || texture == state.publishedFlowMap)
+				return;
+			logger::info("[ORG] ImageSpace: another texture took the flow map's slot; it is published in its place{}",
+				FlowCopyTexture() ? "" : " (it has no UAV, so there are no flow copies)");
+			state.publishedFlowMap = texture;
+			PublishFlowMap();
 		}
 
 		/** @brief The graph's import of a target as ShapeKey names it (a render target, a depth target, a cubemap or the flow map; any mip is its texture's). */
@@ -2702,7 +2730,7 @@ namespace RenderGraph::Engine::ImageSpace
 				keys.push_back(key);
 				positions.emplace(key, entry.position);
 			}
-			if (const auto copy = EffectNamed("ISCopySubRegionCS"); copy >= 0 && state.enabled[static_cast<std::size_t>(copy)] && FlowMap()) {
+			if (const auto copy = EffectNamed("ISCopySubRegionCS"); copy >= 0 && state.enabled[static_cast<std::size_t>(copy)] && FlowCopyTexture()) {
 				ShapeKey flow{};
 				flow.effect = static_cast<std::uint32_t>(copy);
 				flow.compute = true;
@@ -2740,7 +2768,8 @@ namespace RenderGraph::Engine::ImageSpace
 				state.specs.size(), state.late.size());
 			std::vector<ShapeKey> keys;
 			for (const auto& spec : state.specs)
-				keys.push_back(spec->key);
+				if (spec->key.output != kFlowMapOutput || FlowCopyTexture())
+					keys.push_back(spec->key);
 			// The shapes built on first sight join the main registration: it is built again for the new imports anyway.
 			for (const auto& [key, late] : state.late) {
 				keys.push_back(key);
@@ -2928,6 +2957,7 @@ namespace RenderGraph::Engine::ImageSpace
 				RetryBuild();
 				MaybeWriteManifest();
 			}
+			CheckFlowMap();
 			CheckImports();
 			CheckWorldSteps();
 			CheckChainSteps();
