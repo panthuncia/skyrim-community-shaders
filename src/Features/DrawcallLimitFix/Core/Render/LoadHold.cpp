@@ -46,6 +46,17 @@ namespace DCLF::LoadHold
 
 		std::atomic<HoldState> state{ HoldState::Idle };
 		std::atomic<bool> withMenu{ false };
+		// The coordinator's end of the Mist Menu (its fade-out or its hide), kept with the loading menu's close: the loading model is
+		// the Mist Menu's, so the held frames go on drawing it.
+		enum class MistEnd : std::uint8_t
+		{
+			None,
+			FadeOut,
+			Hide,
+		};
+		std::atomic<MistEnd> mistEndKept{ MistEnd::None };
+		bool mistHideArg = false;
+		void PostMistEnd();
 
 		// The test runner sees any state but Idle as a hold: the world is not ready while it lasts (Testing::Holds).
 		void ReportHold(HoldState a_state)
@@ -133,6 +144,8 @@ namespace DCLF::LoadHold
 		/** @brief Main thread, a loading screen's start: a load inside a hold ends it (the new load posts its own close). */
 		void OnLoadBegin()
 		{
+			// The new load shows the Mist Menu again, so the last one's kept end is dropped.
+			mistEndKept.store(MistEnd::None, std::memory_order_relaxed);
 			if (ExchangeState(HoldState::Idle) != HoldState::Idle)
 				logger::info("[DCLF] load hold: a load began during the hold, which ends ({} frames, {:.0f} ms)", hold.frames, MillisecondsSince(hold.start));
 		}
@@ -174,8 +187,10 @@ namespace DCLF::LoadHold
 				StoreState(HoldState::Releasing);
 				if (auto* queue = RE::UIMessageQueue::GetSingleton())
 					queue->AddMessage(RE::BSFixedString(RE::LoadingMenu::MENU_NAME), RE::UI_MESSAGE_TYPE::kHide, nullptr);
+				PostMistEnd();
 			} else {
 				StoreState(HoldState::Idle);
+				PostMistEnd();
 			}
 			// The window after the hold starts here.
 			after = {};
@@ -481,6 +496,53 @@ namespace DCLF::LoadHold
 			static inline REL::Relocation<decltype(thunk)> func;
 		};
 
+		/** @brief Whether the coordinator's end of the Mist Menu is kept: the hold keeps the loading menu's close. */
+		bool KeepsMistEnd(MistEnd a_end)
+		{
+			if (state.load(std::memory_order_acquire) != HoldState::Closing || !withMenu.load(std::memory_order_relaxed))
+				return false;
+			mistEndKept.store(a_end, std::memory_order_release);
+			logger::info("[DCLF] load hold: the Mist Menu's {} kept with the loading menu's close", a_end == MistEnd::FadeOut ? "fade-out" : "hide");
+			return true;
+		}
+
+		/** @brief The coordinator's fade-out of the Mist Menu (+0x2E5, MistMenu's StartFadeOut): it hides itself once faded. */
+		struct MistMenuFadeOut
+		{
+			static void thunk(std::uint64_t a1, std::uint64_t a2, std::uint64_t a3, std::uint64_t a4)
+			{
+				if (!KeepsMistEnd(MistEnd::FadeOut))
+					func(a1, a2, a3, a4);
+			}
+			static inline REL::Relocation<decltype(thunk)> func;
+		};
+
+		/** @brief The coordinator's hide of the Mist Menu (+0x3C0), its other way out of a load. */
+		struct MistMenuHide
+		{
+			static void thunk(const RE::BSFixedString& a_menu, RE::UI_MESSAGE_TYPE a_type, bool a_arg)
+			{
+				mistHideArg = a_arg;
+				if (!KeepsMistEnd(MistEnd::Hide))
+					func(a_menu, a_type, a_arg);
+			}
+			static inline REL::Relocation<decltype(thunk)> func;
+		};
+
+		void PostMistEnd()
+		{
+			switch (mistEndKept.exchange(MistEnd::None, std::memory_order_acq_rel)) {
+			case MistEnd::FadeOut:
+				MistMenuFadeOut::func(0, 0, 0, 0);
+				break;
+			case MistEnd::Hide:
+				MistMenuHide::func(RE::BSFixedString(RE::MistMenu::MENU_NAME), RE::UI_MESSAGE_TYPE::kHide, mistHideArg);
+				break;
+			default:
+				break;
+			}
+		}
+
 		/** @brief The coordinator's close of the loading menu (+0x211: UIMessageQueue::AddMessage("Loading Menu", kHide)): kept for a hold. */
 		struct LoadingMenuClose
 		{
@@ -497,8 +559,9 @@ namespace DCLF::LoadHold
 	void Install()
 	{
 		const auto coordinator = REL::RelocationID(13214, 13363).address();
-		const auto start = coordinator + 0x11A, close = coordinator + 0x211;
-		if (!Engine::CallsTo(start, REL::RelocationID(34552, 35407).address()) || !Engine::CallsTo(close, REL::RelocationID(13530, 13631).address())) {
+		const auto start = coordinator + 0x11A, close = coordinator + 0x211, mistFade = coordinator + 0x2E5, mistHide = coordinator + 0x3C0;
+		if (!Engine::CallsTo(start, REL::RelocationID(34552, 35407).address()) || !Engine::CallsTo(close, REL::RelocationID(13530, 13631).address()) ||
+			!Engine::CallsTo(mistFade, REL::RelocationID(51456, 52317).address()) || !Engine::CallsTo(mistHide, REL::RelocationID(80077, 82180).address())) {
 			logger::warn(
 				"[DCLF] load hold: the load coordinator's calls are not the engine's (another plugin's patch, or this runtime's code differs); "
 				"loads are not held, and their objects show as they join");
@@ -506,6 +569,8 @@ namespace DCLF::LoadHold
 		}
 		stl::write_thunk_call<LoadingScreenStart>(start);
 		stl::write_thunk_call<LoadingMenuClose>(close);
+		stl::write_thunk_call<MistMenuFadeOut>(mistFade);
+		stl::write_thunk_call<MistMenuHide>(mistHide);
 		logger::info("[DCLF] load hold installed: the loading menu stays up after each load until DCLF draws its objects");
 	}
 }
