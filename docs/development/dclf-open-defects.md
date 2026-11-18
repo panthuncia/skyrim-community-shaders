@@ -209,8 +209,8 @@ that a repeat is recognised. They are not chased unless one recurs with a DCLF o
     their slots and are re-filed under the new category node.
 -   **A drawn object rebound to a binding not built yet was hidden (fixed 2026-11-18).** Any change that picked a pipeline or
     material not ready yet took the member out of the set while it was still withheld from the engine, so nobody drew it until the
-    pipeline compiled. At an actor's first cell change 3 to 8 parts vanished for 4 to 10 frames: its fade sat at 0.983 (the
-    engine's snap offset) on the blended fading pipeline, and the crossing reset it to 1 and picked the opaque one. A drawn member
+    pipeline compiled. At an actor's first cell change 3 to 8 parts vanished for 4 to 10 frames: its fade sat at 0.983 (one
+    fade step, "Actors resting at a fractional fade" below) on the blended fading pipeline, and the crossing reset it to 1 and picked the opaque one. A drawn member
     now keeps its record, claim and current binding while the next one is staged (`Coordinator::StageBinding`, which references its
     pipeline and material so they get built), and the joins switch in the publication that can draw the new one. The rebind of
     every resident after a membership witness change goes the same way instead of ending all residency. In the fading case the
@@ -239,6 +239,31 @@ that a repeat is recognised. They are not chased unless one recurs with a DCLF o
 -   **"Sometimes parts do not come back" (not reproduced).** No part stayed drawn by nobody and every actor's tracked count matched
     its held geometry at the end, over runs l1g, fxg, fxn and fig: 31 crossings and about 36,000 actor-frames at Riverwood and in the
     Bannered Mare, plus 47 crossings before.
+-   **Actors resting at a fractional fade (open, 2026-11-18).** After a load, some actors' fade nodes hold 0.983 (guest, 60 fps),
+    0.964 (native, about 28 fps) or 0.950 (20 fps) for good, one frame's fade step below 1. The mirror reads that value, so their
+    parts bind the blended fading pipelines (hint 9) while DCLF's own fade state is 1 and draws them at alpha 1. A placement snap
+    or reseed (a cell change) clears it. Runs b5r1 to b5diag7g and the tour config in the bug5 scratch folder.
+    -   **Vanilla rests at exactly 1.** `FUN_14147a160` (AE 1.6.1170) steps `+0x130`/`+0x140` toward `fadeAmount` by
+        `min(dt / time, 0.1)` and stops at it. The snap applies only above 1.5 (`0x141ad2874`) and gives `fadeAmount - 2.0`
+        (`0x141ad288c`), so 0.983 is no snap offset. Ghosts use the snap. Their `fadeAmount` ramps to 2.25 and they rest at 0.25
+        (actor probe: node 2.250, mirror 2.250, root row 2.250).
+    -   **The handover.** The seed copies the node at the start of the frame that first draws the root's generation. The engine's
+        own `OnVisible` for that frame's cull still runs on the node, because the writer tables that stop it are published at the
+        next `Main::Update` entry. Run b5diag3 caught it for Hod. The seed read `cur 1.0`, `+0x140 1.0` and `fadeAmount 0` (alpha 0
+        for one frame at the load), then the engine stepped the node to 0.9639. DCLF's state runs on from the seed, and only a reported
+        milestone brings the node in line. `ReportMilestone` took the seed's milestone as already on the node, so a state that
+        stays at 1 is never written. **Fixed:** a new generation's
+        first update always reports (`FadeStateCS.hlsl` and the CPU stage's `Report`).
+    -   **Still open: the fade write-back delivers nothing.** Runs b5diag4 to b5diag7g (guest and native) counted about 1,400
+        harvests with 0 events and 0 stores. `FadeStateCS` runs (fade parity: hundreds of updates, 0 differ), its events are bound
+        (capacity 1024, staging set found) and no harvest overflowed, even with every new listing reporting. So the fix above has no
+        effect yet, and every DCLF-owned fade node keeps what the engine left at the handover. **Next:** check whether the events
+        copy (`cs.dclf.z.fade-events`) reads the list before `cs.dclf.z.fade-state` appends on the async compute queue, or after the
+        depth commit's header upload resets the count. The query stage (`cs.dclf.z.fade-portal-queries`) also declares the events
+        as written.
+    -   Also changed: the fade amount and fade snap writers push the mirror update before the key, and the scene pass drains those
+        keys before the tracker. A key could be applied against a mirror without its value, leaving the root row at an older alpha.
+        Not seen in a run.
 
 ## Memory retention
 
