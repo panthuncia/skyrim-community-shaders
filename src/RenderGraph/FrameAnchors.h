@@ -130,9 +130,6 @@ namespace FrameAnchors
 		std::uint32_t Height() const;
 		rhi::Format Format() const;
 
-		/** @brief Whether both handles have the same current backing: a holder of raw handles of one version compares with this. */
-		bool SameBacking(const Texture& a_other) const;
-
 		/** @brief ORG's SelfDeclaringResource hook: the slot, or null for a plain resource. */
 		const org::IResourceResolver* DeclaredResolver() const;
 
@@ -304,7 +301,7 @@ namespace FrameAnchors
 		bool sharedConstants = false;
 		std::vector<std::shared_ptr<RenderGraph::RunGate>> gates;
 		std::function<void(const Point&)> executed;
-		// Declared segments (SegmentsOn): whether the client's passes do work in this frame. Read at the frame's start
+		// Declared segments: whether the client's passes do work in this frame. Read at the frame's start
 		// (BeginFrame), from the client's settings and the scene state it holds, never from what this frame's hooks deliver. Off: its
 		// passes record only their barriers in the segment's recording, and its commit is not called; an active client at the tap is
 		// then a mismatch (Frame::Driver::NoteTapError), unless the frame's schedule lags its description (then its work waits for the
@@ -590,28 +587,6 @@ namespace FrameAnchors
 	Texture ShareImage(ID3D11Texture2D* a_texture, const DxvkOrgInteropImageInfo& a_image, const org::TextureDescription& a_desc, std::string_view a_name);
 
 	/**
-	 * @brief Drops an import by its graph id ("cs.d3d11.<name>" for D3D11Texture, a_id for ImportDepth): the D3D11 texture is
-	 * released once D3D11's last use is done (ReleaseAfterD3D11) and every anchor graph is built again without it (a structural
-	 * build, off the render thread). For a feature
-	 * texture that is destroyed or replaced under another name. Render thread. Nothing when the id is unknown.
-	 */
-	void ReleaseImport(std::string_view a_id);
-
-	/**
-	 * @brief Whether the declared frame's stages are on (docs/development/org-native-frame-graph.md, "The recipe"): native mode unless
-	 * CS_ORG_SEGMENTS=0, with epochs, async epochs and replayable recordings. Each CS stage is one graph, revision-driven,
-	 * recorded on the host's thread for each description of it (RenderGraph::Frame::Description) and kept per frame slot. Its steps are
-	 * hooks in frame order (Frame/RecipeTable.h): anchors it holds wholly (which then have no epoch of their own), named clients of shared
-	 * anchors, and other modules' epochs (SetForeignPasses). A tap stages its clients' values into the frame slot's staging run (the frame inputs); no
-	 * ticket is taken there. The stage's commit point (its last step) copies the staged values into the slot's copy and submits the one
-	 * ticket. Stages: pre-depth (EarlyPrepass), pre-main (RenderDepth's depth copy to Prepass; CS_ORG_SEGMENT_PREMAIN=0 off), deferred
-	 * and water (DeferredPasses to just before the forward epoch; CS_ORG_SEGMENT_DEFERRED=0 off), and the post chain's two
-	 * (CS_ORG_SEGMENT_POST=0 off): the post stage, with the chain and the upscaler's evaluate as CS passes. Guest mode (DXVK with the
-	 * graph) runs the same stages, each one block in DXVK's stream. Any thread.
-	 */
-	bool SegmentsOn();
-
-	/**
 	 * @brief Whether a CS stage holds staged values it has not committed yet: its window is open. D3D11 work that reaches DXVK now runs
 	 * ahead of the stage's block on the GPU (guest mode's residue census counts it). Any thread, without the anchors' lock.
 	 */
@@ -708,7 +683,7 @@ namespace FrameAnchors
 	bool NamedByStage(std::string_view a_id);
 
 	/**
-	 * @brief Whether a CS stage has a step at a_anchor (the recipe table), with the stages on (SegmentsOn). Answers before the anchors are
+	 * @brief Whether a CS stage has a step at a_anchor (the recipe table), in a graph mode. Answers before the anchors are
 	 * reserved, so a module can reserve an anchor only where a stage uses it. Any thread.
 	 */
 	bool StageStepsAt(Anchor a_anchor);
@@ -744,7 +719,7 @@ namespace FrameAnchors
 
 	/**
 	 * @brief The segment (a RenderGraphRuntime::Segment value) whose epoch an anchor's runs submit: its own, or the declared segment
-	 * that holds it (SegmentsOn). Any thread, after Initialize.
+	 * that holds it. Any thread, after Initialize.
 	 */
 	std::uint32_t RunSegment(Anchor a_anchor);
 

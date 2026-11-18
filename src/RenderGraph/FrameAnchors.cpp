@@ -143,7 +143,7 @@ namespace FrameAnchors
 		std::uint32_t EpochOfAnchor(Anchor a_anchor) { return RenderGraphRuntime::EpochOf(static_cast<Segment>(SegmentOf(a_anchor))); }
 
 		/**
-		 * @brief The CS stages (SegmentsOn), as the recipe table declares them (Frame/RecipeTable.h). Each is one epoch whose graph holds its
+		 * @brief The CS stages, as the recipe table declares them (Frame/RecipeTable.h). Each is one epoch whose graph holds its
 		 * steps' passes, in the steps' order. A step is one hook of the frame (a tap), in the order the engine reaches them: an anchor with the
 		 * clients it holds there (a whole step holds its anchor wholly: the anchor has no epoch of its own), another module's epoch (foreign),
 		 * whose passes the module hands to the stage (SetForeignPasses), or a point. The last step is the end tap: the stage's one commit.
@@ -1810,11 +1810,6 @@ namespace FrameAnchors
 	std::uint32_t Texture::Height() const { return HeightOf(Current().get()); }
 	rhi::Format Texture::Format() const { return FormatOf(Current().get()); }
 
-	bool Texture::SameBacking(const Texture& a_other) const
-	{
-		return Current() == a_other.Current();
-	}
-
 	const org::IResourceResolver* Texture::DeclaredResolver() const
 	{
 		return slot.get();
@@ -2276,7 +2271,7 @@ namespace FrameAnchors
 		// A stage that ends at a point commits just before the next GPU work that follows it in every world frame is submitted: the epochs
 		// its table entry lists (Frame/RecipeTable.h, Stage::commitBefore), in recipe order. The deferred+water stage's usual commit point is
 		// the engine's blended draw, the UI stage's the present (Hooks.cpp); these are the frames where that point did not come first.
-		if (a_segment != UINT32_MAX && state.host && SegmentsOn() && IsRenderOwner())
+		if (a_segment != UINT32_MAX && state.host && IsRenderOwner())
 			for (std::uint32_t d = 0; d < kDeclared; ++d)
 				if (std::ranges::find(declaredInfo[d].commitBefore, static_cast<Segment>(a_segment)) != declaredInfo[d].commitBefore.end())
 					(void)TapPoint(static_cast<RenderGraph::Frame::SegmentId>(d));
@@ -3366,7 +3361,7 @@ namespace FrameAnchors
 
 	bool StageOpen(std::uint32_t a_segment)
 	{
-		if (!SegmentsOn() || !IsRenderOwner() || a_segment >= kDeclared)
+		if (!RenderGraph::Engine::Native::GraphMode() || !IsRenderOwner() || a_segment >= kDeclared)
 			return false;
 		auto lock = Guard();
 		return WindowOpen(Anchors(), a_segment);
@@ -3374,7 +3369,7 @@ namespace FrameAnchors
 
 	bool StageAbsent(std::uint32_t a_segment)
 	{
-		if (!SegmentsOn() || !IsRenderOwner() || a_segment >= kDeclared)
+		if (!RenderGraph::Engine::Native::GraphMode() || !IsRenderOwner() || a_segment >= kDeclared)
 			return false;
 		auto lock = Guard();
 		const auto& state = Anchors();
@@ -3387,7 +3382,7 @@ namespace FrameAnchors
 	{
 		const auto& state = Anchors();
 		const std::uint32_t index = IndexOf(a_anchor);
-		return SegmentsOn() && state.frozen && index < kAnchors && DeclaredOfAnchor(state, index) < kDeclared;
+		return state.frozen && index < kAnchors && DeclaredOfAnchor(state, index) < kDeclared;
 	}
 
 	void DropKeptRecordings(Anchor a_anchor, std::string_view a_why)
@@ -3395,7 +3390,7 @@ namespace FrameAnchors
 		auto lock = Guard();
 		auto& state = Anchors();
 		const std::uint32_t index = IndexOf(a_anchor);
-		if (!SegmentsOn() || !state.frozen || index >= kAnchors)
+		if (!state.frozen || index >= kAnchors)
 			return;
 		std::size_t dropped = 0;
 		for (std::uint32_t d = 0; d < kDeclared; ++d) {
@@ -3413,7 +3408,7 @@ namespace FrameAnchors
 	std::optional<std::uint32_t> FirstGraphInstance(Anchor a_anchor)
 	{
 		const std::uint32_t index = IndexOf(a_anchor);
-		if (!SegmentsOn() || !Anchors().frozen || index >= kAnchors)
+		if (!Anchors().frozen || index >= kAnchors)
 			return std::nullopt;
 		for (std::uint32_t d = 0; d < kDeclared; ++d)
 			if (Anchors().declaredEpochs[d] && (WholeAnchorsOf(d) >> index & 1u))
@@ -3425,7 +3420,7 @@ namespace FrameAnchors
 	bool NamedByStage(std::string_view a_id)
 	{
 		const auto& state = Anchors();
-		if (!SegmentsOn() || !state.frozen)
+		if (!state.frozen)
 			return false;
 		for (std::uint32_t d = 0; d < kDeclared; ++d) {
 			if (!state.declaredEpochs[d])
@@ -3440,7 +3435,7 @@ namespace FrameAnchors
 	bool StageStepsAt(Anchor a_anchor)
 	{
 		const std::uint32_t index = IndexOf(a_anchor);
-		if (index >= kAnchors || !SegmentsOn())
+		if (index >= kAnchors || !RenderGraph::Engine::Native::GraphMode())
 			return false;
 		for (std::uint32_t d = 0; d < kDeclared; ++d)
 			if (StepAnchorsOf(d) >> index & 1u)
@@ -3451,7 +3446,7 @@ namespace FrameAnchors
 	bool CanTap(std::string_view a_id)
 	{
 		auto& state = Anchors();
-		if (!SegmentsOn() || !state.host || !IsRenderOwner())
+		if (!state.host || !IsRenderOwner())
 			return false;
 		auto lock = Guard();
 		auto* client = FindClient(state, a_id);
@@ -3470,7 +3465,7 @@ namespace FrameAnchors
 	bool TapMayLag(std::string_view a_id)
 	{
 		auto& state = Anchors();
-		if (!SegmentsOn() || !state.host || !IsRenderOwner())
+		if (!state.host || !IsRenderOwner())
 			return true;
 		auto lock = Guard();
 		auto* client = FindClient(state, a_id);
@@ -3505,7 +3500,7 @@ namespace FrameAnchors
 	bool StageInputs(std::string_view a_id, const std::function<void()>& a_write)
 	{
 		auto& state = Anchors();
-		if (!SegmentsOn() || !state.host || !IsRenderOwner())
+		if (!state.host || !IsRenderOwner())
 			return false;
 		auto lock = Guard();
 		auto* client = FindClient(state, a_id);
@@ -3540,7 +3535,7 @@ namespace FrameAnchors
 	std::int32_t StagePlace(std::span<const std::string_view> a_ids)
 	{
 		auto& state = Anchors();
-		if (!SegmentsOn() || !state.host || !IsRenderOwner())
+		if (!state.host || !IsRenderOwner())
 			return -1;
 		auto lock = Guard();
 		const auto named = [&](const Step& a_step) -> std::int32_t {
@@ -3613,24 +3608,6 @@ namespace FrameAnchors
 		return present && (rows[a_row / 64] >> (a_row % 64) & 1u) != 0;
 	}
 
-	bool SegmentsOn()
-	{
-		static const bool on = [] {
-			// Guest mode is DXVK with the graph on: not CS_ORG=0 or CS_ORG=features, not the system D3D11 runtime, not the owned frame.
-			const bool native = RenderGraph::Engine::Native::Requested();
-			const bool guest = !native && !Switches::Off("CS_ORG") && !Switches::Equals("CS_ORG", "features") && !Switches::On("CS_NATIVE_D3D11") &&
-			                   !Switches::On("CS_ORG_OWNED_FRAME");
-			if (!native && !guest)
-				return false;
-			if (native)
-				logger::info("[ORG] frame segments on: the CS stages' steps run in their epochs, recorded per description");
-			else
-				logger::info("[ORG] frame segments on in guest mode: every CS stage is one block in DXVK's stream");
-			return true;
-		}();
-		return on;
-	}
-
 	bool StagesHoldValues()
 	{
 		const auto& state = Anchors();
@@ -3671,7 +3648,7 @@ namespace FrameAnchors
 	void BeginFrame(RenderGraph::Frame::Description& a_frame)
 	{
 		auto& state = Anchors();
-		if (!SegmentsOn() || !state.host || !IsRenderOwner())
+		if (!state.host || !IsRenderOwner())
 			return;
 		auto lock = Guard();
 		if (!RenderGraphRuntime::Get().IsActive())
@@ -3760,10 +3737,9 @@ namespace FrameAnchors
 			auto* client = FindClient(state, a_client.desc->id);
 			if (!client || !HasPendingOnce(*client, a_point.anchor))
 				return false;
-			if (SegmentsOn())
-				for (std::uint32_t d = 0; d < kDeclared; ++d)
-					if (state.declaredEpochs[d] && ClientHolds(*client, d))
-						return false;
+			for (std::uint32_t d = 0; d < kDeclared; ++d)
+				if (state.declaredEpochs[d] && ClientHolds(*client, d))
+					return false;
 			return true;
 		};
 		const auto dropSegmentOnly = [&](std::vector<RunClient>& a_clients, std::string_view a_why) {
@@ -3773,7 +3749,7 @@ namespace FrameAnchors
 					client.active = false;
 				}
 		};
-		if (SegmentsOn() && work) {
+		if (work) {
 			if (OpenStepAt(state, a_point.anchor).first < kDeclared) {
 				std::vector<RunClient> others = clients;
 				std::vector<RunClient> members;
@@ -3841,7 +3817,7 @@ namespace FrameAnchors
 		// Work here is a mismatch: the frame did something its recipe has no place for. It draws nothing. HDR output and frame generation
 		// keep their anchors' tickets (pieces of their own; neither runs in the tests: HDR off, frame generation needs the foreground).
 		const bool ownEpochError = a_point.anchor != Anchor::HDROutput && a_point.anchor != Anchor::FrameGeneration;
-		if (SegmentsOn() && ownEpochError) {
+		if (ownEpochError) {
 			std::string ids;
 			for (const auto& client : clients)
 				if (client.active)
@@ -3980,22 +3956,18 @@ namespace FrameAnchors
 		const auto* client = FindClient(state, a_id);
 		if (!client)
 			return false;
-		// Native mode: the stage that holds the anchor wholly in this frame's kind. A shared anchor: the open stage whose step takes the anchor's
-		// taps now and holds the client (HeldNow). No such stage: nothing draws the client's work.
-		if (SegmentsOn()) {
-			if (const auto declared = DeclaredOfAnchor(state, index); declared < kDeclared)
-				return ScheduleHolds(state, declared, client->desc);
-			for (std::uint32_t d = 0; d < kDeclared; ++d) {
-				if (!WindowOpen(state, d))
-					continue;
-				for (std::uint32_t k = 0; k < declaredInfo[d].stepCount; ++k)
-					if (declaredInfo[d].steps[k].anchor == a_anchor && StepTakesTaps(state, d, k) && StepHolds(declaredInfo[d].steps[k], *client->desc))
-						return ScheduleHolds(state, d, client->desc);
-			}
-			return false;
+		// The stage that holds the anchor wholly in this frame's kind. A shared anchor: the open stage whose step takes the anchor's taps now
+		// and holds the client (HeldNow). No such stage: nothing draws the client's work.
+		if (const auto declared = DeclaredOfAnchor(state, index); declared < kDeclared)
+			return ScheduleHolds(state, declared, client->desc);
+		for (std::uint32_t d = 0; d < kDeclared; ++d) {
+			if (!WindowOpen(state, d))
+				continue;
+			for (std::uint32_t k = 0; k < declaredInfo[d].stepCount; ++k)
+				if (declaredInfo[d].steps[k].anchor == a_anchor && StepTakesTaps(state, d, k) && StepHolds(declaredInfo[d].steps[k], *client->desc))
+					return ScheduleHolds(state, d, client->desc);
 		}
-		// An anchor with an epoch of its own (the stages off): its own built graph holds this registration.
-		return state.reserved[index] && !(state.declaredMembers >> index & 1u) && InGraphs(*client->desc) && client->serial <= BuiltSerial(state, index);
+		return false;
 	}
 
 	bool InStage(std::string_view a_id, Anchor a_anchor)
@@ -4003,7 +3975,7 @@ namespace FrameAnchors
 		auto lock = Guard();
 		auto& state = Anchors();
 		const std::uint32_t index = IndexOf(a_anchor);
-		if (!SegmentsOn() || !state.host || index >= kAnchors)
+		if (!state.host || index >= kAnchors)
 			return false;
 		const auto declared = DeclaredOfAnchor(state, index);
 		if (declared >= kDeclared)
@@ -4023,7 +3995,7 @@ namespace FrameAnchors
 		auto lock = Guard();
 		auto& state = Anchors();
 		StageHold hold;
-		if (!SegmentsOn() || !state.host || !IsRenderOwner())
+		if (!state.host || !IsRenderOwner())
 			return hold;
 		// The open stage's step at the anchor that takes taps now and holds the client (a shared anchor has a step per client group).
 		const auto* registered = FindClient(state, a_id);
@@ -4166,7 +4138,7 @@ namespace FrameAnchors
 	void PrimeStages(std::string_view a_caller)
 	{
 		auto& state = Anchors();
-		if (!SegmentsOn() || !state.host || !IsRenderOwner())
+		if (!state.host || !IsRenderOwner())
 			return;
 		// The session's first frames are a Bink movie's, then the main menu's: the UI stage is ready before them.
 		PrimeStage(state, RenderGraphRuntime::StageSegment(static_cast<std::uint32_t>(RenderGraph::Frame::SegmentId::Ui)), a_caller);
@@ -4307,22 +4279,6 @@ namespace FrameAnchors
 		return Texture(name, std::move(slot));
 	}
 
-	void ReleaseImport(std::string_view a_id)
-	{
-		auto lock = Guard();
-		auto& state = Anchors();
-		const auto found = state.imports.find(a_id);
-		if (found == state.imports.end())
-			return;
-		// The graph resource views DXVK's image, whose memory the D3D11 texture owns: both go once the GPU is past every use,
-		// which the graph's in-stream epochs and their compute joins precede. Another id of the same image keeps both.
-		auto owner = std::move(found->second);
-		state.imports.erase(found);
-		Publish(state);
-		StructuralRebuild(state, ~0u, fmt::format("import '{}' released", a_id));
-		ReleaseUnnamed(state, std::move(owner));
-	}
-
 	void OnEpochFailed(std::uint32_t a_epoch, const std::string& a_error, bool a_keptGraph)
 	{
 		auto lock = Guard();
@@ -4357,32 +4313,31 @@ namespace FrameAnchors
 		state.frozen = true;
 		// Declared segments: an epoch for each that is on and has a reserved anchor; the anchors it holds wholly have none of their
 		// own. Its end tap's anchor is reserved with it, so the hook that ends it always runs.
-		if (SegmentsOn())
-			for (std::uint32_t d = 0; d < kDeclared; ++d) {
-				std::uint32_t members = 0;
-				bool any = false;
-				for (std::uint32_t i = 0; i < kAnchors; ++i) {
-					any = any || (state.reserved[i] && (StepAnchorsOf(d) >> i & 1u));
-					// An anchor any stage has a step at has no epoch of its own, a wholly held one or a shared one (its other clients' work
-					// outside the stages' steps is a mismatch, Run), in both modes.
-					if (state.reserved[i] && (StepAnchorsOf(d) >> i & 1u))
-						members |= 1u << i;
-				}
-				if (!any)
-					continue;
-				if (const auto end = EndTap(d); end != Anchor::Count) {
-					state.reserved[IndexOf(end)] = true;
-					members |= 1u << IndexOf(end);
-				}
-				state.declaredEpochs[d] = true;
-				state.declaredMembers |= members;
-				const auto segment = static_cast<std::uint32_t>(declaredInfo[d].segment);
-				const std::uint32_t epoch = RenderGraphRuntime::EpochOf(declaredInfo[d].segment);
-				if (std::ranges::find(a_epochs, epoch) != a_epochs.end())
-					continue;
-				const auto after = std::ranges::find_if(a_epochs, [&](std::uint32_t a_epoch) { return RankOf(a_epoch) > RankOf(segment); });
-				a_epochs.insert(after, epoch);
+		for (std::uint32_t d = 0; d < kDeclared; ++d) {
+			std::uint32_t members = 0;
+			bool any = false;
+			for (std::uint32_t i = 0; i < kAnchors; ++i) {
+				any = any || (state.reserved[i] && (StepAnchorsOf(d) >> i & 1u));
+				// An anchor any stage has a step at has no epoch of its own, a wholly held one or a shared one (its other clients' work
+				// outside the stages' steps is a mismatch, Run), in both modes.
+				if (state.reserved[i] && (StepAnchorsOf(d) >> i & 1u))
+					members |= 1u << i;
 			}
+			if (!any)
+				continue;
+			if (const auto end = EndTap(d); end != Anchor::Count) {
+				state.reserved[IndexOf(end)] = true;
+				members |= 1u << IndexOf(end);
+			}
+			state.declaredEpochs[d] = true;
+			state.declaredMembers |= members;
+			const auto segment = static_cast<std::uint32_t>(declaredInfo[d].segment);
+			const std::uint32_t epoch = RenderGraphRuntime::EpochOf(declaredInfo[d].segment);
+			if (std::ranges::find(a_epochs, epoch) != a_epochs.end())
+				continue;
+			const auto after = std::ranges::find_if(a_epochs, [&](std::uint32_t a_epoch) { return RankOf(a_epoch) > RankOf(segment); });
+			a_epochs.insert(after, epoch);
+		}
 		for (std::uint32_t i = 0; i < kAnchors; ++i) {
 			if (!state.reserved[i] || (state.declaredMembers >> i & 1u))
 				continue;
@@ -4445,7 +4400,6 @@ namespace FrameAnchors
 	void Refresh(std::string_view) {}
 	RunResult Run(const Point&) { return {}; }
 	bool InRun() { return false; }
-	bool SegmentsOn() { return false; }
 	bool StagesHoldValues() { return false; }
 	std::uint32_t StagesHoldingValues() { return 0; }
 	void SetWindowsClosedHook(void (*)()) {}
@@ -4477,7 +4431,6 @@ namespace FrameAnchors
 	std::uint32_t Texture::Width() const { return 0; }
 	std::uint32_t Texture::Height() const { return 0; }
 	rhi::Format Texture::Format() const { return rhi::Format{}; }
-	bool Texture::SameBacking(const Texture& a_other) const { return *this == a_other; }
 	const org::IResourceResolver* Texture::DeclaredResolver() const { return nullptr; }
 	Texture EngineTarget(std::uint32_t) { return {}; }
 	Texture EngineDepth(std::uint32_t) { return {}; }
@@ -4487,7 +4440,6 @@ namespace FrameAnchors
 	Texture ImportDepth(const RE::BSGraphics::DepthStencilData&, const std::string&) { return {}; }
 	Texture ImportTexture(std::string_view, ID3D11Texture2D*, const org::TextureDescription&) { return {}; }
 	Texture ShareImage(ID3D11Texture2D*, const DxvkOrgInteropImageInfo&, const org::TextureDescription&, std::string_view) { return {}; }
-	void ReleaseImport(std::string_view) {}
 	bool InBuiltGraph(std::string_view, Anchor) { return false; }
 	void Rearm(std::string_view) {}
 	void SetLateEpochHook(std::function<void()>) {}

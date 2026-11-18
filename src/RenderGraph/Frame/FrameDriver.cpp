@@ -202,7 +202,7 @@ namespace RenderGraph::Frame::Driver
 		{
 			const bool live = func(a_ui);
 			auto& state = Get();
-			if (!FrameAnchors::SegmentsOn() || state.freezesFrame != state.current.frame || !FrameAnchors::IsMainThread())
+			if (!Engine::Native::GraphMode() || state.freezesFrame != state.current.frame || !FrameAnchors::IsMainThread())
 				return live;
 			if (live != state.freezes && state.freezeChanges++ < 8)
 				logger::info("[ORG] frame: the menu stack's freeze flag changed after frame {}'s Begin ({} -> {}); the frame keeps Begin's answer",
@@ -287,7 +287,7 @@ namespace RenderGraph::Frame::Driver
 		// Fix's build point (where its graph builds attach and are handed out) runs here for a frame that draws the world, not at
 		// Main::Draw's start after Begin. Guest keeps it at Main::Draw: its stages' builds switch in only here at Begin (staged), and the
 		// anchors' own epochs there may take a build mid-frame.
-		if (FrameAnchors::SegmentsOn() && Engine::Native::Requested() && FrameAnchors::IsRenderOwner() &&
+		if (Engine::Native::Requested() && FrameAnchors::IsRenderOwner() &&
 			(next.kind == Kind::World || (next.kind == Kind::FrozenWorld && next.capture)))
 			DCLF::BuildPointAtFrameStart(next.frame);
 		next.dclfDraws = (next.kind == Kind::World || next.kind == Kind::FrozenWorld) && DCLF::DrawsWorld();
@@ -317,7 +317,7 @@ namespace RenderGraph::Frame::Driver
 		// The post chain's fields (read again at the chain's decision event), then each segment's schedule for the frame.
 		PostChain::OnBegin(state.current);
 		// The recipe is checked again when a build of one of its epochs attached (render owner, before the stages' schedules).
-		if (FrameAnchors::SegmentsOn() && FrameAnchors::IsRenderOwner())
+		if (Engine::Native::GraphMode() && FrameAnchors::IsRenderOwner())
 			if (auto* host = RenderGraphRuntime::Get().Host())
 				Recipes::Check(*host);
 		FrameAnchors::BeginFrame(state.current);

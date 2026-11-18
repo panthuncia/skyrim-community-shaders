@@ -210,21 +210,6 @@ namespace RenderGraph::Engine::Skeleton
 			return StageHost(a_host) ? a_host : Host::Own;
 		}
 
-		/**
-		 * @brief With the frame's stages (both modes): world frames' clears and copies run in the epochs that write their targets first, the
-		 * stages' places and Drawcall Limit Fix's shadow view and Z-prepass. A clear or copy no stage takes is a mismatch (NoPlace).
-		 */
-		bool HostingOn()
-		{
-			static const bool on = [] {
-				const bool requested = FrameAnchors::SegmentsOn();
-				logger::info("[ORG] engine skeleton: world frames' clears and copies run in the epochs that write their targets first: {}",
-					requested ? "on" : "off");
-				return requested;
-			}();
-			return on;
-		}
-
 		/** @brief Whether this frame's description draws the world (a world frame, or a frozen world's capture frame). Render owner. */
 		bool WorldFrame()
 		{
@@ -392,7 +377,6 @@ namespace RenderGraph::Engine::Skeleton
 			std::map<Target, std::shared_ptr<const ClearSpec>> specs;
 			std::shared_ptr<RunGate> gate;
 			std::shared_ptr<org::LatchBlock> colours;
-			std::vector<Pending> pending;        // the clears for the group's own anchor, flushed at the engine's bind
 			std::vector<Pending> hostedPending;  // the clears waiting for their host's commit (a world frame's)
 			// Per host: the hosted passes (each a view's draws that host runs) and whether they are in the host's graph now.
 			std::array<std::vector<std::shared_ptr<const ClearSpec>>, kHosts> hosted;
@@ -402,9 +386,7 @@ namespace RenderGraph::Engine::Skeleton
 			bool registered = false;  // a registration is live
 			bool stale = false;       // a view's texture was made again: registered again at the next flush with nothing pending
 			std::uint64_t lent = 0;   // clears that found another view in their target's slot (a lent slot), counted
-			bool executed = false;    // the current run's executed signal
 			bool failed = false;      // stays on D3D11 for the session
-			bool announced = false;   // the first clear on the graph was logged
 			std::uint64_t taken = 0;
 			std::uint64_t dropped = 0;  // world frames' clears a stage's load operations replace (the reflection faces)
 			// The UI stage's places (Place): each place's passes by view, their gate and colour latch (kPlaces * entries entries), whether
@@ -858,7 +840,7 @@ namespace RenderGraph::Engine::Skeleton
 		bool HostAvailable(Host a_host)
 		{
 			const auto& info = kHostInfo[HostIndex(a_host)];
-			if (a_host == Host::Own || !HostingOn())
+			if (a_host == Host::Own)
 				return false;
 			return info.dclf || FrameAnchors::HasEpoch(info.anchor);
 		}
@@ -922,7 +904,7 @@ namespace RenderGraph::Engine::Skeleton
 		void PublishHosted()
 		{
 			auto* host = RenderGraphRuntime::Get().Host();
-			if (!host || !HostingOn())
+			if (!host)
 				return;
 			auto set = std::make_shared<HostedSet>();
 			std::vector<std::uint32_t> epochs;
@@ -985,28 +967,26 @@ namespace RenderGraph::Engine::Skeleton
 			const auto index = IndexOf(a_group);
 			for (auto& specs : group.hosted)
 				specs.clear();
-			if (HostingOn()) {
-				for (const auto& [target, spec] : group.specs) {
-					std::array<std::vector<ClearDraw>, kHosts> draws;
-					for (const auto& draw : spec->draws) {
-						if (const auto host = HostFor(target, draw.flags); HostAvailable(host))
-							draws[HostIndex(host)].push_back(draw);
-						// The stage place the DCLF host's clears take in a frame it does not draw them.
-						if (const auto host = HostFor(target, draw.flags); kHostInfo[HostIndex(host)].dclf && HostAvailable(StagePlaceFor(host)))
-							draws[HostIndex(StagePlaceFor(host))].push_back(draw);
-						// The clears inside the post chain (HostFor answers them there only): the TAA mask, and the motion vectors and kMAIN_ONLY_ALPHA
-						// in the frame TAA is turned on.
-						if (target.kind == Kind::Colour && InChainClears(target.index) && HostAvailable(Host::PostChain))
-							draws[HostIndex(Host::PostChain)].push_back(draw);
-					}
-					for (std::size_t h = 0; h < kHosts; ++h) {
-						if (draws[h].empty())
-							continue;
-						auto hosted = std::make_shared<ClearSpec>(*spec);
-						hosted->draws = std::move(draws[h]);
-						hosted->name = fmt::format("{}@{}", spec->name, kHostInfo[h].name);
-						group.hosted[h].push_back(std::move(hosted));
-					}
+			for (const auto& [target, spec] : group.specs) {
+				std::array<std::vector<ClearDraw>, kHosts> draws;
+				for (const auto& draw : spec->draws) {
+					if (const auto host = HostFor(target, draw.flags); HostAvailable(host))
+						draws[HostIndex(host)].push_back(draw);
+					// The stage place the DCLF host's clears take in a frame it does not draw them.
+					if (const auto host = HostFor(target, draw.flags); kHostInfo[HostIndex(host)].dclf && HostAvailable(StagePlaceFor(host)))
+						draws[HostIndex(StagePlaceFor(host))].push_back(draw);
+					// The clears inside the post chain (HostFor answers them there only): the TAA mask, and the motion vectors and kMAIN_ONLY_ALPHA
+					// in the frame TAA is turned on.
+					if (target.kind == Kind::Colour && InChainClears(target.index) && HostAvailable(Host::PostChain))
+						draws[HostIndex(Host::PostChain)].push_back(draw);
+				}
+				for (std::size_t h = 0; h < kHosts; ++h) {
+					if (draws[h].empty())
+						continue;
+					auto hosted = std::make_shared<ClearSpec>(*spec);
+					hosted->draws = std::move(draws[h]);
+					hosted->name = fmt::format("{}@{}", spec->name, kHostInfo[h].name);
+					group.hosted[h].push_back(std::move(hosted));
 				}
 			}
 			for (std::size_t h = 0; h < kHosts; ++h) {
@@ -1089,7 +1069,7 @@ namespace RenderGraph::Engine::Skeleton
 		/** @brief The UI stage's places: the UI stage runs in this mode and holds the clear steps (with hosting). */
 		bool PlacesOn()
 		{
-			return HostingOn() && FrameAnchors::HasEpoch(Anchor::EngineFrameClear) && FrameAnchors::NamedByStage(PlaceClientId(IndexOf(Group::Frame), 0));
+			return FrameAnchors::HasEpoch(Anchor::EngineFrameClear) && FrameAnchors::NamedByStage(PlaceClientId(IndexOf(Group::Frame), 0));
 		}
 
 		/**
@@ -1231,7 +1211,7 @@ namespace RenderGraph::Engine::Skeleton
 		/** @brief Whether a world frame's clear can go to a_host now: its graph holds this registration's passes. */
 		bool HostReady(Group a_group, Host a_host)
 		{
-			if (a_host == Host::Own || StageHost(a_host) || !HostingOn() || !WorldFrame())
+			if (a_host == Host::Own || StageHost(a_host) || !WorldFrame())
 				return false;
 			const auto& group = GroupOf(a_group);
 			const auto h = HostIndex(a_host);
@@ -1307,34 +1287,9 @@ namespace RenderGraph::Engine::Skeleton
 					.gpuGated = true });
 				group.specs.emplace(spec->target, std::move(pass));
 			}
-			client.active = [a_group] { return !GroupOf(a_group).pending.empty(); };
-			client.commit = [a_group](const FrameAnchors::Point&) {
-				auto& state = GroupOf(a_group);
-				const org::RunRef run = RenderGraphRuntime::Get().Host()->CurrentRun();
-				for (const auto& pending : state.pending) {
-					if (!pending.depth)
-						state.colours->WriteValue(run, pending.gateEntry * RunGate::kEntryBytes, pending.colour);
-					state.gate->OpenDraw(pending.gateEntry);
-				}
-			};
-			client.executed = [a_group](const FrameAnchors::Point&) { GroupOf(a_group).executed = true; };
-			client.onFailed = [a_group] {
-				auto& state = GroupOf(a_group);
-				state.failed = true;
-				state.registered = false;
-				logger::error("[ORG] engine skeleton: the {} anchor failed; its clears return to D3D11", FrameAnchors::Name(kGroupAnchors[IndexOf(a_group)]));
-			};
-			client.gates = { group.gate };
 			const auto passes = client.passes.size();
-			// The group's own client runs only on its anchor's own epoch (the recipe table names it there), which the anchor has only without
-			// the stages: with them its clears run at the hosts and places below, so it is not registered.
-			group.registered = HostingOn() || FrameAnchors::Register(std::move(client));
-			if (!group.registered) {
-				group.specs.clear();
-				group.failed = true;
-				logger::warn("[ORG] engine skeleton: the {} anchor refused its clears; they stay on D3D11", FrameAnchors::Name(kGroupAnchors[index]));
-				return;
-			}
+			// The group's clears run at the hosts and places below.
+			group.registered = true;
 			logger::info("[ORG] engine skeleton: the {} clears registered at the {} anchor ({} views, {} gate entries, registration {})", kGroupNames[index],
 				FrameAnchors::Name(kGroupAnchors[index]), passes, entries, group.generation);
 			RegisterHosted(a_group);
@@ -1427,17 +1382,9 @@ namespace RenderGraph::Engine::Skeleton
 				state.hostedPending.push_back(a_pending);
 				return true;
 			}
-			// No stage takes it: a mismatch. Without the stages (HostingOn off) the group anchor has its own epoch, which takes every clear at
-			// the engine's next bind (Flush); false keeps the call on D3D11 until its built graph holds the group's registration.
-			const auto unplaced = [&](std::string_view a_why) {
-				if (HostingOn())
-					return NoPlace(a_target, a_flags, a_why);
-				if (!FrameAnchors::Scheduled(kGroupIds[IndexOf(group)], kGroupAnchors[IndexOf(group)]))
-					return false;
-				state.pending.push_back(a_pending);
-				return true;
-			};
-			if (!HostingOn() || !WorldFrame())
+			// No stage takes it: a mismatch.
+			const auto unplaced = [&](std::string_view a_why) { return NoPlace(a_target, a_flags, a_why); };
+			if (!WorldFrame())
 				return unplaced("no open stage has a place for it");
 			// A world frame's clear of a target a CS stage clears, or one the DCLF host does not draw this frame: its entry and colour are staged
 			// into the stage's frame inputs now.
@@ -1536,7 +1483,7 @@ namespace RenderGraph::Engine::Skeleton
 			AnchorPasses::Builder builder(kCopyAnchors[index], kCopyIds[index], 0, {}, copy.gate);
 			// With hosting the depth copy is a pass of the pre-main stage, which runs it in every execution (Main::RenderDepth always
 			// copies there): ungated. Its own anchor's epoch runs only when the engine's call asks for it, so ungated is right there too.
-			const bool declared = a_kind == CopyKind::Depth && HostingOn();
+			const bool declared = a_kind == CopyKind::Depth;
 			builder.Add(AnchorPasses::Copy{
 				.name = kCopySteps[index],
 				.source = copy.source,
@@ -1579,7 +1526,7 @@ namespace RenderGraph::Engine::Skeleton
 		void RegisterUiCopy(CopyKind a_kind)
 		{
 			auto& copy = CopyOf(a_kind);
-			if (a_kind != CopyKind::Depth || !HostingOn())
+			if (a_kind != CopyKind::Depth)
 				return;
 			if (!copy.uiGate)
 				copy.uiGate = RunGate::Create(kUiDepthCopyId, 1);
@@ -1659,7 +1606,7 @@ namespace RenderGraph::Engine::Skeleton
 		bool CopyDeclared(CopyKind a_kind, bool a_hostable, const char*& a_where)
 		{
 			auto& copy = CopyOf(a_kind);
-			if (a_kind != CopyKind::Depth || !HostingOn())
+			if (a_kind != CopyKind::Depth)
 				return false;
 			// The UI stage's depth copy. The UI stage opens after every world stage ended, so the pre-main stage's copy never finds it open.
 			if (copy.uiRegistered && FrameAnchors::StageInputs(kUiDepthCopyId, [&] { copy.uiGate->OpenDispatch(RunGate::Current(), 0, 1); })) {
@@ -1694,11 +1641,11 @@ namespace RenderGraph::Engine::Skeleton
 				return false;
 			// Main::RenderDepth's copy is its last act: the pre-depth stage (which holds RenderDepth's main depth clear) commits here at the latest,
 			// in a frame without Drawcall Limit Fix's Z-prepass too, so the pre-main stage that holds the copy is open.
-			if (a_kind == CopyKind::Depth && !a_hostable && HostingOn() && WorldFrame())
+			if (a_kind == CopyKind::Depth && !a_hostable && WorldFrame())
 				(void)FrameAnchors::TapPoint(RenderGraph::Frame::SegmentId::PreDepth);
 			// CS's own depth copy (Deferred::DeferredPasses) is the deferred+water stage's first pass, just before its DeferredPasses tap: the
 			// pre-main stage ends here at the latest (in a frame without Drawcall Limit Fix's main opaque epoch, whose submission ends it).
-			if (a_kind == CopyKind::Depth && a_hostable && HostingOn() && WorldFrame())
+			if (a_kind == CopyKind::Depth && a_hostable && WorldFrame())
 				(void)FrameAnchors::TapPoint(RenderGraph::Frame::SegmentId::PreMain);
 			const char* where = nullptr;
 			if (EngineTexturesOf(a_kind) == std::pair{ copy.sourceTexture, copy.targetTexture } && CopyDeclared(a_kind, a_hostable, where)) {
@@ -1718,53 +1665,50 @@ namespace RenderGraph::Engine::Skeleton
 			// pre-main stage's copy writes kPOST_ZPREPASS_COPY again before any pass reads it (the recipe: its readers are pre-main's after its
 			// copy, deferred+water, post and the UI stage's scene), so nothing reads this one. Wherever the start stage runs (StageOpen and
 			// StageAbsent answer only for a stage of this mode).
-			if (a_kind == CopyKind::Depth && HostingOn() && WorldFrame() && (FrameAnchors::StageOpen(start) || FrameAnchors::StageAbsent(start))) {
+			if (a_kind == CopyKind::Depth && WorldFrame() && (FrameAnchors::StageOpen(start) || FrameAnchors::StageAbsent(start))) {
 				if (copy.dropped++ == 0)
 					logger::info("[ORG] engine skeleton: {} while the start stage is open (the cubemap's render) is dropped: pre-main's copy writes it again before any reader",
 						kCopyNames[index]);
 				return true;
 			}
-			if (HostingOn()) {
-				// With the stages the copy's anchor has no own epoch: every copy is a stage's pass, or dropped here.
-				const auto& frame = RenderGraph::Frame::Driver::Current();
-				if (a_kind == CopyKind::Depth) {
-					// The stage that holds the copy has no schedule yet (its first build), or a build with this registration is on its way (a
-					// texture made again, as at the first world frame after a load): the copy lags.
-					auto holder = static_cast<std::uint32_t>(SegmentId::Ui);
-					std::string holderId(kUiDepthCopyId);
-					if (WorldFrame()) {
-						holder = static_cast<std::uint32_t>(a_hostable ? SegmentId::Deferred : SegmentId::PreMain);
-						holderId = a_hostable ? fmt::format("{}@{}", kCopyIds[index], kHostInfo[HostIndex(Host::DeferredPasses)].name) : std::string(kCopyIds[index]);
-					}
-					if (FrameAnchors::StageAbsent(holder) || FrameAnchors::TapMayLag(holderId)) {
-						static Util::ReasonLog s_lag("[ORG] engine skeleton: a copy lags (its stage has no schedule yet); nothing copies this frame");
-						s_lag.Report(kCopyNames[index]);
-						return true;
-					}
-					RenderGraph::Frame::Driver::NoteTapError(RenderGraph::Frame::Driver::TapError::NotDeclared, RenderGraph::Frame::SegmentId::Count,
-						fmt::format("{} in a {} frame came while no open stage holds it (open: start {}, pre-depth {}, pre-main {}, deferred+water {}; hostable {})",
-							kCopyNames[index], RenderGraph::Frame::KindName(frame.kind), FrameAnchors::StageOpen(start),
-							FrameAnchors::StageOpen(static_cast<std::uint32_t>(SegmentId::PreDepth)), FrameAnchors::StageOpen(static_cast<std::uint32_t>(SegmentId::PreMain)),
-							FrameAnchors::StageOpen(static_cast<std::uint32_t>(SegmentId::Deferred)), a_hostable));
-					return true;
+			// The copy's anchor has no own epoch: every copy is a stage's pass, or dropped here.
+			const auto& frame = RenderGraph::Frame::Driver::Current();
+			if (a_kind == CopyKind::Depth) {
+				// The stage that holds the copy has no schedule yet (its first build), or a build with this registration is on its way (a
+				// texture made again, as at the first world frame after a load): the copy lags.
+				auto holder = static_cast<std::uint32_t>(SegmentId::Ui);
+				std::string holderId(kUiDepthCopyId);
+				if (WorldFrame()) {
+					holder = static_cast<std::uint32_t>(a_hostable ? SegmentId::Deferred : SegmentId::PreMain);
+					holderId = a_hostable ? fmt::format("{}@{}", kCopyIds[index], kHostInfo[HostIndex(Host::DeferredPasses)].name) : std::string(kCopyIds[index]);
 				}
-				// The kMAIN copy: the EngineCopy step of the open stage (deferred+water, the sun stage under water, the UI stage's menu scene).
-				const auto hold = FrameAnchors::HeldNow(kCopyIds[index], kCopyAnchors[index]);
-				if (!hold.held) {
-					RenderGraph::FrameSequence::NoteUnplaced(fmt::format("skeleton copy {}", kCopySteps[index]));
-					RenderGraph::Frame::Driver::NoteTapError(RenderGraph::Frame::Driver::TapError::NotDeclared, RenderGraph::Frame::SegmentId::Count,
-						fmt::format("{} in a {} frame came while no open stage holds it", kCopyNames[index], RenderGraph::Frame::KindName(frame.kind)));
-					return true;
-				}
-				// The schedule holds the client by id; a registration made since (a texture made again, as at the main menu's first frame)
-				// is not in its graph until that stage's next build switches in (CanTap): it lags too.
-				if (!hold.scheduled || !FrameAnchors::CanTap(kCopyIds[index])) {
-					static Util::ReasonLog s_lag("[ORG] engine skeleton: a copy lags (its stage's schedule does not hold it yet); nothing copies this frame");
+				if (FrameAnchors::StageAbsent(holder) || FrameAnchors::TapMayLag(holderId)) {
+					static Util::ReasonLog s_lag("[ORG] engine skeleton: a copy lags (its stage has no schedule yet); nothing copies this frame");
 					s_lag.Report(kCopyNames[index]);
 					return true;
 				}
-			} else if (!FrameAnchors::Scheduled(kCopyIds[index], kCopyAnchors[index]))
-				return false;
+				RenderGraph::Frame::Driver::NoteTapError(RenderGraph::Frame::Driver::TapError::NotDeclared, RenderGraph::Frame::SegmentId::Count,
+					fmt::format("{} in a {} frame came while no open stage holds it (open: start {}, pre-depth {}, pre-main {}, deferred+water {}; hostable {})",
+						kCopyNames[index], RenderGraph::Frame::KindName(frame.kind), FrameAnchors::StageOpen(start),
+						FrameAnchors::StageOpen(static_cast<std::uint32_t>(SegmentId::PreDepth)), FrameAnchors::StageOpen(static_cast<std::uint32_t>(SegmentId::PreMain)),
+						FrameAnchors::StageOpen(static_cast<std::uint32_t>(SegmentId::Deferred)), a_hostable));
+				return true;
+			}
+			// The kMAIN copy: the EngineCopy step of the open stage (deferred+water, the sun stage under water, the UI stage's menu scene).
+			const auto hold = FrameAnchors::HeldNow(kCopyIds[index], kCopyAnchors[index]);
+			if (!hold.held) {
+				RenderGraph::FrameSequence::NoteUnplaced(fmt::format("skeleton copy {}", kCopySteps[index]));
+				RenderGraph::Frame::Driver::NoteTapError(RenderGraph::Frame::Driver::TapError::NotDeclared, RenderGraph::Frame::SegmentId::Count,
+					fmt::format("{} in a {} frame came while no open stage holds it", kCopyNames[index], RenderGraph::Frame::KindName(frame.kind)));
+				return true;
+			}
+			// The schedule holds the client by id; a registration made since (a texture made again, as at the main menu's first frame)
+			// is not in its graph until that stage's next build switches in (CanTap): it lags too.
+			if (!hold.scheduled || !FrameAnchors::CanTap(kCopyIds[index])) {
+				static Util::ReasonLog s_lag("[ORG] engine skeleton: a copy lags (its stage's schedule does not hold it yet); nothing copies this frame");
+				s_lag.Report(kCopyNames[index]);
+				return true;
+			}
 			copy.wanted = true;
 			copy.executed = false;
 			auto& state = Skel();
@@ -1789,35 +1733,6 @@ namespace RenderGraph::Engine::Skeleton
 		{
 			auto& state = Skel();
 			auto& group = state.groups[a_index];
-			if (!group.pending.empty()) {
-				// The frame sequence census (CS_ORG_FRAME_SEQUENCE) names the views each flush clears.
-				if (RenderGraph::FrameSequence::On()) {
-					std::string views;
-					for (const auto& pending : group.pending)
-						views += fmt::format("{}{}{}", views.empty() ? "" : ",", TargetName(pending.target), pending.depth ? fmt::format("/{}", pending.flags) : std::string());
-					RenderGraph::FrameSequence::NoteBoundary(fmt::format("skeleton {} clears: {}", kGroupNames[a_index], views));
-				}
-				bool done = false;
-				auto status = FrameAnchors::RunStatus::Failed;
-				if (!group.failed) {
-					// Guest mode only: native mode places every clear in a stage or drops it (Take), so nothing is pending there.
-					group.executed = false;
-					state.flushing = true;
-					const auto result = FrameAnchors::Run(kGroupAnchors[a_index]);
-					state.flushing = false;
-					status = result.status;
-					// The executed signal says the run's graph held this registration's passes. Without it the run failed: an error.
-					done = result && group.executed;
-				}
-				if (done) {
-					group.taken += group.pending.size();
-					if (!std::exchange(group.announced, true))
-						logger::info("[ORG] engine skeleton: the first {} clears ran on the graph ({} anchor)", kGroupNames[a_index], FrameAnchors::Name(kGroupAnchors[a_index]));
-				} else {
-					FailedRun(kGroupNames[a_index], status);
-				}
-				group.pending.clear();
-			}
 			// The engine made one of the group's targets again (a resize): its passes are made again, once, with nothing pending.
 			if (group.stale && !group.failed)
 				Build(static_cast<Group>(a_index));
@@ -1908,7 +1823,7 @@ namespace RenderGraph::Engine::Skeleton
 		auto& state = Skel();
 		if (state.setUp && FrameAnchors::IsRenderOwner())
 			CheckMadeAgain();
-		if (!state.setUp || !HostingOn() || !FrameAnchors::IsRenderOwner())
+		if (!state.setUp || !FrameAnchors::IsRenderOwner())
 			return;
 		// The frame that ends here was cut short by a loading screen: its waiting work is abandoned with the rest of its world work.
 		if (RenderGraph::Frame::Driver::LoadStartedThisFrame()) {
@@ -1980,8 +1895,7 @@ namespace RenderGraph::Engine::Skeleton
 		// mode answers its own copies before the hook is asked.
 		if (state.copies[static_cast<std::size_t>(CopyKind::Main)].registered)
 			Tripwire::SetGuestCopyHook(&Sites::TakeContextCopy);
-		if (HostingOn())
-			RenderGraphRuntime::SetEpochHooks({ .starting = &EpochStarting, .commit = &EpochCommit });
+		RenderGraphRuntime::SetEpochHooks({ .starting = &EpochStarting, .commit = &EpochCommit });
 		logger::info("[ORG] engine skeleton: on (CS_ORG_ENGINE_SKELETON); the engine's clears and its main depth copy are registered with the graph");
 	}
 

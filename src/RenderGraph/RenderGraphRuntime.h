@@ -123,7 +123,7 @@ public:
 		AnchorVolumetricLighting,
 		AnchorDecalQueries,
 		AnchorEngineCopy,
-		// The CS stages' epochs (native mode, CS_ORG_SEGMENTS; FrameAnchors.h, SegmentsOn), one per RenderGraph::Frame::SegmentId, in
+		// The CS stages' epochs (FrameAnchors.h), one per RenderGraph::Frame::SegmentId, in
 		// that order (StageSegment). Each is one revision-driven, open epoch holding its steps' passes (Frame/RecipeTable.h).
 		Declared,
 		Count = Declared + RenderGraph::Frame::kSegments

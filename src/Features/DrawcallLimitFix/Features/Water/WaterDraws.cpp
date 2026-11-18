@@ -40,7 +40,7 @@ namespace DCLF::Features::Water::WaterDraws
 		constexpr const char* kShader = "Water.hlsl";
 		// The most draws a run latches (WaterCapture's kMaxLatched); a batch with more draws in several runs.
 		constexpr std::uint32_t kMaxDraws = 64;
-		// The most draws one execution holds: a declared segment (FrameAnchors::SegmentsOn) commits all of a view's runs of a frame into
+		// The most draws one execution holds: a declared segment commits all of a view's runs of a frame into
 		// its one run (ClientDesc::repeats), each after the earlier ones' entries.
 		constexpr std::uint32_t kExecutionDraws = 4 * kMaxDraws;
 		constexpr std::uint32_t kDrawStride = static_cast<std::uint32_t>(sizeof(DrawLatch));

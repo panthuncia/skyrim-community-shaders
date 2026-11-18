@@ -670,19 +670,13 @@ namespace RenderGraph::Engine::Bink::Graph
 		state.pending.reset();
 		if (!UpdateTargets(state, a_betweenFrames))
 			return refuse("the framebuffer cannot be imported, or its tile program cannot be made");
-		// The UI stage holds the Present anchor (native mode): its schedule must hold this registration. A tick can come between two
-		// frames, before the frame's Begin, so the last schedule is asked. A build with HDR's new UI texture switches in at a frame
-		// boundary; until then the tick stays the engine's.
-		if (FrameAnchors::HeldByStage(FrameAnchors::Anchor::Present)) {
-			if (!FrameAnchors::InStage(kClientId, FrameAnchors::Anchor::Present))
-				return refuse("the UI stage's schedule does not hold the Bink client yet");
-			return true;
-		}
-		// The anchor's own epoch (without the stages). The setup's build point put the client in the Present graph. Only HDR's UI texture
-		// appearing after setup changes it, and a blocking tick builds that between two frames (UpdateTargets): this waits only for an
-		// attach after the first world frame.
-		if (!FrameAnchors::Scheduled(kClientId, FrameAnchors::Anchor::Present))
-			return refuse("the Present graph with HDR's new UI texture is not attached yet");
+		// The UI stage holds the Present anchor: its schedule must hold this registration. A tick can come between two frames, before the
+		// frame's Begin, so the last schedule is asked. A build with HDR's new UI texture switches in at a frame boundary; until then the
+		// tick stays the engine's.
+		if (!FrameAnchors::HeldByStage(FrameAnchors::Anchor::Present))
+			return refuse("no stage holds the Present anchor");
+		if (!FrameAnchors::InStage(kClientId, FrameAnchors::Anchor::Present))
+			return refuse("the UI stage's schedule does not hold the Bink client yet");
 		return true;
 	}
 

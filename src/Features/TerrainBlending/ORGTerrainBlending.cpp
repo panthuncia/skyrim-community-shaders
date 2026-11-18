@@ -206,7 +206,7 @@ namespace
 			.atExecution = true });
 		client.gates = { gate };
 		client.active = [] { return globals::features::terrainBlending.settings.Enabled != 0; };
-		// The declared frame (FrameAnchors::SegmentsOn): the clear is recorded ahead, so the setting turns it off in the description.
+		// The declared frame: the clear is recorded ahead, so the setting turns it off in the description.
 		client.declared = client.active;
 		client.commit = [gate](const FrameAnchors::Point&) {
 			gate->OpenDispatch(0, 1);

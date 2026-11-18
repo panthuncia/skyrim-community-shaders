@@ -276,7 +276,7 @@ namespace
 		};
 		// The D3D11 path ran at the shadow mask draw only with directional shadows; so do the passes.
 		client.active = [a_resources] { return a_resources->cascades && a_resources->sourceWidth && globals::state->HasDirectionalShadows(); };
-		// The declared frame (FrameAnchors::SegmentsOn): directional shadows, read at the frame's start; they follow the cell. The
+		// The declared frame: directional shadows, read at the frame's start; they follow the cell. The
 		// cascades and the source size come from the engine's shadow maps (UpdateImports), and a build makes the passes only with
 		// them, so they need no bit of their own.
 		client.declared = [] { return globals::state->HasDirectionalShadows(); };
