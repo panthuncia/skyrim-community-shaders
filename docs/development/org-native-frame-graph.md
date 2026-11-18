@@ -7849,3 +7849,42 @@ Scaleform displays refused; the only `[C]` line is the known `PublishedResources
 world capture and frozen world kinds were reached. Shots against B6's: quick 2.0, interior 3.6 and 7.9 (light shafts), census at most
 0.8 apart from Dragonsreach (16.7, its light shafts). Not tested: HDR output, frame generation (needs the foreground; its hudless copy
 keeps its anchor's ticket), a menu's item model, the local map, the screen blood.
+
+### Performance and memory (B7's build)
+
+perf-taa, uncapped, VRAM Budget off, one run per mode on DLL `4e9762701b9d` (the B7 commit rebuilt; the same source as `35dbf4497d9e`):
+
+| | Guest (B7) | Native | Guest in B5 |
+|---|---|---|---|
+| frame period between the marks | 19.06 ms (census run 19.04) | 19.09 ms | 18.95 / 18.96 ms |
+| GPU 3D engine busy | 98.3% | 99.5% | 98.2 / 98.1% |
+| render thread CPU | 218 ms a second (census run 233) | 202 | 261 / 249 |
+| graph host thread | 44 ms a second (census run 56) | 128 (the submission thread) | 183 / 180 |
+| DXVK worker | 71 ms a second (census run 93) | none | 100 |
+| process dedicated VRAM | 3,941 MiB (census run 3,916) | 2,917 MiB | 3,514 / 3,587 MiB |
+
+The guest census run (`org.epoch_stats`): 11.5 epochs and 11.5 executions a steady frame (B5: 14.0 and 21.0; native about 11.2 to
+12.0 tickets). The graph host thread falls to a quarter (no anchor epoch is prepared ahead any more) and the render thread toward
+native's. The frame stays GPU-bound. **VRAM rose by about 350 to 430 MiB against B5** (one run each, not attributed): the post and UI
+stages' graphs in guest keep pools of their own (the frame arena is off in guest), and the UI stage's kept recordings cover 384 passes
+for every frame slot. Not looked into here.
+
+### The migration scaffolding: deletion tried, not committed
+
+With every stage in guest, `Stage::runsInGuest`, `DeclaredOn`, `StagesOnly`, `OwnEpochHolds`, the skeleton's `OwnEpochTakes` and
+`RunCopy`'s own-epoch branch were deleted, and work at any anchor a stage has a step at became the `own epoch` mismatch in guest as in
+native (shared anchors no longer keep their own epochs in guest). Two runs of that build found:
+
+- **The kMAIN copy at the main menu's first frame.** kMAIN is made again when the main menu starts, so the copy registers again
+  (frame 167); the next copy (frame 168) came before the UI stage's build with the new registration. `HeldNow` matches the schedule by
+  id and said scheduled; the run found the new registration outside the build and, with no own epoch left, stopped the game. In B7 that
+  copy runs on EngineCopy's own epoch, silently. Fix (in the saved diff): the copy also lags while `CanTap` says the schedule does not
+  hold this registration. Native never remakes kMAIN there.
+- **A GPU device loss at the loading screen**, twice in a row (about 0.2 s after the loading thread takes over, no tap error before it,
+  no device fault information from the driver). B7's build passed the loading screen in seven runs. The cause was not found within the
+  run budget: the change removes the shared anchors' own epochs from the host's frame (EngineDraws, ImageSpace, EngineCopy,
+  EngineFrameClear, EngineDepthCopy, EngineQueries, Tonemap) and with them their graphs and imports, which native mode does not have
+  either.
+
+So the scaffolding stays for now; the diff is kept for the next piece. Until it goes, an anchor a stage shares keeps its own epoch in
+guest, and work there outside every stage's step runs on it instead of stopping the game.
