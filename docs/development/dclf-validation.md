@@ -1150,6 +1150,20 @@ Bugs DCLF's parity checks found in other Community Shaders features, in the engi
     follows the fix. A FaceGen material with no hash key or no extra texture binds black to both. Capture parity's `skin parity`
     line compares t71 and t74.
 
+**Wetness Effects: the shore term darkens menu and loading-screen models in D3D11.** Still present. Left as it is for now
+(decided 2026-11-18).
+-   Where: the shore wetness in `package/Shaders/Lighting.hlsl` (`shoreFactor` from `wetnessDistToWater`, then `shoreWetness` and
+    `wetnessGlossinessAlbedo`). It reads the world's water table at the draw's coordinates and is not gated by `inWorld`, so a
+    menu scene's model, which is not in the world, is treated as standing on a shore. The rain term beside it is gated
+    (`wetnessOcclusion` is 0 outside the world).
+-   Evidence: the loading-screen model's mean luminance at the same shot point in plain D3D11 is 16.2 with Wetness Effects on and
+    21.1 with it off. The pale war paint on loading-screen actors is the same effect.
+-   Found by the loading screen port's comparison against D3D11 (org-native-frame-graph.md, "Loading screens"). The ORG build has
+    no wetness on these draws, so it is brighter than D3D11 there: model area mean 14.1 to 14.3 against D3D11's 15.2 with other
+    terms included.
+-   Proposed fix: gate the shore term by `inWorld`, as the rain term is. The D3D11 build then matches the ORG build on menu models.
+-   The ORG build's rule: no wetness on models outside the world. The difference against D3D11 is accepted until the fix.
+
 **ShaderCache: the shadow masks' filter selector 3 is unsupported, so every shadow mask builds SHADOWFILTER 0.** Still present.
 -   Where: `ShaderCache.cpp`'s Utility defines take the shadow mask filter from the descriptor's bits 17-20 and accept 0, 1, 2, 4
     and 8. The engine's sun, spot and point light masks carry 3 there (bits 17 and 18: descriptors `0x262102`, `0x462102`,
