@@ -8231,3 +8231,39 @@ It is the capture, not the frame. The shots alternate between the graph's captur
 the D3D11 copy taken when every readback buffer is busy or a capture still waits. The graph's captures lack the HUD, the D3D11 copies
 have it. Importing the source as engine target kFRAMEBUFFER changed nothing: every import resolves to `Native::BackBuffer`. Why the
 UI stage's copy comes out without the displays is not found.
+
+## D3D12 tree LOD follows its list order (2026-11-18)
+
+The hazy trees that flicker at the top left of the flicker view are DCLF's tree LOD. With `dclf.tree_lod_tint` they are magenta, and
+a temporary per-instance tint showed each instance keeping its colour while the pixels it covers change between frames (about 23,000
+pixels in the area toggle, about 1,900 change colour). Native Vulkan is steady.
+
+### Measure
+
+The tile detector (`flick.py`) scores 0 to 2 here and misses most of it. The temporal std of luminance over the 60 shots in the area
+(x 0-300, y 96-330 at 1920x1080) separates the backends: Vulkan 0.30 mean with about 15 pixels above 4, D3D12 1.3 to 1.4 with 6,000
+to 8,000 pixels above 4.
+
+### What it is not
+
+Each of these left D3D12 at 1.25 to 1.42: `dclf.cull=frustum` (no HZB), `dclf.pipeline=cpu`, `dclf.tex_stream=false`, upscaling
+off (worse, 4.1, the trees then jump between two values), and declaring the list as the draws' shader resource instead of their
+indirect arguments. The guard sweep of the same day did not change it.
+
+### What it is
+
+A temporary checksum in TreeLodCullCS (sum and xor of the appended record indices) read back per frame: with frustum culling every
+frame appends the same 2,499 or 2,500 records with the same sums. With the HZB on, phase 1 occludes 1,524 to 1,635 of them and phase
+2 brings back 0 to 104, so the drawn set changes from 912 to 976 between frames of a still camera.
+
+Writing each record at its own slot (index or ~0, the colour and depth draws skipping ~0) instead of appending made the trees steady:
+std 0.36 and 13 pixels above 4. So on D3D12 the image depends on the order of the list, which the atomic append changes every frame.
+
+### Open
+
+With a depth prepass that drew the same instances, an EQUAL colour pass should change at most which of two coplanar instances wins,
+not whether a pixel is covered. The fixed-slot list also keeps the list's contents the same every frame, which would hide a read of
+another frame's list or a partly written one. The draw row and the list are single buffers (one version in steady state), the counts
+show one append per frame, and the stage stamps (`dclf.tree_lod_stages`) do not reach the readback on D3D12. Not fixed: a fixed-slot
+list would only mask the cause, and with the HZB on its contents change every frame too.
+

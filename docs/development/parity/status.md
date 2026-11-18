@@ -100,8 +100,13 @@ To match DXVK, native needs what DXVK's CS thread gives it: the GPU work off the
 ## Open
 
 - **D3D12 shadow flicker** (the `flicker` configs): the steady loss of foliage casters is fixed (caster rows, 2026-11-18, below). Left:
-  a hazy far tree at the top left of the flicker view drawn in some D3D12 frames and not the next (main view), 2 spikes without an
-  upscaler and 14 with taa. Vulkan scores 0.
+  the hazy far trees at the top left are DCLF's tree LOD, and their coverage changes from frame to frame on D3D12 only. The cull
+  gives the same set every frame. The image follows the order of the visible list, which the atomic append changes every frame:
+  with each record at a fixed slot the trees are steady. Why the order changes coverage is not found (org-native-frame-graph.md,
+  "D3D12 tree LOD follows its list order"). The tile detector misses most of it. Measure the temporal std of the tree area instead.
+- **Render thread blocked on compiles**: with a cold shader store the main menu stalls 15 s and more while Lighting compiles (the
+  whole compile took 90 s), and after a DCLF compute shader changes the first world frame creates its driver pipelines on the render
+  thread (VisibilityEventsCS took the frame past 15 s on guest). Both trip the hang watchdog. 2026-11-18.
 - **Screenshots in native**: the UI stage's capture comes out without the HUD; the D3D11 copies taken when its readback buffers are busy
   have it, so the flicker bursts show the compass on every other shot. Not the import (all resolve to `Native::BackBuffer`).
 - **D3D12 views**: `CreateWords` buffers read as ByteAddressBuffer have structured views. A raw GetDimensions on them returns the element
