@@ -236,6 +236,9 @@ that a repeat is recognised. They are not chased unless one recurs with a DCLF o
     an attach of the same child pushes both (applied as a move) or the next frame's start pushes it as a removal. Runs fxg and fig
     had none. Run fxn had two static ones at startup and fqn two 'Land' blocks detached at frame 59 and attached at frame 61, which
     stay a removal and an add.
+-   **"Sometimes parts do not come back" (not reproduced).** No part stayed drawn by nobody and every actor's tracked count matched
+    its held geometry at the end, over runs l1g, fxg, fxn and fig: 31 crossings and about 36,000 actor-frames at Riverwood and in the
+    Bannered Mare, plus 47 crossings before.
 
 ## Memory retention
 
