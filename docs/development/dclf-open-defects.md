@@ -239,7 +239,7 @@ that a repeat is recognised. They are not chased unless one recurs with a DCLF o
 -   **"Sometimes parts do not come back" (not reproduced).** No part stayed drawn by nobody and every actor's tracked count matched
     its held geometry at the end, over runs l1g, fxg, fxn and fig: 31 crossings and about 36,000 actor-frames at Riverwood and in the
     Bannered Mare, plus 47 crossings before.
--   **Actors resting at a fractional fade (open, 2026-11-18).** After a load, some actors' fade nodes hold 0.983 (guest, 60 fps),
+-   **Actors resting at a fractional fade (fixed 2026-11-18).** After a load, some actors' fade nodes hold 0.983 (guest, 60 fps),
     0.964 (native, about 28 fps) or 0.950 (20 fps) for good, one frame's fade step below 1. The mirror reads that value, so their
     parts bind the blended fading pipelines (hint 9) while DCLF's own fade state is 1 and draws them at alpha 1. A placement snap
     or reseed (a cell change) clears it. Runs b5r1 to b5diag7g and the tour config in the bug5 scratch folder.
@@ -254,13 +254,22 @@ that a repeat is recognised. They are not chased unless one recurs with a DCLF o
         milestone brings the node in line. `ReportMilestone` took the seed's milestone as already on the node, so a state that
         stays at 1 is never written. **Fixed:** a new generation's
         first update always reports (`FadeStateCS.hlsl` and the CPU stage's `Report`).
-    -   **Still open: the fade write-back delivers nothing.** Runs b5diag4 to b5diag7g (guest and native) counted about 1,400
-        harvests with 0 events and 0 stores. `FadeStateCS` runs (fade parity: hundreds of updates, 0 differ), its events are bound
-        (capacity 1024, staging set found) and no harvest overflowed, even with every new listing reporting. So the fix above has no
-        effect yet, and every DCLF-owned fade node keeps what the engine left at the handover. **Next:** check whether the events
-        copy (`cs.dclf.z.fade-events`) reads the list before `cs.dclf.z.fade-state` appends on the async compute queue, or after the
-        depth commit's header upload resets the count. The query stage (`cs.dclf.z.fade-portal-queries`) also declares the events
-        as written.
+    -   **The fade write-back delivered nothing (fixed).** Runs b5diag4 to b5diag7g (guest and native) counted about 1,400
+        harvests with 0 events and 0 stores, so every DCLF-owned fade node kept what the engine left at the handover. The graph's
+        order was right: a probe word FadeStateCS wrote reached the copied list in the same frame, after the header upload and before
+        the copy (run b6d1g). No event was ever appended. `ReportMilestone` guarded the append with two early returns on an `||` of
+        equalities (`EventsIndex == 0 || ReportedIndex == 0`, then the written bit or an unchanged milestone), the pattern the
+        RX 6600 compiler miscompiles (TextureTransformsCS, the portal programs). Adding counters ahead of the guards, with the logic
+        unchanged, made the events flow (run b6d2g: 13,435 events). The guards are now one relational compare and a plain `if` around
+        the append. Guest run b6fixg: 10,288 events and 10,280 stores in the first window after the load (the first-update rule makes
+        every root report once, 3.3 ms of stores in all), then 2 to 32 a window. Native run b6fixn: 10,531 events, 10,278 stores.
+    -   **Result.** The actor probe at rest finds 0 fading actors in guest (b6fixg, b6fin, b6fin2) and native (b6fixn). Before, native
+        held up to 9 actors at 0.964 and the actor walking in (1A010003) stayed at 0.90 to 0.93 in both modes. An NPC placed in front
+        (`player.placeatme 000A2C8E 1 150 0`, run b6fin2) still fades in on the fading pipelines (lowest fade 0.915, 0.829, 0.764 at
+        5 to 40 frames) and rests opaque. The ghost (`000725F6`) rests with its node's fade at 0.250 in both modes, DCLF's state and
+        the engine's own snap value, and draws translucent (run b6fin, shot ghost240). Its `+0x140` keeps the engine's last step (0.07
+        to 0.13): the store writes only `+0x130`. Console `enable` has no fade, so the bug5 config's disable and enable cycles never
+        tested a fade-in.
     -   Also changed: the fade amount and fade snap writers push the mirror update before the key, and the scene pass drains those
         keys before the tracker. A key could be applied against a mirror without its value, leaving the root row at an older alpha.
         Not seen in a run.

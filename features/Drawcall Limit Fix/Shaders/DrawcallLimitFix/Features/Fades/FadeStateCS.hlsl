@@ -467,7 +467,9 @@ uint FadeMilestone(FadeNodeState a_state, uint a_rootBits)
 // node is the engine's own, so its milestone is what the node holds. The list's header (its frame) is the depth commit's.
 void ReportMilestone(uint a_index, FadeRootStatic a_root, FadeNodeState a_state)
 {
-	if (EventsIndex == 0 || ReportedIndex == 0)
+	// One relational compare and no early return after an || of equalities.
+	// The RX 6600 compiler dropped every event behind such guards.
+	if (min(EventsIndex, ReportedIndex) == 0u)
 		return;
 	RWStructuredBuffer<uint2> reported = ResourceDescriptorHeap[ReportedIndex];
 	uint2 last = reported[a_index];
@@ -475,25 +477,25 @@ void ReportMilestone(uint a_index, FadeRootStatic a_root, FadeNodeState a_state)
 	if (last.x != a_root.Generation)
 		last = uint2(a_root.Generation, 0xFFFFFFFFu);
 	const uint milestone = FadeMilestone(a_state, a_root.Bits);
-	if ((a_root.Bits & kFadeRootWritten) == 0 || last.y == milestone) {
-		reported[a_index] = uint2(a_root.Generation, milestone);
-		return;
+	const bool report = (a_root.Bits & kFadeRootWritten) != 0u && last.y != milestone;
+	uint2 next = uint2(a_root.Generation, milestone);
+	if (report) {
+		RWStructuredBuffer<uint> events = ResourceDescriptorHeap[EventsIndex];
+		uint slot;
+		InterlockedAdd(events[0], 1u, slot);
+		if (slot < EventCapacity) {
+			const uint at = kFadeEventHeaderWords + slot * kFadeEventWords;
+			events[at] = a_index;
+			events[at + 1u] = a_root.Generation;
+			events[at + 2u] = a_state.Flags;
+			events[at + 3u] = asuint(a_state.CurrentFade);
+			events[at + 4u] = a_state.Levels;
+			events[at + 5u] = asuint(a_state.Blend);
+		} else {
+			next = last;
+		}
 	}
-	RWStructuredBuffer<uint> events = ResourceDescriptorHeap[EventsIndex];
-	uint slot;
-	InterlockedAdd(events[0], 1u, slot);
-	if (slot >= EventCapacity) {
-		reported[a_index] = last;
-		return;
-	}
-	const uint at = kFadeEventHeaderWords + slot * kFadeEventWords;
-	events[at] = a_index;
-	events[at + 1u] = a_root.Generation;
-	events[at + 2u] = a_state.Flags;
-	events[at + 3u] = asuint(a_state.CurrentFade);
-	events[at + 4u] = a_state.Levels;
-	events[at + 5u] = asuint(a_state.Blend);
-	reported[a_index] = uint2(a_root.Generation, milestone);
+	reported[a_index] = next;
 }
 
 [numthreads(64, 1, 1)] void main(uint3 dispatchID : SV_DispatchThreadID) {
