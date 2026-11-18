@@ -8565,3 +8565,54 @@ off, with `CS_VK_DRIVER_TRACE` counting driver presents. No fix was needed.
   plain D3D11 (3379). Not looked into.
 - Not tested: HDR with frame generation, DLSS-G.
 
+
+## Settings changes inside a frame (2026-11-18)
+
+A user's native D3D12 session with HDR on stopped after a few quick upscaling changes in the CS menu: "the routed tonemap wrote the
+LDR scratch, and the pass-through copy is not in the frame's schedule".
+
+**Cause.** A new render ratio made ImageSpace register its world, chain, start and menu steps again at the first ImageSpace call,
+inside a frame described against the old step layout. The re-registered post client could not tap that frame, so the routed
+tonemap lagged. It still set the scratch-written flag, and the pass-through copy at the end of the effects then stopped the frame.
+
+**Fix.** The steps register at the next frame boundary (`RegisterAtBoundary`, `Frame::Driver::AtNextBegin`). Until then a key the
+old layout lacks is lagged work. Only a routed tonemap or TAA that drew sets the routing flags. The cs-test `upscale` and `fg`
+steps wrote Upscaling's settings at the jitter update, after the description had read the method, and stopped native D3D12 with
+"cs.upscaling.evaluate had work at the Upscale tap, and the schedule has it off". The menu writes between frames, so the steps now
+apply at the frame boundary too. Frame generation is not supported in native modes, so its toggle there only changes the setting.
+
+**Test.** The new `upscale-burst` config: TAA long enough for its routed build, then the method and the quality on consecutive
+frames, frame generation on and off. With `--set features.HDRDisplay=true` on DLL `fda691f4d7e2`: `native-d3d12`, `native-vulkan`
+and `guest` passed. The old build stopped on the evaluate line in native D3D12.
+
+## Cleanup C3: fallbacks to D3D11 inside the graph modes (2026-11-18)
+
+Plan piece C3. CS on `org-native/phases`.
+
+### Deleted
+
+- **`ClientDesc::onFailed`** and the 47 assignments to it: the engine steps, the deferred composite and clears, ImGui, Scaleform,
+  Bink, the skeleton's copies, Effects11, Post Processing, Volumetric Lighting, Upscaling, the GPU load pass, the graph self-tests,
+  30 feature sites and seven DCLF draw families (their `Fail` and `failed` flag had no other caller). With them went the `Setup`
+  callback parameters, stored callbacks, `failed` flags and `ReturnToD3D11`-style functions that only a failed graph reached.
+- **`FailClients`** is the one report for a failed build, shared constants that cannot be made, a stopped graph and a skipped live
+  epoch. With `CS_ORG_MISMATCH_FATAL` on (development builds) it stops with the clients and the error. Otherwise it logs an error
+  and the removed clients draw nothing. The own-epoch tail no longer turns `EpochResult::Skipped` into a quiet refusal.
+- **The anchor self-test's failure-isolation client** (`CS_ORG_ANCHOR_SELFTEST_FAIL`): its only signal was `onFailed`.
+- **`EffectInfo::ownScope`**, set positionally in `kEffects` and never read. **`GpuGates`** moved into `FrameAnchors.cpp`.
+
+### Stayed
+
+- **Setup failures.** A shader that does not compile or a resource that cannot be made returns false from `Setup`, and the feature
+  keeps its D3D11 path, as the clean-disable rule asks. In a graph mode that path draws through DXVK in guest and nothing in native.
+- **Feature callbacks with other callers.** IBL and Dynamic Cubemaps (the runtime stopped, programs failing to build again), Terrain
+  Shadows (a height map switch that fails), Screen Space GI and Terrain Blending (build, import or registration failures at run time).
+- **Normal states**, not failures: a frame a feature does not draw, a target not imported yet, the fog's and rays' per-frame D3D11
+  frames, Terrain Blending's missed blends.
+- **The screenshot's D3D11 staging copy.** Graph captures have the HUD. The D3D11 copies taken while a graph capture waits for its
+  build or both readback buffers are busy are the ones without it in native mode, which is why consecutive shots alternate.
+  Removing the copy needs a design for consecutive shots (more readback buffers and a capture queue, or the source registered
+  before the first shot), so it stays.
+- **Scaleform's D3D11 handoff.** It is reached off the render thread (loading screens), before the graph initializes, or when the
+  Interface anchor is not held by a stage. Its `Scheduled` branch stays for the reason C4 gave.
+- **BuildManager's `onFailed`**, the plumbing that feeds the anchors' failure handling.
