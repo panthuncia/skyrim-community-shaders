@@ -2,8 +2,11 @@
 
 #include <d3d11.h>
 #include <functional>
+#include <cstdint>
 #include <memory>
+#include <optional>
 #include <string_view>
+#include <utility>
 
 /**
  * @brief Exponential Height Fog's volumetric fog on the render graph (CS_ORG_EXPONENTIAL_HEIGHT_FOG=1).
@@ -70,6 +73,12 @@ public:
 	/** @brief The exported integrated volumes (t19, t22) of the last frame the graph ran; null when the D3D11 path has them. */
 	ID3D11ShaderResourceView* NearSRV() const;
 	ID3D11ShaderResourceView* FarSRV() const;
+
+	/**
+	 * @brief The near and far slice counts of the volumes NearSRV and FarSRV answer with, null when they answer null. A new count
+	 * reaches the volumes at the frame boundary after the setting changed, so their readers take it from here.
+	 */
+	std::optional<std::pair<std::uint32_t, std::uint32_t>> Slices() const;
 
 	/** @brief Drops the client and the volumes (the volumetric fog turned off). The programs stay; the next Prepass registers again. */
 	void Release();

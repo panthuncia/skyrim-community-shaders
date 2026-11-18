@@ -16,7 +16,8 @@
  * each one. Here a name keeps its texture while its shape holds:
  * - the same description: the same texture, whatever registered it;
  * - a history or persistent texture of a new size (same format, mips and slices): a new version of the same slot. Passes declare the
- *   slot, so no graph is built again and every stage follows the version;
+ *   slot, so no graph is built again and every stage follows the version. It takes the size at the next frame boundary
+ *   through GraphResources' RequestSize and keeps the old one until then;
  * - anything else: a new texture under the name. The old one goes once the last build that holds it is gone.
  *
  * A transient keeps one object too. Each graph that uses it places it in its own alias memory; a stage's next build places it again,

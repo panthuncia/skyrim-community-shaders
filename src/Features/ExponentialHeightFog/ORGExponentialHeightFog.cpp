@@ -214,7 +214,7 @@ namespace
 	{
 		std::unique_ptr<GraphResources::Texture3D> vBuffer, scattering, scatteringHistory, integrated;
 		std::unique_ptr<GraphResources::Texture2D> conservativeDepth, conservativeDepthHistory;
-		DirectX::XMUINT4 size{};  // render thread: the extent now, which the commit's group counts follow
+		DirectX::XMUINT4 size{};  // the extent this frame's passes and group counts use, which the textures have
 
 		bool Complete() const
 		{
@@ -232,15 +232,20 @@ namespace
 			conservativeDepthHistory->Register(a_graph);
 		}
 
-		/** @brief Every texture at a_size, as new versions of their slots. False when one could not be made again. */
-		bool Resize(const DirectX::XMUINT4& a_size)
+		/** @brief Every texture asks for a_size, which it takes at the next frame boundary as a new version of its slot. */
+		void RequestSize(const DirectX::XMUINT4& a_size)
 		{
 			for (auto* volume : { vBuffer.get(), scattering.get(), scatteringHistory.get(), integrated.get() })
-				volume->Resize(a_size.x, a_size.y, a_size.z);
+				volume->RequestSize(a_size.x, a_size.y, a_size.z);
 			for (auto* depth : { conservativeDepth.get(), conservativeDepthHistory.get() })
-				depth->Resize(a_size.x, a_size.y);
-			size = a_size;
-			return Complete();
+				depth->RequestSize(a_size.x, a_size.y);
+		}
+
+		/** @brief The extent the textures have now. They all take a new one at the same frame boundary. */
+		DirectX::XMUINT4 Current() const
+		{
+			const auto& desc = vBuffer->Desc();
+			return { desc.Width, desc.Height, desc.Depth, 0 };
 		}
 	};
 
@@ -796,28 +801,27 @@ struct ORGExponentialHeightFog::Impl
 	}
 
 	/**
-	 * @brief A new extent: the volumes resized in place, as new versions of their slots. The passes and the client stay; the
-	 * commit opens the gate with the new group counts. False, logged, when a texture could not be made again.
+	 * @brief The volumes ask for a_sizes, which they take at the next frame boundary as new versions. Each frame runs at the extents
+	 * they have, and a volume that took a new extent since the last frame starts its history again.
 	 */
-	bool Resize(const ExponentialHeightFog::GridSizes& a_sizes)
+	void FollowSizes(const ExponentialHeightFog::GridSizes& a_sizes)
 	{
 		bool resized = false;
-		for (auto [volume, size, name] : { std::tuple{ &textures->nearVolume, a_sizes.nearSize, "near" }, std::tuple{ &textures->farVolume, a_sizes.farSize, "far" } }) {
-			if (SameExtent(volume->size, size))
-				continue;
-			if (!volume->Resize(size)) {
-				logger::error("[ORG] Exponential Height Fog: the {} volume's textures could not be made again at {}x{}x{}", name, size.x, size.y, size.z);
-				return false;
+		for (auto [volume, size] : { std::pair{ &textures->nearVolume, a_sizes.nearSize }, std::pair{ &textures->farVolume, a_sizes.farSize } }) {
+			volume->RequestSize(size);
+			if (const auto current = volume->Current(); !SameExtent(volume->size, current)) {
+				volume->size = current;
+				resized = true;
 			}
-			resized = true;
 		}
 		if (resized) {
 			// The new versions hold nothing to reproject from.
 			ResetHistories();
-			logger::info("[ORG] Exponential Height Fog: the volumes resized as new versions (near {}x{}x{}, far {}x{}x{})", a_sizes.nearSize.x, a_sizes.nearSize.y,
-				a_sizes.nearSize.z, a_sizes.farSize.x, a_sizes.farSize.y, a_sizes.farSize.z);
+			const auto& nearSize = textures->nearVolume.size;
+			const auto& farSize = textures->farVolume.size;
+			logger::info("[ORG] Exponential Height Fog: the volumes are new versions (near {}x{}x{}, far {}x{}x{})", nearSize.x, nearSize.y, nearSize.z, farSize.x,
+				farSize.y, farSize.z);
 		}
-		return true;
 	}
 
 	void ResetHistories()
@@ -847,7 +851,7 @@ struct ORGExponentialHeightFog::Impl
 
 	/**
 	 * @brief A new state for a_shape over the kept textures, registered as the client. Only a change of inputs, history or
-	 * group reduction gets here; a new extent alone is Resize. False, logged, when anything could not be made.
+	 * group reduction gets here; a new extent alone is FollowSizes. False, logged, when anything could not be made.
 	 */
 	bool Build(const Shape& a_shape)
 	{
@@ -1069,11 +1073,12 @@ bool ORGExponentialHeightFog::Prepass()
 	fog.BuildConstants(inputs, farEnabled);
 	shape.farEnabled = farEnabled;
 
-	// A new extent alone (a resolution change, the dynamic resolution, a grid setting) resizes the volumes as new versions,
-	// with no build. Other changes register new passes over the same textures.
-	const bool resized = !impl->textures || impl->Resize(shape.sizes);
-	if (!resized || !impl->state || !(impl->state->shape == shape)) {
-		if (!resized || !impl->Build(shape)) {
+	// A new extent alone (a resolution change, the dynamic resolution, a grid setting) is a new version of each volume from the next
+	// frame boundary, with no build. Other changes register new passes over the same textures.
+	if (impl->textures)
+		impl->FollowSizes(shape.sizes);
+	if (!impl->state || !(impl->state->shape == shape)) {
+		if (!impl->Build(shape)) {
 			logger::error("[ORG] Exponential Height Fog returns to D3D11 for good");
 			FrameAnchors::Unregister(kClientId);
 			WithdrawIntegrated();
@@ -1091,6 +1096,9 @@ bool ORGExponentialHeightFog::Prepass()
 	inputs.historyValidFar = shape.temporal && impl->hasScatteringHistoryFar && consecutive;
 	inputs.depthHistory = impl->hasDepthHistory;
 	inputs.depthHistoryFar = impl->hasDepthHistoryFar;
+	// The extents the volumes have this frame, which may still be the old ones after a new size was asked for.
+	inputs.sizes.nearSize = impl->textures->nearVolume.size;
+	inputs.sizes.farSize = impl->textures->farVolume.size;
 	data.fog = fog.BuildConstants(inputs, farEnabled);
 	impl->pending = data;
 
@@ -1112,6 +1120,13 @@ ID3D11ShaderResourceView* ORGExponentialHeightFog::NearSRV() const
 ID3D11ShaderResourceView* ORGExponentialHeightFog::FarSRV() const
 {
 	return IsActive() && impl->state && impl->ranLastFrame ? impl->textures->farVolume.integrated->SRV() : nullptr;
+}
+
+std::optional<std::pair<std::uint32_t, std::uint32_t>> ORGExponentialHeightFog::Slices() const
+{
+	if (!NearSRV())
+		return std::nullopt;
+	return std::pair{ impl->textures->nearVolume.integrated->Desc().Depth, impl->textures->farVolume.integrated->Desc().Depth };
 }
 
 void ORGExponentialHeightFog::Release()
@@ -1142,6 +1157,7 @@ bool ORGExponentialHeightFog::IsActive() const { return false; }
 bool ORGExponentialHeightFog::Prepass() { return false; }
 ID3D11ShaderResourceView* ORGExponentialHeightFog::NearSRV() const { return nullptr; }
 ID3D11ShaderResourceView* ORGExponentialHeightFog::FarSRV() const { return nullptr; }
+std::optional<std::pair<std::uint32_t, std::uint32_t>> ORGExponentialHeightFog::Slices() const { return std::nullopt; }
 void ORGExponentialHeightFog::Release() {}
 
 #endif

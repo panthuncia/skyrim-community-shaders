@@ -111,6 +111,11 @@ ExponentialHeightFog::Settings ExponentialHeightFog::GetCommonBufferData() const
 
 	if (IsSuppressed())
 		data.enabled = 0;
+	// The render graph's volumes take a new slice count at the next frame boundary, so the readers use the count they have.
+	if (const auto slices = ORGExponentialHeightFog::Get().Slices()) {
+		data.volumetricGridSizeZ = slices->first;
+		data.volumetricFarGridSizeZ = slices->second;
+	}
 
 	return data;
 }

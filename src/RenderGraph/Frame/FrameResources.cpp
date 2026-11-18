@@ -38,11 +38,17 @@ namespace RenderGraph::Frame::Resources
 													 found->second.lifetime == a_lifetime) {
 			auto& texture = *found->second.texture;
 			const auto& desc = texture.Desc();
-			if (SameClass(desc, a_desc) && desc.Width == a_desc.Width && desc.Height == a_desc.Height)
+			if (SameClass(desc, a_desc) && desc.Width == a_desc.Width && desc.Height == a_desc.Height) {
+				// Its own size again drops a size it asked for before.
+				if (versioned)
+					texture.RequestSize(a_desc.Width, a_desc.Height);
 				return { found->second.texture, false };
-			// A new size of a versioned texture: the slot's next version. Nothing is built again.
-			if (versioned && SameClass(desc, a_desc) && texture.Resize(a_desc.Width, a_desc.Height)) {
-				logger::info("[ORG] frame resources: {} resized to {}x{} (a new version of its slot)", a_name, a_desc.Width, a_desc.Height);
+			}
+			// A new size of a versioned texture is the slot's next version from the next frame boundary, before the new registration's
+			// build can switch in.
+			if (versioned && SameClass(desc, a_desc)) {
+				texture.RequestSize(a_desc.Width, a_desc.Height);
+				logger::info("[ORG] frame resources: {} takes {}x{} at the next frame boundary (a new version of its slot)", a_name, a_desc.Width, a_desc.Height);
 				return { found->second.texture, true };
 			}
 		}

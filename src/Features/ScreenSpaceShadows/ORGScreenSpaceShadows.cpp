@@ -387,16 +387,9 @@ ID3D11ShaderResourceView* ORGScreenSpaceShadows::Prepass()
 	if (!IsActive())
 		return nullptr;
 	auto& state = *impl->state;
-	// A resolution change: the shadow mask was made again at another size. The output follows it as a new version of its slot,
-	// with no graph build; the group counts come from each frame's dispatch list.
-	if (const auto size = ShadowMaskSize(); size && (size->first != state.output->Desc().Width || size->second != state.output->Desc().Height)) {
-		if (!state.output->Resize(size->first, size->second) || !*state.output || !state.output->SRV() || !state.output->Versioned()) {
-			logger::error("[ORG] Screen Space Shadows returns to D3D11: its texture could not be resized to {}x{}", size->first, size->second);
-			Stop();
-			return nullptr;
-		}
-		logger::info("[ORG] Screen Space Shadows: the shadow texture is now {}x{}", size->first, size->second);
-	}
+	// The shadow mask made again at another size. The output takes that size at the next frame boundary as a new version.
+	if (const auto size = ShadowMaskSize())
+		state.output->RequestSize(size->first, size->second);
 	bool changed = false;
 	// The sample count follows the settings and the render size (as GetComputeRaymarch's recompile does). The passes are made
 	// again with the new program: a graph rebuild, only when the count changes.

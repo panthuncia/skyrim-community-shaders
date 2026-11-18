@@ -10,6 +10,7 @@
 #	include "RenderGraph/BuildManager.h"
 #	include "RenderGraph/DxvkImageImport.h"
 #	include "RenderGraph/DxvkOrgInterop.h"
+#	include "RenderGraph/Frame/FrameDriver.h"
 #	include "RenderGraph/RenderGraphRuntime.h"
 #	include "Utils/D3D.h"
 
@@ -755,11 +756,76 @@ namespace GraphResources
 		return true;
 	}
 
+	namespace
+	{
+		/** @brief A twin's resize waiting for the next frame boundary. */
+		struct SizeRequest
+		{
+			std::weak_ptr<const void> alive;
+			std::function<void()> apply;
+		};
+
+		std::vector<SizeRequest>& SizeRequests()
+		{
+			static std::vector<SizeRequest> s_requests;
+			return s_requests;
+		}
+
+		/** @brief Every waiting resize, at the frame boundary. A twin destroyed since has none. */
+		void ApplySizeRequests()
+		{
+			for (auto& request : std::exchange(SizeRequests(), {}))
+				if (const auto alive = request.alive.lock())
+					request.apply();
+		}
+	}
+
+	void Resource::RequestExtent(const std::array<UINT, 3>& a_size, bool a_current, std::function<void(const std::array<UINT, 3>&)> a_resize)
+	{
+		if (a_current) {
+			requestedSize.reset();
+			return;
+		}
+		if (requestedSize == a_size)
+			return;
+		const bool queued = requestedSize.has_value();
+		requestedSize = a_size;
+		if (queued)
+			return;
+		auto apply = [this, resize = std::move(a_resize)] {
+			const auto size = std::exchange(requestedSize, std::nullopt);
+			if (!size)
+				return;
+			resize(*size);
+			if (!graph || (Exported() && !d3d11)) {
+				const auto message = fmt::format("Community Shaders: {} could not be made again at {}x{}x{} at a frame boundary", name, (*size)[0], (*size)[1], (*size)[2]);
+				logger::critical("[ORG] {}", message);
+				stl::report_and_fail(message);
+			}
+		};
+		auto& requests = SizeRequests();
+		requests.push_back({ alive, std::move(apply) });
+		if (requests.size() == 1)
+			RenderGraph::Frame::Driver::AtNextBegin(ApplySizeRequests);
+	}
+
+	void Texture2D::RequestSize(UINT a_width, UINT a_height)
+	{
+		RequestExtent({ a_width, a_height, 1 }, a_width == desc.Width && a_height == desc.Height,
+			[this](const std::array<UINT, 3>& a_size) { Resize(a_size[0], a_size[1]); });
+	}
+
 	Texture3D::Texture3D(const D3D11_TEXTURE3D_DESC& a_desc, std::string a_name, Options a_options) :
 		Resource(std::move(a_name), a_options), desc(a_desc)
 	{
 		Create();
 		AdoptSlot(nullptr, false);
+	}
+
+	void Texture3D::RequestSize(UINT a_width, UINT a_height, UINT a_depth)
+	{
+		RequestExtent({ a_width, a_height, a_depth }, a_width == desc.Width && a_height == desc.Height && a_depth == desc.Depth,
+			[this](const std::array<UINT, 3>& a_size) { Resize(a_size[0], a_size[1], a_size[2]); });
 	}
 
 	void Texture3D::Create()
@@ -929,11 +995,13 @@ namespace GraphResources
 	std::shared_ptr<const StagedUpload> Texture2D::Stage(std::span<const SubresourceData>, UINT, UINT) const { return nullptr; }
 	std::shared_ptr<const StagedUpload> Texture2D::StageZeros() const { return nullptr; }
 	bool Texture2D::Resize(UINT, UINT) { return false; }
+	void Texture2D::RequestSize(UINT, UINT) {}
 	Texture3D::Texture3D(const D3D11_TEXTURE3D_DESC& a_desc, std::string a_name, Options a_options) :
 		Resource(std::move(a_name), a_options), desc(a_desc) {}
 	void Texture3D::Create() {}
 	std::shared_ptr<const StagedUpload> Texture3D::Stage(std::span<const SubresourceData>) const { return nullptr; }
 	bool Texture3D::Resize(UINT, UINT, UINT) { return false; }
+	void Texture3D::RequestSize(UINT, UINT, UINT) {}
 	StructuredBuffer::StructuredBuffer(const D3D11_BUFFER_DESC&, UINT a_count, std::string a_name, Options a_options) :
 		Resource(std::move(a_name), a_options), count(a_count) {}
 	Buffer::Buffer(const D3D11_BUFFER_DESC&, std::string a_name, Options a_options) :

@@ -8477,3 +8477,41 @@ desktop:
 
 **Not changed.** Feature prepasses that resize their versioned textures in the middle of a frame (Exponential Height Fog's grid
 sliders, Screen Space GI, Screen Space Shadows, Terrain Blending on a size change) would stop the same way. Listed in `parity/status.md`.
+
+## Size changes at the frame boundary (2026-11-18)
+
+The class the menu's font atlas belonged to: a feature that finds a new size during a frame and resizes a versioned graph texture
+there publishes a new version after the frame's Begin, and the stage's commit stops on `stale recording`.
+
+**Sweep.** Every `Resize` of a twin and every publication of a slot version:
+- Mid-frame, now fixed: Exponential Height Fog's six volume textures (its Prepass, on a grid setting or a new render size), Screen
+  Space GI's textures, Screen Space Shadows' output (their Prepass), Terrain Blending's three depths (its first depth pass), and
+  `Frame::Resources` for ImageSpace's kept textures (the steps' registration at the first ImageSpace call of a frame).
+- Already at a boundary: Terrain Shadows' height map (`AtNextBegin`), ImGui's atlas pages (`75f0892d8`), the native back buffer's
+  next version (after the frame's tail).
+- Not versions of a kept slot, so builds switch them in at a boundary: twins made again as new objects (HDR Display, Upscaling,
+  Sun Rays, Subsurface Scattering, the post effects, Cloud Shadows), resizes of twins that are not versioned (Screen Space GI's
+  aliased textures, the graph resource self-test) and `PublishedResources::Refresh`. HDR Display's toggle makes nothing new.
+- Left as they are: an engine import that takes a new D3D11 texture or more views (`FrameAnchors` `JoinSlot`, `EnsureViews`)
+  publishes when a pass first imports it. The D3D11 texture changed already, so holding the old one a frame is a different change.
+  DCLF's late-bound buffers publish their versions mid-frame by design.
+
+**Fix.** One facility in `GraphResources`. `Texture2D::RequestSize` and `Texture3D::RequestSize` record the size a feature wants. One
+`Driver::AtNextBegin` applies every waiting request as a `Resize`, before the frame's schedules are chosen. A twin destroyed by then
+is skipped, and a request for the size it has drops the waiting one. A resize that fails there stops the game. The sites above call
+`RequestSize` each frame with the size they want and keep reading `Desc()` for the size they have.
+
+**The frame in between** runs at the old size. Exponential Height Fog builds its constants and group counts from the extents its
+volumes have and starts its history again when they change. The slice counts its readers get through the shared data come from the
+volumes too (`ORGExponentialHeightFog::Slices`). Screen Space GI clamps its dispatch to its textures' size and clears its history once
+they took the new one. Terrain Blending registers its blend again for the new group counts then. ImageSpace's registration returns
+the texture as fresh, so its new build clears it, and that build switches in after the boundary.
+
+**Test.** The `resize` config turns the fog on and changes its grid settings with the new `setting` step
+(`<ShortName>.<key>=<JSON value>`, written as a menu widget writes it), then switches the upscale method to FSR and to TAA. The
+saved method was FSR at 1280x720, so the switch to TAA renders at 1920x1080 and the fog's grid follows. With the requests applied at once (the old path, a temporary build) native Vulkan stopped at the first
+setting: `slot 'ExponentialHeightFog::VBufferA' (slot 10269, version 2, recorded with 1)`
+(`1118-172144-nfg-native-vulkan-resize-bug12-old-path`). With the fix, `native-vulkan+resize`, `native-d3d12+resize` and
+`guest+resize` passed on DLL `b5d50a9e7e6a`, five volume resizes each, no tap error (`1118-172531-...-bug12-vk-final`,
+`1118-172633-...-bug12-d3d12-final`, `1118-172743-...-bug12-guest-final`). The fog's readers log one "declared view mismatch" per
+version change (`parity/status.md`). The other sites follow an engine target's size, which no run changes.

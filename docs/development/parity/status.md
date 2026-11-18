@@ -111,10 +111,14 @@ To match DXVK, native needs what DXVK's CS thread gives it: the GPU work off the
   Also in a user's native D3D12 session (RX 6600, 2026-11-18), on the loading screen:
   `[DCLF] menu scenes (Lighting): the first draw waited 9564 ms for its prebuilt program (descriptor 0x1)`, then the watchdog's
   "has not presented for 15.0 s".
-- **Mid-frame resizes in feature prepasses**: Exponential Height Fog (`ORGExponentialHeightFog::Prepass`, its Grid Depth Slices
-  sliders), Screen Space GI, Screen Space Shadows and Terrain Blending resize their versioned textures in the middle of a frame when
-  their size changes. A new version there is the fatal `stale recording` the menu's font atlas had (org-native-frame-graph.md, "Opening
-  the CS menu"). Not reproduced, not changed. The fix is the same: resize at the next frame boundary (`Driver::AtNextBegin`).
+- **Mid-frame resizes in feature prepasses**: fixed 2026-11-18. Every size change of a graph texture during a frame is now
+  `GraphResources` `RequestSize`, applied at the next frame boundary (org-native-frame-graph.md, "Size changes at the frame
+  boundary"). Exponential Height Fog's grid settings and the render-size change were reproduced and pass in all three graph modes.
+  Screen Space GI, Screen Space Shadows, Terrain Blending and ImageSpace's kept textures follow an engine target's size, which never
+  changes in a session, so their new path is not exercised by a run.
+- **Declared view checks after a version change**: DCLF's `CheckDeclaredReads` compares the descriptor a build saw with the one the
+  frame resolves, so a published versioned texture that takes a new version logs one "declared view mismatch" per reader (Exponential
+  Height Fog's volumes, 2026-11-18). The reads themselves take the current version (`PublishedResources::ShaderResourceIndex`). Not changed.
 - **Screenshots in native**: the UI stage's capture comes out without the HUD; the D3D11 copies taken when its readback buffers are busy
   have it, so the flicker bursts show the compass on every other shot. Not the import (all resolve to `Native::BackBuffer`).
 - **D3D12 views**: `CreateWords` buffers read as ByteAddressBuffer have structured views. A raw GetDimensions on them returns the element

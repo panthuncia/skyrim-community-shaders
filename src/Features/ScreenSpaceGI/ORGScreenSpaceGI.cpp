@@ -634,7 +634,10 @@ struct ORGScreenSpaceGI::Impl
 			return;
 		// The internal size from the built state's resolution mode, which the programs were made for (and the debug switch may
 		// override), as GetDispatchSizes gives it from the setting.
-		const auto full = feature.GetDispatchSizes().full;
+		auto full = feature.GetDispatchSizes().full;
+		// A frame between a resolution change and the next frame boundary still has the textures at their old size.
+		full[0] = (std::min)(full[0], static_cast<uint>(state->ao->Desc().Width));
+		full[1] = (std::min)(full[1], static_cast<uint>(state->ao->Desc().Height));
 		const auto shift = static_cast<uint>(state->config.resolutionMode);
 		const std::array<uint, 2> internal{ full[0] >> shift, full[1] >> shift };
 		const auto open = [&](Step a_step, const std::array<uint, 2>& a_size, uint a_tile) {
@@ -803,22 +806,17 @@ void ORGScreenSpaceGI::Prepass()
 		return;
 	}
 
-	// A resolution change: every texture follows the main target's new size. The versioned ones (history and exported) become
-	// new versions, which the composite's reads of the published ids follow with no build. The aliased ones are new resources,
-	// so the chain's anchor is built again (through the build manager), and the chain is registered again for its copy's size.
-	// The group counts come from each frame's dispatch sizes.
+	// A resolution change. Every texture takes the main target's size at the next frame boundary, and once they have it the chain is
+	// registered again for its copy's size and its history cleared.
+	if (D3D11_TEXTURE2D_DESC main{}; MainDesc(main))
+		for (const auto* texture : self.state->All())
+			if (*texture)
+				(*texture)->RequestSize(main.Width, main.Height);
 	bool resized = false;
-	if (D3D11_TEXTURE2D_DESC main{}; MainDesc(main) && (main.Width != self.main.Width || main.Height != self.main.Height)) {
-		self.main.Width = main.Width;
-		self.main.Height = main.Height;
-		for (const auto* texture : self.state->All()) {
-			if (!*texture)
-				continue;
-			(*texture)->Resize(main.Width, main.Height);
-			if (!**texture || ((*texture)->Exported() && !(*texture)->SRV()))
-				return fail("a texture could not be resized");
-		}
-		logger::info("[ORG] Screen Space GI: its textures are now {}x{}", main.Width, main.Height);
+	if (const auto& desc = self.state->ao->Desc(); desc.Width != self.main.Width || desc.Height != self.main.Height) {
+		self.main.Width = desc.Width;
+		self.main.Height = desc.Height;
+		logger::info("[ORG] Screen Space GI: its textures are now {}x{}", desc.Width, desc.Height);
 		resized = true;
 	}
 

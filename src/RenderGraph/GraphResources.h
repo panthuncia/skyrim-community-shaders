@@ -1,7 +1,9 @@
 #pragma once
 
 #include <d3d11.h>
+#include <array>
 #include <cstdint>
+#include <functional>
 #include <optional>
 #include <memory>
 #include <span>
@@ -45,6 +47,9 @@ namespace org
  *   (ResizeGeneration). At their next run the frame anchors see it and build their graphs again (RequestStructuralRebuild), and
  *   PublishedResources publishes the new resource under the twin's id: the owner calls nothing. Passes read Graph() when they
  *   are made (ClientDesc's make), never keep one across builds.
+ * - A new version may be published only at a frame boundary, because a stage's recording binds the versions current at the
+ *   frame's Begin. During a frame a feature calls RequestSize, which Frame::Driver::AtNextBegin applies as a Resize.
+ *   Until then the twin keeps its size and Desc(), and that frame takes its sizes from Desc(). A failed resize there stops the game.
  *
  * Everything here runs on the render thread. Constructors never throw: a twin that could not be created is false (logged), and the feature
  * keeps its D3D11 path.
@@ -253,6 +258,12 @@ namespace GraphResources
 		static void BumpResizeGeneration(std::string_view a_who);
 
 		/**
+		 * @brief RequestSize's work. a_size becomes the twin's next size and a_resize runs at the next frame boundary if the twin lives.
+		 * With a_current set a_size is the size the twin has, which drops an earlier request.
+		 */
+		void RequestExtent(const std::array<UINT, 3>& a_size, bool a_current, std::function<void(const std::array<UINT, 3>&)> a_resize);
+
+		/**
 		 * @brief After Create: the slot of a versioned texture. With a_previous (the slot before a Resize) and a_sameShape, the new
 		 * texture is published as its next version and true is returned: nothing needs a build. Otherwise a new slot is made (or none,
 		 * for a twin that is not versioned) and false is returned: the caller bumps the resize generation.
@@ -267,6 +278,7 @@ namespace GraphResources
 		std::shared_ptr<const void> alive = std::make_shared<const int>(0);
 		std::shared_ptr<org::Resource> graph;
 		std::shared_ptr<org::VersionedTexture> slot;  // a versioned texture's (Options::versioned)
+		std::optional<std::array<UINT, 3>> requestedSize;  // RequestSize's, until the next frame boundary
 		// The exported texture or buffer, as DXVK returned it: one COM object, so the derived twins' D3D11() casts it down.
 		winrt::com_ptr<ID3D11Resource> d3d11;
 		winrt::com_ptr<ID3D11ShaderResourceView> srv;
@@ -314,10 +326,17 @@ namespace GraphResources
 
 		/**
 		 * @brief Recreates the texture at a new size (a resolution change), the export first released. A versioned texture of the same
-		 * mip count becomes the slot's next version: nothing else to call. Otherwise call FrameAnchors::Refresh.
+		 * mip count becomes the slot's next version: nothing else to call. Otherwise call FrameAnchors::Refresh. Only at a frame
+		 * boundary. During a frame use RequestSize.
 		 * @return Whether it was recreated; false, with nothing changed, when the size is the same.
 		 */
 		bool Resize(UINT a_width, UINT a_height);
+
+		/**
+		 * @brief The size the texture takes at the next frame boundary through Resize. Until then it keeps its size and Desc().
+		 * Its own size drops an earlier request. Render thread, at any point of a frame.
+		 */
+		void RequestSize(UINT a_width, UINT a_height);
 
 	private:
 		void Create();
@@ -338,6 +357,9 @@ namespace GraphResources
 
 		/** @brief Texture2D::Resize with a depth. */
 		bool Resize(UINT a_width, UINT a_height, UINT a_depth);
+
+		/** @brief Texture2D::RequestSize with a depth. */
+		void RequestSize(UINT a_width, UINT a_height, UINT a_depth);
 
 	private:
 		void Create();

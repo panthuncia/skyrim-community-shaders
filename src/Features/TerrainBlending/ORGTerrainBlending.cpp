@@ -72,6 +72,7 @@ struct ORGTerrainBlending::Impl
 	FrameAnchors::Texture terrainDepth;
 	// Whether the client is registered with the textures and imports as they are now.
 	bool registered = false;
+	std::pair<UINT, UINT> registeredSize{};  // the textures' size at the registration, which its group counts follow
 
 	/** @brief The three twins, in the order they are published. */
 	std::array<std::pair<std::string_view, GraphResources::Texture2D*>, 3> Outputs() const
@@ -368,6 +369,7 @@ bool ORGTerrainBlending::RegisterClient()
 		logger::error("[ORG] Terrain Blending: its run gate could not be created");
 		return false;
 	}
+	impl->registeredSize = { desc.Width, desc.Height };
 	const std::uint32_t groupsX = (desc.Width + kGroupSize - 1) / kGroupSize;
 	const std::uint32_t groupsY = (desc.Height + kGroupSize - 1) / kGroupSize;
 	RenderGraph::AnchorPasses::Builder builder(FrameAnchors::Anchor::DepthDone, kClientId, 0, {}, gate);
@@ -464,18 +466,15 @@ bool ORGTerrainBlending::BeforeDepth()
 	if (!Active() || !FrameAnchors::HasEpoch(FrameAnchors::Anchor::DepthDone))
 		return false;
 	bool changed = !impl->registered;
-	// A resolution change: new engine depth textures, and the blended depths follow the main target's size. Each twin's resize is a
-	// new version of its slot, which the readers of the published ids follow with no build. The blend is made again for its group
-	// counts and the new engine depths (its own anchor only).
+	// A resolution change. The blended depths take the main target's size at the next frame boundary as new versions, and once they
+	// have it the blend is registered again for its group counts.
 	UINT width = 0, height = 0;
-	if (MainSize(width, height) && (width != impl->blendedDepth->Desc().Width || height != impl->blendedDepth->Desc().Height)) {
-		for (const auto& [id, texture] : impl->Outputs()) {
-			if (!texture->Resize(width, height) || !*texture || !texture->SRV()) {
-				Fail("its textures could not be resized");
-				return false;
-			}
-		}
-		logger::info("[ORG] Terrain Blending: the depth blend's textures are now {}x{}", width, height);
+	if (MainSize(width, height))
+		for (const auto& [id, texture] : impl->Outputs())
+			texture->RequestSize(width, height);
+	if (const auto& desc = impl->blendedDepth->Desc(); desc.Width != impl->registeredSize.first || desc.Height != impl->registeredSize.second) {
+		if (impl->registered)
+			logger::info("[ORG] Terrain Blending: the depth blend's textures are now {}x{}", desc.Width, desc.Height);
 		changed = true;
 	}
 	auto mainDepth = MainDepth();
