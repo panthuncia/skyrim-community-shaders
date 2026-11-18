@@ -384,6 +384,40 @@ namespace Testing
 			return true;
 		}
 
+		bool SetSetting(const std::string& a_arg, std::string& a_error)
+		{
+			// "<ShortName>.<key>=<JSON value>", one setting written as a menu widget writes it (through the feature's settings JSON).
+			const auto dot = a_arg.find('.');
+			const auto equals = a_arg.find('=');
+			if (dot == std::string::npos || equals == std::string::npos || equals < dot) {
+				a_error = fmt::format("'{}' is not <feature>.<key>=<value>", a_arg);
+				return false;
+			}
+			const auto name = a_arg.substr(0, dot);
+			const auto key = a_arg.substr(dot + 1, equals - dot - 1);
+			const auto& list = Feature::GetFeatureList();
+			const auto found = std::ranges::find_if(list, [&](Feature* a_feature) { return a_feature && a_feature->GetShortName() == name; });
+			if (found == list.end()) {
+				a_error = fmt::format("no feature '{}'", name);
+				return false;
+			}
+			json settings;
+			(*found)->SaveSettings(settings);
+			if (!settings.is_object() || !settings.contains(key)) {
+				a_error = fmt::format("{} has no setting '{}'", name, key);
+				return false;
+			}
+			const auto value = json::parse(a_arg.substr(equals + 1), nullptr, false);
+			if (value.is_discarded()) {
+				a_error = fmt::format("'{}' is not a JSON value", a_arg.substr(equals + 1));
+				return false;
+			}
+			settings[key] = value;
+			(*found)->LoadSettings(settings);
+			logger::info("[TEST] setting {}.{} = {}", name, key, value.dump());
+			return true;
+		}
+
 		void RegisterGeneric()
 		{
 			RegisterCommand("console", ConsoleCommand);
@@ -396,6 +430,7 @@ namespace Testing
 			RegisterCommand("window", Window);
 			RegisterCommand("weather", Weather);
 			RegisterCommand("feature", SetFeature);
+			RegisterCommand("setting", SetSetting);
 			RegisterCommand("cast", Cast::Start);
 			RegisterCommand("move", [](const std::string& a_arg, std::string& a_error) { return ParseMotion(a_arg, moving, a_error); });
 			RegisterCommand("turn", [](const std::string& a_arg, std::string& a_error) { return ParseMotion(a_arg, turning, a_error); });
