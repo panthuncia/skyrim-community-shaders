@@ -30,7 +30,7 @@ namespace org
  * images, CS's shared constants as the D3D11 dispatch does, and the directional shadow data from a latch. A run gate holds its group counts: a frame without an update (an interior, the map menu)
  * dispatches nothing.
  *
- * Everything here runs on the render thread. When the graph fails, the client is dropped and Skylighting returns to its D3D11 dispatch.
+ * Everything here runs on the render thread.
  *
  * Header deliberately free of ORG/Vulkan includes (see RenderGraphRuntime.h).
  */
@@ -67,10 +67,9 @@ public:
 	/**
 	 * @brief At SetupResources, with the runtime active: makes the program, sampler, latch, gate and volumes (a_feature's probe grid)
 	 * and registers the anchor client, whose one-shot passes reset the volumes at its first run.
-	 * @param a_onFailed Called once if the graph fails later; Skylighting returns to D3D11.
 	 * @return Whether the probe update runs on the render graph; false keeps Skylighting on D3D11.
 	 */
-	bool Setup(const Skylighting& a_feature, std::function<void()> a_onFailed);
+	bool Setup(const Skylighting& a_feature);
 
 	/**
 	 * @brief At SetupResources, before Setup, when requested and the runtime is active: makes the sky occlusion map as a graph-owned
@@ -101,7 +100,7 @@ public:
 	 */
 	bool TakeOcclusionCleared();
 
-	/** @brief Whether the probe update runs on the render graph: set up, not failed, and the runtime still up. */
+	/** @brief Whether the probe update runs on the render graph: set up, and the runtime still up. */
 	bool IsActive() const;
 
 	/** @brief A volume's exported D3D11 view; null when inactive. */

@@ -20,8 +20,7 @@
  * anchor runs after the shadow maps and before Main::RenderDepth, so before every main-view grass draw: the engine's Z-prepass and
  * main pass, and DCLF's depth commit, which writes the grass draw row from what GrassShared holds.
  *
- * Fallback: when the program or resources cannot be made, Setup returns false and Grass Collision keeps its D3D11 path. When the
- * graph fails later, the client is unregistered and a_onFailed (from Setup) brings the D3D11 path back.
+ * Fallback: when the program or resources cannot be made, Setup returns false and Grass Collision keeps its D3D11 path.
  *
  * Header deliberately free of ORG/Vulkan includes (see RenderGraphRuntime.h). Everything here runs on the render thread.
  */
@@ -61,10 +60,9 @@ public:
 
 	/**
 	 * @brief At SetupResources, with the runtime active: makes the program, latch block and graph resources and registers the client.
-	 * @param a_onFailed Called once if the graph fails later; Grass Collision returns to D3D11.
 	 * @return Whether the update runs on the render graph; false keeps Grass Collision on D3D11.
 	 */
-	bool Setup(const Limits& a_limits, std::function<void()> a_onFailed);
+	bool Setup(const Limits& a_limits);
 
 	/** @brief Whether the update runs on the render graph: set up, not failed, and the runtime still up. */
 	bool IsActive() const;

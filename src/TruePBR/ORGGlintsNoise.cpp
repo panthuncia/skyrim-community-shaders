@@ -137,21 +137,11 @@ bool ORGGlintsNoise::RegisterClient(const std::shared_ptr<Impl>& a_impl)
 		a_impl->filled = true;
 		logger::info("[ORG] TruePBR glints: the noise was filled; the fill pass is dropped");
 	};
-	client.onFailed = [] {
-		logger::error("[ORG] TruePBR glints: the render graph failed; back to D3D11");
-		PublishedResources::Withdraw(kNoiseId);
-		UnbindNoise();
-		auto& self = Get();
-		self.failed = true;
-		self.impl.reset();
-		if (self.onFailed)
-			self.onFailed();
-	};
 	a_impl->filled = false;
 	return FrameAnchors::Register(std::move(client));
 }
 
-bool ORGGlintsNoise::Setup(std::function<void()> a_onFailed)
+bool ORGGlintsNoise::Setup()
 {
 	if (!Requested() || failed || impl)
 		return impl != nullptr;
@@ -161,7 +151,6 @@ bool ORGGlintsNoise::Setup(std::function<void()> a_onFailed)
 		logger::warn("[ORG] TruePBR glints: CS_ORG_GLINTS=1 but the render graph or its EarlyPrepass anchor is not available; back to D3D11");
 		return false;
 	}
-	onFailed = std::move(a_onFailed);
 	auto next = std::make_shared<Impl>();
 	next->program = LoadFillProgram(host->Device());
 	if (!next->program) {
@@ -211,7 +200,7 @@ void ORGGlintsNoise::ClearShaderCache()
 		if (programFailed) {
 			failed = false;
 			programFailed = false;
-			Setup(onFailed);
+			Setup();
 		}
 		return;
 	}
@@ -242,7 +231,7 @@ struct ORGGlintsNoise::Impl
 {};
 
 void ORGGlintsNoise::Reserve() {}
-bool ORGGlintsNoise::Setup(std::function<void()>) { return false; }
+bool ORGGlintsNoise::Setup() { return false; }
 bool ORGGlintsNoise::Active() const { return false; }
 bool ORGGlintsNoise::Filled() const { return false; }
 ID3D11ShaderResourceView* ORGGlintsNoise::NoiseSRV() const { return nullptr; }

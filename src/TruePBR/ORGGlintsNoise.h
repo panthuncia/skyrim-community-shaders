@@ -18,11 +18,8 @@
  *   engine's Lighting pixel shaders until those draws are ported. Until the fill ran TruePBR binds nothing there. It is also published under its name, and Drawcall Limit Fix's
  *   colour passes read it from there (Integrations/TruePBR), ordered after the fill.
  *
- * The render graph has no device reset. When the graph fails, the client is dropped and TruePBR goes back to D3D11, where the
- * noise is made again on its next Prepass.
- *
- * On any failure (no runtime, a shader that does not compile, a texture that cannot be made, the graph stopping) it stops for
- * good and Active() turns false.
+ * On any failure (no runtime, a shader that does not compile, a texture that cannot be made) it stops for good and Active()
+ * turns false.
  *
  * Everything here runs on the render thread. Header deliberately free of ORG/Vulkan includes (see RenderGraphRuntime.h).
  */
@@ -44,10 +41,9 @@ public:
 	/**
 	 * @brief After the render graph initializes (TruePBR::PostSetupResources), when requested: makes the program and the texture,
 	 * registers the client with its one-shot fill and publishes the texture. The device is the graph host's.
-	 * @param a_onFailed Called when the graph fails later and the noise returns to D3D11.
 	 * @return Whether the noise is on the render graph; false keeps the D3D11 path.
 	 */
-	bool Setup(std::function<void()> a_onFailed = {});
+	bool Setup();
 
 	/** @brief Whether the noise is the graph's, its client is registered and the runtime is still up. */
 	bool Active() const;
@@ -79,7 +75,6 @@ private:
 	void Fail();
 
 	std::shared_ptr<Impl> impl;
-	std::function<void()> onFailed;
 	bool failed = false;
 	bool programFailed = false;  // the failure was the fill program's compile, which a shader reload may fix
 };

@@ -33,7 +33,7 @@
  * (FrameAnchors). The engine's targets (scene depth, shadow maps) are its imports. Without the sky the shader reads no terrain
  * or cloud shadow, so those inputs are left out then. A frame whose inputs the graph cannot read (Light Limit Fix or
  * Skylighting still on D3D11, a missing Cloud or Terrain Shadows texture) runs on the D3D11 path instead; a failed program or
- * graph returns the feature to D3D11 for good.
+ * registration returns the feature to D3D11 for good.
  *
  * Render thread throughout. Header deliberately free of ORG/Vulkan includes (see RenderGraphRuntime.h).
  */
@@ -55,10 +55,9 @@ public:
 	/**
 	 * @brief At SetupResources, with the runtime active: makes the programs, samplers, latch and run gate. The client is
 	 * registered at the first Prepass, when the grid sizes and inputs are known, and again when they change.
-	 * @param a_onFailed Called once if the graph fails later; the feature returns to D3D11.
 	 * @return Whether the volumetric fog can run on the render graph; false keeps it on D3D11.
 	 */
-	bool Setup(std::function<void()> a_onFailed);
+	bool Setup();
 
 	/** @brief Whether the render-graph path is set up and the runtime is still up. */
 	bool IsActive() const;

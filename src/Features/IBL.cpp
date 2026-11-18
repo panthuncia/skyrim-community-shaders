@@ -333,7 +333,7 @@ void IBL::CreateSHTextures()
 
 void IBL::SetupResources()
 {
-	// The render graph's SH textures replace the D3D11 ones; on a later graph failure the D3D11 path makes its own.
+	// The render graph's SH textures replace the D3D11 ones; if the runtime stops later the D3D11 path makes its own.
 	if (!ORGIBL::Get().Setup([this] { CreateSHTextures(); }))
 		CreateSHTextures();
 

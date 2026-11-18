@@ -922,7 +922,6 @@ bool ORGDynamicCubemaps::RegisterClient()
 		if (self->impl)
 			self->impl->Commit();
 	};
-	client.onFailed = [self] { self->Fail("the render graph failed", false); };
 	return FrameAnchors::Register(std::move(client));
 }
 
@@ -934,11 +933,10 @@ void ORGDynamicCubemaps::Withdraw()
 	}
 }
 
-void ORGDynamicCubemaps::Fail(const char* a_reason, bool a_unregister)
+void ORGDynamicCubemaps::Fail(const char* a_reason)
 {
 	logger::error("[ORG] Dynamic Cubemaps returns to D3D11: {}", a_reason);
-	if (a_unregister)
-		FrameAnchors::Unregister(kClientId);
+	FrameAnchors::Unregister(kClientId);
 	Withdraw();
 	auto failed = std::move(impl);
 	// The feature drops its views of the exported textures first: they go when the graph's resources are released below.
@@ -963,9 +961,9 @@ bool ORGDynamicCubemaps::AfterUpdate()
 {
 	if (!impl)
 		return false;
-	// The runtime stopped without a failed epoch of this anchor (another epoch faulted): leave as onFailed does, this frame skipped.
+	// The runtime stopped: this frame is skipped.
 	if (!RenderGraphRuntime::Get().IsActive()) {
-		Fail("the render graph is no longer active", true);
+		Fail("the render graph is no longer active");
 		return true;
 	}
 	auto& state = *impl;
@@ -973,7 +971,7 @@ bool ORGDynamicCubemaps::AfterUpdate()
 	if (state.programsDirty) {
 		auto programs = LoadPrograms(RenderGraphRuntime::Get().Host()->Device());
 		if (!programs) {
-			Fail("its programs could not be built again", true);
+			Fail("its programs could not be built again");
 			return true;
 		}
 		state.programs = std::move(programs);
@@ -1017,7 +1015,7 @@ ORGDynamicCubemaps::Outputs ORGDynamicCubemaps::Exported() const { return {}; }
 bool ORGDynamicCubemaps::AfterUpdate() { return false; }
 void ORGDynamicCubemaps::ClearShaderCache() {}
 void ORGDynamicCubemaps::Withdraw() {}
-void ORGDynamicCubemaps::Fail(const char*, bool) {}
+void ORGDynamicCubemaps::Fail(const char*) {}
 bool ORGDynamicCubemaps::RegisterClient() { return false; }
 
 #endif

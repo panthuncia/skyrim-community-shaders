@@ -25,8 +25,8 @@
  * Drawcall Limit Fix). The BC6H copy cannot be a dispatch (no UAV of a block-compressed format), so it runs every frame from each
  * cubemap's persistent encoder output, from the frame after that cubemap's first encode on.
  *
- * Fallback: when anything cannot be made, Setup returns false and the feature keeps its D3D11 path. When the graph fails later, the
- * client is unregistered and a_onFailed (from Setup) brings the D3D11 path back, before the exported textures are released.
+ * Fallback: when anything cannot be made, Setup returns false and the feature keeps its D3D11 path. When the runtime stops or the
+ * programs fail to build again later, the client is unregistered and a_onFailed (from Setup) brings the D3D11 path back, before the exported textures are released.
  *
  * Header deliberately free of ORG/Vulkan includes (see RenderGraphRuntime.h). Everything here runs on the render thread.
  */
@@ -50,7 +50,7 @@ public:
 	/**
 	 * @brief At SetupResources, with the runtime active and the feature's default cubemap loaded: makes the programs, the graph
 	 * textures and the latch, imports the engine targets, registers the anchor client and publishes the outputs.
-	 * @param a_onFailed Called once if the graph fails later: the feature returns to D3D11 (it must drop its views of the outputs).
+	 * @param a_onFailed Called once if the path stops later: the feature returns to D3D11 (it must drop its views of the outputs).
 	 * @return Whether the update runs on the render graph; false keeps the D3D11 path.
 	 */
 	bool Setup(std::function<void()> a_onFailed);
@@ -75,7 +75,7 @@ public:
 	/**
 	 * @brief After the anchor ran (the feature's UpdateCubemap): rebuilds the programs after ClearShaderCache, follows a new engine
 	 * target or reflections cubemap, and adds a cubemap's BC6H copy once it was first encoded. Each rebuilds the anchor's graph at
-	 * its next execution. When the runtime stopped, the feature returns to D3D11 as on a graph failure.
+	 * its next execution. When the runtime stopped, the feature returns to D3D11.
 	 * @return Whether the graph path owned this frame's update; false means the D3D11 update runs.
 	 */
 	bool AfterUpdate();
@@ -89,10 +89,10 @@ private:
 	ORGDynamicCubemaps() = default;
 
 	/**
-	 * @brief Leaves the graph path for good: the client unregistered (a_unregister; the graph's failure did that already), the outputs
-	 * withdrawn, the feature back on D3D11, then the resources released.
+	 * @brief Leaves the graph path for good: the client unregistered, the outputs withdrawn, the feature back on D3D11, then the
+	 * resources released.
 	 */
-	void Fail(const char* a_reason, bool a_unregister);
+	void Fail(const char* a_reason);
 
 	/** @brief Withdraws the published outputs: graph readers return to their D3D11 views. */
 	void Withdraw();

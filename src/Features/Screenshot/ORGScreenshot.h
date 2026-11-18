@@ -62,11 +62,8 @@ public:
 	/** @brief Reserves the Capture anchor when requested. Call before the render graph initializes (the feature's PostPostLoad). */
 	static void Reserve();
 
-	/**
-	 * @brief Registers the anchor client (the feature's SetupResources). False, logged, keeps every capture on D3D11.
-	 * @param a_onFailed Called when the graph fails later; captures then use D3D11.
-	 */
-	bool Setup(std::function<void()> a_onFailed);
+	/** @brief Registers the anchor client (the feature's SetupResources). False, logged, keeps every capture on D3D11. */
+	bool Setup();
 
 	/** @brief Whether captures go through the graph: the client is registered and the runtime is still up. */
 	bool IsActive() const;
@@ -81,9 +78,6 @@ public:
 
 	/** @brief Every capture point, after any Capture: takes a capture still waiting for a run, and hands finished readbacks to their callbacks. */
 	void Poll();
-
-	/** @brief The graph failed with the capture's pass in it: the readbacks in flight are lost and captures use D3D11 (render thread). */
-	void Fail();
 
 	/**
 	 * @brief Copies the a_width x a_height crop at a_x, a_y of a readback into a_image, in a_format. Any thread: the encoding

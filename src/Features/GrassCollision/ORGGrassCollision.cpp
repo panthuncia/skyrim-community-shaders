@@ -228,7 +228,6 @@ struct ORGGrassCollision::Impl
 	std::uint32_t boxesBytes = 0;
 	std::uint32_t instancesBytes = 0;
 	bool stagedFrame = false;  // Stage ran since the last commit
-	std::function<void()> onFailed;
 };
 
 ORGGrassCollision::~ORGGrassCollision() = default;
@@ -239,7 +238,7 @@ void ORGGrassCollision::Reserve()
 		logger::warn("[ORG] Grass Collision: the EarlyPrepass anchor could not be reserved; Grass Collision stays on D3D11");
 }
 
-bool ORGGrassCollision::Setup(const Limits& a_limits, std::function<void()> a_onFailed)
+bool ORGGrassCollision::Setup(const Limits& a_limits)
 {
 	impl.reset();
 	if (!Requested())
@@ -285,7 +284,6 @@ bool ORGGrassCollision::Setup(const Limits& a_limits, std::function<void()> a_on
 	state->resources = resources;
 	state->limits = a_limits;
 	state->staged.resize(layout.slotBytes);
-	state->onFailed = std::move(a_onFailed);
 
 	auto* self = this;
 	FrameAnchors::ClientDesc client{};
@@ -329,13 +327,6 @@ bool ORGGrassCollision::Setup(const Limits& a_limits, std::function<void()> a_on
 	};
 	// Active only with a staged frame. When another client runs the anchor without one, the update stays closed.
 	client.active = [self] { return self->impl && self->impl->stagedFrame; };
-	client.onFailed = [self] {
-		logger::error("[ORG] Grass Collision: the render graph failed; Grass Collision returns to D3D11");
-		PublishedResources::Withdraw(GrassShared::kCollisionGraphId);
-		auto failed = std::move(self->impl);
-		if (failed && failed->onFailed)
-			failed->onFailed();
-	};
 	impl = std::move(state);
 	if (!FrameAnchors::Register(std::move(client))) {
 		impl.reset();
@@ -397,7 +388,7 @@ struct ORGGrassCollision::Impl
 
 ORGGrassCollision::~ORGGrassCollision() = default;
 void ORGGrassCollision::Reserve() {}
-bool ORGGrassCollision::Setup(const Limits&, std::function<void()>) { return false; }
+bool ORGGrassCollision::Setup(const Limits&) { return false; }
 bool ORGGrassCollision::IsActive() const { return false; }
 void ORGGrassCollision::Stage(const Frame&) {}
 ID3D11ShaderResourceView* ORGGrassCollision::CollisionSRV() const { return nullptr; }

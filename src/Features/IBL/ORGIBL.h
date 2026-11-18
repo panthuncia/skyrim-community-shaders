@@ -18,7 +18,7 @@
  * cubemap clears its SH to zero, as the D3D11 path's projection of a null view does.
  *
  * Fallback: when the program, sampler or textures cannot be made, Setup returns false and IBL keeps its D3D11 path. When the
- * graph fails later, the client is unregistered, the textures are withdrawn and a_onFailed (from Setup) brings the D3D11 path
+ * runtime stops later, the client is unregistered, the textures are withdrawn and a_onFailed (from Setup) brings the D3D11 path
  * back.
  *
  * Header deliberately free of ORG/Vulkan includes (see RenderGraphRuntime.h). Everything here runs on the render thread.
@@ -40,7 +40,7 @@ public:
 
 	/**
 	 * @brief At SetupResources, with the runtime active: makes the program, sampler and SH textures and registers the anchor client.
-	 * @param a_onFailed Called once if the graph fails later; IBL returns to D3D11.
+	 * @param a_onFailed Called once if the runtime stops later; IBL returns to D3D11.
 	 * @return Whether the SH runs on the render graph; false keeps IBL on D3D11.
 	 */
 	bool Setup(std::function<void()> a_onFailed);
@@ -50,8 +50,7 @@ public:
 
 	/**
 	 * @brief IBL's Prepass, before the Prepass anchor runs: imports this frame's source cubemaps and rebuilds the passes when they
-	 * or the environment's use (a_useEnvironment: the DALC mode reads it) changed. When the runtime stopped, IBL returns to D3D11
-	 * as on a graph failure.
+	 * or the environment's use (a_useEnvironment: the DALC mode reads it) changed. When the runtime stopped, IBL returns to D3D11.
 	 * @return Whether the anchor computes the SH this frame; false means the D3D11 dispatches run.
 	 */
 	bool Prepass(bool a_useEnvironment);
@@ -66,10 +65,10 @@ private:
 	ORGIBL() = default;
 
 	/**
-	 * @brief Leaves the graph path: the client unregistered (a_unregister; a failed epoch did that already), the SH textures
-	 * withdrawn, then a_onFailed from Setup brings the D3D11 path back.
+	 * @brief Leaves the graph path: the client unregistered, the SH textures withdrawn, then a_onFailed from Setup brings the
+	 * D3D11 path back.
 	 */
-	void Fail(const char* a_reason, bool a_unregister);
+	void Fail(const char* a_reason);
 
 	struct Impl;
 	std::unique_ptr<Impl> impl;

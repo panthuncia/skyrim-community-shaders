@@ -720,7 +720,6 @@ namespace
 struct ORGExponentialHeightFog::Impl
 {
 	std::shared_ptr<const Fixed> fixed;
-	std::function<void()> onFailed;
 	// Made at the first build and kept: a new extent resizes them in place, a new shape only makes new passes.
 	std::shared_ptr<Textures> textures;
 	std::shared_ptr<const FogState> state;
@@ -896,16 +895,6 @@ struct ORGExponentialHeightFog::Impl
 		client.commit = [this, shared](const FrameAnchors::Point&) { Commit(*shared); };
 		// The fog has work on a run only when Prepass gave the graph this frame.
 		client.active = [this] { return pending.has_value(); };
-		client.onFailed = [] {
-			logger::error("[ORG] Exponential Height Fog returns to D3D11: the render graph failed");
-			auto& self = Get();
-			WithdrawIntegrated();
-			self.failed = true;
-			auto onFailed = self.impl ? std::move(self.impl->onFailed) : std::function<void()>{};
-			self.impl.reset();
-			if (onFailed)
-				onFailed();
-		};
 		client.sharedConstants = true;
 		client.gates = { fixed->gate };
 		if (!FrameAnchors::Register(std::move(client)))
@@ -926,7 +915,7 @@ void ORGExponentialHeightFog::Reserve()
 		logger::warn("[ORG] Exponential Height Fog: the Prepass anchor could not be reserved; the fog stays on D3D11");
 }
 
-bool ORGExponentialHeightFog::Setup(std::function<void()> a_onFailed)
+bool ORGExponentialHeightFog::Setup()
 {
 	impl.reset();
 	if (!Requested() || failed)
@@ -952,7 +941,6 @@ bool ORGExponentialHeightFog::Setup(std::function<void()> a_onFailed)
 	}
 	impl = std::make_unique<Impl>();
 	impl->fixed = std::move(fixed);
-	impl->onFailed = std::move(a_onFailed);
 	logger::info("[ORG] Exponential Height Fog: the volumetric fog can run on the render graph");
 	return true;
 }
@@ -1152,7 +1140,7 @@ struct ORGExponentialHeightFog::Impl
 
 ORGExponentialHeightFog::~ORGExponentialHeightFog() = default;
 void ORGExponentialHeightFog::Reserve() {}
-bool ORGExponentialHeightFog::Setup(std::function<void()>) { return false; }
+bool ORGExponentialHeightFog::Setup() { return false; }
 bool ORGExponentialHeightFog::IsActive() const { return false; }
 bool ORGExponentialHeightFog::Prepass() { return false; }
 ID3D11ShaderResourceView* ORGExponentialHeightFog::NearSRV() const { return nullptr; }

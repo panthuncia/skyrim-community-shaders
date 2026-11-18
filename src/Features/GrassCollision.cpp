@@ -359,8 +359,8 @@ void GrassCollision::SetupResources()
 		.maxInstances = MAX_COLLISIONS,
 		.instanceStride = sizeof(float4),
 		.texture = CollisionTextureDesc() };
-	// The render graph's collision texture replaces the D3D11 one; on a later graph failure the D3D11 path makes its own.
-	if (!ORGGrassCollision::Get().Setup(limits, [this] { CreateD3D11Resources(); }))
+	// The render graph's collision texture replaces the D3D11 one.
+	if (!ORGGrassCollision::Get().Setup(limits))
 		CreateD3D11Resources();
 }
 

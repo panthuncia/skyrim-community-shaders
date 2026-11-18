@@ -160,7 +160,6 @@ struct ORGHDRDisplay::Impl
 	std::shared_ptr<const ComputeProgram> program;
 	bool programDirty = false;
 	std::shared_ptr<org::LatchBlock> latch;
-	std::function<void()> onFailed;
 
 	// A movie frame's scene clear: its program (null when it did not build: PrepareMovieDraw clears on D3D11) and its gate.
 	std::shared_ptr<const ComputeProgram> clearProgram;
@@ -188,7 +187,7 @@ void ORGHDRDisplay::Reserve()
 		logger::warn("[ORG] HDR Display stays on D3D11: the HDROutput anchor could not be reserved");
 }
 
-bool ORGHDRDisplay::Setup(std::function<void()> a_onFailed)
+bool ORGHDRDisplay::Setup()
 {
 	if (impl)
 		return true;
@@ -217,7 +216,6 @@ bool ORGHDRDisplay::Setup(std::function<void()> a_onFailed)
 	state->clearProgram = ComputeProgram::Load(host->Device(), { .source = kClearShader, .constantWords = ShaderBindings::Words<ClearBlock>(), .commonDefines = false });
 	if (!state->clearProgram)
 		logger::warn("[ORG] HDR Display: {} could not be built; a movie frame's scene clear stays on D3D11", kClearShader);
-	state->onFailed = std::move(a_onFailed);
 	impl = std::move(state);
 	return true;
 }
@@ -228,10 +226,7 @@ void ORGHDRDisplay::Fail(const char* a_why)
 		logger::error("[ORG] HDR Display returns to D3D11: {}", a_why);
 	failed = true;
 	FrameAnchors::Unregister(kClientId);
-	auto onFailed = impl ? std::move(impl->onFailed) : std::function<void()>();
 	impl.reset();
-	if (onFailed)
-		onFailed();
 }
 
 void ORGHDRDisplay::ClearShaderCache()
@@ -397,8 +392,6 @@ ORGHDRDisplay::Composed ORGHDRDisplay::Compose(const HDRDisplay::HDRDataCB& a_co
 			if (self.impl->clearGroupsX)
 				self.impl->gate->OpenDispatch(kSceneClearEntry, self.impl->clearGroupsX, self.impl->clearGroupsY, 1);
 		};
-		// Run unregisters the clients before this; Compose stops the path once Run returns.
-		client.onFailed = [] { Get().graphFailed = true; };
 		if (!FrameAnchors::Register(std::move(client))) {
 			Fail("its client could not be registered on the HDROutput anchor");
 			return Composed::None;
@@ -415,10 +408,6 @@ ORGHDRDisplay::Composed ORGHDRDisplay::Compose(const HDRDisplay::HDRDataCB& a_co
 	state.clearGroupsY = a_clearScene ? (sceneDesc.Height + kClearGroupSize - 1) / kClearGroupSize : 0;
 	const bool ran = FrameAnchors::Run(FrameAnchors::Anchor::HDROutput);
 	state.clearGroupsX = state.clearGroupsY = 0;
-	if (graphFailed) {
-		Fail("the render graph failed");
-		return Composed::None;
-	}
 	if (!ran)
 		return Composed::None;
 	uiCleared = true;
@@ -433,7 +422,7 @@ struct ORGHDRDisplay::Impl
 
 ORGHDRDisplay::~ORGHDRDisplay() = default;
 void ORGHDRDisplay::Reserve() {}
-bool ORGHDRDisplay::Setup(std::function<void()>) { return false; }
+bool ORGHDRDisplay::Setup() { return false; }
 void ORGHDRDisplay::Fail(const char*) {}
 void ORGHDRDisplay::ClearShaderCache() {}
 FrameAnchors::Texture ORGHDRDisplay::ImportOf(ID3D11Texture2D*) const { return nullptr; }

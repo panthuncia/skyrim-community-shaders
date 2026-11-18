@@ -239,7 +239,6 @@ bool ORGIBL::Setup(std::function<void()> a_onFailed)
 	client.active = [] { return !globals::features::ibl.IsDisabledForCurrentScene(); };
 	// Known at the frame's start (the scene's setting): the declared segment's schedule has the passes on exactly when they have work.
 	client.declared = client.active;
-	client.onFailed = [self] { self->Fail("the render graph failed", false); };
 	impl = std::move(state);
 	if (!FrameAnchors::Register(std::move(client))) {
 		impl.reset();
@@ -258,11 +257,10 @@ bool ORGIBL::Setup(std::function<void()> a_onFailed)
 	return true;
 }
 
-void ORGIBL::Fail(const char* a_reason, bool a_unregister)
+void ORGIBL::Fail(const char* a_reason)
 {
 	logger::error("[ORG] IBL returns to D3D11: {}", a_reason);
-	if (a_unregister)
-		FrameAnchors::Unregister(kClientId);
+	FrameAnchors::Unregister(kClientId);
 	PublishedResources::Withdraw(kEnvId);
 	PublishedResources::Withdraw(kSkyId);
 	auto failed = std::move(impl);
@@ -279,9 +277,8 @@ bool ORGIBL::Prepass(bool a_useEnvironment)
 {
 	if (!impl)
 		return false;
-	// The runtime stopped without a failed epoch of this anchor (another epoch faulted): leave as onFailed does.
 	if (!RenderGraphRuntime::Get().IsActive()) {
-		Fail("the render graph is no longer active", true);
+		Fail("the render graph is no longer active");
 		return false;
 	}
 	auto& state = *impl;
@@ -328,7 +325,7 @@ void ORGIBL::Reserve() {}
 bool ORGIBL::Setup(std::function<void()>) { return false; }
 bool ORGIBL::IsActive() const { return false; }
 bool ORGIBL::Prepass(bool) { return false; }
-void ORGIBL::Fail(const char*, bool) {}
+void ORGIBL::Fail(const char*) {}
 ID3D11ShaderResourceView* ORGIBL::EnvSRV() const { return nullptr; }
 ID3D11ShaderResourceView* ORGIBL::SkySRV() const { return nullptr; }
 

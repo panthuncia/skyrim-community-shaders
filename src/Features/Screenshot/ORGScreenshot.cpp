@@ -188,7 +188,6 @@ namespace
 struct ORGScreenshot::Impl
 {
 	std::shared_ptr<Shared> shared = std::make_shared<Shared>();
-	std::function<void()> onFailed;
 	bool registered = false;
 	bool importWarned = false;
 	std::uint64_t nextId = 0;
@@ -248,28 +247,11 @@ namespace
 		};
 		// No executed callback: in a stage it runs at the tap, before the stage's commit submits the copy. The next capture point takes
 		// the GPU point instead (Poll): every capture point comes after the commit of the run that took the capture.
-		client.onFailed = [] {
-			logger::error("[ORG] Screenshot: the render graph failed with the capture's pass in it; captures use D3D11");
-			ORGScreenshot::Get().Fail();
-		};
 		return FrameAnchors::Register(std::move(client));
 	}
 }
 
-void ORGScreenshot::Fail()
-{
-	if (!impl)
-		return;
-	auto& state = *impl;
-	logger::error("[ORG] Screenshot: {} readbacks lost", state.outstanding.size());
-	state.registered = false;
-	state.outstanding.clear();
-	state.shared->armed.reset();
-	if (state.onFailed)
-		state.onFailed();
-}
-
-bool ORGScreenshot::Setup(std::function<void()> a_onFailed)
+bool ORGScreenshot::Setup()
 {
 	if (!Requested() || impl)
 		return impl && impl->registered;
@@ -279,9 +261,7 @@ bool ORGScreenshot::Setup(std::function<void()> a_onFailed)
 		logger::warn("[ORG] Screenshot: CS_ORG_SCREENSHOT=1, but the render graph or its Capture anchor is not available; captures use D3D11");
 		return false;
 	}
-	auto state = std::make_unique<Impl>();
-	state->onFailed = std::move(a_onFailed);
-	impl = std::move(state);
+	impl = std::make_unique<Impl>();
 	// No source yet: the client has no pass until the first capture names one (SetSource), and its build switches in before the copy.
 	if (!RegisterClient(impl->shared)) {
 		logger::warn("[ORG] Screenshot: the Capture anchor refused the client; captures use D3D11");
@@ -461,11 +441,10 @@ struct ORGScreenshot::Impl
 ORGScreenshot::~ORGScreenshot() = default;
 
 void ORGScreenshot::Reserve() {}
-bool ORGScreenshot::Setup(std::function<void()>) { return false; }
+bool ORGScreenshot::Setup() { return false; }
 bool ORGScreenshot::IsActive() const { return false; }
 bool ORGScreenshot::SetSource(const Source&) { return false; }
 bool ORGScreenshot::Capture(const Source&, OnPixels) { return false; }
 void ORGScreenshot::Poll() {}
-void ORGScreenshot::Fail() {}
 
 #endif

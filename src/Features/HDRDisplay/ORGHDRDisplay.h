@@ -62,10 +62,9 @@ public:
 	/**
 	 * @brief At SetupResources, with the runtime active: builds HDROutputCS for the graph and makes the latch. Nothing when not
 	 * requested or already set up.
-	 * @param a_onFailed Called once if the path stops later (the graph failed, an import failed).
 	 * @return Whether Compose may run the graph path; false keeps HDR Display on D3D11.
 	 */
-	bool Setup(std::function<void()> a_onFailed = {});
+	bool Setup();
 
 	/** @brief Whether the graph path is set up, has not failed, and the runtime is still active. */
 	bool IsActive() const;
@@ -148,6 +147,5 @@ private:
 
 	std::unique_ptr<Impl> impl;
 	bool failed = false;
-	bool graphFailed = false;  // the client's onFailed: the anchor's epoch failed inside Compose's Run
 	bool uiCleared = false;
 };

@@ -121,11 +121,8 @@ void Skylighting::SetupResources()
 		}
 	}
 
-	// CS_ORG_SKYLIGHTING=1: the render graph owns the volumes. If it fails later, the D3D11 ones are made and reset.
-	if (!ORGSkylighting::Get().Setup(*this, [this] {
-			CreateProbeVolumes();
-			ResetSkylighting();
-		}))
+	// CS_ORG_SKYLIGHTING=1: the render graph owns the volumes.
+	if (!ORGSkylighting::Get().Setup(*this))
 		CreateProbeVolumes();
 
 	{
@@ -211,8 +208,8 @@ bool Skylighting::UpdateProbesOnGraph()
 	if (!ORGSkylighting::Requested())
 		return false;
 	const bool onGraph = ORGSkylighting::Get().Update(*this);
-	// Only one path's volumes exist. When the graph path stops without its onFailed (the runtime went down), the D3D11 volumes are
-	// made here and start reset.
+	// Only one path's volumes exist. When the graph path stops (the runtime went down), the D3D11 volumes are made here and start
+	// reset.
 	if (onGraph == (texProbeArray != nullptr)) {
 		if (onGraph)
 			ReleaseProbeVolumes();

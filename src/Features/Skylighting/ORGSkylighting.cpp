@@ -165,7 +165,6 @@ namespace
 	struct ClientState
 	{
 		std::optional<Shadows> pending;
-		bool failed = false;
 		// Render thread: Drawcall Limit Fix drew the occlusion map since its last clear on the graph (NoteOcclusionDrawn).
 		bool occlusionDrawn = false;
 		// The next run clears the map after the update read it (Update queued it); the commit opened that clear (TakeOcclusionCleared).
@@ -388,7 +387,7 @@ struct ORGSkylighting::Impl
 	 * @brief The client: the volumes' reset (one-shot clears, armed at registration and by QueueReset) before the gated probe update.
 	 * A step that cannot be made fails a_builder.
 	 */
-	FrameAnchors::ClientDesc MakeClient(RenderGraph::AnchorPasses::Builder& a_builder, std::function<void()> a_onFailed) const
+	FrameAnchors::ClientDesc MakeClient(RenderGraph::AnchorPasses::Builder& a_builder) const
 	{
 		namespace AnchorPasses = RenderGraph::AnchorPasses;
 		const auto volume = [&](ORGSkylighting::Volume a_volume) { return resources->volumes[static_cast<std::size_t>(a_volume)]->Graph(); };
@@ -438,13 +437,6 @@ struct ORGSkylighting::Impl
 			resources->gate->OpenDispatch(kUpdateEntry, resources->groups[0], resources->groups[1], resources->groups[2]);
 			state->pending.reset();
 		};
-		client.onFailed = [state = state, onFailed = std::move(a_onFailed)] {
-			logger::error("[ORG] Skylighting: the render graph failed; the probe update returns to D3D11");
-			state->failed = true;
-			WithdrawVolumes();
-			if (onFailed)
-				onFailed();
-		};
 		return client;
 	}
 };
@@ -463,7 +455,7 @@ void ORGSkylighting::Reserve()
 		logger::warn("[ORG] Skylighting: the Prepass anchor could not be reserved; the probe update stays on D3D11");
 }
 
-bool ORGSkylighting::Setup(const Skylighting& a_feature, std::function<void()> a_onFailed)
+bool ORGSkylighting::Setup(const Skylighting& a_feature)
 {
 	impl.reset();
 	if (!Requested())
@@ -520,7 +512,7 @@ bool ORGSkylighting::Setup(const Skylighting& a_feature, std::function<void()> a
 
 	// The four reset clears, then the update at -1, before IBL (0 and 1); the occlusion map's clear at 0 touches nothing IBL uses.
 	RenderGraph::AnchorPasses::Builder builder(FrameAnchors::Anchor::Prepass, kClientId, -5);
-	auto client = next->MakeClient(builder, std::move(a_onFailed));
+	auto client = next->MakeClient(builder);
 	if (builder.Failed()) {
 		logger::warn("[ORG] Skylighting: {}; the probe update stays on D3D11", builder.Failure());
 		return false;
@@ -630,7 +622,7 @@ bool ORGSkylighting::TakeOcclusionCleared()
 
 bool ORGSkylighting::IsActive() const
 {
-	return impl && !impl->state->failed && RenderGraphRuntime::Get().IsActive();
+	return impl && RenderGraphRuntime::Get().IsActive();
 }
 
 ID3D11ShaderResourceView* ORGSkylighting::SRV(Volume a_volume) const
@@ -661,7 +653,7 @@ ORGSkylighting& ORGSkylighting::Get()
 
 ORGSkylighting::~ORGSkylighting() = default;
 void ORGSkylighting::Reserve() {}
-bool ORGSkylighting::Setup(const Skylighting&, std::function<void()>) { return false; }
+bool ORGSkylighting::Setup(const Skylighting&) { return false; }
 Texture2D* ORGSkylighting::MakeOcclusionMap(const D3D11_TEXTURE2D_DESC&, DXGI_FORMAT, DXGI_FORMAT) { return nullptr; }
 std::shared_ptr<org::ExternalTextureResource> ORGSkylighting::OcclusionMap() const { return nullptr; }
 bool ORGSkylighting::Update(const Skylighting&) { return false; }

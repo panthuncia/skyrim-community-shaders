@@ -484,7 +484,6 @@ struct ORGSunRays::Impl
 	std::shared_ptr<org::LatchBlock> latch;
 	std::shared_ptr<RenderGraph::RunGate> gate;
 	org::OwnedDescriptorBinding linearSampler;
-	std::function<void()> onFailed;
 
 	// The registered build, null until the first frame the graph takes.
 	std::shared_ptr<const RaysState> state;
@@ -657,15 +656,6 @@ struct ORGSunRays::Impl
 			pendingVolumetric = pendingSun = false;
 			return live;
 		};
-		client.onFailed = [] {
-			logger::error("[ORG] Effects11 rays return to D3D11: the render graph failed");
-			auto& self = Get();
-			self.failed = true;
-			auto onFailed = self.impl ? std::move(self.impl->onFailed) : std::function<void()>{};
-			self.impl.reset();
-			if (onFailed)
-				onFailed();
-		};
 		client.sharedConstants = true;
 		client.gates = { gate };
 		if (!FrameAnchors::Register(std::move(client)))
@@ -686,7 +676,7 @@ void ORGSunRays::Reserve()
 		logger::warn("[ORG] Effects11 rays: the PostComposite anchor could not be reserved; the rays stay on D3D11");
 }
 
-bool ORGSunRays::Setup(std::function<void()> a_onFailed)
+bool ORGSunRays::Setup()
 {
 	if (!Requested() || failed)
 		return false;
@@ -721,7 +711,6 @@ bool ORGSunRays::Setup(std::function<void()> a_onFailed)
 		state->prebuilt = true;
 	} else
 		logger::warn("[ORG] Effects11 rays: kMAIN does not exist at setup; the programs are built at the first frame");
-	state->onFailed = std::move(a_onFailed);
 	impl = std::move(state);
 	return true;
 }
@@ -844,7 +833,7 @@ struct ORGSunRays::Impl
 
 ORGSunRays::~ORGSunRays() = default;
 void ORGSunRays::Reserve() {}
-bool ORGSunRays::Setup(std::function<void()>) { return false; }
+bool ORGSunRays::Setup() { return false; }
 bool ORGSunRays::IsActive() const { return false; }
 bool ORGSunRays::PrepareFrame(const Sizes&) { return false; }
 bool ORGSunRays::VolumetricRays(const Sizes&) { return false; }

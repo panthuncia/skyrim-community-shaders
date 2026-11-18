@@ -221,7 +221,7 @@ void ORGLocalShadows::Reserve()
 		FrameAnchors::Reserve(FrameAnchors::Anchor::EarlyPrepass);
 }
 
-bool ORGLocalShadows::Setup(const Desc& a_desc, std::function<void()> a_onFailed)
+bool ORGLocalShadows::Setup(const Desc& a_desc)
 {
 	if (impl && impl->resources && SameShape(impl->resources->desc, a_desc) && IsActive())
 		return true;
@@ -338,14 +338,6 @@ bool ORGLocalShadows::Setup(const Desc& a_desc, std::function<void()> a_onFailed
 		resources->latch->Write(run, kDataOffset, resources->slotData);
 	};
 	client.gates = { resources->gate };
-	client.onFailed = [onFailed = std::move(a_onFailed)] {
-		// LightLimitFix makes its D3D11 cache at its next EarlyPrepass.
-		logger::error("[ORG] LLF local shadows: the render graph failed; back to D3D11");
-		WithdrawCache();
-		Get().impl.reset();
-		if (onFailed)
-			onFailed();
-	};
 	if (!FrameAnchors::Register(std::move(client))) {
 		logger::warn("[ORG] LLF local shadows stay on D3D11: the EarlyPrepass client could not be registered");
 		return false;
@@ -425,7 +417,7 @@ ORGLocalShadows& ORGLocalShadows::Get()
 ORGLocalShadows::~ORGLocalShadows() = default;
 bool ORGLocalShadows::Requested() { return false; }
 void ORGLocalShadows::Reserve() {}
-bool ORGLocalShadows::Setup(const Desc&, std::function<void()>) { return false; }
+bool ORGLocalShadows::Setup(const Desc&) { return false; }
 
 void ORGLocalShadows::Release() {}
 bool ORGLocalShadows::IsActive() const { return false; }

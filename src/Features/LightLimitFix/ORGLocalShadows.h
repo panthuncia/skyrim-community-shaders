@@ -63,10 +63,9 @@ public:
 	/**
 	 * @brief Creates the cache and data buffer for a_desc and registers the anchor client (again when the shape changed).
 	 * Light Limit Fix calls it when it sizes its cache, which follows its settings, so not at SetupResources.
-	 * @param a_onFailed Called once if the graph fails later; the cache returns to D3D11.
 	 * @return Whether the cache lives on the graph; false, with nothing held, keeps Light Limit Fix on its D3D11 path.
 	 */
-	bool Setup(const Desc& a_desc, std::function<void()> a_onFailed);
+	bool Setup(const Desc& a_desc);
 
 
 	/** @brief Drops the client and its resources (D3D11 views first, the graph's after D3D11's last use), and withdraws them. */

@@ -1868,8 +1868,8 @@ void LightLimitFix::EnsureLocalShadowResources(ID3D11Texture2D* a_engineShadowMa
 
 	if (onGraph) {
 		const ORGLocalShadows::Desc graphDesc{ slots, cacheResolution, cacheFormat, engineResolution / cacheResolution, static_cast<uint32_t>(sizeof(LocalShadowData)) };
-		// A later graph failure shows at the next call as a lost cache (graphLost), which moves the cache to D3D11.
-		if (!ORGLocalShadows::Get().Setup(graphDesc, [this] { localShadowGraphFailed = true; })) {
+		// The runtime stopping later shows at the next call as a lost cache (graphLost), which moves the cache to D3D11.
+		if (!ORGLocalShadows::Get().Setup(graphDesc)) {
 			localShadowGraphFailed = true;
 			EnsureLocalShadowResources(a_engineShadowMaps);
 			return;

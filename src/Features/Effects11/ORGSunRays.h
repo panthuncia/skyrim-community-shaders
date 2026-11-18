@@ -23,7 +23,7 @@
  * name when they are on the graph, else imported from D3D11.
  *
  * Effects11's Draw* functions decide the frame as before, then hand it here. A frame whose inputs the graph cannot read runs
- * on the D3D11 path instead. A failed program or graph returns the rays to D3D11 for good.
+ * on the D3D11 path instead. A failed program or registration returns the rays to D3D11 for good.
  *
  * Render thread throughout. Header deliberately free of ORG/Vulkan includes (see RenderGraphRuntime.h).
  */
@@ -42,10 +42,9 @@ public:
 	/**
 	 * @brief Effects11's SetupResources, with the render graph up: the latch block, the run gate and the sampler every build
 	 * shares. The passes are built at the first frame the graph takes, from that frame's inputs.
-	 * @param a_onFailed Called if the render graph fails later; the rays are then on D3D11 for the session.
 	 * @return False when the rays stay on D3D11 (not requested, or no graph or anchor).
 	 */
-	bool Setup(std::function<void()> a_onFailed);
+	bool Setup();
 
 	/** @brief Whether the graph may take the rays: set up, not failed, and the render graph still active. */
 	bool IsActive() const;

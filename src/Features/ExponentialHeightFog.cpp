@@ -270,8 +270,7 @@ D3D11_SAMPLER_DESC ExponentialHeightFog::SamplerDesc(bool a_comparison)
 
 void ExponentialHeightFog::SetupResources()
 {
-	// Nothing to undo when the graph fails later: the D3D11 path makes its objects at its first frame.
-	ORGExponentialHeightFog::Get().Setup([] {});
+	ORGExponentialHeightFog::Get().Setup();
 }
 
 void ExponentialHeightFog::EnsureD3D11Objects()

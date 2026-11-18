@@ -552,9 +552,8 @@ void ScreenshotFeature::PostPostLoad()
 
 void ScreenshotFeature::SetupResources()
 {
-	// A later graph failure needs nothing here: Capture copies with D3D11 once ORGScreenshot is inactive.
 	if (ORGScreenshot::Requested())
-		(void)ORGScreenshot::Get().Setup({});
+		(void)ORGScreenshot::Get().Setup();
 }
 
 void ScreenshotFeature::ApplyVanillaScreenshotSetting()
