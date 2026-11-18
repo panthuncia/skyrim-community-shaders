@@ -116,7 +116,19 @@ To match DXVK, native needs what DXVK's CS thread gives it: the GPU work off the
   sync present, queue depth, tearing, the torn-down callback). Until then DLSS-G and FSR-FG stay off in native.
 - **Residue:** the reflection cube face draws; load-window shadow draws; the refused occlusion-query draw; the sun occlusion
   draw skipped when its depth is neither kMAIN's nor the Z-prepass copy.
-- **Map:** native shows flat white patches on the world map's terrain. Compare with guest.
+- **Map:** native shows flat white patches on the world map's terrain. Compare with guest. 2026-11-18 (`map` config, RX 6600):
+  the flat white areas are in plain `d3d11` too (the Throat of the World's LOD), so they are the game's. What only guest and native
+  Vulkan show is a long thin white triangle from under the map's centre (the player's place) down to the left, the same on both
+  and in consecutive frames. It stays with DCLF's actors and skins native, with tree LOD native, with `dclf.pipeline=cpu` and with
+  the sky port off. It goes with `dclf.lod_objects=false` (then neither DCLF nor the engine draws object LOD on the map), so it is
+  DCLF's object LOD draw with the map camera. The segment ranges DCLF captures for object LOD stay inside each shape's index buffer
+  (a logged run), so it is not a range overrun. Shots are in `runsI8-135959-nfg-guest-map-bug9` (guest),
+  `1118-140106-nfg-d3d11-map-bug9`, `1118-140227-nfg-native-vulkan-map-bug9` and `1118-142545-nfg-guest-map-bug9-noobjlod`. Not fixed.
+- **Unified Water** (2026-11-18): turned on through cs-test (`--set features.UnifiedWater=true`), the river flicker bursts
+  (`river-flicker`, 2 x 30 consecutive frames) show no flicker on guest or native Vulkan (no tile spikes) after the flow map fix
+  (org-native-frame-graph.md, "Unified Water's flow map"). No Engine Fixes complaint about a flowmap in its log. The user's flicker
+  may have been the start stage dropping its clients in a release build. Not confirmed. Unified Water regenerates its flowmap and
+  caches on every test run ("Load order or plugin version changed"), not looked into.
 - **D3D12:** shader reload loses the device;
   GPU-based validation shows a Scaleform draw sampling a texture still in COPY_DEST (a streamed texture's upload).
 - **Re-recording every frame** (`CS_ORG_REUSE_RECORDINGS=0`) crashes at startup in native D3D12.

@@ -8298,3 +8298,25 @@ Temporal std of the tree area (`treestd.py`, mean / pixels above 4), build 9c4a6
 
 With upscaling off both backends score 4.2 to 4.3 there, and 4.4 to 4.6 over the whole frame. That is not D3D12's and not the trees'.
 Quick runs pass on native D3D12, native Vulkan and guest.
+
+## Unified Water's flow map (2026-11-18)
+
+### Cause
+
+Unified Water puts its own flow map in the engine's FlowMap slot at data load. It is a texture loaded from
+`textures\waterlowmaps\Tamriel-Flowmap.*.dds` and has no UAV. Unified Water also removes the engine's flow copies. The ImageSpace
+port made its own flow map at Setup and published it. When the slot's texture changed, the start stage registered its steps again
+with 32 flow copies writing the new texture. That build failed ("does not publish the requested bindless view; kind=1", the UAV).
+Development builds stop there at the first loading screen, and a release build drops the start stage's clients (the water
+displacement steps). The water's draws also read the flow map published at Setup, not Unified Water's.
+
+### Fix
+
+Flow copies are declared only for a flow map with a UAV (`FlowCopyTexture`). The flow map is published again when another texture
+takes its slot (`CheckFlowMap`), so the water surface reads Unified Water's map.
+
+### Results
+
+With `--set features.UnifiedWater=true` (a new cs-test switch, `CS_ENABLE_FEATURES`), `river-flicker` passes on guest and native
+Vulkan with no tile spikes in either burst. The log shows "0 flow copies", and the surface draws read the Tamriel flowmap. Quick runs
+pass on guest and native Vulkan (DLL 4339388478ce).
