@@ -14,15 +14,15 @@ namespace DCLF::Extensions
 	namespace
 	{
 		// Written only by ResolveShadingFields (InstallFeatures, before DCLF's threads exist), read-only after.
-		struct Resolved
+		struct ResolvedShadingFields
 		{
 			std::vector<ShadingFieldEntry> fields;
 			std::vector<Api::EntryClass> published;
 		};
 
-		Resolved& State()
+		ResolvedShadingFields& ShadingFieldsState()
 		{
-			static Resolved resolved;
+			static ResolvedShadingFields resolved;
 			return resolved;
 		}
 
@@ -38,7 +38,7 @@ namespace DCLF::Extensions
 
 	void ResolveShadingFields(std::span<const Api::ShadingFieldContribution> a_registered)
 	{
-		auto& resolved = State();
+		auto& resolved = ShadingFieldsState();
 		resolved.fields.reserve(a_registered.size());
 		for (const auto& field : a_registered) {
 			auto& entry = resolved.fields.emplace_back();
@@ -55,9 +55,9 @@ namespace DCLF::Extensions
 				resolved.published.push_back(static_cast<Api::EntryClass>(c));
 	}
 
-	std::span<const ShadingFieldEntry> ShadingFields() { return State().fields; }
+	std::span<const ShadingFieldEntry> ShadingFields() { return ShadingFieldsState().fields; }
 
-	std::span<const Api::EntryClass> PublishedEntryClasses() { return State().published; }
+	std::span<const Api::EntryClass> PublishedEntryClasses() { return ShadingFieldsState().published; }
 
 	void ForwardClassMembers(Api::EntryClass a_class, std::span<const Api::ClassMemberChange> a_changes)
 	{
@@ -78,7 +78,7 @@ namespace DCLF::Extensions
 			mine.member[change.slot] = now;
 		}
 		const Api::ShadingFieldMembership membership{ a_changes };
-		for (const auto& entry : State().fields)
+		for (const auto& entry : ShadingFieldsState().fields)
 			if (entry.contribution.members == a_class && entry.contribution.membership)
 				entry.contribution.membership(membership);
 	}
@@ -92,7 +92,7 @@ namespace DCLF::Extensions
 		changedObjects.reserve(a_view.ShadingChanges().size());
 		for (const auto& item : a_view.ShadingChanges())
 			changedObjects.push_back(item.slot);
-		for (const auto& entry : State().fields) {
+		for (const auto& entry : ShadingFieldsState().fields) {
 			DCLF_ZONE("CS.DCLF.ShadingField");
 			ZoneText(entry.name.data(), entry.name.size());
 			Api::ShadingFieldCapture capture{ entry.contribution.field, geometry, values, changedObjects };

@@ -37,7 +37,7 @@ namespace DCLF
 		// What the resources were created for; a change rebuilds them (and the graph).
 		TargetFormats formats{};
 		std::uint32_t width = 0, height = 0;
-		std::optional<Capture> pending;  // this frame's main-pass bindings, until the epoch runs
+		std::optional<Draws::Capture> pending;  // this frame's main-pass bindings, until the epoch runs
 
 		// The shadow and occlusion views' state and the functions over it alone: the shadow engine's (Shadow/ShadowEngine.h).
 		std::unique_ptr<ShadowEngine> shadowEngine = std::make_unique<ShadowEngine>(*this);
@@ -254,10 +254,10 @@ namespace DCLF
 		std::array<std::uint32_t, 5> decalWords{};  // the count buffer's decal words (19-22, then 27), uploaded per colour epoch
 
 		/** @brief An epoch's per-frame constant blocks from the capture's mirrors (render thread; keeps the Z-prepass's bytes). */
-		void PackFrameBlocks(const Capture& a_capture, bool a_depthOnly, FrameBlocks& a_out);
+		void PackFrameBlocks(const Draws::Capture& a_capture, bool a_depthOnly, FrameBlocks& a_out);
 		// PackFrameBlocks' stages: the captured buffers' mirrored blocks (the Z-prepass's vertex bytes kept, replayed for the colour
 		// epoch), and the slots the capture lacks supplied from the last one.
-		void MirrorFrameBlocks(const Capture& a_capture, bool a_depthOnly, bool a_replayVertexInputs, FrameBlocks& a_out);
+		void MirrorFrameBlocks(const Draws::Capture& a_capture, bool a_depthOnly, bool a_replayVertexInputs, FrameBlocks& a_out);
 		void CarryMissingBlocks(bool a_depthOnly, bool a_replayVertexInputs, FrameBlocks& a_out);
 		// Per main epoch (Z-prepass, colour): each frame slot's last captured block, for a frame that lacks it.
 		struct CarriedBlocks
@@ -277,7 +277,7 @@ namespace DCLF
 		};
 		std::array<EpochMasks, 2> epochMasks;
 		/** @brief Inside the epoch's preparation: the frame textures and blocks, the uploads, the PassFrame. */
-		bool CommitMainPayload(const Capture& a_capture, const FrameBlocks& a_blocks, const MainInputs& a_frame, MainPayload& a_payload,
+		bool CommitMainPayload(const Draws::Capture& a_capture, const FrameBlocks& a_blocks, const MainInputs& a_frame, MainPayload& a_payload,
 			const std::shared_ptr<Resources>& a_resources, IndirectDraws::Stats& a_stats,
 			std::vector<std::shared_ptr<const void>>& a_bindingOwners, const EpochRevision& a_revision);
 		// CommitMainPayload's stages (Payload/Uploads.cpp): Draws::MainCommit is its shared locals.
@@ -439,10 +439,10 @@ namespace DCLF
 			return false;
 		}
 
-		bool Setup(const Capture& a_capture, bool a_depthOnly = false);
+		bool Setup(const Draws::Capture& a_capture, bool a_depthOnly = false);
 		// Setup's stages: the main segment's buffers and programs, and the main pass's imported targets and depth.
 		bool CreateMainBuffers(Resources& a_state, org::GraphHost& a_host, rhi::Device a_device);
-		bool ImportMainTargets(Resources& a_state, const Capture& a_capture, rhi::Device a_device, const D3D11_TEXTURE2D_DESC& a_target,
+		bool ImportMainTargets(Resources& a_state, const Draws::Capture& a_capture, rhi::Device a_device, const D3D11_TEXTURE2D_DESC& a_target,
 			const TargetFormats& a_targets);
 	};
 }

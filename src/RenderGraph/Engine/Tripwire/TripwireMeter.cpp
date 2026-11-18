@@ -15,7 +15,7 @@ namespace RenderGraph::Engine::Tripwire
 {
 	namespace
 	{
-		constexpr std::size_t kKinds = static_cast<std::size_t>(Kind::Count);
+		constexpr std::size_t kMeterKinds = static_cast<std::size_t>(Kind::Count);
 
 		/** @brief The families MeterFrame sums handle methods into. */
 		enum class Family : std::uint8_t
@@ -75,9 +75,9 @@ namespace RenderGraph::Engine::Tripwire
 
 		struct MeterState
 		{
-			Detail::MeterCell last[kKinds][WatchSet::kMaxSlots]{};
-			Detail::MeterCell window[kKinds][WatchSet::kMaxSlots]{};
-			Family family[kKinds][WatchSet::kMaxSlots]{};
+			Detail::MeterCell last[kMeterKinds][WatchSet::kMaxSlots]{};
+			Detail::MeterCell window[kMeterKinds][WatchSet::kMaxSlots]{};
+			Family family[kMeterKinds][WatchSet::kMaxSlots]{};
 			std::uint32_t frames = 0;
 			std::uint64_t windowThreadCycles = 0;
 			ULONG64 lastThreadCycles = 0;
@@ -101,7 +101,7 @@ namespace RenderGraph::Engine::Tripwire
 			std::memset(st.window, 0, sizeof(st.window));
 			st.frames = 0;
 			st.windowThreadCycles = 0;
-			for (std::size_t k = 0; k < kKinds; ++k) {
+			for (std::size_t k = 0; k < kMeterKinds; ++k) {
 				const auto names = SlotNames(static_cast<Kind>(k));
 				for (std::size_t i = 0; i < WatchSet::kMaxSlots; ++i)
 					st.family[k][i] = i < names.size() ? FamilyOf(static_cast<Kind>(k), names[i]) : Family::Other;
@@ -122,7 +122,7 @@ namespace RenderGraph::Engine::Tripwire
 			st.cyclesPerUs = static_cast<double>(__rdtsc() - st.tsc0) / us;
 		std::uint64_t familyCalls[kFamilies]{};
 		std::uint64_t familyCycles[kFamilies]{};
-		for (std::size_t k = 0; k < kKinds; ++k) {
+		for (std::size_t k = 0; k < kMeterKinds; ++k) {
 			for (std::size_t i = 0; i < WatchSet::kMaxSlots; ++i) {
 				const auto& now = Detail::g_meter[k][i];
 				auto& last = st.last[k][i];
@@ -159,7 +159,7 @@ namespace RenderGraph::Engine::Tripwire
 		};
 		std::vector<Entry> entries;
 		std::uint64_t totalCycles = 0, totalCalls = 0;
-		for (std::size_t k = 0; k < kKinds; ++k)
+		for (std::size_t k = 0; k < kMeterKinds; ++k)
 			for (std::size_t i = 0; i < WatchSet::kMaxSlots; ++i)
 				if (const auto& w = st.window[k][i]; w.calls) {
 					sumCalls[static_cast<std::size_t>(st.family[k][i])] += w.calls;

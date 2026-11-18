@@ -7,25 +7,25 @@ namespace DCLF::Extensions
 {
 	namespace
 	{
-		struct Resolved
+		struct ResolvedFamilies
 		{
 			ProgramFamilySet families;
 			ProgramFamilyRulesTable rules;
 			std::array<std::size_t, kMaterialKinds> kindRules{};  // by material kind: its rules' index (kProgramFamilies: a Lighting key's)
 		};
 
-		Resolved MakeInitial()
+		ResolvedFamilies MakeInitial()
 		{
-			Resolved initial;
+			ResolvedFamilies initial;
 			initial.kindRules.fill(kProgramFamilies);
 			return initial;
 		}
 
 		// Written only by ResolveProgramFamilies (InstallFeatures, before DCLF's threads exist), read-only after. A namespace-scope object,
 		// not a function's static: the per-object reads (FamilyRules) take no initialization guard.
-		Resolved familyTable = MakeInitial();
+		ResolvedFamilies familyTable = MakeInitial();
 
-		Resolved& Table() { return familyTable; }
+		ResolvedFamilies& Table() { return familyTable; }
 	}
 
 	void ResolveProgramFamilies(const std::array<Api::ProgramFamilyContribution, kProgramFamilies>& a_registered)

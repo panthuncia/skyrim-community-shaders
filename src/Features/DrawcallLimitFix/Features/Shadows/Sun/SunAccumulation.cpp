@@ -36,7 +36,7 @@ namespace DCLF::Features::Shadows::Sun
 {
 	namespace
 	{
-		using namespace Engine;
+		using namespace DCLF::Engine;
 
 		// Engine::Offsets (Address Library ids).
 		// CalculateAndDrawShadowCasterLights -> FUN_141511f30. AE: a CALL. SE: a tail JMP (SE 0x1412e2f32), at the end of the sun part SE

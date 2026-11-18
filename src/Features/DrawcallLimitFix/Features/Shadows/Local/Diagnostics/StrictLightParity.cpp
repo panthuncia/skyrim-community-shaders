@@ -31,7 +31,7 @@ namespace DCLF::Features::Shadows::Local::StrictLightParity
 {
 	namespace
 	{
-		using Engine::At;
+		using DCLF::Engine::At;
 
 		// Offsets from the image base (AE 1.6.1170, SE 1.5.97). The process is Accumulate's static BSParabolicCullingProcess.
 		constexpr DCLF::Engine::Offset kProcess{ { 414845 }, { 527898 } };
@@ -261,7 +261,7 @@ namespace DCLF::Features::Shadows::Local::StrictLightParity
 				++unmodelled[a_kind];
 				if (firstUnmodelled.empty())
 					firstUnmodelled = fmt::format("{} {} ({:#x})", kUnmodelledNames[a_kind], a_object->name.c_str(), OnVisibleOf(a_object) + 0x140000000);
-				Engine::ForEachLive(a_object, [&](RE::NiAVObject& a_node, std::uint32_t) {
+				DCLF::Engine::ForEachLive(a_object, [&](RE::NiAVObject& a_node, std::uint32_t) {
 					if (a_node.AsGeometry())
 						excluded.insert(&a_node);
 				});
@@ -279,7 +279,7 @@ namespace DCLF::Features::Shadows::Local::StrictLightParity
 			{
 				if (!a_object)
 					return;
-				if (Engine::IsHidden(a_object))
+				if (DCLF::Engine::IsHidden(a_object))
 					rejected.emplace(a_object, "hidden");
 				else
 					Process1(a_object);
@@ -291,7 +291,7 @@ namespace DCLF::Features::Shadows::Local::StrictLightParity
 				visited.insert(a_object);
 				if (mode == 2)
 					return void(rejected.emplace(a_object, "mode 2"));
-				const std::uint32_t flags = Engine::FlagsOf(a_object);
+				const std::uint32_t flags = DCLF::Engine::FlagsOf(a_object);
 				if (mode == 1)
 					return OnVisible(a_object, true);
 				if ((flags & kPreprocessed) && !ignorePreprocess) {
@@ -333,14 +333,14 @@ namespace DCLF::Features::Shadows::Local::StrictLightParity
 				if (!node)
 					return;
 				path.push_back(a_object);
-				for (const auto& child : Engine::Children(*node))
+				for (const auto& child : DCLF::Engine::Children(*node))
 					Cull(child.get());
 				path.pop_back();
 			}
 
 			void NodeOnVisible(const RE::NiAVObject* a_object)
 			{
-				if (a_object->worldBound.radius != 0.0f || (Engine::FlagsOf(a_object) & kAlwaysDraw))
+				if (a_object->worldBound.radius != 0.0f || (DCLF::Engine::FlagsOf(a_object) & kAlwaysDraw))
 					Children(a_object);
 				else
 					rejected.emplace(a_object, "zero radius");
@@ -350,7 +350,7 @@ namespace DCLF::Features::Shadows::Local::StrictLightParity
 			void FadeOnVisible(const RE::NiAVObject* a_object)
 			{
 				const float fade = At<float>(a_object, kFadeAmount), current = At<float>(a_object, kCurrentFade);
-				const bool settled = (Engine::FlagsOf(a_object) & kSettled) && fade == 1.0f && current == 1.0f;
+				const bool settled = (DCLF::Engine::FlagsOf(a_object) & kSettled) && fade == 1.0f && current == 1.0f;
 				if (Global<std::uint8_t>(kFadeGate) && !settled && (current <= 0.0f || fade == 0.0f))
 					return void(rejected.emplace(a_object, "fade"));
 				NodeOnVisible(a_object);
@@ -407,7 +407,7 @@ namespace DCLF::Features::Shadows::Local::StrictLightParity
 				if (node->GetChildren().empty())
 					return;
 				const auto& data = node->GetRuntimeData();
-				if (!(Engine::FlagsOf(a_object) & kAlwaysDraw) && mode != 1 && mode != 3 && data.multiBound && mode != 4)
+				if (!(DCLF::Engine::FlagsOf(a_object) & kAlwaysDraw) && mode != 1 && mode != 3 && data.multiBound && mode != 4)
 					return Exclude(a_object, kMultiBoundMode);
 				const auto outer = mode;
 				if (data.cullingMode == RE::BSCullingProcess::BSCPCullingType::kAllPass && mode != 3) {
@@ -509,9 +509,9 @@ namespace DCLF::Features::Shadows::Local::StrictLightParity
 
 			void Visit(const RE::NiAVObject* a_object, std::uint32_t a_mode, std::uint32_t a_program)
 			{
-				if (!a_object || Engine::IsHidden(a_object))
+				if (!a_object || DCLF::Engine::IsHidden(a_object))
 					return;
-				const std::uint32_t flags = Engine::FlagsOf(a_object);
+				const std::uint32_t flags = DCLF::Engine::FlagsOf(a_object);
 				const auto kind = OnVisibleKind(a_object);
 				if (kind == kGeometryOnVisible || kind == kSubIndexOnVisible) {
 					if (model.excluded.contains(a_object) || (kind == kSubIndexOnVisible && !At<std::uint32_t>(a_object, kSubIndexSegments)))
@@ -537,7 +537,7 @@ namespace DCLF::Features::Shadows::Local::StrictLightParity
 				if (!node)
 					return;
 				const auto children = [&](std::uint32_t a_childMode, std::uint32_t a_childProgram) {
-					for (const auto& child : Engine::Children(*node))
+					for (const auto& child : DCLF::Engine::Children(*node))
 						Visit(child.get(), a_childMode, a_childProgram);
 				};
 				const bool walks = a_object->worldBound.radius != 0.0f || (flags & kAlwaysDraw);
@@ -596,7 +596,7 @@ namespace DCLF::Features::Shadows::Local::StrictLightParity
 			for (const auto* node = a_geometry; node; node = node->parent, ++depth) {
 				if (const auto it = a_model.rejected.find(node); it != a_model.rejected.end())
 					return fmt::format("{} at {} ({} up, {:#x}, radius {:.2f}, flags {:#x})", it->second, node->name.empty() ? "?" : node->name.c_str(), depth,
-						KindAddress(OnVisibleKind(node)), node->worldBound.radius, Engine::FlagsOf(node));
+						KindAddress(OnVisibleKind(node)), node->worldBound.radius, DCLF::Engine::FlagsOf(node));
 				if (a_model.visited.contains(node)) {
 					std::string children;
 					if (OnVisibleKind(node) == kSwitchOnVisible)
@@ -606,11 +606,11 @@ namespace DCLF::Features::Shadows::Local::StrictLightParity
 								*reinterpret_cast<const std::uintptr_t*>(node) - Base() + 0x140000000, list.size(), list.capacity());
 							for (std::uint16_t c = 0; c < list.free_idx(); ++c)
 								if (const auto* child = list[c].get())
-									children += fmt::format(" [{}] {}{}{}", c, child->name.empty() ? "?" : child->name.c_str(), Engine::IsHidden(child) ? " hidden" : "",
+									children += fmt::format(" [{}] {}{}{}", c, child->name.empty() ? "?" : child->name.c_str(), DCLF::Engine::IsHidden(child) ? " hidden" : "",
 										a_model.visited.contains(child) ? " visited" : "");
 						}
 					return fmt::format("{} {} visited ({:#x}, radius {:.2f}, flags {:#x}) but its OnVisible did not reach the child{}", depth ? "ancestor" : "geometry",
-						node->name.empty() ? "?" : node->name.c_str(), KindAddress(OnVisibleKind(node)), node->worldBound.radius, Engine::FlagsOf(node), children);
+						node->name.empty() ? "?" : node->name.c_str(), KindAddress(OnVisibleKind(node)), node->worldBound.radius, DCLF::Engine::FlagsOf(node), children);
 				}
 			}
 			return "no ancestor of it was visited (not under the request's roots)";
@@ -685,9 +685,9 @@ namespace DCLF::Features::Shadows::Local::StrictLightParity
 
 			void Visit(const RE::NiAVObject* a_object)
 			{
-				if (!a_object || Engine::IsHidden(a_object))
+				if (!a_object || DCLF::Engine::IsHidden(a_object))
 					return;
-				const std::uint32_t flags = Engine::FlagsOf(a_object);
+				const std::uint32_t flags = DCLF::Engine::FlagsOf(a_object);
 				const auto kind = OnVisibleKind(a_object);
 				if (kind == kGeometryOnVisible || kind == kSubIndexOnVisible) {
 					if (model.excluded.contains(a_object) || (kind == kSubIndexOnVisible && !At<std::uint32_t>(a_object, kSubIndexSegments)))
@@ -700,7 +700,7 @@ namespace DCLF::Features::Shadows::Local::StrictLightParity
 				if (!node)
 					return;
 				const auto children = [&] {
-					for (const auto& child : Engine::Children(*node))
+					for (const auto& child : DCLF::Engine::Children(*node))
 						Visit(child.get());
 				};
 				const bool walks = a_object->worldBound.radius != 0.0f || (flags & kAlwaysDraw);
@@ -944,7 +944,7 @@ namespace DCLF::Features::Shadows::Local::StrictLightParity
 				model.Exclude(root, kOtherOnVisible);  // a request with its own frustum: not a point light's
 			else if (!a_pending.array || i == 0)
 				model.Cull(root);
-			else if (Engine::IsHidden(root))
+			else if (DCLF::Engine::IsHidden(root))
 				model.Exclude(root, kOtherOnVisible);  // the request's hidden test of the later elements is not read
 			else
 				model.Process1(root);

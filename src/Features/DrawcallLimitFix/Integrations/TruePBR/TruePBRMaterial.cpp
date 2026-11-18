@@ -25,7 +25,7 @@ namespace DCLF::Integrations::TruePBR
 		using PBR = BSLightingShaderMaterialPBR;
 		using PBRLandscape = BSLightingShaderMaterialPBRLandscape;
 		using Technique = SIE::ShaderCache::LightingShaderTechniques;
-		using Flag = SIE::ShaderCache::LightingShaderFlags;
+		using ShaderFlag = SIE::ShaderCache::LightingShaderFlags;
 		using Evaluation = Api::MaterialContributorEvaluation;
 		using MaterialPort::kMaxMaterialBytes;
 		using MaterialPort::kMaxTextureFields;
@@ -36,7 +36,7 @@ namespace DCLF::Integrations::TruePBR
 		static_assert(kTextureRegisters.size() == ::TruePBR::NumExtendedTextures && kTextureRegisters.front() == ::TruePBR::FirstExtendedTexture &&
 					  kTextureRegisters.back() == ::TruePBR::FirstExtendedTexture + ::TruePBR::NumExtendedTextures - 1);
 
-		constexpr std::uint32_t Bit(Flag a_flag) { return static_cast<std::uint32_t>(a_flag); }
+		constexpr std::uint32_t ShaderFlagBit(ShaderFlag a_flag) { return static_cast<std::uint32_t>(a_flag); }
 
 		constexpr auto kLandscapeFeature = static_cast<std::uint32_t>(RE::BSShaderMaterial::Feature::kMultiTexLandLODBlend);  // PBRLandscape::GetFeature
 
@@ -279,7 +279,7 @@ namespace DCLF::Integrations::TruePBR
 						set(PBRShaderFlags::Glint);
 						a_write.PS(ps.MultiLayerParallaxData, glint.values, 4);
 					}
-					if ((a_lightingFlags & Bit(Flag::ProjectedUV)) != 0) {
+					if ((a_lightingFlags & ShaderFlagBit(ShaderFlag::ProjectedUV)) != 0) {
 						if (const auto glint = ReadGlint(a_snapshot, kProjectedGlint); glint.enabled) {
 							set(PBRShaderFlags::ProjectedGlint);
 							a_write.PS(ps.SparkleParams, glint.values, 4);
@@ -334,7 +334,7 @@ namespace DCLF::Integrations::TruePBR
 	{
 		const std::uint32_t held = HeldDescriptor(a_evaluation.Pass(), a_evaluation.hook);
 		const auto technique = TechniqueOf(held);
-		return technique != Technique::LODLand && technique != Technique::LODLandNoise && (held & Bit(Flag::TruePbr)) != 0;
+		return technique != Technique::LODLand && technique != Technique::LODLandNoise && (held & ShaderFlagBit(ShaderFlag::TruePbr)) != 0;
 	}
 
 	Api::MaterialOutcome EvaluatePBR(Evaluation& a_evaluation)
@@ -373,7 +373,7 @@ namespace DCLF::Integrations::TruePBR
 			a_evaluation.At<float>(kTexCoordScale + buffer * 8), a_evaluation.At<float>(kTexCoordScale + buffer * 8 + 4) };
 		write.VS(kVSTexcoordOffset, texcoord, 4);
 
-		if (lightingFlags & Bit(Flag::CharacterLight)) {
+		if (lightingFlags & ShaderFlagBit(ShaderFlag::CharacterLight)) {
 			// t11 only while the character light has a render target (its filter mode left alone); the params zero while disabled.
 			if (frame.characterLightTarget >= 0)
 				write.Texture(kCharacterLightSlot, MaterialPort::RenderTargetView(frame, frame.characterLightTarget), kClamp);

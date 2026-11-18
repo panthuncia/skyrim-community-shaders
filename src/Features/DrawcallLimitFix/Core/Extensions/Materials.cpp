@@ -15,7 +15,7 @@ namespace DCLF::Extensions
 	namespace
 	{
 		// Written only by ResolveMaterialContributors (InstallFeatures, before DCLF's threads exist), read-only after.
-		MaterialContributorTable& Table()
+		MaterialContributorTable& ContributorTable()
 		{
 			static MaterialContributorTable table;
 			return table;
@@ -24,14 +24,14 @@ namespace DCLF::Extensions
 		/** @brief Class a_class's entry (its contributor's), or null for kNoMaterialClass and past the classes. */
 		const MaterialContributorEntry* ClassEntry(std::uint8_t a_class)
 		{
-			const auto& table = Table();
+			const auto& table = ContributorTable();
 			return a_class != kNoMaterialClass && a_class <= table.count ? &table.entries[a_class - 1] : nullptr;
 		}
 	}
 
 	void ResolveMaterialContributors(std::span<const MaterialContributorEntry> a_registered)
 	{
-		auto& table = Table();
+		auto& table = ContributorTable();
 		// Stage, then order, then registration (the stable sort keeps registration order among equals).
 		std::array<std::size_t, kMaterialContributorSlots> order{};
 		const std::size_t count = std::min(a_registered.size(), order.size());
@@ -69,11 +69,11 @@ namespace DCLF::Extensions
 		}
 	}
 
-	const MaterialContributorTable& MaterialContributors() { return Table(); }
+	const MaterialContributorTable& MaterialContributors() { return ContributorTable(); }
 
 	std::uint8_t MaterialClassOf(const void* a_vtable)
 	{
-		if (!Table().classes)
+		if (!ContributorTable().classes)
 			return kNoMaterialClass;
 		for (const auto& entry : MaterialContributorList())
 			if (entry.classIndex != kNoMaterialClass && entry.materialClass.owns(a_vtable))

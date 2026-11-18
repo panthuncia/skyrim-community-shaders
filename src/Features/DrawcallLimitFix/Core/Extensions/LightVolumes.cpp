@@ -31,7 +31,7 @@ namespace DCLF::Extensions
 	namespace
 	{
 		// Written only by ResolveLightVolumes (InstallFeatures, before DCLF's threads exist), read-only after.
-		LightVolumesEntry resolved;
+		LightVolumesEntry resolvedVolumes;
 	}
 
 	void ResolveLightVolumes(const Api::LightVolumesContribution& a_registered)
@@ -44,24 +44,24 @@ namespace DCLF::Extensions
 		// A table needs both: whether it is read, and what fills it.
 		if (!a_registered.pointLightsActive != !a_registered.pointLights)
 			stl::report_and_fail(fmt::format("Drawcall Limit Fix: {}'s point lights need both pointLightsActive and pointLights", a_registered.name));
-		resolved = { true, std::string(a_registered.name), a_registered.landscapeFlags, a_registered.sample, a_registered.pointLightsActive, a_registered.pointLights };
+		resolvedVolumes = { true, std::string(a_registered.name), a_registered.landscapeFlags, a_registered.sample, a_registered.pointLightsActive, a_registered.pointLights };
 	}
 
-	const LightVolumesEntry& LightVolumes() { return resolved; }
+	const LightVolumesEntry& LightVolumes() { return resolvedVolumes; }
 
 	void SampleLightVolumes(Api::LightVolumeSink& a_sink)
 	{
-		if (resolved.sample)
-			resolved.sample(a_sink);
+		if (resolvedVolumes.sample)
+			resolvedVolumes.sample(a_sink);
 	}
 
 	bool PointLightsActive()
 	{
-		return resolved.pointLightsActive && resolved.pointLightsActive();
+		return resolvedVolumes.pointLightsActive && resolvedVolumes.pointLightsActive();
 	}
 
 	std::uint32_t SamplePointLights(Api::PointLight* a_out, std::uint32_t a_capacity)
 	{
-		return resolved.pointLights ? std::min(resolved.pointLights(a_out, a_capacity), a_capacity) : 0u;
+		return resolvedVolumes.pointLights ? std::min(resolvedVolumes.pointLights(a_out, a_capacity), a_capacity) : 0u;
 	}
 }

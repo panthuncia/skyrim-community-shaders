@@ -7,15 +7,15 @@ namespace DCLF::Extensions
 	namespace
 	{
 		// Written only by ResolveLatePoses (InstallFeatures, before DCLF's threads exist), read-only after.
-		std::vector<LatePoseEntry> resolved;
+		std::vector<LatePoseEntry> resolvedPoses;
 	}
 
 	void ResolveLatePoses(std::span<const Api::LatePoseContribution> a_registered)
 	{
-		resolved.clear();
+		resolvedPoses.clear();
 		for (const auto& contribution : a_registered)
-			resolved.push_back({ std::string(contribution.name), contribution.root });
+			resolvedPoses.push_back({ std::string(contribution.name), contribution.root });
 	}
 
-	std::span<const LatePoseEntry> LatePoses() { return resolved; }
+	std::span<const LatePoseEntry> LatePoses() { return resolvedPoses; }
 }

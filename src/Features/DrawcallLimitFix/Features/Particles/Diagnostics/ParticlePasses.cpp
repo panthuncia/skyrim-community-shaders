@@ -17,7 +17,7 @@ namespace DCLF::Features::Particles
 		std::atomic<std::uint32_t> firstState{ 0 };
 		std::array<char, 160> first{};
 
-		void Particle(const RE::BSGeometry* a_geometry)
+		void CountParticlePass(const RE::BSGeometry* a_geometry)
 		{
 			particlePasses.fetch_add(1, std::memory_order_relaxed);
 			bool followed = false;
@@ -42,7 +42,7 @@ namespace DCLF::Features::Particles
 			if (!pass || pass->accumulationHint != 1)
 				return;
 			if (pass->geometry && pass->geometry->GetType().get() == RE::BSGeometry::Type::kParticles)
-				Particle(pass->geometry);
+				CountParticlePass(pass->geometry);
 		}
 	}
 

@@ -68,7 +68,7 @@ namespace DCLF::Draws
 		// them; else the whole array made writable once before the loop, the parts compared and written by hand). The marks are applied
 		// on the owner thread afterwards, in chunk order.
 		template <class Rows>
-		void PrepareKeptWrites(Rows& a_rows, std::size_t a_first, std::size_t a_count)
+		void PrepareMainKeptWrites(Rows& a_rows, std::size_t a_first, std::size_t a_count)
 		{
 			if constexpr (requires { a_rows.PrepareWrites(a_first, a_count); })
 				a_rows.PrepareWrites(a_first, a_count);
@@ -1376,7 +1376,7 @@ namespace DCLF::Draws
 			++i;
 		}
 		// 3. The entries scattered into their places on the pool, and one journal resync for them all (the Reset began one).
-		PrepareKeptWrites(r.inputs, 0, held);
+		PrepareMainKeptWrites(r.inputs, 0, held);
 		auto& list = r.inputs.Mutable();
 		executor.ParallelFor("CS.DCLF.BuildMain.Region.Scatter", count, kResyncGrain, [&](std::size_t a_begin, std::size_t a_end) {
 			DCLF_ZONE("CS.DCLF.BuildMain.Region.ScatterShards");
@@ -1587,7 +1587,7 @@ namespace DCLF::Draws
 			// The rows the chunks write are made writable here, on the builder's thread; the chunks mark nothing (MergeWork does).
 			for (std::size_t k = 0; k < a_check.size(); ++k)
 				if (k == 0 || (a_check[k] >> 32) != (a_check[k - 1] >> 32))
-					PrepareKeptWrites(rows.material, static_cast<std::size_t>(a_check[k] >> 32), 1);
+					PrepareMainKeptWrites(rows.material, static_cast<std::size_t>(a_check[k] >> 32), 1);
 			for (auto& work : works)
 				work.deferred = true;
 			SceneScheduler::Executor().ParallelFor("CS.DCLF.BuildMain.Pairs.Resolve", chunks, 1, [&](std::size_t a_begin, std::size_t a_end) {

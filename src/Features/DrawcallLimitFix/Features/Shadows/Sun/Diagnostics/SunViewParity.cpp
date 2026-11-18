@@ -72,7 +72,7 @@ namespace DCLF::Features::Shadows::Sun
 			// After the cull: the traversal's first call (vfunc 0xB8) has set the process up from the cascade's camera. With an empty
 			// objectArray it made none, and the planes are not this cascade's.
 			const std::uint32_t bit = 1u << (a_event.cascade & 31);
-			if ((cascadesChecked & bit) || Engine::At<RE::BSTArray<RE::NiPointer<RE::NiAVObject>>>(a_event.fullProcess, kProcessObjectArray).empty())
+			if ((cascadesChecked & bit) || DCLF::Engine::At<RE::BSTArray<RE::NiPointer<RE::NiAVObject>>>(a_event.fullProcess, kProcessObjectArray).empty())
 				return;
 			cascadesChecked |= bit;
 			const auto& cascade = SunAccumulationView::Cascade(a_event.cascade);

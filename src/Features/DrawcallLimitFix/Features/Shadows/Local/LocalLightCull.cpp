@@ -220,18 +220,18 @@ namespace DCLF::Features::Shadows::Local::LocalLightCull
 			const std::uint32_t light = currentLight;
 			if (light == kNoLight || !a_words)
 				return;
-			const auto mode = Engine::At<std::uint32_t>(a_process, kProcessCullMode);
+			const auto mode = DCLF::Engine::At<std::uint32_t>(a_process, kProcessCullMode);
 			if (mode == 2)  // kAllFail
 				return;
-			const void* frustum = Engine::At<void*>(a_process, kProcessCompoundFrustum);
+			const void* frustum = DCLF::Engine::At<void*>(a_process, kProcessCompoundFrustum);
 			const std::uint32_t kind = mode == 1                                                                     ? kReachAll :
-			                           frustum && Engine::At<std::uint32_t>(frustum, kFrustumFreeOp) != 0 && mode != 3 ? kReachPortal :
+			                           frustum && DCLF::Engine::At<std::uint32_t>(frustum, kFrustumFreeOp) != 0 && mode != 3 ? kReachPortal :
 			                                                                                                          kReachTested;
 			// The static process is every point light's: its sphere is this light's only during its cull.
 			auto& sphere = frameLights[light];
 			if (!sphere.captured) {
-				std::memcpy(sphere.centre, &Engine::At<float>(a_process, kProcessLightCentre), sizeof(sphere.centre));
-				sphere.radius = Engine::At<float>(a_process, kProcessLightRadius);
+				std::memcpy(sphere.centre, &DCLF::Engine::At<float>(a_process, kProcessLightCentre), sizeof(sphere.centre));
+				sphere.radius = DCLF::Engine::At<float>(a_process, kProcessLightRadius);
 				sphere.captured = true;
 			}
 			const std::uint64_t stamp = static_cast<std::uint64_t>(lightStamp.load(std::memory_order_relaxed)) << 32;
@@ -303,7 +303,7 @@ namespace DCLF::Features::Shadows::Local::LocalLightCull
 			return admitted;
 		}
 
-		bool Hidden(const RE::NiAVObject* a_object) { return Engine::IsHidden(a_object); }
+		bool Hidden(const RE::NiAVObject* a_object) { return DCLF::Engine::IsHidden(a_object); }
 
 		/** @brief A node whose OnVisible is NiNode's own through the vtable: exactly NiNode (the category nodes). */
 		bool ExactNiNode(const RE::NiAVObject* a_object)
@@ -319,7 +319,7 @@ namespace DCLF::Features::Shadows::Local::LocalLightCull
 		bool HoldsNoGeometry(const RE::NiAVObject* a_object)
 		{
 			// Past 64 levels it counts as holding one.
-			return Engine::ForEachLive(a_object, [](RE::NiAVObject& a_node, std::uint32_t a_depth) { return a_depth <= 64 && !a_node.AsGeometry(); });
+			return DCLF::Engine::ForEachLive(a_object, [](RE::NiAVObject& a_node, std::uint32_t a_depth) { return a_depth <= 64 && !a_node.AsGeometry(); });
 		}
 
 		std::shared_ptr<CategoryFilter> BuildCategory(const RE::NiNode& a_node, const SunExclusion& a_exclusion)
@@ -644,7 +644,7 @@ namespace DCLF::Features::Shadows::Local::LocalLightCull
 			// Portal-strict: its cull's rooms, shared nodes and room frusta are DCLF's strict gates (Portals/StrictGates.h), on its views'
 			// casters (BuildDrawsLatch::strictContext), DCLF's receivers (GpuShadowVolume::portalContext) and the engine's receivers' bits
 			// (StrictAdmits), always: no switch hands a portal-strict light back to the engine's whole cull.
-			if (Engine::At<bool>(&a_light, kLightPortalStrict))
+			if (DCLF::Engine::At<bool>(&a_light, kLightPortalStrict))
 				emptyStats.strictLights.fetch_add(1, std::memory_order_relaxed);
 			// A caster that stays the engine's has only the engine's cull to draw its shadow: the light's Accumulate culls the subset.
 			if (const auto& subset = Scene::FrameView::Get().GetEngineCasters(); !late && subset && !subset->Of(Scene::EngineOnlySubset::kCaster).roots.empty()) {
@@ -652,8 +652,8 @@ namespace DCLF::Features::Shadows::Local::LocalLightCull
 				return LightCull::Subset;
 			}
 			const std::uint32_t count = *a_count;
-			Engine::At<std::uint32_t>(accumulator, kAccumulatorLightIndex) = count + 1;
-			Engine::At<std::uint32_t>(accumulator, kAccumulatorLightBit) = count < 0x1F ? 1u << count : 0u;
+			DCLF::Engine::At<std::uint32_t>(accumulator, kAccumulatorLightIndex) = count + 1;
+			DCLF::Engine::At<std::uint32_t>(accumulator, kAccumulatorLightBit) = count < 0x1F ? 1u << count : 0u;
 			// A spot light's FUN_1414f0920 counts its one view; a point light's Accumulate one per hemisphere.
 			*a_count = count + (!spot && a_light.shadowMapCount == 2 ? 2 : 1);
 			emptyLights.fetch_or(1u << a_ordinal, std::memory_order_relaxed);
@@ -705,9 +705,9 @@ namespace DCLF::Features::Shadows::Local::LocalLightCull
 			std::uint32_t bit = 0;
 			for (const auto& descriptor : a_light.GetRuntimeData().shadowmapDescriptors)
 				if (const auto* accumulator = descriptor.shaderAccumulator.get()) {
-					const auto index = Engine::At<std::uint32_t>(accumulator, kAccumulatorLightIndex);
+					const auto index = DCLF::Engine::At<std::uint32_t>(accumulator, kAccumulatorLightIndex);
 					if (index != 0 && index != 0xFFFF)
-						bit |= Engine::At<std::uint32_t>(accumulator, kAccumulatorLightBit);
+						bit |= DCLF::Engine::At<std::uint32_t>(accumulator, kAccumulatorLightBit);
 				}
 			frameLights[a_ordinal].bit = bit;
 			frameLightBits.fetch_or(bit, std::memory_order_relaxed);
@@ -732,7 +732,7 @@ namespace DCLF::Features::Shadows::Local::LocalLightCull
 				if (ordinal != kNoLight) {
 					Predict(light, frameLights[ordinal]);
 					frameLights[ordinal].light = &light;
-					frameLights[ordinal].strict = Engine::At<bool>(&light, kLightPortalStrict);
+					frameLights[ordinal].strict = DCLF::Engine::At<bool>(&light, kLightPortalStrict);
 				}
 				const auto mode = ordinal != kNoLight && !a_arg3 && frameCullsEmpty.load(std::memory_order_relaxed) ? CullEmpty(light, ordinal, a_count) :
 				                                                                                                          LightCull::Engine;
@@ -796,7 +796,7 @@ namespace DCLF::Features::Shadows::Local::LocalLightCull
 				if (ordinal != kNoLight) {
 					Predict(light, frameLights[ordinal]);
 					frameLights[ordinal].light = &light;
-					frameLights[ordinal].strict = Engine::At<bool>(&light, kLightPortalStrict);
+					frameLights[ordinal].strict = DCLF::Engine::At<bool>(&light, kLightPortalStrict);
 				}
 				const auto mode = ordinal != kNoLight && !a_arg3 && frameSpotsEmpty.load(std::memory_order_relaxed) ? CullEmpty(light, ordinal, a_count) :
 				                                                                                                         LightCull::Engine;
@@ -968,7 +968,7 @@ namespace DCLF::Features::Shadows::Local::LocalLightCull
 		if (!exclusion && !empty && !parity)
 			return;
 		const auto* property = a_geometry->GetGeometryRuntimeData().shaderProperty.get();
-		void* lightData = property ? Engine::At<void*>(property, Engine::kPropertyLightData) : nullptr;
+		void* lightData = property ? DCLF::Engine::At<void*>(property, DCLF::Engine::kPropertyLightData) : nullptr;
 		if (!lightData)
 			return;
 		const bool whole = cullsWhole.load(std::memory_order_relaxed);
@@ -986,7 +986,7 @@ namespace DCLF::Features::Shadows::Local::LocalLightCull
 			if (first)
 				sphereBits = SphereBits(empty ? empty : PredictedLights(), *a_geometry);
 			if (first && empty) {
-				Engine::At<std::uint32_t>(lightData, Engine::kLightDataActiveMask) |= sphereBits;
+				DCLF::Engine::At<std::uint32_t>(lightData, DCLF::Engine::kLightDataActiveMask) |= sphereBits;
 				emptyStats.given.fetch_add(1, std::memory_order_relaxed);
 				emptyStats.withBits.fetch_add(sphereBits ? 1 : 0, std::memory_order_relaxed);
 			}
@@ -995,7 +995,7 @@ namespace DCLF::Features::Shadows::Local::LocalLightCull
 			static constexpr std::array<std::uint32_t, kReachKinds> kNoReach{};
 			if (parity && first)
 				Diagnostics::Notify(Diagnostics::PointLightBits{ a_geometry, ~0u, 0u, kNoReach,
-					Engine::At<std::uint32_t>(lightData, Engine::kLightDataActiveMask) & frameLightBits.load(std::memory_order_relaxed), true, sphereBits });
+					DCLF::Engine::At<std::uint32_t>(lightData, DCLF::Engine::kLightDataActiveMask) & frameLightBits.load(std::memory_order_relaxed), true, sphereBits });
 			return;
 		}
 		const auto& candidates = *exclusion->candidates;
@@ -1011,7 +1011,7 @@ namespace DCLF::Features::Shadows::Local::LocalLightCull
 			return;
 		std::array<std::uint32_t, kReachKinds> reach{};
 		const std::uint32_t bits = entry != ~0u ? BitsOf(*exclusion, entry, *a_geometry, reach) : 0u;
-		auto& mask = Engine::At<std::uint32_t>(lightData, Engine::kLightDataActiveMask);
+		auto& mask = DCLF::Engine::At<std::uint32_t>(lightData, DCLF::Engine::kLightDataActiveMask);
 		if (!whole) {
 			mask |= bits;
 			bitStats.given.fetch_add(1, std::memory_order_relaxed);

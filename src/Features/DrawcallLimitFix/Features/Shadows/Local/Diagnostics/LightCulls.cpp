@@ -101,7 +101,7 @@ namespace DCLF::Features::Shadows::Local::LightCulls
 				counts.filterMissed.fetch_add(1, std::memory_order_relaxed);
 				std::string chain;
 				for (const RE::NiAVObject* object = a_pass->geometry; object; object = object->parent)
-					chain += fmt::format(" <- {}:{}{}{}", object->GetRTTI() ? object->GetRTTI()->name : "?", object->name.c_str() ? object->name.c_str() : "", Engine::IsHidden(object) ? " hidden" : "",
+					chain += fmt::format(" <- {}:{}{}{}", object->GetRTTI() ? object->GetRTTI()->name : "?", object->name.c_str() ? object->name.c_str() : "", DCLF::Engine::IsHidden(object) ? " hidden" : "",
 						a_exclusion.candidates->entries.contains(object) ? (View::Excluded(a_exclusion, object) ? " [excluded entry]" : " [entry]") : "");
 				std::scoped_lock lock(firstMutex);
 				if (filterFirstMissed.empty())
@@ -155,15 +155,15 @@ namespace DCLF::Features::Shadows::Local::LightCulls
 		{
 			const RE::NiAVObject* below = nullptr;
 			for (const RE::NiAVObject* object = a_pass->geometry; object; below = object, object = object->parent) {
-				a_what += fmt::format(" <- {}:{}{}{}", object->GetRTTI() ? object->GetRTTI()->name : "?", object->name.c_str() ? object->name.c_str() : "", Engine::IsHidden(object) ? " hidden" : "",
+				a_what += fmt::format(" <- {}:{}{}{}", object->GetRTTI() ? object->GetRTTI()->name : "?", object->name.c_str() ? object->name.c_str() : "", DCLF::Engine::IsHidden(object) ? " hidden" : "",
 					a_exclusion.candidates->entries.contains(object) ? (View::Excluded(a_exclusion, object) ? " [excluded entry]" : " [entry]") : "");
 				if (const auto* switchNode = below ? const_cast<RE::NiAVObject*>(object)->AsSwitchNode() : nullptr) {
-					const auto state = Engine::ReadSwitch(*switchNode);
+					const auto state = DCLF::Engine::ReadSwitch(*switchNode);
 					std::int32_t path = -1;
 					const auto& children = switchNode->GetChildren();
 					for (std::uint16_t c = 0; c < children.free_idx(); ++c)
 						path = children[c].get() == below ? static_cast<std::int32_t>(c) : path;
-					a_what += fmt::format(" [index {}, path child {}, selects it {}]", state.index, path, Engine::SwitchSelects(*switchNode, below));
+					a_what += fmt::format(" [index {}, path child {}, selects it {}]", state.index, path, DCLF::Engine::SwitchSelects(*switchNode, below));
 				}
 			}
 		}

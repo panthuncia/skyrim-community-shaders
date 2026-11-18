@@ -18,7 +18,7 @@ namespace DCLF::Features::TreeWind
 {
 	namespace
 	{
-		float TreeNodeFloat(const void* a_node, std::size_t a_offset)
+		float SeedNodeFloat(const void* a_node, std::size_t a_offset)
 		{
 			return *reinterpret_cast<const float*>(static_cast<const std::byte*>(a_node) + a_offset);
 		}
@@ -46,10 +46,10 @@ namespace DCLF::Features::TreeWind
 			const void* node = a_node;
 			const auto* bytes = static_cast<const std::byte*>(node);
 			std::memcpy(a_out.position, bytes + 0xA0, sizeof(a_out.position));
-			a_out.leafFrequency = TreeNodeFloat(node, 0x160);
-			a_out.timer = TreeNodeFloat(node, 0x164);
-			a_out.previousTimer = TreeNodeFloat(node, 0x168);
-			a_out.amplitude = TreeNodeFloat(node, 0x15c);
+			a_out.leafFrequency = SeedNodeFloat(node, 0x160);
+			a_out.timer = SeedNodeFloat(node, 0x164);
+			a_out.previousTimer = SeedNodeFloat(node, 0x168);
+			a_out.amplitude = SeedNodeFloat(node, 0x15c);
 			// The manager advances a node only in its near loop (FUN_1404381e0's loop 2 over FUN_140437e50's near list): one the list
 			// selects whose model (+0xF8, its +0x40) has bones (+0xB8), scaling the gust by the model's +0xB0. Other nodes keep their
 			// clock and amplitude; their +0xB0 is never read (can be garbage like 2.3e36). Not replicated: the near list's count cap.

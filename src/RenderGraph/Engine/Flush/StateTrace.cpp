@@ -25,7 +25,7 @@ namespace RenderGraph::Engine::Flush
 {
 	namespace
 	{
-		constexpr std::uint32_t kSlots = D3D11_COMMONSHADER_INPUT_RESOURCE_SLOT_COUNT;  // 128
+		constexpr std::uint32_t kInputSlots = D3D11_COMMONSHADER_INPUT_RESOURCE_SLOT_COUNT;  // 128
 		constexpr std::uint32_t kEngineSlots = 16;                                      // the shadow state's PSTexture[]
 		constexpr std::uint32_t kTargets = D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT;
 		constexpr std::uint32_t kComputeUavs = 8;
@@ -79,7 +79,7 @@ namespace RenderGraph::Engine::Flush
 		struct Table
 		{
 			std::mutex lock;
-			std::array<Lost, kSlots> pixel{};
+			std::array<Lost, kInputSlots> pixel{};
 		};
 
 		Table& GetTable()
@@ -312,7 +312,7 @@ namespace RenderGraph::Engine::Flush
 		{
 			if (!a_views)
 				return;
-			const UINT end = std::min<UINT>(a_start + a_count, kSlots);
+			const UINT end = std::min<UINT>(a_start + a_count, kInputSlots);
 			for (UINT slot = a_start; slot < end; ++slot) {
 				auto* wanted = a_views[slot - a_start];
 				ID3D11ShaderResourceView* got = nullptr;
@@ -361,12 +361,12 @@ namespace RenderGraph::Engine::Flush
 		}
 
 		/** @brief After a target bind: each PS view it unbound. a_before holds a reference per view, released here. */
-		void AfterTargets(ID3D11DeviceContext* a_context, std::array<ID3D11ShaderResourceView*, kSlots>& a_before, void* a_caller)
+		void AfterTargets(ID3D11DeviceContext* a_context, std::array<ID3D11ShaderResourceView*, kInputSlots>& a_before, void* a_caller)
 		{
-			std::array<ID3D11ShaderResourceView*, kSlots> after{};
-			a_context->PSGetShaderResources(0, kSlots, after.data());
+			std::array<ID3D11ShaderResourceView*, kInputSlots> after{};
+			a_context->PSGetShaderResources(0, kInputSlots, after.data());
 			std::optional<Callers> callers;
-			for (std::uint32_t slot = 0; slot < kSlots; ++slot) {
+			for (std::uint32_t slot = 0; slot < kInputSlots; ++slot) {
 				if (a_before[slot] && !after[slot]) {
 					GetCounters().unbound.fetch_add(1, std::memory_order_relaxed);
 					if (!callers)
@@ -405,8 +405,8 @@ namespace RenderGraph::Engine::Flush
 		{
 			static void thunk(ID3D11DeviceContext* a_context, UINT a_count, ID3D11RenderTargetView* const* a_views, ID3D11DepthStencilView* a_depth)
 			{
-				std::array<ID3D11ShaderResourceView*, kSlots> before{};
-				a_context->PSGetShaderResources(0, kSlots, before.data());
+				std::array<ID3D11ShaderResourceView*, kInputSlots> before{};
+				a_context->PSGetShaderResources(0, kInputSlots, before.data());
 				func(a_context, a_count, a_views, a_depth);
 				AfterTargets(a_context, before, _ReturnAddress());
 			}
@@ -418,8 +418,8 @@ namespace RenderGraph::Engine::Flush
 			static void thunk(ID3D11DeviceContext* a_context, UINT a_count, ID3D11RenderTargetView* const* a_views, ID3D11DepthStencilView* a_depth, UINT a_uavStart,
 				UINT a_uavCount, ID3D11UnorderedAccessView* const* a_uavs, const UINT* a_counts)
 			{
-				std::array<ID3D11ShaderResourceView*, kSlots> before{};
-				a_context->PSGetShaderResources(0, kSlots, before.data());
+				std::array<ID3D11ShaderResourceView*, kInputSlots> before{};
+				a_context->PSGetShaderResources(0, kInputSlots, before.data());
 				func(a_context, a_count, a_views, a_depth, a_uavStart, a_uavCount, a_uavs, a_counts);
 				AfterTargets(a_context, before, _ReturnAddress());
 			}
@@ -526,7 +526,7 @@ namespace RenderGraph::Engine::Flush
 
 	void NoteRead(const char* a_reader, std::uint32_t a_register, ID3D11ShaderResourceView* a_view)
 	{
-		if (a_view || a_register >= kSlots || !s_installed.load(std::memory_order_relaxed))
+		if (a_view || a_register >= kInputSlots || !s_installed.load(std::memory_order_relaxed))
 			return;
 		std::string how;
 		{

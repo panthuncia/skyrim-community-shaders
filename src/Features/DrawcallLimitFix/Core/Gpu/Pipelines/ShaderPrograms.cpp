@@ -79,7 +79,7 @@ namespace DCLF
 		constexpr const char* kSourcePath = "Data/Shaders/Lighting.hlsl";
 		constexpr const char* kUtilitySourcePath = "Data/Shaders/Utility.hlsl";
 		constexpr const char* kShaderDirectory = RenderGraphRuntime::kShaderDirectory;
-		constexpr std::size_t kMaxLoggedFailures = 8;
+		constexpr std::size_t kMaxLoggedBuildFailures = 8;
 
 		std::wstring Widen(const std::string& a_value)
 		{
@@ -948,7 +948,7 @@ namespace DCLF
 			const auto& artifact = *(*requested)->artifact;
 			if (!artifact) {
 				static std::atomic<std::uint32_t> failures{ 0 };
-				if (failures.fetch_add(1) < kMaxLoggedFailures)
+				if (failures.fetch_add(1) < kMaxLoggedBuildFailures)
 					logger::warn("[DCLF] ORG precompile {} {} {:08X} failed: {}", type == RE::BSShader::Type::Lighting ? "Lighting" : "Utility",
 						a_pixel ? "PS" : "VS", a_descriptor, artifact.diagnostics.substr(0, 1500));
 			}
@@ -1211,7 +1211,7 @@ namespace DCLF
 		if (IsDrawFamilyForward(user)) {
 			// A forward view's program of the family's (tree LOD's: DistantTree's forward descriptor).
 			FinishEntry(*drawFamilyForwardEntries[f], nullptr, laneStats.failed, [&](std::size_t a_stage, const org::services::ShaderArtifact& a_artifact) {
-				if (loggedFailures++ < kMaxLoggedFailures)
+				if (loggedFailures++ < kMaxLoggedBuildFailures)
 					logger::warn("[DCLF] SPIR-V build of the forward {} {} failed:\n{}", family.name, a_stage ? "PS" : "VS", a_artifact.diagnostics.substr(0, 1500));
 			});
 			a_finished.drawFamilyForward[f] = true;
@@ -1267,7 +1267,7 @@ namespace DCLF
 					OnDemandOutcome(fmt::format("Utility technique {:08X}", technique).c_str(), entry.onDemand, entry.requested,
 						{ { kOnDemandVertex, &ArtifactOf(entry.stages[0]) }, { kOnDemandPixel, &ArtifactOf(entry.stages[1]) } });
 					FinishEntry(entry, &laneStats.shadowReady, laneStats.shadowFailed, [&](std::size_t a_stage, const org::services::ShaderArtifact& a_artifact) {
-						if (loggedFailures++ < kMaxLoggedFailures)
+						if (loggedFailures++ < kMaxLoggedBuildFailures)
 							logger::warn("[DCLF] SPIR-V build of Utility {} {:08X} failed:\n{}", a_stage ? "PS" : "VS", technique, a_artifact.diagnostics.substr(0, 1500));
 					});
 					a_finished.shadow.push_back(technique);
@@ -1276,7 +1276,7 @@ namespace DCLF
 			case StageUser::Forward:
 				// The forward views' programs: a Lighting pair (a draw family's: FinishDrawFamily).
 				FinishEntry(*forwardEntries.find(id)->second, nullptr, laneStats.failed, [&](std::size_t a_stage, const org::services::ShaderArtifact& a_artifact) {
-					if (loggedFailures++ < kMaxLoggedFailures)
+					if (loggedFailures++ < kMaxLoggedBuildFailures)
 						logger::warn("[DCLF] SPIR-V build of the forward {} {} failed:\n{}", fmt::format("Lighting VS {:08X} PS {:08X}", vertex, pixel), a_stage ? "PS" : "VS",
 							a_artifact.diagnostics.substr(0, 1500));
 				});
@@ -1297,7 +1297,7 @@ namespace DCLF
 					const auto familyVertex = static_cast<std::uint32_t>((id & ~kProgramFamilySlots[f].programIdBit) >> 32);
 					auto& entry = *familyEntries[f].find(id)->second;
 					FinishEntry(entry, &laneStats.ready, laneStats.failed, [&](std::size_t a_stage, const org::services::ShaderArtifact& a_artifact) {
-						if (loggedFailures++ < kMaxLoggedFailures)
+						if (loggedFailures++ < kMaxLoggedBuildFailures)
 							logger::warn("[DCLF] SPIR-V build of {} {}{} {:08X} failed; its {}:\n{}", family.name, a_stage == 0 || a_stage == 3 ? "VS" : "PS",
 								a_stage >= 3 ? " (pulled)" : "", a_stage == 0 || a_stage == 3 ? familyVertex : pixel,
 								family.nativeNote, a_artifact.diagnostics.substr(0, 1500));
@@ -1316,7 +1316,7 @@ namespace DCLF
 					{ kOnDemandPulledPixel, &ArtifactOf(entry.stages[5]) }, { kOnDemandPulledDepthVertex, &ArtifactOf(entry.stages[6]) } });
 			FinishEntry(entry, &laneStats.ready, laneStats.failed, [&](std::size_t a_stage, const org::services::ShaderArtifact& a_artifact) {
 				static constexpr const char* kStages[] = { "VS", "PS", "PS (depth)", "VS (pulled)", "PS (pulled depth)", "PS (pulled)", "VS (pulled depth)" };
-				if (loggedFailures++ < kMaxLoggedFailures)
+				if (loggedFailures++ < kMaxLoggedBuildFailures)
 					logger::warn("[DCLF] SPIR-V build of Lighting {} {:08X} failed:\n{}", kStages[a_stage], a_stage == 0 || a_stage == 3 || a_stage == 6 ? vertex : pixel,
 						a_artifact.diagnostics.substr(0, 1500));
 			});

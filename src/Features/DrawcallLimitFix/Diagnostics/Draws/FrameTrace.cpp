@@ -21,7 +21,7 @@ namespace DCLF::Diagnostics
 			std::uint64_t lastPoint = 0;
 			bool markDown = false;
 		};
-		FrameTraceState& State()
+		FrameTraceState& TraceState()
 		{
 			static FrameTraceState state;
 			return state;
@@ -64,7 +64,7 @@ namespace DCLF::Diagnostics
 
 	void TraceAdoptedBound(const AdoptedBound& a_bound)
 	{
-		auto& state = State();
+		auto& state = TraceState();
 		logger::info("[DCLF] frame trace: frame {} binds point {} (clock {}){}{}", a_bound.frame, a_bound.point, a_bound.completed,
 			a_bound.point <= a_bound.completed ? " <- BOUND AT A RETIRED POINT" : "", a_bound.point < state.lastPoint ? " <- POINT WENT BACK" : "");
 		state.lastPoint = a_bound.point;

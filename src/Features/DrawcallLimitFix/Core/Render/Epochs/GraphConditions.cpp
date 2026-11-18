@@ -24,7 +24,7 @@ namespace DCLF::Draws
 		// CurrentGraphConditions handed out stays valid while another thread swaps it.
 		std::mutex attachedMutex;
 		std::vector<std::shared_ptr<const GraphConditions>> attachedKept;  // attachedMutex
-		std::atomic<const GraphConditions*> attached{ nullptr };
+		std::atomic<const GraphConditions*> attachedConditions{ nullptr };
 		std::mutex cutsMutex;
 		std::string requestedCuts;  // cutsMutex
 		std::atomic<bool> latchedRecordCut{ false };
@@ -33,7 +33,7 @@ namespace DCLF::Draws
 		const GraphConditions& AttachedConditions()
 		{
 			static const GraphConditions kDefaults;
-			const auto* conditions = attached.load(std::memory_order_acquire);
+			const auto* conditions = attachedConditions.load(std::memory_order_acquire);
 			return conditions ? *conditions : kDefaults;
 		}
 	}
@@ -153,11 +153,11 @@ namespace DCLF::Draws
 		const auto* raw = a_conditions.get();
 		{
 			std::scoped_lock lock(attachedMutex);
-			if (attached.load(std::memory_order_relaxed) == raw)
+			if (attachedConditions.load(std::memory_order_relaxed) == raw)
 				return;
 			attachedKept.push_back(std::move(a_conditions));
 		}
-		attached.store(raw, std::memory_order_release);
+		attachedConditions.store(raw, std::memory_order_release);
 		builtForCpu.store(raw->cpuPipeline, std::memory_order_release);
 		latchedRecordCut.store(("," + raw->cuts + ",").find(",~latched-record,") != std::string::npos, std::memory_order_relaxed);
 	}
