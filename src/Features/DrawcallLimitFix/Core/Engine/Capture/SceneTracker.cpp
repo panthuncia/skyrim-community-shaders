@@ -19,6 +19,18 @@ namespace DCLF
 		// the classes overriding them (BSParticleSystemManager's world-space particle systems, BGSDecalNode's detaches and sets,
 		// BSFaceGenNiNode's attach) and the remove-all (FUN_140d1d630: Actor::DetachArrow, Actor::RemoveWeapon, BSTaskPool's queued
 		// removal). A detach before the engine's (the child still attached), an attach after.
+		//
+		// A move (an attach of a child that still has a parent) is pushed whole at its attach, so no scene pass takes its detach alone
+		// and erases what the attach keeps.
+		struct MoveGroup
+		{
+			const RE::NiAVObject* child = nullptr;
+			SceneTracker::Event* oldest = nullptr;
+			SceneTracker::Event* newest = nullptr;
+			std::uint32_t wakes = 0;  // SceneWake bits of the grouped events
+		};
+		thread_local MoveGroup t_move;
+
 		void OnChildAttached(const SWF_EventHeader* a_event, std::uintptr_t*, void*)
 		{
 			const auto& event = *reinterpret_cast<const SWF_ChildEvent*>(a_event);
@@ -33,6 +45,13 @@ namespace DCLF
 		{
 			const auto& event = *reinterpret_cast<const SWF_ChildEvent*>(a_event);
 			auto* child = static_cast<RE::NiAVObject*>(event.child);
+			if (event.flags & SWF_CHILD_REPARENT) {
+				// The engine's attach of this child is in progress on this thread, and no other move can be.
+				if (t_move.child && t_move.child != child)
+					stl::report_and_fail(fmt::format("Drawcall Limit Fix: a move of {} began on thread {} while the move of {} was open", static_cast<const void*>(child),
+						::GetCurrentThreadId(), static_cast<const void*>(t_move.child)));
+				t_move.child = child;
+			}
 			PrimaryCull::Get().NoteListStructure(static_cast<const RE::NiNode*>(event.parent), child, false);
 			SceneTracker::Get().PushDetached(child, static_cast<const RE::NiAVObject*>(event.parent));
 		}
@@ -125,11 +144,30 @@ namespace DCLF
 			a_event->stampNs = static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count());
 			a_event->stampFrame = SceneCapture::Frame();
 		}
-		a_event->next = head.load(std::memory_order_relaxed);
-		while (!head.compare_exchange_weak(a_event->next, a_event, std::memory_order_release, std::memory_order_relaxed)) {
+		if (!t_move.child) {
+			a_event->next = head.load(std::memory_order_relaxed);
+			while (!head.compare_exchange_weak(a_event->next, a_event, std::memory_order_release, std::memory_order_relaxed)) {
+			}
+			if (source != SceneWake::Count)
+				WakeScenePass(source);
+			return;
 		}
+		// A move open on this thread holds its events until its attach pushes them all at once.
+		a_event->next = t_move.newest;
+		t_move.newest = a_event;
+		if (!t_move.oldest)
+			t_move.oldest = a_event;
 		if (source != SceneWake::Count)
-			WakeScenePass(source);
+			t_move.wakes |= 1u << static_cast<std::uint32_t>(source);
+		if (a_event->type != EventType::Attached || a_event->node.get() != t_move.child)
+			return;
+		const MoveGroup move = std::exchange(t_move, {});
+		move.oldest->next = head.load(std::memory_order_relaxed);
+		while (!head.compare_exchange_weak(move.oldest->next, move.newest, std::memory_order_release, std::memory_order_relaxed)) {
+		}
+		for (std::uint32_t wake = 0; wake < static_cast<std::uint32_t>(SceneWake::Count); ++wake)
+			if (move.wakes & (1u << wake))
+				WakeScenePass(static_cast<SceneWake>(wake));
 	}
 
 	void SceneTracker::PushCaptured(Event* a_event, bool a_fillOnly)
@@ -160,8 +198,16 @@ namespace DCLF
 
 	void SceneTracker::PushAttached(RE::NiAVObject* a_child, const RE::NiAVObject* a_parent)
 	{
-		if (!a_child || stopped.load(std::memory_order_acquire))
+		if (!a_child || stopped.load(std::memory_order_acquire)) {
+			if (a_child && t_move.child == a_child) {
+				if (t_move.newest) {
+					t_move.oldest->next = nullptr;
+					FreeEvents(t_move.newest);
+				}
+				t_move = {};
+			}
 			return;
+		}
 		auto* event = new Event{};
 		event->type = EventType::Attached;
 		event->node.reset(a_child);

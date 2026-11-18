@@ -21,6 +21,11 @@
 
 #include <ankerl/unordered_dense.h>
 #include "Features/DrawcallLimitFix/Diagnostics/Policy.h"
+#include "Features/DrawcallLimitFix/Core/Engine/Walkers.h"
+#include "Utils/SwitchFile.h"
+
+#include <array>
+#include <mutex>
 
 namespace DCLF::RegistrationCensus
 {
@@ -675,15 +680,121 @@ namespace DCLF::RegistrationCensus
 
 	namespace
 	{
+		// CS_DCLF_CELL_TRACE=1 logs nearby actors' live parts each frame against DCLF's claims and the engine's kept passes.
+		bool CrossingTraceOn()
+		{
+			static const bool on = Util::SwitchFile::Enabled("CS_DCLF_CELL_TRACE");
+			return on;
+		}
+
+		struct CrossingKept
+		{
+			const RE::BSBatchRenderer* batch = nullptr;
+			const RE::BSGeometry* geometry = nullptr;
+		};
+		std::mutex crossingMutex;
+		std::vector<CrossingKept> crossingKept;
+
+		struct CrossingActor
+		{
+			std::uint32_t cell = 0;
+			std::array<std::uint32_t, 6> counts{};
+			std::uint32_t frame = 0;
+		};
+		ankerl::unordered_dense::map<std::uint32_t, CrossingActor> crossingActors;
+		const void* crossingTables = nullptr;
+		GeometrySet crossingRecords;
+
 		void Kept(const Diagnostics::PassKept& a_event)
 		{
-			Note(a_event.batch, a_event.pass, a_event.site, static_cast<std::uint8_t>(a_event.face ? kReflectionFace : 0), a_event.occlusionPhase);
+			if (Enabled())
+				Note(a_event.batch, a_event.pass, a_event.site, static_cast<std::uint8_t>(a_event.face ? kReflectionFace : 0), a_event.occlusionPhase);
+			if (CrossingTraceOn() && a_event.pass && a_event.pass->geometry) {
+				std::lock_guard lock(crossingMutex);
+				crossingKept.push_back({ a_event.batch, a_event.pass->geometry });
+			}
 		}
 	}
 
 	void Install()
 	{
-		if (Enabled())
+		if (Enabled() || CrossingTraceOn())
 			Diagnostics::Subscribe<Diagnostics::PassKept>(Kept);
+	}
+
+	void TraceCrossings(std::uint32_t a_frame)
+	{
+		if (!CrossingTraceOn())
+			return;
+		RefreshAccumulatorViews();
+		std::vector<CrossingKept> kept;
+		{
+			std::lock_guard lock(crossingMutex);
+			kept.swap(crossingKept);
+		}
+		GeometrySet keptMain;
+		for (const auto& pass : kept)
+			if (const auto it = census.accumulatorViews.find(pass.batch); it != census.accumulatorViews.end() && (it->second == kMain || it->second == kMainDepth))
+				keptMain.insert(pass.geometry);
+		const auto claims = Scene::FrameView::Get().FrameClaims();
+		const auto& tables = Scene::FrameView::Get().AcceptedTables();
+		if (tables.get() != crossingTables) {
+			crossingTables = tables.get();
+			crossingRecords.clear();
+			if (tables)
+				for (std::size_t slot = 0; slot < tables->objectGeometry.size(); ++slot)
+					if (tables->objectGeometry[slot] && !(tables->objects[slot].flags & kObjectFree))
+						crossingRecords.insert(tables->objectGeometry[slot]);
+		}
+		auto* lists = RE::ProcessLists::GetSingleton();
+		auto* player = RE::PlayerCharacter::GetSingleton();
+		if (!lists || !player)
+			return;
+		const auto eye = player->GetPosition();
+		for (const auto& handle : lists->highActorHandles) {
+			const auto actor = handle.get();
+			auto* root = actor ? actor->Get3D(false) : nullptr;
+			if (!root || actor->GetPosition().GetDistance(eye) > 4096.0f)
+				continue;
+			// The counts in the order the line prints them.
+			std::array<std::uint32_t, 6> counts{};
+			std::string missing;
+			Engine::ForEachLive(root, [&](RE::NiAVObject& a_object, std::uint32_t) {
+				if (a_object.GetFlags().any(RE::NiAVObject::Flag::kHidden))
+					return Engine::Walk::Skip;
+				auto* geometry = a_object.AsGeometry();
+				if (!geometry)
+					return Engine::Walk::Descend;
+				const std::uint8_t phases = claims ? claims->PhasesOf(geometry) : std::uint8_t{ 0 };
+				const bool member = (phases & kSetMain) != 0;
+				const bool pending = !member && claims && (claims->WithheldPhasesOf(geometry) & kSetMain);
+				const bool engine = keptMain.contains(geometry);
+				++counts[0];
+				counts[1] += crossingRecords.contains(geometry) ? 1 : 0;
+				counts[2] += member ? 1 : 0;
+				counts[3] += pending ? 1 : 0;
+				counts[4] += engine ? 1 : 0;
+				if (!member && !engine) {
+					++counts[5];
+					if (missing.size() < 240)
+						missing += fmt::format(" '{}' {}{}", geometry->name.c_str() ? geometry->name.c_str() : "", static_cast<const void*>(geometry), pending ? " waiting" : "");
+				}
+				return Engine::Walk::Descend;
+			}, 4096);
+			std::uint32_t held = 0;
+			Engine::ForEachLive(root, [&](RE::NiAVObject& a_object, std::uint32_t) { held += a_object.AsGeometry() ? 1u : 0u; }, 4096);
+			const auto* cell = actor->GetParentCell();
+			const std::uint32_t cellId = cell ? cell->GetFormID() : 0;
+			auto& state = crossingActors[actor->GetFormID()];
+			const bool moved = state.frame && state.cell != cellId;
+			if (moved || state.counts != counts || !state.frame || counts[5])
+				logger::info("[DCLF] cell trace: frame {} actor {:08X} '{}' ref {} cell {:08X}{}: live {}, records {}, members {}, waiting {}, engine {}, drawn by nobody {}{} (held {}, root fade {:.3f})", a_frame,
+					actor->GetFormID(), actor->GetName() ? actor->GetName() : "", static_cast<const void*>(actor.get()), cellId,
+					moved ? fmt::format(" (from {:08X})", state.cell) : std::string(), counts[0], counts[1], counts[2], counts[3], counts[4], counts[5], missing, held,
+					root->AsFadeNode() ? root->AsFadeNode()->GetRuntimeData().currentFade : -1.0f);
+			state.cell = cellId;
+			state.counts = counts;
+			state.frame = a_frame;
+		}
 	}
 }

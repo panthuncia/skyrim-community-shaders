@@ -199,6 +199,20 @@ that a repeat is recognised. They are not chased unless one recurs with a DCLF o
     missing for those frames. Waiting on the catalog at the frame's start could exceed the 5 s bound while the pipelines compile.
     This needs its own design: for example, the old catalog keeps drawing into compatible formats until the new one is installed.
 
+-   **Objects changing cells flickered or vanished (fixed 2026-11-18).** A reference crossing into another cell is moved by one
+    `NiNode::AttachChild` on the new cell's node, which first detaches the child from the old one. The detach and the attach were
+    pushed as separate events, and the detach woke the scene pass, which often drained it alone: every part of the actor was
+    erased and tracked again as new one pass later. The new entries had no slot or binding, so they were withheld while they
+    waited for pipelines and materials, for 10 to 70 frames at Riverwood (`CS_DCLF_CELL_TRACE`, runs x2g and x3n: 8 of 9
+    crossings split). SceneWriterFramework now flags that detach `SWF_CHILD_REPARENT` (ABI minor 4), and `SceneTracker` holds the
+    move's events on the moving thread until its attach pushes them together. The move then applies in one batch, the entries keep
+    their slots and are re-filed under the new category node.
+-   **An actor's first cell change can still hide parts for 4 to 10 frames.** An actor whose fade was left at 1 minus the snap
+    offset (0.983, `FUN_14147a160`'s amount branch, as in the engine) is bound to the blended fading pass. The engine resets its
+    fade to 1 when it changes cells, so DCLF binds it opaque, and the first use of that pipeline in a session waits for its
+    compile while the claim withholds it from the engine. **Fix direction:** ask for the settled key's pipeline when a member binds
+    the fading one.
+
 ## Memory retention
 
 -   **VRAM retention after leaving an exterior: mostly fixed, about 0.9 GB outside DXVK left.** The 2.5 GB that DCLF held after

@@ -13,6 +13,7 @@
 #include "Features/DrawcallLimitFix/Core/Extensions/Views.h"
 #include "Features/DrawcallLimitFix/Core/Runtime/SceneScheduler.h"
 #include "Features/DrawcallLimitFix/Core/Settings/Toggles.h"
+#include "Utils/SwitchFile.h"
 
 #include <algorithm>
 #include <atomic>
@@ -552,6 +553,31 @@ namespace DCLF::Scene
 		}
 		if (decision.rootViewExcluded || decision.rootViewHeld)
 			Diagnostics::Notify(Diagnostics::SetSlotDecided{ *this, a_slot, decision, decision.heldWhyCount ? decision.whys[0] : whyBefore });
+		static const bool cellTrace = Util::SwitchFile::Enabled("CS_DCLF_CELL_TRACE");
+		static ankerl::unordered_dense::map<std::uint32_t, std::pair<std::uint32_t, PipelineKey>> cellTraceReady;
+		if (cellTrace)
+			if (auto* geometry = const_cast<RE::BSGeometry*>(tables.objectGeometry[a_slot]))
+				if (const auto it = tracked.find(geometry); it != tracked.end() && it->second.ownerReference) {
+					const auto& object = tables.objects[a_slot];
+					const std::uint32_t p = object.pipelineIndex;
+					const PipelineKey key = p < tables.pipelines.size() ? tables.pipelines[p] : PipelineKey{};
+					if (!decision.wait) {
+						cellTraceReady[a_slot] = { p, key };
+					} else {
+						std::string whys;
+						for (std::uint8_t w = 0; w < decision.whyCount; ++w)
+							whys += fmt::format("{}{}", w ? "," : "", kSetWaitReasonNames[(std::min<std::size_t>)(decision.whys[w], kSetWaitReasons - 1)]);
+						const auto ready = cellTraceReady.find(a_slot);
+						const auto describe = [](std::uint32_t a_p, const PipelineKey& a_key) {
+							return fmt::format("{} [vs {:x} ps {:x} pass {:x} raster {:x} layout {:x}]", a_p, a_key.vertexDescriptor, a_key.pixelDescriptor, a_key.passDescriptor, a_key.rasterFlags,
+								a_key.vertexLayout);
+						};
+						logger::info("[DCLF] cell trace: pass {} frame {} ref {} slot {} {} waits for {} (resident {}, no bindings {}, tracked since frame {}); pipeline {}, last ready {}",
+							passSerial, sceneFrame, static_cast<const void*>(it->second.ownerReference), a_slot, static_cast<const void*>(geometry), whys, IsResidentSlot(a_slot),
+							(object.flags & kObjectNoBindings) != 0, it->second.trackedFrame, describe(p, key),
+							ready != cellTraceReady.end() ? describe(ready->second.first, ready->second.second) : std::string("none"));
+					}
+				}
 		return decision.phases;
 	}
 

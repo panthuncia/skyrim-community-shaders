@@ -13,6 +13,7 @@
 #include "Features/DrawcallLimitFix/Core/Render/LoadHold.h"
 
 #include "TextureStreaming/Streamer.h"
+#include "Utils/SwitchFile.h"
 
 namespace DCLF::Scene
 {
@@ -40,6 +41,21 @@ namespace DCLF::Scene
 				count += keys.size();
 			return count;
 		}
+
+		// CS_DCLF_CELL_TRACE=1 logs each pass's attaches and detaches of actors' geometry, for cell crossings.
+		bool CellTraceOn()
+		{
+			static const bool on = Util::SwitchFile::Enabled("CS_DCLF_CELL_TRACE");
+			return on;
+		}
+
+		struct CellTraceRef
+		{
+			std::uint32_t added = 0, refiled = 0, same = 0, moved = 0, erased = 0;
+			const void* fromCategory = nullptr;
+			const void* toCategory = nullptr;
+			std::string events;
+		};
 	}
 
 	struct Coordinator::BatchIndex
@@ -384,6 +400,26 @@ namespace DCLF::Scene
 		std::size_t nextPrep = 0;
 		double mergeMs = 0.0;
 		double ancestorMs = 0.0, serialMs = 0.0;
+		// The cell trace notes whether each attached geometry was tracked before its merge, and under which category node.
+		const bool trace = CellTraceOn();
+		struct CellTraceBefore
+		{
+			const void* event = nullptr;
+			bool tracked = false;
+			const void* category = nullptr;
+		};
+		ankerl::unordered_dense::map<RE::BSGeometry*, CellTraceBefore> traceBefore;
+		if (trace)
+			for (const auto* event : a_index.structural)
+				if (event->type == SceneTracker::EventType::Attached && event->node)
+					ForEachMirror(mirror, event->node.get(), [&](const void* a_key, const SceneCapture::NodeRecord& a_record) {
+						if (a_record.kind & SceneCapture::kKindGeometry) {
+							auto* geometry = static_cast<RE::BSGeometry*>(const_cast<void*>(a_key));
+							const auto it = tracked.find(geometry);
+							traceBefore.try_emplace(geometry, CellTraceBefore{ event, it != tracked.end(), it != tracked.end() ? it->second.categoryNode : nullptr });
+						}
+						return true;
+					}, kMaxEventNodes);
 		for (auto* event : a_index.structural) {
 			// A sun candidate above it: its subtree changed, which its primary-cut plan reads (PlanOf).
 			if (!event->ancestors.empty() && !sunTable.index.empty()) {
@@ -422,7 +458,66 @@ namespace DCLF::Scene
 		}
 		a.ancestorMs += ancestorMs;
 		a.mergeMs += mergeMs + serialMs;
+		// The cell trace sums by reference what the merges did and what ApplyDetaches will do with each detached geometry.
+		ankerl::unordered_dense::map<const void*, CellTraceRef> traceRefs;
+		ankerl::unordered_dense::set<RE::BSGeometry*> traceDetached;
+		if (trace) {
+			ankerl::unordered_dense::map<const void*, const void*> eventRef;
+			for (const auto& [geometry, was] : traceBefore) {
+				const auto it = tracked.find(geometry);
+				if (it == tracked.end() || !it->second.ownerReference)
+					continue;
+				auto& ref = traceRefs[it->second.ownerReference];
+				eventRef.try_emplace(was.event, it->second.ownerReference);
+				if (!was.tracked)
+					++ref.added;
+				else if (was.category != it->second.categoryNode) {
+					++ref.refiled;
+					ref.fromCategory = was.category;
+					ref.toCategory = it->second.categoryNode;
+				} else
+					++ref.same;
+			}
+			for (auto* geometry : detached) {
+				const auto it = tracked.find(geometry);
+				if (it == tracked.end() || !it->second.ownerReference || !traceDetached.insert(geometry).second)
+					continue;
+				auto& ref = traceRefs[it->second.ownerReference];
+				++(FindCategoryNode(geometry, nullptr) ? ref.moved : ref.erased);
+				ref.fromCategory = ref.fromCategory ? ref.fromCategory : it->second.categoryNode;
+			}
+			for (std::size_t i = 0; i < a_index.structural.size(); ++i) {
+				const auto* event = a_index.structural[i];
+				const void* owner = nullptr;
+				if (event->type == SceneTracker::EventType::Attached) {
+					const auto at = eventRef.find(event);
+					owner = at != eventRef.end() ? at->second : nullptr;
+				} else
+					for (auto* geometry : event->removed)
+						if (const auto it = tracked.find(geometry); it != tracked.end() && it->second.ownerReference) {
+							owner = it->second.ownerReference;
+							break;
+						}
+				if (!owner)
+					continue;
+				auto& ref = traceRefs[owner];
+				if (event->type == SceneTracker::EventType::Attached)
+					ref.events += fmt::format(" #{} attach {} under {}", i, static_cast<const void*>(event->node.get()), mirror.Parent(event->node.get()));
+				else
+					ref.events += fmt::format(" #{} detach {} from {} ({} geometries)", i, event->detachedRoot, event->ancestors.empty() ? nullptr : event->ancestors.front(),
+						event->removed.size());
+			}
+		}
 		ApplyDetaches(detached);
+		if (trace && !traceRefs.empty()) {
+			ankerl::unordered_dense::map<const void*, std::uint32_t> counts;
+			for (const auto& [geometry, entry] : tracked)
+				if (entry.ownerReference && traceRefs.contains(entry.ownerReference))
+					++counts[entry.ownerReference];
+			for (const auto& [owner, ref] : traceRefs)
+				logger::info("[DCLF] cell trace: pass {} frame {} ref {}:{}; added {}, re-filed {} ({} -> {}), unchanged {}, detached but kept {}, erased {}; tracked now {}",
+					passSerial, sceneFrame, owner, ref.events, ref.added, ref.refiled, ref.fromCategory, ref.toCategory, ref.same, ref.moved, ref.erased, counts[owner]);
+		}
 		// Parity: the category members' index against the tracked entries, on a schedule.
 		if (Policy::CheckCategoryMembers(false, passSerial))
 			CheckCategoryMembers("the attach/detach merge");

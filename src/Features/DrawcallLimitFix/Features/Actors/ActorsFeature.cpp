@@ -20,6 +20,8 @@ namespace DCLF::Features::Actors
 			// this feature).
 			const auto actorsSwitch = a_context.RegisterSwitch({ .name = "CS_DCLF_ACTORS", .kind = Api::SwitchKind::Feature, .reduced = Api::SwitchReduced::UnlessOne,
 				.description = "0: actors stay native (live toggle's seed)", .after = "CS_DCLF_SKIN_PARTITIONS" });
+			a_context.RegisterSwitch({ .name = "CS_DCLF_CELL_TRACE", .kind = Api::SwitchKind::Diagnostic,
+				.description = "1: each scene pass's attaches and detaches of actors' geometry, and each frame's nearby actors' parts against DCLF's claims and the engine's kept passes" });
 			// Geometry under an actor's 3D, and the actor techniques: an object class. Features/FirstPerson's toggle needs it (the player's
 			// skeleton).
 			const auto actors = a_context.RegisterToggle({ .name = "actors", .label = "Actors", .seed = actorsSwitch, .entersClassification = true,

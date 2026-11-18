@@ -34,6 +34,11 @@
 #include "Vram/VramLedger.h"
 #include "Features/DrawcallLimitFix/Diagnostics/Observation.h"
 
+namespace DCLF::RegistrationCensus
+{
+	void TraceCrossings(std::uint32_t a_frame);
+}
+
 namespace DCLF::Reports
 {
 	/** @brief The frame's own report lines (the culling, the leaks, the GPU timings, and with CS_DCLF_STATS the full statistics). */
@@ -53,6 +58,7 @@ void DCLF::Reports::Stats(std::uint32_t frame, FrameDriver::Counters& c)
 	auto& leaks = Leaks();
 	auto& timing = c.timing;
 	const bool due = Due(frame);
+	DCLF::RegistrationCensus::TraceCrossings(frame);
 	// CS_DCLF_CENSUS: the passes the engine kept since the last frame, classified here (Present), reported every interval.
 	if (DCLF::RegistrationCensus::Enabled()) {
 		DCLF::RegistrationCensus::Collect();

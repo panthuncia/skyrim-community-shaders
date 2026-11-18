@@ -140,6 +140,7 @@ Each compares a live path with a reference built from scratch and flags every mi
 | `CS_DCLF_PASS_STATS` | `1`: per-pass counts in the report. |
 | `CS_DCLF_PROFILE` | `1`: scene-phase timings in the report. The profile perturbs what it measures. |
 | `CS_DCLF_CENSUS` | `1`: the registration census, every report, with or without `CS_DCLF_STATS`. |
+| `CS_DCLF_CELL_TRACE` | `1`: actors across cell changes. Each scene pass logs, per actor, the attaches and detaches of its geometry and what they did (added, re-filed under a new category node, kept, erased) with the count tracked after. Each frame logs nearby actors whose parts changed: live parts, records, DCLF members, parts withheld while waiting, parts the engine kept, parts drawn by nobody, all geometry held, and the cell. A waiting actor part logs its reasons and its pipeline key against the last ready one. |
 | `CS_DCLF_PRECISION_CENSUS` | `1`: every 300 frames, what the engine's float translations lose against their parent chains composed in double, by distance from the origin, for rows and bones. |
 | `CS_DCLF_SHADER_DEBUG` | Default on (off in the release profile, where `1` turns it on): SPIR-V with debug info, and the HLSL sources copied beside the log. `0`: without. It inflates the depth pipeline groups. |
 | `CS_DCLF_SHADER_SOURCE_DIR` | Where `CS_DCLF_SHADER_DEBUG` copies the HLSL sources. |
