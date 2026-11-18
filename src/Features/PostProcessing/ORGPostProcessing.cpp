@@ -1,10 +1,11 @@
 #include "ORGPostProcessing.h"
+#include "RenderGraph/Engine/Native/Native.h"
 
 #include "RenderGraph/Switches.h"
 
 bool ORGPostProcessing::Requested()
 {
-	static const bool requested = Switches::On("CS_ORG_POST_PROCESSING");
+	static const bool requested = RenderGraph::Engine::Native::GraphMode();
 	return requested;
 }
 

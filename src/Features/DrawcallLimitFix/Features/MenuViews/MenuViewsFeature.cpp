@@ -2,6 +2,7 @@
 // and its report lines; the rest is MenuViewsProbe.cpp.
 
 #include "Features/DrawcallLimitFix/Features/MenuViews/MenuViews.h"
+#include "RenderGraph/Engine/Native/Native.h"
 #include "Features/DrawcallLimitFix/Features/MenuViews/MenuScenes.h"
 
 #include "Features/DrawcallLimitFix/Core/Handoff/PassCapture.h"
@@ -97,13 +98,13 @@ namespace DCLF::Features::MenuViews
 
 	bool Menu3DEnabled()
 	{
-		static const bool enabled = Switches::On("CS_ORG_MENU3D");
+		static const bool enabled = ::RenderGraph::Engine::Native::GraphMode();
 		return enabled;
 	}
 
 	bool MapEnabled()
 	{
-		static const bool enabled = Switches::On("CS_ORG_MAP");
+		static const bool enabled = ::RenderGraph::Engine::Native::GraphMode();
 		return enabled;
 	}
 

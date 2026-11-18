@@ -1,10 +1,11 @@
 #include "ORGVolumetricLighting.h"
 
+#include "RenderGraph/Engine/Native/Native.h"
 #include "RenderGraph/Switches.h"
 
 bool ORGVolumetricLighting::Requested()
 {
-	static const bool requested = Switches::On("CS_ORG_VOLUMETRIC_LIGHTING");
+	static const bool requested = RenderGraph::Engine::Native::GraphMode();
 	return requested;
 }
 
@@ -28,7 +29,6 @@ ORGVolumetricLighting& ORGVolumetricLighting::Get()
 #	include "Globals.h"
 #	include "RenderGraph/AnchorPasses.h"
 #	include "RenderGraph/ComputeProgram.h"
-#	include "RenderGraph/Engine/Native/Native.h"
 #	include "RenderGraph/Engine/Pipeline/Descriptions.h"
 #	include "RenderGraph/FrameAnchors.h"
 #	include "RenderGraph/GraphResources.h"

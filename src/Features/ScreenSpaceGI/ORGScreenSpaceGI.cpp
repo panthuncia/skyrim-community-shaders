@@ -4,6 +4,7 @@
 #	include <rhi_interop_vulkan.h>
 
 #	include "ORGScreenSpaceGI.h"
+#	include "RenderGraph/Engine/Native/Native.h"
 
 #	include "Deferred.h"
 #	include "Features/ScreenSpaceGI.h"
@@ -700,7 +701,7 @@ struct ORGScreenSpaceGI::Impl
 
 bool ORGScreenSpaceGI::Requested()
 {
-	static const bool requested = Switches::On("CS_ORG_SCREEN_SPACE_GI");
+	static const bool requested = RenderGraph::Engine::Native::GraphMode();
 	return requested;
 }
 

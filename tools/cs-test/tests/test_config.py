@@ -190,13 +190,6 @@ def test_every_shipped_config_resolves():
     assert contract["env"]["CS_ORG_NATIVE_BACKEND"] == "d3d12"
 
 
-def test_shipped_ports_preset_matches_the_old_block():
-    schema = load_schema()
-    contract, _ = resolve("latch-census-short", (), schema=schema)
-    org_lines = [k for k in contract["env"] if k.startswith("CS_ORG_")]
-    assert len(org_lines) == 48
-
-
 def test_named_save_turns_the_autoload_mod_off(configs):
     sets = ['game.autoload_mod="Start On Save"']
     _, harness = r("base", configs, sets)

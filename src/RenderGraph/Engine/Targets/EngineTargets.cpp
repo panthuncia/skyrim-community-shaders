@@ -332,7 +332,7 @@ namespace RenderGraph::Engine::Targets
 		/** @brief Whether CS_ORG_ENGINE_TARGET_HANDLES=1 asks for tripwire handles in the engine's fields. */
 		bool HandlesRequested()
 		{
-			static const bool requested = Switches::On("CS_ORG_ENGINE_TARGET_HANDLES");
+			static const bool requested = RenderGraph::Engine::Native::GraphMode();
 			return requested;
 		}
 
@@ -1081,7 +1081,7 @@ namespace RenderGraph::Engine::Targets
 
 	bool Enabled()
 	{
-		static const bool enabled = Switches::On("CS_ORG_ENGINE_TARGETS");
+		static const bool enabled = RenderGraph::Engine::Native::GraphMode();
 		return enabled;
 	}
 

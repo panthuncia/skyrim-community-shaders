@@ -1763,7 +1763,7 @@ namespace RenderGraph::Engine::Scaleform
 
 	bool Requested()
 	{
-		return Switches::On("CS_ORG_SCALEFORM");
+		return RenderGraph::Engine::Native::GraphMode();
 	}
 
 	void Setup()

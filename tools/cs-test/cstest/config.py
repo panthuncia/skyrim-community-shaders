@@ -218,7 +218,7 @@ def flatten(merged, schema, name):
         key = schema.by_env.get(var)
         if key and schema.get(key).get("use_instead"):
             raise ConfigError(f"[env] {var}: write {schema.get(key)['use_instead']} instead")
-        if var in origin and not origin[var].startswith(("org.ports", "org.census")):
+        if var in origin and not origin[var].startswith("org.census"):
             raise ConfigError(f"{var} is set by {origin[var]} and by [env]: keep one")
         if isinstance(value, bool):
             value = "1" if value else "0"

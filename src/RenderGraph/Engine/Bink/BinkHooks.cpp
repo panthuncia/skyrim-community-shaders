@@ -1,4 +1,5 @@
 #include "RenderGraph/Engine/Bink/Bink.h"
+#include "RenderGraph/Engine/Native/Native.h"
 
 #include "Features/HDRDisplay.h"
 #include "Features/ScreenshotFeature.h"
@@ -510,7 +511,7 @@ namespace RenderGraph::Engine::Bink
 
 	bool Requested()
 	{
-		static const bool requested = !REL::Module::IsVR() && Switches::On("CS_ORG_BINK");
+		static const bool requested = !REL::Module::IsVR() && RenderGraph::Engine::Native::GraphMode();
 		return requested;
 	}
 
@@ -531,7 +532,7 @@ namespace RenderGraph::Engine::Bink
 			return;
 		if (Requested() && !FrameAnchors::Reserve(FrameAnchors::Anchor::Present))
 			logger::warn("[ORG] Bink: CS_ORG_BINK=1, but the Present anchor could not be reserved; the engine draws Bink");
-		logger::info("Hooking the Bink movie player ({})", Requested() ? "CS_ORG_BINK" : "CS_ORG_BINK_SHOT");
+		logger::info("Hooking the Bink movie player ({})", Requested() ? "the graph mode" : "CS_ORG_BINK_SHOT");
 		stl::detour_thunk<PlayerTick>(REL::RelocationID(87890, 90259));
 		tickHooked = true;
 		stl::detour_thunk<LockTexture>(REL::RelocationID(75514, 77306));

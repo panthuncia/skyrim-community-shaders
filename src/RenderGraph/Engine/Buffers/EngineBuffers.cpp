@@ -1,6 +1,7 @@
 // The engine's static vertex and index buffers on ORG, and what both halves share (EngineBuffers.h).
 
 #include "RenderGraph/Engine/Buffers/EngineBuffers.h"
+#include "RenderGraph/Engine/Native/Native.h"
 
 #include "RenderGraph/Switches.h"
 
@@ -8,7 +9,7 @@ namespace RenderGraph::Engine::Buffers
 {
 	bool Requested()
 	{
-		static const bool requested = Switches::On("CS_ORG_ENGINE_BUFFERS");
+		static const bool requested = RenderGraph::Engine::Native::GraphMode();
 		return requested;
 	}
 }

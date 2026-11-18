@@ -2,6 +2,7 @@
 // anchor and installs the engine hooks; the rest is WaterCapture.cpp (the engine side) and WaterDraws.cpp (the graph side).
 
 #include "Features/DrawcallLimitFix/Features/Water/Water.h"
+#include "RenderGraph/Engine/Native/Native.h"
 
 #include "RenderGraph/Switches.h"
 
@@ -44,7 +45,7 @@ namespace DCLF::Features::Water
 
 	bool Enabled()
 	{
-		static const bool enabled = Switches::On("CS_ORG_WATER");
+		static const bool enabled = ::RenderGraph::Engine::Native::GraphMode();
 		return enabled;
 	}
 

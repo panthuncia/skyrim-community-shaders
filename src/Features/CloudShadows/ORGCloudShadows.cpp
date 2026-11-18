@@ -4,13 +4,14 @@
 #endif
 
 #include "Features/CloudShadows/ORGCloudShadows.h"
+#include "RenderGraph/Engine/Native/Native.h"
 
 #include "RenderGraph/Frame/FrameDriver.h"
 #include "RenderGraph/Switches.h"
 
 bool ORGCloudShadows::Requested()
 {
-	static const bool requested = Switches::On("CS_ORG_CLOUD_SHADOWS");
+	static const bool requested = RenderGraph::Engine::Native::GraphMode();
 	return requested;
 }
 

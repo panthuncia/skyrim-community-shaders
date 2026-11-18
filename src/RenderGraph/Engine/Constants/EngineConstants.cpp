@@ -1,6 +1,7 @@
 // The per-use capture of the engine's constant buffers (EngineConstants.h, docs/development/p5/constants.md).
 
 #include "RenderGraph/Engine/Constants/EngineConstants.h"
+#include "RenderGraph/Engine/Native/Native.h"
 
 #include "RenderGraph/Switches.h"
 
@@ -8,7 +9,7 @@ namespace RenderGraph::Engine::Constants
 {
 	bool Requested()
 	{
-		static const bool requested = Switches::On("CS_ORG_ENGINE_CONSTANTS");
+		static const bool requested = RenderGraph::Engine::Native::GraphMode();
 		return requested;
 	}
 }

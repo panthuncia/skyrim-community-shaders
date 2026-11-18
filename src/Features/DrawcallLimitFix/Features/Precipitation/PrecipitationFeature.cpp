@@ -2,6 +2,7 @@
 // EngineDraws anchor and installs the engine hook; the rest is PrecipitationCapture.cpp and PrecipitationDraws.cpp.
 
 #include "Features/DrawcallLimitFix/Features/Precipitation/Precipitation.h"
+#include "RenderGraph/Engine/Native/Native.h"
 
 #include "RenderGraph/Switches.h"
 
@@ -29,7 +30,7 @@ namespace DCLF::Features::Precipitation
 
 	bool Enabled()
 	{
-		static const bool enabled = Switches::On("CS_ORG_PRECIPITATION");
+		static const bool enabled = ::RenderGraph::Engine::Native::GraphMode();
 		return enabled;
 	}
 

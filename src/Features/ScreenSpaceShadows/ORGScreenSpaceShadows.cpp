@@ -4,6 +4,7 @@
 #	include <rhi_interop_vulkan.h>
 
 #	include "ORGScreenSpaceShadows.h"
+#	include "RenderGraph/Engine/Native/Native.h"
 
 #	include "Features/ScreenSpaceShadows.h"
 #	include "Features/TerrainBlending.h"
@@ -244,7 +245,7 @@ struct ORGScreenSpaceShadows::Impl
 
 bool ORGScreenSpaceShadows::Requested()
 {
-	static const bool requested = Switches::On("CS_ORG_SCREEN_SPACE_SHADOWS");
+	static const bool requested = RenderGraph::Engine::Native::GraphMode();
 	return requested;
 }
 

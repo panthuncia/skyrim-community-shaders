@@ -4,6 +4,7 @@
 #	include <rhi_interop_vulkan.h>
 
 #	include "ORGUpscaling.h"
+#	include "RenderGraph/Engine/Native/Native.h"
 
 #	include "Features/HDRDisplay/ORGHDRDisplay.h"
 #	include "Features/Upscaling.h"
@@ -637,7 +638,7 @@ namespace
 
 bool ORGUpscaling::Requested()
 {
-	return Switches::On("CS_ORG_UPSCALING");
+	return RenderGraph::Engine::Native::GraphMode();
 }
 
 ORGUpscaling& ORGUpscaling::Get()

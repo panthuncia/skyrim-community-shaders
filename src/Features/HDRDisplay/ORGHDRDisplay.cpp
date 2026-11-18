@@ -4,13 +4,14 @@
 #endif
 
 #include "Features/HDRDisplay/ORGHDRDisplay.h"
+#include "RenderGraph/Engine/Native/Native.h"
 
 #include "RenderGraph/RenderGraphRuntime.h"
 #include "RenderGraph/Switches.h"
 
 bool ORGHDRDisplay::Requested()
 {
-	static const bool requested = Switches::On("CS_ORG_HDR_DISPLAY");
+	static const bool requested = RenderGraph::Engine::Native::GraphMode();
 	return requested;
 }
 

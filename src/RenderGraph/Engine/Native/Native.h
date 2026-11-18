@@ -70,12 +70,16 @@ namespace RenderGraph::Engine::Native
 	[[noreturn]] void Fail(std::string_view a_dependency, std::string_view a_why);
 
 	/**
-	 * @brief Stage 1, right after CommunityShaders.env is applied and before any other switch is read: turns on every port switch
-	 * native mode needs (in the process environment), and fails on a switch that conflicts. Guest mode (DXVK with the render graph
-	 * on) turns on the same ports, the flush latch and the guest context; a switch the environment sets to 0 is kept there. Nothing
-	 * with CS_ORG=0, CS_ORG=features, CS_NATIVE_D3D11=1 or CS_ORG_OWNED_FRAME=1.
+	 * @brief Stage 1, right after CommunityShaders.env is applied and before any other switch is read: fails on a switch that
+	 * conflicts with native mode, and sets the D3D12 Drawcall Limit Fix switches.
 	 */
 	void ApplySwitches();
+
+	/**
+	 * @brief Whether the frame runs on the render graph: native mode, or guest mode (DXVK with the graph on). Every engine and CS
+	 * port runs then, and none with CS_ORG=0, CS_ORG=features, CS_NATIVE_D3D11=1 or CS_ORG_OWNED_FRAME=1. Any thread.
+	 */
+	bool GraphMode();
 
 	/**
 	 * @brief On D3D12 (CS_ORG_NATIVE_BACKEND=d3d12), the Drawcall Limit Fix switches ApplySwitches set for what has no D3D12 port yet, as

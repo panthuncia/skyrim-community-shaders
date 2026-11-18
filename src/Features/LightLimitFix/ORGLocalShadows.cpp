@@ -7,6 +7,7 @@
 
 #	include "Globals.h"
 #	include "RenderGraph/ComputeProgram.h"
+#	include "RenderGraph/Engine/Native/Native.h"
 #	include "RenderGraph/FrameAnchors.h"
 #	include "RenderGraph/GraphResources.h"
 #	include "RenderGraph/PublishedResources.h"
@@ -30,7 +31,6 @@
 namespace
 {
 	constexpr const char* kClientId = "cs.llf.local-shadows";
-	constexpr std::string_view kSwitch = "CS_ORG_LIGHT_LIMIT_FIX_SHADOWS";
 	constexpr const char* kShader = "LightLimitFix/LocalShadowCopyCS.hlsl";
 	// LocalShadowCopyCS's group size (GROUP_SIZE).
 	constexpr std::uint32_t kGroupSize = 8;
@@ -211,7 +211,7 @@ ORGLocalShadows::~ORGLocalShadows() = default;
 
 bool ORGLocalShadows::Requested()
 {
-	static const bool requested = Switches::On(kSwitch);
+	static const bool requested = RenderGraph::Engine::Native::GraphMode();
 	return requested;
 }
 

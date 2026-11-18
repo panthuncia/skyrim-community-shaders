@@ -1,4 +1,5 @@
 #include "RenderGraph/Engine/LoadingScreen/LoadingScreen.h"
+#include "RenderGraph/Engine/Native/Native.h"
 
 #include "RenderGraph/Frame/FrameDriver.h"
 #include "RenderGraph/Frame/PostChain.h"
@@ -69,7 +70,7 @@ namespace RenderGraph::Engine::LoadingScreen
 
 	bool Requested()
 	{
-		static const bool requested = !REL::Module::IsVR() && Switches::On("CS_ORG_LOADING_THREAD");
+		static const bool requested = !REL::Module::IsVR() && RenderGraph::Engine::Native::GraphMode();
 		return requested;
 	}
 

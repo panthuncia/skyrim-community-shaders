@@ -1,10 +1,11 @@
 #include "ORGSunRays.h"
+#include "RenderGraph/Engine/Native/Native.h"
 
 #include "RenderGraph/Switches.h"
 
 bool ORGSunRays::Requested()
 {
-	static const bool requested = Switches::On("CS_ORG_E11_RAYS");
+	static const bool requested = RenderGraph::Engine::Native::GraphMode();
 	return requested;
 }
 

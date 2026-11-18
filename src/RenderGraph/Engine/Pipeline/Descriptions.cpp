@@ -1,4 +1,5 @@
 #include "RenderGraph/Engine/Pipeline/Descriptions.h"
+#include "RenderGraph/Engine/Native/Native.h"
 
 #include "RenderGraph/Switches.h"
 
@@ -27,7 +28,7 @@ namespace RenderGraph::Engine::Pipeline
 	bool Enabled()
 	{
 #if defined(CS_HAS_RENDER_GRAPH)
-		static const bool enabled = Switches::On("CS_ORG_ENGINE_SHADERS");
+		static const bool enabled = RenderGraph::Engine::Native::GraphMode();
 		return enabled;
 #else
 		return false;

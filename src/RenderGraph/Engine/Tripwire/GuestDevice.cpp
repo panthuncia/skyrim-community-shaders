@@ -1,5 +1,6 @@
 #include "RenderGraph/Engine/Tripwire/GuestDevice.h"
 
+#include "RenderGraph/Engine/Native/Native.h"
 #include "RenderGraph/Engine/Tripwire/Tripwire.h"
 #include "RenderGraph/Switches.h"
 
@@ -25,7 +26,7 @@ namespace RenderGraph::Engine::Tripwire
 
 	bool GuestRequested()
 	{
-		static const bool requested = Switches::On("CS_ORG_TRIPWIRE_GUEST");
+		static const bool requested = Native::GraphMode() && !Native::Requested();
 		return requested;
 	}
 

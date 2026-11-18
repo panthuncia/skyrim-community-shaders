@@ -17,66 +17,6 @@ namespace RenderGraph::Engine::Native
 {
 	namespace
 	{
-		/**
-		 * @brief The port switches every ORG mode turns on: every engine subsystem and CS feature on ORG, and the flush latch, so no
-		 * engine draw is left to D3D11. In native mode a subsystem without its port would call the native handles, which do nothing.
-		 * Guest mode (DXVK) runs the same ports (plan B0); there a switch set to 0 keeps that subsystem on D3D11.
-		 */
-		constexpr std::array kPortSwitches{
-			"CS_ORG_ENGINE_FLUSH_LATCH",
-			"CS_ORG_SHADOW_MASK",
-			"CS_ORG_COMPOSITE",
-			"CS_ORG_IBL",
-			"CS_ORG_SCREEN_SPACE_SHADOWS",
-			"CS_ORG_TERRAIN_SHADOWS",
-			"CS_ORG_VOLUMETRIC_SHADOWS",
-			"CS_ORG_SKYLIGHTING",
-			"CS_ORG_GRASS_COLLISION",
-			"CS_ORG_LIGHT_LIMIT_FIX_SHADOWS",
-			"CS_ORG_SCREEN_SPACE_GI",
-			"CS_ORG_SUBSURFACE_SCATTERING",
-			"CS_ORG_EXPONENTIAL_HEIGHT_FOG",
-			"CS_ORG_DYNAMIC_CUBEMAPS",
-			"CS_ORG_CLOUD_SHADOWS",
-			"CS_ORG_POST_PROCESSING",
-			"CS_ORG_HDR_DISPLAY",
-			"CS_ORG_UPSCALING",
-			"CS_ORG_SCREENSHOT",
-			"CS_ORG_TERRAIN_BLENDING",
-			"CS_ORG_GLINTS",
-			"CS_ORG_E11_RAYS",
-			"CS_ORG_FX",
-			"CS_ORG_IMGUI",
-			"CS_ORG_ENGINE_TARGETS",
-			"CS_ORG_ENGINE_TARGET_HANDLES",
-			"CS_ORG_ENGINE_BUFFERS",
-			"CS_ORG_ENGINE_TEXTURES",
-			"CS_ORG_ENGINE_SHADERS",
-			"CS_ORG_TEXTURE_STREAMING",
-			"CS_ORG_ENGINE_CONSTANTS",
-			"CS_ORG_ENGINE_SKELETON",
-			"CS_ORG_SKY",
-			"CS_ORG_OCCLUSION_QUERIES",
-			"CS_ORG_VOLUMETRIC_LIGHTING",
-			"CS_ORG_WATER",
-			"CS_ORG_BLOOD_SPLATTER",
-			"CS_ORG_PRECIPITATION",
-			"CS_ORG_IMAGESPACE",
-			"CS_ORG_MENU3D",
-			"CS_ORG_MAP",
-			"CS_ORG_SCALEFORM",
-			"CS_ORG_BINK",
-			"CS_ORG_LOADING_THREAD",
-		};
-
-		/**
-		 * @brief The switches guest mode needs besides the ports: the guest context, through which the flush latch withholds the
-		 * engine's binds and draws from DXVK. Native mode's handles do that job there.
-		 */
-		constexpr std::array kGuestSwitches{
-			"CS_ORG_TRIPWIRE_GUEST",
-		};
-
 		/** @brief Switches that select a DXVK path native mode does not have: each one set is a startup error. */
 		struct Conflict
 		{
@@ -205,80 +145,18 @@ namespace RenderGraph::Engine::Native
 			return false;
 #endif
 		}
+	}
 
-		/**
-		 * @brief Sets each switch of a_names to 1 that the environment does not set. A switch set already keeps its value: in native
-		 * mode a 0 is a startup error (a_zeroFails). Returns the names it turned on.
-		 */
-		template <std::size_t N>
-		std::string TurnOn(const std::array<const char*, N>& a_names, bool a_zeroFails)
-		{
-			std::string turnedOn;
-			for (const char* name : a_names) {
-				char value[16]{};
-				const DWORD length = ::GetEnvironmentVariableA(name, value, sizeof(value));
-				if (length != 0 && length < sizeof(value)) {
-					if (a_zeroFails && std::string_view(value) == "0")
-						Fail(fmt::format("{}=0", name), "its subsystem would draw through D3D11");
-					continue;
-				}
-				::SetEnvironmentVariableA(name, "1");
-				// std::getenv reads the C runtime's own copy, which SetEnvironmentVariable does not change.
-				_putenv_s(name, "1");
-				turnedOn += turnedOn.empty() ? name : fmt::format(", {}", name);
-			}
-			return turnedOn;
-		}
-
-		/** @brief The switches a_names that some code read before this point: they are cached without the value set here. */
-		template <std::size_t N>
-		std::string ReadEarly(const std::array<const char*, N>& a_names)
-		{
-			std::string early;
-			for (const char* name : a_names)
-				if (Switches::Value(name).empty())
-					early += early.empty() ? name : fmt::format(", {}", name);
-			return early;
-		}
-
-		/** @brief Guest mode's ports: every port native mode runs, the latch and the guest context. Explicit values are kept. */
-		void ApplyGuestSwitches()
-		{
-			if (!GuestMode())
-				return;
-			auto turnedOn = TurnOn(kPortSwitches, false);
-			const auto guest = TurnOn(kGuestSwitches, false);
-			if (!guest.empty())
-				turnedOn += turnedOn.empty() ? guest : fmt::format(", {}", guest);
-			std::string kept;
-			for (const char* name : kPortSwitches)
-				if (Environment(name) == "0")
-					kept += kept.empty() ? name : fmt::format(", {}", name);
-			for (const char* name : kGuestSwitches)
-				if (Environment(name) == "0")
-					kept += kept.empty() ? name : fmt::format(", {}", name);
-			auto early = ReadEarly(kPortSwitches);
-			const auto earlyGuest = ReadEarly(kGuestSwitches);
-			if (!earlyGuest.empty())
-				early += early.empty() ? earlyGuest : fmt::format(", {}", earlyGuest);
-			if (!early.empty()) {
-				const auto message = fmt::format("Community Shaders: the port switches {} were read before guest mode could turn them on, so those "
-												 "subsystems would stay on D3D11. Fix the early read.",
-					early);
-				logger::critical("[ORG guest] {}", message);
-				stl::report_and_fail(message);
-			}
-			logger::info("[ORG guest] port switches: {}; kept off by the environment: {}", turnedOn.empty() ? std::string("every one was set already") : fmt::format("turned on {}", turnedOn),
-				kept.empty() ? std::string("none") : kept);
-		}
+	bool GraphMode()
+	{
+		static const bool on = Requested() || GuestMode();
+		return on;
 	}
 
 	void ApplySwitches()
 	{
-		if (!Requested()) {
-			ApplyGuestSwitches();
+		if (!Requested())
 			return;
-		}
 		for (const auto& conflict : kConflicts) {
 			if (Switches::Equals(conflict.name, conflict.value))
 				Fail(fmt::format("{}={}", conflict.name, conflict.value), conflict.why);
@@ -292,13 +170,7 @@ namespace RenderGraph::Engine::Native
 			Fail("CS_DISABLE_FEATURES naming DrawcallLimitFix", "the world's draws it takes would stay the engine's");
 		if (Util::SwitchFile::Value("CS_DCLF", false) == "0")
 			Fail("CS_DCLF=0", "the world's draws Drawcall Limit Fix takes would stay the engine's");
-		const auto turnedOn = TurnOn(kPortSwitches, true);
-		// A switch some code read before this point is cached without the value set here: that subsystem would stay on D3D11.
-		for (const char* name : kPortSwitches) {
-			if (Switches::Value(name).empty())
-				Fail(name, "it was read before native mode could turn it on");
-		}
-		Stage("switches", turnedOn.empty() ? std::string("every port switch was set already") : fmt::format("turned on {}", turnedOn));
+		Stage("switches", "no conflicting switch is set");
 		// D3D12: Drawcall Limit Fix's parts without a D3D12 port, by their own switches (read later, at DCLF's install).
 		// GraphicsAPI::ApplyAtBoot set CS_ORG_NATIVE_BACKEND already, so the cached read sees its value.
 		if (!Switches::EqualsNoCase("CS_ORG_NATIVE_BACKEND", "d3d12"))

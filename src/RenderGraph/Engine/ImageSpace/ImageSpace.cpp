@@ -1,10 +1,11 @@
 #include "RenderGraph/Engine/ImageSpace/ImageSpace.h"
+#include "RenderGraph/Engine/Native/Native.h"
 #include "RenderGraph/Engine/TonemapAnchor.h"
 #include "RenderGraph/Switches.h"
 
 bool RenderGraph::Engine::ImageSpace::Requested()
 {
-	static const bool requested = Switches::On("CS_ORG_IMAGESPACE");
+	static const bool requested = RenderGraph::Engine::Native::GraphMode();
 	return requested;
 }
 

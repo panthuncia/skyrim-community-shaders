@@ -244,7 +244,7 @@ namespace ImGuiRenderer
 
 	bool OrgRequested()
 	{
-		return Switches::On("CS_ORG_IMGUI");
+		return RenderGraph::Engine::Native::GraphMode();
 	}
 
 	void Init(ID3D11Device* a_device, ID3D11DeviceContext* a_context)

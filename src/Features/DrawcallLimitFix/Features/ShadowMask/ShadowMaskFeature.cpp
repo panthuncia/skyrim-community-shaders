@@ -3,6 +3,7 @@
 // graph side).
 
 #include "Features/DrawcallLimitFix/Features/ShadowMask/ShadowMask.h"
+#include "RenderGraph/Engine/Native/Native.h"
 
 #include "RenderGraph/Switches.h"
 
@@ -50,7 +51,7 @@ namespace DCLF::Features::ShadowMask
 
 	bool Enabled()
 	{
-		static const bool enabled = Switches::On("CS_ORG_SHADOW_MASK");
+		static const bool enabled = ::RenderGraph::Engine::Native::GraphMode();
 		return enabled;
 	}
 

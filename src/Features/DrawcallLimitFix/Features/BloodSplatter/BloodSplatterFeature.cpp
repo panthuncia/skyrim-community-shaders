@@ -2,6 +2,7 @@
 // EngineDraws anchor and installs the engine hooks; the rest is BloodSplatterCapture.cpp and BloodSplatterDraws.cpp.
 
 #include "Features/DrawcallLimitFix/Features/BloodSplatter/BloodSplatter.h"
+#include "RenderGraph/Engine/Native/Native.h"
 
 #include "RenderGraph/Switches.h"
 
@@ -29,7 +30,7 @@ namespace DCLF::Features::BloodSplatter
 
 	bool Enabled()
 	{
-		static const bool enabled = Switches::On("CS_ORG_BLOOD_SPLATTER");
+		static const bool enabled = ::RenderGraph::Engine::Native::GraphMode();
 		return enabled;
 	}
 

@@ -4,12 +4,13 @@
 #endif
 
 #include "Features/TerrainShadows/ORGTerrainShadows.h"
+#include "RenderGraph/Engine/Native/Native.h"
 
 #include "RenderGraph/Switches.h"
 
 bool ORGTerrainShadows::Requested()
 {
-	static const bool requested = Switches::On("CS_ORG_TERRAIN_SHADOWS");
+	static const bool requested = RenderGraph::Engine::Native::GraphMode();
 	return requested;
 }
 

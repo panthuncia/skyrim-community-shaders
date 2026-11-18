@@ -1217,7 +1217,7 @@ namespace RenderGraph::Engine::Flush
 
 	bool LatchRequested()
 	{
-		static const bool requested = Switches::On("CS_ORG_ENGINE_FLUSH_LATCH");
+		static const bool requested = RenderGraph::Engine::Native::GraphMode();
 		return requested;
 	}
 

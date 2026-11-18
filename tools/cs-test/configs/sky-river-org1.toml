@@ -1,14 +1,10 @@
 # Converted from tools/cs-ab/scenarios/sky-river-org1.env. Old frame N became world-ready + (N - 100) for the first
 # command, then each command at 'previous' plus the old gap.
-# The sky family on (CS_ORG_SKY=1) with its cloud layers, against sky-river-org0.env: the main pass's and the reflection faces'
+# The sky family with its cloud layers: the main pass's and the reflection faces'
 # sky and clouds drawn at the Sky and SkyReflections anchors, the faces' clouds writing Cloud Shadows' graph faces, which its
-# copy (CS_ORG_CLOUD_SHADOWS=1) reads per face. Riverwood's river in cloudy weather (12f2d) at 13:00 and 22:00: a shot down
+# copy reads per face. Riverwood's river in cloudy weather (12f2d) at 13:00 and 22:00: a shot down
 # at the river (the reflection of the sky and its clouds) and one up at the sky each time, then Dragonsreach.
 extends = ["guest"]
-
-[org]
-sky = true
-cloud_shadows = true
 
 [[steps]]
 at = "world-ready"

@@ -1,4 +1,5 @@
 #include "ORGDeferredComposite.h"
+#include "RenderGraph/Engine/Native/Native.h"
 
 #include "RenderGraph/Switches.h"
 #include "RenderGraph/FrameStaging.h"
@@ -6,7 +7,7 @@
 
 bool ORGDeferredComposite::Requested()
 {
-	return Switches::On("CS_ORG_COMPOSITE");
+	return RenderGraph::Engine::Native::GraphMode();
 }
 
 ORGDeferredComposite& ORGDeferredComposite::Get()

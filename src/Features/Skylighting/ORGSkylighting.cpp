@@ -1,10 +1,11 @@
 #include "ORGSkylighting.h"
 
+#include "RenderGraph/Engine/Native/Native.h"
 #include "RenderGraph/Switches.h"
 
 bool ORGSkylighting::Requested()
 {
-	static const bool requested = Switches::On("CS_ORG_SKYLIGHTING");
+	static const bool requested = RenderGraph::Engine::Native::GraphMode();
 	return requested;
 }
 
@@ -19,7 +20,6 @@ bool ORGSkylighting::Requested()
 #	include "Globals.h"
 #	include "RenderGraph/AnchorPasses.h"
 #	include "RenderGraph/ComputeProgram.h"
-#	include "RenderGraph/Engine/Native/Native.h"
 #	include "RenderGraph/Engine/Tripwire/Tripwire.h"
 #	include "RenderGraph/FrameAnchors.h"
 #	include "RenderGraph/GraphResources.h"

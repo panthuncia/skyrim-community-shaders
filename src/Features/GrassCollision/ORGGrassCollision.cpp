@@ -4,6 +4,7 @@
 #endif
 
 #include "ORGGrassCollision.h"
+#include "RenderGraph/Engine/Native/Native.h"
 
 #include "RenderGraph/Switches.h"
 
@@ -19,7 +20,7 @@ ORGGrassCollision& ORGGrassCollision::Get()
 
 bool ORGGrassCollision::Requested()
 {
-	static const bool requested = Switches::On("CS_ORG_GRASS_COLLISION");
+	static const bool requested = RenderGraph::Engine::Native::GraphMode();
 	return requested;
 }
 

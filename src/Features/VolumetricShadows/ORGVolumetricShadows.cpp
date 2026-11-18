@@ -4,6 +4,7 @@
 #	include <rhi_interop_vulkan.h>
 
 #	include "ORGVolumetricShadows.h"
+#	include "RenderGraph/Engine/Native/Native.h"
 
 #	include "Globals.h"
 #	include "RenderGraph/ComputeProgram.h"
@@ -305,7 +306,7 @@ struct ORGVolumetricShadows::Impl
 
 bool ORGVolumetricShadows::Requested()
 {
-	static const bool requested = Switches::On("CS_ORG_VOLUMETRIC_SHADOWS");
+	static const bool requested = RenderGraph::Engine::Native::GraphMode();
 	return requested;
 }
 

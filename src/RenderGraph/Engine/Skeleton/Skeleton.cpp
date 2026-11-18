@@ -1,9 +1,10 @@
 #include "RenderGraph/Engine/Skeleton/Skeleton.h"
+#include "RenderGraph/Engine/Native/Native.h"
 #include "RenderGraph/Switches.h"
 
 bool RenderGraph::Engine::Skeleton::Requested()
 {
-	static const bool requested = Switches::On("CS_ORG_ENGINE_SKELETON");
+	static const bool requested = RenderGraph::Engine::Native::GraphMode();
 	return requested;
 }
 
@@ -21,7 +22,6 @@ bool RenderGraph::Engine::Skeleton::Requested()
 #	include "RenderGraph/Frame/EngineTargetUse.h"
 #	include "RenderGraph/Frame/FrameDriver.h"
 #	include "RenderGraph/Frame/PostChain.h"
-#	include "RenderGraph/Engine/Native/Native.h"
 #	include "RenderGraph/Engine/Targets/EngineTargets.h"
 #	include "RenderGraph/Engine/Tripwire/Tripwire.h"
 #	include "RenderGraph/FrameAnchors.h"

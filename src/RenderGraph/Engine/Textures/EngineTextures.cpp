@@ -1,4 +1,5 @@
 #include "RenderGraph/Engine/Textures/EngineTextures.h"
+#include "RenderGraph/Engine/Native/Native.h"
 
 #include "RenderGraph/Switches.h"
 
@@ -7,7 +8,7 @@ namespace RenderGraph::Engine::Textures
 	bool Requested()
 	{
 		// The creators were checked on SE 1.5.97 and AE 1.6.1170, not on VR.
-		static const bool requested = !REL::Module::IsVR() && Switches::On("CS_ORG_ENGINE_TEXTURES");
+		static const bool requested = !REL::Module::IsVR() && RenderGraph::Engine::Native::GraphMode();
 		return requested;
 	}
 }

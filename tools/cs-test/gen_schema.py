@@ -121,23 +121,6 @@ SPECIAL = {
     },
 }
 
-# The port switches every ORG mode turns on by itself (kPortSwitches in src/RenderGraph/Engine/Native/Native.cpp, the flush latch
-# with them), and the guest context guest mode adds (kGuestSwitches). Keep in step with those lists. "org.ports = off" sets each to 0:
-# guest mode as it was before plan piece B0, the engine and CS features on D3D11 and only DCLF's graphs on ORG.
-PORTS_ALL = [
-    "CS_ORG_ENGINE_FLUSH_LATCH", "CS_ORG_SHADOW_MASK", "CS_ORG_COMPOSITE", "CS_ORG_IBL", "CS_ORG_SCREEN_SPACE_SHADOWS",
-    "CS_ORG_TERRAIN_SHADOWS", "CS_ORG_VOLUMETRIC_SHADOWS", "CS_ORG_SKYLIGHTING", "CS_ORG_GRASS_COLLISION",
-    "CS_ORG_LIGHT_LIMIT_FIX_SHADOWS", "CS_ORG_SCREEN_SPACE_GI", "CS_ORG_SUBSURFACE_SCATTERING", "CS_ORG_EXPONENTIAL_HEIGHT_FOG",
-    "CS_ORG_DYNAMIC_CUBEMAPS", "CS_ORG_CLOUD_SHADOWS", "CS_ORG_POST_PROCESSING", "CS_ORG_HDR_DISPLAY", "CS_ORG_UPSCALING",
-    "CS_ORG_SCREENSHOT", "CS_ORG_TERRAIN_BLENDING", "CS_ORG_GLINTS", "CS_ORG_E11_RAYS", "CS_ORG_FX", "CS_ORG_IMGUI",
-    "CS_ORG_ENGINE_TARGETS", "CS_ORG_ENGINE_TARGET_HANDLES", "CS_ORG_ENGINE_BUFFERS", "CS_ORG_ENGINE_TEXTURES",
-    "CS_ORG_ENGINE_SHADERS", "CS_ORG_TEXTURE_STREAMING", "CS_ORG_ENGINE_CONSTANTS", "CS_ORG_ENGINE_SKELETON", "CS_ORG_SKY",
-    "CS_ORG_OCCLUSION_QUERIES", "CS_ORG_VOLUMETRIC_LIGHTING", "CS_ORG_WATER", "CS_ORG_BLOOD_SPLATTER",
-    "CS_ORG_PRECIPITATION", "CS_ORG_IMAGESPACE", "CS_ORG_MENU3D", "CS_ORG_MAP", "CS_ORG_SCALEFORM", "CS_ORG_BINK",
-    "CS_ORG_LOADING_THREAD",
-]
-GUEST_ONLY = ["CS_ORG_TRIPWIRE_GUEST"]
-
 # The census and latch lines the census scenarios repeat ("org.census = true").
 CENSUS = {
     "CS_ORG_ENGINE_FLUSH_LATCH": "1",
@@ -311,23 +294,14 @@ def build(root):
         else:
             entry["type"] = guess_type(scenarios.get(name, set()))
             if name.startswith("CS_ORG_") and entry["type"] == "bool":
-                # A port switch is on in every ORG mode unless set to 0 (native refuses a 0).
-                entry["default"] = name in PORTS_ALL or name in GUEST_ONLY
+                entry["default"] = False
             entry["description"] = ""
-        if name in PORTS_ALL:
-            entry["sweep"] = True
         special = SPECIAL.get(name, {})
         entry.update({k: v for k, v in special.items() if k != "key"})
         keys[key_of(name)] = entry
     for feature in features(root):
         keys[f"features.{feature}"] = {"type": "bool", "default": True, "family": "features", "kind": "feature", "sweep": True,
                                        "description": f"false: {feature} is disabled at boot for this run (features_disabled); true: it loads at boot for this run even when the saved settings disable it (features_enabled)"}
-    ports = PORTS_ALL + GUEST_ONLY
-    keys["org.ports"] = {"type": "preset", "family": "org", "kind": "preset",
-                         "description": "all: every port switch on, the default of guest and native mode, written out; "
-                                        "off: every port switch 0, guest mode's engine and CS features on D3D11 (guest only; "
-                                        "native refuses it); none: nothing set (the mode's default)",
-                         "values": {"all": {n: "1" for n in ports}, "off": {n: "0" for n in ports}, "none": {}}}
     keys["org.census"] = {"type": "preset", "family": "org", "kind": "preset",
                           "description": "true: the residue census and the flush latch (tools/cs-ab/census.py reads them)",
                           "values": {"true": CENSUS, "false": {}}}

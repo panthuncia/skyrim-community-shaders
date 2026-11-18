@@ -32,7 +32,7 @@ namespace TextureStreaming::ORG
 {
 	bool Requested()
 	{
-		static const bool requested = Switches::On("CS_ORG_TEXTURE_STREAMING");
+		static const bool requested = RenderGraph::Engine::Native::GraphMode();
 		return requested;
 	}
 

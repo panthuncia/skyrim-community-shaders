@@ -4,12 +4,13 @@
 #endif
 
 #include "TruePBR/ORGGlintsNoise.h"
+#include "RenderGraph/Engine/Native/Native.h"
 
 #include "RenderGraph/Switches.h"
 
 bool ORGGlintsNoise::Requested()
 {
-	static const bool requested = Switches::On("CS_ORG_GLINTS");
+	static const bool requested = RenderGraph::Engine::Native::GraphMode();
 	return requested;
 }
 

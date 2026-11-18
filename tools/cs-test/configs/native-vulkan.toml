@@ -1,5 +1,5 @@
 # Native mode on Vulkan (render-graph.md, "Native mode"): no DXVK, BasicRHI's device, ORG presents.
-# Native mode turns on every port switch itself. Upscaling runs with TAA: Streamline is not on the native device yet.
+# Native mode runs every port. Upscaling runs with TAA: Streamline is not on the native device yet.
 # ImprovedCameraSE draws through D3D11 itself (org-extension-api-notes.md, "Improved Camera SE"): off for native runs.
 extends = ["base"]
 

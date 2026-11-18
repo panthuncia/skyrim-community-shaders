@@ -4,6 +4,7 @@
 #endif
 
 #include "ORGIBL.h"
+#include "RenderGraph/Engine/Native/Native.h"
 
 #include "Features/DynamicCubemaps.h"
 #include "Features/DynamicCubemaps/ORGDynamicCubemaps.h"
@@ -21,7 +22,7 @@ ORGIBL::~ORGIBL() = default;
 
 bool ORGIBL::Requested()
 {
-	static const bool requested = Switches::On("CS_ORG_IBL");
+	static const bool requested = RenderGraph::Engine::Native::GraphMode();
 	return requested;
 }
 

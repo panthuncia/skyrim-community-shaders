@@ -4,6 +4,7 @@
 #endif
 
 #include "ORGFxRuntime.h"
+#include "RenderGraph/Engine/Native/Native.h"
 
 #include "RenderGraph/Switches.h"
 
@@ -11,7 +12,7 @@
 
 bool ORGFxRuntime::Requested()
 {
-	static const bool requested = Switches::On("CS_ORG_FX");
+	static const bool requested = RenderGraph::Engine::Native::GraphMode();
 	return requested;
 }
 

@@ -2,6 +2,7 @@
 // detours, and the ORG query rings (OcclusionQueries.h).
 
 #include "RenderGraph/Engine/Queries/OcclusionQueries.h"
+#include "RenderGraph/Engine/Native/Native.h"
 
 #include "RenderGraph/Switches.h"
 #include "Utils/Logging.h"
@@ -500,7 +501,7 @@ namespace RenderGraph::Engine::OcclusionQueries
 
 	bool Requested()
 	{
-		static const bool requested = !REL::Module::IsVR() && Switches::On("CS_ORG_OCCLUSION_QUERIES");
+		static const bool requested = !REL::Module::IsVR() && RenderGraph::Engine::Native::GraphMode();
 		return requested;
 	}
 

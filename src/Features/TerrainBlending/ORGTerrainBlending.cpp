@@ -4,12 +4,13 @@
 #endif
 
 #include "Features/TerrainBlending/ORGTerrainBlending.h"
+#include "RenderGraph/Engine/Native/Native.h"
 
 #include "RenderGraph/Switches.h"
 
 bool ORGTerrainBlending::Requested()
 {
-	static const bool requested = Switches::On("CS_ORG_TERRAIN_BLENDING");
+	static const bool requested = RenderGraph::Engine::Native::GraphMode();
 	return requested;
 }
 

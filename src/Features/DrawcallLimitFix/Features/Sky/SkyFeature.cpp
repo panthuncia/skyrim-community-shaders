@@ -2,6 +2,7 @@
 // installs the engine hooks; the rest is SkyCapture.cpp (the engine side) and SkyDraws.cpp (the graph side).
 
 #include "Features/DrawcallLimitFix/Features/Sky/Sky.h"
+#include "RenderGraph/Engine/Native/Native.h"
 
 #include "RenderGraph/Switches.h"
 
@@ -29,7 +30,7 @@ namespace DCLF::Features::Sky
 
 	bool Enabled()
 	{
-		static const bool enabled = Switches::On("CS_ORG_SKY");
+		static const bool enabled = ::RenderGraph::Engine::Native::GraphMode();
 		return enabled;
 	}
 

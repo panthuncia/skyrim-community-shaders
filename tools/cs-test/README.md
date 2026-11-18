@@ -43,7 +43,7 @@ Configs are `configs/*.toml`. A config may `extends = ["base", ...]`; each file 
 
 - Tables merge key by key. Lists and `steps` are replaced whole.
 - `--set` values are TOML when they parse (`true`, `12`, `[...]`), else plain text: `--set game.save=MySave`, `--set 'steps=[{at="world-ready", frames=5, do="exit"}]'`.
-- `<table>.*` (in `--set`, `--base` and `--vary`) matches only that table's sweep keys: DCLF's families (the switches on unless set), the port switches (on by default in guest and native; `org.ports = "off"` sets them all to 0), and the features.
+- `<table>.*` (in `--set`, `--base` and `--vary`) matches only that table's sweep keys: DCLF's families (the switches on unless set) and the features.
 - A key that is not in the schema, a wrong type, or an unknown `[env]` name is a config error before launch.
 
 The shipped configs:
@@ -51,14 +51,14 @@ The shipped configs:
 | Config | What |
 |---|---|
 | `base` | what every run shares: autoload save (`game.autoload_mod`, turned off when `game.save` names a save), Telemetry off, `DXVK_DEBUG=hang`, Nsight layer off, the live-image check (`expect.live_frames = 30`) |
-| `guest`, `native-vulkan`, `native-d3d12` | the three modes; guest and native run every port (`--set org.ports=off`: guest's engine and CS features on D3D11) |
+| `guest`, `native-vulkan`, `native-d3d12` | the three modes; guest and native run every port |
 | `d3d11` | plain D3D11 mode, the render graph off (`CS_ORG=0`); compose it, `d3d11+quick` |
 | `quick` | a shot 60 frames after world-ready, then exit; compose it, `native-vulkan+quick` |
 | `guest-quick`, `native-quick`, `native-d3d12-quick` | the old quick scenarios |
 | `boot` | exits at shaders-ready (`--set build.shader_cache=cold` for a cold compile) |
 | `rain` | Riverwood's river in a forced rain storm (`fw`), two shots while it falls; compose it, `native-vulkan+rain`, `guest+rain` |
-| `latch-census-short`, `vram-all`, `vram-menu-B`, `native-tour`, `native-d3d12-tour`, `native-validation` | ORG tours |
-| `rx6600-*`, `sky-river-org0`, `sky-river-org1` | the perf and sky scenarios |
+| `latch-census-short`, `vram-all`, `native-tour`, `native-d3d12-tour`, `native-validation` | ORG tours |
+| `rx6600-*`, `sky-river-org1` | the perf and sky scenarios |
 
 The converted scenarios map old frame N to world-ready + (N - 100) for their first command, then each command at `previous` plus the old gap.
 

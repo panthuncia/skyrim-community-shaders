@@ -4,6 +4,7 @@
 #endif
 
 #include "ORGDynamicCubemaps.h"
+#include "RenderGraph/Engine/Native/Native.h"
 
 #include "Features/DynamicCubemaps.h"
 #include "Globals.h"
@@ -17,7 +18,7 @@ ORGDynamicCubemaps& ORGDynamicCubemaps::Get()
 
 bool ORGDynamicCubemaps::Requested()
 {
-	static const bool requested = Switches::On("CS_ORG_DYNAMIC_CUBEMAPS");
+	static const bool requested = RenderGraph::Engine::Native::GraphMode();
 	return requested;
 }
 

@@ -1,11 +1,12 @@
 #include "ORGSubsurfaceScattering.h"
+#include "RenderGraph/Engine/Native/Native.h"
 
 #include "RenderGraph/Switches.h"
 
 bool ORGSubsurfaceScattering::Requested()
 {
 #if defined(CS_HAS_RENDER_GRAPH)
-	static const bool requested = Switches::On("CS_ORG_SUBSURFACE_SCATTERING");
+	static const bool requested = RenderGraph::Engine::Native::GraphMode();
 	return requested;
 #else
 	return false;

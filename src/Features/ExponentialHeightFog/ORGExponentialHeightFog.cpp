@@ -1,10 +1,11 @@
 #include "ORGExponentialHeightFog.h"
+#include "RenderGraph/Engine/Native/Native.h"
 
 #include "RenderGraph/Switches.h"
 
 bool ORGExponentialHeightFog::Requested()
 {
-	static const bool requested = Switches::On("CS_ORG_EXPONENTIAL_HEIGHT_FOG");
+	static const bool requested = RenderGraph::Engine::Native::GraphMode();
 	return requested;
 }
 

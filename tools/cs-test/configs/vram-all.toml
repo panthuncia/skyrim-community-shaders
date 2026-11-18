@@ -8,8 +8,6 @@ extends = ["guest"]
 vram_debug = true
 
 [org]
-ports = "all"
-precipitation = false    # vram-all.env had every port but this one
 census = true
 
 [[steps]]
