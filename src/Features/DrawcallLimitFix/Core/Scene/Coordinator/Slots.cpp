@@ -53,6 +53,8 @@ namespace DCLF::Scene
 		residents.clear();
 		residentPatches.clear();
 		residentPos.clear();
+		stagedBindings.clear();
+		rebindingMembers.clear();
 		residentMaintenanceDirty = true;
 		// The listed nodes' references through the retirement chain with everything else the cleared tables named (the components',
 		// the fade roots' last, and what they keep beside the tables: Features/Faces' regions).
@@ -276,6 +278,8 @@ namespace DCLF::Scene
 				countObject(o);
 			for (std::uint32_t g = 0; g < tables.geometries.size(); ++g)
 				countLink(g);
+			for (const auto& [slot, staged] : stagedBindings)
+				AddStagedReferences(staged);
 			r.objects.Restart(tablesGeneration);
 			r.links.Restart(tablesGeneration);
 		} else {

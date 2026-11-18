@@ -73,6 +73,18 @@ namespace DCLF::Scene
 		std::vector<std::uint32_t> materialMembers;    // by material slot: resident count
 		// Pipelines and materials the joins marked used this pass, cleared again where no resident holds them.
 		std::vector<std::uint32_t> joinMarkedPipelines, joinMarkedMaterials;
+		// A drawn member's next binding until it is drawable. It references its pipeline and material and keeps them used so they get
+		// built and resolved.
+		struct StagedBinding
+		{
+			std::uint32_t pipeline = 0, material = 0;
+			std::uint32_t pipelineGeneration = 0, materialGeneration = 0;
+		};
+		ankerl::unordered_dense::map<std::uint32_t, StagedBinding> stagedBindings;
+		std::vector<ResidentCounted> stagedCounted;
+		SlotMembers stagedPipelineMembers;
+		// This pass's drawn members whose joins decide whether their new binding is ready.
+		ankerl::unordered_dense::set<std::uint32_t> rebindingMembers;
 		ankerl::unordered_dense::set<const RE::BSGeometry*> residentJoining;  // this pass's resident passes, until patched
 		ankerl::unordered_dense::set<const RE::BSGeometry*> residentLayerJoining;  // the layers'
 	};

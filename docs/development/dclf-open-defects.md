@@ -207,11 +207,17 @@ that a repeat is recognised. They are not chased unless one recurs with a DCLF o
     crossings split). SceneWriterFramework now flags that detach `SWF_CHILD_REPARENT` (ABI minor 4), and `SceneTracker` holds the
     move's events on the moving thread until its attach pushes them together. The move then applies in one batch, the entries keep
     their slots and are re-filed under the new category node.
--   **An actor's first cell change can still hide parts for 4 to 10 frames.** An actor whose fade was left at 1 minus the snap
-    offset (0.983, `FUN_14147a160`'s amount branch, as in the engine) is bound to the blended fading pass. The engine resets its
-    fade to 1 when it changes cells, so DCLF binds it opaque, and the first use of that pipeline in a session waits for its
-    compile while the claim withholds it from the engine. **Fix direction:** ask for the settled key's pipeline when a member binds
-    the fading one.
+-   **A drawn object rebound to a binding not built yet was hidden (fixed 2026-11-18).** Any change that picked a pipeline or
+    material not ready yet took the member out of the set while it was still withheld from the engine, so nobody drew it until the
+    pipeline compiled. At an actor's first cell change 3 to 8 parts vanished for 4 to 10 frames: its fade sat at 0.983 (the
+    engine's snap offset) on the blended fading pipeline, and the crossing reset it to 1 and picked the opaque one. A drawn member
+    now keeps its record, claim and current binding while the next one is staged (`Coordinator::StageBinding`, which references its
+    pipeline and material so they get built), and the joins switch in the publication that can draw the new one. The rebind of
+    every resident after a membership witness change goes the same way instead of ending all residency. In the fading case the
+    old binding draws a few frames of the blended pass at alpha 1: no G-buffer write, so no SSAO, screen-space shadows or GI and
+    no decals on it, and no shadow-casting lights, as in the engine's fading pass. A fading join also asks the pipeline lane for
+    its settled key (`RequestSettledPipeline`), so the switch usually finds it built. Runs fxg and fxn: 19 crossings, none losing a
+    part (Alvor's in fxn came while his parts still waited after the load, below).
 
 ## Memory retention
 

@@ -14,13 +14,22 @@
 #include "Features/DrawcallLimitFix/Core/Runtime/SceneScheduler.h"
 #include "Features/DrawcallLimitFix/Core/Render/IndirectDraws.h"
 #include "Features/DrawcallLimitFix/Core/Shading/EngineShaders.h"
+#include "Features/DrawcallLimitFix/Core/Gpu/Pipelines/DrawPipelines.h"
 
 #include <cassert>
+
+namespace DCLF
+{
+	bool SettledMembershipPass(const SceneCapture::LeafView& a_leaf, const MembershipDerived& a_cached, AccumulatedPass& a_out);
+}
 
 namespace DCLF::Scene
 {
 	namespace
 	{
+		// The settled keys asked of the pipeline lane, once each (the lane keeps every key it built).
+		ankerl::unordered_dense::set<PipelineKey, PipelineKeyHash> accumulateSettledAsked;
+
 		// The record flags a technique's objects carry: a feature's contribution (Api::TechniqueContribution; Features/TreeWind's
 		// kObjectTreeAnim for technique 12). Read once, the features installed before any scene work.
 		std::uint32_t TechniqueFlags(std::uint32_t a_technique)
@@ -304,6 +313,10 @@ namespace DCLF::Scene
 		TracyCZoneEnd(orderZone);
 		TracyCZoneN(objectsZone, "CS.DCLF.Accumulate.Objects", true);
 		RunJoins(frame);
+		// The rebinds no join decided (refused, or no pass) leave as any rebind did.
+		for (const std::uint32_t slot : rebindingMembers)
+			LeaveMainForRebind(slot);
+		rebindingMembers.clear();
 
 		TracyCZoneEnd(objectsZone);
 		TracyCZoneN(residentsZone, "CS.DCLF.Accumulate.Residents", true);
@@ -436,13 +449,45 @@ namespace DCLF::Scene
 		} else {
 			binding.key = a_result.key;
 			binding.pipelineSlot = BindJoinPipeline(a_result, descriptors, layer, timer);
-			if (!BindJoinMaterial(objectId, a_result, descriptors, derived, timer, binding.materialSlot))
+			const std::size_t retries = bindRetry.size();
+			if (!BindJoinMaterial(objectId, a_result, descriptors, derived, timer, binding.materialSlot)) {
+				// A drawn member whose material capture is on its way keeps drawing its current binding until the retry binds it.
+				if (bindRetry.size() > retries && rebindingMembers.erase(objectId))
+					residentJoining.erase(a_entry.geometry);
 				return;
+			}
 			binding.staticFlags = a_result.staticFlags;
 			RecordJoinDerivation(a_entry, a_result, a_frame, derivedHit, descriptors, binding, derived);
+			if (!layer && a_entry.accumulated->hint == kFadingHint)
+				RequestSettledPipeline(a_entry, a_result);
 		}
 
+		if (rebindingMembers.erase(objectId)) {
+			// A drawn member switches to its new binding in the publication that can draw it, and draws its current one until then.
+			if (std::uint32_t why = 0; !MainReadyWith(objectId, binding.pipelineSlot, binding.materialSlot, why)) {
+				StageBinding(objectId, binding.pipelineSlot, binding.materialSlot);
+				residentJoining.erase(a_entry.geometry);
+				return;
+			}
+			LeaveMainForRebind(objectId);
+		}
 		PatchJoin(a_entry, a_result, a_frame, object, objectId, descriptors, binding);
+	}
+
+	void Coordinator::RequestSettledPipeline(const OrderEntry& a_entry, const JoinResult& a_result)
+	{
+		// The pipeline its object binds when the fade settles is built meanwhile, so that rebind finds it ready.
+		AccumulatedPass settled;
+		if (!SettledMembershipPass(mirror.Leaf(a_entry.geometry), a_entry.tracked->membershipDerived, settled))
+			return;
+		OrderEntry entry = a_entry;
+		entry.accumulated = &settled;
+		JoinResult result;
+		EvaluateJoin(entry, true, result);
+		if (result.kind != JoinResult::Kind::Joined || result.key == a_result.key || pipelineIndex.contains(result.key))
+			return;
+		if (accumulateSettledAsked.insert(result.key).second)
+			DrawPipelines::Get().RequestLighting(result.key, ~0u);
 	}
 
 	std::uint32_t Coordinator::BindJoinPipeline(const JoinResult& a_result, const LightingDescriptors& a_descriptors, bool a_layer, PartTimer& a_timer)
@@ -687,6 +732,7 @@ namespace DCLF::Scene
 		}
 		timer.Add(BuildPart::Record);
 		ApplyAccumulatePatch(patch);
+		UnstageBinding(objectId);
 		timer.Add(BuildPart::ApplyPatch);
 		MarkResidentSlot(objectId, { *accumulated, pipelineSlot, materialSlot });
 		(layer ? residentLayerJoining : residentJoining).erase(geometry);
@@ -771,29 +817,40 @@ namespace DCLF::Scene
 		}
 	}
 
+	void Coordinator::LeaveMainForRebind(std::uint32_t a_slot)
+	{
+		// A record being rebound first leaves the set's main phases (a join never patches a member). The commit later in this pass
+		// readmits it if ready, keeping its claim (the frame draws the old record until the new publication); otherwise it leaves there.
+		if (a_slot < setPhasesNext.size() && (setPhasesNext[a_slot] & kSetMain))
+			++setStats.rebinding;
+		// Every view's member draws with its main bindings (a first-person member too), so it leaves too.
+		const auto phases = static_cast<std::uint8_t>(kSetMain | Extensions::Views().phases);
+		LeaveSet(a_slot, phases);
+		if (PhasesIn(tables, a_slot) & phases) {
+			tables.setPhases[a_slot] = 0;
+			tables.objects[a_slot].flags &= ~kObjectMember;
+			tables.NoteChange(a_slot, kChangeBindings);
+		}
+	}
+
+	bool Coordinator::RebindKeepsDrawing(std::uint32_t a_slot) const
+	{
+		// A base and its layer are bound and claimed together, so a layered record still leaves while it rebinds.
+		if (a_slot >= tables.objects.size() || a_slot >= setPhasesNext.size() || !(setPhasesNext[a_slot] & kSetMain) || !IsResidentSlot(a_slot))
+			return false;
+		return !tables.IsLayer(a_slot) && (a_slot >= tables.layerOf.size() || tables.layerOf[a_slot] == kNoObjectSlot);
+	}
+
 	void Coordinator::BindByMembership()
 	{
 		DCLF_ZONE("CS.DCLF.Accumulate.BindByMembership");
-		// A record being rebound first leaves the set's main phases (a join never patches a member). The commit later in this pass
-		// readmits it if ready, keeping its claim (the frame draws the old record until the new publication); otherwise it leaves there.
-		auto leaveMain = [&](std::uint32_t a_slot) {
-			if (a_slot < setPhasesNext.size() && (setPhasesNext[a_slot] & kSetMain))
-				++setStats.rebinding;
-			// Every view's member draws with its main bindings (a first-person member too), so it leaves too.
-			const auto phases = static_cast<std::uint8_t>(kSetMain | Extensions::Views().phases);
-			LeaveSet(a_slot, phases);
-			if (PhasesIn(tables, a_slot) & phases) {
-				tables.setPhases[a_slot] = 0;
-				tables.objects[a_slot].flags &= ~kObjectMember;
-				tables.NoteChange(a_slot, kChangeBindings);
-			}
-		};
 		// The frame globals a membership pass reads changed (static sun bits, fade distances): rebind every resident.
+		// Each keeps drawing its current binding until its new one is ready, as any rebind does.
 		if (const std::uint32_t witness = sceneInputs.membershipWitness; witness != membershipWitness) {
 			for (const std::uint32_t slot : residents)
-				leaveMain(slot);
+				if (const auto it = slot < tables.objectGeometry.size() ? tracked.find(const_cast<RE::BSGeometry*>(tables.objectGeometry[slot])) : tracked.end(); it != tracked.end())
+					(tables.IsLayer(slot) ? it->second.layerDerived : it->second.derived).valid = false;
 			bindQueue.insert(bindQueue.end(), residents.begin(), residents.end());
-			EndAllResidency();
 			membershipWitness = witness;
 		}
 		// The frame's material sources know the Lighting shader only from the frame after it was found: wait until then, or every
@@ -829,7 +886,11 @@ namespace DCLF::Scene
 			}
 			(layer ? accumulatedLayerPasses : accumulatedPasses).insert_or_assign(geometry, a_pre.pass);
 			(layer ? residentLayerJoining : residentJoining).insert(geometry);
-			leaveMain(slot);
+			// A drawn member stays in the set until its join knows the new binding is ready (MergeJoin).
+			if (RebindKeepsDrawing(slot))
+				rebindingMembers.insert(slot);
+			else
+				LeaveMainForRebind(slot);
 			++residentStats.membershipQueued;
 		};
 		const std::size_t count = queue.size();

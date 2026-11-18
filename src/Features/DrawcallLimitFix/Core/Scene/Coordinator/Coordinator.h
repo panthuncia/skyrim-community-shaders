@@ -1345,6 +1345,17 @@ namespace DCLF
 			const LightingDescriptors& a_descriptors, const JoinBinding& a_binding);
 		void SettleJoinResidency();
 		void ApplyAccumulatePatch(const AccumulatePatch& a_patch);
+		/** @brief Takes a slot being rebound out of the set's main phases until its new record is committed. */
+		void LeaveMainForRebind(std::uint32_t a_slot);
+		/** @brief Whether a rebind of a_slot keeps its current binding drawing until the new one is ready. */
+		bool RebindKeepsDrawing(std::uint32_t a_slot) const;
+		/** @brief Holds a member's next binding until it is ready, the member drawing its current one meanwhile. */
+		void StageBinding(std::uint32_t a_slot, std::uint32_t a_pipeline, std::uint32_t a_material);
+		void UnstageBinding(std::uint32_t a_slot);
+		void AddStagedReferences(const StagedBinding& a_staged);
+		void ReleaseStagedReferences(const StagedBinding& a_staged);
+		/** @brief Asks the pipeline lane for the key a fading join's object will bind once its fade settles. */
+		void RequestSettledPipeline(const OrderEntry& a_entry, const JoinResult& a_result);
 		/**
 		 * @brief Binds the bind queue's records as residents from membership passes (PrimaryCull::MembershipPass), kept until rewritten.
 		 */
@@ -1562,6 +1573,8 @@ namespace DCLF
 		bool EntryVetoed(std::uint32_t a_slot) const;
 		/** @brief Whether everything the main phase draws with is ready; a_why: waitingBy's index when not. */
 		bool MainReady(std::uint32_t a_slot, std::uint32_t& a_why) const;
+		/** @brief MainReady for a pipeline and material a_slot is not bound to yet (a rebind's). */
+		bool MainReadyWith(std::uint32_t a_slot, std::uint32_t a_pipeline, std::uint32_t a_material, std::uint32_t& a_why) const;
 		/** @brief The CategoryRoot view whose entry a slot's geometry is (a first-person entry's), EngineView::Count for none. */
 		Api::EngineView ViewRootOfSlot(std::uint32_t a_slot) const;
 

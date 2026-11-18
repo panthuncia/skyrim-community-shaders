@@ -78,10 +78,15 @@ namespace DCLF::Scene
 
 	bool Coordinator::MainReady(std::uint32_t a_slot, std::uint32_t& a_why) const
 	{
+		return MainReadyWith(a_slot, tables.objects[a_slot].pipelineIndex, tables.objects[a_slot].materialIndex, a_why);
+	}
+
+	bool Coordinator::MainReadyWith(std::uint32_t a_slot, std::uint32_t a_pipeline, std::uint32_t a_material, std::uint32_t& a_why) const
+	{
 		// What a main build's pair resolution (MainBuild::ResolvePair) needs from this pass's lookups. Its other checks are the tables'
 		// own structure: a member that fails them is a defect set parity reports.
 		const auto& object = tables.objects[a_slot];
-		const std::uint32_t p = object.pipelineIndex, m = object.materialIndex;
+		const std::uint32_t p = a_pipeline, m = a_material;
 		if ((object.flags & kObjectNoBindings) || !PipelineDrawableIn(tables, lookups, p))
 			return a_why = 0, false;
 		// A refraction object draws with the refraction pipeline: the engine keeps it until the lookups' catalog has one.
@@ -500,6 +505,9 @@ namespace DCLF::Scene
 					QueueSet(slot);
 					++setStats.waitingRequeued;
 				}
+			// A staged binding may be ready now, and the next joins switch to it if it is.
+			for (const auto& [slot, staged] : stagedBindings)
+				bindRetry.push_back(slot);
 		}
 		// The fit can shrink too (a newly adopted set naming smaller buffers): a member past it has no build input, so it is decided
 		// again (the waiting ones above only gain from a growth).

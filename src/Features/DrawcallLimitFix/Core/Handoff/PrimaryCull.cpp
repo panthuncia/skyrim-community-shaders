@@ -128,6 +128,9 @@ namespace DCLF
 			a_out.lodRow = SceneCapture::LodRowOf(a_leaf, &a_port);
 			return true;
 		}
+
+		// Set while SettledMembershipPass asks for the pass a fading object takes once its fade settles.
+		thread_local bool t_settledPass = false;
 	}
 
 	bool PrimaryCull::FreshSyntheticPass(const SceneCapture::LeafView& a_leaf, AccumulatedPass& a_out)
@@ -190,6 +193,15 @@ namespace DCLF
 		if (answer.ok)
 			answer.pass.resident = true;
 		return answer;
+	}
+
+	bool SettledMembershipPass(const SceneCapture::LeafView& a_leaf, const MembershipDerived& a_cached, AccumulatedPass& a_out)
+	{
+		t_settledPass = true;
+		const auto membership = PrimaryCull::MembershipPass(a_leaf, a_cached);
+		t_settledPass = false;
+		a_out = membership.pass;
+		return membership.ok;
 	}
 
 	PrimaryCull::Membership PrimaryCull::MembershipLayerPass(const SceneCapture::LeafView& a_leaf, const MembershipDerived& a_cached)
@@ -1162,7 +1174,7 @@ namespace DCLF
 			hint = 4;
 		} else if (flags & 0xc000000ull)
 			hint = translucent ? 3 : 2;  // the decal groups
-		else if (BlendFading(a_leaf, lighting) && Extensions::ObjectClassOn(ActiveToggles(), Api::ObjectClass::Forward)) {
+		else if (!t_settledPass && BlendFading(a_leaf, lighting) && Extensions::ObjectClassOn(ActiveToggles(), Api::ObjectClass::Forward)) {
 			// The root is fading: the engine's fading pass (hint 9), drawn by the forward epoch while the fade lasts. Translucent,
 			// so GetRenderPasses gives it no shadow bits.
 			hint = kFadingHint;
