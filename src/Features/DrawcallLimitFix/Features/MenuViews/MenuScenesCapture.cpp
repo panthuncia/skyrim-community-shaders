@@ -326,9 +326,10 @@ namespace DCLF::Features::MenuViews::Scenes
 			const auto engine = Pipeline::EngineDrawState::Latch();
 			Draw draw{};
 			draw.shader = Shader::Lighting;
-			// The pixel descriptor CS looks its shader up by: it holds the vertex descriptor's bits (the technique, VC, SKINNED,
-			// MODELSPACENORMALS) and the pixel stage's flags, so its defines serve both stages.
-			draw.key.descriptor = state->modifiedPixelDescriptor;
+			// The pixel descriptor's defines serve both stages. The engine leaves SKINNED out of it unless the normals are in model space,
+			// so it comes from the vertex descriptor, or a skinned draw's vertex stage would place it in its bind pose.
+			constexpr auto kSkinned = static_cast<std::uint32_t>(SIE::ShaderCache::LightingShaderFlags::Skinned);
+			draw.key.descriptor = state->modifiedPixelDescriptor | (state->modifiedVertexDescriptor & kSkinned);
 			draw.key.defineStage = Family::DefineStage::Pixel;
 			// The forward stage writes three targets (the colour, the motion vectors, the normals and masks); the deferred one more, which
 			// a menu scene does not bind.
