@@ -648,7 +648,8 @@ namespace DCLF::Family
 	bool HeldForBatch(std::string_view a_family, std::string_view a_client, std::uint32_t a_segment, FrameAnchors::Anchor a_anchor)
 	{
 		namespace Driver = ::RenderGraph::Frame::Driver;
-		if (FrameAnchors::SegmentsOn()) {
+		// A client a stage of this mode names (every one in native mode; in guest those of the stages that run there).
+		if (FrameAnchors::NamedByStage(a_client)) {
 			const auto hold = FrameAnchors::HeldNow(a_client, a_anchor);
 			if (!hold.held) {
 				Driver::NoteTapError(Driver::TapError::NotDeclared, static_cast<::RenderGraph::Frame::SegmentId>(a_segment),

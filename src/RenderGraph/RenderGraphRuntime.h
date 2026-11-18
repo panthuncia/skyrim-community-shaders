@@ -393,6 +393,13 @@ public:
 	void SignalFramePace(bool a_active);
 	void WaitFramePace();
 	/**
+	 * @brief Render owner, at Renderer::Begin (Frame::Driver): the pacing measurement. The epochs submitted from here are frame a_frame's;
+	 * the frame is as many frames ahead of the GPU as it is past the latest frame with a completed epoch (an upper bound: completions are
+	 * read on the host's thread). Logged every 600 frames: the peak and a count per distance, against the published copies per frame slot
+	 * (kGameFramesInFlight).
+	 */
+	void NoteFrameBegin(std::uint64_t a_frame);
+	/**
 	 * @brief Render thread, after a present that succeeded: everything the host submitted before it is in DXVK's queue to the
 	 * device, which submits it with nothing more from the frame (the present flushed it). Seals it (GraphHost::SealSubmitted): the
 	 * points a mid-frame producer may wait for.

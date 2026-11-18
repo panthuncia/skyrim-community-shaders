@@ -1202,6 +1202,13 @@ struct RenderGraphRuntime::Impl
 	std::array<std::atomic<Segment>, kSegmentRing> frameSegments{};
 	// The frame each host frame's epoch ran in, while a timestamp trace collects (GpuCounters::Timestamps; 0: not collected).
 	std::array<std::atomic<std::uint64_t>, kSegmentRing> frameTimestampFrames{};
+	// The pacing measurement (NoteFrameBegin): each host frame's game frame, the latest game frame with a completed epoch (host's thread),
+	// and per window the most frames a Begin was ahead of it, with a count per distance.
+	std::array<std::atomic<std::uint64_t>, kSegmentRing> frameGameFrames{};
+	std::atomic<std::uint64_t> completedGameFrame{ 0 };
+	std::uint64_t gameFrame = 0;
+	std::array<std::uint64_t, 10> aheadCounts{};
+	std::uint64_t aheadPeak = 0, aheadPeakSession = 0, aheadFrames = 0;
 	std::array<SegmentTime, kSegments> segmentTimes{};
 	std::uint32_t timedEpochs = 0;
 	std::uint32_t completedFrames = 0;  // callbacks, timed or not: tells "no readback" from "no timestamps"
@@ -1270,6 +1277,10 @@ struct RenderGraphRuntime::Impl
 	void OnCompletedFrame(std::uint64_t a_frameNumber, const org::runtime::IStatisticsService& a_stats)
 	{
 		GpuTimingSource::OnCompletedFrame(a_frameNumber, a_stats);
+		// The pacing measurement: the game frame of the epoch that completed.
+		const auto game = frameGameFrames[a_frameNumber % kSegmentRing].load(std::memory_order_acquire);
+		for (auto seen = completedGameFrame.load(std::memory_order_relaxed); game > seen && !completedGameFrame.compare_exchange_weak(seen, game, std::memory_order_acq_rel);) {
+		}
 		CompletedEpoch epoch;
 		ReadCompletedEpoch(a_frameNumber, a_stats, epoch);
 		if (!asyncEpochs) {
@@ -1412,6 +1423,7 @@ struct RenderGraphRuntime::Impl
 		const std::uint64_t timestampFrame = GpuCounters::Timestamps::Collecting() ? GpuCounters::Timestamps::CurrentFrame() + 1 : 0;
 		frameTimestampFrames[a_hostFrame % kSegmentRing].store(timestampFrame, std::memory_order_release);
 		frameSegments[a_hostFrame % kSegmentRing].store(a_segment, std::memory_order_release);
+		frameGameFrames[a_hostFrame % kSegmentRing].store(gameFrame, std::memory_order_release);
 		if (timestampFrame)
 			GpuCounters::Timestamps::Submitted(timestampFrame);
 		GpuTimingSource::OnEpochSubmitted(a_hostFrame, SegmentLabel(a_segment));
@@ -3050,6 +3062,33 @@ void RenderGraphRuntime::SignalFramePace(bool a_active)
 	state.framePaceSignalled = true;
 }
 
+void RenderGraphRuntime::NoteFrameBegin(std::uint64_t a_frame)
+{
+	if (!impl)
+		return;
+	auto& state = *impl;
+	state.gameFrame = a_frame;
+	const auto completed = state.completedGameFrame.load(std::memory_order_acquire);
+	if (!completed)
+		return;
+	const auto ahead = a_frame > completed ? a_frame - completed : 0;
+	++state.aheadCounts[(std::min<std::uint64_t>)(ahead, state.aheadCounts.size() - 1)];
+	state.aheadPeak = (std::max)(state.aheadPeak, ahead);
+	state.aheadPeakSession = (std::max)(state.aheadPeakSession, ahead);
+	if (++state.aheadFrames < 600)
+		return;
+	std::string counts;
+	for (std::size_t i = 0; i < state.aheadCounts.size(); ++i)
+		if (state.aheadCounts[i])
+			counts += fmt::format("{}{}{}: {}", counts.empty() ? "" : ", ", i, i + 1 == state.aheadCounts.size() ? "+" : "", state.aheadCounts[i]);
+	logger::info("[ORG] pacing: Begin ahead of the GPU's last completed epoch, last {} frames: peak {} frames (session {}), by distance {}; published copies "
+				 "per frame slot {}",
+		state.aheadFrames, state.aheadPeak, state.aheadPeakSession, counts, kGameFramesInFlight);
+	state.aheadCounts.fill(0);
+	state.aheadPeak = 0;
+	state.aheadFrames = 0;
+}
+
 void RenderGraphRuntime::SealPresented()
 {
 	// The stage commit points and the open-stage census (BeforeGpuWork), before the seal.
@@ -4260,6 +4299,7 @@ bool RenderGraphRuntime::BuildSetupGraphs(std::string_view) { return false; }
 RenderGraph::BuildManager* RenderGraphRuntime::Builds() { return nullptr; }
 void RenderGraphRuntime::SignalFramePace(bool) {}
 void RenderGraphRuntime::SealPresented() {}
+void RenderGraphRuntime::NoteFrameBegin(std::uint64_t) {}
 void RenderGraphRuntime::MoveOwnerThread() {}
 void RenderGraphRuntime::DrainSubmissions(const char*, bool) {}
 bool RenderGraphRuntime::QueuesPresent() const { return false; }

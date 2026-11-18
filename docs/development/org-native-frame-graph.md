@@ -4843,8 +4843,9 @@ Terrain Blending, Volumetric Shadows, light culling, the bloom radii.
 ### What guest mode (DXVK) still uses of the old path
 
 Since Guest B0 (2026-11-18) guest runs every port native runs, with the flush latch and the guest context: the engine's subsystems
-and CS's features draw on ORG in both modes, and the engine's binds and draws are withheld from DXVK. Guest still runs no CS stage.
-It uses: every frame anchor's own epoch (per-anchor epochs, `FrameAnchors::Scheduled` on the anchor's own built
+and CS's features draw on ORG in both modes, and the engine's binds and draws are withheld from DXVK. Since Guest B1 guest runs the
+frame driver, schedules, staged builds, keys and the recipe check, and one stage: pre-depth (its EarlyPrepass step) is one block in
+DXVK's stream. It still uses: every other frame anchor's own epoch (per-anchor epochs, `FrameAnchors::Scheduled` on the anchor's own built
 graph, the skeleton's group anchors and Skylighting's lent slot with its D3D11 clear), the main ImageSpace client,
 the clients built on first sight and the shape manifest (`ImageSpaceShapes.json`) with the per-draw shape capture, the D3D11 renderer for
 displays the graph refuses, the capture's D3D11 staging copy when the graph cannot take it, and the post
@@ -7274,3 +7275,134 @@ Menu run (three times, see above), `latch-census-short`: all passed, 0 tap error
 thread is on by default in guest now, so every guest run covers it. `d3d11+quick` passed ("Render graph disabled: CS_ORG=0", no
 port set up). Native: quick, river, interior, validation: passed, the same 20 `VUID-vkCmdDraw-None-09600` as before, 0 recipe findings, shots as A11's. The only `[C]` line is the
 known `PublishedResources` one.
+
+## Guest B1: stages in guest, pre-depth first (2026-11-18)
+
+Plan piece B1. Guest mode now runs the frame machinery native runs, and its first stage: pre-depth is one block in DXVK's stream. The
+other stages' anchors keep their own epochs in guest until their piece. Code and this text on `org-native/phases`, the test on
+OpenRenderGraph's `org-native/phases`. RX 6600, Perf-Fast, background runs with `DXVK_DEBUG=hang`.
+
+### What runs in guest
+
+- `FrameAnchors::SegmentsOn()` is true in guest (DXVK with the graph on: not `CS_ORG=0` or `features`, not the system D3D11 runtime,
+  not the owned frame), with the same needs as native (epochs, async epochs, replayable recordings). The frame driver, the schedules
+  taken at `Renderer::Begin`, staged builds, build keys (absent passes), the recipe check (at Begin and before a build attaches) and the
+  freeze test's Begin answer all run in guest now.
+- A stage runs in guest when its table entry has `runsInGuest` (decision D7). `Stage::guestSteps` (also a migration field) says how
+  many of its first steps guest holds: the last of them is its commit. Pre-depth has `runsInGuest` and `guestSteps = 1`: the
+  EarlyPrepass step alone, held wholly, committed at its own hook. Its third step, the main depth's clear, is the skeleton's, which
+  hosts nothing in guest yet: that clear keeps the EngineFrameClear anchor's own epoch. `Valid()` checks the guest end is an anchor or
+  a point. `FrameAnchors` picks the table's guest view once, in `AddToFrame` (`declaredInfo`, `StepAnchorsOf`, `WholeAnchorsOf`).
+- In guest only an anchor a guest stage holds wholly loses its own epoch (`declaredMembers`). A shared anchor keeps it for the clients
+  of the stages not in guest yet. `Run`'s `own epoch` error applies in guest only to an anchor a guest stage holds (none can reach it in
+  B1). `Scheduled` answers from the anchor's own built graph for an anchor no guest stage takes now, as guest did before.
+- The Drawcall Limit Fix families decide by the recipe, not by the mode: `segmentOnly` and `HeldForBatch`'s held-or-mismatch rule apply
+  to a client a stage of this mode names (`FrameAnchors::NamedByStage`). In guest that is none of them yet (water, blood, precipitation,
+  the shadow masks and the menu scenes are in stages that do not run in guest).
+- A stage's failed build stops the game in guest too (as in native). `EpochResult::Skipped` for a stage is a fatal error in both modes.
+- Drawcall Limit Fix's build point stays at `Main::Draw` in guest (native moved it to Begin): a stage's build switches in only at Begin
+  (staged), and the anchors' own epochs may take a build mid-frame as before.
+
+### How a guest stage executes
+
+Taps stage values into the frame slot's staging run as in native; the commit copies them into the slot's published copy and submits
+the one ticket through `TryExecuteEpoch`. The stage's epoch is in the in-stream list, revision-driven, open (entry barriers from the
+ledgers at each submission) and in pools of its own (`SetPrivateAliasEpochs`): `host->SubmitEpoch` with the schedule's recording, then
+`TakeExternalExecution`, `EmitExecution`, one `dxvkEmitExternalCommands` per segment into DXVK's current command buffer. The kept lists
+run as secondaries in DXVK's primary, passes recorded at execution are recorded on DXVK's worker by the stream callback, compute
+batches go to ORG's queues with timeline waits. Images DXVK made go back to its resting layout at the block's end (external home
+states); engine targets are ORG images whose layouts the ledgers carry (decision D5, unchanged from B0). In the perf-taa census run
+the pre-depth stage was one ticket a frame (12 calls over every 12-frame report, 55 to 60 us of render-thread CPU each) and the
+EarlyPrepass anchor's epoch never ran.
+
+The block's own submission (its external commands, and DXVK's flush before a split) is not work "inside the window":
+`FrameAnchors` marks the submission (`submittingStage`), and neither the held-work census nor the residue census counts it. Without
+that, every frame logged "external commands was submitted between the first tap and the commit of the CS segment: pre-depth".
+
+### The ORG test
+
+`OpenRenderGraphPersistentVulkanHostTests segment-external`: one revision-driven epoch that is also external, on open executions with
+external home states, its transient in a manual alias pool kept its own by `SetPrivateAliasEpochs`. Each frame stages a value in its
+slot's staging run, pins the copy, copies the staged run into the copy's run at the submission, takes the execution and executes it on
+another thread (as DXVK's worker does), with the copy pass recorded at execution. A host-owned, exclusive texture the write reads rests
+in RenderTarget (as DXVK rests a render target); between blocks the test uses it itself with a barrier that expects it there. Then a
+description that turns the write off, and a staged build recorded while the old one submits and switched in. It passes, and passes
+clean under the Khronos validation layer. With external home states turned off the layer reports the texture left in
+SHADER_READ_ONLY, so the check bites. It found nothing to fix in ORG: 17 submissions, 0 prepared again, 0 copy waits, 0 busy copies,
+one segment a block, no graph in the shared arena. (The `stream open home` mode reads its host texture from UNDEFINED, two validation
+errors of the test's own; the new mode puts its texture in its home state first.) The frame arena was not tested: it stays off in
+guest (below).
+
+### Pacing (decision D11)
+
+`RenderGraphRuntime::NoteFrameBegin` measures, at each Begin, how far the frame is past the latest frame with a completed epoch (an
+upper bound: completions are read on the host's thread), and logs it every 600 frames. In `latch-census-short` the peak was 2 frames in
+every window (by distance: 1 or 2), against 4 published copies per frame slot. Guest's own frame pace (`CS_FRAME_LATENCY`, default 2:
+the GPU at most one frame behind) bounds it. A stage's copy can be busy only if its slot ran again before the present sealed its last
+run, which one ticket a frame per slot never does. So there is no pacing at Begin; `Skipped` for a stage stops the game instead, and no
+run met it.
+
+### The residue census by window
+
+The census now counts, with `CS_ORG_RESIDUE_CENSUS=1` in guest, every call that does work and reaches DXVK's immediate context (draws,
+dispatches, maps, queries, copies, updates, clears, resolves, mips, flushes: engine and CS calls alike, both end there) while a stage
+holds staged values: "D3D11 calls reaching DXVK inside a stage's window". In `latch-census-short` it read 0 in all 15 windows (of 74,000
+to 229,000 such calls a window). Nothing needed fixing: the pre-depth window is the EarlyPrepass hook's run, the features'
+`EarlyPrepass` D3D11 work and `CopyShadowLightData` come before its tap, and its clients' commits make no D3D11 call. The census by
+window otherwise: engine draws reaching D3D11 (all skipped by the latch) 0 in 11 of 15 windows; 7.9 a frame after the load, 6.0 (map),
+7.3 (journal), 3.3 (the save's load). B0 had five such windows (8.0, 6.1, 7.3, 1.5, 4.1).
+
+### Frame facilities in guest
+
+- On: the frame driver and its census, schedules, staged builds and keys, the recipe check, `Frame::Resources` (ImageSpace's targets,
+  already mode-free), the `Starved` and `NotDeclared` tap errors, `own epoch` for the guest stages' anchors.
+- Waits: the frame arena (`Frame::Transients`, `SetFramePositions`). Its frame transients' spans count only the positioned graphs, and in
+  guest the anchors' own epochs (unpositioned) and DXVK's residue still use engine targets outside those spans; the guest stages use
+  pools of their own until every stage is in guest (after B7/B8). `Untappable` is raised only by ImageSpace's steps, which need B3 (world
+  steps), B4 (water steps) and B6 (the chain). `own epoch` for every other anchor waits for each anchor's stage.
+
+### Shots
+
+Each guest shot against B0's guest shot (mean absolute difference over 0-255, share of pixels off by more than 24): quick 2.0, 0.1%;
+river 5.2, 5.3% and 2.9, 1.4%; rain 1.2 and 1.4, 0.1%; under water 6.2, 9.5% and 2.2, 2.1%; interior 2.8, 2.5% and 5.1, 6.6%;
+upscalers 0.6 to 3.9, at most 2.2%; worldspace Tamriel 0.9, Riverwood 1.8, Solstheim 16.2, 28.7% (the trees and grass in the wind,
+looked at side by side: the same image; B0's Solstheim against D3D11 was 17.7); Journal Menu 0.5 to 3.8, at most 3.7% (the frozen
+background drawn). Native's shots against B0's native ones: quick 1.1, interior 2.8 and 6.6.
+
+### Performance and memory
+
+perf-taa, uncapped, VRAM Budget off, alternating guest and native (DLL `436509caadd4`):
+
+| | Guest | Native | Guest in B0 |
+|---|---|---|---|
+| frame period between the marks | 19.23 / 19.29 ms | 19.15 / 19.11 ms | 19.20 / 19.21 ms |
+| GPU 3D engine busy | 98.3 / 98.5% | 99.6 / 99.6% | 98.5 / 98.4% |
+| render thread CPU | 280 / 277 ms a second | 193 / 208 | 270 / 302 |
+| graph host thread | 451 / 461 ms a second | 97 / 112 (the submission thread) | 410 / 451 |
+| DXVK worker | 112 / 140 ms a second | none | 146 / 152 |
+| process dedicated VRAM | 3,853 / 3,852 MiB | 2,931 / 3,002 MiB | 3,948 / 3,887 MiB |
+
+GPU-bound, as before: one stage of twelve moved, so neither the frame nor the CPU cost moved beyond run noise. A guest census run
+(`org.epoch_stats`, 19.19 ms): in every report pre-depth was declared and tapped once a frame, current, with 0 recordings, 0 switches,
+0 build switches and 0 key builds, 0 tap errors, and no busy copy.
+
+### For the next stage pieces
+
+- A stage that runs in guest with every step needs only `runsInGuest`. One whose later steps need something guest lacks takes
+  `guestSteps`; its guest commit is then its last guest step, an anchor's hook. Pre-depth is the only stage that ends at an anchor in
+  either mode: an end tap that does not fire in a frame that declares the stage is a `missing` tap error. EarlyPrepass fired in every
+  world frame of every run here.
+- Pre-main (B2): light culling follows by itself (`HoldsForeign` reads the guest stages). The skeleton's hosting is all or nothing
+  (`HostingOn`); in guest it must host only the places of stages that run there, and keep the group clients' own epochs for the rest.
+  EngineDraws and EngineDepthCopy are shared anchors: they keep their own epochs in guest for the other stages' clients.
+- A client whose code asks "native mode?" to mean "is my anchor a stage's?" must ask the recipe instead (`NamedByStage`, `HeldByStage`,
+  `Scheduled`), as the DCLF families now do.
+- The residue census by window watches DXVK's immediate context, so any D3D11 call in a new stage's window shows there with its caller.
+
+### Checks
+
+One background run each on DLL `436509caadd4`. Guest: `latch-census-short`, quick, river, rain, under water, interior, upscalers, the
+worldspace run, the frozen-world Journal Menu run. Native: quick, river, interior, validation (the same 20
+`VUID-vkCmdDraw-None-09600`). `d3d11+quick`. All passed with 0 tap errors, 0 recipe findings, no failed build; the only `[C]` line is
+the known `PublishedResources` one. ORG: `segment-external` (also under the validation layer), `segment`, `revision`, `external` and
+`external-reuse` pass.

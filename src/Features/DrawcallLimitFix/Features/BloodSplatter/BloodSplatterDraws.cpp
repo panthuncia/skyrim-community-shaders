@@ -274,7 +274,7 @@ namespace DCLF::Features::BloodSplatter::BloodSplatterDraws
 		};
 		desc.active = [client] { return client->pending; };
 		// Native mode: a step of the UI stage only (the anchor has no epoch there).
-		desc.segmentOnly = FrameAnchors::SegmentsOn();
+		desc.segmentOnly = FrameAnchors::NamedByStage(desc.id);
 		desc.onFailed = [] { Fail("the render graph failed with the screen blood's pass in it"); };
 		if (!FrameAnchors::Register(std::move(desc))) {
 			logger::warn("[DCLF] blood splatter: the {} client could not be registered; the screen blood stays the engine's", kClientId);

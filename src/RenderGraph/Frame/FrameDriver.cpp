@@ -2,6 +2,7 @@
 
 #include "RenderGraph/Engine/Bink/Bink.h"
 #include "RenderGraph/Engine/ImageSpace/ImageSpace.h"
+#include "RenderGraph/Engine/Native/Native.h"
 #include "RenderGraph/Engine/Skeleton/Skeleton.h"
 #include "RenderGraph/Frame/PostChain.h"
 #include "RenderGraph/Frame/Recipe.h"
@@ -284,8 +285,10 @@ namespace RenderGraph::Frame::Driver
 		next.kind = DecideKind(state, next.capture);
 		// Native mode with segments: every build attaches at a frame boundary before the frame's schedule is chosen. Drawcall Limit
 		// Fix's build point (where its graph builds attach and are handed out) runs here for a frame that draws the world, not at
-		// Main::Draw's start after Begin. Guest keeps it at Main::Draw.
-		if (FrameAnchors::SegmentsOn() && FrameAnchors::IsRenderOwner() && (next.kind == Kind::World || (next.kind == Kind::FrozenWorld && next.capture)))
+		// Main::Draw's start after Begin. Guest keeps it at Main::Draw: its stages' builds switch in only here at Begin (staged), and the
+		// anchors' own epochs there may take a build mid-frame.
+		if (FrameAnchors::SegmentsOn() && Engine::Native::Requested() && FrameAnchors::IsRenderOwner() &&
+			(next.kind == Kind::World || (next.kind == Kind::FrozenWorld && next.capture)))
 			DCLF::BuildPointAtFrameStart(next.frame);
 		next.dclfDraws = (next.kind == Kind::World || next.kind == Kind::FrozenWorld) && DCLF::DrawsWorld();
 		// Hosted clears and copies the last frame left waiting are tap errors. Before the new frame is current: they are the last frame's.
@@ -309,6 +312,8 @@ namespace RenderGraph::Frame::Driver
 		state.previous = state.current;
 		state.current = next;
 		state.tapped.fill(false);
+		if (FrameAnchors::IsRenderOwner())
+			RenderGraphRuntime::Get().NoteFrameBegin(next.frame);
 		// The post chain's fields (read again at the chain's decision event), then each segment's schedule for the frame.
 		PostChain::OnBegin(state.current);
 		// The recipe is checked again when a build of one of its epochs attached (render owner, before the stages' schedules).

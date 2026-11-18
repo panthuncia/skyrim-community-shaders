@@ -142,8 +142,12 @@ namespace RenderGraph::Frame::Recipes::Table
 		// A new description switches every frame slot at once, when each slot's recording of it is ready (the UI stage: its description
 		// changes with the frame kind, not by frame). Other stages keep one schedule per slot.
 		bool switchesEverySlot = false;
-		// Guest mode runs this stage (plan decision D7). False for every stage today: guest runs each anchor as its own epoch.
+		// Guest mode runs this stage (plan decision D7): one block in DXVK's stream. The anchors of a stage without it keep their own epochs
+		// in guest. A migration bit: it goes once every stage runs in guest.
 		bool runsInGuest = false;
+		// In guest, the stage holds only its first guestSteps steps and commits at the last of them (0: every step). The later steps' anchors
+		// keep their own epochs there until their piece moves them. A migration field, removed with runsInGuest.
+		std::uint8_t guestSteps = 0;
 		// A point-ended stage commits just before any of these epochs is submitted (FrameAnchors::BeforeGpuWork), if it has not ended yet.
 		SegmentList commitBefore = Segments({});
 		std::string_view commit;      // where it commits, for the recipe print
@@ -218,6 +222,8 @@ namespace RenderGraph::Frame::Recipes::Table
 		// Drawcall Limit Fix's Z-prepass does not host it (every world frame before DCLF draws and during its load holds; no pre-depth pass
 		// reads the main depth). Its commit is a point just before DCLF's Z-prepass or a later stage (BeforeGpuWork, and a later stage's first
 		// tap): the clear must reach the GPU before the Z-prepass draws, which a load hold's frames submit.
+	// Guest mode runs the EarlyPrepass step alone and commits at its hook: the depth clear is the skeleton's, which hosts nothing in guest
+	// yet (the clear keeps the EngineFrameClear anchor's own epoch there).
 		{ .id = StageId::PreDepth,
 			.owner = Owner::Cs,
 			.name = "pre-depth",
@@ -231,6 +237,8 @@ namespace RenderGraph::Frame::Recipes::Table
 				{ .anchor = Anchor::EngineFrameClear, .clients = { "cs.engine.skeleton.frame@pre-depth" } },
 				{ .point = true },
 			} },
+			.runsInGuest = true,
+			.guestSteps = 1,
 			.commitBefore = Segments({ Segment::ZPrepass, Segment::FirstPersonDepth, Segment::Reflection, Segment::LightCulling, Segment::MainOpaque, StageSegment(SegmentId::PreMain),
 				StageSegment(SegmentId::Deferred), kEndsWorld[0], kEndsWorld[1], kEndsWorld[2], kEndsWorld[3], kEndsWorld[4], kEndsWorld[5], kEndsWorld[6], kEndsWorld[7] }),
 			.commit = "just before DCLF's Z-prepass, or Main::RenderDepth's depth copy",
@@ -491,6 +499,13 @@ namespace RenderGraph::Frame::Recipes::Table
 		return count;
 	}
 
+	/** @brief The steps a CS stage holds in guest mode (Stage::guestSteps): its first ones, the last of them its commit. */
+	constexpr std::uint32_t GuestStepCount(const Stage& a_stage)
+	{
+		const auto steps = StepCount(a_stage);
+		return a_stage.guestSteps && a_stage.guestSteps < steps ? a_stage.guestSteps : steps;
+	}
+
 	constexpr std::uint32_t EpochCount(const Stage& a_stage)
 	{
 		std::uint32_t count = 0;
@@ -561,6 +576,10 @@ namespace RenderGraph::Frame::Recipes::Table
 				for (std::uint32_t k = steps; k < kMaxSteps; ++k)
 					if (!stage.steps[k].Empty())
 						return false;
+				// In guest the stage ends at its last guest step: an anchor or a point, never a module epoch.
+				if (stage.guestSteps > steps || (stage.guestSteps && !stage.runsInGuest) ||
+					(stage.runsInGuest && stage.steps[GuestStepCount(stage) - 1].foreign != Segment::Count))
+					return false;
 				// Exactly one Graph epoch, the stage's own.
 				std::uint32_t own = 0;
 				for (std::uint32_t e = 0; e < EpochCount(stage); ++e)

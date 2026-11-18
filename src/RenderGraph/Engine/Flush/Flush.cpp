@@ -6,6 +6,7 @@
 #include "RenderGraph/Engine/Native/Native.h"
 #include "RenderGraph/Engine/Tripwire/GuestDevice.h"
 #include "RenderGraph/Engine/Tripwire/Tripwire.h"
+#include "RenderGraph/FrameAnchors.h"
 #include "RenderGraph/Switches.h"
 #include "State.h"
 
@@ -25,6 +26,12 @@
 
 namespace RenderGraph::Engine::Flush
 {
+	namespace StageWindow
+	{
+		void Install();
+		void Report();
+	}
+
 	namespace
 	{
 		// More than ID3D11DeviceContext's 115 vtable slots (Tripwire::WatchSet::kMaxSlots).
@@ -623,6 +630,7 @@ namespace RenderGraph::Engine::Flush
 		{
 			const auto& config = GetConfig();
 			if (config.census) {
+				StageWindow::Install();
 				auto& census = GetCensus();
 				std::unique_lock guard(census.lock);
 				auto& window = census.window;
@@ -642,6 +650,7 @@ namespace RenderGraph::Engine::Flush
 					guard.unlock();
 					Report(closed, totalDraws, totalFrames, totalZero);
 					StateTrace::Report(static_cast<double>(closed.frames));
+					StageWindow::Report();
 				}
 			}
 			if (config.latch) {
@@ -920,6 +929,132 @@ namespace RenderGraph::Engine::Flush
 			if (a_name.size() > 5 && a_name.substr(2, 3) == "Set" && std::find(kStages.begin(), kStages.end(), a_name.substr(0, 2)) != kStages.end())
 				return SlotClass::Setter;
 			return SlotClass::Other;
+		}
+	}
+
+	namespace StageWindow
+	{
+		/**
+		 * @brief Guest mode, with the census: every DXVK immediate-context call that does work (draws, dispatches, maps, queries, copies,
+		 * updates, clears, resolves, mips, flushes) made while a CS stage holds staged values (FrameAnchors::StagesHoldValues). Such a call
+		 * reaches DXVK's stream before the stage's block, so it runs ahead of the stage's work on the GPU. Engine and CS calls alike: both
+		 * end at DXVK's context. Counted by method and caller, reported with the census window.
+		 */
+		struct Counts
+		{
+			std::mutex lock;
+			std::map<std::pair<const char*, const void*>, std::uint64_t> calls;
+			std::uint64_t total = 0, sessionTotal = 0;
+			std::atomic<std::uint64_t> seen{ 0 };  // every hooked call, inside a window or not: the hooks are live
+		};
+
+		Counts& GetCounts()
+		{
+			static Counts s_counts;
+			return s_counts;
+		}
+
+		void Note(const char* a_method, const void* a_caller)
+		{
+			auto& counts = GetCounts();
+			counts.seen.fetch_add(1, std::memory_order_relaxed);
+			if (!FrameAnchors::StagesHoldValues())
+				return;
+			const std::lock_guard guard(counts.lock);
+			++counts.calls[{ a_method, a_caller }];
+			++counts.total;
+			++counts.sessionTotal;
+		}
+
+#	define CS_STAGE_WINDOW_HOOK(Name, Ret, Params, Args)                                          \
+		struct Name##Hook                                                                           \
+		{                                                                                           \
+			static Ret STDMETHODCALLTYPE thunk Params                                               \
+			{                                                                                       \
+				Note(#Name, _ReturnAddress());                                                      \
+				return func Args;                                                                   \
+			}                                                                                       \
+			static inline REL::Relocation<decltype(thunk)> func;                                    \
+		};
+		using C = ID3D11DeviceContext;
+		CS_STAGE_WINDOW_HOOK(DrawIndexed, void, (C * a_this, UINT a, UINT b, INT c), (a_this, a, b, c))
+		CS_STAGE_WINDOW_HOOK(Draw, void, (C * a_this, UINT a, UINT b), (a_this, a, b))
+		CS_STAGE_WINDOW_HOOK(Map, HRESULT, (C * a_this, ID3D11Resource* a, UINT b, D3D11_MAP c, UINT d, D3D11_MAPPED_SUBRESOURCE* e), (a_this, a, b, c, d, e))
+		CS_STAGE_WINDOW_HOOK(Unmap, void, (C * a_this, ID3D11Resource* a, UINT b), (a_this, a, b))
+		CS_STAGE_WINDOW_HOOK(DrawIndexedInstanced, void, (C * a_this, UINT a, UINT b, UINT c, INT d, UINT e), (a_this, a, b, c, d, e))
+		CS_STAGE_WINDOW_HOOK(DrawInstanced, void, (C * a_this, UINT a, UINT b, UINT c, UINT d), (a_this, a, b, c, d))
+		CS_STAGE_WINDOW_HOOK(Begin, void, (C * a_this, ID3D11Asynchronous* a), (a_this, a))
+		CS_STAGE_WINDOW_HOOK(End, void, (C * a_this, ID3D11Asynchronous* a), (a_this, a))
+		CS_STAGE_WINDOW_HOOK(DrawIndexedInstancedIndirect, void, (C * a_this, ID3D11Buffer* a, UINT b), (a_this, a, b))
+		CS_STAGE_WINDOW_HOOK(DrawInstancedIndirect, void, (C * a_this, ID3D11Buffer* a, UINT b), (a_this, a, b))
+		CS_STAGE_WINDOW_HOOK(Dispatch, void, (C * a_this, UINT a, UINT b, UINT c), (a_this, a, b, c))
+		CS_STAGE_WINDOW_HOOK(DispatchIndirect, void, (C * a_this, ID3D11Buffer* a, UINT b), (a_this, a, b))
+		CS_STAGE_WINDOW_HOOK(CopySubresourceRegion, void, (C * a_this, ID3D11Resource* a, UINT b, UINT c, UINT d, UINT e, ID3D11Resource* f, UINT g, const D3D11_BOX* h),
+			(a_this, a, b, c, d, e, f, g, h))
+		CS_STAGE_WINDOW_HOOK(CopyResource, void, (C * a_this, ID3D11Resource* a, ID3D11Resource* b), (a_this, a, b))
+		CS_STAGE_WINDOW_HOOK(UpdateSubresource, void, (C * a_this, ID3D11Resource* a, UINT b, const D3D11_BOX* c, const void* d, UINT e, UINT f), (a_this, a, b, c, d, e, f))
+		CS_STAGE_WINDOW_HOOK(ClearRenderTargetView, void, (C * a_this, ID3D11RenderTargetView* a, const FLOAT b[4]), (a_this, a, b))
+		CS_STAGE_WINDOW_HOOK(ClearUnorderedAccessViewUint, void, (C * a_this, ID3D11UnorderedAccessView* a, const UINT b[4]), (a_this, a, b))
+		CS_STAGE_WINDOW_HOOK(ClearUnorderedAccessViewFloat, void, (C * a_this, ID3D11UnorderedAccessView* a, const FLOAT b[4]), (a_this, a, b))
+		CS_STAGE_WINDOW_HOOK(ClearDepthStencilView, void, (C * a_this, ID3D11DepthStencilView* a, UINT b, FLOAT c, UINT8 d), (a_this, a, b, c, d))
+		CS_STAGE_WINDOW_HOOK(GenerateMips, void, (C * a_this, ID3D11ShaderResourceView* a), (a_this, a))
+		CS_STAGE_WINDOW_HOOK(ResolveSubresource, void, (C * a_this, ID3D11Resource* a, UINT b, ID3D11Resource* c, UINT d, DXGI_FORMAT e), (a_this, a, b, c, d, e))
+		CS_STAGE_WINDOW_HOOK(Flush, void, (C * a_this), (a_this))
+#	undef CS_STAGE_WINDOW_HOOK
+
+		/** @brief Hooks DXVK's immediate context once (main thread, the first census tick with the context). Guest mode only. */
+		void Install()
+		{
+			static bool tried = false;
+			if (tried || Native::Requested() || !globals::d3d::context)
+				return;
+			tried = true;
+			auto* context = globals::d3d::context;
+			// ID3D11DeviceContext's vtable slots.
+			stl::detour_vfunc<12, DrawIndexedHook>(context);
+			stl::detour_vfunc<13, DrawHook>(context);
+			stl::detour_vfunc<14, MapHook>(context);
+			stl::detour_vfunc<15, UnmapHook>(context);
+			stl::detour_vfunc<20, DrawIndexedInstancedHook>(context);
+			stl::detour_vfunc<21, DrawInstancedHook>(context);
+			stl::detour_vfunc<27, BeginHook>(context);
+			stl::detour_vfunc<28, EndHook>(context);
+			stl::detour_vfunc<39, DrawIndexedInstancedIndirectHook>(context);
+			stl::detour_vfunc<40, DrawInstancedIndirectHook>(context);
+			stl::detour_vfunc<41, DispatchHook>(context);
+			stl::detour_vfunc<42, DispatchIndirectHook>(context);
+			stl::detour_vfunc<46, CopySubresourceRegionHook>(context);
+			stl::detour_vfunc<47, CopyResourceHook>(context);
+			stl::detour_vfunc<48, UpdateSubresourceHook>(context);
+			stl::detour_vfunc<50, ClearRenderTargetViewHook>(context);
+			stl::detour_vfunc<51, ClearUnorderedAccessViewUintHook>(context);
+			stl::detour_vfunc<52, ClearUnorderedAccessViewFloatHook>(context);
+			stl::detour_vfunc<53, ClearDepthStencilViewHook>(context);
+			stl::detour_vfunc<54, GenerateMipsHook>(context);
+			stl::detour_vfunc<57, ResolveSubresourceHook>(context);
+			stl::detour_vfunc<111, FlushHook>(context);
+			logger::info("[ORG] residue census: DXVK's immediate context counts the calls made inside a CS stage's window (between its first tap and its commit)");
+		}
+
+		void Report()
+		{
+			auto& counts = GetCounts();
+			std::map<std::pair<const char*, const void*>, std::uint64_t> calls;
+			std::uint64_t total = 0, session = 0;
+			{
+				const std::lock_guard guard(counts.lock);
+				calls = std::exchange(counts.calls, {});
+				total = std::exchange(counts.total, 0);
+				session = counts.sessionTotal;
+			}
+			logger::info("[ORG] residue census: D3D11 calls reaching DXVK inside a stage's window: {} this window, {} since the start (of {} work calls "
+						 "DXVK's immediate context took this window)",
+				total, session, counts.seen.exchange(0, std::memory_order_relaxed));
+			std::vector<std::pair<std::pair<const char*, const void*>, std::uint64_t>> sorted(calls.begin(), calls.end());
+			std::ranges::sort(sorted, [](const auto& a, const auto& b) { return a.second > b.second; });
+			for (std::size_t i = 0; i < sorted.size() && i < 16; ++i)
+				logger::info("[ORG] residue census: inside a stage's window #{}: {} {} at {}", i + 1, sorted[i].second, sorted[i].first.first,
+					Tripwire::DescribeCaller(sorted[i].first.second));
 		}
 	}
 

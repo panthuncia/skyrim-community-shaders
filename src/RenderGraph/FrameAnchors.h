@@ -410,9 +410,9 @@ namespace FrameAnchors
 	 * mode: for an anchor a CS stage holds wholly (a whole step in the recipe table), the schedule of the stage that holds the anchor in this
 	 * frame's kind holds this registration of a_id and has it on (false while the stage is absent, and when no stage of the frame's kind
 	 * holds the anchor); that does not depend on where the frame is now, so a caller may ask before the stage's window opens. For a shared
-	 * anchor, the open stage whose step takes the anchor's taps now holds a_id, and its schedule has it on (HeldNow). Guest mode runs no
-	 * stage: the anchor's own built graph holds this registration. Render thread. Run can still fail afterwards: the client's executed
-	 * callback is how it knows the work was submitted.
+	 * anchor, the open stage whose step takes the anchor's taps now holds a_id, and its schedule has it on (HeldNow). Guest mode, for an
+	 * anchor no guest stage takes now: the anchor's own built graph holds this registration. Render thread. Run can still fail afterwards:
+	 * the client's executed callback is how it knows the work was submitted.
 	 */
 	bool Scheduled(std::string_view a_id, Anchor a_anchor);
 
@@ -608,10 +608,17 @@ namespace FrameAnchors
 	 * ticket is taken there. The stage's commit point (its last step) copies the staged values into the slot's copy and submits the one
 	 * ticket. Stages: pre-depth (EarlyPrepass), pre-main (RenderDepth's depth copy to Prepass; CS_ORG_SEGMENT_PREMAIN=0 off), deferred
 	 * and water (DeferredPasses to just before the forward epoch; CS_ORG_SEGMENT_DEFERRED=0 off), and the post chain's two
-	 * (CS_ORG_SEGMENT_POST=0 off): the post stage, with the chain and the upscaler's evaluate as CS passes. Guest mode keeps the
-	 * anchors' epochs. Any thread.
+	 * (CS_ORG_SEGMENT_POST=0 off): the post stage, with the chain and the upscaler's evaluate as CS passes. Guest mode (DXVK with the
+	 * graph) runs the stages the recipe table marks runsInGuest, each one block in DXVK's stream, with their guest steps only; the
+	 * other stages' anchors keep their own epochs there. Any thread.
 	 */
 	bool SegmentsOn();
+
+	/**
+	 * @brief Whether a CS stage holds staged values it has not committed yet: its window is open. D3D11 work that reaches DXVK now runs
+	 * ahead of the stage's block on the GPU (guest mode's residue census counts it). Any thread, without the anchors' lock.
+	 */
+	bool StagesHoldValues();
 
 	/**
 	 * @brief Render owner: whether the description being read is a stage's build key (docs/development/org-native-frame-graph.md,
