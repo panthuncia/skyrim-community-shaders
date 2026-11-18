@@ -8005,3 +8005,77 @@ the census's windows match B7's (Improved Camera SE's Map and Unmap in steady wi
 the B7 piece's runs: census at most 0.8, quick 1.8, Journal Menu 0.7 to 3.6, interior 3.8 and 8.6 (Dragonsreach's light shafts),
 upscalers 0.6 to 3.1, native quick 1.1; worldspace Tamriel 0.9, Riverwood 3.2, Solstheim 22.0 and 7.2 against the last two guest
 worldspace runs (the trees and grass in the wind). Not run: rain, river, under water, the main menu check, HDR output, frame generation.
+
+## Loading screens (2026-11-19)
+
+The user's report: loading screens flicker in their shading, and actors on them have parts in strange places. CS on
+`org-native/phases`, OpenRenderGraph `dev`. RX 6600, Perf-Fast, background runs with `DXVK_DEBUG=hang`.
+
+### Getting a skinned loading screen
+
+Eight of the 115 loading screen models in the base game's archives are skinned (the race portraits: `LoadScreenMaleNord.nif`,
+`LoadScreenMaleOrc_1.nif`, `LoadScreenMaleDarkElf.nif`, `LoadScreenBretonMage.nif`, `LoadScreenFemaleImperial.nif`,
+`LoadScreenMaleRedguard_1.nif`, `LoadScreenFemaleWoodElf.nif`, `LoadScreenMaleHighElf.nif`). The test runner has two new pieces for
+this (docs/development/testing.md):
+- the `loadscreen` command: every load screen shows the model whose path holds the argument. At `data-loaded` it makes the autoload's
+  own load show that model.
+- the `held-frame` milestone: the first world frame of a load under the loading menu that DCLF's load hold keeps up.
+The menu views probe now names the scene's first geometry. Shots at consecutive frames come from a chain of `shot` steps one frame
+apart (one capture a frame).
+
+### What was seen
+
+- **The skinned model was broken in guest and native, steady from frame to frame.** The Nord's arm stood straight out to the side,
+  a gauntlet floated beside him, the hair sat off the scalp: the skinned parts in their bind pose. Plain D3D11 drew him whole.
+- **No flicker in any loading screen frame**, in any mode: 8 to 40 consecutive shots of the shadow stone, Peryite's shrine, a
+  skeleton and the Nord moved only as the model turns (4 to 5 times D3D11's frame-to-frame pixel change at the second and fifth shot of a
+  burst, then about 1.3 times, the same in guest and native). The load hold's world frames show the loading text without the model,
+  identical frame to frame.
+- **Lighting**: the model is darker than in D3D11 (the Nord's region mean 12.7 against 20.7), the same in guest and native. The steel
+  armour is near black where D3D11 lights it grey, and the face's war paint is pale. Not explained, not fixed (below).
+
+### Cause 1: skinned menu draws compiled without SKINNED
+
+The menu scenes family builds a Lighting draw's program from CS's pixel descriptor alone, whose defines serve both stages. The engine
+leaves the skinned flag out of a Lighting pixel descriptor unless the normals are in model space (logged: vertex 0x202 with pixel
+0x114201, vertex 0x1000203 with pixel 0x1004601). The vertex stage was therefore built without skinning and placed each vertex by
+the geometry's world transform. The palettes were checked first and are right: the latched b10 rows matched the skin instance's
+matrices that the engine's bone setter (the skin it last set is kept in its thread's TLS block) uploaded, for every skinned draw of
+the screen. Fix: the program's descriptor takes the skinned flag from the vertex descriptor. In the pixel stage that flag changes
+only the rain ripples' position source and the projected UV path, both of which already follow the vertex stage.
+
+### Cause 2 (a gap found on the way): the loading model's shadow maps were never drawn
+
+UI3DSceneManager::Render renders the loading model's shadow lights into kSHADOWMAPS (SE 0x1408d2f80, AE 0x140973210, scheme 4
+only). Those Utility shadow map draws reached D3D11 and the flush latch skipped them (`target -1 depth 4 ... nobody vouched`), so the
+shadow mask read maps nothing had drawn. They are now a menu scenes batch of their own (`cs.menu-scenes.menu-shadow`, a step of
+the UI stage between the scene's clears and the depth batch), drawing into the slice each light binds. ORG's `DepthReadWrite` takes
+a list of views for that. The UI stage now has 19 steps (`kMaxSteps` and the shared constants' upload points went from 18 to 19).
+The model's brightness did not change measurably with it (12.66 before, 12.7 after).
+
+### The `RecordsAtExecution` class
+
+Ruled out for this report. A pass paired with another run's slot would read another frame's draws or palettes. The broken parts were
+identical in every frame of a static model and the palettes matched the engine's, and the menu scenes' anchor is a shared one, so
+its answer was already fixed in B8. The wholly held anchors (Scaleform's Interface, the deferred composite) still answer no: Scaleform's
+display pass reads its run's slot and gate region by its recording's run in every case (`Revision` alone takes the answer), so it is
+not affected. The deferred composite takes the latest execution state when told it records ahead, while its stage records it live:
+that is outside the loading screen and was not changed.
+
+### Not fixed
+
+- The darker lighting of the loading model in both graph modes. Not the shadow mask: with the menu mask left undrawn (cleared to
+  shadowed) the model went darker still (3.9), and drawing the shadow maps changed nothing. The difference is in the material
+  shading (the armour's diffuse, the war paint), not in its geometry. Next step: compare the Lighting ORG build's inputs for one
+  armour draw (its textures' views and formats, the permutation block, the light rows) with what CS's D3D11 build binds.
+- The load hold's world frames show the loading menu without its model (about 2.5 s after each save load); D3D11 has no hold.
+- Streamed textures not yet whole refuse a menu draw (`a texture it samples could not be imported`), and the engine's fallback draw
+  draws nothing in the graph modes: parts of a model may be missing in its first frames.
+
+### Checks
+
+One background run each on DLL `ea460831b45e`: the loading screen run with the Nord forced (40 consecutive shots during the load, 8
+during the load hold) in guest (`f1g`), native (`f2n`) and D3D11 (`f3d`): the model whole and steady in all three; guest-quick,
+native-quick, the guest Journal Menu run (menu shot 0.6 from B8's), native-validation (the same 20 `VUID-vkCmdDraw-None-09600`).
+All passed with 0 tap errors, 0 recipe findings, no `NoPass`, no failed build; the only `[C]` line is the known `PublishedResources`
+one. 22 launches.
