@@ -22,7 +22,6 @@
  *   step there.
  * - **Membership is explicit.** A client registers only when a step names it at each anchor its passes use (or, for an anchor that keeps
  *   its own epoch, that epoch's entry names it). Anything else is a recipe mismatch (FrameAnchors::Register). There are no id patterns.
- *   One family registers a variable set of ids: ImageSpace's late clients in guest mode, named below with their serial range.
  * - A stage's **epochs** list, in frame order, every epoch that sits in its part of the frame: its own graph (Graph), an anchor that
  *   keeps its own ticket after it in native mode (Ticket: frame generation, HDR output), and the anchors' own epochs placed there for the
  *   host's epoch order (Placed: the anchors' own epochs, which run only without the stages).
@@ -48,31 +47,6 @@ namespace RenderGraph::Frame::Recipes::Table
 			if (!name.empty() && name == a_id)
 				return true;
 		return false;
-	}
-
-	/**
-	 * @brief A family of clients whose ids carry a serial: prefix + "1" to prefix + count. Not a pattern: the ids are exactly those.
-	 */
-	struct Family
-	{
-		std::string_view prefix;
-		std::uint16_t count = 0;
-	};
-
-	constexpr bool InFamily(const Family& a_family, std::string_view a_id)
-	{
-		if (a_family.prefix.empty() || a_id.size() <= a_family.prefix.size() || a_id.substr(0, a_family.prefix.size()) != a_family.prefix)
-			return false;
-		std::uint32_t serial = 0;
-		const auto digits = a_id.substr(a_family.prefix.size());
-		if (digits.size() > 5 || digits.front() == '0')
-			return false;
-		for (const char c : digits) {
-			if (c < '0' || c > '9')
-				return false;
-			serial = serial * 10 + static_cast<std::uint32_t>(c - '0');
-		}
-		return serial >= 1 && serial <= a_family.count;
 	}
 
 	/** @brief One step of a CS stage (see the header comment). */
@@ -109,7 +83,6 @@ namespace RenderGraph::Frame::Recipes::Table
 		Segment segment = Segment::Count;
 		Role role = Role::Graph;
 		Names clients{};  // an anchor's own epoch: the clients that run on it there (without the stages)
-		Family family{};  // and a family of them
 	};
 
 	/** @brief A list of epochs; the unused tail is Segment::Count. */
@@ -157,7 +130,7 @@ namespace RenderGraph::Frame::Recipes::Table
 	}
 
 	constexpr Epoch Own(Segment a_segment) { return { a_segment, Role::Graph }; }
-	constexpr Epoch Placed(Anchor a_anchor, Names a_clients = {}, Family a_family = {}) { return { AnchorSegment(a_anchor), Role::Placed, a_clients, a_family }; }
+	constexpr Epoch Placed(Anchor a_anchor, Names a_clients = {}) { return { AnchorSegment(a_anchor), Role::Placed, a_clients }; }
 	constexpr Epoch Ticket(Anchor a_anchor, Names a_clients) { return { AnchorSegment(a_anchor), Role::Ticket, a_clients }; }
 
 	// The epochs whose submission commits the point-ended world stages before their own point: a frame where the usual next GPU work does
@@ -362,7 +335,7 @@ namespace RenderGraph::Frame::Recipes::Table
 			.commit = "RenderEndOfFrameEffects' return",
 			.commitSite = "RenderEndOfFrameEffects' return (Frame/PostChain.cpp)",
 			.epochs = { Own(StageSegment(SegmentId::Post)), Placed(Anchor::VolumetricLighting), Placed(Anchor::PostProcessing), Placed(Anchor::Upscale),
-				Placed(Anchor::ImageSpace, { "cs.engine.imagespace" }, { "cs.engine.imagespace.late.", 64 }), Placed(Anchor::EngineCopy), Placed(Anchor::Tonemap),
+				Placed(Anchor::ImageSpace), Placed(Anchor::EngineCopy), Placed(Anchor::Tonemap),
 				Ticket(Anchor::FrameGeneration, { "cs.upscaling.hudless" }), Placed(Anchor::Interface), Placed(Anchor::Present) } },
 		// The UI stage, in every frame kind's recipe. The engine draws, in this order (frame sequence census): the screen blood (a world frame's
 		// Main::RenderScreenSplatter, which Main::Draw calls after RenderWorldPostProcess returned, so after the post stage's end:

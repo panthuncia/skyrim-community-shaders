@@ -1881,11 +1881,6 @@ namespace FrameAnchors
 		return IndexOf(a_anchor) < kAnchors && state.frozen && state.reserved[IndexOf(a_anchor)] && state.host && RenderGraphRuntime::Get().IsActive();
 	}
 
-	bool HasOwnEpoch(Anchor a_anchor)
-	{
-		return HasEpoch(a_anchor) && !(Anchors().declaredMembers >> IndexOf(a_anchor) & 1u);
-	}
-
 	bool RecordsAtExecution(Anchor a_anchor)
 	{
 		// A declared segment records every pass ahead, on the host's thread.
@@ -1937,7 +1932,7 @@ namespace FrameAnchors
 						return true;
 				for (const auto& epoch : stage.epochs)
 					if (epoch.segment == Table::AnchorSegment(a_anchor) && epoch.role != Table::Role::Graph &&
-						(Table::Has(epoch.clients, a_id) || Table::InFamily(epoch.family, a_id)))
+						Table::Has(epoch.clients, a_id))
 						return true;
 			}
 			return false;
@@ -4088,11 +4083,6 @@ namespace FrameAnchors
 		return hold;
 	}
 
-	std::uint32_t PeakRunsPerFrame(Anchor a_anchor)
-	{
-		return IndexOf(a_anchor) < kAnchors ? Anchors().peakRuns[IndexOf(a_anchor)].load(std::memory_order_relaxed) : 0;
-	}
-
 	bool BuildPending(std::string_view a_caller)
 	{
 		auto& state = Anchors();
@@ -4467,7 +4457,6 @@ namespace FrameAnchors
 	const char* Name(Anchor) { return "unknown"; }
 	bool Reserve(Anchor) { return false; }
 	bool HasEpoch(Anchor) { return false; }
-	bool HasOwnEpoch(Anchor) { return false; }
 	bool RecordsAtExecution(Anchor) { return false; }
 	bool GpuGates() { return false; }
 	bool Register(ClientDesc) { return false; }
@@ -4495,7 +4484,6 @@ namespace FrameAnchors
 	void DropKeptRecordings(Anchor, std::string_view) {}
 	bool NamedByStage(std::string_view) { return false; }
 	bool StageStepsAt(Anchor) { return false; }
-	std::uint32_t PeakRunsPerFrame(Anchor) { return 0; }
 	bool BuildPending(std::string_view) { return false; }
 	bool TapMayLag(std::string_view) { return true; }
 	void PrimeStages(std::string_view) {}

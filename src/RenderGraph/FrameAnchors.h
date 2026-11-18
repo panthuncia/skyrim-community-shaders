@@ -355,12 +355,6 @@ namespace FrameAnchors
 	bool HasEpoch(Anchor a_anchor);
 
 	/**
-	 * @brief Whether the anchor runs an epoch of its own: it has an epoch, and no stage has a step there (with the stages on). Any thread,
-	 * after the render graph initialized.
-	 */
-	bool HasOwnEpoch(Anchor a_anchor);
-
-	/**
 	 * @brief Whether a PassDesc::atExecution pass at the anchor is recorded after the run's commit (native: always; guest: when the epoch
 	 * that runs it is in DXVK's stream, the stages' epochs for an anchor a stage shares). Such a pass can read what the commit wrote when
 	 * it records, so its revision need not name the run: a ticket prepared ahead stays current. False for an anchor a stage holds wholly.
@@ -493,9 +487,6 @@ namespace FrameAnchors
 	 * another. Any thread.
 	 */
 	bool InRun();
-
-	/** @brief The most runs the anchor submitted between two Presents so far this session (LogRunStats). Any thread. */
-	std::uint32_t PeakRunsPerFrame(Anchor a_anchor);
 
 	/**
 	 * @brief True on the thread that owns rendering now: the only thread where anchors run (Run refuses elsewhere) and where per-frame
