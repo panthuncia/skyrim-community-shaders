@@ -4851,12 +4851,15 @@ Drawcall Limit Fix's graphs and the stages' places; the kMAIN copy reaches it th
 engine's constant-buffer writes inside a stage's window reach DXVK after the window (the latch's write-behind). The main ImageSpace
 client, the shape manifest and the D3D11 renderer for refused displays are no longer set up or reached in guest.
 
-What is still guest's own: the anchors' own-epoch machinery is still compiled and reachable only for frame generation's hudless copy
-and HDR output (as in native); the main ImageSpace client, the shape manifest, `onFailed` fallbacks and the port switches remain in the
-code (a later deletion piece); Skylighting's lent slot with its D3D11 clear (Guest B4); the capture's D3D11 staging copy when the graph
-cannot take it; DXVK's interop ring for frame generation's evaluates; the frame arena (`Frame::Transients`), still off in guest (each
-stage keeps pools of its own). What still reaches DXVK inside a window is in Guest B6 and B7 (the residue census): none in steady
-frames from CS or the engine.
+Since Guest B8 the migration scaffolding is gone: no anchor a stage has a step at keeps an epoch of its own in guest, and work there
+outside every stage's step is the `own epoch` mismatch, as in native. Only frame generation's hudless copy and HDR output keep their
+anchors' tickets (as in native). The frame arena (`Frame::Transients`) is on in guest too.
+
+What is still guest's own: the main ImageSpace client, the shape manifest, `onFailed` fallbacks, the port switches and the anchors'
+own-epoch paths for a run without the stages remain in the code (a later deletion piece); Skylighting's lent slot with its D3D11 clear
+(Guest B4); the capture's D3D11 staging copy when the graph cannot take it; DXVK's interop ring for frame generation's evaluates; the
+engine targets native keeps without memory are backed in guest (Guest B8, about 150 MiB). What still reaches DXVK inside a window is
+in Guest B6 and B7 (the residue census): none in steady frames from CS or the engine.
 
 ### Old native paths still reachable
 
@@ -7888,3 +7891,117 @@ native (shared anchors no longer keep their own epochs in guest). Two runs of th
 
 So the scaffolding stays for now; the diff is kept for the next piece. Until it goes, an anchor a stage shares keeps its own epoch in
 guest, and work there outside every stage's step runs on it instead of stopping the game.
+
+## Guest B8: the scaffolding gone, the frame arena in guest (2026-11-18)
+
+Plan piece B8, the last step of the guest migration. CS on `org-native/phases`, OpenRenderGraph `dev` (a9e74a3). RX 6600, Perf-Fast,
+background runs with `DXVK_DEBUG=hang`.
+
+### The scaffolding
+
+Deleted: `Stage::runsInGuest`, `DeclaredOn`, `StagesOnly` (now `NamedByStage`), `OwnEpochHolds`, the skeleton's `OwnEpochTakes` and
+`RunCopy`'s own-epoch branch. An anchor any stage has a step at, wholly held or shared, has no epoch of its own in guest either
+(EngineDraws, ImageSpace, EngineCopy, EngineFrameClear, EngineShadowClear, EngineDepthCopy, EngineQueries and Tonemap lost theirs:
+15 epochs a frame instead of 23), and work there outside every stage's step is the `own epoch` mismatch in both modes. Exempt, as in
+native: HDR output and frame generation's hudless copy, which keep their anchors' tickets. `Scheduled` no longer falls back to an
+anchor's own graph in guest.
+
+Two lags replace what the own epochs did silently:
+
+- **The kMAIN copy at the main menu.** kMAIN is made again at the main menu's first frame; the copy registers again, and until the UI
+  stage's next build switches in (3 to 5 frames) the copy lags (`CanTap` says the schedule does not hold the new registration). B7
+  ran those copies on D3D11.
+- **The depth copy at the first world frame after a load.** kMAIN's depth is made again there; the pre-main stage's schedule holds the
+  old registration, and the copy lags while `TapMayLag` says a build with the new one is on its way. Otherwise it is a mismatch. B7 ran
+  it on EngineDepthCopy's own epoch.
+
+### The device loss it exposed
+
+The first deletion build lost the GPU device in every `latch-census-short` run (three of three: at the loading screen's start, at its
+end, and once in the world frames under DCLF's load hold) and passed `guest-quick` once. Radeon GPU Detective (crash mode, around the
+run) named it: a page fault in `cs.menu-scenes.menu-colour.draws` of the UI stage, the loading menu's 3D scene. The vertex shader read
+the index buffer's bindless index from the draw's latch region and loaded its descriptor from far outside the heap: the index was
+garbage. A build that kept the shared anchors' epochs (idle, any work on them a mismatch) and deleted everything else passed the
+census, so the epochs' mere absence was the trigger.
+
+Cause: `FrameAnchors::RecordsAtExecution(anchor)` answered whether the anchor's own epoch was in DXVK's stream. The family passes
+(menu scenes, shadow masks, water, precipitation, screen blood) take that answer when they are made. With EngineDraws' own epoch gone
+it said no, so each pass behaved as recorded ahead: it read the client's latest run (`client->run`) instead of its own run's slot. The
+stage still recorded it at execution (its graph's answer), on DXVK's worker, often after the render thread had committed later frames.
+The draws of a later run were then paired with this run's gate and latch region, and a draw whose latch was never written read past
+it. Fix: a shared anchor answers for the stages' epochs, which record at execution in both modes. Native was never affected (its host
+records every pass at execution inline).
+
+Not changed: an anchor a stage holds wholly still answers no (`DeclaredOfAnchor`), while the stage records its `atExecution` passes
+live. Scaleform's display passes and the deferred composite take that answer. Whether they read per-run state the same way is worth a
+look by the loading screen piece.
+
+### The loading screen's frames, for the next piece
+
+- Kind `loading screen`, recipe UI alone, rendered by the loading thread until the load ends. After the load, DCLF's load hold keeps
+  the loading menu up over world frames: the same scene then draws in a world frame's UI stage.
+- The UI stage draws, in order: the frame clears at the menu-start place (kMAIN, rt4, rt7, the main depth), Scaleform's displays
+  before the scene (instances 8 to 15), the scene's clears (depth4 shadow, rt18), DCLF's menu depth batch, `cs.shadow-mask.menu`, the
+  depth copy (`depth-copy@ui`) and the kMAIN copy, `cs.menu-scenes.menu-colour` (Lighting and Effect draws), ImageSpace's menu
+  composite (`cs.engine.imagespace.menu`: HDR downsample, four luminance levels, bloom, tonemap, with its constants uploaded just
+  before), the main depth's clear after it, the displays after the scene, Bink, ImGui.
+- The scene: "menu 3D scheme 4 (loading)", a perspective camera, 3 or 4 geometries, no skinned ones in these saves, stencil mode 2
+  reference 0xff. Its colour draws alternate their targets every frame between kMAIN, kMOTION_VECTOR and kNORMAL_TAAMASK_SSRMASK or
+  its swap (rt 1 7 4, then 1 7 5): anything that reads the normals must follow that swap.
+- Textures still streaming are refused per draw ("a texture it samples could not be imported"), and such a draw is left to the engine,
+  whose draw the flush latch then skips: a model can miss parts for some frames.
+- The device loss above could explain broken actors (draws paired with another run's constants and bones), but only in a build without
+  the shared anchors' epochs, so not the user's reports on B7 and earlier. Its class (a pass told it records ahead while the stage
+  records it live) is the first thing to rule out for the flicker.
+
+### Guest VRAM
+
+- **The frame arena is on in guest** (`Frame::Transients::Install` in both modes): the stages' transients and Scaleform's scratch
+  images share one arena by their place in the frame. perf-taa process dedicated VRAM, same DLL: 3,895 MiB with `CS_ORG_FRAME_ARENA=0`,
+  3,800 MiB with it.
+- **A staging leak since B7.** A kept recording's late batch recorded into DXVK's stream appended each recording's owners to one
+  retention and never released them (ORG's inline path, native's, already did). The UI stage's kept recordings held a Scaleform and an
+  ImGui staging buffer (256 KiB each) for every frame: about 900 of each at perf-taa's start mark, 1,820 and 1,549 after the census.
+  ORG now releases them before recording again in a host's stream too (the copy's last run is done by then, as for `CopyStableRun`).
+  Guest after it: **3,468 MiB** (vram run), 3,405 MiB (perf run), against 3,916 to 3,941 in B7.
+- **Engine targets without memory: not done in guest.** In guest ORG makes the engine's targets and DXVK wraps them. A D3D11 texture
+  without memory exists in DXVK only as a tiled resource with no tiles mapped. That depends on sparse support per format, and the
+  engine's clears of those targets would reach DXVK inside the stages' windows unless the skeleton learns to drop them. Their size in
+  guest: about 150 MiB (kSAO and its three siblings, both TAA accumulations and their UI forms, the two image-space copies, the get-hit
+  pair, the LDR pair, the downsampled normals, and the volumetric lighting volumes, 320x192x90 each).
+
+What is left against native (perf-taa, driver device-local usage 3,424 against 2,883 MiB; process counters 3,405 to 3,468 against
+2,930):
+
+| Category | MiB over native |
+|---|---|
+| Driver memory not from vkAllocateMemory (DXVK's device: its pipelines, caches) | +216 |
+| DXVK's own allocations (D3D11 resources 87, internal 10, free in DXVK's chunks 55) | +152 |
+| Engine targets native keeps without memory | about +150 |
+| ORG allocator slack (137 against 114) | +23 |
+
+ORG's alias pools are 82 MiB in guest against 93 in native. The guest JSON leaves 1,313 MiB of ORG's allocations untracked by name
+(the exported engine targets, shadow maps, features' textures), so the categories above come from the reconciliation, not from rows.
+
+### Performance
+
+perf-taa, uncapped, VRAM Budget off, one run per mode (DLL `7c148ab4c08a`):
+
+| | Guest | Native | Guest in B7 |
+|---|---|---|---|
+| frame period between the marks | 19.07 ms | 19.03 ms | 19.06 ms |
+| GPU 3D engine busy | 98.0% | 99.5% | 98.3% |
+| render thread CPU | 227 ms a second | 183 | 218 |
+| graph host thread | 34 ms a second | 115 (the submission thread) | 44 |
+| DXVK worker | 87 ms a second | none | 71 |
+| process dedicated VRAM | 3,405 MiB | 2,931 MiB | 3,941 MiB |
+
+### Checks
+
+One background run each on DLL `7c148ab4c08a`: guest `latch-census-short`, quick, the Journal Menu run, interior, upscalers, the
+worldspace run (two more loads); native quick, validation (the same 20 `VUID-vkCmdDraw-None-09600`); `d3d11+quick`; perf-taa per mode.
+All passed with 0 tap errors, 0 recipe findings, no failed build; the only `[C]` line is the known `PublishedResources` one. Residue:
+the census's windows match B7's (Improved Camera SE's Map and Unmap in steady windows, the load windows' known items). Shots against
+the B7 piece's runs: census at most 0.8, quick 1.8, Journal Menu 0.7 to 3.6, interior 3.8 and 8.6 (Dragonsreach's light shafts),
+upscalers 0.6 to 3.1, native quick 1.1; worldspace Tamriel 0.9, Riverwood 3.2, Solstheim 22.0 and 7.2 against the last two guest
+worldspace runs (the trees and grass in the wind). Not run: rain, river, under water, the main menu check, HDR output, frame generation.
