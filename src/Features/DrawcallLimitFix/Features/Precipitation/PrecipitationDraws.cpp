@@ -222,7 +222,6 @@ namespace DCLF::Features::Precipitation::PrecipitationDraws
 																	  .shaderType = static_cast<std::uint32_t>(RE::BSShader::Type::Particle),
 																	  .stagesOf = &StagesOf } };
 			bool reserved = false;
-			bool failed = false;
 			std::uint64_t runs = 0, draws = 0;
 			Family::KeptOwners kept;
 		};
@@ -231,16 +230,6 @@ namespace DCLF::Features::Precipitation::PrecipitationDraws
 		{
 			static DrawsState state;
 			return state;
-		}
-
-		/** @brief Stops the family for good: every draw is the engine's again. */
-		void Fail(const char* a_why)
-		{
-			auto& state = GetState();
-			if (!state.failed)
-				logger::error("[DCLF] precipitation: back to the engine's draws for the session: {}", a_why);
-			state.failed = true;
-			FrameAnchors::Unregister(kClientId);
 		}
 
 		/**
@@ -286,7 +275,7 @@ namespace DCLF::Features::Precipitation::PrecipitationDraws
 	bool Available()
 	{
 		const auto& state = GetState();
-		return state.reserved && !state.failed && RenderGraphRuntime::Get().IsActive() && FrameAnchors::HasEpoch(FrameAnchors::Anchor::EngineDraws);
+		return state.reserved && RenderGraphRuntime::Get().IsActive() && FrameAnchors::HasEpoch(FrameAnchors::Anchor::EngineDraws);
 	}
 
 	void Reserve()
@@ -300,7 +289,7 @@ namespace DCLF::Features::Precipitation::PrecipitationDraws
 	bool Setup()
 	{
 		auto& state = GetState();
-		if (state.tried || state.failed)
+		if (state.tried)
 			return true;
 		auto* host = RenderGraphRuntime::Get().Host();
 		if (!host || !FrameAnchors::IsRenderOwner() || !Available())
@@ -394,7 +383,6 @@ namespace DCLF::Features::Precipitation::PrecipitationDraws
 				logger::info("[DCLF] precipitation: the first precipitation run drawn by the graph");
 		};
 		desc.active = [client] { return client->pending; };
-		desc.onFailed = [] { Fail("the render graph failed with the precipitation's pass in it"); };
 		if (!FrameAnchors::Register(std::move(desc))) {
 			logger::warn("[DCLF] precipitation: the {} client could not be registered; the precipitation stays the engine's", kClientId);
 			return true;
@@ -410,7 +398,7 @@ namespace DCLF::Features::Precipitation::PrecipitationDraws
 	bool CanTake()
 	{
 		auto& state = GetState();
-		if (state.failed || !state.client)
+		if (!state.client)
 			return false;
 		return Family::HeldForBatch("precipitation", kClientId, static_cast<std::uint32_t>(::RenderGraph::Frame::SegmentId::Sun));
 	}
@@ -434,7 +422,7 @@ namespace DCLF::Features::Precipitation::PrecipitationDraws
 	bool Submit(std::shared_ptr<Run> a_run)
 	{
 		auto& state = GetState();
-		if (!a_run || state.failed || !state.client)
+		if (!a_run || !state.client)
 			return false;
 		a_run->revision = RevisionOf(*a_run);
 		state.kept.Keep(std::move(a_run->owners));
@@ -450,8 +438,6 @@ namespace DCLF::Features::Precipitation::PrecipitationDraws
 		const auto& state = GetState();
 		if (!Enabled())
 			return "off (CS_ORG_PRECIPITATION)";
-		if (state.failed)
-			return "failed: the engine draws the precipitation";
 		return fmt::format("{} runs ({} drawn), {} draws, {} programs", state.runs, state.client ? state.client->executed.load(std::memory_order_relaxed) : 0,
 			state.draws, state.programs.Built());
 	}

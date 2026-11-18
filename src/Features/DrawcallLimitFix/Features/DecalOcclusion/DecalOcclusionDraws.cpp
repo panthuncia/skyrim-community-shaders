@@ -184,7 +184,6 @@ namespace DCLF::Features::DecalOcclusion::DecalDraws
 			std::shared_ptr<Client> client;
 			bool reserved = false;
 			bool setUp = false;
-			bool failed = false;
 			std::uint64_t runs = 0, draws = 0;
 			Family::KeptOwners kept;
 		};
@@ -193,17 +192,6 @@ namespace DCLF::Features::DecalOcclusion::DecalDraws
 		{
 			static DrawsState state;
 			return state;
-		}
-
-		/** @brief Stops the family for good: the tests are the engine's again. */
-		void Fail(const char* a_why)
-		{
-			auto& state = GetState();
-			if (!state.failed)
-				logger::error("[DCLF] decal occlusion: back to the engine's decal tests for the session: {}", a_why);
-			state.failed = true;
-			if (state.client)
-				FrameAnchors::Unregister(kClientId);
 		}
 
 		/** @brief kDECAL_OCCLUSION's depth format, from its first view, and its size (Unknown when it has no view). */
@@ -315,7 +303,6 @@ namespace DCLF::Features::DecalOcclusion::DecalDraws
 					logger::info("[DCLF] decal occlusion: the first {} run drawn by the graph", kClientId);
 			};
 			clientDesc.active = [client] { return client->pending; };
-			clientDesc.onFailed = [] { Fail("the render graph failed with the decal occlusion pass in it"); };
 			if (!FrameAnchors::Register(std::move(clientDesc))) {
 				logger::warn("[DCLF] decal occlusion: the {} client could not be registered; the decal tests stay the engine's", kClientId);
 				return nullptr;
@@ -353,13 +340,13 @@ namespace DCLF::Features::DecalOcclusion::DecalDraws
 	bool Available()
 	{
 		const auto& state = GetState();
-		return state.reserved && !state.failed && RenderGraphRuntime::Get().IsActive() && FrameAnchors::HasEpoch(kAnchor);
+		return state.reserved && RenderGraphRuntime::Get().IsActive() && FrameAnchors::HasEpoch(kAnchor);
 	}
 
 	bool Setup()
 	{
 		auto& state = GetState();
-		if (state.setUp || state.failed || !state.reserved)
+		if (state.setUp || !state.reserved)
 			return true;
 		if (!RenderGraphRuntime::Get().Host() || !FrameAnchors::IsRenderOwner() || !Available())
 			return false;
@@ -375,13 +362,13 @@ namespace DCLF::Features::DecalOcclusion::DecalDraws
 	bool HasClient()
 	{
 		const auto& state = GetState();
-		return !state.failed && state.client != nullptr;
+		return state.client != nullptr;
 	}
 
 	bool CanTake()
 	{
 		const auto& state = GetState();
-		if (state.failed || !state.client)
+		if (!state.client)
 			return false;
 		// The decal tests are the start stage's first step.
 		return Family::HeldForBatch("decal occlusion", kClientId, static_cast<std::uint32_t>(::RenderGraph::Frame::SegmentId::Start), kAnchor);
@@ -395,7 +382,7 @@ namespace DCLF::Features::DecalOcclusion::DecalDraws
 	bool Submit(std::shared_ptr<Run> a_run)
 	{
 		auto& state = GetState();
-		if (!a_run || state.failed || !state.client)
+		if (!a_run || !state.client)
 			return false;
 		const auto& client = state.client;
 		a_run->revision = RevisionOf(*a_run);
@@ -411,8 +398,6 @@ namespace DCLF::Features::DecalOcclusion::DecalDraws
 		const auto& state = GetState();
 		if (!Enabled())
 			return "off (CS_ORG_OCCLUSION_QUERIES)";
-		if (state.failed)
-			return "failed: the engine draws the decal tests";
 		if (!state.client)
 			return state.setUp ? "no client: the engine draws the decal tests" : "not set up yet";
 		return std::format("{} tests ({} drawn), {} draws; occlusion queries: {}", state.runs, state.client->executed.load(std::memory_order_relaxed), state.draws,

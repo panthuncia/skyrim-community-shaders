@@ -164,7 +164,6 @@ namespace DCLF::Features::BloodSplatter::BloodSplatterDraws
 																	   .shaderType = static_cast<std::uint32_t>(RE::BSShader::Type::BloodSplatter),
 																	   .stagesOf = &StagesOf } };
 			bool reserved = false;
-			bool failed = false;
 			std::uint64_t runs = 0, draws = 0;
 			Family::KeptOwners kept;
 		};
@@ -173,15 +172,6 @@ namespace DCLF::Features::BloodSplatter::BloodSplatterDraws
 		{
 			static DrawsState state;
 			return state;
-		}
-
-		void Fail(const char* a_why)
-		{
-			auto& state = GetState();
-			if (!state.failed)
-				logger::error("[DCLF] blood splatter: back to the engine's draws for the session: {}", a_why);
-			state.failed = true;
-			FrameAnchors::Unregister(kClientId);
 		}
 
 		std::uint64_t RevisionOf(const Run& a_run)
@@ -201,7 +191,7 @@ namespace DCLF::Features::BloodSplatter::BloodSplatterDraws
 	bool Available()
 	{
 		const auto& state = GetState();
-		return state.reserved && !state.failed && RenderGraphRuntime::Get().IsActive() && FrameAnchors::HasEpoch(FrameAnchors::Anchor::EngineDraws);
+		return state.reserved && RenderGraphRuntime::Get().IsActive() && FrameAnchors::HasEpoch(FrameAnchors::Anchor::EngineDraws);
 	}
 
 	void Reserve()
@@ -215,7 +205,7 @@ namespace DCLF::Features::BloodSplatter::BloodSplatterDraws
 	bool Setup()
 	{
 		auto& state = GetState();
-		if (state.tried || state.failed)
+		if (state.tried)
 			return true;
 		auto* host = RenderGraphRuntime::Get().Host();
 		if (!host || !FrameAnchors::IsRenderOwner() || !Available())
@@ -275,7 +265,6 @@ namespace DCLF::Features::BloodSplatter::BloodSplatterDraws
 		desc.active = [client] { return client->pending; };
 		// A step of the UI stage only (the anchor has no epoch of its own).
 		desc.segmentOnly = FrameAnchors::NamedByStage(desc.id);
-		desc.onFailed = [] { Fail("the render graph failed with the screen blood's pass in it"); };
 		if (!FrameAnchors::Register(std::move(desc))) {
 			logger::warn("[DCLF] blood splatter: the {} client could not be registered; the screen blood stays the engine's", kClientId);
 			return true;
@@ -290,7 +279,7 @@ namespace DCLF::Features::BloodSplatter::BloodSplatterDraws
 	{
 		auto& state = GetState();
 		const auto& client = state.client;
-		if (state.failed || !client)
+		if (!client)
 			return false;
 		// A swap chain made again keeps the back buffer's slot (its next version). One of another format is a new slot: the client takes
 		// it and is built again with it (the import already asked every graph holding the old slot to be built again), and its batches
@@ -319,7 +308,7 @@ namespace DCLF::Features::BloodSplatter::BloodSplatterDraws
 	bool Submit(std::shared_ptr<Run> a_run)
 	{
 		auto& state = GetState();
-		if (!a_run || state.failed || !state.client)
+		if (!a_run || !state.client)
 			return false;
 		a_run->revision = RevisionOf(*a_run);
 		state.kept.Keep(std::move(a_run->owners));
@@ -335,8 +324,6 @@ namespace DCLF::Features::BloodSplatter::BloodSplatterDraws
 		const auto& state = GetState();
 		if (!Enabled())
 			return "off (CS_ORG_BLOOD_SPLATTER)";
-		if (state.failed)
-			return "failed: the engine draws the screen blood";
 		return fmt::format("{} runs ({} drawn), {} draws, {} programs", state.runs, state.client ? state.client->executed.load(std::memory_order_relaxed) : 0,
 			state.draws, state.programs.Built());
 	}

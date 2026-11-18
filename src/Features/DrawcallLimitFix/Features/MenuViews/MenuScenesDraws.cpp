@@ -258,7 +258,6 @@ namespace DCLF::Features::MenuViews::Scenes::SceneDraws
 																		   .shaderType = static_cast<std::uint32_t>(RE::BSShader::Type::Effect) } };
 			bool reserved = false;
 			bool setUp = false;
-			bool failed = false;
 			std::uint64_t runs = 0, draws = 0;
 			Family::KeptOwners kept;
 		};
@@ -267,18 +266,6 @@ namespace DCLF::Features::MenuViews::Scenes::SceneDraws
 		{
 			static DrawsState state;
 			return state;
-		}
-
-		/** @brief Stops the family for good: every menu scene draw is the engine's again. */
-		void Fail(const char* a_why)
-		{
-			auto& state = GetState();
-			if (!state.failed)
-				logger::error("[DCLF] menu scenes: back to the engine's draws for the session: {}", a_why);
-			state.failed = true;
-			for (auto& client : state.clients)
-				if (client)
-					FrameAnchors::Unregister(client->id);
 		}
 
 		std::uint32_t FormatOf(ID3D11RenderTargetView* a_rtv)
@@ -390,7 +377,6 @@ namespace DCLF::Features::MenuViews::Scenes::SceneDraws
 			desc.active = [client] { return client->pending; };
 			// Passes of the UI stage only. A batch while no open stage holds the client is a mismatch (CanTake).
 			desc.segmentOnly = FrameAnchors::NamedByStage(desc.id);
-			desc.onFailed = [] { Fail("the render graph failed with the menu scenes' passes in it"); };
 			if (!FrameAnchors::Register(std::move(desc))) {
 				logger::warn("[DCLF] menu scenes: the {} client could not be registered; that batch stays the engine's", client->id);
 				return nullptr;
@@ -434,7 +420,7 @@ namespace DCLF::Features::MenuViews::Scenes::SceneDraws
 	bool Available()
 	{
 		const auto& state = GetState();
-		return state.reserved && !state.failed && RenderGraphRuntime::Get().IsActive() && FrameAnchors::HasEpoch(FrameAnchors::Anchor::EngineDraws);
+		return state.reserved && RenderGraphRuntime::Get().IsActive() && FrameAnchors::HasEpoch(FrameAnchors::Anchor::EngineDraws);
 	}
 
 	void Reserve()
@@ -448,7 +434,7 @@ namespace DCLF::Features::MenuViews::Scenes::SceneDraws
 	bool Setup()
 	{
 		auto& state = GetState();
-		if (state.setUp || state.failed)
+		if (state.setUp)
 			return true;
 		if (!RenderGraphRuntime::Get().Host() || !FrameAnchors::IsRenderOwner() || !Available())
 			return false;
@@ -469,9 +455,6 @@ namespace DCLF::Features::MenuViews::Scenes::SceneDraws
 
 	bool CanTake(View a_view)
 	{
-		auto& state = GetState();
-		if (state.failed)
-			return false;
 		const auto client = ClientOf(a_view);
 		if (!client)
 			return false;
@@ -530,7 +513,7 @@ namespace DCLF::Features::MenuViews::Scenes::SceneDraws
 	bool Submit(std::shared_ptr<Run> a_run)
 	{
 		auto& state = GetState();
-		if (!a_run || state.failed)
+		if (!a_run)
 			return false;
 		const auto client = ClientOf(a_run->view);
 		if (!client)
@@ -548,8 +531,6 @@ namespace DCLF::Features::MenuViews::Scenes::SceneDraws
 		const auto& state = GetState();
 		if (!AnyEnabled())
 			return "off (CS_ORG_MAP, CS_ORG_MENU3D)";
-		if (state.failed)
-			return "failed: the engine draws the menu scenes";
 		std::uint64_t executed = 0;
 		for (const auto& client : state.clients)
 			if (client)

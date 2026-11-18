@@ -405,7 +405,6 @@ namespace DCLF::Features::Sky::SkyDraws
 															.stagesOf = &StagesOf } };
 			bool reserved = false;
 			bool setUp = false;
-			bool failed = false;
 			std::uint64_t runs = 0, draws = 0;
 			Family::KeptOwners kept;
 		};
@@ -427,18 +426,6 @@ namespace DCLF::Features::Sky::SkyDraws
 		{
 			static DrawsState state;
 			return state;
-		}
-
-		/** @brief Stops the family for good: every batch is the engine's again. */
-		void Fail(const char* a_why)
-		{
-			auto& state = GetState();
-			if (!state.failed)
-				logger::error("[DCLF] sky: back to the engine's draws for the session: {}", a_why);
-			state.failed = true;
-			for (auto& client : state.clients)
-				if (client)
-					FrameAnchors::Unregister(client->id);
 		}
 
 		/** @brief The client of a_shape's view, registered with the anchors for a_shape. Null, logged, when a target cannot be imported. */
@@ -603,7 +590,6 @@ namespace DCLF::Features::Sky::SkyDraws
 				// draw stay closed (their gate entries and runs are not written).
 				desc.instances = [n = client->instances] { return n; };
 			}
-			desc.onFailed = [] { Fail("the render graph failed with the sky's passes in it"); };
 			if (!FrameAnchors::Register(std::move(desc))) {
 				logger::warn("[DCLF] sky: the {} client could not be registered; the sky stays the engine's", client->id);
 				return nullptr;
@@ -645,7 +631,7 @@ namespace DCLF::Features::Sky::SkyDraws
 	bool Available()
 	{
 		const auto& state = GetState();
-		return state.reserved && !state.failed && RenderGraphRuntime::Get().IsActive() && FrameAnchors::HasEpoch(FrameAnchors::Anchor::Sky) &&
+		return state.reserved && RenderGraphRuntime::Get().IsActive() && FrameAnchors::HasEpoch(FrameAnchors::Anchor::Sky) &&
 		       FrameAnchors::HasEpoch(FrameAnchors::Anchor::SkyReflections);
 	}
 
@@ -663,7 +649,7 @@ namespace DCLF::Features::Sky::SkyDraws
 	bool Setup()
 	{
 		auto& state = GetState();
-		if (state.setUp || state.failed)
+		if (state.setUp)
 			return true;
 		if (!RenderGraphRuntime::Get().Host() || !FrameAnchors::IsRenderOwner() || !Available())
 			return false;
@@ -710,7 +696,7 @@ namespace DCLF::Features::Sky::SkyDraws
 	bool CanTake(const Shape& a_shape)
 	{
 		auto& state = GetState();
-		if (state.failed || a_shape.view >= View::Count)
+		if (a_shape.view >= View::Count)
 			return false;
 		const auto& client = state.clients[static_cast<std::size_t>(a_shape.view)];
 		if (!client)
@@ -730,14 +716,14 @@ namespace DCLF::Features::Sky::SkyDraws
 	bool HasSunClient()
 	{
 		const auto& state = GetState();
-		return !state.failed && state.clients[static_cast<std::size_t>(View::Sun)] != nullptr;
+		return state.clients[static_cast<std::size_t>(View::Sun)] != nullptr;
 	}
 
 	bool CanTakeSun()
 	{
 		const auto& state = GetState();
 		const auto& client = state.clients[static_cast<std::size_t>(View::Sun)];
-		if (state.failed || !client)
+		if (!client)
 			return false;
 		// The world's query is the sun stage's, the first person's the post stage's (or the sun stage's in a frame without the first-person epoch).
 		return Family::HeldForBatch("sun", client->id, static_cast<std::uint32_t>(::RenderGraph::Frame::SegmentId::Sun), client->anchor);
@@ -764,7 +750,7 @@ namespace DCLF::Features::Sky::SkyDraws
 	bool Submit(std::shared_ptr<Run> a_run)
 	{
 		auto& state = GetState();
-		if (!a_run || state.failed)
+		if (!a_run)
 			return false;
 		const auto& client = state.clients[static_cast<std::size_t>(a_run->view)];
 		if (!client)
@@ -782,8 +768,6 @@ namespace DCLF::Features::Sky::SkyDraws
 		const auto& state = GetState();
 		if (!Enabled())
 			return "off (CS_ORG_SKY)";
-		if (state.failed)
-			return "failed: the engine draws the sky";
 		std::uint64_t executed = 0;
 		for (const auto& client : state.clients)
 			if (client)

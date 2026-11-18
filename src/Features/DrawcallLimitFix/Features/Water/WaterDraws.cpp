@@ -232,7 +232,6 @@ namespace DCLF::Features::Water::WaterDraws
 															  .stagesOf = &StagesOf } };
 			bool reserved = false;
 			bool setUp = false;
-			bool failed = false;
 			std::uint64_t runs = 0, draws = 0;
 			Family::KeptOwners kept;
 		};
@@ -269,18 +268,6 @@ namespace DCLF::Features::Water::WaterDraws
 		{
 			static DrawsState state;
 			return state;
-		}
-
-		/** @brief Stops the family for good: every batch is the engine's again. */
-		void Fail(const char* a_why)
-		{
-			auto& state = GetState();
-			if (!state.failed)
-				logger::error("[DCLF] water: back to the engine's draws for the session: {}", a_why);
-			state.failed = true;
-			for (auto& client : state.clients)
-				if (client)
-					FrameAnchors::Unregister(client->id);
 		}
 
 		/** @brief The client of a_shape's view, registered with the anchor for a_shape. Null, logged, when a target cannot be imported. */
@@ -375,7 +362,6 @@ namespace DCLF::Features::Water::WaterDraws
 					logger::info("[DCLF] water: the first {} run drawn by the graph", client->id);
 			};
 			desc.active = [client] { return client->pending; };
-			desc.onFailed = [] { Fail("the render graph failed with the water's passes in it"); };
 			// Passes of the deferred+water stage, or of the sun stage under water, only.
 			desc.segmentOnly = FrameAnchors::NamedByStage(desc.id);
 			if (!FrameAnchors::Register(std::move(desc))) {
@@ -414,7 +400,7 @@ namespace DCLF::Features::Water::WaterDraws
 	bool Available()
 	{
 		const auto& state = GetState();
-		return state.reserved && !state.failed && RenderGraphRuntime::Get().IsActive() && FrameAnchors::HasEpoch(FrameAnchors::Anchor::EngineDraws);
+		return state.reserved && RenderGraphRuntime::Get().IsActive() && FrameAnchors::HasEpoch(FrameAnchors::Anchor::EngineDraws);
 	}
 
 	void Reserve()
@@ -428,7 +414,7 @@ namespace DCLF::Features::Water::WaterDraws
 	bool Setup()
 	{
 		auto& state = GetState();
-		if (state.setUp || state.failed)
+		if (state.setUp)
 			return true;
 		if (!RenderGraphRuntime::Get().Host() || !FrameAnchors::IsRenderOwner() || !Available())
 			return false;
@@ -449,7 +435,7 @@ namespace DCLF::Features::Water::WaterDraws
 	bool CanTake(View a_view)
 	{
 		auto& state = GetState();
-		if (state.failed || a_view >= View::Count)
+		if (a_view >= View::Count)
 			return false;
 		const auto& client = state.clients[static_cast<std::size_t>(a_view)];
 		if (!client)
@@ -479,7 +465,7 @@ namespace DCLF::Features::Water::WaterDraws
 	bool Submit(std::shared_ptr<Run> a_run)
 	{
 		auto& state = GetState();
-		if (!a_run || state.failed)
+		if (!a_run)
 			return false;
 		const auto& client = state.clients[static_cast<std::size_t>(a_run->view)];
 		if (!client)
@@ -497,8 +483,6 @@ namespace DCLF::Features::Water::WaterDraws
 		const auto& state = GetState();
 		if (!Enabled())
 			return "off (CS_ORG_WATER)";
-		if (state.failed)
-			return "failed: the engine draws the water";
 		std::uint64_t executed = 0;
 		for (const auto& client : state.clients)
 			if (client)
