@@ -582,6 +582,10 @@ constants), no key build, shots match.
 **Purpose.** Decision 3a. Announced engine changes are events. A discovered mid-frame import change is fatal.
 
 **9a. Announced changes.**
+
+> **Decision (2026-11-18):** a mid-session `Create` of the engine's targets stays a fatal error. Do not build the event path for
+> it described below. Build 9a only for the changes that do occur: the swap chain's `ResizeBuffers` and colour-space changes. See
+> section 9.
 - `EngineTargets.cpp:EndSet` raises `DisplaySize` and an `EngineTargets` serial. The new images are made by the engine's call (they
   cannot be made ahead, correction 4). `Move`/`AdoptSlot` change from `Publish` to `Make`: the new versions are pending and join the next
   revision. Delete `Settle`'s `BumpGeneration` and `Builds::RequestAll`; the revision rebuilds what depends on the shape class.
