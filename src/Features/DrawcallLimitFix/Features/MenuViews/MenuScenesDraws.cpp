@@ -76,6 +76,8 @@ namespace DCLF::Features::MenuViews::Scenes::SceneDraws
 			std::uint32_t colourCount = 0;
 			FrameAnchors::Texture depth;
 			std::uint32_t depthFormat = 0;
+			std::uint32_t depthTarget = 0;  // RE::RENDER_TARGETS_DEPTHSTENCIL: kMAIN, or the shadow maps for the shadow batch
+			std::uint32_t depthSlices = 1;  // the slices its passes draw into
 			// Every published id the batch's draws can read, fixed here (ListInputs). Each build declares the registered ones.
 			Family::PublishedInputs inputs;
 			// Render thread writes, the host's thread reads.
@@ -92,7 +94,7 @@ namespace DCLF::Features::MenuViews::Scenes::SceneDraws
 			SharedConstants::Bindings shared;
 			Extensions::DeclaredReads inputs;  // the published inputs (Client::inputs)
 			std::array<org::DeclaredViewToken, kMaxImports> colours{};
-			org::DeclaredViewToken depth{};
+			std::array<org::DeclaredViewToken, kMaxShadowSlices> depth{};  // a view per slice
 		};
 
 		struct Frame
@@ -110,6 +112,8 @@ namespace DCLF::Features::MenuViews::Scenes::SceneDraws
 				return "LocalMapFog";
 			case View::MenuDepth:
 				return "MenuDepth";
+			case View::MenuShadow:
+				return "MenuShadow";
 			default:
 				return "MenuColour";
 			}
@@ -128,7 +132,12 @@ namespace DCLF::Features::MenuViews::Scenes::SceneDraws
 				bindings.shared = SharedConstants::Declare(a_builder);
 				for (std::uint32_t i = 0; i < client->colourCount; ++i)
 					bindings.colours[i] = a_builder.RenderTarget(client->colours[i]).View();
-				bindings.depth = a_builder.DepthReadWrite(client->depth).View();
+				std::array<org::DsvView, kMaxShadowSlices> slices{};
+				for (std::uint32_t slice = 0; slice < client->depthSlices; ++slice)
+					slices[slice].slice = slice;
+				const auto declared = a_builder.DepthReadWrite(client->depth, std::span<const org::DsvView>(slices.data(), client->depthSlices));
+				for (std::uint32_t slice = 0; slice < client->depthSlices; ++slice)
+					bindings.depth[slice] = declared.View(slice);
 				// The published inputs, each with the view whose index the draws' latches carry.
 				bindings.inputs = client->inputs.Declare(a_builder);
 				// A particles draw pulls its positions from the engine's dynamic ring (EffectSceneConstants::streamRef).
@@ -176,11 +185,11 @@ namespace DCLF::Features::MenuViews::Scenes::SceneDraws
 				const auto& c = *a_frame.client;
 				const auto shared = SharedConstants::Index(a_recording, a_bindings.shared);
 				const org::RunRef latchRun = a_recording.Run();
-				const RasterProgram::Depth depth{ .view = &a_bindings.depth, .readOnly = false };
 				for (std::uint32_t i = 0; i < runRef->draws.size(); ++i) {
 					const auto& draw = runRef->draws[i];
-					if (!draw.program)
+					if (!draw.program || draw.depthSlice >= c.depthSlices)
 						continue;
+					const RasterProgram::Depth depth{ .view = &a_bindings.depth[draw.depthSlice], .readOnly = false };
 					const auto& program = *static_cast<const RasterProgram*>(draw.program.get());
 					std::array<RasterProgram::Colour, kMaxColours> colours{};
 					bool targetsOk = true;
@@ -330,11 +339,17 @@ namespace DCLF::Features::MenuViews::Scenes::SceneDraws
 					return nullptr;
 				}
 			}
-			const auto mainDepth = static_cast<std::uint32_t>(RE::RENDER_TARGETS_DEPTHSTENCIL::kMAIN);
-			client->depth = FrameAnchors::EngineDepth(mainDepth);
-			client->depthFormat = FormatOf(renderer->GetDepthStencilData().depthStencils[mainDepth].views[0]);
-			if (!client->depth || !client->depthFormat) {
-				logger::warn("[DCLF] menu scenes: kMAIN's depth cannot be imported; the {} batch stays the engine's", client->id);
+			client->depthTarget = static_cast<std::uint32_t>(a_view == View::MenuShadow ? RE::RENDER_TARGETS_DEPTHSTENCIL::kSHADOWMAPS : RE::RENDER_TARGETS_DEPTHSTENCIL::kMAIN);
+			const auto& depthData = renderer->GetDepthStencilData().depthStencils[client->depthTarget];
+			client->depth = FrameAnchors::EngineDepth(client->depthTarget);
+			client->depthFormat = FormatOf(depthData.views[0]);
+			if (a_view == View::MenuShadow && depthData.texture) {
+				D3D11_TEXTURE2D_DESC desc{};
+				Unwrap(depthData.texture)->GetDesc(&desc);
+				client->depthSlices = (std::min)(desc.ArraySize, kMaxShadowSlices);
+			}
+			if (!client->depth || !client->depthFormat || !client->depthSlices) {
+				logger::warn("[DCLF] menu scenes: depth target {} cannot be imported; the {} batch stays the engine's", client->depthTarget, client->id);
 				return nullptr;
 			}
 			ListInputs(client->inputs);
@@ -397,6 +412,7 @@ namespace DCLF::Features::MenuViews::Scenes::SceneDraws
 				mix(draw.stencilRef);
 				mix((std::uint64_t(draw.latchOffset) << 32) | draw.bonesOffset);
 				mix(draw.frameOffset);
+				mix(draw.depthSlice);
 				mix(draw.colourCount);
 				for (std::uint32_t k = 0; k < draw.colourCount; ++k)
 					mix(draw.colours[k]);
@@ -460,7 +476,7 @@ namespace DCLF::Features::MenuViews::Scenes::SceneDraws
 		if (!client)
 			return false;
 		// A target made again (a resolution change) is another import: the batch stays the engine's until the next start.
-		bool same = FrameAnchors::EngineDepth(static_cast<std::uint32_t>(RE::RENDER_TARGETS_DEPTHSTENCIL::kMAIN)) == client->depth;
+		bool same = FrameAnchors::EngineDepth(client->depthTarget) == client->depth;
 		const auto targets = TargetsOf(a_view);
 		for (std::uint32_t i = 0; i < client->colourCount && same; ++i)
 			same = FrameAnchors::EngineTarget(static_cast<std::uint32_t>(targets[i])) == client->colours[i];

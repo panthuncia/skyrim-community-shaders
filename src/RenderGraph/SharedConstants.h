@@ -72,7 +72,7 @@ namespace SharedConstants
 	 * @brief The upload points one execution can hold: one per step of a declared segment (FrameAnchors' kMaxSteps), each with a latch
 	 * block of its own. A step past the last point would read another step's values.
 	 */
-	inline constexpr std::uint32_t kUploadPoints = 18;
+	inline constexpr std::uint32_t kUploadPoints = 19;
 
 	/**
 	 * @brief A new upload pass: copies the execution's latch region of upload point a_point into the four buffers. An anchor's epoch

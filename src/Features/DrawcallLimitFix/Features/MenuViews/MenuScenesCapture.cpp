@@ -125,8 +125,14 @@ namespace DCLF::Features::MenuViews::Scenes
 			const auto& rss = RE::BSGraphics::RendererShadowState::GetSingleton()->GetRuntimeData();
 			if (rss.cubeMapRenderTarget != static_cast<std::uint32_t>(-1))
 				return "a cube face is bound";
-			if (rss.depthStencil != static_cast<std::uint32_t>(RE::RENDER_TARGETS_DEPTHSTENCIL::kMAIN))
-				return "its depth target is not kMAIN's";
+			// The shadow batch draws into a slice of the shadow maps, every other batch into kMAIN's depth.
+			const bool shadow = a_view == View::MenuShadow;
+			const auto depthTarget = shadow ? RE::RENDER_TARGETS_DEPTHSTENCIL::kSHADOWMAPS : RE::RENDER_TARGETS_DEPTHSTENCIL::kMAIN;
+			if (rss.depthStencil != static_cast<std::uint32_t>(depthTarget))
+				return shadow ? "its depth target is not the shadow maps" : "its depth target is not kMAIN's";
+			a_draw.depthSlice = shadow ? rss.depthStencilSlice : 0;
+			if (a_draw.depthSlice >= kMaxShadowSlices)
+				return "a shadow map slice past the batch's";
 			const auto imports = TargetsOf(a_view);
 			a_draw.colourCount = 0;
 			for (std::uint32_t i = 0; i < std::min(a_outputs, kMaxColours); ++i) {
@@ -571,34 +577,50 @@ namespace DCLF::Features::MenuViews::Scenes
 		}
 
 		/**
-		 * @brief One batch's engine call (SubmitAccumulator or StartAccumulating, the same arguments): with the view's switch on, the batch
-		 * runs with its draws latched, then the anchor's pass draws them at this point. Otherwise, or when the batch cannot be taken now,
-		 * the engine draws it.
+		 * @brief One batch's engine call: with the view's switch on, the batch runs with its draws latched, then the anchor's pass draws
+		 * them at this point. Otherwise, or when the batch cannot be taken now, the engine draws it.
 		 */
+		template <View kView, class Call>
+		void RunBatch(Call&& a_call)
+		{
+			auto& capture = GetCapture();
+			if (capture.active || !ViewEnabled(kView) || !ShellState::Running() || !FrameAnchors::IsRenderOwner() || !SceneDraws::Available() ||
+				!SceneDraws::CanTake(kView)) {
+				a_call();
+				return;
+			}
+			Family::BeginBatch();
+			capture.view = kView;
+			capture.run = std::make_shared<Run>();
+			capture.run->view = kView;
+			capture.failed = false;
+			capture.passes.Begin();
+			capture.passes.dynamicDraws = DynamicTakerInstalled();
+			capture.active = true;
+			a_call();
+			capture.active = false;
+			if (!capture.passes.End())
+				Refusals().Report(capture.passes.Describe(std::format("{} batch", NameOf(kView))));
+			FlushLatched(capture);
+		}
+
+		/** @brief A batch of SubmitAccumulator or StartAccumulating (the same arguments). */
 		template <View kView>
 		struct SceneBatch
 		{
 			static void thunk(RE::NiCamera* a_camera, RE::BSShaderAccumulator* a_accumulator, std::uint32_t a_flags)
 			{
-				auto& capture = GetCapture();
-				if (capture.active || !ViewEnabled(kView) || !ShellState::Running() || !FrameAnchors::IsRenderOwner() || !SceneDraws::Available() ||
-					!SceneDraws::CanTake(kView)) {
-					func(a_camera, a_accumulator, a_flags);
-					return;
-				}
-				Family::BeginBatch();
-				capture.view = kView;
-				capture.run = std::make_shared<Run>();
-				capture.run->view = kView;
-				capture.failed = false;
-				capture.passes.Begin();
-				capture.passes.dynamicDraws = DynamicTakerInstalled();
-				capture.active = true;
-				func(a_camera, a_accumulator, a_flags);
-				capture.active = false;
-				if (!capture.passes.End())
-					Refusals().Report(capture.passes.Describe(std::format("{} batch", NameOf(kView))));
-				FlushLatched(capture);
+				RunBatch<kView>([&] { func(a_camera, a_accumulator, a_flags); });
+			}
+			static inline REL::Relocation<decltype(thunk)> func;
+		};
+
+		/** @brief The loading screen model's shadow lights as one batch, each light drawing its own shadow map slice. */
+		struct ShadowBatch
+		{
+			static void thunk(void* a_manager, RE::NiCamera* a_camera)
+			{
+				RunBatch<View::MenuShadow>([&] { func(a_manager, a_camera); });
 			}
 			static inline REL::Relocation<decltype(thunk)> func;
 		};
@@ -659,7 +681,7 @@ namespace DCLF::Features::MenuViews::Scenes
 		}
 
 		bool LocalMapKnown() { return Address::kLocalMapSubmit.Known() && Address::kLocalMapWaterSubmit.Known(); }
-		bool MenuKnown() { return Address::kMenu3DSubmit.Known() && Address::kMenu3DDepthSubmit.Known(); }
+		bool MenuKnown() { return Address::kMenu3DSubmit.Known() && Address::kMenu3DDepthSubmit.Known() && Address::kMenu3DShadowRender.Known(); }
 	}
 
 	const char* NameOf(View a_view)
@@ -673,6 +695,8 @@ namespace DCLF::Features::MenuViews::Scenes
 			return "menu-depth";
 		case View::MenuColour:
 			return "menu-colour";
+		case View::MenuShadow:
+			return "menu-shadow";
 		default:
 			return "?";
 		}
@@ -682,6 +706,8 @@ namespace DCLF::Features::MenuViews::Scenes
 	{
 		if (a_view == View::LocalMap || a_view == View::LocalMapFog)
 			return kLocalMapTargets;
+		if (a_view == View::MenuShadow)
+			return {};
 		return kMenuTargets;
 	}
 
@@ -713,6 +739,7 @@ namespace DCLF::Features::MenuViews::Scenes
 		if (Menu3DEnabled() && MenuKnown()) {
 			HookSites::RequireCall("a menu model's depth pass (UI3DSceneManager::Render's StartAccumulating)", REL::Offset(Address::kMenu3DDepthSubmit).address());
 			HookSites::RequireCall("a menu model's colour pass (UI3DSceneManager::Render's SubmitAccumulator)", REL::Offset(Address::kMenu3DSubmit).address());
+			HookSites::RequireCall("the loading screen model's shadow lights (UI3DSceneManager::Render's call)", REL::Offset(Address::kMenu3DShadowRender).address());
 		}
 	}
 
@@ -737,6 +764,7 @@ namespace DCLF::Features::MenuViews::Scenes
 			if (MenuKnown()) {
 				stl::write_thunk_call<SceneBatch<View::MenuDepth>>(REL::Offset(Address::kMenu3DDepthSubmit).address());
 				stl::write_thunk_call<SceneBatch<View::MenuColour>>(REL::Offset(Address::kMenu3DSubmit).address());
+				stl::write_thunk_call<ShadowBatch>(REL::Offset(Address::kMenu3DShadowRender).address());
 			} else
 				logger::warn("[DCLF] menu scenes: this runtime has no address for a menu model's batches; the menu models stay the engine's");
 		}

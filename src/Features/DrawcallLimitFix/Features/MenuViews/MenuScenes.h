@@ -47,10 +47,11 @@ namespace DCLF::Features::MenuViews::Scenes
 		LocalMapFog,  // its fog of war (the second, render mode 0x13)
 		MenuDepth,    // a menu model's depth pass (UI3DSceneManager::Render's StartAccumulating, with keepDepth)
 		MenuColour,   // its colour pass (UI3DSceneManager::Render's SubmitAccumulator)
+		MenuShadow,   // the loading screen model's shadow maps (UI3DSceneManager::Render's call that renders its shadow lights)
 		Count
 	};
 
-	/** @brief "local-map", "local-map-fog", "menu-depth", "menu-colour", for logs and client ids. */
+	/** @brief "local-map", "local-map-fog", "menu-depth", "menu-colour", "menu-shadow", for logs and client ids. */
 	const char* NameOf(View a_view);
 
 	/** @brief RE::RENDER_TARGET values the batches draw into. */
@@ -199,6 +200,9 @@ namespace DCLF::Features::MenuViews::Scenes
 	inline constexpr std::uint32_t kPaletteRows = 240;
 	inline constexpr std::uint32_t kBonesBytes = 2 * kPaletteRows * 16;
 
+	/** @brief The shadow map slices a menu shadow batch can draw into (the engine renders at most four of a scene's shadow lights). */
+	inline constexpr std::uint32_t kMaxShadowSlices = 4;
+
 	/** @brief The most draws one batch latches, and the most latch bytes: past either the rest of the batch is the engine's. */
 	inline constexpr std::uint32_t kMaxDraws = 2048;
 	inline constexpr std::uint32_t kLatchBytes = 1u << 20;
@@ -224,6 +228,7 @@ namespace DCLF::Features::MenuViews::Scenes
 		std::uint32_t frameOffset = 0;  // its FrameBuffer rows in the run's latch
 		std::uint32_t stencilRef = 0;
 		std::uint32_t indexCount = 0;
+		std::uint32_t depthSlice = 0;  // the slice of the view's depth target it draws into
 		Family::Viewport viewport;
 	};
 

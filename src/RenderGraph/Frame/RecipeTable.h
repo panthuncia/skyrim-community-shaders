@@ -35,7 +35,7 @@ namespace RenderGraph::Frame::Recipes::Table
 	using Segment = RenderGraphRuntime::Segment;
 
 	inline constexpr std::size_t kMaxNames = 8;
-	inline constexpr std::size_t kMaxSteps = 18;
+	inline constexpr std::size_t kMaxSteps = 19;
 	inline constexpr std::size_t kMaxEpochs = 10;
 	inline constexpr std::size_t kMaxCommitBefore = 20;
 
@@ -396,6 +396,7 @@ namespace RenderGraph::Frame::Recipes::Table
 				{ .anchor = Anchor::EngineFrameClear, .clients = { "cs.engine.skeleton.frame@menu-start", "cs.engine.skeleton.shadow@menu-start" } },
 				{ .anchor = Anchor::Interface, .clients = { "cs.scaleform" }, .whole = true, .untilLater = true, .firstInstance = 8, .instanceCount = 8 },
 				{ .anchor = Anchor::EngineFrameClear, .clients = { "cs.engine.skeleton.frame@menu-scene", "cs.engine.skeleton.shadow@menu-scene" } },
+				{ .anchor = Anchor::EngineDraws, .clients = { "cs.menu-scenes.menu-shadow" } },
 				{ .anchor = Anchor::EngineDraws, .clients = { "cs.menu-scenes.menu-depth" } },
 				{ .anchor = Anchor::EngineDraws, .clients = { "cs.shadow-mask.menu" } },
 				{ .anchor = Anchor::EngineDepthCopy, .clients = { "cs.engine.skeleton.depth-copy@ui" } },

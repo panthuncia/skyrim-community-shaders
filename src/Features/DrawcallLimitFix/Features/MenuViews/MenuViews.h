@@ -27,6 +27,9 @@ namespace DCLF::Features::MenuViews
 		inline constexpr Engine::Offset kMenu3DSubmit{ { 52727, 0x659 }, { 51855, 0x658 } };
 		// Its depth pass with keepDepth: StartAccumulating(camera, depth accumulator (+0x18), flags | 0x20) (SE 51855 +0x43A, AE 52727 +0x435).
 		inline constexpr Engine::Offset kMenu3DDepthSubmit{ { 52727, 0x435 }, { 51855, 0x43A } };
+		// Its call that renders the loading screen model's shadow lights into kSHADOWMAPS, scheme 4 only (SE 51855 +0x2B7 calling
+		// 0x1408d2f80, AE 52727 +0x2AD calling 0x140973210).
+		inline constexpr Engine::Offset kMenu3DShadowRender{ { 52727, 0x2AD }, { 51855, 0x2B7 } };
 		// LocalMapRenderer::Render's first SubmitAccumulator(local map camera (+0x302B8), accumulator (+0x302C8), 0): the land and objects into
 		// kLOCAL_MAP_SWAP (SE 16094 +0x340, AE 16335 +0x342).
 		inline constexpr Engine::Offset kLocalMapSubmit{ { 16335, 0x342 }, { 16094, 0x340 } };
