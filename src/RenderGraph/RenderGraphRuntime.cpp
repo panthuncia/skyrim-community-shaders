@@ -2965,7 +2965,7 @@ bool RenderGraphRuntime::BuildSetupGraphs(std::string_view a_caller)
 
 void RenderGraphRuntime::OnEpochFailed(std::uint32_t a_epoch, bool a_keptGraph, const std::string& a_error)
 {
-	// Epochs are segment values: a failure outside them is the whole graph's.
+	// Epochs are segment values, so a failure outside them is the whole graph's.
 	if (a_epoch >= static_cast<std::uint32_t>(Segment::Count)) {
 		logger::error("[ORG] Render graph failed, disabling the graph: {}", a_error);
 		impl->faulted = true;

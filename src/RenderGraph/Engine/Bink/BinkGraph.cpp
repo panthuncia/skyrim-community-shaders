@@ -670,9 +670,8 @@ namespace RenderGraph::Engine::Bink::Graph
 		state.pending.reset();
 		if (!UpdateTargets(state, a_betweenFrames))
 			return refuse("the framebuffer cannot be imported, or its tile program cannot be made");
-		// The UI stage holds the Present anchor: its schedule must hold this registration. A tick can come between two frames, before the
-		// frame's Begin, so the last schedule is asked. A build with HDR's new UI texture switches in at a frame boundary; until then the
-		// tick stays the engine's.
+		// The UI stage's last schedule must hold this registration, since a tick can come before the frame's Begin.
+		// A build with HDR's new UI texture switches in at a frame boundary, and until then the tick stays the engine's.
 		if (!FrameAnchors::HeldByStage(FrameAnchors::Anchor::Present))
 			return refuse("no stage holds the Present anchor");
 		if (!FrameAnchors::InStage(kClientId, FrameAnchors::Anchor::Present))

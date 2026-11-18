@@ -1382,7 +1382,7 @@ namespace RenderGraph::Engine::Skeleton
 				state.hostedPending.push_back(a_pending);
 				return true;
 			}
-			// No stage takes it: a mismatch.
+			// No stage takes it, which is a mismatch.
 			const auto unplaced = [&](std::string_view a_why) { return NoPlace(a_target, a_flags, a_why); };
 			if (!WorldFrame())
 				return unplaced("no open stage has a place for it");
@@ -1671,7 +1671,7 @@ namespace RenderGraph::Engine::Skeleton
 						kCopyNames[index]);
 				return true;
 			}
-			// The copy's anchor has no own epoch: every copy is a stage's pass, or dropped here.
+			// The copy's anchor has no own epoch, so every copy is a stage's pass or dropped here.
 			const auto& frame = RenderGraph::Frame::Driver::Current();
 			if (a_kind == CopyKind::Depth) {
 				// The stage that holds the copy has no schedule yet (its first build), or a build with this registration is on its way (a
