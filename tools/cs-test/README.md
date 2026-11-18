@@ -57,6 +57,7 @@ The shipped configs:
 | `guest-quick`, `native-quick`, `native-d3d12-quick` | the old quick scenarios |
 | `boot` | exits at shaders-ready (`--set build.shader_cache=cold` for a cold compile) |
 | `resize` | Exponential Height Fog turned on, its grid settings changed (`setting` steps) and upscale method switches: graph textures that take a new size mid-session; compose it, `native-vulkan+resize` |
+| `hdr` | HDR Display turned on mid-session (the `hdr` step), shots in HDR with and without the CS menu, then off again; compose it, `native-d3d12+hdr`, `d3d11+hdr` |
 | `rain` | Riverwood's river in a forced rain storm (`fw`), two shots while it falls; compose it, `native-vulkan+rain`, `guest+rain` |
 | `latch-census-short`, `vram-all`, `native-tour`, `native-d3d12-tour`, `native-validation` | ORG tours |
 | `rx6600-*`, `sky-river-org1` | the perf and sky scenarios |

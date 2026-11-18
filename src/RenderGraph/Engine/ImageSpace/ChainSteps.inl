@@ -51,6 +51,9 @@ struct ChainSteps
 	std::uint64_t registeredFrame = 0;
 	std::uint32_t width = 0, height = 0, finalWidth = 0, finalHeight = 0, levels = 0;
 	std::pair<float, float> ratios{ 1.0f, 1.0f };
+	// The final target's name the passes were made for (FinalName) and the engine object its import was made from.
+	std::int32_t final = RE::RENDER_TARGET::kFRAMEBUFFER;
+	const void* finalObject = nullptr;
 	struct Entry
 	{
 		std::uint8_t part = 0;  // index into kChainParts
@@ -505,6 +508,12 @@ std::pair<std::uint32_t, std::uint32_t> FinalSize()
 	return { data.width, data.height };
 }
 
+/** @brief The chain's final target now: HDR Display's scene texture while HDR is on (its framebuffer redirect), else kFRAMEBUFFER. */
+std::int32_t FinalName()
+{
+	return globals::features::hdrDisplay.PostChainTarget() ? kHdrSceneOutput : static_cast<std::int32_t>(RE::RENDER_TARGET::kFRAMEBUFFER);
+}
+
 /**
  * @brief Begin of a world frame: the chain registered again when what its passes were sized for changed (kMAIN's or the final
  * target's size, the luminance level count, the dynamic-resolution ratios) or a build left a pass out. The build runs off the render
@@ -528,7 +537,7 @@ void CheckChainSteps()
 	if (chain.registered && chain.retry && frame - chain.registeredFrame < kRetryFrames)
 		return;
 	if (chain.registered && !chain.retry && chain.width == main.Width && chain.height == main.Height && chain.finalWidth == final.first &&
-		chain.finalHeight == final.second && chain.levels == Frame::PostChain::LuminanceLevels() && chain.ratios == DynamicRatios())
+		chain.finalHeight == final.second && chain.final == FinalName() && chain.finalObject == EngineObjectOf(chain.final) && chain.levels == Frame::PostChain::LuminanceLevels() && chain.ratios == DynamicRatios())
 		return;
 	RegisterChainSteps();
 }
@@ -640,15 +649,19 @@ void ChainRows(std::size_t a_part, std::array<std::uint64_t, 4>& a_rows)
  * @brief A CS target made with an engine target's size (its import's) and its render target view's format, for a plain texel copy
  * between the two. The final target has no texture in the renderer's table in native mode, only its view: this works for it too.
  */
-bool MakeOwnedLike(OwnedTarget& a_out, RE::RENDER_TARGET a_like, std::string_view a_name, GraphResources::Lifetime a_lifetime)
+bool MakeOwnedLike(OwnedTarget& a_out, std::int32_t a_like, std::string_view a_name, GraphResources::Lifetime a_lifetime)
 {
-	const auto index = static_cast<std::int32_t>(a_like);
-	const auto& target = globals::game::renderer->GetRuntimeData().renderTargets[index];
+	const auto index = a_like;
 	const auto import = ImportOf(ImportOfName(index));
-	if (!target.RTV || !import || !import.Width() || !import.Height())
+	if (!import || !import.Width() || !import.Height())
 		return false;
 	D3D11_RENDER_TARGET_VIEW_DESC view{};
-	target.RTV->GetDesc(&view);
+	if (index & kHdrSceneOutput)
+		view.Format = globals::features::hdrDisplay.hdrTexture->desc.Format;
+	else if (auto* rtv = globals::game::renderer->GetRuntimeData().renderTargets[index].RTV)
+		rtv->GetDesc(&view);
+	else
+		return false;
 	D3D11_TEXTURE2D_DESC desc{};
 	desc.Width = import.Width();
 	desc.Height = import.Height();
@@ -724,6 +737,8 @@ void RegisterChainSteps()
 	chain.width = main.Width;
 	chain.height = main.Height;
 	std::tie(chain.finalWidth, chain.finalHeight) = FinalSize();
+	chain.final = FinalName();
+	chain.finalObject = EngineObjectOf(chain.final);
 	chain.ratios = DynamicRatios();
 	chain.levels = Frame::PostChain::LuminanceLevels();
 	using Lifetime = GraphResources::Lifetime;
@@ -755,7 +770,7 @@ void RegisterChainSteps()
 		!MakeOwned(chain.fullBlurDown, T::kHDR_BLURSWAP, "ImageSpace::FullBlurDown", Lifetime::Transient) ||
 		!MakeOwned(chain.fullBlurSwap, T::kHDR_DOWNSAMPLE0, "ImageSpace::FullBlurSwap", Lifetime::Transient) ||
 		!MakeOwnedLike(chain.hdrScratch, T::kMAIN, "ImageSpace::HdrScratch", Lifetime::Transient) ||
-		!MakeOwnedLike(chain.ldrScratch, T::kFRAMEBUFFER, "ImageSpace::LdrScratch", Lifetime::Transient)) {
+		!MakeOwnedLike(chain.ldrScratch, chain.final, "ImageSpace::LdrScratch", Lifetime::Transient)) {
 		logger::warn("[ORG] ImageSpace: the post chain's targets could not be made; registered again at a later frame");
 		chain.retry = true;
 		return;
@@ -778,7 +793,7 @@ void RegisterChainSteps()
 	const auto owned = [](const OwnedTarget& a_target) { return StepTexture::Owned(a_target); };
 	const auto mainDepth = StepTexture::Engine(kDepthInput | 0);
 	constexpr StepSampler kPoint{ 0, 0 }, kLinear{ 0, 1 }, kWrapPoint{ 3, 0 };
-	constexpr std::int32_t kFinal = T::kFRAMEBUFFER;
+	const std::int32_t kFinal = chain.final;
 	// The chain's two images, before the tonemap and after it, and the scratch an effect draws into before its copy back.
 	const auto image = [&](bool a_ldr) { return engine(a_ldr ? kFinal : T::kMAIN); };
 	const auto scratch = [&](bool a_ldr) { return owned(a_ldr ? chain.ldrScratch : chain.hdrScratch); };

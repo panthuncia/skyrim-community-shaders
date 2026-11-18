@@ -8515,3 +8515,27 @@ setting: `slot 'ExponentialHeightFog::VBufferA' (slot 10269, version 2, recorded
 `guest+resize` passed on DLL `b5d50a9e7e6a`, five volume resizes each, no tap error (`1118-172531-...-bug12-vk-final`,
 `1118-172633-...-bug12-d3d12-final`, `1118-172743-...-bug12-guest-final`). The fog's readers log one "declared view mismatch" per
 version change (`parity/status.md`). The other sites follow an engine target's size, which no run changes.
+
+## HDR Display's black scene (2026-11-18)
+
+A user's native D3D12 session: with HDR on, the CS menu and the HUD showed and the world stayed black.
+
+**Cause.** In D3D11, HDR Display swaps kFRAMEBUFFER's entry for its float scene texture around `RenderEndOfFrameEffects`
+(`RedirectFramebuffer`), so ISHDR and the effects after it write the scene that the composite reads. The post chain's CS passes
+(`ChainSteps.inl`) import their final target once, when they register. Outside the redirect that is the back buffer. So the chain
+wrote the back buffer, the composite read a scene texture nothing wrote, and its copy into the back buffer covered the world. The UI
+draws into HDR's UI texture and came through. Native since the chain became CS passes (`bea24442f`, 2026-11-15). Guest since it took
+the post stage (`cc66d6b2e`, Guest B7, today): its old client resolved each draw's target as bound, so it followed the redirect. It
+does not come from the deletions in `8060d7fce`, `7e73f95ea`, `db0799f2d` or `b0f53593b`, and not from HDR output's own ticket.
+
+**Fix.** ImageSpace names HDR's scene texture as a target of its own (`kHdrSceneOutput`, from `HDRDisplay::PostChainTarget`, with
+`RedirectFramebuffer`'s conditions). While HDR is on the chain's final target, its LDR scratch and the Tonemap anchor's output
+(`ChainTonemapTargets`) are that texture. `CheckChainSteps` registers the chain again when HDR is switched or the texture is made
+again. The menus' and the frozen world's composites still write kFRAMEBUFFER, as on D3D11 where the redirect covers only the world's
+chain. Plan piece A7 (HDR output as a UI-stage step) is not done: the ticket's order was not the cause.
+
+**Test.** The new `hdr` config turns HDR on 60 frames after a shot, takes a shot, opens the CS menu, takes one, then turns HDR off. On
+DLL `99ee0750d7cf`, background, Windows HDR on: `native-d3d12+hdr`, `native-vulkan+hdr`, `guest+hdr` and `d3d11+hdr` passed. Their
+HDR shots show the world (mean levels 102 to 104 of 255 in each mode; the PQ PNGs look washed out in an SDR viewer). Runs
+`1118-173813-nfg-native-d3d12-hdr-bug13`, `1118-174011-nfg-native-vulkan-hdr-bug13`, `1118-174109-nfg-guest-hdr-bug13`,
+`1118-174209-nfg-d3d11-hdr-bug13`. A switch shows a few black frames until the chain's new build is in (`parity/status.md`).

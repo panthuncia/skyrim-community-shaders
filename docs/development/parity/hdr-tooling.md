@@ -26,6 +26,12 @@ Lane `par-hdr-tooling`, branch `org-native/par-hdr-tooling`, based on `ababbdf09
   would also mean editing `Native::Present`, which another lane owns. Line:
   `[ORG] HDR Display: the output goes into the back buffer on the graph` (once, and again after a resize).
 
+- **The scene in graph modes (2026-11-18).** In D3D11, `RedirectFramebuffer` swaps kFRAMEBUFFER for HDR's float scene texture
+  around `RenderEndOfFrameEffects`, so ISHDR and the effects after it write the scene the composite reads. The post chain's CS passes
+  import their final target once, at registration, so they wrote the back buffer and the composite read a scene nothing wrote. The
+  chain now ends in the scene texture while HDR is on (ImageSpace's `kHdrSceneOutput`, `HDRDisplay::PostChainTarget`) and registers
+  again when HDR is switched. The Tonemap anchor's clients get the same target (`ChainTonemapTargets`).
+
 ### How to test
 
 HDR shots need an HDR display with Windows HDR on. Without one:
@@ -44,6 +50,10 @@ HDR shots need an HDR display with Windows HDR on. Without one:
      reaches DXGI.
    - Turning HDR off in the menu logs `SDR asked, SDR now`.
 4. With HDR off (the default on an SDR display) nothing changes except the `[ORG] ... swap chain: SDR` line at startup.
+
+On an HDR display (Windows HDR on), the `hdr` config switches HDR on and off mid-session and takes a shot in each:
+`native-d3d12+hdr`, `native-vulkan+hdr`, `guest+hdr`, `d3d11+hdr`. HDR shots are HDR10 PNGs (PQ, Rec. 2020), which look washed out
+in an SDR viewer. Judge brightness on the display.
 
 ## Tooling
 
@@ -131,7 +141,7 @@ docs commit. BasicRHI: `a605e0d` D3D12 labels and Close diagnostics, `9887544` h
 
 ## What is left
 
-- An HDR display check, on both backends (shots and the colour space lines).
+- An HDR display check by eye: shots and the colour space lines pass on both backends (2026-11-18), brightness is not judged.
 - A native `SetFrameSource` (present HDR Display's output directly, one copy fewer). It is optional: the copy works.
 - Nsight Perf on native D3D12 (the ORG item above). GPUPerfAPI in native mode (early initialization and `VK_AMD_gpa_interface` on
   the native device).

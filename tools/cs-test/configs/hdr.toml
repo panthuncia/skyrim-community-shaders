@@ -1,0 +1,68 @@
+# HDR Display turned on mid-session (the hdr step, as its menu toggle does), a shot in HDR, then off again and a shot in SDR.
+# HDR shots are HDR10 PNGs (PQ, Rec. 2020): judge brightness on an HDR display. Compose it: native-d3d12+hdr, native-vulkan+hdr,
+# guest+hdr, d3d11+hdr.
+extends = ["base"]
+
+[run]
+timeout_s = 300
+
+[features]
+HDRDisplay = true
+
+[[steps]]
+at = "world-ready"
+frames = 60
+do = "shot"
+arg = "sdr"
+
+# A shot's copy may wait for a build to switch in: give it time to land before HDR changes.
+[[steps]]
+at = "previous"
+frames = 60
+do = "hdr"
+arg = "1"
+
+[[steps]]
+at = "previous"
+frames = 120
+do = "shot"
+arg = "hdr"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "cs-menu"
+arg = "open"
+
+[[steps]]
+at = "previous"
+frames = 120
+do = "shot"
+arg = "hdr-menu"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "cs-menu"
+arg = "close"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "hdr"
+arg = "0"
+
+[[steps]]
+at = "previous"
+frames = 120
+do = "shot"
+arg = "sdr-after"
+
+[[steps]]
+at = "previous"
+frames = 10
+do = "exit"
+
+[expect]
+reach = "world-ready"
+shots = ["sdr", "hdr", "hdr-menu", "sdr-after"]

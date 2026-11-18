@@ -51,6 +51,9 @@ Phase 2:
   - D3D12 on AMD (2026-11-18): the tree LOD draw's mesh loads index their buffers as non-uniform. One draw holds every tree type,
     and `DEVICE_REF_ASSUME_UNIFORM` made a wave read all its vertices from its first lane's mesh, so coverage followed the list order.
   - ORG: a barrier between unordered-access (and copy) uses of one resource in consecutive passes.
+  - HDR Display (2026-11-18): the post chain ends in HDR's float scene texture while HDR is on, as the engine's chain does through
+    `RedirectFramebuffer`. It ended in the back buffer, so the composite read a scene nothing wrote: a black world under the UI, in
+    native since the chain became CS passes and in guest since Guest B7 (org-native-frame-graph.md, "HDR Display's black scene").
 - **Screenshots** are a gated pass, in the graph for good: a capture needs no build, so it no longer misses its capture point.
 
 ## Tested
@@ -123,6 +126,9 @@ To match DXVK, native needs what DXVK's CS thread gives it: the GPU work off the
   have it, so the flicker bursts show the compass on every other shot. Not the import (all resolve to `Native::BackBuffer`).
 - **D3D12 views**: `CreateWords` buffers read as ByteAddressBuffer have structured views. A raw GetDimensions on them returns the element
   count on AMD. None is left in the shaders, but the views do not match the reads.
+- **HDR Display in graph modes**: switching HDR on or off shows a few black frames while the post chain's new build switches in
+  (the composite reads the other texture at once). Menus that draw a 3D scene (an inventory item, the local map) under HDR are not
+  checked: their composite still writes the back buffer, which HDR's copy covers, as on D3D11.
 - **Frame generation in native**: the native presenter needs the frame-generation controls DXVK exports (swap chain recreate,
   sync present, queue depth, tearing, the torn-down callback). Until then DLSS-G and FSR-FG stay off in native.
 - **Residue:** the reflection cube face draws; load-window shadow draws; the refused occlusion-query draw; the sun occlusion

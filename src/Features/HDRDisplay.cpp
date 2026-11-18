@@ -842,6 +842,13 @@ void HDRDisplay::RedirectFramebuffer()
 	framebufferRedirected = true;
 }
 
+ID3D11Texture2D* HDRDisplay::PostChainTarget() const
+{
+	if (!loaded || !IsHDREnabledForFrame() || !hdrTexture || !hdrTexture->rtv || !hdrOutputCS)
+		return nullptr;
+	return reinterpret_cast<ID3D11Texture2D*>(hdrTexture->resource.get());
+}
+
 void HDRDisplay::RestoreFramebuffer()
 {
 	if (!framebufferRedirected)

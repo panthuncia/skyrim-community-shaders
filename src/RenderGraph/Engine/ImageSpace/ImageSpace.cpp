@@ -19,6 +19,8 @@ bool RenderGraph::Engine::ImageSpace::Requested()
 #	include "Features/DrawcallLimitFix/Core/Gpu/GpuTextures.h"
 #	include "Features/DynamicCubemaps/ORGDynamicCubemaps.h"
 #	include "Features/ExponentialHeightFog/ORGExponentialHeightFog.h"
+#	include "Features/HDRDisplay.h"
+#	include "Features/HDRDisplay/ORGHDRDisplay.h"
 #	include "Features/IBL/ORGIBL.h"
 #	include "Globals.h"
 #	include "RenderGraph/AnchorPasses.h"
@@ -106,7 +108,12 @@ namespace RenderGraph::Engine::ImageSpace
 		 * index. The engine binds one where an input has nothing else: ISTemporalAA's t5 when Upscaling turns the vanilla TAA setting off.
 		 */
 		constexpr std::int32_t kDefaultTextureInput = 0x1000000;  // above the mip bits (kMipShift)
-		constexpr std::int32_t kKindBits = kDepthInput | kCubeInput | kFlowMapOutput | kLatchSourceInput | kDefaultTextureInput;
+		/**
+		 * @brief HDR Display's float scene texture (HDRDisplay::PostChainTarget): the post chain's final target while HDR is on, as
+		 * RedirectFramebuffer makes it for the engine's own chain.
+		 */
+		constexpr std::int32_t kHdrSceneOutput = 0x2000000;
+		constexpr std::int32_t kKindBits = kDepthInput | kCubeInput | kFlowMapOutput | kLatchSourceInput | kDefaultTextureInput | kHdrSceneOutput;
 		constexpr std::int32_t kInputIndexMask = 0xFFFF;
 		/**
 		 * @brief A render target that is one mip of another target's texture (the SAO camera-Z levels: an RTV and SRV of one mip, no
@@ -614,6 +621,8 @@ namespace RenderGraph::Engine::ImageSpace
 				return "none";
 			if (a_name & kFlowMapOutput)
 				return "flowmap";
+			if (a_name & kHdrSceneOutput)
+				return "hdr-scene";
 			if (a_name & kLatchSourceInput)
 				return "latched";
 			if (a_name & kDefaultTextureInput)
@@ -929,6 +938,8 @@ namespace RenderGraph::Engine::ImageSpace
 				return nullptr;
 			if (a_name & kFlowMapOutput)
 				return FlowMapImport();
+			if (a_name & kHdrSceneOutput)
+				return ORGHDRDisplay::Get().GraphOf(globals::features::hdrDisplay.PostChainTarget());
 			const auto index = IndexOfName(a_name);
 			if (a_name & kDefaultTextureInput) {
 				auto* texture = DefaultTextureOf(index);
@@ -952,6 +963,8 @@ namespace RenderGraph::Engine::ImageSpace
 				return nullptr;
 			if (a_name & kFlowMapOutput)
 				return FlowMapTexture();
+			if (a_name & kHdrSceneOutput)
+				return globals::features::hdrDisplay.PostChainTarget();
 			const auto index = IndexOfName(a_name);
 			if (a_name & kDefaultTextureInput) {
 				auto* texture = DefaultTextureOf(index);
@@ -970,6 +983,8 @@ namespace RenderGraph::Engine::ImageSpace
 		/** @brief The format of an output's render target view (the program's target format), from the target or the texture it is a mip of. */
 		rhi::Format RtvFormatOf(std::int32_t a_name, const FrameAnchors::Texture& a_import)
 		{
+			if (a_name >= 0 && (a_name & kHdrSceneOutput))
+				return a_import ? a_import.Format() : rhi::Format::Unknown;
 			const auto& targets = globals::game::renderer->GetRuntimeData().renderTargets;
 			if (auto* rtv = targets[IndexOfName(a_name)].RTV) {
 				D3D11_RENDER_TARGET_VIEW_DESC view{};
@@ -1550,8 +1565,9 @@ namespace RenderGraph::Engine::ImageSpace
 		{
 			auto& state = IS();
 			bool changed = false;
+			// HDR's scene texture comes and goes with HDR. The chain checks it itself (CheckChainSteps).
 			for (const auto& [name, object] : state.importedObjects)
-				if (EngineObjectOf(name) != object) {
+				if (!(name & kHdrSceneOutput) && EngineObjectOf(name) != object) {
 					changed = true;
 					break;
 				}
@@ -2414,9 +2430,9 @@ namespace RenderGraph::Engine::ImageSpace
 			return false;
 		a_out = {};
 		a_out.input = ImportOf(ImportOfName(RE::RENDER_TARGET::kMAIN));
-		a_out.output = ImportOf(ImportOfName(RE::RENDER_TARGET::kFRAMEBUFFER));
+		a_out.output = ImportOf(ImportOfName(chain.final));
 		a_out.inputFormat = RtvFormatOf(RE::RENDER_TARGET::kMAIN, a_out.input);
-		a_out.outputFormat = RtvFormatOf(RE::RENDER_TARGET::kFRAMEBUFFER, a_out.output);
+		a_out.outputFormat = RtvFormatOf(chain.final, a_out.output);
 		a_out.chain = true;
 		return a_out.input && a_out.output;
 	}

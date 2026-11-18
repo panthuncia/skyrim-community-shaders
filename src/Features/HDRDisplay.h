@@ -94,6 +94,11 @@ public:
 	void RedirectFramebuffer();
 	/** @brief Restores the original kFRAMEBUFFER texture, SRV, and RTV after HDR rendering. */
 	void RestoreFramebuffer();
+	/**
+	 * @brief The texture RedirectFramebuffer puts in kFRAMEBUFFER's place this frame (the float16 HDR texture), or null when it would not
+	 * redirect. The render graph's post chain ends in it instead of the back buffer.
+	 */
+	ID3D11Texture2D* PostChainTarget() const;
 
 	/** @brief Redirects kFRAMEBUFFER.RTV to the UI texture for vanilla UI capture. */
 	void SetUIBuffer();
