@@ -129,6 +129,9 @@ To match DXVK, native needs what DXVK's CS thread gives it: the GPU work off the
 - **HDR Display in graph modes**: switching HDR on or off shows a few black frames while the post chain's new build switches in
   (the composite reads the other texture at once). Menus that draw a 3D scene (an inventory item, the local map) under HDR are not
   checked: their composite still writes the back buffer, which HDR's copy covers, as on D3D11.
+- **Frame generation in guest** (2026-11-18, RX 6600, FSR-FG): engages, about 2x driver presents, and stays on through the CS menu,
+  the pause menu and a loading screen, in the background and the foreground (`fg` config). Its hudless input has no HUD. FSR-FG drops
+  to one presented frame for a moment about twice a second (guest 28 to 36 times a run, plain D3D11 3379). Not looked into.
 - **Frame generation in native**: the native presenter needs the frame-generation controls DXVK exports (swap chain recreate,
   sync present, queue depth, tearing, the torn-down callback). Until then DLSS-G and FSR-FG stay off in native.
 - **Residue:** the reflection cube face draws; load-window shadow draws; the refused occlusion-query draw; the sun occlusion

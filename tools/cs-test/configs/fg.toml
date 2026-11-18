@@ -1,0 +1,92 @@
+# FSR frame generation switched on mid-session (the fg step), then the CS menu, the pause menu and a loading screen with it on.
+# Driver presents per second are logged (CS_VK_DRIVER_TRACE) next to the [FGTEST] lines. Frame generation runs through DXVK's
+# swap chain only: compose it with guest or d3d11, guest+fg. DLSS-G needs the window in the foreground, FSR does not.
+extends = ["base"]
+
+[run]
+timeout_s = 400
+
+[env]
+CS_VK_DRIVER_TRACE = "1"
+
+[[steps]]
+at = "world-ready"
+frames = 60
+do = "shot"
+arg = "before"
+
+[[steps]]
+at = "previous"
+frames = 60
+do = "fg"
+arg = "fsr"
+
+[[steps]]
+at = "previous"
+frames = 300
+do = "shot"
+arg = "fg"
+
+[[steps]]
+at = "previous"
+frames = 60
+do = "cs-menu"
+arg = "open"
+
+[[steps]]
+at = "previous"
+frames = 180
+do = "shot"
+arg = "fg-csmenu"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "cs-menu"
+arg = "close"
+
+[[steps]]
+at = "previous"
+frames = 60
+do = "menu"
+arg = "Journal Menu=show"
+
+[[steps]]
+at = "previous"
+frames = 180
+do = "shot"
+arg = "fg-pause"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "menu"
+arg = "Journal Menu=hide"
+
+[[steps]]
+at = "previous"
+frames = 120
+do = "console"
+arg = "coc WhiterunDragonsreach"
+
+# Frames, not world-ready: plain D3D11 mode records no world-ready after a coc.
+[[steps]]
+at = "previous"
+frames = 900
+do = "shot"
+arg = "fg-loaded"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "fg"
+arg = "off"
+
+[[steps]]
+at = "previous"
+frames = 120
+do = "exit"
+
+[expect]
+reach = "world-ready"
+shots = ["before", "fg", "fg-csmenu", "fg-pause", "fg-loaded"]

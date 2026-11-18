@@ -8539,3 +8539,29 @@ DLL `99ee0750d7cf`, background, Windows HDR on: `native-d3d12+hdr`, `native-vulk
 HDR shots show the world (mean levels 102 to 104 of 255 in each mode; the PQ PNGs look washed out in an SDR viewer). Runs
 `1118-173813-nfg-native-d3d12-hdr-bug13`, `1118-174011-nfg-native-vulkan-hdr-bug13`, `1118-174109-nfg-guest-hdr-bug13`,
 `1118-174209-nfg-d3d11-hdr-bug13`. A switch shows a few black frames until the chain's new build is in (`parity/status.md`).
+
+## Frame generation on the recipe (2026-11-18)
+
+Not checked since guest moved onto the recipe. RX 6600, so FSR frame generation (DLSS-G needs NVIDIA).
+
+**Where it runs.** Through DXVK's swap chain only: guest and plain D3D11. Streamline probes FSR-G and DLSS-G on DXVK's physical
+device (`Streamline::Initialize`). On the native device `SetNativeDevice` sets both to unsupported, so `IsFrameGenerationActive` is
+false in native Vulkan and D3D12 (`parity/status.md`, "Frame generation in native"). The `[FGTEST]` lines are always on (Upscaling's
+`BeginRenderFrame`). `fg` is the setting, `active` is `IsFrameGenerationActive`, `presented xN` is FSR-FG's presented count. The user's
+log said `fg false` because frame generation was off in the settings. The `fg` step turns it on as the menu does.
+
+**Test.** The new `fg` config: FSR-FG on, the CS menu open and closed, the Journal menu shown and hidden, a coc to Dragonsreach, FSR-FG
+off, with `CS_VK_DRIVER_TRACE` counting driver presents. No fix was needed.
+- `guest+fg` background (`1118-174510-nfg-guest-fg-bug13`) and foreground (`1118-175910-nfg-guest-fg-bug13-fg`): `fg true, active true,
+  presented x2` from the second after the switch; 107 to 147 driver presents a second at 55 to 80 rendered. It stays on through the
+  CS menu, the pause menu (FSR discards its prepared frames while the world is frozen and picks up again) and the load. FSR-FG
+  generates without focus, so the foreground adds nothing here.
+- The HUD on generated frames: the shots are rendered frames, so a temporary build shot the hudless texture itself
+  (`1118-175014-nfg-guest-fg-bug13-hudless2`). It holds the scene without the compass or the crosshair, also after the load. The copy
+  reads the back buffer on frame generation's own ticket, after the post stage and before the UI stage.
+- `d3d11+fg` (`1118-175205-nfg-d3d11-fg-bug13`): the same engagement. It timed out at the step after the coc, since plain D3D11 mode
+  records no world-ready there; the config now waits frames instead.
+- FSR-FG falls back to one presented frame for a moment about twice a second in guest (28 and 36 times a run) and far more often in
+  plain D3D11 (3379). Not looked into.
+- Not tested: HDR with frame generation, DLSS-G.
+
