@@ -1148,10 +1148,7 @@ struct RenderGraphRuntime::Impl
 		return true;
 	}
 	static constexpr std::size_t kEpochPhases = 12;
-	static constexpr std::array<const char*, kEpochPhases> kEpochPhaseNames{
-		"wait", "releases", "inputs", "prepare", "retire", "admission", "acquire", "record", "submit", "commit", "signal", "other"
-	};
-	// With async epochs the render thread's phases are SubmitEpoch's (the rest runs on the host's thread), and ExecuteEpoch's own
+	// The render thread's phases are SubmitEpoch's (the rest runs on the host's thread), and ExecuteEpoch's own
 	// around it: the native producer's flush, the completed epochs taken, the stream's close (the compute epoch's exit and the
 	// batched enqueue).
 	static constexpr std::array<const char*, kEpochPhases> kAsyncEpochPhaseNames{
@@ -1238,7 +1235,6 @@ struct RenderGraphRuntime::Impl
 		std::uint64_t timestampFrame = 0;
 		std::vector<GpuCounters::Timestamps::Range> ranges;
 	};
-	bool asyncEpochs = false;
 	std::vector<CompletedEpoch> hostPending;  // the host's thread only
 	std::atomic<std::shared_ptr<std::vector<CompletedEpoch>>> completedInbox;
 
@@ -1287,10 +1283,6 @@ struct RenderGraphRuntime::Impl
 		}
 		CompletedEpoch epoch;
 		ReadCompletedEpoch(a_frameNumber, a_stats, epoch);
-		if (!asyncEpochs) {
-			Aggregate(epoch);
-			return;
-		}
 		hostPending.push_back(std::move(epoch));
 		std::shared_ptr<std::vector<CompletedEpoch>> expected;
 		auto batch = std::make_shared<std::vector<CompletedEpoch>>(std::move(hostPending));
@@ -1514,8 +1506,8 @@ struct RenderGraphRuntime::Impl
 				continue;
 			std::string phases;
 			for (std::size_t p = 0; p < kEpochPhases; ++p)
-				if ((asyncEpochs ? kAsyncEpochPhaseNames : kEpochPhaseNames)[p][0] != '-')
-					phases += fmt::format("{}{} {:.1f}", p ? ", " : "", (asyncEpochs ? kAsyncEpochPhaseNames : kEpochPhaseNames)[p], stats.phaseUs[p] / stats.epochs);
+				if (kAsyncEpochPhaseNames[p][0] != '-')
+					phases += fmt::format("{}{} {:.1f}", p ? ", " : "", kAsyncEpochPhaseNames[p], stats.phaseUs[p] / stats.epochs);
 			if (stats.bodies) {
 				// Outside ExecuteEpoch: the feature's own render-thread work around it (inputs, frame blocks, the
 				// stale inline build, stats). Joins: waits on workers anywhere in the body, "inputs" included.
@@ -1528,7 +1520,7 @@ struct RenderGraphRuntime::Impl
 				double(stats.batches) / stats.epochs, double(stats.hookCalls) / stats.epochs, double(stats.enqueues) / stats.epochs, stats.cachedAdmissions, stats.segments, phases);
 			stats = {};
 		}
-		if (asyncEpochs) {
+		{
 			const auto async = host->TakeAsyncStats();
 			logger::info("[ORG] Async epochs: {} submitted, {} waited for their ticket, {} prepared again after the feature's inputs changed, {} carried uploads ({} lists recorded ahead by their producers; "
 						 "{} copies recorded on the queue that first uses them, {} other-queue batches spared the graphics uploads' wait; "
@@ -2086,7 +2078,7 @@ struct RenderGraphRuntime::Impl
 		// Another thread: keep the graph's submissions in order by letting everything already in
 		// DXVK's stream reach the queue first, then submit directly under DXVK's queue lock. With async epochs
 		// nothing but the render thread submits (the host's thread only prepares): count it if something does.
-		if (self->asyncEpochs && self->offThreadSubmits.fetch_add(1, std::memory_order_relaxed) == 0)
+		if (self->offThreadSubmits.fetch_add(1, std::memory_order_relaxed) == 0)
 			logger::warn("[ORG] A graph submission came from a thread other than the render thread while epochs are async");
 		if (!self->WaitForStreamSubmissions(std::chrono::seconds(10))) {
 			logger::error("[ORG] Timed out waiting for queued render graph submissions");
@@ -2218,8 +2210,6 @@ bool RenderGraphRuntime::Initialize()
 		state->emitExternalCommands = ResolveExport<PFN_dxvkEmitExternalCommands>(d3d11, "dxvkEmitExternalCommands");
 		// Optional: without it, each epoch flushes and waits for DXVK's command stream instead.
 		state->enqueueSubmission = ResolveExport<PFN_dxvkEnqueueInteropSubmission>(d3d11, "dxvkEnqueueInteropSubmission");
-		if (Switches::Equals("CS_ORG_SUBMIT", "flush"))
-			state->enqueueSubmission = nullptr;
 		if (state->enqueueSubmission && !Switches::Equals("CS_ORG_BATCH_SUBMIT", "0"))
 			state->enqueueSubmissions = ResolveExport<PFN_dxvkEnqueueInteropSubmissions>(d3d11, "dxvkEnqueueInteropSubmissions");
 		state->earlyFlush = Switches::Equals("CS_ORG_EARLY_FLUSH", "1");
@@ -2401,7 +2391,7 @@ bool RenderGraphRuntime::Initialize()
 		// CS_ORG_CLOSED (default off, =1 on): each epoch leaves every resource in its home state and starts with a full barrier, so
 		// its admission is independent of the epochs before it. An interop fallback: the epochs' resources otherwise flow between them
 		// through ORG's ledgers.
-		desc.closedExecutions = EpochsEnabled() && Switches::Equals("CS_ORG_CLOSED", "1");
+		desc.closedExecutions = Switches::Equals("CS_ORG_CLOSED", "1");
 		// CS_ORG_EXTERNAL_HOME (default on, =0 off): each epoch gives DXVK's images (the imports) back in their home state on the
 		// graphics queue, where DXVK uses them between the epochs (GENERAL, the external-commands contract).
 		// Native mode (Vulkan or D3D12) has none: no image goes home, the ledgers carry each image's layout from one execution to the
@@ -2409,10 +2399,8 @@ bool RenderGraphRuntime::Initialize()
 		desc.externalHomeStates = !state->native && !Switches::Equals("CS_ORG_EXTERNAL_HOME", "0");
 		if (state->native)
 			logger::info("[ORG] native: no home states; the graph imports native images exclusively and its ledgers carry their layouts");
-		// CS_ORG_REUSE_RECORDINGS (default on, =0 off): tickets record replayable recordings, which the revision-driven epochs need
-		// (their published copies are submitted again). A live epoch's recording is used once. Replayable recordings carry no Tracy GPU
-		// zones: turn it off to profile the epochs' passes on the GPU with Tracy (the revision-driven epochs then run synchronously).
-		desc.reuseRecordings = !Switches::Equals("CS_ORG_REUSE_RECORDINGS", "0");
+		// Tickets record replayable recordings, which the revision-driven epochs need (their published copies are submitted again).
+		desc.reuseRecordings = true;
 		// CS_ORG_KEEP_LIVE (native mode, default on, =0 off): a live epoch's runs reuse the recording kept for their copy while every
 		// pass's revision holds, so a run prepares and records nothing on the host's thread (Desc::reuseLiveRecordings). Guest mode
 		// keeps recording every live run.
@@ -2464,9 +2452,9 @@ bool RenderGraphRuntime::Initialize()
 		// shadow views at AfterShadowMaps, the Z-prepass at the depth pass, the water reflection's faces after it, Skylighting's map, Light
 		// Limit Fix's culling at Prepass, the colour pass where the main pass's opaque batches end, and the forward epoch (T7d) at the
 		// engine's blended draw after the deferred composite.
-		if (EpochsEnabled() && frameConfigured)
+		if (frameConfigured)
 			desc.epochOrder = EpochsOf(frameConfig.epochOrder);
-		else if (EpochsEnabled())
+		else
 			desc.epochOrder = { EpochOf(Segment::ShadowView), EpochOf(Segment::ZPrepass), EpochOf(Segment::Reflection), EpochOf(Segment::FirstPersonDepth),
 				EpochOf(Segment::SkyOcclusion), EpochOf(Segment::LightCulling), EpochOf(Segment::MainOpaque), EpochOf(Segment::Forward), EpochOf(Segment::FirstPerson) };
 		// The self-tests reserve their anchors as any client does, before the reservations freeze.
@@ -2510,10 +2498,6 @@ bool RenderGraphRuntime::Initialize()
 				logger::warn("[ORG] The frame-wait timeline could not be created: per-frame values have no GPU wait");
 			}
 		}
-		// CS_ORG_ASYNC_EPOCHS (default on, =0 off): each epoch's work is prepared, admitted and recorded ahead of
-		// its epoch point on the host's own thread; at the point the render thread only writes the epoch's
-		// latches, records the queued uploads and submits. Needs epochs.
-		state->asyncEpochs = !Switches::Equals("CS_ORG_ASYNC_EPOCHS", "0") && EpochsEnabled();
 	} catch (const std::exception& e) {
 		return disable(std::string("graph host creation failed: ") + e.what());
 	}
@@ -2566,7 +2550,7 @@ bool RenderGraphRuntime::Initialize()
 	// The frame anchors' passes, before any graph is built (so adding the extension rebuilds nothing).
 	FrameAnchors::Attach(*state->host);
 	state->CreateContributorHost();
-	if (state->asyncEpochs) {
+	{
 		try {
 			std::vector<std::uint32_t> epochs{ EpochOf(Segment::Reflection), EpochOf(Segment::ShadowView), EpochOf(Segment::ZPrepass), EpochOf(Segment::SkyOcclusion),
 				EpochOf(Segment::LightCulling), EpochOf(Segment::MainOpaque), EpochOf(Segment::Forward), EpochOf(Segment::FirstPersonDepth), EpochOf(Segment::FirstPerson) };
@@ -2596,37 +2580,18 @@ bool RenderGraphRuntime::Initialize()
 				logger::info("[ORG] frame segments: epochs {} are revision-driven and open", fmt::join(segments, ","));
 			}
 			logger::info("[ORG] async epochs: {}; revision-driven: {}", fmt::join(epochs, ","), fmt::join(revisionEpochs, ","));
-			// In DXVK's own command stream unless CS_ORG_IN_STREAM=0 (or DXVK takes no external commands); a list of epochs (3,1) puts only
-			// those there.
+			// In DXVK's own command stream when DXVK takes external commands.
 			// Native mode owns its queues: no external epochs. Every epoch submits directly, and a pass recorded at execution is
 			// recorded inline, into the epoch's own command list at its place in the graph's order, with the graph's barriers
 			// (org::GraphHost::SetInlineAtExecution), on Vulkan and D3D12 alike.
-			// A pass a description turns off records no barriers of its own: ORG folds them into the next pass that runs
-			// (FoldSkippedPassBarriers). CS_ORG_KEEP_SKIPPED_BARRIERS=1 keeps them where the plan put them, for A/B runs.
-			if (Switches::On("CS_ORG_KEEP_SKIPPED_BARRIERS")) {
-				org::diagnostics::DiagnosticKeepSkippedPassBarriers().store(true, std::memory_order_relaxed);
-				logger::info("[ORG] skipped passes keep their barriers (CS_ORG_KEEP_SKIPPED_BARRIERS=1)");
-			}
 			if (state->native) {
 				state->host->SetInlineAtExecution(true);
 				logger::info(
 					"[ORG] native: no external epochs; every epoch submits directly, and passes recorded at execution are recorded "
 					"inline into their epoch's command list");
 			}
-			if (state->emitExternalCommands && !Switches::Equals("CS_ORG_IN_STREAM", "0")) {
+			if (state->emitExternalCommands) {
 				state->inStreamEpochs = epochs;
-				const auto list = Switches::Value("CS_ORG_IN_STREAM");
-				if (list.find(',') != std::string::npos) {
-					std::vector<std::uint32_t> chosen;
-					for (const char* at = list.c_str(); *at;) {
-						chosen.push_back(static_cast<std::uint32_t>(std::strtoul(at, nullptr, 10)));
-						const char* comma = std::strchr(at, ',');
-						if (!comma)
-							break;
-						at = comma + 1;
-					}
-					std::erase_if(state->inStreamEpochs, [&](std::uint32_t epoch) { return std::ranges::find(chosen, epoch) == chosen.end(); });
-				}
 				std::ranges::sort(state->inStreamEpochs);
 				logger::info("[ORG] in-stream epochs: {} (their graphics work in DXVK's command list, split only where a wait needs it)",
 					fmt::join(state->inStreamEpochs, ","));
@@ -2636,27 +2601,23 @@ bool RenderGraphRuntime::Initialize()
 			state->host->SetAsyncEpochs(std::move(epochs), std::move(revisionEpochs));
 			logger::info("[ORG] Async epochs: each epoch is prepared and recorded ahead on the graph host's thread; the render thread submits (DCLF's from its scene revisions)");
 		} catch (const std::exception& e) {
-			logger::warn("[ORG] Async epochs unavailable ({}); epochs run synchronously", e.what());
-			state->asyncEpochs = false;
+			return disable(std::string("async epochs unavailable: ") + e.what());
 		}
 	}
 	{
 		// Drawcall Limit Fix's epochs are built by its own builder: on its scene worker from its immutable build state, attached at a
 		// frame's end (DCLF::Draws::BuildState; BuildManager::ExternalBuilder). Until it registers, and with CS_DCLF_ASYNC_BUILDS=0, they
-		// are built on the render thread at its build point. Without epochs the one graph is everything's.
+		// are built on the render thread at its build point.
 		RenderGraph::BuildManager::Desc builds{};
 		builds.host = state->host.get();
 		const bool dclfAsync = !Switches::Equals("CS_DCLF_ASYNC_BUILDS", "0");
-		if (!EpochsEnabled())
-			builds.ownerBuilt.push_back(EpochOf(Segment::LightCulling));
-		else
-			for (std::uint32_t index = 0; index < static_cast<std::uint32_t>(Segment::Count); ++index)
-				if (IsDclfSegment(static_cast<Segment>(index))) {
-					const auto epoch = EpochOf(static_cast<Segment>(index));
-					auto& list = dclfAsync ? builds.external : builds.ownerBuilt;
-					if (std::ranges::find(list, epoch) == list.end())
-						list.push_back(epoch);
-				}
+		for (std::uint32_t index = 0; index < static_cast<std::uint32_t>(Segment::Count); ++index)
+			if (IsDclfSegment(static_cast<Segment>(index))) {
+				const auto epoch = EpochOf(static_cast<Segment>(index));
+				auto& list = dclfAsync ? builds.external : builds.ownerBuilt;
+				if (std::ranges::find(list, epoch) == list.end())
+					list.push_back(epoch);
+			}
 		// CS's stages: a finished build is staged and recorded on the host's thread, then switched in whole with its recordings at a frame
 		// boundary (FrameAnchors::BeginFrame), so a build never blanks a stage.
 		builds.staged = FrameAnchors::SegmentEpochs();
@@ -3004,8 +2965,8 @@ bool RenderGraphRuntime::BuildSetupGraphs(std::string_view a_caller)
 
 void RenderGraphRuntime::OnEpochFailed(std::uint32_t a_epoch, bool a_keptGraph, const std::string& a_error)
 {
-	// Epochs are segment values. Without epochs (CS_ORG_EPOCHS=0) the one graph runs every segment: its failure is the whole graph's.
-	if (!EpochsEnabled() || a_epoch >= static_cast<std::uint32_t>(Segment::Count)) {
+	// Epochs are segment values: a failure outside them is the whole graph's.
+	if (a_epoch >= static_cast<std::uint32_t>(Segment::Count)) {
 		logger::error("[ORG] Render graph failed, disabling the graph: {}", a_error);
 		impl->faulted = true;
 		disabledReason = a_error;
@@ -3280,15 +3241,9 @@ void RenderGraphRuntime::AddEpochJoinWait(std::chrono::steady_clock::duration a_
 		runtime.impl->bodyJoinUs += std::chrono::duration<double, std::micro>(a_waited).count();
 }
 
-bool RenderGraphRuntime::EpochsEnabled()
-{
-	static const bool enabled = !Switches::Equals("CS_ORG_EPOCHS", "0");
-	return enabled;
-}
-
 std::uint32_t RenderGraphRuntime::EpochOf(Segment a_segment)
 {
-	return EpochsEnabled() ? static_cast<std::uint32_t>(a_segment) : UINT32_MAX;
+	return static_cast<std::uint32_t>(a_segment);
 }
 
 void RenderGraphRuntime::ConfigureFrame(FrameConfig a_config)
@@ -3309,7 +3264,7 @@ std::shared_ptr<org::ExternalEpochExecution> RenderGraphRuntime::ExecuteExternal
 	const std::function<void(org::RenderGraph&)>& a_beforePrepare, std::shared_ptr<const void> a_resourceOwner)
 {
 	ZoneScopedN("CS.ORG.ExecuteExternalEpoch");
-	if (!IsActive() || !impl->asyncEpochs)
+	if (!IsActive())
 		return nullptr;
 	// As ExecuteEpoch: the hosted work sees the submission first, and its commit writes the run's data first. Drawcall Limit Fix's graphs are
 	// external epochs in guest mode and host the skeleton's clears there too.
@@ -3534,14 +3489,11 @@ RenderGraphRuntime::EpochResult RenderGraphRuntime::TryExecuteEpoch(Segment a_se
 			impl->NoteStreamClosed("early flush", Impl::SegmentLabel(a_segment));
 		}
 	} else if (impl->interop) {
-		// Older DXVK (or CS_ORG_SUBMIT=flush): submit and wait for every D3D11 command recorded
+		// Older DXVK: submit and wait for every D3D11 command recorded
 		// so far, then submit the graph directly under DXVK's queue lock.
 		impl->interop->FlushRenderingCommands();
 	}
 	lap(impl->flushUs);
-	const bool async = impl->asyncEpochs;
-	if (!async)
-		impl->MarkEpoch(impl->host->FramesExecuted(), a_segment);
 	impl->TakeCompletedEpochs();
 	lap(impl->completionsUs);
 	impl->epochHookCalls = 0;
@@ -3567,19 +3519,14 @@ RenderGraphRuntime::EpochResult RenderGraphRuntime::TryExecuteEpoch(Segment a_se
 				a_beforePrepare(a_graph);
 			};
 		}
-		std::shared_ptr<org::ExternalEpochExecution> execution;
-		if (async) {
-			if (impl->epochStats)
-				impl->host->SetSubmissionSegment(FrameSegmentOf(a_segment, impl->frameStage));
-			impl->host->SubmitEpoch(EpochOf(a_segment), beforePrepare, a_resourceOwner);
-			impl->MarkEpoch(impl->host->LastHostFrame(), a_segment);
-			// An in-stream epoch: its graphics work into DXVK's own command stream, here.
-			execution = impl->host->TakeExternalExecution();
-			if (execution && !impl->EmitExecution(execution, Impl::SegmentLabel(a_segment)))
-				throw std::runtime_error("DXVK took no external commands for an in-stream epoch");
-		} else {
-			impl->host->ExecuteFrame(nullptr, beforePrepare, EpochOf(a_segment), a_resourceOwner);
-		}
+		if (impl->epochStats)
+			impl->host->SetSubmissionSegment(FrameSegmentOf(a_segment, impl->frameStage));
+		impl->host->SubmitEpoch(EpochOf(a_segment), beforePrepare, a_resourceOwner);
+		impl->MarkEpoch(impl->host->LastHostFrame(), a_segment);
+		// An in-stream epoch: its graphics work into DXVK's own command stream, here.
+		const auto execution = impl->host->TakeExternalExecution();
+		if (execution && !impl->EmitExecution(execution, Impl::SegmentLabel(a_segment)))
+			throw std::runtime_error("DXVK took no external commands for an in-stream epoch");
 		if (!impl->CloseComputeEpoch(Impl::SegmentLabel(a_segment), execution != nullptr, execution && execution->exitSplit))
 			throw std::runtime_error("DXVK rejected the compute queue's exit wait");
 		if (impl->batching && (heldSegments.load(std::memory_order_relaxed) >> static_cast<std::uint32_t>(a_segment) & 1u)) {
@@ -3597,15 +3544,12 @@ RenderGraphRuntime::EpochResult RenderGraphRuntime::TryExecuteEpoch(Segment a_se
 			// Since ExecuteEpoch's last lap (the completions): the host's call and the stream's close.
 			const double totalUs = std::chrono::duration<double, std::micro>(elapsed).count();
 			const auto& t = impl->host->LastFrameTimings();
-			impl->closeUs = 0.0;
-			if (async) {
-				double sinceCompletions = 0.0;
-				lap(sinceCompletions);
-				const double hostUs = t.buildUs + t.ticketWaitUs + t.releaseUs + t.beforePrepareUs + t.checkUs + t.uploadsUs + t.submitUs + t.postUs;
-				impl->closeUs = (std::max)(0.0, sinceCompletions - hostUs);
-			}
+			double sinceCompletions = 0.0;
+			lap(sinceCompletions);
+			const double hostUs = t.buildUs + t.ticketWaitUs + t.releaseUs + t.beforePrepareUs + t.checkUs + t.uploadsUs + t.submitUs + t.postUs;
+			impl->closeUs = (std::max)(0.0, sinceCompletions - hostUs);
 			const double inputsUs = t.beforePrepareUs;
-			const double submitUs = async ? t.ticketWaitUs + t.submitUs + impl->closeUs : 0.0;
+			const double submitUs = t.ticketWaitUs + t.submitUs + impl->closeUs;
 			epochTotals.inputsUs += inputsUs;
 			epochTotals.submitUs += submitUs;
 			epochTotals.overheadUs += (std::max)(0.0, totalUs - inputsUs - submitUs);

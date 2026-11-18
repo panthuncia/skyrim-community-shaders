@@ -347,7 +347,7 @@ namespace FrameAnchors
 
 	/**
 	 * @brief Reserves an anchor's epoch. Call before the render graph initializes (a feature's Load or PostPostLoad, when its ORG
-	 * path is on): the frame's epochs are fixed then. False, logged, afterwards, or when epochs are off (CS_ORG_EPOCHS=0).
+	 * path is on): the frame's epochs are fixed then. False, logged, afterwards.
 	 */
 	bool Reserve(Anchor a_anchor);
 

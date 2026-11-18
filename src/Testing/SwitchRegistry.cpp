@@ -85,7 +85,6 @@ namespace Testing::SwitchRegistry
 			"CS_NVPERF_START_FRAME",
 			"CS_NVPERF_TEMPLATE",
 			"CS_ORG",
-			"CS_ORG_ABSENT_PASSES",
 			"CS_ORG_ADAPT_READBACK",
 			"CS_ORG_ALIAS_LOG",
 			"CS_ORG_ANCHOR_SELFTEST",
@@ -141,9 +140,7 @@ namespace Testing::SwitchRegistry
 			"CS_ORG_IMAGESPACE_LOG",
 			"CS_ORG_IMAGE_DUPLICATE_CHECK",
 			"CS_ORG_IMGUI",
-			"CS_ORG_IN_STREAM",
 			"CS_ORG_KEEP_GATED",
-			"CS_ORG_KEEP_SKIPPED_BARRIERS",
 			"CS_ORG_KEEP_LIVE",
 			"CS_ORG_LIGHT_LIMIT_FIX_SHADOWS",
 			"CS_ORG_LLF_PARITY",
@@ -178,7 +175,6 @@ namespace Testing::SwitchRegistry
 			"CS_ORG_RESIDUE_CENSUS_FRAMES",
 			"CS_ORG_RESIDUE_CENSUS_TOP",
 			"CS_ORG_RESTING_LAYOUTS",
-			"CS_ORG_REUSE_RECORDINGS",
 			"CS_ORG_RT_SAMPLE",
 			"CS_ORG_SCALEFORM",
 			"CS_ORG_SCREENSHOT",
@@ -190,7 +186,6 @@ namespace Testing::SwitchRegistry
 			"CS_ORG_SKY",
 			"CS_ORG_SKYLIGHTING",
 			"CS_ORG_SSGI_DEBUG",
-			"CS_ORG_SUBMIT",
 			"CS_ORG_SUBMIT_THREAD",
 			"CS_ORG_SUBSURFACE_SCATTERING",
 			"CS_ORG_TERRAIN_BLENDING",
@@ -289,11 +284,9 @@ namespace Testing::SwitchRegistry
 			std::string_view description;
 		};
 		constexpr Described kDescribed[] = {
-			{ "CS_ORG_ASYNC_EPOCHS", "0: epochs are recorded on the render thread" },
 			{ "CS_ORG_BATCH_SUBMIT", "0: an epoch's submissions go to DXVK one at a time" },
 			{ "CS_ORG_CLOSED", "1: epochs return every resource to its home state and start with a full barrier (closed executions, an interop fallback)" },
 			{ "CS_ORG_EARLY_FLUSH", "1: DXVK's pending work is flushed when an epoch starts (a second DXVK list per epoch)" },
-			{ "CS_ORG_EPOCHS", "0: the render graph runs without epochs, and DCLF does not install" },
 			{ "CS_ORG_EXTERNAL_HOME", "0: epochs do not return DXVK's images to their home state on the graphics queue (unsafe: DXVK expects them there)" },
 		};
 

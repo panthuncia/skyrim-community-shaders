@@ -240,10 +240,10 @@ void DrawcallLimitFix::SetupResources()
 	// reading their bindings themselves (DrawPipelines, DxilStages). What has no D3D12 port yet is off by the switches native mode sets
 	// (Native::ApplySwitches: the CPU pipeline, the shadow views, the draw and program families), each named in its log line.
 	const bool d3d12 = ::RenderGraph::Backend::IsD3D12();
-	if (installed && RenderGraphRuntime::Get().IsActive() && RenderGraphRuntime::EpochsEnabled())
+	if (installed && RenderGraphRuntime::Get().IsActive())
 		DCLF::ShaderPrograms::Get().StartPrecompile();
 	// Runs right after the render graph tried to adopt DXVK's device (State::SetupResources). The hooks went in at PostPostLoad,
-	// before any device existed; without the graph (or its epochs: CS_ORG_EPOCHS, async: CS_ORG_ASYNC_EPOCHS) or the device's
+	// before any device existed; without the graph or the device's
 	// indirect pipelines there is nothing to draw with, while the claims would stand and withhold the engine's passes. So DCLF is
 	// forced off here, with the reason in the log and the menu.
 	if (!installed)
@@ -251,10 +251,8 @@ void DrawcallLimitFix::SetupResources()
 	auto& graph = RenderGraphRuntime::Get();
 	if (!graph.IsActive())
 		unavailableReason = graph.GetDisabledReason();
-	else if (!RenderGraphRuntime::EpochsEnabled())
-		unavailableReason = "the render graph runs without epochs (CS_ORG_EPOCHS=0)";
-	else if (!graph.Host() || !graph.Host()->AsyncEpochs())
-		unavailableReason = "the render graph runs without async epochs (CS_ORG_ASYNC_EPOCHS=0)";
+	else if (!graph.Host())
+		unavailableReason = "the render graph has no host";
 	else if (!DCLF::DrawPipelines::Get().Enabled())
 		unavailableReason = "the GPU or driver lacks the indirect pipelines DCLF draws with (see the [DCLF] Indirect pipelines line)";
 	else {

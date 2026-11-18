@@ -108,7 +108,7 @@ namespace DCLF
 			// CS_DCLF_SHADOWS: Features/OcclusionMaps' CS_DCLF_SKYLIGHT and CS_DCLF_PRECIPITATION, Features/Reflection's and
 			// Features/FirstPerson's switches before CS_DCLF_OPAQUE_EFFECTS, Features/Billboards' CS_DCLF_BILLBOARD_PARTICLES after it.)
 			// (Features/Fades' CS_DCLF_EMPTY_FADE_NODE is listed here, after CS_DCLF_SHADOWS and the rows anchored after it.)
-			// (The render graph's epoch and submission switches, CS_ORG_EPOCHS and the rest, are in src/Testing/SwitchRegistry.cpp.)
+			// (The render graph's submission switches are in src/Testing/SwitchRegistry.cpp.)
 
 			{ PersistentParity, "CS_DCLF_PERSISTENT_PARITY", P, N, false, "1: every kept store (records, bindings, slots, shading, geometry) against a rebuild, every 60 frames" },
 			{ WalkParity, "CS_DCLF_WALK_PARITY", P, N, false, "1: the delta walk against a dense walk, every 60 frames" },

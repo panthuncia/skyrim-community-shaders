@@ -15,12 +15,6 @@ namespace DCLF
 		auto* host = RenderGraphRuntime::Get().Host();
 		if (!host)
 			return;
-		// DCLF draws only from scene revisions' recordings, which need async, revision-driven epochs (CS_ORG_ASYNC_EPOCHS and
-		// CS_ORG_REUSE_RECORDINGS): without them no frame is DCLF's.
-		if (!host->AsyncEpochs() && !failed) {
-			logger::error("[DCLF] the render graph runs without async epochs: no scene revision is recorded, and DCLF draws nothing");
-			failed = true;
-		}
 		auto& rv = impl->revisions;
 		// The host always builds explicitly (the build manager: RenderGraphRuntime::BuildIfRequested). While scene revisions draw, this
 		// point is the frame's build point: an extension added or removed during a frame waits for it, so the graph a frame's revision

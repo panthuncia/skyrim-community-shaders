@@ -1867,10 +1867,6 @@ namespace FrameAnchors
 			logger::warn("[ORG] frame anchor {}: reserved after the render graph initialized; it has no epoch this session", Name(a_anchor));
 			return false;
 		}
-		if (!RenderGraphRuntime::EpochsEnabled()) {
-			logger::info("[ORG] frame anchor {}: not reserved, the render graph runs without epochs (CS_ORG_EPOCHS=0)", Name(a_anchor));
-			return false;
-		}
 		state.reserved[IndexOf(a_anchor)] = true;
 		return true;
 	}
@@ -2746,13 +2742,6 @@ namespace FrameAnchors
 			return active.fields;
 		}
 
-		/** @brief CS_ORG_ABSENT_PASSES=0 keeps every pass in the stages' builds, off passes skipped and folded (A/B runs). */
-		bool AbsentPassesOn()
-		{
-			static const bool on = !Switches::Equals("CS_ORG_ABSENT_PASSES", "0");
-			return on;
-		}
-
 		/** @brief Seconds of a stage's own clock that a pass no frame wants stays present. */
 		constexpr double kKeyHold = 10.0;
 
@@ -2766,7 +2755,7 @@ namespace FrameAnchors
 		 */
 		void UpdateKey(State& a_state, std::uint32_t a_declared, bool a_inRecipe, const RenderGraph::Frame::Description& a_frame, bool a_kindSwitch)
 		{
-			if (!AbsentPassesOn() || !a_state.host)
+			if (!a_state.host)
 				return;
 			auto& use = a_state.keyUse[a_declared];
 			const auto snapshot = a_state.snapshot.load(std::memory_order_acquire);
@@ -3633,10 +3622,6 @@ namespace FrameAnchors
 			                   !Switches::On("CS_ORG_OWNED_FRAME");
 			if (!native && !guest)
 				return false;
-			if (!RenderGraphRuntime::EpochsEnabled() || Switches::Equals("CS_ORG_ASYNC_EPOCHS", "0") || Switches::Equals("CS_ORG_REUSE_RECORDINGS", "0")) {
-				logger::warn("[ORG] frame segments need epochs, async epochs and replayable recordings; every anchor keeps its own epoch");
-				return false;
-			}
 			if (native)
 				logger::info("[ORG] frame segments on: the CS stages' steps run in their epochs, recorded per description");
 			else
@@ -4369,8 +4354,6 @@ namespace FrameAnchors
 	void AddToFrame(std::vector<std::uint32_t>& a_epochs)
 	{
 		auto& state = Anchors();
-		if (!RenderGraphRuntime::EpochsEnabled())
-			return;
 		state.frozen = true;
 		// Declared segments: an epoch for each that is on and has a reserved anchor; the anchors it holds wholly have none of their
 		// own. Its end tap's anchor is reserved with it, so the hook that ends it always runs.
@@ -4416,8 +4399,6 @@ namespace FrameAnchors
 	void SetTicketsAhead(org::GraphHost& a_host)
 	{
 		auto& state = Anchors();
-		if (!RenderGraphRuntime::EpochsEnabled())
-			return;
 		// An anchor that runs ten times a frame back to back would otherwise wait for a preparation at each run.
 		const auto most = static_cast<std::uint32_t>((std::min)(Switches::Number("CS_ORG_TICKETS_AHEAD", 16), std::uint64_t{ 64 }));
 		for (std::uint32_t i = 0; i < kAnchors; ++i)

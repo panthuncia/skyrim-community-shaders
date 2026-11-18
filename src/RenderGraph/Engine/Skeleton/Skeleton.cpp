@@ -860,7 +860,7 @@ namespace RenderGraph::Engine::Skeleton
 			const auto& info = kHostInfo[HostIndex(a_host)];
 			if (a_host == Host::Own || !HostingOn())
 				return false;
-			return info.dclf ? RenderGraphRuntime::EpochsEnabled() : FrameAnchors::HasEpoch(info.anchor);
+			return info.dclf || FrameAnchors::HasEpoch(info.anchor);
 		}
 
 		std::string HostedClientId(std::size_t a_group, Host a_host)

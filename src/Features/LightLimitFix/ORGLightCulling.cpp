@@ -103,12 +103,9 @@ namespace
 		std::shared_ptr<const Shape> pending;
 	};
 
-	// The shape the passes record against. With epochs, these passes run only in the light culling epoch;
-	// without, every epoch runs them and they are empty outside it.
+	// The shape the passes record against. These passes run only in the light culling epoch.
 	std::shared_ptr<const Shape> CurrentShape(const Resources& a_resources)
 	{
-		if (!RenderGraphRuntime::EpochsEnabled() && RenderGraphRuntime::Get().CurrentSegment() != RenderGraphRuntime::Segment::LightCulling)
-			return nullptr;
 		return a_resources.shape.load(std::memory_order_acquire);
 	}
 

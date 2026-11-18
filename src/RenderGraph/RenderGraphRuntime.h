@@ -148,15 +148,7 @@ public:
 	 */
 	static constexpr std::uint32_t kRunCapacity = 256;
 
-	/**
-	 * @brief CS_ORG_EPOCHS (default on, =0 off): each segment is an ORG host epoch. The graph compiles once
-	 * over the whole frame - scheduling and transient aliasing see every segment's lifetimes, in frame order -
-	 * and each ExecuteEpoch prepares, admits, records and submits only its own segment's passes. Off, every
-	 * epoch runs every pass of every feature and the passes no-op outside their segment, as before.
-	 */
-	static bool EpochsEnabled();
-
-	/** @brief The ORG epoch a segment's passes declare (ExternalPassDesc::Epoch); every epoch when EpochsEnabled is off. */
+	/** @brief The ORG epoch a segment's passes declare (ExternalPassDesc::Epoch). Each segment is an ORG host epoch. */
 	static std::uint32_t EpochOf(Segment a_segment);
 
 	/**
@@ -525,9 +517,9 @@ public:
 	 */
 	bool RecordsAtExecution(std::uint32_t a_epoch) const;
 	/**
-	 * @brief The async epochs whose graphics work goes into DXVK's own command stream (CS_ORG_IN_STREAM, default on when DXVK takes
-	 * external commands; =0 off): external epochs (org::GraphHost::SetExternalEpochs) whose execution ExecuteEpoch emits there, so
-	 * DXVK's command list is split only where a wait needs it. Empty when off.
+	 * @brief The async epochs whose graphics work goes into DXVK's own command stream, when DXVK takes external commands: external
+	 * epochs (org::GraphHost::SetExternalEpochs) whose execution ExecuteEpoch emits there, so DXVK's command list is split only where
+	 * a wait needs it. Empty in native mode.
 	 */
 	std::vector<std::uint32_t> InStreamEpochs() const;
 
