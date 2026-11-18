@@ -2,6 +2,7 @@
 #include "RenderGraph/BufferRefs.h"
 
 #include "RenderGraph/RenderGraphRuntime.h"
+#include "RenderGraph/ShaderTarget.h"
 
 #include <OpenRenderGraph/GraphHost.h>
 #include <Resources/Buffers/Buffer.h>
@@ -15,27 +16,47 @@ namespace DCLF::TextureFeedback
 	namespace
 	{
 		std::shared_ptr<org::Buffer> buffer;  // the render thread's, kept for the process
+		rhi::ResourcePtr committed;           // D3D12's instead, kept for the process
 		std::atomic<std::uint64_t> ref{ 0 };  // the buffer's view ref (BufferRef::Bits), which the pixel stages write through
 		std::atomic<volatile std::uint32_t*> words{ nullptr };
 	}
 
 	void Ensure()
 	{
-		if (buffer)
+		if (buffer || committed)
 			return;
 		auto* host = RenderGraphRuntime::Get().Host();
 		if (!host || !host->Graph())
 			return;
-		buffer = org::Buffer::CreateShared(rhi::HeapType::HostVisibleCoherent, std::uint64_t(kWords) * sizeof(std::uint32_t), true);
-		buffer->SetName("cs.dclf.texture-feedback");
-		auto resource = buffer->GetAPIResource();
+		const std::uint64_t bytes = std::uint64_t(kWords) * sizeof(std::uint32_t);
+		rhi::Resource resource{};
+		RenderGraph::BufferRef made{};
+		if (::RenderGraph::ShaderTarget::IsSpirv()) {
+			buffer = org::Buffer::CreateShared(rhi::HeapType::HostVisibleCoherent, bytes, true);
+			buffer->SetName("cs.dclf.texture-feedback");
+			resource = buffer->GetAPIResource();
+			// The colour pass writes the words with no order between draws, and only the streaming worker reads them, from the mapping. No
+			// GPU pass reads the buffer, so no pass declares it: the validator counts its ref as host feedback.
+			if (RenderGraph::UndeclaredAccess::On())
+				RenderGraph::UndeclaredAccess::NoteHostFeedback(buffer);
+			made = RenderGraph::BufferRefOf(*buffer);
+		} else {
+			// An UPLOAD buffer cannot have unordered access, and the graph's allocator takes only the standard heaps.
+			rhi::ResourceDesc desc{};
+			desc.type = rhi::ResourceType::Buffer;
+			desc.heapType = rhi::HeapType::HostCached;
+			desc.resourceFlags = rhi::RF_AllowUnorderedAccess;
+			desc.debugName = "cs.dclf.texture-feedback";
+			desc.buffer.sizeBytes = bytes;
+			if (host->Device().CreateCommittedResource(desc, committed) != rhi::Result::Ok || !committed) {
+				logger::critical("[DCLF] Texture streaming's feedback buffer could not be made");
+				return;
+			}
+			resource = committed.Get();
+			made = RenderGraph::BufferRefOf(host->Device(), resource.GetHandle());
+		}
 		void* mapped = nullptr;
 		resource.Map(&mapped);
-		// The colour pass writes the words with no order between draws, and only the streaming worker reads them, from the mapping. No
-		// GPU pass reads the buffer, so no pass declares it: the validator counts its ref as host feedback.
-		if (RenderGraph::UndeclaredAccess::On())
-			RenderGraph::UndeclaredAccess::NoteHostFeedback(buffer);
-		const RenderGraph::BufferRef made = RenderGraph::BufferRefOf(*buffer);
 		if (!mapped || !made) {
 			logger::warn("[DCLF] Texture streaming's feedback buffer has no {}: no feedback", mapped ? "buffer view ref" : "mapping");
 			return;
