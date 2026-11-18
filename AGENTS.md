@@ -64,9 +64,30 @@ AI-based training, scraping, and other automated or human reuse do not waive the
 
 For detailed explanations, examples, and comprehensive guidance, refer to `.claude/CLAUDE.md`.
 
-### Known Driver Bug: AMD RDNA2 Shader Compiler
+### Shader Rule: No Equality-`||` Guards (AMD RDNA2 Miscompile)
 
-AMD's Windows shader compiler for RDNA2 (seen on the RX 6600) miscompiles an early `return` or `continue` guarded by an `||` of equality tests. Past the guard it treats the equality as true and folds the value to the constant. Examples: `if (a == 0 || b == 0) return;` made `a` read as 0 below it; `k == kNone || k >= count` made `k` read as `kNone`. It has broken DCLF shaders three times (portal programs, texture transforms twice). The symptom looks like bad data or missing synchronization, so it is easy to misdiagnose.
+**Never write an early `return`, `continue`, `break` or `discard` guarded by an `||` of equality tests in any shader.** AMD's Windows SPIR-V shader compiler for RDNA2 (seen on the RX 6600) miscompiles that shape. Past the guard it treats the equality as true and folds the value to the constant.
 
-- Write null and sentinel guards branch-free (zero the loop counts with a select), or as one unsigned relational compare.
-- To confirm, dump the driver's ISA with `BASICRHI_VK_DUMP_ISA=<dir>` and look for a constant where a loaded value should be, for example a descriptor load from heap offset `null` (slot 0).
+Forbidden shapes:
+
+```hlsl
+if (a == 0 || b == 0) return;            // `a` read as 0 below it
+if (k == kNone || k >= count) continue;  // `k` read as `kNone` below it
+if (!written || milestone == last) return;
+```
+
+Write the guard one of these ways instead:
+
+```hlsl
+if (min(a, b) == 0u) return;             // one unsigned relational compare
+
+bool report = written && milestone != last;
+if (report) { /* the work, with no early return behind the test */ }
+
+uint count = (a != 0u && b != 0u) ? n : 0u;  // zero the loop count with a select
+```
+
+- The same applies to the De Morgan form: an `&&` of inequality tests around an early exit.
+- It has broken DCLF shaders four times: the portal programs, texture transforms twice, and the fade write-back (`FadeStateCS.hlsl`, no fade event was ever appended). The symptom looks like bad data or missing synchronization, so it is easy to misdiagnose.
+- When reviewing or editing a shader, rewrite any guard of this shape you find.
+- To confirm a suspected case, dump the driver's ISA with `BASICRHI_VK_DUMP_ISA=<dir>` and look for a constant where a loaded value should be, for example a descriptor load from heap offset `null` (slot 0).
