@@ -180,12 +180,11 @@ void RootSlot(uint a_slot, FadeFrame a_frame)
 void ObjectSlot(uint a_slot)
 {
 	ByteAddressBuffer frustum = ResourceDescriptorHeap[FrustumIndex];
-	uint frustumBytes;
-	frustum.GetDimensions(frustumBytes);
 	RWStructuredBuffer<uint> reported = ResourceDescriptorHeap[ObjectReportedIndex];
 	uint reportedSlots, stride;
 	reported.GetDimensions(reportedSlots, stride);
-	if (a_slot * 4u >= frustumBytes || a_slot >= reportedSlots)
+	// ObjectSlots bounds the frustum stamps. A raw GetDimensions would read a structured view's element count on D3D12.
+	if (a_slot >= reportedSlots)
 		return;
 	const uint stamp = frustum.Load(a_slot * 4u);
 	const bool stamped = (stamp & kFrustumStampMask) == (SceneFrame & kFrustumStampMask);

@@ -45,7 +45,7 @@ cbuffer BuildDrawsConstants : register(b0)
 	// its draw is recorded on the CPU, which cannot know phase 1's count. The decal sub-ranges follow (one per decal group and state
 	// class, where each starts the latch's class table says): DecalStride slots each, slot = the decal's ordinal in the engine's draw
 	// order.
-	uint PushPhaseTwoBase;
+	uint PushPhaseTwoBase;  // ShadowCasterRows: the caster rows' capacity instead
 	uint DecalBase;
 	uint DecalStride;
 	uint PipelineRowStride;
@@ -1818,7 +1818,8 @@ void LoadShadowView(ShadowBuildView a_view)
 // Hands out the frame's caster rows, before the shadow epoch's culling (ShadowCasterRowsPass): each caster and occluder its rows, consecutive,
 // a row per partition in each view family it has a key in. A thread per input of the shadow list. PushLatchOffset names the list in the latch
 // (ShadowLatchLayout::RowsInputsOffset), PushSequencesIndex the objects' first rows, PushCountIndex the words handed out (zeroed by the epoch),
-// VisibilityIndex the rows, which bound them. An object past the rows has none: its views leave it to count (kCountCasterRowsLost).
+// VisibilityIndex the rows and PushPhaseTwoBase how many the bound version holds. An object past the rows has none: its views leave it to
+// count (kCountCasterRowsLost).
 [numthreads(64, 1, 1)] void ShadowCasterRows(uint3 dispatchID : SV_DispatchThreadID) {
 	ByteAddressBuffer latch = ResourceDescriptorHeap[LatchIndex];
 	const uint2 list = latch.Load2(PushLatchOffset);
@@ -1834,9 +1835,7 @@ void LoadShadowView(ShadowBuildView a_view)
 	RWByteAddressBuffer used = ResourceDescriptorHeap[PushCountIndex];
 	uint first;
 	used.InterlockedAdd(0, rows, first);
-	RWByteAddressBuffer casterRows = ResourceDescriptorHeap[VisibilityIndex];
-	uint bytes;
-	casterRows.GetDimensions(bytes);
+	// The host's count. On D3D12 a raw GetDimensions of a structured view gives its elements, not bytes.
 	RWByteAddressBuffer firsts = ResourceDescriptorHeap[PushSequencesIndex];
-	firsts.Store(inputs.Load(inputOffset + 32) * 4, first + rows <= bytes / kSequenceStride ? first : 0xFFFFFFFFu);
+	firsts.Store(inputs.Load(inputOffset + 32) * 4, first + rows <= PushPhaseTwoBase ? first : 0xFFFFFFFFu);
 }

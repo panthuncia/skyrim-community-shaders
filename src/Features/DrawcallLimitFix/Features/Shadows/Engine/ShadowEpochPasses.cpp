@@ -55,6 +55,7 @@ namespace DCLF::Draws
 		std::shared_ptr<const org::LatchBlock> latch;
 		rhi::CommandSignatureHandle signature{};
 		std::uint32_t listOffset = 0, dispatchOffset = 0;  // in the frame slot's region (ShadowLatchLayout)
+		std::uint32_t rowCapacity = 0;                     // the rows the revision's version of the caster rows holds
 	};
 
 	/**
@@ -78,7 +79,7 @@ namespace DCLF::Draws
 
 		void Revision(std::vector<std::uint64_t>&) const {}
 
-		ShadowCasterRowsPrepared Prepare(const ShadowCasterRowsBindings&, [[maybe_unused]] const org::PassPrepareContext& a_preparation) const
+		ShadowCasterRowsPrepared Prepare(const ShadowCasterRowsBindings&, const org::PassPrepareContext& a_preparation) const
 		{
 			ShadowCasterRowsPrepared prepared{};
 			const auto frame = CurrentShadowFrame(a_preparation);
@@ -89,6 +90,7 @@ namespace DCLF::Draws
 			prepared.signature = resources->rowsDispatchSignature->GetHandle();
 			prepared.listOffset = frame->latchLayout.RowsInputsOffset();
 			prepared.dispatchOffset = frame->latchLayout.RowsDispatchOffset();
+			prepared.rowCapacity = static_cast<std::uint32_t>(NamedUnitsOf(a_preparation, resources->casterRows));
 			return prepared;
 		}
 
@@ -108,6 +110,7 @@ namespace DCLF::Draws
 			constants.sequencesIndex = a_recording.Index(a_bindings.firsts);
 			constants.countIndex = a_recording.Index(a_bindings.used);
 			constants.visibilityIndex = a_recording.Index(a_bindings.rows);
+			constants.phaseTwoBase = a_prepared.rowCapacity;
 			commands.PushConstants(rhi::ShaderStage::Compute, 0, 0, 0, kBuildDrawsConstantWords, reinterpret_cast<const std::uint32_t*>(&constants));
 			commands.ExecuteIndirect(a_prepared.signature, at.buffer->GetAPIResource().GetHandle(), region + a_prepared.dispatchOffset, {}, 0, 1);
 		}

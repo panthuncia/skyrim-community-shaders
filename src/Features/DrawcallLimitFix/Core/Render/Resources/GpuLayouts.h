@@ -378,7 +378,7 @@ namespace DCLF::Draws
 		std::uint32_t sortRanksIndex;
 		// Sequence buffer ranges, in sequences: phase 2's first slot, the first decal slot, each decal sub-range's slots (where each
 		// one starts is the latch's class table's).
-		std::uint32_t phaseTwoBase;
+		std::uint32_t phaseTwoBase;  // ShadowCasterRows: the caster rows' capacity instead
 		std::uint32_t decalBase;
 		std::uint32_t decalStride;
 		std::uint32_t pipelineRowStride;
