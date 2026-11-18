@@ -41,7 +41,7 @@ enum class StepArea : std::uint8_t
 };
 
 /**
- * @brief A sampler by the engine's mode numbers (EngineSamplerDesc): address 0 clamp, 3 wrap, 4 border, 5 mirror; filter 0 point,
+ * @brief A sampler by the engine's mode numbers : address 0 clamp, 3 wrap, 4 border, 5 mirror; filter 0 point,
  * 1 linear without mips, 2 trilinear.
  */
 struct StepSampler

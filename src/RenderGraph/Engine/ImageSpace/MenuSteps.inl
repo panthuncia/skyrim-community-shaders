@@ -128,7 +128,7 @@ void RegisterMenuSteps()
 	// source downsampled into kHDR_DOWNSAMPLE0, the luminance levels into kHDR_DOWNSAMPLE1 onwards, the last level into
 	// 27 + levels - 1 + 2 * parity (the luminance shader, or the light adaptation from the other parity's target), the bloom of the
 	// scene's radius (the bright pass into kHDR_BLURSWAP, its blur into kHDR_BLOOM), then the tonemap or its fade form into the final
-	// target. The menus' manifest shapes of earlier sessions had exactly these targets and samplers.
+	// target.
 	constexpr std::int32_t kDownsample = T::kHDR_DOWNSAMPLE0, kFirstLevel = T::kHDR_DOWNSAMPLE1;
 	const auto levels = menu.levels;
 	const auto levelEffect = [](std::uint32_t a_level) { return a_level == 0 ? E::ISHDRDownSample4RGB2Lum : E::ISHDRDownSample16Lum; };
