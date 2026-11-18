@@ -34,6 +34,14 @@ SKSE plugin providing advanced DirectX 11 graphics modifications for Skyrim SE/A
 - `ZIP_TO_DIST=ON` (default) - Create individual feature 7z packages
 - `AIO_ZIP_TO_DIST=ON` (default) - Create all-in-one 7z package
 - `TRACY_SUPPORT=ON` - Enable Tracy profiler integration
+- `SC_UNITY_BUILD=ON` (on in `Dev-Fast` and presets that inherit it) - Compile `src/Features/DrawcallLimitFix/` and `src/RenderGraph/` in batches of 8 files
+
+**Keeping builds fast** (measurements and details: `docs/development/build-speed.md`):
+
+- Do not include often-edited render-graph headers (`Frame/FrameDescription.h`, `Frame/RecipeTable.h`) from widely included headers (DCLF's `Api/*.h`, `RenderGraphRuntime.h`). Include the narrow header (`Frame/SegmentId.h`) or forward-declare.
+- `include/PCHRenderGraph.h` takes only stable submodule headers, never project headers and never Vulkan or volk headers. Do not add project headers to `include/PCH.h`.
+- In DCLF and `src/RenderGraph`, give file-local (anonymous-namespace) names specific names, and qualify namespaces a sibling file could shadow (`DCLF::Engine::`). A unity batch is one translation unit, so two files' `kSlots` or `State()` clash.
+- A unity build hides missing includes. CI and the PR preset build without it; check changed files with `-DSC_UNITY_BUILD=OFF` before pushing.
 
 ### Custom CMake Targets
 
