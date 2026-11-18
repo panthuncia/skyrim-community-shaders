@@ -273,6 +273,11 @@ void Deferred::EarlyPrepasses()
 	ZoneScoped;
 	TracyD3D11Zone(globals::state->tracyCtx, "Early Prepass");
 
+	// Main::RenderShadowMaps returned: every step of the start stage has tapped (its last, the shadow maps' clears, are inside it). The
+	// stage ends here at the latest. In a frame without Drawcall Limit Fix's shadow view epoch (a load hold) it would otherwise stay open
+	// until the pre-depth stage's first tap, after the D3D11 work below.
+	(void)FrameAnchors::TapPoint(RenderGraph::Frame::SegmentId::Start);
+
 	sceneDepthFinal = false;
 
 	auto shaderCache = globals::shaderCache;

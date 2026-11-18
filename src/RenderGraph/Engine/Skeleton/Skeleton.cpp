@@ -1726,22 +1726,23 @@ namespace RenderGraph::Engine::Skeleton
 			}
 			if (!copy.registered)
 				return false;
+			using RenderGraph::Frame::SegmentId;
+			const auto start = static_cast<std::uint32_t>(SegmentId::Start);
+			// The reflection cubemap's render copies the main depth while the start stage is open (the session's first world frames): the
+			// pre-main stage's copy writes kPOST_ZPREPASS_COPY again before any pass reads it (the recipe: its readers are pre-main's after its
+			// copy, deferred+water, post and the UI stage's scene), so nothing reads this one. Wherever the start stage runs (StageOpen and
+			// StageAbsent answer only for a stage of this mode).
+			if (a_kind == CopyKind::Depth && HostingOn() && WorldFrame() && (FrameAnchors::StageOpen(start) || FrameAnchors::StageAbsent(start))) {
+				if (copy.dropped++ == 0)
+					logger::info("[ORG] engine skeleton: {} while the start stage is open (the cubemap's render) is dropped: pre-main's copy writes it again before any reader",
+						kCopyNames[index]);
+				return true;
+			}
 			if (HostingOn() && !FrameAnchors::HasOwnEpoch(kCopyAnchors[index])) {
 				// No own epoch for the copy's anchor (native mode): every copy is a stage's pass, or dropped here. Guest mode keeps the anchor's
 				// own epoch for the copies of the stages that do not run there yet (migration scaffolding, as OwnEpochTakes for the clears).
 				const auto& frame = RenderGraph::Frame::Driver::Current();
 				if (a_kind == CopyKind::Depth) {
-					// The reflection cubemap's render copies the main depth while the start stage is open (the session's first world frames): the
-					// pre-main stage's copy writes kPOST_ZPREPASS_COPY again before any pass reads it (the recipe: its readers are pre-main's after its
-					// copy, deferred+water, post and the UI stage's scene), so nothing reads this one.
-					using RenderGraph::Frame::SegmentId;
-					const auto start = static_cast<std::uint32_t>(SegmentId::Start);
-					if (WorldFrame() && (FrameAnchors::StageOpen(start) || FrameAnchors::StageAbsent(start))) {
-						if (copy.dropped++ == 0)
-							logger::info("[ORG] engine skeleton: {} while the start stage is open (the cubemap's render) is dropped: pre-main's copy writes it again before any reader",
-								kCopyNames[index]);
-						return true;
-					}
 					// The stage that holds the copy has no schedule yet (its first build): the copy lags.
 					auto holder = static_cast<std::uint32_t>(SegmentId::Ui);
 					if (WorldFrame())
@@ -1944,8 +1945,9 @@ namespace RenderGraph::Engine::Skeleton
 		bool reserved = true;
 		for (const auto anchor : { Anchor::EngineShadowClear, Anchor::EngineFrameClear, Anchor::EngineDepthCopy })
 			reserved = FrameAnchors::Reserve(anchor) && reserved;
-		// Native mode drops the reflection faces' clears (Take): the cube group has no anchor there.
-		if (!Native::Requested())
+		// Where a stage of this mode holds the faces' sky (the start stage), that sky clears the faces and their clears are dropped (Take):
+		// the cube group has no anchor then.
+		if (!FrameAnchors::StageStepsAt(Anchor::SkyReflections))
 			reserved = FrameAnchors::Reserve(Anchor::EngineCubeClear) && reserved;
 		// The kMAIN copy: where a stage of this mode has its step (the immediate context's CopyResource reaches the skeleton in both modes).
 		if (FrameAnchors::StageStepsAt(Anchor::EngineCopy))

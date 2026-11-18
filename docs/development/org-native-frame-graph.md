@@ -7609,3 +7609,49 @@ river 25.0 and 3.1 (the NPC and the grass again, looked at side by side: the sam
 interior 2.7 and 5.3; upscalers 0.8 to 3.6; worldspace Tamriel 1.0, Riverwood 3.5, Solstheim 17.1; census shots at most 0.9 apart from
 Dragonsreach (13.5, its light shafts); Journal Menu pre and post at most 4.3, the menu shot 7.1 off: its background is blurred again
 (the shape manifest holds ISDistantBlur again, B2's note). Perf and epochs: with the last piece (Guest B5).
+
+## Guest B4: start in guest (2026-11-18)
+
+Plan piece B4. Guest mode now runs four stages as blocks in DXVK's stream: start, pre-depth, pre-main and deferred+water. Code and this
+text on `org-native/phases` (no submodule change). RX 6600, Perf-Fast, background runs with `DXVK_DEBUG=hang`.
+
+### What runs in guest
+
+- Start has `runsInGuest`: the decal occlusion queries (DecalQueries, whole), the cloud shadows at ReflectionsPrepass, the faces' sky
+  at SkyReflections (both whole), the water effects (ImageSpace's start steps: the displacement update and the flow copies; `Start().on`
+  follows the stage since B3) and the shadow maps' clears that Drawcall Limit Fix's shadow view does not host (the start place took over
+  from the shadow group's own epoch by itself). DecalQueries, ReflectionsPrepass and SkyReflections have no own epoch in guest any more.
+  The decal queries' answers were already CS's in both modes (Engine/Queries: the bracket's GetQueryData reads the graph's readback).
+- **The faces' clears.** `Skeleton::Reserve` reserves the cube group's anchor only where no stage of this mode holds the faces' sky
+  (`StageStepsAt(SkyReflections)`), not by mode: in guest now, as in native, the faces' sky clears each face with its load operations
+  and the engine's clears of them are dropped (`FacesClearedBySky`).
+- **The cubemap render's depth copy.** Dropped wherever the start stage runs (`StageOpen`/`StageAbsent` answer only for a stage of this
+  mode), before `RunCopy`'s own-epoch branch: it was native's rule inside the native-only branch.
+- **The start stage's commit at the latest.** In a frame without Drawcall Limit Fix's shadow view epoch (a load hold), the stage stayed
+  open until the pre-depth stage's first tap, after `Deferred::EarlyPrepasses`' D3D11 work: `CopyShadowLightData`'s map of CS's shadow
+  light buffer reached DXVK inside the window (63 to 66 calls in the load windows). `EarlyPrepasses` now ends the stage first
+  (`TapPoint(Start)`: Main::RenderShadowMaps has returned, so every start step has tapped). The same commit point in both modes.
+- The player's face tint at a load (the start stage's first ImageSpace step) is a client of the menu steps, which are on only with the
+  post stage (`Menu().on`): in guest the main client still sees ISAlphaBlend and leaves it to the engine (the latch drops it), as since
+  Guest B0. It follows with the UI stage (B7), which holds the tint's other step.
+
+### Residue
+
+`latch-census-short`: 0 calls inside a stage's window in every steady window. The windows of the session's first load and of the save's
+load hold Skylighting's guest-only occlusion map clear (`Skylighting::RenderSkyOcclusionMap`, a D3D11 ClearDepthStencilView when the
+graph did not clear the map: 142 and 158 calls in the two load windows, 1 to 2 elsewhere) and the release query of its lent slot (2), now
+inside the start window during load holds. The first window also has the before-water depth copy of a frame without
+`Deferred::DeferredPasses` (2) and one skeleton clear of a view it does not hold (B3). Not fixed: Skylighting asks "native mode?" to mean
+"do the engine's draws reach the GPU?", which with the flush latch is false in guest too. Answering it that way (`Native::Active() ||
+Flush::Latched()`, three places) removed the clears but changed the image: the quick shot's tree lit brighter than native's and B2's
+(3.4 off, 20.7 against native), so its guest flow (the map's clear and the update's wait) needs its own look before that switch.
+Old guest paths for the stage's anchors that lost their use: the DecalQueries, ReflectionsPrepass and SkyReflections own epochs, the cube
+group's anchor and its registration, and the shadow group's own epoch for the start stage's clears.
+
+### Checks
+
+One background run each on DLL `f4585d8bd6ca` (the census on `df8c26b2d2ba`, the same source). Guest: `latch-census-short`, quick,
+river, rain, interior, under water. Native: quick. All passed with 0 tap errors, 0 recipe findings, no failed build; the only `[C]` line
+is the known `PublishedResources` one. Shots against Guest B2's: quick 2.0; river 21.8 (the NPC) and 3.0; rain 1.7 and 1.5; interior 1.5
+and 1.8; under water 6.6 and 2.2; census shots at most 0.9 apart from Dragonsreach (12.6, its light shafts). Native quick against B3's
+native run 0.9.

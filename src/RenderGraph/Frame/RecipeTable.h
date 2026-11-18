@@ -190,7 +190,8 @@ namespace RenderGraph::Frame::Recipes::Table
 		// shadow maps' clears (BSShadowLight::RenderShadowmap) that Drawcall Limit Fix's shadow view does not host: every world frame before
 		// DCLF draws and during its load holds. They are passes at a place (Engine/Skeleton): the engine's call stages each one. Pre-depth,
 		// pre-main and post read those maps. Its commit is a point just before the next GPU work that follows it in every world frame is
-		// submitted: DCLF's shadow view epoch or a later stage (BeforeGpuWork, and a later stage's first tap).
+		// submitted: DCLF's shadow view epoch or a later stage (BeforeGpuWork), at the latest when Main::RenderShadowMaps has returned (the
+		// EarlyPrepass hook's start, before its D3D11 work).
 		{ .id = StageId::Start,
 			.owner = Owner::Cs,
 			.name = "start",
@@ -205,11 +206,12 @@ namespace RenderGraph::Frame::Recipes::Table
 				{ .anchor = Anchor::EngineShadowClear, .clients = { "cs.engine.skeleton.shadow@start" } },
 				{ .point = true },
 			} },
+			.runsInGuest = true,
 			.commitBefore = Segments({ Segment::ShadowView, Segment::SkyOcclusion, Segment::ZPrepass, Segment::FirstPersonDepth, Segment::LightCulling, Segment::MainOpaque,
 				StageSegment(SegmentId::PreDepth), StageSegment(SegmentId::PreMain), StageSegment(SegmentId::Deferred), kEndsWorld[0], kEndsWorld[1], kEndsWorld[2],
 				kEndsWorld[3], kEndsWorld[4], kEndsWorld[5], kEndsWorld[6], kEndsWorld[7] }),
-			.commit = "just before DCLF's shadow view epoch or the pre-depth stage's first tap",
-			.commitSite = "BeforeGpuWork, before DCLF's shadow view epoch or later GPU work, or a later stage's first tap",
+			.commit = "just before DCLF's shadow view epoch, or Main::RenderShadowMaps' return",
+			.commitSite = "BeforeGpuWork, before DCLF's shadow view epoch or later GPU work; at the latest the EarlyPrepass hook's start (Deferred::EarlyPrepasses)",
 			.epochs = { Own(StageSegment(SegmentId::Start)), Placed(Anchor::DecalQueries), Placed(Anchor::EngineShadowClear, { "cs.engine.skeleton.shadow" }) } },
 		{ .id = StageId::Shadows,
 			.owner = Owner::Dclf,
