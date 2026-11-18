@@ -40,10 +40,9 @@ public:
 	/**
 	 * @brief Makes the program, the shadow texture (a_desc: the D3D11 texture's description), the latch and the run gate, and
 	 * registers the anchor client. With the runtime active (the feature's SetupResources).
-	 * @param a_onFailed Called once if the graph fails later; the feature returns to D3D11.
 	 * @return Whether the shadows run on the render graph; false keeps the D3D11 path.
 	 */
-	bool Setup(const D3D11_TEXTURE2D_DESC& a_desc, std::function<void()> a_onFailed);
+	bool Setup(const D3D11_TEXTURE2D_DESC& a_desc);
 
 	/** @brief Whether the shadows run on the render graph: the client is registered and the runtime is still up. */
 	bool IsActive() const;

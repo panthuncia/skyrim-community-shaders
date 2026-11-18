@@ -535,17 +535,6 @@ struct ORGScreenSpaceGI::Impl
 		};
 	}
 
-	/** @brief Both clients' onFailed: the graph failed, so the feature returns to D3D11 for good. */
-	std::function<void()> FailedCallback()
-	{
-		return [this] {
-			if (failed)
-				return;
-			logger::error("[ORG] Screen Space GI returns to D3D11: the render graph failed");
-			Stop();
-		};
-	}
-
 	/**
 	 * @brief The chain's client for the current state and inputs: every step behind its gate entry, then the accumulation copy.
 	 * Registering again replaces it, so the anchor builds its graph with the new textures.
@@ -598,7 +587,6 @@ struct ORGScreenSpaceGI::Impl
 		client.registerResources = Registrar(state);
 		client.commit = [this](const FrameAnchors::Point&) { Commit(); };
 		client.active = [this] { return frameReady; };
-		client.onFailed = FailedCallback();
 		registered = FrameAnchors::Register(std::move(client));
 		return registered;
 	}
@@ -618,7 +606,6 @@ struct ORGScreenSpaceGI::Impl
 		client.passes = builder.Take();
 		client.registerResources = Registrar(state);
 		client.active = [] { return false; };
-		client.onFailed = FailedCallback();
 		return FrameAnchors::Register(std::move(client));
 	}
 

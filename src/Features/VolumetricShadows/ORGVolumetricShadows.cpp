@@ -245,7 +245,7 @@ namespace
 		return desc.Width;
 	}
 
-	FrameAnchors::ClientDesc MakeClient(const std::shared_ptr<Resources>& a_resources, std::function<void()> a_onFailed)
+	FrameAnchors::ClientDesc MakeClient(const std::shared_ptr<Resources>& a_resources)
 	{
 		FrameAnchors::ClientDesc client{};
 		client.id = kClientId;
@@ -292,7 +292,6 @@ namespace
 				}
 			}
 		};
-		client.onFailed = std::move(a_onFailed);
 		return client;
 	}
 }
@@ -301,7 +300,6 @@ struct ORGVolumetricShadows::Impl
 {
 	std::shared_ptr<Resources> resources;
 	bool inputChecked = false;
-	std::function<void()> onFailed;
 };
 
 bool ORGVolumetricShadows::Requested()
@@ -324,7 +322,7 @@ void ORGVolumetricShadows::Reserve()
 		logger::warn("[ORG] Volumetric Shadows stays on D3D11: the EarlyPrepass anchor could not be reserved");
 }
 
-bool ORGVolumetricShadows::Setup(std::function<void()> a_onFailed)
+bool ORGVolumetricShadows::Setup()
 {
 	impl.reset();
 	if (!Requested())
@@ -358,17 +356,8 @@ bool ORGVolumetricShadows::Setup(std::function<void()> a_onFailed)
 	}
 	auto state = std::make_unique<Impl>();
 	state->resources = resources;
-	state->onFailed = std::move(a_onFailed);
 	impl = std::move(state);
-	const bool registered = FrameAnchors::Register(MakeClient(resources, [this] {
-		logger::error("[ORG] Volumetric Shadows: the render graph failed; back to the D3D11 dispatches");
-		PublishedResources::Withdraw(kShadowCopyId);
-		auto onFailed = impl ? std::move(impl->onFailed) : nullptr;
-		impl.reset();
-		if (onFailed)
-			onFailed();
-	}));
-	if (!registered) {
+	if (!FrameAnchors::Register(MakeClient(resources))) {
 		logger::warn("[ORG] Volumetric Shadows stays on D3D11: its anchor client could not be registered");
 		impl.reset();
 		return false;
@@ -461,7 +450,7 @@ ORGVolumetricShadows& ORGVolumetricShadows::Get()
 
 ORGVolumetricShadows::~ORGVolumetricShadows() = default;
 void ORGVolumetricShadows::Reserve() {}
-bool ORGVolumetricShadows::Setup(std::function<void()>) { return false; }
+bool ORGVolumetricShadows::Setup() { return false; }
 void ORGVolumetricShadows::UpdateImports() {}
 void ORGVolumetricShadows::Stop() {}
 bool ORGVolumetricShadows::IsActive() const { return false; }

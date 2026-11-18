@@ -143,7 +143,6 @@ namespace
 		std::shared_ptr<org::LatchBlock> latch;
 		std::shared_ptr<RenderGraph::RunGate> gate;
 		org::OwnedDescriptorBinding pointSampler;
-		std::function<void()> onFailed;
 	};
 
 	/** @brief What a pass records from: kept for the build, so the recording can be submitted again. */
@@ -360,14 +359,6 @@ struct ORGSubsurfaceScattering::Impl
 			if (auto& self = Get(); self.impl)
 				self.impl->ranThisFrame = true;
 		};
-		client.onFailed = [] {
-			logger::error("[ORG] Subsurface Scattering returns to D3D11: the render graph failed");
-			auto& self = Get();
-			auto onFailed = self.impl ? std::move(self.impl->state->onFailed) : std::function<void()>{};
-			self.impl.reset();
-			if (onFailed)
-				onFailed();
-		};
 		return client;
 	}
 
@@ -425,7 +416,7 @@ void ORGSubsurfaceScattering::Reserve()
 		logger::warn("[ORG] Subsurface Scattering stays on D3D11: the DeferredPasses anchor could not be reserved");
 }
 
-bool ORGSubsurfaceScattering::Setup(const D3D11_TEXTURE2D_DESC& a_desc, std::function<void()> a_onFailed)
+bool ORGSubsurfaceScattering::Setup(const D3D11_TEXTURE2D_DESC& a_desc)
 {
 	if (impl)
 		Stop();
@@ -444,7 +435,6 @@ bool ORGSubsurfaceScattering::Setup(const D3D11_TEXTURE2D_DESC& a_desc, std::fun
 	}
 	if (!state)
 		return false;
-	state->onFailed = std::move(a_onFailed);
 	// The engine targets may not exist yet: then the passes join the graph at the first frame they can be imported.
 	if (auto targets = ImportTargets())
 		state->targets = std::move(targets);
@@ -529,7 +519,7 @@ struct ORGSubsurfaceScattering::Impl
 
 ORGSubsurfaceScattering::~ORGSubsurfaceScattering() = default;
 void ORGSubsurfaceScattering::Reserve() {}
-bool ORGSubsurfaceScattering::Setup(const D3D11_TEXTURE2D_DESC&, std::function<void()>) { return false; }
+bool ORGSubsurfaceScattering::Setup(const D3D11_TEXTURE2D_DESC&) { return false; }
 bool ORGSubsurfaceScattering::IsActive() const { return false; }
 bool ORGSubsurfaceScattering::AfterDeferredPasses() { return false; }
 void ORGSubsurfaceScattering::ClearShaderCache() {}

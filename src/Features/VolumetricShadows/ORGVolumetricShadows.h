@@ -37,10 +37,9 @@ public:
 	/**
 	 * @brief At SetupResources, with the runtime active: makes the programs, sampler and textures, registers the anchor client and
 	 * publishes the shared shadow map.
-	 * @param a_onFailed Called once if the graph fails later; the D3D11 dispatches run again.
 	 * @return Whether the passes run on the render graph; false keeps the D3D11 dispatches.
 	 */
-	bool Setup(std::function<void()> a_onFailed);
+	bool Setup();
 
 	/**
 	 * @brief The feature's EarlyPrepass, before the anchor runs: imports the engine's shadow maps again when the engine replaced

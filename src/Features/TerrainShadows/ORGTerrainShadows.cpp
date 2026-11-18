@@ -401,15 +401,6 @@ void ORGTerrainShadows::Switch()
 	client.commit = [heightmap = next](const FrameAnchors::Point&) { Commit(*heightmap); };
 	client.active = [heightmap = next] { return !heightmap->pending.empty(); };
 	client.gates = { next->gate };
-	client.onFailed = [] {
-		logger::error("[ORG] Terrain Shadows: the render graph failed; back to D3D11");
-		auto& self = Get();
-		PublishedResources::Withdraw(kShadowHeightId);
-		auto onFailed = self.impl ? std::move(self.impl->onFailed) : nullptr;
-		self.impl.reset();
-		if (onFailed)
-			onFailed();
-	};
 	impl->current = next;
 	if (!FrameAnchors::Register(std::move(client)))
 		return fail("the client could not be registered");

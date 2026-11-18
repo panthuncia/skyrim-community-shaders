@@ -136,9 +136,6 @@ public:
 	/** @brief The D3D11 occlusion copy, made the first time the D3D11 path needs it (filled from the first layer then). */
 	Texture2D* OcclusionCopy();
 
-	/** @brief The render graph failed: the D3D11 copy is filled from the last layer and bound at t25 again. */
-	void ReturnToD3D11();
-
 	/** @brief Installs the BSSkyShader hooks and reserves the ORG path's anchor after all plugins have loaded. */
 	virtual void PostPostLoad() override;
 

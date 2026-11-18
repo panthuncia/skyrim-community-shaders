@@ -382,7 +382,7 @@ void SubsurfaceScattering::SetupResources()
 		D3D11_TEXTURE2D_DESC texDesc{};
 		main.texture->GetDesc(&texDesc);
 		texDesc.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS;
-		onGraph = ORGSubsurfaceScattering::Get().Setup(texDesc, {});
+		onGraph = ORGSubsurfaceScattering::Get().Setup(texDesc);
 	}
 	// The D3D11 path's resources only when it runs: DrawSSS makes them later if the render graph's path falls back.
 	if (!onGraph)

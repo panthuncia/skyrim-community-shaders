@@ -91,7 +91,7 @@ public:
 
 	/**
 	 * @brief After the z-prepass: runs the DepthDone anchor, whose pass blends the depths.
-	 * @return Whether it ran; false: blend on D3D11 (the path may have failed and returned to D3D11 inside).
+	 * @return Whether it ran; false: blend on D3D11.
 	 */
 	bool Blend();
 

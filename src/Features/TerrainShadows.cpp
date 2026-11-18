@@ -341,7 +341,7 @@ void TerrainShadows::SetupResources()
 	CompileComputeShaders();
 
 	// The render graph's update, when requested and a heightmap is installed. Each heightmap gets textures of its own size there.
-	// If the graph stops, EarlyPrepass loads the heightmap again on D3D11.
+	// If a heightmap switch fails, EarlyPrepass loads the heightmap again on D3D11.
 	if (ORGTerrainShadows::Requested()) {
 		if (heightmaps.empty())
 			logger::info("[ORG] Terrain Shadows: no heightmap is installed; it stays on D3D11");

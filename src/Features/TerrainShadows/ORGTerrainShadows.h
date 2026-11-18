@@ -34,8 +34,8 @@ namespace DirectX
  *   for refreshes and keeps terrain shadows off, so no frame reads the new version before it is written.
  *
  * Setup at SetupResources makes the program and the shadow height map and publishes it. On any failure (a shader that does not
- * compile, a texture that cannot be made, the graph stopping) the ORG path stops for good and the feature loads its heightmap
- * again on D3D11.
+ * compile, a texture that cannot be made, a heightmap switch that fails) the ORG path stops for good and the feature loads its
+ * heightmap again on D3D11.
  *
  * Everything here runs on the render thread. Header deliberately free of ORG/Vulkan includes (see RenderGraphRuntime.h).
  */
@@ -56,7 +56,7 @@ public:
 	/**
 	 * @brief At SetupResources, with the runtime active and a heightmap installed: makes the program and the shadow height map, and
 	 * publishes it.
-	 * @param a_onFailed Called once if the graph fails later; the feature loads its heightmap again on D3D11.
+	 * @param a_onFailed Called once if a heightmap switch fails later; the feature loads its heightmap again on D3D11.
 	 * @return Whether heightmaps go to the render graph; false keeps Terrain Shadows on D3D11.
 	 */
 	bool Setup(std::function<void()> a_onFailed);

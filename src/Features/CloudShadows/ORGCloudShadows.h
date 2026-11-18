@@ -65,7 +65,7 @@ namespace FrameAnchors
  * - Ops stay queued only until that run. Before any D3D11 use of the layers (an engine draw, a D3D11 copy), the feature takes
  *   what is queued and does it on D3D11 first.
  *
- * On any failure it stops for good and IsActive() turns false: the feature then copies on D3D11 again.
+ * When setup fails IsActive() stays false and the feature copies on D3D11.
  *
  * Everything here runs on the render thread. Header deliberately free of ORG/Vulkan includes (see RenderGraphRuntime.h).
  */
@@ -108,10 +108,9 @@ public:
 	/**
 	 * @brief At SetupResources, after Cloud Shadows made its layers, with the runtime active: makes the program and the occlusion
 	 * cubemap, imports the last layer, registers the anchor client and publishes the cubemap.
-	 * @param a_onFailed Called once if the graph fails later; the feature copies and binds its D3D11 occlusion again.
 	 * @return Whether the copy runs on the render graph; false keeps it on D3D11.
 	 */
-	bool Setup(std::function<void()> a_onFailed);
+	bool Setup();
 
 	/** @brief Whether the occlusion cubemap is the graph's and its pass is registered, with the runtime still up. */
 	bool IsActive() const;

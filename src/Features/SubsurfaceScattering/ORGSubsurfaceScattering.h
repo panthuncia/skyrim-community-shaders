@@ -39,10 +39,9 @@ public:
 	 * @brief At the feature's SetupResources, with the runtime active: makes the programs, the intermediate textures (a_desc: the
 	 * main target's description with SRV and UAV binds), the latch and the run gate, and registers the anchor client. The client
 	 * joins the graphs once CS's shared constants exist; the D3D11 path draws until then.
-	 * @param a_onFailed Called once if the graph fails later; the feature returns to D3D11.
 	 * @return Whether the passes run on the render graph; false keeps the D3D11 path.
 	 */
-	bool Setup(const D3D11_TEXTURE2D_DESC& a_desc, std::function<void()> a_onFailed);
+	bool Setup(const D3D11_TEXTURE2D_DESC& a_desc);
 
 	/** @brief Whether the render-graph path is set up and the runtime is still up. */
 	bool IsActive() const;

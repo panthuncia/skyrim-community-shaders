@@ -90,7 +90,6 @@ namespace
 		std::shared_ptr<RenderGraph::RunGate> gate;
 		org::OwnedDescriptorBinding sampler;
 		DepthSource depth;
-		std::function<void()> onFailed;
 	};
 
 	std::shared_ptr<const Program> LoadProgram(rhi::Device a_device, std::uint32_t a_sampleCount)
@@ -263,7 +262,7 @@ ORGScreenSpaceShadows& ORGScreenSpaceShadows::Get()
 
 ORGScreenSpaceShadows::~ORGScreenSpaceShadows() = default;
 
-bool ORGScreenSpaceShadows::Setup(const D3D11_TEXTURE2D_DESC& a_desc, std::function<void()> a_onFailed)
+bool ORGScreenSpaceShadows::Setup(const D3D11_TEXTURE2D_DESC& a_desc)
 {
 	if (impl)
 		Stop();
@@ -277,7 +276,6 @@ bool ORGScreenSpaceShadows::Setup(const D3D11_TEXTURE2D_DESC& a_desc, std::funct
 	}
 	try {
 		auto state = std::make_shared<ShadowState>();
-		state->onFailed = std::move(a_onFailed);
 		// Every sample count the settings can ask for at this size, so a settings change or the upscaler's scale finds its program.
 		for (const auto count : SettingsSampleCounts()) {
 			auto program = LoadProgram(host->Device(), count);
@@ -339,15 +337,6 @@ bool ORGScreenSpaceShadows::Setup(const D3D11_TEXTURE2D_DESC& a_desc, std::funct
 			state->latch->WriteValue(RenderGraphRuntime::Get().Host()->CurrentRun(), 0, data);
 			for (std::uint32_t i = 0; i < dispatches.count; ++i)
 				state->gate->OpenDispatch(i, dispatches.groups[i][0], dispatches.groups[i][1], dispatches.groups[i][2]);
-		};
-		client.onFailed = [] {
-			logger::error("[ORG] Screen Space Shadows returns to D3D11: the render graph failed");
-			auto& self = Get();
-			PublishedResources::Withdraw(kTextureName);
-			auto onFailed = self.impl ? std::move(self.impl->state->onFailed) : std::function<void()>{};
-			self.impl.reset();
-			if (onFailed)
-				onFailed();
 		};
 		if (!FrameAnchors::Register(std::move(client))) {
 			return false;
@@ -441,7 +430,7 @@ ORGScreenSpaceShadows& ORGScreenSpaceShadows::Get()
 }
 
 ORGScreenSpaceShadows::~ORGScreenSpaceShadows() = default;
-bool ORGScreenSpaceShadows::Setup(const D3D11_TEXTURE2D_DESC&, std::function<void()>) { return false; }
+bool ORGScreenSpaceShadows::Setup(const D3D11_TEXTURE2D_DESC&) { return false; }
 bool ORGScreenSpaceShadows::IsActive() const { return false; }
 ID3D11ShaderResourceView* ORGScreenSpaceShadows::Prepass() { return nullptr; }
 ID3D11ShaderResourceView* ORGScreenSpaceShadows::ShadowSRV() const { return nullptr; }

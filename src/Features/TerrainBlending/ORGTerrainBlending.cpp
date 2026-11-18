@@ -214,10 +214,6 @@ namespace
 			if (FrameAnchors::InBuiltGraph(kClearClientId, FrameAnchors::Anchor::EarlyPrepass))
 				ClearedFrame() = globals::state->frameCount;
 		};
-		client.onFailed = [] {
-			logger::error("[ORG] Terrain Blending: the render graph failed; the terrain depth is cleared through its D3D11 export");
-			ClearedFrame() = UINT64_MAX;
-		};
 		return FrameAnchors::Register(std::move(client));
 	}
 
@@ -393,7 +389,6 @@ bool ORGTerrainBlending::RegisterClient()
 	client.active = [] { return globals::features::terrainBlending.settings.Enabled != 0; };
 	client.gates = { gate };
 	client.commit = [gate, groupsX, groupsY](const FrameAnchors::Point&) { gate->OpenDispatch(0, groupsX, groupsY, 1); };
-	client.onFailed = [] { Get().Fail("the render graph failed"); };
 	return FrameAnchors::Register(std::move(client));
 }
 
@@ -503,9 +498,8 @@ bool ORGTerrainBlending::Blend()
 {
 	if (frame != FrameBlend::Planned)
 		return false;
-	// A failed epoch calls the client's onFailed inside Run, which returns Terrain Blending to D3D11. An anchor that submitted
-	// nothing leaves the frame to D3D11 too: the views then name the D3D11 textures Terrain Blending blends into.
-	const bool written = Active() && impl->registered && FrameAnchors::Run(FrameAnchors::Anchor::DepthDone) && Active();
+	// An anchor that submitted nothing leaves the frame to D3D11: the views then name the D3D11 textures Terrain Blending blends into.
+	const bool written = Active() && impl->registered && FrameAnchors::Run(FrameAnchors::Anchor::DepthDone);
 	frame = written ? FrameBlend::Written : FrameBlend::Missed;
 	return written;
 }

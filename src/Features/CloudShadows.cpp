@@ -323,18 +323,6 @@ Texture2D* CloudShadows::OcclusionCopy()
 	return texCubemapCloudOccCopy;
 }
 
-void CloudShadows::ReturnToD3D11()
-{
-	// The D3D11 occlusion filled from the last layer and bound at t25, before the graph's export goes.
-	auto* copy = OcclusionCopy();
-	FlushQueuedLayerOps();
-	auto context = globals::d3d::context;
-	context->CopyResource(copy->resource.get(), texCloudShadowLayers[kMaxCloudLayers - 1]->resource.get());
-	ID3D11ShaderResourceView* srv = copy->srv.get();
-	context->PSSetShaderResources(25, 1, &srv);
-	context->CSSetShaderResources(25, 1, &srv);
-}
-
 ID3D11ShaderResourceView* CloudShadows::OcclusionSRV() const
 {
 	if (auto* srv = ORGCloudShadows::Get().OcclusionSRV())
@@ -398,9 +386,8 @@ void CloudShadows::SetupResources()
 			}
 		}
 
-		// The render graph copies into its own occlusion cubemap when requested. The D3D11 copy is made only for the D3D11 path, and
-		// when the graph fails later.
-		if (!ORGCloudShadows::Get().Setup([this] { ReturnToD3D11(); }))
+		// The render graph copies into its own occlusion cubemap when requested. The D3D11 copy is made only for the D3D11 path.
+		if (!ORGCloudShadows::Get().Setup())
 			OcclusionCopy();
 	}
 	{

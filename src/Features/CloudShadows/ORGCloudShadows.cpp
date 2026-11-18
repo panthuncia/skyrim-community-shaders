@@ -76,7 +76,6 @@ struct ORGCloudShadows::Impl
 	UINT width = 0;
 	UINT height = 0;
 	UINT mips = 0;
-	std::function<void()> onFailed;
 
 	// Render thread: ReflectionsPrepass queued this frame's copy; the commit of the next run opens the gate and clears it.
 	bool pending = false;
@@ -272,7 +271,7 @@ void ORGCloudShadows::Stop()
 	impl.reset();
 }
 
-bool ORGCloudShadows::Setup(std::function<void()> a_onFailed)
+bool ORGCloudShadows::Setup()
 {
 	impl.reset();
 	if (!Requested())
@@ -295,7 +294,6 @@ bool ORGCloudShadows::Setup(std::function<void()> a_onFailed)
 	next->width = layerDesc.Width;
 	next->height = layerDesc.Height;
 	next->mips = layerDesc.MipLevels;
-	next->onFailed = std::move(a_onFailed);
 
 	next->program = ComputeProgram::Load(host->Device(), { .source = kShader, .constantWords = ShaderBindings::Words<OcclusionCopyBlock>() });
 	if (!next->program) {
@@ -344,15 +342,6 @@ bool ORGCloudShadows::Setup(std::function<void()> a_onFailed)
 	// The anchor runs at every cubemap render; only the run after the frame's first reflections prepass copies, as on D3D11.
 	client.active = [next] { return next->pending; };
 	client.gates = { next->gate };
-	client.onFailed = [] {
-		logger::error("[ORG] Cloud Shadows: the render graph failed; back to D3D11");
-		auto& self = Get();
-		PublishedResources::Withdraw(kOcclusionId);
-		auto onFailed = self.impl ? std::move(self.impl->onFailed) : nullptr;
-		self.impl.reset();
-		if (onFailed)
-			onFailed();
-	};
 	impl = next;
 	if (!FrameAnchors::Register(std::move(client))) {
 		impl.reset();
@@ -485,7 +474,6 @@ struct ORGCloudShadows::LayerOps
 	std::array<std::array<std::uint8_t, kFaces>, kLayers> value{};
 	std::array<std::uint32_t, kFaces> sources{};  // per face, a bit per layer whose face the copies read
 	std::uint32_t sourceCount = 0;
-	bool failed = false;
 
 	void Reset()
 	{
@@ -714,14 +702,6 @@ bool ORGCloudShadows::SetupLayerOps()
 	client.gates = { next->gate };
 	// The start stage: a tap per reflection face, each writing its own entry set and latch rows.
 	client.repeats = next->instances > 1;
-	client.onFailed = [next] {
-		logger::error("[ORG] Cloud Shadows: the render graph failed with the layer operations; they return to D3D11");
-		next->failed = true;
-		auto& self = Get();
-		auto ops = self.TakeLayerOps();
-		self.layerOps.reset();
-		globals::features::cloudShadows.ApplyLayerOps(ops);
-	};
 	layerOps = next;
 	if (!FrameAnchors::Register(std::move(client))) {
 		layerOps.reset();
@@ -735,7 +715,7 @@ bool ORGCloudShadows::SetupLayerOps()
 bool ORGCloudShadows::QueueLayerOp(LayerOpPoint a_point, LayerOp a_op)
 {
 	auto* ops = layerOps.get();
-	if (!ops || ops->failed || a_point == LayerOpPoint::D3D11 || !RenderGraphRuntime::Get().IsActive())
+	if (!ops || a_point == LayerOpPoint::D3D11 || !RenderGraphRuntime::Get().IsActive())
 		return false;
 	if (a_op.dst >= kLayers || a_op.face >= kFaces || (a_op.src != kClearOp && a_op.src >= kLayers))
 		return false;
@@ -794,7 +774,7 @@ void ORGCloudShadows::Reserve() {}
 std::string ORGCloudShadows::PublishedLayerId(int) { return {}; }
 FrameAnchors::Texture ORGCloudShadows::ImportLayer(int) { return nullptr; }
 Texture2D* ORGCloudShadows::MakeLayer(int, const D3D11_TEXTURE2D_DESC&, const D3D11_SHADER_RESOURCE_VIEW_DESC&, const char*) { return nullptr; }
-bool ORGCloudShadows::Setup(std::function<void()>) { return false; }
+bool ORGCloudShadows::Setup() { return false; }
 bool ORGCloudShadows::IsActive() const { return false; }
 ID3D11ShaderResourceView* ORGCloudShadows::OcclusionSRV() const { return nullptr; }
 void ORGCloudShadows::Stop() {}

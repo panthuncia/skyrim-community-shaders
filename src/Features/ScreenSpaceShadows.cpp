@@ -319,7 +319,7 @@ void ScreenSpaceShadows::SetupResources()
 		shadowTextureSrvDesc.Format = shadowTextureDesc.Format;
 
 		// The ORG path's texture has the same description. The D3D11 one is made only when the D3D11 path runs.
-		ORGScreenSpaceShadows::Get().Setup(shadowTextureDesc, {});
+		ORGScreenSpaceShadows::Get().Setup(shadowTextureDesc);
 	}
 }
 

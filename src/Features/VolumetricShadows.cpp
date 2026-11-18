@@ -39,8 +39,8 @@ void VolumetricShadows::SetupResources()
 	defines.push_back({ "BLUR_VERTICAL", nullptr });
 	blurShadowVerticalCS = static_cast<ID3D11ComputeShader*>(Util::CompileShader(L"Data\\Shaders\\VolumetricShadows\\BlurShadowCS.hlsl", defines, "cs_5_0"));
 
-	// The render graph's passes, when requested. If the graph fails later, the D3D11 dispatches run again by themselves.
-	ORGVolumetricShadows::Get().Setup({});
+	// The render graph's passes, when requested.
+	ORGVolumetricShadows::Get().Setup();
 }
 
 void VolumetricShadows::ClearShaderCache()
