@@ -52,6 +52,9 @@ VIEW_ATMOSPHERE_COMPOSITE_RESOURCES(ORG_RESOURCE)
 //    non-finite, blue while the volume has no size.
 // 9: the same for the far fog volume.
 // 10: the analytic fog's transmittance alone, without the volumes and without the volumes' range cut out. White is no fog.
+// 11: the analytic fog's inputs, top third to bottom: the camera's height below 0 over 10000 units, the height falloff over 0.4,
+//     the density over 0.01, each as grey; the bottom third is the pixel's world height over 10000 units (red above 0, green below).
+// 12: per pixel, over the volumes' slices: red where the near volume holds a non-finite or over 60000 value, green for the far.
 #	ifdef EXP_HEIGHT_FOG
 float3 DebugVolume(Texture3D<float4> volume, float2 uv)
 {
@@ -65,6 +68,20 @@ float3 DebugVolume(Texture3D<float4> volume, float2 uv)
 }
 #	endif
 
+#	ifdef EXP_HEIGHT_FOG
+float DebugVolumeBad(Texture3D<float4> volume, uint2 cell)
+{
+	uint width, height, depth;
+	volume.GetDimensions(width, height, depth);
+	float bad = 0.0;
+	for (uint z = 0; z < depth; ++z) {
+		const float4 value = volume.Load(int4(min(cell, uint2(width, height) - 1), z, 0));
+		bad = max(bad, all(isfinite(value)) && all(abs(value) < 60000.0) ? 0.0 : 1.0);
+	}
+	return width * height * depth == 0 ? 0.0 : bad;
+}
+#	endif
+
 float3 DebugView(float3 sceneColor, float3 position, float2 uv, bool fullCloudRay)
 {
 	if (VIEW_ATMOSPHERE_COMPOSITE_DEBUG == 6)
@@ -75,6 +92,26 @@ float3 DebugView(float3 sceneColor, float3 position, float2 uv, bool fullCloudRa
 			return DebugVolume(ExponentialHeightFogIntegratedLightScattering, uv);
 		if (VIEW_ATMOSPHERE_COMPOSITE_DEBUG == 9)
 			return DebugVolume(ExponentialHeightFogIntegratedLightScatteringFar, uv);
+		if (VIEW_ATMOSPHERE_COMPOSITE_DEBUG == 11) {
+			const SharedData::ExponentialHeightFogSettings settings = SharedData::exponentialHeightFogSettings;
+			if (uv.y < 0.25)
+				return saturate(-FrameBuffer::CameraPosAdjust.z / 10000.0).xxx;
+			if (uv.y < 0.5)
+				return saturate(settings.fogHeightFalloff / 0.4).xxx;
+			if (uv.y < 0.75)
+				return saturate(settings.fogDensity / 0.01).xxx;
+			const float worldHeight = position.z + FrameBuffer::CameraPosAdjust.z;
+			return float3(saturate(worldHeight / 10000.0), saturate(-worldHeight / 10000.0), 0.0);
+		}
+		if (VIEW_ATMOSPHERE_COMPOSITE_DEBUG == 12) {
+			uint width, height, depth;
+			ExponentialHeightFogIntegratedLightScattering.GetDimensions(width, height, depth);
+			const uint2 nearCell = uint2(uv * float2(width, height));
+			ExponentialHeightFogIntegratedLightScatteringFar.GetDimensions(width, height, depth);
+			const uint2 farCell = uint2(uv * float2(width, height));
+			return float3(DebugVolumeBad(ExponentialHeightFogIntegratedLightScattering, nearCell),
+				DebugVolumeBad(ExponentialHeightFogIntegratedLightScatteringFar, farCell), 0.0);
+		}
 		if (VIEW_ATMOSPHERE_COMPOSITE_DEBUG == 10) {
 			const float4 analytic = ExponentialHeightFog::GetExponentialHeightFogNoVolumetric(position, FrameBuffer::CameraPosAdjust.xyz, 0.0.xxx);
 			return isfinite(analytic.a) ? (1.0 - analytic.a).xxx : float3(1, 0, 1);
