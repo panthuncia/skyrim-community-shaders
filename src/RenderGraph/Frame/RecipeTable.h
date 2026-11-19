@@ -217,7 +217,7 @@ namespace RenderGraph::Frame::Recipes::Table
 			.names = { "CS stage: deferred+water", "CS stage: deferred+water inputs", "FrameSegments::Deferred / ", "cs.segment.deferred" },
 			.steps = { {
 				{ .anchor = Anchor::DeferredPasses,
-					.clients = { "cs.dyncubemaps", "cs.engine.skeleton.depth-copy@deferred-passes", "cs.org.graphres-selftest", "cs.ssgi", "cs.ssgi.reset", "cs.subsurface" },
+					.clients = { "cs.dyncubemaps", "cs.engine.skeleton.depth-copy@deferred-passes", "cs.org.graphres-selftest", "cs.org.graphres-selftest.prepared", "cs.ssgi", "cs.ssgi.reset", "cs.subsurface" },
 					.whole = true },
 				// Physical Sky's aerial perspective right after the composite, which is built without it (ORGPhysicalSky).
 				{ .anchor = Anchor::DeferredComposite, .clients = { "cs.deferred", "cs.physical-sky.composite" }, .whole = true },
