@@ -379,6 +379,15 @@ namespace ORGPostChain
 		virtual void Executed(PostProcessFeature& a_feature) { (void)a_feature; }
 	};
 
+	/**
+	* @brief CS_ORG_PP_LOG=1, read once. Every 120 frames the chain logs which main target it reads and the exposure it applies.
+	* Render thread.
+	*/
+	bool LogOn();
+
+	/** @brief With LogOn, whether this frame logs. Render thread. */
+	bool LogFrame();
+
 	// Add a port's factory here and in MakeEffect.
 	std::unique_ptr<Effect> MakeVignette();
 	std::unique_ptr<Effect> MakeColorGrading();

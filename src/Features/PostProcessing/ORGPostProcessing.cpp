@@ -650,6 +650,14 @@ namespace ORGPostChain
 			*a_stamp = state->latestStamps[a_part];
 		return std::exchange(state->latest[a_part], {});
 	}
+
+	bool LogOn()
+	{
+		static const bool s_on = Switches::On("CS_ORG_PP_LOG");
+		return s_on;
+	}
+
+	bool LogFrame() { return LogOn() && globals::state->frameCount % 120 == 0; }
 }
 
 namespace
@@ -731,6 +739,17 @@ namespace
 		default:
 			return "effect";
 		}
+	}
+
+	/**
+	* @brief CS_ORG_PP_PROBE=<step or image>, read once. The output copies take the image after that step (input, or a StepName such as
+	* vignette, composite or color-grading), or an image an effect publishes (such as PostProcessing::CODBloom::Bloom), in place of
+	* the chain's last image. It finds the step that turns the image black. Every step still runs.
+	*/
+	const std::string& Probe()
+	{
+		static const std::string s_probe = Switches::Value("CS_ORG_PP_PROBE");
+		return s_probe;
 	}
 
 	// COPY_RESOURCES order.
@@ -861,19 +880,36 @@ struct ORGPostProcessing::Impl
 				.target = image });
 			builder.SetCurrent(image);
 		}
+		// CS_ORG_PP_PROBE: the image the output copies take in place of the chain's last one.
+		const auto& probe = Probe();
+		ORGPostChain::Image probed;
+		if (probe == "input")
+			probed = next->current;
 
 		for (const auto index : a_order) {
 			if (!next->failure.empty() || next->passes->Failed())
 				break;
 			ORGPostChain::Builder builder(*next, programs, a_shape, StepName(index));
 			effects[static_cast<std::size_t>(index)]->Build(builder, *pp.pipeline[static_cast<std::size_t>(index)]);
+			if (probe == StepName(index))
+				probed = next->current;
+		}
+		if (!probe.empty() && !probed) {
+			if (const auto found = next->published.find(probe); found != next->published.end())
+				probed = found->second;
+		}
+		if (!probe.empty()) {
+			if (probed)
+				logger::warn("[ORG] Post Processing: CS_ORG_PP_PROBE={}: the output copies take that image, not the chain's last one", probe);
+			else
+				logger::warn("[ORG] Post Processing: CS_ORG_PP_PROBE={} names no step of this chain and no image it publishes; the probe is off", probe);
 		}
 
 		// As PreProcess's two CopyToRenderTarget, into both main targets. Each is a copy.ps draw rather than a copy,
 		// because a copy has no run gate and would run on frames the chain does not.
 		{
 			ORGPostChain::Builder builder(*next, programs, a_shape, "output");
-			const auto chainOutput = builder.Current();
+			const auto chainOutput = probed ? probed : builder.Current();
 			nextOutput = builder.Latch<CopyLatch>();
 			for (const auto& [target, name] : { std::pair{ &a_main, "main" }, std::pair{ &a_mainCopy, "main-copy" } }) {
 				if (!*target)
@@ -1144,6 +1180,11 @@ void ORGPostProcessing::BeforeTonemap(const RenderGraph::Engine::TonemapTargets&
 	s.ready = true;
 	s.SetReason({});
 	s.SetMembers(s.order);
+	if (ORGPostChain::LogFrame())
+		logger::info("[ORG] Post Processing log: frame {}: reads {} (one target {}, refraction {}, engine input kMAIN_COPY {}, scene in kMAIN {}); linear {}, "
+					 "exposure resolved {}, pre-exposure {}",
+			globals::state->frameCount, s.readsMainCopy ? "kMAIN_COPY" : "kMAIN", single, a_refraction, a_targets.input == mainCopyTarget && !single, sceneInMain,
+			linear, exposureResolved, state->preExposure);
 
 	// As PreProcess, unbind the main targets, since ISRefraction may still have kMAIN_COPY bound.
 	globals::d3d::context->OMSetRenderTargets(0, nullptr, nullptr);

@@ -16,6 +16,7 @@
 
 #	include <OpenRenderGraph/GraphHost.h>
 
+#	include <algorithm>
 #	include <atomic>
 #	include <cmath>
 #	include <cstring>
@@ -148,7 +149,7 @@ namespace ORGPostChain
 			* @brief Moves arrived readbacks into the UI values and the pre-exposure metering. Every run copies both parts.
 			* As the D3D11 staging copies, only what the settings UI or the metering under linear lighting wants is taken.
 			*/
-			void TakeReadbacks(HistogramAutoExposure& a_exposure) const
+			void TakeReadbacks(HistogramAutoExposure& a_exposure)
 			{
 				const auto wanted = a_exposure.WantedReadbacks();
 				const bool metering = globals::features::linearLighting.IsLinearLightingActive();
@@ -156,6 +157,18 @@ namespace ORGPostChain
 				if (wanted.histogram && bins.size() >= sizeof(std::uint32_t) * kBins)
 					std::memcpy(a_exposure.histogramData.data(), bins.data(), sizeof(std::uint32_t) * kBins);
 				const auto adapted = readback->Take(kAdaptationPart);
+				// CS_ORG_PP_LOG: the adapted luminance and the exposure Composite makes of it, at most every 120 frames.
+				const auto frame = static_cast<std::uint64_t>(globals::state->frameCount);
+				if (LogOn() && adapted.size() >= sizeof(float) && (loggedFrame == 0 || frame >= loggedFrame + 120)) {
+					loggedFrame = frame;
+					float value = 0.0f;
+					std::memcpy(&value, adapted.data(), sizeof(value));
+					const auto constants = a_exposure.Constants(false);
+					const float gain = constants.ExposureTarget * constants.ExposureCompensation /
+					                   (std::min)((std::max)(value, constants.AdaptationRange.x), constants.AdaptationRange.y);
+					logger::info("[ORG] Post Processing log: frame {}: adapted luminance {} (range {} to {}), so the global exposure is {}", frame, value,
+						constants.AdaptationRange.x, constants.AdaptationRange.y, gain);
+				}
 				if ((wanted.adaptation || metering) && adapted.size() >= sizeof(float)) {
 					float value = 0.0f;
 					std::memcpy(&value, adapted.data(), sizeof(value));
@@ -172,7 +185,8 @@ namespace ORGPostChain
 			std::shared_ptr<RunReadback> readback;  // kept across builds
 			LatchRegion<HistogramAutoExposure::AutoExposureCB> constants;
 			std::uint64_t shaderGeneration = 0;
-			bool clearPending = false;  // new history buffers not cleared yet
+			std::uint64_t loggedFrame = 0;  // CS_ORG_PP_LOG's last line
+			bool clearPending = false;      // new history buffers not cleared yet
 			bool reset = true;
 		};
 	}
