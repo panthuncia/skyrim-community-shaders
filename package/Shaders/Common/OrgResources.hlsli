@@ -71,7 +71,8 @@
 // The whole block is at most 32 words (128 bytes, Vulkan's guaranteed push constant size).
 //
 // Shared headers' own resources (SharedData's depth, Light Limit Fix's light lists, IBL, Terrain
-// and Cloud Shadows) are declared with ORG_HEADER_SRV(type, name, register). Everywhere they stay
+// and Cloud Shadows, Physical Sky) are declared with ORG_HEADER_SRV(type, name, register), and their
+// samplers with ORG_HEADER_SAMPLER(type, name, register). Everywhere they stay
 // register-bound as before. An ORG pass shader that defines ORG_HEADER_RESOURCES before including
 // this file reads them from the heap instead, and lists each one, of every such header it
 // includes, as an EXTERN entry (EXTERN_LATCH for a header's LATCH), or as an UNREAD
@@ -180,8 +181,10 @@
 
 #if defined(CS_ORG_BINDLESS) && defined(ORG_HEADER_RESOURCES)
 #	define ORG_HEADER_SRV(T, N, R) static T N = ResourceDescriptorHeap[OrgHandle_##N];
+#	define ORG_HEADER_SAMPLER(T, N, R) static T N = SamplerDescriptorHeap[OrgHandle_##N];
 #else
 #	define ORG_HEADER_SRV(T, N, R) T N : register(t##R);
+#	define ORG_HEADER_SAMPLER(T, N, R) T N : register(s##R);
 #endif
 
 #endif  // __ORG_RESOURCES_DEPENDENCY_HLSL__

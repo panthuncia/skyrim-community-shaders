@@ -5,6 +5,7 @@
 #include "Common/ColorManagement.hlsli"
 #include "Common/Game.hlsli"
 #include "Common/Math.hlsli"
+#include "Common/OrgResources.hlsli"
 #include "Common/Random.hlsli"
 #include "Common/SharedData.hlsli"
 #include "Common/ViewAtmosphere.hlsli"
@@ -29,9 +30,10 @@ namespace PhysSky
 	SamplerState SampNoise : register(s2);
 #endif
 
+// The pixel stages' registers. An ORG build with ORG_HEADER_RESOURCES reads them by the OrgHandle_<name> it declares.
 #ifdef PS_SKY_SAMPLERS
-	SamplerState SampTr : register(s3);
-	SamplerState SampSv : register(s4);
+	ORG_HEADER_SAMPLER(SamplerState, SampTr, 3)
+	ORG_HEADER_SAMPLER(SamplerState, SampSv, 4)
 #endif
 
 #ifdef PS_DEFERRED_SAMPLERS
@@ -49,11 +51,11 @@ namespace PhysSky
 Texture3D<float4> TexApLut : register(t16);
 Texture2D<unorm float> TexApShadow : register(t17);
 #else
-Texture2D<float4> TexTrLut : register(t61);
-Texture2D<float4> TexSvLut : register(t62);
-Texture3D<float4> TexApLut : register(t63);
-Texture2D<unorm float> TexApShadow : register(t64);
-Texture2D<float4> TexSkyTail : register(t66);
+ORG_HEADER_SRV(Texture2D<float4>, TexTrLut, 61)
+ORG_HEADER_SRV(Texture2D<float4>, TexSvLut, 62)
+ORG_HEADER_SRV(Texture3D<float4>, TexApLut, 63)
+ORG_HEADER_SRV(Texture2D<unorm float>, TexApShadow, 64)
+ORG_HEADER_SRV(Texture2D<float4>, TexSkyTail, 66)
 #endif
 
 #include "PhysicalSky/DiskPhase.hlsli"
@@ -581,20 +583,20 @@ Texture2D<float4> TexSkyTail : register(t66);
 	}
 
 #	ifndef PS_PREPASS_RSRCS
-	Texture2D<float4> TexLightningChannels : register(t113);
-	TextureCube<float4> TexLightningReflection : register(t109);
+	ORG_HEADER_SRV(Texture2D<float4>, TexLightningChannels, 113)
+	ORG_HEADER_SRV(TextureCube<float4>, TexLightningReflection, 109)
 	// Volumetric cloud main-view result and shadow volume. Pixel shaders use t110-t112 to avoid feature texture conflicts.
 #		if defined(PS_DEFERRED_RSRCS)
 	Texture2D<float> TexVolTr : register(t18);
 	Texture2D<float4> TexVolLum : register(t19);
 	Texture3D<float> TexShadowVolume : register(t20);
 #		else
-	Texture2D<float> TexVolTr : register(t110);
-	Texture2D<float4> TexVolLum : register(t111);
-	Texture3D<float> TexShadowVolume : register(t112);
-	TextureCube<float> TexVolCubeTr : register(t114);
-	TextureCube<float4> TexVolCubeLum : register(t115);
-	TextureCube<float4> TexVolCubeDepth : register(t67);
+	ORG_HEADER_SRV(Texture2D<float>, TexVolTr, 110)
+	ORG_HEADER_SRV(Texture2D<float4>, TexVolLum, 111)
+	ORG_HEADER_SRV(Texture3D<float>, TexShadowVolume, 112)
+	ORG_HEADER_SRV(TextureCube<float>, TexVolCubeTr, 114)
+	ORG_HEADER_SRV(TextureCube<float4>, TexVolCubeLum, 115)
+	ORG_HEADER_SRV(TextureCube<float4>, TexVolCubeDepth, 67)
 #		endif
 
 	// The screen-space cloud targets only exist while volumetric clouds are enabled.
