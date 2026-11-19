@@ -1,4 +1,4 @@
-// PooledBackings (see the header): DCLF's allocate and retire hooks for its backing pools.
+// DCLF's allocate and retire hooks for its backing pools.
 #include "Features/DrawcallLimitFix/Core/Gpu/PooledBackings.h"
 
 #include "Features/DrawcallLimitFix/Core/Settings/Switches.h"
@@ -49,7 +49,7 @@ namespace DCLF::PooledBackings
 		buffer->Materialize();
 		org::services::BackingAllocation allocation;
 		allocation.address = a_request.flags.deviceAddress ? DeviceAddressOf(*buffer) : 0;
-		assert(allocation.address % 16 == 0);  // a whole buffer; row and block offsets keep 16 (DrawPipelines.h)
+		assert(allocation.address % 16 == 0);  // row and block offsets keep 16-byte alignment
 		allocation.srvIndex = buffer->HasSRV() ? buffer->GetSRVInfo(0).slot.index : 0;
 		allocation.buffer = std::move(buffer);
 		return allocation;
@@ -62,8 +62,8 @@ namespace DCLF::PooledBackings
 		auto* host = RenderGraphRuntime::Get().Host();
 		auto cleanup = host ? host->ResourceCleanup() : nullptr;
 		if (!cleanup)
-			return;  // no graph host (process exit): nothing left to keep off a frame
-		// The node's last reference drops here: the queue destroys the buffer on its cleanup lane.
+			return;  // no graph host at process exit
+		// The queue destroys the buffer on its cleanup lane.
 		(void)cleanup->Make<std::shared_ptr<org::Buffer>>(std::move(a_buffer));
 	}
 
@@ -77,8 +77,7 @@ namespace DCLF::PooledBackings
 
 	std::uint32_t PerFrameSpares()
 	{
-		// The newest frame's backing is still bound when the next is acquired: the other frames in flight retire in turn (measured: one
-		// fewer makes a backing again every few frames; this many makes none once warm).
+		// The newest frame's backing is still bound when the next is acquired. Measured: one fewer remakes a backing every few frames.
 		return RenderGraphRuntime::kGameFramesInFlight - 1;
 	}
 

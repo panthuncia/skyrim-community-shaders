@@ -1,14 +1,10 @@
 #pragma once
 
-// What every DCLF family that draws the engine's own draws on the graph shares (the sky, the water, the screen blood, the shadow masks):
-// the one DrawTriShape detour they latch through, their SetupGeometry watch, the batch's pass count, the geometry, viewport, constant,
-// texture and header reads of a latched draw, the leases a run keeps, and the setup point where their clients register. The families
-// are the primary path for their draws (docs/development/p5/primary-path.md): a client registers at setup with every input declared,
-// a batch is withheld when its anchor can run, and a draw the family cannot take ends the latched part of its batch: the latched draws
-// run at that point and the engine draws the rest, in order. Nothing a family hands back is vouched for under the flush latch: the
-// latch skips it and the residue census counts it.
-//
-// Render thread (the render owner) unless a function says otherwise.
+// What every DCLF family that draws the engine's own draws on the graph shares: the DrawTriShape detour they latch through, the
+// SetupGeometry watch, and the reads of a latched draw's geometry, constants, textures and headers.
+// A batch is withheld when its anchor can run. A draw the family cannot take ends the latched part of the batch, so the latched
+// draws run there and the engine draws the rest, in order.
+// Render thread unless a function says otherwise.
 
 #include "Features/DrawcallLimitFix/Core/Engine/EngineAccess.h"
 #include "Features/DrawcallLimitFix/Core/Extensions/FrameBindings.h"
@@ -49,18 +45,17 @@ namespace DCLF::Family
 
 	namespace Address
 	{
-		// BSGraphics::Renderer::DrawTriShape(renderer, TriShape*, startIndex, triangleCount): a static TriShape's draw (R1).
+		// BSGraphics::Renderer::DrawTriShape(renderer, TriShape*, startIndex, triangleCount).
 		inline constexpr Engine::Offset kDrawTriShape{ { 77263 }, { 75477 } };
-		// BSGraphics::Renderer::DrawDynamicTriShape's DrawData copy (renderer, DynamicDrawData*, unused, startIndex, triangleCount): a
-		// dynamic shape's draw from a copy of its draw data, the particles' (NiParticles) among them. SE 75488 calls 75489; AE 77275
-		// draws itself (0x140e46f20): stream 0 the static buffer, stream 1 the dynamic ring at the data's offset, 16-bit indices.
+		// DrawDynamicTriShape's DrawData copy, which particles use among others. SE 75488 calls 75489. AE 77275 (0x140e46f20) draws
+		// itself: stream 0 the static buffer, stream 1 the dynamic ring at the data's offset, 16-bit indices.
 		inline constexpr Engine::Offset kDrawDynamicDrawData{ { 77275 }, { 75488 } };
-		// The engine's dynamic ring: its three buffers and the current one (RenderGraph/Engine/Buffers/DynamicRing.cpp's).
+		// The engine's dynamic ring: its three buffers and the current one.
 		inline constexpr Engine::Offset kDynamicRing{ { 411350 }, { 524731 } };
 		inline constexpr Engine::Offset kDynamicRingCurrent{ { 411351 }, { 524732 } };
 	}
 
-	/** @brief BSGraphics::TriShape's head (R1): the static vertex and index buffers and the VertexDesc. */
+	/** @brief BSGraphics::TriShape's head: the static vertex and index buffers and the VertexDesc. */
 	struct TriShape
 	{
 		ID3D11Buffer* vertexBuffer;
@@ -68,16 +63,10 @@ namespace DCLF::Family
 		std::uint64_t vertexDesc;
 	};
 
-	/**
-	 * @brief A family's DrawTriShape taker: true when it took the draw (latched it), so the engine does not make it. Called for every
-	 * DrawTriShape on the render owner's thread; a taker whose family has no batch open returns false at once.
-	 */
+	/** @brief A family's DrawTriShape taker. Returns true when it latched the draw, so the engine skips it. */
 	using DrawTaker = bool (*)(const TriShape* a_shape, std::uint32_t a_start, std::uint32_t a_triangles);
 
-	/**
-	 * @brief The draw data DrawDynamicTriShape's DrawData copy draws (R1, AE 0x140e46f20): TriShape's head (the static vertex buffer,
-	 * stream 0, the index buffer, the VertexDesc), then the offset of its stream 1 in the engine's dynamic ring's current buffer.
-	 */
+	/** @brief The data DrawDynamicTriShape's copy draws (AE 0x140e46f20): TriShape's head, then stream 1's offset in the dynamic ring. */
 	struct DynamicDrawData
 	{
 		ID3D11Buffer* vertexBuffer;
@@ -86,31 +75,27 @@ namespace DCLF::Family
 		std::uint32_t streamOffset;
 	};
 
-	/**
-	 * @brief A family's DrawDynamicTriShape (DrawData copy) taker, as DrawTaker: true when it took the draw. The detour has set the shadow
-	 * state's VertexDesc and topology as the engine's function does, before the takers run.
-	 */
+	/** @brief A DrawData copy taker, as DrawTaker. The detour has set the VertexDesc and topology before the takers run. */
 	using DynamicDrawTaker = bool (*)(const DynamicDrawData* a_data, std::uint32_t a_start, std::uint32_t a_triangles);
 
-	/** @brief AddDrawTaker for the DrawData copy's detour (kDrawDynamicDrawData), which the first call installs. */
+	/** @brief AddDrawTaker for the DrawData copy's detour, which the first call installs. */
 	bool AddDynamicDrawTaker(std::string_view a_family, DynamicDrawTaker a_taker);
 
 	/**
-	 * @brief Adds a_taker to the one DrawTriShape detour, which the first call installs. Takers are asked in the order added; the first
-	 * that takes the draw ends it. False, logged, when this runtime has no address for DrawTriShape. Install time (main thread).
-	 * ImageSpace keeps its own detour for now (RenderGraph/Engine/ImageSpace); it can move here as a taker.
+	 * @brief Adds a taker to the DrawTriShape detour, which the first call installs. Takers are asked in order and the first that
+	 * takes the draw ends it. Install time, main thread. False when this runtime has no address for DrawTriShape.
 	 */
 	bool AddDrawTaker(std::string_view a_family, DrawTaker a_taker);
 
-	/** @brief Whether the DrawTriShape detour is installed (AddDrawTaker succeeded once). */
+	/** @brief Whether the DrawTriShape detour is installed. */
 	bool DrawTakersInstalled();
 
-	/** @brief A family's SetupGeometry watcher: after the shader's own SetupGeometry (and the hooks chained before this one). */
+	/** @brief A family's SetupGeometry watcher, run after the shader's own SetupGeometry. */
 	using SetupWatcher = void (*)(RE::BSRenderPass* a_pass);
 
 	namespace Detail
 	{
-		/** @brief The most watchers one shader type takes (the families that watch it). */
+		/** @brief The most watchers one shader type takes. */
 		inline constexpr std::size_t kSetupWatchers = 4;
 
 		template <RE::BSShader::Type kType>
@@ -131,9 +116,8 @@ namespace DCLF::Family
 	}
 
 	/**
-	 * @brief Watches a shader's SetupGeometry (vtable slot 6 of a_vtable, the shader type's BSShader vtable): a_watcher runs after it,
-	 * where the draw's constants are written. Up to Detail::kSetupWatchers watchers per shader type, run in the order added; the first
-	 * writes the hook. Install time (main thread). False, logged, when the type has no room left.
+	 * @brief Watches a shader type's SetupGeometry (vtable slot 6), where the draw's constants are written. Watchers run in order.
+	 * Install time, main thread. False when the type has no room left.
 	 */
 	template <RE::BSShader::Type kType>
 	bool WatchSetupGeometry(REL::VariantID a_vtable, SetupWatcher a_watcher)
@@ -155,72 +139,65 @@ namespace DCLF::Family
 	}
 
 	/**
-	 * @brief Adds a family's setup, which registers its clients and queues its programs. It runs at CS's setup (RunSetups, from
-	 * DrawcallLimitFix::PostSetupResources), before the setup's graph build (RenderGraph::Engine::PostSetup, FrameAnchors::BuildPending),
-	 * so the clients are in their anchors' graphs before any world frame. A setup that returns false there (no render graph host) is
-	 * tried again on the main thread after every frame-job wait (RenderGraph::Engine::MainTick) until it returns true. Install time
-	 * (main thread). False, logged, when the tick could not be installed.
+	 * @brief Adds a family's setup, which registers its clients. It runs at CS's setup, before the setup's graph build, so clients are
+	 * in their anchors' graphs before any world frame. A setup that returns false is retried on the main thread after every frame-job
+	 * wait until it succeeds. Install time, main thread.
 	 */
 	bool AddSetup(std::string_view a_family, std::function<bool()> a_setup);
 
-	/** @brief CS's setup (main thread, after every feature's SetupResources): every family's setup added so far, once. */
+	/** @brief Main thread, after every feature's SetupResources. Runs every family's setup once. */
 	void RunSetups();
 
 	/**
-	 * @brief Once a game frame, from the first family batch: the render thread's buffer registry (GpuResources::Frame) drops the entries
-	 * whose leases went and takes DXVK's buffer moves. Grass and tree LOD do the same at their depth commit; the families' leases need
-	 * it whether those run or not.
+	 * @brief Once a game frame, from the first family batch. Lets the render thread's buffer registry drop dead entries and take
+	 * DXVK's buffer moves, whether or not grass and tree LOD run.
 	 */
 	void BeginBatch();
 
-	/** @brief The engine's frame counter (Renderer::End increments it). Any thread. */
+	/** @brief Any thread. The engine's frame counter, incremented by Renderer::End. */
 	std::uint32_t GameFrame();
 
 	/**
-	 * @brief A batch's passes against its draws: every pass SetupGeometry set up must draw through DrawTriShape, since a pass that drew
-	 * through another function was the engine's, at its place in the batch, ahead of the graph's draws.
+	 * @brief A batch's passes against its draws. A pass that drew through another function than DrawTriShape was the engine's,
+	 * at its place in the batch, ahead of the graph's draws.
 	 */
 	struct Passes
 	{
 		static constexpr std::uint32_t kNone = 0xFF;
 
-		std::uint32_t passes = 0;         // SetupGeometry calls
-		std::uint32_t drawn = 0;          // DrawTriShape calls
+		std::uint32_t passes = 0;
+		std::uint32_t drawn = 0;
 		std::uint32_t pendingType = kNone;  // the last pass's geometry type while its draw has not reached DrawTriShape
-		std::uint32_t otherTypes = 0;       // the geometry types of passes that drew elsewhere, a bit each
-		// The family takes the DrawData copy's draws too (AddDynamicDrawTaker): a particles pass (type 1, R1's dispatcher +0x101) draws
-		// through its taker, so it is no shortfall. Set after Begin.
+		std::uint32_t otherTypes = 0;  // a bit each
+		// Set when the family also takes DrawData copy draws, so a particles pass is no shortfall.
 		bool dynamicDraws = false;
 
 		void Begin() { *this = {}; }
 		/**
-		 * @brief A pass set up (its geometry's type, BSGeometry::GetType: R1's dispatcher picks the draw function by it). False when the
-		 * pass will not draw through DrawTriShape (DrawsThroughTriShape): the family ends its latched part there, before the
-		 * engine draws the pass.
+		 * @brief A pass set up. False when it will not draw through DrawTriShape, so the family ends its latched part before the engine draws it.
 		 */
 		bool OnSetup(const RE::BSRenderPass* a_pass);
-		/** @brief A DrawTriShape of the batch. */
 		void OnDraw()
 		{
 			++drawn;
 			pendingType = kNone;
 		}
-		/** @brief After the batch: the last pass folded in. True when every pass drew through DrawTriShape. */
+		/** @brief After the batch. True when every pass drew through DrawTriShape. */
 		bool End();
 		/** @brief The shortfall in words, for a log. */
 		std::string Describe(std::string_view a_what) const;
 	};
 
-	/** @brief Whether R1's geometry-type dispatcher draws a_pass through DrawTriShape (its geometry type and accumulation hint). */
+	/** @brief Whether the engine's geometry-type dispatcher draws a_pass through DrawTriShape. */
 	bool DrawsThroughTriShape(const RE::BSRenderPass* a_pass);
 
 	/** @brief A latched draw's geometry, read through its buffer view refs while its leases are held. */
 	struct Geometry
 	{
 		RenderGraph::BufferRef vertexRef, indexRef;
-		std::uint64_t layout = 0;  // the engine's input layout key: the vertex shader's mask and the geometry's VertexDesc
+		std::uint64_t layout = 0;  // the vertex shader's mask and the geometry's VertexDesc
 		std::uint32_t stride = 0, firstIndex = 0, indexCount = 0;
-		// A dynamic draw's stream 1 (the dynamic ring at its offset, LatchDynamicGeometry): null for a static draw.
+		// A dynamic draw's stream 1. Null for a static draw.
 		RenderGraph::BufferRef streamRef;
 		std::uint32_t streamStride = 0;
 	};
@@ -228,41 +205,35 @@ namespace DCLF::Family
 	enum class GeometryResult : std::uint8_t
 	{
 		Ok,
-		Missing,   // no TriShape, or no buffers
-		Topology,  // not a triangle list
-		Buffers,   // a buffer could not be imported
-		Bounds,    // the index range is past the index buffer, or a vertex is smaller than its position
+		Missing,
+		Topology,
+		Buffers,
+		Bounds,  // the index range is past the index buffer, or a vertex is smaller than its position
 	};
 
 	const char* ReasonOf(GeometryResult a_result);
 
 	/**
-	 * @brief The draw's geometry: both buffers leased (into a_owners), the 16-bit index range checked against the index buffer and the
-	 * vertex stride against the position the vertex stage pulls (R32G32B32A32: DCLFPullPosition). a_shaderVertexDesc: the bound vertex
-	 * shader's VertexDesc mask; a_topology: the shadow state's. a_detail, when given, receives the numbers of a refusal (the index range,
-	 * the buffers' bytes, the stride and the vertex count) for its log line.
+	 * @brief The draw's geometry with both buffers leased into a_owners. Checks the 16-bit index range against the index buffer, and
+	 * the stride against the R32G32B32A32 position the vertex stage pulls. a_detail gets a refusal's numbers for the log.
 	 */
 	GeometryResult LatchGeometry(const TriShape* a_shape, std::uint32_t a_start, std::uint32_t a_triangles, std::uint64_t a_shaderVertexDesc,
 		std::uint32_t a_topology, Geometry& a_out, Owners& a_owners, std::string* a_detail = nullptr);
 
-	/**
-	 * @brief LatchGeometry for a DrawData copy's draw: stream 0 the static buffer (none when its stride is 0), stream 1 the engine's dynamic
-	 * ring's current buffer at the data's offset, which holds the position (VertexDesc bit 54: DCLFAttribute's second stream), all leased.
-	 * Render thread, at the draw (the ring's current buffer is the one the engine would bind).
-	 */
+	/** @brief LatchGeometry for a DrawData copy. Call at the draw, while the ring's current buffer is the one the engine would bind. */
 	GeometryResult LatchDynamicGeometry(const DynamicDrawData* a_data, std::uint32_t a_start, std::uint32_t a_triangles, std::uint64_t a_shaderVertexDesc,
 		std::uint32_t a_topology, Geometry& a_out, Owners& a_owners, std::string* a_detail = nullptr);
 
 	/** @brief The viewport SetDirtyStates would set, and its depth range. */
 	struct Viewport
 	{
-		std::array<std::uint32_t, 4> rect{};  // x, y, width, height
+		std::array<std::uint32_t, 4> rect{};
 		std::array<float, 2> depthRange{ 0.0f, 1.0f };
 	};
 
 	/**
-	 * @brief The shadow state's viewport, with the camera state's depth range and the depth bias mode's offset taken off its maximum
-	 * (BSGraphics::CreateDepthBiasViewportOffsets' table, SE 0x141794530, AE 0x1419db270; R2, SetDirtyStates' dirty bit 0x40).
+	 * @brief The shadow state's viewport, with the depth bias mode's offset taken off its maximum depth
+	 * (CreateDepthBiasViewportOffsets' table, SE 0x141794530, AE 0x1419db270).
 	 */
 	Viewport LatchViewport(std::uint32_t a_depthBias);
 
@@ -270,19 +241,15 @@ namespace DCLF::Family
 	namespace Flush = ::RenderGraph::Engine::Flush;
 
 	/**
-	 * @brief The constant buffers bound for the draw about to be latched, as the engine constants capture saw them written and bound
-	 * (Constants::Capture of the vertex and pixel stages: it tracks every buffer's writes from startup, so a buffer's first use has its
-	 * bytes). Invalid when the capture is not active (CS_ORG_ENGINE_CONSTANTS=1, which the families require).
+	 * @brief The constant buffers bound for the draw about to be latched, as the engine constants capture saw them.
+	 * Invalid unless CS_ORG_ENGINE_CONSTANTS=1, which the families require.
 	 */
 	Constants::UseId CaptureConstants();
 
-	/** @brief The bytes of a_slot of a_stage the use bound (0: nothing bound there). */
+	/** @brief The bytes of a_slot of a_stage the use bound, 0 if nothing. */
 	std::uint32_t ConstantBytes(Constants::UseId a_use, Constants::Stage a_stage, std::uint32_t a_slot);
 
-	/**
-	 * @brief A slot's constants as the draw reads them, copied into a_out (zeros past them: a technique whose vanilla shader declares
-	 * fewer rows does not read those). True for nothing bound there; false for an invalid use.
-	 */
+	/** @brief Copies a slot's constants into a_out, zero-filled past them. True for nothing bound, false for an invalid use. */
 	bool CopyConstants(Constants::UseId a_use, Constants::Stage a_stage, std::uint32_t a_slot, std::span<std::byte> a_out);
 
 	/** @brief CopyConstants into whole 16-byte rows. */
@@ -295,41 +262,34 @@ namespace DCLF::Family
 	enum class SlotResult : std::uint8_t
 	{
 		Ok,
-		Published,  // a published graph texture's export, which only a declared read orders after its writes
-		Failed,     // the view could not be imported (a_failure says why), or the null view could not be made
+		Published,  // only a declared read orders it after its writes
+		Failed,
 	};
 
-	/**
-	 * @brief A draw's texture slot as the shadow state holds it: a_view's import, or for an empty slot the null view of the slot's
-	 * declared kind. a_view is unwrapped (Tripwire). The binding's owner goes into a_owners.
-	 */
+	/** @brief A draw's texture slot: a_view's import, or the null view of the slot's kind. a_view is unwrapped first. */
 	SlotResult SlotTexture(ID3D11ShaderResourceView* a_view, GpuTextures::ViewKind a_kind, std::uint32_t a_tag, std::uint32_t& a_index, Owners& a_owners,
 		GpuTextures::ResolveFailure* a_failure = nullptr);
 
 	/** @brief A set of published ids. */
 	using PublishedIds = std::set<std::string, std::less<>>;
 
-	/** @brief The id EngineTargets publishes an engine target under: "Engine::" and the enum's name ("Engine::kSSR"). */
+	/** @brief The id an engine target is published under, such as "Engine::kSSR". */
 	std::string EngineTargetId(RE::RENDER_TARGET a_target);
-	/** @brief An engine depth target's id: "Engine::Depth::" and the enum's name. */
+	/** @brief An engine depth target's id. */
 	std::string EngineTargetId(RE::RENDER_TARGET_DEPTHSTENCIL a_target);
-	/** @brief An engine cubemap target's id: "Engine::Cubemap::" and the enum's name. */
+	/** @brief An engine cubemap target's id. */
 	std::string EngineTargetId(RE::RENDER_TARGET_CUBEMAP a_target);
 
-	/**
-	 * @brief The published ids Drawcall Limit Fix's registry lists at a_registers: its frame textures' graph ids
-	 * (Api::FrameTexture::graphResources) and its frame graph buffers' (Api::FrameGraphBuffers). The ported features publish what CS
-	 * binds at those registers under these ids. Any thread, after DCLF's install.
-	 */
+	/** @brief Any thread, after install. The published ids DCLF's registry lists at a_registers. */
 	std::vector<std::string> RegisteredIdsAt(std::span<const std::uint32_t> a_registers);
 
-	/** @brief How a client reads a published export bound at a slot or a header (PublishedInputs::Resolve). */
+	/** @brief How a client reads a published export bound at a slot or a header. */
 	enum class InputResult : std::uint8_t
 	{
-		Graph,          // by the id's bindless index: the client's graph declares the id
-		NotListed,      // the id is not among the client's inputs: an inherent refusal (the family's list should name it)
-		PublishedLate,  // listed, but first published after the client's graph was built: a producer that publishes during play (an error)
-		NoView,         // the id has no whole-resource view (PublishedResources::ShaderResourceIndex)
+		Graph,  // by the id's bindless index, the client's graph declares the id
+		NotListed,  // not among the client's inputs, so the family's list should name it
+		PublishedLate,  // first published after the client's graph was built, an error
+		NoView,  // no whole-resource view
 	};
 
 	/** @brief InputResult in words, for a log. */
@@ -337,92 +297,69 @@ namespace DCLF::Family
 
 	/**
 	 * @brief The published ids a family client's draws can read, fixed when the client is made at setup.
-	 *
-	 * The engine targets among them are imported when listed (AddEngine), which publishes them, so the client's first build declares
-	 * them. The ported features publish theirs at their own setup (SetupResources), before the families' setup. At each build of its
-	 * anchor's graph, the client's pass declares a read of every listed id that every graph registers (PublishedResources::IsRegistered),
-	 * for order only, and records it as declared. An id stays registered once published, so the set only grows. A producer that
-	 * publishes an id for the first time during play rebuilds every graph by that Publish (not the family); until that rebuild the id is
-	 * PublishedLate, an error the family logs once, and that batch is the engine's.
-	 *
-	 * Filled before the client registers, then shared with the client's passes.
+	 * Each graph build declares a read of every listed id that is registered, for ordering. The set only grows.
+	 * An id first published during play is an error until the graphs rebuild, and that batch goes to the engine.
 	 */
 	class PublishedInputs
 	{
 	public:
-		/** @brief Lists a_id (once; an empty id is ignored). Before the client registers. */
+		/** @brief Lists a_id once. Call before the client registers. */
 		void Add(std::string_view a_id);
 		/** @brief Lists each of a_ids. */
 		void Add(std::span<const std::string> a_ids);
-		/** @brief Lists an engine target's id and imports the target now, which publishes it (render thread, at setup). */
+		/** @brief Render thread, at setup. Lists an engine target and imports it now, which publishes it. */
 		void AddEngine(RE::RENDER_TARGET a_target);
 		void AddEngine(RE::RENDER_TARGET_DEPTHSTENCIL a_target);
 		void AddEngine(RE::RENDER_TARGET_CUBEMAP a_target);
 		/**
-		 * @brief Lists a render target's copy texture (RenderTargetData::textureCopy, "Engine::<target> Copy") and publishes it now when
-		 * ORG owns the target (render thread, at setup). The engine binds the copy where a pass reads the target it draws into (the
-		 * water's refraction reads kMAIN's).
+		 * @brief Render thread, at setup. Lists a target's copy texture and publishes it when ORG owns the target.
+		 * The engine binds the copy where a pass reads the target it draws into.
 		 */
 		void AddEngineCopy(RE::RENDER_TARGET a_target);
 
-		/**
-		 * @brief Graph build: declares a read of each listed id every graph registers, with the view whose index Resolve hands out
-		 * (Extensions::DeclarePublishedRead), and records it as declared.
-		 * @return The declared reads: the pass's Prepare checks them (Extensions::CheckDeclaredReads).
-		 */
+		/** @brief Graph build. Declares a read of each registered listed id and returns them for Prepare to check. */
 		Extensions::DeclaredReads Declare(org::RenderPassBuilder& a_builder);
 
-		/**
-		 * @brief Render thread (a batch): how the client reads a_id, the id a bound view exports (PublishedResources::ExportedId). On
-		 * Graph, a_index receives the bindless index of the id's whole-resource view (PublishedResources::ShaderResourceIndex).
-		 */
+		/** @brief Render thread. How the client reads a_id. On Graph, a_index gets the id's bindless index. */
 		InputResult Resolve(std::string_view a_id, std::uint32_t& a_index) const;
 
-		/** @brief The listed ids, comma separated, for the registration's log line. */
+		/** @brief The listed ids, for the log. */
 		std::string Describe() const;
 
-		/** @brief The listed ids no graph registers yet (comma separated; empty: none), for the setup's log line. */
+		/** @brief The listed ids no graph registers yet, for the log. */
 		std::string Unregistered() const;
 
 	private:
 		std::vector<std::string> ids;
-		// The ids a build declared. Replaced whole, and it only grows. Atomic because a graph may be built on the host's owner thread.
+		// Replaced whole and only grows. Atomic because a graph may be built on the host's owner thread.
 		std::atomic<std::shared_ptr<const PublishedIds>> declared;
 	};
 
-	/** @brief The engine sampler for a slot's address and filter modes. kInvalid when the graph has none. */
+	/** @brief The engine sampler for a slot's address and filter modes, or kInvalid. */
 	std::uint32_t SlotSampler(std::uint32_t a_addressMode, std::uint32_t a_filterMode, Owners& a_owners);
 
-	/** @brief What a header register (a resource CS binds for its features' includes) holds for a batch. */
+	/** @brief What a header register holds for a batch. */
 	struct Header
 	{
-		std::string publishedId;                  // a published graph texture or buffer: read by its index (PublishedInputs::Resolve)
-		std::uint32_t index = GpuTextures::kInvalid;  // otherwise its heap index: a D3D11 view's import, or the kind's null view
+		std::string publishedId;  // read by its index
+		std::uint32_t index = GpuTextures::kInvalid;  // otherwise a D3D11 view's import or the null view
 	};
 
 	enum class HeaderResult : std::uint8_t
 	{
 		Ok,
-		Buffer,   // a D3D11 buffer view the graph cannot import (its feature's ORG path publishes it)
-		Texture,  // a D3D11 texture view that could not be imported (a_failure says why), or no null view
+		Buffer,  // a D3D11 buffer view the graph cannot import
+		Texture,  // could not be imported, or no null view
 	};
 
 	/**
-	 * @brief The one header resolver: PS t<a_register> as CS binds it for the batch. A published resource's export resolves to its id
-	 * first; an empty register to the null view of a_kind; any other view to its import (a_tag, GpuTextures::Source::FamilyHeader + the
-	 * header's index). Imports go into a_owners. a_view, when given, receives the bound view (not kept) for a log.
-	 *
-	 * The headers are CS's registers (t16 and up; the engine binds t0-t15 only), which CS binds on DXVK's own context
-	 * (globals::d3d::context), never through the engine's guest context. The flush latch drops only the guest's binds, so this read stays
-	 * true under it (docs/development/p5/primary-path.md, "D3D11 state reads"). A register below 16 is refused.
+	 * @brief Resolves PS t<a_register> as CS binds it for the batch. Registers below 16 are refused.
+	 * CS binds these on DXVK's own context, not the engine's guest context, so the read stays true under the flush latch.
 	 */
 	HeaderResult ResolveHeader(std::uint32_t a_register, GpuTextures::ViewKind a_kind, std::uint32_t a_tag, Header& a_out, Owners& a_owners,
 		GpuTextures::ResolveFailure* a_failure = nullptr, ID3D11ShaderResourceView** a_view = nullptr);
 
-	/**
-	 * @brief Leases and imports kept for a few frames: a run's (the GPU may be that far behind) and a batch's that ran nothing (its
-	 * imports are found again by the next batch instead of imported again).
-	 */
+	/** @brief Keeps leases and imports for a few frames, since the GPU may be that far behind. */
 	class KeptOwners
 	{
 	public:
@@ -433,23 +370,18 @@ namespace DCLF::Family
 		std::deque<std::pair<std::uint32_t, Owners>> kept;  // (game frame, owners)
 	};
 
-	/** @brief Game frames a run's owners are kept: the frames the graph may run behind, with a margin. */
+	/** @brief Game frames a run's owners are kept: how far the graph may run behind, plus a margin. */
 	std::uint32_t KeptFrames();
 
 	/**
-	 * @brief Runs a_anchor for a client whose latched draws are ready (HeldForBatch said it would draw): a_pending, which the client's active
-	 * callback returns, is set for the run. True when the run was submitted (RunStatus::Ran). Any other status is an error: the latched
-	 * draws were not drawn this frame, logged once per status as an error (with a_family and a_client). Nothing is retried. The client's
-	 * executed callback counts the runs that drew.
+	 * @brief Runs a_anchor for a client whose latched draws are ready. True when the run was submitted.
+	 * Any other status is an error, logged once per status, and nothing is retried.
 	 */
 	bool RunWithheld(std::string_view a_family, std::string_view a_client, FrameAnchors::Anchor a_anchor, bool& a_pending);
 
 	/**
-	 * @brief Whether a batch of a family's client at a_anchor is drawn by the graph now (the batch is taken).
-	 * A client a stage names: the stage step that names it holds it (FrameAnchors::HeldNow). A batch while no open stage holds the client
-	 * is a tap error (NotDeclared, in a_segment: the stage the client belongs to); one the stage's schedule does not hold yet lags (its
-	 * first build): nothing is drawn. Any other client: the anchor's own built graph holds it (FrameAnchors::Scheduled). a_family names
-	 * the family in the messages.
+	 * @brief Whether the graph draws a client's batch now. A batch while no open stage holds the client is a tap error.
+	 * One the stage's schedule does not hold yet lags, and nothing is drawn.
 	 */
 	bool HeldForBatch(std::string_view a_family, std::string_view a_client, std::uint32_t a_segment, FrameAnchors::Anchor a_anchor = FrameAnchors::Anchor::EngineDraws);
 }

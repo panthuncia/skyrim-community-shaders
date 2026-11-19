@@ -1,6 +1,5 @@
-// PrimaryCull's scene lists (dclf-architecture.md, "The scene lists without DCLF's roots"): the filter published on the render
-// thread (PublishListFilter, RestoreSceneLists), the build's job (DrawWorld_BuildSceneLists' detour: kept, rebuilt or the engine's
-// build filtered), and the attach/detach detours' structure events (any thread). PrimaryCull.h, PublishListFilter, describes the modes.
+// PrimaryCull's scene lists: the filter published on the render thread, the build job's detour that keeps, rebuilds or filters
+// the lists, and the attach and detach structure events. PrimaryCull.h describes the modes.
 #include "Features/DrawcallLimitFix/Core/Handoff/PrimaryCull.h"
 
 #include "Features/DrawcallLimitFix/Core/Engine/EngineAccess.h"
@@ -28,16 +27,16 @@ namespace DCLF
 	{
 		using namespace Engine;
 
-		// Engine::Offsets (Address Library ids).
+		// Address Library ids.
 		constexpr Engine::Offset kBuildSceneLists{ { 36643 }, { 35630 } };  // DrawWorld_BuildSceneLists, a job of Main::Draw's
 		constexpr Engine::Offset kClearList{ { 36655 }, { 35641 } };  // FUN_14064cf20(list): Main::Draw's ClearLists job, one list
 		constexpr Engine::Offset kCullList{ { 76561 }, { 74811 } };  // FUN_140e28f70(process, list, camera, skipHidden, jobs): every list cull
 		// In DrawWorld_BuildSceneLists: `mov rax, [rcx]; call [rax + 0x18]`, the object root's AsNode (ShadowSceneNode child 3).
 		constexpr Engine::Offset kObjectRootAsNode{ { 36643, 0x23a }, { 35630, 0x239 } };
 		constexpr std::array<std::uint8_t, 6> kObjectRootAsNodeBytes{ 0x48, 0x8B, 0x01, 0xFF, 0x50, 0x18 };
-		// TES: the current worldspace (AE FUN_14019d200 reads +0x148, SE FUN_140153cf0 +0x140: TES is 8 bytes shorter before it on SE).
+		// TES's current worldspace. TES is 8 bytes shorter before it on SE (AE FUN_14019d200 +0x148, SE FUN_140153cf0 +0x140).
 		inline std::size_t TesWorldSpace() { return REL::Module::IsSE() ? 0x140 : 0x148; }
-		constexpr std::size_t kWorldSpaceFlags = 0xa0;        // byte; 0x40: the build skips category node 2
+		constexpr std::size_t kWorldSpaceFlags = 0xa0;  // byte. 0x40 means the build skips category node 2
 
 		using SceneList = RE::BSTArray<RE::NiPointer<RE::NiAVObject>>;
 
@@ -48,7 +47,7 @@ namespace DCLF
 			return globals::game::smState ? globals::game::smState->shadowSceneNode[0] : nullptr;
 		}
 
-		/** @brief The engine's build's category rule: cell children 2, 3, 5, 6, 7 and on (node 2 not when the worldspace says so). */
+		/** @brief The engine build's category rule: cell children 2, 3, 5, 6, 7 and on, node 2 not when the worldspace says so. */
 		bool CategoryListed(std::uint32_t a_index, bool a_skipCategory2)
 		{
 			return ((a_index & ~5u) != 0 || a_index == 5) && !(a_skipCategory2 && a_index == 2);
@@ -58,8 +57,7 @@ namespace DCLF
 	template <class List, class Structural>
 	void PrimaryCull::EnumerateSceneLists(const RE::NiAVObject* a_objectRoot, bool a_skipCategory2, List&& a_list, Structural&& a_structural)
 	{
-		// DrawWorld_BuildSceneLists (AE 0x14064bc20), the exterior branch's object root: every hidden test on an entry itself is
-		// the list cull's (CullList), and the ones on the nodes above are structure.
+		// The exterior branch of DrawWorld_BuildSceneLists (AE 0x14064bc20). Hidden tests on an entry are the list cull's, and those on the nodes above are structure.
 		if (!a_objectRoot)
 			return;
 		a_structural(a_objectRoot);
@@ -70,7 +68,7 @@ namespace DCLF
 				auto* cell = cells[i] ? cells[i]->AsNode() : nullptr;
 				if (!cell)
 					continue;
-				// Children 0 and 1 are entries, whole, in list 0.
+				// Children 0 and 1 are whole entries in list 0.
 				if (i < 2) {
 					a_list(cell, true);
 					continue;
@@ -123,9 +121,7 @@ namespace DCLF
 		const std::uint32_t count = Global<std::uint32_t>(Engine::Address::kSceneListCount);
 		if (!sceneNode || !processes || !processes[0] || !tes || !count || count > listSentinels.size())
 			return fail(1);
-		// The interior branch (and with no unbound space, the water's) does not walk the object root. Whether the walk reached
-		// unbound space is DCLF's walk's (the main cull input's, after Main::Update's: Features/Portals). The primary cull is installed
-		// only with its walk, so an input is registered here.
+		// The interior branch does not walk the object root, so lists cannot be kept without unbound space visible.
 		if (const auto* input = Extensions::MainCullInput(); input && !input->contribution.unboundVisible())
 			return fail(2);
 		if (tes->interiorCell)
@@ -142,7 +138,7 @@ namespace DCLF
 
 	bool PrimaryCull::ListFilterReady(bool& a_sunOff, Api::ShadowListExclusion& a_exclusion)
 	{
-		// Entries to judge again pile up while no filter is made: past the index space, all are.
+		// Entries to judge pile up while no filter is made. Past the index space, judge all.
 		if (filterDirty.size() > std::max<std::size_t>(cut.plans.size(), 1024)) {
 			filterDirty.clear();
 			filterDirtyAll = true;
@@ -152,8 +148,7 @@ namespace DCLF
 			++listStats.notToggled;
 			return false;
 		}
-		// Precipitation::SetupMask culls every list when the engine draws an occlusion map: every map that can render must be DCLF's (one not
-		// available, Skylighting's without it, never renders).
+		// Precipitation::SetupMask culls every list when the engine draws an occlusion map, so every map that can render must be DCLF's.
 		bool everyMap = true;
 		for (std::uint32_t v = 0; v < kOcclusionViews && everyMap; ++v)
 			if (const auto& map = Extensions::OcclusionMapOf(v); map.registered && *map.available)
@@ -162,7 +157,7 @@ namespace DCLF
 			++listStats.noOcclusion;
 			return false;
 		}
-		// The cut as the last frame left it, brought up to the frame's candidates (it plans again only the entries that moved).
+		// The cut brought up to the frame's candidates. Only entries that moved are planned again.
 		TakePlans();
 		if (const auto candidates = Scene::FrameView::Get().GetSunCandidates(); !candidates) {
 			++listStats.notCurrent;
@@ -173,10 +168,8 @@ namespace DCLF
 			SyncCut(candidates, changed);
 			cutStats.entriesPlanned += changed.size();
 		}
-		// The exclusion this frame's full-frustum cull applies, for the same snapshot: a root out of the lists is out of
-		// the sun's cascades only when that exclusion takes it out too. With the sun off (an interior) no full-frustum cull
-		// reads the lists, and no exclusion is needed. The exclusion is the contribution's (Features/Shadows/Local's SunExclusionSlot), read
-		// through its plain view.
+		// A root out of the lists is out of the sun's cascades only when this frame's exclusion takes it out too.
+		// With the sun off no full-frustum cull reads the lists, so no exclusion is needed.
 		const bool sunOff = Global<std::uint8_t>(Engine::Address::kSunOff) != 0;
 		Api::ShadowListExclusion exclusion;
 		if (!sunOff)
@@ -192,7 +185,7 @@ namespace DCLF
 
 	bool PrimaryCull::MarkFilterDirty(std::uint32_t a_entries, bool a_sunOff, Api::ShadowListExclusion& a_exclusion)
 	{
-		// Judged again: the entries the cut changed (NoteFilterEntry) and those whose exclusion bit moved; all for a first filter.
+		// Judge again the entries the cut changed and those whose exclusion bit moved. All for a first filter.
 		bool all = filterDirtyAll || !listFilterBuilt || a_sunOff != filterSunOff || (!a_sunOff && !filterExclusion.held);
 		if (!all && !a_sunOff && a_exclusion.held != filterExclusion.held) {
 			const auto was = filterExclusion.excluded;
@@ -251,7 +244,7 @@ namespace DCLF
 			listReason.resize(a_entries, kNoEntry);
 			listReasonRoot.resize(a_entries, nullptr);
 		}
-		// Erased first, then inserted: a root that moved to another index within the delta stays in.
+		// Erase first, then insert, so a root that moved index within the delta stays in.
 		std::vector<std::pair<std::uint32_t, std::uint8_t>> judged;
 		judged.reserve(filterDirty.size());
 		for (const std::uint32_t e : filterDirty) {
@@ -296,15 +289,14 @@ namespace DCLF
 		const auto entries = static_cast<std::uint32_t>(cut.plans.size());
 		const bool all = MarkFilterDirty(entries, sunOff, exclusion);
 		auto next = JudgeFilterEntries(entries, sunOff, all);
-		// Entries past the index space are gone from it.
 		if (listReason.size() > entries) {
 			for (std::uint32_t e = entries; e < listReason.size(); ++e)
 				--listReasonCount[listReason[e]];
 			listReason.resize(entries);
 			listReasonRoot.resize(entries);
 		}
-		// Every root a version lists is its entry's root in that version's candidates, which hold it; one erased is held by the base's.
-		// No root moved: the last version stands (its candidates hold the same roots), whatever snapshot is current.
+		// Every root a version lists is held by that version's candidates, and an erased one by the base's.
+		// If no root moved, the last version stands.
 		if (next) {
 			next->candidates = cut.candidates;
 			next->version = ++listFilterVersion;
@@ -332,7 +324,7 @@ namespace DCLF
 		auto filter = CurrentListFilter();
 		std::uint64_t witness = 0;
 		const bool keepable = ListsKeepable(witness);
-		// The engine's build, whole: its observers look at the roots the filter would have left out, and at the engine's lists.
+		// The engine's build, whole.
 		if (!Policy::FilterSceneLists(Scene::FrameView::Get().GetFrame())) {
 			if (Diagnostics::Armed<Diagnostics::SceneListsWhole>())
 				Diagnostics::Notify(Diagnostics::SceneListsWhole{ filter, filter ? &filter->roots : nullptr, keepable });
@@ -346,7 +338,7 @@ namespace DCLF
 			const bool dirty = listsDirty.load(std::memory_order_relaxed);
 			const bool structure = listStructure.load(std::memory_order_acquire) != listStructureBuilt;
 			const bool witnessMoved = witness != listWitnessBuilt;
-			// A new filter whose delta is from the kept lists' is applied to them (ApplyFilterDelta); any other rebuilds them.
+			// A new filter whose delta is from the kept lists' filter is applied to them. Any other rebuilds them.
 			const bool filterMoved = filter != listFilterKept && !(filter && listFilterKept && filter->base && filter->base == listFilterKept->version);
 			mode = dirty || structure || witnessMoved || filterMoved ? ListMode::Rebuild : ListMode::Keep;
 			listStats.rebuildDirty += dirty ? 1 : 0;
@@ -385,7 +377,7 @@ namespace DCLF
 					filterScratch[r] = 1;
 					++removable;
 				}
-			// Each list keeps an entry: its job sets its process's frustum up from the first (Process2).
+			// Each list keeps one entry, because its job sets the frustum up from the first (Process2).
 			if (removable && removable == size) {
 				filterScratch[0] = 0;
 				--removable;
@@ -420,7 +412,7 @@ namespace DCLF
 		const auto* tes = RE::TES::GetSingleton();
 		if (!sceneNode || !lists || !count || count > listSentinels.size() || !tes)
 			return;
-		// Read first: an event during the build rebuilds again next frame.
+		// Read first, so an event during the build rebuilds again next frame.
 		listStructureBuilt = listStructure.load(std::memory_order_acquire);
 		listWitnessBuilt = listWitness;
 		listFilterKept = listFilter.load(std::memory_order_acquire);
@@ -455,7 +447,7 @@ namespace DCLF
 			},
 			[&](const RE::NiAVObject* a_node) { listStructural.insert(a_node); });
 		listNext = next;
-		// The category nodes whose roots were listed: a root attached under one is listed by an event.
+		// Roots attached under these category nodes are listed by events.
 		ForEachCell(objectRoot, 2, [&](RE::NiNode& a_cell) {
 			ForEachCategory(a_cell, [&](std::uint16_t a_index, RE::NiNode& a_category) {
 				if (CategoryListed(a_index, skipCategory2))
@@ -464,7 +456,6 @@ namespace DCLF
 		});
 		for (std::uint32_t l = 0; l < count; ++l)
 			listKeptSize[l] = lists[l].size();
-		// What the detours compare a parent with.
 		const auto* objectNode = objectRoot ? const_cast<RE::NiAVObject*>(objectRoot)->AsNode() : nullptr;
 		for (std::uint16_t i = 0; i < 2; ++i)
 			listWholeEntries[i].store(objectNode && i < objectNode->GetChildren().free_idx() ? objectNode->GetChildren()[i].get() : nullptr, std::memory_order_relaxed);
@@ -498,10 +489,10 @@ namespace DCLF
 			if (category == listCategories.end()) {
 				if (held)
 					listGraveyard.push_back(std::move(held));
-				return;  // not a listed category node: nothing under it is listed
+				return;  // not a listed category node, so nothing under it is listed
 			}
 			if (a_event.attached) {
-				// Category node 6's first child is not listed (the build starts at 1); the cell's order is read now.
+				// Category node 6's first child is not listed, since the build starts at 1.
 				const auto* node = const_cast<RE::NiAVObject*>(a_event.parent)->AsNode();
 				const bool first = category->second == 6 && node && node->GetChildren().free_idx() && node->GetChildren()[0].get() == a_event.child;
 				if (!first && held && !listPositions.contains(a_event.child) && !(a_filter && a_filter->roots.contains(a_event.child))) {
@@ -521,7 +512,7 @@ namespace DCLF
 			const auto [l, position] = it->second;
 			const std::uint32_t last = listKeptSize[l] - 1;
 			if (l >= count || position > last || lists[l][position].get() != a_event.child) {
-				rebuild = true;  // the kept lists are not what the positions say: built again
+				rebuild = true;  // the kept lists no longer match the positions
 				return;
 			}
 			listGraveyard.push_back(std::move(lists[l][position]));
@@ -545,9 +536,7 @@ namespace DCLF
 		auto* lists = Global<SceneList*>(Engine::Address::kSceneLists);
 		if (!lists || !count)
 			return false;
-		// Put back: the roots the filter no longer leaves out, where the build lists them (under a kept category node, in the round
-		// robin). Each is alive: the kept lists' filter (the delta's base) holds it. One detached since has left the scene; one under
-		// anything else than a kept category node is the build's to place.
+		// Put back roots the filter no longer leaves out. Each is held alive by the delta's base. One detached since has left the scene.
 		std::uint64_t in = 0, out = 0;
 		for (const auto* root : a_filter.erased) {
 			if (listPositions.contains(root))
@@ -558,7 +547,7 @@ namespace DCLF
 			const auto category = listCategories.find(parent);
 			if (category == listCategories.end())
 				return false;
-			// Category node 6's first child is not listed (the build starts at 1).
+			// Category node 6's first child is not listed, since the build starts at 1.
 			if (category->second == 6 && parent->GetChildren().free_idx() && parent->GetChildren()[0].get() == root)
 				continue;
 			const std::uint32_t l = listNext++ % count;
@@ -567,7 +556,7 @@ namespace DCLF
 			++listKeptSize[l];
 			++in;
 		}
-		// Take out: the roots it now leaves out (as a detach event).
+		// Take out the roots it now leaves out, as a detach event.
 		for (const auto* root : a_filter.inserted) {
 			const auto it = listPositions.find(root);
 			if (it == listPositions.end())
@@ -605,7 +594,7 @@ namespace DCLF
 
 	void PrimaryCull::ListUpkeep()
 	{
-		// What DrawWorld_BuildSceneLists' object root walk does besides the lists: its visible children marked kAccumulated.
+		// The build's other work on the object root: its visible children are marked kAccumulated.
 		const auto* sceneNode = SceneNode();
 		if (!sceneNode)
 			return;
@@ -636,9 +625,7 @@ namespace DCLF
 		auto* lists = Global<SceneList*>(Engine::Address::kSceneLists);
 		if (!filter || !lists || !count)
 			return;
-		// The filter's roots are alive: its candidates hold them (EntrySpace::held). One the engine detached since the snapshot
-		// was made stays out (it has left the scene); a hidden one is skipped by the cull. Taking a reference to a root the
-		// snapshot did not hold is what put freed roots into the lists, released at Present (dclf-architecture.md, "Engine references").
+		// The filter's candidates hold its roots alive. Never take a reference to a root the snapshot did not hold, which once put freed roots into the lists.
 		const auto* scene = SceneNode();
 		std::uint32_t l = 0;
 		for (const auto* root : filter->roots) {
@@ -657,7 +644,6 @@ namespace DCLF
 
 	void PrimaryCull::NoteListStructure(const RE::NiNode* a_parent, RE::NiAVObject* a_child, bool a_attached)
 	{
-		// The stand-in observers' structure first (the point lights' category filter, Features/Shadows/Local), then the cull input's.
 		Extensions::StandInStructure(a_parent);
 		if (const auto* input = Extensions::MainCullInput())
 			input->contribution.structure(a_parent);
@@ -667,7 +653,7 @@ namespace DCLF
 		const auto* whole0 = listWholeEntries[0].load(std::memory_order_relaxed);
 		const auto* whole1 = listWholeEntries[1].load(std::memory_order_relaxed);
 		int kind = a_parent == objectRoot ? 0 : -1;
-		// A cell's category node, or a category node's root; not anything under the two whole entries (the actors).
+		// A cell's category node, or a category node's root. Not anything under the two whole entries (the actors).
 		if (const auto* grandparent = a_parent->parent; kind < 0 && grandparent) {
 			if (grandparent == objectRoot && a_parent != whole0 && a_parent != whole1)
 				kind = 1;
@@ -677,7 +663,7 @@ namespace DCLF
 		if (kind < 0)
 			return;
 		listStats.structureBy[kind].fetch_add(1, std::memory_order_relaxed);
-		// A root: applied by the next build. A detach is identity only: the root may be gone by then.
+		// Applied by the next build. A detach is identity only, because the root may be gone by then.
 		if (kind == 2 && a_child) {
 			listEvents.Push({ a_attached ? RE::NiPointer<RE::NiAVObject>(a_child) : RE::NiPointer<RE::NiAVObject>(), a_child, a_parent, a_attached });
 			return;
@@ -687,27 +673,26 @@ namespace DCLF
 
 	struct PrimaryCull::ListHooks
 	{
-		/** @brief DrawWorld_BuildSceneLists (a job of Main::Draw's): the engine's build, DCLF's, or the kept lists. */
+		/** @brief DrawWorld_BuildSceneLists, a job of Main::Draw's: the engine's build, DCLF's, or the kept lists. */
 		struct BuildSceneLists
 		{
 			static void thunk()
 			{
 				auto& self = PrimaryCull::Get();
 				auto mode = self.listMode.load(std::memory_order_acquire);
-				// A structure change since the publication: built again now rather than kept.
+				// A structure change since the publication means build again now rather than keep.
 				if (mode == ListMode::Keep && self.listStructure.load(std::memory_order_acquire) != self.listStructureBuilt) {
 					mode = ListMode::Rebuild;
 					self.listStats.lateRebuilds.fetch_add(1, std::memory_order_relaxed);
 				}
 				const std::uint32_t count = Global<std::uint32_t>(Engine::Address::kSceneListCount);
 				auto* lists = Global<SceneList*>(Engine::Address::kSceneLists);
-				// Still the exterior branch (an interior since the publication: the engine's build, on cleared lists).
+				// If this became an interior since the publication, use the engine's build on cleared lists.
 				std::uint64_t witness = 0;
 				if (mode != ListMode::Engine && !self.ListsKeepable(witness))
 					mode = ListMode::Engine;
 				if (mode == ListMode::Engine) {
-					// Main::Draw clears the lists at the frame's end (ClearLists, after the occlusion maps): after a frame that
-					// kept them they still hold DCLF's build, which the engine's would be appended to.
+					// Main::Draw clears the lists at the frame's end. After a kept frame they still hold DCLF's build, which the engine's would append to.
 					self.DropListEvents();
 					self.BuryLists();
 					func();
@@ -716,7 +701,7 @@ namespace DCLF
 					self.FilterSceneLists();
 					return;
 				}
-				// A list shorter than its kept part was cleared after all: built again.
+				// A list shorter than its kept part was cleared after all, so build again.
 				for (std::uint32_t l = 0; mode == ListMode::Keep && l < count && l < self.listKeptSize.size(); ++l)
 					if (lists[l].size() < self.listKeptSize[l]) {
 						mode = ListMode::Rebuild;
@@ -725,11 +710,10 @@ namespace DCLF
 				if (mode == ListMode::Rebuild) {
 					self.RebuildSceneLists(self.listFilter.load(std::memory_order_acquire).get());
 				} else {
-					// Last frame's engine entries (rooms, occlusion planes) go; the kept part stays, with the roots attached and
-					// detached since.
+					// Last frame's engine entries go. The kept part stays, with the roots attached and detached since.
 					for (std::uint32_t l = 0; l < count && l < self.listKeptSize.size(); ++l)
 						lists[l].resize(self.listKeptSize[l]);
-					// The events against the filter the kept lists were made with, then the new filter's delta from it.
+					// Apply events against the kept lists' filter first, then the new filter's delta.
 					const auto filter = self.listFilter.load(std::memory_order_acquire);
 					bool kept = self.ApplyListEvents(self.listFilterKept.get());
 					if (kept && filter != self.listFilterKept) {
@@ -748,7 +732,7 @@ namespace DCLF
 						self.RebuildSceneLists(self.listFilter.load(std::memory_order_acquire).get());
 					}
 				}
-				// The engine's build for the rest: the extra list, and what follows the camera; not the object root.
+				// The engine builds the rest, but not the object root.
 				self.skipObjectRoot = true;
 				func();
 				self.skipObjectRoot = false;
@@ -759,7 +743,7 @@ namespace DCLF
 			static inline REL::Relocation<decltype(thunk)> func;
 		};
 
-		/** @brief The build's AsNode of the object root: null while its part of the lists is DCLF's (kept or built). */
+		/** @brief The build's AsNode of the object root. Null while its part of the lists is DCLF's. */
 		struct ObjectRootAsNode
 		{
 			static RE::NiNode* thunk(RE::NiAVObject* a_object)
@@ -768,7 +752,7 @@ namespace DCLF
 			}
 		};
 
-		/** @brief Main::Draw's ClearLists job, one list: kept lists stay (the build trims the engine's own entries). */
+		/** @brief Main::Draw's ClearLists job, one list. Kept lists stay. */
 		struct ClearList
 		{
 			static void thunk(void* a_list)
@@ -780,10 +764,7 @@ namespace DCLF
 			static inline REL::Relocation<decltype(thunk)> func;
 		};
 
-		/**
-		 * @brief FUN_140e28f70, every list cull (the list jobs, the sun's full-frustum cull, Precipitation::SetupMask): a scene
-		 * list's hidden entries are skipped, as the engine's own build leaves them out (kept lists hold them).
-		 */
+		/** @brief FUN_140e28f70, every list cull. Skips a scene list's hidden entries, which the engine's own build would leave out. */
 		struct CullList
 		{
 			static void thunk(void* a_process, void* a_list, void* a_camera, bool a_skipHidden, bool a_jobs)
@@ -796,8 +777,7 @@ namespace DCLF
 
 	void PrimaryCull::PreflightSceneLists()
 	{
-		// Not chained: the build's object root call is replaced inline (the thunk makes the virtual call itself), and a kept list skips
-		// ClearList's original (another plugin's detour of it with it). The build's and the cull's detours chain.
+		// Not chained. The object root call is replaced inline, and a kept list skips ClearList's original. The build and cull detours chain.
 		const auto base = REL::Module::get().base();
 		HookSites::RequireBytes("the scene lists' object root call", base + kObjectRootAsNode, kObjectRootAsNodeBytes);
 		HookSites::RequireKnown("the scene lists' build, clear and cull functions", kBuildSceneLists.Known() && kClearList.Known() && kCullList.Known());
@@ -807,8 +787,7 @@ namespace DCLF
 
 	void PrimaryCull::InstallSceneLists()
 	{
-		// PreflightSceneLists checked the object root call's bytes, the functions' addresses and ClearList's entry before any hook was
-		// written. The three detours go in together: a list kept by a ClearList detour whose build is the engine's would grow every frame.
+		// The three detours go in together. A list kept by ClearList whose build is the engine's would grow every frame.
 		const auto base = REL::Module::get().base();
 		SKSE::GetTrampoline().write_call<6>(base + kObjectRootAsNode, ListHooks::ObjectRootAsNode::thunk);
 		listsKeepInstalled = true;

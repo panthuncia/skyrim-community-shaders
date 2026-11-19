@@ -1,4 +1,4 @@
-// FrameData: the render thread's per-frame write counters (see the header).
+// The render thread's per-frame write counters.
 
 #include "Features/DrawcallLimitFix/Core/Gpu/FrameData.h"
 
@@ -21,14 +21,13 @@ namespace DCLF
 		std::uint64_t frames = 0;
 		std::atomic<std::uint32_t> renderThread{ 0 };
 
-		// The names seen since the last Take, in front of the map: most writes name a string literal, so the pointer matches and no
-		// string is made. The text is compared too, so a buffer reused for another name never counts against the wrong one.
+		// Most names are string literals, so a pointer match avoids making a string. The text is compared too, in case a buffer is reused.
 		struct Seen
 		{
 			const char* data;
 			std::string name;  // without the prefix
 			bool latch;
-			Counts* counts;  // a node of `counts` (std::map nodes stay put)
+			Counts* counts;  // std::map nodes stay put
 		};
 		std::vector<Seen> seen;
 

@@ -24,52 +24,36 @@ namespace DCLF::SceneCapture
 namespace DCLF
 {
 	/**
-	 * @brief Why the engine would draw no shadow-map pass for an object (engine notes: shadow maps,
-	 * `BSLightingShaderProperty::GetRenderPasses_ShadowMapOrMask`). None means it is a caster. It agrees with the engine's own
-	 * registrations: it rejects none of the casters the engine registers.
+	 * @brief Why the engine would draw no shadow-map pass for an object, from GetRenderPasses_ShadowMapOrMask. None means a caster.
+	 * It must never reject a caster the engine registers.
 	 */
 	enum class ShadowReject : std::uint8_t
 	{
 		None,
-		NotLighting,    // not a BSLightingShaderProperty; the rule is that property's
-		DeclZero,       // DetermineUtilityShaderDecl() == 0
-		Faded,          // material->materialAlpha < 1 (the fade node's share: the GPU's, RootFading)
-		Refraction,     // flags kTempRefraction (2) or kRefraction (15)
-		AlphaBlended,   // alpha blending, outside the decal exception
-		/**
-		 * A decal flag (kDecal 26 or kDynamicDecal 27) outside the one exception: kZBufferWrite (32), bit 18 and
-		 * alpha blending. The sun's and the spot lights' accumulators (their UpdateCamera: drawDecals +0x12C = 0,
-		 * +0x12D = 1) are registered through FUN_1414b2a60 (AE), which drops such a property before it asks for a
-		 * pass; GetRenderPasses_ShadowMapOrMask then drops the bit-18 ones again. A paraboloid light keeps the
-		 * constructor's drawDecals = 1 and casts the ones without bit 18 (DecalPointLight).
-		 */
+		NotLighting,  // the rule is that property's
+		DeclZero,
+		Faded,  // material->materialAlpha < 1. The fade node's share is the GPU's
+		Refraction,  // kTempRefraction (2) or kRefraction (15)
+		AlphaBlended,  // outside the decal exception
+		// A decal (kDecal 26, kDynamicDecal 27) outside the one exception: kZBufferWrite (32), bit 18 and alpha blending.
+		// The sun's and spot lights' accumulators drop it in FUN_1414b2a60 before asking for a pass.
 		DecalNoZWrite,
-		NoCastShadows,  // kCastShadows clear while the engine's shadow global demands it
-		/**
-		 * kCastShadows clear while the shadow global is 2 (volumetric lighting): a clamped view whose accumulator
-		 * has the volumetric flag (+0x12E, which BSShadowDirectionalLight::Accumulate always sets) gives it a pass
-		 * only in the property's volumetricShadowUtilityPasses, drawn into the volumetric lighting copy and never
-		 * into the sun's cascades (batch group 15, accumulation hint 8). DCLF draws it in the copy's views alone
-		 * (kObjectVolumetricOnly), and PassCapture withholds the engine's pass.
-		 */
+		NoCastShadows,  // kCastShadows clear while the shadow global demands it
+		// kCastShadows clear while the shadow global is 2. The engine gives it a pass only in the volumetric lighting copy, never the
+		// sun's cascades (batch group 15, hint 8). DCLF draws it in the copy's views alone.
 		VolumetricOnly,
-		/**
-		 * A DecalNoZWrite decal without bit 18. By the reading of FUN_1414b2a60 above a paraboloid light would cast it, but it
-		 * never does (observed with the point lights' culls whole, every insertion watched: no paraboloid pass). So it is no
-		 * caster of any mode; the point lights' culls' observer (Features/Shadows/Local) reports one if a scene ever registers it.
-		 */
+		// A DecalNoZWrite decal without bit 18. By FUN_1414b2a60 a paraboloid light would cast it, but it was never seen to.
+		// Features/Shadows/Local reports one if a scene ever registers it.
 		DecalPointLight,
-		// A multi-index shape's layer object (Coordinator::Tracked::layerSlot): the shadow modes register the main property's
-		// passes alone (FUN_1414b2a60), so the additional property never casts.
+		// A multi-index shape's layer. The shadow modes register the main property's passes alone (FUN_1414b2a60).
 		Layer,
-		// Object and terrain LOD (under TES::lodLandRoot: IsLodObject, IsLodLand): no shadow cull reaches the LOD root, and no
-		// shadow mode ever registers either (observed: dclf-architecture.md, "The census").
+		// Object and terrain LOD. No shadow cull reaches the LOD root, and no shadow mode registers either.
 		Lod,
 		Count
 	};
 	const char* ShadowRejectName(ShadowReject a_reason);
 
-	/** @brief Object LOD: a BSSubIndexTriShape whose Lighting property has the LOD object flags (dclf-architecture.md, "Object LOD"). */
+	/** @brief Object LOD: a BSSubIndexTriShape whose Lighting property has the LOD object flags. */
 	inline bool IsLodObject(std::uint64_t a_flags, std::uint8_t a_type)
 	{
 		using Flag = RE::BSShaderProperty::EShaderPropertyFlag;
@@ -82,13 +66,12 @@ namespace DCLF
 	}
 
 	/**
-	 * @brief The previous transform BSLightingShader::SetupGeometry (0x1414dd040) draws a_geometry with: for LOD (techniques 9, 13, 15
-	 * and 18: IsLodObject, IsLodLand) its current one with the previous posAdjust, else NiAVObject::previousWorld. A terrain LOD
-	 * chunk the terrain manager placed keeps the previousWorld it was loaded with (the origin) for good.
+	 * @brief The previous transform BSLightingShader::SetupGeometry (0x1414dd040) draws with. LOD techniques use the current one with
+	 * the previous posAdjust. A placed terrain LOD chunk keeps the previousWorld it was loaded with, the origin, for good.
 	 */
 	inline const RE::NiTransform& DrawnPreviousWorld(const RE::BSGeometry& a_geometry);
 
-	/** @brief Terrain LOD: a BSTriShape whose Lighting property has the LOD landscape flag (dclf-architecture.md, "Terrain LOD"). */
+	/** @brief Terrain LOD: a BSTriShape whose Lighting property has the LOD landscape flag. */
 	inline bool IsLodLand(std::uint64_t a_flags, std::uint8_t a_type)
 	{
 		using Flag = RE::BSShaderProperty::EShaderPropertyFlag;
@@ -106,47 +89,35 @@ namespace DCLF
 	}
 
 	/**
-	 * @brief The engine's verdict on whether an object casts into a shadow map. Faded takes the material's alpha alone: the fade
-	 * node's share is FadeStateCS's, and a shadow view's BuildDraws drops the caster while its root fades (never the node's).
+	 * @brief The engine's verdict on whether an object casts into a shadow map. Faded reads the material's alpha alone, since the
+	 * fade node's share is FadeStateCS's.
 	 */
 	ShadowReject ShadowCasterReject(const SceneCapture::LeafView& a_leaf);
 	/**
-	 * @brief Whether a Lighting property's own flags give it no shadow pass in any view, whatever the frame: the verdicts of
-	 * ShadowCasterReject that no fade, global or view changes (a rejected decal, refraction, alpha blending, a Utility
-	 * declaration of 0).
-	 * Its entry can leave every shadow cull; only its activeLightMask bits are wanted, which DCLF writes.
+	 * @brief Whether a Lighting property's own flags give it no shadow pass in any view, whatever the frame.
+	 * Its entry can leave every shadow cull, since DCLF writes the activeLightMask bits it still needs.
 	 */
 	bool CastsNoShadow(const SceneCapture::LeafView& a_leaf);
 
-	/**
-	 * @brief The Utility technique the engine derives for a caster, without the view's mode bits.
-	 *
-	 * `DetermineUtilityShaderDecl()` with the alpha-test bit and the property-flag bits; a view adds its
-	 * own mode bits (`ShadowModeBits`), and the pass the engine registers is this plus 0x2B.
-	 */
+	/** @brief The Utility technique the engine derives for a caster, without the view's mode bits. The registered pass is this plus 0x2B. */
 	std::uint32_t ShadowUtilityTechnique(const SceneCapture::LeafView& a_leaf);
 
-	/** @brief The technique bits one accumulator render mode contributes (0xC RenderDepth .. 0xF Pb). */
+	/** @brief The technique bits one accumulator render mode contributes, 0xC RenderDepth to 0xF Pb. */
 	std::uint32_t ShadowModeBits(std::uint32_t a_renderMode);
 
 	/**
-	 * @brief The selection's slots: shadowLightsAccum as DCLF's light selection fills it (CalculateActiveShadowCasterLights ported:
-	 * Features/LocalLights' selection), the array GetShadowCasterLightArrayEntry indexes: the sun per slot, then the lights (null: a slot a
-	 * light took but did not fill); and the focus shadows' hosts (the drawn lights with the focus flag) and the focus views each draws. The
-	 * spans are into the selection's own frame, which stays put until its next selection, which invalidates the board first.
-	 *
-	 * The views list's input (ShadowViews::LightSlots, Core's: the list is built from it), which the selection publishes. Render thread:
-	 * invalidated at the selection's start and published at its end (an early return leaves it invalid), read by the shadow views' rebuild
-	 * right after (the end of CalculateAndDrawShadowCasterLights).
+	 * @brief The shadow light selection's slots, as the array GetShadowCasterLightArrayEntry indexes, plus the focus shadow hosts.
+	 * Render thread. Invalidated at the selection's start and published at its end, so an early return leaves it invalid.
+	 * The spans stay valid until the next selection.
 	 */
 	struct LightSlotFrame
 	{
 		std::uint32_t sceneFrame = ~0u;
 		std::span<const RE::BSShadowLight* const> slots;
 		std::span<const RE::BSShadowLight* const> focusHosts;
-		std::uint32_t focusCount = 0;  // the focus views each host draws (the targets, at most 4)
+		std::uint32_t focusCount = 0;  // at most 4
 		bool valid = false;
-		bool published = false;  // the selection has published once (its hook is in): the views' renderers may be published light by light
+		bool published = false;  // once set, the views' renderers may be published light by light
 
 		void Invalidate()
 		{
@@ -170,39 +141,29 @@ namespace DCLF
 	};
 
 	/**
-	 * @brief The shadow views of the frame, as the engine is about to draw them.
+	 * @brief The frame's shadow views, as the engine is about to draw them.
 	 *
-	 * One view per `ShadowmapDescriptor`: a cascade of the sun, a spot light's frustum, one hemisphere of
-	 * a paraboloid light, or one of the four focus shadows (engine notes: shadow maps). The list is
-	 * rebuilt when CalculateAndDrawShadowCasterLights returns, from DCLF's selection of the shadow scene
-	 * node's caster array, which is the same order and the same set the engine's own `Render` loop walks
-	 * at the shadow draw. Before that, as the engine keeps each light and before it accumulates it
-	 * (`AddCaster`), the light's views are covered and their renderers published, so that every
-	 * registration is withheld by this frame's coverage (engine notes: "The shadow lights' selection").
-	 *
-	 * A view is identified downstream by its accumulator and by its batch renderer: the accumulator is
-	 * what `FinishAccumulatingPreResolveDepth` is called on when the view is drawn, and the batch renderer
-	 * is what the engine registers the view's Utility passes with - which is how a captured registration
-	 * is attributed to a view, as the diagnostics' `mainBatchRenderers` attributes the main camera's.
-	 *
-	 * Render thread only, and valid only between the end of CalculateAndDrawShadowCasterLights and the end of the frame's shadow
-	 * draws.
+	 * One view per ShadowmapDescriptor: a sun cascade, a spot light frustum, a paraboloid hemisphere or a focus shadow. The list is
+	 * rebuilt in the engine's own order when CalculateAndDrawShadowCasterLights returns. Before that, each light's views are covered
+	 * as the engine keeps it, so its registrations are already withheld.
+	 * Downstream a view is identified by its accumulator and its batch renderer.
+	 * Render thread only, valid from the end of CalculateAndDrawShadowCasterLights to the end of the frame's shadow draws.
 	 */
 	class ShadowViews
 	{
 	public:
 		enum class Kind : std::uint8_t
 		{
-			Directional,  // the sun's cascades
-			Frustum,      // spot lights
-			Parabolic,    // point lights: two hemispheres in one slice
+			Directional,
+			Frustum,
+			Parabolic,  // point lights, two hemispheres in one slice
 			Other,
 			Count
 		};
 		static constexpr std::uint32_t kKindCount = static_cast<std::uint32_t>(Kind::Count);
 		static const char* KindName(Kind a_kind);
 
-		/** @brief A rectangle of an array slice, as NiRect holds it (left, right, top, bottom; y up). */
+		/** @brief A rectangle of an array slice, as NiRect holds it (left, right, top, bottom, y up). */
 		struct Port
 		{
 			std::int32_t left = 0, right = 0, top = 0, bottom = 0;
@@ -217,26 +178,20 @@ namespace DCLF
 			bool focus = false;
 			const RE::BSShaderAccumulator* accumulator = nullptr;
 			const RE::BSBatchRenderer* batch = nullptr;
-			std::uint32_t renderTarget = 0;  // RENDER_TARGET_DEPTHSTENCIL, or ~0u until the draw assigns one
+			std::uint32_t renderTarget = 0;  // ~0u until the draw assigns one
 			std::uint32_t slice = 0;
 			Port port;
 			bool clear = false;
 			bool enabled = false;
 			/**
-			 * @brief The accumulator's render mode as it stands at Rebuild - the mode the view was drawn
-			 * with LAST frame (0xD plain, 0xE clamped, 0xF paraboloid), which is stable for a descriptor;
-			 * 0 before its first draw. It is what attributes a registration to a mode's phase of the set.
+			 * @brief The render mode the view was drawn with last frame (0xD plain, 0xE clamped, 0xF paraboloid), stable per descriptor.
+			 * 0 before its first draw.
 			 */
 			std::uint32_t renderMode = 0;
-			/**
-			 * @brief DCLF's this frame: a shadow mode's view (focus views too, its mode known) within the view slots DCLF's
-			 * buffers hold this frame (SetViewCapacity), in the engine's order. Only these are withheld (the registration hook's renderers)
-			 * and captured; the rest the engine draws alone, while DCLF's slots grow (SceneBufferSet) for them.
-			 */
+			/** @brief Whether DCLF draws this view this frame. Only covered views are withheld and captured. */
 			bool covered = false;
 			/**
-			 * @brief Where the engine will draw it, DCLF's prediction at Rebuild: the depth target (RENDER_TARGET_DEPTHSTENCIL) and
-			 * slice. A sun cascade with volumetricCopy is drawn twice, its volumetric lighting copy first (target 3, the same slice).
+			 * @brief DCLF's prediction of the depth target and slice. A sun cascade with volumetricCopy is drawn twice, the copy first.
 			 */
 			std::uint32_t drawTarget = ~0u;
 			std::uint32_t drawSlice = 0;
@@ -244,48 +199,34 @@ namespace DCLF
 		};
 
 		static ShadowViews& Get();
-		/** @brief The selection's slots the list is rebuilt from (render thread; see LightSlotFrame). */
+		/** @brief Render thread. The selection's slots the list is rebuilt from. */
 		static LightSlotFrame& LightSlots();
 
-		/** @brief How many shadow views DCLF can draw this frame (its view slots' buffers); UINT32_MAX: no bound. Before BeginCasters. */
+		/** @brief How many shadow views DCLF's buffers can hold this frame. Call before BeginCasters. */
 		void SetViewCapacity(std::uint32_t a_views) { viewCapacity = a_views; }
-		/** @brief The frame's shadow-mode views DCLF would draw with slots enough (covered or not): what its slots grow to. */
+		/** @brief The frame's shadow-mode views DCLF would draw given enough slots. Its slots grow to this. */
 		std::uint32_t Candidates() const { return candidates; }
 
-		/**
-		 * @brief Before the engine keeps its first shadow light (CalculateAndDrawShadowCasterLights' call): the list dropped, the frame's
-		 * views DCLF's until SetDrawable, and no renderer published.
-		 */
+		/** @brief Before the engine keeps its first shadow light. Drops the list and publishes no renderer. */
 		void BeginCasters();
-		/**
-		 * @brief After BeginCasters, before the first light is kept: whether the frame's views are DCLF's (IndirectDraws::DecideShadowCoverage:
-		 * false while the scene revision has no shape for their layout). When not, the engine draws every one whole; nothing is withheld.
-		 */
+		/** @brief After BeginCasters. Whether the frame's views are DCLF's. When not, the engine draws every one and nothing is withheld. */
 		void SetDrawable(bool a_drawable);
-		/** @brief After SetDrawable: whether DCLF draws this frame's shadow views (its capacity is not zero and they are drawable). */
+		/** @brief Whether DCLF draws this frame's shadow views. */
 		bool DclfDraws() const { return drawable && viewCapacity != 0; }
-		/**
-		 * @brief The engine kept a_light in a_slots slots from a_firstSlot (FUN_1414a3fb0) and accumulates it next: its views covered and
-		 * the renderers published with them, before its registrations.
-		 */
+		/** @brief The engine kept a_light (FUN_1414a3fb0) and accumulates it next. Covers its views and publishes their renderers first. */
 		void AddCaster(const RE::BSShadowLight* a_light, std::uint32_t a_firstSlot, std::uint32_t a_slots);
 		/**
-		 * @brief The engine is about to register a_light's focus targets into its focus views (the focus accumulation; for a spot light host
-		 * before the light is kept): those views listed (up to the engine's target count, which the focus cameras just set), covered and their
-		 * renderers published, unless already listed (the sun's, at its keep). AddCaster then adds the light's other views. Whether any of its
-		 * focus views is covered.
+		 * @brief The engine is about to register a_light's focus targets. Lists and covers those views and publishes their renderers.
+		 * Returns whether any is covered.
 		 */
 		bool AddFocusHost(const RE::BSShadowLight* a_light);
-		/** @brief Rebuilds the list from DCLF's selection and publishes its renderers; call once the engine's selection is done. */
+		/** @brief Rebuilds the list from DCLF's selection and publishes its renderers, once the engine's selection is done. */
 		void Rebuild();
-		/**
-		 * @brief Render thread, for the log: which shadow light's descriptor (or focus descriptor) holds a_accumulator, read from the
-		 * scene node's lights (the sun's, the active and the accumulated ones), and whether this frame's list has it.
-		 */
+		/** @brief Render thread, for logs. Which shadow light holds a_accumulator and whether this frame's list has it. */
 		std::string DescribeAccumulator(const void* a_accumulator) const;
-		/** @brief Drops the list (the frame's shadow draws are over, or the feature is off). */
+		/** @brief Drops the list. */
 		void Clear();
-		/** @brief The frame's list has views DCLF would draw, but not this frame (SetDrawable): the engine draws them (the report's count). */
+		/** @brief The list has views DCLF would draw, but not this frame, so the engine draws them. */
 		bool Unrecorded() const { return unrecorded; }
 
 		std::span<const View> All() const { return views; }
@@ -295,7 +236,7 @@ namespace DCLF
 		std::uint32_t ViewOfAccumulator(const void* a_accumulator) const;
 
 		const View* At(std::uint32_t a_id) const { return a_id < views.size() ? &views[a_id] : nullptr; }
-		/** @brief The view's captures so far this frame, then counts this one (a cascade's first, with its copy, is the copy's). */
+		/** @brief The view's captures so far this frame, then counts this one. A cascade's first, with its copy, is the copy's. */
 		std::uint32_t NextCapture(std::uint32_t a_id)
 		{
 			if (a_id >= captures.size())
@@ -305,20 +246,20 @@ namespace DCLF
 
 	private:
 		std::vector<View> views;
-		std::vector<std::uint32_t> captures;  // by view, this frame
+		std::vector<std::uint32_t> captures;
 		void PredictTargets();
-		/** @brief Appends a_light's views at a_lightIndex: its descriptors', then a_focusCount focus views. */
+		/** @brief Appends a light's descriptor views, then its focus views. */
 		void AddLightViews(RE::BSShadowLight& a_light, std::uint32_t a_lightIndex, std::uint32_t a_focusCount, bool a_focusOnly = false);
-		/** @brief Decides the coverage of the views from a_first on, continuing the candidates' count; whether one is covered. */
+		/** @brief Decides coverage from a_first on. Returns whether one is covered. */
 		bool CoverFrom(std::size_t a_first);
-		/** @brief The covered views' renderers to PassCapture (the registration hook's withholding), whole. */
+		/** @brief Publishes the covered views' renderers to PassCapture, whole. */
 		void PublishRenderers();
 		ankerl::unordered_dense::map<const RE::BSBatchRenderer*, std::uint32_t> batchToView;
 		ankerl::unordered_dense::map<const void*, std::uint32_t> accumulatorToView;
 		bool valid = false;
 		std::uint32_t viewCapacity = UINT32_MAX;
 		std::uint32_t candidates = 0;
-		bool drawable = true;     // the frame's views are DCLF's (SetDrawable)
+		bool drawable = true;
 		bool unrecorded = false;  // a view would be covered but the frame's are not DCLF's
 	};
 }

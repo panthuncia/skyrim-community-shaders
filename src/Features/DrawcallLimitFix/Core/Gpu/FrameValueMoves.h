@@ -1,23 +1,18 @@
 #pragma once
 
-// FrameValues' own move events (dclf B, "FrameValues samples only what moved"): the move writers' keys and Havok's node writes, pushed by
-// the same hooks as the scene pass's MoveEvents and node events (SceneEvents.cpp) into a second pair of queues, whose one consumer is
-// FrameValues' producer (one at a time, in order). The scene pass keeps its own queues; neither drains the other's.
+// FrameValues' own move events. The same hooks that feed the scene pass push into these queues too.
+// FrameValues' producer is their one consumer. Neither side drains the other's queues.
 
 #include "Features/DrawcallLimitFix/Core/Runtime/EventQueue.h"
 
 namespace DCLF::FrameValueMoves
 {
-	/**
-	 * @brief Keys of what an update pass moved, as MoveEvents has them (a reference, or the node an update pass keyed itself by). Never
-	 * dereferenced: the producer looks them up in its plan's index (FrameValues: a mover's keys are its geometry, the references on its
-	 * chain, and with none every node above it).
-	 */
-	// Per-frame: no wake (thousands a frame); the next producer drains them.
+	/** @brief Keys of what an update pass moved. Never dereferenced. */
+	// Per frame there are thousands, so no wake. The next producer drains them.
 	inline EventQueue<const void*> keys;
 	/**
-	 * @brief Nodes Havok wrote from their rigid bodies (FUN_140ea55a0) or that gained a controller (PrependController). Held: the producer
-	 * names the reference above each under an engine-read lease, then lets the reference go through EngineReleases.
+	 * @brief Nodes Havok wrote from rigid bodies (FUN_140ea55a0) or that gained a controller. Held references go back through
+	 * EngineReleases once the producer has named their owner.
 	 */
 	inline EventQueue<RE::NiPointer<RE::NiAVObject>> nodes;
 

@@ -11,14 +11,9 @@
 namespace DCLF
 {
 	/**
-	 * @brief The scene's event stack: scene graph attaches and detaches, the hooks' value updates and SceneStack channels' events, from
-	 * any thread.
-	 *
-	 * The NiNode child-management functions are detoured once. An attach becomes an event holding a reference to the attached subtree
-	 * and, in the world, its records (SceneCapture::CaptureAttached); a detach becomes an event holding the subtree's BSGeometry leaves
-	 * and nodes, collected on the detaching thread while the subtree is still intact. Every event goes onto one lock-free stack, so
-	 * they apply in push order; the coordinator drains it at each scene pass (Coordinator::CollectEvents), and the drained events'
-	 * references are released with their batch on the render thread.
+	 * @brief The scene's event stack: attaches, detaches, hook value updates and channel events, from any thread.
+	 * The NiNode child functions are detoured once. A detach collects the subtree's leaves on the detaching thread while it is still
+	 * intact. Every event goes onto one lock-free stack so they apply in push order. References are released with their batch on the render thread.
 	 */
 	class SceneTracker
 	{
@@ -27,48 +22,36 @@ namespace DCLF
 		{
 			Attached,
 			Detached,
-			Updated,  // a hook's values for the mirror (update), in the same order as the attaches and detaches
-			Stacked,  // a SceneStack channel's event (Extensions::PushStacked), after what its thread pushed before it
+			Updated,  // in the same order as the attaches and detaches
+			Stacked,  // after what its thread pushed before it
 		};
 
 		struct Event
 		{
 			Event* next = nullptr;
 			EventType type = EventType::Attached;
-			RE::NiPointer<RE::NiAVObject> node;    // Attached: the subtree root
-			std::vector<RE::BSGeometry*> removed;  // Detached: geometry leaves (identity only, never dereferenced)
-			// For the mirror: an attach in the world, its subtree's and ancestors' records (SceneCapture::CaptureAttached); a detach in the
-			// world, its root and its other nodes (keys).
+			RE::NiPointer<RE::NiAVObject> node;
+			std::vector<RE::BSGeometry*> removed;  // identity only, never dereferenced
 			std::unique_ptr<SceneCapture::Records> captured;
 			const void* detachedRoot = nullptr;
 			std::vector<const void*> removedNodes;
-			// The attached or detached node's ancestors at the hook (identities only, never dereferenced): the sun candidates among them
-			// are planned again (their subtrees changed: Coordinator::sunEntriesForced).
+			// The node's ancestors at the hook, identities only. Sun candidates among them are planned again.
 			std::vector<const void*> ancestors;
 			SceneCapture::Update update;
-			// An update's own references (a leaf update's new properties: what the scene work holds its geometry's by), taken on the
-			// writer's thread, or a Stacked event's pinned roots. The event's, not the update's: the mirror keeps copies of updates, whose last
-			// release would be the scene work's. Released with the batch, on the render thread.
+			// The event's own references, released with the batch on the render thread. They belong to the event, not the update, because
+			// the mirror keeps copies of updates whose last release would otherwise land on the scene work.
 			std::vector<RE::NiPointer<RE::NiRefObject>> pins;
-			// The render thread's captures at the frame's start (the category capture's portal roots, the mirror's requests:
-			// PushCaptured), for the mirror alone - in order with the hooks' events, so a capture is never applied over a newer write -
-			// and never a tracking attach or detach.
+			// The render thread's own captures at the frame's start, for the mirror alone. Ordered with the hooks' events so a capture never overwrites a newer write.
 			bool mirrorOnly = false;
-			// A mirror request's capture (FrameView::CaptureMirrorRequests): only the records the mirror lacks are taken from it (a record
-			// the mirror holds is the events' to keep: the frame's start can catch an ancestor in a state the engine sets and undoes within
-			// the frame, with no event).
+			// A mirror request's capture fills only missing records. The frame's start can catch an ancestor in a state the engine undoes within the frame, with no event.
 			bool mirrorFill = false;
-			// A Detached event of an unheld root leaving its owner's array (WatchUnheldOwner): the category capture's unheld roots diff
-			// follows it, so it forces no full capture (Channels::categoryDetachSeen).
+			// An unheld root leaving its owner's array. The category capture follows it with a diff, so it forces no full capture.
 			bool unheldExit = false;
-			// When an event that wakes the scene pass was pushed (steady clock, ns) and the render thread's frame then
-			// (SceneCapture::Frame): the event-to-publication and event-to-adoption latencies.
+			// Push time (steady clock, ns) and frame, for latency reports.
 			std::uint64_t stampNs = 0;
 			std::uint32_t stampFrame = 0;
-			std::uint32_t thread = 0;  // an attach's or detach's pushing thread, for the cell trace
-			// A Stacked event's (Api::Stacked): its channel, whether it wakes the pass (the channel's Api::WakeSource), its token (from 1),
-			// the pinned roots (keys, each held by a pin in `pins` until the batch is released on the render thread) and the named roots
-			// (keys alone: the pushing side holds them).
+			std::uint32_t thread = 0;  // for the cell trace
+			// A Stacked event's channel, wake, token, pinned roots (held in `pins`) and named roots (keys only, the pusher holds them).
 			std::uint32_t stackedChannel = ~0u;
 			bool stackedWakes = false;
 			std::uint64_t stackedToken = 0;
@@ -80,48 +63,36 @@ namespace DCLF
 		void Install();
 		bool IsInstalled() const { return installed; }
 
-		/**
-		 * @brief Stops queueing events and frees the ones pending, for good. The detours stay installed and
-		 * pass straight through: used when DCLF is forced off after install, with nothing left to drain the queue.
-		 */
+		/** @brief Stops queueing and frees pending events for good. The detours pass straight through. Used when DCLF is forced off after install. */
 		void Stop();
 
-		/** @brief Takes every pending event, oldest first. The caller owns the list (see FreeEvents). */
+		/** @brief Takes every pending event, oldest first. The caller owns the list. */
 		Event* Drain();
 		static void FreeEvents(Event* a_head);
 
 		/**
-		 * @brief An attach, after the engine's. a_parent: the node whose array took the child (null: the child's parent). It differs for
-		 * a parentless root an array owns (the particle manager's master particle systems).
+		 * @brief An attach, after the engine's. a_parent is the node whose array took the child, which differs for a parentless root an
+		 * array owns, such as the particle manager's master systems.
 		 */
 		void PushAttached(RE::NiAVObject* a_child, const RE::NiAVObject* a_parent = nullptr);
 		static void CollectAncestors(const RE::NiAVObject* a_node, std::vector<const void*>& a_out);
-		/** @brief A detach, before the engine's (the child still in its array). a_parent as PushAttached's. */
+		/** @brief A detach, before the engine's, while the child is still in its array. */
 		void PushDetached(RE::NiAVObject* a_child, const RE::NiAVObject* a_parent = nullptr);
-		/** @brief Render thread, at the frame's start: pushes the detaches its update held for an attach of the same child (PushDetached). */
+		/** @brief Render thread, at the frame's start. Pushes detaches held back for an attach of the same child. */
 		void PushHeldDetaches();
-		/** @brief A hook's values (after its write, on the writer's thread): one stack with the attaches and detaches, so an address a
-		 * detach let go and an attach took again is never given an earlier object's values. */
+		/**
+		 * @brief A hook's values, after its write. On the same stack as attaches and detaches, so a reused address never gets an earlier object's values.
+		 */
 		void PushUpdate(SceneCapture::Update&& a_update, std::vector<RE::NiPointer<RE::NiRefObject>>&& a_pins = {});
-		/**
-		 * @brief Render thread: a capture of its own (the frame's start: the category capture's portal roots, the mirror's
-		 * requests) onto the same stack, marked mirror-only (Event::mirrorOnly). The stack owns a_event from here.
-		 */
+		/** @brief Render thread. Pushes its own capture, marked mirror-only. The stack owns a_event from here. */
 		void PushCaptured(Event* a_event, bool a_fillOnly = false);
-		/**
-		 * @brief Extensions::PushStacked: a SceneStack channel's event, on the pushing thread after what it pushed before (one stack with
-		 * the attaches: applied after their captures). The pinned roots are pinned by the event; a_wakes: it stamps and wakes the pass.
-		 */
+		/** @brief A channel's event, on the pushing thread, applied after the attaches it pushed before. */
 		void PushStacked(std::uint32_t a_channel, std::uint64_t a_token, std::span<RE::NiAVObject* const> a_pinned, std::span<RE::NiAVObject* const> a_named,
 			bool a_wakes);
 
 		static void CollectGeometry(RE::NiAVObject* a_root, std::vector<RE::BSGeometry*>& a_out, std::vector<const void*>* a_nodes = nullptr);
 
-		/**
-		 * @brief An edit under the watched subtree (WatchSubtree), pushed by the hooks in order with each other: a hidden store's new
-		 * bit, a detach's nodes and geometry (their keys leave the subtree: an address the engine frees and reuses is a new node) and an
-		 * attach (the subtree's membership changed). The node is an identity, never dereferenced by the consumer.
-		 */
+		/** @brief An edit under the watched subtree: a hidden store, a detach or an attach. The node is an identity, never dereferenced. */
 		struct SubtreeEvent
 		{
 			enum class Kind : std::uint8_t
@@ -134,36 +105,26 @@ namespace DCLF
 			const RE::NiAVObject* node = nullptr;
 			Kind kind = Kind::Hidden;
 		};
-		/**
-		 * @brief Render thread: the root whose subtree's edits the hooks push onto SubtreeEvents from now on (FrameGlobals' first-person
-		 * cull bits; null: none). The root itself is not of its subtree: its own hidden stores are not pushed.
-		 */
+		/** @brief Render thread. The root whose subtree edits are pushed onto SubtreeEvents from now on. The root's own stores are not pushed. */
 		static void WatchSubtree(const RE::NiAVObject* a_root);
 		/**
-		 * @brief Render thread: the watched subtree's members as its consumer last walked them (keys, never dereferenced). A hidden store
-		 * is pushed onto SubtreeEvents only for a member: the store's object may be under construction (its parent not yet written), so
-		 * the hook looks it up instead of walking its parents. A node attached since the walk has no event; the walk the attach triggers
-		 * reads its bit. Replaced sets are freed by RetireCategoryNodes.
+		 * @brief Render thread. The watched subtree's members, as keys. Hidden stores are pushed only for members, because the stored
+		 * object may be under construction, so the hook looks it up instead of walking its parents.
 		 */
 		static void WatchSubtreeMembers(std::vector<const void*> a_members);
-		/** @brief The watched subtree's edits, for their one consumer (FrameGlobals, render thread). */
+		/** @brief The watched subtree's edits, for their one consumer on the render thread. */
 		static EventQueue<SubtreeEvent>& SubtreeEvents();
 
-		/**
-		 * @brief Render thread: the nodes the category capture finds its category nodes through (FrameView's category signature: TES's object
-		 * root, the cells' 3D and their parents, the portal graphs' shared nodes and parentless roots). An attach or detach of one of them,
-		 * or of a child of one, counts an edit (CategoryEdits), so the frame's start re-reads the signature only after one.
-		 */
+		/** @brief Render thread. The nodes the category capture finds category nodes through. Their edits count CategoryEdits. */
 		static void WatchCategoryNodes(std::vector<const void*> a_nodes);
-		/** @brief Any thread: the edits of watched category nodes since the start. */
+		/** @brief Any thread. Edits of watched category nodes since the start. */
 		static std::uint64_t CategoryEdits();
-		/** @brief Render thread, once at the frame's start (before any read of the watched set it replaces is retired): frees replaced sets no reader holds. */
+		/** @brief Render thread, once at the frame's start. Frees replaced sets no reader holds. */
 		static void RetireCategoryNodes();
 
 		/**
-		 * @brief Any thread: a read of a set published lock-free (the watched category nodes, the subtree's members, SceneCapture's drawn
-		 * roots). Counted in from before its load to after its last use, so a replaced set handed to RetireSet is freed only once no read
-		 * that could have loaded it is in.
+		 * @brief Any thread. Marks a read of a lock-free published set from before its load to after its last use, so a replaced set
+		 * is freed only once no such read is in.
 		 */
 		class SetRead
 		{
@@ -173,22 +134,16 @@ namespace DCLF
 			SetRead(const SetRead&) = delete;
 			SetRead& operator=(const SetRead&) = delete;
 		};
-		/** @brief Render thread, after the set's replacement was stored: a replaced set, freed by RetireCategoryNodes once no SetRead is in. */
+		/** @brief Render thread, after storing the replacement. Retires a replaced set until no SetRead is in. */
 		static void RetireSet(std::unique_ptr<const std::vector<const void*>> a_set);
 
-		/**
-		 * @brief Render thread: the unheld roots' owner (Api::UnheldRootsContribution::owner: the particle manager; null: none). Its child
-		 * edits (a root added to or removed from its array) count UnheldEdits instead of CategoryEdits: the category capture follows them
-		 * with an unheld roots diff, not a full capture.
-		 */
+		/** @brief Render thread. The unheld roots' owner, whose child edits count UnheldEdits instead of CategoryEdits. */
 		static void WatchUnheldOwner(const RE::NiAVObject* a_owner);
-		/** @brief Any thread: the unheld roots owner's child edits since the start. */
+		/** @brief Any thread. The unheld roots owner's child edits since the start. */
 		static std::uint64_t UnheldEdits();
 
 		/**
-		 * @brief The ordering premise of the frame start's leased captures (FrameView::ServeFrameRequests): no attach or detach in the world
-		 * while EngineReadWindow is open. What the hooks pushed against it since the last call: by the render thread and by others, and
-		 * the first one's thread id.
+		 * @brief Checks the frame start's premise that nothing attaches or detaches in the world while EngineReadWindow is open.
 		 */
 		struct WindowEdits
 		{
@@ -199,9 +154,9 @@ namespace DCLF
 
 	private:
 		void Push(Event* a_event);
-		/** @brief Links a_oldest to a_newest (a chain through next) onto the stack at once, then wakes the pump for a_wakes (SceneWake bits). */
+		/** @brief Links a chain onto the stack at once, then wakes the pump. */
 		void PushChain(Event* a_oldest, Event* a_newest, std::uint32_t a_wakes);
-		/** @brief Counts a_child's edit under a_parent; returns whether a_parent is the unheld roots' owner (WatchUnheldOwner). */
+		/** @brief Counts a child edit. Returns whether a_parent is the unheld roots' owner. */
 		static bool NoteEdit(const RE::NiAVObject* a_child, const RE::NiAVObject* a_parent, bool a_inWorld);
 
 		std::atomic<Event*> head{ nullptr };

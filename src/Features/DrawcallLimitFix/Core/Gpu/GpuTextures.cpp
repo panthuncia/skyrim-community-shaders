@@ -1,4 +1,4 @@
-// GpuTextures: the registry, the import thread and the samplers (see the header).
+// The texture registry, the import thread and the samplers.
 
 
 // volk must precede every Vulkan header in this translation unit.
@@ -48,14 +48,13 @@ namespace DCLF
 {
 	namespace
 	{
-		// The renderer's sampler states, [address mode][filter mode], selected by the shadow state's
-		// PSTextureAddressMode / PSTextureFilterMode (engine notes: samplers). The engine's table is [6][5] on AE 1.6.1170 and
-		// SE 1.5.97 alike (the renderer's release loops); DCLF takes the first four address modes.
+		// Indexed by the shadow state's PSTextureAddressMode and PSTextureFilterMode. The engine's table is [6][5] on AE 1.6.1170 and
+		// SE 1.5.97 alike. DCLF uses the first four address modes.
 		constexpr std::uint32_t kAddressModes = 4;
 		constexpr std::uint32_t kFilterModes = 5;
 		constexpr Engine::Offset kSamplerTable{ { 411366 }, { 524751 } };
 
-		// VkComponentMapping as D3D12's shader 4-component mapping (0: identity).
+		// 0 is the identity mapping.
 		rhi::ComponentMapping MappingOf(const VkComponentMapping& a_components)
 		{
 			auto source = [](VkComponentSwizzle a_swizzle, std::uint32_t a_identity) -> std::uint32_t {
@@ -82,9 +81,7 @@ namespace DCLF
 			return r | (g << 3) | (b << 6) | (a << 9) | (1u << 12);
 		}
 
-		/**
-		 * @brief Logs a refused view's format once: every draw that reads such a view is withheld from the engine and drawn by nobody.
-		 */
+		/** @brief Log a refused format once. Every draw that reads such a view is withheld from the engine and drawn by nobody. */
 		void NoteRefusedMapping(rhi::Format a_format, const char* a_why, const rhi::FormatSupport& a_support, VkFormat a_dxvkFormat, rhi::ComponentMapping a_dxvk)
 		{
 			static std::mutex mutex;
@@ -97,12 +94,8 @@ namespace DCLF
 		}
 
 		/**
-		 * @brief The view's own mapping (SrvDesc::componentMapping) for a DXVK image or an image DXVK wraps. DXVK's swizzle is its
-		 * format's: DXVK stores some formats in others (A8 as R8, read as (0, 0, 0, R)) and swizzles B8G8R8X8's alpha to one. BasicRHI
-		 * stores the same formats the same way and adds the same swizzle to every view of a_format (rhi::FormatSupport), so the view
-		 * adds nothing when the two agree or when the source's own mapping is the identity (an image BasicRHI made, or one DXVK reads
-		 * as stored), and the source's swizzle when BasicRHI has none. False when they disagree: a_dxvkFormat, when given, must be the
-		 * format BasicRHI stores a_format in.
+		 * @brief The swizzle the view must add on top of BasicRHI's own. DXVK stores some formats as others, such as A8 as R8.
+		 * BasicRHI does the same, so usually nothing is added. False when the two disagree.
 		 */
 		bool ViewMappingOf(const rhi::Device& a_device, rhi::Format a_format, const VkComponentMapping& a_dxvk, VkFormat a_dxvkFormat,
 			rhi::ComponentMapping& a_out)
@@ -163,7 +156,7 @@ namespace DCLF
 				a_out.tex3D.mipLevels = a_view.Texture3D.MipLevels;
 				break;
 			default:
-				return false;  // buffers, 1D and multisampled views: not used by the eligible Lighting draws
+				return false;  // not used by the eligible Lighting draws
 			}
 			return a_out.formatOverride != rhi::Format::Unknown;
 		}
@@ -175,9 +168,8 @@ namespace DCLF
 		struct Registry
 		{
 			/**
-			 * @brief A view's import. A rejection is permanent for the device generation, and is kept by key without holding the view
-			 * (a held view would keep its texture alive after the game let it go): the view carries kRejectedTag with the slot's serial,
-			 * and a lookup that finds a rejected slot confirms the tag, so a new view at a freed one's address is not taken for it.
+			 * @brief A view's import. Rejections are permanent per device generation and kept by key without holding the view.
+			 * The view is tagged with the slot's serial, so a new view at a freed address is not mistaken for it.
 			 */
 			struct Slot
 			{
@@ -189,23 +181,21 @@ namespace DCLF
 			ankerl::unordered_dense::map<ID3D11ShaderResourceView*, Slot> entries;
 			std::atomic<std::uint32_t> liveCount{ 0 };
 			std::uint64_t nextSerial = 0;
-			// Pinless: the tracked imports by resource (an image's views each import it), and the relocations kept a while for imports
-			// tracked before a move and registered after it (the old storage they read).
+			// Pinless imports by resource, plus recent relocations for imports described before a move and registered after it.
 			ankerl::unordered_dense::map<std::uint64_t, std::vector<std::weak_ptr<Entry>>> byCookie;
 			struct Unclaimed
 			{
 				std::uint64_t serial = 0;
 				std::shared_ptr<const void> storage;
 				std::chrono::steady_clock::time_point taken;
-				std::uint64_t ticket = 0;  // nextTicket when it was taken: an import with a ticket up to this began before
+				std::uint64_t ticket = 0;  // imports with a ticket up to this began before it
 			};
 			ankerl::unordered_dense::map<std::uint64_t, std::vector<Unclaimed>> unclaimed;
-			// The imports between their description and their registration, by ticket. An unclaimed move is kept past
-			// kUnclaimedFor while an import that began before it was taken is still in flight: that import may describe the old
-			// storage and claim it at its Register, however long its description took (DXVK's CS thread is slow in a load).
+			// An unclaimed move is kept while an import that began before it is still in flight. That import may have described the old
+			// storage, and DXVK's CS thread can be slow during a load.
 			std::uint64_t nextTicket = 0;
 			std::set<std::uint64_t> importsInFlight;
-			// The superseded imports' views, oldest first: [logEnd - log.size(), logEnd).
+			// Oldest first, covering [logEnd - log.size(), logEnd).
 			std::deque<ID3D11ShaderResourceView*> log;
 			std::uint64_t logEnd = 0;
 			std::atomic<std::uint64_t> superseded{ 0 };
@@ -221,19 +211,15 @@ namespace DCLF
 		{
 			winrt::com_ptr<ID3D11ShaderResourceView> view;
 			rhi::ResourcePtr image;
-			IUnknown* tracked = nullptr;  // Held by view: image SRV or its buffer resource; untrack the same object.
-			// Pinless: the old storages of relocations that superseded the import, which its image reads (appended under the registry's
-			// lock).
+			IUnknown* tracked = nullptr;  // untrack the same object
+			// Old storages from relocations that superseded this import. Its image still reads them.
 			std::vector<std::shared_ptr<const void>> storages;
-			// An engine texture ORG owns (CS_ORG_ENGINE_TEXTURES): its record, which holds the image the descriptor reads.
 			std::shared_ptr<const RenderGraph::Engine::Textures::Texture> engineTexture;
-			// The graph resource whose own image the descriptor reads, when the graph moves the image between layouts (native mode
-			// without home states or with exclusive imports: RenderGraph::NativeGraphMovesImages).
+			// Set when the graph moves the image between layouts, so the descriptor must read the graph's own image.
 			std::shared_ptr<org::Resource> graphResource;
 			~ImportedBacking()
 			{
-				// The descriptor's last use is done (the binding released this on the cleanup queue): the wrapper first, then the
-				// import, then the storage the wrapper's image was.
+				// Release order matters: the wrapper, then the import, then the storage behind it.
 				image = {};
 				if (tracked) {
 					RenderGraphRuntime::Get().UntrackResources({ &tracked, 1 });
@@ -251,17 +237,15 @@ namespace DCLF
 			std::weak_ptr<Registry> registry;
 			ID3D11ShaderResourceView* key = nullptr;
 			std::uint64_t serial = 0;
-			// Pinless: the tracked resource, the storage described, whether DXVK pinned it all the same, and the backing (which holds
-			// the old storage once superseded).
 			std::uint64_t cookie = 0, storageSerial = 0;
 			bool pinned = false;
-			const void* window = nullptr;  // a streamed texture's: the window imported (an identity)
-			std::shared_ptr<const void> graphWindow;  // a streamed window the render graph owns: its own descriptor is the binding
-			std::uint32_t sourceTag = ~0u;  // who first asked for it (ResolveBinding's tags), for DescribeSuperseded
+			const void* window = nullptr;  // an identity
+			std::shared_ptr<const void> graphWindow;
+			std::uint32_t sourceTag = ~0u;  // diagnostics
 			std::weak_ptr<ImportedBacking> backing;
-			// The fields above are the importing thread's until it stores the state (release); a lookup reads it first.
+			// The fields above belong to the importing thread until it stores state with release. Readers load state first.
 			std::atomic<State> state{ State::Pending };
-			std::atomic<bool> superseded{ false };  // a relocation replaced the storage it reads (under the registry's lock)
+			std::atomic<bool> superseded{ false };  // under the registry's lock
 			~Entry()
 			{
 				if (auto owner = registry.lock()) {
@@ -278,15 +262,14 @@ namespace DCLF
 				}
 			}
 		};
-		// The counters the import thread writes as well as the render thread.
+		// Written by both the import thread and the render thread.
 		struct Counters
 		{
 			std::array<std::atomic<std::uint32_t>, static_cast<std::size_t>(Reject::Count)> rejected{};
 			std::atomic<std::uint32_t> unsupportedLayouts{ 0 };
 			std::atomic<std::uint64_t> importedAsync{ 0 };
 		};
-		// Everything an import needs, owned, so the import thread can make it outside any epoch: the descriptor service is
-		// retained from the graph (its heap allocation is locked), not the epoch's active pointer.
+		// The descriptor service here is retained from the graph, not the epoch's, so imports can run outside any epoch.
 		struct ImportContext
 		{
 			std::shared_ptr<org::runtime::IDescriptorService> service;
@@ -294,15 +277,14 @@ namespace DCLF
 			rhi::Device device;
 			std::shared_ptr<const void> deviceOwner;
 		};
-		// The import thread's work: a Request to answer.
 		struct Work
 		{
 			std::uint32_t sourceTag = ~0u;
-			winrt::com_ptr<ID3D11ShaderResourceView> view;  // the request's reference on its view
+			winrt::com_ptr<ID3D11ShaderResourceView> view;
 			Replies* replies = nullptr;
 			std::uint64_t cookie = 0;
 		};
-		// What a Request is answered with, published by the render thread (PublishImportContext): immutable.
+		// Published by the render thread, immutable.
 		struct Published
 		{
 			ImportContext context;
@@ -310,15 +292,14 @@ namespace DCLF
 			std::shared_ptr<Counters> counters;
 			std::shared_ptr<const FixedBindings> fixed;  // never null
 		};
-		// The import thread's queue (lock-free, many producers, the thread its one consumer) and its wake. The thread shares it, so the
-		// last owner only signals it and never joins.
+		// The thread shares this, so the last owner only signals it and never joins.
 		struct Importer
 		{
 			EventQueue<Work, 1024> queue;
 			std::atomic<std::uint64_t> wake{ 0 };
 			std::atomic<bool> stop{ false };
 			std::atomic<std::shared_ptr<const Published>> published;
-			std::atomic<std::uint32_t> requestsPending{ 0 };  // Request: not answered yet
+			std::atomic<std::uint32_t> requestsPending{ 0 };
 			std::atomic<std::uint64_t> requestsAnswered{ 0 };
 
 			void Notify()
@@ -343,7 +324,7 @@ namespace DCLF
 		std::array<bool, kAddressModes * kFilterModes> samplerFailed{};
 		org::OwnedDescriptorBinding nullBinding;
 		std::uint32_t nullIndex = kInvalid;
-		// NullBufferIndex's: [0] structured or raw, [1] typed.
+		// [0] structured or raw, [1] typed.
 		std::array<org::OwnedDescriptorBinding, 2> nullBufferBindings{};
 		std::array<std::uint32_t, 2> nullBufferIndices{ kInvalid, kInvalid };
 
@@ -355,8 +336,7 @@ namespace DCLF
 			}
 		}
 
-		// The descriptor service: the epoch's while one prepares, else the graph's own, retained (its heap allocation is locked), as
-		// the import thread makes its imports outside any epoch. The lookups are the scene lane's.
+		// The epoch's descriptor service while one prepares, else the graph's retained one for imports outside any epoch.
 		static org::runtime::IDescriptorService* ServiceNow(std::shared_ptr<org::runtime::IDescriptorService>& a_retained)
 		{
 			if (auto* active = org::runtime::GetActiveDescriptorService())
@@ -368,7 +348,6 @@ namespace DCLF
 			return a_retained.get();
 		}
 
-		// What an import needs: the graph's descriptor service and cleanup queue (the descriptor heap manager's, the epoch's too).
 		static bool MakeContext(ImportContext& a_context)
 		{
 			auto* host = RenderGraphRuntime::Get().Host();
@@ -382,11 +361,9 @@ namespace DCLF
 			return a_context.service && a_context.cleanup && a_context.deviceOwner;
 		}
 
-		// The registry's answer for a view; under its lock. The registry holds entries weakly: an import in flight is owned by
-		// the import thread, and an import goes when nobody holds it any more.
-		// {8B1E3F52-6C0D-4E2A-9A61-3D5C2F7B4E10}: a view DCLF rejected, with its registry slot's serial.
+		// {8B1E3F52-6C0D-4E2A-9A61-3D5C2F7B4E10} tags a view DCLF rejected with its registry slot's serial.
 		static constexpr GUID kRejectedTag = { 0x8b1e3f52, 0x6c0d, 0x4e2a, { 0x9a, 0x61, 0x3d, 0x5c, 0x2f, 0x7b, 0x4e, 0x10 } };
-		/** @brief A slot's rejection kept by key (the registry's lock held): the view tagged with the slot's serial, the entry not held. */
+		/** @brief Record a rejection by tagging the view, without holding the entry. Call under the registry lock. */
 		static void MarkRejected(Registry::Slot& a_slot, const Entry& a_entry)
 		{
 			if (a_slot.rejected)
@@ -395,7 +372,6 @@ namespace DCLF
 			if (a_entry.view)
 				a_entry.view->SetPrivateData(kRejectedTag, sizeof(a_slot.serial), &a_slot.serial);
 		}
-		/** @brief Whether a_view is the view a rejected slot of a_serial was for. */
 		static bool Tagged(ID3D11ShaderResourceView* a_view, std::uint64_t a_serial)
 		{
 			std::uint64_t serial = 0;
@@ -406,9 +382,8 @@ namespace DCLF
 		static constexpr std::size_t kRelocationLogEntries = std::size_t(1) << 14;
 
 		/**
-		 * @brief The first relocation past a_entry's storage (the registry's lock held; the relocations come in serial order): it replaced
-		 * the storage a_entry reads, which its backing holds from then on; its view leaves the registry (the next lookup imports anew) and
-		 * is logged. A later one replaced a newer import's storage, which that import holds.
+		 * @brief Apply the first relocation past the entry's storage. Its backing holds the old storage from then on, and the view leaves
+		 * the registry. Call under the registry lock.
 		 */
 		static void Supersede(Registry& a_registry, Entry& a_entry, const std::shared_ptr<const void>& a_storage)
 		{
@@ -425,7 +400,7 @@ namespace DCLF
 				a_registry.log.pop_front();
 		}
 
-		/** @brief An import from before its description to after its registration (Registry::importsInFlight). Takes the lock. */
+		/** @brief Marks an import in flight from before its description until after its registration. */
 		struct InFlight
 		{
 			explicit InFlight(std::shared_ptr<Registry> a_registry) :
@@ -447,10 +422,7 @@ namespace DCLF
 			std::uint64_t ticket = 0;
 		};
 
-		/**
-		 * @brief A settled import, listed by its resource (the registry's lock held). A relocation taken since it was described (it
-		 * was tracked before the move, and registers after it) supersedes it now.
-		 */
+		/** @brief Register a settled import. A relocation that came after it was described supersedes it now. Call under the registry lock. */
 		static void Register(Registry& a_registry, const std::shared_ptr<Entry>& a_entry)
 		{
 			if (!a_entry->cookie)
@@ -476,7 +448,7 @@ namespace DCLF
 				switch (live->state.load(std::memory_order_acquire)) {
 				case State::Pending:
 					a_binding.index = kInvalid;
-					a_binding.owner = std::move(live);  // the asker holds the import until it settles
+					a_binding.owner = std::move(live);
 					a_binding.pending = true;
 					return Found::Pending;
 				case State::Rejected:
@@ -500,8 +472,7 @@ namespace DCLF
 			return Found::Unknown;
 		}
 
-		// A streamed texture's shell has no storage of its own: the import is of its current window (the entry stays keyed by the shell). A view
-		// that was not gated (a frame texture, or a load that lost its race) makes its base now, on this thread. False: no window can be made.
+		// A streamed shell has no storage of its own, so import its current window. An ungated view makes its base now. False if no window exists.
 		static bool StreamedWindow(Entry& a_entry, winrt::com_ptr<ID3D11ShaderResourceView>& a_window)
 		{
 			a_window.attach(TextureStreaming::CurrentWindow(a_entry.view.get()));
@@ -528,10 +499,7 @@ namespace DCLF
 			}
 		}
 
-		/**
-		 * @brief An engine texture ORG owns (CS_ORG_ENGINE_TEXTURES): the descriptor reads its graph texture's image directly, in the
-		 * layout DXVK rests it in. Nothing is asked of DXVK: the image is ORG's, so it never moves and needs no tracking or pin.
-		 */
+		/** @brief An engine texture ORG owns. The image is ORG's, so it never moves and needs no tracking or pin. */
 		static Reject ImportEngineTexture(Entry& a_entry, std::shared_ptr<const RenderGraph::Engine::Textures::Texture> a_texture,
 			const ImportContext& a_context, std::uint32_t a_sourceTag)
 		{
@@ -560,25 +528,23 @@ namespace DCLF
 			return Reject::None;
 		}
 
-		// The import: marks the image stable in DXVK (a synchronous chunk on its CS thread), wraps it in BasicRHI and writes
-		// its view into ORG's heap. Any thread; the entry is the caller's until Settle.
+		// Marks the image stable in DXVK, which is a synchronous CS chunk, then imports it. The entry is the caller's until Settle.
 		static Reject Import(Entry& a_entry, const ImportContext& a_context, Counters& a_counters, [[maybe_unused]] std::uint32_t a_sourceTag)
 		{
 			a_entry.sourceTag = a_sourceTag;
-			// The engine texture is ORG's (a view of it may be a tripwire handle, which DXVK must never see).
+			// A view of an engine texture may be a tripwire handle, which DXVK must never see.
 			if (auto engine = RenderGraph::Engine::Textures::Find(a_entry.view.get()))
 				return ImportEngineTexture(a_entry, std::move(engine), a_context, a_sourceTag);
 			winrt::com_ptr<ID3D11ShaderResourceView> window;
 			if (!StreamedWindow(a_entry, window))
 				return Reject::NotImage;
-			// A window the render graph owns (CS_ORG_TEXTURE_STREAMING): its own descriptor, read by index. Nothing of DXVK's to import.
 			if (TextureStreaming::GraphWindow graph; window && TextureStreaming::GraphWindowOf(a_entry.view.get(), window.get(), graph)) {
 				a_entry.graphWindow = std::move(graph.owner);
 				a_entry.index = graph.index;
 				NoteImported(window.get(), a_sourceTag, nullptr);
 				return Reject::None;
 			}
-			// An engine target's view can be a tripwire handle (CS_ORG_ENGINE_TARGET_HANDLES): DXVK's exports take the view it wraps.
+			// A tripwire handle must be unwrapped before DXVK sees it.
 			auto* view = RenderGraph::Engine::Tripwire::Unwrap(window ? window.get() : a_entry.view.get());
 			D3D11_SHADER_RESOURCE_VIEW_DESC viewDesc{};
 			view->GetDesc(&viewDesc);
@@ -594,8 +560,8 @@ namespace DCLF
 				buffer->GetDesc(&desc);
 				if (!desc.StructureByteStride || desc.StructureByteStride % 4)
 					return Reject::View;
-				// Vulkan structured and raw SRVs both use storage-buffer descriptors. Express the range in words
-				// so DXVK's suballocation offset need not be a multiple of the shader's structure stride.
+				// Vulkan structured and raw SRVs both use storage-buffer descriptors. The range is in words so DXVK's suballocation offset
+				// need not be a multiple of the structure stride.
 				srv.dimension = rhi::SrvDim::Buffer;
 				srv.buffer.kind = rhi::BufferViewKind::Raw;
 				srv.buffer.firstElement = std::uint64_t(viewDesc.Buffer.FirstElement) * desc.StructureByteStride / 4;
@@ -608,7 +574,7 @@ namespace DCLF
 
 			DxvkOrgInteropResourceInfo info{};
 			std::shared_ptr<org::Resource> graphResource;
-			// Pinless: the import is tracked, ended by its backing once made, else here.
+			// A pinless import is tracked. Its backing ends the tracking once made, otherwise this does.
 			struct Tracking
 			{
 				IUnknown* object = nullptr;
@@ -640,7 +606,7 @@ namespace DCLF
 					return Reject::NotImage;
 			}
 			if (structured && ::RenderGraph::Backend::IsD3D12()) {
-				// D3D12 (native mode): the description carries the ID3D12Resource in the VkBuffer's place.
+				// On D3D12 the description carries the ID3D12Resource in the VkBuffer's place.
 				const auto& buffer = info.buffer;
 				if (buffer.offset % 4)
 					return Reject::Import;
@@ -662,8 +628,7 @@ namespace DCLF
 				srv.buffer.firstElement += buffer.offset / 4;
 			} else {
 				const auto& image = info.image;
-				// Imported in the layout DXVK rests it in (RenderGraph::ImportDxvkImage); the graph never moves these, and the
-				// view's descriptor names that layout: GENERAL, or the read-only layout of a sampled colour or depth image.
+				// The descriptor names the layout DXVK rests the image in. The graph never moves these images.
 				if (!RenderGraph::HomeLayoutOf(image.layout)) {
 					if (a_counters.unsupportedLayouts.fetch_add(1, std::memory_order_relaxed) == 0)
 						logger::warn("[DCLF] A game texture is in Vulkan layout {}, which BasicRHI cannot import; such textures stay native",
@@ -671,14 +636,11 @@ namespace DCLF
 					return Reject::Import;
 				}
 
-				// Aftermath resource tracking reports Vulkan object names at a fault. Distinguish
-				// imports by the stable DXVK image and the game SRV that produced this view.
+				// Aftermath reports Vulkan object names at a fault, so name imports by DXVK image and game SRV.
 				const auto importName = std::format("DCLF texture image {:#x} SRV {:#x}",
 					reinterpret_cast<std::uintptr_t>(image.image), reinterpret_cast<std::uintptr_t>(view));
-				// An image resting in GENERAL that a graph moves between layouts (native mode's tracked images with exclusive imports):
-				// a raw import's view names GENERAL, but the pass that declares the read holds the image in the read-only layout. With
-				// the graph moving images (RenderGraph::NativeGraphMovesImages) the view is made on the graph resource's own image,
-				// whose descriptor names that read-only layout. The raw access check counts the GENERAL views left.
+				// A raw import of a GENERAL image names GENERAL, but a graph that moves images holds it in a read-only layout during the read.
+				// So the view is made on the graph resource's own image instead.
 				if (image.layout == VK_IMAGE_LAYOUT_GENERAL && (RenderGraph::NativeGraphMovesImages() || RenderGraph::RawAccess::On()))
 					if (auto graph = RenderGraph::GraphResourceOfImage(reinterpret_cast<std::uint64_t>(image.image)); graph && !graph->CommonLayoutOnly())
 						graphResource = std::move(graph);
@@ -700,7 +662,6 @@ namespace DCLF
 						return Reject::Import;
 				}
 
-				// The view's format is the D3D11 view's; BasicRHI stores and swizzles it as DXVK does (A8 as R8 included).
 				if (!ViewMappingOf(a_context.device, srv.formatOverride, image.components, image.viewFormat, srv.componentMapping))
 					return Reject::View;
 			}
@@ -722,7 +683,7 @@ namespace DCLF
 			return Reject::None;
 		}
 
-		// Publishes an import's result: its fields, then its state (release).
+		// Store the fields first, then the state with release.
 		static void Settle(Entry& a_entry, Reject a_reject, Counters& a_counters)
 		{
 			a_entry.reject = a_reject;
@@ -733,7 +694,6 @@ namespace DCLF
 			a_entry.state.store(a_reject == Reject::None ? State::Ready : State::Rejected, std::memory_order_release);
 		}
 
-		// An import's binding as a Request is answered with: the entry's, or kInvalid with no owner when it was rejected.
 		static Binding AnswerOf(const std::shared_ptr<Entry>& a_entry, Reject a_reject)
 		{
 			if (a_reject != Reject::None || a_entry->index == kInvalid)
@@ -752,8 +712,7 @@ namespace DCLF
 			a_importer.requestsAnswered.fetch_add(1, std::memory_order_relaxed);
 		}
 
-		// The import thread: a Request answered from the registry, or by importing the view now. The registry holds no entry pending
-		// but the one this thread is importing (ResolveBinding registers only what it has imported).
+		// The registry only holds a pending entry for the import this thread is doing.
 		static void Answer(Importer& a_importer, Work& a_work, const Published& a_published)
 		{
 			DCLF_ZONE("CS.DCLF.Texture.Answer");
@@ -769,7 +728,7 @@ namespace DCLF
 				std::scoped_lock lock(table.mutex);
 				if (Find(table, key, binding) == Found::Unknown) {
 					entry = a_published.context.cleanup->Make<Entry>();
-					entry->view = std::move(a_work.view);  // the request's reference: the SRV stays alive (its address unused) while imported
+					entry->view = std::move(a_work.view);  // keeps the SRV alive, so its address is not reused, while imported
 					entry->registry = a_published.registry;
 					entry->key = key;
 					entry->serial = ++table.nextSerial;
@@ -797,7 +756,7 @@ namespace DCLF
 							MarkRejected(found->second, *entry);
 					} else {
 						Register(table, entry);
-						// The window changed between the import and here: the listener found no entry to supersede.
+						// The window changed between the import and here, so no listener could supersede the entry.
 						if (entry->window) {
 							winrt::com_ptr<ID3D11ShaderResourceView> window;
 							window.attach(TextureStreaming::CurrentWindow(entry->view.get()));
@@ -816,7 +775,7 @@ namespace DCLF
 #if defined(TRACY_ENABLE)
 			tracy::SetThreadName("CS DCLF texture import");
 #endif
-			// Requests that came before the render thread published a context (PublishImportContext wakes the thread).
+			// Requests that came before a context was published.
 			std::vector<Work> parked;
 			for (;;) {
 				const std::uint64_t observed = a_importer.wake.load(std::memory_order_acquire);
@@ -830,7 +789,7 @@ namespace DCLF
 					parked.clear();
 					worked = true;
 				}
-				// The work's references (an import nobody asks for any more, its material gone meanwhile) are let go here.
+				// References the requests held are let go here, on the import thread.
 				worked |= a_importer.queue.Drain([&](Work&& a_work) {
 					if (published)
 						Answer(a_importer, a_work, *published);
@@ -854,7 +813,7 @@ namespace DCLF
 	{
 		impl->samplers.fill(kInvalid);
 		impl->samplerFailed.fill(false);
-		// The import thread from the start, so any thread may queue for it (Request) without a lazy start to race on.
+		// Started up front so Request never races a lazy start.
 		impl->importer = std::make_shared<Impl::Importer>();
 		std::thread([state = impl->importer] { Impl::RunImporter(*state); }).detach();
 	}
@@ -863,7 +822,7 @@ namespace DCLF
 
 	std::string GpuTextures::SourceName(std::uint32_t a_tag)
 	{
-		// Highest first: a tag is its source's first value plus a slot.
+		// Highest first, since a tag is its source's first value plus a slot.
 		static constexpr std::pair<Source, const char*> kSources[] = { { Source::Scaleform, "Scaleform" }, { Source::ImGui, "ImGui" },
 			{ Source::ShadowDiffuse, "shadow diffuse" }, { Source::FamilyNull, "family null view" }, { Source::FamilyHeader, "family header" },
 			{ Source::FrameSlot, "frame slot" }, { Source::Mask, "pipeline mask" }, { Source::Projected, "projected decal" },
@@ -893,10 +852,10 @@ namespace DCLF
 		failure = ResolveFailure::None;
 		if (!a_view)
 			return NullBinding();
-		// A second import of the view: no pass declares what the index reads (CS_ORG_VALIDATE_UNDECLARED=1 logs it).
+		// A second import means no pass declared what the index reads.
 		if (RenderGraph::UndeclaredAccess::On())
 			RenderGraph::UndeclaredAccess::NoteView(a_view, SourceName(a_sourceTag), a_where);
-		// These holders keep their first import and do not follow a swap: the full window, and they ask again until it is there.
+		// These holders keep the full window and do not follow a swap. They ask again until it exists.
 		if (!TextureStreaming::PinFull(a_view)) {
 			failure = ResolveFailure::StreamedWindow;
 			return { kInvalid, {} };
@@ -906,7 +865,7 @@ namespace DCLF
 			DCLF_ZONE("CS.DCLF.Texture.RegistryLookup");
 			Binding binding;
 			std::scoped_lock lock(registry->mutex);
-			// A pending import is not waited for: the caller asks again (its binding is kInvalid).
+			// A pending import is not waited for. The caller asks again.
 			switch (impl->Find(*registry, a_view, binding)) {
 			case Impl::Found::Unknown:
 				break;
@@ -920,9 +879,7 @@ namespace DCLF
 				return binding;
 			}
 		}
-		// A descriptor import is legal only inside an epoch. Do not cache an Import
-		// rejection merely because the caller reached us outside that boundary:
-		// the same view may become executable at the next epoch.
+		// Imports are legal only inside an epoch. Do not cache that as a rejection, since the view may import fine at the next epoch.
 		Impl::ImportContext context;
 		if (!Impl::MakeContext(context)) {
 			failure = ResolveFailure::NoContext;
@@ -941,8 +898,7 @@ namespace DCLF
 			const auto reject = Impl::Import(*entry, context, *impl->counters, a_sourceTag);
 			Impl::Settle(*entry, reject, *impl->counters);
 			{
-				// Registered settled, never pending: a pending entry is one whose import is queued for the import thread, which a
-				// Request that finds it waits on (Impl::Answer). The import thread may have imported the view meanwhile: both are valid.
+				// The import thread may have imported the view meanwhile. Both results are valid.
 				DCLF_ZONE("CS.DCLF.Texture.Import.Register");
 				std::scoped_lock lock(registry->mutex);
 				entry->serial = ++registry->nextSerial;
@@ -967,7 +923,7 @@ namespace DCLF
 	{
 		if (a_kind == ViewKind::Buffer)
 			return { .index = NullBufferIndex(false) };
-		// Zero textures of each dimension, made once on the render thread. The null descriptor (NullBinding) is a 2D view.
+		// Made once on the render thread. The null descriptor is a 2D view.
 		struct NullViews
 		{
 			winrt::com_ptr<ID3D11ShaderResourceView> texture2D, texture2DArray, texture3D, cube;
@@ -1066,13 +1022,12 @@ namespace DCLF
 	void GpuTextures::Request(ID3D11ShaderResourceView* a_view, std::uint32_t a_sourceTag, Replies& a_replies, std::uint64_t a_cookie)
 	{
 		Impl::Work work;
-		work.view.copy_from(a_view);  // the caller's view is alive here; the request holds it until the import does, or it is answered
+		work.view.copy_from(a_view);  // held until the import takes it or the request is answered
 		work.sourceTag = a_sourceTag;
 		work.replies = &a_replies;
 		work.cookie = a_cookie;
 		impl->importer->requestsPending.fetch_add(1, std::memory_order_relaxed);
-		// A streamed texture's request is answered once its base window exists: until then its material is unresolved, and its objects are not
-		// admitted. The graph runs the request when the window's artifact is ready.
+		// A streamed texture is answered once its base window exists. Until then its objects are not admitted.
 		if (const auto streamed = TextureStreaming::IdOf(a_view); streamed && !TextureStreaming::BaseReady(a_view)) {
 			TextureStreaming::RequestBase(a_view);
 			auto gated = std::make_shared<Impl::Work>(std::move(work));
@@ -1088,14 +1043,13 @@ namespace DCLF
 		Impl::ImportContext context;
 		if (!Impl::MakeContext(context))
 			return;
-		// Before any material row is packed: a row is written once, and names the feedback buffer.
+		// Must run before any material row is packed. A row is written once and names the feedback buffer.
 		if (TextureStreaming::Enabled() && !TextureStreaming::FullMode())
 			TextureFeedback::Ensure();
 		impl->cleanup = context.cleanup;
 		if (!impl->registry)
 			impl->registry = context.cleanup->Make<Impl::Registry>();
-		// The fixed bindings, made here once each (the samplers read the engine's table, a render thread read): the scene work takes
-		// them from the publication (Fixed), never makes them.
+		// The samplers read the engine's table, which is a render thread read. The scene work only takes these from Fixed.
 		FixedBindings fixed;
 		fixed.null = NullBinding();
 		for (std::uint32_t address = 0; address < kAddressModes; ++address)
@@ -1115,7 +1069,7 @@ namespace DCLF
 		next->counters = impl->counters;
 		next->fixed = sameFixed ? current->fixed : std::make_shared<const FixedBindings>(std::move(fixed));
 		importer.published.store(std::move(next), std::memory_order_release);
-		// The requests parked for want of a context.
+		// Wake requests parked for want of a context.
 		importer.Notify();
 	}
 
@@ -1213,8 +1167,7 @@ namespace DCLF
 			return kInvalid;
 		D3D11_SAMPLER_DESC desc{};
 		state->GetDesc(&desc);
-		// A sampler the backend cannot create is never handed out (the service throws): the draws that need it
-		// are skipped rather than drawn through an empty descriptor. Not retried; the engine's table is fixed.
+		// A sampler the backend cannot create is never handed out, so its draws are skipped. Not retried, since the engine's table is fixed.
 		const std::size_t key = a_addressMode * kFilterModes + a_filterMode;
 		if (impl->samplerFailed[key])
 			return kInvalid;
@@ -1242,11 +1195,9 @@ namespace DCLF
 	{
 		const auto registry = impl->registry;
 		if (!registry)
-			return;  // nothing imported: the old storages go with the caller's
+			return;
 		DCLF_ZONE("CS.DCLF.Texture.NoteRelocations");
-		// Kept this long for an import tracked before its move and registered after it (an import takes milliseconds), and longer
-		// while such an import is still in flight (Registry::importsInFlight). A move with no import of the old storage registered
-		// or in flight has no reader: every registered import that reads it holds it from Supersede, behind its recordings.
+		// Kept a while for imports described before the move and registered after it, and longer while such an import is in flight.
 		constexpr auto kUnclaimedFor = std::chrono::seconds(2);
 		const auto now = std::chrono::steady_clock::now();
 		std::scoped_lock lock(registry->mutex);

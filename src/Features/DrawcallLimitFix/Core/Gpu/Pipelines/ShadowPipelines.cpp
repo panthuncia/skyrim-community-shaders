@@ -1,5 +1,4 @@
-// DrawPipelines' shadow set (ShadowPipelines): the shadow views' rasterizer states, pipelines and set versions, and their
-// indirect state.
+// The shadow set: the shadow views' rasterizer states, pipelines, set versions and indirect state.
 
 // volk must precede every Vulkan header in this translation unit.
 #include <rhi_interop_vulkan.h>
@@ -56,7 +55,7 @@ namespace DCLF
 
 	inline namespace DrawPipelinesDetail
 	{
-		// The shadow views': the draw's words name its material row, the view's push words and frame record the rest.
+		// The draw's words name its material row. The view's push words and frame record give the rest.
 		std::vector<rhi::LayoutBindingRange> ShadowLayoutRanges()
 		{
 			const auto index = rhi::LayoutRangeSource::IndirectIndex;
@@ -68,7 +67,7 @@ namespace DCLF
 				for (std::uint32_t r = 0; r < kConstantBufferRegisters; ++r) {
 					const std::uint32_t b = kBindingShiftB + r;
 					if (!pixel && r == 1)
-						shadowRanges.push_back(PushedRange(b, stage, 0, kDrawPushMaterialRow));  // the material row itself
+						shadowRanges.push_back(PushedRange(b, stage, 0, kDrawPushMaterialRow));
 					else if (r == 0)
 						shadowRanges.push_back(PushedRange(b, stage, 1, kShadowPushViewBlock));
 					else if (r == kPerFrameVertexRegister)
@@ -81,7 +80,7 @@ namespace DCLF
 						shadowRanges.push_back(PushedRange(b, stage, 1, kShadowPushZeros));
 				}
 			}
-			// The diffuse (t0) from the draw's row; t1 and up, the samplers and the vertex stage's buffers from the frame record.
+			// The diffuse t0 from the draw's row. Everything else from the frame record.
 			shadowRanges.push_back(FromMaterialRow(LayoutRange(kBindingShiftT, 1, pixelStage, index, kShadowRowDiffuseOffset)));
 			shadowRanges.push_back(fromShadowFrameRecord(LayoutRange(kBindingShiftT + 1, kTextureRegisters - 1, pixelStage, index, offsetof(DrawBindings, textures) + 4)));
 			shadowRanges.push_back(fromShadowFrameRecord(LayoutRange(kBindingShiftS, kSamplerRegisters, pixelStage, index, offsetof(DrawBindings, samplers), true)));
@@ -100,7 +99,7 @@ namespace DCLF
 	void DrawPipelines::SetShadowInputs(DXGI_FORMAT a_format, RE::BSShader& a_utility)
 	{
 		auto& input = impl->renderInput;
-		// The view format of a shadow map the engine has drawn: unknown until then, and not posted.
+		// Unknown until the engine has drawn a shadow map, and then not posted.
 		if (a_format == DXGI_FORMAT_UNKNOWN || (input.shadowFormat == a_format && input.utility == &a_utility) || !Enabled())
 			return;
 		input.shadowFormat = a_format;
@@ -136,7 +135,7 @@ namespace DCLF
 		auto& s = lane.shadow;
 		if (s.entries.contains(a_key))
 			return;  // requested, or failed for good
-		// An inexpressible view rasterizer state has id 0: its views stay native.
+		// An inexpressible rasterizer state has id 0, so its views stay native.
 		if (a_key.viewState == 0) {
 			s.FailForGood(a_key);
 			lane.dirty = true;
@@ -151,7 +150,6 @@ namespace DCLF
 		}
 		const auto asked = s.asked.find(a_key);
 		const std::string casters = asked != s.asked.end() ? DescribeShadowCasters(asked->second.casterKey, asked->second.occlusion) : std::string("for no recorded caster");
-		// As TryRequest: each build is logged with its casters and nearest relative.
 		std::uint8_t onDemand = 0;
 		bool programFailed = false;
 		const auto program = ShaderPrograms::Get().FindShadow(a_key.technique, *input->utility, true, nullptr, &onDemand, &programFailed);
@@ -160,7 +158,7 @@ namespace DCLF
 				a_key.technique, SIE::ShaderCache::Instance().IsCompiling() ? "Community Shaders' compile workers still busy" : "Community Shaders' compile workers idle",
 				casters);
 		if (programFailed) {
-			// Its casters stay native in this key's views until a shader reload makes its program again (RetryAfterSourcesMoved).
+			// Its casters stay native in this key's views until a shader reload makes its program again.
 			s.FailForGood(a_key);
 			lane.dirty = true;
 			return;
@@ -177,9 +175,7 @@ namespace DCLF
 		const DXGI_FORMAT depthFormat = input->shadowFormat;
 		org::services::PipelineRecipe recipe;
 		recipe.id = fmt::format("dclf.shadow.{:08X}.{:X}.{:016X}.{}", a_key.technique, a_key.rasterFlags, a_key.vertexLayout, a_key.viewState);
-		// Its program's binaries, as the main set's (TryRequest).
 		recipe.shaderKey = ShadowPipelineKeyHash{}(a_key) ^ (program->fingerprint * 0x9E3779B97F4A7C15ull);
-		// No vertex input: never an artifact built with an input layout (kPulledVerticesSalt).
 		recipe.fixedFunctionKey = static_cast<std::uint64_t>(depthFormat) ^ kPulledVerticesSalt;
 		const auto build = [device = device, layout = ShadowLayout(), key = a_key, depthFormat, rasterState](const ShaderPrograms::ShadowProgram& a_program) {
 			return BuildShadow(device, layout, key, &a_program, depthFormat, rasterState);
@@ -204,7 +200,6 @@ namespace DCLF
 	void DrawPipelines::Impl::RecreateShadowSet(DXGI_FORMAT a_from, DXGI_FORMAT a_to)
 	{
 		auto& s = lane.shadow;
-		// Every shadow pipeline depends on the format: start over (the new generation drops queued builds' completions).
 		logger::info("[DCLF] pipeline lane: shadow map format {} -> {}; rebuilding {} shadow pipelines", static_cast<int>(a_from), static_cast<int>(a_to),
 			s.setPipelines.size());
 		ResetShadowSet(fmt::format("shadow map format {} -> {}", static_cast<int>(a_from), static_cast<int>(a_to)));
@@ -216,7 +211,7 @@ namespace DCLF
 		s.StartOver();
 		s.versions.Retire();
 		s.setPipelines.clear();
-		s.setSlots.clear();  // their registry entries go with them
+		s.setSlots.clear();
 		s.layouts.clear();
 		s.discards.clear();
 		s.recreatedBy = std::move(a_by);
@@ -226,7 +221,6 @@ namespace DCLF
 	void DrawPipelines::Impl::AdmitShadow()
 	{
 		auto& s = lane.shadow;
-		// As AdmitLane.
 		completions->shadow.Drain([&](ShadowDone&& a_done) {
 			if (a_done.generation != s.generation)
 				return;
@@ -272,13 +266,12 @@ namespace DCLF
 		auto built = std::make_shared<Built>();
 		AddUsage(vertex, false, built->usage[kColorVariant]);
 		AddUsage(pixel, true, built->usage[kColorVariant]);
-		// The pulling vertex stage (DCLF_PULLED) has no vertex inputs, so the pipeline has no vertex input state; it is bound by its
-		// draws, not from an execution set.
+		// No vertex input state. It is bound by its draws, not from an execution set.
 		PipelineDesc desc(a_layout, a_program->vertex, a_program->pixel, a_depthFormat);
 		desc.raster.rs.cull = (a_key.rasterFlags & kRasterTwoSided) ? rhi::CullMode::None : a_state.cull;
 		desc.raster.rs.frontCCW = a_state.frontCCW;
-		// The integer DepthBias passes through as the constant factor: the shadow maps are D16_UNORM, where Vulkan's default
-		// representation (the least representable value) is what D3D11 and DXVK mean by it.
+		// The integer DepthBias passes through as the constant factor. Shadow maps are D16_UNORM, where Vulkan's default
+		// representation matches what D3D11 and DXVK mean by it.
 		desc.raster.rs.depthBias = a_state.depthBias;
 		desc.raster.rs.depthBiasClamp = a_state.depthBiasClamp;
 		desc.raster.rs.slopeScaledDepthBias = a_state.slopeScaledDepthBias;
@@ -293,8 +286,8 @@ namespace DCLF
 
 	std::uint32_t DrawPipelines::ShadowRasterStateId(const D3D11_RASTERIZER_DESC& a_desc, std::uint32_t a_renderMode)
 	{
-		// The scissor is not part of it: the epoch's pass is bounded by the view's viewport. Depth clipping off is depth clamped to the
-		// viewport's range, as DXVK draws it (Vulkan depthClamp), where the device has it and CS_DCLF_SHADOW_DEPTH_CLAMP is not 0.
+		// The epoch's pass is bounded by the viewport, so no scissor. Depth clipping off becomes depth clamp, as DXVK draws it,
+		// where the device has it and CS_DCLF_SHADOW_DEPTH_CLAMP is not 0.
 		static const bool depthClamp = SwitchOnUnlessZero(Switch::ShadowDepthClamp);
 		const bool clampable = depthClamp && Enabled() && impl->depthClipDisable;
 		if (a_desc.FillMode != D3D11_FILL_SOLID || (!a_desc.DepthClipEnable && !clampable)) {
@@ -309,7 +302,7 @@ namespace DCLF
 			}
 			return 0;
 		}
-		// CS_DCLF_TEST_SHADOW_CLAMP: every state clamped, so a run exercises that path with the engine's states.
+		// CS_DCLF_TEST_SHADOW_CLAMP clamps every state, to exercise that path with the engine's states.
 		static const bool testClamp = SwitchEnabled(Switch::TestShadowClamp);
 		Impl::ShadowRasterState state;
 		state.depthClip = a_desc.DepthClipEnable != FALSE && !(testClamp && clampable);
@@ -340,7 +333,7 @@ namespace DCLF
 
 	ShadowIndirectState GetShadowIndirectState(const PipelineCatalog& a_catalog, DXGI_FORMAT a_shadowFormat)
 	{
-		// a_catalog's shadow set version (its lookups' indices are of it); none once the shadow map format differs from the set's.
+		// Invalid once the shadow map format differs from the set's.
 		const auto& pipelines = DrawPipelines::Get();
 		const auto& impl = *pipelines.impl;
 		ShadowIndirectState state;

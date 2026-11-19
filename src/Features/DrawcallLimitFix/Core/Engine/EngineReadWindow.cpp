@@ -1,4 +1,4 @@
-// EngineReadWindow: Open/Close on the render thread, leases taken and released on any worker; the report's counters.
+// Open and Close on the render thread, leases on any worker, and the report's counters.
 
 #include "Features/DrawcallLimitFix/Core/Engine/EngineReadWindow.h"
 
@@ -50,7 +50,7 @@ namespace DCLF
 
 	double EngineReadWindow::DrainLeases()
 	{
-		// Items in flight: each finishes the one item it holds a lease for (no new lease can be taken now).
+		// Each item in flight finishes. No new lease can be taken now.
 		const auto start = std::chrono::steady_clock::now();
 		for (std::uint32_t spins = 0; state.load(std::memory_order_acquire) & kLeases; ++spins) {
 			if (spins < 64)
@@ -63,7 +63,7 @@ namespace DCLF
 
 	EngineReadWindow::Lease::Lease()
 	{
-		// One word: the lease is counted and the window seen open (not suspended) in the same step, so Close and Suspend cannot miss it.
+		// Count the lease and check open-and-not-suspended in one step, so Close and Suspend cannot miss it.
 		if ((state.fetch_add(1, std::memory_order_acq_rel) & (kOpen | kSuspended)) == kOpen) {
 			held = true;
 			++heldHere;

@@ -18,39 +18,32 @@ namespace org
 namespace DCLF
 {
 	/**
-	 * @brief The bytes the render thread writes for the GPU each frame, by where they go: what the frame's epochs carry through the
-	 * render thread (dclf-architecture.md, "Frame data through the render thread"). Fed at the three ways a commit writes
-	 * per-frame data - a latched copy (LatchedUploads: "latched: <target>", the frame-constants buffer by slot), a staged upload
-	 * (CommitUploads: "staged: <target>") and a latch block's write (LatchWrite: "latch: <what>") - so nothing the render thread
-	 * sends is left out. What a worker or the pool sends (staged batches, FrameValues) is not the render thread's and is not counted.
+	 * @brief Counts the bytes the render thread writes for the GPU each frame, by destination. Fed from latched copies, staged
+	 * uploads and latch writes. Work sent from workers is not counted.
 	 */
 	namespace FrameData
 	{
-		/**
-		 * @brief Whether writes are counted: only under CS_DCLF_STATS, whose epoch report is the counts' one reader. Callers that build
-		 * a name for Note check it first (the names are strings made per write).
-		 */
+		/** @brief Whether writes are counted, only under CS_DCLF_STATS. Check before building a name for Note, since names cost a string. */
 		bool Enabled();
-		/** @brief Render thread, at Present: a frame ended (the thread that calls it is the one counted). */
+		/** @brief Render thread, at Present. Ends the frame. */
 		void EndFrame();
-		/** @brief a_bytes written by the render thread to a_where this frame; ignored on any other thread. */
+		/** @brief Bytes the render thread wrote to a_where this frame. Ignored on any other thread. */
 		void Note(std::string_view a_where, std::size_t a_bytes);
-		/** @brief What a frame's writes to one place came to. */
 		struct Counts
 		{
 			std::uint64_t bytes = 0, writes = 0;
 		};
-		/** @brief The counts since the last take, by where, over a number of frames. */
+		/** @brief The counts since the last take, over a number of frames. */
 		struct Taken
 		{
 			std::uint64_t frames = 0;
 			std::map<std::string, Counts, std::less<>> counts;
 		};
-		/** @brief The report's take (Reports/DrawsFrameValues.cpp): the counts, reset; nothing (and nothing reset) before a frame wrote. */
+		/** @brief Takes and resets the counts. Returns nothing before a frame wrote. */
 		Taken Take();
 	}
 
-	/** @brief org::LatchBlock::Write at a_run's region, counted under "latch: a_what" (FrameData). */
+	/** @brief org::LatchBlock::Write, counted under "latch: a_what". */
 	void LatchWrite(const org::LatchBlock& a_block, std::string_view a_what, const org::RunRef& a_run, std::uint32_t a_offset, std::span<const std::byte> a_bytes);
 	template <class T>
 	void LatchWriteValue(const org::LatchBlock& a_block, std::string_view a_what, const org::RunRef& a_run, std::uint32_t a_offset, const T& a_value)

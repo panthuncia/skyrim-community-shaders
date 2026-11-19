@@ -8,32 +8,21 @@ struct ID3D11RasterizerState;
 namespace DCLF
 {
 	/**
-	 * @brief The engine's fixed-function state tables, indexed by the RendererShadowState fields
-	 * (engine notes: renderer shadow state), and the globals that pick a decal's depth bias.
-	 *
-	 * The rasterizer array is the one ShadowmapCascadeRasterizerFix clones; the blend array is the one
-	 * Deferred.cpp swaps for its deferred variants between StartDeferred and ResetBlendStates. A state
-	 * read from the blend table therefore depends on WHEN it is read: inside the deferred pass it is what
-	 * a native draw in the G-buffer uses, outside it is the forward one.
+	 * @brief The engine's fixed-function state tables and the globals that pick a decal's depth bias.
+	 * Community Shaders swaps the blend table for deferred variants between StartDeferred and ResetBlendStates, so a blend state
+	 * read from it depends on when it is read.
 	 */
 	using RasterStateArray = ID3D11RasterizerState* [2][3][12][2];  // [fill][cull][depth bias][scissor]
 	using BlendStateArray = ID3D11BlendState* [7][2][13][2];        // [blend mode][alpha to coverage][write mode][extra]
 
 	RasterStateArray& EngineRasterStates();
 	BlendStateArray& EngineBlendStates();
-	/**
-	 * @brief The blend state the G-buffer pass draws with at these indices: Deferred's variant (whatever the table holds when
-	 * this is called), null until Deferred has made them. DCLF's main-pass draws are that pass's.
-	 */
+	/** @brief The G-buffer pass's blend state at these indices, or null until Deferred has made them. */
 	ID3D11BlendState* DeferredBlendState(std::uint32_t a_blendMode, std::uint32_t a_alphaToCoverage, std::uint32_t a_writeMode, std::uint32_t a_extra);
 
 	/**
-	 * @brief The depth-bias mode the engine's decal groups draw with (decompiled FUN_1414b3bb0 and
-	 * FUN_1414b3d50, and measured against the engine's decal draws; engine notes: decals).
-	 *
-	 * Group 1 (accumulation hint 2, opaque decals): 6 + DrawWorld::disableSunShadows while the
-	 * ToggleDepthBias global is set, 0 otherwise. Group 2 (hint 3, blended decals): 10 + disableSunShadows,
-	 * unconditionally. Modes 7 and 11 - what interiors use, where sun shadows are off - hold no bias at all.
+	 * @brief The depth-bias mode the engine's decal groups draw with (FUN_1414b3bb0, FUN_1414b3d50, checked against real draws).
+	 * Opaque decals use 6 + disableSunShadows while ToggleDepthBias is set. Blended decals always use 10 + disableSunShadows.
 	 */
 	std::uint32_t DecalDepthBiasMode(std::uint32_t a_decalGroup);
 }

@@ -47,41 +47,20 @@ namespace DCLF
 	}
 
 	/**
-	 * @brief FrameValues(N) (dclf-architecture.md, "FrameValues"): the values a frame's draws need to be its own - the
-	 * claimed members' placements (BindlessPlacement), the skins' palettes and the objects' shading (BindlessShading) - made on
-	 * DCLF's pool while the frame runs, and waited for by the GPU, never by the render thread. The scene's tables hold none of
-	 * them: these are the only ones drawn with.
+	 * @brief Makes the per-frame values a frame's draws read: placements, skin palettes and shading rows.
 	 *
-	 * Each frame the render thread kicks one producer (Kick, at the scene's start) with the placement plans the walks made since the last
-	 * (PlacementPlan: a delta of the placement set, made only when it changes), which the producer applies in order onto the set it keeps
-	 * (its movers and roots at stable indices). The producers run one after another on the preparation pool:
-	 * - they sample the kept movers and roots that moved, and the slots the walks wrote in full (once), across the pool, under
-	 *   engine-read leases: a skin's palette after the engine's palette update (which the native draw's bone setter would have run),
-	 *   into the rows kept by object slot and the palette rows kept by block (journalled KeptArrays); and the shading of the slots the
-	 *   walk and the accumulate phase named (ShadingItem), with the shading fields' values the frame's start captured (the wetness);
-	 * - what moved is what the move writers pushed (FrameValueMoves, the producer the queues' one consumer), looked up in an index from
-	 *   move key to the kept movers and roots, patched as plans add, change and remove them: a mover or root is sampled when one of its
-	 *   keys moved this frame or the last, when a plan added or changed it, and on the frame after a sample of it changed a row or palette
-	 *   (so a skin's previous palette and a placement's previous world settle once its motion stops); a palette rows class's items every
-	 *   frame, their blocks the class's registration's (Api::PaletteRowsContribution: particle quads face the camera);
-	 * - send the frame's buffers the runs they lack on the dedicated upload queue, then signal the frame-wait timeline to the frame's
-	 *   sequence number (always, also after a failure), which every batch of the frame waits for (GraphHost's frame wait).
+	 * Each frame the render thread kicks one producer on DCLF's pool. Producers run one after another. Each applies the new placement
+	 * plans to the set it keeps, samples only what moved under engine-read leases, and uploads the changed rows on the dedicated
+	 * upload queue. It then signals the frame-wait timeline, always, even after a failure. The GPU waits for that signal and the
+	 * render thread never does.
 	 *
-	 * The features' registered pools (Api::FrameValuePool, Extensions::RegisteredPools) run beside the built-in row sets, after them: their
-	 * frame-start reads after the built-in ones, their kicks after the built-in inputs, their samples after the built-in sampling, their
-	 * sends after the built-in sends.
-	 *
-	 * Each of the row sets (the three built-in ones: placements, palettes, shading; then the registered pools', Features/Fades' seeds the
-	 * last) is a pooled version (D6,
-	 * org::services::BackingPool on DCLF's retirement clock, the render thread its one acquirer): Kick leases a backing holding every
-	 * row, preferring the one that holds the most (its contentEpoch), and the producer sends it the journal's runs since then. The
-	 * frame's draws read those backings (the frame record's t123, t122 and t121, and the culling's latches); EndFrame binds them to the
-	 * frame's last submission, so no producer writes a backing while a frame reads it. No producer waits for the GPU.
+	 * Each row set lives in pooled backings. A backing is bound to the frame's last submission, so no producer writes a backing a
+	 * frame in flight still reads. Feature-registered pools run after the built-in row sets at every step.
 	 */
 	class FrameValues
 	{
 	public:
-		/** @brief One float4 of a palette (three a bone): DCLFPalettes' element. */
+		/** @brief One float4 of a palette. A bone takes three. */
 		struct PaletteRow
 		{
 			float v[4];
@@ -89,65 +68,40 @@ namespace DCLF
 
 		static FrameValues& Get();
 
-		/**
-		 * @brief An object's placement row from the engine now: its geometry's transforms and bound, its listed root's bound
-		 * (unbounded without one), its fade property's fade node (the layer property for a layer's row).
-		 */
+		/** @brief An object's placement row read from the engine now. Without a listed root the bound is unbounded. */
 		static void SampleRow(const RE::BSGeometry& a_geometry, const RE::NiAVObject* a_listedRoot, const RE::BSShaderProperty* a_fadeProperty,
 			BindlessPlacement& a_out);
-		/** @brief Render thread (diagnostics): a slot's row from the engine now, by the tables' structure; false for a free slot. */
+		/** @brief Diagnostics, render thread. A slot's row read from the engine now. False for a free slot. */
 		static bool SampleSlot(const SceneTables& a_tables, std::uint32_t a_slot, BindlessPlacement& a_out);
 
 		/**
-		 * @brief Render thread, at the scene's start (the engine's update done, the window open): the frame's producer, from a_plans
-		 * (the walks' plans the publication log brought since the last frame, oldest first: each applied onto the kept set in order and its
-		 * written slots sampled; none: the set as it was), the slots named for their shading (a_shading, the newest last) and
-		 * the shading fields' values captured (a_fieldValues: Extensions::CaptureShadingFields). Sets the host's frame wait to its sequence
-		 * number. False when it cannot run (no render
-		 * graph, no dedicated upload queue): the frame waits for nothing, and its draws have no rows; what it was handed waits for the
-		 * first producer.
+		 * @brief Render thread, at the scene's start. Kicks the frame's producer and sets the host's frame wait to its sequence number.
+		 * Returns false when there is no graph or dedicated upload queue. The frame then waits for nothing and its inputs wait for the first producer.
 		 */
 		bool Kick(std::vector<std::shared_ptr<const PlacementPlan>> a_plans, std::vector<ShadingItem> a_shading,
 			std::vector<ShadingFieldValue> a_fieldValues, std::shared_ptr<const FrameGlobals> a_globals);
-		/**
-		 * @brief Render thread, before Kick: the frame's late pose plan (LatePoses::PrepareFrame; null: none). Kick leases a second placement
-		 * and palette backing for it with the frame's, and the frame's producer fills them: the frame's rows with the plan's shrink applied.
-		 * No other work and no other wait: they go up with the frame's rows, under the frame's signal.
-		 */
+		/** @brief Render thread, before Kick. Kick also leases late-pose placement and palette backings, filled by the same producer. */
 		void SetLatePoses(std::shared_ptr<const LatePoses::FramePlan> a_plan);
-		/**
-		 * @brief Render thread, at the depth commit, before the depth epoch is submitted: the draws from here read the late backings
-		 * (PlacementsIndex, PalettesIndex), when Kick leased them. The work before (the shadow epoch) keeps the frame's first ones.
-		 */
+		/** @brief Render thread, at the depth commit. Draws from here read the late backings. The shadow epoch keeps the first ones. */
 		void UseLatePoses();
 		/**
-		 * @brief Render thread, before Kick: the claims whose CategoryRoot views' members the frame draws (null: none, those views'
-		 * epochs do not draw this frame: the first person's). Kick samples those members' rows and skin palettes itself, before Main::Draw
-		 * moves the first-person skeleton into its root's space (FUN_1414cb020); the producer never samples a root view's item.
+		 * @brief Render thread, before Kick. Kick samples these first-person members itself, before Main::Draw moves the skeleton into its
+		 * root's space (FUN_1414cb020). The producer never samples them.
 		 */
 		void SetRootViewClaims(std::shared_ptr<const SetSnapshot> a_claims) { rootViewClaims = std::move(a_claims); }
-		/**
-		 * @brief Render thread, before Kick: the CPU pipeline's view batches the frame draws with (the adopted snapshot's; null: none, the GPU
-		 * pipeline). Kept until replaced: every producer from the next Kick on stores its movers' spheres into the set's live column of its
-		 * parity (Direct::LiveParity), and the static lanes' once a set and parity, after its sampling and before it is done.
-		 */
+		/** @brief Render thread, before Kick. The CPU pipeline's view batches, kept until replaced. Producers fill their live sphere column. */
 		void SetViewBatches(std::shared_ptr<const Direct::ViewBatchSet> a_set) { viewBatches = std::move(a_set); }
-		/**
-		 * @brief Any thread (the snapshot builder): asks the next producer for its placement bounds (Direct::SnapshotSpheres), taken with
-		 * TakeSnapshotSpheres once posted (latest wins). Made only when asked: a gather of every slot's bound.
-		 */
+		/** @brief Any thread. Asks the next producer for every slot's bound. Costly, so made only when asked. Latest wins. */
 		void RequestSnapshotSpheres();
-		/** @brief The snapshot builder: the newest bounds a producer posted since the last take (null: none). */
+		/** @brief The newest bounds posted since the last take, or null. */
 		std::unique_ptr<Direct::SnapshotSpheres> TakeSnapshotSpheres();
-		/** @brief Any thread (texture streaming's worker): as RequestSnapshotSpheres, in a slot of its own; its table holds spheres and owners only. */
+		/** @brief Any thread. Like RequestSnapshotSpheres, in its own slot for texture streaming. */
 		void RequestStreamingSpheres();
-		/** @brief The newest bounds posted for streaming since the last take (null: none). */
+		/** @brief The newest streaming bounds since the last take, or null. */
 		std::unique_ptr<Direct::SnapshotSpheres> TakeStreamingSpheres();
 		/**
-		 * @brief The first-person report: the palette rows classes' first-person writes since the last call that gave their placement
-		 * (Api::PaletteRowsChunk::NoteFirstPerson; Features/Particles: the first-person particle members' expansions), their units (the
-		 * particles), and the farthest a written placement's bound centre was from the first-person eye (a particle snapshot taken while
-		 * Main::Draw had the skeleton in its root's space would be far from it).
+		 * @brief First-person particle writes since the last call. The farthest distance from the first-person eye flags a snapshot taken
+		 * while the skeleton was in its root's space.
 		 */
 		struct FirstPersonPaletteStats
 		{
@@ -155,24 +109,18 @@ namespace DCLF
 			float farthest = 0.0f;
 		};
 		static FirstPersonPaletteStats TakeFirstPersonPaletteStats();
-		/** @brief Render thread: a frame with no producer (DCLF not running): no batch waits for one. */
+		/** @brief Render thread. A frame with no producer, so no batch waits for one. */
 		void Skip();
-		/**
-		 * @brief Render thread, before the Present: once the frame's producers are done, waits until the last one's signal is on the
-		 * copy queue (see the .cpp). EndFrame waits too, when this did not run.
-		 */
+		/** @brief Render thread, before Present. Waits until the last producer's signal is on the copy queue. See the .cpp for why. */
 		void WaitSignalSubmitted();
-		/** @brief Render thread, after the frame's last submission: binds the frame's backings to it (SubmittedRetirementPoint). */
+		/** @brief Render thread, after the frame's last submission. Binds the frame's backings to it. */
 		void EndFrame();
 		/**
-		 * @brief Render thread, after Kick: what the frame's GPU work must wait for, the frame-wait timeline (signalled from the upload
-		 * queue once the producer's uploads for the frame are sent) at the frame's value (what Kick set as the host's SetFrameWaitValue).
-		 * Value 0 (none) on a frame without a producer. Work submitted outside ORG's batches (guest: the CPU sites' external commands
-		 * in DXVK's command buffer, RenderGraphRuntime::EmitCommands) takes it at its trigger, on the render thread: the next Kick moves
-		 * it. ORG's batches wait for it themselves (GraphHost::SetFrameWaitValue), the native mode's inline site passes among them.
+		 * @brief Render thread, after Kick. The timeline point the frame's GPU work must wait for, or 0 without a producer.
+		 * Work outside ORG's batches must take it at its trigger, before the next Kick moves it.
 		 */
 		rhi::TimelinePoint FrameWaitPoint() const;
-		/** @brief The row sets a pass reads (DeclareReads): bits. Pools: every registered pool (Api::FrameValuePool: Features/Fades' seeds...). */
+		/** @brief The row sets a pass reads, as bits. */
 		enum ReadSets : std::uint32_t
 		{
 			kReadPlacements = 1u << 0,
@@ -182,111 +130,81 @@ namespace DCLF
 			kReadAll = kReadPlacements | kReadPalettes | kReadShading | kReadPools,
 		};
 		/**
-		 * @brief Any thread, a pass's declaration: the pass reads a_sets of the frame's values, through the indices or addresses a latch, a
-		 * frame record or an address block carries (PlacementsIndex, PalettesIndex, ShadingIndex, PoolIndex, PoolAddress). Declares each
-		 * row set's late-bound buffer (org::VersionedBuffer::CreateLateBound, ready at the frame wait), whose versions are the frame's
-		 * backings. With a scoped frame wait (GraphHost::Desc::scopedFrameWait, CS_ORG_SCOPED_FRAME_WAIT) only the batches whose passes
-		 * declare them wait for the frame's values, so every pass that reads one must declare it.
+		 * @brief Any thread, in a pass's declaration. Declares the frame's value buffers the pass reads.
+		 * With a scoped frame wait only declaring batches wait, so every pass that reads a row set must declare it.
 		 */
 		void DeclareReads(org::RenderPassBuilder& a_builder, std::uint32_t a_sets = kReadAll);
-		/**
-		 * @brief Any thread, a pass's declaration: the pass writes registered pool a_pool's frame backing through PoolRef (a latch's frame
-		 * rows: Api::PassDef::frameRows) and reads a_sets. DeclareReads without a_pool, then a_pool's late-bound buffer declared written
-		 * (unordered access, no view), added to a_out with the ref PoolRef last handed out, for RenderGraph::CheckDeclaredRefs in the
-		 * pass's Prepare.
-		 */
+		/** @brief Any thread, in a pass's declaration. Declares a registered pool written through PoolRef, checked again in Prepare. */
 		void DeclarePoolWrite(org::RenderPassBuilder& a_builder, Api::FrameValuePoolId a_pool, std::uint32_t a_sets, RenderGraph::DeclaredRefs& a_out);
-		/** @brief Render thread: the descriptor of the placement buffer the current frame's draws read (0 before the first frame). */
+		/** @brief Render thread. The placement buffer's descriptor for the current frame, 0 before the first. */
 		std::uint32_t PlacementsIndex() const { return frameIndex; }
-		/** @brief Render thread: the descriptor of the palette buffer the current frame's draws read (0 before the first frame). */
+		/** @brief Render thread. The palette buffer's descriptor for the current frame, 0 before the first. */
 		std::uint32_t PalettesIndex() const { return paletteIndex; }
-		/** @brief Render thread: the descriptor of the shading buffer the current frame's draws read (0 before the first frame). */
+		/** @brief Render thread. The shading buffer's descriptor for the current frame, 0 before the first. */
 		std::uint32_t ShadingIndex() const { return shadingIndex; }
-		/**
-		 * @brief Render thread: the descriptor of a registered pool's backing the current frame reads (StructuredBuffer of its rows; 0
-		 * before the first frame, on a frame without a producer, and for an unknown pool).
-		 */
+		/** @brief Render thread. A registered pool's backing descriptor this frame, 0 when there is none. */
 		std::uint32_t PoolIndex(Api::FrameValuePoolId a_pool) const;
-		/** @brief Render thread: the device address of that backing (deviceAddress pools; 0 otherwise, or as PoolIndex). */
+		/** @brief Render thread. The device address of that backing, 0 for pools without one. */
 		std::uint64_t PoolAddress(Api::FrameValuePoolId a_pool) const;
-		/**
-		 * @brief Render thread: the buffer view ref of that backing, which shaders read it through (null as PoolIndex). A pass that writes
-		 * through it declares the pool with DeclarePoolWrite, which checks this ref against the version bound at its Prepare.
-		 */
+		/** @brief Render thread. The buffer view ref shaders use for that backing. Writers must declare it with DeclarePoolWrite. */
 		RenderGraph::BufferRef PoolRef(Api::FrameValuePoolId a_pool) const;
-		/** @brief Render thread: that backing's bytes (0 as PoolIndex). */
+		/** @brief Render thread. That backing's size in bytes. */
 		std::uint64_t PoolBytes(Api::FrameValuePoolId a_pool) const;
-		/** @brief Render thread (diagnostics): that backing (null as PoolIndex), held by the frame until EndFrame. */
+		/** @brief Diagnostics, render thread. That backing, held by the frame until EndFrame. */
 		std::shared_ptr<const org::services::Backing> PoolBacking(Api::FrameValuePoolId a_pool) const;
-		/**
-		 * @brief Render thread: whether a frame's Kick now makes its values (a graph host with a dedicated upload queue): what a covered frame
-		 * needs, for the placements and shading it draws with.
-		 */
+		/** @brief Render thread. Whether Kick can make values now, which needs a graph host with a dedicated upload queue. */
 		bool Available() const;
-		/**
-		 * @brief Render thread (diagnostics): whether the frame's producer is done (false before the first frame); a_wait: waits for it
-		 * first. A registered pool's rows are then as it left them, until the next Kick.
-		 */
+		/** @brief Diagnostics, render thread. Whether the frame's producer is done, optionally waiting for it. */
 		bool ProducerDone(bool a_wait = false) const;
 		/**
-		 * @brief Any thread (an engine writer inside the window: WindowWriters): returns once the newest kicked producer's sampling is done,
-		 * its reads of engine memory (its sends may still run); at once without one.
+		 * @brief Any thread. Returns once the newest producer has finished reading engine memory.
+		 * Engine writers inside the window call this. Its uploads may still run.
 		 */
 		void WaitSampled() const;
-		/** @brief The producer (a pool's sample): an engine-read lease refused, counted with the built-in parts' (Counters::refused). */
+		/** @brief A pool's sample counts its refused engine-read lease here. */
 		void NoteRefused();
 
-		/**
-		 * @brief Render thread: the rows as the frame's producer left them, once it is done (diagnostics); null while it runs (a_wait:
-		 * waits for it first; null before the first frame). Valid until the next Kick.
-		 */
+		/** @brief Diagnostics, render thread. The rows the producer left, or null while it runs. Valid until the next Kick. */
 		const std::vector<BindlessPlacement>* RowsIfDone(bool a_wait = false) const;
-		/** @brief Render thread: the palette rows likewise (PaletteRowsOf places a block's). */
+		/** @brief Render thread. The palette rows, likewise. */
 		const std::vector<PaletteRow>* PalettesIfDone(bool a_wait = false) const;
-		/** @brief Render thread: the shading rows likewise; a_wait (diagnostics frames): waits for the frame's producer first. */
+		/** @brief Render thread. The shading rows, likewise. */
 		const std::vector<BindlessShading>* ShadingIfDone(bool a_wait = false) const;
-		/** @brief The producer's counters since the last take (frames 0: nothing ran, nothing else taken). */
+		/** @brief The producer's counters since the last take. */
 		struct Counters
 		{
 			std::uint64_t frames = 0, sampled = 0, settled = 0, seeded = 0, rowsChanged = 0, skins = 0, paletteRowsChanged = 0, shadingSampled = 0, shadingChanged = 0,
 						  wetnessChanged = 0, runs = 0, bytes = 0, sampleUs = 0, uploadUs = 0, maxTotalUs = 0, refused = 0, defects = 0,
 						  failures = 0;
-			// The moved-only sampling: the kept set's movers and roots, those due (sampled), the move keys and node events drained.
 			std::uint64_t movers = 0, moversDue = 0, roots = 0, rootsDue = 0, moveKeys = 0, moveNodes = 0;
-			// Producers that reused a copy a frame in flight still bound (SceneCopies): their uploads waited for it on the GPU.
+			// Producers that reused a copy a frame in flight still bound. Their uploads waited for it on the GPU.
 			std::uint64_t reusedInFlight = 0;
-			// The placement plans applied onto the kept set, those that reset it, and their items (joined, changed and left).
 			std::uint64_t plans = 0, planResets = 0, planItems = 0;
 		};
-		/** @brief The report's take (Reports/DrawsFrameValues.cpp): the counters, reset. */
+		/** @brief Takes and resets the counters. */
 		Counters TakeCounters();
-		/** @brief One row set's pool (TakePoolStats): a built-in part's or a registered pool's. */
+		/** @brief One row set's pool stats. */
 		struct PoolStats
 		{
 			const char* name = "";
-			// The pool's census (BackingPool::Count): backings, leased, free, their bytes; allocated/reused/released since creation.
 			std::uint64_t live = 0, leased = 0, free = 0, liveBytes = 0, allocated = 0, reused = 0, released = 0;
-			// Since the last take: Kick's acquires, the backings it made new, the catch-up runs and bytes sent into the backings.
+			// Since the last take.
 			std::uint64_t acquires = 0, made = 0, runs = 0, bytes = 0;
-			// The journal's trim floor at the last Kick (the oldest content any backing holds; 0: none holds any).
+			// The oldest content any backing holds, 0 if none.
 			std::uint64_t floor = 0;
 		};
 		static constexpr std::size_t kBuiltInPools = 3;  // placements, palettes, shading
-		/**
-		 * @brief Any thread (the report): the pools' stats, the since-last-take counts reset: the built-in parts', then the registered
-		 * pools' once the first Kick made them.
-		 */
+		/** @brief Any thread. Takes the pools' stats and resets the since-last-take counts. */
 		std::vector<PoolStats> TakePoolStats();
 
 	private:
 		FrameValues();
 		~FrameValues();
-		/** @brief DeclareReads without row set a_skip (a written pool's, which DeclarePoolWrite declares). */
 		void DeclareReadsExcept(org::RenderPassBuilder& a_builder, std::uint32_t a_sets, std::size_t a_skip);
 		struct Impl;
 		std::unique_ptr<Impl> impl;
 		std::uint32_t frameIndex = 0, paletteIndex = 0, shadingIndex = 0;
-		std::shared_ptr<const SetSnapshot> rootViewClaims;  // SetRootViewClaims
-		std::shared_ptr<const Direct::ViewBatchSet> viewBatches;  // SetViewBatches
+		std::shared_ptr<const SetSnapshot> rootViewClaims;
+		std::shared_ptr<const Direct::ViewBatchSet> viewBatches;
 	};
 }

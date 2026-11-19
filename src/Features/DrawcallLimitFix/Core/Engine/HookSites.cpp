@@ -35,7 +35,7 @@ namespace DCLF::HookSites
 			return a_site + 5 + static_cast<std::intptr_t>(displacement);
 		}
 
-		// In the game's code (its .text): an engine function, not another module's hook.
+		// In the game's .text, so an engine function and not another module's hook.
 		bool InGame(std::uintptr_t a_address)
 		{
 			const auto text = REL::Module::get().segment(REL::Segment::textx);
@@ -50,7 +50,7 @@ namespace DCLF::HookSites
 			return module;
 		}
 
-		// Community Shaders' own code: its hooks (SceneWriterFramework's, another feature's) are not another plugin's.
+		// Community Shaders' own code. Its hooks are not another plugin's.
 		bool Own(std::uintptr_t a_address)
 		{
 			static const HMODULE self = ModuleAt(reinterpret_cast<std::uintptr_t>(&ModuleAt));
@@ -60,8 +60,7 @@ namespace DCLF::HookSites
 		constexpr DWORD kExecutable = PAGE_EXECUTE_READ | PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY;
 		constexpr DWORD kReadable = kExecutable | PAGE_READONLY | PAGE_READWRITE | PAGE_WRITECOPY;
 
-		// Whether a_size bytes at a_address are committed with one of a_protections. The report reads wherever a byte pattern points, so it
-		// asks first: a pattern found by chance must not crash the game.
+		// The report reads wherever a byte pattern points, so check first. A pattern found by chance must not crash the game.
 		bool Accessible(std::uintptr_t a_address, std::size_t a_size, DWORD a_protections)
 		{
 			const auto end = a_address + a_size;
@@ -74,7 +73,7 @@ namespace DCLF::HookSites
 			return true;
 		}
 
-		// As Resolve, asking before each read. 0 when the path leaves code, or does not end in a few hops.
+		// Resolve, checking before each read. 0 when the path leaves code or does not end in a few hops.
 		std::uintptr_t ResolveChecked(std::uintptr_t a_address)
 		{
 			for (int hop = 0; hop < 4; ++hop) {
@@ -115,7 +114,7 @@ namespace DCLF::HookSites
 			std::uintptr_t target = 0;
 		};
 
-		// The call or jump whose encoding starts at a_address, if there is one. A patch's: an engine call's target is in the game.
+		// The call or jump whose encoding starts at a_address, if any.
 		NearbyJump JumpAt(std::uintptr_t a_address)
 		{
 			constexpr std::size_t kLongest = 13;
@@ -132,10 +131,10 @@ namespace DCLF::HookSites
 					return {};
 				std::uintptr_t target = 0;
 				std::memcpy(&target, reinterpret_cast<const void*>(slot), sizeof(target));
-				// Displacement 0: the target's 8 bytes follow inline, and are part of the patch.
+				// Displacement 0 means the target's 8 bytes follow inline as part of the patch.
 				return { bytes[1] == 0x15 ? "CALL [rip]" : "JMP [rip]", displacement == 0 ? 14u : 6u, target };
 			}
-			// mov reg, imm64, then call or jmp reg: 48 B8+r imm64 FF D0+r / E0+r, or 49 B8+r imm64 41 FF D0+r / E0+r for r8-r15.
+			// mov reg, imm64 then call or jmp reg: 48 B8+r imm64 FF D0+r / E0+r, or 49 B8+r imm64 41 FF D0+r / E0+r for r8-r15.
 			if ((bytes[0] == 0x48 || bytes[0] == 0x49) && bytes[1] >= 0xB8 && bytes[1] <= 0xBF) {
 				const std::uint8_t reg = bytes[1] - 0xB8;
 				const std::size_t branch = bytes[0] == 0x49 ? 11 : 10;
@@ -148,9 +147,8 @@ namespace DCLF::HookSites
 			return {};
 		}
 
-		// How a plugin that patches a place in the engine usually names it: the function's Address Library id with the offset inside it, or
-		// the address itself. A patch can start before the site (a site inside a longer patch), so these allow kNameReach either way. Not
-		// the module offset: 32 bits in that wide a range turn up by chance in a large module.
+		// Plugins usually name a patch site by Address Library id plus offset, or by address. A patch can start before the site, so allow
+		// kNameReach either way. Not module offsets, since 32 bits that wide turn up by chance in a large module.
 		constexpr std::int64_t kNameReach = 32;
 		struct SiteNames
 		{
@@ -224,7 +222,7 @@ namespace DCLF::HookSites
 			}
 		}
 
-		// A module can be unloaded under the scan, and the scan only exists to explain a failure: reading it must not add a crash.
+		// A module can be unloaded under the scan, which only explains a failure, so reading must not add a crash.
 		void CountNamesGuarded(const std::uint8_t* a_bytes, std::size_t a_size, const SiteNames& a_names, NameHits& a_hits)
 		{
 			__try {
@@ -248,8 +246,7 @@ namespace DCLF::HookSites
 			return hits;
 		}
 
-		// The loaded plugins whose image names the site's code. A lead, not proof: a plugin can name a place and not patch it, and one that
-		// finds its place by a byte signature names nothing.
+		// Loaded plugins whose image names the site. A lead, not proof, and a plugin that finds its place by byte signature names nothing.
 		void LogModulesNaming(std::uintptr_t a_site)
 		{
 			constexpr int kMostScans = 4;
@@ -307,9 +304,8 @@ namespace DCLF::HookSites
 				logger::error("[DCLF]     and {} more", leads.size() - kMostLines);
 		}
 
-		// What a person needs to tell a patch from a wrong address, in the log, as a conflict's text has to stay short: the game's version,
-		// the site's address and bytes, and each call or jump around it that leaves the game's code. A first byte alone says little: the site
-		// can sit inside a patch that starts before it.
+		// Log what a person needs to tell a patch from a wrong address: the game version, the site's address and bytes, and each branch
+		// around it that leaves the game's code. The site can sit inside a patch that starts before it.
 		void LogSite(std::string_view a_name, std::uintptr_t a_site)
 		{
 			constexpr std::uintptr_t kReach = 32;
@@ -341,7 +337,7 @@ namespace DCLF::HookSites
 				LogSite(a_name, a_site);
 		}
 
-		// A rel32 branch with opcode a_opcode at a_site (0xE8 CALL, 0xE9 JMP); empty when it is one, else why not.
+		// Empty when a_site is a rel32 branch with a_opcode (0xE8 CALL, 0xE9 JMP), else why not.
 		std::string Branch(std::uintptr_t a_site, std::uint8_t a_opcode)
 		{
 			if (!a_site)
@@ -440,7 +436,7 @@ namespace DCLF::HookSites
 
 	std::uintptr_t Resolve(std::uintptr_t a_address)
 	{
-		// A few hops at most: a JMP rel32 into a branch stub, the stub's jmp [rip+disp] to the hook.
+		// A few hops at most: a JMP rel32 into a stub, then the stub's jmp [rip+disp] to the hook.
 		for (int hop = 0; hop < 4 && a_address; ++hop) {
 			const auto* bytes = reinterpret_cast<const std::uint8_t*>(a_address);
 			if (bytes[0] == 0xE9)

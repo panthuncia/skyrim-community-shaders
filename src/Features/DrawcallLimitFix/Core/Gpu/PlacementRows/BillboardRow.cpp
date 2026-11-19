@@ -1,5 +1,4 @@
-// BillboardRow: the billboard row (SampleBillboardRow, FrameValues' producer inside the engine-read window) and the face mode
-// (BillboardFaceMode, the scene capture's). The CPU port of the engine's turn is the feature's (Features/Billboards, Orient: for its parity).
+// Samples billboard placement rows and reads a billboard node's face mode.
 
 #include "Features/DrawcallLimitFix/Core/Gpu/PlacementRows/BillboardRow.h"
 
@@ -22,13 +21,11 @@ namespace DCLF::PlacementRows
 		const auto* property = a_geometry.GetGeometryRuntimeData().shaderProperty.get();
 		if (!property)
 			return false;
-		// An effect leaf, or a Lighting refraction leaf (heat haze cards: their one draw is the refraction normals, which turns them too).
+		// Lighting refraction leaves, such as heat haze cards, turn too.
 		using Flag = RE::BSShaderProperty::EShaderPropertyFlag;
 		const bool refraction = property->GetRTTI() == lightingRtti.get() && property->flags.any(Flag::kRefraction, Flag::kTempRefraction);
 		if (property->GetRTTI() != effectRtti.get() && !refraction)
 			return false;
-		// The leaf relative to the nearest billboard node: the locals between them, composed as the children's world updates compose them
-		// (NiAVObject's world = the parent's world * the local).
 		RE::NiTransform relative = a_geometry.local;
 		const RE::NiNode* node = a_geometry.parent;
 		while (node && !netimmerse_cast<RE::NiBillboardNode*>(const_cast<RE::NiNode*>(node))) {
@@ -37,10 +34,9 @@ namespace DCLF::PlacementRows
 		}
 		if (!node)
 			return false;
-		// The node's base, as 0x140d3e650 rebuilds it before turning it: its parent's world times its local (the identity without a parent).
+		// The node's base as 0x140d3e650 rebuilds it before turning.
 		const RE::NiTransform base = node->parent ? node->parent->world * node->local : node->local;
-		// The unturned world (the node's turn the identity): a world transform like any row's, so a pass that does not turn the leaf still
-		// draws it where the node stands.
+		// The unturned world, so a pass that does not turn the leaf still draws it where the node stands.
 		const RE::NiTransform unturned = base * relative;
 		const auto& r = unturned.rotate.entry;
 		const float scale = unturned.scale;
@@ -55,9 +51,9 @@ namespace DCLF::PlacementRows
 			a_out.previousWorld[row * 4 + 2] = base.rotate.entry[row][2];
 			a_out.previousWorld[row * 4 + 3] = 0.0f;
 		}
-		// The node's face mode, for a draw whose record has no room for it (the refraction stage: Utility.hlsl, DCLFRefractionVertex).
+		// The refraction stage's record has no room for the face mode, so it reads it here (DCLFRefractionVertex).
 		a_out.previousWorld[7] = static_cast<float>(BillboardFaceMode(node));
-		// The leaf's bound: its model bound by the unturned world (its centre's distance from the pivot does not change as the node turns).
+		// The bound centre's distance from the pivot does not change as the node turns.
 		const auto& model = a_geometry.GetModelData().modelBound;
 		float offset = 0.0f;
 		for (int row = 0; row < 3; ++row) {

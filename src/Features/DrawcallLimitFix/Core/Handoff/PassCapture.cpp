@@ -1,5 +1,4 @@
-// PassCapture: the registration hooks (RegisterPass and the direct group/list insertions; any registering thread), the withholding
-// tests by view, the per-pass record the render thread drains, and the renderer sets refreshed on the render thread.
+// The registration hooks, the withholding tests by view, the per-pass record the render thread drains, and the renderer sets.
 #include "Features/DrawcallLimitFix/Core/Handoff/PassCapture.h"
 
 #include "Features/DrawcallLimitFix/Diagnostics/Feature/OpenDefectProbes.h"
@@ -26,15 +25,14 @@ namespace DCLF
 	namespace
 	{
 		// BSShaderProperty::EShaderPropertyFlag bits the engine's batch-group classifier reads.
-		constexpr std::uint64_t kFlagList4 = 1ull << 54;  // -> list 4 on its own
-		constexpr std::uint64_t kFlagList2 = 1ull << 36;  // -> adds 2
+		constexpr std::uint64_t kFlagList4 = 1ull << 54;  // list 4 on its own
+		constexpr std::uint64_t kFlagList2 = 1ull << 36;  // adds 2
 		constexpr std::uint16_t kAlphaTestingFlag = 1u << 9;
 
-		// A draw family's engine shapes are known by their shader property's vtable (DrawFamilyEntry::engineShapeVtable, resolved at
-		// install; an untaken family's is 0, which no property's is).
+		// A draw family's engine shapes are known by their shader property's vtable. An untaken family's is 0, which matches no property.
 		const void* ShaderPropertyOf(const RE::BSGeometry* a_geometry) { return a_geometry->GetGeometryRuntimeData().shaderProperty.get(); }
 
-		/** @brief The draw family whose engine shape a_geometry is (kDrawFamilies: none). */
+		/** @brief The draw family whose engine shape a_geometry is, or kDrawFamilies for none. */
 		std::size_t EngineShapeFamily(const RE::BSGeometry* a_geometry)
 		{
 			const void* property = ShaderPropertyOf(a_geometry);
@@ -45,27 +43,24 @@ namespace DCLF
 			return Extensions::kDrawFamilies;
 		}
 
-		// A draw family's faces' root in a view's roots (Api::ViewRootBit; 0: none).
+		// A draw family's faces' root bit in a view's roots, or 0.
 		std::uint32_t FacesRootBit(std::size_t a_family)
 		{
 			const auto root = Extensions::DrawFamilies()[a_family].contribution.faces.root;
 			return root < Api::ViewRoot::Count ? Api::ViewRootBit(root) : 0u;
 		}
 
-		// The shadow-map registration this thread runs now (ShadowRegistration): its accumulator's render mode is a shadow view's.
+		// Set while this thread runs the shadow-map registration.
 		thread_local bool t_shadowRegistration = false;
-		// The accumulator the shadow modes' registration on this thread registers into, and its render mode (~0u: none).
+		// The accumulator this thread's shadow registration registers into, and its render mode (~0u for none).
 		thread_local const void* t_registrationAccumulator = nullptr;
 		thread_local std::uint32_t t_registrationMode = ~0u;
-		// Inside the engine's focus accumulation of a host whose focus views DCLF covers (SetFocusAccumulation).
+		// Inside the engine's focus accumulation of a host whose focus views DCLF covers.
 		thread_local bool t_focusAccumulationCovered = false;
-		// The menu scenes' renders this thread is inside (MenuSceneScope).
+		// How many menu scene renders this thread is inside.
 		thread_local std::uint32_t t_menuScenes = 0;
 
-		/**
-		 * @brief Whether a_pass is of DCLF's classes: a Lighting object's (grass included; its depth and shadow passes are Utility on the
-		 * same property), an effect's or tree LOD's.
-		 */
+		/** @brief Whether a_pass is of DCLF's classes: Lighting (grass included), effect or tree LOD. */
 		bool DclfClass(const RE::BSRenderPass* a_pass)
 		{
 			const auto* property = a_pass->shaderProperty;
@@ -114,8 +109,7 @@ namespace DCLF
 		if (a_pass->shader->shaderType.get() != RE::BSShader::Type::Lighting)
 			return;
 
-		// How many threads register, for the record: the engine classifier takes a mutex and the scene
-		// lists are built on a job list, so more than one is expected.
+		// The classifier takes a mutex and the scene lists build on a job list, so several threads register.
 		const auto thread = static_cast<std::uint32_t>(GetCurrentThreadId());
 		if (lastThread.exchange(thread, std::memory_order_relaxed) != thread)
 			threadCount.fetch_add(1, std::memory_order_relaxed);
@@ -165,8 +159,8 @@ namespace DCLF
 
 	namespace
 	{
-		// An accumulator's batch renderers: its own, its geometry groups' and its alpha group's, in that order. The engine makes groups as
-		// geometry first uses them, so a set made from these is made again whenever the list changes, not only when the accumulators do.
+		// An accumulator's batch renderers, its groups' and its alpha group's. The engine makes groups as geometry first uses them,
+		// so a set built from these is rebuilt whenever the list changes.
 		void CollectRenderers(const void* a_accumulator, std::vector<const RE::BSBatchRenderer*>& a_out)
 		{
 			const auto* accumulator = static_cast<const RE::BSGraphics::BSShaderAccumulator*>(a_accumulator);
@@ -181,7 +175,7 @@ namespace DCLF
 				a_out.push_back(batch->alphaGroup->batchRenderer);
 		}
 
-		/** @brief Whether a_batch is one of a_accumulator's batch renderers now (CollectRenderers' list, read live). */
+		/** @brief Whether a_batch is one of a_accumulator's batch renderers now, read live. */
 		bool HasRenderer(const void* a_accumulator, const RE::BSBatchRenderer* a_batch)
 		{
 			const auto* accumulator = static_cast<const RE::BSGraphics::BSShaderAccumulator*>(a_accumulator);
@@ -199,14 +193,11 @@ namespace DCLF
 
 	void PassCapture::RefreshMainRenderers()
 	{
-		// The Z-prepass's accumulator (render mode 0xC) and the main camera's (render mode 0), as the registration jobs
-		// (FUN_1414cbff0) take them (skyrim-engine-notes.md, "The primary's cull: the scene lists").
+		// The Z-prepass accumulator (render mode 0xC) and the main camera's (render mode 0), as the registration jobs take them.
 		static REL::Relocation<RE::BSGraphics::BSShaderAccumulator**> depthAccumulator{ REL::Offset(Engine::Address::kDepthAccumulator) };
 		static REL::Relocation<RE::BSGraphics::BSShaderAccumulator**> mainAccumulator{ REL::Offset(Engine::Address::kMainAccumulator) };
 		const std::array<const void*, 2> accumulators{ *depthAccumulator, *mainAccumulator };
-		// The InMainRenderers views' accumulators (their callbacks: the first person's, Main::unk_FPCulling culls the first-person root
-		// alone into it and FUN_1414cb6d0 renders it). Their registrations are their members' alone, so a member's there is the view's
-		// member's (WithholdMain).
+		// InMainRenderers views register only their own members, so a member's pass there is the view's member's.
 		const auto& views = Extensions::Views();
 		std::array<Api::ViewAccumulators, Extensions::kEngineViews> viewAccumulators{};
 		std::vector<const RE::BSBatchRenderer*> sources;
@@ -241,9 +232,8 @@ namespace DCLF
 
 	bool PassCapture::HeldByLoad(const RE::BSRenderPass* a_pass)
 	{
-		// A load's hold (Core/Render/LoadHold.h): the world's frames run off the screen, and every pass of DCLF's classes into a view DCLF
-		// draws is withheld, member or not, so the engine draws none of the load's objects while their claims settle. A menu scene's are
-		// not the world's (the loading menu's model and its shadow casters draw).
+		// During a load's hold every pass of DCLF's classes into a view DCLF draws is withheld, member or not, so the engine draws none
+		// of the load's objects while their claims settle. Menu scenes are not the world's.
 		if (!LoadHold::Active() || t_menuScenes || !Policy::WithholdFromEngine() || !DclfClass(a_pass))
 			return false;
 		holdWithheld.fetch_add(1, std::memory_order_relaxed);
@@ -268,32 +258,26 @@ namespace DCLF
 	{
 		if (!a_pass || !a_pass->geometry || !Policy::WithholdFromEngine())
 			return false;
-		// The main views' renderers, and a geometry group's renderer the engine made during this frame's registrations (in no set until the
-		// next frame's RefreshMainRenderers: MainRendererNow). A shadow-map registration is never the main views'.
+		// Include group renderers the engine made during this frame's registrations. A shadow-map registration is never the main views'.
 		if (!IsMainRenderer(a_batch) && (t_shadowRegistration || !MainRendererNow(a_batch)))
 			return false;
 		if (HeldByLoad(a_pass))
 			return true;
-		// Tree LOD (dclf-architecture.md, "Tree LOD: the draws"): DCLF draws every instance the mirror holds this frame, so the engine's
-		// passes of every tree LOD shape (its Z-prepass's, hint 7 into group 1 through the shadow modes' registration; its colour
-		// pass's, hint 7 into group 1) are withheld. So for every draw family DCLF draws this frame, or waits to draw (its pipelines not
-		// ready yet): its engine shapes' passes.
+		// For every draw family DCLF draws this frame, or waits to draw, the engine's passes of its shapes are withheld.
 		for (std::size_t f = 0; f < Extensions::kDrawFamilies; ++f)
 			if (familyHeld[f].load(std::memory_order_acquire) && Engine::VtableIs(ShaderPropertyOf(a_pass->geometry), Extensions::DrawFamilies()[f].engineShapeVtable)) {
 				familyWithheld[f].fetch_add(1, std::memory_order_relaxed);
 				return true;
 			}
-		// A member's phases, or a waiting object's (SetSnapshot::pending): the engine draws neither.
+		// The engine draws neither a member's phases nor a waiting object's.
 		const auto set = std::atomic_load(&frameSet);
 		const std::uint8_t phases = set ? set->WithheldPhasesOf(a_pass->geometry) : std::uint8_t{ 0 };
 		const auto& views = Extensions::Views();
 		for (std::uint32_t i = 0; i < views.mainRendererCount; ++i)
 			if (IsViewRenderer(views.mainRendererViews[i], a_batch))
 				viewRenderers[static_cast<std::size_t>(views.mainRendererViews[i])].registered.fetch_add(1, std::memory_order_relaxed);
-		// An InMainRenderers view's member (the first person's: kSetFirstPerson alone, no world view registers it, its root hidden there):
-		// its passes into the view's accumulators and into the main views' (the first person's RenderDepth block culls into the
-		// Z-prepass's) are the view's epochs' while they draw this frame (SetViewCovered); every fade of the skeleton is the engine's
-		// root's (alpha 1).
+		// An InMainRenderers view's member, such as the first person's. Its passes into the view's accumulators and into the main views'
+		// belong to the view's epochs while they draw.
 		for (std::uint32_t i = 0; i < views.mainRendererCount; ++i) {
 			const auto v = static_cast<std::size_t>(views.mainRendererViews[i]);
 			const std::uint8_t phase = views.views[v].phase;
@@ -310,8 +294,7 @@ namespace DCLF
 		}
 		if (!(phases & kSetMain))
 			return false;
-		// Every pass of a member, a fade's and a LOD cross-fade's hint-10 copy of the old level included: DCLF draws them (the
-		// draw's alpha takes its root's FadeStateCS fade, and BuildDraws adds the copy partitions while the root crosses).
+		// Every pass of a member, fade and LOD cross-fade copies included. DCLF draws them all.
 		mainWithheld.fetch_add(1, std::memory_order_relaxed);
 		NotePending(*set, a_pass->geometry, kSetMain);
 		if (!(set->PhasesOf(a_pass->geometry) & kSetMain) && LitPass(a_pass)) {
@@ -324,8 +307,7 @@ namespace DCLF
 
 	void PassCapture::SetViewRenderers(Api::EngineView a_view, const Api::ViewAccumulators& a_accumulators)
 	{
-		// The view's accumulators (the reflection's: BSCubeMapCamera's two, the faces cull into the first): their batch renderers, their
-		// geometry groups' and their alpha groups', made again whenever any of them changes.
+		// Rebuilt whenever any of the view's renderers changes.
 		auto& view = viewRenderers[static_cast<std::size_t>(a_view)];
 		std::vector<const RE::BSBatchRenderer*> sources;
 		for (std::uint32_t a = 0; a < a_accumulators.count; ++a)
@@ -371,7 +353,7 @@ namespace DCLF
 		for (std::uint32_t i = 0; i < views.ownRendererCount; ++i) {
 			const auto v = static_cast<std::size_t>(views.ownRendererViews[i]);
 			auto& view = viewRenderers[v];
-			// The view's own gates, or a load's hold (every view DCLF draws), before its renderers are read.
+			// The view's own gates, or a load's hold, before its renderers are read.
 			const bool withholding = view.withholdActive.load(std::memory_order_acquire) && ViewCovered(views.ownRendererViews[i]);
 			if (!withholding && !LoadHold::Active())
 				continue;
@@ -382,8 +364,7 @@ namespace DCLF
 				return true;
 			if (!withholding)
 				continue;
-			// A draw family's engine shape (tree LOD's), withheld while the view's faces draw the family. One of a family without faces
-			// (grass) is never a view's: the view's own renderers draw it, and it is no residue of the view's roots.
+			// A draw family's engine shape is withheld while the view's faces draw the family. Families without faces are never a view's.
 			const std::size_t family = EngineShapeFamily(a_pass->geometry);
 			if (family < Extensions::kDrawFamilies && !Extensions::DrawFamilyHasFaces(static_cast<Api::DrawFamily>(family)))
 				return false;
@@ -395,8 +376,7 @@ namespace DCLF
 			const auto set = std::atomic_load(&frameSet);
 			const std::uint8_t phase = views.views[v].phase;
 			if (!set || !(set->drawn & phase) || !HeldPhase(*set, a_pass->geometry, phase)) {
-				// The residue watch: a draw family's engine shape under its faces' root, anything else but the sky under the view root
-				// contributions' roots (the LOD land and objects').
+				// The residue watch counts what the engine still draws under the watched roots.
 				if (const auto watch = view.residueWatch.load(std::memory_order_acquire); watch & (treeLod ? FacesRootBit(family) : views.rootBits))
 					NoteViewResidue(view, a_pass, treeLod);
 				return false;
@@ -480,8 +460,7 @@ namespace DCLF
 			a_mode = it->second;
 			return true;
 		}
-		// A renderer of no published set during the shadow modes' registration: a geometry group's the engine made for this pass. It is
-		// the registering accumulator's view's (covered views only: ShadowViews::PublishRenderers).
+		// A renderer in no published set during the shadow registration is a group the engine just made, so it is the registering accumulator's view's.
 		if (!t_shadowRegistration || !t_registrationAccumulator)
 			return false;
 		const auto accumulators = std::atomic_load(&shadowAccumulators);
@@ -490,7 +469,7 @@ namespace DCLF
 			a_mode = it->second;
 			return true;
 		}
-		// Inside a covered host's focus accumulation: its focus view's, even through an accumulator made inside it.
+		// Inside a covered host's focus accumulation, even through an accumulator made inside it.
 		if (t_focusAccumulationCovered && t_registrationMode >= kFirstShadowMode && t_registrationMode < kFirstShadowMode + kShadowModes) {
 			a_mode = t_registrationMode - kFirstShadowMode;
 			return true;
@@ -520,9 +499,7 @@ namespace DCLF
 	{
 		if (!a_pass || !a_pass->geometry)
 			return false;
-		// A shadow view's renderers (the focus views' among them): the set's casters. A pass into any other renderer
-		// (reflections, cubemaps) is never withheld here; the main camera's are WithholdMain's, an OwnRenderers view's WithholdOwn's.
-		// What the engine registers into a covered focus view, for its observer (Features/Shadows/Local's focus parity: against its target's fade root).
+		// Passes into other renderers, such as reflections, are never withheld here.
 		if (Diagnostics::Armed<Diagnostics::FocusRegistration>())
 			if (const auto focus = std::atomic_load(&focusRenderers); focus && !focus->empty())
 				if (const auto it = focus->find(a_batch); it != focus->end())
@@ -541,8 +518,7 @@ namespace DCLF
 
 	void PassCapture::NoteKept(const RE::BSBatchRenderer* a_batch, const RE::BSRenderPass* a_pass, std::uint8_t a_site, std::uint8_t a_occlusionPhase) const
 	{
-		// The census's per-pass values, read here as the pass registers (the frame's end has neither the pass, a pooled object, nor
-		// these states): whether the reflection faces withhold now (WithholdOwn's own gates).
+		// Read as the pass registers, because the frame's end has neither the pooled pass nor these states.
 		const bool face = OwnViewWithholding();
 		Diagnostics::Notify(Diagnostics::PassKept{ a_batch, a_pass, static_cast<RegistrationCensus::Site>(a_site), face, a_occlusionPhase });
 	}
@@ -550,10 +526,8 @@ namespace DCLF
 	namespace
 	{
 		/**
-		 * @brief The shadow modes' registration (FUN_1414b2a60, SE 99932 / AE 106576; the Z-prepass's 0xC too): the one function that builds
-		 * a caster's shadow-map passes (the property's GetRenderPasses_ShadowMapOrMask, vtable +0x158) and hands them to the accumulator's
-		 * renderers. Every hook it reaches (RegisterPass, its direct group insertions) runs inside it on this thread, so the accumulator's
-		 * render mode says the pass is a shadow view's, whatever renderer sets DCLF published (a load's hold withholds by it).
+		 * @brief The shadow modes' registration (FUN_1414b2a60, SE 99932 / AE 106576), the one function that builds a caster's shadow-map passes.
+		 * Every hook it reaches runs inside it on this thread, so the accumulator's render mode marks the pass as a shadow view's.
 		 */
 		struct ShadowRegistration
 		{
@@ -581,8 +555,7 @@ namespace DCLF
 		static REL::Relocation<RE::BSGraphics::BSShaderAccumulator**> mainAccumulator{ REL::Offset(Engine::Address::kMainAccumulator) };
 		if (HasRenderer(*depthAccumulator, a_batch) || HasRenderer(*mainAccumulator, a_batch))
 			return true;
-		// The InMainRenderers views' accumulators as RefreshMainRenderers last stored them (the first person's: an engine global, kept for
-		// the session). An OwnRenderers view's (a cube camera's) may not outlive its set, so it is not read here.
+		// The InMainRenderers accumulators are engine globals kept for the session. An OwnRenderers view's may not outlive its set, so it is not read here.
 		const auto& views = Extensions::Views();
 		for (std::uint32_t i = 0; i < views.mainRendererCount; ++i) {
 			const auto& accumulators = viewRenderers[static_cast<std::size_t>(views.mainRendererViews[i])].accumulators;
@@ -595,7 +568,7 @@ namespace DCLF
 
 	namespace
 	{
-		/** @brief The nearest ancestor of a_object with a reference: its form ID and base object's name, or empty. */
+		/** @brief The nearest ancestor with a reference: its form ID and base object's name, or empty. */
 		std::string OwnerOf(const RE::NiAVObject* a_object)
 		{
 			std::uint32_t depth = 0;
@@ -608,7 +581,7 @@ namespace DCLF
 			return {};
 		}
 
-		/** @brief Whether a_object or an ancestor is app-culled (kHidden). */
+		/** @brief Whether a_object or an ancestor is app-culled. */
 		bool HiddenChain(const RE::NiAVObject* a_object)
 		{
 			std::uint32_t depth = 0;
@@ -719,8 +692,7 @@ namespace DCLF
 
 	void PassCapture::KeepForEngine(const RE::BSBatchRenderer* a_batch, const RE::BSRenderPass* a_pass) const
 	{
-		// Counted for the log outside loads (LoadHold.h): what DCLF still hands the engine of its classes, with a sample by geometry: its
-		// view, its owner and whether it is hidden or skinned, read while the engine registers it.
+		// Counted outside loads, with a sample by geometry read while the engine registers it.
 		if (a_pass && a_pass->geometry && !t_menuScenes && !bypassed.load(std::memory_order_acquire) && DclfClass(a_pass)) {
 			dclfKept.fetch_add(1, std::memory_order_relaxed);
 			if (LitPass(a_pass) && (IsMainRenderer(a_batch) || (!t_shadowRegistration && MainRendererNow(a_batch))) && EngineLitDrawsVoid()) {
@@ -743,7 +715,6 @@ namespace DCLF
 				                                                                            std::string("another view");
 				if (t_shadowRegistration && t_registrationAccumulator && !ShadowModeOfBatch(a_batch, mode) && uncoveredAccumulators.size() < kKeptSamples)
 					uncoveredAccumulators.insert(t_registrationAccumulator);
-				// Another view: an OwnRenderers view's renderer (its name, and whether it withholds now), else one DCLF knows nothing of.
 				if (sample.where == "another view") {
 					const auto& views = Extensions::Views();
 					for (std::uint32_t i = 0; i < views.ownRendererCount; ++i) {
@@ -774,8 +745,7 @@ namespace DCLF
 			if (it != keptSamples.end())
 				++it->second.passes;
 		}
-		// Nothing is vouched for here: members and waiting objects are withheld (WithholdMain, WithholdOwn, Withhold, the occlusion maps'),
-		// and so is everything of them during a load's hold. The sky's precipitation is Features/Precipitation's (CS_ORG_PRECIPITATION).
+		// Nothing is vouched for here. Members, waiting objects and everything during a load's hold are withheld elsewhere.
 	}
 
 	namespace
@@ -802,9 +772,8 @@ namespace DCLF
 		}
 
 		/**
-		 * @brief Texture streaming: every pass of a lit object whose diffuse or normal map has no base window yet stays off the engine's lists
-		 * until it has one, and its load is asked for: its depth and shadow passes too (Utility's, not Lighting's), or its depth without its colour
-		 * would show the empty G-buffer. Only for a pass the engine is registering, never a sweep; the rarer slots wait in the bind (the safety net).
+		 * @brief Texture streaming. A lit object's passes stay off the engine's lists until its diffuse or normal map has a base window,
+		 * depth and shadow passes included, or its depth would show an empty G-buffer.
 		 */
 		bool WaitsForBaseMips(const RE::BSRenderPass* a_pass)
 		{
@@ -828,8 +797,7 @@ namespace DCLF
 				func(a_this, a_pass, a_techniqueID);
 				return;
 			}
-			// Withholding is the whole of ownership: the pass is built, lit and shadowed as the engine would - only the batch
-			// renderer never receives it, so the native loop has nothing to draw. Record notes it for the observers.
+			// Withholding is the whole of ownership. The pass is built as the engine would, but the batch renderer never receives it.
 			bool withheld = capture.WithholdMain(a_this, a_pass) || capture.WithholdOwn(a_this, a_pass) || capture.Withhold(a_this, a_pass);
 			if (!withheld && WaitsForBaseMips(a_pass)) {
 				capture.baseMipsWithheld.fetch_add(1, std::memory_order_relaxed);
@@ -849,10 +817,8 @@ namespace DCLF
 	};
 
 	/**
-	 * @brief The shadow modes' registration inserting an accumulation hint 8 pass (a volumetric-only caster)
-	 * into batch group 15: AE FUN_1414b2a60's direct call to FUN_1414f5090(batch, pass, 15, 0) at +0xFF. The
-	 * pass is withheld when the batch renderer is a shadow view's and the geometry is in the frame's set with the phase of
-	 * that view's render mode (SetPhaseOfMode).
+	 * @brief The shadow registration's direct insertion of a volumetric-only caster (hint 8) into batch group 15 (FUN_1414b2a60 +0xFF).
+	 * Withheld when the renderer is a shadow view's and the geometry has that view's phase in the frame's set.
 	 */
 	bool PassCapture::WithholdAtGroup(const RE::BSBatchRenderer* a_batch, const RE::BSRenderPass* a_pass, std::atomic<std::uint32_t>& a_counter)
 	{
@@ -889,10 +855,8 @@ namespace DCLF
 	};
 
 	/**
-	 * @brief The same registration's other direct insertions (FUN_1414b2a60): accumulation hint 11 into batch
-	 * group 9 (+0xC9), hint 7 into group 1 (+0xDB) and hint 3, a decal-flagged caster such as an NPC's face
-	 * part, into group 4 (+0xED). None of them reaches RegisterPass, so a member registered with one of these hints is
-	 * withheld here.
+	 * @brief The same function's other direct insertions: hint 11 into group 9, hint 7 into group 1, and hint 3 into group 4.
+	 * None reaches RegisterPass, so members with these hints are withheld here.
 	 */
 	template <std::uint32_t Hint>
 	struct PassCapture::DirectGroupHook
@@ -915,11 +879,8 @@ namespace DCLF
 	};
 
 	/**
-	 * @brief The main modes' registration (FUN_1414b2330, render modes 0-11: the main camera's accumulator among them) inserting a
-	 * pass straight into a geometry group by its accumulation hint (FUN_1414f5090(batch, pass, group, flag)): hints 2-7, 9, 11,
-	 * 13-18, and a multi-index shape's layer (hint 12, group 2). None of them reaches RegisterPass, so a member's pass with one of
-	 * these hints (terrain LOD's 6 into group 0, object LOD's 7 into group 1) is withheld here. The Z-prepass's accumulator
-	 * (render mode 0xC) registers through the shadow modes' function (FUN_1414b2a60), whose insertions are the hooks above.
+	 * @brief The main modes' registration (FUN_1414b2330) inserting straight into a geometry group by hint. None reaches RegisterPass,
+	 * so members with these hints are withheld here. The Z-prepass registers through FUN_1414b2a60 instead.
 	 */
 	template <std::uint32_t Group>
 	struct PassCapture::MainGroupHook
@@ -947,7 +908,7 @@ namespace DCLF
 		static inline REL::Relocation<decltype(thunk)> func;
 	};
 
-	/** @brief The same registration's hint 1, into a pass list of the batch renderer (FUN_1414f50b0(batch, pass, list)). */
+	/** @brief The same registration's hint 1, into a pass list (FUN_1414f50b0). */
 	struct PassCapture::MainListHook
 	{
 		static void thunk(RE::BSBatchRenderer* a_batch, RE::BSRenderPass* a_pass, void* a_list)
@@ -973,9 +934,8 @@ namespace DCLF
 	};
 
 	/**
-	 * @brief The occlusion maps' registration (FUN_1414b2c20, render mode 0x1C: Precipitation::SetupMask's accumulator) inserting a
-	 * pass into geometry group 14 (FUN_1414f5090(batch, pass, 14), its one insertion): a member of the map's occluder phase is
-	 * withheld, DCLF drawing it into the map (its shadow epoch, FrameDriver::AfterShadowMaps); the engine draws every other occluder.
+	 * @brief The occlusion maps' registration (FUN_1414b2c20, render mode 0x1C) inserting into group 14. A member of the map's
+	 * occluder phase is withheld, since DCLF draws it into the map.
 	 */
 	struct PassCapture::OcclusionGroupHook
 	{
@@ -994,8 +954,7 @@ namespace DCLF
 				}
 			if (Diagnostics::Armed<Diagnostics::PassKept>() && !capture.bypassed.load(std::memory_order_acquire))
 				capture.NoteKept(a_batch, a_pass, Census(RegistrationCensus::Site::Occlusion), phase);
-			// Every occluder DCLF does not draw into the map and does not wait to: all of them while the map is not DCLF's (phase 0, the
-			// engine draws it whole).
+			// The engine draws every other occluder, and all of them when the map is not DCLF's.
 			capture.KeepForEngine(a_batch, a_pass);
 			func(a_batch, a_pass, a_group, a_arg);
 		}
@@ -1004,8 +963,7 @@ namespace DCLF
 
 	namespace
 	{
-		// The main modes' registration's (FUN_1414b2330) group insertions and its hint 1 list insertion, by call site.
-		// (SE FUN_1412ca300, the same code; the occlusion maps' FUN_1414b2c20 is SE FUN_1412cab70.)
+		// The main modes' registration's insertions, by call site. SE FUN_1412ca300 is the same code.
 		constexpr Engine::Offset kInsertGroup{ { 107668 }, { 100872 } }, kInsertList{ { 107669 }, { 100873 } };
 		constexpr std::array<std::pair<Engine::Offset, Engine::Offset>, 16> kMainGroupSites{ {
 			{ Engine::Offset{ { 106570, 0x172 }, { 99926, 0x172 } }, kInsertGroup }, { Engine::Offset{ { 106570, 0x18d }, { 99926, 0x18d } }, kInsertGroup },
@@ -1024,15 +982,14 @@ namespace DCLF
 			stl::write_thunk_call<Hook>(REL::Offset(kMainGroupSites[a_site].first).address());
 		}
 
-		// The registration's (FUN_1414b2a60) group insertions: the volumetric copy's, and the direct hints 11, 7 and 3.
-		// (SE FUN_1412ca9c0, the same code.)
+		// FUN_1414b2a60's group insertions. SE FUN_1412ca9c0 is the same code.
 		constexpr Engine::Offset kVolumetricGroupCall{ { 106576, 0xff }, { 99932, 0xff } };
 		constexpr Engine::Offset kDirectGroupCalls[3] = { { { 106576, 0xc9 }, { 99932, 0xc9 } }, { { 106576, 0xdb }, { 99932, 0xdb } }, { { 106576, 0xed }, { 99932, 0xed } } };
 	}
 
 	void PassCapture::Preflight()
 	{
-		// Not chained: a withheld pass skips what the call or slot holds, another plugin's hook with it. So each needs the engine's own.
+		// Not chained, since a withheld pass skips what the call or slot holds. So each must still be the engine's own.
 		HookSites::RequireSlot("BSBatchRenderer::RegisterPass", REL::Relocation<std::uintptr_t>{ RE::VTABLE_BSBatchRenderer[0] }.address(), 0x2);
 		const auto group = REL::Offset(kInsertGroup).address();
 		HookSites::RequireCallTo("the shadow registration's volumetric group insertion", REL::Offset(kVolumetricGroupCall).address(), group);
@@ -1054,14 +1011,12 @@ namespace DCLF
 	{
 		if (installed)
 			return;
-		// Preflight checked the slot and the shadow registration's insertions before any hook was written.
 		stl::write_vfunc<0x2, Hook>(RE::VTABLE_BSBatchRenderer[0]);
 		stl::write_thunk_call<VolumetricGroupHook>(REL::Offset(kVolumetricGroupCall).address());
 		stl::write_thunk_call<DirectGroupHook<11>>(REL::Offset(kDirectGroupCalls[0]).address());
 		stl::write_thunk_call<DirectGroupHook<7>>(REL::Offset(kDirectGroupCalls[1]).address());
 		stl::write_thunk_call<DirectGroupHook<3>>(REL::Offset(kDirectGroupCalls[2]).address());
-		// The main modes' group insertions (kMainGroupSites, in order), by the group each inserts into, and the hint 1 list insertion.
-		// PostPostLoad checked every site against its callee (SitesMissing) before any hook was written.
+		// SitesMissing checked every site against its callee before any hook was written.
 		if (!SitesMissing().empty())
 			stl::report_and_fail("Drawcall Limit Fix: the main registration's group insertions changed after their sites were checked");
 		InstallMainGroup<MainGroupHook<3>>(0);
@@ -1080,7 +1035,7 @@ namespace DCLF
 		InstallMainGroup<MainGroupHook<2>>(13);
 		InstallMainGroup<MainListHook>(14);
 		InstallMainGroup<OcclusionGroupHook>(15);
-		// The shadow registration's scope (a caster's passes into any shadow view's renderer): what a load's hold withholds by.
+		// The shadow registration's scope, which a load's hold withholds by.
 		stl::detour_thunk<ShadowRegistration>(REL::RelocationID(99932, 106576));
 		if (!ShadowRegistration::func.address())
 			logger::warn("[DCLF] pass capture: the shadow registration's detour did not attach; a load's hold withholds only the shadow views DCLF published");

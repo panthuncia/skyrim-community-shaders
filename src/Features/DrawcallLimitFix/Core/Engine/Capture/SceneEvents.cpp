@@ -1,5 +1,4 @@
-// The scene's events (subscribed on the render thread at PostPostLoad): SceneWriterFramework's engine call hooks, patched stores and
-// movers (SceneWriter.h), each pushing the mirror's update and the scene pass's event on the writer's thread (SceneEvents.h).
+// The scene's event handlers. Each SceneWriterFramework hook pushes the mirror's update and the scene pass's event on the writer's thread.
 
 #include "Features/DrawcallLimitFix/Core/Engine/Capture/SceneEvents.h"
 #include "Features/DrawcallLimitFix/Core/Engine/Capture/SkinPartitionWatch.h"
@@ -17,8 +16,7 @@
 
 namespace DCLF::Scene
 {
-	// The engine writers are SceneWriterFramework's call hooks (SWF_EVENT_CALL(SWF_HOOK_*)): each handler below is one, taking the
-	// values it compares on PRE into its scratch and pushing on POST, on the writer's thread.
+	// Each handler takes the values it compares into scratch on PRE and pushes on POST, on the writer's thread.
 	namespace
 	{
 		using SceneWriter::Arg;
@@ -27,8 +25,7 @@ namespace DCLF::Scene
 		std::uintptr_t Bits(float a_value) { return std::bit_cast<std::uint32_t>(a_value); }
 		float FloatOf(std::uintptr_t a_word) { return std::bit_cast<float>(static_cast<std::uint32_t>(a_word)); }
 
-		// BSFadeNode::OnVisible (slot 0x34) and FUN_14147a160 (node, fadeAmount, camera), the fade state machine: currentFade and the
-		// door state (+0x154) for the mirror.
+		// BSFadeNode::OnVisible (slot 0x34) and FUN_14147a160, the fade state machine: currentFade and the door state (+0x154).
 		void OnFadeValues(const SWF_EventHeader* a_event, std::uintptr_t* a_scratch, void*)
 		{
 			auto* fade = Arg<RE::BSFadeNode*>(a_event, 0);
@@ -43,12 +40,8 @@ namespace DCLF::Scene
 				PushNodeUpdate(fade, SceneCapture::NodeRecord::kFadeCurrent | SceneCapture::NodeRecord::kFadeDoor);
 		}
 
-		// Actor::SetAlpha's fadeAmount writes are Features/Actors' (its early hooks; the fade amounts channel's push, Features/Fades).
 
-		/**
-		 * @brief FUN_14147a430 (node, level): the only writer of the fade node's LOD level (+0x152 & 0xF, the skin partitions' row);
-		 * called by the fade update (FUN_14147a160), BSLeafAnimNode::OnVisible and the feedback's fade service.
-		 */
+		/** @brief FUN_14147a430 (node, level), the only writer of the fade node's LOD level (+0x152 & 0xF). */
 		void OnLodLevel(const SWF_EventHeader* a_event, std::uintptr_t* a_scratch, void*)
 		{
 			auto* fade = Arg<RE::BSFadeNode*>(a_event, 0);
@@ -59,7 +52,7 @@ namespace DCLF::Scene
 				PushNodeUpdate(fade, SceneCapture::NodeRecord::kFadeLevel);
 		}
 
-		// Sky::SetColor (0x14040d970): a weather-blend colour written in place; external emittance may point at it.
+		// Sky::SetColor (0x14040d970) writes a weather-blend colour in place, and external emittance may point at it.
 		void OnSkySetColor(const SWF_EventHeader* a_event, std::uintptr_t* a_scratch, void*)
 		{
 			auto* colour = Arg<RE::NiColor*>(a_event, 1);
@@ -72,8 +65,7 @@ namespace DCLF::Scene
 				emittanceEvents.Push(colour);
 		}
 
-		// FUN_141480fc0 (object, &colour): points the external emittance of the Lighting and material port properties under the object
-		// at a colour. The colour is a classification input (ListDependents), so a re-point is a property event.
+		// FUN_141480fc0 (object, &colour) points external emittance at a colour. The colour is a classification input, so this is a property event.
 		void OnSetExternalEmittance(const SWF_EventHeader* a_event, std::uintptr_t* a_scratch, void*)
 		{
 			if (IsPre(a_event)) {
@@ -81,8 +73,7 @@ namespace DCLF::Scene
 				auto* geometry = object ? object->AsGeometry() : nullptr;
 				auto* shaderProperty = geometry ? geometry->GetGeometryRuntimeData().shaderProperty.get() : nullptr;
 				auto* property = shaderProperty ? netimmerse_cast<RE::BSLightingShaderProperty*>(shaderProperty) : nullptr;
-				// A port property's emissive (the Effect port's emittanceColor, its PropertyColor: the mirror's emissive): a re-point is an
-				// event too. The port's (its exact RTTI, as the capture's), read through its emissiveOf.
+				// A port property's emissive re-point is an event too.
 				const std::uint8_t port = shaderProperty && !property ? Extensions::PortOfRtti(shaderProperty->GetRTTI()) : std::uint8_t{ 0 };
 				const auto emissiveOf = port ? Extensions::MaterialPorts()[port].emissiveOf : nullptr;
 				a_scratch[0] = reinterpret_cast<std::uintptr_t>(property);
@@ -106,9 +97,8 @@ namespace DCLF::Scene
 			}
 		}
 
-		// FUN_1402d1280 (cell, reference) and FUN_1402d5090 (cell, reference, flag): a reference's 3D placed in its cell. They write
-		// the LOD type inline (`and`/`or` at +0x153: 10 if flagged, 6 if distant) around the range (FUN_14021f200) and snap only on
-		// one branch (save-load and sky cell skip it): the statics after the call.
+		// FUN_1402d1280 and FUN_1402d5090 place a reference's 3D in its cell. They write the LOD type inline at +0x153 and snap only on
+		// one branch, so read the statics after the call.
 		void OnCellPlaceReference(const SWF_EventHeader* a_event, std::uintptr_t*, void*)
 		{
 			auto* reference = Arg<RE::TESObjectREFR*>(a_event, 1);
@@ -119,16 +109,14 @@ namespace DCLF::Scene
 			}
 		}
 
-		// FUN_140b44490 (rigid body, motion type, ...): the motion rebuilt in place (from hkpRigidBody::setMotionType, FUN_140b30700,
-		// directly or deferred while the world is locked). Every motion type path ends here (SetMotionType, animation graph, ragdolls,
-		// Havok). The owning node (TESHavokUtilities::FindCollidableObject) after the call.
+		// FUN_140b44490 rebuilds the rigid body's motion in place. Every motion type path ends here.
 		void OnRigidBodyMotionType(const SWF_EventHeader* a_event, std::uintptr_t*, void*)
 		{
 			if (auto* body = Arg<RE::hkpRigidBody*>(a_event, 0))
 				PushNodeUpdate(RE::TESHavokUtilities::FindCollidableObject(*body->GetCollidable()), SceneCapture::NodeRecord::kBody);
 		}
 
-		// NiObjectNET::RemoveController (0x140d269a0): PrependController's other half.
+		// NiObjectNET::RemoveController (0x140d269a0).
 		void OnRemoveController(const SWF_EventHeader* a_event, std::uintptr_t*, void*)
 		{
 			auto* target = Arg<RE::NiObjectNET*>(a_event, 0);
@@ -164,8 +152,7 @@ namespace DCLF::Scene
 			FrameValueMoves::PushNode(collision->sceneObject);
 		}
 
-		// BSDismemberSkinInstance::UpdateDismemberPartion (0x14021a530): a partition's editorVisible, its only writer after load. The
-		// skin instance knows no geometry: the mirror finds it by the skin.
+		// BSDismemberSkinInstance::UpdateDismemberPartion (0x14021a530), the only writer of editorVisible after load. The mirror finds the geometry by its skin.
 		void PushSkinShown(const RE::BSDismemberSkinInstance* a_skin)
 		{
 			if (!a_skin)
@@ -184,8 +171,7 @@ namespace DCLF::Scene
 			PushSkinShown(Arg<RE::BSDismemberSkinInstance*>(a_event, 0));
 		}
 
-		// FUN_140218200 (biped, ?, skin, slot, flag): an armor's partitions shown for a biped slot, stored inline (job thread, the
-		// actor's 3D update). The skin's partitions after the call.
+		// FUN_140218200 stores an armor's shown partitions inline, on a job thread.
 		void OnBipedDismemberPartitions(const SWF_EventHeader* a_event, std::uintptr_t*, void*)
 		{
 			PushSkinShown(Arg<RE::BSDismemberSkinInstance*>(a_event, 2));
@@ -207,16 +193,14 @@ namespace DCLF::Scene
 			}
 		}
 
-		// FUN_1402ad800 (land): a TESObjectLAND's landscape properties stored into its four quads' geometry (+0x128) after their
-		// attach. Each quad's leaf after the call (a swap, with the new property's record).
+		// FUN_1402ad800 stores a land's landscape properties into its four quads (+0x128) after their attach.
 		void OnLandSetupProperties(const SWF_EventHeader* a_event, std::uintptr_t*, void*)
 		{
 			ForEachLandQuad(Arg<RE::TESObjectLAND*>(a_event, 0), [](RE::BSGeometry& a_geometry) { PushLeafUpdate(a_geometry); });
 		}
 
-		// FUN_1402ad0e0 (land): after the cell's attach, each quad's landscape material takes LOD blend textures (+0xF8, +0x100) and
-		// landBlendParams (+0x108). Each quad's material (a write: its record takes the LOD blend textures, MTLandLODBlend's t13 and t15,
-		// which it otherwise holds null from the attach's capture) and property after the call.
+		// FUN_1402ad0e0 gives each quad's material its LOD blend textures (+0xF8, +0x100) and landBlendParams (+0x108) after the cell's
+		// attach. The record otherwise holds null for t13 and t15.
 		void OnLandBlendParams(const SWF_EventHeader* a_event, std::uintptr_t*, void*)
 		{
 			ForEachLandQuad(Arg<RE::TESObjectLAND*>(a_event, 0), [](RE::BSGeometry& a_geometry) {
@@ -233,29 +217,22 @@ namespace DCLF::Scene
 			return object ? object->AsGeometry() : nullptr;
 		}
 
-		// FUN_1414abd10 (object, visitor {params, colour, snow}): projected UV on every Lighting or grass property under the object
-		// (recursing through the entry): kProjectedUV and kSnow via SetFlags, projectedUVParams and projectedUVColor inline. The
-		// property after the call.
+		// FUN_1414abd10 sets projected UV flags and params inline on every Lighting or grass property under the object.
 		void OnPropertiesProjectedUV(const SWF_EventHeader* a_event, std::uintptr_t*, void*)
 		{
 			if (auto* geometry = GeometryArg(a_event, 0))
 				PushPropertyUpdate(geometry->GetGeometryRuntimeData().shaderProperty.get(), SceneCapture::PropertyRecord::kProjected);
 		}
 
-		// BSGeometry::AttachProperty (0x140267cf0, geometry, alpha): the alpha property (+0x120), set after attach (object LOD's
-		// blocks). The leaf after the call.
+		// BSGeometry::AttachProperty (0x140267cf0) sets the alpha property (+0x120) after attach, as object LOD blocks do.
 		void OnGeometryAttachAlpha(const SWF_EventHeader* a_event, std::uintptr_t*, void*)
 		{
 			if (auto* geometry = Arg<RE::BSGeometry*>(a_event, 0))
 				PushLeafUpdate(*geometry);
 		}
 
-		// FUN_1414ab770 (object, visitor {predicate, threshold}): the alpha test threshold (+0x32) of admitted geometries under the
-		// object, inline: an actor's or effect's fade (job threads, every frame of it). Per geometry after the call. Also FUN_1401e95a0
-		// (object, harvested), the same walk: a flora's harvested look, each alpha's threshold swapped between the unharvested and
-		// harvested values (the harvest; the harvestable 3D's setup, after the 3D's capture).
-		// A changed threshold is a structural event too: the alpha's dependents are joined again (their static flags carry it; a static
-		// flora is never rewritten otherwise). An actor's fade writes the same value most frames: no event then.
+		// FUN_1414ab770 writes the alpha test threshold (+0x32) inline every frame of a fade, and FUN_1401e95a0 swaps it for harvested flora.
+		// A changed threshold is a structural event, since static flora is never rewritten otherwise. Unchanged values push nothing.
 		void OnAlphasSetThreshold(const SWF_EventHeader* a_event, std::uintptr_t* a_scratch, void*)
 		{
 			auto* geometry = GeometryArg(a_event, 0);
@@ -272,8 +249,7 @@ namespace DCLF::Scene
 			PushAlphaUpdate(alpha, SceneCapture::AlphaRecord::kThreshold);
 		}
 
-		// FUN_1414ab580 (object, visitor {flag, hide}): weapon blood on flagged geometries under the object: hidden bit, kWeaponBlood
-		// (SetFlags), alpha blend bits cleared inline (& 0xFE01). Alpha flags and hidden bit after the call, per geometry.
+		// FUN_1414ab580 sets weapon blood: the hidden bit, kWeaponBlood, and alpha blend bits cleared inline (& 0xFE01).
 		void OnWeaponBloodGeometry(const SWF_EventHeader* a_event, std::uintptr_t*, void*)
 		{
 			if (auto* geometry = GeometryArg(a_event, 0)) {
@@ -285,8 +261,7 @@ namespace DCLF::Scene
 			}
 		}
 
-		// FUN_140e880e0 (visit): FUN_140e874d0's walk callback releasing a node's collision object (+0x40) as an equipped item loses
-		// physics; the node is at visit +0x10. The body after the call.
+		// FUN_140e880e0 releases a node's collision object (+0x40) as an equipped item loses physics. The node is at visit +0x10.
 		void OnReleaseCollisionObject(const SWF_EventHeader* a_event, std::uintptr_t* a_scratch, void*)
 		{
 			if (IsPre(a_event)) {
@@ -296,18 +271,14 @@ namespace DCLF::Scene
 				PushNodeUpdate(reinterpret_cast<RE::NiAVObject*>(a_scratch[0]), SceneCapture::NodeRecord::kBody);
 		}
 
-		// bhkWorld::InitHavok (0x140e86ad0: world, from, to): moves a collision object from `from` to `to`, SetCollisionObject on `to`
-		// and `from`'s +0x40 cleared inline (0x140e86fb7, 0x140e870c6; Hazard::InitHavok's, a projectile's or a quiver's). Both bodies
-		// after the call.
+		// bhkWorld::InitHavok (0x140e86ad0) moves a collision object between nodes and clears the source's +0x40 inline.
 		void OnHavokInit(const SWF_EventHeader* a_event, std::uintptr_t*, void*)
 		{
 			PushNodeUpdate(Arg<RE::NiAVObject*>(a_event, 1), SceneCapture::NodeRecord::kBody);
 			PushNodeUpdate(Arg<RE::NiAVObject*>(a_event, 2), SceneCapture::NodeRecord::kBody);
 		}
 
-		// The reference's 3D's LOD type (+0x153 & 0xF) after one of its inline writers: Papyrus Disable with a fade (FUN_140a3db90: type 9,
-		// the fade out before the disable; a critter's despawn) and the script command Enable (0x14034c9f0: a type of 9 reset to the
-		// model's).
+		// The 3D's LOD type (+0x153 & 0xF) after an inline writer: Papyrus Disable with a fade (FUN_140a3db90, type 9) or Enable (0x14034c9f0).
 		void PushReferenceFadeType(RE::TESObjectREFR* a_reference)
 		{
 			auto* root = a_reference ? a_reference->Get3D() : nullptr;
@@ -323,15 +294,13 @@ namespace DCLF::Scene
 			PushReferenceFadeType(Arg<RE::TESObjectREFR*>(a_event, 2));
 		}
 
-		// FUN_140e8bd40 (node, collision object): NiAVObject::SetCollisionObject (+0x40), from bhkWorld::InitHavok and FUN_140e8c600
-		// after the world attach (a loader's clutter gets its body after the capture). The body after the call.
+		// FUN_140e8bd40, NiAVObject::SetCollisionObject (+0x40). A loader's clutter gets its body after the capture.
 		void OnSetCollisionObject(const SWF_EventHeader* a_event, std::uintptr_t*, void*)
 		{
 			PushNodeUpdate(Arg<RE::NiAVObject*>(a_event, 0), SceneCapture::NodeRecord::kBody);
 		}
 
-		// FUN_14147c1e0 (object, flag, set, Lighting only): one shader flag on every property under the object, inline (not SetFlags):
-		// AIProcess::Update3DModel_Impl's kCharacterLighting, the sky, explosions. Per geometry after the call.
+		// FUN_14147c1e0 sets one shader flag on every property under the object, inline rather than through SetFlags.
 		void OnPropertiesSetFlag(const SWF_EventHeader* a_event, std::uintptr_t*, void*)
 		{
 			if (auto* geometry = GeometryArg(a_event, 0))
@@ -339,24 +308,21 @@ namespace DCLF::Scene
 					SceneCapture::PropertyRecord::kFlags | SceneCapture::PropertyRecord::kMaterialOther);
 		}
 
-		// FUN_14147c690 (&fadeNode, object): the fade node (+0x60) of every shader property under the object, from FUN_14147bf70. Per
-		// geometry after the call.
+		// FUN_14147c690 sets the fade node (+0x60) of every shader property under the object.
 		void OnPropertiesSetFadeNode(const SWF_EventHeader* a_event, std::uintptr_t*, void*)
 		{
-			// A leaf update, so the entry holds the new fade node its tree and fade-root owners copy from (HoldProperties); a property
-			// update carries no reference, and an entry attached before the fade node was set would leave its root unlisted.
+			// A leaf update, not a property update, because only the leaf carries a reference. Otherwise an entry attached before the fade node was set would leave its root unlisted.
 			if (auto* geometry = GeometryArg(a_event, 1))
 				PushLeafUpdate(*geometry);
 		}
 
-		// FUN_14147a9b0 (node, near, far): the fade range's only writer (+0x128, +0x12C; near clamped to a minimum, far to twice it),
-		// from the attach (FUN_14021f200, from the radius) and an FX path (FUN_1407cfba0).
+		// FUN_14147a9b0 is the fade range's only writer (+0x128, +0x12C).
 		void OnFadeSetRange(const SWF_EventHeader* a_event, std::uintptr_t*, void*)
 		{
 			PushNodeUpdate(Arg<RE::BSFadeNode*>(a_event, 0), SceneCapture::NodeRecord::kFadeNear | SceneCapture::NodeRecord::kFadeFar);
 		}
 
-		// FUN_14147aa00 (node, type): the fade node's LOD type (+0x153 & 0xF), from the model processor and the reference 3D paths.
+		// FUN_14147aa00 sets the fade node's LOD type (+0x153 & 0xF).
 		void OnFadeSetLodType(const SWF_EventHeader* a_event, std::uintptr_t*, void*)
 		{
 			PushNodeUpdate(Arg<RE::BSFadeNode*>(a_event, 0), SceneCapture::NodeRecord::kFadeType);
@@ -372,11 +338,9 @@ namespace DCLF::Scene
 				a_scratch[2] = Bits(property->alpha);
 				return;
 			}
-			// The LOD fades and the alpha left on the property (materialAlpha times the fade, for the last registering camera),
-			// which non-member records shade with (MakeShading).
+			// The LOD fades and the alpha left on the property, which non-member records shade with.
 			if (Bits(property->specularLODFade) != a_scratch[0] || Bits(property->envmapLODFade) != a_scratch[1] || Bits(property->alpha) != a_scratch[2])
 				lodFadeEvents.Push(property);
-			// The alpha's value for the mirror.
 			if (Bits(property->alpha) != a_scratch[2])
 				PushPropertyUpdate(property, SceneCapture::PropertyRecord::kAlphaValue);
 		}
@@ -389,7 +353,7 @@ namespace DCLF::Scene
 				a_scratch[0] = property->flags.underlying();
 			else if (property->flags.underlying() != a_scratch[0]) {
 				PushProperty(property);
-				// The glints follow kVertexLighting (CaptureProperty).
+				// The glints follow kVertexLighting.
 				PushPropertyUpdate(property, SceneCapture::PropertyRecord::kFlags | SceneCapture::PropertyRecord::kMaterialOther);
 			}
 		}
@@ -420,17 +384,14 @@ namespace DCLF::Scene
 			}
 		}
 
-		// MoveEvents' writers (SceneEvents.h), each pushing its key to the scene pass and to FrameValues' producer (FrameValueMoves).
+		// Each move key goes to both the scene pass and FrameValues' producer.
 		void PushMoved(const void* a_key)
 		{
 			PushMove(a_key);
 			FrameValueMoves::PushKey(a_key);
 		}
 
-		// SceneWriterFramework's movers (SWF_EVENT_MOVED), counted under Core's writer slots: the animation graph's placement
-		// (FUN_14066afa0) 0, TESObjectREFR::Update3DPosition 1, a reference's graph animation (FUN_1402f75a0) 5, the cells' update
-		// passes (UpdateSelectedDownwardPass, its reference or the node as the key) 6, a projectile's world update (Projectile::Update3D,
-		// every frame) 9. Slots 2-4 (actor 3D position, sky cell skin, ragdoll) are Features/Actors' reserved writers (its early hooks).
+		// SceneWriterFramework's movers, counted by writer slot. Slots 2-4 are reserved for Features/Actors.
 		void OnMoved(const SWF_EventHeader* a_event, std::uintptr_t*, void*)
 		{
 			const auto& event = *reinterpret_cast<const SWF_MovedEvent*>(a_event);
@@ -440,9 +401,7 @@ namespace DCLF::Scene
 				CountMove(kSlots[event.writer]);
 		}
 
-		// SceneWriterFramework's Write (SWF_EVENT_SCENE_WRITE, a plugin's scene write made through SWF): a property swapped on a geometry,
-		// its leaf again (the record and the new property, with pins); an alpha property's flags, its record. The hidden bit is
-		// Features/HiddenNodes' (a hidden event on its reserved site).
+		// A plugin's scene write made through SWF: a property swapped on a geometry, or an alpha property's flags.
 		void OnSceneWrite(const SWF_EventHeader* a_event, std::uintptr_t*, void*)
 		{
 			const auto& write = *reinterpret_cast<const SWF_SceneWriteEvent*>(a_event);
@@ -455,7 +414,7 @@ namespace DCLF::Scene
 			}
 		}
 
-		// A shader property's reported write: its material captured and its record taken again (the events its hooked writers push).
+		// A shader property's reported write: its material captured and its record taken again.
 		void PushPropertyWritten(RE::BSShaderProperty* a_property, SWF_Fields a_fields)
 		{
 			if (!a_property)
@@ -468,13 +427,12 @@ namespace DCLF::Scene
 			PushPropertyUpdate(a_property, (1u << SceneCapture::PropertyRecord::kFieldCount) - 1);
 		}
 
-		// SWF_EVENT_WRITTEN: a plugin's report of its own direct store (SWF_Api::NotifyWritten; swf.h lists the object each field
-		// names). RaceMenu's NiOverride values (overlay colour, alpha, glow, textures) and body morphs are such stores.
+		// A plugin's report of its own direct store, such as RaceMenu's NiOverride values and body morphs.
 		void OnWritten(const SWF_EventHeader* a_event, std::uintptr_t*, void*)
 		{
 			const auto& written = *reinterpret_cast<const SWF_WrittenEvent*>(a_event);
 			const SWF_Fields fields = written.fields;
-			// A material is no NiObject: told by its vtable, never by a virtual call.
+			// A material is no NiObject, so tell it by its vtable, never by a virtual call.
 			const void* vtable = *static_cast<const void* const*>(written.object);
 			if (Extensions::MaterialClassOf(vtable) || Extensions::PortOfVtable(vtable)) {
 				if (fields & SWF_FIELD_MATERIAL)
@@ -504,7 +462,7 @@ namespace DCLF::Scene
 			}
 		}
 
-		// NiSwitchNode's own child edits (its vtable's implementations of NiNode slots 0x35, 0x37-0x3C).
+		// NiSwitchNode's own child edits (its NiNode slots 0x35, 0x37-0x3C).
 		void OnSwitchStructural(const SWF_EventHeader* a_event, std::uintptr_t*, void*)
 		{
 			PushSwitchStructural(static_cast<RE::NiNode*>(reinterpret_cast<const SWF_NodeEvent*>(a_event)->node));
@@ -558,7 +516,7 @@ namespace DCLF::Scene
 
 namespace DCLF::Extensions
 {
-	// A contributed node's list edit, from the feature's own hooks (Features/Decals' decal array edits): Core/Extensions/NodeCaptures.h.
+	// A contributed node's list edit, from a feature's own hooks.
 	void PushNodeUpdate(const RE::NiAVObject* a_node, std::uint32_t a_fields)
 	{
 		Scene::PushNodeUpdate(a_node, a_fields);
@@ -568,10 +526,8 @@ namespace DCLF::Extensions
 namespace DCLF::Scene
 {
 	/**
-	 * @brief The fade resets (SceneWriterFramework's SWF_EVENT_FADE_RESET, after SWF made the store): currentFade (+0x130) stored inline
-	 * as 0 or 1.0, then flag bit 14 (a frame bit, not mirrored) set or cleared: cell placements (FUN_1402bc1f0, grid controller, main
-	 * thread; FUN_1402bb690, a job, after FUN_1402d5090), the sky cell (FUN_1402b9da0), FUN_1402d1280's no-snap branches,
-	 * Explosion::Load3D and every other store-then-bit-14 site in the image.
+	 * @brief Fade resets, after SWF made the store: currentFade (+0x130) stored inline as 0 or 1, then frame bit 14 set or cleared.
+	 * Covers cell placements, the sky cell, Explosion::Load3D and every other such site.
 	 */
 	void OnFadeReset(const SWF_EventHeader* a_event, std::uintptr_t*, void*)
 	{
@@ -579,12 +535,12 @@ namespace DCLF::Scene
 		PushNodeUpdate(static_cast<RE::NiAVObject*>(event.node), SceneCapture::NodeRecord::kFadeCurrent);
 	}
 
-	/** @brief An engine store changed an NiSwitchNode's index (SWF_EVENT_SWITCH_INDEX, after SWF made the store). */
+	/** @brief An engine store changed an NiSwitchNode's index. */
 	void OnSwitchIndex(const SWF_EventHeader* a_event, std::uintptr_t*, void*)
 	{
 		const auto& event = *reinterpret_cast<const SWF_SwitchIndexEvent*>(a_event);
 		auto* node = static_cast<RE::NiAVObject*>(event.node);
-		// The mirror's value on any thread (no reference taken); the tracking's event on the render thread alone.
+		// The mirror's value is safe on any thread. The tracking event is the render thread's alone.
 		PushNodeUpdate(node, SceneCapture::NodeRecord::kSwitch);
 		PushSwitch(node, event.before, false);
 	}
@@ -604,14 +560,12 @@ namespace DCLF::Scene
 
 	void InstallMoveEvents()
 	{
-		// SceneWriterFramework's movers (OnMoved); without them every mover is placed every frame.
+		// Without SWF's movers every mover is placed every frame.
 		if (!(SceneWriter::Caps() & SWF_CAP_MOVES) || !SceneWriter::Subscribe(SWF_EVENT_MOVED, &OnMoved)) {
 			logger::warn("[DCLF] move events: SceneWriterFramework has no movers (see the [SWF] log lines); every mover is placed every frame");
 			return;
 		}
 		moveEventsInstalled = true;
-		// The actors' 3D position, sky cell skin and ragdoll writers follow at Features/Actors' early hooks (only when these are in);
-		// the line names every writer, as before they moved.
 		logger::info("[DCLF] move events installed (animation, 3D positions, ragdolls, the cells' update passes, projectiles)");
 	}
 
@@ -621,43 +575,33 @@ namespace DCLF::Scene
 		if (installed)
 			return;
 		installed = true;
-		// Every family below is one DrawcallLimitFix::PostPostLoad required (SceneWriter::kRequiredCaps) before any hook was written, so a
-		// refused subscription is SWF contradicting its own capabilities.
+		// PostPostLoad required these capabilities before any hook was written, so a refused subscription means SWF contradicted itself.
 		for (const auto& call : kCalls)
 			if (!SceneWriter::SubscribeCall(call.hook, call.handler, call.phases))
 				stl::report_and_fail(fmt::format("Drawcall Limit Fix: the scene writer framework refused engine call hook {} after reporting it installed", call.hook));
 		lodFadeEventsInstalled = true;
-		// FUN_14147aa20, a fade node's placement snap, is Features/Fades' (its early hooks; the fade snaps channel's source).
-		// Actor::SetAlpha's slot (0xE1) is Features/Actors' (its early hooks); no other hook takes it.
-		// Switch selections are followed by event alone (memberLive, ApplySwitchEvents), and the mirror's currentFade takes the cells'
-		// inline resets: SceneWriterFramework's stores. NiSwitchNode's own child edits are its structural events.
+		// Switch selections are followed by event alone, and currentFade takes the inline resets through SWF's stores.
 		if (!SceneWriter::Subscribe(SWF_EVENT_SWITCH_INDEX, &OnSwitchIndex) || !SceneWriter::Subscribe(SWF_EVENT_FADE_RESET, &OnFadeReset) ||
 			!SceneWriter::Subscribe(SWF_EVENT_SWITCH_STRUCTURAL, &OnSwitchStructural))
 			stl::report_and_fail("Drawcall Limit Fix: the scene writer framework refused the switch or fade-reset subscriptions after reporting them installed");
 		switchEventsInstalled = true;
-		// A plugin's scene writes through SWF (CS's own among them: DrawcallLimitFix::WriteShaderProperty): a provider before ABI minor 2
-		// has none, and every writer then stores itself.
+		// A provider before ABI minor 2 has no scene writes, and every writer stores itself.
 		if (const auto* api = SceneWriter::Api(); api && api->abiMinor >= 2 && !SceneWriter::Subscribe(SWF_EVENT_SCENE_WRITE, &OnSceneWrite))
 			stl::report_and_fail("Drawcall Limit Fix: the scene writer framework refused its scene write events at ABI minor 2");
-		// A plugin's reports of the stores it makes itself (NotifyWritten): every ABI has them.
+		// Every ABI has NotifyWritten reports.
 		if (!SceneWriter::Subscribe(SWF_EVENT_WRITTEN, &OnWritten))
 			stl::report_and_fail("Drawcall Limit Fix: the scene writer framework refused its written events");
 		logger::info("[DCLF] scene events subscribed to SceneWriterFramework ({} engine calls: fades, property flags, materials and material alpha, LOD fades, emittance, Havok node transforms, controllers)",
 			std::size(kCalls));
 		InstallMoveEvents();
-		// RaceMenu's skin partition swaps, which no writer reports: their copies (SkinPartitionWatch.h).
+		// RaceMenu's skin partition swaps, which no writer reports.
 		SkinPartitionWatch::Install();
-		// Actor::SetAlpha and the actors' reserved move writers are Features/Actors' (its early hooks, after the reflection's).
-		// The hidden stores are Features/HiddenNodes' (its early hooks, right after these). Object LOD's segment writers are Features/Lod's
-		// engine channel's source (its early hooks, before tree LOD's and the hidden nodes').
-		// Tree LOD's channel's source is Features/TreeLod's (its early hooks, right after these).
 	}
 }
 
 namespace DCLF::Extensions
 {
-	// The engine side's pushes for the features' engine hooks (Core/Extensions/EngineEvents.h), onto the scene's stack and Core's hidden,
-	// fade amount and move channels.
+	// Pushes for the features' engine hooks, onto the scene's stack and Core's channels.
 
 	void PushStacked(Api::EngineChannelId a_channel, std::uint64_t a_token, std::span<RE::NiAVObject* const> a_pinned, std::span<RE::NiAVObject* const> a_named)
 	{
@@ -675,7 +619,7 @@ namespace DCLF::Extensions
 
 	void PushReservedHidden(const RE::NiAVObject* a_object, std::uint32_t a_site)
 	{
-		// A feature's own stores as events, on its reserved site (past the source's).
+		// A feature's own stores as events, on its reserved site.
 		if (Scene::hiddenEventsInstalled && a_object)
 			Scene::PushHiddenUpdate(a_object, a_site);
 	}
@@ -692,7 +636,7 @@ namespace DCLF::Extensions
 
 	namespace
 	{
-		// The reserved writers' names, copied (Scene::moveWriterNames views them); written on the main thread at PostPostLoad.
+		// Copied, because Scene::moveWriterNames views them. Written on the main thread at PostPostLoad.
 		std::array<std::string, kMoveWriterSlots> reservedMoveWriterNames;
 	}
 

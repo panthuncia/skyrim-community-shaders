@@ -1,4 +1,4 @@
-// DxilStages.h: DCLF's stages on D3D12, read and prepared through the dxcompiler.dll in the process.
+// DCLF's stages on D3D12, read and prepared through the dxcompiler.dll in the process.
 #include "Features/DrawcallLimitFix/Core/Gpu/Pipelines/DxilStages.h"
 
 #include "Features/DrawcallLimitFix/Core/Gpu/Pipelines/DrawPipelines.h"
@@ -24,18 +24,18 @@ namespace DCLF::DxilStages
 {
 	namespace
 	{
-		// CLSID_DxcCompiler and CLSID_DxcUtils, spelled out so no GUID definition is needed (as Utils/DxcShaderStore.cpp).
+		// Spelled out so no GUID definition is needed.
 		constexpr GUID kClsidDxcCompiler = { 0x73e22d93, 0xe6ce, 0x47f3, { 0xb5, 0xbf, 0xf0, 0x66, 0x4f, 0x39, 0xc1, 0xb0 } };
 		constexpr GUID kClsidDxcUtils = { 0x6245d6af, 0x66e0, 0x48fd, { 0x80, 0xb4, 0x4d, 0x27, 0x17, 0x96, 0x74, 0x8c } };
 
-		// The dxcompiler.dll the render graph's compiler loaded: its DxcCreateInstance, or null.
+		// The loaded dxcompiler.dll's DxcCreateInstance, or null.
 		DxcCreateInstanceProc CreateInstance()
 		{
 			const HMODULE dxc = ::GetModuleHandleW(L"dxcompiler.dll");
 			return dxc ? reinterpret_cast<DxcCreateInstanceProc>(::GetProcAddress(dxc, "DxcCreateInstance")) : nullptr;
 		}
 
-		// One utils and one compiler per thread: DXC's objects are not shared between threads.
+		// One utils and one compiler per thread, because DXC's objects are not shared between threads.
 		IDxcUtils* Utils()
 		{
 			thread_local winrt::com_ptr<IDxcUtils> utils;
@@ -99,7 +99,7 @@ namespace DCLF::DxilStages
 				continue;
 			switch (bind.Type) {
 			case D3D_SIT_CBUFFER:
-				// The pass's push block (DCLFFramePush, b191) is push data, as the draw's (b190) is kept for the checks.
+				// The pass's push block is push data. The draw's (b190) is kept for the checks.
 				if (bind.BindPoint == kFramePushBinding)
 					continue;
 				a_out.bindings.push_back({ 0, kBindingShiftB + bind.BindPoint, Kind::ConstantBuffer });
@@ -151,8 +151,8 @@ namespace DCLF::DxilStages
 			                     output.SystemValueType == D3D_NAME_DEPTH_LESS_EQUAL;
 			facts.exportsSampleMask = facts.exportsSampleMask || output.SystemValueType == D3D_NAME_COVERAGE;
 		}
-		// Discards, texture and typed buffer stores and atomics are DXIL operations: found by name in the disassembly. Raw buffer stores
-		// (DeviceStore) are not, as the SPIR-V scan does not count its stores through addresses.
+		// Discards, texture and typed buffer stores and atomics are found by name in the disassembly. Raw buffer stores are not counted,
+		// matching the SPIR-V scan.
 		const DxcBuffer buffer{ a_dxil.data(), a_dxil.size(), 0 };
 		winrt::com_ptr<IDxcResult> result;
 		winrt::com_ptr<IDxcBlobUtf8> text;
@@ -180,7 +180,6 @@ namespace DCLF::DxilStages
 			a_error = "no dxcompiler.dll in the process to preprocess the D3D12 build";
 			return false;
 		}
-		// The frame record's reads first, then the build's source.
 		std::string source = "#include \"Common/DCLFFrameRecord.hlsli\"\n";
 		source.append(reinterpret_cast<const char*>(a_request.source.data()), a_request.source.size());
 		std::vector<std::wstring> arguments = { L"-P", L"-E", a_request.entryPoint, L"-T", a_request.target, L"-HV",
@@ -231,7 +230,7 @@ namespace DCLF::DxilStages
 			return false;
 		}
 		a_storage = std::move(rewritten.source);
-		// CS_D3D12_SOURCE_DUMP=<dir>: the first rewritten sources, to compile and inspect offline.
+		// CS_D3D12_SOURCE_DUMP=<dir> dumps the first rewritten sources to inspect offline.
 		static const std::string dumpDirectory = [] {
 			char value[MAX_PATH]{};
 			const DWORD length = ::GetEnvironmentVariableA("CS_D3D12_SOURCE_DUMP", value, sizeof(value));
@@ -246,7 +245,7 @@ namespace DCLF::DxilStages
 				std::ofstream(std::filesystem::path(dumpDirectory) / std::format("{:02}_{}.hlsl", index, options.pixel ? "ps" : "vs"), std::ios::binary) << a_storage;
 			}
 		}
-		// Every include and define has done its work: the compile reads this text alone. Its #line directives name the files.
+		// Includes and defines are resolved, so the compile reads this text alone. Its #line directives name the files.
 		a_request.source = std::as_bytes(std::span(a_storage.data(), a_storage.size()));
 		return true;
 	}

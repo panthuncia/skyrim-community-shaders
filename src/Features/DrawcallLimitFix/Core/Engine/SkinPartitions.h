@@ -8,16 +8,13 @@
 
 namespace DCLF::SkinPartitions
 {
-	// NiSkinPartition::Unk_25 (AE 140d43a10) draws partition i when this table holds a non-zero byte at
-	// (LODMode.index + LODMode.singleLevel * 4) * 3 + the partition's LOD byte (Partition+0x42). Read from
-	// AE 1.6.1170 at 0x14202a030, where nothing writes it: level n draws the LOD bytes below n, and
-	// single-level n draws LOD byte n alone.
+	// NiSkinPartition::Unk_25 (AE 140d43a10) draws partition i when this table is non-zero at (index + singleLevel * 4) * 3 + the
+	// partition's LOD byte (+0x42). Read from AE 1.6.1170 at 0x14202a030, which nothing writes.
 	inline constexpr std::array<std::uint8_t, 24> kPartitionLodTable{ 0, 0, 0, 1, 0, 0, 1, 1, 0, 1, 1, 1, 1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0 };
 
 	/**
-	 * @brief Which skin partitions the engine draws for this LOD row (bit i = partition i): BSDismemberSkinInstance::Unk_25 (AE
-	 * 140d31f40) skips a partition whose flag (Data byte 0) is clear, then NiSkinPartition::Unk_25 applies the table. 0 when it draws
-	 * none.
+	 * @brief Which skin partitions the engine draws for this LOD row, a bit each. BSDismemberSkinInstance::Unk_25 (AE 140d31f40) skips
+	 * a partition whose flag is clear, then the table applies.
 	 */
 	inline std::uint32_t Mask(const RE::NiSkinInstance& a_skin, std::uint32_t a_lodRow)
 	{
@@ -39,12 +36,12 @@ namespace DCLF::SkinPartitions
 		return mask;
 	}
 
-	/** @brief Mask from the geometry's record: its partitions' LOD bytes and a dismember skin's shown flags. */
+	/** @brief Mask from the geometry's record. */
 	inline std::uint32_t Mask(const SceneCapture::GeometryRecord& a_geometry, std::uint32_t a_lodRow)
 	{
 		if (!a_geometry.skinPartition || a_lodRow >= 8)
 			return 0;
-		// A dismember skin's shown flags (empty otherwise).
+		// Empty unless it is a dismember skin.
 		const auto& shown = a_geometry.shown;
 		std::uint32_t mask = 0;
 		for (std::uint32_t i = 0; i < a_geometry.partitions.size() && i < kMaxSkinPartitions; ++i) {
@@ -57,17 +54,17 @@ namespace DCLF::SkinPartitions
 		return mask;
 	}
 
-	/** @brief Tables::skinPartitions: 0 for none or a single drawn partition, kNoPartitions when row 3 draws none, else the mask. */
+	/** @brief 0 for none or a single drawn partition, kNoPartitions when row 3 draws none, else the mask. */
 	inline std::uint16_t Of(const SceneCapture::GeometryRecord& a_geometry)
 	{
 		if (!a_geometry.skin || !a_geometry.skinPartition)
 			return 0;
-		// Row 3 (cumulative over levels); a LOD skin's draw narrows it (LodOf).
+		// Row 3, cumulative over levels. A LOD skin's draw narrows it.
 		const std::uint32_t mask = Mask(a_geometry, 3);
 		return static_cast<std::uint16_t>(!mask ? kNoPartitions : a_geometry.partitions.size() > 1 ? mask : 0u);
 	}
 
-	/** @brief Tables::skinLodPartitions for a geometry: a kMeshLOD skin's masks per level (byte L: row L), 0 for any other. */
+	/** @brief A kMeshLOD skin's masks per level, byte L for row L. 0 for any other. */
 	inline std::uint32_t LodOf(const SceneCapture::LeafView& a_leaf)
 	{
 		if (!a_leaf || !a_leaf.geometry->skin || !a_leaf.geometry->skinPartition || !(a_leaf.node->flags & static_cast<std::uint32_t>(RE::NiAVObject::Flag::kMeshLOD)) ||

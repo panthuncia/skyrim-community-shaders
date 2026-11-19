@@ -1,4 +1,4 @@
-// The engine draw families' shared pieces (EngineDrawFamily.h).
+// The engine draw families' shared pieces.
 
 // volk must precede every Vulkan header in this translation unit.
 #include <rhi_interop_vulkan.h>
@@ -37,7 +37,7 @@ namespace DCLF::Family
 			DrawTaker take = nullptr;
 		};
 
-		// Filled at install (main thread), read by the detour afterwards: never changed while the game draws.
+		// Filled at install on the main thread and never changed while the game draws.
 		std::vector<Taker>& Takers()
 		{
 			static std::vector<Taker> takers;
@@ -45,9 +45,8 @@ namespace DCLF::Family
 		}
 
 		/**
-		 * @brief The shadow state a draw function sets before its SetDirtyStates: the geometry's VertexDesc (dirty bit 0x400) and a
-		 * triangle list (dirty bit 0x800). DrawTriShape (SE 0x140d6bfe0, AE 0x140e464d0) and the DrawData copy both start this way, so a
-		 * taker reads the state the engine's draw would apply, not what the previous draw left (topology 0 before the first one).
+		 * @brief Sets the VertexDesc and triangle list topology the engine's draw function sets before SetDirtyStates (DrawTriShape SE
+		 * 0x140d6bfe0, AE 0x140e464d0). So a taker reads the state the engine's draw would apply, not the previous draw's.
 		 */
 		void SetDrawState(std::uint64_t a_vertexDesc)
 		{
@@ -63,10 +62,7 @@ namespace DCLF::Family
 			}
 		}
 
-		/**
-		 * @brief BSGraphics::Renderer::DrawTriShape (SE 75477, AE 77263): a family's open batch takes the draw instead. The shadow state
-		 * gets the shape's VertexDesc and a triangle list first, as the engine's function sets them.
-		 */
+		/** @brief BSGraphics::Renderer::DrawTriShape (SE 75477, AE 77263). A family's open batch takes the draw instead. */
 		struct DrawTriShape
 		{
 			static void thunk(void* a_renderer, TriShape* a_shape, std::uint32_t a_start, std::uint32_t a_triangles)
@@ -87,17 +83,14 @@ namespace DCLF::Family
 			DynamicDrawTaker take = nullptr;
 		};
 
-		// As Takers(): filled at install, read by the detour afterwards.
+		// Filled at install and never changed while the game draws.
 		std::vector<DynamicTaker>& DynamicTakers()
 		{
 			static std::vector<DynamicTaker> takers;
 			return takers;
 		}
 
-		/**
-		 * @brief DrawDynamicTriShape's DrawData copy (SE 75488, AE 77275): a family's open batch takes the draw instead. The shadow state
-		 * gets the data's VertexDesc and a triangle list first, as the engine's function sets them before its SetDirtyStates.
-		 */
+		/** @brief DrawDynamicTriShape's DrawData copy (SE 75488, AE 77275). A family's open batch takes the draw instead. */
 		struct DrawDynamicDrawData
 		{
 			static void thunk(void* a_renderer, DynamicDrawData* a_data, void* a_arg3, std::uint32_t a_start, std::uint32_t a_triangles)
@@ -113,8 +106,7 @@ namespace DCLF::Family
 			static inline REL::Relocation<decltype(thunk)> func;
 		};
 
-		// The depth bias viewport offsets (BSGraphics::CreateDepthBiasViewportOffsets, SE 0x141794530, AE 0x1419db270): a bias mode takes
-		// its entry off the viewport's maximum depth.
+		// CreateDepthBiasViewportOffsets' table (SE 0x141794530, AE 0x1419db270). A bias mode takes its entry off the maximum depth.
 		constexpr std::array<float, 12> kBiasViewportOffsets{ 0.0f, 1.5e-5f, 0.0f, 0.0f, 0.0f, 0.0f, 2.6e-5f, 1.5e-5f, 2.8e-5f, 1.7e-5f, 3e-5f, 1.9e-5f };
 
 		bool IsBufferView(ID3D11ShaderResourceView* a_view)
@@ -172,7 +164,7 @@ namespace DCLF::Family
 			bool done = false;
 		};
 
-		// Added at install, run on the main thread: never touched by two threads at once.
+		// Added at install and run on the main thread, never by two threads at once.
 		std::vector<std::shared_ptr<Setup>>& Setups()
 		{
 			static std::vector<std::shared_ptr<Setup>> setups;
@@ -237,10 +229,8 @@ namespace DCLF::Family
 	{
 		if (!a_pass || !a_pass->geometry)
 			return false;
-		// R1's geometry-type dispatcher (AE 107637, SE 100847; Ghidra 2026-11-11) by BSGeometry::GetType: a TriShape (3, +0x1A2), a mesh
-		// LOD TriShape (5), a sub-index TriShape (8) and a sub-index land TriShape (9, +0x430 and +0x4CE: one DrawTriShape a segment) draw
-		// through DrawTriShape; the LOD and plain multi-index TriShapes (6, 7) too, but through the alternate index buffer's draw (AE 77264)
-		// when the pass's accumulation hint (BSRenderPass +0x1C) is 12. Every other type draws through another function.
+		// The engine's geometry-type dispatcher (AE 107637, SE 100847). Types 3, 5, 8 and 9 draw through DrawTriShape. Types 6 and 7 do too,
+		// except with accumulation hint 12, which uses the alternate index buffer's draw (AE 77264). Every other type uses another function.
 		using Type = RE::BSGeometry::Type;
 		const auto type = a_pass->geometry->GetType().get();
 		const auto hint = *reinterpret_cast<const std::uint8_t*>(reinterpret_cast<const std::byte*>(a_pass) + 0x1C);
@@ -303,10 +293,8 @@ namespace DCLF::Family
 		auto indices = buffers.Acquire(a_shape->indexBuffer);
 		if (!vertices || !indices || !vertices->buffer.ref || !indices->buffer.ref)
 			return GeometryResult::Buffers;
-		// The draw's 16-bit indices must lie in the index buffer, and a vertex must hold at least the position the stage pulls. The index
-		// stage loads the 4-byte word holding each index, so an odd range's last word reaches 2 bytes past the buffer's end: inside its
-		// allocation, which DXVK pads to 4 bytes at least (its buffer slices are aligned; a dedicated allocation to 256 bytes). So the
-		// range is checked to its last byte, not its last word: a mesh with an odd index count (the cloud layers have them) is drawable.
+		// The index stage loads the 4-byte word holding each index, so an odd range reads 2 bytes past the end. DXVK pads buffers to at
+		// least 4 bytes, so check to the last byte, not word. Cloud layers have odd index counts.
 		const std::uint32_t stride = static_cast<std::uint32_t>(a_shape->vertexDesc & 0xF) * 4;
 		const std::uint64_t endIndexByte = (std::uint64_t(a_start) + std::uint64_t(a_triangles) * 3) * 2;
 		if (!a_triangles || stride < 16 || endIndexByte > indices->buffer.size || vertices->buffer.size < stride) {
@@ -338,13 +326,13 @@ namespace DCLF::Family
 				*a_detail = std::format("topology {}", a_topology);
 			return GeometryResult::Topology;
 		}
-		// The ring's current buffer, as the engine binds it for this draw (stream 1).
+		// The ring's current buffer, as the engine binds it for this draw.
 		auto* const* ring = reinterpret_cast<ID3D11Buffer* const*>(REL::Offset(Address::kDynamicRing).address());
 		const auto current = *reinterpret_cast<const std::uint32_t*>(REL::Offset(Address::kDynamicRingCurrent).address());
 		ID3D11Buffer* streamBuffer = current < 3 ? ring[current] : nullptr;
 		if (!streamBuffer)
 			return GeometryResult::Missing;
-		// The strides as the engine's function sets them: stream 0's from the VertexDesc's low nibble, stream 1's from the next.
+		// Stream 0's stride from the VertexDesc's low nibble, stream 1's from the next, as the engine sets them.
 		const std::uint32_t stride = static_cast<std::uint32_t>(a_data->vertexDesc * 4) & 0x3C;
 		const std::uint32_t streamStride = static_cast<std::uint32_t>(a_data->vertexDesc >> 2) & 0x3C;
 		auto& buffers = GpuResources::Frame();
@@ -355,7 +343,7 @@ namespace DCLF::Family
 			vertices = buffers.Acquire(a_data->vertexBuffer);
 		if (!indices || !stream || !indices->buffer.ref || !stream->buffer.ref || (stride && a_data->vertexBuffer && (!vertices || !vertices->buffer.ref)))
 			return GeometryResult::Buffers;
-		// The index range as LatchGeometry checks it; the position (four floats) must fit in a stream-1 vertex at the offset.
+		// The four-float position must fit in a stream-1 vertex at the offset.
 		const std::uint64_t endIndexByte = (std::uint64_t(a_start) + std::uint64_t(a_triangles) * 3) * 2;
 		if (!a_triangles || streamStride < 16 || endIndexByte > indices->buffer.size || std::uint64_t(a_data->streamOffset) + streamStride > stream->buffer.size) {
 			if (a_detail)
@@ -367,7 +355,7 @@ namespace DCLF::Family
 		}
 		a_out.vertexRef = vertices ? vertices->buffer.ref : RenderGraph::BufferRef{};
 		a_out.indexRef = indices->buffer.ref;
-		// The attributes stream 1 holds (VertexDesc bits 54 and up: DCLFAttribute's second stream) are kept whatever the shader's mask.
+		// Stream 1's attributes (VertexDesc bits 54 and up) are kept whatever the shader's mask.
 		constexpr std::uint64_t kStreamOneBits = ~((std::uint64_t{ 1 } << 54) - 1);
 		a_out.layout = (a_shaderVertexDesc & a_data->vertexDesc) | (a_data->vertexDesc & kStreamOneBits);
 		a_out.stride = vertices ? stride : 0;
@@ -512,8 +500,7 @@ namespace DCLF::Family
 
 	void PublishedInputs::AddEngineCopy(RE::RENDER_TARGET a_target)
 	{
-		// The copy is published under its own id, only while ORG owns the target (Engine::Targets). Otherwise it stays a D3D11 texture,
-		// and the id is never declarable.
+		// Published only while ORG owns the target. Otherwise it stays a D3D11 texture and the id is never declarable.
 		const auto index = static_cast<std::uint32_t>(a_target);
 		if (auto* renderer = globals::game::renderer; renderer && index < static_cast<std::uint32_t>(RE::RENDER_TARGET::kTOTAL)) {
 			if (auto* copy = renderer->GetRuntimeData().renderTargets[index].textureCopy)
@@ -528,7 +515,7 @@ namespace DCLF::Family
 		const auto known = declared.load(std::memory_order_acquire);
 		std::vector<std::string_view> added;
 		for (const auto& id : ids) {
-			// Only ids every graph registers: declaring another would fail the build. One skipped is built in once published.
+			// Declaring an id not every graph registers would fail the build. A skipped one is built in once published.
 			if (!PublishedResources::IsDeclarable(id))
 				continue;
 			Extensions::DeclarePublishedRead(a_builder, id, reads);
@@ -548,11 +535,10 @@ namespace DCLF::Family
 	{
 		if (a_id.empty() || std::ranges::find(ids, a_id) == ids.end())
 			return InputResult::NotListed;
-		// The declared check comes first: an undeclared id must never be read (nothing orders the read after its writes).
+		// An undeclared id must never be read, since nothing orders the read after its writes.
 		const auto known = declared.load(std::memory_order_acquire);
 		if (!known || !known->contains(a_id))
 			return InputResult::PublishedLate;
-		// The client's pass declared it (Declare): the read is ordered, only its index is the build's.
 		RenderGraph::UndeclaredAccess::DeclaredIndexScope declaredIndex;
 		return PublishedResources::ShaderResourceIndex(a_id, a_index) ? InputResult::Graph : InputResult::NoView;
 	}
@@ -586,7 +572,7 @@ namespace DCLF::Family
 		GpuTextures::ResolveFailure* a_failure, ID3D11ShaderResourceView** a_view)
 	{
 		a_out = {};
-		// Only CS's registers: the engine's t0-t15 are latched under the flush latch and read from the shadow state (SlotTexture).
+		// Only CS's registers. The engine's t0-t15 come from the shadow state.
 		if (a_register < 16)
 			return HeaderResult::Texture;
 		ID3D11ShaderResourceView* view = nullptr;
@@ -598,7 +584,7 @@ namespace DCLF::Family
 			a_out.index = GpuTextures::Get().NullOf(a_kind).index;
 			return a_out.index != GpuTextures::kInvalid ? HeaderResult::Ok : HeaderResult::Texture;
 		}
-		// The binding keeps the view alive for the batch; the import keeps what the run reads.
+		// The binding keeps the view alive for the batch, and the import keeps what the run reads.
 		view->Release();
 		a_out.publishedId = PublishedResources::ExportedId(view);
 		if (!a_out.publishedId.empty())
@@ -648,7 +634,6 @@ namespace DCLF::Family
 	bool HeldForBatch(std::string_view a_family, std::string_view a_client, std::uint32_t a_segment, FrameAnchors::Anchor a_anchor)
 	{
 		namespace Driver = ::RenderGraph::Frame::Driver;
-		// A client a stage names.
 		if (FrameAnchors::NamedByStage(a_client)) {
 			const auto hold = FrameAnchors::HeldNow(a_client, a_anchor);
 			if (!hold.held) {

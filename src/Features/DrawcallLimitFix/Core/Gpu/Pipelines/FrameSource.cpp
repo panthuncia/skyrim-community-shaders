@@ -1,5 +1,4 @@
-// The D3D12 builds' frame rewrite (FrameSource.h). Standard library only, so tools/shader-compare's dclf-shadertool builds it as the
-// game does.
+// The D3D12 builds' frame rewrite. Standard library only, so tools/shader-compare builds it as the game does.
 #include "Features/DrawcallLimitFix/Core/Gpu/Pipelines/FrameSource.h"
 
 #include <bit>
@@ -32,7 +31,6 @@ namespace DCLF::FrameSource
 			return a_at;
 		}
 
-		// Reads digits at a_at into a_value; false when there are none.
 		bool ReadNumber(std::string_view a_text, std::size_t& a_at, std::uint32_t& a_value)
 		{
 			const std::size_t start = a_at;
@@ -42,7 +40,7 @@ namespace DCLF::FrameSource
 			return a_at > start;
 		}
 
-		// Splits a_text into its preprocessor lines (kept as they are) and the rest (the declaration's text).
+		// Splits preprocessor lines, kept as they are, from the declaration's text.
 		void SplitDirectives(std::string_view a_text, std::string& a_directives, std::string& a_rest)
 		{
 			std::size_t at = 0;
@@ -59,10 +57,10 @@ namespace DCLF::FrameSource
 			}
 		}
 
-		// A declarator: the type (with its qualifiers), the name and the array count (0: none).
+		// The array count is 0 for none.
 		struct Declarator
 		{
-			std::string qualifiers;  // row_major or column_major, if given
+			std::string qualifiers;
 			std::string type;
 			std::string name;
 			std::uint32_t count = 0;
@@ -73,7 +71,6 @@ namespace DCLF::FrameSource
 		{
 			std::string text = Trim(a_text);
 			a_out = {};
-			// The array suffix.
 			if (!text.empty() && text.back() == ']') {
 				const auto open = text.rfind('[');
 				if (open == std::string::npos)
@@ -93,7 +90,6 @@ namespace DCLF::FrameSource
 				return false;
 			a_out.name = text.substr(begin, end - begin);
 			std::string type = Trim(std::string_view(text).substr(0, begin));
-			// Matrix orientation and other qualifiers before the type.
 			for (;;) {
 				bool removed = false;
 				for (const char* qualifier : { "row_major", "column_major", "uniform", "precise" }) {
@@ -112,7 +108,7 @@ namespace DCLF::FrameSource
 			return !a_out.type.empty();
 		}
 
-		// A packed member's shape: its scalar type and its rows and columns (a vector: 1 row; a matrix: rows x columns).
+		// A vector has 1 row, a matrix rows x columns.
 		struct Shape
 		{
 			std::string scalar;
@@ -146,7 +142,7 @@ namespace DCLF::FrameSource
 			return false;
 		}
 
-		// A register's components (a_first, a_count of them) as a_scalar: the float4 the block gives is reinterpreted.
+		// Reinterprets components of the float4 the block gives as a_scalar.
 		std::string Components(const std::string& a_register, std::uint32_t a_first, std::uint32_t a_count, const std::string& a_scalar)
 		{
 			const std::string value = std::format("{}.{}", a_register, std::string_view("xyzw").substr(a_first, a_count));
@@ -156,7 +152,7 @@ namespace DCLF::FrameSource
 				return std::format("asint({})", value);
 			if (a_scalar == "bool")
 				return std::format("(asuint({}) != 0)", value);
-			return std::format("asuint({})", value);  // uint, dword
+			return std::format("asuint({})", value);
 		}
 
 		struct Rewriter
@@ -172,7 +168,6 @@ namespace DCLF::FrameSource
 				return false;
 			}
 
-			// A resource: its static from the heap.
 			bool Resource(char a_class, std::uint32_t a_register, std::string_view a_declaration)
 			{
 				Declarator declarator;
@@ -193,7 +188,6 @@ namespace DCLF::FrameSource
 				return true;
 			}
 
-			// A constant buffer's members: a_body split at its statements, preprocessor lines left out.
 			bool Members(std::string_view a_body, std::vector<std::pair<Declarator, std::optional<std::uint32_t>>>& a_members)
 			{
 				std::string body;
@@ -250,7 +244,6 @@ namespace DCLF::FrameSource
 				return true;
 			}
 
-			// A constant buffer: its view, then a static per member.
 			bool Block(std::string_view a_name, std::uint32_t a_register, std::string_view a_body)
 			{
 				std::vector<std::pair<Declarator, std::optional<std::uint32_t>>> members;
@@ -258,7 +251,7 @@ namespace DCLF::FrameSource
 					return false;
 				const std::string name(a_name);
 				const std::uint32_t mask = options.pixel ? options.pixelBlocks : options.vertexBlocks;
-				// A shadow view's SharedData and FeatureData have a view each (its push words); its other blocks a ref each.
+				// A shadow view's SharedData and FeatureData have a view each. Its other blocks have a ref each.
 				const bool passWide = options.shadow ? (a_register == 5 || a_register == 6) : (a_register < 32 && ((mask >> a_register) & 1));
 				if (a_register >= 14)
 					return Fail(std::format("constant buffer {} is at b{}, which is no register a DCLF pass gives", name, a_register));
@@ -272,14 +265,13 @@ namespace DCLF::FrameSource
 				const std::uint32_t ordinal = (options.pixel ? static_cast<std::uint32_t>(std::popcount(options.vertexBlocks)) : 0u) +
 				                              static_cast<std::uint32_t>(std::popcount(mask & ((1u << a_register) - 1)));
 				const std::string stage = options.pixel ? "PS" : "VS";
-				// The block's view (a pass-wide block) or its ref (any other), as the build's pass gives them.
 				const std::string view = options.shadow ? std::format("DCLFShadowBlockView({})", a_register) : std::format("DCLFFrameBlockIndex({})", ordinal);
 				const std::string byRef = options.shadow ? std::format("DCLFShadowBlockRef({})", a_register) :
 				                                           std::format("DCLFFrameBlockSpan({}, {})", options.pixel ? "true" : "false", a_register);
 				out += std::format("// {} b{} ({}): the pass's {} (DCLF FrameSource)\n", name, a_register, stage, passWide ? "view of the block" : "block, by address");
 				++result.blocks;
 				if (packed == 0) {
-					// The same members in a struct, read as a ConstantBuffer: cbuffer packing, as the block was written.
+					// Without packoffset, read the same members as a ConstantBuffer struct to keep cbuffer packing.
 					if (!passWide)
 						return Fail(std::format("constant buffer {} at {} b{} has no packoffset and no view of its own in the pass", name, stage, a_register));
 					out += std::format("struct DCLFBlock_{}\n{{\n", name);
@@ -295,7 +287,6 @@ namespace DCLF::FrameSource
 					}
 					return true;
 				}
-				// Register by register: the pass's view, or the block's raw view by its address.
 				std::string registerOf;
 				if (passWide) {
 					out += std::format("static ConstantBuffer<DCLFRawBlock> DCLFBlockView_{} = ResourceDescriptorHeap[{}];\n", name, view);
@@ -311,7 +302,6 @@ namespace DCLF::FrameSource
 						return Fail(std::format("constant buffer {} member {} has a type the D3D12 build does not read by register: {}", name, member.name, member.type));
 					const std::uint32_t row = *offset / 16, component = (*offset % 16) / 4;
 					const bool rowMajor = member.qualifiers == "row_major";
-					// An element's value at a_row, and the registers it spans.
 					const auto element = [&](std::uint32_t a_row) -> std::string {
 						if (!shape.matrix)
 							return Components(reg(a_row), component, shape.columns, shape.scalar);
@@ -321,7 +311,7 @@ namespace DCLF::FrameSource
 						for (std::uint32_t l = 0; l < lines; ++l)
 							value += (l ? ", " : "") + Components(reg(a_row + l), 0, width, shape.scalar);
 						value += ")";
-						// Column-major: the registers are the columns.
+						// Column-major registers are the columns.
 						return rowMajor ? value : std::format("transpose({})", value);
 					};
 					const std::uint32_t span = shape.matrix ? (rowMajor ? shape.rows : shape.columns) : 1u;
@@ -340,7 +330,6 @@ namespace DCLF::FrameSource
 				return true;
 			}
 
-			// The text before a replaced declaration, then its preprocessor lines, each replacement starting on a line of its own.
 			void Begin(std::string_view a_before, const std::string& a_directives)
 			{
 				out.append(a_before);
@@ -370,7 +359,7 @@ namespace DCLF::FrameSource
 					if (!ReadNumber(a_text, p, number))
 						return Fail(std::format("a register binding is not understood near: {}", a_text.substr(keyword, 40)));
 					p = SkipSpace(a_text, p);
-					if (p < a_text.size() && a_text[p] == ',') {  // ", space<n>": the register's own number is what the pass gives
+					if (p < a_text.size() && a_text[p] == ',') {  // the register's own number is what the pass gives
 						p = SkipSpace(a_text, p + 1);
 						if (a_text.compare(p, 5, "space") != 0)
 							return Fail(std::format("a register binding is not understood near: {}", a_text.substr(keyword, 40)));
@@ -383,7 +372,6 @@ namespace DCLF::FrameSource
 					if (p >= a_text.size() || a_text[p] != ')')
 						return Fail(std::format("a register binding is not understood near: {}", a_text.substr(keyword, 40)));
 					p = SkipSpace(a_text, p + 1);
-					// The declaration's start: after the previous statement or block.
 					std::size_t colon = keyword;
 					while (colon > 0 && IsSpace(a_text[colon - 1]))
 						--colon;
@@ -400,7 +388,7 @@ namespace DCLF::FrameSource
 					if (block != (registerClass == 'b'))
 						return Fail(std::format("register {}{} binds {}", registerClass, number, trimmed));
 					if (block && number >= options.keepFirst && number <= options.keepLast) {
-						at = p;  // a push block: as it is
+						at = p;  // a push block, kept as it is
 						continue;
 					}
 					if (!block) {

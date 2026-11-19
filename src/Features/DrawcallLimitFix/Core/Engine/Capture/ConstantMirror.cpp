@@ -1,4 +1,4 @@
-// ConstantMirror: the watched buffers' CPU copies, kept by the immediate-context hooks on the render thread.
+// The watched buffers' CPU copies, kept by the immediate-context hooks on the render thread.
 
 #include "Features/DrawcallLimitFix/Core/Engine/Capture/ConstantMirror.h"
 
@@ -42,7 +42,7 @@ namespace DCLF
 	std::span<const std::byte> ConstantMirror::Contents(const ID3D11Buffer* a_buffer)
 	{
 		auto* entry = Find(reinterpret_cast<const ID3D11Resource*>(a_buffer));
-		// The mapping's memory stays the writer's last contents after Unmap (DXVK keeps the slice until it is reused).
+		// DXVK keeps the mapping's slice until it is reused, so it still holds the writer's last contents after Unmap.
 		return entry ? entry->contents.Settled(entry->byteWidth) : std::span<const std::byte>{};
 	}
 
@@ -54,14 +54,14 @@ namespace DCLF
 
 	void ConstantMirror::OnUnmap(ID3D11Resource* a_resource)
 	{
-		// WRITE_DISCARD: whatever the writer left in the mapping is the buffer's new contents (copied when read: Contents).
+		// WRITE_DISCARD: whatever the writer left in the mapping is the new contents, copied when read.
 		if (auto* entry = Find(a_resource))
 			entry->contents.OnUnmap();
 	}
 
 	void ConstantMirror::OnUpdateSubresource(ID3D11Resource* a_resource, const D3D11_BOX* a_box, const void* a_data)
 	{
-		// A partial update applies over the last mapping's contents, and only counts once the buffer was fully written before.
+		// A partial update applies over the last contents, and only counts once the buffer was fully written before.
 		if (auto* entry = Find(a_resource))
 			entry->contents.OnUpdate(a_box, a_data, entry->byteWidth);
 	}

@@ -1,6 +1,6 @@
 #pragma once
 
-// Buffer view refs (RenderGraph/BufferRef.h) of the buffers DCLF names by version: what its shaders read through.
+// Buffer view refs for the buffers DCLF names by version.
 
 #include "RenderGraph/BufferRefs.h"
 
@@ -12,16 +12,8 @@
 namespace DCLF
 {
 	/**
-	 * @brief A named version's buffer view ref (at its first byte); null without a buffer or a graph host. Any thread.
-	 *
-	 * Every pass reading these refs declares the named buffer (no views), and the version the snapshot seals is the one its
-	 * declaration binds for that frame:
-	 * - the face lists: the view epochs' face passes (ViewEpochRecord's DrawFamilyDeclare, TreeLodFaces);
-	 * - the vertex stream: the main view, view epoch, shadow, forward and CPU site passes;
-	 * - grass's instances, owners, frame, visible, shapes, buckets and meshes: its cull and arguments passes (GrassPasses) and its main
-	 *   draws (GrassDraws' MainDeclare);
-	 * - tree LOD's records, shapes, meshes and visible table: its passes and its draws.
-	 * So the ref is not a raw access (RenderGraph::DeclaredRefOf). Phase 4 writes it in Prepare from the declaration.
+	 * @brief Any thread. A named version's buffer view ref, or null without a buffer or graph host.
+	 * Every pass that reads one must declare the named buffer, so the ref is never a raw access.
 	 */
 	inline RenderGraph::BufferRef RefOf(const org::services::NamedEntry& a_entry, std::source_location a_where = std::source_location::current())
 	{

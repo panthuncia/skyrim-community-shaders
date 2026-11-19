@@ -1,4 +1,4 @@
-// SpirvReflection::Parse: one pass over a DXC module's words. Pure; any thread.
+// SpirvReflection::Parse, one pass over a DXC module's words. Pure, any thread.
 
 #include "Features/DrawcallLimitFix/Core/Gpu/Pipelines/SpirvReflection.h"
 
@@ -14,7 +14,6 @@ namespace DCLF
 		constexpr std::uint32_t kMagic = 0x07230203;
 		constexpr std::uint32_t kHeaderWords = 5;
 
-		// Opcodes, decorations and storage classes from the SPIR-V specification.
 		constexpr std::uint16_t kOpName = 5;
 		constexpr std::uint16_t kOpMemberName = 6;
 		constexpr std::uint16_t kOpExtInstImport = 11;
@@ -48,16 +47,15 @@ namespace DCLF
 		struct Id
 		{
 			std::uint16_t opcode = 0;
-			std::uint32_t storage = kNone;  // variables and pointers
-			std::uint32_t type = kNone;     // pointee (pointers), element (arrays), result type (variables)
+			std::uint32_t storage = kNone;
+			std::uint32_t type = kNone;  // pointee for pointers, element for arrays, result type for variables
 			std::uint32_t location = kNone;
 			std::uint32_t binding = kNone;
 			std::uint32_t set = 0;
 			bool builtIn = false;
 			bool referenced = false;  // named by an instruction in a function body
-			bool nonSemantic = false;  // an OpExtInstImport of a NonSemantic.* set
+			bool nonSemantic = false;
 			std::string name;
-			// A struct type's members, by index: their names (OpMemberName) and byte offsets (Offset; kNone where it has none).
 			std::vector<std::string> memberNames;
 			std::vector<std::uint32_t> memberOffsets;
 		};
@@ -70,10 +68,8 @@ namespace DCLF
 		Id* At(std::vector<Id>& a_ids, std::uint32_t a_id) { return a_id < a_ids.size() ? &a_ids[a_id] : nullptr; }
 		const Id* At(const std::vector<Id>& a_ids, std::uint32_t a_id) { return a_id < a_ids.size() ? &a_ids[a_id] : nullptr; }
 
-		// A binding counts only if the code uses it. Unoptimized builds (-Od) keep every declared
-		// resource in the module and the entry point's interface, used or not; debug instructions
-		// name variables without accessing them. A literal operand that happens to equal a
-		// variable's id can only keep a binding, which is the conservative direction.
+		// A binding counts only if the code uses it. -Od builds keep every declared resource, and debug instructions name variables
+		// without accessing them. A literal that equals some id can only keep a binding, which is the safe direction.
 		void MarkReferenced(std::vector<Id>& a_ids, std::uint16_t a_opcode, std::uint16_t a_count, const std::uint32_t* a_operands, bool& a_inFunction)
 		{
 			const auto at = [&](std::uint32_t a_id) { return At(a_ids, a_id); };
@@ -82,14 +78,13 @@ namespace DCLF
 			else if (a_opcode == kOpFunctionEnd)
 				a_inFunction = false;
 			else if (a_inFunction && !(a_opcode == kOpExtInst && a_count >= 4 && at(a_operands[2]) && at(a_operands[2])->nonSemantic)) {
-				// An extended instruction's number is a literal (GLSL.std.450's NClamp is 80, a plausible id).
+				// An extended instruction's number is a literal. GLSL.std.450's NClamp is 80, which could pass for an id.
 				for (std::uint16_t i = a_opcode == kOpExtInst ? 4 : 0; i + 1 < a_count; ++i)
 					if (auto* id = at(a_operands[i]))
 						id->referenced = true;
 			}
 		}
 
-		// OpExtInstImport, OpName, OpMemberName.
 		void ReadName(std::vector<Id>& a_ids, std::uint16_t a_opcode, std::uint16_t a_count, const std::uint32_t* a_operands)
 		{
 			const auto at = [&](std::uint32_t a_id) { return At(a_ids, a_id); };
@@ -114,7 +109,6 @@ namespace DCLF
 			}
 		}
 
-		// OpMemberDecorate (Offset), OpDecorate.
 		void ReadDecoration(std::vector<Id>& a_ids, std::uint16_t a_opcode, std::uint16_t a_count, const std::uint32_t* a_operands)
 		{
 			const auto at = [&](std::uint32_t a_id) { return At(a_ids, a_id); };
@@ -147,7 +141,6 @@ namespace DCLF
 			}
 		}
 
-		// The resource, array and pointer types, and variables.
 		void ReadType(std::vector<Id>& a_ids, std::uint16_t a_opcode, const std::uint32_t* a_operands)
 		{
 			const auto at = [&](std::uint32_t a_id) { return At(a_ids, a_id); };
@@ -210,7 +203,6 @@ namespace DCLF
 			}
 		}
 
-		// A stage input: its semantic and index from DXC's name ("in.var.TEXCOORD1").
 		void ReadInput(const Id& a_variable, std::vector<SpirvReflection::Input>& a_inputs)
 		{
 			constexpr std::string_view kPrefix = "in.var.";
@@ -225,7 +217,7 @@ namespace DCLF
 			a_inputs.push_back({ std::move(semantic), index, a_variable.location });
 		}
 
-		// A constant buffer's members, whether the code reads them or not: the layout is the declaration's.
+		// Read whether the code uses them or not, since the layout is the declaration's.
 		void ReadBlockMembers(const std::vector<Id>& a_ids, const Id& a_variable, std::vector<SpirvReflection::BlockMember>& a_blockMembers)
 		{
 			const auto at = [&](std::uint32_t a_id) { return At(a_ids, a_id); };
@@ -237,12 +229,10 @@ namespace DCLF
 			}
 		}
 
-		// The kind of a used binding.
 		SpirvReflection::BindingKind KindOf(const std::vector<Id>& a_ids, const Id& a_variable)
 		{
 			using BindingKind = SpirvReflection::BindingKind;
 			const auto at = [&](std::uint32_t a_id) { return At(a_ids, a_id); };
-			// The type a variable's pointer points at, through resource arrays.
 			auto elementOpcode = [&](std::uint32_t a_pointer) -> std::uint16_t {
 				const Id* pointer = at(a_pointer);
 				const Id* type = pointer ? at(pointer->type) : nullptr;
@@ -265,7 +255,7 @@ namespace DCLF
 
 	bool SpirvReflection::Parse(std::span<const std::byte> a_spirv)
 	{
-		// D3D12's stages are DXIL: DXC's reflection of them, in the same terms.
+		// D3D12's stages are DXIL.
 		if (DxilStages::IsDxil(a_spirv))
 			return DxilStages::Reflect(a_spirv, *this);
 		inputs.clear();

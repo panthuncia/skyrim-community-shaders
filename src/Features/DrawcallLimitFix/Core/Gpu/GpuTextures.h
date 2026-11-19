@@ -19,30 +19,15 @@ namespace DCLF
 	/**
 	 * @brief Shader-visible descriptors for the game's textures and samplers.
 	 *
-	 * A texture is resolved once per shader resource view: the image is marked stable in DXVK and imported
-	 * into BasicRHI without ownership (dxvkGetInteropResourceInfo), and a view with the SRV's format,
-	 * range and swizzle is written into a slot of ORG's shader-visible heap, read in the layout DXVK keeps
-	 * the image in. The registry weakly deduplicates live imports; every numeric index handed to a draw
-	 * is accompanied by ownership of its exact descriptor and SRV through GPU completion.
+	 * Each D3D11 view is imported once into BasicRHI without ownership and written into ORG's shader-visible heap.
+	 * Every index handed to a draw comes with ownership of its descriptor and view until the GPU is done with it.
 	 *
-	 * An import waits on DXVK's CS thread (marking the image stable is a synchronous CS chunk) and on the driver
-	 * (the view and its descriptor), for milliseconds while the game streams textures. Request therefore never imports
-	 * on the calling thread: the import thread answers it, and a draw whose texture is still asked for is deferred, and so
-	 * stays the engine's. ResolveBinding imports inline, for the frame's textures, whose draws cannot be deferred.
+	 * An import can take milliseconds while the game streams textures, because it waits on DXVK's CS thread and the driver.
+	 * So Request never imports on the calling thread. The import thread answers it, and a draw still waiting stays the engine's.
+	 * ResolveBinding imports inline for the frame's own textures, whose draws cannot be deferred.
 	 *
-	 * Samplers copy the renderer's own D3D11 sampler states (the table the engine selects from by the
-	 * shadow state's address and filter modes) into ORG's sampler heap.
-	 *
-	 * Render thread: inside an epoch (its descriptor service) or outside one (the graph's own, retained, as the import thread uses).
-	 * Request, Seal and Fixed are any thread's (the scene work's material and shared bindings): a request goes to the import
-	 * thread through a lock-free queue, which answers it as an event into the requester's queue, from the registry or by importing
-	 * with the context the render thread published (PublishImportContext, with the null descriptor and the samplers: Fixed). The
-	 * registry's lock is the render thread's (ResolveBinding, NoteRelocations) and the import thread's alone.
-	 *
-	 * Pinless (RenderGraphRuntime::PinlessImports): an import tracks the image instead of pinning it (one the GPU writes is still
-	 * pinned), so DXVK may move it. A move (NoteRelocations) supersedes the views' imports of the old storage: each keeps reading it,
-	 * held by the import's backing until the import's last owner lets it go, and leaves the registry, so the next lookup of its view
-	 * imports the new storage. The moved views are logged (RelocatedViews) for the bindings' holders to resolve again.
+	 * With pinless imports DXVK may move an image. A move supersedes the old import, which keeps its storage alive until its last
+	 * owner goes, and the next lookup imports the new storage.
 	 */
 	class GpuTextures
 	{
@@ -67,8 +52,8 @@ namespace DCLF
 			std::uint32_t samplers = 0;
 			std::uint32_t unsupportedLayouts = 0;  // images in a layout BasicRHI cannot import
 			std::uint64_t importedAsync = 0;   // imports the import thread made
-			std::uint32_t requestsPending = 0;    // Request: not answered yet
-			std::uint64_t requestsAnswered = 0;  // Request: answered
+			std::uint32_t requestsPending = 0;
+			std::uint64_t requestsAnswered = 0;
 			std::uint64_t superseded = 0;        // pinless: imports a relocation superseded
 			std::uint32_t pinned = 0;            // pinless: imports DXVK pinned all the same (images the GPU writes)
 		};
@@ -76,51 +61,44 @@ namespace DCLF
 		{
 			std::uint32_t index = kInvalid;
 			std::shared_ptr<const void> owner;
-			bool pending = false;  // a requester's own: asked for and not answered yet (no owner, kInvalid)
+			bool pending = false;  // asked for and not answered yet
 		};
-		/** @brief Request's answer: the view's binding (never pending: kInvalid with no owner when the view is rejected). */
+		/** @brief Request's answer. Never pending. A rejected view gets kInvalid with no owner. */
 		struct Reply
 		{
-			ID3D11ShaderResourceView* view = nullptr;  // as requested (an identity: the request's reference is gone)
-			std::uint64_t cookie = 0;                   // as requested
+			ID3D11ShaderResourceView* view = nullptr;  // an identity only, the reference is gone
+			std::uint64_t cookie = 0;
 			Binding binding;
 		};
 		using Replies = EventQueue<Reply, 1024>;
 		static constexpr std::uint32_t kSamplerCount = 4 * 5;  // the engine's (address mode, filter mode) table
-		/**
-		 * @brief The bindings every record reads that never change after they are made (the null descriptor, the engine's samplers by
-		 * address * 5 + filter, kInvalid where the engine has none), published with the import context: immutable.
-		 */
+		/** @brief Bindings that never change once made: the null descriptor and the engine's samplers by address * 5 + filter. */
 		struct FixedBindings
 		{
 			Binding null;
 			std::array<Binding, kSamplerCount> samplers{};
 		};
 
-		/**
-		 * @brief Who first asked for a view (ResolveBinding's and Request's a_sourceTag): diagnostic only, counted per tag by
-		 * DescribeSuperseded and plotted by Tracy. A source with several slots adds the slot (Tag).
-		 */
+		/** @brief Who first asked for a view. Diagnostic only. */
 		enum class Source : std::uint32_t
 		{
-			Material = 0,         // a material's t0-t15 (+ the slot)
-			Feature = 16,         // a material's feature texture (+ its index)
-			Projected = 32,       // a projected decal's
-			Mask = 48,            // the pipeline mask
-			FrameSlot = 64,       // a frame texture or an engine draw's slot tN (+ N)
-			FamilyHeader = 96,    // an engine draw family's header texture (+ the header's index)
-			FamilyNull = 120,     // an engine draw family's null view (+ its ViewKind)
-			ShadowDiffuse = 192,  // the shadow pass's diffuse
-			ImGui = 256,          // CS's ImGui textures
-			Scaleform = 257,      // the engine's Scaleform textures
+			Material = 0,  // + the slot
+			Feature = 16,  // + its index
+			Projected = 32,
+			Mask = 48,
+			FrameSlot = 64,  // + N
+			FamilyHeader = 96,  // + the header's index
+			FamilyNull = 120,  // + its ViewKind
+			ShadowDiffuse = 192,
+			ImGui = 256,
+			Scaleform = 257,
 		};
 
-		/** @brief a_source's tag, a_offset past its first. */
 		static constexpr std::uint32_t Tag(Source a_source, std::uint32_t a_offset = 0) { return static_cast<std::uint32_t>(a_source) + a_offset; }
 
 		/**
-		 * @brief A shader resource's declared dimension. A slot the engine or CS leaves empty reads a null view of it (NullOf): a cube, 3D
-		 * or array read through a 2D descriptor is undefined on the GPU, and AMD loses the device on it.
+		 * @brief A shader resource's declared dimension. Empty slots need a null view of the right kind.
+		 * A cube, 3D or array read through a 2D descriptor is undefined, and AMD loses the device on it.
 		 */
 		enum class ViewKind : std::uint8_t
 		{
@@ -128,116 +106,91 @@ namespace DCLF
 			Texture2DArray,
 			Texture3D,
 			Cube,
-			Buffer,  // a structured or raw buffer
+			Buffer,
 		};
 
-		/** @brief Why ResolveBinding gave no binding (its optional out parameter). */
+		/** @brief Why ResolveBinding gave no binding. */
 		enum class ResolveFailure : std::uint8_t
 		{
 			None,
-			Rejected,        // the view cannot be imported (a reject count in the status says why)
-			Pending,         // the import thread is importing it: a later call takes it
-			StreamedWindow,  // a streamed texture whose full window is not loaded yet (asked for: a later call takes it)
-			NoContext,       // outside an epoch's descriptor service
+			Rejected,  // the status counts why
+			Pending,  // a later call takes it
+			StreamedWindow,  // full window not loaded yet, a later call takes it
+			NoContext,
 		};
 
 		static GpuTextures& Get();
 
-		/** @brief The superseded imports still alive, each holding an old storage and its chunk: who asked for them. */
+		/** @brief Who asked for the superseded imports still alive, each holding an old storage. */
 		std::string DescribeSuperseded() const;
 
-		/**
-		 * @brief Resolve with CPU ownership of this exact import and descriptor slot, importing inline if needed. a_sourceTag is diagnostic
-		 * only (Tag). a_failure, when given, says why the binding is kInvalid. a_where names the caller for the undeclared-access
-		 * validator (CS_ORG_VALIDATE_UNDECLARED=1).
-		 */
+		/** @brief Resolve with ownership of this exact import and descriptor slot, importing inline if needed. a_sourceTag is diagnostic only. */
 		Binding ResolveBinding(ID3D11ShaderResourceView* a_view, std::uint32_t a_sourceTag = ~0u, ResolveFailure* a_failure = nullptr,
 			std::source_location a_where = std::source_location::current());
 
-		/**
-		 * @brief An empty slot's binding: a view of a_kind that reads zero (1x1 RGBA32F D3D11 textures made on first use, imported once;
-		 * a buffer's is NullBufferIndex(false)). kInvalid when it could not be made. Render thread.
-		 */
+		/** @brief Render thread. A zero-reading binding of a_kind for an empty slot, or kInvalid if it could not be made. */
 		Binding NullOf(ViewKind a_kind);
 
-		/** @brief One line for a refusal's log: a_view (slot a_slot) as D3D11 describes it, and a_failure in words. Reads nothing else. */
+		/** @brief One log line describing a refusal. */
 		static std::string DescribeFailure(ID3D11ShaderResourceView* a_view, std::uint32_t a_slot, ResolveFailure a_failure);
 
-		/** @brief A source tag (Tag) in words, for logs: "ResolveBinding frame slot 17". */
+		/** @brief A source tag in words, for logs. */
 		static std::string SourceName(std::uint32_t a_tag);
 
 		/**
-		 * @brief Any thread: a_view's binding, answered as an event into a_replies (its one consumer drains it; it lives as long as the
-		 * process). a_view must be alive at the call: the request takes a reference, which the import becomes or which is let go
-		 * once answered. The import thread answers from the registry, or imports the view; a request made before the render thread
-		 * published a context waits for one. A null view is answered with the null descriptor.
+		 * @brief Any thread. Asks for a_view's binding, answered later as an event into a_replies.
+		 * a_view must be alive at the call. The request holds a reference until it is answered.
 		 */
 		void Request(ID3D11ShaderResourceView* a_view, std::uint32_t a_sourceTag, Replies& a_replies, std::uint64_t a_cookie);
 
-		/**
-		 * @brief Render thread, outside an epoch (the frame's start): what the import thread imports with - the graph's retained
-		 * descriptor service, the cleanup queue, the device, the registry - and the fixed bindings (made here: the samplers read the
-		 * engine's table), published when any changed.
-		 */
+		/** @brief Render thread, outside an epoch. Publishes what the import thread imports with, and the fixed bindings. */
 		void PublishImportContext();
 
-		/** @brief Any thread: the fixed bindings the render thread last published (PublishImportContext), null before the first. */
+		/** @brief Any thread. The fixed bindings last published, or null before the first. */
 		std::shared_ptr<const FixedBindings> Fixed() const;
 
-		/**
-		 * @brief Any thread: one owner for a_owners (an immutable ORG execution lease on the published cleanup queue: its last release
-		 * runs there), null when none is non-null. An owner Request handed out was made with the published context, so it is there.
-		 */
+		/** @brief Any thread. Combines a_owners into one owner whose last release runs on the published cleanup queue. */
 		std::shared_ptr<const void> Seal(std::vector<std::shared_ptr<const void>> a_owners) const;
 
-		/** @brief A null texture view's descriptor heap index (reads zero); kInvalid when unsupported. */
+		/** @brief A null texture view's heap index, or kInvalid when unsupported. */
 		std::uint32_t NullIndex();
 		/**
-		 * @brief A null buffer view's descriptor heap index (reads zero): a typed buffer's (a texel buffer), else a structured or raw
-		 * buffer's (a storage buffer); kInvalid when unsupported. A register a shader reads as a buffer needs one: the descriptors are
-		 * typed, and a null texture's read as a buffer is not zero on every GPU (RDNA's names an address).
+		 * @brief A null buffer view's heap index, or kInvalid when unsupported. A buffer register needs one.
+		 * A null texture descriptor read as a buffer is not zero on every GPU, RDNA for one.
 		 */
 		std::uint32_t NullBufferIndex(bool a_typed);
-		/** @brief The null descriptor of a_view's kind: NullBufferIndex for a buffer view, else NullIndex (no view: NullIndex). */
+		/** @brief NullBufferIndex for a buffer view, otherwise NullIndex. */
 		std::uint32_t NullIndexFor(ID3D11ShaderResourceView* a_view);
-		/** @brief The null descriptor and its exact device-generation owner. */
+		/** @brief The null descriptor with its owner. */
 		Binding NullBinding();
 
-		/** @brief The sampler heap index for the engine's (address mode, filter mode); kInvalid if unknown. */
+		/** @brief The sampler index for the engine's (address mode, filter mode), or kInvalid if unknown. */
 		std::uint32_t Sampler(std::uint32_t a_addressMode, std::uint32_t a_filterMode);
-		/** @brief The sampler index with ownership of the fixed descriptor. */
+		/** @brief The sampler index with ownership of its descriptor. */
 		Binding SamplerBinding(std::uint32_t a_addressMode, std::uint32_t a_filterMode);
 
-		/**
-		 * @brief Changes on device/reset invalidation. Individual binding identities, not a global restamp,
-		 * distinguish a successor import at a reused SRV address.
-		 */
+		/** @brief Changes on device reset. Per-binding identities, not this, tell a new import apart at a reused SRV address. */
 		std::uint32_t Generation() const { return generation.load(std::memory_order_acquire); }  // any thread
 
 		/**
-		 * @brief Render thread, at frame start (ImportRelocations::Poll): DXVK's image relocations. Each supersedes the imports of the
-		 * storage it replaced: their backings hold the old storage, their views leave the registry and are logged (RelocatedViews).
-		 * One taken before its import registered applies when it does.
+		 * @brief Render thread, at frame start. Applies DXVK's image relocations by superseding the old imports.
+		 * A relocation taken before its import registered applies when it does.
 		 */
 		void NoteRelocations(std::span<const ImportRelocations::Relocation> a_relocations);
 
 		/**
-		 * @brief Any thread: the views whose imports a relocation superseded since a_cursor (advanced past them), each view at most as
-		 * often as it moved: a lookup imports its new storage. False when the log no longer reaches back to a_cursor (some were missed:
-		 * every binding should be resolved again).
+		 * @brief Any thread. Views superseded since a_cursor, which it advances.
+		 * False when the log no longer reaches a_cursor, so every binding should be resolved again.
 		 */
 		bool RelocatedViews(std::uint64_t& a_cursor, std::vector<ID3D11ShaderResourceView*>& a_out) const;
 
-		/**
-		 * @brief A streamed texture's shell has a new window: its import is superseded as a relocation supersedes one (the old window stays
-		 * alive, held by the import's backing, until its last owner goes). Any thread; a_shell is an identity, never dereferenced.
-		 */
+		/** @brief Any thread. A streamed texture got a new window, so supersede its import. a_shell is an identity, never dereferenced. */
 		void NoteWindowChanged(const ID3D11ShaderResourceView* a_shell);
 
-		/** @brief Whether a_owner (a view's Binding's owner: an import, never a null view's) was superseded by a relocation. Any thread. */
+		/** @brief Any thread. Whether a binding's owner was superseded. */
 		static bool Superseded(const void* a_owner);
 
-		/** @brief For a report: the window a binding's owner imported, as an identity (null: not a streamed texture's). */
+		/** @brief For reports. The window a binding's owner imported, as an identity, or null. */
 		static const void* ImportedWindow(const void* a_owner);
 
 		Stats GetStats() const;

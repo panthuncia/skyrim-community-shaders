@@ -15,9 +15,9 @@ namespace DCLF::TextureFeedback
 {
 	namespace
 	{
-		std::shared_ptr<org::Buffer> buffer;  // the render thread's, kept for the process
-		rhi::ResourcePtr committed;           // D3D12's instead, kept for the process
-		std::atomic<std::uint64_t> ref{ 0 };  // the buffer's view ref (BufferRef::Bits), which the pixel stages write through
+		std::shared_ptr<org::Buffer> buffer;  // kept for the process
+		rhi::ResourcePtr committed;  // D3D12's instead
+		std::atomic<std::uint64_t> ref{ 0 };
 		std::atomic<volatile std::uint32_t*> words{ nullptr };
 	}
 
@@ -35,8 +35,7 @@ namespace DCLF::TextureFeedback
 			buffer = org::Buffer::CreateShared(rhi::HeapType::HostVisibleCoherent, bytes, true);
 			buffer->SetName("cs.dclf.texture-feedback");
 			resource = buffer->GetAPIResource();
-			// The colour pass writes the words with no order between draws, and only the streaming worker reads them, from the mapping. No
-			// GPU pass reads the buffer, so no pass declares it: the validator counts its ref as host feedback.
+			// No GPU pass reads the buffer, so none declares it. The validator counts its ref as host feedback.
 			if (RenderGraph::UndeclaredAccess::On())
 				RenderGraph::UndeclaredAccess::NoteHostFeedback(buffer);
 			made = RenderGraph::BufferRefOf(*buffer);

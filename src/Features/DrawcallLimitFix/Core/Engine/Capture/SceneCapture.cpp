@@ -1,5 +1,4 @@
-// SceneCapture: the record captures, on the capturing thread (a hook's writer, a loader attaching, or the render thread at the frame's
-// start), inside the engine-read window or under the engine call that holds the objects; the drawn-roots set and the counters.
+// The record captures on the capturing thread, the drawn-roots set and the counters.
 
 #include "Features/DrawcallLimitFix/Core/Engine/Capture/SceneCapture.h"
 #include "Features/DrawcallLimitFix/Core/Engine/Capture/SceneTracker.h"
@@ -34,7 +33,7 @@ namespace DCLF::SceneCapture
 		using Engine::At;
 
 		constexpr std::uint32_t kMaxDepth = 64;
-		// +0x109's bits written every frame, not the record's: 0x40 the cull's (FUN_140d1c5f0), 0x20 the strip particles' update (set) and the cell's update pass (clear, FUN_1402b41a0).
+		// +0x109 bits written every frame: 0x40 by the cull (FUN_140d1c5f0), 0x20 by strip particles and the cell update pass (FUN_1402b41a0).
 		constexpr std::uint8_t kFade109FrameBits = 0x60;
 
 		std::atomic<std::uint64_t> attaches{ 0 }, records{ 0 }, ns{ 0 }, mainThreadCaptures{ 0 }, mainThreadNs{ 0 }, outOfWorld{ 0 };
@@ -51,7 +50,7 @@ namespace DCLF::SceneCapture
 			return entity && entity->motion.type.get() != RE::hkpMotion::MotionType::kFixed;
 		}
 
-		// The records' extras, read on the capturing thread (a hook's or the probe's), never the scene work's.
+		// Read on the capturing thread, never the scene work's.
 		std::int32_t BsxOf(const RE::NiNode& a_node)
 		{
 			static const RE::BSFixedString name{ "BSX" };
@@ -59,7 +58,7 @@ namespace DCLF::SceneCapture
 			return extra ? static_cast<std::int32_t>(static_cast<const RE::BSXFlags*>(extra)->value) : -1;
 		}
 
-		// The declared geometry extra's value (Api: DeclareGeometryExtra). The name is built at first use, after the install.
+		// The name is built at first use, after install.
 		std::int64_t ExtraValueOf(const RE::BSGeometry& a_geometry)
 		{
 			const std::string_view declared = Extensions::GeometryExtraName();
@@ -80,7 +79,7 @@ namespace DCLF::SceneCapture
 			return source && source->source;
 		}
 
-		// A fade node's per-frame state: currentFade (+0x130), the LOD level (+0x152 & 0xF), the screen-door byte (+0x154).
+		// currentFade (+0x130), the LOD level (+0x152 & 0xF) and the screen-door byte (+0x154).
 		void CaptureFadeState(const RE::NiAVObject& a_node, NodeRecord& a_out)
 		{
 			a_out.currentFade = At<float>(&a_node, 0x130);
@@ -266,8 +265,8 @@ namespace DCLF::SceneCapture
 			boneCount = a_o.boneCount;
 			partitions = a_o.partitions;
 		}
-		// The shown flags are the skin instance's: a new instance (kSkin) brings its own. RaceMenu relinks an overlay onto its base's
-		// new skin instance after an armor change; with the old flags it drew only the partitions the armor had left shown.
+		// The shown flags belong to the skin instance. RaceMenu relinks an overlay onto a new skin instance after an armor change, and
+		// the old flags drew only the partitions the armor had left shown.
 		if (a_f & (kSkin | kDismember))
 			shown = a_o.shown;
 		if (a_f & kProperty)
@@ -342,7 +341,7 @@ namespace DCLF::SceneCapture
 	{
 		static_assert(Api::kNodeFieldCaptured == NodeRecord::kCaptured, "the Api's node fields are the capture's");
 
-		/** @brief A contributed node's list (Api::NodeCaptureContribution::capture), in place of the record's. */
+		/** @brief A contributed node's list, captured in place of the children. */
 		void CaptureContributed(const Extensions::NodeCaptureEntry& a_capture, const RE::NiAVObject& a_node, NodeRecord& r)
 		{
 			r.captured.clear();
@@ -388,11 +387,9 @@ namespace DCLF::SceneCapture
 			CaptureFadeState(a_object, r);
 		if (a_fields & F::kFadeAmount)
 			r.fadeAmount = At<float>(&a_object, 0x100);
-		// A switch's index store or child edit (the caller's node is a switch).
 		if (a_fields & F::kSwitch)
 			if (const auto* node = object.AsNode())
 				CaptureSwitch(*node, r);
-		// A contributed node's list edit (the feature's hook).
 		if (a_fields & F::kCaptured)
 			if (const auto* capture = Extensions::NodeCaptureOf(object.GetRTTI()))
 				CaptureContributed(*capture, a_object, r);
@@ -419,7 +416,7 @@ namespace DCLF::SceneCapture
 			r.actor = const_cast<RE::TESObjectREFR*>(reference)->IsActor();
 			r.emittance = EmittanceOf(*reference);
 		}
-		r.facts = Extensions::ReferenceFactsOf(a_object.GetUserData());  // without a reference, each fact's none
+		r.facts = Extensions::ReferenceFactsOf(a_object.GetUserData());  // without a reference, each fact is none
 		if (object.AsGeometry()) {
 			r.kind |= kKindGeometry;
 			return r;
@@ -446,7 +443,7 @@ namespace DCLF::SceneCapture
 		r.kind |= netimmerse_cast<RE::BSOrderedNode*>(node) ? kKindOrdered : 0u;
 		r.kind |= netimmerse_cast<RE::BSMultiBoundNode*>(node) ? kKindMultiBound : 0u;
 		r.kind |= netimmerse_cast<RE::BSFaceGenNiNode*>(node) ? kKindFaceGen : 0u;
-		// The engine's own test (the vtable's AsFadeNode, which every fade writer reaches the node by), not the RTTI chain.
+		// Use the engine's own test, the AsFadeNode vtable call every fade writer uses, not the RTTI chain.
 		if (node->AsFadeNode()) {
 			r.kind |= kKindFadeNode;
 			r.kind |= netimmerse_cast<RE::BSTreeNode*>(node) ? kKindTree : 0u;
@@ -465,14 +462,9 @@ namespace DCLF::SceneCapture
 	namespace
 	{
 		/**
-		 * @brief DCLF's own copy of a RaceMenu-morphed skin partition's vertices, or null.
-		 *
-		 * RaceMenu's body morphs (skee64's NIOVTaskUpdateSkinPartition, with its default bBodyMorphRebind) leave a partition on a DYNAMIC
-		 * vertex buffer, which DXVK cannot import (a discard map renames it), so the body went native. RaceMenu writes every morph into a
-		 * new partition (a deep copy, its vertices in the partition's CPU data, then the store into the skin), and marks the shape with
-		 * its "SHAPEDATA" extra data. A partition's vertices are therefore fixed once it is in the skin: a DEFAULT-usage copy of its CPU
-		 * data draws it as the engine's buffer would. Only such shapes are copied: a writer that maps its buffer in place stays native.
-		 * Copies are shared by the shapes on one partition (RaceMenu's overlays) and dropped once no record holds them.
+		 * @brief DCLF's DEFAULT-usage copy of a RaceMenu-morphed skin partition's vertices, or null.
+		 * RaceMenu's body morphs leave a partition on a DYNAMIC vertex buffer, which DXVK cannot import. Each morph writes a new partition
+		 * with its vertices in CPU data and tags the shape with "SHAPEDATA", so the vertices are fixed once stored and can be copied.
 		 */
 		ID3D11Buffer* MorphedPartitionCopy(const RE::BSGeometry& a_geometry, const RE::NiSkinPartition& a_partition, std::uint32_t a_index,
 			ID3D11Buffer* a_engine)
@@ -513,7 +505,7 @@ namespace DCLF::SceneCapture
 			std::scoped_lock guard(lock);
 			if (const auto it = copies.find(key); it != copies.end())
 				return it->second.get();
-			// The copies no record holds any more (the cache's reference alone), before a new one.
+			// Drop copies only the cache still holds before making a new one.
 			std::erase_if(copies, [](auto& a_entry) {
 				a_entry.second->AddRef();
 				return a_entry.second->Release() == 1;
@@ -528,7 +520,7 @@ namespace DCLF::SceneCapture
 			if (!globals::d3d::device || FAILED(globals::d3d::device->CreateBuffer(&copyDesc, &initial, copy.put())))
 				return nullptr;
 			Util::SetResourceName(copy.get(), "DCLF::MorphedSkinPartition");
-			// The first few in the log (a RaceMenu slider drag makes one per step).
+			// A RaceMenu slider drag makes one per step, so log only the first few.
 			static std::uint32_t logged = 0;
 			if (logged++ < 4)
 				logger::info("[DCLF] {}: a RaceMenu-morphed skin partition ({} bytes) draws from DCLF's copy of its vertices ({} copies kept)",
@@ -559,8 +551,7 @@ namespace DCLF::SceneCapture
 			r.vertexCount = shape.vertexCount;
 			r.triangleCount = shape.triangleCount;
 		}
-		// A particle geometry (NiParticles; its draw, FUN_1414f2ad0 types 1 and 2, builds its vertices from the particle data each
-		// draw): its own vertex description and what DCLF's particle path decides by. The particles are ParticleSnapshots', at their writer.
+		// A particle geometry builds its vertices from the particle data at each draw (FUN_1414f2ad0). Its particles are ParticleSnapshots'.
 		if (r.type == static_cast<std::uint8_t>(RE::BSGeometry::Type::kParticles) || r.type == static_cast<std::uint8_t>(RE::BSGeometry::Type::kStripParticles)) {
 			static const REL::Relocation<const RE::NiRTTI*> systemRtti{ RE::NiParticleSystem::Ni_RTTI };
 			r.vertexDesc = std::bit_cast<std::uint64_t>(data.vertexDesc);
@@ -572,7 +563,7 @@ namespace DCLF::SceneCapture
 				const auto& d = static_cast<const RE::NiParticlesData*>(particleData)->GetParticlesRuntimeData();
 				p.data = true;
 				p.aligned = d.unk88 || d.unk89;
-				// The aligned quads' velocities (FUN_140e51320 reads NiPSysData's particle info, +0x90, for them).
+				// FUN_140e51320 reads NiPSysData's particle info (+0x90) for aligned quads' velocities.
 				p.velocities = netimmerse_cast<RE::NiPSysData*>(const_cast<RE::NiObject*>(static_cast<const RE::NiObject*>(particleData))) &&
 				               static_cast<const RE::NiPSysData*>(particleData)->GetPSysRuntimeData().particleInfo;
 				p.capacity = d.maxNumVertices;
@@ -594,7 +585,6 @@ namespace DCLF::SceneCapture
 					if (p.buffData) {
 						out.rendererData = p.buffData;
 						out.vertexBuffer = reinterpret_cast<ID3D11Buffer*>(p.buffData->vertexBuffer);
-						// A RaceMenu-morphed partition draws from DCLF's copy of its vertices (MorphedPartitionCopy).
 						if (auto* copy = MorphedPartitionCopy(a_geometry, *partition, i, out.vertexBuffer))
 							out.vertexBuffer = copy;
 						out.indexBuffer = reinterpret_cast<ID3D11Buffer*>(p.buffData->indexBuffer);
@@ -634,7 +624,6 @@ namespace DCLF::SceneCapture
 			r.multiParams[21] = multi.normalDampener;
 		}
 		r.extraValue = ExtraValueOf(a_geometry);
-		// A ranged type's drawn ranges (its contribution's capture: object LOD's segments, Features/Lod).
 		if (const auto ranges = Extensions::GeometryRangesOf(r.type))
 			ranges(&a_geometry, r.ranges);
 		return r;
@@ -656,7 +645,7 @@ namespace DCLF::SceneCapture
 		if (const auto* lighting = netimmerse_cast<const RE::BSLightingShaderProperty*>(&a_property)) {
 			r.lighting = true;
 			r.shadowPasses = lighting->shadowMapOrMaskPasses.head != nullptr;
-			r.alpha = a_property.alpha;  // a Lighting property's (MaterialModelOf): GetRenderPasses' update carries it
+			r.alpha = a_property.alpha;  // GetRenderPasses' update carries it
 			r.emissive = lighting->emissiveColor;
 			const auto& params = lighting->projectedUVParams;
 			const auto& colour = lighting->projectedUVColor;
@@ -668,17 +657,15 @@ namespace DCLF::SceneCapture
 				r.diffuseHeld.copy_from(static_cast<ID3D11ShaderResourceView*>(const_cast<void*>(r.diffuseView)));
 				const auto feature = const_cast<RE::BSLightingShaderMaterialBase*>(material)->GetFeature();
 				r.feature = static_cast<std::uint32_t>(feature);
-				// What the derive's pass rules read of the material (Api::PropertyBits: TruePBR's glints).
 				r.contributorBits = Extensions::CapturePropertyBits(a_property);
-				// The land blend's material (techniques 8 and 19, the landscape materials).
+				// Techniques 8 and 19, the landscape materials.
 				if (feature == RE::BSShaderMaterial::Feature::kMultiTexLand || feature == RE::BSShaderMaterial::Feature::kMultiTexLandLODBlend) {
 					const auto& blend = static_cast<const RE::BSLightingShaderMaterialLandscape*>(material)->landBlendParams;
 					r.landBlend = { blend.red, blend.green, blend.blue, blend.alpha };
 				}
 			}
 		} else if (const std::uint8_t port = Extensions::PortOfRtti(r.rtti)) {
-			// A material port's property (the Effect port's: what its descriptor and PropertyColor read of the property and its material,
-			// taken here where the property holds the material).
+			// Taken here, where the property holds the material.
 			r.port = port;
 			Extensions::CapturePort(port, a_property, r.emissive, r.feature);
 		}
@@ -706,9 +693,7 @@ namespace DCLF::SceneCapture
 			for (const void* property : { g.property, g.layerProperty, g.alpha })
 				if (property)
 					a_pins->emplace_back(static_cast<RE::NiRefObject*>(const_cast<void*>(property)));
-		// The property's fade node too (the scene work's tree and fade-root owners are copies of the entry's: Tracked::fadeNodeRef), pinned
-		// only when it is on the geometry's chain (the property's field names the BSFadeNode above it; one off the chain is not known to be
-		// alive here).
+		// Pin the property's fade node too, but only when it is on the geometry's chain. One off the chain is not known to be alive.
 		if (a_pins && g.property)
 			if (const auto* fadeNode = static_cast<const RE::BSShaderProperty*>(g.property)->fadeNode)
 				for (const RE::NiAVObject* at = a_geometry.parent; at; at = at->parent)
@@ -716,8 +701,7 @@ namespace DCLF::SceneCapture
 						a_pins->emplace_back(const_cast<RE::NiAVObject*>(at));
 						break;
 					}
-		// A Lighting (or an on material port's) property's material, for the scene work's records (the property holds it here): an attach's
-		// or a swap's (a_pins). A material shared by several leaves is pushed by each; the scene work keeps the newest.
+		// A material shared by several leaves is pushed by each. The scene work keeps the newest.
 		auto pushMaterial = [&](const PropertyRecord& a_property) {
 			if (a_pins && (a_property.lighting || Extensions::PortOn(SceneToggles(), a_property.port)) && a_property.material)
 				MaterialPort::PushCapture(static_cast<const RE::BSShaderMaterial*>(a_property.material));
@@ -765,10 +749,9 @@ namespace DCLF::SceneCapture
 
 	namespace
 	{
-		// The drawn parentless roots (SetDrawnRoots): an immutable sorted set InWorld reads lock-free inside a SceneTracker::SetRead. A
-		// replaced set is retired through SceneTracker::RetireSet, freed once no read is in.
+		// An immutable sorted set InWorld reads lock-free inside a SetRead, retired through SceneTracker::RetireSet.
 		std::atomic<const std::vector<const void*>*> drawnRoots{ nullptr };
-		std::unique_ptr<const std::vector<const void*>> drawnRootsCurrent;  // render thread: the published set's owner
+		std::unique_ptr<const std::vector<const void*>> drawnRootsCurrent;  // render thread
 	}
 
 	void SetDrawnRoots(std::vector<const void*> a_roots)
@@ -792,7 +775,7 @@ namespace DCLF::SceneCapture
 				return true;
 			top = a_object;
 		}
-		// A portal graph's parentless root (SetDrawnRoots).
+		// A portal graph's parentless root.
 		if (!top || top->parent)
 			return false;
 		const SceneTracker::SetRead read;
@@ -811,7 +794,7 @@ namespace DCLF::SceneCapture
 		out->sequence = NextSequence();
 		out->pinning = true;
 		Visit(a_root, *out);
-		// The ancestors: their children lists changed (the parent's), and a record is wanted for every node a chain walks.
+		// Ancestors' children lists changed, and every node a chain walks needs a record.
 		for (const auto* ancestor = a_root.parent; ancestor; ancestor = ancestor->parent) {
 			out->nodes.push_back(CaptureNode(*ancestor));
 			out->pins.emplace_back(const_cast<RE::NiNode*>(ancestor));

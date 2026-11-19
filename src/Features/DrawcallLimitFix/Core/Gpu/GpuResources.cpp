@@ -1,4 +1,4 @@
-// GpuResources: the buffer registries' resolution and leases, each instance on its owner's thread (see the header).
+// Buffer resolution and leases. Each instance runs on its owner's thread.
 
 #include "Features/DrawcallLimitFix/Core/Gpu/GpuResources.h"
 #include "Features/DrawcallLimitFix/Diagnostics/Zones.h"
@@ -22,10 +22,10 @@ namespace DCLF
 {
 	namespace
 	{
-		// Shared by the instances: a generation names one import whichever instance made it.
+		// Shared by the instances, so a generation names one import whichever instance made it.
 		std::atomic<std::uint64_t> nextGeneration{ 1 };
 
-		// The owner's writes to a counter only it writes: a load and a store, no read-modify-write.
+		// Only the owner writes these counters, so a relaxed load and store is enough.
 		template <class T, class U>
 		void Bump(std::atomic<T>& a_counter, U a_amount)
 		{
@@ -35,19 +35,19 @@ namespace DCLF
 
 	struct GpuResources::Batch
 	{
-		std::vector<winrt::com_ptr<ID3D11Buffer>> references;  // the owner's: moved into the leases once done
+		std::vector<winrt::com_ptr<ID3D11Buffer>> references;  // moved into the leases once done
 		std::vector<IUnknown*> objects;
-		std::vector<DxvkOrgInteropResourceInfo> infos;              // pinned
-		std::vector<DxvkOrgInteropTrackedResource> tracked;        // pinless
+		std::vector<DxvkOrgInteropResourceInfo> infos;
+		std::vector<DxvkOrgInteropTrackedResource> tracked;
 		std::vector<HRESULT> results;
 		bool pinless = false;
-		bool described = false;  // the batched export answered (else Acquire describes each one alone)
+		bool described = false;  // otherwise Acquire describes each one alone
 		double ms = 0.0;
-		std::atomic<bool> claimed{ false };  // taken by the job or by the owner, whichever describes first
-		std::atomic<bool> done{ false };     // released with the answers
-		bool noted = false;                  // the owner counted it (NoteResolve)
+		std::atomic<bool> claimed{ false };  // the job or the owner, whichever describes first
+		std::atomic<bool> done{ false };
+		bool noted = false;
 
-		/** @brief The description, by whoever claimed it (the job, or the owner finding it unstarted). Touches only the batch. */
+		/** @brief Run by whoever claimed the batch. Touches only the batch. */
 		void Describe()
 		{
 			const auto start = std::chrono::steady_clock::now();
@@ -59,7 +59,7 @@ namespace DCLF
 
 		~Batch()
 		{
-			// The tracked imports no lease took (their reference still here) end with the batch, on whichever thread drops it last.
+			// Tracked imports no lease took end with the batch, on whichever thread drops it last.
 			if (!pinless || !described)
 				return;
 			std::vector<IUnknown*> untaken;
@@ -72,7 +72,7 @@ namespace DCLF
 
 	GpuResources::Held::~Held()
 	{
-		// The last lease went behind the GPU's use (the leases' holders retire them so): the import ends, then the storages it read.
+		// Leases are retired behind the GPU's use. End the import first, then release the storages it read.
 		if (tracked) {
 			IUnknown* object = reference.get();
 			RenderGraphRuntime::Get().UntrackResources({ &object, 1 });
@@ -101,24 +101,20 @@ namespace DCLF
 	{
 		if (!a_buffer)
 			return std::nullopt;
-		// An engine buffer the ORG owns is judged where Resolve makes its ref: a ring chunk's readers declare the ring
-		// (Engine::Buffers::DeclareRingRead), and a static buffer's ref is noted by its ORG buffer, which is immutable. Noting the
-		// handle here as well would report the ring's chunks as undeclared.
+		// ORG-owned engine buffers are checked where their ref is made. Noting them here too would report ring chunks as undeclared.
 		if (RenderGraph::UndeclaredAccess::On() && !RenderGraph::Engine::Buffers::Owns(a_buffer))
 			RenderGraph::UndeclaredAccess::NoteBuffer(a_buffer, "GpuResources::Acquire", a_where);
 		if (const auto it = entries.find(a_buffer); it != entries.end()) {
 			if (auto owner = it->second.owner.lock())
 				return LeasedBuffer{ it->second.buffer, it->second.generation, std::shared_ptr<const void>(std::move(owner)) };
-			// Its last lease went (the removal is queued): a buffer at this address now is resolved as new.
+			// Its last lease went, so a buffer at this address now is a new one.
 			if (const auto c = byCookie.find(it->second.cookie); c != byCookie.end() && c->second == a_buffer)
 				byCookie.erase(c);
 			entries.erase(it);
 			Bump(counters.cached, -1);
 		}
 
-		// An engine buffer the ORG owns (CS_ORG_ENGINE_BUFFERS=1) is read directly: nothing to describe, pin or track, and it never
-		// moves. The lease's reference keeps the engine's object, and so the ORG buffer, alive. Never passed to DXVK: it may be a
-		// tripwire handle.
+		// An ORG-owned engine buffer is read directly and never moves. Never pass it to DXVK, since it may be a tripwire handle.
 		if (const auto direct = RenderGraph::Engine::Buffers::Resolve(a_buffer)) {
 			if (!direct->address) {
 				Bump(counters.rejected, 1);
@@ -129,7 +125,7 @@ namespace DCLF
 			return Insert(a_buffer, std::move(reference), Buffer{ direct->vkBuffer, 0, direct->size, direct->address, direct->ref }, nullptr);
 		}
 
-		// Resolved by this pass's Prefetch (or the pass before's), under its reference: the description is still this buffer's.
+		// A prefetch from this pass or the last was taken under its own reference, so the description still matches this buffer.
 		for (auto* map : { &prefetched, &prefetchedBefore }) {
 			const auto it = map->find(a_buffer);
 			if (it == map->end())
@@ -139,7 +135,7 @@ namespace DCLF
 			map->erase(it);
 			Finish(*batch);
 			if (!batch->described)
-				break;  // no batched export: described alone below
+				break;  // no batched export, described alone below
 			auto& reference = batch->references[i];
 			if (Diagnostics::Observe().claimsOrScene) {
 				Bump(counters.prefetchTaken, 1);
@@ -148,8 +144,7 @@ namespace DCLF
 			}
 			const auto& info = batch->Info(i);
 			if (SUCCEEDED(batch->results[i]) && info.kind == DXVK_ORG_INTEROP_RESOURCE_BUFFER && info.buffer.address != 0) {
-				// A description older than a relocation taken names storage nothing holds for it: described again below (the batch
-				// ends its import).
+				// A description older than a relocation names storage nothing holds for it, so describe it again.
 				if (batch->pinless && Superseded(batch->tracked[i].cookie, batch->tracked[i].storageSerial)) {
 					Bump(counters.prefetchSuperseded, 1);
 					break;
@@ -199,12 +194,10 @@ namespace DCLF
 		entry.generation = nextGeneration.fetch_add(1, std::memory_order_relaxed);
 		if (!entry.generation)
 			std::terminate();
-		// The lease holds the reference the description was taken under for as long as it lives, so the address cannot be reused;
-		// its release queues the entry's removal (any thread).
+		// The lease holds the reference the description was taken under, so the address cannot be reused while it lives.
 		auto* held = new Held;
 		held->reference = std::move(a_reference);
 		held->tracked = a_tracked != nullptr;
-		// A described buffer's ref: a view of its BasicRHI import, which the lease's owner holds (an ORG buffer has its own).
 		if (!entry.buffer.ref)
 			if (auto* host = RenderGraphRuntime::Get().Host())
 				entry.buffer.ref = RenderGraph::ImportBufferRef(host->Device(), entry.buffer.vkBuffer, entry.buffer.offset, entry.buffer.size, entry.buffer.address, held->refKeep);
@@ -239,7 +232,7 @@ namespace DCLF
 	void GpuResources::TakeRelocations()
 	{
 		++passes;
-		relocatedBuffers.clear();  // the last BeginFrame's, taken or not (Frame()'s holders never re-acquire)
+		relocatedBuffers.clear();  // Frame()'s holders never re-acquire
 		std::vector<ImportRelocations::Relocation> taken;
 		{
 			std::scoped_lock lock(inboxMutex);
@@ -251,7 +244,7 @@ namespace DCLF
 			seen.pass = passes;
 			const auto c = byCookie.find(relocation.cookie);
 			const auto e = c != byCookie.end() ? entries.find(c->second) : entries.end();
-			// Not this instance's, its last lease gone, or imported after the move: nothing reads the old storage here.
+			// Not ours, its last lease gone, or imported after the move. Nothing here reads the old storage.
 			if (e == entries.end() || e->second.cookie != relocation.cookie || e->second.serial >= relocation.serial) {
 				Bump(counters.relocationsIgnored, 1);
 				continue;
@@ -266,7 +259,7 @@ namespace DCLF
 			Bump(counters.cached, -1);
 			Bump(counters.relocated, 1);
 		}
-		// A prefetched description is taken within two passes (BeginFrame's): the moves older than that name none.
+		// A prefetched description is taken within two passes, so older moves can be dropped.
 		if (!moved.empty() && passes % 8 == 0)
 			std::erase_if(moved, [&](const auto& a_moved) { return a_moved.second.pass + 3 < passes; });
 	}
@@ -287,12 +280,12 @@ namespace DCLF
 				continue;
 			if (const auto it = entries.find(buffer); it != entries.end() && !it->second.owner.expired())
 				continue;
-			// The ORG's own buffers need no description (Acquire reads them directly). Asked without making a ref.
+			// ORG-owned buffers need no description.
 			if (RenderGraph::Engine::Buffers::Owns(buffer))
 				continue;
 			if (!batch)
 				batch = std::make_shared<Batch>();
-			// Named once; described on the pool, under this reference (taken here, on the owner's thread).
+			// Described on the pool under this reference, taken here on the owner's thread.
 			prefetched.emplace(buffer, Prefetched{ batch, static_cast<std::uint32_t>(batch->objects.size()) });
 			batch->references.emplace_back().copy_from(buffer);
 			batch->objects.push_back(buffer);
@@ -307,7 +300,7 @@ namespace DCLF
 		batch->results.assign(batch->objects.size(), E_FAIL);
 		Bump(counters.prefetchBatches, 1);
 		Bump(counters.prefetched, batch->objects.size());
-		// The job holds the batch, so its answers outlive whatever the owner drops meanwhile. A refused job is left to Finish.
+		// The job holds the batch, so its answers outlive whatever the owner drops. A refused job is left to Finish.
 		SceneScheduler::Executor().Dispatch(SceneScheduler::Scope(), SceneExecutor::Preparation, org::async::TaskDispatch::Cpu, "DCLF buffer prefetch",
 			[batch](const auto&) {
 				DCLF_ZONE("CS.DCLF.Scene.PrefetchBuffers.Describe");
@@ -324,12 +317,12 @@ namespace DCLF
 		if (!a_batch.done.load(std::memory_order_acquire)) {
 			const auto start = std::chrono::steady_clock::now();
 			if (!a_batch.claimed.exchange(true, std::memory_order_acq_rel)) {
-				// Not started (the pool is busy): described here, the job finding it claimed.
+				// Not started because the pool is busy, so describe it here.
 				a_batch.Describe();
 				a_batch.done.store(true, std::memory_order_relaxed);
 				Bump(counters.prefetchRunByOwner, 1);
 			} else {
-				// Running on a worker (synchronizing with DXVK's worker): waited for, as ParallelFor waits for a claimed chunk.
+				// Already running on a worker, so wait for it.
 				DCLF_ZONE("CS.DCLF.Scene.PrefetchBuffers.Wait");
 				a_batch.done.wait(false, std::memory_order_acquire);
 				Bump(counters.prefetchWaited, 1);
@@ -342,11 +335,11 @@ namespace DCLF
 
 	void GpuResources::BeginFrame()
 	{
-		// The pass before's batches go (their references with them, on whichever thread drops a batch last); this pass's stay one more.
+		// The pass before's batches go now. This pass's stay one more.
 		prefetchedBefore = std::move(prefetched);
 		prefetched.clear();
 		released->Drain([this](ID3D11Buffer*&& a_key) {
-			// A key resolved again since holds a live lease: that entry stays.
+			// A key resolved again since has a live lease, so that entry stays.
 			if (const auto it = entries.find(a_key); it != entries.end() && it->second.owner.expired()) {
 				if (const auto c = byCookie.find(it->second.cookie); c != byCookie.end() && c->second == a_key)
 					byCookie.erase(c);

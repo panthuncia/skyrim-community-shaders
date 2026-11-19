@@ -1,7 +1,6 @@
 #pragma once
 
-// The scene graph walkers: a live subtree depth first (ForEachLive) and a live parent chain (ForEachParent). The mirror's walks over its
-// records are SceneMirror's (ForEachMirror, ForEachMirrorParent). Any thread where the walked nodes are alive.
+// Scene graph walkers over a live subtree and a live parent chain. Any thread where the walked nodes are alive.
 
 #include <cstddef>
 #include <cstdint>
@@ -12,13 +11,12 @@
 
 namespace DCLF::Engine
 {
-	/** @brief The deepest parent chain a walk follows (a chain longer than this is not the scene graph's). */
+	/** @brief The deepest parent chain a walk follows. Anything longer is not the scene graph. */
 	inline constexpr std::uint32_t kMaxParentDepth = 64;
 
 	/**
-	 * @brief a_node's child slots below its free index, null slots included, as the engine's loops run them. CommonLib's
-	 * begin/end span the capacity, whose tail slots the engine never promises to clear (dclf-architecture.md, "Child indices run
-	 * to _freeIdx"): walk children through this, never a range-for over GetChildren().
+	 * @brief A node's child slots below its free index, null slots included. CommonLib's begin/end span the capacity, whose tail the
+	 * engine never promises to clear. Always walk children through this, never a range-for over GetChildren().
 	 */
 	inline std::span<const RE::NiPointer<RE::NiAVObject>> Children(const RE::NiNode& a_node)
 	{
@@ -26,7 +24,7 @@ namespace DCLF::Engine
 		return { children.begin(), children.free_idx() };
 	}
 
-	/** @brief What a walk's visit makes of the object it visited: its children walked, left out, or the walk ended. */
+	/** @brief What a visit makes of its object: descend, skip its children, or stop. */
 	enum class Walk : std::uint8_t
 	{
 		Descend,
@@ -36,7 +34,7 @@ namespace DCLF::Engine
 
 	namespace Detail
 	{
-		/** @brief A visit's answer as a Walk: a bool is Descend (true) or Stop (false); void is Descend. */
+		/** @brief A visit's answer as a Walk. A bool true is Descend and false is Stop. void is Descend. */
 		template <class Visit, class... Args>
 		Walk Answer(Visit& a_visit, Args&&... a_args)
 		{
@@ -53,8 +51,7 @@ namespace DCLF::Engine
 	}
 
 	/**
-	 * @brief The subtree under a_root depth first, a_root included, each node's children pushed in order and taken last first:
-	 * a_visit(object, depth) (depth 0 at a_root) for each, at most a_limit objects. False when a visit stopped the walk.
+	 * @brief Walks the subtree under a_root depth first, at most a_limit objects. False when a visit stopped the walk.
 	 */
 	template <class Visit>
 	bool ForEachLive(const RE::NiAVObject* a_root, Visit&& a_visit, std::size_t a_limit = ~std::size_t{ 0 })
@@ -78,10 +75,7 @@ namespace DCLF::Engine
 		return true;
 	}
 
-	/**
-	 * @brief The live parent chain from a_from (included) up to its top: a_visit(object) for each until it returns false. The object it
-	 * stopped at, or null when it reached the top.
-	 */
+	/** @brief Walks the parent chain from a_from up until a_visit returns false. Returns where it stopped, or null at the top. */
 	template <class Visit>
 	const RE::NiAVObject* ForEachParent(const RE::NiAVObject* a_from, Visit&& a_visit)
 	{

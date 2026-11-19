@@ -1,5 +1,4 @@
-// DrawPipelines' forward pipelines (ForwardPipelines): the forward views' keys and the refraction pipeline, built for their
-// targets and bound by handle.
+// Forward pipelines and the refraction pipeline, built for their targets and bound by handle.
 
 // volk must precede every Vulkan header in this translation unit.
 #include <rhi_interop_vulkan.h>
@@ -46,7 +45,7 @@ namespace DCLF
 {
 	namespace
 	{
-		/** @brief The draw family whose lane slot's forward flags a_flags (a forward key's) carry, or Count for a Lighting key. */
+		/** @brief The draw family whose forward flags a_flags carry, or Count for a Lighting key. */
 		Api::DrawFamily ForwardFamilyOf(std::uint32_t a_flags)
 		{
 			for (const auto& slot : kDrawFamilyLaneSlots)
@@ -110,7 +109,7 @@ namespace DCLF
 		auto& r = lane.refraction;
 		if (!r.asked || r.requested || r.built || r.failed)
 			return;
-		// What it lacks arrives with the frame's inputs or its program (Finished::shadow); DrainLane retries each pass.
+		// Missing inputs arrive later, and DrainLane retries each pass.
 		const auto* input = lane.input.get();
 		if (!input || !input->refractionUtility || input->refractionFormat == DXGI_FORMAT_UNKNOWN || input->targets.depth == DXGI_FORMAT_UNKNOWN || !input->frontCCW ||
 			!shadowLayout)
@@ -158,11 +157,9 @@ namespace DCLF
 		auto& f = lane.forward;
 		if (f.entries.contains(a_key))
 			return;  // requested, or failed for good
-		// A draw family's key (its lane slot's forward flags: tree LOD's) draws its forward program.
 		const auto family = ForwardFamilyOf(a_key.flags);
 		const bool familyKey = family != Api::DrawFamily::Count;
 		const auto d = static_cast<std::size_t>(family);
-		// A key draws into its view's targets (Extensions::ForwardKeyView), with its view's culling (a plain projection's back faces).
 		const auto view = Extensions::ForwardKeyView(a_key.flags);
 		const bool cullBack = view != Api::EngineView::Count && Extensions::ViewEntryOf(view).keys.cullBackFaces;
 		const auto* input = lane.input.get();
@@ -176,7 +173,7 @@ namespace DCLF
 		const auto program = familyKey ? ShaderPrograms::Get().FindDrawFamilyForward(family, *input->drawFamilySource[d], &programFailed) :
 		                                 ShaderPrograms::Get().FindForward(a_key.vertexDescriptor, a_key.pixelDescriptor, *input->lighting, &programFailed);
 		if (programFailed) {
-			// Its objects stay out of the reflection phase (the engine draws them).
+			// The engine draws its objects in the reflection phase instead.
 			f.FailForGood(a_key);
 			f.counters.failed.fetch_add(1, std::memory_order_relaxed);
 			lane.dirty = true;
@@ -198,7 +195,6 @@ namespace DCLF
 			return BuildForward(device, zLayout, &a_program, forwardTargets, cull, frontCCW);
 		};
 		recipe.build = [build, program] { return build(*program); };
-		// Its program as the lane made it: a draw family's forward descriptor's, or the Lighting pair's.
 		const RE::BSShader* shader = familyKey ? input->drawFamilySource[d] : input->lighting;
 		auto live = MakeLive(recipe.id, ShaderPrograms::SourcePathOf(*shader), *program,
 			[family, familyKey, shader, key = a_key](ShaderPrograms::Rebuilt<ShaderPrograms::ForwardProgram> a_done) {
@@ -215,14 +211,13 @@ namespace DCLF
 				WakePipelineLane();
 			});
 		f.counters.requested.fetch_add(1, std::memory_order_relaxed);
-		lane.dirty = true;  // the catalog reports its program
+		lane.dirty = true;
 	}
 
 	void DrawPipelines::Impl::RecreateForward(const ForwardTargets& a_from, const ForwardTargets& a_to)
 	{
 		auto& f = lane.forward;
-		// Start over (the new generation drops queued builds' completions); built ones are kept for the process: a recording may still
-		// draw with them.
+		// Built pipelines are kept for the process, because a recording may still draw with them.
 		logger::info("[DCLF] pipeline lane: forward targets colour {} depth {} -> colour {} depth {}; rebuilding {} forward pipelines", static_cast<int>(a_from.colour),
 			static_cast<int>(a_from.depth), static_cast<int>(a_to.colour), static_cast<int>(a_to.depth), f.entries.size());
 		ResetForward();
@@ -231,7 +226,6 @@ namespace DCLF
 	void DrawPipelines::Impl::ResetForward()
 	{
 		auto& f = lane.forward;
-		// Their slots go with their entries (StartOver), and their registry entries with them.
 		for (auto& entry : f.entries)
 			if (entry.second.built)
 				f.retired.push_back(std::move(entry.second.built));
@@ -273,7 +267,7 @@ namespace DCLF
 		desc.depth.ds.depthEnable = true;
 		desc.depth.ds.depthWrite = true;
 		desc.depth.ds.depthFunc = rhi::CompareOp::LessEqual;
-		// No blending, every channel written (the engine's write mask there is stale state; the cube's alpha is not read).
+		// No blending. The engine's write mask here is stale state, and the cube's alpha is not read.
 		desc.Colour(a_targets.colour);
 		if (a_targets.colour2 != DXGI_FORMAT_UNKNOWN)
 			desc.Colour(a_targets.colour2);

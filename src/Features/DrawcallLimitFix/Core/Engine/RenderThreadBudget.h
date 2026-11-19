@@ -8,29 +8,22 @@
 namespace DCLF
 {
 	/**
-	 * @brief DCLF's render-thread time a frame, by what the asynchronous scene leaves on it (dclf-architecture.md,
-	 * "The render thread").
-	 *
-	 * Every DCLF hook the render thread enters is a Hook: its whole time is counted, by site. Parts nested in it are counted to
-	 * their bucket; the epochs it ran are split by RenderGraphRuntime::RenderThreadEpochTotals (the submission proper, and ORG's
-	 * other render-thread work); the rest is Other. The per-draw hooks (NoteNativePass,
-	 * OnNativeLightingDraw) and the engine's own hooks DCLF edits (the sun's and point lights' culls, the scene lists, the pass
-	 * capture on the job threads) are not counted here: they report their own times.
-	 *
-	 * Render thread only: a scope on any other thread counts nothing.
+	 * @brief DCLF's render-thread time per frame, by bucket. Every DCLF hook the render thread enters is a Hook, counted by site.
+	 * Parts nested in it go to their bucket, the epochs are split by ORG's totals, and the rest is Other. Per-draw hooks and the hooks
+	 * on job threads report their own times. Render thread only.
 	 */
 	class RenderThreadBudget
 	{
 	public:
 		enum class Bucket : std::uint8_t
 		{
-			Exchange,        // the frame's start's exchange with the scene: the snapshot taken and adopted, its publication installed
-			SceneCaptures,   // the frame's start's engine captures and requests for the scene (globals, categories, mirror, switches)
-			Capture,         // copying state only the render thread can read: D3D11 bindings, constant mirrors, view state
-			Submit,          // ORG's submission proper: the ticket, the queue submission, the stream's close
-			OrgOverhead,     // ORG's other render-thread work in an epoch: releases, the ticket's check, upload recording, flushes
+			Exchange,  // the frame start's exchange with the scene
+			SceneCaptures,  // the frame start's engine captures for the scene
+			Capture,  // copying state only the render thread can read
+			Submit,  // ORG's submission proper
+			OrgOverhead,  // ORG's other render-thread work in an epoch
 			EngineBoundary,  // engine code DCLF calls and engine writes it applies
-			Other,           // everything else (work that belongs off the render thread)
+			Other,  // work that belongs off the render thread
 			Count
 		};
 
@@ -66,7 +59,7 @@ namespace DCLF
 			bool counted = false;
 		};
 
-		/** @brief A part of a hook (or of nothing) counted to a_bucket rather than Other. */
+		/** @brief A part of a hook counted to a_bucket rather than Other. */
 		class Part
 		{
 		public:
@@ -81,20 +74,20 @@ namespace DCLF
 			std::chrono::steady_clock::time_point start;
 		};
 
-		/** @brief One frame's render-thread time: its total and its buckets, in microseconds. */
+		/** @brief One frame's total and buckets, in microseconds. */
 		struct FrameTime
 		{
 			double totalUs = 0.0;
 			std::array<double, static_cast<std::size_t>(Bucket::Count)> bucketUs{};
 		};
 
-		/** @brief The frame's end (Present, after its hook): the frame's total joins the report's maximum. */
+		/** @brief At Present. The frame's total joins the report's maximum. */
 		void EndFrame();
 
-		/** @brief Render thread: the last frame EndFrame closed. Reads only; the report is not reset. */
+		/** @brief Render thread. The last frame EndFrame closed. */
 		const FrameTime& LastFrame() const { return lastFrame; }
 
-		/** @brief A bucket's name, as the report line prints it. */
+		/** @brief A bucket's name in the report. */
 		static const char* BucketName(Bucket a_bucket);
 
 		/** @brief The report line since the last one, or empty when no frame ended. */
@@ -108,14 +101,14 @@ namespace DCLF
 		std::uint32_t depth = 0;
 		Site site = Site::Present;
 		std::chrono::steady_clock::time_point hookStart;
-		double hookPartsUs = 0.0;  // the open hook's parts
+		double hookPartsUs = 0.0;
 		double epochSubmitStart = 0.0, epochOverheadStart = 0.0;
 
 		std::array<double, static_cast<std::size_t>(Bucket::Count)> bucketUs{};
 		std::array<double, static_cast<std::size_t>(Site::Count)> siteUs{};
 		std::array<std::uint32_t, static_cast<std::size_t>(Site::Count)> siteCalls{};
 		double frameUs = 0.0;
-		std::array<double, static_cast<std::size_t>(Bucket::Count)> frameBucketUs{};  // this frame's buckets
+		std::array<double, static_cast<std::size_t>(Bucket::Count)> frameBucketUs{};
 		FrameTime lastFrame;
 		double frameMaxUs = 0.0;
 		double totalUs = 0.0;

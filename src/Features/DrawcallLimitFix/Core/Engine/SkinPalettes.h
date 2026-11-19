@@ -7,21 +7,20 @@
 
 namespace DCLF::SkinPalettes
 {
-	inline constexpr std::uint32_t kRowsPerBone = 3;  // float4 rows a bone (FrameValues::PaletteRow)
-	inline constexpr std::uint32_t kMaxRows = 240;    // the engine's palette limit: 80 bones
+	inline constexpr std::uint32_t kRowsPerBone = 3;  // float4 rows per bone
+	inline constexpr std::uint32_t kMaxRows = 240;  // the engine's palette limit, 80 bones
 
-	/** @brief The palette rows a skin's record needs: three a bone, 0 without skin data. */
+	/** @brief The palette rows a skin's record needs, 0 without skin data. */
 	inline std::uint32_t RowsOf(const SceneCapture::GeometryRecord& a_geometry)
 	{
 		return a_geometry.skinData ? a_geometry.boneCount * kRowsPerBone : 0u;
 	}
-	/** @brief Whether a skin of a_rows takes a palette block (some rows, within the engine's limit). */
+	/** @brief Whether a skin of a_rows takes a palette block, within the engine's limit. */
 	inline bool Fits(std::uint32_t a_rows) { return a_rows && a_rows <= kMaxRows; }
 
 	/**
-	 * @brief The engine's per-frame palette update (AE FUN_140e4ff90), which the native draw's bone setter runs and an owned skin
-	 * misses. Idempotent per frame (frameID) under the skin's critical section, so any thread may run it; copies current to
-	 * previous, then writes three float4 rows per bone in absolute world space.
+	 * @brief The engine's per-frame palette update (AE FUN_140e4ff90), which an owned skin would otherwise miss. Idempotent per frame
+	 * under the skin's critical section, so any thread may run it.
 	 */
 	inline void Update(RE::NiSkinInstance* a_skin, const RE::NiTransform& a_world)
 	{
@@ -30,7 +29,7 @@ namespace DCLF::SkinPalettes
 		updateSkinInstance(a_skin, &a_world);
 	}
 
-	// The skin's palettes after this frame's update; false when its size mismatches its block (the walk rewrites it: KeepSkin).
+	// False when its size mismatches its block.
 	inline bool Of(const RE::BSGeometry& a_geometry, std::uint32_t a_rows, const float*& a_current, const float*& a_previous)
 	{
 		auto* skin = a_geometry.GetGeometryRuntimeData().skinInstance.get();
@@ -41,10 +40,7 @@ namespace DCLF::SkinPalettes
 		return a_current && a_previous && skin->numMatrices * 3 == a_rows;
 	}
 
-	/**
-	 * @brief Engine read (under the caller's lease): runs the skin's palette update (Update), then its palettes (Of); false when it
-	 * has none or their size is not a_rows.
-	 */
+	/** @brief Under the caller's lease. Runs the palette update, then reads the palettes. False when the size is not a_rows. */
 	inline bool Sample(const RE::BSGeometry& a_geometry, std::uint32_t a_rows, const float*& a_current, const float*& a_previous)
 	{
 		if (auto* skin = a_geometry.GetGeometryRuntimeData().skinInstance.get())

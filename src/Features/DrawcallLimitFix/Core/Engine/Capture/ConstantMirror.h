@@ -14,26 +14,21 @@ struct D3D11_BOX;
 namespace DCLF
 {
 	/**
-	 * @brief CPU copies of D3D11 buffers the graph needs but must not lock: constant buffers and dynamic
-	 * structured buffers the game and Community Shaders rewrite with Map(WRITE_DISCARD) or
-	 * UpdateSubresource. A buffer is mirrored once it is watched: every later write through the immediate
-	 * context lands in its copy too. The write tracking is RenderGraph::Engine::Constants::BufferContents, which the per-use
-	 * capture of the engine's constants (EngineConstants.h) shares.
-	 *
-	 * D3D11 immediate-context thread only (the render thread), like the hooks that feed it.
+	 * @brief CPU copies of D3D11 buffers the graph needs but must not lock, which the game and CS rewrite with Map(WRITE_DISCARD) or
+	 * UpdateSubresource. Once watched, every later write through the immediate context lands in the copy too.
+	 * Immediate-context thread only.
 	 */
 	class ConstantMirror
 	{
 	public:
 		static ConstantMirror& Get();
 
-		/** @brief Starts mirroring a buffer (idempotent). Its copy is invalid until the next full write. */
+		/** @brief Starts mirroring a buffer. Its copy is invalid until the next full write. */
 		void Watch(ID3D11Buffer* a_buffer);
 
 		/**
-		 * @brief The buffer's current contents, or empty when not watched or never written since. A mapped
-		 * buffer is re-read from its last mapping, which DXVK keeps valid until the next Map: the engine
-		 * writes some constants after Unmap (engine notes: SetupTechnique).
+		 * @brief The buffer's current contents, or empty. A mapped buffer is re-read from its last mapping, which DXVK keeps valid until the
+		 * next Map, because the engine writes some constants after Unmap.
 		 */
 		std::span<const std::byte> Contents(const ID3D11Buffer* a_buffer);
 
@@ -49,14 +44,13 @@ namespace DCLF
 		{
 			ID3D11Buffer* buffer = nullptr;  // referenced while watched
 			std::uint32_t byteWidth = 0;
-			// The last finished mapping is copied once, by the first read after it (Contents) or a partial UpdateSubresource, rather
-			// than at every Unmap (a buffer is unmapped more often than it is read).
+			// The last mapping is copied by the first read after it, not at every Unmap, since buffers are unmapped more often than read.
 			::RenderGraph::Engine::Constants::BufferContents contents;
 		};
 
 		Entry* Find(const ID3D11Resource* a_resource);
 		const Entry* Find(const ID3D11Resource* a_resource) const;
 
-		std::vector<Entry> entries;  // a handful of buffers: a linear search is cheapest
+		std::vector<Entry> entries;  // a handful of buffers, so a linear search is cheapest
 	};
 }

@@ -1,4 +1,4 @@
-// WindowWriters: the cell animations' and animated cell objects' jobs' updates between the frame's sampling and the window's resumption (WindowWriters.h).
+// Runs the cell animation jobs' updates after the frame's sampling, with the engine-read window suspended.
 #include "Features/DrawcallLimitFix/Core/Engine/WindowWriters.h"
 
 #include "Features/DrawcallLimitFix/Core/Engine/EngineAccess.h"
@@ -14,9 +14,8 @@ namespace DCLF::WindowWriters
 	namespace
 	{
 		bool installed = false;
-		std::atomic<bool> held{ false };  // Hold: the updates wait for Release
+		std::atomic<bool> held{ false };  // the updates wait for Release
 
-		// One writer's counters (Counters::Job), atomically.
 		struct JobCounters
 		{
 			std::atomic<std::uint64_t> runs{ 0 }, waited{ 0 }, waitedUs{ 0 }, waitedMaxUs{ 0 };
@@ -29,7 +28,7 @@ namespace DCLF::WindowWriters
 		};
 		JobCounters cellAnimations, animatedObjects;
 
-		// A writer's update: after the frame's sampling (and a parity frame's Release), with the window suspended until EndWriter.
+		// After the frame's sampling, and a parity frame's Release, with the window suspended until EndWriter.
 		void BeginWriter(JobCounters& a_counters)
 		{
 			a_counters.runs.fetch_add(1, std::memory_order_relaxed);
@@ -56,7 +55,7 @@ namespace DCLF::WindowWriters
 
 		struct CellAnimations
 		{
-			// The job's call: TES and the frame's animation time (xmm1).
+			// TES and the frame's animation time (xmm1).
 			static void thunk(RE::TES* a_tes, float a_time)
 			{
 				AsWriter(cellAnimations, [&] { func(a_tes, a_time); });
@@ -64,8 +63,7 @@ namespace DCLF::WindowWriters
 			static inline REL::Relocation<decltype(thunk)> func;
 		};
 
-		// The job's queuing of its updates on its group, then (straight on) the group's start and wait: the window is suspended from
-		// the first to the end of the last.
+		// The window is suspended from the job's queuing call to the end of its wait.
 		struct AnimatedObjects
 		{
 			static void thunk(void* a_group)
@@ -86,7 +84,7 @@ namespace DCLF::WindowWriters
 			static inline REL::Relocation<decltype(thunk)> func;
 		};
 
-		// A writer's call, chained onto whatever it holds (logged when that is not the engine's a_target).
+		// Chains onto whatever the call holds, and logs when that is not the engine's.
 		template <class T>
 		void Chain(const Engine::Offset& a_call, const Engine::Offset& a_target, const char* a_job)
 		{
@@ -115,7 +113,7 @@ namespace DCLF::WindowWriters
 			return;
 		Chain<CellAnimations>(Engine::Address::kCellAnimationsCall, Engine::Address::kCellAnimationsUpdate, "cell animations");
 		Installed("cell animations");
-		// Both of its calls (Preflight required both): a suspension never resumed would refuse every lease after it.
+		// Both calls are required, because a suspension never resumed would refuse every lease after it.
 		constexpr const char* kObjects = "animated cell object update";
 		Chain<AnimatedObjects>(Engine::Address::kAnimatedObjectsCall, Engine::Address::kAnimatedObjectsUpdate, kObjects);
 		Chain<AnimatedObjectsWait>(Engine::Address::kAnimatedObjectsWaitCall, Engine::Address::kAnimatedObjectsWait, kObjects);
