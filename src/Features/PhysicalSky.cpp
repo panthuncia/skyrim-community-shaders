@@ -13,6 +13,7 @@
 #include "CloudShadows.h"
 #include "Deferred.h"
 #include "Effects11.h"
+#include "Features/PhysicalSky/ORGCloudInputs.h"
 #include "Features/PhysicalSky/ORGCloudMaps.h"
 #include "Features/PhysicalSky/ORGPhysicalSky.h"
 #include "Features/PhysicalSky/ORGVolumetricClouds.h"
@@ -579,8 +580,8 @@ void PhysicalSky::Settings::ApplyAerosolOptics()
 
 bool PhysicalSky::VolumetricCloudsEnabled() const
 {
-	// Native mode runs no D3D11 work and the clouds are not on the render graph yet, so their targets would hold nothing.
-	return settings.enableVolumetricClouds && !volumetricScreenResourcesFailed && !RenderGraph::Engine::Native::Active();
+	// In the graph modes, native too, the clouds are the render graph's (ORGVolumetricClouds).
+	return settings.enableVolumetricClouds && !volumetricScreenResourcesFailed;
 }
 
 bool PhysicalSky::IsActive() const
@@ -1787,6 +1788,11 @@ void PhysicalSky::SetupResources()
 	ORGPhysicalSky::Get().Setup(*this);
 	// The cloud map generators on the render graph, after the managers made their twins.
 	ORGCloudMaps::Get().Setup(*this);
+#if defined(CS_HAS_RENDER_GRAPH)
+	// The cloud renderer reads the generators' outputs.
+	if (ORGVolumetricClouds::Requested())
+		ORGVolumetricClouds::Get().SetInputSource(&ORGCloudInputs::Gather);
+#endif
 }
 
 void PhysicalSky::ClearShaderCache()

@@ -267,7 +267,9 @@ void VoxelCloudManager::Update(const SceneBlend& selection, const std::string& w
 		data = eastl::make_unique<StructuredBuffer>(StructuredBufferDesc<VoxelCloudData>(capacity, true), capacity, "PhysicalSky::VoxelCloudPlacements");
 		data->CreateSRV();
 	}
-	data->Update(active.data(), active.size() * sizeof(VoxelCloudData));
+	// On the graph the cloud renderer latches the placements.
+	if (!ORGCloudMaps::Requested())
+		data->Update(active.data(), active.size() * sizeof(VoxelCloudData));
 	bindings.back() = data->SRV();
 }
 

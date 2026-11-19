@@ -236,7 +236,7 @@ void CloudStormManager::Update(TextureManager& textures, ID3D11ShaderResourceVie
 			key.clear();
 			return;
 		}
-		data->Update(active.data(), active.size() * sizeof(CloudStormData));
+		// The cloud renderer reads the instances from its latch on the graph.
 		++revision;
 		return;
 	}
@@ -426,6 +426,9 @@ void CloudStormManager::UpdateMotion(double time, double previousTime, float2 lo
 			parcel.previousNoiseOffset = previous.noiseOffset;
 		}
 	}
+	// On the graph the cloud renderer latches the instances itself.
+	if (ORGCloudMaps::Requested())
+		return;
 	data->Update(active.data(), active.size() * sizeof(CloudStormData));
 	if (active.size() == 1)
 		generatorCb->Update(active.front());

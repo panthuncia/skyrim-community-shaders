@@ -37,6 +37,9 @@ public:
 	static constexpr std::string_view kVolTrId = "PhysicalSky::VolTr";
 	static constexpr std::string_view kVolLumId = "PhysicalSky::VolLum";
 	static constexpr std::string_view kVolAuxId = "PhysicalSky::VolAux";
+	// The reprojected targets before the filter, which the deferred composite's aerial perspective reads (D3D11 t18, t19).
+	static constexpr std::string_view kVolTrCurrentId = "PhysicalSky::CloudTr";
+	static constexpr std::string_view kVolLumCurrentId = "PhysicalSky::CloudLum";
 	static constexpr std::string_view kVolCubeTrId = "PhysicalSky::VolCubeTr";
 	static constexpr std::string_view kVolCubeLumId = "PhysicalSky::VolCubeLum";
 	static constexpr std::string_view kVolCubeDepthId = "PhysicalSky::VolCubeDepth";

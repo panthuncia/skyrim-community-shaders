@@ -87,7 +87,9 @@ void LocalNdfManager::SetupResources()
 	weights = eastl::make_unique<StructuredBuffer>(StructuredBufferDesc<float4>(1u, true), 1, "PhysicalSky::LocalNdfWeights");
 	weights->CreateSRV();
 	layerWeights.assign(1, float4{});
-	weights->Update(layerWeights.data(), sizeof(float4));
+	// On the graph the cloud renderer latches the weights.
+	if (!ORGCloudMaps::Requested())
+		weights->Update(layerWeights.data(), sizeof(float4));
 	targets.clear();
 	previews.clear();
 	activeAssets.clear();
@@ -201,7 +203,8 @@ bool LocalNdfManager::Update(const NdfSettings& settings, TextureManager& textur
 		weights = eastl::make_unique<StructuredBuffer>(StructuredBufferDesc<float4>(static_cast<UINT>(nextWeights.size()), true), static_cast<UINT>(nextWeights.size()), "PhysicalSky::LocalNdfWeights");
 		weights->CreateSRV();
 	}
-	if (nextWeights.size() != layerWeights.size() || std::memcmp(nextWeights.data(), layerWeights.data(), nextWeights.size() * sizeof(float4)) != 0)
+	if (!ORGCloudMaps::Requested() &&
+		(nextWeights.size() != layerWeights.size() || std::memcmp(nextWeights.data(), layerWeights.data(), nextWeights.size() * sizeof(float4)) != 0))
 		weights->Update(nextWeights.data(), nextWeights.size() * sizeof(float4));
 	layerWeights = std::move(nextWeights);
 	std::string nextKey = worldspace;

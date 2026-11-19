@@ -12,6 +12,7 @@
 
 #include "Features/PhysicalSky.h"
 #include "Features/PhysicalSky/ORGPhysicalSky.h"
+#include "Features/PhysicalSky/ORGVolumetricClouds.h"
 #include "RenderGraph/Engine/Native/Native.h"
 #include "RenderGraph/PublishedResources.h"
 
@@ -47,17 +48,21 @@ namespace DCLF::Integrations::PhysicalSky
 			{ false, [](const ::PhysicalSky& a_sky) { return PhysSkySrvOf(a_sky.texCloudShadowMean); } },
 			{ true, [](const ::PhysicalSky& a_sky) { return PhysSkySrvOf(a_sky.texDiskPhaseLut); } },
 			{ false, [](const ::PhysicalSky& a_sky) { return PhysSkySrvOf(a_sky.texLightningCubeLum); } },
-			{ false, [](const ::PhysicalSky& a_sky) { return PhysSkySrvOf(a_sky.texVolTr); } },
-			{ false, [](const ::PhysicalSky& a_sky) { return PhysSkySrvOf(a_sky.texVolLum); } },
+			// The filtered targets, which the feature binds at t110 and t111 for engine draws.
+			{ false, [](const ::PhysicalSky& a_sky) { return PhysSkySrvOf(a_sky.texVolFilteredTr); } },
+			{ false, [](const ::PhysicalSky& a_sky) { return PhysSkySrvOf(a_sky.texVolFilteredLum); } },
 			{ false, [](const ::PhysicalSky& a_sky) { return PhysSkySrvOf(a_sky.texShadowVolume); } },
 			{ false, [](const ::PhysicalSky& a_sky) { return PhysSkySrvOf(a_sky.texLightningChannels); } },
 			{ false, [](const ::PhysicalSky& a_sky) { return PhysSkySrvOf(a_sky.texVolCubeTr); } },
 			{ false, [](const ::PhysicalSky& a_sky) { return PhysSkySrvOf(a_sky.texVolCubeLum); } },
 		} };
 
-		// The graph twins' published ids, by slot: the LUTs, the AP shadow and the sky tail. Empty for D3D11's textures.
+		// The graph twins' published ids, by slot: the LUTs, the AP shadow, the sky tail and the clouds' outputs.
 		constexpr std::array<std::string_view, kOrgTextureRegisters.size()> kPhysSkySlotIds{ ORGPhysicalSky::kTransmittanceLutId, ORGPhysicalSky::kSkyViewLutId,
-			ORGPhysicalSky::kApLutId, ORGPhysicalSky::kApShadowId, ORGPhysicalSky::kSkyTailId, {}, {}, ORGPhysicalSky::kDiskPhaseLutId };
+			ORGPhysicalSky::kApLutId, ORGPhysicalSky::kApShadowId, ORGPhysicalSky::kSkyTailId, ORGVolumetricClouds::kVolCubeDepthId,
+			ORGVolumetricClouds::kCloudShadowMeanId, ORGPhysicalSky::kDiskPhaseLutId, ORGVolumetricClouds::kLightningReflectionId, ORGVolumetricClouds::kVolTrId,
+			ORGVolumetricClouds::kVolLumId, ORGVolumetricClouds::kShadowVolumeId, ORGVolumetricClouds::kLightningChannelsId, ORGVolumetricClouds::kVolCubeTrId,
+			ORGVolumetricClouds::kVolCubeLumId };
 
 		constexpr std::size_t PhysSkySlotOf(std::uint32_t a_register)
 		{
@@ -75,11 +80,12 @@ namespace DCLF::Integrations::PhysicalSky
 		}
 
 		// The view medium's cloud depth. D3D11 binds it at t116 after the medium composite, so no capture holds it at t105.
+		// It is the clouds' published filtered aux target in every graph mode.
 		void* PhysSkyMediumCloudDepthView()
 		{
 			const auto& sky = globals::features::physicalSky;
-			const bool made = !RenderGraph::Engine::Native::Active() && sky.IsActive() && sky.VolumetricCloudsEnabled() && sky.texVolFilteredAux;
-			return made ? sky.texVolFilteredAux->srv.get() : GpuTextures::NullView(PhysSkyKind::Texture2D);
+			auto* srv = sky.IsActive() && sky.VolumetricCloudsEnabled() && sky.texVolFilteredAux ? sky.texVolFilteredAux->srv.get() : nullptr;
+			return srv && PublishedResources::IsExportOf(srv, ORGVolumetricClouds::kVolAuxId) ? srv : GpuTextures::NullView(PhysSkyKind::Texture2D);
 		}
 
 		template <std::uint32_t Register>
@@ -109,7 +115,10 @@ namespace DCLF::Integrations::PhysicalSky
 			RegisterPhysSkySlot<kLightningChannelsRegister>(a_context, "physical sky lightning channels");
 			RegisterPhysSkySlot<kVolCubeTrRegister>(a_context, "physical sky cloud cube transmittance");
 			RegisterPhysSkySlot<kVolCubeLumRegister>(a_context, "physical sky cloud cube luminance");
-			a_context.RegisterFrameTexture({ .name = "physical sky medium cloud depth", .textureRegister = kMediumCloudDepthRegister, .view = &PhysSkyMediumCloudDepthView });
+			a_context.RegisterFrameTexture({ .name = "physical sky medium cloud depth",
+				.textureRegister = kMediumCloudDepthRegister,
+				.view = &PhysSkyMediumCloudDepthView,
+				.graphResources = { ORGVolumetricClouds::kVolAuxId } });
 		}
 	}
 
@@ -122,7 +131,8 @@ namespace DCLF::Integrations::PhysicalSky
 		auto* srv = sky.loaded && sky.cbData.enabled ? slot.srv(sky) : nullptr;
 		if (!srv)
 			return GpuTextures::NullView(kOrgTextureKinds[a_slot]);
-		// The LUTs are graph textures in every graph mode. So are the AP shadow and the sky tail while their twins are the textures.
+		// The LUTs are graph textures in every graph mode. So are the AP shadow, the sky tail and the clouds' outputs while their
+		// twins are the textures.
 		if (slot.lut || (!kPhysSkySlotIds[a_slot].empty() && PublishedResources::IsExportOf(srv, kPhysSkySlotIds[a_slot])))
 			return srv;
 		// Native mode runs none of the D3D11 passes that write the rest.
