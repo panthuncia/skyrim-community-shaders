@@ -1,4 +1,5 @@
 #include "ORGPostProcessing.h"
+#include "Utils/Logging.h"
 #include "RenderGraph/Engine/Native/Native.h"
 
 #include "RenderGraph/Switches.h"
