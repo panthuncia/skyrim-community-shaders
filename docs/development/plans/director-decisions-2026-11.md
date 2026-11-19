@@ -113,5 +113,7 @@ final until the user confirms it.
     - Upscaler options are not yet read from the adopted revision. This moved to migration 6.14.
     - The Dev-Fast PDB hit LNK1140 (the program database size limit) after many incremental links. Deleting the `.pdb` and
       `.ilk` fixes it.
-22. **Step 6 runs one lead per migration.** 6.1 (EHF) goes alone first, because it lands the declaration API. After it, at
-    most three migrations run at once, on disjoint files.
+22. **Step 6 runs one lead per migration.** 6.1 (EHF) goes alone first, because it lands the declaration API. After it, up to
+    six migrations run at once, on disjoint files (the user raised this from the plan's three on 2026-11-19). To stay near
+    the cap of about 8 agents building at once, each migration lead does its own build and uses at most one worker. Runs
+    still go one at a time through the cs-test lock, so test queues get longer.
