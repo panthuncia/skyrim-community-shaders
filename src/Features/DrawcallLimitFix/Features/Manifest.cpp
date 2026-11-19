@@ -37,6 +37,7 @@
 #include "Features/DrawcallLimitFix/Integrations/TerrainBlending/TerrainBlending.h"
 #include "Features/DrawcallLimitFix/Integrations/TerrainShadows/TerrainShadows.h"
 #include "Features/DrawcallLimitFix/Integrations/TruePBR/TruePBRIntegration.h"
+#include "Features/DrawcallLimitFix/Integrations/ViewAtmosphere/ViewAtmosphere.h"
 #include "Features/DrawcallLimitFix/Integrations/VolumetricShadows/VolumetricShadows.h"
 #include "Features/DrawcallLimitFix/Integrations/WaterEffects/WaterEffects.h"
 
@@ -99,6 +100,9 @@ namespace DCLF::Features
 			Integrations::ScreenSpaceShadows::kShadowTextureRegister,
 			Integrations::LightLimitFix::kLocalShadowDataRegister,
 			Integrations::LightLimitFix::kLocalShadowMapsRegister,
+			Integrations::ViewAtmosphere::kLuminanceRegister,
+			Integrations::ViewAtmosphere::kTransmittanceRegister,
+			Integrations::ViewAtmosphere::kParametersRegister,
 		};
 
 		constexpr bool FrameTextureRegistersValid()

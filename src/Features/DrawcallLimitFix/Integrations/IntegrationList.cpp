@@ -16,6 +16,7 @@
 #include "Features/DrawcallLimitFix/Integrations/TerrainBlending/TerrainBlending.h"
 #include "Features/DrawcallLimitFix/Integrations/TerrainShadows/TerrainShadows.h"
 #include "Features/DrawcallLimitFix/Integrations/TruePBR/TruePBRIntegration.h"
+#include "Features/DrawcallLimitFix/Integrations/ViewAtmosphere/ViewAtmosphere.h"
 #include "Features/DrawcallLimitFix/Integrations/VolumetricShadows/VolumetricShadows.h"
 #include "Features/DrawcallLimitFix/Integrations/WaterEffects/WaterEffects.h"
 
@@ -34,6 +35,7 @@ namespace DCLF::Integrations
 			ExtendedTranslucency::Integration(),
 			VolumetricShadows::Integration(),
 			ExponentialHeightFog::Integration(),
+			ViewAtmosphere::Integration(),
 			CloudShadows::Integration(),
 			DynamicCubemaps::Integration(),
 			Skylighting::Integration(),

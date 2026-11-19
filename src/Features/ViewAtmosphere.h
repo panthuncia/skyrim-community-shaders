@@ -26,6 +26,10 @@ public:
 	void SaveSettings(json& value) override;
 	/** @brief Restores shared volume quality defaults. */
 	void RestoreDefaultSettings() override;
+	/** @brief Sets up the render graph path in the graph modes. */
+	void SetupResources() override;
+	/** @brief Reserves the render graph path's anchors. */
+	void PostPostLoad() override;
 	struct alignas(16) Settings
 	{
 		uint enabled = 1;

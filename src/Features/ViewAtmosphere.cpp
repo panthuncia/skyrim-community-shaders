@@ -13,6 +13,7 @@
 #include "Features/PhysicalSky.h"
 #include "Features/Skylighting.h"
 #include "Features/TerrainShadows.h"
+#include "Features/ViewAtmosphere/ORGViewAtmosphere.h"
 #include "RenderGraph/Engine/Tripwire/Tripwire.h"
 #include "ShaderCache.h"
 #include "State.h"
@@ -142,9 +143,25 @@ void ViewAtmosphere::DrawDebugSection()
 
 #undef I18N_KEY_PREFIX
 
+void ViewAtmosphere::SetupResources()
+{
+	ORGViewAtmosphere::Get().Setup();
+}
+
+void ViewAtmosphere::PostPostLoad()
+{
+	ORGViewAtmosphere::Reserve();
+}
+
 bool ViewAtmosphere::Prepare()
 {
 	prepared = ready = false;
+	// The graph modes' medium is ORGViewAtmosphere's. Nothing here runs D3D11 work there.
+	if (ORGViewAtmosphere::Requested()) {
+		ORGViewAtmosphere::Get().Prepass();
+		lastFrame = UINT32_MAX;
+		return false;
+	}
 	Unbind();
 	auto& sky = globals::features::physicalSky;
 	if (!sky.loaded || !sky.cbData.enabled || !loaded || !settings.enabled || !sky.texTrLut || !sky.texMsLut || !sky.texSkyTail || !sky.csSkyTailGen ||
@@ -388,6 +405,8 @@ void ViewAtmosphere::Bind(bool compute)
 
 void ViewAtmosphere::RenderReflection()
 {
+	if (ORGViewAtmosphere::Requested())
+		return;
 	Unbind();
 	auto& sky = globals::features::physicalSky;
 	auto& fog = globals::features::exponentialHeightFog;
@@ -533,6 +552,8 @@ void ViewAtmosphere::RenderReflection()
 
 void ViewAtmosphere::Unbind()
 {
+	if (ORGViewAtmosphere::Requested())
+		return;
 	ID3D11ShaderResourceView* nullSrvs[3]{};
 	globals::d3d::context->PSSetShaderResources(125, 3, nullSrvs);
 	globals::d3d::context->CSSetShaderResources(125, 3, nullSrvs);
@@ -540,6 +561,7 @@ void ViewAtmosphere::Unbind()
 
 void ViewAtmosphere::ClearShaderCache()
 {
+	ORGViewAtmosphere::Get().ClearShaderCache();
 	preview.ClearShaderCache();
 	mediumCompositeCS = nullptr;
 	mediumShaderRequested = false;
@@ -555,6 +577,8 @@ void ViewAtmosphere::ClearShaderCache()
 
 bool ViewAtmosphere::CompositeEnabled()
 {
+	if (ORGViewAtmosphere::Requested())
+		return ORGViewAtmosphere::Get().CompositeActive();
 	if (!loaded || !globals::deferred->postWaterHookInstalled || !globals::shaderCache->IsEnabled() ||
 		!globals::game::renderer->GetRuntimeData().renderTargets[RE::RENDER_TARGETS::kMAIN].UAV)
 		return false;
@@ -589,6 +613,10 @@ bool ViewAtmosphere::CompositeEnabled()
 
 void ViewAtmosphere::CompositeAfterWater()
 {
+	if (ORGViewAtmosphere::Requested()) {
+		ORGViewAtmosphere::Get().CompositeAfterWater();
+		return;
+	}
 	if (!CompositeEnabled() ||
 		!globals::state->inWorld ||
 		(globals::state->permutationData.ExtraShaderDescriptor & static_cast<uint32_t>(State::ExtraShaderDescriptors::IsReflections)) != 0 ||
