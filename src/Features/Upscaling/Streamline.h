@@ -92,7 +92,7 @@ public:
 		ID3D11Resource* a_hudlessColor,
 		uint32_t a_renderWidth, uint32_t a_renderHeight,
 		uint32_t a_outputWidth, uint32_t a_outputHeight,
-		float a_jitterX, float a_jitterY);
+		float a_jitterX, float a_jitterY, bool a_depthCopy);
 
 	[[nodiscard]] bool SetFSRFrameGen(bool a_enable, bool a_hdr,
 		bool a_debugView = false, bool a_debugTearLines = false, bool a_debugPacingLines = false,

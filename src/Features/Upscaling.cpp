@@ -2101,12 +2101,13 @@ void Upscaling::PrepareFrameGeneration(ID3D11Resource* a_hudlessColor)
 		const auto renderSize = Util::ConvertToDynamic(displaySize, true);
 		auto& depth = renderer->GetDepthStencilData().depthStencils[RE::RENDER_TARGETS_DEPTHSTENCIL::kMAIN];
 		auto& depthCopy = renderer->GetDepthStencilData().depthStencils[RE::RENDER_TARGETS_DEPTHSTENCIL::kMAIN_COPY];
-		ID3D11Resource* fgDepth = Unwrap((IsUpscalingActive() && depthCopy.texture) ? depthCopy.texture : depth.texture);
+		const bool depthIsCopy = IsUpscalingActive() && depthCopy.texture;
+		ID3D11Resource* fgDepth = Unwrap(depthIsCopy ? depthCopy.texture : depth.texture);
 		(void)Streamline::GetSingleton()->EvaluateFSRFrameGen(
 			fgDepth, motionTexture, a_hudlessColor,
 			(uint32_t)renderSize.x, (uint32_t)renderSize.y,
 			(uint32_t)displaySize.x, (uint32_t)displaySize.y,
-			jitter.x, jitter.y);
+			jitter.x, jitter.y, depthIsCopy);
 		Streamline::GetSingleton()->CaptureFSRFrameGenState();
 	}
 }

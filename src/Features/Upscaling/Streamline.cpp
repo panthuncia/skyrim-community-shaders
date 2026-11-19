@@ -1606,6 +1606,88 @@ static sl::Result cs_EvaluateFeatureAsPass(sl::Feature a_feature, const sl::View
 		s_evalFrameByVp[vpId] = frame;
 	return sl::Result::eOk;
 }
+
+/**
+ * @brief FSR-FG's inputs as the UI stage's pass, after the hudless copy (ORGUpscaling::QueueFrameGenInputs): the frame's constants
+ * now, then the tags and the prepare on the pass's own command list when it records. The images are kMAIN's depth (or its copy),
+ * the motion vectors and the hudless, each in the common state, where the hudless stays until the present reads it. Everything the
+ * recording uses is captured by value, so a replayed recording records the same prepare again.
+ */
+static sl::Result cs_RecordFrameGenInputs(uint32_t a_renderWidth, uint32_t a_renderHeight, uint32_t a_outputWidth, uint32_t a_outputHeight,
+	float a_jitterX, float a_jitterY, bool a_depthCopy, bool* a_queued)
+{
+	using RenderGraph::Engine::Native::ExternalImageInfo;
+	*a_queued = false;
+	sl::FrameToken* token = RenderFrameToken();
+	if (!token)
+		return sl::Result::eOk;
+	// One prepare a frame.
+	static uint32_t s_queuedFrame = UINT32_MAX;
+	const uint32_t frame = g_sl.renderFrameId.load(std::memory_order_acquire);
+	if (s_queuedFrame == frame)
+		return sl::Result::eOk;
+	// Frame generation's own viewport, apart from the upscalers' tags and constants.
+	const sl::ViewportHandle viewport{ 1 };
+	sl::Constants consts;
+	if (!cs_BuildConstants(consts, a_outputWidth, a_outputHeight, a_jitterX, a_jitterY))
+		return sl::Result::eOk;
+	if (const sl::Result constantsRes = g_sl.slSetConstants(consts, *token, viewport); constantsRes != sl::Result::eOk) {
+		logger::error("[Streamline] slSetConstants failed for viewport 1 (result {})", static_cast<int>(constantsRes));
+		return constantsRes;
+	}
+
+	const bool d3d12 = RenderGraph::Backend::IsD3D12();
+	auto record = [=](void* a_list, std::span<const ExternalImageInfo> a_infos) {
+		std::array<sl::Resource, 3> resources{};
+		std::array<sl::SubresourceRange, 3> ranges{};
+		for (std::size_t i = 0; i < a_infos.size() && i < resources.size(); ++i) {
+			const auto& info = a_infos[i];
+			if (d3d12) {
+				resources[i] = sl::Resource{ sl::ResourceType::eTex2d, info.native, static_cast<uint32_t>(info.state) };
+			} else {
+				resources[i] = sl::Resource{ sl::ResourceType::eTex2d, info.native, nullptr, reinterpret_cast<void*>(info.view), static_cast<uint32_t>(info.state) };
+				resources[i].width = info.width;
+				resources[i].height = info.height;
+				resources[i].nativeFormat = info.format;
+				resources[i].mipLevels = info.mips;
+				resources[i].arrayLayers = info.layers;
+				resources[i].usage = info.usage;
+				ranges[i].aspectMask = cs_ImageAspect(static_cast<VkFormat>(info.format));
+				ranges[i].baseMipLevel = 0;
+				ranges[i].levelCount = info.mips;
+				ranges[i].baseArrayLayer = 0;
+				ranges[i].layerCount = info.layers;
+				resources[i].next = &ranges[i];
+			}
+		}
+		sl::Extent renderExtent{ 0, 0, a_renderWidth, a_renderHeight };
+		sl::Extent outputExtent{ 0, 0, a_outputWidth, a_outputHeight };
+		std::array<sl::ResourceTag, 3> tags{
+			sl::ResourceTag{ &resources[0], sl::kBufferTypeDepth, sl::ResourceLifecycle::eOnlyValidNow, &renderExtent },
+			sl::ResourceTag{ &resources[1], sl::kBufferTypeMotionVectors, sl::ResourceLifecycle::eOnlyValidNow, &renderExtent },
+			sl::ResourceTag{ &resources[2], sl::kBufferTypeHUDLessColor, sl::ResourceLifecycle::eOnlyValidNow, &outputExtent }
+		};
+		auto* commandBuffer = static_cast<sl::CommandBuffer*>(a_list);
+		if (const sl::Result tagRes = g_sl.slSetTagForFrame(*token, viewport, tags.data(), static_cast<uint32_t>(tags.size()), commandBuffer); tagRes != sl::Result::eOk) {
+			logger::error("[Streamline] slSetTagForFrame failed for FSR-FG's inputs (result {})", static_cast<int>(tagRes));
+			return false;
+		}
+		const sl::BaseStructure* inputs[] = { &viewport };
+		const sl::Result evalRes = g_sl.slEvaluateFeature(sl::kFeatureFSR_G, *token, inputs, static_cast<uint32_t>(std::size(inputs)), commandBuffer);
+		if (evalRes != sl::Result::eOk && evalRes != sl::Result::eWarnOutOfVRAM) {
+			logger::error("[Streamline] slEvaluateFeature failed for FSR-FG's inputs (result {})", static_cast<int>(evalRes));
+			return false;
+		}
+		return true;
+	};
+	if (!ORGUpscaling::Get().QueueFrameGenInputs("Streamline FSR-FG inputs", std::move(record), a_depthCopy))
+		return sl::Result::eOk;
+	static std::once_flag logged;
+	std::call_once(logged, [] { logger::info("[Streamline] FSR-FG's inputs are the UI stage's pass"); });
+	*a_queued = true;
+	s_queuedFrame = frame;
+	return sl::Result::eOk;
+}
 #endif
 
 static sl::Result cs_EvaluateFeatureCore(sl::Feature a_feature, const sl::ViewportHandle& a_viewport,
@@ -2091,7 +2173,7 @@ bool Streamline::EvaluateFSRFrameGen(ID3D11Resource* a_depth, ID3D11Resource* a_
 	ID3D11Resource* a_hudlessColor,
 	uint32_t a_renderWidth, uint32_t a_renderHeight,
 	uint32_t a_outputWidth, uint32_t a_outputHeight,
-	float a_jitterX, float a_jitterY)
+	float a_jitterX, float a_jitterY, bool a_depthCopy)
 {
 	// Isolate FSR frame-generation preparation from viewport 0 upscaling tags and constants.
 	// Not separated from render-graph epochs (Upscaling::SeparateFromGraphEpochs): if a graph epoch is the last GPU work before this
@@ -2100,6 +2182,22 @@ bool Streamline::EvaluateFSRFrameGen(ID3D11Resource* a_depth, ID3D11Resource* a_
 		return false;
 	if (!a_depth || !a_motionVectors || !a_hudlessColor)
 		return false;
+
+#if defined(CS_HAS_RENDER_GRAPH)
+	// Graph modes: the UI stage's pass after the hudless copy. Plain D3D11 mode keeps the interop ring below.
+	if (ORGUpscaling::Get().RecordsFrameGenInputs()) {
+		bool queued = false;
+		const sl::Result res = cs_RecordFrameGenInputs(a_renderWidth, a_renderHeight, a_outputWidth, a_outputHeight, a_jitterX, a_jitterY, a_depthCopy, &queued);
+		if (queued)
+			g_sl.fsrfgPreparedThisFrame.store(true, std::memory_order_release);
+		static sl::Result s_loggedPassRes = sl::Result::eErrorNotInitialized;
+		if (res != s_loggedPassRes) {
+			s_loggedPassRes = res;
+			logger::info("[Streamline] FSR FG-prepare (UI stage pass) result={} render={}x{}", static_cast<int>(res), a_renderWidth, a_renderHeight);
+		}
+		return res == sl::Result::eOk && queued;
+	}
+#endif
 
 	auto* dxvk = DXVKInterop::GetSingleton();
 	if (!dxvk->CommandResourcesReady())
