@@ -550,6 +550,49 @@ PhysicalLensImaging::GPUParameters PhysicalLens::OpticalParameters() const
 	return data;
 }
 
+PhysicalLens::Parameters PhysicalLens::FlareParameters(unsigned width, unsigned height, unsigned outputWidth, unsigned outputHeight, bool autoExposure) const
+{
+	const auto& lens = cachedLens;
+	Parameters data{};
+	data.width = width;
+	data.height = height;
+	data.surfaceCount = lens.count;
+	data.surfaces = lens.interfaces;
+	data.pathCount = cachedPathCount;
+	const auto& prescription = cachedImagingModel;
+	// Central crop of the lens's actual format. Screen UV maps onto this virtual
+	// cinema/still camera; game FOV no longer invents a different sensor each frame.
+	data.sensorWidth = float(std::min(prescription.gateWidth, prescription.gateHeight * data.width / data.height));
+	data.sensorHeight = data.sensorWidth * data.height / data.width;
+	data.sensorZ = lens.sensorZ;
+	data.focalLength = lens.focalLength;
+	// The input is an already formed image. Normalize ghost flux to the direct
+	// pupil at the selected f-number, not to a permanently wide-open lens.
+	data.pupilRadius = lens.pupilRadius;
+	data.intensity = settings.Intensity * cameraApertureExtent * cameraApertureExtent;
+	data.ghostDiffraction = settings.GhostDiffraction;
+	data.fNumber = optical.fNumber;
+	data.reserved = 1;
+	data.cutoffRelease = std::exp(-2.44932f * std::clamp(*globals::game::deltaTime, 0.f, .25f));
+	data.alignmentVariation = settings.AlignmentVariation;
+	data.lensSeed = float(settings.LensPreset + 1);
+	data.maxSources = settings.MaxSources;
+	data.threshold = .18f * std::exp2(settings.ThresholdEV);
+	data.coating = settings.Coating;
+	data.blades = optical.blades;
+	// Fixed blade curvature in millimetres: relative rounding falls as the iris
+	// closes. Mechanical blade geometry is an estimate, not patent lens data.
+	data.bladeCurvature = BladeCurvature();
+	data.rotation = DirectX::XMConvertToRadians(optical.rotation);
+	data.outputWidth = (float)outputWidth;
+	data.outputHeight = (float)outputHeight;
+	auto* local = owner ? owner->GetPipelineFeature<LocalExposure>(PostProcessing::FeaturePipelineIndex::LocalExposure) : nullptr;
+	data.exposureDecode = 1.f / globals::state->preExposure;
+	data.autoExposure = autoExposure ? 1.f : 0.f;
+	data.manualExposure = local && local->enabled && local->GetLogLuminanceSRV() ? local->settings.Exposure : 1.f;
+	return data;
+}
+
 PhysicalLens::FocusInputs PhysicalLens::FocusInputsFor(const CinematicCamera::PhysicalCameraState& camera, bool reset)
 {
 	FocusInputs data{ camera.ScreenPointUV, camera.ManualDistanceM * .001f, camera.TransitionSpeed,
@@ -708,6 +751,39 @@ void PhysicalLens::UpdateCameraMapping(float aspect)
 	cameraReady = cameraValid;
 }
 
+PhysicalLens::DiffractionInputs PhysicalLens::DiffractionFor(unsigned width, unsigned height) const
+{
+	DiffractionInputs inputs;
+	inputs.optics = OpticalParameters();
+	inputs.table = PhysicalLensImaging::CameraTable(cachedImagingModel, projectionFocal, float(width) / height, optical.focusM > 0 ? optical.focusM * 1000.0 : PhysicalLensImaging::Infinity);
+	// Resolve fine dirt on a 512-sample pupil within the existing 1024 FFT.
+	// DiffractionTable adjusts the Fourier step, preserving the optical scale.
+	auto& sampling = inputs.sampling;
+	sampling = PhysicalLensImaging::DiffractionTable(inputs.table, width, height, optical.fNumber, settings.StarburstSize, settings.StarburstIntensity, 512u);
+	// The camera aperture is equal-area; FFT coordinates span its outer radius.
+	if (optical.linked)
+		for (auto& band : sampling.sampling)
+			for (auto& value : band) value /= cameraApertureExtent;
+	sampling.enabled = settings.ImageEffects ? 2.f : 1.f;
+	sampling.surface = { settings.SurfaceScatter, float(settings.LensPreset + 1), float((optical.linked ? optical.focalMM : cachedImagingModel.focalLength) / (2 * optical.fNumber) * cameraApertureExtent), settings.DirtOpacity };
+	sampling.pupilDirt = { settings.DirtDensity, settings.DirtSize, settings.ScratchLength, DirectX::XMConvertToRadians(settings.ScratchSpread) };
+	return inputs;
+}
+
+bool PhysicalLens::DiffractionCacheEqual(const DiffractionInputs& a_left, const DiffractionInputs& a_right)
+{
+	// Source gain and unused legacy surface fields do not change the real-pupil FFT.
+	const auto key = [](PhysicalLensImaging::DiffractionParameters a_sampling) {
+		a_sampling.starburst[1] = 0;
+		a_sampling.surface[0] = a_sampling.surface[2] = 0;
+		a_sampling.enabled = 0;
+		return a_sampling;
+	};
+	const auto left = key(a_left.sampling), right = key(a_right.sampling);
+	return a_left.optics.blades == a_right.optics.blades && a_left.optics.rotation == a_right.optics.rotation &&
+	       a_left.optics.bladeCurvature == a_right.optics.bladeCurvature && !std::memcmp(&left, &right, sizeof(left));
+}
+
 bool PhysicalLens::UpdateDiffraction(unsigned width, unsigned height)
 {
 	if (!settings.Diffraction || (settings.ImageEffects && !cameraReady))
@@ -741,18 +817,7 @@ bool PhysicalLens::UpdateDiffraction(unsigned width, unsigned height)
 		tailUAV.Texture2DArray.ArraySize = 3;
 		waveRadiance->CreateUAV(tailUAV);
 	}
-	const auto optics = OpticalParameters();
-	const auto table = PhysicalLensImaging::CameraTable(cachedImagingModel, projectionFocal, float(width) / height, optical.focusM > 0 ? optical.focusM * 1000.0 : PhysicalLensImaging::Infinity);
-	// Resolve fine dirt on a 512-sample pupil within the existing 1024 FFT.
-	// DiffractionTable adjusts the Fourier step, preserving the optical scale.
-	auto sampling = PhysicalLensImaging::DiffractionTable(table, width, height, optical.fNumber, settings.StarburstSize, settings.StarburstIntensity, 512u);
-	// The camera aperture is equal-area; FFT coordinates span its outer radius.
-	if (optical.linked)
-		for (auto& band : sampling.sampling)
-			for (auto& value : band) value /= cameraApertureExtent;
-	sampling.enabled = settings.ImageEffects ? 2.f : 1.f;
-	sampling.surface = { settings.SurfaceScatter, float(settings.LensPreset + 1), float((optical.linked ? optical.focalMM : cachedImagingModel.focalLength) / (2 * optical.fNumber) * cameraApertureExtent), settings.DirtOpacity };
-	sampling.pupilDirt = { settings.DirtDensity, settings.DirtSize, settings.ScratchLength, DirectX::XMConvertToRadians(settings.ScratchSpread) };
+	const auto [optics, table, sampling] = DiffractionFor(width, height);
 	auto cacheSampling = sampling;
 	// Source gain and unused legacy surface fields do not change the real-pupil FFT.
 	cacheSampling.starburst[1] = cachedWaveParameters.starburst[1];
@@ -811,6 +876,15 @@ bool PhysicalLens::UpdateDiffraction(unsigned width, unsigned height)
 	return true;
 }
 
+PhysicalLensGhostWave::Parameters PhysicalLens::GhostWaveFor() const
+{
+	PhysicalLensGhostWave::Parameters data;
+	data.aperture = { float(optical.blades), BladeCurvature(),
+		DirectX::XMConvertToRadians(optical.rotation), optical.fNumber };
+	data.surface = { settings.SurfaceScatter, float((optical.linked ? optical.focalMM : cachedImagingModel.focalLength) / (2 * optical.fNumber) * cameraApertureExtent), float(settings.LensPreset + 1), 0 };
+	return data;
+}
+
 bool PhysicalLens::UpdateGhostWave()
 {
 	std::array<winrt::com_ptr<ID3D11ComputeShader>, 4> shaders;
@@ -821,10 +895,7 @@ bool PhysicalLens::UpdateGhostWave()
 	for (const auto& shader : shaders)
 		if (!shader)
 			return false;
-	PhysicalLensGhostWave::Parameters data;
-	data.aperture = { float(optical.blades), BladeCurvature(),
-		DirectX::XMConvertToRadians(optical.rotation), optical.fNumber };
-	data.surface = { settings.SurfaceScatter, float((optical.linked ? optical.focalMM : cachedImagingModel.focalLength) / (2 * optical.fNumber) * cameraApertureExtent), float(settings.LensPreset + 1), 0 };
+	const auto data = GhostWaveFor();
 	if (ghostWaveValid && data.aperture == cachedGhostWave.aperture && data.surface == cachedGhostWave.surface)
 		return true;
 	auto* ctx = globals::d3d::context;
@@ -896,6 +967,7 @@ bool PhysicalLens::PrepareOptics(float aspect, const CinematicCamera::PhysicalCa
 				if (!cachedLens.interfaces[back].stop && !cachedLens.interfaces[front].stop)
 					ghostPaths[cachedPathCount++] = PhysicalLensOptics::BuildPath(cachedLens, back, front, settings.Coating);
 		ghostPathsChanged = true;
+		++ghostPathsVersion;
 		cachedPreset = settings.LensPreset;
 		cachedFNumber = optical.fNumber;
 		cachedFocusDistance = optical.focusM;
@@ -965,53 +1037,16 @@ void PhysicalLens::Draw(TextureInfo& input)
 		paths->Update(ghostPaths.data(), ghostPaths.size() * sizeof(ghostPaths[0]));
 		ghostPathsChanged = false;
 	}
-	const auto& lens = cachedLens;
-	Parameters data{};
 	UpdateCameraMapping(aspect);
 	const bool renderWave = buildWaveSources && buildWaveTiles && buildWaveTail && UpdateDiffraction(inputDesc.Width, inputDesc.Height);
 	if (settings.Intensity == 0 && !renderWave)
 		return;
-	data.width = inputDesc.Width;
-	data.height = inputDesc.Height;
-	data.surfaceCount = lens.count;
-	data.surfaces = lens.interfaces;
-	data.pathCount = cachedPathCount;
-	const auto& prescription = cachedImagingModel;
-	// Central crop of the lens's actual format. Screen UV maps onto this virtual
-	// cinema/still camera; game FOV no longer invents a different sensor each frame.
-	data.sensorWidth = float(std::min(prescription.gateWidth, prescription.gateHeight * data.width / data.height));
-	data.sensorHeight = data.sensorWidth * data.height / data.width;
-	data.sensorZ = lens.sensorZ;
-	data.focalLength = lens.focalLength;
-	// The input is an already formed image. Normalize ghost flux to the direct
-	// pupil at the selected f-number, not to a permanently wide-open lens.
-	data.pupilRadius = lens.pupilRadius;
-	data.intensity = settings.Intensity * cameraApertureExtent * cameraApertureExtent;
-	data.ghostDiffraction = settings.GhostDiffraction;
-	data.fNumber = optical.fNumber;
-	data.reserved = 1;
+	auto* exposure = owner ? owner->GetPipelineFeature<HistogramAutoExposure>(PostProcessing::FeaturePipelineIndex::AutoExposure) : nullptr;
+	const bool hasExposure = exposure && exposure->IsActive() && exposure->GetAdaptationSRV();
+	Parameters data = FlareParameters(inputDesc.Width, inputDesc.Height, output->desc.Width, output->desc.Height, hasExposure);
 	data.beamState = lastGhostFrame != ~0u && globals::state->frameCount == lastGhostFrame + 1 && !globals::state->ShouldResetHistory() ? 2.f : 1.f;
-	data.cutoffRelease = std::exp(-2.44932f * std::clamp(*globals::game::deltaTime, 0.f, .25f));
-	data.alignmentVariation = settings.AlignmentVariation;
-	data.lensSeed = float(settings.LensPreset + 1);
 	if (settings.Intensity > 0 && settings.GhostDiffraction > 0 && !UpdateGhostWave())
 		return;
-	data.maxSources = settings.MaxSources;
-	data.threshold = .18f * std::exp2(settings.ThresholdEV);
-	data.coating = settings.Coating;
-	data.blades = optical.blades;
-	// Fixed blade curvature in millimetres: relative rounding falls as the iris
-	// closes. Mechanical blade geometry is an estimate, not patent lens data.
-	data.bladeCurvature = BladeCurvature();
-	data.rotation = DirectX::XMConvertToRadians(optical.rotation);
-	data.outputWidth = (float)output->desc.Width;
-	data.outputHeight = (float)output->desc.Height;
-	auto* exposure = owner ? owner->GetPipelineFeature<HistogramAutoExposure>(PostProcessing::FeaturePipelineIndex::AutoExposure) : nullptr;
-	auto* local = owner ? owner->GetPipelineFeature<LocalExposure>(PostProcessing::FeaturePipelineIndex::LocalExposure) : nullptr;
-	const bool hasExposure = exposure && exposure->IsActive() && exposure->GetAdaptationSRV();
-	data.exposureDecode = 1.f / globals::state->preExposure;
-	data.autoExposure = hasExposure ? 1.f : 0.f;
-	data.manualExposure = local && local->enabled && local->GetLogLuminanceSRV() ? local->settings.Exposure : 1.f;
 	parameters->Update(data);
 	auto* ctx = globals::d3d::context;
 	globals::profiler->BeginPass("PostProcessing::PhysicalLensFlare");

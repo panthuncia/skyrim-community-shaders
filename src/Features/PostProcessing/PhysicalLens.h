@@ -91,6 +91,24 @@ struct PhysicalLens : PostProcessFeature
 	/// BuildCameraMaps' two constant blocks for the current lens model.
 	std::pair<PhysicalLensImaging::GPUParameters, PhysicalLensImaging::CameraTableParameters> CameraMapping(float aspect) const;
 	void SanitizeSettings();
+	using Parameters = PhysicalLensOptics::Parameters;
+	/// The flare passes' constants for an input of this size, from the current lens model. The caller sets beamState.
+	Parameters FlareParameters(unsigned width, unsigned height, unsigned outputWidth, unsigned outputHeight, bool autoExposure) const;
+	/// The diffraction cache's and the per-frame diffraction passes' constants for an input of this size.
+	struct DiffractionInputs
+	{
+		PhysicalLensImaging::GPUParameters optics;
+		PhysicalLensImaging::CameraTableParameters table;
+		PhysicalLensImaging::DiffractionParameters sampling;
+	};
+	DiffractionInputs DiffractionFor(unsigned width, unsigned height) const;
+	/// Whether two inputs give the same diffraction cache.
+	static bool DiffractionCacheEqual(const DiffractionInputs& a_left, const DiffractionInputs& a_right);
+	/// The ghost-wave cache's constants (stage left zero).
+	PhysicalLensGhostWave::Parameters GhostWaveFor() const;
+	/// The current lens model's ghost paths, MaxPaths entries. The version changes with every new model.
+	const std::vector<PhysicalLensOptics::GhostPath>& GhostPaths() const { return ghostPaths; }
+	std::uint64_t GhostPathsVersion() const { return ghostPathsVersion; }
 	/// For the settings readout when the ORG path resolves the focus.
 	void SetResolvedFocus(float metres) { resolvedFocusM = metres; }
 	// C4324: the aligned diffraction block pads the struct.
@@ -104,10 +122,10 @@ struct PhysicalLens : PostProcessFeature
 	} orgComposite;
 #pragma warning(pop)
 
+	static constexpr unsigned SourceCount = PhysicalLensOptics::SourceCount, TileCount = 64 * 36, CandidateCount = 2 * TileCount;
+
 private:
 	bool resourcesReady = false, shadersRequested = false;
-	static constexpr unsigned SourceCount = PhysicalLensOptics::SourceCount, TileCount = 64 * 36, CandidateCount = 2 * TileCount;
-	using Parameters = PhysicalLensOptics::Parameters;
 	struct OpticalState
 	{
 		float fNumber = 5.6f, focusM = 0, rotation = 0, roundness = 0;
@@ -194,4 +212,5 @@ private:
 	// The lens model's ghost paths, uploaded by the D3D11 path when changed.
 	std::vector<PhysicalLensOptics::GhostPath> ghostPaths;
 	bool ghostPathsChanged = false;
+	std::uint64_t ghostPathsVersion = 0;
 };
