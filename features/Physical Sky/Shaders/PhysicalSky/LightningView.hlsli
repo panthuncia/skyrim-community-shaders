@@ -6,13 +6,22 @@ struct LightningSegment
 	float4 start;
 	float4 end;
 };
+#if defined(CS_ORG_BINDLESS)
+// The segments latch: LightningSegment at a 32-byte stride, physSkyData.lightningControl.z of them (at most 128).
+struct OrgLightningSegments
+{
+	LightningSegment operator[](uint a_index) { return OrgLatch_LightningSegments.Load<LightningSegment>(OrgOffset_LightningSegments + a_index * 32u); }
+};
+static OrgLightningSegments LightningSegments;
+#else
 StructuredBuffer<LightningSegment> LightningSegments : register(t94);
-RWStructuredBuffer<float4> LightningCandidates : register(u4);
-Texture2D<float2> LightningResolvedMask : register(t95);
-TextureCube<float2> LightningResolvedCubeMask : register(t95);
-RWTexture2D<float4> RWLightningChannels : register(u4);
-RWTexture2D<float4> RWLightningColor : register(u5);
-RWTexture2DArray<float4> RWLightningCubeColor : register(u5);
+#endif
+ORG_HEADER_UAV(RWStructuredBuffer<float4>, LightningCandidates, 4)
+ORG_HEADER_SRV(Texture2D<float2>, LightningResolvedMask, 95)
+ORG_HEADER_SRV(TextureCube<float2>, LightningResolvedCubeMask, 95)
+ORG_HEADER_UAV(RWTexture2D<float4>, RWLightningChannels, 4)
+ORG_HEADER_UAV(RWTexture2D<float4>, RWLightningColor, 5)
+ORG_HEADER_UAV(RWTexture2DArray<float4>, RWLightningCubeColor, 5)
 
 float LightningHash(float value)
 {
@@ -96,8 +105,15 @@ float LightningChannelTransmission(float3 direction, float distance)
 
 float4 LightningChannel(float3 direction, float sceneDistance, float footprint, float intensity)
 {
+#if defined(CS_ORG_BINDLESS)
+	// One relational test: an early return behind an || with a negation miscompiles on AMD RDNA2.
+	const float sourceIntensity = Lightning::HasSource() ? intensity : 0.0;
+	if (sourceIntensity <= 0.0)
+		return 0.0;
+#else
 	if (!Lightning::HasSource() || intensity <= 0.0)
 		return 0.0;
+#endif
 	float energy = 0.0, depth = 0.0, strongest = 0.0;
 	const float3 eye = FrameBuffer::CameraPosAdjust.xyz;
 	// Reject rays outside the entire branched discharge before reading segments.

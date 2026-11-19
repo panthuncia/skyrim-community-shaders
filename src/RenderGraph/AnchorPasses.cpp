@@ -25,6 +25,7 @@
 #	include <Resources/VersionedTexture.h>
 
 #	include <algorithm>
+#	include <cstring>
 #	include <format>
 #	include <map>
 #	include <mutex>
@@ -47,7 +48,7 @@ namespace RenderGraph::AnchorPasses
 		{
 			std::uint32_t words = 0;
 			for (const auto& bind : a_bindings)
-				words += bind.kind == Bind::Kind::Latch ? 2u : (bind.kind == Bind::Kind::Shared ? 4u : 1u);
+				words += bind.kind == Bind::Kind::Latch || bind.kind == Bind::Kind::Table ? 2u : (bind.kind == Bind::Kind::Shared ? 4u : 1u);
 			return words;
 		}
 
@@ -72,48 +73,91 @@ namespace RenderGraph::AnchorPasses
 			return declared;
 		}
 
-		/** @brief A view for each Srv and Uav entry, empty for the others, and the shared buffers. */
+		/** @brief A view for each Srv and Uav entry, empty for the others, the table's views, and the shared buffers. */
 		struct DeclaredBindings
 		{
 			std::vector<org::DeclaredViewToken> views;
+			std::vector<org::DeclaredViewToken> table;
 			SharedConstants::Bindings shared;
 		};
 
-		DeclaredBindings DeclareBindings(org::PassBuilder& a_builder, const std::vector<Bind>& a_bindings)
+		/** @brief The view an Srv, Uav or Published entry declares. Empty for the other kinds. */
+		org::DeclaredViewToken DeclareOne(org::PassBuilder& a_builder, const Bind& a_bind)
+		{
+			const auto& bind = a_bind;
+			const bool whole = bind.mip == kAllMips;
+			const bool variant = bind.variant != UINT32_MAX;
+			if (bind.slot && bind.kind == Bind::Kind::Srv && variant)
+				return a_builder.ShaderResource(SlotOf(*bind.slot, bind.mip), org::SrvView{ .variant = bind.variant, .mip = whole ? 0u : bind.mip }).View();
+			if (bind.slot && bind.kind == Bind::Kind::Srv)
+				return whole ? a_builder.ShaderResource(SlotOf(*bind.slot, kAllMips)).View() :
+				               a_builder.ShaderResource(SlotOf(*bind.slot, bind.mip), org::SrvView{ .mip = bind.mip }).View();
+			if (bind.slot && bind.kind == Bind::Kind::Uav && variant)
+				return a_builder.UnorderedAccess(SlotOf(*bind.slot, bind.mip), org::UavView{ .variant = bind.variant, .mip = whole ? 0u : bind.mip }).View();
+			if (bind.slot && bind.kind == Bind::Kind::Uav)
+				return whole ? a_builder.UnorderedAccess(SlotOf(*bind.slot, kAllMips)).View() :
+				               a_builder.UnorderedAccess(SlotOf(*bind.slot, bind.mip), org::UavView{ .mip = bind.mip }).View();
+			if (bind.kind == Bind::Kind::Srv && variant)
+				return whole ? a_builder.ShaderResource(bind.resource, org::SrvView{ .variant = bind.variant }).View() :
+				               a_builder.ShaderResource(MipOf(bind.resource, bind.mip), org::SrvView{ .variant = bind.variant, .mip = bind.mip }).View();
+			if (bind.kind == Bind::Kind::Srv)
+				return whole ? a_builder.ShaderResource(bind.resource).View() :
+				               a_builder.ShaderResource(MipOf(bind.resource, bind.mip), org::SrvView{ .mip = bind.mip }).View();
+			if (bind.kind == Bind::Kind::Uav && variant)
+				return whole ? a_builder.UnorderedAccess(bind.resource, org::UavView{ .variant = bind.variant }).View() :
+				               a_builder.UnorderedAccess(MipOf(bind.resource, bind.mip), org::UavView{ .variant = bind.variant, .mip = bind.mip }).View();
+			if (bind.kind == Bind::Kind::Uav)
+				return whole ? a_builder.UnorderedAccess(bind.resource).View() :
+				               a_builder.UnorderedAccess(MipOf(bind.resource, bind.mip), org::UavView{ .mip = bind.mip }).View();
+			if (bind.kind == Bind::Kind::Published)
+				return variant ? a_builder.ShaderResource(org::ResourceIdentifier(bind.id), org::SrvView{ .variant = bind.variant }).View() :
+				                 a_builder.ShaderResource(org::ResourceIdentifier(bind.id)).View();
+			return {};
+		}
+
+		DeclaredBindings DeclareBindings(org::PassBuilder& a_builder, const std::vector<Bind>& a_bindings, const std::vector<Bind>& a_table = {})
 		{
 			DeclaredBindings declared;
-			declared.views.resize(a_bindings.size());
-			for (std::size_t i = 0; i < a_bindings.size(); ++i) {
-				const auto& bind = a_bindings[i];
-				const bool whole = bind.mip == kAllMips;
-				if (bind.slot && bind.kind == Bind::Kind::Srv && bind.variant != UINT32_MAX)
-					declared.views[i] = a_builder.ShaderResource(SlotOf(*bind.slot, kAllMips), org::SrvView{ .variant = bind.variant }).View();
-				else if (bind.slot && bind.kind == Bind::Kind::Srv)
-					declared.views[i] = whole ? a_builder.ShaderResource(SlotOf(*bind.slot, kAllMips)).View() :
-					                            a_builder.ShaderResource(SlotOf(*bind.slot, bind.mip), org::SrvView{ .mip = bind.mip }).View();
-				else if (bind.slot && bind.kind == Bind::Kind::Uav)
-					declared.views[i] = whole ? a_builder.UnorderedAccess(SlotOf(*bind.slot, kAllMips)).View() :
-					                            a_builder.UnorderedAccess(SlotOf(*bind.slot, bind.mip), org::UavView{ .mip = bind.mip }).View();
-				else if (bind.kind == Bind::Kind::Srv && bind.variant != UINT32_MAX)
-					declared.views[i] = a_builder.ShaderResource(bind.resource, org::SrvView{ .variant = bind.variant }).View();
-				else if (bind.kind == Bind::Kind::Srv)
-					declared.views[i] = whole ? a_builder.ShaderResource(bind.resource).View() :
-					                            a_builder.ShaderResource(MipOf(bind.resource, bind.mip), org::SrvView{ .mip = bind.mip }).View();
-				else if (bind.kind == Bind::Kind::Uav)
-					declared.views[i] = whole ? a_builder.UnorderedAccess(bind.resource).View() :
-					                            a_builder.UnorderedAccess(MipOf(bind.resource, bind.mip), org::UavView{ .mip = bind.mip }).View();
-				else if (bind.kind == Bind::Kind::Published)
-					declared.views[i] = bind.variant != UINT32_MAX ?
-					                         a_builder.ShaderResource(org::ResourceIdentifier(bind.id), org::SrvView{ .variant = bind.variant }).View() :
-					                         a_builder.ShaderResource(org::ResourceIdentifier(bind.id)).View();
-			}
+			declared.views.reserve(a_bindings.size());
+			for (const auto& bind : a_bindings)
+				declared.views.push_back(DeclareOne(a_builder, bind));
+			declared.table.reserve(a_table.size());
+			for (const auto& bind : a_table)
+				declared.table.push_back(DeclareOne(a_builder, bind));
 			if (ReadsShared(a_bindings))
 				declared.shared = SharedConstants::Declare(a_builder);
 			return declared;
 		}
 
-		PushWords FillWords(const std::vector<Bind>& a_bindings, const DeclaredBindings& a_declared, const org::LatchBlock* a_latch,
+		/** @brief A pass's handle table buffer: made when a recording first needs it, and again only when its indices change. */
+		struct TableCache
+		{
+			std::mutex mutex;
+			std::vector<std::uint32_t> words;
+			std::shared_ptr<org::LatchBlock> block;
+		};
+
+		/** @brief The table's buffer for this recording: its entries' indices, in a dedicated block the recording keeps alive.
+		*  A replay of the recording reads the same buffer, so a buffer is never written after it is made. */
+		const org::LatchBlock& TableOf(const std::vector<Bind>& a_table, const DeclaredBindings& a_declared, TableCache& a_cache, std::string_view a_name,
 			org::PassRecordContext& a_recording)
+		{
+			std::vector<std::uint32_t> words(a_table.size());
+			for (std::size_t i = 0; i < a_table.size(); ++i)
+				words[i] = a_table[i].kind == Bind::Kind::Handle ? a_table[i].value : a_recording.Index(a_declared.table[i]);
+			std::scoped_lock lock(a_cache.mutex);
+			if (!a_cache.block || a_cache.words != words) {
+				auto block = org::LatchBlock::CreateDedicated(std::format("{}.table", a_name), static_cast<std::uint32_t>(words.size() * sizeof(std::uint32_t)));
+				std::memcpy(block->Bytes().data(), words.data(), words.size() * sizeof(std::uint32_t));
+				a_cache.block = std::move(block);
+				a_cache.words = std::move(words);
+			}
+			a_recording.Retain(std::shared_ptr<const void>(a_cache.block));
+			return *a_cache.block;
+		}
+
+		PushWords FillWords(const std::vector<Bind>& a_bindings, const DeclaredBindings& a_declared, const org::LatchBlock* a_latch,
+			org::PassRecordContext& a_recording, const org::LatchBlock* a_table = nullptr)
 		{
 			PushWords words;
 			for (std::size_t i = 0; i < a_bindings.size(); ++i) {
@@ -142,18 +186,24 @@ namespace RenderGraph::AnchorPasses
 							words.data[words.count++] = handle;
 						break;
 					}
+				case Bind::Kind::Table:
+					// Builder::Check refuses a Table entry without a table.
+					words.data[words.count++] = a_table->SrvIndex();
+					words.data[words.count++] = 0;
+					break;
 				}
 			}
 			return words;
 		}
 
-		/** @brief What a pass is made from at a build. Immutable. */
+		/** @brief What a pass is made from at a build. Immutable but for its table's buffer, which its recordings make. */
 		template <class Step>
 		struct Spec
 		{
 			Step step;
 			std::shared_ptr<const org::LatchBlock> latch;
 			std::shared_ptr<const RunGate> gate;
+			std::shared_ptr<TableCache> table = std::make_shared<TableCache>();
 		};
 
 		template <class Step>
@@ -189,7 +239,7 @@ namespace RenderGraph::AnchorPasses
 				std::optional<org::DeclaredViewToken> depth;
 				if (draw.depth)
 					depth = draw.depthReadOnly ? a_builder.DepthRead(draw.depth).View() : a_builder.DepthReadWrite(draw.depth).View();
-				return { view, std::move(extra), DeclareBindings(a_builder, draw.bindings), depth };
+				return { view, std::move(extra), DeclareBindings(a_builder, draw.bindings, draw.table), depth };
 			}
 
 			// The recording depends only on what the pass was made with.
@@ -208,7 +258,8 @@ namespace RenderGraph::AnchorPasses
 			{
 				const auto& spec = *a_frame.spec;
 				const auto& draw = spec.step;
-				const auto words = FillWords(draw.bindings, a_bindings.declared, spec.latch.get(), a_recording);
+				const auto* table = draw.table.empty() ? nullptr : &TableOf(draw.table, a_bindings.declared, *spec.table, draw.name, a_recording);
+				const auto words = FillWords(draw.bindings, a_bindings.declared, spec.latch.get(), a_recording, table);
 				std::array<RasterProgram::Colour, 8> colours{};
 				std::size_t colourCount = 0;
 				colours[colourCount++] = { .view = &a_bindings.target, .load = draw.load, .clear = draw.clear };
@@ -224,6 +275,8 @@ namespace RenderGraph::AnchorPasses
 					.dynamicViewport = draw.dynamicViewport,
 					.scissor = draw.scissor,
 					.constants = words.Span(),
+					.vertexCount = draw.vertexCount,
+					.instanceCount = draw.instanceCount,
 					.debugName = draw.name.c_str(),
 					.stencilReference = draw.stencilReference };
 				if (draw.gate) {
@@ -251,7 +304,7 @@ namespace RenderGraph::AnchorPasses
 			DispatchBindings Declare(org::PassBuilder& a_builder)
 			{
 				a_builder.PreferQueue(org::QueueKind::Graphics);
-				return { DeclareBindings(a_builder, spec->step.bindings) };
+				return { DeclareBindings(a_builder, spec->step.bindings, spec->step.table) };
 			}
 
 			void Revision(std::vector<std::uint64_t>& a_out) const { a_out.push_back(reinterpret_cast<std::uintptr_t>(spec.get())); }
@@ -269,7 +322,8 @@ namespace RenderGraph::AnchorPasses
 			{
 				const auto& spec = *a_frame.spec;
 				const auto& dispatch = spec.step;
-				const auto words = FillWords(dispatch.bindings, a_bindings.declared, spec.latch.get(), a_recording);
+				const auto* table = dispatch.table.empty() ? nullptr : &TableOf(dispatch.table, a_bindings.declared, *spec.table, dispatch.name, a_recording);
+				const auto words = FillWords(dispatch.bindings, a_bindings.declared, spec.latch.get(), a_recording, table);
 				if (dispatch.gate)
 					spec.gate->Dispatch(a_recording, *dispatch.program, words.Span(), *dispatch.gate);
 				else if (dispatch.latchArgs)
@@ -317,9 +371,13 @@ namespace RenderGraph::AnchorPasses
 			static void Record(const CopyBindings& a_bindings, const SpecFrame<Copy>& a_frame, org::PassRecordContext& a_recording)
 			{
 				const auto& copy = a_frame.spec->step;
-				const rhi::TextureCopyRegion target{ .texture = a_recording.Resolve(a_bindings.target).GetHandle(), .width = copy.width, .height = copy.height };
-				const rhi::TextureCopyRegion source{ .texture = a_recording.Resolve(a_bindings.source).GetHandle(), .width = copy.width, .height = copy.height };
-				a_recording.Commands().CopyTextureRegion(target, source);
+				const auto targetHandle = a_recording.Resolve(a_bindings.target).GetHandle();
+				const auto sourceHandle = a_recording.Resolve(a_bindings.source).GetHandle();
+				for (std::uint32_t slice = 0; slice < copy.slices; ++slice) {
+					const rhi::TextureCopyRegion target{ .texture = targetHandle, .arraySlice = slice, .width = copy.width, .height = copy.height, .depth = copy.depth };
+					const rhi::TextureCopyRegion source{ .texture = sourceHandle, .arraySlice = slice, .width = copy.width, .height = copy.height, .depth = copy.depth };
+					a_recording.Commands().CopyTextureRegion(target, source);
+				}
 			}
 
 		private:
@@ -537,13 +595,47 @@ namespace RenderGraph::AnchorPasses
 		return bind;
 	}
 
+	Bind Bind::SrvCube(const FrameAnchors::Texture& a_texture)
+	{
+		Bind bind = Srv(a_texture);
+		bind.variant = static_cast<std::uint32_t>(org::SRVViewType::TextureCube);
+		return bind;
+	}
+
+	Bind Bind::UavArray(const FrameAnchors::Texture& a_texture, std::uint32_t a_mip)
+	{
+		Bind bind = Uav(a_texture, a_mip);
+		bind.variant = static_cast<std::uint32_t>(org::UAVViewType::Texture2DArrayFull);
+		return bind;
+	}
+
 	Builder::Builder(FrameAnchors::Anchor a_anchor, std::string a_prefix, std::int32_t a_orderBase, std::shared_ptr<const org::LatchBlock> a_latch,
 		std::shared_ptr<const RunGate> a_gate) :
 		anchor(a_anchor), prefix(std::move(a_prefix)), orderBase(a_orderBase), latch(std::move(a_latch)), gate(std::move(a_gate))
 	{}
 
-	bool Builder::Check(std::string_view a_name, const std::vector<Bind>& a_bindings, std::uint32_t a_programWords, std::optional<std::uint32_t> a_gate)
+	bool Builder::Check(std::string_view a_name, const std::vector<Bind>& a_bindings, std::uint32_t a_programWords, std::optional<std::uint32_t> a_gate,
+		const std::vector<Bind>& a_table)
 	{
+		const auto tables = std::ranges::count_if(a_bindings, [](const Bind& a_bind) { return a_bind.kind == Bind::Kind::Table; });
+		if (tables != (a_table.empty() ? 0 : 1)) {
+			Fail(std::format("{}: {} table entries in the push block and {} table words", a_name, tables, a_table.size()));
+			return false;
+		}
+		for (const auto& bind : a_table) {
+			if (bind.kind != Bind::Kind::Srv && bind.kind != Bind::Kind::Uav && bind.kind != Bind::Kind::Published && bind.kind != Bind::Kind::Handle) {
+				Fail(std::format("{}: a table entry is an Srv, Uav, Published or Handle", a_name));
+				return false;
+			}
+			if ((bind.kind == Bind::Kind::Srv || bind.kind == Bind::Kind::Uav) && !bind.resource && !bind.slot) {
+				Fail(std::format("{}: a table input is missing", a_name));
+				return false;
+			}
+			if (bind.kind == Bind::Kind::Published && !PublishedResources::IsDeclarable(bind.id)) {
+				Fail(std::format("{}: {} is not published", a_name, bind.id));
+				return false;
+			}
+		}
 		for (const auto& bind : a_bindings) {
 			if ((bind.kind == Bind::Kind::Srv || bind.kind == Bind::Kind::Uav) && !bind.resource && !bind.slot) {
 				Fail(std::format("{}: an input is missing", a_name));
@@ -593,7 +685,7 @@ namespace RenderGraph::AnchorPasses
 			                                                                    "a depth target is given and the program has no depth format"));
 			return;
 		}
-		if (!Check(a_draw.name, a_draw.bindings, a_draw.program->constantWords, a_draw.gate))
+		if (!Check(a_draw.name, a_draw.bindings, a_draw.program->constantWords, a_draw.gate, a_draw.table))
 			return;
 		const std::string step = a_draw.name;
 		a_draw.name = std::format("{}.{}", prefix, step);
@@ -607,7 +699,7 @@ namespace RenderGraph::AnchorPasses
 			Fail(std::format("{}: a program is missing", a_dispatch.name));
 			return;
 		}
-		if (!Check(a_dispatch.name, a_dispatch.bindings, a_dispatch.program->constantWords, a_dispatch.gate))
+		if (!Check(a_dispatch.name, a_dispatch.bindings, a_dispatch.program->constantWords, a_dispatch.gate, a_dispatch.table))
 			return;
 		if (a_dispatch.latchArgs && !latch) {
 			Fail(std::format("{}: indirect group counts without the client's latch", a_dispatch.name));
@@ -620,7 +712,7 @@ namespace RenderGraph::AnchorPasses
 
 	void Builder::Add(Copy a_copy)
 	{
-		if (!a_copy.source || !a_copy.target || !a_copy.width || !a_copy.height) {
+		if (!a_copy.source || !a_copy.target || !a_copy.width || !a_copy.height || !a_copy.depth || !a_copy.slices) {
 			Fail(std::format("{}: the copy's textures or size are missing", a_copy.name));
 			return;
 		}
@@ -632,7 +724,7 @@ namespace RenderGraph::AnchorPasses
 		// A gated copy is recorded at execution, since a copy cannot take its work from the gate.
 		const bool atExecution = a_copy.gate.has_value();
 		// Draw depth copies where the device can, so both textures stay in depth layouts.
-		const auto depthFormat = DepthCopyFormat(a_copy.target);
+		const auto depthFormat = a_copy.depth == 1 && a_copy.slices == 1 ? DepthCopyFormat(a_copy.target) : rhi::Format::Unknown;
 		auto program = depthFormat != rhi::Format::Unknown && DepthCopyFormat(a_copy.source) == depthFormat ? DepthCopyProgram(depthFormat) : nullptr;
 		auto spec = std::make_shared<const Spec<Copy>>(Spec<Copy>{ std::move(a_copy), latch, gate });
 		if (program) {

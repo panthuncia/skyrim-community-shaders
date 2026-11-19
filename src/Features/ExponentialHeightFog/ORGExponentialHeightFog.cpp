@@ -46,6 +46,7 @@ ORGExponentialHeightFog& ORGExponentialHeightFog::Get()
 #	include "Features/LightLimitFix/ORGLocalShadows.h"
 #	include "Features/PhysicalSky.h"
 #	include "Features/PhysicalSky/ORGPhysicalSky.h"
+#	include "Features/PhysicalSky/ORGVolumetricClouds.h"
 #	include "RenderGraph/Engine/Tripwire/Tripwire.h"
 #	include "Features/Skylighting.h"
 #	include "Features/Skylighting/ORGSkylighting.h"
@@ -1160,9 +1161,13 @@ bool ORGExponentialHeightFog::Prepass()
 		shape.inputs[kPhysSkyTransmittance] = Published(ORGPhysicalSky::kTransmittanceLutId, physicalSky.texTrLut->srv.get());
 		if (!shape.inputs[kPhysSkyTransmittance])
 			return fallback("Physical Sky's LUTs are on D3D11");
-		// The shader reads them only with the clouds on (enableVolumetricClouds). They are D3D11's until the clouds are ported.
-		if (physicalSky.VolumetricCloudsEnabled() && (physicalSky.texShadowVolume || physicalSky.texCloudShadowMean))
-			return fallback("Physical Sky's cloud shadows are on D3D11");
+		// The shader reads them only with the clouds on (enableVolumetricClouds). They are the cloud renderer's twins.
+		if (physicalSky.VolumetricCloudsEnabled() && physicalSky.texShadowVolume && physicalSky.texCloudShadowMean && ORGVolumetricClouds::OutputsWritten()) {
+			shape.inputs[kPhysSkyShadowVolume] = Published(ORGVolumetricClouds::kShadowVolumeId, physicalSky.texShadowVolume->srv.get());
+			shape.inputs[kPhysSkyShadowMean] = Published(ORGVolumetricClouds::kCloudShadowMeanId, physicalSky.texCloudShadowMean->srv.get());
+			if (!shape.inputs[kPhysSkyShadowVolume] || !shape.inputs[kPhysSkyShadowMean])
+				return fallback("Physical Sky's cloud shadows are not published");
+		}
 	}
 
 	auto& lightLimitFix = globals::features::lightLimitFix;

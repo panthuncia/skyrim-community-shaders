@@ -1,6 +1,7 @@
 #include "Features/PhysicalSky.h"
 
 #include "CSEditor/SceneManager/SceneWidgetInterceptor.h"
+#include "Features/PhysicalSky/ORGCloudMaps.h"
 #include "I18n/I18n.h"
 #include "Util.h"
 
@@ -29,7 +30,8 @@ namespace
 		desc.ArraySize = count;
 		desc.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
 		desc.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS;
-		auto texture = eastl::make_unique<Texture2D>(desc, name);
+		// A graph twin in the graph modes, where the graph generates it.
+		auto texture = ORGCloudMaps::MakeTexture2D(desc, name, true);
 		texture->CreateSRV({ .Format = desc.Format, .ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2DARRAY, .Texture2DArray = { .MipLevels = 1, .ArraySize = count } });
 		texture->CreateUAV({ .Format = desc.Format, .ViewDimension = D3D11_UAV_DIMENSION_TEXTURE2DARRAY, .Texture2DArray = { .ArraySize = count } });
 		return texture;
@@ -67,10 +69,13 @@ void LocalNdfManager::SetupResources()
 	height = CreateLocalTexture(1, 1, "PhysicalSky::LocalNdfHeight");
 	modeling = CreateLocalTexture(1, 1, "PhysicalSky::LocalNdfModeling");
 	maximum = CreateLocalTexture(1, 1, "PhysicalSky::LocalNdfMaximum");
-	const float clear[4] = {};
-	globals::d3d::context->ClearUnorderedAccessViewFloat(height->uav.get(), clear);
-	globals::d3d::context->ClearUnorderedAccessViewFloat(modeling->uav.get(), clear);
-	globals::d3d::context->ClearUnorderedAccessViewFloat(maximum->uav.get(), clear);
+	// The graph modes write the empty maps with the first Update's dispatch instead.
+	if (!ORGCloudMaps::Requested()) {
+		const float clear[4] = {};
+		globals::d3d::context->ClearUnorderedAccessViewFloat(height->uav.get(), clear);
+		globals::d3d::context->ClearUnorderedAccessViewFloat(modeling->uav.get(), clear);
+		globals::d3d::context->ClearUnorderedAccessViewFloat(maximum->uav.get(), clear);
+	}
 	D3D11_SAMPLER_DESC desc{};
 	desc.Filter = D3D11_FILTER_MIN_MAG_MIP_LINEAR;
 	desc.AddressU = desc.AddressV = desc.AddressW = D3D11_TEXTURE_ADDRESS_CLAMP;
@@ -82,7 +87,9 @@ void LocalNdfManager::SetupResources()
 	weights = eastl::make_unique<StructuredBuffer>(StructuredBufferDesc<float4>(1u, true), 1, "PhysicalSky::LocalNdfWeights");
 	weights->CreateSRV();
 	layerWeights.assign(1, float4{});
-	weights->Update(layerWeights.data(), sizeof(float4));
+	// On the graph the cloud renderer latches the weights.
+	if (!ORGCloudMaps::Requested())
+		weights->Update(layerWeights.data(), sizeof(float4));
 	targets.clear();
 	previews.clear();
 	activeAssets.clear();
@@ -102,7 +109,9 @@ NdfTextureSet LocalNdfManager::GetTextures() const
 
 bool LocalNdfManager::Update(const NdfSettings& settings, TextureManager& textures, const std::string& worldspace)
 {
-	if (!program || !cb || !sampler)
+	// The graph modes generate on the render graph, never with the D3D11 program.
+	const bool graph = ORGCloudMaps::Requested();
+	if ((!graph && !program) || !cb || !sampler)
 		return false;
 	struct Layer
 	{
@@ -194,7 +203,8 @@ bool LocalNdfManager::Update(const NdfSettings& settings, TextureManager& textur
 		weights = eastl::make_unique<StructuredBuffer>(StructuredBufferDesc<float4>(static_cast<UINT>(nextWeights.size()), true), static_cast<UINT>(nextWeights.size()), "PhysicalSky::LocalNdfWeights");
 		weights->CreateSRV();
 	}
-	if (nextWeights.size() != layerWeights.size() || std::memcmp(nextWeights.data(), layerWeights.data(), nextWeights.size() * sizeof(float4)) != 0)
+	if (!ORGCloudMaps::Requested() &&
+		(nextWeights.size() != layerWeights.size() || std::memcmp(nextWeights.data(), layerWeights.data(), nextWeights.size() * sizeof(float4)) != 0))
 		weights->Update(nextWeights.data(), nextWeights.size() * sizeof(float4));
 	layerWeights = std::move(nextWeights);
 	std::string nextKey = worldspace;
@@ -237,6 +247,41 @@ bool LocalNdfManager::Update(const NdfSettings& settings, TextureManager& textur
 				DX::ThrowIfFailed(globals::d3d::device->CreateUnorderedAccessView(maps[map]->resource.get(), &uav, targets[slice][map].put()));
 			}
 		}
+	}
+	if (graph) {
+		using Input = ORGCloudMaps::Input;
+		ORGCloudMaps::Work work;
+		// Each layer writes its own slice through the whole-array views. The shader clears every texel it covers.
+		const auto add = [&](std::string a_step, const Parameters& a_data, const std::array<ID3D11ShaderResourceView*, 3>& a_sources, uint32_t a_slice) {
+			ORGCloudMaps::Dispatch step{ .step = std::move(a_step),
+				.order = ORGCloudMaps::kLocalOrder + static_cast<std::int32_t>(a_slice),
+				.program = ORGCloudMaps::Program::LocalNdf,
+				.inputs = { Input::Srv(a_sources[0]), Input::Srv(a_sources[1]), Input::Srv(a_sources[2]), Input::UavArray(height->resource.get()),
+					Input::UavArray(modeling->resource.get()), Input::UavArray(maximum->resource.get()), Input::SamplerOf(ORGCloudMaps::Sampler::ClampLinear),
+					Input::Latch(), Input::Word(a_slice) },
+				.groups = { (dimension + 7u) / 8u, (dimension + 7u) / 8u, 1 } };
+			step.Constants(a_data);
+			work.dispatches.push_back(std::move(step));
+		};
+		std::vector<std::string> nextActive;
+		for (size_t index = 0; index < layers.size(); ++index) {
+			auto& layer = layers[index];
+			layer.data.rect = rect;
+			layer.data.altitude = altitude;
+			layer.data.dimension = dimension;
+			add(std::format("local.{}", index), layer.data, layer.sources, static_cast<uint32_t>(index));
+			nextActive.push_back(layer.asset);
+		}
+		// D3D11 clears the maps. Zero weights write zeros.
+		if (layers.empty())
+			add("local.empty", Parameters{ .dimension = dimension }, {}, 0);
+		// Not taken: everything stays as it was and the update runs again next frame.
+		if (!ORGCloudMaps::Get().Submit(std::move(work)))
+			return false;
+		activeAssets = std::move(nextActive);
+		textureRevision = textures.revision;
+		key = std::move(nextKey);
+		return true;
 	}
 	auto* context = globals::d3d::context;
 	winrt::com_ptr<ID3D11ComputeShader> previousShader;

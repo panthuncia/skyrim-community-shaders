@@ -8,6 +8,7 @@
 #include <sstream>
 
 #include "CSEditor/SceneManager/SceneWidgetInterceptor.h"
+#include "Features/PhysicalSky/ORGCloudMaps.h"
 #include "I18n/I18n.h"
 #include "Utils/Form.h"
 
@@ -34,7 +35,8 @@ namespace
 		desc.ArraySize = count;
 		desc.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
 		desc.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS;
-		auto texture = eastl::make_unique<Texture2D>(desc, name);
+		// A graph twin in the graph modes, where the graph generates it.
+		auto texture = ORGCloudMaps::MakeTexture2D(desc, name, true);
 		texture->CreateSRV({ .Format = desc.Format, .ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2DARRAY, .Texture2DArray = { .MipLevels = 1, .ArraySize = count } });
 		return texture;
 	}
@@ -91,7 +93,9 @@ void CloudStormManager::CompileShaders(Util::AsyncShaderSet& a_shaders)
 
 void CloudStormManager::Update(TextureManager& textures, ID3D11ShaderResourceView* pattern, uint64_t noiseRevision, const std::string& worldspace, bool enabled)
 {
-	if (!enabled || !program || !generatorCb || !sampler || !pattern) {
+	// The graph modes generate on the render graph, never with the D3D11 program.
+	const bool graph = ORGCloudMaps::Requested();
+	if (!enabled || (!graph && !program) || !generatorCb || !sampler || !pattern) {
 		active.clear();
 		wind.clear();
 		references.clear();
@@ -211,6 +215,30 @@ void CloudStormManager::Update(TextureManager& textures, ID3D11ShaderResourceVie
 				DX::ThrowIfFailed(globals::d3d::device->CreateUnorderedAccessView(maps[map]->resource.get(), &desc, targets[index][map].put()));
 				Util::SetResourceName(targets[index][map].get(), std::format("PhysicalSky::Storm {} Slice {} UAV", map, index).c_str());
 			}
+	}
+	if (graph) {
+		using Input = ORGCloudMaps::Input;
+		ORGCloudMaps::Work work;
+		// Each instance writes its own slice through the whole-array views.
+		for (uint32_t i = 0; i < count; ++i) {
+			ORGCloudMaps::Dispatch step{ .step = std::format("storm.{}", i),
+				.order = ORGCloudMaps::kStormOrder + static_cast<std::int32_t>(i),
+				.program = ORGCloudMaps::Program::StormNdf,
+				.inputs = { Input::Srv(sources[i][0]), Input::Srv(sources[i][1]), Input::Srv(sources[i][2]), Input::Srv(sources[i][3]), Input::Srv(sources[i][4]),
+					Input::UavArray(height->resource.get()), Input::UavArray(modeling->resource.get()), Input::SamplerOf(ORGCloudMaps::Sampler::WrapLinear),
+					Input::Latch(), Input::Word(i) },
+				.groups = { kDimension / 8, kDimension / 8, 1 } };
+			step.Constants(active[i]);
+			work.dispatches.push_back(std::move(step));
+		}
+		// Not taken: the next frame builds the instances again.
+		if (!ORGCloudMaps::Get().Submit(std::move(work))) {
+			key.clear();
+			return;
+		}
+		// The cloud renderer reads the instances from its latch on the graph.
+		++revision;
+		return;
 	}
 	auto* context = globals::d3d::context;
 	winrt::com_ptr<ID3D11ComputeShader> previousShader;
@@ -398,6 +426,9 @@ void CloudStormManager::UpdateMotion(double time, double previousTime, float2 lo
 			parcel.previousNoiseOffset = previous.noiseOffset;
 		}
 	}
+	// On the graph the cloud renderer latches the instances itself.
+	if (ORGCloudMaps::Requested())
+		return;
 	data->Update(active.data(), active.size() * sizeof(CloudStormData));
 	if (active.size() == 1)
 		generatorCb->Update(active.front());

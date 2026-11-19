@@ -16,6 +16,8 @@ struct LocalNdfManager
 	NdfTextureSet GetTextures() const;
 	ID3D11ShaderResourceView* GetMaximum() const { return maximum ? maximum->srv.get() : nullptr; }
 	ID3D11ShaderResourceView* GetWeights() const { return weights ? weights->SRV() : nullptr; }
+	/** @brief The layer weights as GetWeights holds them, for the render graph's latch (ORGVolumetricClouds). */
+	const std::vector<float4>& LayerWeights() const { return layerWeights; }
 
 private:
 	struct Parameters

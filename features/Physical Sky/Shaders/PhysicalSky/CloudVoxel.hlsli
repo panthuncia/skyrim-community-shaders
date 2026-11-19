@@ -39,9 +39,37 @@ uint VoxelAssetSlot(VoxelCloudData cloud)
 #	endif
 }
 
+#	if defined(CS_ORG_BINDLESS)
+// One table entry per asset slot: TexVoxelModeling0-7 and TexVoxelDistance0-7.
+ORG_HEADER_SRV(Texture2DArray<float3>, TexVoxelModeling0, 60)
+ORG_HEADER_SRV(Texture2DArray<float3>, TexVoxelModeling1, 61)
+ORG_HEADER_SRV(Texture2DArray<float3>, TexVoxelModeling2, 62)
+ORG_HEADER_SRV(Texture2DArray<float3>, TexVoxelModeling3, 63)
+ORG_HEADER_SRV(Texture2DArray<float3>, TexVoxelModeling4, 64)
+ORG_HEADER_SRV(Texture2DArray<float3>, TexVoxelModeling5, 65)
+ORG_HEADER_SRV(Texture2DArray<float3>, TexVoxelModeling6, 66)
+ORG_HEADER_SRV(Texture2DArray<float3>, TexVoxelModeling7, 67)
+ORG_HEADER_SRV(Texture2DArray<float3>, TexVoxelDistance0, 68)
+ORG_HEADER_SRV(Texture2DArray<float3>, TexVoxelDistance1, 69)
+ORG_HEADER_SRV(Texture2DArray<float3>, TexVoxelDistance2, 70)
+ORG_HEADER_SRV(Texture2DArray<float3>, TexVoxelDistance3, 71)
+ORG_HEADER_SRV(Texture2DArray<float3>, TexVoxelDistance4, 72)
+ORG_HEADER_SRV(Texture2DArray<float3>, TexVoxelDistance5, 73)
+ORG_HEADER_SRV(Texture2DArray<float3>, TexVoxelDistance6, 74)
+ORG_HEADER_SRV(Texture2DArray<float3>, TexVoxelDistance7, 75)
+#		define VOXEL_TEXTURE(texture, slot) texture##slot
+// The placements latch: VoxelCloudData at a 96-byte stride, voxelCount of them.
+struct OrgVoxelClouds
+{
+	VoxelCloudData operator[](uint a_index) { return OrgLatch_VoxelClouds.Load<VoxelCloudData>(OrgOffset_VoxelClouds + a_index * 96u); }
+};
+static OrgVoxelClouds VoxelClouds;
+#	else
 Texture2DArray<float3> TexVoxelModeling[8] : register(t60);
 Texture2DArray<float3> TexVoxelDistance[8] : register(t68);
+#		define VOXEL_TEXTURE(texture, slot) texture[slot]
 StructuredBuffer<VoxelCloudData> VoxelClouds : register(t77);
+#	endif
 
 // D3D11 supports BC volumes as 2D slice arrays. Interpolate Z explicitly to
 // retain compressed fields rather than expanding them 8x in GPU memory.
@@ -56,30 +84,30 @@ float3 SampleVoxelField(Texture2DArray<float3> field, float3 uv, float mip)
 }
 
 // SM5 resource indices must be literal. Placements sharing an asset reuse its slot.
-#	define VOXEL_SAMPLE_CASES(texture, function, uv, mip) \
-	case 0:                                                \
-		result = function(texture[0], uv, mip);            \
-		break;                                             \
-	case 1:                                                \
-		result = function(texture[1], uv, mip);            \
-		break;                                             \
-	case 2:                                                \
-		result = function(texture[2], uv, mip);            \
-		break;                                             \
-	case 3:                                                \
-		result = function(texture[3], uv, mip);            \
-		break;                                             \
-	case 4:                                                \
-		result = function(texture[4], uv, mip);            \
-		break;                                             \
-	case 5:                                                \
-		result = function(texture[5], uv, mip);            \
-		break;                                             \
-	case 6:                                                \
-		result = function(texture[6], uv, mip);            \
-		break;                                             \
-	case 7:                                                \
-		result = function(texture[7], uv, mip);            \
+#	define VOXEL_SAMPLE_CASES(texture, function, uv, mip)      \
+	case 0:                                                    \
+		result = function(VOXEL_TEXTURE(texture, 0), uv, mip); \
+		break;                                                 \
+	case 1:                                                    \
+		result = function(VOXEL_TEXTURE(texture, 1), uv, mip); \
+		break;                                                 \
+	case 2:                                                    \
+		result = function(VOXEL_TEXTURE(texture, 2), uv, mip); \
+		break;                                                 \
+	case 3:                                                    \
+		result = function(VOXEL_TEXTURE(texture, 3), uv, mip); \
+		break;                                                 \
+	case 4:                                                    \
+		result = function(VOXEL_TEXTURE(texture, 4), uv, mip); \
+		break;                                                 \
+	case 5:                                                    \
+		result = function(VOXEL_TEXTURE(texture, 5), uv, mip); \
+		break;                                                 \
+	case 6:                                                    \
+		result = function(VOXEL_TEXTURE(texture, 6), uv, mip); \
+		break;                                                 \
+	case 7:                                                    \
+		result = function(VOXEL_TEXTURE(texture, 7), uv, mip); \
 		break;
 
 float3 VoxelModeling(uint slot, float3 uv, float mip)
@@ -101,6 +129,7 @@ float3 VoxelDistanceChannels(uint slot, float3 uv)
 }
 
 #	undef VOXEL_SAMPLE_CASES
+#	undef VOXEL_TEXTURE
 
 float3 VoxelCoordinates(float3 metres, VoxelCloudData cloud)
 {
@@ -129,12 +158,12 @@ float2 VoxelBoxInterval(float3 origin, float3 direction, VoxelCloudData cloud, f
 	const float3 ray = float3(dot(direction, cloud.axisX.xyz) * cloud.axisX.w,
 		dot(direction, cloud.axisY.xyz) * cloud.axisY.w, dot(direction, cloud.axisZ.xyz) * cloud.axisZ.w);
 	const bool3 parallel = abs(ray) < 1e-12;
-	if (any(parallel && (uv < 0.0 || uv > 1.0)))
+	if (any(CLOUD_AND(parallel, CLOUD_OR(uv < 0.0, uv > 1.0))))
 		return 0.0;
-	const float3 inverse = rcp(parallel ? 1e-12 : ray);
+	const float3 inverse = rcp(CLOUD_SELECT(parallel, 1e-12, ray));
 	const float3 first = -uv * inverse, last = (1.0 - uv) * inverse;
-	const float3 lower = parallel ? -1e30 : min(first, last);
-	const float3 upper = parallel ? 1e30 : max(first, last);
+	const float3 lower = CLOUD_SELECT(parallel, -1e30, min(first, last));
+	const float3 upper = CLOUD_SELECT(parallel, 1e30, max(first, last));
 	const float2 interval = float2(max(start * GAME_UNIT_TO_M, max(lower.x, max(lower.y, lower.z))), min(upper.x, min(upper.y, upper.z)));
 	return interval.y > interval.x ? interval * GAME_UNITS_PER_METER : 0.0;
 }
@@ -233,14 +262,16 @@ float sampleCloudDensity(float3 pos, CloudLayer layer, float mipBias, float view
 
 // Resolve three near-detail probes and store the longer coarse integral.
 // The response to this optical depth remains the shared NDF lighting model.
-Texture2DArray<float> TexVoxelLighting : register(t85);
-RWTexture2DArray<float> RWVoxelLighting : register(u0);
-cbuffer VoxelLightingUpdate : register(b4)
-{
-	uint VoxelLightingFirstSlice;
-	uint VoxelLightingSliceCount;
-	uint2 VoxelLightingPadding;
-};
+ORG_HEADER_SRV(Texture2DArray<float>, TexVoxelLighting, 85)
+ORG_HEADER_UAV(RWTexture2DArray<float>, RWVoxelLighting, 0)
+// ORG: the VoxelLightingUpdate latch (Volumetrics.cs.hlsl's push block).
+#define VOXEL_LIGHTING_FIELDS(M, A)  	M(uint, VoxelLightingFirstSlice) 	M(uint, VoxelLightingSliceCount) 	M(uint2, VoxelLightingPadding)
+ORG_GLOBAL_LATCH_BEGIN(VoxelLightingData, VoxelLightingUpdate, 4)
+VOXEL_LIGHTING_FIELDS(ORG_GLOBAL_MEMBER, ORG_GLOBAL_ARRAY)
+ORG_GLOBAL_LATCH_END(VoxelLightingData, VoxelLightingUpdate, 4)
+#define ORG_GLOBAL_LATCH VoxelLightingUpdate
+VOXEL_LIGHTING_FIELDS(ORG_GLOBAL_STATIC, ORG_GLOBAL_STATIC_ARRAY)
+#undef ORG_GLOBAL_LATCH
 static const uint VOXEL_LIGHTING_DEPTH = 32u;
 
 float VoxelCoarseDensity(float3 uv, VoxelCloudData cloud)

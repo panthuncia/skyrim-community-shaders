@@ -557,7 +557,7 @@ struct IDXGISwapChain_Present
 			QueryPerformanceCounter(&qpc);
 			QueryPerformanceFrequency(&freq);
 			if (lastTsc && tsc > lastTsc) {
-				const double wallMs = static_cast<double>(qpc.QuadPart - lastQpc.QuadPart) * 1000.0 / static_cast<double>(freq.QuadPart);
+				[[maybe_unused]] const double wallMs = static_cast<double>(qpc.QuadPart - lastQpc.QuadPart) * 1000.0 / static_cast<double>(freq.QuadPart);
 				TracyPlot("CS.RenderThread.CpuMs", wallMs * static_cast<double>(cycles - lastCycles) / static_cast<double>(tsc - lastTsc));
 			}
 			lastCycles = cycles;

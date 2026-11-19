@@ -41,8 +41,8 @@ float VolcanoCoreProfile(float3 position, uint index, out float coordinate, out 
 	const float widthSquared = width * width;
 	[unroll] for (uint i = 0u; i < 7u; ++i)
 	{
-		const float4 a = CloudStorms[index].parcels[i].sphere;
-		const float4 b = CloudStorms[index].parcels[i + 1u].sphere;
+		const float4 a = CLOUD_STORM_PARCEL(CloudStorms[index], index, i).sphere;
+		const float4 b = CLOUD_STORM_PARCEL(CloudStorms[index], index, i + 1u).sphere;
 		const float3 axis = b.xyz - a.xyz;
 		const float along = saturate(dot(position - a.xyz, axis) / max(dot(axis, axis), 1e-6));
 		float3 delta = position - lerp(a.xyz, b.xyz, along);
@@ -73,13 +73,13 @@ float VolcanoCoreProfile(float3 position, uint index, out float coordinate, out 
 
 float3 PlumeNoisePosition(float3 position, uint index, uint parcelIndex)
 {
-	const CloudStormParcel parcel = CloudStorms[index].parcels[parcelIndex];
+	const CloudStormParcel parcel = CLOUD_STORM_PARCEL(CloudStorms[index], index, parcelIndex);
 	return PlumeRotate(position - parcel.sphere.xyz, parcel.rotation) - parcel.noiseOffset.xyz;
 }
 
 float3 PlumeDisplacement(float3 position, uint index, uint parcelIndex)
 {
-	const CloudStormParcel parcel = CloudStorms[index].parcels[parcelIndex];
+	const CloudStormParcel parcel = CLOUD_STORM_PARCEL(CloudStorms[index], index, parcelIndex);
 	const float3 field = PlumeRotate(position - parcel.sphere.xyz, parcel.rotation) - parcel.noiseOffset.xyz;
 	const float4 inversePrevious = float4(-parcel.previousRotation.xyz, parcel.previousRotation.w);
 	return position - (PlumeRotate(field + parcel.previousNoiseOffset.xyz, inversePrevious) + parcel.previousSphere.xyz);
@@ -249,7 +249,7 @@ NDFInfo SampleVolcanicNdf(float3 positionMeters, uint index)
 			return ndf;
 		const uint first = min((uint)ndf.plumeCoordinate, 6u);
 		const float blend = smoothstep(0.0, 1.0, saturate(ndf.plumeCoordinate - first));
-		const float3 centre = lerp(CloudStorms[index].parcels[first].sphere.xyz, CloudStorms[index].parcels[first + 1u].sphere.xyz, blend);
+		const float3 centre = lerp(CLOUD_STORM_PARCEL(CloudStorms[index], index, first).sphere.xyz, CLOUD_STORM_PARCEL(CloudStorms[index], index, first + 1u).sphere.xyz, blend);
 		// Transport the authored modeling with the local section. The old fixed
 		// Height footprint must not slice off a wind-displaced or spreading parcel.
 		const float3 uv = float3((positionMeters.xy - centre.xy) / (2.0 * storm.animation.z) + .5, index);
@@ -264,7 +264,7 @@ NDFInfo SampleVolcanicNdf(float3 positionMeters, uint index)
 		ndf.stormVolume = true;
 		ndf.stormIndex = index;
 		ndf.stormBlend = 1.0;
-		ndf.plumeDensity = lerp(CloudStorms[index].parcels[first].flow.w, CloudStorms[index].parcels[first + 1u].flow.w, blend);
+		ndf.plumeDensity = lerp(CLOUD_STORM_PARCEL(CloudStorms[index], index, first).flow.w, CLOUD_STORM_PARCEL(CloudStorms[index], index, first + 1u).flow.w, blend);
 		const float age = saturate((ndf.plumeCoordinate - 4.0) / 3.0);
 		ndf.dimension_profile = profile * lerp(1.0, .55, age);
 		ndf.dimension_profile *= smoothstep(0.0, .025, ndf.height_fraction);
@@ -449,21 +449,21 @@ float2 PlumeRayInterval(float3 eye, float3 direction, uint index, float start, b
 	const float3 origin = eye * GAME_UNIT_TO_M;
 	// Parallel rays use a finite reciprocal; reject slabs they cannot enter.
 	const bool3 parallel = abs(direction) < 1e-8;
-	const float3 inverseDirection = 1.0 / (parallel ? 1e-8 : direction);
+	const float3 inverseDirection = 1.0 / CLOUD_SELECT(parallel, 1e-8, direction);
 	float2 result = 0.0;
 	[unroll] for (uint i = 0u; i < 7u; ++i)
 	{
-		const float4 a = CloudStorms[index].parcels[i].sphere;
-		const float4 b = CloudStorms[index].parcels[i + 1u].sphere;
+		const float4 a = CLOUD_STORM_PARCEL(CloudStorms[index], index, i).sphere;
+		const float4 b = CLOUD_STORM_PARCEL(CloudStorms[index], index, i + 1u).sphere;
 		// Linear centre/radius interpolation stays within these endpoint bounds.
 		const float3 lower = min(a.xyz - a.w, b.xyz - b.w) - 200.0;
 		const float3 upper = max(a.xyz + a.w, b.xyz + b.w) + 200.0;
 		const float3 first = (lower - origin) * inverseDirection;
 		const float3 second = (upper - origin) * inverseDirection;
-		const float3 nearPlane = parallel ? -1e30 : min(first, second);
-		const float3 farPlane = parallel ? 1e30 : max(first, second);
+		const float3 nearPlane = CLOUD_SELECT(parallel, -1e30, min(first, second));
+		const float3 farPlane = CLOUD_SELECT(parallel, 1e30, max(first, second));
 		const float2 segment = float2(max(start * GAME_UNIT_TO_M, max(nearPlane.x, max(nearPlane.y, nearPlane.z))), min(farPlane.x, min(farPlane.y, farPlane.z)));
-		if (segment.y > segment.x && !any(parallel && (origin < lower || origin > upper))) {
+		if (segment.y > segment.x && !any(CLOUD_AND(parallel, CLOUD_OR(origin < lower, origin > upper)))) {
 			if (result.y <= result.x || (nearestOnly && segment.x < result.x))
 				result = segment;
 			else if (!nearestOnly || segment.x == result.x)

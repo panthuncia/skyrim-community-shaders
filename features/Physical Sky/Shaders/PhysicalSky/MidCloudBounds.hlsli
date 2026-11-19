@@ -1,7 +1,7 @@
 #ifndef PHYSICAL_SKY_MID_CLOUD_BOUNDS_HLSLI
 #define PHYSICAL_SKY_MID_CLOUD_BOUNDS_HLSLI
 
-Texture2D<float2> TexMiddleBounds : register(t105);
+ORG_HEADER_SRV(Texture2D<float2>, TexMiddleBounds, 105)
 
 bool MiddleIntervalEmpty(float3 start, float3 end)
 {

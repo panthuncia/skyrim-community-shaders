@@ -1,8 +1,8 @@
 #ifndef PHYSICAL_SKY_UPPER_CLOUD_TILES_HLSLI
 #define PHYSICAL_SKY_UPPER_CLOUD_TILES_HLSLI
 
-Texture2D<uint> TexUpperTiles : register(t87);
-RWTexture2D<uint> RWUpperTiles : register(u4);
+ORG_HEADER_SRV(Texture2D<uint>, TexUpperTiles, 87)
+ORG_HEADER_UAV(RWTexture2D<uint>, RWUpperTiles, 4)
 groupshared uint UpperTileActive;
 
 [numthreads(8, 8, 1)] void classifyUpperTiles(uint2 tid : SV_DispatchThreadID, uint2 group : SV_GroupID, uint lane : SV_GroupIndex) {

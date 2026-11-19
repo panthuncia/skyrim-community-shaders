@@ -2,6 +2,9 @@
 #	define COMPUTESHADER
 #endif
 
+// Dual-target (Common/OrgResources.hlsli). The graph reads the constants from a latch.
+#include "Common/OrgResources.hlsli"
+
 struct NoiseLayer
 {
 	uint noise;
@@ -10,25 +13,43 @@ struct NoiseLayer
 	float4 range;
 };
 
-cbuffer CB : register(b1)
-{
-	NoiseLayer weather[2];
-	float2 windOffset;
-	float localWeight;
-	float localWindScale;
-	uint localBlendMode;
-	float weight;
-	uint hasPrevious;
-	float padding;
-};
-Texture2D<float> Noise0 : register(t0);
-Texture2D<float> Noise1 : register(t1);
-Texture2D<float> Noise2 : register(t2);
-Texture2D<float> Noise3 : register(t3);
-Texture2D<float4> LocalWeather : register(t4);
-Texture2D<float2> PreviousWeather : register(t5);
-SamplerState NoiseSampler : register(s0);
-RWTexture2D<float2> OutputWeather : register(u0);
+#define CIRRUS_FIELDS(M, A)   \
+	A(NoiseLayer, weather, 2) \
+	M(float2, windOffset)     \
+	M(float, localWeight)     \
+	M(float, localWindScale)  \
+	M(uint, localBlendMode)   \
+	M(float, weight)          \
+	M(uint, hasPrevious)      \
+	M(float, padding)
+
+#define CIRRUS_RESOURCES(X)                       \
+	X(SRV, Texture2D<float>, Noise0, 0)           \
+	X(SRV, Texture2D<float>, Noise1, 1)           \
+	X(SRV, Texture2D<float>, Noise2, 2)           \
+	X(SRV, Texture2D<float>, Noise3, 3)           \
+	X(SRV, Texture2D<float4>, LocalWeather, 4)    \
+	X(SRV, Texture2D<float2>, PreviousWeather, 5) \
+	X(UAV, RWTexture2D<float2>, OutputWeather, 0) \
+	X(SAMPLER, SamplerState, NoiseSampler, 0)     \
+	X(LATCH, CirrusConstants, CB, 1)
+ORG_PUSH_BLOCK(CIRRUS_RESOURCES(ORG_HANDLE))
+
+ORG_GLOBAL_LATCH_BEGIN(CirrusConstants, CB, 1)
+CIRRUS_FIELDS(ORG_GLOBAL_MEMBER, ORG_GLOBAL_ARRAY)
+ORG_GLOBAL_LATCH_END(CirrusConstants, CB, 1)
+#define ORG_GLOBAL_LATCH CB
+CIRRUS_FIELDS(ORG_GLOBAL_STATIC, ORG_GLOBAL_STATIC_ARRAY)
+#undef ORG_GLOBAL_LATCH
+
+ORG_RESOURCE(SRV, Texture2D<float>, Noise0, 0)
+ORG_RESOURCE(SRV, Texture2D<float>, Noise1, 1)
+ORG_RESOURCE(SRV, Texture2D<float>, Noise2, 2)
+ORG_RESOURCE(SRV, Texture2D<float>, Noise3, 3)
+ORG_RESOURCE(SRV, Texture2D<float4>, LocalWeather, 4)
+ORG_RESOURCE(SRV, Texture2D<float2>, PreviousWeather, 5)
+ORG_RESOURCE(SAMPLER, SamplerState, NoiseSampler, 0)
+ORG_RESOURCE(UAV, RWTexture2D<float2>, OutputWeather, 0)
 
 float SampleNoise(Texture2D<float> source, NoiseLayer layer, float2 uv, uint2 size)
 {

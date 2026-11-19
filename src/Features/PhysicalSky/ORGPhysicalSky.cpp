@@ -27,6 +27,7 @@ ORGPhysicalSky& ORGPhysicalSky::Get()
 #	include "Features/DrawcallLimitFix/Core/Gpu/GpuTextures.h"
 #	include "Features/DynamicCubemaps.h"
 #	include "Features/PhysicalSky.h"
+#	include "Features/PhysicalSky/ORGVolumetricClouds.h"
 #	include "Features/TerrainShadows.h"
 #	include "Features/TerrainShadows/ORGTerrainShadows.h"
 #	include "Features/ViewAtmosphere.h"
@@ -103,6 +104,7 @@ namespace
 		FrameAnchors::Texture shadowMap;  // null when the frame drew no shadow mask
 		std::string terrain;              // Terrain Shadows' published heights, empty for none
 		std::string cloud;                // Cloud Shadows' last layer, published, empty for none
+		bool clouds = false;              // the volumetric clouds' shadow volume and mean, read by their ids
 
 		bool operator==(const ShadowInputs&) const = default;
 	};
@@ -112,7 +114,7 @@ namespace
 	{
 		std::uint32_t main = 0;  // the engine target the graph composite writes
 		bool depth = false;      // with Dynamic Cubemaps only, as the D3D11 composite binds it
-		FrameAnchors::Texture volTr, volLum, lightning;
+		bool clouds = false;     // the clouds' reprojected targets and lightning channels, read by their ids
 
 		bool operator==(const CompositeInputs&) const = default;
 	};
@@ -139,12 +141,23 @@ namespace
 		return FrameAnchors::ImportDepth(target, a_id);
 	}
 
-	/** @brief A D3D11 texture the feature still makes, imported once by name. Null for none. */
-	FrameAnchors::Texture PhysSkyImportD3D11(std::string_view a_name, const eastl::unique_ptr<Texture2D>& a_texture)
+	/**
+	* @brief Whether this frame's readers bind the volumetric clouds' outputs: the clouds are on, and their targets are the
+	* published twins. The cloud client clears them to neutral until it first runs.
+	*/
+	bool CloudsOnGraph(const PhysicalSky& a_feature)
 	{
-		if (!a_texture || !a_texture->resource || !a_texture->srv)
-			return nullptr;
-		return FrameAnchors::D3D11Texture(a_name, a_texture->resource.get(), a_texture->srv.get(), nullptr);
+		// Nothing may read them before the cloud client's first run writes them.
+		if (!a_feature.VolumetricCloudsEnabled() || !a_feature.texShadowVolume || !a_feature.texVolTr || !ORGVolumetricClouds::OutputsWritten())
+			return false;
+		const bool published = PublishedResources::IsExportOf(a_feature.texShadowVolume->srv.get(), ORGVolumetricClouds::kShadowVolumeId) &&
+		                       PublishedResources::IsExportOf(a_feature.texVolTr->srv.get(), ORGVolumetricClouds::kVolTrCurrentId);
+		if (!published) {
+			static bool s_logged = false;
+			if (!std::exchange(s_logged, true))
+				logger::error("[ORG] Physical Sky: the volumetric clouds' targets are not the graph's; their readers see no clouds");
+		}
+		return published;
 	}
 
 	using Lut = ORGPhysicalSky::Lut;
@@ -360,7 +373,8 @@ struct ORGPhysicalSky::Impl
 		const auto cube = static_cast<std::uint32_t>(org::SRVViewType::TextureCube);
 		// In ShadowAccum's resource list order. The shadow volume is D3D11's until the clouds are ported (phase 4), so it is null.
 		const std::vector<Bind> bindings{ Bind::Shared(), Bind::Srv(depth), a_inputs.shadowMap ? Bind::SrvArray(a_inputs.shadowMap) : null, Bind::Latch(0),
-			a_inputs.terrain.empty() ? null : Bind::Published(a_inputs.terrain), a_inputs.cloud.empty() ? null : Bind::Published(a_inputs.cloud, cube), null,
+			a_inputs.terrain.empty() ? null : Bind::Published(a_inputs.terrain), a_inputs.cloud.empty() ? null : Bind::Published(a_inputs.cloud, cube),
+			a_inputs.clouds ? Bind::Published(ORGVolumetricClouds::kShadowVolumeId) : null,
 			Bind::Uav(output), Bind::Handle(samplers[0].Index()) };
 		AnchorPasses::Builder builder(FrameAnchors::Anchor::Prepass, kPrepassClientId, kPrepassOrder, prepassLatch, prepassGate);
 		// The twin starts out as no shadow, for readers on frames no AP shadow ran.
@@ -375,7 +389,9 @@ struct ORGPhysicalSky::Impl
 			.program = skyTail,
 			.bindings = { Bind::Shared(), Bind::Published(ORGPhysicalSky::kTransmittanceLutId), Bind::Published(ORGPhysicalSky::kMultiscatterLutId),
 				Bind::Published(ORGPhysicalSky::kDiskPhaseLutId),
-				Bind::Uav(tailOutput), Bind::Handle(samplers[0].Index()), Bind::Handle(samplers[1].Index()), Bind::Handle(samplers[2].Index()), null, null, null },
+				Bind::Uav(tailOutput), Bind::Handle(samplers[0].Index()), Bind::Handle(samplers[1].Index()), Bind::Handle(samplers[2].Index()),
+				a_inputs.clouds ? Bind::Published(ORGVolumetricClouds::kShadowVolumeId) : null,
+				a_inputs.clouds ? Bind::Published(ORGVolumetricClouds::kCloudShadowMeanId) : null, null },
 			.gate = kSkyTailEntry });
 		if (builder.Failed()) {
 			logger::error("[ORG] Physical Sky: {}; the AP shadow stays on D3D11", builder.Failure());
@@ -418,7 +434,9 @@ struct ORGPhysicalSky::Impl
 		const auto srvOr = [&](const FrameAnchors::Texture& a_texture) { return a_texture ? Bind::Srv(a_texture) : null; };
 		// In ApplyAerialPerspectiveCS's resource list order. A null depth reads zero, as the D3D11 composite's unbound t4 does.
 		std::vector<Bind> bindings{ Bind::Shared(), Bind::Uav(main), srvOr(depth), Bind::Published(ORGPhysicalSky::kApLutId),
-			Bind::Published(ORGPhysicalSky::kApShadowId), srvOr(a_inputs.volTr), srvOr(a_inputs.volLum), srvOr(a_inputs.lightning),
+			Bind::Published(ORGPhysicalSky::kApShadowId), a_inputs.clouds ? Bind::Published(ORGVolumetricClouds::kVolTrCurrentId) : null,
+			a_inputs.clouds ? Bind::Published(ORGVolumetricClouds::kVolLumCurrentId) : null,
+			a_inputs.clouds ? Bind::Published(ORGVolumetricClouds::kLightningChannelsId) : null,
 			Bind::Handle(samplers[1].Index()) };
 		AnchorPasses::Builder builder(FrameAnchors::Anchor::DeferredComposite, kCompositeClientId, kCompositeOrder, {}, compositeGate);
 		builder.Add(AnchorPasses::Dispatch{ .name = "apply", .program = applyAp, .bindings = std::move(bindings), .gate = 0 });
@@ -439,7 +457,7 @@ struct ORGPhysicalSky::Impl
 		}
 		compositeRegistered = a_inputs;
 		logger::info("[ORG] Physical Sky: the aerial perspective runs after the graph composite ({}; main target {}, depth {}, clouds {})",
-			kCompositeClientId, a_inputs.main, a_inputs.depth ? "the depth copy" : "none (no Dynamic Cubemaps)", a_inputs.volTr ? "D3D11's" : "none");
+			kCompositeClientId, a_inputs.main, a_inputs.depth ? "the depth copy" : "none (no Dynamic Cubemaps)", a_inputs.clouds ? "the graph's" : "none");
 		return true;
 	}
 };
@@ -754,9 +772,7 @@ bool ORGPhysicalSky::AccumShadow(const PhysicalSky& a_feature)
 			if (inputs.cloud.empty())
 				return fallback("Cloud Shadows' layers are not on the render graph");
 		}
-		// The cloud shadow volume is D3D11's until the clouds are ported (phase 4). Native mode has the clouds off.
-		if (a_feature.VolumetricCloudsEnabled() && a_feature.texShadowVolume)
-			return fallback("the volumetric clouds are on D3D11");
+		inputs.clouds = CloudsOnGraph(a_feature);
 	} else {
 		// As D3D11 clears it in the map menu.
 		latch.clear = 1;
@@ -793,15 +809,12 @@ bool ORGPhysicalSky::GenerateSkyTail(const PhysicalSky& a_feature)
 	if (!IsActive() || !impl->skyTail || impl->prepassFailed)
 		return false;
 	auto& state = *impl;
-	// The cloud shadow volume and the cloud diffuse transport are D3D11's until the clouds are ported (phase 4).
-	if (a_feature.VolumetricCloudsEnabled())
-		return false;
 	if (!state.MakeNull()) {
 		state.prepassFailed = true;
 		return false;
 	}
 	// The tail shares the AP shadow's client. Without an AP shadow this frame, it registers with no shadow inputs.
-	if (!state.shadowRegistered && !state.RegisterPrepass({}, impl)) {
+	if (!state.shadowRegistered && !state.RegisterPrepass({ .clouds = CloudsOnGraph(a_feature) }, impl)) {
 		state.prepassFailed = true;
 		return false;
 	}
@@ -830,12 +843,7 @@ void ORGPhysicalSky::StageComposite(const PhysicalSky& a_feature)
 	CompositeInputs inputs;
 	inputs.main = frame->main;
 	inputs.depth = globals::features::dynamicCubemaps.loaded;
-	// The cloud targets are D3D11's until the clouds are ported (phase 4). Native mode has the clouds off.
-	if (a_feature.VolumetricCloudsEnabled()) {
-		inputs.volTr = PhysSkyImportD3D11("PhysicalSky::VolTr", a_feature.texVolTr);
-		inputs.volLum = PhysSkyImportD3D11("PhysicalSky::VolLum", a_feature.texVolLum);
-		inputs.lightning = PhysSkyImportD3D11("PhysicalSky::LightningChannels", a_feature.texLightningChannels);
-	}
+	inputs.clouds = CloudsOnGraph(a_feature);
 	if (!state.compositeRegistered || !(*state.compositeRegistered == inputs)) {
 		if (!state.RegisterComposite(inputs, impl)) {
 			state.compositeFailed = true;

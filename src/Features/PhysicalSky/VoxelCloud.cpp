@@ -1,6 +1,7 @@
 #include "Features/PhysicalSky.h"
 
 #include "CSEditor/SceneManager/SceneWidgetInterceptor.h"
+#include "Features/PhysicalSky/ORGCloudMaps.h"
 #include "I18n/I18n.h"
 #include "Util.h"
 #include <DirectXTex.h>
@@ -266,13 +267,51 @@ void VoxelCloudManager::Update(const SceneBlend& selection, const std::string& w
 		data = eastl::make_unique<StructuredBuffer>(StructuredBufferDesc<VoxelCloudData>(capacity, true), capacity, "PhysicalSky::VoxelCloudPlacements");
 		data->CreateSRV();
 	}
-	data->Update(active.data(), active.size() * sizeof(VoxelCloudData));
+	// On the graph the cloud renderer latches the placements.
+	if (!ORGCloudMaps::Requested())
+		data->Update(active.data(), active.size() * sizeof(VoxelCloudData));
 	bindings.back() = data->SRV();
 }
 
 void VoxelCloudManager::Bind() const
 {
 	globals::d3d::context->CSSetShaderResources(60, static_cast<UINT>(bindings.size()), bindings.data());
+}
+
+std::optional<std::array<uint32_t, 2>> VoxelCloudManager::PlanLighting(float3 direction)
+{
+	if (active.empty())
+		return std::nullopt;
+	auto geometry = active;
+	for (auto& cloud : geometry) {
+		// As UpdateLighting: placement, density and fade do not change the cached integral.
+		cloud.centerWeight = {};
+		cloud.parameters.y = 0.f;
+		cloud.noise = {};
+	}
+	const bool changed = geometry.size() != lightingGeometry.size() ||
+	                     std::memcmp(geometry.data(), lightingGeometry.data(), geometry.size() * sizeof(VoxelCloudData)) != 0;
+	// A new array size is a new lighting texture, whose contents are not valid yet.
+	const uint32_t slices = Count() * 32u;
+	if (plannedSlices != slices) {
+		plannedSlices = slices;
+		lightingValid = false;
+	}
+	const bool rebuild = changed || !lightingValid;
+	if (rebuild || (lightingRemaining == 0 && (direction - lightingDirection).LengthSquared() > 1e-8f)) {
+		lightingGeometry = std::move(geometry);
+		lightingDirection = direction;
+		lightingNextSlice = 0;
+		lightingRemaining = slices;
+	}
+	if (lightingRemaining == 0)
+		return std::nullopt;
+	const uint32_t count = rebuild ? lightingRemaining : std::min(lightingRemaining, 4u);
+	const std::array<uint32_t, 2> update{ lightingNextSlice, count };
+	lightingNextSlice += count;
+	lightingRemaining -= count;
+	lightingValid = true;
+	return update;
 }
 
 void VoxelCloudManager::UpdateLighting(ID3D11ComputeShader* shader, float3 direction)
@@ -298,7 +337,8 @@ void VoxelCloudManager::UpdateLighting(ID3D11ComputeShader* shader, float3 direc
 		desc.Format = DXGI_FORMAT_R16_FLOAT;
 		desc.Usage = D3D11_USAGE_DEFAULT;
 		desc.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS;
-		lighting = eastl::make_unique<Texture2D>(desc, "PhysicalSky::VoxelCloudLighting");
+		// A graph twin in the graph modes, which the cloud renderer writes there.
+		lighting = ORGCloudMaps::MakeTexture2D(desc, "PhysicalSky::VoxelCloudLighting", true);
 		D3D11_SHADER_RESOURCE_VIEW_DESC srv{};
 		srv.Format = desc.Format;
 		srv.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2DARRAY;

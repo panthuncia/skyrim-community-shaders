@@ -3,8 +3,8 @@
 
 // Tiles cover every checkerboard phase and include the finite direct-light
 // probes. Clear tiles can use the ordinary cloud shader without losing shadows.
-Texture2D<uint> TexStormTiles : register(t88);
-RWTexture2D<uint> RWStormTiles : register(u7);
+ORG_HEADER_SRV(Texture2D<uint>, TexStormTiles, 88)
+ORG_HEADER_UAV(RWTexture2D<uint>, RWStormTiles, 7)
 
 [numthreads(8, 8, 1)] void classifyStormTiles(uint2 tile : SV_DispatchThreadID) {
 	const VolumetricCloudData info = VolumetricCloudBuffer[0];
@@ -34,8 +34,8 @@ RWTexture2D<uint> RWStormTiles : register(u7);
 		if (IsVolcanic(storm)) {
 			[loop] for (uint segment = 0u; segment < 7u; ++segment)
 			{
-				const float4 a = storm.parcels[segment].sphere;
-				const float4 b = storm.parcels[segment + 1u].sphere;
+				const float4 a = CLOUD_STORM_PARCEL(storm, index, segment).sphere;
+				const float4 b = CLOUD_STORM_PARCEL(storm, index, segment + 1u).sphere;
 				bool intersects = true;
 				[unroll] for (uint plane = 0u; plane < 5u; ++plane)
 				{

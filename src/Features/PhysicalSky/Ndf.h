@@ -399,6 +399,9 @@ private:
 		float4 shape;
 	};
 	static_assert(sizeof(Parameters) == 192);
+	/** @brief Update's render graph path: the weather states as graph steps. False when the graph did not take them. */
+	bool UpdateGraph(const MidCloudSettings& settings, TextureManager& textures, const NdfManager& ndf,
+		const std::vector<std::pair<MidCloudWeatherState, float>>& states);
 	std::array<eastl::unique_ptr<Texture2D>, 2> maps;
 	eastl::unique_ptr<ConstantBuffer> parameters;
 	winrt::com_ptr<ID3D11ComputeShader> shader;
@@ -448,6 +451,9 @@ private:
 		float padding = 0.f;
 	};
 	static_assert(sizeof(GenerationParameters) == 96);
+	/** @brief Update's render graph path: the weather states as graph steps, then the mips. False when the graph did not take them. */
+	bool UpdateGraph(const std::vector<CirrusWeatherState>& states, const std::vector<float>& weights, float2 wind, TextureManager& textures,
+		const NdfManager& ndf);
 	std::array<eastl::unique_ptr<Texture2D>, 2> texWeather;
 	eastl::unique_ptr<ConstantBuffer> generationCb;
 	winrt::com_ptr<ID3D11ComputeShader> weatherProgram;

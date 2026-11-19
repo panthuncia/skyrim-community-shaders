@@ -61,6 +61,8 @@ private:
 		float warpCorrelation;
 	};
 	static_assert(sizeof(Parameters) == 208);
+	/** @brief Update's render graph path: the same work as graph steps, taken by ORGCloudMaps. */
+	bool UpdateGraph(Parameters data, ID3D11ShaderResourceView* source, uint32_t width, uint32_t height, uint32_t mipCount);
 	Parameters requested = {};
 	Parameters generated = {};
 	bool pending = false;

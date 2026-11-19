@@ -1,5 +1,8 @@
 #define COMPUTESHADER
 
+// Dual-target (Common/OrgResources.hlsli). The graph reads the parameters from a latch.
+#include "Common/OrgResources.hlsli"
+
 struct NoiseLayer
 {
 	uint noise;
@@ -7,23 +10,44 @@ struct NoiseLayer
 	float2 offset;
 	float4 range;
 };
-cbuffer Parameters : register(b1)
-{
-	NoiseLayer weather[5];  // primary, type, secondary, coverage gain, thickness variation
-	float localWeight;
-	uint localBlendMode;
-	float weight;
-	uint hasPrevious;
-	float4 shape;  // coverage-to-height exponent, displacement / nominal thickness
-};
-Texture2D<float> Noise0 : register(t0);
-Texture2D<float> Noise1 : register(t1);
-Texture2D<float> Noise2 : register(t2);
-Texture2D<float> Noise3 : register(t3);
-Texture2D<float4> LocalWeather : register(t4);
-Texture2D<float4> PreviousWeather : register(t5);
-SamplerState NoiseSampler : register(s0);
-RWTexture2D<float4> OutputWeather : register(u0);
+
+// weather: primary, type, secondary, coverage gain, thickness variation.
+// shape: coverage-to-height exponent, displacement / nominal thickness.
+#define MID_CLOUD_FIELDS(M, A) \
+	A(NoiseLayer, weather, 5)  \
+	M(float, localWeight)      \
+	M(uint, localBlendMode)    \
+	M(float, weight)           \
+	M(uint, hasPrevious)       \
+	M(float4, shape)
+
+#define MID_CLOUD_RESOURCES(X)                    \
+	X(SRV, Texture2D<float>, Noise0, 0)           \
+	X(SRV, Texture2D<float>, Noise1, 1)           \
+	X(SRV, Texture2D<float>, Noise2, 2)           \
+	X(SRV, Texture2D<float>, Noise3, 3)           \
+	X(SRV, Texture2D<float4>, LocalWeather, 4)    \
+	X(SRV, Texture2D<float4>, PreviousWeather, 5) \
+	X(UAV, RWTexture2D<float4>, OutputWeather, 0) \
+	X(SAMPLER, SamplerState, NoiseSampler, 0)     \
+	X(LATCH, MidCloudConstants, Parameters, 1)
+ORG_PUSH_BLOCK(MID_CLOUD_RESOURCES(ORG_HANDLE))
+
+ORG_GLOBAL_LATCH_BEGIN(MidCloudConstants, Parameters, 1)
+MID_CLOUD_FIELDS(ORG_GLOBAL_MEMBER, ORG_GLOBAL_ARRAY)
+ORG_GLOBAL_LATCH_END(MidCloudConstants, Parameters, 1)
+#define ORG_GLOBAL_LATCH Parameters
+MID_CLOUD_FIELDS(ORG_GLOBAL_STATIC, ORG_GLOBAL_STATIC_ARRAY)
+#undef ORG_GLOBAL_LATCH
+
+ORG_RESOURCE(SRV, Texture2D<float>, Noise0, 0)
+ORG_RESOURCE(SRV, Texture2D<float>, Noise1, 1)
+ORG_RESOURCE(SRV, Texture2D<float>, Noise2, 2)
+ORG_RESOURCE(SRV, Texture2D<float>, Noise3, 3)
+ORG_RESOURCE(SRV, Texture2D<float4>, LocalWeather, 4)
+ORG_RESOURCE(SRV, Texture2D<float4>, PreviousWeather, 5)
+ORG_RESOURCE(SAMPLER, SamplerState, NoiseSampler, 0)
+ORG_RESOURCE(UAV, RWTexture2D<float4>, OutputWeather, 0)
 
 float SampleNoise(Texture2D<float> source, float2 uv, float frequency, uint2 size)
 {

@@ -1,28 +1,53 @@
-cbuffer LocalNdfParameters : register(b1)
-{
-	float4 fieldRect;
-	float4 centerSize;
-	float4 rotationWeights;
-	float4 heightFeather;
-	float4 altitude;
-	uint hasMask;
-	uint modelingAlpha;
-	uint dimension;
-	uint modelingBlend;
-};
+// Dual-target (Common/OrgResources.hlsli). The graph reads the parameters from a latch.
+#include "Common/OrgResources.hlsli"
 
-Texture2D<float2> HeightInput : register(t0);
-Texture2D<float4> ModelingInput : register(t1);
-Texture2D<float> MaskInput : register(t2);
-SamplerState ClampSampler : register(s0);
-RWTexture2DArray<float4> HeightOutput : register(u0);
-RWTexture2DArray<float4> ModelingOutput : register(u1);
-RWTexture2DArray<float4> MaximumOutput : register(u2);
+#define LOCAL_NDF_FIELDS(M, A) \
+	M(float4, fieldRect)       \
+	M(float4, centerSize)      \
+	M(float4, rotationWeights) \
+	M(float4, heightFeather)   \
+	M(float4, altitude)        \
+	M(uint, hasMask)           \
+	M(uint, modelingAlpha)     \
+	M(uint, dimension)         \
+	M(uint, modelingBlend)
+
+#define LOCAL_NDF_RESOURCES(X)                          \
+	X(SRV, Texture2D<float2>, HeightInput, 0)           \
+	X(SRV, Texture2D<float4>, ModelingInput, 1)         \
+	X(SRV, Texture2D<float>, MaskInput, 2)              \
+	X(UAV, RWTexture2DArray<float4>, HeightOutput, 0)   \
+	X(UAV, RWTexture2DArray<float4>, ModelingOutput, 1) \
+	X(UAV, RWTexture2DArray<float4>, MaximumOutput, 2)  \
+	X(SAMPLER, SamplerState, ClampSampler, 0)           \
+	X(LATCH, LocalNdfConstants, LocalNdfParameters, 1)  \
+	X(EXTERN, uint, OutputSlice, 0)
+ORG_PUSH_BLOCK(LOCAL_NDF_RESOURCES(ORG_HANDLE))
+
+ORG_GLOBAL_LATCH_BEGIN(LocalNdfConstants, LocalNdfParameters, 1)
+LOCAL_NDF_FIELDS(ORG_GLOBAL_MEMBER, ORG_GLOBAL_ARRAY)
+ORG_GLOBAL_LATCH_END(LocalNdfConstants, LocalNdfParameters, 1)
+#define ORG_GLOBAL_LATCH LocalNdfParameters
+LOCAL_NDF_FIELDS(ORG_GLOBAL_STATIC, ORG_GLOBAL_STATIC_ARRAY)
+#undef ORG_GLOBAL_LATCH
+
+ORG_RESOURCE(SRV, Texture2D<float2>, HeightInput, 0)
+ORG_RESOURCE(SRV, Texture2D<float4>, ModelingInput, 1)
+ORG_RESOURCE(SRV, Texture2D<float>, MaskInput, 2)
+ORG_RESOURCE(SAMPLER, SamplerState, ClampSampler, 0)
+ORG_RESOURCE(UAV, RWTexture2DArray<float4>, HeightOutput, 0)
+ORG_RESOURCE(UAV, RWTexture2DArray<float4>, ModelingOutput, 1)
+ORG_RESOURCE(UAV, RWTexture2DArray<float4>, MaximumOutput, 2)
 
 [numthreads(8, 8, 1)] void main(uint2 pixel : SV_DispatchThreadID) {
 	if (any(pixel >= dimension))
 		return;
+#if defined(CS_ORG_BINDLESS)
+	// The graph writes a whole-array view, so the push block names the layer's slice.
+	const uint3 target = uint3(pixel, OrgHandle_OutputSlice);
+#else
 	const uint3 target = uint3(pixel, 0);
+#endif
 	HeightOutput[target] = 0.0;
 	ModelingOutput[target] = 0.0;
 	MaximumOutput[target] = 0.0;

@@ -2,24 +2,37 @@
 #	define COMPUTESHADER
 #endif
 
+// Dual-target (Common/OrgResources.hlsli). The graph reads the constants from a latch.
+#include "Common/OrgResources.hlsli"
 #include "Common/Random.hlsli"
 #include "PhysicalSky/AlligatorNoise.hlsli"
 
-cbuffer CB : register(b1)
-{
-	uint noiseType;
-	uint seed;
-	uint frequency;
-	uint octaves;
-	float persistence;
-	uint lacunarity;
-	float contrast;
-	float bias;
-	uint repetitions;
-	float responseExponent;
-	float2 padding;
-};
-RWTexture2D<float> Output : register(u0);
+#define NDF_NOISE_FIELDS(M, A) \
+	M(uint, noiseType)         \
+	M(uint, seed)              \
+	M(uint, frequency)         \
+	M(uint, octaves)           \
+	M(float, persistence)      \
+	M(uint, lacunarity)        \
+	M(float, contrast)         \
+	M(float, bias)             \
+	M(uint, repetitions)       \
+	M(float, responseExponent) \
+	M(float2, padding)
+
+#define NDF_NOISE_RESOURCES(X)            \
+	X(UAV, RWTexture2D<float>, Output, 0) \
+	X(LATCH, NdfNoiseConstants, CB, 1)
+ORG_PUSH_BLOCK(NDF_NOISE_RESOURCES(ORG_HANDLE))
+
+ORG_GLOBAL_LATCH_BEGIN(NdfNoiseConstants, CB, 1)
+NDF_NOISE_FIELDS(ORG_GLOBAL_MEMBER, ORG_GLOBAL_ARRAY)
+ORG_GLOBAL_LATCH_END(NdfNoiseConstants, CB, 1)
+#define ORG_GLOBAL_LATCH CB
+NDF_NOISE_FIELDS(ORG_GLOBAL_STATIC, ORG_GLOBAL_STATIC_ARRAY)
+#undef ORG_GLOBAL_LATCH
+
+ORG_RESOURCE(UAV, RWTexture2D<float>, Output, 0)
 
 float3 CellHash(int3 cell, uint period, uint salt)
 {
