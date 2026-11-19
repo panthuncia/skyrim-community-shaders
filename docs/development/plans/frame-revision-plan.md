@@ -477,6 +477,14 @@ first wish to adoption (p50/p95/max)`.
 
 **Size.** Large. One agent per sub-step, serial (4a can run alongside 4b).
 
+**As built (2026-11-19, `org-native/rev-step4`).** 4a: ORG `rev-step4` (`bfd13bb`, `IUploadService::QueueTrackedStreamingTextureZeroFill`),
+OMS `rev-step4` (`d2ec1c6`, `VersionedTextureGrowth.h`: `MakeTextureVersions`, `FragmentWhenReady`, `PostTextureVersions`). 4b:
+`GraphResources` `Preparable`/`PlanPrepare`/`Prepare`/`AdoptPrepared`, `SetSizeWishHook`. 4c/4d: `src/RenderGraph/Frame/Revision.{h,cpp}`,
+`Frame/RevisionRecordings.h` (implemented in `FrameAnchors.cpp`), `AdoptLatest` first in `OnBegin`. 4e: staged CS stage builds join
+revisions (`Builds::AttachStaged` over `AttachStagedEpochGraphs`), Physical Lens's ghost paths are a `kBuffers` fragment
+(`Revision::PublishBuffer`/`AdoptedPayload`). New configs `resize-drag`, `menu-resize`. Where it differs from the scope above, see
+section 9, "Decided by the agent (step 4)".
+
 ---
 
 ### Step 5. Variables and event sources
@@ -1168,6 +1176,49 @@ the ORG adoption observer (development check), the missed-writer check, `Setting
 - **`PersistentVulkanHostTests leases`** fails with "Synchronous frame capacity exhausted" and then hangs, on ORG `2b22711` as well;
   not fixed here.
 - **Q9 answered for the quick set:** 0 refusals in `guest-quick`, `native-quick`, `native-d3d12-quick`, `d3d11+quick`.
+
+**Decided by the agent (step 4, 2026-11-19), to confirm:**
+- **4c and 4d were one worker**, since the coordinator cannot be tested without adoption. 4a ran alongside 4b as planned.
+- **Q2 answered: exports at adoption are cheap in guest, not in native.** `AdoptPrepared` wraps on the render thread (option (a): the
+  image and graph resource are made on the lane in the previous version's home layout, the wrap's layout is checked, fatal if it
+  differs). Guest 0.007 to 0.053 ms per twin. Native Vulkan 19 to 75 ms, native D3D12 41 to 102 ms per exported twin (Dev-Fast, /Od):
+  `NativeDevice.cpp:WrapTexture` runs `Initialize` (an immediate submission that waits) and a `RunOp` clear on the render thread.
+  Today's `Resize` paid the same. Wrapping on the lane was rejected: DXVK's wrap injects a chunk into the immediate context
+  (`LockImage`/`PinGeneral`), and native's waits. **Open:** in native, give exported versions `Contents::Zero` on the lane and skip
+  the wrap's initialize, so adoption does not wait.
+- **Q3 answered: the lane is a `SerializedTaskPump` on DCLF's `SceneExecutor`** (`DCLF::SceneScheduler::MakeLanePump`, scope "CS frame
+  revision"). `BuildManager` runs a bare thread with its own queue, not an executor. DCLF joins revisions in step 10 anyway.
+- **Zero-filled versions are `QueueSharing::Concurrent`.** The copy-queue zero fill needs no ownership transfer then. Only graph-only
+  History twins are Zero. Exported versions are `Undefined`: their wrap at adoption zero-fills them, and nothing may touch the image
+  before that (it is still UNDEFINED). Depth, MSAA and multi-device textures are refused for Zero.
+- **Twins are snapshotted on the render thread** (`PlanPrepare`), and the lane makes the version from the snapshot. The lane never
+  touches a twin, so a twin destroyed meanwhile needs no lock.
+- **Wishes reach the lane only at Begin**, so the twins one feature resizes in a frame land in one revision (about a frame of latency).
+- **The render thread owns the `RevisionAssembler`.** The lane makes versions and the closure. Recordings are requested at Begin
+  (descriptions and schedules are render-owner state); the Begin that finds everything ready seals and selects. So "superseded"
+  counts only revisions dropped because a twin was destroyed or remade (0 in every run).
+- **A newer wish does not supersede the revision in preparation.** It is prepared after that one is adopted (a drag adopts the first
+  and later values, 7.2). A twin wished to A and back may briefly adopt A.
+- **Only slots whose schedule is current get a revision recording.** `Schedule` fills empty slots against the adopted versions
+  afterwards. `NoteNewVersions` is kept after `AdoptAll` for per-frame tickets (DCLF).
+- **Staged builds join the revision in preparation**, or a builds-only revision when none is (while a build is staged the attached
+  graph takes no new recording). A staged member records all four slots on the staged build's description. A new staged generation
+  is a new input for the starvation rule, not a drop. The rule lives in the coordinator only.
+- **`Builds::SwitchStaged` was removed in 4e, not 7b**: since A7 every staged epoch is a CS declared segment, so it had no caller. It
+  became `Builds::AttachStaged(epochs)` over `AttachStagedEpochGraphs`; a refusal is fatal.
+- **The version-lag branch stays** for slots published outside revisions; each use is counted by slot in the `[ORG] boundary:` line
+  ("version lags outside revisions"). In the runs: `TerrainShadows::ShadowHeight` (resized directly at Begin, 6.x) and
+  `ImGui::Texture N` (`AtNextBegin`, 6.3).
+- **The buffer fragment is CS-local** (`RevisionBuffers` in `Revision.cpp`, an `IResourceVersions` over pending buffer versions and
+  their payloads), not OMS: no second user yet. Buffer versions are made and uploaded on the lane.
+- **Not done: non-preparable wishes** (another shape class) still take `ResizeTo` at Begin and a structural rebuild
+  (`Revision.cpp:ApplyResizes`). No run hit it. The end state is a revision with a new slot and a `kBuilds` fragment.
+- **Since the plan was written.** Native frame generation and Physical Sky's port changed nothing here. Guest's 2 to 4 late versions
+  are `Engine::3D::VOLUMETRIC_LIGHTING_ACCUMULATION(_COPY)` (twin `JoinSlot` of engine targets), present before step 4; no late
+  version comes from a `RequestSize` site. "Declared view mismatch" lines remain (18 per resize run); not checked one by one that
+  each is a DCLF reader.
+- **Native self-test.** `CS_ORG_GRAPHRES_SELFTEST=1` fails its first (old) part in native, `16x16 MISMATCH: D3D11 read 0`, on the base
+  stage too, so the prepared part is tested in guest only.
 
 **Decided by the user (2026-11-18):**
 - **Mid-session target recreation (Q4).** A mid-session `Create` of the engine's targets stays a fatal error. Step 9a does not build

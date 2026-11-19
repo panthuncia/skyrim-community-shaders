@@ -1,0 +1,224 @@
+# A slider drag on the fog volumes' grid (frame revision plan, step 4): thirty setting steps one frame apart, cycling
+# ViewAtmosphere.nearSlices, then a shot 120 frames later. Each new size is a frame revision. Checks that the latest wish wins and
+# that no starvation error fires during the drag. Compose it: native-vulkan+resize-drag, guest+resize-drag.
+extends = ["base"]
+
+[run]
+timeout_s = 300
+
+[features]
+ExponentialHeightFog = true
+
+[[steps]]
+at = "world-ready"
+frames = 30
+do = "setting"
+arg = "ExponentialHeightFog.enabled=1"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "setting"
+arg = "ExponentialHeightFog.volumetricFogEnabled=1"
+
+[[steps]]
+at = "previous"
+frames = 120
+do = "shot"
+arg = "fog"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "setting"
+arg = "ViewAtmosphere.nearSlices=72"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "setting"
+arg = "ViewAtmosphere.nearSlices=80"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "setting"
+arg = "ViewAtmosphere.nearSlices=88"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "setting"
+arg = "ViewAtmosphere.nearSlices=96"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "setting"
+arg = "ViewAtmosphere.nearSlices=104"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "setting"
+arg = "ViewAtmosphere.nearSlices=112"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "setting"
+arg = "ViewAtmosphere.nearSlices=120"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "setting"
+arg = "ViewAtmosphere.nearSlices=128"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "setting"
+arg = "ViewAtmosphere.nearSlices=96"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "setting"
+arg = "ViewAtmosphere.nearSlices=64"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "setting"
+arg = "ViewAtmosphere.nearSlices=48"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "setting"
+arg = "ViewAtmosphere.nearSlices=32"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "setting"
+arg = "ViewAtmosphere.nearSlices=40"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "setting"
+arg = "ViewAtmosphere.nearSlices=56"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "setting"
+arg = "ViewAtmosphere.nearSlices=72"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "setting"
+arg = "ViewAtmosphere.nearSlices=88"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "setting"
+arg = "ViewAtmosphere.nearSlices=104"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "setting"
+arg = "ViewAtmosphere.nearSlices=120"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "setting"
+arg = "ViewAtmosphere.nearSlices=136"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "setting"
+arg = "ViewAtmosphere.nearSlices=152"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "setting"
+arg = "ViewAtmosphere.nearSlices=160"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "setting"
+arg = "ViewAtmosphere.nearSlices=144"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "setting"
+arg = "ViewAtmosphere.nearSlices=128"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "setting"
+arg = "ViewAtmosphere.nearSlices=112"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "setting"
+arg = "ViewAtmosphere.nearSlices=96"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "setting"
+arg = "ViewAtmosphere.nearSlices=80"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "setting"
+arg = "ViewAtmosphere.nearSlices=64"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "setting"
+arg = "ViewAtmosphere.nearSlices=48"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "setting"
+arg = "ViewAtmosphere.nearSlices=32"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "setting"
+arg = "ViewAtmosphere.nearSlices=100"
+
+[[steps]]
+at = "previous"
+frames = 120
+do = "shot"
+arg = "dragged"
+
+[[steps]]
+at = "previous"
+frames = 10
+do = "exit"
+
+[expect]
+reach = "world-ready"
+shots = ["fog", "dragged"]
+no_log = ["frame tap error", "staged build starved"]

@@ -126,7 +126,7 @@ namespace RenderGraph
 		std::unordered_set<std::uint32_t> ownerBuilt;
 		std::unordered_set<std::uint32_t> external;
 		std::unordered_set<std::uint32_t> staged;
-		// Owner thread. Run by SwitchStaged.
+		// Owner thread. Run by AttachStaged.
 		std::unordered_map<std::uint32_t, std::vector<std::function<void()>>> stagedAttach;
 		ExternalBuilder externalBuilder;  // owner thread
 		std::shared_ptr<ExternalLife> externalLife = std::make_shared<ExternalLife>();
@@ -371,7 +371,7 @@ namespace RenderGraph
 				return false;
 			}
 			const auto begin = Clock::now();
-			// A staged epoch is recorded by the host's thread first, and its owner switches it in.
+			// A staged epoch is recorded by the host's thread first, and a frame revision attaches it.
 			if (staged.contains(epoch) && !a_synchronous) {
 				const auto stagedResult = host.StageEpochGraph(a_done.graph);
 				if (stagedResult.staged) {
@@ -383,7 +383,7 @@ namespace RenderGraph
 							fn();
 					stagedAttach[epoch] = std::move(a_done.context.attached);
 					logger::info("[ORG] build manager: {} staged as build {}: built in {:.2f} ms off the render thread, staged in {:.3f} ms, {} frames after it was "
-								 "asked for; it switches in with its recordings; why: {}",
+								 "asked for; it attaches with a frame revision; why: {}",
 						Label(epoch), stagedResult.generation, buildMs, MillisecondsSince(begin), frames - a_done.job.frame, a_done.job.reason);
 					return true;
 				}
@@ -686,30 +686,29 @@ namespace RenderGraph
 		impl->Submit(std::move(request));
 	}
 
-	bool BuildManager::SwitchStaged(std::uint32_t a_epoch)
+	std::string BuildManager::AttachStaged(std::span<const std::uint32_t> a_epochs)
 	{
 		auto& m = *impl;
 		auto& host = *m.desc.host;
-		if (!host.StagedGeneration(a_epoch))
-			return false;
 		const auto begin = Clock::now();
-		const auto result = host.AttachStagedEpochGraph(a_epoch);
-		auto deferred = std::move(m.stagedAttach[a_epoch]);
-		m.stagedAttach.erase(a_epoch);
+		const auto result = host.AttachStagedEpochGraphs(a_epochs);
 		if (!result.attached) {
-			RenderGraph::Frame::Boundary::NoteRefusal("switch", org::GraphHost::AttachRefusalName(result.refusal));
-			logger::info("[ORG] build manager: {}'s staged graph was refused at its switch ({}); built again", m.Label(a_epoch), result.reason);
-			return false;
+			RenderGraph::Frame::Boundary::NoteRefusal("revision", org::GraphHost::AttachRefusalName(result.refusal));
+			return result.reason.empty() ? std::string("refused") : result.reason;
 		}
-		RenderGraph::Frame::Boundary::NoteAttach(m.Label(a_epoch));
-		++m.window.attached;
 		const double ms = MillisecondsSince(begin);
 		m.window.attachMs += ms;
 		m.window.attachMaxMs = (std::max)(m.window.attachMaxMs, ms);
-		for (auto& fn : deferred)
-			if (fn)
-				fn();
-		return true;
+		for (const auto epoch : a_epochs) {
+			RenderGraph::Frame::Boundary::NoteAttach(m.Label(epoch));
+			++m.window.attached;
+			auto deferred = std::move(m.stagedAttach[epoch]);
+			m.stagedAttach.erase(epoch);
+			for (auto& fn : deferred)
+				if (fn)
+					fn();
+		}
+		return {};
 	}
 
 	void BuildManager::SetExternalBuilder(ExternalBuilder a_builder)
@@ -869,10 +868,12 @@ namespace RenderGraph
 			return true;
 		}
 
-		bool SwitchStaged(std::uint32_t a_epoch)
+		std::string AttachStaged(std::span<const std::uint32_t> a_epochs)
 		{
 			auto* manager = Manager();
-			return manager && manager->SwitchStaged(a_epoch);
+			if (!manager)
+				return a_epochs.empty() ? std::string() : std::string("the build manager is gone");
+			return manager->AttachStaged(a_epochs);
 		}
 
 		bool InManagedBuild()
@@ -898,7 +899,7 @@ namespace RenderGraph::Builds
 	}
 	bool Defer(std::function<void()>, std::function<void(const std::string&)>) { return false; }
 	bool DeferStaged(std::function<void()>) { return false; }
-	bool SwitchStaged(std::uint32_t) { return false; }
+	std::string AttachStaged(std::span<const std::uint32_t> a_epochs) { return a_epochs.empty() ? std::string() : std::string("no render graph"); }
 	bool InManagedBuild() { return false; }
 }
 

@@ -9,7 +9,7 @@
 #	include "Features/PostProcessing/HistogramAutoExposure.h"
 #	include "Features/PostProcessing/PhysicalLens.h"
 #	include "Globals.h"
-#	include "RenderGraph/Frame/FrameDriver.h"
+#	include "RenderGraph/Frame/Revision.h"
 #	include "RenderGraph/GenerateMips.h"
 #	include "RenderGraph/GraphResources.h"
 #	include "RenderGraph/RenderGraphRuntime.h"
@@ -498,107 +498,37 @@ namespace ORGPostChain
 		};
 
 		/**
-		* @brief A buffer whose contents change rarely, such as the ghost paths. Each change is a new version, filled by the
-		* uploader's worker path while the old version stays current, and made current at the next frame boundary after its
-		* copies complete. Nothing waits: readers use the current version until then. Render thread.
+		* @brief A buffer whose contents change rarely, such as the ghost paths. Each change is a new version that joins a frame
+		* revision: uploaded off the render thread while the old version stays current, then adopted at a frame's Begin with every
+		* stage that declares the buffer. Nothing waits: readers use the adopted version until then.
 		*/
-		class StagedBuffer
+		class RevisedBuffer
 		{
 		public:
 			/** @brief Throws when the buffer cannot be made. */
-			StagedBuffer(std::string a_name, uint32_t a_elements, uint32_t a_stride) :
-				name(std::move(a_name)), elements(a_elements), state(std::make_shared<Shared>())
+			RevisedBuffer(const std::string& a_name, uint32_t a_elements, uint32_t a_stride) :
+				elements(a_elements)
 			{
 				auto first = org::Buffer::CreateUnmaterializedStructuredBuffer(a_elements, a_stride, false);
-				first->SetName(name);
+				first->SetName(a_name);
 				first->Materialize();
 				versions = org::VersionedBuffer::Create(std::move(first));
 			}
 
 			const std::shared_ptr<org::VersionedBuffer>& Versions() const { return versions; }
 
-			/** @brief The payload of the current version: what the caller passed with its bytes. Null until one is current. */
-			std::shared_ptr<const void> Current() const { return state->current; }
+			/** @brief The payload of the adopted version: what the caller passed with its bytes. Null until one is adopted. */
+			std::shared_ptr<const void> Current() const { return RenderGraph::Frame::Revision::AdoptedPayload(*versions); }
 
-			/** @brief A new version of a_bytes, started by the next Poll. A version still uploading finishes first; only the newest
-			*  waiting bytes follow it. Any thread that owns the effect's commit. */
-			void Publish(std::vector<std::byte> a_bytes, std::shared_ptr<const void> a_payload) { waiting = Waiting{ std::move(a_bytes), std::move(a_payload) }; }
-
-			/** @brief Starts the next upload, or makes a finished one current at the next frame boundary. Render thread, each frame. */
-			void Poll()
+			/** @brief A new version of a_bytes for the next frame revision. Only the newest waiting bytes are uploaded. Any thread. */
+			void Publish(std::vector<std::byte> a_bytes, std::shared_ptr<const void> a_payload)
 			{
-				if (uploading) {
-					const auto& ticket = uploading->ticket;
-					if (ticket->state.load(std::memory_order_acquire) == org::TrackedUploadTicketState::Cancelled) {
-						Fatal("its upload was cancelled");
-						return;
-					}
-					if (!ticket->Complete())
-						return;
-					RenderGraph::Frame::Driver::AtNextBegin([weak = std::weak_ptr<Shared>(state), versions = versions, done = std::move(*uploading)]() {
-						const auto shared = weak.lock();
-						if (!shared)
-							return;
-						versions->Adopt(done.version);
-						shared->current = done.payload;
-						if (auto* host = RenderGraphRuntime::Get().Host())
-							host->NoteNewVersions();
-					});
-					uploading.reset();
-				}
-				if (!waiting)
-					return;
-				auto* host = RenderGraphRuntime::Get().Host();
-				const auto uploads = host ? host->RetainUploads() : nullptr;
-				if (!uploads) {
-					Fatal("the render graph has no uploader");
-					return;
-				}
-				Upload next{ .version = versions->MakeStructured(elements), .payload = std::move(waiting->payload) };
-				next.bytes = std::make_shared<std::vector<std::byte>>(std::move(waiting->bytes));
-				waiting.reset();
-				const org::StreamingUploadSegment segment{ next.bytes->data(), next.bytes->size() };
-				next.ticket = uploads->QueueTrackedStreamingUploadSegments({ &segment, 1 }, segment.size,
-					org::WorkerOwnedDestination{ next.version->buffer, org::WorkerOwnedDestination::Ownership::PendingVersion });
-				if (!next.ticket) {
-					Fatal("the uploader refused it");
-					return;
-				}
-				uploading = std::move(next);
+				RenderGraph::Frame::Revision::PublishBuffer(versions, elements, std::move(a_bytes), std::move(a_payload));
 			}
 
 		private:
-			struct Shared
-			{
-				std::shared_ptr<const void> current;
-			};
-			struct Upload
-			{
-				std::shared_ptr<const org::BufferVersion> version;
-				std::shared_ptr<const void> payload;
-				std::shared_ptr<std::vector<std::byte>> bytes;  // kept until the copy completes
-				std::shared_ptr<org::TrackedUploadTicket> ticket;
-			};
-			struct Waiting
-			{
-				std::vector<std::byte> bytes;
-				std::shared_ptr<const void> payload;
-			};
-
-			/** @brief Errors are fatal: a lens model that never shows would be silent. */
-			void Fatal(std::string_view a_why) const
-			{
-				const auto message = std::format("Community Shaders: {} could not be uploaded: {}", name, a_why);
-				logger::critical("[ORG] {}", message);
-				stl::report_and_fail(message);
-			}
-
-			std::string name;
 			uint32_t elements = 0;
 			std::shared_ptr<org::VersionedBuffer> versions;
-			std::shared_ptr<Shared> state;
-			std::optional<Upload> uploading;
-			std::optional<Waiting> waiting;
 		};
 
 		/** @brief A device-local buffer with a CBV over a_bytes rounded to 256, as SharedConstants makes its blocks. */
@@ -681,7 +611,7 @@ namespace ORGPostChain
 		* @brief PhysicalLens::Draw on the graph. The caches (mapping, diffraction, ghost wave, planning status) are persistent
 		* resources remade through gated passes only when their inputs change; a request repeats until a frame with it reached
 		* the GPU with this build. The camera focus is DoF's published focus or this effect's own, read back without a wait.
-		* The ghost paths are a staged buffer: a new lens model shows once its upload is done.
+		* The ghost paths are a revised buffer: a new lens model shows with the frame revision that adopts its upload.
 		*/
 		class PhysicalLensEffect final : public Effect
 		{
@@ -703,10 +633,6 @@ namespace ORGPostChain
 				a_key.push_back(reinterpret_cast<std::uintptr_t>(depth.Key()));
 				// The starburst's and the ghosts' passes are in the build only while they are on.
 				a_key.push_back((lens.settings.Diffraction ? 1u : 0u) | (lens.settings.Intensity > 0.f ? 2u : 0u));
-				if (paths)
-					paths->Poll();
-				if (indices)
-					indices->Poll();
 				return nullptr;
 			}
 
@@ -1370,9 +1296,9 @@ namespace ORGPostChain
 							"PostProcessing::PhysicalLens::GhostWaveAtlas", persistent);
 						material = std::make_unique<GraphResources::Texture2D>(TextureDesc(PhysicalLensGhostWave::Size, PhysicalLensGhostWave::Size, 1, DXGI_FORMAT_R32G32B32A32_FLOAT),
 							"PostProcessing::PhysicalLens::GhostPupilMaterial", persistent);
-						paths = std::make_unique<StagedBuffer>("PostProcessing::PhysicalLens::Paths", PhysicalLensOptics::MaxPaths,
+						paths = std::make_unique<RevisedBuffer>("PostProcessing::PhysicalLens::Paths", PhysicalLensOptics::MaxPaths,
 							static_cast<uint32_t>(sizeof(PhysicalLensOptics::GhostPath)));
-						indices = std::make_unique<StagedBuffer>("PostProcessing::PhysicalLens::BeamIndices", PhysicalLensOptics::BeamDrawVertices, 4u);
+						indices = std::make_unique<RevisedBuffer>("PostProcessing::PhysicalLens::BeamIndices", PhysicalLensOptics::BeamDrawVertices, 4u);
 						// The beam's 16-bit index list as 32-bit words, for the vertex stage's pull.
 						const auto list = PhysicalLensOptics::BeamIndices<std::uint32_t>();
 						std::vector<std::byte> bytes(sizeof(list));
@@ -1449,7 +1375,7 @@ namespace ORGPostChain
 			std::array<std::unique_ptr<GraphResources::Texture2D>, 3> waveTextures;  // 1024, 512 and 1024 squared, 3 bands; 0 and 2 are scratch
 			std::unique_ptr<GraphResources::Texture2D> waveMax, waveRadiance, ghosts, blueViolet, atlas, material;
 			std::array<std::unique_ptr<GraphResources::Texture2D>, 3> areaLayers;
-			std::unique_ptr<StagedBuffer> paths, indices;
+			std::unique_ptr<RevisedBuffer> paths, indices;
 			std::uint64_t stagedPaths = 0;
 			std::shared_ptr<const GraphPasses::GenerateMipsProgram> generateMips;
 

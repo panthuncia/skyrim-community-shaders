@@ -1,0 +1,74 @@
+# A fog grid size change while the Community Shaders menu is open (frame revision plan, step 4): the revision's member stages are
+# absent from menu frames, so their recordings are made ahead for every frame slot. Compose it: native-vulkan+menu-resize,
+# guest+menu-resize.
+extends = ["base"]
+
+[run]
+timeout_s = 300
+
+[features]
+ExponentialHeightFog = true
+
+[[steps]]
+at = "world-ready"
+frames = 30
+do = "setting"
+arg = "ExponentialHeightFog.enabled=1"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "setting"
+arg = "ExponentialHeightFog.volumetricFogEnabled=1"
+
+[[steps]]
+at = "previous"
+frames = 120
+do = "shot"
+arg = "start"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "cs-menu"
+arg = "open"
+
+[[steps]]
+at = "previous"
+frames = 120
+do = "shot"
+arg = "menu"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "setting"
+arg = "ViewAtmosphere.nearSlices=96"
+
+[[steps]]
+at = "previous"
+frames = 120
+do = "shot"
+arg = "menu-resized"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "cs-menu"
+arg = "close"
+
+[[steps]]
+at = "previous"
+frames = 120
+do = "shot"
+arg = "closed"
+
+[[steps]]
+at = "previous"
+frames = 10
+do = "exit"
+
+[expect]
+reach = "world-ready"
+shots = ["start", "menu", "menu-resized", "closed"]
+no_log = ["frame tap error"]
