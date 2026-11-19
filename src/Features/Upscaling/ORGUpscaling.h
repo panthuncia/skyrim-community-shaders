@@ -15,7 +15,7 @@
 * Streamline's evaluate is the Upscale anchor's first pass. It records the SDK's tags and evaluate on the pass's own command list.
 * The upscaled output is exported to D3D11, and a gated draw copies it into kMAIN. The depth upscale runs at the same anchor.
 * A copy has no per-run switch, so the client is rebuilt when the depth upscale starts or stops.
-* Frame generation still runs in the DXVK interop command ring. Its hudless colour is copied at the FrameGeneration anchor.
+* Frame generation still runs in the DXVK interop command ring. Its hudless colour is copied at the UI stage's FrameGeneration step.
 * On any failure the feature returns to D3D11 once the ring is drained. Render thread throughout. Free of ORG/Vulkan includes.
 */
 class ORGUpscaling

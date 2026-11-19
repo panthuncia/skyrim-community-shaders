@@ -8710,3 +8710,59 @@ Steps 4 and 5 of `plans/native-frame-generation-plan.md`.
   `volumetricGridSizeZ` setting any more); a copy without the fog grid steps (the upscaler switches kept) passed on both
   backends. `BasicRHIPresentationLayerSmoke` passes on both backends.
 
+## A7: the hudless copy and HDR output as UI steps (2026-11-19)
+
+Plan piece A7, step 1 of `plans/native-frame-generation-plan.md`. CS on `org-native/fg-a7` from `integ/hard-ports` `1937f0c0b`.
+
+### What changed
+
+- **Recipe.** The UI stage's first step is the FrameGeneration anchor, holding `cs.upscaling.hudless` and `cs.screenshot.clean`
+  wholly. It fires in `Main_PostProcessing` after the post chain, so both copies read kFRAMEBUFFER after the chain's output (the
+  pre-exposure is divided out) and before the screen blood. HDROutput is a whole step after Overlay, before Capture. The post
+  stage's FrameGeneration ticket and the UI stage's `commitBefore` (HDR output, Capture) are gone, and so is `Role::Ticket`.
+  The UI stage has 20 steps: `kMaxSteps` and `SharedConstants::kUploadPoints` went from 19 to 21.
+- **No anchor runs an epoch of its own.** `FrameAnchors::Run`'s own-epoch tail is deleted. Work at an anchor outside every
+  stage's step is the `own epoch` tap error in both graph modes, with no exceptions (the name lost "in native mode").
+- **Two clients, one step.** The clean copy and the hudless copy tap the same step in one frame, so both are `repeats` clients,
+  and the hudless copy is active only around `CopyHudless`'s own tap. Each copies only once the UI stage's build holds its
+  registration (`Scheduled`); a frame before that has no hudless or clean scene. Both are gated per run from the commit.
+- **HDR output in the stage.** The UI stage runs `cs.hdr`'s passes on every frame, also after HDR is turned off, so every pass is
+  now gated per run (the composite, the back buffer copy, and the UI clear as a gated `ClearSceneCS` dispatch). The first build
+  without the gates showed a frozen, washed-out image after HDR was turned off: the stale composite was copied into the back
+  buffer each frame. Until the stage's build holds a new registration, `Compose` returns `None`, and HDR Display commits the UI
+  stage (`ORGHDRDisplay::FollowWithD3D11`) before its D3D11 composite or copy, so that D3D11 work follows the stage's.
+- **HDR's deferred composite ends the frame at its own present.** With HDR on, HDR Display runs the present chain suppressed (other
+  mods' Present hooks draw into the UI texture), then composes, then presents. The UI stage used to commit inside the suppressed
+  chain, before HDR output. `Hooks.cpp` now hands HDR Display the frame's end (`frameEnd`: the capture, the UI stage's end point,
+  DCLF's `BeforePresent`, frame pacing, the drain) and the suppressed chain skips it. A held present under HDR now holds, where it
+  used to present after the composite.
+
+### Stayed
+
+- **`Placed` epochs and the anchor part of `AddToFrame`.** EngineCubeClear is reserved by the skeleton and no stage has a step at
+  it, so it still gets an epoch of its own in the host's order (it never runs: its work is the `own epoch` error). Its rank comes
+  from its `Placed` entry. They go when that anchor is unreserved or gets a step.
+- **The late-epoch hook.** `SubmitSegment` runs it after a stage whose steps include a late anchor, which keeps the epoch separator
+  between the post stage's commit and frame generation's interop evaluate in guest.
+- **`RenderGraphRuntime::EpochOf`** is the segment-to-epoch map DCLF and the stages use, not an own-epoch helper.
+- FrameDriver's comment about own epochs taking a build mid-frame (`frame-revision-plan.md` 7b) is left to that step.
+
+### Checks
+
+Background runs on the RX 6600, Dev-Fast, `DXVK_DEBUG=hang`. No run logged an `own epoch` tap error, a replay error ("not
+replayable") or any other frame tap error.
+
+- `guest-quick`, `native-quick`, `native-d3d12-quick` (`final`): passed. Shots against `integ/hard-ports` (`*-ps3`) 1.1 to 1.6 apart.
+- `hdr` in all four modes (`a7b`): passed. The first build (`a7`) failed guest and native Vulkan with a frozen final target after HDR
+  was turned off: real, the ungated `cs.hdr` passes above. The HDR shots show the composite with the HUD and the CS menu.
+- `guest+menu` (`a7b`): passed.
+- `guest+fg` (`a7b`): passed. `presented x2, fg true, active true` after the switch, up to 131 driver presents a second. Shots against
+  `integ/hard-ports`'s own `guest+fg` today (`1119-060033-nfg-guest-fg-a7-baseline`): 0.3 to 1.6 apart, Dragonsreach 15 (eye adaptation).
+  Today's exterior is washed out in both builds; it is not from this change (the plain D3D11 `hdr` run shows it too).
+- The hudless input: a temporary build shot the hudless texture itself (`1119-054812-fga-guest-fg-hudless`). No compass, crosshair
+  or CS menu, also after the load.
+- The clean scene: the harness's `shot` is a scripted capture, which never waits for the clean scene, so no run had used it. The new
+  `shot-ui` test command takes a capture as the menu's button does. The first `shot-ui` of a session registers the copy and uses the
+  D3D11 snapshot; the second used the clean scene (`the copy now reads the clean scene`) in guest, native Vulkan and native D3D12
+  (`*-quick-clean`), and those screenshots have no HUD. Before, the copy was never set up at all: with the engine's targets on the
+  graph kFRAMEBUFFER's slot has no D3D11 texture. It now takes the description from the slot's view.

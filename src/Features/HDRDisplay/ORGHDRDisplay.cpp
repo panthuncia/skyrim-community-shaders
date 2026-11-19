@@ -30,6 +30,7 @@ bool ORGHDRDisplay::IsActive() const
 
 #	include "Globals.h"
 #	include "RenderGraph/AnchorPasses.h"
+#	include "RenderGraph/Frame/SegmentId.h"
 #	include "RenderGraph/ComputeProgram.h"
 #	include "RenderGraph/FrameAnchors.h"
 #	include "RenderGraph/GraphResources.h"
@@ -66,8 +67,12 @@ namespace
 	constexpr const char* kBackBufferName = "hdr.back-buffer";
 	// The scene clear, composite, back buffer copy and UI clear take order keys from here up.
 	constexpr std::int32_t kOrderBase = 100;
-	// A movie frame's scene clear.
-	constexpr std::uint32_t kSceneClearEntry = 0;
+	// The run gate's entries. Every pass is gated: the UI stage runs them on every frame, also when ApplyHDR did not tap.
+	constexpr std::uint32_t kSceneClearEntry = 0;  // a movie frame's scene clear
+	constexpr std::uint32_t kOutputEntry = 1;
+	constexpr std::uint32_t kCopyEntry = 2;
+	constexpr std::uint32_t kUiClearEntry = 3;
+	constexpr std::uint32_t kGateEntries = 4;
 
 	using ShaderBindings::Handle;
 
@@ -95,6 +100,9 @@ namespace
 		// Null means no scene clear pass, and PrepareMovieDraw clears on D3D11.
 		std::shared_ptr<const ComputeProgram> clearProgram;
 		FrameAnchors::Texture clearTarget;
+		// ClearSceneCS clears any float4 UAV, so it clears the UI texture too. Null means an ungated clear.
+		std::shared_ptr<const ComputeProgram> uiClearProgram;
+		std::uint32_t uiGroupsX = 0, uiGroupsY = 0;
 		std::uint32_t groupsX = 0, groupsY = 0;
 		std::uint32_t width = 0, height = 0;  // the copy's extent
 
@@ -108,8 +116,8 @@ namespace
 	}
 
 	/**
-	* @brief The gated movie scene clear, the composite, the back buffer copy, then the UI clear after the composite read it.
-	* Every pass but the gated clear runs at every run of the anchor.
+	* @brief The movie scene clear, the composite, the back buffer copy, then the UI clear after the composite read it.
+	* Each pass runs only on runs whose commit opened its gate entry. Without the clear program the UI clear is ungated.
 	*/
 	RenderGraph::AnchorPasses::Builder MakePasses(const Inputs& a_in, std::shared_ptr<const org::LatchBlock> a_latch, std::shared_ptr<const RenderGraph::RunGate> a_gate)
 	{
@@ -123,10 +131,14 @@ namespace
 		builder.Add(RenderGraph::AnchorPasses::Dispatch{ .name = "output",
 			.program = a_in.program,
 			.bindings = { Bind::Shared(), Bind::Srv(a_in.scene), Bind::Srv(a_in.ui), Bind::Uav(a_in.output), Bind::Latch(0) },
-			.groups = { a_in.groupsX, a_in.groupsY, 1 } });
+			.gate = kOutputEntry });
 		if (a_in.backBuffer)
-			builder.Add(RenderGraph::AnchorPasses::Copy{ .name = "back-buffer", .source = a_in.output, .target = a_in.backBuffer, .width = a_in.width, .height = a_in.height });
-		builder.Add(RenderGraph::AnchorPasses::Clear{ .name = "ui-clear", .target = a_in.ui }, false);
+			builder.Add(RenderGraph::AnchorPasses::Copy{
+				.name = "back-buffer", .source = a_in.output, .target = a_in.backBuffer, .width = a_in.width, .height = a_in.height, .gate = kCopyEntry });
+		if (a_in.uiClearProgram)
+			builder.Add(RenderGraph::AnchorPasses::Dispatch{ .name = "ui-clear", .program = a_in.uiClearProgram, .bindings = { Bind::Uav(a_in.ui) }, .gate = kUiClearEntry });
+		else
+			builder.Add(RenderGraph::AnchorPasses::Clear{ .name = "ui-clear", .target = a_in.ui }, false);
 		return builder;
 	}
 
@@ -198,7 +210,7 @@ bool ORGHDRDisplay::Setup()
 	auto state = std::make_unique<Impl>();
 	state->program = std::move(program);
 	state->latch = std::make_shared<org::LatchBlock>("cs.hdr.latch", static_cast<std::uint32_t>(sizeof(HDRDisplay::HDRDataCB)));
-	state->gate = RenderGraph::RunGate::Create("cs.hdr.gate");
+	state->gate = RenderGraph::RunGate::Create("cs.hdr.gate", kGateEntries);
 	if (!state->gate) {
 		Fail("its run gate could not be made");
 		return false;
@@ -288,6 +300,12 @@ bool ORGHDRDisplay::TakeUIClear()
 	return std::exchange(uiCleared, false);
 }
 
+void ORGHDRDisplay::FollowWithD3D11()
+{
+	// The stage's end point, as the present would tap it. A capture after it uses D3D11.
+	(void)FrameAnchors::TapPoint(RenderGraph::Frame::SegmentId::Ui);
+}
+
 bool ORGHDRDisplay::CanClearScene() const
 {
 	const auto& hdr = globals::features::hdrDisplay;
@@ -357,6 +375,9 @@ ORGHDRDisplay::Composed ORGHDRDisplay::Compose(const HDRDisplay::HDRDataCB& a_co
 	const auto groups = Util::GetScreenDispatchCount(false);
 	inputs->groupsX = groups.x;
 	inputs->groupsY = groups.y;
+	inputs->uiClearProgram = state.clearProgram;
+	inputs->uiGroupsX = (hdr.uiTexture->desc.Width + kClearGroupSize - 1) / kClearGroupSize;
+	inputs->uiGroupsY = (hdr.uiTexture->desc.Height + kClearGroupSize - 1) / kClearGroupSize;
 	inputs->width = outputDesc.Width;
 	inputs->height = outputDesc.Height;
 
@@ -373,12 +394,18 @@ ORGHDRDisplay::Composed ORGHDRDisplay::Compose(const HDRDisplay::HDRDataCB& a_co
 		client.gates = { state.gate };
 		client.commit = [](const FrameAnchors::Point&) {
 			auto& self = Get();
-			if (!self.impl)
+			if (!self.impl || !self.impl->registered)
 				return;
 			self.impl->latch->WriteValue(RenderGraphRuntime::Get().Host()->CurrentRun(), 0, self.impl->constants);
 			// Every run closes the gate first, so only a movie frame's run clears.
 			if (self.impl->clearGroupsX)
 				self.impl->gate->OpenDispatch(kSceneClearEntry, self.impl->clearGroupsX, self.impl->clearGroupsY, 1);
+			const auto& in = *self.impl->registered;
+			self.impl->gate->OpenDispatch(kOutputEntry, in.groupsX, in.groupsY, 1);
+			if (in.backBuffer)
+				self.impl->gate->OpenDraw(kCopyEntry);
+			if (in.uiClearProgram)
+				self.impl->gate->OpenDispatch(kUiClearEntry, in.uiGroupsX, in.uiGroupsY, 1);
 		};
 		if (!FrameAnchors::Register(std::move(client))) {
 			Fail("its client could not be registered on the HDROutput anchor");
@@ -390,6 +417,9 @@ ORGHDRDisplay::Composed ORGHDRDisplay::Compose(const HDRDisplay::HDRDataCB& a_co
 			outputDesc.Height, hdrScene ? "the HDR texture" : "the framebuffer", state.registered->backBuffer ? "on the graph" : "not on the graph");
 	}
 
+	// A new registration composes once the UI stage's build holds it. Until then ApplyHDR composes with D3D11.
+	if (!FrameAnchors::Scheduled(kClientId, FrameAnchors::Anchor::HDROutput))
+		return Composed::None;
 	state.constants = a_constants;
 	const D3D11_TEXTURE2D_DESC& sceneDesc = hdr.hdrTexture ? hdr.hdrTexture->desc : outputDesc;
 	state.clearGroupsX = a_clearScene ? (sceneDesc.Width + kClearGroupSize - 1) / kClearGroupSize : 0;
@@ -417,6 +447,7 @@ FrameAnchors::Texture ORGHDRDisplay::ImportOf(ID3D11Texture2D*) const { return n
 Texture2D* ORGHDRDisplay::MakeTexture(Texture, const D3D11_TEXTURE2D_DESC&, const char*) { return nullptr; }
 void ORGHDRDisplay::ReleaseTextures() {}
 std::shared_ptr<org::ExternalTextureResource> ORGHDRDisplay::GraphOf(ID3D11Texture2D*) const { return nullptr; }
+void ORGHDRDisplay::FollowWithD3D11() {}
 bool ORGHDRDisplay::TakeUIClear() { return false; }
 bool ORGHDRDisplay::CanClearScene() const { return false; }
 ORGHDRDisplay::Composed ORGHDRDisplay::Compose(const HDRDisplay::HDRDataCB&, ID3D11Texture2D*, bool) { return Composed::None; }

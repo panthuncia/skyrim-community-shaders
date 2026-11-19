@@ -20,7 +20,7 @@ namespace DirectX
 * One copy pass at the Capture anchor copies the source into a readback buffer. It is recorded at execution from the capture its
 * run stored, so a kept recording needs nothing new. The bytes come back at a later capture point and the frame never waits.
 * D3D11's staging copy is used only when the graph cannot take a capture at all.
-* The pre-UI clean scene is a graph copy too: at the FrameGeneration anchor, after the ImageSpace chain and before the UI, kFRAMEBUFFER
+* The pre-UI clean scene is a graph copy too: at the UI stage's FrameGeneration step, after the post chain and before the UI, kFRAMEBUFFER
 * is copied into a graph texture that a capture of that frame then reads. It needs no D3D11 content, so it also works in native mode.
 * Render thread throughout, except Crop. Free of ORG/Vulkan includes.
 */

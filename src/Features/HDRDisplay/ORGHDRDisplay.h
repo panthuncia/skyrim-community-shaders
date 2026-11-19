@@ -19,7 +19,7 @@ namespace FrameAnchors
 /**
 * @brief HDR Display's output on the render graph, with CS_ORG_HDR_DISPLAY=1.
 *
-* At the HDROutput anchor, which only ApplyHDR runs: the composite, the copy into the back buffer, and the UI texture's clear.
+* At the UI stage's HDROutput step, which only ApplyHDR taps: the composite, the copy into the back buffer, and the UI texture's clear.
 * A Bink frame's scene clear is a gated dispatch before the composite, since Bink draws into the UI texture and leaves the scene alone.
 * The UI redirect, the clean composite for screenshots and frame generation, and the no-shader fallback stay on D3D11.
 * The scene, output and UI textures are persistent published twins exported to D3D11, where HDR Display makes its views.
@@ -70,11 +70,15 @@ public:
 	};
 
 	/**
-	* @brief Runs the HDROutput anchor with this frame's constants. Composed::None while not IsActive.
+	* @brief Taps the HDROutput step with this frame's constants. Composed::None while not IsActive, and until the UI stage's
+	* build holds a new registration.
 	* @param a_backBuffer Null means no copy pass.
 	* @param a_clearScene Clear the scene to black first, for a movie frame. With Composed::None the caller clears with D3D11.
 	*/
 	Composed Compose(const HDRDisplay::HDRDataCB& a_constants, ID3D11Texture2D* a_backBuffer, bool a_clearScene = false);
+
+	/** @brief Commits the UI stage, so D3D11 work ApplyHDR does next follows the stage's work on the GPU. Render owner. */
+	void FollowWithD3D11();
 
 	/** @brief ClearUIBuffer then leaves the texture alone. Resets the answer. */
 	bool TakeUIClear();

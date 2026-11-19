@@ -359,7 +359,7 @@ namespace RenderGraph::Frame::Driver
 		case TapError::NotExecuted:
 			return "run not executed";
 		case TapError::OwnEpoch:
-			return "own epoch in native mode";
+			return "own epoch";
 		default:
 			return "?";
 		}

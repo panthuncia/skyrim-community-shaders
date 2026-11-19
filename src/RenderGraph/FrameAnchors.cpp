@@ -3547,7 +3547,7 @@ namespace FrameAnchors
 			}
 			return TapDeclared(state, a_point, declared, step, clients);
 		}
-		// At a shared anchor, clients a segment names commit into it while its window is open. The others run the anchor's own epoch.
+		// At a shared anchor, clients a segment names commit into it while its window is open. The others are a mismatch.
 		// A segment-only client draws nothing outside every open window.
 		const auto hasWork = [&](const RunClient& a_client) {
 			if (a_client.active)
@@ -3570,7 +3570,6 @@ namespace FrameAnchors
 		if (work) {
 			if (OpenStepAt(state, a_point.anchor).first < kDeclared) {
 				std::vector<RunClient> others = clients;
-				std::vector<RunClient> members;
 				RunResult tapped{ RunStatus::Idle };
 				// Two segments can be open at once. A stage whose commit point has not come yet, and the post stage after it.
 				for (std::uint32_t declared = 0; declared < kDeclared; ++declared) {
@@ -3608,19 +3607,14 @@ namespace FrameAnchors
 							if (tapped.status == RunStatus::Idle || !result)
 								tapped = result;
 						}
-						members.insert(members.end(), stepMembers.begin(), stepMembers.end());
 					}
 				}
 				dropSegmentOnly(others, "outside its segment's built graph");
 				const bool otherWork = std::ranges::any_of(others, hasWork);
 				if (!otherWork)
 					return tapped;
-				// The rest run now in the anchor's own epoch, ahead of the segment's work on the GPU.
+				// The rest have no step that takes them now.
 				clients = std::move(others);
-				for (auto& member : members) {
-					member.active = false;
-					clients.push_back(member);
-				}
 			} else {
 				dropSegmentOnly(clients, "outside its segment's window");
 				work = std::ranges::any_of(clients, hasWork);
@@ -3628,110 +3622,14 @@ namespace FrameAnchors
 		}
 		if (!work)
 			return { RunStatus::Idle };
-		// No anchor runs its own epoch, so work here is a mismatch and draws nothing.
-		// HDR output and frame generation are the exceptions and keep their anchors' tickets.
-		const bool ownEpochError = a_point.anchor != Anchor::HDROutput && a_point.anchor != Anchor::FrameGeneration;
-		if (ownEpochError) {
-			std::string ids;
-			for (const auto& client : clients)
-				if (client.active)
-					ids += (ids.empty() ? "" : ",") + client.desc->id;
-			Driver::NoteTapError(Driver::TapError::OwnEpoch, SegmentId::Count,
-				fmt::format("the {} anchor had work outside every stage's step (clients [{}]); no stage of the frame has a place for it", kInfo[index].name, ids));
-			return { RunStatus::Idle };
-		}
-		// Each run takes its own run lease, so an anchor can run many times a frame without waiting for DXVK to submit earlier runs.
-		auto& runs = RunsSinceSeal(state, index);
-		const auto segment = static_cast<Segment>(SegmentOf(a_point.anchor));
-		// The graph holds the upload whenever a registered client reads the shared constants, active or not.
-		std::vector<std::shared_ptr<const ClientDesc>> descs;
+		// No anchor runs an epoch of its own, so work here is a mismatch and draws nothing.
+		std::string ids;
 		for (const auto& client : clients)
-			descs.push_back(client.desc);
-		const bool sharedConstants = UsesSharedConstants(descs, a_point.anchor);
-		std::uint64_t built = 0;
-		RenderGraphRuntime::EpochResult result = RenderGraphRuntime::EpochResult::Stopped;
-		// Report this epoch to the commit points and the census here, named for the anchor.
-		BeforeGpuWork(Interned(fmt::format("an anchor with its own epoch ({})", kInfo[index].name)), static_cast<std::uint32_t>(segment));
-		// TryExecuteEpoch calls BeforeGpuWork for the same submission: the census counts it once, here.
-		state.insideHeldCounted = static_cast<std::uint32_t>(segment);
-		NoteSequenceRun(a_point, RenderGraph::FrameSequence::RunKind::Own, clients);
-		{
-			RenderGraphRuntime::EpochBodyScope body(segment);
-			result = runtime.TryExecuteEpoch(segment, [&](org::RenderGraph&) {
-				// The graph this run submits is built by now.
-				built = state.built[index].load(std::memory_order_acquire);
-				RenderGraph::RunShapes::BeginRun();
-				if (sharedConstants)
-					SharedConstants::Commit();
-				// Close every gate first, including retired registrations' gates. A run does work only where its commits open a gate.
-				for (const auto& client : clients)
-					for (const auto& gate : client.desc->gates)
-						if (gate)
-							gate->Close();
-				for (const auto& retired : state.retired)
-					if ((retired.mask >> index & 1u) && built < retired.serial)
-						for (const auto& gate : retired.gates)
-							gate->Close();
-				for (const auto& client : clients)
-					if (client.active && client.desc->commit)
-						client.desc->commit(a_point);
-			});
-		}
-		state.insideHeldCounted = UINT32_MAX;
-		if (result == RenderGraphRuntime::EpochResult::Skipped) {
-			// Only a revision-driven epoch is skipped (its published copies were all busy), never an anchor's live one.
-			FailClients(fmt::format("the {} anchor's epoch was skipped", kInfo[index].name), "its published copies were all busy, and an anchor's live epoch never skips");
-			return { RunStatus::Failed };
-		}
-		if (result == RenderGraphRuntime::EpochResult::EpochFailed) {
-			// Only this anchor's epoch failed. Its clients are dropped at the next poll and the others run on.
-			return { RunStatus::Failed };
-		}
-		if (result != RenderGraphRuntime::EpochResult::Submitted) {
-			StopAll(state, Name(a_point.anchor));
-			return { RunStatus::Failed };
-		}
-		++runs;
-		if (runs > state.peakRuns[index].load(std::memory_order_relaxed))
-			state.peakRuns[index].store(runs, std::memory_order_relaxed);
-		if (RenderGraph::RunShapes::On()) {
-			// The run's shape for CS_ORG_EPOCH_STATS.
-			std::uint64_t active = 0;
-			for (const auto& client : clients)
-				if (client.active)
-					active += reinterpret_cast<std::uintptr_t>(client.desc.get()) * 0x9E3779B97F4A7C15ull;
-			RenderGraph::RunShapes::EndRun(index, kInfo[index].name, a_point.input, a_point.output, active);
-		}
-		// An epoch must not be the last GPU work before a third-party Vulkan consumer. render-graph.md describes the hazard.
-		// After the late anchors an upscaler, frame generation or the present may follow.
-		if (kInfo[index].late && state.lateHook)
-			state.lateHook();
-		if (sharedConstants)
-			SharedConstants::CheckAfterRun();
-		PruneRetired(state);
-		// One-shot passes in the graph this run submitted have run: the next build leaves them out.
-		bool ranOnce = false;
-		for (auto& client : state.clients)
-			for (std::size_t i = 0; i < client.desc->passes.size(); ++i)
-				if (client.armed[i] && client.armed[i] <= built && client.desc->passes[i].anchor == a_point.anchor) {
-					client.armed[i] = 0;
-					ranOnce = true;
-				}
-		if (ranOnce) {
-			Publish(state);
-			Rebuild(state, 1u << index, "one-shot passes ran");
-		}
-		// Last, since an executed callback may register. A matchesById client whose newer registration is not built yet
-		// ran through the registration the graph holds.
-		const auto ownBuilt = OwnSnapshot(state, index);
-		const auto heldById = [&](const RunClient& a_client) {
-			return a_client.desc->matchesById && ownBuilt &&
-			       std::ranges::any_of(ownBuilt->clients, [&](const auto& a_built) { return a_built->id == a_client.desc->id; });
-		};
-		for (const auto& client : clients)
-			if (client.active && client.desc->executed && (client.serial <= built || heldById(client)))
-				client.desc->executed(a_point);
-		return { RunStatus::Ran };
+			if (client.active)
+				ids += (ids.empty() ? "" : ",") + client.desc->id;
+		Driver::NoteTapError(Driver::TapError::OwnEpoch, SegmentId::Count,
+			fmt::format("the {} anchor had work outside every stage's step (clients [{}]); no stage of the frame has a place for it", kInfo[index].name, ids));
+		return { RunStatus::Idle };
 	}
 
 

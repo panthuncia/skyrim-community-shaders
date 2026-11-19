@@ -76,7 +76,7 @@ bool ORGScreenshot::Crop(const Pixels& a_pixels, std::uint32_t a_x, std::uint32_
 namespace
 {
 	constexpr const char* kClientId = "cs.screenshot";
-	// The clean scene's copy, at the FrameGeneration anchor (RecipeTable.h names it on that anchor's ticket).
+	// The clean scene's copy, at the UI stage's FrameGeneration step (RecipeTable.h).
 	constexpr const char* kCleanClientId = "cs.screenshot.clean";
 	// How many capture points a capture may wait for its copy and readback before it is reported lost.
 	constexpr std::uint64_t kPatience = 600;
@@ -487,6 +487,8 @@ namespace
 			gate->OpenDraw(0);
 			copy->copied = globals::state->frameCount;
 		};
+		// The UI stage's frame generation step also takes the hudless copy's tap in the same frame.
+		client.repeats = true;
 		return FrameAnchors::Register(std::move(client));
 	}
 }
@@ -496,10 +498,23 @@ bool ORGScreenshot::SnapshotCleanScene()
 	if (!IsActive() || !globals::game::renderer)
 		return false;
 	auto& state = *impl;
-	auto* framebuffer = globals::game::renderer->GetRuntimeData().renderTargets[RE::RENDER_TARGETS::kFRAMEBUFFER].texture;
+	// Only its description is read. With the engine's targets on the graph the slot has no texture, so take it from a view.
+	const auto& target = globals::game::renderer->GetRuntimeData().renderTargets[RE::RENDER_TARGETS::kFRAMEBUFFER];
+	winrt::com_ptr<ID3D11Texture2D> viewed;
+	ID3D11Texture2D* framebuffer = target.texture;
+	if (ID3D11View* view = target.SRV ? static_cast<ID3D11View*>(target.SRV) : static_cast<ID3D11View*>(target.RTV); !framebuffer && view) {
+		winrt::com_ptr<ID3D11Resource> resource;
+		view->GetResource(resource.put());
+		if (resource && SUCCEEDED(resource->QueryInterface(IID_PPV_ARGS(viewed.put()))))
+			framebuffer = viewed.get();
+	}
 	auto source = FrameAnchors::EngineTarget(static_cast<std::uint32_t>(RE::RENDER_TARGETS::kFRAMEBUFFER));
-	if (!framebuffer || !source)
+	if (!framebuffer || !source) {
+		if (!std::exchange(state.cleanWarned, true))
+			logger::warn("[ORG] Screenshot: the clean scene cannot be copied ({}); captures read kFRAMEBUFFER at the capture point",
+				!framebuffer ? "kFRAMEBUFFER has no texture" : "kFRAMEBUFFER cannot be imported");
 		return false;
+	}
 	D3D11_TEXTURE2D_DESC desc{};
 	framebuffer->GetDesc(&desc);
 	const bool same = state.clean && state.clean->Desc().Width == desc.Width && state.clean->Desc().Height == desc.Height &&

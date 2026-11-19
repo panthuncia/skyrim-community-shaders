@@ -617,6 +617,47 @@ struct IDXGISwapChain_Present
 			RenderGraphRuntime::Get().SignalFramePace(pacedByCS);
 		};
 
+		using PresentFn = std::function<HRESULT(IDXGISwapChain*, UINT, UINT)>;
+		// The frame's end, then a_present. HDR Display's deferred composite runs it at its own present, after HDR output.
+		const auto frameEnd = [&](IDXGISwapChain* sc, UINT si, UINT f, const PresentFn& a_present) -> HRESULT {
+			ZoneScopedN("CS.Present.NativeWait");
+			// The UI stage's commit point: just before the present. The capture point comes first in native mode with the UI stage, so
+			// a screenshot is a pass of the stage (its Capture step, after the overlay).
+			if (FrameAnchors::HeldByStage(FrameAnchors::Anchor::Capture))
+				globals::features::screenshotFeature.ProcessCaptureRequest();
+			(void)FrameAnchors::TapPoint(RenderGraph::Frame::SegmentId::Ui);
+			// The UI stage commits before the present (BeforeGpuWork).
+			FrameAnchors::BeforeGpuWork("the present");
+			queueFrameEnd();
+			// The frame's epochs still on the submission thread reach the queue before the present. A loading screen's thread
+			// presenting without owning rendering drains too: it copies what the owner's epochs draw.
+			// Native mode with CS_ORG_QUEUE_PRESENT: the render owner's present is an entry on the submission thread's queue,
+			// after the frame's epochs, so it does not drain (Native's QueuePresent).
+			const bool holdsPresent = globals::features::drawcallLimitFix.loaded && globals::features::drawcallLimitFix.LoadHoldsPresents() &&
+			                          !globals::features::upscaling.IsFrameGenerationActive();
+			// Native keeps the queued present with frame generation on: the swap chain's layer presents on the submission thread.
+			const bool queuedPresent = !holdsPresent && RenderGraph::Engine::Native::Active() && RenderGraphRuntime::Get().QueuesPresent();
+			if (!queuedPresent)
+				RenderGraphRuntime::Get().DrainSubmissions("the present", true);
+			RenderGraph::FrameSequence::NoteBoundary("the present");
+			GpuEventTimers::BeginEvent("mark before native present");
+			GpuEventTimers::EndEvent();
+			// A load without a loading menu (or a re-entry), held until Drawcall Limit Fix draws its objects: the previous frame
+			// stays on screen. The frame's work is sent on as a present would send it. Not with frame generation, which presents
+			// itself.
+			if (holdsPresent) {
+				globals::d3d::context->Flush();
+				// Native: the held frame is paced as a present would pace it.
+				if (RenderGraph::Engine::Native::Active())
+					RenderGraph::Engine::Native::PaceHeldPresent();
+				return S_OK;
+			}
+			const auto presented = a_present(sc, si, f);
+			GpuEventTimers::BeginEvent("mark after native present");
+			GpuEventTimers::EndEvent();
+			return presented;
+		};
+
 		HRESULT retval;
 		{
 		ZoneScopedN("CS.Present.Chain");
@@ -628,44 +669,13 @@ struct IDXGISwapChain_Present
 				return globals::features::upscaling.PresentWithFrameGeneration(
 					swapChain, syncInterval, presentFlags,
 					[&](IDXGISwapChain* sc, UINT si, UINT f) {
-						ZoneScopedN("CS.Present.NativeWait");
-						// The UI stage's commit point: just before the present. The capture point comes first in native mode with the UI stage, so
-						// a screenshot is a pass of the stage (its Capture step, after the overlay).
-						if (FrameAnchors::HeldByStage(FrameAnchors::Anchor::Capture))
-							globals::features::screenshotFeature.ProcessCaptureRequest();
-						(void)FrameAnchors::TapPoint(RenderGraph::Frame::SegmentId::Ui);
-						// The UI stage commits before the present (BeforeGpuWork).
-						FrameAnchors::BeforeGpuWork("the present");
-						queueFrameEnd();
-						// The frame's epochs still on the submission thread reach the queue before the present. A loading screen's thread
-						// presenting without owning rendering drains too: it copies what the owner's epochs draw.
-						// Native mode with CS_ORG_QUEUE_PRESENT: the render owner's present is an entry on the submission thread's queue,
-						// after the frame's epochs, so it does not drain (Native's QueuePresent).
-						const bool holdsPresent = globals::features::drawcallLimitFix.loaded && globals::features::drawcallLimitFix.LoadHoldsPresents() &&
-						                          !globals::features::upscaling.IsFrameGenerationActive();
-						// Native keeps the queued present with frame generation on: the swap chain's layer presents on the submission thread.
-						const bool queuedPresent = !holdsPresent && RenderGraph::Engine::Native::Active() && RenderGraphRuntime::Get().QueuesPresent();
-						if (!queuedPresent)
-							RenderGraphRuntime::Get().DrainSubmissions("the present", true);
-						RenderGraph::FrameSequence::NoteBoundary("the present");
-						GpuEventTimers::BeginEvent("mark before native present");
-						GpuEventTimers::EndEvent();
-						// A load without a loading menu (or a re-entry), held until Drawcall Limit Fix draws its objects: the previous frame
-						// stays on screen. The frame's work is sent on as a present would send it. Not with frame generation, which presents
-						// itself.
-						if (holdsPresent) {
-							globals::d3d::context->Flush();
-							// Native: the held frame is paced as a present would pace it.
-							if (RenderGraph::Engine::Native::Active())
-								RenderGraph::Engine::Native::PaceHeldPresent();
-							return S_OK;
-						}
-						const auto presented = func(sc, si, f);
-						GpuEventTimers::BeginEvent("mark after native present");
-						GpuEventTimers::EndEvent();
-						return presented;
+						// HDR Display's deferred composite ends the frame at its own present.
+						if (globals::features::hdrDisplay.IsPresentSuppressed())
+							return func(sc, si, f);
+						return frameEnd(sc, si, f, [](IDXGISwapChain* a_sc, UINT a_si, UINT a_f) { return func(a_sc, a_si, a_f); });
 					});
-			});
+			},
+			frameEnd);
 		}
 
 		// A chain that returned without presenting (occluded, a failed frame generation present).
