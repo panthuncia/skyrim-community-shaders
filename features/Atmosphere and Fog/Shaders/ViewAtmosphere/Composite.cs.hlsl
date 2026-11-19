@@ -38,6 +38,48 @@ VIEW_ATMOSPHERE_COMPOSITE_RESOURCES(ORG_RESOURCE)
 #endif
 #include "Common/ViewMedium.hlsli"
 
+#if defined(CS_ORG_BINDLESS) && defined(VIEW_ATMOSPHERE_COMPOSITE_DEBUG)
+// Debug views of the ORG build (CS_ORG_VIEW_ATMOSPHERE_DEBUG). They write finite values only.
+// 1: red where kMAIN held a non-finite value, green where the medium is non-finite, blue where the result is. Else the scene, dimmed.
+// 2: the distance to the pixel, white at 10 km. Red where the depth reads as the sky.
+// 3: the medium's transmittance. White is no fog. Magenta where it is non-finite.
+// 4: the medium's luminance, times 4. Magenta where it is non-finite.
+// 5: red where the shared medium is on, green where the near fog volume has a size, blue where the far one has. Dim while volumetric fog is off.
+// 6: kMAIN written back unchanged.
+float3 DebugView(float3 sceneColor, float3 position, float2 uv, bool fullCloudRay)
+{
+	if (VIEW_ATMOSPHERE_COMPOSITE_DEBUG == 6)
+		return sceneColor;
+	if (VIEW_ATMOSPHERE_COMPOSITE_DEBUG == 2)
+		return fullCloudRay ? float3(1, 0, 0) : saturate(length(position) * GAME_UNIT_TO_M / 10000.0).xxx;
+	if (VIEW_ATMOSPHERE_COMPOSITE_DEBUG == 5) {
+		float3 flags = float3(ViewAtmosphere::Enabled() ? 1.0 : 0.0, 0.0, 0.0);
+#	ifdef EXP_HEIGHT_FOG
+		uint width, height, depth;
+		ExponentialHeightFogIntegratedLightScattering.GetDimensions(width, height, depth);
+		flags.y = width * height * depth != 0 ? 1.0 : 0.0;
+		ExponentialHeightFogIntegratedLightScatteringFar.GetDimensions(width, height, depth);
+		flags.z = width * height * depth != 0 ? 1.0 : 0.0;
+		if (!ExponentialHeightFog::ShouldApplyVolumetricFog())
+			flags *= 0.25;
+#	endif
+		return flags;
+	}
+	const ViewAtmosphere::Medium medium = ViewMedium::SampleViewMedium(position, uv, SampColorSampler, fullCloudRay);
+	if (VIEW_ATMOSPHERE_COMPOSITE_DEBUG == 3)
+		return all(isfinite(medium.transmittance)) ? medium.transmittance : float3(1, 0, 1);
+	if (VIEW_ATMOSPHERE_COMPOSITE_DEBUG == 4)
+		return all(isfinite(medium.luminance)) ? medium.luminance * 4.0 : float3(1, 0, 1);
+	const float3 result = ViewMedium::CompositeViewMedium(PreExposure::Decode(sceneColor), position, uv, SampColorSampler, fullCloudRay);
+	const bool badInput = !all(isfinite(sceneColor));
+	const bool badMedium = !all(isfinite(medium.luminance)) || !all(isfinite(medium.transmittance));
+	const bool badResult = !all(isfinite(result));
+	if (badInput || badMedium || badResult)
+		return float3(badInput ? 1.0 : 0.0, badMedium ? 1.0 : 0.0, badResult ? 1.0 : 0.0);
+	return sceneColor * 0.25;
+}
+#endif
+
 [numthreads(8, 8, 1)] void main(uint2 pixel : SV_DispatchThreadID) {
 	uint2 size;
 	MainRW.GetDimensions(size.x, size.y);
@@ -50,6 +92,10 @@ VIEW_ATMOSPHERE_COMPOSITE_RESOURCES(ORG_RESOURCE)
 	float4 position = mul(FrameBuffer::CameraViewProjInverse, float4(uv * float2(2, -2) + float2(-1, 1), depth, 1));
 	position.xyz /= position.w;
 	float4 color = MainRW[pixel];
+#if defined(CS_ORG_BINDLESS) && defined(VIEW_ATMOSPHERE_COMPOSITE_DEBUG)
+	MainRW[pixel] = float4(DebugView(color.rgb, position.xyz, uv, fullCloudRay), color.a);
+	return;
+#endif
 	color.rgb = PreExposure::Encode(ViewMedium::CompositeViewMedium(PreExposure::Decode(color.rgb), position.xyz, uv, SampColorSampler, fullCloudRay));
 	MainRW[pixel] = color;
 }
