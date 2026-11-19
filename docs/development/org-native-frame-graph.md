@@ -8939,3 +8939,48 @@ runs (plan Q9). Shots against step 1's runs (`rv1`): mean channel difference 1.4
 (guest crashed while compiling, native timed out compiling, native D3D12 timed out loading); the warm-up passed all four.
 Launches: 12.
 
+## Frame revisions, step 4 (2026-11-19)
+
+Step 4 of [plans/frame-revision-plan.md](plans/frame-revision-plan.md): the prepared set, behind today's API. CS on
+`org-native/rev-step4` from `integ/hard-ports` `7707964b9`; ORG `rev-step4` (`bfd13bb`) on `0f2efbf`; OMS `rev-step4` (`d2ec1c6`) on
+`9b85a9f`. Decisions to confirm are in the plan's section 9, "Decided by the agent (step 4)".
+
+- **4a (ORG, OMS).** ORG's copy-queue uploader zero-fills a fresh texture (`QueueTrackedStreamingTextureZeroFill`, every mip and
+  slice from one 4 MB zero buffer, tracked completion). OMS `MakeTextureVersions` makes pending versions (`MakeImage`, caller-made or
+  from an extent), queues the fills, and gives a texture `NamedVersions` and a `RevisionFragment` that settles on the fills' tickets.
+- **4b (CS twins).** `Resource::PlanPrepare` (render thread) and `Prepare` (any thread) make a twin's next version, memory included,
+  off the render thread. `AdoptPrepared` makes the D3D11 export at adoption. Exported versions take the previous version's home
+  layout and are zeroed by their wrap.
+- **4c/4d (coordinator, adoption).** `Frame/Revision.{h,cpp}`. `RequestSize` records a wish through `SetSizeWishHook`. At Begin the
+  wishes go to the lane (a `SerializedTaskPump` on DCLF's scene executor): versions made, closure from `EpochsDeclaring`. Member
+  stages record every scheduled slot against the pending versions (`ComposedVersions`). `AdoptLatest`, first in `OnBegin`, adopts a
+  complete revision whole: `AdoptAll`, `AdoptPrepared`, `NoteNewVersions`, staged attaches, `InstallRevisionSchedules`.
+- **4e (builds, buffers).** Staged builds of CS stages join revisions and attach with `AttachStagedEpochGraphs` (refusal fatal).
+  `Schedule`'s staged branch and its starvation counter are gone; the rule lives in the coordinator. Physical Lens's ghost paths are a
+  buffer fragment; its per-frame ticket poll and `AtNextBegin` are gone.
+- **Census.** `[ORG] frame revision: prepared, adopted, superseded, members, recordings, builds, buffers, frames from first wish to
+  adoption`. The boundary line adds "version lags outside revisions" by slot.
+
+**Runs** (RX 6600, background, `DXVK_DEBUG=hang`; stage `rv4c` for 4c/4d, `rv4e` for the merged tip). Every run passed with 0 stale
+recordings, 0 starvation errors and 0 build refusals. No late version came from a `RequestSize` site; guest's 2 to 4 are the engine's
+volumetric lighting accumulation pair, as before step 4.
+
+| Run (stage `rv4e`) | Revisions prepared/adopted/superseded | Late versions | Notes |
+|---|---|---|---|
+| `native-vulkan+resize` | 14/14/0 | 0 | 39 builds; first input to adoption p50/p95/max 5/7/10 frames |
+| `native-d3d12+resize` | 12/12/0 | 0 | 6/15/21 frames |
+| `guest+resize` | 13/13/0 | 2 | |
+| `native-vulkan+resize-drag` | 20/20/0 | 0 | last adopted size is the drag's last value |
+| `guest+resize-drag` | 18/18/0 | 2 | |
+| `menu`, `native-vulkan+menu-resize` | 9/9/0, 10 adopted | 2, 0 | |
+| `native-d3d12+hdr` | 12/12/0 | 0 | post-stage builds adopted with their revisions |
+| `latch-census-short` | 20/20/0 | 4 | |
+| lens ghosts, post chain on (guest, native Vulkan) | 13, 11 adopted | | 3 buffer revisions each; no "not replayable" error |
+| `guest-quick`, `native-quick`, `d3d11+quick`, `native-d3d12-quick` | 9, 8, none, 7 adopted | | standard set |
+
+- Each size change and staged build was adopted in one frame for all its members (pre-main, deferred and water, sun).
+- Q2: the export at adoption costs 0.007 to 0.053 ms per twin in guest, but 19 to 102 ms in native (Dev-Fast), in native's
+  `WrapTexture` (`Initialize` waits, then a clear). Today's `Resize` paid the same; it is the step's main open item.
+- `CS_ORG_GRAPHRES_SELFTEST=1`: the prepared part passes in guest. Native stops in the self-test's old part (mismatch, same on the
+  base stage).
+- Version lags outside revisions: `TerrainShadows::ShadowHeight` and `ImGui::Texture N`, both intermediates for step 6.
