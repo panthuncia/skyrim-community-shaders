@@ -49,7 +49,7 @@ struct PhysicalSky final : public Feature
 	/** @brief Whether Physical Sky rendered this frame. */
 	bool IsRendering() const { return loaded && cbData.enabled; }
 	/** @brief Whether volumetric clouds are enabled and their screen targets have not failed to allocate. */
-	bool VolumetricCloudsEnabled() const { return settings.enableVolumetricClouds && !volumetricScreenResourcesFailed; }
+	bool VolumetricCloudsEnabled() const;
 
 	void DrawSettings() override;
 	bool HasDebugSection() const override { return true; }

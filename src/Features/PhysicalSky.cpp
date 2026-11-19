@@ -18,6 +18,7 @@
 #include "I18n/I18n.h"
 #include "LinearLighting.h"
 #include "PostProcessing/ColorSpace.h"
+#include "RenderGraph/Engine/Native/Native.h"
 #include "SkySync.h"
 #include "TerrainShadows.h"
 
@@ -572,6 +573,12 @@ void PhysicalSky::Settings::ApplyAerosolOptics()
 	aerosolScatter = optics.scatter;
 	aerosolAbsorption = optics.absorption;
 	aerosolPhaseG = optics.phaseG;
+}
+
+bool PhysicalSky::VolumetricCloudsEnabled() const
+{
+	// Native mode runs no D3D11 work and the clouds are not on the render graph yet, so their targets would hold nothing.
+	return settings.enableVolumetricClouds && !volumetricScreenResourcesFailed && !RenderGraph::Engine::Native::Active();
 }
 
 bool PhysicalSky::IsActive() const

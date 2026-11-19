@@ -31,6 +31,7 @@
 #include "Features/DrawcallLimitFix/Integrations/ExponentialHeightFog/ExponentialHeightFog.h"
 #include "Features/DrawcallLimitFix/Integrations/IBL/IBL.h"
 #include "Features/DrawcallLimitFix/Integrations/LightLimitFix/LightLimitFix.h"
+#include "Features/DrawcallLimitFix/Integrations/PhysicalSky/PhysicalSky.h"
 #include "Features/DrawcallLimitFix/Integrations/ScreenSpaceShadows/ScreenSpaceShadows.h"
 #include "Features/DrawcallLimitFix/Integrations/Skylighting/Skylighting.h"
 #include "Features/DrawcallLimitFix/Integrations/SubsurfaceScattering/SubsurfaceScattering.h"
@@ -99,6 +100,10 @@ namespace DCLF::Features
 			Integrations::ScreenSpaceShadows::kShadowTextureRegister,
 			Integrations::LightLimitFix::kLocalShadowDataRegister,
 			Integrations::LightLimitFix::kLocalShadowMapsRegister,
+			Integrations::PhysicalSky::kTransmittanceRegister,
+			Integrations::PhysicalSky::kSkyViewRegister,
+			Integrations::PhysicalSky::kAerialPerspectiveRegister,
+			Integrations::PhysicalSky::kDiskPhaseRegister,
 		};
 
 		constexpr bool FrameTextureRegistersValid()
