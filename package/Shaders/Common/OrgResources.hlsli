@@ -28,7 +28,8 @@
 // - UAV: u#. RWTexture*, RWStructuredBuffer, RWByteAddressBuffer, RWBuffer.
 // - SAMPLER: s#. SamplerState or SamplerComparisonState.
 // - CBUFFER: b#. A struct. D3D11: a cbuffer holding one member of that struct. ORG: a constant
-//   buffer read from the heap (ConstantBuffer<T>). Code reads its fields as name.field on both.
+//   buffer read from the heap (ConstantBuffer<T>). Code reads its fields as ORG_CB(name).field on
+//   every path, which also allows indexing an array in the struct with a dynamic index.
 // - LATCH: b#. A struct. D3D11: as CBUFFER. ORG: the struct loaded from a raw buffer at a byte
 //   offset, both given in the push block: the execution's region of an org::LatchBlock. For values
 //   that change every frame, which a recording reused across frames cannot hold: the host writes the
@@ -125,7 +126,21 @@
 #	define ORG_RESOURCE_SRV(T, N, R) static T N = ResourceDescriptorHeap[OrgHandle_##N];
 #	define ORG_RESOURCE_UAV(T, N, R) static T N = ResourceDescriptorHeap[OrgHandle_##N];
 #	define ORG_RESOURCE_SAMPLER(T, N, R) static T N = SamplerDescriptorHeap[OrgHandle_##N];
-#	define ORG_RESOURCE_CBUFFER(T, N, R) static ConstantBuffer<T> N = ResourceDescriptorHeap[OrgHandle_##N];
+// CBUFFER on ORG. DXC's SPIR-V copies a ConstantBuffer held in a variable (a static, or the value a heap read
+// returns) into function memory once an array in it is indexed dynamically, and that copy fails validation. So on
+// Vulkan the buffer is an element of an array declared at the resource heap's binding: the same variable DXC makes
+// for ResourceDescriptorHeap. Reads index it in place. DXIL accepts the static, and rejects that array.
+// The binding and set are BasicRHI's VULKAN_RESOURCE_DESCRIPTOR_HEAP_BINDING and VULKAN_DESCRIPTOR_HEAP_SET
+// (extern/BasicRHI/rhi_shader_abi.h). Keep them the same.
+#	if defined(BASICRHI_SHADER_API_VULKAN)
+#		define ORG_VULKAN_RESOURCE_HEAP_BINDING 1000000
+#		define ORG_VULKAN_DESCRIPTOR_HEAP_SET 0
+#		define ORG_RESOURCE_CBUFFER(T, N, R) 			[[vk::binding(ORG_VULKAN_RESOURCE_HEAP_BINDING, ORG_VULKAN_DESCRIPTOR_HEAP_SET)]] ConstantBuffer<T> OrgConstantBuffers_##N[];
+#		define ORG_CB(N) OrgConstantBuffers_##N[OrgHandle_##N]
+#	else
+#		define ORG_RESOURCE_CBUFFER(T, N, R) static ConstantBuffer<T> N = ResourceDescriptorHeap[OrgHandle_##N];
+#		define ORG_CB(N) N
+#	endif
 #	define ORG_RESOURCE_LATCH(T, N, R)                                                   \
 		static ByteAddressBuffer OrgLatch_##N = ResourceDescriptorHeap[OrgHandle_##N]; \
 		static T N = OrgLatch_##N.Load<T>(OrgOffset_##N);
@@ -160,6 +175,7 @@
 #	define ORG_RESOURCE_SAMPLER(T, N, R) T N : register(s##R);
 #	define ORG_RESOURCE_CBUFFER(T, N, R) \
 		cbuffer N##Buffer : register(b##R) { T N; }
+#	define ORG_CB(N) N
 #	define ORG_RESOURCE_LATCH(T, N, R) ORG_RESOURCE_CBUFFER(T, N, R)
 #	define ORG_RESOURCE_PUSH(T, N, R) ORG_RESOURCE_CBUFFER(T, N, R)
 #	define ORG_RESOURCE_EXTERN(T, N, R)

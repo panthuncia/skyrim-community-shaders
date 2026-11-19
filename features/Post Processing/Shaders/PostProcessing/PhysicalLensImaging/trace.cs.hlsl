@@ -78,31 +78,25 @@ TRACE_RESOURCES(ORG_RESOURCE)
 PHYSICAL_LENS_TRACE_EXTRA_RESOURCES
 
 #if defined(CS_ORG_BINDLESS)
-// DXC's SPIR-V rejects a static ConstantBuffer whose arrays are indexed, and its DXIL rejects the cast, so each takes its own form.
-#	if defined(BASICRHI_SHADER_API_VULKAN)
-#		define ImagingCB ((ConstantBuffer<ImagingConstants>)ResourceDescriptorHeap[OrgHandle_ImagingCB])
-#		define CameraTableCB ((ConstantBuffer<CameraTableConstants>)ResourceDescriptorHeap[OrgHandle_CameraTableCB])
-#	else
 ORG_RESOURCE(CBUFFER, ImagingConstants, ImagingCB, 0)
 ORG_RESOURCE(CBUFFER, CameraTableConstants, CameraTableCB, 1)
-#	endif
-#	define SurfaceCount ImagingCB.SurfaceCount
-#	define RayCount ImagingCB.RayCount
-#	define SensorZ ImagingCB.SensorZ
-#	define Coating ImagingCB.Coating
-#	define Blades ImagingCB.Blades
-#	define Rotation ImagingCB.Rotation
-#	define BladeCurvature ImagingCB.BladeCurvature
-#	define Surfaces ImagingCB.Surfaces
-#	define GridWidth CameraTableCB.GridWidth
-#	define GridHeight CameraTableCB.GridHeight
-#	define PupilSamples CameraTableCB.PupilSamples
-#	define InverseFocusDistance CameraTableCB.InverseFocusDistance
-#	define GateWidth CameraTableCB.GateWidth
-#	define GateHeight CameraTableCB.GateHeight
-#	define ProjectionFocal CameraTableCB.ProjectionFocal
-#	define RayPlaneZ CameraTableCB.RayPlaneZ
-#	define PupilTransfer CameraTableCB.PupilTransfer
+#	define SurfaceCount ORG_CB(ImagingCB).SurfaceCount
+#	define RayCount ORG_CB(ImagingCB).RayCount
+#	define SensorZ ORG_CB(ImagingCB).SensorZ
+#	define Coating ORG_CB(ImagingCB).Coating
+#	define Blades ORG_CB(ImagingCB).Blades
+#	define Rotation ORG_CB(ImagingCB).Rotation
+#	define BladeCurvature ORG_CB(ImagingCB).BladeCurvature
+#	define Surfaces ORG_CB(ImagingCB).Surfaces
+#	define GridWidth ORG_CB(CameraTableCB).GridWidth
+#	define GridHeight ORG_CB(CameraTableCB).GridHeight
+#	define PupilSamples ORG_CB(CameraTableCB).PupilSamples
+#	define InverseFocusDistance ORG_CB(CameraTableCB).InverseFocusDistance
+#	define GateWidth ORG_CB(CameraTableCB).GateWidth
+#	define GateHeight ORG_CB(CameraTableCB).GateHeight
+#	define ProjectionFocal ORG_CB(CameraTableCB).ProjectionFocal
+#	define RayPlaneZ ORG_CB(CameraTableCB).RayPlaneZ
+#	define PupilTransfer ORG_CB(CameraTableCB).PupilTransfer
 #endif
 static const float PI = 3.14159265359;
 
