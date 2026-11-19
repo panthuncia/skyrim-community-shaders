@@ -163,11 +163,11 @@ namespace ORGPostChain
 					loggedFrame = frame;
 					float value = 0.0f;
 					std::memcpy(&value, adapted.data(), sizeof(value));
-					const auto constants = a_exposure.Constants(false);
-					const float gain = constants.ExposureTarget * constants.ExposureCompensation /
-					                   (std::min)((std::max)(value, constants.AdaptationRange.x), constants.AdaptationRange.y);
+					const auto logged = a_exposure.Constants(false);
+					const float gain = logged.ExposureTarget * logged.ExposureCompensation /
+					                   (std::min)((std::max)(value, logged.AdaptationRange.x), logged.AdaptationRange.y);
 					logger::info("[ORG] Post Processing log: frame {}: adapted luminance {} (range {} to {}), so the global exposure is {}", frame, value,
-						constants.AdaptationRange.x, constants.AdaptationRange.y, gain);
+						logged.AdaptationRange.x, logged.AdaptationRange.y, gain);
 				}
 				if ((wanted.adaptation || metering) && adapted.size() >= sizeof(float)) {
 					float value = 0.0f;
