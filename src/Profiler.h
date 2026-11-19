@@ -148,7 +148,8 @@ public:
 
 	/**
 	 * @brief Records a zero sample for a pass skipped on purpose this frame, so its row reads 0 instead of its last cost.
-	 * @param name Pass identifier, as given to BeginPass. Ignored if that pass began this frame or has no row yet.
+	 * @param name Pass identifier, as given to BeginPass or AddExternalSample. Ignored if that pass began this frame, has an
+	 * external sample waiting for the next collection, or has no row yet.
 	 * @note Needs an active profiler. A mark made before the frame's first BeginPass waits for it, and is dropped if no profiling frame begins before EndFrame. Zero samples do not keep a row alive, so a pass skipped for kTimerRetireFrames retires. Ignored on a frame that ran out of timers.
 	 */
 	void MarkPassSkipped(std::string_view name);
@@ -325,7 +326,7 @@ private:
 	/** @brief Reads one finished frame's queries into the timers' histories; false while the GPU is not done with it. */
 	bool CollectFrame(FrameQueries& frame, std::unordered_map<std::string, std::pair<float, float>>& activeTimers);
 
-	/** @brief Pushes a zero sample for each marked pass that has a row and did not run this frame (a_ran says whether it did). */
+	/** @brief Pushes a zero sample for each marked pass that has a row, did not run this frame (a_ran) and has no external sample waiting. */
 	void PushSkipSamples(const SkipMarks& a_marks, const std::function<bool(const std::string&)>& a_ran);
 
 	/** @brief Drops timers that have not been sampled for kTimerRetireFrames, so disabled passes stop reporting stale values. */
