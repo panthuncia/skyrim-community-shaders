@@ -58,11 +58,11 @@ namespace
 {
 	constexpr const char* kClientId = "cs.e11-rays";
 	constexpr const char* kShaderDir = "Effects11/";
-	// Keys at the PostComposite anchor: the volumetric rays first, then the sun rays, as the D3D11 path draws them.
+	// Volumetric rays first, then sun rays, as the D3D11 path draws them.
 	constexpr std::int32_t kVolumetricOrder = 100;
 	constexpr std::int32_t kSunRaysOrder = 200;
 
-	// The run gate's entries. The commit opens those of the effects the frame gave the graph; the others do no work.
+	// The commit opens the entries of the effects the frame gave the graph.
 	constexpr std::uint32_t kVolumetricDraws = 0;  // the raymarch and the apply pass
 	constexpr std::uint32_t kBlurH = 1;
 	constexpr std::uint32_t kBlurV = 2;
@@ -72,7 +72,7 @@ namespace
 	using ShaderBindings::Handle;
 	using RenderGraph::AnchorPasses::Bind;
 
-	// The blurs' groups cover this many pixels along the blurred axis (BlurVolumetricRaysCS: TG_DIM - WINDOW * 2).
+	// BlurVolumetricRaysCS's TG_DIM - WINDOW * 2.
 	constexpr std::uint32_t kBlurGroupPixels = 256 - 12 * 2;
 
 	/** @brief Mirrors VLData in Effects11/VolumetricRaysData.hlsli. */
@@ -82,7 +82,7 @@ namespace
 	};
 	static_assert(sizeof(VLData) == 16);
 
-	// The frame's values, in its latch region: the half-res size, then each sun ray pass's constants.
+	// The half-res size, then each sun ray pass's constants.
 	struct LatchData
 	{
 		VLData vl;
@@ -97,22 +97,22 @@ namespace
 		return static_cast<std::uint32_t>(offsetof(LatchData, sun) + a_pass * sizeof(Effects11::SunRaysData));
 	}
 
-	// The shaders' push blocks, as their resource lists give them.
-	struct RaymarchBlock  // RaymarchVolumetricRaysPS
+	// Push blocks in each resource list's order.
+	struct RaymarchBlock
 	{
 		SharedConstants::Handles shared;
 		Handle sampler, depth, shadowHeights, cloudShadows;
 	};
 	static_assert(sizeof(RaymarchBlock) == 32);
 
-	struct BlurBlock  // BlurVolumetricRaysCS
+	struct BlurBlock
 	{
 		Handle input, linearDepth, output;
 		ShaderBindings::Latch vl;
 	};
 	static_assert(sizeof(BlurBlock) == 20);
 
-	struct ApplyBlock  // ApplyVolumetricRaysPS
+	struct ApplyBlock
 	{
 		SharedConstants::Handles shared;
 		Handle scattering, raymarchDepth;
@@ -121,7 +121,7 @@ namespace
 	};
 	static_assert(sizeof(ApplyBlock) == 36);
 
-	struct SunRaysBlock  // SunRaysPS
+	struct SunRaysBlock
 	{
 		SharedConstants::Handles shared;
 		Handle sampler, rays;
@@ -130,7 +130,6 @@ namespace
 	};
 	static_assert(sizeof(SunRaysBlock) == 40);
 
-	/** @brief A graph resource a pass reads: one imported, or one another client registers by name. */
 	struct Source
 	{
 		FrameAnchors::Texture resource;
@@ -147,10 +146,7 @@ namespace
 		return a_builder.ShaderResource(org::ResourceIdentifier(a_source.name)).View();
 	}
 
-	/**
-	 * @brief What the graph is built from: a change makes a new client. The areas the passes cover are part of it, since a kept
-	 * recording fixes its viewports; they change only with the dynamic resolution.
-	 */
+	/** @brief A change makes a new client. The areas are part of it, since a kept recording fixes its viewports. */
 	struct Shape
 	{
 		ORGSunRays::Sizes sizes;
@@ -168,28 +164,27 @@ namespace
 		}
 	};
 
-	/** @brief Everything a build's passes are made from. Immutable once registered. */
+	/** @brief Immutable once registered. */
 	struct RaysState
 	{
 		Shape shape;
 		std::shared_ptr<const RasterProgram> raymarch, apply, sunMask, sunBlur, sunComposite;
 		std::shared_ptr<const ComputeProgram> blurH, blurV;
-		// The volumetric rays' scattering (raymarched, then blurred back into it), the blur's other half and the raymarch's depth;
-		// the sun rays' ping-pong pair.
+		// Volumetric scattering, the blur's other half and the raymarch depth, then the sun rays' ping-pong pair.
 		std::unique_ptr<GraphResources::Texture2D> vlScattering, vlBlur, vlDepth, sunA, sunB;
 		std::shared_ptr<const org::LatchBlock> latch;
 		std::shared_ptr<const RenderGraph::RunGate> gate;
 		std::uint32_t linearSampler = 0;
 	};
 
-	/** @brief What a raster pass records from: the state and the pass's index. Its revision is the same, so its recording is kept. */
+	/** @brief Its revision never changes, so its recording is kept. */
 	struct RaysFrame
 	{
 		std::shared_ptr<const RaysState> state;
 		std::uint32_t index = 0;
 	};
 
-	/** @brief A raster pass's draw, through its gate entry: no work on runs whose commit did not open it. */
+	/** @brief Does no work on runs whose commit did not open the entry. */
 	void GatedDraw(const RaysState& a_state, std::uint32_t a_entry, const RasterProgram& a_program, RasterProgram::DrawDesc a_desc,
 		org::PassRecordContext& a_recording)
 	{
@@ -198,9 +193,7 @@ namespace
 		a_program.Draw(a_recording, a_desc);
 	}
 
-	// - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
-	// Volumetric rays
-	// - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+	// ---- Volumetric rays ----
 
 	struct RaymarchBindings
 	{
@@ -209,10 +202,7 @@ namespace
 		bool hasShadowHeights = false, hasCloudShadows = false;
 	};
 
-	/**
-	 * @brief The raymarch: the scattering and its linear depth into the half-res pair. A pass of its own, since it has two targets
-	 * and reads other clients' textures by name, which AnchorPasses::Draw does not cover.
-	 */
+	/** @brief Its own pass, since it has two targets and reads other clients' textures by name, which AnchorPasses::Draw does not cover. */
 	class RaymarchPass final : public org::TypedRenderGraphPass<RaymarchPass, RaysFrame, RaymarchBindings>
 	{
 	public:
@@ -251,7 +241,7 @@ namespace
 			block.depth = a_recording.Index(a_bindings.depth);
 			block.shadowHeights = a_bindings.hasShadowHeights ? a_recording.Index(a_bindings.shadowHeights) : 0;
 			block.cloudShadows = a_bindings.hasCloudShadows ? a_recording.Index(a_bindings.cloudShadows) : 0;
-			// The raymarch writes every texel of the area: nothing to keep.
+			// The raymarch writes every texel of the area, so nothing to keep.
 			const std::array<RasterProgram::Colour, 2> colours{ { { .view = &a_bindings.scattering, .load = rhi::LoadOp::DontCare },
 				{ .view = &a_bindings.depthOut, .load = rhi::LoadOp::DontCare } } };
 			const auto& sizes = s.shape.sizes;
@@ -273,7 +263,7 @@ namespace
 		org::DeclaredViewToken main, scattering, raymarchDepth, depth;
 	};
 
-	/** @brief The apply pass: the blurred scattering, upsampled and lit, added to kMAIN. Reads the scene depth, maybe by name. */
+	/** @brief Upsamples and lights the blurred scattering, added to kMAIN. */
 	class ApplyPass final : public org::TypedRenderGraphPass<ApplyPass, RaysFrame, ApplyBindings>
 	{
 	public:
@@ -319,9 +309,7 @@ namespace
 		std::shared_ptr<const RaysState> state;
 	};
 
-	// - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
-	// Sun rays
-	// - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+	// ---- Sun rays ----
 
 	struct SunRaysBindings
 	{
@@ -330,10 +318,7 @@ namespace
 		bool hasRays = false, hasCloudShadows = false;
 	};
 
-	/**
-	 * @brief One sun ray pass: the mask (into A), a blur (A into B, B into A, A into B) or the composite (B added to kMAIN). Each
-	 * reads its own SunRaysData from the latch region, and the scene depth, maybe by name.
-	 */
+	/** @brief The mask into A, the blurs A to B to A to B, or the composite adding B to kMAIN. Each reads its own SunRaysData. */
 	class SunRaysPass final : public org::TypedRenderGraphPass<SunRaysPass, RaysFrame, SunRaysBindings>
 	{
 	public:
@@ -344,7 +329,7 @@ namespace
 		{
 			const auto& s = *state;
 			const bool composite = pass == ORGSunRays::kSunRaysPasses - 1;
-			// The mask and the second blur write A, the other blurs write B; each blur and the composite read the last target.
+			// The mask and the second blur write A, the other blurs write B.
 			const auto& written = pass % 2 == 0 ? s.sunA : s.sunB;
 			const auto& read = pass % 2 == 0 ? s.sunB : s.sunA;
 			SunRaysBindings b{};
@@ -382,7 +367,7 @@ namespace
 			block.data = ShaderBindings::LatchOf(*s.latch, a_recording.Run(), SunOffset(pass));
 			block.depth = a_recording.Index(a_bindings.depth);
 			block.cloudShadows = a_bindings.hasCloudShadows ? a_recording.Index(a_bindings.cloudShadows) : 0;
-			// The half-res passes write every texel of the area; the composite adds to kMAIN.
+			// The half-res passes write every texel. The composite adds to kMAIN.
 			const RasterProgram::Colour colour{ .view = &a_bindings.target, .load = composite ? rhi::LoadOp::Load : rhi::LoadOp::DontCare };
 			const auto& program = pass == 0 ? s.sunMask : (composite ? s.sunComposite : s.sunBlur);
 			static constexpr std::array<const char*, ORGSunRays::kSunRaysPasses> kNames{ "Effects11::SunRays Mask", "Effects11::SunRays Blur 1",
@@ -400,15 +385,9 @@ namespace
 		std::uint32_t pass = 0;
 	};
 
-	// - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
-	// Inputs and programs
-	// - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+	// ---- Inputs and programs ----
 
-	/**
-	 * @brief The scene depth the D3D11 passes read at PS t17 (VanillaBinding::LastSceneDepth): the engine's depth-stencil import when
-	 * it is one of the engine's, else Terrain Blending's published blended depth. Only published ids are read: nothing would order an
-	 * import of a D3D11 texture after its producer.
-	 */
+	/** @brief The engine's depth import when it is one of the engine's, else Terrain Blending's published blended depth. */
 	Source SceneDepth(ID3D11ShaderResourceView* a_view)
 	{
 		if (!a_view || !globals::game::renderer)
@@ -417,11 +396,10 @@ namespace
 		a_view->GetResource(resource.put());
 		const auto& depthStencils = globals::game::renderer->GetDepthStencilData().depthStencils;
 		for (std::uint32_t i = 0; i < static_cast<std::uint32_t>(RE::RENDER_TARGETS_DEPTHSTENCIL::kTOTAL); ++i)
-			// The view is DXVK's (from the raw context); a field can be a tripwire handle that wraps it.
+			// The view is DXVK's from the raw context, while a field may be a tripwire handle wrapping it.
 			if (depthStencils[i].texture && RenderGraph::Engine::Tripwire::Unwrap(depthStencils[i].texture) == resource.get())
 				return { FrameAnchors::EngineDepth(i), {} };
-		// Terrain Blending's blended depth: by name on its ORG path (published, ordered after the blend; importing its export would make
-		// a second graph resource of the same image), else imported.
+		// By name on Terrain Blending's ORG path, since importing its export would make a second graph resource of the same image.
 		const auto& graphBlending = ORGTerrainBlending::Get();
 		if (a_view == graphBlending.BlendedDepthSRV(false))
 			return { nullptr, std::string(ORGTerrainBlending::kBlendedDepthId) };
@@ -430,7 +408,7 @@ namespace
 		return {};
 	}
 
-	/** @brief A program's own defines, each without a value. The programs add the D3D11 build's common defines themselves. */
+	/** @brief The programs add the D3D11 build's common defines themselves. */
 	std::vector<std::pair<std::wstring, std::wstring>> Defines(const std::vector<std::string>& a_names)
 	{
 		std::vector<std::pair<std::string, std::string>> defines;
@@ -453,7 +431,7 @@ namespace
 		return desc;
 	}
 
-	/** @brief The D3D11 path's additive blend (Effects11::EnsureAdditiveBlendState): colour added, the target's alpha kept. */
+	/** @brief As Effects11::EnsureAdditiveBlendState: colour added, the target's alpha kept. */
 	rhi::BlendAttachment AdditiveBlend()
 	{
 		rhi::BlendAttachment blend{};
@@ -468,10 +446,9 @@ namespace
 		return blend;
 	}
 
-	/** @brief The blurs' group counts for a frame's half-res area, as the D3D11 dispatches give them. */
+	/** @brief As the D3D11 dispatches give them. */
 	std::array<std::uint32_t, 3> BlurGroups(const ORGSunRays::Sizes& a_sizes, bool a_horizontal)
 	{
-		// Each group covers kBlurGroupPixels along the blurred axis, one row or column across it.
 		if (a_horizontal)
 			return { (a_sizes.halfWidth + kBlurGroupPixels - 1) / kBlurGroupPixels, a_sizes.halfHeight, 1 };
 		return { a_sizes.halfWidth, (a_sizes.halfHeight + kBlurGroupPixels - 1) / kBlurGroupPixels, 1 };
@@ -480,25 +457,23 @@ namespace
 
 struct ORGSunRays::Impl
 {
-	// From Setup, for the session: the latch block, the run gate and the sampler every build shares.
+	// Made at Setup and shared by every build.
 	std::shared_ptr<org::LatchBlock> latch;
 	std::shared_ptr<RenderGraph::RunGate> gate;
 	org::OwnedDescriptorBinding linearSampler;
 
-	// The registered build, null until the first frame the graph takes.
+	// Null until the first frame the graph takes.
 	std::shared_ptr<const RaysState> state;
-	// Programs by source, defines and target formats, kept across shapes: a resize does not compile again.
+	// Kept across shapes, so a resize does not recompile.
 	std::map<std::string, std::shared_ptr<const RasterProgram>> rasterPrograms;
 	std::map<std::string, std::shared_ptr<const ComputeProgram>> computePrograms;
-	// Set once Setup built kMAIN's programs: a program built after that is logged (a format setup did not know).
+	// After this, a newly built program is logged as a format setup did not know.
 	bool prebuilt = false;
-	// This frame's values, gathered by VolumetricRays and SunRays, handed to the run at the hook and latched by the commit.
+	// Gathered by VolumetricRays and SunRays, handed to the run at the hook, latched by the commit.
 	LatchData pending{};
 	bool pendingVolumetric = false, pendingSun = false;
-	// The run's, from the hook (active) for the commit.
 	std::optional<LatchData> committed;
 	bool committedVolumetric = false, committedSun = false;
-	// The frame PrepareFrame last ran for, and its answer.
 	std::uint32_t preparedFrame = UINT32_MAX;
 	bool preparedOk = false;
 	std::string fallbackReason;  // why the last frame ran on D3D11, logged when it changes
@@ -539,10 +514,10 @@ struct ORGSunRays::Impl
 		return program;
 	}
 
-	/** @brief The programs for kMAIN in a_mainFormat into a_state: from the maps, or built now. False, logged, when one fails. */
+	/** @brief False, logged, when one fails. */
 	bool LoadPrograms(RaysState& a_state, rhi::Format a_mainFormat)
 	{
-		// The D3D11 path's defines (Effects11::DrawVolumetricRays, EnsureSunRaysResources).
+		// As Effects11::DrawVolumetricRays and EnsureSunRaysResources define them.
 		std::vector<std::string> raymarchDefines;
 		if (globals::features::cloudShadows.loaded)
 			raymarchDefines.emplace_back("CLOUD_SHADOWS");
@@ -568,7 +543,7 @@ struct ORGSunRays::Impl
 		return true;
 	}
 
-	/** @brief A new state for a_shape, registered as the client. False, logged, when anything could not be made. */
+	/** @brief False, logged, on failure. */
 	bool Build(const Shape& a_shape)
 	{
 		auto built = std::make_shared<RaysState>();
@@ -579,7 +554,7 @@ struct ORGSunRays::Impl
 		if (!LoadPrograms(*built, a_shape.mainFormat))
 			return false;
 
-		// Written and read within the frame, as the D3D11 path's own textures: transient and aliasable.
+		// Written and read within the frame, so transient.
 		const GraphResources::Options transient{ .lifetime = GraphResources::Lifetime::Transient };
 		constexpr UINT kTarget = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET;
 		constexpr UINT kStorage = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS;
@@ -593,8 +568,7 @@ struct ORGSunRays::Impl
 			return false;
 		}
 
-		// The blurs are plain gated dispatches. The raster passes stay passes of their own: they read other clients' textures by
-		// name, and the raymarch has two targets, neither of which AnchorPasses::Draw covers.
+		// The raster passes stay their own passes, since they read other clients' textures by name and the raymarch has two targets.
 		const std::shared_ptr<const RaysState> shared = built;
 		namespace AP = RenderGraph::AnchorPasses;
 		AP::Builder volumetric(FrameAnchors::Anchor::PostComposite, std::string(kClientId) + ".volumetric", kVolumetricOrder, latch, gate);
@@ -630,7 +604,6 @@ struct ORGSunRays::Impl
 			for (const auto* texture : { shared->vlScattering.get(), shared->vlBlur.get(), shared->vlDepth.get(), shared->sunA.get(), shared->sunB.get() })
 				texture->Register(a_graph);
 		};
-		// In the epoch: the run's values, and the gate entries of the effects the frame gave the graph.
 		client.commit = [this, shared](const FrameAnchors::Point&) {
 			if (committed) {
 				latch->WriteValue(RenderGraphRuntime::Get().Host()->CurrentRun(), 0, *committed);
@@ -646,7 +619,7 @@ struct ORGSunRays::Impl
 			}
 			committed.reset();
 		};
-		// At the hook, before the epoch: the run has work only for the effects the frame gave the graph.
+		// The run has work only for the effects the frame gave the graph.
 		client.active = [this] {
 			committedVolumetric = pendingVolumetric;
 			committedSun = pendingSun;
@@ -690,14 +663,14 @@ bool ORGSunRays::Setup()
 	auto state = std::make_unique<Impl>();
 	state->latch = std::make_shared<org::LatchBlock>("cs.e11-rays.latch", static_cast<std::uint32_t>(sizeof(LatchData)));
 	state->gate = RenderGraph::RunGate::Create("cs.e11-rays.gate", kGateEntries);
-	// As Deferred::linearSampler: linear, clamped.
+	// As Deferred::linearSampler.
 	state->linearSampler = ShaderBindings::CreateSampler({});
 	if (!state->gate || !state->linearSampler) {
 		logger::error("[ORG] Effects11 rays: the run gate or the sampler could not be made; the rays stay on D3D11");
 		failed = true;
 		return false;
 	}
-	// The programs for kMAIN's format now, so the first frame that draws the rays compiles nothing.
+	// Build kMAIN's programs now so the first frame compiles nothing.
 	const auto& main = globals::game::renderer->GetRuntimeData().renderTargets[RE::RENDER_TARGETS::kMAIN];
 	if (main.RTV) {
 		D3D11_RENDER_TARGET_VIEW_DESC rtvDesc{};
@@ -738,7 +711,6 @@ bool ORGSunRays::PrepareFrame(const Sizes& a_sizes)
 		return false;
 	};
 
-	// This frame's inputs, as the D3D11 passes read them, each as a graph resource.
 	Shape shape;
 	shape.sizes = a_sizes;
 	const auto& main = globals::game::renderer->GetRuntimeData().renderTargets[RE::RENDER_TARGETS::kMAIN];
@@ -751,7 +723,7 @@ bool ORGSunRays::PrepareFrame(const Sizes& a_sizes)
 	if (!shape.main || shape.mainFormat == rhi::Format::Unknown)
 		return fallback("kMAIN cannot be imported");
 
-	// What CS bound at t17 for the frame, resolved here rather than read back from the D3D11 context.
+	// What CS bound at t17, resolved here rather than read back from the context.
 	shape.depth = SceneDepth(VanillaBinding::LastSceneDepth());
 	if (!shape.depth)
 		return fallback("the scene depth at t17 is missing or cannot be imported");
@@ -768,8 +740,7 @@ bool ORGSunRays::PrepareFrame(const Sizes& a_sizes)
 	}
 
 	if (globals::features::cloudShadows.loaded) {
-		// The occlusion cubemap Cloud Shadows binds at PS t25 for the frame, which the D3D11 passes read: the graph's own cubemap
-		// when it is that one.
+		// The cubemap Cloud Shadows binds at t25 for the frame. Use the graph's own when it is that one.
 		auto* view = globals::features::cloudShadows.OcclusionSRV();
 		const auto& graphClouds = ORGCloudShadows::Get();
 		if (view && graphClouds.IsActive() && view == graphClouds.OcclusionSRV())
@@ -816,7 +787,7 @@ void ORGSunRays::Release()
 {
 	if (!impl)
 		return;
-	// The build and its programs go; the latch, the gate and the sampler stay. The next frame builds again.
+	// The latch, gate and sampler stay. The next frame builds again.
 	FrameAnchors::Unregister(kClientId);
 	impl->state.reset();
 	impl->rasterPrograms.clear();
@@ -827,7 +798,7 @@ void ORGSunRays::Release()
 
 #else  // !CS_HAS_RENDER_GRAPH
 
-// Built without OpenRenderGraph: the rays always run on D3D11.
+// Without OpenRenderGraph the rays always run on D3D11.
 struct ORGSunRays::Impl
 {};
 

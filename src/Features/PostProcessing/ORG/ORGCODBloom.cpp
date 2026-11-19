@@ -20,7 +20,7 @@ namespace ORGPostChain
 		constexpr const char* kShader = "PostProcessing/CODBloom/bloom.ps.hlsl";
 		constexpr std::uint32_t kMips = static_cast<std::uint32_t>(CODBloom::s_BloomMips);
 
-		// bloom.ps.hlsl's push block: BLOOM_RESOURCES, in order.
+		// BLOOM_RESOURCES order.
 		struct BloomBlock
 		{
 			ShaderBindings::Handle texColor, texBloomIn, sampColor;
@@ -28,20 +28,16 @@ namespace ORGPostChain
 		};
 
 		/**
-		 * @brief CODBloom::Draw on the graph: the threshold into mip 0 of a kMAIN-sized chain, the downsamples down the mips, then
-		 * the upsamples back up to mip 1, each accumulating into its mip by blending. Each pass reads and writes one mip through
-		 * per-mip views of one transient texture. Mip 1 is published (Published::kBloomOutput) for Composite, as GetBloomOutput gives it.
-		 *
-		 * The D3D11 upsample scales the destination by a blend factor (CurrentMipMult). A recording is reused across frames, so a
-		 * blend constant would be fixed in it; under ORG the shader returns CurrentMipMult in alpha instead, the blend scales the
-		 * destination by the source alpha, and alpha is not written (it stays the downsample's 1, as the D3D11 blend leaves it).
-		 */
+		* @brief CODBloom::Draw on the graph: threshold into mip 0, downsamples, then upsamples back to mip 1 by blending. Mip 1 is published.
+		* The D3D11 upsample uses a blend factor, but a reused recording would freeze it. So the shader returns CurrentMipMult in alpha,
+		* the blend scales by source alpha, and alpha is not written.
+		*/
 		class CODBloomEffect final : public Effect
 		{
 		public:
 			const char* Update(PostProcessFeature& a_feature, std::vector<std::uint64_t>& a_key) override
 			{
-				// The number of passes follows the mip blend settings: another count is another build.
+				// The mip blend settings set the pass count, so another count is another build.
 				usedMips = static_cast<CODBloom&>(a_feature).UsedMips();
 				a_key.push_back(static_cast<std::uint64_t>(usedMips));
 				return nullptr;
@@ -50,7 +46,7 @@ namespace ORGPostChain
 			void Build(Builder& a_builder, PostProcessFeature&) override
 			{
 				if (!sampler) {
-					// CODBloom::colorSampler's description: linear, border addressing (transparent black), every mip.
+					// Linear, transparent black border, every mip.
 					sampler = ShaderBindings::CreateSampler(
 						{ .addressU = rhi::AddressMode::Border, .addressV = rhi::AddressMode::Border, .addressW = rhi::AddressMode::Border });
 					if (!sampler) {
@@ -59,7 +55,7 @@ namespace ORGPostChain
 					}
 				}
 
-				// As CODBloom::SetupResources: kMAIN_COPY's size and format, the whole mip chain.
+				// kMAIN_COPY's size and format, the whole mip chain.
 				const auto format = a_builder.GetShape().mainCopyFormat;
 				const auto words = ShaderBindings::Words<BloomBlock>();
 				auto threshold = a_builder.Raster(kShader, words, { format }, {}, L"PS_Threshold");
@@ -86,7 +82,7 @@ namespace ORGPostChain
 					.bindings = { Bind::Srv(a_builder.Current()), Bind::Unused(), linear, Bind::Latch(constants[0]) },
 					.target = image.Mip(0) });
 
-				// The downsamples read no constants; they take the threshold's region.
+				// The downsamples read no constants and take the threshold's region.
 				for (int i = 0; i < usedMips - 1; ++i) {
 					const auto mip = static_cast<std::uint32_t>(i);
 					a_builder.Draw({ .name = std::format("downsample-{}", mip + 1),
@@ -118,7 +114,7 @@ namespace ORGPostChain
 
 		private:
 			org::OwnedDescriptorBinding sampler;
-			// [0]: the threshold pass's; [i]: the upsample's into mip i.
+			// [0] is the threshold's, [i] the upsample into mip i.
 			std::array<LatchRegion<CODBloom::BloomCB>, kMips> constants{};
 			int usedMips = static_cast<int>(kMips);   // from Update, for the next build
 			int builtMips = static_cast<int>(kMips);  // the registered build's, for Commit

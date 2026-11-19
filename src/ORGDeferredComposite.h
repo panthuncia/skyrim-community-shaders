@@ -7,60 +7,46 @@
 struct ID3D11ShaderResourceView;
 
 /**
- * @brief The deferred composite (DeferredCompositeCS) as a render-graph compute pass, behind CS_ORG_COMPOSITE=1 (default 0: the
- * D3D11 dispatch in Deferred::DeferredPasses, unchanged).
- *
- * It runs on the DeferredComposite frame anchor, where the D3D11 composite runs: after the D3D11 SSGI, SSS and cubemap update. The
- * GBuffer, the main target, the normals, the motion vectors and the final depth copy are engine targets imported once
- * (FrameAnchors::EngineTarget / EngineDepth) and tracked by the graph. What other features produce (SSGI's outputs, the cubemaps,
- * the skylighting probes, the IBL SH) is declared by its published id when the producer runs on the graph, so the read is ordered
- * after its writes. A producer on D3D11 is imported (FrameAnchors::D3D11Texture) and declared in guest mode; native mode binds null. The shared constant buffers come from SharedConstants. The shader is the same DeferredCompositeCS.hlsl, built by DXC
- * with the defines Util::CompileShader would give it.
- *
- * When the ORG path cannot run a frame (an input it cannot import, programs that failed to build), Deferred runs the D3D11
- * composite instead.
- *
- * Render thread. Header deliberately free of ORG/Vulkan includes (see RenderGraphRuntime.h).
- */
+* @brief The deferred composite as a compute pass at the DeferredComposite anchor, with CS_ORG_COMPOSITE=1.
+*
+* Engine targets are imported once. Other features' outputs are read by published id when their producer runs on the graph,
+* so the read is ordered after the writes. A producer on D3D11 is imported in guest mode and bound null in native mode.
+* When a frame cannot run on the graph, Deferred runs the D3D11 composite. Render thread. Free of ORG/Vulkan includes.
+*/
 class ORGDeferredComposite
 {
 public:
-	/** @brief What one frame's composite reads, as Deferred::DeferredPasses gathers it for the D3D11 dispatch. */
+	/** @brief As Deferred::DeferredPasses gathers it for the D3D11 dispatch. */
 	struct Frame
 	{
 		bool interior = false;
-		std::uint32_t main = 0;     // RE::RENDER_TARGET of the main target (forwardRenderTargets[0])
-		std::uint32_t normals = 0;  // and of the normals (forwardRenderTargets[2])
+		std::uint32_t main = 0;     // forwardRenderTargets[0]
+		std::uint32_t normals = 0;  // forwardRenderTargets[2]
 		std::uint32_t groupsX = 0, groupsY = 0;
-		// The D3D11 composite's t0-t15 (null where it binds nothing); t0-t5 and t9 are the engine targets above, imported.
+		// The D3D11 composite's t0-t15, null where it binds nothing. t0-t5 and t9 are the imported engine targets.
 		std::array<ID3D11ShaderResourceView*, 16> views{};
 	};
 
 	static ORGDeferredComposite& Get();
 
-	/** @brief CS_ORG_COMPOSITE=1. */
 	static bool Requested();
 
-	/** @brief Before the render graph initializes: reserves the DeferredComposite anchor when requested. */
+	/** @brief Call before the render graph initializes. */
 	static void Reserve();
 
-	/** @brief After the render graph initializes (Deferred::SetupResources): the programs, the sampler and the anchor client. */
+	/** @brief At Deferred::SetupResources. */
 	void Setup();
 
-	/** @brief Before the anchor runs: the frame the composite would read. Nothing when the ORG path is off. */
+	/** @brief Before the anchor runs. Nothing when the ORG path is off. */
 	void SetFrame(const Frame& a_frame);
 
-	/** @brief After the anchor ran: whether the ORG composite wrote this frame (else Deferred runs the D3D11 one). */
+	/** @brief After the anchor ran. False means Deferred runs the D3D11 composite. */
 	bool Composited() const;
 
-	/**
-	 * @brief After the anchor ran: the composite is the graph's this frame (registered, its frame imported) but its stage's schedule does
-	 * not hold it yet (the first build after a registration). Nothing composites this frame: the composite lags, as a stage's other work
-	 * does. Deferred does not run the D3D11 one then.
-	 */
+	/** @brief After the anchor ran. The schedule does not hold the composite yet, so nothing composites and Deferred must not run D3D11's either. */
 	bool Lagged() const;
 
-	/** @brief The shader defines changed (Deferred::ClearShaderCache): the programs are built again at the next frame. */
+	/** @brief Programs rebuild at the next frame. */
 	void ClearShaderCache();
 
 	~ORGDeferredComposite();

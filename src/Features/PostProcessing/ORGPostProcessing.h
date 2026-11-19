@@ -8,48 +8,34 @@ namespace RenderGraph::Engine
 }
 
 /**
- * @brief Post Processing's tonemap chain on the render graph (CS_ORG_POST_PROCESSING=1; default 0: the D3D11 chain, unchanged).
- *
- * The chain runs at the Tonemap frame anchor, where PostProcessing::PreProcess runs it on D3D11: an input pass, one or more passes
- * per sub-effect, and an output pass into kMAIN and kMAIN_COPY. It runs on the graph only while every enabled sub-effect has an ORG
- * implementation; otherwise the whole chain stays on D3D11 that frame and the log names the sub-effects that keep it there. How
- * the chain is built and the rules for porting a sub-effect are in ORGPostEffect.h.
- *
- * On any failure (a program that does not build, a target that cannot be imported, a failed graph) the chain runs on D3D11.
- *
- * Render thread. Header deliberately free of ORG/Vulkan includes (see RenderGraphRuntime.h).
- */
+* @brief Post Processing's tonemap chain on the render graph at the Tonemap anchor, with CS_ORG_POST_PROCESSING=1.
+* It runs on the graph only while every enabled sub-effect has an ORG port, otherwise on D3D11 that frame. See ORGPostEffect.h.
+* Render thread. Free of ORG/Vulkan includes.
+*/
 class ORGPostProcessing
 {
 public:
-	/** @brief Whether CS_ORG_POST_PROCESSING=1 is set. */
 	static bool Requested();
 
-	/** @brief The chain's one instance, for the session. Render thread. */
+	/** @brief Render thread. */
 	static ORGPostProcessing& Get();
 
-	/** @brief Before the render graph initializes (PostProcessing::PostPostLoad): reserves the Tonemap anchor when requested. */
+	/** @brief PostProcessing::PostPostLoad, before the render graph initializes. */
 	static void Reserve();
 
-	/** @brief After the render graph initializes (PostProcessing::SetupResources): the copy programs and the effects. */
+	/** @brief PostProcessing::SetupResources. */
 	void Setup();
 
 	/**
-	 * @brief At the tonemap hook, before the anchor runs: decides whether the graph runs the chain this frame, builds it again when
-	 * its shape changed, and leaves the frame's values for the epoch's commit.
-	 * @param a_targets The tonemap's targets. With CS's native chain the chain reads its input and writes the result back there.
-	 * Otherwise (guest) it reads kMAIN or kMAIN_COPY, whichever the input is, and writes both.
-	 * @param a_refraction Guest: refraction routed the scene through kMAIN_COPY although the input does not say so.
-	 */
+	* @brief Before the anchor runs. Decides whether the graph runs the chain, rebuilds when its shape changed, and leaves the values for the commit.
+	* @param a_refraction Guest: refraction routed the scene through kMAIN_COPY although the input does not say so.
+	*/
 	void BeforeTonemap(const RenderGraph::Engine::TonemapTargets& a_targets, bool a_refraction);
 
-	/** @brief After the anchor ran: whether the graph ran the chain this frame (then PreProcess draws nothing). */
+	/** @brief After the anchor ran. When true PreProcess draws nothing. */
 	bool Ran() const;
 
-	/**
-	 * @brief Drops the cached programs and the chain's key (PostProcessing::ClearShaderCache): the next frame builds the chain again,
-	 * and a chain that failed to build is tried again.
-	 */
+	/** @brief The next frame rebuilds the chain, and a failed one is tried again. */
 	void ClearShaderCache();
 
 	~ORGPostProcessing();

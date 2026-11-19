@@ -72,37 +72,36 @@ bool ORGScreenshot::Crop(const Pixels& a_pixels, std::uint32_t a_x, std::uint32_
 namespace
 {
 	constexpr const char* kClientId = "cs.screenshot";
-	// Capture points a capture may wait for its copy and its readback before it is reported lost.
+	// How many capture points a capture may wait for its copy and readback before it is reported lost.
 	constexpr std::uint64_t kPatience = 600;
-	// The readback buffers: a capture takes a free one; more captures in flight wait for one.
+	// Extra captures in flight wait for a free buffer.
 	constexpr std::size_t kBuffers = 2;
 
-	/** @brief One capture: armed at a capture point, copied by the pass of the run that took it, read back once that run's work is done. */
+	/** @brief Armed at a capture point, copied by the run that took it, read back once that run's work is done. */
 	struct Request
 	{
 		std::uint64_t id = 0;
 		std::uint64_t armedAt = 0;  // the capture point's number
 		ORGScreenshot::OnPixels onPixels;
-		std::size_t buffer = kBuffers;  // the readback buffer it copies into
+		std::size_t buffer = kBuffers;
 		std::uint32_t width = 0, height = 0, rowPitch = 0;
-		bool taken = false;          // a run committed it (the copy is in that run's recording)
-		std::uint64_t takenAt = 0;   // the capture point its run committed it at
-		bool submitted = false;      // that run was submitted: point is set
+		bool taken = false;          // a run committed it, so the copy is in that run's recording
+		std::uint64_t takenAt = 0;
+		bool submitted = false;      // that run was submitted, so point is set
 		org::GraphHost::GpuPoint point;
 	};
 
-	/** @brief What the render thread and the passes' recordings share. */
 	struct Shared
 	{
-		// Render thread: what the pass copies, and the readback buffers sized for it (a change rebuilds the client).
+		// Render thread. A change rebuilds the client.
 		FrameAnchors::Texture source;
 		std::uint32_t width = 0, height = 0, texelBytes = 0, rowPitch = 0;
 		std::array<std::shared_ptr<org::Buffer>, kBuffers> buffers;
-		// The capture each run copies, stored by the commit for the pass recorded at execution (a frame input).
+		// Stored by the commit for the pass recorded at execution.
 		RenderGraph::RunSlots<Request> runs;
-		// Render thread: the capture waiting for a run.
+		// Render thread.
 		std::shared_ptr<Request> armed;
-		// Render thread: capture points seen (Poll), read by the commit.
+		// Render thread, read by the commit.
 		std::uint64_t points = 0;
 	};
 
@@ -116,11 +115,7 @@ namespace
 		std::shared_ptr<Shared> shared;
 	};
 
-	/**
-	 * @brief The source's first subresource copied into the capture's readback buffer. Recorded at execution from the capture its run's
-	 * commit stored; a run without one skips, its barriers folded. The buffers are CS's, declared as copy destinations at the build, so a
-	 * kept recording needs nothing prepared again for a capture.
-	 */
+	/** @brief Recorded at execution from the capture the commit stored. A run without one skips. The buffers are declared at build, so nothing is re-prepared per capture. */
 	class CapturePass final : public org::TypedRenderGraphPass<CapturePass, CaptureFrame, CaptureBindings>
 	{
 	public:
@@ -173,12 +168,11 @@ namespace
 	{
 		if (a_source.engineTarget >= 0) {
 			auto* renderer = globals::game::renderer;
-			// The engine's own import when the source is the slot's texture, so the graph orders it with other anchors' uses.
+			// Use the engine's own import so the graph orders it with other anchors' uses.
 			if (renderer && renderer->GetRuntimeData().renderTargets[static_cast<std::size_t>(a_source.engineTarget)].texture == a_source.texture)
 				return FrameAnchors::EngineTarget(static_cast<std::uint32_t>(a_source.engineTarget));
 		}
-		// HDR Display's output or back buffer, which its ORG passes write at the HDROutput anchor: their own import, so the graph orders
-		// the copy after those writes.
+		// HDR Display's ORG passes write these, so use their import to order the copy after those writes.
 		if (auto hdr = ORGHDRDisplay::Get().ImportOf(a_source.texture))
 			return hdr;
 		return a_source.importName ? FrameAnchors::D3D11Texture(a_source.importName, a_source.texture, a_source.srv, nullptr) : nullptr;
@@ -191,7 +185,7 @@ struct ORGScreenshot::Impl
 	bool registered = false;
 	bool importWarned = false;
 	std::uint64_t nextId = 0;
-	std::uint64_t points = 0;                           // capture points seen
+	std::uint64_t points = 0;
 	std::vector<std::shared_ptr<Request>> outstanding;  // taken, not read back yet
 	std::uint64_t built = 0;                            // the registration the client's passes were made for
 };
@@ -207,19 +201,15 @@ void ORGScreenshot::Reserve()
 namespace
 {
 	/**
-	 * @brief Whether the run now copies with the client's current registration (its source and buffers). A stage commits only
-	 * clients its schedule holds. The anchor's own epoch (without the stages) runs whatever graph it has built: until the new registration's
-	 * build switches in, that graph has the old copy or none, and a capture taken then reads back an unwritten buffer (all black).
-	 */
+	* @brief Whether the run copies with the current registration. Without the stages the anchor runs whatever graph it built,
+	* so a capture taken before the new build switches in would read back an unwritten, black buffer.
+	*/
 	bool CopyBuilt()
 	{
 		return FrameAnchors::HeldByStage(FrameAnchors::Anchor::Capture) || FrameAnchors::Scheduled(kClientId, FrameAnchors::Anchor::Capture);
 	}
 
-	/**
-	 * @brief Registers the capture client for the shared source and buffers: one copy pass, recorded at execution. In native mode with the
-	 * UI stage the Capture anchor is its step (after the overlay); otherwise it runs its own epoch.
-	 */
+	/** @brief In native mode with the UI stage the Capture anchor is its step after the overlay. Otherwise it runs its own epoch. */
 	bool RegisterClient(const std::shared_ptr<Shared>& a_shared)
 	{
 		RenderGraph::AnchorPasses::Builder builder(FrameAnchors::Anchor::Capture, kClientId, 100);
@@ -231,7 +221,7 @@ namespace
 		client.passes = builder.Take();
 		for (auto& pass : client.passes)
 			pass.atExecution = true;
-		// The anchor's step has work only while a capture waits for a run.
+		// Work only while a capture waits for a run.
 		client.active = [weak = std::weak_ptr<Shared>(a_shared)] {
 			const auto owner = weak.lock();
 			return owner && owner->armed != nullptr;
@@ -245,8 +235,7 @@ namespace
 			request->takenAt = owner->points;
 			owner->runs.Store(RenderGraphRuntime::Get().Host()->CurrentRun(), request);
 		};
-		// No executed callback: in a stage it runs at the tap, before the stage's commit submits the copy. The next capture point takes
-		// the GPU point instead (Poll): every capture point comes after the commit of the run that took the capture.
+		// No executed callback, since in a stage it would run before the commit submits. The next capture point takes the GPU point instead.
 		return FrameAnchors::Register(std::move(client));
 	}
 }
@@ -262,7 +251,7 @@ bool ORGScreenshot::Setup()
 		return false;
 	}
 	impl = std::make_unique<Impl>();
-	// No source yet: the client has no pass until the first capture names one (SetSource), and its build switches in before the copy.
+	// No pass until the first capture names a source.
 	if (!RegisterClient(impl->shared)) {
 		logger::warn("[ORG] Screenshot: the Capture anchor refused the client; captures use D3D11");
 		return false;
@@ -304,7 +293,7 @@ bool ORGScreenshot::SetSource(const Source& a_source)
 			return false;
 		shared.buffers[i]->SetName(fmt::format("cs.screenshot.readback{}", i));
 	}
-	// The pass copies the new source into the new buffers from the client's next build; a capture waits for it.
+	// A capture waits for the client's next build.
 	if (!RegisterClient(state.shared))
 		return false;
 	logger::info("[ORG] Screenshot: the copy now reads {} ({}x{}, {} bytes a texel); its build switches in before the next capture copies",
@@ -314,7 +303,7 @@ bool ORGScreenshot::SetSource(const Source& a_source)
 
 namespace
 {
-	/** @brief A readback buffer no capture in flight holds, or kBuffers. */
+	/** @brief kBuffers when none is free. */
 	std::size_t FreeBuffer(const std::vector<std::shared_ptr<Request>>& a_outstanding, const std::shared_ptr<Request>& a_armed)
 	{
 		for (std::size_t i = 0; i < kBuffers; ++i) {
@@ -326,7 +315,7 @@ namespace
 		return kBuffers;
 	}
 
-	/** @brief Taps the Capture anchor for the armed capture when a tap now commits (the UI stage open, or the anchor's own epoch). */
+	/** @brief Taps when a tap now commits, with the UI stage open or the anchor's own epoch. */
 	void TryTake(Shared& a_shared)
 	{
 		if (!a_shared.armed)
@@ -367,7 +356,7 @@ bool ORGScreenshot::Capture(const Source& a_source, OnPixels a_onPixels)
 	request->rowPitch = shared.rowPitch;
 	shared.armed = request;
 	state.outstanding.push_back(request);
-	// Taken now when the stage's schedule has the pass; otherwise at a later capture point (its build switching in, or the stage's next run).
+	// Otherwise taken at a later capture point.
 	TryTake(shared);
 	logger::info("[ORG] Screenshot: capture {} {}", request->id, request->taken ? "copied on the render graph" : "waits for a run that holds its copy");
 	return true;
@@ -379,7 +368,7 @@ void ORGScreenshot::Poll()
 		return;
 	auto& state = *impl;
 	auto& shared = *state.shared;
-	// The capture point's number moves on when this one ends: a capture its run commits from here on has this number.
+	// Captures committed from here on get this number.
 	const struct Next
 	{
 		Impl& state;
@@ -388,7 +377,7 @@ void ORGScreenshot::Poll()
 	TryTake(shared);
 	if (state.outstanding.empty())
 		return;
-	// A capture taken at an earlier capture point: its run was submitted since, so the point submitted by now covers its copy.
+	// Its run was submitted since, so the point submitted by now covers its copy.
 	if (auto* host = RenderGraphRuntime::Get().Host())
 		for (const auto& request : state.outstanding)
 			if (request->taken && !request->submitted && request->takenAt < state.points) {
@@ -434,7 +423,7 @@ void ORGScreenshot::Poll()
 
 #else  // !CS_HAS_RENDER_GRAPH
 
-// Built without OpenRenderGraph: screenshots always copy with D3D11.
+// Without OpenRenderGraph screenshots always copy with D3D11.
 struct ORGScreenshot::Impl
 {};
 

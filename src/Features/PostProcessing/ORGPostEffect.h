@@ -1,76 +1,17 @@
 #pragma once
 
 /**
- * The ORG post-processing chain: the framework each sub-effect's ORG port plugs into (CS_ORG_POST_PROCESSING=1).
- *
- * How the chain runs
- * ------------------
- * PostProcessing::PreProcess runs the sub-effects (PostProcessFeature) at the ImageSpace tonemap, each reading the previous
- * one's output and writing its own texture, then copies the last output into kMAIN and kMAIN_COPY. On the graph the same
- * chain is a list of passes at the Tonemap frame anchor (FrameAnchors::Anchor::Tonemap), built by ORGPostProcessing.cpp:
- *
- *   input   copy.ps: kMAIN or kMAIN_COPY (picked per frame through the latch) into "PostProcessing::Input", RGBA16F,
- *           with the game gamma removed unless Linear Lighting is on (BeginLinearProcessing)
- *   effects each enabled sub-effect, in PostProcessing::ChainOrder, through its Effect below
- *   output  the last image into kMAIN and into kMAIN_COPY: a copy, or copy.ps when the gamut or gamma changes or the
- *           formats differ (PostProcessing::OutputConversion)
- *
- * Every chain image is a transient GraphResources::Texture2D, the size of kMAIN unless the effect names one (a half-resolution
- * or FFT image), so the graph aliases them: there is no ping-pong to write by hand. A sub-feature's D3D11 textures are made only
- * when the D3D11 path first draws it (PostProcessing::DrawFeature), so an effect must not read them; files the sub-feature
- * loads itself (LUT::UpdateTexture) are fine.
- *
- * The mixed rule
- * --------------
- * The chain runs on the graph only while every sub-effect ChainOrder lists has an Effect here and none reports a reason not
- * to run (Effect::Update). Otherwise the whole chain runs on D3D11 that frame, and the log names the sub-effects that keep
- * it there whenever that list changes ("[ORG] Post Processing: the chain runs on D3D11: ..."). A sub-effect that is off
- * costs nothing on either path. There is no mixed frame: a graph image is never handed to a D3D11 sub-effect.
- *
- * Rules for porting a sub-effect
- * ------------------------------
- * 1. Convert its shaders to dual-target first, one refactor commit each (OrgResources.hlsli; prove them with
- *    tools/verify-shader-refactor.ps1 and tools/check-dual-target-shaders.py, --stage/--entry for multi-entry files).
- *    Constants that change by frame are a LATCH entry; take the struct layout from the C++ CB the D3D11 path uploads.
- * 2. Move the D3D11 Draw's constant building into a method of the sub-feature (Vignette::Constants,
- *    ColorGrading::BuildConstants) and call it from both paths. Do not copy it.
- * 3. Write an Effect in src/Features/PostProcessing/ORG/ORG<Name>.cpp, declare its Make<Name>() below and add it to
- *    MakeEffect in ORGPostProcessing.cpp. Nothing else in the D3D11 sub-feature changes.
- * 4. Update (render thread, before the anchor, every frame the effect is in the chain): import what the passes read from
- *    D3D11 (FrameAnchors::D3D11Texture, EngineTarget, EngineDepth), push what the passes are built from into the key, and
- *    return a reason when the graph cannot run it as it is set now (a debug readback, a format it cannot import). A
- *    changed key rebuilds the whole chain, so never push a value that changes every frame: those go in the latch.
- * 5. Build (render thread, at a rebuild): read Builder::Current(), create the outputs with Builder::CreateImage, add the
- *    passes (Draw, Dispatch, or Add for a custom pass), reserve latch regions, then SetCurrent(output) when the
- *    effect replaces the image (WritesToMainTexture). An effect that only produces side data (bloom, exposure) leaves
- *    Current alone and Publishes its result by name, and its constants by PublishLatch; Composite Finds them under the
- *    names in ORGPostChain::Published. A mip chain is one CreateMipChain image, read and written a mip at a time through
- *    Image::Mip (the draw's viewport is then that mip's size); a published Image keeps its mip, so the reader's Bind::Srv
- *    sees only that mip. Programs come from Builder::Raster/Compute (RasterTargets for a target that blends), which cache
- *    them across builds (a first build blocks on the compile). A shader's SHARED entry is Bind::Shared:
- *    the chain then uploads CS's shared constants at the anchor (FrameBuffer, SharedData: frame count, depth params).
- * 6. Commit (in the epoch, every frame): write this frame's values into the regions Build reserved. Work that runs only
- *    on some frames (a LUT regenerated on a settings change) is a dispatch through its own gate entry (Builder::Gate,
- *    ComputeDispatch::gate) that Commit opens on those frames, so the recording stays the same. Such work counts as done
- *    in Executed, which runs after a frame whose commit reached the GPU with this build's passes, not in Commit.
- * 7. Resources that live across frames (history, adaptation, a baked LUT) belong to the Effect object, which lives for
- *    the session: create them as GraphResources with Lifetime::History or Persistent and Builder::Register them at each
- *    build. Everything per frame is a chain image.
- * 8. A D3D11-only side path stays D3D11 (Border::ClearMotionVectorsForFrameGen, ColorGrading's curve preview). If it
- *    needs the frame's image, make Update return a reason while it is active.
- * 9. Names: passes "cs.pp.<effect>.<step>" (Builder adds the prefix), images "PostProcessing::<Effect>::<Name>", as the
- *    D3D11 resources are named.
- *
- * Every draw and dispatch of the chain runs through the chain's run gate (RenderGraph::RunGate): the chain's commit opens
- * the draws and the fixed dispatches, and each effect opens its own entries. A frame the chain does not run (the Tonemap
- * anchor runs for another client) therefore does no chain work, and the recording is kept.
- *
- * Threads: Update and Build run on the render thread, Commit inside the epoch (render thread, before submission), Executed
- * after the run. The passes' Prepare and Record run on the graph host's thread and read only what they were made with and the
- * latch.
- *
- * Translation units that include this header include <rhi_interop_vulkan.h> first (volk before any Vulkan header).
- */
+* The framework each Post Processing sub-effect's ORG port plugs into, with CS_ORG_POST_PROCESSING=1.
+*
+* At the Tonemap anchor the chain copies kMAIN into an input image, runs each enabled sub-effect in ChainOrder, and copies
+* the last image back into kMAIN and kMAIN_COPY. Chain images are transient, so the graph aliases them.
+* The chain runs on the graph only when every listed sub-effect has an Effect here and none reports a reason not to run.
+* Otherwise the whole chain runs on D3D11 that frame. There is never a mixed frame.
+*
+* Per effect: Update runs on the render thread every frame and builds the key, Build runs at a rebuild, Commit writes the
+* frame's values in the epoch. Never put a per-frame value in the key, since a changed key rebuilds the chain.
+* Includers must include <rhi_interop_vulkan.h> first.
+*/
 
 #if defined(CS_HAS_RENDER_GRAPH)
 
@@ -112,25 +53,24 @@ namespace RenderGraph
 
 namespace ORGPostChain
 {
-	/** @brief The latch bytes one build may reserve for every effect together, per run. */
+	/** @brief For every effect together, per run. */
 	inline constexpr std::uint32_t kLatchBytes = 16384;
 
-	/** @brief An Image or Bind that covers every mip of its texture (the texture's default view). */
+	/** @brief Covers every mip of its texture. */
 	inline constexpr std::uint32_t kAllMips = RenderGraph::AnchorPasses::kAllMips;
 
-	/** @brief The run gate entries one build may use: the draws' entry, one per distinct fixed dispatch size, and the effects' own. */
+	/** @brief The draws' entry, one per distinct fixed dispatch size, and the effects' own. */
 	inline constexpr std::uint32_t kGateEntries = 128;
 
-	/** @brief A texture of the chain: the graph resource (or an engine target's slot) and its format, or one mip of it (Mip). */
 	struct Image
 	{
 		FrameAnchors::Texture graph;
 		DXGI_FORMAT format = DXGI_FORMAT_UNKNOWN;
-		std::uint32_t mip = kAllMips;  // kAllMips: the whole texture; else a pass reads or writes only this mip
+		std::uint32_t mip = kAllMips;  // kAllMips for the whole texture
 
 		explicit operator bool() const { return static_cast<bool>(graph); }
 
-		/** @brief The same texture, one mip only: a draw targets that mip, a Bind::Srv reads a view of that mip alone. */
+		/** @brief A draw targets that mip, and a Bind::Srv reads a view of that mip alone. */
 		Image Mip(std::uint32_t a_mip) const
 		{
 			Image image = *this;
@@ -139,17 +79,16 @@ namespace ORGPostChain
 		}
 	};
 
-	/** @brief What a build is made for: kMAIN's size and the main targets' formats. */
+	/** @brief kMAIN's size and the main targets' formats. */
 	struct Shape
 	{
-		UINT width = 0, height = 0;  // kMAIN's size, which every chain image has
-		float dynamicWidth = 0.0f;   // Util::ConvertToDynamic of it: the D3D11 passes' viewport size
+		UINT width = 0, height = 0;  // every chain image has kMAIN's size
+		float dynamicWidth = 0.0f;   // the D3D11 passes' viewport size
 		float dynamicHeight = 0.0f;
 		DXGI_FORMAT mainFormat = DXGI_FORMAT_UNKNOWN;
 		DXGI_FORMAT mainCopyFormat = DXGI_FORMAT_UNKNOWN;  // the format most D3D11 sub-effects give their output
 	};
 
-	/** @brief A region of the chain's latch block holding a T, written by Commit. */
 	template <class T>
 	struct LatchRegion
 	{
@@ -157,48 +96,36 @@ namespace ORGPostChain
 	};
 
 	/**
-	 * @brief The side outputs Composite reads, under the names their effects publish them (Builder::Publish, PublishLatch).
-	 *
-	 * An effect that is on publishes every entry of its group; Composite treats a group with an entry missing as that
-	 * contributor off, as the D3D11 Composite treats a missing SRV (the effect off, or its output not ready). Composite reads
-	 * each image through Bind::Srv, so publish an image that views the level named here. A latch entry is
-	 * a region holding the C++ struct the D3D11 path uploads, written by the publisher's Commit.
-	 */
+	* @brief Side outputs Composite reads by name. Composite treats a group with a missing entry as that contributor being off,
+	* as the D3D11 Composite treats a missing SRV.
+	*/
 	namespace Published
 	{
-		// CODBloom: the accumulated bloom, mip 1 of its chain (a published Image of that mip), which Composite upsamples.
+		// Mip 1 of the bloom chain, which Composite upsamples.
 		inline constexpr std::string_view kBloomOutput = "PostProcessing::CODBloom::Bloom";
-		// LensFlare: the ghosts and halo, RGBA16F, at max(width / 2, 1) x max(height / 2, 1) of the chain's Shape
-		// (LensFlare::texGhostHalo's size, Composite's FlareSize).
+		// RGBA16F at half the chain's size, at least 1x1.
 		inline constexpr std::string_view kLensFlareOutput = "PostProcessing::LensFlare::GhostHalo";
-		// PhysicalGlare: the glare, the size of the chain's images.
 		inline constexpr std::string_view kGlare = "PostProcessing::PhysicalGlare::Output";
-		// HistogramAutoExposure: the adapted luminance (a structured buffer of one float) and a HistogramAutoExposure::AutoExposureCB.
+		// A structured buffer of one float, plus a HistogramAutoExposure::AutoExposureCB.
 		inline constexpr std::string_view kAdaptation = "PostProcessing::AutoExposure::Adaptation";
 		inline constexpr std::string_view kAutoExposureConstants = "PostProcessing::AutoExposure::Constants";
-		// LocalExposure: the scene's log luminance (mip 0), the luminance grid (3D), the blurred base and a LocalExposure::LocalExposureCB.
+		// Mip 0 log luminance, the 3D luminance grid, the blurred base and a LocalExposure::LocalExposureCB.
 		inline constexpr std::string_view kLogLuminance = "PostProcessing::LocalExposure::LogLuminance";
 		inline constexpr std::string_view kLuminanceGrid = "PostProcessing::LocalExposure::LuminanceGrid";
 		inline constexpr std::string_view kBlurredLuminance = "PostProcessing::LocalExposure::BlurredLuminance";
 		inline constexpr std::string_view kLocalExposureConstants = "PostProcessing::LocalExposure::Constants";
 	}
 
-	/**
-	 * @brief A run gate entry an effect owns (Builder::Gate): the dispatches through it run only on the frames Commit opens it
-	 * (CommitContext::Open), with the group counts given there.
-	 */
+	/** @brief Dispatches through it run only on frames Commit opens it, with the group counts given there. */
 	struct GateEntry
 	{
 		std::uint32_t index = 0;
 	};
 
 	/**
-	 * @brief One entry of a pass's push block (RenderGraph::AnchorPasses::Bind), with the chain's Image and LatchRegion forms.
-	 * SRV and UAV entries are declared resources, Handle a sampler or another descriptor, Latch a LATCH entry's two words,
-	 * Unused a handle the shader never reads on this pass (another entry point's resource, the LUT type not loaded), Shared a
-	 * SHARED entry's four words (CS's shared constant buffers, SharedConstants.h; the chain's client then uploads them at the
-	 * anchor).
-	 */
+	* @brief Adds the chain's Image and LatchRegion forms. Unused is a handle the shader never reads on this pass.
+	* Shared makes the client upload CS's shared constants at the anchor.
+	*/
 	struct Bind : RenderGraph::AnchorPasses::Bind
 	{
 		using Base = RenderGraph::AnchorPasses::Bind;
@@ -217,21 +144,19 @@ namespace ORGPostChain
 		}
 	};
 
-	/** @brief A fullscreen raster pass: a_program's pixel stage over the viewport, into one target. */
 	struct FullscreenDraw
 	{
-		std::string name;  // the step: the pass is "cs.pp.<effect>.<name>"
+		std::string name;  // the pass is "cs.pp.<effect>.<name>"
 		std::shared_ptr<const RasterProgram> program;
 		std::vector<Bind> bindings;
-		Image target;                                     // or one mip of it (Image::Mip)
-		std::optional<RasterProgram::Viewport> viewport;  // default: the whole target or its mip (Builder::MipViewport)
+		Image target;                                     // or one mip of it
+		std::optional<RasterProgram::Viewport> viewport;  // default is the whole target or its mip
 	};
 
 	/**
-	 * @brief A compute pass. With fixed group counts it runs on every frame the chain runs. With gate it runs on the frames
-	 * Commit opens that entry, with the counts given there. once: a one-shot pass with fixed group counts (the clear of a new
-	 * history resource), which runs at the anchor's next run whether the chain runs or not, so it reads no latch entry.
-	 */
+	* @brief Fixed group counts run every frame the chain runs. With gate it runs only on frames Commit opens.
+	* once is a one-shot pass that runs at the anchor's next run whether the chain runs or not, so it reads no latch.
+	*/
 	struct ComputeDispatch
 	{
 		std::string name;
@@ -245,7 +170,7 @@ namespace ORGPostChain
 	struct BuildState;
 	struct Programs;
 
-	/** @brief What an effect's Build adds its passes and resources through. Render thread, during one rebuild. */
+	/** @brief Render thread, during one rebuild. */
 	class Builder
 	{
 	public:
@@ -253,39 +178,29 @@ namespace ORGPostChain
 
 		const Shape& GetShape() const { return shape; }
 
-		/** @brief The image the effect reads: the last one an earlier stage wrote. */
+		/** @brief The last image an earlier stage wrote. */
 		const Image& Current() const;
 
-		/** @brief Makes a_image the input of the next stage (an effect that writes the main image). */
+		/** @brief For an effect that writes the main image. */
 		void SetCurrent(const Image& a_image);
 
-		/**
-		 * @brief A transient image the size of kMAIN, aliasable, registered with the graph. a_bindFlags: D3D11_BIND_RENDER_TARGET
-		 * for a raster output, D3D11_BIND_UNORDERED_ACCESS for a compute one (the SRV is always there). Null image, and the build
-		 * fails, when it cannot be made.
-		 */
+		/** @brief A transient kMAIN-sized image. The SRV is always there. A null image fails the build. */
 		Image CreateImage(std::string_view a_name, DXGI_FORMAT a_format, UINT a_bindFlags);
 
-		/**
-		 * @brief As CreateImage, at a_width x a_height instead of kMAIN's size (a reduced-resolution or FFT image), with a_mips
-		 * mips. A draw into one mip of an image that is not kMAIN's size gives its viewport (MipViewport assumes kMAIN's size).
-		 */
+		/** @brief A draw into one mip of an image not at kMAIN's size must give its own viewport, since MipViewport assumes kMAIN's size. */
 		Image CreateImage(std::string_view a_name, DXGI_FORMAT a_format, UINT a_bindFlags, UINT a_width, UINT a_height, UINT a_mips = 1);
 
-		/** @brief A kMAIN-sized image with a_mips mips, each read and written through Image::Mip (a bloom pyramid). */
+		/** @brief Each mip is read and written through Image::Mip. */
 		Image CreateMipChain(std::string_view a_name, DXGI_FORMAT a_format, UINT a_bindFlags, UINT a_mips);
 
-		/** @brief Registers an effect-owned resource (history, persistent) with the graph at this build. */
+		/** @brief An effect-owned history or persistent resource. Call at every build. */
 		void Register(const GraphResources::Resource& a_resource);
 
-		/** @brief Publishes a side output (bloom, exposure) under a name for later effects; Find returns it, or a null image. */
+		/** @brief Find returns it, or a null image. */
 		void Publish(std::string_view a_name, const Image& a_image);
 		Image Find(std::string_view a_name) const;
 
-		/**
-		 * @brief Publishes a latch region (an effect's constants, which a later effect binds too) under a name. FindLatch returns it,
-		 * or nothing when none was published; a region published for another type fails the build.
-		 */
+		/** @brief FindLatch returns it. A region published for another type fails the build. */
 		template <class T>
 		void PublishLatch(std::string_view a_name, const LatchRegion<T>& a_region)
 		{
@@ -298,10 +213,9 @@ namespace ORGPostChain
 			return offset ? std::optional<LatchRegion<T>>(LatchRegion<T>{ *offset }) : std::nullopt;
 		}
 
-		/** @brief Reserves a run gate entry for dispatches that run on some frames only (ComputeDispatch::gate). */
 		GateEntry Gate();
 
-		/** @brief Reserves a latch region for a T: 16-byte aligned, at most kLatchBytes for the whole build. */
+		/** @brief 16-byte aligned, at most kLatchBytes for the whole build. */
 		template <class T>
 		LatchRegion<T> Latch()
 		{
@@ -309,38 +223,32 @@ namespace ORGPostChain
 			return { Reserve(static_cast<std::uint32_t>(sizeof(T))) };
 		}
 
-		/** @brief The build's latch block, for a custom pass (Add); the regions are offsets into a run's region of it. */
+		/** @brief The regions are offsets into a run's region of it. */
 		std::shared_ptr<const org::LatchBlock> LatchBlock() const;
 
-		/**
-		 * @brief Programs, cached across builds by source, entry, defines, push words and targets. Common defines and the
-		 * stage define are added as Util::CompileShader adds them. Null, and the build fails, when one does not build.
-		 */
+		/** @brief Cached across builds. Common and stage defines are added as Util::CompileShader adds them. Null fails the build. */
 		std::shared_ptr<const RasterProgram> Raster(std::string_view a_source, std::uint32_t a_words, std::vector<DXGI_FORMAT> a_targets,
 			std::vector<std::pair<std::string, std::string>> a_defines = {}, std::wstring a_entry = L"main");
-		/** @brief As Raster, with each target's blending and write mask (RasterProgram::Target): an accumulating draw. */
+		/** @brief For an accumulating draw. */
 		std::shared_ptr<const RasterProgram> RasterTargets(std::string_view a_source, std::uint32_t a_words, std::vector<RasterProgram::Target> a_targets,
 			std::vector<std::pair<std::string, std::string>> a_defines = {}, std::wstring a_entry = L"main");
 		std::shared_ptr<const ComputeProgram> Compute(std::string_view a_source, std::uint32_t a_words,
 			std::vector<std::pair<std::string, std::string>> a_defines = {}, std::wstring a_entry = L"main");
 
-		/** @brief The whole of kMAIN, and the dynamic-resolution part the D3D11 viewports cover (Shape::dynamicWidth). */
+		/** @brief The whole of kMAIN, and the dynamic-resolution part the D3D11 viewports cover. */
 		RasterProgram::Viewport FullViewport() const;
 		RasterProgram::Viewport DynamicViewport() const;
-		/** @brief The whole of a_mip of a kMAIN-sized image (FullViewport for kAllMips), as a D3D11 viewport of width >> a_mip. */
+		/** @brief As a D3D11 viewport of width >> a_mip. */
 		RasterProgram::Viewport MipViewport(std::uint32_t a_mip) const;
 
-		/** @brief Adds a pass. Its push words must match the program's (logged, and the build fails, otherwise). */
+		/** @brief Push words must match the program's, or the build fails. */
 		void Draw(FullscreenDraw a_draw);
 		void Dispatch(ComputeDispatch a_dispatch);
 
-		/**
-		 * @brief A custom pass: make is called at each graph build of the anchor, as FrameAnchors::PassDesc::make. It has no
-		 * gate: it runs on every run of the anchor, so it decides in Prepare whether it has work.
-		 */
+		/** @brief make is called at each graph build. It has no gate and runs on every anchor run, so it decides in Prepare whether it has work. */
 		void Add(std::string_view a_name, FrameAnchors::PassKind a_kind, std::function<std::shared_ptr<org::RenderPass>()> a_make);
 
-		/** @brief Marks the build failed (an effect that cannot build); the reason is logged. */
+		/** @brief The reason is logged. */
 		void Fail(std::string_view a_reason);
 
 		bool Failed() const;
@@ -358,7 +266,6 @@ namespace ORGPostChain
 		std::string effect;
 	};
 
-	/** @brief What Commit writes through: the build's latch region of this run, and its run gate. */
 	class CommitContext
 	{
 	public:
@@ -371,7 +278,7 @@ namespace ORGPostChain
 			WriteBytes(a_region.offset, &a_value, sizeof(T));
 		}
 
-		/** @brief The dispatches through a_entry run this frame with these group counts. They are closed on every other frame. */
+		/** @brief They stay closed on every other frame. */
 		void Open(GateEntry a_entry, std::uint32_t a_x, std::uint32_t a_y = 1, std::uint32_t a_z = 1) const;
 
 	private:
@@ -382,20 +289,16 @@ namespace ORGPostChain
 		const RenderGraph::RunGate& gate;
 	};
 
-	/**
-	 * @brief A sub-effect's ORG implementation. One object per pipeline slot for the session; it reads the D3D11 sub-feature
-	 * (passed in, never kept: SyncPipelineResources may replace it) for its settings.
-	 */
+	/** @brief One per pipeline slot for the session. Never keep the sub-feature, since SyncPipelineResources may replace it. */
 	class Effect
 	{
 	public:
 		virtual ~Effect() = default;
 
 		/**
-		 * @brief Render thread, before the anchor, each frame the effect is in the chain: imports up to date, what the passes
-		 * are built from appended to a_key. @return Null when the graph can run the effect this frame, else why not (the chain
-		 * then runs on D3D11).
-		 */
+		* @brief Render thread, each frame the effect is in the chain. Refreshes imports and appends what the passes depend on to a_key.
+		* @return Null when the graph can run it this frame, else why not.
+		*/
 		virtual const char* Update(PostProcessFeature& a_feature, std::vector<std::uint64_t>& a_key)
 		{
 			(void)a_feature;
@@ -403,20 +306,17 @@ namespace ORGPostChain
 			return nullptr;
 		}
 
-		/** @brief Render thread, at a rebuild: the effect's passes and resources. Fail the builder when it cannot. */
+		/** @brief Render thread, at a rebuild. Fail the builder when it cannot. */
 		virtual void Build(Builder& a_builder, PostProcessFeature& a_feature) = 0;
 
-		/** @brief In the epoch, each frame: this frame's values into the regions Build reserved. */
+		/** @brief In the epoch, each frame. */
 		virtual void Commit(const CommitContext& a_commit, PostProcessFeature& a_feature) = 0;
 
-		/**
-		 * @brief After a frame whose Commit reached the GPU with this build's passes (FrameAnchors::ClientDesc::executed): the
-		 * work that commit opened is done. Not called for a frame whose epoch ran an older build. Render thread.
-		 */
+		/** @brief After a frame whose Commit reached the GPU with this build's passes. Not called when the epoch ran an older build. Render thread. */
 		virtual void Executed(PostProcessFeature& a_feature) { (void)a_feature; }
 	};
 
-	// The ported sub-effects (src/Features/PostProcessing/ORG/). Add a port's factory here and in MakeEffect.
+	// Add a port's factory here and in MakeEffect.
 	std::unique_ptr<Effect> MakeVignette();
 	std::unique_ptr<Effect> MakeColorGrading();
 	std::unique_ptr<Effect> MakeLUT();

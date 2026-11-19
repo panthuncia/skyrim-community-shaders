@@ -16,10 +16,10 @@ namespace ORGPostChain
 	namespace
 	{
 		constexpr const char* kShader = "PostProcessing/ColorGrading/colorgrading.hlsl";
-		constexpr DXGI_FORMAT kFormat = DXGI_FORMAT_R16G16B16A16_FLOAT;  // texColor's and texLUT's, as ColorGrading::SetupResources
+		constexpr DXGI_FORMAT kFormat = DXGI_FORMAT_R16G16B16A16_FLOAT;  // as ColorGrading::SetupResources
 		constexpr std::uint32_t kLutGroups = ColorGrading::LUTDim >> 3;
 
-		// colorgrading.hlsl's push block, both entries: COLOR_GRADING_RESOURCES, then the ColorGradingFrame latch.
+		// COLOR_GRADING_RESOURCES, then the ColorGradingFrame latch.
 		struct ColorBlock
 		{
 			ShaderBindings::Handle texColor, texLUT, rwLUT, linearSampler;
@@ -27,12 +27,10 @@ namespace ORGPostChain
 		};
 
 		/**
-		 * @brief ColorGrading::Draw on the graph: the LUT bake (CSLUTGen) whenever the constants changed, then the grading draw over
-		 * the whole target. The bake runs through its own gate entry, which Commit opens on the frames it bakes, so the recording
-		 * stays the same. The LUT is persistent and owned here. A bake counts as done once a frame that asked for it reached the GPU
-		 * with this build (Executed); until then it is asked for again each frame. The curve preview and the image export read back
-		 * through D3D11, so the chain stays on D3D11 while either runs.
-		 */
+		* @brief ColorGrading::Draw on the graph: a gated LUT bake when the constants changed, then the grading draw.
+		* A bake repeats until a frame with it reached the GPU with this build. The curve preview and image export read back through D3D11,
+		* so the chain stays on D3D11 while either runs.
+		*/
 		class ColorGradingEffect final : public Effect
 		{
 		public:
@@ -43,7 +41,7 @@ namespace ORGPostChain
 					return "its curve preview reads back through D3D11";
 				if (grading.saveImagesFlag)
 					return "it saves its LUT and output through D3D11";
-				// The tonemapper is a define: another one is another program.
+				// The tonemapper is a define, so another one is another program.
 				a_key.push_back(std::hash<std::string_view>{}(grading.TonemapFunctionName()));
 				return nullptr;
 			}
@@ -52,7 +50,7 @@ namespace ORGPostChain
 			{
 				auto& grading = static_cast<ColorGrading&>(a_feature);
 				if (!sampler) {
-					// ColorGrading::linearSampler's description: linear, clamped, every mip.
+					// Linear, clamped, every mip.
 					sampler = ShaderBindings::CreateSampler(rhi::SamplerDesc{});
 					if (!sampler) {
 						a_builder.Fail("its sampler could not be made");
@@ -87,7 +85,7 @@ namespace ORGPostChain
 					.bindings = { Bind::Srv(a_builder.Current()), Bind::Srv(lut->Graph()), Bind::Unused(), linear, Bind::Latch(constants) },
 					.target = image });
 				a_builder.SetCurrent(image);
-				// A new build may have a new bake program: bake again once it runs.
+				// A new build may have a new bake program.
 				lutValid = false;
 				pending = false;
 			}
@@ -97,7 +95,7 @@ namespace ORGPostChain
 				const auto data = static_cast<ColorGrading&>(a_feature).BuildConstants();
 				a_commit.Write(constants, data);
 				pending = false;
-				// As the D3D11 draw: the LUT depends only on the constants (and the program, which a rebuild changes).
+				// The LUT depends only on the constants and the program.
 				const bool bake = !data.skipLUT && (!lutValid || std::memcmp(&data, lutKey.data(), sizeof(data)) != 0);
 				if (bake) {
 					a_commit.Open(bakeGate, kLutGroups, kLutGroups, kLutGroups);
@@ -108,7 +106,6 @@ namespace ORGPostChain
 
 			void Executed(PostProcessFeature&) override
 			{
-				// The bake this frame's commit asked for reached the GPU with this build.
 				if (!pending)
 					return;
 				lutKey = pendingKey;
@@ -123,7 +120,7 @@ namespace ORGPostChain
 			GateEntry bakeGate;
 			std::array<char, sizeof(ColorGrading::ColorCB)> lutKey{};
 			bool lutValid = false;
-			// The constants this frame's commit baked with, until Executed.
+			// Until Executed.
 			std::array<char, sizeof(ColorGrading::ColorCB)> pendingKey{};
 			bool pending = false;
 		};

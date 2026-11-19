@@ -8,74 +8,56 @@
 #include <span>
 
 /**
- * @brief Grass Collision's collision update (CollisionUpdateCS) as render-graph passes, behind CS_ORG_GRASS_COLLISION=1.
- *
- * Two passes at the EarlyPrepass anchor: a copy moves the frame's colliders (bounding boxes and collision spheres) from the
- * client's latch block into two graph buffers, then the update writes the 512x512 collision texture. The per-frame values are a
- * LATCH entry of the shader, read from the same block. The texture is a graph twin (GraphResources::Texture2D) exported as a D3D11
- * SRV: the engine's grass vertex shader reads it at t100. It is also published (PublishedResources, GrassShared::kCollisionGraphId):
- * Drawcall Limit Fix's grass draws read it through the graph. Each update reads the last frame's texture, so it is History.
- *
- * Why EarlyPrepass: the colliders are queued in Main::Update, before the frame renders, and the eye is the main camera's then. The
- * anchor runs after the shadow maps and before Main::RenderDepth, so before every main-view grass draw: the engine's Z-prepass and
- * main pass, and DCLF's depth commit, which writes the grass draw row from what GrassShared holds.
- *
- * Fallback: when the program or resources cannot be made, Setup returns false and Grass Collision keeps its D3D11 path.
- *
- * Header deliberately free of ORG/Vulkan includes (see RenderGraphRuntime.h). Everything here runs on the render thread.
- */
+* @brief Grass Collision's update as render-graph passes at EarlyPrepass, with CS_ORG_GRASS_COLLISION=1.
+*
+* A copy moves the frame's colliders from the latch into graph buffers, then the update writes the 512x512 collision texture.
+* The texture is History, since each update reads the last frame's. It is exported for the engine's grass at t100 and published for DCLF.
+* EarlyPrepass runs after Main::Update queued the colliders and before every main-view grass draw.
+* Setup returns false on failure and Grass Collision keeps D3D11. Render thread throughout. Free of ORG/Vulkan includes.
+*/
 class ORGGrassCollision
 {
 public:
-	/** @brief The shapes the passes are made for: the D3D11 path's limits and strides. */
+	/** @brief The D3D11 path's limits and strides. */
 	struct Limits
 	{
-		std::uint32_t perFrameBytes = 0;  // GrassCollision::PerFrame
+		std::uint32_t perFrameBytes = 0;
 		std::uint32_t maxBoxes = 0;
-		std::uint32_t boxStride = 0;  // GrassCollision::BoundingBoxPacked
+		std::uint32_t boxStride = 0;
 		std::uint32_t maxInstances = 0;
-		std::uint32_t instanceStride = 0;  // float4
-		D3D11_TEXTURE2D_DESC texture{};    // the collision texture (SRV and UAV)
+		std::uint32_t instanceStride = 0;
+		D3D11_TEXTURE2D_DESC texture{};    // SRV and UAV
 	};
 
-	/**
-	 * @brief One frame's collision update as Grass Collision describes it for either path: its per-frame values, colliders and whether
-	 * the setting is on. Copied by Stage, nothing kept by reference.
-	 */
+	/** @brief Copied by Stage. Nothing is kept by reference. */
 	struct Frame
 	{
-		std::span<const std::byte> perFrame;   // GrassCollision::PerFrame
-		std::span<const std::byte> boxes;      // GrassCollision::BoundingBoxPacked[BoundingBoxCount]
+		std::span<const std::byte> perFrame;
+		std::span<const std::byte> boxes;
 		std::span<const std::byte> instances;  // float4 collision spheres
-		bool enabled = true;                   // off: the update clears the texture, as the D3D11 path does
+		bool enabled = true;                   // off clears the texture, as the D3D11 path does
 	};
 
 	static ORGGrassCollision& Get();
 
-	/** @brief Whether CS_ORG_GRASS_COLLISION=1 asks for the render-graph path. */
 	static bool Requested();
 
-	/** @brief Before the render graph initializes (Grass Collision's PostPostLoad): reserves the EarlyPrepass anchor when Requested. */
+	/** @brief Grass Collision's PostPostLoad, before the render graph initializes. */
 	static void Reserve();
 
-	/**
-	 * @brief At SetupResources, with the runtime active: makes the program, latch block and graph resources and registers the client.
-	 * @return Whether the update runs on the render graph; false keeps Grass Collision on D3D11.
-	 */
+	/** @brief At SetupResources with the runtime active. @return False keeps Grass Collision on D3D11. */
 	bool Setup(const Limits& a_limits);
 
-	/** @brief Whether the update runs on the render graph: set up, not failed, and the runtime still up. */
+	/** @brief Set up, not failed, and the runtime still up. */
 	bool IsActive() const;
 
 	/**
-	 * @brief Before each run of the EarlyPrepass anchor (Grass Collision's EarlyPrepass, which Deferred calls right before it): the
-	 * values the anchor's commit writes into the latch block. Sizes past the limits are cut to them. The commit opens the update's run
-	 * gate only on a frame that staged, so a frame without one (no camera) updates nothing. A disabled frame is staged as one that
-	 * writes zero everywhere.
-	 */
+	* @brief Call before each EarlyPrepass run. Sizes past the limits are cut. Only a frame that staged opens the update,
+	* so a frame with no camera updates nothing. A disabled frame writes zero everywhere.
+	*/
 	void Stage(const Frame& a_frame);
 
-	/** @brief The exported collision texture's D3D11 view; null when inactive. */
+	/** @brief Null when inactive. */
 	ID3D11ShaderResourceView* CollisionSRV() const;
 
 	~ORGGrassCollision();

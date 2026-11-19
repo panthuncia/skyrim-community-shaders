@@ -9,51 +9,33 @@ namespace RenderGraph::Engine
 }
 
 /**
- * @brief Effects11's ORG FX runtime (CS_ORG_FX=1): the preset's .fx passes run as render-graph passes at the Tonemap anchor,
- * in place of FX11's EffectManager::ExecuteEffects. Design and limits: docs/development/org-fx-runtime.md, section 5.
- *
- * Each effect FX11 compiled is parsed from the same preprocessed text (OrgFx::Parse), lowered to bindless HLSL (OrgFx::LowerEffect)
- * and compiled per pass with DXC (RasterProgram from generated text) when a frame first needs that pass. The frame's chain is
- * planned on the render thread, before the anchor runs: colour correction, the 1024 downsample, enbbloom.fx, enblens.fx,
- * enbadaptation.fx (with the sun mask), enbeffect.fx, enbeffectpostpass.fx and the copy to the tonemap's output, with FX11's
- * ping-pong resolved into fixed graph textures. Each plan is one client registration; a change of shape (effects on or off, the
- * selected technique, UIBinding toggles, sizes, the output target) registers a new one.
- *
- * Values: FX11 stays the value store for now. The commit runs EffectManager::UpdateEffectValues for each effect, then copies the
- * variables' bytes (FX11 lays out $Globals as the parser does; checked per variable at build) into one latch region per pass, with
- * that pass's ScreenSize. Texture and sampler handles go in the push block.
- *
- * FX11 runs instead, with a log line naming why, whenever the runtime cannot run the frame: the render graph or anchor is missing, a
- * parse, lowering or compile failure, an unsupported construct, enbdepthoffield.fx running, a tonemap input other than kMAIN. A
- * failed graph returns Effects11 to FX11 for the session. Render thread throughout.
- *
- * Header deliberately free of ORG/Vulkan includes (see RenderGraphRuntime.h).
- */
+* @brief Effects11's ORG FX runtime, with CS_ORG_FX=1. The preset's .fx passes run as graph passes at the Tonemap anchor in place
+* of EffectManager::ExecuteEffects. See docs/development/org-fx-runtime.md.
+*
+* Each effect is parsed from FX11's preprocessed text, lowered to bindless HLSL and compiled per pass when first needed.
+* The frame's chain is planned on the render thread with FX11's ping-pong resolved into fixed textures. A change of shape registers a new plan.
+* FX11 stays the value store, and the commit copies its variables' bytes into one latch region per pass.
+* Whenever the runtime cannot run a frame, FX11 runs it and a log line says why. A failed graph returns to FX11 for the session.
+* Render thread throughout. Free of ORG/Vulkan includes.
+*/
 class ORGFxRuntime
 {
 public:
-	/** @brief Whether CS_ORG_FX=1 is set. */
 	static bool Requested();
 
-	/** @brief The one runtime. Its state is made on the first Prepare. */
+	/** @brief Its state is made on the first Prepare. */
 	static ORGFxRuntime& Get();
 
-	/** @brief Reserves the Tonemap anchor when requested. Before the render graph initializes (Effects11::PostPostLoad). */
+	/** @brief Effects11::PostPostLoad, before the render graph initializes. */
 	static void Reserve();
 
-	/**
-	 * @brief Drops every effect's ORG state and the registered passes. Called before FX11 reloads the effects (EffectManager::Apply),
-	 * whose variables the commit reads; the next tonemap builds them again.
-	 */
+	/** @brief Call before FX11 reloads the effects, whose variables the commit reads. The next tonemap rebuilds. */
 	void Invalidate();
 
-	/**
-	 * @brief At the tonemap hook, before FrameAnchors::Run(Tonemap): decides whether the graph runs this frame's chain and registers
-	 * its passes when the frame's shape changed. a_targets: the tonemap's input and output (CS's in native mode, the engine's else).
-	 */
+	/** @brief At the tonemap hook, before the anchor runs. Registers new passes when the frame's shape changed. */
 	void Prepare(const RenderGraph::Engine::TonemapTargets& a_targets);
 
-	/** @brief Whether this frame's chain ran on the graph and wrote the tonemap's output: Effects11 then skips FX11. */
+	/** @brief When true Effects11 skips FX11. */
 	bool RanThisFrame() const;
 
 	~ORGFxRuntime();

@@ -56,40 +56,40 @@ namespace ORGPostChain
 	{
 		constexpr const char* kClientId = "cs.pp";
 		constexpr const char* kCopyShader = "PostProcessing/copy.ps.hlsl";
-		// After any earlier client of the Tonemap anchor; the chain's own images order its passes among themselves.
+		// After any earlier Tonemap client. The chain's images order its passes among themselves.
 		constexpr std::int32_t kOrderBase = 1000;
 		constexpr DXGI_FORMAT kInputFormat = DXGI_FORMAT_R16G16B16A16_FLOAT;  // PostProcessing::texInput's
-		// The run gate entry every draw of the chain goes through: the chain's commit opens it on the frames the chain runs.
+		// Every chain draw uses it, and the commit opens it on frames the chain runs.
 		constexpr std::uint32_t kDrawEntry = 0;
 	}
 
-	/** @brief The program caches, for the session: a rebuild (a settings change) finds the programs it built before. */
+	/** @brief For the session, so a rebuild finds the programs it built before. */
 	struct Programs
 	{
 		rhi::Device device;
 		std::unordered_map<std::string, std::shared_ptr<const RasterProgram>> raster;
 		std::unordered_map<std::string, std::shared_ptr<const ComputeProgram>> compute;
-		// Set after the first chain built: a program built later (a setting's new permutation) is logged.
+		// After the first chain, a newly built program is logged.
 		bool chainBuilt = false;
 	};
 
-	/** @brief One build of the chain: what its passes are made from. Immutable once registered. */
+	/** @brief Immutable once registered. */
 	struct BuildState
 	{
 		std::shared_ptr<org::LatchBlock> latch;
 		std::shared_ptr<RenderGraph::RunGate> gate;
-		std::unique_ptr<RenderGraph::AnchorPasses::Builder> passes;  // the passes as they are added, until Take
-		std::vector<FrameAnchors::PassDesc> descs;                   // the passes taken for the client
+		std::unique_ptr<RenderGraph::AnchorPasses::Builder> passes;  // until Take
+		std::vector<FrameAnchors::PassDesc> descs;
 		std::uint32_t latchUsed = 0;
 		std::uint32_t gateUsed = kDrawEntry + 1;
 		std::vector<std::pair<std::array<std::uint32_t, 3>, std::uint32_t>> fixed;  // a fixed dispatch size and its gate entry
-		std::vector<std::string> once;                                               // the one-shot passes' names
+		std::vector<std::string> once;
 		std::vector<std::unique_ptr<GraphResources::Texture2D>> images;
 		std::vector<std::pair<std::string, std::shared_ptr<org::Resource>>> registered;
 		std::map<std::string, Image, std::less<>> published;
 		std::map<std::string, std::pair<std::uint32_t, std::uint32_t>, std::less<>> publishedLatches;  // offset, size
 		Image current;
-		std::string failure;  // empty while the build is good; the pass builder keeps its own
+		std::string failure;  // empty while the build is good
 
 		std::string Failure() const { return failure.empty() ? passes->Failure() : failure; }
 	};
@@ -107,7 +107,7 @@ namespace ORGPostChain
 			return key;
 		}
 
-		/** @brief The pixels a D3D11 viewport a_size wide covers: those whose centre lies inside it. */
+		/** @brief Pixels whose centre lies inside a D3D11 viewport a_size wide. */
 		std::uint32_t CoveredPixels(float a_size) { return static_cast<std::uint32_t>((std::max)(std::ceil(a_size - 0.5f), 0.0f)); }
 	}
 
@@ -146,7 +146,7 @@ namespace ORGPostChain
 		desc.SampleDesc = { 1, 0 };
 		desc.Usage = D3D11_USAGE_DEFAULT;
 		desc.BindFlags = D3D11_BIND_SHADER_RESOURCE | a_bindFlags;
-		// Transient and not exported: the graph aliases it with the chain's other images.
+		// Transient and not exported, so it aliases with the chain's other images.
 		auto texture = std::make_unique<GraphResources::Texture2D>(desc, std::string(a_name));
 		if (!*texture) {
 			Fail(std::format("{} could not be created", a_name));
@@ -213,7 +213,7 @@ namespace ORGPostChain
 
 	std::optional<std::uint32_t> Builder::FixedEntry(const std::array<std::uint32_t, 3>& a_groups)
 	{
-		// Dispatches of one size share an entry: the chain's commit opens each size once.
+		// Dispatches of one size share an entry, opened once.
 		for (const auto& [groups, entry] : state.fixed) {
 			if (groups == a_groups)
 				return entry;
@@ -365,7 +365,7 @@ namespace
 
 	constexpr std::size_t kSlots = static_cast<std::size_t>(Index::COUNT);
 
-	/** @brief The ORG implementation of a pipeline slot, or null: not ported, so the chain runs on D3D11 while it is enabled. */
+	/** @brief Null means not ported, so the chain runs on D3D11 while it is enabled. */
 	std::unique_ptr<ORGPostChain::Effect> MakeEffect(Index a_index)
 	{
 		switch (a_index) {
@@ -400,7 +400,7 @@ namespace
 		}
 	}
 
-	/** @brief A slot's step in the pass names: "cs.pp.<step>.<pass>". */
+	/** @brief "cs.pp.<step>.<pass>". */
 	const char* StepName(Index a_index)
 	{
 		switch (a_index) {
@@ -435,14 +435,14 @@ namespace
 		}
 	}
 
-	// copy.ps.hlsl's push block: COPY_RESOURCES under ORG, in order.
+	// COPY_RESOURCES order.
 	struct CopyBlock
 	{
 		ShaderBindings::Handle texSrc, texSrcAlt;
 		ShaderBindings::Latch copy;
 	};
 
-	// copy.ps.hlsl's CopyConstants: PostProcessing::CopyCB with the ORG source selector in its last word.
+	// PostProcessing::CopyCB with the ORG source selector in its last word.
 	struct CopyLatch
 	{
 		std::uint32_t inputGamut = 0;
@@ -465,13 +465,13 @@ struct ORGPostProcessing::Impl
 	ORGPostChain::Programs programs;
 	std::array<std::unique_ptr<ORGPostChain::Effect>, kSlots> effects;
 
-	// The registered build, what it was made for, and the last key that failed to build (not tried again).
+	// A key that failed to build is not tried again.
 	std::shared_ptr<ORGPostChain::BuildState> build;
 	std::vector<std::uint64_t> key;
 	std::vector<std::uint64_t> failedKey;
 	ORGPostChain::LatchRegion<CopyLatch> input, output;
 
-	// This frame's, from BeforeTonemap, for the commit.
+	// Set by BeforeTonemap for the commit.
 	bool ready = false;
 	bool ran = false;
 	bool readsMainCopy = false;
@@ -479,7 +479,7 @@ struct ORGPostProcessing::Impl
 	bool colorGraded = false;
 	std::vector<Index> order;
 
-	// Why the chain runs on D3D11 (empty: on the graph), logged when it changes.
+	// Empty means on the graph. Logged when it changes.
 	std::optional<std::string> reason;
 
 	void SetReason(std::string a_reason)
@@ -493,11 +493,11 @@ struct ORGPostProcessing::Impl
 		reason = std::move(a_reason);
 	}
 
-	/** @brief The chain for a_order as a new client of the Tonemap anchor. False, with the reason in a_failure, when it cannot. */
+	/** @brief False, with the reason in a_failure, when it cannot. */
 	bool Rebuild(const ORGPostChain::Shape& a_shape, const ORGPostChain::Image& a_main, const ORGPostChain::Image& a_mainCopy,
 		const std::vector<Index>& a_order, std::vector<std::uint64_t> a_key, std::string& a_failure)
 	{
-		// One image (CS's native chain): it is read, and the result goes back into it.
+		// CS's native chain has one image, read and written back.
 		const auto& second = a_mainCopy ? a_mainCopy : a_main;
 		auto* host = RenderGraphRuntime::Get().Host();
 		if (!host) {
@@ -516,8 +516,7 @@ struct ORGPostProcessing::Impl
 		auto& pp = globals::features::postProcessing;
 		ORGPostChain::LatchRegion<CopyLatch> nextInput, nextOutput;
 
-		// As BeginLinearProcessing: the scene in RGBA16F, linear unless Linear Lighting already is. Under ORG the input pass also
-		// picks kMAIN or kMAIN_COPY (CopyLatch::source), so one recording serves either (guest; CS's native chain has one image).
+		// As BeginLinearProcessing. The input pass also picks kMAIN or kMAIN_COPY from the latch, so one recording serves either.
 		{
 			ORGPostChain::Builder builder(*next, programs, a_shape, "input");
 			auto program = builder.Raster(ORGPostChain::kCopyShader, ShaderBindings::Words<CopyBlock>(), { ORGPostChain::kInputFormat });
@@ -537,10 +536,8 @@ struct ORGPostProcessing::Impl
 			effects[static_cast<std::size_t>(index)]->Build(builder, *pp.pipeline[static_cast<std::size_t>(index)]);
 		}
 
-		// As PreProcess's two CopyToRenderTarget: the chain's output into both main targets. Both receive the same image, as the
-		// D3D11 copy of one into the other gives (when their formats differ, each is converted from the output directly). Each
-		// is a copy.ps draw, also without a conversion (the latch then holds gamma 1 and one gamut, and copy.ps returns the texel
-		// it loads): a copy has no run gate, and the chain's passes do nothing on a frame the chain does not run.
+		// As PreProcess's two CopyToRenderTarget, into both main targets. Each is a copy.ps draw rather than a copy,
+		// because a copy has no run gate and would run on frames the chain does not.
 		{
 			ORGPostChain::Builder builder(*next, programs, a_shape, "output");
 			const auto chainOutput = builder.Current();
@@ -593,7 +590,6 @@ struct ORGPostProcessing::Impl
 		return true;
 	}
 
-	/** @brief In the epoch: this frame's values into the latch, and the chain's draws and dispatches opened. */
 	void Commit()
 	{
 		ran = false;
@@ -615,7 +611,7 @@ struct ORGPostProcessing::Impl
 		ran = true;
 	}
 
-	/** @brief After a run whose commit reached the GPU with this build: the effects' opened work is done. */
+	/** @brief After a run whose commit reached the GPU with this build. */
 	void Executed()
 	{
 		auto& pp = globals::features::postProcessing;
@@ -667,19 +663,19 @@ void ORGPostProcessing::BeforeTonemap(const RenderGraph::Engine::TonemapTargets&
 	auto& pp = globals::features::postProcessing;
 	auto* state = globals::state;
 	const bool linear = globals::features::linearLighting.IsLinearLightingActive();
-	// PreProcess draws nothing in these cases, so neither does the graph.
+	// PreProcess draws nothing here, so neither does the graph.
 	if (linear && (state->permutationData.RenderToUI || state->IsMainOrLoadingMenuOpen()))
 		return;
 	if (pp.bypass && !linear)
 		return;
-	// Effects11 owns the tonemap: it renders it, or PreProcess runs the D3D11 chain when it cannot.
+	// Effects11 owns the tonemap.
 	if (state->GetTonemapOwner() != State::TonemapOwner::kPostProcessing)
 		return;
 
 	pp.UpdatePipeline();
 	auto order = pp.ChainOrder();
 
-	// The mixed rule: the graph runs the chain only when it can run every effect in it.
+	// The graph runs the chain only when it can run every effect in it.
 	std::vector<std::uint64_t> key;
 	std::string held;
 	const auto hold = [&](const std::string& a_why) { held += std::format("{}{}", held.empty() ? "" : "; ", a_why); };
@@ -700,8 +696,7 @@ void ORGPostProcessing::BeforeTonemap(const RenderGraph::Engine::TonemapTargets&
 	}
 
 	auto& targets = globals::game::renderer->GetRuntimeData().renderTargets;
-	// CS's native chain: the tonemap's input is kMAIN, read and written back; kMAIN_COPY is not the chain's. Guest: either may hold the
-	// scene, and both get the result.
+	// Native: kMAIN is read and written back. Guest: either main target may hold the scene, and both get the result.
 	const bool single = a_targets.chain;
 	auto mainTarget = single ? a_targets.input : FrameAnchors::EngineTarget(static_cast<std::uint32_t>(RE::RENDER_TARGETS::kMAIN));
 	auto mainCopyTarget = single ? FrameAnchors::Texture{} : FrameAnchors::EngineTarget(static_cast<std::uint32_t>(RE::RENDER_TARGETS::kMAIN_COPY));
@@ -764,7 +759,7 @@ void ORGPostProcessing::BeforeTonemap(const RenderGraph::Engine::TonemapTargets&
 	s.ready = true;
 	s.SetReason({});
 
-	// As PreProcess: the main targets leave the output merger, which ISRefraction may still have kMAIN_COPY bound to.
+	// As PreProcess, unbind the main targets, since ISRefraction may still have kMAIN_COPY bound.
 	globals::d3d::context->OMSetRenderTargets(0, nullptr, nullptr);
 	globals::game::stateUpdateFlags->set(RE::BSGraphics::ShaderFlags::DIRTY_RENDERTARGET);
 }
@@ -778,7 +773,7 @@ void ORGPostProcessing::ClearShaderCache()
 {
 	if (!impl)
 		return;
-	// Failed compiles are cached as null, and a failed key is not tried again: both go, and the next frame builds the chain anew.
+	// Failed compiles are cached as null and failed keys are not retried, so clear both.
 	impl->programs.raster.clear();
 	impl->programs.compute.clear();
 	impl->failedKey.clear();
@@ -787,7 +782,7 @@ void ORGPostProcessing::ClearShaderCache()
 
 #else  // !CS_HAS_RENDER_GRAPH
 
-// Built without OpenRenderGraph: the chain always runs on D3D11.
+// Without OpenRenderGraph the chain always runs on D3D11.
 struct ORGPostProcessing::Impl
 {};
 

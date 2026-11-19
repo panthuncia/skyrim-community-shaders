@@ -12,20 +12,20 @@ namespace ORGPostChain
 {
 	namespace
 	{
-		// vignette.ps.hlsl's push block: VIGNETTE_RESOURCES, in order.
+		// VIGNETTE_RESOURCES order.
 		struct VignetteBlock
 		{
 			ShaderBindings::Handle texColor;
 			ShaderBindings::Latch vignette;
 		};
 
-		/** @brief Vignette::Draw on the graph: one fullscreen draw over the dynamic-resolution area, into kMAIN_COPY's format. */
+		/** @brief Vignette::Draw on the graph. */
 		class VignetteEffect final : public Effect
 		{
 		public:
 			void Build(Builder& a_builder, PostProcessFeature&) override
 			{
-				// As Vignette::SetupResources: the output takes kMAIN_COPY's format.
+				// The output takes kMAIN_COPY's format.
 				const auto format = a_builder.GetShape().mainCopyFormat;
 				auto program = a_builder.Raster("PostProcessing/Vignette/vignette.ps.hlsl", ShaderBindings::Words<VignetteBlock>(), { format });
 				auto image = a_builder.CreateImage("PostProcessing::Vignette::Output", format, D3D11_BIND_RENDER_TARGET);

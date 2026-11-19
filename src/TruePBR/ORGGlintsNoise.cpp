@@ -43,10 +43,10 @@ namespace
 	// TruePBR::SetupGlintsTexture's size, and noisegen.cs.hlsl's group size.
 	constexpr UINT kNoiseSize = 128;
 	constexpr std::uint32_t kGroupSize = 32;
-	// TruePBR binds the noise here for the engine's Lighting pixel shaders (Glints2023.hlsli's Glint2023NoiseMap).
+	// Glints2023.hlsli's Glint2023NoiseMap register.
 	constexpr UINT kNoiseRegister = 20;
 
-	// noisegen.cs.hlsl's push block (NOISEGEN_RESOURCES), in list order.
+	// In NOISEGEN_RESOURCES order.
 	struct NoiseGenBlock
 	{
 		ShaderBindings::Handle noise;
@@ -57,7 +57,7 @@ struct ORGGlintsNoise::Impl
 {
 	std::shared_ptr<const ComputeProgram> program;
 	std::unique_ptr<GraphResources::Texture2D> noise;
-	// Set by the executed signal of the run that submitted the fill. A new registration (a reload) clears it.
+	// Set by the executed signal of the run that submitted the fill. A new registration clears it.
 	bool filled = false;
 };
 
@@ -71,7 +71,7 @@ namespace
 		return ComputeProgram::Load(a_device, { .source = kShader, .constantWords = ShaderBindings::Words<NoiseGenBlock>() });
 	}
 
-	/** @brief Unbinds t20 before the export goes: its texture is freed once D3D11 is past the commands issued until then. */
+	/** @brief Unbinds t20 before the export goes. Its texture is freed once D3D11 is past the commands issued so far. */
 	void UnbindNoise()
 	{
 		ID3D11ShaderResourceView* none = nullptr;
@@ -112,7 +112,7 @@ void ORGGlintsNoise::Fail()
 
 bool ORGGlintsNoise::RegisterClient(const std::shared_ptr<Impl>& a_impl)
 {
-	// The fill is one-shot: it runs at the anchor's next run, and the graph is built again without it after that run.
+	// One-shot. The graph rebuilds without it after the run.
 	RenderGraph::AnchorPasses::Builder builder(FrameAnchors::Anchor::EarlyPrepass, kClientId, 0);
 	constexpr std::uint32_t groups = (kNoiseSize + kGroupSize - 1) / kGroupSize;
 	builder.Add(RenderGraph::AnchorPasses::Dispatch{
@@ -125,7 +125,7 @@ bool ORGGlintsNoise::RegisterClient(const std::shared_ptr<Impl>& a_impl)
 	FrameAnchors::ClientDesc client{};
 	client.id = kClientId;
 	client.passes = builder.Take();
-	// Builder::Add(Dispatch) makes a pass that runs every run: the fill is made one-shot here.
+	// Builder::Add(Dispatch) makes a pass that runs every run, so make it one-shot here.
 	for (auto& pass : client.passes)
 		pass.once = true;
 	client.registerResources = [a_impl](org::RenderGraph& a_graph) { a_impl->noise->Register(a_graph); };
@@ -169,7 +169,7 @@ bool ORGGlintsNoise::Setup()
 		.SampleDesc = { .Count = 1 },
 		.Usage = D3D11_USAGE_DEFAULT,
 		.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS };
-	// Engine draws read it at t20 until they are ported. It is filled once, so it lives for good.
+	// Engine draws read it at t20 until they are ported. Filled once, so it lives for good.
 	next->noise = std::make_unique<GraphResources::Texture2D>(desc, std::string(kNoiseId),
 		GraphResources::Options{ .lifetime = GraphResources::Lifetime::Persistent, .d3d11 = GraphResources::Export::SRV });
 	if (!*next->noise || !next->noise->SRV()) {
@@ -182,7 +182,7 @@ bool ORGGlintsNoise::Setup()
 		Fail();
 		return false;
 	}
-	// Drawcall Limit Fix's colour passes read it by name, ordered after the fill (Integrations/TruePBR).
+	// DCLF's colour passes read it by name, ordered after the fill.
 	if (!PublishedResources::Publish(*next->noise)) {
 		logger::error("[ORG] TruePBR glints: the noise texture could not be published; back to D3D11");
 		Fail();
@@ -196,7 +196,7 @@ bool ORGGlintsNoise::Setup()
 void ORGGlintsNoise::ClearShaderCache()
 {
 	if (failed) {
-		// Only a failed compile is tried again.
+		// Only a failed compile is retried.
 		if (programFailed) {
 			failed = false;
 			programFailed = false;
@@ -207,13 +207,13 @@ void ORGGlintsNoise::ClearShaderCache()
 	auto* host = RenderGraphRuntime::Get().Host();
 	if (!impl || !host)
 		return;
-	// The noise is filled once, so a reload fills it again with the program as the file is now. Until then nothing is bound.
+	// A reload refills with the program as the file is now. Nothing is bound until then.
 	auto program = LoadFillProgram(host->Device());
 	if (!program) {
 		logger::error("[ORG] TruePBR glints: {} could not be compiled; the noise keeps its last fill", kShader);
 		return;
 	}
-	// The fill's spec holds its program, so the client is registered again (the fill pending again) instead of rearmed.
+	// The fill's spec holds its program, so register again rather than rearm.
 	impl->program = std::move(program);
 	if (!RegisterClient(impl)) {
 		Fail();
@@ -226,7 +226,7 @@ ORGGlintsNoise::~ORGGlintsNoise() = default;
 
 #else  // !CS_HAS_RENDER_GRAPH
 
-// Built without OpenRenderGraph: the glints noise is always made on D3D11.
+// Without OpenRenderGraph the glints noise is always made on D3D11.
 struct ORGGlintsNoise::Impl
 {};
 

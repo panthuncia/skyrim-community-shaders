@@ -14,23 +14,19 @@ namespace ORGPostChain
 {
 	namespace
 	{
-		// border.cs.hlsl's push block: BORDER_RESOURCES, in order.
+		// BORDER_RESOURCES order.
 		struct BorderBlock
 		{
 			ShaderBindings::Handle inputTexture, depthTexture, outputTexture, motionTexture;
 			ShaderBindings::Latch border;
 		};
 
-		/**
-		 * @brief Border::Draw on the graph: one dispatch over the dynamic-resolution area that writes the bordered image and zeroes
-		 * the engine's motion vectors under the border. Border::ClearMotionVectorsForFrameGen stays on D3D11 (Upscaling runs it).
-		 */
+		/** @brief Border::Draw on the graph. Also zeroes the motion vectors under the border. ClearMotionVectorsForFrameGen stays on D3D11. */
 		class BorderEffect final : public Effect
 		{
 		public:
 			const char* Update(PostProcessFeature&, std::vector<std::uint64_t>& a_key) override
 			{
-				// The targets Border::Draw binds: kMAIN's depth and the motion vectors.
 				depth = FrameAnchors::EngineDepth(static_cast<std::uint32_t>(RE::RENDER_TARGETS_DEPTHSTENCIL::kMAIN));
 				motion = FrameAnchors::EngineTarget(static_cast<std::uint32_t>(RE::RENDER_TARGETS::kMOTION_VECTOR));
 				if (!depth || !motion)
@@ -43,7 +39,7 @@ namespace ORGPostChain
 			void Build(Builder& a_builder, PostProcessFeature&) override
 			{
 				const auto& shape = a_builder.GetShape();
-				// As Border::SetupResources: the output takes kMAIN_COPY's format.
+				// The output takes kMAIN_COPY's format.
 				auto image = a_builder.CreateImage("PostProcessing::Border::Output", shape.mainCopyFormat, D3D11_BIND_UNORDERED_ACCESS);
 				constants = a_builder.Latch<Border::BorderCB>();
 				size = float2(shape.dynamicWidth, shape.dynamicHeight);

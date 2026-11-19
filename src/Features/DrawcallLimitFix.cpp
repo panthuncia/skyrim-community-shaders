@@ -1,5 +1,5 @@
-// The feature shell: install, the engine hook thunks and their installation, the menu toggle and the settings UI. The lifecycle
-// points forward to Draws/FrameDriver on the render thread. The one file that decides whether DCLF is built (CS_HAS_DCLF).
+// The feature shell: install, the engine hook thunks and their installation, the menu toggle and the settings UI.
+// Lifecycle points forward to Draws/FrameDriver on the render thread. This is the one file that decides whether DCLF is built (CS_HAS_DCLF).
 #include "DrawcallLimitFix.h"
 #include "DrawcallLimitFix/Diagnostics/Capture/Capture.h"
 #include "DrawcallLimitFix/Diagnostics/RefTrace.h"
@@ -76,9 +76,8 @@
 
 namespace
 {
-	// Every engine hook and offset DCLF uses is an Engine::Offset: Address Library ids, with the positions of the sites inside functions
-	// checked against SE 1.5.97, AE 1.6.1170 and AE 1.7.104 only (another build may move them, or renumber an id). SceneWriterFramework
-	// has tables for the same three.
+	// Every engine hook and offset is an Engine::Offset. Site positions inside functions are only checked against SE 1.5.97, AE 1.6.1170
+	// and AE 1.7.104, and another build may move them. SceneWriterFramework has tables for the same three.
 	bool SupportedGame()
 	{
 		return DCLF::Engine::Supported();
@@ -87,15 +86,14 @@ namespace
 
 void DrawcallLimitFix::PostLoad()
 {
-	// SceneWriterFramework's election, only when PostPostLoad will install: without CS's, the engine's stores stay unpatched unless
-	// another plugin's copy of SWF elects.
+	// SceneWriterFramework's election, only when PostPostLoad will install. Without CS's, the engine's stores stay unpatched unless another plugin's SWF elects.
 	if (SupportedGame() && DCLF::SwitchValue(DCLF::Switch::Dclf) != "0")
 		DCLF::SceneWriter::Elect();
 }
 
 void DrawcallLimitFix::DataLoaded()
 {
-	// The patches another plugin rewrote after SWF's install, each logged with its module (SWF's lines), kept for the menu.
+	// Patches another plugin rewrote after SWF's install, each logged with its module, kept for the menu.
 	DCLF::SceneWriter::CheckIntegrity();
 }
 
@@ -133,14 +131,13 @@ void DrawcallLimitFix::PostPostLoad()
 		logger::info("[DCLF] {}; the game renders natively", unavailableReason);
 		return;
 	}
-	// CS_DCLF=0: the baseline the gates compare against; nothing is installed. Unset means on.
+	// CS_DCLF=0 is the baseline, with nothing installed. Unset means on.
 	if (DCLF::SwitchValue(DCLF::Switch::Dclf) == "0") {
 		logger::info("[DCLF] CS_DCLF=0; the feature stays off and the game renders natively");
 		return;
 	}
-	// The patch sites DCLF cannot run without, checked before any hook is written: another plugin's patch at one leaves the game
-	// native rather than half hooked. (Optional sites warn and skip at their own install.) The engine's stores are SceneWriterFramework's,
-	// verified by the provider at its election: the families DCLF requires must be installed.
+	// The patch sites DCLF cannot run without, checked before any hook is written. Another plugin's patch at one leaves the game
+	// native rather than half hooked. Optional sites warn and skip at their own install.
 	if (const auto missing = DCLF::SceneWriter::MissingReason(); !missing.empty()) {
 		unavailableReason = missing;
 		logger::warn("[DCLF] {}; the game renders natively", unavailableReason);
@@ -152,9 +149,8 @@ void DrawcallLimitFix::PostPostLoad()
 			logger::warn("[DCLF] {}; the game renders natively", unavailableReason);
 			return;
 		}
-	// Every other site DCLF's hooks write (Core's, then the features'): a chained hook needs a CALL there, whatever it calls; one that skips
-	// or replaces the engine's code needs the engine's own. A conflict leaves the game native rather than half hooked (a producer whose
-	// consumer never went in).
+	// Every other site DCLF's hooks write. A chained hook needs a CALL there, and one that skips or replaces the engine's code needs the engine's own bytes.
+	// A conflict leaves the game native rather than half hooked.
 	Hooks::Preflight();
 	DCLF::Extensions::PreflightFeatures(DCLF::Features::List());
 	if (const auto conflicts = DCLF::HookSites::Conflicts(); !conflicts.empty()) {
@@ -165,68 +161,50 @@ void DrawcallLimitFix::PostPostLoad()
 	logger::info("[DCLF] hook preflight: {} sites checked, no conflicts", DCLF::HookSites::Checked());
 	DCLF::SceneTracker::Get().Install();
 	DCLF::Scene::InstallSceneEvents();
-	// Capture at registration: where the set's members' passes are withheld from the views DCLF draws.
+	// Where the set's members' passes are withheld from the views DCLF draws.
 	DCLF::PassCapture::Get().Install();
-	// The hold after every load: the loading menu stays up until DCLF draws the load's objects (Core/Render/LoadHold.h).
+	// After every load, the loading menu stays up until DCLF draws the load's objects.
 	DCLF::LoadHold::Install();
-	// Whether DCLF runs, for the engine hooks outside the shell (the features' own thunks), before any of them is installed.
+	// Whether DCLF runs, for engine hooks outside the shell, before any of them is installed.
 	DCLF::ShellState::InstallRunningQuery([] { return globals::features::drawcallLimitFix.Running(); });
-	// The features' engine hooks that must precede DCLF's own engine side (Features/Portals: Main::Update's portal walk, first, the call
-	// site the primary cull requires; Features/Reflection: the water reflection's update, add-roots and face render, right after it;
-	// Features/Actors: Actor::SetAlpha and the actors' move writers, on the slots it reserves, where Core's scene events installed them;
-	// Features/Billboards: its parity's NiBillboardNode::OnVisible thunk, before the primary cull takes the slot; Features/Lod: object
-	// LOD's segment writers, its engine channel's source; Features/TreeLod: tree LOD's channel's source, the refill's, block update's and
-	// group slots' hooks;
-	// Features/HiddenNodes: the hidden stores, right after the scene events as before; Features/Decals: the decal array edits, which Core's
-	// scene events installed (no other hook shares their sites)), then the observers
-	// this run's switches ask for, and the engine hooks only they use (before DCLF's threads start).
+	// The features' early engine hooks, which must go in before DCLF's own engine side reads what they change,
+	// then the observers this run's switches ask for. All before DCLF's threads start.
 	DCLF::Extensions::InstallEarlyHooks(DCLF::Features::List());
 	DCLF::Diagnostics::Install();
-	// CS_DCLF_REF_CHECK: every buffer view ref checked against BasicRHI's region as it is made and recorded.
+	// CS_DCLF_REF_CHECK checks every buffer view ref against BasicRHI's region as it is made and recorded.
 	RenderGraph::SetBufferRefChecks(DCLF::SwitchEnabled(DCLF::Switch::RefCheck));
 	DCLF::MaterialWrites::Install();
-	// The frame-sourced float positions built now, off the render thread's first frame.
+	// Built now, so the render thread's first frame does not pay for it.
 	(void)DCLF::MaterialSources::FramePSFloats();
 	(void)DCLF::MaterialSources::FrameVSFloats();
-	// The shadow sources' hooks, by source (Api::Feature::sourceHooks): Features/Shadows/Sun's accumulation and UpdateCamera, Features/LocalLights'
-	// light selection (Spot), then Features/Shadows/Local's point culls (Point) and focus cameras (Focus), in that order; the point culls
-	// write NiNode's OnVisible slot before the primary cull reads it.
+	// The shadow sources' hooks, source by source. The point culls write NiNode's OnVisible slot before the primary cull reads it.
 	DCLF::Extensions::InstallSourceHooks(DCLF::Features::List());
 	DCLF::PrimaryCull::Get().Install();
-	// The features' extension points (Features/FeatureList.cpp), registered before DCLF's threads start and read-only after, and
-	// their engine hooks (after DCLF's own: Features/Portals' Main::IsRoomVisible detours, first; Features/TreeWind's tree manager hooks
-	// follow the primary cull's stand-in; Features/Forward's main pass blended draw and Main::Draw's refraction point, before Hooks::Install's;
-	// Features/Particles' snapshots of NiParticleSystem's update; Features/Lod's LOD gates, the engine's LOD swaps gated on DCLF's claims;
-	// Features/Faces' thunks in the face morphing).
-	// The integrations after them (Integrations/IntegrationList.cpp: Integrations/AdvancedSkin's wetness, Integrations/TerrainBlending's
-	// classify input, toggle and held groups, Integrations/LightLimitFix's room index and light buffers).
+	// The features' extension points and engine hooks, then the integrations'. Registered before DCLF's threads start and read-only after.
 	DCLF::Extensions::InstallFeatures(DCLF::Features::List(), DCLF::Integrations::List(), DCLF::Schedule::Frame());
-	// The frame's epoch orders are the schedule's, handed to the render graph before it initializes (State::Setup, at the renderer's
-	// targets' creation, after PostPostLoad).
+	// The schedule's epoch orders, handed to the render graph before it initializes.
 	{
 		const auto& orders = DCLF::Extensions::ScheduledFrameOrders();
 		RenderGraphRuntime::ConfigureFrame({ orders.epochOrder, orders.asyncOrder, orders.revisionEpochs });
 	}
-	// DCLF's threads and its state graph, before the first frame dispatches a job (dclf-architecture.md, "The design").
+	// DCLF's threads and state graph, before the first frame dispatches a job.
 	(void)DCLF::SceneScheduler::Graph();
 	Hooks::Install();
 	installed = true;
 	// DCLF's test commands and waits exist only when it installs.
 	DCLF::RegisterTestCommands();
-	// The menu's saved toggles, now that every toggle is seeded (their switches win where set).
+	// The menu's saved toggles, now that every toggle is seeded. Set switches win.
 	ApplySavedSettings();
-	// The coordinator's pump, from here woken by its producers (the hooks above push from now on); its passes apply the events
-	// alone until the first frame runs DCLF (SetScenePassMode).
+	// The coordinator's pump, from now on woken by its producers. Its passes only apply events until the first frame runs DCLF.
 	DCLF::Scene::Coordinator::Get().SetScenePassMode(false, DCLF::Policy::ScenePassInline());
 	DCLF::Scene::Coordinator::Get().StartScenePump();
-	// The switches this process actually sees, once: a silent log is otherwise indistinguishable from a switch that never reached
-	// the game (Switches.h).
+	// Log the switches this process actually sees, once, since a silent log looks the same as a switch that never reached the game.
 	logger::info("[DCLF] switches: {}", DCLF::SwitchSummary());
 	if (const auto reduced = DCLF::ReducedFeatures(); reduced.empty())
 		logger::info("[DCLF] featureset: full (every feature on; the menu can still turn some off live)");
 	else
 		logger::warn("[DCLF] featureset: REDUCED by {}; this run does not exercise DCLF's full featureset", reduced);
-	// A hook whose site passed the preflight but did not go in (a detour's attach): the others are written, so DCLF is forced off.
+	// A hook that passed preflight but failed to attach. The others are already written, so DCLF is forced off.
 	if (const auto failed = DCLF::HookSites::Conflicts(); !failed.empty()) {
 		unavailableReason = fmt::format("its hooks did not all install ({})", failed);
 		logger::error("[DCLF] {}", unavailableReason);
@@ -236,16 +214,13 @@ void DrawcallLimitFix::PostPostLoad()
 
 void DrawcallLimitFix::SetupResources()
 {
-	// D3D12 (native mode, CS_ORG_NATIVE_BACKEND=d3d12): DCLF draws with its pulled builds and plain indirect draws only, the stages
-	// reading their bindings themselves (DrawPipelines, DxilStages). What has no D3D12 port yet is off by the switches native mode sets
-	// (Native::ApplySwitches: the CPU pipeline, the shadow views, the draw and program families), each named in its log line.
+	// On D3D12 native mode DCLF draws with pulled builds and plain indirect draws only. Anything without a D3D12 port is turned off
+	// by the switches native mode sets, each named in its log line.
 	const bool d3d12 = ::RenderGraph::Backend::IsD3D12();
 	if (installed && RenderGraphRuntime::Get().IsActive())
 		DCLF::ShaderPrograms::Get().StartPrecompile();
-	// Runs right after the render graph tried to adopt DXVK's device (State::SetupResources). The hooks went in at PostPostLoad,
-	// before any device existed; without the graph or the device's
-	// indirect pipelines there is nothing to draw with, while the claims would stand and withhold the engine's passes. So DCLF is
-	// forced off here, with the reason in the log and the menu.
+	// Runs right after the render graph tried to adopt DXVK's device. The hooks went in before any device existed.
+	// Without the graph or indirect pipelines there is nothing to draw with, while the claims would still withhold the engine's passes, so DCLF is forced off.
 	if (!installed)
 		return;
 	auto& graph = RenderGraphRuntime::Get();
@@ -268,7 +243,7 @@ void DrawcallLimitFix::ForceOff()
 {
 	installed = false;
 	DCLF::SceneTracker::Get().Stop();
-	// The scene passes apply what the hooks still push (the scene queues: kept bounded), and nothing else.
+	// The scene passes only apply what the hooks still push, to keep the queues bounded.
 	DCLF::Scene::Coordinator::Get().SetScenePassMode(false, false);
 	DCLF::PassCapture::Get().SetBypassed(true);
 	TextureStreaming::SetScheduler({});
@@ -279,7 +254,7 @@ void DrawcallLimitFix::BeforePresent()
 {
 	if (installed)
 		DCLF::FrameDriver::Get().BeforePresent();
-	// CS_DCLF_REF_TRACE: the table made once the graph is up, and its entries logged once a second.
+	// CS_DCLF_REF_TRACE: the table is made once the graph is up, and logged once a second.
 	DCLF::Diagnostics::RefTrace::Ensure();
 	DCLF::Diagnostics::RefTrace::Report();
 }
@@ -293,8 +268,7 @@ void DrawcallLimitFix::Reset()
 	// The frame's last target point, then Present's observers (with DCLF on or off).
 	DCLF::Diagnostics::Notify(DCLF::Diagnostics::TargetPoint{ "present" });
 	DCLF::Diagnostics::Notify<DCLF::Diagnostics::FramePoint::Present>();
-	// Every Present, in menus too: the coordinator's queues hold references to attached subtrees and must not grow while the world is
-	// not rendered (FrameDriver::EndFrame keeps its passes draining them).
+	// Every Present, menus included. The coordinator's queues hold references to attached subtrees and must not grow while the world is not rendered.
 	if (!installed)
 		return;
 	{
@@ -317,13 +291,12 @@ void DrawcallLimitFix::UpdateActive()
 void DrawcallLimitFix::SetActive(bool a_active)
 {
 	switchedOn = a_active;
-	// While off the scene passes apply the events alone (the tracked set stays current); whole again once on.
+	// While off the scene passes only apply events, so the tracked set stays current.
 	DCLF::Scene::Coordinator::Get().SetScenePassMode(Running(), DCLF::Policy::ScenePassInline());
 	if (!a_active)
 		DCLF::IndirectDraws::Get().DrainAsync();
 	auto& capture = DCLF::PassCapture::Get();
-	// Off: every pass reaches the batch renderers again, and no set or claim outlives the switch. Back on, nothing is
-	// withheld until the first frame's commit publishes the set again.
+	// Off: every pass reaches the batch renderers again and no claim survives. Back on, nothing is withheld until the first frame's commit publishes the set.
 	capture.SetBypassed(!a_active);
 	capture.PublishSet(nullptr);
 	if (a_active)
@@ -353,14 +326,14 @@ bool DrawcallLimitFix::BeginSceneFrame()
 		WatchGraphFailure();
 	if (Running())
 		WatchScenePump();
-	// Called every frame, loaded or not: the one place an unload (which stops Reset from being called) is noticed.
+	// Called every frame, loaded or not, because it is the one place an unload is noticed.
 	UpdateActive();
 	return DCLF::FrameDriver::Get().BeginFrame(Running(), installed);
 }
 
 namespace
 {
-	/** @brief The first failure of one of DCLF's epochs (OnGraphEpochFailed). Render thread. */
+	/** @brief Render thread. The first failure of one of DCLF's epochs. */
 	std::string& GraphFailure()
 	{
 		static std::string s_failure;
@@ -384,8 +357,8 @@ const std::string& DrawcallLimitFix::GraphEpochFailure()
 
 void DrawcallLimitFix::WatchGraphFailure()
 {
-	// Between frames, before this frame decides what it draws: a failed epoch draws nothing, and DCLF would wait for it forever.
-	// Handing drawing back here is the menu toggle's path, which is safe at a frame start.
+	// Between frames, before this frame decides what it draws. A failed epoch draws nothing, and DCLF would wait for it forever.
+	// Handing drawing back here follows the menu toggle's path, which is safe at a frame start.
 	RenderGraphRuntime::Get().PollEpochFailures();
 	const auto& failure = GraphFailure();
 	if (failure.empty() || faulted)
@@ -398,10 +371,8 @@ void DrawcallLimitFix::WatchGraphFailure()
 
 void DrawcallLimitFix::WatchScenePump()
 {
-	// Every running frame's inputs wake a scene pass (FrameView::BeginFrame), and a pass ends a frame or two behind, so a frame far ahead of
-	// the last pass for long means the pump stopped (a pass threw past its handler, or hangs). The builder would never publish again and
-	// every frame keep drawing the last snapshot while the scene changes; the game is handed back for the session instead. The bounds
-	// leave room for a slow pass at a load (the frames that wait for a snapshot give up at 5 s on their own, Snapshot.cpp).
+	// Every running frame wakes a scene pass, and a pass ends a frame or two behind. A frame far ahead of the last pass for long means the pump stopped,
+	// so the builder would never publish again. Hand the game back for the session instead. The bounds leave room for a slow pass at a load.
 	constexpr std::uint32_t kLagFrames = 600;
 	constexpr auto kLagTime = std::chrono::seconds(30);
 	const auto frame = DCLF::Scene::FrameView::Get().GetFrame();
@@ -477,7 +448,7 @@ bool DrawcallLimitFix::OcclusionEngineOnlyMask(RE::Precipitation* a_precip)
 void DrawcallLimitFix::OcclusionView(OcclusionMap a_map)
 {
 	DCLF::RenderThreadBudget::Hook budget(DCLF::RenderThreadBudget::Site::Occlusion);
-	// The map's camera (its entry's: Features/OcclusionMaps' is the precipitation accumulator's).
+	// The map's camera, from its entry.
 	const auto& map = DCLF::Extensions::OcclusionMapOf(a_map);
 	if (!Running() || !map.camera)
 		return;
@@ -497,9 +468,8 @@ bool DrawcallLimitFix::OcclusionNeedsEngine(OcclusionMap a_map)
 namespace
 {
 	/**
-	 * @brief The precipitation object Main::Precipitation::RenderOcclusion (AE FUN_1404076c0, SE FUN_1403ae920) renders the mask for: with
-	 * the occlusion map on (TogglePrecipitationOcclusionMap's flag) and either weather's precipitation rain or snow, the current one, else
-	 * the last. Null: the engine renders none (it clears the mask once when switched off, and keeps its projection).
+	 * @brief The precipitation object Main::Precipitation::RenderOcclusion (AE FUN_1404076c0, SE FUN_1403ae920) renders the mask for:
+	 * the current rain or snow, else the last, while the occlusion map is on. Null when the engine renders none.
 	 */
 	RE::BSGeometry* EngineMaskObject()
 	{
@@ -524,16 +494,15 @@ namespace
 
 void DrawcallLimitFix::RenderPrecipitationMask(RE::Precipitation* a_precip, RE::BSGeometry* a_precipObject, bool a_dclf)
 {
-	// With DCLF drawing it (a_dclf), its native variant of the mask: DCLF draws every occluder from its own tables, GPU-culled, in its
-	// shadow epoch, so the engine's cull and registration (SetupMask) are skipped and RenderMask only sets the camera and clears the mask.
-	// Otherwise, or on a frame DCLF did not draw it, the engine does.
+	// When DCLF draws the mask it draws every occluder from its own tables in the shadow epoch, so SetupMask is skipped
+	// and RenderMask only sets the camera and clears the mask. Otherwise the engine does it all.
 	const bool reference = a_dclf && OcclusionReferenceFrame(kPrecipitationOcclusion);
-	// Held by a load's hold (Core/Render/LoadHold.h): the engine's point renders it without its cull, as DCLF's own variant does.
+	// Held by a load, so the engine's point renders it without its cull, as DCLF's variant does.
 	const bool held = !a_dclf && OcclusionHeld(kPrecipitationOcclusion);
 	if ((!a_dclf && !held) || reference) {
 		a_precip->SetupMask();
 	} else if (!OcclusionEngineOnlyMask(a_precip)) {
-		// What SetupMask sets: the projection, and the accumulator's camera.
+		// What SetupMask sets: the projection and the accumulator's camera.
 		static REL::Relocation<void(RE::Precipitation*, RE::NiPointer<RE::NiCamera>)> computeProjection{ REL::RelocationID(25643, 26185) };
 		computeProjection(a_precip, a_precip->occlusionData.camera);
 		if (auto* accumulator = a_precip->occlusionData.accumulator.get())
@@ -546,7 +515,7 @@ void DrawcallLimitFix::RenderPrecipitationMask(RE::Precipitation* a_precip, RE::
 	globals::profiler->BeginPass("Skylighting::PrecipMask");
 	a_precip->RenderMask(rain);
 	if (reference) {
-		// The engine's mask, announced; then the same view again, cleared, for DCLF's.
+		// Announce the engine's mask, then clear the same view for DCLF's.
 		OcclusionReferenceRendered(kPrecipitationOcclusion);
 		a_precip->RenderMask(rain);
 	}
@@ -555,7 +524,7 @@ void DrawcallLimitFix::RenderPrecipitationMask(RE::Precipitation* a_precip, RE::
 
 void DrawcallLimitFix::RenderPrecipitationAtShadowMaps()
 {
-	// Skylighting's RenderOcclusionAtShadowMaps draws the maps when it is loaded; the engine renders the mask whole with the shader cache off.
+	// Skylighting draws the maps when loaded. With the shader cache off, the engine renders the mask whole.
 	if (globals::features::skylighting.loaded || !globals::shaderCache->IsEnabled())
 		return;
 	auto* object = EngineMaskObject();
@@ -564,8 +533,8 @@ void DrawcallLimitFix::RenderPrecipitationAtShadowMaps()
 	auto state = globals::state;
 	TracyD3D11Zone(state->tracyCtx, "Precipitation Mask (Drawcall Limit Fix)");
 	state->BeginPerfEvent("Precipitation Mask (Drawcall Limit Fix)");
-	// As Skylighting's: before the engine's shadow maps, which set the renderer's state again; the camera they begin with is put back
-	// (EarlyPrepasses reads its eye after them), and the mask's viewport is not scaled by dynamic resolution.
+	// As Skylighting does, before the engine's shadow maps reset the renderer's state. Restore the camera they begin with,
+	// since EarlyPrepasses reads its eye after them. The mask's viewport is not scaled by dynamic resolution.
 	auto& shadowState = globals::game::shadowState->GetRuntimeData();
 	const auto posAdjust = shadowState.posAdjust;
 	const auto previousPosAdjust = shadowState.previousPosAdjust;
@@ -583,7 +552,7 @@ void DrawcallLimitFix::RenderPrecipitationAtShadowMaps()
 
 void DrawcallLimitFix::Hooks::Main_Precipitation_RenderOcclusion::thunk()
 {
-	// The mask DCLF drew in this frame's shadow epoch (RenderPrecipitationAtShadowMaps) is done; else the engine renders it whole.
+	// DCLF drew the mask in this frame's shadow epoch, so it is done. Otherwise the engine renders it whole.
 	auto& dclf = globals::features::drawcallLimitFix;
 	if (!globals::shaderCache->IsEnabled() || !EngineMaskObject() || dclf.OcclusionNeedsEngine(kPrecipitationOcclusion))
 		func();
@@ -591,10 +560,9 @@ void DrawcallLimitFix::Hooks::Main_Precipitation_RenderOcclusion::thunk()
 
 bool DrawcallLimitFix::OcclusionReferenceFrame(OcclusionMap a_map)
 {
-	// The map's own parity's (its entry's referenceDue: CS_DCLF_SKYLIGHT_PARITY's for Features/OcclusionMaps' maps).
 	const auto& map = DCLF::Extensions::OcclusionMapOf(a_map);
 	const bool due = map.referenceDue && map.referenceDue();
-	// The engine's reference map registers every occluder, from the whole scene lists.
+	// The engine's reference map registers every occluder from the whole scene lists.
 	if (due) {
 		DCLF::PrimaryCull::Get().RestoreSceneLists();
 		DCLF::PassCapture::Get().SetOcclusionPhase(0);
@@ -631,17 +599,13 @@ void DrawcallLimitFix::Hooks::Main_RenderDepth_WorldDrawn::thunk(void* a_accumul
 	if (!DCLF::ShellState::Passes().inDepthPass || !feature.Running())
 		return;
 	DCLF::RenderThreadBudget::Hook budget(DCLF::RenderThreadBudget::Site::ZPrepass);
-	// The world's depth draws are done and its camera is still current. The engine's own copy of the depth
-	// (kPOST_ZPREPASS_COPY), at the end of the pass, now includes DCLF's objects, and the first-person model's
-	// depth goes in after the world's, as it does natively (DCLF's in this epoch, after the world's depth; the engine's residue at
-	// its first-person draw), so there is nothing to refresh. The views' work at the depth commit runs inside it (the frame's
-	// reflection faces and first-person depth, which the depth epoch hosts).
+	// The world's depth draws are done and its camera is still current. The engine's kPOST_ZPREPASS_COPY at the end of the pass will include
+	// DCLF's objects, and first-person depth goes in after the world's as it does natively, so nothing needs refreshing.
 	DCLF::FrameDriver::Get().DepthCommitted();
 	if (DCLF::Scene::FrameView::Get().GetTables().objects.size() >= 400)
-		// The trace compares DXVK's objects; the field can be a tripwire handle.
+		// The trace compares DXVK's objects, and the field can be a tripwire handle.
 		globals::BeginDCLFDepthTrace(RenderGraph::Engine::Tripwire::Unwrap(globals::game::renderer->GetDepthStencilData().depthStencils[RE::RENDER_TARGETS_DEPTHSTENCIL::kMAIN].texture));
-	// DCLF's epoch leaves the context's bindings to the engine's state tracking: rebind its targets for the
-	// rest of the pass.
+	// DCLF's epoch leaves the context's bindings to the engine's state tracking, so rebind its targets for the rest of the pass.
 	globals::game::stateUpdateFlags->set(RE::BSGraphics::ShaderFlags::DIRTY_RENDERTARGET);
 }
 
@@ -661,8 +625,7 @@ void DrawcallLimitFix::Hooks::BSShaderAccumulator_FinishAccumulating::thunk(RE::
 	if (!globals::features::drawcallLimitFix.Running())
 		return;
 	const auto mode = static_cast<std::uint32_t>(a_accumulator->GetRuntimeData().renderMode);
-	// The occlusion maps (render mode 0x1C): the map whose entry owns the accumulator, in slot order (Features/OcclusionMaps': the
-	// precipitation accumulator's, Skylighting's own map while it draws it, else the precipitation mask).
+	// The occlusion maps, render mode 0x1C: the first map in slot order whose entry owns the accumulator.
 	if (mode == 0x1C) {
 		DCLF::RenderThreadBudget::Hook budget(DCLF::RenderThreadBudget::Site::Occlusion);
 		const DCLF::Api::OcclusionAccumulator accumulator{ reinterpret_cast<RE::BSShaderAccumulator*>(a_accumulator) };
@@ -674,7 +637,7 @@ void DrawcallLimitFix::Hooks::BSShaderAccumulator_FinishAccumulating::thunk(RE::
 		return;
 	}
 	if (mode < 0xD || mode > 0xF)
-		return;  // shadow-map modes only: plain, clamped, paraboloid (engine notes: shadow maps)
+		return;  // shadow-map modes only: plain, clamped, paraboloid
 	DCLF::RenderThreadBudget::Hook budget(DCLF::RenderThreadBudget::Site::ShadowViewCapture);
 	const auto view = DCLF::ShadowViews::Get().ViewOfAccumulator(a_accumulator);
 	if (view != ~0u)
@@ -683,7 +646,7 @@ void DrawcallLimitFix::Hooks::BSShaderAccumulator_FinishAccumulating::thunk(RE::
 
 namespace
 {
-	// Hooks::Install's sites (Preflight checks the same ones).
+	// Hooks::Install's sites. Preflight checks the same ones.
 	std::uintptr_t DepthPassSite() { return REL::RelocationID(35560, 36559).address() + Util::VersionedRelocation::Select(0x395, 0x395, 0x3B3); }
 	std::uintptr_t WorldDrawnSite() { return REL::RelocationID(100421, 107139).address() + REL::Relocate(0x18E, 0x1AA); }
 	std::uintptr_t ScenePhaseSite() { return REL::RelocationID(35560, 36559).address() + 0xD3; }
@@ -692,15 +655,14 @@ namespace
 
 void DrawcallLimitFix::Hooks::Preflight()
 {
-	// Chained: the call's target (Terrain Blending's at the depth pass, ShadowBoost's at Main::Update's entry) runs before or around
-	// DCLF's thunk. Each is one DCLF cannot run without: the depth pass and its commit point (the withheld objects' depth), the frame's
-	// start, and Main::Update's entry (the only consumer of the visibility decoder's write lists, whose tables the retirement chain waits on).
+	// Chained, so another plugin's target, such as Terrain Blending's or ShadowBoost's, runs before or around DCLF's thunk.
+	// DCLF cannot run without any of these: the depth pass and its commit point, the frame's start, and Main::Update's entry.
 	DCLF::HookSites::RequireCall("Main::Draw's depth pass call", DepthPassSite());
 	DCLF::HookSites::RequireCall("Main::RenderDepth's world-drawn call", WorldDrawnSite());
 	DCLF::HookSites::RequireCall("Main::Draw's first call", ScenePhaseSite());
 	DCLF::HookSites::RequireCall("Main::Update's first call", REL::Offset(DCLF::Engine::Address::kUpdateEntryCall).address());
-	// Not chained: on the frames DCLF drew the mask the engine's call is skipped, and with it any hook another plugin put there.
-	// Skylighting (which drives the mask itself) takes the call instead.
+	// Not chained. On frames DCLF drew the mask the engine's call is skipped, and any hook another plugin put there with it.
+	// Skylighting, which drives the mask itself, takes the call instead.
 	if (!globals::features::skylighting.loaded)
 		DCLF::HookSites::RequireCallTo("Main::Draw's precipitation mask call", PrecipitationMaskSite());
 	DCLF::WindowWriters::Preflight();
@@ -710,27 +672,23 @@ void DrawcallLimitFix::Hooks::Preflight()
 
 void DrawcallLimitFix::Hooks::Install()
 {
-	// Always installed: the shadow views are a live toggle (Toggles.h), and the thunk costs one compare per
-	// accumulator finish when they are off.
+	// Always installed, because the shadow views are a live toggle. The thunk costs one compare per accumulator finish when off.
 	stl::write_vfunc<0x2A, BSShaderAccumulator_FinishAccumulating>(RE::VTABLE_BSShaderAccumulator[0]);
 	logger::info("[DCLF] shadow view hook installed on BSShaderAccumulator::FinishAccumulatingPreResolveDepth");
-	// The diagnostics' sites below are calls another plugin may already have redirected, so only the instruction form is checked: a CALL
-	// rel32, as write_thunk_call needs. The required ones passed Preflight.
+	// The diagnostics' sites may already be redirected by another plugin, so only check for a CALL rel32, as write_thunk_call needs.
 	const auto isCall = [](std::uintptr_t a_site) { return *reinterpret_cast<const std::uint8_t*>(a_site) == 0xE8; };
 	// The main camera's depth pass, hooked where Terrain Blending hooks it.
 	stl::write_thunk_call<Main_RenderDepth>(DepthPassSite());
-	// Main::RenderDepth's call of BSShaderAccumulator::RenderFirstPersonView_End (SE +0x18E, AE +0x1AA).
+	// Main::RenderDepth's call of RenderFirstPersonView_End, SE +0x18E and AE +0x1AA.
 	stl::write_thunk_call<Main_RenderDepth_WorldDrawn>(WorldDrawnSite());
 	logger::info("[DCLF] Z-prepass hook installed inside Main::RenderDepth, after the world's depth draws");
-	// Light Limit Fix's RenderPass3 site: the plain pass list loop (SE FUN_1413090c0, AE FUN_1414f4f20).
+	// Light Limit Fix's RenderPass3 site, the plain pass list loop: SE FUN_1413090c0, AE FUN_1414f4f20.
 	if (const auto site = REL::RelocationID(100871, 107667).address() + REL::Relocate(0xEE, 0xED); isCall(site))
 		stl::write_thunk_call<BSBatchRenderer_RenderPassImmediately<1>>(site);
 	if (const auto site = REL::RelocationID(100852, 107642).address() + REL::Relocate(0x29E, 0x28F); isCall(site))
 		stl::write_thunk_call<BSBatchRenderer_RenderPassImmediately<2>>(site);
-	// A geometry group's pass list (AE FUN_1414f19d0): the main pass's groups 9, 8, 1, 0 and 13 when they hold a plain list, which is where
-	// terrain LOD's colour passes are drawn (dclf-architecture.md, "Terrain LOD"). AE inlines the plain-list loop there; SE's
-	// RenderPersistentPassList calls FUN_1413090c0 for it, whose call RenderPassImmediately<1> already hooks (no SE address here).
-	// A diagnostics' observer (the geometry groups' passes), chained onto whatever the call holds.
+	// A geometry group's pass list (AE FUN_1414f19d0), where terrain LOD's colour passes are drawn. AE inlines the plain-list loop there.
+	// SE calls FUN_1413090c0 instead, which the RenderPassImmediately<1> hook already covers, so there is no SE address. A diagnostics observer.
 	if (DCLF::Engine::Address::kGeometryGroupDraw.Known()) {
 		if (const auto site = REL::Offset(DCLF::Engine::Address::kGeometryGroupDraw).address(); isCall(site))
 			stl::write_thunk_call<BSBatchRenderer_RenderPassImmediately<3>>(site);
@@ -739,21 +697,18 @@ void DrawcallLimitFix::Hooks::Install()
 	}
 	stl::write_thunk_call<Main_Draw_Early>(ScenePhaseSite());
 	logger::info("[DCLF] scene phase hook installed on Main::Draw");
-	// The stood-in roots' kAccumulated, written at Main::Update's entry. Chained onto whatever the call holds: another plugin's hook there
-	// (ShadowBoost's) runs, and through it the engine's, before DCLF's. Without this hook nothing takes the decoder's write lists, whose
-	// tables then stall the retirement chain (every engine reference DCLF lets go of is kept).
+	// The stood-in roots' kAccumulated, written at Main::Update's entry, chained so ShadowBoost's hook and the engine's run first.
+	// Without this hook nothing takes the decoder's write lists, which stalls the retirement chain and keeps every released engine reference.
 	if (const auto site = REL::Offset(DCLF::Engine::Address::kUpdateEntryCall).address(); !DCLF::Engine::CallsTo(site, REL::Offset(DCLF::Engine::Address::kStagesReset).address()))
 		logger::info("[DCLF] Main::Update's first call is hooked by {}; DCLF's entry hook chains onto it", DCLF::HookSites::BranchTargetModule(site));
 	stl::write_thunk_call<Main_Update_Entry>(REL::Offset(DCLF::Engine::Address::kUpdateEntryCall).address());
-	// The engine's precipitation mask, without Skylighting (which hooks the same call, and drives the mask itself).
+	// The engine's precipitation mask, without Skylighting, which hooks the same call and drives the mask itself.
 	if (!globals::features::skylighting.loaded) {
 		stl::write_thunk_call<Main_Precipitation_RenderOcclusion>(PrecipitationMaskSite());
 		logger::info("[DCLF] precipitation mask hook installed on Main::Draw (without Skylighting)");
 	}
-	// The engine's writers inside the engine-read window, kept out of DCLF's reads there.
+	// Keeps the engine's writers inside the engine-read window out of DCLF's reads there.
 	DCLF::WindowWriters::Install();
-	// (The main pass's blended draw and Main::Draw's refraction point are Features/Forward's, the first-person view's two points
-	// Features/FirstPerson's, installed with the features.)
 	logger::info("[DCLF] Native pass hooks installed");
 }
 
@@ -793,7 +748,7 @@ void DrawcallLimitFix::DrawSettings()
 		DCLF::Capture::DrawControls();
 		return;
 	}
-	// The developer's tools, under a header a player can leave closed.
+	// Developer tools, under a header a player can leave closed.
 	const auto drawTools = [] {
 		if (ImGui::Button("Reload shaders"))
 			RenderGraphRuntime::RequestShaderReload();
@@ -826,20 +781,18 @@ void DrawcallLimitFix::DrawSettings()
 		}
 		return;
 	}
-	// The player's capture to send back, first: it is what a report of a problem needs.
+	// The player's capture to send back comes first, because a problem report needs it.
 	DCLF::Capture::DrawControls();
 	DCLF::Diagnostics::PlayerParity::DrawPanel();
 	DrawSceneWriterPanel();
-	// The live toggles, for A/B comparisons without a restart. They are the REQUESTED set; the render thread applies them at the start of the next frame (Toggles.h).
+	// The live toggles, for A/B comparisons without a restart. These are the requested set, applied at the next frame's start.
 	auto& toggles = DCLF::Toggles::Get().Requested();
 	if (ImGui::TreeNodeEx("What DCLF draws", ImGuiTreeNodeFlags_DefaultOpen)) {
 		ImGui::TextWrapped("Each takes effect at the next frame, and Save Settings keeps it. What DCLF does not draw, the game draws as it would without DCLF.");
 		int cull = toggles.cullMode;
 		if (ImGui::Combo("GPU culling", &cull, "off\0frustum\0frustum + occlusion\0"))
 			toggles.cullMode = static_cast<std::uint8_t>(cull);
-		// The pipeline (Core/Render/Direct/Direct.h for the CPU-driven one): auto or manual (per kind of cell), the CPU-driven one's record
-		// mode and per-view cadences; the test harness's dclf:pipeline, dclf:pipeline-interior/-exterior, dclf:cpu-record and
-		// dclf:cpu-cadence-<view>. Save Settings keeps the pipeline choice; the CPU-driven one's options are seeded by their switches alone.
+		// The pipeline choice and the CPU-driven pipeline's options. Save Settings keeps the pipeline choice. The CPU options are seeded by their switches only.
 		int pipelineMode = toggles.pipelineMode == DCLF::PipelineMode::Manual ? 1 : 0;
 		if (ImGui::Combo("Pipeline", &pipelineMode, "Auto\0Manual\0"))
 			toggles.pipelineMode = pipelineMode == 1 ? DCLF::PipelineMode::Manual : DCLF::PipelineMode::Auto;
@@ -872,7 +825,7 @@ void DrawcallLimitFix::DrawSettings()
 					"Serial: the workers cull, and DXVK's CS thread records every batch's draws. Parallel: the workers also record each batch into "
 					"a secondary command list, which the CS thread only executes (decals, forward and refraction stay direct on the CS thread: one ordered stream). "
 					"CS_DCLF_CPU_RECORD seeds it.");
-			// Applied when entered (or stepped), from the next snapshot: each change makes the view batches again.
+			// Applied when changed, from the next snapshot. Each change rebuilds the view batches.
 			int lanes = static_cast<int>(DCLF::Draws::BatchLanes());
 			if (ImGui::InputInt("Batch lanes", &lanes, 256, 1024, ImGuiInputTextFlags_EnterReturnsTrue))
 				DCLF::Draws::SetBatchLanes(static_cast<std::uint32_t>(std::max(lanes, 8)));
@@ -900,7 +853,7 @@ void DrawcallLimitFix::DrawSettings()
 			ImGui::BeginDisabled(!DCLF::Toggles::Get().Editable(toggle));
 			if (bool value = DCLF::ToggleValue(toggles, toggle); ImGui::Checkbox(toggle.label, &value))
 				DCLF::SetToggleValue(toggles, toggle, value);
-			// The tooltip names the toggle's switch, which overrides the saved setting at startup when set (validation runs).
+			// The tooltip names the toggle's switch, which overrides the saved setting at startup when set.
 			if (auto _tt = Util::HoverTooltipWrapper()) {
 				if (toggle.tooltip)
 					ImGui::TextUnformatted(toggle.tooltip);
@@ -916,7 +869,7 @@ void DrawcallLimitFix::DrawSettings()
 		return;
 	drawTools();
 	if (ImGui::TreeNodeEx("This frame", ImGuiTreeNodeFlags_DefaultOpen)) {
-		// The first line (the active toggles) is long, so it wraps; the rest are short.
+		// The first line, the active toggles, is long so it wraps. The rest are short.
 		const auto lines = DCLF::Reports::FrameSummary();
 		for (std::size_t i = 0; i < lines.size(); ++i) {
 			if (i == 0)
@@ -931,7 +884,7 @@ void DrawcallLimitFix::DrawSettings()
 
 void DrawcallLimitFix::SaveSettings(json& o_json)
 {
-	// Not installed: nothing was seeded, so what was loaded is kept as it was.
+	// Not installed, so nothing was seeded and what was loaded is kept as is.
 	if (!installed) {
 		o_json = savedSettings;
 		return;
@@ -941,7 +894,7 @@ void DrawcallLimitFix::SaveSettings(json& o_json)
 	for (const auto& toggle : DCLF::ToggleTable())
 		toggles[std::string(toggle.name)] = DCLF::ToggleValue(requested, toggle);
 	o_json["Toggles"] = std::move(toggles);
-	// The cull mode is saved only when it is not the default, so a later default reaches settings saved before it.
+	// Save the cull mode only when not the default, so a later default reaches settings saved before it.
 	if (requested.cullMode != DCLF::DefaultCullMode())
 		o_json["CullMode"] = requested.cullMode;
 	else
@@ -1009,22 +962,22 @@ void DrawcallLimitFix::ApplySavedSettings()
 
 void DrawcallLimitFix::ClearShaderCache()
 {
-	// Every live render graph pipeline (RenderGraphRuntime's registry: DCLF's, the compute programs), whether DCLF is installed or not.
+	// Every live render graph pipeline, whether DCLF is installed or not.
 	RenderGraphRuntime::RequestShaderReload();
 }
 
 void DrawcallLimitFix::NoteMaterialWritten(const RE::BSShaderMaterial* a_material)
 {
-	// Not installed, nothing drains the captures. Each one holds a reference, so the materials and their textures would never be freed.
+	// Not installed, so nothing drains the captures. Each holds a reference, so the materials and textures would never be freed.
 	if (!globals::features::drawcallLimitFix.installed)
 		return;
-	// CS's PBR materials (src/TruePBR) reach Core through the material-write sink, as the features' write hooks do.
+	// CS's PBR materials reach Core through the material-write sink, like the features' write hooks.
 	DCLF::Api::NoteMaterialWritten(a_material);
 }
 
 namespace
 {
-	/** @brief SceneWriterFramework's Write, when the provider serves it (ABI minor 2); false: the caller stores. */
+	/** @brief SceneWriterFramework's Write, when the provider serves it at ABI minor 2. False means the caller stores. */
 	bool SceneWrite(std::uint32_t a_kind, void* a_object, std::uint64_t a_value)
 	{
 		const auto* api = DCLF::SceneWriter::Api();
@@ -1053,7 +1006,7 @@ void DrawcallLimitFix::WriteAlphaFlags(RE::NiAlphaProperty* a_alpha, std::uint16
 void DrawcallLimitFix::PrecompileShader(const RE::BSShader& a_shader, bool a_pixel, std::uint32_t a_descriptor)
 {
 	DCLF::ShaderPrograms::Get().Precompile(a_shader, a_pixel, a_descriptor);
-	// The engine draw families' ORG stages for the descriptor (the sky, the water, the screen blood, the shadow masks).
+	// The engine draw families' ORG stages for the descriptor: the sky, the water, the screen blood and the shadow masks.
 	DCLF::Family::PrecompileStages(a_shader, a_pixel, a_descriptor);
 }
 
@@ -1064,8 +1017,7 @@ void DrawcallLimitFix::PrecompileFamilyStages(const RE::BSShader& a_shader, bool
 
 void DrawcallLimitFix::PostSetupResources()
 {
-	// The sky's, the water's, the screen blood's and the shadow masks' clients, registered before the setup's graph build
-	// (RenderGraph::Engine::PostSetup), so they are in their anchors' graphs before the first world frame.
+	// Their clients register before the setup's graph build, so they are in their anchors' graphs before the first world frame.
 	if (installed)
 		DCLF::Family::RunSetups();
 }
@@ -1104,7 +1056,7 @@ void DrawcallLimitFix::TargetDumpPoint(const char* a_label, ID3D11Texture2D* a_e
 
 void DrawcallLimitFix::OnGraphSubmissionsRetired(std::uint64_t a_submissions)
 {
-	// With the CPU pipeline's frames, a point retires once its frames' signals did too (FrameRetirement.h).
+	// With CPU pipeline frames, a point retires only once its frames' signals did too.
 	DCLF::NoteGraphSubmissionsRetired(a_submissions);
 }
 
@@ -1133,7 +1085,7 @@ void DrawcallLimitFix::LoadSettings(json& o_json) { savedSettings = o_json; }
 void DrawcallLimitFix::ApplySavedSettings() {}
 void DrawcallLimitFix::ClearShaderCache()
 {
-	// The render graph's live pipelines (Light Limit Fix's compute programs), when there is a graph.
+	// The render graph's live pipelines, such as Light Limit Fix's compute programs, when there is a graph.
 	RenderGraphRuntime::RequestShaderReload();
 }
 void DrawcallLimitFix::BeforeOpaquePass() {}

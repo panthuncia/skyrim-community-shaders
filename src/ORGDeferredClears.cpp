@@ -35,18 +35,18 @@ namespace
 {
 	constexpr const char* kClientId = "cs.deferred.clears";
 
-	// The targets StartDeferred binds with SRTM_CLEAR at render target slots 2-7.
+	// StartDeferred binds these with SRTM_CLEAR at slots 2-7.
 	constexpr std::array<RE::RENDER_TARGET, 6> kTargets{ NORMALROUGHNESS, ALBEDO, SPECULAR, REFLECTANCE, MASKS, MASKS2 };
 
-	// Last at the anchor: on D3D11 the clears come at the first state flush after every feature's Prepass.
+	// Last, since on D3D11 the clears come at the first state flush after every feature's Prepass.
 	constexpr std::int32_t kOrder = std::numeric_limits<std::int32_t>::max();
 
 	struct Shared
 	{
 		bool setUp = false;
-		// The renderer's clear colour at the last commit (render thread writes, the host's thread reads), as four float bit patterns.
+		// As float bit patterns. The render thread writes and the host's thread reads.
 		std::array<std::atomic<std::uint32_t>, 4> colour{};
-		// One entry, opened by every commit: the clear is recorded at execution and skips a run that left it closed (gated).
+		// Recorded at execution, so a run that left it closed skips.
 		std::shared_ptr<RenderGraph::RunGate> gate;
 	};
 
@@ -77,7 +77,7 @@ namespace
 		std::uint32_t width = 0, height = 0;
 	};
 
-	/** @brief One render pass over the six targets, each loaded as a clear and stored; it draws nothing. */
+	/** @brief Loads each target as a clear and draws nothing. */
 	class ClearPass final : public org::TypedRenderGraphPass<ClearPass, ClearFrame, ClearBindings>
 	{
 	public:
@@ -92,7 +92,7 @@ namespace
 			return bindings;
 		}
 
-		// The clear colour is recorded into the pass: a new one records it again.
+		// The colour is recorded into the pass, so a new one re-records it.
 		void Revision(std::vector<std::uint64_t>& a_out) const
 		{
 			for (const auto& component : Get().colour)
@@ -101,10 +101,10 @@ namespace
 
 		ClearFrame Prepare(const ClearBindings&, const org::PassPrepareContext&) const { return { CurrentColour(), width, height }; }
 
-		// Its commands depend on the run only through SkipsAtExecution: a kept late batch keeps its list while the answer holds.
+		// A kept late batch keeps its list while SkipsAtExecution's answer holds.
 		static constexpr bool kRecordKeyedBySkip = true;
 
-		// Recorded at execution: a run whose commit left the gate closed records only the pass's barriers.
+		// A run that left the gate closed records only barriers.
 		static bool SkipsAtExecution(const ClearBindings&, const ClearFrame&, const org::PassRecordContext& a_recording)
 		{
 			const auto& gate = Get().gate;
@@ -169,7 +169,7 @@ namespace ORGDeferredClears
 			.order = kOrder,
 			.kind = FrameAnchors::PassKind::Render,
 			.make = []() -> std::shared_ptr<org::RenderPass> {
-				// The targets as they are at this build: a resize makes new imports, which build the graph again.
+				// A resize makes new imports, which rebuild the graph.
 				std::array<FrameAnchors::Texture, kTargets.size()> targets;
 				for (std::size_t i = 0; i < kTargets.size(); ++i) {
 					targets[i] = FrameAnchors::EngineTarget(static_cast<std::uint32_t>(kTargets[i]));

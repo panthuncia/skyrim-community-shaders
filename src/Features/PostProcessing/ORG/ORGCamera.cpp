@@ -13,7 +13,7 @@ namespace ORGPostChain
 {
 	namespace
 	{
-		// camera.ps.hlsl's push block: CAMERA_RESOURCES, in order.
+		// CAMERA_RESOURCES order.
 		struct CameraBlock
 		{
 			SharedConstants::Handles shared;
@@ -21,24 +21,21 @@ namespace ORGPostChain
 			ShaderBindings::Latch camera;
 		};
 
-		/**
-		 * @brief Camera::Draw on the graph: one fullscreen draw over the dynamic-resolution area, into kMAIN_COPY's format. The
-		 * film grain reads SharedData's frame count, so the chain uploads CS's shared constants (Bind::Shared).
-		 */
+		/** @brief Camera::Draw on the graph. Film grain reads SharedData's frame count, so the chain uploads the shared constants. */
 		class CameraEffect final : public Effect
 		{
 		public:
 			void Build(Builder& a_builder, PostProcessFeature&) override
 			{
 				if (!sampler) {
-					// Camera::colorSampler's description: linear, clamped, every mip.
+					// Linear, clamped, every mip.
 					sampler = ShaderBindings::CreateSampler(rhi::SamplerDesc{});
 					if (!sampler) {
 						a_builder.Fail("its sampler could not be made");
 						return;
 					}
 				}
-				// As Camera::SetupResources: the output takes kMAIN_COPY's format.
+				// The output takes kMAIN_COPY's format.
 				const auto& shape = a_builder.GetShape();
 				const auto format = shape.mainCopyFormat;
 				auto program = a_builder.Raster("PostProcessing/Camera/camera.ps.hlsl", ShaderBindings::Words<CameraBlock>(), { format });

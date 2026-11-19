@@ -18,19 +18,19 @@ namespace ORGPostChain
 	{
 		constexpr const char* kShader = "PostProcessing/LensFlare/lensflare.cs.hlsl";
 		constexpr const char* kFFTShader = "PostProcessing/LensFlare/lensflare_fft.cs.hlsl";
-		constexpr DXGI_FORMAT kColorFormat = DXGI_FORMAT_R16G16B16A16_FLOAT;  // texThreshold's, texGhostHalo's, texBlurTemp's
-		constexpr DXGI_FORMAT kComplexFormat = DXGI_FORMAT_R32G32_FLOAT;     // the FFT textures'
+		constexpr DXGI_FORMAT kColorFormat = DXGI_FORMAT_R16G16B16A16_FLOAT;  // texThreshold, texGhostHalo, texBlurTemp
+		constexpr DXGI_FORMAT kComplexFormat = DXGI_FORMAT_R32G32_FLOAT;     // the FFT textures
 
 		using CB = LensFlare::LensFlareCB;
 
-		// lensflare.cs.hlsl's push block: LENS_FLARE_RESOURCES, then the LensFlareFrame latch.
+		// LENS_FLARE_RESOURCES, then the LensFlareFrame latch.
 		struct FlareBlock
 		{
 			ShaderBindings::Handle inputTexture, colorSampler, borderSampler, outputTexture;
 			ShaderBindings::Latch frame;
 		};
 
-		// lensflare_fft.cs.hlsl's push block: LENS_FLARE_FFT_RESOURCES, then the LensFlareFrame latch.
+		// LENS_FLARE_FFT_RESOURCES, then the LensFlareFrame latch.
 		struct FFTBlock
 		{
 			ShaderBindings::Handle inputTexture, flareTexture, bokehSampler, borderSampler, texComplexA, texComplexB, rwTexComplex, rwTexColor;
@@ -39,7 +39,7 @@ namespace ORGPostChain
 
 		constexpr std::uint32_t Tiles(std::uint32_t a_size) { return (a_size + 7) >> 3; }
 
-		/** @brief What a baked bokeh kernel depends on, as LensFlare::PrepareBokehFFT compares it. */
+		/** @brief As LensFlare::PrepareBokehFFT compares it. */
 		struct KernelKey
 		{
 			float kernelScale = 0.f;
@@ -50,7 +50,7 @@ namespace ORGPostChain
 			bool operator==(const KernelKey&) const = default;
 		};
 
-		/** @brief A kernel group's persistent bokeh kernel spectrum and when it is baked. */
+		/** @brief Persistent, per kernel group. */
 		struct Kernel
 		{
 			std::unique_ptr<GraphResources::Texture2D> spectrum;
@@ -62,25 +62,17 @@ namespace ORGPostChain
 		};
 
 		/**
-		 * @brief LensFlare::Draw on the graph. The threshold pass, then either the Fast path (ghosts and halo, then the Kawase
-		 * blur) or the FFT path (Quality, Ultra): the thresholded scene's spectrum, then per kernel group the bokeh kernel's
-		 * spectrum, the product, the inverse transform and the ghost compose, added into the ghosts-and-halo image. That image
-		 * is published for Composite (Published::kLensFlareOutput); the main image is left alone, as on D3D11.
-		 *
-		 * Every pass has its own latch copy of LensFlareCB, since the D3D11 path changes the per-pass sizes, the kernel scale,
-		 * the ghost mask and the halo strength between dispatches. What sets the passes (mode, FFT size, kernel group count,
-		 * blur passes) is the key; the settings and the camera's aperture are in the latch. The kernel spectra are persistent
-		 * and owned here, one per group; their bake runs through gate entries that Commit opens after a kernel's inputs change,
-		 * until a frame that baked it reached the GPU with this build (Executed).
-		 * Every other image is a transient chain image.
-		 */
+		* @brief LensFlare::Draw on the graph: threshold, then the Fast path or the FFT path, into the published ghosts-and-halo image.
+		* Every pass has its own latch copy of LensFlareCB, because the D3D11 path changes it between dispatches.
+		* The kernel spectra are persistent. Their bake is gated, and Commit keeps opening it until a baking frame reached the GPU with this build.
+		*/
 		class LensFlareEffect final : public Effect
 		{
 		public:
 			const char* Update(PostProcessFeature& a_feature, std::vector<std::uint64_t>& a_key) override
 			{
 				auto& flare = static_cast<LensFlare&>(a_feature);
-				// These leave the D3D11 textures as the last frame wrote them, which a transient chain image cannot do.
+				// These keep the D3D11 textures as last frame wrote them, which a transient chain image cannot do.
 				if (flare.debugsettings.disableThreshold || flare.debugsettings.disableGhosts)
 					return "a debug switch (Disable Threshold or Disable Ghosts) is on";
 				const auto wanted = ShapeOf(flare);
@@ -136,7 +128,7 @@ namespace ORGPostChain
 					return;
 				}
 
-				// As DrawQuality: each group's kernel scale and ghosts, the halo in the first group only.
+				// As DrawQuality. The halo is in the first group only.
 				const auto groups = flare.KernelGroups(data.ActiveGhostMask);
 				const std::uint32_t n = shape.fftSize;
 				for (std::size_t i = 0; i < kernels.size(); ++i) {
@@ -169,7 +161,6 @@ namespace ORGPostChain
 
 			void Executed(PostProcessFeature&) override
 			{
-				// The kernels this frame's commit baked reached the GPU with this build.
 				for (auto& kernel : kernels) {
 					kernel.baked = kernel.baked || kernel.pending;
 					kernel.pending = false;
@@ -177,7 +168,7 @@ namespace ORGPostChain
 			}
 
 		private:
-			/** @brief What the passes are built from: the key. */
+			/** @brief The key. */
 			struct PassShape
 			{
 				bool fft = false;
@@ -196,13 +187,13 @@ namespace ORGPostChain
 					// The size does not change the ghost mask.
 					result.groups = static_cast<std::uint32_t>(a_flare.KernelGroups(a_flare.BuildConstants(1, 1).ActiveGhostMask).size());
 				} else if (!a_flare.debugsettings.disableBlur) {
-					// The debug slider's range; a larger value read from elsewhere is held there.
+					// The debug slider's range.
 					result.blurPasses = static_cast<std::uint32_t>(std::clamp(a_flare.debugsettings.blurIterations, 0, 4));
 				}
 				return result;
 			}
 
-			/** @brief a_data with one pass's output and input sizes, as the D3D11 path sets them before a dispatch. */
+			/** @brief As the D3D11 path sets the sizes before a dispatch. */
 			static CB Sized(CB a_data, std::uint32_t a_outWidth, std::uint32_t a_outHeight, std::uint32_t a_inWidth, std::uint32_t a_inHeight)
 			{
 				a_data.OutputWidth = static_cast<float>(a_outWidth);
@@ -212,7 +203,7 @@ namespace ORGPostChain
 				return a_data;
 			}
 
-			/** @brief LensFlare::colorSampler and borderSampler: linear, clamped or with a transparent black border. */
+			/** @brief Linear, clamped or with a transparent black border. */
 			bool MakeSamplers()
 			{
 				if (!colorSampler)
@@ -231,7 +222,7 @@ namespace ORGPostChain
 				return { std::move(a_input), Bind::Handle(colorSampler.Index()), Bind::Handle(borderSampler.Index()), std::move(a_output), Bind::Latch(a_constants) };
 			}
 
-			/** @brief An FFT-shader pass's bindings; the entries a_* leave out are unused by that entry point. */
+			/** @brief Entries left out are unused by that entry point. */
 			std::vector<Bind> FFTBindings(const LatchRegion<CB>& a_constants, Bind a_input, Bind a_complexA, Bind a_complexB, Bind a_complexOut,
 				Bind a_colorOut) const
 			{
@@ -239,7 +230,7 @@ namespace ORGPostChain
 					std::move(a_complexB), std::move(a_complexOut), std::move(a_colorOut), Bind::Latch(a_constants) };
 			}
 
-			/** @brief DrawFast: ghosts and halo from the threshold, then the Kawase blur passes through a quarter-resolution image. */
+			/** @brief DrawFast: ghosts and halo, then Kawase blurs through a quarter-resolution image. */
 			void BuildFast(Builder& a_builder, const Image& a_threshold, const Image& a_ghostHalo)
 			{
 				kernels.clear();
@@ -268,7 +259,7 @@ namespace ORGPostChain
 				}
 			}
 
-			/** @brief DrawQuality: the scene's spectrum once, then per kernel group the convolution and the compose. */
+			/** @brief DrawQuality: the scene's spectrum once, then per kernel group the convolution and compose. */
 			void BuildFFT(Builder& a_builder, const Image& a_threshold, const Image& a_ghostHalo)
 			{
 				const std::uint32_t n = shape.fftSize;
@@ -288,7 +279,7 @@ namespace ORGPostChain
 				const auto compose = program(L"CSFFTGhostCompose");
 				const auto composeFirst = program(L"CSFFTGhostCompose", { { "FIRST_GROUP", "" } });
 
-				// The FFT ping-pong pair and the scene's spectrum: per frame, so chain images.
+				// Per frame, so chain images.
 				constexpr UINT uav = D3D11_BIND_UNORDERED_ACCESS;
 				const auto fftA = a_builder.CreateImage("PostProcessing::LensFlare::FFT0", kComplexFormat, uav, n, n);
 				const auto fftB = a_builder.CreateImage("PostProcessing::LensFlare::FFT1", kComplexFormat, uav, n, n);
@@ -303,7 +294,7 @@ namespace ORGPostChain
 					kernel.constants = a_builder.Latch<CB>();
 					kernel.prepareGate = a_builder.Gate();
 					kernel.fftGate = a_builder.Gate();
-					// A new build may have new programs: bake again.
+					// A new build may have new programs, so bake again.
 					kernel.baked = false;
 					kernel.pending = false;
 				}
@@ -323,7 +314,7 @@ namespace ORGPostChain
 					const auto& kernel = kernels[i];
 					const auto spectrum = kernel.spectrum->Graph();
 					const auto step = [i](const char* a_name) { return std::format("group{}-{}", i, a_name); };
-					// PrepareBokehFFT: only on the frames the kernel is baked (the group counts are zero otherwise).
+					// Group counts are zero except on the frames the kernel is baked.
 					a_builder.Dispatch({ .name = step("bokeh"), .program = prepare,
 						.bindings = FFTBindings(kernel.constants, none, none, none, Bind::Uav(fftA), none), .gate = kernel.prepareGate });
 					a_builder.Dispatch({ .name = step("bokeh-rows"), .program = rowForward,
@@ -343,7 +334,7 @@ namespace ORGPostChain
 				}
 			}
 
-			/** @brief One persistent kernel spectrum per group, N x N, made again when N changes. */
+			/** @brief N x N, remade when N changes. */
 			bool MakeKernels(std::uint32_t a_size)
 			{
 				kernels.resize(shape.groups);

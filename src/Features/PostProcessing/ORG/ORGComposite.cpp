@@ -14,9 +14,9 @@ namespace ORGPostChain
 {
 	namespace
 	{
-		constexpr DXGI_FORMAT kFormat = DXGI_FORMAT_R16G16B16A16_FLOAT;  // Composite::texOutput's
+		constexpr DXGI_FORMAT kFormat = DXGI_FORMAT_R16G16B16A16_FLOAT;
 
-		// composite.ps.hlsl's push block: COMPOSITE_RESOURCES, in order.
+		// COMPOSITE_RESOURCES order.
 		struct CompositeBlock
 		{
 			ShaderBindings::Handle texColor, texBloom, texFlare, texGlare, texAdaptation, texLocalExposureLog, texLuminanceGrid,
@@ -24,12 +24,7 @@ namespace ORGPostChain
 			ShaderBindings::Latch autoExposure, localExposure, composite;
 		};
 
-		/**
-		 * @brief Composite::Draw on the graph: one fullscreen draw that adds the bloom, lens flare and glare to the image and applies
-		 * the exposure. It reads the contributors' side outputs and constants by the names they publish (ORGPostChain::Published).
-		 * A contributor whose outputs are missing is left out of the permutation, and with none the image passes through
-		 * untouched, as on D3D11.
-		 */
+		/** @brief Composite::Draw on the graph. A contributor whose published outputs are missing is left out, and with none the image passes through. */
 		class CompositeEffect final : public Effect
 		{
 		public:
@@ -53,12 +48,12 @@ namespace ORGPostChain
 				const bool hasGlare = static_cast<bool>(glare);
 				const bool hasExposure = adaptation && autoExposure;
 				const bool hasLocalExposure = logLuminance && grid && blurred && localExposure;
-				// As Composite::Draw: nothing to add, nothing drawn.
+				// Nothing to add, so nothing drawn, as Composite::Draw.
 				if (!hasBloom && !hasFlare && !hasGlare && !hasExposure && !hasLocalExposure)
 					return;
 
 				if (!linearSampler || !borderSampler) {
-					// The samplers Composite::Draw binds: linear clamp (Local Exposure's, Lens Flare's), linear border (COD Bloom's).
+					// Linear clamp for Local Exposure and Lens Flare, linear border for COD Bloom.
 					linearSampler = ShaderBindings::CreateSampler(rhi::SamplerDesc{});
 					borderSampler = ShaderBindings::CreateSampler(rhi::SamplerDesc{ .addressU = rhi::AddressMode::Border,
 						.addressV = rhi::AddressMode::Border,
@@ -69,7 +64,7 @@ namespace ORGPostChain
 					}
 				}
 
-				// As Composite::CompileRasterShaders: one permutation per set of contributors.
+				// One permutation per set of contributors.
 				std::vector<std::pair<std::string, std::string>> defines;
 				for (const auto& [on, name] : { std::pair{ hasBloom, "HAS_BLOOM" }, std::pair{ hasFlare, "HAS_LENS_FLARE" }, std::pair{ hasGlare, "HAS_GLARE" },
 						 std::pair{ hasExposure, "HAS_EXPOSURE" }, std::pair{ hasLocalExposure, "HAS_LOCAL_EXPOSURE" } }) {
@@ -81,7 +76,7 @@ namespace ORGPostChain
 				auto image = a_builder.CreateImage("PostProcessing::Composite::Output", kFormat, D3D11_BIND_RENDER_TARGET);
 				constants = a_builder.Latch<Composite::CompositeCB>();
 
-				// A permutation never reads the entries of the contributors it leaves out: those get placeholders.
+				// Left-out contributors' entries are never read, so they get placeholders.
 				const auto srvOrUnused = [](bool a_on, const Image& a_image) { return a_on ? Bind::Srv(a_image) : Bind::Unused(); };
 				const auto unusedLatch = Bind::Latch(constants);
 				a_builder.Draw({ .name = "draw",

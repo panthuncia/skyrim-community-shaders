@@ -62,11 +62,11 @@ namespace
 	constexpr const char* kPublishShader = "DynamicCubemaps/PublishCubemapCS.hlsl";
 	constexpr const char* kDefaultCubemapName = "DynamicCubemaps::DefaultCubemap";
 
-	// The published outputs: the D3D11 path's names for the same textures.
+	// The D3D11 path's names for the same textures.
 	constexpr std::array<std::string_view, 2> kEnvNames{ ORGDynamicCubemaps::kEnvId, ORGDynamicCubemaps::kEnvReflectionsId };
 	constexpr std::array<std::string_view, 2> kBC6HNames{ ORGDynamicCubemaps::kEnvBC6HId, ORGDynamicCubemaps::kEnvReflectionsBC6HId };
 
-	// As the D3D11 path (DynamicCubemaps.cpp's MIPLEVELS): every cubemap's mips, the engine's 256 x 256 down to 1 x 1.
+	// As the D3D11 path's MIPLEVELS: 256 x 256 down to 1 x 1.
 	constexpr std::uint32_t kMips = 9;
 	constexpr std::uint32_t kFaces = 6;
 	// After Subsurface Scattering's passes (199-202) at DeferredPasses.
@@ -75,7 +75,7 @@ namespace
 	using ShaderBindings::Handle;
 	using Groups = GraphPasses::DispatchGroups;
 
-	// The capture and inference programs: the environment's, the reflections', and the reflections' with the sky hidden.
+	// The environment's, the reflections', and the reflections' with the sky hidden.
 	enum Variant : std::uint32_t
 	{
 		kBase,
@@ -84,40 +84,37 @@ namespace
 		kVariants,
 	};
 
-	// The push blocks, in their shaders' list order (check-dual-target-shaders reports each size).
-	struct CaptureBlock  // CaptureCommon.hlsli: 52 bytes
+	// Push blocks in each shader's list order.
+	struct CaptureBlock  // 52 bytes
 	{
 		SharedConstants::Handles shared;
 		Handle dynamicCubemap, raw, position, lightingState, depth, color, sampler;
 		ShaderBindings::Latch updateData;
 	};
-	struct InferBlock  // InferCubemapCS: 36 bytes
+	struct InferBlock  // 36 bytes
 	{
 		SharedConstants::Handles shared;
 		Handle envCapture, reflections, defaultCubemap, inferred, sampler;
 	};
-	struct IrradianceBlock  // SpecularIrradianceCS: 36 bytes, the PUSH struct on a 16-byte boundary
+	struct IrradianceBlock  // 36 bytes, PUSH struct on a 16-byte boundary
 	{
 		SharedConstants::Handles shared;
 		Handle input, output, sampler, pad;
 		float roughness;
 	};
-	struct EncodeBlock  // BC6HEncodeCS: 32 bytes, the PUSH struct on a 16-byte boundary
+	struct EncodeBlock  // 32 bytes, PUSH struct on a 16-byte boundary
 	{
 		Handle source, output, pad[2];
 		std::uint32_t blocksX, blocksY, mip, pad2;
 	};
-	struct PublishBlock  // PublishCubemapCS: 8 bytes
+	struct PublishBlock  // 8 bytes
 	{
 		Handle source, destination;
 	};
 	static_assert(ShaderBindings::Words<CaptureBlock>() == 13 && ShaderBindings::Words<InferBlock>() == 9 &&
 				  ShaderBindings::Words<IrradianceBlock>() == 9 && ShaderBindings::Words<EncodeBlock>() == 8 && ShaderBindings::Words<PublishBlock>() == 2);
 
-	/**
-	 * @brief One execution's region of the latch block: the capture constants CaptureCommon.hlsli reads (its LATCH), then the group
-	 * counts of every indirect dispatch the recording holds. The commit writes the counts of this frame's step and leaves the rest zero.
-	 */
+	/** @brief The capture constants, then the group counts of every indirect dispatch. The commit writes this frame's step and leaves the rest zero. */
 	struct FrameLatch
 	{
 		DynamicCubemaps::UpdateCubemapCB capture;
@@ -134,7 +131,7 @@ namespace
 
 	constexpr std::uint32_t GroupsOffset(std::size_t a_fieldOffset, std::uint32_t a_index) { return static_cast<std::uint32_t>(a_fieldOffset) + a_index * sizeof(Groups); }
 
-	/** @brief A program; it owns its indirect dispatch signature (ComputeProgram::DispatchIndirect). */
+	/** @brief Owns its indirect dispatch signature. */
 	using Program = std::shared_ptr<const ComputeProgram>;
 
 	struct Programs
@@ -151,7 +148,7 @@ namespace
 		}
 	};
 
-	/** @brief A program with a_define, if given. ComputeProgram adds the defines every D3D11 build gets, so both paths build one permutation. */
+	/** @brief ComputeProgram adds the defines every D3D11 build gets, so both paths build one permutation. */
 	template <class Block>
 	Program LoadProgram(rhi::Device a_device, const char* a_source, const wchar_t* a_define = nullptr)
 	{
@@ -161,7 +158,7 @@ namespace
 		return ComputeProgram::Load(a_device, desc);
 	}
 
-	/** @brief Every program, as DynamicCubemaps' GetComputeShader* compile them, and ORG's GenerateMips for arrays and cubes. */
+	/** @brief As DynamicCubemaps' GetComputeShader* compile them, plus ORG's GenerateMips for arrays and cubes. */
 	std::shared_ptr<const Programs> LoadPrograms(rhi::Device a_device)
 	{
 		auto programs = std::make_shared<Programs>();
@@ -181,7 +178,7 @@ namespace
 		return programs;
 	}
 
-	// A view a pass declares: the default one (UINT32_MAX) or a variant, at a mip.
+	// The default view (UINT32_MAX) or a variant, at a mip.
 	struct ViewDesc
 	{
 		std::uint32_t variant = UINT32_MAX;
@@ -191,7 +188,6 @@ namespace
 	constexpr std::uint32_t kUavArray = static_cast<std::uint32_t>(org::UAVViewType::Texture2DArrayFull);
 	constexpr std::uint32_t kSrvArray = static_cast<std::uint32_t>(org::SRVViewType::Texture2DArrayFull);
 
-	/** @brief One resource a gated pass declares, with its views in order. */
 	struct Use
 	{
 		FrameAnchors::Texture resource;  // an import's slot, or a twin's resource
@@ -199,15 +195,14 @@ namespace
 		std::vector<ViewDesc> views{ ViewDesc{} };
 	};
 
-	/** @brief A word of a push block: a constant, a declared view's handle, the four shared handles, or a latch entry. */
 	struct Word
 	{
 		enum class Kind : std::uint8_t
 		{
 			Literal,
-			View,    // value: the view's index, in the order the uses declare them
+			View,    // value is the view's index, in declaration order
 			Shared,  // four words
-			Latch,   // two words; value: the byte offset in the execution's region
+			Latch,   // two words, value is the byte offset in the region
 		};
 		Kind kind = Kind::Literal;
 		std::uint32_t value = 0;
@@ -218,7 +213,6 @@ namespace
 	Word Shared() { return { Word::Kind::Shared, 0 }; }
 	Word LatchAt(std::uint32_t a_offset) { return { Word::Kind::Latch, a_offset }; }
 
-	/** @brief One indirect dispatch: its program, its push block, where its group counts are in the region, and a barrier before it. */
 	struct Dispatch
 	{
 		const Program* program = nullptr;
@@ -227,7 +221,7 @@ namespace
 		bool barrier = false;
 	};
 
-	/** @brief What a gated pass declares and records: fixed from the build on, so its recording is the same every frame. */
+	/** @brief Fixed from the build on, so its recording is the same every frame. */
 	struct Plan
 	{
 		std::shared_ptr<const Programs> programs;  // keeps the dispatches' programs
@@ -248,10 +242,7 @@ namespace
 		std::shared_ptr<const Plan> plan;
 	};
 
-	/**
-	 * @brief Compute dispatches whose group counts the execution's latch region holds: the commit sets those of this frame's work and
-	 * zeros the rest, so a dispatch runs only on the frames that need it while the recording stays the same.
-	 */
+	/** @brief Group counts come from the latch. The commit zeroes those not needed this frame, so the recording stays the same. */
 	class GatedComputePass final : public org::TypedRenderGraphPass<GatedComputePass, GatedFrame, GatedBindings>
 	{
 	public:
@@ -282,7 +273,7 @@ namespace
 			return bindings;
 		}
 
-		// Everything the recording depends on is fixed with the plan; the frame's work is in the latch.
+		// Everything the recording depends on is fixed with the plan. The frame's work is in the latch.
 		void Revision(std::vector<std::uint64_t>& a_out) const { a_out.push_back(reinterpret_cast<std::uintptr_t>(plan.get())); }
 
 		GatedFrame Prepare(const GatedBindings&, const org::PassPrepareContext&) const { return { plan }; }
@@ -326,7 +317,7 @@ namespace
 					}
 				}
 				const auto& compute = **dispatch.program;
-				// A block that does not match the program's records nothing (a programming error, caught in the first test).
+				// A block that does not match the program's records nothing. This is a programming error.
 				if (count != compute.constantWords)
 					continue;
 				if (dispatch.barrier)
@@ -339,7 +330,6 @@ namespace
 		std::shared_ptr<const Plan> plan;
 	};
 
-	/** @brief One subresource copy: source and target by index into the copy plan's lists. */
 	struct CopyRegion
 	{
 		std::uint32_t source = 0, sourceMip = 0, sourceSlice = 0;
@@ -357,16 +347,13 @@ namespace
 		std::vector<org::ResourceBindingToken> sources, targets;
 	};
 
-	// The copies' run gate entries (ORGDynamicCubemaps::Impl::copyGate). A commit opens an entry while its copy has a new source
-	// to take (CopyDirty).
+	// A commit opens a copy's entry while it has a new source to take.
 	constexpr std::uint32_t kFilteredMipZeroEntry = 0;
 	constexpr std::uint32_t kBC6HEntry = 1;  // + the cubemap
 	constexpr std::uint32_t kCopyEntries = 3;
 
-	// Per copy entry: its source changed since the copy last recorded. A commit sets it when a pass writes the source (the inference
-	// for the filtered mip 0, a publish for a BC6H cubemap), and the copy pass clears it when it records the copy. A run whose gate
-	// entry is open runs the copy, from a new recording or from a kept one, so one run after the change is enough. An entry stays
-	// open while its copy is not in the running graph yet (a BC6H copy is added after its cubemap's first publish).
+	// Set by a commit when a pass writes the copy's source, cleared when the copy records.
+	// An entry stays open while its copy is not in the running graph yet.
 	using CopyDirty = std::array<std::atomic<bool>, kCopyEntries>;
 
 	struct CopyFrame
@@ -377,11 +364,7 @@ namespace
 		std::shared_ptr<CopyDirty> dirty;
 	};
 
-	/**
-	 * @brief Whole subresource copies, in the runs after their source changed (CopyDirty). Only copies whose result does not change
-	 * between the frames that need them: the inferred cubemap's mip 0 into the filtered one, and each encoder's output into its BC6H
-	 * cubemap.
-	 */
+	/** @brief Copies in the runs after their source changed. Only for copies whose result stays the same between the frames that need them. */
 	class CopyPass final : public org::TypedRenderGraphPass<CopyPass, CopyFrame, CopyBindings>
 	{
 	public:
@@ -404,10 +387,10 @@ namespace
 
 		CopyFrame Prepare(const CopyBindings&, const org::PassPrepareContext&) const { return { plan, gate, entry, dirty }; }
 
-		// Its commands depend on the run only through SkipsAtExecution: a kept late batch keeps its list while the answer holds.
+		// A kept late batch keeps its list while SkipsAtExecution's answer holds.
 		static constexpr bool kRecordKeyedBySkip = true;
 
-		// Recorded at execution: a run whose commit left the copy's gate entry closed records only its barriers.
+		// A run that left the gate entry closed records only barriers.
 		static bool SkipsAtExecution(const CopyBindings&, const CopyFrame& a_frame, const org::PassRecordContext& a_recording)
 		{
 			return a_frame.gate && !a_frame.gate->IsOpen(a_recording.Run(), a_frame.entry);
@@ -418,7 +401,7 @@ namespace
 			if (!a_frame.plan)
 				return;
 			auto& commands = a_recording.Commands();
-			// The extent is the source subresource's whole size (in the encoder's case its texels, which are the BC6H blocks).
+			// The whole source subresource. For the encoder that is its texels, which are the BC6H blocks.
 			for (const auto& region : a_frame.plan->regions)
 				commands.CopyTextureRegion(
 					{ .texture = a_recording.Resolve(a_bindings.targets[region.target]).GetHandle(), .mip = region.targetMip, .arraySlice = region.targetSlice },
@@ -434,7 +417,6 @@ namespace
 		std::shared_ptr<CopyDirty> dirty;
 	};
 
-	/** @brief The engine's and the feature's textures the passes read, imported (FrameAnchors). */
 	struct Imports
 	{
 		FrameAnchors::Texture depth, main, reflections, defaultCubemap;
@@ -476,12 +458,12 @@ namespace
 
 struct ORGDynamicCubemaps::Impl
 {
-	UINT size = 0;  // the cubemaps' mip 0, the engine's reflections cubemap's
+	UINT size = 0;  // mip 0, the engine's reflections cubemap's size
 	std::shared_ptr<const Programs> programs;
 	bool programsDirty = false;
 	org::OwnedDescriptorBinding sampler;
 	std::shared_ptr<org::LatchBlock> latch;
-	std::shared_ptr<RenderGraph::RunGate> copyGate;  // the copies' entries (kCopyEntries), opened while their source is new
+	std::shared_ptr<RenderGraph::RunGate> copyGate;  // opened while their source is new
 	std::shared_ptr<CopyDirty> copyDirty = [] {
 		auto dirty = std::make_shared<CopyDirty>();
 		for (auto& entry : *dirty)
@@ -490,19 +472,17 @@ struct ORGDynamicCubemaps::Impl
 	}();
 	Imports imports;
 
-	// Graph-only, read in later frames (History). The capture textures per cubemap; the filtered one is a plain array, which the
-	// encoder and the publish read through array views.
+	// Graph-only and read in later frames. The filtered one is a plain array, read through array views.
 	std::array<std::unique_ptr<GraphResources::Texture2D>, 2> capture, raw, position;
 	std::unique_ptr<GraphResources::StructuredBuffer> lightingState;
 	std::unique_ptr<GraphResources::Texture2D> inferred, filtered;
-	// The encoder's output for each BC6H mip, a 6-slice array of uint4 blocks, kept for the copy that follows every frame.
+	// Kept for the copy that follows every frame.
 	std::array<std::array<std::unique_ptr<GraphResources::Texture2D>, kMips>, 2> scratch;
-	// Exported and published.
 	std::array<std::unique_ptr<GraphResources::Texture2D>, 2> env, bc6h;
-	// Their zeros, copied by a one-shot pass before the first capture.
+	// Copied by a one-shot pass before the first capture.
 	std::vector<std::shared_ptr<const GraphResources::StagedUpload>> zeros;
 
-	// Each cubemap encoded since the programs were built; the BC6H copy in the graph (from the frame after its first encode).
+	// The BC6H copy joins the graph from the frame after the first encode.
 	std::array<bool, 2> encoded{};
 	std::array<bool, 2> copying{};
 	std::function<void()> onFailed;
@@ -535,7 +515,7 @@ struct ORGDynamicCubemaps::Impl
 		filtered->Register(a_graph);
 	}
 
-	/** @brief Detection and capture for both cubemaps: each runs only on its capture frames. */
+	/** @brief Each cubemap runs only on its capture frames. */
 	std::shared_ptr<const Plan> CapturePlan() const
 	{
 		auto plan = std::make_shared<Plan>();
@@ -554,7 +534,7 @@ struct ORGDynamicCubemaps::Impl
 			return std::vector<Word>{ Shared(), View(a_cubemap * 3), View(a_cubemap * 3 + 1), View(a_cubemap * 3 + 2), View(6), View(7), View(8),
 				Literal(sampler.Index()), LatchAt(offsetof(FrameLatch, capture)) };
 		};
-		// Detection writes the lighting state the capture reads; the capture writes what the next detection reads.
+		// Detection writes the lighting state the capture reads, and the capture writes what the next detection reads.
 		plan->dispatches.push_back({ &programs->detect, block(0), GroupsOffset(offsetof(FrameLatch, detect), 0), false });
 		plan->dispatches.push_back({ &programs->update[kBase], block(0), GroupsOffset(offsetof(FrameLatch, update), kBase), true });
 		plan->dispatches.push_back({ &programs->detect, block(1), GroupsOffset(offsetof(FrameLatch, detect), 1), true });
@@ -563,14 +543,13 @@ struct ORGDynamicCubemaps::Impl
 		return plan;
 	}
 
-	/** @brief Inference into the shared inferred cubemap, from either capture. */
 	std::shared_ptr<const Plan> InferPlan() const
 	{
 		auto plan = std::make_shared<Plan>();
 		plan->programs = programs;
 		plan->latch = latch;
 		plan->shared = true;
-		// The captures' and the cubemaps' default views: cube views of every mip.
+		// Cube views of every mip.
 		plan->uses.push_back({ capture[0]->Graph(), false });
 		plan->uses.push_back({ capture[1]->Graph(), false });
 		plan->uses.push_back({ imports.reflections, false });
@@ -583,7 +562,7 @@ struct ORGDynamicCubemaps::Impl
 		return plan;
 	}
 
-	/** @brief The pre-filtered specular mips 1 to 8 of the filtered cubemap, from the inferred one; the state machine spreads them. */
+	/** @brief Mips 1 to 8, spread over frames by the state machine. */
 	std::shared_ptr<const Plan> IrradiancePlan() const
 	{
 		auto plan = std::make_shared<Plan>();
@@ -595,7 +574,7 @@ struct ORGDynamicCubemaps::Impl
 		for (std::uint32_t mip = 1; mip < kMips; ++mip)
 			output.views.push_back({ kUavArray, mip });
 		plan->uses.push_back(std::move(output));
-		// As the D3D11 path: mip / (mips - 1).
+		// As the D3D11 path, mip / (mips - 1).
 		const float deltaRoughness = 1.0f / static_cast<float>(kMips - 1);
 		for (std::uint32_t mip = 1; mip < kMips; ++mip) {
 			const float roughness = static_cast<float>(mip) * deltaRoughness;
@@ -605,13 +584,12 @@ struct ORGDynamicCubemaps::Impl
 		return plan;
 	}
 
-	/** @brief BC6H encoding of every mip of the filtered cubemap, into the encoder outputs of the cubemap being published. */
 	std::shared_ptr<const Plan> EncodePlan() const
 	{
 		auto plan = std::make_shared<Plan>();
 		plan->programs = programs;
 		plan->latch = latch;
-		// Every mip and face: the D3D11 path's Texture2DArray view (Load takes the mip).
+		// The D3D11 path's Texture2DArray view. Load takes the mip.
 		plan->uses.push_back({ filtered->Graph(), false, { { kSrvArray, 0 } } });
 		for (std::uint32_t i = 0; i < 2; ++i)
 			for (const auto& texture : scratch[i])
@@ -625,7 +603,7 @@ struct ORGDynamicCubemaps::Impl
 		return plan;
 	}
 
-	/** @brief The filtered cubemap, every mip, into the environment cubemap being published (the D3D11 path's CopyResource). */
+	/** @brief The D3D11 path's CopyResource. */
 	std::shared_ptr<const Plan> PublishPlan() const
 	{
 		auto plan = std::make_shared<Plan>();
@@ -648,7 +626,7 @@ struct ORGDynamicCubemaps::Impl
 		return plan;
 	}
 
-	/** @brief The inferred cubemap's mip 0 into the filtered one's, after an inference (the same between the inference frames). */
+	/** @brief After an inference. The result is the same between inference frames. */
 	std::shared_ptr<const CopyPlan> FilteredMipZeroPlan() const
 	{
 		auto plan = std::make_shared<CopyPlan>();
@@ -659,7 +637,7 @@ struct ORGDynamicCubemaps::Impl
 		return plan;
 	}
 
-	/** @brief A cubemap's encoder outputs into its BC6H cubemap, after a publish (the same between its publish frames). */
+	/** @brief After a publish. The result is the same between publish frames. */
 	std::shared_ptr<const CopyPlan> BC6HPlan(std::uint32_t a_cubemap) const
 	{
 		auto plan = std::make_shared<CopyPlan>();
@@ -672,7 +650,7 @@ struct ORGDynamicCubemaps::Impl
 		return plan;
 	}
 
-	/** @brief In the epoch: the state machine's step for this frame, as the group counts of its work and the capture constants. */
+	/** @brief Runs the state machine and writes this frame's group counts and capture constants. */
 	void Commit()
 	{
 		auto& feature = globals::features::dynamicCubemaps;
@@ -683,7 +661,6 @@ struct ORGDynamicCubemaps::Impl
 		// The D3D11 path's ceil(size / 8) groups on each face.
 		const std::uint32_t faceGroups = (size + 7) / 8;
 		if (step.capture) {
-			// The inference writes the inferred cubemap's mip 0, which the filtered mip 0 copies.
 			(*copyDirty)[kFilteredMipZeroEntry].store(true, std::memory_order_release);
 			const Variant variant = !step.reflections ? kBase : (feature.fakeReflections ? kFake : kReflections);
 			data.capture = feature.NextCaptureConstants(step.reflections);
@@ -709,7 +686,7 @@ struct ORGDynamicCubemaps::Impl
 			encoded[cubemap] = true;
 			(*copyDirty)[kBC6HEntry + cubemap].store(true, std::memory_order_release);
 		}
-		// The BC6H cubemap is valid once its copy runs: on its first publish only from the next frame (AfterUpdate adds the copy).
+		// On a cubemap's first publish the BC6H copy only exists from the next frame.
 		for (std::uint32_t i = 0; i < 2; ++i)
 			if (encoded[i] && copying[i])
 				feature.cubemapValid[i] = true;
@@ -757,13 +734,13 @@ bool ORGDynamicCubemaps::Setup(std::function<void()> a_onFailed)
 		}
 
 		state->programs = LoadPrograms(host->Device());
-		// The D3D11 path's compute sampler: linear, wrapped, every mip.
+		// The D3D11 path's compute sampler, linear and wrapped.
 		state->sampler = ShaderBindings::CreateSampler({ .addressU = rhi::AddressMode::Wrap, .addressV = rhi::AddressMode::Wrap, .addressW = rhi::AddressMode::Wrap });
 
 		const UINT size = state->size;
 		constexpr UINT kReadWrite = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS;
 		const GraphResources::Options history{ .lifetime = GraphResources::Lifetime::History };
-		// Read through D3D11 (the composite, IBL, the engine's draws, Drawcall Limit Fix's reflection faces) until those readers move.
+		// Readers still use D3D11: the composite, IBL, the engine's draws and DCLF's reflection faces.
 		const GraphResources::Options exportedOptions{ .lifetime = GraphResources::Lifetime::Persistent, .d3d11 = GraphResources::Export::SRV };
 		constexpr std::array<const char*, 2> kCaptureNames{ "DynamicCubemaps::EnvCapture", "DynamicCubemaps::EnvCaptureReflections" };
 		constexpr std::array<const char*, 2> kRawNames{ "DynamicCubemaps::EnvCaptureRaw", "DynamicCubemaps::EnvCaptureRawReflections" };
@@ -771,7 +748,7 @@ bool ORGDynamicCubemaps::Setup(std::function<void()> a_onFailed)
 		constexpr std::array<const char*, 2> kScratchNames{ "DynamicCubemaps::BC6HScratch", "DynamicCubemaps::BC6HScratchReflections" };
 		for (std::uint32_t i = 0; i < 2; ++i) {
 			state->capture[i] = std::make_unique<GraphResources::Texture2D>(TextureDesc(size, kMips, DXGI_FORMAT_R16G16B16A16_FLOAT, kReadWrite, true), kCaptureNames[i], history);
-			// The history and positions only at mip 0 (the D3D11 path gives them the whole chain, which nothing reads).
+			// Only mip 0, since nothing reads the rest of the D3D11 path's chain.
 			state->raw[i] = std::make_unique<GraphResources::Texture2D>(TextureDesc(size, 1, DXGI_FORMAT_R16G16B16A16_FLOAT, kReadWrite, false), kRawNames[i], history);
 			state->position[i] = std::make_unique<GraphResources::Texture2D>(TextureDesc(size, 1, DXGI_FORMAT_R16G16B16A16_FLOAT, kReadWrite, false), kPositionNames[i], history);
 			state->env[i] = std::make_unique<GraphResources::Texture2D>(TextureDesc(size, kMips, DXGI_FORMAT_R11G11B10_FLOAT, kReadWrite, true),
@@ -779,7 +756,7 @@ bool ORGDynamicCubemaps::Setup(std::function<void()> a_onFailed)
 			state->bc6h[i] = std::make_unique<GraphResources::Texture2D>(TextureDesc(size, kMips, DXGI_FORMAT_BC6H_UF16, D3D11_BIND_SHADER_RESOURCE, true),
 				std::string(kBC6HNames[i]), exportedOptions);
 			for (std::uint32_t mip = 0; mip < kMips; ++mip) {
-				// One uint4 block per 4x4 texels; mips under 4x4 still take one block.
+				// One uint4 block per 4x4 texels. Mips under 4x4 still take one block.
 				const UINT blocks = (std::max)((std::max)(size >> mip, 1u) / 4, 1u);
 				state->scratch[i][mip] = std::make_unique<GraphResources::Texture2D>(TextureDesc(blocks, 1, DXGI_FORMAT_R32G32B32A32_UINT, kReadWrite, false),
 					fmt::format("{} mip{}", kScratchNames[i], mip), history);
@@ -787,8 +764,7 @@ bool ORGDynamicCubemaps::Setup(std::function<void()> a_onFailed)
 		}
 		state->inferred = std::make_unique<GraphResources::Texture2D>(TextureDesc(size, kMips, DXGI_FORMAT_R11G11B10_FLOAT, kReadWrite, true), "DynamicCubemaps::EnvInferred", history);
 		state->filtered = std::make_unique<GraphResources::Texture2D>(TextureDesc(size, kMips, DXGI_FORMAT_R11G11B10_FLOAT, kReadWrite, false), "DynamicCubemaps::EnvFiltered", history);
-		// The capture's lighting state. Its first contents need no clear (the D3D11 path's): the first capture of each cubemap resets
-		// (resetCapture starts true), and a reset writes every field the shaders read afterwards.
+		// Needs no first clear, since each cubemap's first capture resets and writes every field the shaders read.
 		D3D11_BUFFER_DESC stateDesc{};
 		stateDesc.ByteWidth = sizeof(DynamicCubemaps::CaptureLightingState);
 		stateDesc.Usage = D3D11_USAGE_DEFAULT;
@@ -808,8 +784,7 @@ bool ORGDynamicCubemaps::Setup(std::function<void()> a_onFailed)
 				state->imports.depth != nullptr, state->imports.main != nullptr, state->imports.reflections != nullptr, state->imports.defaultCubemap != nullptr);
 			return false;
 		}
-		// Black until the first publish, as the D3D11 path's cubemaps are (DXVK's new images are zero): zeros staged here, copied by
-		// the client's one-shot pass, which declares the cubemaps as copy destinations.
+		// Black until the first publish, like the D3D11 path's cubemaps. Zeros are copied by the client's one-shot pass.
 		for (std::uint32_t i = 0; i < 2; ++i) {
 			state->zeros.push_back(state->env[i]->StageZeros());
 			state->zeros.push_back(state->bc6h[i]->StageZeros());
@@ -820,8 +795,7 @@ bool ORGDynamicCubemaps::Setup(std::function<void()> a_onFailed)
 		}
 		state->onFailed = std::move(a_onFailed);
 		impl = std::move(state);
-		// The client may register before CS's first constant upload: the anchors hold it until the shared constants exist. The
-		// readers see the black cubemaps until the first publish.
+		// The anchors hold the client until the shared constants exist. Readers see black cubemaps until the first publish.
 		if (!RegisterClient()) {
 			logger::warn("[ORG] Dynamic Cubemaps: the anchor client could not be registered; the cubemaps stay on D3D11");
 			impl.reset();
@@ -870,7 +844,7 @@ bool ORGDynamicCubemaps::RegisterClient()
 	const auto bc6hCopy = [self](std::uint32_t a_cubemap) {
 		return [self, a_cubemap]() -> std::shared_ptr<org::RenderPass> {
 			const auto& current = self->impl;
-			// From the frame after the cubemap's first encode: before it, its encoder outputs hold nothing.
+			// Before the first encode the encoder outputs hold nothing.
 			return current && current->copying[a_cubemap] ? std::make_shared<CopyPass>(current->BC6HPlan(a_cubemap), current->copyGate, kBC6HEntry + a_cubemap, current->copyDirty) :
 			                                                nullptr;
 		};
@@ -883,8 +857,7 @@ bool ORGDynamicCubemaps::RegisterClient()
 	client.id = kClientId;
 	client.sharedConstants = true;
 	client.gates = { impl->copyGate };
-	// Gated: the compute passes take their group counts from the latch (zero in a run the commit did not write), and the copies are
-	// recorded at execution, where they skip a run that left their gate entries closed. So the anchor can run in a frame phase.
+	// Gated so the anchor can run in a frame phase. Dispatch counts are zero in runs the commit did not write, and copies skip at execution.
 	const auto pass = [&client](const char* a_name, std::int32_t a_order, FrameAnchors::PassKind a_kind, std::function<std::shared_ptr<org::RenderPass>()> a_make) {
 		client.passes.push_back({ .name = a_name,
 			.anchor = FrameAnchors::Anchor::DeferredPasses,
@@ -894,7 +867,6 @@ bool ORGDynamicCubemaps::RegisterClient()
 			.atExecution = a_kind == FrameAnchors::PassKind::Copy });
 	};
 	using Kind = FrameAnchors::PassKind;
-	// Once, before everything else: the exported cubemaps' zeros.
 	client.passes.push_back({ .name = "cs.dyncubemaps.zero",
 		.anchor = FrameAnchors::Anchor::DeferredPasses,
 		.order = kOrder - 1,
@@ -939,7 +911,7 @@ void ORGDynamicCubemaps::Fail(const char* a_reason)
 	FrameAnchors::Unregister(kClientId);
 	Withdraw();
 	auto failed = std::move(impl);
-	// The feature drops its views of the exported textures first: they go when the graph's resources are released below.
+	// The feature drops its views first, since the textures go when the graph's resources are released below.
 	if (failed && failed->onFailed)
 		failed->onFailed();
 }
@@ -961,7 +933,6 @@ bool ORGDynamicCubemaps::AfterUpdate()
 {
 	if (!impl)
 		return false;
-	// The runtime stopped: this frame is skipped.
 	if (!RenderGraphRuntime::Get().IsActive()) {
 		Fail("the render graph is no longer active");
 		return true;
@@ -978,7 +949,7 @@ bool ORGDynamicCubemaps::AfterUpdate()
 		state.programsDirty = false;
 		refresh = true;
 	}
-	// A resolution change or a new engine cubemap: imported again (the old imports stay alive with the builds that hold them).
+	// Old imports stay alive with the builds that hold them.
 	if (auto imports = Import(); imports && imports != state.imports) {
 		state.imports = std::move(imports);
 		refresh = true;
@@ -1003,7 +974,7 @@ void ORGDynamicCubemaps::ClearShaderCache()
 
 #else  // !CS_HAS_RENDER_GRAPH
 
-// Built without OpenRenderGraph: the cubemaps always update with D3D11.
+// Without OpenRenderGraph the cubemaps always update with D3D11.
 struct ORGDynamicCubemaps::Impl
 {};
 

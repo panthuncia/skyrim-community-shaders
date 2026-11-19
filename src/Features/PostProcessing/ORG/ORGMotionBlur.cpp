@@ -19,19 +19,19 @@ namespace ORGPostChain
 		constexpr UINT kGrid = MotionBlur::FixedGridSize;
 		constexpr std::uint32_t kGridGroups = (kGrid + 7) >> 3;
 
-		// The passes' push blocks: their shaders' resource lists, in order.
-		struct HorizontalBlock  // motionblur_horizontalpass.cs.hlsl
+		// Each shader's resource list in order.
+		struct HorizontalBlock
 		{
 			ShaderBindings::Handle texVelocity, rwTexHorizontal;
 			ShaderBindings::Latch reduction;
 		};
 
-		struct GridBlock  // motionblur_verticalpass.cs.hlsl, motionblur_neighborpass.cs.hlsl
+		struct GridBlock
 		{
 			ShaderBindings::Handle input, output;
 		};
 
-		struct BlurBlock  // motionblur_blurpass.cs.hlsl
+		struct BlurBlock
 		{
 			ShaderBindings::Handle texColor, texVelocity, texNeighborMax, texDepth, rwTexOut, linearSampler, pointSampler;
 			ShaderBindings::Latch blur;
@@ -52,17 +52,15 @@ namespace ORGPostChain
 		}
 
 		/**
-		 * @brief MotionBlur::Draw on the graph: the horizontal and vertical velocity reductions into a 20 x 20 grid, its neighbour
-		 * maximum, then the blur over the dynamic-resolution area into an image of the input's format. The grid textures belong to
-		 * the effect: the horizontal one keeps its rows across frames, as on D3D11 (the reductions read its whole height, the first
-		 * pass writes the dynamic rows), the two 20 x 20 ones are written whole each frame.
-		 */
+		* @brief MotionBlur::Draw on the graph: velocity reductions into a 20 x 20 grid, its neighbour max, then the blur.
+		* The horizontal grid keeps its rows across frames as on D3D11, since the reductions read its whole height but write only the dynamic rows.
+		*/
 		class MotionBlurEffect final : public Effect
 		{
 		public:
 			const char* Update(PostProcessFeature&, std::vector<std::uint64_t>& a_key) override
 			{
-				// What MotionBlur::Draw binds: kMAIN's depth and the motion vectors.
+				// As MotionBlur::Draw binds them.
 				depth = FrameAnchors::EngineDepth(static_cast<std::uint32_t>(RE::RENDER_TARGETS_DEPTHSTENCIL::kMAIN));
 				motion = FrameAnchors::EngineTarget(static_cast<std::uint32_t>(RE::RENDER_TARGETS::kMOTION_VECTOR));
 				if (!depth || !motion)
@@ -81,12 +79,12 @@ namespace ORGPostChain
 				a_builder.Register(*vertical);
 				a_builder.Register(*neighborMax);
 
-				// As MotionBlur::CheckAndResizeResources: the output takes the input's format.
+				// The output takes the input's format.
 				const auto input = a_builder.Current();
 				auto image = a_builder.CreateImage("PostProcessing::MotionBlur::Output", input.format, D3D11_BIND_UNORDERED_ACCESS);
 				reduction = a_builder.Latch<MotionBlur::ReductionPassConstantBuffer>();
 				blur = a_builder.Latch<MotionBlur::MotionBlurConstantBuffer>();
-				// As MotionBlur::Draw: the dispatches cover the dynamic size, truncated.
+				// The dispatches cover the dynamic size, truncated.
 				const auto dynamicWidth = static_cast<std::uint32_t>(shape.dynamicWidth);
 				const auto dynamicHeight = static_cast<std::uint32_t>(shape.dynamicHeight);
 
@@ -113,18 +111,18 @@ namespace ORGPostChain
 
 			void Commit(const CommitContext& a_commit, PostProcessFeature& a_feature) override
 			{
-				// As MotionBlur::UpdateConstantBuffers: the target resolution is the full texture size.
+				// The target resolution is the full texture size, as UpdateConstantBuffers.
 				const auto constants = static_cast<MotionBlur&>(a_feature).Constants(size);
 				a_commit.Write(reduction, constants.reduction);
 				a_commit.Write(blur, constants.blur);
 			}
 
 		private:
-			/** @brief The samplers and the grid textures, the horizontal one a_height rows tall. False, with the build failed, when one cannot be made. */
+			/** @brief False, with the build failed, when one cannot be made. */
 			bool Prepare(Builder& a_builder, UINT a_height)
 			{
 				if (!linearSampler || !pointSampler) {
-					// MotionBlur::SetupResources' samplers: linear and point, clamped, every mip.
+					// Linear and point, clamped, every mip.
 					linearSampler = ShaderBindings::CreateSampler(rhi::SamplerDesc{});
 					pointSampler = ShaderBindings::CreateSampler(rhi::SamplerDesc{ .minFilter = rhi::Filter::Nearest,
 						.magFilter = rhi::Filter::Nearest,
@@ -135,7 +133,7 @@ namespace ORGPostChain
 					}
 				}
 				if (!horizontal || !*horizontal || horizontal->Desc().Height != a_height) {
-					// Its rows below the dynamic height carry over from earlier frames, as the D3D11 texture's do: never aliased.
+					// Rows below the dynamic height carry over from earlier frames, so never aliased.
 					horizontal = std::make_unique<GraphResources::Texture2D>(GridDesc(a_height), "PostProcessing::MotionBlur::Horizontal",
 						GraphResources::Options{ .lifetime = GraphResources::Lifetime::History });
 				}

@@ -56,10 +56,9 @@ namespace
 	constexpr std::uint32_t kFaces = 6;
 	// OcclusionCopyCS's numthreads.
 	constexpr std::uint32_t kGroupSize = 8;
-	// The layer operations' client (ORGCloudShadows.h, "Layer operations").
 	constexpr const char* kLayersClientId = "cs.cloud-shadows.layers";
 
-	// OcclusionCopyCS's push block (OCCLUSION_COPY_RESOURCES), in list order.
+	// Push block in list order.
 	struct OcclusionCopyBlock
 	{
 		std::array<ShaderBindings::Handle, kFaces> faces;
@@ -77,10 +76,9 @@ struct ORGCloudShadows::Impl
 	UINT height = 0;
 	UINT mips = 0;
 
-	// Render thread: ReflectionsPrepass queued this frame's copy; the commit of the next run opens the gate and clears it.
+	// Render thread. Set by ReflectionsPrepass, cleared by the next commit.
 	bool pending = false;
 
-	/** @brief The gate entry of one face's copy of one mip. */
 	std::uint32_t Entry(std::uint32_t a_face, std::uint32_t a_mip) const { return a_face * mips + a_mip; }
 };
 
@@ -90,8 +88,8 @@ namespace
 
 	struct CopyBindings
 	{
-		std::vector<org::DeclaredViewToken> layer;    // face + mip * 6: one face of one mip of the last layer
-		std::vector<org::DeclaredViewToken> targets;  // face + mip * 6: one face of one mip of the occlusion cubemap
+		std::vector<org::DeclaredViewToken> layer;    // face + mip * 6
+		std::vector<org::DeclaredViewToken> targets;  // face + mip * 6
 	};
 
 	struct CopyFrame
@@ -99,19 +97,18 @@ namespace
 		std::shared_ptr<const Impl> impl;
 	};
 
-	/** @brief Each face of the last layer into the occlusion cubemap, every mip, as the D3D11 path's CopyResource. A gated dispatch each. */
+	/** @brief As the D3D11 path's CopyResource, with one gated dispatch per face and mip. */
 	class OcclusionCopyPass final : public org::TypedRenderGraphPass<OcclusionCopyPass, CopyFrame, CopyBindings>
 	{
 	public:
-		// At the build, on the render thread: the textures as they are now (GraphResources' rule).
+		// At the build, on the render thread, so it sees the textures as they are now.
 		explicit OcclusionCopyPass(std::shared_ptr<const Impl> a_impl) :
 			impl(std::move(a_impl)), from(impl->lastLayer), to(impl->occlusion->Graph()) {}
 
 		CopyBindings Declare(org::PassBuilder& a_builder)
 		{
 			a_builder.PreferQueue(org::QueueKind::Graphics);
-			// Single face views of the layer (the import is a cube with views per face and mip) and of the cubemap (the default UAV of
-			// a slice and mip is a one-slice array view, so a group's z of 0 writes that face).
+			// Single face views. The default UAV of a slice and mip is a one-slice array, so z of 0 writes that face.
 			std::vector<org::SrvView> faceViews;
 			std::vector<org::UavView> targetViews;
 			for (std::uint32_t mip = 0; mip < impl->mips; ++mip) {
@@ -139,7 +136,6 @@ namespace
 			const auto& impl = *a_frame.impl;
 			for (std::uint32_t mip = 0; mip < impl.mips; ++mip) {
 				for (std::uint32_t face = 0; face < kFaces; ++face) {
-					// One face a dispatch (z = 0): the shader reads Face0 and writes the target view's one slice.
 					OcclusionCopyBlock block{};
 					block.faces.fill(a_recording.Index(a_bindings.layer[mip * kFaces + face]));
 					block.occlusion = a_recording.Index(a_bindings.targets[mip * kFaces + face]);
@@ -154,7 +150,7 @@ namespace
 		std::shared_ptr<org::Resource> to;
 	};
 
-	/** @brief The client's commit: on the run that follows the frame's first reflections prepass, every face and mip copied. */
+	/** @brief Copies every face and mip on the run after the frame's first reflections prepass. */
 	void Commit(Impl& a_impl)
 	{
 		if (!std::exchange(a_impl.pending, false))
@@ -173,14 +169,14 @@ void ORGCloudShadows::Reserve()
 {
 	if (Requested() && !FrameAnchors::Reserve(FrameAnchors::Anchor::ReflectionsPrepass))
 		logger::warn("[ORG] Cloud Shadows stays on D3D11: the ReflectionsPrepass anchor could not be reserved");
-	// The frame's last propagation of the layers (CloudShadows::EarlyPrepass). SkyReflections is the sky family's to reserve.
+	// The frame's last propagation of the layers. SkyReflections is the sky family's to reserve.
 	if (Requested() && !FrameAnchors::Reserve(FrameAnchors::Anchor::EarlyPrepass))
 		logger::warn("[ORG] Cloud Shadows: the EarlyPrepass anchor could not be reserved; the layers' last propagation stays on D3D11");
 }
 
 namespace
 {
-	/** @brief The layers' twins (ORGCloudShadows::MakeLayer); a null entry is a D3D11 layer. */
+	/** @brief A null entry is a D3D11 layer. */
 	std::array<std::unique_ptr<GraphResources::Texture2D>, CloudShadows::kMaxCloudLayers>& LayerTwins()
 	{
 		static std::array<std::unique_ptr<GraphResources::Texture2D>, CloudShadows::kMaxCloudLayers> s_twins;
@@ -195,8 +191,8 @@ Texture2D* ORGCloudShadows::MakeLayer(int a_layer, const D3D11_TEXTURE2D_DESC& a
 	auto& twin = LayerTwins()[a_layer];
 	if (twin)
 		return nullptr;
-	// Drawn by the engine's cloud draws (D3D11) and the sky family's, cleared and copied by the layer operations (unordered access)
-	// or by D3D11, and sampled by the engine's draws: exported, never aliased. A face keeps its clouds until the next frame draws it.
+	// Drawn by D3D11 and the graph, written by layer ops, and sampled by engine draws, so exported and never aliased.
+	// A face keeps its clouds until the next frame draws it.
 	D3D11_TEXTURE2D_DESC desc = a_desc;
 	desc.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS;
 	desc.MiscFlags = a_desc.MiscFlags & D3D11_RESOURCE_MISC_TEXTURECUBE;
@@ -208,12 +204,12 @@ Texture2D* ORGCloudShadows::MakeLayer(int a_layer, const D3D11_TEXTURE2D_DESC& a
 		logger::warn("[ORG] Cloud Shadows: {} could not be made on the render graph; it is a D3D11 texture", a_name);
 		return nullptr;
 	}
-	// The occlusion copy and the sky family's face draws declare it in their graphs: one resource in every graph.
+	// Published so every graph that declares it gets one resource.
 	if (!PublishedResources::Publish(*texture)) {
 		logger::warn("[ORG] Cloud Shadows: {} could not be published; it is a D3D11 texture", a_name);
 		return nullptr;
 	}
-	// The wrapper holds a reference of its own: the twin keeps the image, the wrapper the D3D11 texture and its views.
+	// The twin keeps the image, the wrapper keeps the D3D11 texture and its views.
 	auto* d3d11 = texture->D3D11();
 	d3d11->AddRef();
 	auto* wrapper = new Texture2D(d3d11, a_name);
@@ -247,7 +243,7 @@ FrameAnchors::Texture ORGCloudShadows::ImportLayer(int a_layer)
 	auto* layer = cloudShadows.texCloudShadowLayers[a_layer];
 	if (!layer || !layer->resource || !layer->srv || !cloudShadows.cloudShadowLayerRTVs[a_layer][0])
 		return nullptr;
-	// A D3D11 layer (its twin could not be made): imported. Each lives as long as the feature.
+	// A D3D11 layer, imported. Each lives as long as the feature.
 	return FrameAnchors::D3D11Texture(fmt::format("CloudShadows::Layer[{}]", a_layer), layer->resource.get(), layer->srv.get(), nullptr,
 		cloudShadows.cloudShadowLayerRTVs[a_layer][0]);
 }
@@ -306,7 +302,6 @@ bool ORGCloudShadows::Setup()
 		return false;
 	}
 
-	// The last layer's shape (the reflections cubemap's, in R8), written by the copy's dispatches and sampled.
 	const D3D11_TEXTURE2D_DESC desc{ .Width = layerDesc.Width,
 		.Height = layerDesc.Height,
 		.MipLevels = layerDesc.MipLevels,
@@ -316,8 +311,7 @@ bool ORGCloudShadows::Setup()
 		.Usage = D3D11_USAGE_DEFAULT,
 		.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS,
 		.MiscFlags = layerDesc.MiscFlags & D3D11_RESOURCE_MISC_TEXTURECUBE };
-	// Engine draws read it at t25 and t26 (and Drawcall Limit Fix through that view) until they are ported. A frame without the
-	// full sky keeps the last copy, so it lives across frames.
+	// Engine draws read it at t25 and t26 until they are ported. A frame without the full sky keeps the last copy, so it is kept across frames.
 	next->occlusion = std::make_unique<GraphResources::Texture2D>(desc, std::string(kOcclusionId),
 		GraphResources::Options{ .lifetime = GraphResources::Lifetime::History, .d3d11 = GraphResources::Export::SRV });
 	if (!*next->occlusion || !next->occlusion->SRV()) {
@@ -339,7 +333,7 @@ bool ORGCloudShadows::Setup()
 		.make = [next]() -> std::shared_ptr<org::RenderPass> { return std::make_shared<OcclusionCopyPass>(next); } });
 	client.registerResources = [next](org::RenderGraph& a_graph) { next->occlusion->Register(a_graph); };
 	client.commit = [next](const FrameAnchors::Point&) { Commit(*next); };
-	// The anchor runs at every cubemap render; only the run after the frame's first reflections prepass copies, as on D3D11.
+	// The anchor runs at every cubemap render, but only the run after the frame's first reflections prepass copies, as on D3D11.
 	client.active = [next] { return next->pending; };
 	client.gates = { next->gate };
 	impl = next;
@@ -347,7 +341,7 @@ bool ORGCloudShadows::Setup()
 		impl.reset();
 		return false;
 	}
-	// Drawcall Limit Fix's colour passes read it by name, ordered after the copy (Integrations/CloudShadows).
+	// DCLF's colour passes read it by name, ordered after the copy.
 	if (!PublishedResources::Publish(*next->occlusion)) {
 		logger::error("[ORG] Cloud Shadows: the occlusion cubemap could not be published; it stays on D3D11");
 		Stop();
@@ -367,19 +361,18 @@ bool ORGCloudShadows::QueueOcclusionCopy()
 	return true;
 }
 
-// Layer operations (ORGCloudShadows.h).
+// ---- Layer operations ----
 
 namespace
 {
 	constexpr const char* kLayerShader = "CloudShadows/LayerOpsCS.hlsl";
 	constexpr std::uint32_t kLayers = CloudShadows::kMaxCloudLayers;
-	// The anchors the layer operations run at, each with its own range of the gate's entries: a frame phase may hold two of them in one
-	// execution, and each pass then dispatches only for its own anchor's commit.
+	// Each anchor has its own gate range, since a frame phase may hold two of them in one execution.
 	constexpr std::array<FrameAnchors::Anchor, 3> kLayerAnchors{ FrameAnchors::Anchor::ReflectionsPrepass, FrameAnchors::Anchor::SkyReflections,
 		FrameAnchors::Anchor::EarlyPrepass };
 	constexpr std::uint32_t kLayerEntries = 2;  // per anchor and tap: the gather, then the scatter
 
-	/** @brief a_anchor's place in kLayerAnchors (its range of the gate's entries); 0 for another anchor. */
+	/** @brief 0 for another anchor. */
 	std::uint32_t LayerSlot(FrameAnchors::Anchor a_anchor)
 	{
 		for (std::uint32_t i = 0; i < kLayerAnchors.size(); ++i)
@@ -387,29 +380,25 @@ namespace
 				return i;
 		return 0;
 	}
-	// The scratch array's slots: the most distinct faces one run's copies may read. More, and the queue sends the rest to D3D11.
+	// The most distinct faces one run may read. More sends the rest to D3D11.
 	constexpr std::uint32_t kScratchSlots = 32;
-	// A tap's rows (LayerOpsCS): the gather's entries (one per scratch slot at most), then the scatter's (one per layer face at most).
+	// A tap's rows: the gather entries, then the scatter entries.
 	constexpr std::uint32_t kGatherWords = kScratchSlots;
 	constexpr std::uint32_t kScatterWords = kLayers * kFaces;
 	constexpr std::uint32_t kScatterRow = kGatherWords * sizeof(std::uint32_t);
 	constexpr std::uint32_t kLatchBytes = (kGatherWords + kScatterWords) * sizeof(std::uint32_t);
-	// An entry: the layer in bits 24 to 28, the face in bits 16 to 18, and the scratch slot or (scatter) a clear in the low half.
+	// Layer in bits 24 to 28, face in bits 16 to 18, and the scratch slot or a clear in the low half.
 	constexpr std::uint32_t kNoWord = 0xFFFFFFFFu;
 	constexpr std::uint32_t kZeroWord = 0xFFFEu;
 	constexpr std::uint32_t Entry(std::uint32_t a_layer, std::uint32_t a_face, std::uint32_t a_value) { return a_layer << 24 | a_face << 16 | a_value; }
-	// What a layer face holds once the queued operations are done: untouched, zero, or else the layer whose face (as it was before
-	// the run) it is a copy of.
+	// After the queued ops each layer face is untouched, zero, or a copy of some layer's face as it was before the run.
 	constexpr std::uint8_t kUntouched = 0xFF;
 	constexpr std::uint8_t kZero = 0xFE;
-	// LayerOpsCS's layer handles are 24 bits each (the descriptor heap holds about a million).
+	// LayerOpsCS packs layer handles in 24 bits each.
 	constexpr std::uint32_t kHandleBits = 24;
 	constexpr std::uint32_t kPackedWords = kLayers * kHandleBits / 32;
 
-	/**
-	 * @brief LayerOpsCS's push block (written by hand there): the 32 layers' whole-array UAV handles packed in 24 words, the scratch
-	 * (its UAV in the gather, its SRV in the scatter), and the tap's row.
-	 */
+	/** @brief Written by hand in LayerOpsCS: 32 layer UAV handles packed in 24 words, the scratch, and the tap's row. */
 	struct LayerOpsBlock
 	{
 		std::array<std::uint32_t, kPackedWords> layers{};
@@ -418,7 +407,7 @@ namespace
 	};
 	static_assert(kLayers == 32 && kPackedWords == 24, "LayerOpsCS packs 32 layer handles in 24 words");
 
-	/** @brief The layer handles as LayerOpsCS unpacks them: layer i below 24 in word i's low 24 bits, layer 24 + j in the top bytes of words 3j to 3j + 2. */
+	/** @brief Layer i below 24 sits in word i's low 24 bits. Layer 24 + j sits in the top bytes of words 3j to 3j + 2. */
 	void PackLayers(const std::array<std::uint32_t, kLayers>& a_handles, std::array<std::uint32_t, kPackedWords>& a_out)
 	{
 		for (std::uint32_t i = 0; i < kPackedWords; ++i)
@@ -446,29 +435,26 @@ namespace
 
 struct ORGCloudShadows::LayerOps
 {
-	// Made at setup, then only read (the passes read them on the graph host's thread).
+	// Made at setup, then only read on the graph host's thread.
 	std::shared_ptr<const ComputeProgram> gather, scatter;
-	std::shared_ptr<RenderGraph::RunGate> gate;  // per anchor (LayerSlot): the gather of layer l at l, the scatter into layer l at kLayers + l
+	std::shared_ptr<RenderGraph::RunGate> gate;  // per anchor: gather of layer l at l, scatter into layer l at kLayers + l
 	std::shared_ptr<org::LatchBlock> latch;
 	std::unique_ptr<GraphResources::Texture2D> scratch;
 	std::array<FrameAnchors::Texture, kLayers> layers;
 	UINT width = 0;
 	UINT height = 0;
-	// The taps one anchor's gate entries and latch rows serve in one run: one per reflection face when the start stage holds
-	// SkyReflections (its k-th face writes entry set k), else 1. The passes dispatch every set; the sets no tap opened stay closed.
+	// One tap per reflection face when the start stage holds SkyReflections, else 1. Sets no tap opened stay closed.
 	std::uint32_t instances = 1;
-	// The scratch slots earlier face taps of this frame gave out (the gathers of every tap run before the scatters, so the taps of
-	// one run take distinct slots), and the frame they were given in.
+	// Taps of one run need distinct slots, since every gather runs before every scatter.
 	std::uint32_t slotsUsed = 0;
 	std::uint64_t slotsFrame = 0;
 
-	/** @brief The scratch slots earlier SkyReflections taps of this frame gave out. */
 	std::uint32_t SlotsTaken() const
 	{
 		return instances > 1 && slotsFrame == RenderGraph::Frame::Driver::Current().frame ? slotsUsed : 0;
 	}
 
-	// Render thread: the queue since the last run took it.
+	// Render thread. The queue since the last run took it.
 	std::vector<LayerOp> ops;
 	LayerOpPoint point = LayerOpPoint::D3D11;
 	std::array<std::array<std::uint8_t, kFaces>, kLayers> value{};
@@ -492,7 +478,7 @@ namespace
 
 	struct LayerBindings
 	{
-		std::array<org::DeclaredViewToken, kLayers> layers;  // each layer's face array (mip 0)
+		std::array<org::DeclaredViewToken, kLayers> layers;  // each layer's face array, mip 0
 		org::DeclaredViewToken scratch;
 	};
 
@@ -500,15 +486,14 @@ namespace
 	{
 		std::shared_ptr<const LayerOps> ops;
 		bool scatter = false;
-		std::uint32_t base = 0;  // the pass's anchor's first gate entry
-		std::uint32_t sets = 1;  // the anchor's entry sets: one per tap of a run
+		std::uint32_t base = 0;
+		std::uint32_t sets = 1;  // one per tap of a run
 	};
 
 	/**
-	 * @brief The gather (the faces the run's copies read, into scratch slots) or the scatter (every face the run writes, from its slot
-	 * or zero): one dispatch per tap through the gate, a group's z an entry of the tap's row. Every layer is bound by its whole-array
-	 * UAV, so a single dispatch reaches the faces of any layer. The recording depends only on what the pass was made with.
-	 */
+	* @brief The gather copies read faces into scratch slots, the scatter writes changed faces from their slot or as zero.
+	* Every layer is bound by its whole-array UAV, so one dispatch per tap reaches any face.
+	*/
 	class LayerOpsPass final : public org::TypedRenderGraphPass<LayerOpsPass, LayerFrame, LayerBindings>
 	{
 	public:
@@ -518,7 +503,7 @@ namespace
 		LayerBindings Declare(org::PassBuilder& a_builder)
 		{
 			a_builder.PreferQueue(org::QueueKind::Graphics);
-			// A single cube has a Texture2DArrayFull UAV (its six faces) and no such SRV, so the gather reads a layer through its UAV too.
+			// A single cube has a Texture2DArrayFull UAV but no such SRV, so the gather reads through the UAV.
 			const org::SrvView arraySrv{ .variant = static_cast<std::uint32_t>(org::SRVViewType::Texture2DArrayFull) };
 			const org::UavView arrayUav{ .variant = static_cast<std::uint32_t>(org::UAVViewType::Texture2DArrayFull) };
 			LayerBindings bindings;
@@ -551,7 +536,7 @@ namespace
 			LayerOpsBlock block{};
 			PackLayers(handles, block.layers);
 			block.scratch = a_recording.Index(a_bindings.scratch);
-			// Each entry set of the anchor (one per tap of a run), in tap order.
+			// One entry set per tap, in tap order.
 			for (std::uint32_t k = 0; k < a_frame.sets; ++k) {
 				const std::uint32_t rows = k * kLatchBytes + (a_frame.scatter ? kScatterRow : 0);
 				block.row = ShaderBindings::LatchOf(*ops.latch, a_recording.Run(), rows);
@@ -567,15 +552,11 @@ namespace
 		std::shared_ptr<org::Resource> scratch;
 	};
 
-	/**
-	 * @brief The client's commit: the queue as the run's rows (a scratch slot for each face read, then each face written: its slot
-	 * or zero) and the tap's gather and scatter gate entries, opened for the entries in their rows. The queue is empty afterwards.
-	 */
+	/** @brief Turns the queue into the run's rows and opens the matching gate entries. The queue is empty afterwards. */
 	void CommitLayerOps(LayerOps& a_ops, FrameAnchors::Anchor a_anchor)
 	{
 		if (a_ops.ops.empty())
 			return;
-		// The faces read, each with its scratch slot, and the faces written: a slot, or zero.
 		std::array<std::uint32_t, kGatherWords> gatherRow;
 		std::array<std::uint32_t, kScatterWords> scatterRow;
 		gatherRow.fill(kNoWord);
@@ -583,8 +564,7 @@ namespace
 		std::uint32_t gatherCount = 0, scatterCount = 0;
 		std::array<std::uint32_t, kLayers * kFaces> slotOf;
 		slotOf.fill(kNoWord);
-		// The tap's entry set and its first scratch slot: a SkyReflections tap of the start stage takes the set of its face's instance and
-		// the slots after those the frame's earlier face taps took.
+		// A start-stage SkyReflections tap uses its face's entry set and the slots after those earlier face taps took.
 		const bool faces = a_anchor == FrameAnchors::Anchor::SkyReflections && a_ops.instances > 1;
 		const std::uint32_t set = faces ? (std::min)(FrameAnchors::TapInstance(), a_ops.instances - 1) : 0;
 		const std::uint32_t first = faces && set > 0 ? a_ops.SlotsTaken() : 0;
@@ -598,7 +578,7 @@ namespace
 					scatterRow[scatterCount++] = Entry(l, f, kZeroWord);
 					continue;
 				}
-				// The face read: its slot, given the first time (the queue counted every face read, so the slots suffice).
+				// The queue counted every face read, so the slots suffice.
 				auto& slot = slotOf[value * kFaces + f];
 				if (slot == kNoWord) {
 					slot = slots++;
@@ -633,7 +613,7 @@ bool ORGCloudShadows::SetupLayerOps()
 		return false;
 	auto next = std::make_shared<LayerOps>();
 	next->Reset();
-	// Every layer a twin: the scatter writes them through unordered access, which a D3D11 layer's import has not.
+	// The scatter needs unordered access, which a D3D11 layer's import lacks.
 	for (std::uint32_t l = 0; l < kLayers; ++l) {
 		if (!LayerTwins()[l]) {
 			logger::warn("[ORG] Cloud Shadows: layer {} is a D3D11 texture, so the layer operations stay on D3D11", l);
@@ -651,7 +631,7 @@ bool ORGCloudShadows::SetupLayerOps()
 	next->gather = ComputeProgram::Load(host->Device(),
 		{ .source = kLayerShader, .constantWords = ShaderBindings::Words<LayerOpsBlock>(), .defines = { { L"LAYER_GATHER", L"" } } });
 	next->scatter = ComputeProgram::Load(host->Device(), { .source = kLayerShader, .constantWords = ShaderBindings::Words<LayerOpsBlock>() });
-	// One entry set per reflection face a frame may draw when the start stage holds the faces' sky.
+	// One entry set per reflection face when the start stage holds the faces' sky.
 	next->instances = FrameAnchors::HeldByStage(FrameAnchors::Anchor::SkyReflections) ? kFaces : 1;
 	next->gate = RenderGraph::RunGate::Create("CloudShadows::LayerOpsGate", static_cast<std::uint32_t>(kLayerAnchors.size()) * next->instances * kLayerEntries);
 	next->latch = std::make_shared<org::LatchBlock>(std::string(kLayersClientId) + ".latch", next->instances * kLatchBytes);
@@ -659,7 +639,7 @@ bool ORGCloudShadows::SetupLayerOps()
 		logger::error("[ORG] Cloud Shadows: {} or its run gate could not be made", kLayerShader);
 		return false;
 	}
-	// The faces one run's copies read, between its gather and its scatter. Every run writes the slots it reads.
+	// Every run writes the slots it reads.
 	const D3D11_TEXTURE2D_DESC scratchDesc{ .Width = layerDesc.Width,
 		.Height = layerDesc.Height,
 		.MipLevels = 1,
@@ -675,9 +655,7 @@ bool ORGCloudShadows::SetupLayerOps()
 		return false;
 	}
 
-	// The gather and the scatter before everything else at each anchor that follows a layer operation: the occlusion copy (0) at
-	// ReflectionsPrepass, the sky family's face draws (0 and 1) at SkyReflections. Where an anchor has no epoch (SkyReflections
-	// without the sky family), its operations stay on D3D11.
+	// First at each anchor that follows a layer op. An anchor with no epoch keeps its ops on D3D11.
 	FrameAnchors::ClientDesc client{};
 	client.id = kLayersClientId;
 	for (const auto [anchor, label] : { std::pair{ FrameAnchors::Anchor::ReflectionsPrepass, "reflections-prepass" },
@@ -700,7 +678,7 @@ bool ORGCloudShadows::SetupLayerOps()
 	client.commit = [next](const FrameAnchors::Point& a_point) { CommitLayerOps(*next, a_point.anchor); };
 	client.active = [next] { return !next->ops.empty(); };
 	client.gates = { next->gate };
-	// The start stage: a tap per reflection face, each writing its own entry set and latch rows.
+	// The start stage taps once per reflection face.
 	client.repeats = next->instances > 1;
 	layerOps = next;
 	if (!FrameAnchors::Register(std::move(client))) {
@@ -719,7 +697,7 @@ bool ORGCloudShadows::QueueLayerOp(LayerOpPoint a_point, LayerOp a_op)
 		return false;
 	if (a_op.dst >= kLayers || a_op.face >= kFaces || (a_op.src != kClearOp && a_op.src >= kLayers))
 		return false;
-	// Queued for another anchor whose run has not come: the caller sends those to D3D11 first.
+	// Ops queued for another anchor whose run has not come go to D3D11 first.
 	if (!ops->ops.empty() && ops->point != a_point)
 		return false;
 	if (ops->ops.empty() && !FrameAnchors::Scheduled(kLayersClientId, AnchorOf(a_point)))
@@ -728,15 +706,15 @@ bool ORGCloudShadows::QueueLayerOp(LayerOpPoint a_point, LayerOp a_op)
 	if (a_op.src == kClearOp) {
 		target = kZero;
 	} else {
-		// What the source face holds now: zero, a face as it was before the run, or itself.
+		// Zero, a face as it was before the run, or itself.
 		std::uint8_t value = ops->value[a_op.src][a_op.face];
 		if (value == kUntouched)
 			value = a_op.src;
 		if (value == a_op.dst) {
-			target = kUntouched;  // the face's own contents again (or a copy onto itself)
+			target = kUntouched;  // the face's own contents again, or a copy onto itself
 		} else {
 			if (value != kZero && !(ops->sources[a_op.face] & (1u << value))) {
-				// The slots this frame's earlier face taps took are not free: their gathers run with this tap's.
+				// Slots taken by earlier face taps this frame are not free, since their gathers run with this one.
 				if (ops->sourceCount + (a_point == LayerOpPoint::SkyReflections ? ops->SlotsTaken() : 0) >= kScratchSlots)
 					return false;
 				ops->sources[a_op.face] |= 1u << value;
@@ -764,7 +742,7 @@ ORGCloudShadows::~ORGCloudShadows() = default;
 
 #else  // !CS_HAS_RENDER_GRAPH
 
-// Built without OpenRenderGraph: Cloud Shadows always copies on D3D11.
+// Without OpenRenderGraph Cloud Shadows always copies on D3D11.
 struct ORGCloudShadows::Impl
 {};
 struct ORGCloudShadows::LayerOps

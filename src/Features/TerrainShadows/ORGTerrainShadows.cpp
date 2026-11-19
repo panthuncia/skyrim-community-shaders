@@ -46,16 +46,16 @@ namespace
 {
 	constexpr const char* kClientId = "cs.terrain-shadows";
 	constexpr const char* kShader = "TerrainShadows/ShadowUpdate.cs.hlsl";
-	// ShadowUpdate.cs.hlsl's NTHREADS: the pixels of one stripe along the light.
+	// ShadowUpdate.cs.hlsl's NTHREADS, the pixels of one stripe along the light.
 	constexpr std::uint32_t kStripeLength = 128;
-	// The heightmap formats kept as they are. Any other format is converted to R16_UNORM on the CPU.
+	// Other heightmap formats are converted to R16_UNORM on the CPU.
 	constexpr DXGI_FORMAT kHeightFormat = DXGI_FORMAT_R16_UNORM;
 	constexpr DXGI_FORMAT kHeightBlockFormat = DXGI_FORMAT_BC4_UNORM;
 
 	using Constants = TerrainShadows::ShadowUpdateCB;
 	static_assert(sizeof(Constants) == 48, "ShadowUpdateConstants in ShadowUpdate.cs.hlsl is 48 bytes");
 
-	// ShadowUpdate.cs.hlsl's push block (SHADOW_UPDATE_RESOURCES), in list order.
+	// In SHADOW_UPDATE_RESOURCES order.
 	struct ShadowUpdateBlock
 	{
 		ShaderBindings::Handle heightMap;
@@ -63,10 +63,7 @@ namespace
 		ShaderBindings::Latch constants;
 	};
 
-	/**
-	 * @brief What one heightmap's passes are made from. Immutable. Each heightmap gets its own: the heightmap texture at its size
-	 * and format, the latch and gate sized for its stripes, and the shadow height map's slot.
-	 */
+	/** @brief Immutable. Each heightmap gets its own. */
 	struct UpdateSpec
 	{
 		std::shared_ptr<const ComputeProgram> program;
@@ -78,38 +75,33 @@ namespace
 	};
 }
 
-/**
- * @brief One heightmap's registration of the client: its texture, its staged bytes, its latch and gate, and the stripes waiting for
- * the commit. A new heightmap registers the client again with a new one. The old registration's gate stays closed until its graphs
- * are gone, so its passes do no work in the meantime.
- */
+/** @brief A new heightmap registers with a new one. The old one's gate stays closed until its graphs are gone. */
 struct ORGTerrainShadows::Heightmap
 {
 	std::uint32_t width = 0, height = 0;
-	int format = 0;  // DXGI_FORMAT, for the log
+	int format = 0;  // for the log
 	std::unique_ptr<GraphResources::Texture2D> texture;
 	std::shared_ptr<const GraphResources::StagedUpload> staged;
 	std::shared_ptr<org::LatchBlock> latch;
 	std::shared_ptr<RenderGraph::RunGate> gate;
 	std::shared_ptr<const UpdateSpec> spec;
 
-	// Render thread: this frame's constants and groups, until the commit latches them.
+	// Render thread. Held until the commit latches them.
 	std::vector<Constants> pending;
 	std::uint32_t pendingGroups = 0;
 	bool pendingRefresh = false;
-	// Render thread: a full refresh was committed in a graph that holds this registration (and so its upload).
+	// Render thread. A full refresh ran in a graph holding this registration and its upload.
 	bool refreshed = false;
 };
 
 struct ORGTerrainShadows::Impl
 {
 	std::shared_ptr<const ComputeProgram> program;
-	// Made at setup, 1x1, and published once. Each heightmap resizes it to its own size: a new version of the slot, which
-	// Drawcall Limit Fix's graphs follow with no build.
+	// Made at setup at 1x1 and published once. Each heightmap's size is a new version that DCLF's graphs follow with no build.
 	std::unique_ptr<GraphResources::Texture2D> shadowHeights;
 	std::function<void()> onFailed;
 	std::shared_ptr<Heightmap> current;
-	// Render thread: the heightmap staged last, until the next frame boundary switches it in (Switch).
+	// Render thread. Held until the next frame boundary switches it in.
 	std::shared_ptr<Heightmap> pending;
 };
 
@@ -129,13 +121,9 @@ namespace
 	};
 
 	/**
-	 * @brief The heightmap's stripes, one gated dispatch a stripe. The commit opens as many entries as this run updates, so the
-	 * recording stays the same whatever the run does.
-	 *
-	 * Two passes: the update (stripe 0, the one a steady frame runs) is recorded ahead. The refresh (stripes 1 and up, which only a
-	 * refresh opens) is recorded at execution and skips a run that did not open stripe 1. Each refresh stripe waits for the one
-	 * before it with a full barrier, so a steady frame no longer runs those barriers around empty dispatches.
-	 */
+	* @brief One gated dispatch per stripe, so the recording stays the same. The steady update (stripe 0) is recorded ahead.
+	* The refresh (stripes 1 and up) records at execution and skips unless stripe 1 is open, so steady frames skip its barriers.
+	*/
 	template <bool Refresh>
 	class ShadowUpdatePass final : public org::TypedRenderGraphPass<ShadowUpdatePass<Refresh>, UpdateFrame, UpdateBindings>
 	{
@@ -146,7 +134,7 @@ namespace
 		UpdateBindings Declare(org::PassBuilder& a_builder)
 		{
 			a_builder.PreferQueue(org::QueueKind::Graphics);
-			// The shadow height map's slot: a new worldspace's size is a new version.
+			// A new worldspace's size is a new version of the slot.
 			return { a_builder.ShaderResource(spec->heightMap).View(),
 				a_builder.UnorderedAccess(org::ResourceResolverAndRange(*spec->shadowHeights)).View() };
 		}
@@ -156,10 +144,10 @@ namespace
 
 		UpdateFrame Prepare(const UpdateBindings&, const org::PassPrepareContext&) const { return { spec }; }
 
-		// The refresh's commands depend on the run only through this answer, so a kept late batch keeps its list while it holds.
+		// A kept late batch keeps its list while SkipsAtExecution's answer holds.
 		static constexpr bool kRecordKeyedBySkip = true;
 
-		// Recorded at execution (the refresh only): a run that did not open stripe 1 is not a refresh.
+		// A run that did not open stripe 1 is not a refresh.
 		static bool SkipsAtExecution(const UpdateBindings&, const UpdateFrame& a_frame, const org::PassRecordContext& a_recording)
 		{
 			return Refresh && !a_frame.spec->gate->IsOpen(a_recording.Run(), 1);
@@ -172,7 +160,7 @@ namespace
 			const std::uint32_t first = Refresh ? 1 : 0;
 			const std::uint32_t end = Refresh ? spec.maxDispatches : (std::min)(1u, spec.maxDispatches);
 			for (std::uint32_t i = first; i < end; ++i) {
-				// Each stripe reads the one before it. The graph orders the refresh's first stripe after the update's.
+				// Each stripe reads the one before it.
 				if (i > first) {
 					const rhi::GlobalBarrier global = rhi::FullMemoryBarrier();
 					a_recording.Commands().Barriers(rhi::BarrierBatch{ {}, {}, { &global, 1 } });
@@ -187,10 +175,7 @@ namespace
 		std::shared_ptr<const UpdateSpec> spec;
 	};
 
-	/**
-	 * @brief The heightmap's mip 0 in a format the texture takes: BC4_UNORM and R16_UNORM as they are, any other format converted to
-	 * R16_UNORM. False, logged, when DirectXTex cannot convert it.
-	 */
+	/** @brief BC4_UNORM and R16_UNORM pass through, others convert to R16_UNORM. False, logged, when DirectXTex cannot convert. */
 	bool ToHeightFormat(const DirectX::Image& a_image, DirectX::ScratchImage& a_converted, const DirectX::Image*& a_out)
 	{
 		if (a_image.format == kHeightFormat || a_image.format == kHeightBlockFormat) {
@@ -209,10 +194,7 @@ namespace
 		return true;
 	}
 
-	/**
-	 * @brief The client's commit: this frame's constants into the run's latch region, and a gate entry for each stripe. It runs only
-	 * in a graph that holds this registration, so a committed refresh covers the heightmap this registration uploads.
-	 */
+	/** @brief Runs only in a graph holding this registration, so a committed refresh covers the heightmap it uploads. */
 	void Commit(Heightmap& a_heightmap)
 	{
 		const org::RunRef run = RenderGraphRuntime::Get().Host()->CurrentRun();
@@ -248,8 +230,7 @@ bool ORGTerrainShadows::Setup(std::function<void()> a_onFailed)
 		logger::error("[ORG] Terrain Shadows: {} could not be compiled; it stays on D3D11", kShader);
 		return false;
 	}
-	// Engine draws read it at t60 (and Drawcall Limit Fix through that view) until they are ported. Versioned: each heightmap's
-	// size is a new version of the same slot.
+	// Engine draws read it at t60 until they are ported. Versioned, so each heightmap's size is a new version.
 	const D3D11_TEXTURE2D_DESC desc{ .Width = 1,
 		.Height = 1,
 		.MipLevels = 1,
@@ -266,7 +247,7 @@ bool ORGTerrainShadows::Setup(std::function<void()> a_onFailed)
 	}
 	next->onFailed = std::move(a_onFailed);
 	impl = next;
-	// Drawcall Limit Fix's colour passes read it by name, ordered after the update (Integrations/TerrainShadows). Published once.
+	// DCLF's colour passes read it by name, ordered after the update. Published once.
 	if (!PublishedResources::Publish(*next->shadowHeights)) {
 		logger::error("[ORG] Terrain Shadows: the shadow height map could not be published; it stays on D3D11");
 		Stop();
@@ -315,7 +296,7 @@ bool ORGTerrainShadows::SetHeightmap(const DirectX::Image& a_image)
 		.SampleDesc = { .Count = 1 },
 		.Usage = D3D11_USAGE_DEFAULT,
 		.BindFlags = D3D11_BIND_SHADER_RESOURCE };
-	// Nothing outside the graph reads it: no D3D11 view.
+	// Nothing outside the graph reads it, so no D3D11 view.
 	next->texture = std::make_unique<GraphResources::Texture2D>(desc, "TerrainShadows::HeightMap",
 		GraphResources::Options{ .lifetime = GraphResources::Lifetime::Persistent });
 	if (!*next->texture) {
@@ -330,8 +311,7 @@ bool ORGTerrainShadows::SetHeightmap(const DirectX::Image& a_image)
 		Stop();
 		return false;
 	}
-	// The shadow height map's resize publishes a new version, which only a frame boundary may do: the switch waits for the next
-	// one. Until then no stripes are taken, and NeedsRefresh keeps terrain shadows off.
+	// Only a frame boundary may publish the resized version, so the switch waits. Until then no stripes are taken.
 	impl->current.reset();
 	impl->pending = next;
 	RenderGraph::Frame::Driver::AtNextBegin([state = std::weak_ptr<Impl>(impl), next] {
@@ -353,7 +333,7 @@ void ORGTerrainShadows::Switch()
 		if (onFailed)
 			onFailed();
 	};
-	// The shadow height map takes the heightmap's size as a new version. The new registration's refresh writes all of it.
+	// The new registration's refresh writes all of it.
 	auto& shadowHeights = *impl->shadowHeights;
 	shadowHeights.Resize(next->width, next->height);
 	if (!shadowHeights || !shadowHeights.SRV() || !shadowHeights.Versioned())
@@ -371,17 +351,15 @@ void ORGTerrainShadows::Switch()
 		UpdateSpec{ impl->program, next->latch, next->gate, next->texture->Graph(), shadowHeights.Versioned(), maxDispatches });
 	next->pending.reserve(maxDispatches);
 
-	// Keys 99 (the heightmap copy, a one-shot pass) and 100 (the update, which reads the heightmap after it). The copy declares its
-	// staging buffer and the texture, so the graph orders and tracks it.
+	// Key 99 is the one-shot heightmap copy, 100 the update that reads it.
 	RenderGraph::AnchorPasses::Builder builder(FrameAnchors::Anchor::EarlyPrepass, kClientId, 99);
 	builder.Add(
 		"heightmap-upload", FrameAnchors::PassKind::Copy,
 		[staged = next->staged]() -> std::shared_ptr<org::RenderPass> { return GraphResources::MakeUploadPass({ staged }); }, true);
-	// Gated: its dispatches take their counts from the registration's gate entries, which the commit opens.
 	builder.Add(
 		"update", FrameAnchors::PassKind::Compute,
 		[spec = next->spec]() -> std::shared_ptr<org::RenderPass> { return std::make_shared<ShadowUpdatePass<false>>(spec); });
-	// Recorded at execution: it records nothing in a run that is not a refresh.
+	// Records nothing in a run that is not a refresh.
 	if (maxDispatches > 1)
 		builder.Add(
 			"refresh", FrameAnchors::PassKind::Compute,
@@ -389,7 +367,7 @@ void ORGTerrainShadows::Switch()
 	if (builder.Failed())
 		return fail(builder.Failure());
 
-	// A new registration replaces the last: the EarlyPrepass graphs are built again, staged, with this heightmap's passes.
+	// Replaces the last registration. The EarlyPrepass graphs rebuild with this heightmap's passes.
 	FrameAnchors::ClientDesc client{};
 	client.id = kClientId;
 	client.passes = builder.Take();
@@ -434,7 +412,7 @@ ORGTerrainShadows::~ORGTerrainShadows() = default;
 
 #else  // !CS_HAS_RENDER_GRAPH
 
-// Built without OpenRenderGraph: Terrain Shadows always runs on D3D11.
+// Without OpenRenderGraph Terrain Shadows always runs on D3D11.
 struct ORGTerrainShadows::Impl
 {};
 

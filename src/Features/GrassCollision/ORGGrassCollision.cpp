@@ -46,12 +46,11 @@ namespace
 {
 	constexpr const char* kClientId = "cs.grass-collision";
 	constexpr const char* kShader = "GrassCollision/CollisionUpdateCS.hlsl";
-	// The anchor's keys (org-extension-api-notes.md, "Attaching passes to the frame"): the copy, then the update.
+	// The copy, then the update.
 	constexpr std::int32_t kOrder = 200;
-	// CollisionUpdateCS's thread groups are 8x8.
 	constexpr std::uint32_t kGroupSize = 8;
 
-	// CollisionUpdateCS's push block (COLLISION_UPDATE_RESOURCES, in list order).
+	// In COLLISION_UPDATE_RESOURCES order.
 	struct CollisionUpdateBlock
 	{
 		ShaderBindings::Handle boundingBoxes, instances, collision;
@@ -60,7 +59,7 @@ namespace
 
 	constexpr std::uint32_t AlignRegion(std::uint32_t a_bytes) { return (a_bytes + 255u) & ~255u; }
 
-	// The latch block's layout in each slot: the per-frame values, the bounding boxes, the collision spheres.
+	// Per slot: per-frame values, bounding boxes, collision spheres.
 	struct Layout
 	{
 		std::uint32_t boxesOffset = 0;
@@ -83,9 +82,7 @@ namespace
 		std::unique_ptr<GraphResources::Texture2D> collision;
 	};
 
-	// The copy: the latch's boxes and spheres into the graph buffers the update reads. Whole capacities: the recording is kept from
-	// frame to frame, and the counts that bound the reads are latched. A run without a staged frame copies the slot's old bytes,
-	// which nothing reads: the update is closed then.
+	// Copies whole capacities so the recording is kept, and the latched counts bound the reads.
 	struct CopyBindings
 	{
 		org::ResourceBindingToken boxes, instances;
@@ -95,7 +92,7 @@ namespace
 	{
 		std::shared_ptr<const org::LatchBlock> latch;
 		Layout layout;
-		std::shared_ptr<const RenderGraph::RunGate> gate;  // the update's entry: the copy goes with it
+		std::shared_ptr<const RenderGraph::RunGate> gate;  // the update's entry, which the copy follows
 	};
 
 	class CopyCollidersPass final : public org::TypedRenderGraphPass<CopyCollidersPass, CopyFrame, CopyBindings>
@@ -120,10 +117,10 @@ namespace
 
 		CopyFrame Prepare(const CopyBindings&, const org::PassPrepareContext&) const { return { latch, layout, gate }; }
 
-		// Its commands depend on the run only through SkipsAtExecution: a kept late batch keeps its list while the answer holds.
+		// A kept late batch keeps its list while SkipsAtExecution's answer holds.
 		static constexpr bool kRecordKeyedBySkip = true;
 
-		// Recorded at execution: a run whose commit staged nothing (the update's gate entry closed) copies nothing.
+		// A run that staged nothing copies nothing.
 		static bool SkipsAtExecution(const CopyBindings&, const CopyFrame& a_frame, const org::PassRecordContext& a_recording)
 		{
 			return a_frame.gate && !a_frame.gate->IsOpen(a_recording.Run(), 0);
@@ -134,7 +131,6 @@ namespace
 			if (!a_frame.latch)
 				return;
 			auto& commands = a_recording.Commands();
-			// The run's latch region: its arena chunk and its offset there.
 			const auto region = a_frame.latch->At(a_recording.Run());
 			const auto source = region.buffer->GetAPIResource().GetHandle();
 			const auto base = region.offset;
@@ -151,8 +147,7 @@ namespace
 		std::shared_ptr<org::Resource> instances;
 	};
 
-	// The update: CollisionUpdateCS over the whole texture, which it reads (the last frame's) and writes in place. Through the run gate:
-	// it dispatches only on runs whose commit staged a frame.
+	// Over the whole texture, reading last frame's and writing in place. Dispatches only on runs that staged a frame.
 	struct UpdateBindings
 	{
 		org::DeclaredViewToken boxes, instances, collision;
@@ -222,7 +217,7 @@ struct ORGGrassCollision::Impl
 {
 	std::shared_ptr<Resources> resources;
 	Limits limits;
-	// The staged frame, laid out as a latch slot: the commit writes the regions in use.
+	// Laid out as a latch slot. The commit writes the regions in use.
 	std::vector<std::byte> staged;
 	std::uint32_t perFrameBytes = 0;
 	std::uint32_t boxesBytes = 0;
@@ -265,13 +260,12 @@ bool ORGGrassCollision::Setup(const Limits& a_limits)
 		logger::error("[ORG] Grass Collision: the latch block could not be made ({})", e.what());
 	}
 	resources->gate = RenderGraph::RunGate::Create("GrassCollision::Gate");
-	// Written by the copy before the update reads them, every frame: transient.
+	// Written by the copy before the update reads them every frame, so transient.
 	resources->boxes = std::make_unique<GraphResources::StructuredBuffer>(StructuredDesc(a_limits.maxBoxes, a_limits.boxStride), a_limits.maxBoxes,
 		"GrassCollision::BoundingBoxes");
 	resources->instances = std::make_unique<GraphResources::StructuredBuffer>(StructuredDesc(a_limits.maxInstances, a_limits.instanceStride),
 		a_limits.maxInstances, "GrassCollision::Instances");
-	// Read back by the next frame's update, and by the engine's grass through D3D11 until those draws are the graph's. Published: DCLF's
-	// grass draws read it by name.
+	// Read by the next frame's update and by the engine's grass through D3D11. DCLF's grass draws read it by name.
 	resources->collision = std::make_unique<GraphResources::Texture2D>(a_limits.texture, std::string(GrassShared::kCollisionGraphId),
 		GraphResources::Options{ .lifetime = GraphResources::Lifetime::History, .d3d11 = GraphResources::Export::SRV });
 	if (!resources->program || !resources->latch || !resources->gate || !*resources->boxes || !*resources->instances || !*resources->collision ||
@@ -293,7 +287,7 @@ bool ORGGrassCollision::Setup(const Limits& a_limits)
 		.order = kOrder,
 		.kind = FrameAnchors::PassKind::Copy,
 		.make = [resources]() -> std::shared_ptr<org::RenderPass> { return std::make_shared<CopyCollidersPass>(*resources); },
-		// Gated: recorded at execution, it skips a run that left the update's gate entry closed.
+		// Skips a run that left the update's entry closed.
 		.atExecution = true });
 	client.passes.push_back({ .name = "cs.grass-collision.update",
 		.anchor = FrameAnchors::Anchor::EarlyPrepass,
@@ -306,8 +300,7 @@ bool ORGGrassCollision::Setup(const Limits& a_limits)
 		resources->instances->Register(a_graph);
 		resources->collision->Register(a_graph);
 	};
-	// The staged frame into the execution's latch region: the regions in use only, as the counts in the per-frame values bound the reads.
-	// Then the update opens for this run. A frame that staged nothing (no camera) updates nothing, as on D3D11: the run closed the gate.
+	// Writes only the regions in use. A frame that staged nothing updates nothing, as on D3D11.
 	client.commit = [self](const FrameAnchors::Point&) {
 		const auto& current = self->impl;
 		auto* graphHost = RenderGraphRuntime::Get().Host();
@@ -325,14 +318,14 @@ bool ORGGrassCollision::Setup(const Limits& a_limits)
 		const auto& resources = *current->resources;
 		resources.gate->OpenDispatch(0, resources.width / kGroupSize, resources.height / kGroupSize, 1);
 	};
-	// Active only with a staged frame. When another client runs the anchor without one, the update stays closed.
+	// When another client runs the anchor without a staged frame, the update stays closed.
 	client.active = [self] { return self->impl && self->impl->stagedFrame; };
 	impl = std::move(state);
 	if (!FrameAnchors::Register(std::move(client))) {
 		impl.reset();
 		return false;
 	}
-	// Drawcall Limit Fix's grass draws read it by name, ordered after the update (Features/Grass, GrassTables.cpp).
+	// DCLF's grass draws read it by name, ordered after the update.
 	if (!PublishedResources::Publish(*resources->collision)) {
 		logger::error("[ORG] Grass Collision: the collision texture could not be published; Grass Collision stays on D3D11");
 		FrameAnchors::Unregister(kClientId);
@@ -362,7 +355,7 @@ void ORGGrassCollision::Stage(const Frame& a_frame)
 		return bytes;
 	};
 	state.perFrameBytes = copy(a_frame.perFrame, 0, state.limits.perFrameBytes);
-	// Disabled: no colliders, and every cell new, so the update writes zero everywhere as the D3D11 path's clear does.
+	// No colliders and every cell new, so the update writes zero everywhere as the D3D11 clear does.
 	if (!a_frame.enabled && state.perFrameBytes == sizeof(GrassCollision::PerFrame)) {
 		GrassCollision::PerFrame values;
 		std::memcpy(&values, state.staged.data(), sizeof(values));
@@ -382,7 +375,7 @@ ID3D11ShaderResourceView* ORGGrassCollision::CollisionSRV() const
 
 #else  // !CS_HAS_RENDER_GRAPH
 
-// Built without OpenRenderGraph: Grass Collision always updates with D3D11.
+// Without OpenRenderGraph Grass Collision always updates with D3D11.
 struct ORGGrassCollision::Impl
 {};
 

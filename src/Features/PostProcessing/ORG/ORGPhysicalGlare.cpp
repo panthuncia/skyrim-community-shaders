@@ -17,11 +17,11 @@ namespace ORGPostChain
 {
 	namespace
 	{
-		constexpr DXGI_FORMAT kComplexFormat = DXGI_FORMAT_R32G32_FLOAT;       // texFFT's, texPSF_FFT's and texApertureBase's
-		constexpr DXGI_FORMAT kPackedFormat = DXGI_FORMAT_R32G32B32A32_FLOAT;  // texGlarePacked's
+		constexpr DXGI_FORMAT kComplexFormat = DXGI_FORMAT_R32G32_FLOAT;       // texFFT, texPSF_FFT, texApertureBase
+		constexpr DXGI_FORMAT kPackedFormat = DXGI_FORMAT_R32G32B32A32_FLOAT;  // texGlarePacked
 		constexpr const char* kChannels[3] = { "R", "G", "B" };
 
-		// The push blocks, each the shader's resource list in order (PhysicalGlare/*.cs.hlsl).
+		// Each shader's resource list in order.
 		struct ThresholdBlock
 		{
 			ShaderBindings::Handle texColor, fftR, fftG, fftB;
@@ -61,19 +61,14 @@ namespace ORGPostChain
 			ShaderBindings::Latch glare;
 		};
 
-		/** @brief Whether the animated tear film is on: the PSF then starts from the tear-film pass and is made every frame. */
+		/** @brief The PSF then starts from the tear-film pass and is made every frame. */
 		bool TearFilmAnimated(const PhysicalGlare::Settings& a_effective) { return a_effective.ApertureMode == 1 && a_effective.TearFilmStrength > 0.f; }
 
 		/**
-		 * @brief PhysicalGlare::Draw on the graph. The aperture response and the PSF's spectrum are persistent and owned here; they
-		 * are made again only when their settings change (every frame while the tear film animates). Those passes run through
-		 * gate entries that Commit opens on the frames they are made, so the recording stays the same. The
-		 * scene's FFT work images and the packed result are transient chain images at the FFT size. The glare is a side output:
-		 * the image is published as "PostProcessing::PhysicalGlare::Output" for Composite, and Current is left alone.
-		 *
-		 * A regenerated PSF counts as made once a frame that asked for it reached the GPU with this build (Executed); until then
-		 * the request is repeated each frame.
-		 */
+		* @brief PhysicalGlare::Draw on the graph. The aperture and PSF spectrum are persistent and remade only when their settings change.
+		* Their passes are gated, so the recording stays the same, and a request repeats until a frame with it reached the GPU with this build.
+		* The glare is a published side output for Composite.
+		*/
 		class PhysicalGlareEffect final : public Effect
 		{
 		public:
@@ -95,7 +90,7 @@ namespace ORGPostChain
 				const auto& shape = a_builder.GetShape();
 
 				if (!wrapSampler) {
-					// PhysicalGlare::wrapSampler's description: linear, wrapped, every mip.
+					// PhysicalGlare::wrapSampler: linear, wrapped, every mip.
 					wrapSampler = ShaderBindings::CreateSampler(
 						{ .addressU = rhi::AddressMode::Wrap, .addressV = rhi::AddressMode::Wrap, .addressW = rhi::AddressMode::Wrap });
 					if (!wrapSampler) {
@@ -111,7 +106,6 @@ namespace ORGPostChain
 				for (const auto& texture : psfSpectrum)
 					a_builder.Register(*texture);
 
-				// Programs.
 				constexpr const char* kDir = "PostProcessing/PhysicalGlare/";
 				const auto program = [&](const char* a_file, std::uint32_t a_words, const wchar_t* a_entry, std::vector<std::pair<std::string, std::string>> a_defines = {}) {
 					return a_builder.Compute(std::format("{}{}", kDir, a_file), a_words, std::move(a_defines), a_entry);
@@ -133,14 +127,14 @@ namespace ORGPostChain
 				if (a_builder.Failed())
 					return;
 
-				// Images: the FFT ping-pong pair per channel, the packed result, and the output, as PhysicalGlare's textures.
+				// The FFT ping-pong pair per channel, the packed result, and the output.
 				Image work[3][2];
 				for (int channel = 0; channel < 3; ++channel)
 					for (int side = 0; side < 2; ++side)
 						work[channel][side] = a_builder.CreateImage(std::format("PostProcessing::PhysicalGlare::FFT{}{}", kChannels[channel], side), kComplexFormat,
 							D3D11_BIND_UNORDERED_ACCESS, size, size);
 				const auto packed = a_builder.CreateImage("PostProcessing::PhysicalGlare::Packed", kPackedFormat, D3D11_BIND_UNORDERED_ACCESS, size, size);
-				// As PhysicalGlare::SetupResources: the output takes kMAIN_COPY's format.
+				// As PhysicalGlare::SetupResources, the output takes kMAIN_COPY's format.
 				const auto output = a_builder.CreateImage(Published::kGlare, shape.mainCopyFormat, D3D11_BIND_UNORDERED_ACCESS);
 				if (a_builder.Failed())
 					return;
@@ -162,8 +156,7 @@ namespace ORGPostChain
 					a_builder.Dispatch(std::move(dispatch));
 				};
 
-				// The PSF, as GeneratePSF: the static aperture, the tear film over it, its FFT, the chromatic blur, then each
-				// channel's FFT into the persistent spectrum.
+				// As GeneratePSF: static aperture, tear film, FFT, chromatic blur, then each channel's FFT into the spectrum.
 				a_builder.Dispatch({ .name = "aperture",
 					.program = aperture,
 					.bindings = { Bind::Uav(apertureBase->Graph()), Bind::Latch(apertureConstants) },
@@ -187,7 +180,7 @@ namespace ORGPostChain
 					dispatchFft(std::format("psf-col-{}", kChannels[channel]), colForward, work[channel][0], psfSpectrum[channel]->Graph(), true);
 				}
 
-				// The scene, as Draw: threshold into the FFT size, forward FFT, multiply by the PSF, inverse FFT, pack, composite.
+				// As Draw: threshold, forward FFT, multiply by the PSF, inverse FFT, pack, composite.
 				pending.reset();
 				a_builder.Dispatch({ .name = "threshold",
 					.program = threshold,
@@ -224,7 +217,7 @@ namespace ORGPostChain
 				auto& glare = static_cast<PhysicalGlare&>(a_feature);
 				const auto effective = glare.GetEffectiveSettings();
 				const float deltaTime = *globals::game::deltaTime;
-				// As Draw: the tear film's clock runs while it animates.
+				// The tear film's clock runs while it animates.
 				if (TearFilmAnimated(effective))
 					glare.tearFilmTimeAccum += deltaTime;
 				const bool useAP1 = globals::features::linearLighting.IsACEScgActive();
@@ -238,7 +231,7 @@ namespace ORGPostChain
 
 				const auto data = glare.BuildConstants(effective, deltaTime, fftSize, width, height);
 				a_commit.Write(constants, data);
-				// As GeneratePSF: the static aperture leaves the tear film out; it is applied by its own pass.
+				// The static aperture leaves out the tear film, which has its own pass.
 				auto apertureData = data;
 				apertureData.TearFilmStrength = 0.f;
 				a_commit.Write(apertureConstants, apertureData);
@@ -252,7 +245,6 @@ namespace ORGPostChain
 
 			void Executed(PostProcessFeature&) override
 			{
-				// The PSF this frame's commit asked for reached the GPU with this build.
 				if (!pending)
 					return;
 				made = *pending;
@@ -261,7 +253,7 @@ namespace ORGPostChain
 			}
 
 		private:
-			/** @brief The aperture and PSF spectrum at a_size, made again (and so the PSF too) when the size changed. */
+			/** @brief Remade, and the PSF with it, when the size changed. */
 			bool CreatePersistent(uint a_size)
 			{
 				if (apertureBase && apertureBase->Desc().Width == a_size)
@@ -287,12 +279,12 @@ namespace ORGPostChain
 				return good;
 			}
 
-			// Persistent, at the build's FFT size.
+			// At the build's FFT size.
 			std::unique_ptr<GraphResources::Texture2D> apertureBase;
 			std::array<std::unique_ptr<GraphResources::Texture2D>, 3> psfSpectrum;
 			org::OwnedDescriptorBinding wrapSampler;
 
-			// What the persistent PSF was made from, and what this frame's commit asked for, until Executed.
+			// What the PSF was made from, and what this frame asked for until Executed.
 			PhysicalGlare::PSFParams made{};
 			bool madeValid = false;
 			std::optional<PhysicalGlare::PSFParams> pending;

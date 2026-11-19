@@ -32,13 +32,11 @@ namespace
 {
 	constexpr const char* kClientId = "cs.llf.local-shadows";
 	constexpr const char* kShader = "LightLimitFix/LocalShadowCopyCS.hlsl";
-	// LocalShadowCopyCS's group size (GROUP_SIZE).
+	// LocalShadowCopyCS's GROUP_SIZE.
 	constexpr std::uint32_t kGroupSize = 8;
-	// RE::RENDER_TARGETS_DEPTHSTENCIL::kSHADOWMAPS.
 	constexpr std::uint32_t kShadowMaps = static_cast<std::uint32_t>(RE::RENDER_TARGETS_DEPTHSTENCIL::kSHADOWMAPS);
 
-	// LocalShadowCopyCS's CopyConstants: one per copy, the latch's first kMaxCopies rows. The run gate's entry of the same
-	// index says whether that copy runs this frame.
+	// One per copy in the latch's first kMaxCopies rows. The gate entry of the same index says whether it runs.
 	struct CopyConstants
 	{
 		std::uint32_t sourceSlice;
@@ -48,17 +46,17 @@ namespace
 	};
 	static_assert(sizeof(CopyConstants) == 16);
 
-	/** @brief The graph no longer writes the cache: its published readers return to their D3D11 views. */
+	/** @brief Readers return to their D3D11 views. */
 	void WithdrawCache()
 	{
 		PublishedResources::Withdraw(ORGLocalShadows::kDataId);
 		PublishedResources::Withdraw(ORGLocalShadows::kCacheId);
 	}
 
-	// The latch slot: the copies, then the slots' data.
+	// The copies, then the slots' data.
 	constexpr std::uint32_t kDataOffset = ORGLocalShadows::kMaxCopies * sizeof(CopyConstants);
 
-	// LocalShadowCopyCS's push block, in list order.
+	// In list order.
 	struct CopyBlock
 	{
 		ShaderBindings::Handle source, cache;
@@ -72,18 +70,16 @@ namespace
 		std::unique_ptr<GraphResources::Texture2D> cache;
 		std::unique_ptr<GraphResources::StructuredBuffer> data;
 		std::shared_ptr<org::LatchBlock> latch;
-		// One entry per possible copy: the commit opens those of the copies the frame staged.
 		std::shared_ptr<RenderGraph::RunGate> gate;
-		// Each copy's groups along x and y.
 		std::uint32_t groups = 0;
-		// The frame SetFrame gave, written into the latch at the anchor's commit. staged: SetFrame ran since the last commit.
+		// Written into the latch at the commit. staged means SetFrame ran since the last commit.
 		std::vector<CopyConstants> copies = std::vector<CopyConstants>(ORGLocalShadows::kMaxCopies);
 		std::uint32_t copyCount = 0;
 		std::vector<std::byte> slotData;
 		bool staged = false;
 	};
 
-	// Copies the frame's fresh engine slices into the cache: a gated dispatch per possible copy, each reading its row of the latch.
+	// A gated dispatch per possible copy, each reading its latch row.
 	struct CopyBindings
 	{
 		org::DeclaredViewToken source, cache;
@@ -99,14 +95,14 @@ namespace
 	class ShadowCopyPass final : public org::TypedRenderGraphPass<ShadowCopyPass, CopyFrame, CopyBindings>
 	{
 	public:
-		// At the build, on the render thread: the resources as they are now (GraphResources' rule).
+		// At the build, on the render thread, so it sees the resources as they are now.
 		ShadowCopyPass(const Resources& a_resources, FrameAnchors::Texture a_source) :
 			program(a_resources.program), latch(a_resources.latch), gate(a_resources.gate), source(std::move(a_source)), cache(a_resources.cache->Graph()) {}
 
 		CopyBindings Declare(org::PassBuilder& a_builder)
 		{
 			a_builder.PreferQueue(org::QueueKind::Graphics);
-			// Both are texture arrays the shader reads and writes whole: their whole-array views, not the default first slice.
+			// The shader reads and writes both arrays whole, so use the whole-array views.
 			const org::SrvView sourceView{ .variant = static_cast<std::uint32_t>(org::SRVViewType::Texture2DArrayFull) };
 			const org::UavView cacheView{ .variant = static_cast<std::uint32_t>(org::UAVViewType::Texture2DArrayFull) };
 			return { a_builder.ShaderResource(source, sourceView).View(), a_builder.UnorderedAccess(cache, cacheView).View() };
@@ -126,7 +122,7 @@ namespace
 			if (!a_frame.program || !a_frame.latch || !a_frame.gate)
 				return;
 			CopyBlock block{ a_recording.Index(a_bindings.source), a_recording.Index(a_bindings.cache), {} };
-			// A copy the frame did not stage has zero groups in its gate entry, so it does no work.
+			// An unstaged copy has zero groups, so it does no work.
 			for (std::uint32_t copy = 0; copy < ORGLocalShadows::kMaxCopies; ++copy) {
 				block.copy = ShaderBindings::LatchOf(*a_frame.latch, a_recording.Run(), copy * sizeof(CopyConstants));
 				a_frame.gate->Dispatch(a_recording, *a_frame.program, ShaderBindings::Data(block), copy);
@@ -137,11 +133,11 @@ namespace
 		std::shared_ptr<const ComputeProgram> program;
 		std::shared_ptr<const org::LatchBlock> latch;
 		std::shared_ptr<const RenderGraph::RunGate> gate;
-		FrameAnchors::Texture source;  // the engine's shadow maps (their slot)
+		FrameAnchors::Texture source;  // the engine's shadow maps slot
 		std::shared_ptr<org::Resource> cache;
 	};
 
-	// Moves the slots' data from the latch into the buffer the engine's pixel shaders read at t102.
+	// Into the buffer the engine's pixel shaders read at t102.
 	struct DataBindings
 	{
 		org::ResourceBindingToken data;
@@ -198,7 +194,7 @@ namespace
 struct ORGLocalShadows::Impl
 {
 	std::shared_ptr<Resources> resources;
-	std::shared_ptr<const ComputeProgram> program;  // kept across shapes: it does not depend on them
+	std::shared_ptr<const ComputeProgram> program;  // kept across shapes, which it does not depend on
 };
 
 ORGLocalShadows& ORGLocalShadows::Get()
@@ -235,12 +231,11 @@ bool ORGLocalShadows::Setup(const Desc& a_desc)
 		logger::warn("[ORG] LLF local shadows stay on D3D11: the render graph is not active or EarlyPrepass has no epoch");
 		return false;
 	}
-	// The graph's copy writes the cache as a 32-bit float storage image (LocalShadowCopyCS's RWTexture2DArray<float>).
+	// The graph's copy writes the cache as a 32-bit float storage image.
 	if (a_desc.format != DXGI_FORMAT_R32_FLOAT || !a_desc.slots || !a_desc.resolution || !a_desc.dataStride) {
 		logger::warn("[ORG] LLF local shadows stay on D3D11: the cache must be R32_FLOAT with slots, a resolution and data");
 		return false;
 	}
-	// The engine's shadow maps as a graph texture; the copy reads their depth view.
 	auto source = FrameAnchors::EngineDepth(kShadowMaps);
 	if (!source) {
 		logger::warn("[ORG] LLF local shadows stay on D3D11: the engine's shadow maps could not be imported");
@@ -302,7 +297,7 @@ bool ORGLocalShadows::Setup(const Desc& a_desc)
 
 	FrameAnchors::ClientDesc client{};
 	client.id = kClientId;
-	// The slots' data first; the copy does not depend on it.
+	// The slots' data first. The copy does not depend on it.
 	client.passes.push_back({ .name = "cs.llf.local-shadow-data",
 		.anchor = FrameAnchors::Anchor::EarlyPrepass,
 		.order = 100,
@@ -313,7 +308,7 @@ bool ORGLocalShadows::Setup(const Desc& a_desc)
 		.order = 101,
 		.kind = FrameAnchors::PassKind::Compute,
 		.make = [resources]() -> std::shared_ptr<org::RenderPass> {
-			// The import as it is at this build: a new engine texture is a new import, which rebuilds the anchors.
+			// A new engine texture is a new import, which rebuilds the anchors.
 			auto shadowMaps = FrameAnchors::EngineDepth(kShadowMaps);
 			if (!shadowMaps)
 				return nullptr;
@@ -328,8 +323,7 @@ bool ORGLocalShadows::Setup(const Desc& a_desc)
 		if (!graphHost)
 			return;
 		const org::RunRef run = graphHost->CurrentRun();
-		// A frame that staged nothing opens no copy (the run closed the gate): the engine's slices are not this frame's. The
-		// data stays as last staged.
+		// A frame that staged nothing opens no copy, since the engine's slices are not this frame's. The data stays as last staged.
 		if (std::exchange(resources->staged, false)) {
 			resources->latch->Write(run, 0, std::as_bytes(std::span(resources->copies)));
 			for (std::uint32_t copy = 0; copy < resources->copyCount; ++copy)
@@ -342,7 +336,7 @@ bool ORGLocalShadows::Setup(const Desc& a_desc)
 		logger::warn("[ORG] LLF local shadows stay on D3D11: the EarlyPrepass client could not be registered");
 		return false;
 	}
-	// Drawcall Limit Fix's colour passes read them by name, ordered after the copies (Integrations/LightLimitFix).
+	// DCLF's colour passes read them by name, ordered after the copies.
 	if (!PublishedResources::Publish(*resources->data) || !PublishedResources::Publish(*resources->cache)) {
 		logger::warn("[ORG] LLF local shadows stay on D3D11: the cache or its data could not be published");
 		FrameAnchors::Unregister(kClientId);
@@ -402,7 +396,7 @@ ID3D11ShaderResourceView* ORGLocalShadows::GetDataSRV() const
 
 #else  // !CS_HAS_RENDER_GRAPH
 
-// Built without OpenRenderGraph: the local shadow cache always stays on D3D11.
+// Without OpenRenderGraph the local shadow cache always stays on D3D11.
 #	include "ORGLocalShadows.h"
 
 struct ORGLocalShadows::Impl

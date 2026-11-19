@@ -19,7 +19,7 @@ namespace ORGPostChain
 {
 	namespace
 	{
-		// lut.ps.hlsl's push block: LUT_RESOURCES, in order.
+		// LUT_RESOURCES order.
 		struct LutBlock
 		{
 			ShaderBindings::Handle texColor, texLut, texLut3D;
@@ -30,10 +30,9 @@ namespace ORGPostChain
 		constexpr int kLut3D = 3;
 
 		/**
-		 * @brief LUT::Draw on the graph: one fullscreen draw over the dynamic-resolution area. The LUT stays a D3D11 texture loaded
-		 * by LUT::ReadTexture: a 2D one is imported (FrameAnchors::D3D11Texture), a 3D one is copied into a graph texture by a
-		 * declared copy pass (the anchors import 2D textures only). No LUT loaded: nothing drawn, as on D3D11.
-		 */
+		* @brief LUT::Draw on the graph, one draw over the dynamic-resolution area. A 2D LUT is imported from D3D11.
+		* A 3D LUT is copied into a graph texture by a declared copy pass, since the anchors import 2D textures only.
+		*/
 		class LUTEffect final : public Effect
 		{
 		public:
@@ -66,18 +65,17 @@ namespace ORGPostChain
 				lutType = static_cast<LUT&>(a_feature).LutType;
 				if (lutType == kNoLut)
 					return;
-				// As LUT::SetupResources: the output takes kMAIN_COPY's format.
+				// As LUT::SetupResources, the output takes kMAIN_COPY's format.
 				const auto format = a_builder.GetShape().mainCopyFormat;
 				auto image = a_builder.CreateImage("PostProcessing::LUT::Output", format, D3D11_BIND_RENDER_TARGET);
 				constants = a_builder.Latch<LUT::LUTCB>();
 				const bool is3D = lutType == kLut3D;
 				if (is3D) {
 					a_builder.Register(*copy);
-					// The chain has no one-shot pass, so the copy runs on every run: the LUT's whole contents (a few hundred KB),
-					// declared as a copy destination before the draw reads it.
+					// The chain has no one-shot pass, so the copy of a few hundred KB runs every run.
 					a_builder.Add("upload", FrameAnchors::PassKind::Copy, [staged = staged]() { return GraphResources::MakeUploadPass({ staged }); });
 				}
-				// The shader reads only the LUT LutType names; the other handle is never read.
+				// The shader reads only the LUT LutType names.
 				a_builder.Draw({ .name = "draw",
 					.program = a_builder.Raster("PostProcessing/LUT/lut.ps.hlsl", ShaderBindings::Words<LutBlock>(), { format }),
 					.bindings = { Bind::Srv(a_builder.Current()), is3D ? Bind::Unused() : Bind::Srv(source), is3D ? Bind::Srv(source) : Bind::Unused(),
@@ -95,11 +93,9 @@ namespace ORGPostChain
 
 		private:
 			/**
-			 * @brief The 3D LUT's graph copy, made again when LUT::ReadTexture loaded another. The file's mip 0 (all the shader
-			 * loads) is read again on the CPU and staged for the chain's upload pass, which declares the texture a copy destination:
-			 * the graph orders it before the draw and tracks the texture. A D3D11 CopyResource would write a graph resource outside
-			 * the graph. @return Null, or why it cannot be made.
-			 */
+			* @brief Re-reads the file's mip 0 on the CPU and stages it for the upload pass, so the graph orders and tracks the copy.
+			* A D3D11 CopyResource would write a graph resource outside the graph. @return Null, or why it cannot be made.
+			*/
 			const char* CopyLut3D(const LUT& a_lut)
 			{
 				const auto& loaded = a_lut.texLUT3D->resource;
@@ -108,7 +104,7 @@ namespace ORGPostChain
 				copy.reset();
 				staged.reset();
 				copiedFrom = nullptr;
-				// The file LUT::ReadTexture loaded: the same path, resolved the same way.
+				// The same path LUT::ReadTexture resolves.
 				const auto path = UnifiedPresetCatalog::GetSingleton().ResolveActivePackPath(a_lut.attemptedPath);
 				DirectX::ScratchImage image;
 				if (FAILED(DirectX::LoadFromDDSFile(path.c_str(), DirectX::DDS_FLAGS_NONE, nullptr, image)))
@@ -124,7 +120,7 @@ namespace ORGPostChain
 				desc.Format = metadata.format;
 				desc.Usage = D3D11_USAGE_DEFAULT;
 				desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
-				// Written once and read only by the chain: persistent, and graph-only.
+				// Written once and read only by the chain, so persistent and graph-only.
 				auto next = std::make_unique<GraphResources::Texture3D>(desc, "PostProcessing::LUT::Lut3D",
 					GraphResources::Options{ .lifetime = GraphResources::Lifetime::Persistent });
 				if (!*next)
@@ -145,8 +141,8 @@ namespace ORGPostChain
 			}
 
 			std::unique_ptr<GraphResources::Texture3D> copy;
-			std::shared_ptr<const GraphResources::StagedUpload> staged;  // copy's contents, for the upload pass
-			winrt::com_ptr<ID3D11Texture3D> copiedFrom;  // held, so a new LUT never takes the old one's address
+			std::shared_ptr<const GraphResources::StagedUpload> staged;  // for the upload pass
+			winrt::com_ptr<ID3D11Texture3D> copiedFrom;  // held so a new LUT never takes the old one's address
 			FrameAnchors::Texture source;
 			LatchRegion<LUT::LUTCB> constants;
 			int lutType = kNoLut;

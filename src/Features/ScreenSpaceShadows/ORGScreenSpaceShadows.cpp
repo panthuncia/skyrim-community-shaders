@@ -38,39 +38,35 @@ namespace
 {
 	constexpr const char* kClientId = "cs.screen-space-shadows";
 	constexpr const char* kShader = "ScreenSpaceShadows/RaymarchCS.hlsl";
-	// The shadow texture's name, which it is published under: Drawcall Limit Fix's t45.
+	// Published under this name for DCLF's t45.
 	constexpr std::string_view kTextureName = ORGScreenSpaceShadows::kShadowTextureId;
-	// Terrain Blending's D3D11 blended depth, imported while its graph path is off (FrameAnchors::D3D11Texture adds "cs.d3d11.").
 	constexpr std::uint32_t kMaxDispatches = ScreenSpaceShadows::Dispatches::kMax;
-	// The clear's run gate entry, after the dispatches': every commit opens it, as the D3D11 path clears on every run.
+	// After the dispatches' entries. Every commit opens it, as the D3D11 path clears on every run.
 	constexpr std::uint32_t kClearEntry = kMaxDispatches;
 
-	// RaymarchCS's push block under ORG, in list order: three handles, then PerFrame's latch region.
+	// Three handles, then PerFrame's latch region.
 	struct RaymarchBlock
 	{
 		ShaderBindings::Handle depthTexture, outputTexture, pointBorderSampler;
 		ShaderBindings::Latch perFrame;
 	};
 
-	// One execution's values, in its slot of the latch block: each dispatch's constants (RaymarchConstants, read at their
-	// offset by the shader). The group counts are in the run gate.
+	// Each dispatch's RaymarchConstants. The group counts are in the run gate.
 	struct RaymarchLatchData
 	{
 		ScreenSpaceShadows::RaymarchCB constants[kMaxDispatches];
 	};
 	static_assert(sizeof(ScreenSpaceShadows::RaymarchCB) % 16 == 0);
 
-	/** @brief The raymarch program for one sample count. */
 	struct Program
 	{
 		std::shared_ptr<const ComputeProgram> compute;
 		std::uint32_t sampleCount = 0;
 	};
 
-	/** @brief The raymarch programs by sample count. */
 	using ProgramSet = std::map<std::uint32_t, std::shared_ptr<const Program>>;
 
-	/** @brief The depth the raymarch reads: the z-prepass copy, or Terrain Blending's published blended depth by its id. */
+	/** @brief The z-prepass copy, or Terrain Blending's published blended depth. */
 	struct DepthSource
 	{
 		FrameAnchors::Texture resource;
@@ -80,11 +76,11 @@ namespace
 		bool operator==(const DepthSource&) const = default;
 	};
 
-	/** @brief What the passes are made from; changed on the render thread only, between builds (then FrameAnchors::Refresh). */
+	/** @brief Changed on the render thread only, between builds. */
 	struct ShadowState
 	{
 		std::shared_ptr<const Program> program;
-		ProgramSet programs;  // built at setup; a count outside it is added at first sight
+		ProgramSet programs;  // built at setup, other counts added at first sight
 		std::unique_ptr<GraphResources::Texture2D> output;
 		std::shared_ptr<org::LatchBlock> latch;
 		std::shared_ptr<RenderGraph::RunGate> gate;
@@ -95,7 +91,7 @@ namespace
 	std::shared_ptr<const Program> LoadProgram(rhi::Device a_device, std::uint32_t a_sampleCount)
 	{
 		std::vector<std::pair<std::wstring, std::wstring>> defines{ { L"SAMPLE_COUNT", std::to_wstring(a_sampleCount) } };
-		// As the D3D11 build: the depth texture's HLSL type follows Terrain Blending.
+		// As the D3D11 build, the depth texture's HLSL type follows Terrain Blending.
 		if (globals::features::terrainBlending.loaded)
 			defines.push_back({ L"TERRAIN_BLENDING", L"" });
 		auto program = std::make_shared<Program>();
@@ -104,10 +100,7 @@ namespace
 		return program->compute ? program : nullptr;
 	}
 
-	/**
-	 * @brief Every sample count the settings can ask for at the screen size: each multiplier (1-4) at the full render size and
-	 * at the dynamic one now. A dynamic size seen later can ask for another; ProgramFor builds that one at first sight.
-	 */
+	/** @brief Each multiplier (1-4) at the full and current dynamic render size. Later dynamic sizes are built at first sight. */
 	std::set<std::uint32_t> SettingsSampleCounts()
 	{
 		const auto* graphics = globals::game::graphicsState;
@@ -121,11 +114,7 @@ namespace
 		return counts;
 	}
 
-	/**
-	 * @brief The depth the D3D11 path reads at Prepass (Util::GetCurrentSceneDepthSRV(false)), as a graph texture: on Terrain
-	 * Blending's ORG path its published blended depth, which the graph orders after the blend. Without it, the z-prepass copy: an
-	 * import of the D3D11 texture is not ordered after its writer.
-	 */
+	/** @brief Terrain Blending's published blended depth on its ORG path, else the z-prepass copy, since a D3D11 import is not ordered after its writer. */
 	DepthSource CurrentDepth()
 	{
 		auto& terrainBlending = globals::features::terrainBlending;
@@ -144,8 +133,7 @@ namespace
 		return "Terrain Blending's graph texture";
 	}
 
-	// Every dispatch of the list's capacity, each reading its constants from the execution's latch region and its group counts
-	// from its run gate entry.
+	// Every dispatch of the list's capacity, with constants from the latch and counts from the gate.
 	struct RaymarchBindings
 	{
 		org::DeclaredViewToken depth, output;
@@ -162,7 +150,7 @@ namespace
 	class RaymarchPass final : public org::TypedRenderGraphPass<RaymarchPass, RaymarchFrame, RaymarchBindings>
 	{
 	public:
-		// At the build, on the render thread: the state as it is now.
+		// At the build, on the render thread, so it sees the state as it is now.
 		explicit RaymarchPass(const ShadowState& a_state) :
 			program(a_state.program), latch(a_state.latch), gate(a_state.gate), sampler(a_state.sampler.Index()), depth(a_state.depth), output(a_state.output->Versioned())
 		{}
@@ -172,7 +160,7 @@ namespace
 			a_builder.PreferQueue(org::QueueKind::Graphics);
 			const auto in = depth.resource ? a_builder.ShaderResource(depth.resource).View() :
 			                                 a_builder.ShaderResource(org::ResourceIdentifier(depth.published)).View();
-			// The output's slot: a resize is a new version, which the pass writes with no build.
+			// A resize is a new version of the slot, written with no build.
 			return { in, a_builder.UnorderedAccess(org::ResourceResolverAndRange(*output)).View() };
 		}
 
@@ -194,7 +182,7 @@ namespace
 				return;
 			const org::RunRef run = a_recording.Run();
 			RaymarchBlock block{ a_recording.Index(a_bindings.depth), a_recording.Index(a_bindings.output), a_frame.sampler, {} };
-			// Bend's dispatches write separate pixels, so they need no barrier between them (as on D3D11).
+			// Bend's dispatches write separate pixels, so they need no barrier between them, as on D3D11.
 			for (std::uint32_t i = 0; i < kMaxDispatches; ++i) {
 				block.perFrame = ShaderBindings::LatchOf(*a_frame.latch, run,
 					static_cast<std::uint32_t>(offsetof(RaymarchLatchData, constants) + i * sizeof(ScreenSpaceShadows::RaymarchCB)));
@@ -211,7 +199,7 @@ namespace
 		std::shared_ptr<org::VersionedTexture> output;
 	};
 
-	/** @brief a_sampleCount's program: from the set built at setup, else built now (logged) and kept. Null when it fails. */
+	/** @brief Built now, logged and kept, when setup did not build it. Null on failure. */
 	std::shared_ptr<const Program> ProgramFor(ShadowState& a_state, std::uint32_t a_sampleCount)
 	{
 		if (const auto found = a_state.programs.find(a_sampleCount); found != a_state.programs.end())
@@ -223,7 +211,7 @@ namespace
 		return program;
 	}
 
-	/** @brief The engine's shadow mask size, which the output follows (ScreenSpaceShadows::SetupResources); none without the mask. */
+	/** @brief The output follows it. None without the mask. */
 	std::optional<std::pair<UINT, UINT>> ShadowMaskSize()
 	{
 		auto* renderer = globals::game::renderer;
@@ -276,7 +264,7 @@ bool ORGScreenSpaceShadows::Setup(const D3D11_TEXTURE2D_DESC& a_desc)
 	}
 	try {
 		auto state = std::make_shared<ShadowState>();
-		// Every sample count the settings can ask for at this size, so a settings change or the upscaler's scale finds its program.
+		// Every count the settings can ask for, so a settings or upscaler change finds its program.
 		for (const auto count : SettingsSampleCounts()) {
 			auto program = LoadProgram(host->Device(), count);
 			if (!program) {
@@ -286,7 +274,7 @@ bool ORGScreenSpaceShadows::Setup(const D3D11_TEXTURE2D_DESC& a_desc)
 			state->programs.emplace(count, std::move(program));
 		}
 		state->program = ProgramFor(*state, globals::features::screenSpaceShadows.GetScaledSampleCount());
-		// The D3D11 sampler's: point, border white (beyond the screen is far depth, no shadow).
+		// Point, border white, since beyond the screen is far depth with no shadow.
 		state->sampler = ShaderBindings::CreateSampler({ .minFilter = rhi::Filter::Nearest,
 			.magFilter = rhi::Filter::Nearest,
 			.mipFilter = rhi::MipFilter::Nearest,
@@ -294,12 +282,11 @@ bool ORGScreenSpaceShadows::Setup(const D3D11_TEXTURE2D_DESC& a_desc)
 			.addressV = rhi::AddressMode::Border,
 			.addressW = rhi::AddressMode::Border,
 			.borderPreset = rhi::BorderPreset::OpaqueWhite });
-		// Written in full every frame, but the engine's draws read it through D3D11: exported, so never aliased. Versioned: the
-		// passes declare its slot, so a resolution change resizes it as a new version with no graph build (Prepass).
+		// The engine reads it through D3D11, so exported and never aliased. Versioned, so a resize needs no graph build.
 		state->output = std::make_unique<GraphResources::Texture2D>(a_desc, std::string(kTextureName),
 			GraphResources::Options{ .lifetime = GraphResources::Lifetime::Transient, .d3d11 = GraphResources::Export::SRV, .versioned = true });
 		state->latch = std::make_shared<org::LatchBlock>("cs.screen-space-shadows.latch", static_cast<std::uint32_t>(sizeof(RaymarchLatchData)));
-		// One entry per dispatch of Bend's list: the commit opens those this frame uses.
+		// One entry per dispatch of Bend's list, plus the clear.
 		state->gate = RenderGraph::RunGate::Create("cs.screen-space-shadows.dispatches", kMaxDispatches + 1);
 		state->depth = CurrentDepth();
 		if (!state->program || !state->sampler || !*state->output || !state->output->SRV() || !state->output->Versioned() || !state->gate || !state->depth) {
@@ -313,8 +300,7 @@ bool ORGScreenSpaceShadows::Setup(const D3D11_TEXTURE2D_DESC& a_desc)
 			.anchor = FrameAnchors::Anchor::Prepass,
 			.order = 100,
 			.kind = FrameAnchors::PassKind::Compute,
-			// The clear to white (no shadow), as the D3D11 path clears before its dispatches. Gated: recorded at execution, it skips a run
-			// that left its entry closed.
+			// Clear to white, as the D3D11 path does before its dispatches. Skips a run that left its entry closed.
 			.make = [state] { return GraphPasses::MakeUavClear(*state->output, { 1.0f, 1.0f, 1.0f, 1.0f }, { state->gate, kClearEntry }); },
 			.atExecution = true });
 		client.passes.push_back({ .name = "cs.screen-space-shadows.raymarch",
@@ -327,7 +313,7 @@ bool ORGScreenSpaceShadows::Setup(const D3D11_TEXTURE2D_DESC& a_desc)
 		client.commit = [state](const FrameAnchors::Point&) {
 			state->gate->OpenDispatch(kClearEntry, 1);
 			auto& feature = globals::features::screenSpaceShadows;
-			// The gate is closed for this run: a frame without the full sky dispatches nothing.
+			// A frame without the full sky dispatches nothing.
 			if (!feature.ShouldDraw())
 				return;
 			const auto dispatches = feature.BuildDispatches();
@@ -341,7 +327,7 @@ bool ORGScreenSpaceShadows::Setup(const D3D11_TEXTURE2D_DESC& a_desc)
 		if (!FrameAnchors::Register(std::move(client))) {
 			return false;
 		}
-		// Drawcall Limit Fix's colour passes read it by name, ordered after the raymarch (Integrations/ScreenSpaceShadows).
+		// DCLF's colour passes read it by name, ordered after the raymarch.
 		if (!PublishedResources::Publish(*state->output)) {
 			logger::warn("[ORG] Screen Space Shadows stays on D3D11: the shadow texture could not be published");
 			FrameAnchors::Unregister(kClientId);
@@ -376,12 +362,11 @@ ID3D11ShaderResourceView* ORGScreenSpaceShadows::Prepass()
 	if (!IsActive())
 		return nullptr;
 	auto& state = *impl->state;
-	// The shadow mask made again at another size. The output takes that size at the next frame boundary as a new version.
+	// A new shadow mask size takes effect at the next frame boundary as a new version.
 	if (const auto size = ShadowMaskSize())
 		state.output->RequestSize(size->first, size->second);
 	bool changed = false;
-	// The sample count follows the settings and the render size (as GetComputeRaymarch's recompile does). The passes are made
-	// again with the new program: a graph rebuild, only when the count changes.
+	// The sample count follows the settings and render size. A change rebuilds the graph with the new program.
 	if (const auto sampleCount = globals::features::screenSpaceShadows.GetScaledSampleCount(); sampleCount != state.program->sampleCount) {
 		auto program = ProgramFor(state, sampleCount);
 		if (!program) {
@@ -414,7 +399,7 @@ ID3D11ShaderResourceView* ORGScreenSpaceShadows::ShadowSRV() const
 
 #else  // !CS_HAS_RENDER_GRAPH
 
-// Built without OpenRenderGraph: Screen Space Shadows always draws with D3D11.
+// Without OpenRenderGraph Screen Space Shadows always draws with D3D11.
 #	include "ORGScreenSpaceShadows.h"
 
 struct ORGScreenSpaceShadows::Impl

@@ -16,10 +16,10 @@ namespace ORGPostChain
 	namespace
 	{
 		constexpr const char* kShader = "PostProcessing/LocalExposure/localexposure.cs.hlsl";
-		constexpr DXGI_FORMAT kLuminanceFormat = DXGI_FORMAT_R16_FLOAT;  // as LocalExposure::SetupResources
+		constexpr DXGI_FORMAT kLuminanceFormat = DXGI_FORMAT_R16_FLOAT;
 		constexpr DXGI_FORMAT kGridFormat = DXGI_FORMAT_R32G32_FLOAT;
 
-		// localexposure.cs.hlsl's push block, every entry: LOCAL_EXPOSURE_RESOURCES, in order.
+		// LOCAL_EXPOSURE_RESOURCES order, every entry.
 		struct LocalExposureBlock
 		{
 			ShaderBindings::Handle texColor, texLogLuminance, texLuminanceGrid, texBlurredLuminance;
@@ -30,16 +30,13 @@ namespace ORGPostChain
 
 		std::uint32_t Groups8(std::uint32_t a_size) { return (a_size + 7) >> 3; }
 
-		/** @brief The D3D11 dispatch's size of a pyramid level: rounded up, where the level's texture is rounded down. */
+		/** @brief Rounded up, where the level's texture is rounded down. */
 		std::uint32_t DispatchSize(std::uint32_t a_size, std::uint32_t a_mip) { return (std::max)(1u, (a_size + ((1u << a_mip) - 1u)) >> a_mip); }
 
 		/**
-		 * @brief LocalExposure::Draw on the graph: the scene's log luminance, its pyramid down to the blur level, the broad blur, and
-		 * the edge-aware grid. Each pyramid level is its own texture the size of that D3D11 mip, so every pass reads and writes whole
-		 * textures, as the D3D11 path's single-mip views do. All of them are transient and owned here (the chain's images are kMAIN
-		 * sized). Composite reads three of them: published as "PostProcessing::LocalExposure::LogLuminance", "::LuminanceGrid" and
-		 * "::BlurredLuminance".
-		 */
+		* @brief LocalExposure::Draw on the graph. Each pyramid level is its own texture the size of that D3D11 mip, so every pass reads
+		* and writes whole textures. All are transient and owned here. Composite reads three of them by name.
+		*/
 		class LocalExposureEffect final : public Effect
 		{
 		public:
@@ -47,7 +44,7 @@ namespace ORGPostChain
 			{
 				const auto shape = a_builder.GetShape();
 				if (!linearSampler || !mirrorSampler) {
-					// LocalExposure's samplers: linear over every mip, clamped or mirrored.
+					// Linear over every mip, clamped or mirrored.
 					linearSampler = ShaderBindings::CreateSampler(rhi::SamplerDesc{});
 					mirrorSampler = ShaderBindings::CreateSampler(rhi::SamplerDesc{ .addressU = rhi::AddressMode::Mirror, .addressV = rhi::AddressMode::Mirror });
 					if (!linearSampler || !mirrorSampler) {
@@ -71,7 +68,7 @@ namespace ORGPostChain
 				constants = a_builder.Latch<LocalExposure::LocalExposureCB>();
 				const auto linear = Bind::Handle(linearSampler.Index());
 				const auto mirror = Bind::Handle(mirrorSampler.Index());
-				// Every entry takes the whole list; each reads only its own resources.
+				// Every entry takes the whole list, and each reads only its own.
 				auto bindings = [&](Bind a_color, Bind a_logLuminance, Bind a_output, Bind a_grid) {
 					return std::vector<Bind>{ std::move(a_color), std::move(a_logLuminance), Bind::Unused(), Bind::Unused(), linear, mirror,
 						std::move(a_output), std::move(a_grid), Bind::Latch(constants) };
@@ -116,7 +113,7 @@ namespace ORGPostChain
 			}
 
 		private:
-			/** @brief The textures LocalExposure::SetupResources makes, for a scene a_width by a_height. False when one cannot be made. */
+			/** @brief False when one cannot be made. */
 			bool MakeTextures(UINT a_width, UINT a_height)
 			{
 				levels.clear();
@@ -139,7 +136,7 @@ namespace ORGPostChain
 					return std::make_unique<GraphResources::Texture2D>(desc, std::move(a_name));
 				};
 
-				// The pyramid's levels 0 to the blur level: the D3D11 mips' sizes (each halved, rounded down).
+				// Each level halves, rounded down, as the D3D11 mips.
 				const UINT blurMip = LocalExposure::BlurMip(LocalExposure::MipCount(a_width, a_height));
 				for (UINT mip = 0; mip <= blurMip; ++mip) {
 					levels.push_back(texture2D(a_width >> mip, a_height >> mip, std::format("PostProcessing::LocalExposure::LogLuminance{}", mip)));
@@ -173,7 +170,7 @@ namespace ORGPostChain
 				return false;
 			}
 
-			std::vector<std::unique_ptr<GraphResources::Texture2D>> levels;  // the log-luminance pyramid, level 0 at the scene's size
+			std::vector<std::unique_ptr<GraphResources::Texture2D>> levels;  // level 0 at the scene's size
 			std::unique_ptr<GraphResources::Texture2D> blurTemp;
 			std::unique_ptr<GraphResources::Texture2D> blurred;
 			std::unique_ptr<GraphResources::Texture3D> grid;

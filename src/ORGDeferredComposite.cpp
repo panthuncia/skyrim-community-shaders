@@ -59,7 +59,7 @@ namespace
 
 	using ShaderBindings::Handle;
 
-	// DeferredCompositeCS's push block: its DEFERRED_COMPOSITE_RESOURCES list, in order.
+	// In DEFERRED_COMPOSITE_RESOURCES order.
 	struct CompositeBlock
 	{
 		SharedConstants::Handles shared;
@@ -73,10 +73,10 @@ namespace
 	};
 	static_assert(sizeof(CompositeBlock) == 96, "matches the shader's push block (check-dual-target-shaders reports 96 bytes)");
 
-	// The D3D11 composite's slots of what other features produce.
+	// The D3D11 composite's slots for other features' outputs.
 	constexpr std::array<std::uint32_t, 9> kViewSlots{ 6, 7, 8, 10, 11, 12, 13, 14, 15 };
 
-	/** @brief The ids a slot's producer publishes its texture under, and whether the shader reads a cube. kViewSlots order. */
+	/** @brief In kViewSlots order. */
 	struct SlotSource
 	{
 		std::array<std::string_view, 2> ids;
@@ -94,10 +94,7 @@ namespace
 		{ { ORGIBL::kSkyId, {} }, false },
 	} };
 
-	/**
-	 * @brief What the composite reads at one of kViewSlots: the producer's published resource by its id (ordered after its writes
-	 * in any epoch). Without one: the null descriptor, as D3D11 binds nothing there.
-	 */
+	/** @brief The producer's published resource, ordered after its writes. Without one, the null descriptor, as D3D11 binds nothing there. */
 	struct SlotInput
 	{
 		std::string_view published;
@@ -106,46 +103,40 @@ namespace
 		bool operator==(const SlotInput&) const = default;
 	};
 
-	// The engine swaps the normals target with its twin every frame (forwardRenderTargets[2] alternates): both are imported and
-	// declared, and each frame's execution picks one.
+	// The engine swaps the normals target with its twin every frame, so both are imported and each execution picks one.
 	constexpr std::array<std::uint32_t, 2> kNormalsTargets{ RE::RENDER_TARGETS::kNORMAL_TAAMASK_SSRMASK,
 		RE::RENDER_TARGETS::kNORMAL_TAAMASK_SSRMASK_SWAP };
 
-	/** @brief The engine targets the pass declares, imported once (FrameAnchors::EngineTarget). Null reflectance and depth: not read. */
+	/** @brief Imported once. Null reflectance and depth are not read. */
 	struct Targets
 	{
 		FrameAnchors::Texture specular, albedo, normalRoughness, masks, masks2, reflectance, depth;
 		FrameAnchors::Texture main, motionVectors;
-		std::array<FrameAnchors::Texture, 2> normals;  // kNormalsTargets
+		std::array<FrameAnchors::Texture, 2> normals;
 		std::array<SlotInput, kViewSlots.size()> inputs;
 
 		bool operator==(const Targets&) const = default;
 	};
 
-	/**
-	 * @brief One frame's values that are not declared views: immutable once published, replaced only when they change. The
-	 * recordings that read one keep it, with its null descriptor, until their GPU work retires (RecordingContext::Retain).
-	 */
+	/** @brief Immutable once published. Recordings that read one keep it until their GPU work retires. */
 	struct Execution
 	{
-		std::uint64_t serial = 0;  // the pass's revision: a new one for every execution made
+		std::uint64_t serial = 0;  // the pass's revision, new for every execution
 		std::shared_ptr<const ComputeProgram> program;
 		std::uint32_t groupsX = 0, groupsY = 0;
 		std::uint32_t normals = 0;  // which of kNormalsTargets the composite writes
-		Handle null = 0;            // the null descriptor, for a slot with no input
+		Handle null = 0;            // for a slot with no input
 		Handle sampler = 0;
-		std::shared_ptr<const void> nullOwner;  // the null descriptor's ownership, through GPU completion
+		std::shared_ptr<const void> nullOwner;  // kept through GPU completion
 	};
 
-	/** @brief What the passes share with the render thread. */
 	struct Shared
 	{
 		Targets targets;
 		std::atomic<std::shared_ptr<const Execution>> execution;
-		// The execution each commit chose, by the epoch's run: what the pass recorded at execution reads. It may record on the
-		// submission thread after the render thread chose the next frame's.
+		// By run. The pass may record on the submission thread after the render thread chose the next frame's.
 		::RenderGraph::RunSlots<Execution> executions;
-		// One entry, opened by the commit that chose an execution: the pass is gated, so it can run in a frame phase.
+		// Gated so the pass can run in a frame phase.
 		std::shared_ptr<const RenderGraph::RunGate> gate;
 	};
 
@@ -155,13 +146,13 @@ namespace
 		org::DeclaredViewToken specular, albedo, normalRoughness, masks, masks2, reflectance, depth;
 		org::DeclaredViewToken main, motionVectors;
 		std::array<org::DeclaredViewToken, 2> normals;
-		std::array<org::DeclaredViewToken, kViewSlots.size()> inputs;  // where declared is set
+		std::array<org::DeclaredViewToken, kViewSlots.size()> inputs;
 		std::array<bool, kViewSlots.size()> declared{};
 	};
 
 	struct CompositeFrame
 	{
-		std::shared_ptr<const Execution> execution;  // null when the pass records at execution: Record reads shared's then
+		std::shared_ptr<const Execution> execution;  // null when recorded at execution, which reads shared's then
 		std::shared_ptr<const Shared> shared;
 		bool reflectance = false, depth = false;
 	};
@@ -202,9 +193,7 @@ namespace
 			return bindings;
 		}
 
-		// The recorded dispatch depends on the execution only: the shared constants are uploaded each run. Recorded at execution, it
-		// reads the execution the commit chose when it records, so the execution is not part of it: the normals target alternates
-		// every frame, and a ticket prepared ahead would be prepared again each time.
+		// Recorded at execution, so the execution is not part of the revision. Otherwise the alternating normals target would re-prepare every frame.
 		void Revision(std::vector<std::uint64_t>& a_out) const
 		{
 			if (atExecution)
@@ -219,7 +208,7 @@ namespace
 				static_cast<bool>(shared->targets.depth) };
 		}
 
-		// Recorded at execution: a run whose commit did not open the gate (it chose no execution) records only the pass's barriers.
+		// A run that chose no execution records only barriers.
 		static bool SkipsAtExecution(const CompositeBindings&, const CompositeFrame& a_frame, const org::PassRecordContext& a_recording)
 		{
 			return a_frame.shared && a_frame.shared->gate && !a_frame.shared->gate->IsOpen(a_recording.Run(), 0);
@@ -236,7 +225,6 @@ namespace
 			// The descriptors it names live as long as any submission of this recording.
 			a_recording.Retain(executionRef);
 			const Handle null = execution->null;
-			// Each input's index comes from the view its declaration returned (kViewSlots order).
 			std::array<Handle, kViewSlots.size()> inputs{};
 			for (std::size_t i = 0; i < inputs.size(); ++i)
 				inputs[i] = a_bindings.declared[i] ? a_recording.Index(a_bindings.inputs[i]) : null;
@@ -267,13 +255,12 @@ namespace
 
 	private:
 		std::shared_ptr<Shared> shared;
-		bool atExecution = false;  // FrameAnchors::RecordsAtExecution at the build
+		bool atExecution = false;
 	};
 
-	/** @brief Deferred::CompositeDefines as the program takes them; ComputeProgram adds the common ones, as Util::CompileShader does. */
+	/** @brief ComputeProgram adds the common defines, as Util::CompileShader does. */
 	std::vector<std::pair<std::wstring, std::wstring>> CompositeDefines(bool a_interior)
 	{
-		// Defines are ASCII.
 		const auto wide = [](const char* a_text) { return a_text ? std::wstring(a_text, a_text + std::strlen(a_text)) : std::wstring(); };
 		std::vector<std::pair<std::wstring, std::wstring>> defines;
 		for (const auto& [name, value] : Deferred::CompositeDefines(a_interior))
@@ -292,15 +279,14 @@ struct ORGDeferredComposite::Impl
 	bool registered = false;
 	bool failed = false;
 
-	// This frame's, from SetFrame: what the commit resolves.
 	Frame frame{};
-	std::uint32_t normals = 0;  // the frame's kNormalsTargets entry
+	std::uint32_t normals = 0;
 	bool frameReady = false;
-	// The last execution for each normals target: the engine alternates them, so each frame reuses one.
+	// The engine alternates normals targets, so each frame reuses one of these.
 	std::array<std::shared_ptr<const Execution>, 2> byNormals;
 	bool composited = false;
-	std::uint64_t executions = 0;  // the serial of the last execution made
-	std::shared_ptr<RenderGraph::RunGate> gate;  // Shared::gate
+	std::uint64_t executions = 0;
+	std::shared_ptr<RenderGraph::RunGate> gate;
 
 	bool LoadPrograms()
 	{
@@ -317,7 +303,7 @@ struct ORGDeferredComposite::Impl
 		return exterior && interior;
 	}
 
-	/** @brief The engine targets of a_frame, or nothing when one cannot be imported. */
+	/** @brief Nothing when one cannot be imported. */
 	std::optional<Targets> ImportTargets(const Frame& a_frame) const
 	{
 		Targets t;
@@ -330,7 +316,7 @@ struct ORGDeferredComposite::Impl
 		for (std::size_t i = 0; i < kNormalsTargets.size(); ++i)
 			t.normals[i] = FrameAnchors::EngineTarget(kNormalsTargets[i]);
 		t.motionVectors = FrameAnchors::EngineTarget(RE::RENDER_TARGETS::kMOTION_VECTOR);
-		// As the D3D11 composite: depth and reflectance only with Dynamic Cubemaps (null otherwise).
+		// As the D3D11 composite, depth and reflectance only with Dynamic Cubemaps.
 		if (globals::features::dynamicCubemaps.loaded) {
 			t.reflectance = FrameAnchors::EngineTarget(REFLECTANCE);
 			t.depth = FrameAnchors::EngineDepth(RE::RENDER_TARGETS_DEPTHSTENCIL::kPOST_ZPREPASS_COPY);
@@ -344,11 +330,7 @@ struct ORGDeferredComposite::Impl
 		return t;
 	}
 
-	/**
-	 * @brief The input of kViewSlots[a_slot] for a_view, the view the D3D11 composite binds there: its producer's published id
-	 * while a_view is that id's export. Otherwise the producer is not on the graph, and the slot binds the null descriptor: an
-	 * import of its D3D11 texture is not ordered after its producer.
-	 */
+	/** @brief The producer's published id while a_view is its export. Otherwise bind the null descriptor, since a D3D11 import is not ordered after its producer. */
 	static SlotInput InputOf(std::size_t a_slot, ID3D11ShaderResourceView* a_view)
 	{
 		const auto& source = kSlotSources[a_slot];
@@ -385,11 +367,10 @@ struct ORGDeferredComposite::Impl
 					return std::static_pointer_cast<org::RenderPass>(
 						std::make_shared<CompositePass>(next, FrameAnchors::RecordsAtExecution(FrameAnchors::Anchor::DeferredComposite)));
 				},
-				// Its execution is chosen by the commit: recorded then, the pass reads it without a ticket prepared again.
+				// The commit chooses the execution, so record then.
 				.atExecution = true } },
 			.commit = [this](const FrameAnchors::Point&) {
 				Commit();
-				// The chosen execution, by this run, for the pass recorded at execution (null: none chosen).
 				if (shared)
 					if (auto* host = RenderGraphRuntime::Get().Host())
 						shared->executions.Store(host->CurrentRun(), composited ? shared->execution.load(std::memory_order_acquire) : nullptr);
@@ -400,19 +381,19 @@ struct ORGDeferredComposite::Impl
 			.sharedConstants = true,
 			.gates = { gate },
 		});
-		// The recordings that read the old executions keep them (CompositePass::Record).
+		// Recordings that read the old executions keep them.
 		if (previous)
 			byNormals = {};
 		return registered;
 	}
 
-	/** @brief In the epoch: this frame's execution, resolved when its inputs changed. */
+	/** @brief Resolves a new execution only when the inputs changed. */
 	void Commit()
 	{
 		composited = false;
 		if (!frameReady || !shared)
 			return;
-		// Made inside the first epoch, where the graph's descriptor service is there.
+		// Made inside the first epoch, where the descriptor service exists.
 		if (!sampler) {
 			// Deferred::linearSampler's description.
 			rhi::SamplerDesc samplerDesc{};
@@ -493,7 +474,7 @@ void ORGDeferredComposite::SetFrame(const Frame& a_frame)
 		impl->failed = true;
 		return;
 	}
-	// The skylighting probes without Dynamic Cubemaps: D3D11 reads a null 3D texture, which the graph has no descriptor for.
+	// D3D11 reads a null 3D texture here, which the graph has no descriptor for.
 	if (globals::features::skylighting.loaded && !a_frame.views[8])
 		return;
 	const auto normals = std::ranges::find(kNormalsTargets, a_frame.normals);
@@ -535,7 +516,7 @@ void ORGDeferredComposite::ClearShaderCache()
 
 #else  // !CS_HAS_RENDER_GRAPH
 
-// Built without OpenRenderGraph: the composite is always D3D11's.
+// Without OpenRenderGraph the composite is always D3D11's.
 struct ORGDeferredComposite::Impl
 {};
 

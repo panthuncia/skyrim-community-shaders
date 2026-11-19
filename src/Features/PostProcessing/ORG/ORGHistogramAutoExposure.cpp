@@ -30,14 +30,14 @@ namespace ORGPostChain
 		constexpr const char* kShader = "PostProcessing/HistogramAutoExposure/histogram.cs.hlsl";
 		constexpr std::uint32_t kBins = 256;
 
-		// histogram.cs.hlsl's push block, every entry: HISTOGRAM_RESOURCES, in order.
+		// HISTOGRAM_RESOURCES order, every entry.
 		struct HistogramBlock
 		{
 			ShaderBindings::Handle texColor, rwHistogram, rwAdaptation;
 			ShaderBindings::Latch autoExposure;
 		};
 
-		/** @brief What the render thread, the readback passes (graph host thread) and the readback callbacks share. */
+		/** @brief Shared by the render thread, the readback passes on the graph host thread, and the readback callbacks. */
 		struct Readback
 		{
 			std::shared_ptr<org::runtime::IReadbackService> service;
@@ -45,7 +45,7 @@ namespace ORGPostChain
 			std::atomic<bool> wantAdaptation = false;
 
 			std::mutex mutex;
-			std::optional<std::array<std::uint32_t, kBins>> histogram;  // guarded: the latest result not taken yet
+			std::optional<std::array<std::uint32_t, kBins>> histogram;  // guarded, the latest result not taken yet
 			std::optional<float> adaptation;                            // guarded
 		};
 
@@ -61,10 +61,7 @@ namespace ORGPostChain
 			org::runtime::ReadbackCapturePlan plan;
 		};
 
-		/**
-		 * @brief The histogram or the adaptation into a readback buffer, on the frames the settings UI or the log wants it (as the
-		 * D3D11 staging copies). No revision: it is prepared every frame, so a plan is never replayed.
-		 */
+		/** @brief Only on frames the settings UI or the log wants it, as the D3D11 staging copies. No revision, so it is prepared every frame and never replayed. */
 		class ReadbackPass final : public org::TypedRenderGraphPass<ReadbackPass, ReadbackFrame>
 		{
 		public:
@@ -84,7 +81,7 @@ namespace ORGPostChain
 					return {};
 				ReadbackFrame data{};
 				data.source = a_preparation.CaptureResource(source->GetGlobalResourceID());
-				// The readback service's thread: the result waits for the next Commit.
+				// The readback service's thread. The result waits for the next Commit.
 				org::ReadbackCaptureCallback onDone = [weak = std::weak_ptr<Readback>(shared), histogram](org::ReadbackCaptureResult&& a_result) {
 					const auto owner = weak.lock();
 					if (!owner)
@@ -137,18 +134,15 @@ namespace ORGPostChain
 		}
 
 		/**
-		 * @brief HistogramAutoExposure::Draw on the graph: CS_Histogram over the chain's image, CS_Average into the adaptation. The
-		 * histogram and the adaptation are history buffers owned here; CS_Reset clears them after they are made: a one-shot pass,
-		 * in the builds made until a frame with it reached the GPU (Executed). CS_Reset reads no constants, so it may run on a
-		 * frame the chain does not. The adaptation is published as "PostProcessing::AutoExposure::Adaptation" for
-		 * Composite. The settings UI's histogram and meter read back through the graph's readback service.
-		 */
+		* @brief HistogramAutoExposure::Draw on the graph. The histogram and adaptation are history buffers owned here, cleared once by a
+		* one-shot CS_Reset until a frame with it reached the GPU. CS_Reset reads no constants, so it may run on a frame the chain does not.
+		*/
 		class HistogramAutoExposureEffect final : public Effect
 		{
 		public:
 			const char* Update(PostProcessFeature& a_feature, std::vector<std::uint64_t>&) override
 			{
-				// As ClearShaderCache's resetAdaptation: the adaptation starts over after a shader reload.
+				// The adaptation starts over after a shader reload, as ClearShaderCache's resetAdaptation.
 				const auto generation = a_feature.shaderGeneration.load(std::memory_order_relaxed);
 				if (generation != shaderGeneration) {
 					shaderGeneration = generation;
@@ -194,7 +188,7 @@ namespace ORGPostChain
 					.program = a_builder.Compute(kShader, words, {}, L"CS_Histogram"),
 					.bindings = { Bind::Srv(input), Bind::Uav(histogram->Graph()), Bind::Uav(adaptation->Graph()), Bind::Latch(constants) },
 					.groups = { groups[0], groups[1], 1 } });
-				// As the D3D11 staging copy: before CS_Average clears the histogram.
+				// Before CS_Average clears the histogram, as the D3D11 staging copy.
 				a_builder.Add("histogram-readback", FrameAnchors::PassKind::Copy,
 					[shared = readback, source = histogram->Graph()]() -> std::shared_ptr<org::RenderPass> {
 						return std::make_shared<ReadbackPass>(shared, source, Capture::Histogram);
@@ -218,11 +212,11 @@ namespace ORGPostChain
 				TakeReadbacks(exposure);
 			}
 
-			// The first frame with this build reached the GPU: its one-shot clear ran before it, or in an earlier run.
+			// The one-shot clear ran before or with the first frame of this build.
 			void Executed(PostProcessFeature&) override { clearPending = false; }
 
 		private:
-			/** @brief The readbacks that arrived since the last frame into the feature's UI values, and this frame's requests. */
+			/** @brief Moves arrived readbacks into the UI values and posts this frame's requests. */
 			void TakeReadbacks(HistogramAutoExposure& a_exposure) const
 			{
 				{
@@ -247,7 +241,7 @@ namespace ORGPostChain
 			std::shared_ptr<Readback> readback = std::make_shared<Readback>();
 			LatchRegion<HistogramAutoExposure::AutoExposureCB> constants;
 			std::uint64_t shaderGeneration = 0;
-			bool clearPending = false;  // the history buffers are new and not cleared yet
+			bool clearPending = false;  // new history buffers not cleared yet
 			bool reset = true;
 		};
 	}

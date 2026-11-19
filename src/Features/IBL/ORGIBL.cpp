@@ -48,7 +48,7 @@ namespace
 	constexpr const char* kClientId = "cs.ibl";
 	constexpr const char* kShader = "IBL/DiffuseIBLCS.hlsl";
 
-	// The SH textures: three texels (R, G, B), each an sh2 (float4) in RGBA16F.
+	// R, G, B texels, each an sh2 in RGBA16F.
 	constexpr UINT kShTexels = 3;
 
 	D3D11_TEXTURE2D_DESC ShTextureDesc()
@@ -65,19 +65,19 @@ namespace
 		return desc;
 	}
 
-	// DiffuseIBLCS's push block (DIFFUSE_IBL_RESOURCES, in list order).
+	// In DIFFUSE_IBL_RESOURCES order.
 	struct DiffuseIBLBlock
 	{
 		ShaderBindings::Handle envTexture, iblTexture, linearSampler;
 	};
 
-	// One projection: a cubemap into a 3x1 SH texture, one 16x16 group.
+	// A cubemap into a 3x1 SH texture, one 16x16 group.
 	struct ProjectBindings
 	{
 		org::DeclaredViewToken source, target;
 	};
 
-	// Run gate entries: the environment's projection (or clear), then the sky's. Every commit opens both.
+	// The environment's projection or clear, then the sky's. Every commit opens both.
 	constexpr std::uint32_t kEnvEntry = 0;
 	constexpr std::uint32_t kSkyEntry = 1;
 
@@ -89,7 +89,7 @@ namespace
 		std::uint32_t entry = 0;
 	};
 
-	/** @brief A projection's source cubemap: an imported texture, or another feature's published graph texture by its id. */
+	/** @brief An import, or another feature's published texture by id. */
 	struct Source
 	{
 		FrameAnchors::Texture resource;
@@ -109,7 +109,7 @@ namespace
 		ProjectBindings Declare(org::PassBuilder& a_builder)
 		{
 			a_builder.PreferQueue(org::QueueKind::Graphics);
-			// An import's default view: a cube view of mip 0, as the D3D11 path samples it. A published cubemap by name: its cube view.
+			// A cube view of mip 0, as the D3D11 path samples it.
 			if (source.resource)
 				return { a_builder.ShaderResource(source.resource).View(), a_builder.UnorderedAccess(target).View() };
 			const org::SrvView cube{ .variant = static_cast<std::uint32_t>(org::SRVViewType::TextureCube) };
@@ -131,7 +131,6 @@ namespace
 			if (!a_frame.program || !a_frame.gate)
 				return;
 			const DiffuseIBLBlock block{ a_recording.Index(a_bindings.source), a_recording.Index(a_bindings.target), a_frame.sampler };
-			// One group, when the commit opened the entry.
 			a_frame.gate->Dispatch(a_recording, *a_frame.program, ShaderBindings::Data(block), a_frame.entry);
 		}
 
@@ -151,11 +150,11 @@ struct ORGIBL::Impl
 	org::OwnedDescriptorBinding sampler;
 	std::unique_ptr<GraphResources::Texture2D> env;
 	std::unique_ptr<GraphResources::Texture2D> sky;
-	// This frame's sources (render thread): the passes read them when they are made.
+	// Render thread. The passes read them when they are made.
 	Source envSource;
 	Source skySource;
 	bool useEnvironment = false;
-	std::shared_ptr<RenderGraph::RunGate> gate;  // kEnvEntry and kSkyEntry, opened by every commit
+	std::shared_ptr<RenderGraph::RunGate> gate;  // opened by every commit
 	std::function<void()> onFailed;
 };
 
@@ -177,13 +176,13 @@ bool ORGIBL::Setup(std::function<void()> a_onFailed)
 	}
 	auto state = std::make_unique<Impl>();
 	ComputeProgram::Desc desc{ .source = kShader, .constantWords = ShaderBindings::Words<DiffuseIBLBlock>() };
-	// The D3D11 path's own defines (IBL::GetDiffuseIBLCS); ComputeProgram adds the common ones.
+	// IBL::GetDiffuseIBLCS's defines. ComputeProgram adds the common ones.
 	if (globals::features::dynamicCubemaps.loaded)
 		desc.defines.push_back({ L"DYNAMIC_CUBEMAPS", L"" });
 	state->program = ComputeProgram::Load(host->Device(), desc);
-	// Linear, clamped, every mip: Deferred::linearSampler.
+	// Deferred::linearSampler.
 	state->sampler = ShaderBindings::CreateSampler(rhi::SamplerDesc{});
-	// Read in the next frame (the reflection prepass binds the last frame's SH), and by D3D11 until its readers are ported.
+	// Read in the next frame, and by D3D11 until its readers are ported.
 	const GraphResources::Options options{ .lifetime = GraphResources::Lifetime::History, .d3d11 = GraphResources::Export::SRV };
 	state->env = std::make_unique<GraphResources::Texture2D>(ShTextureDesc(), std::string(kEnvId), options);
 	state->sky = std::make_unique<GraphResources::Texture2D>(ShTextureDesc(), std::string(kSkyId), options);
@@ -201,10 +200,10 @@ bool ORGIBL::Setup(std::function<void()> a_onFailed)
 			return nullptr;
 		const auto& source = a_env ? current->envSource : current->skySource;
 		const auto& target = a_env ? current->env : current->sky;
-		// The environment only while the DALC mode reads it: the D3D11 path skips it too, and the last values stay.
+		// The D3D11 path also skips the environment unless the DALC mode reads it, and the last values stay.
 		if (a_env && !current->useEnvironment)
 			return nullptr;
-		// A missing cubemap: the D3D11 path projects a null view, which samples zero, so the SH is zero.
+		// The D3D11 path projects a null view, which samples zero.
 		const std::uint32_t entry = a_env ? kEnvEntry : kSkyEntry;
 		if (!source)
 			return GraphPasses::MakeUavClear(target->Graph(), {}, { current->gate, entry });
@@ -212,7 +211,7 @@ bool ORGIBL::Setup(std::function<void()> a_onFailed)
 	};
 	FrameAnchors::ClientDesc client{};
 	client.id = kClientId;
-	// Gated: a projection dispatches through its gate entry, and a clear (recorded at execution) skips a run that left it closed.
+	// A projection dispatches through its entry. A clear records at execution and skips a closed run.
 	client.passes.push_back({ .name = "cs.ibl.env-sh",
 		.anchor = FrameAnchors::Anchor::Prepass,
 		.kind = FrameAnchors::PassKind::Compute,
@@ -235,16 +234,16 @@ bool ORGIBL::Setup(std::function<void()> a_onFailed)
 			self->impl->sky->Register(a_graph);
 		}
 	};
-	// IBL::Prepass returns before computing anything while the scene disables IBL.
+	// IBL::Prepass computes nothing while the scene disables IBL.
 	client.active = [] { return !globals::features::ibl.IsDisabledForCurrentScene(); };
-	// Known at the frame's start (the scene's setting): the declared segment's schedule has the passes on exactly when they have work.
+	// Known at frame start, so the declared schedule has the passes on exactly when they have work.
 	client.declared = client.active;
 	impl = std::move(state);
 	if (!FrameAnchors::Register(std::move(client))) {
 		impl.reset();
 		return false;
 	}
-	// Drawcall Limit Fix's colour passes read them by name, ordered after the projection (Integrations/IBL).
+	// DCLF's colour passes read them by name, ordered after the projection.
 	if (!PublishedResources::Publish(*impl->env) || !PublishedResources::Publish(*impl->sky)) {
 		logger::error("[ORG] IBL: the SH textures could not be published; IBL stays on D3D11");
 		FrameAnchors::Unregister(kClientId);
@@ -282,14 +281,12 @@ bool ORGIBL::Prepass(bool a_useEnvironment)
 		return false;
 	}
 	auto& state = *impl;
-	// Imported once; imported again (and every anchor rebuilt) when the engine or Dynamic Cubemaps replace the texture.
+	// Imported again, rebuilding every anchor, when the engine or Dynamic Cubemaps replace the texture.
 	const Source sky{ FrameAnchors::EngineCubemap(RE::RENDER_TARGETS_CUBEMAP::kREFLECTIONS), {} };
 	Source env;
 	const auto& dynamicCubemaps = globals::features::dynamicCubemaps;
 	if (a_useEnvironment && dynamicCubemaps.loaded && dynamicCubemaps.envTexture) {
-		// On Dynamic Cubemaps' ORG path its texture is the graph twin's export: read the published twin, ordered after its writes.
-		// Only the published twin is read: an import is not ordered after its producer. Without it the source stays empty and the
-		// SH is cleared to zero, as a null view samples.
+		// Only the published twin is read, since an import is not ordered after its producer. Without it the SH is zero.
 		if (PublishedResources::IsPublished(ORGDynamicCubemaps::kEnvId))
 			env.published = ORGDynamicCubemaps::kEnvId;
 	}
@@ -317,7 +314,7 @@ ID3D11ShaderResourceView* ORGIBL::SkySRV() const
 
 #else  // !CS_HAS_RENDER_GRAPH
 
-// Built without OpenRenderGraph: IBL always projects with D3D11.
+// Without OpenRenderGraph IBL always projects with D3D11.
 struct ORGIBL::Impl
 {};
 

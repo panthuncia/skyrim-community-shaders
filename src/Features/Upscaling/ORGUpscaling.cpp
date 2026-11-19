@@ -41,14 +41,13 @@ namespace
 
 	constexpr const char* kClientId = "cs.upscaling";
 	constexpr const char* kHudlessClientId = "cs.upscaling.hudless";
-	// The evaluate's own client (native mode): on only while an SDK upscaler is the method, so the post stage's build leaves its pass out
-	// with TAA or no upscaler (docs/development/org-native-frame-graph.md, "Absent passes").
+	// On only while an SDK upscaler is the method, so the post stage's build leaves the pass out with TAA or no upscaler.
 	constexpr const char* kEvaluateClientId = "cs.upscaling.evaluate";
 	constexpr const char* kUpscaledName = "Upscaling::UpscaledTexture";
 	constexpr const char* kHudlessName = "Upscaling::HudlessTexture";
 	constexpr const char* kDepthShader = "Upscaling/DepthRefractionUpscalePS.hlsl";
 	constexpr const char* kUnderwaterShader = "Upscaling/UnderwaterMaskUpscalePS.hlsl";
-	// A plain Load and write: the hudless copy, and the upscaled colour's copy into kMAIN.
+	// A plain Load and write, for the hudless copy and the upscaled colour's copy into kMAIN.
 	constexpr const char* kCopyShader = "Upscaling/CopyHudlessPS.hlsl";
 	constexpr std::int32_t kOrderBase = 100;
 
@@ -57,12 +56,12 @@ namespace
 	constexpr std::uint32_t kDepthUpscale = 1u << 1;
 	constexpr std::uint32_t kEvaluate = 1u << 2;
 
-	// The Upscale client's run gate: the copy into kMAIN, and the depth upscale's two draws.
+	// The copy into kMAIN, and the depth upscale's two draws.
 	constexpr std::uint32_t kCopyEntry = 0;
 	constexpr std::uint32_t kDepthEntry = 1;
 	constexpr std::uint32_t kUpscaleEntries = 2;
 
-	// DepthRefractionUpscalePS's push block under ORG, in list order.
+	// Push blocks in list order.
 	struct DepthBlock
 	{
 		SharedConstants::Handles shared;
@@ -70,7 +69,6 @@ namespace
 		ShaderBindings::Latch jitter;
 	};
 
-	// UnderwaterMaskUpscalePS's.
 	struct UnderwaterBlock
 	{
 		SharedConstants::Handles shared;
@@ -78,7 +76,6 @@ namespace
 		ShaderBindings::Latch jitter;
 	};
 
-	// CopyHudlessPS's.
 	struct CopyBlock
 	{
 		ShaderBindings::Handle colorInput;
@@ -100,7 +97,6 @@ namespace
 		return rhi::helpers::ToRHI(desc.Format);
 	}
 
-	/** @brief A texture's width and height, for a whole-texture copy. */
 	std::pair<std::uint32_t, std::uint32_t> SizeOf(ID3D11Texture2D* a_texture)
 	{
 		D3D11_TEXTURE2D_DESC desc{};
@@ -108,17 +104,17 @@ namespace
 		return { desc.Width, desc.Height };
 	}
 
-	/** @brief The engine targets the Upscale anchor's passes read and write, as graph textures. */
+	/** @brief The engine targets the Upscale anchor's passes use. */
 	struct DepthInputs
 	{
 		FrameAnchors::Texture main;
-		rhi::Format mainFormat = rhi::Format::Unknown;  // kMAIN's view: the copy's target format
-		FrameAnchors::Texture mainDepth, motion;        // the evaluate's depth and motion vectors (where it is a stage's pass)
+		rhi::Format mainFormat = rhi::Format::Unknown;  // the copy's target format
+		FrameAnchors::Texture mainDepth, motion;        // read by the evaluate where it is a stage's pass
 		FrameAnchors::Texture depth, depthCopy;
 		FrameAnchors::Texture refraction, refractionCopy, saoCameraZ;
 		FrameAnchors::Texture underwater, underwaterCopy;
 		std::pair<std::uint32_t, std::uint32_t> depthSize, refractionSize, underwaterSize;  // the copies' sizes
-		std::uint32_t width = 0, height = 0;  // the screen: the depth upscale's render area
+		std::uint32_t width = 0, height = 0;  // the depth upscale's render area
 
 		bool operator==(const DepthInputs&) const = default;
 
@@ -128,7 +124,7 @@ namespace
 		}
 	};
 
-	/** @brief The formats the depth upscale's programs are built for: the engine's views. */
+	/** @brief The engine's view formats. */
 	struct DepthFormats
 	{
 		rhi::Format refraction = rhi::Format::Unknown, saoCameraZ = rhi::Format::Unknown, underwater = rhi::Format::Unknown;
@@ -137,19 +133,13 @@ namespace
 		bool operator==(const DepthFormats&) const = default;
 	};
 
-	/**
-	 * @brief Whether the upscaler's evaluate is a pass of a stage that runs in this mode: the post stage holds the Upscale anchor (the
-	 * recipe table). Native mode, and guest mode since the post stage runs there.
-	 */
+	/** @brief Whether a stage in this mode holds the Upscale anchor. True in native mode and now in guest mode too. */
 	bool EvaluateInStage()
 	{
 		return FrameAnchors::StageStepsAt(FrameAnchors::Anchor::Upscale);
 	}
 
-	/**
-	 * @brief kMAIN as the copy writes it, with its view's format; where the evaluate is a stage's pass also kMAIN's depth and the motion
-	 * vectors, which the evaluate reads. A null main when it cannot be imported.
-	 */
+	/** @brief Also the depth and motion vectors when the evaluate is a stage's pass. A null main when it cannot be imported. */
 	void CurrentMain(DepthInputs& a_inputs)
 	{
 		auto* renderer = globals::game::renderer;
@@ -164,10 +154,7 @@ namespace
 		a_inputs.motion = motion.texture ? FrameAnchors::EngineTarget(static_cast<std::uint32_t>(RE::RENDER_TARGETS::kMOTION_VECTOR)) : nullptr;
 	}
 
-	/**
-	 * @brief The depth upscale's targets as UpscaleDepth binds them. Empty depth fields when one is missing or a copy is its own
-	 * source: the D3D11 path then draws.
-	 */
+	/** @brief Empty depth fields when one is missing or a copy is its own source. The D3D11 path then draws. */
 	void CurrentDepthInputs(DepthInputs& a_inputs, DepthFormats& a_formats)
 	{
 		auto* renderer = globals::game::renderer;
@@ -223,7 +210,7 @@ namespace
 	struct EvaluateWork;
 	struct EvaluateShared;
 
-	/** @brief A texture description the graph twins accept: default usage, no CPU access, no misc flags. */
+	/** @brief Default usage, no CPU access, no misc flags, as the graph twins require. */
 	D3D11_TEXTURE2D_DESC Sanitized(D3D11_TEXTURE2D_DESC a_desc, UINT a_bindFlags)
 	{
 		a_desc.Usage = D3D11_USAGE_DEFAULT;
@@ -238,7 +225,7 @@ struct ORGUpscaling::Impl
 {
 	std::shared_ptr<const RasterProgram> depthProgram, underwaterProgram;
 	DepthFormats formats;
-	std::map<rhi::Format, std::shared_ptr<const RasterProgram>> copyPrograms;  // CopyHudlessPS, by target format
+	std::map<rhi::Format, std::shared_ptr<const RasterProgram>> copyPrograms;  // by target format
 	org::OwnedDescriptorBinding linearSampler;
 	std::shared_ptr<org::LatchBlock> latch;
 	std::shared_ptr<RenderGraph::RunGate> upscaleGate, hudlessGate;
@@ -247,14 +234,13 @@ struct ORGUpscaling::Impl
 	DepthInputs inputs;
 	FrameAnchors::Texture hudlessSource;
 
-	// Render thread: this frame's queued work, and the depth upscale's constants.
+	// Render thread.
 	std::uint32_t queued = 0;
 	Upscaling::JitterCB jitter{};
-	// Native mode: the evaluate pass's work by run (the commit stores this frame's), and this frame's evaluate before the commit.
+	// Native mode: each run's evaluate, stored by the commit.
 	std::shared_ptr<const EvaluateShared> evaluateShared;
 	std::shared_ptr<const EvaluateWork> evaluate;
 
-	// Whether each client is registered, and whether the Upscale client holds the depth upscale's passes.
 	bool registered = false, hudlessRegistered = false;
 	bool depthRegistered = false;
 	bool failed = false;
@@ -264,7 +250,7 @@ namespace
 {
 	using Impl = ORGUpscaling::Impl;
 
-	/** @brief What the depth upscale's draw is made from. Immutable once built. */
+	/** @brief Immutable once built. */
 	struct DepthSpec
 	{
 		std::shared_ptr<const RasterProgram> program;
@@ -285,11 +271,7 @@ namespace
 		std::shared_ptr<const DepthSpec> spec;
 	};
 
-	/**
-	 * @brief DepthRefractionUpscalePS: the refraction normals, kSAO_CAMERAZ and kMAIN's depth, from their render-size copies. It
-	 * writes two colour targets and the depth, which AnchorPasses::Draw does not cover, so it is a pass of its own. It draws
-	 * through the run gate's depth entry.
-	 */
+	/** @brief Writes two colour targets and depth, which AnchorPasses::Draw does not cover, so it is its own pass. Gated by the depth entry. */
 	class DepthUpscalePass final : public org::TypedRenderGraphPass<DepthUpscalePass, DepthFrame, DepthBindings>
 	{
 	public:
@@ -335,14 +317,13 @@ namespace
 	};
 
 
-	/** @brief One frame's evaluate: the SDK's commands, recorded by the evaluate pass. */
 	struct EvaluateWork
 	{
 		std::string label;
 		ORGUpscaling::EvaluateRecord record;
 	};
 
-	/** @brief What the evaluate pass shares with the render thread: each run's evaluate, stored by the Upscale client's commit. */
+	/** @brief Each run's evaluate, stored by the Upscale client's commit. */
 	struct EvaluateShared
 	{
 		RenderGraph::RunSlots<EvaluateWork> runs;
@@ -359,12 +340,9 @@ namespace
 	};
 
 	/**
-	 * @brief The upscaler's evaluate (a pass of the post stage, in both modes): Streamline's tags and evaluate recorded on this pass's command list, as
-	 * BasicRenderer's UpscalingPass does. Its four images are legacy interop uses (the common state: GENERAL on Vulkan, COMMON on
-	 * D3D12), which is the state the tags name; on D3D12 the output is declared to leave the pass in the common state, as Streamline
-	 * leaves it. Recorded at execution each frame: it reads the run's evaluate, which the Upscale client's commit stored; a run with
-	 * none records only the barriers. The graph's descriptor heaps are bound again after the SDK.
-	 */
+	* @brief Records Streamline's tags and evaluate on this pass's command list. Its four images are legacy interop uses in the
+	* common state, which the tags name. Recorded at execution from the run's stored evaluate. Rebinds the graph's heaps after.
+	*/
 	class EvaluatePass final : public org::TypedRenderGraphPass<EvaluatePass, EvaluateFrame, EvaluateBindings>
 	{
 	public:
@@ -384,7 +362,7 @@ namespace
 			return bindings;
 		}
 
-		// Recorded at execution: what it records comes from the run's evaluate, so nothing here keeps a recording from being reused.
+		// Recorded at execution from the run's evaluate, so nothing here prevents reuse.
 		void Revision(std::vector<std::uint64_t>&) const {}
 
 		EvaluateFrame Prepare(const EvaluateBindings&, const org::PassPrepareContext&) const { return { shared }; }
@@ -414,7 +392,7 @@ namespace
 				return;
 			}
 			const bool evaluated = work->record(nativeList, infos);
-			// Streamline may bind descriptor heaps of its own: the passes after this one read the frame's again.
+			// Streamline may bind its own descriptor heaps, so restore the frame's.
 			a_recording.RestoreDescriptorHeaps();
 			if (!evaluated) {
 				static std::once_flag logged;
@@ -435,13 +413,10 @@ namespace
 		a_impl->failed = true;
 	}
 
-	/** @brief The formats Upscaling::CreateHudlessTexture can give the hudless texture: its copy's targets, built at setup. */
+	/** @brief Every format Upscaling::CreateHudlessTexture can produce, built at setup. */
 	constexpr std::array kHudlessFormats{ DXGI_FORMAT_R8G8B8A8_UNORM, DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_FORMAT_R10G10B10A2_UNORM };
 
-	/**
-	 * @brief The copy program for a_format: kMAIN's and the hudless formats are built at setup (a_atSetup); another one (a new
-	 * kMAIN format) is built at first sight and logged.
-	 */
+	/** @brief A format not built at setup, such as a new kMAIN format, is built at first sight and logged. */
 	std::shared_ptr<const RasterProgram> CopyProgram(Impl& a_impl, rhi::Format a_format, bool a_atSetup = false)
 	{
 		if (const auto found = a_impl.copyPrograms.find(a_format); found != a_impl.copyPrograms.end())
@@ -455,10 +430,9 @@ namespace
 	}
 
 	/**
-	 * @brief The Upscale client as the frame needs it now: the copy into kMAIN while the graph holds the upscaled texture, and the
-	 * depth upscale's copies and draws when a_depth (the depth upscale runs on every run of this registration). Registering again
-	 * replaces the client. False, logged, when a pass cannot be made or the anchors refuse the client.
-	 */
+	* @brief The copy into kMAIN while the graph holds the upscaled texture, plus the depth upscale when a_depth.
+	* Registering again replaces the client. False, logged, on failure.
+	*/
 	bool RegisterUpscale(const std::shared_ptr<Impl>& a_impl, bool a_depth)
 	{
 		auto& impl = *a_impl;
@@ -507,8 +481,7 @@ namespace
 
 		FrameAnchors::ClientDesc client{};
 		client.id = kClientId;
-		// Where the post stage runs: the evaluate first, recorded at execution each frame (it is not gated: it reads the run's evaluate, which this
-		// client's commit stores). Its own client, declared while an SDK upscaler is the method.
+		// The evaluate first, recorded at execution and not gated. Its own client, declared while an SDK upscaler is the method.
 		const std::weak_ptr<Impl> weakImpl = a_impl;
 		if (impl.evaluateShared && impl.upscaled && impl.inputs.main && impl.inputs.mainDepth && impl.inputs.motion) {
 			auto shared = impl.evaluateShared;
@@ -535,7 +508,7 @@ namespace
 			FrameAnchors::Unregister(kEvaluateClientId);
 		for (auto& pass : builder.Take())
 			client.passes.push_back(std::move(pass));
-		// The depth upscale's own pass reads the shared constants too, beside the underwater draw the builder saw.
+		// The depth upscale's own pass reads the shared constants too.
 		client.sharedConstants = depth;
 		client.gates = { impl.upscaleGate };
 		const std::weak_ptr<Impl> weak = a_impl;
@@ -549,11 +522,9 @@ namespace
 				return;
 			const auto run = RenderGraphRuntime::Get().Host()->CurrentRun();
 			impl->latch->WriteValue(run, 0, impl->jitter);
-			// The run's evaluate (null: none), for the evaluate pass recorded at execution.
 			if (impl->evaluateShared)
 				impl->evaluateShared->runs.Store(run, (impl->queued & kEvaluate) ? impl->evaluate : nullptr);
-			// While the evaluate's pass is absent from the stage's schedule (an upscaler just chosen, its build not switched in yet), its
-			// output was not written: it is not copied into kMAIN.
+			// While a newly chosen upscaler's build has not switched in, its output was not written, so do not copy it.
 			const bool evaluated = !(impl->queued & kEvaluate) || !impl->evaluateShared || FrameAnchors::Scheduled(kEvaluateClientId, FrameAnchors::Anchor::Upscale);
 			if ((impl->queued & kCopyToMain) && evaluated)
 				impl->upscaleGate->OpenDraw(kCopyEntry);
@@ -569,10 +540,7 @@ namespace
 		return impl.registered;
 	}
 
-	/**
-	 * @brief The FrameGeneration client: CopyHudlessPS from the current source into the hudless texture, through the run gate.
-	 * Registering again replaces it. False, logged, when the pass cannot be made or the anchors refuse the client.
-	 */
+	/** @brief Registering again replaces it. False, logged, on failure. */
 	bool RegisterHudless(const std::shared_ptr<Impl>& a_impl)
 	{
 		auto& impl = *a_impl;
@@ -600,7 +568,7 @@ namespace
 			if (const auto impl = weak.lock(); impl && impl->hudless)
 				impl->hudless->Register(a_graph);
 		};
-		// CopyHudless runs the anchor for this copy alone, so every run that commits draws it.
+		// CopyHudless runs the anchor for this copy alone, so every committing run draws it.
 		client.commit = [weak](const FrameAnchors::Point&) {
 			if (const auto impl = weak.lock())
 				impl->hudlessGate->OpenDraw(0);
@@ -609,14 +577,14 @@ namespace
 		return impl.hudlessRegistered;
 	}
 
-	/** @brief A registered Upscale client made again with what it holds now: a new texture or engine target. */
+	/** @brief Remakes the client after a new texture or engine target. */
 	void UpscaleChanged(const std::shared_ptr<Impl>& a_impl)
 	{
 		if (a_impl->registered && !RegisterUpscale(a_impl, a_impl->depthRegistered))
 			MarkFailed(a_impl, "its Upscale client could not be registered again");
 	}
 
-	/** @brief A registered FrameGeneration client made again with what it holds now: a new texture or source. */
+	/** @brief Remakes the client after a new texture or source. */
 	void HudlessChanged(const std::shared_ptr<Impl>& a_impl)
 	{
 		if (a_impl->hudlessRegistered && !RegisterHudless(a_impl))
@@ -661,7 +629,7 @@ bool ORGUpscaling::Setup()
 	setupFailed = true;
 	try {
 		auto next = std::make_shared<Impl>();
-		// The D3D11 path's Deferred::LinearSampler: linear, clamped.
+		// The D3D11 path's Deferred::LinearSampler.
 		next->linearSampler = ShaderBindings::CreateSampler({});
 		next->latch = std::make_shared<org::LatchBlock>("cs.upscaling.jitter", static_cast<std::uint32_t>(sizeof(Upscaling::JitterCB)));
 		next->upscaleGate = RenderGraph::RunGate::Create("cs.upscaling.gate", kUpscaleEntries);
@@ -707,8 +675,7 @@ bool ORGUpscaling::EvaluatesInStage() const
 
 void ORGUpscaling::ClearShaderCache()
 {
-	// Programs that built reload through the pipeline registry. A setup that failed (a shader that did not compile) is tried
-	// again; until the textures are made again the copy to kMAIN and the hudless copy stay on D3D11.
+	// Built programs reload through the pipeline registry. A failed setup is tried again, and the copies stay on D3D11 until the textures are remade.
 	if (!impl && setupFailed)
 		(void)Setup();
 }
@@ -745,8 +712,7 @@ bool ORGUpscaling::CreateTexture(Target a_target, const D3D11_TEXTURE2D_DESC& a_
 		logger::error("[ORG] Upscaling: the hudless copy could not be built for format {}; it stays a D3D11 texture", static_cast<int>(a_desc.Format));
 		return false;
 	}
-	// Streamline writes the upscaled texture (its UAV) and reads the hudless one (its SRV) through their D3D11 images, outside the
-	// graph: exported, kept.
+	// Streamline writes and reads these through their D3D11 images outside the graph, so they are exported and kept.
 	const UINT bindFlags = D3D11_BIND_SHADER_RESOURCE | (upscaled ? D3D11_BIND_UNORDERED_ACCESS : D3D11_BIND_RENDER_TARGET);
 	const auto exports = GraphResources::Export::SRV | (upscaled ? GraphResources::Export::UAV : GraphResources::Export::RTV);
 	auto texture = std::make_unique<GraphResources::Texture2D>(Sanitized(a_desc, bindFlags), upscaled ? kUpscaledName : kHudlessName,
@@ -801,7 +767,7 @@ bool ORGUpscaling::QueueEvaluate(std::string a_label, EvaluateRecord a_record)
 {
 	if (!IsActive() || !impl->upscaled || !impl->evaluateShared)
 		return false;
-	// A new kMAIN, depth or motion target (a resolution change): the client is made again with them.
+	// A resolution change remakes the client.
 	DepthInputs current{};
 	CurrentMain(current);
 	if (!current.main || !current.mainDepth || !current.motion)
@@ -825,7 +791,7 @@ bool ORGUpscaling::QueueCopyToMain()
 {
 	if (!IsActive() || !impl->upscaled)
 		return false;
-	// A new kMAIN (a resolution change): the client is made again with it.
+	// A resolution change remakes the client.
 	DepthInputs current{};
 	CurrentMain(current);
 	if (current.main != impl->inputs.main || current.mainFormat != impl->inputs.mainFormat) {
@@ -854,7 +820,6 @@ bool ORGUpscaling::QueueDepthUpscale(float2 a_jitter, float a_useWideKernel)
 	inputs.motion = impl->inputs.motion;
 	if (!(inputs == impl->inputs)) {
 		if (!(formats == impl->formats)) {
-			// New engine targets in other formats: the programs follow them, built now.
 			logger::info("[ORG] Upscaling: the engine's depth upscale targets changed format; building their programs now");
 			auto* host = RenderGraphRuntime::Get().Host();
 			auto depthProgram = LoadDepthProgram(host->Device(), formats);
@@ -885,8 +850,7 @@ void ORGUpscaling::RunUpscale()
 		impl->queued = 0;
 		return;
 	}
-	// The depth upscale's copies have no per-run switch, so the client holds them exactly while the depth upscale runs and is
-	// made again when it starts or stops (an upscaler at full resolution queues only the copy into kMAIN).
+	// The copies have no per-run switch, so the client holds them exactly while the depth upscale runs and is remade when it starts or stops.
 	const bool depth = (impl->queued & kDepthUpscale) != 0;
 	if ((!impl->registered || depth != impl->depthRegistered) && !RegisterUpscale(impl, depth)) {
 		impl->queued = 0;
@@ -907,8 +871,7 @@ bool ORGUpscaling::CopyHudless(ID3D11ShaderResourceView* a_source)
 	winrt::com_ptr<ID3D11Texture2D> texture;
 	if (!resource || FAILED(resource->QueryInterface(IID_PPV_ARGS(texture.put()))) || !texture)
 		return false;
-	// The framebuffer is the engine's target (the overlay imports it too). HDR's clean composite is its output texture: the twin
-	// with CS_ORG_HDR_DISPLAY, ordered after the composite's writes, else a D3D11 texture imported.
+	// HDR's clean composite is its output twin with CS_ORG_HDR_DISPLAY, ordered after its writes, else an imported D3D11 texture.
 	auto& framebuffer = globals::game::renderer->GetRuntimeData().renderTargets[RE::RENDER_TARGETS::kFRAMEBUFFER];
 	FrameAnchors::Texture source;
 	if (framebuffer.texture == texture.get())
@@ -930,7 +893,7 @@ bool ORGUpscaling::CopyHudless(ID3D11ShaderResourceView* a_source)
 
 #else  // !CS_HAS_RENDER_GRAPH
 
-// Built without OpenRenderGraph: Upscaling's own passes always draw with D3D11.
+// Without OpenRenderGraph Upscaling's own passes always draw with D3D11.
 #	include "ORGUpscaling.h"
 
 struct ORGUpscaling::Impl

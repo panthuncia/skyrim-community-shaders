@@ -6,34 +6,19 @@
 #include <string_view>
 
 /**
- * @brief Dynamic Cubemaps' update pipeline on the render graph (CS_ORG_DYNAMIC_CUBEMAPS=1).
- *
- * The D3D11 path spreads its work over a state machine of three frames per cubemap (DynamicCubemaps::NextUpdateStep): capture,
- * inference and the first irradiance mip; the middle irradiance mips; the last mip, BC6H encoding and publishing. Here the same work
- * is compute and copy passes at the DeferredPasses anchor, after Screen Space GI's and Subsurface Scattering's passes. Every frame's
- * recording is the same: each dispatch is indirect, and the client's commit runs the state machine and writes the group counts of
- * the work this frame does (zero for the rest) into the frame's latch region, with the capture constants. Mips are ORG's GenerateMips
- * (GraphPasses::MakeGenerateMips), gated the same way.
- *
- * Not DeferredComposite, where the D3D11 path runs: the ORG composite (CS_ORG_COMPOSITE) reads the environment cubemaps through
- * descriptors the graph does not track, so writing them in the composite's own epoch would race its read. One epoch earlier, the
- * only D3D11 work skipped over is Screen Space GI (which writes no colour) and Subsurface Scattering's skin blur of kMAIN.
- *
- * Outputs, exported to D3D11 while D3D11 readers remain, and published under their names (PublishedResources) so graph readers can
- * name them: the environment cubemaps ("DynamicCubemaps::Env", "DynamicCubemaps::EnvReflections": the composite, IBL) and their
- * BC6H copies ("DynamicCubemaps::EnvTextureBC6H", "DynamicCubemaps::EnvReflectionsBC6H": the engine's pixel shaders at t30 and t31,
- * Drawcall Limit Fix). The BC6H copy cannot be a dispatch (no UAV of a block-compressed format), so it runs every frame from each
- * cubemap's persistent encoder output, from the frame after that cubemap's first encode on.
- *
- * Fallback: when anything cannot be made, Setup returns false and the feature keeps its D3D11 path. When the runtime stops or the
- * programs fail to build again later, the client is unregistered and a_onFailed (from Setup) brings the D3D11 path back, before the exported textures are released.
- *
- * Header deliberately free of ORG/Vulkan includes (see RenderGraphRuntime.h). Everything here runs on the render thread.
- */
+* @brief Dynamic Cubemaps' update pipeline on the render graph, with CS_ORG_DYNAMIC_CUBEMAPS=1.
+*
+* The D3D11 path spreads its work over a three-frame state machine per cubemap. Here every frame's recording is the same.
+* Each dispatch is indirect, and the commit writes this frame's group counts into the latch, with zero for the rest.
+* It runs at DeferredPasses, not DeferredComposite. The ORG composite reads the cubemaps through descriptors the graph does not
+* track, so writing them in its epoch would race the read.
+* A BC6H copy cannot be a dispatch, since there is no UAV of a block-compressed format.
+* Render thread throughout. Free of ORG/Vulkan includes.
+*/
 class ORGDynamicCubemaps
 {
 public:
-	/** @brief The published ids (PublishedResources), the D3D11 path's names: the environment cubemaps and their BC6H copies. */
+	/** @brief The published ids, matching the D3D11 path's names. */
 	static constexpr std::string_view kEnvId = "DynamicCubemaps::Env";
 	static constexpr std::string_view kEnvReflectionsId = "DynamicCubemaps::EnvReflections";
 	static constexpr std::string_view kEnvBC6HId = "DynamicCubemaps::EnvTextureBC6H";
@@ -41,24 +26,21 @@ public:
 
 	static ORGDynamicCubemaps& Get();
 
-	/** @brief Whether CS_ORG_DYNAMIC_CUBEMAPS=1 asks for the render-graph path. */
 	static bool Requested();
 
-	/** @brief Before the render graph initializes (the feature's PostPostLoad): reserves the DeferredPasses anchor when Requested. */
+	/** @brief Call in the feature's PostPostLoad, before the render graph initializes. */
 	static void Reserve();
 
 	/**
-	 * @brief At SetupResources, with the runtime active and the feature's default cubemap loaded: makes the programs, the graph
-	 * textures and the latch, imports the engine targets, registers the anchor client and publishes the outputs.
-	 * @param a_onFailed Called once if the path stops later: the feature returns to D3D11 (it must drop its views of the outputs).
-	 * @return Whether the update runs on the render graph; false keeps the D3D11 path.
-	 */
+	* @brief Call at SetupResources with the runtime active and the default cubemap loaded.
+	* @param a_onFailed Called once if the path stops later. The feature must drop its views of the outputs.
+	* @return False keeps the D3D11 path.
+	*/
 	bool Setup(std::function<void()> a_onFailed);
 
-	/** @brief Whether the update runs on the render graph: set up, and the runtime still up. */
 	bool IsActive() const;
 
-	/** @brief The exported outputs: the environment cubemaps (R11G11B10, every mip) and their BC6H copies. Null when inactive. */
+	/** @brief R11G11B10 with every mip, and their BC6H copies. Null when inactive. */
 	struct Outputs
 	{
 		ID3D11Texture2D* env = nullptr;
@@ -73,14 +55,12 @@ public:
 	Outputs Exported() const;
 
 	/**
-	 * @brief After the anchor ran (the feature's UpdateCubemap): rebuilds the programs after ClearShaderCache, follows a new engine
-	 * target or reflections cubemap, and adds a cubemap's BC6H copy once it was first encoded. Each rebuilds the anchor's graph at
-	 * its next execution. When the runtime stopped, the feature returns to D3D11.
-	 * @return Whether the graph path owned this frame's update; false means the D3D11 update runs.
-	 */
+	* @brief Call after the anchor ran. Follows shader reloads, new engine targets and first encodes, each of which rebuilds the graph.
+	* @return False means the D3D11 update runs.
+	*/
 	bool AfterUpdate();
 
-	/** @brief The programs are built again at the next AfterUpdate, and no cubemap counts as encoded until its next publish. */
+	/** @brief Programs rebuild at the next AfterUpdate. No cubemap counts as encoded until its next publish. */
 	void ClearShaderCache();
 
 	~ORGDynamicCubemaps();
@@ -88,16 +68,13 @@ public:
 private:
 	ORGDynamicCubemaps() = default;
 
-	/**
-	 * @brief Leaves the graph path for good: the client unregistered, the outputs withdrawn, the feature back on D3D11, then the
-	 * resources released.
-	 */
+	/** @brief For good. Unregisters, withdraws outputs, returns to D3D11, then releases the resources. */
 	void Fail(const char* a_reason);
 
-	/** @brief Withdraws the published outputs: graph readers return to their D3D11 views. */
+	/** @brief Graph readers return to their D3D11 views. */
 	void Withdraw();
 
-	/** @brief Registers the anchor client: its passes, resources and commit. False, logged by FrameAnchors, when it cannot be. */
+	/** @brief False, logged by FrameAnchors, when it cannot be. */
 	bool RegisterClient();
 
 	struct Impl;

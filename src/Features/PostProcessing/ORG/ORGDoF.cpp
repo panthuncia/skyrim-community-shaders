@@ -20,16 +20,15 @@ namespace ORGPostChain
 	namespace
 	{
 		constexpr const char* kShader = "PostProcessing/DoF/dof.cs.hlsl";
-		// As DoF::SetupResources: the CoC in R16F, the tiles in RGBA16F, the focus distance in R32F.
+		// As DoF::SetupResources: CoC in R16F, tiles in RGBA16F, focus distance in R32F.
 		constexpr DXGI_FORMAT kCoCFormat = DXGI_FORMAT_R16_FLOAT;
 		constexpr DXGI_FORMAT kTileFormat = DXGI_FORMAT_R16G16B16A16_FLOAT;
 		constexpr DXGI_FORMAT kFocusFormat = DXGI_FORMAT_R32_FLOAT;
 		constexpr std::size_t kPyramidLevels = 3;
-		// Commits after a build that start the focus from this frame's focus, not the history: a few, because a commit cannot
-		// tell whether its epoch runs the new build yet.
+		// A commit cannot tell whether its epoch runs the new build yet, so restart the focus for a few commits after a build.
 		constexpr std::uint32_t kFocusResetCommits = 4;
 
-		// dof.cs.hlsl's push block: DOF_RESOURCES, then the DoFFrame latch, then the BokehSamples latch region.
+		// DOF_RESOURCES, then the DoFFrame latch, then the BokehSamples latch region.
 		struct DoFBlock
 		{
 			ShaderBindings::Handle shared[4];
@@ -40,7 +39,7 @@ namespace ORGPostChain
 			ShaderBindings::Latch dofFrame, bokehSamples;
 		};
 
-		// dof.cs.hlsl's DoFConstants under ORG: DoFCB, then OrgResetFocus and its row's padding.
+		// DoFCB, then OrgResetFocus and its row's padding.
 		struct DoFLatch
 		{
 			DoF::DoFCB cb;
@@ -51,7 +50,7 @@ namespace ORGPostChain
 
 		using SampleTable = std::array<BokehResources::ShapeSample, BokehResources::GATHER_SAMPLE_COUNT>;
 
-		/** @brief One dispatch's resources by the shader's names; a slot left empty is a handle the entry never reads. */
+		/** @brief An empty slot is a handle the entry never reads. */
 		struct Slots
 		{
 			Bind out, focus, coc, tile;  // u0..u3
@@ -65,14 +64,10 @@ namespace ORGPostChain
 		std::uint32_t HalfUp(std::uint32_t a_size) { return (std::max)(1u, (a_size + 1) / 2); }
 
 		/**
-		 * @brief DoF::Draw on the graph: focus, CoC, the half-resolution setup, the CoC pyramid and tiles, the far and near gathers,
-		 * the postfilter, the combiner and the optional post smoothing, 11 to 18 dispatches as DoF::Draw issues them. What decides the
-		 * passes (adaptive gather, ring count, post smoothing, the custom aperture) is in the key; everything else is in the latch,
-		 * including the gather's sample table, so a blade or shape change needs no rebuild.
-		 *
-		 * The focus stays on the GPU: CS_UpdateFocus updates a 1x1 history texture owned here in place, and CS_CalculateCoC reads
-		 * it. The custom aperture textures stay BokehResources' D3D11 textures (shared with Lens Flare), imported by name.
-		 */
+		* @brief DoF::Draw on the graph, 11 to 18 dispatches. Only what changes the pass list is in the key. The rest, including the sample
+		* table, is latched, so a blade or shape change needs no rebuild. The focus history stays on the GPU in a 1x1 texture owned here.
+		* The custom aperture textures stay BokehResources' D3D11 textures, imported by name.
+		*/
 		class DoFEffect final : public Effect
 		{
 		public:
@@ -82,8 +77,7 @@ namespace ORGPostChain
 				depth = FrameAnchors::EngineDepth(static_cast<std::uint32_t>(RE::RENDER_TARGETS_DEPTHSTENCIL::kMAIN));
 				if (!depth)
 					return "the main depth cannot be imported";
-				// As DoF::Draw: the frame for its output's size, kMAIN_COPY's (the chain checks it is kMAIN's). Not the D3D11 output's,
-				// which the graph path does not make.
+				// As DoF::Draw, sized for kMAIN_COPY, since the graph path does not make the D3D11 output.
 				auto* mainCopy = globals::game::renderer->GetRuntimeData().renderTargets[RE::RENDER_TARGETS::kMAIN_COPY].texture;
 				if (!mainCopy)
 					return "kMAIN_COPY is missing";
@@ -113,7 +107,7 @@ namespace ORGPostChain
 			void Build(Builder& a_builder, PostProcessFeature&) override
 			{
 				if (!sampler) {
-					// DoF::linearSampler's description: linear, mirrored, every mip.
+					// DoF::linearSampler: linear, mirrored, every mip.
 					sampler = ShaderBindings::CreateSampler(rhi::SamplerDesc{
 						.addressU = rhi::AddressMode::Mirror,
 						.addressV = rhi::AddressMode::Mirror,
@@ -139,7 +133,7 @@ namespace ORGPostChain
 				focusReset = kFocusResetCommits;
 
 				const auto& size = a_builder.GetShape();
-				const DXGI_FORMAT colorFormat = size.mainCopyFormat;  // as DoF::SetupResources, kMAIN_COPY's
+				const DXGI_FORMAT colorFormat = size.mainCopyFormat;  // kMAIN_COPY's, as DoF::SetupResources
 				const std::uint32_t width = size.width, height = size.height;
 				const std::uint32_t halfWidth = Half(width), halfHeight = Half(height);
 				const std::uint32_t tileWidth = (std::max)(1u, (halfWidth + 7) / 8), tileHeight = (std::max)(1u, (halfHeight + 7) / 8);
@@ -202,13 +196,10 @@ namespace ORGPostChain
 					}
 				};
 
-				// Update Focus: the history in place.
 				dispatch("focus", program(L"CS_UpdateFocus"), { .focus = Bind::Uav(focus->Graph()), .color = Bind::Srv(input), .depth = Bind::Srv(depth) }, 1, 1);
-				// Calculate CoC, from the focus just written.
 				dispatch("coc", program(L"CS_CalculateCoC"),
 					{ .coc = Bind::Uav(coc), .color = Bind::Srv(input), .previousFocus = Bind::Srv(focus->Graph()), .depth = Bind::Srv(depth) },
 					Groups(width), Groups(height));
-				// Half-resolution colour and CoC.
 				dispatch("downsample", program(frame.adaptiveGather ? L"CS_Downsample" : L"CS_DownsampleLegacy"),
 					{ .out = Bind::Uav(setupColor), .coc = Bind::Uav(setupCoC), .color = Bind::Srv(input), .cocInput = Bind::Srv(coc) },
 					Groups(halfWidth), Groups(halfHeight));
@@ -221,13 +212,12 @@ namespace ORGPostChain
 							Groups(gatherSize[i][0]), Groups(gatherSize[i][1]));
 					}
 				}
-				// CoC tiles: flatten, then the separable dilation.
+				// Flatten, then the separable dilation.
 				dispatch("tile-flatten", program(L"CS_CoCTileFlatten"), { .tile = Bind::Uav(cocTile), .cocInput = Bind::Srv(coc) }, Groups(tileWidth), Groups(tileHeight));
 				dispatch("tile-dilate-h", program(L"CS_CoCTileDilateH"), { .tile = Bind::Uav(cocTileTemporary), .cocTile = Bind::Srv(cocTile) },
 					Groups(tileWidth), Groups(tileHeight));
 				dispatch("tile-dilate-v", program(L"CS_CoCTileDilateV"), { .tile = Bind::Uav(cocTileDilated), .cocTile = Bind::Srv(cocTileTemporary) },
 					Groups(tileWidth), Groups(tileHeight));
-				// Far gather.
 				{
 					Slots slots{ .out = Bind::Uav(farLayer), .color = Bind::Srv(setupColor), .bokehShape = shapeBind, .cocHalf = Bind::Srv(setupCoC), .cocTile = Bind::Srv(cocTile) };
 					gatherInputs(slots);
@@ -247,11 +237,11 @@ namespace ORGPostChain
 					gatherInputs(slots);
 					dispatch("near", frame.adaptiveGather ? program(L"CS_NearGather", true) : program(L"CS_NearBlur"), slots, Groups(halfWidth), Groups(halfHeight));
 				}
-				// Median postfilter of both layers; the setup colour takes the filtered near layer.
+				// The setup colour takes the filtered near layer.
 				dispatch("postfilter", program(L"CS_GatherPostfilter"),
 					{ .out = Bind::Uav(farFiltered), .tile = Bind::Uav(setupColor), .color = Bind::Srv(farLayer), .nearBlur = Bind::Srv(nearLayer) },
 					Groups(halfWidth), Groups(halfHeight));
-				// Combiner, straight into the output unless post smoothing follows.
+				// Straight into the output unless post smoothing follows.
 				const Image smooth = frame.postSmoothing ? image("PostSmooth", colorFormat, width, height) : Image{};
 				dispatch("combine", program(L"CS_Combiner"),
 					{ .out = Bind::Uav(frame.postSmoothing ? smooth : output), .color = Bind::Srv(input), .cocInput = Bind::Srv(coc), .farBlur = Bind::Srv(farFiltered), .nearBlur = Bind::Srv(setupColor) },
@@ -269,7 +259,7 @@ namespace ORGPostChain
 
 			void Commit(const CommitContext& a_commit, PostProcessFeature& a_feature) override
 			{
-				// Update made this frame's values; the chain commits only frames it runs, after Update.
+				// The chain commits only frames it runs, after Update.
 				DoFLatch latch{ .cb = frame.constants, .resetFocus = focusReset > 0 ? 1u : 0u };
 				a_commit.Write(constants, latch);
 				a_commit.Write(samples, static_cast<DoF&>(a_feature).BokehSamples(frame));
@@ -279,7 +269,7 @@ namespace ORGPostChain
 
 		private:
 			FrameAnchors::Texture depth, shape;
-			std::unique_ptr<GraphResources::Texture2D> focus;  // the focus distance in km, read and updated each frame
+			std::unique_ptr<GraphResources::Texture2D> focus;  // focus distance in km, updated in place each frame
 			org::OwnedDescriptorBinding sampler;
 			DoF::Frame frame;
 			LatchRegion<DoFLatch> constants;

@@ -37,16 +37,16 @@ namespace
 	using AnchorPasses::Bind;
 
 	constexpr const char* kClientId = "cs.ssgi";
-	// The history clears, a client of their own: new inputs register the chain again without clearing the history.
+	// A separate client, so new inputs can re-register the chain without clearing the history.
 	constexpr const char* kResetClientId = "cs.ssgi.reset";
 	constexpr const char* kNoiseName = "ssgi.noise";
 	constexpr std::uint32_t kMips = 5;
-	// Below Subsurface Scattering's keys (199-202): the D3D11 frame runs SSGI first.
+	// Below Subsurface Scattering's keys (199-202), since the D3D11 frame runs SSGI first.
 	constexpr std::int32_t kOrderReset = 100;
 	constexpr std::int32_t kOrderFirstStep = 110;
 	constexpr std::size_t kHistoryTextures = 6;
 
-	/** @brief The chain's dispatches, in their D3D11 order; also each one's run gate entry. */
+	/** @brief In D3D11 order. Also each step's run gate entry. */
 	enum Step : std::uint32_t
 	{
 		kPrefilterDepths,
@@ -63,7 +63,7 @@ namespace
 	{
 		const char* name;
 		const char* source;
-		std::uint32_t views;  // the shader's SRV and UAV entries, after its SHARED, latch and sampler entries
+		std::uint32_t views;  // SRV and UAV entries after the SHARED, latch and sampler entries
 	};
 
 	constexpr std::array<StepInfo, kSteps> kStepInfo{ {
@@ -76,36 +76,33 @@ namespace
 		{ "upsample", "ScreenSpaceGI/upsample.cs.hlsl", 5 + 4 },
 	} };
 
-	// Each push block: the four shared constant handles, the latch (handle, offset), the point and linear samplers, then the views.
+	// Four shared constant handles, the latch handle and offset, point and linear samplers, then the views.
 	constexpr std::uint32_t kFixedWords = 4 + 2 + 2;
 
 	static_assert(sizeof(ScreenSpaceGI::SSGICB) % 16 == 0);
 
-	/**
-	 * @brief CS_ORG_SSGI_DEBUG=<n>: a diagnostic that changes one thing about the graph path, to find which part of it goes wrong
-	 * with one run per mode. Unset or 0: off. Read once, logged at setup.
-	 */
+	/** @brief CS_ORG_SSGI_DEBUG=<n> changes one thing about the graph path, to bisect a fault with one run per mode. Read once. */
 	enum class Debug : std::uint32_t
 	{
 		Off,
-		NoAliasing,    // 1: every transient texture is made a history one, so nothing is aliased
-		NoOutputs,     // 2: the chain runs, but the composite gets no SSGI (null inputs)
-		NoChain,       // 3: no dispatch runs (gates stay closed) and the outputs are cleared each run
-		ClearCoCg,     // 4: the CoCg output is cleared each run, after the chain (luma only)
-		ClearHistory,  // 5: every history texture is cleared each run, before the chain (no temporal reuse)
-		NoBlur,        // 6: the blur is off, whatever the setting
-		NoTemporal,    // 7: the temporal denoiser is off, whatever the setting
-		FullRes,       // 8: full resolution, whatever the setting (no upsample)
-		MainDepth,     // 9: the depth input is the engine's kMAIN, not the final depth copy
-		// 10-15: one transient kept out of the alias pool, the others aliased as usual.
+		NoAliasing,    // 1: no transient is aliased
+		NoOutputs,     // 2: the composite gets no SSGI
+		NoChain,       // 3: no dispatch runs and the outputs are cleared each run
+		ClearCoCg,     // 4: CoCg cleared after the chain, luma only
+		ClearHistory,  // 5: histories cleared before the chain, no temporal reuse
+		NoBlur,        // 6: blur off
+		NoTemporal,    // 7: temporal denoiser off
+		FullRes,       // 8: full resolution, no upsample
+		MainDepth,     // 9: depth from kMAIN instead of the final depth copy
+		// 10-15: one transient kept out of the alias pool.
 		KeepWorkingDepth,
 		KeepRadianceTemp,
 		KeepNormal,
 		KeepRadiance,
 		KeepAccumScratch,
-		KeepBlurInputs,  // IlYBlurInput and IlCoCgBlurInput
-		KeepSssDiffuse,  // 16: SSS::DiffuseNoAlbedo kept out of the pool (ORGSubsurfaceScattering.cpp reads the switch)
-		PrivatePool,     // 17: SSGI's transients aliased only with each other, in a pool no other graph places into
+		KeepBlurInputs,
+		KeepSssDiffuse,  // 16: ORGSubsurfaceScattering.cpp reads this switch
+		PrivatePool,     // 17: SSGI's transients alias only with each other, in a private pool
 		Count
 	};
 
@@ -115,7 +112,7 @@ namespace
 		"Radiance not aliased", "AccumFramesScratch not aliased", "blur inputs not aliased", "SSS::DiffuseNoAlbedo not aliased",
 		"SSGI's own alias pool" };
 
-	// Mode 17's manual pool id: any value no other resource names.
+	// Any value no other resource uses.
 	constexpr std::uint64_t kPrivatePool = 0x5591'0000'0000'0017ull;
 
 	Debug DebugMode()
@@ -127,7 +124,6 @@ namespace
 		return mode;
 	}
 
-	/** @brief Whether a debug mode keeps this texture (by name) out of the alias pool. */
 	bool KeptApart(std::string_view a_name)
 	{
 		switch (DebugMode()) {
@@ -150,7 +146,7 @@ namespace
 		}
 	}
 
-	/** @brief The settings the programs and the textures are made from: a change makes them again. */
+	/** @brief A change remakes the programs and textures. */
 	struct Config
 	{
 		int resolutionMode = 0;
@@ -163,7 +159,7 @@ namespace
 		bool operator==(const Config&) const = default;
 
 		bool FullRes() const { return resolutionMode == 0; }
-		// The shaders touch the specular textures with the specular GI or the temporal denoiser on.
+		// The shaders touch the specular textures with specular GI or the temporal denoiser on.
 		bool SpecularTextures() const { return specular || temporal; }
 
 		static Config Current()
@@ -171,7 +167,6 @@ namespace
 			const auto& settings = globals::features::screenSpaceGI.settings;
 			Config config{ settings.ResolutionMode, settings.Enabled, settings.EnableGI, settings.EnableExperimentalSpecularGI,
 				settings.EnableTemporalDenoiser, settings.EnableBlur };
-			// CS_ORG_SSGI_DEBUG's setting overrides.
 			switch (DebugMode()) {
 			case Debug::NoBlur:
 				config.blur = false;
@@ -189,7 +184,7 @@ namespace
 		}
 	};
 
-	/** @brief A step's own defines, as CompileComputeShaders gives them. The program adds CS's common ones itself. */
+	/** @brief As CompileComputeShaders gives them. The program adds CS's common defines itself. */
 	std::vector<std::pair<std::string, std::string>> StepDefines(Step a_step, const Config& a_config)
 	{
 		std::vector<std::pair<std::string, std::string>> defines;
@@ -208,14 +203,13 @@ namespace
 		return defines;
 	}
 
-	/** @brief A step's program key: the step and the settings its defines come from (not enabled or blur, which add none). */
+	/** @brief Enabled and blur add no defines, so they are not part of the key. */
 	std::uint32_t ProgramKey(const Config& a_config, std::uint32_t a_step)
 	{
 		return a_step | (static_cast<std::uint32_t>(a_config.resolutionMode) << 4) | (static_cast<std::uint32_t>(a_config.temporal) << 6) |
 		       (static_cast<std::uint32_t>(a_config.gi) << 7) | (static_cast<std::uint32_t>(a_config.specular) << 8);
 	}
 
-	/** @brief A step's program for a configuration. */
 	ComputeProgram::Desc StepDesc(const Config& a_config, std::uint32_t a_step)
 	{
 		return { .source = kStepInfo[a_step].source,
@@ -223,13 +217,12 @@ namespace
 			.defines = AnchorPasses::Defines(StepDefines(static_cast<Step>(a_step), a_config)) };
 	}
 
-	/** @brief Whether a configuration dispatches a step. */
 	bool UsesStep(const Config& a_config, std::uint32_t a_step)
 	{
 		return !(a_step == kBlur && !a_config.blur) && !(a_step == kUpsample && a_config.FullRes());
 	}
 
-	/** @brief Every configuration the settings can select, for the programs: each resolution mode and define option, blur on. */
+	/** @brief Each resolution mode and define option, with blur on. */
 	std::vector<Config> SettingsConfigs()
 	{
 		std::vector<Config> configs;
@@ -239,7 +232,6 @@ namespace
 		return configs;
 	}
 
-	/** @brief The engine and feature textures the chain reads, as graph textures. */
 	struct Inputs
 	{
 		FrameAnchors::Texture depth, main, normalRoughness, motionVectors, noise;
@@ -248,23 +240,23 @@ namespace
 		explicit operator bool() const { return depth && main && normalRoughness && motionVectors && noise; }
 	};
 
-	// Shared, so a new state can keep a texture of the one before (Impl::MakeTexture) while the old clients still name it.
+	// Shared, so a new state can keep a texture from the old one while the old clients still name it.
 	using Texture = std::shared_ptr<GraphResources::Texture2D>;
 
-	/** @brief What one configuration's passes are made from. Made on the render thread; a new one replaces it on a settings change. */
+	/** @brief Made on the render thread. A settings change replaces it. */
 	struct GiState
 	{
 		Config config;
 		std::array<std::shared_ptr<const ComputeProgram>, kSteps> programs;
 		Inputs inputs;
 
-		// Transient within the chain: aliasable unless exported.
+		// Aliasable unless exported.
 		Texture workingDepth, normal, radiance, radianceTemp, accumScratch, aoScratch, yScratch, coCgScratch, specScratch, yBlurInput,
 			coCgBlurInput;
 		// Read by the next frame's disocclusion pass.
 		Texture accum, ao, y, coCg, spec, prevGeo;
 
-		/** @brief The textures the composite reads: the history at full resolution, the upsampled scratch otherwise. */
+		/** @brief The history at full resolution, the upsampled scratch otherwise. */
 		const Texture& OutAo() const { return config.FullRes() ? ao : aoScratch; }
 		const Texture& OutY() const { return config.FullRes() ? y : yScratch; }
 		const Texture& OutCoCg() const { return config.FullRes() ? coCg : coCgScratch; }
@@ -279,17 +271,13 @@ namespace
 		std::array<const Texture*, kHistoryTextures> History() const { return { &accum, &ao, &y, &coCg, &spec, &prevGeo }; }
 	};
 
-	/** @brief A shader resource entry of an input, or handle 0 for an input the permutation does not touch. */
+	/** @brief Handle 0 for an input the permutation does not touch. */
 	Bind Srv(const FrameAnchors::Texture& a_texture) { return a_texture ? Bind::Srv(a_texture) : Bind::Unused(); }
 
-	/**
-	 * @brief An entry of one of the chain's textures (its slot when versioned, so a resize is a new version), or handle 0 for a
-	 * texture the permutation does not have.
-	 */
+	/** @brief Uses the slot when versioned, so a resize is a new version. Handle 0 for a texture the permutation lacks. */
 	Bind Srv(const Texture& a_texture) { return a_texture ? Bind::Srv(*a_texture) : Bind::Unused(); }
 	Bind Uav(const Texture& a_texture) { return a_texture ? Bind::Uav(*a_texture) : Bind::Unused(); }
 
-	/** @brief A UAV entry for each of the kMips mips. */
 	std::vector<Bind> UavMips(const Texture& a_texture)
 	{
 		std::vector<Bind> mips;
@@ -298,12 +286,12 @@ namespace
 		return mips;
 	}
 
-	/** @brief A step's resource entries, in its shader's list order after the fixed entries. */
+	/** @brief In the shader's list order after the fixed entries. */
 	std::vector<Bind> StepBinds(const GiState& a_state, Step a_step)
 	{
 		const auto& s = a_state;
 		const auto& in = s.inputs;
-		// With the blur, GI writes scratch textures that the blur reads, and the blur writes the history.
+		// With the blur, GI writes scratch that the blur reads, and the blur writes the history.
 		const bool blur = s.config.blur;
 		std::vector<Bind> binds;
 		const auto add = [&](std::vector<Bind> a_more) { binds.insert(binds.end(), a_more.begin(), a_more.end()); };
@@ -346,7 +334,7 @@ namespace
 		return binds;
 	}
 
-	/** @brief The main target's description now, which the chain's textures follow; false without it. */
+	/** @brief The chain's textures follow it. False without it. */
 	bool MainDesc(D3D11_TEXTURE2D_DESC& a_desc)
 	{
 		auto* renderer = globals::game::renderer;
@@ -357,12 +345,11 @@ namespace
 		return true;
 	}
 
-	/** @brief The inputs as they are now: the final depth copy, the main target, the GBuffer normals, motion vectors and noise. */
 	Inputs CurrentInputs()
 	{
 		auto& feature = globals::features::screenSpaceGI;
 		Inputs inputs;
-		// At DeferredPasses the D3D11 path reads Util::GetCurrentSceneDepthSRV(), which is the final depth copy by then.
+		// At DeferredPasses the D3D11 path's scene depth is already the final depth copy.
 		inputs.depth = FrameAnchors::EngineDepth(DebugMode() == Debug::MainDepth ? RE::RENDER_TARGETS_DEPTHSTENCIL::kMAIN :
 		                                                                           RE::RENDER_TARGETS_DEPTHSTENCIL::kPOST_ZPREPASS_COPY);
 		if (globals::deferred)
@@ -379,26 +366,24 @@ struct ORGScreenSpaceGI::Impl
 {
 	std::shared_ptr<GiState> state;
 	org::OwnedDescriptorBinding pointSampler, linearSampler;
-	// SSGICB, the shaders' latch entry, written by the chain's commit each run.
+	// SSGICB, written by the commit each run.
 	std::shared_ptr<org::LatchBlock> latch;
-	// One entry per step: a run does only the steps its commit opened.
+	// One entry per step, so a run does only the steps its commit opened.
 	std::shared_ptr<RenderGraph::RunGate> gate;
 	D3D11_TEXTURE2D_DESC main{};
 	std::function<void()> onFailed;
-	// The programs by ProgramKey: the current configuration's built at setup, every other one queued then on the program build
-	// thread (prebuilt) so a settings change finds it. Taken into programs at first use.
+	// The current configuration is built at setup. The others are queued on the program build thread so a settings change finds them ready.
 	std::map<std::uint32_t, std::shared_ptr<const ComputeProgram>> programs;
 	RenderGraph::ProgramCache<ComputeProgram, std::uint32_t> prebuilt{ "Screen Space GI" };
 	bool registered = false;
-	// Set by Prepass on frames the chain has its inputs: the client's active.
+	// Set by Prepass on frames the chain has its inputs.
 	bool frameReady = false;
 	bool failed = false;
 
 	/**
-	 * @brief A texture of the chain, the size of the main target. One the graph never aliases (history, or exported) is versioned,
-	 * so a resize is a new version of its slot. a_previous: the state being replaced, whose texture of the same name and shape
-	 * is kept, so a settings change keeps what it published and nothing outside the chain's anchor is built again.
-	 */
+	* @brief A main-target-sized texture. Non-aliased ones are versioned, so a resize is a new version.
+	* A matching texture from a_previous is kept, so a settings change rebuilds nothing outside the chain's anchor.
+	*/
 	Texture MakeTexture(DXGI_FORMAT a_format, UINT a_mips, const char* a_name, GraphResources::Lifetime a_lifetime, bool a_exported,
 		const GiState* a_previous) const
 	{
@@ -432,7 +417,7 @@ struct ORGScreenSpaceGI::Impl
 		return std::make_shared<GraphResources::Texture2D>(desc, a_name, options);
 	}
 
-	/** @brief Queues every configuration's programs on the program build thread, except those already built. */
+	/** @brief Queues every other configuration on the program build thread. */
 	void Prebuild()
 	{
 		for (const auto& config : SettingsConfigs())
@@ -441,10 +426,7 @@ struct ORGScreenSpaceGI::Impl
 					(void)prebuilt.Get(ProgramKey(config, step), [&] { return StepDesc(config, step); });
 	}
 
-	/**
-	 * @brief A step's program: built before, or by Prebuild's queue, or built now on this thread. a_expected: setup or a shader
-	 * reload, where building now is the plan; otherwise it is logged (a program setup did not prebuild in time).
-	 */
+	/** @brief Building now is expected only at setup or a shader reload. Otherwise it is logged as a missed prebuild. */
 	std::shared_ptr<const ComputeProgram> ProgramFor(const Config& a_config, std::uint32_t a_step, bool a_expected)
 	{
 		const auto key = ProgramKey(a_config, a_step);
@@ -462,10 +444,7 @@ struct ORGScreenSpaceGI::Impl
 		return program;
 	}
 
-	/**
-	 * @brief The programs and textures of a configuration; null, logged, when one cannot be made. a_expected: as ProgramFor.
-	 * a_previous: the state it replaces, whose matching textures it keeps (MakeTexture).
-	 */
+	/** @brief Null, logged, when one cannot be made. Matching textures from a_previous are kept. */
 	std::shared_ptr<GiState> Build(const Config& a_config, bool a_expected, const GiState* a_previous = nullptr)
 	{
 		auto gi = std::make_shared<GiState>();
@@ -525,7 +504,7 @@ struct ORGScreenSpaceGI::Impl
 		return gi;
 	}
 
-	/** @brief Every texture of a state, registered with each build of the anchor's graph. */
+	/** @brief Registered with each build of the anchor's graph. */
 	static std::function<void(org::RenderGraph&)> Registrar(std::shared_ptr<const GiState> a_state)
 	{
 		return [a_state](org::RenderGraph& a_graph) {
@@ -535,14 +514,11 @@ struct ORGScreenSpaceGI::Impl
 		};
 	}
 
-	/**
-	 * @brief The chain's client for the current state and inputs: every step behind its gate entry, then the accumulation copy.
-	 * Registering again replaces it, so the anchor builds its graph with the new textures.
-	 */
+	/** @brief Each step behind its gate entry, then the accumulation copy. Registering again replaces it. */
 	bool RegisterChain()
 	{
 		AnchorPasses::Builder builder(FrameAnchors::Anchor::DeferredPasses, kClientId, kOrderFirstStep, latch, gate);
-		// CS_ORG_SSGI_DEBUG's clears: every run, not one-shot.
+		// Debug clears run every run, not once.
 		const auto clearEachRun = [&](const char* a_name, const Texture& a_texture) {
 			if (a_texture)
 				builder.Add(AnchorPasses::ClearOf(a_name, *a_texture), false);
@@ -563,7 +539,7 @@ struct ORGScreenSpaceGI::Impl
 				binds.push_back(std::move(bind));
 			builder.Add(AnchorPasses::Dispatch{ .name = kStepInfo[step].name, .program = state->programs[step], .bindings = std::move(binds), .gate = step });
 		}
-		// Without the blur, the next frame reads the counts the disocclusion pass wrote, which it cannot write in place.
+		// Without the blur, the next frame reads counts the disocclusion pass cannot write in place.
 		if (!state->config.blur)
 			builder.Add(AnchorPasses::CopyOf("keep-accumulation", *state->accumScratch, *state->accum, state->accum->Desc().Width, state->accum->Desc().Height));
 		if (DebugMode() == Debug::NoChain) {
@@ -592,9 +568,9 @@ struct ORGScreenSpaceGI::Impl
 	}
 
 	/**
-	 * @brief The history clears as one-shot passes: they run at the anchor's next run after this registration (a new state) or
-	 * after FrameAnchors::Rearm (a history reset). The client is never active itself, so it keeps no epoch running.
-	 */
+	* @brief One-shot history clears, run at the anchor's next run after this registration or after FrameAnchors::Rearm.
+	* The client is never active itself, so it keeps no epoch running.
+	*/
 	bool RegisterReset()
 	{
 		AnchorPasses::Builder builder(FrameAnchors::Anchor::DeferredPasses, kResetClientId, kOrderReset);
@@ -609,7 +585,6 @@ struct ORGScreenSpaceGI::Impl
 		return FrameAnchors::Register(std::move(client));
 	}
 
-	/** @brief This run's constants, and the steps it does with their group counts. */
 	void Commit() const
 	{
 		if (!state || !state->config.enabled)
@@ -619,10 +594,9 @@ struct ORGScreenSpaceGI::Impl
 		latch->WriteValue(RenderGraphRuntime::Get().Host()->CurrentRun(), 0, constants);
 		if (DebugMode() == Debug::NoChain)
 			return;
-		// The internal size from the built state's resolution mode, which the programs were made for (and the debug switch may
-		// override), as GetDispatchSizes gives it from the setting.
+		// Use the built state's resolution mode, which the programs were made for.
 		auto full = feature.GetDispatchSizes().full;
-		// A frame between a resolution change and the next frame boundary still has the textures at their old size.
+		// Between a resolution change and the next frame boundary the textures still have their old size.
 		full[0] = (std::min)(full[0], static_cast<uint>(state->ao->Desc().Width));
 		full[1] = (std::min)(full[1], static_cast<uint>(state->ao->Desc().Height));
 		const auto shift = static_cast<uint>(state->config.resolutionMode);
@@ -640,17 +614,14 @@ struct ORGScreenSpaceGI::Impl
 		open(kUpsample, full, 8);
 	}
 
-	/** @brief The composite's inputs of the current state, by their published ids (null where the state has none). */
+	/** @brief Null where the state has none. */
 	std::array<std::pair<std::string_view, const GraphResources::Texture2D*>, 4> CompositeInputs() const
 	{
 		return { { { ORGScreenSpaceGI::kAoId, state->OutAo().get() }, { ORGScreenSpaceGI::kYId, state->OutY().get() },
 			{ ORGScreenSpaceGI::kCoCgId, state->OutCoCg().get() }, { ORGScreenSpaceGI::kSpecularId, state->OutSpec().get() } } };
 	}
 
-	/**
-	 * @brief Publishes the current state's composite inputs, so the composite's reads are ordered after the chain's writes. An id
-	 * the state has no texture for is withdrawn. A new texture under an id (a settings change) rebuilds every graph once.
-	 */
+	/** @brief Orders the composite's reads after the chain. An id with no texture is withdrawn. A new texture under an id rebuilds every graph once. */
 	bool PublishOutputs() const
 	{
 		for (const auto& [id, texture] : CompositeInputs()) {
@@ -662,14 +633,13 @@ struct ORGScreenSpaceGI::Impl
 		return true;
 	}
 
-	/** @brief The composite returns to the D3D11 views of these inputs (the chain no longer writes them). */
+	/** @brief The composite returns to the D3D11 views. */
 	static void WithdrawOutputs()
 	{
 		for (const auto id : { ORGScreenSpaceGI::kAoId, ORGScreenSpaceGI::kYId, ORGScreenSpaceGI::kCoCgId, ORGScreenSpaceGI::kSpecularId })
 			PublishedResources::Withdraw(id);
 	}
 
-	/** @brief Takes both clients out of the anchor's graph. */
 	void Unregister()
 	{
 		registered = false;
@@ -678,7 +648,7 @@ struct ORGScreenSpaceGI::Impl
 		FrameAnchors::Unregister(kResetClientId);
 	}
 
-	/** @brief Leaves the graph path for good: the feature's D3D11 path takes over. */
+	/** @brief For good. The D3D11 path takes over. */
 	void Stop()
 	{
 		failed = true;
@@ -711,7 +681,7 @@ void ORGScreenSpaceGI::Reserve()
 
 bool ORGScreenSpaceGI::Setup(const D3D11_TEXTURE2D_DESC& a_main, std::function<void()> a_onFailed)
 {
-	// The clients' callbacks point at the Impl: they go with it.
+	// The clients' callbacks point at the Impl, so they go with it.
 	if (impl)
 		impl->Unregister();
 	impl.reset();
@@ -733,7 +703,7 @@ bool ORGScreenSpaceGI::Setup(const D3D11_TEXTURE2D_DESC& a_main, std::function<v
 		next->latch = std::make_shared<org::LatchBlock>("cs.ssgi.latch", static_cast<std::uint32_t>(sizeof(ScreenSpaceGI::SSGICB)));
 		next->gate = RenderGraph::RunGate::Create("cs.ssgi.gate", kSteps);
 		next->state = next->Build(Config::Current(), true);
-		// The other configurations' programs, off the render thread: a settings change then makes no compile.
+		// Prebuild off the render thread so a settings change does not compile.
 		next->Prebuild();
 		if (!next->pointSampler || !next->linearSampler || !next->gate || !next->state) {
 			logger::warn("[ORG] Screen Space GI stays on D3D11: its samplers, programs or textures could not be made");
@@ -765,11 +735,10 @@ void ORGScreenSpaceGI::Prepass()
 		self.Stop();
 	};
 
-	// A setting the programs or textures depend on, or a recompile from the menu: both made again, and the history with them.
+	// A setting the programs or textures depend on, or a menu recompile, remakes both and the history.
 	bool newState = false;
 	if (feature.recompileFlag) {
-		// The D3D11 shaders too, so a later fallback finds them current. It also queues the history reset. The graph's programs are
-		// built again from the reloaded sources: the current ones now, the others queued again.
+		// Also reload the D3D11 shaders so a later fallback finds them current. This queues the history reset too.
 		feature.ClearShaderCache();
 		self.programs.clear();
 		self.prebuilt.Clear();
@@ -793,8 +762,7 @@ void ORGScreenSpaceGI::Prepass()
 		return;
 	}
 
-	// A resolution change. Every texture takes the main target's size at the next frame boundary, and once they have it the chain is
-	// registered again for its copy's size and its history cleared.
+	// A resolution change. Textures take the new size at the next frame boundary, then the chain re-registers and clears its history.
 	if (D3D11_TEXTURE2D_DESC main{}; MainDesc(main))
 		for (const auto* texture : self.state->All())
 			if (*texture)
@@ -807,7 +775,7 @@ void ORGScreenSpaceGI::Prepass()
 		resized = true;
 	}
 
-	// A new engine texture (a resolution change) or a new noise texture: the chain's passes are made again.
+	// A new engine texture or noise texture remakes the chain's passes.
 	bool newInputs = resized;
 	if (auto inputs = CurrentInputs(); !(inputs == self.state->inputs)) {
 		if (!inputs)
@@ -818,8 +786,7 @@ void ORGScreenSpaceGI::Prepass()
 
 	const bool reset = feature.queuedResetHistory.exchange(false);
 	if (!self.registered || newState) {
-		// Registered at the first frame, with the inputs imported on the render thread. A new registration of the clears runs
-		// them once, so a new state starts from a cleared history.
+		// Registered at the first frame, with the inputs imported on the render thread. Re-registering the clears runs them once.
 		if (!self.RegisterReset() || !self.RegisterChain())
 			return fail("its anchor clients could not be registered");
 		if (!self.PublishOutputs())
@@ -827,7 +794,7 @@ void ORGScreenSpaceGI::Prepass()
 	} else {
 		if (newInputs && !self.RegisterChain())
 			return fail("its anchor client could not be registered");
-		// A resize leaves the new versions' history undefined: cleared as a reset clears it.
+		// A resize leaves the new versions' history undefined, so clear it.
 		if (reset || resized)
 			FrameAnchors::Rearm(kResetClientId);
 	}
@@ -850,7 +817,7 @@ ORGScreenSpaceGI::Outputs ORGScreenSpaceGI::GetOutputs() const
 
 #else  // !CS_HAS_RENDER_GRAPH
 
-// Built without OpenRenderGraph: Screen Space GI always draws with D3D11.
+// Without OpenRenderGraph Screen Space GI always draws with D3D11.
 #	include "ORGScreenSpaceGI.h"
 
 struct ORGScreenSpaceGI::Impl

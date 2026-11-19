@@ -10,134 +10,91 @@
 #include <string>
 
 /**
- * @brief Upscaling's own passes on the render graph (CS_ORG_UPSCALING=1). Streamline's FSR, XeSS and DLSS evaluates are the post
- * stage's pass in both modes (below); frame generation still runs in the DXVK interop command ring (Upscaling/DXVKInterop.cpp).
- *
- * - The upscaler's output is a graph texture exported to D3D11 (SRV and UAV), because Streamline still writes it through its
- *   D3D11 image in guest mode. At the Upscale anchor, which runs after the evaluate, CopyHudlessPS draws it into kMAIN (the D3D11
- *   path's CopyResource). It is a draw so that a run gate can skip it on frames the evaluate wrote nothing.
- * - The evaluate itself is the Upscale anchor's first pass (QueueEvaluate), wherever the post stage runs (native mode, and guest mode
- *   since Guest B6). It is recorded at execution each frame: its Record calls Streamline's tags and evaluate on the pass's own
- *   command list (in guest, DXVK's command buffer inside the stage's block), with the four images declared as legacy interop uses,
- *   then restores the graph's descriptor heaps.
- * - The depth upscale at the same anchor: kMAIN's depth into kMAIN_COPY and the refraction normals into their copy, then
- *   DepthRefractionUpscalePS into the refraction normals, kSAO_CAMERAZ and kMAIN's depth, then the underwater mask's copy and
- *   UnderwaterMaskUpscalePS at half size. The jitter constants come from a latch block, the shared constant buffers from
- *   SharedConstants. A copy has no per-run switch, so these passes are in the anchor's graph only while the depth upscale runs:
- *   the client is built again when it starts or stops.
- * - Frame generation's hudless colour is a graph texture exported to D3D11 (SRV and RTV), which Streamline tags or reads. At the
- *   FrameGeneration anchor CopyHudlessPS draws the framebuffer, or HDR's clean composite, into it.
- *
- * The draws go through run gates (RenderGraph/RunGate.h): each client's commit opens the draws this frame queued, so a kept
- * recording does nothing where the D3D11 path would have skipped that work.
- *
- * Ordering against the ring: the ring's buffer is submitted after DXVK's command list in flight, and ends with a full memory
- * barrier, so the Upscale epoch that follows in DXVK's next list sees the evaluate's output. Before an evaluate or a frame
- * generation call, a late anchor's epoch is separated from it (Upscaling::SeparateFromGraphEpochs), as before.
- *
- * On any failure the feature returns to D3D11: once the ring is drained the graph textures are released and the D3D11 ones are
- * made again (Failed, ReleaseAfterFailure). Render thread throughout.
- *
- * Header deliberately free of ORG/Vulkan includes (see RenderGraphRuntime.h).
- */
+* @brief Upscaling's own passes on the render graph, with CS_ORG_UPSCALING=1.
+*
+* Streamline's evaluate is the Upscale anchor's first pass. It records the SDK's tags and evaluate on the pass's own command list.
+* The upscaled output is exported to D3D11, and a gated draw copies it into kMAIN. The depth upscale runs at the same anchor.
+* A copy has no per-run switch, so the client is rebuilt when the depth upscale starts or stops.
+* Frame generation still runs in the DXVK interop command ring. Its hudless colour is copied at the FrameGeneration anchor.
+* On any failure the feature returns to D3D11 once the ring is drained. Render thread throughout. Free of ORG/Vulkan includes.
+*/
 class ORGUpscaling
 {
 public:
-	/** @brief Upscaling's own textures, which the graph holds instead of D3D11 while its path runs. */
+	/** @brief Textures the graph holds instead of D3D11 while its path runs. */
 	enum class Target : std::uint8_t
 	{
-		Upscaled,  // the upscaler's output: kMAIN's description, SRV and UAV
-		Hudless,   // frame generation's hudless colour: SRV and RTV
+		Upscaled,  // kMAIN's description, SRV and UAV
+		Hudless,   // SRV and RTV
 	};
 
-	/** @brief Whether CS_ORG_UPSCALING=1 is set. */
 	static bool Requested();
 
-	/** @brief The one instance, for the session. */
 	static ORGUpscaling& Get();
 
-	/** @brief PostPostLoad, when requested: reserves the Upscale and FrameGeneration anchors. */
+	/** @brief PostPostLoad, when requested. */
 	static void Reserve();
 
 	/**
-	 * @brief SetupResources, with the runtime active: makes the programs, the sampler, the latch and the run gates. The clients
-	 * register at the first frame that queues their work, since what they hold (the textures, the engine targets) is known then.
-	 * @return Whether the graph path runs. False keeps D3D11 (logged).
-	 */
+	* @brief SetupResources, with the runtime active. Clients register at the first frame that queues their work.
+	* @return False keeps D3D11, logged.
+	*/
 	bool Setup();
 
-	/**
-	 * @brief Upscaling::ClearShaderCache: a Setup that failed is tried again. Programs that built reload through the pipeline
-	 * registry, so nothing else is dropped.
-	 */
+	/** @brief Retries a failed Setup. Built programs reload through the pipeline registry. */
 	void ClearShaderCache();
 
-	/** @brief Whether the graph path runs: set up, not failed, and the runtime still up. */
+	/** @brief Set up, not failed, and the runtime still up. */
 	bool IsActive() const;
 
-	/**
-	 * @brief Whether the upscaler's evaluate is the post stage's pass (QueueEvaluate): the graph path runs and a stage of this mode holds
-	 * the Upscale anchor. Native mode, and guest mode since the post stage runs there.
-	 */
+	/** @brief Whether the evaluate is the post stage's pass. */
 	bool EvaluatesInStage() const;
 
-	/** @brief Whether the graph failed and the textures it holds must go back to D3D11 (ReleaseAfterFailure). */
+	/** @brief The textures it holds must then go back to D3D11. */
 	bool Failed() const;
 
 	/**
-	 * @brief After a failure, with the command ring drained: drops the clients, the graph textures and the programs. The feature is
-	 * on D3D11 from then on. @return Whether it held the upscaled texture (the caller makes the D3D11 one again).
-	 */
+	* @brief Call after a failure with the command ring drained. The feature stays on D3D11 from then on.
+	* @return Whether it held the upscaled texture, which the caller must remake in D3D11.
+	*/
 	bool ReleaseAfterFailure();
 
-	/** @brief a_target as an exported graph texture (a_desc: the D3D11 description). False: the caller makes the D3D11 texture. */
+	/** @brief False means the caller makes the D3D11 texture. */
 	bool CreateTexture(Target a_target, const D3D11_TEXTURE2D_DESC& a_desc);
 
-	/** @brief Releases a_target's graph texture, if the graph holds it. The caller has drained the command ring. */
+	/** @brief The caller must have drained the command ring. */
 	void DestroyTexture(Target a_target);
 
-	/** @brief Whether the graph holds a_target. */
 	bool Holds(Target a_target) const;
 
-	/**
-	 * @brief The texture Upscaling uses for a_target: the graph's D3D11 export while the graph holds it, else a_d3d11 (Upscaling's
-	 * own D3D11 texture, or null).
-	 */
+	/** @brief The graph's D3D11 export while the graph holds it, else a_d3d11. */
 	ID3D11Texture2D* Texture(Target a_target, ID3D11Texture2D* a_d3d11) const;
 
-	/** @brief a_target's description, chosen as Texture chooses: the graph texture's, else a_d3d11. */
+	/** @brief Chosen as Texture chooses. */
 	const D3D11_TEXTURE2D_DESC* Desc(Target a_target, const D3D11_TEXTURE2D_DESC* a_d3d11) const;
 
 	/**
-	 * @brief What the evaluate pass records for a frame: the SDK's commands on the native list (a VkCommandBuffer or an
-	 * ID3D12GraphicsCommandList), given its four images in order: colour in (kMAIN), colour out (the upscaled texture), depth (kMAIN's
-	 * depth) and motion vectors (kMOTION_VECTOR). Returns false when the SDK refused (logged by the caller's code).
-	 */
+	* @brief Records the SDK's commands on the native list, a VkCommandBuffer or ID3D12GraphicsCommandList.
+	* Images in order: colour in (kMAIN), colour out, depth, motion vectors. False when the SDK refused.
+	*/
 	using EvaluateRecord = std::function<bool(void* a_nativeList, std::span<const RenderGraph::Engine::Native::ExternalImageInfo> a_images)>;
 
 	/**
-	 * @brief This frame's upscaler evaluate, recorded by the evaluate pass at the Upscale anchor (which RunUpscale runs after it).
-	 * a_record runs once, in that pass's Record for this frame's run, on the thread that records it (native mode's submission thread,
-	 * guest mode's DXVK worker). False when the graph path does not run, holds no upscaled texture, or the engine's inputs cannot be imported.
-	 */
+	* @brief a_record runs once, in the evaluate pass's Record, on whichever thread records it.
+	* False when the graph path does not run, holds no upscaled texture, or the inputs cannot be imported.
+	*/
 	bool QueueEvaluate(std::string a_label, EvaluateRecord a_record);
 
-	/** @brief After an evaluate that wrote the upscaled texture: the Upscale anchor copies it into kMAIN. False: copy with D3D11. */
+	/** @brief After an evaluate that wrote the upscaled texture. False means copy with D3D11. */
 	bool QueueCopyToMain();
 
-	/**
-	 * @brief UpscaleDepth's work at the Upscale anchor, with this frame's jitter and kernel choice (Upscaling::JitterCB).
-	 * @return False when the engine's targets cannot be imported: draw with D3D11.
-	 */
+	/** @brief @return False when the engine's targets cannot be imported. Then draw with D3D11. */
 	bool QueueDepthUpscale(float2 a_jitter, float a_useWideKernel);
 
-	/** @brief In PerformUpscaling, after the evaluate and UpscaleDepth: runs the Upscale anchor when something was queued. */
+	/** @brief In PerformUpscaling. Runs the anchor when something was queued. */
 	void RunUpscale();
 
-	/**
-	 * @brief Draws a_source into the hudless texture at the FrameGeneration anchor. @return False when nothing was drawn (the graph
-	 * failed, or the source cannot be imported).
-	 */
+	/** @brief @return False when nothing was drawn. */
 	bool CopyHudless(ID3D11ShaderResourceView* a_source);
 
 	~ORGUpscaling();
@@ -148,5 +105,5 @@ private:
 	ORGUpscaling() = default;
 
 	std::shared_ptr<Impl> impl;
-	bool setupFailed = false;  // the last Setup found the runtime but could not make its programs or resources
+	bool setupFailed = false;  // the runtime was there but programs or resources failed
 };

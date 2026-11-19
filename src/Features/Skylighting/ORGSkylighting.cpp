@@ -49,43 +49,43 @@ namespace
 {
 	constexpr const char* kClientId = "cs.skylighting";
 	constexpr const char* kShader = "Skylighting/UpdateProbesCS.hlsl";
-	// The occlusion map's clear, drawn: the engine skeleton's clear shader (depth 1.0 from the vertex stage, an Always test).
+	// The engine skeleton's clear shader: depth 1.0 from the vertex stage and an Always test.
 	constexpr const char* kClearShader = "RenderGraph/EngineClear.hlsl";
 	constexpr auto kVolumes = static_cast<std::size_t>(ORGSkylighting::Volume::Count);
-	// The client's gate entries: the probe update, and the occlusion map's clear.
+	// The probe update, then the occlusion map's clear.
 	constexpr std::uint32_t kUpdateEntry = 0;
 	constexpr std::uint32_t kClearEntry = 1;
 
-	/** @brief The sky occlusion map's twin (ORGSkylighting::MakeOcclusionMap); null when Skylighting made a D3D11 one. */
+	/** @brief Null when Skylighting made a D3D11 one. */
 	std::unique_ptr<GraphResources::Texture2D>& OcclusionTwin()
 	{
 		static std::unique_ptr<GraphResources::Texture2D> s_twin;
 		return s_twin;
 	}
 
-	/** @brief The twin's DSV format (the target's), for the clear program. */
+	/** @brief For the clear program. */
 	DXGI_FORMAT& OcclusionDsvFormat()
 	{
 		static DXGI_FORMAT s_format = DXGI_FORMAT_UNKNOWN;
 		return s_format;
 	}
 
-	/** @brief The graph no longer updates the probes: the published volumes' readers return to D3D11. */
+	/** @brief The published volumes' readers return to D3D11. */
 	void WithdrawVolumes()
 	{
 		PublishedResources::Withdraw(ORGSkylighting::kProbeArrayId);
 		PublishedResources::Withdraw(ORGSkylighting::kShadowVisibilityId);
 	}
 
-	/** @brief The directional shadow data, as UpdateProbesShadows in UpdateProbesCS.hlsl: float4 rows, tightly packed. */
+	/** @brief As UpdateProbesShadows in UpdateProbesCS.hlsl: float4 rows, tightly packed. */
 	struct Shadows
 	{
-		float shadowProj[32];     // DirectionalShadowLightData::ShadowProj, as stored (column_major)
+		float shadowProj[32];     // column_major, as stored
 		float splitDistances[4];  // end xy, start zw
 	};
 	static_assert(sizeof(Shadows) == 9 * 16);
 
-	/** @brief The textures the pass reads, as D3D11 gives them. */
+	/** @brief As D3D11 gives them. */
 	struct Inputs
 	{
 		ID3D11Texture2D* occlusion = nullptr;
@@ -102,10 +102,7 @@ namespace
 		std::memcpy(&a_out, a_in, sizeof(T));
 	}
 
-	/**
-	 * @brief What the D3D11 dispatch reads from Deferred's structured buffer at t2: the directional shadow data (zero without shadow
-	 * maps, as D3D11's null SRV reads). The rest it reads from the shared constants, which the anchor latches for the pass.
-	 */
+	/** @brief What the D3D11 dispatch reads at t2. Zero without shadow maps, as D3D11's null SRV reads. */
 	Shadows MakeShadows(const Skylighting& a_feature)
 	{
 		Shadows shadows{};
@@ -133,7 +130,7 @@ namespace
 		return inputs;
 	}
 
-	// UpdateProbesCS's push block, in its list order.
+	// In list order.
 	struct UpdateProbesBlock
 	{
 		SharedConstants::Handles shared;
@@ -143,10 +140,9 @@ namespace
 		ShaderBindings::Latch shadows;
 	};
 
-	// UpdateProbesCS runs 8x8x1 groups.
 	constexpr std::uint32_t kGroupX = 8, kGroupY = 8;
 
-	/** @brief The probe update's graph state. Built on the render thread; the pass copies what it uses when it is made. */
+	/** @brief Built on the render thread. The pass copies what it uses when it is made. */
 	struct Resources
 	{
 		std::uint32_t groups[3]{};
@@ -155,22 +151,22 @@ namespace
 		std::array<std::unique_ptr<GraphResources::Texture3D>, kVolumes> volumes;
 		std::shared_ptr<org::LatchBlock> latch;
 		std::shared_ptr<RenderGraph::RunGate> gate;
-		// The imported inputs, null until the first frame that updates; replaced (and the client refreshed) when D3D11 gives others.
+		// Null until the first frame that updates. Replaced, refreshing the client, when D3D11 gives others.
 		FrameAnchors::Texture occlusion, shadowCascades, esramShadows;
-		// The occlusion map's clear (the twin's only; null keeps the D3D11 clear).
+		// Only for the twin. Null keeps the D3D11 clear.
 		std::shared_ptr<const RasterProgram> clearProgram;
 	};
 
-	/** @brief What the render thread hands the anchor's commit: this frame's shadow data, on a frame that updates. */
+	/** @brief This frame's shadow data, on a frame that updates. */
 	struct ClientState
 	{
 		std::optional<Shadows> pending;
-		// Render thread: Drawcall Limit Fix drew the occlusion map since its last clear on the graph (NoteOcclusionDrawn).
+		// Render thread. DCLF drew the map since its last graph clear.
 		bool occlusionDrawn = false;
-		// The next run clears the map after the update read it (Update queued it); the commit opened that clear (TakeOcclusionCleared).
+		// The next run clears the map after the update read it.
 		bool clearOcclusion = false;
 		bool occlusionCleared = false;
-		// Native mode: a run with the map's clear executed, so the map holds no memory nothing wrote: the probe update may read it.
+		// Native mode: a run with the clear executed, so the map holds no unwritten memory and the update may read it.
 		bool mapCleared = false;
 	};
 
@@ -189,11 +185,11 @@ namespace
 		ShaderBindings::Handle sampler = 0;
 	};
 
-	/** @brief The probe update, through the client's run gate: the commit opens it on the frames that update. */
+	/** @brief The commit opens it on frames that update. */
 	class UpdateProbesPass final : public org::TypedRenderGraphPass<UpdateProbesPass, ProbeFrame, ProbeBindings>
 	{
 	public:
-		// At the build, on the render thread: the resources as they are now (GraphResources' rule).
+		// At the build, on the render thread, so it sees the resources as they are now.
 		explicit UpdateProbesPass(const Resources& a_resources) :
 			occlusion(a_resources.occlusion), shadowCascades(a_resources.shadowCascades), esramShadows(a_resources.esramShadows)
 		{
@@ -211,7 +207,7 @@ namespace
 			ProbeBindings bindings{};
 			bindings.shared = SharedConstants::Declare(a_builder);
 			bindings.occlusion = a_builder.ShaderResource(occlusion).View();
-			// The shader reads the cascades as one Texture2DArray: the whole-array view, not the default (first slice).
+			// The shader reads the cascades as one Texture2DArray, so use the whole-array view.
 			const org::SrvView wholeArray{ .variant = static_cast<std::uint32_t>(org::SRVViewType::Texture2DArrayFull) };
 			bindings.shadowCascades = a_builder.ShaderResource(shadowCascades, wholeArray).View();
 			bindings.esramShadows = a_builder.ShaderResource(esramShadows, wholeArray).View();
@@ -220,7 +216,7 @@ namespace
 			return bindings;
 		}
 
-		// The values that change per frame are latched and gated, so the recording depends only on these.
+		// Per-frame values are latched and gated, so the recording depends only on these.
 		void Revision(std::vector<std::uint64_t>& a_out) const
 		{
 			a_out.push_back(reinterpret_cast<std::uintptr_t>(frame.program.get()));
@@ -266,10 +262,9 @@ namespace
 	};
 
 	/**
-	 * @brief The occlusion map cleared to 1.0 after the probe update read it, so Drawcall Limit Fix's next shadow epoch draws into an
-	 * empty map (D3D11 cleared it just before that epoch). A depth draw through the client's gate: the commit opens it on the runs
-	 * Update queued it for.
-	 */
+	* @brief Clears the map to 1.0 after the update read it, so DCLF's next shadow epoch draws into an empty map.
+	* D3D11 cleared it just before that epoch. The commit opens it on the runs Update queued.
+	*/
 	class OcclusionClearPass final : public org::TypedRenderGraphPass<OcclusionClearPass, ClearFrame, ClearBindings>
 	{
 	public:
@@ -296,8 +291,8 @@ namespace
 		{
 			if (!a_frame.program || !a_frame.gate)
 				return;
-			// Native mode: the map is Skylighting's alone (no slot of the engine's is lent), cleared by its render pass's load operation in
-			// every run, after the probe update read it. Guest mode: the draw clears it when the gate entry is open.
+			// Native mode: the map is Skylighting's alone and its render pass clears it with a load op every run.
+			// Guest mode: the draw clears it when the gate entry is open.
 			const bool native = RenderGraph::Engine::Native::Active();
 			const RasterProgram::Depth depth{ .view = &a_bindings.depth, .readOnly = false, .load = native ? rhi::LoadOp::Clear : rhi::LoadOp::Load, .clear = 1.0f };
 			RasterProgram::DrawDesc draw{};
@@ -314,7 +309,7 @@ namespace
 		ClearFrame frame;
 	};
 
-	/** @brief A shadow map's texture behind a_srv: the engine's depth-stencil import when it is one of the engine's, else its own. */
+	/** @brief The engine's depth-stencil import when it is one of the engine's, else its own. */
 	FrameAnchors::Texture ImportShadowMap(ID3D11ShaderResourceView* a_srv, const char* a_id)
 	{
 		if (!a_srv)
@@ -324,7 +319,7 @@ namespace
 		auto texture = resource.try_as<ID3D11Texture2D>();
 		if (!texture)
 			return nullptr;
-		// The view and the depth fields can be tripwire handles or DXVK's objects: compare what they wrap.
+		// Either side may be a tripwire handle or DXVK's object, so compare what they wrap.
 		using RenderGraph::Engine::Tripwire::Unwrap;
 		const auto& depthStencils = globals::game::renderer->GetDepthStencilData().depthStencils;
 		for (std::uint32_t i = 0; i < static_cast<std::uint32_t>(RE::RENDER_TARGETS_DEPTHSTENCIL::kTOTAL); ++i)
@@ -355,10 +350,7 @@ struct ORGSkylighting::Impl
 	std::shared_ptr<Resources> resources;
 	std::shared_ptr<ClientState> state;
 
-	/**
-	 * @brief The inputs for this frame; false when one is missing. Refreshes the client when one changed. The occlusion map is the
-	 * graph's own (MakeOcclusionMap); a D3D11 one, when the twin could not be made, is imported.
-	 */
+	/** @brief False when one is missing. Refreshes the client when one changed. */
 	bool ResolveInputs(const Inputs& a_inputs)
 	{
 		FrameAnchors::Texture occlusion = ORGSkylighting::Get().OcclusionMap();
@@ -383,16 +375,12 @@ struct ORGSkylighting::Impl
 		return true;
 	}
 
-	/**
-	 * @brief The client: the volumes' reset (one-shot clears, armed at registration and by QueueReset) before the gated probe update.
-	 * A step that cannot be made fails a_builder.
-	 */
+	/** @brief One-shot volume resets before the gated probe update. A step that cannot be made fails a_builder. */
 	FrameAnchors::ClientDesc MakeClient(RenderGraph::AnchorPasses::Builder& a_builder) const
 	{
 		namespace AnchorPasses = RenderGraph::AnchorPasses;
 		const auto volume = [&](ORGSkylighting::Volume a_volume) { return resources->volumes[static_cast<std::size_t>(a_volume)]->Graph(); };
-		// The values the D3D11 path's ResetSkylighting clears to: unit SH (fully unoccluded, matching Skylighting::UNIT_SH), no
-		// accumulated frames, all 32 history bits lit (a reset does not fade in from black), full visibility.
+		// As ResetSkylighting: unit SH (fully unoccluded), no accumulated frames, all 32 history bits lit so a reset does not fade in, full visibility.
 		const float unitSH = std::sqrt(4.0f * std::numbers::pi_v<float>);
 		constexpr std::array<std::uint32_t, 4> none{ 0, 0, 0, 0 };
 		constexpr std::array<std::uint32_t, 4> lit{ 0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu };
@@ -405,14 +393,14 @@ struct ORGSkylighting::Impl
 			if (!resources->occlusion || !resources->shadowCascades || !resources->esramShadows)
 				return nullptr;
 			return std::make_shared<UpdateProbesPass>(*resources);
-		});  // its dispatch takes its counts from the gate's update entry
-		// After the update read the map: the twin cleared for Drawcall Limit Fix's next shadow epoch. Left out without a twin or program.
+		});  // counts from the gate's update entry
+		// Left out without a twin or program.
 		a_builder.Add("clear-occlusion", FrameAnchors::PassKind::Render, [resources = resources]() -> std::shared_ptr<org::RenderPass> {
 			auto map = ORGSkylighting::Get().OcclusionMap();
 			if (!map || !resources->clearProgram)
 				return nullptr;
 			return std::make_shared<OcclusionClearPass>(std::move(map), *resources);
-		});  // its draw takes its count from the gate's clear entry, and its depth loads
+		});  // count from the gate's clear entry, depth loaded
 
 		FrameAnchors::ClientDesc client{};
 		client.id = kClientId;
@@ -423,7 +411,7 @@ struct ORGSkylighting::Impl
 			for (const auto& volume : resources->volumes)
 				volume->Register(a_graph);
 		};
-		// Active on frames that update or clear the map; every run closes the gate first, so the others dispatch and draw nothing.
+		// Every run closes the gate first, so other frames dispatch and draw nothing.
 		client.active = [state = state] { return state->pending.has_value() || state->clearOcclusion; };
 		client.commit = [state = state, resources = resources](const FrameAnchors::Point&) {
 			if (std::exchange(state->clearOcclusion, false)) {
@@ -482,7 +470,7 @@ bool ORGSkylighting::Setup(const Skylighting& a_feature)
 		logger::warn("[ORG] Skylighting: the probe update's program, sampler or gate could not be made; it stays on D3D11");
 		return false;
 	}
-	// The occlusion map's clear, for the twin only (a D3D11 map keeps Skylighting's D3D11 clear).
+	// A D3D11 map keeps Skylighting's D3D11 clear.
 	if (OcclusionTwin() && OcclusionDsvFormat() != DXGI_FORMAT_UNKNOWN) {
 		RasterProgram::Desc clearDesc{ .pixelSource = kClearShader, .vertexSource = kClearShader, .vertexEntry = L"VSMain", .commonDefines = false };
 		clearDesc.pixelEntry = L"PSDepth";
@@ -492,7 +480,7 @@ bool ORGSkylighting::Setup(const Skylighting& a_feature)
 		if (!resources->clearProgram)
 			logger::warn("[ORG] Skylighting: the occlusion map's clear program could not be made; the map is cleared on D3D11");
 	}
-	// Read by D3D11 (the engine's draws, the composite): exported SRV. ResetSkylighting clears them on the graph (QueueReset).
+	// D3D11 reads them, so the SRV is exported.
 	constexpr GraphResources::Options volumeOptions{ .lifetime = GraphResources::Lifetime::History, .d3d11 = GraphResources::Export::SRV };
 	constexpr std::pair<DXGI_FORMAT, std::string_view> volumeInfo[kVolumes] = {
 		{ DXGI_FORMAT_R16G16B16A16_FLOAT, kProbeArrayId },
@@ -510,7 +498,7 @@ bool ORGSkylighting::Setup(const Skylighting& a_feature)
 	}
 	next->resources = resources;
 
-	// The four reset clears, then the update at -1, before IBL (0 and 1); the occlusion map's clear at 0 touches nothing IBL uses.
+	// Four reset clears, then the update at -1, before IBL. The clear at 0 touches nothing IBL uses.
 	RenderGraph::AnchorPasses::Builder builder(FrameAnchors::Anchor::Prepass, kClientId, -5);
 	auto client = next->MakeClient(builder);
 	if (builder.Failed()) {
@@ -519,7 +507,7 @@ bool ORGSkylighting::Setup(const Skylighting& a_feature)
 	}
 	if (!FrameAnchors::Register(std::move(client)))
 		return false;
-	// Drawcall Limit Fix's colour passes read them by name, ordered after the update (Integrations/Skylighting).
+	// DCLF's colour passes read them by name, ordered after the update.
 	if (!PublishedResources::Publish(*resources->volumes[static_cast<std::size_t>(Volume::ProbeArray)]) ||
 		!PublishedResources::Publish(*resources->volumes[static_cast<std::size_t>(Volume::ShadowVisibility)])) {
 		logger::warn("[ORG] Skylighting: the probe volumes could not be published; the probe update stays on D3D11");
@@ -537,8 +525,7 @@ Texture2D* ORGSkylighting::MakeOcclusionMap(const D3D11_TEXTURE2D_DESC& a_desc, 
 	auto& twin = OcclusionTwin();
 	if (twin || !Requested() || !RenderGraphRuntime::Get().IsActive())
 		return nullptr;
-	// Written by D3D11 (the engine's RenderMask draws, Skylighting's clear) and read by D3D11 (the probe update's D3D11 dispatch, the
-	// parity diagnostic): exported, never aliased. Its contents are read in the frame after a frame that renders no map.
+	// Written and read by D3D11, so exported and never aliased. Read in the frame after one that renders no map.
 	D3D11_TEXTURE2D_DESC desc = a_desc;
 	desc.MipLevels = 1;
 	desc.ArraySize = 1;
@@ -552,7 +539,7 @@ Texture2D* ORGSkylighting::MakeOcclusionMap(const D3D11_TEXTURE2D_DESC& a_desc, 
 			static_cast<int>(a_desc.Format));
 		return nullptr;
 	}
-	// The engine's map draws and the precipitation shaders read it through views in the target's formats.
+	// The engine's map draws and the precipitation shaders use views in the target's formats.
 	D3D11_SHADER_RESOURCE_VIEW_DESC srvDesc{};
 	D3D11_DEPTH_STENCIL_VIEW_DESC dsvDesc{};
 	texture->SRV()->GetDesc(&srvDesc);
@@ -562,12 +549,12 @@ Texture2D* ORGSkylighting::MakeOcclusionMap(const D3D11_TEXTURE2D_DESC& a_desc, 
 			static_cast<int>(srvDesc.Format), static_cast<int>(dsvDesc.Format), static_cast<int>(a_srvFormat), static_cast<int>(a_dsvFormat));
 		return nullptr;
 	}
-	// Drawcall Limit Fix's shadow epoch draws into it and the Prepass anchor's probe update reads it: one resource in every graph.
+	// Published so DCLF's shadow epoch and the probe update share one resource.
 	if (!PublishedResources::Publish(*texture)) {
 		logger::warn("[ORG] Skylighting: the sky occlusion map could not be published; it is a D3D11 texture");
 		return nullptr;
 	}
-	// The wrapper holds a reference of its own: the twin keeps the image, the wrapper the D3D11 texture and views of it.
+	// The twin keeps the image, the wrapper keeps the D3D11 texture and its views.
 	auto* d3d11 = texture->D3D11();
 	d3d11->AddRef();
 	auto* wrapper = new Texture2D(d3d11, kOcclusionId.data());
@@ -590,17 +577,16 @@ bool ORGSkylighting::Update(const Skylighting& a_feature)
 	if (!IsActive())
 		return false;
 	auto& state = *impl->state;
-	// Native mode: the map is cleared after every update (its pass's load operation); until a run with that clear executed, it holds memory
-	// nothing wrote, and the update waits.
+	// Native mode: until a run with the clear has executed, the map holds unwritten memory, so the update waits.
 	const bool native = RenderGraph::Engine::Native::Active();
-	// Without an input the gate stays closed: the graph's volumes hold this frame as they are.
+	// Without an input the gate stays closed and the volumes hold this frame.
 	if (impl->ResolveInputs(MakeInputs(a_feature)) && (!native || state.mapCleared))
 		state.pending = MakeShadows(a_feature);
 	if (native) {
 		state.clearOcclusion = impl->resources->clearProgram != nullptr;
 		return true;
 	}
-	// The map Drawcall Limit Fix drew is read now: cleared after the update for its next draw, when the frame's schedule holds the clear.
+	// Clear the map DCLF drew after the update reads it, when the schedule holds the clear.
 	if (state.occlusionDrawn && impl->resources->clearProgram && FrameAnchors::Scheduled(kClientId, FrameAnchors::Anchor::Prepass)) {
 		state.occlusionDrawn = false;
 		state.occlusionCleared = false;
@@ -641,7 +627,7 @@ bool ORGSkylighting::QueueReset()
 
 #else  // !CS_HAS_RENDER_GRAPH
 
-// Built without OpenRenderGraph: the probe update always runs on D3D11.
+// Without OpenRenderGraph the probe update always runs on D3D11.
 struct ORGSkylighting::Impl
 {};
 
