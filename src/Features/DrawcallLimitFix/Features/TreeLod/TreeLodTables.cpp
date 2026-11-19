@@ -17,6 +17,7 @@
 #include "Features/DrawcallLimitFix/Core/Render/Resources/SceneBuffers.h"
 #include "Features/DrawcallLimitFix/Features/TreeLod/Diagnostics/TreeLodEvents.h"
 #include "Features/DrawcallLimitFix/Diagnostics/Hooks.h"
+#include "Features/TreeWind.h"
 
 #include "RenderGraph/ComputeProgram.h"
 #include "RenderGraph/RenderGraphRuntime.h"
@@ -26,6 +27,7 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <cstring>
 #include <memory>
 #include <vector>
 
@@ -187,6 +189,9 @@ namespace DCLF::Features::TreeLod
 			row.maxIndices = std::max(a_mirror.MaxIndices(), 1u);
 			row.stats = a_tables.stagesRef;
 			row.frame = a_frame;
+			// The frame's wind, set at the last Present like the engine's DistantTree b3. Params.z is 0 while Tree Wind is off.
+			if (const auto& treeWind = globals::features::treeWind; treeWind.loaded)
+				std::memcpy(row.wind, &treeWind.FrameWind(), sizeof(row.wind));
 			// The engine's tree LOD draws use the worldspace's atlas and alpha reference 128/255.
 			if (a_draw && a_mirror.MaxIndices() && TreeLodTextureBinding(owned))
 				row.shapeSlots = shapeSlots;
@@ -215,6 +220,8 @@ namespace DCLF::Features::TreeLod
 				Diagnostics::Notify(TreeLodMissed{ a_commit.frame, mirror.ShapeSlots(), a_commit.adopted.Of(tables->shapes).units });
 		}
 	}
+
+	static_assert(sizeof(TreeInstances::DrawRow::wind) == sizeof(::TreeWind::WindCB), "the tree LOD draw row's wind is not TreeWindCB");
 
 	TreeLodTables* TablesOf(const Draws::SceneBuffers& a_scene)
 	{
