@@ -460,6 +460,11 @@ namespace ORGPostChain
 				const bool configured = lens.PrepareOptics(aspect, camera, focusM);
 				pending.reset();
 				const bool mapped = configured && lens.settings.ImageEffects;
+				if (mapped != lastMapped || configured != lastConfigured)
+					logger::info("[ORG] Physical Lens: the image mapping is {}{}", mapped ? "on" : "off",
+						configured ? "" : " (the lens cannot be configured for these settings)");
+				lastMapped = mapped;
+				lastConfigured = configured;
 				if (mapped) {
 					const auto [imaging, table] = lens.CameraMapping(aspect);
 					if (!made || std::memcmp(&imaging, &made->imaging, sizeof(imaging)) || std::memcmp(&table, &made->table, sizeof(table))) {
@@ -544,6 +549,7 @@ namespace ORGPostChain
 			unsigned lastFocusFrame = ~0u;
 			float resolvedFocusM = 10.f;
 			std::uint32_t focusReset = 0;
+			bool lastMapped = false, lastConfigured = true;  // for the log line when either changes
 
 			// What the mapping was made from, and what this frame asked for until Executed.
 			std::optional<Mapping> made, pending;
