@@ -157,3 +157,11 @@ D3D11 maps a staging copy with `DO_NOT_WAIT` and retries on later frames. On the
 4. **Half-res AP shadow** changes the texture's use, not its size. Keep one full-size twin as D3D11 does.
 5. **Native mode and engine draws.** In native mode engine draws read nothing, so until DCLF registers the frame textures the
    sky, grass and water lose Physical Sky's inputs. Phase 3 is therefore required before native runs with the feature on.
+
+## 9. Status (2026-11-18)
+
+- Phase 1 done: `ORGPhysicalSky` (`cs.physical-sky.luts`), LutGen and DiskPhaseLut dual-target (FXC bytecode unchanged).
+- Phase 3 partly: DCLF registers t61-t63 and t106; the `PHYSICAL_SKY` strip is removed. t64 and the cloud registers are
+  still captured. Removing the strip needs port-viewatmos's ViewAtmosphere register move, since DCLF's buffers use t125-t127.
+- Native mode treats volumetric clouds as off (`PhysicalSky::VolumetricCloudsEnabled`) until phase 4.
+- Not started: the AP shadow, the AP composite pass, the fog's inputs, clouds, lightning.
