@@ -312,6 +312,46 @@ namespace ORGPostChain
 		const RenderGraph::RunGate& gate;
 	};
 
+	/**
+	* @brief A small copy from the GPU to the CPU that a kept recording can replay.
+	* The post stage is recorded ahead and its recording is submitted again and again, so its passes may not use the readback
+	* service. Each run copies into its own region of a host buffer, picked by the run's lease index. A region is read when
+	* the lease's next run is committed, since the lease's last run is done by then. Nothing waits.
+	* Each copy also copies a stamp from the run's latch, so a run the chain did not commit is never read as one it did.
+	* Make one per effect and keep it across builds. Render thread, except the passes' recording.
+	*/
+	class RunReadback
+	{
+	public:
+		/** @brief One part per copy, a_parts[i] bytes each. Null and logged when the buffer cannot be made. */
+		static std::shared_ptr<RunReadback> Create(std::string_view a_name, std::vector<std::uint32_t> a_parts);
+
+		/** @brief At every build, before AddBuffer and AddTexture. */
+		void Build(Builder& a_builder);
+		/** @brief A pass that copies the first bytes of buffer a_source into part a_part. */
+		void AddBuffer(Builder& a_builder, std::string_view a_name, std::uint32_t a_part, std::shared_ptr<org::Resource> a_source);
+		/** @brief A pass that copies mip 0 of a small 2D texture into part a_part. Rows are 256 bytes apart. */
+		void AddTexture(Builder& a_builder, std::string_view a_name, std::uint32_t a_part, std::shared_ptr<org::Resource> a_source,
+			std::uint32_t a_width, std::uint32_t a_height);
+
+		/**
+		* @brief In the effect's Commit, before Take. Reads the lease's last run and stamps this run.
+		* @return This run's stamp. Stamps grow by one each commit.
+		*/
+		std::uint32_t Commit(const CommitContext& a_commit);
+		/** @brief In the effect's Executed: the run last committed was submitted. */
+		void Executed();
+		/** @brief The newest copy of part a_part read since the last Take, and its run's stamp. Empty when none arrived. */
+		std::vector<std::byte> Take(std::uint32_t a_part, std::uint32_t* a_stamp = nullptr);
+
+		struct State;
+		explicit RunReadback(std::shared_ptr<State> a_state) :
+			state(std::move(a_state)) {}
+
+	private:
+		std::shared_ptr<State> state;
+	};
+
 	/** @brief One per pipeline slot for the session. Never keep the sub-feature, since SyncPipelineResources may replace it. */
 	class Effect
 	{
