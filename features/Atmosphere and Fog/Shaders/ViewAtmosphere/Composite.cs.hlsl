@@ -51,6 +51,7 @@ VIEW_ATMOSPHERE_COMPOSITE_RESOURCES(ORG_RESOURCE)
 // 8: the near fog volume's transmittance at its last slice, by screen position, with no depth mapping. Magenta where
 //    non-finite, blue while the volume has no size.
 // 9: the same for the far fog volume.
+// 10: the analytic fog's transmittance alone, without the volumes and without the volumes' range cut out. White is no fog.
 #	ifdef EXP_HEIGHT_FOG
 float3 DebugVolume(Texture3D<float4> volume, float2 uv)
 {
@@ -74,6 +75,10 @@ float3 DebugView(float3 sceneColor, float3 position, float2 uv, bool fullCloudRa
 			return DebugVolume(ExponentialHeightFogIntegratedLightScattering, uv);
 		if (VIEW_ATMOSPHERE_COMPOSITE_DEBUG == 9)
 			return DebugVolume(ExponentialHeightFogIntegratedLightScatteringFar, uv);
+		if (VIEW_ATMOSPHERE_COMPOSITE_DEBUG == 10) {
+			const float4 analytic = ExponentialHeightFog::GetExponentialHeightFogNoVolumetric(position, FrameBuffer::CameraPosAdjust.xyz, 0.0.xxx);
+			return isfinite(analytic.a) ? (1.0 - analytic.a).xxx : float3(1, 0, 1);
+		}
 		const SharedData::ExponentialHeightFogSettings fog = SharedData::exponentialHeightFogSettings;
 		return float3(fog.enabled ? 1.0 : 0.0, max(fog.fogDensity, fog.fogDensity2) > 0.0 ? 1.0 : 0.0,
 			ExponentialHeightFog::ShouldApplyVolumetricFog() ? 1.0 : 0.0);
