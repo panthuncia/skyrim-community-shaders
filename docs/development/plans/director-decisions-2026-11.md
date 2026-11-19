@@ -25,3 +25,13 @@ final until the user confirms it.
    (step 7) and F (step 8, DLSS-G) follow as A and C land.
 6. **DLSS-G in native (step 8) is implemented but not testable here.** The plan needs the RTX 5080; the test machine has the
    RX 6600. It lands behind its probe, with its tests left for the user.
+7. **Frame generation steps 1, 4 and 5 merged** (`e1c469e09`; quick runs in three modes, `hdr` in all four, `menu` and guest
+   `fg` pass). Their leads' calls are in `native-frame-generation-plan.md` section 6, marked "to confirm". The ones with visible
+   effects:
+   - HDR's frame end moves to HDR Display's own present. Under HDR, a DCLF load-hold present now holds.
+   - Every native colour-space change is a full swap chain destroy and create.
+   - `SetSwapChainColorSpace` now reports HDR10 support, not that the change applied.
+   - The `Placed` epochs and the late-epoch hook stay, for EngineCubeClear and guest's separator.
+8. **Washed-out exteriors in today's runs** are Physical Sky on without Linear Lighting (the open upstream question), not a
+   regression. Physical Sky's textures are now staged with the test build, so the feature runs where it did not before. Runs that
+   compare brightness set `features.PhysicalSky=false`.
