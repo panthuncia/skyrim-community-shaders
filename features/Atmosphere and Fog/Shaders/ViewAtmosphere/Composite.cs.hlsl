@@ -55,6 +55,8 @@ VIEW_ATMOSPHERE_COMPOSITE_RESOURCES(ORG_RESOURCE)
 // 11: the analytic fog's inputs, top third to bottom: the camera's height below 0 over 10000 units, the height falloff over 0.4,
 //     the density over 0.01, each as grey; the bottom third is the pixel's world height over 10000 units (red above 0, green below).
 // 12: per pixel, over the volumes' slices: red where the near volume holds a non-finite or over 60000 value, green for the far.
+// 13: the analytic fog's colour by source, as luminance times 4: red the settings' colours, green the sky IBL term, blue the
+//     directional term. Black is a source that adds no haze colour. Magenta where one is non-finite.
 #	ifdef EXP_HEIGHT_FOG
 float3 DebugVolume(Texture3D<float4> volume, float2 uv)
 {
@@ -111,6 +113,27 @@ float3 DebugView(float3 sceneColor, float3 position, float2 uv, bool fullCloudRa
 			const uint2 farCell = uint2(uv * float2(width, height));
 			return float3(DebugVolumeBad(ExponentialHeightFogIntegratedLightScattering, nearCell),
 				DebugVolumeBad(ExponentialHeightFogIntegratedLightScatteringFar, farCell), 0.0);
+		}
+		if (VIEW_ATMOSPHERE_COMPOSITE_DEBUG == 13) {
+			// As GetExponentialHeightFogInternal builds the colour, with no vanilla fog colour (the composite passes none).
+			const SharedData::ExponentialHeightFogSettings fog = SharedData::exponentialHeightFogSettings;
+			const float3 settingsColour = fog.originalFogColorOverride.rgb * fog.originalFogColorOverride.a * fog.originalFogColorAmount +
+			                              fog.fogInscatteringColor.rgb * fog.fogInscatteringColor.a;
+			float3 skyColour = 0.0;
+#		if defined(IBL)
+			if (!SharedData::InInterior && fog.useSkyIBL > 0) {
+				const float3 direction = normalize(lerp(position, float3(0, 0, 1), saturate((fog.cubemapMipLevel + 1) / 9)));
+				skyColour = ImageBasedLighting::GetSkyIBLColor(direction) * fog.inscatteringTint.rgb * fog.inscatteringTint.a;
+			}
+#		endif
+			float3 directionalColour = 0.0;
+			if (fog.directionalInscatteringMultiplier > 0) {
+				const float cosTheta = dot(normalize(SharedData::DirLightDirection.xyz), normalize(position));
+				directionalColour = Color::DirectionalLight(SharedData::DirLightColor.xyz) *
+				                    ExponentialHeightFog::HenyeyGreenstein(cosTheta, fog.directionalInscatteringAnisotropy) * fog.directionalInscatteringMultiplier;
+			}
+			const float3 sources = float3(Color::RGBToLuminance(settingsColour), Color::RGBToLuminance(skyColour), Color::RGBToLuminance(directionalColour));
+			return all(isfinite(sources)) ? saturate(sources * 4.0) : float3(1, 0, 1);
 		}
 		if (VIEW_ATMOSPHERE_COMPOSITE_DEBUG == 10) {
 			const float4 analytic = ExponentialHeightFog::GetExponentialHeightFogNoVolumetric(position, FrameBuffer::CameraPosAdjust.xyz, 0.0.xxx);

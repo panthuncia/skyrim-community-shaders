@@ -151,13 +151,13 @@ namespace
 		bool operator==(const CompositeInputs&) const = default;
 	};
 
-	/** @brief The composite's debug view, 1 to 12, from CS_ORG_VIEW_ATMOSPHERE_DEBUG (Composite.cs.hlsl lists them). 0 when off. */
+	/** @brief The composite's debug view, 1 to 13, from CS_ORG_VIEW_ATMOSPHERE_DEBUG (Composite.cs.hlsl lists them). 0 when off. */
 	std::uint32_t DebugView()
 	{
 		static const std::uint32_t s_view = [] {
 			const auto view = Switches::Number("CS_ORG_VIEW_ATMOSPHERE_DEBUG", 0);
-			if (view > 12) {
-				logger::warn("[ORG] Atmosphere and Fog: CS_ORG_VIEW_ATMOSPHERE_DEBUG={} is not a debug view (1 to 12); it is off", view);
+			if (view > 13) {
+				logger::warn("[ORG] Atmosphere and Fog: CS_ORG_VIEW_ATMOSPHERE_DEBUG={} is not a debug view (1 to 13); it is off", view);
 				return 0u;
 			}
 			if (view)

@@ -720,6 +720,7 @@ struct ORGExponentialHeightFog::Impl
 	bool ranLastFrame = false;
 	std::string fallbackReason;  // why the last frame ran on D3D11, logged when it changes
 	bool reportedConstants = false;  // the first graph frame's constants are logged once
+	const FogState* reportedUnbound = nullptr;  // the last state Commit turned flags off for, logged once each
 
 	void MakeVolume(Volume& a_volume, VolumeTextures& a_textures, bool a_groupReduce, bool a_far) const
 	{
@@ -816,7 +817,35 @@ struct ORGExponentialHeightFog::Impl
 		if (!pending)
 			return;
 		const auto& shape = *a_state.fixed;
-		shape.latch->WriteValue(RenderGraphRuntime::Get().Host()->CurrentRun(), 0, *pending);
+		// Prepass built the constants for the newest shape. This run executes a_state, which can be a build behind it.
+		// Its push blocks hold handle 0 for an input it does not have, so its constants may only name inputs it binds.
+		// Otherwise a flag reads heap slot 0 as that input: IBL's SH from there goes unbounded into the scattering.
+		LatchData data = *pending;
+		const auto& inputs = a_state.shape.inputs;
+		std::uint32_t bound = 0;
+		if (inputs[kDirectionalShadowMap])
+			bound |= 1u;
+		if (inputs[kDepth])
+			bound |= 2u | 16u;
+		if (inputs[kEnvIBL] && inputs[kSkyIBL])
+			bound |= 4u;
+		if (inputs[kProbes])
+			bound |= 8u;
+		if (inputs[kLights] && inputs[kLightList] && inputs[kLightGrid])
+			bound |= 32u;
+		if (inputs[kLocalShadows] && inputs[kLocalShadowMaps])
+			bound |= 64u;
+		if (inputs[kEngineShadowMaps])
+			bound |= 128u;
+		const std::uint32_t unbound = (data.fog.gridSizeAndFlags.w | data.fog.farGridSizeAndFlags.w) & ~bound;
+		if (unbound && reportedUnbound != &a_state) {
+			reportedUnbound = &a_state;
+			logger::info("[ORG] Exponential Height Fog: this run executes a build without inputs its constants name (flags {:#x}); they are off for it",
+				unbound);
+		}
+		data.fog.gridSizeAndFlags.w &= bound;
+		data.fog.farGridSizeAndFlags.w &= bound;
+		shape.latch->WriteValue(RenderGraphRuntime::Get().Host()->CurrentRun(), 0, data);
 		pending.reset();
 		const auto open = [&](const Volume& a_volume, bool a_far) {
 			for (std::uint32_t step = 0; step < static_cast<std::uint32_t>(Step::Count); ++step) {
