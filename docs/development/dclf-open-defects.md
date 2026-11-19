@@ -636,10 +636,17 @@ Known gaps in the ORG ports of Community Shaders features, from the 2026-11-18 h
     phase 4 of `physical-sky-port.md` (the cloud passes, about 12,000 lines of shaders and 60 resources; its Status section
     lists the order of work). The lightning query reads the clouds' resources, so it lands with them; the replayable readback
     it uses is in place (`RenderGraph::RunReadback`).
--   **Guest: kMAIN goes non-finite with Exponential Height Fog on.** With the fog and its volumetric fog on, guest's image goes
+-   **(Closed) Guest: kMAIN goes non-finite with Exponential Height Fog on.** With the fog and its volumetric fog on, guest's image goes
     black with bright green-haloed foliage and stays so (NaN or inf through bloom). Fog off, native and plain D3D11 are clean.
     Pre-existing: build `87fcac5d6` (before ViewAtmosphere's port) shows it too. `CS_ORG_VIEW_ATMOSPHERE_DEBUG=1` shows kMAIN
     already non-finite before the post-water composite, and `=6` (pass-through) keeps the blobs, so the composite is not the cause.
+    **Fixed (2026-11-19, build `1a0b9dde1`):** the fog's temporal history (`CS_ORG_FOG_DEBUG=8` turned it off and the image
+    was clean). Guest memory is DXVK's recycled VRAM, so history texels never written held garbage, and the 0.96 blend kept
+    it. The scattering shader now rejects history that is not finite or above 65504 (`3bd376e65`, also in D3D11), and
+    readers get the volumes only after a run wrote them (`d451564b3`). Guest fog now matches native and plain D3D11. Where
+    the unwritten texels come from is not proven. `CS_ORG_FOG_DEBUG=9` (clear the histories every run) is clean too.
+    `CS_ORG_FOG_DEBUG=10` (clear every 600 frames by a one-shot client) hung 31 frames after world-ready; it is a
+    diagnostic only, not looked into.
 -   **(Closed) Native: the fog volumes hold almost no fog.** With the same settings plain D3D11 shows haze on distant hills; native shows
     none. `CS_ORG_VIEW_ATMOSPHERE_DEBUG=3` reads transmittance near 1 across the screen, so the integrated volumes the post-water
     composite reads are near identity. Before ViewAtmosphere's port native had no fog composite at all, so this was hidden.
