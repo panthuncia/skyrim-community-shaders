@@ -561,6 +561,11 @@ namespace Testing
 				});
 				return true;
 			});
+			// "shot-ui": a capture as the menu's button takes it, of the next frame's clean scene, into the user's screenshot folder.
+			RegisterCommand("shot-ui", [](const std::string&, std::string&) {
+				globals::features::screenshotFeature.captureRequested = true;
+				return true;
+			});
 			// "cs-menu": open|close, Community Shaders' own menu. font=<px> sets a fixed font size (a font reload) and font=saved puts the
 			// saved size back, so closing the menu saves the user's settings unchanged.
 			RegisterCommand("cs-menu", [](const std::string& a_arg, std::string& a_error) {
