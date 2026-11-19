@@ -1456,6 +1456,7 @@ Streamline::EvaluationResult Streamline::EvaluateDLSS(ID3D11Resource* a_colorIn,
 	// The Vulkan scene chain is always FP16 HDR.
 	options.colorBuffersHDR = sl::Boolean::eTrue;
 	options.useAutoExposure = sl::Boolean::eTrue;
+	options.preExposure = globals::state->preExposure;
 
 	// Use the recommended preset for the detected NVIDIA architecture.
 	if (isRTXBelow40Series) {

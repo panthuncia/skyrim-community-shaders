@@ -195,6 +195,7 @@ public:
 		static constexpr float HEADER_ICON_IDLE_ALPHA = 0.85f;                         // Header icon opacity while neither hovered nor current (docked monochrome icons, Home button)
 		static constexpr float STATUS_BAR_NAV_BUTTON_FONT_RATIO = 1.8f;                // Settings / Profiling button edge in the status bar, in font sizes
 		static constexpr float STATUS_BAR_DIVIDER_FONT_RATIO = 1.0f;                   // Height of the thin dividers between status bar groups, in font sizes
+		static constexpr float GLYPH_BUTTON_CAPTION_FONT_RATIO = 0.5f;                 // Caption under a glyph button's icon (the Profiling button's overlay hotkey), in font sizes
 		static constexpr float HOME_CARD_PADDING = 12.0f;                              // Inner padding on every side of a Home card (1080p baseline)
 		static constexpr float HOME_CARD_SPACING = 8.0f;                               // Vertical gap below each Home card (1080p baseline)
 		static constexpr float ATTENTION_FOCUS_SECONDS = 2.5f;                         // How long the Needs Attention card stays outlined after a click-through
@@ -405,6 +406,11 @@ public:
 		// Shared widgets: feature toggle (Util::FeatureToggle; also the Load at Boot toggles)
 		static constexpr float FEATURE_TOGGLE_WIDTH_RATIO = 1.6f;   // Feature toggle width per frame height
 		static constexpr float FEATURE_TOGGLE_HEIGHT_RATIO = 0.8f;  // Feature toggle height per frame height
+
+		// Feature header: profiling cost chip and its popover
+		static constexpr float FEATURE_COST_GOOD_MS = 1.0f;               // Feature GPU/CPU cost below this tints the chip's icon as good
+		static constexpr float FEATURE_COST_WARNING_MS = 3.0f;            // Below this as a warning; at or above as expensive
+		static constexpr float FEATURE_PROFILING_POPOVER_WIDTH = 560.0f;  // Profiling popover width, before UI scale
 
 		// Shared widgets: tooltips, badges, section headers and editor chrome
 		static constexpr float TOOLTIP_WRAP_FONT_SIZES = 35.0f;                     // Wrapped tooltip width in font sizes

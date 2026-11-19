@@ -6,6 +6,7 @@
 #include "Features/Effects11/D3D11StateBackup.h"
 #include "HDRDisplay.h"
 #include "Hooks.h"
+#include "ScreenshotFeature.h"
 #include "State.h"
 #include "Upscaling/DXVKInterop.h"
 #include "Upscaling/FrameGenController.h"
@@ -1931,6 +1932,7 @@ void Upscaling::MenuManagerDrawInterfaceStartHook::thunk(int64_t a1)
 	auto& upscaling = globals::features::upscaling;
 
 	upscaling.PostDisplay();
+	globals::features::screenshotFeature.SnapshotCleanScene();
 
 	auto& hdr = globals::features::hdrDisplay;
 	if (hdr.loaded)

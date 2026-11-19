@@ -64,6 +64,19 @@ namespace Util
 	static int g_lastWindowWidth = 0;
 	static int g_lastWindowHeight = 0;
 
+	// Matches the Win32 backend, which marks a stick key down only past 0.10 but still queues the analog value below it.
+	static constexpr float kGamepadStickPressThreshold = 0.10f;
+
+	/** @brief Zeroes queued stick values short of a press and rescales the rest from 0, so a resting stick does not drift nav. */
+	static void FilterGamepadStickEvents()
+	{
+		for (auto& event : ImGui::GetCurrentContext()->InputEventsQueue) {
+			if (event.Type != ImGuiInputEventType_Key || event.Key.Key < ImGuiKey_GamepadLStickLeft || event.Key.Key > ImGuiKey_GamepadRStickDown)
+				continue;
+			event.Key.AnalogValue = event.Key.Down ? std::clamp((event.Key.AnalogValue - kGamepadStickPressThreshold) / (1.0f - kGamepadStickPressThreshold), 0.0f, 1.0f) : 0.0f;
+		}
+	}
+
 	void RefreshScreenScale(HWND hwnd, float bufferWidth, float bufferHeight)
 	{
 		RECT rect{};
@@ -89,6 +102,7 @@ namespace Util
 
 		auto& io = ImGui::GetIO();
 		io.DisplaySize = g_displaySize;
+		FilterGamepadStickEvents();
 
 		POINT cursorPos{};
 		if (GetCursorPos(&cursorPos) &&
@@ -162,25 +176,6 @@ namespace Util
 		// NewFrame copies ActiveId into ActiveIdPreviousFrame, so a change since then is an item letting go.
 		const auto& context = *ImGui::GetCurrentContext();
 		return context.ActiveIdPreviousFrame != 0 && context.ActiveId != context.ActiveIdPreviousFrame;
-	}
-
-	namespace
-	{
-		bool debugSectionsHidden = false;
-	}
-
-	HideDebugSectionsGuard::HideDebugSectionsGuard(bool hide) :
-		previous(std::exchange(debugSectionsHidden, hide))
-	{}
-
-	HideDebugSectionsGuard::~HideDebugSectionsGuard()
-	{
-		debugSectionsHidden = previous;
-	}
-
-	bool ShowDebugSections()
-	{
-		return !debugSectionsHidden;
 	}
 
 	void StepFade(float& fade, bool visible, float deltaTime)
@@ -3170,40 +3165,23 @@ namespace Util
 			return false;
 		}
 
-		ID3D11Resource* pResource = nullptr;
-		try {
-			DX::ThrowIfFailed(DirectX::CreateTexture(device,
-				image.GetImages(), image.GetImageCount(),
-				image.GetMetadata(), &pResource));
-		} catch (const DX::com_exception& e) {
-			logger::warn("LoadDDSTextureFromFile: Failed to create texture: {}", e.what());
+		const auto& metadata = image.GetMetadata();
+		if (metadata.dimension != DirectX::TEX_DIMENSION_TEXTURE2D || metadata.arraySize != 1) {
+			logger::warn("LoadDDSTextureFromFile: Only single 2D DDS textures are supported: {}", filename);
 			return false;
 		}
-
-		ID3D11Texture2D* pTexture = reinterpret_cast<ID3D11Texture2D*>(pResource);
-		D3D11_TEXTURE2D_DESC desc;
-		pTexture->GetDesc(&desc);
-
-		D3D11_SHADER_RESOURCE_VIEW_DESC srvDesc = {
-			.Format = desc.Format,
-			.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D,
-			.Texture2D = {
-				.MostDetailedMip = 0,
-				.MipLevels = desc.MipLevels }
-		};
-
-		HRESULT hr = device->CreateShaderResourceView(pTexture, &srvDesc, out_srv);
-		if (SUCCEEDED(hr) && *out_srv)
-			Util::SetResourceName(*out_srv, "UI::DDS:%s", filename);
-		pTexture->Release();
-
+		const HRESULT hr = DirectX::CreateShaderResourceView(device, image.GetImages(), image.GetImageCount(), metadata, out_srv);
 		if (FAILED(hr) || !*out_srv) {
 			logger::warn("LoadDDSTextureFromFile: Failed to create SRV, HRESULT: 0x{:08X}", static_cast<uint32_t>(hr));
 			return false;
 		}
+		Util::SetResourceName(*out_srv, "UI::DDS:%s SRV", filename);
+		winrt::com_ptr<ID3D11Resource> resource;
+		(*out_srv)->GetResource(resource.put());
+		Util::SetResourceName(resource.get(), "UI::DDS:%s", filename);
 
-		out_size = ImVec2((float)desc.Width, (float)desc.Height);
-		logger::debug("LoadDDSTextureFromFile: Successfully loaded {} ({}x{})", filename, desc.Width, desc.Height);
+		out_size = ImVec2(static_cast<float>(metadata.width), static_cast<float>(metadata.height));
+		logger::debug("LoadDDSTextureFromFile: Successfully loaded {} ({}x{})", filename, metadata.width, metadata.height);
 		return true;
 	}
 
@@ -3309,6 +3287,7 @@ namespace Util
 				if (ImGui::Selectable(T("ui.keybind.clear", "Clear Binding"))) {
 					combo.clear();
 					changed = true;
+					globals::state->CheckCoreSettingsChanged();
 				}
 				ImGui::EndPopup();
 			}

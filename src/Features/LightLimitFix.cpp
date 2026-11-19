@@ -4,12 +4,15 @@
 #include "LightLimitFix/Common.h"
 #include "LightLimitFix/LightAttach.h"
 #include "LinearLighting.h"
+#include "PhysicalSky.h"
+#include "Utils/ColorSpace.h"
 
 #include "I18n/I18n.h"
 #include "Menu.h"
 #include "Menu/ThemeManager.h"
 #include "Shadercache.h"
 #include "State.h"
+#include "Utils/DebugSection.h"
 #include "Utils/Logging.h"
 
 #include <bit>
@@ -105,8 +108,6 @@ void LightLimitFix::DrawLightAttachSettings()
 
 void LightLimitFix::DrawSettings()
 {
-	auto shaderCache = globals::shaderCache;
-
 	ImGui::Checkbox(T(TKEY("enable_particle_lights"), "Enable Particle Lights"), &settings.EnableParticleLights);
 
 	ImGui::Spacing();
@@ -116,26 +117,31 @@ void LightLimitFix::DrawSettings()
 	ImGui::Spacing();
 
 	DrawLocalShadowSettings();
+}
 
-	if (ImGui::TreeNodeEx(T(TKEY("statistics"), "Statistics"), ImGuiTreeNodeFlags_DefaultOpen)) {
-		ImGui::Text(std::format("Clustered Light Count : {}", lightCount).c_str());
-		ImGui::Text("%s", std::vformat(T(TKEY("particle_light_count"), "Particle Lights : {}"), std::make_format_args(particleLightCount)).c_str());
-		if (IsLocalShadowsEnabled()) {
-			ImGui::Text("%s", std::vformat(T(TKEY("shadow_casters_stats"), "Shadow Casters : {} tracked, {} cached, {} rendered this frame"),
-								  std::make_format_args(localShadowStatTracked, localShadowStatCached, localShadowStatRendered))
-								  .c_str());
-		}
-		if (localShadowCache) {
-			const uint64_t cacheMegabytes = (localShadowCacheSlots * GetLocalShadowSlotBytes(localShadowCacheResolution, localShadowCacheFormat)) >> 20;
-			ImGui::Text("%s", std::vformat(T(TKEY("shadow_cache_stats"), "Shadow Cache : {} x {}x{}, {} MB"),
-								  std::make_format_args(localShadowCacheSlots, localShadowCacheResolution, localShadowCacheResolution, cacheMegabytes))
-								  .c_str());
-		}
+void LightLimitFix::DrawDebugSection()
+{
+	Util::DebugSection section;
+	if (!section)
+		return;
 
-		ImGui::TreePop();
+	auto shaderCache = globals::shaderCache;
+
+	ImGui::Text("%s", std::vformat(T(TKEY("clustered_light_count"), "Clustered Light Count : {}"), std::make_format_args(lightCount)).c_str());
+	ImGui::Text("%s", std::vformat(T(TKEY("particle_light_count"), "Particle Lights : {}"), std::make_format_args(particleLightCount)).c_str());
+	if (IsLocalShadowsEnabled()) {
+		ImGui::Text("%s", std::vformat(T(TKEY("shadow_casters_stats"), "Shadow Casters : {} tracked, {} cached, {} rendered this frame"),
+							  std::make_format_args(localShadowStatTracked, localShadowStatCached, localShadowStatRendered))
+							  .c_str());
+	}
+	if (localShadowCache) {
+		const uint64_t cacheMegabytes = (localShadowCacheSlots * GetLocalShadowSlotBytes(localShadowCacheResolution, localShadowCacheFormat)) >> 20;
+		ImGui::Text("%s", std::vformat(T(TKEY("shadow_cache_stats"), "Shadow Cache : {} x {}x{}, {} MB"),
+							  std::make_format_args(localShadowCacheSlots, localShadowCacheResolution, localShadowCacheResolution, cacheMegabytes))
+							  .c_str());
 	}
 
-	ImGui::SeparatorText(T(TKEY("debug"), "Debug"));
+	ImGui::Spacing();
 
 	ImGui::Checkbox(T(TKEY("enable_lights_vis"), "Enable Lights Visualisation"), &settings.EnableLightsVisualisation);
 	if (auto _tt = Util::HoverTooltipWrapper()) {
@@ -143,7 +149,12 @@ void LightLimitFix::DrawSettings()
 	}
 
 	{
-		static const char* comboOptions[] = { "Light Limit", "Strict Lights Count", "Clustered Lights Count", "Shadow Mask" };
+		const char* comboOptions[] = {
+			T(TKEY("lights_vis_mode_light_limit"), "Light Limit"),
+			T(TKEY("lights_vis_mode_strict_lights"), "Strict Lights Count"),
+			T(TKEY("lights_vis_mode_clustered_lights"), "Clustered Lights Count"),
+			T(TKEY("lights_vis_mode_shadow_mask"), "Shadow Mask")
+		};
 		ImGui::Combo(T(TKEY("lights_vis_mode"), "Lights Visualisation Mode"), (int*)&settings.LightsVisualisationMode, comboOptions, 4);
 		if (auto _tt = Util::HoverTooltipWrapper()) {
 			ImGui::Text("%s", T(TKEY("lights_vis_mode_tooltip"),
@@ -728,6 +739,29 @@ void LightLimitFix::UpdateLights()
 	}
 
 	AddParticleLightsToBuffer(lightsData);
+	const auto& flash = globals::features::physicalSky.cbData;
+	if (flash.enabled && flash.lightningControl.w > 0.f && flash.lightningColorIntensity.w > 0.f) {
+		for (uint32_t i = 0; i < 2 && lightsData.size() < MAX_LIGHTS; ++i) {
+			const auto source = i == 0 ? flash.lightningPositionRadius : flash.lightningChannelEmitter;
+			if (source.w <= 0.f)
+				continue;
+			LightData light{};
+			const float luminance = (i == 0 ? flash.lightningPhotometry.x : flash.lightningPhotometry.y) * flash.lightningColorIntensity.w;
+			if (luminance <= 0.f)
+				continue;
+			light.color = float3(flash.lightningColorIntensity.x, flash.lightningColorIntensity.y, flash.lightningColorIntensity.z) *
+			              luminance;
+			if (!globals::features::linearLighting.IsLinearLightingActive())
+				light.color = { Util::ColorSpace::LinearToGameGamma(light.color.x), Util::ColorSpace::LinearToGameGamma(light.color.y), Util::ColorSpace::LinearToGameGamma(light.color.z) };
+			light.sizeBias = source.w * source.w;  // equivalent emitter radius squared, game units
+			// Cull only below 0.1 lux; attenuation itself stays photometric.
+			light.radius = source.w * std::sqrt(std::max(std::numbers::pi_v<float> * luminance / 0.1f - 1.f, 1.f));
+			light.invRadius = 1.f / light.radius;
+			light.lightFlags.set(LightFlags::PortalStrict, LightFlags::Lightning);
+			SetLightPosition(light, { source.x, source.y, source.z });
+			lightsData.push_back(light);
+		}
+	}
 
 	auto context = globals::d3d::context;
 
@@ -1825,6 +1859,7 @@ void LightLimitFix::CopyLocalShadowMaps()
 				continue;
 			}
 		}
+		globals::profiler->BeginPass("LightLimitFix::LocalShadowCopy");
 		if (localShadowDirectCopy) {
 			context->CopySubresourceRegion(localShadowCache->resource.get(), D3D11CalcSubresource(0, static_cast<UINT>(caster->slice), 1), 0, 0, 0,
 				depthStencil.texture, D3D11CalcSubresource(0, engineSlice, localShadowEngineMipLevels), nullptr);
@@ -1844,6 +1879,7 @@ void LightLimitFix::CopyLocalShadowMaps()
 			localShadowCopyCB->Update(copyData);
 			context->Dispatch(groups, groups, 1);
 		}
+		globals::profiler->EndPass();
 
 		DirectX::XMMATRIX projection = DirectX::XMLoadFloat4x4(&info.lightTransform);
 		DirectX::XMStoreFloat4x4(&caster->shadowProj, projection);
