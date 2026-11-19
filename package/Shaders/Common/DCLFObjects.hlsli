@@ -251,8 +251,8 @@ static const uint kDCLFGeometryBlock = 768;
 #		endif
 uint DCLFMaterialTextureIndex(uint a_register)
 {
-	// MaterialRowHeader: four words (the animated row, reserved), textures[16], samplers[16], features (t71, t74, then TruePBR's t80-t91: kFeatureMaterialRegisters).
-	const uint slot = a_register == 71 ? 32 : a_register == 74 ? 33 : a_register >= 80 ? 34 + (a_register - 80) : a_register;
+	// MaterialRowHeader: four words (the animated row, reserved), textures[16], samplers[16], features (TruePBR's t80-t91: Manifest.cpp).
+	const uint slot = a_register >= 80 ? 32 + (a_register - 80) : a_register;
 	const uint index = DeviceLoad(uint, DeviceRefAdd(DCLFMaterialRowAddress, kDCLFMaterialRowHeader + 16 + 4 * slot), 4);
 	DEVICE_REF_TRACE_ZERO_INDEX(index, uint2(a_register, DCLFMaterialRowAddress.y));  // CS_DCLF_REF_TRACE: the register, the row's offset
 	return index;
