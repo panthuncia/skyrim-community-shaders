@@ -632,6 +632,11 @@ Known gaps in the ORG ports of Community Shaders features, from the 2026-11-18 h
     `cs.physical-sky.composite` right after `cs.deferred` (phase 2, not yet run in the game). Minor cost: one more full-screen
     read and write of kMAIN and a second fp16 rounding. **Next:** fold it back into the composite when the composite takes a
     handle table.
+-   **Intermittent crash in DCLF's material capture during a load (guest).** `guest+resize` on build `2fcb06441` crashed at the
+    loading screen (2026-11-19 12:12, `crash-2026-11-19-12-12-42.log`): the render thread executed `0x1ffff`, with
+    `MaterialPort.cpp:68` (`Capture(*a_material, ...)`) under `SceneCapture.cpp:707` on the scanned stack. Two reruns passed. A
+    guess, not proven: a material whose reference count is still above zero while it is being destroyed (its vtable already
+    gone). **Next:** check the material's lifetime against the capture in `SceneCapture`, and catch it with a hang/crash dump.
 -   **Native Vulkan: Physical Lens's ghosts and starburst lose the device on the RX 6600.** Seen in `cs.pp.physical-lens.request-plans`
     with frame generation off (step 6's lead, `native-vulkan+fg-fx`, 2026-11-19). The lens image mapping and Camera FX are fine.
     **Next:** reproduce with `DXVK_DEBUG=hang` and the RGD crash flow on Vulkan only.
