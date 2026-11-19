@@ -316,6 +316,8 @@ public:
 		SceneLayerGuard& operator=(const SceneLayerGuard&) = delete;
 
 	private:
+		// Declared first, so it ends after the destructor resumed the layer. The round trip raises no settings event.
+		Feature::SettingsWriteBatch settingsBatch{ "scene layer suspension" };
 		SceneSettingsManager* manager;
 	};
 

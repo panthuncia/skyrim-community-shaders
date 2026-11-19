@@ -521,3 +521,10 @@ void TerrainBlending::RenderTerrainBlendingPasses()
 	zPrepassCopy.depthSRV = prepassSRVBackup;
 }
 #undef I18N_KEY_PREFIX
+
+Feature::SizeProjection TerrainBlending::ProjectSizeSettings() const
+{
+	SizeProjection projection;
+	projection.Add("Enabled", settings.Enabled);
+	return projection;
+}

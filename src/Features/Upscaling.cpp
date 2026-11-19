@@ -601,6 +601,7 @@ void Upscaling::ApplyHardwareDefaults()
 			logger::info("[Upscaling] Hardware default: XeSS selected (Intel GPU detected via Streamline)");
 		}
 	}
+	SettingsWritten("Upscaling hardware defaults");
 
 	// The hardware defaults leave Reflex's low-latency mode off. Streamline::Initialize still loads the feature, for frame generation.
 }
@@ -640,6 +641,7 @@ void Upscaling::BeginRenderFrame()
 	if (const int request = s_upscaleTestRequest.exchange(-1, std::memory_order_relaxed); request >= 0)
 		RenderGraph::Frame::Driver::AtNextBegin([this, request] {
 			settings.upscaleMethod = static_cast<uint>(request);
+			SettingsWritten("cs-test upscale");
 			logger::info("[UPTEST] upscale method {} (now {})", magic_enum::enum_name(static_cast<UpscaleMethod>(request)), magic_enum::enum_name(GetUpscaleMethod()));
 		});
 	// A test run's frame generation switch (RequestFrameGenTest), as the menu's stepper makes it, at the frame boundary as well.
@@ -648,6 +650,7 @@ void Upscaling::BeginRenderFrame()
 			settings.frameGeneration = request != 0;
 			if (request != 0)
 				settings.frameGenMethod = static_cast<uint>(request == 2 ? FrameGenMethod::kDLSSG : FrameGenMethod::kFSR);
+			SettingsWritten("cs-test fg");
 			logger::info("[FGTEST] switch: frame generation {}", request == 0 ? "off" : request == 2 ? "DLSS-G" : "FSR-FG");
 		});
 	{  // The [FGTEST] line: frames rendered and FSR-FG's presents each second.
@@ -2237,4 +2240,16 @@ void Upscaling::BSFaceGenManager_UpdatePendingCustomizationTextures::thunk()
 	runtimeData.dynamicResolutionLock = 1;
 	func();
 	runtimeData.dynamicResolutionLock = 0;
+}
+
+Feature::SizeProjection Upscaling::ProjectSizeSettings() const
+{
+	SizeProjection projection;
+	projection.Add("upscaleMethod", settings.upscaleMethod)
+		.Add("upscaleMethodNoDLSS", settings.upscaleMethodNoDLSS)
+		.Add("qualityMode", settings.qualityMode)
+		.Add("frameGeneration", settings.frameGeneration)
+		.Add("frameGenMethod", settings.frameGenMethod)
+		.Add("frameGenMultiplier", settings.frameGenMultiplier);
+	return projection;
 }

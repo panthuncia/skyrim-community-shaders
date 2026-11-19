@@ -773,3 +773,16 @@ std::pair<ID3D11ShaderResourceView*, ID3D11Buffer*> ViewAtmosphere::PrepareLocal
 	// The engine's field can be a tripwire handle: DXVK takes the wrapped object.
 	return { RenderGraph::Engine::Tripwire::Unwrap(depthStencil.depthSRV), engineLocalShadowCB->CB() };
 }
+
+Feature::SizeProjection ViewAtmosphere::ProjectSizeSettings() const
+{
+	SizeProjection projection;
+	projection.Add("enabled", settings.enabled)
+		.Add("nearPixelSize", settings.nearPixelSize)
+		.Add("nearSlices", settings.nearSlices)
+		.Add("middlePixelSize", settings.middlePixelSize)
+		.Add("middleSlices", settings.middleSlices)
+		.Add("distantPixelSize", settings.distantPixelSize)
+		.Add("distantSlices", settings.distantSlices);
+	return projection;
+}

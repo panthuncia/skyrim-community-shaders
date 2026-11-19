@@ -711,6 +711,8 @@ void HDRDisplay::SetupResources()
 		settings.hdrAutoDetected = true;
 		logger::info("[HDR] Auto-configured HDR based on display: {}", isHDRMonitor ? "enabled" : "disabled");
 	}
+	// Outside the lock, since the projection takes it.
+	SettingsWritten("HDRDisplay auto-detect");
 	{
 		std::lock_guard<std::mutex> lock(settingsMutex);
 		hdrEnabledForFrame = settings.enableHDR;
@@ -1727,4 +1729,17 @@ void HDRDisplay::UpdateSwapChainColorSpace() const
 	FrameGen::DxvkPresenter::Get().SetColorSpace(swapChain4, IsHDREnabledForFrame());
 
 	swapChain4->Release();
+}
+
+Feature::SizeProjection HDRDisplay::ProjectSizeSettings() const
+{
+	// The menu and the render thread write enableHDR under the settings mutex. Locking leaves the settings unchanged.
+	bool enableHDR = false;
+	{
+		std::lock_guard lock(const_cast<std::mutex&>(settingsMutex));
+		enableHDR = settings.enableHDR;
+	}
+	SizeProjection projection;
+	projection.Add("enableHDR", enableHDR);
+	return projection;
 }

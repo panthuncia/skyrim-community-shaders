@@ -320,3 +320,19 @@ void VolumetricLighting::SetGroupCountsVCS(uint32_t& threadGroupCountX, uint32_t
 }
 
 #undef I18N_KEY_PREFIX
+
+Feature::SizeProjection VolumetricLighting::ProjectSizeSettings() const
+{
+	SizeProjection projection;
+	projection.Add("ExteriorEnabled", settings.ExteriorEnabled)
+		.Add("ExteriorQuality", settings.ExteriorQuality)
+		.Add("ExteriorCustomSize.Width", settings.ExteriorCustomSize.Width)
+		.Add("ExteriorCustomSize.Height", settings.ExteriorCustomSize.Height)
+		.Add("ExteriorCustomSize.Depth", settings.ExteriorCustomSize.Depth)
+		.Add("InteriorEnabled", settings.InteriorEnabled)
+		.Add("InteriorQuality", settings.InteriorQuality)
+		.Add("InteriorCustomSize.Width", settings.InteriorCustomSize.Width)
+		.Add("InteriorCustomSize.Height", settings.InteriorCustomSize.Height)
+		.Add("InteriorCustomSize.Depth", settings.InteriorCustomSize.Depth);
+	return projection;
+}

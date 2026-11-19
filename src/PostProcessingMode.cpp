@@ -96,8 +96,10 @@ namespace PostProcessingMode
 		resolved = true;
 		Apply(mode);
 		// Switching to Post Processing always starts linear; running without it is a manual opt-out.
-		if (mode == Mode::PostProcessing)
+		if (mode == Mode::PostProcessing) {
 			globals::features::linearLighting.settings.enableLinearLighting = true;
+			globals::features::linearLighting.SettingsWritten("linear lighting mode");
+		}
 		return true;
 	}
 
@@ -150,8 +152,10 @@ namespace PostProcessingMode
 		heldMode = mode != chosen ? std::optional(chosen) : std::nullopt;
 		Apply(mode);
 		// Set() turns Linear Lighting on with Post Processing; a pack's choice gets the same at startup.
-		if (std::exchange(pendingFromPack, false) && mode == Mode::PostProcessing && !heldMode)
+		if (std::exchange(pendingFromPack, false) && mode == Mode::PostProcessing && !heldMode) {
 			globals::features::linearLighting.settings.enableLinearLighting = true;
+			globals::features::linearLighting.SettingsWritten("linear lighting mode");
+		}
 		pendingMode.reset();
 		resolved = true;
 	}

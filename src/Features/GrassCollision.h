@@ -137,6 +137,8 @@ public:
 	static void StoodDownUpdate(const GrassShared::StoodDownFrame& a_frame);
 
 	virtual void LoadSettings(json& o_json) override;
+	/** @brief The size- and shape-relevant settings (frame revision plan 6.4). */
+	virtual SizeProjection ProjectSizeSettings() const override;
 	virtual void SaveSettings(json& o_json) override;
 	virtual void RestoreDefaultSettings() override;
 

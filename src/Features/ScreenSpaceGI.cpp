@@ -1067,3 +1067,15 @@ std::tuple<ID3D11ShaderResourceView*, ID3D11ShaderResourceView*, ID3D11ShaderRes
 }
 
 #undef I18N_KEY_PREFIX
+
+Feature::SizeProjection ScreenSpaceGI::ProjectSizeSettings() const
+{
+	SizeProjection projection;
+	projection.Add("Enabled", settings.Enabled)
+		.Add("ResolutionMode", settings.ResolutionMode)
+		.Add("EnableGI", settings.EnableGI)
+		.Add("EnableExperimentalSpecularGI", settings.EnableExperimentalSpecularGI)
+		.Add("EnableTemporalDenoiser", settings.EnableTemporalDenoiser)
+		.Add("EnableBlur", settings.EnableBlur);
+	return projection;
+}

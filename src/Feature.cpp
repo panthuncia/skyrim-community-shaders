@@ -56,9 +56,12 @@
 #include "Utils/Format.h"
 #include "Vram/Attribution.h"
 
+#include "RenderGraph/Frame/Variables.h"
 #include "State.h"
 #include "TruePBR.h"
 
+#include <algorithm>
+#include <mutex>
 #include <unordered_map>
 
 void Feature::Load(json& o_json)
@@ -171,24 +174,24 @@ void Feature::Load(json& o_json)
 		if (o_json[GetName()].is_structured()) {
 			logger::info("Loading {} settings", GetName());
 			try {
-				LoadSettings(o_json[GetName()]);
+				ApplySettings(o_json[GetName()], "Feature::Load");
 			} catch (...) {
 				// Plain defaults would be saved back as the user's edits, so the layered base is tried first.
 				logger::warn("Invalid settings for {}, using its defaults and Baseline packs.", GetName());
-				RestoreDefaultSettings();
+				ApplyDefaults("Feature::Load");
 				if (const auto* base = globals::state->GetFeatureBase(GetName())) {
 					try {
 						auto baseSettings = *base;
-						LoadSettings(baseSettings);
+						ApplySettings(baseSettings, "Feature::Load");
 					} catch (...) {
 						logger::warn("Invalid Baseline settings for {}, using default.", GetName());
-						RestoreDefaultSettings();
+						ApplyDefaults("Feature::Load");
 					}
 				}
 			}
 		} else {
 			logger::info("Loading default settings for {}", GetName());
-			RestoreDefaultSettings();
+			ApplyDefaults("Feature::Load");
 		}
 	}
 }
@@ -379,4 +382,189 @@ bool Feature::IsFeatureKnown(const std::string& shortName, REL::Version* outVers
 	}
 
 	return false;
+}
+
+namespace
+{
+	/** @brief What the settings events know of one feature. */
+	struct FeatureSettingsRecord
+	{
+		Feature::SizeProjection raised;  // the projection raised last, or the baseline
+		bool baseline = false;           // raised holds a projection
+		std::uint32_t pending = 0;       // writes held back by open batches
+		bool differed = false;           // the last check saw a difference
+		std::vector<std::string_view> reported;  // fields the check reported
+	};
+
+	struct FeatureSettingsRecords
+	{
+		std::mutex mutex;
+		std::unordered_map<const Feature*, FeatureSettingsRecord> records;
+	};
+
+	FeatureSettingsRecords& FeatureSettingsEventRecords()
+	{
+		static FeatureSettingsRecords records;
+		return records;
+	}
+
+	thread_local std::uint32_t featureSettingsBatchDepth = 0;
+	thread_local std::vector<Feature*> featureSettingsBatchWrites;
+
+	std::string ProjectionValueText(const Feature::SizeProjection::Field* a_field)
+	{
+		if (!a_field)
+			return "none";
+		if (!a_field->text.empty())
+			return a_field->text;
+		if (a_field->real != 0.0)
+			return std::format("{}", a_field->real);
+		return std::format("{}", a_field->integer);
+	}
+
+	const Feature::SizeProjection::Field* FindProjectionField(const Feature::SizeProjection& a_projection, std::string_view a_name)
+	{
+		const auto it = std::ranges::find(a_projection.fields, a_name, &Feature::SizeProjection::Field::name);
+		return it == a_projection.fields.end() ? nullptr : &*it;
+	}
+
+	/** @brief The names of the fields that differ between two projections, a field missing from one included. */
+	std::vector<std::string_view> ChangedProjectionFields(const Feature::SizeProjection& a_old, const Feature::SizeProjection& a_new)
+	{
+		std::vector<std::string_view> changed;
+		for (const auto& field : a_new.fields)
+			if (const auto* old = FindProjectionField(a_old, field.name); !old || !(*old == field))
+				changed.push_back(field.name);
+		for (const auto& field : a_old.fields)
+			if (!FindProjectionField(a_new, field.name))
+				changed.push_back(field.name);
+		return changed;
+	}
+
+	/** @brief Raises the feature's event when its projection changed since the last raise. */
+	void RaiseIfProjectionChanged(Feature& a_feature, std::string_view a_writer)
+	{
+		auto projection = a_feature.ProjectSizeSettings();
+		std::string change;
+		{
+			auto& records = FeatureSettingsEventRecords();
+			const std::lock_guard lock(records.mutex);
+			auto& record = records.records[&a_feature];
+			if (!std::exchange(record.baseline, true)) {
+				record.raised = std::move(projection);
+				return;
+			}
+			if (record.raised == projection)
+				return;
+			for (const auto name : ChangedProjectionFields(record.raised, projection))
+				change += std::format("{}{} {} -> {}", change.empty() ? "" : ", ", name, ProjectionValueText(FindProjectionField(record.raised, name)),
+					ProjectionValueText(FindProjectionField(projection, name)));
+			record.raised = std::move(projection);
+			record.differed = false;
+		}
+		RenderGraph::Frame::Vars::RaiseFeatureSettings(a_feature.GetShortName(), std::format("{}, {}", a_writer, change));
+	}
+}
+
+void Feature::SettingsWritten(std::string_view a_writer)
+{
+	if (featureSettingsBatchDepth > 0) {
+		if (std::ranges::contains(featureSettingsBatchWrites, this))
+			return;
+		featureSettingsBatchWrites.push_back(this);
+		auto& records = FeatureSettingsEventRecords();
+		const std::lock_guard lock(records.mutex);
+		++records.records[this].pending;
+		return;
+	}
+	RaiseIfProjectionChanged(*this, a_writer);
+}
+
+void Feature::ApplySettings(json& a_json, std::string_view a_writer)
+{
+	// A load that throws may have written part of the settings.
+	try {
+		LoadSettings(a_json);
+	} catch (...) {
+		SettingsWritten(a_writer);
+		throw;
+	}
+	SettingsWritten(a_writer);
+}
+
+void Feature::ApplyDefaults(std::string_view a_writer)
+{
+	try {
+		RestoreDefaultSettings();
+	} catch (...) {
+		SettingsWritten(a_writer);
+		throw;
+	}
+	SettingsWritten(a_writer);
+}
+
+Feature::SettingsWriteBatch::SettingsWriteBatch(std::string_view a_writer) :
+	writer(a_writer)
+{
+	++featureSettingsBatchDepth;
+}
+
+Feature::SettingsWriteBatch::~SettingsWriteBatch()
+{
+	if (--featureSettingsBatchDepth > 0)
+		return;
+	for (auto* feature : std::exchange(featureSettingsBatchWrites, {})) {
+		{
+			auto& records = FeatureSettingsEventRecords();
+			const std::lock_guard lock(records.mutex);
+			--records.records[feature].pending;
+		}
+		try {
+			RaiseIfProjectionChanged(*feature, writer);
+		} catch (const std::exception& e) {
+			logger::error("[ORG] settings event for {} failed: {}", feature->GetShortName(), e.what());
+		}
+	}
+}
+
+std::vector<std::string> Feature::FindMissedSettingsWriters()
+{
+	const auto& features = GetFeatureList();
+	std::vector<SizeProjection> projections;
+	projections.reserve(features.size());
+	for (const auto* feature : features)
+		projections.push_back(feature->ProjectSizeSettings());
+
+	std::vector<std::pair<Feature*, std::vector<std::string_view>>> found;
+	{
+		auto& records = FeatureSettingsEventRecords();
+		const std::lock_guard lock(records.mutex);
+		for (std::size_t i = 0; i < features.size(); ++i) {
+			auto& record = records.records[features[i]];
+			if (!std::exchange(record.baseline, true)) {
+				record.raised = std::move(projections[i]);
+				continue;
+			}
+			if (record.pending > 0 || record.raised == projections[i]) {
+				record.differed = false;
+				continue;
+			}
+			if (!std::exchange(record.differed, true))
+				continue;
+			std::vector<std::string_view> fields;
+			for (const auto name : ChangedProjectionFields(record.raised, projections[i]))
+				if (!std::ranges::contains(record.reported, name)) {
+					record.reported.push_back(name);
+					fields.push_back(name);
+				}
+			if (!fields.empty())
+				found.emplace_back(features[i], std::move(fields));
+		}
+	}
+
+	std::vector<std::string> missed;
+	for (auto& [feature, fields] : found)
+		for (const auto name : fields)
+			missed.push_back(std::format("{}.{}", feature->GetShortName(), name));
+	return missed;
 }

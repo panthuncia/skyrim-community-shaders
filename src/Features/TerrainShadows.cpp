@@ -714,3 +714,10 @@ void TerrainShadows::EarlyPrepass()
 	if (auto srv = GetShadowHeightSRV())
 		BindShadowHeight(srv);
 }
+
+Feature::SizeProjection TerrainShadows::ProjectSizeSettings() const
+{
+	SizeProjection projection;
+	projection.Add("EnableTerrainShadow", settings.EnableTerrainShadow);
+	return projection;
+}

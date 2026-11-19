@@ -1,4 +1,6 @@
 #include "SettingManager.h"
+#include "Features/Effects11.h"
+#include "Globals.h"
 
 #include "IniSerialization.h"
 #include "Overlays/PresetOverlays.h"
@@ -62,6 +64,15 @@ static bool TryParseWeatherID(const std::string& a_key, uint32_t& a_out)
 		return pos == idStr.size();
 	} catch (...) {
 		return false;
+	}
+}
+
+namespace
+{
+	/** @brief Tells Effects11 its settings were written. Call it with the manager's lock released, since the projection reads them. */
+	void NoteEffects11SettingsWrite(std::string_view a_writer)
+	{
+		globals::features::effects11.SettingsWritten(a_writer);
 	}
 }
 
@@ -230,19 +241,22 @@ SettingManager::StoredValue SettingManager::GetStoredValue(uint32_t id, uint32_t
 
 void SettingManager::SetStoredValue(uint32_t id, uint32_t weatherID, const StoredValue& stored)
 {
-	std::unique_lock lock(mutex);
-	assert(id < allSettings.size());
-	if (!weatherID) {
-		allSettings[id].currentValue = stored.value;
-		return;
-	}
-	const auto* entry = WeatherManager::GetSingleton().FindWeatherEntry(weatherID);
-	if (!entry)
-		return;
-	for (uint32_t linkedID : entry->weatherIDs) {
-		WeatherValuesFor(linkedID)[id] = stored.value;
-		WeatherDefinedFor(linkedID)[id] = stored.definedMask;
-	}
+	[&] {
+		std::unique_lock lock(mutex);
+		assert(id < allSettings.size());
+		if (!weatherID) {
+			allSettings[id].currentValue = stored.value;
+			return;
+		}
+		const auto* entry = WeatherManager::GetSingleton().FindWeatherEntry(weatherID);
+		if (!entry)
+			return;
+		for (uint32_t linkedID : entry->weatherIDs) {
+			WeatherValuesFor(linkedID)[id] = stored.value;
+			WeatherDefinedFor(linkedID)[id] = stored.definedMask;
+		}
+	}();
+	NoteEffects11SettingsWrite("Effects11 overlay");
 }
 
 /** @brief A bool setting ready for RegisterSettingInternal. */
@@ -400,8 +414,11 @@ T SettingManager::GetValueInternal(uint32_t id, bool rawValue, float weatherBlen
 template <typename T>
 void SettingManager::SetValue(uint32_t id, const T& value)
 {
-	std::unique_lock lock(mutex);
-	SetValueInternal<T>(id, value);
+	{
+		std::unique_lock lock(mutex);
+		SetValueInternal<T>(id, value);
+	}
+	NoteEffects11SettingsWrite("Effects11 setting");
 }
 
 template <typename T>
@@ -1249,6 +1266,7 @@ void SettingManager::Load()
 	Overlays::Manager::GetSingleton().RestoreBeforeReload();
 	LoadFromFile(PresetManager::GetSingleton().GetENBSeriesIniPath().string());
 	ReloadAllWeatherSettings();
+	NoteEffects11SettingsWrite("Effects11 reload");
 }
 
 bool SettingManager::Save()

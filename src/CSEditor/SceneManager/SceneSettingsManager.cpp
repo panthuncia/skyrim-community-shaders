@@ -109,7 +109,7 @@ bool SceneSettingsManager::ApplyCatalogSceneSettings(
 	}
 
 	try {
-		feature.LoadSettings(settingsDocument);
+		feature.ApplySettings(settingsDocument, "scene layer");
 		return true;
 	} catch (const std::exception& e) {
 		logger::warn("[SceneSettings] Failed to apply settings for {}: {}", featureShortName, e.what());
@@ -120,7 +120,7 @@ bool SceneSettingsManager::ApplyCatalogSceneSettings(
 	try {
 		for (size_t index = 0; index < updates.size(); ++index)
 			*targetValues[index] = std::move(originalValues[index]);
-		feature.LoadSettings(settingsDocument);
+		feature.ApplySettings(settingsDocument, "scene layer");
 	} catch (...) {
 		featureApplyDocuments.erase(featureShortName);
 		logger::error("[SceneSettings] Failed to restore {} after an apply error", featureShortName);

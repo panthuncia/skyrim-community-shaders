@@ -563,3 +563,10 @@ void SubsurfaceScattering::Hooks::BSLightingShader_SetupGeometry::thunk(RE::BSSh
 }
 
 #undef I18N_KEY_PREFIX
+
+Feature::SizeProjection SubsurfaceScattering::ProjectSizeSettings() const
+{
+	SizeProjection projection;
+	projection.Add("SSMode", settings.SSMode).Add("EnableCharacterLighting", settings.EnableCharacterLighting);
+	return projection;
+}

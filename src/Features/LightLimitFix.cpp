@@ -2388,3 +2388,12 @@ void LightLimitFix::Hooks::InstallLocalShadows()
 }
 
 #undef I18N_KEY_PREFIX
+
+Feature::SizeProjection LightLimitFix::ProjectSizeSettings() const
+{
+	SizeProjection projection;
+	projection.Add("EnableLocalShadows", settings.EnableLocalShadows)
+		.Add("LocalShadowSlots", settings.LocalShadowSlots)
+		.Add("LocalShadowResolution", settings.LocalShadowResolution);
+	return projection;
+}

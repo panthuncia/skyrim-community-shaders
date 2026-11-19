@@ -22,6 +22,8 @@ public:
 	void DrawDebugSection() override;
 	/** @brief Loads global volume quality settings. */
 	void LoadSettings(json& value) override;
+	/** @brief The size- and shape-relevant settings (frame revision plan 6.4). */
+	SizeProjection ProjectSizeSettings() const override;
 	/** @brief Saves global volume quality settings. */
 	void SaveSettings(json& value) override;
 	/** @brief Restores shared volume quality defaults. */

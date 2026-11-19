@@ -65,6 +65,8 @@ public:
 	virtual void RestoreDefaultSettings() override;
 	/** @brief Loads HDR settings from JSON and schedules auto-detection if needed. */
 	virtual void LoadSettings(json& o_json) override;
+	/** @brief The size- and shape-relevant settings (frame revision plan 6.4). */
+	virtual SizeProjection ProjectSizeSettings() const override;
 	/** @brief Saves HDR settings to JSON (thread-safe). */
 	virtual void SaveSettings(json& o_json) override;
 	/** @brief Draws the ImGui settings UI for HDR enable, paper white, peak brightness, and UI brightness. */

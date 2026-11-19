@@ -43,6 +43,8 @@ public:
 
 	virtual void SaveSettings(json&) override;
 	virtual void LoadSettings(json&) override;
+	/** @brief The size- and shape-relevant settings (frame revision plan 6.4). */
+	virtual SizeProjection ProjectSizeSettings() const override;
 	virtual void RestoreDefaultSettings() override;
 	/** @brief Draws the ImGui settings panel for volumetric lighting configuration. */
 	virtual void DrawSettings() override;

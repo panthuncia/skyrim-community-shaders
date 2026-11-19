@@ -498,7 +498,7 @@ namespace Testing
 				return false;
 			}
 			*target = value;
-			(*found)->LoadSettings(settings);
+			(*found)->ApplySettings(settings, "cs-test setting");
 			logger::info("[TEST] setting {}.{} = {}", name, path, value.dump());
 			return true;
 		}
