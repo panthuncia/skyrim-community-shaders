@@ -132,6 +132,10 @@ To match DXVK, native needs what DXVK's CS thread gives it: the GPU work off the
 - **Frame generation in guest** (2026-11-18, RX 6600, FSR-FG): engages, about 2x driver presents, and stays on through the CS menu,
   the pause menu and a loading screen, in the background and the foreground (`fg` config). Its hudless input has no HUD. FSR-FG drops
   to one presented frame for a moment about twice a second (guest 28 to 36 times a run, plain D3D11 3379). Not looked into.
+- **Frame generation's inputs on the UI stage** (2026-11-19, A7): the hudless copy, the screenshot's clean scene and HDR output are
+  steps of the UI stage in both graph modes; no anchor runs an epoch of its own. Guest FSR-FG engages as before (`fg`), and its
+  hudless input has no HUD or CS menu. A new registration of any of the three is missing for the few frames before the stage's
+  build holds it (no hudless, a D3D11 screenshot, a D3D11 HDR composite).
 - **Frame generation in native**: the native presenter needs the frame-generation controls DXVK exports (swap chain recreate,
   sync present, queue depth, tearing, the torn-down callback). Until then DLSS-G and FSR-FG stay off in native.
 - **Residue:** the reflection cube face draws; load-window shadow draws; the refused occlusion-query draw; the sun occlusion
