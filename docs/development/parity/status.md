@@ -145,6 +145,11 @@ To match DXVK, native needs what DXVK's CS thread gives it: the GPU work off the
   through `FrameGen::DxvkPresenter` (the native backend is `NativePresenter`). In both graph modes FSR-FG's tags and prepare are a
   pass of the UI stage after the hudless copy; plain D3D11 keeps the interop ring. Guest `fg` presents x2 as before. DLSS-G and
   FSR-FG stay off in native until the plan's steps 6 to 8.
+- **FSR-FG in native D3D12** (2026-11-19, step 7): `sl.fsr_g` has a D3D12 backend (`fsrGDX12.cpp`). The proxy factory's
+  CreateSwapChainForHwnd makes FidelityFX's DX12 frame interpolation swap chain while FSR-FG is on. `native-d3d12-fg` presents x2
+  in the world (37 rendered, 74 presented a second on the RX 6600, in the background) and passes frames through in the menus and
+  the loading screen. HDR10 under it (`native-d3d12+fg-hdr`) presents x2, and the D3D12 InfoQueue stays empty with
+  `org.validation=true`. The foreground eye check (HUD ghosting, pacing) is still open.
 - **Residue:** the reflection cube face draws; load-window shadow draws; the refused occlusion-query draw; the sun occlusion
   draw skipped when its depth is neither kMAIN's nor the Z-prepass copy.
 - **Map:** native shows flat white patches on the world map's terrain. Compare with guest. 2026-11-18 (`map` config, RX 6600):
