@@ -1,6 +1,62 @@
 // SPDX-License-Identifier: MIT AND (LicenseRef-GPL-3.0-with-Modding-Exception WITH GPL-3.0-linking-source-exception)
 // Original code Copyright (c) 2022 Ilya Perapechka (MIT), modifications GPL-3.0 with Modding Exception (see EXCEPTIONS.md)
 
+#if defined(DCLF_PULLED)
+// Drawcall Limit Fix's grass draws (dclf-architecture.md, "Grass: the draws"; Features/Grass/GrassLayout.h): per pass, a multi-draw
+// whose count and arguments the cull wrote, one non-indexed instanced draw a bucket's tier, whose instances (firstInstance on) are the
+// visible list's entries. The vertex stage fetches its instance, its shape's row, its bucket's, its mesh's index and vertex and the
+// cull's InstanceFrame (wind, fade, tier) through the buffer view refs in the draw row; the pixel stages take the bucket's textures,
+// samplers and alpha reference, and the frame's shadow mask, from the rows and the descriptor heap. It binds nothing a draw would
+// vary: the engine's per-pass PerGeometry, PerMaterial, alpha reference and permutation blocks become statics set from the rows
+// (DCLFGrassStatics), Grass Collision's texture and block come from the draw row (GRASS_COLLISION_EXTERNAL), and Grass
+// Optimizations' instance buffer is replaced by the cull's (its path is not taken: the instances are DCLF's).
+// The permutation block's values become assignable statics (Permutation.hlsli).
+#	define DCLF_PULLED_ROWS
+#	undef GRASS_OPTIMIZATIONS
+#	define GRASS_COLLISION_EXTERNAL
+// No object rows: a family's push data is its own (below), not DCLFObjects.hlsli's, which Light Limit Fix's header would include.
+#	undef DCLF_BINDLESS
+#	undef DCLF_BINDLESS_DRAW
+// The draw's push data (DrawPipelines.h, kDrawPushBinding): the draw row's buffer view ref, the pass's phase and the colour program (0 base,
+// 1 TruePBR). The phase needs no reading: a phase-two draw's firstInstance already starts past phase one's instances.
+cbuffer DCLFGrassPush : register(b190)
+{
+	uint2 DCLFGrassDrawAddress : packoffset(c0.x);
+	uint DCLFGrassPhase : packoffset(c0.z);
+	uint DCLFGrassProgram : packoffset(c0.w);
+	uint2 DCLFGrassUnused : packoffset(c1.x);
+#	if !defined(__spirv__)
+	// D3D12: SV_InstanceID does not count the draw's first instance. The family's signature writes it into this word per draw instead
+	// (DrawPipelines.h, kDrawPushInstance; GrassArgsCS stores it before the draw's arguments).
+	uint DCLFGrassInstanceWord : packoffset(c5.w);
+#	endif
+};
+#	include "Common/DCLFVertexPull.hlsli"
+DeviceRef DCLFGrassDraw() { return DCLFGrassDrawAddress; }
+// GrassInstances::DrawRow: the tables' refs, then the frame's values.
+DeviceRef DCLFGrassTable(uint a_offset) { return DeviceLoad(uint2, DeviceRefAdd(DCLFGrassDraw(), a_offset), 8); }
+uint DCLFGrassDrawUint(uint a_offset) { return DeviceLoad(uint, DeviceRefAdd(DCLFGrassDraw(), a_offset), 4); }
+float4 DCLFGrassDrawFloat4(uint a_offset) { return asfloat(DeviceLoad(uint4, DeviceRefAdd(DCLFGrassDraw(), a_offset), 4)); }
+static const uint kDCLFGrassInstances = 0, kDCLFGrassShapes = 8, kDCLFGrassBuckets = 16, kDCLFGrassMeshes = 24, kDCLFGrassOwners = 32,
+				  kDCLFGrassFrame = 40, kDCLFGrassVisible = 48;
+static const uint kDCLFGrassWindVector = 64, kDCLFGrassTimeBase = 80, kDCLFGrassDirLightDirection = 96, kDCLFGrassDirLightColor = 112,
+				  kDCLFGrassAmbientColor = 128, kDCLFGrassShadowMaskIndex = 144, kDCLFGrassCollisionIndex = 148, kDCLFGrassCollisionPerFrame = 160;
+// CullRow (at 256): AlphaParam1 and AlphaParam2 are its alphaParam1, alphaParam2 (words 9 and 10).
+static const uint kDCLFGrassAlphaParams = 256 + 36;
+// GrassInstances::BucketRow (224 bytes): mesh[3] by tier, flags, ..., diffuse, depth sampler, colour sampler, alpha reference at 32;
+// wavePeriod at 64, pbrFlags at 76, scaleMask at 80, normal, RMAOS, features textures and the PBR sampler at 96, pbrParams1 and 2,
+// windDirection at 144, pbrParams3 and 4 at 160, fuzz and emissive textures at 192, canopyHeight[3] by tier at 200.
+static const uint kDCLFGrassBucketStride = 224, kDCLFGrassBucketFlags = 12, kDCLFGrassBucketTextures = 32, kDCLFGrassBucketWavePeriod = 64,
+				  kDCLFGrassBucketPbrFlags = 76, kDCLFGrassBucketScaleMask = 80, kDCLFGrassBucketPbrTextures = 96, kDCLFGrassBucketPbrParams1 = 112,
+				  kDCLFGrassBucketPbrParams2 = 128, kDCLFGrassBucketWindDirection = 144, kDCLFGrassBucketPbrParams3 = 160,
+				  kDCLFGrassBucketPbrParams4 = 176, kDCLFGrassBucketFuzzEmissive = 192, kDCLFGrassBucketCanopyHeight = 200;
+static const uint kDCLFGrassBucketTruePbr = 1u << 0, kDCLFGrassBucketSphereNormal = 1u << 1;
+// GrassInstances::InstanceFrame (8 bytes): windCur and windPrev as halfs; the fade (unorm16) and, in the high 16 bits, the flags (bits 0-1 the
+// tier, 2 in collision range, 3 simple shading). The vertex stage takes it unpacked (DCLFGrassFrame: windCur, windPrev, fade as floats, flags).
+static const uint kDCLFGrassFrameStride = 8, kDCLFGrassTierMask = 3u, kDCLFGrassInCollisionRange = 1u << 2, kDCLFGrassSimpleShading = 1u << 3;
+static const uint kDCLFGrassNone = 0xFFFFFFFFu;
+#endif
+
 #include "Common/ColorManagement.hlsli"
 #include "Common/FrameBuffer.hlsli"
 #include "Common/GBuffer.hlsli"
@@ -13,6 +69,12 @@
 #include "Common/SharedData.hlsli"
 
 #define DEFERRED
+
+#if defined(GRASS_OPTIMIZATIONS) || defined(DCLF_PULLED)
+// The instances carry a LOD tier and a far (simple shading) flag, and no WorldView: culled by Grass Optimizations' or by Drawcall
+// Limit Fix's compute.
+#	define GRASS_CULLED_INSTANCES
+#endif
 
 #ifdef GRASS_LIGHTING
 #	define GRASS
@@ -56,22 +118,71 @@ struct VS_OUTPUT
 	float3 ClumpNormal: POSITION5;
 #	else
 	float DirLightAngle: TEXCOORD1;
-#		ifndef GRASS_OPTIMIZATIONS
-	// Use the engine's view transform when reconstructing geometric normals.
+#		ifndef GRASS_CULLED_INSTANCES
+	// Preserve the engine's WorldView transform for standard-path geometric normals.
 	float3 ViewSpacePosition: TEXCOORD3;
 #		endif
 #	endif
 #endif
 #ifdef GRASS_OPTIMIZATIONS
 	nointerpolation float IsComplex: TEXCOORD8;
-#	if !defined(RENDER_DEPTH)
+#endif
+#if defined(GRASS_CULLED_INSTANCES) && !defined(RENDER_DEPTH)
 	nointerpolation float IsFar: TEXCOORD9;
 	// 0 = full mesh, 1 = middle LOD mesh, 2 = far LOD mesh.
 	nointerpolation float LodTier: TEXCOORD10;
-#	endif
+#endif
+#if defined(DCLF_PULLED)
+	// The instance's bucket, whose row the pixel stages read their textures and samplers from.
+	nointerpolation uint Bucket: TEXCOORD11;
 #endif
 };
 
+#if defined(DCLF_PULLED)
+// PerGeometry's values that DCLF's draws read (none of its transforms: an instance's position is its shape's origin plus its own),
+// from the draw row (one for the frame: what SetupGeometry writes per pass) and ScaleMask and WindVector.xy (the shapes' rotation)
+// from the bucket's row, set by DCLFGrassStatics first in both stages' main. [UNVERIFIED] which of SetupGeometry's b2 values are per
+// frame (GrassLayout.h, DrawRow): read as laid out. WindTimer and PreviousWindTimer are what the cull's InstanceFrame wind was made from (the vertex
+// stage reads that, not them).
+static float4 FogNearColor;  // only w: the row's dirLightColor.w
+static float3 WindVector;
+static float WindTimer;
+static float3 DirLightDirection;
+static float PreviousWindTimer;
+static float3 DirLightColor;
+static float AlphaParam1;
+static float3 AmbientColor;
+static float AlphaParam2;
+static float3 ScaleMask;
+static float ShadowClampValue;
+
+// The bucket's row (GrassInstances::BucketRow), set by DCLFGrassStatics.
+static DeviceRef DCLFGrassBucketRow;
+
+void DCLFGrassStatics(uint a_bucket)
+{
+	DCLFGrassBucketRow = DeviceRefAdd(DCLFGrassTable(kDCLFGrassBuckets), a_bucket * kDCLFGrassBucketStride);
+	WindVector = float3(asfloat(DeviceLoad(uint2, DeviceRefAdd(DCLFGrassBucketRow, kDCLFGrassBucketWindDirection), 4)), DCLFGrassDrawFloat4(kDCLFGrassWindVector).z);
+	const float2 timeBase = asfloat(DeviceLoad(uint2, DeviceRefAdd(DCLFGrassDraw(), kDCLFGrassTimeBase), 4));  // timeBase, prevTimeBase
+	const float wavePeriod = asfloat(DeviceLoad(uint, DeviceRefAdd(DCLFGrassBucketRow, kDCLFGrassBucketWavePeriod), 4));
+	WindTimer = timeBase.x * wavePeriod;
+	PreviousWindTimer = timeBase.y * wavePeriod;
+	const float4 dirLightDirection = DCLFGrassDrawFloat4(kDCLFGrassDirLightDirection);  // w ShadowClampValue
+	DirLightDirection = dirLightDirection.xyz;
+	ShadowClampValue = dirLightDirection.w;
+	const float4 dirLightColor = DCLFGrassDrawFloat4(kDCLFGrassDirLightColor);  // w FogNearColor.w
+	DirLightColor = dirLightColor.xyz;
+	FogNearColor = float4(0, 0, 0, dirLightColor.w);
+	AmbientColor = DCLFGrassDrawFloat4(kDCLFGrassAmbientColor).xyz;
+	const float2 alphaParams = asfloat(DeviceLoad(uint2, DeviceRefAdd(DCLFGrassDraw(), kDCLFGrassAlphaParams), 4));
+	AlphaParam1 = alphaParams.x;
+	AlphaParam2 = alphaParams.y;
+	ScaleMask = asfloat(DeviceLoad(uint3, DeviceRefAdd(DCLFGrassBucketRow, kDCLFGrassBucketScaleMask), 4));
+	// What CS's SetupGeometry hook puts in the permutation block for a sphere-normal property (Hooks.cpp, GrassSphereNormal).
+	const uint flags = DeviceLoad(uint, DeviceRefAdd(DCLFGrassBucketRow, kDCLFGrassBucketFlags), 4);
+	Permutation::ExtraShaderDescriptor = (flags & kDCLFGrassBucketSphereNormal) ? Permutation::ExtraFlags::GrassSphereNormal : 0;
+}
+#else
 cbuffer PerGeometry : register(b2)
 {
 	row_major float4x4 WorldViewProj : packoffset(c0);
@@ -90,11 +201,35 @@ cbuffer PerGeometry : register(b2)
 	float3 ScaleMask : packoffset(c21);
 	float ShadowClampValue : packoffset(c21.w);
 }
+#endif  // DCLF_PULLED
 
 #ifdef VSHADER
 
 #	ifdef GRASS_COLLISION
+#		if defined(DCLF_PULLED)
+// Grass Collision's texture (GRASS_COLLISION_EXTERNAL): its latest published one, in the descriptor heap at the draw row's index.
+Texture2D<float4> GrassCollisionTexture()
+{
+	Texture2D<float4> t = ResourceDescriptorHeap[DCLFGrassDrawUint(kDCLFGrassCollisionIndex)];
+	return t;
+}
+#		endif
 #		include "GrassCollision\\GrassCollision.hlsli"
+#		if defined(DCLF_PULLED)
+// Grass Collision's GrassCollisionPerFrame block (b5), copied into the draw row at kDCLFGrassCollisionPerFrame in its layout.
+void DCLFGrassCollisionStatics()
+{
+	const DeviceRef block = DeviceRefAdd(DCLFGrassDraw(), kDCLFGrassCollisionPerFrame);
+	const uint4 first = DeviceLoad(uint4, block, 4);
+	const uint4 second = DeviceLoad(uint4, DeviceRefAdd(block, 16), 4);
+	GrassCollision::PosOffset = asfloat(first.xy);
+	GrassCollision::ArrayOrigin = first.zw;
+	GrassCollision::ValidMargin = asint(second.xy);
+	GrassCollision::TimeDelta = asfloat(second.z);
+	GrassCollision::BoundingBoxCount = second.w;
+	GrassCollision::CameraHeightDelta = asfloat(DeviceLoad(uint, DeviceRefAdd(block, 32), 4));
+}
+#		endif
 #	endif  // GRASS_COLLISION
 
 #	ifdef GRASS_OPTIMIZATIONS
@@ -117,7 +252,8 @@ cbuffer GrassBucket : register(b13)
 };
 #	endif
 
-// The engine selects each instance's fade from cb8 using the index in cb7.
+#	if !defined(DCLF_PULLED)
+// The engine's per-instance fade, bound by vanilla grass setup.
 cbuffer cb7 : register(b7)
 {
 	float4 cb7[1];
@@ -127,6 +263,7 @@ cbuffer cb8 : register(b8)
 {
 	float4 cb8[240];
 }
+#	endif  // !DCLF_PULLED
 
 float3 CalculateWindDisplacement(VS_INPUT input, float windTimer)
 {
@@ -175,7 +312,8 @@ float4 GetMSPosition(VS_INPUT input)
 	return msPosition;
 }
 
-// Engine draws use the instance stream and PerGeometry transforms.
+#	if !defined(DCLF_PULLED)
+// Engine draws use the instance stream and PerGeometry transforms, including grass not yet resident in a bucket.
 VS_OUTPUT VanillaVertex(VS_INPUT input)
 {
 	VS_OUTPUT vsout = (VS_OUTPUT)0;
@@ -249,9 +387,130 @@ VS_OUTPUT VanillaVertex(VS_INPUT input)
 #	endif
 	return vsout;
 }
+#	endif  // !DCLF_PULLED
 
-#	ifdef GRASS_OPTIMIZATIONS
-// Decode packed transforms into the engine's per-instance vertex inputs.
+#	if defined(DCLF_PULLED)
+// GO's instance path (below) for one of DCLF's instances: a_origin its shape's (Grass Optimizations' e0.xyz), a_frame the cull's
+// InstanceFrame (e1: windCur, windPrev, fade, flags). Precise throughout: the Z-prepass (RENDER_DEPTH) and the colour builds (base and
+// TruePBR) each compute the position, and the colour pass tests EQUAL against the Z-prepass's depth; precise does not reach into a
+// called function, so the instance transform is written out here and Grass Collision's functions are precise themselves
+// (GRASS_COLLISION_EXTERNAL).
+VS_OUTPUT DCLFGrassVertex(VS_INPUT input, float3 a_origin, uint4 a_frame, uint a_bucket)
+{
+	VS_OUTPUT vsout = (VS_OUTPUT)0;
+	vsout.TexCoord = input.TexCoord.xy;
+	vsout.Bucket = a_bucket;
+	const float windCur = asfloat(a_frame.x), windPrev = asfloat(a_frame.y), fade = asfloat(a_frame.z);
+
+	// GetMSPosition's instance transform (both of its forms are these three products).
+	precise float3 inputPosition = input.Position.xyz * (input.InstanceData4.yyy * ScaleMask.xyz + float3(1, 1, 1));
+	precise float3 instancePosition;
+	instancePosition.x = dot(input.InstanceData2.xyz, inputPosition);
+	instancePosition.y = dot(input.InstanceData3.xyz, inputPosition);
+	instancePosition.z = dot(float3(input.InstanceData4.x, input.InstanceData2.w, input.InstanceData3.w), inputPosition);
+	precise float3 localPosition = input.InstanceData1.xyz + instancePosition;
+	// The origin is made eye-relative first. Everything below adds to that small value, so nothing rounds at world magnitude.
+	precise float3 relativeOrigin = a_origin - FrameBuffer::CameraPosAdjust.xyz;
+	precise float3 eyeRel = relativeOrigin + localPosition;
+
+#		if !defined(RENDER_DEPTH)
+	precise float3 previousEyeRel = (a_origin - FrameBuffer::CameraPreviousPosAdjust.xyz) + localPosition;
+#		endif
+
+#		ifdef GRASS_COLLISION
+	[branch] if ((a_frame.w & kDCLFGrassInCollisionRange) != 0 && DCLFGrassDrawUint(kDCLFGrassCollisionIndex) != kDCLFGrassNone)
+	{
+		DCLFGrassCollisionStatics();
+		precise float3 collisionCentre = relativeOrigin + input.InstanceData1.xyz;
+		precise float3 displacement, previousDisplacement;
+		GrassCollision::GetDisplacedPosition(input, eyeRel, collisionCentre, displacement, previousDisplacement);
+		eyeRel += displacement;
+#			if !defined(RENDER_DEPTH)
+		previousEyeRel += previousDisplacement;
+#			endif
+	}
+#		endif
+
+	precise float vertexTerm = WindVector.z * (0.5 * (input.Color.w * input.Color.w));
+	eyeRel += float3(WindVector.xy, 0) * (windCur * vertexTerm);
+	precise float4 projSpacePosition = mul(FrameBuffer::CameraViewProj, float4(eyeRel, 1.0));
+	vsout.HPosition = projSpacePosition;
+
+#		if defined(RENDER_DEPTH)
+	vsout.Depth = projSpacePosition.zw;
+	vsout.Fade = fade;
+#		else
+	previousEyeRel += float3(WindVector.xy, 0) * (windPrev * vertexTerm);
+	vsout.Color = float4(input.InstanceData1.www * input.Color.xyz, fade);
+#			ifndef GRASS_LIGHTING
+	float3 instanceNormal = float3(input.InstanceData2.z, input.InstanceData3.zw);
+	vsout.DirLightAngle = saturate(dot(DirLightDirection.xyz, instanceNormal));
+#			endif
+	vsout.WorldPosition = eyeRel;
+	vsout.PreviousWorldPosition = previousEyeRel;
+	vsout.IsFar = (a_frame.w & kDCLFGrassSimpleShading) != 0 ? 1.0 : 0.0;
+	vsout.LodTier = float(a_frame.w & kDCLFGrassTierMask);
+#			ifdef GRASS_LIGHTING
+	float3x3 world3x3 = float3x3(input.InstanceData2.xyz, input.InstanceData3.xyz, float3(input.InstanceData4.x, input.InstanceData2.w, input.InstanceData3.w));
+	vsout.VertexNormal.xyz = mul(world3x3, input.Normal.xyz * 2.0 - 1.0);
+	const float canopyHeight = asfloat(DeviceLoad(uint, DeviceRefAdd(DCLFGrassBucketRow, kDCLFGrassBucketCanopyHeight + 4 * (a_frame.w & kDCLFGrassTierMask)), 4));
+	vsout.VertexNormal.w = GetCanopyHeight(input, canopyHeight);
+	vsout.ClumpNormal = GetClumpNormal(input, world3x3, canopyHeight);
+#			endif
+#		endif
+
+	return vsout;
+}
+
+// The draw's instance a_instance (SV_InstanceID counts from the draw's firstInstance: its range of the visible list) is the visible
+// list's entry, an instance slot; its owner is its shape. The vertex comes from the bucket's mesh for the instance's tier: R16
+// indices, attributes as the engine's input layout for the mesh's vertex layout has them (one stream).
+VS_OUTPUT main(uint a_vertex : SV_VertexID, uint a_instance : SV_InstanceID)
+{
+#		if !defined(__spirv__)
+	a_instance += DCLFGrassInstanceWord;  // D3D12: the draw's first instance, from its push word
+#		endif
+	const uint index = DeviceLoad(uint, DeviceRefAdd(DCLFGrassTable(kDCLFGrassVisible), 4 * a_instance), 4);
+	const uint shapeSlot = DeviceLoad(uint, DeviceRefAdd(DCLFGrassTable(kDCLFGrassOwners), 4 * index), 4);
+	const DeviceRef shape = DeviceRefAdd(DCLFGrassTable(kDCLFGrassShapes), 32 * shapeSlot);
+	const float3 origin = asfloat(DeviceLoad(uint3, shape, 4));
+	const uint bucket = DeviceLoad(uint, DeviceRefAdd(shape, 12), 4);
+	DCLFGrassStatics(bucket);
+	const uint2 packedFrame = DeviceLoad(uint2, DeviceRefAdd(DCLFGrassTable(kDCLFGrassFrame), kDCLFGrassFrameStride * index), 8);
+	const uint4 frame = uint4(asuint(f16tof32(packedFrame.x)), asuint(f16tof32(packedFrame.x >> 16)), asuint(float(packedFrame.y & 0xFFFFu) / 65535.0), packedFrame.y >> 16);
+	const uint meshSlot = DeviceLoad(uint, DeviceRefAdd(DCLFGrassBucketRow, 4 * (frame.w & kDCLFGrassTierMask)), 4);
+	if (meshSlot == kDCLFGrassNone)
+		return (VS_OUTPUT)0;
+	// GrassInstances::MeshRow: vertex ref, index ref, vertex layout, index count, vertex stride.
+	const DeviceRef mesh = DeviceRefAdd(DCLFGrassTable(kDCLFGrassMeshes), 32 * meshSlot);
+	const uint4 meshAddresses = DeviceLoad(uint4, mesh, 8);
+	DCLFDrawVertexLayout = DeviceLoad(uint2, DeviceRefAdd(mesh, 16), 8);
+	const uint indexWord = DeviceLoad(uint, DeviceRefAdd(meshAddresses.zw, 4 * (a_vertex / 2)), 4);
+	const uint vertexIndex = (a_vertex & 1) ? (indexWord >> 16) : (indexWord & 0xFFFF);
+	DCLFStream first, second;
+	first.address = meshAddresses.xy;
+	first.stride = DeviceLoad(uint, DeviceRefAdd(mesh, 28), 4);
+	second.address = DeviceRef(0, 0);
+	second.stride = 0;
+	DCLFStreamsAt(vertexIndex, first, second);
+
+	VS_INPUT input;
+	input.Position = DCLFPullPosition(first, second);
+	input.TexCoord = DCLFPullHalf2(1, first, second);
+	input.Normal = DCLFPullUnorm4(3, 0, first, second);
+	input.Color = DCLFPullUnorm4(5, 0, first, second);
+	// The engine's instance record (TEXCOORD4-7, R16G16B16A16_FLOAT each).
+	const DeviceRef record = DeviceRefAdd(DCLFGrassTable(kDCLFGrassInstances), 32 * index);
+	const uint4 low = DeviceLoad(uint4, record, 16);
+	const uint4 high = DeviceLoad(uint4, DeviceRefAdd(record, 16), 16);
+	input.InstanceData1 = float4(DCLFHalf2(low.x), DCLFHalf2(low.y));
+	input.InstanceData2 = float4(DCLFHalf2(low.z), DCLFHalf2(low.w));
+	input.InstanceData3 = float4(DCLFHalf2(high.x), DCLFHalf2(high.y));
+	input.InstanceData4 = float4(DCLFHalf2(high.z), DCLFHalf2(high.w));
+	return DCLFGrassVertex(input, origin, frame, bucket);
+}
+#	elif defined(GRASS_OPTIMIZATIONS)
+// Captured instances retain upstream's vertex input layout.
 VS_OUTPUT main(VS_INPUT input, uint instanceID : SV_InstanceID)
 {
 	[branch] if (GrassBucketGroupCount == GrassInstance::VanillaDrawMarker) return VanillaVertex(input);
@@ -372,6 +631,75 @@ struct PS_OUTPUT
 #endif
 
 #ifdef PSHADER
+#	if defined(DCLF_PULLED)
+// The pass's textures and samplers by descriptor heap index: the bucket's (its row's, read by DCLFGrassPixelStatics), the frame's
+// shadow mask (the draw row's). A multi-draw's waves may mix buckets, so the indices are non-uniform. PerFrame (b0) is not read.
+static uint DCLFGrassDiffuse, DCLFGrassSampler, DCLFGrassShadowMask;
+static float AlphaTestRefRS;
+Texture2D<float4> DCLFGrassTextureAt(uint a_index)
+{
+	Texture2D<float4> t = ResourceDescriptorHeap[NonUniformResourceIndex(a_index)];
+	return t;
+}
+SamplerState DCLFGrassSamplerAt(uint a_index)
+{
+	SamplerState s = SamplerDescriptorHeap[NonUniformResourceIndex(a_index)];
+	return s;
+}
+#		define SampBaseSampler DCLFGrassSamplerAt(DCLFGrassSampler)
+#		define TexBaseSampler DCLFGrassTextureAt(DCLFGrassDiffuse)
+#		define TexShadowMaskSampler DCLFGrassTextureAt(DCLFGrassShadowMask)
+#		if defined(GRASS_LIGHTING) && defined(TRUE_PBR)
+// PerMaterial (b1) from the bucket's row: TruePBR's material, which GrassShared reads at capture.
+static uint PBRFlags;
+static float3 PBRParams1;  // roughness scale, specular level, emissive scale
+static float4 PBRParams2;  // subsurface color, subsurface opacity
+static float4 PBRParams3;  // fuzz color, fuzz weight
+static float4 PBRParams4;  // subsurface balance, front/back specular weights, back roughness scale
+static uint DCLFGrassNormal, DCLFGrassRmaos, DCLFGrassFeatures, DCLFGrassFuzz, DCLFGrassEmissive, DCLFGrassPbrSampler;
+#			define SampNormalSampler DCLFGrassSamplerAt(DCLFGrassPbrSampler)
+#			define SampRMAOSSampler DCLFGrassSamplerAt(DCLFGrassPbrSampler)
+#			define SampSubsurfaceSampler DCLFGrassSamplerAt(DCLFGrassPbrSampler)
+#			define SampFuzzSampler DCLFGrassSamplerAt(DCLFGrassPbrSampler)
+#			define SampEmissiveSampler DCLFGrassSamplerAt(DCLFGrassPbrSampler)
+#			define TexNormalSampler DCLFGrassTextureAt(DCLFGrassNormal)
+#			define TexRMAOSSampler DCLFGrassTextureAt(DCLFGrassRmaos)
+#			define TexSubsurfaceSampler DCLFGrassTextureAt(DCLFGrassFeatures)
+#			define TexFuzzSampler DCLFGrassTextureAt(DCLFGrassFuzz)
+#			define TexEmissiveSampler DCLFGrassTextureAt(DCLFGrassEmissive)
+#		endif
+
+// The pixel stage's statics (DCLFGrassStatics, then the bucket's textures, samplers and alpha reference), first in its main.
+void DCLFGrassPixelStatics(uint a_bucket)
+{
+	DCLFGrassStatics(a_bucket);
+	const uint4 textures = DeviceLoad(uint4, DeviceRefAdd(DCLFGrassBucketRow, kDCLFGrassBucketTextures), 4);  // diffuse, samplers, alpha ref
+	DCLFGrassDiffuse = textures.x;
+#		if defined(RENDER_DEPTH)
+	DCLFGrassSampler = textures.y;
+#		else
+	DCLFGrassSampler = textures.z;
+#		endif
+	// [UNVERIFIED] the engine's grass alpha reference (b11): the bucket's, 0.5 until stage 0 logs it.
+	AlphaTestRefRS = asfloat(textures.w);
+	DCLFGrassShadowMask = DCLFGrassDrawUint(kDCLFGrassShadowMaskIndex);
+#		if defined(GRASS_LIGHTING) && defined(TRUE_PBR)
+	PBRFlags = DeviceLoad(uint, DeviceRefAdd(DCLFGrassBucketRow, kDCLFGrassBucketPbrFlags), 4);
+	const uint4 pbrTextures = DeviceLoad(uint4, DeviceRefAdd(DCLFGrassBucketRow, kDCLFGrassBucketPbrTextures), 4);
+	DCLFGrassNormal = pbrTextures.x;
+	DCLFGrassRmaos = pbrTextures.y;
+	DCLFGrassFeatures = pbrTextures.z;
+	DCLFGrassPbrSampler = pbrTextures.w;
+	PBRParams1 = asfloat(DeviceLoad(uint3, DeviceRefAdd(DCLFGrassBucketRow, kDCLFGrassBucketPbrParams1), 4));
+	PBRParams2 = asfloat(DeviceLoad(uint4, DeviceRefAdd(DCLFGrassBucketRow, kDCLFGrassBucketPbrParams2), 4));
+	PBRParams3 = asfloat(DeviceLoad(uint4, DeviceRefAdd(DCLFGrassBucketRow, kDCLFGrassBucketPbrParams3), 4));
+	PBRParams4 = asfloat(DeviceLoad(uint4, DeviceRefAdd(DCLFGrassBucketRow, kDCLFGrassBucketPbrParams4), 4));
+	const uint2 fuzzEmissive = DeviceLoad(uint2, DeviceRefAdd(DCLFGrassBucketRow, kDCLFGrassBucketFuzzEmissive), 4);
+	DCLFGrassFuzz = fuzzEmissive.x;
+	DCLFGrassEmissive = fuzzEmissive.y;
+#		endif
+}
+#	else
 SamplerState SampBaseSampler : register(s0);
 SamplerState SampShadowMaskSampler : register(s1);
 #	if defined(PHYSICAL_SKY)
@@ -411,8 +739,9 @@ cbuffer AlphaTestRefCB : register(b11)
 {
 	float AlphaTestRefRS : packoffset(c0);
 }
+#	endif  // DCLF_PULLED
 
-#	if defined(GRASS_OPTIMIZATIONS) && !defined(RENDER_DEPTH)
+#	if defined(GRASS_CULLED_INSTANCES) && !defined(RENDER_DEPTH)
 float GetLODBrightness(float tier)
 {
 	const float brightness = tier > 1.5 ? SharedData::grassLightingSettings.FarLODBrightness : SharedData::grassLightingSettings.MidLODBrightness;
@@ -463,6 +792,7 @@ float GetLODBrightness(float tier)
 #	include "Common/ShadowSampling.hlsli"
 #	ifdef GRASS_LIGHTING
 #		if defined(TRUE_PBR)
+#			if !defined(DCLF_PULLED)
 cbuffer PerMaterial : register(b1)
 {
 	uint PBRFlags : packoffset(c0.x);
@@ -472,6 +802,7 @@ cbuffer PerMaterial : register(b1)
 	float4 PBRParams4 : packoffset(c3);    // subsurface balance, front/back specular weights, back roughness scale
 	float4 PBRParams5 : packoffset(c4);    // fuzz roughness (negative uses base roughness), displacement scale
 };
+#			endif
 
 #		endif
 #		include "Common/LightingEval.hlsli"
@@ -485,6 +816,9 @@ cbuffer PerMaterial : register(b1)
 PS_OUTPUT main(PS_INPUT input, bool frontFace : SV_IsFrontFace)
 {
 	PS_OUTPUT psout = (PS_OUTPUT)0;
+#			if defined(DCLF_PULLED)
+	DCLFGrassPixelStatics(input.Bucket);
+#			endif
 #			if defined(RENDER_DEPTH)
 	float diffuseAlpha = input.Fade * TexBaseSampler.SampleBias(SampBaseSampler, input.TexCoord.xy, SharedData::MipBias).w;
 #			elif defined(DO_ALPHA_TEST)
@@ -522,7 +856,7 @@ PS_OUTPUT main(PS_INPUT input, bool frontFace : SV_IsFrontFace)
 	if (!sphereNormal && !frontFace)
 		vertexNormal = -vertexNormal;
 
-#				ifdef GRASS_OPTIMIZATIONS
+#				ifdef GRASS_CULLED_INSTANCES
 	const bool pbrDetail = input.IsFar <= 0.5;
 #				else
 	const bool pbrDetail = true;
@@ -530,7 +864,7 @@ PS_OUTPUT main(PS_INPUT input, bool frontFace : SV_IsFrontFace)
 	float2 uv = input.TexCoord.xy;
 	float3 normal = vertexNormal;
 	float4 rawRMAOS = float4(1, 0, 1, 0);
-#				ifdef GRASS_OPTIMIZATIONS
+#				ifdef GRASS_CULLED_INSTANCES
 	[branch] if (pbrDetail)
 #				else
 	if (pbrDetail)
@@ -575,7 +909,7 @@ PS_OUTPUT main(PS_INPUT input, bool frontFace : SV_IsFrontFace)
 	if (SharedData::grassLightingSettings.OverrideComplexGrassSettings)
 		baseColor.xyz *= SharedData::grassLightingSettings.BasicGrassBrightness;
 
-#				ifdef GRASS_OPTIMIZATIONS
+#				ifdef GRASS_CULLED_INSTANCES
 	baseColor.xyz *= GetLODBrightness(input.LodTier);
 #				endif
 
@@ -866,6 +1200,9 @@ PS_OUTPUT main(PS_INPUT input, bool frontFace : SV_IsFrontFace)
 PS_OUTPUT main(PS_INPUT input, bool frontFace : SV_IsFrontFace)
 {
 	PS_OUTPUT psout = (PS_OUTPUT)0;
+#			if defined(DCLF_PULLED)
+	DCLFGrassPixelStatics(input.Bucket);
+#			endif
 
 #			if defined(SKYLIGHTING_SHADOW_VIS)
 	float skylightingShadowVisibility = 1.0;
@@ -916,8 +1253,8 @@ PS_OUTPUT main(PS_INPUT input, bool frontFace : SV_IsFrontFace)
 	if (SharedData::lodBlendingSettings.DisableTerrainVertexColors)
 		input.Color.xyz = 1;
 
-#				ifdef GRASS_OPTIMIZATIONS
-	// Distant shading still needs the atlas's diffuse half.
+#				ifdef GRASS_CULLED_INSTANCES
+	// Keep the atlas selection above independent of the distant-detail cutoff.
 	const bool complexDetail = complex && input.IsFar <= 0.5;
 	float4 specColor = complexDetail ? TexBaseSampler.SampleBias(SampBaseSampler, float2(input.TexCoord.x, 0.5 + input.TexCoord.y * 0.5), SharedData::MipBias) : 1;
 #				else
@@ -944,7 +1281,7 @@ PS_OUTPUT main(PS_INPUT input, bool frontFace : SV_IsFrontFace)
 	float3 normal = vertexNormal;
 	float3x3 tbn = 0;
 
-#				ifdef GRASS_OPTIMIZATIONS
+#				ifdef GRASS_CULLED_INSTANCES
 	if (complexDetail)
 #				else
 	if (complex)
@@ -967,7 +1304,7 @@ PS_OUTPUT main(PS_INPUT input, bool frontFace : SV_IsFrontFace)
 	if (!complex || SharedData::grassLightingSettings.OverrideComplexGrassSettings)
 		baseColor.xyz *= SharedData::grassLightingSettings.BasicGrassBrightness;
 
-#				ifdef GRASS_OPTIMIZATIONS
+#				ifdef GRASS_CULLED_INSTANCES
 	baseColor.xyz *= GetLODBrightness(input.LodTier);
 #				endif
 
@@ -1042,7 +1379,7 @@ PS_OUTPUT main(PS_INPUT input, bool frontFace : SV_IsFrontFace)
 	float2 dirTransmissionShadow = dirShadow;
 
 #				if defined(SCREEN_SPACE_SHADOWS)
-#					ifdef GRASS_OPTIMIZATIONS
+#					ifdef GRASS_CULLED_INSTANCES
 	if (!SharedData::InInterior && input.IsFar <= 0.5)
 #					else
 	if (!SharedData::InInterior)
@@ -1090,7 +1427,7 @@ PS_OUTPUT main(PS_INPUT input, bool frontFace : SV_IsFrontFace)
 
 	float3 dirDiffuseColor = lightsDiffuseColor;
 	float3 dirSpecularColor = 0;
-#				ifdef GRASS_OPTIMIZATIONS
+#				ifdef GRASS_CULLED_INSTANCES
 	if (complexDetail)
 #				else
 	if (complex)
@@ -1150,7 +1487,7 @@ PS_OUTPUT main(PS_INPUT input, bool frontFace : SV_IsFrontFace)
 					NdotL, 0.0, 1.0, 1.0, lightDiffuseColor, lightTransmissionColor);
 				float3 lightSpecularColor = 0;
 
-#					ifdef GRASS_OPTIMIZATIONS
+#					ifdef GRASS_CULLED_INSTANCES
 				if (complexDetail)
 #					else
 				if (complex)
@@ -1266,6 +1603,9 @@ PS_OUTPUT main(PS_INPUT input, bool frontFace : SV_IsFrontFace)
 PS_OUTPUT main(PS_INPUT input)
 {
 	PS_OUTPUT psout;
+#		if defined(DCLF_PULLED)
+	DCLFGrassPixelStatics(input.Bucket);
+#		endif
 
 #		if defined(SKYLIGHTING_SHADOW_VIS)
 	float skylightingShadowVisibility = 1.0;
@@ -1294,7 +1634,7 @@ PS_OUTPUT main(PS_INPUT input)
 	float4 baseColor = TexBaseSampler.SampleBias(SampBaseSampler, input.TexCoord.xy, SharedData::MipBias);
 	baseColor.xyz = Color::Albedo(ColorManagement::DiffuseToWorking(baseColor.xyz));
 
-#			ifdef GRASS_OPTIMIZATIONS
+#			ifdef GRASS_CULLED_INSTANCES
 	baseColor.xyz *= GetLODBrightness(input.LodTier);
 #			endif
 
@@ -1321,7 +1661,7 @@ PS_OUTPUT main(PS_INPUT input)
 		dirDetailedShadow = shadowColor.x;
 
 #			if defined(SCREEN_SPACE_SHADOWS)
-#				ifdef GRASS_OPTIMIZATIONS
+#				ifdef GRASS_CULLED_INSTANCES
 	if (!SharedData::InInterior && input.IsFar <= 0.5)
 #				else
 	if (!SharedData::InInterior)
@@ -1376,7 +1716,7 @@ PS_OUTPUT main(PS_INPUT input)
 	}
 #			endif  // LIGHT_LIMIT_FIX
 
-#			ifdef GRASS_OPTIMIZATIONS
+#			ifdef GRASS_CULLED_INSTANCES
 	float3 ddx = ddx_coarse(viewPosition);
 	float3 ddy = ddy_coarse(viewPosition);
 #			else

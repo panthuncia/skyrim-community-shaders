@@ -112,6 +112,12 @@ public:
 	 */
 	void SetGroupCountsVCS(uint32_t& threadGroupCountX, uint32_t& threadGroupCountY) const;
 
+	/**
+	 * @brief The volume size SetupVL gives the engine for interiors or exteriors (the quality's preset, or the custom size), in
+	 * texels. The ORG path makes a volume for each at setup.
+	 */
+	TextureSize VolumeSize(bool a_interior) const;
+
 private:
 	struct VolumetricLightingDescriptor
 	{};

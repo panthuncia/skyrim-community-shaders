@@ -51,6 +51,7 @@ void Composite::ClearShaderCache()
 		}
 	}
 
+	globals::shaderCache->ReloadShaderSources();
 	CompileRasterShaders();
 }
 
@@ -89,6 +90,36 @@ void Composite::CompileRasterShaders(uint firstFlags, uint endFlags, Output outp
 
 	if (!shaderInfos.empty())
 		CompileRasterShadersAsync(L"Data\\Shaders\\PostProcessing\\Composite", {}, shaderInfos);
+}
+
+Composite::CompositeCB Composite::Constants(float2 a_outputSize, bool a_bloom, bool a_flare, bool a_physicalFlare, bool a_physicalLens) const
+{
+	CompositeCB cbData = {};
+	cbData.OutputSize[0] = a_outputSize.x;
+	cbData.OutputSize[1] = a_outputSize.y;
+	cbData.HasPhysicalFlare = a_physicalFlare ? 1.f : 0.f;
+	cbData.HasPhysicalLens = a_physicalLens ? 1.f : 0.f;
+	if (!owner)
+		return cbData;
+	if (a_bloom) {
+		const auto* bloom = owner->GetPipelineFeature<CODBloom>(PostProcessing::FeaturePipelineIndex::CODBloom);
+		if (!bloom)
+			return cbData;
+		cbData.BloomRadius = bloom->settings.UpsampleRadius;
+		cbData.BloomIntensity = bloom->settings.BlendFactor;
+	}
+	if (a_flare) {
+		const auto* flare = owner->GetPipelineFeature<LensFlare>(PostProcessing::FeaturePipelineIndex::LensFlare);
+		if (!flare)
+			return cbData;
+		if (flare->texGhostHalo) {
+			cbData.FlareSize[0] = (float)flare->texGhostHalo->desc.Width;
+			cbData.FlareSize[1] = (float)flare->texGhostHalo->desc.Height;
+		}
+		std::copy(flare->settings.Tint.begin(), flare->settings.Tint.end(), cbData.FlareTint);
+		cbData.FlareIntensity = flare->settings.Intensity;
+	}
+	return cbData;
 }
 
 void Composite::Draw(TextureInfo& inout_tex)
@@ -241,22 +272,7 @@ Composite::Output Composite::Draw(TextureInfo& inout_tex, ColorGrading* grading,
 	uint width = target->desc.Width;
 	uint height = target->desc.Height;
 
-	CompositeCB cbData = {};
-	cbData.OutputSize[0] = (float)width;
-	cbData.OutputSize[1] = (float)height;
-	if (hasBloom) {
-		cbData.BloomRadius = bloom->settings.UpsampleRadius;
-		cbData.BloomIntensity = bloom->settings.BlendFactor;
-	}
-	if (hasFlare) {
-		cbData.FlareSize[0] = (float)flare->texGhostHalo->desc.Width;
-		cbData.FlareSize[1] = (float)flare->texGhostHalo->desc.Height;
-		std::copy(flare->settings.Tint.begin(), flare->settings.Tint.end(), cbData.FlareTint);
-		cbData.FlareIntensity = flare->settings.Intensity;
-	}
-	cbData.HasPhysicalFlare = hasPhysicalFlare ? 1.f : 0.f;
-	cbData.HasPhysicalLens = hasPhysicalLens ? 1.f : 0.f;
-	compositeCB->Update(cbData);
+	compositeCB->Update(Constants({ (float)width, (float)height }, hasBloom, hasFlare, hasPhysicalFlare, hasPhysicalLens));
 	std::array<ID3D11SamplerState*, 2> samplers = {
 		hasLocalExposure ? localExposure->linearSampler.get() : (hasFlare ? flare->colorSampler.get() : ((hasPhysicalFlare || hasPhysicalLens || hasPhysicalWave) ? physicalLens->sampler.get() : nullptr)),
 		hasBloom ? bloom->colorSampler.get() : nullptr

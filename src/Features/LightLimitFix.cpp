@@ -1,15 +1,22 @@
 #include "LightLimitFix.h"
+
 #include "CSEditor/EditorWindow.h"
+#include "DrawcallLimitFix.h"
 #include "Effects11.h"
 #include "LightLimitFix/Common.h"
 #include "LightLimitFix/LightAttach.h"
+#include "LightLimitFix/ORGLightCulling.h"
+#include "LightLimitFix/ORGLocalShadows.h"
 #include "LinearLighting.h"
 #include "PhysicalSky.h"
 #include "Utils/ColorSpace.h"
+#include <bitset>
 
 #include "I18n/I18n.h"
 #include "Menu.h"
 #include "Menu/ThemeManager.h"
+#include "RenderGraph/Engine/Tripwire/Tripwire.h"
+#include "RenderGraph/Switches.h"
 #include "Shadercache.h"
 #include "State.h"
 #include "Utils/DebugSection.h"
@@ -17,6 +24,10 @@
 
 #include <bit>
 #include <numbers>
+
+#if defined(CS_HAS_DCLF)
+#	include "DrawcallLimitFix/Core/Settings/Switches.h"
+#endif
 
 #define I18N_KEY_PREFIX "feature.light_limit_fix."
 
@@ -47,15 +58,36 @@ static int FindOptionIndex(const std::array<uint32_t, N>& a_options, uint32_t a_
 	return index;
 }
 
+bool LightLimitFix::LocalShadowsBlockedByDCLF()
+{
+	if (!globals::features::drawcallLimitFix.loaded)
+		return false;
+#if defined(CS_HAS_DCLF)
+	// CS_DCLF=0: DCLF installs nothing, so the engine still selects and draws the shadow lights.
+	return DCLF::SwitchValue(DCLF::Switch::Dclf) != "0";
+#else
+	return true;
+#endif
+}
+
 void LightLimitFix::DrawLocalShadowSettings()
 {
 	ImGui::SeparatorText(T(TKEY("local_shadows"), "Local Light Shadows"));
 
+	const bool blockedByDCLF = LocalShadowsBlockedByDCLF();
+	ImGui::BeginDisabled(blockedByDCLF);
 	ImGui::Checkbox(T(TKEY("enable_local_shadows"), "(Experimental) Enable Local Light Shadows"), &settings.EnableLocalShadows);
+	ImGui::EndDisabled();
 	if (auto _tt = Util::HoverTooltipWrapper()) {
 		ImGui::Text("%s", T(TKEY("enable_local_shadows_tooltip"),
 							  "Keeps a cache of the shadow maps the game renders for shadow-casting lights and rotates which lights the game renders each frame.\n"
 							  "More than four lights can cast shadows at once at the same rendering cost as vanilla. Lights with characters inside their radius are refreshed every frame, nearest to the camera first."));
+	}
+
+	if (blockedByDCLF) {
+		ImGui::TextDisabled("%s", T(TKEY("local_shadows_dclf_unavailable"), "Unavailable while Drawcall Limit Fix is loaded: it draws the shadow maps for the lights it selects itself, which the cache's light rotation would not reach."));
+		ImGui::Spacing();
+		return;
 	}
 
 	if (settings.EnableLocalShadows && !localShadowHooksInstalled)
@@ -106,6 +138,41 @@ void LightLimitFix::DrawLightAttachSettings()
 	}
 }
 
+namespace
+{
+	bool OrgParityEnabled()
+	{
+		static const bool enabled = Switches::On("CS_ORG_LLF_PARITY");
+		return enabled;
+	}
+
+	// Blocking copy of a buffer's first a_bytes into CPU memory (debug use only).
+	std::vector<uint32_t> ReadBackBuffer(ID3D11Resource* a_resource, uint32_t a_bytes)
+	{
+		auto device = globals::d3d::device;
+		auto context = globals::d3d::context;
+
+		D3D11_BUFFER_DESC desc{};
+		desc.ByteWidth = a_bytes;
+		desc.Usage = D3D11_USAGE_STAGING;
+		desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+		winrt::com_ptr<ID3D11Buffer> staging;
+		if (FAILED(device->CreateBuffer(&desc, nullptr, staging.put())))
+			return {};
+
+		const D3D11_BOX box{ 0, 0, 0, a_bytes, 1, 1 };
+		context->CopySubresourceRegion(staging.get(), 0, 0, 0, 0, a_resource, 0, &box);
+
+		D3D11_MAPPED_SUBRESOURCE mapped{};
+		if (FAILED(context->Map(staging.get(), 0, D3D11_MAP_READ, 0, &mapped)))
+			return {};
+		std::vector<uint32_t> words(a_bytes / sizeof(uint32_t));
+		std::memcpy(words.data(), mapped.pData, a_bytes);
+		context->Unmap(staging.get(), 0);
+		return words;
+	}
+}
+
 void LightLimitFix::DrawSettings()
 {
 	ImGui::Checkbox(T(TKEY("enable_particle_lights"), "Enable Particle Lights"), &settings.EnableParticleLights);
@@ -134,7 +201,7 @@ void LightLimitFix::DrawDebugSection()
 							  std::make_format_args(localShadowStatTracked, localShadowStatCached, localShadowStatRendered))
 							  .c_str());
 	}
-	if (localShadowCache) {
+	if (localShadowCache || localShadowOnGraph) {
 		const uint64_t cacheMegabytes = (localShadowCacheSlots * GetLocalShadowSlotBytes(localShadowCacheResolution, localShadowCacheFormat)) >> 20;
 		ImGui::Text("%s", std::vformat(T(TKEY("shadow_cache_stats"), "Shadow Cache : {} x {}x{}, {} MB"),
 							  std::make_format_args(localShadowCacheSlots, localShadowCacheResolution, localShadowCacheResolution, cacheMegabytes))
@@ -219,7 +286,22 @@ void LightLimitFix::SetupResources()
 	clusterSize[0] = ((uint)screenSize.x + 63) / 64;
 	clusterSize[1] = ((uint)screenSize.y + 63) / 64;
 	clusterSize[2] = 32;
-	uint clusterCount = clusterSize[0] * clusterSize[1] * clusterSize[2];
+	legacyClusterCount = clusterSize[0] * clusterSize[1] * clusterSize[2];
+
+	// Culling runs on the render graph when DXVK's device could be adopted. The D3D11 set is the
+	// fallback for native D3D11 and for graph failures, so it is made only when one of those needs it.
+	if (!ORGLightCulling::Get().Setup(legacyClusterCount, MAX_LIGHTS, sizeof(LightData), CLUSTER_MAX_LIGHTS))
+		EnsureLegacyCulling();
+
+	strictLightDataCB = new ConstantBuffer(ConstantBufferDesc<StrictLightDataCB>(), "LLF::StrictLightDataCB");
+}
+
+void LightLimitFix::EnsureLegacyCulling()
+{
+	if (lights)
+		return;
+	const uint clusterCount = legacyClusterCount;
+	logger::info("[LLF] D3D11 light culling resources created ({} clusters)", clusterCount);
 
 	{
 		std::vector<std::pair<const char*, const char*>> clusterDefines;
@@ -303,10 +385,6 @@ void LightLimitFix::SetupResources()
 		srvDesc.Buffer.NumElements = MAX_LIGHTS;
 		lights->CreateSRV(srvDesc);
 	}
-
-	{
-		strictLightDataCB = new ConstantBuffer(ConstantBufferDesc<StrictLightDataCB>(), "LLF::StrictLightDataCB");
-	}
 }
 
 void LightLimitFix::SaveSettings(json& o_json)
@@ -352,14 +430,40 @@ void LightLimitFix::BSLightingShader_SetupGeometry_Before(RE::BSRenderPass* a_pa
 	strictLightDataTemp.ShadowBitMask = 0;
 	strictLightDataTemp.FirstPerson = localShadowFirstPersonPass ? 1u : 0u;
 
-	strictLightDataTemp.RoomIndex = -1;
-	if (!roomNodes.empty()) {
-		if (RE::NiNode* roomNode = GetParentRoomNode(a_pass->geometry)) {
-			if (auto it = roomNodes.find(roomNode); it != roomNodes.cend()) {
-				strictLightDataTemp.RoomIndex = it->second;
-			}
-		}
+	strictLightDataTemp.RoomIndex = GetRoomIndex(a_pass->geometry);
+}
+
+int LightLimitFix::GetRoomIndex(RE::NiAVObject* a_object) const
+{
+	return GetRoomIndexForRoom(GetRoomNode(a_object));
+}
+
+RE::NiNode* LightLimitFix::GetRoomNode(RE::NiAVObject* a_object) const
+{
+	return GetParentRoomNode(a_object);
+}
+
+int LightLimitFix::GetRoomIndexForRoom(const RE::NiNode* a_room) const
+{
+	if (a_room && !roomNodes.empty())
+		if (auto it = roomNodes.find(const_cast<RE::NiNode*>(a_room)); it != roomNodes.cend())
+			return it->second;
+	return -1;
+}
+
+uint LightLimitFix::GetShadowBitMask(const RE::BSRenderPass* a_pass)
+{
+	uint mask = 0;
+	for (uint32_t i = 0; i < a_pass->numShadowLights; i++) {
+		auto bsLight = a_pass->sceneLights[i + 1];
+		if (!bsLight)
+			continue;
+		auto* shadowLight = static_cast<RE::BSShadowLight*>(bsLight);
+		const auto maskIndex = GetShadowMaskIndex(shadowLight);
+		if (maskIndex < SHADOW_MASK_CHANNEL_COUNT)
+			mask |= (1u << maskIndex);
 	}
+	return mask;
 }
 
 void LightLimitFix::BSLightingShader_SetupGeometry_GeometrySetupConstantPointLights(RE::BSRenderPass* a_pass)
@@ -398,16 +502,7 @@ void LightLimitFix::BSLightingShader_SetupGeometry_GeometrySetupConstantPointLig
 		strictLightDataTemp.StrictLights[writeIdx++] = light;
 	}
 	strictLightDataTemp.NumStrictLights = writeIdx;
-
-	for (uint32_t i = 0; i < a_pass->numShadowLights; i++) {
-		auto bsLight = a_pass->sceneLights[i + 1];
-		if (!bsLight)
-			continue;
-		auto* shadowLight = static_cast<RE::BSShadowLight*>(bsLight);
-		const auto maskIndex = GetShadowMaskIndex(shadowLight);
-		if (maskIndex < SHADOW_MASK_CHANNEL_COUNT)
-			strictLightDataTemp.ShadowBitMask |= (1u << maskIndex);
-	}
+	strictLightDataTemp.ShadowBitMask |= GetShadowBitMask(a_pass);
 }
 
 void LightLimitFix::BSLightingShader_SetupGeometry_After(RE::BSRenderPass*)
@@ -473,13 +568,31 @@ void LightLimitFix::Prepass()
 	state->BeginPerfEvent("LightLimitFix Prepass");
 	UpdateLights();
 
-	ID3D11ShaderResourceView* views[3]{};
-	views[0] = lights->srv.get();
-	views[1] = lightIndexList->srv.get();
-	views[2] = lightGrid->srv.get();
+	ID3D11ShaderResourceView* views[3]{ GetLightsSRV(), GetLightIndexListSRV(), GetLightGridSRV() };
 	context->PSSetShaderResources(35, ARRAYSIZE(views), views);
 
 	state->EndPerfEvent();
+}
+
+ID3D11ShaderResourceView* LightLimitFix::GetLightsSRV() const
+{
+	if (orgCulledThisFrame)
+		return ORGLightCulling::Get().GetLightsSRV();
+	return lights ? lights->srv.get() : nullptr;
+}
+
+ID3D11ShaderResourceView* LightLimitFix::GetLightIndexListSRV() const
+{
+	if (orgCulledThisFrame)
+		return ORGLightCulling::Get().GetLightIndexListSRV();
+	return lightIndexList ? lightIndexList->srv.get() : nullptr;
+}
+
+ID3D11ShaderResourceView* LightLimitFix::GetLightGridSRV() const
+{
+	if (orgCulledThisFrame)
+		return ORGLightCulling::Get().GetLightGridSRV();
+	return lightGrid ? lightGrid->srv.get() : nullptr;
 }
 
 bool LightLimitFix::IsValidLight(RE::BSLight* a_light)
@@ -497,9 +610,13 @@ void LightLimitFix::PostPostLoad()
 	particleLightConfigs.Load();
 	Hooks::Install();
 	LightAttach::Install();
-	if (settings.EnableLocalShadows) {
+	if (settings.EnableLocalShadows && LocalShadowsBlockedByDCLF())
+		logger::info("[LLF] Local light shadows stay off: Drawcall Limit Fix is loaded");
+	else if (settings.EnableLocalShadows) {
 		Hooks::InstallLocalShadows();
 		localShadowHooksInstalled = true;
+		// CS_ORG_LIGHT_LIMIT_FIX_SHADOWS=1: the cache's copies run at the EarlyPrepass anchor, reserved before the graph starts.
+		ORGLocalShadows::Reserve();
 	}
 
 	stl::detour_thunk<CreatePointLight>(REL::RelocationID(17208, 17610));
@@ -631,6 +748,9 @@ void LightLimitFix::ClearShaderCache()
 		localShadowCopyCS = nullptr;
 	}
 	localShadowCopyCSCompiled = false;
+	// The D3D11 culling shaders exist only while the fallback set does.
+	if (!lights)
+		return;
 	std::vector<std::pair<const char*, const char*>> clusterDefines;
 	clusterBuildingCS = (ID3D11ComputeShader*)Util::CompileShader(L"Data\\Shaders\\LightLimitFix\\ClusterBuildingCS.hlsl", clusterDefines, "cs_5_0");
 	clusterCullingCS = (ID3D11ComputeShader*)Util::CompileShader(L"Data\\Shaders\\LightLimitFix\\ClusterCullingCS.hlsl", clusterDefines, "cs_5_0");
@@ -657,20 +777,22 @@ void LightLimitFix::UpdateLights()
 
 	// Process point lights
 
-	roomNodes.clear();
+	nextRoomNodes.clear();
 
-	auto addRoom = [&](RE::NiNode* node, LightData& light) {
-		uint8_t roomIndex = 0;
-		if (auto it = roomNodes.find(node); it == roomNodes.cend()) {
-			roomIndex = static_cast<uint8_t>(roomNodes.size());
-			roomNodes.insert_or_assign(node, roomIndex);
-		} else {
-			roomIndex = it->second;
-		}
-		light.roomFlags.SetBit(roomIndex, 1);
+	// The rooms each kept light reaches, by its index in lightsData. Their bits are set once every room has its number (below).
+	static eastl::vector<std::pair<uint32_t, RE::NiNode*>> lightRooms;
+	static eastl::vector<RE::NiNode*> currentLightRooms;
+	lightRooms.clear();
+
+	auto addRoom = [&](RE::NiNode* node) {
+		if (!node)
+			return;
+		nextRoomNodes.insert(eastl::make_pair(node, kNoRoomNumber));
+		currentLightRooms.push_back(node);
 	};
 
 	auto addLight = [&](const RE::NiPointer<RE::BSLight>& e) {
+		currentLightRooms.clear();
 		if (auto bsLight = e.get()) {
 			if (auto niLight = bsLight->light.get()) {
 				if (IsValidLight(bsLight)) {
@@ -692,11 +814,11 @@ void LightLimitFix::UpdateLights()
 					if (!IsGlobalLight(bsLight)) {
 						// List of BSMultiBoundRooms affected by a light
 						for (const auto& roomPtr : bsLight->rooms) {
-							addRoom(roomPtr, light);
+							addRoom(roomPtr);
 						}
 						// List of BSPortals affected by a light
 						for (const auto& portalPtr : bsLight->portals) {
-							addRoom(portalPtr->portalSharedNode.get(), light);
+							addRoom(portalPtr->portalSharedNode.get());
 						}
 						light.lightFlags.set(LightFlags::PortalStrict);
 					}
@@ -724,6 +846,8 @@ void LightLimitFix::UpdateLights()
 					SetLightPosition(light, niLight->world.translate);
 
 					if ((light.color.x + light.color.y + light.color.z) * light.fade > 1e-4 && light.radius > 1e-4) {
+						for (auto* room : currentLightRooms)
+							lightRooms.push_back({ static_cast<uint32_t>(lightsData.size()), room });
 						lightsData.push_back(light);
 					}
 				}
@@ -736,6 +860,49 @@ void LightLimitFix::UpdateLights()
 	}
 	for (auto& e : shadowSceneNode->GetRuntimeData().activeShadowLights) {
 		addLight(e);
+	}
+	// A room keeps its number while any light reaches it. DCLF's objects carry the number from its copy of this map, which reaches
+	// their draws a few frames late: a renumbered room would gate them as another room until then. A newly reached room takes the
+	// lowest free number. The shader's room flags hold 128 rooms: a room past them has no number, and its objects are not gated (-1).
+	{
+		std::bitset<kRoomNumbers> taken;
+		for (auto& [node, number] : nextRoomNodes)
+			if (const auto kept = roomNodes.find(node); kept != roomNodes.end() && kept->second < kRoomNumbers) {
+				number = kept->second;
+				taken.set(number);
+			}
+		std::size_t free = 0;
+		for (auto& [node, number] : nextRoomNodes) {
+			if (number != kNoRoomNumber)
+				continue;
+			while (free < kRoomNumbers && taken.test(free))
+				++free;
+			if (free == kRoomNumbers)
+				break;
+			number = static_cast<uint8_t>(free);
+			taken.set(free);
+		}
+		for (auto it = nextRoomNodes.begin(); it != nextRoomNodes.end();) {
+			if (it->second == kNoRoomNumber)
+				it = nextRoomNodes.erase(it);
+			else
+				++it;
+		}
+		for (const auto& [light, room] : lightRooms)
+			if (const auto it = nextRoomNodes.find(room); it != nextRoomNodes.end())
+				lightsData[light].roomFlags.SetBit(it->second, 1);
+	}
+	// The mapping often stands across thousands of frames. Only an actual mapping change invalidates DCLF's identity-to-index bindings.
+	bool roomMapChanged = nextRoomNodes.size() != roomNodes.size();
+	if (!roomMapChanged)
+		for (const auto& [node, index] : nextRoomNodes)
+			if (const auto it = roomNodes.find(node); it == roomNodes.end() || it->second != index) {
+				roomMapChanged = true;
+				break;
+			}
+	if (roomMapChanged) {
+		roomNodes.swap(nextRoomNodes);
+		++roomMapGeneration;
 	}
 
 	AddParticleLightsToBuffer(lightsData);
@@ -763,10 +930,18 @@ void LightLimitFix::UpdateLights()
 		}
 	}
 
-	auto context = globals::d3d::context;
-
 	lightCount = std::min((uint)lightsData.size(), MAX_LIGHTS);
 
+	UpdateClusterParameters();
+	// On the graph, the culling epoch also moves the lights into the buffer pixel shaders read (t35).
+	orgCulledThisFrame = CullOnRenderGraph(lightsData);
+	// The D3D11 buffers are not bound while the graph culls, so filling them for the parity check is free of side effects.
+	const bool parityCheck = orgCulledThisFrame && OrgParityEnabled() && (orgParityFrame++ % 300) == 0;
+	if (orgCulledThisFrame && !parityCheck)
+		return;
+
+	EnsureLegacyCulling();
+	auto context = globals::d3d::context;
 	D3D11_MAPPED_SUBRESOURCE mapped;
 	DX::ThrowIfFailed(context->Map(lights->resource.get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped));
 	size_t bytes = sizeof(LightData) * lightCount;
@@ -774,12 +949,73 @@ void LightLimitFix::UpdateLights()
 	context->Unmap(lights->resource.get(), 0);
 
 	UpdateStructure();
+	if (parityCheck)
+		CompareRenderGraphCulling();
 }
 
-void LightLimitFix::UpdateStructure()
+void LightLimitFix::CompareRenderGraphCulling()
 {
-	auto context = globals::d3d::context;
+	auto& orgCulling = ORGLightCulling::Get();
+	auto* orgGridSRV = orgCulling.GetLightGridSRV();
+	auto* orgListSRV = orgCulling.GetLightIndexListSRV();
+	if (!orgGridSRV || !orgListSRV)
+		return;
 
+	winrt::com_ptr<ID3D11Resource> orgGrid;
+	winrt::com_ptr<ID3D11Resource> orgList;
+	orgGridSRV->GetResource(orgGrid.put());
+	orgListSRV->GetResource(orgList.put());
+
+	const uint32_t clusterTotal = clusterSize[0] * clusterSize[1] * clusterSize[2];
+	const uint32_t gridBytes = clusterTotal * static_cast<uint32_t>(sizeof(LightGrid));
+	const uint32_t listBytes = clusterTotal * CLUSTER_MAX_LIGHTS * static_cast<uint32_t>(sizeof(uint32_t));
+
+	const auto d3dGridData = ReadBackBuffer(lightGrid->resource.get(), gridBytes);
+	const auto d3dListData = ReadBackBuffer(lightIndexList->resource.get(), listBytes);
+	const auto orgGridData = ReadBackBuffer(orgGrid.get(), gridBytes);
+	const auto orgListData = ReadBackBuffer(orgList.get(), listBytes);
+	if (d3dGridData.empty() || d3dListData.empty() || orgGridData.empty() || orgListData.empty()) {
+		logger::warn("[ORG] LLF parity: readback failed");
+		return;
+	}
+
+	constexpr uint32_t kGridWords = sizeof(LightGrid) / sizeof(uint32_t);
+	auto lightSet = [&](const std::vector<uint32_t>& a_grid, const std::vector<uint32_t>& a_list, uint32_t a_cluster) {
+		const uint32_t offset = a_grid[a_cluster * kGridWords + 0];
+		const uint32_t count = a_grid[a_cluster * kGridWords + 1];
+		std::vector<uint32_t> set;
+		for (uint32_t i = 0; i < count && offset + i < a_list.size(); ++i)
+			set.push_back(a_list[offset + i]);
+		std::sort(set.begin(), set.end());
+		return set;
+	};
+
+	uint32_t mismatched = 0;
+	uint64_t references = 0;
+	uint32_t firstMismatch = UINT32_MAX;
+	for (uint32_t cluster = 0; cluster < clusterTotal; ++cluster) {
+		const auto d3dSet = lightSet(d3dGridData, d3dListData, cluster);
+		const auto orgSet = lightSet(orgGridData, orgListData, cluster);
+		references += d3dSet.size();
+		if (d3dSet != orgSet) {
+			if (firstMismatch == UINT32_MAX)
+				firstMismatch = cluster;
+			++mismatched;
+		}
+	}
+
+	if (mismatched == 0) {
+		logger::info("[ORG] LLF parity OK: {} clusters, {} lights, {} light references match", clusterTotal, lightCount, references);
+	} else {
+		const auto d3dSet = lightSet(d3dGridData, d3dListData, firstMismatch);
+		const auto orgSet = lightSet(orgGridData, orgListData, firstMismatch);
+		logger::warn("[ORG] LLF parity MISMATCH: {}/{} clusters differ ({} lights); first cluster {}: D3D11 {} lights, graph {} lights",
+			mismatched, clusterTotal, lightCount, firstMismatch, d3dSet.size(), orgSet.size());
+	}
+}
+
+void LightLimitFix::UpdateClusterParameters()
+{
 	lightsNear = *globals::game::cameraNear;
 	lightsFar = *globals::game::cameraFar;
 
@@ -787,6 +1023,32 @@ void LightLimitFix::UpdateStructure()
 	clusterSize[0] = ((uint)renderSize.x + 63) / 64;
 	clusterSize[1] = ((uint)renderSize.y + 63) / 64;
 	clusterSize[2] = 32;
+}
+
+bool LightLimitFix::CullOnRenderGraph(const eastl::vector<LightData>& a_lightsData)
+{
+	auto& orgCulling = ORGLightCulling::Get();
+	if (!orgCulling.IsActive())
+		return false;
+
+	ORGLightCulling::FrameInputs inputs{};
+	inputs.lights = a_lightsData.data();
+	inputs.lightCount = lightCount;
+	std::copy(clusterSize, clusterSize + 3, inputs.clusterSize);
+	inputs.lightsNear = lightsNear;
+	inputs.lightsFar = lightsFar;
+	// The same matrices the D3D11 shaders read from the FrameBuffer cbuffer (row-major).
+	std::memcpy(inputs.cameraProjInverse.data(), &globals::game::frameBufferCached.GetCameraProjInverse(), sizeof(float) * 16);
+	std::memcpy(inputs.cameraView.data(), &globals::game::frameBufferCached.GetCameraView(), sizeof(float) * 16);
+
+	// No D3D11 timer here: the epoch is submitted between two DXVK command lists, so one would also count the
+	// queue's idle time. Its passes report their own GPU time (RenderGraphRuntime::ProfilerName).
+	return orgCulling.Execute(inputs);
+}
+
+void LightLimitFix::UpdateStructure()
+{
+	auto context = globals::d3d::context;
 
 	{
 		LightBuildingCB updateData{};
@@ -1564,12 +1826,14 @@ bool LightLimitFix::FilterLocalShadowCaster(RE::BSShadowLight* a_light, const RE
 
 void LightLimitFix::ReleaseLocalShadowResources()
 {
-	if (localShadowCache || localShadowBuffer) {
+	if (localShadowCache || localShadowBuffer || localShadowOnGraph) {
 		ID3D11ShaderResourceView* nullViews[2] = {};
 		globals::d3d::context->PSSetShaderResources(102, ARRAYSIZE(nullViews), nullViews);
 	}
 	localShadowCache = nullptr;
 	localShadowBuffer = nullptr;
+	ORGLocalShadows::Get().Release();
+	localShadowOnGraph = false;
 	localShadowCacheSlots = 0;
 	localShadowRequestedSlots = 0;
 	localShadowCacheResolution = 0;
@@ -1604,27 +1868,57 @@ void LightLimitFix::EnsureLocalShadowResources(ID3D11Texture2D* a_engineShadowMa
 			cacheFormat = DXGI_FORMAT_R16_UNORM;
 	}
 
+	// The render graph lost the cache it held: D3D11 keeps it from here on.
+	const bool graphLost = localShadowOnGraph && !ORGLocalShadows::Get().IsActive();
+	if (graphLost)
+		localShadowGraphFailed = true;
+	// CS_ORG_LIGHT_LIMIT_FIX_SHADOWS=1: LocalShadowCopyCS on the render graph does every copy, into a 32-bit float cache (its
+	// storage image's format).
+	const bool onGraph = ORGLocalShadows::Requested() && !localShadowGraphFailed && engineDesc.ArraySize > 1;
+	if (onGraph)
+		cacheFormat = DXGI_FORMAT_R32_FLOAT;
+
 	// A typed depth format (D16_UNORM, D32_FLOAT) cannot be copied into a color format, only its typeless parent can.
-	localShadowDirectCopy = cacheResolution == engineResolution && engineDesc.Height == engineDesc.Width &&
+	localShadowDirectCopy = !onGraph && cacheResolution == engineResolution && engineDesc.Height == engineDesc.Width &&
 	                        (engineDesc.Format == cacheFormat || engineDesc.Format == GetTypelessCacheFormat(cacheFormat));
 	localShadowEngineMipLevels = std::max(engineDesc.MipLevels, 1u);
 	localShadowEngineSlices = engineDesc.ArraySize;
 
 	// Without LocalShadowCopyCS a downsampled cache can never be filled, so don't hold its memory
-	if (!localShadowDirectCopy && !EnsureLocalShadowCopyShader()) {
+	if (!onGraph && !localShadowDirectCopy && !EnsureLocalShadowCopyShader()) {
 		if (localShadowCache)
 			ReleaseLocalShadowResources();
 		return;
 	}
 
 	const uint32_t renderFrame = globals::state->frameCount;
-	const bool retryDue = !localShadowCache && renderFrame - localShadowAllocFailedFrame >= LOCAL_SHADOW_ALLOC_RETRY_FRAMES;
-	if (!retryDue && requestedSlots == localShadowRequestedSlots && cacheResolution == localShadowCacheResolution && engineResolution == localShadowEngineResolution && cacheFormat == localShadowCacheFormat)
+	const bool retryDue = !localShadowCache && !localShadowOnGraph && renderFrame - localShadowAllocFailedFrame >= LOCAL_SHADOW_ALLOC_RETRY_FRAMES;
+	if (!graphLost && !retryDue && requestedSlots == localShadowRequestedSlots && cacheResolution == localShadowCacheResolution && engineResolution == localShadowEngineResolution && cacheFormat == localShadowCacheFormat)
 		return;
 
 	ReleaseLocalShadowResources();
 
 	uint32_t slots = requestedSlots;
+
+	if (onGraph) {
+		const ORGLocalShadows::Desc graphDesc{ slots, cacheResolution, cacheFormat, engineResolution / cacheResolution, static_cast<uint32_t>(sizeof(LocalShadowData)) };
+		// The runtime stopping later shows at the next call as a lost cache (graphLost), which moves the cache to D3D11.
+		if (!ORGLocalShadows::Get().Setup(graphDesc)) {
+			localShadowGraphFailed = true;
+			EnsureLocalShadowResources(a_engineShadowMaps);
+			return;
+		}
+		localShadowOnGraph = true;
+		localShadowRequestedSlots = requestedSlots;
+		localShadowCacheResolution = cacheResolution;
+		localShadowEngineResolution = engineResolution;
+		localShadowCacheFormat = cacheFormat;
+		localShadowSliceOwner.assign(slots, nullptr);
+		localShadowCacheSlots = slots;
+		logger::info("[LLF] Local shadow cache: {} slots at {}x{} (R32_FLOAT), engine shadow maps {}x{} (format {}, {} slices), render graph copy", slots, cacheResolution,
+			cacheResolution, engineResolution, engineResolution, static_cast<uint32_t>(engineDesc.Format), engineDesc.ArraySize);
+		return;
+	}
 
 	D3D11_TEXTURE2D_DESC texDesc{};
 	texDesc.Width = cacheResolution;
@@ -1658,7 +1952,7 @@ void LightLimitFix::EnsureLocalShadowResources(ID3D11Texture2D* a_engineShadowMa
 		return;
 	}
 
-	localShadowCache = eastl::make_unique<Texture2D>(cacheTexture, "LightLimitFix::LocalShadowCache");
+	localShadowCache = eastl::make_unique<Texture2D>(cacheTexture, ORGLocalShadows::kCacheId.data());
 
 	D3D11_SHADER_RESOURCE_VIEW_DESC srvDesc{};
 	srvDesc.Format = cacheFormat;
@@ -1691,7 +1985,7 @@ void LightLimitFix::EnsureLocalShadowResources(ID3D11Texture2D* a_engineShadowMa
 	bufferSrvDesc.Buffer.FirstElement = 0;
 	bufferSrvDesc.Buffer.NumElements = slots;
 
-	localShadowBuffer = eastl::make_unique<Buffer>(bufferDesc, nullptr, "LightLimitFix::LocalShadowData");
+	localShadowBuffer = eastl::make_unique<Buffer>(bufferDesc, nullptr, ORGLocalShadows::kDataId.data());
 	localShadowBuffer->CreateSRV(bufferSrvDesc);
 
 	localShadowSliceOwner.assign(slots, nullptr);
@@ -1783,19 +2077,17 @@ void LightLimitFix::CopyLocalShadowMaps()
 		return;
 
 	EnsureLocalShadowResources(depthStencil.texture);
-	if (!localShadowCache || !localShadowBuffer || (!localShadowDirectCopy && (!localShadowCopyCS || !localShadowCopyCB)))
+	auto& graphShadows = ORGLocalShadows::Get();
+	if (localShadowOnGraph ? !graphShadows.IsActive() : (!localShadowCache || !localShadowBuffer || (!localShadowDirectCopy && (!localShadowCopyCS || !localShadowCopyCB))))
 		return;
+	localShadowFrameCopies.clear();
 
-	auto context = globals::d3d::context;
 	const uint32_t frame = localShadowFrame;
 	auto& runtimeData = shadowSceneNode->GetRuntimeData();
 	auto* sunLight = static_cast<RE::BSShadowLight*>(runtimeData.sunShadowDirLight);
 	const uint32_t scale = std::max(localShadowEngineResolution / localShadowCacheResolution, 1u);
 	assert(std::has_single_bit(scale));
-	const uint32_t threadsPerTexel = std::min(scale, LOCAL_SHADOW_COPY_GROUP_SIZE);
-	const uint32_t groups = (localShadowCacheResolution * threadsPerTexel + LOCAL_SHADOW_COPY_GROUP_SIZE - 1) / LOCAL_SHADOW_COPY_GROUP_SIZE;
 
-	bool computeBound = false;
 	static Util::OnceFlag loggedMapping;
 
 	const uint32_t engineSliceCount = std::min(ENGINE_SHADOW_MAP_SLICES, localShadowEngineSlices);
@@ -1859,27 +2151,7 @@ void LightLimitFix::CopyLocalShadowMaps()
 				continue;
 			}
 		}
-		globals::profiler->BeginPass("LightLimitFix::LocalShadowCopy");
-		if (localShadowDirectCopy) {
-			context->CopySubresourceRegion(localShadowCache->resource.get(), D3D11CalcSubresource(0, static_cast<UINT>(caster->slice), 1), 0, 0, 0,
-				depthStencil.texture, D3D11CalcSubresource(0, engineSlice, localShadowEngineMipLevels), nullptr);
-		} else {
-			if (!computeBound) {
-				ID3D11ShaderResourceView* srv = depthStencil.depthSRV;
-				ID3D11UnorderedAccessView* uav = localShadowCache->uav.get();
-				ID3D11Buffer* buffer = localShadowCopyCB->CB();
-				context->CSSetShaderResources(0, 1, &srv);
-				context->CSSetUnorderedAccessViews(0, 1, &uav, nullptr);
-				context->CSSetConstantBuffers(0, 1, &buffer);
-				context->CSSetShader(localShadowCopyCS, nullptr, 0);
-				computeBound = true;
-			}
-
-			LocalShadowCopyCB copyData{ engineSlice, static_cast<uint32_t>(caster->slice), scale, localShadowCacheResolution };
-			localShadowCopyCB->Update(copyData);
-			context->Dispatch(groups, groups, 1);
-		}
-		globals::profiler->EndPass();
+		localShadowFrameCopies.push_back({ engineSlice, static_cast<uint32_t>(caster->slice) });
 
 		DirectX::XMMATRIX projection = DirectX::XMLoadFloat4x4(&info.lightTransform);
 		DirectX::XMStoreFloat4x4(&caster->shadowProj, projection);
@@ -1918,22 +2190,10 @@ void LightLimitFix::CopyLocalShadowMaps()
 		}
 	}
 
-	if (computeBound) {
-		ID3D11ShaderResourceView* nullSrv = nullptr;
-		ID3D11UnorderedAccessView* nullUav = nullptr;
-		ID3D11Buffer* nullBuffer = nullptr;
-		context->CSSetShaderResources(0, 1, &nullSrv);
-		context->CSSetUnorderedAccessViews(0, 1, &nullUav, nullptr);
-		context->CSSetConstantBuffers(0, 1, &nullBuffer);
-		context->CSSetShader(nullptr, nullptr, 0);
-	}
-
 	const auto& eye = globals::game::frameBufferCached.GetCameraPosAdjust();
 	const float frameTime = globals::game::deltaTime ? std::clamp(*globals::game::deltaTime, 0.0f, LOCAL_SHADOW_MAX_FRAME_TIME) : 0.0f;
-	// Unwritten slots are left undefined by WRITE_DISCARD; no light flagged LocalShadow points at them.
-	D3D11_MAPPED_SUBRESOURCE mapped{};
-	DX::ThrowIfFailed(context->Map(localShadowBuffer->resource.get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped));
-	auto* upload = static_cast<LocalShadowData*>(mapped.pData);
+	// Unwritten slots are zero; no light flagged LocalShadow points at them.
+	localShadowFrameData.assign(localShadowCacheSlots, LocalShadowData{});
 	for (auto& caster : localShadowCasters) {
 		if (caster.slice < 0 || caster.lastRenderedFrame == 0 || static_cast<uint32_t>(caster.slice) >= localShadowCacheSlots)
 			continue;
@@ -1950,18 +2210,90 @@ void LightLimitFix::CopyLocalShadowMaps()
 			data.Params2.y = std::min((expectedInterval - 1.0f) * (caster.actorSpeed + LOCAL_SHADOW_ANIMATION_SPEED * frameTime), LOCAL_SHADOW_MAX_SLACK);
 		}
 		data.Origin = { eye.x, eye.y, eye.z, 0.0f };
-		upload[caster.slice] = data;
+		localShadowFrameData[caster.slice] = data;
 		localShadowStatCached++;
 	}
+
+	// The frame's description goes to the path that holds the cache.
+	if (!localShadowOnGraph) {
+		// Engine target fields can be tripwire handles: the D3D11 copy goes through DXVK, which takes the wrapped objects.
+		CommitLocalShadowFrameD3D11(RenderGraph::Engine::Tripwire::Unwrap(depthStencil.texture), RenderGraph::Engine::Tripwire::Unwrap(depthStencil.depthSRV));
+		return;
+	}
+	std::array<ORGLocalShadows::Copy, ORGLocalShadows::kMaxCopies> copies{};
+	const size_t copyCount = std::min(localShadowFrameCopies.size(), copies.size());
+	for (size_t i = 0; i < copyCount; ++i)
+		copies[i] = { localShadowFrameCopies[i].sourceSlice, localShadowFrameCopies[i].targetSlot };
+	graphShadows.SetFrame({ copies.data(), copyCount }, std::as_bytes(std::span(localShadowFrameData.data(), localShadowFrameData.size())));
+}
+
+void LightLimitFix::CommitLocalShadowFrameD3D11(ID3D11Texture2D* a_engineShadowMaps, ID3D11ShaderResourceView* a_engineShadowMapsSRV)
+{
+	auto context = globals::d3d::context;
+	const bool profileCopies = !localShadowFrameCopies.empty();
+	if (profileCopies)
+		globals::profiler->BeginPass("LightLimitFix::LocalShadowCopy");
+	if (localShadowDirectCopy) {
+		for (const auto& copy : localShadowFrameCopies)
+			context->CopySubresourceRegion(localShadowCache->resource.get(), D3D11CalcSubresource(0, copy.targetSlot, 1), 0, 0, 0,
+				a_engineShadowMaps, D3D11CalcSubresource(0, copy.sourceSlice, localShadowEngineMipLevels), nullptr);
+	} else if (!localShadowFrameCopies.empty()) {
+		const uint32_t scale = std::max(localShadowEngineResolution / localShadowCacheResolution, 1u);
+		const uint32_t threadsPerTexel = std::min(scale, LOCAL_SHADOW_COPY_GROUP_SIZE);
+		const uint32_t groups = (localShadowCacheResolution * threadsPerTexel + LOCAL_SHADOW_COPY_GROUP_SIZE - 1) / LOCAL_SHADOW_COPY_GROUP_SIZE;
+
+		ID3D11ShaderResourceView* srv = a_engineShadowMapsSRV;
+		ID3D11UnorderedAccessView* uav = localShadowCache->uav.get();
+		ID3D11Buffer* buffer = localShadowCopyCB->CB();
+		context->CSSetShaderResources(0, 1, &srv);
+		context->CSSetUnorderedAccessViews(0, 1, &uav, nullptr);
+		context->CSSetConstantBuffers(0, 1, &buffer);
+		context->CSSetShader(localShadowCopyCS, nullptr, 0);
+
+		for (const auto& copy : localShadowFrameCopies) {
+			LocalShadowCopyCB copyData{ copy.sourceSlice, copy.targetSlot, scale, localShadowCacheResolution };
+			localShadowCopyCB->Update(copyData);
+			context->Dispatch(groups, groups, 1);
+		}
+
+		ID3D11ShaderResourceView* nullSrv = nullptr;
+		ID3D11UnorderedAccessView* nullUav = nullptr;
+		ID3D11Buffer* nullBuffer = nullptr;
+		context->CSSetShaderResources(0, 1, &nullSrv);
+		context->CSSetUnorderedAccessViews(0, 1, &nullUav, nullptr);
+		context->CSSetConstantBuffers(0, 1, &nullBuffer);
+		context->CSSetShader(nullptr, nullptr, 0);
+	}
+	if (profileCopies)
+		globals::profiler->EndPass();
+
+	D3D11_MAPPED_SUBRESOURCE mapped{};
+	DX::ThrowIfFailed(context->Map(localShadowBuffer->resource.get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped));
+	std::memcpy(mapped.pData, localShadowFrameData.data(), localShadowFrameData.size() * sizeof(LocalShadowData));
 	context->Unmap(localShadowBuffer->resource.get(), 0);
 }
 
+
 void LightLimitFix::BindLocalShadowResources()
 {
-	if (!localShadowCache || !localShadowBuffer)
+	ID3D11ShaderResourceView* views[2] = { GetLocalShadowDataSRV(), GetLocalShadowCacheSRV() };
+	if (!views[0] || !views[1])
 		return;
-	ID3D11ShaderResourceView* views[2] = { localShadowBuffer->srv.get(), localShadowCache->srv.get() };
 	globals::d3d::context->PSSetShaderResources(102, ARRAYSIZE(views), views);
+}
+
+ID3D11ShaderResourceView* LightLimitFix::GetLocalShadowDataSRV() const
+{
+	if (localShadowOnGraph)
+		return ORGLocalShadows::Get().GetDataSRV();
+	return localShadowBuffer ? localShadowBuffer->srv.get() : nullptr;
+}
+
+ID3D11ShaderResourceView* LightLimitFix::GetLocalShadowCacheSRV() const
+{
+	if (localShadowOnGraph)
+		return ORGLocalShadows::Get().GetCacheSRV();
+	return localShadowCache ? localShadowCache->srv.get() : nullptr;
 }
 
 bool LightLimitFix::EnsureLocalShadowCopyShader()
@@ -1979,7 +2311,7 @@ bool LightLimitFix::EnsureLocalShadowCopyShader()
 void LightLimitFix::EarlyPrepass()
 {
 	if (!IsLocalShadowsEnabled()) {
-		if (localShadowCache)
+		if (localShadowCache || localShadowOnGraph)
 			ReleaseLocalShadowResources();
 		return;
 	}

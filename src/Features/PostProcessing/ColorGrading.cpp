@@ -953,6 +953,9 @@ void ColorGrading::ReleaseActiveShaders()
 void ColorGrading::ClearShaderCache()
 {
 	ReleaseActiveShaders();
+	// Explicit "Recompile Shaders" / force path: wipe ColorGrading disk variants so
+	// source edits and define changes are rebuilt from scratch.
+	globals::shaderCache->ReloadShaderSources();
 	CompileShaders();
 }
 
@@ -966,9 +969,8 @@ void ColorGrading::ReloadActiveShaders()
 
 void ColorGrading::CompileShaders()
 {
-	const auto& tonemappers = TonemapperInfo::GetTonemappers();
-
-	auto tonemapFuncName = settings.useOpenDrt ? "OpenDRTTransform" : tonemappers[tonemapperType].func_name.data();
+	// The function names are literals, so data() is null-terminated.
+	auto tonemapFuncName = TonemapFunctionName().data();
 
 	const std::vector<ComputeShaderCompileInfo> shaderInfos = {
 		{ &lutgenCS, "colorgrading.hlsl", { { "TONEMAP_FUNC", tonemapFuncName } }, "CSLUTGen" },
@@ -998,9 +1000,8 @@ bool ColorGrading::PrepareDraw()
 	return owner && AllShadersReady({ &colorgradingVS }) && AllShadersReady({ &colorgradingPS }) && AllShadersReady({ &lutgenCS });
 }
 
-void ColorGrading::UpdateConstantsAndLUT()
+ColorGrading::ColorCB ColorGrading::BuildConstants()
 {
-	auto context = globals::d3d::context;
 	auto& pp = globals::features::postProcessing;
 
 	RE::ImageSpaceData imageSpaceData = pp.imageSpaceManager->gameISData;
@@ -1023,7 +1024,7 @@ void ColorGrading::UpdateConstantsAndLUT()
 		storeMatrix(getWhiteAdaptedRGBMatrix("XYZ", spaces[wsIdx]), xyzToWorkingMatrix);
 	}
 
-	ColorCB colorCBData = {
+	return {
 		.asccdl = { settings.slope, settings.power, settings.cdlOffset },
 		.liftgammagain = { settings.lift, settings.gamma, settings.gain },
 		.inOutGamma = settings.inOutGamma,
@@ -1067,6 +1068,18 @@ void ColorGrading::UpdateConstantsAndLUT()
 		}(),
 		.odrtConfig = settings.odrtConfig,
 	};
+}
+
+std::string_view ColorGrading::TonemapFunctionName() const
+{
+	const auto& tonemappers = TonemapperInfo::GetTonemappers();
+	return settings.useOpenDrt ? "OpenDRTTransform"sv : tonemappers[tonemapperType].func_name;
+}
+
+void ColorGrading::UpdateConstantsAndLUT()
+{
+	auto context = globals::d3d::context;
+	const ColorCB colorCBData = BuildConstants();
 	colorCB->Update(colorCBData);
 
 	// Check if curve needs update (CB changed = settings changed)

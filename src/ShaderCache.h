@@ -280,6 +280,7 @@ namespace SIE
 		 *  to share the same dispatchedTasksInFlight budget as the main permutation matrix,
 		 *  instead of being submitted to compilationPool independently of it. Wakes TryTakeNext(). */
 		void EnqueueAux(std::function<void()> work);
+		void NotifyPoolProgress() { conditionVariable.notify_one(); }
 		/** @brief Resets all task queues and counters for a fresh compilation pass. */
 		void Clear();
 		/** @brief Formats a millisecond duration into a human-readable time string. */
@@ -294,8 +295,6 @@ namespace SIE
 		std::atomic<uint32_t> dispatchedTasksInFlight = 0;  // Admission budget enforced by TryTakeNext()
 		std::atomic<uint64_t> cacheHitTasks = 0;            // number of compiles of a previously seen shader combo
 		std::atomic<uint64_t> diskHitTasks = 0;             // tasks resolved from disk cache rather than compiled
-		std::atomic<uint64_t> contentDedupeTasks = 0;       // compiles skipped because identical preprocessed code had already compiled this session
-		std::atomic<uint64_t> contentStoreHitTasks = 0;     // compiles skipped because the persistent shader store held an identical blob
 		std::atomic<uint64_t> diskHitPriorityWeight = 0;    // cumulative priority weight of disk-hit tasks
 		LARGE_INTEGER compilationPhaseStart = { 0 };        // time of first non-disk-hit task dispatch
 		std::atomic<bool> compilationPhaseStarted = false;  // set when first actual compilation begins
@@ -376,17 +375,6 @@ namespace SIE
 
 		using VertexShaderPtr = std::unique_ptr<RE::BSGraphics::VertexShader, VertexShaderDeleter>;
 
-		/** @brief Reads a cached blob, deleting the file and returning null when it is unreadable or not intact DXBC. */
-		winrt::com_ptr<ID3DBlob> ReadIntactBlob(const std::wstring& diskPath);
-
-		/** @brief Writes through a sibling temp file and a rename, so a crash mid-write cannot leave a torn blob at diskPath. */
-		bool WriteBlobAtomic(const std::wstring& diskPath, ID3DBlob* blob);
-
-		/** @brief The persistent shader store's blob for a CompileDedupe key, or null on a miss or while the store is off. */
-		winrt::com_ptr<ID3DBlob> ReadContentStore(const Util::ContentHash::Hash128& a_key);
-
-		/** @brief Adds a blob to the persistent shader store under a CompileDedupe key; does nothing while the store is off. */
-		void WriteContentStore(const Util::ContentHash::Hash128& a_key, ID3DBlob* a_blob);
 	}
 
 	class UpdateListener;
@@ -426,6 +414,7 @@ namespace SIE
 
 		/** @brief Returns true if any shader compilation tasks are in progress. */
 		bool IsCompiling();
+		void NotifyPoolProgress() { compilationSet.NotifyPoolProgress(); }
 		/** Gets whether the shader cache is enabled. */
 		bool IsEnabled() const;
 		/** Sets whether the shader cache is enabled. */
@@ -447,22 +436,11 @@ namespace SIE
 		void SetDiskCache(bool value);
 		/** @brief Whether shaders compile with debug info: Developer Mode, or RenderDoc attached. */
 		static bool IsDebugCompile();
-		/**
-		 * @brief Deletes the on-disk shader cache directory.
-		 * @param a_keepContentStore Keep the persistent shader store, whose blobs stay valid because they are keyed by their own inputs.
-		 */
-		void DeleteDiskCache(bool a_keepContentStore = false);
+		/** @brief Deletes the shader store and everything else in the on-disk cache folder, so every shader compiles again. */
+		void DeleteDiskCache();
 		/** @brief True after a user action cleared every shader, until the menu banner is dismissed. */
 		bool IsRecachePending() const { return recachePending; }
 		void SetRecachePending(bool value) { recachePending = value; }
-		/** @brief Validates disk cache integrity against current shader sources and feature set. */
-		void ValidateDiskCache();
-		/** @brief Writes cache metadata (version, feature list) to the disk cache directory. */
-		void WriteDiskCacheInfo();
-		/** Gets whether unchanged shaders are skipped during recompilation. */
-		bool IsSkipUnchangedShaders() const;
-		/** Sets whether unchanged shaders are skipped during recompilation. */
-		void SetSkipUnchangedShaders(bool value);
 		/** Gets whether the filesystem watcher for hot-reload is active. */
 		bool UseFileWatcher() const;
 		/** Sets whether the filesystem watcher for hot-reload is active. */
@@ -601,6 +579,10 @@ namespace SIE
 			std::vector<std::pair<const char*, const char*>> defines,
 			ComputeShaderReadyCallback onReady);
 
+		/// @brief Source files may have changed, so the next builds must read them again.
+		///        A feature calls this before it recompiles its own shaders.
+		void ReloadShaderSources();
+
 		RE::BSGraphics::VertexShader* MakeAndAddVertexShader(const RE::BSShader& shader,
 			uint32_t descriptor);
 		RE::BSGraphics::PixelShader* MakeAndAddPixelShader(const RE::BSShader& shader,
@@ -609,6 +591,13 @@ namespace SIE
 			uint32_t descriptor);
 
 		static std::string GetDefinesString(const RE::BSShader& shader, uint32_t descriptor);
+
+		/**
+		 * @brief The preprocessor defines a permutation is compiled with (without the developer-mode
+		 * debug defines): the shader-class define, the global feature defines and the permutation's own.
+		 * For compilers other than D3DCompile, e.g. Drawcall Limit Fix's SPIR-V builds.
+		 */
+		static std::vector<std::pair<std::string, std::string>> GetCompileDefines(const RE::BSShader& shader, ShaderClass shaderClass, uint32_t descriptor);
 
 		uint64_t GetCachedHitTasks();
 		uint64_t GetCompletedTasks();
@@ -624,27 +613,17 @@ namespace SIE
 		/** @brief Standalone compiles queued or running, which IsCompiling() does not count. */
 		uint32_t GetStandalonePending() const { return standalonePending.load(std::memory_order_relaxed); }
 		uint64_t GetDiskHitTasks();
-		uint64_t GetContentDedupeTasks();
 		void IncCacheHitTasks();
-		void IncContentDedupeTasks();
-		/** @brief Number of compiles satisfied by the persistent shader store in the current batch. */
-		uint64_t GetContentStoreHitTasks();
-		/** @brief Counts a compile satisfied by the persistent shader store. */
-		void IncContentStoreHitTasks();
-		/** @brief Deletes every blob in the persistent shader store, whether or not the setting is on. */
-		void ClearContentStore();
-		/** @brief Applies the store size limit setting now, evicting least recently used shaders if it was lowered. */
-		void ApplyContentStoreLimit();
-		/** @brief Where the persistent shader store lives and how much it holds. */
-		struct ContentStoreUsage
+		/** @brief Where the shader store lives and how much it holds. */
+		struct ShaderStoreUsage
 		{
 			std::string path;  ///< Absolute, UTF-8
-			uint64_t blobs = 0;
+			uint64_t artifacts = 0;
 			uint64_t bytes = 0;
 			uint64_t maxBytes = 0;
 		};
-		/** @brief Measures the persistent shader store on disk; usable while the setting is off. */
-		ContentStoreUsage GetContentStoreUsage();
+		/** @brief Measures the shader store on disk. This walks its folder, so call it away from the frame. */
+		ShaderStoreUsage GetShaderStoreUsage();
 		void ToggleErrorMessages();
 		void DisableShaderBlocking();
 		void IterateShaderBlock(bool a_forward = true);
@@ -902,7 +881,6 @@ namespace SIE
 			RE::BSShader::Type shaderType;
 			ShaderClass shaderClass;
 			uint32_t descriptor;
-			std::wstring diskPath;
 			uint32_t drawCalls = 0;
 			bool isActive = false;  // Used in current/recent frames
 			std::chrono::steady_clock::time_point lastUsed;
@@ -933,7 +911,6 @@ namespace SIE
 			RE::BSShader::Type type;
 			std::uint32_t descriptor;
 			SIE::ShaderClass shaderClass;
-			std::wstring diskPath;
 
 			bool operator<(const hlslRecord& other) const
 			{
@@ -957,7 +934,6 @@ namespace SIE
 
 		bool isEnabled = true;
 		bool isDiskCache = true;
-		bool isSkipUnchangedShaders = true;  ///< when true, recompile a disk-cached shader only if its source is newer
 		bool isAsync = true;
 		bool isDump = false;
 		bool hideError = false;

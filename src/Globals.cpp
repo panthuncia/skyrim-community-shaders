@@ -1,4 +1,9 @@
 #include "Globals.h"
+#include "GpuEventTimers.h"
+#include "RenderGraph/Engine/Constants/EngineConstants.h"
+#include "RenderGraph/Engine/Flush/Flush.h"
+#include "RenderGraph/Engine/Native/Native.h"
+#include "RenderGraph/Engine/Tripwire/Tripwire.h"
 
 #include "CSEditor/SceneManager/SceneManager.h"
 #include "CSEditor/SceneManager/SceneSettingsManager.h"
@@ -6,6 +11,7 @@
 #include "Features/CSEditor.h"
 #include "Features/CloudShadows.h"
 #include "Features/DeveloperTools.h"
+#include "Features/GraphicsAPI.h"
 #include "Features/DynamicCubemaps.h"
 #include "Features/Effects11.h"
 #include "Features/ExponentialHeightFog.h"
@@ -20,6 +26,8 @@
 #include "Features/IBL.h"
 #include "Features/InteriorSun.h"
 #include "Features/LODBlending.h"
+#include "Features/DrawcallLimitFix.h"
+#include "Utils/SwitchFile.h"
 #include "Features/LightLimitFix.h"
 #include "Features/LinearLighting.h"
 #include "Features/PerformanceOverlay.h"
@@ -47,6 +55,8 @@
 #include "Features/ViewAtmosphere.h"
 #include "Features/VolumetricLighting.h"
 #include "Features/VolumetricShadows.h"
+#include "Features/TextureStreaming.h"
+#include "Features/VRAMBudget.h"
 #include "Features/WaterEffects.h"
 #include "Features/WetnessEffects.h"
 #include "HiZPyramid.h"
@@ -55,6 +65,12 @@
 #include "State.h"
 #include "TruePBR.h"
 #include "Utils/Game.h"
+#include "TextureStreaming/Census.h"
+
+#include <array>
+#include <atomic>
+#include <intrin.h>
+#include <mutex>
 
 namespace globals
 {
@@ -73,6 +89,7 @@ namespace globals
 		ExtendedMaterials extendedMaterials{};
 		GrassCollision grassCollision{};
 		GrassLighting grassLighting{};
+		DrawcallLimitFix drawcallLimitFix{};
 		GrassOptimizations grassOptimizations{};
 		IBL ibl{};
 		LightLimitFix lightLimitFix{};
@@ -97,6 +114,8 @@ namespace globals
 		UnifiedWater unifiedWater{};
 		VolumetricLighting volumetricLighting{};
 		ViewAtmosphere viewAtmosphere{};
+		VRAMBudget vramBudget{};
+		TextureStreamingFeature textureStreaming{};
 		WaterEffects waterEffects{};
 		PerformanceOverlay performanceOverlay{};
 		WetnessEffects wetnessEffects{};
@@ -105,6 +124,7 @@ namespace globals
 		HDRDisplay hdrDisplay{};
 		Effects11 effects11{};
 		DeveloperTools developerTools{};
+		GraphicsAPI graphicsAPI{};
 		RenderDoc renderDoc{};
 		RemoteControl remoteControl{};
 		ScreenshotFeature screenshotFeature{};
@@ -241,8 +261,16 @@ namespace globals
 			BSMultiStreamInstanceTriShapeRTTI = { RE::BSMultiStreamInstanceTriShape::Ni_RTTI };
 		}
 
-		d3d::device = reinterpret_cast<ID3D11Device*>(game::renderer->GetRuntimeData().forwarder);
-		d3d::context = reinterpret_cast<ID3D11DeviceContext*>(game::renderer->GetRuntimeData().context);
+		// DXVK's own objects, also when the engine's pointers hold the guest handles (CS_ORG_TRIPWIRE_GUEST, P4.1). In native mode
+		// (CS_ORG_NATIVE=1) there is nothing under the handles: CS uses the native handles, so each of its D3D11 calls is a native
+		// service or a tripwire that names its call site.
+		if (RenderGraph::Engine::Native::Requested()) {
+			d3d::device = reinterpret_cast<ID3D11Device*>(game::renderer->GetRuntimeData().forwarder);
+			d3d::context = reinterpret_cast<ID3D11DeviceContext*>(game::renderer->GetRuntimeData().context);
+		} else {
+			d3d::device = RenderGraph::Engine::Tripwire::Unwrap(reinterpret_cast<ID3D11Device*>(game::renderer->GetRuntimeData().forwarder));
+			d3d::context = RenderGraph::Engine::Tripwire::Unwrap(reinterpret_cast<ID3D11DeviceContext*>(game::renderer->GetRuntimeData().context));
+		}
 		d3d::swapChain = reinterpret_cast<IDXGISwapChain*>(game::renderer->GetRuntimeData().renderWindows->swapChain);
 	}
 
@@ -266,6 +294,8 @@ namespace globals
 	void OnGameWindowClose()
 	{
 		game::quitGame = true;
+		RenderGraph::Engine::Tripwire::Stop();
+		RenderGraph::Engine::Native::Shutdown();
 		if (shaderCache)
 			shaderCache->StopCompilation();
 	}
@@ -293,6 +323,22 @@ namespace globals
 		mappedFrameBuffer = nullptr;
 	}
 
+	void OnContextMap(ID3D11Resource* a_resource, D3D11_MAP a_type, D3D11_MAPPED_SUBRESOURCE* a_mapped)
+	{
+		if (*globals::game::perFrame.get() == a_resource)
+			globals::game::mappedFrameBuffer = a_mapped;
+		DrawcallLimitFix::OnMap(a_resource, a_mapped->pData);
+		RenderGraph::Engine::Constants::OnMap(a_resource, a_type, a_mapped->pData);
+	}
+
+	void OnContextUnmap(ID3D11Resource* a_resource)
+	{
+		if (*globals::game::perFrame.get() == a_resource && globals::game::mappedFrameBuffer)
+			CacheFramebuffer();
+		DrawcallLimitFix::OnUnmap(a_resource);
+		RenderGraph::Engine::Constants::OnUnmap(a_resource);
+	}
+
 	/**
  * @brief Hooks the ID3D11DeviceContext::Map method to track mapping of the per-frame resource.
  *
@@ -305,10 +351,8 @@ namespace globals
 		static HRESULT thunk(ID3D11DeviceContext* This, ID3D11Resource* pResource, UINT Subresource, D3D11_MAP MapType, UINT MapFlags, D3D11_MAPPED_SUBRESOURCE* pMappedResource)
 		{
 			HRESULT hr = func(This, pResource, Subresource, MapType, MapFlags, pMappedResource);
-			if (hr == S_OK) {
-				if (*globals::game::perFrame.get() == pResource)
-					globals::game::mappedFrameBuffer = pMappedResource;
-			}
+			if (hr == S_OK)
+				OnContextMap(pResource, MapType, pMappedResource);
 			return hr;
 		}
 		static inline REL::Relocation<decltype(thunk)> func;
@@ -323,17 +367,551 @@ namespace globals
 	{
 		static void thunk(ID3D11DeviceContext* This, ID3D11Resource* pResource, UINT Subresource)
 		{
-			if (*globals::game::perFrame.get() == pResource && globals::game::mappedFrameBuffer) {
-				CacheFramebuffer();
-			}
+			OnContextUnmap(pResource);
 			func(This, pResource, Subresource);
+		}
+		static inline REL::Relocation<decltype(thunk)> func;
+	};
+
+	/** @brief Feeds Drawcall Limit Fix's constant buffer mirror (buffers updated without Map). */
+	struct ID3D11DeviceContext_UpdateSubresource
+	{
+		static void thunk(ID3D11DeviceContext* This, ID3D11Resource* pDstResource, UINT DstSubresource, const D3D11_BOX* pDstBox, const void* pSrcData, UINT SrcRowPitch,
+			UINT SrcDepthPitch)
+		{
+			DrawcallLimitFix::OnUpdateSubresource(pDstResource, pDstBox, pSrcData);
+			RenderGraph::Engine::Constants::OnUpdateSubresource(pDstResource, pDstBox, pSrcData);
+			func(This, pDstResource, DstSubresource, pDstBox, pSrcData, SrcRowPitch, SrcDepthPitch);
+		}
+		static inline REL::Relocation<decltype(thunk)> func;
+	};
+
+	// CS_DCLF_DEPTH_TRACE=1: only the five selected interior frames incur these hooks' work.
+	// Keep the calls in order and log after leaving the interval, so logging cannot change it.
+	namespace
+	{
+		struct DepthEvent
+		{
+			const char* action = nullptr;
+			const void* caller = nullptr;
+			const void* resource = nullptr;
+			std::uint32_t detail = 0;
+			bool mainDepth = false;
+		};
+
+		std::atomic<bool> depthTraceActive = false;
+		std::mutex depthTraceMutex;
+		ID3D11Texture2D* depthTraceTarget = nullptr;
+		std::array<DepthEvent, 256> depthEvents{};
+		std::size_t depthEventCount = 0;
+		std::uint32_t depthEventOverflow = 0;
+		std::uint32_t depthCandidateFrames = 0;
+		std::uint32_t depthTracedFrames = 0;
+
+		bool IsMainDepth(ID3D11DepthStencilView* a_dsv)
+		{
+			if (!a_dsv || !depthTraceTarget)
+				return false;
+			ID3D11Resource* resource = nullptr;
+			a_dsv->GetResource(&resource);
+			const bool match = resource == static_cast<ID3D11Resource*>(depthTraceTarget);
+			if (resource)
+				resource->Release();
+			return match;
+		}
+
+		void AppendDepthEvent(const char* a_action, const void* a_caller, const void* a_resource, std::uint32_t a_detail, bool a_main)
+		{
+			if (!depthTraceActive.load(std::memory_order_relaxed))
+				return;
+			std::scoped_lock lock(depthTraceMutex);
+			if (!depthTraceActive.load(std::memory_order_relaxed))
+				return;
+			if (depthEventCount < depthEvents.size())
+				depthEvents[depthEventCount++] = { a_action, a_caller, a_resource, a_detail, a_main };
+			else
+				++depthEventOverflow;
+		}
+
+		void TraceNativeDraw(ID3D11DeviceContext* a_context, const char* a_action, const void* a_caller)
+		{
+			if (!depthTraceActive.load(std::memory_order_relaxed))
+				return;
+			ID3D11DepthStencilView* dsv = nullptr;
+			a_context->OMGetRenderTargets(0, nullptr, &dsv);
+			ID3D11DepthStencilState* depthState = nullptr;
+			UINT stencilRef = 0;
+			a_context->OMGetDepthStencilState(&depthState, &stencilRef);
+			D3D11_DEPTH_STENCIL_DESC desc{};
+			if (depthState) {
+				depthState->GetDesc(&desc);
+				depthState->Release();
+			}
+			const auto detail = std::uint32_t(desc.DepthEnable) | (std::uint32_t(desc.DepthWriteMask) << 1) | (std::uint32_t(desc.DepthFunc) << 8);
+			const bool main = IsMainDepth(dsv);
+			AppendDepthEvent(a_action, a_caller, dsv, detail, main);
+			if (dsv)
+				dsv->Release();
+		}
+	}
+
+	struct ID3D11DeviceContext_DepthClearTrace
+	{
+		static void thunk(ID3D11DeviceContext* a_context, ID3D11DepthStencilView* a_dsv, UINT a_flags, FLOAT a_depth, UINT8 a_stencil)
+		{
+			if (depthTraceActive.load(std::memory_order_relaxed))
+				AppendDepthEvent("clear", _ReturnAddress(), a_dsv, a_flags, IsMainDepth(a_dsv));
+			func(a_context, a_dsv, a_flags, a_depth, a_stencil);
+		}
+		static inline REL::Relocation<decltype(thunk)> func;
+	};
+
+	struct ID3D11DeviceContext_DepthCopyTrace
+	{
+		static void thunk(ID3D11DeviceContext* a_context, ID3D11Resource* a_dst, ID3D11Resource* a_src)
+		{
+			const auto* target = static_cast<ID3D11Resource*>(depthTraceTarget);
+			if (depthTraceActive.load(std::memory_order_relaxed) && target && (a_dst == target || a_src == target)) {
+				AppendDepthEvent("copy", _ReturnAddress(), a_dst, a_dst == target ? 1u : 2u, true);
+			}
+			func(a_context, a_dst, a_src);
+		}
+		static inline REL::Relocation<decltype(thunk)> func;
+	};
+
+	struct ID3D11DeviceContext_DepthBindTrace
+	{
+		static void thunk(ID3D11DeviceContext* a_context, UINT a_count, ID3D11RenderTargetView* const* a_rtvs, ID3D11DepthStencilView* a_dsv)
+		{
+			if (depthTraceActive.load(std::memory_order_relaxed))
+				AppendDepthEvent("bind", _ReturnAddress(), a_dsv, a_count, IsMainDepth(a_dsv));
+			func(a_context, a_count, a_rtvs, a_dsv);
+		}
+		static inline REL::Relocation<decltype(thunk)> func;
+	};
+
+	struct ID3D11DeviceContext_DepthDrawIndexedTrace
+	{
+		static void thunk(ID3D11DeviceContext* a_context, UINT a_count, UINT a_start, INT a_base)
+		{
+			TraceNativeDraw(a_context, "draw-indexed", _ReturnAddress());
+			func(a_context, a_count, a_start, a_base);
+		}
+		static inline REL::Relocation<decltype(thunk)> func;
+	};
+
+	struct ID3D11DeviceContext_DrawCallerTrace
+	{
+		static void thunk(ID3D11DeviceContext* a_context, UINT a_count, UINT a_start, INT a_base)
+		{
+			if (a_count == 8991) {
+				using SetDrawCaller = void(__stdcall*)(const void*, const void* const*, std::uint32_t);
+				static const auto setCaller = []() -> SetDrawCaller {
+					const auto module = ::GetModuleHandleW(L"dxvk_d3d11.dll");
+					return module ? reinterpret_cast<SetDrawCaller>(::GetProcAddress(module, "dxvkSetDrawCaller")) : nullptr;
+				}();
+				if (setCaller) {
+					void* stack[16]{};
+					const void* addresses[16]{};
+					const auto count = ::RtlCaptureStackBackTrace(1, static_cast<DWORD>(std::size(stack)), stack, nullptr);
+					for (std::uint32_t i = 0; i < count; ++i)
+						addresses[i] = stack[i];
+					setCaller(_ReturnAddress(), addresses, count);
+				}
+			}
+			func(a_context, a_count, a_start, a_base);
+		}
+		static inline REL::Relocation<decltype(thunk)> func;
+	};
+
+	struct ID3D11DeviceContext_DepthDrawTrace
+	{
+		static void thunk(ID3D11DeviceContext* a_context, UINT a_count, UINT a_start)
+		{
+			TraceNativeDraw(a_context, "draw", _ReturnAddress());
+			func(a_context, a_count, a_start);
+		}
+		static inline REL::Relocation<decltype(thunk)> func;
+	};
+
+	struct ID3D11DeviceContext_DepthDrawIndexedInstancedTrace
+	{
+		static void thunk(ID3D11DeviceContext* a_context, UINT a_indexCount, UINT a_instances, UINT a_startIndex, INT a_base, UINT a_startInstance)
+		{
+			TraceNativeDraw(a_context, "draw-indexed-instanced", _ReturnAddress());
+			func(a_context, a_indexCount, a_instances, a_startIndex, a_base, a_startInstance);
+		}
+		static inline REL::Relocation<decltype(thunk)> func;
+	};
+
+	struct ID3D11DeviceContext_DepthDrawInstancedTrace
+	{
+		static void thunk(ID3D11DeviceContext* a_context, UINT a_vertices, UINT a_instances, UINT a_startVertex, UINT a_startInstance)
+		{
+			TraceNativeDraw(a_context, "draw-instanced", _ReturnAddress());
+			func(a_context, a_vertices, a_instances, a_startVertex, a_startInstance);
+		}
+		static inline REL::Relocation<decltype(thunk)> func;
+	};
+
+	void BeginDCLFDepthTrace(ID3D11Texture2D* a_depth)
+	{
+		static const bool depthTrace = Util::SwitchFile::Enabled("CS_DCLF_DEPTH_TRACE");
+		if (!a_depth || !depthTrace || depthTracedFrames >= 5 || ++depthCandidateFrames < 40)
+			return;
+		std::scoped_lock lock(depthTraceMutex);
+		depthTraceTarget = a_depth;
+		depthEventCount = 0;
+		depthEventOverflow = 0;
+		depthTraceActive.store(true, std::memory_order_release);
+	}
+
+	void EndDCLFDepthTrace()
+	{
+		if (!depthTraceActive.load(std::memory_order_acquire))
+			return;
+		std::array<DepthEvent, 256> events;
+		std::size_t count;
+		std::uint32_t overflow;
+		{
+			std::scoped_lock lock(depthTraceMutex);
+			depthTraceActive.store(false, std::memory_order_release);
+			events = depthEvents;
+			count = depthEventCount;
+			overflow = depthEventOverflow;
+			++depthTracedFrames;
+		}
+		logger::info("[DCLF] depth trace frame {}: {} D3D11 calls, {} omitted; target {}", depthTracedFrames, count, overflow, fmt::ptr(depthTraceTarget));
+		for (std::size_t i = 0; i < count; ++i) {
+			const auto& event = events[i];
+			logger::info("[DCLF] depth trace {:03}: {} resource={} main={} detail={:#x} caller={}", i, event.action, fmt::ptr(event.resource), event.mainDepth, event.detail,
+				fmt::ptr(event.caller));
+		}
+	}
+
+	// CS_PASS_SKIP's drops: the engine runs as usual, and these calls do nothing inside the chosen event.
+	struct PassSkipDrawIndexed
+	{
+		static void thunk(ID3D11DeviceContext* a_context, UINT a, UINT b, INT c)
+		{
+			if (!GpuEventTimers::PassSkipDropping())
+				func(a_context, a, b, c);
+		}
+		static inline REL::Relocation<decltype(thunk)> func;
+	};
+	struct PassSkipDraw
+	{
+		static void thunk(ID3D11DeviceContext* a_context, UINT a, UINT b)
+		{
+			if (!GpuEventTimers::PassSkipDropping())
+				func(a_context, a, b);
+		}
+		static inline REL::Relocation<decltype(thunk)> func;
+	};
+	struct PassSkipDrawIndexedInstanced
+	{
+		static void thunk(ID3D11DeviceContext* a_context, UINT a, UINT b, UINT c, INT d, UINT e)
+		{
+			if (!GpuEventTimers::PassSkipDropping())
+				func(a_context, a, b, c, d, e);
+		}
+		static inline REL::Relocation<decltype(thunk)> func;
+	};
+	struct PassSkipDrawInstanced
+	{
+		static void thunk(ID3D11DeviceContext* a_context, UINT a, UINT b, UINT c, UINT d)
+		{
+			if (!GpuEventTimers::PassSkipDropping())
+				func(a_context, a, b, c, d);
+		}
+		static inline REL::Relocation<decltype(thunk)> func;
+	};
+	struct PassSkipDrawAuto
+	{
+		static void thunk(ID3D11DeviceContext* a_context)
+		{
+			if (!GpuEventTimers::PassSkipDropping())
+				func(a_context);
+		}
+		static inline REL::Relocation<decltype(thunk)> func;
+	};
+	struct PassSkipDrawIndexedInstancedIndirect
+	{
+		static void thunk(ID3D11DeviceContext* a_context, ID3D11Buffer* a, UINT b)
+		{
+			if (!GpuEventTimers::PassSkipDropping())
+				func(a_context, a, b);
+		}
+		static inline REL::Relocation<decltype(thunk)> func;
+	};
+	struct PassSkipDrawInstancedIndirect
+	{
+		static void thunk(ID3D11DeviceContext* a_context, ID3D11Buffer* a, UINT b)
+		{
+			if (!GpuEventTimers::PassSkipDropping())
+				func(a_context, a, b);
+		}
+		static inline REL::Relocation<decltype(thunk)> func;
+	};
+	struct PassSkipDispatch
+	{
+		static void thunk(ID3D11DeviceContext* a_context, UINT a, UINT b, UINT c)
+		{
+			if (!GpuEventTimers::PassSkipDropping())
+				func(a_context, a, b, c);
+		}
+		static inline REL::Relocation<decltype(thunk)> func;
+	};
+	struct PassSkipDispatchIndirect
+	{
+		static void thunk(ID3D11DeviceContext* a_context, ID3D11Buffer* a, UINT b)
+		{
+			if (!GpuEventTimers::PassSkipDropping())
+				func(a_context, a, b);
+		}
+		static inline REL::Relocation<decltype(thunk)> func;
+	};
+
+	struct OpDrawIndexed
+	{
+		static void thunk(ID3D11DeviceContext* a_context, UINT a, UINT b, INT c)
+		{
+			const bool on = GpuEventTimers::OpBegin(a_context, "DrawIndexed", a, nullptr, nullptr, _ReturnAddress());
+			func(a_context, a, b, c);
+			if (on)
+				GpuEventTimers::OpEnd();
+		}
+		static inline REL::Relocation<decltype(thunk)> func;
+	};
+	struct OpDraw
+	{
+		static void thunk(ID3D11DeviceContext* a_context, UINT a, UINT b)
+		{
+			const bool on = GpuEventTimers::OpBegin(a_context, "Draw", a, nullptr, nullptr, _ReturnAddress());
+			func(a_context, a, b);
+			if (on)
+				GpuEventTimers::OpEnd();
+		}
+		static inline REL::Relocation<decltype(thunk)> func;
+	};
+	struct OpDrawIndexedInstanced
+	{
+		static void thunk(ID3D11DeviceContext* a_context, UINT a, UINT b, UINT c, INT d, UINT e)
+		{
+			const bool on = GpuEventTimers::OpBegin(a_context, "DrawIdxInst", a, nullptr, nullptr, _ReturnAddress());
+			func(a_context, a, b, c, d, e);
+			if (on)
+				GpuEventTimers::OpEnd();
+		}
+		static inline REL::Relocation<decltype(thunk)> func;
+	};
+	struct OpDrawInstanced
+	{
+		static void thunk(ID3D11DeviceContext* a_context, UINT a, UINT b, UINT c, UINT d)
+		{
+			const bool on = GpuEventTimers::OpBegin(a_context, "DrawInst", a, nullptr, nullptr, _ReturnAddress());
+			func(a_context, a, b, c, d);
+			if (on)
+				GpuEventTimers::OpEnd();
+		}
+		static inline REL::Relocation<decltype(thunk)> func;
+	};
+	struct OpDrawIndexedInstancedIndirect
+	{
+		static void thunk(ID3D11DeviceContext* a_context, ID3D11Buffer* a, UINT b)
+		{
+			const bool on = GpuEventTimers::OpBegin(a_context, "DrawIdxIndirect", 0, nullptr, nullptr, _ReturnAddress());
+			func(a_context, a, b);
+			if (on)
+				GpuEventTimers::OpEnd();
+		}
+		static inline REL::Relocation<decltype(thunk)> func;
+	};
+	struct OpDrawInstancedIndirect
+	{
+		static void thunk(ID3D11DeviceContext* a_context, ID3D11Buffer* a, UINT b)
+		{
+			const bool on = GpuEventTimers::OpBegin(a_context, "DrawIndirect", 0, nullptr, nullptr, _ReturnAddress());
+			func(a_context, a, b);
+			if (on)
+				GpuEventTimers::OpEnd();
+		}
+		static inline REL::Relocation<decltype(thunk)> func;
+	};
+	struct OpDispatch
+	{
+		static void thunk(ID3D11DeviceContext* a_context, UINT a, UINT b, UINT c)
+		{
+			const bool on = GpuEventTimers::OpBegin(a_context, "Dispatch", a * b * c, nullptr, nullptr, _ReturnAddress());
+			func(a_context, a, b, c);
+			if (on)
+				GpuEventTimers::OpEnd();
+		}
+		static inline REL::Relocation<decltype(thunk)> func;
+	};
+	struct OpDispatchIndirect
+	{
+		static void thunk(ID3D11DeviceContext* a_context, ID3D11Buffer* a, UINT b)
+		{
+			const bool on = GpuEventTimers::OpBegin(a_context, "DispatchIndirect", 0, nullptr, nullptr, _ReturnAddress());
+			func(a_context, a, b);
+			if (on)
+				GpuEventTimers::OpEnd();
+		}
+		static inline REL::Relocation<decltype(thunk)> func;
+	};
+	struct OpCopyRegion
+	{
+		static void thunk(ID3D11DeviceContext* a_context, ID3D11Resource* a, UINT b, UINT c, UINT d, UINT e, ID3D11Resource* f, UINT g, const D3D11_BOX* h)
+		{
+			const bool on = GpuEventTimers::OpBegin(a_context, "CopyRegion", h ? 1 : 0, a, nullptr, _ReturnAddress());
+			func(a_context, a, b, c, d, e, f, g, h);
+			if (on)
+				GpuEventTimers::OpEnd();
+		}
+		static inline REL::Relocation<decltype(thunk)> func;
+	};
+	struct OpCopy
+	{
+		static void thunk(ID3D11DeviceContext* a_context, ID3D11Resource* a, ID3D11Resource* b)
+		{
+			const bool on = GpuEventTimers::OpBegin(a_context, "Copy", 0, a, nullptr, _ReturnAddress());
+			func(a_context, a, b);
+			if (on)
+				GpuEventTimers::OpEnd();
+		}
+		static inline REL::Relocation<decltype(thunk)> func;
+	};
+	struct OpUpdate
+	{
+		static void thunk(ID3D11DeviceContext* a_context, ID3D11Resource* a, UINT b, const D3D11_BOX* c, const void* d, UINT e, UINT f)
+		{
+			const bool on = GpuEventTimers::OpBegin(a_context, "Update", 0, a, nullptr, _ReturnAddress());
+			func(a_context, a, b, c, d, e, f);
+			if (on)
+				GpuEventTimers::OpEnd();
+		}
+		static inline REL::Relocation<decltype(thunk)> func;
+	};
+	struct OpClearRTV
+	{
+		static void thunk(ID3D11DeviceContext* a_context, ID3D11RenderTargetView* a, const FLOAT* b)
+		{
+			const bool on = GpuEventTimers::OpBegin(a_context, "ClearRTV", 0, nullptr, a, _ReturnAddress());
+			func(a_context, a, b);
+			if (on)
+				GpuEventTimers::OpEnd();
+		}
+		static inline REL::Relocation<decltype(thunk)> func;
+	};
+	struct OpClearUAVU
+	{
+		static void thunk(ID3D11DeviceContext* a_context, ID3D11UnorderedAccessView* a, const UINT* b)
+		{
+			const bool on = GpuEventTimers::OpBegin(a_context, "ClearUAVU", 0, nullptr, a, _ReturnAddress());
+			func(a_context, a, b);
+			if (on)
+				GpuEventTimers::OpEnd();
+		}
+		static inline REL::Relocation<decltype(thunk)> func;
+	};
+	struct OpClearUAVF
+	{
+		static void thunk(ID3D11DeviceContext* a_context, ID3D11UnorderedAccessView* a, const FLOAT* b)
+		{
+			const bool on = GpuEventTimers::OpBegin(a_context, "ClearUAVF", 0, nullptr, a, _ReturnAddress());
+			func(a_context, a, b);
+			if (on)
+				GpuEventTimers::OpEnd();
+		}
+		static inline REL::Relocation<decltype(thunk)> func;
+	};
+	struct OpClearDSV
+	{
+		static void thunk(ID3D11DeviceContext* a_context, ID3D11DepthStencilView* a, UINT b, FLOAT c, UINT8 d)
+		{
+			const bool on = GpuEventTimers::OpBegin(a_context, "ClearDSV", 0, nullptr, a, _ReturnAddress());
+			func(a_context, a, b, c, d);
+			if (on)
+				GpuEventTimers::OpEnd();
+		}
+		static inline REL::Relocation<decltype(thunk)> func;
+	};
+	struct OpGenMips
+	{
+		static void thunk(ID3D11DeviceContext* a_context, ID3D11ShaderResourceView* a)
+		{
+			const bool on = GpuEventTimers::OpBegin(a_context, "GenMips", 0, nullptr, a, _ReturnAddress());
+			func(a_context, a);
+			if (on)
+				GpuEventTimers::OpEnd();
+		}
+		static inline REL::Relocation<decltype(thunk)> func;
+	};
+	struct OpResolve
+	{
+		static void thunk(ID3D11DeviceContext* a_context, ID3D11Resource* a, UINT b, ID3D11Resource* c, UINT d, DXGI_FORMAT e)
+		{
+			const bool on = GpuEventTimers::OpBegin(a_context, "Resolve", 0, a, nullptr, _ReturnAddress());
+			func(a_context, a, b, c, d, e);
+			if (on)
+				GpuEventTimers::OpEnd();
 		}
 		static inline REL::Relocation<decltype(thunk)> func;
 	};
 
 	void InstallD3DHooks(ID3D11DeviceContext* a_context)
 	{
+		if (GpuEventTimers::PassSkipRequested()) {
+			stl::detour_vfunc<12, PassSkipDrawIndexed>(a_context);
+			stl::detour_vfunc<13, PassSkipDraw>(a_context);
+			stl::detour_vfunc<20, PassSkipDrawIndexedInstanced>(a_context);
+			stl::detour_vfunc<21, PassSkipDrawInstanced>(a_context);
+			stl::detour_vfunc<38, PassSkipDrawAuto>(a_context);
+			stl::detour_vfunc<39, PassSkipDrawIndexedInstancedIndirect>(a_context);
+			stl::detour_vfunc<40, PassSkipDrawInstancedIndirect>(a_context);
+			stl::detour_vfunc<41, PassSkipDispatch>(a_context);
+			stl::detour_vfunc<42, PassSkipDispatchIndirect>(a_context);
+		}
+		TextureStreaming::Census::InstallD3DHooks(a_context);
+		if (GpuEventTimers::OpProbeRequested()) {
+			stl::detour_vfunc<12, OpDrawIndexed>(a_context);
+			stl::detour_vfunc<13, OpDraw>(a_context);
+			stl::detour_vfunc<20, OpDrawIndexedInstanced>(a_context);
+			stl::detour_vfunc<21, OpDrawInstanced>(a_context);
+			stl::detour_vfunc<39, OpDrawIndexedInstancedIndirect>(a_context);
+			stl::detour_vfunc<40, OpDrawInstancedIndirect>(a_context);
+			stl::detour_vfunc<41, OpDispatch>(a_context);
+			stl::detour_vfunc<42, OpDispatchIndirect>(a_context);
+			stl::detour_vfunc<46, OpCopyRegion>(a_context);
+			stl::detour_vfunc<47, OpCopy>(a_context);
+			stl::detour_vfunc<48, OpUpdate>(a_context);
+			stl::detour_vfunc<50, OpClearRTV>(a_context);
+			stl::detour_vfunc<51, OpClearUAVU>(a_context);
+			stl::detour_vfunc<52, OpClearUAVF>(a_context);
+			stl::detour_vfunc<53, OpClearDSV>(a_context);
+			stl::detour_vfunc<54, OpGenMips>(a_context);
+			stl::detour_vfunc<57, OpResolve>(a_context);
+		}
 		stl::detour_vfunc<14, ID3D11DeviceContext_Map>(a_context);
 		stl::detour_vfunc<15, ID3D11DeviceContext_Unmap>(a_context);
+		stl::detour_vfunc<48, ID3D11DeviceContext_UpdateSubresource>(a_context);
+		// CS_ORG_ENGINE_CONSTANTS=1: the constant-buffer binds behind the per-use capture.
+		RenderGraph::Engine::Constants::InstallD3DHooks(a_context);
+		// CS_ORG_RESIDUE_CENSUS=1: the state readers' trace (binds DXVK drops, the readers that read them).
+		RenderGraph::Engine::Flush::InstallStateTrace(a_context);
+		// CS_DCLF_DRAW_TRACE / CS_DCLF_DEPTH_TRACE (Drawcall Limit Fix's diagnostics).
+		const bool depthTrace = Util::SwitchFile::Enabled("CS_DCLF_DEPTH_TRACE");
+		if (Util::SwitchFile::Enabled("CS_DCLF_DRAW_TRACE") && !depthTrace)
+			stl::detour_vfunc<12, ID3D11DeviceContext_DrawCallerTrace>(a_context);
+		if (depthTrace) {
+			stl::detour_vfunc<53, ID3D11DeviceContext_DepthClearTrace>(a_context);
+			stl::detour_vfunc<47, ID3D11DeviceContext_DepthCopyTrace>(a_context);
+			stl::detour_vfunc<33, ID3D11DeviceContext_DepthBindTrace>(a_context);
+			stl::detour_vfunc<12, ID3D11DeviceContext_DepthDrawIndexedTrace>(a_context);
+			stl::detour_vfunc<13, ID3D11DeviceContext_DepthDrawTrace>(a_context);
+			stl::detour_vfunc<20, ID3D11DeviceContext_DepthDrawIndexedInstancedTrace>(a_context);
+			stl::detour_vfunc<21, ID3D11DeviceContext_DepthDrawInstancedTrace>(a_context);
+		}
 	}
 }

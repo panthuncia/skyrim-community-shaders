@@ -13,3 +13,6 @@ shadertoolsconfig.json
 .claude/settings.local.json
 
 **/__pycache__/
+
+# ORG built-in shaders, copied from the OpenRenderGraph checkout at configure time (cmake/RenderGraph.cmake).
+/package/Shaders/OpenRenderGraph/

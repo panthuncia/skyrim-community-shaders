@@ -70,10 +70,13 @@ public:
 	/** @brief Processes lifecycle events and completed LOD loads at Present. */
 	virtual void Reset() override;
 
-	/** @brief Installs the grass capture, culling and draw hooks after all plugins have loaded. */
+	/** @brief Registers the bucket store with GrassShared's capture, then installs the culling and draw hooks after all plugins have loaded. */
 	virtual void PostPostLoad() override;
 
-	/** @brief Selects engine setup, bucket setup or a pass covered by bucket draws. */
+	/** @brief Publishes the cull settings to GrassShared, where Drawcall Limit Fix's grass reads them. */
+	void PublishSettings();
+
+	/** @brief Identifies who sets up a grass pass: the engine, an optimized bucket, or nobody because optimized buckets cover it. */
 	enum class GrassPassSetup
 	{
 		kNative,
@@ -428,6 +431,13 @@ private:
 	float maxGrassDistance = 0.0f;
 	float maxDistSq = 0.0f;
 
+	// GrassShared's capture hands the bucket store the shapes' lifecycle (the hooks are GrassShared's, shared with Drawcall Limit Fix).
+	static void OnModel(RE::BSMultiStreamInstanceTriShape* shape, const char* modelPath);
+	static void OnGroup(RE::BSMultiStreamInstanceTriShape* shape, uint32_t group);
+	static void OnAttached();
+	static void OnRemoveGroup(RE::BSMultiStreamInstanceTriShape* shape, uint32_t group, uint64_t seq);
+	static void OnRemove(RE::BSMultiStreamInstanceTriShape* shape, uint64_t seq);
+
 	// Cached main-view values for bucket depth cutoffs.
 	RE::NiPoint3 cullForward{};
 	float cullForwardDotEye = 0.0f;
@@ -437,38 +447,13 @@ private:
 	{
 		static void DrawVanilla(RE::BSMultiStreamInstanceTriShape* geometry);
 
-		struct BSMultiStreamInstanceTriShape_dtor
-		{
-			static void thunk(RE::BSMultiStreamInstanceTriShape* This);
-			inline static REL::Relocation<decltype(thunk)> func;
-		};
-
-		// All grass shapes share one parent, so intercept its culling traversal.
+		// The engine parents every grass shape directly under one node, so culling visits each shape every pass.
 		struct NiNode_OnVisible
 		{
 			static void thunk(RE::NiNode* This, RE::NiCullingProcess* process, std::int32_t alphaGroupIndex);
 			inline static REL::Relocation<decltype(thunk)> func;
 			inline static std::atomic<RE::NiNode*> grassRoot{ nullptr };
 			inline static std::atomic<uint32_t> mainViewVisitFrame{ 0 };
-		};
-
-		// Shapes span 12x12 cells, so a cell unload removes groups rather than shapes.
-		struct RemoveGroup
-		{
-			static void thunk(RE::BSMultiStreamInstanceTriShape* shape, std::uint32_t index);
-			inline static REL::Relocation<decltype(thunk)> func;
-		};
-
-		struct AddGroup
-		{
-			static std::uint32_t thunk(RE::BSMultiStreamInstanceTriShape* shape, std::uint32_t count, std::uint16_t* instanceData, std::uint32_t instanceShorts, float boundPadding);
-			inline static REL::Relocation<decltype(thunk)> func;
-		};
-
-		struct DoneAddingInstances
-		{
-			static void thunk(RE::BSMultiStreamInstanceTriShape* shape, RE::BSTArray<std::uint32_t>& groupIndices);
-			inline static REL::Relocation<decltype(thunk)> func;
 		};
 
 		struct BSGrassShader_SetupGeometry
@@ -489,78 +474,19 @@ private:
 			inline static REL::Relocation<decltype(thunk)> func;
 		};
 
-		struct AddGroupGIDBuffer
-		{
-			static std::uint32_t thunk(RE::BSMultiStreamInstanceTriShape* a1, RE::BSMultiStreamInstanceTriShape::GroupHeader* a2, std::uint16_t* a3);
-			inline static REL::Relocation<decltype(thunk)> func;
-		};
-
-		struct AddQueuedGroupGIDBuffer
-		{
-			static void thunk(RE::BSMultiStreamInstanceTriShape* shape, RE::BSMultiStreamInstanceTriShape::GroupHeader* header, std::uint16_t* instanceData, RE::BSTArray<std::uint32_t>& groupIndices);
-			inline static REL::Relocation<decltype(thunk)> func;
-		};
-
-		struct AddQueuedGroupGIDFile
-		{
-			static void thunk(RE::BSMultiStreamInstanceTriShape* shape, RE::BSStream* stream, RE::BSTArray<std::uint32_t>& groupIndices);
-			inline static REL::Relocation<decltype(thunk)> func;
-		};
-
-		struct AttachQueuedGroups
-		{
-			static void thunk();
-			inline static REL::Relocation<decltype(thunk)> func;
-			inline static std::atomic<bool> pendingCapture{ false };
-		};
-
-		struct AddGroupGIDFile
-		{
-			static void thunk(RE::BSMultiStreamInstanceTriShape* a1, RE::BSStream* a2);
-			inline static REL::Relocation<decltype(thunk)> func;
-		};
-
 		struct DrawInstanceTriShape
 		{
 			static void thunk(RE::BSRenderPass* curPass, RE::BSMultiStreamInstanceTriShape* geometry);
 			inline static REL::Relocation<decltype(thunk)> func;
 		};
 
-		struct LoadGrassType
-		{
-			static RE::BSMultiStreamInstanceTriShape* thunk(RE::BGSGrassManager* grassManager, RE::GrassParam* a_param, uint32_t CellXDivided, uint32_t CellYDivided, uint64_t* typeKey, RE::BSFixedString* modelPath);
-			inline static REL::Relocation<decltype(thunk)> func;
-		};
-
 		// Optimized draws upload their own buffers, so captured groups need only a CPU copy.
+		// GrassShared's add hooks mark the engine's group adds (GrassShared::InGroupAdd).
 		struct CreateVertexBuffer
 		{
 			static RE::BSGraphics::VertexBuffer* thunk(void* manager, std::uint32_t byteWidth, void* data, std::uint64_t vertexDesc);
 			inline static REL::Relocation<decltype(thunk)> func;
 		};
-
-		/** @brief Keeps grass group buffers on the CPU while optimized drawing is active. */
-		class CPUBufferScope
-		{
-		public:
-			CPUBufferScope();
-			~CPUBufferScope() { active = previous; }
-			CPUBufferScope(const CPUBufferScope&) = delete;
-			CPUBufferScope& operator=(const CPUBufferScope&) = delete;
-
-			inline static thread_local bool active = false;
-
-		private:
-			bool previous;
-		};
-
-		/** @brief Applies CPU buffer allocation only during the engine group add. */
-		template <class F>
-		static decltype(auto) WithOwnedGroups(F&& add)
-		{
-			CPUBufferScope scope;
-			return add();
-		}
 
 		static void Install();
 	};

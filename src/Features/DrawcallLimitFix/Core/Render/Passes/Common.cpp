@@ -1,0 +1,267 @@
+// Shared pass helpers: the eye fold, DXVK image import, scene buffer registration, the latched copies pass, frame
+// buffer declaration and the preprocessed indirect draw.
+
+#include "Features/DrawcallLimitFix/Core/Render/Internal.h"
+#include "RenderGraph/BufferRefs.h"
+#include "Features/DrawcallLimitFix/Core/Render/Passes/DrawHelpers.h"
+#include "Features/DrawcallLimitFix/Core/Extensions/SceneResources.h"
+#include "Features/DrawcallLimitFix/Core/Render/Epochs/GraphConditions.h"
+#include "Features/DrawcallLimitFix/Core/Extensions/PassContext.h"
+#include "Features/DrawcallLimitFix/Core/Gpu/FrameValues.h"
+#include "Features/RemoteControl/GpuCounters.h"
+#include "RenderGraph/DxvkImageImport.h"
+#include "RenderGraph/Switches.h"
+
+#include <Resources/ExternalTextureResource.h>
+
+namespace DCLF::Draws
+{
+	std::uint64_t RecordingBufferAddress(rhi::ResourceHandle a_buffer)
+	{
+		auto* host = RenderGraphRuntime::Get().Host();
+		return host ? host->Device().GetBufferDeviceAddress({ a_buffer, 0 }) : 0;
+	}
+
+	RenderGraph::BufferRef RecordingBufferRef(const org::RecordingContext& a_recording, const org::ResourceBindingToken& a_binding)
+	{
+		auto* host = RenderGraphRuntime::Get().Host();
+		return host ? RenderGraph::MakeBufferRef(host->Device(), a_recording.Resolve(a_binding).GetHandle(), 0, std::source_location::current()) :
+		              RenderGraph::BufferRef{};
+	}
+
+	void FoldEyeIntoViewProj(const std::array<float, 16>& a_viewProj, const RE::NiPoint3& a_eye, float (&a_out)[16])
+	{
+		const float eye[3]{ a_eye.x, a_eye.y, a_eye.z };
+		FoldCullEye(a_viewProj.data(), eye, a_out);
+	}
+
+	FrameAnchors::Texture ImportImage(rhi::Device a_device, ID3D11Texture2D* a_texture, const DxvkOrgInteropImageInfo& a_image, org::TextureDescription a_desc,
+		const char* a_name)
+	{
+		// Share the image's one graph resource with every other importer, so the graph orders all uses and one tracker follows
+		// its layout. CS_ORG_ENGINE_TARGETS_DCLF=0 keeps DCLF's own import, as a bisecting aid.
+		static const bool shareOwned = !Switches::Off("CS_ORG_ENGINE_TARGETS_DCLF");
+		if (shareOwned)
+			return FrameAnchors::ShareImage(a_texture, a_image, a_desc, a_name ? a_name : "DCLF image");
+		a_desc.imageDimensions.clear();
+		a_desc.imageDimensions.push_back({ a_image.extent.width, a_image.extent.height, 0, 0 });
+		// ORG builds a DSV per slice for arrays, so a shadow view attaches its own slice.
+		a_desc.isArray = a_image.arrayLayers > 1;
+		a_desc.arraySize = a_desc.isArray ? a_image.arrayLayers : 1;
+		return RenderGraph::ImportDxvkTexture(a_device, a_image, std::move(a_desc), a_name);
+	}
+
+	void RegisterSceneBuffers(org::RenderGraph& a_graph, const SceneBuffers& a_scene)
+	{
+		if (a_scene.pool) {
+			Register(a_graph, org::ResourceIdentifier("cs.dclf.index-pool"), a_scene.pool->indices);
+			Register(a_graph, org::ResourceIdentifier("cs.dclf.pool-firsts"), a_scene.pool->firsts);
+			Register(a_graph, org::ResourceIdentifier("cs.dclf.pool-copies"), a_scene.pool->copies);
+		}
+		// The features' scene resources, the root state buffers among them. The visibility readback is made only with their rows.
+		Extensions::RegisterSceneResources(a_graph, a_scene.sceneResources);
+		if (a_scene.visibilityEvents) {
+			Register(a_graph, org::ResourceIdentifier("cs.dclf.visibility-events"), a_scene.visibilityEvents);
+			Register(a_graph, org::ResourceIdentifier("cs.dclf.visibility-root-reported"), a_scene.visibilityRootReported);
+			Register(a_graph, org::ResourceIdentifier("cs.dclf.visibility-object-reported"), a_scene.visibilityObjectReported);
+		}
+	}
+
+	namespace
+	{
+		/**
+		 * @brief Records the latched copies a_source names, the epoch's own lists then each hosted shape's. A target that is not
+		 * declared resolves to a null handle and is skipped. a_withZeros false leaves out the zeroed count lists.
+		 */
+		template <class TargetOf>
+		void CopyLatchedLists(rhi::CommandList& a_commands, const LatchedSource& a_source, const org::RunRef& a_run, const TargetOf& a_target,
+			bool a_withZeros = true)
+		{
+			// A copy adjacent to the one before it, with the same latch and target, joins it into one command.
+			struct Run
+			{
+				rhi::ResourceHandle target, latch;
+				std::uint64_t dst = 0, src = 0, bytes = 0;
+			} run;
+			constexpr rhi::HandleEqual<rhi::ResourceHandle> same{};
+			auto flush = [&] {
+				if (!run.bytes)
+					return;
+				a_commands.CopyBufferRegion(run.target, run.dst, run.latch, run.src, run.bytes);
+				run.bytes = 0;
+			};
+			auto copyLists = [&](std::span<const LatchedList> a_lists) {
+				for (const auto& list : a_lists) {
+					if (!list.latch || (list.fixed && !a_withZeros))
+						continue;
+					const auto at = list.latch->At(a_run);
+					const auto latch = at.buffer->GetAPIResource().GetHandle();
+					const std::uint64_t region = at.offset;
+					for (const auto& copy : list.copies) {
+						const auto target = a_target(copy.target);
+						if (!target.valid())
+							continue;
+						const std::uint64_t src = region + copy.latchOffset;
+						if (run.bytes && same(run.target, target) && same(run.latch, latch) && run.dst + run.bytes == copy.dstOffset && run.src + run.bytes == src) {
+							run.bytes += copy.bytes;
+							continue;
+						}
+						flush();
+						run = { target, latch, copy.dstOffset, src, copy.bytes };
+					}
+				}
+			};
+			copyLists(a_source.lists);
+			for (const auto& hosted : a_source.hosted)
+				copyLists(hosted.lists);
+			flush();
+		}
+
+		struct LatchedCopiesBindings
+		{
+			std::vector<std::pair<const void*, org::ResourceBindingToken>> targets;  // LatchedTarget::Key
+		};
+
+		class LatchedCopiesPass final : public org::TypedRenderGraphPass<LatchedCopiesPass, LatchedSource, LatchedCopiesBindings>
+		{
+		public:
+			LatchedCopiesPass(std::function<std::vector<LatchedTarget>()> a_targets, std::function<LatchedSource(const org::PassPrepareContext&)> a_source,
+				std::atomic<std::shared_ptr<const std::vector<const void*>>>* a_declared) :
+				targets(std::move(a_targets)), source(std::move(a_source)), declared(a_declared), zeros(!CurrentGraphConditions().cpuPipeline) {}
+
+			LatchedCopiesBindings Declare(org::PassBuilder& a_builder)
+			{
+				a_builder.PreferQueue(org::QueueKind::Graphics);
+				LatchedCopiesBindings bindings{};
+				auto keys = std::make_shared<std::vector<const void*>>();
+				for (const auto& target : targets()) {
+					bindings.targets.emplace_back(target.Key(), target.versioned ? a_builder.CopyDestination(*target.versioned).Resource() : a_builder.CopyDestination(target.buffer));
+					keys->push_back(target.Key());
+				}
+				if (declared)
+					declared->store(std::move(keys), std::memory_order_release);
+				return bindings;
+			}
+
+			void Revision(std::vector<std::uint64_t>&) const {}
+
+			LatchedSource Prepare(const LatchedCopiesBindings&, const org::PassPrepareContext& a_preparation) const
+			{
+				auto prepared = source(a_preparation);
+				prepared.zeros = zeros;
+				return prepared;
+			}
+
+			static void Record(const LatchedCopiesBindings& a_bindings, const LatchedSource& a_prepared, org::PassRecordContext& a_recording)
+			{
+				if (LatchedRecordCut())
+					return;
+				CopyLatchedLists(a_recording.Commands(), a_prepared, a_recording.Run(), [&](const void* a_key) {
+					const auto target = std::find_if(a_bindings.targets.begin(), a_bindings.targets.end(), [&](const auto& a_target) { return a_target.first == a_key; });
+					return target != a_bindings.targets.end() ? a_recording.Resolve(target->second).GetHandle() : rhi::ResourceHandle{};
+				}, a_prepared.zeros);
+			}
+
+		private:
+			std::function<std::vector<LatchedTarget>()> targets;
+			std::function<LatchedSource(const org::PassPrepareContext&)> source;
+			std::atomic<std::shared_ptr<const std::vector<const void*>>>* declared = nullptr;
+			bool zeros = true;  // a CPU pipeline graph's pass copies no zeroed lists
+		};
+	}
+
+	std::shared_ptr<org::RenderPass> MakeLatchedCopiesPass(std::function<std::vector<LatchedTarget>()> a_targets,
+		std::function<LatchedSource(const org::PassPrepareContext&)> a_source, std::atomic<std::shared_ptr<const std::vector<const void*>>>* a_declared)
+	{
+		return std::make_shared<LatchedCopiesPass>(std::move(a_targets), std::move(a_source), a_declared);
+	}
+
+	Extensions::DeclaredReads DeclareFrameBuffers(org::PassBuilder& a_builder, const Resources& a_resources, bool a_lights)
+	{
+		const std::span<const org::SrvView> noViews{};
+		for (const auto& frameBuffer : a_resources.frameBuffers)
+			a_builder.ShaderResource(frameBuffer.copy, noViews);
+		// The frame graph buffers on the graph, such as Light Limit Fix's lights, light list and grid, each with the view
+		// whose index the commit latches.
+		const auto graphBuffers = Extensions::RegisteredFrameGraphBuffers();
+		Extensions::DeclaredReads reads;
+		for (std::size_t b = 0; a_lights && b < graphBuffers.size(); ++b)
+			if ((a_resources.graphBuffers >> b) & 1)
+				for (std::uint32_t r = 0; r < graphBuffers[b].count; ++r)
+					Extensions::DeclarePublishedRead(a_builder, graphBuffers[b].resources[r], reads);
+		// Declare the frame textures' published ids so the graph orders these reads after the producers' writes.
+		Extensions::DeclareGraphTextures(a_builder, Extensions::ColourGraphTextureIds(), reads);
+		// The character light's noise, whichever HDR downsample level the engine names this frame.
+		Extensions::DeclareGraphTextures(a_builder, Extensions::CharacterLightGraphTextureIds(), reads);
+		// Wetness Effects' precipitation occlusion (t70), the engine's depth target once published.
+		Extensions::DeclareGraphTextures(a_builder, Extensions::PrecipitationOcclusionGraphTextureIds(), reads);
+		// Every caller draws with the frame record bound, whose shaders read t117 and t121-t123 and the payload's rows.
+		FrameValues::Get().DeclareReads(a_builder);
+		DeclarePayloadReads(a_builder);
+		return reads;
+	}
+
+	void DeclarePayloadReads(org::PassBuilder& a_builder)
+	{
+		PayloadPools::DeclareReads(a_builder);
+	}
+
+	void RecordPreprocessedDraws(org::PassRecordContext& a_recording, PreprocessStates& a_preprocess, const rhi::PassBeginInfo& a_begin, rhi::DescriptorHeapHandle a_resourceHeap,
+		rhi::DescriptorHeapHandle a_samplerHeap, rhi::PipelineLayoutHandle a_layout, const std::array<std::uint32_t, kFramePushWords>& a_push, rhi::ResourceHandle a_arguments,
+		std::span<const IndirectCall> a_calls, const char* a_preprocessRange)
+	{
+		if (a_calls.empty())
+			return;
+		auto& commands = a_recording.Commands();
+		void* const nvCommands = GpuCounters::CommandBufferRangesActive() ? rhi::vulkan::get_cmd_list(commands) : nullptr;
+		auto beginDrawPass = [&](rhi::CommandList& a_list) {
+			a_list.SetDescriptorHeaps(a_resourceHeap, a_samplerHeap);
+			a_list.BeginPass(a_begin);
+			a_list.SetPrimitiveTopology(rhi::PrimitiveTopology::TriangleList);
+			a_list.BindLayout(a_layout);
+			a_list.PushConstants(rhi::ShaderStage::AllGraphics, 0, kFramePushBinding, 0, kFramePushWords, a_push.data());
+		};
+		if (std::ranges::none_of(a_calls, CallDrawable))
+			return;
+		// Preprocess every call before the pass with the execution's exact state, then execute them in order.
+		auto& state = a_preprocess.Begin(a_recording.Run());
+		beginDrawPass(state);
+		const bool preprocessRange = nvCommands && a_preprocessRange && GpuCounters::PushCommandBufferRange(nvCommands, a_preprocessRange);
+		for (const auto& call : a_calls) {
+			const bool callRange = nvCommands && call.preprocessRange && GpuCounters::PushCommandBufferRange(nvCommands, call.preprocessRange);
+			commands.PreprocessIndirect(state, call.signature, a_arguments, call.argumentsOffset, call.counts, call.countOffset, call.capacity);
+			if (nvCommands)
+				GpuCounters::PopCommandBufferRange(nvCommands, callRange);
+		}
+		if (nvCommands)
+			GpuCounters::PopCommandBufferRange(nvCommands, preprocessRange);
+		state.EndPass();
+		state.End();
+		beginDrawPass(commands);
+		for (const auto& call : a_calls) {
+			const bool range = nvCommands && call.range && GpuCounters::PushCommandBufferRange(nvCommands, call.range);
+			commands.ExecuteIndirect(call.signature, a_arguments, call.argumentsOffset, call.counts, call.countOffset, call.capacity);
+			if (nvCommands)
+				GpuCounters::PopCommandBufferRange(nvCommands, range);
+		}
+		commands.EndPass();
+	}
+
+	bool CallDrawable(const IndirectCall& a_call)
+	{
+		if (a_call.signature.valid())
+			return true;
+		static std::atomic<std::uint32_t> logged{ 0 };
+		if (logged.fetch_add(1) < 4)
+			logger::error("[DCLF] a device-generated call without a signature (capacity {}): skipped, its draws are not drawn", a_call.capacity);
+		return false;
+	}
+
+	void RecordPreprocessedDraw(org::PassRecordContext& a_recording, PreprocessStates& a_preprocess, const rhi::PassBeginInfo& a_begin, rhi::DescriptorHeapHandle a_resourceHeap,
+		rhi::DescriptorHeapHandle a_samplerHeap, rhi::PipelineLayoutHandle a_layout, const std::array<std::uint32_t, kFramePushWords>& a_push, rhi::CommandSignatureHandle a_signature,
+		rhi::ResourceHandle a_arguments, std::uint64_t a_argumentsOffset, rhi::ResourceHandle a_counts, std::uint64_t a_countOffset, std::uint32_t a_capacity)
+	{
+		const IndirectCall call{ a_signature, a_argumentsOffset, a_counts, a_countOffset, a_capacity };
+		RecordPreprocessedDraws(a_recording, a_preprocess, a_begin, a_resourceHeap, a_samplerHeap, a_layout, a_push, a_arguments, std::span(&call, 1));
+	}
+}

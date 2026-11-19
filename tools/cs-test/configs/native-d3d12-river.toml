@@ -1,0 +1,2 @@
+# Native D3D12 at Riverwood's river (river.toml).
+extends = ["native-d3d12", "river"]

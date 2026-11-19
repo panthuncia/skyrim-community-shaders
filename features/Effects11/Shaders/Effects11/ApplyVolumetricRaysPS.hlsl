@@ -1,15 +1,22 @@
+// Dual-target (Common/OrgResources.hlsli). Under ORG the shared constant buffers and SharedData's depth are heap
+// reads through the push block (ORG_SHARED_CONSTANTS, ORG_HEADER_RESOURCES), and VLData is the frame's latch region.
+#define ORG_SHARED_CONSTANTS
+#define ORG_HEADER_RESOURCES
+#include "Common/OrgResources.hlsli"
+#include "Effects11/VolumetricRaysData.hlsli"
+
+#define APPLY_VOLUMETRIC_RAYS_RESOURCES(X)           \
+	X(SHARED, ConstantBuffer, Shared, 0)              \
+	X(SRV, Texture2D<float>, BlurredShadowTexture, 0) \
+	X(SRV, Texture2D<float>, RaymarchDepthTexture, 1) \
+	X(LATCH, VLData, VL, 1)                           \
+	X(EXTERN, Texture2D<float4>, DepthTexture, 17)
+ORG_PUSH_BLOCK(APPLY_VOLUMETRIC_RAYS_RESOURCES(ORG_HANDLE))
+
 #include "Common/ColorManagement.hlsli"
 #include "Common/SharedData.hlsli"
 
-Texture2D<float> BlurredShadowTexture : register(t0);
-Texture2D<float> RaymarchDepthTexture : register(t1);
-
-// Half-res target dimensions; same layout the blur passes use.
-cbuffer VLData : register(b1)
-{
-	int2 ScreenSize;
-	int2 ScreenSizeMin1;
-}
+APPLY_VOLUMETRIC_RAYS_RESOURCES(ORG_RESOURCE)
 
 struct VS_OUTPUT_POST
 {
@@ -38,7 +45,7 @@ float UpsampleScattering(float2 fullResPixel, float fullResDepth)
 	float weightSum = 0.0;
 	[unroll] for (uint i = 0; i < 4; i++)
 	{
-		int2 tap = clamp(basePixel + offsets[i], int2(0, 0), ScreenSizeMin1);
+		int2 tap = clamp(basePixel + offsets[i], int2(0, 0), VL.ScreenSizeMin1);
 		float tapDepth = RaymarchDepthTexture[tap];
 		float relativeDelta = abs(referenceDepth - tapDepth) / max(referenceDepth, 1e-4);
 		float weight = bilinearWeights[i] * rcp(0.01 + relativeDelta);

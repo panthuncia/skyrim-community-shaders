@@ -1,0 +1,2 @@
+# Native Vulkan, each upscale method (upscalers.toml).
+extends = ["native-vulkan", "upscalers"]

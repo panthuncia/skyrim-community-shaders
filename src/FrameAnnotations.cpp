@@ -1,5 +1,7 @@
 #include "FrameAnnotations.h"
 
+#include "GpuEventTimers.h"
+#include "GpuIdleTrace.h"
 #include "State.h"
 #include "Util.h"
 
@@ -29,15 +31,13 @@ namespace FrameAnnotations
 	{
 		static void thunk(RE::BSShader* shader, RE::BSRenderPass* pass, uint32_t renderFlags)
 		{
-			if (globals::state->AnnotateDraws()) {
+			if (GeometryEventsEnabled()) {
 				uint32_t descriptor = 0;
 				if (globals::game::currentPixelShader && *globals::game::currentPixelShader) {
 					descriptor = (*globals::game::currentPixelShader)->id;
 				}
-				const std::string definesSuffix = Util::GetShaderDefinesSuffix(globals::state->GetDefinesString());
-				std::string diskPath = std::format("Data/ShaderCache/{}/{:X}{}.pso", shader->fxpFilename, descriptor, definesSuffix);
-				const std::string passName = std::format("[{}:{:X}] ({:X}) <{}> {} -> {}", magic_enum::enum_name(ShaderType), descriptor, pass->passEnum,
-					pass->accumulationHint, pass->geometry->name.c_str(), diskPath);
+				const std::string passName = std::format("[{}:{:X}] ({:X}) <{}> {}", magic_enum::enum_name(ShaderType), descriptor, pass->passEnum,
+					pass->accumulationHint, pass->geometry->name.c_str());
 				globals::state->BeginPerfEvent(passName);
 			}
 
@@ -54,7 +54,7 @@ namespace FrameAnnotations
 		{
 			func(shader, pass, renderFlags);
 
-			if (globals::state->AnnotateDraws()) {
+			if (GeometryEventsEnabled()) {
 				globals::state->EndPerfEvent();
 			}
 		}
@@ -334,10 +334,21 @@ namespace FrameAnnotations
 		static inline REL::Relocation<decltype(thunk)> func;
 	};
 
+	namespace
+	{
+		bool hooksInstalled = false;
+	}
+
+	bool GeometryEventsEnabled()
+	{
+		return hooksInstalled && globals::state->AnnotateDraws() && !GpuIdleTrace::Requested() && !GpuEventTimers::Requested();
+	}
+
 	void OnPostPostLoad()
 	{
 		if (!globals::state->frameAnnotations)
 			return;
+		hooksInstalled = true;
 
 		stl::detour_thunk<Main_RenderShadowmasks>(REL::RelocationID(100422, 107140));
 

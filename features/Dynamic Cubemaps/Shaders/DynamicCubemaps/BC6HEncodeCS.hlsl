@@ -40,18 +40,34 @@
 #define OPTIMIZE_ENDPOINTS 1
 #define LUMINANCE_WEIGHTS 1
 
+// A per-component choice by a vector condition: HLSL 2021 (DXC) takes one only through select,
+// FXC's ternary is per component.
+#if defined(__HLSL_VERSION) && __HLSL_VERSION >= 2021
+#	define BC6H_SELECT(c, a, b) select(c, a, b)
+#else
+#	define BC6H_SELECT(c, a, b) ((c) ? (a) : (b))
+#endif
+
 static const float HALF_MAX = 65504.0f;
 static const uint PATTERN_NUM = 32;
 
-Texture2DArray<float4> SrcTexture : register(t0);
-RWTexture2DArray<uint4> OutputTexture : register(u0);
+// Dual-target (Common/OrgResources.hlsli). The mip's constants are a PUSH struct: under ORG pushed
+// with each mip's dispatch, under D3D11 the cbuffer at b0.
+#include "Common/OrgResources.hlsli"
 
-cbuffer BC6HEncodeCB : register(b0)
+struct BC6HEncodeConstants
 {
 	uint2 TextureSizeInBlocks;
 	uint MipLevel;
 	uint pad;
 };
+
+#define BC6H_ENCODE_RESOURCES(X)                      \
+	X(SRV, Texture2DArray<float4>, SrcTexture, 0)     \
+	X(UAV, RWTexture2DArray<uint4>, OutputTexture, 0) \
+	X(PUSH, BC6HEncodeConstants, Encode, 0)
+ORG_PUSH_BLOCK(BC6H_ENCODE_RESOURCES(ORG_HANDLE))
+BC6H_ENCODE_RESOURCES(ORG_RESOURCE)
 
 float CalcMSLE(float3 a, float3 b)
 {
@@ -179,8 +195,8 @@ void InsetColorBBoxP1(float3 texels[16], inout float3 blockMin, inout float3 blo
 	float3 refinedBlockMax = blockMin;
 
 	for (uint i = 0; i < 16; ++i) {
-		refinedBlockMin = min(refinedBlockMin, texels[i] == blockMin ? refinedBlockMin : texels[i]);
-		refinedBlockMax = max(refinedBlockMax, texels[i] == blockMax ? refinedBlockMax : texels[i]);
+		refinedBlockMin = min(refinedBlockMin, BC6H_SELECT(texels[i] == blockMin, refinedBlockMin, texels[i]));
+		refinedBlockMax = max(refinedBlockMax, BC6H_SELECT(texels[i] == blockMax, refinedBlockMax, texels[i]));
 	}
 
 	float3 logRefinedBlockMax = log2(refinedBlockMax + 1.0f);
@@ -330,18 +346,18 @@ void EncodeP1(inout uint4 block, inout float blockMSLE, float3 texels[16])
 	uint2 blockCoord = dispatchThreadID.xy;
 	uint faceIndex = dispatchThreadID.z;
 
-	if (all(blockCoord < TextureSizeInBlocks)) {
+	if (all(blockCoord < Encode.TextureSizeInBlocks)) {
 		int2 texelBase = int2(blockCoord) * 4;
 
 		uint mipWidth, mipHeight, elements, levels;
-		SrcTexture.GetDimensions(MipLevel, mipWidth, mipHeight, elements, levels);
+		SrcTexture.GetDimensions(Encode.MipLevel, mipWidth, mipHeight, elements, levels);
 		int2 maxTexel = int2(mipWidth, mipHeight) - 1;
 
 		float3 texels[16];
 		[unroll] for (int i = 0; i < 16; i++)
 		{
 			int2 texel = min(texelBase + int2(i % 4, i / 4), maxTexel);
-			texels[i] = SrcTexture.Load(int4(texel, int(faceIndex), int(MipLevel))).rgb;
+			texels[i] = SrcTexture.Load(int4(texel, int(faceIndex), int(Encode.MipLevel))).rgb;
 		}
 
 		uint4 block = uint4(0, 0, 0, 0);

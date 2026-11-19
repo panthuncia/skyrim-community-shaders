@@ -4,67 +4,37 @@
 #include "Common/Color.hlsli"
 #include "PostProcessing/common.hlsli"
 
+#include "Common/OrgResources.hlsli"
+
 // The same constants and LUT are used by the standalone and fused pixel shaders.
+// The fused one (Composite) is D3D11 only. The standalone one (colorgrading.hlsl) declares TexLUT and
+// GradingSampler in its own resource list, with its push block, before it includes this file.
 #ifdef COMPOSITE_APPLY_LUT
-#	define COLOR_GRADING_CB b0
+#	if defined(CS_ORG_BINDLESS)
+#		error "the fused grading is D3D11 only: ORG runs Composite and ColorGrading as separate passes"
+#	endif
 Texture3D<float4> TexLUT : register(t15);
 SamplerState GradingSampler : register(s2);
-#else
-#	define COLOR_GRADING_CB b1
-Texture3D<float4> TexLUT : register(t1);
-SamplerState GradingSampler : register(s0);
 #endif
 
 #define LUT_SIZE 64
 
 #include "PostProcessing/ColorGrading/Include/OpenDRTConfig.hlsli"
 
-cbuffer ColorCB : register(COLOR_GRADING_CB)
-{
-	float4 asccdl[3];
-	float4 liftgammagain[3];  // lift，gamma，gain
-	float4 inOutGamma;        // .z = input gamma, .w = output gamma
-	float4 oklchSaturation;
-	float4 oklchColorMixer[7];
-	float4 contrast;
-	float4 pivot;
-	float4 exposureTemperatureTint;
-	float4 shadows;
-	float4 midtones;
-	float4 highlights;
-	float4 shadowsHighlightsRange;  // shadowBegin, shadowEnd, highlightBegin, highlightEnd
+// ColorGrading::ColorCB. D3D11: cbuffer ColorCB, at b0 in the fused shader and b1 in the standalone one. ORG: the
+// fields of the ColorGradingFrame latch, read through statics of the same names (Common/OrgResources.hlsli).
+#define COLOR_CB_FIELDS(M, A)                                                                    	A(float4, asccdl, 3)                                                                         	A(float4, liftgammagain, 3) /* lift，gamma，gain */                                          	M(float4, inOutGamma)       /* .z = input gamma, .w = output gamma */                        	M(float4, oklchSaturation)                                                                   	A(float4, oklchColorMixer, 7)                                                                	M(float4, contrast)                                                                          	M(float4, pivot)                                                                             	M(float4, exposureTemperatureTint)                                                           	M(float4, shadows)                                                                           	M(float4, midtones)                                                                          	M(float4, highlights)                                                                        	M(float4, shadowsHighlightsRange) /* shadowBegin, shadowEnd, highlightBegin, highlightEnd */ 	A(float4, tonemapParams, 2)                                                                  	A(float4, inputToWorking, 3)   /* scene RGB → working color space */                         	A(float4, workingToTonemap, 3) /* working → tonemapper native space */                       	A(float4, tonemapToOutput, 3)  /* tonemapper native → output space */                        	A(float4, workingToXYZ, 3)     /* working → XYZ D65 (white balance and Oklab) */             	A(float4, xyzToWorking, 3)     /* XYZ D65 → working */                                       	M(float4, workingWhitePoint)   /* .xy = D65 reference white of the XYZ matrices */           	M(float4, shadowsOffset)       /* SMH color offsets */                                       	M(float4, midtonesOffset)                                                                    	M(float4, highlightsOffset)                                                                  	M(float4, cinematic) /* game value: saturation, brightness, contrast */                      	M(float4, fade)      /* color */                                                             	M(float4, tint)      /* color */                                                             	M(uint, logType)                                                                             	M(uint, skipLDR)                                                                             	M(uint, skipLUT)                                                                             	M(uint, enableTonemap)                                                                       	M(uint, enableColorSpaceTransform)                                                           	M(uint, enableHDR)          /* HDR display is enabled (auto-set from HDR feature) */         	M(float, hdrPeakNits)       /* Maximum display brightness in nits for HDR */                 	M(float, hdrPaperWhiteNits) /* Reference white brightness in nits for HDR */                 	M(OpenDRTConfig, odrtConfig)
 
-	float4 tonemapParams[2];
-	float4 inputToWorking[3];    // scene RGB → working color space
-	float4 workingToTonemap[3];  // working → tonemapper native space
-	float4 tonemapToOutput[3];   // tonemapper native → output space
-
-	float4 workingToXYZ[3];  // working → XYZ D65 (white balance and Oklab)
-	float4 xyzToWorking[3];  // XYZ D65 → working
-
-	float4 workingWhitePoint;  // .xy = D65 reference white of the XYZ matrices
-
-	float4 shadowsOffset;  // SMH color offsets
-	float4 midtonesOffset;
-	float4 highlightsOffset;
-
-	// game value
-	float4 cinematic;  // saturation, brightness, contrast
-	float4 fade;       // color
-	float4 tint;       // color
-
-	uint logType;
-	uint skipLDR;
-	uint skipLUT;
-	uint enableTonemap;
-	uint enableColorSpaceTransform;
-	uint enableHDR;           // HDR display is enabled (auto-set from HDR feature)
-	float hdrPeakNits;        // Maximum display brightness in nits for HDR
-	float hdrPaperWhiteNits;  // Reference white brightness in nits for HDR
-
-	OpenDRTConfig odrtConfig;
-};
-#undef COLOR_GRADING_CB
+#ifdef COMPOSITE_APPLY_LUT
+ORG_GLOBAL_LATCH_BEGIN(ColorConstants, ColorCB, 0)
+#else
+ORG_GLOBAL_LATCH_BEGIN(ColorConstants, ColorCB, 1)
+#endif
+COLOR_CB_FIELDS(ORG_GLOBAL_MEMBER, ORG_GLOBAL_ARRAY)
+ORG_GLOBAL_LATCH_END(ColorConstants, ColorGradingFrame, 1)
+#define ORG_GLOBAL_LATCH ColorGradingFrame
+COLOR_CB_FIELDS(ORG_GLOBAL_STATIC, ORG_GLOBAL_STATIC_ARRAY)
+#undef ORG_GLOBAL_LATCH
 
 float3 LogToLinear(float3 logColor)
 {

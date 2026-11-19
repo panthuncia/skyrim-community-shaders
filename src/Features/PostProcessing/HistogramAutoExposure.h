@@ -52,6 +52,16 @@ struct HistogramAutoExposure : public PostProcessFeature
 	};
 	static_assert(sizeof(AutoExposureCB) == 48);
 	static_assert(offsetof(AutoExposureCB, ExposureTarget) == 36);
+
+	/**
+	 * @brief The constants Draw uploads, also latched by the ORG path (ORG/ORGHistogramAutoExposure.cpp).
+	 * @param a_reset Whether the adaptation starts over this frame (it then takes the measured value at once).
+	 */
+	AutoExposureCB Constants(bool a_reset) const;
+
+	/** @brief CS_Histogram's group counts for an input a_width by a_height. */
+	static std::array<uint32_t, 2> HistogramGroups(uint a_width, uint a_height);
+
 	std::unique_ptr<ConstantBuffer> autoExposureCB = nullptr;
 	std::unique_ptr<StructuredBuffer> histogramSB = nullptr;
 	std::unique_ptr<StructuredBuffer> adaptationSB = nullptr;
@@ -89,6 +99,14 @@ struct HistogramAutoExposure : public PostProcessFeature
 	int64_t histogramReadbackRequestFrame = -1;
 	int64_t exposureReadbackRequestFrame = -1;
 	int64_t adaptationReadbackFrame = -1;
+
+	/** @brief What the settings UI and the debug log want read back from this frame's buffers. */
+	struct Readbacks
+	{
+		bool histogram = false;   // the histogram panel is open
+		bool adaptation = false;  // the panel or the Auto ISO meter
+	};
+	Readbacks WantedReadbacks() const;
 
 	struct ExposureParameters
 	{

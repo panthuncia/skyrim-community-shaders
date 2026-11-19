@@ -6,13 +6,20 @@
 #endif
 
 #include "Common/Game.hlsli"
+#include "Common/OrgResources.hlsli"
 
 namespace CloudShadows
 {
+	// A shader that binds the cloud shadows elsewhere (CLOUD_SHADOW_REGISTER, the Physical Sky passes) declares the register itself;
+	// that override is D3D11-only.
+#if defined(CS_ORG_BINDLESS) && defined(ORG_HEADER_RESOURCES)
+	ORG_HEADER_SRV(TextureCube<float>, CloudShadowsTexture, 25)
+#else
 	TextureCube<float> CloudShadowsTexture : register(CLOUD_SHADOW_REGISTER);
+#endif
 #if defined(CLOUDS)
 	// Cloud occlusion of the layers drawn up to the current one, for cloud self shadowing
-	TextureCube<float> CloudSelfShadowTexture : register(t26);
+	ORG_HEADER_SRV(TextureCube<float>, CloudSelfShadowTexture, 26)
 #endif
 
 	const static float CloudHeight = (2e3f / GAME_UNIT_TO_M);

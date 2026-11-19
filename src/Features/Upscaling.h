@@ -71,7 +71,7 @@ public:
 
 		bool vsync = false;
 		// Zero disables the cap; positive values divide the monitor refresh rate.
-		int frameRateLimitDivisor = 1;
+		int frameRateLimitDivisor = 0;
 	};
 
 	Settings settings;
@@ -92,13 +92,29 @@ public:
 	static bool IsWindowMinimized();
 
 	static void NotifyWindowFocus(bool a_focused);        // WM_ACTIVATEAPP / WM_ACTIVATE
+	/**
+	 * @brief Any thread (a test run's dclf:fg command): frame generation set as the menu's method stepper sets it, at the frame
+	 * boundary after the next render frame's start. 0: off, 1: FSR-FG, 2: DLSS-G.
+	 */
+	static void RequestFrameGenTest(int a_method);
+	/** @brief A test run's upscale method (the "upscale" command: an UpscaleMethod), applied at the frame boundary after the next render frame's start. */
+	static void RequestUpscaleTest(int a_method);
 	static void NotifyWindowModifying(bool a_modifying);  // WM_ENTERSIZEMOVE / WM_EXITSIZEMOVE
+	static void NotifyDisplayState(bool a_on);            // GUID_CONSOLE_DISPLAY_STATE
+	static void NotifyDesktopChanged();                   // WM_DISPLAYCHANGE
+
+	/** @brief With CS_FG_DISPLAY_SUSPEND=1, whether the display is off or the desktop changed moments ago: frame generation stays down until it settles. */
+	static bool IsDisplayUnsettled();
 
 	/** @brief Returns whether presenting must be suspended. */
 	static bool IsWindowUnusable();
 
 	static inline std::atomic<bool> s_windowUnfocused{ false };
+	static inline std::atomic<int> s_frameGenTestRequest{ -1 };  // RequestFrameGenTest's, -1: none
+	static inline std::atomic<int> s_upscaleTestRequest{ -1 };   // RequestUpscaleTest's, -1: none
 	static inline std::atomic<bool> s_windowModifying{ false };
+	static inline std::atomic<bool> s_displayOff{ false };
+	static inline std::atomic<std::uint64_t> s_displayChangedTick{ 0 };
 
 	// Timing and scaling
 	double refreshRate = 0.0;
@@ -143,6 +159,11 @@ public:
 	void ConfigureTAA();
 	void ConfigureUpscaling(RE::BSGraphics::State* a_state);
 	void Upscale();
+	/**
+	 * @brief Before an evaluate: DXVK work between the last render-graph epoch and the upscaler. The rule and its evidence:
+	 * docs/development/render-graph.md, "Hazard: external Vulkan work directly after a graph epoch". Frame generation is not covered.
+	 */
+	void SeparateFromGraphEpochs();
 
 	bool IsFrameGenerationActive() const;
 
@@ -180,6 +201,8 @@ public:
 	// D3D11 textures
 	Texture2D* upscaledTexture = nullptr;
 	Texture2D* hudlessTexture = nullptr;
+	// A small typed UAV DXVK clears before each evaluate (SeparateFromGraphEpochs).
+	winrt::com_ptr<ID3D11UnorderedAccessView> epochSeparator;
 
 	virtual void ClearShaderCache() override;
 
@@ -196,6 +219,8 @@ public:
 	void PostDisplay();
 	void PerformUpscaling();
 	void UpscaleDepth();
+	/** @brief The depth upscale's constants for this frame: the jitter, and the wide kernel's choice with its hysteresis. */
+	JitterCB DepthUpscaleConstants();
 
 	static double GetRefreshRate(HWND a_window);
 
@@ -209,6 +234,10 @@ private:
 	void CreateHudlessTexture();
 	bool DestroyHudlessTexture(bool a_commandRingDrained = false);
 	ID3D11Resource* CaptureHudlessColor();
+	/** @brief The upscaler's output as ORGUpscaling::Texture chooses it (the graph's export with CS_ORG_UPSCALING); null when neither exists. */
+	ID3D11Texture2D* UpscaledResource() const;
+	/** @brief Frame generation's hudless colour, as UpscaledResource. */
+	ID3D11Texture2D* HudlessResource() const;
 	bool CopyHudlessColor(ID3D11ShaderResourceView* a_source);
 	void PrepareFrameGeneration(ID3D11Resource* a_hudlessColor);
 

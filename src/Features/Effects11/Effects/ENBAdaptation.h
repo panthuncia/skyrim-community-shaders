@@ -19,10 +19,7 @@ public:
 	TextureManager::Texture textureCurrent;
 	TextureManager::Texture textureSunMasked;
 
-protected:
-	void CreateEffectTextures() override;
-
-private:
+	/** @brief AdaptationSunMaskPS's constants (SunMaskConstants): the matrices are row-major, as the shader reads their rows. */
 	struct alignas(16) SunMaskCB
 	{
 		Matrix CameraViewProj;
@@ -32,6 +29,19 @@ private:
 		float4 MaskParams;
 	};
 
+	/** @brief The side of the sun mask's square texture, sampled from the downsampled frame's 256x256 mip. */
+	static constexpr uint32_t kSunMaskSize = 256;
+
+	/**
+	 * @brief The sun mask's constants for this frame. The camera and resolution are always filled.
+	 * @return Whether the [PROCEDURALSUN] disc is to be masked; when not, a_out's mask leaves every pixel as it is.
+	 */
+	bool SunMaskConstants(SunMaskCB& a_out) const;
+
+protected:
+	void CreateEffectTextures() override;
+
+private:
 	/** @brief Names of the adaptation ping-pong pair for this frame: (previous, output). */
 	static std::pair<const char*, const char*> GetTextureNames();
 

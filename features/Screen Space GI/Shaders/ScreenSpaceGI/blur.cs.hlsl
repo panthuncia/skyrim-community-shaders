@@ -1,6 +1,24 @@
 // FAST DENOISING WITH SELF-STABILIZING RECURRENT BLURS
 // 	https://developer.download.nvidia.com/video/gputechconf/gtc/2020/presentations/s22699-fast-denoising-with-self-stabilizing-recurrent-blurs.pdf
 
+#define ORG_SHARED_CONSTANTS
+#include "Common/OrgResources.hlsli"
+
+#define BLUR_RESOURCES(X)                               \
+	X(SHARED, ConstantBuffer, Shared, 0)                \
+	X(EXTERN_LATCH, SSGIConstants, SsgiFrame, 1)        \
+	X(EXTERN, SamplerState, samplerPointClamp, 0)       \
+	X(EXTERN, SamplerState, samplerLinearClamp, 1)      \
+	X(SRV, Texture2D<half>, srcDepth, 0)                \
+	X(SRV, Texture2D<half4>, srcNormalRoughness, 1)     \
+	X(SRV, Texture2D<unorm float>, srcAccumFrames, 2)   \
+	X(SRV, Texture2D<float4>, srcIlY, 3)                \
+	X(SRV, Texture2D<float2>, srcIlCoCg, 4)             \
+	X(UAV, RWTexture2D<unorm float>, outAccumFrames, 0) \
+	X(UAV, RWTexture2D<float4>, outIlY, 1)              \
+	X(UAV, RWTexture2D<float2>, outIlCoCg, 2)
+ORG_PUSH_BLOCK(BLUR_RESOURCES(ORG_HANDLE))
+
 #include "Common/FastMath.hlsli"
 #include "Common/FrameBuffer.hlsli"
 #include "Common/GBuffer.hlsli"
@@ -8,15 +26,7 @@
 #include "Common/Random.hlsli"
 #include "ScreenSpaceGI/common.hlsli"
 
-Texture2D<half> srcDepth : register(t0);
-Texture2D<half4> srcNormalRoughness : register(t1);
-Texture2D<unorm float> srcAccumFrames : register(t2);  // maybe half-res
-Texture2D<float4> srcIlY : register(t3);               // maybe half-res
-Texture2D<float2> srcIlCoCg : register(t4);            // maybe half-res
-
-RWTexture2D<unorm float> outAccumFrames : register(u0);
-RWTexture2D<float4> outIlY : register(u1);
-RWTexture2D<float2> outIlCoCg : register(u2);
+BLUR_RESOURCES(ORG_RESOURCE)
 
 // samples = 8, min distance = 0.5, average samples on radius = 2
 static const float3 g_Poisson8[8] = {
@@ -87,9 +97,9 @@ float2x2 getRotationMatrix(float noise)
 	// Early exit if dispatch thread is outside frame bounds
 	if (any(dtid >= uint2(OUT_FRAME_DIM)))
 		return;
-	const float2 frameScale = FrameDim * RcpTexDim;
+	const float2 frameScale = SsgiFrame.FrameDim * SsgiFrame.RcpTexDim;
 
-	float radius = BlurRadius;
+	float radius = SsgiFrame.BlurRadius;
 #ifdef TEMPORAL_DENOISER
 	float accumFrames = srcAccumFrames[dtid];
 	radius = lerp(radius, 2, 1 / (1 + accumFrames * 255));
@@ -103,7 +113,7 @@ float2x2 getRotationMatrix(float noise)
 	float3 pos = ScreenToViewPosition(screenPos, depth);
 	float3 normal = GBuffer::DecodeNormal(FULLRES_LOAD(srcNormalRoughness, dtid, uv * frameScale, samplerLinearClamp).xy);
 
-	const float2 pixelDirRBViewspaceSizeAtCenterZ = depth.xx * NDCToViewMul.xy * RCP_OUT_FRAME_DIM;
+	const float2 pixelDirRBViewspaceSizeAtCenterZ = depth.xx * SsgiFrame.NDCToViewMul.xy * RCP_OUT_FRAME_DIM;
 	const float worldRadius = radius * pixelDirRBViewspaceSizeAtCenterZ.x;
 	float2x3 TvBv = getKernelBasis(normal, normal);  // D = N
 	float halfAngle = Math::HALF_PI;
@@ -111,7 +121,7 @@ float2x2 getRotationMatrix(float noise)
 	TvBv[0] *= worldRadius;
 	TvBv[1] *= worldRadius;
 #ifdef TEMPORAL_DENOISER
-	halfAngle *= 1 - lerp(0, 0.8, sqrt(saturate(accumFrames * 255 / (float)MaxAccumFrames)));
+	halfAngle *= 1 - lerp(0, 0.8, sqrt(saturate(accumFrames * 255 / (float)SsgiFrame.MaxAccumFrames)));
 #endif
 
 	const float4 ilY = srcIlY[dtid];
@@ -145,7 +155,7 @@ float2x2 getRotationMatrix(float noise)
 		float3 normalSample = GBuffer::DecodeNormal(normalRoughnessSample.xy);
 
 		// geometry weight
-		w *= saturate(1 - abs(dot(normal, posSample - pos)) * DistanceNormalisation);
+		w *= saturate(1 - abs(dot(normal, posSample - pos)) * SsgiFrame.DistanceNormalisation);
 		// normal weight
 		w *= 1 - saturate(FastMath::acosFast4(saturate(dot(normalSample, normal))) / halfAngle);
 

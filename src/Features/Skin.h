@@ -48,6 +48,12 @@ struct Skin : Feature
 	void SetShaderResources(ID3D11DeviceContext* a_context);
 	void BSLightingShader_SetupGeometry(RE::BSRenderPass* a_pass);
 	void RestoreSampler();
+	/**
+	 * @brief Per-geometry wetness (sweat, water submersion, fade) of the actor that owns a geometry. Public for Drawcall
+	 * Limit Fix, which fills the per-geometry value for the draws it records. Render thread.
+	 * @return (sweat, waterWetness, positionZ, waterDepth); zero for a geometry no actor owns.
+	 */
+	float4 GetWetness(RE::BSGeometry* a_geometry);
 
 	struct Settings
 	{
@@ -129,6 +135,7 @@ private:
 	};
 	struct ActorWetnessCacheEntry
 	{
+		const RE::TESObjectREFR* actor = nullptr;  // identity check only; never dereferenced from the cache
 		float4 wetness{ 0, 0, 0, 0 };
 		uint32_t frameCount = 0;
 	};
@@ -261,7 +268,6 @@ private:
 	void DrawEditorDialogs();
 	void DrawGlobalSettings();
 	float GetWaterHeight(const RE::TESObjectREFR* a_ref, const RE::NiPoint3& a_pos);
-	float4 GetWetness(RE::BSGeometry* a_geometry);
 	struct Hooks
 	{
 		struct SetupGeometry

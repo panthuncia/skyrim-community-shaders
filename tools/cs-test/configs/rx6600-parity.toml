@@ -1,0 +1,26 @@
+# Converted from tools/cs-ab/scenarios/rx6600-parity.env. Old frame N became world-ready + (N - 100) for the first
+# command, then each command at 'previous' plus the old gap.
+# RX 6600: short set-parity run at the newest save (GPU culling against the CPU's verdicts; "members rejected with their live
+# bound in view" counts wrong rejections). tgm first: a wolf attacks the player at the newest save.
+extends = ["guest"]
+
+[dclf]
+set_parity = true
+stats = true
+
+[dxvk]
+filter_device_name = "AMD Radeon RX 6600"
+
+[[steps]]
+at = "world-ready"
+frames = 0
+do = "console"
+arg = "tgm"
+
+[[steps]]
+at = "previous"
+frames = 1270
+do = "exit"
+
+[expect]
+reach = "world-ready"

@@ -1,0 +1,6 @@
+# Plain D3D11 mode: DXVK runs the game, the render graph is off (CS_ORG=0), every feature on its D3D11 path. Still supported.
+# Compose it: d3d11+quick.
+extends = ["base"]
+
+[org]
+enabled = false

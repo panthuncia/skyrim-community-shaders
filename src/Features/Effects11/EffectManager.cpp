@@ -7,9 +7,12 @@
 #include "Globals.h"
 #include "Menu.h"
 #include "Overlays/PresetOverlays.h"
+#include "RenderGraph/Engine/Tripwire/Tripwire.h"
 #include "State.h"
+#include "Utils/D3D.h"
 #include "Utils/Game.h"
 
+#include "ORG/ORGFxRuntime.h"
 #include "PresetManager.h"
 #include "SettingManager.h"
 #include "TextureManager.h"
@@ -151,6 +154,10 @@ void EffectManager::Apply()
 	// Overlays must be read before compiling, since #define values are taken from them while preprocessing
 	Overlays::Manager::GetSingleton().LoadFiles();
 	Overlays::Manager::GetSingleton().ClearCompiledDefines();
+
+	// The ORG FX runtime reads these effects' variables; it builds again from the reloaded effects.
+	ORGFxRuntime::Get().Invalidate();
+
 	if (auto& rainRefraction = globals::features::rainRefraction; rainRefraction.loaded)
 		rainRefraction.LoadPresetRaindrops(PresetManager::GetSingleton().GetENBSeriesPath());
 
@@ -445,6 +452,13 @@ void EffectManager::ExecuteEffect(EffectBase& a_effect, uint32_t enableSettingID
 		return;
 
 	a_effect.profiler = globals::profiler;
+	UpdateEffectValues(a_effect);
+	a_effect.Execute();
+	a_effect.profiler = nullptr;
+}
+
+void EffectManager::UpdateEffectValues(EffectBase& a_effect)
+{
 #ifdef ENABLE_ENB_EXTENDER
 	const float weatherBlend = Effects11Editor::GetSingleton().IsOpen() ? (commonData.weather[2] > 0.5f ? 1.0f : 0.0f) : commonData.weather[2];
 	a_effect.ApplyWeatherBlending(weatherBlend, currentWeatherID, previousWeatherID);
@@ -453,8 +467,6 @@ void EffectManager::ExecuteEffect(EffectBase& a_effect, uint32_t enableSettingID
 	UpdateCommonVariablesForEffect(a_effect);
 	a_effect.UpdateExternBindings();
 	a_effect.UpdateEffectVariables();
-	a_effect.Execute();
-	a_effect.profiler = nullptr;
 }
 
 bool EffectManager::ExecuteEffects(RE::BSGraphics::RenderTargetData& a_input, RE::BSGraphics::RenderTargetData& a_output)
@@ -480,8 +492,9 @@ bool EffectManager::ExecuteEffects(RE::BSGraphics::RenderTargetData& a_input, RE
 
 	// Effects sample kMAIN as TextureOriginal, so mirror any other input into it
 	auto& textureOriginal = renderer->GetRuntimeData().renderTargets[RE::RENDER_TARGETS::kMAIN];
+	// Engine target fields can be tripwire handles: the passes below take the DXVK objects they wrap.
 	if (&a_input != &textureOriginal && a_input.SRV && textureOriginal.RTV)
-		CopyToTarget(a_input.texture, a_input.SRV, textureOriginal.texture, textureOriginal.RTV);
+		CopyToTarget(RenderGraph::Engine::Tripwire::Unwrap(a_input.texture), RenderGraph::Engine::Tripwire::Unwrap(a_input.SRV), RenderGraph::Engine::Tripwire::Unwrap(textureOriginal.texture), RenderGraph::Engine::Tripwire::Unwrap(textureOriginal.RTV));
 
 	// Set our render state
 	context->RSSetState(rasterizerState.get());
@@ -496,7 +509,7 @@ bool EffectManager::ExecuteEffects(RE::BSGraphics::RenderTargetData& a_input, RE
 	context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP);
 
 	globals::profiler->BeginPass("Effects11::ColorCorrection");
-	ApplyColorCorrection(textureOriginal.UAV);
+	ApplyColorCorrection(RenderGraph::Engine::Tripwire::Unwrap(textureOriginal.UAV));
 	globals::profiler->EndPass();
 
 	auto& textureManager = TextureManager::GetSingleton();
@@ -504,7 +517,7 @@ bool EffectManager::ExecuteEffects(RE::BSGraphics::RenderTargetData& a_input, RE
 	ExecuteEffect(enbDepthOfField, ids.useDepthOfField);
 
 	if (WillEffectRun(enbBloom, ids.useBloom) || WillEffectRun(enbLens, ids.useLens) || WillEffectRun(enbAdaptation, ids.useAdaptation))
-		textureManager.UpdateDownsampledTexture(textureOriginal.SRV);
+		textureManager.UpdateDownsampledTexture(RenderGraph::Engine::Tripwire::Unwrap(textureOriginal.SRV));
 
 	ExecuteEffect(enbBloom, ids.useBloom);
 	ExecuteEffect(enbLens, ids.useLens);
@@ -520,7 +533,7 @@ bool EffectManager::ExecuteEffects(RE::BSGraphics::RenderTargetData& a_input, RE
 	bool wroteOutput = false;
 	if (textureSDRTemp && a_output.RTV) {
 		globals::profiler->BeginPass("Effects11::CopyToOutput");
-		wroteOutput = CopyTexture(textureSDRTemp->srv.get(), a_output.RTV);
+		wroteOutput = CopyTexture(textureSDRTemp->srv.get(), RenderGraph::Engine::Tripwire::Unwrap(a_output.RTV));
 		globals::profiler->EndPass();
 	}
 
@@ -574,7 +587,7 @@ void EffectManager::CreateQuadGeometry()
 	initData.pSysMem = vertices;
 
 	DX::ThrowIfFailed(globals::d3d::device->CreateBuffer(&bufferDesc, &initData, quadVertexBuffer.put()));
-	Util::SetResourceName(quadVertexBuffer.get(), "EffectManager::QuadVertexBuffer");
+	Util::SetResourceName(quadVertexBuffer.get(), "Effects11::QuadVertexBuffer");
 
 	// Create input layout for ENB post-processing
 	D3D11_INPUT_ELEMENT_DESC inputElementDescs[] = {
@@ -667,7 +680,9 @@ void EffectManager::CreateCopyShaders()
 
 	winrt::com_ptr<ID3DBlob> psBlob;
 	errorBlob = nullptr;  // Holds any vertex shader warnings, and put() requires an empty pointer
-	hr = D3DCompile(pixelShaderSource.data(), pixelShaderSource.size(), "CopyPS.hlsl", nullptr, nullptr,
+	// Dual-target shader: its includes resolve under Data\Shaders.
+	Util::CustomInclude include;
+	hr = D3DCompile(pixelShaderSource.data(), pixelShaderSource.size(), "CopyPS.hlsl", nullptr, &include,
 		"main", "ps_5_0", 0, 0, psBlob.put(), errorBlob.put());
 
 	if (FAILED(hr)) {
@@ -700,7 +715,7 @@ void EffectManager::CreateCopyShaders()
 	cbDesc.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
 	cbDesc.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
 	globals::d3d::device->CreateBuffer(&cbDesc, nullptr, ditherConstantBuffer.put());
-	Util::SetResourceName(ditherConstantBuffer.get(), "EffectManager::DitherCB");
+	Util::SetResourceName(ditherConstantBuffer.get(), "Effects11::DitherCB");
 
 	logger::info("[EFFECTS11] Created texture copy shaders successfully");
 }
@@ -712,7 +727,9 @@ void EffectManager::CreateColorCorrectionShader()
 		return;
 
 	winrt::com_ptr<ID3DBlob> csBlob, errorBlob;
-	HRESULT hr = D3DCompile(computeShaderSource.data(), computeShaderSource.size(), "ColorCorrectionCS.hlsl", nullptr, nullptr,
+	// Dual-target shader: its includes resolve under Data\Shaders.
+	Util::CustomInclude include;
+	HRESULT hr = D3DCompile(computeShaderSource.data(), computeShaderSource.size(), "ColorCorrectionCS.hlsl", nullptr, &include,
 		"main", "cs_5_0", 0, 0, csBlob.put(), errorBlob.put());
 
 	if (FAILED(hr)) {
@@ -737,6 +754,7 @@ void EffectManager::CreateColorCorrectionShader()
 	cbDesc.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
 
 	hr = globals::d3d::device->CreateBuffer(&cbDesc, nullptr, colorCorrectionConstantBuffer.put());
+	Util::SetResourceName(colorCorrectionConstantBuffer.get(), "Effects11::ColorCorrectionCB");
 	if (FAILED(hr)) {
 		logger::error("[EFFECTS11] Failed to create color correction constant buffer");
 		return;
@@ -1029,8 +1047,9 @@ void EffectManager::UpdateCommonVariablesForEffect(Effect& effect)
 
 	auto renderer = globals::game::renderer;
 
+	// Engine target fields can be tripwire handles: the effect variable takes the DXVK object.
 	effect.SetShaderResourceVariable("TextureDepth",
-		renderer->GetDepthStencilData().depthStencils[RE::RENDER_TARGETS_DEPTHSTENCIL::kMAIN].depthSRV);
+		RenderGraph::Engine::Tripwire::Unwrap(renderer->GetDepthStencilData().depthStencils[RE::RENDER_TARGETS_DEPTHSTENCIL::kMAIN].depthSRV));
 
 	static const std::string renderTargets[] = {
 		"RenderTargetRGBA32", "RenderTargetRGBA64", "RenderTargetRGBA64F",

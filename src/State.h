@@ -25,6 +25,9 @@ using json = nlohmann::json;
 
 struct Feature;
 
+// lastSharedData (an alignas(16) block) pads the class.
+#pragma warning(push)
+#pragma warning(disable: 4324)
 class State
 {
 public:
@@ -87,6 +90,13 @@ public:
 
 	/** @brief Per-draw-call hook: updates feature state, constant buffers, and overlay. */
 	void Draw();
+
+	/**
+	 * @brief The sun's shadow mask draw (a Utility RenderShadowmask pass): the features that take the shadow cascades from it
+	 * (a_shadowMap, its t4) take them now. Draw calls it for a draw that reaches D3D11, and Drawcall Limit Fix's shadow mask family
+	 * for a draw it takes onto the render graph (that draw never reaches SetDirtyStates' hook). Render thread.
+	 */
+	void OnShadowMaskDraw(ID3D11ShaderResourceView* a_shadowMap);
 	/** @brief Accumulates per-shader-type draw call counts and frame timing for the performance overlay. */
 	void Debug();
 	/** @brief Per-frame reset: advances timer, caches menu state, resets descriptors and frame counters. */
@@ -126,6 +136,13 @@ public:
 	/// Publishes the tone pass result to ISHDR and HDR Display without changing frame ownership.
 	void SetPostProcessingFallback(bool fallback);
 	bool IsPostProcessingFallback() const { return postProcessingFallback; }
+
+	/**
+	 * @brief The tonemap owner GetTonemapOwner resolves this frame, without resolving it: the cached owner when it was resolved, else
+	 * what it would resolve to now. Nothing is cached and no feature is told, so a reader earlier in the frame (the frame description)
+	 * changes nothing.
+	 */
+	TonemapOwner PeekTonemapOwner() const;
 
 	/**
 	 * @brief Dispatches the HDR tonemap pass to the resolved owner.
@@ -271,18 +288,6 @@ public:
 	void SaveTheme();
 
 	/**
-	 * @brief Validates the disk shader cache against all loaded features.
-	 * @param a_ini The cache INI to validate against.
-	 * @return True if all feature cache entries are still valid.
-	 */
-	bool ValidateCache(CSimpleIniA& a_ini);
-	/**
-	 * @brief Writes each feature's cache metadata into the disk cache INI.
-	 * @param a_ini The cache INI to write into.
-	 */
-	void WriteDiskCacheInfo(CSimpleIniA& a_ini);
-
-	/**
 	 * @brief Sets the global log level and flushes on that level.
 	 * @param a_level The spdlog severity level to apply.
 	 */
@@ -348,6 +353,7 @@ public:
 	 * @param a_forceDeferred If true, forces the Deferred flag regardless of current pass.
 	 */
 	void ModifyShaderLookup(const RE::BSShader& a_shader, uint& a_vertexDescriptor, uint& a_pixelDescriptor, bool a_forceDeferred = false);
+	void ModifyShaderLookup(RE::BSShader::Type a_shaderType, uint& a_vertexDescriptor, uint& a_pixelDescriptor, bool a_forceDeferred = false);
 
 	/**
 	 * @brief Pixel descriptor bits a shader type reads at runtime although they also take part in the lookup.
@@ -370,6 +376,10 @@ public:
 	void SetAdapterDescription(const std::wstring& description);
 
 	bool frameAnnotations = false;
+	// The saved "Frame Annotations" value while CS_GPU_IDLE_TRACE forces annotations on.
+	std::optional<bool> frameAnnotationsSetting;
+	/** @brief Debugger events are being emitted (Frame Annotations, or a capture tool is attached). */
+	bool debuggerEvents = false;
 
 	// Pass D3DCOMPILE_PARTIAL_PRECISION to fxc. With explicit min16float types this is
 	// mostly belt-and-braces in SM5, but it lets the compiler downgrade unmarked float
@@ -386,14 +396,11 @@ public:
 	// Atomic: written from the UI thread, read from compilation pool workers.
 	std::atomic_bool enableAvoidFlowControl{ false };
 
-	// Keep compiled shaders in Data/ShaderCache/ContentStore, keyed by their preprocessed source and
-	// compile inputs, so a cache wipe or plugin update restores unchanged shaders instead of recompiling.
-	// Atomic: written from the UI thread, read from compilation pool workers.
-	std::atomic_bool enableContentStore{ true };
-	/// Size limit of the persistent shader store in MB; least recently used shaders beyond it are evicted.
-	std::atomic<uint32_t> contentStoreMaxMB{ 1024 };
-	static constexpr uint32_t kContentStoreMinMB = 512;
-	static constexpr uint32_t kContentStoreMaxMB = 32768;
+	/// Size limit of the shader store in MB. It applies at startup, and never evicts what recent starts used.
+	/// Atomic: written from the UI thread.
+	std::atomic<uint32_t> shaderStoreMaxMB{ 4096 };
+	static constexpr uint32_t kShaderStoreMinMB = 512;
+	static constexpr uint32_t kShaderStoreMaxMB = 32768;
 
 	uint lastVertexDescriptor = 0;
 	uint lastPixelDescriptor = 0;
@@ -534,6 +541,20 @@ public:
 
 	std::unique_ptr<ConstantBuffer> sharedDataCB;
 	std::unique_ptr<ConstantBuffer> featureDataCB;
+
+	/**
+	 * @brief The last SharedData uploaded to sharedDataCB.
+	 *
+	 * Drawcall Limit Fix packs this buffer's contents into its own per-draw constants, and it cannot read
+	 * them back from the GPU buffer: the constant mirror only sees writes made through the hooked device
+	 * context, which this one is not. Keeping the struct is exact and costs a copy per frame.
+	 */
+	SharedDataCB lastSharedData{};
+
+	/** @brief The last FeatureData uploaded to featureDataCB, for the same reason as lastSharedData. */
+	std::vector<std::byte> lastFeatureData;
+	/** @brief featureDataCB's size (FeatureBuffer.cpp's packed size, fixed at build time): where Drawcall Limit Fix lays the block out. */
+	std::uint32_t featureDataBytes = 0;
 
 	PermutationCB permutationData{};
 	PermutationCB permutationDataPrevious{};
@@ -677,4 +698,21 @@ private:
 	uint historyResetFrame = UINT_MAX;
 	winrt::com_ptr<ID3DUserDefinedAnnotation> pPerf;
 	std::mutex statsMutex;
+};
+#pragma warning(pop)
+
+/**
+ * @brief A debugger event (Nsight, RenderDoc, PIX) around one scope of GPU work, emitted only while
+ * State::debuggerEvents is on, so the name costs nothing otherwise.
+ */
+class ScopedPerfEvent
+{
+public:
+	explicit ScopedPerfEvent(std::string_view a_name);
+	~ScopedPerfEvent();
+	ScopedPerfEvent(const ScopedPerfEvent&) = delete;
+	ScopedPerfEvent& operator=(const ScopedPerfEvent&) = delete;
+
+private:
+	bool active = false;
 };

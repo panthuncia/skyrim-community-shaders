@@ -1,0 +1,435 @@
+# Riverwood's river (river.toml) for water flicker: 30 shots on consecutive frames down at the water, then 30 along it, then exit.
+# Score them with a tile flicker scorer. Compose it: guest+river-flicker, native-vulkan+river-flicker.
+extends = ["base"]
+
+[run]
+timeout_s = 420
+
+[[steps]]
+at = "world-ready"
+frames = 200
+do = "console"
+arg = "set timescale to 0"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "console"
+arg = "set gamehour to 13"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "weather"
+arg = "SkyrimClear"
+
+[[steps]]
+at = "previous"
+frames = 20
+do = "console"
+arg = "coc Riverwood"
+
+[[steps]]
+at = "previous"
+frames = 900
+do = "console"
+arg = "player.setpos x 19300"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "console"
+arg = "player.setpos y -45300"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "console"
+arg = "player.setpos z -80"
+
+[[steps]]
+at = "previous"
+frames = 8
+do = "console"
+arg = "player.setangle x 12"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "console"
+arg = "player.setangle z 0"
+
+[[steps]]
+at = "previous"
+frames = 390
+do = "shot"
+arg = "a00"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "shot"
+arg = "a01"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "shot"
+arg = "a02"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "shot"
+arg = "a03"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "shot"
+arg = "a04"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "shot"
+arg = "a05"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "shot"
+arg = "a06"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "shot"
+arg = "a07"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "shot"
+arg = "a08"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "shot"
+arg = "a09"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "shot"
+arg = "a10"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "shot"
+arg = "a11"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "shot"
+arg = "a12"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "shot"
+arg = "a13"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "shot"
+arg = "a14"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "shot"
+arg = "a15"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "shot"
+arg = "a16"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "shot"
+arg = "a17"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "shot"
+arg = "a18"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "shot"
+arg = "a19"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "shot"
+arg = "a20"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "shot"
+arg = "a21"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "shot"
+arg = "a22"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "shot"
+arg = "a23"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "shot"
+arg = "a24"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "shot"
+arg = "a25"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "shot"
+arg = "a26"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "shot"
+arg = "a27"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "shot"
+arg = "a28"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "shot"
+arg = "a29"
+
+[[steps]]
+at = "previous"
+frames = 10
+do = "console"
+arg = "player.setangle z 90"
+
+[[steps]]
+at = "previous"
+frames = 290
+do = "shot"
+arg = "b00"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "shot"
+arg = "b01"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "shot"
+arg = "b02"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "shot"
+arg = "b03"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "shot"
+arg = "b04"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "shot"
+arg = "b05"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "shot"
+arg = "b06"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "shot"
+arg = "b07"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "shot"
+arg = "b08"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "shot"
+arg = "b09"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "shot"
+arg = "b10"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "shot"
+arg = "b11"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "shot"
+arg = "b12"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "shot"
+arg = "b13"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "shot"
+arg = "b14"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "shot"
+arg = "b15"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "shot"
+arg = "b16"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "shot"
+arg = "b17"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "shot"
+arg = "b18"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "shot"
+arg = "b19"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "shot"
+arg = "b20"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "shot"
+arg = "b21"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "shot"
+arg = "b22"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "shot"
+arg = "b23"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "shot"
+arg = "b24"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "shot"
+arg = "b25"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "shot"
+arg = "b26"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "shot"
+arg = "b27"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "shot"
+arg = "b28"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "shot"
+arg = "b29"
+
+[[steps]]
+at = "previous"
+frames = 10
+do = "exit"
+
+[expect]
+reach = "world-ready"
+shots = ["a00", "a01", "a02", "a03", "a04", "a05", "a06", "a07", "a08", "a09", "a10", "a11", "a12", "a13", "a14", "a15", "a16", "a17", "a18", "a19", "a20", "a21", "a22", "a23", "a24", "a25", "a26", "a27", "a28", "a29", "b00", "b01", "b02", "b03", "b04", "b05", "b06", "b07", "b08", "b09", "b10", "b11", "b12", "b13", "b14", "b15", "b16", "b17", "b18", "b19", "b20", "b21", "b22", "b23", "b24", "b25", "b26", "b27", "b28", "b29"]

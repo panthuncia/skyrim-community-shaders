@@ -41,6 +41,9 @@ struct Border : public PostProcessFeature
 
 	virtual void Draw(TextureInfo&) override;
 
+	/** @brief The constants for a dispatch over a_dim pixels. Shared by the D3D11 passes and the ORG chain. */
+	BorderCB Constants(float2 a_dim) const;
+
 	/// Clear the copied frame-generation vectors after the border color is committed.
 	void ClearMotionVectorsForFrameGen();
 };

@@ -5,6 +5,7 @@
 
 #include "Buffer.h"
 #include "GrassBucket.h"
+#include "GrassShared/GrassMeshLibrary.h"
 
 /** @brief Retains a captured group and its resources until the render thread admits it. */
 struct PendingCapture
@@ -76,9 +77,8 @@ public:
 	/** @brief Captures attached cache groups that have not already been queued. */
 	void CaptureQueuedGroups();
 
-	/** @brief Removes the engine group, invalidates its captures, and queues render-thread removal. */
-	void RemoveEngineGroup(RE::BSMultiStreamInstanceTriShape* shape, uint32_t engineGroup,
-		void (*remove)(RE::BSMultiStreamInstanceTriShape*, uint32_t));
+	/** @brief Retires an engine group's coverage and stages removal at the next frame boundary. GrassShared's capture calls it after the engine removed the group. */
+	void RemoveEngineGroup(RE::BSMultiStreamInstanceTriShape* shape, uint32_t engineGroup);
 
 	/** @brief Invalidates a shape's registration and queues removal of its captured chunks. */
 	void StageRemoval(RE::BSMultiStreamInstanceTriShape* shape);
@@ -127,7 +127,8 @@ public:
 	inline static constexpr uint32_t kMaxPoolInstances = (1u << 27) * 4 / kSourceStride;
 
 	std::unordered_map<GrassBucketKey, GrassBucket, GrassBucketKeyHash> buckets;
-	GrassMeshLibrary meshLibrary;
+	// GrassShared's: the one library Drawcall Limit Fix shares.
+	GrassMeshLibrary& meshLibrary = GrassShared::MeshLibrary();
 
 private:
 	struct Removal

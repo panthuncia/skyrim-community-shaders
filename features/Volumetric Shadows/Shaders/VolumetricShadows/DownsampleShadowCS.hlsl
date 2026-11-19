@@ -1,7 +1,8 @@
-Texture2DArray<float> InputTexture : register(t0);
-Texture2DArray<float> ESRAMShadow : register(t1);
-RWTexture2D<float2> OutputTexture : register(u0);
-SamplerState LinearSampler : register(s0);
+#include "Common/OrgResources.hlsli"
+
+#define DOWNSAMPLE_SHADOW_RESOURCES(X)               	X(SRV, Texture2DArray<float>, InputTexture, 0) 	X(SRV, Texture2DArray<float>, ESRAMShadow, 1)  	X(UAV, RWTexture2D<float2>, OutputTexture, 0)  	X(SAMPLER, SamplerState, LinearSampler, 0)
+ORG_PUSH_BLOCK(DOWNSAMPLE_SHADOW_RESOURCES(ORG_HANDLE))
+DOWNSAMPLE_SHADOW_RESOURCES(ORG_RESOURCE)
 
 float2 GetVSMMoments(in float depth)
 {

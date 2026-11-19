@@ -1,0 +1,104 @@
+// CS_DCLF_PERSISTENT_PARITY: tree LOD's mirror against the LOD trees root's shapes on parity frames.
+// Refills run on the terrain manager's threads and can land between a drain and the check, so a differing shape counts as late
+// when its Add arrives at the next drain, and as differing only when it does not.
+
+#include "Features/DrawcallLimitFix/Features/TreeLod/TreeLod.h"
+#include "Features/DrawcallLimitFix/Features/TreeLod/TreeLodMirror.h"
+#include "Features/DrawcallLimitFix/Features/TreeLod/Diagnostics/TreeLodEvents.h"
+#include "Features/DrawcallLimitFix/Features/TreeLod/Diagnostics/TreeLodParity.h"
+#include "Features/DrawcallLimitFix/Diagnostics/Hooks.h"
+#include "Features/DrawcallLimitFix/Diagnostics/Observation.h"
+#include "Features/DrawcallLimitFix/Core/Engine/Walkers.h"
+
+namespace DCLF::Features::TreeLod
+{
+	namespace
+	{
+		void CheckParity(const Mirror& a_mirror)
+		{
+			auto& stats = ParityState();
+			auto& suspects = stats.suspects;
+			const auto& groups = a_mirror.MirroredGroups();
+			++stats.checks;
+			auto* root = LodTreesRoot();
+			ankerl::unordered_dense::set<const void*> live;
+			std::vector<TreeInstances::Instance> packed;
+			auto note = [&](std::string&& a_text) {
+				if (stats.first.empty())
+					stats.first = std::move(a_text);
+			};
+			if (root) {
+				for (const auto& child : Engine::Children(*root)) {
+					auto* shape = child ? child->AsGeometry() : nullptr;
+					if (!TreeInstances::IsEngineShape(shape))
+						continue;
+					live.insert(shape);
+					++stats.shapes;
+					const auto it = groups.find(shape);
+					if (it == groups.end()) {
+						++stats.missing;
+						note(fmt::format("'{}' under the root, not mirrored", shape->name.c_str() ? shape->name.c_str() : ""));
+						continue;
+					}
+					const auto& block = *static_cast<const RE::BGSDistantTreeBlock*>(it->second.block);
+					const auto& group = *static_cast<const RE::BGSDistantTreeBlock::TreeGroup*>(it->second.group);
+					if (!group.shaderPropertyUpToDate) {
+						++stats.unsettled;
+						continue;
+					}
+					PackGroup(block.allVisible, group, packed);
+					if (packed == it->second.instances)
+						continue;
+					std::size_t at = 0;
+					while (at < packed.size() && at < it->second.instances.size() && packed[at] == it->second.instances[at])
+						++at;
+					std::string fields;
+					if (at < packed.size() && at < it->second.instances.size())
+						for (std::size_t f = 0; f < TreeInstances::kInstanceShorts; ++f)
+							if (packed[at].shorts[f] != it->second.instances[at].shorts[f])
+								fields += fmt::format(" [{}] {:#06x} mirrored, {:#06x} packed", f, it->second.instances[at].shorts[f], packed[at].shorts[f]);
+					suspects[shape] = fmt::format("{} records mirrored, {} packed now; record {}:{}", it->second.instances.size(), packed.size(), at, fields);
+				}
+			}
+			// A mirrored shape no longer under the root: its removal was missed.
+			for (const auto& [shape, group] : groups)
+				if (!live.contains(shape)) {
+					++stats.stale;
+					note(fmt::format("a mirrored shape ({} records) is not under the root", group.instances.size()));
+				}
+		}
+
+		void OnEventDrained(const TreeLodEventDrained& a_event)
+		{
+			auto& stats = ParityState();
+			if (!stats.suspects.empty() && stats.suspects.erase(a_event.shape))
+				++stats.late;
+		}
+
+		void OnDrained(const TreeLodDrained& a_event)
+		{
+			// Suspects with no event since the check: the mirror missed a refill.
+			auto& stats = ParityState();
+			for (auto& [shape, text] : stats.suspects) {
+				++stats.differ;
+				if (stats.first.empty())
+					stats.first = std::move(text);
+			}
+			stats.suspects.clear();
+			if (Diagnostics::ParityDue(a_event.frame) && std::exchange(stats.frame, a_event.frame) != a_event.frame)
+				CheckParity(a_event.mirror);
+		}
+	}
+
+	TreeLodParityState& ParityState()
+	{
+		static TreeLodParityState state;
+		return state;
+	}
+
+	void SubscribeParity()
+	{
+		Diagnostics::Subscribe<TreeLodEventDrained>(OnEventDrained);
+		Diagnostics::Subscribe<TreeLodDrained>(OnDrained);
+	}
+}

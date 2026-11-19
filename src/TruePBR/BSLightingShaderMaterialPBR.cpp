@@ -1,5 +1,7 @@
 #include "BSLightingShaderMaterialPBR.h"
 
+#include "Features/DrawcallLimitFix.h"
+
 #include "TruePBR.h"
 
 /** @brief Drops textureSet unless its NiRTTI derives from BSTextureSet; malformed meshes can link any block, and calling BSTextureSet virtuals on it is a CTD. */
@@ -43,6 +45,8 @@ RE::BSShaderMaterial* BSLightingShaderMaterialPBR::Create()
 
 void BSLightingShaderMaterialPBR::CopyMembers(RE::BSShaderMaterial* that)
 {
+	// DCLF's material records follow the material's writes (MaterialSources).
+	const DrawcallLimitFix::MaterialWriteScope written{ this };
 	BSLightingShaderMaterialBase::CopyMembers(that);
 
 	auto* pbrThat = static_cast<BSLightingShaderMaterialPBR*>(that);
@@ -166,6 +170,8 @@ RE::BSShaderMaterial::Feature BSLightingShaderMaterialPBR::GetFeature() const
 
 void BSLightingShaderMaterialPBR::ApplyTextureSetData(const TruePBR::PBRTextureSetData& textureSetData)
 {
+	// DCLF's material records follow the material's writes (MaterialSources).
+	const DrawcallLimitFix::MaterialWriteScope written{ this };
 	specularColorScale = textureSetData.roughnessScale;
 	specularPower = textureSetData.specularLevel;
 	rimLightPower = textureSetData.displacementScale;
@@ -255,6 +261,8 @@ bool BSLightingShaderMaterialPBR::ApplyNifThinSurfaceParameters(std::span<const 
 
 void BSLightingShaderMaterialPBR::ApplyMaterialObjectData(const TruePBR::PBRMaterialObjectData& materialObjectData)
 {
+	// DCLF's material records follow the material's writes (MaterialSources).
+	const DrawcallLimitFix::MaterialWriteScope written{ this };
 	projectedMaterialBaseColorScale = materialObjectData.baseColorScale;
 	projectedMaterialRoughness = materialObjectData.roughness;
 	projectedMaterialSpecularLevel = materialObjectData.specularLevel;
@@ -263,6 +271,8 @@ void BSLightingShaderMaterialPBR::ApplyMaterialObjectData(const TruePBR::PBRMate
 
 void BSLightingShaderMaterialPBR::ClearMaterialObjectData()
 {
+	// DCLF's material records follow the material's writes (MaterialSources).
+	const DrawcallLimitFix::MaterialWriteScope written{ this };
 	projectedMaterialBaseColorScale = { 1.f, 1.f, 1.f };
 	projectedMaterialRoughness = 1.f;
 	projectedMaterialSpecularLevel = 0.04f;
@@ -271,6 +281,8 @@ void BSLightingShaderMaterialPBR::ClearMaterialObjectData()
 
 void BSLightingShaderMaterialPBR::OnLoadTextureSet(std::uint64_t arg1, RE::BSTextureSet* inTextureSet)
 {
+	// DCLF's material records follow the material's writes (MaterialSources).
+	const DrawcallLimitFix::MaterialWriteScope written{ this };
 	const auto& stateData = globals::game::graphicsState->GetRuntimeData();
 
 	if (diffuseTexture == nullptr || diffuseTexture == stateData.defaultTextureNormalMap) {
@@ -319,6 +331,8 @@ void BSLightingShaderMaterialPBR::OnLoadTextureSet(std::uint64_t arg1, RE::BSTex
 
 void BSLightingShaderMaterialPBR::ClearTextures()
 {
+	// DCLF's material records follow the material's writes (MaterialSources).
+	const DrawcallLimitFix::MaterialWriteScope written{ this };
 	BSLightingShaderMaterialBase::ClearTextures();
 	rmaosTexture.reset();
 	emissiveTexture.reset();
@@ -329,6 +343,8 @@ void BSLightingShaderMaterialPBR::ClearTextures()
 
 void BSLightingShaderMaterialPBR::ReceiveValuesFromRootMaterial(bool skinned, bool rimLighting, bool softLighting, bool backLighting, bool MSN)
 {
+	// DCLF's material records follow the material's writes (MaterialSources).
+	const DrawcallLimitFix::MaterialWriteScope written{ this };
 	BSLightingShaderMaterialBase::ReceiveValuesFromRootMaterial(skinned, rimLighting, softLighting, backLighting, MSN);
 	const auto& stateData = globals::game::graphicsState->GetRuntimeData();
 	if (rmaosTexture == nullptr) {
@@ -384,6 +400,8 @@ uint32_t BSLightingShaderMaterialPBR::GetTextures(RE::NiSourceTexture** textures
 
 void BSLightingShaderMaterialPBR::LoadBinary(RE::NiStream& stream)
 {
+	// DCLF's material records follow the material's writes (MaterialSources).
+	const DrawcallLimitFix::MaterialWriteScope written{ this };
 	BSLightingShaderMaterialBase::LoadBinary(stream);
 
 	if (loadedWithFeature == RE::BSLightingShaderMaterial::Feature::kMultilayerParallax) {

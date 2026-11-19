@@ -1,0 +1,2 @@
+# Native D3D12, each upscale method (upscalers.toml).
+extends = ["native-d3d12", "upscalers"]

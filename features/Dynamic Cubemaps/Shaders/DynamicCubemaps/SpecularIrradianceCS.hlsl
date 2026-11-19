@@ -4,6 +4,25 @@
 // Pre-filters environment cube map using GGX NDF importance sampling.
 // Part of specular IBL split-sum approximation.
 
+// Dual-target (Common/OrgResources.hlsli). Under ORG the shared constant buffers are heap reads
+// (ORG_SHARED_CONSTANTS). The mip's roughness is a PUSH struct: under ORG pushed with each mip's
+// dispatch, under D3D11 the cbuffer at b0.
+#define ORG_SHARED_CONSTANTS
+#include "Common/OrgResources.hlsli"
+
+struct SpecularMapFilterConstants
+{
+	float roughness;
+};
+
+#define SPECULAR_IRRADIANCE_RESOURCES(X)                   \
+	X(SHARED, ConstantBuffer, Shared, 0)                   \
+	X(SRV, TextureCube, inputTexture, 0)                   \
+	X(UAV, RWTexture2DArray<float4>, outputTexture, 0)     \
+	X(SAMPLER, SamplerState, linear_wrap_sampler, 0)       \
+	X(PUSH, SpecularMapFilterConstants, FilterSettings, 0)
+ORG_PUSH_BLOCK(SPECULAR_IRRADIANCE_RESOURCES(ORG_HANDLE))
+
 #include "Common/Color.hlsli"
 #include "Common/ColorManagement.hlsli"
 #include "Common/Math.hlsli"
@@ -14,15 +33,7 @@ static const float Epsilon = 0.00001;
 static const uint NumSamples = 16;
 static const float InvNumSamples = 1.0 / float(NumSamples);
 
-cbuffer SpecularMapFilterSettings : register(b0)
-{
-	float roughness;
-};
-
-TextureCube inputTexture : register(t0);
-RWTexture2DArray<float4> outputTexture : register(u0);
-
-SamplerState linear_wrap_sampler : register(s0);
+SPECULAR_IRRADIANCE_RESOURCES(ORG_RESOURCE)
 
 // Compute Van der Corput radical inverse
 // See: http://holger.dammertz.org/stuff/notes_HammersleyOnHemisphere.html
@@ -115,7 +126,7 @@ float3 tangentToWorld(const float3 v, const float3 N, const float3 S, const floa
 	// Weight by cosine term since Epic claims it generally improves quality.
 	for (uint i = 0; i < NumSamples; ++i) {
 		float2 u = sampleHammersley(i);
-		float3 Lh = tangentToWorld(sampleGGX(u.x, u.y, roughness), N, S, T);
+		float3 Lh = tangentToWorld(sampleGGX(u.x, u.y, FilterSettings.roughness), N, S, T);
 
 		// Compute incident direction (Li) by reflecting viewing direction (Lo) around half-vector (Lh).
 		float3 Li = 2.0 * dot(Lo, Lh) * Lh - Lo;
@@ -129,7 +140,7 @@ float3 tangentToWorld(const float3 v, const float3 N, const float3 S, const floa
 
 			// GGX normal distribution function (D term) probability density function.
 			// Scaling by 1/4 is due to change of density in terms of Lh to Li (and since N=V, rest of the scaling factor cancels out).
-			float pdf = ndfGGX(cosLh, roughness) * 0.25;
+			float pdf = ndfGGX(cosLh, FilterSettings.roughness) * 0.25;
 
 			// Solid angle associated with this sample.
 			float ws = 1.0 / (NumSamples * pdf);

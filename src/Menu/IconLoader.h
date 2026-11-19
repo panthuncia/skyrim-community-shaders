@@ -4,6 +4,8 @@
 #include <d3d11.h>
 #include <imgui.h>
 
+#include "RenderGraph/ImGuiBasicRHI.h"
+
 struct ID3D11Device;
 class Menu;
 
@@ -67,6 +69,13 @@ namespace Util
 		 * @param drawSize The size, in screen pixels, the icon is about to be drawn at.
 		 */
 		[[nodiscard]] ID3D11ShaderResourceView* ViewForSize(ID3D11ShaderResourceView* texture, const ImVec2& drawSize);
+
+		/**
+		 * @brief The render graph's ImGui (CS_ORG_IMGUI=1): an icon's view (its full view or one ViewForSize returned) as a descriptor of
+		 * the icon's ORG copy, made from its pixels on first use. kNoIndex for a view that is not an icon's, or before the graph is up.
+		 * Render thread, inside the overlay's epoch.
+		 */
+		[[nodiscard]] ImGuiBasicRHI::Binding OrgBinding(ID3D11ShaderResourceView* texture);
 
 		/** @brief Rounds a screen position or size to whole pixels, so an icon's edges land on pixel boundaries. */
 		[[nodiscard]] inline ImVec2 SnapToPixel(const ImVec2& value)

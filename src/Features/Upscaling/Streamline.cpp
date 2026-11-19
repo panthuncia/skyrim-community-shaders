@@ -1,9 +1,20 @@
 #include "Streamline.h"
+#include "Features/DrawcallLimitFix.h"
+#include "Features/Upscaling.h"
 
 #include "DXVKInterop.h"
 
 #include "../../DxvkLoader.h"
+#include "Utils/SwitchFile.h"
 #include "../../Globals.h"
+#if defined(CS_HAS_RENDER_GRAPH)
+#	include "../../RenderGraph/Backend.h"
+#	include "../../RenderGraph/Engine/Native/Native.h"
+#endif
+#include "../../RenderGraph/Backend.h"
+#include "../../RenderGraph/RenderGraphRuntime.h"
+#include "ORGUpscaling.h"
+#include "../../RenderGraph/Switches.h"
 #include "../../State.h"
 #include "../../Utils/Game.h"
 
@@ -11,6 +22,8 @@
 #include <cmath>
 #include <cstring>
 #include <filesystem>
+#include <DirectXPackedVector.h>
+#include <fstream>
 #include <mutex>
 #include <string_view>
 #include <unordered_set>
@@ -74,6 +87,9 @@ namespace
 		// the D3D11 branch does not have at all. Streamline is now always initialised for in-game
 		// switching, so this has to be gated on use rather than on initialisation.
 		std::atomic<bool> latencyMarkersNeeded = { false };
+		// Frame generation also needs them for sl.common to recycle its input copies, and sl.common goes on making those once a
+		// plugin has asked for the tags, after the plugin is unloaded too. So they stay on from the first load (2.4 GB of copies otherwise).
+		std::atomic<bool> frameGenerationHasLoaded = { false };
 
 		// Disable dispatch after an SEH fault to prevent repeated crashes.
 
@@ -268,10 +284,7 @@ namespace
 
 	void LogCallback(sl::LogType a_type, const char* a_msg)
 	{
-		static const bool s_verbose = [] {
-			char v[2] = {};
-			return GetEnvironmentVariableA("CS_SL_VERBOSE", v, sizeof(v)) && v[0] == 0x31;
-		}();
+		static const bool s_verbose = Switches::On("CS_SL_VERBOSE");
 		if (s_verbose) {
 			logger::info("[Streamline/SL] {}", a_msg);
 			return;
@@ -315,11 +328,24 @@ Streamline* Streamline::GetSingleton()
 	return &singleton;
 }
 
+// RenderDoc's Vulkan layer does not expose VK_NVX_binary_import or VK_NVX_image_view_handle, and the
+// interposer's vkCreateDevice fails with VK_ERROR_EXTENSION_NOT_PRESENT without them, which takes DXVK's
+// device (normal and safe mode alike) and the game down with it. DLSS cannot run under RenderDoc anyway,
+// so Streamline stands down and DXVK talks to the real loader.
+static bool RenderDocLoaded()
+{
+	return GetModuleHandleW(L"renderdoc.dll") != nullptr;
+}
+
 void Streamline::PreloadInterposer()
 {
 	// Preload before DXVK creates VkInstance so its Vulkan loader aliases the interposer.
 	if (g_sl.interposer)
 		return;
+	if (RenderDocLoaded()) {
+		logger::info("[Streamline] renderdoc.dll is loaded: interposer not preloaded, DXVK uses the real Vulkan loader");
+		return;
+	}
 	const auto slDir = GetStreamlineDir();
 	if (slDir.empty())
 		return;
@@ -336,7 +362,7 @@ void Streamline::PreloadInterposer()
 // Probe with the system loader before slInit decides which FG plugin to load.
 static bool ProbeDLSSGHardware()
 {
-	if (char v[2] = {}; GetEnvironmentVariableA("CS_FORCE_FSR_FG", v, sizeof(v)) && v[0] == '1') {
+	if (Switches::On("CS_FORCE_FSR_FG")) {
 		logger::info("[Streamline] CS_FORCE_FSR_FG=1: hardware probe reports no DLSS-G (FSR-FG path forced)");
 		return false;
 	}
@@ -399,6 +425,20 @@ bool Streamline::Initialize()
 		return initialized;
 	triedInit = true;
 
+	// Native D3D12: Streamline on the native D3D12 device (asked before the device exists, so the requested backend). CS's sl.fsr and
+	// sl.xess run there too; sl.fsr_g is Vulkan-only and stands down. DLSS and Reflex run.
+#if defined(CS_HAS_RENDER_GRAPH)
+	const bool d3d12 = native && RenderGraph::Backend::Requested() == rhi::Backend::D3D12;
+#else
+	const bool d3d12 = false;
+#endif
+
+	if (RenderDocLoaded()) {
+		logger::info("[Streamline] renderdoc.dll is loaded: Streamline features disabled for this session");
+		MarkUnavailable();
+		return false;
+	}
+
 	const auto slDir = GetStreamlineDir();
 	if (slDir.empty()) {
 		logger::warn("[Streamline] could not resolve plugin directory");
@@ -437,14 +477,42 @@ bool Streamline::Initialize()
 	// The controller keeps at most one frame-generation feature loaded at runtime.
 	dlssgHardware = ProbeDLSSGHardware();
 
-	std::vector<sl::Feature> featuresToLoad = { sl::kFeatureDLSS, sl::kFeatureReflex, sl::kFeaturePCL,
-		sl::kFeatureFSR, sl::kFeatureFSR_G, sl::kFeatureXeSS };
-	if (dlssgHardware)
+	// Frame generation needs Reflex and PCL. DLSS-G does not load without Reflex. FSR-FG needs PCL's present marker: without it
+	// sl.common never recycles the input copies it makes each frame, and holds 32 frames of them (3.3 GB at 4K, past the budget of
+	// a 16 GB card). They do make the interposer enable VK_NV_low_latency on DXVK's device, which Nsight Graphics refuses to capture,
+	// so CS_STREAMLINE_REFLEX=0 leaves them out for a capture.
+	const bool reflexRequested = Util::SwitchFile::Value("CS_STREAMLINE_REFLEX") != "0";
+	// CS_STREAMLINE_DLSS=0 leaves DLSS and DLSS-G out. On a machine with an NVIDIA GPU, DLSS-G's plugin adds VK_NV_optical_flow to
+	// the device even when DXVK runs on another vendor's GPU (DXVK_FILTER_DEVICE_NAME), and that device then fails to create.
+	const bool dlssRequested = Util::SwitchFile::Value("CS_STREAMLINE_DLSS") != "0";
+	// Native mode has no frame generation yet (its presenter has no frame-generation controls): its plugins are not loaded, so the
+	// device takes no optical-flow queue for them.
+	std::vector<sl::Feature> featuresToLoad = { sl::kFeatureFSR, sl::kFeatureXeSS };
+	if (!native)
+		featuresToLoad.push_back(sl::kFeatureFSR_G);
+	if (dlssRequested)
+		featuresToLoad.push_back(sl::kFeatureDLSS);
+	else
+		logger::info("[Streamline] CS_STREAMLINE_DLSS=0: DLSS and DLSS-G are not loaded");
+	if (reflexRequested) {
+		featuresToLoad.push_back(sl::kFeatureReflex);
+		featuresToLoad.push_back(sl::kFeaturePCL);
+	}
+	if (dlssgHardware && reflexRequested && dlssRequested && !native)
 		featuresToLoad.push_back(sl::kFeatureDLSS_G);
+	if (reflexRequested)
+		logger::info("[Streamline] Reflex, PCL and DLSS-G loaded (CS_STREAMLINE_REFLEX=0 leaves them out)");
+	else
+		logger::warn("[Streamline] CS_STREAMLINE_REFLEX=0: no Reflex, PCL or DLSS-G; FSR-FG would hold 32 frames of input copies in VRAM");
 
 	sl::Preferences pref{};
-	pref.renderAPI = sl::RenderAPI::eVulkan;
+	pref.renderAPI = d3d12 ? sl::RenderAPI::eD3D12 : sl::RenderAPI::eVulkan;
 	pref.flags |= sl::PreferenceFlags::eUseFrameBasedResourceTagging;
+	// Native mode: BasicRHI creates the device and calls Streamline's swap chain and command hooks itself (manual hooking).
+	if (native)
+		pref.flags |= sl::PreferenceFlags::eUseManualHooking;
+	loadedFeatures.assign(featuresToLoad.begin(), featuresToLoad.end());
+	pluginDirectory = slDirWide;
 	pref.featuresToLoad = featuresToLoad.data();
 	pref.numFeaturesToLoad = static_cast<uint32_t>(featuresToLoad.size());
 	pref.pathsToPlugins = pluginPaths;
@@ -452,7 +520,7 @@ bool Streamline::Initialize()
 	pref.engine = sl::EngineType::eCustom;
 	pref.engineVersion = "1.0";
 	pref.projectId = "a0f57b54-1daf-4934-90ae-c4035c19df04";
-	if (char v[2] = {}; GetEnvironmentVariableA("CS_SL_VERBOSE", v, sizeof(v)) && v[0] == 0x31)
+	if (Switches::On("CS_SL_VERBOSE"))
 		pref.logLevel = sl::LogLevel::eVerbose;
 	else
 		pref.logLevel = sl::LogLevel::eDefault;
@@ -468,9 +536,84 @@ bool Streamline::Initialize()
 	}
 
 	initialized = true;
-	logger::info("[Streamline] initialized on Vulkan (SDK {}.{}.{})",
+	logger::info("[Streamline] initialized on {}{} (SDK {}.{}.{})", d3d12 ? "D3D12" : "Vulkan", native ? " for the native device (manual hooking)" : "",
 		SL_VERSION_MAJOR, SL_VERSION_MINOR, SL_VERSION_PATCH);
 	return true;
+}
+
+bool Streamline::InitializeForNative()
+{
+	if (triedInit)
+		return initialized && native;
+	native = true;
+	return Initialize();
+}
+
+void* Streamline::InterposerModule() const
+{
+	return initialized ? g_sl.interposer : nullptr;
+}
+
+void Streamline::SetNativeDevice(void* a_vkPhysicalDevice, uint64_t a_luid)
+{
+	if (!initialized || !native || vulkanDeviceSet)
+		return;
+	vulkanDeviceSet = true;
+	sl::AdapterInfo adapter{};
+	if (a_vkPhysicalDevice) {
+		adapter.vkPhysicalDevice = a_vkPhysicalDevice;
+	} else {
+		adapter.deviceLUID = reinterpret_cast<uint8_t*>(&a_luid);
+		adapter.deviceLUIDSizeInBytes = sizeof(a_luid);
+	}
+	const auto supported = [&](sl::Feature f) {
+		if (std::ranges::find(loadedFeatures, static_cast<uint32_t>(f)) == loadedFeatures.end())
+			return false;
+		const sl::Result r = g_sl.slIsFeatureSupported(f, adapter);
+		if (r != sl::Result::eOk)
+			logger::info("[Streamline] feature {} unsupported on the native device (result {})", f, static_cast<int>(r));
+		return r == sl::Result::eOk;
+	};
+	featureDLSS = supported(sl::kFeatureDLSS);
+	featureReflex = supported(sl::kFeatureReflex);
+	featureXeSS = supported(sl::kFeatureXeSS);
+	featureFSR = supported(sl::kFeatureFSR);
+	featureDLSSG = false;
+	featureFSRFG = false;
+	if (featureDLSS) {
+		g_sl.slGetFeatureFunction(sl::kFeatureDLSS, "slDLSSGetOptimalSettings", reinterpret_cast<void*&>(g_sl.slDLSSGetOptimalSettings));
+		g_sl.slGetFeatureFunction(sl::kFeatureDLSS, "slDLSSSetOptions", reinterpret_cast<void*&>(g_sl.slDLSSSetOptions));
+		featureDLSS = g_sl.slDLSSSetOptions != nullptr;
+	}
+	if (featureReflex) {
+		g_sl.slGetFeatureFunction(sl::kFeatureReflex, "slReflexSetOptions", reinterpret_cast<void*&>(g_sl.slReflexSetOptions));
+		g_sl.slGetFeatureFunction(sl::kFeatureReflex, "slReflexSleep", reinterpret_cast<void*&>(g_sl.slReflexSleep));
+		featureReflex = g_sl.slReflexSetOptions != nullptr && g_sl.slReflexSleep != nullptr;
+	}
+	g_sl.slGetFeatureFunction(sl::kFeaturePCL, "slPCLSetMarker", reinterpret_cast<void*&>(g_sl.slPCLSetMarker));
+	if (featureFSR) {
+		g_sl.slGetFeatureFunction(sl::kFeatureFSR, "slFSRSetOptions", reinterpret_cast<void*&>(g_sl.slFSRSetOptions));
+		featureFSR = g_sl.slFSRSetOptions != nullptr;
+	}
+	if (featureXeSS) {
+		g_sl.slGetFeatureFunction(sl::kFeatureXeSS, "slXeSSSetOptions", reinterpret_cast<void*&>(g_sl.slXeSSSetOptions));
+		featureXeSS = g_sl.slXeSSSetOptions != nullptr;
+	}
+	// The vendor from the adapter, as SetVulkanDevice reads it from Vulkan: DXGI names the adapter the native device was made on.
+	winrt::com_ptr<IDXGIFactory4> factory;
+	if (SUCCEEDED(CreateDXGIFactory1(IID_PPV_ARGS(factory.put())))) {
+		LUID luid{ static_cast<DWORD>(a_luid & 0xFFFFFFFFu), static_cast<LONG>(a_luid >> 32) };
+		winrt::com_ptr<IDXGIAdapter1> dxgiAdapter;
+		DXGI_ADAPTER_DESC1 desc{};
+		if (a_luid && SUCCEEDED(factory->EnumAdapterByLuid(luid, IID_PPV_ARGS(dxgiAdapter.put()))) && SUCCEEDED(dxgiAdapter->GetDesc1(&desc))) {
+			isNvidiaGPU = desc.VendorId == 0x10DE;
+			isIntelGPU = desc.VendorId == 0x8086;
+			constexpr uint32_t kFirstAdaDeviceID = 0x2600;
+			isRTXBelow40Series = isNvidiaGPU && desc.DeviceId < kFirstAdaDeviceID;
+		}
+	}
+	logger::info("[Streamline] native device feature support: DLSS={} Reflex={} FSR={} XeSS={} (frame generation off in native mode); NVIDIA {}",
+		featureDLSS, featureReflex, featureFSR, featureXeSS, isNvidiaGPU);
 }
 
 void Streamline::SetVulkanDevice()
@@ -615,6 +758,14 @@ static sl::Result cs_EvaluateFeature(sl::Feature a_feature, sl::FrameToken& a_to
 	const sl::BaseStructure* inputs[] = { &a_viewport };
 	result = g_sl.slEvaluateFeature(
 		a_feature, a_token, inputs, static_cast<uint32_t>(std::size(inputs)), a_commandBuffer);
+	// Streamline replaces a successful evaluate's eOk with eWarnOutOfVRAM while the VRAM budget is exhausted
+	// (sl.common's slEvaluateFeatureInternal): the work is recorded and the output written, so it is a success.
+	if (result == sl::Result::eWarnOutOfVRAM) {
+		static std::atomic<bool> s_logged{ false };
+		if (!s_logged.exchange(true))
+			logger::warn("[Streamline] evaluating over the VRAM budget (eWarnOutOfVRAM): outputs kept; expect stutter");
+		result = sl::Result::eOk;
+	}
 	return result;
 }
 
@@ -741,9 +892,10 @@ void Streamline::CaptureDLSSGPresentState()
 
 void Streamline::UpdateReflex(bool a_enable, bool a_boost, uint32_t a_frameLimitUs)
 {
-	g_sl.latencyMarkersNeeded.store(a_enable || g_dlssgCurrentlyLoaded.load(std::memory_order_acquire) ||
-			g_fsrfgCurrentlyLoaded.load(std::memory_order_acquire),
-		std::memory_order_release);
+	if (globals::features::upscaling.settings.frameGeneration || g_dlssgCurrentlyLoaded.load(std::memory_order_acquire) ||
+		g_fsrfgCurrentlyLoaded.load(std::memory_order_acquire))
+		g_sl.frameGenerationHasLoaded.store(true, std::memory_order_relaxed);
+	g_sl.latencyMarkersNeeded.store(a_enable || g_sl.frameGenerationHasLoaded.load(std::memory_order_relaxed), std::memory_order_release);
 	if (!initialized || !featureReflex)
 		return;
 
@@ -885,6 +1037,13 @@ static bool cs_BuildConstants(sl::Constants& a_consts, uint32_t a_outputWidth, u
 			}
 		}
 	}
+	// CS_DCLF_TARGET_DUMP's frames: the constants, to compare a good frame with a corrupt one (dclf-validation.md, "The target dump"; render-graph.md, "Hazard: external Vulkan work directly after a graph epoch").
+	if (DrawcallLimitFix::TargetDumpArmed())
+		logger::info("[Streamline] dump constants: posAdj ({:.3f} {:.3f} {:.3f}) prev ({:.3f} {:.3f} {:.3f}); near {} far {} fov {}; viewToClip [{:.4f} {:.4f} {:.4f} {:.4f} | {:.4f} {:.4f}]; curVP r0 [{:.5f} {:.5f} {:.5f} {:.5f}] r3 [{:.5f} {:.5f} {:.5f} {:.5f}]; prevVP r0 [{:.5f} {:.5f} {:.5f} {:.5f}] r3 [{:.5f} {:.5f} {:.5f} {:.5f}]; clipToPrevClip diag [{:.5f} {:.5f} {:.5f} {:.5f}] row3 [{:.5f} {:.5f} {:.5f}]; jitter ({:.4f} {:.4f}); finite {}",
+			posAdj.x, posAdj.y, posAdj.z, prevPosAdj.x, prevPosAdj.y, prevPosAdj.z, a_consts.cameraNear, a_consts.cameraFar, a_consts.cameraFOV, cameraViewToClip._11, cameraViewToClip._22,
+			cameraViewToClip._33, cameraViewToClip._34, cameraViewToClip._43, cameraViewToClip._44, curVP._11, curVP._12, curVP._13, curVP._14, curVP._41, curVP._42, curVP._43, curVP._44,
+			prevVP._11, prevVP._12, prevVP._13, prevVP._14, prevVP._41, prevVP._42, prevVP._43, prevVP._44, clipToPrevClip._11, clipToPrevClip._22, clipToPrevClip._33,
+			clipToPrevClip._44, clipToPrevClip._41, clipToPrevClip._42, clipToPrevClip._43, a_jitterX, a_jitterY, reprojectionFinite);
 	a_consts.clipToPrevClip = *reinterpret_cast<const sl::float4x4*>(&clipToPrevClip);
 	a_consts.prevClipToClip = *reinterpret_cast<const sl::float4x4*>(&prevClipToClip);
 
@@ -1192,6 +1351,315 @@ static bool cs_CanReleaseFailedFSRFrame(DXVKInterop* a_dxvk,
 	return false;
 }
 
+
+// Diagnostic (CS_DCLF_TARGET_DUMP frames): the upscaler's inputs and output copied inside its
+// own command buffer, just before and just after the evaluate, and read back kGameFramesInFlight frames later (InCbReadback::Drain).
+namespace InCbReadback
+{
+	struct Copy
+	{
+		std::string name;
+		VkFormat format = VK_FORMAT_UNDEFINED;
+		uint32_t width = 0, height = 0, texel = 0;
+		VkDeviceSize offset = 0;
+	};
+	struct State
+	{
+		VkDevice device = VK_NULL_HANDLE;
+		VkBuffer buffer = VK_NULL_HANDLE;
+		VkDeviceMemory memory = VK_NULL_HANDLE;
+		void* mapped = nullptr;
+		VkDeviceSize size = 0, used = 0;
+		std::vector<Copy> copies;
+		uint32_t frame = 0;
+		bool pending = false;
+		uint32_t framesWaited = 0;
+		PFN_vkCmdCopyImageToBuffer copyImageToBuffer = nullptr;
+		PFN_vkCmdPipelineBarrier barrier = nullptr;
+	};
+	static State& Get()
+	{
+		static State s;
+		return s;
+	}
+
+	static bool Ensure(DXVKInterop* a_dxvk)
+	{
+		auto& s = Get();
+		if (s.buffer)
+			return true;
+		const VkDevice device = a_dxvk->GetDevice();
+		auto gdpa = a_dxvk->GetDeviceProcAddr();
+		auto gipa = a_dxvk->GetInstanceProcAddr();
+		if (!gdpa || !gipa)
+			return false;
+		auto createBuffer = reinterpret_cast<PFN_vkCreateBuffer>(gdpa(device, "vkCreateBuffer"));
+		auto requirements = reinterpret_cast<PFN_vkGetBufferMemoryRequirements>(gdpa(device, "vkGetBufferMemoryRequirements"));
+		auto allocate = reinterpret_cast<PFN_vkAllocateMemory>(gdpa(device, "vkAllocateMemory"));
+		auto bind = reinterpret_cast<PFN_vkBindBufferMemory>(gdpa(device, "vkBindBufferMemory"));
+		auto map = reinterpret_cast<PFN_vkMapMemory>(gdpa(device, "vkMapMemory"));
+		auto properties = reinterpret_cast<PFN_vkGetPhysicalDeviceMemoryProperties>(gipa(a_dxvk->GetInstance(), "vkGetPhysicalDeviceMemoryProperties"));
+		s.copyImageToBuffer = reinterpret_cast<PFN_vkCmdCopyImageToBuffer>(gdpa(device, "vkCmdCopyImageToBuffer"));
+		s.barrier = reinterpret_cast<PFN_vkCmdPipelineBarrier>(gdpa(device, "vkCmdPipelineBarrier"));
+		if (!createBuffer || !requirements || !allocate || !bind || !map || !properties || !s.copyImageToBuffer || !s.barrier)
+			return false;
+		s.size = 512ull << 20;
+		VkBufferCreateInfo info{ VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO };
+		info.size = s.size;
+		info.usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+		if (createBuffer(device, &info, nullptr, &s.buffer) != VK_SUCCESS)
+			return false;
+		VkMemoryRequirements req{};
+		requirements(device, s.buffer, &req);
+		VkPhysicalDeviceMemoryProperties props{};
+		properties(a_dxvk->GetPhysicalDevice(), &props);
+		const VkMemoryPropertyFlags cached = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT | VK_MEMORY_PROPERTY_HOST_CACHED_BIT;
+		const VkMemoryPropertyFlags coherent = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
+		uint32_t type = UINT32_MAX;
+		for (uint32_t i = 0; i < props.memoryTypeCount && type == UINT32_MAX; ++i)
+			if ((req.memoryTypeBits & (1u << i)) && (props.memoryTypes[i].propertyFlags & cached) == cached)
+				type = i;
+		for (uint32_t i = 0; i < props.memoryTypeCount && type == UINT32_MAX; ++i)
+			if ((req.memoryTypeBits & (1u << i)) && (props.memoryTypes[i].propertyFlags & coherent) == coherent)
+				type = i;
+		if (type == UINT32_MAX)
+			return false;
+		VkMemoryAllocateInfo alloc{ VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO };
+		alloc.allocationSize = req.size;
+		alloc.memoryTypeIndex = type;
+		if (allocate(device, &alloc, nullptr, &s.memory) != VK_SUCCESS || bind(device, s.buffer, s.memory, 0) != VK_SUCCESS ||
+			map(device, s.memory, 0, VK_WHOLE_SIZE, 0, &s.mapped) != VK_SUCCESS)
+			return false;
+		s.device = device;
+		logger::info("[Streamline] in-command-buffer readback ready ({} MB, memory type {})", s.size >> 20, type);
+		return true;
+	}
+
+	static uint32_t TexelBytes(VkFormat a_format)
+	{
+		switch (a_format) {
+		case VK_FORMAT_R16G16B16A16_SFLOAT:
+			return 8;
+		case VK_FORMAT_R16G16_SFLOAT:
+		case VK_FORMAT_D24_UNORM_S8_UINT:
+		case VK_FORMAT_D32_SFLOAT:
+		case VK_FORMAT_X8_D24_UNORM_PACK32:
+			return 4;
+		default:
+			return 0;
+		}
+	}
+
+	static bool IsDepth(VkFormat a_format)
+	{
+		return a_format == VK_FORMAT_D24_UNORM_S8_UINT || a_format == VK_FORMAT_D32_SFLOAT || a_format == VK_FORMAT_X8_D24_UNORM_PACK32;
+	}
+
+	static void Record(VkCommandBuffer a_cmd, const sl::Resource& a_res, const std::string& a_name, uint32_t a_width, uint32_t a_height)
+	{
+		auto& s = Get();
+		const auto format = static_cast<VkFormat>(a_res.nativeFormat);
+		const uint32_t texel = TexelBytes(format);
+		if (!texel || !s.buffer) {
+			logger::info("[Streamline] in-cb readback: {} format {} not copied", a_name, static_cast<int>(format));
+			return;
+		}
+		const VkDeviceSize bytes = VkDeviceSize(a_width) * a_height * texel;
+		if (s.used + bytes > s.size)
+			return;
+		VkMemoryBarrier full{ VK_STRUCTURE_TYPE_MEMORY_BARRIER };
+		full.srcAccessMask = VK_ACCESS_MEMORY_WRITE_BIT;
+		full.dstAccessMask = VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT;
+		s.barrier(a_cmd, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 1, &full, 0, nullptr, 0, nullptr);
+		VkBufferImageCopy region{};
+		region.bufferOffset = s.used;
+		region.imageSubresource.aspectMask = IsDepth(format) ? VK_IMAGE_ASPECT_DEPTH_BIT : VK_IMAGE_ASPECT_COLOR_BIT;
+		region.imageSubresource.layerCount = 1;
+		region.imageExtent = { a_width, a_height, 1 };
+		s.copyImageToBuffer(a_cmd, static_cast<VkImage>(a_res.native), static_cast<VkImageLayout>(a_res.state), s.buffer, 1, &region);
+		s.barrier(a_cmd, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 1, &full, 0, nullptr, 0, nullptr);
+		s.copies.push_back({ a_name, format, a_width, a_height, texel, s.used });
+		s.used += (bytes + 255) & ~VkDeviceSize(255);
+	}
+
+	static std::string Stats(const Copy& a_copy)
+	{
+		auto& s = Get();
+		const auto* base = static_cast<const uint8_t*>(s.mapped) + a_copy.offset;
+		double sum[4] = {}, mn[4], mx[4];
+		for (int c = 0; c < 4; ++c)
+			mn[c] = 1e30, mx[c] = -1e30;
+		uint64_t nonFinite = 0, n = 0, topBad = 0, topCount = 0;
+		const uint32_t channels = a_copy.format == VK_FORMAT_R16G16B16A16_SFLOAT ? 4 : a_copy.format == VK_FORMAT_R16G16_SFLOAT ? 2 : 1;
+		for (uint32_t y = 0; y < a_copy.height; ++y)
+			for (uint32_t x = 0; x < a_copy.width; ++x) {
+				const uint8_t* t = base + (std::size_t(y) * a_copy.width + x) * a_copy.texel;
+				float v[4]{};
+				if (channels > 1) {
+					for (uint32_t c = 0; c < channels; ++c)
+						v[c] = DirectX::PackedVector::XMConvertHalfToFloat(reinterpret_cast<const uint16_t*>(t)[c]);
+				} else if (a_copy.format == VK_FORMAT_D32_SFLOAT) {
+					v[0] = *reinterpret_cast<const float*>(t);
+				} else {
+					v[0] = (*reinterpret_cast<const uint32_t*>(t) & 0xFFFFFFu) / 16777215.0f;
+				}
+				bool bad = false;
+				for (uint32_t c = 0; c < channels; ++c) {
+					if (!std::isfinite(v[c])) {
+						++nonFinite;
+						bad = true;
+						continue;
+					}
+					sum[c] += v[c];
+					mn[c] = std::min<double>(mn[c], v[c]);
+					mx[c] = std::max<double>(mx[c], v[c]);
+				}
+				if (channels > 1 && y < a_copy.height / 4) {
+					++topCount;
+					if (bad || std::abs(v[0]) > 100.0f || std::abs(v[1]) > 100.0f)
+						++topBad;
+				}
+				++n;
+			}
+		std::string text = fmt::format("{} ({}x{}, format {}): {} non-finite", a_copy.name, a_copy.width, a_copy.height, static_cast<int>(a_copy.format), nonFinite);
+		for (uint32_t c = 0; c < channels; ++c)
+			text += fmt::format("; c{} min {:.4g} max {:.4g} mean {:.4g}", c, mn[c], mx[c], sum[c] / double(n ? n : 1));
+		if (topCount)
+			text += fmt::format("; top quarter |v|>100 or non-finite: {} of {}", topBad, topCount);
+		return text;
+	}
+
+	// At each evaluate: once the armed frame's buffer can have completed, waits for it and writes its statistics and raw copies.
+	static void Drain()
+	{
+		auto& s = Get();
+		// Read once the frame's work is surely done, without waiting: the render thread runs at most kGameFramesInFlight frames ahead
+		// of the GPU (DXVK's frame latency, and the graph host's waits for a revision-driven epoch's published copy of that many frames
+		// back), so kGameFramesInFlight frames later the frame that recorded the copies (and everything queued before them) has
+		// completed. A diagnostic dump (CS_DCLF_TARGET_DUMP). A device-wide idle wait here, mid-frame on the render thread, can deadlock: queued work may wait on a
+		// timeline this thread signals only once it moves on.
+		if (!s.pending || ++s.framesWaited <= RenderGraphRuntime::kGameFramesInFlight)
+			return;
+		auto dir = logger::log_directory().value_or(std::filesystem::path{}) / "dclf-dump" / "incb";
+		std::error_code error;
+		std::filesystem::create_directories(dir, error);
+		for (const auto& copy : s.copies) {
+			logger::info("[Streamline] in-cb readback frame {}: {}", s.frame, Stats(copy));
+			std::ofstream raw(dir / (copy.name + ".raw"), std::ios::binary);
+			raw.write(static_cast<const char*>(s.mapped) + copy.offset, static_cast<std::streamsize>(std::size_t(copy.width) * copy.height * copy.texel));
+		}
+		s.copies.clear();
+		s.used = 0;
+		s.pending = false;
+	}
+}
+
+#if defined(CS_HAS_RENDER_GRAPH)
+/**
+ * @brief The evaluate as the post stage's pass (native mode, and guest mode since the post stage runs there): the frame's constants
+ * now, then the tags and the evaluate as the evaluate pass at the Upscale anchor (ORGUpscaling::QueueEvaluate), which records them on
+ * its own command list in the post stage, on the thread that records it (in guest, DXVK's command buffer inside the stage's block). The
+ * images are the pass's: kMAIN in, the upscaled texture out, kMAIN's depth and the motion vectors, each in the common state. The
+ * upscaled output's copy into kMAIN is the same anchor's next pass. The result is known only when the pass records: an evaluate the
+ * SDK refuses is logged there, and this frame's output is the previous one.
+ */
+static sl::Result cs_EvaluateFeatureAsPass(sl::Feature a_feature, const sl::ViewportHandle& a_viewport,
+	ID3D11Resource* a_colorIn, ID3D11Resource* a_colorOut, ID3D11Resource* a_depth, ID3D11Resource* a_motionVectors,
+	uint32_t a_renderWidth, uint32_t a_renderHeight, uint32_t a_outputWidth, uint32_t a_outputHeight,
+	float a_jitterX, float a_jitterY, ID3D11Resource* a_hudlessColor, bool* a_outputReady, bool* a_skipped)
+{
+	using RenderGraph::Engine::Native::ExternalImageInfo;
+	const auto skip = [&] {
+		if (a_skipped)
+			*a_skipped = true;
+		return sl::Result::eOk;
+	};
+	sl::FrameToken* token = RenderFrameToken();
+	if (!token)
+		return skip();
+	static uint32_t s_evalFrameByVp[2] = { UINT32_MAX, UINT32_MAX };
+	const uint32_t vpId = a_viewport;
+	const uint32_t frame = g_sl.renderFrameId.load(std::memory_order_acquire);
+	if (vpId < 2 && s_evalFrameByVp[vpId] == frame)
+		return skip();
+	// The pass's images are kMAIN, the upscaled texture, kMAIN's depth and the motion vectors: the only evaluate the post stage makes.
+	if (!a_colorIn || !a_colorOut || !a_depth || !a_motionVectors || a_hudlessColor) {
+		static std::once_flag logged;
+		std::call_once(logged, [] { logger::error("[Streamline] the evaluate pass takes only colour, depth and motion vectors without a hudless colour; skipped (logged once)"); });
+		return skip();
+	}
+	sl::Constants consts;
+	if (!cs_BuildConstants(consts, a_outputWidth, a_outputHeight, a_jitterX, a_jitterY))
+		return skip();
+	if (const sl::Result constantsRes = g_sl.slSetConstants(consts, *token, a_viewport); constantsRes != sl::Result::eOk) {
+		logger::error("[Streamline] slSetConstants failed for viewport {} (result {})", vpId, static_cast<int>(constantsRes));
+		return constantsRes;
+	}
+
+	const bool d3d12 = RenderGraph::Backend::IsD3D12();
+	const sl::ViewportHandle viewport = a_viewport;
+	const char* label = a_feature == sl::kFeatureDLSS ? "Streamline DLSS" : a_feature == sl::kFeatureXeSS ? "Streamline XeSS" : "Streamline FSR";
+	// Runs later, in the evaluate pass's Record: everything it uses is captured by value. The token stays valid: Streamline keeps a
+	// ring of them, and the pass records within the frames in flight.
+	auto record = [=](void* a_list, std::span<const ExternalImageInfo> a_infos) {
+		std::array<sl::Resource, 4> resources{};
+		std::array<sl::SubresourceRange, 4> ranges{};
+		for (std::size_t i = 0; i < a_infos.size() && i < resources.size(); ++i) {
+			const auto& info = a_infos[i];
+			if (d3d12) {
+				resources[i] = sl::Resource{ sl::ResourceType::eTex2d, info.native, static_cast<uint32_t>(info.state) };
+			} else {
+				resources[i] = sl::Resource{ sl::ResourceType::eTex2d, info.native, nullptr, reinterpret_cast<void*>(info.view), static_cast<uint32_t>(info.state) };
+				resources[i].width = info.width;
+				resources[i].height = info.height;
+				resources[i].nativeFormat = info.format;
+				resources[i].mipLevels = info.mips;
+				resources[i].arrayLayers = info.layers;
+				resources[i].usage = info.usage;
+				ranges[i].aspectMask = cs_ImageAspect(static_cast<VkFormat>(info.format));
+				ranges[i].baseMipLevel = 0;
+				ranges[i].levelCount = info.mips;
+				ranges[i].baseArrayLayer = 0;
+				ranges[i].layerCount = info.layers;
+				resources[i].next = &ranges[i];
+			}
+		}
+		sl::Extent renderExtent{ 0, 0, a_renderWidth, a_renderHeight };
+		sl::Extent outputExtent{ 0, 0, a_outputWidth, a_outputHeight };
+		std::array<sl::ResourceTag, 4> tags{
+			sl::ResourceTag{ &resources[0], sl::kBufferTypeScalingInputColor, sl::ResourceLifecycle::eValidUntilEvaluate, &renderExtent },
+			sl::ResourceTag{ &resources[1], sl::kBufferTypeScalingOutputColor, sl::ResourceLifecycle::eValidUntilEvaluate, &outputExtent },
+			sl::ResourceTag{ &resources[2], sl::kBufferTypeDepth, sl::ResourceLifecycle::eValidUntilEvaluate, &renderExtent },
+			sl::ResourceTag{ &resources[3], sl::kBufferTypeMotionVectors, sl::ResourceLifecycle::eValidUntilEvaluate, &renderExtent }
+		};
+		auto* commandBuffer = static_cast<sl::CommandBuffer*>(a_list);
+		if (const sl::Result tagRes = g_sl.slSetTagForFrame(*token, viewport, tags.data(), static_cast<uint32_t>(tags.size()), commandBuffer); tagRes != sl::Result::eOk) {
+			logger::error("[Streamline] slSetTagForFrame failed for feature {} viewport {} (result {})", static_cast<uint32_t>(a_feature), static_cast<uint32_t>(viewport),
+				static_cast<int>(tagRes));
+			return false;
+		}
+		const sl::BaseStructure* inputs[] = { &viewport };
+		const sl::Result evalRes = g_sl.slEvaluateFeature(a_feature, *token, inputs, static_cast<uint32_t>(std::size(inputs)), commandBuffer);
+		if (evalRes != sl::Result::eOk && evalRes != sl::Result::eWarnOutOfVRAM) {
+			logger::error("[Streamline] slEvaluateFeature failed for feature {} viewport {} (result {})", static_cast<uint32_t>(a_feature), static_cast<uint32_t>(viewport),
+				static_cast<int>(evalRes));
+			return false;
+		}
+		return true;
+	};
+	if (!ORGUpscaling::Get().QueueEvaluate(label, std::move(record))) {
+		static std::once_flag logged;
+		std::call_once(logged, [label] { logger::error("[Streamline] {}: the evaluate pass cannot run (Upscaling's graph path or its inputs are missing); skipped (logged once)", label); });
+		return sl::Result::eErrorNotInitialized;
+	}
+	if (a_outputReady)
+		*a_outputReady = true;
+	if (vpId < 2)
+		s_evalFrameByVp[vpId] = frame;
+	return sl::Result::eOk;
+}
+#endif
+
 static sl::Result cs_EvaluateFeatureCore(sl::Feature a_feature, const sl::ViewportHandle& a_viewport,
 	ID3D11Resource* a_colorIn, ID3D11Resource* a_colorOut, ID3D11Resource* a_depth, ID3D11Resource* a_motionVectors,
 	uint32_t a_renderWidth, uint32_t a_renderHeight, uint32_t a_outputWidth, uint32_t a_outputHeight,
@@ -1202,10 +1670,17 @@ static sl::Result cs_EvaluateFeatureCore(sl::Feature a_feature, const sl::Viewpo
 		*a_outputReady = false;
 	if (a_skipped)
 		*a_skipped = false;
+#if defined(CS_HAS_RENDER_GRAPH)
+	// The upscalers' evaluate is the post stage's pass wherever that stage runs (the recipe); frame generation's stays in the ring.
+	if (RenderGraph::Engine::Native::Active() || (a_feature != sl::kFeatureFSR_G && ORGUpscaling::Get().EvaluatesInStage()))
+		return cs_EvaluateFeatureAsPass(a_feature, a_viewport, a_colorIn, a_colorOut, a_depth, a_motionVectors, a_renderWidth, a_renderHeight, a_outputWidth,
+			a_outputHeight, a_jitterX, a_jitterY, a_hudlessColor, a_outputReady, a_skipped);
+#endif
 
 	auto* dxvk = DXVKInterop::GetSingleton();
 	if (!dxvk)
 		return sl::Result::eErrorNotInitialized;
+	InCbReadback::Drain();
 
 	sl::FrameToken* token = RenderFrameToken();
 	if (!token) {
@@ -1324,7 +1799,9 @@ static sl::Result cs_EvaluateFeatureCore(sl::Feature a_feature, const sl::Viewpo
 		tags[nt++] = sl::ResourceTag{ &hudlessRes, sl::kBufferTypeHUDLessColor, sl::ResourceLifecycle::eOnlyValidNow, &outputExtent };
 
 	sl::Result evalRes = sl::Result::eErrorNotInitialized;
-	auto transaction = dxvk->BeginFrameCommandBuffer();
+	// Timed inside the buffer: a D3D11 timer around it would straddle the submission (DXVKInterop.h).
+	auto transaction = dxvk->BeginFrameCommandBuffer(
+		a_feature == sl::kFeatureFSR_G ? nullptr : "Upscaling::Upscale");
 	if (transaction) {
 		const VkCommandBuffer cmd = transaction.GetCommandBuffer();
 		const sl::Result tagRes = cs_SetTagForFrame(*token, a_viewport, tags, nt, cmd);
@@ -1341,7 +1818,23 @@ static sl::Result cs_EvaluateFeatureCore(sl::Feature a_feature, const sl::Viewpo
 			return tagRes;
 		}
 
+		// CS_DCLF_TARGET_DUMP frames: the inputs as this command buffer sees them, before the evaluate (InCbReadback).
+		static uint32_t s_dumpFrames = 0;
+		const bool readback = DrawcallLimitFix::TargetDumpArmed() && haveColor && s_dumpFrames < 3 && InCbReadback::Ensure(dxvk);
+		if (readback) {
+			InCbReadback::Record(cmd, colorInRes, fmt::format("f{}-in-color", s_dumpFrames + 1), a_renderWidth, a_renderHeight);
+			InCbReadback::Record(cmd, mvecRes, fmt::format("f{}-in-mvec", s_dumpFrames + 1), a_renderWidth, a_renderHeight);
+			InCbReadback::Record(cmd, depthRes, fmt::format("f{}-in-depth", s_dumpFrames + 1), a_renderWidth, a_renderHeight);
+		}
 		evalRes = cs_EvaluateFeature(a_feature, *token, a_viewport, cmd);
+		if (readback && evalRes == sl::Result::eOk) {
+			InCbReadback::Record(cmd, colorOutRes, fmt::format("f{}-out-color", s_dumpFrames + 1), a_outputWidth, a_outputHeight);
+			InCbReadback::Record(cmd, colorInRes, fmt::format("f{}-in-color-after", s_dumpFrames + 1), a_renderWidth, a_renderHeight);
+			auto& rb = InCbReadback::Get();
+			rb.pending = true;
+			rb.framesWaited = 0;
+			rb.frame = ++s_dumpFrames;
+		}
 		if (evalRes != sl::Result::eOk) {
 			const bool canRelease = a_feature != sl::kFeatureFSR_G ||
 				cs_CanReleaseFailedFSRFrame(dxvk, transaction, a_viewport,
@@ -1424,7 +1917,7 @@ Streamline::EvaluationResult Streamline::EvaluateDLSS(ID3D11Resource* a_colorIn,
 		return result;
 
 	auto* dxvk = DXVKInterop::GetSingleton();
-	if (!dxvk->CommandResourcesReady())
+	if (!native && !dxvk->CommandResourcesReady())
 		return result;
 
 	sl::DLSSMode dlssMode = sl::DLSSMode::eMaxQuality;
@@ -1523,7 +2016,7 @@ Streamline::EvaluationResult Streamline::EvaluateXeSS(ID3D11Resource* a_colorIn,
 		return result;
 
 	auto* dxvk = DXVKInterop::GetSingleton();
-	if (!dxvk->CommandResourcesReady())
+	if (!native && !dxvk->CommandResourcesReady())
 		return result;
 
 	sl::XeSSMode xessMode = sl::XeSSMode::eQuality;
@@ -1591,7 +2084,7 @@ Streamline::EvaluationResult Streamline::EvaluateFSR(ID3D11Resource* a_colorIn, 
 		return result;
 
 	auto* dxvk = DXVKInterop::GetSingleton();
-	if (!dxvk->CommandResourcesReady())
+	if (!native && !dxvk->CommandResourcesReady())
 		return result;
 
 	sl::FSRMode fsrMode = sl::FSRMode::eMaxQuality;
@@ -1650,6 +2143,8 @@ bool Streamline::EvaluateFSRFrameGen(ID3D11Resource* a_depth, ID3D11Resource* a_
 	float a_jitterX, float a_jitterY)
 {
 	// Isolate FSR frame-generation preparation from viewport 0 upscaling tags and constants.
+	// Not separated from render-graph epochs (Upscaling::SeparateFromGraphEpochs): if a graph epoch is the last GPU work before this
+	// evaluate, its output can be corrupt (docs/development/render-graph.md, "Hazard: external Vulkan work directly after a graph epoch").
 	if (!initialized || !featureFSRFG)
 		return false;
 	if (!a_depth || !a_motionVectors || !a_hudlessColor)
@@ -1950,6 +2445,9 @@ ID3D11Resource* a_depth, ID3D11Resource* a_motionVectors,
 	ID3D11Resource* a_hudlessColor, uint32_t a_renderWidth, uint32_t a_renderHeight,
 	uint32_t a_displayWidth, uint32_t a_displayHeight)
 {
+	// DLSS-G interpolates from these tags at present, through Streamline's present hook. It is not separated from render-graph epochs:
+	// if a graph epoch is the last GPU work before it, its output can be corrupt (docs/development/render-graph.md, "Hazard: external
+	// Vulkan work directly after a graph epoch").
 	if (!initialized || !featureDLSSG) {
 		cs_NoteDlssgTagSkip("DLSS-G unavailable");
 		return;

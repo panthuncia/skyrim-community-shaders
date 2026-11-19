@@ -16,12 +16,15 @@
 #include "State.h"
 #include "Util.h"
 
+#include "PostProcessing/ORGPostProcessing.h"
 #include "PostProcessing/RasterPass.h"
 
 #include "Features/HDRDisplay.h"
 #include "Features/LinearLighting.h"
 #include "Features/Upscaling.h"
 #include "Utils/ColorSpace.h"
+#include "RenderGraph/Engine/Tripwire/Tripwire.h"
+#include "Vram/DxvkMemory.h"
 
 #include <algorithm>
 #include <array>
@@ -270,17 +273,22 @@ void PostProcessing::DrawSettings()
 			const float headerBottom = ImGui::GetCursorPosY();
 			ImGui::SetCursorPos(ImVec2(ImGui::GetContentRegionMax().x - Util::IconButtonSize(), headerTop));
 			if (Util::IconButton("##RecompileShaders", Icons::TI(ICON_TI_REFRESH),
-					T("feature.post_processing.recompile_shaders_for_this_sub_feature_only", "Recompile shaders for this sub-feature only.")))
+					T("feature.post_processing.recompile_shaders_for_this_sub_feature_only", "Recompile shaders for this sub-feature only."))) {
 				feat->ClearShaderCache();
+				ORGPostProcessing::Get().ClearShaderCache();
+			}
 			ImGui::SetCursorPosY(headerBottom);
 
 			if (!drawForcedEnabled(T("feature.post_processing.enabled", "Enabled"), *feat))
 				ImGui::Checkbox(T("feature.post_processing.enabled", "Enabled"), &feat->enabled);
 			ImGui::Spacing();
-			if (feat->IsActive())
+			if (feat->IsActive()) {
+				// Some settings pages preview the feature's textures before its first frame has run.
+				EnsureResources(*feat);
 				feat->DrawSettings();
-			else
+			} else {
 				Util::SettingHint(T("feature.post_processing.enable_the_feature_to_see_its_settings", "Enable the feature to see its settings."), false);
+			}
 
 			ImGui::PopID();
 		} else {
@@ -417,8 +425,44 @@ void PostProcessing::ApplyContextualDefaults(json& a_defaults) const
 	}
 }
 
+std::shared_ptr<PostProcessFeature> PostProcessing::MakePipelineFeature(FeaturePipelineIndex idx)
+{
+	switch (idx) {
+	case FeaturePipelineIndex::DoF:
+		return std::make_shared<DoF>();
+	case FeaturePipelineIndex::Vignette:
+		return std::make_shared<Vignette>();
+	case FeaturePipelineIndex::LocalExposure:
+		return std::make_shared<LocalExposure>();
+	case FeaturePipelineIndex::AutoExposure:
+		return std::make_shared<HistogramAutoExposure>();
+	case FeaturePipelineIndex::MotionBlur:
+		return std::make_shared<MotionBlur>();
+	case FeaturePipelineIndex::PhysicalGlare:
+		return std::make_shared<PhysicalGlare>();
+	case FeaturePipelineIndex::CODBloom:
+		return std::make_shared<CODBloom>();
+	case FeaturePipelineIndex::LensFlare:
+		return std::make_shared<LensFlare>();
+	case FeaturePipelineIndex::Composite:
+		return std::make_shared<Composite>();
+	case FeaturePipelineIndex::ColorGrading:
+		return std::make_shared<ColorGrading>();
+	case FeaturePipelineIndex::LUT:
+		return std::make_shared<LUT>();
+	case FeaturePipelineIndex::Camera:
+		return std::make_shared<Camera>();
+	case FeaturePipelineIndex::Border:
+		return std::make_shared<Border>();
+	default:
+		return nullptr;
+	}
+}
+
 void PostProcessing::BuildPipeline()
 {
+	// Spelled out rather than through MakePipelineFeature: the scene settings catalog generator
+	// discovers the sub-features from these assignments.
 	pipeline[static_cast<size_t>(FeaturePipelineIndex::LocalExposure)] = std::make_shared<LocalExposure>();
 	pipeline[static_cast<size_t>(FeaturePipelineIndex::AutoExposure)] = std::make_shared<HistogramAutoExposure>();
 	pipeline[static_cast<size_t>(FeaturePipelineIndex::ColorGrading)] = std::make_shared<ColorGrading>();
@@ -434,6 +478,64 @@ void PostProcessing::BuildPipeline()
 	pipeline[static_cast<size_t>(FeaturePipelineIndex::Camera)] = std::make_shared<Camera>();
 	pipeline[static_cast<size_t>(FeaturePipelineIndex::Border)] = std::make_shared<Border>();
 	ApplyDefaultEnabledStates();
+}
+
+void PostProcessing::EnsureResources(PostProcessFeature& feature)
+{
+	if (feature.resourcesReady)
+		return;
+	// Set up from the pipeline's hook or the menu rather than the feature's own setup, so the owner is not in scope.
+	Vram::OwnerScope vramScope("CS/PostProcessing");
+	feature.SetupResources();
+	feature.resourcesReady = true;
+}
+
+void PostProcessing::SyncPipelineResources()
+{
+	for (size_t index = 0; index < pipeline.size(); ++index) {
+		auto& pipe = pipeline[index];
+		// An active sub-feature is set up where the D3D11 path first draws it (DrawFeature), so it holds no D3D11 textures while
+		// the render graph runs the chain.
+		if (!pipe || pipe->IsActive() || !pipe->resourcesReady)
+			continue;
+
+		// A fresh instance is the never-set-up state every sub-feature already supports, so this frees its
+		// GPU resources without a per-feature release path. Async compiles of the old one hold a weak_ptr.
+		json featureSettings{};
+		pipe->SaveSettings(featureSettings);
+		auto fresh = MakePipelineFeature(static_cast<FeaturePipelineIndex>(index));
+		fresh->owner = this;
+		fresh->enabled = pipe->enabled;
+		fresh->LoadSettings(featureSettings);
+		pipe = std::move(fresh);
+	}
+}
+
+void PostProcessing::UpdatePipeline()
+{
+	for (auto& pipe : pipeline) {
+		if (pipe && pipe->IsAutoEnabled())
+			pipe->UpdateAutoEnabled();
+	}
+	SyncPipelineResources();
+}
+
+std::vector<PostProcessing::FeaturePipelineIndex> PostProcessing::ChainOrder() const
+{
+	std::vector<FeaturePipelineIndex> order;
+	if (bypass)
+		return order;
+	const bool inMainLoadingMenu = globals::state->IsMainOrLoadingMenuOpen();
+	const bool upscalingLoaded = globals::features::upscaling.loaded;
+	for (const bool afterGrading : { false, true }) {
+		for (size_t index = 0; index < pipeline.size(); ++index) {
+			const auto& pipe = pipeline[index];
+			if (pipe && pipe->IsActive() && pipe->DrawAfterColorGrading() == afterGrading && !(inMainLoadingMenu && pipe->DisableInMainLoadingMenu()) &&
+				(!pipe->DrawBeforeUpscaling() || !upscalingLoaded))
+				order.push_back(static_cast<FeaturePipelineIndex>(index));
+		}
+	}
+	return order;
 }
 
 void PostProcessing::ApplyDefaultEnabledStates()
@@ -464,10 +566,12 @@ void PostProcessing::RestoreDefaultSettings()
 
 void PostProcessing::ClearShaderCache()
 {
+	// Sub-features without resources compile their shaders when they are set up.
 	for (auto& pipe : pipeline) {
-		if (pipe)
+		if (pipe && pipe->resourcesReady)
 			pipe->ClearShaderCache();
 	}
+	ORGPostProcessing::Get().ClearShaderCache();
 }
 
 void PostProcessing::SetupResources()
@@ -490,11 +594,10 @@ void PostProcessing::SetupResources()
 
 	BuildPipeline();
 
+	// Sub-features are set up when the D3D11 path first draws them (DrawFeature), so disabled ones allocate nothing.
 	for (auto& pipe : pipeline) {
-		if (pipe) {
+		if (pipe)
 			pipe->owner = this;
-			pipe->SetupResources();
-		}
 	}
 
 	bokehResources.Setup();
@@ -503,6 +606,8 @@ void PostProcessing::SetupResources()
 
 	ProcessSettings(pendingSettings);
 	pendingSettings = {};
+
+	ORGPostProcessing::Get().Setup();
 }
 
 void PostProcessing::Reset()
@@ -519,6 +624,9 @@ void PostProcessing::Reset()
 std::optional<PostProcessing::RenderTargetCopy> PostProcessing::PrepareRenderTargetCopy(
 	ID3D11Texture2D* target, PostProcessFeature::TextureInfo source, const CopyCB& conversion)
 {
+	// Engine target fields can be tripwire handles: DXVK's context takes the objects they wrap.
+	target = RenderGraph::Engine::Tripwire::Unwrap(target);
+	source = { RenderGraph::Engine::Tripwire::Unwrap(source.tex), RenderGraph::Engine::Tripwire::Unwrap(source.srv) };
 	if (!target || !source.tex)
 		return std::nullopt;
 
@@ -664,8 +772,23 @@ bool PostProcessing::BeginLinearProcessing(PostProcessFeature::TextureInfo& text
 	return true;
 }
 
+PostProcessing::CopyCB PostProcessing::OutputConversion(bool a_colorGraded, bool a_exposureResolved) const
+{
+	auto& ll = globals::features::linearLighting;
+	const bool sceneOutput = globals::state->GetTonemapOwner() != State::TonemapOwner::kPostProcessing;
+	const auto sceneGamut = ll.IsACEScgActive() ? Gamut::ACEScg : Gamut::Rec709;
+	const auto displayGamut = globals::features::hdrDisplay.loaded && globals::features::hdrDisplay.settings.enableHDR ? Gamut::Rec2020 : Gamut::Rec709;
+	return {
+		.inputGamut = a_colorGraded ? displayGamut : sceneGamut,
+		.outputGamut = sceneOutput ? sceneGamut : displayGamut,
+		.gamma = sceneOutput && !ll.IsLinearLightingActive() ? Util::ColorSpace::GAME_GAMMA_INV : 1.f,
+		.scale = a_exposureResolved ? 1.f : 1.f / globals::state->preExposure
+	};
+}
+
 void PostProcessing::DrawFeature(PostProcessFeature& feature, PostProcessFeature::TextureInfo& lastTexColor)
 {
+	EnsureResources(feature);
 	if (feature.WritesToMainTexture()) {
 		feature.Draw(lastTexColor);
 	} else {
@@ -688,16 +811,13 @@ void PostProcessing::DrawBeforeUpscaling()
 
 	bool inMainLoadingMenu = state->IsMainOrLoadingMenuOpen();
 	auto gameTexMain = renderer->GetRuntimeData().renderTargets[RE::RENDER_TARGETS::kMAIN];
-	PostProcessFeature::TextureInfo lastTexColor = { gameTexMain.texture, gameTexMain.SRV };
+	// Engine target fields can be tripwire handles: the passes bind these through DXVK's context.
+	PostProcessFeature::TextureInfo lastTexColor = { RenderGraph::Engine::Tripwire::Unwrap(gameTexMain.texture), RenderGraph::Engine::Tripwire::Unwrap(gameTexMain.SRV) };
 	bool processing = false;
 
 	state->BeginPerfEvent("[Post Processing] Pre-Upscale");
 
-	// update auto-enabled features
-	for (auto& pipe : pipeline) {
-		if (pipe && pipe->IsAutoEnabled())
-			pipe->UpdateAutoEnabled();
-	}
+	UpdatePipeline();
 
 	// go through each fx
 	for (auto& pipe : pipeline) {
@@ -722,8 +842,26 @@ void PostProcessing::DrawBeforeUpscaling()
 	state->EndPerfEvent();
 }
 
+void PostProcessing::BeforeTonemapAnchor(const RenderGraph::Engine::TonemapTargets& a_targets)
+{
+	ORGPostProcessing::Get().BeforeTonemap(a_targets, isrefraction);
+}
+
+bool PostProcessing::ReadsMainCopy(RE::RENDER_TARGET a_input) const
+{
+	// The tonemap hook hands us the pass input directly, so no need to probe the bound RTV.
+	// Refraction still routes through kMAIN_COPY without that being reflected in a_input.
+	return isrefraction || a_input == RE::RENDER_TARGETS::kMAIN_COPY;
+}
+
 std::optional<RE::RENDER_TARGET> PostProcessing::PreProcess(RE::RENDER_TARGET a_input)
 {
+	// The render graph ran the chain in the Tonemap anchor's epoch.
+	// Its Border pass zeroes the band's motion vectors itself (ORG/ORGBorder.cpp).
+	if (ORGPostProcessing::Get().Ran()) {
+		isrefraction = false;
+		return std::nullopt;
+	}
 	if (globals::features::linearLighting.IsLinearLightingActive() &&
 		(globals::state->permutationData.RenderToUI || globals::state->IsMainOrLoadingMenuOpen()))
 		return std::nullopt;
@@ -747,23 +885,18 @@ std::optional<RE::RENDER_TARGET> PostProcessing::PreProcess(RE::RENDER_TARGET a_
 	auto& gameTexMainRT = renderer->GetRuntimeData().renderTargets[RE::RENDER_TARGETS::kMAIN];
 	auto& gameTexMainCopyRT = renderer->GetRuntimeData().renderTargets[RE::RENDER_TARGETS::kMAIN_COPY];
 
-	// The tonemap hook hands us the pass input directly, so no need to probe the bound RTV.
-	// Refraction still routes through kMAIN_COPY without that being reflected in a_input.
-	const bool useMainCopy = isrefraction || a_input == RE::RENDER_TARGETS::kMAIN_COPY;
+	const bool useMainCopy = ReadsMainCopy(a_input);
 	const auto sceneTarget = useMainCopy ? RE::RENDER_TARGETS::kMAIN_COPY : RE::RENDER_TARGETS::kMAIN;
 	isrefraction = false;
 
 	auto gameTexMain = useMainCopy ? gameTexMainCopyRT : gameTexMainRT;
-	PostProcessFeature::TextureInfo lastTexColor = { gameTexMain.texture, gameTexMain.SRV };
+	// Engine target fields can be tripwire handles: the passes bind these through DXVK's context.
+	PostProcessFeature::TextureInfo lastTexColor = { RenderGraph::Engine::Tripwire::Unwrap(gameTexMain.texture), RenderGraph::Engine::Tripwire::Unwrap(gameTexMain.SRV) };
 	if (!BeginLinearProcessing(lastTexColor))
 		return sceneTarget;
 	auto gameTexMainAlt = useMainCopy ? gameTexMainRT : gameTexMainCopyRT;
 
-	// update auto-enabled features
-	for (auto& pipe : pipeline) {
-		if (pipe && pipe->IsAutoEnabled())
-			pipe->UpdateAutoEnabled();
-	}
+	UpdatePipeline();
 
 	const auto canDraw = [&](const auto& pipe) {
 		return !bypass && pipe && pipe->IsActive() && !(inMainLoadingMenu && pipe->DisableInMainLoadingMenu()) &&
@@ -786,6 +919,8 @@ std::optional<RE::RENDER_TARGET> PostProcessing::PreProcess(RE::RENDER_TARGET a_
 	Composite::ConversionTarget fusedConversion;
 	if (linear && canDraw(composite)) {
 		if (canDraw(grading)) {
+			// The fused draw reads Color Grading's LUT and constants.
+			EnsureResources(*grading);
 			fusedGrading = static_cast<ColorGrading*>(grading.get());
 		} else if (gameTexMain.texture && std::ranges::none_of(pipeline, [&](const auto& pipe) {
 					   return canDraw(pipe) && pipe->DrawAfterColorGrading();
@@ -810,6 +945,7 @@ std::optional<RE::RENDER_TARGET> PostProcessing::PreProcess(RE::RENDER_TARGET a_
 		if (canDraw(pipe) && !pipe->DrawAfterColorGrading()) {
 			auto* input = lastTexColor.tex;
 			if (pipe == composite) {
+				EnsureResources(*pipe);
 				const auto output = static_cast<Composite*>(pipe.get())->Draw(lastTexColor, fusedGrading, fusedConversion);
 				exposureResolved |= lastTexColor.tex != input;
 				colorGraded = output == Composite::Output::Graded;
@@ -960,4 +1096,6 @@ void PostProcessing::PostPostLoad()
 	stl::write_vfunc<0x6, VanillaDoF_IsActive>(RE::VTABLE_ImageSpaceEffectDepthOfField[0]);
 	stl::write_vfunc<0x1, VanillaBlur_Render>(RE::VTABLE_ImageSpaceEffectBlur[0]);
 	stl::write_vfunc<0x2, BSImagespaceShaderRefraction_SetupTechnique>(RE::VTABLE_BSImagespaceShaderRefraction[0]);
+
+	ORGPostProcessing::Reserve();
 }

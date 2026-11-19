@@ -1,0 +1,67 @@
+// The light volumes' entry and sink.
+
+// Internal.h first, because volk must precede every Vulkan header in the translation unit.
+#include "Features/DrawcallLimitFix/Core/Render/Internal.h"
+#include "Features/DrawcallLimitFix/Core/Extensions/LightVolumes.h"
+
+#include <algorithm>
+#include <cstring>
+
+namespace DCLF::Api
+{
+	void LightVolumeSink::Put(const LightVolume& a_volume)
+	{
+		auto& volume = out.emplace_back();
+		volume.masks[0] = a_volume.masks[0];
+		volume.masks[1] = a_volume.masks[1];
+		volume.maskBit = a_volume.maskBit;
+		volume.affectsLand = a_volume.affectsLand ? 1u : 0u;
+		std::memcpy(volume.sphere, a_volume.sphere, sizeof(volume.sphere));
+		std::memcpy(volume.planes, a_volume.planes, sizeof(volume.planes));
+		volume.portalContext = a_volume.portalContext;
+		volume.padding[0] = volume.padding[1] = volume.padding[2] = 0;
+	}
+}
+
+namespace DCLF::Extensions
+{
+	static_assert(sizeof(Api::LightVolume::sphere) == sizeof(Draws::GpuShadowVolume::sphere) &&
+				  sizeof(Api::LightVolume::planes) == sizeof(Draws::GpuShadowVolume::planes));
+
+	namespace
+	{
+		// Written only during InstallFeatures, before DCLF's threads exist. Read-only after.
+		LightVolumesEntry resolvedVolumes;
+	}
+
+	void ResolveLightVolumes(const Api::LightVolumesContribution& a_registered)
+	{
+		static bool once = false;
+		if (std::exchange(once, true))
+			stl::report_and_fail("Drawcall Limit Fix: the light volumes were resolved twice");
+		if (a_registered.name.empty())
+			return;
+		// A table needs both: whether it is read, and what fills it.
+		if (!a_registered.pointLightsActive != !a_registered.pointLights)
+			stl::report_and_fail(fmt::format("Drawcall Limit Fix: {}'s point lights need both pointLightsActive and pointLights", a_registered.name));
+		resolvedVolumes = { true, std::string(a_registered.name), a_registered.landscapeFlags, a_registered.sample, a_registered.pointLightsActive, a_registered.pointLights };
+	}
+
+	const LightVolumesEntry& LightVolumes() { return resolvedVolumes; }
+
+	void SampleLightVolumes(Api::LightVolumeSink& a_sink)
+	{
+		if (resolvedVolumes.sample)
+			resolvedVolumes.sample(a_sink);
+	}
+
+	bool PointLightsActive()
+	{
+		return resolvedVolumes.pointLightsActive && resolvedVolumes.pointLightsActive();
+	}
+
+	std::uint32_t SamplePointLights(Api::PointLight* a_out, std::uint32_t a_capacity)
+	{
+		return resolvedVolumes.pointLights ? std::min(resolvedVolumes.pointLights(a_out, a_capacity), a_capacity) : 0u;
+	}
+}

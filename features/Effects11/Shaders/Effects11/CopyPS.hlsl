@@ -1,10 +1,18 @@
-Texture2D SourceTexture : register(t0);
+#include "Common/OrgResources.hlsli"
 
-cbuffer DitherParams : register(b0)
+struct DitherConstants
 {
 	uint FrameCount;
 	float DitherAmplitude;
+	uint2 Pad;
 };
+
+// D3D11: t0 and b0. ORG: handles in the push block (Common/OrgResources.hlsli), the values a latch region.
+#define COPY_RESOURCES(X)               \
+	X(SRV, Texture2D, SourceTexture, 0) \
+	X(LATCH, DitherConstants, Dither, 0)
+ORG_PUSH_BLOCK(COPY_RESOURCES(ORG_HANDLE))
+COPY_RESOURCES(ORG_RESOURCE)
 
 struct PS_INPUT
 {
@@ -39,7 +47,7 @@ float4 main(PS_INPUT input) : SV_TARGET
 	return SourceTexture.Load(int3(0, 0, 0)).xxxx;
 #else
 	float3 color = SourceTexture.Load(int3(input.pos.xy, 0)).rgb;
-	color += TriDither(input.pos.xy, FrameCount) * DitherAmplitude;
+	color += TriDither(input.pos.xy, Dither.FrameCount) * Dither.DitherAmplitude;
 	return float4(color, 1.0);
 #endif
 }

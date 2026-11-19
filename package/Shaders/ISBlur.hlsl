@@ -1,3 +1,16 @@
+#if defined(CS_ORG_BINDLESS)
+// The ORG build of the pixel stage (RenderGraph/Engine/ImageSpace, CS_ORG_IMAGESPACE): t0-t1 and s0-s1 from the heap, FrameBuffer
+// from the shared constants, PerGeometry from the engine-constants capture through the pass's latch.
+#	define ORG_SHARED_CONSTANTS
+// FrameBuffer is the PerFrame the engine's draw had bound (captured with PerGeometry), not CS's shared snapshot.
+#	define ORG_SHARED_FRAMEBUFFER_AT PerGeometryAt
+#	include "Common/OrgEngineConstants.hlsli"
+#	include "Common/OrgResources.hlsli"
+#	define ISBLUR_ORG_RESOURCES(X) X(SHARED, ConstantBuffer, Shared, 0) X(SRV, Texture2D<float4>, ImageTex, 0) X(SRV, Texture2D<float4>, AvgLumTex, 1) X(SAMPLER, SamplerState, ImageSampler, 0) X(SAMPLER, SamplerState, AvgLumSampler, 1) X(LATCH, OrgEngineConstantsAt, PerGeometryAt, 2)
+ORG_PUSH_BLOCK(ISBLUR_ORG_RESOURCES(ORG_HANDLE))
+ISBLUR_ORG_RESOURCES(ORG_RESOURCE)
+#endif
+
 #include "Common/Color.hlsli"
 #include "Common/DummyVSTexCoord.hlsl"
 #include "Common/FrameBuffer.hlsli"
@@ -10,6 +23,13 @@ struct PS_OUTPUT
 };
 
 #if defined(PSHADER)
+#	if defined(CS_ORG_BINDLESS)
+// BlurRadius has a row of its own in the cbuffer: BlurOffsets starts at c3.
+static float4 BlurBrightPass = OrgEngineRow(PerGeometryAt, 0);
+static float4 BlurScale = OrgEngineRow(PerGeometryAt, 1);
+static float BlurRadius = OrgEngineRow(PerGeometryAt, 2).x;
+static float4 BlurOffsets[16] = ORG_ENGINE_ROWS16(PerGeometryAt, 3);
+#	else
 SamplerState ImageSampler : register(s0);
 SamplerState AvgLumSampler : register(s1);
 
@@ -23,6 +43,7 @@ cbuffer PerGeometry : register(b2)
 	float BlurRadius : packoffset(c2);
 	float4 BlurOffsets[16] : packoffset(c3);
 };
+#	endif
 
 float4 GetImageColor(float2 texCoord, float blurScale)
 {
@@ -63,7 +84,8 @@ PS_OUTPUT main(PS_INPUT input)
 	}
 
 #	if defined(BRIGHTPASS)
-	float avgLum = Color::RGBToLuminance(AvgLumTex.Sample(AvgLumSampler, input.TexCoord.xy).xyz);
+	// Vanilla scales the average luminance texel by the color range, like the image taps.
+	float avgLum = Color::RGBToLuminance(AvgLumTex.Sample(AvgLumSampler, input.TexCoord.xy).xyz * blurScale.y);
 	color.w = avgLum;
 #	endif
 

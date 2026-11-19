@@ -1,7 +1,15 @@
+#include "Common/OrgResources.hlsli"
+
+// Dual-target (Common/OrgResources.hlsli). D3D11 binds the registers below and reads ColorCB (ColorGrading::ColorCB) at b1,
+// which Apply.hlsli declares. Under ORG (ORG/ORGColorGrading.cpp) the same fields are the LATCH entry ColorGradingFrame
+// (struct ColorConstants), and each field is copied into a static of the same name, so the grading code reads them as
+// it does under D3D11 (ORG_GLOBAL_LATCH_BEGIN in Apply.hlsli).
+#define COLOR_GRADING_RESOURCES(X)         	X(SRV, Texture2D<float4>, TexColor, 0) 	X(SRV, Texture3D<float4>, TexLUT, 1)   	X(UAV, RWTexture3D<float4>, RWLUT, 0)  	X(SAMPLER, SamplerState, GradingSampler, 0)
+ORG_PUSH_BLOCK(COLOR_GRADING_RESOURCES(ORG_HANDLE) ORG_HANDLE(LATCH, ColorConstants, ColorGradingFrame, 1))
+COLOR_GRADING_RESOURCES(ORG_RESOURCE)
+
 #include "PostProcessing/ColorGrading/Apply.hlsli"
 #include "PostProcessing/fullscreen.hlsli"
-
-Texture2D<float4> TexColor : register(t0);
 
 #include "PostProcessing/ColorGrading/Include/GT7ToneMapping.hlsli"
 #include "PostProcessing/ColorGrading/Include/OpenDRT.hlsli"
@@ -851,8 +859,6 @@ float4 PSColorGrading(ColorGradingVSOutput input) : SV_Target
 		color = ApplyGameTintFade(color);
 	return float4(color, 1);
 }
-
-RWTexture3D<float4> RWLUT : register(u0);
 
 [numthreads(8, 8, 8)] void CSLUTGen(uint3 DTid : SV_DispatchThreadID) {
 	float3 uvw = float3(DTid) / float3((LUT_SIZE - 1).xxx);

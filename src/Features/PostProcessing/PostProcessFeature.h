@@ -19,6 +19,11 @@ struct PostProcessFeature : public std::enable_shared_from_this<PostProcessFeatu
 	bool enabled = true;
 	PostProcessing* owner = nullptr;
 
+	/// Whether SetupResources has run on this instance. PostProcessing sets a sub-feature up when the
+	/// D3D11 path first draws it (DrawFeature) and replaces it with a fresh instance once it is inactive
+	/// (SyncPipelineResources).
+	bool resourcesReady = false;
+
 	/// One compute-shader entry point to compile via CompileComputeShadersAsync().
 	struct ComputeShaderCompileInfo
 	{

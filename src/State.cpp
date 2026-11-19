@@ -14,6 +14,10 @@
 #include "EngineFixes/LODBlendRingFix.h"
 #include "EngineFixes/LandscapeSeamsFix.h"
 #include "EngineFixes/SunShadowMaskFix.h"
+#include "Utils/SwitchFile.h"
+#include "Features/DrawcallLimitFix.h"
+#include "GpuEventTimers.h"
+#include "GpuIdleTrace.h"
 #include "FeatureIssues.h"
 #include "Features/CSEditor.h"
 #include "Features/CloudShadows.h"
@@ -26,7 +30,7 @@
 #include "Features/PostProcessing.h"
 #include "Features/PostProcessing/HistogramAutoExposure.h"
 #include "Features/RainRefraction.h"
-#include "Features/RemoteControl/NvPerf.h"
+#include "Features/RemoteControl/GpuCounters.h"
 #include "Features/Skin.h"
 #include "Features/SkySync.h"
 #include "Features/Skylighting.h"
@@ -39,19 +43,68 @@
 #include "HiZPyramid.h"
 #include "I18n/I18n.h"
 #include "Menu.h"
+#include "Menu/ImGuiRenderer.h"
+#include "ORGDeferredClears.h"
+#include "ORGDeferredComposite.h"
 #include "PostProcessingMode.h"
 #include "Presets/UnifiedPresetCatalog.h"
+#include "RenderGraph/Engine/Engine.h"
+#include "RenderGraph/Engine/ImageSpace/ImageSpace.h"
+#include "RenderGraph/Engine/Skeleton/Skeleton.h"
+#include "RenderGraph/Engine/Targets/EngineTargets.h"
+#include "RenderGraph/Engine/Tripwire/Tripwire.h"
+#include "RenderGraph/GpuLoadPass.h"
+#include "RenderGraph/RenderGraphRuntime.h"
+#include "RenderGraph/Switches.h"
 #include "ShaderCache.h"
 #include "TruePBR.h"
 #include "Utils/FileSystem.h"
 #include "Utils/SettingsCatalog.h"
 #include "Utils/SphericalHarmonics.h"
 #include "VanillaBinding.h"
+#include "Vram/DxvkMemory.h"
 
 #ifdef TRACY_ENABLE
 static thread_local std::vector<TracyCZoneCtx> s_tracyPerfZones;
 #endif
 static thread_local std::vector<bool> s_perfEventEmitted;
+
+namespace
+{
+	/**
+	 * @brief Whether CS_DISABLE_FEATURES (a comma-separated list of short names, for test runs) names a_featureName. Such a feature is
+	 * disabled at boot for this run only: the saved "Disable at Boot" settings are not changed. Read from the environment alone (a
+	 * run's own setting: the switches file outlives the run).
+	 */
+	bool DisabledByEnvironment(const std::string& a_featureName)
+	{
+		static const std::vector<std::string> names = Switches::List("CS_DISABLE_FEATURES");
+		return std::ranges::find(names, a_featureName) != names.end();
+	}
+
+	/**
+	 * @brief Whether CS_ENABLE_FEATURES (short names, for test runs) names a_featureName. Such a feature loads at boot for this run
+	 * even when the saved "Disable at Boot" settings disable it, and the settings stay as they are.
+	 */
+	bool EnabledByEnvironment(const std::string& a_featureName)
+	{
+		static const std::vector<std::string> names = Switches::List("CS_ENABLE_FEATURES");
+		return std::ranges::find(names, a_featureName) != names.end();
+	}
+
+	/**
+	 * @brief Shaders compile on demand when a run turns a feature with shader defines on or off, because its startup precompile of a
+	 * cold cache would hold the main menu far longer than a test run. A feature without defines keeps the precompile.
+	 */
+	void CompileOnDemandForRunFeatureSet(Feature* a_feature, const char* a_switch)
+	{
+		const bool changesDefines = !a_feature->GetShaderDefineName().empty() || !a_feature->GetCommonShaderDefines().empty();
+		if (changesDefines && !globals::shaderCache->backgroundCompilation) {
+			globals::shaderCache->SetBackgroundCompilation(true);
+			logger::info("{}: shaders compile in the background, on demand (no startup precompile)", a_switch);
+		}
+	}
+}
 
 void State::UpdateLightingShaderPermutation(RE::BSRenderPass* a_pass)
 {
@@ -123,6 +176,17 @@ void State::UpdateEffectShaderPermutation(RE::BSRenderPass* a_pass)
 	}
 }
 
+void State::OnShadowMaskDraw(ID3D11ShaderResourceView* a_shadowMap)
+{
+	if (globals::features::volumetricShadows.loaded)
+		globals::features::volumetricShadows.CopyShadowLightData(a_shadowMap);
+	globals::deferred->CaptureDirectionalShadowMap(a_shadowMap);
+	if (globals::features::exponentialHeightFog.loaded)
+		globals::features::exponentialHeightFog.CaptureDirectionalShadowMap(a_shadowMap);
+	if (globals::features::skylighting.loaded)
+		globals::features::skylighting.CaptureShadowCascadeSRV(a_shadowMap);
+}
+
 void State::Draw()
 {
 	ZoneScoped;
@@ -136,8 +200,6 @@ void State::Draw()
 	auto& skin = globals::features::skin;
 	auto& truePBR = globals::features::truePBR;
 	auto context = globals::d3d::context;
-	auto& volumetricShadows = globals::features::volumetricShadows;
-	auto& skylighting = globals::features::skylighting;
 
 	if (shaderCache->IsEnabled()) {
 		if (terrainBlending.loaded && terrainBlending.settings.Enabled) {
@@ -183,11 +245,9 @@ void State::Draw()
 		if (currentShader && updateShader) {
 			if (currentShader->shaderType.get() == RE::BSShader::Type::Utility) {
 				if (currentPixelDescriptor & static_cast<uint32_t>(SIE::ShaderCache::UtilityShaderFlags::RenderShadowmask)) {
-					if (volumetricShadows.loaded)
-						volumetricShadows.CopyShadowLightData();
-					globals::deferred->CaptureDirectionalShadowMap();
-					if (skylighting.loaded)
-						skylighting.CaptureShadowCascadeSRV();
+					// The sun's shadow cascades, from the engine's shadow state: the flush has just applied it (the same view as PS t4),
+					// and under the flush latch (P5.13) it bound nothing. DXVK's view, as ShadowMaskCapture gives it.
+					OnShadowMaskDraw(RenderGraph::Engine::Tripwire::Unwrap(globals::game::shadowState->GetRuntimeData().PSTexture[4]));
 				}
 			}
 		}
@@ -289,6 +349,21 @@ void State::SetPostProcessingFallback(bool fallback)
 
 	sharedData.TonemapOwner = owner;
 	sharedDataCB->Update(sharedData);
+	// Drawcall Limit Fix and the render graph read the uploaded copy (lastSharedData).
+	lastSharedData.TonemapOwner = owner;
+}
+
+State::TonemapOwner State::PeekTonemapOwner() const
+{
+	if (tonemapOwner)
+		return *tonemapOwner;
+	auto& effects11 = globals::features::effects11;
+	auto& postProcessing = globals::features::postProcessing;
+	if (effects11.loaded && !IsMainOrLoadingMenuOpen() && effects11.WantsTonemapOwnership())
+		return TonemapOwner::kEffects11;
+	if (postProcessing.loaded && postProcessing.WantsTonemapOwnership())
+		return TonemapOwner::kPostProcessing;
+	return TonemapOwner::kVanilla;
 }
 
 bool State::HandlePostProcessing(RE::RENDER_TARGET a_input, RE::RENDER_TARGET a_output)
@@ -300,8 +375,9 @@ bool State::HandlePostProcessing(RE::RENDER_TARGET a_input, RE::RENDER_TARGET a_
 		return false;
 
 	auto renderer = globals::game::renderer;
-	auto& outputRT = renderer->GetRuntimeData().renderTargets[a_output];
-	globals::d3d::context->OMSetRenderTargets(1, &outputRT.RTV, nullptr);
+	// Engine target fields can be tripwire handles: DXVK's context takes the wrapped view.
+	auto* outputRTV = RenderGraph::Engine::Tripwire::Unwrap(renderer->GetRuntimeData().renderTargets[a_output].RTV);
+	globals::d3d::context->OMSetRenderTargets(1, &outputRTV, nullptr);
 
 	auto shadowState = globals::game::shadowState;
 	auto& stateData = shadowState->GetRuntimeData();
@@ -390,7 +466,12 @@ void State::Reset()
 
 void State::Setup()
 {
-	globals::features::truePBR.SetupResources();
+	// VRAM attribution: what DXVK creates here is CS's core memory, unless a narrower scope (a feature's callbacks) says otherwise.
+	Vram::OwnerScope vramScope("CS/Core");
+	{
+		Vram::OwnerScope truePbrScope("CS/TruePBR");
+		globals::features::truePBR.SetupResources();
+	}
 	SetupResources();
 	globals::hiZPyramid->SetupResources();
 
@@ -398,9 +479,26 @@ void State::Setup()
 	// gating logic that wants to read the log can run during feature SetupResources.
 	CheckTypedUAVLoadSupport();
 
+	// Adopt DXVK's Vulkan device for the render graph before features create
+	// resources; features fall back to their D3D11 paths when it stays inactive.
+	GpuLoadPass::ReserveAnchor();
+	// Anchors are reserved before the graph initializes: the frame's epochs are fixed then.
+	ORGDeferredComposite::Reserve();
+	ORGDeferredClears::Reserve();
+	ImGuiRenderer::ReserveAnchor();
+	RenderGraph::Engine::Reserve();
+	RenderGraphRuntime::Get().Initialize();
+	// The engine's targets move to ORG, then the engine subsystems that use them set up, before any feature reads them.
+	RenderGraph::Engine::Setup();
+
 	Feature::ForEachLoadedFeature("SetupResources", [](Feature* feature) { feature->SetupResources(); });
-	globals::deferred->SetupResources();
+	{
+		Vram::OwnerScope deferredScope("CS/Deferred");
+		globals::deferred->SetupResources();
+	}
 	Feature::ForEachLoadedFeature("PostSetupResources", [](Feature* feature) { feature->PostSetupResources(); });
+	// The engine subsystems that read features' resources, then the setup's graph build: the primary-path clients join here.
+	RenderGraph::Engine::PostSetup();
 	PostProcessingMode::ApplyPending();
 	tonemapOwner.reset();
 }
@@ -621,6 +719,15 @@ void State::Load(bool a_allowReload)
 					logger::info("Feature '{}' is disabled by default", featureName);
 				}
 				bool isDisabled = !feature->IsAlwaysEnabled() && disabledFeatures.contains(featureName) && disabledFeatures[featureName];
+				if (!isDisabled && !feature->IsAlwaysEnabled() && DisabledByEnvironment(featureName)) {
+					isDisabled = true;
+					logger::info("Feature '{}' is disabled at boot by CS_DISABLE_FEATURES (this run only)", featureName);
+					CompileOnDemandForRunFeatureSet(feature, "CS_DISABLE_FEATURES");
+				} else if (isDisabled && feature->installed && !DisabledByEnvironment(featureName) && EnabledByEnvironment(featureName)) {
+					isDisabled = false;
+					logger::info("Feature '{}' is enabled at boot by CS_ENABLE_FEATURES (this run only)", featureName);
+					CompileOnDemandForRunFeatureSet(feature, "CS_ENABLE_FEATURES");
+				}
 				if (!isDisabled) {
 					logger::info("Loading Feature: '{}'", featureName);
 
@@ -690,16 +797,14 @@ void State::SaveCoreToJson(json& settings)
 	advanced["Compiler Threads"] = shaderCache->compilationThreadCount;
 	advanced["Background Compiler Threads"] = shaderCache->backgroundCompilationThreadCount;
 	advanced["Use FileWatcher"] = shaderCache->UseFileWatcher();
-	advanced["Frame Annotations"] = frameAnnotations;
+	advanced["Frame Annotations"] = frameAnnotationsSetting.value_or(frameAnnotations);
 	advanced["Partial Precision"] = enablePartialPrecision.load(std::memory_order_relaxed);
-	advanced["Content Store"] = enableContentStore.load(std::memory_order_relaxed);
-	advanced["Content Store Max MB"] = contentStoreMaxMB.load(std::memory_order_relaxed);
+	advanced["Shader Store Max MB"] = shaderStoreMaxMB.load(std::memory_order_relaxed);
 	settings["Advanced"] = advanced;
 
 	json general;
 	general["Enable Shaders"] = shaderCache->IsEnabled();
 	general["Enable Disk Cache"] = shaderCache->IsDiskCache();
-	general["Skip Unchanged Shaders"] = shaderCache->IsSkipUnchangedShaders();
 	general["Enable Async"] = shaderCache->IsAsync();
 	general["Language"] = I18n::GetSingleton()->GetCurrentLocale();
 	PostProcessingMode::Save(general);
@@ -840,12 +945,15 @@ void State::LoadFromJson(nlohmann::json& settings)
 			shaderCache->SetFileWatcher(advanced["Use FileWatcher"]);
 		if (advanced.contains("Frame Annotations") && advanced["Frame Annotations"].is_boolean())
 			frameAnnotations = advanced["Frame Annotations"];
+		// The GPU idle trace attributes gaps to the engine's render phases, which only the annotations mark.
+		if ((GpuIdleTrace::Requested() || GpuEventTimers::Requested() || GpuCounters::EnvironmentRequested()) && !frameAnnotations) {
+			frameAnnotationsSetting = frameAnnotations;
+			frameAnnotations = true;
+		}
 		if (advanced.contains("Partial Precision") && advanced["Partial Precision"].is_boolean())
 			enablePartialPrecision.store(advanced["Partial Precision"].get<bool>(), std::memory_order_relaxed);
-		if (advanced.contains("Content Store") && advanced["Content Store"].is_boolean())
-			enableContentStore.store(advanced["Content Store"].get<bool>(), std::memory_order_relaxed);
-		if (advanced.contains("Content Store Max MB") && advanced["Content Store Max MB"].is_number_unsigned())
-			contentStoreMaxMB.store(static_cast<uint32_t>(std::clamp<uint64_t>(advanced["Content Store Max MB"].get<uint64_t>(), kContentStoreMinMB, kContentStoreMaxMB)), std::memory_order_relaxed);
+		if (advanced.contains("Shader Store Max MB") && advanced["Shader Store Max MB"].is_number_unsigned())
+			shaderStoreMaxMB.store(static_cast<uint32_t>(std::clamp<uint64_t>(advanced["Shader Store Max MB"].get<uint64_t>(), kShaderStoreMinMB, kShaderStoreMaxMB)), std::memory_order_relaxed);
 	}
 
 	if (settings.contains("General") && settings["General"].is_object()) {
@@ -854,8 +962,6 @@ void State::LoadFromJson(nlohmann::json& settings)
 			shaderCache->SetEnabled(general["Enable Shaders"]);
 		if (general.contains("Enable Disk Cache") && general["Enable Disk Cache"].is_boolean())
 			shaderCache->SetDiskCache(general["Enable Disk Cache"]);
-		if (general.contains("Skip Unchanged Shaders") && general["Skip Unchanged Shaders"].is_boolean())
-			shaderCache->SetSkipUnchangedShaders(general["Skip Unchanged Shaders"]);
 		if (general.contains("Enable Async") && general["Enable Async"].is_boolean())
 			shaderCache->SetAsync(general["Enable Async"]);
 		PostProcessingMode::Load(general);
@@ -1148,20 +1254,6 @@ void State::RestoreFeatureLayers(Feature* feature)
 	}
 }
 
-bool State::ValidateCache(CSimpleIniA& a_ini)
-{
-	bool valid = true;
-	for (auto* feature : Feature::GetFeatureList())
-		valid = valid && feature->ValidateCache(a_ini);
-	return valid;
-}
-
-void State::WriteDiskCacheInfo(CSimpleIniA& a_ini)
-{
-	for (auto* feature : Feature::GetFeatureList())
-		feature->WriteDiskCacheInfo(a_ini);
-}
-
 void State::SetLogLevel(spdlog::level::level_enum a_level)
 {
 	logLevel = a_level;
@@ -1211,7 +1303,17 @@ std::string State::GetDefinesString()
 
 std::shared_ptr<const std::vector<std::pair<std::string, std::string>>> State::GetDefines()
 {
+	// CS_DCLF_SHADOW_DEBUG_OUTPUT (dclf-validation.md, "Shader debug output (`CS_DCLF_SHADOW_DEBUG_OUTPUT`)"): Lighting.hlsl writes chosen intermediate values into the Diffuse
+	// target, native and DCLF alike (DCLF_SHADOW_DEBUG).
+	static const bool shadowDebug = Util::SwitchFile::Enabled("CS_DCLF_SHADOW_DEBUG_OUTPUT");
 	std::scoped_lock lock(shaderDefinesMutex);
+	if (shadowDebug && std::ranges::none_of(*shaderDefines, [](const auto& a_define) { return a_define.first == "DCLF_SHADOW_DEBUG"; })) {
+		auto defines = std::make_shared<std::vector<std::pair<std::string, std::string>>>(*shaderDefines);
+		defines->emplace_back("DCLF_SHADOW_DEBUG", "1");
+		shaderDefines = std::move(defines);
+		// The disk cache's file names carry this string, so the debug builds are cached apart.
+		shaderDefinesString += shaderDefinesString.empty() ? "DCLF_SHADOW_DEBUG=1" : ";DCLF_SHADOW_DEBUG=1";
+	}
 	return shaderDefines;
 }
 
@@ -1315,6 +1417,7 @@ void State::SetupResources()
 	auto [data, size] = GetFeatureBufferData(false);
 	(void)data;
 	featureDataCB = std::make_unique<ConstantBuffer>(ConstantBufferDesc((uint32_t)size), "State::FeatureDataCB");
+	featureDataBytes = static_cast<std::uint32_t>(size);
 
 	// Grab main texture to get resolution
 	D3D11_TEXTURE2D_DESC texDesc{};
@@ -1332,25 +1435,46 @@ void State::SetupResources()
 
 	globals::profiler->Initialize(globals::d3d::device, globals::d3d::context);
 
-	// Checked per pass rather than bound once, so annotations forced on at runtime (RenderDoc capture, Nsight Perf)
-	// also cover the profiler's passes. Toggles happen between frames, so a pass's begin and end agree.
+	// Debugger events (Nsight, RenderDoc, PIX) around CS's own GPU work: the profiler's passes and each
+	// feature's frame callbacks. With Frame Annotations on, or whenever a capture tool is attached, which
+	// DXVK reports through GetStatus (it forwards D3D11 events only then). Checked per pass rather than
+	// bound once, so annotations forced on at runtime (RenderDoc capture, Nsight Perf) also cover them.
+	// Toggles happen between frames, so a pass's begin and end agree.
+	const bool captureAttached = pPerf && pPerf->GetStatus();
+	debuggerEvents = pPerf && (frameAnnotations || captureAttached);
+	if (debuggerEvents)
+		logger::info("Debugger events on ({})", frameAnnotations ? "Frame Annotations" : "capture tool attached");
 	globals::profiler->SetPerfEventCallbacks(
 		[this](std::string_view name) {
-			if (frameAnnotations)
+			if (debuggerEvents || frameAnnotations)
 				BeginPerfEvent(name);
 		},
 		[this](std::string_view) {
-			if (frameAnnotations)
+			if (debuggerEvents || frameAnnotations)
 				EndPerfEvent();
+		});
+	Feature::SetGpuEventCallbacks(
+		[](std::string_view name) {
+			if (globals::state->debuggerEvents || globals::state->frameAnnotations)
+				globals::state->BeginPerfEvent(name);
+		},
+		[] {
+			if (globals::state->debuggerEvents || globals::state->frameAnnotations)
+				globals::state->EndPerfEvent();
 		});
 }
 
 void State::ModifyShaderLookup(const RE::BSShader& a_shader, uint& a_vertexDescriptor, uint& a_pixelDescriptor, bool a_forceDeferred)
 {
+	ModifyShaderLookup(a_shader.shaderType.get(), a_vertexDescriptor, a_pixelDescriptor, a_forceDeferred);
+}
+
+void State::ModifyShaderLookup(RE::BSShader::Type a_shaderType, uint& a_vertexDescriptor, uint& a_pixelDescriptor, bool a_forceDeferred)
+{
 	auto deferred = globals::deferred;
 
-	if (a_shader.shaderType.get() != RE::BSShader::Type::Utility && a_shader.shaderType.get() != RE::BSShader::Type::ImageSpace) {
-		switch (a_shader.shaderType.get()) {
+	if (a_shaderType != RE::BSShader::Type::Utility && a_shaderType != RE::BSShader::Type::ImageSpace) {
+		switch (a_shaderType) {
 		case RE::BSShader::Type::Lighting:
 			{
 				a_vertexDescriptor &= ~((uint32_t)SIE::ShaderCache::LightingShaderFlags::AdditionalAlphaMask |
@@ -1451,7 +1575,7 @@ void State::ModifyShaderLookup(const RE::BSShader& a_shader, uint& a_vertexDescr
 			}
 			break;
 		}
-	} else if (a_shader.shaderType.get() == RE::BSShader::Type::Utility) {
+	} else if (a_shaderType == RE::BSShader::Type::Utility) {
 		a_vertexDescriptor &= ~(uint32_t)SIE::ShaderCache::UtilityShaderFlags::TruePbr;
 	}
 }
@@ -1464,7 +1588,8 @@ uint32_t State::GetRuntimePixelBits(const RE::BSShader& a_shader)
 
 bool State::PerfEventsConsumed() const
 {
-	if ((pPerf && pPerf->GetStatus()) || NvPerf::RangesActive())
+	// The GPU event timers read the events too. Native D3D11's GetStatus is false unless a capture tool is attached.
+	if ((pPerf && pPerf->GetStatus()) || GpuCounters::RangesActive() || GpuEventTimers::Requested())
 		return true;
 #ifdef TRACY_ENABLE
 	return TracyIsConnected;
@@ -1493,8 +1618,10 @@ void State::BeginPerfEvent(std::string_view title)
 	s_tracyPerfZones.push_back(ctx);
 #endif
 	pPerf->BeginEvent(std::wstring(title.begin(), title.end()).c_str());
-	if (NvPerf::RangesActive())
-		NvPerf::PushRange(title);
+	if (GpuCounters::RangesActive())
+		GpuCounters::PushRange(title);
+	GpuIdleTrace::BeginEvent(title);
+	GpuEventTimers::BeginEvent(title);
 }
 
 void State::EndPerfEvent()
@@ -1515,9 +1642,24 @@ void State::EndPerfEvent()
 		logger::warn("EndPerfEvent called without a matching BeginPerfEvent");
 	}
 #endif
-	if (NvPerf::RangesActive())
-		NvPerf::PopRange();
+	if (GpuCounters::RangesActive())
+		GpuCounters::PopRange();
 	pPerf->EndEvent();
+	GpuIdleTrace::EndEvent();
+	GpuEventTimers::EndEvent();
+}
+
+ScopedPerfEvent::ScopedPerfEvent(std::string_view a_name) :
+	active(globals::state && globals::state->debuggerEvents)
+{
+	if (active)
+		globals::state->BeginPerfEvent(a_name);
+}
+
+ScopedPerfEvent::~ScopedPerfEvent()
+{
+	if (active)
+		globals::state->EndPerfEvent();
 }
 
 void State::SetPerfMarker(std::string_view title)
@@ -1525,6 +1667,7 @@ void State::SetPerfMarker(std::string_view title)
 	if (!PerfEventsConsumed())
 		return;
 	pPerf->SetMarker(std::wstring(title.begin(), title.end()).c_str());
+	GpuIdleTrace::Mark(title);
 }
 
 void State::SetAdapterDescription(const std::wstring& description)
@@ -1683,11 +1826,17 @@ void State::UpdateSharedData([[maybe_unused]] bool a_inWorld, [[maybe_unused]] b
 		data.MasserColor = lighting.masser.GetColor();
 		data.SecundaColor = lighting.secunda.GetColor();
 		data.TonemapOwner = static_cast<uint>(postProcessingFallback ? TonemapOwner::kPostProcessingFallback : GetTonemapOwner());
+		lastSharedData = data;  // Drawcall Limit Fix packs these bytes itself; see State::lastSharedData
 		sharedDataCB->Update(data);
 	}
 
 	{
 		auto [data, size] = GetFeatureBufferData(a_inWorld);
+
+		// Kept for Drawcall Limit Fix, for the same reason as lastSharedData: it packs these bytes into its
+		// own per-draw constants and cannot read them back from the GPU buffer.
+		lastFeatureData.assign(static_cast<const std::byte*>(static_cast<const void*>(data)),
+			static_cast<const std::byte*>(static_cast<const void*>(data)) + size);
 
 		featureDataCB->Update(data, size);
 	}

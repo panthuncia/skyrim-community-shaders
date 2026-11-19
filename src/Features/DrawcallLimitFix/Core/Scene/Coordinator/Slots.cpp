@@ -1,0 +1,455 @@
+// The coordinator's slot lifetimes on the scene lane. Engine references freed here go through the retirement chain to the render thread.
+
+#include "Internal.h"
+
+namespace DCLF::Scene
+{
+	std::uint32_t Coordinator::AllocateGeometrySlot()
+	{
+		const auto allocation = tables.geometrySlots.Allocate();
+		if (allocation.grown) {
+			tables.GeometryColumns(kGrowColumn);
+			tables.NoteGeometry(allocation.slot);
+		}
+		return allocation.slot;
+	}
+
+	std::uint32_t Coordinator::AllocatePipelineSlot()
+	{
+		const auto allocation = tables.pipelineSlots.Allocate();
+		if (allocation.grown) {
+			tables.PipelineColumns(kGrowColumn);
+			tables.NoteConstantsWrite();
+		}
+		tables.NotePipelinesWrite();
+		return allocation.slot;
+	}
+
+	std::uint32_t Coordinator::AllocateMaterialSlot()
+	{
+		const auto allocation = tables.materialSlots.Allocate();
+		if (allocation.grown)
+			tables.MaterialColumns(kGrowColumn);
+		return allocation.slot;
+	}
+
+	void Coordinator::InvalidateVerdicts()
+	{
+		// The caches witness the object, not the toggles, so a toggle the classification reads leaves all of them stale.
+		for (auto& [geometry, entry] : tracked) {
+			entry.verdict.cached = false;
+			entry.candidateFrame = 0;
+			entry.derived.valid = false;
+		}
+		++tablesGeneration;
+		fullEvaluation = true;
+	}
+
+	void Coordinator::ResetSlotTables()
+	{
+		residents.clear();
+		residentPatches.clear();
+		residentPos.clear();
+		stagedBindings.clear();
+		rebindingMembers.clear();
+		residentMaintenanceDirty = true;
+		ComponentsReset();
+		tables.Clear();
+		ResetMaterialBindings();
+		ResetSharedBindings();
+		// Must not let an old worker snapshot match a newly empty lookup generation.
+		ResetLookups();
+		for (auto& [geometry, entry] : tracked) {
+			entry.slot = kNoObjectSlot;
+			entry.layerSlot = kNoObjectSlot;
+		}
+		geometryIndex.clear();
+		pipelineIndex.clear();
+		materialIndex.clear();
+		materialDependents.clear();
+		ResetMaterialRecords();
+		// Released at Present, since the last reference deletes the engine's material and the pump runs this on a loading pass.
+		for (auto& owner : materialOwners)
+			ReleaseMaterial(std::move(owner));
+		materialOwners.clear();
+		for (std::uint32_t slot = 0; slot < materialViewPins.size(); ++slot)
+			ReleaseMaterialViews(slot);
+		materialViewPins.clear();
+		bindQueue.clear();
+		membershipWitness = ~0u;
+		materialMember.clear();
+		// The next shadow index rebuild must publish additions even if an SRV address recurs.
+		shadowTextureMembers.clear();
+		shadowKeyMembers.clear();
+		for (auto& members : occlusionKeyMembers)
+			members.clear();
+		shadowIndexNeedsRebuild = true;
+		shadowDirtySlots.clear();
+		++tablesGeneration;
+		fullEvaluation = true;
+	}
+
+	void Coordinator::CheckObjectSlots(bool a_resolveBuffers)
+	{
+		stats.slotViolations = 0;
+		for (std::size_t o = 0; o < tables.objects.size(); ++o) {
+			auto& object = tables.objects[o];
+			if (object.flags & kObjectNoBindings)
+				continue;
+			const char* what = nullptr;
+			if (!tables.geometrySlots.Alive(object.geometryIndex))
+				what = "geometry slot free";
+			else if (a_resolveBuffers && (!tables.geometries[object.geometryIndex].vertexAddress || !tables.geometries[object.geometryIndex].indexAddress))
+				what = "geometry slot unresolved";
+			else if (object.pipelineIndex >= tables.pipelines.size() || !tables.PipelineUsed(object.pipelineIndex))
+				what = "pipeline slot not a member's";
+			else if (object.materialIndex >= tables.materials.size() || !tables.MaterialUsed(object.materialIndex))
+				what = "material slot not a member's";
+			else if (!tables.geometryTemplate[object.pipelineIndex])
+				what = "pipeline without a template";
+			if (!what)
+				continue;
+			if (stats.slotViolations++ == 0) {
+				const auto* geometry = tables.objectGeometry[o];
+				logger::error("[DCLF] slot check: object {} '{}' {} (geometry {} written {}, pipeline {} used {}, material {} used {}, member {}, frame {})",
+					o, geometry && geometry->name.c_str() ? geometry->name.c_str() : "?", what,
+					object.geometryIndex, object.geometryIndex < tables.geometryLastUsed.size() ? tables.geometryLastUsed[object.geometryIndex] : ~0u,
+					object.pipelineIndex, tables.PipelineUsed(object.pipelineIndex), object.materialIndex, tables.MaterialUsed(object.materialIndex),
+					IsResidentSlot(static_cast<std::uint32_t>(o)), sceneFrame);
+			}
+			// Nothing downstream may draw from slots no member holds. The next delta walk writes it again.
+			pendingEvaluation.push_back(tables.objectGeometry[o]);
+			DropResidentSlot(static_cast<std::uint32_t>(o), false);
+			object.flags = (object.flags & ~(kObjectMember | kObjectSunTest)) | kObjectNoBindings;
+			object.geometryIndex = object.pipelineIndex = object.materialIndex = 0;
+			tables.NoteChange(static_cast<std::uint32_t>(o), kChangeBindings | kChangeGeometry);
+		}
+	}
+
+	void Coordinator::ClearGeometrySlot(std::uint32_t a_slot)
+	{
+		auto& link = slotReferences.link;
+		if (a_slot < link.size()) {
+			tables.geometrySlots.Release(link[a_slot].slot, link[a_slot].generation);
+			link[a_slot] = {};
+		}
+		geometryIndex.erase(tables.geometrySlotKey[a_slot]);
+		tables.geometrySlotKey[a_slot] = nullptr;
+		if (!denseWalk)
+			relocatedGeometrySlots.erase(a_slot);
+		// The leases outlive the frames in flight.
+		auto& import = tables.geometryImports[a_slot];
+		for (auto* owner : { &import.vertexOwner, &import.indexOwner })
+			if (*owner)
+				retirement.Open().imports.push_back(std::move(*owner));
+		import = {};
+		// Nothing may read through the record once the leases are released.
+		tables.geometries[a_slot] = {};
+		tables.geometryLastUsed[a_slot] = Tables::kSlotFree;
+		tables.NoteGeometry(a_slot);
+	}
+
+	void Coordinator::FreeGeometrySlot(std::uint32_t a_slot)
+	{
+		ClearGeometrySlot(a_slot);
+		tables.geometrySlots.Free(a_slot);
+	}
+
+	void Coordinator::ClearMaterialSlot(std::uint32_t a_slot)
+	{
+		const auto key = tables.materialSlotKey[a_slot];
+		materialIndex.erase(key);
+		UnlistMaterialDependent(key.first, a_slot);
+		// Released at Present, since the last reference deletes the engine's material.
+		ReleaseMaterial(std::move(materialOwners[a_slot]));
+		ReleaseMaterialViews(a_slot);
+		tables.materialSlotKey[a_slot] = { nullptr, 0u };
+		tables.NoteMaterial(a_slot);
+		tables.UnmarkMaterial(a_slot);
+		tables.Retire(Tables::kRetiredMaterialLookup, a_slot);
+	}
+
+	void Coordinator::PinMaterialViews(std::uint32_t a_slot, const MaterialPort::HeldSnapshot& a_held, const MaterialPort::MaterialFrame& a_frame)
+	{
+		if (a_slot >= tables.materials.size())
+			return;
+		const auto& record = tables.materials[a_slot];
+		std::vector<ID3D11ShaderResourceView*> named;
+		named.reserve(record.textures.size() + record.featureTextures.size());
+		for (auto* view : record.textures)
+			if (view)
+				named.push_back(view);
+		for (auto* view : record.featureTextures)
+			if (view)
+				named.push_back(view);
+		if (materialViewPins.size() <= a_slot)
+			materialViewPins.resize(std::size_t(a_slot) + 1);
+		auto& pins = materialViewPins[a_slot];
+		// The pins hold the views, so equal pointers are the same objects.
+		if (pins ? pins->named == named : named.empty())
+			return;
+		std::shared_ptr<MaterialViewPins> next;
+		if (!named.empty()) {
+			next = std::make_shared<MaterialViewPins>();
+			next->named = named;
+			const auto count = std::min<std::size_t>(a_held.snapshot.textureCount, a_held.views.size());
+			for (auto* view : named) {
+				// Never take a reference on the pointer itself.
+				const auto captured = std::find_if(a_held.views.begin(), a_held.views.begin() + static_cast<std::ptrdiff_t>(count),
+					[&](const winrt::com_ptr<ID3D11ShaderResourceView>& a_ref) { return a_ref.get() == view; });
+				if (captured != a_held.views.begin() + static_cast<std::ptrdiff_t>(count))
+					next->views.push_back(*captured);
+				else
+					next->frame = a_frame.held;
+			}
+		}
+		// Take the new references before the old go, so a view in both is never released in between.
+		ReleaseMaterialViews(a_slot);
+		pins = std::move(next);
+	}
+
+	void Coordinator::ReleaseMaterialViews(std::uint32_t a_slot)
+	{
+		if (a_slot >= materialViewPins.size() || !materialViewPins[a_slot])
+			return;
+		retirement.Open().owners.push_back(std::move(materialViewPins[a_slot]));
+		materialViewPins[a_slot] = nullptr;
+	}
+
+	void Coordinator::UpdateSlotReferences()
+	{
+		auto& r = slotReferences;
+		using Reference = SlotReferences::Reference;
+		auto referenceTo = [](const SlotTable& a_table, std::uint32_t a_slot) {
+			return a_table.Alive(a_slot) ? Reference{ a_slot, a_table.Generation(a_slot) } : Reference{};
+		};
+		auto move = [&](SlotTable& a_table, Reference& a_counted, const Reference& a_now) {
+			if (a_counted == a_now)
+				return;
+			if (a_counted.slot != SlotReferences::kNone)
+				a_table.Release(a_counted.slot, a_counted.generation);
+			if (a_now.slot != SlotReferences::kNone)
+				a_table.AddRef(a_now.slot, a_now.generation);
+			a_counted = a_now;
+		};
+		auto countObject = [&](std::uint32_t o) {
+			if (r.object.size() <= o)
+				r.object.resize(std::size_t(o) + 1);
+			auto& counted = r.object[o];
+			const bool live = o < tables.objects.size() && !(tables.objects[o].flags & kObjectFree);
+			const bool bound = live && !(tables.objects[o].flags & kObjectNoBindings);
+			const auto& object = live ? tables.objects[o] : ObjectRecord{};
+			move(tables.geometrySlots, counted.geometry, live ? referenceTo(tables.geometrySlots, object.geometryIndex) : Reference{});
+			move(tables.pipelineSlots, counted.pipeline, bound ? referenceTo(tables.pipelineSlots, object.pipelineIndex) : Reference{});
+			move(tables.materialSlots, counted.material, bound ? referenceTo(tables.materialSlots, object.materialIndex) : Reference{});
+		};
+		auto countLink = [&](std::uint32_t g) {
+			if (r.link.size() <= g)
+				r.link.resize(std::size_t(g) + 1);
+			const bool linked = tables.geometrySlots.Alive(g) && tables.geometries[g].nextPartition != kNoPartition;
+			move(tables.geometrySlots, r.link[g], linked ? referenceTo(tables.geometrySlots, tables.geometries[g].nextPartition) : Reference{});
+		};
+		if (!r.objects.Continues(tables.changeLog, tablesGeneration) || !r.links.Continues(tables.geometryLog, tablesGeneration)) {
+			tables.geometrySlots.ResetReferences();
+			tables.pipelineSlots.ResetReferences();
+			tables.materialSlots.ResetReferences();
+			r.object.assign(tables.objects.size(), {});
+			r.link.assign(tables.geometries.size(), {});
+			for (std::uint32_t o = 0; o < tables.objects.size(); ++o)
+				countObject(o);
+			for (std::uint32_t g = 0; g < tables.geometries.size(); ++g)
+				countLink(g);
+			for (const auto& [slot, staged] : stagedBindings)
+				AddStagedReferences(staged);
+			r.objects.Restart(tablesGeneration);
+			r.links.Restart(tablesGeneration);
+		} else {
+			for (const auto& change : r.objects.Unread(tables.changeLog))
+				countObject(change.slot);
+			for (const std::uint32_t g : r.links.Unread(tables.geometryLog))
+				countLink(g);
+		}
+		r.objects.Advance(tables.changeLog);
+		r.links.Advance(tables.geometryLog);
+	}
+
+	void Coordinator::SweepSlots()
+	{
+		UpdateSlotReferences();
+		// A slot's last reference going frees it after the whole batch, with no grace period.
+		std::uint32_t freed = tables.geometrySlots.DrainUnreferenced([&](std::uint32_t a_slot) { ClearGeometrySlot(a_slot); });
+		freed += tables.pipelineSlots.DrainUnreferenced([&](std::uint32_t a_slot) {
+			pipelineIndex.erase(tables.pipelines[a_slot]);
+			tables.geometryTemplate[a_slot] = nullptr;
+			tables.UnmarkPipeline(a_slot);
+			tables.Retire(Tables::kRetiredPipelineLookup, a_slot);
+		});
+		freed += tables.materialSlots.DrainUnreferenced([&](std::uint32_t a_slot) {
+			Diagnostics::Notify(Diagnostics::MaterialSlotDrained{ *this, a_slot });
+			ClearMaterialSlot(a_slot);
+			++stats.materialCacheEvicted;
+			if (a_slot < materialMember.size() && std::exchange(materialMember[a_slot], 0))
+				++stats.materialEvictedMember;
+		});
+		stats.slotsSwept += freed;
+		if (freed)
+			slotsFreedThisFrame = true;
+	}
+
+	std::uint32_t Coordinator::AcquireObjectSlot(Tracked& a_tracked, RE::BSGeometry* a_geometry)
+	{
+		if (denseWalk) {
+			const auto slot = static_cast<std::uint32_t>(tables.objects.size());
+			tables.GrowObjects(std::size_t(slot) + 1);
+			tables.objectGeometry[slot] = a_geometry;
+			tables.objectIdentity[slot] = a_tracked.identity;
+			tables.objectGroup[slot] = a_tracked.groupIdentity;
+			return slot;
+		}
+		if (a_tracked.slot != kNoObjectSlot && a_tracked.slot < tables.objectGeometry.size() && tables.objectGeometry[a_tracked.slot] == a_geometry &&
+			tables.objectIdentity[a_tracked.slot] == a_tracked.identity && tables.objectGroup[a_tracked.slot] == a_tracked.groupIdentity)
+			return a_tracked.slot;
+		std::uint32_t slot;
+		if (!tables.objectFree.empty()) {
+			slot = tables.objectFree.back();
+			tables.objectFree.pop_back();
+		} else {
+			slot = static_cast<std::uint32_t>(tables.objects.size());
+			tables.GrowObjects(std::size_t(slot) + 1);
+		}
+		tables.objectGeometry[slot] = a_geometry;
+		tables.objectIdentity[slot] = a_tracked.identity;
+		tables.objectGroup[slot] = a_tracked.groupIdentity;
+		a_tracked.slot = slot;
+		return slot;
+	}
+
+	std::uint32_t Coordinator::AcquireLayerSlot(Tracked& a_tracked, RE::BSGeometry* a_geometry, std::uint32_t a_base)
+	{
+		if (denseWalk) {
+			const auto slot = static_cast<std::uint32_t>(tables.objects.size());
+			tables.GrowObjects(std::size_t(slot) + 1);
+			tables.objectGeometry[slot] = a_geometry;
+			tables.objectIdentity[slot] = a_tracked.identity;
+			tables.objectGroup[slot] = a_tracked.groupIdentity;
+			return slot;
+		}
+		const std::uint32_t held = a_tracked.layerSlot;
+		if (held != kNoObjectSlot && held < tables.objectGeometry.size() && tables.objectGeometry[held] == a_geometry && tables.layerBase[held] == a_base &&
+			tables.objectIdentity[held] == a_tracked.identity && tables.objectGroup[held] == a_tracked.groupIdentity)
+			return held;
+		ReleaseLayerSlot(a_tracked);  // one of another base slot (the base moved)
+		std::uint32_t slot;
+		if (!tables.objectFree.empty()) {
+			slot = tables.objectFree.back();
+			tables.objectFree.pop_back();
+		} else {
+			slot = static_cast<std::uint32_t>(tables.objects.size());
+			tables.GrowObjects(std::size_t(slot) + 1);
+		}
+		tables.objectGeometry[slot] = a_geometry;
+		tables.objectIdentity[slot] = a_tracked.identity;
+		tables.objectGroup[slot] = a_tracked.groupIdentity;
+		a_tracked.layerSlot = slot;
+		return slot;
+	}
+
+	RE::BSShaderProperty* Coordinator::SlotProperty(std::uint32_t a_slot) const
+	{
+		auto* geometry = a_slot < tables.objectGeometry.size() ? tables.objectGeometry[a_slot] : nullptr;
+		if (!geometry)
+			return nullptr;
+		const auto it = tracked.find(geometry);
+		return it != tracked.end() ? it->second.HeldProperty(tables.IsLayer(a_slot)) : nullptr;
+	}
+
+	void Coordinator::ReleaseLayerSlot(Tracked& a_entry)
+	{
+		const auto slot = std::exchange(a_entry.layerSlot, kNoObjectSlot);
+		if (slot == kNoObjectSlot || slot >= tables.objects.size() || tables.objectGeometry[slot] != a_entry.geometry.get() || !tables.IsLayer(slot))
+			return;
+		shadowSetsDirty = true;
+		shadowDirtySlots.push_back(slot);
+		if (IsResidentSlot(slot)) {
+			DropResidentSlot(slot, false);
+			++residentStats.released;
+		}
+		ComponentsSlotReleased(slot);
+		tables.ResetObject(slot);
+		tables.RetireObject(slot);
+		if (tables.liveObjects)
+			--tables.liveObjects;
+	}
+
+	void Coordinator::ReleaseObjectSlot(Tracked& a_entry)
+	{
+		ReleaseLayerSlot(a_entry);
+		const auto slot = a_entry.slot;
+		a_entry.slot = kNoObjectSlot;
+		a_entry.objectStamp = 0;
+		shadowSetsDirty = true;
+		if (slot != kNoObjectSlot)
+			shadowDirtySlots.push_back(slot);
+		if (slot == kNoObjectSlot || slot >= tables.objects.size() || tables.objectGeometry[slot] != a_entry.geometry.get())
+			return;
+		if (IsResidentSlot(slot)) {
+			DropResidentSlot(slot, false);
+			++residentStats.released;
+		}
+		ComponentsSlotReleased(slot);
+		tables.ResetObject(slot);
+		tables.RetireObject(slot);
+		if (tables.liveObjects)
+			--tables.liveObjects;
+	}
+
+	void Coordinator::EraseTracked(RE::BSGeometry* a_geometry)
+	{
+		if (const auto it = tracked.find(a_geometry); it != tracked.end()) {
+			ReleaseObjectSlot(it->second);
+			MoveBucket(it->second, Ineligible::Count);
+			UnlistDependents(it->first, it->second, true);
+			UnlistCategoryMember(it->first, it->second);
+			ComponentsForgot(it->first);
+			if (const std::uint8_t veto = it->second.veto)
+				--(veto == Api::kVetoHold ? vetoHeld : vetoObserved);
+			sceneIdentity.Detach(a_geometry);
+			entryRanges.erase(a_geometry);
+			NoteEngineCaster(a_geometry, Ineligible::None);
+			HandBack(std::move(it->second.geometry));
+			HandBack(std::move(it->second.property));
+			HandBack(std::move(it->second.layerProperty));
+			HandBack(std::move(it->second.sourceRef));
+			HandBack(std::move(it->second.fadeNodeRef));
+			tracked.erase(it);
+			++trackedLayout;
+		}
+	}
+
+	void Coordinator::SweepObjectSlots()
+	{
+		// Consumers binary-search these lists.
+		for (auto& members : tables.classMembers)
+			std::sort(members.objects.begin(), members.objects.end());
+		if (denseWalk) {
+			tables.liveObjects = static_cast<std::uint32_t>(tables.objects.size());
+			return;
+		}
+		// A slot this walk did not write has no record this frame, so it is freed. The pointer is only a key and may already be gone.
+		for (std::uint32_t slot = 0; slot < tables.objects.size(); ++slot) {
+			auto* geometry = tables.objectGeometry[slot];
+			if (!geometry || tables.objectSeen[slot] == walkSerial)
+				continue;
+			if (const auto it = tracked.find(geometry); it != tracked.end()) {
+				if (it->second.slot == slot)
+					it->second.slot = kNoObjectSlot;
+				if (it->second.layerSlot == slot)
+					it->second.layerSlot = kNoObjectSlot;
+			}
+			ComponentsSlotReleased(slot);
+			tables.ResetObject(slot);
+			tables.RetireObject(slot);
+		}
+		tables.liveObjects = tables.CountLive();
+	}
+}

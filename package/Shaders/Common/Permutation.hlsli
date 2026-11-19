@@ -1,6 +1,8 @@
 #ifndef __PERMUTATION_DEPENDENCY_HLSL__
 #define __PERMUTATION_DEPENDENCY_HLSL__
 
+#include "Common/NamespacedCBuffer.hlsli"
+
 namespace Permutation
 {
 
@@ -100,18 +102,52 @@ namespace Permutation
 		static const int TVMeshVariation = (1 << 10);
 	}
 
-	cbuffer PerShader : register(b4)
+#if defined(ORG_LATCHED_PERMUTATION)
+	// An engine draw family's ORG build (Lighting.hlsl): the block is the draw's, latched with it. ORG_LATCHED_PERMUTATION names the
+	// latch, which the shader declares before it includes this.
+	static uint VertexShaderDescriptor = ORG_LATCHED_PERMUTATION.Descriptors.x;
+	static uint PixelShaderDescriptor = ORG_LATCHED_PERMUTATION.Descriptors.y;
+	static uint ExtraShaderDescriptor = ORG_LATCHED_PERMUTATION.Descriptors.z;
+	static uint ExtraFeatureDescriptor = ORG_LATCHED_PERMUTATION.Descriptors.w;
+	static float EffectRadius = ORG_LATCHED_PERMUTATION.EffectRadius;
+	static uint BaseTextureIsWorking = ORG_LATCHED_PERMUTATION.BaseTextureIsWorking;
+	static uint RenderToUI = ORG_LATCHED_PERMUTATION.RenderToUI;
+	static float GrassCanopyHeight = 0;
+#elif defined(DCLF_PULLED_ROWS)
+	// Drawcall Limit Fix's pulled Lighting stages (DCLF_PULLED_ROWS): the block is the draw's pipeline row's, which a plain draw
+	// cannot bind per draw, so the stage's main assigns these from the row (Lighting.hlsl, DCLFPermutationStatics) before
+	// anything reads them.
+	static uint VertexShaderDescriptor;
+	static uint PixelShaderDescriptor;
+	static uint ExtraShaderDescriptor;
+	static uint ExtraFeatureDescriptor;
+	static float EffectRadius;
+	// Zero for every pulled draw: a world material (not a render-target texture, LinearLighting's SetupGeometry), not the UI.
+	static uint BaseTextureIsWorking;
+	static uint RenderToUI;
+#else
+	ORG_SHARED_CBUFFER(PerShader, Permutation, 4)
 	{
-		uint VertexShaderDescriptor;
-		uint PixelShaderDescriptor;
-		uint ExtraShaderDescriptor;
-		uint ExtraFeatureDescriptor;
+		uint NSCB(Permutation, VertexShaderDescriptor);
+		uint NSCB(Permutation, PixelShaderDescriptor);
+		uint NSCB(Permutation, ExtraShaderDescriptor);
+		uint NSCB(Permutation, ExtraFeatureDescriptor);
 
-		float EffectRadius;
-		uint BaseTextureIsWorking;
-		uint RenderToUI;
-		float GrassCanopyHeight;  // Model-space height of the grass mesh being drawn
+		float NSCB(Permutation, EffectRadius);
+		uint NSCB(Permutation, BaseTextureIsWorking);
+		uint NSCB(Permutation, RenderToUI);
+		float NSCB(Permutation, GrassCanopyHeight);  // Model-space height of the grass mesh being drawn
 	};
+	ORG_SHARED_VIEW(Permutation)
+	ORG_SHARED_ALIAS(Permutation, Permutation, uint, VertexShaderDescriptor)
+	ORG_SHARED_ALIAS(Permutation, Permutation, uint, PixelShaderDescriptor)
+	ORG_SHARED_ALIAS(Permutation, Permutation, uint, ExtraShaderDescriptor)
+	ORG_SHARED_ALIAS(Permutation, Permutation, uint, ExtraFeatureDescriptor)
+	ORG_SHARED_ALIAS(Permutation, Permutation, float, EffectRadius)
+	ORG_SHARED_ALIAS(Permutation, Permutation, uint, BaseTextureIsWorking)
+	ORG_SHARED_ALIAS(Permutation, Permutation, uint, RenderToUI)
+	ORG_SHARED_ALIAS(Permutation, Permutation, float, GrassCanopyHeight)
+#endif  // DCLF_PULLED_ROWS
 
 }
 #endif  // __PERMUTATION_DEPENDENCY_HLSL__

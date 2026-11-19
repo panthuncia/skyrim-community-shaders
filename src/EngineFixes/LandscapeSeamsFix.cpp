@@ -1,6 +1,7 @@
 #include "LandscapeSeamsFix.h"
 
 #include "Globals.h"
+#include "RenderGraph/Engine/Tripwire/Tripwire.h"
 #include "ShaderCache.h"
 #include "State.h"
 #include "TruePBR.h"
@@ -113,12 +114,17 @@ namespace
 
 bool LandscapeSeamsFix::IsBlended(RE::BSGeometry* a_geometry)
 {
+	return CaptureResources(a_geometry) != nullptr;
+}
+
+std::shared_ptr<const LandscapeSeamsFix::Resources> LandscapeSeamsFix::CaptureResources(RE::BSGeometry* a_geometry)
+{
 	const std::shared_lock lock(mutex);
 	const auto loadedIt = loadedQuads.find(a_geometry);
 	if (loadedIt == loadedQuads.end())
-		return false;
+		return nullptr;
 	const auto quadIt = quads.find(loadedIt->second);
-	return quadIt != quads.end() && quadIt->second.resources;
+	return quadIt != quads.end() ? quadIt->second.resources : nullptr;
 }
 
 void LandscapeSeamsFix::Bind(RE::BSGeometry* a_geometry)
@@ -139,8 +145,9 @@ void LandscapeSeamsFix::Bind(RE::BSGeometry* a_geometry)
 		for (uint32_t extra = 0; extra < MaxExtraLayers; ++extra) {
 			for (uint32_t texture = 0; texture < TexturesPerExtra; ++texture) {
 				const auto& source = resources->extras[extra][texture];
+				// The raw context takes D3D11 views, never an engine texture's tripwire handle.
 				if (source != nullptr && source->rendererTexture != nullptr)
-					views[2 + extra * TexturesPerExtra + texture] = source->rendererTexture->resourceView;
+					views[2 + extra * TexturesPerExtra + texture] = RenderGraph::Engine::Tripwire::Unwrap(source->rendererTexture->resourceView);
 			}
 		}
 	}
@@ -514,6 +521,7 @@ void LandscapeSeamsFix::Rebuild(const std::vector<QuadKey>& a_keys)
 			if (it != quads.end() && it->second.generation == pending[i].generation)
 				std::swap(it->second.resources, built[i]);
 		}
+		changes.fetch_add(1, std::memory_order_release);
 	}
 }
 
@@ -593,6 +601,7 @@ void LandscapeSeamsFix::TESObjectLAND_SetupMaterial(RE::TESObjectLAND* a_land)
 
 			keys.push_back(entry.key);
 		}
+		changes.fetch_add(1, std::memory_order_release);
 
 		for (const auto& entry : loadedNow) {
 			for (int dy = -1; dy <= 1; ++dy) {
@@ -622,6 +631,7 @@ void LandscapeSeamsFix::Reset()
 		if (!lock.owns_lock())
 			return;
 		released.swap(retiredGeometry);
+		const std::size_t loadedBefore = loadedQuads.size();
 
 		for (auto it = loadedQuads.begin(); it != loadedQuads.end();) {
 			const auto quadIt = quads.find(it->second);
@@ -648,6 +658,8 @@ void LandscapeSeamsFix::Reset()
 
 			++it;
 		}
+		if (loadedQuads.size() != loadedBefore)
+			changes.fetch_add(1, std::memory_order_release);
 	}
 
 	for (auto* geometry : released) {

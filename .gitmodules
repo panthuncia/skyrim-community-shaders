@@ -8,4 +8,26 @@
 [submodule "extern/dxvk"]
 	path = extern/dxvk
 	url = https://github.com/community-shaders/dxvk.git
-	branch = interop
+	branch = org_integration
+[submodule "extern/OpenRenderGraph"]
+	path = extern/OpenRenderGraph
+	url = https://github.com/panthuncia/OpenRenderGraph.git
+	branch = dev
+[submodule "extern/BasicRHI"]
+	path = extern/BasicRHI
+	url = https://github.com/panthuncia/BasicRHI.git
+	branch = dev
+[submodule "extern/BasicTelemetry"]
+	path = extern/BasicTelemetry
+	url = https://github.com/panthuncia/BasicTelemetry.git
+	branch = main
+[submodule "extern/volk"]
+	path = extern/volk
+	url = https://github.com/zeux/volk.git
+	branch = master
+[submodule "extern/ORGModuleServices"]
+	path = extern/ORGModuleServices
+	url = https://github.com/panthuncia/ORGModuleServices.git
+[submodule "extern/SceneWriterFramework"]
+	path = extern/SceneWriterFramework
+	url = https://github.com/panthuncia/SSESceneWriterFramework

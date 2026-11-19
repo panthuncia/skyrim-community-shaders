@@ -1,3 +1,16 @@
+#if defined(CS_ORG_BINDLESS)
+// The ORG build of the pixel stage (RenderGraph/Engine/ImageSpace, CS_ORG_IMAGESPACE): t0, t1, s0 and s1 from the heap, the
+// shared constants, and PerGeometry from the engine-constants capture through the pass's latch.
+#	define ORG_SHARED_CONSTANTS
+// FrameBuffer is the PerFrame the engine's draw had bound (captured with PerGeometry), not CS's shared snapshot.
+#	define ORG_SHARED_FRAMEBUFFER_AT PerGeometryAt
+#	include "Common/OrgEngineConstants.hlsli"
+#	include "Common/OrgResources.hlsli"
+#	define ISWORLDMAP_ORG_RESOURCES(X) X(SHARED, ConstantBuffer, Shared, 0) X(SRV, Texture2D<float4>, ImageTex, 0) X(SRV, Texture2D<float4>, DepthTex, 1) X(SAMPLER, SamplerState, ImageSampler, 0) X(SAMPLER, SamplerState, DepthSampler, 1) X(LATCH, OrgEngineConstantsAt, PerGeometryAt, 2)
+ORG_PUSH_BLOCK(ISWORLDMAP_ORG_RESOURCES(ORG_HANDLE))
+ISWORLDMAP_ORG_RESOURCES(ORG_RESOURCE)
+#endif
+
 #include "Common/DummyVSTexCoord.hlsl"
 #include "Common/FrameBuffer.hlsli"
 
@@ -9,6 +22,14 @@ struct PS_OUTPUT
 };
 
 #if defined(PSHADER)
+// The engine fills PerGeometry by name. The names are vanilla's, from the BSImagespaceShaderWorldMap constructor.
+// TexelSize xy: the blur step. CameraParams yzw: depth linearization. DepthParams x: focus distance, y: largest step,
+// z: step per distance, w: scale nearer than focus.
+#	if defined(CS_ORG_BINDLESS)
+static float4 TexelSize = OrgEngineRow(PerGeometryAt, 0);
+static float4 CameraParams = OrgEngineRow(PerGeometryAt, 1);
+static float4 DepthParams = OrgEngineRow(PerGeometryAt, 2);
+#	else
 SamplerState ImageSampler : register(s0);
 SamplerState DepthSampler : register(s1);
 
@@ -17,10 +38,11 @@ Texture2D<float4> DepthTex : register(t1);
 
 cbuffer PerGeometry : register(b2)
 {
-	float4 CameraParams : packoffset(c0);
-	float4 DepthParams : packoffset(c1);
-	float4 TexelSize : packoffset(c2);
+	float4 TexelSize : packoffset(c0);
+	float4 CameraParams : packoffset(c1);
+	float4 DepthParams : packoffset(c2);
 };
+#	endif
 
 PS_OUTPUT main(PS_INPUT input)
 {
@@ -30,26 +52,30 @@ PS_OUTPUT main(PS_INPUT input)
 
 	float depth = DepthTex.Sample(DepthSampler, adjustedTexCoord).x;
 
-	float depthFactor = DepthParams.w / ((1 - depth) * DepthParams.z + DepthParams.y);
-	float offsetDelta = min(TexelSize.y, TexelSize.z * abs(depthFactor - TexelSize.x));
+	float depthFactor = CameraParams.w / ((1 - depth) * CameraParams.z + CameraParams.y);
+	float offsetDelta = min(DepthParams.y, DepthParams.z * abs(depthFactor - DepthParams.x));
 #	if defined(NO_SKY)
 	if (1 - depth <= 1e-4) {
 		offsetDelta = 0;
 	}
 #	endif
-	if (depthFactor < TexelSize.x) {
-		offsetDelta *= TexelSize.w;
+	if (depthFactor < DepthParams.x) {
+		offsetDelta *= DepthParams.w;
 	}
-	float2 startOffset = input.TexCoord - 3 * (CameraParams.xy * offsetDelta);
+	float2 startOffset = input.TexCoord - 3 * (TexelSize.xy * offsetDelta);
 
+	// The tap position steps by adding, as vanilla's does, so the taps land on the same texels.
 	float4 color = 0;
+	float tapX = startOffset.x;
 	for (int i = 0; i < 7; ++i) {
+		float tapY = startOffset.y;
 		for (int j = 0; j < 7; ++j) {
-			float2 currentTexCoord = FrameBuffer::GetDynamicResolutionAdjustedScreenPosition(
-				startOffset + CameraParams.xy * offsetDelta * float2(i, j));
+			float2 currentTexCoord = FrameBuffer::GetDynamicResolutionAdjustedScreenPosition(float2(tapX, tapY));
 			float4 currentColor = ImageTex.Sample(ImageSampler, currentTexCoord);
 			color += currentColor;
+			tapY = TexelSize.y * offsetDelta + tapY;
 		}
+		tapX = TexelSize.x * offsetDelta + tapX;
 	}
 
 	psout.Color = 0.0204081628 * color;

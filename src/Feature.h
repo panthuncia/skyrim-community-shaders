@@ -5,6 +5,7 @@
 #include "FeatureVersions.h"
 #include "I18n/I18n.h"
 #include "Utils/RestartSettings.h"
+#include "Vram/DxvkMemory.h"
 
 #include <span>
 #include <string_view>
@@ -57,6 +58,8 @@ struct Feature
 	virtual std::string GetName() = 0;
 	virtual std::string GetShortName() = 0;
 	virtual std::string GetDisplayName() { return GetName(); }
+	/** @brief "CS/<short name>": the VRAM owner of what DXVK creates during the feature's callbacks (ForEachLoadedFeature). */
+	const char* GetVramOwner();
 	virtual std::string GetFeatureModLink() { return ""; }
 	virtual std::string_view GetShaderDefineName() { return ""; }
 
@@ -258,6 +261,12 @@ public:
 	virtual bool ToggleAtBootSetting();
 
 	/**
+	 * @brief Whether the menu's on/off toggle also takes effect in the running session, not only at the next
+	 * boot. A feature that returns true reads IsFeatureDisabled itself each frame and stands down or resumes.
+	 */
+	virtual bool AppliesBootToggleLive() const { return false; }
+
+	/**
 	 * Weather analysis configuration for features that want to provide weather analysis.
 	 * If sectionName is empty, the feature will not appear in weather analysis UI.
 	 * Features should populate this struct to opt-in to weather analysis display.
@@ -292,19 +301,6 @@ public:
 	 * @return Vector of constraints this feature currently imposes (empty if none)
 	 */
 	virtual std::vector<FeatureConstraints::Constraint> GetActiveConstraints() const { return {}; }
-
-	/**
-	 * @brief Validates this feature's disk-cache entry against current install state.
-	 * @param a_ini The cache INI to read from.
-	 * @return True if the cache entry matches the current feature version and load state.
-	 */
-	virtual bool ValidateCache(CSimpleIniA& a_ini);
-
-	/**
-	 * @brief Writes this feature's version and enabled state into the disk-cache INI.
-	 * @param a_ini The cache INI to write to.
-	 */
-	virtual void WriteDiskCacheInfo(CSimpleIniA& a_ini);
 
 	/** @brief Invalidates any cached compiled shaders owned by this feature. */
 	virtual void ClearShaderCache() {}
@@ -368,18 +364,38 @@ public:
 		return a_buffer.data();
 	}
 #endif
+	// Debugger events (D3D11 BeginEvent/EndEvent) around the GPU-emitting callbacks below. Injected by
+	// State, like the Tracy context, and only while events are wanted (a capture tool is attached, or
+	// Frame Annotations is on), so the names are not built otherwise.
+	using GpuEventBegin = void (*)(std::string_view);
+	using GpuEventEnd = void (*)();
+	inline static GpuEventBegin s_beginGpuEvent = nullptr;
+	inline static GpuEventEnd s_endGpuEvent = nullptr;
+
+	/** @brief Sets (or with nulls, clears) the debugger event callbacks used by ForEachLoadedFeature. */
+	static void SetGpuEventCallbacks(GpuEventBegin a_begin, GpuEventEnd a_end) noexcept
+	{
+		s_beginGpuEvent = a_begin;
+		s_endGpuEvent = a_end;
+	}
 
 	/**
 	 * @brief Invokes a callback on every loaded feature with optional Tracy profiling.
 	 * @param methodName Label for the Tracy zone (e.g. "Reset", "Prepass").
 	 * @param callback Callable receiving a Feature* for each loaded feature.
-	 * @param emitGpuZone When true and Tracy is enabled, also emits a GPU timer zone.
+	 * @param emitGpuZone When true, also emits a GPU timer zone (Tracy) and a debugger event (Nsight,
+	 * RenderDoc, PIX) named "<feature>::<method>".
 	 */
 	template <typename Func>
 	static inline void ForEachLoadedFeature(std::string_view methodName, Func&& callback, bool emitGpuZone = false)
 	{
 		for (auto* feature : GetFeatureList()) {
 			if (feature->loaded) {
+				// What DXVK creates during the callback is the feature's memory (VRAM attribution).
+				Vram::OwnerScope vramScope(feature->GetVramOwner());
+				const bool gpuEvent = emitGpuZone && s_beginGpuEvent && s_endGpuEvent;
+				if (gpuEvent)
+					s_beginGpuEvent(std::format("{}::{}", feature->GetShortName(), methodName));
 #ifdef TRACY_ENABLE
 				// Zones are only worth their name lookup while a Tracy client is recording.
 				if (!TracyIsConnected) {
@@ -398,6 +414,8 @@ public:
 #else
 				callback(feature);
 #endif
+				if (gpuEvent)
+					s_endGpuEvent();
 			}
 		}
 	}

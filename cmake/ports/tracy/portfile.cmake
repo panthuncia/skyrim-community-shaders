@@ -1,8 +1,8 @@
 vcpkg_from_github(
     OUT_SOURCE_PATH SOURCE_PATH
     REPO wolfpld/tracy
-    REF 20a293b3575118b15a33f5cdea8866df1fb07b64
-    SHA512 f008a750f58733236ef32799383f17745d7dd72ae54f35b12cfb06f05792a80e7e3db728ed34a2dac396b6bb026317ec45c327c8a3da12190c6f7442d11d40cd
+    REF v0.15.0
+    SHA512 a274fbb62ec25ab9b6025eeeb6e0458ba282fe61509dcd0daf824bdbcf3215c25eb992271d33cc88544068f83e00d791833e980eed7c8f4a1cd3ef71841cf38e
     HEAD_REF master
     PATCHES
         build-tools.patch
@@ -39,6 +39,9 @@ vcpkg_cmake_configure(
         -DDOWNLOAD_CAPSTONE=OFF
         -DLEGACY=ON
         -DTRACY_ENABLE=ON
+        # Listen on localhost only: listening on every interface makes Windows Firewall ask for network access at
+        # every game launch. A local Tracy GUI still connects; profiling from another machine needs this off.
+        -DTRACY_ONLY_LOCALHOST=ON
         ${FEATURE_OPTIONS}
     OPTIONS_RELEASE
         ${TOOLS_OPTIONS}

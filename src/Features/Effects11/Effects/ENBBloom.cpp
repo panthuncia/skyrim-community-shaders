@@ -1,6 +1,7 @@
 #include "ENBBloom.h"
 
 #include "../TextureManager.h"
+#include "RenderGraph/Engine/Tripwire/Tripwire.h"
 
 void ENBBloom::Execute()
 {
@@ -34,5 +35,6 @@ void ENBBloom::UpdateEffectVariables()
 	SetShaderResourceVariable("TextureDownsampled", TextureManager::GetSingleton().GetDownsampleTexture());
 
 	// Set original texture, not typically used due to aliasing
-	SetShaderResourceVariable("TextureOriginal", globals::game::renderer->GetRuntimeData().renderTargets[RE::RENDER_TARGETS::kMAIN].SRV);
+	// Engine target fields can be tripwire handles: the effect variable takes the DXVK object.
+	SetShaderResourceVariable("TextureOriginal", RenderGraph::Engine::Tripwire::Unwrap(globals::game::renderer->GetRuntimeData().renderTargets[RE::RENDER_TARGETS::kMAIN].SRV));
 }

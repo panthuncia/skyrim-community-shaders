@@ -1,0 +1,46 @@
+# Converted from tools/cs-ab/scenarios/rx6600-perf-whiterun.env. Old frame N became world-ready + (N - 100) for the first
+# command, then each command at 'previous' plus the old gap.
+# RX 6600 timing in Whiterun (coc Whiterun from the newest save: the heavier CPU scene): 3,000 frames to settle (DCLF's
+# pipelines compile in the first frames), then 1,000 measured, with GPU event timer blocks every 250 frames. DXVK takes the RX
+# 6600, not the integrated GPU; native D3D11 takes the default adapter (check its log). Hang markers stay on for every RX 6600
+# run (the -nomarkers twin drops them, only to measure their cost).
+# tgm first: a wolf attacks the player at the newest save, and god mode keeps every run's scene alike.
+extends = ["guest"]
+
+[cs]
+gpu_event_timers = 250
+
+[dxvk]
+filter_device_name = "AMD Radeon RX 6600"
+
+[[steps]]
+at = "world-ready"
+frames = 0
+do = "console"
+arg = "tgm"
+
+[[steps]]
+at = "previous"
+frames = 270
+do = "console"
+arg = "coc Whiterun"
+
+[[steps]]
+at = "previous"
+frames = 2700
+do = "mark"
+arg = "start"
+
+[[steps]]
+at = "previous"
+frames = 1000
+do = "mark"
+arg = "end"
+
+[[steps]]
+at = "previous"
+frames = 10
+do = "exit"
+
+[expect]
+reach = "world-ready"

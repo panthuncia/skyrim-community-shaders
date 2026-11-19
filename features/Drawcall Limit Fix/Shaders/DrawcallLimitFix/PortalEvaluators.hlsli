@@ -1,0 +1,110 @@
+#ifndef DCLF_PORTAL_EVALUATORS_HLSLI
+#define DCLF_PORTAL_EVALUATORS_HLSLI
+
+// The portal bench's program evaluators, included by PortalPrograms.hlsli under DCLF_PORTAL_EXPERIMENTAL in place of the interpreter.
+// Each reads the same encoding plus an auxiliary table the bench builds on the CPU, and must match PortalProgramRun bit for bit,
+// with the same precise distances and comparisons in another order. Uncovered programs and context atlas programs use the interpreter.
+// DCLF_PORTAL_FLAT flattens each program's accepting paths into terms of literals. DCLF_PORTAL_PLANE_BITS tests each distinct plane
+// once into bit masks and runs the records on the bits.
+
+static uint PortalAuxIndex;
+
+#ifdef DCLF_PORTAL_FLAT
+// Header {programs, terms base, literals base, 0}, then per program {first term, terms}, per term {first literal, literals}.
+// A literal packs set in bits 0-15, occluder bit 16 and the needed verdict bit 17. 0xFFFFFFFF terms means the interpreter.
+static const uint kFlatFallback = 0xFFFFFFFFu;
+bool PortalFlatRun(ByteAddressBuffer a_programs, uint a_program, uint4 a_entry, uint4 a_entry2, uint a_recordsBase, uint a_setsBase, float3 a_centre, float a_radius)
+{
+	ByteAddressBuffer aux = ResourceDescriptorHeap[PortalAuxIndex];
+	const uint4 header = aux.Load4(0);
+	if (a_program >= header.x)
+		return PortalProgramRun(a_programs, a_entry, a_entry2, a_recordsBase, a_setsBase, a_centre, a_radius);
+	const uint2 terms = aux.Load2((4u + 2u * a_program) * 4u);
+	if (terms.y == kFlatFallback)
+		return PortalProgramRun(a_programs, a_entry, a_entry2, a_recordsBase, a_setsBase, a_centre, a_radius);
+	const uint sets = a_setsBase + a_entry2.y * kPortalSetBytes;
+	[loop] for (uint t = 0; t < terms.y; ++t)
+	{
+		const uint2 term = aux.Load2((header.y + 2u * (terms.x + t)) * 4u);
+		bool holds = true;
+		[loop] for (uint l = 0; l < term.y && holds; ++l)
+		{
+			const uint literal = aux.Load((header.z + term.x + l) * 4u);
+			const uint set = literal & 0xFFFFu;
+			if (set >= a_entry.z)
+				return false;
+			const bool result = PortalPlaneSetTest(a_programs, sets + set * kPortalSetBytes, (literal & 0x10000u) != 0u ? 8u : 7u, a_centre, a_radius);
+			holds = result == ((literal & 0x20000u) != 0u);
+		}
+		if (holds)
+			return true;
+	}
+	return false;
+}
+#endif
+
+#ifdef DCLF_PORTAL_PLANE_BITS
+// Header {programs, planes base, set masks base, 0}, then per program {first plane, planes, first set mask, 0}, at most 64 planes.
+// Then the float4 planes, and per set a uint2 mask of its active planes. 0xFFFFFFFF planes means the interpreter.
+static const uint kPlaneBitsFallback = 0xFFFFFFFFu;
+bool PortalPlaneBitsRun(ByteAddressBuffer a_programs, uint a_program, uint4 a_entry, uint4 a_entry2, uint a_recordsBase, float3 a_centre, float a_radius,
+	uint a_setsBase)
+{
+	ByteAddressBuffer aux = ResourceDescriptorHeap[PortalAuxIndex];
+	const uint4 header = aux.Load4(0);
+	if (a_program >= header.x)
+		return PortalProgramRun(a_programs, a_entry, a_entry2, a_recordsBase, a_setsBase, a_centre, a_radius);
+	const uint4 info = aux.Load4((4u + 4u * a_program) * 4u);
+	if (info.y == kPlaneBitsFallback)
+		return PortalProgramRun(a_programs, a_entry, a_entry2, a_recordsBase, a_setsBase, a_centre, a_radius);
+	uint2 outside = uint2(0, 0), notContained = uint2(0, 0);
+	[loop] for (uint i = 0; i < info.y; ++i)
+	{
+		const precise float d = PortalDistance(asfloat(aux.Load4((header.y + 4u * (info.x + i)) * 4u)), a_centre);
+		const uint bit = 1u << (i & 31u);
+		const uint o = d <= -a_radius ? bit : 0u;
+		const uint n = (d <= -a_radius || d < a_radius) ? bit : 0u;
+		if (i < 32u) {
+			outside.x |= o;
+			notContained.x |= n;
+		} else {
+			outside.y |= o;
+			notContained.y |= n;
+		}
+	}
+	const uint records = a_recordsBase + a_entry2.x * kPortalOpBytes;
+	uint op = a_entry.w;
+	[loop] for (uint step = 0; step < a_entry2.w; ++step)
+	{
+		if (op >= a_entry.y)
+			return false;
+		const uint4 record = a_programs.Load4(records + op * kPortalOpBytes);
+		// Ops 2 and 3 end the program. Range compares keep these guards free of equality tests.
+		if (record.x - 2u < 2u)
+			return record.x == 2u;
+		if (record.x - 7u >= 2u || record.y >= a_entry.z)
+			return false;
+		const uint2 mask = aux.Load2((header.z + 2u * (info.z + record.y)) * 4u);
+		const bool result = record.x == 7u ? !any((outside & mask) != 0u) : any((notContained & mask) != 0u);
+		op = result ? record.z : record.w;
+	}
+	return false;
+}
+#endif
+
+bool PortalProgramEvaluate(ByteAddressBuffer a_programs, uint a_base, uint a_program, uint4 a_entry, uint4 a_entry2, uint a_recordsBase, uint a_setsBase, float3 a_centre, float a_radius)
+{
+#if defined(DCLF_PORTAL_FLAT) || defined(DCLF_PORTAL_PLANE_BITS)
+	const bool auxRun = a_base == 0u && PortalAuxIndex != 0u;
+	if (auxRun) {
+#	if defined(DCLF_PORTAL_FLAT)
+		return PortalFlatRun(a_programs, a_program, a_entry, a_entry2, a_recordsBase, a_setsBase, a_centre, a_radius);
+#	else
+		return PortalPlaneBitsRun(a_programs, a_program, a_entry, a_entry2, a_recordsBase, a_centre, a_radius, a_setsBase);
+#	endif
+	}
+#endif
+	return PortalProgramRun(a_programs, a_entry, a_entry2, a_recordsBase, a_setsBase, a_centre, a_radius);
+}
+
+#endif

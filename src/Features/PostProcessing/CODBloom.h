@@ -37,6 +37,15 @@ struct CODBloom : public PostProcessFeature
 	};
 	std::unique_ptr<ConstantBuffer> bloomCB = nullptr;
 
+	/**
+	 * @brief The constants of one pass, for both paths: the threshold pass's (a_mip 0; the downsamples read none), or the
+	 * upsample's that accumulates into mip a_mip (1 to UsedMips() - 2).
+	 */
+	BloomCB Constants(int a_mip) const;
+
+	/** @brief The mips the chain runs: one fewer when the last mip's blend leaves the result unchanged. */
+	int UsedMips() const;
+
 	winrt::com_ptr<ID3D11SamplerState> colorSampler = nullptr;
 
 	std::unique_ptr<Texture2D> texBloom = nullptr;

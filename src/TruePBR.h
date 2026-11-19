@@ -61,8 +61,13 @@ public:
 	virtual void DrawSettings() override;
 	virtual bool HasDebugSection() const override { return true; }
 	virtual void DrawDebugSection() override;
+
+	/** @brief The render graph's glints noise is filled again (ORGGlintsNoise::ClearShaderCache). */
+	virtual void ClearShaderCache() override;
 	/** @brief Loads PBR texture set and material object configurations from disk. */
 	virtual void SetupResources() override;
+	/** @brief On the ORG path (CS_ORG_GLINTS=1), once the render graph is up: sets up the glint noise's one-shot fill at EarlyPrepass. */
+	virtual void PostSetupResources() override;
 	/** @brief Per-frame prepass that initializes the glint noise texture and binds it to the pipeline. */
 	virtual void Prepass() override;
 	/** @brief Installs all Detours hooks for PBR material, shader, and decal interception. */
@@ -157,6 +162,23 @@ public:
 	 * @param a_context The D3D11 device context to bind resources on.
 	 */
 	void SetShaderResources(ID3D11DeviceContext* a_context);
+
+	/** @brief First pixel texture register of TruePBR's own slots, and how many: the landscape displacement layers (t80-t85), then RMAOS (t86-t91). */
+	static constexpr uint32_t FirstExtendedTexture = 80;
+	static constexpr uint32_t NumExtendedTextures = 12;
+	/**
+	 * @brief TruePBR's own slots as BSLightingShader_SetupMaterial left them for the next SetShaderResources: the views, and which
+	 * of them are pending (bit per slot). Drawcall Limit Fix's stand-in SetupMaterial runs this feature's hook: it reads what the
+	 * hook set and restores the state afterwards, so that the next native draw does not bind the evaluated material's textures.
+	 */
+	struct ExtendedTextures
+	{
+		std::array<ID3D11ShaderResourceView*, NumExtendedTextures> views{};
+		uint32_t modified = 0;
+	};
+	ExtendedTextures GetExtendedTextures() const;
+	void SetExtendedTextures(const ExtendedTextures& a_textures);
+
 	/**
 	 * @brief Pre-compiles all PBR-specific lighting shader permutations.
 	 * @param shader The BSShader whose PBR permutations to generate.
@@ -166,6 +188,12 @@ public:
 	/** @brief Creates and populates the 128x128 glint noise texture via a compute shader dispatch. */
 	void SetupGlintsTexture();
 	eastl::unique_ptr<Texture2D> glintsNoiseTexture = nullptr;
+
+	/**
+	 * @brief The glint noise's view (t20): the render graph's export on the ORG path once it is filled, else the D3D11 texture's;
+	 * null before either is ready.
+	 */
+	ID3D11ShaderResourceView* GlintsNoiseSRV() const;
 
 	std::unordered_map<uint32_t, std::string> editorIDs;
 

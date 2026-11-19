@@ -6,7 +6,7 @@
 #include <string>
 #include <vector>
 
-namespace NvPerf
+namespace GpuCounters
 {
 	struct CaptureResult;
 }
@@ -61,10 +61,12 @@ public:
 	RemoteControl& operator=(RemoteControl&&) = delete;
 
 private:
+	void DrawNvPerfTraces();
+
 	// The Nsight Perf section's inputs. UI state only: nothing here is saved.
 	struct NvPerfPanel
 	{
-		std::vector<char> defaultMetricEnabled;  // per NvPerf::DefaultMetrics() entry
+		std::vector<char> defaultMetricEnabled;  // per GpuCounters::DefaultMetrics() entry
 		std::string extraMetrics;                // comma-separated name[:kind]
 		std::string ranges;                      // comma-separated range filters
 		int samples = 1;
@@ -75,11 +77,17 @@ private:
 		/** @brief A finished capture and when it was first seen. */
 		struct RecentCapture
 		{
-			std::shared_ptr<const NvPerf::CaptureResult> result;
+			std::shared_ptr<const GpuCounters::CaptureResult> result;
 			std::filesystem::file_time_type time;
 		};
 		std::vector<RecentCapture> recent;  // newest first
 		std::uint64_t viewedCaptureId = 0;  // 0: the newest
+		// Traces (NvPerfTrace.h).
+		std::string traceTemplate = "dclf-passes";
+		std::string traceLabel;
+		std::string traceBaseline;  // a saved report's label, empty: none
+		std::string traceError;
+		int traceRows = 40;
 	} nvperfPanel;
 
 	static constexpr std::size_t kMaxRecentNvPerfCaptures = 8;

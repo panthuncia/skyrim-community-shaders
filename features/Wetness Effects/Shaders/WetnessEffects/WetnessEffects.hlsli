@@ -5,13 +5,14 @@
 #include "Common/Game.hlsli"
 #include "Common/LightDisk.hlsli"
 #include "Common/Random.hlsli"
+#include "Common/OrgResources.hlsli"
 #include "Common/Shading.hlsli"
 #include "Common/SharedData.hlsli"
 #include "WetnessEffects/optimized-ggx.hlsli"
 
 namespace WetnessEffects
 {
-	Texture2D<float4> TexPrecipOcclusion : register(t70);
+	ORG_HEADER_SRV(Texture2D<float4>, TexPrecipOcclusion, 70)
 
 	// https://github.com/BelmuTM/Noble/blob/master/LICENSE.txt
 

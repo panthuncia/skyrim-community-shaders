@@ -3,18 +3,192 @@
 
 #define LIGHTING
 
+#if defined(CS_ORG_BINDLESS) && !defined(DCLF_BINDLESS)
+// The ORG build of the engine's Lighting draws, drawn by Drawcall Limit Fix's menu scenes family
+// (Features/DrawcallLimitFix/Features/MenuViews): a menu model's colour pass. A draw's engine constants (both stages' PerTechnique,
+// PerMaterial and PerGeometry, the alpha test reference), CS's permutation block, its textures' and samplers' heap indices and its
+// geometry are one latch region; a skinned draw's palettes are another (Common/Skinned.hlsli, ORG_LATCHED_BONES). FrameBuffer
+// (the engine's VS_PerFrame), SharedData and FeatureData are the shared constants, written at the anchor's run right after the
+// engine's batch, so they hold the camera the engine's draw would have read.
+// The world's CS features are off in this build: a menu scene has none of their frame inputs (light clusters, skylighting, the
+// cubemaps, the world's shadows, fog, wetness), so it shades as the vanilla shader with CS's material path.
+#	define LIGHTING_ORG
+#	undef LIGHT_LIMIT_FIX
+#	undef SKYLIGHTING
+#	undef IBL
+#	undef DYNAMIC_CUBEMAPS
+#	undef CLOUD_SHADOWS
+#	undef TERRAIN_SHADOWS
+#	undef VOLUMETRIC_SHADOWS
+#	undef SCREEN_SPACE_SHADOWS
+#	undef SCREEN_SPACE_GI
+#	undef WETNESS_EFFECTS
+#	undef WATER_EFFECTS
+#	undef WATER_BLENDING
+#	undef TERRAIN_BLENDING
+#	undef TERRAIN_VARIATION
+#	undef EXTENDED_MATERIALS
+#	undef EXTENDED_TRANSLUCENCY
+#	undef EXP_HEIGHT_FOG
+#	undef SSS
+#	undef CS_SKIN
+#	undef CS_SKIN_SHADING
+#	undef CS_HAIR_SHADING
+#	undef CS_HAIR
+#	undef LANDSCAPE_SEAMS
+#	undef GLINT
+#	undef LLFDEBUG
+#	undef ENABLE_LL
+#	define ORG_SHARED_CONSTANTS
+#	define ORG_HEADER_RESOURCES
+#	define ORG_LATCHED_BONES
+#	define ORG_LATCHED_PERMUTATION LightingDraw
+#	include "Common/OrgResources.hlsli"
+
+// A draw's latched values (LightingSceneConstants in Features/DrawcallLimitFix/Features/MenuViews/MenuScenes.h): the rows of the
+// engine's constant buffers as SetupTechnique, SetupMaterial and SetupGeometry wrote them (row_major matrices: their rows are the
+// registers).
+struct LightingOrgDraw
+{
+	float4 VSTechnique[4];  // VS b0: HighDetailRange, FogParam, FogNearColor, FogFarColor
+	float4 VSMaterial[3];   // VS b1: LeftEyeCenter, RightEyeCenter, TexcoordOffset
+	float4 VSGeometry[15];  // VS b2: World, PreviousWorld, EyePosition, LandBlendParams, TreeParams, WindTimers, TextureProj, IndexScale, WorldMapOverlayParameters
+	float4 PSTechnique[3];  // PS b0: FogColor, ColourOutputClamp, VPOSOffset
+	float4 PSMaterial[18];  // PS b1
+	float4 PSGeometry[30];  // PS b2
+	uint4 Descriptors;      // CS's permutation block: vertex, pixel, extra and extra feature descriptors
+	float EffectRadius;
+	uint BaseTextureIsWorking;
+	uint RenderToUI;
+	float AlphaTestRefRS;  // b11
+	uint VertexStride;
+	uint FirstIndex;
+	uint NullTexture;  // a null 2D view: what a register CS binds past t15 reads in this build
+	uint Padding;
+	uint4 Textures[4];  // t0-t15 heap indices
+	uint4 Samplers[4];  // s0-s15 sampler heap indices
+	uint2 VertexAddress;
+	uint2 IndexAddress;
+	uint2 VertexLayout;
+	uint2 Padding2;
+};
+
+// The draw's FrameBuffer rows (b12, c0-c44), its matrices transposed (OrgSceneFrame, below).
+struct OrgSceneFrameRows
+{
+	float4 Rows[45];
+};
+
+// The draw's palettes (Common/Skinned.hlsli): previous frame's 240 rows, then this frame's. Read by row, never loaded whole.
+struct LightingOrgBones
+{
+	float4 Rows[480];
+};
+
+#	define LIGHTING_ORG_RESOURCES(X)                \
+		X(SHARED, ConstantBuffer, Shared, 0)         \
+		X(LATCH, LightingOrgDraw, LightingDraw, 2)   \
+		X(EXTERN_LATCH, LightingOrgBones, Bones, 9) \
+		X(EXTERN_LATCH, OrgSceneFrameRows, Frame, 12)  \
+		X(UNREAD, Texture2D<float4>, DepthTexture, 17) \
+		X(UNREAD_LATCH, DirectionalShadowLightData, DirectionalShadowLight, 98)
+ORG_PUSH_BLOCK(LIGHTING_ORG_RESOURCES(ORG_HANDLE))
+LIGHTING_ORG_RESOURCES(ORG_RESOURCE)
+
+// FrameBuffer (the engine's VS_PerFrame, b12) as the draw had it bound, latched with it, its matrices stored transposed: the shared
+// FrameBuffer's ConstantBuffer view, read in this build's vertex stage, made DXC emit invalid SPIR-V (a Function-storage
+// ConstantBuffer). Common/NamespacedCBuffer.hlsli loads it raw from here instead (ORG_SHARED_FRAMEBUFFER_AT).
+struct OrgSceneFrameAt
+{
+	uint FrameSrv;
+	uint FrameOffset;
+};
+static OrgSceneFrameAt OrgSceneFrame = { OrgHandle_Frame, OrgOffset_Frame };
+#	define ORG_SHARED_FRAMEBUFFER_AT OrgSceneFrame
+
+static ByteAddressBuffer OrgBonesBuffer = ResourceDescriptorHeap[OrgHandle_Bones];
+/** @brief Row a_row of palette a_palette (0 previous, 1 current) of the draw's latched bones. */
+float4 OrgBoneRow(uint a_palette, uint a_row)
+{
+	return asfloat(OrgBonesBuffer.Load4(OrgOffset_Bones + (a_palette * 240 + a_row) * 16));
+}
+
+/** @brief The heap index of texture register a_register: the latched slot below t16, else the null view (CS's registers, read only by the features this build turns off). */
+uint LightingOrgTexture(uint a_register)
+{
+	return a_register < 16 ? LightingDraw.Textures[a_register >> 2][a_register & 3] : LightingDraw.NullTexture;
+}
+
+#	define LIGHTING_SRV(T, N, R) static T N = ResourceDescriptorHeap[LightingOrgTexture(R)];
+#	define LIGHTING_SAMPLER(T, N, R) static T N = SamplerDescriptorHeap[LightingDraw.Samplers[(R) >> 2][(R) & 3]];
+
+// The vertex pulling helpers (DCLFStream, DCLFAttribute): the ORG vertex stage reads its draw's vertex as the DCLF pulled stages do.
+#	define DCLF_PULLED_VERTICES
+#	include "Common/DCLFVertexPull.hlsli"
+#	undef DCLF_PULLED_VERTICES
+#endif
+
+#if defined(LANDSCAPE) && defined(DCLF_BINDLESS_DRAW) && !defined(LANDSCAPE_SEAMS)
+// Seam resources vary per quad; a zero descriptor row preserves ordinary terrain without splitting batches.
+#	define LANDSCAPE_SEAMS
+#endif
+
 #include "Common/ColorManagement.hlsli"
+#include "Common/DCLFObjects.hlsli"
 #include "Common/FrameBuffer.hlsli"
 #include "Common/GBuffer.hlsli"
 #include "Common/LodLandscape.hlsli"
 #include "Common/Math.hlsli"
 #include "Common/MotionBlur.hlsli"
 #include "Common/Permutation.hlsli"
+
+// The pixel stage's pass descriptor. Under DCLF a pass carries the shadow bits the object can take (StaticShadowBits), and
+// the draw decides them as GetRenderPasses' light selection would this frame (BuildDrawsCS): ShadowDir unless its bound
+// meets no cascade (DCLFSunMiss), DefShadow when the sun or a local shadow light (DCLFLocalShadowMask) reaches it.
+uint PixelDescriptor()
+{
+#if defined(DCLF_BINDLESS)
+	uint descriptor = Permutation::PixelShaderDescriptor;
+	if (DCLFSunMiss)
+		descriptor &= ~Permutation::LightingFlags::ShadowDir;
+	if (!(descriptor & Permutation::LightingFlags::ShadowDir) && DCLFLocalShadowMask == 0)
+		descriptor &= ~Permutation::LightingFlags::DefShadow;
+	return descriptor;
+#else
+	return Permutation::PixelShaderDescriptor;
+#endif
+}
+
+#if defined(DCLF_BINDLESS_DRAW)
+// The draw's shadow lights (Light Limit Fix's ShadowBitMask, LightLimitFix.hlsli's ShadowBitMaskOf). GetRenderPasses gives a pass
+// shadow lights only where it lets the pass have deferred shadows (FUN_1414fcf80's flag, AE 0x1414adfb0): a translucent object
+// takes none unless it is screen-door faded, a decal or kAssumeShadowmask, which is when its static bits (StaticShadowBits) carry
+// DefShadow. BuildDrawsCS selects them by the bound alone, so a pass without DefShadow drops them here: a blended object would
+// otherwise take each light unshadowed (no DefShadow, no shadow mask) where the engine leaves it out.
+uint DCLFShadowLightMask()
+{
+	return (Permutation::PixelShaderDescriptor & Permutation::LightingFlags::DefShadow) ? DCLFLocalShadowMask : 0;
+}
+#	define DCLF_SHADOW_LIGHT_MASK DCLFShadowLightMask()
+#endif
+
 #include "Common/Random.hlsli"
 #include "Common/Shading.hlsli"
 #include "Common/SharedData.hlsli"
 #include "Common/Skinned.hlsli"
 #include "Common/Triplanar.hlsli"
+
+#if defined(DCLF_PULLED_ROWS)
+// The permutation block (b4) as the draw's pipeline row holds it (Permutation.hlsli, DCLF_PULLED_ROWS).
+void DCLFPermutationStatics()
+{
+	Permutation::VertexShaderDescriptor = DCLFRowUint(DCLFPipelineRowAddress, kDCLFPermutationBlock);
+	Permutation::PixelShaderDescriptor = DCLFRowUint(DCLFPipelineRowAddress, kDCLFPermutationBlock + 4);
+	Permutation::ExtraShaderDescriptor = DCLFRowUint(DCLFPipelineRowAddress, kDCLFPermutationBlock + 8);
+	Permutation::ExtraFeatureDescriptor = DCLFRowUint(DCLFPipelineRowAddress, kDCLFPermutationBlock + 12);
+	Permutation::EffectRadius = DCLFRowFloat(DCLFPipelineRowAddress, kDCLFPermutationBlock + 16);
+}
+#endif  // DCLF_PULLED_ROWS
 
 #if defined(FACEGEN) || defined(FACEGEN_RGB_TINT)
 #	define SKIN
@@ -93,16 +267,62 @@ struct VS_OUTPUT
 	float4 FogParam: COLOR1;
 
 	float3 ModelPosition: TEXCOORD12;
+#if defined(DCLF_PULLED)
+	// Drawcall Limit Fix's plain draws (DCLF_PULLED): the draw's instance, by which the pixel stage reads its sequence as the vertex
+	// stage does (DCLFDrawSequence). One flat word: the five the stage reads (its rows and object word) cost a pixel shader 60 bytes of
+	// attribute storage a warp, which cost the terrain shader a warp of occupancy.
+	nointerpolation uint DCLFDrawInstance: TEXCOORD15;
+#endif
 };
 #ifdef VSHADER
 
+#	if defined(LIGHTING_ORG)
+// The vertex stage's constants, from the draw's latch (LightingOrgDraw) and the shared FrameBuffer (VS_PerFrame is the engine's b12).
+static float4 HighDetailRange = LightingDraw.VSTechnique[0];
+static float4 FogParam = LightingDraw.VSTechnique[1];
+static float4 FogNearColor = LightingDraw.VSTechnique[2];
+static float4 FogFarColor = LightingDraw.VSTechnique[3];
+static float4 LeftEyeCenter = LightingDraw.VSMaterial[0];
+static float4 RightEyeCenter = LightingDraw.VSMaterial[1];
+static float4 TexcoordOffset = LightingDraw.VSMaterial[2];
+static row_major float3x4 World = float3x4(LightingDraw.VSGeometry[0], LightingDraw.VSGeometry[1], LightingDraw.VSGeometry[2]);
+static row_major float3x4 PreviousWorld = float3x4(LightingDraw.VSGeometry[3], LightingDraw.VSGeometry[4], LightingDraw.VSGeometry[5]);
+static float4 EyePosition = LightingDraw.VSGeometry[6];
+static float4 LandBlendParams = LightingDraw.VSGeometry[7];
+static float4 TreeParams = LightingDraw.VSGeometry[8];
+static float2 WindTimers = LightingDraw.VSGeometry[9].xy;
+static row_major float3x4 TextureProj = float3x4(LightingDraw.VSGeometry[10], LightingDraw.VSGeometry[11], LightingDraw.VSGeometry[12]);
+static float IndexScale = LightingDraw.VSGeometry[13].x;
+static float4 WorldMapOverlayParameters = LightingDraw.VSGeometry[14];
+static row_major float3x3 ScreenProj = (float3x3)FrameBuffer::CameraView;
+static row_major float4x4 ViewProj = FrameBuffer::CameraViewProj;
+static float3 BonesPivot = FrameBuffer::CameraPosAdjust.xyz;
+static float3 PreviousBonesPivot = FrameBuffer::CameraPreviousPosAdjust.xyz;
+#	else
 cbuffer PerTechnique : register(b0)
 {
 	float4 HighDetailRange : packoffset(c0);  // loaded cells center in xy, size in zw
+#	if !defined(DCLF_BINDLESS)
 	float4 FogParam : packoffset(c1);
 	float4 FogNearColor : packoffset(c2);
 	float4 FogFarColor : packoffset(c3);
+#	endif  // !DCLF_BINDLESS
 };
+
+#	if defined(DCLF_BINDLESS)
+// The fog: the frame's, the same in every technique and drifting with the time of day, so Drawcall Limit Fix keeps it in a block
+// of its own for the whole frame (SceneStore::Tables::frameFog) and no technique row changes with it. No other shader uses VS b13.
+cbuffer DCLFFrameFog : register(b13)
+{
+	float4 FogParam : packoffset(c0);
+	float4 FogNearColor : packoffset(c1);
+	float4 FogFarColor : packoffset(c2);
+	// The extras' frame inputs (LightingConstants.h, ExtrasFrame): the land blend's position in xy, and the ProjectedUV projection
+	// (row vectors; TextureProj is World x this, DCLFTextureProjOf). An object's extras rows hold only its static parts.
+	float4 DCLFExtrasLandBlend : packoffset(c3);
+	row_major float4x4 DCLFExtrasProjection : packoffset(c4);
+};
+#	endif  // DCLF_BINDLESS
 
 cbuffer PerMaterial : register(b1)
 {
@@ -113,26 +333,119 @@ cbuffer PerMaterial : register(b1)
 
 cbuffer PerGeometry : register(b2)
 {
+#if !defined(DCLF_BINDLESS)
 	row_major float3x4 World : packoffset(c0);
 	row_major float3x4 PreviousWorld : packoffset(c3);
+#endif  // !DCLF_BINDLESS
 	float4 EyePosition : packoffset(c6);
+#if !defined(DCLF_BINDLESS)
 	float4 LandBlendParams : packoffset(c7);  // offset in xy, gridPosition in yw
 	float4 TreeParams : packoffset(c8);       // wind magnitude in y, amplitude in z, leaf frequency in w
 	float2 WindTimers : packoffset(c9);
 	row_major float3x4 TextureProj : packoffset(c10);
+#endif  // !DCLF_BINDLESS
 	float IndexScale : packoffset(c13);
 	float4 WorldMapOverlayParameters : packoffset(c14);
 };
 
+#	if defined(__hlsl_dx_compiler) && !defined(__spirv__)
+// DXIL refuses two blocks at one register, and FrameBuffer's PerFrame is b12 too (SPIR-V lets both read the frame's VS b12). Space 1
+// keeps it apart; DCLF's D3D12 builds read both as VS b12 (DrawcallLimitFix FrameSource, DxilReflection).
+cbuffer VS_PerFrame : register(b12, space1)
+#	else
 cbuffer VS_PerFrame : register(b12)
+#	endif
 {
 	row_major float3x3 ScreenProj : packoffset(c0);
 	row_major float4x4 ViewProj : packoffset(c8);
-#	if defined(SKINNED)
+#	if defined(SKINNED) || defined(DCLF_BINDLESS)
+	// posAdjust and its previous value (FrameBuffer's CameraPosAdjust and CameraPreviousPosAdjust): the
+	// skinning pivot, and under DCLF_BINDLESS also the eye the absolute object records are made relative to.
 	float3 BonesPivot : packoffset(c40);
 	float3 PreviousBonesPivot : packoffset(c41);
-#	endif  // SKINNED
+#	endif  // SKINNED || DCLF_BINDLESS
 };
+#	endif  // LIGHTING_ORG
+
+#if defined(DCLF_BINDLESS)
+// The placement holds World and PreviousWorld absolute, so one row serves every epoch and every camera;
+// the vertex stage makes them relative to this epoch's eye and previous eye, the subtraction the engine
+// does on the CPU for its own draws. `precise` keeps it the same single float subtraction (so the depth
+// and colour epochs, and the native draws, agree to the bit) rather than something folded into the
+// transform that follows.
+#	define DCLF_VS_WORLD float3x4(                                         \
+		DCLFPlacements[DCLFObjectIndex].World[0] - float4(0, 0, 0, BonesPivot.x), \
+		DCLFPlacements[DCLFObjectIndex].World[1] - float4(0, 0, 0, BonesPivot.y), \
+		DCLFPlacements[DCLFObjectIndex].World[2] - float4(0, 0, 0, BonesPivot.z))
+#	define DCLF_VS_PREVIOUS_WORLD float3x4(                                                 \
+		DCLFPlacements[DCLFObjectIndex].PreviousWorld[0] - float4(0, 0, 0, PreviousBonesPivot.x), \
+		DCLFPlacements[DCLFObjectIndex].PreviousWorld[1] - float4(0, 0, 0, PreviousBonesPivot.y), \
+		DCLFPlacements[DCLFObjectIndex].PreviousWorld[2] - float4(0, 0, 0, PreviousBonesPivot.z))
+// Tree animation is per object for the same reason World is: with DCLF_BINDLESS the PerGeometry
+// buffer is one block for the whole pipeline, and a tree's wind amplitude and clock are its own.
+// Likewise the landscape blend parameters (MTLand) and the ProjectedUV texture matrix: the object's extras rows (its static parts)
+// completed from the frame's inputs (DCLFFrameFog c3-c7) and its placement, as the engine's SetupGeometry makes them (CPU:
+// LightingConstants.cpp, CompleteExtras). An object without extras points at row 0, which nothing reads for it.
+float4 DCLFLandBlendParamsOf(uint a_object)
+{
+	const float4 own = DCLFExtras[DCLFObjects[a_object].DCLFExtraOffset];
+	// The blend position less the object's translation (absolute).
+	return float4(own.xy, DCLFExtrasLandBlend.xy - float2(DCLFPlacements[a_object].World[0].w, DCLFPlacements[a_object].World[1].w));
+}
+float3x4 DCLFTextureProjOf(uint a_object)
+{
+	const uint extras = DCLFObjects[a_object].DCLFExtraOffset;
+	// How it is made, in the static land-blend row's x (kTextureProj*): the shape's own rows (2), the projection alone (1, the
+	// Envmap technique), or World x the projection (0); TextureProj's rows are the product's columns.
+	const float mode = DCLFExtras[extras].x;
+	if (mode == 2)
+		return float3x4(DCLFExtras[extras + 1], DCLFExtras[extras + 2], DCLFExtras[extras + 3]);
+	float4x4 product = DCLFExtrasProjection;
+	if (mode == 0) {
+		const float4 w0 = DCLFPlacements[a_object].World[0], w1 = DCLFPlacements[a_object].World[1], w2 = DCLFPlacements[a_object].World[2];
+		const float4x4 world = float4x4(float4(w0.x, w1.x, w2.x, 0), float4(w0.y, w1.y, w2.y, 0), float4(w0.z, w1.z, w2.z, 0), float4(w0.w, w1.w, w2.w, 1));
+		product = mul(world, DCLFExtrasProjection);
+	}
+	const float4x4 columns = transpose(product);
+	return float3x4(columns[0], columns[1], columns[2]);
+}
+#	define DCLF_VS_LAND_BLEND_PARAMS DCLFLandBlendParamsOf(DCLFObjectIndex)
+#	define DCLF_VS_TEXTURE_PROJ DCLFTextureProjOf(DCLFObjectIndex)
+#	if defined(DCLF_PULLED)
+// A pulled draw's object word is its sequence's, which main reads first: these are assigned there (DCLFVertexObjectStatics).
+static precise float3x4 World;
+static precise float3x4 PreviousWorld;
+static float4 TreeParams;
+static float2 WindTimers;
+static float4 LandBlendParams;
+static row_major float3x4 TextureProj;
+void DCLFVertexObjectStatics()
+{
+	World = DCLF_VS_WORLD;
+	PreviousWorld = DCLF_VS_PREVIOUS_WORLD;
+	TreeParams = DCLFTreeParamsOf(DCLFObjectIndex);
+	WindTimers = DCLFWindTimersOf(DCLFObjectIndex);
+	LandBlendParams = DCLF_VS_LAND_BLEND_PARAMS;
+	TextureProj = DCLF_VS_TEXTURE_PROJ;
+}
+#	else
+static precise float3x4 World = DCLF_VS_WORLD;
+static precise float3x4 PreviousWorld = DCLF_VS_PREVIOUS_WORLD;
+static float4 TreeParams = DCLFTreeParamsOf(DCLFObjectIndex);
+static float2 WindTimers = DCLFWindTimersOf(DCLFObjectIndex);
+static float4 LandBlendParams = DCLF_VS_LAND_BLEND_PARAMS;
+static row_major float3x4 TextureProj = DCLF_VS_TEXTURE_PROJ;
+#	endif
+#endif  // DCLF_BINDLESS
+
+// Drawcall Limit Fix draws a pipeline's depth and colour from two vertex modules when the Z-prepass is pulled (DCLF_PULLED):
+// the colour pass tests EQUAL against that depth, so the clip position is precise in every DCLF build, to the bit the same.
+// So do the game's own passes under DXC, with Utility's depth (DXC_PRECISE there): FXC's output happened to match.
+#if defined(DCLF_BINDLESS) || defined(__hlsl_dx_compiler)
+#	define DCLF_PRECISE precise
+#else
+#	define DCLF_PRECISE
+#endif
 
 #	if defined(TREE_ANIM)
 float2 GetTreeShiftVector(float4 position, float4 color)
@@ -145,12 +458,16 @@ float2 GetTreeShiftVector(float4 position, float4 color)
 }
 #	endif  // TREE_ANIM
 
-#	if defined(TREE_WIND) && defined(VC) && !defined(TREE_ANIM) && !defined(LOD) && !defined(LODLANDSCAPE) && !defined(LANDSCAPE) && !defined(SKINNED) && !defined(EYE)
+// Tree Wind binds its wind block and vertex data only for the engine's draws, so Drawcall Limit Fix's and ORG's draws build without it.
+#	if defined(TREE_WIND) && defined(VC) && !defined(TREE_ANIM) && !defined(LOD) && !defined(LODLANDSCAPE) && !defined(LANDSCAPE) && !defined(SKINNED) && !defined(EYE) && \
+		!defined(DCLF_PULLED) && !defined(DCLF_PULLED_VERTICES) && !defined(LIGHTING_ORG)
 #		define TREE_WIND_VS
 #		include "TreeWind/TreeWind.hlsli"
 #	endif
 
-#	if defined(TREE_WIND_VS)
+#	if defined(DCLF_PULLED) || defined(DCLF_PULLED_VERTICES) || defined(LIGHTING_ORG)
+VS_OUTPUT DCLFShade(VS_INPUT input)
+#	elif defined(TREE_WIND_VS)
 VS_OUTPUT main(VS_INPUT input, uint vertexID : SV_VertexID)
 #	else
 VS_OUTPUT main(VS_INPUT input)
@@ -161,7 +478,13 @@ VS_OUTPUT main(VS_INPUT input)
 	precise float4 inputPosition = float4(input.Position.xyz, 1.0);
 
 #	if defined(LODLANDNOISE) || defined(LODLANDSCAPE)
+#		if defined(DCLF_BINDLESS)
+	// Drawcall Limit Fix keeps HighDetailRange's centre absolute (EvaluateTechnique): relative here to the draw's eye, as World is,
+	// so the Z-prepass and the colour pass lower the same vertices whichever frame's camera their rows were written with.
+	inputPosition = LodLandscape::AdjustLodLandscapeVertexPositionMS(inputPosition, float4x4(World, float4(0, 0, 0, 1)), HighDetailRange - float4(BonesPivot.xy, 0, 0));
+#		else
 	inputPosition = LodLandscape::AdjustLodLandscapeVertexPositionMS(inputPosition, float4x4(World, float4(0, 0, 0, 1)), HighDetailRange);
+#		endif
 #	endif  // defined(LODLANDNOISE) || defined(LODLANDSCAPE)                                                                   \
 
 	precise float4 previousInputPosition = inputPosition;
@@ -185,15 +508,24 @@ VS_OUTPUT main(VS_INPUT input)
 #	if defined(SKINNED)
 	precise int4 actualIndices = 765.01.xxxx * input.BoneIndices.xyzw;
 
+#		if defined(DCLF_BINDLESS)
+	float3x4 previousWorldMatrix =
+		Skinned::GetBoneTransformMatrixBindless(DCLFObjects[DCLFObjectIndex].DCLFPreviousBoneOffset, actualIndices, PreviousBonesPivot, input.BoneWeights);
+#		else
 	float3x4 previousWorldMatrix =
 		Skinned::GetBoneTransformMatrix(PreviousBones, actualIndices, PreviousBonesPivot, input.BoneWeights);
+#		endif
 	precise float4 previousWorldPosition =
 		float4(mul(inputPosition, transpose(previousWorldMatrix)), 1);
 
+#		if defined(DCLF_BINDLESS)
+	float3x4 worldMatrix = Skinned::GetBoneTransformMatrixBindless(DCLFObjects[DCLFObjectIndex].DCLFBoneOffset, actualIndices, BonesPivot, input.BoneWeights);
+#		else
 	float3x4 worldMatrix = Skinned::GetBoneTransformMatrix(Bones, actualIndices, BonesPivot, input.BoneWeights);
+#		endif
 	precise float4 worldPosition = float4(mul(inputPosition, transpose(worldMatrix)), 1);
 
-	float4 viewPos = mul(ViewProj, worldPosition);
+	DCLF_PRECISE float4 viewPos = mul(ViewProj, worldPosition);
 #	else  // !SKINNED
 #		if defined(TREE_WIND_VS)
 	precise float4 previousWorldPosition = float4(mul(PreviousWorld, previousInputPosition), 1);
@@ -203,13 +535,23 @@ VS_OUTPUT main(VS_INPUT input)
 	precise float4 worldPosition = float4(mul(World, inputPosition), 1);
 	precise float4x4 world4x4 = float4x4(World[0], World[1], World[2], float4(0, 0, 0, 1));
 	precise float4x4 modelView = mul(ViewProj, world4x4);
-	float4 viewPos = mul(modelView, inputPosition);
+	DCLF_PRECISE float4 viewPos = mul(modelView, inputPosition);
 #	endif  // SKINNED
 
 	vsout.Position = viewPos;
+#	if defined(DCLF_BINDLESS)
+	// A decal's depth toward the eye (DCLFObjects.hlsli, DCLFDecalNudged), on top of the pipeline's depth bias.
+	// The view has no translation, so this entry of the matrix is the projection's: about -near.
+	vsout.Position = DCLFDecalNudged(vsout.Position, DCLFObjectIndex, abs(FrameBuffer::CameraViewProj[2][3]));
+#	endif
 
 #	if defined(LODLANDNOISE) || defined(LODLANDSCAPE)
-	vsout.Position.z += min(1, 1e-4 * max(0, viewPos.z - 70000)) * 0.5;
+	// Precise like viewPos: Drawcall Limit Fix's Z-prepass and colour pass compile this from two modules, and the colour pass tests
+	// EQUAL against the prepass's depth. Contracted differently in one of them (a fused multiply-add), the distant LOD land's depth
+	// moved by an ulp and its pixels went unshaded.
+	DCLF_PRECISE float lodDepthOffset = min(1, 1e-4 * max(0, viewPos.z - 70000)) * 0.5;
+	DCLF_PRECISE float lodDepth = viewPos.z + lodDepthOffset;
+	vsout.Position.z = lodDepth;
 #	endif
 
 	float2 uv = input.TexCoord0.xy * TexcoordOffset.zw + TexcoordOffset.xy;
@@ -226,7 +568,11 @@ VS_OUTPUT main(VS_INPUT input)
 #	endif
 
 #	if defined(SKINNED)
+#		if defined(DCLF_BINDLESS)
+	float3x3 boneRSMatrix = Skinned::GetBoneRSMatrixBindless(DCLFObjects[DCLFObjectIndex].DCLFBoneOffset, actualIndices, input.BoneWeights);
+#		else
 	float3x3 boneRSMatrix = Skinned::GetBoneRSMatrix(Bones, actualIndices, input.BoneWeights);
+#		endif
 #	endif
 
 #	if !defined(MODELSPACENORMALS)
@@ -304,6 +650,146 @@ VS_OUTPUT main(VS_INPUT input)
 
 	return vsout;
 }
+
+#	if defined(DCLF_PULLED) || defined(DCLF_PULLED_VERTICES) || defined(LIGHTING_ORG)
+// Drawcall Limit Fix's draws have no input assembly: every vertex stage loads its vertex's attributes itself, decoded as the
+// engine's input layout for the draw's vertex layout has them (VertexInput.cpp, BuildVertexElements; DCLFDrawVertexLayout, set
+// first), then shades them as the input assembler's (DCLFShade). One function for the Z-prepass's build and the colour pass's, so
+// the two compute the same positions (the colour pass tests EQUAL against the prepass's depth). The draw is indexed from the index
+// pool (IndexPool) with no vertex offset, so a_index is the geometry's own vertex index.
+// The attributes read here must match the mask the pipelines check the geometry's layout against (ShaderPrograms.cpp,
+// VertexAttributesOf: Lighting's), or a pipeline is built for a layout that lacks one and draws its defaults.
+VS_INPUT DCLFPulledInput(uint a_index, DCLFStream a_first, DCLFStream a_second)
+{
+	DCLFStreamsAt(a_index, a_first, a_second);
+	VS_INPUT input;
+	input.Position = DCLFPullPosition(a_first, a_second);
+	input.TexCoord0 = DCLFPullHalf2(1, a_first, a_second);
+#		if !defined(MODELSPACENORMALS)
+	input.Normal = DCLFPullUnorm4(3, 0, a_first, a_second);
+	input.Bitangent = DCLFPullUnorm4(4, 0, a_first, a_second);
+#		endif
+#		if defined(VC)
+	input.Color = DCLFPullUnorm4(5, 0, a_first, a_second);
+#			if defined(LANDSCAPE)
+	input.LandBlendWeights1 = DCLFPullUnorm4(7, 0, a_first, a_second);
+	input.LandBlendWeights2 = DCLFPullUnorm4(7, 4, a_first, a_second);
+#			endif
+#		endif
+#		if defined(SKINNED)
+	input.BoneWeights = DCLFPullHalf4(6, a_first, a_second);
+	input.BoneIndices = DCLFPullUnorm4(6, 8, a_first, a_second);
+#		endif
+#		if defined(EYE)
+	input.EyeParameter = DCLFPullFloat(8, a_first, a_second);
+#		endif
+	return input;
+}
+#	endif  // DCLF_PULLED || DCLF_PULLED_VERTICES
+
+#	if defined(DCLF_PULLED)
+// Drawcall Limit Fix's Z-prepass draws with plain indirect draws (MainOpaquePass): one per pipeline, which cannot bind a vertex
+// buffer, or push data, per draw. So this stage reads its draw's sequence (BuildDrawsCS: DrawSequence, at DCLFSequencesAddress
+// plus its instance's stride), and through it the draw's object word, material row and geometry, whose attributes it pulls
+// (DCLFPulledInput).
+// The draw's rows (refs, from its sequence's: the pipeline row's, then the material row's), and the blocks the pulled source reads
+// from them (ShaderPrograms.cpp, PulledLightingSource), before anything reads them.
+void DCLFRowStatics(uint4 a_rows)
+{
+	DCLFPipelineRowAddress = a_rows.xy;
+	DCLFMaterialRowAddress = a_rows.zw;
+	DCLFPerTechniqueStatics();
+	DCLFPerMaterialStatics();
+	DCLFPerGeometryStatics();
+	DCLFPermutationStatics();
+}
+
+VS_OUTPUT DCLFPulledVertex(uint index, uint a_instance)
+{
+	const DeviceRef sequence = DCLFDrawSequence(a_instance);
+	DCLFObjectWord = DCLFSequenceObjectWord(sequence);
+	DCLFRowStatics(DCLFSequenceRows(sequence));  // the pipeline row's ref, the material row's
+	DCLFDrawVertexLayout = DCLFPipelineVertexLayout();
+	const uint4 vertexBuffer = DeviceLoad(uint4, DeviceRefAdd(sequence, 24));  // ref, size, stride
+	const uint4 streamBuffer = DeviceLoad(uint4, DeviceRefAdd(sequence, 40));
+	DCLFStream first, second;
+	first.address = vertexBuffer.xy;
+	first.stride = vertexBuffer.w;
+	second.address = streamBuffer.xy;
+	second.stride = streamBuffer.w;
+	const VS_INPUT input = DCLFPulledInput(index, first, second);
+
+	DCLFVertexObjectStatics();
+	VS_OUTPUT vsout = DCLFShade(input);
+	// T7c1: Terrain Blending's depth offset (Utility.hlsl, OFFSET_DEPTH) for a near terrain block's draw into the main depth, pushed per
+	// call in the word a shadow view's vertex layout takes (DrawPipelines.h, kZDrawPushOffsetDepth): 0 for every other Z-prepass call.
+	if (DCLFVertexLayout.x != 0)
+		vsout.Position.z += 10.0;
+	vsout.DCLFDrawInstance = a_instance;
+	return vsout;
+}
+
+#		if defined(DCLF_DEPTH_ONLY)
+// The Z-prepass's build for a depth pipeline without a pixel stage (DCLF_DEPTH_ONLY): the clip position alone. It is
+// DCLFPulledVertex's, the colour pass's expression to the bit (the colour pass tests EQUAL against it); everything else that
+// computes is compiled away, PreviousWorld, the previous palette, the TBN and the fog with it.
+struct DCLF_DEPTH_VS_OUTPUT
+{
+	float4 Position: SV_POSITION0;
+};
+#			define DCLF_PULLED_VS_OUTPUT DCLF_DEPTH_VS_OUTPUT
+#		else
+#			define DCLF_PULLED_VS_OUTPUT VS_OUTPUT
+#		endif
+
+// The draw's lookups (its sequence, rows, statics, object and geometry) keyed on a wave-uniform instance, as the shadow views' stage
+// (Utility.hlsl): each pass of the loop takes the first active lane's draw and that draw's lanes, so everything DCLFPulledVertex reads
+// per draw is the draw's (scalar), not each lane's. One pass unless a wave mixes draws.
+DCLF_PULLED_VS_OUTPUT main(uint index : SV_VertexID, uint a_instance : SV_InstanceID)
+{
+#			if defined(DEVICE_REF_TRACE)
+	DEVICE_REF_TRACE_SAMPLE(index);  // CS_DCLF_REF_TRACE: a vertex in 64
+#			endif
+	DCLF_PULLED_VS_OUTPUT vsout;
+#		if defined(DCLF_DEPTH_ONLY)
+	vsout.Position = DCLFPulledVertex(index, a_instance).Position;
+#		else
+	vsout = DCLFPulledVertex(index, a_instance);
+#		endif
+	return vsout;
+}
+#	elif defined(DCLF_PULLED_VERTICES)
+// Drawcall Limit Fix's device-generated draws (the colour pass, and the depth variants): one execution set's call switches
+// pipelines per draw, and so vertex layouts, which no input assembly can follow (an execution set's pipelines share their vertex
+// input state). The draw's push data carries its geometry's buffers (DCLFObjects.hlsli, DCLFPushData) and its pipeline row's
+// address, whose row holds the layout; the object statics above keep their initialisers (the object word is pushed too).
+VS_OUTPUT main(uint index : SV_VertexID)
+{
+#		if defined(DEVICE_REF_TRACE)
+	DEVICE_REF_TRACE_SAMPLE(index);  // CS_DCLF_REF_TRACE: a vertex in 64
+#		endif
+	DCLFDrawVertexLayout = DCLFPushedVertexLayout();
+	DCLFStream first, second;
+	first.address = DCLFVertexBuffer.xy;
+	first.stride = DCLFVertexStride;
+	second.address = DCLFStreamBuffer.xy;
+	second.stride = DCLFStreamStride;
+	return DCLFShade(DCLFPulledInput(index, first, second));
+}
+#	elif defined(LIGHTING_ORG)
+// The ORG build's vertex stage: the draw's vertex pulled as the input assembler reads it (its 16-bit index, then its attributes as
+// the engine's input layout for the draw's vertex layout decodes them), then the engine's stage (DCLFShade).
+VS_OUTPUT main(uint a_vertexID : SV_VertexID)
+{
+	DCLFDrawVertexLayout = LightingDraw.VertexLayout;
+	const uint indexNumber = LightingDraw.FirstIndex + a_vertexID;
+	const uint indexWord = DeviceLoad(uint, DeviceRefAdd(LightingDraw.IndexAddress, (indexNumber * 2) & ~3u));
+	const uint index = (indexNumber & 1) ? (indexWord >> 16) : (indexWord & 0xFFFF);
+	DCLFStream first = { LightingDraw.VertexAddress, LightingDraw.VertexStride };
+	DCLFStream second = { DeviceRef(0, 0), 0u };
+	return DCLFShade(DCLFPulledInput(index, first, second));
+}
+#	endif  // DCLF_PULLED, DCLF_PULLED_VERTICES, LIGHTING_ORG
 #endif  // VSHADER
 
 typedef VS_OUTPUT PS_INPUT;
@@ -345,6 +831,208 @@ static const bool PBRTextures = true;
 static const bool PBRTextures = false;
 #	endif
 
+#	if defined(LIGHTING_ORG)
+// The ORG build reads the same slots from the heap (LIGHTING_SRV, LIGHTING_SAMPLER). The register declarations stay as they are
+// below: Drawcall Limit Fix rewrites those lines for its own builds (PulledSource.cpp).
+LIGHTING_SAMPLER(SamplerState, SampTerrainParallaxSampler, 1)
+
+#	if defined(LANDSCAPE)
+
+LIGHTING_SAMPLER(SamplerState, SampColorSampler, 0)
+
+#		define SampLandColor2Sampler SampColorSampler
+#		define SampLandColor3Sampler SampColorSampler
+#		define SampLandColor4Sampler SampColorSampler
+#		define SampLandColor5Sampler SampColorSampler
+#		define SampLandColor6Sampler SampColorSampler
+#		define SampNormalSampler SampColorSampler
+#		define SampLandNormal2Sampler SampColorSampler
+#		define SampLandNormal3Sampler SampColorSampler
+#		define SampLandNormal4Sampler SampColorSampler
+#		define SampLandNormal5Sampler SampColorSampler
+#		define SampLandNormal6Sampler SampColorSampler
+#		define SampRMAOSSampler SampColorSampler
+#		define SampLandRMAOS2Sampler SampColorSampler
+#		define SampLandRMAOS3Sampler SampColorSampler
+#		define SampLandRMAOS4Sampler SampColorSampler
+#		define SampLandRMAOS5Sampler SampColorSampler
+#		define SampLandRMAOS6Sampler SampColorSampler
+
+#	else
+
+LIGHTING_SAMPLER(SamplerState, SampColorSampler, 0)
+
+#		define SampNormalSampler SampColorSampler
+
+#		if defined(MODELSPACENORMALS) && !defined(LODLANDNOISE)
+LIGHTING_SAMPLER(SamplerState, SampSpecularSampler, 2)
+#		endif
+#		if defined(FACEGEN)
+LIGHTING_SAMPLER(SamplerState, SampTintSampler, 3)
+LIGHTING_SAMPLER(SamplerState, SampDetailSampler, 4)
+#		elif defined(PARALLAX)
+LIGHTING_SAMPLER(SamplerState, SampParallaxSampler, 3)
+#		elif defined(PROJECTED_UV) && !defined(SPARKLE)
+LIGHTING_SAMPLER(SamplerState, SampProjDiffuseSampler, 3)
+#		endif
+
+#		if (defined(ENVMAP) || defined(MULTI_LAYER_PARALLAX) || defined(SNOW_FLAG) || defined(EYE)) && !defined(FACEGEN)
+LIGHTING_SAMPLER(SamplerState, SampEnvSampler, 4)
+LIGHTING_SAMPLER(SamplerState, SampEnvMaskSampler, 5)
+#		endif
+
+#		if defined(TRUE_PBR) && !defined(FACEGEN)
+LIGHTING_SAMPLER(SamplerState, SampParallaxSampler, 4)
+#		endif
+#		if defined(TRUE_PBR)
+LIGHTING_SAMPLER(SamplerState, SampRMAOSSampler, 5)
+#		endif
+
+LIGHTING_SAMPLER(SamplerState, SampGlowSampler, 6)
+
+#		if defined(MULTI_LAYER_PARALLAX)
+LIGHTING_SAMPLER(SamplerState, SampLayerSampler, 8)
+#		elif defined(PROJECTED_UV) && !defined(SPARKLE)
+LIGHTING_SAMPLER(SamplerState, SampProjNormalSampler, 8)
+#		endif
+
+LIGHTING_SAMPLER(SamplerState, SampBackLightSampler, 9)
+
+#		if defined(PROJECTED_UV)
+LIGHTING_SAMPLER(SamplerState, SampProjDetailSampler, 10)
+#		endif
+
+LIGHTING_SAMPLER(SamplerState, SampCharacterLightProjNoiseSampler, 11)
+LIGHTING_SAMPLER(SamplerState, SampRimSoftLightWorldMapOverlaySampler, 12)
+
+#		if defined(WORLD_MAP) && (defined(LODLANDSCAPE) || defined(LODLANDNOISE))
+LIGHTING_SAMPLER(SamplerState, SampWorldMapOverlaySnowSampler, 13)
+#		endif
+
+#	endif
+
+#	if defined(LOD_LAND_BLEND)
+LIGHTING_SAMPLER(SamplerState, SampLandLodBlend1Sampler, 13)
+LIGHTING_SAMPLER(SamplerState, SampLandLodBlend2Sampler, 15)
+#	elif defined(LODLANDNOISE)
+LIGHTING_SAMPLER(SamplerState, SampLandLodNoiseSampler, 15)
+#	endif
+
+LIGHTING_SAMPLER(SamplerState, SampShadowMaskSampler, 14)
+
+#	if defined(LANDSCAPE)
+
+LIGHTING_SRV(Texture2D<float4>, TexColorSampler, 0)
+LIGHTING_SRV(Texture2D<float4>, TexLandColor2Sampler, 1)
+LIGHTING_SRV(Texture2D<float4>, TexLandColor3Sampler, 2)
+LIGHTING_SRV(Texture2D<float4>, TexLandColor4Sampler, 3)
+LIGHTING_SRV(Texture2D<float4>, TexLandColor5Sampler, 4)
+LIGHTING_SRV(Texture2D<float4>, TexLandColor6Sampler, 5)
+LIGHTING_SRV(Texture2D<float4>, TexNormalSampler, 7)
+LIGHTING_SRV(Texture2D<float4>, TexLandNormal2Sampler, 8)
+LIGHTING_SRV(Texture2D<float4>, TexLandNormal3Sampler, 9)
+LIGHTING_SRV(Texture2D<float4>, TexLandNormal4Sampler, 10)
+LIGHTING_SRV(Texture2D<float4>, TexLandNormal5Sampler, 11)
+LIGHTING_SRV(Texture2D<float4>, TexLandNormal6Sampler, 12)
+
+LIGHTING_SRV(Texture2D<float4>, TexLandTHDisp0Sampler, 92)
+LIGHTING_SRV(Texture2D<float4>, TexLandTHDisp1Sampler, 93)
+LIGHTING_SRV(Texture2D<float4>, TexLandTHDisp2Sampler, 94)
+LIGHTING_SRV(Texture2D<float4>, TexLandTHDisp3Sampler, 95)
+LIGHTING_SRV(Texture2D<float4>, TexLandTHDisp4Sampler, 96)
+LIGHTING_SRV(Texture2D<float4>, TexLandTHDisp5Sampler, 97)
+
+#		if defined(TRUE_PBR)
+
+LIGHTING_SRV(Texture2D<float4>, TexLandDisplacement0Sampler, 80)
+LIGHTING_SRV(Texture2D<float4>, TexLandDisplacement1Sampler, 81)
+LIGHTING_SRV(Texture2D<float4>, TexLandDisplacement2Sampler, 82)
+LIGHTING_SRV(Texture2D<float4>, TexLandDisplacement3Sampler, 83)
+LIGHTING_SRV(Texture2D<float4>, TexLandDisplacement4Sampler, 84)
+LIGHTING_SRV(Texture2D<float4>, TexLandDisplacement5Sampler, 85)
+
+LIGHTING_SRV(Texture2D<float4>, TexRMAOSSampler, 86)
+LIGHTING_SRV(Texture2D<float4>, TexLandRMAOS2Sampler, 87)
+LIGHTING_SRV(Texture2D<float4>, TexLandRMAOS3Sampler, 88)
+LIGHTING_SRV(Texture2D<float4>, TexLandRMAOS4Sampler, 89)
+LIGHTING_SRV(Texture2D<float4>, TexLandRMAOS5Sampler, 90)
+LIGHTING_SRV(Texture2D<float4>, TexLandRMAOS6Sampler, 91)
+
+#		endif
+
+#	else
+
+LIGHTING_SRV(Texture2D<float4>, TexColorSampler, 0)
+LIGHTING_SRV(Texture2D<float4>, TexNormalSampler, 1)  // normal in xyz, glossiness in w if not modelspacenormal
+
+#		if defined(MODELSPACENORMALS) && !defined(LODLANDNOISE)
+LIGHTING_SRV(Texture2D<float4>, TexSpecularSampler, 2)
+#		endif
+#		if defined(FACEGEN)
+LIGHTING_SRV(Texture2D<float4>, TexTintSampler, 3)
+LIGHTING_SRV(Texture2D<float4>, TexDetailSampler, 4)
+#		elif defined(PARALLAX)
+LIGHTING_SRV(Texture2D<float4>, TexParallaxSampler, 3)
+#		elif defined(PROJECTED_UV) && !defined(SPARKLE)
+LIGHTING_SRV(Texture2D<float4>, TexProjDiffuseSampler, 3)
+#		endif
+
+#		if (defined(ENVMAP) || defined(MULTI_LAYER_PARALLAX) || defined(SNOW_FLAG) || defined(EYE)) && !defined(FACEGEN)
+LIGHTING_SRV(TextureCube<float4>, TexEnvSampler, 4)
+LIGHTING_SRV(Texture2D<float4>, TexEnvMaskSampler, 5)
+#		endif
+
+#		if defined(TRUE_PBR) && !defined(FACEGEN)
+LIGHTING_SRV(Texture2D<float4>, TexParallaxSampler, 4)
+#		endif
+#		if defined(TRUE_PBR)
+LIGHTING_SRV(Texture2D<float4>, TexRMAOSSampler, 5)
+#		endif
+
+LIGHTING_SRV(Texture2D<float4>, TexGlowSampler, 6)
+
+#		if defined(MULTI_LAYER_PARALLAX)
+LIGHTING_SRV(Texture2D<float4>, TexLayerSampler, 8)
+#		elif defined(PROJECTED_UV) && !defined(SPARKLE)
+LIGHTING_SRV(Texture2D<float4>, TexProjNormalSampler, 8)
+#		endif
+
+LIGHTING_SRV(Texture2D<float4>, TexBackLightSampler, 9)
+
+#		if defined(PROJECTED_UV)
+LIGHTING_SRV(Texture2D<float4>, TexProjDetail, 10)
+#		endif
+
+LIGHTING_SRV(Texture2D<float4>, TexCharacterLightProjNoiseSampler, 11)
+#		if defined(DCLF_BINDLESS)
+// The character light's noise under DCLF (DrawPipelines.h: kCharacterLightRegister). The engine binds it at t11, but it is a
+// render target that alternates every frame: the frame record gives it, not the material row. A character-light pass reads it
+// here for both of t11's uses.
+LIGHTING_SRV(Texture2D<float4>, DCLFCharacterLightNoise, 125)
+#		endif
+LIGHTING_SRV(Texture2D<float4>, TexRimSoftLightWorldMapOverlaySampler, 12)
+
+#		if defined(WORLD_MAP) && (defined(LODLANDSCAPE) || defined(LODLANDNOISE))
+LIGHTING_SRV(Texture2D<float4>, TexWorldMapOverlaySnowSampler, 13)
+#		endif
+
+#	endif
+
+#	if defined(LOD_LAND_BLEND)
+LIGHTING_SRV(Texture2D<float4>, TexLandLodBlend1Sampler, 13)
+LIGHTING_SRV(Texture2D<float4>, TexLandLodBlend2Sampler, 15)
+#	elif defined(LODLANDNOISE)
+LIGHTING_SRV(Texture2D<float4>, TexLandLodNoiseSampler, 15)
+#	endif
+
+LIGHTING_SRV(Texture2D<float4>, TexShadowMaskSampler, 14)
+
+#	if defined(SKIN) && defined(CS_SKIN)
+LIGHTING_SRV(Texture2D<float4>, TexSkinExtraSampler, 71)
+LIGHTING_SRV(Texture2D<float4>, TexSkinWetnessSampler, 74)
+LIGHTING_SRV(Texture2D<float4>, TexSkinWetnessNormalSampler, 75)
+#	endif
+#	else
 SamplerState SampTerrainParallaxSampler : register(s1);
 
 #	if defined(LANDSCAPE)
@@ -515,6 +1203,12 @@ Texture2D<float4> TexProjDetail : register(t10);
 #		endif
 
 Texture2D<float4> TexCharacterLightProjNoiseSampler : register(t11);
+#		if defined(DCLF_BINDLESS)
+// The character light's noise under DCLF (DrawPipelines.h: kCharacterLightRegister). The engine binds it at t11, but it is a
+// render target that alternates every frame: the frame record gives it, not the material row. A character-light pass reads it
+// here for both of t11's uses.
+Texture2D<float4> DCLFCharacterLightNoise : register(t125);
+#		endif
 Texture2D<float4> TexRimSoftLightWorldMapOverlaySampler : register(t12);
 
 #		if defined(WORLD_MAP) && (defined(LODLANDSCAPE) || defined(LODLANDNOISE))
@@ -536,7 +1230,71 @@ Texture2D<float4> TexShadowMaskSampler : register(t14);
 Texture2D<float4> TexSkinExtraSampler : register(t71);
 Texture2D<float4> TexSkinWetnessSampler : register(t74);
 #	endif
+#	endif  // LIGHTING_ORG
 
+#	if defined(LIGHTING_ORG)
+// The pixel stage's constants, from the draw's latch (LightingOrgDraw).
+static float4 FogColor = LightingDraw.PSTechnique[0];
+static float4 ColourOutputClamp = LightingDraw.PSTechnique[1];
+static float4 VPOSOffset = LightingDraw.PSTechnique[2];
+
+static float4 LODTexParams = LightingDraw.PSMaterial[0];
+#		if !(defined(LANDSCAPE) && defined(TRUE_PBR))
+static float4 TintColor = LightingDraw.PSMaterial[1];
+static float4 EnvmapData = LightingDraw.PSMaterial[2];
+static float4 ParallaxOccData = LightingDraw.PSMaterial[3];
+static float4 SpecularColor = LightingDraw.PSMaterial[4];
+static float4 SparkleParams = LightingDraw.PSMaterial[5];
+static float4 MultiLayerParallaxData = LightingDraw.PSMaterial[6];
+#		else
+static float4 LandscapeTexture1GlintParameters = LightingDraw.PSMaterial[1];
+static float4 LandscapeTexture2GlintParameters = LightingDraw.PSMaterial[2];
+static float4 LandscapeTexture3GlintParameters = LightingDraw.PSMaterial[3];
+static float4 LandscapeTexture4GlintParameters = LightingDraw.PSMaterial[4];
+static float4 LandscapeTexture5GlintParameters = LightingDraw.PSMaterial[5];
+static float4 LandscapeTexture6GlintParameters = LightingDraw.PSMaterial[6];
+#		endif
+static float4 LightingEffectParams = LightingDraw.PSMaterial[7];
+static float4 IBLParams = LightingDraw.PSMaterial[8];
+#		if !defined(TRUE_PBR)
+static float4 LandscapeTexture1to4IsSnow = LightingDraw.PSMaterial[9];
+static float4 LandscapeTexture5to6IsSnow = LightingDraw.PSMaterial[10];
+static float4 LandscapeTexture1to4IsSpecPower = LightingDraw.PSMaterial[11];
+static float4 LandscapeTexture5to6IsSpecPower = LightingDraw.PSMaterial[12];
+static float4 SnowRimLightParameters = LightingDraw.PSMaterial[13];
+#		endif
+#		if defined(TRUE_PBR) && defined(LANDSCAPE)
+static float3 LandscapeTexture2PBRParams = LightingDraw.PSMaterial[9].xyz;
+static float3 LandscapeTexture3PBRParams = LightingDraw.PSMaterial[10].xyz;
+static float3 LandscapeTexture4PBRParams = LightingDraw.PSMaterial[11].xyz;
+static float3 LandscapeTexture5PBRParams = LightingDraw.PSMaterial[12].xyz;
+static float3 LandscapeTexture6PBRParams = LightingDraw.PSMaterial[13].xyz;
+#		endif
+static float4 CharacterLightParams = LightingDraw.PSMaterial[14];
+static uint PBRFlags = asuint(LightingDraw.PSMaterial[15].x);
+static float3 PBRParams1 = LightingDraw.PSMaterial[15].yzw;
+static float4 PBRParams2 = LightingDraw.PSMaterial[16];
+static float3 MaterialObjectRGBScale = LightingDraw.PSMaterial[17].xyz;
+
+static float3 DirLightDirection = LightingDraw.PSGeometry[0].xyz;
+static float3 DirLightColor = LightingDraw.PSGeometry[1].xyz;
+static float4 ShadowLightMaskSelect = LightingDraw.PSGeometry[2];
+static float4 MaterialData = LightingDraw.PSGeometry[3];
+static float AlphaTestRef = LightingDraw.PSGeometry[4].x;
+static float3 EmitColor = LightingDraw.PSGeometry[4].yzw;
+static float4 ProjectedUVParams = LightingDraw.PSGeometry[6];
+static float4 SSRParams = LightingDraw.PSGeometry[7];
+static float4 WorldMapOverlayParametersPS = LightingDraw.PSGeometry[8];
+static float4 ProjectedUVParams2 = LightingDraw.PSGeometry[9];
+static float4 ProjectedUVParams3 = LightingDraw.PSGeometry[10];
+static row_major float3x4 DirectionalAmbient = float3x4(LightingDraw.PSGeometry[11], LightingDraw.PSGeometry[12], LightingDraw.PSGeometry[13]);
+static float4 AmbientSpecularTintAndFresnelPower = LightingDraw.PSGeometry[14];
+static float4 PointLightPosition[7] = { LightingDraw.PSGeometry[15], LightingDraw.PSGeometry[16], LightingDraw.PSGeometry[17], LightingDraw.PSGeometry[18],
+	LightingDraw.PSGeometry[19], LightingDraw.PSGeometry[20], LightingDraw.PSGeometry[21] };
+static float4 PointLightColor[7] = { LightingDraw.PSGeometry[22], LightingDraw.PSGeometry[23], LightingDraw.PSGeometry[24], LightingDraw.PSGeometry[25],
+	LightingDraw.PSGeometry[26], LightingDraw.PSGeometry[27], LightingDraw.PSGeometry[28] };
+static float2 NumLightNumShadowLight = LightingDraw.PSGeometry[29].xy;
+#	else
 cbuffer PerTechnique : register(b0)
 {
 	float4 FogColor : packoffset(c0);           // Color in xyz, invFrameBufferRange in w
@@ -592,28 +1350,121 @@ cbuffer PerMaterial : register(b1)
 
 cbuffer PerGeometry : register(b2)
 {
+#if !defined(DCLF_BINDLESS)
 	float3 DirLightDirection : packoffset(c0);
 	float3 DirLightColor : packoffset(c1);
+#endif  // !DCLF_BINDLESS
 	float4 ShadowLightMaskSelect : packoffset(c2);
+#if !defined(DCLF_BINDLESS)
 	float4 MaterialData : packoffset(c3);  // envmapLODFade in x, specularLODFade in y, alpha in z
+#endif  // !DCLF_BINDLESS
 	float AlphaTestRef : packoffset(c4);
+#if !defined(DCLF_BINDLESS)
 	float3 EmitColor : packoffset(c4.y);
+#endif  // !DCLF_BINDLESS
+#if !defined(DCLF_BINDLESS)
 	float4 ProjectedUVParams : packoffset(c6);
+#endif  // !DCLF_BINDLESS
 	float4 SSRParams : packoffset(c7);
 	float4 WorldMapOverlayParametersPS : packoffset(c8);
+#if !defined(DCLF_BINDLESS)
 	float4 ProjectedUVParams2 : packoffset(c9);
 	float4 ProjectedUVParams3 : packoffset(c10);  // fProjectedUVDiffuseNormalTilingScale in x, fProjectedUVNormalDetailTilingScale in y, EnableProjectedNormals in w
+#endif  // !DCLF_BINDLESS
+#if !defined(DCLF_BINDLESS)
 	row_major float3x4 DirectionalAmbient : packoffset(c11);
 	float4 AmbientSpecularTintAndFresnelPower : packoffset(c14);  // Fresnel power in z, color in xyz
-	float4 PointLightPosition[7] : packoffset(c15);               // point light radius in w
+#endif  // !DCLF_BINDLESS
+	float4 PointLightPosition[7] : packoffset(c15);  // point light radius in w
 	float4 PointLightColor[7] : packoffset(c22);
 	float2 NumLightNumShadowLight : packoffset(c29);
 };
+#	endif  // LIGHTING_ORG
 
+#if defined(DCLF_BINDLESS)
+// The frame's lighting: the same in every pipeline's PerGeometry block, so Drawcall Limit Fix keeps it in one block
+// of its own for the whole frame (SceneStore::Tables::frameLighting), and a pipeline's block does not change with the
+// sun. No other shader uses b13.
+cbuffer DCLFFrameLighting : register(b13)
+{
+	float3 DirLightDirection : packoffset(c0);
+	float3 DirLightColor : packoffset(c1);
+	row_major float3x4 DirectionalAmbient : packoffset(c2);
+	float4 AmbientSpecularTintAndFresnelPower : packoffset(c5);  // Fresnel power in z, color in xyz
+	// The LOD fades' frame inputs (LodFadeFrame): what BSFadeNode::OnVisible's fade value and GetRenderPasses' fade read.
+	float4 DCLFLodFadeEye : packoffset(c6);          // the main camera's world position, its lodAdjust in w
+	float4 DCLFLodFadeThresholds : packoffset(c7);   // specular start and end, envmap start and end
+	float4 DCLFLodFadeMetric : packoffset(c8);       // metric scale, default scale, the override metric, 1 when overridden
+	float4 DCLFLodFadeDivisors[4] : packoffset(c9);  // per LOD type
+	float4 DCLFLodFadeState : packoffset(c13);       // x: 1 when the engine updates the metric at all (else the property's fades stand)
+// CS_DCLF_FOLIAGE_PARITY's draws: the alpha-tested ones, and terrain LOD (whose depth the Z-prepass and the colour pass each
+// compute from HighDetailRange); with CS_DCLF_FOLIAGE_PARITY=land every draw (DCLF_FOLIAGE_PARITY_ALL), so that a pixel no draw
+// shaded is told from one another object took at the same depth. Each records the pixels it owns in the Z-prepass (those with a
+// pixel stage there) and those the colour pass shaded.
+#	if defined(DCLF_FOLIAGE_PARITY) && (defined(DO_ALPHA_TEST) || defined(LODLANDNOISE) || defined(LODLANDSCAPE) || defined(DCLF_FOLIAGE_PARITY_ALL))
+#		define DCLF_OWNED_PARITY
+#	endif
+#	if defined(DCLF_FOLIAGE_PARITY)
+	// CS_DCLF_FOLIAGE_PARITY (IndirectDraws GpuLayouts.h, FoliageParityConstants): the frame's buffers' refs (each pixel's
+	// object word; its albedo and diffuse), the render size, the frame's tag and the Z-prepass owners' UAV.
+	uint4 DCLFFoliageParityBuffers : packoffset(c14);
+	uint4 DCLFFoliageParityFrame : packoffset(c15);
+#	endif
+	// The extras' pixel input (LightingConstants.h, ExtrasFrame): ProjectedUVParams3, the frame's (the two tilings, 0, the
+	// projected-normals switch).
+	float4 DCLFExtrasProjectedGlobals : packoffset(c16);
+};
+#endif  // DCLF_BINDLESS
+
+#if defined(DCLF_BINDLESS)
+// The object's pixel-stage values are its row of the frame's DCLFPixelObjects (Common/DCLFObjects.hlsli, DCLFPixelObjectRow), written
+// once a frame (Features/Fades' PixelRowsCS) rather than computed per pixel from its records, LOD fade and fade root: they are the
+// draw's. A LOD cross-fade's copy (the object word's bit 30) takes the row's copy alpha.
+#	define DCLF_PS_CROSSFADE_COPY ((DCLFObjectWord & 0x40000000u) != 0)
+#	define DCLF_PIXEL_ROW DCLFPixelObjects[DCLFObjectIndex]
+float4 DCLFPixelMaterialData(DCLFPixelObjectRow a_row)
+{
+	return float4(a_row.MaterialData.xy, DCLF_PS_CROSSFADE_COPY ? a_row.CopyAlpha : a_row.MaterialData.z, a_row.MaterialData.w);
+}
+// ProjectedUV's three pixel parameters are per object too (the property's, plus two globals).
+#	if defined(DCLF_PULLED)
+// A pulled draw's object word is its vertex stage's, which main reads first: these are assigned there (DCLFPixelObjectStatics).
+static float4 MaterialData;
+static float3 EmitColor;
+static float DCLFSSRSpecular;
+static float4 ProjectedUVParams;
+static float4 ProjectedUVParams2;
+static float4 ProjectedUVParams3;
+#	else
+static const DCLFPixelObjectRow DCLFPixelRow = DCLF_PIXEL_ROW;
+static float4 MaterialData = DCLFPixelMaterialData(DCLFPixelRow);
+static float3 EmitColor = DCLFPixelRow.EmitColorSSR.xyz;
+static float DCLFSSRSpecular = DCLFPixelRow.EmitColorSSR.w;
+static float4 ProjectedUVParams = DCLFExtras[DCLFObjects[DCLFObjectIndex].DCLFExtraOffset + 4];
+static float4 ProjectedUVParams2 = DCLFExtras[DCLFObjects[DCLFObjectIndex].DCLFExtraOffset + 5];
+static float4 ProjectedUVParams3 = DCLFExtrasProjectedGlobals;
+#	endif
+#	define DCLF_SSR_SPECULAR DCLFSSRSpecular
+#else
+#	define DCLF_SSR_SPECULAR SSRParams.w
+#endif  // DCLF_BINDLESS
+
+#if defined(DCLF_BINDLESS_DRAW)
+// The reference comes from the per-object record instead of a constant buffer of its own, so that b11
+// stops being part of what makes a draw's binding record unique. Same value, same single read below.
+#	if defined(DCLF_PULLED)
+static float AlphaTestRefRS;  // DCLFPixelObjectStatics
+#	else
+static const float AlphaTestRefRS = DCLFPixelRow.AlphaTestRef;
+#	endif
+#elif defined(LIGHTING_ORG)
+static float AlphaTestRefRS = LightingDraw.AlphaTestRefRS;
+#else
 cbuffer AlphaTestRefBuffer : register(b11)
 {
 	float AlphaTestRefRS : packoffset(c0);
 }
+#endif  // DCLF_BINDLESS_DRAW
 
 float GetSoftLightMultiplier(float angle)
 {
@@ -877,6 +1728,12 @@ float GetSnowParameterY(float texProjTmp, float alpha)
 #		include "LightLimitFix/LightLimitFix.hlsli"
 #	endif
 
+#	if defined(DCLF_BINDLESS_DRAW) && !defined(LIGHT_LIMIT_FIX) && !defined(LOD) && !defined(DCLF_DEPTH_ONLY)
+// Drawcall Limit Fix without Light Limit Fix: a draw's point lights come from the frame's table, not its pipeline's PerGeometry.
+#		define DCLF_POINT_LIGHTS
+#		include "Common/DCLFPointLights.hlsli"
+#	endif
+
 #	if defined(TREE_ANIM)
 #		undef WETNESS_EFFECTS
 #	endif
@@ -1011,8 +1868,60 @@ bool UseSkylightingShadowVisibility()
 
 #	include "Common/LightingEval.hlsli"
 
-PS_OUTPUT main(PS_INPUT input, bool frontFace : SV_IsFrontFace)
+#	if defined(DCLF_TEX_FEEDBACK) && !defined(DO_ALPHA_TEST)
+#		define DCLF_WRITES_TEX_FEEDBACK 1
+#	else
+#		define DCLF_WRITES_TEX_FEEDBACK 0
+#	endif
+
+#	if DCLF_WRITES_TEX_FEEDBACK
+// Texture streaming's feedback (Core/Gpu/TextureFeedback.h): what this material's surface wants, one value however many textures it samples.
+// The footprint is log2 of the UV one pixel covers, which needs no texture's size: the worker turns it into each texture's mip. One pixel
+// in 64 writes, on a pattern that moves each frame, keeping the finest; a write lost to a race comes back on a later frame.
+void DCLFTextureFeedback(float2 a_uv, uint2 a_pixel)
 {
+	const float2 dx = ddx(a_uv), dy = ddy(a_uv);
+	const uint frame = SharedData::FrameCount;
+	if (((a_pixel.x + frame) & 7u) != 0u || ((a_pixel.y + (frame >> 3)) & 7u) != 0u)
+		return;
+	// MaterialRowHeader (DrawPipelines.h, at kMaterialRowHeader 768): the animated row, the slot, the buffer's ref.
+#		if defined(DCLF_PULLED)
+	const DeviceRef row = DCLFMaterialRowAddress;
+#		else
+	const DeviceRef row = DCLFMaterialRowRef(DCLFMaterialRowAddress);  // the push data's is the layout's device address
+#		endif
+	const uint3 feedback = DeviceLoad(uint3, DeviceRefAdd(row, 768 + 4), 4);
+	const DeviceRef buffer = feedback.yz;
+	// Two tests: HLSL 2018's || does not short-circuit, so one condition would load through the null ref.
+	if (DeviceRefIsNull(buffer))
+		return;
+	if (DeviceLoad(uint, buffer, 4) == 0)
+		return;
+	const float major = max(dot(dx, dx), dot(dy, dy)), minor = min(dot(dx, dx), dot(dy, dy));
+	// Anisotropic filtering reads the mip of the minor axis, within its ratio (16).
+	const float footprint = 0.5 * log2(max(max(minor, major / 256.0), 1e-16)) + SharedData::MipBias;
+	const uint value = uint(max(footprint + 32.0, 0.0) * 256.0);
+	const DeviceRef word = DeviceRefAdd(buffer, 4 * (feedback.x + 1));
+	if (value < DeviceLoad(uint, word, 4))
+		DeviceStore(uint, word, value, 4);
+}
+#	endif
+
+#	if defined(DCLF_PULLED)
+PS_OUTPUT DCLFShadePS(PS_INPUT input, bool frontFace)
+#	else
+#		if defined(DCLF_OWNED_PARITY) || DCLF_WRITES_TEX_FEEDBACK
+// The parity write below must be the visible fragment's: the colour pass tests EQUAL and writes no depth, so testing first
+// changes nothing else. So must texture streaming's feedback: occluded surfaces ask for nothing. Its stage has no alpha test (a
+// draw that writes depth here would otherwise write it for a fragment it then discards).
+[earlydepthstencil]
+#		endif
+PS_OUTPUT main(PS_INPUT input, bool frontFace : SV_IsFrontFace)
+#	endif
+{
+#	if defined(DEVICE_REF_TRACE)
+	DEVICE_REF_TRACE_SAMPLE((uint(input.Position.x) & 7u) | ((uint(input.Position.y) & 7u) << 3));  // CS_DCLF_REF_TRACE: a pixel in 64
+#	endif
 	PS_OUTPUT psout;
 
 	float3 viewPosition = mul(FrameBuffer::CameraView, float4(input.WorldPosition.xyz, 1)).xyz;
@@ -1103,6 +2012,9 @@ PS_OUTPUT main(PS_INPUT input, bool frontFace : SV_IsFrontFace)
 
 	float2 uv = input.TexCoord0.xy;
 	float2 uvOriginal = uv;
+#	if DCLF_WRITES_TEX_FEEDBACK
+	DCLFTextureFeedback(uv, uint2(input.Position.xy));
+#	endif
 
 	// Lattice cell comes from the geometric UV, before the parallax block below rewrites uv.
 #	if !defined(LANDSCAPE) && (defined(TERRAIN_VARIATION_MESH) || defined(EMAT))
@@ -1838,8 +2750,15 @@ PS_OUTPUT main(PS_INPUT input, bool frontFace : SV_IsFrontFace)
 	}
 #	endif
 
+#	if defined(DCLF_POINT_LIGHTS)
+	// The draw's lights, picked from the frame's table by its shadow mask and bound (Common/DCLFPointLights.hlsli).
+	const DCLFPointLightSelection dclfPointLights = DCLFSelectPointLights(DCLFShadowLightMask(), DCLFPlacements[DCLFObjectIndex].Bound);
+	uint numLights = dclfPointLights.Count;
+	uint numShadowLights = dclfPointLights.ShadowCount;
+#	else
 	uint numLights = min(7, uint(NumLightNumShadowLight.x));
 	uint numShadowLights = min(4, uint(NumLightNumShadowLight.y));
+#	endif
 
 #	if defined(MODELSPACENORMALS) && !defined(SKINNED)
 	float3 worldNormal = normal.xyz;
@@ -1915,7 +2834,7 @@ PS_OUTPUT main(PS_INPUT input, bool frontFace : SV_IsFrontFace)
 
 	float2 baseShadowUV = 1.0.xx;
 	float4 shadowColor = 1.0;
-	if ((Permutation::PixelShaderDescriptor & Permutation::LightingFlags::DefShadow) && ((Permutation::PixelShaderDescriptor & Permutation::LightingFlags::ShadowDir) || inWorld) || numShadowLights > 0) {
+	if ((PixelDescriptor() & Permutation::LightingFlags::DefShadow) && ((PixelDescriptor() & Permutation::LightingFlags::ShadowDir) || inWorld) || numShadowLights > 0) {
 		baseShadowUV = input.Position.xy * FrameBuffer::DynamicResolutionParams2.xy;
 		float2 adjustedShadowUV = baseShadowUV * VPOSOffset.xy + VPOSOffset.zw;
 		float2 shadowUV = FrameBuffer::GetDynamicResolutionAdjustedScreenPosition(adjustedShadowUV);
@@ -1930,7 +2849,13 @@ PS_OUTPUT main(PS_INPUT input, bool frontFace : SV_IsFrontFace)
 	float3 projWorldPos = input.WorldPosition.xyz + FrameBuffer::CameraPosAdjust.xyz;
 	float3 triFaceNormal = normalize(-cross(ddx(input.WorldPosition.xyz), ddy(input.WorldPosition.xyz)));
 	float3 triWeights = Triplanar::GetWeights(tbnTr[2], triFaceNormal);
+#		if defined(DCLF_BINDLESS)
+	float projNoise = (Permutation::PixelShaderDescriptor & Permutation::LightingFlags::CharacterLight) ?
+	                      Triplanar::Sample(DCLFCharacterLightNoise, SampCharacterLightProjNoiseSampler, projWorldPos, triWeights, ProjectedUVParams.z).x :
+	                      Triplanar::Sample(TexCharacterLightProjNoiseSampler, SampCharacterLightProjNoiseSampler, projWorldPos, triWeights, ProjectedUVParams.z).x;
+#		else
 	float projNoise = Triplanar::Sample(TexCharacterLightProjNoiseSampler, SampCharacterLightProjNoiseSampler, projWorldPos, triWeights, ProjectedUVParams.z).x;
+#		endif
 	float3 texProj = normalize(input.TexProj);
 #		if defined(TREE_ANIM) || defined(LODOBJECTSHD)
 	float vertexAlpha = 1;
@@ -2018,6 +2943,11 @@ PS_OUTPUT main(PS_INPUT input, bool frontFace : SV_IsFrontFace)
 	baseColor.xyz = GetWorldMapBaseColor(sampledBaseColor.xyz, baseColor.xyz, projWeight);
 #	endif  // WORLD_MAP
 
+#	if !defined(DCLF_DEPTH_ONLY)
+	// Drawcall Limit Fix's Z-prepass (DCLF_DEPTH_ONLY) needs only the alpha test, and nothing between here
+	// and it changes baseColor.w or discards. Compiling the lighting out here, rather than leaving it to the
+	// optimizer behind the depth-only return, keeps its reads of the per-frame pixel bindings out of the module
+	// even in debug builds (CS_DCLF_SHADER_DEBUG), where DXC keeps them alive for their debug values.
 	float3 localShadowPosition = input.WorldPosition.xyz;
 #	if defined(DEFERRED) && !defined(LANDSCAPE) && defined(TERRAIN_BLENDING_OBJECTS)
 	// Terrain Blending fades terrain over the part of an object below the terrain surface, where the scene
@@ -2481,7 +3411,7 @@ PS_OUTPUT main(PS_INPUT input, bool frontFace : SV_IsFrontFace)
 	float dirDetailedShadow = 1.0;
 	float dirTransmissionContactShadow = 1.0;
 
-	if ((Permutation::PixelShaderDescriptor & Permutation::LightingFlags::DefShadow) && (Permutation::PixelShaderDescriptor & Permutation::LightingFlags::ShadowDir)) {
+	if ((PixelDescriptor() & Permutation::LightingFlags::DefShadow) && (PixelDescriptor() & Permutation::LightingFlags::ShadowDir)) {
 		dirDetailedShadow *= shadowColor.x;
 
 #	if !defined(VOLUMETRIC_SHADOWS)
@@ -2628,9 +3558,22 @@ PS_OUTPUT main(PS_INPUT input, bool frontFace : SV_IsFrontFace)
 #		if !defined(LIGHT_LIMIT_FIX)
 	[loop] for (uint lightIndex = 0; lightIndex < numLights; lightIndex++)
 	{
-		float3 lightDirection = PointLightPosition[lightIndex].xyz - input.WorldPosition.xyz;
+		// The light's position relative to the eye with its radius in w, its colour, and its shadow mask channel.
+#			if defined(DCLF_POINT_LIGHTS)
+		// The table's positions are absolute, as the object rows: relative to the drawing view's eye, as WorldPosition.
+		const DCLFPointLight dclfPointLight = DCLFPointLightTable[DCLFPointLightIndex(dclfPointLights, lightIndex)];
+		const float4 lightPositionRadius = float4(dclfPointLight.PositionRadius.xyz - FrameBuffer::CameraPosAdjust.xyz, dclfPointLight.PositionRadius.w);
+		const float3 lightSourceColor = dclfPointLight.Color;
+		const uint lightMaskSelect = (dclfPointLight.Flags & kDCLFPointLightShadowChannel) - 1;
+#			else
+		const float4 lightPositionRadius = PointLightPosition[lightIndex];
+		const float3 lightSourceColor = PointLightColor[lightIndex].xyz;
+		const uint lightMaskSelect = ShadowLightMaskSelect[lightIndex];
+#			endif
+
+		float3 lightDirection = lightPositionRadius.xyz - input.WorldPosition.xyz;
 		float lightDist = length(lightDirection);
-		float intensityFactor = saturate(lightDist / PointLightPosition[lightIndex].w);
+		float intensityFactor = saturate(lightDist / lightPositionRadius.w);
 		if (intensityFactor == 1)
 			continue;
 
@@ -2638,11 +3581,11 @@ PS_OUTPUT main(PS_INPUT input, bool frontFace : SV_IsFrontFace)
 #			if defined(ENABLE_LL)
 		intensityMultiplier = pow(intensityMultiplier, TransferFunctions::GAME_GAMMA);
 #			endif
-		float3 lightColor = Color::PointLight(PointLightColor[lightIndex].xyz) * intensityMultiplier;
+		float3 lightColor = Color::PointLight(lightSourceColor) * intensityMultiplier;
 		float lightShadow = 1.f;
-		if (Permutation::PixelShaderDescriptor & Permutation::LightingFlags::DefShadow) {
+		if (PixelDescriptor() & Permutation::LightingFlags::DefShadow) {
 			if (lightIndex < numShadowLights) {
-				lightShadow *= shadowColor[ShadowLightMaskSelect[lightIndex]];
+				lightShadow *= shadowColor[lightMaskSelect];
 			}
 		}
 
@@ -2741,7 +3684,7 @@ PS_OUTPUT main(PS_INPUT input, bool frontFace : SV_IsFrontFace)
 			shadowComponent = LightLimitFix::GetLocalShadow(LinearSampler, light.localShadowIndex, localShadowPosition, localShadowEye, normalizedLightDirection, localShadowSkinned, screenNoise);
 			lightShadow *= shadowComponent;
 		}
-		else if (Permutation::PixelShaderDescriptor & Permutation::LightingFlags::DefShadow)
+		else if (PixelDescriptor() & Permutation::LightingFlags::DefShadow)
 		{
 			if (light.lightFlags & LightLimitFix::LightFlags::Shadow) {
 				shadowComponent = shadowColor[light.shadowLightIndex];
@@ -3100,6 +4043,9 @@ PS_OUTPUT main(PS_INPUT input, bool frontFace : SV_IsFrontFace)
 
 	directionalAmbientColor *= outputAlbedo;
 
+#	if defined(DCLF_SHADOW_DEBUG)
+	float dbgBeforeSky = dot(color.xyz, float3(0.2126, 0.7152, 0.0722));
+#	endif
 #	if defined(SKYLIGHTING)
 	float3 skylightingAlbedo = outputAlbedo;
 #		if defined(TRUE_PBR)
@@ -3217,6 +4163,8 @@ PS_OUTPUT main(PS_INPUT input, bool frontFace : SV_IsFrontFace)
 	color.xyz = 0;
 #	endif
 
+#	endif  // !DCLF_DEPTH_ONLY
+
 #	if defined(LANDSCAPE) && !defined(LOD_LAND_BLEND)
 	psout.Diffuse.w = 0;
 #	else
@@ -3283,7 +4231,8 @@ PS_OUTPUT main(PS_INPUT input, bool frontFace : SV_IsFrontFace)
 #			endif      // DO_ALPHA_TEST
 #		endif
 
-#		if defined(ANISOTROPIC_ALPHA)
+#		if !defined(DCLF_DEPTH_ONLY)
+#			if defined(ANISOTROPIC_ALPHA)
 	// Uniform alpha material settings
 	uint AlphaMaterialModel = ExtendedTranslucency::GetMaterialModelFromDescriptor(Permutation::ExtraFeatureDescriptor);
 	float AlphaMaterialReduction = 0.f;
@@ -3322,10 +4271,13 @@ PS_OUTPUT main(PS_INPUT input, bool frontFace : SV_IsFrontFace)
 			alpha = lerp(alpha, originalAlpha, AlphaMaterialStrength);
 		}
 	}
-#		endif  // ANISOTROPIC_ALPHA
+#			endif  // ANISOTROPIC_ALPHA
 
 	psout.Diffuse.w = alpha;
+#		endif  // !DCLF_DEPTH_ONLY
 #	endif
+
+#	if !defined(DCLF_DEPTH_ONLY)
 
 #	if defined(LIGHT_LIMIT_FIX) && defined(LLFDEBUG)
 	if (SharedData::lightLimitFixSettings.EnableLightsVisualisation) {
@@ -3395,7 +4347,13 @@ PS_OUTPUT main(PS_INPUT input, bool frontFace : SV_IsFrontFace)
 	if (skinEnabled)
 		skinSSSAmount *= skinData.sssParams.z;
 #			endif
-	psout.Masks = float4(saturate(skinSSSAmount), !(Permutation::ExtraShaderDescriptor & Permutation::ExtraFlags::IsBeastRace), masksZ, psout.Diffuse.w);
+#			if defined(DCLF_BINDLESS)
+	// Drawcall Limit Fix: per actor, from the object record (the permutation is the pipeline's).
+	const bool beastRace = (DCLFObjects[DCLFObjectIndex].DCLFRecordFlags & 1u) != 0;
+#			else
+	const bool beastRace = (Permutation::ExtraShaderDescriptor & Permutation::ExtraFlags::IsBeastRace) != 0;
+#			endif
+	psout.Masks = float4(saturate(skinSSSAmount), !beastRace, masksZ, psout.Diffuse.w);
 #		else
 	psout.Masks = float4(0, 0, masksZ, psout.Diffuse.w);
 #		endif
@@ -3423,12 +4381,20 @@ PS_OUTPUT main(PS_INPUT input, bool frontFace : SV_IsFrontFace)
 	float4 normalAndSSR;
 	normalAndSSR.xy = ssrNormal.xy + 0.5.xx;
 	normalAndSSR.z = 0.0;
-	normalAndSSR.w = SSRParams.w * smoothstep(SSRParams.x - 1e-5, SSRParams.y, normal.w);
+	normalAndSSR.w = DCLF_SSR_SPECULAR * smoothstep(SSRParams.x - 1e-5, SSRParams.y, normal.w);
 
 	const bool outputColorToAuxiliaryTarget = SSRParams.z > 1e-5;
 	psout.NormalGlossiness = outputColorToAuxiliaryTarget ? psout.Diffuse : normalAndSSR;
 	psout.MotionVectors = outputColorToAuxiliaryTarget ? float4(1, 0, 0, 1) : float4(screenMotionVector, 0, 1);
 #	endif
+
+#		if defined(DCLF_SHADOW_DEBUG) && defined(DEFERRED)
+	// [TEMP] Native and DCLF alike: the sun's shadow terms in place of the colour, read back with CS_DCLF_TARGET_PROBE
+	// (dclf-validation.md, "Shader debug output (`CS_DCLF_SHADOW_DEBUG_OUTPUT`)"): x the VSM soft shadow, y its detailed term, z the detailed
+	// shadow the lighting uses.
+	psout.Diffuse = float4(dirSoftShadow, dirVSMDetailedShadow, dirDetailedShadow, 1);
+#		endif
+#	endif  // !DCLF_DEPTH_ONLY
 
 #	if defined(EMAT)
 #		undef COMPUTE_TERRAIN_SHADOW_BASE
@@ -3436,13 +4402,126 @@ PS_OUTPUT main(PS_INPUT input, bool frontFace : SV_IsFrontFace)
 #		undef LANDSCAPE_PARALLAX_ENABLED
 #	endif
 
-	psout.Diffuse.rgb = PreExposure::EncodeScene(psout.Diffuse.rgb);
-#	if defined(DEFERRED)
-	psout.Specular.rgb = PreExposure::EncodeScene(psout.Specular.rgb);
+#	if defined(DCLF_DEPTH_ONLY) && defined(DCLF_OWNED_PARITY)
+	// CS_DCLF_FOLIAGE_PARITY: the fragment the alpha test kept, as its pixel's owner if it is the closest (its depth inverted
+	// above its object): the compare pass checks that the colour pass shaded the owner of each pixel whose depth it is.
+	{
+		const uint2 pixel = uint2(input.Position.xy);
+		if (pixel.x < DCLFFoliageParityFrame.x && pixel.y < DCLFFoliageParityFrame.y) {
+			RWStructuredBuffer<uint64_t> owners = ResourceDescriptorHeap[DCLFFoliageParityFrame.w];
+			// Bit 31: terrain LOD's, counted on its own by the compare pass.
+#		if defined(LODLANDNOISE) || defined(LODLANDSCAPE)
+			const uint ownerTag = 0x80000000u;
+#		else
+			const uint ownerTag = 0;
+#		endif
+			const uint64_t owner = (uint64_t(0xFFFFFFFFu - asuint(input.Position.z)) << 32) | uint64_t(((DCLFObjectIndex + 1) & 0x00FFFFFFu) | ownerTag);
+			InterlockedMax(owners[pixel.y * DCLFFoliageParityFrame.x + pixel.x], owner);
+		}
+	}
+#	endif
+#	if defined(DCLF_DEPTH_ONLY)
+	// Drawcall Limit Fix's Z-prepass builds this permutation with DCLF_DEPTH_ONLY: the pass has no render
+	// targets and only needs the depth, so it keeps the alpha test and nothing else - the lighting before it
+	// and the outputs after it are compiled out (see above). That makes the prepass cheap and, more
+	// importantly, keeps the shader from reading the per-frame pixel-stage bindings: they are not bound
+	// while the native depth pass runs.
+	return (PS_OUTPUT)0;
 #	else
+	psout.Diffuse.rgb = PreExposure::EncodeScene(psout.Diffuse.rgb);
+#		if defined(DEFERRED)
+	psout.Specular.rgb = PreExposure::EncodeScene(psout.Specular.rgb);
+#		else
 	if (outputColorToAuxiliaryTarget)
 		psout.NormalGlossiness.rgb = PreExposure::EncodeScene(psout.NormalGlossiness.rgb);
-#	endif
+#		endif
+#		if defined(DCLF_OWNED_PARITY)
+	// CS_DCLF_FOLIAGE_PARITY: what this pixel shows of the object, for the compare pass (FoliageParityCS.hlsl).
+	{
+		const uint2 pixel = uint2(input.Position.xy);
+		if (pixel.x < DCLFFoliageParityFrame.x && pixel.y < DCLFFoliageParityFrame.y) {
+			const uint index = pixel.y * DCLFFoliageParityFrame.x + pixel.x;
+			const DeviceRef ids = DCLFFoliageParityBuffers.xy;
+			const DeviceRef colours = DCLFFoliageParityBuffers.zw;
+#			if defined(DEFERRED)
+			const uint4 albedo = uint4(round(saturate(psout.Albedo) * 255.0));
+#			else
+			const uint4 albedo = uint4(round(saturate(psout.Diffuse) * 255.0));
+#			endif
+			const uint4 diffuse = uint4(round(saturate(psout.Diffuse) * 255.0));
+			DeviceStore(uint, DeviceRefAdd(ids, index * 4), (DCLFFoliageParityFrame.z << 24) | ((DCLFObjectIndex + 1) & 0x00FFFFFFu));
+			// The motion vector against a static object's: the same point where the camera saw it the frame before (its absolute
+			// position, from this frame's eye, made relative to the frame before's). In pixels, with the motion vector itself.
+			float2 motionError = 0;
+#			if !defined(SKINNED)
+			const float4 staticPrevious = float4(input.WorldPosition.xyz + FrameBuffer::CameraPosAdjust.xyz - FrameBuffer::CameraPreviousPosAdjust.xyz, 1);
+			const float2 renderSize = float2(DCLFFoliageParityFrame.xy);
+			motionError = (psout.MotionVectors.xy - MotionBlur::GetSSMotionVector(input.WorldPosition, staticPrevious)) * renderSize;
+#			endif
+			const float2 motion = psout.MotionVectors.xy * float2(DCLFFoliageParityFrame.xy);
+			// The albedo's alpha byte carries the motion error's length (tenths of a pixel); the specular is the pass's.
+			const uint error = uint(min(round(length(motionError) * 10.0), 255.0));
+#			if defined(DEFERRED)
+			const uint4 specular = uint4(round(saturate(psout.Specular) * 255.0));
+#			else
+			const uint4 specular = 0;
+#			endif
+			DeviceStore(uint4, DeviceRefAdd(colours, index * 16),
+				uint4(albedo.x | (albedo.y << 8) | (albedo.z << 16) | (error << 24), diffuse.x | (diffuse.y << 8) | (diffuse.z << 16) | (diffuse.w << 24),
+					specular.x | (specular.y << 8) | (specular.z << 16) | (specular.w << 24), f32tof16(motion.x) | (f32tof16(motion.y) << 16)));
+		}
+	}
+#		endif
 	return psout;
+#	endif
 }
+#	if defined(DCLF_PULLED)
+// The draw's rows (refs, from its sequence's: the pipeline row's, then the material row's), and the blocks the pulled source reads
+// from them (ShaderPrograms.cpp, PulledLightingSource), before anything reads them.
+void DCLFRowStatics(uint4 a_rows)
+{
+	DCLFPipelineRowAddress = a_rows.xy;
+	DCLFMaterialRowAddress = a_rows.zw;
+	DCLFPerTechniqueStatics();
+	DCLFPerMaterialStatics();
+	DCLFPerGeometryStatics();
+	DCLFPermutationStatics();
+}
+
+// The object's values the DCLF_BINDLESS build's statics hold, assigned once this draw's object word is known.
+void DCLFPixelObjectStatics()
+{
+#		if defined(DCLF_BINDLESS)
+	const DCLFPixelObjectRow row = DCLF_PIXEL_ROW;
+	MaterialData = DCLFPixelMaterialData(row);
+	EmitColor = row.EmitColorSSR.xyz;
+	DCLFSSRSpecular = row.EmitColorSSR.w;
+	ProjectedUVParams = DCLFExtras[DCLFObjects[DCLFObjectIndex].DCLFExtraOffset + 4];
+	ProjectedUVParams2 = DCLFExtras[DCLFObjects[DCLFObjectIndex].DCLFExtraOffset + 5];
+	ProjectedUVParams3 = DCLFExtrasProjectedGlobals;
+#			if defined(DCLF_BINDLESS_DRAW)
+	AlphaTestRefRS = row.AlphaTestRef;
+#			endif
+#		endif
+}
+
+// Drawcall Limit Fix's plain draws (DCLF_PULLED): the draw's object word and rows are its sequence's, as its vertex stage read them.
+// Keyed on a wave-uniform instance as the vertex stage's main is, so the rows, the statics and every texture's and sampler's descriptor
+// index (the material row's, read where used) are the draw's. A quad's four lanes are one primitive's, so one draw's: they take the
+// same pass, helper lanes with them, and their derivatives hold.
+#		if DCLF_WRITES_TEX_FEEDBACK
+[earlydepthstencil]
+#		endif
+PS_OUTPUT main(PS_INPUT input, bool frontFace : SV_IsFrontFace)
+{
+#		if defined(DEVICE_REF_TRACE)
+	DEVICE_REF_TRACE_SAMPLE((uint(input.Position.x) & 7u) | ((uint(input.Position.y) & 7u) << 3));  // CS_DCLF_REF_TRACE: a pixel in 64
+#		endif
+	const DeviceRef sequence = DCLFDrawSequence(input.DCLFDrawInstance);
+	DCLFObjectWord = DCLFSequenceObjectWord(sequence);
+	DCLFRowStatics(DCLFSequenceRows(sequence));
+	DCLFPixelObjectStatics();
+	return DCLFShadePS(input, frontFace);
+}
+#	endif  // DCLF_PULLED
 #endif  // PSHADER

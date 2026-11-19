@@ -1,7 +1,106 @@
 // SPDX-License-Identifier: MIT AND (LicenseRef-GPL-3.0-with-Modding-Exception WITH GPL-3.0-linking-source-exception)
 // Original code Copyright (c) 2022 Ilya Perapechka (MIT), modifications GPL-3.0 with Modding Exception (see EXCEPTIONS.md)
 
+#if defined(CS_ORG_BINDLESS) && !defined(DCLF_BINDLESS)
+// The ORG build of the engine's Effect draws, drawn by Drawcall Limit Fix's menu scenes family
+// (Features/DrawcallLimitFix/Features/MenuViews): a menu model's glow and the main menu's mist. A draw's engine constants (both
+// stages' PerTechnique, PerMaterial and PerGeometry, the alpha test reference), CS's permutation block, its textures' and samplers'
+// heap indices and its geometry are one latch region; a skinned draw's palettes are another (Common/Skinned.hlsli). FrameBuffer
+// (the engine's VS_PerFrame), SharedData and FeatureData are the shared constants. The world's CS features are off, as in
+// Lighting.hlsl's ORG build.
+#	define EFFECT_ORG
+#	undef LIGHT_LIMIT_FIX
+#	undef SKYLIGHTING
+#	undef IBL
+#	undef DYNAMIC_CUBEMAPS
+#	undef CLOUD_SHADOWS
+#	undef TERRAIN_SHADOWS
+#	undef VOLUMETRIC_SHADOWS
+#	undef SCREEN_SPACE_SHADOWS
+#	undef EXP_HEIGHT_FOG
+#	undef WETNESS_EFFECTS
+#	undef CS_HAIR
+#	undef CS_SKIN
+#	define ORG_SHARED_CONSTANTS
+#	define ORG_HEADER_RESOURCES
+#	define ORG_LATCHED_BONES
+#	define ORG_LATCHED_PERMUTATION EffectDraw
+#	include "Common/OrgResources.hlsli"
+
+// A draw's latched values (EffectSceneConstants in Features/DrawcallLimitFix/Features/MenuViews/MenuScenes.h).
+struct EffectOrgDraw
+{
+	float4 VSTechnique[3];  // VS b0: FogParam, FogNearColor, FogFarColor
+	float4 VSMaterial[3];   // VS b1: TexcoordOffset, SoftMateralVSParams, FalloffData
+	float4 VSGeometry[15];  // VS b2: World, PreviousWorld, MatProj, EyePosition (c12), PosAdjust, TexcoordOffsetMembrane
+	float4 PSTechnique[2];  // PS b0: CameraDataEffect, VPOSOffset and FilteringParam
+	float4 PSMaterial[3];   // PS b1: BaseColor, BaseColorScale, LightingInfluence
+	float4 PSGeometry[12];  // PS b2
+	uint4 Descriptors;      // CS's permutation block: vertex, pixel, extra and extra feature descriptors
+	float EffectRadius;
+	uint BaseTextureIsWorking;
+	uint RenderToUI;
+	float AlphaTestRefRS;  // b11
+	uint VertexStride;
+	uint FirstIndex;
+	uint NullTexture;
+	uint StreamStride;  // a DrawData copy's stream 1 (the dynamic ring), with StreamAddress; 0 for a static draw
+	uint4 Textures[2];  // t0-t7 heap indices
+	uint4 Samplers[2];  // s0-s7 sampler heap indices
+	uint2 VertexAddress;
+	uint2 IndexAddress;
+	uint2 VertexLayout;
+	uint2 StreamAddress;
+};
+// A TEXCOORD_INDEX draw's indexed texture coordinates (b11, 128 rows) follow its EffectOrgDraw (752 bytes) in the latch.
+#	define EFFECT_ORG_INDEXED_TEXCOORDS 752
+
+// The draw's FrameBuffer rows (b12, c0-c44), its matrices transposed (OrgSceneFrame, below).
+struct OrgSceneFrameRows
+{
+	float4 Rows[45];
+};
+
+struct EffectOrgBones
+{
+	float4 Rows[480];
+};
+
+#	define EFFECT_ORG_RESOURCES(X)                    \
+		X(SHARED, ConstantBuffer, Shared, 0)           \
+		X(LATCH, EffectOrgDraw, EffectDraw, 2)         \
+		X(EXTERN_LATCH, EffectOrgBones, Bones, 9) \
+		X(EXTERN_LATCH, OrgSceneFrameRows, Frame, 12)      \
+		X(UNREAD, Texture2D<float4>, DepthTexture, 17) \
+		X(UNREAD_LATCH, DirectionalShadowLightData, DirectionalShadowLight, 98)
+ORG_PUSH_BLOCK(EFFECT_ORG_RESOURCES(ORG_HANDLE))
+EFFECT_ORG_RESOURCES(ORG_RESOURCE)
+
+// FrameBuffer (the engine's VS_PerFrame, b12) as the draw had it bound, latched with it, its matrices stored transposed: the shared
+// FrameBuffer's ConstantBuffer view, read in this build's vertex stage, made DXC emit invalid SPIR-V (a Function-storage
+// ConstantBuffer). Common/NamespacedCBuffer.hlsli loads it raw from here instead (ORG_SHARED_FRAMEBUFFER_AT).
+struct OrgSceneFrameAt
+{
+	uint FrameSrv;
+	uint FrameOffset;
+};
+static OrgSceneFrameAt OrgSceneFrame = { OrgHandle_Frame, OrgOffset_Frame };
+#	define ORG_SHARED_FRAMEBUFFER_AT OrgSceneFrame
+
+static ByteAddressBuffer OrgBonesBuffer = ResourceDescriptorHeap[OrgHandle_Bones];
+/** @brief Row a_row of palette a_palette (0 previous, 1 current) of the draw's latched bones. */
+float4 OrgBoneRow(uint a_palette, uint a_row)
+{
+	return asfloat(OrgBonesBuffer.Load4(OrgOffset_Bones + (a_palette * 240 + a_row) * 16));
+}
+
+#	define DCLF_PULLED_VERTICES
+#	include "Common/DCLFVertexPull.hlsli"
+#	undef DCLF_PULLED_VERTICES
+#endif
+
 #include "Common/ColorManagement.hlsli"
+#include "Common/DCLFObjects.hlsli"
 #include "Common/FrameBuffer.hlsli"
 #include "Common/GBuffer.hlsli"
 #include "Common/Math.hlsli"
@@ -21,6 +120,12 @@
 
 #if !defined(DYNAMIC_CUBEMAPS) && defined(IBL)
 #	undef IBL
+#endif
+
+#if defined(DCLF_BINDLESS) && defined(PARTICLES)
+// Drawcall Limit Fix (T7e; ParticleSnapshots.h): a particle system's quads are pulled from its block of the frame's palettes by the vertex's
+// index in the renderer's quad index list (DCLFParticleInput), each particle's subtexture rect resolved: no vertex stream, no IndexedTexCoord.
+#	define DCLF_PARTICLE_PULL
 #endif
 
 #if defined(VSHADER)
@@ -94,27 +199,76 @@ struct VS_OUTPUT
 	float3 ScreenSpaceNormal: TEXCOORD7;
 #	endif
 #endif
+#if defined(DCLF_PULLED)
+	// Drawcall Limit Fix's plain draws (DCLF_PULLED; Lighting.hlsl's): the draw's instance, by which the pixel stage reads its sequence.
+	nointerpolation uint DCLFDrawInstance: TEXCOORD15;
+#endif
 };
 
 #ifdef VSHADER
+#	if defined(EFFECT_ORG)
+// The vertex stage's constants, from the draw's latch (EffectOrgDraw) and the shared FrameBuffer (VS_PerFrame is the engine's b12).
+static row_major float4x4 ScreenProj = FrameBuffer::CameraView;
+static row_major float4x4 ViewProj = FrameBuffer::CameraViewProj;
+static float3 BonesPivot = FrameBuffer::CameraPosAdjust.xyz;
+static float3 PreviousBonesPivot = FrameBuffer::CameraPreviousPosAdjust.xyz;
+static float4 FogParam = EffectDraw.VSTechnique[0];
+static float4 FogNearColor = EffectDraw.VSTechnique[1];
+static float4 FogFarColor = EffectDraw.VSTechnique[2];
+static float4 TexcoordOffset = EffectDraw.VSMaterial[0];
+static float4 SoftMateralVSParams = EffectDraw.VSMaterial[1];
+static float4 FalloffData = EffectDraw.VSMaterial[2];
+static row_major float3x4 World = float3x4(EffectDraw.VSGeometry[0], EffectDraw.VSGeometry[1], EffectDraw.VSGeometry[2]);
+static row_major float3x4 PreviousWorld = float3x4(EffectDraw.VSGeometry[3], EffectDraw.VSGeometry[4], EffectDraw.VSGeometry[5]);
+static float4 MatProj[3] = { EffectDraw.VSGeometry[6], EffectDraw.VSGeometry[7], EffectDraw.VSGeometry[8] };
+static float4 EyePosition = EffectDraw.VSGeometry[12];
+static float4 PosAdjust = EffectDraw.VSGeometry[13];
+static float4 TexcoordOffsetMembrane = EffectDraw.VSGeometry[14];
+// The indexed texture coordinates (b11) follow the draw's latched values. A vertex loads the row it names from the latch.
+// A static array written and read at a per-vertex index lives in scratch memory on AMD.
+float4 EffectIndexedTexCoord(uint a_index)
+{
+	return asfloat(OrgLatch_EffectDraw.Load4(OrgOffset_EffectDraw + EFFECT_ORG_INDEXED_TEXCOORDS + min(a_index, 127u) * 16));
+}
+#	else
+#	if defined(__hlsl_dx_compiler) && !defined(__spirv__)
+// DXIL refuses two blocks at one register, and FrameBuffer's PerFrame is b12 too (SPIR-V lets both read the frame's VS b12). Space 1
+// keeps it apart; DCLF's D3D12 builds read both as VS b12 (DrawcallLimitFix FrameSource, DxilReflection).
+cbuffer VS_PerFrame : register(b12, space1)
+#	else
 cbuffer VS_PerFrame : register(b12)
+#	endif
 {
 	row_major float4x4 ScreenProj : packoffset(c0);
 	row_major float4x4 ViewProj : packoffset(c8);
-#	if defined(SKINNED)
+#	if defined(SKINNED) || defined(DCLF_BINDLESS)
+	// posAdjust and its previous value: the skinning pivot, and under DCLF_BINDLESS also the eye the absolute placement rows are made
+	// relative to (as Lighting.hlsl's).
 	float3 BonesPivot : packoffset(c40);
-#		if defined(MOTIONVECTORS_NORMALS)
+#		if defined(MOTIONVECTORS_NORMALS) || defined(DCLF_BINDLESS)
 	float3 PreviousBonesPivot : packoffset(c41);
-#		endif  // MOTIONVECTORS_NORMALS
-#	endif      // SKINNED
+#		endif  // MOTIONVECTORS_NORMALS || DCLF_BINDLESS
+#	endif      // SKINNED || DCLF_BINDLESS
 };
 
+#	if defined(DCLF_BINDLESS)
+// Drawcall Limit Fix's draws (T7d's Effect port: dclf-architecture.md, "The Effect shader in the forward epoch"): the fog is the
+// frame's, the same block every DCLF_BINDLESS draw reads (Lighting.hlsl, DCLFFrameFog: SetupTechnique writes the effect's fog exactly
+// as the Lighting technique's), so no pipeline row holds it.
+cbuffer DCLFFrameFog : register(b13)
+{
+	float4 FogParam : packoffset(c0);
+	float4 FogNearColor : packoffset(c1);
+	float4 FogFarColor : packoffset(c2);
+};
+#	else
 cbuffer PerTechnique : register(b0)
 {
 	float4 FogParam : packoffset(c0);
 	float4 FogNearColor : packoffset(c1);
 	float4 FogFarColor : packoffset(c2);
 };
+#	endif  // DCLF_BINDLESS
 
 cbuffer PerMaterial : register(b1)
 {
@@ -125,18 +279,86 @@ cbuffer PerMaterial : register(b1)
 
 cbuffer PerGeometry : register(b2)
 {
+#	if !defined(DCLF_BINDLESS)
 	row_major float3x4 World : packoffset(c0);
 	row_major float3x4 PreviousWorld : packoffset(c3);
+#	endif  // !DCLF_BINDLESS
 	float4 MatProj[3] : packoffset(c6);
 	float4 EyePosition : packoffset(c12);
 	float4 PosAdjust : packoffset(c13);
 	float4 TexcoordOffsetMembrane : packoffset(c14);
 }
 
+#	if !defined(DCLF_PARTICLE_PULL)
 cbuffer IndexedTexcoordBuffer : register(b11)
 {
 	float4 IndexedTexCoord[128] : packoffset(c0);
 }
+
+float4 EffectIndexedTexCoord(uint a_index)
+{
+	return IndexedTexCoord[a_index];
+}
+#	endif  // !DCLF_PARTICLE_PULL
+#	endif  // EFFECT_ORG
+
+#	if defined(DCLF_BINDLESS)
+// World and PreviousWorld are the object's placement row's (absolute), made relative to this draw's eye and previous eye, the
+// subtraction SetupGeometry does on the CPU for the engine's own draws (Lighting.hlsl, DCLF_VS_WORLD).
+// CS_DCLF_BILLBOARDS (Billboards.h): a billboard's row is its unturned world and its node's base and pivot, turned here to this
+// draw's camera as NiBillboardNode::OnVisible turns the node for the culling camera (DCLFObjects.hlsli, DCLFBillboardWorld): the camera's
+// axes are CameraView's rows (c0-c2, as SetCameraData copies the camera's world rotation: right, up, forward) and its eye the posAdjust
+// above. Its previous world is the same turn (the row holds no previous base): no motion of its own. The turn comes back relative to the
+// eye, and the previous world moves it by the eye's change, so neither passes through an absolute position.
+#		if defined(DCLF_PULLED)
+// A plain draw's object word is its sequence's, which main reads first: these are assigned there (DCLFVertexObjectStatics).
+static bool DCLFBillboard;
+#		else
+static const bool DCLFBillboard = (DCLFObjects[DCLFObjectIndex].DCLFRecordFlags & kDCLFRecordEffectBillboard) != 0;
+#		endif
+// The billboard's turned world for this draw's camera, relative to its eye.
+float3x4 DCLFEffectBillboardWorld() { return DCLFBillboardWorld(DCLFObjectIndex, ScreenProj[2].xyz, ScreenProj[1].xyz, ScreenProj[0].xyz, BonesPivot); }
+float3x4 DCLFEyeRelative(float3x4 a_world, float3 a_eye)
+{
+	return float3x4(a_world[0] - float4(0, 0, 0, a_eye.x), a_world[1] - float4(0, 0, 0, a_eye.y), a_world[2] - float4(0, 0, 0, a_eye.z));
+}
+// The placement's World or PreviousWorld (absolute).
+float3x4 DCLFPlacementWorld(bool a_previous)
+{
+	const DCLFPlacement placement = DCLFPlacements[DCLFObjectIndex];
+	return a_previous ? float3x4(placement.PreviousWorld[0], placement.PreviousWorld[1], placement.PreviousWorld[2]) :
+	                    float3x4(placement.World[0], placement.World[1], placement.World[2]);
+}
+float3x4 DCLFEffectWorld(bool a_previous)
+{
+	const float3 eye = a_previous ? PreviousBonesPivot : BonesPivot;
+	if (DCLFBillboard) {
+		const float3x4 world = DCLFEffectBillboardWorld();
+		return a_previous ? DCLFEyeRelative(world, PreviousBonesPivot - BonesPivot) : world;
+	}
+	return DCLFEyeRelative(DCLFPlacementWorld(a_previous), eye);
+}
+#		if defined(DCLF_PULLED)
+static precise float3x4 World;
+static precise float3x4 PreviousWorld;
+void DCLFVertexObjectStatics()
+{
+	DCLFBillboard = (DCLFObjects[DCLFObjectIndex].DCLFRecordFlags & kDCLFRecordEffectBillboard) != 0;
+	if (DCLFBillboard) {
+		// One turn for both (DCLFEffectWorld's), already relative to the eye.
+		const float3x4 world = DCLFEffectBillboardWorld();
+		World = world;
+		PreviousWorld = DCLFEyeRelative(world, PreviousBonesPivot - BonesPivot);
+	} else {
+		World = DCLFEyeRelative(DCLFPlacementWorld(false), BonesPivot);
+		PreviousWorld = DCLFEyeRelative(DCLFPlacementWorld(true), PreviousBonesPivot);
+	}
+}
+#		else
+static precise float3x4 World = DCLFEffectWorld(false);
+static precise float3x4 PreviousWorld = DCLFEffectWorld(true);
+#		endif
+#	endif  // DCLF_BINDLESS
 
 #	if defined(PROJECTED_UV)
 float GetProjectedU(float3 worldPosition, float4 texCoordOffset)
@@ -178,7 +400,48 @@ float GetProjectedV(float3 worldPosition)
 }
 #	endif
 
+#	if defined(DCLF_PARTICLE_PULL)
+struct VS_PARTICLE_INPUT
+{
+	uint VertexID: SV_VertexID;
+};
+
+// The object's block (DCLFBoneOffset; ParticleSnapshots::Expand writes it each frame, five rows a particle, back to front): the particle's
+// four corners - the position relative to the model bound's centre (the placement's translation carries it, as SetupGeometry's World does)
+// and the colour packed as FUN_140e51320 packs it, red lowest - then its subtexture rect, which the engine's vertex stage applies to the
+// corner's texture coordinates from its static stream: (0, 1), (1, 1), (1, 0), (0, 0).
+VS_INPUT DCLFParticleInput(uint a_vertex)
+{
+	const uint quad = a_vertex >> 2;
+	const uint corner = a_vertex & 3;
+	const uint row = DCLFObjects[DCLFObjectIndex].DCLFBoneOffset + quad * 5;
+	const float4 vertex = DCLFPalettes[row + corner];
+	VS_INPUT input = (VS_INPUT)0;
+	input.Position = float4(vertex.xyz, 0);
+#		if defined(TEXCOORD)
+	const float4 rect = DCLFPalettes[row + 4];
+	const float2 corners = float2(corner == 1 || corner == 2 ? 1.0 : 0.0, corner < 2 ? 1.0 : 0.0);
+	input.TexCoord0 = float2(rect.y * corners.x + rect.x, rect.w * corners.y + rect.z);
+#		endif
+#		if defined(VC)
+	// R8G8B8A8_UNORM as the input assembler converts it (DCLFObjects.hlsli's DCLFUnorm4: c / 255 correctly rounded).
+	const uint packed = asuint(vertex.w);
+	precise float4 c = float4(packed & 0xFF, (packed >> 8) & 0xFF, (packed >> 16) & 0xFF, packed >> 24);
+	precise float4 q = c * (1.0 / 255.0);
+	precise float4 r = mad(-q, 255.0, c);
+	input.Color = mad(r, 1.0 / 255.0, q);
+#		endif
+	return input;
+}
+#	endif  // DCLF_PARTICLE_PULL
+
+// Drawcall Limit Fix's builds have no input assembly: main pulls the vertex (DCLFParticleInput; DCLFPulledInput, below) and shades
+// it here.
+#	if defined(DCLF_PARTICLE_PULL) || defined(DCLF_PULLED_VERTICES) || defined(DCLF_PULLED) || defined(EFFECT_ORG)
+VS_OUTPUT DCLFShade(VS_INPUT input)
+#	else
 VS_OUTPUT main(VS_INPUT input)
+#	endif
 {
 	VS_OUTPUT vsout;
 	precise float4 inputPosition = float4(input.Position.xyz, 1.0);
@@ -195,14 +458,26 @@ VS_OUTPUT main(VS_INPUT input)
 
 #	if defined(SKINNED)
 	precise int4 actualIndices = 765.01.xxxx * input.BoneIndices.xyzw;
+	// Drawcall Limit Fix (T7d part 5, skinned effects): the palette rows are the object's in DCLFPalettes, at its record's offsets (as
+	// Lighting.hlsl's SKINNED path under DCLF_BINDLESS), not the bone constant buffers.
 #		if defined(MOTIONVECTORS_NORMALS)
+#			if defined(DCLF_BINDLESS)
+	float3x4 previousBoneTransformMatrix =
+		Skinned::GetBoneTransformMatrixBindless(DCLFObjects[DCLFObjectIndex].DCLFPreviousBoneOffset, actualIndices, PreviousBonesPivot, input.BoneWeights);
+#			else
 	float3x4 previousBoneTransformMatrix =
 		Skinned::GetBoneTransformMatrix(PreviousBones, actualIndices, PreviousBonesPivot, input.BoneWeights);
+#			endif  // DCLF_BINDLESS
 	precise float4 previousWorldPosition =
 		float4(mul(inputPosition, transpose(previousBoneTransformMatrix)), 1);
 #		endif
+#		if defined(DCLF_BINDLESS)
+	float3x4 boneTransformMatrix =
+		Skinned::GetBoneTransformMatrixBindless(DCLFObjects[DCLFObjectIndex].DCLFBoneOffset, actualIndices, BonesPivot, input.BoneWeights);
+#		else
 	float3x4 boneTransformMatrix =
 		Skinned::GetBoneTransformMatrix(Bones, actualIndices, BonesPivot, input.BoneWeights);
+#		endif  // DCLF_BINDLESS
 	precise float4 worldPosition = float4(mul(inputPosition, transpose(boneTransformMatrix)), 1);
 	float4 viewPos = mul(viewProj, worldPosition);
 #	else
@@ -213,9 +488,18 @@ VS_OUTPUT main(VS_INPUT input)
 #	endif
 
 	vsout.Position = viewPos;
+#	if defined(DCLF_BINDLESS)
+	// A decal's depth toward the eye (DCLFObjects.hlsli, DCLFDecalNudged), on top of the pipeline's depth bias.
+	// The view has no translation, so this entry of the matrix is the projection's: about -near.
+	vsout.Position = DCLFDecalNudged(vsout.Position, DCLFObjectIndex, abs(FrameBuffer::CameraViewProj[2][3]));
+#	endif
 
 #	if defined(SKINNED)
+#		if defined(DCLF_BINDLESS)
+	float3x3 boneRSMatrix = Skinned::GetBoneRSMatrixBindless(DCLFObjects[DCLFObjectIndex].DCLFBoneOffset, actualIndices, input.BoneWeights);
+#		else
 	float3x3 boneRSMatrix = Skinned::GetBoneRSMatrix(Bones, actualIndices, input.BoneWeights);
+#		endif  // DCLF_BINDLESS
 	float3x3 boneRSMatrixTr = transpose(boneRSMatrix);
 #	endif
 
@@ -249,7 +533,7 @@ VS_OUTPUT main(VS_INPUT input)
 	float4 texCoordOffset = TexcoordOffset;
 #	endif
 
-#	if defined(TEXCOORD_INDEX)
+#	if defined(TEXCOORD_INDEX) && !defined(DCLF_PARTICLE_PULL)
 #		if defined(NORMALS)
 	uint index = input.TexCoord0.z;
 #		else
@@ -266,8 +550,9 @@ VS_OUTPUT main(VS_INPUT input)
 #	else
 #		if defined(TEXTURE)
 	float u = input.TexCoord0.x;
-#			if defined(TEXCOORD_INDEX)
-	u = IndexedTexCoord[index].y * u + IndexedTexCoord[index].x;
+#			if defined(TEXCOORD_INDEX) && !defined(DCLF_PARTICLE_PULL)
+	const float4 indexedTexCoord = EffectIndexedTexCoord(index);
+	u = indexedTexCoord.y * u + indexedTexCoord.x;
 #			endif
 	texCoord.x = u * texCoordOffset.z + texCoordOffset.x;
 #		endif
@@ -281,8 +566,9 @@ VS_OUTPUT main(VS_INPUT input)
 #	else
 #		if defined(TEXTURE)
 	float v = input.TexCoord0.y;
-#			if defined(TEXCOORD_INDEX)
-	v = IndexedTexCoord[index].w * v + IndexedTexCoord[index].z;
+#			if defined(TEXCOORD_INDEX) && !defined(DCLF_PARTICLE_PULL)
+	const float4 indexedTexCoordV = EffectIndexedTexCoord(index);
+	v = indexedTexCoordV.w * v + indexedTexCoordV.z;
 #			endif
 	texCoord.y = v * texCoordOffset.w + texCoordOffset.y;
 #		endif
@@ -376,9 +662,151 @@ VS_OUTPUT main(VS_INPUT input)
 
 	return vsout;
 }
+
+#	if defined(DCLF_PARTICLE_PULL) && !defined(DCLF_PULLED)
+// A particle system's quads keep priority over the vertex pull below: they have no vertex stream at all.
+VS_OUTPUT main(VS_PARTICLE_INPUT particleInput)
+{
+	return DCLFShade(DCLFParticleInput(particleInput.VertexID));
+}
+#	elif defined(DCLF_PULLED_VERTICES) || defined(DCLF_PULLED) || defined(EFFECT_ORG)
+// Drawcall Limit Fix's device-generated draws (Lighting.hlsl's DCLF_PULLED_VERTICES main): the vertex's attributes loaded from the
+// geometry's buffers in the draw's push data, decoded as the engine's input layout for the draw's vertex layout has them
+// (VertexInput.cpp, BuildVertexElements), the input assembler's defaults where it lacks one.
+// The attributes read here must match the mask the pipelines check the geometry's layout against (ShaderPrograms.cpp,
+// VertexAttributesOf: Effect's).
+VS_INPUT DCLFPulledInput(uint a_index, DCLFStream a_first, DCLFStream a_second)
+{
+	DCLFStreamsAt(a_index, a_first, a_second);
+	VS_INPUT input;
+	input.Position = DCLFPullPosition(a_first, a_second);
+#		if defined(TEXCOORD)
+#			if defined(STRIP_PARTICLES)
+	// R16G16_FLOAT read as three components: the input assembler fills z with 0.
+	input.TexCoord0 = float3(DCLFPullHalf2(1, a_first, a_second), 0);
+#			else
+	input.TexCoord0 = DCLFPullHalf2(1, a_first, a_second);
+#			endif
+#		endif
+#		if defined(NORMALS) || defined(MOTIONVECTORS_NORMALS)
+	input.Normal = DCLFPullUnorm4(3, 0, a_first, a_second);
+#		endif
+#		if defined(BINORMAL_TANGENT)
+	input.Bitangent = DCLFPullUnorm4(4, 0, a_first, a_second);
+#		endif
+#		if defined(VC)
+	input.Color = DCLFPullUnorm4(5, 0, a_first, a_second);
+#		endif
+#		if defined(SKINNED)
+	input.BoneWeights = DCLFPullHalf4(6, a_first, a_second);
+	input.BoneIndices = DCLFPullUnorm4(6, 8, a_first, a_second);
+#		endif
+	return input;
+}
+
+#		if defined(DCLF_PULLED)
+// The permutation block (b4) as the draw's pipeline row holds it (Permutation.hlsli, DCLF_PULLED_ROWS; Lighting.hlsl's).
+void DCLFPermutationStatics()
+{
+	Permutation::VertexShaderDescriptor = DCLFRowUint(DCLFPipelineRowAddress, kDCLFPermutationBlock);
+	Permutation::PixelShaderDescriptor = DCLFRowUint(DCLFPipelineRowAddress, kDCLFPermutationBlock + 4);
+	Permutation::ExtraShaderDescriptor = DCLFRowUint(DCLFPipelineRowAddress, kDCLFPermutationBlock + 8);
+	Permutation::ExtraFeatureDescriptor = DCLFRowUint(DCLFPipelineRowAddress, kDCLFPermutationBlock + 12);
+	Permutation::EffectRadius = DCLFRowFloat(DCLFPipelineRowAddress, kDCLFPermutationBlock + 16);
+}
+
+// Drawcall Limit Fix's plain draws (DCLF_PULLED; ForwardDrawPass): one per pipeline, which cannot push data per draw. So this stage
+// reads its draw's sequence (BuildDrawsCS: DrawSequence, at DCLFSequencesAddress plus its instance's stride), and through it the draw's
+// object word, rows and geometry (Lighting.hlsl's pulled main); a particle system pulls its quads from its object's block. The rows'
+// blocks the pulled source reads (ShaderPrograms.cpp, PulledLightingSource) are assigned first; Effect's PerTechnique is the frame's
+// (DCLFFrameFog).
+VS_OUTPUT DCLFPulledVertex(uint index, uint a_instance)
+{
+	const DeviceRef sequence = DCLFDrawSequence(a_instance);
+	const uint4 rows = DCLFSequenceRows(sequence);  // the pipeline row's ref, the material row's
+	DCLFObjectWord = DCLFSequenceObjectWord(sequence);
+	DCLFPipelineRowAddress = rows.xy;
+	DCLFMaterialRowAddress = rows.zw;
+	DCLFPerMaterialStatics();
+	DCLFPerGeometryStatics();
+	DCLFPermutationStatics();
+	DCLFVertexObjectStatics();
+#			if defined(DCLF_PARTICLE_PULL)
+	VS_OUTPUT vsout = DCLFShade(DCLFParticleInput(index));
+#			else
+	DCLFDrawVertexLayout = DCLFPipelineVertexLayout();
+	const uint4 vertexBuffer = DeviceLoad(uint4, DeviceRefAdd(sequence, 24));  // ref, size, stride
+	const uint4 streamBuffer = DeviceLoad(uint4, DeviceRefAdd(sequence, 40));
+	DCLFStream first, second;
+	first.address = vertexBuffer.xy;
+	first.stride = vertexBuffer.w;
+	second.address = streamBuffer.xy;
+	second.stride = streamBuffer.w;
+	VS_OUTPUT vsout = DCLFShade(DCLFPulledInput(index, first, second));
+#			endif
+	vsout.DCLFDrawInstance = a_instance;
+	return vsout;
+}
+
+// The draw's lookups keyed on a wave-uniform instance (Lighting.hlsl's pulled main): its rows, statics, object and billboard turn are
+// the draw's (scalar), not each lane's.
+VS_OUTPUT main(uint index : SV_VertexID, uint a_instance : SV_InstanceID)
+{
+	VS_OUTPUT vsout;
+	[loop] for (;;) {
+		const uint drawInstance = WaveReadLaneFirst(a_instance);
+		[branch] if (drawInstance == a_instance) {
+			vsout = DCLFPulledVertex(index, drawInstance);
+			break;
+		}
+	}
+	return vsout;
+}
+#		elif defined(EFFECT_ORG)
+// The ORG build's vertex stage: the draw's vertex pulled as the input assembler reads it (its 16-bit index, then its attributes),
+// then the engine's stage (DCLFShade).
+VS_OUTPUT main(uint a_vertexID : SV_VertexID)
+{
+	DCLFDrawVertexLayout = EffectDraw.VertexLayout;
+	const uint indexNumber = EffectDraw.FirstIndex + a_vertexID;
+	const uint indexWord = DeviceLoad(uint, DeviceRefAdd(EffectDraw.IndexAddress, (indexNumber * 2) & ~3u));
+	const uint index = (indexNumber & 1) ? (indexWord >> 16) : (indexWord & 0xFFFF);
+	DCLFStream first = { EffectDraw.VertexAddress, EffectDraw.VertexStride };
+	DCLFStream second = { EffectDraw.StreamAddress, EffectDraw.StreamStride };
+	const VS_INPUT input = DCLFPulledInput(index, first, second);
+	return DCLFShade(input);
+}
+#		else
+VS_OUTPUT main(uint index : SV_VertexID)
+{
+	DCLFDrawVertexLayout = DCLFPushedVertexLayout();
+	DCLFStream first, second;
+	first.address = DCLFVertexBuffer.xy;
+	first.stride = DCLFVertexStride;
+	second.address = DCLFStreamBuffer.xy;
+	second.stride = DCLFStreamStride;
+	return DCLFShade(DCLFPulledInput(index, first, second));
+}
+#		endif  // DCLF_PULLED
+#	endif  // DCLF_PARTICLE_PULL, DCLF_PULLED_VERTICES, DCLF_PULLED
 #endif
 
 typedef VS_OUTPUT PS_INPUT;
+#if defined(EFFECT_ORG)
+// The ORG build reads the same slots from the heap. The register declarations stay as they are below: Drawcall Limit Fix rewrites
+// those lines for its own builds (PulledSource.cpp).
+static SamplerState SampBaseSampler = SamplerDescriptorHeap[EffectDraw.Samplers[0].x];
+static SamplerState SampNormalSampler = SamplerDescriptorHeap[EffectDraw.Samplers[0].y];
+static SamplerState SampNoiseSampler = SamplerDescriptorHeap[EffectDraw.Samplers[0].z];
+static SamplerState SampDepthSampler = SamplerDescriptorHeap[EffectDraw.Samplers[0].w];
+static SamplerState SampGrayscaleSampler = SamplerDescriptorHeap[EffectDraw.Samplers[1].x];
+
+static Texture2D<float4> TexBaseSampler = ResourceDescriptorHeap[EffectDraw.Textures[0].x];
+static Texture2D<float4> TexNormalSampler = ResourceDescriptorHeap[EffectDraw.Textures[0].y];
+static Texture2D<float4> TexNoiseSampler = ResourceDescriptorHeap[EffectDraw.Textures[0].z];
+static Texture2D<float4> TexDepthSamplerEffect = ResourceDescriptorHeap[EffectDraw.Textures[0].w];
+static Texture2D<float4> TexGrayscaleSampler = ResourceDescriptorHeap[EffectDraw.Textures[1].x];
+#else
 SamplerState SampBaseSampler : register(s0);
 SamplerState SampNormalSampler : register(s1);
 SamplerState SampNoiseSampler : register(s2);
@@ -390,6 +818,7 @@ Texture2D<float4> TexNormalSampler : register(t1);
 Texture2D<float4> TexNoiseSampler : register(t2);
 Texture2D<float4> TexDepthSamplerEffect : register(t3);
 Texture2D<float4> TexGrayscaleSampler : register(t4);
+#endif
 
 #if defined(DEFERRED)
 struct PS_OUTPUT
@@ -422,18 +851,73 @@ struct PS_OUTPUT
 
 #ifdef PSHADER
 
+#	if defined(DCLF_BINDLESS_DRAW) && defined(DCLF_PULLED)
+static float AlphaTestRefRS;  // the pulled main's
+#	elif defined(DCLF_BINDLESS_DRAW)
+// Drawcall Limit Fix: the alpha test reference is the object record's (as Lighting.hlsl's), not a buffer of its own.
+static const float AlphaTestRefRS = DCLFObjects[DCLFObjectIndex].AlphaTestRef;
+#	elif defined(EFFECT_ORG)
+static float AlphaTestRefRS = EffectDraw.AlphaTestRefRS;
+#	else
 cbuffer AlphaTestRefCB : register(b11)
 {
 	float AlphaTestRefRS : packoffset(c0);
 }
+#	endif  // DCLF_BINDLESS_DRAW
 
+#	if defined(DCLF_BINDLESS)
+// Drawcall Limit Fix (T7d's Effect port): the camera's planes are the frame's, in the frame lighting block every DCLF_BINDLESS draw's
+// pixel stage reads (Lighting.hlsl, DCLFFrameLighting; LightingConstants.h, SampleEffectCamera): x far, y near, z far - near, as SetupTechnique
+// writes CameraDataEffect.yz from the current camera (+0x160, +0x164). VPOSOffset and FilteringParam are not read.
+cbuffer DCLFFrameLighting : register(b13)
+{
+	float4 DCLFEffectCamera : packoffset(c17);
+	// The Lighting variant's DLightColor (SetupGeometry: the pass's light 0, the scene's sun light, its NiDirectionalLight +0x14c colour times
+	// its fade and the HDR multiplier): the frame's (LightingConstants.h, SampleEffectLight).
+	float4 DCLFEffectDLightColor : packoffset(c18);
+	// Blood's AlphaTestRef.yz (SetupGeometry: the weapon blood's two globals, 0x1433dccf0 and 0x1433dccf4): the frame's (LightingConstants.h,
+	// SampleEffectBlood).
+	float4 DCLFEffectBlood : packoffset(c19);
+	// The Lighting variant's DLightColor for a kCloudLOD property: light 0 is then the scene's cloud light (FUN_1414fcf80: ShadowSceneNode
+	// +0x208), read as c18 is (LightingConstants.h, SampleEffectCloudLight). The object's shading row says which (MaterialData.w).
+	float4 DCLFEffectCloudLightColor : packoffset(c20);
+};
+static const float4 CameraDataEffect = DCLFEffectCamera;
+// The soft depth (Soft: SetupTechnique binds the depth copy, kPOST_ZPREPASS_COPY, to t3): the frame record's, by name (DrawPipelines.h,
+// kEffectSoftDepthRegister), so a material row does not hold a render target.
+Texture2D<float4> DCLFEffectSoftDepth : register(t118);
+#	elif defined(EFFECT_ORG)
+// The pixel stage's constants, from the draw's latch (EffectOrgDraw).
+static float4 CameraDataEffect = EffectDraw.PSTechnique[0];
+static float2 VPOSOffset = EffectDraw.PSTechnique[1].xy;
+static float2 FilteringParam = EffectDraw.PSTechnique[1].zw;
+#	else
 cbuffer PerTechnique : register(b0)
 {
 	float4 CameraDataEffect : packoffset(c0);
 	float2 VPOSOffset : packoffset(c1);
 	float2 FilteringParam : packoffset(c1.z);
 };
+#	endif  // DCLF_BINDLESS
 
+#	if defined(EFFECT_ORG)
+static float4 BaseColor = EffectDraw.PSMaterial[0];
+static float4 BaseColorScale = EffectDraw.PSMaterial[1];
+static float4 LightingInfluence = EffectDraw.PSMaterial[2];
+
+static float4 PLightPositionX[1] = { EffectDraw.PSGeometry[0] };
+static float4 PLightPositionY[1] = { EffectDraw.PSGeometry[1] };
+static float4 PLightPositionZ[1] = { EffectDraw.PSGeometry[2] };
+static float4 PLightingRadiusInverseSquared = EffectDraw.PSGeometry[3];
+static float4 PLightColorR = EffectDraw.PSGeometry[4];
+static float4 PLightColorG = EffectDraw.PSGeometry[5];
+static float4 PLightColorB = EffectDraw.PSGeometry[6];
+static float4 DLightColor = EffectDraw.PSGeometry[7];
+static float4 PropertyColor = EffectDraw.PSGeometry[8];
+static float4 AlphaTestRef = EffectDraw.PSGeometry[9];
+static float4 MembraneRimColor = EffectDraw.PSGeometry[10];
+static float4 MembraneVars = EffectDraw.PSGeometry[11];
+#	else
 cbuffer PerMaterial : register(b1)
 {
 	float4 BaseColor : packoffset(c0);
@@ -450,12 +934,42 @@ cbuffer PerGeometry : register(b2)
 	float4 PLightColorR : packoffset(c4);
 	float4 PLightColorG : packoffset(c5);
 	float4 PLightColorB : packoffset(c6);
+#	if !defined(DCLF_BINDLESS)
 	float4 DLightColor : packoffset(c7);
 	float4 PropertyColor : packoffset(c8);
+#	endif  // !DCLF_BINDLESS
 	float4 AlphaTestRef : packoffset(c9);
 	float4 MembraneRimColor : packoffset(c10);
 	float4 MembraneVars : packoffset(c11);
 };
+#	endif  // EFFECT_ORG
+
+#	if defined(DCLF_BINDLESS)
+// Drawcall Limit Fix (T7d's Effect port): PropertyColor is the object's (SetupGeometry: its property's emittance colour, white without
+// one, and its alpha, which GetRenderPasses leaves as the material's times the fade node's currentFade): the shading row's (LightingConstants,
+// SampleShading) EmitColor and the material's alpha in MaterialData.z, times the object's fade (DCLFAlphaFade, as Lighting's MaterialData.z).
+#		if defined(DCLF_PULLED)
+static float4 PropertyColor;  // the pulled main's
+#		else
+static const float4 PropertyColor = float4(DCLFShading[DCLFObjectIndex].EmitColor.xyz,
+	DCLFShading[DCLFObjectIndex].MaterialData.z * DCLFAlphaFade(DCLFObjectIndex, (DCLFObjectWord & 0x40000000u) != 0));
+#		endif
+// The Lighting variant's DLightColor is the frame's (DCLFFrameLighting c18, or c20 for a kCloudLOD property, whose shading row's
+// MaterialData.w is 1); its point lights are Light Limit Fix's clusters (the PLight variables above are read only outside the world,
+// which a DCLF draw never is: a Lighting effect without Light Limit Fix stays the engine's).
+#		if defined(DCLF_PULLED)
+static float4 DLightColor;  // the pulled main's
+#		else
+static const float4 DLightColor = DCLFShading[DCLFObjectIndex].MaterialData.w > 0.5 ? DCLFEffectCloudLightColor : DCLFEffectDLightColor;
+#		endif
+// External Emittance's suppress bit (ExternalEmittance::UpdatePermutation in BSEffectShader::SetupGeometry's hook) is the object's, in its
+// record (LightingConstants.h, kRecordEffectSuppressEmittance), not the pipeline row's permutation block.
+#		if defined(DCLF_PULLED)
+static bool DCLFSuppressExternalEmittance;  // the pulled main's
+#		else
+static const bool DCLFSuppressExternalEmittance = (DCLFObjects[DCLFObjectIndex].DCLFRecordFlags & 0x8u) != 0;
+#		endif
+#	endif  // DCLF_BINDLESS
 
 #	if defined(LIGHT_LIMIT_FIX)
 #		include "LightLimitFix/LightLimitFix.hlsli"
@@ -491,7 +1005,11 @@ float3 GetLightingColor(float3 msPosition, float3 worldPosition, float2 screenPo
 {
 	float3 color = DLightColor.xyz * Color::EffectLightingScale;
 	const float3 sceneAmbientColor = ShadowSampling::GetAmbientLighting(worldPosition);
+#		if defined(DCLF_BINDLESS)
+	bool suppressExternalEmittance = SharedData::InInterior && DCLFSuppressExternalEmittance;
+#		else
 	bool suppressExternalEmittance = SharedData::InInterior && (Permutation::ExtraShaderDescriptor & Permutation::ExtraFlags::SuppressExternalEmittance);
+#		endif  // DCLF_BINDLESS
 	if (suppressExternalEmittance) {
 		color = sceneAmbientColor + ShadowSampling::GetDirectionalLighting();
 	}
@@ -639,7 +1157,11 @@ float3 GetLightingShadow(float3 color, float3 worldPosition, float2 screenPositi
 }
 #	endif
 
+#	if defined(DCLF_PULLED)
+PS_OUTPUT DCLFShadePS(PS_INPUT input)
+#	else
 PS_OUTPUT main(PS_INPUT input)
+#	endif
 {
 	PS_OUTPUT psout = (PS_OUTPUT)0;
 
@@ -683,8 +1205,16 @@ PS_OUTPUT main(PS_INPUT input)
 	float softMul = 1;
 	float depth = 1;
 #	if defined(SOFT)
+#		if defined(DCLF_BINDLESS)
+	// The material row holds softFalloffDepth itself (MaterialPortEffect.cpp): near * far / it, as SetupMaterial computes it on the CPU
+	// from the camera's planes (the same product and quotient).
+	depth = DCLFEffectSoftDepth.Load(int3(input.Position.xy, 0)).x;
+	const float softInfluence = (DCLFEffectCamera.x * DCLFEffectCamera.y) / LightingInfluence.y;
+	softMul = saturate(-input.TexCoord0.w + softInfluence / ((1 - depth) * CameraDataEffect.z + CameraDataEffect.y));
+#		else
 	depth = TexDepthSamplerEffect.Load(int3(input.Position.xy, 0)).x;
 	softMul = saturate(-input.TexCoord0.w + LightingInfluence.y / ((1 - depth) * CameraDataEffect.z + CameraDataEffect.y));
+#		endif  // DCLF_BINDLESS
 #	endif
 
 	float lightingInfluence = LightingInfluence.x;
@@ -782,16 +1312,23 @@ PS_OUTPUT main(PS_INPUT input)
 	float alpha = baseColor.w;
 
 #	if defined(BLOOD)
+#		if defined(DCLF_BINDLESS)
+	// Drawcall Limit Fix (T7d's Effect port): SetupGeometry's AlphaTestRef for Blood is the alpha property's threshold / 255 (the object record's
+	// reference: LightingConstants.h, AlphaTestRefOf) and the frame's two globals (DCLFEffectBlood); the PerGeometry block is not bound.
+	const float4 bloodRef = float4(AlphaTestRefRS, DCLFEffectBlood.yz, 0);
+#		else
+	const float4 bloodRef = AlphaTestRef;
+#		endif
 	alpha = baseColor.y;
-	float deltaY = saturate(baseColor.y - AlphaTestRef.x);
+	float deltaY = saturate(baseColor.y - bloodRef.x);
 	float bloodMul = baseColor.z;
 #		if defined(VC)
 	bloodMul *= input.Color.w;
 #		endif
-	if (deltaY < AlphaTestRef.y) {
-		bloodMul *= (deltaY / AlphaTestRef.y);
+	if (deltaY < bloodRef.y) {
+		bloodMul *= (deltaY / bloodRef.y);
 	}
-	baseColor.xyz = saturate(float3(2, 1, 1) - bloodMul.xxx) * (-bloodMul * AlphaTestRef.z + 1);
+	baseColor.xyz = saturate(float3(2, 1, 1) - bloodMul.xxx) * (-bloodMul * bloodRef.z + 1);
 	baseColor.xyz = ColorManagement::TextureToWorking(baseColor.xyz);
 #	endif
 
@@ -1124,4 +1661,53 @@ PS_OUTPUT main(PS_INPUT input)
 #	endif
 	return psout;
 }
+#	if defined(DCLF_PULLED)
+// The permutation block (b4) as the draw's pipeline row holds it (the vertex stage's DCLFPermutationStatics).
+void DCLFPermutationStatics()
+{
+	Permutation::VertexShaderDescriptor = DCLFRowUint(DCLFPipelineRowAddress, kDCLFPermutationBlock);
+	Permutation::PixelShaderDescriptor = DCLFRowUint(DCLFPipelineRowAddress, kDCLFPermutationBlock + 4);
+	Permutation::ExtraShaderDescriptor = DCLFRowUint(DCLFPipelineRowAddress, kDCLFPermutationBlock + 8);
+	Permutation::ExtraFeatureDescriptor = DCLFRowUint(DCLFPipelineRowAddress, kDCLFPermutationBlock + 12);
+	Permutation::EffectRadius = DCLFRowFloat(DCLFPipelineRowAddress, kDCLFPermutationBlock + 16);
+}
+
+// Drawcall Limit Fix's plain draws (DCLF_PULLED): the draw's rows and object word are its vertex stage's (Lighting.hlsl's pulled pixel
+// main), and so the rows' blocks and the object's values, assigned before anything reads them.
+PS_OUTPUT DCLFPulledPixel(PS_INPUT input, uint a_instance)
+{
+	const DeviceRef sequence = DCLFDrawSequence(a_instance);
+	const uint4 rows = DCLFSequenceRows(sequence);  // the pipeline row's ref, the material row's
+	DCLFObjectWord = DCLFSequenceObjectWord(sequence);
+	DCLFPipelineRowAddress = rows.xy;
+	DCLFMaterialRowAddress = rows.zw;
+	DCLFPerMaterialStatics();
+	DCLFPerGeometryStatics();
+	DCLFPermutationStatics();
+#		if defined(DCLF_BINDLESS_DRAW)
+	AlphaTestRefRS = DCLFObjects[DCLFObjectIndex].AlphaTestRef;
+#		endif
+#		if defined(DCLF_BINDLESS)
+	PropertyColor = float4(DCLFShading[DCLFObjectIndex].EmitColor.xyz,
+		DCLFShading[DCLFObjectIndex].MaterialData.z * DCLFAlphaFade(DCLFObjectIndex, (DCLFObjectWord & 0x40000000u) != 0));
+	DLightColor = DCLFShading[DCLFObjectIndex].MaterialData.w > 0.5 ? DCLFEffectCloudLightColor : DCLFEffectDLightColor;
+	DCLFSuppressExternalEmittance = (DCLFObjects[DCLFObjectIndex].DCLFRecordFlags & 0x8u) != 0;
+#		endif
+	return DCLFShadePS(input);
+}
+
+// Keyed on a wave-uniform instance (Lighting.hlsl's pulled pixel main): a quad's lanes are one draw's, so they take one pass together.
+PS_OUTPUT main(PS_INPUT input)
+{
+	PS_OUTPUT psout;
+	[loop] for (;;) {
+		const uint drawInstance = WaveReadLaneFirst(input.DCLFDrawInstance);
+		[branch] if (drawInstance == input.DCLFDrawInstance) {
+			psout = DCLFPulledPixel(input, drawInstance);
+			break;
+		}
+	}
+	return psout;
+}
+#	endif  // DCLF_PULLED
 #endif

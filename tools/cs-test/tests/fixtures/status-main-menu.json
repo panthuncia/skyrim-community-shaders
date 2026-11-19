@@ -1,0 +1,24 @@
+{
+  "version": 1,
+  "run_id": "R1",
+  "pid": 12345,
+  "updated": "2026-11-12T15:18:20.000",
+  "phase": "menu",
+  "frame": 900,
+  "fps": 60.0,
+  "milestones": {
+    "plugin": { "t": 0.0, "frame": 0 },
+    "data-loaded": { "t": 6.1, "frame": 0 },
+    "shaders-ready": { "t": 9.8, "frame": 31 },
+    "main-menu": { "t": 10.2, "frame": 40 }
+  },
+  "config": { "applied": 4, "features_off": [], "unknown": [] },
+  "step": { "index": 0, "do": "shot", "state": "waiting" },
+  "compile": { "done": 1560, "total": 1560 },
+  "holds": [],
+  "last_error": "",
+  "outcome": "",
+  "reason": "",
+  "fault": { "address": "", "markers": "" },
+  "shots": []
+}
