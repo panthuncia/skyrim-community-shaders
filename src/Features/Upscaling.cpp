@@ -1002,6 +1002,7 @@ HRESULT Upscaling::PresentWithFrameGeneration(IDXGISwapChain* a_swapChain, UINT 
 	auto requestFaultTeardown = [&](const char* a_reason) -> HRESULT {
 		logger::error("[Upscaling] {} - disabling frame generation", a_reason);
 		settings.frameGeneration = false;
+		SettingsWritten("frame generation fault");
 		const uint32_t displayWidth = globals::game::graphicsState ? globals::game::graphicsState->screenWidth : 0;
 		const uint32_t displayHeight = globals::game::graphicsState ? globals::game::graphicsState->screenHeight : 0;
 		if (streamline->IsDLSSGLoaded() &&
@@ -1032,6 +1033,7 @@ HRESULT Upscaling::PresentWithFrameGeneration(IDXGISwapChain* a_swapChain, UINT 
 	};
 	if (dxvk->HasCommandRingFault()) {
 		settings.frameGeneration = false;
+		SettingsWritten("frame generation fault");
 		if (streamline->IsDLSSGLoaded() || streamline->IsFSRFGLoaded())
 			return requestFaultTeardown("Vulkan frame-generation dispatch fault");
 		return a_present(a_swapChain, a_syncInterval, a_flags);
