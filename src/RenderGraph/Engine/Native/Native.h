@@ -151,6 +151,7 @@ namespace RenderGraph::Engine::Native
 		std::uint32_t format = 0;     // the swap chain images' rhi::Format
 		bool hdr10 = false;
 		bool presentationLayer = false;
+		bool vsync = false;  // with a presentation layer, the vsync the swap chain was made for. Its presents keep it
 	};
 
 	/**
@@ -161,6 +162,12 @@ namespace RenderGraph::Engine::Native
 	 * @return The request's serial. Presentation().serial reaches it once the swap chain is replaced.
 	 */
 	std::uint64_t RequestPresentation(const FrameGen::PresentationConfig& a_config, std::function<bool()> a_tornDown);
+
+	/**
+	 * @brief The torn-down step a replacement runs when its request names none (HDR's colour space change, say), so a feature load
+	 * change waiting for a replacement goes through whichever request runs. Any thread.
+	 */
+	void SetPresentationTornDown(std::function<bool()> a_tornDown);
 
 	/** @brief The presentation the swap chain has now. Any thread. */
 	PresentationState Presentation();

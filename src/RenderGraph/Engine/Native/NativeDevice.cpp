@@ -1137,6 +1137,9 @@ namespace RenderGraph::Engine::Native
 			std::mutex presentationLock;
 			FrameGen::PresentationConfig requestedPresentation{};
 			PresentationState adoptedPresentation{};
+			std::function<bool()> defaultTornDown;  // under presentationLock
+			// With a presentation layer, the vsync the swap chain was made for. Submission thread, under presentLock.
+			std::optional<bool> layerVsync;
 			std::atomic<bool> hdr10Supported = false;
 			PresentationState framePresentation{};  // render owner
 			// The render thread queues a present only once the one before has finished.
@@ -2038,7 +2041,7 @@ namespace RenderGraph::Engine::Native
 			}
 
 			/** @brief Publishes what the swap chain is now. Under presentLock. */
-			void PublishPresentation(uint64_t a_serial)
+			void PublishPresentation(uint64_t a_serial, bool a_vsync)
 			{
 				hdr10Supported.store(swapchain->IsColorSpaceSupported(rhi::SwapchainColorSpace::Hdr10St2084), std::memory_order_relaxed);
 				const bool hdr10 = swapchain->ColorSpace() == rhi::SwapchainColorSpace::Hdr10St2084;
@@ -2048,6 +2051,7 @@ namespace RenderGraph::Engine::Native
 				adoptedPresentation.format = static_cast<std::uint32_t>(hdr10 ? rhi::Format::R10G10B10A2_UNorm : swapchainFormat);
 				adoptedPresentation.hdr10 = hdr10;
 				adoptedPresentation.presentationLayer = layer;
+				adoptedPresentation.vsync = a_vsync;
 			}
 
 			/**
@@ -2070,7 +2074,12 @@ namespace RenderGraph::Engine::Native
 				if (a_config.hdr && !hdr)
 					logger::warn("[ORG native] HDR is on, but the display path does not take HDR10 (ST.2084, Rec. 2020). Presenting SDR.");
 				swapchain.Reset();
-				if (a_tornDown && !a_tornDown())
+				std::function<bool()> tornDown = a_tornDown;
+				if (!tornDown) {
+					std::lock_guard guard(presentationLock);
+					tornDown = defaultTornDown;
+				}
+				if (tornDown && !tornDown())
 					stl::report_and_fail(fmt::format("[ORG native] the presentation's torn-down step failed for {}", describe()));
 				rhi::SwapchainDesc desc{};
 				desc.hwnd = window;
@@ -2078,16 +2087,19 @@ namespace RenderGraph::Engine::Native
 				desc.height = height;
 				desc.format = swapchainFormat;
 				desc.bufferCount = bufferCount;
-				desc.allowTearing = a_config.tearing;
-				desc.colorSpace = hdr ? rhi::SwapchainColorSpace::Hdr10St2084 : rhi::SwapchainColorSpace::SrgbNonlinear;
 				desc.presentationLayer = a_config.method != FrameGen::Method::kNone;
+				// A layer bakes the present mode in (FidelityFX's swap chain does), so make it with the mode the vsync asks for.
+				// BasicRHI picks the first mode from allowTearing.
+				desc.allowTearing = a_config.tearing && !(desc.presentationLayer && a_config.vsync);
+				desc.colorSpace = hdr ? rhi::SwapchainColorSpace::Hdr10St2084 : rhi::SwapchainColorSpace::SrgbNonlinear;
 				if (const auto created = Rhi().CreateSwapchain(desc, swapchain); created != rhi::Result::Ok || !swapchain)
 					stl::report_and_fail(fmt::format("[ORG native] the swap chain could not be made for {} (BasicRHI result {})", describe(), static_cast<int>(created)));
 				if (swapchain->SetMaximumFrameLatency(frameLatency) != rhi::Result::Ok)
 					stl::report_and_fail(fmt::format("[ORG native] the new swap chain refused a frame latency of {}", frameLatency));
 				// A fresh swap chain has no mode change pending.
 				resizeRequested = false;
-				PublishPresentation(a_serial);
+				layerVsync = desc.presentationLayer ? std::optional<bool>(a_config.vsync) : std::nullopt;
+				PublishPresentation(a_serial, a_config.vsync);
 				logger::info("[ORG native] presentation replaced (request {}): {}; {} images {}x{}, presentation layer {}, {:.1f} ms", a_serial, describe(),
 					swapchain->ImageCount(), width, height, desc.presentationLayer,
 					std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count());
@@ -2370,10 +2382,13 @@ namespace RenderGraph::Engine::Native
 				rhi::PresentSyncDesc sync{};
 				sync.queue = graphics;
 				sync.wait = a_signal;
+				// A presentation layer keeps the vsync it was made with. A change is a replacement (the frame generation controller asks
+				// for it), never a recreate inside the present, which would skip the replacement's torn-down step.
+				const bool vsync = layerVsync.value_or(a_syncInterval > 0);
 				rhi::Result presented;
 				{
 					ZoneScopedN("CS.Native.SwapchainPresent");
-					presented = swapchain->Present(a_syncInterval > 0, sync);
+					presented = swapchain->Present(vsync, sync);
 				}
 				if (presents == 1)
 					Stage("first present", fmt::format("{}x{}, result {}", width, height, static_cast<int>(presented)));
@@ -4608,7 +4623,7 @@ namespace RenderGraph::Engine::Native
 			Fail("the native swap chain", "BasicRHI could not create a swap chain on the game's window");
 		// HDR Display switches the colour space later.
 		(void)ConfigureSwapchain(state->swapchain.Get(), { .hdr = false, .maximumFrameLatency = state->frameLatency });
-		state->PublishPresentation(0);
+		state->PublishPresentation(0, false);
 		state->framePresentation = state->adoptedPresentation;
 		if (!state->MakePresentObjects())
 			Fail("the native swap chain", "the present's command lists or timeline could not be made");
@@ -5105,6 +5120,14 @@ namespace RenderGraph::Engine::Native
 		return serial;
 	}
 
+	void SetPresentationTornDown(std::function<bool()> a_tornDown)
+	{
+		if (!g_device)
+			return;
+		std::lock_guard guard(g_device->presentationLock);
+		g_device->defaultTornDown = std::move(a_tornDown);
+	}
+
 	PresentationState Presentation()
 	{
 		if (!g_device)
@@ -5304,6 +5327,7 @@ namespace RenderGraph::Engine::Native
 	std::uint64_t RequestPresentation(const FrameGen::PresentationConfig&, std::function<bool()>) { return 0; }
 	PresentationState Presentation() { return {}; }
 	PresentationState FramePresentation() { return {}; }
+	void SetPresentationTornDown(std::function<bool()>) {}
 	void OnFrameBegin() {}
 	void TakePresentPace(std::uint64_t& a_waits, std::uint64_t& a_us) { a_waits = a_us = 0; }
 	void PaceHeldPresent() {}

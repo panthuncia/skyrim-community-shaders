@@ -15,7 +15,8 @@ namespace FrameGen
 		Method DesiredMethod()
 		{
 			auto& upscaling = globals::features::upscaling;
-			if (!upscaling.IsFrameGenerationActive())
+			// Not IsFrameGenerationActive: its surface is not ready while a replacement the controller asked for is in flight.
+			if (!upscaling.IsFrameGenerationSelected())
 				return Method::kNone;
 			return upscaling.GetFrameGenMethod() == Upscaling::FrameGenMethod::kDLSSG
 			           ? Method::kDLSSG

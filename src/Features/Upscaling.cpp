@@ -617,10 +617,14 @@ Upscaling::FrameGenMethod Upscaling::GetFrameGenMethod() const
 
 bool Upscaling::IsFrameGenerationActive() const
 {
+	return IsFrameGenerationSelected() && FrameGen::ActivePresenter().Surface().ready;
+}
+
+bool Upscaling::IsFrameGenerationSelected() const
+{
 	if (!loaded || !settings.frameGeneration || IsDisplayUnsettled())
 		return false;
-	const auto& presenter = FrameGen::ActivePresenter();
-	if (!presenter.Available() || !presenter.Surface().ready)
+	if (!FrameGen::ActivePresenter().Available())
 		return false;
 	auto fgMethod = GetFrameGenMethod();
 	if (fgMethod == FrameGenMethod::kDLSSG)
@@ -645,8 +649,8 @@ void Upscaling::BeginRenderFrame()
 				settings.frameGenMethod = static_cast<uint>(request == 2 ? FrameGenMethod::kDLSSG : FrameGenMethod::kFSR);
 			logger::info("[FGTEST] switch: frame generation {}", request == 0 ? "off" : request == 2 ? "DLSS-G" : "FSR-FG");
 		});
-	{  // TEMP-FG-TEST
-		static uint64_t secondTick = 0, lastTick = 0;
+	{  // The [FGTEST] line: frames rendered and FSR-FG's presents each second.
+		static uint64_t secondTick = 0, lastTick = 0, lastPresented = 0;
 		static uint32_t frames = 0, worst = 0, stalls = 0;
 		const auto now = GetTickCount64();
 		auto* ui = RE::UI::GetSingleton();
@@ -666,7 +670,9 @@ void Upscaling::BeginRenderFrame()
 		if (!secondTick)
 			secondTick = now;
 		if (now - secondTick >= 1000) {
-			logger::info("[FGTEST] {} fps, worst {} ms, stalls {}; {}", frames, worst, stalls, describe());
+			const uint64_t presented = Streamline::GetSingleton()->GetTotalPresentedFrames();
+			logger::info("[FGTEST] {} fps, {} FSR-FG presents, worst {} ms, stalls {}; {}", frames, lastPresented ? presented - lastPresented : 0, worst, stalls, describe());
+			lastPresented = presented;
 			frames = worst = stalls = 0;
 			secondTick = now;
 		}
@@ -1584,6 +1590,8 @@ void Upscaling::SetupResources()
 		DxvkOrgInteropDeviceInfo vulkan{};
 		const bool onVulkan = RenderGraph::Engine::Native::DescribeVulkanDevice(vulkan);
 		Streamline::GetSingleton()->SetNativeDevice(onVulkan ? static_cast<void*>(vulkan.physicalDevice) : nullptr, RenderGraph::Engine::Native::AdapterLuid());
+		// Frame generation's plugins load and unload between a replacement's destroy and create.
+		FrameGen::ActivePresenter().SetTornDown(&Streamline::CompleteSwapchainTeardown);
 		ApplyHardwareDefaults();
 	}
 }

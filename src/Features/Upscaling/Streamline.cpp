@@ -434,11 +434,9 @@ bool Streamline::Initialize()
 	// CS_STREAMLINE_DLSS=0 leaves DLSS and DLSS-G out. On a machine with an NVIDIA GPU, DLSS-G's plugin adds VK_NV_optical_flow to
 	// the device even when DXVK runs on another vendor's GPU (DXVK_FILTER_DEVICE_NAME), and that device then fails to create.
 	const bool dlssRequested = Util::SwitchFile::Value("CS_STREAMLINE_DLSS") != "0";
-	// Native mode has no frame generation yet (its presenter has no frame-generation controls): its plugins are not loaded, so the
-	// device takes no optical-flow queue for them.
-	std::vector<sl::Feature> featuresToLoad = { sl::kFeatureFSR, sl::kFeatureXeSS };
-	if (!native)
-		featuresToLoad.push_back(sl::kFeatureFSR_G);
+	// Native mode loads FSR-FG as guest does. DLSS-G stays out of native until step 8 of the native frame generation plan, so the
+	// device takes no optical-flow queue for it.
+	std::vector<sl::Feature> featuresToLoad = { sl::kFeatureFSR, sl::kFeatureXeSS, sl::kFeatureFSR_G };
 	if (dlssRequested)
 		featuresToLoad.push_back(sl::kFeatureDLSS);
 	else
@@ -528,7 +526,7 @@ void Streamline::SetNativeDevice(void* a_vkPhysicalDevice, uint64_t a_luid)
 	featureXeSS = supported(sl::kFeatureXeSS);
 	featureFSR = supported(sl::kFeatureFSR);
 	featureDLSSG = false;
-	featureFSRFG = false;
+	featureFSRFG = supported(sl::kFeatureFSR_G);
 	if (featureDLSS) {
 		g_sl.slGetFeatureFunction(sl::kFeatureDLSS, "slDLSSGetOptimalSettings", reinterpret_cast<void*&>(g_sl.slDLSSGetOptimalSettings));
 		g_sl.slGetFeatureFunction(sl::kFeatureDLSS, "slDLSSSetOptions", reinterpret_cast<void*&>(g_sl.slDLSSSetOptions));
@@ -548,6 +546,20 @@ void Streamline::SetNativeDevice(void* a_vkPhysicalDevice, uint64_t a_luid)
 		g_sl.slGetFeatureFunction(sl::kFeatureXeSS, "slXeSSSetOptions", reinterpret_cast<void*&>(g_sl.slXeSSSetOptions));
 		featureXeSS = g_sl.slXeSSSetOptions != nullptr;
 	}
+	if (featureFSRFG) {
+		g_sl.slGetFeatureFunction(sl::kFeatureFSR_G, "slFSRFrameGenerationSetOptions", reinterpret_cast<void*&>(g_sl.slFSRFrameGenerationSetOptions));
+		g_sl.slGetFeatureFunction(sl::kFeatureFSR_G, "slFSRGetFrameGenState", reinterpret_cast<void*&>(g_sl.slFSRGetFrameGenState));
+		g_sl.slGetFeatureFunction(sl::kFeatureFSR_G, "slFSRFrameGenerationDiscardPreparedFrame", reinterpret_cast<void*&>(g_sl.slFSRFrameGenerationDiscardPreparedFrame));
+		g_sl.slGetFeatureFunction(sl::kFeatureFSR_G, "slFSRFrameGenerationOwnsSwapchain", reinterpret_cast<void*&>(g_sl.slFSRFrameGenerationOwnsSwapchain));
+		g_sl.slGetFeatureFunction(sl::kFeatureFSR_G, "slFSRFrameGenerationCompleteSwapchainTeardown", reinterpret_cast<void*&>(g_sl.slFSRFrameGenerationCompleteSwapchainTeardown));
+		featureFSRFG = g_sl.slFSRFrameGenerationSetOptions != nullptr && g_sl.slFSRGetFrameGenState != nullptr &&
+		               g_sl.slFSRFrameGenerationCompleteSwapchainTeardown != nullptr;
+	}
+	// Loaded from slInit, as in guest. The controller unloads it at a presentation replacement while frame generation is off.
+	if (featureFSRFG) {
+		g_fsrfgDesiredLoaded.store(true, std::memory_order_release);
+		g_fsrfgCurrentlyLoaded.store(true, std::memory_order_release);
+	}
 	// The vendor from the adapter, as SetVulkanDevice reads it from Vulkan: DXGI names the adapter the native device was made on.
 	winrt::com_ptr<IDXGIFactory4> factory;
 	if (SUCCEEDED(CreateDXGIFactory1(IID_PPV_ARGS(factory.put())))) {
@@ -561,8 +573,8 @@ void Streamline::SetNativeDevice(void* a_vkPhysicalDevice, uint64_t a_luid)
 			isRTXBelow40Series = isNvidiaGPU && desc.DeviceId < kFirstAdaDeviceID;
 		}
 	}
-	logger::info("[Streamline] native device feature support: DLSS={} Reflex={} FSR={} XeSS={} (frame generation off in native mode); NVIDIA {}",
-		featureDLSS, featureReflex, featureFSR, featureXeSS, isNvidiaGPU);
+	logger::info("[Streamline] native device feature support: DLSS={} Reflex={} FSR={} XeSS={} FSR-G={} (no DLSS-G in native mode); NVIDIA {}",
+		featureDLSS, featureReflex, featureFSR, featureXeSS, featureFSRFG, isNvidiaGPU);
 }
 
 void Streamline::SetVulkanDevice()
@@ -746,7 +758,9 @@ static uint32_t SimFrameId()
 
 void Streamline::BeginRenderFrame()
 {
-	if (g_fsrfgCurrentlyLoaded.load(std::memory_order_acquire))
+	// Native mode records the prepare and presents on the submission thread, so a discard from this thread would race with them.
+	// A present there that finds nothing prepared passes the frame through.
+	if (!native && g_fsrfgCurrentlyLoaded.load(std::memory_order_acquire))
 		(void)DiscardFSRFrameGenerationPreparedFrame();
 	// Adopt the index SimulationStart already used. It is SimFrameId(), i.e. renderFrameId + 1, so
 	// this is strictly increasing by construction -- which the tag and constant keying and CS's own
@@ -2263,7 +2277,8 @@ bool Streamline::EnsureFSRFGPresentState()
 		}
 	}
 
-	if (!prepared)
+	// Native mode: no discard from the render thread (BeginRenderFrame).
+	if (!prepared && !native)
 		(void)DiscardFSRFrameGenerationPreparedFrame();
 
 	return prepared;
@@ -2379,6 +2394,8 @@ bool Streamline::SetFSRFrameGen(bool a_enable, bool a_hdr,
 	// See tools/pacing/README.md for the uncapped measurements and why this pair is used there too.
 	options.pacingSafetyMarginMs = 0.01f;
 	options.pacingVarianceFactor = 0.0f;
+	// Native mode replaces the swap chain itself (Native::RequestPresentation). Guest leaves the recreate trigger to the plugin.
+	options.hostRecreatesSwapchain = native ? sl::Boolean::eTrue : sl::Boolean::eFalse;
 	const sl::Result res = g_sl.slFSRFrameGenerationSetOptions(g_sl.viewport, options);
 	if (res != sl::Result::eOk) {
 		logger::error("[Streamline] slFSRFrameGenerationSetOptions failed (result {})", static_cast<int>(res));
@@ -2403,6 +2420,11 @@ void Streamline::CaptureFSRFrameGenState()
 		g_sl.frameGenerationMultiplier.store(
 			std::max(state.numFramesActuallyPresented, 1u), std::memory_order_release);
 		g_sl.fsrTotalPresentedFrames.store(state.totalPresentedFrames, std::memory_order_release);
+		// Native mode records each frame's prepare and its present on the submission thread, in order. A present that found a
+		// frame prepared for another one means that order broke.
+		if (native && state.foreignPreparedFrames != 0)
+			stl::report_and_fail(fmt::format("[Streamline] FSR-FG presented {} frame(s) with another frame's prepared inputs; the native submission order broke",
+				state.foreignPreparedFrames));
 		// FSR-FG had no equivalent of the DLSS-G present-state log, so "frame generation is on
 		// but generating nothing" was invisible on this path and the overlay's Post-FG FPS was
 		// the only clue. Sample on the same cadence DLSS-G uses.
