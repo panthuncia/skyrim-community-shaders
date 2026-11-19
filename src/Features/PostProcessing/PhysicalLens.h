@@ -93,12 +93,16 @@ struct PhysicalLens : PostProcessFeature
 	void SanitizeSettings();
 	/// For the settings readout when the ORG path resolves the focus.
 	void SetResolvedFocus(float metres) { resolvedFocusM = metres; }
+	// C4324: the aligned diffraction block pads the struct.
+#pragma warning(push)
+#pragma warning(disable: 4324)
 	/// What the ORG Composite reads this frame, set by the ORG effect's commit before Composite's.
 	struct OrgComposite
 	{
 		bool cameraMap = false, flare = false;
 		PhysicalLensImaging::DiffractionParameters diffraction{};
 	} orgComposite;
+#pragma warning(pop)
 
 private:
 	bool resourcesReady = false, shadersRequested = false;
