@@ -29,6 +29,7 @@
 #	include <algorithm>
 #	include <atomic>
 #	include <bit>
+#	include <chrono>
 #	include <deque>
 #	include <map>
 #	include <mutex>
@@ -58,6 +59,7 @@ namespace GraphResources
 		{
 			std::shared_ptr<org::Resource> graph;
 			winrt::com_ptr<ID3D11Resource> d3d11;
+			std::uint32_t layout = 0;  // an exported texture's resting VkImageLayout
 		};
 
 		bool Is3D(const Shape& a_shape) { return a_shape.dimension == D3D11_RESOURCE_DIMENSION_TEXTURE3D; }
@@ -146,8 +148,15 @@ namespace GraphResources
 			return texture;
 		}
 
-		/** @brief An exported twin texture with every view in its own format. */
-		Created CreateExportedTexture(const Shape& a_shape, const std::string& a_name)
+		/** @brief A twin's shape, from the description ShapeAt gives. */
+		Shape TwinShapeOf(const ExportDesc& a_desc)
+		{
+			return { a_desc.dimension, a_desc.width, a_desc.height, a_desc.depthOrArraySize, a_desc.mips, a_desc.format, a_desc.samples, a_desc.bindFlags,
+				a_desc.miscFlags, D3D11_USAGE_DEFAULT, 0, a_desc.array };
+		}
+
+		/** @brief What ExportTexture makes for an exported twin texture: every view in its own format. */
+		ExportDesc TwinExportDescOf(const Shape& a_shape)
 		{
 			const auto formats = FormatsOf(a_shape);
 			ExportDesc desc{};
@@ -165,8 +174,14 @@ namespace GraphResources
 			desc.uav = (a_shape.bindFlags & D3D11_BIND_UNORDERED_ACCESS) ? a_shape.format : DXGI_FORMAT_UNKNOWN;
 			desc.dsv = formats.dsv;
 			desc.array = a_shape.array;
-			auto exported = ExportTexture(desc, a_name);
-			return { std::move(exported.graph), std::move(exported.d3d11) };
+			return desc;
+		}
+
+		/** @brief An exported twin texture. */
+		Created CreateExportedTexture(const Shape& a_shape, const std::string& a_name)
+		{
+			auto exported = ExportTexture(TwinExportDescOf(a_shape), a_name);
+			return { std::move(exported.graph), std::move(exported.d3d11), exported.layout };
 		}
 
 		Created CreateTexture(const Shape& a_shape, const std::string& a_name, const Options& a_options)
@@ -382,26 +397,39 @@ namespace GraphResources
 		return std::make_shared<UploadCopyPass>(std::make_shared<const StagedUploads>(std::move(a_uploads)));
 	}
 
-	ExportedTexture ExportTexture(const ExportDesc& a_desc, const std::string& a_name)
+	struct PreparedExport
 	{
-		auto& runtime = RenderGraphRuntime::Get();
-		if (!runtime.CanWrapTextures()) {
-			logger::warn("[ORG] {}: not exported, the DXVK build cannot wrap images (dxvkCreateTextureFromVkImage)", a_name);
-			return {};
-		}
-		const bool is3D = a_desc.dimension == D3D11_RESOURCE_DIMENSION_TEXTURE3D;
-		const bool cube = (a_desc.miscFlags & D3D11_RESOURCE_MISC_TEXTURECUBE) != 0;
-		const UINT layers = (std::max)(a_desc.depthOrArraySize, 1u);
-		const Shape shape{ a_desc.dimension, a_desc.width, a_desc.height, layers, a_desc.mips, a_desc.format, a_desc.samples, a_desc.bindFlags,
-			a_desc.miscFlags, D3D11_USAGE_DEFAULT, 0, a_desc.array };
-		const UINT mips = MipCount(shape);
-		// A typeless format names no image format, so a depth image uses its DSV's format.
-		const auto imageFormat = rhi::helpers::ToRHI(a_desc.dsv != DXGI_FORMAT_UNKNOWN ? a_desc.dsv : a_desc.format);
-		if (imageFormat == rhi::Format::Unknown) {
-			logger::error("[ORG] {}: not exported, format {} has no image format", a_name, static_cast<int>(a_desc.format));
-			return {};
-		}
-		try {
+		rhi::Resource image;  // the image the version's graph resource holds, which adoption wraps
+		DxvkOrgInteropTextureWrap wrap{};
+		org::TextureDescription views;  // the graph resource's description, for the made-image registry
+		std::uint64_t vkImage = 0;      // what the wrap must report
+		std::uint32_t layout = 0;
+		bool imported = false;  // a GENERAL import, which noted its image already
+	};
+
+	namespace
+	{
+		/** @brief An exported texture's image before D3D11 wraps it, and the graph description of it without a layout. */
+		struct TwinExportImage
+		{
+			rhi::ResourcePtr image;
+			DxvkOrgInteropTextureWrap wrap{};
+			org::TextureDescription graphDesc;
+		};
+
+		/** @brief Makes the image of an exported texture. Any thread. Throws when the format has no image format or the image is refused. */
+		TwinExportImage MakeExportImage(const ExportDesc& a_desc, const std::string& a_name)
+		{
+			const bool is3D = a_desc.dimension == D3D11_RESOURCE_DIMENSION_TEXTURE3D;
+			const bool cube = (a_desc.miscFlags & D3D11_RESOURCE_MISC_TEXTURECUBE) != 0;
+			const UINT layers = (std::max)(a_desc.depthOrArraySize, 1u);
+			const Shape shape{ a_desc.dimension, a_desc.width, a_desc.height, layers, a_desc.mips, a_desc.format, a_desc.samples, a_desc.bindFlags,
+				a_desc.miscFlags, D3D11_USAGE_DEFAULT, 0, a_desc.array };
+			const UINT mips = MipCount(shape);
+			// A typeless format names no image format, so a depth image uses its DSV's format.
+			const auto imageFormat = rhi::helpers::ToRHI(a_desc.dsv != DXGI_FORMAT_UNKNOWN ? a_desc.dsv : a_desc.format);
+			if (imageFormat == rhi::Format::Unknown)
+				throw std::runtime_error(fmt::format("format {} has no image format", static_cast<int>(a_desc.format)));
 			rhi::ResourceDesc desc{};
 			desc.type = is3D ? rhi::ResourceType::Texture3D : rhi::ResourceType::Texture2D;
 			desc.heapType = rhi::HeapType::DeviceLocal;
@@ -422,12 +450,10 @@ namespace GraphResources
 			desc.texture.depthOrLayers = static_cast<std::uint16_t>(layers);
 			desc.texture.mipLevels = static_cast<std::uint16_t>(mips);
 			desc.texture.sampleCount = (std::max)(a_desc.samples, 1u);
-			rhi::ResourcePtr image;
-			if (runtime.Host()->Device().CreateCommittedResource(desc, image) != rhi::Result::Ok || !image) {
-				logger::error("[ORG] {}: the image could not be created", a_name);
-				return {};
-			}
-			DxvkOrgInteropTextureWrap wrap{};
+			TwinExportImage made;
+			if (RenderGraphRuntime::Get().Host()->Device().CreateCommittedResource(desc, made.image) != rhi::Result::Ok || !made.image)
+				throw std::runtime_error("the image could not be created");
+			auto& wrap = made.wrap;
 			wrap.dimension = static_cast<std::uint32_t>(a_desc.dimension);
 			wrap.width = a_desc.width;
 			wrap.height = a_desc.height;
@@ -437,19 +463,8 @@ namespace GraphResources
 			wrap.sampleCount = (std::max)(a_desc.samples, 1u);
 			wrap.bindFlags = a_desc.bindFlags;
 			wrap.miscFlags = a_desc.miscFlags;
-			DxvkOrgInteropResourceInfo info{};
-			ExportedTexture exported;
-			exported.d3d11 = runtime.WrapTexture(image.Get(), wrap, info, a_name.c_str());
-			const auto home = exported.d3d11 ? RenderGraph::HomeLayoutOf(info.image.layout) : std::nullopt;
-			if (!home) {
-				if (exported.d3d11)
-					logger::error("[ORG] {}: DXVK rests it in layout {}, which the graph has no equivalent of", a_name, static_cast<int>(info.image.layout));
-				// DXVK's stream may still initialize the image, so it goes once D3D11 is past this point.
-				exported.d3d11 = nullptr;
-				runtime.ReleaseAfterD3D11(std::make_shared<rhi::ResourcePtr>(std::move(image)));
-				return {};
-			}
-			auto graphDesc = Describe(shape, true);
+			auto& graphDesc = made.graphDesc;
+			graphDesc = Describe(shape, true);
 			graphDesc.format = imageFormat;
 			graphDesc.hasSRV = a_desc.srv != DXGI_FORMAT_UNKNOWN;
 			graphDesc.srvFormat = rhi::helpers::ToRHI(a_desc.srv);
@@ -460,8 +475,21 @@ namespace GraphResources
 			graphDesc.rtvFormat = rhi::helpers::ToRHI(a_desc.rtv);
 			graphDesc.hasDSV = a_desc.dsv != DXGI_FORMAT_UNKNOWN;
 			graphDesc.dsvFormat = imageFormat;
-			graphDesc.initialLayout = *home;
-			std::shared_ptr<org::ExternalTextureResource> texture;
+			return made;
+		}
+
+		/**
+		* @brief The graph texture of an exported image, a_info describing it in the layout D3D11 rests it in. Any thread.
+		* Takes a_image on success. Null when the layout has no graph equivalent or the import fails, with a_image kept.
+		* a_note registers a texture the graph owns for the duplicate-image check (an import registers itself).
+		*/
+		std::shared_ptr<org::ExternalTextureResource> MakeExportGraph(rhi::ResourcePtr& a_image, const DxvkOrgInteropImageInfo& a_info,
+			org::TextureDescription& a_graphDesc, const std::string& a_name, bool a_note)
+		{
+			const auto home = RenderGraph::HomeLayoutOf(a_info.layout);
+			if (!home)
+				return nullptr;
+			a_graphDesc.initialLayout = *home;
 			if (*home == rhi::ResourceLayout::Common) {
 				// Native mode keeps the image in Common and the graph moves it between layouts. Other users go through this resource.
 				// The import does not own the image, so the import is released first and then the image.
@@ -470,25 +498,80 @@ namespace GraphResources
 					rhi::ResourcePtr image;
 					std::shared_ptr<org::ExternalTextureResource> texture;
 				};
-				auto imported = RenderGraph::ImportDxvkTexture(runtime.Host()->Device(), info.image, graphDesc, a_name.c_str());
-				if (!imported) {
-					logger::error("[ORG] {}: not exported, the graph could not import it in GENERAL", a_name);
-					exported.d3d11 = nullptr;
-					runtime.ReleaseAfterD3D11(std::make_shared<rhi::ResourcePtr>(std::move(image)));
-					return {};
-				}
-				auto kept = std::make_shared<Kept>(Kept{ std::move(image), std::move(imported) });
-				texture = std::shared_ptr<org::ExternalTextureResource>(kept, kept->texture.get());
+				auto imported = RenderGraph::ImportDxvkTexture(RenderGraphRuntime::Get().Host()->Device(), a_info, a_graphDesc, a_name.c_str());
+				if (!imported)
+					return nullptr;
+				auto kept = std::make_shared<Kept>(Kept{ std::move(a_image), std::move(imported) });
+				return std::shared_ptr<org::ExternalTextureResource>(kept, kept->texture.get());
+			}
+			// Guest mode rests the texture in its own layout and the graph moves it into each pass's layout and back.
+			auto texture = org::ExternalTextureResource::CreateShared(std::move(a_image), a_graphDesc, false);
+			texture->SetName(a_name);
+			if (a_note)
+				RenderGraph::NoteImageResource(reinterpret_cast<std::uint64_t>(a_info.image), texture, a_name);
+			return texture;
+		}
+
+		/** @brief An exported image as D3D11's wrap of it will describe it, in a_layout. Any thread. False when BasicRHI does not say. */
+		bool DescribeExportImage(const rhi::Resource& a_image, const DxvkOrgInteropTextureWrap& a_wrap, VkImageLayout a_layout, DxvkOrgInteropImageInfo& a_out)
+		{
+			a_out = {};
+			if (RenderGraph::Backend::IsD3D12()) {
+				// D3D12 native mode: the image field carries the ID3D12Resource, as native's wrap gives it.
+				rhi::D3D12ResourceInfo info{};
+				if (!rhi::QueryNativeResource(a_image, rhi::RHI_IID_D3D12_RESOURCE, &info, sizeof(info)) || !info.resource)
+					return false;
+				a_out.image = reinterpret_cast<VkImage>(info.resource);
 			} else {
-				// Guest mode rests the texture in its own layout and the graph moves it into each pass's layout and back.
-				texture = org::ExternalTextureResource::CreateShared(std::move(image), graphDesc, false);
-				texture->SetName(a_name);
-				// For the duplicate-image check.
-				RenderGraph::NoteImageResource(reinterpret_cast<std::uint64_t>(info.image.image), texture, a_name);
+				// D3D11 keeps the format, create flags and usage the image was made with.
+				rhi::VulkanResourceInfo info{};
+				if (!rhi::vulkan::get_resource_info(a_image, info) || !info.resource)
+					return false;
+				a_out.image = rhi::vulkan::from_native_void<VkImage>(info.resource);
+				a_out.format = static_cast<VkFormat>(info.nativeFormat);
+				a_out.flags = static_cast<VkImageCreateFlags>(info.flags);
+				a_out.usage = static_cast<VkImageUsageFlags>(info.usage);
+			}
+			const bool is3D = a_wrap.dimension == D3D11_RESOURCE_DIMENSION_TEXTURE3D;
+			a_out.type = is3D ? VK_IMAGE_TYPE_3D : VK_IMAGE_TYPE_2D;
+			a_out.extent = { a_wrap.width, a_wrap.height, is3D ? a_wrap.depthOrArraySize : 1u };
+			a_out.mipLevels = a_wrap.mipLevels;
+			a_out.arrayLayers = is3D ? 1u : a_wrap.depthOrArraySize;
+			a_out.samples = static_cast<VkSampleCountFlagBits>(a_wrap.sampleCount);
+			a_out.layout = a_layout;
+			return true;
+		}
+	}
+
+	ExportedTexture ExportTexture(const ExportDesc& a_desc, const std::string& a_name)
+	{
+		auto& runtime = RenderGraphRuntime::Get();
+		if (!runtime.CanWrapTextures()) {
+			logger::warn("[ORG] {}: not exported, the DXVK build cannot wrap images (dxvkCreateTextureFromVkImage)", a_name);
+			return {};
+		}
+		try {
+			auto made = MakeExportImage(a_desc, a_name);
+			DxvkOrgInteropResourceInfo info{};
+			ExportedTexture exported;
+			exported.d3d11 = runtime.WrapTexture(made.image.Get(), made.wrap, info, a_name.c_str());
+			std::shared_ptr<org::ExternalTextureResource> texture;
+			if (exported.d3d11) {
+				texture = MakeExportGraph(made.image, info.image, made.graphDesc, a_name, true);
+				if (!texture)
+					logger::error("[ORG] {}: not exported: DXVK rests it in layout {}, which the graph has no equivalent of, or the graph could not import it",
+						a_name, static_cast<int>(info.image.layout));
+			}
+			if (!texture) {
+				// DXVK's stream may still initialize the image, so it goes once D3D11 is past this point.
+				exported.d3d11 = nullptr;
+				runtime.ReleaseAfterD3D11(std::make_shared<rhi::ResourcePtr>(std::move(made.image)));
+				return {};
 			}
 			exported.image = reinterpret_cast<std::uint64_t>(info.image.image);
+			exported.layout = static_cast<std::uint32_t>(info.image.layout);
 			// An import of the D3D11 texture finds this resource instead of importing it again.
-			RenderGraph::RegisterMadeImage(exported.image, texture, graphDesc, a_name);
+			RenderGraph::RegisterMadeImage(exported.image, texture, made.graphDesc, a_name);
 			exported.graph = std::move(texture);
 			return exported;
 		} catch (const std::exception& e) {
@@ -667,6 +750,237 @@ namespace GraphResources
 		slot.reset();
 	}
 
+	bool Resource::ShapeAt(const Extent&, ExportDesc&) const
+	{
+		return false;
+	}
+
+	bool Resource::Preparable(const Extent& a_next) const
+	{
+		std::shared_lock lock(RegisterMutex());
+		ExportDesc shape{};
+		return options.versioned && !Aliasable() && slot && graph && (!Exported() || d3d11) && ShapeAt(a_next, shape);
+	}
+
+	PreparedVersion Resource::Prepare(const Extent& a_next) const
+	{
+		ZoneScopedN("CS.Frame.Revision.Prepare");
+		ExportDesc shape{};
+		PreparedVersion prepared;
+		std::uint32_t layout = 0;
+		{
+			// Only a twin's own adoption changes what is read here, so the lock is held briefly and never while memory is made.
+			std::shared_lock lock(RegisterMutex());
+			if (!options.versioned || Aliasable() || !slot || !graph || (Exported() && !d3d11) || !ShapeAt(a_next, shape))
+				return {};
+			prepared.slot = slot;
+			layout = exportLayout;
+		}
+		prepared.extent = a_next;
+		prepared.twin = this;
+		// An exported version is zeroed by its D3D11 wrap at adoption, before any graph use, so nothing may fill it before.
+		prepared.contents = !Exported() && options.lifetime == Lifetime::History ? Contents::Zero : Contents::Undefined;
+		const auto failure = [&](std::string_view a_why) {
+			return std::runtime_error(fmt::format("{}: no version at {}x{}x{}: {}", name, a_next[0], a_next[1], a_next[2], a_why));
+		};
+		const Shape next = TwinShapeOf(shape);
+		if (!Exported()) {
+			try {
+				prepared.resource = std::dynamic_pointer_cast<org::GloballyIndexedResource>(CreateGraphTexture(next, name, false));
+			} catch (const std::exception& e) {
+				throw failure(e.what());
+			}
+			if (!prepared.resource)
+				throw failure("the graph texture could not be made");
+			return prepared;
+		}
+		TwinExportImage made;
+		try {
+			made = MakeExportImage(TwinExportDescOf(next), name);
+		} catch (const std::exception& e) {
+			throw failure(e.what());
+		}
+		DxvkOrgInteropImageInfo info{};
+		if (!DescribeExportImage(made.image.Get(), made.wrap, static_cast<VkImageLayout>(layout), info))
+			throw failure("BasicRHI did not describe its image");
+		auto exported = std::make_shared<PreparedExport>();
+		exported->image = made.image.Get();
+		exported->wrap = made.wrap;
+		exported->vkImage = reinterpret_cast<std::uint64_t>(info.image);
+		exported->layout = layout;
+		exported->imported = RenderGraph::HomeLayoutOf(info.layout) == rhi::ResourceLayout::Common;
+		// The previous version's resting layout, since D3D11 rests every image of a shape class alike. Adoption checks it.
+		auto texture = MakeExportGraph(made.image, info, made.graphDesc, name, false);
+		if (!texture)
+			throw failure(fmt::format("the graph could not take it in layout {}", layout));
+		exported->views = made.graphDesc;
+		prepared.resource = std::move(texture);
+		prepared.exported = std::move(exported);
+		return prepared;
+	}
+
+	void Resource::AdoptPrepared(const PreparedVersion& a_prepared)
+	{
+		const auto& extent = a_prepared.extent;
+		const auto fail = [&](std::string_view a_why) {
+			const auto message = fmt::format("Community Shaders: {} could not adopt its version at {}x{}x{}: {}", name, extent[0], extent[1], extent[2], a_why);
+			logger::critical("[ORG] {}", message);
+			stl::report_and_fail(message);
+		};
+		if (a_prepared.twin != static_cast<const void*>(this) || !a_prepared.resource)
+			fail("it was prepared for another twin");
+		std::unique_lock lock(RegisterMutex());
+		if (!slot || a_prepared.slot != slot)
+			fail("the twin has another slot since it was prepared");
+		if (slot->CurrentResource() != std::static_pointer_cast<org::Resource>(a_prepared.resource))
+			fail("its slot has not adopted the version");
+		if (Exported() != (a_prepared.exported != nullptr))
+			fail("it was prepared with another export");
+		winrt::com_ptr<ID3D11Resource> nextD3D11;
+		winrt::com_ptr<ID3D11ShaderResourceView> nextSrv;
+		winrt::com_ptr<ID3D11UnorderedAccessView> nextUav;
+		winrt::com_ptr<ID3D11RenderTargetView> nextRtv;
+		winrt::com_ptr<ID3D11DepthStencilView> nextDsv;
+		double exportMs = 0.0;
+		if (a_prepared.exported) {
+			ZoneScopedN("CS.Frame.Revision.Adopt");
+			const auto start = std::chrono::steady_clock::now();
+			const auto& exported = *a_prepared.exported;
+			DxvkOrgInteropResourceInfo info{};
+			nextD3D11 = RenderGraphRuntime::Get().WrapTexture(exported.image, exported.wrap, info, name.c_str());
+			if (!nextD3D11)
+				fail("D3D11 did not wrap its image");
+			if (reinterpret_cast<std::uint64_t>(info.image.image) != exported.vkImage || static_cast<std::uint32_t>(info.image.layout) != exported.layout)
+				fail(fmt::format("D3D11 wrapped image 0x{:X} in layout {}, but it was prepared as image 0x{:X} in layout {}",
+					reinterpret_cast<std::uint64_t>(info.image.image), static_cast<int>(info.image.layout), exported.vkImage, exported.layout));
+			ExportDesc shape{};
+			if (!ShapeAt(extent, shape))
+				fail("its shape class changed");
+			const Shape next = TwinShapeOf(shape);
+			const auto formats = FormatsOf(next);
+			const bool typed = Is3D(next) ? static_cast<bool>(nextD3D11.try_as<ID3D11Texture3D>()) : static_cast<bool>(nextD3D11.try_as<ID3D11Texture2D>());
+			if (!typed || !CreateTextureViews(nextD3D11.get(), options.d3d11, nextSrv, nextUav, nextRtv, nextDsv, IsDepth(next) ? &formats : nullptr))
+				fail("D3D11 refused a view of the exported texture");
+			exportMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
+		}
+		// The old D3D11 side goes first, as in Reset. The slot's old version keeps its graph texture while frames hold it.
+		srv = nullptr;
+		uav = nullptr;
+		rtv = nullptr;
+		dsv = nullptr;
+		d3d11 = nullptr;
+		RenderGraph::ForgetMadeImage(graph.get());
+		if (a_prepared.exported && graph)
+			RenderGraphRuntime::Get().ReleaseAfterD3D11(std::move(graph));
+		graph = a_prepared.resource;
+		d3d11 = std::move(nextD3D11);
+		srv = std::move(nextSrv);
+		uav = std::move(nextUav);
+		rtv = std::move(nextRtv);
+		dsv = std::move(nextDsv);
+		SetExtent(extent);
+		if (a_prepared.exported) {
+			const auto& exported = *a_prepared.exported;
+			// A GENERAL import registered its image for the duplicate check when it was made.
+			if (!exported.imported)
+				RenderGraph::NoteImageResource(exported.vkImage, graph, name);
+			// An import of the D3D11 texture finds this resource, and through it the slot.
+			RenderGraph::RegisterMadeImage(exported.vkImage, graph, exported.views, name);
+		}
+		RenderGraph::SetMadeImageSlot(graph.get(), slot);
+		NameViews();
+		if (requestedSize == extent)
+			requestedSize.reset();
+		if (a_prepared.exported)
+			logger::info("[ORG] {}: adopted its prepared version at {}x{}x{} (D3D11 export {:.3f} ms)", name, extent[0], extent[1], extent[2], exportMs);
+		else
+			logger::info("[ORG] {}: adopted its prepared version at {}x{}x{}", name, extent[0], extent[1], extent[2]);
+	}
+
+	namespace
+	{
+		Resource::SizeWishHook& TwinSizeWishHook()
+		{
+			static Resource::SizeWishHook s_hook;
+			return s_hook;
+		}
+
+		UINT TwinMipsOf3D(const D3D11_TEXTURE3D_DESC& a_desc)
+		{
+			return a_desc.MipLevels ? a_desc.MipLevels : static_cast<UINT>(std::bit_width((std::max)({ a_desc.Width, a_desc.Height, a_desc.Depth, 1u })));
+		}
+	}
+
+	void Resource::SetSizeWishHook(SizeWishHook a_hook)
+	{
+		TwinSizeWishHook() = std::move(a_hook);
+	}
+
+	Extent Texture2D::CurrentExtent() const
+	{
+		return { desc.Width, desc.Height, 1u };
+	}
+
+	bool Texture2D::ShapeAt(const Extent& a_extent, ExportDesc& a_out) const
+	{
+		auto next = desc;
+		next.Width = a_extent[0];
+		next.Height = a_extent[1];
+		if (a_extent[2] != 1 || MipsOf(next) != MipsOf(desc))
+			return false;
+		a_out = {};
+		a_out.dimension = D3D11_RESOURCE_DIMENSION_TEXTURE2D;
+		a_out.width = next.Width;
+		a_out.height = next.Height;
+		a_out.depthOrArraySize = desc.ArraySize;
+		a_out.mips = desc.MipLevels;
+		a_out.samples = desc.SampleDesc.Count;
+		a_out.format = desc.Format;
+		a_out.bindFlags = desc.BindFlags;
+		a_out.miscFlags = desc.MiscFlags;
+		a_out.array = options.array;
+		return true;
+	}
+
+	void Texture2D::SetExtent(const Extent& a_extent)
+	{
+		desc.Width = a_extent[0];
+		desc.Height = a_extent[1];
+	}
+
+	Extent Texture3D::CurrentExtent() const
+	{
+		return { desc.Width, desc.Height, desc.Depth };
+	}
+
+	bool Texture3D::ShapeAt(const Extent& a_extent, ExportDesc& a_out) const
+	{
+		auto next = desc;
+		next.Width = a_extent[0];
+		next.Height = a_extent[1];
+		next.Depth = a_extent[2];
+		if (TwinMipsOf3D(next) != TwinMipsOf3D(desc))
+			return false;
+		a_out = {};
+		a_out.dimension = D3D11_RESOURCE_DIMENSION_TEXTURE3D;
+		a_out.width = next.Width;
+		a_out.height = next.Height;
+		a_out.depthOrArraySize = next.Depth;
+		a_out.mips = desc.MipLevels;
+		a_out.samples = 1;
+		a_out.format = desc.Format;
+		a_out.bindFlags = desc.BindFlags;
+		a_out.miscFlags = desc.MiscFlags;
+		return true;
+	}
+
+	void Texture3D::SetExtent(const Extent& a_extent)
+	{
+		desc.Width = a_extent[0];
+		desc.Height = a_extent[1];
+		desc.Depth = a_extent[2];
+	}
+
 	void Resource::NameViews() const
 	{
 		if (srv)
@@ -693,6 +1007,7 @@ namespace GraphResources
 		auto created = CreateTexture(shape, name, options);
 		graph = std::move(created.graph);
 		d3d11 = std::move(created.d3d11);
+		exportLayout = created.layout;
 		const auto formats = FormatsOf(shape);
 		const Formats* depth = IsDepth(shape) ? &formats : nullptr;
 		if (d3d11 && (!d3d11.try_as<ID3D11Texture2D>() || !CreateTextureViews(d3d11.get(), options.d3d11, srv, uav, rtv, dsv, depth))) {
@@ -771,13 +1086,19 @@ namespace GraphResources
 	void Resource::RequestExtent(const std::array<UINT, 3>& a_size, bool a_current, std::function<void(const std::array<UINT, 3>&)> a_resize)
 	{
 		if (a_current) {
-			requestedSize.reset();
+			if (std::exchange(requestedSize, std::nullopt) && TwinSizeWishHook())
+				TwinSizeWishHook()(*this, requestedSize);
 			return;
 		}
 		if (requestedSize == a_size)
 			return;
 		const bool queued = requestedSize.has_value();
 		requestedSize = a_size;
+		// A taker of wishes serves them instead of the next frame boundary.
+		if (TwinSizeWishHook()) {
+			TwinSizeWishHook()(*this, requestedSize);
+			return;
+		}
 		if (queued)
 			return;
 		auto apply = [this, resize = std::move(a_resize)] {
@@ -827,6 +1148,7 @@ namespace GraphResources
 		auto created = CreateTexture(shape, name, options);
 		graph = std::move(created.graph);
 		d3d11 = std::move(created.d3d11);
+		exportLayout = created.layout;
 		if (d3d11 && (!d3d11.try_as<ID3D11Texture3D>() || !CreateTextureViews(d3d11.get(), options.d3d11, srv, uav, rtv, dsv))) {
 			logger::error("[ORG] {}: D3D11 refused a view of the exported texture", name);
 			Reset();
@@ -968,6 +1290,17 @@ namespace GraphResources
 	bool IsTransientName(std::string_view) { return false; }
 	void NoteTransientName(const std::string&, bool) {}
 	bool Resource::AdoptSlot(std::shared_ptr<org::VersionedTexture>, bool) { return false; }
+	bool Resource::ShapeAt(const Extent&, ExportDesc&) const { return false; }
+	bool Resource::Preparable(const Extent&) const { return false; }
+	PreparedVersion Resource::Prepare(const Extent&) const { return {}; }
+	void Resource::AdoptPrepared(const PreparedVersion&) {}
+	void Resource::SetSizeWishHook(SizeWishHook) {}
+	Extent Texture2D::CurrentExtent() const { return { desc.Width, desc.Height, 1u }; }
+	bool Texture2D::ShapeAt(const Extent&, ExportDesc&) const { return false; }
+	void Texture2D::SetExtent(const Extent&) {}
+	Extent Texture3D::CurrentExtent() const { return { desc.Width, desc.Height, desc.Depth }; }
+	bool Texture3D::ShapeAt(const Extent&, ExportDesc&) const { return false; }
+	void Texture3D::SetExtent(const Extent&) {}
 	std::uint64_t Resource::ResizeGeneration() { return 0; }
 	std::string Resource::ResizeCauses(std::uint64_t) { return {}; }
 	void Resource::BumpResizeGeneration(std::string_view) {}
