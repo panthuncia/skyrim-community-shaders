@@ -50,6 +50,7 @@ namespace RenderGraph::Frame::Vars
 			Variable<ShadowMapShape> engineShadowMap = set.Declare("EngineShadowMap", ShadowMapShape{});
 			Variable<CubemapShape> reflectionCubemap = set.Declare("ReflectionCubemap", CubemapShape{});
 			Variable<UpscalerOptions> upscalerOptions = set.Declare("UpscalerOptions", UpscalerOptions{});
+			Variable<FrameGen::PresentationConfig> presentationConfig = set.Declare("PresentationConfig", FrameGen::PresentationConfig{});
 
 			std::mutex eventsMutex;
 			std::map<std::string, VariableEventCounts, std::less<>> events;
@@ -139,6 +140,11 @@ namespace RenderGraph::Frame::Vars
 	bool SetEngineShadowMap(ShadowMapShape a_value, std::string_view a_writer) { return SetFrameVariable(FrameVariableSet().engineShadowMap, a_value, "EngineShadowMap", a_writer); }
 	bool SetReflectionCubemap(CubemapShape a_value, std::string_view a_writer) { return SetFrameVariable(FrameVariableSet().reflectionCubemap, a_value, "ReflectionCubemap", a_writer); }
 	bool SetUpscalerOptions(UpscalerOptions a_value, std::string_view a_writer) { return SetFrameVariable(FrameVariableSet().upscalerOptions, a_value, "UpscalerOptions", a_writer); }
+	bool SetPresentationConfig(const FrameGen::PresentationConfig& a_value, std::string_view a_writer)
+	{
+		return SetFrameVariable(FrameVariableSet().presentationConfig, a_value, "PresentationConfig", a_writer);
+	}
+	FrameGen::PresentationConfig WrittenPresentationConfig() { return FrameVariableSet().set.Get(FrameVariableSet().presentationConfig); }
 
 	Extent2D AdoptedDisplaySize() { return AdoptedFrameValue(FrameVariableSet().displaySize); }
 	Extent2D AdoptedRenderSize() { return AdoptedFrameValue(FrameVariableSet().renderSize); }
@@ -149,6 +155,7 @@ namespace RenderGraph::Frame::Vars
 	ShadowMapShape AdoptedEngineShadowMap() { return AdoptedFrameValue(FrameVariableSet().engineShadowMap); }
 	CubemapShape AdoptedReflectionCubemap() { return AdoptedFrameValue(FrameVariableSet().reflectionCubemap); }
 	UpscalerOptions AdoptedUpscalerOptions() { return AdoptedFrameValue(FrameVariableSet().upscalerOptions); }
+	FrameGen::PresentationConfig AdoptedPresentationConfig() { return AdoptedFrameValue(FrameVariableSet().presentationConfig); }
 
 	void RaiseFeatureSettings(std::string_view a_feature, std::string_view a_writer)
 	{
@@ -223,6 +230,11 @@ namespace RenderGraph::Frame::Vars
 			FrameVariableSet().adopted = std::move(a_snapshot);
 		}
 
+		FrameGen::PresentationConfig PresentationConfigIn(const org::services::VariableSnapshot& a_values)
+		{
+			return a_values.Get(FrameVariableSet().presentationConfig);
+		}
+
 		std::string ChangedNames(const org::services::VariableSnapshot& a_newer, const org::services::VariableSnapshot* a_older)
 		{
 			std::string names;
@@ -245,27 +257,50 @@ namespace RenderGraph::Frame::Vars
 
 #else
 
+#	include <atomic>
+#	include <mutex>
+#	include <utility>
+
 namespace RenderGraph::Frame::Vars
 {
+	namespace
+	{
+		// Without revisions the values read back are the newest written ones.
+		std::atomic<bool> g_stubHdrEnabled{ false };
+		std::mutex g_stubPresentationMutex;
+		FrameGen::PresentationConfig g_stubPresentation{};
+	}
+
 	bool SetDisplaySize(Extent2D, std::string_view) { return false; }
 	bool SetRenderSize(Extent2D, std::string_view) { return false; }
 	bool SetDynamicRatios(Ratios, std::string_view) { return false; }
 	bool SetUpscaleMethod(Upscaler, std::string_view) { return false; }
-	bool SetHdrEnabled(bool, std::string_view) { return false; }
+	bool SetHdrEnabled(bool a_value, std::string_view) { return g_stubHdrEnabled.exchange(a_value) != a_value; }
 	bool SetHdrOutputTarget(TargetIdentity, std::string_view) { return false; }
 	bool SetEngineShadowMap(ShadowMapShape, std::string_view) { return false; }
 	bool SetReflectionCubemap(CubemapShape, std::string_view) { return false; }
 	bool SetUpscalerOptions(UpscalerOptions, std::string_view) { return false; }
+	bool SetPresentationConfig(const FrameGen::PresentationConfig& a_value, std::string_view)
+	{
+		const std::lock_guard lock(g_stubPresentationMutex);
+		return std::exchange(g_stubPresentation, a_value) != a_value;
+	}
+	FrameGen::PresentationConfig WrittenPresentationConfig()
+	{
+		const std::lock_guard lock(g_stubPresentationMutex);
+		return g_stubPresentation;
+	}
 
 	Extent2D AdoptedDisplaySize() { return {}; }
 	Extent2D AdoptedRenderSize() { return {}; }
 	Ratios AdoptedDynamicRatios() { return {}; }
 	Upscaler AdoptedUpscaleMethod() { return {}; }
-	bool AdoptedHdrEnabled() { return false; }
+	bool AdoptedHdrEnabled() { return g_stubHdrEnabled.load(); }
 	TargetIdentity AdoptedHdrOutputTarget() { return {}; }
 	ShadowMapShape AdoptedEngineShadowMap() { return {}; }
 	CubemapShape AdoptedReflectionCubemap() { return {}; }
 	UpscalerOptions AdoptedUpscalerOptions() { return {}; }
+	FrameGen::PresentationConfig AdoptedPresentationConfig() { return WrittenPresentationConfig(); }
 
 	void RaiseFeatureSettings(std::string_view, std::string_view) {}
 	std::uint64_t FeatureSettingsEvents(std::string_view) { return 0; }

@@ -47,13 +47,15 @@ namespace RenderGraph::Frame::Revision
 	{
 		using GraphResources::Extent;
 
-		// The revision's fragments (plan, step 4c). Inputs hold the variables' snapshot (step 5b).
+		// The revision's fragments (plan, step 4c). Inputs hold the variables' snapshot (step 5b). Input waits hold the work
+		// outside the frame that changed variables need (RegisterInputProducer), such as a swap chain replacement.
 		constexpr std::uint32_t kRevisionInputs = 0;
 		constexpr std::uint32_t kRevisionTextures = 1;
 		constexpr std::uint32_t kRevisionBuffers = 2;
 		constexpr std::uint32_t kRevisionBuilds = 3;
 		constexpr std::uint32_t kRevisionRecordings = 4;
-		constexpr std::uint32_t kRevisionSlots = 5;
+		constexpr std::uint32_t kRevisionInputWaits = 5;
+		constexpr std::uint32_t kRevisionSlots = 6;
 
 		// The starvation rule (plan 7.8): recordings dropped and asked for again this often with no new input is a schedule bug.
 		constexpr std::uint64_t kRevisionStarvedAfter = 4 * RenderGraphRuntime::kGameFramesInFlight;
@@ -112,6 +114,20 @@ namespace RenderGraph::Frame::Revision
 			std::shared_ptr<const org::services::VariableSnapshot> variables;
 		};
 
+		/** @brief One input a revision waits for, from a variable's producer. */
+		struct RevisionInputWait
+		{
+			std::string variable;
+			InputWait wait;
+			bool ready = false;
+		};
+
+		/** @brief The value of the input waits fragment: what adoption runs for each input. */
+		struct RevisionInputWaits
+		{
+			std::vector<std::function<void()>> adopt;
+		};
+
 		/** @brief The value of the builds fragment: the staged builds the revision attaches. */
 		struct RevisionBuilds
 		{
@@ -139,6 +155,9 @@ namespace RenderGraph::Frame::Revision
 			// The newest variables when it started, and the names of those changed since the revision before.
 			std::shared_ptr<const org::services::VariableSnapshot> variables;
 			std::string changedVariables;
+			// What its variable changes need outside the frame, and the fragment that resolves once all of it is ready.
+			std::vector<RevisionInputWait> inputWaits;
+			std::shared_ptr<org::async::RevisionFragment> inputWaitsFragment;
 			std::uint64_t firstWish = 0;
 			std::uint64_t planned = 0;  // the frame it was handed to the lane
 			std::shared_ptr<org::runtime::IUploadService> uploads;
@@ -198,6 +217,9 @@ namespace RenderGraph::Frame::Revision
 			std::deque<std::pair<std::uint64_t, std::shared_ptr<PreparedRevision>>> retiring;
 			std::unique_ptr<org::async::RevisionAssembler> assembler = std::make_unique<org::async::RevisionAssembler>(kRevisionSlots);
 			std::uint64_t adoptedLines = 0;
+			// The input producers by variable name (RegisterInputProducer).
+			std::mutex producerMutex;
+			std::map<std::string, InputProducer, std::less<>> producers;
 			// The census, read by LogStats on any thread.
 			std::mutex statsMutex;
 			RevisionStats window;
@@ -398,6 +420,41 @@ namespace RenderGraph::Frame::Revision
 			}
 		}
 
+		/** @brief The variables a_newer changed since a_older. Without a_older, the variables written at least once. */
+		std::vector<org::services::VariableIndex> ChangedVariables(const org::services::VariableSnapshot& a_newer, const org::services::VariableSnapshot* a_older)
+		{
+			if (a_older)
+				return a_newer.ChangedSince(*a_older);
+			// A variable's first serial is 1, so a higher one was written.
+			std::vector<org::services::VariableIndex> changed;
+			for (org::services::VariableIndex i = 0; i < a_newer.Size(); ++i)
+				if (a_newer.Serial(i) > 1)
+					changed.push_back(i);
+			return changed;
+		}
+
+		/** @brief Starts the work outside the frame that the revision's variable changes need. Render thread. */
+		void ProduceInputs(Coordinator& a_coordinator, PreparedRevision& a_job, const org::services::VariableSnapshot& a_values,
+			const org::services::VariableSnapshot* a_started)
+		{
+			for (const auto index : ChangedVariables(a_values, a_started)) {
+				InputProducer producer;
+				{
+					const std::lock_guard lock(a_coordinator.producerMutex);
+					const auto it = a_coordinator.producers.find(a_values.Name(index));
+					if (it == a_coordinator.producers.end())
+						continue;
+					producer = it->second;
+				}
+				auto wait = producer(a_values, a_job.serial);
+				if (!wait.poll)
+					FailRevision(fmt::format("revision {}'s producer of {} returned no wait", a_job.serial, a_values.Name(index)));
+				a_job.inputWaits.push_back({ std::string(a_values.Name(index)), std::move(wait) });
+			}
+			if (!a_job.inputWaits.empty())
+				a_job.inputWaitsFragment = std::make_shared<org::async::RevisionFragment>();
+		}
+
 		/**
 		* @brief Hands the standing inputs to the lane as the next revision: size wishes and buffer contents. With none of those, a
 		* staged stage build makes a revision of its own. Only one is prepared at a time.
@@ -406,12 +463,11 @@ namespace RenderGraph::Frame::Revision
 		{
 			if (a_coordinator.preparing)
 				return;
+			// Without a graph (plain D3D11, or before the graph is up) a revision carries only variables.
 			auto* host = RenderGraphRuntime::Get().Host();
-			if (!host)
-				return;
 			auto job = std::make_shared<PreparedRevision>();
 			job->firstWish = UINT64_MAX;
-			if (!a_coordinator.wishes.empty() && a_coordinator.plannedSerial != a_coordinator.wishSerial) {
+			if (host && !a_coordinator.wishes.empty() && a_coordinator.plannedSerial != a_coordinator.wishSerial) {
 				for (auto it = a_coordinator.wishes.begin(); it != a_coordinator.wishes.end();) {
 					auto& [twin, wish] = *it;
 					if (wish.alive.expired() || twin->CurrentExtent() == wish.extent) {
@@ -435,7 +491,7 @@ namespace RenderGraph::Frame::Revision
 				}
 				a_coordinator.plannedSerial = a_coordinator.wishSerial;
 			}
-			{
+			if (host) {
 				const std::lock_guard lock(a_coordinator.bufferMutex);
 				for (auto& [key, wish] : std::exchange(a_coordinator.bufferWishes, {}))
 					job->bufferWishes.push_back(std::move(wish));
@@ -447,15 +503,17 @@ namespace RenderGraph::Frame::Revision
 			if (variablesChanged)
 				job->firstWish = (std::min)(job->firstWish, a_coordinator.variablesFirstChange);
 			const bool lane = !job->plans.empty() || !job->bufferWishes.empty();
-			if (!lane && !FrameAnchors::StagedStages() && !variablesChanged)
+			if (!lane && !(host && FrameAnchors::StagedStages()) && !variablesChanged)
 				return;
 			if (job->firstWish == UINT64_MAX)
 				job->firstWish = a_frame;
 			if (variablesChanged)
 				job->changedVariables = Vars::Lane::ChangedNames(*a_coordinator.variables, a_coordinator.startedVariables.get());
+			job->serial = ++a_coordinator.serials;
+			if (variablesChanged)
+				ProduceInputs(a_coordinator, *job, *a_coordinator.variables, a_coordinator.startedVariables.get());
 			job->variables = a_coordinator.variables;
 			a_coordinator.startedVariables = a_coordinator.variables;
-			job->serial = ++a_coordinator.serials;
 			job->planned = a_frame;
 			job->host = host;
 			a_coordinator.preparing = job;
@@ -527,7 +585,12 @@ namespace RenderGraph::Frame::Revision
 			auto draft = assembler.Begin();
 			auto inputsValue = std::make_shared<RevisionInputs>();
 			inputsValue->variables = revision->variables;
-			const auto inputs = org::async::RevisionFragment::MakeReady(std::move(inputsValue));
+			// The variables are valid only with the work their changes needed.
+			std::vector<org::async::RevisionFragment::Requirement> inputRequirements;
+			if (revision->inputWaitsFragment)
+				inputRequirements.push_back({ kRevisionInputWaits, revision->inputWaitsFragment });
+			draft.Set(kRevisionInputWaits, revision->inputWaitsFragment);
+			const auto inputs = org::async::RevisionFragment::MakeReady(std::move(inputsValue), std::move(inputRequirements));
 			draft.Set(kRevisionInputs, inputs);
 			draft.Set(kRevisionTextures, revision->made ? revision->made->fragment : nullptr);
 			draft.Set(kRevisionBuffers, revision->buffersFragment);
@@ -556,17 +619,22 @@ namespace RenderGraph::Frame::Revision
 				FailRevision(fmt::format("revision {} was complete but not selected", revision->serial));
 			const auto lease = assembler.AcquireActive();
 			const auto adoptedInputs = lease->Get<RevisionInputs>(kRevisionInputs);
+			const auto inputWaits = lease->Get<RevisionInputWaits>(kRevisionInputWaits);
 			const auto named = lease->Get<org::services::NamedVersions>(kRevisionTextures);
 			const auto buffers = lease->Get<RevisionBuffers>(kRevisionBuffers);
 			const auto attaching = lease->Get<RevisionBuilds>(kRevisionBuilds);
 			const auto recorded = lease->Get<RevisionMemberRecordings>(kRevisionRecordings);
 			if (static_cast<bool>(named) != static_cast<bool>(revision->made) || static_cast<bool>(buffers) != static_cast<bool>(revision->buffers) ||
-				static_cast<bool>(attaching) != !stagedEpochs.empty() || !recorded || !adoptedInputs || !adoptedInputs->variables)
+				static_cast<bool>(attaching) != !stagedEpochs.empty() || !recorded || !adoptedInputs || !adoptedInputs->variables ||
+				static_cast<bool>(inputWaits) != static_cast<bool>(revision->inputWaitsFragment))
 				FailRevision(fmt::format("revision {} was selected without its inputs, versions, builds or recordings", revision->serial));
 			{
 				const Boundary::Caller caller("revision");
-				// The frame reads the variables of the revision it runs.
+				// The frame reads the variables of the revision it runs, and takes what their changes made outside the frame.
 				Vars::Lane::Adopt(adoptedInputs->variables);
+				if (inputWaits)
+					for (const auto& adopt : inputWaits->adopt)
+						adopt();
 				if (named)
 					named->AdoptAll();
 				for (std::size_t i = 0; i < revision->twins.size(); ++i)
@@ -631,9 +699,14 @@ namespace RenderGraph::Frame::Revision
 				std::string others;
 				for (const auto epoch : revision->others)
 					others += fmt::format("{}{}", others.empty() ? "" : ", ", EpochText(epoch));
-				logger::info("[ORG] frame revision {}: adopted at frame {} with every member stage, {} frames after its first input (prepared in {:.2f} ms "
-							 "on the lane); twins [{}]; buffers [{}]; variables [{}]; staged builds {}; member stages [{}] with {} recordings; not members [{}]",
-					revision->serial, a_frame, wishFrames, revision->milliseconds, twins, bufferNames, revision->changedVariables, stagedEpochs.size(),
+				std::string waits;
+				for (const auto& input : revision->inputWaits)
+					waits += fmt::format("{}{}", waits.empty() ? "" : ", ", input.wait.what);
+				logger::info(
+					"[ORG] frame revision {}: adopted at frame {} with every member stage, {} frames after its first input (prepared in {:.2f} ms "
+					"on the lane); twins [{}]; buffers [{}]; variables [{}]; inputs [{}]; staged builds {}; member stages [{}] with {} recordings; not "
+					"members [{}]",
+					revision->serial, a_frame, wishFrames, revision->milliseconds, twins, bufferNames, revision->changedVariables, waits, stagedEpochs.size(),
 					stages.empty() ? "none" : stages, revision->recordingCount, others.empty() ? "none" : others);
 			}
 			a_coordinator.adopted = std::move(revision);
@@ -664,6 +737,38 @@ namespace RenderGraph::Frame::Revision
 			return a_fragment->GetState() == org::async::RevisionFragment::State::Ready;
 		}
 
+		/** @brief Polls the revision's input waits and resolves their fragment once all are ready. Fatal when one failed. Render thread. */
+		bool PollInputs(PreparedRevision& a_revision)
+		{
+			if (!a_revision.inputWaitsFragment)
+				return true;
+			bool ready = true;
+			for (auto& input : a_revision.inputWaits) {
+				if (input.ready)
+					continue;
+				std::string why;
+				switch (input.wait.poll(why)) {
+				case InputState::Ready:
+					input.ready = true;
+					break;
+				case InputState::Failed:
+					a_revision.inputWaitsFragment->Fail(std::make_exception_ptr(std::runtime_error(fmt::format("{} for {}: {}", input.wait.what, input.variable, why))));
+					break;
+				case InputState::Pending:
+					ready = false;
+					break;
+				}
+			}
+			if (ready && a_revision.inputWaitsFragment->GetState() == org::async::RevisionFragment::State::Pending) {
+				auto value = std::make_shared<RevisionInputWaits>();
+				for (const auto& input : a_revision.inputWaits)
+					if (input.wait.adopt)
+						value->adopt.push_back(input.wait.adopt);
+				a_revision.inputWaitsFragment->Resolve(std::move(value));
+			}
+			return FragmentReady(a_revision, a_revision.inputWaitsFragment.get(), "input waits");
+		}
+
 		/** @brief The revision in preparation, once the lane is done: recordings, then adoption. Render thread. */
 		void Advance(Coordinator& a_coordinator, std::uint64_t a_frame)
 		{
@@ -673,6 +778,14 @@ namespace RenderGraph::Frame::Revision
 			std::string why;
 			if (!StillPlanned(revision, why)) {
 				Supersede(a_coordinator, why);
+				return;
+			}
+			// Inputs outside the frame (a swap chain replacement) run meanwhile. Only adoption waits for them.
+			const bool inputsReady = PollInputs(revision);
+			if (!revision.host) {
+				// A revision of variables alone has no recordings to make.
+				if (inputsReady)
+					Adopt(a_coordinator, a_frame);
 				return;
 			}
 			// The zero fills and uploads run on the uploader's queue. Recordings wait for nothing, but the revision is adopted only once they are done.
@@ -714,7 +827,7 @@ namespace RenderGraph::Frame::Revision
 						progress.dropReasons.empty() ? "none" : progress.dropReasons, progress.waiting));
 				a_coordinator.askedAgainSinceWish = 0;
 			}
-			if (!progress.ready)
+			if (!progress.ready || !inputsReady)
 				return;
 			revision.recordingCount = progress.recordings;
 			revision.buildCount = progress.builds;
@@ -743,6 +856,16 @@ namespace RenderGraph::Frame::Revision
 #	endif
 		logger::info("[ORG] frame revision: size wishes, buffer contents, staged stage builds and variable changes are prepared off the render thread "
 					 "and adopted whole at a frame's Begin");
+	}
+
+	bool RegisterInputProducer(std::string_view a_variable, InputProducer a_producer)
+	{
+		auto& coordinator = GetCoordinator();
+		const std::lock_guard lock(coordinator.producerMutex);
+		if (!coordinator.producers.emplace(std::string(a_variable), std::move(a_producer)).second)
+			FailRevision(fmt::format("a second input producer for the variable {}", a_variable));
+		logger::info("[ORG] frame revision: a revision that changes {} waits for its producer's input", a_variable);
+		return true;
 	}
 
 	void AdoptLatest()
@@ -819,6 +942,7 @@ namespace RenderGraph::Frame::Revision
 namespace RenderGraph::Frame::Revision
 {
 	void Install() {}
+	bool RegisterInputProducer(std::string_view, InputProducer) { return false; }
 	void AdoptLatest() {}
 	void PublishBuffer(const std::shared_ptr<org::VersionedBuffer>&, std::uint32_t, std::vector<std::byte>, std::shared_ptr<const void>) {}
 	std::shared_ptr<const void> AdoptedPayload(const org::VersionedBuffer&) { return nullptr; }

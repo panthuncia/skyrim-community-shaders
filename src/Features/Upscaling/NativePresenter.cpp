@@ -26,8 +26,9 @@ namespace FrameGen
 		surface.format = static_cast<rhi::Format>(state.format);
 		surface.hdr10 = state.hdr10;
 		surface.serial = state.serial;
-		// Ready once the swap chain has the latest request, so the frame's inputs match what it presents into.
-		surface.ready = RenderGraph::Engine::Native::Active() && state.serial == state.requested;
+		// Ready while no replacement is in flight, so the frame's inputs match what it presents into. A revision asks for one at
+		// a frame's Begin and is adopted with its result.
+		surface.ready = RenderGraph::Engine::Native::Active() && state.serial == RenderGraph::Engine::Native::Presentation().requested;
 		return surface;
 	}
 

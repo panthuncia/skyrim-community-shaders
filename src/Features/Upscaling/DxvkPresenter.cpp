@@ -228,6 +228,12 @@ namespace FrameGen
 		}
 	}
 
+	bool DxvkPresenter::ReportsReplacements() const
+	{
+		std::lock_guard guard(lock);
+		return callbackRegistered && g_dxvk.module && g_dxvk.setSwapchainTornDownCallback;
+	}
+
 	void DxvkPresenter::Settled(Method a_owner)
 	{
 		if (a_owner == Method::kNone) {
