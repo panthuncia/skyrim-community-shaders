@@ -1,0 +1,36 @@
+# As clouds, with the late shot 6000 frames later: plain D3D11 compiles the 47 cloud programs with FXC first.
+# native-d3d12+clouds, d3d11+clouds.
+extends = ["base"]
+
+[run]
+timeout_s = 600
+
+[features]
+PhysicalSky = true
+
+[[steps]]
+at = "world-ready"
+frames = 30
+do = "setting"
+arg = "PhysicalSky.enableVolumetricClouds=true"
+
+[[steps]]
+at = "previous"
+frames = 240
+do = "shot"
+arg = "clouds"
+
+[[steps]]
+at = "previous"
+frames = 6000
+do = "shot"
+arg = "clouds-late"
+
+[[steps]]
+at = "previous"
+frames = 10
+do = "exit"
+
+[expect]
+reach = "world-ready"
+shots = ["clouds", "clouds-late"]
