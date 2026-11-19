@@ -179,6 +179,43 @@ and storm data). It can be a graph pass only once those are graph resources, so 
 4. `SkyLightning::ReadSource` on the graph calls `Take(0)`. Empty means not read yet (as `DXGI_ERROR_WAS_STILL_DRAWING`). The
    first candidate with `w > 0` is the source, as on D3D11.
 
+## 6a. Volumetric clouds on the graph (phase 4 design, 2026-11-19)
+
+**Handle table.** The cloud programs read up to about 60 of 146 resources, and the push block holds 32 words. So every
+`Volumetrics.cs.hlsl` program reads its resource handles from a table. `AnchorPasses::Dispatch::table` (and `Draw::table`)
+lists one entry per table field, in the shader's order. Srv, Uav and Published entries are declared as bindings are; Handle
+entries (samplers, the null descriptor) carry their value. When the pass is recorded it writes its views' indices into a
+dedicated buffer (`LatchBlock::CreateDedicated`) that the recording retains, and pushes that buffer as a LATCH entry
+(`Bind::Table()`). The table is fixed for a recording and any replay of it, so it obeys the replay rule. A new buffer is made
+only when a recording's indices differ from the last one's.
+
+- `PhysicalSky/CloudTableList.hlsli` holds only `#define PHYSSKY_CLOUD_TABLE(X) X(name) ...`, every resource the
+  `Volumetrics.cs.hlsl` include closure declares (its own and its headers', `SharedData`'s and `ViewAtmosphere`'s
+  included). The C++ side includes the same file for its slot enum, so the two orders cannot drift.
+- In the ORG build every declaration in that closure is `ORG_HEADER_SRV`, `ORG_HEADER_UAV` or `ORG_HEADER_SAMPLER` (FXC
+  output unchanged), and `OrgHandle_<name>` is a static read from the table.
+- Every cloud program has the same push block: the shared constants, the table, then the latches (cloud constants,
+  dispatch rectangle, ambient volume, single storm, the AP shadow's light, and the per-frame structured data the D3D11 side
+  uploads: storms, local NDF weights, voxel placements, lightning segments). One C++ helper fills it.
+- An unbound entry is the null descriptor, as an unbound D3D11 register reads zero.
+
+**Per-frame choices.** Every dispatch the D3D11 code may issue is a gated step registered once. The commit opens the steps
+the frame takes, with their group counts. Shader variants are separate gated steps with the same declarations. The D3D11
+pointer swaps become copies: reprojection writes the fixed current targets, and a copy at the end of the frame makes them
+the next frame's history (the cube targets, the main view, the lightning masks, the ambient sources and layout). The voxel
+and upper passes copy their traces back into the low-resolution targets. So declarations never depend on the frame, and
+every reader reads one published id.
+
+**Resources.** Every cloud texture is a `GraphResources` twin in the graph modes, named `PhysicalSky::<member>`, Persistent
+or History, exported to D3D11 where guest D3D11 still binds it for engine draws. File textures are `ImmutableTexture`
+imports (native: exempt resources). Generated maps (noise, NDF, local NDF, storm, voxel, middle and cirrus maps, cross
+section, middle bounds) are gated or one-shot steps opened when their manager regenerates.
+
+**Clients.** `cs.physical-sky.cloud-maps` (the generators) and `cs.physical-sky.clouds` (shadow volume and mean, ambient,
+bounds, main view, cube, lightning) at Prepass, before `cs.physical-sky` (the AP shadow and sky tail read the shadow
+volume and mean by id) and the fog. The D3D11 cloud dispatches never run in the graph modes: before the clients are
+scheduled the outputs hold their neutral clears.
+
 ## 7. Order of work
 
 1. **LUTs** (this branch): disk phase, Tr, Ms, Sv, Ap on `cs.physical-sky.luts`; twins exported for D3D11 readers and
