@@ -46,8 +46,11 @@ namespace RenderGraph::Frame::Resources
 			}
 			// A new size becomes the slot's next version at the next frame boundary, before the new registration's build can switch in.
 			if (versioned && SameClass(desc, a_desc)) {
+				// A frame revision may take several frames to adopt the size, so only a new wish is logged.
+				const GraphResources::Extent wished{ a_desc.Width, a_desc.Height, 1 };
+				if (texture.RequestedExtent() != wished)
+					logger::info("[ORG] frame resources: {} takes {}x{} at a coming frame boundary (a new version of its slot)", a_name, a_desc.Width, a_desc.Height);
 				texture.RequestSize(a_desc.Width, a_desc.Height);
-				logger::info("[ORG] frame resources: {} takes {}x{} at the next frame boundary (a new version of its slot)", a_name, a_desc.Width, a_desc.Height);
 				return { found->second.texture, true };
 			}
 		}
