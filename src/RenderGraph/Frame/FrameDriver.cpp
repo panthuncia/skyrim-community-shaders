@@ -7,6 +7,7 @@
 #include "RenderGraph/Frame/BoundaryCheck.h"
 #include "RenderGraph/Frame/PostChain.h"
 #include "RenderGraph/Frame/Recipe.h"
+#include "RenderGraph/Frame/Revision.h"
 #include "RenderGraph/FrameAnchors.h"
 #include "RenderGraph/RenderGraphRuntime.h"
 #include "RenderGraph/Switches.h"
@@ -207,6 +208,7 @@ namespace RenderGraph::Frame::Driver
 		auto& state = Get();
 		state.installed = true;
 		Boundary::Install();
+		Revision::Install();
 		if (!REL::Module::IsVR())
 			stl::write_thunk_call<FreezeTestAtBegin>(REL::RelocationID(35556, 36555).address() + REL::Relocate(0x211, 0x217));
 		// The Bink hooks mark their own ticks. Without them this detour only reads the kind.
@@ -261,6 +263,8 @@ namespace RenderGraph::Frame::Driver
 			return;
 		// The frame's adoption point. Versions, builds and registrations changed outside it are counted (rule R1).
 		const Boundary::Scope boundary;
+		// The newest prepared frame revision switches in whole, before anything reads what it changes.
+		Revision::AdoptLatest();
 		// Work that waited for a frame boundary runs before the frame's kind and schedules are decided.
 		for (auto& work : std::exchange(state.atNextBegin, {}))
 			work();
@@ -610,5 +614,6 @@ namespace RenderGraph::Frame::Driver
 		state.errors = {};
 		state.lags = {};
 		Boundary::LogStats();
+		Revision::LogStats();
 	}
 }
