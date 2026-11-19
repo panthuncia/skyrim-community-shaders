@@ -29,6 +29,7 @@
 #	include <Resources/Buffers/Buffer.h>
 #	include <Resources/Buffers/VersionedBuffer.h>
 #	include <Resources/GloballyIndexedResource.h>
+#	include <Resources/VersionedTexture.h>
 #	include <rhi_helpers.h>
 
 #	include <algorithm>
@@ -908,7 +909,7 @@ namespace ORGPostChain
 				}
 
 				const bool wave = built && waveOn && configured;
-				const bool ghosts = built && ghostsOn && configured && GhostsReady();
+				const bool drawGhosts = built && ghostsOn && configured && GhostsReady();
 				const bool extract = wave || (built && ghostsOn && configured);
 				PhysicalLensImaging::DiffractionParameters composite{};
 
@@ -917,7 +918,7 @@ namespace ORGPostChain
 					auto data = lens.FlareParameters(width, height, ghostSize[0], ghostSize[1], hasExposure);
 					if (ghostsOn && configured)
 						StageGhostPaths(lens, data);
-					if (ghosts) {
+					if (drawGhosts) {
 						// The ghosts use the model their paths were built for. A new model starts the beams over, as PrepareOptics does.
 						const auto model = paths->Current();
 						CopyModel(data, *std::static_pointer_cast<const Parameters>(model));
@@ -958,7 +959,7 @@ namespace ORGPostChain
 				constants->WriteValue(run, kWaveSeedOffset, wave ? kWaveSeed : std::array<uint32_t, 4>{});
 
 				MipGroups mips{};
-				if (ghosts) {
+				if (drawGhosts) {
 					if (lens.settings.GhostDiffraction > 0.f) {
 						const auto ghostWave = lens.GhostWaveFor();
 						if (!madeGhostWave || ghostWave.aperture != madeGhostWave->aperture || ghostWave.surface != madeGhostWave->surface) {
@@ -985,10 +986,10 @@ namespace ORGPostChain
 					lastGhostFrame = ~0u;
 				if (ghostsOn && built)
 					a_commit.Write(mipGroups, mips);
-				constants->WriteValue(run, kGhostSeedOffset, ghosts ? kGhostSeed : std::array<uint32_t, 32>{});
-				constants->WriteValue(run, kPlanSeedOffset, ghosts ? kPlanSeed : std::array<uint32_t, 4>{});
+				constants->WriteValue(run, kGhostSeedOffset, drawGhosts ? kGhostSeed : std::array<uint32_t, 32>{});
+				constants->WriteValue(run, kPlanSeedOffset, drawGhosts ? kPlanSeed : std::array<uint32_t, 4>{});
 
-				lens.orgComposite = { .cameraMap = mapped, .flare = ghosts, .diffraction = composite };
+				lens.orgComposite = { .cameraMap = mapped, .flare = drawGhosts, .diffraction = composite };
 			}
 
 			void Executed(PostProcessFeature&) override
@@ -1167,19 +1168,19 @@ namespace ORGPostChain
 				}
 
 				// Per frame, as Draw.
-				Binds sources;
-				sources.cbv[0] = Of(lensBuffer);
-				sources.latch[1] = a_exposureLatch;
-				sources.latch[2] = diffraction.offset;
+				Binds waveBinds;
+				waveBinds.cbv[0] = Of(lensBuffer);
+				waveBinds.latch[1] = a_exposureLatch;
+				waveBinds.latch[2] = diffraction.offset;
 				if (hasExposure)
-					sources.srv[5] = ImageOf(a_adaptation);
-				sources.srv[0] = ArrayOf(mapping->Graph());
-				sources.srv[1] = Of(this->sources);
-				sources.srv[3] = Of(waveKernel);
-				sources.srv[4] = ArrayOf(waveMax->Graph());
-				sources.uav[0] = Of(waveSources);
+					waveBinds.srv[5] = ImageOf(a_adaptation);
+				waveBinds.srv[0] = ArrayOf(mapping->Graph());
+				waveBinds.srv[1] = Of(this->sources);
+				waveBinds.srv[3] = Of(waveKernel);
+				waveBinds.srv[4] = ArrayOf(waveMax->Graph());
+				waveBinds.uav[0] = Of(waveSources);
 				waveOneEntry = a_builder.Gate();
-				AddDispatch(a_builder, "wave-sources", kSourcesShader, L"BuildWaveSources", {}, kSourcesLayout, sources, waveOneEntry);
+				AddDispatch(a_builder, "wave-sources", kSourcesShader, L"BuildWaveSources", {}, kSourcesLayout, waveBinds, waveOneEntry);
 
 				Binds tiles;
 				tiles.cbv[0] = Of(lensBuffer);

@@ -253,7 +253,7 @@ namespace ORGPostChain
 	{
 		auto key = ProgramKey(a_source, a_entry, a_words, a_defines);
 		if (!a_vertexSource.empty())
-			key += std::format("|vs:{}:{}", a_vertexSource, std::string(a_vertexEntry.begin(), a_vertexEntry.end()));
+			key += std::format("|vs:{}:{}", a_vertexSource, Util::WStringToString(a_vertexEntry));
 		for (const auto& target : a_targets) {
 			const auto& blend = target.blend;
 			key += std::format("|f{}", static_cast<int>(target.format));
