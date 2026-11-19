@@ -33,6 +33,10 @@ public:
 	* 2: the engine's draws and DCLF's get no volume at t19 and t22; the graph readers still read them by published id.
 	* 3: the graph path stays off, so the D3D11 path runs (guest mode only).
 	* 4: the engine's draws and DCLF's get each volume version before any run wrote it, as before that was fixed. To show its effect.
+	* 5: the draws that still run on D3D11 get no volume (the slots Prepass binds). Every DCLF colour draw still does.
+	* 6: every DCLF draw gets no volume. The draws that still run on D3D11 still do.
+	* 7: the far volume is cleared to no fog every run, so every reader sees only the near volume.
+	* 8: no history: the volumes take no temporal history.
 	*/
 	static std::uint32_t Debug();
 
