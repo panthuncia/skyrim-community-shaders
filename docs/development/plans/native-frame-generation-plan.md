@@ -564,6 +564,62 @@ D3D12 needs new plugin code. Steps 6 and 7 are independent after step 5; swap th
   `reflexNotDetectedAtRuntime` status.
 - Risks: untestable on the daily machine; the NVIDIA D3D12 heap limit.
 - Size: L. NVIDIA: yes.
+- Code done 2026-11-19, not run on NVIDIA (branch `org-native/fg-dlssg-native`, BasicRHI `org-native/fg-dlssg-native`).
+  - Loading. `Streamline::Initialize` loads `kFeatureDLSS_G` in native when the hardware probe passes, and in native the probe
+    checks only the adapter the device is made on (its LUID), so a second NVIDIA GPU cannot add `VK_NV_optical_flow` to another
+    vendor's device. `UnloadDLSSGBeforeFirstSwapchain` unloads it right after the device and before the first swap chain, which has
+    no presentation layer. `SetNativeDevice` reports `DLSS-G=` and, when it is false, one line with the reason. The controller loads
+    it at a replacement (decision 37).
+  - Tags. In both graph modes `TagDLSSGResources` records depth, motion vectors and the hudless as the UI stage's inputs pass
+    (`cs_RecordDLSSGInputs` through `ORGUpscaling::QueueFrameGenInputs`, the FSR-FG pass's client), each tagged valid only now
+    (decision 38). Viewport 0's constants are set once a frame: by the upscaler's evaluate, or by `cs_EnsureDLSSGConstants` when
+    none ran (native no longer runs guest's FSR evaluate for that, decision 39). Native's passthrough tags are null tags with no
+    command list. Plain D3D11 keeps the ring.
+  - Mode off. `Native::SetPresentationLeaving` runs on the asking thread before every `RequestPresentation` and the engine's
+    `ResizeBuffers`; the presenter registers `TurnDLSSGOffBeforeSwapchainChange` there. The torn-down step
+    (`CompleteSwapchainTeardown`) already makes the `slSetFeatureLoaded` changes.
+  - Images: through the proxy, from step 4 (`presentationLayer` is on for any method).
+  - Vsync. A presentation layer keeps its vsync, so native bakes `vsync && DLSS-G's bIsVsyncSupportAvailable` into the replacement
+    and the controller asks for a "DLSS-G vsync change" replacement when that differs from the swap chain's (decision 40).
+  - Vulkan. BasicRHI takes the optical flow queue natively when it can (decision 41). The semaphores already follow the guide's
+    section 16: the relay signals the binary present semaphore, and the acquire batch waits the acquire semaphore on the queue
+    before the next frame's work. `presentCommon` runs on every present: BasicRHI presents through the proxy on both backends,
+    frame generation never holds a present (`Hooks.cpp`), and Streamline's own check ("presentCommon() was not observed", logged
+    after 60 evaluates without a present) is absent from the RX 6600 runs below, which evaluate FSR-FG every frame.
+  - RX 6600 (no DLSS-G): see the runs below. The probe fails and the native log says, once, "DLSS-G is not loaded for the native
+    device: its adapter has no optical flow hardware" and "DLSS-G unsupported on the native device: ...".
+- User to run (RTX 5080). The machine needs Hardware-accelerated GPU Scheduling on and NVIDIA Control Panel's Vertical sync on "Use
+  the 3D application setting". Do not set `CS_TEST_BACKGROUND`: DLSS-G needs the window in the foreground. Keep `DXVK_DEBUG=hang`.
+  1. Build Dev-Fast on this branch and stage it: `python tools/cs-test/cs_test.py stage . --name fgf --preset Dev-Fast
+     --base-aio "C:/Modding/MO2/mods/CS AB nfg"`. The base AIO brings `sl.dlss_g.dll` and `nvngx_dlssg.dll`.
+  2. The D3D12 heap limit first (memory note `d3d12-heap-limit-viewrefs`: no world on NVIDIA D3D12 when the view references pass
+     1M). Run `native-d3d12-quick`. If its shots have no world, stop the D3D12 part and run the Vulkan one only.
+  3. Boot lines, in `native-quick` and `native-d3d12-quick` (frame generation off):
+     `[Streamline] hardware probe: DLSS-G-class GPU (VK_NV_optical_flow) present on the native device's adapter`,
+     `[Streamline] DLSS-G unloaded before the native device's first swap chain (result 0)`,
+     `[Streamline] native device feature support: ... DLSS-G=true`. On Vulkan also BasicRHI's
+     `CreateVulkanDevice: Streamline's optical flow is native, 1 queue(s) of family N` (or "runs through interop" with a reason)
+     and "queues: ... 1 optical flow".
+  4. DLSS-G runs: `python tools/cs-test/cs_test.py run native-d3d12+fg-dlss --stage fgf --wait 3600 --label dlssg`, then
+     `native-vulkan+fg-dlss`, then the guest regression checks `guest+fg-dlss` and `d3d11+fg-dlss` (guest's graph-mode tags moved
+     to the inputs pass too). Add `--set fg.presentmon=true` for PresentMon's count. `fg-dlss.toml` is `fg.toml` with
+     `do = "fg", arg = "dlss"`, and fails the run on `getCurrentBackBufferIndexNotCalled`, `reflexNotDetectedAtRuntime` and
+     "presentCommon() was not observed".
+  5. Read in each run's CS log, in this order: `[FGTEST] switch: frame generation DLSS-G`; `[FrameGen] FG method switch requested:
+     DLSS-G load=true FSR-FG load=false`; native: `[ORG native] presentation replaced (request N): frame generation 2, ...
+     presentation layer true`; `[FrameGen] FG method switch settled - present owner: DLSS-G`; `[Streamline] DLSS-G mode=true (on)
+     numFrames=1`; `[Streamline] DLSS-G's inputs are the UI stage's pass`; `[Streamline] DLSS-G tagging real inputs again` (after
+     one "clone tags not primed yet"); `[Streamline] DLSS-G status OK (presenting 2 frames, max N)`. `[Perf] ... method=DLSS-G`
+     with `lastGenMultiplier=2`, and PresentMon about twice the rendered rate. In the pause menu and the loading screen,
+     "falling back to passthrough tags" is expected.
+  6. Failures to report: any `DLSS-G NOT generating - status 0x...` after the first second (name the flags it prints), a pink
+     overlay on screen (DLSS-G in an invalid state), `slSetTagForFrame failed for DLSS-G's inputs`, `slSetConstants failed for
+     DLSS-G's viewport`, `[Streamline/SL]` lines with "Tag of buffer" or "Unable to find 'common' constants", a device loss, or a
+     torn-down step failure (`the presentation's torn-down step failed`).
+  7. By hand, in native, with DLSS-G on: HDR on and off (one replacement each, then status OK again; `hdrFormatNotSupported` must
+     not appear), vsync on and off (one "DLSS-G vsync change" replacement), and the eye check (the HUD does not ghost, generated
+     frames do not collapse toward a corner).
+  8. Send back the run folders and the CS and Streamline logs.
 
 ### Step 9: the frame-revision system
 - When that plan's variables land (its step 5): `PresentationConfig` becomes a variable written from the settings event and from HDR's
@@ -665,6 +721,17 @@ D3D12 needs new plugin code. Steps 6 and 7 are independent after step 5; swap th
 | 34 | The present count (2 or 1) is published from a Present after-hook, since FFX's interpolation dispatch runs inside the proxy's call to FFX's Present. | The before-hook runs before that dispatch |
 | 35 | On `ResizeBuffers` the backend unlinks, waits for FFX's presents and releases the interpolation context; the next present makes it again at the new size. An HDR change waits for the host's replacement. | FFX's DX12 swap chain resizes itself, but the context is sized to the display |
 | 36 | No HDR mastering metadata from the D3D12 backend. | FFX's DX12 swap chain reads the monitor's luminance range at creation (`getMonitorLuminanceRange`); only its Vulkan one starts at zero |
+
+**Step 8, decided by the agent, to confirm (2026-11-19). Not run on NVIDIA.**
+
+| # | Decision | Why |
+|---|---|---|
+| 37 | Native loads `sl.dlss_g` at `slInit` (the device needs its extensions and queues), then unloads it before the first swap chain. It loads again only at the controller's "FG method switch" replacement, with a presentation layer. FSR-FG keeps decision 23. | DLSS-G attaches to every swap chain made through the proxy while it is loaded. The boot swap chain has no presentation layer, so its images come from the native swap chain, which DLSS-G forbids |
+| 38 | Native's DLSS-G tags are all `eOnlyValidNow`: Streamline copies depth, motion vectors and the hudless on the inputs pass's list, in the state the pass declares. Guest's ring path keeps `eValidUntilPresent`. The "clone tags primed" gate stays: null tags until DLSS-G has presented once with its mode on, so the copies are made from the first real tag. | Nothing guarantees the depth's and motion vectors' state at the present in the graph; the pass's state is known. The cost is three display-size copies per frame in flight. Same lifecycle as FSR-FG's pass |
+| 39 | Without an upscaler, native sets viewport 0's constants itself (once a frame) instead of guest's FSR evaluate. Guest keeps its evaluate. | An evaluate queued after the post stage has no Upscale anchor left in the frame; DLSS-G needs only the constants |
+| 40 | Native bakes `vsync && bIsVsyncSupportAvailable` into DLSS-G's swap chain and replaces it when that changes. Until DLSS-G has reported, the flag is false, so the first DLSS-G swap chain has no vsync; a later report that vsync works makes one more replacement. | A presentation layer keeps the vsync it was made with (decision 26), and guest forces sync interval 0 per present the same way |
+| 41 | BasicRHI takes Streamline's optical flow queue natively (the first optical flow family, index 0, `useNativeOpticalFlowMode`) when the device has the features and that family is none of its own; otherwise it logs why and DLSS-G uses its interop optical flow, as before. | The manual hooking guide's 5.2.1 requirements; guest's interposed device takes the native queue too |
+| 42 | The DLSS-G hardware probe checks only the native device's adapter (its LUID). | On a machine with two GPUs, the NVIDIA one would add `VK_NV_optical_flow` to the other's device, and BasicRHI then turns all of Streamline off |
 
 1. **Is DLSS-G in native in scope?**
    (a) yes, last, in a session on the RTX 5080; (b) not now: build the interface so it fits, implement later; (c) D3D12 only.
