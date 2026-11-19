@@ -167,6 +167,7 @@ namespace RenderGraph::Frame::Revision
 			std::mutex bufferMutex;
 			std::map<const void*, BufferWish> bufferWishes;
 			std::uint64_t bufferFirstWish = 0;
+			std::atomic<std::uint64_t> beginFrame{ 0 };  // the frame of the last Begin, for wishes from other threads
 			std::map<const void*, std::shared_ptr<const void>> adoptedPayloads;
 			// Render thread from here.
 			std::map<GraphResources::Resource*, RevisionWish> wishes;
@@ -715,6 +716,7 @@ namespace RenderGraph::Frame::Revision
 			return;
 		ZoneScopedN("CS.Frame.Revision.Adopt");
 		const std::uint64_t frame = Driver::Current().frame + 1;
+		coordinator.beginFrame.store(frame, std::memory_order_relaxed);
 		ReleaseRetired(coordinator);
 		ApplyResizes(coordinator);
 		if (coordinator.preparing && coordinator.preparing->done.load(std::memory_order_acquire))
@@ -732,7 +734,7 @@ namespace RenderGraph::Frame::Revision
 		if (!a_buffer)
 			return;
 		auto& coordinator = GetCoordinator();
-		const auto frame = Driver::Current().frame;
+		const auto frame = coordinator.beginFrame.load(std::memory_order_relaxed);
 		const std::lock_guard lock(coordinator.bufferMutex);
 		if (coordinator.bufferWishes.empty())
 			coordinator.bufferFirstWish = frame;
