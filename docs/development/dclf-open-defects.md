@@ -623,6 +623,10 @@ Known gaps in the ORG ports of Community Shaders features, from the 2026-11-18 h
     ImageSpace programs one by one through `GetNow` at the graph's build ("Setup did not queue it"). That took 40 s in batch 16,
     and frame 167 of the loading screen had a kMAIN clear with no place in the schedule. Warm stores do not show it.
     **Next:** address with the shader precompile overhaul (queue the programs at Setup and compile them in parallel).
+-   **A cold cache makes a frame wait for DCLF's on-demand pipelines.** A new variant (for example HDR's Lighting variants in
+    native Vulkan with frame generation) is compiled on demand while the frame waits; one took 13 s on 2026-11-19 and the hang
+    watchdog fired at 15 s (`native-vulkan+fg-hdr`, passed once warm). The render thread must never wait. **Next:** with the
+    shader precompile overhaul; until then warm each mode and config once before judging a failure.
 -   **Physical Sky's aerial perspective is its own full-screen pass.** The ORG deferred composite's push block holds 32
     words and uses 26; Physical Sky needs about 7 more and ViewAtmosphere 3. So the aerial perspective runs as
     `cs.physical-sky.composite` right after `cs.deferred` (phase 2, not yet run in the game). Minor cost: one more full-screen
