@@ -165,8 +165,8 @@ namespace RenderGraph::Frame::Recipes::Table
 			.names = { "CS segment: pre-depth", "CS segment: pre-depth inputs", "FrameSegments::PreDepth / ", "cs.segment.pre-depth" },
 			.steps = { {
 				{ .anchor = Anchor::EarlyPrepass,
-					.clients = { "cs.cloud-shadows.layers", "cs.grass-collision", "cs.llf.local-shadows", "cs.terrain-blending.terrain-depth-clear", "cs.terrain-shadows",
-						"cs.true-pbr.glints", "cs.volumetric-shadows" },
+					.clients = { "cs.cloud-shadows.layers", "cs.grass-collision", "cs.llf.local-shadows", "cs.physical-sky.luts", "cs.terrain-blending.terrain-depth-clear",
+						"cs.terrain-shadows", "cs.true-pbr.glints", "cs.volumetric-shadows" },
 					.whole = true },
 				{ .anchor = Anchor::EngineFrameClear, .clients = { "cs.engine.skeleton.frame@pre-depth" } },
 				{ .point = true },

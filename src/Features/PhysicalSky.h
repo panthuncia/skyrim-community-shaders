@@ -91,7 +91,7 @@ struct PhysicalSky final : public Feature
 	void Prepass() override;
 	void GenerateLuts();
 	void AccumShadow();
-	inline void PostPostLoad() override { Hooks::Install(); }
+	void PostPostLoad() override;
 
 	////////////////////////////////////////////////// Feature Specific Data
 	constexpr static std::wstring_view kShaderDir = L"Data\\Shaders\\PhysicalSky";
@@ -306,6 +306,8 @@ struct PhysicalSky final : public Feature
 	bool diskPhaseValid = false;
 	/** @brief Rebuilds normalized finite-disc scattering responses when angular radii or particle optics change. */
 	void UpdateDiskPhaseLut();
+	/** @brief The disk phase LUT's constants (DiskPhaseLut.cs.hlsl's DiskPhaseConstants). */
+	std::array<float, 12> DiskPhaseParameters() const;
 	eastl::unique_ptr<Texture2D> texMsLut = nullptr;  // multiscattering
 	eastl::unique_ptr<Texture2D> texSvLut = nullptr;  // sky view
 	eastl::unique_ptr<Texture2D> texSkyTail = nullptr;

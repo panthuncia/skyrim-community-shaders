@@ -1347,6 +1347,7 @@ struct RenderGraphRuntime::Impl
 			{ "cs.terrain-blending", "TerrainBlending" },
 			{ "cs.terrain-shadows", "TerrainShadows" },
 			{ "cs.ibl", "ImageBasedLighting" },
+			{ "cs.physical-sky", "PhysicalSky" },
 			{ "cs.grass-collision", "GrassCollision" },
 			{ "cs.texstream", "TextureStreaming" },
 			{ "cs.dclf", "DrawcallLimitFix" },

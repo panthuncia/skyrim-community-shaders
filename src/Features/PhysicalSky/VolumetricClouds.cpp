@@ -992,18 +992,23 @@ void PhysicalSky::UpdateCloudWind()
 	volWind.disturbance = std::lerp(volWind.disturbance, CloudUnitParameter(layer.wind.disturbance), static_cast<float>(-std::expm1(-elapsed / 2.0)));
 }
 
-void PhysicalSky::UpdateDiskPhaseLut()
+std::array<float, 12> PhysicalSky::DiskPhaseParameters() const
 {
-	if (!csDiskPhaseLutGen || !texDiskPhaseLut || !diskPhaseCb)
-		return;
 	const auto& lighting = settings.cloudLayer.lighting;
 	const auto fit = CloudMiePhase(lighting.dropletDiameter).coefficients;
-	const std::array<float, 12> parameters = {
+	return {
 		fit.x, fit.y, fit.z, fit.w,
 		cbData.diskAngularRadius.x, cbData.diskAngularRadius.y, cbData.diskAngularRadius.z, 0.f,
 		std::clamp(lighting.phaseForwardG, 0.f, .95f), std::clamp(lighting.phaseBackwardG, -.95f, 0.f),
 		std::clamp(settings.aerosolPhaseG, -.999f, .999f), std::lerp(.82f, .94f, std::clamp(1.f - std::abs(settings.silverLiningSpread), 0.f, 1.f))
 	};
+}
+
+void PhysicalSky::UpdateDiskPhaseLut()
+{
+	if (!csDiskPhaseLutGen || !texDiskPhaseLut || !diskPhaseCb)
+		return;
+	const auto parameters = DiskPhaseParameters();
 	auto* context = globals::d3d::context;
 	if (!diskPhaseValid || parameters != diskPhaseParameters) {
 		ID3D11ShaderResourceView* nullSrv = nullptr;
