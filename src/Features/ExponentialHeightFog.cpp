@@ -472,6 +472,8 @@ void ExponentialHeightFog::ReleaseVolumetricResources()
 
 ID3D11ShaderResourceView* ExponentialHeightFog::IntegratedLightScatteringView() const
 {
+	if (ORGExponentialHeightFog::Debug() == 2)
+		return nullptr;
 	if (auto* view = ORGExponentialHeightFog::Get().NearSRV())
 		return view;
 	return integratedLightScattering ? integratedLightScattering->srv.get() : nullptr;
@@ -479,6 +481,8 @@ ID3D11ShaderResourceView* ExponentialHeightFog::IntegratedLightScatteringView() 
 
 ID3D11ShaderResourceView* ExponentialHeightFog::IntegratedLightScatteringFarView() const
 {
+	if (ORGExponentialHeightFog::Debug() == 2)
+		return nullptr;
 	if (auto* view = ORGExponentialHeightFog::Get().FarSRV())
 		return view;
 	return integratedLightScatteringFar ? integratedLightScatteringFar->srv.get() : nullptr;

@@ -46,10 +46,41 @@ VIEW_ATMOSPHERE_COMPOSITE_RESOURCES(ORG_RESOURCE)
 // 4: the medium's luminance, times 4. Magenta where it is non-finite.
 // 5: red where the shared medium is on, green where the near fog volume has a size, blue where the far one has. Dim while volumetric fog is off.
 // 6: kMAIN written back unchanged.
+// 7: the fog's constants as the composite reads them: red where the fog is on, green where a density is above zero, blue where
+//    volumetric fog applies. Black without the fog's build.
+// 8: the near fog volume's transmittance at its last slice, by screen position, with no depth mapping. Magenta where
+//    non-finite, blue while the volume has no size.
+// 9: the same for the far fog volume.
+#	ifdef EXP_HEIGHT_FOG
+float3 DebugVolume(Texture3D<float4> volume, float2 uv)
+{
+	uint width, height, depth;
+	volume.GetDimensions(width, height, depth);
+	if (width * height * depth == 0)
+		return float3(0, 0, 1);
+	const float3 halfTexel = 0.5 / float3(width, height, depth);
+	const float4 value = volume.SampleLevel(SampColorSampler, float3(clamp(uv, halfTexel.xy, 1.0 - halfTexel.xy), 1.0 - halfTexel.z), 0);
+	return all(isfinite(value)) ? value.aaa : float3(1, 0, 1);
+}
+#	endif
+
 float3 DebugView(float3 sceneColor, float3 position, float2 uv, bool fullCloudRay)
 {
 	if (VIEW_ATMOSPHERE_COMPOSITE_DEBUG == 6)
 		return sceneColor;
+	if (VIEW_ATMOSPHERE_COMPOSITE_DEBUG >= 7) {
+#	ifdef EXP_HEIGHT_FOG
+		if (VIEW_ATMOSPHERE_COMPOSITE_DEBUG == 8)
+			return DebugVolume(ExponentialHeightFogIntegratedLightScattering, uv);
+		if (VIEW_ATMOSPHERE_COMPOSITE_DEBUG == 9)
+			return DebugVolume(ExponentialHeightFogIntegratedLightScatteringFar, uv);
+		const SharedData::ExponentialHeightFogSettings fog = SharedData::exponentialHeightFogSettings;
+		return float3(fog.enabled ? 1.0 : 0.0, max(fog.fogDensity, fog.fogDensity2) > 0.0 ? 1.0 : 0.0,
+			ExponentialHeightFog::ShouldApplyVolumetricFog() ? 1.0 : 0.0);
+#	else
+		return 0.0.xxx;
+#	endif
+	}
 	if (VIEW_ATMOSPHERE_COMPOSITE_DEBUG == 2)
 		return fullCloudRay ? float3(1, 0, 0) : saturate(length(position) * GAME_UNIT_TO_M / 10000.0).xxx;
 	if (VIEW_ATMOSPHERE_COMPOSITE_DEBUG == 5) {
