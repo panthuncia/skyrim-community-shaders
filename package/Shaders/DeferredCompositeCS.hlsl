@@ -13,7 +13,7 @@
 #endif
 
 // Every permutation's resources: a permutation leaves out what it does not read. The skylighting
-// probes (t8) and the IBL SH (t14, t15) are declared by their headers.
+// probes (t8) and coverage (t21, t22) and the IBL SH (t14, t15) are declared by their headers.
 #define DEFERRED_COMPOSITE_RESOURCES(X)                         \
 	X(SHARED, ConstantBuffer, Shared, 0)                        \
 	X(SRV, Texture2D<float3>, SpecularTexture, 0)               \
@@ -35,7 +35,9 @@
 	X(SRV, Texture2D<float4>, SsgiCoCgTexture, 12)              \
 	X(SRV, Texture2D<float4>, SsgiSpecularTexture, 13)          \
 	X(EXTERN, Texture2D<sh2>, EnvIBLTexture, 14)                \
-	X(EXTERN, Texture2D<sh2>, SkyIBLTexture, 15)
+	X(EXTERN, Texture2D<sh2>, SkyIBLTexture, 15)                \
+	X(EXTERN, Texture3D<uint>, SkylightingProbeCoverage, 21)    \
+	X(EXTERN, Texture2D<float>, SkylightingZenithDepth, 22)
 ORG_PUSH_BLOCK(DEFERRED_COMPOSITE_RESOURCES(ORG_HANDLE))
 
 #include "Common/BRDF.hlsli"

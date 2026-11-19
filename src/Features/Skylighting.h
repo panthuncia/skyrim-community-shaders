@@ -87,6 +87,9 @@ public:
 	/** @brief The probe array (t50) and shadow visibility (t53) views D3D11 readers bind: the render graph's while its probe update runs. */
 	ID3D11ShaderResourceView* ProbeArraySRV() const;
 	ID3D11ShaderResourceView* ShadowVisibilitySRV() const;
+	/** @brief The roof coverage (t51) and zenith capture (t52) views D3D11 readers bind: the render graph's while its probe update runs. */
+	ID3D11ShaderResourceView* ProbeCoverageSRV() const;
+	ID3D11ShaderResourceView* ZenithSRV() const;
 
 	winrt::com_ptr<ID3D11SamplerState> comparisonSampler = nullptr;
 
