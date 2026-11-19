@@ -8,22 +8,11 @@
 namespace DCLF
 {
 	/**
-	 * @brief The slots of one of SceneTables' shared tables (geometrySlots, pipelineSlots, materialSlots), whose columns are
-	 * parallel vectors the table grows together. Coordinator thread.
-	 *
-	 * A slot lives while something references it - the objects' records, and for a geometry slot the partition before it
-	 * in a skin's chain - counted from the tables' logs (Coordinator::UpdateSlotReferences), and is freed after the batch
-	 * in which its last reference went (DrainUnreferenced). A slot can also be freed while referenced (its record
-	 * describes nothing); its generation then moves on, and every count taken against the old generation lapses rather than
-	 * landing on the slot's next use.
-	 *
-	 * A freed slot is retiring, not free: a published version of the tables may still name it. The owner takes the
-	 * retiring slots (TakeRetiring) into its retirement chain and gives each back (Recycle) once no publication that names it lives.
-	 *
-	 * Free slots are reused lowest first, so the slots in use stay packed at the bottom and the table's top falls as a scene unloads.
-	 * An owner that sizes GPU tables from Size() calls TrimTop after recycling, and cuts its columns to the size it returns: the free
-	 * slots past the last one in use (alive or retiring) are dropped. Generations are kept across a trim, so a count taken against a
-	 * dropped slot still lapses once the slot is made again.
+	 * @brief The slots of one of SceneTables' shared tables, whose columns are parallel vectors grown together. Coordinator thread.
+	 * A slot lives while something references it, and is freed after the batch in which its last reference went.
+	 * Freeing a referenced slot moves its generation on, so counts taken against the old generation lapse instead of landing on the next use.
+	 * A freed slot is retiring, because a publication may still name it. The owner recycles it once no such publication lives.
+	 * Free slots are reused lowest first so the table's top falls as a scene unloads. Generations survive TrimTop.
 	 */
 	class SlotTable
 	{
@@ -31,10 +20,10 @@ namespace DCLF
 		struct Allocation
 		{
 			std::uint32_t slot = 0;
-			bool grown = false;  // a new slot at the end: the caller grows its columns
+			bool grown = false;  // a new slot at the end, so the caller grows its columns
 		};
 
-		/** @brief A free slot, or a new one; unreferenced, so the next drain frees it unless a reference comes. */
+		/** @brief A free or new slot. It is unreferenced, so the next drain frees it unless a reference comes. */
 		Allocation Allocate()
 		{
 			Allocation allocation;
@@ -55,7 +44,7 @@ namespace DCLF
 			BecomeIdle(allocation.slot);
 			return allocation;
 		}
-		/** @brief Frees a slot whatever references it has: the counts taken against it lapse. */
+		/** @brief Frees a slot whatever references it has. Counts taken against it lapse. */
 		void Free(std::uint32_t a_slot)
 		{
 			if (!Alive(a_slot))
@@ -68,7 +57,7 @@ namespace DCLF
 			--aliveCount;
 			retiring.push_back({ a_slot, generation[a_slot] });
 		}
-		/** @brief The slots freed since the last call, with their generations then (for Recycle). */
+		/** @brief The slots freed since the last call, with their generations, for Recycle. */
 		template <class F>
 		void TakeRetiring(F&& a_take)
 		{
@@ -76,16 +65,13 @@ namespace DCLF
 				a_take(entry.slot, entry.generation);
 			retiring.clear();
 		}
-		/** @brief A retired slot back on the free list: no publication names it any more (unless it was reused or cleared since). */
+		/** @brief Puts a retired slot back on the free list once no publication names it, unless it was reused or cleared since. */
 		void Recycle(std::uint32_t a_slot, std::uint32_t a_generation)
 		{
 			if (a_slot < alive.size() && !alive[a_slot] && generation[a_slot] == a_generation)
 				freeList.insert(a_slot);
 		}
-		/**
-		 * @brief Drops the free slots past the last one in use (alive or retiring: a publication may name it): the new Size(), to
-		 * which the owner cuts its columns. Retiring slots are never past it.
-		 */
+		/** @brief Drops free slots past the last one in use, alive or retiring. Returns the new Size(), to which the owner cuts its columns. */
 		std::size_t TrimTop()
 		{
 			while (!alive.empty() && !freeList.empty() && *freeList.rbegin() == alive.size() - 1) {
@@ -99,7 +85,7 @@ namespace DCLF
 		std::size_t Retiring() const { return retiring.size(); }
 		bool Alive(std::size_t a_slot) const { return a_slot < alive.size() && alive[a_slot]; }
 		std::uint32_t Generation(std::size_t a_slot) const { return a_slot < generation.size() ? generation[a_slot] : 0; }
-		/** @brief A reference to the slot as of a_generation (none when the slot has moved on since). */
+		/** @brief A reference to the slot as of a_generation. Nothing if the slot has moved on since. */
 		void AddRef(std::uint32_t a_slot, std::uint32_t a_generation)
 		{
 			if (!Alive(a_slot) || generation[a_slot] != a_generation)
@@ -116,7 +102,7 @@ namespace DCLF
 				BecomeIdle(a_slot);
 			}
 		}
-		/** @brief Every count to zero, before a recount: each live slot is unreferenced until the recount says otherwise. */
+		/** @brief Sets every count to zero before a recount. */
 		void ResetReferences()
 		{
 			idle.clear();
@@ -128,8 +114,8 @@ namespace DCLF
 			}
 		}
 		/**
-		 * @brief After a complete batch of reference changes: frees each slot whose last reference went (a_onFree first). A
-		 * reference reacquired in the batch cancels the free; a reused slot's stale events are skipped by generation.
+		 * @brief After a complete batch of reference changes, frees each slot whose last reference went, calling a_onFree first.
+		 * A reference reacquired in the batch cancels the free, and stale events for a reused slot are skipped by generation.
 		 */
 		template <class F>
 		std::uint32_t DrainUnreferenced(F&& a_onFree)
@@ -160,9 +146,9 @@ namespace DCLF
 			std::uint32_t slot = 0, generation = 0;
 		};
 		std::vector<std::uint8_t> alive;
-		std::vector<std::uint32_t> refs, generation;  // generation: at least alive's size (kept across TrimTop)
+		std::vector<std::uint32_t> refs, generation;  // generation is at least alive's size and survives TrimTop
 		std::set<std::uint32_t> freeList;            // lowest first
-		std::vector<Idle> retiring;  // freed, not on the free list yet (TakeRetiring)
+		std::vector<Idle> retiring;  // freed, not yet on the free list
 		std::deque<Idle> idle;  // last-reference events, in order
 		std::size_t aliveCount = 0, referencedCount = 0;
 	};

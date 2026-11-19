@@ -1,5 +1,4 @@
-// FrameRetirement: DCLF's retirement clock, advanced by the graph host's retired callback (RenderGraphRuntime.cpp) and by the CPU
-// pipeline's frame timeline (Direct/Sites.cpp), over the points the frames took (see the header).
+// FrameRetirement: DCLF's retirement clock, advanced by the graph host's retired callback and the CPU pipeline's frame timeline.
 #include "Features/DrawcallLimitFix/Core/Runtime/FrameRetirement.h"
 
 #include "Features/DrawcallLimitFix/Core/Runtime/EventQueue.h"
@@ -17,7 +16,7 @@ namespace DCLF
 {
 	namespace
 	{
-		/** @brief A point taken (SubmittedRetirementPoint) and the two counts it stands for. */
+		/** @brief A point taken and the two counts it stands for. */
 		struct TakenPoint
 		{
 			std::uint64_t point = 0, host = 0, cpu = 0;
@@ -25,21 +24,21 @@ namespace DCLF
 
 		struct Sources
 		{
-			// The points the render thread took, to the one advancing (PollRetirement's run), oldest first.
+			// Points the render thread took, passed to the advancing run, oldest first.
 			EventQueue<TakenPoint, 256> taken;
-			// The host's submissions retired (its callback, any thread), and the CPU frames signalled and their timeline (render thread;
-			// the timeline is set once, before the first signal, and read by PollRetirement on any thread after an acquire of signalled).
+			// The host's retired submissions, from any thread, and the CPU frames signalled and their timeline, on the render thread.
+			// The timeline is set once before the first signal, and PollRetirement reads it after an acquire of signalled.
 			std::atomic<std::uint64_t> hostRetired{ 0 };
 			std::atomic<std::uint64_t> cpuSignalled{ 0 };
-			// The value the open CPU frame signals at its end (0: none opened yet): what it binds mid-frame retires after its own work.
+			// The value the open CPU frame signals at its end, or 0 before the first. What it binds mid-frame retires after its own work.
 			std::atomic<std::uint64_t> cpuOpen{ 0 };
 			std::shared_ptr<rhi::TimelinePtr> cpuTimeline;
-			// One run at a time: the noted points it has not passed yet are its own while it runs.
+			// Only one run at a time, and it owns the noted points it has not passed yet.
 			std::atomic<bool> running{ false };
 			std::deque<TakenPoint> pending;
-			// The newest point noted: SubmittedRetirementPoint's callers are on several threads (the render thread, the builder's binds).
+			// The newest point noted. Callers are on several threads.
 			std::atomic<std::uint64_t> lastTaken{ 0 };
-			// The CPU frames signalled before the last present (SealCpuFrames).
+			// CPU frames signalled before the last present.
 			std::atomic<std::uint64_t> cpuSealed{ 0 };
 		};
 
@@ -63,12 +62,11 @@ namespace DCLF
 			return 0;
 		auto& s = State();
 		const std::uint64_t submissions = host->SubmissionsMade();
-		// A point taken inside a CPU frame covers that frame's own work, which its signal (queued at its end) completes: a frame's sites
-		// draw after their commits bound what they read, and the colour site can execute behind host submissions made meanwhile.
+		// A point taken inside a CPU frame covers that frame's own work, which its end signal completes.
+		// The colour site may execute behind host submissions made meanwhile.
 		const std::uint64_t cpu = std::max(s.cpuSignalled.load(std::memory_order_relaxed), s.cpuOpen.load(std::memory_order_relaxed));
 		const std::uint64_t point = submissions + cpu;
-		// Noted whatever the source (before any CPU frame a point is the host's count, which its callback also advances the clock to
-		// directly), so the points taken before the first CPU frame retire after it as well.
+		// Note every point whatever its source, so points taken before the first CPU frame also retire after it.
 		std::uint64_t last = s.lastTaken.load(std::memory_order_relaxed);
 		while (point > last && !s.lastTaken.compare_exchange_weak(last, point, std::memory_order_relaxed)) {
 		}
@@ -106,14 +104,13 @@ namespace DCLF
 	bool Sealed(const org::GraphHost::GpuPoint& a_point)
 	{
 		const auto sealed = SealedGpuPoint();
-		// A seal still queued on the submission thread (GraphHost::Desc::queuedSeals) has no values yet. It will cover the work queued
-		// before it, so nothing can be said until the thread passes it.
+		// A seal still queued on the submission thread has no values yet, so nothing can be said until the thread passes it.
 		if (!sealed.Passed())
 			return true;
-		// Before the first present nothing is sealed, and nothing can be said.
+		// Nothing is sealed before the first present.
 		if (sealed.points.empty())
 			return true;
-		// A point still in the submission thread's queue names work that is not on the device yet (GpuPoint::Pending).
+		// A point still in the submission thread's queue names work that is not on the device yet.
 		if (!a_point.Passed())
 			return false;
 		for (const auto& [timeline, value] : a_point.Resolve()) {
@@ -186,7 +183,7 @@ namespace DCLF
 		const std::uint64_t host = s.hostRetired.load(std::memory_order_acquire);
 		const bool cpuFrames = s.cpuOpen.load(std::memory_order_acquire) != 0;
 		const std::uint64_t cpu = cpuFrames && s.cpuTimeline && *s.cpuTimeline ? (*s.cpuTimeline)->GetCompletedValue() : 0;
-		// Both counts rise with the points, so the noted points retire in order: the newest one both passed is the clock's.
+		// Both counts only rise, so noted points retire in order and the newest one both passed is the clock's.
 		std::uint64_t reached = 0;
 		while (!s.pending.empty() && s.pending.front().host <= host && s.pending.front().cpu <= cpu) {
 			reached = s.pending.front().point;

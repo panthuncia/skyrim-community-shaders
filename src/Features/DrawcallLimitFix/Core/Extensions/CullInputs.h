@@ -1,9 +1,7 @@
 #pragma once
 
-// The main cull input contract's Core side (Api/CullInputs.h): the input's entry, resolved once at InstallFeatures (none registered: no
-// walk); the batch its judge answers (RootProgramsJudge); and whether its walk's hook is in, which the primary cull's install requires
-// (noted from the feature's early hooks, before InstallFeatures). And the cull bindings': what a binding's select is handed and answers
-// (CullBindingSelect), the entries by slot, resolved once at InstallFeatures, and the selection Core's cull makes per pass or commit.
+// Core's side of Api/CullInputs.h: the main cull input's entry and the batch its judge answers, and the cull bindings by slot.
+// The primary cull's install requires the main walk's hook, which a feature's early hooks report.
 
 #include "Features/DrawcallLimitFix/Api/CullInputs.h"
 
@@ -35,9 +33,8 @@ namespace DCLF::Draws
 namespace DCLF::Api
 {
 	/**
-	 * @brief The fade roots a depth commit asks the judge about (render thread, UploadFadeRootPrograms): Count of them, each one's node
-	 * (Root: non-null, a root without one takes noProgram unasked), and the answer Put back by the same index. Core keeps the batch's
-	 * storage beside its programs mirror (Draws::FadeScene::fadeRootProgramsBatch): no allocation per commit once grown.
+	 * @brief The fade roots a depth commit asks the judge about. Answers are Put back by the same index.
+	 * Roots without a node get noProgram unasked. Core reuses the storage, so nothing allocates per commit once grown.
 	 */
 	class RootProgramsJudge
 	{
@@ -46,41 +43,35 @@ namespace DCLF::Api
 		const void* Root(std::size_t a_index) const { return nodes[roots[asked[a_index]]]; }
 		void Put(std::size_t a_index, std::uint32_t a_program) const { programs[asked[a_index]] = a_program; }
 
-		std::span<const void* const> nodes;     // by root slot (Extensions::RootListOf's nodes)
-		std::span<const std::uint32_t> roots;   // the roots judged, in Core's order
-		std::span<const std::uint32_t> asked;   // by question: its place in roots (those with a node)
-		std::span<std::uint32_t> programs;      // by place in roots: the answers
+		std::span<const void* const> nodes;     // by root slot
+		std::span<const std::uint32_t> roots;   // in Core's order
+		std::span<const std::uint32_t> asked;   // per question, its place in roots
+		std::span<std::uint32_t> programs;      // per place in roots, the answers
 	};
 
-	/**
-	 * @brief A cull binding's select (render thread, per pass or commit): the scene's tables (Extensions::SceneResourcesOf finds the
-	 * feature's state in them), the frame and the adopted set; select answers with one of Versioned, Buffer or Index (none: unbound).
-	 */
+	/** @brief What a cull binding's select gets on the render thread. It answers with one of Versioned, Buffer or Index, or leaves it unbound. */
 	class CullBindingSelect
 	{
 	public:
 		const Draws::SceneBuffers& scene;
-		std::uint32_t frame = 0;                                     // the scene frame whose cull reads it (a binding may alternate by frame)
-		const org::services::NamedVersions* adopted = nullptr;       // the set a commit or a preparation reads (null at a declaration)
+		std::uint32_t frame = 0;                                     // a binding may alternate by frame
+		const org::services::NamedVersions* adopted = nullptr;       // null at a declaration
 
-		/** @brief A versioned buffer of the scene's set (the feature's scene resources: made at setup, never replaced). */
+		/** @brief Answers with a versioned buffer from the feature's scene resources. */
 		void Versioned(const std::shared_ptr<org::VersionedBuffer>& a_buffer) { versioned = &a_buffer; }
-		/** @brief A plain buffer made at the scene's setup (the feature's scene resources). */
+		/** @brief Answers with a plain buffer made at scene setup. */
 		void Buffer(const std::shared_ptr<org::Buffer>& a_buffer) { buffer = &a_buffer; }
-		/** @brief A pooled buffer's SRV index this frame (a frame value pool's: 0 none), which no pass declares. */
+		/** @brief Answers with a pooled buffer's SRV index for this frame. No pass declares it. */
 		void Index(std::uint32_t a_srv) { srv = a_srv; }
 		/**
-		 * @brief With Index for a publication made by an upload each frame: its late-bound versioned buffer
-		 * (org::VersionedBuffer::CreateLateBound, made at the scene's setup), which every reader declares in place of the pooled backing.
-		 * The feature publishes each backing as its version (PublishLate), so a reader's batch on another queue waits for (or takes) the
-		 * upload that fills it. Answer it at a declaration too.
+		 * @brief With Index, for a publication an upload fills each frame: the late-bound versioned buffer readers declare instead of the backing.
+		 * That lets a reader on another queue wait for the upload. Answer it at declarations too.
 		 */
 		void Published(const std::shared_ptr<org::VersionedBuffer>& a_buffer) { published = &a_buffer; }
-		/** @brief With Versioned or Buffer: how many of its units hold the content its readers may read now (a by-root buffer: the roots the
-		 *  depth commit sent; 0: none yet, its readers bind none). Unanswered: all it names. */
+		/** @brief With Versioned or Buffer: how many units readers may read now. 0 binds none. Unanswered means all of it. */
 		void Rows(std::uint32_t a_rows) { rows = a_rows; }
 
-		// The answer (Core reads it).
+		// The answer.
 		const std::shared_ptr<org::VersionedBuffer>* versioned = nullptr;
 		const std::shared_ptr<org::Buffer>* buffer = nullptr;
 		const std::shared_ptr<org::VersionedBuffer>* published = nullptr;
@@ -91,55 +82,42 @@ namespace DCLF::Api
 
 namespace DCLF::Extensions
 {
-	/** @brief The input's entry: its registration (copied, its name owned). */
+	/** @brief The input's entry, with its name owned. */
 	struct MainCullInputEntry
 	{
 		std::string name;
 		Api::MainCullInputContribution contribution;
 	};
 
-	/** @brief Main thread, the end of InstallFeatures: the entry from the registration (no name: none). */
+	/** @brief Main thread, at the end of InstallFeatures. */
 	void ResolveMainCullInput(const Api::MainCullInputContribution& a_registered);
-	/** @brief Any thread, after InstallFeatures (null before): the input's entry, or null without one. */
+	/** @brief Any thread, after InstallFeatures. Null without an input. */
 	const MainCullInputEntry* MainCullInput();
 
-	/** @brief Main thread at PostPostLoad, from a feature's early hooks: the main walk's hook is in. */
+	/** @brief Main thread, from a feature's early hooks. Reports that the main walk's hook is in. */
 	void NoteMainWalkInstalled();
-	/** @brief Main thread at PostPostLoad (PrimaryCull::Install): whether NoteMainWalkInstalled came; the primary cull requires it. */
+	/** @brief Main thread. Whether the main walk's hook is in. The primary cull requires it. */
 	bool MainWalkInstalled();
 
-	/** @brief The cull binding slots (Api::CullBindingSlot::Count). */
 	inline constexpr std::size_t kCullBindingSlots = static_cast<std::size_t>(Api::CullBindingSlot::Count);
-	/** @brief A slot's binding: its registration (copied, its name owned). */
+	/** @brief A slot's binding, with its name owned. */
 	struct CullBindingEntry
 	{
 		std::string name;
 		Api::CullBinding binding;
 	};
 
-	/** @brief Main thread, the end of InstallFeatures: the entries from the registrations, by slot (no select: none). */
+	/** @brief Main thread, at the end of InstallFeatures. */
 	void ResolveCullBindings(const std::array<Api::CullBinding, kCullBindingSlots>& a_registered);
-	/** @brief Any thread, after InstallFeatures (null before): a_slot's binding, or null without one. */
+	/** @brief Any thread, after InstallFeatures. Null without a binding. */
 	const CullBindingEntry* CullBindingOf(Api::CullBindingSlot a_slot);
-	/**
-	 * @brief Render thread, per pass (its declaration, revision or preparation) or commit, never per object: a_slot's select run for
-	 * a_scene, a_frame and a_adopted (null at a declaration); no answer without a binding.
-	 */
+	/** @brief Render thread, per pass or commit, never per object. Runs a_slot's select. a_adopted is null at a declaration. */
 	Api::CullBindingSelect SelectCullBinding(Api::CullBindingSlot a_slot, const Draws::SceneBuffers& a_scene, std::uint32_t a_frame = 0,
 		const org::services::NamedVersions* a_adopted = nullptr);
-	/**
-	 * @brief SelectCullBinding's versioned answer for a pass's declaration and preparation (Declare: bound when non-null): the
-	 * scene resources' handle, or a null one held by Core (no binding, or a binding answering otherwise). Stable while a_scene lives.
-	 */
+	/** @brief The versioned answer for a pass's declaration and preparation, or a null handle. Stable while a_scene lives. */
 	const std::shared_ptr<org::VersionedBuffer>& CullBindingBuffer(Api::CullBindingSlot a_slot, const Draws::SceneBuffers& a_scene, std::uint32_t a_frame = 0);
-	/**
-	 * @brief SelectCullBinding's late-bound answer for a pass's declaration (Api::CullBindingSelect::Published): the buffer a pass that
-	 * reads a_slot's publication declares, or a null one held by Core (no binding, or none answered). Stable while a_scene lives.
-	 */
+	/** @brief The late-bound answer a reader declares, or a null handle. Stable while a_scene lives. */
 	const std::shared_ptr<org::VersionedBuffer>& CullBindingPublished(Api::CullBindingSlot a_slot, const Draws::SceneBuffers& a_scene);
-	/**
-	 * @brief Declares a read of every cull binding publication in a_slots on a_builder (a pass that reads them through Core's descriptor
-	 * words or the latch's indices). Slots without one are skipped.
-	 */
+	/** @brief Declares a read of every cull binding publication in a_slots. Slots without one are skipped. */
 	void DeclareCullBindingPublications(org::RenderPassBuilder& a_builder, const Draws::SceneBuffers& a_scene, std::initializer_list<Api::CullBindingSlot> a_slots);
 }

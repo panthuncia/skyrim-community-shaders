@@ -1,10 +1,6 @@
 #pragma once
 
-// The material-write sink: what a feature's engine hooks tell Core when the engine writes a material or a property's shading in place
-// (Features/Effects' effect controllers and material rewrite), so the coordinator's records follow the write (the material captured for
-// them, MaterialPort::PushCapture) and the shading resampled. The frame patch of the ports' frame VS variable, which leaves a capture
-// whose texture transforms alone moved to the frame (Features/TextureTransforms), is registered through the install context
-// (InstallContext::RegisterFrameVSVariablePatch). Implemented by Core (Core/Shading/MaterialWrites.cpp, Core/Extensions/MaterialWrites.h).
+// Calls a feature's engine hooks make when the engine writes a material or a property's shading in place, so Core's records follow.
 
 namespace RE
 {
@@ -14,14 +10,8 @@ namespace RE
 
 namespace DCLF::Api
 {
-	/**
-	 * @brief Any thread, lock-free (a hook after the engine's write, where a_material is alive and readable): a_material's fields were
-	 * written; it is captured for the coordinator's records. Null: nothing.
-	 */
+	/** @brief Any thread, lock-free, after the engine's write. Recaptures the material. Null is ignored. */
 	void NoteMaterialWritten(const RE::BSShaderMaterial* a_material);
-	/**
-	 * @brief Any thread, lock-free (a hook after the engine's write): a_property's shading moved (a colour or a value its shading row
-	 * reads, or its material's alpha); the next frame's shading sample resamples its dependents. Never null.
-	 */
+	/** @brief Any thread, lock-free, after the engine's write. The next shading sample resamples the property. Never null. */
 	void NotePropertyShading(const RE::BSShaderProperty* a_property);
 }

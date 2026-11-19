@@ -7,13 +7,10 @@
 namespace DCLF
 {
 	/**
-	 * @brief The events the engine's hooks push, from any thread, for one consumer to drain: DCLF's scene and material
-	 * events (Coordinator's fade, property, node, LOD fade and switch events; MaterialSources' writes).
-	 *
-	 * A bounded ring with a sequence per cell (Vyukov's), so a push allocates nothing while the ring has room. When it is
-	 * full a push spills onto a lock-free stack instead, which allocates, so no event is ever lost: the consumers have no
-	 * path that rebuilds what a lost event would have told them. A drain visits the ring's events in push order, then the
-	 * spilled ones in push order.
+	 * @brief Events the engine's hooks push from any thread, for one consumer to drain.
+	 * A bounded Vyukov ring, so a push allocates nothing while there is room. When full, a push spills onto a lock-free stack.
+	 * No event is ever lost, because consumers have no way to rebuild what a lost event would have told them.
+	 * A drain visits the ring's events in push order, then the spilled ones in push order.
 	 */
 	template <class T, std::size_t Capacity = 4096>
 	class EventQueue
@@ -26,19 +23,18 @@ namespace DCLF
 			for (std::size_t i = 0; i < Capacity; ++i)
 				cells[i].sequence.store(i, std::memory_order_relaxed);
 		}
-		/** @brief a_onPush is called after every push, on the pushing thread (a consumer's wake: WakeScenePropertyEvent and the like). */
+		/** @brief a_onPush runs after every push, on the pushing thread, to wake the consumer. */
 		explicit EventQueue(void (*a_onPush)()) :
 			EventQueue()
 		{
 			onPush = a_onPush;
 		}
-		// The queues live as long as the process, and what they hold at its end (engine objects' references among them) is
-		// left alone: nothing may release engine objects while the process is torn down.
+		// The queues live as long as the process and are never cleaned up at its end,
+		// because nothing may release engine objects while the process is torn down.
 		~EventQueue() = default;
 		EventQueue(const EventQueue&) = delete;
 		EventQueue& operator=(const EventQueue&) = delete;
 
-		/** @brief Any thread. */
 		void Push(T a_value)
 		{
 			PushOnly(std::move(a_value));
@@ -47,8 +43,8 @@ namespace DCLF
 		}
 
 		/**
-		 * @brief The one consumer: every event pushed before the call, oldest first (a_visit(T&&)). Returns how many. Bounded by the
-		 * ring's head at the call: a producer extending the queue meanwhile is the next drain's, so a drain always ends.
+		 * @brief The one consumer. Visits every event pushed before the call, oldest first, and returns how many.
+		 * Bounded by the ring's head at the call, so a drain always ends even while producers keep pushing.
 		 */
 		template <class F>
 		std::size_t Drain(F&& a_visit)
@@ -84,7 +80,7 @@ namespace DCLF
 		}
 		/** @brief Drops every event pushed before the call. */
 		void Discard() { Drain([](T&&) {}); }
-		/** @brief The pushes that found the ring full, since the start. */
+		/** @brief Pushes that found the ring full since the start. */
 		std::uint64_t Spilled() const { return spilled.load(std::memory_order_relaxed); }
 
 	private:
@@ -102,7 +98,7 @@ namespace DCLF
 						return;
 					}
 				} else if (difference < 0) {
-					// Full: spilled, never dropped.
+					// Full, so spill. Never drop.
 					auto* node = new Spill{ std::move(a_value), spill.load(std::memory_order_relaxed) };
 					while (!spill.compare_exchange_weak(node->next, node, std::memory_order_release, std::memory_order_relaxed)) {
 					}
@@ -124,7 +120,7 @@ namespace DCLF
 			T value;
 			Spill* next;
 		};
-		Cell* cells = new Cell[Capacity];  // never freed (above)
+		Cell* cells = new Cell[Capacity];  // never freed, see above
 		std::atomic<std::uint64_t> head{ 0 };
 		std::uint64_t tail = 0;  // the consumer's
 		std::atomic<Spill*> spill{ nullptr };

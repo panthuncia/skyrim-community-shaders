@@ -10,17 +10,15 @@ namespace DCLF::Integrations::TerrainShadows
 {
 	namespace
 	{
-		// The view EarlyPrepass binds at t60 while terrain shadows are on: its shadow height map, remade there on a new heightmap, so
-		// already this frame's texture (and this frame's update) at the faces' commit, which follows the shadow maps. Off, or before the
-		// map exists, EarlyPrepass binds nothing (the reflection prepass's binding, or an earlier frame's, stands): the captured view.
+		// The view EarlyPrepass binds at t60 while terrain shadows are on. It is already this frame's at the faces' commit, which follows the shadow maps.
+		// Off, or before the map exists, EarlyPrepass binds nothing, so the captured view.
 		void* ShadowHeightView()
 		{
 			const auto& terrainShadows = globals::features::terrainShadows;
 			return terrainShadows.loaded && terrainShadows.settings.EnableTerrainShadow ? terrainShadows.GetShadowHeightSRV() : nullptr;
 		}
 
-		// On the ORG path (CS_ORG_TERRAIN_SHADOWS) the view is the graph texture's export while the current heightmap is the graph's,
-		// so the commits read the published texture, ordered after the update at the EarlyPrepass anchor.
+		// On the ORG path the view is the graph texture's export, so commits read it ordered after the update at the EarlyPrepass anchor.
 		void Install(Api::InstallContext& a_context)
 		{
 			a_context.RegisterFrameTexture({ .name = "terrain shadows height", .textureRegister = kShadowHeightRegister, .view = &ShadowHeightView,

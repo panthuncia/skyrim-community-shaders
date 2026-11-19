@@ -1,11 +1,7 @@
 #pragma once
 
-// The frame-value pool contract (Api::InstallContext::RegisterFrameValuePool): rows a feature samples every frame on DCLF's pool, sent
-// into a pooled backing the frame's GPU work reads by descriptor. FrameValues (Core/Gpu) runs it beside its built-in parts.
-//
-// The palette rows contract (Api::InstallContext::RegisterPaletteRows): a class of FrameValues' items whose palette block a feature
-// fills every frame in FrameValues' built-in palette part (the part the skins' bone palettes are in), and whose placement row it may
-// override.
+// Frame-value pools: rows a feature samples every frame on DCLF's pool and sends to a backing the GPU reads by descriptor.
+// Palette rows: a class of FrameValues items whose palette block a feature fills every frame, beside the skins' bone palettes.
 
 #include <algorithm>
 #include <bit>
@@ -16,57 +12,45 @@
 
 namespace DCLF::Api
 {
-	// Defined by Core (Core/Extensions/FrameValuePools.h), which the features inside DCLF include for them.
+	// Defined in Core/Extensions/FrameValuePools.h.
 	class FrameValuePoolFrameStart;
 	class FrameValuePoolKick;
 	class FrameValuePoolProducer;
 
-	/** @brief A registered pool (RegisterFrameValuePool's result): FrameValues::PoolIndex names its frame's backing by it. */
+	/** @brief A registered pool. FrameValues::PoolIndex finds the frame's backing by this id. */
 	struct FrameValuePoolId
 	{
 		std::uint32_t index = ~0u;
 		explicit operator bool() const { return index != ~0u; }
 	};
 
-	/** @brief What a pool's kick hands its frame's producer. */
+	/** @brief What a pool's kick hands to the frame's producer. */
 	struct FrameValueInput
 	{
-		// Held by the frame's job until its producer is done, then let go on DCLF's pool (no engine reference may be in it). Kick runs
-		// every frame: hand over a pointer the feature already holds, not a new allocation.
+		// Released on DCLF's pool, so it must hold no engine reference. Kick runs every frame, so pass a pointer you already hold.
 		std::shared_ptr<const void> input;
-		// The rows the producer may leave: the frame's backing holds at least these (its class grows by FrameValues' headroom policy, never shrinks).
+		// The backing holds at least this many rows. It grows with headroom and never shrinks.
 		std::uint64_t rows = 0;
 	};
 
 	/**
-	 * @brief A frame-value pool: its rows, journalled by the feature (KeptWholeArray<Row>), each frame sent the runs its backing lacks.
+	 * @brief A frame-value pool. The feature journals its rows, and each frame only the missing runs are sent.
 	 *
-	 * - frameStart (optional): render thread, at every FrameValues::Kick (the frame's start), in registration order, with the built-in
-	 *   parts' own frame-start reads, before it is known whether the frame has a producer: reads what must be the frame start's (the
-	 *   engine as this frame's culls have not changed it yet) into the feature's own queue, which a later kick hands over. The feature
-	 *   drains its inputs here: the frame's queued requests (the publications' deltas the frame installed) are its to take.
-	 * - kick: render thread, in FrameValues::Kick (the frame's start, after the engine's update), in registration order, after the
-	 *   built-in parts' inputs. Not called on a frame without a producer.
-	 * - sample: the frame's producer, on DCLF's preparation pool, after the built-in parts' sampling. The producers run one at a time in
-	 *   frame order, so state only they touch needs no synchronisation. Opens the rows' build at the job's floor (BeginBuild), writes and
-	 *   marks them; may fan out on SceneScheduler::Executor(); reads the engine only under an EngineReadWindow::Lease while Newest().
-	 * - send: the same producer, after the built-in parts' sends: hands the rows to FrameValuePoolProducer::Send.
-	 *
-	 * The frame's GPU work reads the backing by FrameValues::PoolIndex (render thread, from Kick until the next; 0 without a producer).
-	 * The render thread's diagnostics read the rows as the frame's producer left them once FrameValues::ProducerDone says it is done
-	 * (until the next Kick, which no producer passes).
-	 * The backing is bound to the frame's last submission at EndFrame. A throw from sample or send fails the frame's values, as a built-in
-	 * part's failure does (logged; the frame draws what its backings held).
+	 * - frameStart: render thread at every kick, before it is known whether the frame has a producer.
+	 *   Read frame-start engine state here and drain the frame's queued requests.
+	 * - kick: render thread. Not called on a frame without a producer.
+	 * - sample: on DCLF's pool. Producers run one at a time in frame order, so state only they touch needs no lock.
+	 *   Read the engine only under an EngineReadWindow lease.
+	 * - send: hands the rows to FrameValuePoolProducer::Send.
+	 * A throw from sample or send fails the frame's values. The frame then draws what its backings already held.
 	 */
 	struct FrameValuePool
 	{
-		std::string_view name;    // the backing pool's name, cs.dclf.frame-values.<name>, and the report's
-		std::uint32_t stride = 0;  // bytes a row
-		// Its backings report their device address (FrameValues::PoolAddress): rows that hold their own address, or a pass that reads them
-		// by address.
+		std::string_view name;    // backing pool name is cs.dclf.frame-values.<name>
+		std::uint32_t stride = 0;  // bytes per row
+		// The backings report their device address, for rows or passes that use it.
 		bool deviceAddress = false;
-		// Its backings take writes from the GPU (a pass that stores into the rows). D3D12 needs it for the buffer's UAV: without it the
-		// buffer view ref's UAV is a null view, and every store through it is dropped.
+		// The GPU writes to the rows. D3D12 needs this, or the UAV is a null view and every store is dropped.
 		bool unorderedAccess = false;
 		void (*frameStart)(const FrameValuePoolFrameStart& a_start) = nullptr;
 		FrameValueInput (*kick)(const FrameValuePoolKick& a_kick) = nullptr;
@@ -74,18 +58,13 @@ namespace DCLF::Api
 		void (*send)(FrameValuePoolProducer& a_producer) = nullptr;
 	};
 
-	// Defined by Core (Core/Extensions/PaletteRows.h), which the features inside DCLF include for them.
+	// Defined in Core/Extensions/PaletteRows.h.
 	struct PaletteGeometrySource;
 	class PaletteRowsKick;
 	class PaletteRowsRun;
 	class PaletteRowsChunk;
 
-	/**
-	 * @brief A class of FrameValues' items (PlacementPlan::Item::itemClass), Core's to decide: a geometry type contribution names the class
-	 * of its skinless objects (Api::GeometryTypeContribution::itemClass, read as data), the coordinator names an item's class when it plans
-	 * it, the walk sizes its palette block by the class's rule, and the class's registration fills the block.
-	 * - ParticleSystem: a particle system without a skin (BSGeometry type kParticles), its block its quads (Features/Particles).
-	 */
+	/** @brief A class of FrameValues items. ParticleSystem is a skinless particle system whose block holds its quads. */
 	enum class FrameValueItemClass : std::uint8_t
 	{
 		None,
@@ -94,33 +73,17 @@ namespace DCLF::Api
 	};
 	inline constexpr std::size_t kPaletteRowsClasses = static_cast<std::size_t>(FrameValueItemClass::Count) - 1;  // None has none
 
-	/** @brief The bytes of a palette rows class's frame input (PaletteRowsKick::input): trivially copyable, held in the frame's job. */
+	/** @brief Size of a palette rows class's frame input. It must be trivially copyable. */
 	inline constexpr std::size_t kPaletteRowsInputBytes = 128;
 
 	/**
-	 * @brief A palette rows class: the items of itemClass with a palette block (the walk's, sized by rule) are due every frame, their keys
-	 * unread (FrameValues samples them whatever moved), and their block's rows are the feature's. Read as data where the walk sizes a block;
-	 * its callbacks run at the frame's start, at FrameValues' kick, once a producer run and once a chunk of its items, never per object
-	 * (geometrySource: per record write of the class's geometry).
+	 * @brief A palette rows class. Its items are sampled every frame whether or not they moved, and the feature writes their blocks.
 	 *
-	 * - name: the report's and the install's.
-	 * - itemClass: the class (one registration's).
-	 * - rule: a block's rows from the geometry's unit count (SceneCapture's record: a particle system's capacity): the units clamped to
-	 *   [minUnits, maxUnits], rounded up when pow2 (maxUnits then a power of two) to the next of octaveSteps equal steps between powers
-	 *   of two (1: a power of two; 4: 8, 10, 12, 14, 16, 20, ...), times rowsPerUnit. The walk reads it as data.
-	 * - geometrySource: the scene lane (the walk's record writes): the geometry slot the class's draws read, for a_source.units units
-	 *   (the rule's); false: none yet (the record waits, Tables::kSlotFree).
-	 * - frameStart (optional): render thread, FrameDriver::BeginFrame, every frame (after the primary cull's frame camera): the engine's
-	 *   frame-start state the class reads.
-	 * - kick (optional): render thread, FrameValues::Kick (the frame's start, after the engine's update), on a frame with a producer: the
-	 *   frame's input into PaletteRowsKick::input (kPaletteRowsInputBytes, held by the frame's job; all zero without a kick).
-	 * - beginRun: the frame's producer (DCLF's pool, one producer at a time), before its items are sampled: every item of the class with a
-	 *   block listed this run, in the run's order (PaletteRowsRun::items); sets each one's state.
-	 * - sampleChunk: the producer's pool, once a chunk of the run's items (CS.DCLF.FrameValues.Items, concurrently with the other chunks;
-	 *   a chunk's items are distinct): each listed item of the class whose sample was not refused, after Core sampled its placement row:
-	 *   writes every row of its block, and may give its placement row's world (its previous too) and bound. Core then compares them with
-	 *   the frame's rows (the block's current rows only) and marks what changed. No engine read (no lease is held).
-	 * - endRun: the producer, after every chunk.
+	 * - geometrySource: scene lane, per record write. Returns false when no geometry slot exists yet, so the record waits.
+	 * - kick: render thread, only on frames with a producer. The input stays all zero without a kick.
+	 * - beginRun: lists this run's items of the class and sets each one's state.
+	 * - sampleChunk: runs concurrently with other chunks, and chunks hold distinct items. Writes every row of each block.
+	 *   May also supply the placement row's world and bound. No engine reads, because no lease is held.
 	 */
 	struct PaletteRowsContribution
 	{
@@ -128,11 +91,11 @@ namespace DCLF::Api
 		{
 			std::uint32_t rowsPerUnit = 0, minUnits = 0, maxUnits = 0;
 			bool pow2 = false;
-			// With pow2: each octave's equal steps (a power of two itself: 1, 2, 4, ...). More steps hold fewer rows past the count (at most
-			// a 1/octaveSteps share of the octave) at more sizes (each size a geometry slot of the class's).
+			// With pow2, sizes round up to one of this many equal steps per octave. Must be a power of two.
+			// More steps waste fewer rows but create more sizes, and each size is its own geometry slot.
 			std::uint32_t octaveSteps = 1;
 
-			/** @brief The units a geometry of a_count is given a block for. */
+			/** @brief The units a geometry with a_count units gets a block for. */
 			constexpr std::uint32_t Units(std::uint32_t a_count) const
 			{
 				const std::uint32_t units = std::clamp(a_count, minUnits, maxUnits);
@@ -142,7 +105,7 @@ namespace DCLF::Api
 				const std::uint32_t step = std::max(octave / std::max(octaveSteps, 1u), 1u);
 				return (units + step - 1) / step * step;
 			}
-			/** @brief Its block's rows in the frame's palettes. */
+			/** @brief The block's rows in the frame's palettes. */
 			constexpr std::uint32_t Rows(std::uint32_t a_count) const { return Units(a_count) * rowsPerUnit; }
 		};
 

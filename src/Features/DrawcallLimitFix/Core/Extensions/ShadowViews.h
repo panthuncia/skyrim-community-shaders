@@ -1,11 +1,7 @@
 #pragma once
 
-// The shadow-view contributions' Core side (Api/ShadowViews.h): each occlusion map's and shadow source's entry and the exclusion
-// contribution's, resolved once at InstallFeatures (ResolveShadowViews) from the features' registrations, and what the shadow engine
-// derives from them for its per-object and per-frame paths (each mode's set phase, the set decision's readiness order, the source of each
-// engine view kind, the maps' import order). The shadow capability, the captures, both shadow epochs, the set decisions, the
-// classification and the reports read them as data; the contexts the callbacks are handed are defined here (but the exclusion build's,
-// Core/Render/Shadow/ShadowExclusionBuild.h).
+// Core's side of Api/ShadowViews.h. Occlusion map, shadow source and exclusion entries are resolved once at install.
+// The shadow engine reads them, and what it derives from them, as plain data on its per-object and per-frame paths.
 
 #include "Features/DrawcallLimitFix/Api/ShadowViews.h"
 #include "Features/DrawcallLimitFix/Core/Settings/Toggles.h"
@@ -42,9 +38,8 @@ namespace DCLF::ShadowCameras
 namespace DCLF::Api
 {
 	/**
-	 * @brief What an ImportedTexture map's importTarget is handed: the texture and depth view to import as its depth target, and whether
-	 * it supplied them (none: nothing is imported this time). A target the graph owns also gives its graph resource, which the shadow
-	 * epoch then declares instead of importing the texture again: one resource, which every graph orders.
+	 * @brief What importTarget gets for an ImportedTexture map: the texture and depth view to import, and whether they were supplied.
+	 * A graph-owned target also gives its graph resource, which the shadow epoch declares instead of importing again.
 	 */
 	class OcclusionTargetImport
 	{
@@ -55,40 +50,37 @@ namespace DCLF::Api
 		std::shared_ptr<org::ExternalTextureResource> graph;
 	};
 
-	/**
-	 * @brief What a map's technique is handed: the walked object's records as its occluder rule reads them (the mirror's, on the scene
-	 * work). The nearest fade node's BSX flags are walked only when asked (the walk's own, through nearestFadeBsx).
-	 */
+	/** @brief What a map's technique reads of the walked object. The nearest fade node's BSX flags are only walked when asked for. */
 	class OccluderLeaf
 	{
 	public:
-		std::uint64_t flags = 0;    // its Lighting property's (BSShaderProperty::flags)
+		std::uint64_t flags = 0;    // BSShaderProperty::flags
 		bool alphaTesting = false;  // NiAlphaProperty::GetAlphaTesting
-		bool referenced = false;    // its node has a reference (user data)
-		/** @brief The BSX flags of the nearest fade node above the object, by the mirror's parents (-1: none, or none read). */
+		bool referenced = false;    // its node has a reference
+		/** @brief BSX flags of the nearest fade node above the object, or -1. */
 		std::int32_t NearestFadeNodeBsx() const { return nearestFadeBsx(*this); }
 
-		// The walk's: what NearestFadeNodeBsx walks (the coordinator and the object's records).
+		// What NearestFadeNodeBsx walks.
 		const void* scene = nullptr;
 		const void* records = nullptr;
 		std::int32_t (*nearestFadeBsx)(const OccluderLeaf& a_leaf) = nullptr;
 	};
 
-	/** @brief What a map's camera is handed: the camera it is drawn from (none: the view is not set up). */
+	/** @brief What a map's camera gets. Leave it empty when the view is not set up. */
 	class OcclusionCamera
 	{
 	public:
 		const RE::NiCamera* camera = nullptr;
 	};
 
-	/** @brief What a map's ownsAccumulator is handed: the 0x1C accumulator that finished accumulating. */
+	/** @brief The 0x1C accumulator that finished accumulating. */
 	class OcclusionAccumulator
 	{
 	public:
 		const RE::BSShaderAccumulator* accumulator = nullptr;
 	};
 
-	/** @brief A light the selection kept (ShadowSourceContribution::lightKept), and the scene frame of the selection. */
+	/** @brief A light the selection kept, and the scene frame of the selection. */
 	class ShadowLightKept
 	{
 	public:
@@ -97,8 +89,8 @@ namespace DCLF::Api
 	};
 
 	/**
-	 * @brief What a source's camera is handed: a view (its light, its descriptor, the scene frame), and what it answers: DCLF's camera
-	 * for the view (null: none this frame) and, a focus view's, its target's node (null: past the targets).
+	 * @brief What a source's camera gets: a view's light, descriptor and scene frame.
+	 * It answers with DCLF's camera, or null, and for a focus view the target's node.
 	 */
 	class ShadowSourceCamera
 	{
@@ -115,145 +107,115 @@ namespace DCLF::Extensions
 {
 	inline constexpr std::size_t kOcclusionMaps = static_cast<std::size_t>(Api::OcclusionMap::Count);
 	inline constexpr std::size_t kShadowSources = static_cast<std::size_t>(Api::ShadowSource::Count);
-	// The shadow engine's modes (Draws::kShadowModeCount: plain, clamped, paraboloid, then one per map) and the engine views' kinds
-	// (ShadowViews::Kind: directional, frustum, parabolic, other); both checked where they are defined.
+	// Shadow engine modes are plain, clamped and paraboloid, then one per map. Both counts are checked where they are defined.
 	inline constexpr std::size_t kShadowEngineModes = 3 + kOcclusionMaps;
 	inline constexpr std::size_t kShadowViewKinds = 4;
 
-	/** @brief A map's resolved entry: its feature's registration (none: registered false, every field its default). */
+	/** @brief A map's resolved entry. Every field keeps its default when no feature registered it. */
 	struct OcclusionMapEntry
 	{
 		bool registered = false;
-		Api::ToggleId toggle;                         // the feature's toggle
-		const bool* available = nullptr;              // the load-time flag, read whenever the toggle is
-		std::uint8_t phase = 0;                       // its set phase
-		std::uint32_t viewBit = 0;                    // its view bit at the GPU cull
-		std::uint32_t (*technique)(const Api::OccluderLeaf&) = nullptr;  // its occluder rule, per walked entry
-		bool minRadius = false;                       // its cull's size test (kCullMinRadius)
-		float (*floorHeight)() = nullptr;             // its cull's floor (a cull plane at the epoch's latch), none: no floor
+		Api::ToggleId toggle;
+		const bool* available = nullptr;              // read whenever the toggle is
+		std::uint8_t phase = 0;
+		std::uint32_t viewBit = 0;
+		std::uint32_t (*technique)(const Api::OccluderLeaf&) = nullptr;  // per walked entry
+		bool minRadius = false;                       // kCullMinRadius
+		float (*floorHeight)() = nullptr;             // null means no floor
 		Api::OcclusionTarget target = Api::OcclusionTarget::EngineMask;
-		std::string list, report, targetName;         // its labels, owned here
+		std::string list, report, targetName;         // owned here
 		void (*importTarget)(Api::OcclusionTargetImport&) = nullptr;
 		bool (*referenceDue)() = nullptr;
 		void (*camera)(Api::OcclusionCamera&) = nullptr;
 		bool (*ownsAccumulator)(const Api::OcclusionAccumulator&) = nullptr;
 	};
-	/** @brief A source's resolved entry. */
 	struct ShadowSourceEntry
 	{
 		bool registered = false;
-		void (*camera)(Api::ShadowSourceCamera&) = nullptr;  // Registry refused a source without it
+		void (*camera)(Api::ShadowSourceCamera&) = nullptr;
 		void (*lightKept)(const Api::ShadowLightKept&) = nullptr;
-		bool (*fullFrustumWindowEnd)() = nullptr;  // the Sun's: Registry refused a Sun source without it
+		bool (*fullFrustumWindowEnd)() = nullptr;  // Sun only
 		void (*frameStart)(std::uint32_t) = nullptr;
 		void (*frameEnd)() = nullptr;
 	};
-	/** @brief Every map's and source's entry, and what the shadow engine reads of them. */
 	struct ShadowViewSet
 	{
 		std::array<OcclusionMapEntry, kOcclusionMaps> maps;
 		std::array<ShadowSourceEntry, kShadowSources> sources;
-		// The exclusion contribution's callbacks (none: no exclusion; Registry refused one without any of them).
+		// Null means no exclusion.
 		void (*exclusion)(Api::ShadowExclusionBuild&) = nullptr;
 		void (*exclusionPublish)(Api::ShadowSource, std::shared_ptr<void>) = nullptr;
 		void (*exclusionFrameStart)() = nullptr;
 		void (*listExclusion)(Api::ShadowListExclusion&) = nullptr;
-		std::uint8_t occluderPhases = 0;     // the registered maps' phases
-		std::uint32_t occluderViewBits = 0;  // and their view bits
-		// Each mode's set phase (SetPhaseOfMode for the caster modes, the map's for an occlusion mode: 0 for a map none takes).
+		std::uint8_t occluderPhases = 0;
+		std::uint32_t occluderViewBits = 0;
+		// Each mode's set phase. 0 for a map nobody takes.
 		std::array<std::uint8_t, kShadowEngineModes> phaseOfMode{};
-		// The phases the set decision tests the slot's readiness for, in its order (Coordinator::DecideSlot): the casters' (kSetCaster,
-		// kSetCasterPoint), then the registered maps', in slot order.
+		// The phases the set decision tests readiness for, in order: casters first, then the registered maps in slot order.
 		std::array<std::uint8_t, 2 + kOcclusionMaps> readinessOrder{};
 		std::uint32_t readinessCount = 0;
-		// The source an engine view draws for, by kind and whether it is a focus view (Count: none, the kind's views have no camera of
-		// DCLF's): what the capture reads the camera from and the view list covers by.
+		// The source an engine view draws for, by kind and whether it is a focus view. Count means DCLF has no camera for it.
 		std::array<std::array<Api::ShadowSource, 2>, kShadowViewKinds> sourceOf{};
-		// The order the maps' targets are imported in (IndirectDraws::UpdateShadowCapability): the precipitation mask's, then the sky map's.
+		// The order map targets are imported in: the precipitation mask, then the sky map.
 		std::array<Api::OcclusionMap, kOcclusionMaps> importOrder{};
 	};
 
 	namespace Detail
 	{
-		// Written only by ResolveShadowViews (the main thread, before DCLF's threads exist: their start orders these writes before every
-		// read), read-only after: a plain read for the per-object paths.
+		// Written only by ResolveShadowViews on the main thread before DCLF's threads exist. Read-only after, so plain reads are safe.
 		inline ShadowViewSet resolvedShadowViews;
 	}
 
-	/** @brief Any thread, after InstallFeatures (empty before): the maps' and sources' entries. */
+	/** @brief Any thread, after InstallFeatures. */
 	inline const ShadowViewSet& ShadowViewsSet() { return Detail::resolvedShadowViews; }
-	/** @brief Any thread, after InstallFeatures: map a_map's entry (kOcclusionSky, kOcclusionPrecipitation). */
+	/** @brief Any thread, after InstallFeatures. */
 	inline const OcclusionMapEntry& OcclusionMapOf(std::uint32_t a_map) { return ShadowViewsSet().maps[a_map]; }
-	/** @brief Any thread, after InstallFeatures: a_source's entry. */
+	/** @brief Any thread, after InstallFeatures. */
 	inline const ShadowSourceEntry& ShadowSourceOf(Api::ShadowSource a_source) { return ShadowViewsSet().sources[static_cast<std::size_t>(a_source)]; }
-	/**
-	 * @brief Render thread: a_source's camera for a_request's view (ShadowSourceContribution::camera), also in a_request.camera; null
-	 * for a source none registered.
-	 */
+	/** @brief Render thread. a_source's camera for a_request's view, or null for an unregistered source. */
 	inline const ShadowCameras::Camera* SourceCamera(Api::ShadowSource a_source, Api::ShadowSourceCamera& a_request)
 	{
 		if (const auto& source = ShadowSourceOf(a_source); source.camera)
 			source.camera(a_request);
 		return a_request.camera;
 	}
-	/**
-	 * @brief The snapshot builder, in the shadow participant's payload: a_build's exclusion into a_build.result (the exclusion
-	 * contribution's build; nothing without one).
-	 */
+	/** @brief Snapshot builder. Runs the exclusion contribution's build, if any. */
 	inline void BuildShadowExclusion(Api::ShadowExclusionBuild& a_build)
 	{
 		if (const auto exclusion = ShadowViewsSet().exclusion)
 			exclusion(a_build);
 	}
-	/**
-	 * @brief Render thread, after the shadow epoch drew (once DCLF draws): a_exclusion, the payload's opaque
-	 * exclusion of a_source, handed back to the exclusion contribution (publish; nothing without one).
-	 */
+	/** @brief Render thread, after the shadow epoch drew. Hands a_source's exclusion back to the contribution, if any. */
 	inline void PublishShadowExclusion(Api::ShadowSource a_source, std::shared_ptr<void> a_exclusion)
 	{
 		if (const auto publish = ShadowViewsSet().exclusionPublish)
 			publish(a_source, std::move(a_exclusion));
 	}
-	/**
-	 * @brief Render thread, once a frame (FrameDriver, after the views' FrameStartBeforeCoverage work, before the lookups are installed):
-	 * the exclusion contribution's frameStart (nothing without one).
-	 */
+	/** @brief Render thread, once per frame. Runs the exclusion contribution's frameStart, if any. */
 	inline void ShadowExclusionFrameStart()
 	{
 		if (const auto frameStart = ShadowViewsSet().exclusionFrameStart)
 			frameStart();
 	}
-	/**
-	 * @brief Render thread: the Sun source's pending exclusion as the scene-list filter reads it (the exclusion contribution's
-	 * listExclusion), into a_view; left empty without one.
-	 */
+	/** @brief Render thread. The Sun's pending exclusion for the scene-list filter, or left empty. */
 	inline void ListExclusion(Api::ShadowListExclusion& a_view)
 	{
 		if (const auto listExclusion = ShadowViewsSet().listExclusion)
 			listExclusion(a_view);
 	}
-	/**
-	 * @brief Main thread, in InstallFeatures (Registry), after the features' installs: the entries from the registered contributions (by
-	 * map and source; Count: none; the exclusion's, no name: none). Once.
-	 */
+	/** @brief Main thread, once, after the features' installs. Builds the entries from the registered contributions. */
 	void ResolveShadowViews(std::span<const Api::OcclusionMapContribution, kOcclusionMaps> a_maps,
 		std::span<const Api::ShadowSourceContribution, kShadowSources> a_sources, const Api::ShadowExclusionContribution& a_exclusion);
-	/**
-	 * @brief Main thread, from the source's hooks on (InstallSourceHooks): whether a_source's feature installed its engine culls' hooks
-	 * (Api::ShadowSourceHooks::CullsInstalled; Features/Shadows/Local's point culls install only after the Sun's).
-	 */
+	/** @brief Whether a_source's feature installed its engine cull hooks. Point culls must install after the Sun's. */
 	bool SourceCullsInstalled(Api::ShadowSource a_source);
-	/**
-	 * @brief Render thread, once a frame (FrameDriver, after the frame requests are served, before the main renderers are refreshed): each
-	 * registered source's frameStart, in source order.
-	 */
+	/** @brief Render thread, once per frame. Each registered source's frameStart, in source order. */
 	void ShadowSourcesFrameStart(std::uint32_t a_frame);
-	/** @brief Render thread, at Present (first in PrimaryCull::EndFrame): each registered source's frameEnd, in source order. */
+	/** @brief Render thread, at Present. Each registered source's frameEnd, in source order. */
 	void ShadowSourcesFrameEnd();
 
 	/**
-	 * @brief Whether DCLF draws occlusion map a_map under a_toggles: taken, available (its load-time flag: Features/OcclusionMaps' is
-	 * Skylighting's, whose hook drives both maps) and its toggle on. False past the maps.
+	 * @brief Whether DCLF draws occlusion map a_map: taken, available and toggled on.
+	 * The available flag comes from Skylighting, whose hook drives both maps.
 	 */
 	inline bool OcclusionOn(const ToggleSet& a_toggles, std::uint32_t a_map)
 	{

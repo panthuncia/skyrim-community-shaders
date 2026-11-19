@@ -1,5 +1,5 @@
 // MaterialPort's vanilla part: BSLightingShader::SetupMaterial for the vanilla material classes, and the VanillaFrame sample
-// (render thread, the frame's start). Evaluation is pure.
+// taken on the render thread at the frame's start. Evaluation is pure.
 
 #include "Features/DrawcallLimitFix/Core/Shading/MaterialPort.h"
 #include "Features/DrawcallLimitFix/Core/Engine/EngineAccess.h"
@@ -56,9 +56,9 @@ namespace DCLF::MaterialPort
 		constexpr std::uint16_t kSpecularBackLighting = 0x68;
 		constexpr std::uint16_t kTextureClampMode = 0x70;
 
-		// The module globals SampleVanillaFrame reads (AE 1.6.1170, SE 1.5.97); VanillaFrame's comments name each by its AE address.
+		// Module globals SampleVanillaFrame reads, for AE 1.6.1170 and SE 1.5.97. VanillaFrame's comments name each by its AE address.
 		constexpr Engine::Offset kTechniqueByte12{ { 390937 }, { 513196 } };
-		// SetupMaterial's AmbientSpecular write as Engine Fixes computes it (its ID and offset: the same 0x20-byte write on each runtime).
+		// SetupMaterial's AmbientSpecular write as Engine Fixes computes it. The same 0x20-byte write on each runtime.
 		constexpr Engine::Offset kAmbientSpecularWrite{ { 107298, 0x8cf }, { 100563, 0x713 } };
 		constexpr Engine::Offset kTechniqueByte7{ { 391632 }, { 513692 } };
 		constexpr Engine::Offset kTextureTransformBuffer{ { 391006 }, { 513265 } };  // BSShaderManager::State+0x120
@@ -79,7 +79,7 @@ namespace DCLF::MaterialPort
 		constexpr std::uint32_t kOneBits = 0x3f800000u;  // gFloatOne, 0x141ad2870
 		constexpr std::uint32_t kZeroBits = 0u;
 
-		/** @brief A vanilla material class: its vtable, its size (its Create's allocation) and its NiSourceTexture pointer fields. */
+		/** @brief A vanilla material class: its vtable, its size from its Create's allocation, and its NiSourceTexture fields. */
 		struct VanillaClass
 		{
 			std::uintptr_t vtable = 0;
@@ -110,8 +110,8 @@ namespace DCLF::MaterialPort
 
 		const std::array<VanillaClass, 14>& Classes()
 		{
-			// Sizes from each Create (BSLightingShaderMaterialLandscape::Create 1414bb140 allocates 0x158, LODLandscape 1414bb7e0 200).
-			// CommonLib's LODLandscape puts its floats at 0xb4; SetupMaterial reads them at 0xb8..0xc0 (the noise texture is 0xb0).
+			// Sizes come from each Create: Landscape (1414bb140) allocates 0x158 and LODLandscape (1414bb7e0) 200.
+			// CommonLib puts LODLandscape's floats at 0xb4, but SetupMaterial reads them at 0xb8..0xc0, with the noise texture at 0xb0.
 			// In Engine::LightingMaterialVtables' order.
 			const auto& v = Engine::LightingMaterialVtables();
 			static const std::array<VanillaClass, 14> classes{
@@ -143,8 +143,8 @@ namespace DCLF::MaterialPort
 		}
 
 		/**
-		 * @brief SetupMaterial's writes against a snapshot: a constant lands at the variable's StageLayout offset plus its component;
-		 * a texture slot is written when anything stores to PSTexture; a filter mode when anything stores to PSTextureFilterMode. Any read the engine would do outside the class, or through a null texture it dereferences, fails.
+		 * @brief SetupMaterial's writes against a snapshot. Constants land at the variable's StageLayout offset plus component.
+		 * Any read the engine would make outside the class, or through a null texture it dereferences, fails the evaluation.
 		 */
 		struct Port
 		{
@@ -176,8 +176,8 @@ namespace DCLF::MaterialPort
 				}
 				return m.HasTexture(a_offset);
 			}
-			// A texture field the engine dereferences without a test (FUN_1414e0460, FUN_1414e06b0, the inline binds): the view
-			// ViewOf resolved (rendererTexture +0x48, then +0x10; null when the texture has no renderer texture).
+			// A texture field the engine dereferences without a null test (FUN_1414e0460, FUN_1414e06b0, the inline binds).
+			// The view comes from rendererTexture +0x48, then +0x10. Null when there is no renderer texture.
 			ID3D11ShaderResourceView* Texture(std::uint16_t a_offset)
 			{
 				if (!Has(a_offset)) {
@@ -210,7 +210,7 @@ namespace DCLF::MaterialPort
 			}
 			void SetFilter(std::uint32_t a_slot, std::uint32_t a_mode) { out.filterModes[a_slot] = a_mode; }
 
-			/** @brief FUN_1414e0460(slot, texture, material): the texture's view, and the material's textureClampMode (+0x70). */
+			/** @brief FUN_1414e0460(slot, texture, material): the texture's view, with the material's textureClampMode at +0x70. */
 			void Bind(std::uint32_t a_slot, std::uint16_t a_offset)
 			{
 				SetTexture(a_slot, Texture(a_offset));
@@ -218,13 +218,13 @@ namespace DCLF::MaterialPort
 			}
 			/** @brief FUN_1414e06b0: the envmap cube in t4, with textureClampMode. */
 			void BindCube(std::uint16_t a_offset) { Bind(4, a_offset); }
-			/** @brief NiSourceTexture__sub (1414e0710): the envmap mask in t5, the default texture (0x14328ccb8) when there is none. */
+			/** @brief NiSourceTexture__sub (1414e0710): the envmap mask in t5, or the default texture (0x14328ccb8) without one. */
 			void BindMask(std::uint16_t a_offset)
 			{
 				SetTexture(5, Has(a_offset) ? m.View(a_offset) : frame.envMaskDefaultView);
 				SetAddress(5, Bits(kTextureClampMode));
 			}
-			/** @brief A render target's SRV (0x143289230 + 0x30 * index); an index outside the array fails. */
+			/** @brief A render target's SRV at 0x143289230 + 0x30 * index. An index outside the array fails. */
 			ID3D11ShaderResourceView* RenderTarget(std::int32_t a_index)
 			{
 				if (a_index < 0 || static_cast<std::uint32_t>(a_index) >= VanillaRenderTargets()) {
@@ -235,7 +235,6 @@ namespace DCLF::MaterialPort
 			}
 		};
 
-		/** @brief The record before SetupMaterial: nothing written. */
 		void ResetRecord(MaterialRecord& a_out)
 		{
 			a_out.vs.Reset();
@@ -247,7 +246,7 @@ namespace DCLF::MaterialPort
 			a_out.featureTextures = {};
 		}
 
-		/** @brief The +0x94 the draw has: SetupTechnique's remap (1414db810), idempotent, so a descriptor already remapped passes unchanged. */
+		/** @brief The +0x94 the draw has, after SetupTechnique's remap (1414db810). Idempotent, so an already remapped descriptor passes unchanged. */
 		std::uint32_t RemapDescriptor(std::uint32_t a_passDescriptor, const VanillaFrame& a_frame)
 		{
 			std::uint32_t d = a_passDescriptor;
@@ -260,36 +259,35 @@ namespace DCLF::MaterialPort
 			return d;
 		}
 
-		/** @brief Techniques 8 (MTLand) and 0x13 (MTLandLODBlend). False: the engine would read past the layer arrays. */
+		/** @brief Techniques 8 (MTLand) and 0x13 (MTLandLODBlend). False when the engine would read past the layer arrays. */
 		bool EvaluateLandscape(Port& p, std::uint32_t d, const VanillaFrame& a_frame)
 		{
 			p.PSCopy(kPSLODTexParams, 0, 0x148);
 			p.PSCopy(kPSLODTexParams, 1, 0x14c);
 			p.PS(kPSLODTexParams, 2, a_frame.lodTexParamsZ ? kOneBits : kZeroBits);
 			p.PSCopy(kPSLODTexParams, 3, 0x150);
-			// Base diffuse t0 and normal t7, inline with no address mode: SetupTechnique (1414db810, techniques 8/0x13) set every
-			// slot's to 3 just before.
+			// Base diffuse t0 and normal t7, inline with no address mode, because SetupTechnique (1414db810) set every slot's to 3 just before.
 			p.SetTexture(0, p.Texture(kDiffuse));
 			p.SetAddress(0, 3);
 			p.SetTexture(7, p.Texture(kNormal));
 			p.SetAddress(7, 3);
-			// Layers: diffuse[i] (+0xa8) to t(i+1), normal[i] (+0xd0) to t(i+8), clamp mode 3; numLandscapeTextures (+0xa0) of them.
+			// Layers: diffuse[i] at +0xa8 to t(i+1) and normal[i] at +0xd0 to t(i+8), clamp mode 3. numLandscapeTextures at +0xa0.
 			const std::uint32_t count = p.Bits(0xa0);
 			if (count > 5)
-				return false;  // the engine would read past the arrays (diffuse[5] is normal[0])
+				return false;  // the engine would read past the arrays, since diffuse[5] is normal[0]
 			for (std::uint32_t i = 0; i < count; ++i) {
 				p.SetTexture(i + 1, p.Texture(static_cast<std::uint16_t>(0xa8 + 8 * i)));
 				p.SetAddress(i + 1, 3);
 				p.SetTexture(i + 8, p.Texture(static_cast<std::uint16_t>(0xd0 + 8 * i)));
 				p.SetAddress(i + 8, 3);
 			}
-			if (p.Has(0xf8)) {  // overlay: t13, clamp mode 0
+			if (p.Has(0xf8)) {  // overlay in t13, clamp mode 0
 				p.SetTexture(13, p.m.View(0xf8));
 				p.SetAddress(13, 0);
 			}
-			if (p.Has(0x100))  // noise: t15 through FUN_1414e0460
+			if (p.Has(0x100))  // noise in t15 through FUN_1414e0460
 				p.Bind(15, 0x100);
-			// LandscapeTexture1to4IsSpecPower = +0x130..+0x13c; 5to6 = (+0x140, +0x144, 0, 0).
+			// LandscapeTexture1to4IsSpecPower is +0x130..+0x13c. 5to6 is (+0x140, +0x144, 0, 0).
 			p.PSCopy(kPSLandscape1to4IsSpecPower, 1, 0x134);
 			p.PSCopy(kPSLandscape1to4IsSpecPower, 2, 0x138);
 			p.PSCopy(kPSLandscape1to4IsSpecPower, 3, 0x13c);
@@ -299,7 +297,7 @@ namespace DCLF::MaterialPort
 			p.PS(kPSLandscape5to6IsSpecPower, 2, kZeroBits);
 			p.PS(kPSLandscape5to6IsSpecPower, 3, kZeroBits);
 			if (d & kSnow) {
-				// 1to4IsSnow = +0x118..+0x124; 5to6IsSnow = (+0x128, +0x12c, byte 0x142035548, 1 / (float)int 0x1420355f0).
+				// 1to4IsSnow is +0x118..+0x124. 5to6IsSnow is (+0x128, +0x12c, byte 0x142035548, 1 / (float)int 0x1420355f0).
 				p.PSCopy(kPSLandscape1to4IsSnow, 1, 0x11c);
 				p.PSCopy(kPSLandscape1to4IsSnow, 2, 0x120);
 				p.PSCopy(kPSLandscape1to4IsSnow, 3, 0x124);
@@ -307,16 +305,13 @@ namespace DCLF::MaterialPort
 				p.PSCopy(kPSLandscape5to6IsSnow, 1, 0x12c);
 				p.PS(kPSLandscape5to6IsSnow, 2, a_frame.landSnowZ ? kOneBits : kZeroBits);
 				p.PSCopy(kPSLandscape5to6IsSnow, 0, 0x128);
-				// cvtdq2ps then divss (1414dc8d9).
+				// cvtdq2ps then divss, as at 1414dc8d9.
 				p.PSFloat(kPSLandscape5to6IsSnow, 3, std::bit_cast<float>(kOneBits) / static_cast<float>(a_frame.landSnowDivisor));
 			}
 			return true;
 		}
 
-		/**
-		 * @brief The technique's own textures and constants. a_bindBase: t0/t1 at the end (every technique but MTLand). False: the
-		 * landscape's layer count is past its arrays.
-		 */
+		/** @brief The technique's own textures and constants. a_bindBase binds t0/t1 at the end. False when the landscape's layer count is past its arrays. */
 		bool EvaluateTechnique(Port& p, std::uint32_t d, const VanillaFrame& a_frame, bool& a_bindBase)
 		{
 			const std::uint32_t technique = (d >> 24) & 0x3f;
@@ -362,7 +357,7 @@ namespace DCLF::MaterialPort
 				p.PS(kPSLODTexParams, 2, a_frame.lodTexParamsZ ? kOneBits : kZeroBits);
 				p.PSCopy(kPSLODTexParams, 3, 0xc0);
 				if ((d & 0x3f000000u) == 0x12000000u) {
-					// The noise texture (+0xb0) when there is one; t15's clamp mode 3 and filter mode 1 either way.
+					// The noise texture at +0xb0 if any. t15 gets clamp mode 3 and filter mode 1 either way.
 					if (p.Has(0xb0))
 						p.Bind(15, 0xb0);
 					p.SetAddress(15, 3);
@@ -381,10 +376,9 @@ namespace DCLF::MaterialPort
 				p.PSCopy(kPSEnvmapData, 0, 0xc8);
 				break;
 			case 0xe:  // MultiIndexSparkle: SparkleParams = +0xa0..+0xac
-				// The engine reads them on any class. A plain material (NIF shader type 0 under kMultiIndexSnow | kProjectedUV: vanilla
-				// glaciers and ice; the loader makes the Snow class only for types 10 and 0xe) ends at 0xa0, so the engine reads the
-				// next heap object there, and its sparkle is all but always off by accident (dclf-validation.md, "In the engine"). DCLF
-				// gives it the Snow class's constructor default (1, 1, 1, 1; FUN_1412d38f0) or, with the toggle off, zeros.
+				// The engine reads these on any class. A plain material under kMultiIndexSnow | kProjectedUV, such as vanilla glaciers and ice, ends at 0xa0,
+				// so the engine reads the next heap object and the sparkle is almost always off by accident.
+				// DCLF uses the Snow class's constructor default (1, 1, 1, 1; FUN_1412d38f0), or zeros with the toggle off.
 				if (p.c.size < 0xb0) {
 					const float sparkle = a_frame.plainSnowSparkle ? 1.0f : 0.0f;
 					for (std::uint32_t i = 0; i < 4; ++i)
@@ -414,7 +408,7 @@ namespace DCLF::MaterialPort
 			return true;
 		}
 
-		/** @brief After the technique: the texcoord offset, then the feature flags' writes, the base textures and the IBL colour, in SetupMaterial's order. */
+		/** @brief After the technique: texcoord offset, the feature flags' writes, the base textures and the IBL colour, in SetupMaterial's order. */
 		void EvaluateFeatures(Port& p, std::uint32_t d, const VanillaFrame& a_frame, bool a_bindBase)
 		{
 			// TexcoordOffset: offset (+0xc/+0x10) and scale (+0x1c/+0x20) of the buffer the frame reads, 8 bytes per buffer.
@@ -425,14 +419,14 @@ namespace DCLF::MaterialPort
 			p.VSCopy(kVSTexcoordOffset, 3, 0x20 + buffer);
 
 			if (d & kSpecular) {
-				// SpecularColor = (specularColor +0x38..+0x40 times specularColorScale +0x8c (mulss each), specularPower +0x88).
+				// SpecularColor = specularColor (+0x38..+0x40) times specularColorScale (+0x8c), with specularPower (+0x88).
 				const float scale = p.Float(0x8c);
 				p.PSFloat(kPSSpecularColor, 0, p.Float(0x38) * scale);
 				p.PSFloat(kPSSpecularColor, 1, p.Float(0x3c) * scale);
 				p.PSFloat(kPSSpecularColor, 2, p.Float(0x40) * scale);
 				p.PSCopy(kPSSpecularColor, 3, 0x88);
 				if (d & kModelSpaceNormals) {
-					// The specular map in t2 (FUN_1414e0460, then the same inline), filter mode 3.
+					// The specular map in t2, filter mode 3.
 					p.Bind(2, kSpecularBackLighting);
 					p.Bind(2, kSpecularBackLighting);
 					p.SetFilter(2, 3);
@@ -441,7 +435,7 @@ namespace DCLF::MaterialPort
 			if ((d & kAmbientSpecular) && a_frame.ambientSpecularWritten)
 				for (std::uint32_t i = 0; i < 4; ++i)
 					p.PSFloat(kPSAmbientSpecular, i, a_frame.ambientSpecular[i]);
-			// Soft and rim lighting: the rim/soft texture in t12 (inline, textureClampMode), LightingEffectParams.xy = +0x90, +0x94.
+			// Soft and rim lighting: the texture in t12 with textureClampMode, and LightingEffectParams.xy from +0x90 and +0x94.
 			for (const auto flag : { kSoftLighting, kRimLighting }) {
 				if (!(d & flag))
 					continue;
@@ -449,7 +443,7 @@ namespace DCLF::MaterialPort
 				p.PSCopy(kPSLightingEffectParams, 0, 0x90);
 				p.PSCopy(kPSLightingEffectParams, 1, 0x94);
 			}
-			if (d & kBackLighting)  // the back-lighting texture in t9 (inline)
+			if (d & kBackLighting)  // the back-lighting texture in t9, inline
 				p.Bind(9, kSpecularBackLighting);
 			if (d & kSnow) {
 				for (std::uint32_t i = 0; i < 3; ++i)
@@ -457,7 +451,7 @@ namespace DCLF::MaterialPort
 				p.PS(kPSSnowRimLightParameters, 3, a_frame.snowRimW ? kOneBits : kZeroBits);
 			}
 			if (a_bindBase) {
-				// t0: the diffuse texture, or the render target the material names (+0x50); t1: the normal map. Both textureClampMode.
+				// t0 is the diffuse texture, or the render target the material names at +0x50. t1 is the normal map. Both use textureClampMode.
 				const auto target = static_cast<std::int32_t>(p.Bits(kDiffuseRenderTarget));
 				if (target == -1) {
 					p.Bind(0, kDiffuse);
@@ -510,8 +504,7 @@ namespace DCLF::MaterialPort
 		frame.fullBright = readByte(kFullBright);
 		readBytes(&frame.characterLightTarget, kCharacterLightTarget, sizeof(std::int32_t));
 
-		// The shader object's IBL colour: x at +0xcc, then +0xd0.. or +0xe0.. by the byte at +0xf0 (SetupMaterial reads 16 bytes and
-		// writes the first three).
+		// The shader object's IBL colour: x at +0xcc, then +0xd0 or +0xe0 by the byte at +0xf0. SetupMaterial reads 16 bytes and writes 3.
 		if (const auto* shader = reinterpret_cast<const std::byte*>(EngineShaders::Lighting())) {
 			frame.shaderKnown = true;
 			std::memcpy(&frame.ibl[0], shader + 0xcc, sizeof(float));
@@ -519,7 +512,7 @@ namespace DCLF::MaterialPort
 		}
 
 		frame.envMaskDefaultView = ViewOf(*reinterpret_cast<const void* const*>(raw(kEnvMaskDefault)));
-		// The renderer's render targets: SetupMaterial reads the SRV at 0x143289230 + 0x30 * index (1414dcdc9, 1414dcee8).
+		// SetupMaterial reads the render target SRV at 0x143289230 + 0x30 * index (1414dcdc9, 1414dcee8).
 		for (std::uint32_t i = 0, count = VanillaRenderTargets(); i < count; ++i)
 			frame.renderTargetViews[i] = *reinterpret_cast<ID3D11ShaderResourceView* const*>(raw(kRenderTargetViews + 0x30 * i));
 		frame.sampled = true;
@@ -528,7 +521,7 @@ namespace DCLF::MaterialPort
 
 	ID3D11ShaderResourceView* ViewOf(const void* a_texture)
 	{
-		// NiSourceTexture +0x48 (BSGraphics::Texture*, the renderer texture), then +0x10 (its SRV): FUN_1414e0460 and the inline binds.
+		// NiSourceTexture +0x48 is the renderer texture, then +0x10 its SRV, as FUN_1414e0460 and the inline binds read them.
 		if (!a_texture)
 			return nullptr;
 		const auto* rendererTexture = *reinterpret_cast<const std::byte* const*>(static_cast<const std::byte*>(a_texture) + 0x48);
@@ -555,8 +548,8 @@ namespace DCLF::MaterialPort
 	{
 		if (!a_frame.sampled || !a_frame.shaderKnown)
 			return false;
-		// A contributor's class reaches here when its Replace hands the pass back (TruePBR's CHECK_PBR_TEXTURE): vanilla code on a
-		// Base-derived object, its texture fields the base's, its size its own.
+		// A contributor's class gets here when its Replace hands the pass back, as TruePBR's CHECK_PBR_TEXTURE does.
+		// Vanilla code runs on a Base-derived object: texture fields from the base, size from the class.
 		const bool asBase = Extensions::MaterialClassVanillaAsBase(a_snapshot.materialClass);
 		VanillaClass pbrBase;
 		if (asBase) {
@@ -572,7 +565,7 @@ namespace DCLF::MaterialPort
 
 		const std::uint32_t d = RemapDescriptor(a_passDescriptor, a_frame);
 		Port p(a_snapshot, *c, a_frame, a_out);
-		bool bindBase = true;  // t0/t1 at the end: every technique but MTLand
+		bool bindBase = true;  // t0/t1 at the end for every technique but MTLand
 		if (!EvaluateTechnique(p, d, a_frame, bindBase))
 			return false;
 		EvaluateFeatures(p, d, a_frame, bindBase);

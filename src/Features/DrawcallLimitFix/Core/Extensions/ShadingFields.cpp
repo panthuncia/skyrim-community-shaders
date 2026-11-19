@@ -1,4 +1,4 @@
-// The shading fields' entries, the published entry classes, and the frame start's calls into the fields (see the header).
+// The shading fields' entries, the published entry classes, and the frame start's calls into the fields.
 
 #include "Features/DrawcallLimitFix/Core/Extensions/ShadingFields.h"
 #include "Features/DrawcallLimitFix/Diagnostics/Zones.h"
@@ -13,7 +13,7 @@ namespace DCLF::Extensions
 {
 	namespace
 	{
-		// Written only by ResolveShadingFields (InstallFeatures, before DCLF's threads exist), read-only after.
+		// Written only during InstallFeatures, before DCLF's threads exist. Read-only after.
 		struct ResolvedShadingFields
 		{
 			std::vector<ShadingFieldEntry> fields;
@@ -26,8 +26,7 @@ namespace DCLF::Extensions
 			return resolved;
 		}
 
-		// The render thread's, by published class: which slots are members as the membership writes left them (a byte by slot), and
-		// the slots that left since the last capture, whose fields it zeroes before the fields' own values (CaptureShadingFields).
+		// Render thread only. Per published class, which slots are members, and the slots that left since the last capture, to be zeroed first.
 		struct Members
 		{
 			std::vector<std::uint8_t> member;
@@ -86,7 +85,7 @@ namespace DCLF::Extensions
 	std::vector<Api::ShadingFieldValue> CaptureShadingFields(Scene::FrameView& a_view)
 	{
 		std::vector<Api::ShadingFieldValue> values;
-		// Their geometries the newest publication's (held by it), never the coordinator's tables.
+		// Use the newest publication's geometries, which it holds, never the coordinator's tables.
 		const auto geometry = a_view.NewestObjectGeometry();
 		std::vector<std::uint32_t> changedObjects;
 		changedObjects.reserve(a_view.ShadingChanges().size());
@@ -96,8 +95,7 @@ namespace DCLF::Extensions
 			DCLF_ZONE("CS.DCLF.ShadingField");
 			ZoneText(entry.name.data(), entry.name.size());
 			Api::ShadingFieldCapture capture{ entry.contribution.field, geometry, values, changedObjects };
-			// A slot that left the field's class first: its value zero (a member's own value follows: a slot that left and joined again
-			// takes its new owner's, which its capture puts as a joined member's).
+			// Zero slots that left the class first. A slot that left and rejoined then takes its new owner's value from the capture.
 			if (entry.contribution.members != Api::EntryClass::None)
 				for (const auto slot : members[static_cast<std::size_t>(entry.contribution.members)].left)
 					capture.Put(slot, {});

@@ -1,5 +1,4 @@
-// Advanced Skin's wetness field: its membership hook (the actors' index, from the publications' writes) and its capture (each actor's
-// value at the frame's start, fanned out). Render thread. Its material textures are SkinTextures.cpp's.
+// Advanced Skin's wetness field: its membership hook and its capture at the frame's start. Render thread. Its material textures are in SkinTextures.cpp.
 
 #include "Features/DrawcallLimitFix/Integrations/AdvancedSkin/AdvancedSkin.h"
 #include "Features/DrawcallLimitFix/Diagnostics/Zones.h"
@@ -15,15 +14,14 @@ namespace DCLF::Integrations::AdvancedSkin
 {
 	namespace
 	{
-		// The capture's actor index: membership from the coordinator's walks (SceneTables::classMembers' changes, via the log); values and
-		// fan-out are the render thread's.
+		// The capture's actor index. Membership comes from the coordinator's walks through the log. Values and fan-out are the render thread's.
 		OwnerValues& Owners()
 		{
 			static OwnerValues owners;
 			return owners;
 		}
 
-		// The last capture's counts (render thread), for the diagnostic capture.
+		// The last capture's counts, for the diagnostic capture.
 		OwnerValues::Stats lastStats;
 
 		void Membership(const Api::ShadingFieldMembership& a_membership)
@@ -39,15 +37,13 @@ namespace DCLF::Integrations::AdvancedSkin
 
 		void Capture(Api::ShadingFieldCapture& a_capture)
 		{
-			// Advanced Skin's wetness, per actor-owned object. Skin::GetWetness keeps each actor's fading state and computes it once a
-			// frame (the first call; later ones, including its own SetupGeometry hook for the draws the engine still makes this frame,
-			// return the same value), so calling it here for every actor in the tables advances every actor's fade once a frame,
-			// whether or not the engine draws it. Its cache is not thread-safe: the render thread's, at the frame's start.
+			// Skin::GetWetness advances each actor's fade once a frame on its first call, and later calls return the same value.
+			// Calling it here for every actor advances every fade once a frame, whether or not the engine draws it.
+			// Its cache is not thread-safe, so this must run on the render thread at the frame's start.
 			DCLF_ZONE("CS.DCLF.Capture.Wetness");
 			auto& skin = globals::features::skin;
 			const bool wetness = skin.loaded && skin.settings.EnableSkin;
-			// The actors' membership is the render thread's own index (the log's changes, Membership), their geometries the newest
-			// publication's (held by it), never the coordinator's tables.
+			// Use the render thread's own membership index and the newest publication's geometries, never the coordinator's tables.
 			const auto geometry = a_capture.objectGeometry;
 			const auto wetnessStats = Owners().Update([&](std::uint32_t o) {
 				auto* mesh = o < geometry.size() ? geometry[o] : nullptr;
@@ -65,7 +61,6 @@ namespace DCLF::Integrations::AdvancedSkin
 			// Features/Actors' class, registered published whatever its toggle.
 			a_context.RegisterShadingField({ .name = "wetness", .field = Api::ShadingRowField::SkinPerGeometry, .members = Api::EntryClass::ActorOwned,
 				.membership = &Membership, .capture = &Capture });
-			// Its t71/t74 hook on SetupMaterial and SkinPerGeometry's per-draw buffer (SkinTextures.cpp).
 			InstallMaterialTextures(a_context);
 		}
 	}

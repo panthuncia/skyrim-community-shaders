@@ -1,4 +1,4 @@
-// The node capture contributions' entries (see the header).
+// The node capture contributions' entries.
 
 #include "Features/DrawcallLimitFix/Core/Extensions/NodeCaptures.h"
 
@@ -8,7 +8,7 @@ namespace DCLF::Extensions
 {
 	namespace
 	{
-		// Written on the main thread during InstallFeatures, read-only after: the captures that read it start with the world's load.
+		// Written on the main thread during InstallFeatures. Read-only after, since the captures that read it start with the world's load.
 		std::vector<NodeCaptureEntry> nodeCaptures;
 	}
 

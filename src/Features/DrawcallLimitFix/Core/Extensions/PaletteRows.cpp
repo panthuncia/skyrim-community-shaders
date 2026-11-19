@@ -1,4 +1,4 @@
-// The palette rows classes' entries and the walk's and frame start's calls into them (see the header).
+// The palette rows classes' entries and the walk's and frame start's calls into them.
 
 #include "Features/DrawcallLimitFix/Core/Extensions/PaletteRows.h"
 
@@ -6,7 +6,7 @@ namespace DCLF::Extensions
 {
 	namespace
 	{
-		// Written only by ResolvePaletteRows (InstallFeatures, before DCLF's threads exist), read-only after. By class index - 1.
+		// Written only during InstallFeatures, before DCLF's threads exist. Read-only after. By class index - 1.
 		struct Resolved
 		{
 			std::array<PaletteRowsEntry, Api::kPaletteRowsClasses> entries;

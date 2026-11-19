@@ -1,4 +1,4 @@
-// The late poses' search, plans and rows (see the header).
+// The late poses' search, plans and rows.
 
 #include "Features/DrawcallLimitFix/Core/LatePoses/LatePoseOverrides.h"
 
@@ -16,26 +16,24 @@ namespace DCLF::LatePoses
 {
 	namespace
 	{
-		// A node is hidden when its world scale is below this share of its parent's. Improved Camera's is 0.001: it sets the local scale
-		// (kept until the next frame's start, or put back at once with the world left shrunk). Anything this small draws nothing.
+		// A node is hidden when its world scale is below this share of its parent's. Improved Camera uses 0.001, and anything this small draws nothing.
 		constexpr float kHiddenRatio = 0.01f;
-		// A plan's factor at or above this is no shrink: the node is as small at the frame's start (shrunk for good), so the rows the
-		// producer samples are already shrunk.
+		// A factor at or above this is no shrink: the node was already as small at the frame's start, so the sampled rows are already shrunk.
 		constexpr float kNoShrink = 0.5f;
-		// Nodes a frame may hide (a plan's scale index is 16 bits, 0 meaning none).
+		// Most nodes a frame may hide. A plan's scale index is 16 bits, with 0 meaning none.
 		constexpr std::size_t kMaxHidden = 64;
 		using BoneEntry = RE::BSFlattenedBoneTree::BoneEntry;
 
-		// One search's result, holding the engine objects it names (released on the render thread when replaced).
+		// One search's result, holding the engine objects it names. Released on the render thread when replaced.
 		struct Search
 		{
-			// Per hidden bone: the node holding it (a flattened bone tree for a bone that is only a tree entry), its world transform (the
-			// node's, or the entry's inside the tree's entry array), and its world scale as found.
+			// Per hidden bone: the node holding it, its world transform, and its world scale as found.
+			// A bone that is only an entry in a flattened bone tree uses the tree node and the entry's transform.
 			std::vector<RE::NiPointer<RE::NiAVObject>> nodes;
 			std::vector<const RE::NiTransform*> worlds;
 			std::vector<float> worldScales;
-			// Per hidden bone: the tree's entry array its world points into (null for a node). The plan holds the tree, not its array, so
-			// PrepareFrame uses the pointer only while the tree still has that array.
+			// Per hidden bone, the tree entry array its world points into, or null for a node.
+			// The plan holds the tree, not the array, so the pointer is only used while the tree still has that array.
 			std::vector<const BoneEntry*> entryArrays;
 			struct Skin
 			{
@@ -53,11 +51,11 @@ namespace DCLF::LatePoses
 		struct State
 		{
 			std::uint64_t frame = 0;    // PrepareFrame's count
-			Search last;                // the newest search (ConfirmFrame's)
+			Search last;                // the newest search
 			std::uint64_t lastFrame = 0;  // the frame it was taken in
-			Search inUse;               // the one the frame's plan came from: its objects outlive the frame's producer
+			Search inUse;               // the search the frame's plan came from. Its objects outlive the frame's producer.
 			bool planned = false;       // this frame has a plan
-			bool searchedEmpty = false;  // this frame's depth commit named a root and found no hidden node
+			bool searchedEmpty = false;  // this frame's depth commit named a root and found nothing hidden
 		};
 		State& S()
 		{
@@ -65,7 +63,7 @@ namespace DCLF::LatePoses
 			return state;
 		}
 
-		// Any thread (the producer's adds, the report's take).
+		// Any thread.
 		struct Counters
 		{
 			std::atomic<std::uint64_t> rooted{ 0 }, hidden{ 0 }, planned{ 0 }, confirmed{ 0 }, refused{ 0 }, unplanned{ 0 }, afterDepth{ 0 };
@@ -78,22 +76,19 @@ namespace DCLF::LatePoses
 			for (auto max = a_max.load(std::memory_order_relaxed); a_value > max && !a_max.compare_exchange_weak(max, a_value, std::memory_order_relaxed);) {}
 		}
 
-		// Whether a node is hidden: its world scale far below its parent's.
 		bool Hidden(const RE::NiAVObject& a_node)
 		{
 			const auto* parent = a_node.parent;
 			return parent && parent->world.scale > 1e-4f && a_node.world.scale < kHiddenRatio * parent->world.scale;
 		}
 
-		// Every hidden node under a_root (the outermost one of a hidden chain), the skins with bones under them, and the geometry
-		// without a skin under them.
+		// Every outermost hidden node under a_root, the skins with bones under them, and the unskinned geometry under them.
 		void SearchRoot(RE::NiAVObject* a_root, Search& a_out)
 		{
-			// First the nodes: each node's hidden ancestor (its index + 1), the geometry met on the way.
+			// First the nodes: each node's hidden ancestor as index + 1, and the geometry met on the way.
 			ankerl::unordered_dense::map<const RE::NiAVObject*, std::uint16_t> hiddenOf;
 			std::vector<std::pair<RE::BSGeometry*, std::uint16_t>> geometry;
-			// The flattened bone trees met (an actor's skeleton): most of their bones are only entries in the tree's array, with no node,
-			// so the node walk cannot see them hidden.
+			// Flattened bone trees, such as an actor's skeleton. Most of their bones are array entries with no node, so the node walk cannot see them hidden.
 			struct Tree
 			{
 				RE::BSFlattenedBoneTree* node = nullptr;
@@ -127,7 +122,7 @@ namespace DCLF::LatePoses
 				if (hidden)
 					hiddenOf.emplace(object, hidden);
 				if (auto* tree = netimmerse_cast<RE::BSFlattenedBoneTree*>(object)) {
-					// numBones: the entry array's length (numPopulatedBones is not used: what it counts is unconfirmed).
+					// numBones is the entry array's length. numPopulatedBones is not used, since what it counts is unconfirmed.
 					const auto& data = tree->GetRuntimeData();
 					if (data.boneEntries && data.numBones)
 						trees.push_back({ tree, data.boneEntries, data.numBones, hidden, {} });
@@ -138,8 +133,7 @@ namespace DCLF::LatePoses
 			bool anyTreeHidden = false;
 			for (auto& tree : trees) {
 				tree.hiddenOf.assign(tree.count, 0);
-				// The entries are in parent-first order (the tree's update relies on it): a parent index not below the entry's own is taken
-				// as a top bone, whose parent is the tree node.
+				// Entries are in parent-first order, which the tree's update relies on. A parent index not below the entry's own means a top bone under the tree node.
 				for (std::uint32_t i = 0; i < tree.count; ++i) {
 					const auto& entry = tree.entries[i];
 					const std::int16_t parent = entry.parentIndex;
@@ -148,7 +142,7 @@ namespace DCLF::LatePoses
 					const float parentScale = parentEntry ? tree.entries[parent].world.scale : tree.node->world.scale;
 					std::uint16_t hidden = inherited;
 					if (!hidden && parentScale > 1e-4f && entry.world.scale < kHiddenRatio * parentScale) {
-						// A bone with a node the walk found hidden takes that node's index; one without takes a new one on the tree.
+						// A bone with a node found hidden takes that node's index. One without takes a new one on the tree.
 						const auto* node = entry.node;
 						const auto known = std::ranges::find_if(a_out.nodes, [&](const auto& a_node) { return node && a_node.get() == node; });
 						if (known != a_out.nodes.end())
@@ -167,7 +161,7 @@ namespace DCLF::LatePoses
 			}
 			if (hiddenOf.empty() && !anyTreeHidden)
 				return;
-			// Then the geometry: a skin by its bones (any skin under the root may have bones in a hidden subtree), the rest whole.
+			// Then the geometry: a skin by its bones, since any skin may have bones in a hidden subtree, and the rest whole.
 			for (auto [shape, hidden] : geometry) {
 				auto* skin = shape->GetGeometryRuntimeData().skinInstance.get();
 				const auto* data = skin ? skin->skinData.get() : nullptr;
@@ -179,8 +173,7 @@ namespace DCLF::LatePoses
 				const std::uint32_t bones = data->GetBoneCount();
 				std::vector<std::uint16_t> scaleOf(bones, 0);
 				bool any = false;
-				// A bone in a tree is known by its world transform's address (the skin's bone world pointers point into the tree's entries);
-				// any other by its node.
+				// A tree bone is known by its world transform's address, since skin bone pointers point into the tree's entries. Any other by its node.
 				const auto* const* worlds = skin->boneWorldTransforms;
 				for (std::uint32_t b = 0; b < bones; ++b) {
 					const auto* world = reinterpret_cast<const std::byte*>(worlds ? worlds[b] : nullptr);
@@ -206,9 +199,8 @@ namespace DCLF::LatePoses
 		Search SearchRoots()
 		{
 			Search search;
-			// No walk while a load shows (FrameView::LoadShown). A load rebuilds the actors' 3D, the player's too, so a walk can read a freed
-			// child (a crash in the player's skeleton at world frame 11 of a load, 2026-11-13). The player sees none of those frames, so
-			// there is nothing to hide.
+			// No walk while a load shows. A load rebuilds the actors' 3D, the player's too, so a walk can read a freed child and crash.
+			// The player sees none of those frames, so there is nothing to hide.
 			if (Scene::FrameView::LoadShown())
 				return search;
 			for (const auto& pose : Extensions::LatePoses())
@@ -219,7 +211,7 @@ namespace DCLF::LatePoses
 			return search;
 		}
 
-		// x' = center + factor * (x - center) on a 3x4 transform of three float4 rows (translation in w).
+		// x' = center + factor * (x - center) on a 3x4 transform of three float4 rows, translation in w.
 		void ScaleRows(float* a_rows, const FramePlan::Scale& a_scale)
 		{
 			for (int row = 0; row < 3; ++row) {
@@ -238,7 +230,7 @@ namespace DCLF::LatePoses
 		const std::uint64_t previous = s.frame++;
 		s.planned = false;
 		s.searchedEmpty = false;
-		// The last plan's objects: its producer is done (the frame before presented after it).
+		// Release the last plan's objects. Its producer is done, because the frame before presented after it.
 		s.inUse = {};
 		if (s.last.Empty() || s.lastFrame != previous) {
 			s.last = {};
@@ -246,12 +238,12 @@ namespace DCLF::LatePoses
 		}
 		s.inUse = std::move(s.last);
 		s.last = {};
-		// The scales about each hidden node's world position now (the frame's start, the full pose the producer samples), by the share
-		// of its world scale now that it was hidden to. One as small now shrinks nothing: its scale index stays 0 below.
+		// Scales about each hidden node's world position at the frame's start, by the share of its current world scale it was hidden to.
+		// A node already that small shrinks nothing, and its scale index stays 0.
 		auto plan = std::make_shared<FramePlan>();
 		std::vector<std::uint16_t> index(s.inUse.nodes.size() + 1, 0);
 		for (std::size_t i = 0; i < s.inUse.nodes.size(); ++i) {
-			// A tree entry's world only while the tree still has the array it was found in (a rebuilt skeleton takes a new one).
+			// Use a tree entry's world only while the tree still has the array it was found in. A rebuilt skeleton gets a new one.
 			if (const auto* entries = s.inUse.entryArrays[i]) {
 				const auto* tree = netimmerse_cast<RE::BSFlattenedBoneTree*>(s.inUse.nodes[i].get());
 				if (!tree || tree->GetRuntimeData().boneEntries != entries)
@@ -294,7 +286,7 @@ namespace DCLF::LatePoses
 			NoteMax(counters.maxNodes, search.nodes.size());
 		}
 		s.searchedEmpty = search.rooted && search.Empty();
-		// The plan holds when each node it shrinks is shrunk now: else (the plugin stopped hiding one) the frame draws its first rows.
+		// The plan holds only if each node it shrinks is still shrunk. Otherwise the plugin stopped hiding one, and the frame draws its own rows.
 		bool holds = s.planned;
 		for (std::size_t i = 0; holds && i < s.inUse.worlds.size(); ++i)
 			holds = std::ranges::find(search.worlds, s.inUse.worlds[i]) != search.worlds.end();
@@ -334,7 +326,7 @@ namespace DCLF::LatePoses
 				++counters.missing;
 				continue;
 			}
-			// The whole block (current, then previous), its hidden bones shrunk in both.
+			// The whole block, current then previous, with its hidden bones shrunk in both.
 			const std::size_t first = a_out.palettes.size();
 			a_out.palettes.insert(a_out.palettes.end(), a_palettes.begin() + block.current, a_palettes.begin() + block.current + 2ull * at.boneRows);
 			for (std::size_t b = 0; b < skin.scaleOf.size(); ++b)

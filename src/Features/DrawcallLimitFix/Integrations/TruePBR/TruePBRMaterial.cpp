@@ -1,5 +1,4 @@
-// TruePBR's material contributor: its SetupMaterial replacement (EvaluatePBR, pure), its classes' capture (any thread the material is
-// alive on) and its frame sample (render thread, the frame's start).
+// TruePBR's material contributor: its pure SetupMaterial replacement, its classes' capture, and its frame sample at the frame's start.
 
 #include "Features/DrawcallLimitFix/Integrations/TruePBR/TruePBRIntegration.h"
 #include "Features/DrawcallLimitFix/Core/Extensions/Materials.h"
@@ -47,9 +46,9 @@ namespace DCLF::Integrations::TruePBR
 
 		constexpr std::uint32_t kVSTexcoordOffset = 11;
 		constexpr std::uint32_t kCharacterLightSlot = 11;
-		constexpr std::uint32_t kNormalStart = 7;  // TruePBR's landscape normals: t7..t12
+		constexpr std::uint32_t kNormalStart = 7;  // TruePBR's landscape normals, t7..t12
 
-		// Fields (the classes are this repo's: offsetof gives what TruePBR's compiled code reads).
+		// Fields. The classes are this repo's, so offsetof gives what TruePBR's compiled code reads.
 		constexpr std::uint16_t Off(std::size_t a_offset) { return static_cast<std::uint16_t>(a_offset); }
 		constexpr std::uint16_t kTexCoordOffset = Off(offsetof(RE::BSShaderMaterial, texCoordOffset));
 		constexpr std::uint16_t kTexCoordScale = Off(offsetof(RE::BSShaderMaterial, texCoordScale));
@@ -99,10 +98,10 @@ namespace DCLF::Integrations::TruePBR
 		constexpr std::uint16_t kLandGlint = Off(offsetof(PBRLandscape, glintParameters));
 
 		constexpr std::uint32_t kTiles = PBRLandscape::NumTiles;
-		// The landscape's displacement layers are its feature textures from local 0, its RMAOS layers from local kTiles.
+		// Displacement layers are its feature textures from local 0, RMAOS layers from local kTiles.
 		static_assert(2 * kTiles == kTextureRegisters.size());
 
-		/** @brief Element a_index of an array field (a_stride bytes each). */
+		/** @brief Element a_index of an array field of a_stride-byte elements. */
 		constexpr std::uint16_t Element(std::uint16_t a_base, std::uint32_t a_index, std::size_t a_stride)
 		{
 			return static_cast<std::uint16_t>(a_base + a_index * a_stride);
@@ -111,7 +110,7 @@ namespace DCLF::Integrations::TruePBR
 		constexpr std::uint16_t Float(std::uint16_t a_base, std::uint32_t a_index) { return Element(a_base, a_index, sizeof(float)); }
 		constexpr std::uint16_t GlintOf(std::uint16_t a_base, std::uint32_t a_index) { return Element(a_base, a_index, sizeof(GlintParameters)); }
 
-		/** @brief SetupTechniqueDescriptor (LightingDescriptors.cpp) from the frame's bytes; idempotent, so a held descriptor passes unchanged. */
+		/** @brief SetupTechniqueDescriptor from the frame's bytes. Idempotent, so a held descriptor passes unchanged. */
 		std::uint32_t HeldDescriptor(std::uint32_t a_pass, const MaterialPort::HookFrame& a_frame)
 		{
 			const std::uint32_t technique = a_pass & 0x3f000000u;
@@ -124,12 +123,12 @@ namespace DCLF::Integrations::TruePBR
 
 		Technique TechniqueOf(std::uint32_t a_held) { return static_cast<Technique>((a_held >> 24) & 0x3f); }
 
-		/** @brief RendererShadowState's Set* calls, in the evaluation's record terms. */
+		/** @brief RendererShadowState's Set* calls, in the record's terms. */
 		struct Writer
 		{
 			Evaluation& out;
 
-			// SetPSConstant<T>: sizeof(T) bytes at the variable's offset, the rest of the float4 untouched.
+			// SetPSConstant<T>: sizeof(T) bytes at the variable's offset, leaving the rest of the float4 untouched.
 			void PS(std::uint32_t a_variable, const float* a_values, std::uint32_t a_count)
 			{
 				std::memcpy(out.PSFloats() + LightingPSLayout().offset[a_variable], a_values, a_count * sizeof(float));
@@ -142,18 +141,18 @@ namespace DCLF::Integrations::TruePBR
 			{
 				std::memcpy(out.VSFloats() + LightingVSLayout().offset[a_variable], a_values, a_count * sizeof(float));
 			}
-			// SetPSTexture + SetPSTextureAddressMode (+ SetPSTextureFilterMode).
+			// SetPSTexture and SetPSTextureAddressMode, plus SetPSTextureFilterMode.
 			void Texture(std::uint32_t a_slot, ID3D11ShaderResourceView* a_view, std::uint32_t a_address) { out.BindTexture(a_slot, a_view, a_address); }
 			void Texture(std::uint32_t a_slot, ID3D11ShaderResourceView* a_view, std::uint32_t a_address, std::uint32_t a_filter)
 			{
 				Texture(a_slot, a_view, a_address);
 				out.SetFilterMode(a_slot, a_filter);
 			}
-			// Its own register (kTextureRegisters' a_local): TruePBR's extendedRendererState.SetPSTexture.
+			// Its own register: TruePBR's extendedRendererState.SetPSTexture.
 			void FeatureTexture(std::uint32_t a_local, ID3D11ShaderResourceView* a_view) { out.FeatureTexture(a_local, a_view); }
 		};
 
-		/** @brief GlintParameters (TruePBR.h) at a_offset: enabled, then four floats. */
+		/** @brief GlintParameters at a_offset: enabled, then four floats. */
 		struct Glint
 		{
 			bool enabled;
@@ -170,13 +169,12 @@ namespace DCLF::Integrations::TruePBR
 			return glint;
 		}
 
-		// TruePBR::BSLightingShader_SetupMaterial, MTLand and MTLandLODBlend (BSLightingShaderMaterialPBRLandscape).
+		// TruePBR::BSLightingShader_SetupMaterial for MTLand and MTLandLODBlend.
 		void Landscape(const Evaluation& a_snapshot, const MaterialPort::HookFrame& a_frame, Writer& a_write)
 		{
 			const auto& ps = ShaderConstants::LightingPS::Get();
-			// Every tile's slots, a missing texture by the default; the displacement (black) and RMAOS (white) layers go to TruePBR's own
-			// t80-t91 (extendedRendererState: views only, sampled through the colour sampler, s0), its feature textures (kTextureRegisters).
-			// Without them a full-PBR tile samples no RMAOS: AO 0 (no ambient), roughness 0.
+			// Every tile's slots, with defaults for missing textures. The black displacement and white RMAOS layers go to t80-t91 as views only, sampled through s0.
+			// Without them a full-PBR tile samples no RMAOS, giving AO 0 and roughness 0.
 			const auto orDefault = [&](std::uint16_t a_offset, ID3D11ShaderResourceView* a_default) {
 				return a_snapshot.HasTexture(a_offset) ? a_snapshot.View(a_offset) : a_default;
 			};
@@ -216,7 +214,7 @@ namespace DCLF::Integrations::TruePBR
 			a_write.PS(ps.LODTexParams, lodTexParams, 4);
 		}
 
-		// TruePBR::BSLightingShader_SetupMaterial, None and TreeAnim (BSLightingShaderMaterialPBR), its textures checked present.
+		// TruePBR::BSLightingShader_SetupMaterial for None and TreeAnim, with its textures checked present.
 		void Object(const Evaluation& a_snapshot, std::uint32_t a_lightingFlags, const MaterialPort::HookFrame& a_frame, Writer& a_write)
 		{
 			const auto& ps = ShaderConstants::LightingPS::Get();
@@ -293,7 +291,7 @@ namespace DCLF::Integrations::TruePBR
 			const float projected2[4]{ a_snapshot.At<float>(kProjectedRoughness), a_snapshot.At<float>(kProjectedSpecularLevel), 0.f, 0.f };
 			a_write.PS(ps.ParallaxOccData, projected2, 4);
 
-			// Optional maps: bound only when present and not the default they stand for.
+			// Optional maps are bound only when present and not the default they stand for.
 			const auto optionalMap = [&](std::uint16_t a_offset, const void* a_default, std::uint32_t a_slot, PBRShaderFlags a_flag) {
 				const auto* texture = a_snapshot.At<const void*>(a_offset);
 				if (texture == nullptr || texture == a_default)
@@ -326,7 +324,7 @@ namespace DCLF::Integrations::TruePBR
 
 	void SampleFrame(Api::MaterialContributorFrame& a_frame)
 	{
-		// Which hook is installed and runs (Feature::loaded; the hooks are installed only for loaded features).
+		// Which hook is installed and running. Hooks only install for loaded features.
 		a_frame.SetActive(globals::features::truePBR.loaded);
 	}
 
@@ -339,7 +337,7 @@ namespace DCLF::Integrations::TruePBR
 
 	Api::MaterialOutcome EvaluatePBR(Evaluation& a_evaluation)
 	{
-		// Called only for a pass PBRTakesPass took, while TruePBR is loaded (Extensions::EvaluateReplace).
+		// Only called for a pass PBRTakesPass took, while TruePBR is loaded.
 		const auto& frame = a_evaluation.hook;
 		const std::uint32_t held = HeldDescriptor(a_evaluation.Pass(), frame);
 		const std::uint32_t lightingFlags = held & 0xffffffu;
@@ -347,13 +345,13 @@ namespace DCLF::Integrations::TruePBR
 
 		const bool landscape = technique == Technique::MTLand || technique == Technique::MTLandLODBlend;
 		const bool object = technique == Technique::None || technique == Technique::TreeAnim;
-		// The hook casts by technique; the port covers only the class that cast is right for.
+		// The hook casts by technique, so the port only covers the class that cast is right for.
 		if (landscape && (a_evaluation.Feature() != kLandscapeFeature || a_evaluation.Size() < sizeof(PBRLandscape)))
 			return Api::MaterialOutcome::Uncovered;
 		if (object) {
 			if (!a_evaluation.OwnClass() || a_evaluation.Size() < sizeof(PBR))
 				return Api::MaterialOutcome::Uncovered;
-			// CHECK_PBR_TEXTURE: a missing diffuse, normal or RMAOS returns to the vanilla function (nothing written before it).
+			// CHECK_PBR_TEXTURE: a missing diffuse, normal or RMAOS returns to vanilla, with nothing written before it.
 			if (!a_evaluation.HasTexture(kDiffuse) || !a_evaluation.HasTexture(kNormal) || !a_evaluation.HasTexture(kRmaos))
 				return Api::MaterialOutcome::HandBack;
 		}
@@ -374,7 +372,7 @@ namespace DCLF::Integrations::TruePBR
 		write.VS(kVSTexcoordOffset, texcoord, 4);
 
 		if (lightingFlags & ShaderFlagBit(ShaderFlag::CharacterLight)) {
-			// t11 only while the character light has a render target (its filter mode left alone); the params zero while disabled.
+			// t11 only while the character light has a render target, leaving its filter mode alone. The params are zero while disabled.
 			if (frame.characterLightTarget >= 0)
 				write.Texture(kCharacterLightSlot, MaterialPort::RenderTargetView(frame, frame.characterLightTarget), kClamp);
 			std::array<float, 4> params{};
@@ -403,7 +401,7 @@ namespace DCLF::Integrations::TruePBR
 			add(kLandNoise);
 			return;
 		}
-		// The base class's four, then the PBR maps (TruePBR binds diffuse, normal, RMAOS, emissive, displacement, features 0 and 1).
+		// The base class's four, then the PBR maps TruePBR binds.
 		add(kDiffuse);
 		add(kNormal);
 		add(kRimSoft);
@@ -421,6 +419,6 @@ namespace DCLF::Integrations::TruePBR
 		                                                                                   static_cast<std::uint32_t>(sizeof(PBR));
 	}
 
-	// Landscape: 4 per tile and the overlay and noise; PBR: the base four and five maps.
+	// Landscape has 4 per tile plus the overlay and noise. PBR has the base four plus five maps.
 	static_assert(4 * PBRLandscape::NumTiles + 2 <= kMaxTextureFields);
 }

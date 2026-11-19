@@ -1,5 +1,4 @@
-// Exponential Height Fog: its integrated light scattering volumes (t19 near, t22 far), frame textures. The render thread's callbacks
-// read the feature live.
+// Exponential Height Fog: its light scattering volumes (t19 near, t22 far) as frame textures. Callbacks read the feature live.
 
 #include "Features/DrawcallLimitFix/Integrations/ExponentialHeightFog/ExponentialHeightFog.h"
 #include "Features/DrawcallLimitFix/Core/Extensions/IntegrationStatus.h"
@@ -11,10 +10,8 @@ namespace DCLF::Integrations::ExponentialHeightFog
 {
 	namespace
 	{
-		// The views Prepass binds at t19 and t22 under its own conditions (every path past them ends in BindIntegratedLightScattering;
-		// otherwise ReleaseVolumetricResources binds null). Prepass runs after the faces' commit, so they read last frame's volumes, or the
-		// previous textures while Prepass remakes them (a grid change), held by their binding. Null without the feature or the volumes:
-		// the captured views.
+		// The views Prepass binds at t19 and t22. Prepass runs after the faces' commit, so the faces read last frame's volumes,
+		// or the previous textures while Prepass remakes them on a grid change. Null without the feature or volumes.
 		bool Binds()
 		{
 			const auto& fog = globals::features::exponentialHeightFog;
@@ -32,8 +29,7 @@ namespace DCLF::Integrations::ExponentialHeightFog
 			return Binds() ? globals::features::exponentialHeightFog.IntegratedLightScatteringFarView() : nullptr;
 		}
 
-		// On the ORG path (CS_ORG_EXPONENTIAL_HEIGHT_FOG) the views are the graph volumes' exports while the graph ran the last Prepass, so
-		// the commits read the published volumes, ordered after the integration at the Prepass anchor.
+		// On the ORG path the views are the graph volumes' exports, so commits read them ordered after the integration at the Prepass anchor.
 		void Install(Api::InstallContext& a_context)
 		{
 			a_context.RegisterFrameTexture({ .name = "exponential height fog light scattering", .textureRegister = kLightScatteringRegister,

@@ -1,7 +1,7 @@
 // The registered scene resources' setup, graph registration, requirements, fit, posted inputs, latched buffers and sealed sets, and
-// their states' lookup (see the header).
+// their states' lookup.
 
-// Internal.h first: volk must precede every Vulkan header of the translation unit.
+// Internal.h first, because volk must precede every Vulkan header in the translation unit.
 #include "Features/DrawcallLimitFix/Core/Render/Internal.h"
 
 #include "Features/DrawcallLimitFix/Core/Extensions/Registry.h"
@@ -27,7 +27,7 @@ namespace DCLF::Extensions
 		const auto registered = RegisteredSceneResources();
 		SceneResourceStates states(registered.size());
 		const Api::SceneResourcesSetup setup{ a_device, a_smallStart };
-		// The vertex stream's first (SceneResourcesOrder): without its buffer the scene's tables are not made, and nothing else is set up.
+		// The vertex stream's first. Without its buffer the scene's tables are not made and nothing else is set up.
 		for (const std::uint32_t i : SceneResourcesOrder()) {
 			states[i] = registered[i].setup(setup);
 			if (!states[i] && VertexStreamResources(i))

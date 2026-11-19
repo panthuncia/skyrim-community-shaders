@@ -1,7 +1,6 @@
 #pragma once
 
-// The pass contract (Api::InstallContext::RegisterPass): a graph pass the frame's schedule (Schedule/Frame.cpp) names by key, made at the
-// graph's build in the epoch the schedule puts it in.
+// A graph pass that the frame schedule in Schedule/Frame.cpp names by key, made at graph build time in the schedule's epoch.
 
 #include "RenderGraph/BufferRef.h"
 #include <cstdint>
@@ -15,12 +14,12 @@ namespace org
 
 namespace DCLF::Api
 {
-	// Defined by Core (Core/Extensions/PassContext.h), which the features inside DCLF include for them.
-	class PassContext;  // what a pass is made from: the epoch and its extension's resources
-	class PassOut;      // where an anchor adds its passes
-	class PassSetup;    // what a pass's setup is handed: the device and the scene's tables
+	// Defined in Core/Extensions/PassContext.h.
+	class PassContext;
+	class PassOut;
+	class PassSetup;
 
-	/** @brief The kind of a pass (the graph's ExternalPassDesc). */
+	/** @brief The kind of a pass. */
 	enum class PassKind : std::uint8_t
 	{
 		Compute,
@@ -28,7 +27,7 @@ namespace DCLF::Api
 		Render,
 	};
 
-	/** @brief The queue a pass prefers. Default: the graphics queue for a copy or compute pass, no preference for a render pass. */
+	/** @brief The queue a pass prefers. Default is the graphics queue for copy and compute, and no preference for render. */
 	enum class PassQueue : std::uint8_t
 	{
 		Default,
@@ -36,43 +35,7 @@ namespace DCLF::Api
 		None,
 	};
 
-	/**
-	 * @brief A pass the schedule (Schedule/Frame.cpp) names by key. Exactly one of make and emit:
-	 * - make: render thread, at the graph's build: the pass, or null (its conditions unmet: not added). Added under passName, as kind,
-	 *   on queue.
-	 * - emit: an anchor, which adds any number of passes, each with its own name, kind and queue (the diagnostics' passes at a point).
-	 * passName: the graph pass's name; "{view}" in it becomes the view's prefix (ViewTraits::prefix). The strings are copied.
-	 *
-	 * With make, optionally:
-	 * - setup: render thread, once, where the scene's GPU tables are made (the first frame with a device), after the features' scene
-	 *   resources (Api/SceneResources.h), in registration order: makes the pass's programs and buffers, or takes them from its feature's
-	 *   scene resources. Its result is the pass's state, held with the scene's tables (PassContext::State); while it is null the pass is
-	 *   not added (make is not called). Only in a Main or View epoch (their scene's tables); the install fails otherwise.
-	 * - latchWord: render thread, at each depth commit: the value of the depth segment's BuildDrawsLatch stage word (byte 300), which the
-	 *   pass's shader reads from the latch. The latch has one such word: a second pass with one fails the install (grow BuildDrawsLatch,
-	 *   Core/Render/Resources/GpuLayouts.h, first), as does a key the schedule names anywhere but in main.depth before core.z.build-draws.
-	 * - animatedRows: render thread, at each latch of the main rows (PayloadLatch: the depth and colour segments', the views'): the device
-	 *   address, buffer view ref and rows of the frame's copy of the installed payload's animated material rows (MaterialRowHeader::animatedRow: row k at k *
-	 *   kMaterialRowBytes), BuildDrawsLatch::animatedRows, which the pass writes whole before any of the frame's draws and BuildDraws
-	 *   points those rows' draws at (0: none, the draws read the installed rows). One pass may have one, scheduled as latchWord's is.
-	 * - frameRows: render thread, at each latch of the main rows: the buffer view ref and row count of the frame's per-object rows the
-	 *   pass writes (BuildDrawsLatch::frameRows; Features/Fades' object rows, which the pixel stages read by a frame binding), so that a
-	 *   recording the graph keeps across frames finds the frame's backing. One pass may have one, scheduled as latchWord's is.
-	 * - cpuPipeline: the pass is in its epoch in the CPU-driven pipeline too (dclf:pipeline=cpu; Core/Render/Epochs/GraphConditions.h):
-	 *   the revisions record it, on the graphics queue (a preferred queue is not taken there). In guest the epochs are external and the
-	 *   site executes the recording in DXVK's command buffer before its draws; in native the graph submits it. False: the pass is left
-	 *   out there (the CPU does its work).
-	 * - recordAtExecution (with cpuPipeline): the pass is in the CPU-driven pipeline only, recorded at execution (ORG's late batch:
-	 *   ExternalPassDesc::RecordAtExecution), after the commit opened its site's run: in guest by the site's execution on DXVK's CS thread
-	 *   into DXVK's command buffer, in native inline into the epoch's own list on the render thread. The direct sites' draws
-	 *   (Core/Render/Direct/SitePasses.cpp).
-	 * - gpuLate (with recordAtExecution): the pass is in the GPU-driven graph too, where its make decides, recorded at execution by its
-	 *   epoch (in-stream in guest, inline in native): the forward site's (GraphConditions::forwardDirect).
-	 */
-	/**
-	 * @brief A pass's frame rows (PassDef::frameRows, animatedRows): its frame's backing's device address, buffer view ref (what shaders read
-	 * through) and rows (0: none this frame).
-	 */
+	/** @brief A pass's frame rows for this frame. A count of 0 means none. */
 	struct FrameRows
 	{
 		std::uint64_t address = 0;
@@ -80,6 +43,20 @@ namespace DCLF::Api
 		std::uint32_t count = 0;
 	};
 
+	/**
+	 * @brief A pass the schedule names by key. Set exactly one of make, which returns one pass or null, and emit, which adds any number.
+	 * "{view}" in passName becomes the view's prefix.
+	 *
+	 * - setup: render thread, once, when the scene's GPU tables are made. The pass is skipped while its result is null.
+	 *   Only valid in a Main or View epoch.
+	 * - latchWord, animatedRows, frameRows: one pass each at most, scheduled in main.depth before core.z.build-draws.
+	 *   The latch has room for one stage word. Grow BuildDrawsLatch in GpuLayouts.h first if a second pass needs one.
+	 * - animatedRows: the pass writes these rows whole before any of the frame's draws, and BuildDraws points those draws at them.
+	 * - frameRows: lets a recording the graph keeps across frames find this frame's backing.
+	 * - cpuPipeline: also record the pass in the CPU-driven pipeline, always on the graphics queue. False leaves the work to the CPU there.
+	 * - recordAtExecution: CPU-driven pipeline only, recorded late when the commit opens its site.
+	 * - gpuLate: with recordAtExecution, also in the GPU-driven graph, recorded at execution by its epoch.
+	 */
 	struct PassDef
 	{
 		std::string_view key;

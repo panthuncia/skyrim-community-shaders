@@ -1,5 +1,4 @@
-// FrameGlobals.h's capture (render thread, the frame's start), the first-person subtree's cull bits (announced for its feature's
-// diagnostics: Diagnostics::RootSubtreeSynced) and the scoped reads.
+// FrameGlobals.h's capture at the frame's start, the first-person subtree's cull bits, and the scoped reads.
 
 #include "Features/DrawcallLimitFix/Core/Shading/FrameGlobals.h"
 #include "Features/DrawcallLimitFix/Diagnostics/Zones.h"
@@ -30,7 +29,7 @@ namespace DCLF
 	{
 		using Engine::Global;
 
-		// Engine::Offsets (Address Library ids) (the readers' notes name each).
+		// Address Library ids. The readers' notes name each.
 		constexpr Engine::Offset kTechniqueByte12{ { 390937 }, { 513196 } };
 		constexpr Engine::Offset kTechniqueByte7{ { 391632 }, { 513692 } };
 		constexpr Engine::Offset kShadowGlobal{ { 391108 }, { 513334 } };
@@ -39,7 +38,7 @@ namespace DCLF
 		constexpr Engine::Offset kLodExponentScale{ { 390887 }, { 513163 } };
 		constexpr Engine::Offset kLodPowBase{ { 390883 }, { 513159 } };
 
-		// A setting's value: the setting itself looked up once (GetINISetting walks the collection by name), its value every frame.
+		// A setting's value. The setting is looked up once, since GetINISetting walks the collection by name, and read every frame.
 		struct CachedSetting
 		{
 			const char* name;
@@ -57,20 +56,19 @@ namespace DCLF
 		CachedSetting iniSpecularEnd{ "fSpecularLODFadeEnd:LightingShader", 0.10f };
 		CachedSetting iniEnvmapStart{ "fEnvmapLODFadeStart:LightingShader", 0.09f };
 		CachedSetting iniEnvmapEnd{ "fEnvmapLODFadeEnd:LightingShader", 0.10f };
-		// GetRenderPasses' refraction LOD fade (the Setting objects' values it reads, AE 0x142033408 and 0x142033420).
+		// GetRenderPasses' refraction LOD fade settings, AE 0x142033408 and 0x142033420.
 		CachedSetting iniRefractionStart{ "fRefractionLODFadeStart:LightingShader", 0.025f };
 		CachedSetting iniRefractionEnd{ "fRefractionLODFadeEnd:LightingShader", 0.03f };
 
 		bool Hidden(const RE::NiAVObject* a_object) { return Engine::IsHidden(a_object); }
 
-		// The capture's listed hidden bits (render thread). The nodes are almost always last frame's, in the same order, so the order that
-		// sorted them is kept and tried first.
+		// The capture's listed hidden bits. The nodes are almost always last frame's in the same order, so the last sort order is tried first.
 		using HiddenList = std::vector<std::pair<const RE::NiAVObject*, bool>>;
 		std::vector<const RE::NiAVObject*> sortedNodes;  // the last sort's input, in collection order
-		std::vector<std::uint32_t> sortOrder;            // the positions in it, sorted
+		std::vector<std::uint32_t> sortOrder;            // positions in it, sorted
 		HiddenList sortScratch;
 
-		/** @brief a_list sorted as std::sort sorts it, reusing the last sort's order when it lists the same nodes in the same order. */
+		/** @brief Sorts a_list as std::sort would, reusing the last order when it lists the same nodes in the same order. */
 		void SortCullHidden(HiddenList& a_list)
 		{
 			const std::size_t n = a_list.size();
@@ -81,7 +79,7 @@ namespace DCLF
 			if (same) {
 				for (std::size_t i = 0; i < n; ++i)
 					sortScratch[i] = a_list[sortOrder[i]];
-				// The bits order a node listed twice: checked, and sorted afresh when they changed it.
+				// A node listed twice is ordered by its bits, so check them and sort afresh if they changed.
 				if (std::is_sorted(sortScratch.begin(), sortScratch.end())) {
 					a_list.swap(sortScratch);
 					return;
@@ -99,32 +97,28 @@ namespace DCLF
 			a_list.swap(sortScratch);
 		}
 
-		// One node of the first-person subtree (FrameGlobals.h).
 		using SubtreeNode = RootSubtreeNode;
 
 		/**
-		 * @brief The first-person subtree's bits, kept by its events (SceneTracker::SubtreeEvents: hidden stores, detached keys, attaches)
-		 * and applied at the two engine moments (the frame's start, the first-person culls); render thread. The live tree is walked only
-		 * when its membership changed (an attach, a detached key, a new root): a key still indexed keeps its bits, a new one takes its live
-		 * bit. A detached key leaves at once, so an address the engine frees and reuses is a new node.
+		 * @brief The first-person subtree's bits, kept up to date by its events and applied at the frame's start and the first-person culls.
+		 * The live tree is walked only when membership changed. A detached key leaves at once, so a freed and reused address is a new node.
 		 */
 		struct Subtree
 		{
-			const RE::NiAVObject* root = nullptr;  // compared; dereferenced only on the render thread inside the frame
-			std::vector<SubtreeNode> nodes;        // by key: an entry's index is stable until the next walk
+			const RE::NiAVObject* root = nullptr;  // compared, and dereferenced only on the render thread inside the frame
+			std::vector<SubtreeNode> nodes;        // an entry's index is stable until the next walk
 			ankerl::unordered_dense::map<const RE::NiAVObject*, std::uint32_t> index;
-			std::vector<const RE::NiAVObject*> geometry;  // the geometry keys, sorted (FrameGlobals::firstPersonGeometry)
-			std::vector<std::uint32_t> saved;             // entries whose culled bit is saved since the last culls
-			bool edited = false;                          // an attach or a detached key since the last walk
+			std::vector<const RE::NiAVObject*> geometry;  // sorted
+			std::vector<std::uint32_t> saved;             // entries whose culled bit was saved since the last culls
+			bool edited = false;                          // an attach or detached key since the last walk
 			bool culled = false;                          // the culls were seen for this root
-			std::uint64_t changes = 0;                    // bits or membership changed (the diagnostics' trigger: RootSubtreeSynced)
+			std::uint64_t changes = 0;                    // bits or membership changed
 			std::uint64_t walks = 0;
 		} subtree;
 
-		/** @brief The node's bit at the last culls, else now. */
 		bool CulledBit(const SubtreeNode& a_node) { return subtree.culled && a_node.saved ? a_node.culled : a_node.hidden; }
 
-		/** @brief Every node and geometry under a_root (not a_root) as it is now (the tree alive: the render thread, inside the frame). */
+		/** @brief Every node and geometry under a_root as it is now. Render thread, inside the frame. */
 		void LiveSubtree(const RE::NiAVObject* a_root, std::vector<SubtreeNode>& a_out)
 		{
 			a_out.clear();
@@ -137,12 +131,12 @@ namespace DCLF
 			std::ranges::sort(a_out, {}, &SubtreeNode::key);
 		}
 
-		/** @brief The membership walked again: keys still indexed keep their bits, new ones take the live bit. */
+		/** @brief Walks the membership again. Indexed keys keep their bits and new ones take the live bit. */
 		void WalkSubtree()
 		{
 			std::vector<SubtreeNode> next;
 			LiveSubtree(subtree.root, next);
-			std::vector<std::uint32_t> added;  // keys new to the members: their stores had no event until the members are published
+			std::vector<std::uint32_t> added;  // new keys. Their stores raise no event until the members are published.
 			for (std::uint32_t i = 0; i < next.size(); ++i) {
 				auto& node = next[i];
 				if (const auto it = subtree.index.find(node.key); it != subtree.index.end()) {
@@ -168,27 +162,26 @@ namespace DCLF
 			subtree.edited = false;
 			++subtree.changes;
 			++subtree.walks;
-			// The members the hidden stores look up (their objects' parents are not read on the hooks' threads).
+			// The members the hidden stores look up, since the hooks' threads do not read their objects' parents.
 			std::vector<const void*> members;
 			members.reserve(subtree.nodes.size());
 			for (const auto& node : subtree.nodes)
 				members.push_back(node.key);
 			SceneTracker::WatchSubtreeMembers(std::move(members));
-			// A new key's bit read again after its publication: a store before it is in this read, one after it has an event.
+			// Read a new key's bit again after publishing it. A store before that is in this read, one after it raises an event.
 			for (const std::uint32_t i : added)
 				subtree.nodes[i].hidden = Hidden(subtree.nodes[i].key);
 		}
 
 		/**
-		 * @brief At an engine moment (render thread, the tree alive): the subtree under a_root brought up to now - the events since the last
-		 * moment applied, the membership walked again when it changed. A new root (or none) starts over.
+		 * @brief Render thread, at an engine moment. Brings the subtree under a_root up to now, walking again if membership changed.
+		 * A new root, or none, starts over.
 		 */
 		void SyncSubtree(const RE::NiAVObject* a_root)
 		{
 			auto& events = SceneTracker::SubtreeEvents();
 			if (a_root != subtree.root) {
-				// The old root's events dropped, then the new root watched before its walk: a store after the watch has an event, one before
-				// it is in the walk's bits.
+				// Drop the old root's events, then watch the new root before walking it. A store after the watch raises an event, one before is in the walk.
 				events.Discard();
 				SceneTracker::WatchSubtree(a_root);
 				SceneTracker::WatchSubtreeMembers({});
@@ -208,7 +201,7 @@ namespace DCLF
 				}
 				const auto it = subtree.index.find(a_event.node);
 				if (it == subtree.index.end())
-					return;  // not walked yet: the next walk reads its bit
+					return;  // not walked yet, so the next walk reads its bit
 				auto& node = subtree.nodes[it->second];
 				if (a_event.kind == Kind::Removed) {
 					node.key = nullptr;
@@ -231,14 +224,13 @@ namespace DCLF
 				WalkSubtree();
 		}
 
-		/** @brief The subtree at an engine moment, for the root view's diagnostics (Features/FirstPerson's: its parity, chain and differences). */
+		/** @brief The subtree at an engine moment, for the root view's diagnostics. */
 		void NoteSubtreeSynced(const char* a_moment, bool a_frameStart)
 		{
 			Diagnostics::Notify(Diagnostics::RootSubtreeSynced{ a_moment, a_frameStart, subtree.root, subtree.nodes, subtree.culled, subtree.walks, subtree.changes });
 		}
 
-		// The render thread's latest capture (written by the render thread alone), and the ones before it: an unscoped reader (a
-		// defect, counted) holds a reference to one for its read, so a few frames' are kept alive past their replacement.
+		// The render thread's latest capture and a few before it. An unscoped reader, which is a defect, may hold one past its replacement.
 		std::shared_ptr<const FrameGlobals> latest = std::make_shared<FrameGlobals>();
 		std::array<std::shared_ptr<const FrameGlobals>, 8> recent;
 		std::uint32_t recentNext = 0;
@@ -249,8 +241,8 @@ namespace DCLF
 
 	void FrameGlobals::NoteFirstPersonCulled(const RE::NiAVObject* a_root)
 	{
-		// The render thread, at RenderDepth's first-person draw: the tree alive. The events since the frame's start applied; the bits now are
-		// the culls', saved from here only for the nodes an event changes before the next culls.
+		// At RenderDepth's first-person draw. Apply events since the frame's start. The bits now are the culls'.
+		// From here a bit is saved only for nodes an event changes before the next culls.
 		SyncSubtree(a_root);
 		if (!subtree.saved.empty() || subtree.culled != (a_root != nullptr))
 			++subtree.changes;
@@ -303,10 +295,9 @@ namespace DCLF
 			g->lodAdjust = camera->GetRuntimeData2().lodAdjust;
 		}
 		Extensions::CaptureFrameGlobals(g->features);
-		// The roots whose hidden bit the frame changes around the scene's views (Coordinator::HiddenForWalk), as the views see it,
-		// at the frame's start (after Main::Draw's early call).
+		// Roots whose hidden bit the frame changes around the scene's views, as the views see it, at the frame's start.
 		if (!g->loading) {
-			// Numbered before the reads (a locked add): a store whose event is numbered before it is in them.
+			// Numbered before the reads with a locked add, so a store whose event is numbered earlier is in them.
 			g->cullHiddenSequence = SceneCapture::NextSequence();
 			g->cullHidden.reserve(sortedNodes.size() + subtree.nodes.size());
 			for (auto* sceneNode : RE::BSShaderManager::State::GetSingleton().shadowSceneNode) {
@@ -319,11 +310,9 @@ namespace DCLF
 				if (graph->portalSharedNode)
 					g->cullHidden.emplace_back(graph->portalSharedNode.get(), Hidden(graph->portalSharedNode.get()));
 			}
-			// The features' nodes whose bit the engine changes around the views (Api::CullHiddenSource: Features/Reflection's player 3D and
-			// water shapes, Features/FirstPerson's skeleton), sorted with the rest below.
+			// The features' nodes whose bit the engine changes around the views, such as Reflection's player 3D and FirstPerson's skeleton.
 			Extensions::CollectCullHidden(g->cullHidden);
-			// A CategoryRoot view's root while its toggle is on, as its feature names it (Api::ViewContribution::captureRoot): the first
-			// with a root. The subtree machinery below holds one root (the first person's, the one CategoryRoot view today).
+			// The first CategoryRoot view's root while its toggle is on. The subtree machinery holds a single root.
 			const RE::NiAVObject* subtreeRoot = nullptr;
 			const auto& views = Extensions::Views();
 			for (std::uint32_t i = 0; i < views.rootCount && !subtreeRoot; ++i) {
@@ -335,10 +324,9 @@ namespace DCLF
 				subtreeRoot = root.root;
 			}
 			SortCullHidden(g->cullHidden);
-			// CS_DCLF_FIRST_PERSON: every node and geometry under the first-person root, with the bit the engine's first-person culls saw
-			// last frame (NoteFirstPersonCulled), else as it is now (this thread, before Main::Draw touches the skeleton). The frame start's
-			// bits are not the culls' (the arms are hidden at the frame's start while the engine draws them), so the first-person members'
-			// chains read their bits from here. Kept by the subtree's events (SyncSubtree), not walked; merged in key order.
+			// Every node under the first-person root, with the bit the engine's first-person culls saw last frame, or as it is now.
+			// The frame start's bits are not the culls': the arms are hidden at the frame's start while the engine draws them.
+			// So the first-person members' chains read their bits from here.
 			SyncSubtree(subtreeRoot);
 			if (subtreeRoot) {
 				const auto listed = static_cast<std::ptrdiff_t>(g->cullHidden.size());
@@ -348,14 +336,13 @@ namespace DCLF
 						g->cullHidden.emplace_back(node.key, CulledBit(node));
 				std::inplace_merge(g->cullHidden.begin(), g->cullHidden.begin() + listed, g->cullHidden.end());
 				g->firstPersonGeometry = subtree.geometry;
-				// The root view's diagnostics (render thread: the tree alive, its membership just synced; the merge above reads nothing
-				// they log).
+				// The root view's diagnostics, with the membership just synced.
 				NoteSubtreeSynced("at the frame's start", true);
 			}
 		}
 		g->membershipWitness = PrimaryCull::MembershipWitness(*g);
 		g->technique = SampleTechniqueInputs();
-		g->shadowMaskHeld.copy_from(g->technique.shadowMask);  // the renderer's target holds it now: alive
+		g->shadowMaskHeld.copy_from(g->technique.shadowMask);  // the renderer's target holds it now, so it is alive
 		g->material = MaterialPort::SampleFrame();
 		recent[recentNext++ % recent.size()] = latest;
 		latest = g;

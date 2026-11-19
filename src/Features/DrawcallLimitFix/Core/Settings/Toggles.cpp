@@ -1,4 +1,4 @@
-// Toggles: the flag table (seed, menu entry, dependencies), packing the active set, and the per-frame apply (render thread).
+// Toggles: the flag table with seeds, menu entries and dependencies, the packed active set, and the per-frame apply on the render thread.
 #include "Features/DrawcallLimitFix/Core/Settings/Toggles.h"
 
 #include "Features/DrawcallLimitFix/Core/Render/Direct/Direct.h"
@@ -16,28 +16,19 @@ namespace DCLF
 		constexpr std::string_view kOn = "1";
 
 		constexpr ToggleInfo kToggles[] = {
-			// (Features/Skins' "skinned", which opens the "Object classes" heading, is listed here, before the projected's, with
-			// Features/TreeWind's "trees" and Features/Decals' toggles after it.)
 			{ &S::projectedUv, Switch::ProjectedUv, kOn, "projected", {}, "Projected UV", nullptr, true, {} },
 			{ &S::plainSnowSparkle, Switch::PlainSnowSparkle, kOn, "plain snow sparkle", {}, "Sparkle on plain snow layers",
 				"Glacier and ice snow layers carry a material without sparkle values, so the engine reads whatever memory follows it (in practice no "
 				"sparkle). On: DCLF gives them the snow material's default sparkle. Off: no sparkle.", false, {} },
-			// (Features/Landscape's "terrain", then Integrations/TerrainBlending's "terrain under TB", follow the projected's here; then
-			// Features/Forward's "forward", Features/Effects' "effects" after it, and Features/Forward's "refraction" after that.)
-			// (Features/Particles', Features/Billboards' and Features/SwitchNodes' toggles follow the refraction's here, then Features/Lod's
-			// "object LOD" and "terrain LOD" and Features/TreeLod's "tree LOD"; then Features/Skins' "skin partitions" after the tree LOD's,
-			// and Features/Actors' "actors" after it.)
 			{ &S::shadows, Switch::Shadows, kOn, "shadows", "Shadow views", "Draw the shadow views", nullptr, false, {} },
-			// (Features/OcclusionMaps' "sky occlusion" and "precipitation occlusion" follow here: the first feature toggles registered, their
-			// bits right after these; then Features/Reflection's "reflections" and Features/FirstPerson's "first person".)
 		};
 
-		// The packed word: cullMode in the low two bits, then each flag in kToggles order, then the features' by their bits (the low 32).
+		// The packed word's low 32 bits: cullMode in the low two, then each flag in kToggles order, then the features' by bit.
 		constexpr std::uint32_t kFirstFlagBit = 2;
 		constexpr std::uint32_t kFirstRegisteredBit = kFirstFlagBit + static_cast<std::uint32_t>(std::size(kToggles));
 		static_assert(kFirstRegisteredBit < 32);
-		// The high word: the pipeline's state (pipelineMode, interiorCpu, exteriorCpu, cpuRecord, then cpuCadence's bits by Direct::ViewType).
-		constexpr std::uint32_t kPipelineModeBit = 32, kInteriorCpuBit = 33, kExteriorCpuBit = 34, kCpuRecordBit = 35, kFirstCadenceBit = 37;  // cpuRecord: two bits
+		// The high word holds the pipeline state: pipelineMode, interiorCpu, exteriorCpu, cpuRecord, then the cadence bits by Direct::ViewType.
+		constexpr std::uint32_t kPipelineModeBit = 32, kInteriorCpuBit = 33, kExteriorCpuBit = 34, kCpuRecordBit = 35, kFirstCadenceBit = 37;  // cpuRecord takes two bits
 		static_assert(kFirstCadenceBit + Direct::kViewTypes <= 64 && Direct::kViewTypes <= 16, "the cadences fit the word and ToggleSet::cpuCadence");
 		// Main's cadence is always per frame.
 		constexpr std::uint16_t kCadenceMask = static_cast<std::uint16_t>(((1u << Direct::kViewTypes) - 1u) & ~(1u << static_cast<std::uint32_t>(Direct::ViewType::Main)));
@@ -46,14 +37,13 @@ namespace DCLF
 			"first-person" };
 		static_assert(std::size(kCpuViewNames) == Direct::kViewTypes);
 
-		// The features' toggles (RegisterToggle), in registration order: their strings (the table's entries view them), their anchors and
-		// needs by name, and their entries; then the table with them placed in it (SeedRegistered), and their count. Written at install
-		// alone (the main thread, before DCLF's threads start), read-only after; until placed, the table is kToggles.
+		// The features' toggles in registration order, with their strings, anchors and needs, and the table once they are placed.
+		// Written only at install, before DCLF's threads start. Until placed, the table is kToggles.
 		struct RegisteredToggle
 		{
 			std::string name, label, tooltip, section, onValue, after, before, feature;
 			std::string needs[2];
-			ToggleInfo info{ nullptr, Switch::Count, {}, {}, {}, nullptr, nullptr, false, { nullptr, nullptr } };  // spelled out: MSVC ICEs on {} here
+			ToggleInfo info{ nullptr, Switch::Count, {}, {}, {}, nullptr, nullptr, false, { nullptr, nullptr } };  // spelled out, because MSVC ICEs on {} here
 		};
 		std::deque<RegisteredToggle>& RegisteredToggles()
 		{
@@ -90,12 +80,9 @@ namespace DCLF
 		}
 
 		/**
-		 * @brief The record mode with no CS_DCLF_CPU_RECORD: indirect.
-		 *
-		 * Indirect execution records a handful of indirect calls instead of a draw call per object, so the driver's per-draw cost leaves the
-		 * CPU. Its pulled pipelines find their draw through a chain of dependent loads (the draw's record, its sequence, its rows), and AMD's
-		 * driver makes none of them scalar: on an RX 6600 (driver 26.10.1, 1080p) serial's colour pass was 0.5 ms of GPU time faster
-		 * (rx6600-dxvk-overhead.md). CS_DCLF_CPU_RECORD=serial records direct draws again.
+		 * @brief The record mode with no CS_DCLF_CPU_RECORD: indirect, which moves the driver's per-draw cost off the CPU.
+		 * Its pulled pipelines find each draw through a chain of dependent loads that AMD's driver makes none of scalar.
+		 * On an RX 6600 serial's colour pass was 0.5 ms of GPU time faster. CS_DCLF_CPU_RECORD=serial records direct draws again.
 		 */
 		Direct::RecordMode DefaultRecordMode()
 		{
@@ -125,7 +112,7 @@ namespace DCLF
 			return set;
 		}
 
-		/** @brief The combinations that cannot hold: each flag off while one it needs is off (the table's order resolves chains). */
+		/** @brief Forces impossible combinations off: a flag is off while one it needs is off. Table order resolves chains. */
 		ToggleSet Normalised(ToggleSet a_set)
 		{
 			for (const auto& toggle : Table())
@@ -143,7 +130,7 @@ namespace DCLF
 			return false;
 		}
 
-		/** @brief The toggle named a_name in a_table, by its index (none: -1). */
+		/** @brief The index of the toggle named a_name in a_table, or -1. */
 		std::ptrdiff_t ToggleAt(const std::vector<ToggleInfo>& a_table, std::string_view a_name)
 		{
 			for (std::size_t i = 0; i < a_table.size(); ++i)
@@ -153,10 +140,7 @@ namespace DCLF
 		}
 		std::ptrdiff_t ToggleAt(std::string_view a_name) { return ToggleAt(Table(), a_name); }
 
-		/**
-		 * @brief The features' toggles whose a_anchor names a_name, in registration order, each with the toggles anchored at it around it
-		 * (those before it first, those after it next), onto a_table. a_listed marks the toggles placed.
-		 */
+		/** @brief Appends the features' toggles anchored at a_name, each surrounded by the toggles anchored at it in turn. a_listed marks those placed. */
 		void ListAnchoredAt(std::vector<ToggleInfo>& a_table, std::vector<std::uint8_t>& a_listed, std::string RegisteredToggle::*a_anchor, std::string_view a_name)
 		{
 			const auto& registered = RegisteredToggles();
@@ -170,10 +154,7 @@ namespace DCLF
 				}
 		}
 
-		/**
-		 * @brief Once every feature registered: the table in menu order (each Core flag, the features' toggles before it first and after it
-		 * next, each with the toggles anchored at it around it; the unanchored last), then the features' needs resolved against it.
-		 */
+		/** @brief Once every feature registered, builds the table in menu order and resolves the features' needs against it. */
 		void PlaceRegistered()
 		{
 			const auto& registered = RegisteredToggles();
@@ -195,8 +176,7 @@ namespace DCLF
 						entry.name, entry.after.empty() ? "before" : "after", entry.after.empty() ? entry.before : entry.after));
 				table.push_back(entry.info);
 			}
-			// What a feature's toggle needs comes before it (Normalised resolves chains in table order): Core's, or a feature's (Features/
-			// Decals: the layers need the decals; Features/FirstPerson: the first person needs the skinned and the actors).
+			// A feature toggle's needs must come before it, Core's or another feature's, because Normalised resolves chains in table order.
 			for (const auto& entry : registered) {
 				const auto at = ToggleAt(table, entry.name);
 				auto& info = table[static_cast<std::size_t>(at)];
@@ -306,7 +286,7 @@ namespace DCLF
 			stl::report_and_fail(fmt::format("Drawcall Limit Fix: {} registered the toggle {}, which is taken", a_feature, a_toggle.name));
 		if (kFirstRegisteredBit + bit >= 32)
 			stl::report_and_fail(fmt::format("Drawcall Limit Fix: {}'s toggle {} is past the toggle word's 32 bits", a_feature, a_toggle.name));
-		// Its anchor and needs may name a feature's toggle registered after it: SeedRegistered places it once every feature registered.
+		// Its anchor and needs may name a toggle a later feature registers, so it is placed once every feature registered.
 		if (!a_toggle.before.empty() && !a_toggle.after.empty())
 			stl::report_and_fail(fmt::format("Drawcall Limit Fix: {}'s toggle {} is listed before {} and after {}", a_feature, a_toggle.name, a_toggle.before,
 				a_toggle.after));
@@ -347,10 +327,9 @@ namespace DCLF
 
 	void Toggles::SeedRegistered()
 	{
-		// The features' toggles by their anchors, which may name a toggle a later feature registered.
+		// Place the features' toggles by their anchors, which may name a later feature's toggle.
 		PlaceRegistered();
-		// The Core flags' needs by name, now every feature registered: before the flag (Normalised resolves chains in table order), or
-		// missing (no feature registered it), which holds the flag off.
+		// Resolve Core flags' needs by name now. A need must come before its flag. A missing one holds the flag off.
 		auto& table = Table();
 		for (std::size_t i = 0; i < table.size(); ++i) {
 			auto& toggle = table[i];
@@ -373,7 +352,7 @@ namespace DCLF
 		}
 		requested.registered = FromSwitches().registered;
 		active.store(Pack(Normalised(requested)), std::memory_order_relaxed);
-		// The frames' until the first publication is installed.
+		// Used as the frame set until the first publication is installed.
 		frame.store(active.load(std::memory_order_relaxed), std::memory_order_relaxed);
 	}
 

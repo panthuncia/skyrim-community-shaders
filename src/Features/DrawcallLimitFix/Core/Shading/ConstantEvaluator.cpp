@@ -1,5 +1,4 @@
-// ConstantEvaluator.h's layouts, and SetupTechnique's port: SampleTechniqueInputs (render thread, the frame's start) and the pure
-// EvaluateTechnique.
+// ConstantEvaluator.h's layouts, and SetupTechnique's port: SampleTechniqueInputs at the frame's start, and the pure EvaluateTechnique.
 
 #include "Features/DrawcallLimitFix/Core/Shading/ConstantEvaluator.h"
 #include "Features/DrawcallLimitFix/Core/Engine/EngineAccess.h"
@@ -23,9 +22,8 @@ namespace DCLF
 {
 	namespace
 	{
-		// Lighting's variables of more than 4 floats and the ones nothing reads: World, PreviousWorld and TextureProj are float3x4; Bones
-		// (skinned only) never needs real storage. DirectionalAmbient is float3x4; PointLightPosition/Color[7] (1, 2) are unused with Light
-		// Limit Fix.
+		// Lighting variables larger than 4 floats and the ones nothing reads. World, PreviousWorld, TextureProj and DirectionalAmbient are float3x4.
+		// Bones never needs real storage, and the point light arrays are unused with Light Limit Fix.
 		constexpr std::pair<std::uint32_t, std::uint32_t> kLightingVSSized[] = { { 0, 12 }, { 1, 12 }, { 6, 12 } };
 		constexpr std::uint32_t kLightingVSScratch[] = { 16 };
 		constexpr std::pair<std::uint32_t, std::uint32_t> kLightingPSSized[] = { { 5, 12 }, { 1, 28 }, { 2, 28 } };
@@ -46,9 +44,7 @@ namespace DCLF
 
 	const Api::MaterialPortContribution& Extensions::CoreLightingPort()
 	{
-		// Kind 0: BSLightingShader's space (LightingVSLayout's rows, the groups of LightingConstants.h, ShaderCache's names: DrawPipelines'
-		// own) and the rules Core's Lighting paths take: pass enum + 0x4800002D, the Deferred pixel bit, ProjectedUV, TexcoordOffset (VS 11)
-		// from the frame, technique rows, its own permutation and signature.
+		// Kind 0, BSLightingShader's space, and the rules Core's Lighting paths take.
 		static const Api::MaterialPortContribution lighting{
 			.shaderType = static_cast<std::uint8_t>(RE::BSShader::Type::Lighting),
 			.vs = { .variables = kLightingVSVariables, .sized = kLightingVSSized, .scratch = kLightingVSScratch, .groups = { kVSGroups[0], kVSGroups[1], kVSGroups[2] },
@@ -67,8 +63,7 @@ namespace DCLF
 
 	void LodHighDetailRange(float* a_out)
 	{
-		// The frame's sample. The draws take theirs from the technique rows of the frame's tables (the coordinator's, from the
-		// sample of the frame that published them), so the Z-prepass and the colour pass of a frame draw the same range.
+		// The draws take theirs from the frame's technique rows, so a frame's Z-prepass and colour pass draw the same range.
 		const auto& range = FrameGlobals::Current().technique.highDetailRange;
 		std::memcpy(a_out, range.data(), sizeof(range));
 	}
@@ -76,14 +71,13 @@ namespace DCLF
 	TechniqueInputs SampleTechniqueInputs()
 	{
 		TechniqueInputs in;
-		// The loaded grid's centre and half extents (0x142033094, written by FUN_141480ab0 from the terrain manager's update), less
-		// 15 units in z and w (0x141ad28d0). SetupTechnique also takes the camera's posAdjust off the centre; DCLF's draws take
-		// their own eye off it in the vertex shader (Lighting.hlsl, DCLF_BINDLESS), so the value changes only with the grid.
+		// The loaded grid's centre and half extents (0x142033094, written by FUN_141480ab0), less 15 units in z and w (0x141ad28d0).
+		// SetupTechnique also subtracts posAdjust from the centre. DCLF's vertex shader subtracts its own eye, so this only changes with the grid.
 		static const REL::Relocation<const float*> highDetailRange{ REL::Offset(Engine::Address::kHighDetailRange) };
 		static const REL::Relocation<const float*> margin{ REL::Offset(Engine::Address::kHighDetailMargin) };
 		const float* range = highDetailRange.get();
 		in.highDetailRange = { range[0], range[1], range[2] - *margin.get(), range[3] - *margin.get() };
-		// The shadow mask (t14): its view, filter (point unless iShadowMaskQuarter is 4) and inverse size.
+		// The shadow mask in t14: its view, its filter, point unless iShadowMaskQuarter is 4, and its inverse size.
 		if (auto* renderer = globals::game::renderer) {
 			const auto& target = renderer->GetRuntimeData().renderTargets[RE::RENDER_TARGETS::kSHADOW_MASK];
 			in.shadowMask = reinterpret_cast<ID3D11ShaderResourceView*>(target.SRV);
@@ -96,7 +90,7 @@ namespace DCLF
 		}
 		static RE::Setting* quarter = RE::GetINISetting("iShadowMaskQuarter:Display");
 		in.shadowMaskFilter = (quarter && quarter->GetInteger() != 4) ? 1u : 0u;
-		// Fog from the current scene graph's fog property (FUN_1414dfad0 in AE).
+		// Fog from the current scene graph's fog property, FUN_1414dfad0 in AE.
 		const auto& shaderState = RE::BSShaderManager::State::GetSingleton();
 		auto* sceneNode = shaderState.shadowSceneNode[shaderState.sceneGraph];
 		if (const auto* fog = sceneNode ? sceneNode->GetRuntimeData().fogProperty.get() : nullptr) {
@@ -109,7 +103,7 @@ namespace DCLF
 			in.fogFarColor = { fog->farColor.red, fog->farColor.green, fog->farColor.blue };
 		}
 		in.invFrameBufferRange = shaderState.invFrameBufferRange;
-		// ColourOutputClamp: the fLightingOutputColourClamp* settings, copied when the shader is created.
+		// ColourOutputClamp from the fLightingOutputColourClamp* settings, copied when the shader is created.
 		static RE::Setting* clampSettings[3] = {
 			RE::GetINISetting("fLightingOutputColourClampPostLit:General"),
 			RE::GetINISetting("fLightingOutputColourClampPostEnv:General"),
@@ -122,7 +116,6 @@ namespace DCLF
 
 	void EvaluateTechnique(std::uint32_t a_passDescriptor, const TechniqueInputs& a_inputs, TechniqueConstants& a_out)
 	{
-		// Lighting variable indices (ShaderConstants::LightingVS / LightingPS).
 		constexpr std::uint32_t kVSFogParam = 13;
 		constexpr std::uint32_t kVSFogNearColor = 14;
 		constexpr std::uint32_t kVSFogFarColor = 15;
@@ -133,7 +126,7 @@ namespace DCLF
 		a_out.ps.Reset();
 		a_out.filterModes.fill(kUnwrittenFilterMode);
 
-		// Sampler filter modes: diffuse and normal always, then per technique, as SetupTechnique draws it.
+		// Sampler filter modes: diffuse and normal always, then per technique.
 		const std::uint32_t technique = (SetupTechniqueDescriptor(a_passDescriptor) >> 24) & 0x3f;
 		a_out.filterModes[0] = a_out.filterModes[1] = kAnisotropic;
 		switch (technique) {
@@ -153,7 +146,7 @@ namespace DCLF
 		case 9:   // LODLand
 		case 18:  // LODLandNoise
 		{
-			// Bilinear diffuse and normal, and HighDetailRange (LodHighDetailRange), its centre absolute.
+			// Bilinear diffuse and normal, and HighDetailRange with its centre absolute.
 			constexpr auto kBilinear = static_cast<std::uint32_t>(RE::BSGraphics::TextureFilterMode::kBilinear);
 			a_out.filterModes[0] = a_out.filterModes[1] = kBilinear;
 			std::memcpy(&a_out.vs.floats[LightingVSLayout().offset[kVSHighDetailRange]], a_inputs.highDetailRange.data(), sizeof(a_inputs.highDetailRange));
@@ -163,8 +156,7 @@ namespace DCLF
 			break;
 		}
 
-		// Shadowed directional or shadow-casting point lights with DefShadow: the shadow mask in t14
-		// (clamped; point-filtered unless iShadowMaskQuarter is 4) and its inverse size in VPOSOffset.
+		// Shadowed directional or shadow-casting point lights with DefShadow bind the clamped shadow mask in t14 and its inverse size in VPOSOffset.
 		const bool shadowLights = (a_passDescriptor & (1u << 13)) || (a_passDescriptor & 0x1c0u);
 		a_out.shadowMask = shadowLights && (a_passDescriptor & (1u << 14));
 		a_out.shadowMaskTexture = nullptr;
@@ -181,7 +173,7 @@ namespace DCLF
 			}
 		}
 
-		// Fog from the scene graph's fog property (FUN_1414dfad0 in AE), as sampled.
+		// Fog from the scene graph's fog property, as sampled.
 		if (a_inputs.fog) {
 			const auto& vsLayout = LightingVSLayout();
 			const auto& psLayout = LightingPSLayout();
@@ -201,14 +193,14 @@ namespace DCLF
 			const float nearColor[4] = { a_inputs.fogNearColor[0], a_inputs.fogNearColor[1], a_inputs.fogNearColor[2], a_inputs.invFrameBufferRange };
 			std::memcpy(&a_out.vs.floats[vsLayout.offset[kVSFogNearColor]], nearColor, sizeof(nearColor));
 			std::memcpy(&a_out.ps.floats[psLayout.offset[kPSFogColor]], nearColor, sizeof(nearColor));
-			// The engine leaves w of FogFarColor as whatever was on its stack.
+			// The engine leaves FogFarColor's w as whatever was on its stack.
 			float* farColor = &a_out.vs.floats[vsLayout.offset[kVSFogFarColor]];
 			farColor[0] = a_inputs.fogFarColor[0];
 			farColor[1] = a_inputs.fogFarColor[1];
 			farColor[2] = a_inputs.fogFarColor[2];
 		}
 
-		// ColourOutputClamp: the fLightingOutputColourClamp* settings, copied when the shader is created.
+		// ColourOutputClamp from the settings, copied when the shader is created.
 		float* clamp = &a_out.ps.floats[LightingPSLayout().offset[kPSColourOutputClamp]];
 		for (std::uint32_t i = 0; i < 3; ++i)
 			clamp[i] = a_inputs.colourClamp[i];

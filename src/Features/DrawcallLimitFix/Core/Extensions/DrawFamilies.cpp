@@ -1,6 +1,6 @@
-// The draw families' entries and their frame calls (see the header).
+// The draw families' entries and their frame calls.
 
-// Internal.h first: volk must precede every Vulkan header of the translation unit (the face block's bytes: ViewEpoch.h).
+// Internal.h first, because volk must precede every Vulkan header in the translation unit.
 #include "Features/DrawcallLimitFix/Core/Render/Internal.h"
 #include "Features/DrawcallLimitFix/Core/Extensions/DrawFamilies.h"
 #include "Features/DrawcallLimitFix/Core/Extensions/ObjectContributors.h"
@@ -9,14 +9,14 @@ namespace DCLF::Extensions
 {
 	namespace
 	{
-		// Written only by ResolveDrawFamilies (InstallFeatures, before DCLF's threads exist), read-only after.
+		// Written only during InstallFeatures, before DCLF's threads exist. Read-only after.
 		DrawFamilySet& Entries()
 		{
 			static DrawFamilySet entries;
 			return entries;
 		}
 
-		// By engine shader type: the family whose program it is (Count: none). Written with the entries.
+		// Per engine shader type, the family whose program it is, or Count.
 		std::array<Api::DrawFamily, 256>& ShaderFamilies()
 		{
 			static std::array<Api::DrawFamily, 256> families = [] {
@@ -33,7 +33,7 @@ namespace DCLF::Extensions
 			return bytes;
 		}
 
-		/** @brief The program's and the faces' strings into the entry, the contribution's views pointed at them. */
+		/** @brief Moves the strings into the entry and points the contribution's views at them. */
 		void OwnStrings(DrawFamilyEntry& a_entry)
 		{
 			auto& program = a_entry.contribution.program;
@@ -71,7 +71,7 @@ namespace DCLF::Extensions
 			OwnStrings(entry);
 			entry.engineShapeVtable = reinterpret_cast<std::uintptr_t>(registered.engineShapes.propertyVtable());
 			ShaderFamilies()[registered.program.shaderType] = registered.family;
-			// A family with faces: its row and list header after the face's block and the earlier families' (Registry refused partial faces).
+			// A family with faces places its row and list header after the face block and earlier families.
 			if (registered.faces.face) {
 				entry.faceLayout = { faceValues, faceValues + registered.faces.rowBytes };
 				faceValues += registered.faces.rowBytes + registered.faces.headerBytes;

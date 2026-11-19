@@ -1,8 +1,7 @@
 #pragma once
 
-// The sun volume contract's Core side (Api/SunVolume.h): the contribution's entry, resolved once at InstallFeatures (none registered:
-// no cascades, no entry planes), and the sinks its callbacks fill: the colour commit's GpuCascade list and the shadow inputs' sun entry
-// processes, each written from a camera of Core's camera math (ShadowCameras) exactly as the latch and the inputs read it.
+// Core's side of Api/SunVolume.h: the contribution's entry and the sinks its callbacks fill.
+// Each value is written from Core's ShadowCameras math exactly as the latch and the shadow inputs read it.
 
 #include "Features/DrawcallLimitFix/Api/SunVolume.h"
 
@@ -25,9 +24,8 @@ namespace DCLF::ShadowCameras
 namespace DCLF::Api
 {
 	/**
-	 * @brief Where the cascades go: the colour commit's list (IndirectDraws::Impl::sunCascades, cleared before the sample), a GpuCascade
-	 * each, in the order put: the planes its cull tests (0-5) and its caster volume (6-11), with their masks. Core's storage: no
-	 * allocation per commit once grown.
+	 * @brief Where cascades go: the colour commit's list, one GpuCascade per put, in order. Planes 0-5 are the cull, 6-11 the caster volume.
+	 * Core reuses the storage, so nothing allocates per commit once grown.
 	 */
 	class SunCascadeSink
 	{
@@ -41,7 +39,7 @@ namespace DCLF::Api
 		std::vector<Draws::GpuCascade>& out;
 	};
 
-	/** @brief Where the full-frustum planes go: the shadow inputs' (ShadowInputs::sunEntryProcesses), a SunEntryProcess each, in order. */
+	/** @brief Where the full-frustum planes go, one SunEntryProcess each, in order. */
 	class SunEntryPlanesSink
 	{
 	public:
@@ -57,7 +55,7 @@ namespace DCLF::Api
 
 namespace DCLF::Extensions
 {
-	/** @brief The contribution's entry (registered false: none, every field its default). */
+	/** @brief The contribution's entry. Every field keeps its default when none is registered. */
 	struct SunVolumeEntry
 	{
 		bool registered = false;
@@ -66,15 +64,12 @@ namespace DCLF::Extensions
 		decltype(Api::SunVolumeContribution::entryPlanes) entryPlanes = nullptr;
 	};
 
-	/** @brief Main thread, the end of InstallFeatures: the entry from the registration (no name: none). Once. */
+	/** @brief Main thread, once, at the end of InstallFeatures. */
 	void ResolveSunVolume(const Api::SunVolumeContribution& a_registered);
-	/** @brief Any thread, after InstallFeatures (unregistered before): the contribution's entry. */
+	/** @brief Any thread, after InstallFeatures. */
 	const SunVolumeEntry& SunVolume();
-	/** @brief Render thread, once per colour commit (CommitShadowInputs): this frame's cascades into a_sink; nothing without one. */
+	/** @brief Render thread, once per colour commit. This frame's cascades, or nothing without a contribution. */
 	void SampleSunCascades(Api::SunCascadeSink& a_sink);
-	/**
-	 * @brief Render thread, where the shadow inputs are prepared: the full-frustum planes of scene frame a_frame or the one before into
-	 * a_sink; whether there were (false without one).
-	 */
+	/** @brief Render thread. The full-frustum planes of scene frame a_frame or the one before. Returns whether there were any. */
 	bool SampleSunEntryPlanes(Api::SunEntryPlanesSink& a_sink, std::uint32_t a_frame);
 }

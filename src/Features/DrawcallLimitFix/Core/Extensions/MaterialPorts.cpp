@@ -1,4 +1,4 @@
-// The material ports' table and calls (see the header).
+// The material ports' table and calls.
 
 #include "Features/DrawcallLimitFix/Core/Extensions/MaterialPorts.h"
 #include "Features/DrawcallLimitFix/Core/Shading/MaterialPort.h"
@@ -15,7 +15,7 @@ namespace DCLF
 		layout.size.fill(4);
 		for (auto [variable, size] : a_sized)
 			layout.size[variable] = static_cast<std::uint8_t>(size);
-		// Variables nothing reads (the per-geometry point lights under Light Limit Fix) share one region at the end.
+		// Variables nothing reads, like the per-geometry point lights under Light Limit Fix, share one region at the end.
 		constexpr std::uint32_t kScratchRegion = 228;
 		std::uint32_t next = 0;
 		for (std::uint32_t i = 0; i < a_count; ++i) {
@@ -34,10 +34,10 @@ namespace DCLF::Extensions
 {
 	namespace
 	{
-		// BSShaderMaterial's texCoordOffset/texCoordScale (two buffers of 8 bytes each): the texture transforms' fields, every kind's.
+		// BSShaderMaterial's texCoordOffset and texCoordScale, two 8-byte buffers. Every kind has them.
 		constexpr std::uint16_t kTransformsFirst = 0xc, kTransformsEnd = 0x2c;
 
-		// Written only by ResolveMaterialPorts (InstallFeatures, before DCLF's threads exist), read-only after.
+		// Written only during InstallFeatures, before DCLF's threads exist. Read-only after.
 		MaterialPortEntries& Table()
 		{
 			static MaterialPortEntries table;
@@ -64,19 +64,19 @@ namespace DCLF::Extensions
 			entry.name = port.name;
 			entry.shaderType = port.shaderType;
 			entry.objectClass = port.objectClass;
-			// The engine's addresses, read once here (REL), never per capture.
+			// Read the engine addresses once here, never per capture.
 			entry.rtti = port.propertyRtti ? port.propertyRtti() : nullptr;
 			entry.vtable = port.materialVtable ? port.materialVtable() : nullptr;
 			entry.materialBytes = port.materialBytes;
 			entry.textureFields = port.textureFields;
 			entry.space.vs = StageOf(port.vs);
 			entry.space.ps = StageOf(port.ps);
-			// The frame's VS floats: the variable's components, at most 4 (MaterialSources' TexcoordOffset positions).
+			// The frame's VS floats, at most 4.
 			const auto& vs = entry.space.vs.layout;
 			if (const std::uint32_t variable = port.rules.frameVSVariable; variable < vs.count)
 				for (std::uint32_t c = 0; c < vs.size[variable] && c < 4; ++c)
 					entry.space.frameVSFloats.push_back(vs.offset[variable] + c);
-			// The declared frame variables' floats, and the bytes the frame owns: the texture transforms' and the declared spans, merged.
+			// The bytes the frame owns: the texture transforms plus the declared spans, merged.
 			entry.frameVariables = port.frameVariables;
 			entry.frameSpans = { { kTransformsFirst, kTransformsEnd } };
 			for (const auto& variable : port.frameVariables) {

@@ -1,9 +1,7 @@
 #pragma once
 
-// The depth pyramid contract (Api::InstallContext::RegisterDepthPyramid): the hierarchical depth Core's cull tests against (the HZB),
-// made and filled by a feature. Core keeps the test (CS_DCLF_CULL's mode, BuildDrawsCS's HZB branch, HzbTest.hlsli), the latch's words,
-// the bindings and the phase 2 block; the producer owns the texture, its program and its pass (its own Api::PassDef, which the schedule
-// names in the depth epoch, made from the state its setup gave: Extensions::DepthPyramidState).
+// The hierarchical depth (HZB) Core's cull tests against, made and filled by a feature.
+// Core owns the test in HzbTest.hlsli, the latch words and the phase 2 block. The producer owns the texture and the pass that fills it.
 
 #include <cstdint>
 #include <memory>
@@ -17,32 +15,28 @@ namespace org
 
 namespace DCLF::Api
 {
-	// Defined by Core (Core/Extensions/DepthPyramid.h), which the features inside DCLF include for them.
+	// Defined in Core/Extensions/DepthPyramid.h.
 	class DepthPyramidSetup;
 
 	/**
-	 * @brief What a pyramid's setup makes. Mip 0 is half the depth's next power of two a side, so a mip is chosen from a screen extent by
-	 * log2 alone (HzbTest.hlsli's and the latch's convention).
+	 * @brief What a pyramid's setup makes. Mip 0 is half the depth's next power of two on each side.
+	 * That lets a mip be picked from a screen extent by log2 alone.
 	 */
 	struct DepthPyramid
 	{
-		std::shared_ptr<org::PixelBuffer> texture;  // null: no pyramid (frustum culling only, no phase 2 passes)
+		std::shared_ptr<org::PixelBuffer> texture;  // null means frustum culling only, with no phase 2 passes
 		std::uint32_t width = 0, height = 0, mips = 0;
-		std::shared_ptr<org::Buffer> scratch;  // optional words Core zeroes once, at the first depth commit after setup
+		std::shared_ptr<org::Buffer> scratch;  // optional, zeroed once at the first depth commit after setup
 	};
 
 	/**
-	 * @brief The pyramid's producer (one: a second fails the install).
-	 *
-	 * - setup: render thread, where Core makes the main view's resources (the first colour frame, a target change), after the
-	 *   refraction normals' import: fills a_out. Its result is the producer's state, held with those resources.
-	 * The pass filling the pyramid from the main depth is the producer's pass (gpu-occlusion.hzb), added only while the setup gave a
-	 * texture (PassContext::PhaseTwo), after the depth draw (cs.dclf.z.depth), before phase 2's retest build (cs.dclf.build-draws-phase2).
+	 * @brief The pyramid's producer. One contribution only.
+	 * setup runs on the render thread when Core makes the main view's resources, including after a target change.
 	 */
 	struct DepthPyramidContribution
 	{
 		std::string_view resource;         // the texture's graph name
-		std::string_view scratchResource;  // the scratch's graph name (registered only while setup gives one)
+		std::string_view scratchResource;  // the scratch buffer's graph name
 		std::shared_ptr<const void> (*setup)(const DepthPyramidSetup& a_setup, DepthPyramid& a_out) = nullptr;
 	};
 }

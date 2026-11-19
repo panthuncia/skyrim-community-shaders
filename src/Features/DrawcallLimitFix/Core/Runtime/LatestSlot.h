@@ -6,11 +6,9 @@
 namespace DCLF
 {
 	/**
-	 * @brief A latest-wins mailbox between threads: Post replaces what is there (freeing a value nobody took), Take empties it.
-	 * Lock-free (one pointer exchange each way; MSVC's std::atomic<std::shared_ptr> is not); a value is owned by exactly one side at a
-	 * time, so nothing is read after it is freed. A value nobody took is freed by the next Post or by the slot's end, on that thread:
-	 * a value whose drop must happen on a given thread (an engine reference) is not posted here bare.
-	 * Users: the scene channels (Channels.h), the pipeline lane's inputs and catalogs, the revision producer's slots (Impl.h).
+	 * @brief A lock-free latest-wins mailbox: Post replaces what is there, Take empties it. MSVC's std::atomic<std::shared_ptr> is not lock-free.
+	 * A value nobody took is freed by the next Post or the slot's end, on that thread.
+	 * So never post a value here bare if it must be dropped on a given thread, such as an engine reference.
 	 */
 	template <class T>
 	struct LatestSlot
@@ -24,7 +22,7 @@ namespace DCLF
 
 		void Post(std::unique_ptr<T> a_value) { delete slot.exchange(a_value.release(), std::memory_order_acq_rel); }
 		std::unique_ptr<T> Take() { return std::unique_ptr<T>(slot.exchange(nullptr, std::memory_order_acq_rel)); }
-		/** @brief Takes the newest into a_held when there is one (the taker's copy: kept while nothing newer is posted). */
+		/** @brief Takes the newest into a_held if there is one. */
 		bool TakeInto(T& a_held)
 		{
 			if (auto taken = Take()) {

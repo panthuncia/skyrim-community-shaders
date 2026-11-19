@@ -1,8 +1,6 @@
 #pragma once
 
-// The scene resources contract's Core side (Api/SceneResources.h): what a feature's setup, graph registration, requirement, fit,
-// latched buffers and sealed set are handed, the calls Core makes where the scene's tables are made, registered with a graph, required,
-// fitted, latched and sealed and where the revision's inputs are posted, and the lookup of a feature's state in the scene's tables.
+// Core's side of Api/SceneResources.h: what each scene resources callback gets, the calls Core makes, and the lookup of a feature's state.
 
 #include "Features/DrawcallLimitFix/Api/SceneResources.h"
 #include "Features/DrawcallLimitFix/Core/Extensions/Registry.h"
@@ -36,7 +34,7 @@ namespace DCLF
 
 namespace DCLF::Draws
 {
-	/** @brief Every table family's rows unbounded (SceneFit::familyRows before a fit bounds them). */
+	/** @brief Every table family's rows unbounded, until a fit bounds them. */
 	inline constexpr std::array<std::uint32_t, Extensions::kTableFamilySlots> kUnboundedFamilyRows = [] {
 		std::array<std::uint32_t, Extensions::kTableFamilySlots> rows{};
 		rows.fill(~0u);
@@ -44,17 +42,15 @@ namespace DCLF::Draws
 	}();
 
 	/**
-	 * @brief What the named versions of the scene's buffers hold (the per-object buffers' objects): an object past them - its per-object
-	 * rows, its table families' rows (the fade roots' among them), its vertex stream row's vertices - waits for the requirement that grows them, drawing nothing and
-	 * culling nothing (ObjectFits). The payload's parts are not among them: it holds every row of its publication.
+	 * @brief What the scene's buffers hold. An object past them waits for the requirement that grows them, drawing and culling nothing.
+	 * The payload is not covered, because it holds every row of its publication.
 	 */
 	struct SceneFit
 	{
 		std::uint32_t objects = ~0u;
-		// The vertex stream's vertices (its scene resources' fit: Features/Faces' face positions), unbounded without one.
+		// The vertex stream's vertices. Unbounded without a stream.
 		std::uint32_t streamVertices = ~0u;
-		// The table families' rows a draw reads by its reference, by registration (Extensions::TableFamilyColumns::objectRow): what the
-		// features' scene resources hold of them (their fit: Features/TreeWind's wind entries), unbounded without one.
+		// Per table family, the rows the features' scene resources hold. Unbounded without a fit.
 		std::array<std::uint32_t, Extensions::kTableFamilySlots> familyRows = kUnboundedFamilyRows;
 		bool operator==(const SceneFit&) const = default;
 	};
@@ -62,21 +58,18 @@ namespace DCLF::Draws
 
 namespace DCLF::Api
 {
-	/**
-	 * @brief Scene resources' setup (render thread, EnsureSceneBuffers): the device, and how the tables start. A versioned buffer is made
-	 * with Draws::MakeVersioned (registered with the scene's set as it is made).
-	 */
+	/** @brief What a scene resources setup gets on the render thread. Make versioned buffers with Draws::MakeVersioned. */
 	class SceneResourcesSetup
 	{
 	public:
 		rhi::Device device;
-		bool smallStart = false;  // CS_DCLF_TABLE_START=small: the growable tables start with a few rows, so growth runs early and often
+		bool smallStart = false;  // CS_DCLF_TABLE_START=small starts growable tables tiny, so growth runs early and often
 
-		/** @brief A structured buffer of a_elements a_stride-byte elements, named, materialized: its SRV is what shaders read it by. */
+		/** @brief A named, materialized structured buffer. Shaders read it through its SRV. */
 		std::shared_ptr<org::Buffer> StructuredBuffer(std::uint32_t a_elements, std::uint32_t a_stride, const char* a_name, bool a_unorderedAccess = false) const;
 	};
 
-	/** @brief Scene resources' graph registration (render thread, RegisterSceneBuffers): the graph, and the state setup made. */
+	/** @brief What graph registration gets: the graph and the setup's state. */
 	class SceneResourcesGraph
 	{
 	public:
@@ -90,10 +83,7 @@ namespace DCLF::Api
 		}
 	};
 
-	/**
-	 * @brief Scene resources' requirement (snapshot builder, RequireSceneTables): the revision's build, the publication's tables, and the
-	 * words the registration's postInputs posted with the revision's inputs (SceneResources::inputWords; empty without).
-	 */
+	/** @brief What a requirement gets on the snapshot builder: the revision's build, the publication's tables, and the posted input words. */
 	class SceneResourcesRequirements
 	{
 	public:
@@ -101,7 +91,7 @@ namespace DCLF::Api
 		const SceneTables& tables;
 		const std::shared_ptr<void>& state;
 		std::span<const std::uint32_t> inputs;
-		std::uint32_t objectRows = 0;  // already witnessed by RequireSceneTables; stable object-slot high-water mark
+		std::uint32_t objectRows = 0;  // stable object-slot high-water mark
 
 		template <class T>
 		const T& State() const
@@ -110,7 +100,7 @@ namespace DCLF::Api
 		}
 	};
 
-	/** @brief Scene resources' fit (SceneFitOf): the versions a set names, and the fit the feature's slots go into. */
+	/** @brief What a fit gets: the versions a set names, and the fit to fill. */
 	class SceneResourcesFit
 	{
 	public:
@@ -125,15 +115,12 @@ namespace DCLF::Api
 		}
 	};
 
-	/**
-	 * @brief Scene resources' latched buffers (render thread: MainLatchedTargets, MainLatchedLayout): the state, and where each buffer
-	 * the depth commit latches goes (Latch: a_bytes of it from offset 0; a versioned buffer by its key, copied into the adopted version).
-	 */
+	/** @brief Where the depth commit latches each buffer, from offset 0. A versioned buffer is copied into the adopted version. */
 	class SceneResourcesLatch
 	{
 	public:
 		const std::shared_ptr<void>& state;
-		// Core's: where Latch puts a target (the listed targets, or the layout's add), and its context.
+		// Core's sink for Latch.
 		void (*sink)(void* a_context, const std::shared_ptr<org::Buffer>& a_buffer, const std::shared_ptr<org::VersionedBuffer>& a_versioned, std::size_t a_bytes);
 		void* context;
 
@@ -146,7 +133,7 @@ namespace DCLF::Api
 		void Latch(const std::shared_ptr<org::VersionedBuffer>& a_buffer, std::size_t a_bytes) const { sink(context, nullptr, a_buffer, a_bytes); }
 	};
 
-	/** @brief Scene resources' sealed set (snapshot builder, MakeRevision): the versions a revision's sealed set names, and the state. */
+	/** @brief What sealed gets: the versions the sealed set names, and the state. */
 	class SceneResourcesSealed
 	{
 	public:
@@ -163,42 +150,40 @@ namespace DCLF::Api
 
 namespace DCLF::Extensions
 {
-	/** @brief The features' scene resources' states, by registration (Extensions::RegisteredSceneResources); a slot may be null. */
+	/** @brief The scene resources' states by registration. A slot may be null. */
 	using SceneResourceStates = std::vector<std::shared_ptr<void>>;
-	/** @brief The words the registrations' postInputs post with the revision's inputs (Registry.h's kSceneResourceInputWords). */
 	using SceneResourceInputs = std::array<std::uint32_t, kSceneResourceInputWords>;
 
-	// Every call below but PostSceneResourceInputs runs the registrations in SceneResourcesOrder (Extensions/VertexStreams.h): the vertex
-	// stream's first, the others in registration order.
+	// Every call below except PostSceneResourceInputs runs the vertex stream's resources first, then the rest in registration order.
 
-	/** @brief Render thread (EnsureSceneBuffers): every registration's setup, in order (none after the vertex stream's giving no state). */
+	/** @brief Render thread. Every setup. If the vertex stream's gives no state, the rest are skipped. */
 	SceneResourceStates SetUpSceneResources(rhi::Device a_device, bool a_smallStart);
-	/** @brief Render thread (RegisterSceneBuffers): every state's buffers registered with a_graph, in order. */
+	/** @brief Render thread. Registers every state's buffers with a_graph. */
 	void RegisterSceneResources(org::RenderGraph& a_graph, const SceneResourceStates& a_states);
-	/** @brief Snapshot builder (RequireSceneTables): every state's requirements for a_tables and the posted a_inputs, in order. */
+	/** @brief Snapshot builder. Every state's requirements. */
 	void RequireSceneResources(org::services::GrowableBufferSet::Build& a_build, const SceneTables& a_tables, const SceneResourceStates& a_states,
 		const SceneResourceInputs& a_inputs);
-	/** @brief Render thread (PostRevisionInputs): every registration's postInputs into its words of a_out (zeroed first), in order. */
+	/** @brief Render thread. Every postInputs, each into its zeroed words of a_out. */
 	void PostSceneResourceInputs(SceneResourceInputs& a_out);
-	/** @brief a_id's words of a_inputs (what its postInputs posted; empty: none, or no such registration). */
+	/** @brief a_id's posted words, or empty. */
 	std::span<const std::uint32_t> SceneResourceInputsOf(const SceneResourceInputs& a_inputs, Api::SceneResourcesId a_id);
-	/** @brief Render thread (MainLatchedTargets, MainLatchedLayout): every state's latched buffers into a_sink, in order. */
+	/** @brief Render thread. Every state's latched buffers. */
 	void LatchSceneResources(const SceneResourceStates& a_states,
 		void (*a_sink)(void*, const std::shared_ptr<org::Buffer>&, const std::shared_ptr<org::VersionedBuffer>&, std::size_t), void* a_context);
-	/** @brief SceneFitOf: what every state's buffers hold, as a_sealed names them, into a_fit. */
+	/** @brief What every state's buffers hold, as a_sealed names them. */
 	void FitSceneResources(const org::services::NamedVersions& a_sealed, const SceneResourceStates& a_states, Draws::SceneFit& a_fit);
-	/** @brief Snapshot builder (MakeRevision, once a revision's set is sealed, before any shape of it): every state's sealed, in order. */
+	/** @brief Snapshot builder, once a revision's set seals and before any of its shapes. Every state's sealed. */
 	void SealSceneResources(const org::services::NamedVersions& a_sealed, const SceneResourceStates& a_states);
 
-	/** @brief a_id's state in a_scene's tables (empty: none made, or no such registration). */
+	/** @brief a_id's state in a_scene's tables, or empty. */
 	const std::shared_ptr<void>& SceneResourcesStateOf(const Draws::SceneBuffers& a_scene, Api::SceneResourcesId a_id);
-	/** @brief SceneResourcesStateOf as the feature's type. Its thread rules are the feature's (Api/SceneResources.h). */
+	/** @brief The state as the feature's type. Thread rules are the feature's. */
 	template <class T>
 	T* SceneResourcesOf(const Draws::SceneBuffers& a_scene, Api::SceneResourcesId a_id)
 	{
 		return static_cast<T*>(SceneResourcesStateOf(a_scene, a_id).get());
 	}
-	/** @brief SceneResourcesOf, sharing the state's ownership (a pass or a stage state that holds it). */
+	/** @brief Same, sharing ownership. */
 	template <class T>
 	std::shared_ptr<T> SharedSceneResourcesOf(const Draws::SceneBuffers& a_scene, Api::SceneResourcesId a_id)
 	{

@@ -1,6 +1,6 @@
-// The main cull input's entry, the main walk's install note and the cull bindings' entries (see the header).
+// The main cull input's entry, the main walk's install note and the cull bindings' entries.
 
-// Helpers.h first, in its own include block: volk must precede every Vulkan header of the translation unit.
+// Helpers.h first in its own block, because volk must precede every Vulkan header in the translation unit.
 #include "Features/DrawcallLimitFix/Core/Render/Resources/Helpers.h"
 
 #include "Features/DrawcallLimitFix/Core/Extensions/CullInputs.h"
@@ -13,12 +13,11 @@ namespace DCLF::Extensions
 {
 	namespace
 	{
-		// Written only by ResolveMainCullInput (InstallFeatures, before DCLF's threads exist), read-only after.
+		// Written only during InstallFeatures, before DCLF's threads exist. Read-only after.
 		struct Resolved
 		{
 			MainCullInputEntry entry;
 			bool registered = false;
-			// By slot (Written only by ResolveCullBindings, as the entry).
 			std::array<CullBindingEntry, kCullBindingSlots> bindings;
 			std::array<bool, kCullBindingSlots> bound{};
 		};
@@ -29,12 +28,10 @@ namespace DCLF::Extensions
 			return resolved;
 		}
 
-		// Written once on the main thread at PostPostLoad (a feature's early hooks, before PrimaryCull::Install reads it).
+		// Written once on the main thread by a feature's early hooks, before PrimaryCull::Install reads it.
 		bool mainWalkInstalled = false;
 
-		// CullBindingBuffer's answer without a versioned one.
 		const std::shared_ptr<org::VersionedBuffer> kNoCullBuffer;
-		// CullBindingPublished's answer without a publication.
 		const std::shared_ptr<org::VersionedBuffer> kNoCullPublished;
 	}
 

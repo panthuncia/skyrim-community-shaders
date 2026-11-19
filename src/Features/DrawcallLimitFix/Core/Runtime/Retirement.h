@@ -9,13 +9,10 @@
 namespace DCLF
 {
 	/**
-	 * @brief Deferred reclamation by ownership (BasicRenderer's rule: nothing is logically freed while a published version that may
-	 * name it lives). One owner thread retires things into the open node; each publication it makes holds the node opened with it,
-	 * which collects what is retired after it (named by that publication and the ones before). A node holds the next newer one, so
-	 * a node lives while any publication up to it does. When the last of them goes - on whatever thread drops it - the node's batch
-	 * is returned, and the owner takes it back (Drain) to put the slots on its free lists and hand the references on.
-	 *
-	 * Batch: movable, with Empty().
+	 * @brief Deferred reclamation by ownership: nothing is freed while a published version that may name it lives.
+	 * The owner retires into the open node, and each publication holds the node opened with it. Each node holds the next newer one.
+	 * When the last publication up to a node goes, on whatever thread, the batch returns and the owner Drains it.
+	 * Batch must be movable, with Empty().
 	 */
 	template <class Batch>
 	class RetirementChain
@@ -35,7 +32,7 @@ namespace DCLF
 			{
 				if (!batch.Empty())
 					chain->Return(std::move(batch));
-				// The newer nodes go with this one when nothing else holds them; iteratively, not by recursion through the chain.
+				// Newer nodes go with this one when nothing else holds them. Done iteratively, not by recursion through the chain.
 				auto newer = std::move(next);
 				while (newer && newer.use_count() == 1) {
 					auto after = std::move(newer->next);
@@ -59,9 +56,9 @@ namespace DCLF
 			Drain([](Batch&&) {});
 		}
 
-		/** @brief Owner thread: where what is retired now goes (named by the publications made so far). */
+		/** @brief Owner thread. Where things retired now go. */
 		Batch& Open() { return open->batch; }
-		/** @brief Owner thread, with a publication made now: what it holds (the node collecting what is retired after it). */
+		/** @brief Owner thread, with a publication made now. The node it holds. */
 		std::shared_ptr<const void> Publish()
 		{
 			auto node = std::make_shared<Node>(this);
@@ -69,7 +66,7 @@ namespace DCLF
 			open = std::move(node);
 			return open;
 		}
-		/** @brief Owner thread: the batches returned since, oldest first: a_take(batch). Returns how many. */
+		/** @brief Owner thread. Calls a_take(batch) for batches returned since, oldest first. Returns how many. */
 		template <class F>
 		std::size_t Drain(F&& a_take)
 		{
@@ -105,8 +102,8 @@ namespace DCLF
 	};
 
 	/**
-	 * @brief Immutable publications one thread lets go of for another to drop (a frame's replaced publication or snapshot, dropped by
-	 * the thread that made it, never by the render thread). Any thread pushes; one thread drops.
+	 * @brief Immutable publications one thread lets go of for another to drop, so the render thread never drops them.
+	 * Any thread pushes, and one thread drops.
 	 */
 	template <class T>
 	class Retired
@@ -117,7 +114,7 @@ namespace DCLF
 			if (a_retired)
 				queue.Push(std::move(a_retired));
 		}
-		/** @brief The dropping thread: everything pushed so far, let go here. */
+		/** @brief The dropping thread. Lets go of everything pushed so far. */
 		void Drop()
 		{
 			queue.Drain([](std::shared_ptr<const T>&& a_retired) { const auto dropped = std::move(a_retired); });

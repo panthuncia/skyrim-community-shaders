@@ -1,6 +1,6 @@
-// The registered frame bindings' values and registers (see the header).
+// The registered frame bindings' values and registers.
 
-// Internal.h first: volk must precede every Vulkan header of the translation unit.
+// Internal.h first, because volk must precede every Vulkan header in the translation unit.
 #include "Features/DrawcallLimitFix/Core/Render/Internal.h"
 #include "Features/DrawcallLimitFix/Core/Extensions/FrameBindings.h"
 #include "Features/DrawcallLimitFix/Core/Extensions/Registry.h"
@@ -70,8 +70,7 @@ namespace DCLF::Extensions
 		if (a_buffers >= registered.size())
 			return false;
 		const auto& buffers = registered[a_buffers];
-		// Only whether the indices exist: the caller drops them, and the colour passes that read them declare their ids
-		// (Draws::DeclareFrameBuffers).
+		// Only checks the indices exist. The colour passes that read them declare their ids.
 		RenderGraph::UndeclaredAccess::DeclaredIndexScope declared;
 		return buffers.indices(a_out.first(buffers.count));
 	}
@@ -86,7 +85,7 @@ namespace DCLF::Extensions
 
 	namespace
 	{
-		/** @brief Every frame texture's graph ids once each; with a_withView, only those of the textures with a view. */
+		/** @brief Every frame texture's graph ids once each. With a_withView, only textures that have a view. */
 		std::vector<std::string_view> GraphIdsOf(bool a_withView)
 		{
 			std::vector<std::string_view> ids;
@@ -98,10 +97,9 @@ namespace DCLF::Extensions
 			return ids;
 		}
 
-		/** @brief The ids a graph build declared (DeclareGraphTextures). Replaced whole, and only ever grows. */
+		/** @brief The ids a graph build declared. Replaced whole, and it only ever grows. */
 		std::atomic<std::shared_ptr<const std::vector<std::string_view>>> s_declared;
 
-		/** @brief Who a path log line names. */
 		std::string GraphTextureWho(GraphTextureReader a_reader, std::uint32_t a_register, std::string_view a_name)
 		{
 			switch (a_reader) {
@@ -131,7 +129,7 @@ namespace DCLF::Extensions
 	{
 		std::string id;
 		org::DeclaredViewToken view;
-		std::uint32_t latched = UINT32_MAX;  // ShaderResourceIndex at the build; UINT32_MAX: withdrawn then, nothing to compare
+		std::uint32_t latched = UINT32_MAX;  // UINT32_MAX means withdrawn at build, so nothing to compare
 		std::unique_ptr<std::atomic<bool>> reported = std::make_unique<std::atomic<bool>>(false);
 	};
 
@@ -182,7 +180,7 @@ namespace DCLF::Extensions
 		const auto declared = s_declared.load(std::memory_order_acquire);
 		std::vector<std::string_view> added;
 		for (const auto id : a_ids) {
-			// Only ids every graph registers: declaring another would fail the build. One skipped is built in once published.
+			// Only ids every graph registers, since declaring another fails the build. A skipped id is built in once published.
 			if (!PublishedResources::IsDeclarable(id))
 				continue;
 			DeclarePublishedRead(a_builder, id, a_out);
@@ -205,20 +203,20 @@ namespace DCLF::Extensions
 	{
 		if (!a_view)
 			return false;
-		// The declared check comes first: it is cheap, and an undeclared id must never be read.
+		// Check declared first. It is cheap, and an undeclared id must never be read.
 		const auto declared = s_declared.load(std::memory_order_acquire);
 		std::string_view read;
 		for (const auto id : a_ids) {
 			if (id.empty() || !declared || std::ranges::find(*declared, id) == declared->end())
 				continue;
-			// A graph build declared the id (DeclareGraphTextures): the read is ordered, only its index is the build's.
+			// The graph orders the declared read. Only its index comes from the build.
 			RenderGraph::UndeclaredAccess::DeclaredIndexScope declaredIndex;
 			if (PublishedResources::IsExportOf(a_view, id) && PublishedResources::ShaderResourceIndex(id, a_index)) {
 				read = id;
 				break;
 			}
 		}
-		// Each change of path, once per reader and register. Commits run on the render thread alone.
+		// Log each path change once per reader and register. Commits run only on the render thread.
 		constexpr auto kReaders = static_cast<std::size_t>(GraphTextureReader::Count);
 		static std::array<std::array<std::string_view, kTextureRegisters>, kReaders> s_logged{};
 		static std::array<std::array<bool, kTextureRegisters>, kReaders> s_seen{};
@@ -238,10 +236,10 @@ namespace DCLF::Extensions
 
 	namespace
 	{
-		/** @brief Static ids for spans of string_view: "Engine::<target>" for each of a_targets. */
+		/** @brief Static "Engine::<target>" ids for a_targets. */
 		std::vector<std::string_view> EngineTargetIds(std::initializer_list<RE::RENDER_TARGET> a_targets)
 		{
-			static std::vector<std::unique_ptr<std::string>> s_names;  // kept for the process: the views point into them
+			static std::vector<std::unique_ptr<std::string>> s_names;  // kept for the process, because the views point into them
 			std::vector<std::string_view> ids;
 			for (const auto target : a_targets) {
 				s_names.push_back(std::make_unique<std::string>(std::format("Engine::{}", magic_enum::enum_name(target))));
@@ -258,7 +256,7 @@ namespace DCLF::Extensions
 			auto ids = EngineTargetIds({ Target::kHDR_DOWNSAMPLE0, Target::kHDR_DOWNSAMPLE1, Target::kHDR_DOWNSAMPLE2, Target::kHDR_DOWNSAMPLE3,
 				Target::kHDR_DOWNSAMPLE4, Target::kHDR_DOWNSAMPLE5, Target::kHDR_DOWNSAMPLE6, Target::kHDR_DOWNSAMPLE7, Target::kHDR_DOWNSAMPLE8,
 				Target::kHDR_DOWNSAMPLE9, Target::kHDR_DOWNSAMPLE10, Target::kHDR_DOWNSAMPLE11, Target::kHDR_DOWNSAMPLE12, Target::kHDR_DOWNSAMPLE13 });
-			// CS's adapted luminance pair, which the post chain draws in place of the engine's last luminance level (native mode).
+			// CS's adapted luminance pair, which the post chain draws instead of the engine's last luminance level in native mode.
 			for (const auto id : RenderGraph::Engine::ImageSpace::AdaptedLuminanceIds())
 				ids.push_back(id);
 			return ids;
@@ -271,7 +269,7 @@ namespace DCLF::Extensions
 		const auto id = RenderGraph::Engine::ImageSpace::AdaptedLuminanceOf(a_view);
 		if (id.empty())
 			return false;
-		// Only a read a graph build declared (DeclareGraphTextures): its order against the post stage's write is then the graph's.
+		// Only a read a graph build declared, so the graph orders it against the post stage's write.
 		const auto declared = s_declared.load(std::memory_order_acquire);
 		if (!declared || std::ranges::find(*declared, id) == declared->end() || !PublishedResources::IsPublished(id))
 			return false;
@@ -295,13 +293,13 @@ namespace DCLF::Extensions
 	{
 		if (!a_view)
 			return false;
-		// The export is the D3D11 view a handle wraps. A native handle wraps none (Unwrap answers null): it is the export itself.
+		// The export is the D3D11 view a handle wraps. A native handle wraps none, so it is the export itself.
 		auto* view = RenderGraph::Engine::Tripwire::Unwrap(a_view);
 		if (!view)
 			view = a_view;
 		if (GraphTextureIndex(a_reader, a_register, a_name, view, a_ids, a_index))
 			return true;
-		// Publish the target once per new view: the first publish builds every graph again, and the next build declares it.
+		// Publish the target once per new view. The first publish rebuilds every graph, and the next build declares it.
 		constexpr auto kReaders = static_cast<std::size_t>(GraphTextureReader::Count);
 		static std::array<std::array<const void*, kTextureRegisters>, kReaders> s_served{};
 		auto& served = s_served[static_cast<std::size_t>(a_reader)][a_register < kTextureRegisters ? a_register : 0];
@@ -316,7 +314,6 @@ namespace DCLF::Extensions
 
 	std::span<const std::string_view> PrecipitationOcclusionGraphTextureIds()
 	{
-		// Engine::Targets' id for the depth target (Draws::EngineTargetId).
 		static constexpr std::array<std::string_view, 1> s_ids{ "Engine::Depth::kPRECIPITATION_OCCLUSION_MAP" };
 		return s_ids;
 	}
@@ -325,15 +322,14 @@ namespace DCLF::Extensions
 	{
 		if (!a_view)
 			return false;
-		// Matched as the D3D11 view a handle wraps; a native handle wraps none and is the view itself (as EngineTargetTextureIndex).
+		// Match the D3D11 view a handle wraps. A native handle is the view itself.
 		auto* view = RenderGraph::Engine::Tripwire::Unwrap(a_view);
 		if (!view)
 			view = a_view;
 		const auto ids = PrecipitationOcclusionGraphTextureIds();
 		if (GraphTextureIndex(a_reader, a_register, "precipitation occlusion", view, ids, a_index))
 			return true;
-		// Only the engine's own map. Skylighting swaps its own map into the field while it draws, but Wetness Effects binds the
-		// engine's after that.
+		// Only the engine's own map. Skylighting swaps its map into the field while it draws, but Wetness Effects binds the engine's after that.
 		auto* renderer = globals::game::renderer;
 		if (!renderer)
 			return false;
@@ -344,15 +340,15 @@ namespace DCLF::Extensions
 			engineView = field;
 		if (!engineView || view != engineView)
 			return false;
-		// Once per new view: the first publish builds every graph again (off the render thread), and the next build declares the id.
+		// Once per new view. The first publish rebuilds every graph off the render thread, and the next build declares the id.
 		static std::array<const void*, static_cast<std::size_t>(GraphTextureReader::Count)> s_served{};
 		static bool s_publishedHere = false;
 		auto& served = s_served[static_cast<std::size_t>(a_reader)];
 		if (served == view)
 			return false;
 		served = view;
-		// A twin's export swapped into the field (Skylighting's own map while it draws) is not the engine's map. Its import is the
-		// twin, which is published under its own id; under this one it would replace the engine map's slot whenever the two take turns.
+		// Skylighting's twin map swapped into the field is not the engine's map. It has its own id.
+		// Publishing it under this id would replace the engine map's slot whenever the two take turns.
 		winrt::com_ptr<ID3D11Resource> resource;
 		view->GetResource(resource.put());
 		DxvkOrgInteropResourceInfo info{};
@@ -362,8 +358,7 @@ namespace DCLF::Extensions
 		const auto import = FrameAnchors::EngineDepth(static_cast<std::uint32_t>(target));
 		if (!import)
 			return false;
-		// ORG's own target is published by Engine::Targets under this id; leave it to them. Otherwise the anchors' import is published
-		// here, and again with each new view (a new version of the slot needs no build).
+		// Engine::Targets publishes ORG's own target under this id. Otherwise publish the import here, again with each new view.
 		if (PublishedResources::IsPublished(ids[0]) && !s_publishedHere)
 			return false;
 		s_publishedHere = PublishedResources::PublishImport(ids[0], import, view) || s_publishedHere;

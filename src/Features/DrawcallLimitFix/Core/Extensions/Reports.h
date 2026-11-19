@@ -1,6 +1,6 @@
 #pragma once
 
-// The report lines contract's Core side (Api/Reports.h): the call the report makes at each of its points.
+// Core's side of Api/Reports.h.
 
 #include "Features/DrawcallLimitFix/Api/Reports.h"
 
@@ -9,12 +9,11 @@
 
 namespace DCLF::Extensions
 {
-	/** @brief Render thread (the report of a_frame, at a_point): every registered feature's lines there, in order. */
+	/** @brief Render thread. Every registered feature's logged lines at a_point, in order. */
 	void ReportLinesAt(Api::ReportPoint a_point, std::uint32_t a_frame);
 	/**
-	 * @brief Render thread (the report, at a_point, composing its text): every registered feature's text lines there, in order, onto a_text.
-	 * A coordinator component's lines (Api::ReportLines::componentText) are the coordinator's to call, with the component's context
-	 * (Scene::Coordinator::ComponentsReportText, which calls both kinds at its point in order).
+	 * @brief Render thread. Appends every registered feature's text lines at a_point, in order.
+	 * The coordinator calls coordinator components' lines itself, with their context.
 	 */
 	void ReportTextAt(Api::ReportPoint a_point, std::string& a_text);
 }

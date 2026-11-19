@@ -10,9 +10,8 @@ namespace DCLF::Integrations::ScreenSpaceShadows
 {
 	namespace
 	{
-		// t45 has no view of its own: the colour commit reads the captured view, the faces null. On the ORG path
-		// (CS_ORG_SCREEN_SPACE_SHADOWS) the Prepass binds the graph texture's export, so the commit reads the published texture,
-		// ordered after the raymarch at the Prepass anchor.
+		// t45 has no view of its own. The colour commit reads the captured view and the faces null.
+		// On the ORG path the Prepass binds the graph texture's export, so the commit reads it ordered after the raymarch.
 		void Install(Api::InstallContext& a_context)
 		{
 			a_context.RegisterFrameTexture({ .name = "screen space shadows", .textureRegister = kShadowTextureRegister,

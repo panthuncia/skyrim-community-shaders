@@ -1,9 +1,8 @@
 #pragma once
 
-// Ports of the engine's pass and shader-descriptor selection: why an object stays native (Ineligible), the Lighting descriptors DCLF
-// draws it with (a material port's are its derive's: Extensions::DerivePort), LOD fades and the particle path's acceptance. Pure
-// functions of the capture records, called on the scene-work thread and its pool; the render thread samples the frame inputs
-// (SampleLodFadeFrame).
+// Ports of the engine's pass and shader-descriptor selection: why an object stays native, the Lighting descriptors DCLF draws it with,
+// LOD fades and particle acceptance. Pure functions of the capture records, run on the scene-work thread and its pool.
+// The render thread samples the frame inputs.
 
 #include <array>
 #include <cstdint>
@@ -77,139 +76,127 @@ namespace DCLF
 	struct LightingDescriptors
 	{
 		std::uint32_t technique = 0;  // descriptor bits 24-29, as GetRenderPasses selects it
-		std::uint32_t pass = 0;       // pass descriptor (BSRenderPass::passEnum - 0x4800002D), before the VS/PS split
-		std::uint32_t vertex = 0;     // final descriptors, as the native deferred draw looks the shaders up
+		std::uint32_t pass = 0;       // BSRenderPass::passEnum - 0x4800002D, before the VS/PS split
+		std::uint32_t vertex = 0;     // final descriptors, as the native deferred draw looks shaders up
 		std::uint32_t pixel = 0;
-		std::uint32_t rawVertex = 0;  // descriptors BeginTechnique receives, before State::ModifyShaderLookup
+		std::uint32_t rawVertex = 0;  // what BeginTechnique receives, before State::ModifyShaderLookup
 		std::uint32_t rawPixel = 0;
-		std::uint32_t derivedPass = 0;  // the pass descriptor derived from the property (kNotDerived if it cannot be)
-		// Which technique produced Ineligible::Technique (kRefractionReject for the refraction rejection).
-		std::uint32_t rejectedTechnique = 62;  // 62 = never set, so an empty field cannot read as `none`
-		// CS_DCLF_DECALS: 0, or the decal group (1 = hint 2, opaque; 2 = hint 3, blended) with alphaBlendMode (FUN_14150bc80) and
-		// alphaBlendWriteMode as the group function and SetupGeometry leave them. The depth-bias mode is frame state (Coordinator).
+		std::uint32_t derivedPass = 0;  // kNotDerived if it cannot be derived
+		// The technique behind Ineligible::Technique, or kRefractionReject.
+		std::uint32_t rejectedTechnique = 62;  // 62 means never set, so an empty field cannot read as none
+		// Decal group: 1 for hint 2 opaque, 2 for hint 3 blended, with the blend modes the group function and SetupGeometry leave.
+		// The depth-bias mode is frame state.
 		std::uint32_t decalGroup = 0;
 		std::uint32_t decalBlendMode = 0;
 		std::uint32_t decalWriteMode = 0;
-		// An opaque object (hint 0, not 2) drawn through decal group 1 without depth bias (CS_DCLF_OPAQUE_EFFECTS: an opaque effect).
+		// An opaque object, hint 0, drawn through decal group 1 without depth bias.
 		bool opaqueInDecalGroup = false;
-		// CS_DCLF_TB_TERRAIN under Terrain Blending: 0, or the terrain group (1 kMultiTextureLandscape, 2 kNoTransparencyMultiSample),
-		// as TerrainBlending.cpp's BSBatchRenderer__RenderPassImmediately hook sorts them.
+		// The terrain group under Terrain Blending: 1 kMultiTextureLandscape, 2 kNoTransparencyMultiSample, sorted as its hook sorts them.
 		std::uint32_t terrainGroup = 0;
-		// CS_DCLF_FORWARD: a blended object the forward epoch draws, with the engine's alphaBlendMode (FUN_14150bc80) and depth flags.
+		// A blended object the forward epoch draws, with the engine's alphaBlendMode and depth flags.
 		bool forward = false;
 		std::uint32_t forwardBlendMode = 0;
 		bool forwardDepthTest = false, forwardDepthWrite = false;
-		// CS_DCLF_FIRST_PERSON_DECALS: a first-person effect decal drawn forward: its decal group (1 or 2, bias in kRasterDepthBiasShift).
+		// A first-person effect decal drawn forward, with its decal group.
 		std::uint32_t forwardDecalGroup = 0;
-		// CS_DCLF_REFRACTION: drawn as GetRenderPasses' Utility RENDER_NORMAL pass (also `forward`), variants RENDER_NORMAL_FALLOFF
-		// (kRefractionFalloff, bit 16) and RENDER_NORMAL_CLAMP (kNonProjectiveShadows, bit 13). Its Lighting descriptors are never drawn.
+		// Drawn as GetRenderPasses' Utility RENDER_NORMAL pass, with the FALLOFF (bit 16) and CLAMP (bit 13) variants.
+		// Its Lighting descriptors are never drawn.
 		bool refraction = false;
 		bool refractionFalloff = false, refractionClamp = false;
-		// A material port's object (its kind, Extensions::MaterialPorts; 0: Lighting's): pass and descriptors are its shader's, technique 0
-		// (CS_DCLF_EFFECTS: the Effect port's, Features/Effects).
+		// A material port's object kind, 0 for Lighting. Pass and descriptors come from its shader, and technique is 0.
 		std::uint8_t port = 0;
-		// ProjectedUV (CS_DCLF_PROJECTED_UV): needs the per-object texture matrix, pixel parameters and projected textures.
+		// ProjectedUV needs the per-object texture matrix, pixel parameters and projected textures.
 		bool projectedUV = false;
 	};
 
-	/** @brief LightingDescriptors::rejectedTechnique for the refraction rejection, which has no technique. */
+	/** @brief rejectedTechnique for the refraction rejection, which has no technique. */
 	inline constexpr std::uint32_t kRefractionReject = 63;
 
-	/** @brief LightingDescriptors::derivedPass when the derivation leaves the object native. */
+	/** @brief derivedPass when the derivation leaves the object native. */
 	inline constexpr std::uint32_t kNotDerived = ~0u;
 
-	/** @brief FadeStateOf: the object has a fade-sensitive flag but no fade node. */
+	/** @brief The object has a fade-sensitive flag but no fade node. */
 	inline constexpr std::uint8_t kFadeNoNode = 0x40;
 
-	/** @brief kFadeNoNode (stays native) or 0. The LOD metric is not read: its fades are the draw's, so it is camera-independent. */
+	/** @brief kFadeNoNode or 0. The LOD metric is not read, because the draw does its own fades, so this stays camera-independent. */
 	std::uint8_t FadeStateOf(const SceneCapture::PropertyRecord* a_property);
 
 	/**
-	 * @brief Pass bits GetRenderPasses sets from per-frame engine state, not the property: ShadowDir (13), DefShadow (14) and the
-	 * shadow light count (6-8) from the light assignment, and DoAlphaTest (20), which for alpha-tested geometry also follows the
-	 * early-Z global other renders toggle (engine notes: GetRenderPasses runtime bits).
+	 * @brief Pass bits GetRenderPasses sets from per-frame state, not the property: ShadowDir (13), DefShadow (14), shadow light count (6-8)
+	 * and DoAlphaTest (20), which for alpha-tested geometry also follows an early-Z global other renders toggle.
 	 */
 	inline constexpr std::uint32_t kRuntimePassBits = 0x1061c0u;
-	/**
-	 * @brief The bits a registered pass supplies over the derivation: the runtime bits, the screen-door fade (AdditionalAlphaMask,
-	 * 23) and the snow conditions' bits 19 and 21.
-	 */
+	/** @brief Bits a registered pass supplies over the derivation: the runtime bits, screen-door fade (23) and the snow bits 19 and 21. */
 	inline constexpr std::uint32_t kRegisteredPassBits = (1u << 20) | (1u << 23) | (1u << 19) | (1u << 21);
 	/**
-	 * @brief The pass's light-independent shadow bits (GetRenderPasses, AE 0x1414adfb0): ShadowDir where the sun's shadow may apply,
-	 * DefShadow where deferred shadows do, and for DefShadow alone one shadow light in the count, which makes the technique bind the
-	 * shadow mask. BuildDrawsCS decides per frame (kObjectSunTest, local shadow lights). a_property: a layer's property, else null.
+	 * @brief The light-independent shadow bits GetRenderPasses (AE 0x1414adfb0) would set. DefShadow alone adds one shadow light,
+	 * which makes the technique bind the shadow mask. BuildDrawsCS decides per frame. a_property is a layer's property, or null.
 	 */
 	std::uint32_t StaticShadowBits(const SceneCapture::LeafView& a_leaf, bool a_settled, const SceneCapture::PropertyRecord* a_property = nullptr);
-	/** @brief A multi-index shape's layer passes' accumulation hint (FUN_1414b2330), which their pass draw reads (FUN_1414f2ad0). */
+	/** @brief The accumulation hint of a multi-index shape's layer passes (FUN_1414b2330, read by FUN_1414f2ad0). */
 	inline constexpr std::uint32_t kLayerHint = 12;
-	/**
-	 * @brief A BSMultiIndexTriShape's additional property, as the main registration takes it (FUN_1414b2330: any additional
-	 * property; its passes draw the second index list). Null otherwise, or without a second list.
-	 */
+	/** @brief A BSMultiIndexTriShape's additional property, as FUN_1414b2330 takes it. Null otherwise or without a second index list. */
 	RE::BSShaderProperty* LayerPropertyOf(const RE::BSGeometry& a_geometry);
 	inline constexpr std::uint32_t kShadowBits = 0x61c0u;  // ShadowDir, DefShadow and the shadow light count
 
 	/**
-	 * @brief Inputs from which the draw (Lighting.hlsl, DCLFLodFade) computes the specular and envmap LOD fades BSFadeNode::OnVisible
-	 * (FUN_14147b110) and GetRenderPasses (FUN_14147c470) give. DCLF keeps both features at any distance; past a fade's end the factor
-	 * is 0, matching a dropped feature (engine notes: LOD fades). Uploaded once an epoch after the frame lighting (PS b13, c6-c12).
+	 * @brief Inputs for the draw's specular and envmap LOD fades, as BSFadeNode::OnVisible (FUN_14147b110) and GetRenderPasses (FUN_14147c470) give them.
+	 * DCLF keeps both features at any distance and fades to 0 past the end, which matches a dropped feature. Uploaded to PS b13, c6-c12.
 	 */
 	struct LodFadeFrame
 	{
-		float eye[3]{};           // the main camera's world position
-		float lodAdjust = 1.0f;   // its NiCamera::lodAdjust
+		float eye[3]{};           // main camera world position
+		float lodAdjust = 1.0f;   // NiCamera::lodAdjust
 		float specularStart = 0.0f, specularEnd = 0.0f, envmapStart = 0.0f, envmapEnd = 0.0f;
-		float metricScale = 0.0f;     // the metric per scaled distance (0x141aa6300)
-		float defaultScale = 0.0f;    // the distance scale when the LOD type's divisor is not positive (0x141ad2840)
-		float metricOverride = 0.0f;  // the metric every node takes instead, when overridden (0x14332a254 against 0x141769578)
+		float metricScale = 0.0f;     // metric per scaled distance (0x141aa6300)
+		float defaultScale = 0.0f;    // scale when the LOD type's divisor is not positive (0x141ad2840)
+		float metricOverride = 0.0f;  // metric every node takes when overridden (0x14332a254 against 0x141769578)
 		float overridden = 0.0f;      // 1 when metricOverride applies
-		float divisors[16]{};         // per LOD type (+0x153 & 0xF): the distance scales by lodAdjust / divisor (0x142032e00)
-		// 1 when BSFadeNode::OnVisible updates the metric (0x142032dfd); otherwise nodes keep their fades.
+		float divisors[16]{};         // per LOD type (+0x153 & 0xF), lodAdjust / divisor (0x142032e00)
+		// 1 when BSFadeNode::OnVisible updates the metric (0x142032dfd). Otherwise nodes keep their fades.
 		float fadesOn = 0.0f;
-		// GetRenderPasses' refraction LOD fade thresholds (Utility.hlsl, DCLF_REFRACTION).
+		// GetRenderPasses' refraction LOD fade thresholds.
 		float refractionStart = 0.0f, refractionEnd = 0.0f;
 		float pad = 0.0f;
 	};
 	static_assert(sizeof(LodFadeFrame) == 128);
-	/** @brief This frame's, from the main camera and the engine's settings. Render thread. */
+	/** @brief Render thread. This frame's inputs, from the main camera and the engine's settings. */
 	LodFadeFrame SampleLodFadeFrame();
-	/** @brief The draw's LOD fade word (DCLFLodFadeFlagsOf, Common/DCLFObjects.hlsli): LOD type and the fades applied. */
+	/** @brief The draw's LOD fade word: LOD type and which fades apply. */
 	inline constexpr std::uint32_t kLodFadeTypeMask = 0xFu;
 	inline constexpr std::uint32_t kLodFadeSpecular = 1u << 4;  // MaterialData.y, and SSRParams.w with kLodFadeSsr
 	inline constexpr std::uint32_t kLodFadeEnvmap = 1u << 5;    // MaterialData.x
-	inline constexpr std::uint32_t kLodFadeSsr = 1u << 6;       // the pass writes SSRParams.w (render flag 2 clear)
+	inline constexpr std::uint32_t kLodFadeSsr = 1u << 6;       // the pass writes SSRParams.w, render flag 2 clear
 	/**
-	 * @brief The fade node's world bound centre and LOD type in w, plus kLodFadeHeld when the fades do not apply (no fade-sensitive
-	 * flag, or kIgnoreFade, which BSFadeNode::OnVisible skips). w < 0: no fade node.
+	 * @brief The fade node's world bound centre, with the LOD type in w plus kLodFadeHeld when fades do not apply.
+	 * w < 0 means no fade node. kIgnoreFade nodes are skipped by BSFadeNode::OnVisible.
 	 */
 	std::array<float, 4> LodFadeNodeOf(const RE::BSShaderProperty* a_property);
 	inline constexpr float kLodFadeHeld = 16.0f;
-	/** @brief Whether a LodFadeNodeOf row has the draw fade the property's LOD fades. */
+	/** @brief Whether a LodFadeNodeOf row means the draw fades the property's LOD fades. */
 	inline bool LodFadesApply(const std::array<float, 4>& a_node) { return a_node[3] >= 0.0f && a_node[3] < kLodFadeHeld; }
 
-	/** @brief Pass descriptor of a BSRenderPass (passEnum minus the Lighting shader's base). */
+	/** @brief A BSRenderPass's pass descriptor: passEnum minus the Lighting shader's base. */
 	inline constexpr std::uint32_t PassDescriptorOf(std::uint32_t a_passEnum) { return a_passEnum - 0x4800002Du; }
 
-	/** @brief Technique GetRenderPasses selects from the property flags (engine notes: technique table). */
+	/** @brief The technique GetRenderPasses selects from the property flags. */
 	std::uint32_t SelectLightingTechnique(std::uint64_t a_flags);
 	/**
-	 * @brief The descriptor BSLightingShader::SetupTechnique (AE 0x1414db810) draws a pass with: LODLandNoise (18) is LODLand (9)
-	 * unless the land noise global (0x142032fdb) is set, and ParallaxOcc (7) is None (0) unless the parallax occlusion global
-	 * (0x142035500) is. Its shaders, samplers and what SetupGeometry reads (+0x94) are that technique's.
+	 * @brief The descriptor BSLightingShader::SetupTechnique (AE 0x1414db810) draws a pass with.
+	 * LODLandNoise (18) becomes LODLand (9) unless the land noise global (0x142032fdb) is set.
+	 * ParallaxOcc (7) becomes None (0) unless the parallax occlusion global (0x142035500) is set.
 	 */
 	std::uint32_t SetupTechniqueDescriptor(std::uint32_t a_pass);
-	/** @brief SetupTechnique's VS/PS split, then State::ModifyShaderLookup; the pixel Deferred bit only when a_deferred. */
+	/** @brief SetupTechnique's VS/PS split, then State::ModifyShaderLookup. The pixel Deferred bit only when a_deferred. */
 	void LightingShaderDescriptors(std::uint32_t a_pass, bool a_deferred, std::uint32_t& a_vertex, std::uint32_t& a_pixel);
-	/** @brief The pixel descriptor's Deferred bit (ShaderCache.h, LightingShaderFlags::Deferred): the G-buffer variant. */
+	/** @brief The pixel descriptor's Deferred bit, the G-buffer variant. */
 	inline constexpr std::uint32_t kLightingPixelDeferred = 1u << 4;
-	/** @brief Whether the technique is one the water reflection's cube map draws (dclf-architecture.md, "The census"). */
+	/** @brief Whether the water reflection's cube map draws this technique. */
 	inline constexpr bool LodLightingTechnique(std::uint32_t a_passDescriptor)
 	{
 		const std::uint32_t technique = (a_passDescriptor >> 24) & 0x3f;
 		return technique == 9 || technique == 13 || technique == 15 || technique == 18;
 	}
-	/** @brief The Lighting techniques by id, and kRefractionReject's name. */
 	constexpr std::array<std::string_view, 20> kLightingTechniqueNames{ "none", "envmap", "glowmap", "parallax", "facegen",
 		"facegenRGBTint", "hair", "parallaxOcc", "MTLand", "LODLand", "snow", "multilayerParallax", "treeAnim", "LODObjects",
 		"multiIndexSparkle", "LODObjectHD", "eye", "cloud", "LODLandNoise", "MTLandLODBlend" };
@@ -218,32 +205,27 @@ namespace DCLF
 		return a_technique == 63 ? std::string_view("refraction") : a_technique < kLightingTechniqueNames.size() ? kLightingTechniqueNames[a_technique] : std::string_view("?");
 	}
 
-	/**
-	 * @brief A member's main pass built from the object alone (PrimaryCull::MembershipPass): what GetRenderPasses would register.
-	 */
+	/** @brief A member's main pass built from the object alone: what GetRenderPasses would register. */
 	struct AccumulatedPass
 	{
-		std::uint32_t technique = 0;  // pass descriptor (key minus the Lighting base): the batch group's key, what SetupTechnique receives
-		std::uint32_t subPass = 0;    // PassGroup list 0-4; the renderer draws 1, 3 and 4 with alpha testing
-		std::uint32_t passEnum = 0;   // the pass's own passEnum when the tables were built (diagnostics)
-		// Accumulation hint (BSRenderPass+0x1C): the batch renderer's geometry group, and for decals which of the two decal groups.
+		std::uint32_t technique = 0;  // key minus the Lighting base, which SetupTechnique receives
+		std::uint32_t subPass = 0;    // PassGroup list 0-4. The renderer alpha-tests 1, 3 and 4.
+		std::uint32_t passEnum = 0;   // diagnostics only
+		// BSRenderPass+0x1C: the batch renderer's geometry group, and which decal group for decals.
 		std::uint32_t hint = 0;
-		// LODMode as a row of the engine's partition table (index + singleLevel * 4): which skin partitions the main camera draws.
+		// LODMode as a row of the engine's partition table, index + singleLevel * 4. Picks the skin partitions the main camera draws.
 		std::uint32_t lodRow = 3;
-		// A synthetic pass whose technique carries the sun's bits for the GPU to drop on a cascade miss (kObjectSunTest).
+		// A synthetic pass whose technique carries the sun's bits, for the GPU to drop on a cascade miss.
 		bool sunTest = false;
-		// A resident object's pass: the accumulate phase patches its record once and keeps the patch across frames.
+		// A resident pass. The accumulate phase patches its record once and keeps the patch.
 		bool resident = false;
-		// A resident pass under a fade root: the distance BuildDraws tests (kObjectFadeTest); 0 when the root's fade needs no test.
+		// A resident pass under a fade root: the distance BuildDraws tests, or 0 when no test is needed.
 		float fadeDistance = 0.0f;
-		// A resident tree's pass: BuildDraws applies BSTreeNode::OnVisible's height test (kObjectHeightTest).
+		// A resident tree pass: BuildDraws applies BSTreeNode::OnVisible's height test.
 		bool heightTest = false;
 	};
 
-	/**
-	 * @brief A membership pass's derived pass descriptor with the inputs it came from (property record's key, material, flags,
-	 * fade state); derived again when any differs. Lives in the geometry's tracked entry (Coordinator::Tracked::membershipDerived).
-	 */
+	/** @brief A membership pass's derived descriptor with the inputs it came from. Derived again when any input differs. */
 	struct MembershipDerived
 	{
 		const void* property = nullptr;
@@ -255,13 +237,13 @@ namespace DCLF
 		bool operator==(const MembershipDerived&) const = default;
 	};
 
-	inline constexpr std::uint32_t kPassDoAlphaTest = 1u << 20;           // pass descriptor DoAlphaTest
-	inline constexpr std::uint32_t kPassAdditionalAlphaMask = 1u << 23;  // pass descriptor AdditionalAlphaMask (screen-door fade)
-	inline constexpr std::uint32_t kPassProjectedUV = 1u << 15;          // pass descriptor ProjectedUV
+	inline constexpr std::uint32_t kPassDoAlphaTest = 1u << 20;
+	inline constexpr std::uint32_t kPassAdditionalAlphaMask = 1u << 23;  // screen-door fade
+	inline constexpr std::uint32_t kPassProjectedUV = 1u << 15;
 
 	/**
-	 * @brief Hair (6) with ProjectedUV: SetupGeometry writes the projected-UV constants (VS TextureProj, PS ProjectedUVParams 1-3) for
-	 * every technique but Hair, so the native draw uses stale ones (dclf-validation.md, "In the engine"). DCLF draws such hair without projection.
+	 * @brief Hair (6) with ProjectedUV. SetupGeometry writes the projected-UV constants for every technique but Hair, so the native draw
+	 * uses stale ones. DCLF draws such hair without projection.
 	 */
 	inline bool HairProjection(std::uint32_t a_descriptor)
 	{
@@ -269,10 +251,8 @@ namespace DCLF
 	}
 
 	/**
-	 * @brief The descriptor DCLF draws a pass in batch list a_subPass with. The renderer alpha-tests lists 1, 3 and 4 whatever the
-	 * technique says (engine notes, batch renderer), and GetRenderPasses' DoAlphaTest comes and goes with the early-Z global, blending
-	 * and the last build's fade while the pixels do not (EQUAL depth against an alpha-tested prepass), so DCLF always adds the discard
-	 * there, keeping the object DCLF's every frame.
+	 * @brief The descriptor DCLF draws a pass in batch list a_subPass with. The renderer alpha-tests lists 1, 3 and 4 whatever the technique says.
+	 * GetRenderPasses' DoAlphaTest flickers with the early-Z global, blending and fades while the pixels do not, so DCLF always adds the discard there.
 	 */
 	inline std::uint32_t DrawnPassDescriptor(std::uint32_t a_descriptor, std::uint32_t a_subPass)
 	{
@@ -281,44 +261,40 @@ namespace DCLF
 		return (a_subPass == 1 || a_subPass == 3 || a_subPass == 4) ? (a_descriptor | kPassDoAlphaTest) : a_descriptor;
 	}
 
-	/** @brief GetRenderPasses' hint for a fading pass (geometry group 7, drawn blended right before the blended list). */
+	/** @brief GetRenderPasses' hint for a fading pass: geometry group 7, drawn blended just before the blended list. */
 	inline constexpr std::uint32_t kFadingHint = 9;
 
 	/**
-	 * @brief GetRenderPasses' (AE 0x1414adfb0) hint 9 for a main pass: the property's fade node is fading (the mirror's currentFade below 1),
-	 * it is not a decal, refraction or bit-19 property, and it is not a screen-door fade of an unblended property. The engine draws such a
-	 * pass blended, with no depth write and no shadow bits. DCLF's members follow it while their root fades.
+	 * @brief Whether GetRenderPasses (AE 0x1414adfb0) gives a main pass hint 9: its fade node is fading, and it is not a decal, refraction,
+	 * bit-19 property or a screen-door fade of an unblended property. The engine then draws it blended, without depth write or shadow bits.
 	 */
 	bool BlendFading(const SceneCapture::LeafView& a_leaf, const SceneCapture::PropertyRecord* a_property);
 
-	/** @brief The engine's alphaBlendWriteMode for the blended group (FUN_1414b3390 sets 11 before FUN_1414b39d0's draws). */
+	/** @brief The engine's alphaBlendWriteMode for the blended group. FUN_1414b3390 sets 11 before FUN_1414b39d0's draws. */
 	inline constexpr std::uint32_t kForwardWriteMode = 11;
 
 	/**
-	 * @brief The native main pass's descriptors for this geometry, derived without running GetRenderPasses; returns why the object
-	 * stays native, or None. Camera-independent. Reads the records (the mirror's on the scene work, LiveLeaf's elsewhere).
+	 * @brief The native main pass's descriptors, derived without running GetRenderPasses. Returns why the object stays native, or None.
+	 * Camera-independent.
 	 *
-	 * @param a_accumulated This frame's accumulated pass, or null; supplies kRegisteredPassBits.
-	 * @param a_layer a_property is the geometry's layer (LayerPropertyOf), drawn with hint 12.
+	 * @param a_accumulated This frame's accumulated pass, or null. Supplies kRegisteredPassBits.
+	 * @param a_layer a_property is the geometry's layer, drawn with hint 12.
 	 */
 	Ineligible DeriveLightingDescriptors(const SceneCapture::PropertyRecord& a_property, const SceneCapture::LeafView& a_leaf,
 		const AccumulatedPass* a_accumulated, LightingDescriptors& a_out, bool a_layer = false);
 
 	/**
-	 * @brief alphaBlendMode as BSShader's alpha setup (AE FUN_14150bc80) picks it from a blending NiAlphaProperty's functions, or
-	 * 0 for a pair it leaves alone. (Its mode 1 for a non-blending property with alpha below 1 is not modelled: not eligible.) The Lighting
-	 * derive's and the material ports' (the Effect port's forward and decal groups).
+	 * @brief alphaBlendMode as BSShader's alpha setup (AE FUN_14150bc80) picks it from a blending NiAlphaProperty, or 0 for pairs it leaves alone.
+	 * Its mode 1 for a non-blending property with alpha below 1 is not modelled, so such objects are not eligible.
 	 */
 	std::uint32_t AlphaBlendModeOf(const SceneCapture::AlphaRecord& a_alpha);
 
-	/** @brief A particle geometry's type (BSGeometry::Type kParticles or kStripParticles: NiParticles, drawn from its particle data). */
+	/** @brief Whether a geometry type is a particle type, kParticles or kStripParticles. */
 	inline constexpr bool ParticleGeometryType(std::uint8_t a_type) { return a_type == 1 || a_type == 2; }
 	/**
-	 * @brief The palette rows class a member's block is its geometry type's (Api::GeometryTypeContribution::itemClass, while the
-	 * contribution's toggle is on; None for none): a skinless leaf whose capture is a complete particle system (dclf-architecture.md,
-	 * "Particles"), exactly an NiParticleSystem with particle data, local or world space (a world-space system's transform is the identity
-	 * with its parent's scale, FUN_140dd4db0), for aspect flags (FUN_140e51320's other path) an NiPSysData with velocities, and a capacity
-	 * (the block's units).
+	 * @brief The palette rows class of a member's block. Only a skinless leaf whose capture is a complete particle system qualifies:
+	 * an NiParticleSystem with particle data, an NiPSysData with velocities for aspect flags (FUN_140e51320), and a capacity.
+	 * A world-space system's transform is the identity with its parent's scale (FUN_140dd4db0).
 	 */
 	Api::FrameValueItemClass PaletteItemClassOf(const SceneCapture::LeafView& a_leaf);
 }

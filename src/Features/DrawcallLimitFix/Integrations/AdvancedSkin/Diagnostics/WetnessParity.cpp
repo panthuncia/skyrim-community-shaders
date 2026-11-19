@@ -1,4 +1,4 @@
-// Advanced Skin's wetness parities (see the header). Render thread.
+// Advanced Skin's wetness parities. Render thread.
 
 #include "Features/DrawcallLimitFix/Integrations/AdvancedSkin/Diagnostics/WetnessParity.h"
 #include "Features/DrawcallLimitFix/Core/Scene/Model/Tables.h"
@@ -14,7 +14,7 @@ namespace DCLF::Integrations::AdvancedSkin
 {
 	namespace
 	{
-		// The persistent parity's since the shading line's last take (render thread: the check and the report).
+		// The persistent parity's counters since the shading line's last take.
 		std::uint64_t rowWetness = 0, rowWetnessDiffer = 0;
 		std::string rowWetnessFirst;
 
@@ -27,7 +27,7 @@ namespace DCLF::Integrations::AdvancedSkin
 	void DrawWetnessParity::Compare(const RE::BSGeometry* a_geometry, std::uint32_t a_objectIndex, const SceneTables& a_tables,
 		const std::vector<BindlessShading>* a_rows, NoteFn a_note, void* a_owner)
 	{
-		// b7: the SetupGeometry hook's upload (bound only while enabled).
+		// b7, the SetupGeometry hook's upload, bound only while enabled.
 		auto& skin = globals::features::skin;
 		if (skin.settings.EnableSkin && a_rows && a_objectIndex < a_rows->size()) {
 			const auto& expected = (*a_rows)[a_objectIndex].skinPerGeometry;
@@ -52,8 +52,7 @@ namespace DCLF::Integrations::AdvancedSkin
 
 	void CheckRowWetness(const SceneTables& a_tables, const std::vector<BindlessShading>& a_rows, const std::vector<std::uint8_t>& a_named)
 	{
-		// The wetness, as the frame's start captured it (Skin::GetWetness's same-frame value: no second advance): a mesh named this
-		// frame (joined, or its record rewritten) takes its value with the next frame's capture.
+		// The wetness as the frame's start captured it, with no second advance. A mesh named this frame takes its value at the next capture.
 		auto& skin = globals::features::skin;
 		const bool wetness = skin.loaded && skin.settings.EnableSkin;
 		for (const auto o : Members(a_tables)) {

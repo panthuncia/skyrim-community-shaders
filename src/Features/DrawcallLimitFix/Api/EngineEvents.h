@@ -1,8 +1,7 @@
 #pragma once
 
-// The engine event contracts: what DCLF's engine side tells a feature that follows the engine state DCLF takes over, as it changes
-// (Api::InstallContext::RegisterStandInObserver: the primary cull's stood-in roots, Core/Handoff/PrimaryCull), and the engine event
-// channels a feature's own engine hooks feed, which the coordinator drains into its passes (Api::InstallContext::RegisterEngineChannel).
+// Engine events for features. A stand-in observer hears about the roots the primary cull takes over.
+// An engine channel is a feature's own queue of keys, fed by its hooks and drained by each scene pass.
 
 #include <atomic>
 #include <cstddef>
@@ -12,27 +11,19 @@
 
 namespace DCLF::Api
 {
-	// Defined by Core (Core/Extensions/EngineEvents.h), which the features inside DCLF include for them.
+	// Defined in Core/Extensions/EngineEvents.h.
 	class StandInRootsChange;
 	class KeySink;
 
 	/**
-	 * @brief An observer of the primary cull's stood-in roots: the fade roots DCLF stands in for whole (state on the GPU alone; no engine
-	 * cull visits them). Called per change, never per root; the roots are alive during the call (the cut's snapshot holds them).
+	 * @brief Hears about the fade roots DCLF stands in for whole, which no engine cull visits. Called per change, never per root.
+	 * Every callback is optional.
 	 *
-	 * - changed: render thread (the main thread), when the admitted entries' ownership moved (PrimaryCull::SyncRootOwnership): the roots
-	 *   that left and joined, left first (a root in both stays). Optional.
-	 * - cleared: render thread, when the stand-in is dropped whole (PrimaryCull::ClearRootOwnership): no root is stood in. Optional.
-	 * - updateEntry: the main thread at Main::Update's entry (PrimaryCull::AtUpdateEntry), after the stood-in roots' kAccumulated is
-	 *   written, in registration order (the fade writers' tables and stores are the last's, Fades'): whether DCLF runs this frame. Optional.
-	 * - afterWrites: the main thread at Main::Update's entry too, after every updateEntry and the UpdateEntry diagnostics event, last
-	 *   there: whether DCLF runs this frame. Optional.
-	 * - structure: any thread (the attaching or detaching one), per attach/detach the primary cull's structure events follow
-	 *   (PrimaryCull::NoteListStructure), first there, before the main cull input's: a_parent, the node attached to or detached from (an
-	 *   engine NiNode; null for none). Lock-free and cheap. Optional.
-	 * - listJobsDone: render thread, once a frame the list jobs ran, at their Finish (PrimaryCull's ListJobsFinish, where the stand-in's
-	 *   jobs are done and before the registration jobs read their output): what the feature's hooks gathered on the jobs' threads is
-	 *   whole (the animated fades' batch). Optional.
+	 * - changed: render thread. Roots that left come before roots that joined. They stay alive during the call.
+	 * - updateEntry: main thread at Main::Update's entry, in registration order. Tells whether DCLF runs this frame.
+	 * - afterWrites: main thread, after every updateEntry.
+	 * - structure: any thread, per attach or detach. Must be lock-free and cheap. a_parent may be null.
+	 * - listJobsDone: render thread, once per frame when the list jobs finish. Data the hooks gathered on job threads is complete here.
 	 */
 	struct StandInObserver
 	{
@@ -47,24 +38,18 @@ namespace DCLF::Api
 	/** @brief What an engine channel carries. */
 	enum class ChannelKind : std::uint8_t
 	{
-		// Keys: the objects the hooked writers wrote, as keys pushed after the write (never dereferenced by the drain), from any thread.
+		// Keys pushed from any thread after the engine write. The drain never dereferences them.
 		Keys,
-		// SceneStack: events on the scene's event stack itself (Extensions::PushStacked), ordered with the attaches and detaches pushed
-		// around them on the same thread; applied in stack order (CoordinatorComponent::Events::stacked). No queue, no drain.
+		// Events on the scene's own event stack, ordered with the attaches and detaches around them. No queue and no drain.
 		SceneStack,
 	};
 
 	/**
-	 * @brief Where a pass applies a channel's keys (Core/Scene/Coordinator/ApplyEvents.cpp, ApplyBatch's structural events), and so where
-	 * CollectEvents drains its queue among Core's own (each queue drained up to where it stands at its turn: what is pushed after is the
-	 * next pass's).
+	 * @brief Where in a scene pass a channel's keys are drained and applied. Keys pushed after the drain wait for the next pass.
 	 *
-	 * - BeforeStructural: drained after Core's fade snaps and fade amounts, before the property events; applied after Core's fade snaps and
-	 *   fade amounts, before the property and node events are taken (an actor's fadeAmount, Actor::SetAlpha, would apply here).
-	 * - AfterSwitches: drained after Core's switch events, last; applied after the switch events are pending, before the leaf holds (object
-	 *   LOD's segment writes: Features/Lod).
-	 * - AfterBatch: a SceneStack channel's: after the batch's events are applied (ApplyEvents), only in a pass that applies a batch; the
-	 *   keys hook is called with no keys (what it applies is what the component took itself, CoordinatorComponent::Commit::take).
+	 * - BeforeStructural: after Core's fade snaps and amounts, before property and node events.
+	 * - AfterSwitches: after the switch events, before the leaf holds.
+	 * - AfterBatch: SceneStack channels only. Runs after the batch with no keys, so the component applies what it took itself.
 	 */
 	enum class ChannelApply : std::uint8_t
 	{
@@ -73,14 +58,14 @@ namespace DCLF::Api
 		AfterBatch,
 	};
 
-	/** @brief What wakes the scene pass for a channel (Extensions::WakeChannel): None, nothing; Pass, a scene pass (WakeScenePass). */
+	/** @brief What wakes the scene pass when the channel gets a key. */
 	enum class WakeSource : std::uint8_t
 	{
 		None,
 		Pass,
 	};
 
-	/** @brief A registered engine channel (RegisterEngineChannel's result, FindEngineChannel's): the keys hook names its channel by it. */
+	/** @brief A registered engine channel. */
 	struct EngineChannelId
 	{
 		std::uint32_t index = ~0u;
@@ -89,21 +74,11 @@ namespace DCLF::Api
 	};
 
 	/**
-	 * @brief An engine event channel: a feature's own queue its engine hooks push into (an EventQueue of keys, Core/Runtime/EventQueue.h:
-	 * its capacity and its wake, WakeScenePass or none, are the feature's), which every scene pass drains into its batch and applies at
-	 * its point, handing the keys to the coordinator components' keys hooks (Api::CoordinatorComponent::Events, every pass that applies a
-	 * batch, the keys possibly none).
+	 * @brief A feature's own key queue. Its hooks push, and every scene pass drains it and hands the keys to the components' keys hooks.
 	 *
-	 * - name: the channel's (FindEngineChannel; the install's failures).
-	 * - kind, apply, wake: above.
-	 * - namesKeys: the keys a pass applies are objects whose writers' events carry no value of their own, which the mirror's parity counts
-	 *   named (a field its probe finds different on one has a hook).
-	 * - drain: the scene lane, the queue's one consumer (CollectEvents, once a pass): every key pushed before the call into a_sink, oldest
-	 *   first (EventQueue::Drain(a_sink)); returns how many. None for a SceneStack channel.
-	 * - push (optional): any thread, lock-free, after the store it reports: a_key into the channel's queue, for another feature's hooks
-	 *   (InstallContext::NeedEngineChannel, Extensions::PushChannelKey: Features/Actors' Actor::SetAlpha into the fade amounts). Whatever
-	 *   else the channel's own hooks do with the store (the mirror's value: Extensions::PushNodeUpdate) it does too. None: the channel
-	 *   takes no pushes but its own.
+	 * - namesKeys: the writers' events carry no value of their own, so the mirror parity counts these keys as named.
+	 * - drain: scene lane, the queue's only consumer. Moves every key pushed so far into a_sink, oldest first. None for SceneStack.
+	 * - push: optional, any thread, lock-free. Lets another feature's hooks push into this channel.
 	 */
 	struct EngineChannel
 	{
@@ -117,9 +92,8 @@ namespace DCLF::Api
 	};
 
 	/**
-	 * @brief A SceneStack channel's event as a pass applies it (CoordinatorComponent::Events::stacked), in stack order: its token, the
-	 * roots the event pinned (alive while the batch holds its pins) and the roots it only names (keys, never dereferenced), and its push
-	 * (steady clock ns, the render thread's frame then).
+	 * @brief A SceneStack event as a pass applies it. Pinned roots stay alive while the batch holds its pins.
+	 * Named roots are keys only and are never dereferenced.
 	 */
 	struct Stacked
 	{
@@ -130,15 +104,10 @@ namespace DCLF::Api
 	};
 
 	/**
-	 * @brief The show veto (InstallContext::RegisterShowVeto; one): the hidden-node source's stubs on the engine's vetoable show stores
-	 * test open (one dword compare) and, while it is not 0, call vetoes; a vetoed store returns unrun, without a hidden event. Core keeps
-	 * the cells the stubs load (open defaults to a zero word, vetoes to a function answering false), so the stubs' shape does not depend
-	 * on whether a veto is registered.
+	 * @brief Lets a feature skip engine show stores. The stubs test `open` and call `vetoes` only while it is non-zero.
+	 * A vetoed store does not run and raises no hidden event. Core supplies defaults, so the stubs look the same with or without a veto.
 	 *
-	 * - open: a word not 0 while anything may be vetoed (any thread; read in the stub).
-	 * - vetoes: any thread, lock-free: whether a_object's show is skipped.
-	 * - engineHid: any thread, after one of hideSites' engine stores hid a_object (a_siteOffset: the store's offset). Optional (parity).
-	 * - hideSites: the engine hide stores' offsets engineHid is told of (copied).
+	 * - engineHid: optional, any thread. Called after one of hideSites' engine stores hid an object.
 	 */
 	struct ShowVeto
 	{
@@ -148,11 +117,7 @@ namespace DCLF::Api
 		std::span<const std::uint32_t> hideSites;
 	};
 
-	/**
-	 * @brief A move writer of a feature's own (Extensions::ReserveMoveWriter): an engine writer whose hook pushes move events (Core's
-	 * MoveEvents, Core/Engine/Capture/SceneEvents.h) through Extensions::PushReservedMove, counted under its name in the report's move writers'
-	 * calls.
-	 */
+	/** @brief A feature's own engine writer whose hook pushes move events, counted under its name in the report. */
 	struct MoveWriterId
 	{
 		std::uint32_t index = ~0u;
@@ -161,9 +126,8 @@ namespace DCLF::Api
 	};
 
 	/**
-	 * @brief Whom a reserved writer's move event reaches: ScenePass, the scene pass's light path alone (MoveEvents); WithPlacements, also
-	 * FrameValues' placement producer (FrameValueMoves), as Core's own writers push; Placements, the producer alone (a key only its
-	 * index knows, such as a BSOrderedNode whose bound a leaf's forward sort reads).
+	 * @brief Who receives a reserved writer's move event. ScenePass is the scene pass only. WithPlacements adds FrameValues' placements.
+	 * Placements is the placements only, for keys only it knows, such as a BSOrderedNode.
 	 */
 	enum class MoveReach : std::uint8_t
 	{
@@ -173,23 +137,17 @@ namespace DCLF::Api
 	};
 }
 
-// Node capture contributions and the features' node updates (Core/Extensions/NodeCaptures.h).
+// Node capture contributions and node updates.
 
 #include <vector>
 
 namespace DCLF::Api
 {
 	/**
-	 * @brief A node capture contribution (InstallContext::RegisterNodeCapture): an engine node class (its RTTI exactly) whose OnVisible
-	 * visits an ordered list of its own in its children's place (Features/Decals: a BGSDecalNode's decals, last to first). The scene
-	 * capture records the list with the node's record (kMirroredKindCaptured; CoordinatorComponentContext::MirroredNodeOf's captured),
-	 * and again on each update of kNodeFieldCaptured the feature's own hooks push (Extensions::PushNodeUpdate). One contribution a class.
+	 * @brief An engine node class whose OnVisible visits its own ordered list instead of its children, such as a BGSDecalNode's decals.
+	 * The scene capture records that list with the node. One contribution per class.
 	 *
-	 * - name: the contribution's (the install's failures).
-	 * - rtti: the node class's RTTI, called once at registration.
-	 * - capture: the capturing thread (a hook's writer, a loader attaching, or the render thread), inside the engine-read window or under
-	 *   the engine call that holds the node: a_node's list into a_out (empty on the call), in its order. Per captured node of the class,
-	 *   never per frame.
+	 * - capture: runs in the engine-read window or under the engine call that holds the node. Once per captured node, never per frame.
 	 */
 	struct NodeCaptureContribution
 	{
@@ -198,11 +156,7 @@ namespace DCLF::Api
 		void (*capture)(const void* a_node, std::vector<const void*>& a_out) = nullptr;
 	};
 
-	/**
-	 * @brief The node record fields a feature's hook may push (Extensions::PushNodeUpdate's a_fields; the capture's NodeRecord fields as
-	 * they are, Core checks they match). Captured: a node capture contribution's list (its writers' edits). FadeAmount: a fade node's
-	 * fadeAmount (+0x100: Actor::SetAlpha's, through the fade amounts channel's push).
-	 */
+	/** @brief Node record fields a feature's hook may push. FadeAmount is the fade node's fadeAmount at +0x100. */
 	inline constexpr std::uint32_t kNodeFieldCaptured = 1u << 21;
 	inline constexpr std::uint32_t kNodeFieldFadeAmount = 1u << 20;
 }

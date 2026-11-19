@@ -9,8 +9,7 @@ namespace DCLF::Integrations::WaterEffects
 {
 	namespace
 	{
-		// The view Prepass binds at t65 every frame (the only PS binding there): the caustics texture loaded at setup, a static texture.
-		// Null without the feature, or without the texture (Prepass binds null): the captured view.
+		// The view Prepass binds at t65 every frame: a static caustics texture loaded at setup. Null without the feature or the texture.
 		void* CausticsView()
 		{
 			const auto& waterEffects = globals::features::waterEffects;

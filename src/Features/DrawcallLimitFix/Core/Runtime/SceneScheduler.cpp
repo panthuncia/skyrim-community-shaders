@@ -1,4 +1,4 @@
-// SceneScheduler: DCLF's executor, scopes, state graph and lane pumps; thread names and priorities. Created on first use, never destroyed.
+// SceneScheduler: DCLF's executor, scopes, state graph and lane pumps, and thread names and priorities. Created on first use, never destroyed.
 #include "Features/DrawcallLimitFix/Core/Runtime/SceneScheduler.h"
 
 #include "Features/DrawcallLimitFix/Core/Settings/Switches.h"
@@ -36,9 +36,8 @@ namespace DCLF
 
 	namespace
 	{
-		// A worker running an above-normal caller's ParallelFor chunk is raised to it for that chunk, so the engine's job threads do
-		// not preempt work the scene lane or coordinator waits on; one running a frame-critical job (the CPU pipeline's culls) is raised
-		// to the coordinator's priority for that job. CS_DCLF_ASYNC_PRIORITY=noboost leaves workers where they are (A/B).
+		// A worker running an above-normal caller's ParallelFor chunk is raised to its priority, so the engine's job threads cannot preempt it.
+		// A frame-critical job runs at the coordinator's priority. CS_DCLF_ASYNC_PRIORITY=noboost turns this off for A/B tests.
 		SceneExecutor::ThreadPriority WorkerBoost()
 		{
 			if (SwitchValue(Switch::AsyncPriority) == "noboost")
@@ -50,28 +49,26 @@ namespace DCLF
 
 	SceneExecutor& SceneScheduler::Executor()
 	{
-		// Never destroyed: joining threads in a DLL's static destruction (under the loader lock, after ExitProcess has ended
-		// them) is not something to rely on.
+		// Never destroyed, because joining threads in a DLL's static destruction, under the loader lock after ExitProcess ended them, is unreliable.
 		static auto* executor = new SceneExecutor(PreparationWorkers(), [](org::async::TaskClass a_class, unsigned a_index) {
-			// One of DCLF's threads, for the release guard (CS_DCLF_RELEASE_GUARD): the scene lane's, or the others'.
+			// Marks DCLF's threads for the release guard, CS_DCLF_RELEASE_GUARD.
 			ReleaseGuard::MarkThread(a_class.domain == SceneExecutor::Scene.domain ? 1 : 2);
 			if (a_class.domain == SceneExecutor::Scene.domain) {
 				SetThreadDescription(GetCurrentThread(), L"CS DCLF scene");
-				// The render thread waits for it only at Present; above the engine's job threads, as the coordinator.
+				// The render thread only waits for it at Present. It runs above the engine's job threads, like the coordinator.
 				if (SwitchValue(Switch::AsyncPriority) != "normal")
 					SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_ABOVE_NORMAL);
 				return;
 			}
 			if (a_class.domain == SceneExecutor::Coordinator.domain) {
 				SetThreadDescription(GetCurrentThread(), L"CS DCLF coordinator");
-				// The engine's job threads run at normal priority; the frame's jobs are joined by the render thread, so the
-				// coordinator goes above them unless asked not to.
+				// The engine's job threads run at normal priority, and the render thread joins the frame's jobs, so the coordinator goes above them unless asked not to.
 				if (SwitchValue(Switch::AsyncPriority) != "normal")
 					SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_ABOVE_NORMAL);
 				return;
 			}
 			if (a_class.domain == SceneExecutor::FrameCriticalThread.domain) {
-				// Waiting at the frame-critical priority: a frame-critical job starts while the engine's threads hold every core.
+				// Waiting at frame-critical priority, so a frame-critical job starts even while the engine's threads hold every core.
 				SetThreadDescription(GetCurrentThread(), (L"CS DCLF frame worker " + std::to_wstring(a_index)).c_str());
 				SetThreadPriority(GetCurrentThread(), SwitchValue(Switch::AsyncPriority) == "normal" ? THREAD_PRIORITY_NORMAL : THREAD_PRIORITY_ABOVE_NORMAL);
 				return;
@@ -95,7 +92,7 @@ namespace DCLF
 
 	Runtime::SceneGraph& SceneScheduler::Graph()
 	{
-		// Never destroyed, as the executor it runs on; the graph holds it without owning it.
+		// Never destroyed, like the executor it runs on. The graph holds it without owning it.
 		static auto* graph = new Runtime::SceneGraph(std::shared_ptr<org::async::GraphScheduler>(&Executor(), [](org::async::GraphScheduler*) {}));
 		return *graph;
 	}

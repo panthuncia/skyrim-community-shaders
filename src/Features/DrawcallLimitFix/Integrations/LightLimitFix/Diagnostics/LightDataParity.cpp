@@ -1,4 +1,4 @@
-// Light Limit Fix's StrictLightData parity (LightLimitFix.h's DrawLightDataParity), CaptureParity's. Render thread.
+// Light Limit Fix's StrictLightData parity, under the capture parity. Render thread.
 
 #include "Features/DrawcallLimitFix/Integrations/LightLimitFix/LightLimitFix.h"
 #include "Features/DrawcallLimitFix/Core/Scene/Model/Tables.h"
@@ -17,10 +17,7 @@ namespace DCLF::Integrations::LightLimitFix
 			return fmt::format("{}:'{}'", rtti && rtti->name ? rtti->name : "?", a_object->name.c_str() ? a_object->name.c_str() : "");
 		}
 
-		/**
-		 * @brief A room mismatch's detail: the live parent chain up to the native room node (LLF's GetParentRoomNode, as its SetupGeometry
-		 * read it), and the room node a_index names in LLF's map now, with whether it is on the chain.
-		 */
+		/** @brief A room mismatch's detail: the live parent chain up to LLF's room node, and whether the node DCLF's index names is on it. */
 		std::string RoomDetail(const RE::BSGeometry* a_geometry, std::int32_t a_index)
 		{
 			const auto& llf = globals::features::lightLimitFix;
@@ -49,7 +46,7 @@ namespace DCLF::Integrations::LightLimitFix
 	void DrawLightDataParity::Compare(const RE::BSGeometry* a_geometry, std::uint32_t a_objectIndex, const SceneTables& a_tables, const std::uint32_t (*a_drawn)[2],
 		bool a_moved, bool a_reassigned, NoteFn a_note, void* a_owner)
 	{
-		// LLF's StrictLightData as its SetupGeometry hook left it. The record's shadow mask is dead (DCLF's is the draw's): printed 0.
+		// LLF's StrictLightData as its SetupGeometry hook left it. The record's shadow mask is unused, since DCLF's is the draw's, so it prints 0.
 		if (globals::features::lightLimitFix.loaded) {
 			const auto& native = globals::features::lightLimitFix.strictLightDataTemp;
 			const std::int32_t expected = a_tables.ancestorValue[a_objectIndex].value;
@@ -64,8 +61,7 @@ namespace DCLF::Integrations::LightLimitFix
 					roomDetails.push_back(fmt::format("DCLF room {}, native {}: {}", expected, native.RoomIndex, RoomDetail(a_geometry, expected)));
 				}
 			}
-			// The shadow lights a Lighting draw applies at all (LightLimitFix.hlsli, IsLightIgnored: a shadow light whose bit is clear is
-			// skipped): the four mask channels.
+			// The shadow lights a Lighting draw applies at all. IsLightIgnored skips a shadow light whose bit is clear.
 			if (a_drawn) {
 				const std::uint32_t ours = (*a_drawn)[0] & 0xFu, theirs = native.ShadowBitMask & 0xFu;
 				++shadowChecks;

@@ -1,4 +1,4 @@
-// The registered commit hooks' calls (see the header).
+// The registered commit hooks' calls.
 
 #include "Features/DrawcallLimitFix/Core/Extensions/Commits.h"
 #include "Features/DrawcallLimitFix/Core/Extensions/Registry.h"

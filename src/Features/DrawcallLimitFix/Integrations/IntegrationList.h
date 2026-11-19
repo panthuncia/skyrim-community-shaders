@@ -1,6 +1,6 @@
 #pragma once
 
-// The CS features DCLF supports (Extensions::InstallFeatures, from the shell, after the features), in the order they install and run.
+// The CS features DCLF supports, in install order.
 
 #include "Features/DrawcallLimitFix/Api/Feature.h"
 
@@ -10,9 +10,9 @@
 
 namespace DCLF::Integrations
 {
-	/** @brief Every integration, in order (any thread; built on first call). */
+	/** @brief Any thread. Every integration, in order. */
 	std::span<const Api::Feature> List();
 
-	/** @brief Any thread (menu or render). One line per integration, "name: status" ("installed" when it has no status of its own). */
+	/** @brief Any thread. One "name: status" line per integration. */
 	std::vector<std::string> StatusLines();
 }

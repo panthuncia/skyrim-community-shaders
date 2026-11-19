@@ -1,4 +1,4 @@
-// Advanced Skin's t71/t74 parity (see the header). Render thread.
+// Advanced Skin's t71 and t74 parity. Render thread.
 
 #include "Features/DrawcallLimitFix/Integrations/AdvancedSkin/Diagnostics/TextureParity.h"
 #include "Features/DrawcallLimitFix/Core/Extensions/Materials.h"
@@ -26,7 +26,7 @@ namespace DCLF::Integrations::AdvancedSkin
 		// t71 and t74, bound by State::Draw from the SetupMaterial hook's pending binding.
 		if (!(object.flags & kObjectNoBindings) && object.materialIndex < a_tables.materials.size()) {
 			const auto& features = a_tables.materials[object.materialIndex].featureTextures;
-			// The contributor's slots (Core's assignment of its registers; the integration always registers them).
+			// The contributor's slots, as Core assigned them.
 			std::array<ID3D11ShaderResourceView*, kTextures> expected{};
 			for (std::size_t f = 0; f < kTextures; ++f) {
 				const int slot = Extensions::FeatureTextureSlotOf(kMaterialTextureRegisters[f]);

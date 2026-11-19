@@ -1,4 +1,4 @@
-// The depth pyramid's entry, setup and state (see the header).
+// The depth pyramid's entry, setup and state.
 
 #include "Features/DrawcallLimitFix/Core/Extensions/DepthPyramid.h"
 #include "Features/DrawcallLimitFix/Core/Render/Internal.h"
@@ -8,7 +8,7 @@ namespace DCLF::Extensions
 {
 	namespace
 	{
-		// Written only by ResolveDepthPyramid (InstallFeatures, before DCLF's threads exist), read-only after.
+		// Written only during InstallFeatures, before DCLF's threads exist. Read-only after.
 		DepthPyramidEntry resolved;
 		bool registered = false;
 	}

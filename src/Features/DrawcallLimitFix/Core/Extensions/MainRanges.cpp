@@ -1,4 +1,4 @@
-// The main ranges' table (see the header).
+// The main ranges' table.
 
 #include "Features/DrawcallLimitFix/Core/Extensions/MainRanges.h"
 
@@ -8,7 +8,7 @@ namespace DCLF::Extensions
 {
 	namespace
 	{
-		// Written only by ResolveMainRanges (InstallFeatures, before DCLF's threads exist), read-only after.
+		// Written only during InstallFeatures, before DCLF's threads exist. Read-only after.
 		MainRangeTable& Table()
 		{
 			static MainRangeTable table;

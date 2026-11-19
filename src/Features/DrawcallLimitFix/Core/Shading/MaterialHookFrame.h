@@ -12,35 +12,32 @@ namespace RE
 
 namespace DCLF::MaterialPort
 {
-	/** @brief Render target views HookFrame keeps (RE::RENDER_TARGETS::kTOTAL fits: checked in MaterialHookFrame.cpp). */
+	/** @brief Render target views HookFrame keeps. RE::RENDER_TARGETS::kTOTAL must fit, which the .cpp checks. */
 	inline constexpr std::uint32_t kHookRenderTargets = 128;
 
 	/**
-	 * @brief The per-frame engine sources Community Shaders' SetupMaterial hooks read (the material contributors, through
-	 * MaterialContributorFrame::hook and MaterialContributorEvaluation::hook) and Core's FrameCharacterLightView, sampled by the render
-	 * thread at the frame's start (SampleHookFrame, MaterialHookFrame.cpp). A contributor's own frame state is its sample's
-	 * (Extensions::MaterialContributorSamples), not this.
-	 *
-	 * Core/Extensions/Materials.h forward-declares it by this name: a struct, never an alias.
+	 * @brief The per-frame engine sources Community Shaders' SetupMaterial hooks read, sampled on the render thread at the frame's start.
+	 * A contributor's own frame state is in its sample, not here.
+	 * Core/Extensions/Materials.h forward-declares this by name, so it must stay a struct, never an alias.
 	 */
 	struct HookFrame
 	{
-		// SetupTechniqueDescriptor's bytes (FrameGlobals): the technique +0x94 holds, which TruePBR's hook branches on.
+		// SetupTechniqueDescriptor's bytes, which give the +0x94 technique TruePBR's hook branches on.
 		std::uint8_t techniqueByte12 = 0;
 		std::uint8_t techniqueByte7 = 0;
 
-		// TruePBR's TexcoordOffset: BSShaderManager::State::textureTransformCurrentBuffer (unmasked, as the hook indexes with it).
+		// TruePBR's TexcoordOffset index, textureTransformCurrentBuffer, unmasked as the hook uses it.
 		std::uint32_t textureTransformBuffer = 0;
 
-		// TruePBR's CharacterLight: the character light image space texture's render target (-1: none) and smState's params.
+		// TruePBR's character light: the image space texture's render target, -1 for none, and smState's params.
 		std::int32_t characterLightTarget = -1;
 		bool characterLightEnabled = false;
 		std::array<float, 4> characterLightParams{};
 
-		// Renderer render target views (TruePBR's diffuseRenderTargetSourceIndex and the character light's t11).
+		// Renderer render target views.
 		std::array<ID3D11ShaderResourceView*, kHookRenderTargets> renderTargetViews{};
 
-		// BSGraphics::State's default textures: the NiSourceTexture pointers (compared with material fields) and their views.
+		// BSGraphics::State's default textures: their NiSourceTexture pointers, compared with material fields, and their views.
 		const void* defaultBlack = nullptr;
 		const void* defaultWhite = nullptr;
 		const void* defaultNormalMap = nullptr;
@@ -49,16 +46,16 @@ namespace DCLF::MaterialPort
 		ID3D11ShaderResourceView* defaultNormalMapView = nullptr;
 	};
 
-	/** @brief Render thread, the frame's start. */
+	/** @brief Render thread, at the frame's start. */
 	HookFrame SampleHookFrame();
 
-	/** @brief Render target a_index's view in a_frame, or null (TruePBR's diffuseRenderTargetSourceIndex and character light). */
+	/** @brief Render target a_index's view in a_frame, or null. */
 	inline ID3D11ShaderResourceView* RenderTargetView(const HookFrame& a_frame, std::int32_t a_index)
 	{
-		// The engine indexes renderTargets unchecked; an index past the array has no defined view.
+		// The engine indexes renderTargets unchecked. An index past the array has no defined view.
 		return a_index >= 0 && static_cast<std::uint32_t>(a_index) < kHookRenderTargets ? a_frame.renderTargetViews[a_index] : nullptr;
 	}
 
-	/** @brief A texture's view as the hooks resolve it (NiSourceTexture -> rendererTexture -> resourceView), or null. */
+	/** @brief A texture's view as the hooks resolve it, or null. */
 	ID3D11ShaderResourceView* ViewOfTexture(const RE::NiSourceTexture* a_texture);
 }

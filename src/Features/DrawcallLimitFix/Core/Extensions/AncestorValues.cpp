@@ -1,4 +1,4 @@
-// The ancestor value's entry (see the header).
+// The ancestor value's entry.
 
 #include "Features/DrawcallLimitFix/Core/Extensions/AncestorValues.h"
 #include "Features/DrawcallLimitFix/Core/Extensions/ClassifyInputs.h"
@@ -7,7 +7,7 @@ namespace DCLF::Extensions
 {
 	namespace
 	{
-		// Written only by ResolveAncestorValue (InstallFeatures, before DCLF's threads exist), read-only after.
+		// Written only during InstallFeatures, before DCLF's threads exist. Read-only after.
 		AncestorValueEntry resolved;
 	}
 

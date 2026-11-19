@@ -1,8 +1,7 @@
 #pragma once
 
-// The scene resources contract (Api::InstallContext::RegisterSceneResources): a feature's GPU state held with the scene's tables
-// (Draws::SceneBuffers) - its programs and buffers, the versioned ones registered with the scene's set (SceneBufferSet), which grows
-// them to what the feature requires of each revision and names their versions.
+// A feature's GPU state held with the scene's tables: its programs and buffers.
+// Versioned buffers join the scene's buffer set, which grows them to each revision's needs.
 
 #include <cstdint>
 #include <memory>
@@ -11,7 +10,7 @@
 
 namespace DCLF::Api
 {
-	// Defined by Core (Core/Extensions/SceneResources.h), which the features inside DCLF include for them.
+	// Defined in Core/Extensions/SceneResources.h.
 	class SceneResourcesSetup;
 	class SceneResourcesGraph;
 	class SceneResourcesRequirements;
@@ -19,7 +18,7 @@ namespace DCLF::Api
 	class SceneResourcesLatch;
 	class SceneResourcesSealed;
 
-	/** @brief Registered scene resources (RegisterSceneResources' result): Extensions::SceneResourcesOf finds their state by it. */
+	/** @brief Registered scene resources. Extensions::SceneResourcesOf finds their state by this id. */
 	struct SceneResourcesId
 	{
 		std::uint32_t index = ~0u;
@@ -27,35 +26,17 @@ namespace DCLF::Api
 	};
 
 	/**
-	 * @brief A feature's scene resources.
+	 * @brief A feature's scene resources. Callbacks run in registration order, with the vertex stream's resources first.
 	 *
-	 * - setup: render thread, once, where the scene's tables are made (the first frame with a device; IndirectDraws' EnsureSceneBuffers),
-	 *   in registration order (the vertex stream's first: Api/VertexStreams.h) and before the passes' setups (Api::PassDef::setup): makes the feature's programs and buffers (a
-	 *   versioned one through SceneResourcesSetup::MakeVersioned, which registers it with the scene's set in this order). Its result is
-	 *   the state, held with the scene's tables until they go; null: none, and the other callbacks are not called.
-	 * - registerGraph (optional): render thread, when a graph extension registers the scene's buffers (RegisterSceneBuffers), in the same
-	 *   order: the buffers its passes declare, each under its name.
-	 * - require (optional): the snapshot builder, each revision's requirements (RequireSceneTables), in the same order: the
-	 *   units its versioned buffers must hold for the publication's tables (and the words postInputs posted for the revision:
-	 *   SceneResourcesRequirements::inputs). A set is sealed only once they hold them. SceneResourcesRequirements::objectRows exposes the already witnessed object-slot count. Of the tables it reads only the table families
-	 *   (a family's rows, Api::TableFamily::rows, where it counts them; anything of one that does not, which its stamp follows) and the
-	 *   vertex stream's rows' ranges (SceneTables::streamRows: object, first, count): a make whose witnesses of those, of the posted
-	 *   words and of the rest of the requirement pass stood keeps the last revision without calling it (Impl::MakeRevision). Anything
-	 *   else it would read goes through postInputs.
-	 * - fit (optional): the snapshot builder or the render thread, wherever a SceneFit is made from the versions a set names: what its
-	 *   buffers hold of the slots the objects read them by. An object past them waits (ObjectFits).
-	 * - postInputs (optional, with inputWords): render thread, wherever Core posts the revision's inputs (PostRevisionInputs): the
-	 *   feature's inputWords words of them (what its requirements grow by: a mirror's slots), into a_words (zeroed). A change of them
-	 *   is a new revision's inputs (RevisionInputs' equality); require reads them as posted. Any state or none: it reads its own.
-	 * - latched (optional): render thread, where the main view's latched targets are listed (MainLatchedTargets: the graph's build) and
-	 *   the depth shape's latch is laid out (MainLatchedLayout): the buffers the depth commit latches (CommitContext::latched), each with
-	 *   its bytes from offset 0, after the frame buffers' and before the draw count's.
-	 * - sealed (optional): the snapshot builder, once a revision's set is sealed (Impl::MakeRevision), before any shape of it, in the
-	 *   same order: what the feature keeps by the versions the set names (Features/Fades: its event list's host staging for the capacity
-	 *   the set names, HostEventRing::AddSet).
-	 *
-	 * The state is the render thread's (its commits: Api/Commits.h), but for what registerGraph, require, fit and sealed read: the handles
-	 * setup made, never replaced.
+	 * - setup: render thread, once, before the passes' setups. A null result means none, and no other callback runs.
+	 * - require: snapshot builder, per revision. A set seals only once the buffers hold what this requires.
+	 *   It may read only table families, the vertex stream rows and the posted input words, because a revision whose witnesses
+	 *   of those did not change is kept without calling it. Anything else must go through postInputs.
+	 * - fit: what the buffers hold, so an object past them waits.
+	 * - postInputs: render thread. Writes inputWords zeroed words. A change makes a new revision.
+	 * - latched: buffers the depth commit latches, each from offset 0.
+	 * - sealed: snapshot builder, once a revision's set seals, before any of its shapes.
+	 * The state belongs to the render thread. Other threads may read only the handles setup made, which are never replaced.
 	 */
 	struct SceneResources
 	{

@@ -1,5 +1,4 @@
-// TruePBR: its material contributor (TruePBRMaterial.cpp), its glints property bits, its glints noise (a frame texture) and its Lighting
-// pass rules (GetRenderPasses, GetPixelTechnique and SetupGeometry hooks). The capture and derive callbacks are pure.
+// TruePBR: its material contributor, glints property bits, glints noise frame texture and Lighting pass rules. Capture and derive callbacks are pure.
 
 #include "Features/DrawcallLimitFix/Integrations/TruePBR/TruePBRIntegration.h"
 #include "Features/DrawcallLimitFix/Core/Extensions/IntegrationStatus.h"
@@ -24,12 +23,10 @@ namespace DCLF::Integrations::TruePBR
 		constexpr std::uint64_t Bit(Flag a_flag) { return static_cast<std::uint64_t>(a_flag); }
 		constexpr std::uint32_t Bit(LightingFlag a_flag) { return static_cast<std::uint32_t>(a_flag); }
 
-		// Community Shaders' pixel split (TruePBR.cpp, BSLightingShader_GetPixelTechnique) keeps bits 3-5 (TruePbr/Deferred); only the
-		// shadow light count (bits 6-8) is dropped.
+		// CS's pixel split keeps bits 3-5, TruePbr and Deferred. Only the shadow light count in bits 6-8 is dropped.
 		constexpr std::uint32_t kPixelKeep = 0x38u;
 
-		// The property capture, with a material: LightingDescriptors' PBR test (Community Shaders' GetRenderPasses: TruePBR.cpp), then the
-		// PBR material's glint.
+		// The property capture with a material: the PBR test as CS's GetRenderPasses does it, then the PBR material's glint.
 		std::uint8_t CaptureGlints(const RE::BSShaderProperty& a_property)
 		{
 			const auto* material = static_cast<const RE::BSLightingShaderMaterialBase*>(a_property.material);
@@ -40,7 +37,7 @@ namespace DCLF::Integrations::TruePBR
 			return pbr && static_cast<const BSLightingShaderMaterialPBR*>(a_property.material)->glintParameters.enabled ? kGlints : std::uint8_t(0);
 		}
 
-		// Community Shaders' GetRenderPasses hook (TruePBR.cpp): PBR swaps Specular for TruePbr; glint adds AnisoLighting.
+		// CS's GetRenderPasses hook: PBR swaps Specular for TruePbr, and glint adds AnisoLighting.
 		std::uint32_t DerivePass(std::uint32_t a_pass, const Api::LightingJoinView& a_view)
 		{
 			const auto feature = static_cast<Feature>(a_view.MaterialFeature());
@@ -56,9 +53,8 @@ namespace DCLF::Integrations::TruePBR
 			return d;
 		}
 
-		// The glints noise TruePBR's Prepass binds at t20, made once (the first Prepass on D3D11, the first EarlyPrepass anchor on the ORG
-		// path). Before it exists, the captured view. On the ORG path (CS_ORG_GLINTS) it is the published texture's export, so the commits
-		// read the published texture, ordered after its fill.
+		// The glints noise TruePBR's Prepass binds at t20, made once. Before it exists, the captured view.
+		// On the ORG path it is the published texture's export, so commits read it ordered after its fill.
 		void* GlintsNoiseView()
 		{
 			const auto& truePBR = globals::features::truePBR;
@@ -67,8 +63,7 @@ namespace DCLF::Integrations::TruePBR
 
 		void Install(Api::InstallContext& a_context)
 		{
-			// Its SetupMaterial replacement around vanilla: its classes, its landscape layers (t80-t91) and the TruePbr pass bit its
-			// takesPass branches on (the material signature's).
+			// Its SetupMaterial replacement around vanilla: its classes, its landscape layers at t80-t91, and the TruePbr pass bit takesPass branches on.
 			a_context.RegisterMaterialContributor({ .name = "TruePBR",
 				.stage = Api::MaterialStage::Replace,
 				.order = 0,
@@ -81,8 +76,8 @@ namespace DCLF::Integrations::TruePBR
 			a_context.RegisterPropertyBits({ .name = "glints", .bits = kGlints, .capture = &CaptureGlints });
 			a_context.RegisterFrameTexture({ .name = "true pbr glints noise", .textureRegister = kGlintsNoiseRegister, .view = &GlintsNoiseView,
 				.capturedWhenNull = true, .graphResources = { ORGGlintsNoise::kNoiseId } });
-			// Its hooks' pass changes, whether or not it is loaded (as their ports always applied): GetRenderPasses' swap (per derive),
-			// GetPixelTechnique's split, and SetupGeometry's raw technique (a TruePbr pass gains AmbientSpecular and flips AnisoLighting).
+			// Its hooks' pass changes apply whether or not it is loaded, as their ports always did:
+			// the GetRenderPasses swap, the GetPixelTechnique split, and SetupGeometry's raw technique.
 			a_context.RegisterLightingPassRules({ .pixelKeep = kPixelKeep,
 				.rawWhen = Bit(LightingFlag::TruePbr),
 				.rawSet = Bit(LightingFlag::AmbientSpecular),

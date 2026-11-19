@@ -1,4 +1,4 @@
-// MaterialSources.h's rules: the frame-sourced float positions, signatures and the copy / apply helpers.
+// MaterialSources.h's rules: frame-sourced float positions, signatures and the copy and apply helpers.
 
 #include "Features/DrawcallLimitFix/Core/Shading/MaterialSources.h"
 #include "Features/DrawcallLimitFix/Core/Engine/EngineAccess.h"
@@ -31,20 +31,17 @@ namespace DCLF::MaterialSources
 {
 	namespace
 	{
-		// Pass descriptor flags (ShaderCache.h LightingShaderFlags) that decide which frame-sourced groups
-		// SetupMaterial writes (with the material contributors' own: Extensions::MaterialSignatureBits, TruePBR's TruePbr).
+		// Pass descriptor flags that decide which frame-sourced groups SetupMaterial writes, plus the material contributors' own.
 		constexpr std::uint32_t kAmbientSpecular = 1u << 17;
 		constexpr std::uint32_t kSnow = 1u << 21;
 		constexpr std::uint32_t kCharacterLight = 1u << 22;
 
-		// PS PerMaterial variables whose values come from the shader object or engine globals
-		// (BSLightingShader::SetupMaterial, AE 1414dc310), with the components that do. Not IBLParams (this+0xcc, then
-		// this+0xd0.. or this+0xe0.. by this+0xf0): no Lighting stage reads it, and its colour drifts with the time of day
-		// almost every frame, which would re-version every record of every signature.
+		// PS PerMaterial variables whose values come from the shader object or engine globals, with the components that do.
+		// IBLParams is left out: no Lighting stage reads it, and its colour drifts almost every frame, which would re-version every record.
 		struct FrameVariable
 		{
 			std::uint32_t variable;
-			std::uint32_t components;  // bit c: component c
+			std::uint32_t components;  // bit c is component c
 		};
 		constexpr std::array<FrameVariable, 5> kFrameVariables{ {
 			{ 6, 0xF },   // AmbientSpecularTintAndFresnelPower (AmbientSpecular): 0x14203315c..
@@ -75,7 +72,7 @@ namespace DCLF::MaterialSources
 			return out;
 		}
 
-		// A port's record's TexcoordOffset (its rules' frame VS variable: BSEffectShader's VS variable 9).
+		// A port record's TexcoordOffset, its rules' frame VS variable.
 		const std::vector<std::uint32_t>& PortVSPositions(std::uint8_t a_kind)
 		{
 			return Extensions::MaterialSpaceOf(a_kind).frameVSFloats;
@@ -108,9 +105,8 @@ namespace DCLF::MaterialSources
 	void CopyFrameComponents(const MaterialRecord& a_from, MaterialRecord& a_to, std::uint32_t a_passDescriptor)
 	{
 		if (a_to.kind != kMaterialKindLighting || a_from.kind != kMaterialKindLighting) {
-			// A port's record's frame parts are TexcoordOffset (the transform watch's) and, while a feature patches them, its declared frame
-			// variables (Api::MaterialFrameVariable: the Effect port's FalloffData and BaseColor; the frame values write their rows); its pass
-			// descriptor's bits are not Lighting's.
+			// A port record's frame parts are TexcoordOffset and, while a feature patches them, its declared frame variables.
+			// Its pass descriptor bits are not Lighting's.
 			if (a_to.kind == a_from.kind) {
 				const auto copy = [](const std::vector<std::uint32_t>& a_positions, const ConstantBlock& a_source, ConstantBlock& a_target) {
 					for (const auto position : a_positions)
@@ -132,8 +128,8 @@ namespace DCLF::MaterialSources
 		for (const auto position : FrameVSFloats())
 			if (a_to.vs.Written(position) && a_from.vs.Written(position))
 				a_to.vs.floats[position] = a_from.vs.floats[position];
-		// Whether t11 is written at all is the frame's too: SetupMaterial binds it only while the character light has a
-		// render target (its index, 0x142033db0, is -1 while a cell loads).
+		// Whether t11 is written at all is the frame's too. SetupMaterial binds it only while the character light has a render target,
+		// whose index at 0x142033db0 is -1 while a cell loads.
 		if (a_passDescriptor & kCharacterLight) {
 			a_to.textures[kCharacterLightSlot] = a_from.textures[kCharacterLightSlot];
 			a_to.addressModes[kCharacterLightSlot] = a_from.addressModes[kCharacterLightSlot];
@@ -144,7 +140,7 @@ namespace DCLF::MaterialSources
 
 	bool ApplyFrameComponents(const MaterialRecord& a_live, MaterialRecord& a_record, std::uint32_t a_passDescriptor, bool* a_floatsChanged)
 	{
-		// A port's record without signature components (the Effect port's) has none to apply (NoteMaterialRecord lists none).
+		// A port record without signature components has nothing to apply.
 		if (!Extensions::PortRules(a_live.kind).signatureComponents || !Extensions::PortRules(a_record.kind).signatureComponents)
 			return false;
 		for (const auto position : FramePSFloats())
@@ -155,8 +151,7 @@ namespace DCLF::MaterialSources
 			}
 		if (!(a_passDescriptor & kCharacterLight) || !((a_live.textureWritten >> kCharacterLightSlot) & 1))
 			return false;
-		// The view is the frame's (CharacterLightView, the frame record's kCharacterLightRegister): the record holds none, so the
-		// render target alternating every frame changes no record.
+		// The view is the frame's, and the record holds none, so the render target alternating every frame changes no record.
 		const bool changed = a_record.textures[kCharacterLightSlot] != nullptr || a_record.addressModes[kCharacterLightSlot] != a_live.addressModes[kCharacterLightSlot] ||
 		                     a_record.filterModes[kCharacterLightSlot] != a_live.filterModes[kCharacterLightSlot] ||
 		                     !((a_record.textureWritten >> kCharacterLightSlot) & 1);
@@ -194,8 +189,7 @@ namespace DCLF::MaterialSources
 
 	ID3D11ShaderResourceView* FrameCharacterLightView(const MaterialPort::MaterialFrame& a_frame)
 	{
-		// What SetupMaterial binds at t11 (MaterialPortVanilla: the render target at 0x142033db0 while not negative; TruePBR's hook:
-		// the character light image space texture's), from the frame's sample: no engine read.
+		// What SetupMaterial binds at t11, from the frame's sample with no engine read: vanilla's render target, or TruePBR's texture.
 		const auto& vanilla = a_frame.vanilla;
 		if (vanilla.characterLightTarget >= 0 && static_cast<std::uint32_t>(vanilla.characterLightTarget) < MaterialPort::VanillaRenderTargets())
 			if (auto* view = vanilla.renderTargetViews[static_cast<std::size_t>(vanilla.characterLightTarget)])

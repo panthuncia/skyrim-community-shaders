@@ -1,4 +1,4 @@
-// The families a SceneTables holds (see the header): made, copied, cleared, recycled and published by their registrations.
+// The table families a SceneTables holds: made, copied, cleared, recycled and published through their registrations.
 
 #include "Features/DrawcallLimitFix/Core/Extensions/TableFamilies.h"
 #include "Features/DrawcallLimitFix/Core/Extensions/Registry.h"
@@ -10,14 +10,14 @@ namespace DCLF::Extensions
 {
 	namespace
 	{
-		// By family: the content epoch its commit hook last reported sent (TableFamilySent; render thread -> scene lane, latest wins).
+		// Per family, the content epoch its commit hook last reported sent. Render thread to scene lane, latest wins.
 		constexpr std::uint64_t kNoneSent = ~0ull;
 		struct SentSlot
 		{
 			std::atomic<std::uint64_t> contentEpoch{ kNoneSent };
 		};
 		std::array<SentSlot, kTableFamilySlots> sentPosted;
-		// By family: the publications that replayed its marked rows since the report last took them (scene lane -> the report).
+		// Per family, publications that replayed its marked rows since the report last took them.
 		std::array<std::atomic<std::uint64_t>, kTableFamilySlots> replays{};
 	}
 
@@ -31,7 +31,7 @@ namespace DCLF::Extensions
 		const auto registered = RegisteredTableFamilies();
 		if (a_id.index >= registered.size() || !registered[a_id.index].journaled)
 			return;
-		// No wake: the frame's next pass takes it.
+		// No wake. The frame's next pass takes it.
 		sentPosted[a_id.index].contentEpoch.store(a_contentEpoch, std::memory_order_release);
 	}
 
@@ -53,7 +53,7 @@ namespace DCLF::Extensions
 			const std::uint64_t contentEpoch = sentPosted[f].contentEpoch.exchange(kNoneSent, std::memory_order_acq_rel);
 			if (contentEpoch == kNoneSent)
 				continue;
-			// The live tables hold every family from their first write on (Mutable); none held: nothing was sent from them.
+			// The live tables hold every family from their first write on. If none is held, nothing was sent from them.
 			if (f < entries.size())
 				entries[f].journal.BeginBuild(contentEpoch);
 		}
@@ -104,7 +104,7 @@ namespace DCLF::Extensions
 		auto& to = entries[a_family];
 		to.stamp = a_from.stamp;
 		to.written = a_from.written;
-		to.markedRows = a_from.markedRows;  // the chunks shared
+		to.markedRows = a_from.markedRows;  // shares the chunks
 		to.objectRow = a_from.objectRow;
 		to.rowTag = a_from.rowTag;
 		to.rowsEnd = a_from.rowsEnd;
@@ -135,7 +135,7 @@ namespace DCLF::Extensions
 			family.objectRow.clear();
 			family.rowTag.clear();
 			registered[f].clear(family.columns.get());
-			// Every holder is sent everything (its content epoch counts on).
+			// Every holder is sent everything, so its content epoch counts on.
 			if (family.journaled)
 				family.journal.Resync();
 		}
@@ -190,16 +190,15 @@ namespace DCLF::Extensions
 			if (a_replayable && StampOf(family) == a_from.StampOf(family)) {
 				++a_kept[f];
 				kept |= 1u << f;
-				// The journal is copied whatever the stamp: a sent epoch trims it without a write.
+				// Copy the journal whatever the stamp, because a sent epoch trims it without a write.
 				if (f < entries.size() && f < a_from.entries.size() && a_from.entries[f].journaled)
 					entries[f].journal = a_from.entries[f].journal;
 				continue;
 			}
-			// The live tables hold every family from their first write on, and their stamps only move: one they do not hold yet is one
-			// neither side wrote.
+			// The live tables hold every family from their first write on, and stamps only move. A family not yet held was written by neither side.
 			if (f >= a_from.entries.size())
 				continue;
-			// Moved by marks alone: the rows they name (a few a publication: the fade roots' seeds, owned bits and inputs), not the family.
+			// Moved only by marks, so replay the few marked rows instead of copying the family.
 			if (a_replayable && ReplayMarked(f, a_from.entries[f])) {
 				replays[f].fetch_add(1, std::memory_order_relaxed);
 				kept |= 1u << f;
@@ -216,8 +215,7 @@ namespace DCLF::Extensions
 		if (a_family >= registered.size() || a_family >= entries.size() || !registered[a_family].assignRow)
 			return false;
 		auto& to = entries[a_family];
-		// Nothing written since this copy but marked rows (its written stands: the references, the tags' count and the feature's other
-		// columns are a_from's), every mark since still in a_from's log (one trimmed past this copy's end: copied whole).
+		// Replay only when nothing but marked rows was written since this copy, and every mark since is still in a_from's log.
 		if (to.written != a_from.written || !to.columns || !a_from.columns || to.markedRows.base > a_from.markedRows.base ||
 			!a_from.markedRows.Readable(to.markedRows.End()))
 			return false;
@@ -229,7 +227,7 @@ namespace DCLF::Extensions
 		}
 		to.stamp = a_from.stamp;
 		to.markedRows = a_from.markedRows;
-		// The journal with it, as for a kept family.
+		// Copy the journal too, as for a kept family.
 		if (a_from.journaled)
 			to.journal = a_from.journal;
 		return true;
@@ -241,7 +239,7 @@ namespace DCLF::Extensions
 		const auto* left = a_family < entries.size() ? &entries[a_family] : nullptr;
 		const auto* right = a_family < a_other.entries.size() ? &a_other.entries[a_family] : nullptr;
 		const bool compared = a_family < registered.size() && registered[a_family].same;
-		// A family one side does not hold reads as empty (a tables made before the first write, kept since).
+		// A family one side does not hold reads as empty.
 		if (!left || !right) {
 			const auto* held = left ? left : right;
 			if (!held)
