@@ -1197,6 +1197,15 @@ the ORG Physical Sky port, not by a parity check.
 -   It may be intended: only the cubemap path may need that view, with the aerial perspective covered elsewhere. Not confirmed.
 -   The ORG port keeps upstream's behaviour: its aerial perspective reads depth only when Dynamic Cubemaps is loaded.
 
+**Physical Lens and Camera FX: generated frames do not follow lens effects.** Accepted, found while planning native frame
+generation, not by a parity check.
+-   Where: the hudless image frame generation reads holds Physical Lens's image mapping (distortion, chromatic split), ghosts and
+    starburst, and Camera FX's distortion and grain. The engine's motion vectors describe the undistorted scene, and ghosts move
+    against their light sources, not with the geometry. Generated frames therefore misplace these effects. Guest has the same
+    mismatch today.
+-   Decided (2026-11-19): accept it for the first version (`native-frame-generation-plan.md`, decision 8). If distortion shows,
+    the inputs pass can warp the motion vectors by the lens's image mapping.
+
 ### In the engine
 
 | Bug | DCLF's rule |
