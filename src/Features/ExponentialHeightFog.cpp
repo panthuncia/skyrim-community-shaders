@@ -277,11 +277,6 @@ void ExponentialHeightFog::ClearShaderCache()
 	}
 }
 
-void ExponentialHeightFog::CaptureDirectionalShadowMap(ID3D11ShaderResourceView* a_shadowMap)
-{
-	directionalShadowMap.copy_from(a_shadowMap);
-}
-
 ExponentialHeightFog::GridSizes ExponentialHeightFog::ComputeGridSizes() const
 {
 	const auto& quality = globals::features::viewAtmosphere.settings;

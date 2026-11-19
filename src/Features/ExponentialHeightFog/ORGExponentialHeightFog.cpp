@@ -942,8 +942,10 @@ bool ORGExponentialHeightFog::Prepass()
 
 	LatchData data{};
 	const bool hasShadowLight = globals::deferred && globals::deferred->GetDirectionalShadowLightData(data.directionalShadow);
-	if (fog.directionalShadowMap && hasShadowLight) {
-		shape.inputs[kDirectionalShadowMap] = ImportDepthView(fog.directionalShadowMap.get(), "cs.exp-height-fog.directional-shadow-map");
+	// Null unless this frame drew the shadow mask, as the D3D11 path reads it.
+	auto* directionalShadowMap = globals::deferred ? globals::deferred->GetDirectionalShadowMap() : nullptr;
+	if (directionalShadowMap && hasShadowLight) {
+		shape.inputs[kDirectionalShadowMap] = ImportDepthView(directionalShadowMap, "cs.exp-height-fog.directional-shadow-map");
 		if (!shape.inputs[kDirectionalShadowMap])
 			return fallback("the directional shadow map cannot be imported");
 		inputs.directionalShadow = true;
