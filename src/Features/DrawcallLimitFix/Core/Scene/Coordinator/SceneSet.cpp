@@ -1,5 +1,5 @@
-// The DCLF set (SceneSet.h; dclf-architecture.md, "The DCLF set"): who draws an object, decided by the commit of each scene pass.
-// Also the pass itself (RunSceneWork), its publication and the lookups and table snapshots it carries. Scene lane.
+// The DCLF set: who draws an object, decided by each scene pass's commit. Also the pass itself, its publication, and the lookups
+// and table snapshots it carries. Scene lane.
 
 #include "Internal.h"
 #include "Features/DrawcallLimitFix/Diagnostics/Zones.h"
@@ -23,8 +23,7 @@ namespace DCLF::Scene
 {
 	std::uint32_t Coordinator::SetCapability()
 	{
-		// Main always; shadow/occlusion once set up (objects then wait on PhaseReady); each view's phase once it is drawable, in slot order
-		// (the reflection's, the first person's). Under the commit's toggles (the pass's: ToggleSnapshotScope).
+		// Main always. Shadow and occlusion once set up. Each view's phase once it is drawable.
 		const auto toggles = ActiveToggles();
 		std::uint32_t phases = kSetMain | (toggles.shadows ? IndirectDraws::Get().ShadowCapability() : 0u);
 		const auto& views = Extensions::Views();
@@ -39,9 +38,8 @@ namespace DCLF::Scene
 		const auto flags = tables.objects[a_slot].flags;
 		if (flags & kObjectFree)
 			return 0;
-		// A CategoryRoot view's slot (a first-person one) takes part in its view alone (the engine draws the skeleton in no world view;
-		// the sun's casters run with both roots hidden): opaque, alpha-tested or forward (blended Lighting, Effect meshes, particles).
-		// Decals, refraction and shadow-only objects stay the engine's (an effect decal is forward there, ViewDecalForward).
+		// A first-person slot takes part in its view alone, since the engine draws the skeleton in no world view. Decals, refraction and
+		// shadow-only objects stay the engine's there.
 		if (const auto view = ViewRootOfSlot(a_slot); view != Api::EngineView::Count) {
 			const auto p = tables.objects[a_slot].pipelineIndex;
 			const bool forward = (flags & kObjectForward) && p < tables.pipelines.size() && RasterForward(tables.pipelines[p].rasterFlags);
@@ -53,13 +51,11 @@ namespace DCLF::Scene
 		std::uint32_t phases = 0;
 		if (!(flags & kObjectShadowOnly))
 			phases |= kSetMain;
-		// The LodTechniques views draw the LOD techniques (the reflection's faces: dclf-architecture.md, "Water reflections").
 		if (const auto p = tables.objects[a_slot].pipelineIndex; !(flags & kObjectShadowOnly) && p < tables.pipelines.size() &&
 			LodLightingTechnique(tables.pipelines[p].passDescriptor))
 			phases |= Extensions::Views().lodPhases;
 		if (!(flags & kObjectNoShadow))
 			phases |= kSetCaster | kSetCasterPoint;
-		// Each occlusion map's phase (its entry's: 0 for a map none takes) for a slot with its technique.
 		const auto& maps = Extensions::ShadowViewsSet().maps;
 		if (a_slot < tables.occlusionTechnique[kOcclusionSky].size() && tables.occlusionTechnique[kOcclusionSky][a_slot])
 			phases |= maps[kOcclusionSky].phase;
@@ -83,13 +79,12 @@ namespace DCLF::Scene
 
 	bool Coordinator::MainReadyWith(std::uint32_t a_slot, std::uint32_t a_pipeline, std::uint32_t a_material, std::uint32_t& a_why) const
 	{
-		// What a main build's pair resolution (MainBuild::ResolvePair) needs from this pass's lookups. Its other checks are the tables'
-		// own structure: a member that fails them is a defect set parity reports.
+		// What a main build's pair resolution needs from this pass's lookups. A member that fails the tables' own checks is a defect set parity reports.
 		const auto& object = tables.objects[a_slot];
 		const std::uint32_t p = a_pipeline, m = a_material;
 		if ((object.flags & kObjectNoBindings) || !PipelineDrawableIn(tables, lookups, p))
 			return a_why = 0, false;
-		// A refraction object draws with the refraction pipeline: the engine keeps it until the lookups' catalog has one.
+		// The engine keeps a refraction object until the catalog has the refraction pipeline.
 		if (RasterRefraction(tables.pipelines[p].rasterFlags) && !(lookupsCatalog && lookupsCatalog->refraction.pipeline))
 			return a_why = 11, false;
 		if (m >= lookups.materials.size() || m >= tables.materialSlotKey.size() || !lookups.materials[m].resolved || lookups.materials[m].key != tables.materialSlotKey[m])
@@ -100,7 +95,7 @@ namespace DCLF::Scene
 			return a_why = 2, false;
 		if (!lookups.samplersResolved || lookups.nullTexture == Lookups::kNone)
 			return a_why = 3, false;
-		// A ProjectedUV pipeline (not Hair, technique 6) binds the projected textures.
+		// A ProjectedUV pipeline, except Hair (technique 6), binds the projected textures.
 		if (const auto pass = tables.pipelines[p].passDescriptor; (pass & 0x8000u) && ((pass >> 24) & 0x3f) != 6)
 			for (const auto index : lookups.projectedTextures)
 				if (index == Lookups::kNone)
@@ -108,10 +103,9 @@ namespace DCLF::Scene
 		if (object.geometryIndex >= tables.geometries.size() || !tables.geometries[object.geometryIndex].vertexAddress ||
 			!tables.geometries[object.geometryIndex].indexAddress)
 			return a_why = 4, false;
-		// Past the current scene buffers it has no build input until they grow.
 		if (!IndirectDraws::Get().FitsScene(&tables, a_slot, false))
 			return a_why = 10, false;
-		// A decal needs its ordered slots in its group's range (OrderDecals; one a partition for blood decals).
+		// A decal needs its ordered slots in its group's range, one per partition for blood decals.
 		if (const std::uint32_t group = ObjectDecalGroup(object.flags))
 			if (a_slot >= tables.rangeOrdinal.size() || tables.rangeOrdinal[a_slot] >= tables.rangeCount[group - 1])
 				return a_why = 5, false;
@@ -128,7 +122,7 @@ namespace DCLF::Scene
 
 	void Coordinator::LeaveSet(std::uint32_t a_slot, std::uint8_t a_lost, bool a_partner)
 	{
-		// A claim is the whole object: losing any phase it holds loses all of them.
+		// A claim is the whole object, so losing any phase loses all of them.
 		if (a_slot < setPhasesNext.size() && (setPhasesNext[a_slot] & a_lost))
 			a_lost = setPhasesNext[a_slot];
 		if (a_slot < setPhasesNext.size() && (setPhasesNext[a_slot] & a_lost)) {
@@ -154,7 +148,6 @@ namespace DCLF::Scene
 			}
 			++setStats.leftAfterCommit;
 			QueueSet(a_slot);
-			// Marked so ApplySet notes the claim left even if the next commit sees no change.
 			if (a_slot < tables.objects.size())
 				MarkSetApply(a_slot);
 		}
@@ -190,7 +183,6 @@ namespace DCLF::Scene
 
 	std::size_t Coordinator::TakeClaimsEntry()
 	{
-		// An entry only the pool holds (publications, frames and the claims' readers hold theirs).
 		for (std::size_t i = 0; i < claimsPool.size(); ++i)
 			if (claimsPool[i].snapshot.use_count() == 1) {
 				std::atomic_thread_fence(std::memory_order_acquire);  // after the last holder's release (use_count reads relaxed)
@@ -202,16 +194,12 @@ namespace DCLF::Scene
 
 	void Coordinator::RefreshPending()
 	{
-		// The waiting slots (bound, eligible, not ready yet) by base geometry, with the phases they take part in: the hooks withhold them
-		// from the engine until they join (SetSnapshot::pending). Made whole when a waiting slot was decided, and a change only when it
-		// differs: a slot that waits on, requeued by its sources, changes nothing. The waiting slots are few once a load has settled.
-		// The stream waits age out by frame: looked at every publication while there are any.
+		// The hooks withhold waiting slots from the engine until they join. Made whole only when a waiting slot was decided.
 		if (!streamWaitingSince.empty())
 			setPendingDirty = true;
 		if (!std::exchange(setPendingDirty, false))
 			return;
 		PendingMap next;
-		// A face shape waiting for its head's snapshot (no slot yet): its core phases, while it has waited less than kStreamWaitFrames.
 		for (auto it = streamWaitingSince.begin(); it != streamWaitingSince.end();) {
 			const auto found = tracked.find(const_cast<RE::BSGeometry*>(it->first));
 			if (found == tracked.end() || !found->second.streamWaiting) {
@@ -246,21 +234,17 @@ namespace DCLF::Scene
 	void Coordinator::PublishClaims()
 	{
 		DCLF_ZONE("CS.DCLF.Scene.PublishClaims");
-		// After ApplySet: setBuilding is the last commit's set minus what left since.
 		if (!setBuilding)
 			setBuilding = std::make_shared<SetSnapshot>();
 		auto& pace = paceStats;
 		const std::uint8_t drawn = static_cast<std::uint8_t>(setPhaseMask);
 		claimsFresh = false;
 		RefreshPending();
-		// The paced parity's reference: the claims made whole, as an every-pass publication's were.
 		if (pacedCheckDue) {
-			// setBuilding's phases only: its frame and drawn are never set (the published claims take them here).
 			claimsReference = std::make_shared<SetSnapshot>(*setBuilding);
 			claimsReference->frame = sceneFrame;
 			claimsReference->drawn = drawn;
 		}
-		// Nothing changed since the last claims (setBuilding unwritten, no edit of the last): shared again.
 		if (claimsPublished < claimsPool.size() && publicationClaims == claimsPool[claimsPublished].snapshot && !setSnapshotDirty && !setPendingChanged) {
 			const auto& last = claimsPool[claimsPublished];
 			if (last.edited.empty() && last.cursor.Continues(setPhaseLog, 0) && last.cursor.position == setPhaseLog.End() && last.snapshot->drawn == drawn) {
@@ -271,8 +255,7 @@ namespace DCLF::Scene
 		const std::size_t index = TakeClaimsEntry();
 		auto& entry = claimsPool[index];
 		auto& phases = entry.snapshot->phases;
-		// Caught up by the keys written since its last publication and the keys its revocations edited (each to setBuilding's value), or
-		// copied whole when the log no longer reaches it.
+		// Caught up by the keys written since its last publication, or copied whole when the log no longer reaches it.
 		auto refresh = [&](const RE::BSGeometry* a_geometry) {
 			if (const auto it = setBuilding->phases.find(a_geometry); it != setBuilding->phases.end())
 				phases.insert_or_assign(a_geometry, it->second);
@@ -303,14 +286,13 @@ namespace DCLF::Scene
 		claimsFresh = true;
 		setSnapshotDirty = false;
 		++setStats.publications;
-		// The pool's readers are the entries alone; one behind the bound is copied whole.
+		// One behind the bound is copied whole.
 		setPhaseLog.Trim(1u << 16);
 	}
 
 	Coordinator::SlotDecision Coordinator::DecideSlot(std::uint32_t a_slot, bool a_live, std::uint32_t a_drawn) const
 	{
-		// Read-only. All participating phases if ready for all, else none (whole-object claims); `wait` with reasons in order
-		// (SetStats::waitingBy's index); `partial` when some were ready (counted for the report).
+		// Read-only. Claims are whole-object, so all participating phases if ready for all, else none.
 		SlotDecision d;
 		if (!a_live || a_slot >= tables.objects.size())
 			return d;
@@ -318,7 +300,6 @@ namespace DCLF::Scene
 		std::uint8_t phases = participation;
 		const auto& views = Extensions::Views();
 		if (!phases) {
-			// For the observers: a CategoryRoot view's slot (a first-person one) SetParticipation left out.
 			if ((a_drawn & views.rootPhases) && Diagnostics::Armed<Diagnostics::SetSlotDecided>())
 				if (const auto view = ViewRootOfSlot(a_slot); view != Api::EngineView::Count)
 					d.rootViewExcluded = (a_drawn & Extensions::ViewEntryOf(view).phase) != 0;
@@ -329,7 +310,7 @@ namespace DCLF::Scene
 			if (d.whyCount < d.whys.size())
 				d.whys[d.whyCount++] = static_cast<std::uint8_t>(a_why);
 		};
-		// The main phase needs its binding; shadow and occlusion phases draw from the record alone.
+		// The main phase needs its binding. Shadow and occlusion phases draw from the record alone.
 		if (phases & kSetMain) {
 			bool main = IsResidentSlot(a_slot);
 			if (std::uint32_t why = 0; main && !MainReady(a_slot, why)) {
@@ -339,16 +320,13 @@ namespace DCLF::Scene
 			if (!main)
 				phases &= ~kSetMain;
 		}
-		// The views', in the decision's order (Extensions::ViewSet::decideOrder: the CategoryRoot views, then the rest). Reason 8: a
-		// forward pipeline.
 		for (std::uint32_t i = 0; i < views.decideCount; ++i) {
 			const auto view = views.decideOrder[i];
 			const auto& entry = Extensions::ViewEntryOf(view);
 			if (!(phases & entry.phase))
 				continue;
 			if (entry.membership == Api::ViewMembership::CategoryRoot) {
-				// A CategoryRoot view (the first person) draws with the main rows and bindings: main-ready, plus its pipelines (forward and
-				// Z-prepass) in the lookups' catalog.
+				// A first-person view draws with the main rows and bindings, plus its own pipelines in the catalog.
 				bool member = IsResidentSlot(a_slot);
 				if (std::uint32_t why = 0; member && !MainReady(a_slot, why)) {
 					waiting(why);
@@ -361,20 +339,17 @@ namespace DCLF::Scene
 				}
 				if (!member)
 					phases &= static_cast<std::uint8_t>(~entry.phase);
-				// For the observers: held out, and why.
 				if (!member) {
 					d.rootViewHeld = true;
 					d.heldWhyCount = d.whyCount;
 					d.rootViewSlotWhy = slotWhy;
 				}
 			} else if (!IndirectDraws::Get().ViewSlotReady(view, &tables, &lookups, lookupsCatalog.get(), a_slot)) {
-				// A LodTechniques view (the reflection's faces) needs the slot's forward pipeline in the lookups' catalog (the one the
-				// revision resolves from).
+				// The reflection's faces need the slot's forward pipeline in the catalog the revision resolves from.
 				waiting(8);
 				phases &= static_cast<std::uint8_t>(~entry.phase);
 			}
 		}
-		// The casters' phases, then the occlusion maps' (Extensions::ShadowViewSet::readinessOrder).
 		const auto& shadowViews = Extensions::ShadowViewsSet();
 		for (std::uint32_t r = 0; r < shadowViews.readinessCount; ++r) {
 			const std::uint8_t phase = shadowViews.readinessOrder[r];
@@ -391,7 +366,6 @@ namespace DCLF::Scene
 		return d;
 	}
 
-	// One commit's inputs, shared by its stages (CommitSet).
 	struct Coordinator::SetCommit
 	{
 		std::size_t objects = 0;
@@ -403,8 +377,7 @@ namespace DCLF::Scene
 
 	void Coordinator::CommitMembershipEvents(const SetCommit& a_commit)
 	{
-		// Membership events: the change log since the last commit and readiness moves for waiting slots. New phases, new tables or a
-		// log the cursor cannot continue evaluate every slot.
+		// New phases, new tables or a log the cursor cannot continue evaluate every slot.
 		auto& setPhases = setPhasesNext;
 		const std::size_t objects = a_commit.objects;
 		const bool live = a_commit.live;
@@ -412,8 +385,7 @@ namespace DCLF::Scene
 		const bool everything = drawn != setPhaseMask || !setCursor.Continues(tables.changeLog, tablesGeneration) || setPhases.size() > objects;
 		if (everything) {
 			++setStats.resyncs;
-			// A load that never finishes can resync hundreds of times a scene frame, so the lines are capped per window of scene frames.
-			// The next line logged counts the ones skipped. Only the commit's thread touches these, as with setStats.
+			// A load that never finishes can resync hundreds of times a scene frame, so the lines are capped per window.
 			constexpr std::uint32_t kLinesPerWindow = 8;
 			constexpr std::uint32_t kWindowFrames = 600;
 			static std::uint32_t logWindow = ~0u;
@@ -445,7 +417,6 @@ namespace DCLF::Scene
 			for (std::uint32_t slot = 0; slot < objects; ++slot)
 				MarkSetApply(slot);
 			setBuilding->phases.clear();
-			// Every pooled claims entry is copied whole at its next publication.
 			setPhaseLog.Invalidate();
 			setSnapshotDirty = true;
 			for (const std::uint32_t slot : setWaiting)
@@ -468,8 +439,7 @@ namespace DCLF::Scene
 
 	void Coordinator::CommitReadinessSources()
 	{
-		// Readiness sources: lookups version, shadow lookups generation, constants stamp, scene-buffer fit serial. A waiting slot is
-		// requeued when a source it waits on moved, or any did for kWaitOther.
+		// A waiting slot is requeued when a source it waits on moved, or any did for kWaitOther.
 		const std::array<std::uint64_t, kWaitSources> readiness{ (std::uint64_t(lookups.versionCounter) << 32) ^ lookups.generation, lookups.shadowGeneration,
 			tables.constantsStamp, IndirectDraws::Get().SceneFitSerial() };
 		std::uint8_t moved = 0;
@@ -478,8 +448,7 @@ namespace DCLF::Scene
 				setReadiness[source] = readiness[source];
 				moved |= std::uint8_t(1u << source);
 			}
-		// Forward-view pipelines (reason 8) arrive in a new catalog without new lookups: a changed ready count is a kWaitOther event.
-		// Counted once a catalog (immutable), not once a commit.
+		// Forward-view pipelines arrive in a new catalog without new lookups. Counted once per immutable catalog.
 		{
 			if (lookupsCatalog != setForwardCatalog || !setForwardCatalog) {
 				std::uint64_t count = 0;
@@ -505,12 +474,10 @@ namespace DCLF::Scene
 					QueueSet(slot);
 					++setStats.waitingRequeued;
 				}
-			// A staged binding may be ready now, and the next joins switch to it if it is.
 			for (const auto& [slot, staged] : stagedBindings)
 				bindRetry.push_back(slot);
 		}
-		// The fit can shrink too (a newly adopted set naming smaller buffers): a member past it has no build input, so it is decided
-		// again (the waiting ones above only gain from a growth).
+		// The fit can shrink too, so a member past it is decided again.
 		if (moved & kWaitFit) {
 			auto& draws = IndirectDraws::Get();
 			const std::size_t objects = std::min(setPhasesNext.size(), tables.objects.size());
@@ -526,8 +493,7 @@ namespace DCLF::Scene
 
 	void Coordinator::CommitShadowModeRequeues(std::size_t a_objects)
 	{
-		// New shadow view modes or rasterizer states (rare) may need pipelines a caster lacks: requeue every caster and waiting slot.
-		// Read from the lane's lookups, never the render thread's.
+		// New shadow view modes or rasterizer states may need pipelines a caster lacks. Read from the lane's lookups, never the render thread's.
 		auto& setPhases = setPhasesNext;
 		if (const std::uint64_t modes = lookups.shadowInputsSerial; modes != setShadowModes) {
 			setShadowModes = modes;
@@ -541,7 +507,6 @@ namespace DCLF::Scene
 
 	std::uint8_t Coordinator::CommitDecideSlot(std::uint32_t a_slot, const SetCommit& a_commit, bool& a_wait, bool* a_partial)
 	{
-		// DecideSlot plus the commit's side effects (wait causes and reasons, counts, observers).
 		if (a_slot < setWaitCause.size())
 			setWaitCause[a_slot] = 0;
 		const SlotDecision decision = DecideSlot(a_slot, a_commit.live, a_commit.drawn);
@@ -594,10 +559,8 @@ namespace DCLF::Scene
 		auto& setPhases = setPhasesNext;
 		const bool live = a_commit.live;
 		const std::uint32_t drawn = a_commit.drawn;
-		// Already pending application: refresh for the geometry it holds now.
 		if (setApplyMark[a_slot])
 			MarkSetApply(a_slot);
-		// Occluder and LodTechniques view phases (the reflection's) it participates in but misses.
 		const std::uint8_t lacking =
 			live ? static_cast<std::uint8_t>(SetParticipation(a_slot, drawn) & ~a_phases & Extensions::ResolvedViewBits().lackingMask) : 0;
 		if (lacking != setLackingNext[a_slot]) {
@@ -610,7 +573,6 @@ namespace DCLF::Scene
 			if (a_wait)
 				setWaiting.push_back(a_slot);  // compacted below
 		}
-		// The claims' pending map names the waiting slots' geometry and phases: made again at the next publication.
 		if (a_wait || a_commit.waitingMoved)
 			setPendingDirty = true;
 		const std::uint8_t before = setPhases[a_slot];
@@ -637,7 +599,7 @@ namespace DCLF::Scene
 			if (cause == 3 && a_slot < setWaitWhy.size())
 				++setStats.leftWaiting[(std::min<std::size_t>)(setWaitWhy[a_slot], setStats.leftWaiting.size() - 1)];
 		}
-		// The engine's copy is keyed by base geometry; a layer is a member with its base.
+		// The engine's copy is keyed by base geometry, so a layer is a member with its base.
 		if (tables.IsLayer(a_slot))
 			return;
 		if (const auto* old = setGeometry[a_slot]; old && !a_phases) {
@@ -667,7 +629,7 @@ namespace DCLF::Scene
 			const std::uint32_t slot = setQueue[q];
 			if (slot >= objects)
 				continue;
-			// A base and its layer are main-phase members together (the engine's main passes of both are the base geometry's).
+			// The engine's main passes of both are the base geometry's, so they are members together.
 			const std::uint32_t partner = tables.IsLayer(slot) ? tables.layerBase[slot] : slot < tables.layerOf.size() ? tables.layerOf[slot] : kNoObjectSlot;
 			bool wait = false, partial = false;
 			std::uint8_t phases = CommitDecideSlot(slot, a_commit, wait, &partial);
@@ -682,14 +644,12 @@ namespace DCLF::Scene
 				std::uint8_t partnerPhases = CommitDecideSlot(partner, a_commit, partnerWait);
 				if (!(phases & kSetMain) != !(partnerPhases & kSetMain)) {
 					++setStats.waitingBy[6];
-					// Either may become ready on any source.
 					setWaitCause[slot] |= kWaitOther;
 					setWaitCause[partner] |= kWaitOther;
 					phases = 0;
 					partnerPhases = 0;
 				}
-				// Vetoed entries' slots, read as data: gated incoming blocks hold their phases until the flip (Observe); outgoing ones drop
-				// after it (Hold).
+				// Gated incoming blocks hold their phases until the flip. Outgoing ones drop after it.
 				if (a_commit.gatesLive)
 					partnerPhases = VetoedPhases(partner, partnerPhases, partnerWait, drawn, live);
 				CommitApplySlot(partner, partnerPhases, partnerWait, a_commit);
@@ -702,8 +662,7 @@ namespace DCLF::Scene
 
 	void Coordinator::CommitComponentsSettle(SetCommit& a_commit)
 	{
-		// The components settle: gates whose incoming geometries are all settled flip here and ride the publication (the gates' component
-		// deltas: Features::Lod::Gates::Adopt). The vetoes they drop or set apply here, before the set's change is noted and the claims are snapshotted.
+		// Gates flip here and ride the publication. The vetoes they change apply before the claims are snapshotted.
 		settleApply.clear();
 		settling = true;
 		ComponentsSettle(a_commit.live);
@@ -721,12 +680,10 @@ namespace DCLF::Scene
 		SetCommit commit;
 		const std::size_t objects = tables.objects.size();
 		commit.objects = objects;
-		// Not built (load screen): the set is empty.
 		const bool live = sceneBuilt;
 		commit.live = live;
 		const std::uint32_t drawn = live ? SetCapability() : 0u;
 		commit.drawn = drawn;
-		// The commit's own copy (setPhasesNext); records and Tables::setPhases take it at the next ApplySet.
 		setQueueMark.resize(objects, 0);
 		setWaitingMark.resize(objects, 0);
 		setLackingNext.resize(objects, 0);
@@ -739,7 +696,6 @@ namespace DCLF::Scene
 		setGeometryNext.resize(objects, nullptr);
 		if (!setBuilding)
 			setBuilding = std::make_shared<SetSnapshot>();
-		// Without a component asking for it (open gates) or a vetoed entry (held-out blocks) the commit does no veto work.
 		const bool gatesLive = CommitLive();
 		commit.gatesLive = gatesLive;
 		for (const std::uint32_t slot : requeued)
@@ -749,7 +705,7 @@ namespace DCLF::Scene
 		CommitMembershipEvents(commit);
 		CommitReadinessSources();
 		CommitShadowModeRequeues(objects);
-		// The joins ran earlier in this pass: whatever they rebound or dropped is queued here through LeaveSet and the change log.
+		// Whatever the joins rebound or dropped earlier in this pass is queued through LeaveSet and the change log.
 
 		CommitQueuedSlots(commit);
 		if (gatesLive)
@@ -762,7 +718,6 @@ namespace DCLF::Scene
 		setQueue.clear();
 		if (commit.waitingMoved) {
 			std::erase_if(setWaiting, [&](std::uint32_t a_slot) { return a_slot >= setWaitingMark.size() || !setWaitingMark[a_slot]; });
-			// A slot can be pushed twice within one commit.
 			std::sort(setWaiting.begin(), setWaiting.end());
 			setWaiting.erase(std::unique(setWaiting.begin(), setWaiting.end()), setWaiting.end());
 			++paceStats.waitingCompacted;
@@ -773,7 +728,6 @@ namespace DCLF::Scene
 		setStats.partial += setPartialCount;
 		setStats.waiting += setWaiting.size();
 
-		// The claims are made at the publication (PublishClaims), from setBuilding. ApplySet's revocation reads the log from here.
 		setCommitCursor.Restart(tablesGeneration);
 		setCommitCursor.Advance(tables.changeLog);
 	}
@@ -789,7 +743,6 @@ namespace DCLF::Scene
 		setLackingNext.resize(objects, 0);
 		setPhasesApplied.resize(objects, 0);
 		setGeometryApplied.resize(objects, nullptr);
-		// Geometries whose main claim changed since the last publication (PrimaryCull::NoteSetChanges at install).
 		auto& joined = publicationJoined;
 		auto& left = publicationLeft;
 		for (const auto& [slot, geometry] : setApply) {
@@ -801,7 +754,6 @@ namespace DCLF::Scene
 			const bool same = !(tables.objects[slot].flags & kObjectFree) && tables.objectGeometry[slot] == geometry;
 			const std::uint8_t phases = same ? setPhasesNext[slot] : std::uint8_t{ 0 };
 			const std::uint8_t lacking = same ? setLackingNext[slot] : std::uint8_t{ 0 };
-			// The claim as the engine hooks read it: by base geometry.
 			const auto* wasClaimed = (setPhasesApplied[slot] & kSetMain) ? setGeometryApplied[slot] : nullptr;
 			setPhasesApplied[slot] = phases;
 			setGeometryApplied[slot] = phases && !tables.IsLayer(slot) ? geometry : nullptr;
@@ -821,7 +773,7 @@ namespace DCLF::Scene
 			}
 			if (applied[slot] == phases)
 				continue;
-			// kObjectMember is the main phase (the main builds' GPU input); the shadow builds read the phases.
+			// kObjectMember is the main builds' GPU input. The shadow builds read the phases.
 			applied[slot] = phases;
 			if (!(tables.objects[slot].flags & kObjectFree)) {
 				auto& object = tables.objects[slot];
@@ -832,8 +784,6 @@ namespace DCLF::Scene
 			}
 		}
 		setApply.clear();
-		// The claims are the last commit's, minus what left since (LeaveSet): PublishClaims. CheckClaimsDrawable checks what changed since
-		// the commit (this application's own notes).
 		if (setCommitCursor.Continues(tables.changeLog, tablesGeneration)) {
 			claimCheckCursor = setCommitCursor;
 		} else {
@@ -856,8 +806,6 @@ namespace DCLF::Scene
 			return 0;
 		if (veto != Api::kVetoObserve)
 			return a_phases;
-		// The slot's phases as the commit decided them, and whether whole (every phase it takes part in, not waiting): what dropping the
-		// Observe applies and what its component's readiness counts (ObservedSlot).
 		if (observedSlots.size() < tables.objects.size())
 			observedSlots.resize(tables.objects.size());
 		auto& held = observedSlots[a_slot];
@@ -879,9 +827,8 @@ namespace DCLF::Scene
 	void Coordinator::CheckClaimsDrawable()
 	{
 		DCLF_ZONE("CS.DCLF.Scene.CheckClaimsDrawable");
-		// The commit ran in this pass, right before this publication, and judged every slot the change log named since the last one;
-		// nothing writes the tables between them. So every claim is one the publication's tables draw. A claimed phase they do not draw is
-		// a defect: it is counted and named in the report (<- UNDRAWN CLAIM), and the claim stands (it is never handed back to the engine).
+		// The commit judged every slot the log named, and nothing writes the tables before this publication. So any claimed phase the
+		// tables do not draw is a defect. It is reported and the claim stands.
 		auto check = [&](std::uint32_t a_slot) {
 			if (a_slot >= setPhasesApplied.size() || a_slot >= setGeometryApplied.size())
 				return;
@@ -895,8 +842,7 @@ namespace DCLF::Scene
 				const auto flags = tables.objects[a_slot].flags;
 				auto& draws = IndirectDraws::Get();
 				const bool main = (flags & kObjectMember) && !(flags & kObjectNoBindings) && draws.FitsScene(&tables, a_slot, false);
-				// A CategoryRoot view's member (a first-person one) draws with main bindings but has no kObjectMember; a LodTechniques
-				// view's draws with the main phase.
+				// A first-person member draws with main bindings but has no kObjectMember.
 				const auto& views = Extensions::Views();
 				const auto root = static_cast<std::uint8_t>(tables.setPhases[a_slot] & views.rootPhases);
 				const bool rootMember = root && !(flags & kObjectNoBindings) && draws.FitsScene(&tables, a_slot, false);
@@ -912,7 +858,6 @@ namespace DCLF::Scene
 			for (const auto& change : claimCheckCursor.Unread(tables.changeLog))
 				check(change.slot);
 		} else {
-			// The log broke (new tables): every claim is checked.
 			for (std::uint32_t slot = 0; slot < setPhasesApplied.size(); ++slot)
 				check(slot);
 		}
@@ -937,24 +882,19 @@ namespace DCLF::Scene
 	void Coordinator::PublishScene()
 	{
 		DCLF_ZONE("CS.DCLF.Scene.PublishScene");
-		// A pass whose only change is deltas the frame takes and nothing a snapshot is built from reads (the placement plans, the shading
-		// names, the retired imports, the light entries: no claim, table, lookup or toggle moved since the last publication, and
-		// the claims shared again) publishes the last tables again: the snapshot builder then posts the last snapshot again for
-		// it (PassesThrough: the same objects), and the frame takes its deltas. Its tables would be a copy of the same content.
+		// A pass whose only changes are frame deltas publishes the last tables again. The snapshot builder then reposts the last snapshot.
 		const auto& pace = paceStats;
 		bool deltasOnly = publishedKeyValid && !publishForced && publishedTables && setApply.empty() && !setSnapshotDirty && !nodeSetsDirty &&
 		                  publicationJoined.empty() && publicationLeft.empty() &&
 		                  componentSeedRequests.empty() && switchesApplied.empty() && !switchResync && !tables.ClassMemberChangesPending() &&
 		                  componentDeltaRequests.empty() && CurrentPublishKey() == publishedKey;
 		const auto sharedBefore = pace.claimsShared, wholeBefore = pace.claimsWhole;
-		// Apply the committed set: the publication draws exactly what it claims (CheckClaimsDrawable reports a claim it cannot draw).
 		ApplySet();
 		PublishClaims();
 		CheckClaimsDrawable();
 		deltasOnly = deltasOnly && pace.claimsShared != sharedBefore && pace.claimsWhole == wholeBefore &&
 		             CurrentPublishKey() == publishedKey;
-		// The lookups are the pass's (ResolveLookups before the commit judged readiness by them): a second resolve here could take a newer
-		// catalog or shadow inputs than the commit judged.
+		// A second resolve here could take a newer catalog than the commit judged.
 		PublicationDeltas deltas;
 		{
 			DCLF_ZONE("CS.DCLF.Scene.TakeDeltas");
@@ -963,7 +903,6 @@ namespace DCLF::Scene
 		if (!deltasOnly)
 			PublishTables();
 		PublishLookups();
-		// The publication made and posted (the snapshot builder takes it).
 		DCLF_ZONE_NAMED(postSnapshotZone, "CS.DCLF.Scene.PostSnapshotWork", true);
 		auto publication = std::make_shared<ScenePublication>();
 		publication->sequence = ++publicationSequence;
@@ -975,8 +914,7 @@ namespace DCLF::Scene
 		publication->retirementHold = publishedRetirement;
 		publication->claims = publicationClaims ? publicationClaims : std::make_shared<const SetSnapshot>();
 		publication->lackingCount = setLackingCount;
-		// The waiting slots by reason, and whether the scene was built: a load's hold waits for a built scene whose objects wait on nothing
-		// transient (Core/Render/LoadHold.h).
+		// Read by a load's hold.
 		static_assert(std::tuple_size_v<decltype(SetStats::waitingBy)> == kSetWaitReasons, "the published waiting reasons are SetStats::waitingBy's");
 		publication->built = sceneBuilt;
 		for (const std::uint32_t slot : setWaiting)
@@ -994,20 +932,17 @@ namespace DCLF::Scene
 		publication->lightCandidates = lightCandidates;
 		publication->lightEntriesAppeared = lightEntriesAppeared;
 		publication->engineCasters = PublishEngineCasters();
-		// The point lights' category nodes, copied only when the set changed.
 		if (std::exchange(nodeSetsDirty, false) || !publishedCategoryNodes) {
 			DCLF_ZONE("CS.DCLF.Scene.PublishCategoryNodes");
 			publishedCategoryNodes = std::make_shared<const ankerl::unordered_dense::set<RE::NiNode*>>(categoryNodes);
 		}
 		publication->categoryNodes = publishedCategoryNodes;
-		// Counts for MakeRevision on the snapshot builder.
 		auto& revision = publication->revision;
 		revision.pipelines = static_cast<std::uint32_t>(tables.pipelines.size());
 		revision.shadowSlotKeys = lookups.shadowSlotKeys.size();
 		revision.shadowKeys = tables.shadowKeysUsed.size();
 		for (const auto& used : tables.occlusionKeysUsed)
 			revision.shadowKeys += used.size();
-		// The oldest unpublished event, for the latency reports.
 		publication->eventNs = std::exchange(unpublishedNs, 0);
 		publication->eventFrame = std::exchange(unpublishedFrame, 0u);
 		if (publication->eventNs) {
@@ -1023,7 +958,7 @@ namespace DCLF::Scene
 		deltas.eventNs = publication->eventNs;
 		deltas.eventFrame = publication->eventFrame;
 		channels.publicationLog.Append(std::move(deltas));
-		// The snapshot builder builds draws and the revision off the render thread; a skipped publication loses nothing of the log.
+		// A skipped publication loses nothing of the log.
 		IndirectDraws::Get().PostSnapshotWork(std::move(publication));
 	}
 
@@ -1031,7 +966,6 @@ namespace DCLF::Scene
 	{
 		a_deltas.joined = std::exchange(publicationJoined, {});
 		a_deltas.left = std::exchange(publicationLeft, {});
-		// Held passes' plans first, then the last walk's.
 		for (auto& held : placementPlansHeld)
 			a_deltas.plans.push_back(std::move(held));
 		placementPlansHeld.clear();
@@ -1039,14 +973,14 @@ namespace DCLF::Scene
 			a_deltas.plans.push_back(std::exchange(placementPlanReady, nullptr));
 		a_deltas.shading = std::exchange(shadingNamed, {});
 		a_deltas.componentSeeds = std::exchange(componentSeedRequests, {});
-		// No cap: PrimaryCull reads them all only on a full walk.
+		// No cap, since PrimaryCull reads them all only on a full walk.
 		a_deltas.switches = std::exchange(switchesApplied, {});
 		a_deltas.switchResync = std::exchange(switchResync, false);
 		a_deltas.retiredImports = std::exchange(retiredImports, {});
 		for (std::size_t c = 0; c < a_deltas.classMembers.size(); ++c)
 			a_deltas.classMembers[c] = std::exchange(tables.classMembers[c].changes, {});
 		a_deltas.lightEntries = std::exchange(lightEntryChanges, {});
-		// The components' published hooks before their deltas are taken (the LOD gates' observers read the flips pending).
+		// The LOD gates' observers read the pending flips before the deltas are taken.
 		ComponentsPublished();
 		a_deltas.componentDeltas = std::exchange(componentDeltaRequests, {});
 	}
@@ -1059,19 +993,16 @@ namespace DCLF::Scene
 	void Coordinator::TakeFrameInputs()
 	{
 		DCLF_ZONE("CS.DCLF.Scene.TakeFrameInputs");
-		// Latest wins; none keeps the last. Once a pass, at its start, so its globals and inputs are one frame's.
+		// Once a pass at its start, so its globals and inputs are one frame's.
 		const bool taken = channels.frameInputs.TakeInto(sceneInputs);
-		// The toggles the whole pass evaluates, commits and publishes under (ScenePass binds them: ToggleSnapshotScope), the frame inputs'
-		// (never the live ones, which the render thread may apply mid-pass); before the first frame inputs, the newest.
+		// Never the live toggles, which the render thread may apply mid-pass.
 		if (!sceneInputs.frame)
 			sceneInputs.toggles = Toggles::Get().Active();
 		passSnapshot.toggles = sceneInputs.toggles;
 		if (!taken)
 			return;
-		// The frame's own pass: it publishes whatever it changed (publication pacing, NoteScenePassDone's gate).
 		passTookFrameInputs = true;
 		sceneFrame = sceneInputs.frame;
-		// A classification toggle or the feature coming back: drop every cached verdict before the pass reads one.
 		if (sceneInputs.verdictsGeneration != verdictsApplied) {
 			verdictsApplied = sceneInputs.verdictsGeneration;
 			InvalidateVerdicts();
@@ -1081,8 +1012,7 @@ namespace DCLF::Scene
 	void Coordinator::TakeCoordinatorInputs()
 	{
 		DCLF_ZONE("CS.DCLF.Scene.TakeCoordinatorInputs");
-		// In order: the content epochs the commit hooks sent of the journaled families (the depth commit's fade roots: a trim, which publishes
-		// nothing by itself, since the hook posts every frame), then PrimaryCull's admitted roots, which force a publication.
+		// Order matters. The journaled families' sent epochs first, then PrimaryCull's admitted roots, which force a publication.
 		tables.families.TakeSent();
 		if (const auto roots = channels.standInRootsPosted.Take()) {
 			ComponentsAdmitted(*roots);
@@ -1092,8 +1022,7 @@ namespace DCLF::Scene
 
 	void Coordinator::PublishIfDue(bool a_task)
 	{
-		// Only when something changed, and paced by its consumer (PublicationDue): a publication the snapshot builder has not taken
-		// would only be replaced in its slot, so the pass defers, and its commit's applications, deltas and log entries ride the next.
+		// A publication the builder has not taken would only be replaced, so the pass defers and its changes ride the next one.
 		DCLF_SCENE_PART(Publish, "CS.DCLF.Scene.Publish");
 		auto& pace = paceStats;
 		++pace.passes;
@@ -1111,8 +1040,6 @@ namespace DCLF::Scene
 		if (needed) {
 			if (PublishReason why{}; PublicationDue(a_task, why)) {
 				const std::uint32_t folded = std::exchange(passesDeferred, 0u);
-				// The paced parity: a publication that folded deferred passes in, against the coordinator's whole (claims copied whole,
-				// the tables themselves).
 				pacedCheckDue = folded && Policy::CheckPacedPublication(pacedPublications + 1);
 				pacedPublications += folded ? 1u : 0u;
 				PublishScene();
@@ -1136,43 +1063,33 @@ namespace DCLF::Scene
 
 	void Coordinator::RunSceneWork(bool a_task)
 	{
-		// One pass (events, walk, joins, commit, publication), so a record bound in it is committed in it and published with it or the next
-		// publishing pass (PublicationDue). The pump runs
-		// it whenever a producer wakes it, any number of times a frame; PrimaryCull notes its events drop are held (primaryNotes), and
-		// released references go back at Present.
+		// A record bound in this pass is committed in it and published with it or the next publishing pass.
 		inSceneTask = a_task;
 		holdPrimaryNotes = true;
 		const auto workStart = std::chrono::steady_clock::now();
-		// Every step between the parts has a zone of its own (CS.DCLF.Scene.<step>), so the pass's self time is what no step covers.
 		{
 			DCLF_ZONE("CS.DCLF.Scene.TakeAheadContext");
 			IndirectDraws::Get().TakeAheadContext();
 		}
 		++passSerial;
 		{
-			// The publications the frames returned: the last references of their lookups copies and deltas may go here.
 			DCLF_ZONE("CS.DCLF.Scene.DropReturnedPublications");
 			DropReturnedPublications();
 		}
-		// Back on the free lists before anything allocates.
 		RecycleRetired();
-		// While DCLF is not running the pass applies events only, so the tracked set is current when it resumes.
+		// While DCLF is not running a pass applies events only, so the tracked set is current when it resumes.
 		const bool full = passesFull.load(std::memory_order_acquire);
 		if (full) {
 			TakeCoordinatorInputs();
-			// The joins' inputs posted at EarlyPrepass (ancestor map, pipeline frame, capture drain).
 			DCLF_ZONE("CS.DCLF.Scene.TakeAccumulateInputs");
 			TakeAccumulateInputs();
 		}
 		{
-			// Posts the drains must follow, then the engine queues drained to where each stands now.
 			DCLF_ZONE("CS.DCLF.Scene.TakeCategoryCapture");
 			TakeCategoryCapture();
 		}
 		{
-			// The components' own queues (the gate outcomes) are taken before the tracker's stack (an outcome is posted after its gate's
-			// events, so the batch holds them) and applied after the batch (AfterBatch), unless it is a load screen's (carried, not applied):
-			// those wait for the next.
+			// Gate outcomes are taken before the tracker's stack, since an outcome is posted after its gate's events. A load screen's batch carries them unapplied.
 			DCLF_ZONE("CS.DCLF.Scene.TakeGateOutcomes");
 			ComponentsTake();
 		}
@@ -1198,18 +1115,16 @@ namespace DCLF::Scene
 			ApplyConstantsPosts();
 		}
 		{
-			// Technique rows to the pass's sample (a witness: a second pass of the frame finds nothing moved), before the joins use them.
 			DCLF_ZONE("CS.DCLF.Scene.RefreshTechniqueRows");
 			RefreshTechniqueRows();
 		}
 		RefreshMaterialRecords();
 		{
-			// The bindings are made once, after the joins (nothing before the commit reads them). The walk's self time is what its parts
-			// leave (the delta walk's own loop, the placement plan).
+			// The bindings are made once, after the joins, since nothing before the commit reads them.
 			DCLF_ZONE("CS.DCLF.Scene.Walk");
 			BuildFrame(Phase::Scene);
 		}
-		// The joins, in the same pass; members they drop from PrimaryCull are held until the publication.
+		// Members the joins drop from PrimaryCull are held until the publication.
 		holdLostMembers = true;
 		{
 			DCLF_SCENE_PART(Joins, "CS.DCLF.Scene.Joins");
@@ -1218,17 +1133,16 @@ namespace DCLF::Scene
 				BuildFrame(Phase::Accumulate);
 			}
 			{
-				// New pipelines' PerGeometry blocks, before the commit judges them (MainReady).
 				DCLF_ZONE("CS.DCLF.Scene.MakeNewPipelineConstants");
 				MakeNewPipelineConstants();
 			}
 			UpdateMaterialBindings();
 			UpdateSharedBindings();
-			// The lookups the commit judges readiness by, and the publication carries (one resolve a pass).
+			// One resolve a pass. The commit judges readiness by it and the publication carries it.
 			ResolveLookups();
 		}
 		{
-			// After the joins: their leaves and writes are on the change log it reads.
+			// After the joins, since their leaves and writes are on the change log it reads.
 			DCLF_SCENE_PART(Commit, "CS.DCLF.Scene.Commit");
 			CommitSet();
 		}
@@ -1248,9 +1162,7 @@ namespace DCLF::Scene
 	void Coordinator::ResolveLookups()
 	{
 		DCLF_ZONE("CS.DCLF.Scene.ResolveLookups");
-		// Bindings are written in place by the scene work; changed material entries take their versions here.
 		VersionMaterialBindings();
-		// The newest catalog (none newer keeps the last); IndirectDraws::ResolveLookups is pure apart from requesting unseen keys.
 		if (auto catalog = DrawPipelines::Get().TakeCatalog())
 			lookupsCatalog = std::move(catalog);
 		IndirectDraws::Get().ResolveLookups(&tables, lookupsCatalog.get(), lookups, lookupsResolve);
@@ -1260,9 +1172,8 @@ namespace DCLF::Scene
 	{
 		DCLF_ZONE("CS.DCLF.Scene.PublishLookups");
 		auto& publication = tablesPublication;
-		// A newer catalog of the same generations holds every index an older one did, so it serves unchanged lookups too.
+		// A newer catalog of the same generations holds every index an older one did.
 		publishedCatalog = lookupsCatalog;
-		// Unchanged: share the last copy. Else a new copy that shares unwritten chunks (SharedChunks).
 		const auto key = lookups.ChangeKey();
 		if (publishedLookups && key == publishedLookupsKey) {
 			++publication.lookupsShared;
@@ -1275,7 +1186,6 @@ namespace DCLF::Scene
 		++publication.lookupsCopied;
 		publication.lookupsMs += ms;
 		publication.lookupsMaxMs = std::max(publication.lookupsMaxMs, ms);
-		// A new instance restarts its count.
 		const std::uint64_t copies = lookups.pipelines.Copies() + lookups.materials.Copies();
 		publication.lookupsChunks += copies >= lookupsChunkCopies ? copies - lookupsChunkCopies : copies;
 		lookupsChunkCopies = copies;
@@ -1283,8 +1193,7 @@ namespace DCLF::Scene
 
 	void Coordinator::ResetLookups()
 	{
-		// Generations move past the old instance (stale for builds and kept bindings); versions continue, unique across instances.
-		// Publications holding the old instance keep it until released.
+		// Generations move past the old instance and versions continue. Publications holding the old instance keep it until released.
 		const auto lookupGeneration = lookups.generation;
 		const auto shadowGeneration = lookups.shadowGeneration;
 		const auto lookupVersion = lookups.versionCounter;
@@ -1358,8 +1267,7 @@ namespace DCLF::Scene
 					break;
 				}
 			}
-			// Imports go to the epochs (held until their executions retire); engine references are released at Present on the render
-			// thread, once the readers of publications up to the batch's are told (EngineReleases::Alive).
+			// Imports go to the epochs. Engine references are released at Present on the render thread.
 			for (auto& owner : a_batch.imports)
 				retiredImports.push_back(std::move(owner));
 			EngineReleases::NoteReleased(a_batch.lastPublication);
@@ -1369,9 +1277,7 @@ namespace DCLF::Scene
 			for (auto& owner : a_batch.owners)
 				EngineReleases::PushOwner(std::move(owner));
 		});
-		// The pipeline table's top follows the slots in use (lowest-first reuse): past the last one alive or retiring nothing names
-		// a slot, so the columns are cut there, and with them every per-pipeline GPU table sized from them (the payload's pipeline
-		// rows, the main layout's ranges), which then shrink (PooledBackings::Shrink). The publication takes the cut family whole.
+		// Past the last slot alive or retiring nothing names a pipeline slot, so the columns and every GPU table sized from them are cut there.
 		if (const auto top = tables.pipelineSlots.TrimTop(); top < tables.pipelines.size()) {
 			tables.PipelineColumns([top](auto& a_column, auto&&...) { a_column.erase(a_column.begin() + static_cast<std::ptrdiff_t>(top), a_column.end()); });
 			tables.TrimPipelineUsed(static_cast<std::uint32_t>(top));
@@ -1383,9 +1289,7 @@ namespace DCLF::Scene
 
 	namespace
 	{
-		// PublishTables' column sets. Each logged column with the causes that cover it (CausesBetween): a replayed slot copies it only when a
-		// cause it was noted with covers it (kChangeAll: any). A slot the publication log names takes every column. a_right may be a
-		// published snapshot (const: the spare's source).
+		// A replayed slot copies a column only when a cause it was noted with covers it. A publication-log slot takes every column.
 		template <class Right, class Column>
 		void ForLoggedColumns(SceneTables& a_left, Right& a_right, Column&& a_column)
 		{
@@ -1411,11 +1315,10 @@ namespace DCLF::Scene
 			a_column(a_left.skinPartitions, a_right.skinPartitions, kChangeSkin);
 			a_column(a_left.skinLodPartitions, a_right.skinLodPartitions, kChangeSkin);
 			a_column(a_left.shadowReject, a_right.shadowReject, kChangeShadow);
-			// Residency is written ahead of the accumulate phase's snapshot (KeepResident): any cause.
+			// Residency is written ahead of the accumulate phase's snapshot, so any cause.
 			a_column(a_left.residentSlot, a_right.residentSlot, kChangeAll);
 		}
 
-		// Logged per-object columns sized apart from the objects (resized to the tables', then replayed by slot).
 		template <class Right, class Column>
 		void ForSidedColumns(SceneTables& a_left, Right& a_right, Column&& a_column)
 		{
@@ -1425,10 +1328,7 @@ namespace DCLF::Scene
 			a_column(a_left.layerOf, a_right.layerOf, kNoObjectSlot);
 		}
 
-		// Not published: the coordinator's alone - its walk stamps and templates, the slot tables' reference counts and free lists, the
-		// writers' scratch (shadow texture transitions, freed stream rows, the class members' owners and changes the frame's fields keep
-		// from the log), and
-		// what is retiring. No reader of a publication reads them; a publication's stay as they were made (empty).
+		// Not published. No reader of a publication reads these, so a publication's stay empty.
 		template <class Column>
 		void ForUnpublished(SceneTables& a_left, SceneTables& a_right, Column&& a_column)
 		{
@@ -1452,7 +1352,6 @@ namespace DCLF::Scene
 			a_column(a_left.retiring, a_right.retiring);
 		}
 
-		// Covered by the geometry log (geometryLastUsed is copied whole).
 		template <class Column>
 		void ForGeometryColumns(SceneTables& a_left, SceneTables& a_right, Column&& a_column)
 		{
@@ -1462,7 +1361,6 @@ namespace DCLF::Scene
 			a_column(a_left.geometryLayerKey, a_right.geometryLayerKey);
 		}
 
-		// The families copied only when their write stamp moved (the table families' own stamps: Extensions::TableFamilies::Publish).
 		template <class Member>
 		void ForPipelineFamily(SceneTables& a_left, SceneTables& a_right, Member&& a_member)
 		{
@@ -1476,7 +1374,6 @@ namespace DCLF::Scene
 			a_member(a_left.techniqueConstants, a_right.techniqueConstants);
 		}
 
-		// Everything replayed or kept rather than copied whole, swapped between a_left and a_right.
 		void SwapHeldOut(SceneTables& a_left, SceneTables& a_right)
 		{
 			ForLoggedColumns(a_left, a_right, [](auto& a_x, auto& a_y, std::uint32_t) { a_x.swap(a_y); });
@@ -1497,9 +1394,7 @@ namespace DCLF::Scene
 			std::swap(a_left.publicationLog, a_right.publicationLog);
 		}
 
-		// Of the snapshots only the pool holds (each lets go of its node; the last published keeps it: a frame may still accept it), the
-		// one nearest the tables: its logs' ends furthest on, the least to replay. One the logs no longer reach is copied whole.
-		// a_pool.size(): none is free.
+		// The free pooled snapshot with the least to replay. Returns a_pool.size() when none is free.
 		std::size_t NearestPooledTables(std::vector<std::shared_ptr<SceneTables>>& a_pool, const std::vector<std::uint8_t>& a_replayable,
 			const std::shared_ptr<SceneTables>& a_published, SceneTables& a_tables, CoordinatorPump::PaceStats& a_pace)
 		{
@@ -1523,8 +1418,6 @@ namespace DCLF::Scene
 			return index;
 		}
 
-		// What a pooled snapshot replays and keeps: the logs' ends it stands at, which logs still reach it, and the families whose stamps
-		// stood.
 		struct TablesReplayPlan
 		{
 			std::uint64_t position = 0, publicationPosition = 0, materialPosition = 0, geometryPosition = 0, extrasPosition = 0;
@@ -1557,7 +1450,7 @@ namespace DCLF::Scene
 			return plan;
 		}
 
-		// The rest, copied whole: swap the held-out members aside on both (restored however the copy ends), copy the rest whole.
+		// Swap the held-out members aside on both, then copy the rest whole.
 		void CopyRestWhole(SceneTables& a_snapshot, SceneTables& a_tables)
 		{
 			auto& snapshot = a_snapshot;
@@ -1575,8 +1468,7 @@ namespace DCLF::Scene
 			SwapHeldOut(snapshot, snapshotHeld);
 		}
 
-		// The replay's object half, collected once on the lane: the object slots the logs name, sorted, with the causes each gathered
-		// (a_causes; kChangeAll for a publication-log slot). A snapshot the logs no longer reach takes the logged columns and logs whole.
+		// A snapshot the logs no longer reach takes the logged columns and logs whole.
 		void CollectReplaySlots(SceneTables& a_snapshot, SceneTables& a_tables, const TablesReplayPlan& a_plan, std::size_t a_objectSlots,
 			std::vector<std::uint32_t>& a_slots, std::vector<std::uint32_t>& a_causes, Coordinator::TablesPublication& a_publication,
 			CoordinatorPump::PaceStats& a_pace, bool& a_versionsKnown)
@@ -1620,9 +1512,7 @@ namespace DCLF::Scene
 			}
 		}
 
-		// Material records by the slots the material log names (every write of a record notes its slot), collected into a_materialSlots
-		// (sorted) for the replay's jobs; a snapshot the log no longer reaches by version (session-unique per write; none kept after a whole
-		// copy), copied here.
+		// A snapshot the log no longer reaches is compared by version, which is session-unique per write.
 		void ReplayMaterialRecords(SceneTables& a_snapshot, SceneTables& a_tables, const TablesReplayPlan& a_plan, bool a_versionsKnown,
 			std::vector<std::uint32_t>& a_materialSlots, std::vector<std::uint8_t>& a_marks, Coordinator::TablesPublication& a_publication,
 			CoordinatorPump::PaceStats& a_pace)
@@ -1634,7 +1524,7 @@ namespace DCLF::Scene
 			snapshot.materials.resize(materialCount);
 			materialSlots.clear();
 			if (a_plan.replayMaterials) {
-				// The versions with their records (a grown slot's are 0 until its first write, which the log names).
+				// A grown slot's version is 0 until its first write, which the log names.
 				snapshot.materialVersion.resize(materialCount, 0);
 				snapshot.materialFrameVersion.resize(materialCount, 0);
 				a_marks.assign(materialCount, 0);
@@ -1662,7 +1552,6 @@ namespace DCLF::Scene
 			a_publication.materialSlots += materialCount;
 		}
 
-		// After a replay's jobs: a layer link's other end, the named slots' causes cleared, and the logs brought up to the tables'.
 		void FinishObjectReplay(SceneTables& a_snapshot, SceneTables& a_tables, const std::vector<std::uint32_t>& a_slots, std::vector<std::uint32_t>& a_causes,
 			std::size_t a_objectSlots, Coordinator::TablesPublication& a_publication, CoordinatorPump::PaceStats& a_pace)
 		{
@@ -1670,7 +1559,7 @@ namespace DCLF::Scene
 			auto& tables = a_tables;
 			auto& slots = a_slots;
 			auto& causes = a_causes;
-			// A layer link's other end: the layer's write notes only the layer.
+			// The layer's write notes only the layer, so copy the other end too.
 			for (const std::uint32_t slot : slots)
 				for (const std::uint32_t end : { tables.layerBase[slot], tables.layerOf[slot] })
 					if (end < a_objectSlots && !causes[end]) {
@@ -1681,14 +1570,12 @@ namespace DCLF::Scene
 				causes[slot] = 0;
 			a_publication.objectsReplayed += slots.size();
 			a_pace.replaySlots += slots.size();
-			// The logs: the tables' chunks shared (SharedEventLog), whatever the snapshot held let go.
 			snapshot.changeLog = tables.changeLog;
 			snapshot.publicationLog = tables.publicationLog;
 			snapshot.geometryLog = tables.geometryLog;
 			snapshot.materialLog = tables.materialLog;
 		}
 
-		// Extras rows by the blocks the block log names; else the rows and the log whole.
 		void ReplayExtras(SceneTables& a_snapshot, SceneTables& a_tables, const TablesReplayPlan& a_plan)
 		{
 			auto& snapshot = a_snapshot;
@@ -1706,8 +1593,7 @@ namespace DCLF::Scene
 			}
 		}
 
-		// The geometry columns on the lane (an import lease the snapshot drops is let go here, never on a pool worker): by the slots the
-		// geometry log names, else whole.
+		// On the lane, since an import lease the snapshot drops must never be let go on a pool worker.
 		void ReplayGeometryColumns(SceneTables& a_snapshot, SceneTables& a_tables, const TablesReplayPlan& a_plan, std::vector<std::uint8_t>& a_marks,
 			Coordinator::TablesPublication& a_publication)
 		{
@@ -1734,9 +1620,7 @@ namespace DCLF::Scene
 
 	void Coordinator::ReplayTableColumns(Tables& a_snapshot, bool a_replay)
 	{
-		// The jobs: one per object column (its named slots, by contiguous runs, skipping slots no cause of theirs covers it for), then one
-		// per chunk of material slots (records and versions, by runs). Each writes only its own column or record range of the snapshot,
-		// which only the pool holds, and reads the tables, which nothing writes meanwhile: pure, so the pool may run them in any order.
+		// Each job writes only its own column or record range of a snapshot only the pool holds, and reads tables nothing writes meanwhile.
 		auto& snapshot = a_snapshot;
 		auto& pace = paceStats;
 		auto& slots = replaySlots;
@@ -1754,7 +1638,6 @@ namespace DCLF::Scene
 			std::uint64_t columns = 0, skipped = 0, runs = 0;
 		};
 		std::vector<JobCounts> counts(jobs);
-		// The slots of a_list (sorted) a_keep takes, copied from a_from to a_to by contiguous runs.
 		auto copyRuns = [](auto& a_to, const auto& a_from, std::span<const std::uint32_t> a_list, auto&& a_keep, JobCounts& a_counts) {
 			const std::size_t limit = (std::min)(a_to.size(), a_from.size());
 			std::size_t runBegin = 0, runEnd = 0;
@@ -1806,7 +1689,6 @@ namespace DCLF::Scene
 				job(j);
 		};
 		const auto replayStart = std::chrono::steady_clock::now();
-		// The pool for a replay worth the chunks (FanoutMode: the lane alone, CS_DCLF_FANOUT, the parities' serial runs).
 		const bool worth = slots.size() >= kReplayMinSlots || materialSlots.size() >= kReplayMinMaterials;
 		if (jobs && worth && FanoutMode(jobs, 2) == 2) {
 			SceneScheduler::Executor().ParallelFor("CS.DCLF.Scene.PublishTables.Replay", jobs, 1, run);
@@ -1825,17 +1707,12 @@ namespace DCLF::Scene
 	namespace
 	{
 		/**
-		 * @brief PublishTables' spare (EntrySpaceTable's pattern): after each publication the free pooled snapshot nearest the logs is
-		 * brought up to the published one on the preparation pool, from it alone (immutable: the spare holds it until the lane takes the
-		 * spare), so the next publication replays one publication's changes on the lane, not every change since the snapshot's own
-		 * publication. What it brings up is what the logs name: the logged and sided object columns (with the layer links' other ends), the
-		 * material records, the extras rows, and the change, publication, material and extras logs (their chunks shared). The geometry
-		 * columns stay the publication's (a lease a snapshot drops is let go on the lane), as does everything copied whole or kept by
-		 * stamp. One spare at a time; the coordinator's thread but for the catch-up, which its job or the lane runs.
+		 * @brief After each publication the free pooled snapshot nearest the logs is caught up on the preparation pool, so the next
+		 * publication replays only one publication's changes on the lane. Geometry columns stay the lane's, since a dropped lease must be let go there.
 		 */
 		struct TablesSpare
 		{
-			/** @brief One catch-up, shared with its job (a new one per dispatch): whichever of the job and the lane claims it runs it. */
+			/** @brief A new one per dispatch. Whichever of the job and the lane claims it runs it. */
 			struct State
 			{
 				std::atomic<bool> claimed{ false };
@@ -1844,16 +1721,14 @@ namespace DCLF::Scene
 			SceneTables* target = nullptr;              // the pool's (which never lets go of its snapshots)
 			std::shared_ptr<const SceneTables> source;  // the publication it is brought up to
 			std::shared_ptr<State> state;
-			// The catch-up's scratch (the job's while busy).
 			std::vector<std::uint32_t> slots, causes;
 			std::vector<std::uint8_t> marks;
-			// Since startup: spares dispatched, run by the lane (not started), waited for (running).
 			std::uint64_t dispatched = 0, runByLane = 0, waited = 0;
 
 			TablesSpare() = default;
 			TablesSpare(const TablesSpare&) = delete;
 			TablesSpare& operator=(const TablesSpare&) = delete;
-			/** @brief A running catch-up waited for (one not started is left: nothing reads it again). */
+			/** @brief Waits for a running catch-up. One not started is left, since nothing reads it again. */
 			~TablesSpare()
 			{
 				if (state && state->busy.load(std::memory_order_acquire) && state->claimed.exchange(true, std::memory_order_acq_rel))
@@ -1861,14 +1736,13 @@ namespace DCLF::Scene
 			}
 		};
 
-		/** @brief The spare, made at the first publication (after the coordinator: gone before it). */
 		TablesSpare& Spare()
 		{
 			static TablesSpare spare;
 			return spare;
 		}
 
-		/** @brief a_spare brought up to a_source (a published snapshot) by what its logs name since a_spare's ends: pure on a_spare and a_scratch. */
+		/** @brief Pure on a_spare and a_scratch. */
 		void CatchUpTables(SceneTables& a_spare, const SceneTables& a_source, TablesSpare& a_scratch)
 		{
 			DCLF_ZONE("CS.DCLF.Scene.PublishTables.Spare");
@@ -1895,7 +1769,6 @@ namespace DCLF::Scene
 					name(change.slot, change.causes ? change.causes : kChangeAll);
 				for (const std::uint32_t slot : p.publicationLog.From(plan.publicationPosition))
 					name(slot, kChangeAll);
-				// As ReplayTableColumns' jobs, slot by slot: a column where a cause the slot gathered covers it.
 				ForLoggedColumns(s, p, [&](auto& a_to, const auto& a_from, std::uint32_t a_gate) {
 					const std::size_t limit = (std::min)(a_to.size(), a_from.size());
 					for (const std::uint32_t slot : slots)
@@ -1908,7 +1781,7 @@ namespace DCLF::Scene
 						if (slot < limit)
 							a_to[slot] = a_from[slot];
 				});
-				// A layer link's other end: the layer's write notes only the layer.
+				// The layer's write notes only the layer, so copy the other end too.
 				for (const std::uint32_t slot : slots)
 					for (const std::uint32_t end : { p.layerBase[slot], p.layerOf[slot] })
 						if (end < objectSlots && !causes[end]) {
@@ -1947,18 +1820,17 @@ namespace DCLF::Scene
 			}
 		}
 
-		/** @brief The publication's start: the spare's catch-up done (run here if its job has not started, else waited for), its source let go. */
+		/** @brief Runs the spare's catch-up here if its job has not started, else waits for it. */
 		void FinishTablesSpare()
 		{
 			auto& spare = Spare();
 			if (spare.state && spare.state->busy.load(std::memory_order_acquire)) {
 				if (!spare.state->claimed.exchange(true, std::memory_order_acq_rel)) {
-					// Not started (the pool is busy): the lane runs it, the job finding it claimed.
+					// Not started yet, so the lane runs it and the job finds it claimed.
 					CatchUpTables(*spare.target, *spare.source, spare);
 					spare.state->busy.store(false, std::memory_order_relaxed);
 					++spare.runByLane;
 				} else {
-					// Running on a worker: waited for, as ParallelFor waits for a claimed chunk.
 					spare.state->busy.wait(true, std::memory_order_acquire);
 					++spare.waited;
 				}
@@ -1967,10 +1839,6 @@ namespace DCLF::Scene
 			spare.target = nullptr;
 		}
 
-		/**
-		 * @brief After a publication (a_published): the free pooled snapshot nearest the logs that they still reach (none free: no spare),
-		 * brought up to it on the preparation pool (here under Policy::SerialFanout, or when the pool refuses the job).
-		 */
 		void DispatchTablesSpare(const std::vector<std::shared_ptr<SceneTables>>& a_pool, const std::vector<std::uint8_t>& a_replayable,
 			const std::shared_ptr<SceneTables>& a_published)
 		{
@@ -1998,8 +1866,7 @@ namespace DCLF::Scene
 			state->busy.store(true, std::memory_order_relaxed);
 			spare.state = state;
 			++spare.dispatched;
-			// The job reads the snapshots by address: the pool holds the spare, and the spare's source the publication, until the lane
-			// finishes it (FinishTablesSpare, at the next publication).
+			// The job reads the snapshots by address. The pool and the spare's source hold them until the lane finishes it.
 			auto job = [target = spare.target, source = spare.source.get(), state = std::move(state)]() {
 				if (state->claimed.exchange(true, std::memory_order_acq_rel))
 					return;
@@ -2015,11 +1882,7 @@ namespace DCLF::Scene
 
 	namespace
 	{
-		/**
-		 * @brief The free pooled tables past kFreeTables let go of, the nearest the logs kept (as Publish and the spare choose). A free one
-		 * holds its geometry slots' import leases (game vertex and index buffers) until it is replayed: kept, an idle copy would keep
-		 * buffers the scene let go of. In use, published, or the spare's target: kept.
-		 */
+		/** @brief A free snapshot holds its geometry slots' import leases until replayed, so idle extras would keep buffers the scene let go of. */
 		void TrimTablesPool(std::vector<std::shared_ptr<SceneTables>>& a_pool, std::vector<std::uint8_t>& a_replayable, const std::shared_ptr<SceneTables>& a_published,
 			std::uint64_t& a_trimmed)
 		{
@@ -2059,9 +1922,7 @@ namespace DCLF::Scene
 		std::size_t index = tablesPool.size();
 		{
 			DCLF_ZONE("CS.DCLF.Scene.PublishTables.Pool");
-			// Frees since the last publication go into the chain's open node, which this publication closes.
 			RetireIntoChain();
-			// The spare brought up to the last publication first (its source let go): the nearest snapshot, one publication behind.
 			FinishTablesSpare();
 			index = NearestPooledTables(tablesPool, tablesPoolReplayable, publishedTables, tables, pace);
 		}
@@ -2075,14 +1936,10 @@ namespace DCLF::Scene
 		const std::shared_ptr<Tables> target = tablesPool[index];
 		Tables& snapshot = *target;
 
-		// The snapshot equals the tables at its change log's end (WriteBoth keeps frame-start writes alike). Since then, replay: the
-		// logged per-object columns by the slots the change and publication logs name (a layer link's other end with them); the logs
-		// by appending what they gained; materials by the slots the material log names. The families whose stamps stood are kept.
-		// Everything else is copied whole. A new snapshot, or one a log no longer reaches, is copied whole. The coordinator's own
-		// columns (objectSeen, geometryTemplate) are not published.
+		// The snapshot equals the tables at its change log's end. Replay what the logs name since then, keep families whose stamps stood,
+		// and copy everything else whole.
 		const TablesReplayPlan plan = PlanTablesReplay(snapshot, tables, tablesPoolReplayable[index]);
-		// The material versions are held out with the records (replayed by the material log, or compared below); none are trusted after
-		// a whole copy of the objects.
+		// No material version is trusted after a whole copy of the objects.
 		bool versionsKnown = tablesPoolReplayable[index] != 0;
 		CopyRestWhole(snapshot, tables);
 		const auto restEnd = std::chrono::steady_clock::now();
@@ -2090,9 +1947,7 @@ namespace DCLF::Scene
 		publication.restMs += restMs;
 		pace.restMs += restMs;
 
-		// The replay's two halves, collected once on the lane: the object slots the logs name, sorted, with the causes each gathered
-		// (replaySlotCauses; kChangeAll for a publication-log slot), and the material slots the material log names, sorted. Their copies are
-		// jobs over disjoint columns and disjoint record ranges (ReplayTableColumns).
+		// The copies run as jobs over disjoint columns and record ranges.
 		const std::size_t objectSlots = tables.objects.size();
 		publication.objectSlots += objectSlots;
 		CollectReplaySlots(snapshot, tables, plan, objectSlots, replaySlots, replaySlotCauses, publication, pace, versionsKnown);
@@ -2100,7 +1955,6 @@ namespace DCLF::Scene
 		ReplayTableColumns(snapshot, plan.replay);
 		if (plan.replay)
 			FinishObjectReplay(snapshot, tables, replaySlots, replaySlotCauses, objectSlots, publication, pace);
-		// The extras, the families and the geometry columns (each its own zone: what the families' zone spends, by part).
 		DCLF_ZONE_NAMED(familiesZone, "CS.DCLF.Scene.PublishTables.Families", true);
 		{
 			DCLF_ZONE("CS.DCLF.Scene.PublishTables.Extras");
@@ -2109,7 +1963,6 @@ namespace DCLF::Scene
 		auto assign = [](auto& a_to, auto& a_from) { a_to = a_from; };
 		std::uint32_t keptFamilies = 0;
 		{
-			// The table families: kept by stamp, their marked rows replayed, or copied whole (TableFamilies::Publish).
 			DCLF_ZONE("CS.DCLF.Scene.PublishTables.TableFamilies");
 			keptFamilies = snapshot.families.Publish(tables.families, tablesPoolReplayable[index] != 0, publication.familiesKept);
 		}
@@ -2128,12 +1981,10 @@ namespace DCLF::Scene
 		tablesPoolReplayable[index] = 1;
 
 		Diagnostics::Notify(Diagnostics::TablesReplayed{ *this, snapshot, publication.published, plan.position, plan.geometryPosition, keptFamilies, plan.keepConstants });
-		// The publication log's readers are the snapshots alone (one behind the bound is copied whole).
+		// The snapshots are its only readers. One behind the bound is copied whole.
 		tables.publicationLog.Trim(1u << 16);
-		// Its node collects what is freed after it.
 		{
 			DCLF_ZONE("CS.DCLF.Scene.PublishTables.Retirement");
-			// The node closed here was held by the publications made so far (the one made next holds the new one).
 			retirement.Open().lastPublication = publicationSequence;
 			publishedRetirement = retirement.Publish();
 			snapshot.publishedSequence = publicationSequence;
@@ -2152,8 +2003,6 @@ namespace DCLF::Scene
 
 	namespace
 	{
-		// CheckPacedPublication's tables half: the first difference of a publication's tables from the coordinator's a_tables (by the
-		// columns every reader builds from, the log ends and the families' stamps); empty: none.
 		std::string FirstTablesDifference(const SceneTables& a_published, const SceneTables& a_tables)
 		{
 			std::string first;
@@ -2191,8 +2040,6 @@ namespace DCLF::Scene
 			return first;
 		}
 
-		// CheckPacedPublication's claims half: the first difference by key, both ways (a member only one side holds shows 0 on the other),
-		// then the drawn phases, of the published a_claims from a_reference (made whole); empty: none.
 		std::string FirstClaimsDifference(const SetSnapshot& a_reference, const SetSnapshot& a_claims)
 		{
 			std::string claimsFirst;
@@ -2215,9 +2062,7 @@ namespace DCLF::Scene
 
 	void Coordinator::CheckPacedPublication(const Tables& a_published, const SetSnapshot& a_claims)
 	{
-		// A publication that folded deferred passes in must equal the one an every-pass publication would have made at this pass: its
-		// tables the coordinator's (by the columns every reader builds from, the log ends and the families' stamps), its claims the set
-		// copied whole (claimsReference).
+		// A publication that folded deferred passes in must equal what an every-pass publication would have made.
 		auto& p = paceStats;
 		++p.parityChecks;
 		const std::string first = FirstTablesDifference(a_published, tables);

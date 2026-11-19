@@ -19,29 +19,21 @@ namespace DCLF
 	}
 
 	/**
-	 * @brief The coordinator's copy of the engine's scene: the records the hooks captured, applied in event order. Owned and
-	 * written by the scene work (ApplyEvents); the scene pass's pool evaluations read it while it is unchanged.
-	 *
-	 * CS_DCLF_MIRROR_PARITY checks it (Diagnostics/Scene, the mirror's records): a slice of the tracked objects captured live at the
-	 * frame's start against the mirror after the frame's events.
+	 * @brief The coordinator's copy of the engine's scene, built from the records the hooks captured and applied in event order.
+	 * Only ApplyEvents writes it. Pool evaluations read it while it is unchanged. CS_DCLF_MIRROR_PARITY checks it against live captures.
 	 */
 	class SceneMirror
 	{
-		// The mirror's report and its check (Diagnostics/Reports/SceneCoordinator.cpp, Diagnostics/Scene).
 		friend struct Diagnostics::SceneView;
 
 	public:
 		using KeySet = ankerl::unordered_dense::set<const void*>;
-		// By object and record type (Key), the fields the batch's updates carried.
 		using FieldMap = ankerl::unordered_dense::map<std::uintptr_t, std::uint32_t>;
 		static std::uintptr_t Key(const void* a_object, std::uint8_t a_type) { return reinterpret_cast<std::uintptr_t>(a_object) | a_type; }
 		/** @brief The record type (node 0, geometry 1, property 2, alpha 3) and key of an update. */
 		static std::pair<std::uint8_t, const void*> TypeOf(const SceneCapture::Update& a_update);
 
-		/**
-		 * @brief A capture's records copied off the lane, each stamped as Apply takes it (Prepare); Apply moves them in instead of copying.
-		 * One record kind each, in the capture's order.
-		 */
+		/** @brief A capture's records copied off the lane, so Apply can move them in instead of copying. */
 		struct Prepared
 		{
 			std::vector<SceneCapture::NodeRecord> nodes;
@@ -49,59 +41,41 @@ namespace DCLF
 			std::vector<SceneCapture::PropertyRecord> properties;
 			std::vector<SceneCapture::AlphaRecord> alphas;
 		};
-		/**
-		 * @brief One record kind (a_kind: node 0, geometry 1, property 2, alpha 3) of a capture into a_out, stamped with its sequence and
-		 * a_frame. Pure: reads the capture alone, so any thread, any order (ApplyMirrorEvents' pool prepare).
-		 */
+		/** @brief Pure. Reads the capture alone, so it runs on any thread in any order. a_kind is node 0, geometry 1, property 2, alpha 3. */
 		static void Prepare(const SceneCapture::Records& a_records, std::uint32_t a_kind, std::uint32_t a_frame, Prepared& a_out);
-		/** @brief A capture's records, newest wins; with a_prepared (Prepare's of the same capture, every kind) its records are moved in. */
+		/** @brief Newest wins. With a_prepared the records are moved in. */
 		void Apply(const SceneCapture::Records& a_records, Prepared* a_prepared = nullptr);
-		/** @brief Property and alpha records no geometry counts (none should be kept: parity only, a walk over both maps). */
+		/** @brief Parity only. None should be kept. */
 		std::size_t UnusedRecords() const;
-		/** @brief A detached subtree: its root (taken off its parent's children) and every object under it. */
 		void Detach(const void* a_root, std::span<RE::BSGeometry* const> a_geometries, std::span<const void* const> a_nodes);
 		/**
-		 * @brief A record whose object an event names attached out of the world: it left the world by no detach a hook saw (or its
-		 * memory is another object's now), so it and every record under it go. a_what names the new object for the report.
+		 * @brief Drops a record whose object an event names attached out of the world. It left by no detach a hook saw, or its memory now
+		 * holds another object, so it and every record under it go.
 		 */
 		void Evict(const void* a_key, std::string_view a_what);
-		/**
-		 * @brief A hook's values into the record, when the mirror holds one (an object out of the world has none). Returns the
-		 * record's type and key (a geometry named by its skin resolved), the key null when the mirror holds none.
-		 */
+		/** @brief Returns the record's type and key, with a null key when the mirror holds no record. An object out of the world has none. */
 		std::pair<std::uint8_t, const void*> Update(const SceneCapture::Update& a_update);
-		/**
-		 * @brief Update, keeping a_update's record for the replays by move (no copy): a_update's record is moved from after, its fields,
-		 * leaf, sequence and hidden site stay (the event's other readers read those).
-		 */
+		/** @brief Update that moves a_update's record into the replay log. Its fields, leaf, sequence and hidden site stay for other readers. */
 		std::pair<std::uint8_t, const void*> UpdateTaking(SceneCapture::Update& a_update);
-		/** @brief The property records whose material is a_material (a copy: an update may change the set). */
+		/** @brief Returns a copy, since an update may change the set. */
 		std::vector<const void*> PropertiesOfMaterial(const void* a_material) const;
-		/** @brief The geometry records on a skin instance (a copy: an update may change the set). */
+		/** @brief Returns a copy, since an update may change the set. */
 		std::vector<const void*> GeometriesOfSkin(const void* a_skin) const;
-		/** @brief The apply's work since the last call (the coordinator's attach report). */
 		struct Work
 		{
 			std::uint64_t replaysSkipped = 0;  // captures numbered at or after every kept update: no key looked up
 			std::uint64_t replaysWalked = 0;   // captures whose keys were looked up in the kept updates
 			std::uint64_t remembered = 0;      // updates kept for the replays
 			std::uint64_t forgotten = 0;       // updates two batches old let go
-			// The checks (SetChecking): skipped replays walked anyway (and kept updates they would have applied), prepared records
-			// compared with their capture's (and those that differ), batches whose log was checked against its chains (and those wrong).
 			std::uint64_t skipsChecked = 0, skipsWrong = 0, preparedChecked = 0, preparedWrong = 0, logsChecked = 0, logsWrong = 0;
 		};
 		Work TakeWork() { return std::exchange(work, {}); }
-		/**
-		 * @brief Parity (Policy::CheckMirrorApply): each skipped replay is walked as before the skip and must find nothing, each
-		 * prepared record is compared with its capture's before it is moved in, and each batch's update log with its key chains.
-		 */
 		void SetChecking(bool a_checking) { checking = a_checking; }
-		/** @brief A new batch: the recent updates older than two batches go. */
+		/** @brief Updates older than two batches go. */
 		void BeginBatch();
 		void Clear();
 
 		const SceneCapture::NodeRecord* Node(const void* a_key) const;
-		/** @brief A key's parent as its record names it (null: none, or no record): a mirror chain's step. */
 		const void* Parent(const void* a_key) const
 		{
 			const auto* record = Node(a_key);
@@ -110,19 +84,14 @@ namespace DCLF
 		const SceneCapture::GeometryRecord* Geometry(const void* a_key) const;
 		const SceneCapture::PropertyRecord* Property(const void* a_key) const;
 		const SceneCapture::AlphaRecord* Alpha(const void* a_key) const;
-		/** @brief A geometry's records (its node, parent, properties, alpha and fade node), null where the mirror holds none. */
+		/** @brief Null where the mirror holds no record. */
 		SceneCapture::LeafView Leaf(const void* a_key) const;
-		/**
-		 * @brief The record writes so far (Apply, Detach, Evict, Update, Clear), never reset: the scene pass's evaluations read the
-		 * mirror from the pool and assert it unchanged across them (it is written by ApplyEvents alone).
-		 */
+		/** @brief Never reset. Pool evaluations assert it unchanged across them. */
 		std::uint64_t Writes() const { return writes; }
 
 		/**
-		 * @brief A LOD gate's incoming root (its root mark's own hide: CoordinatorComponentContext::MarkRoot; cleared at the gate's outcome or its root's detach). Its own
-		 * kHidden is the gate's - the engine side hides the block before its attach and vetoes the engine's shows until the flip - so the
-		 * scene's hidden test ignores that one bit (Coordinator::HiddenForWalk): the blocks are classified, written, bound and committed
-		 * while hidden. Kept beside the records, not in them: a capture replaces a record whole, and the parity compares records alone.
+		 * @brief A LOD gate's incoming root keeps its kHidden bit set by the gate until the flip, so the hidden test ignores that bit.
+		 * Kept beside the records, since a capture replaces a record whole and the parity compares records alone.
 		 */
 		void SetGated(const void* a_key, bool a_gated)
 		{
@@ -135,7 +104,6 @@ namespace DCLF
 		bool Gated(const void* a_key) const { return !gated.empty() && gated.contains(a_key); }
 		std::size_t GatedCount() const { return gated.size(); }
 
-		// The record types (node 0, geometry 1, property 2, alpha 3) by name, and a record's field bits by name.
 		static constexpr std::array<const char*, 4> kTypeNames{ "node", "geometry", "property", "alpha" };
 		template <class Record>
 		static std::string Fields(std::uint32_t a_fields)
@@ -163,18 +131,15 @@ namespace DCLF
 		ankerl::unordered_dense::map<const void*, SceneCapture::GeometryRecord> geometries;
 		ankerl::unordered_dense::map<const void*, Counted<SceneCapture::PropertyRecord>> properties;
 		ankerl::unordered_dense::map<const void*, Counted<SceneCapture::AlphaRecord>> alphas;
-		// A skin instance -> the geometry records on it. RaceMenu's overlays share their base's, so a skin's update (its dismember
-		// partitions' shown flags) is every one's.
+		// RaceMenu's overlays share their base's skin instance, so a skin's update applies to every geometry on it.
 		ankerl::unordered_dense::map<const void*, std::vector<const void*>> geometriesBySkin;
 		void LinkSkin(const void* a_skin, const void* a_key);
 		void UnlinkSkin(const void* a_skin, const void* a_key);
-		// A material -> the property records naming it: a material's capture finds the properties that cache its alpha.
+		// A material's capture finds the properties that cache its alpha through this.
 		ankerl::unordered_dense::map<const void*, std::vector<const void*>> propertiesByMaterial;
 		void IndexMaterial(const void* a_property, const void* a_before, const void* a_after);
-		// The last two batches' updates, for the captures numbered before them (Apply): a log in push order (the oldest batch's leave
-		// from the front at BeginBatch), each entry chained to the one before it of its object and record type (Key). recentLast is a
-		// key's newest entry; indices count from the log's first entry ever (recentBase: the front's). recentNewest: the highest
-		// sequence kept (0: none), so a capture numbered at or after it replays nothing and looks nothing up.
+		// The last two batches' updates, replayed onto captures numbered before them. Each entry links to the previous one of its key.
+		// A capture numbered at or after recentNewest replays nothing.
 		struct Recent
 		{
 			std::uint64_t batch = 0;
@@ -187,7 +152,7 @@ namespace DCLF
 		std::uint64_t recentNewest = 0;
 		ankerl::unordered_dense::map<std::uintptr_t, std::uint64_t> recentLast;
 		void Remember(std::uintptr_t a_key, SceneCapture::Update&& a_update);
-		/** @brief The kept updates of a_key numbered after a_after (the replay's), newest first. */
+		/** @brief Newest first. */
 		void Later(std::uintptr_t a_key, std::uint64_t a_after, std::vector<const SceneCapture::Update*>& a_out) const;
 		Work work;
 		bool checking = false;
@@ -206,9 +171,8 @@ namespace DCLF
 	};
 
 	/**
-	 * @brief The mirror's records under a_root depth first, a_root included (ForEachLive's order): a_visit(key, record, state, below) for
-	 * each, where below is the state its children take (a copy of its own: a_state at a_root), at most a_limit keys. The visit answers as
-	 * ForEachLive's does. True when a key on the way had no record (it is passed over).
+	 * @brief Visits the mirror's records under a_root depth first, a_root included, as ForEachLive does.
+	 * True when a key on the way had no record. That key is passed over.
 	 */
 	template <class State, class Visit>
 	bool ForEachMirror(const SceneMirror& a_mirror, const void* a_root, State a_state, Visit&& a_visit, std::size_t a_limit = ~std::size_t{ 0 })
@@ -236,7 +200,6 @@ namespace DCLF
 		return missing;
 	}
 
-	/** @brief ForEachMirror without a state: a_visit(key, record). */
 	template <class Visit>
 	bool ForEachMirror(const SceneMirror& a_mirror, const void* a_root, Visit&& a_visit, std::size_t a_limit = ~std::size_t{ 0 })
 	{

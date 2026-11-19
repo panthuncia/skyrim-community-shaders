@@ -1,11 +1,7 @@
 #pragma once
 
-// The walk (CoordinatorWalk): the frame state both halves read, the per-frame set, the evaluation rounds' results and counters
-// (EvalResult, EvalCounters), the pass snapshot, the fan-out and the delta walk's counters. Walk.cpp, with Internal.h's
-// ShardScope and the joins (AccumulatePhase.cpp).
-//
-// A private base of Scene::Coordinator, included by Coordinator.h: names, types and initialisers are the coordinator's own,
-// and the functions over them are declared there.
+// The walk: the frame state both halves read, the per-frame set, the evaluation rounds' results and counters, and the fan-out.
+// A private base of Scene::Coordinator. Its functions are declared in Coordinator.h.
 
 #include "Features/DrawcallLimitFix/Core/Extensions/ClassifyInputs.h"
 
@@ -13,37 +9,31 @@ namespace DCLF::Scene
 {
 	struct CoordinatorWalk
 	{
-		// Per-frame entries are walked once per frame input: the last such frame, and whether this walk took them.
+		// Per-frame entries are walked once per frame input.
 		std::uint32_t perFrameFrame = ~0u;
 		bool perFrameWalked = true;
-		// Only for CS_DCLF_WALK_PARITY's dense rebuild: objects laid out densely, the entries' slots and indices left alone.
+		// Only for CS_DCLF_WALK_PARITY's dense rebuild.
 		bool denseWalk = false;
-		// The dense rebuild's verdicts, classified without the caches: what walk parity checks the kept ones against.
 		ankerl::unordered_dense::map<const RE::BSGeometry*, Ineligible> referenceReasons;
-		// Frame state the walk reads once and the joins reuse, so both halves agree.
+		// Read once by the walk and reused by the joins, so both halves agree.
 		bool sceneBuilt = false;  // the walk ran: the records are this frame's
 		bool frameResolveBuffers = false;
 		bool frameInterior = false;
 		std::array<std::uint32_t, 4> frameDecalBias{};
 		bool graphWasActive = false;  // the previous BuildFrame's resolveBuffers, to log the flip
-		/** @brief Why an entry's inputs change every frame (Tracked::perFrame); 0 when they do not. */
 		enum PerFrameTrait : std::uint32_t
 		{
 			kTraitEntryClass = 1u << 0,  // a per-frame entry class's entry (a face shape; the report's "face")
 			kTraitOwnerClass = 1u << 1,  // a per-frame owner class's entry (EntryClassContribution::everyFrame; the report's "actor")
-			// 1u << 2 unused (the report names the bits).
+			// 1u << 2 is unused but the report still names the bits.
 			kTraitSkin = 1u << 3,
 			kTraitAnimatedShading = 1u << 4,  // a controller on its shader or alpha property: its shading is named by events, never per frame
 			kTraitMoves = 1u << 5,            // a controller or a non-fixed rigid body on its chain, or a geometry type contribution's mover (its toggle on)
 			kTraitRootMoves = 1u << 6,        // its reference root's subtree moves (RootMoves)
 		};
-		// Entries per fan-out chunk (one EvalCounters each), and the fewest a round fans out for.
 		static constexpr std::size_t kFanoutGrain = 64;
 		static constexpr std::size_t kFanoutMinEntries = 128;
-		/**
-		 * @brief An evaluation chunk's counters, merged in chunk order before the round's merges, so first-named strings match the serial
-		 * walk.
-		 */
+		/** @brief A chunk's counters, merged in chunk order so first-named strings match the serial walk. */
 		struct EvalCounters
 		{
 			std::array<std::uint32_t, static_cast<std::size_t>(Ineligible::Count)> ineligible{};
@@ -58,7 +48,6 @@ namespace DCLF::Scene
 			CoordinatorMirror::MirrorReadStats mirror;  // mirrorReadSink
 			ankerl::unordered_dense::map<const RE::NiAVObject*, bool> rootMotion;  // RootMovesNow's answers
 		};
-		/** @brief What an evaluation decided for its entry's Tracked, applied by its merge. */
 		struct TrackedDelta
 		{
 			bool entryClassSet = false;                        // resolved once
@@ -71,10 +60,7 @@ namespace DCLF::Scene
 			std::uint32_t candidateFrame = 0;
 			Ineligible candidateReason = Ineligible::None;
 		};
-		/**
-		 * @brief One entry's evaluation for its merge: reads only the frozen mirror, the entry's own Tracked and the pass snapshot, never a
-		 * table, slot or other entry.
-		 */
+		/** @brief Reads only the frozen mirror, the entry's own Tracked and the pass snapshot. Never a table, slot or other entry. */
 		struct EvalResult
 		{
 			enum class Write : std::uint8_t
@@ -85,7 +71,6 @@ namespace DCLF::Scene
 				Record,    // the merge resolves the face, the geometry and the slots
 			};
 			EvaluateKind kind = EvaluateKind::Event;
-			// The light path (first round): kept, recorded, and KeepSkin's table half left to the merge.
 			bool light = false;
 			bool lightRecorded = false;
 			bool lightSkin = false;
@@ -101,7 +86,6 @@ namespace DCLF::Scene
 			bool focusOnly = false;  // with shadowOnly: a hidden actor part, drawn only by focus views (kObjectFocusOnly)
 			bool entryTaken = false;       // a taken entry class's: its snapshot is the merge's (ComponentsResolve)
 			bool referenceReason = false;  // the dense walk's: reason into referenceReasons
-			// Slot-free record inputs.
 			std::uint16_t partitionMask = 0;
 			bool lodChain = false;
 			bool skinCandidate = false;  // in this walk's skinnedObjects
@@ -113,8 +97,6 @@ namespace DCLF::Scene
 			ID3D11ShaderResourceView* shadowDiffuse = nullptr;
 			std::array<std::uint32_t, kOcclusionViews> occlusion{};
 			std::uint32_t skinLodWord = 0;  // SkinLodPartitionsOf (0 for a LOD chain)
-			// A classified entry: traits without root motion (PerFrameFrom's input), whether it may get a record, its sun entry and that
-			// root's motion now, its move key.
 			bool classified = false;
 			std::uint32_t traits = 0;
 			bool mayRecord = false;
@@ -123,10 +105,7 @@ namespace DCLF::Scene
 			const void* moveKey = nullptr;
 			const void* moveKeyOuter = nullptr;
 		};
-		/**
-		 * @brief What a pass's evaluations read in place of the live toggles and classify inputs (Api/ClassifyInputs.h): the toggles its
-		 * frame inputs carried (TakeFrameInputs; bound over the whole pass, ScenePass), the classify inputs sampled at its walk.
-		 */
+		/** @brief What a pass's evaluations read in place of the live toggles and classify inputs, bound over the whole pass. */
 		struct PassSnapshot
 		{
 			ToggleSet toggles;
@@ -136,22 +115,17 @@ namespace DCLF::Scene
 		std::shared_ptr<const FrameGlobals> passGlobals;  // the frame globals the pass binds, on the pool too
 		std::vector<EvalResult> evalResults;
 		std::vector<EvalCounters> evalCounters;
-		/** @brief The fan-out since the report. */
 		struct FanoutStats
 		{
 			std::uint64_t rounds = 0, parallelRounds = 0, entries = 0, parallelEntries = 0, chunks = 0;
 			std::uint64_t joinRounds = 0, joinParallelRounds = 0, joinEntries = 0;
 			std::uint64_t lightMissed = 0;  // light-path entries rewritten in full at the merge
-			// AddSubtrees' calls, roots and geometries, those prepared on the pool, and prepare / merge times (modes 1 and 2).
 			std::uint64_t subtreeRounds = 0, subtreeParallelRounds = 0, subtreeRoots = 0, subtreeParallelRoots = 0, subtreeGeometries = 0;
 			double subtreePrepareMs = 0.0, subtreeMergeMs = 0.0;
 		} fanoutStats;
 		bool fullEvaluation = true;  // a reset, a load or a live toggle: the next delta walk evaluates everything
 		std::uint32_t walkSerial = 0;
-		/**
-		 * @brief The per-frame entries with their addresses, trusted only while trackedLayout (bumped when `tracked` may move its values)
-		 * equals perFrameLayout.
-		 */
+		/** @brief The per-frame entries with their addresses, trusted only while trackedLayout equals perFrameLayout. */
 		struct PerFrameItem
 		{
 			RE::BSGeometry* geometry = nullptr;

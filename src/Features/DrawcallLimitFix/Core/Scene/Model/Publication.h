@@ -1,8 +1,7 @@
 #pragma once
 
-// What crosses from the coordinator to the render thread with a publication: the immutable ScenePublication, the publication
-// log's per-publication deltas (claims, placement plans, shading names, seed requests, gate flips) and their item types. Made on
-// the scene-work thread, read on the render thread once installed.
+// What crosses from the coordinator to the render thread with a publication: the immutable ScenePublication, and the
+// publication log's per-publication deltas. Made on the scene lane, read on the render thread once installed.
 
 #include <array>
 #include <cstdint>
@@ -23,11 +22,7 @@ namespace DCLF
 	struct PipelineCatalog;
 	struct EntrySpace;
 
-	/**
-	 * @brief What a scene revision is made of besides its publication's tables, lookups and catalog (the revision is its publication's
-	 * alone: MakeRevision reads those from the publication): the counts the latch and the shadow reservations size by - the pipeline
-	 * slots, and the shadow key slots the lookups resolved with the keys the tables' casters and occluders use.
-	 */
+	/** @brief The counts a scene revision sizes by besides its publication's own tables, lookups and catalog. */
 	struct RevisionRequest
 	{
 		std::uint32_t pipelines = 0;
@@ -35,16 +30,8 @@ namespace DCLF
 	};
 
 	/**
-	 * @brief A publication of the scene, complete and immutable: everything a frame reads of the scene, made by the
-	 * coordinator (PublishScene) and handed to the snapshot builder (IndirectDraws::PostSnapshotWork), which posts it with its
-	 * draws and its revision as one snapshot; the render thread adopts the newest snapshot whole (HandOverAtFrameStart installs its
-	 * publication). The claims' changes and the frame inputs each publication's pass made (the placement plan, the shading names, the
-	 * seed requests, the switches, the retired imports) travel on the publication log (PublicationDeltas), so a publication the builder
-	 * skipped loses none of them.
-	 */
-	/**
-	 * @brief The newest publication's tables and lookups, for a reader off the frame's path (texture streaming's worker). Not the publication:
-	 * its retirement chain stays on the frame's path, and the pieces' last releases are safe on any thread.
+	 * @brief The newest tables and lookups, for a reader off the frame's path such as texture streaming. It is not the publication,
+	 * so the retirement chain stays on the frame's path. The pieces' last releases are safe on any thread.
 	 */
 	struct PublishedScene
 	{
@@ -54,10 +41,8 @@ namespace DCLF
 	PublishedScene LatestPublishedScene();
 
 	/**
-	 * @brief Why a bound object waits to join the set (Coordinator::DecideSlot; SetStats::waitingBy's index), with a name for the logs.
-	 * kSetTransientWaits marks the reasons a load's objects settle from by themselves (a pipeline compiled, a texture imported, a buffer
-	 * grown): what a load's hold waits on (Core/Render/LoadHold.h). The rest wait on what a load does not bring: a decal's order, a layer's
-	 * partner, the reflection's last-commit rule, the refraction pipeline.
+	 * @brief Why a bound object waits to join the set, with a name for the logs. kSetTransientWaits marks the reasons a load's objects
+	 * settle from by themselves, which is what a load's hold waits on.
 	 */
 	inline constexpr std::size_t kSetWaitReasons = 14;
 	inline constexpr std::array<const char*, kSetWaitReasons> kSetWaitReasonNames{ "pipeline", "material", "shadow mask", "shared lookups", "geometry",
@@ -66,30 +51,27 @@ namespace DCLF
 	inline constexpr std::uint32_t kSetTransientWaits = (1u << 0) | (1u << 1) | (1u << 2) | (1u << 3) | (1u << 4) | (1u << 7) | (1u << 9) | (1u << 10) |
 	                                                    (1u << 12) | (1u << 13);
 
+	/** @brief Everything a frame reads of the scene, complete and immutable. The render thread adopts the newest one whole. */
 	struct ScenePublication
 	{
 		std::uint64_t sequence = 0;
 		std::uint32_t commitFrame = 0;        // the scene frame of the commit it applies (CommitSet's; stats and the install delay)
 		std::uint32_t togglesGeneration = 0;  // the toggles generation that commit was made under (FrameInputs)
-		// ... and the set: the frames' while it is installed (Toggles::Adopt), and its revision's (MakeRevision).
+		// The frames use this toggle set while the publication is installed.
 		ToggleSet toggles{};
 		std::uint32_t tablesGeneration = 0;  // the tables' generation (GetTablesGeneration while it is the frame's)
 		std::shared_ptr<const SceneTables> tables;
-		// The retirement chain's node published with its tables: the slots and imports retired after them are freed once no publication
-		// up to it lives. Held by the frame's path alone - the builder, the installed frame, the GPU executions that draw it, the readback
-		// slots armed with it (Readback::Armed::retirement) - so its holders are bounded by the frames in flight.
+		// Slots and imports retired after this node are freed once no publication up to it lives. Only the frame's path holds it,
+		// so its holders are bounded by the frames in flight.
 		std::shared_ptr<const void> retirementHold;
 		std::shared_ptr<const SetSnapshot> claims;
 		std::array<std::uint32_t, 3> lackingCount{};
-		// The waiting slots by the first reason of their wait (kSetWaitReasons), and whether its pass built the scene (no load was up):
-		// what a load's hold reads (Core/Render/LoadHold.h).
+		// Waiting slots by the first reason of their wait, read by a load's hold.
 		std::array<std::uint32_t, kSetWaitReasons> waiting{};
 		bool built = false;
-		// The coordinator's readiness signal for a load's hold: its pass built the scene and no slot waits on a transient reason. The render
-		// thread adds what only it sees (the draw families, the views' coverage, the claims installed and unchanged).
+		// The pass built the scene and no slot waits on a transient reason. The render thread adds what only it sees.
 		bool settled = false;
 
-		/** @brief The waiting slots whose reason is transient (kSetTransientWaits). */
 		std::uint32_t TransientWaiting() const
 		{
 			std::uint32_t count = 0;
@@ -97,37 +79,26 @@ namespace DCLF
 				count += (kSetTransientWaits >> why) & 1u ? waiting[why] : 0u;
 			return count;
 		}
-		// The lookups the draws were built with, parallel to the tables, and the catalog they were resolved from, whose
-		// set versions the frames that install it bind (DrawPipelines::HoldCatalog; a revision names its request's explicitly).
+		// The lookups the draws were built with and the catalog they were resolved from.
 		std::shared_ptr<const Lookups> lookups;
 		std::shared_ptr<const PipelineCatalog> catalog;
-		// The sun and light candidates as its pass left them (UpdateSunCandidates, UpdateLightCandidates).
 		std::shared_ptr<const EntrySpace> sunCandidates, lightCandidates;
 		std::uint64_t lightEntriesAppeared = 0;
-		// The shadow casters only the engine's cull draws, by root (Scene/EngineCasters.h); null: none.
+		// Shadow casters only the engine's cull draws, by root. Null for none.
 		std::shared_ptr<const Scene::EngineOnlySubset> engineCasters;
-		// The category nodes as its pass left them (immutable, copied again only when the set changed, a cell attach or detach): what the
-		// point lights' culls ask of the frame (IsCategoryNode), never the coordinator's set. The light entries change with every
-		// tracked root, so they travel as changes on the publication log instead (PublicationDeltas::lightEntries).
+		// Copied only when a cell attaches or detaches. The light entries change with every tracked root, so they travel as log changes instead.
 		std::shared_ptr<const ankerl::unordered_dense::set<RE::NiNode*>> categoryNodes;
-		// The scene revision's counts (the snapshot builder's).
 		RevisionRequest revision;
-		// The oldest event it is the first publication of (SceneTracker::Event::stampNs, stampFrame; 0: none), for the
-		// event-to-adoption latency (IndirectDraws' snapshot report).
+		// The oldest event this is the first publication of, for event-to-adoption latency. 0 for none.
 		std::uint64_t eventNs = 0;
 		std::uint32_t eventFrame = 0;
 	};
 
 	/**
-	 * @brief What FrameValues samples (dclf-architecture.md, "FrameValues"): the placements and palettes of the per-frame
-	 * movers (the walk's kept movers, every one), the sun entries of the roots the walk took, and the slots the walk wrote in
-	 * full - each an object's slot and the engine objects its row is read from, held. Made by the walk on the scene task, taken
-	 * by the render thread at the next frame's start (FrameView::TakePlacementPlans) and released there: its references are the engine's to
-	 * drop. The tables hold no placement or palette: these are the only rows the frames draw with.
+	 * @brief What FrameValues samples: per-frame movers, the sun entries of roots the walk took, and the slots it wrote in full.
+	 * The tables hold no placement or palette, so these are the only rows the frames draw with. References are held and dropped on the render thread.
 	 *
-	 * A plan is a delta of the placement set (the movers, and the listed roots with their dependents): what joined or changed, with
-	 * references, and what left, by key. FrameValues applies every plan in order onto the set it keeps (a reset plan clears it first and
-	 * carries the set whole), so none may be skipped: the publication log carries every plan since the last frame (TakeDeltas).
+	 * A plan is a delta of the placement set. FrameValues applies every plan in order, so none may be skipped.
 	 */
 	struct PlacementPlan
 	{
@@ -137,24 +108,18 @@ namespace DCLF
 			RE::NiPointer<RE::NiAVObject> listedRoot;  // its listed root, the sun entry (ResolveSunEntry); none: the entry is unbounded
 			std::uint32_t slot = kNoObjectSlot;
 			std::uint32_t layerSlot = kNoObjectSlot;  // its layer's row (WriteLayer): the same placement, its layer property's fade node
-			// A skin's palette block (SceneTables::boneOffset, boneRows), 0 rows without one: the engine's palette update, then its
-			// rows (PaletteRowsOf).
+			// A skin's palette block, 0 rows without one.
 			std::uint32_t boneOffset = 0, boneRows = 0;
-			// The skin partition the mirror holds for a skin's block (never dereferenced). RaceMenu's body morphs store a new partition
-			// straight into the skin instance, with no writer DCLF hooks: the producer compares the engine's against this one and
-			// captures the geometry again when they differ (FrameValues' SkinPartitionMoved).
+			// The skin partition the mirror holds, never dereferenced. RaceMenu's body morphs store a new partition straight into the skin
+			// instance with no hook, so the producer compares against this and captures the geometry again when they differ.
 			const void* skinPartition = nullptr;
-			// A first-person entry's (a CategoryRoot view's: ViewRootEntry). The engine moves the first-person skeleton's world translations to its
-			// root's space on the render thread (FUN_1414cb020 to FUN_1414cb270, and RenderDepth's block), within the read window: the
-			// producer never samples it, and the render thread takes a claimed one's row and palette at the frame's start, before
-			// the shift (FrameValues::Kick).
+			// The engine moves the first-person skeleton's translations into its root's space on the render thread (FUN_1414cb020), so the
+			// producer never samples it. The render thread takes its row at frame start, before the shift.
 			bool firstPerson = false;
-			// Its palette rows class (Api::PaletteRowsContribution; None: a skin's block, or none): a class's block (boneOffset and
-			// boneRows) is filled by the class's registration every frame, which may give its placement row (Features/Particles: a particle
-			// system's quads, five rows a particle, and its snapshot's world).
+			// A palette rows class's block is filled by the class's registration every frame, as for a particle system's quads.
 			Api::FrameValueItemClass itemClass = Api::FrameValueItemClass::None;
 		};
-		/** @brief An item as compared (raw pointers, never dereferenced): the coordinator's planned set, the parity's, FrameValues' kept one. */
+		/** @brief An item as compared. Raw pointers, never dereferenced. */
 		struct Key
 		{
 			const void* object = nullptr;
@@ -175,13 +140,13 @@ namespace DCLF
 			RE::NiPointer<RE::NiAVObject> root;
 			std::vector<Item> dependents;  // joined or changed (by geometry); their sun entry is the root's bound (listedRoot unused)
 		};
-		/** @brief Parity (the coordinator's full rebuild of the set after this plan): movers by object, roots by node with their dependents, sorted. */
+		/** @brief Parity only. The coordinator's full rebuild of the set after this plan, sorted. */
 		struct Check
 		{
 			std::vector<Key> movers;
 			std::vector<std::pair<const void*, std::vector<Key>>> roots;
 		};
-		// The set's changes, applied in this order: what left (movers, whole roots, single dependents), then what joined or changed.
+		// Applied in this order: what left, then what joined or changed.
 		std::vector<const void*> moversLeft;                             // by geometry
 		std::vector<const void*> rootsLeft;                              // by node, with every dependent
 		std::vector<std::pair<const void*, const void*>> dependentsLeft;  // (root node, geometry) of a root that stays
@@ -195,10 +160,7 @@ namespace DCLF
 		std::shared_ptr<const Check> check;  // parity only (the set after this plan, rebuilt whole): FrameValues compares its kept set
 	};
 
-	/**
-	 * @brief A slot whose shading FrameValues samples (SampleShading) at the next frame's start: named by its shading events (the
-	 * walk: NameShadingEvents) and by the accumulate phase's patch. Holds its property, so the sample never reads a freed one.
-	 */
+	/** @brief A slot whose shading FrameValues samples at the next frame start. Holds its property so the sample never reads a freed one. */
 	struct ShadingItem
 	{
 		RE::NiPointer<RE::BSShaderProperty> property;  // a BSLightingShaderProperty (the layer's for a layer's slot), or an effect property
@@ -207,11 +169,7 @@ namespace DCLF
 		bool member = false;      // a resident record's (SampleShading's a_member)
 	};
 
-	/**
-	 * @brief A fade root whose seed FrameValues samples (FadeState::StaticOf) in the frame that first draws its generation, into
-	 * its seed row (FadeSeedRow): listed, reseeded by a placement snap, or owned; or a node a coordinator component listed, whose seed
-	 * its feature takes at the frame's start (Api::CoordinatorComponentContext::RequestSeed; root: the component's slot). Holds the node.
-	 */
+	/** @brief A fade root or component node whose seed FrameValues samples in the frame that first draws its generation. Holds the node. */
 	struct FadeSeedItem
 	{
 		RE::NiPointer<RE::NiAVObject> node;
@@ -220,12 +178,9 @@ namespace DCLF
 		std::uint32_t row = 0;
 	};
 
-	/** @brief One member slot's shading field value, as the frame's start captured it (Extensions::CaptureShadingFields). */
 	using ShadingFieldValue = Api::ShadingFieldValue;
 
-	// The light entries (IsLightEntry): a key of lightDependents gaining its first geometry, losing its last, or every key gone, as
-	// the coordinator's changes (onto the log: PublicationDeltas::lightEntries) and the render thread's set kept from them. Changes, not
-	// copies of the set: it changes with every root tracked or untracked, every frame in motion.
+	// Light entry changes rather than copies of the set, since the set changes with every root tracked and every frame in motion.
 	struct LightEntryChange
 	{
 		const RE::NiAVObject* node = nullptr;
@@ -233,18 +188,13 @@ namespace DCLF
 	};
 
 	/**
-	 * @brief What one publication's passes made for the frame and the frame's start takes, carried by the publication log in
-	 * the publication's order: the main claims' changes against the publication before it (taken up to the installed one), and the
-	 * frame inputs (taken up to the newest one taken): the walks' placement plans, the slots named for their shading, the fade and
-	 * components' seed requests, the switches the walks applied (switchResync: PrimaryCull reads them all), the import leases of the geometry
-	 * slots cleared, and the published entry classes' membership changes (the shading fields' members: the actors' wetness).
+	 * @brief What one publication's passes made for the frame, carried by the publication log in order. Claims changes are taken up
+	 * to the installed publication, frame inputs up to the newest one taken.
 	 */
 	struct PublicationDeltas
 	{
 		std::uint64_t publication = 0;  // its publication's sequence
 		std::uint32_t commitFrame = 0;  // that publication's commit (the install delay)
-		// That publication's oldest event (ScenePublication::eventNs, eventFrame): the frame installing it, or one after it the
-		// builder skipped past to, measures the event to its adoption.
 		std::uint64_t eventNs = 0;
 		std::uint32_t eventFrame = 0;
 		std::vector<const RE::BSGeometry*> joined, left;
@@ -254,15 +204,12 @@ namespace DCLF
 		std::vector<const RE::NiAVObject*> switches;
 		bool switchResync = false;
 		std::vector<std::shared_ptr<const void>> retiredImports;
-		// By published entry class (Api::EntryClass): its membership writes (SceneTables::ClassMembers::changes), for the shading fields.
 		std::array<std::vector<Api::ClassMemberChange>, Extensions::kPublishedEntryClasses> classMembers;
 		std::vector<LightEntryChange> lightEntries;
-		// By coordinator component (Api::CoordinatorComponentId): the deltas its passes published (CoordinatorComponentContext::PublishDelta),
-		// handed to its adoption.
 		std::vector<std::vector<std::shared_ptr<const void>>> componentDeltas;
 	};
 
-	/** @brief What a publication is made from (the tables' logs, stamps and sizes, the lookups, the catalog): a pass that changed none of it publishes nothing. */
+	/** @brief A pass that changed none of these publishes nothing. */
 	struct PublishKey
 	{
 		std::array<std::uint64_t, 17> words{};
@@ -272,16 +219,16 @@ namespace DCLF
 	};
 	namespace Scene
 	{
-		/** @brief The latency histograms' buckets (frames): 0, 1, 2, 3, 4-7, 8-15, 16-63, 64+. */
+		/** @brief Latency histogram buckets in frames: 0, 1, 2, 3, 4-7, 8-15, 16-63, 64+. */
 		inline constexpr std::size_t kAgeBuckets = 8;
 		inline constexpr std::array<const char*, kAgeBuckets> kAgeBucketNames{ "0", "1", "2", "3", "4-7", "8-15", "16-63", "64+" };
 		constexpr std::size_t AgeBucket(std::uint32_t a_frames)
 		{
 			return a_frames < 4 ? a_frames : a_frames < 8 ? 4 : a_frames < 16 ? 5 : a_frames < 64 ? 6 : 7;
 		}
-		/** @brief A slot's set phases in given tables, 0 past the column (sized when the set is applied). */
+		/** @brief 0 past the column. */
 		inline std::uint8_t PhasesIn(const SceneTables& a_tables, std::uint32_t a_slot) { return a_slot < a_tables.setPhases.size() ? a_tables.setPhases[a_slot] : std::uint8_t{ 0 }; }
-		/** @brief Whether a main-pass build can draw with the pipeline slot: compiled into the set for the slot's current key in a_lookups. */
+		/** @brief Whether the pipeline is compiled into the set for the slot's current key. */
 		inline bool PipelineDrawableIn(const SceneTables& a_tables, const Lookups& a_lookups, std::uint32_t a_pipeline)
 		{
 			return a_pipeline < a_tables.pipelines.size() && a_pipeline < a_lookups.pipelines.size() && a_lookups.pipelines[a_pipeline].setIndex != Lookups::kNone &&

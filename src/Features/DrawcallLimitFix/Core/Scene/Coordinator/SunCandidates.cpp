@@ -1,5 +1,5 @@
-// The coordinator's sun and point-light candidate sets (scene lane, verdicts across the preparation pool): the dirty entries judged,
-// written into their EntrySpaceTable, and a snapshot published for the shadow builds when an entry moved.
+// The coordinator's sun and point-light candidate sets. Dirty entries are judged across the preparation pool, written into
+// their EntrySpaceTable, and published when an entry moved.
 
 #include "Internal.h"
 #include "Features/DrawcallLimitFix/Diagnostics/Zones.h"
@@ -14,11 +14,7 @@ namespace DCLF::Scene
 {
 	namespace
 	{
-		/**
-		 * @brief a_verdict(i) for every dirty entry, into a_out: across the preparation pool from the scene task (the verdicts read
-		 * the coordinator's state, which nothing writes meanwhile), else on the calling thread; each chunk under a_scope() (the pass's
-		 * ShardScope, as a worker's).
-		 */
+		/** @brief Runs across the pool from the scene task, since nothing writes the coordinator's state meanwhile. */
 		template <class Scope, class Verdict>
 		void DirtyVerdicts(bool a_parallel, std::size_t a_count, std::vector<std::pair<bool, std::uint64_t>>& a_out, Scope&& a_scope, Verdict&& a_verdict)
 		{
@@ -35,11 +31,7 @@ namespace DCLF::Scene
 				run(0, a_count);
 		}
 
-		/**
-		 * @brief After an update's writes: each geometry a_table let go of that no entry holds a row for, while its root (a_rootOf) is an
-		 * entry of the table, gives that entry a row: the entry is written again (a_write). Again until none is left: a rewrite lets go
-		 * only of the rows it no longer lists.
-		 */
+		/** @brief Gives a released geometry a row again in the entry that holds its root. Repeats until none is left. */
 		template <class RootOf, class Write>
 		void WriteReleasedRoots(EntrySpaceTable& a_table, RootOf&& a_rootOf, Write&& a_write)
 		{
@@ -139,13 +131,12 @@ namespace DCLF::Scene
 				} else {
 					lightSignature.erase(root);
 				}
-				// Its entry, written again: its index's version moves (the readers take it entry by entry).
 				if (written)
 					lightTable.Set(root, candidate ? LightDependentsOf(root) : nullptr, candidateVersions, [&](RE::BSGeometry* a_geometry) { return std::pair{ FindObject(a_geometry), std::uint8_t{ 0 } }; });
 			}
 			lightEntriesDirty.clear();
 		}
-		// A geometry moved between entries in this update, its new entry written before its old one let go of it: the new one again.
+		// A geometry moved between entries, its new entry written before the old one let go of it.
 		WriteReleasedRoots(
 			lightTable, [this](const RE::BSGeometry* a_geometry) {
 				const auto it = tracked.find(const_cast<RE::BSGeometry*>(a_geometry));
@@ -154,10 +145,8 @@ namespace DCLF::Scene
 			[this](const RE::NiAVObject* a_root) {
 				lightTable.Set(a_root, LightDependentsOf(a_root), candidateVersions, [&](RE::BSGeometry* a_geometry) { return std::pair{ FindObject(a_geometry), std::uint8_t{ 0 } }; });
 			});
-		// A snapshot for every walk that moved an entry (and the first): the readers bring themselves up to it entry by entry.
 		if (lightTable.changed || !lightCandidates)
 			lightCandidates = lightTable.Publish(lightCandidatesGeneration, publicationSequence + 1, [this](const RE::NiAVObject* a_root) { return OwnedRoot(a_root); });
-		// The roots it let go of, named by the publications made so far: retired through the chain.
 		for (auto& root : lightTable.TakeRetiredRoots())
 			HandBack(std::move(root));
 		Diagnostics::Notify(Diagnostics::CandidatesUpdated{ *this, false });
@@ -175,7 +164,6 @@ namespace DCLF::Scene
 			if (leaf && (reject == ShadowReject::None || reject == ShadowReject::VolumetricOnly))
 				views |= Subset::ViewBit(Subset::kCaster);
 		}
-		// The colour view: under an object class's category root (the LOD land root), the roots a colour view skips whole.
 		if (Eligibility::EngineColourReason(a_reason))
 			if (const auto entry = tracked.find(a_geometry); entry != tracked.end() && entry->second.categoryNode)
 				for (const auto categoryRoot : Extensions::RegisteredCategoryRoots())
@@ -188,7 +176,6 @@ namespace DCLF::Scene
 			return;
 		}
 		const auto [it, inserted] = engineCasterGeometries.insert_or_assign(a_geometry, EngineOnlyEntry{ a_reason, views });
-		// The first few in the log: the engine culls each one's root for the views it is in, never the whole scene.
 		static std::uint32_t logged = 0;
 		if (inserted && logged++ < 16)
 			logger::info("[DCLF] '{}' stays the engine's ({}, caster rule {}): the engine culls its root for {}{} ({} such)", a_geometry->name.c_str(),
@@ -200,9 +187,8 @@ namespace DCLF::Scene
 	{
 		if (engineCasterGeometries.empty())
 			return nullptr;
-		// Made again for every publication: a root is only safe to name while it is owned now. Each caster's light entry (an actor's root)
-		// or sun entry when the coordinator owns it, else the geometry itself (tracked: its reference goes through the retirement chain
-		// too), so every caster has a root and no view falls back to a whole cull for one.
+		// A root is safe to name only while it is owned now, so this is made again for every publication. Every caster gets a root,
+		// so no view falls back to a whole cull.
 		auto out = std::make_shared<EngineOnlySubset>();
 		bool any = false;
 		for (const auto& [geometry, engineOnly] : engineCasterGeometries) {
@@ -225,7 +211,6 @@ namespace DCLF::Scene
 				view.roots.push_back(root);
 				view.category.push_back(entry->second.categoryNode);
 				out->geometryRoots += root == geometry ? 1 : 0;
-				// Its ancestors by the mirror's chain, up to the scene root (or a chain another root already gave).
 				for (const void* parent = mirror.Parent(root); parent && view.ancestors.insert(parent).second; parent = mirror.Parent(parent)) {
 				}
 			}
@@ -263,8 +248,7 @@ namespace DCLF::Scene
 			std::vector<std::pair<bool, std::uint64_t>> verdicts;
 			DirtyVerdicts(inSceneTask, sunEntriesDirty.size(), verdicts, [this] { return ShardScope(*this, true); }, [&](std::size_t a_index) {
 				bool candidate = false;
-				// The dependents as a set (a sum of their hashes): a geometry moved between containers is listed again at the
-				// end, which changes nothing.
+				// A sum of hashes, so a geometry listed again at the end changes nothing.
 				std::uint64_t signature = 0;
 				if (const auto it = rootDependents.find(sunEntriesDirty[a_index]); it != rootDependents.end() && !it->second.empty()) {
 					candidate = true;
@@ -301,7 +285,6 @@ namespace DCLF::Scene
 				} else {
 					primarySignature.erase(root);
 				}
-				// Its subtree changed under it (an attach or detach below it): written again whatever its verdict, its plan to be made again.
 				written = written || (candidate && sunEntriesForced.contains(root));
 				if (written) {
 					const auto dependents = candidate ? rootDependents.find(root) : rootDependents.end();
@@ -311,7 +294,6 @@ namespace DCLF::Scene
 			sunEntriesDirty.clear();
 			sunEntriesForced.clear();
 		}
-		// As the light table's.
 		WriteReleasedRoots(
 			sunTable, [this](const RE::BSGeometry* a_geometry) {
 				const auto it = tracked.find(const_cast<RE::BSGeometry*>(a_geometry));
@@ -321,7 +303,6 @@ namespace DCLF::Scene
 				const auto dependents = rootDependents.find(a_root);
 				sunTable.Set(a_root, dependents != rootDependents.end() ? &dependents->second : nullptr, candidateVersions, [&](RE::BSGeometry* a_geometry) { return std::pair{ FindObject(a_geometry), PrimaryVerdictOf(a_geometry) }; });
 			});
-		// A snapshot for every walk that moved an entry (and the first): the readers bring themselves up to it entry by entry.
 		if (sunTable.changed || !sunCandidates)
 			sunCandidates = sunTable.Publish(sunCandidatesGeneration, publicationSequence + 1, [this](const RE::NiAVObject* a_root) { return OwnedRoot(a_root); });
 		for (auto& root : sunTable.TakeRetiredRoots())

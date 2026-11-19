@@ -1,12 +1,9 @@
 #pragma once
 
-// The parts a scene pass is timed by (CS_DCLF_PROFILE, CS_DCLF_STATS): BuildFrame's parts, the pass's sub-zones and the first
-// round's kinds, with their report names. Named by Coordinator::Stats and the walk's counters (State/Walk.h); included by
-// Coordinator.h, before the state.
+// The parts a scene pass is timed by under CS_DCLF_PROFILE and CS_DCLF_STATS, with their report names.
 
 namespace DCLF
 {
-	/** @brief The parts of Coordinator::BuildFrame, timed separately under CS_DCLF_PROFILE. */
 	enum class BuildPart : std::uint32_t
 	{
 		Walk,            // the setup before the loop (the walk's prologue, the joins' BindByMembership)
@@ -32,7 +29,7 @@ namespace DCLF
 		"dedup-hit", "loop-tail", "skinning"
 	};
 
-	/** @brief The sub-zones of a scene pass, each a Tracy zone and a Stats::scenePartMs sum (CS_DCLF_STATS). */
+	/** @brief Each part is a Tracy zone and a Stats::scenePartMs sum. */
 	enum class ScenePart : std::uint32_t
 	{
 		CategoryNodes,     // the attach queue's drain and RefreshCategoryNodes
@@ -57,7 +54,7 @@ namespace DCLF
 		Joins,             // BuildAccumulatePhase, new pipelines' blocks, bindings, lookups
 		Commit,            // CommitSet, after the joins
 		Publish,           // PublishScene: set applied, claims checked, tables and lookups published
-		// Nested in the parts above (ScenePartNested): the two halves of each fan-out.
+		// Nested in the parts above, the two halves of each fan-out.
 		EvaluateFanout,    // EvaluateEntry over the round (the pool from 128 entries)
 		EvaluateMerge,     // MergeEntry over the round, in order
 		JoinsFanout,       // EvaluateJoinPre and EvaluateJoin
@@ -74,13 +71,12 @@ namespace DCLF
 		"evaluate (fan-out)", "evaluate merge", "joins (fan-out)", "joins merge", "subtrees (fan-out)", "subtrees merge"
 	};
 
-	/** @brief A part measured inside another (the fan-outs' halves), left out of the parts' sum. */
+	/** @brief Measured inside another part, so left out of the parts' sum. */
 	inline constexpr bool ScenePartNested(std::size_t a_part)
 	{
 		return a_part >= static_cast<std::size_t>(ScenePart::EvaluateFanout);
 	}
 
-	/** @brief What the first evaluation round did with an entry, for its timing (CS_DCLF_PROFILE). */
 	enum class EvaluateKind : std::uint32_t
 	{
 		Light,        // the light path kept or moved it
@@ -93,10 +89,6 @@ namespace DCLF
 		Count
 	};
 
-	/**
-	 * @brief EvaluateKind's report names, by kind: the owned kinds' are the registered owner classes' (Extensions::OwnedEntriesLabel:
-	 * "actor", "actor without a record").
-	 */
 	struct EvaluateKindNames
 	{
 		std::string_view operator[](std::size_t a_kind) const

@@ -1,19 +1,15 @@
 #pragma once
 
-// The slot tables (CoordinatorSlots): the tables, their slot indices by key, object indices, the slot references counted from
-// the logs, stale and freed geometry slots and the geometry scan's index. Slots.cpp, written by every phase that writes records.
-//
-// A private base of Scene::Coordinator, included by Coordinator.h: names, types and initialisers are the coordinator's own,
-// and the functions over them are declared there.
+// The slot tables, their indices by key, object indices, slot references and the geometry scan's index.
+// A private base of Scene::Coordinator. Its functions are declared in Coordinator.h.
 
 namespace DCLF::Scene
 {
 	struct CoordinatorSlots
 	{
 		SceneTables tables;
-		// The walk the entries' objectStamp must match; a new walk or a teardown bumps it, invalidating every index at once.
+		// Bumping it invalidates every entry's object index at once.
 		std::uint32_t objectStamp = 1;
-		// The slots by key, and each material's slots.
 		ankerl::unordered_dense::map<const RE::BSGraphics::TriShape*, std::uint32_t> geometryIndex;
 		ankerl::unordered_dense::map<PipelineKey, std::uint32_t, PipelineKeyHash> pipelineIndex;
 		ankerl::unordered_dense::map<std::pair<const RE::BSShaderMaterial*, std::uint32_t>, std::uint32_t> materialIndex;
@@ -22,8 +18,7 @@ namespace DCLF::Scene
 		std::uint32_t materialVersions = 0;  // the last Tables::materialVersion handed out
 		std::array<std::uint64_t, kChangeCauseCount> reportedChangeCounts{};
 		std::vector<std::uint32_t> refreshedGeometry;  // geometry slots re-resolved in place this walk
-		// Slot liveness, counted from the logs: each object slot's references (slot, generation) and each geometry slot's next skin
-		// partition. A geometry slot goes stale by event; objects drawing it are rewritten (FinishDeltaWalk).
+		// Slot liveness, counted from the logs. Objects drawing a stale geometry slot are rewritten.
 		struct SlotReferences
 		{
 			static constexpr std::uint32_t kNone = ~0u;
@@ -42,24 +37,19 @@ namespace DCLF::Scene
 		} slotReferences;
 		std::vector<std::uint32_t> freedGeometry;
 		std::vector<std::uint32_t> staleGeometrySlots;
-		// Pinless imports: the geometry slots drawing a buffer DXVK moved, stale until resolved again (their leases hold the old
-		// storage they read meanwhile), and those still to be scheduled (ScheduleStaleGeometry). The pass's tables' slots: never the
-		// dense walk's.
+		// Geometry slots drawing a buffer DXVK moved. Their leases hold the old storage until they are resolved again.
 		ankerl::unordered_dense::set<std::uint32_t> relocatedGeometrySlots;
 		std::vector<std::uint32_t> relocatedGeometry;
 		/**
-		 * @brief GeometryScan's index (geometry slot to object slots), keys only and checked again at the scan: an entry may go stale, none
-		 * is missing. Every object slot under the head geometry slot its last write gave it (MergeWrite, WriteLayer), and every geometry
-		 * slot under each slot its nextPartition link was ever written to name (MergeWrite's partitions, ResolveEntryRangeSlots): a stale
-		 * slot's objects are those under the heads its links lead back to. The dense walk's tables are put back, so it indexes nothing.
+		 * @brief Geometry slot to object slots, keys only and checked again at the scan. An entry may go stale but none is missing.
+		 * A stale slot's objects are those under the heads its partition links lead back to.
 		 */
 		ankerl::unordered_dense::map<std::uint32_t, std::vector<std::uint32_t>> headObjects;
 		std::vector<std::uint32_t> objectHead, objectHeadAt;  // per object slot: its head (kNoPartition: none) and its index under it
 		ankerl::unordered_dense::map<std::uint32_t, std::vector<std::uint32_t>> linkedFrom;  // geometry slot: the slots linked to it
 		bool geometryResolvedLastWalk = false;
-		// CheckObjectSlots runs only after a slot was freed (or under parity): only then can a bound object reference a dead slot.
+		// Only a freed slot can leave a bound object pointing at a dead slot, so CheckObjectSlots runs only then.
 		bool slotsFreedThisFrame = true;
-		/** @brief What a geometry slot is resolved from. */
 		struct GeometrySource
 		{
 			const RE::BSGraphics::TriShape* key = nullptr;

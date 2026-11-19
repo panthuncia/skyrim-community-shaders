@@ -10,37 +10,28 @@
 namespace DCLF
 {
 	/**
-	 * @brief The per-frame engine values the frame evaluates (FrameView::RefreshFrameConstants, the render thread), kept out of the
-	 * tables: the coordinator owns the tables and publishes them, the frame owns these. Indexed
-	 * by the tables' slots; a slot whose key changed (reused for another pipeline) or tables made again is evaluated afresh.
-	 * Versions come from the frame's own counter, so they never collide with the tables'.
-	 *
-	 * Render thread writes (sized at the frame's start, evaluated at Prepass); the frame's builds read (kicked after the writes).
+	 * @brief The per-frame engine values the frame evaluates, kept out of the tables because the frame owns these and the coordinator
+	 * owns the tables. Indexed by the tables' slots. Versions come from the frame's own counter so they never collide with the tables'.
+	 * The render thread writes them, and the builds kicked after its writes read them.
 	 */
 	struct FrameTables
 	{
-		// Parallel to SceneTables::pipelines: the PerGeometry block of each pipeline (its template object's lighting pass, evaluated
-		// in full once, its frame globals refreshed every frame), whether it holds one, its version, and the key it is for.
+		// Each pipeline's PerGeometry block, evaluated in full once, with its frame globals refreshed every frame.
 		std::vector<GeometryConstants> geometryConstants;
 		std::vector<std::uint8_t> geometryConstantsValid;
 		std::vector<std::uint32_t> pipelineConstantsVersion;
 		std::vector<PipelineKey> pipelineKeys;
 		std::vector<std::uint32_t> pipelineBindings;  // the slot's SceneTables::pipelineBindingVersion its block is for
-		// Not the frame's: the technique rows (SceneTables::techniqueConstants) and the material records (SceneTables::materials) are
-		// the coordinator's, drawn from the installed publication.
+		// The technique rows and material records are the coordinator's, read from the installed publication.
 
 		std::uint32_t tablesGeneration = ~0u;
-		// The tables' pipeline family stamp (SceneTables::pipelinesStamp) the slots were last keyed to: the publication copies the family
-		// only when the stamp moved, so an unmoved stamp of the same tables generation is the same family, and nothing is compared.
+		// An unmoved stamp in the same tables generation means the same family, so nothing needs comparing.
 		std::uint64_t pipelinesStamp = ~0ull;
 		std::uint32_t versionCounter = 0;
 
 		std::uint32_t NextVersion() { return ++versionCounter; }
 
-		/**
-		 * @brief Sized and keyed to the tables' pipelines: a slot whose key or binding moved, or tables made again, holds no block. Only
-		 * when the family's stamp (a_stamp, SceneTables::pipelinesStamp) or the generation moved: every write of the family bumps the stamp.
-		 */
+		/** @brief A slot whose key or binding moved holds no block. Does nothing unless the stamp or the generation moved. */
 		void SyncPipelines(const std::vector<PipelineKey>& a_pipelines, const std::vector<std::uint32_t>& a_bindings, std::uint32_t a_tablesGeneration, std::uint64_t a_stamp)
 		{
 			if (a_tablesGeneration == tablesGeneration && a_stamp == pipelinesStamp)

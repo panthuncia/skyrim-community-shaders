@@ -1,6 +1,5 @@
-// The coordinator's accumulate phase (scene lane; join evaluations across the pool): the membership joins bound (pipeline and
-// material slots, records, the patch), residency kept or dropped, pipeline constants made from the posted pipeline frame, and the
-// shadow dependency index refreshed.
+// The coordinator's accumulate phase on the scene lane: membership joins bound, residency kept or dropped, pipeline constants
+// made from the posted pipeline frame, and the shadow dependency index refreshed.
 
 #include "Internal.h"
 #include "Features/DrawcallLimitFix/Diagnostics/Zones.h"
@@ -27,31 +26,26 @@ namespace DCLF::Scene
 {
 	namespace
 	{
-		// The settled keys asked of the pipeline lane, once each (the lane keeps every key it built).
+		// Asked once each, since the pipeline lane keeps every key it built.
 		ankerl::unordered_dense::set<PipelineKey, PipelineKeyHash> accumulateSettledAsked;
 
-		// The record flags a technique's objects carry: a feature's contribution (Api::TechniqueContribution; Features/TreeWind's
-		// kObjectTreeAnim for technique 12). Read once, the features installed before any scene work.
+		// Read once, since the features install before any scene work.
 		std::uint32_t TechniqueFlags(std::uint32_t a_technique)
 		{
 			static const auto& techniques = Extensions::RegisteredTechniques();
 			return Extensions::TechniqueObjectFlags(techniques, a_technique);
 		}
 
-		// The property flags whose objects take only the light volumes that light land (Api::LightVolumesContribution::landscapeFlags:
-		// Features/LocalLights' kLandscape and kNoLODLandFade; none without the contribution). Read once, like the techniques.
+		// Read once, like the techniques.
 		std::uint64_t LandscapeLightFlags()
 		{
 			static const std::uint64_t flags = Extensions::LightVolumes().landscapeFlags;
 			return flags;
 		}
 
-		// The shadow sets' emitted lists, by the order each is made again from (RefreshShadowSets' moved): texture, key, then one bit
-		// per occlusion view.
 		constexpr std::uint32_t kTextureOrder = 1u, kKeyOrder = 2u, kOcclusionOrder = 4u;
 
-		// A member in or out of its key's set, the key's place in the order moved with its lowest member (a_bit into a_moved); +1 / -1
-		// when the key appears or goes.
+		// Returns +1 or -1 when the key appears or goes.
 		template <class Index, class Order, class Key>
 		std::int32_t ShadowMember(Index& a_index, Order& a_order, const Key& a_key, std::uint32_t a_slot, bool a_add, std::uint32_t a_bit, std::uint32_t& a_moved)
 		{
@@ -123,8 +117,7 @@ namespace DCLF::Scene
 			stats.landBlend += a_patch.landBlend ? 1 : 0;
 			if (tables.extraOffset[objectId] == kNoExtraRows)
 				tables.extraOffset[objectId] = tables.AllocateExtras();
-			// The static parts (the draw adds the frame's: ExtrasFrame). Rows rewritten in a kept block change no offset, so they are
-			// noted below or the uploads would never send them.
+			// Rows rewritten in a kept block change no offset, so they are noted below or the uploads would never send them.
 			extrasWritten = WriteObjectExtras(objectId);
 		} else {
 			tables.FreeExtras(objectId);
@@ -133,9 +126,8 @@ namespace DCLF::Scene
 		before.NoteWrite(tables, objectId);
 		if (extrasWritten)
 			tables.NoteChange(objectId, kChangeExtras);
-		// Sampled by the next frame's values (the earliest it can join the set).
+		// The earliest it can join the set is the next frame's values.
 		NameShading(objectId, true);
-		// The features' components list what they keep by the patch (Features/Decals: the member decals' order and candidates).
 		ComponentsAccumulated(objectId, a_patch.decalKey);
 	}
 
@@ -164,7 +156,7 @@ namespace DCLF::Scene
 
 	void Coordinator::TakeAccumulateInputs()
 	{
-		// Latest wins (a replaced post is dropped on the render thread; neither holds engine references).
+		// Latest wins. Neither post holds engine references.
 		if (auto posted = channels.ancestorMapPosted.exchange(nullptr, std::memory_order_acq_rel)) {
 			ancestorMap = posted->map;
 			ancestorMapGeneration = posted->generation;
@@ -181,8 +173,7 @@ namespace DCLF::Scene
 
 	void Coordinator::MakeNewPipelineConstants()
 	{
-		// A used pipeline without a current block gets one from the newest posted pipeline frame (PostPipelineFrame; the port is pure).
-		// It draws until the render thread's own block supersedes it (RefreshFrameConstants). Without a sample yet the slot waits.
+		// It draws until the render thread's own block supersedes it. Without a sample yet the slot waits.
 		if (!scenePipelineFrame) {
 			for (std::size_t word = 0; word < tables.usedPipelineBits.size(); ++word)
 				for (std::uint64_t remaining = tables.usedPipelineBits[word]; remaining; remaining &= remaining - 1)
@@ -232,7 +223,6 @@ namespace DCLF::Scene
 	template <class Result, class Evaluate>
 	void Coordinator::EvaluateJoins(std::size_t a_count, bool a_pool, std::vector<Result>& a_results, Evaluate&& a_evaluate)
 	{
-		// By chunks of kFanoutGrain on the pool or here, each under a ShardScope.
 		a_results.clear();
 		a_results.resize(a_count);
 		auto body = [&](std::size_t a_begin, std::size_t a_end) {
@@ -248,7 +238,6 @@ namespace DCLF::Scene
 		}
 	}
 
-	// The frame's inputs to the joins, read once after BindByMembership, and the joins' timer and fading count.
 	struct Coordinator::JoinFrame
 	{
 		PartTimer& timer;
@@ -259,7 +248,6 @@ namespace DCLF::Scene
 		std::uint32_t fadingThisFrame = 0;
 	};
 
-	// A join's slots, static flags and key: the derivation cache's, or bound by the merge.
 	struct Coordinator::JoinBinding
 	{
 		std::uint32_t pipelineSlot = Tables::kSlotFree, materialSlot = Tables::kSlotFree, staticFlags = 0;
@@ -275,7 +263,6 @@ namespace DCLF::Scene
 		PartTimer timer(stats.partMs, &stats.accumulatePartMs);
 		TracyCZoneN(captureZone, "CS.DCLF.Accumulate.Capture", true);
 		Diagnostics::Notify<Diagnostics::ScenePoint::JoinsBegin>();
-		// The pass tables hold only this frame's membership joins.
 		accumulatedPasses.clear();
 		accumulatedLayerPasses.clear();
 		residentJoining.clear();
@@ -289,11 +276,10 @@ namespace DCLF::Scene
 		const auto& decalBiasMode = frameDecalBias;
 		const std::uint32_t biasWitness = decalBiasMode[1] | (decalBiasMode[2] << 8) | (decalBiasMode[3] << 16);
 		const bool ancestorValueOn = Extensions::AncestorValueOn();
-		// The cached derivation is served and also recomputed, and the two compared.
 		const bool derivedProbe = Policy::RecomputeCachedVerdicts(Policy::Verdicts::Derivation, passSerial);
 		JoinFrame frame{ timer, interior, biasWitness, ancestorValueOn, derivedProbe };
 
-		// Only the joins; every other record keeps its binding, or has none and is only a culling candidate.
+		// Only the joins. Every other record keeps its binding, or has none and is only a culling candidate.
 		accumulateOrder.clear();
 		TracyCZoneN(orderZone, "CS.DCLF.Accumulate.Order", true);
 		accumulateOrder.reserve(accumulatedPasses.size());
@@ -313,7 +299,6 @@ namespace DCLF::Scene
 		TracyCZoneEnd(orderZone);
 		TracyCZoneN(objectsZone, "CS.DCLF.Accumulate.Objects", true);
 		RunJoins(frame);
-		// The rebinds no join decided (refused, or no pass) leave as any rebind did.
 		for (const std::uint32_t slot : rebindingMembers)
 			LeaveMainForRebind(slot);
 		rebindingMembers.clear();
@@ -343,7 +328,6 @@ namespace DCLF::Scene
 
 	void Coordinator::RunJoins(JoinFrame& a_frame)
 	{
-		// The joins resolve no geometry slots: unchanged until the merges are done.
 		[[maybe_unused]] const std::size_t geometries = tables.geometries.size();
 		[[maybe_unused]] const std::uint32_t generation = tablesGeneration;
 		const std::size_t count = accumulateOrder.size();
@@ -380,8 +364,7 @@ namespace DCLF::Scene
 
 	void Coordinator::MergeJoin(const OrderEntry& a_entry, JoinResult& a_result, JoinFrame& a_frame)
 	{
-		// One join (a base record or its layer's). EvaluateJoin ran before, on the pool for a burst; here, in order, everything that
-		// reads or writes slots: the cache's slot half, pipeline and material slots and records, the derivation cache, the patch.
+		// Runs in order and does everything that reads or writes slots. EvaluateJoin ran before.
 		Tracked* trackedEntry = a_entry.tracked;
 		const bool layer = a_entry.layer;
 		auto& timer = a_frame.timer;
@@ -391,14 +374,12 @@ namespace DCLF::Scene
 		// Only records written this frame with verdict None, never shadow-only.
 		const std::uint32_t objectId = layer ? trackedEntry->layerSlot : trackedEntry->objectId;
 		auto& object = tables.objects[objectId];
-		// The cached derivation is used when its witnesses match and its slots still carry their keys (earlier joins in this loop
-		// may have re-keyed them).
+		// Earlier joins in this loop may have re-keyed the cached derivation's slots.
 		auto& derived = layer ? trackedEntry->layerDerived : trackedEntry->derived;
 		bool derivedHit = a_result.derivedWitness && derived.pipelineSlot < tables.pipelines.size() && tables.pipelineSlots.Alive(derived.pipelineSlot) &&
 		                  tables.pipelines[derived.pipelineSlot] == derived.key &&
 		                  derived.materialSlot < tables.materialSlotKey.size() && tables.materialSlots.Alive(derived.materialSlot) &&
 		                  tables.materialSlotKey[derived.materialSlot] == std::pair{ derived.material, derived.descriptors.pass };
-		// Witnesses held but slots gone: classify here.
 		if (a_result.derivedWitness && !derivedHit && !a_result.classified)
 			EvaluateJoin(a_entry, true, a_result);
 		auto* property = a_result.property;
@@ -412,7 +393,6 @@ namespace DCLF::Scene
 			descriptors = a_result.descriptors;
 		}
 		timer.Add(BuildPart::ClassifyStatic);
-		// The histogram is the scene phase's; a different verdict here moves the object between buckets.
 		if (!layer && reason != trackedEntry->candidateReason) {
 			--stats.ineligible[static_cast<std::size_t>(trackedEntry->candidateReason)];
 			++stats.ineligible[static_cast<std::size_t>(reason)];
@@ -423,7 +403,6 @@ namespace DCLF::Scene
 				trackedEntry->accumulateReasonFrame = sceneFrame;
 				trackedEntry->accumulateReasonPass = passSerial;
 			}
-			// A record but no bindings: stays native (kObjectNoBindings).
 			derived.valid = false;
 			return;
 		}
@@ -438,8 +417,7 @@ namespace DCLF::Scene
 			binding.key = derived.key;
 			tables.MarkMaterialUsed(binding.materialSlot);
 			joinMarkedMaterials.push_back(binding.materialSlot);
-			// A pipeline's template is always a member's property (KeepResidentsAlive refreshes it whenever the pipeline's first member or its held property changes), so a slot never
-			// points at a freed property. Its constants are evaluated from it at Prepass (RefreshFrameConstants).
+			// A pipeline's template is always a member's property, so a slot never points at a freed property.
 			if (!tables.PipelineUsed(binding.pipelineSlot)) {
 				tables.MarkPipelineUsed(binding.pipelineSlot);
 				joinMarkedPipelines.push_back(binding.pipelineSlot);
@@ -451,7 +429,7 @@ namespace DCLF::Scene
 			binding.pipelineSlot = BindJoinPipeline(a_result, descriptors, layer, timer);
 			const std::size_t retries = bindRetry.size();
 			if (!BindJoinMaterial(objectId, a_result, descriptors, derived, timer, binding.materialSlot)) {
-				// A drawn member whose material capture is on its way keeps drawing its current binding until the retry binds it.
+				// Keeps drawing its current binding until the retry binds it.
 				if (bindRetry.size() > retries && rebindingMembers.erase(objectId))
 					residentJoining.erase(a_entry.geometry);
 				return;
@@ -463,7 +441,7 @@ namespace DCLF::Scene
 		}
 
 		if (rebindingMembers.erase(objectId)) {
-			// A drawn member switches to its new binding in the publication that can draw it, and draws its current one until then.
+			// A drawn member switches binding in the publication that can draw it, and draws its current one until then.
 			if (std::uint32_t why = 0; !MainReadyWith(objectId, binding.pipelineSlot, binding.materialSlot, why)) {
 				StageBinding(objectId, binding.pipelineSlot, binding.materialSlot);
 				residentJoining.erase(a_entry.geometry);
@@ -476,7 +454,7 @@ namespace DCLF::Scene
 
 	void Coordinator::RequestSettledPipeline(const OrderEntry& a_entry, const JoinResult& a_result)
 	{
-		// The pipeline its object binds when the fade settles is built meanwhile, so that rebind finds it ready.
+		// Build the pipeline for the settled fade now, so that rebind finds it ready.
 		AccumulatedPass settled;
 		if (!SettledMembershipPass(mirror.Leaf(a_entry.geometry), a_entry.tracked->membershipDerived, settled))
 			return;
@@ -497,7 +475,7 @@ namespace DCLF::Scene
 		auto pipelineIt = pipelineIndex.find(key);
 		const bool newPipeline = pipelineIt == pipelineIndex.end();
 		if (!newPipeline && !tables.PipelineUsed(pipelineIt->second)) {
-			// The slot's first member: its property is the template.
+			// The slot's first member's property is the template.
 			tables.MarkPipelineUsed(pipelineIt->second);
 			joinMarkedPipelines.push_back(pipelineIt->second);
 			tables.geometryTemplate[pipelineIt->second] = property;
@@ -522,11 +500,9 @@ namespace DCLF::Scene
 		const bool alphaBlending = alpha && (alpha->flags & 1u);  // GetAlphaBlending
 		const std::uint32_t slot = AllocatePipelineSlot();
 		tables.pipelines[slot] = key;
-		// PerGeometry values (the engine's SetupGeometry) are evaluated per frame from the template (FrameTables).
 		tables.geometryTemplate[slot] = a_result.property;
 
-		// A port's key without technique rows reads no Lighting technique row (the Effect port's: Effect.hlsl); it holds the plain
-		// technique's (no shadow mask).
+		// A port's key without technique rows holds the plain technique's, with no shadow mask.
 		const auto& rules = Extensions::PortRules(descriptors.port);
 		tables.pipelineTechnique[slot] = TechniqueRowFor(rules.techniqueRows ? descriptors.pass : 0u);
 		stats.shadowMaskPipelines += tables.TechniqueShadowMask(slot) ? 1 : 0;
@@ -535,16 +511,12 @@ namespace DCLF::Scene
 		permutation.vertexShaderDescriptor = descriptors.rawVertex;
 		permutation.pixelShaderDescriptor = descriptors.rawPixel & ~descriptors.pixel;
 		permutation.extraShaderDescriptor = static_cast<std::uint32_t>(State::ExtraShaderDescriptors::InWorld);
-		// AdditiveLighting (State::UpdateLightingShaderPermutation): destination blend ONE. Only blended decals (group 2) and
-		// forward objects (FUN_1414b39d0's render flag 4) apply their alpha property; the key carries the blend mode.
+		// AdditiveLighting sets destination blend ONE. Only blended decals and forward objects (FUN_1414b39d0's flag 4) apply their alpha property.
 		if ((descriptors.decalGroup == 2 || descriptors.forward) && alphaBlending &&
 			static_cast<RE::NiAlphaProperty::AlphaFunction>((alpha->flags >> 5) & 0xF) == RE::NiAlphaProperty::AlphaFunction::kOne)  // GetDestBlendMode
 			permutation.extraShaderDescriptor |= static_cast<std::uint32_t>(State::ExtraShaderDescriptors::AdditiveLighting);
-		// The Lighting key bits' feature word, as their claimant's SetupGeometry hook sets it (the key carries the bits;
-		// Integrations/ExtendedTranslucency's material model).
 		permutation.extraFeatureDescriptor = RasterRefraction(key.rasterFlags) ? 0u : Extensions::LightingKeyPermutation(RasterLightingSpare(key.rasterFlags));
-		// A raw-permutation port's pass, as BSShader_BeginTechnique sets it (the Effect port's): raw vertex descriptor (Effect.hlsl
-		// tests SkyObject), the raw pixel bits the lookup dropped (GrayscaleToColor/ToAlpha, IgnoreTexAlpha), InWorld, no feature bits.
+		// A raw-permutation port's pass, as BSShader_BeginTechnique sets it.
 		if (rules.rawPermutation) {
 			permutation.vertexShaderDescriptor = descriptors.rawVertex;
 			permutation.pixelShaderDescriptor = descriptors.rawPixel & ~descriptors.pixel;
@@ -553,7 +525,7 @@ namespace DCLF::Scene
 		}
 		tables.permutations[slot] = permutation;
 		tables.pipelineBindingVersion[slot] = tables.NextVersion();
-		// Its technique mask is looked up with the next bindings update (a slot keyed again may keep its used bit).
+		// A slot keyed again may keep its used bit, so mark its mask for lookup.
 		sharedBindings.MarkMask(slot);
 		return slot;
 	}
@@ -565,13 +537,11 @@ namespace DCLF::Scene
 		const auto& descriptors = a_descriptors;
 		auto& derived = a_derived;
 		auto* property = a_result.property;
-		// Material state as the engine's SetupMaterial produces it for this pass descriptor.
 		const auto* material = a_result.material;
 		auto materialIt = materialIndex.find(std::pair{ material, descriptors.pass });
 		if (materialIt == materialIndex.end()) {
 			a_timer.Add(BuildPart::Dedup);
-			// The material port's record from the material's capture. Without one the render thread is asked once
-			// (ServeMaterialRequests) and the join waits, native meanwhile.
+			// Without a capture the render thread is asked once and the join waits, native meanwhile.
 			auto& ms = materialSnapshotStats;
 			const auto held = materialSnapshots.find(material);
 			if (held == materialSnapshots.end() || !held->second.held) {
@@ -589,7 +559,6 @@ namespace DCLF::Scene
 				return false;
 			}
 			held->second.frame = sceneFrame;
-			// Evaluated before the merges (PrepareJoinMaterials), else here (a join classified only in its merge, or no fan-out).
 			const MaterialEvaluation* evaluation = nullptr;
 			std::optional<MaterialEvaluation> here;
 			if (const auto prepared = joinMaterialPrepared.find(std::pair{ material, descriptors.pass }); prepared != joinMaterialPrepared.end()) {
@@ -601,8 +570,7 @@ namespace DCLF::Scene
 				++materialRecordStats.joinInline;
 			}
 			if (evaluation->outcome != MaterialEvaluation::Outcome::Made) {
-				// An input the frame lacks yet (e.g. Advanced Skin's textures): retry later. Else a class the port does not cover:
-				// native, counted.
+				// An input the frame lacks yet is retried later. Else the port does not cover the class.
 				derived.valid = false;
 				if (evaluation->outcome == MaterialEvaluation::Outcome::Retry) {
 					bindRetry.push_back(objectId);
@@ -613,11 +581,11 @@ namespace DCLF::Scene
 				return false;
 			}
 			++ms.made;
-			// As records hold it: the character light's t11 view is the frame's, never the record's (EvaluateMaterial).
+			// The character light's t11 view is the frame's, never the record's.
 			const MaterialRecord& record = evaluation->record;
 			const std::uint32_t slot = AllocateMaterialSlot();
 			materialOwners.resize(tables.materials.size());
-			// A second count on the material (alive: the capture holds one).
+			// The capture holds a count, so the material is alive.
 			if (materialOwners[slot])
 				EngineReleases::PushOwner(std::make_shared<MaterialReference>(std::move(materialOwners[slot])));
 			materialOwners[slot].reset(const_cast<RE::BSShaderMaterial*>(material));
@@ -629,7 +597,6 @@ namespace DCLF::Scene
 			materialIt = materialIndex.emplace(std::pair{ material, descriptors.pass }, slot).first;
 			ListMaterialDependent(material, slot);
 			NoteMaterialRecord(slot, held->second.held->snapshot);
-			// Its texture transforms counted as watched (nothing follows them: the frame values patch the rows).
 			++materialRecordStats.transformsWatched;
 			a_timer.Add(BuildPart::MaterialEval);
 		}
@@ -691,8 +658,6 @@ namespace DCLF::Scene
 		const auto& descriptors = a_descriptors;
 		auto& timer = a_frame.timer;
 		const std::uint32_t pipelineSlot = a_binding.pipelineSlot, materialSlot = a_binding.materialSlot;
-		// The patch into the scene phase's record, applied once and kept.
-		// A technique whose objects take the land blend rows (Api::ObjectExtras::LandBlend: Features/Landscape's MTLand, MTLandLODBlend).
 		const bool landBlendRecord = Extensions::TechniqueExtras(descriptors.technique) == Api::ObjectExtras::LandBlend;
 		AccumulatePatch patch;
 		patch.object = objectId;
@@ -700,7 +665,7 @@ namespace DCLF::Scene
 		patch.pipeline = pipelineSlot;
 		patch.projectedUV = descriptors.projectedUV;
 		patch.landBlend = landBlendRecord;
-		// Membership is CommitSet's, which keeps a record being bound out of the set (SetStats::patchedMember counts violations).
+		// Membership is CommitSet's, which keeps a record being bound out of the set.
 		patch.flags = (a_object.flags & kSceneKeptFlags) | a_binding.staticFlags | (accumulated->sunTest ? kObjectSunTest : 0u) |
 		              (accumulated->fadeDistance != 0.0f ? kObjectFadeTest : 0u) | (accumulated->heightTest ? kObjectHeightTest : 0u) |
 		              (patch.projectedUV ? kObjectProjectedUV : 0u) | (patch.landBlend ? kObjectLandBlend : 0u) |
@@ -710,7 +675,6 @@ namespace DCLF::Scene
 		patch.fadeDistance = accumulated->fadeDistance;
 		timer.Add(BuildPart::Record);
 		if (a_frame.ancestorValueOn) {
-			// The evaluation's ancestor value, when the ancestor map moved on.
 			if (a_result.ancestorSet) {
 				trackedEntry->ancestorValue = a_result.ancestorValue;
 				trackedEntry->ancestorMapGeneration = ancestorMapGeneration;
@@ -723,9 +687,7 @@ namespace DCLF::Scene
 				++stats.fadingFrames;
 			++stats.fadingDrawn;
 		}
-		// A member decal's order key (Features/Decals/DecalOrder.cpp): group, pass enum (the descriptor + its kind's base: Lighting's
-		// 0x4800002D, the Effect port's 0x4000002C), sub-pass. The engine draws a group's buckets in ascending enum, so effect decals precede
-		// Lighting ones.
+		// The engine draws a group's buckets in ascending pass enum, so effect decals precede Lighting ones.
 		if (descriptors.decalGroup) {
 			const std::uint32_t passEnum = accumulated->technique + Extensions::PortRules(descriptors.port).passEnumBase;
 			patch.decalKey = (std::uint64_t(descriptors.decalGroup) << 60) | (std::uint64_t(passEnum) << 27) | (std::uint64_t(accumulated->subPass & 7) << 24);
@@ -742,7 +704,6 @@ namespace DCLF::Scene
 
 	void Coordinator::SettleJoinResidency()
 	{
-		// Unpatched joins (a frame verdict, a material not ready) leave residency.
 		for (const auto* geometry : residentJoining) {
 			++residentStats.failed;
 			const auto entry = tracked.find(const_cast<RE::BSGeometry*>(geometry));
@@ -761,7 +722,7 @@ namespace DCLF::Scene
 				DropResidentSlot(entry->second.layerSlot, true);
 		}
 		residentLayerJoining.clear();
-		// A base and its layer are bound together (the set is by geometry): one without the other leaves.
+		// The set is by geometry, so a base without its layer leaves.
 		for (const auto& entry : accumulateOrder) {
 			const auto& t = *entry.tracked;
 			if (t.layerSlot == kNoObjectSlot || t.slot == kNoObjectSlot || IsResidentSlot(t.slot) == IsResidentSlot(t.layerSlot))
@@ -774,7 +735,7 @@ namespace DCLF::Scene
 		residentStats.resident += residents.size();
 		Diagnostics::Notify<Diagnostics::ScenePoint::ResidentsKept>();
 		{
-			// Slots are freed only when unreferenced, which the normal path trusts; parity neutralises any object that dangles.
+			// Slots are freed only when unreferenced. Parity neutralises any object that dangles.
 			if (Policy::NeutraliseDanglingSlots(slotsFreedThisFrame, passSerial))
 				CheckObjectSlots(frameResolveBuffers);
 			slotsFreedThisFrame = false;
@@ -783,9 +744,7 @@ namespace DCLF::Scene
 
 	void Coordinator::PrepareJoinMaterials(std::size_t a_count)
 	{
-		// Each (material, pass) a classified join keys that no slot holds, once, from its held capture (drained at the pass's start, stable
-		// over it): evaluated here, on the pool for a burst, so the merges only allocate and store. Read-only over materialIndex; a merge
-		// that keys one first leaves its evaluation unread.
+		// Each (material, pass) no slot holds is evaluated once here, so the merges only allocate and store.
 		auto& r = materialRecordStats;
 		auto& items = joinMaterialItems;
 		items.clear();
@@ -819,11 +778,10 @@ namespace DCLF::Scene
 
 	void Coordinator::LeaveMainForRebind(std::uint32_t a_slot)
 	{
-		// A record being rebound first leaves the set's main phases (a join never patches a member). The commit later in this pass
-		// readmits it if ready, keeping its claim (the frame draws the old record until the new publication); otherwise it leaves there.
+		// A join never patches a member, so a rebinding record first leaves the main phases. The commit later readmits it if ready.
 		if (a_slot < setPhasesNext.size() && (setPhasesNext[a_slot] & kSetMain))
 			++setStats.rebinding;
-		// Every view's member draws with its main bindings (a first-person member too), so it leaves too.
+		// Every view's member draws with its main bindings, so it leaves those too.
 		const auto phases = static_cast<std::uint8_t>(kSetMain | Extensions::Views().phases);
 		LeaveSet(a_slot, phases);
 		if (PhasesIn(tables, a_slot) & phases) {
@@ -835,7 +793,6 @@ namespace DCLF::Scene
 
 	bool Coordinator::RebindKeepsDrawing(std::uint32_t a_slot) const
 	{
-		// A base and its layer are bound and claimed together, so a layered record still leaves while it rebinds.
 		if (a_slot >= tables.objects.size() || a_slot >= setPhasesNext.size() || !(setPhasesNext[a_slot] & kSetMain) || !IsResidentSlot(a_slot))
 			return false;
 		return !tables.IsLayer(a_slot) && (a_slot >= tables.layerOf.size() || tables.layerOf[a_slot] == kNoObjectSlot);
@@ -844,8 +801,7 @@ namespace DCLF::Scene
 	void Coordinator::BindByMembership()
 	{
 		DCLF_ZONE("CS.DCLF.Accumulate.BindByMembership");
-		// The frame globals a membership pass reads changed (static sun bits, fade distances): rebind every resident.
-		// Each keeps drawing its current binding until its new one is ready, as any rebind does.
+		// The frame globals a membership pass reads changed, so every resident rebinds. Each keeps drawing until its new binding is ready.
 		if (const std::uint32_t witness = sceneInputs.membershipWitness; witness != membershipWitness) {
 			for (const std::uint32_t slot : residents)
 				if (const auto it = slot < tables.objectGeometry.size() ? tracked.find(const_cast<RE::BSGeometry*>(tables.objectGeometry[slot])) : tracked.end(); it != tracked.end())
@@ -853,23 +809,21 @@ namespace DCLF::Scene
 			bindQueue.insert(bindQueue.end(), residents.begin(), residents.end());
 			membershipWitness = witness;
 		}
-		// The frame's material sources know the Lighting shader only from the frame after it was found: wait until then, or every
-		// record of the load would fail the port.
+		// The material sources know the Lighting shader only from the frame after it was found. Without waiting every record of the load would fail.
 		if (!EngineShaders::Lighting() || !FrameGlobals::Current().material.vanilla.sampled || !FrameGlobals::Current().material.vanilla.shaderKnown)
 			return;
 		bindQueue.insert(bindQueue.end(), bindRetry.begin(), bindRetry.end());
 		bindRetry.clear();
 		const auto queue = std::exchange(bindQueue, {});
-		// Evaluate each element (EvaluateJoinPre), then merge in queue order. A slot may be queued twice; evaluations read the state
-		// before the merges, and the merge handles what earlier merges changed.
+		// A slot may be queued twice. Evaluations read the state before the merges, and each merge handles what earlier merges changed.
 		auto merge = [&](std::uint32_t a_slot, JoinPre& a_pre) {
 			const std::uint32_t slot = a_slot;
-			// Kept when evaluated but dropped since (its partner failed): evaluate again.
+			// Its partner failed after it was evaluated, so evaluate again.
 			if (a_pre.kind == JoinPre::Kind::Kept && !IsResidentSlot(slot))
 				EvaluateJoinPre(slot, a_pre);
 			if (a_pre.kind == JoinPre::Kind::Skip)
 				return;
-			// The binding's inputs are unchanged (skins, faces and movers are rewritten every frame for transforms alone).
+			// Skins, faces and movers are rewritten every frame for transforms alone.
 			if (a_pre.kind == JoinPre::Kind::Kept) {
 				++residentStats.membershipKept;
 				return;
@@ -879,14 +833,13 @@ namespace DCLF::Scene
 			auto& entry = tracked.find(geometry)->second;
 			(layer ? entry.membershipLayerDerived : entry.membershipDerived) = a_pre.derived;
 			if (a_pre.kind == JoinPre::Kind::Failed) {
-				// No pass: unbind, or the commit would keep it with a binding it no longer has. Rebound only when written again.
+				// Unbind, or the commit would keep it with a binding it no longer has.
 				if (IsResidentSlot(slot))
 					DropResidentSlot(slot, true);
 				return;
 			}
 			(layer ? accumulatedLayerPasses : accumulatedPasses).insert_or_assign(geometry, a_pre.pass);
 			(layer ? residentLayerJoining : residentJoining).insert(geometry);
-			// A drawn member stays in the set until its join knows the new binding is ready (MergeJoin).
 			if (RebindKeepsDrawing(slot))
 				rebindingMembers.insert(slot);
 			else
@@ -923,7 +876,7 @@ namespace DCLF::Scene
 
 	void Coordinator::EvaluateJoinPre(std::uint32_t a_slot, JoinPre& a_out) const
 	{
-		// Pure; PrimaryCull's pass reads the frame globals the ShardScope binds.
+		// Pure. PrimaryCull's pass reads the frame globals the ShardScope binds.
 		const std::uint32_t slot = a_slot;
 		auto& r = a_out;
 		r = JoinPre{};
@@ -931,7 +884,6 @@ namespace DCLF::Scene
 			return;
 		auto* geometry = const_cast<RE::BSGeometry*>(tables.objectGeometry[slot]);
 		const auto trackedIt = geometry ? tracked.find(geometry) : tracked.end();
-		// A layer slot joins with its own pass (its property's, hint 12).
 		const bool layer = tables.IsLayer(slot);
 		if (trackedIt == tracked.end() || (layer ? trackedIt->second.layerSlot : trackedIt->second.slot) != slot ||
 			trackedIt->second.objectStamp != objectStamp || trackedIt->second.candidateReason != Ineligible::None)
@@ -953,8 +905,6 @@ namespace DCLF::Scene
 			return;
 		}
 		r.pass = membership.pass;
-		// The root test (the root states' producer): a fade node's fade-out distance for BuildDraws' fade test (measured from the node's
-		// centre), and the height test where it asks for one (trees).
 		if (const auto* fadeNode = r.leaf.fadeNode) {
 			Api::RootTestOutput test;
 			Extensions::RootStatesTest(*fadeNode, FrameGlobals::Current(), test);
@@ -966,7 +916,7 @@ namespace DCLF::Scene
 
 	void Coordinator::EvaluateJoin(const OrderEntry& a_entry, bool a_classify, JoinResult& a_out) const
 	{
-		// Pure (any thread under a ShardScope). Anything touching slots or records is the merge's (BuildAccumulatePhase's join).
+		// Pure. Anything touching slots or records is the merge's.
 		auto* geometry = a_entry.geometry;
 		const Tracked& entry = *a_entry.tracked;
 		const AccumulatedPass* accumulated = a_entry.accumulated;
@@ -975,7 +925,6 @@ namespace DCLF::Scene
 		r = JoinResult{};
 		const std::uint32_t objectId = layer ? entry.layerSlot : entry.objectId;
 		r.geometrySlot = tables.objects[objectId].geometryIndex;
-		// The entry's held property reference (the template's, a material request's).
 		r.leaf = mirror.Leaf(geometry);
 		const auto* propertyRecord = layer ? r.leaf.layer : r.leaf.property;
 		r.property = entry.HeldProperty(layer);
@@ -984,12 +933,11 @@ namespace DCLF::Scene
 		r.material = static_cast<const RE::BSShaderMaterial*>(propertyRecord->material);
 		r.fadeState = FadeStateOf(propertyRecord);
 		r.alphaBelowOne = propertyRecord->materialAlpha < 1.0f;  // 1 without a material, or for any but a Lighting property
-		// The alpha test and threshold KeyJoin puts in the static flags (a flora's harvest raises the threshold in place).
+		// A flora's harvest raises the threshold in place.
 		r.alphaState = layer ? 0u : r.leaf.AlphaState();
 		const bool interior = frameInterior;
 		const auto& decalBiasMode = frameDecalBias;
 		const std::uint32_t biasWitness = decalBiasMode[1] | (decalBiasMode[2] << 8) | (decalBiasMode[3] << 16);
-		// The derivation cache's witnesses; whether its slots still hold is the merge's.
 		const auto& derived = layer ? entry.layerDerived : entry.derived;
 		r.derivedWitness = derived.valid && derived.generation == tablesGeneration && derived.geometrySlot == r.geometrySlot && derived.property == r.property &&
 		                   derived.material == r.material && derived.fadeState == r.fadeState && derived.technique == accumulated->technique &&
@@ -1000,10 +948,9 @@ namespace DCLF::Scene
 		Ineligible reason = Ineligible::None;
 		if (r.classified)
 			reason = layer ? Eligibility::Layer(r.leaf, &r.descriptors, accumulated) : Eligibility::Static(r.leaf, &r.descriptors, accumulated);
-		// A first-person decal draws in the first-person forward part.
 		if (r.classified && reason == Ineligible::None && !layer)
 			ViewDecalForward(entry, r.descriptors);
-		// Every time, cached or not: an object just hidden must lose its bindings now, or DCLF keeps drawing what the engine stopped.
+		// Every time, since an object just hidden must lose its bindings now or DCLF keeps drawing what the engine stopped.
 		if (reason == Ineligible::None)
 			reason = ClassifyFrame(entry);
 		r.reason = reason;
@@ -1014,7 +961,6 @@ namespace DCLF::Scene
 		r.kind = JoinResult::Kind::Joined;
 		if (r.classified)
 			KeyJoin(entry, layer, *propertyRecord, interior, r);
-		// The ancestor value (Light Limit Fix's room), when the ancestor map moved on (read-only here).
 		if (Extensions::AncestorValueOn() && entry.ancestorMapGeneration != ancestorMapGeneration) {
 			r.ancestorSet = true;
 			r.ancestorValue = Extensions::AncestorValue()->none;
@@ -1031,61 +977,53 @@ namespace DCLF::Scene
 
 	void Coordinator::KeyJoin(const Tracked& a_entry, bool a_layer, const SceneCapture::PropertyRecord& a_property, bool a_interior, JoinResult& a_out) const
 	{
-		// A classified join's pipeline key and static flags (EvaluateJoin's; pure).
 		const Tracked& entry = a_entry;
 		auto& r = a_out;
 		const auto& decalBiasMode = frameDecalBias;
 		const auto& descriptors = r.descriptors;
-		// What the Lighting join rules read (Api::LightingJoinView; read for Lighting keys only).
 		const Api::LightingJoinView view{ a_property, r.leaf, r.leaf.geometry->extraValue, r.leaf.node->facts, a_property.contributorBits };
 		using PropertyFlag = RE::BSShaderProperty::EShaderPropertyFlag;
 		const bool twoSided = (a_property.flags & static_cast<std::uint64_t>(PropertyFlag::kTwoSided)) != 0;
-		// A layer's draws apply no alpha property (render flags 0x41, engine notes).
+		// A layer's draws apply no alpha property.
 		const auto* alpha = a_layer ? nullptr : r.leaf.alpha;
 		const bool alphaTest = alpha && (alpha->flags & (1u << 9));  // GetAlphaTesting
 		const bool alphaBlending = alpha && (alpha->flags & 1u);     // GetAlphaBlending
-		// A decal's key carries the engine's fixed-function state indices (Records.h): the frame's depth-bias mode, the alpha
-		// property's blend and write modes.
+		// A decal's key carries the engine's fixed-function state indices.
 		std::uint32_t rasterFlags = twoSided ? kRasterTwoSided : 0u;
 		if (descriptors.decalGroup)
 			rasterFlags |= PackDecalRasterFlags(descriptors.decalGroup, descriptors.opaqueInDecalGroup ? 0u : decalBiasMode[descriptors.decalGroup & 3], descriptors.decalBlendMode,
 				               descriptors.decalWriteMode) |  // an opaque effect in decal group 1 has no bias (DeriveEffectDescriptors)
 			               (descriptors.opaqueInDecalGroup ? 0u : kRasterDecalNudge);
-		// As Terrain Blending's replay sets it: blend 1 / write 1 for terrain, blend off / write 1 for the no-blend meshes after it.
+		// As Terrain Blending's replay sets it.
 		if (descriptors.terrainGroup)
 			rasterFlags |= PackTerrainRasterFlags(descriptors.terrainGroup, descriptors.terrainGroup == 1 ? 1u : 0u, 1u);
 		// As the engine's blended draw (FUN_1414b39d0) leaves it.
 		if (descriptors.forward)
 			rasterFlags |= PackForwardRasterFlags(descriptors.forwardBlendMode, kForwardWriteMode, descriptors.forwardDepthTest, descriptors.forwardDepthWrite);
-		// A first-person decal's depth bias, in the bias bits a forward key leaves free.
 		if (descriptors.forward && descriptors.forwardDecalGroup)
 			rasterFlags |= ((decalBiasMode[descriptors.forwardDecalGroup & 3] & 15u) << kRasterDepthBiasShift) | kRasterDecalNudge;
 		if (descriptors.refraction)
 			rasterFlags |= PackRefractionRasterFlags(descriptors.refractionFalloff, descriptors.refractionClamp);
-		// The Lighting key bits' claimant's (Integrations/ExtendedTranslucency's material model; 0 while it isn't loaded). A refraction key
-		// never draws its Lighting pipeline, so its spare bits hold a billboard leaf's mode + 1 instead (kRasterRefractionBillboardShift).
+		// A refraction key never draws its Lighting pipeline, so its spare bits hold a billboard mode instead.
 		if (!descriptors.port && descriptors.refraction) {
 			if (entry.parentReason == Ineligible::Billboard)
 				if (const std::int32_t mode = BillboardModeOf(entry); mode >= 0)
 					rasterFlags |= static_cast<std::uint32_t>(mode + 1) << kRasterRefractionBillboardShift;
 		} else if (!descriptors.port)
 			rasterFlags |= Extensions::LightingKeyBitsOf(view) << kRasterLightingSpareShift;
-		// A port's key carries its program family's key bit (the Effect port's kRasterEffect; none for Lighting's).
 		const auto& family = Extensions::FamilyRulesOfKind(descriptors.port);
 		rasterFlags |= family.keyBit;
-		// A billboard leaf's mode + 1 in its family's spare bits, so the vertex stage turns it (ClassifyFrame admits it only with a mode).
 		if (family.turnedKeyBits && entry.parentReason == Ineligible::Billboard)
 			if (const std::int32_t mode = BillboardModeOf(entry); mode >= 0)
 				rasterFlags |= static_cast<std::uint32_t>(mode + 1) << family.spareShift;
 		r.key = PipelineKey{ descriptors.vertex, descriptors.pixel, rasterFlags, descriptors.pass,
 			VertexLayoutOf(tables.geometries[r.geometrySlot].vertexDesc) };
-		// ExternalEmittance::ShouldSuppress: interior, kExternalEmittance, and a reference without an emittance source.
+		// As ExternalEmittance::ShouldSuppress decides.
 		const bool suppress = a_interior && (a_property.flags & static_cast<std::uint64_t>(PropertyFlag::kExternalEmittance)) && !r.leaf.node->emittance;
 		r.staticFlags = (alphaTest ? kObjectAlphaTest : 0u) | (twoSided ? kObjectTwoSided : 0u) |
 		                (suppress ? kObjectSuppressExternalEmittance : 0u) |
 		                TechniqueFlags(descriptors.technique) |
-		                // A Blood effect keeps its threshold too (its family's alphaRefPassBits; AlphaTestRefOf: SetupGeometry's AlphaTestRef.x,
-		                // tested or not).
+		                // A Blood effect keeps its threshold too, tested or not.
 		                ((alphaTest || (alpha && (descriptors.pass & family.records.alphaRefPassBits))) ?
 		                        static_cast<std::uint32_t>(alpha->threshold) << kObjectAlphaThresholdShift :
 		                        0u) |
@@ -1107,7 +1045,7 @@ namespace DCLF::Scene
 		const auto* material = record ? static_cast<const RE::BSShaderMaterial*>(record->material) : nullptr;
 		const bool alphaBelowOne = record && record->materialAlpha < 1.0f;
 		const std::uint32_t alphaState = layer ? 0u : leaf.AlphaState();
-		// A blended fade starting or ending changes the synthetic pass's hint (BlendFading): the binding goes with it.
+		// A blended fade starting or ending changes the synthetic pass's hint, so the binding goes with it.
 		const bool fading = !layer && BlendFading(leaf, record) && Extensions::ObjectClassOn(ActiveToggles(), Api::ObjectClass::Forward);
 		return derived.valid && (derived.hint == kFadingHint) == fading && derived.alphaState == alphaState && derived.generation == tablesGeneration && derived.geometrySlot == tables.objects[a_slot].geometryIndex &&
 		       derived.property == property && derived.material == material && derived.fadeState == FadeStateOf(record) &&
@@ -1134,8 +1072,7 @@ namespace DCLF::Scene
 	void Coordinator::RefreshShadowSets(bool a_forceRebuild)
 	{
 		DCLF_ZONE("CS.DCLF.Capture.ShadowSets");
-		// ClearFrame rebuilds the public lists every walk; the dependency index holds membership across frames. Each index keeps its keys
-		// ordered by their lowest member (the order the sets are emitted in), and the textures that appear or go are noted as they do.
+		// The dependency index holds membership across frames. Each index keeps its keys ordered by their lowest member.
 		shadowTextureNet.clear();
 		bool rebuild = a_forceRebuild || shadowIndexNeedsRebuild;
 		std::vector<std::uint32_t> changed = std::move(shadowDirtySlots);
@@ -1143,14 +1080,11 @@ namespace DCLF::Scene
 		auto& counters = shadowSetStats;
 		++counters.refreshes;
 		counters.unjournaled += !rebuild && changed.empty() ? 1u : 0u;
-		// The journal is complete: every input write pushes its slot, and the invalidations no slot names (a table reset, a full walk)
-		// set shadowIndexNeedsRebuild. Dirty with nothing journaled (a slotless entry released) changes no membership: the lists are
-		// emitted again (the walk dropped them), the index is not made again. The parity rebuild (Policy::RebuildShadowSets) is the check.
+		// Every input write journals its slot, and invalidations with no slot set shadowIndexNeedsRebuild.
 		if (!rebuild) {
 			stats.shadowCasters = keptShadowCasters;
 			stats.shadowRejects = keptShadowRejects;
 		}
-		// Which emitted lists to make again from their order: every one after a rebuild.
 		std::uint32_t moved = rebuild ? ~0u : 0u;
 		if (rebuild)
 			ResetShadowIndex(changed);
@@ -1187,7 +1121,7 @@ namespace DCLF::Scene
 		auto& net = shadowTextureNet;
 		auto& changed = a_changed;
 		++shadowSetStats.rebuilds;
-		// Every texture held goes, and comes back as the slots are indexed again: only the difference is noted.
+		// Only the difference is noted.
 		for (const auto& entry : shadowTextureMembers)
 			--net[entry.first];
 		shadowIndexedInputs.clear();
@@ -1237,9 +1171,7 @@ namespace DCLF::Scene
 		auto& counters = shadowSetStats;
 		const bool rebuild = a_rebuild;
 		const std::uint32_t moved = a_moved;
-		// The public lists (the walk's merges started them again), in the kept order: no sort. Each emitted list is made again only when
-		// its order moved; the seen set follows the net changes (whole again after a rebuild, which can drop members unnoted). The
-		// tables take copies, flat copies of what the sets would rebuild by inserting every texture.
+		// Each list is made again only when its order moved.
 		if (moved & kTextureOrder) {
 			shadowEmittedTextures.clear();
 			shadowEmittedTextures.reserve(shadowTextureOrder.size());
@@ -1276,7 +1208,7 @@ namespace DCLF::Scene
 		tables.shadowTextureSeen = shadowEmittedSeen;
 		tables.shadowKeysUsed = shadowEmittedKeys;
 		tables.occlusionKeysUsed = shadowEmittedOcclusionKeys;
-		// Only what appeared or went (a texture that went and came back is no change), the releases first.
+		// A texture that went and came back is no change.
 		for (const auto& [texture, change] : net)
 			if (change < 0)
 				tables.shadowTextureChanges.emplace_back(texture, false);

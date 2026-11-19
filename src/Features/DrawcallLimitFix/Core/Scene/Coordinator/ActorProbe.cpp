@@ -1,6 +1,5 @@
-// The actor probe (dclf:actor-probe): at a scene pass's end, per actor in the tracked set, how DCLF binds its geometry - which
-// entries hold records, the fade the binding was derived under against the fade now, forward or deferred descriptors, the joins'
-// verdicts - and the entries whose binding disagrees with their state. The scene work's own data, read on its lane.
+// The actor probe (dclf:actor-probe). At a scene pass's end it logs how DCLF binds each actor's geometry and flags entries whose
+// binding disagrees with their state. Reads the scene work's own data on its lane.
 
 #include "Internal.h"
 
@@ -52,7 +51,6 @@ namespace DCLF::Scene
 		std::vector<std::pair<std::uint32_t, std::string>> shadowProbe;
 		std::map<std::uint32_t, ActorSummary> actors;
 		std::uint32_t wrongTotal = 0;
-		// The root row's fadeAmount (what FadeStateCS steps amountFade toward) against the node's and the mirror's.
 		const auto rootList = Extensions::RootListOf(tables);
 		for (auto& [geometry, entry] : tracked) {
 			const bool face = entry.entryClass == Api::EntryClass::FaceShape;
@@ -76,8 +74,7 @@ namespace DCLF::Scene
 				}
 			}
 			actor.faces += face ? 1u : 0u;
-			// The live bound (FrameValues samples it into the placement row: the cull's and the shadow lights' test) against the
-			// geometry's own transform and model bound and its actor's position (engine reads, diagnostics only).
+			// Engine reads, diagnostics only.
 			{
 				const auto& wb = geometry->worldBound;
 				const auto& t = geometry->world.translate;
@@ -129,7 +126,6 @@ namespace DCLF::Scene
 				continue;
 			actor.parts.push_back(std::format("'{}' face {} technique {} hint {} forward {} pass {:08X} pixel {:08X} property flags {:X} blend {} alpha {:.2f} fading now {}", name ? name : "",
 				face, d.technique, derived.hint, d.forward, d.pass, d.pixel, record ? record->flags : 0ull, leaf.AlphaBlending(), record ? record->materialAlpha : 1.0f, fadingNow));
-			// Up to twelve bound entries an actor for the CPU cull's shadow light verdicts.
 			if (actor.armed < 12) {
 				++actor.armed;
 				shadowProbe.emplace_back(entry.slot, std::format("actor {:08X} '{}'", formId, name ? name : ""));

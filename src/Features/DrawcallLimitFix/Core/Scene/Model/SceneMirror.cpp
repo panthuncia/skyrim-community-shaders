@@ -1,5 +1,5 @@
-// SceneMirror's record maintenance: captures applied newest-wins with the later updates replayed over them, detaches, evictions
-// and hook updates. Scene-work thread (the coordinator's event application).
+// SceneMirror's record maintenance: captures applied newest-wins with later updates replayed over them, detaches, evictions and
+// hook updates. Scene lane only.
 
 #include "Features/DrawcallLimitFix/Core/Scene/Model/SceneMirror.h"
 #include "Features/DrawcallLimitFix/Diagnostics/Zones.h"
@@ -43,7 +43,6 @@ namespace DCLF
 
 	void SceneMirror::Prepare(const Records& a_records, std::uint32_t a_kind, std::uint32_t a_frame, Prepared& a_out)
 	{
-		// What ApplyCapture's take stamps, done here; it only moves the records in (a superseded one is dropped there).
 		auto copy = [&a_records, a_frame](const auto& a_from, auto& a_into) {
 			a_into.assign(a_from.begin(), a_from.end());
 			for (auto& record : a_into) {
@@ -86,7 +85,7 @@ namespace DCLF
 		ApplyCapture(a_records, a_prepared);
 		if (replaying || !a_records.sequence)
 			return;
-		// Numbered at or after every kept update: none is newer than what it read.
+		// Captured after every kept update, so no update is newer than what it read.
 		if (a_records.sequence >= recentNewest) {
 			++work.replaysSkipped;
 			if (checking) {
@@ -108,7 +107,7 @@ namespace DCLF
 		}
 		++work.replaysWalked;
 		DCLF_ZONE("CS.DCLF.Scene.Mirror.Replay");
-		// The updates numbered after this capture's start: their writes may be newer than what it read.
+		// Updates numbered after this capture started may be newer than what it read.
 		replaying = true;
 		for (const auto& n : a_records.nodes)
 			Replay(Key(n.key, 0), a_records.sequence);
@@ -123,7 +122,7 @@ namespace DCLF
 
 	namespace
 	{
-		/** @brief ApplyCapture's parity: every prepared record is its capture's, stamped with the capture's sequence. */
+		/** @brief Parity check that every prepared record matches its capture. */
 		void CheckPrepared(const Records& a_records, const SceneMirror::Prepared& a_prepared, std::uint64_t& a_checked, std::uint64_t& a_wrong)
 		{
 			const std::uint64_t sequence = a_records.sequence;
@@ -148,8 +147,7 @@ namespace DCLF
 	{
 		DCLF_ZONE("CS.DCLF.Scene.Mirror.Capture");
 		++applied;
-		// A record a newer capture took stays (two loader threads capture subtrees naming one shared property or ancestor; the
-		// older capture can be pushed last). A prepared record is stamped already, and moved in.
+		// A record a newer capture took stays. Two loader threads can capture one shared property and push the older capture last.
 		const std::uint64_t sequence = a_records.sequence;
 		auto take = [&](auto& a_record, const auto& a_captured, auto* a_ready) {
 			if (a_record.key && a_record.sequence > sequence) {
@@ -171,7 +169,7 @@ namespace DCLF
 								  a_prepared->properties.size() == a_records.properties.size() && a_prepared->alphas.size() == a_records.alphas.size()));
 		if (a_prepared && checking)
 			CheckPrepared(a_records, *a_prepared, work.preparedChecked, work.preparedWrong);
-		// Properties and alphas first (their values), then the geometries that count their uses.
+		// Properties and alphas first, then the geometries that count their uses.
 		for (std::size_t i = 0; i < a_records.properties.size(); ++i) {
 			auto& record = properties[a_records.properties[i].key].record;
 			const void* before = record.key ? record.material : nullptr;
@@ -186,7 +184,7 @@ namespace DCLF
 				++superseded;
 				continue;
 			}
-			// The new record's uses first, then the old one's let go: a property both name keeps its record.
+			// Count the new record's uses before dropping the old one's, so a property both name keeps its record.
 			for (const void* key : { g.property, g.layerProperty })
 				if (key)
 					++properties[key].uses;
@@ -206,9 +204,7 @@ namespace DCLF
 			if (g.skin)
 				LinkSkin(g.skin, g.key);
 		}
-		// A property or alpha the capture took that no geometry counts (none can be: each comes with its geometry) is not kept. Only
-		// this capture's keys can be uncounted (every other record is a geometry's, and Use drops one at its last use): by key, not a
-		// walk over the maps (UnusedRecords' parity).
+		// Each property or alpha comes with its geometry, so only this capture's keys can be uncounted. Checking by key avoids walking the maps.
 		for (const auto& p : a_records.properties)
 			if (const auto it = properties.find(p.key); it != properties.end() && !it->second.uses) {
 				IndexMaterial(p.key, it->second.record.material, nullptr);
@@ -226,8 +222,6 @@ namespace DCLF
 	{
 		++writes;
 		++detached;
-		// The root leaves its parent's children (the engine's detach, which the hook ran before): its slot null, the trailing nulls
-		// trimmed (the capture's).
 		if (const auto root = nodes.find(a_root); root != nodes.end())
 			if (const auto parent = nodes.find(root->second.parent); parent != nodes.end()) {
 				auto& children = parent->second.children;
@@ -272,10 +266,9 @@ namespace DCLF
 				if (child)
 					stack.push_back(child);
 		}
-		// The RTTI is static data: its name is safe to read; the record's own name may not be.
+		// The RTTI is static data so its name is safe to read. The record's own name may not be.
 		const auto* rtti = static_cast<const RE::NiRTTI*>(root->rtti);
-		// A light (NiPointLight, NiSpotLight, NiAmbientLight, NiDirectionalLight) leaves by ShadowSceneNode's queued removal, which
-		// detaches it by no hooked function, and a camera likewise; DCLF draws neither, so they are counted apart.
+		// Lights leave by ShadowSceneNode's queued removal and cameras likewise, through no hooked function. DCLF draws neither.
 		if (rtti && rtti->name && std::string_view(rtti->name).starts_with("Ni") &&
 			(std::string_view(rtti->name).ends_with("Light") || std::string_view(rtti->name) == "NiCamera")) {
 			++lightEvictions;
@@ -311,7 +304,6 @@ namespace DCLF
 	void SceneMirror::BeginBatch()
 	{
 		++batch;
-		// The log is in push order, so batch order: the batches older than two leave from its front (O(those), not a walk over the kept).
 		while (!recent.empty() && recent.front().batch + 2 < batch) {
 			if (const auto it = recentLast.find(recent.front().key); it != recentLast.end() && it->second == recentBase)
 				recentLast.erase(it);
@@ -322,8 +314,6 @@ namespace DCLF
 		if (recent.empty())
 			recentNewest = 0;
 		if (checking) {
-			// Parity: the chains from recentLast cover the log exactly, each entry once under its own key, and no kept update is newer
-			// than recentNewest.
 			++work.logsChecked;
 			std::size_t chained = 0;
 			bool wrong = false;
@@ -365,8 +355,7 @@ namespace DCLF
 		++writes;
 		++updates;
 		const auto result = UpdateRecord(a_update);
-		// Kept by the key it names (a geometry named by its skin, by its key once resolved): the record moved, the rest copied (the
-		// caller's event still reads them).
+		// The record is moved and the rest copied, since the caller's event still reads them.
 		const auto [type, key] = TypeOf(a_update);
 		if (const void* object = result.second ? result.second : key) {
 			SceneCapture::Update kept;
@@ -385,7 +374,6 @@ namespace DCLF
 		const auto it = recentLast.find(a_key);
 		if (it == recentLast.end())
 			return;
-		// The key's chain, newest first, back to the log's front.
 		for (std::uint64_t at = it->second; at != ~0ull && at >= recentBase;) {
 			const auto& r = recent[static_cast<std::size_t>(at - recentBase)];
 			if (r.update.sequence > a_after)
@@ -396,7 +384,7 @@ namespace DCLF
 
 	void SceneMirror::Replay(std::uintptr_t a_key, std::uint64_t a_after)
 	{
-		// Then in their order (a later update may have been pushed first).
+		// A later update may have been pushed first, so apply them in sequence order.
 		std::vector<const SceneCapture::Update*> later;
 		Later(a_key, a_after, later);
 		if (later.empty())
@@ -420,12 +408,11 @@ namespace DCLF
 					if (const auto it = a_map.find(key); it != a_map.end()) {
 						auto& record = a_get(it->second);
 						held = true;
-						// Written before the record's capture started: the capture has it, and may have newer values.
+						// Written before the record's capture started, so the capture already has it and may hold newer values.
 						if (a_update.sequence && a_update.sequence < record.sequence) {
 							++stale;
 							return;
 						}
-						// A leaf is applied whole below (Apply counts the old record's uses off before it replaces it).
 						if (!a_update.leaf)
 							record.Assign(a_record, a_update.fields);
 					}
@@ -436,8 +423,7 @@ namespace DCLF
 					if (!key)
 						if (const auto it = geometriesBySkin.find(a_record.skin); it != geometriesBySkin.end() && !it->second.empty())
 							key = it->second.front();
-					// A skin's update moves its instance's lookup (RaceMenu stores a cloned instance straight into an overlay: FrameValues'
-					// SkinPartitionMoved captures it).
+					// RaceMenu stores a cloned skin instance straight into an overlay, so a skin update moves the lookup.
 					const auto before = geometries.find(key);
 					const void* skinBefore = before != geometries.end() ? before->second.skin : nullptr;
 					assign(geometries, [](auto& a_value) -> GeometryRecord& { return a_value; });

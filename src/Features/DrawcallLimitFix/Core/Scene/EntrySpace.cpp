@@ -1,4 +1,4 @@
-// The readers of an entry space's published snapshots and change log (any thread).
+// The readers of an entry space's published snapshots and change log. Any thread.
 
 #include "Features/DrawcallLimitFix/Core/Scene/EntrySpace.h"
 
@@ -32,8 +32,7 @@ namespace DCLF
 			ChangedEntriesByScan(a_from, a_to, a_out);
 			return false;
 		}
-		// The runs after a_from's generation, merged; then the indices whose versions differ (an index written and freed again
-		// between them is not a change).
+		// An index written and freed again between the two snapshots is not a change.
 		const std::size_t first = a_out.size();
 		std::size_t runs = 0;
 		for (const auto& run : a_to.changes->runs)

@@ -6,9 +6,8 @@
 
 namespace DCLF
 {
-	// Lifecycle IDs for tracked geometry and their actors, coordinator thread only. Raw keys never escape this tracker; a
-	// publication carries only the returned IDs. Reset drops keys but not the
-	// allocation counter, so a new world cannot reuse an old publication ID.
+	// Lifecycle IDs for tracked geometry and their actors. Coordinator thread only. Raw keys never escape this tracker.
+	// Reset keeps the allocation counter, so a new world cannot reuse an old publication's ID.
 	class SceneIdentity
 	{
 	public:
@@ -63,8 +62,7 @@ namespace DCLF
 		std::uint64_t Next()
 		{
 			const auto value = next++;
-			// Wrapping would violate ABA prevention; fail closed long before it
-			// could let a publication refer to an unrelated object.
+			// Wrapping would allow ABA, so fail closed long before a publication could name an unrelated object.
 			if (!value)
 				std::terminate();
 			return value;

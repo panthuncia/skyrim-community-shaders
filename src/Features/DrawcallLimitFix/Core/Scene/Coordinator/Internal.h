@@ -1,7 +1,7 @@
 #pragma once
 
-// Coordinator's implementation, shared by the files of this folder only (Coordinator.h is the interface): helpers, the event batch,
-// the shard and timing scopes. Coordinator thread (the scene lane) and the pass's pool workers.
+// The coordinator's implementation, shared by this folder's files only. Coordinator.h is the interface.
+// Runs on the scene lane and the pass's pool workers.
 
 #include "Features/DrawcallLimitFix/Core/Scene/Coordinator/Coordinator.h"
 #include "Features/DrawcallLimitFix/Diagnostics/Zones.h"
@@ -46,7 +46,7 @@ namespace DCLF
 	namespace Scene
 	{
 		using Engine::kMaxParentDepth;
-		// An event's walk of a subtree (ForEachLive, ForEachMirror): bounded, and whatever it leaves out the frame's walk still covers.
+		// Bounded. Whatever an event's walk leaves out, the frame's walk still covers.
 		constexpr std::size_t kMaxEventNodes = 4096;
 		constexpr std::size_t kValidationSlice = 256;
 		constexpr std::uint32_t kIndexFormatR16 = 57;  // DXGI_FORMAT_R16_UINT
@@ -70,10 +70,7 @@ namespace DCLF
 
 		inline bool IsHidden(const RE::NiAVObject* a_object) { return Engine::IsHidden(a_object); }
 
-		/**
-		 * @brief A skin's palette rows: three a bone, as the engine's palette update (AE FUN_140e4ff90, which FrameValues runs) sizes
-		 * it - numMatrices is the skin data's bone count (+0x58), copied by that update.
-		 */
+		/** @brief Three rows a bone, sized as the engine's palette update (AE FUN_140e4ff90) sizes it. */
 		inline std::uint32_t SkinRowsOf(const RE::NiSkinInstance& a_skin)
 		{
 			const auto* data = a_skin.skinData.get();
@@ -81,7 +78,7 @@ namespace DCLF
 		}
 
 
-		/** @brief Takes a geometry off a dependents list; true when others remain under the key. */
+		/** @brief True when others remain under the key. */
 		template <class Map, class Key>
 		bool Unlist(Map& a_map, Key a_key, RE::BSGeometry* a_geometry)
 		{
@@ -100,18 +97,17 @@ namespace DCLF
 			return true;
 		}
 
-		/** @brief Puts a geometry on a dependents list whose positions a_at keeps (Coordinator::DependentsAt). */
 		template <class Map, class At, class Key>
 		void List(Map& a_map, At& a_at, Key a_key, RE::BSGeometry* a_geometry)
 		{
 			auto& list = a_map[a_key];
-			// One position a (key, geometry): a geometry is listed once under a key (its keys are distinct objects).
+			// A geometry is listed once under a key.
 			assert(!a_at.contains(std::pair<const void*, const RE::BSGeometry*>{ a_key, a_geometry }));
 			a_at.insert_or_assign(std::pair<const void*, const RE::BSGeometry*>{ a_key, a_geometry }, static_cast<std::uint32_t>(list.size()));
 			list.push_back(a_geometry);
 		}
 
-		/** @brief Unlist by a_at's position (the last swapped into it, its position kept); true when others remain under the key. */
+		/** @brief Swaps the last entry into the freed position. True when others remain under the key. */
 		template <class Map, class At, class Key>
 		bool Unlist(Map& a_map, At& a_at, Key a_key, RE::BSGeometry* a_geometry)
 		{
@@ -147,7 +143,7 @@ namespace DCLF
 			return std::memcmp(&a_lhs, &a_rhs, sizeof(RE::NiTransform)) == 0;
 		}
 
-		/** @brief A rigid body on this node whose motion type is not kFixed: Havok moves it. */
+		/** @brief A rigid body on this node whose motion type is not kFixed, so Havok moves it. */
 		inline bool NonFixedBody(const RE::NiAVObject& a_object)
 		{
 			auto* collision = a_object.collisionObject.get();
@@ -164,17 +160,13 @@ namespace DCLF
 			return record;
 		}
 
-		// The frame's globals (kPSFrameGeometry, kVSEyePosition: LightingConstants.h). EyePosition is written only for some
-		// passes (WritesEyePosition); every other pass leaves whatever the constant buffer last held there, which no draw
-		// of it reads.
-		// What ObjectGeometryConstants writes over the pipeline's block for every object (or every object of the pipeline's
-		// kind): World, PreviousWorld, LandBlendParams, TreeParams, WindTimers, TextureProj; the light assignment Light
-		// Limit Fix never reads, MaterialData, EmitColor, ShadowLightMaskSelect, ProjectedUVParams 1-3, SSRParams.
+		// EyePosition is written only for some passes. Other passes leave whatever the buffer last held there, which none of their draws read.
+		// ObjectGeometryConstants writes the rest per object over the pipeline's block.
 		constexpr std::uint64_t kObjectGeometryVS = (1ull << 0) | (1ull << 1) | (1ull << 3) | (1ull << 4) | (1ull << 5) | (1ull << 6);
 		constexpr std::uint64_t kObjectGeometryPS = (1ull << 0) | (1ull << 1) | (1ull << 2) | (1ull << 7) | (1ull << 8) | (1ull << 10) | (1ull << 12) |
 		                                            (1ull << 13) | (1ull << 14) | (1ull << 16);
 
-		/** @brief The frame variables of a_sample written over a_out's where both write them; true when any differed. */
+		/** @brief True when any differed. */
 		inline bool CopyFrameGeometry(const GeometryConstants& a_sample, GeometryConstants& a_out)
 		{
 			const auto& layout = LightingPSLayout();
@@ -190,7 +182,7 @@ namespace DCLF
 			return changed;
 		}
 
-		/** @brief a_sample's EyePosition over a_out's where both write it; true when it differed. */
+		/** @brief True when it differed. */
 		inline bool CopyEyePosition(const GeometryConstants& a_sample, GeometryConstants& a_out)
 		{
 			const auto& layout = LightingVSLayout();
@@ -205,14 +197,10 @@ namespace DCLF
 		{
 			return *reinterpret_cast<const float*>(a_at.address());
 		}
-		// Grows each column of a table by one slot (Tables::GeometryColumns and the like).
 		inline constexpr auto kGrowColumn = [](auto& a_column, auto&&... a_initial) { a_column.emplace_back(a_initial...); };
 
 
-		/**
-		 * @brief Whether two technique samples feed the technique rows the same (bitwise): everything EvaluateTechnique reads but
-		 * the fog, which a row keeps from its making (KeepTechniqueFog; the draws read the frame's, FrameCapture::fog).
-		 */
+		/** @brief Compares bitwise everything EvaluateTechnique reads except fog, which a row keeps from its making. */
 		inline bool SameTechniqueWitness(const TechniqueInputs& a_a, const TechniqueInputs& a_b)
 		{
 			auto same = [](const auto& a, const auto& b) { return std::memcmp(&a, &b, sizeof(a)) == 0; };
@@ -226,13 +214,11 @@ namespace DCLF
 			return a_a.filterModes == a_b.filterModes && a_a.shadowMask == a_b.shadowMask && a_a.shadowMaskTexture == a_b.shadowMaskTexture;
 		}
 
-		/** @brief CS_DCLF_FANOUT, read once: 0 interleaved, 1 evaluated then merged on the lane, 2 (unset or anything else) on the pool. */
+		/** @brief Read once. 0 interleaved, 1 evaluated then merged on the lane, 2 on the pool. */
 		std::uint32_t ConfiguredFanout();
 
 
-		// Only columns the accumulator patch below can change. It never writes placement, geometry,
-		// bones, wetness or shadow inputs. Extras contents the patch rewrites in a kept block are noted by the patch itself
-		// (kChangeExtras: an offset change is noted here). Skin-mask changes are noted before the patch.
+		// Only the columns the accumulator patch can change. It never writes placement, geometry, bones, wetness or shadow inputs.
 		struct AccumulateSnapshot
 		{
 			std::uint32_t flags, material, pipeline, drawPipeline, extras;
@@ -266,13 +252,11 @@ namespace DCLF
 		};
 	}
 
-	// The folder's files use Scene's names unqualified.
 	using namespace Scene;
 
 	/**
-	 * @brief One scene pass's events (Coordinator::CollectEvents, on the coordinator, each queue drained up to where it stood at
-	 * the pass's start), oldest first per queue, applied by the same pass (ApplyEvents). Applied, it is handed back whole: its tracker
-	 * events hold attached subtrees, released at Present.
+	 * @brief One scene pass's events, each queue drained up to where it stood at the pass's start. Its tracker events hold attached
+	 * subtrees, so it is handed back whole and released at Present.
 	 */
 	struct Scene::Coordinator::EventBatch
 	{
@@ -281,9 +265,7 @@ namespace DCLF
 		std::vector<const void*> properties;
 		std::vector<RE::NiPointer<RE::NiAVObject>> nodes;
 		std::vector<SwitchEvent> switches;
-		// The features' engine channels' keys, by channel (Extensions::RegisteredEngineChannels' order).
 		std::array<std::vector<const void*>, Extensions::kEngineChannelSlots> channelKeys;
-		// The oldest stamp of its tracker events (SceneTracker::Event::stampNs, stampFrame; 0: none), for the latencies.
 		std::uint64_t oldestNs = 0;
 		std::uint32_t oldestFrame = 0;
 
@@ -306,9 +288,8 @@ namespace DCLF
 	};
 
 	/**
-	 * @brief A pass's batch (its tracker events' pins and captures, its nodes' and switches' references) handed to the render thread
-	 * (EngineReleases::PushOwner, released at Present) when the pass unwinds while it holds it: a throw never destroys it on the pump, where the
-	 * engine's destructors must not run. A batch passed on (retired, posted) leaves it null and the guard does nothing.
+	 * @brief Hands the batch to the render thread if the pass unwinds while holding it. The engine's destructors must never run on
+	 * the pump. A batch passed on leaves it null and the guard does nothing.
 	 */
 	struct Scene::Coordinator::BatchUnwindGuard
 	{
@@ -329,7 +310,6 @@ namespace DCLF
 	};
 
 
-	/** @brief Adds the time from construction to destruction to a scene part's sum and its frame's time (ms). */
 	struct ScenePartScope
 	{
 		double& sum;
@@ -349,11 +329,8 @@ namespace DCLF
 	};
 
 	/**
-	 * @brief What a scene pass's evaluations read on whichever thread runs them. Always the pass's snapshot of the toggles and of
-	 * the classify inputs (Coordinator::passSnapshot), and the chunk's mirror-read counters when given. On a pool thread (a_worker) also the
-	 * pass's frame globals (FrameGlobals::Current is per thread) and the scene work's flags (sceneWorkThread, EngineReadWindow::sceneWork),
-	 * as the sun candidates' verdicts (DirtyVerdicts) and the fan-outs take them: an engine read from there without a lease is counted. One per chunk; the
-	 * pass's own thread holds one (not a worker's) over a whole round, its merges included, so both halves read the same snapshot.
+	 * @brief What a pass's evaluations read on whichever thread runs them: the pass's snapshot of toggles and classify inputs.
+	 * A pool worker also takes the frame globals and scene work flags, since those are per thread. An engine read there without a lease is counted.
 	 */
 	struct Scene::Coordinator::ShardScope
 	{
@@ -390,7 +367,7 @@ namespace DCLF
 		MirrorReadStats* sink = nullptr;
 	};
 
-	// One scene sub-zone (ScenePart) for the rest of the enclosing block: a Tracy zone and the part's sum. One per block.
+// One scene sub-zone for the rest of the enclosing block. One per block.
 #define DCLF_SCENE_PART(a_part, a_zone) \
 	DCLF_ZONE(a_zone);                \
 	ScenePartScope scenePartScope(stats.scenePartMs[static_cast<std::size_t>(ScenePart::a_part)], \
@@ -399,9 +376,8 @@ namespace DCLF
 	/**
 	 * @brief Attributes the time since the last call to one BuildPart.
 	 *
-	 * Inert unless CS_DCLF_PROFILE=1: with profiling off `parts` is null and Add() is a null test, so the loop makes no clock calls.
-	 * Timing a loop from inside it perturbs what it measures, so the profiled and unprofiled totals are both reported and the
-	 * difference is the instrument's own cost.
+	 * Inert unless CS_DCLF_PROFILE=1, so the loop makes no clock calls otherwise. Profiled and unprofiled totals are both reported,
+	 * and the difference is the instrument's own cost.
 	 */
 	struct PartTimer
 	{

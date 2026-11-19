@@ -1,5 +1,4 @@
-// The eligibility rules that need more than a header: the cacheable verdicts, a geometry's and a layer's static verdict, and the
-// primary-cull rule. Pure functions of the records passed in; called on the scene-work thread and on the render thread.
+// The eligibility rules that need more than a header. Pure functions of the records passed in, called on the scene lane and the render thread.
 
 #include "Features/DrawcallLimitFix/Core/Scene/Model/Eligibility.h"
 
@@ -17,16 +16,8 @@ namespace DCLF::Eligibility
 {
 	bool Cacheable(Ineligible a_reason)
 	{
-		// Only the verdicts that follow from the geometry's own shape - its type, its skin instance, its
-		// renderer data and the *type* of its shader property. Those are exactly what the pointer
-		// witnesses cover.
-		//
-		// Everything decided later is deliberately left out, because its inputs can change without any
-		// witness noticing. AlphaBlend reads `materialAlpha`, which is animated and lives behind an
-		// unchanged material pointer; the reasons DeriveLightingDescriptors produces (Decal, Technique,
-		// ProjectedUV, Lod, Fading) read property *flags*, which Community Shaders' own features set in
-		// place behind an unchanged property pointer. Caching those would trade a real correctness
-		// surface for the cheapest third of the population.
+		// Only verdicts from the geometry's own shape are cacheable, since the pointer witnesses cover exactly those.
+		// Alpha and property flags can change behind an unchanged pointer. Community Shaders' features set flags in place.
 		switch (a_reason) {
 		case Ineligible::NotTriShape:
 		case Ineligible::Skinned:
@@ -40,21 +31,15 @@ namespace DCLF::Eligibility
 
 	namespace
 	{
-		/**
-		 * @brief Static's buffer verdict: a skinned shape's skin instance, partitions and palette, or an unskinned one's renderer data
-		 * (None: drawable buffers).
-		 */
+		/** @brief None when the buffers are drawable. */
 		Ineligible BufferVerdict(const SceneCapture::GeometryRecord& a_geometry)
 		{
 			const auto& g = a_geometry;
 			if (g.skin) {
 				if (!Extensions::ObjectClassOn(ActiveToggles(), Api::ObjectClass::Skinned))
 					return Ineligible::Skinned;
-				// The skinned path (engine notes: skinning): a NiSkinInstance, or with CS_DCLF_SKIN_PARTITIONS a
-				// BSDismemberSkinInstance or several partitions, and a palette the native shader could index (240
-				// rows). Each partition the engine draws is one draw of that PARTITION's buffer, not the geometry's
-				// rendererData, which for a skinned shape is a different TriShape; which partitions it draws is
-				// SkinPartitionMask's, per frame.
+				// For a skinned shape each drawn partition is one draw of that partition's buffer, not rendererData, which is a different TriShape.
+				// The native shader can index at most 240 palette rows.
 				static const REL::Relocation<const RE::NiRTTI*> niSkinInstance{ RE::NiSkinInstance::Ni_RTTI };
 				static const REL::Relocation<const RE::NiRTTI*> dismemberSkinInstance{ RE::BSDismemberSkinInstance::Ni_RTTI };
 				const bool dismember = g.skinRtti == dismemberSkinInstance.get();
@@ -67,12 +52,11 @@ namespace DCLF::Eligibility
 					return Ineligible::SkinShape;
 				if (partitions > kMaxSkinPartitions)
 					return Ineligible::SkinShape;
-				// The engine indexes the dismember flags by partition; a flag array of another length is not one it
-				// could have drawn from either.
+				// The engine indexes the dismember flags by partition, so a flag array of another length is not one it could have drawn from.
 				if (dismember && !g.shown.empty() && g.shown.size() != partitions)
 					return Ineligible::SkinShape;
-				// Every partition is drawn with the first one's pipeline, so they share its vertex layout; a LOD
-				// byte past 2 would index the next row of the engine's table.
+				// Every partition draws with the first one's pipeline, so they must share its vertex layout. A LOD byte past 2 would index
+				// the next row of the engine's table.
 				const auto& first = g.partitions[0];
 				for (const auto& p : g.partitions) {
 					if (!p.vertexBuffer || !p.indexBuffer)
@@ -86,7 +70,6 @@ namespace DCLF::Eligibility
 			return Ineligible::None;
 		}
 
-		/** @brief CS_DCLF_TEST_REFUSE: whether a_leaf's node name contains one of the switch's comma-separated names. */
 		bool TestRefused(const SceneCapture::LeafView& a_leaf)
 		{
 			static const std::vector<std::string> names = [] {
@@ -107,10 +90,7 @@ namespace DCLF::Eligibility
 			return std::ranges::any_of(names, [&](const std::string& a_name) { return name.find(a_name) != std::string_view::npos; });
 		}
 
-		/**
-		 * @brief A skin the skinned path refuses (SkinShape) named in the log, once per geometry and at most kMax times a session: the engine
-		 * keeps such a shape, so its shadow is the engine's culls' alone.
-		 */
+		/** @brief Logs a refused skin once per geometry, a few times a session. The engine keeps such a shape, so its shadow is the engine's alone. */
 		void NoteSkinShape(const SceneCapture::LeafView& a_leaf)
 		{
 			constexpr std::size_t kMax = 64;
@@ -142,23 +122,14 @@ namespace DCLF::Eligibility
 		if (!a_leaf)
 			return Ineligible::NotTriShape;
 		const auto& g = *a_leaf.geometry;
-		// An entry of a taken entry class (its geometry type's rule, Api::GeometryTypeContribution::entry: Features/Faces' face shape, a
-		// dynamic shape under a BSFaceGenNiNode) takes the checks below like any shape. Its positions are not in its buffers but its
-		// component's (a face shape's head's snapshots): the walk gives every record of one its stream (Coordinator::Tracked::entryClass),
-		// whatever the verdict, and the draws bind it as the second stream.
+		// A taken entry class such as a face shape gets the same checks. Its positions come from its component, bound as the second stream.
 		const auto type = static_cast<RE::BSGeometry::Type>(g.type);
 		const auto entryClass = a_leaf.parent ? Extensions::EntryClassOf(g.type, a_leaf.parent->kind) : Api::EntryClass::None;
 		const bool entryShape = entryClass != Api::EntryClass::None && Extensions::EntryClassTaken(entryClass);
-		// A BSMultiIndexTriShape (cave walls, rocks with a snow layer) draws every pass but one as a tri-shape: its renderer data and
-		// its triangle count (FUN_1414f2ad0, type 7). The exception is the additional property's main-pass layer (accumulation
-		// hint 12), drawn from its second index list: DCLF's layer object (Tracked::layerSlot, Layer). The shadow modes
-		// register the main property's passes alone (FUN_1414b2a60), so it casts as a tri-shape. One whose layer DCLF cannot
-		// draw is MultiIndex, a shadow-only caster (ShadowOnlyReason): its two main passes stay the engine's, together.
+		// A BSMultiIndexTriShape draws every pass as a tri-shape except its main-pass layer (hint 12), which draws from the second index list
+		// as DCLF's layer object. Shadow modes register only the main property's passes (FUN_1414b2a60), so it casts as a tri-shape.
 		const bool multiIndex = type == RE::BSGeometry::Type::kMultiIndexTriShape;
-		// A geometry type a contribution takes by its Lighting property's flags (Api::GeometryTypeContribution::propertyFlags: Features/Lod's
-		// object LOD, a BSSubIndexTriShape with the LOD object flags, drawn by the segment runs the engine leaves visible, FUN_1414f2ad0
-		// type 8): a tri-shape over the ranges LodSegments mirrors, Lod while its toggle is off. Any other shape of the type is not one DCLF
-		// draws.
+		// A geometry type a contribution takes by its property flags, such as object LOD's BSSubIndexTriShape drawn by visible segment runs.
 		bool flaggedShape = false;
 		if (const auto& flagged = Extensions::GeometryTypeContributionOf(g.type); flagged.propertyFlags) {
 			const auto* flaggedProperty = SceneCapture::LeafView::Lighting(a_leaf.property);
@@ -169,10 +140,7 @@ namespace DCLF::Eligibility
 			}
 		}
 		if (type != RE::BSGeometry::Type::kTriShape && !multiIndex && !flaggedShape) {
-			// Its geometry type's contribution (Features/Particles): a particle geometry with a material port's property is that port's to
-			// classify when it takes the particle geometries (the Effect port's DeriveEffectDescriptors: a particle system DCLF's particle path
-			// draws, or the particle variant). It has no renderer data of its own: its draw is the renderer's quads, its vertices
-			// ParticleSnapshots' (Coordinator::ResolveGeometrySlot).
+			// A particle geometry with a material port's property is that port's to classify. It has no renderer data, its vertices come from ParticleSnapshots.
 			if (ParticleGeometryType(g.type) && Extensions::GeometryTypeOn(ActiveToggles(), g.type)) {
 				const auto* port = SceneCapture::LeafView::Port(a_leaf.property);
 				if (!port || !Extensions::PortTakesParticles(ActiveToggles(), port->port))
@@ -187,7 +155,7 @@ namespace DCLF::Eligibility
 				return Ineligible::NotTriShape;
 		}
 
-		// CS_DCLF_TEST_REFUSE: the named geometry refused as a buffer DCLF cannot import, so a test run has engine-only geometry of any class.
+		// CS_DCLF_TEST_REFUSE refuses the named geometry, so a test run has engine-only geometry of any class.
 		if (TestRefused(a_leaf))
 			return Ineligible::UnstableBuffer;
 		if (const Ineligible buffers = BufferVerdict(g); buffers != Ineligible::None) {
@@ -198,9 +166,6 @@ namespace DCLF::Eligibility
 
 		const auto* property = SceneCapture::LeafView::Lighting(a_leaf.property);
 		if (!property) {
-			// A material port while its class is on (the Effect port, Api::ObjectClass::Effect: a BSEffectShaderProperty on a BSTriShape, drawn
-			// by the forward epoch when its pass is the static blended mesh's: DeriveEffectDescriptors). Any other shape of one keeps the port's
-			// own variant reason.
 			const auto* port = SceneCapture::LeafView::Port(a_leaf.property);
 			if (!port || !Extensions::PortOn(ActiveToggles(), port->port))
 				return Ineligible::NotLightingShader;
@@ -213,8 +178,7 @@ namespace DCLF::Eligibility
 			return reason;
 		}
 
-		// GetRenderPasses treats material alpha below one as transparent (the record's: 1 without a material): blended, the forward
-		// epoch's with CS_DCLF_FORWARD (DeriveLightingDescriptors), else native.
+		// GetRenderPasses treats material alpha below one as transparent.
 		if (property->materialAlpha < 1.0f && !Extensions::ObjectClassOn(ActiveToggles(), Api::ObjectClass::Forward))
 			return Ineligible::AlphaBlend;
 
@@ -224,8 +188,7 @@ namespace DCLF::Eligibility
 			if (reason == Ineligible::None) {
 				*a_descriptors = descriptors;
 			} else {
-				// The rejection diagnostics have to survive the rejection: rejectedTechnique's default 0 is `none`, a
-				// supported technique, so it is copied on rejection too.
+				// rejectedTechnique's default 0 is a supported technique, so it must be copied on rejection too.
 				a_descriptors->rejectedTechnique = descriptors.rejectedTechnique;
 			}
 		}
@@ -238,8 +201,7 @@ namespace DCLF::Eligibility
 
 	Ineligible Layer(const SceneCapture::LeafView& a_leaf, LightingDescriptors* a_descriptors, const AccumulatedPass* a_accumulated)
 	{
-		// The layer's passes are GetRenderPasses of the additional property for this geometry (FUN_1414b2330): the geometry's
-		// alpha property and skin, the layer's flags and material.
+		// The layer's passes are GetRenderPasses of the additional property (FUN_1414b2330), with the geometry's alpha and skin.
 		const auto* layer = SceneCapture::LeafView::Lighting(a_leaf.layer);
 		if (!layer)
 			return Ineligible::NotLightingShader;
@@ -262,12 +224,9 @@ namespace DCLF::Eligibility
 	{
 		if (!a_entry.record || !a_entry.classified || a_entry.reason != Ineligible::None || !a_leaf.property)
 			return false;
-		// A decal is a member like any other (its group from the settled state); the blended decal group is DCLF's too.
 		const bool decal = (a_leaf.property->flags & 0xc000000ull) != 0;
 		if (decal && !Extensions::ObjectClassOn(ActiveToggles(), Api::ObjectClass::Decal))
 			return false;
-		// A blended member is DCLF's too (the forward epoch: blended Lighting, the Effect port, its billboards), so its entry can be whole;
-		// its eligibility (the entry's reason) already says whether the forward toggles take it.
 		if (Extensions::ObjectClassOn(ActiveToggles(), Api::ObjectClass::Forward))
 			return true;
 		return decal || !a_leaf.AlphaBlending();

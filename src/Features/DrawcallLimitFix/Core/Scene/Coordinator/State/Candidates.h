@@ -1,11 +1,7 @@
 #pragma once
 
-// The sun and light candidates (CoordinatorCandidates): the entries DCLF can take out of the engine's cascade and light culls,
-// their signatures, dirty lists and snapshots, and their index spaces (EntrySpaceTable). SunCandidates.cpp, fed by the events
-// (ApplyEvents.cpp) and the walk.
-//
-// A private base of Scene::Coordinator, included by Coordinator.h: names, types and initialisers are the coordinator's own,
-// and the functions over them are declared there.
+// The sun and light candidates: the entries DCLF can take out of the engine's cascade and light culls, and their index spaces.
+// A private base of Scene::Coordinator. Its functions are declared in Coordinator.h.
 
 namespace DCLF::Scene
 {
@@ -19,17 +15,15 @@ namespace DCLF::Scene
 		std::uint32_t lightCandidatesGeneration = 0;
 		std::uint64_t lightEntriesAppeared = 0;
 		ankerl::unordered_dense::set<const RE::NiAVObject*> sunCandidateSet;
-		// Per sun candidate, a signature of its geometries' PrimaryEntryAllows verdicts: a change bumps the generation.
+		// A signature change bumps the generation.
 		ankerl::unordered_dense::map<const RE::NiAVObject*, std::uint64_t> primarySignature;
 		std::vector<const RE::NiAVObject*> sunEntriesDirty;
 		ankerl::unordered_dense::set<const RE::NiAVObject*> sunEntriesForced;  // candidates whose subtree an attach or detach changed
 		std::shared_ptr<const EntrySpace> sunCandidates;
 		std::uint32_t sunCandidatesGeneration = 0;
-		// The sun's and the point lights' candidate index spaces (EntrySpaceTable.h), one version counter for both.
 		EntrySpaceTable sunTable, lightTable;
 		std::uint32_t candidateVersions = 0;
-		// The tracked geometries whose shadow only the engine's cull draws (NoteEngineCaster), by their verdict; their roots go out with
-		// each publication (PublishEngineCasters, EngineCasters.h).
+		// Geometry whose shadow only the engine's cull draws. Their roots go out with each publication.
 		struct EngineOnlyEntry
 		{
 			Ineligible reason = Ineligible::None;

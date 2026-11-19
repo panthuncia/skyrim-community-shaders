@@ -1,6 +1,5 @@
-// The coordinator's frame-dependent constants (scene lane, its frame's FrameGlobals bound): material records refreshed from the
-// captures, frame-sourced components and texture transforms, object extras, technique rows, and the pipeline constants the render
-// thread posts back.
+// The coordinator's frame-dependent constants on the scene lane: material records refreshed from captures and frame sources,
+// object extras, technique rows, and the pipeline constants the render thread posts back.
 
 #include "Internal.h"
 #include "Features/DrawcallLimitFix/Diagnostics/Zones.h"
@@ -22,11 +21,7 @@ namespace DCLF::Scene
 {
 	namespace
 	{
-		/**
-		 * @brief RefreshMaterialSignatures' witness (scene lane only; the coordinator is one, Coordinator::Get): the frame's sources every
-		 * applied signature was last evaluated against, and what it saved. The parity (CS_DCLF_PERSISTENT_PARITY, every 60 passes while it
-		 * holds) evaluates every held signature as every pass did, and counts a component the witness would have missed.
-		 */
+		/** @brief The frame sources every applied signature was last evaluated against. Scene lane only. */
 		struct SignatureWitness
 		{
 			std::optional<MaterialPort::FrameComponentsWitness> applied;
@@ -36,18 +31,13 @@ namespace DCLF::Scene
 		constexpr std::uint32_t kSignatureParityOffset = 31;
 		constexpr std::uint64_t kSignatureReportPasses = 600;
 
-		/**
-		 * @brief DrainMaterialCaptures' deduplication's parity (CS_DCLF_PERSISTENT_PARITY, on its passes, kMaterialDedupParityOffset): the
-		 * slots of every material whose capture was deduplicated, evaluated as a rewrite would; a record that rewrite would change is a
-		 * capture the deduplication lost. Diagnostics only (scene lane).
-		 */
+		/** @brief Parity for the capture deduplication. A record a rewrite would change is a capture the deduplication lost. */
 		Diagnostics::ParityCounter materialDedupParity;
 	}
 
 	bool Coordinator::PrepareMaterials(std::string_view a_zone, std::size_t a_count, const std::function<void(std::size_t, std::size_t)>& a_body)
 	{
-		// Pure chunks over frozen inputs (the held captures, the pass's sources passed in, the records read-only or each chunk's own
-		// slots); the lane applies their results after, in order.
+		// Pure chunks over frozen inputs. The lane applies their results after, in order.
 		const bool pool = FanoutMode(a_count) == 2;
 		auto chunk = [&](std::size_t a_begin, std::size_t a_end, bool a_worker) {
 			ShardScope scope(*this, a_worker);
@@ -69,8 +59,7 @@ namespace DCLF::Scene
 		a_out.record = MaterialRecord{};
 		a_out.same = false;
 		if (!MaterialPort::Evaluate(a_snapshot, a_pass, a_sources, a_out.record)) {
-			// An input the frame's sources do not have yet (Advanced Skin's textures for a key it has not set up): again with a later
-			// pass's (an After contributor's covers false: Extensions::MaterialRetryable). Else a class the port does not cover.
+			// An input the frame's sources lack yet, such as an Advanced Skin key not set up, is retried with a later pass. Else the port does not cover the class.
 			a_out.outcome = Extensions::MaterialRetryable({ a_snapshot, a_snapshot.materialClass, a_pass, a_sources.hook, a_sources.contributors }) ?
 			                    Outcome::Retry :
 			                    Outcome::Uncovered;
@@ -81,8 +70,7 @@ namespace DCLF::Scene
 		MaterialSources::StripFrameViews(a_out.record, a_pass);
 		if (a_slot == kNoMaterialSlot)
 			return;
-		// A rewrite: its frame parts are kept (the frame components are the signature's writes; TexcoordOffset stays the slot's: the frame
-		// values patch the rows with the frame's), so only the material's own values are compared and rewritten.
+		// A rewrite keeps the slot's frame parts, so only the material's own values are compared and rewritten.
 		const auto& held = tables.materials[a_slot];
 		MaterialSources::CopyFrameComponents(held, a_out.record, a_pass);
 		MaterialSources::KeepUnreadFloats(held, a_out.record);
@@ -91,16 +79,13 @@ namespace DCLF::Scene
 
 	void Coordinator::RefreshMaterialRecords()
 	{
-		// The scene work, its frame's FrameGlobals bound, the captures drained (ApplyEvents): the written materials' records, then the
-		// frame components (a rewrite keeps the slot's frame parts, which the signatures bring to this frame's sources). The texture
-		// transforms are no record's (TextureTransformList). No engine read: the captures and the frame's sample are the inputs.
+		// No engine read. The captures and the frame's sample are the inputs.
 		DCLF_ZONE("CS.DCLF.Scene.MaterialRecords");
 		++materialRecordStats.passes;
 		stats.materialWrites = stats.materialsRewritten = stats.materialsHeld = stats.frameMaterialSamples = 0;
 		RewriteCapturedMaterials();
 		RefreshMaterialSignatures();
-		// The captures' deduplication and the pool's share (CS_DCLF_STATS), with the parities where they ran: once per report window (the
-		// pass's frame in a later one; the coordinator's clock may skip frame numbers), whatever the passes a frame.
+		// Once per report window, since the coordinator's clock may skip frame numbers.
 		auto& r = materialRecordStats;
 		auto& s = materialSnapshotStats;
 		const std::uint32_t window = sceneFrame / Reports::Interval();
@@ -111,8 +96,6 @@ namespace DCLF::Scene
 						 "{} inline; transform captures left to the frame values {}; applications pooled {}; dedup parity {} checks, {} differ{}",
 				s.deduped, s.transformsOnly, s.relisted, r.evaluationsPooled, r.poolRounds, r.joinPrepared, r.joinInline, r.transformsWatched, r.appliedPooled,
 				materialDedupParity.checks, materialDedupParity.mismatches, materialDedupParity.Verdict(true));
-			// The bindings' and lookups' change sets: owner blocks sealed or shared, waiters deduplicated, masks looked up of those checked
-			// (and full sweeps), Lighting pipeline entries resolved of those witnessed, shadow resolutions skipped; their parities.
 			auto& mw = materialBindings.work;
 			auto& sw = sharedBindings.work;
 			auto& lr = lookupsResolve;
@@ -134,8 +117,7 @@ namespace DCLF::Scene
 
 	void Coordinator::RewriteCapturedMaterials()
 	{
-		// The lane gathers (slot, held capture) for the materials captured since the last pass; the pool evaluates each slot's record and
-		// compares it with the slot's (read-only); the lane stores the changed ones in slot order.
+		// The pool evaluates each slot read-only, and the lane stores the changed ones in slot order.
 		auto& r = materialRecordStats;
 		std::vector<const RE::BSShaderMaterial*> materials = std::exchange(materialsCaptured, {});
 		const std::size_t captured = materials.size();
@@ -169,7 +151,6 @@ namespace DCLF::Scene
 		};
 		for (const auto* material : materials)
 			gather(material, false);
-		// The parity's: the deduplicated materials no rewrite covers, evaluated as one would (nothing stored).
 		std::sort(deduped.begin(), deduped.end());
 		deduped.erase(std::unique(deduped.begin(), deduped.end()), deduped.end());
 		for (const auto* material : deduped)
@@ -179,7 +160,7 @@ namespace DCLF::Scene
 			return;
 		auto& results = materialRewriteResults;
 		results.resize(items.size());
-		// Each slot once (a slot is one material's), so every result reads a record no other chunk writes, and none is written before the apply.
+		// A slot belongs to one material, so no other chunk writes the record a result reads.
 		if (PrepareMaterials("CS.DCLF.Scene.MaterialRewritesShards", items.size(), [&](std::size_t a_begin, std::size_t a_end) {
 				for (std::size_t i = a_begin; i < a_end; ++i)
 					EvaluateMaterial(*items[i].snapshot, tables.materialSlotKey[items[i].slot].second, sources, items[i].slot, results[i]);
@@ -201,7 +182,7 @@ namespace DCLF::Scene
 				continue;
 			}
 			if (result.outcome == Outcome::Retry) {
-				// The slot keeps its record meanwhile; the material is evaluated again with a later pass's sources.
+				// The slot keeps its record meanwhile.
 				if (retried != item.material) {
 					retried = item.material;
 					materialRewritesPending.push_back(item.material);
@@ -228,12 +209,8 @@ namespace DCLF::Scene
 
 	void Coordinator::RefreshMaterialSignatures()
 	{
-		// The frame-sourced components (MaterialSources): the same for every record of a signature, so one port evaluation of the
-		// signature's probe against the frame's sources gives them; written into every slot of the signature only when they moved
-		// since the last application. A slot keyed since was made from the same sources (the joins evaluate with them).
-		// The frame's witness (MaterialPort::FrameComponentsWitness, what of the sources the components read): while it is the one the
-		// signatures were last evaluated against, every applied signature already holds this frame's components, and only a signature
-		// not applied yet or whose probe failed (a new probe, or the same one again) is evaluated.
+		// Frame-sourced components are the same for every record of a signature, so one evaluation of its probe gives them.
+		// While the frame witness matches the last one, only new signatures and failed probes need evaluating.
 		DCLF_ZONE("CS.DCLF.Scene.MaterialSignatures");
 		auto& r = materialRecordStats;
 		const auto& sources = FrameGlobals::Current().material;
@@ -259,19 +236,16 @@ namespace DCLF::Scene
 			MaterialRecord live;
 			if (!MaterialPort::Evaluate(entry.probe, entry.probePass, sources, live)) {
 				if (held) {
-					// The parity's: a held probe these sources no longer evaluate (a gate the witness leaves out).
 					w.parity.Check(false, [&] { return fmt::format("signature {:#x}: its probe no longer evaluates", signature); });
 					continue;
 				}
-				// Not evaluable with these sources (an Advanced Skin key not set up yet): tried again next pass, unless a slot noted
-				// meanwhile gives another probe. Its slots keep components of an older witness: not applied at this one, so the probe
-				// that replaces it is evaluated under any witness (NoteMaterialRecord clears probeFailed).
+				// Not evaluable with these sources yet, so tried again next pass. Its slots keep components of an older witness.
 				entry.probeFailed = true;
 				entry.appliedValid = false;
 				continue;
 			}
 			if (held) {
-				// The parity's: the components every pass's evaluation would apply against those the witness kept. Changes nothing.
+				// Parity only. Changes nothing.
 				MaterialRecord probe = entry.applied;
 				bool floatsChanged = false;
 				const bool texturesChanged = MaterialSources::ApplyFrameComponents(live, probe, entry.probePass, &floatsChanged);
@@ -290,7 +264,7 @@ namespace DCLF::Scene
 				if (!MaterialSources::ApplyFrameComponents(live, probe, entry.probePass, &floatsChanged) && !floatsChanged)
 					continue;
 			}
-			// Kept as records hold it (no t11 view: the frame's), so the next comparison sees only what a record would take.
+			// Kept as records hold it, without the frame's t11 view.
 			entry.applied = live;
 			MaterialSources::StripFrameViews(entry.applied, entry.probePass);
 			entry.appliedValid = true;
@@ -307,7 +281,7 @@ namespace DCLF::Scene
 				}
 				++i;
 			}
-			// Written in place by chunks (a slot is on one signature's list once), versioned after in list order.
+			// A slot is on one signature's list once, so chunks write disjoint slots.
 			auto& items = materialApplyItems;
 			items.resize(slots.size());
 			if (PrepareMaterials("CS.DCLF.Scene.MaterialSignaturesShards", slots.size(), [&](std::size_t a_begin, std::size_t a_end) {
@@ -329,7 +303,6 @@ namespace DCLF::Scene
 			}
 			r.slotsApplied += slots.size();
 		}
-		// The witness's line (CS_DCLF_STATS), with its parity's verdict where it ran.
 		if (w.passes >= kSignatureReportPasses && Diagnostics::Observe().stats) {
 			logger::info("[DCLF] material signature witness: moved on {} of {} passes, {} signature evaluations held; parity {} checks, {} differ{}", w.moved,
 				w.passes, w.held, w.parity.checks, w.parity.mismatches, w.parity.Verdict(true));
@@ -340,14 +313,13 @@ namespace DCLF::Scene
 
 	void Coordinator::NoteMaterialRecord(std::uint32_t a_slot, const MaterialPort::MaterialSnapshot& a_snapshot)
 	{
-		// The material's texture transforms are no record's (the frame values patch the rows: TextureTransformList).
+		// Texture transforms are not in the record. The frame values patch the rows.
 		if (a_slot >= tables.materialSlotKey.size())
 			return;
 		const auto [material, pass] = tables.materialSlotKey[a_slot];
 		if (!material)
 			return;
-		// A port's record without signature components (the Effect port's: its pass descriptor's bits are not Lighting's); its texture
-		// transforms are the frame values'.
+		// A port's record without signature components, such as the Effect port's.
 		if (a_slot < tables.materials.size() && !Extensions::PortRules(tables.materials[a_slot].kind).signatureComponents)
 			return;
 		const std::uint32_t signature = MaterialSources::Signature(pass);
@@ -355,8 +327,7 @@ namespace DCLF::Scene
 		if (materialSignatureListed.size() <= a_slot)
 			materialSignatureListed.resize(std::size_t(a_slot) + 1, 0);
 		if (materialSignatureListed[a_slot] != signature + 1) {
-			// Listed under another signature (the slot keyed again): out of that list first, as a list is walked only when its signature
-			// applies (the witness moved), so a slot cycling between two would otherwise gather duplicates.
+			// Take the slot out of its old list first. A list is walked only when its signature applies, so a slot cycling between two would gather duplicates.
 			if (const std::uint32_t was = materialSignatureListed[a_slot]; was != 0)
 				if (const auto old = materialSignatures.find(was - 1); old != materialSignatures.end()) {
 					auto& slots = old->second.slots;
@@ -418,9 +389,7 @@ namespace DCLF::Scene
 
 	void Coordinator::NameShadingKeys(const std::vector<const void*>& a_keys, std::vector<std::uint32_t>* a_slots)
 	{
-		// Prepared by chunks of keys (across the pool when they are many: FanoutMode), pure: each key's dependents, their slots and
-		// what NameShading would name, read from the frozen index and tables. Applied on the pass's thread in key order: the items
-		// with their references, the extras' rows, the counters (as the serial loop did, slot by slot).
+		// Prepared by key chunks, pure over the frozen index and tables. Applied on the pass's thread in key order.
 		struct Named
 		{
 			std::uint32_t slot = kNoObjectSlot;
@@ -475,7 +444,6 @@ namespace DCLF::Scene
 					item.pass = named.pass;
 					item.member = named.member;
 				}
-				// The extras' static rows read the same property fields (ProjectedUV's parameters and colour).
 				if ((tables.objects[slot].flags & (kObjectProjectedUV | kObjectLandBlend)) && WriteObjectExtras(slot))
 					tables.NoteChange(slot, kChangeExtras);
 				++shadingStats.resampled;
@@ -486,11 +454,8 @@ namespace DCLF::Scene
 
 	void Coordinator::NameShadingEvents(std::vector<std::uint32_t>* a_slots)
 	{
-		// The events: the controllers' writes of the emissive colour and multiplier and of material fields (MaterialSources), the
-		// LOD fades and the alpha GetRenderPasses leaves on the property (an actor's fade among them; lodFadeEvents), and external
-		// emittance's shared colour (emittanceEvents). Their dependents are sampled at the next frame's start: a value that changes
-		// during this frame (a controller on the animation job, a cull's GetRenderPasses) is drawn from the next frame on, a frame
-		// after the engine's own draw would show it (dclf-architecture.md, "Accepted differences").
+		// Dependents are sampled at the next frame start, so a value that changes during this frame is drawn a frame after the engine
+		// would show it. This is an accepted difference.
 		lodFadeChanged.clear();
 		DrainLodFadeEvents(lodFadeChanged);
 		const std::size_t lodFades = lodFadeChanged.size();
@@ -498,7 +463,7 @@ namespace DCLF::Scene
 		shadingStats.emittanceEvents += lodFadeChanged.size() - lodFades;
 		MaterialWrites::DrainShadingChanges(lodFadeChanged);
 		if (!shadingNamedAll || !lodFadeEventsInstalled) {
-			// Every slot (the events are not installed: every walk).
+			// The events are not installed, so every walk names every slot.
 			shadingNamedAll = true;
 			for (std::uint32_t o = 0; o < tables.objects.size() && o < tables.objectGeometry.size(); ++o) {
 				NameShading(o, IsResidentSlot(o));
@@ -520,28 +485,23 @@ namespace DCLF::Scene
 			return false;
 		const auto& object = tables.objects[a_object];
 		const auto* geometry = tables.objectGeometry[a_object];
-		// The records: the slot's property's (its layer's for a layer slot) and the geometry's.
 		const auto leaf = geometry ? mirror.Leaf(geometry) : SceneCapture::LeafView{};
 		const auto* property = tables.IsLayer(a_object) ? leaf.layer : leaf.property;
 		if (!geometry || !leaf || !property || (object.flags & kObjectNoBindings))
 			return false;
-		// What of the rows is the object's alone (CompleteExtras adds the frame's): the land blend's material offset; how its
-		// TextureProj is made, and a multi-index shape's own; the ProjectedUV parameters.
+		// What of the rows is the object's alone. CompleteExtras adds the frame's part.
 		std::array<float, kExtraRows * 4> rows{};
 		if (object.flags & kObjectLandBlend) {
 			rows[kExtraRowLandBlend * 4 + 0] = property->landBlend[0];  // the landscape material's landBlendParams
 			rows[kExtraRowLandBlend * 4 + 1] = property->landBlend[1];
 		}
 		if (object.flags & kObjectProjectedUV) {
-			// A multi-index shape's parameters (GeometryRecord::multiParams: materialProjection, materialParams, materialScale,
-			// normalDampener).
 			const bool multiIndex = leaf.Type() == static_cast<std::uint8_t>(RE::BSGeometry::Type::kMultiIndexTriShape);
 			const auto& m = leaf.geometry->multiParams;
 			const std::uint32_t technique = (tables.pipelines[object.pipelineIndex].passDescriptor >> 24) & 0x3f;
 			if (!(object.flags & kObjectLandBlend))
 				rows[kExtraRowLandBlend * 4] = multiIndex ? kTextureProjShape : technique == 1 ? kTextureProjProjection : kTextureProjWorld;
-			// A multi-index shape's passes take the shape's own projection (SetupGeometry's ProjectedUV block, engine notes):
-			// materialProjection's columns, as stored.
+			// A multi-index shape's passes take the shape's own projection, as SetupGeometry's ProjectedUV block does.
 			if (multiIndex) {
 				float* proj = rows.data() + kExtraRowTextureProj * 4;
 				for (std::uint32_t r = 0; r < 3; ++r) {
@@ -551,8 +511,7 @@ namespace DCLF::Scene
 					proj[r * 4 + 3] = m[3 * 4 + r];
 				}
 			}
-			// The pixel parameters (FUN_1414e00c0): the property's projectedUVParams folded by its w, its projectedUVColor (a
-			// multi-index shape's materialParams, normalDampener and materialScale); the globals are the frame's (ExtrasFrame).
+			// The pixel parameters as FUN_1414e00c0 builds them. The globals are the frame's.
 			const std::array<float, 4> params = multiIndex ? std::array<float, 4>{ m[16], m[17], m[18], m[19] } :
 			                                                 std::array<float, 4>{ property->projected[0], property->projected[1], property->projected[2], property->projected[3] };
 			float* out = rows.data() + kExtraRowProjectedParams * 4;
@@ -581,8 +540,8 @@ namespace DCLF::Scene
 
 	void Coordinator::MaterialReference::reset(RE::BSShaderMaterial* a_material)
 	{
-		// BSIntrusiveRefCounted's count (+0x8), incremented as the engine takes a reference on a property's material
-		// (FUN_1414ac820); a material being read off a live property has one already, so it cannot be at zero here.
+		// BSIntrusiveRefCounted's count (+0x8), as the engine takes a material reference (FUN_1414ac820). A material read off a live
+		// property already has one, so it cannot be at zero here.
 		if (a_material)
 			InterlockedIncrement(reinterpret_cast<volatile LONG*>(reinterpret_cast<std::byte*>(a_material) + 0x8));
 		if (material) {
@@ -601,7 +560,7 @@ namespace DCLF::Scene
 		if (fresh) {
 			tables.techniqueKeys.push_back(key);
 			tables.techniqueConstants.emplace_back().passDescriptor = a_passDescriptor;
-			// Evaluated now, from the frame's sample (the witness RefreshTechniqueRows took this pass): drawable with this publication.
+			// Evaluated now so it is drawable with this publication.
 			EvaluateTechniqueRow(it->second);
 			tables.NoteConstantsWrite();
 		}
@@ -610,9 +569,7 @@ namespace DCLF::Scene
 
 	void Coordinator::RefreshTechniqueRows()
 	{
-		// The coordinator's technique rows follow its frame's sample (FrameGlobals, bound to the scene work). The witness is what
-		// the rows read of it but the fog (SameTechniqueWitness) and SetupTechniqueDescriptor's bytes; while it holds, every row is
-		// already this sample's. It moves with the loaded grid (terrain LOD's HighDetailRange), the shadow mask target, the INI clamps.
+		// While the witness holds every row is already this sample's. It moves with the loaded grid, the shadow mask target and the INI clamps.
 		const auto& g = FrameGlobals::Current();
 		auto& w = techniqueWitness;
 		if (w.valid && w.byte12 == g.techniqueByte12 && w.byte7 == g.techniqueByte7 && SameTechniqueWitness(w.inputs, g.technique))
@@ -635,7 +592,7 @@ namespace DCLF::Scene
 		TechniqueConstants now;
 		EvaluateTechnique(row.passDescriptor, inputs, now);
 		++constantsPostStats.techniquesEvaluated;
-		// The row keeps the fog it was made with (the draws read the frame's, FrameCapture::fog): the time of day versions no row.
+		// The row keeps the fog it was made with, so the time of day versions no row.
 		if (row.valid)
 			KeepTechniqueFog(row.value, now);
 		const bool floats = !row.valid || !SameTechniqueFloats(now, row.value);
@@ -655,8 +612,7 @@ namespace DCLF::Scene
 
 	void Coordinator::ApplyConstantsPosts()
 	{
-		// The coordinator's tables: a post whose slot holds another key now (a slot reused, the tables made again) is dropped; the
-		// render thread evaluates the new tenant when the frame's snapshot shows it.
+		// A post whose slot holds another key now is dropped. The render thread evaluates the new tenant when it sees it.
 		bool wrote = false;
 		channels.pipelineConstantsPosted.Drain([&](std::unique_ptr<PipelineConstantsPost>&& a_post) {
 			if (!a_post)

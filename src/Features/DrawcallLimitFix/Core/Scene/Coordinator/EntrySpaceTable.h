@@ -1,7 +1,6 @@
 #pragma once
 
-// The coordinator's stable index space for a candidate set (the sun's and the point lights' EntrySpace), and the pooled snapshots
-// published from it. Coordinator thread only; a published snapshot is read by the frame's builds and released by its last owner.
+// The coordinator's stable index space for a candidate set, and the pooled snapshots published from it. Coordinator thread only.
 
 #include <algorithm>
 #include <atomic>
@@ -18,17 +17,10 @@
 namespace DCLF::Scene
 {
 	/**
-	 * @brief The entries' and their geometries' indices with their free lists, each entry's geometries and its version (moved by every
-	 * change of the index, from a counter the caller shares between tables). Publish brings a pooled snapshot no reader holds up to the
-	 * table at the indices whose versions moved.
+	 * @brief Entry and geometry indices with their free lists, and a version per entry. Publish brings a pooled snapshot no reader
+	 * holds up to date at the indices whose versions moved.
 	 *
-	 * Every index Set or Reset writes is appended to log. Each pooled snapshot keeps a LogCursor into it and catches up by the indices
-	 * it has not read; a snapshot whose cursor is no longer readable (new, or behind a Reset or the trim) is brought up index by index.
-	 * Each publication also closes a run of the indices written since the last (EntrySpaceChanges), published with the snapshot.
-	 *
-	 * The lane brings up only one publication's run: after each publication a spare (the free pooled snapshot nearest the log, or a
-	 * new one) is brought up to it on the preparation pool from the published snapshot and its runs, and the next publication takes
-	 * the spare. An index rewritten under the same root keeps its map entries and its held root (no map churn for a rewrite).
+	 * After each publication a spare snapshot is caught up on the preparation pool, so the lane only brings up one publication's run.
 	 */
 	struct EntrySpaceTable
 	{
@@ -43,13 +35,9 @@ namespace DCLF::Scene
 		std::vector<std::int32_t> geometrySlot;
 		std::vector<std::uint8_t> primaryGeometry;
 		std::vector<std::uint32_t> geometryFree;
-		/** @brief A pooled snapshot, where it read log to (the lane's), and the spare catch-up on the pool it may be under. */
 		struct Pooled
 		{
-			/**
-			 * @brief One catch-up on the pool, shared with its job (a new one per dispatch: a job that finds it claimed by the lane
-			 * does nothing, so a stale job never runs a later dispatch's work).
-			 */
+			/** @brief A new one per dispatch, so a stale job that finds it claimed by the lane does nothing. */
 			struct State
 			{
 				std::atomic<bool> claimed{ false };  // taken by the job or by the lane (whichever first runs the catch-up)
@@ -61,11 +49,11 @@ namespace DCLF::Scene
 			std::shared_ptr<EntrySpace> snapshot = std::make_shared<EntrySpace>();
 			LogCursor cursor;
 			std::shared_ptr<State> state = std::make_shared<State>();
-			// What the catch-up brings it up to, held by the lane until it is done (the job reads it by address).
+			// Held by the lane until the catch-up is done, since the job reads it by address.
 			std::shared_ptr<const EntrySpace> source;
 		};
 		std::vector<Pooled> pool;
-		// Every index written, in order (Reset invalidates it: every reader is brought up whole).
+		// Reset invalidates it, so every reader is brought up whole.
 		EventLog<std::uint32_t> log;
 		std::uint64_t logId = NextLogId();
 		std::uint64_t published = 0;  // log's end at the last publication (the next run starts there)
@@ -76,73 +64,51 @@ namespace DCLF::Scene
 		std::uint64_t entriesWritten = 0, snapshots = 0;  // since the last report
 		std::uint64_t rowsTakenBack = 0;  // since the last report: entries written again for a geometry another let go of (released)
 		std::uint64_t entriesCaughtUp = 0, wholeCatchUps = 0;  // since the last report: indices a snapshot was brought up at; snapshots brought up index by index
-		// Since the last report, of entriesCaughtUp: indices rewritten under the same root (map entries and held root kept); spares
-		// dispatched, the indices they brought up, those the lane found unstarted (and ran) or running (and waited for); the snapshots
-		// the pool grew by.
 		std::uint64_t entriesKept = 0, spareCatchUps = 0, spareEntries = 0, sparesRunByLane = 0, sparesWaited = 0, poolGrowths = 0;
 		std::uint64_t poolTrimmed = 0;  // since the last report: free snapshots let go of past kFreeSpares (TrimPool)
 		std::vector<std::uint8_t> setKept;        // per position, Set's scratch
 		std::vector<std::uint32_t> setPrevious;  // Set's scratch: the entry's geometries before
-		// The geometries Set let go of since the caller last took them (TakeReleased). One another entry lists has no row there when
-		// that entry was written first (a geometry moved between entries in one update: the new entry's Set skipped it, still indexed
-		// by the old): the caller writes that entry again.
+		// A geometry moved between entries in one update may be skipped by the new entry's Set. The caller writes that entry again.
 		std::vector<const RE::BSGeometry*> released;
-		// The entry roots the last publication names, by index: the only references a candidate set holds (its snapshots hold none).
-		// An index Publish writes under another root lets its old one go into retiredRoots, which the caller retires through its chain
-		// (released once no publication that names it lives).
+		// The only references a candidate set holds, since its snapshots hold none. Replaced roots go to retiredRoots for the caller to retire.
 		std::vector<RE::NiPointer<RE::NiAVObject>> owned;
 		std::vector<RE::NiPointer<RE::NiRefObject>> retiredRoots;
 
 		static std::uint64_t NextLogId();
 
-		/** @brief Every index freed under a new version: the pooled snapshots drop their entries when brought up to it. */
 		void Reset(std::uint32_t& a_versions);
-		/** @brief The geometries Set let go of since the last call that no entry holds a row for now. */
 		std::vector<const RE::BSGeometry*> TakeReleased()
 		{
 			auto taken = std::exchange(released, {});
 			std::erase_if(taken, [this](const RE::BSGeometry* a_geometry) { return geometryIndex.contains(a_geometry); });
 			return taken;
 		}
-		/**
-		 * @brief a_root's entry as its dependents are (a_dependents; null: not a candidate): written again, its geometries with it,
-		 * under a new version. a_geometry(geometry) gives a new geometry's object slot and primary verdict.
-		 */
+		/** @brief a_dependents null means not a candidate. a_geometry(geometry) gives a new geometry's object slot and primary verdict. */
 		template <class Geometry>
 		void Set(const RE::NiAVObject* a_root, const std::vector<RE::BSGeometry*>* a_dependents, std::uint32_t& a_versions, Geometry&& a_geometry);
-		/**
-		 * @brief A snapshot, a new generation (a_generation), brought up to the table at the indices that moved, for a_publication (the
-		 * first publication that may carry it); a_ownedRoot gives owned each root newly listed, and the roots let go of are left in
-		 * retiredRoots (TakeRetiredRoots).
-		 */
+		/** @brief Roots let go of are left in retiredRoots. */
 		std::shared_ptr<const EntrySpace> Publish(std::uint32_t& a_generation, std::uint64_t a_publication,
 			const std::function<RE::NiPointer<RE::NiAVObject>(const RE::NiAVObject*)>& a_ownedRoot);
-		/** @brief The roots the publications let go of since the last call: the last Publish's a_publication is the first not to name them. */
+		/** @brief The last Publish's a_publication is the first not to name them. */
 		std::vector<RE::NiPointer<RE::NiRefObject>> TakeRetiredRoots() { return std::exchange(retiredRoots, {}); }
-		/** @brief Every owned root let go of (into retiredRoots): nothing names the table's entries any more (a teardown). */
+		/** @brief Teardown only. */
 		void ReleaseOwned();
-		/** @brief Parity: a_snapshot against the table index by index (what a snapshot made whole would hold); the first difference, or empty. */
+		/** @brief Parity check. Returns the first difference, or empty. */
 		std::string CheckSnapshot(const EntrySpace& a_snapshot) const;
 
 		EntrySpaceTable() = default;
 		EntrySpaceTable(const EntrySpaceTable&) = delete;
 		EntrySpaceTable& operator=(const EntrySpaceTable&) = delete;
-		/** @brief Every spare's catch-up finished first (its job reads the pool's snapshots by address). */
+		/** @brief Waits for every spare's catch-up, since the job reads the pool's snapshots by address. */
 		~EntrySpaceTable();
 
 	private:
-		// The free pooled snapshots kept past a publication (TrimPool): the next publication's and the next spare's.
 		static constexpr std::size_t kFreeSpares = 2;
 
-		/** @brief After a publication (pool[a_published]): a spare brought up to last on the preparation pool (inline under Policy::SerialFanout). */
 		void DispatchSpare(std::size_t a_published);
-		/**
-		 * @brief After a publication: the free pooled snapshots past kFreeSpares let go of, the nearest the log kept. The pool grows while
-		 * every snapshot is held (publications kept behind the retirement chain); a free one is memory alone (it holds no entry root),
-		 * let go of once the readers that grew the pool are done. In use or catching up: kept.
-		 */
+		/** @brief The pool grows while every snapshot is held. A free one is only memory, so extras past kFreeSpares are let go. */
 		void TrimPool();
-		/** @brief a_pooled's catch-up done: run here if its job has not started, else waited for (it is running). */
+		/** @brief Runs the job here if it has not started, else waits for it. */
 		void FinishSpare(Pooled& a_pooled);
 	};
 
@@ -164,9 +130,7 @@ namespace DCLF::Scene
 			version.push_back(0);
 			geometries.emplace_back();
 		}
-		// Its geometries: one the entry lists again at the same position keeps its index and its map entry (a rewrite of the same
-		// geometries moves none of them; Publish writes only their rows); the others let go (a geometry another entry lists too stays
-		// that entry's), and the new ones take indices.
+		// A geometry listed again at the same position keeps its index and map entry, so a rewrite moves none of them.
 		auto& list = geometries[e];
 		setKept.assign(list.size(), 0);
 		if (a_dependents)
