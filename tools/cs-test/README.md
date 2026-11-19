@@ -57,6 +57,7 @@ The shipped configs:
 | `guest-quick`, `native-quick`, `native-d3d12-quick` | the old quick scenarios |
 | `boot` | exits at shaders-ready (`--set build.shader_cache=cold` for a cold compile) |
 | `resize` | Exponential Height Fog turned on, its grid settings changed (`setting` steps) and upscale method switches: graph textures that take a new size mid-session; compose it, `native-vulkan+resize` |
+| `quality-burst` | XeSS, then FSR, with the quality mode changed many times a few frames apart (new SDK contexts while frames are in flight); compose it, `native-d3d12+quality-burst` |
 | `hdr` | HDR Display turned on mid-session (the `hdr` step), shots in HDR with and without the CS menu, then off again; compose it, `native-d3d12+hdr`, `d3d11+hdr` |
 | `fg` | FSR frame generation switched on (the `fg` step), then the CS menu, the pause menu and a coc with it on, driver presents logged; compose it, `guest+fg`, `d3d11+fg` |
 | `rain` | Riverwood's river in a forced rain storm (`fw`), two shots while it falls; compose it, `native-vulkan+rain`, `guest+rain` |

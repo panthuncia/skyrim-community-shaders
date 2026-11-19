@@ -425,8 +425,8 @@ bool Streamline::Initialize()
 		return initialized;
 	triedInit = true;
 
-	// Native D3D12: Streamline on the native D3D12 device (asked before the device exists, so the requested backend). CS's sl.fsr,
-	// sl.fsr_g and sl.xess plugins are Vulkan-only and stand down there; DLSS and Reflex run.
+	// Native D3D12: Streamline on the native D3D12 device (asked before the device exists, so the requested backend). CS's sl.fsr and
+	// sl.xess run there too; sl.fsr_g is Vulkan-only and stands down. DLSS and Reflex run.
 #if defined(CS_HAS_RENDER_GRAPH)
 	const bool d3d12 = native && RenderGraph::Backend::Requested() == rhi::Backend::D3D12;
 #else

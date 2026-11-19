@@ -1,0 +1,131 @@
+# Upscaling quality changed many times in quick succession, first with XeSS and then with FSR. Each XeSS change and each FSR
+# render-size growth makes a new SDK context while earlier frames are still on the GPU. Compose it: native-d3d12+quality-burst,
+# native-vulkan+quality-burst, guest+quality-burst (add --set org.validation=true on native for the API validation messages).
+extends = ["base"]
+
+[run]
+timeout_s = 300
+
+[[steps]]
+at = "world-ready"
+frames = 60
+do = "upscale"
+arg = "xess"
+
+[[steps]]
+at = "previous"
+frames = 120
+do = "shot"
+arg = "xess"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "setting"
+arg = "Upscaling.qualityMode=3"
+
+[[steps]]
+at = "previous"
+frames = 3
+do = "setting"
+arg = "Upscaling.qualityMode=1"
+
+[[steps]]
+at = "previous"
+frames = 3
+do = "setting"
+arg = "Upscaling.qualityMode=3"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "setting"
+arg = "Upscaling.qualityMode=2"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "setting"
+arg = "Upscaling.qualityMode=1"
+
+[[steps]]
+at = "previous"
+frames = 5
+do = "setting"
+arg = "Upscaling.qualityMode=4"
+
+[[steps]]
+at = "previous"
+frames = 2
+do = "setting"
+arg = "Upscaling.qualityMode=1"
+
+[[steps]]
+at = "previous"
+frames = 120
+do = "shot"
+arg = "xess-burst"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "upscale"
+arg = "fsr"
+
+[[steps]]
+at = "previous"
+frames = 120
+do = "shot"
+arg = "fsr"
+
+# FSR keeps its context when the render size shrinks, so the growing steps (4 -> 1, 3 -> 1) are the ones that matter.
+[[steps]]
+at = "previous"
+frames = 1
+do = "setting"
+arg = "Upscaling.qualityMode=4"
+
+[[steps]]
+at = "previous"
+frames = 3
+do = "setting"
+arg = "Upscaling.qualityMode=1"
+
+[[steps]]
+at = "previous"
+frames = 3
+do = "setting"
+arg = "Upscaling.qualityMode=3"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "setting"
+arg = "Upscaling.qualityMode=0"
+
+[[steps]]
+at = "previous"
+frames = 2
+do = "setting"
+arg = "Upscaling.qualityMode=4"
+
+[[steps]]
+at = "previous"
+frames = 1
+do = "setting"
+arg = "Upscaling.qualityMode=1"
+
+[[steps]]
+at = "previous"
+frames = 120
+do = "shot"
+arg = "fsr-burst"
+
+[[steps]]
+at = "previous"
+frames = 10
+do = "exit"
+
+[expect]
+reach = "world-ready"
+shots = ["xess", "xess-burst", "fsr", "fsr-burst"]
