@@ -52,6 +52,12 @@ public:
 	static ORGVolumetricClouds& Get();
 
 	/**
+	* @brief Whether the client has run: its first run clears the outputs to neutral, so readers may read the published ids from
+	* this frame on. Before that nothing has written them, and a graph must not read them. Render thread.
+	*/
+	static bool OutputsWritten();
+
+	/**
 	* @brief In place of a cloud texture's D3D11 creation (SetupVolumetricResources, EnsureVolumetricScreenResources).
 	* A graph twin with exported SRV and UAV (and RTV when the description binds one), published under a_publishedId when one
 	* is given. Its wrapper names the export, so the D3D11 code keeps its members. Null means make a D3D11 texture.

@@ -84,7 +84,9 @@ namespace DCLF::Integrations::PhysicalSky
 		void* PhysSkyMediumCloudDepthView()
 		{
 			const auto& sky = globals::features::physicalSky;
-			auto* srv = sky.IsActive() && sky.VolumetricCloudsEnabled() && sky.texVolFilteredAux ? sky.texVolFilteredAux->srv.get() : nullptr;
+			auto* srv = sky.IsActive() && sky.VolumetricCloudsEnabled() && sky.texVolFilteredAux && ORGVolumetricClouds::OutputsWritten() ?
+			                sky.texVolFilteredAux->srv.get() :
+			                nullptr;
 			return srv && PublishedResources::IsExportOf(srv, ORGVolumetricClouds::kVolAuxId) ? srv : GpuTextures::NullView(PhysSkyKind::Texture2D);
 		}
 
@@ -130,6 +132,11 @@ namespace DCLF::Integrations::PhysicalSky
 		const auto& slot = kPhysSkySlots[a_slot];
 		auto* srv = sky.loaded && sky.cbData.enabled ? slot.srv(sky) : nullptr;
 		if (!srv)
+			return GpuTextures::NullView(kOrgTextureKinds[a_slot]);
+		// The clouds' outputs hold nothing before the cloud client's first run writes them.
+		const auto id = kPhysSkySlotIds[a_slot];
+		const bool cloud = !slot.lut && id != ORGPhysicalSky::kApShadowId && id != ORGPhysicalSky::kSkyTailId;
+		if (cloud && !ORGVolumetricClouds::OutputsWritten())
 			return GpuTextures::NullView(kOrgTextureKinds[a_slot]);
 		// The LUTs are graph textures in every graph mode. So are the AP shadow, the sky tail and the clouds' outputs while their
 		// twins are the textures.

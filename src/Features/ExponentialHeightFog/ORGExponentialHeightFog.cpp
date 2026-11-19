@@ -1096,7 +1096,7 @@ bool ORGExponentialHeightFog::Prepass()
 		if (!shape.inputs[kPhysSkyTransmittance])
 			return fallback("Physical Sky's LUTs are on D3D11");
 		// The shader reads them only with the clouds on (enableVolumetricClouds). They are the cloud renderer's twins.
-		if (physicalSky.VolumetricCloudsEnabled() && physicalSky.texShadowVolume && physicalSky.texCloudShadowMean) {
+		if (physicalSky.VolumetricCloudsEnabled() && physicalSky.texShadowVolume && physicalSky.texCloudShadowMean && ORGVolumetricClouds::OutputsWritten()) {
 			shape.inputs[kPhysSkyShadowVolume] = Published(ORGVolumetricClouds::kShadowVolumeId, physicalSky.texShadowVolume->srv.get());
 			shape.inputs[kPhysSkyShadowMean] = Published(ORGVolumetricClouds::kCloudShadowMeanId, physicalSky.texCloudShadowMean->srv.get());
 			if (!shape.inputs[kPhysSkyShadowVolume] || !shape.inputs[kPhysSkyShadowMean])

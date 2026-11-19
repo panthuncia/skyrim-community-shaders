@@ -147,7 +147,8 @@ namespace
 	*/
 	bool CloudsOnGraph(const PhysicalSky& a_feature)
 	{
-		if (!a_feature.VolumetricCloudsEnabled() || !a_feature.texShadowVolume || !a_feature.texVolTr)
+		// Nothing may read them before the cloud client's first run writes them.
+		if (!a_feature.VolumetricCloudsEnabled() || !a_feature.texShadowVolume || !a_feature.texVolTr || !ORGVolumetricClouds::OutputsWritten())
 			return false;
 		const bool published = PublishedResources::IsExportOf(a_feature.texShadowVolume->srv.get(), ORGVolumetricClouds::kShadowVolumeId) &&
 		                       PublishedResources::IsExportOf(a_feature.texVolTr->srv.get(), ORGVolumetricClouds::kVolTrCurrentId);

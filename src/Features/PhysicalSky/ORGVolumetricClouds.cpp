@@ -8,6 +8,17 @@
 #include "Features/PhysicalSky/ORGCloudInputs.h"
 #include "RenderGraph/Engine/Native/Native.h"
 
+namespace
+{
+	// Set at the first frame the client is scheduled. The outputs are History twins, so they keep what that run wrote.
+	bool s_outputsWritten = false;
+}
+
+bool ORGVolumetricClouds::OutputsWritten()
+{
+	return s_outputsWritten;
+}
+
 bool ORGVolumetricClouds::Requested()
 {
 	static const bool requested = RenderGraph::Engine::Native::GraphMode();
@@ -1244,6 +1255,7 @@ void ORGVolumetricClouds::Stage(PhysicalSky& a_feature, const Frame& a_frame)
 	// Until the schedule holds the client the clouds render nothing, and the targets keep their neutral clears.
 	if (!FrameAnchors::Scheduled(kCloudsClientId, FrameAnchors::Anchor::Prepass))
 		return;
+	s_outputsWritten = true;
 
 	auto& frame = state.pending.emplace();
 	state.pendingFrame = globals::state->frameCount;

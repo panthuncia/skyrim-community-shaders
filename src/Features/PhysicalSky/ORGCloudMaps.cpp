@@ -231,6 +231,8 @@ namespace
 	bool s_twinsChanged = false;
 	// The twins the latest registration registers. A graph built from now on has them.
 	std::unordered_set<const Twin*> s_registeredTwins;
+	// The twins the cloud renderer read through Gather last, which the client registers though no step of its own uses them.
+	std::unordered_map<const Twin*, std::shared_ptr<Twin>> s_inputTwins;
 
 	std::unordered_map<const ID3D11ShaderResourceView*, std::shared_ptr<Import>>& Imports()
 	{
@@ -266,7 +268,9 @@ namespace
 	/** @brief Drops twins no manager holds any more. Their graph resources live on in older graphs until those are gone. */
 	void PruneTwins()
 	{
-		std::erase_if(Twins(), [](const auto& a_entry) { return !a_entry.second->copy && RefCount(a_entry.second->d3d11) <= a_entry.second->baseline; });
+		std::erase_if(Twins(), [](const auto& a_entry) {
+			return !a_entry.second->copy && a_entry.second->baseline && RefCount(a_entry.second->d3d11) <= a_entry.second->baseline;
+		});
 	}
 
 	std::shared_ptr<Twin> Remember(std::shared_ptr<GraphResources::Resource> a_resource, ID3D11Resource* a_d3d11, bool a_copy, std::uint32_t a_width,
@@ -373,14 +377,22 @@ namespace
 		if (!a_srv)
 			return {};
 		if (const auto twin = TwinOf(a_srv)) {
-			// A twin the latest registration does not register is in no graph yet.
-			if (!s_registeredTwins.contains(twin.get()))
+			// A twin the latest registration does not register is in no graph yet: the next registers it.
+			s_inputTwins.emplace(twin.get(), twin);
+			if (!s_registeredTwins.contains(twin.get())) {
 				a_ok = false;
+				s_twinsChanged = true;
+			}
 			return RenderGraph::AnchorPasses::TextureOf(*twin->resource);
 		}
 		if (const auto import = ImportOf(a_srv)) {
-			if (import->copy && !s_registeredTwins.contains(import->copy.get()))
-				a_ok = false;
+			if (import->copy) {
+				s_inputTwins.emplace(import->copy.get(), import->copy);
+				if (!s_registeredTwins.contains(import->copy.get())) {
+					a_ok = false;
+					s_twinsChanged = true;
+				}
+			}
 			return import->texture;
 		}
 		a_ok = false;
@@ -406,9 +418,13 @@ eastl::unique_ptr<Texture2D> ORGCloudMaps::MakeTexture2D(const D3D11_TEXTURE2D_D
 		return eastl::make_unique<Texture2D>(a_desc, a_name);
 	}
 	auto* d3d11 = twin->D3D11();
-	Remember(twin, d3d11, false, desc.Width, desc.Height, desc.MipLevels);
+	auto remembered = Remember(twin, d3d11, false, desc.Width, desc.Height, desc.MipLevels);
 	// The wrapper takes its own reference. The twin keeps the image.
 	d3d11->AddRef();
+	// A device whose references do not count the wrapper's (native mode's may not) would make the twin look unused at once.
+	// Such a twin is never pruned.
+	if (RefCount(d3d11) <= remembered->baseline)
+		remembered->baseline = 0;
 	auto wrapper = eastl::make_unique<Texture2D>(d3d11, name.c_str());
 	wrapper->srv.copy_from(twin->SRV());
 	wrapper->uav.copy_from(twin->UAV());
@@ -433,8 +449,12 @@ eastl::unique_ptr<Texture3D> ORGCloudMaps::MakeTexture3D(const D3D11_TEXTURE3D_D
 		return eastl::make_unique<Texture3D>(a_desc, a_name);
 	}
 	auto* d3d11 = twin->D3D11();
-	Remember(twin, d3d11, false, desc.Width, desc.Height, desc.MipLevels);
+	auto remembered = Remember(twin, d3d11, false, desc.Width, desc.Height, desc.MipLevels);
 	d3d11->AddRef();
+	// A device whose references do not count the wrapper's (native mode's may not) would make the twin look unused at once.
+	// Such a twin is never pruned.
+	if (RefCount(d3d11) <= remembered->baseline)
+		remembered->baseline = 0;
 	auto wrapper = eastl::make_unique<Texture3D>(d3d11);
 	wrapper->srv.copy_from(twin->SRV());
 	wrapper->uav.copy_from(twin->UAV());
@@ -689,13 +709,21 @@ void ORGCloudMaps::EndFrame()
 		state.failed = true;
 		return;
 	}
-	// Every live twin, so maps only the cloud renderer reads (the voxel lighting, file copies) are in the graph too.
+	// The twins the steps use, and those only the cloud renderer reads (the voxel lighting, file copies, the current noise).
+	// A twin nothing uses stays out: an idle one of a ping-pong pair would enter the graph with no state to start from.
 	std::vector<std::shared_ptr<GraphResources::Resource>> resources;
 	std::unordered_set<const Twin*> registeredTwins;
-	for (const auto& [key, twin] : Twins()) {
-		resources.push_back(twin->resource);
-		registeredTwins.insert(twin.get());
+	const auto add = [&](const std::shared_ptr<Twin>& a_twin) {
+		if (a_twin && Twins().contains(KeyOf(a_twin->d3d11)) && registeredTwins.insert(a_twin.get()).second)
+			resources.push_back(a_twin->resource);
+	};
+	for (const auto* step : ordered) {
+		for (const auto& twin : step->twins)
+			add(twin);
+		add(step->mipsTexture);
 	}
+	for (const auto& [_, twin] : s_inputTwins)
+		add(twin);
 
 	FrameAnchors::ClientDesc client{};
 	client.id = kClientId;
@@ -721,6 +749,7 @@ bool ORGCloudInputs::Gather(const PhysicalSky& a_feature, Inputs& a_out)
 {
 	a_out = {};
 	static std::string s_logged;
+	s_inputTwins.clear();
 	const auto fail = [](const char* a_reason) {
 		if (s_logged != a_reason) {
 			logger::warn("[ORG] Physical Sky clouds: no clouds this frame ({})", a_reason);
