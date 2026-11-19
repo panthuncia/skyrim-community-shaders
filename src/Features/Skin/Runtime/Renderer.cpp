@@ -346,6 +346,7 @@ void Skin::BSLightingShader_SetupGeometry(RE::BSRenderPass* a_pass)
 			}
 		}
 	}
+	currentWetness = data.skinPerGeometry;
 	PerGeometryCB->Update(data);
 	ID3D11Buffer* buffer = PerGeometryCB->CB();
 	globals::d3d::context->PSSetConstantBuffers(7, 1, &buffer);
