@@ -1,4 +1,3 @@
-#include "Common/PreExposure.hlsli"
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 // Modified by Jiaye
 ////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -185,6 +184,7 @@ ORG_PUSH_BLOCK(DOF_RESOURCES(ORG_HANDLE) ORG_HANDLE(LATCH, DoFConstants, DoFFram
 #include "Common/Color.hlsli"
 #include "Common/Game.hlsli"
 #include "Common/Math.hlsli"
+#include "Common/PreExposure.hlsli"
 #include "Common/SharedData.hlsli"
 
 #if defined(GATHER_RING_COUNT)
