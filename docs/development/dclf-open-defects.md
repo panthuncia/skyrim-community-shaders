@@ -619,9 +619,13 @@ Known gaps in the ORG ports of Community Shaders features, from the 2026-11-18 h
     words and uses 26; Physical Sky needs about 7 more and ViewAtmosphere 3. Decided: run the aerial perspective as
     `cs.physical-sky.composite` right after `cs.deferred`. Minor cost: one more full-screen read and write of kMAIN and a second
     fp16 rounding. **Next:** fold it back into the composite when the composite takes a handle table.
--   **ViewAtmosphere's post-water composite corrupts guest and shows no fog in native.** With Exponential Height Fog and its
-    volumetric fog on, guest's image goes black with bright green-haloed foliage and stays so; native shows no haze where plain
-    D3D11 does. Fog off is clean. Being diagnosed with `CS_ORG_VIEW_ATMOSPHERE_DEBUG` (`render-graph.md`).
+-   **Guest: kMAIN goes non-finite with Exponential Height Fog on.** With the fog and its volumetric fog on, guest's image goes
+    black with bright green-haloed foliage and stays so (NaN or inf through bloom). Fog off, native and plain D3D11 are clean.
+    Pre-existing: build `87fcac5d6` (before ViewAtmosphere's port) shows it too. `CS_ORG_VIEW_ATMOSPHERE_DEBUG=1` shows kMAIN
+    already non-finite before the post-water composite, and `=6` (pass-through) keeps the blobs, so the composite is not the cause.
+-   **Native: the fog volumes hold almost no fog.** With the same settings plain D3D11 shows haze on distant hills; native shows
+    none. `CS_ORG_VIEW_ATMOSPHERE_DEBUG=3` reads transmittance near 1 across the screen, so the integrated volumes the post-water
+    composite reads are near identity. Before ViewAtmosphere's port native had no fog composite at all, so this was hidden.
 -   **Physical Sky's `PHYSICAL_SKY` define is still stripped from graph builds.** Removing the strip broke DCLF Lighting and
     Effect pipelines (unmapped t63, t69, t110, s3, s4) in native Vulkan, Water's DXIL build (`ApSampler`) in native D3D12, and
     the ORG `ISSAOComposite` build in guest. Reverted on the integration branch; phase 3 of `physical-sky-port.md` maps them.
