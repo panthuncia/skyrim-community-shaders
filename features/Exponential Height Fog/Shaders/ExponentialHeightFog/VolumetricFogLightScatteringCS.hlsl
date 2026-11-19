@@ -81,8 +81,7 @@ LightLimitFix::LocalShadowData EngineLocalShadowAt(uint a_index)
 	return EngineLocalShadow.Shadows[a_index];
 #	endif
 }
-// VolumetricFogLighting.hlsli indexes EngineLocalShadows, the D3D11 cbuffer's name.
-#	define EngineLocalShadows EngineLocalShadow.Shadows
+#	define VOLUMETRIC_FOG_ENGINE_LOCAL_SHADOW(i) EngineLocalShadowAt(i)
 #endif
 #if defined(PHYSICAL_SKY)
 #	include "PhysicalSky/Common.hlsli"
