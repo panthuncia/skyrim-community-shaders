@@ -249,9 +249,11 @@ namespace ORGPostChain
 	}
 
 	std::shared_ptr<const RasterProgram> Builder::RasterTargets(std::string_view a_source, std::uint32_t a_words, std::vector<RasterProgram::Target> a_targets,
-		std::vector<std::pair<std::string, std::string>> a_defines, std::wstring a_entry)
+		std::vector<std::pair<std::string, std::string>> a_defines, std::wstring a_entry, std::string_view a_vertexSource, std::wstring a_vertexEntry)
 	{
 		auto key = ProgramKey(a_source, a_entry, a_words, a_defines);
+		if (!a_vertexSource.empty())
+			key += std::format("|vs:{}:{}", a_vertexSource, std::string(a_vertexEntry.begin(), a_vertexEntry.end()));
 		for (const auto& target : a_targets) {
 			const auto& blend = target.blend;
 			key += std::format("|f{}", static_cast<int>(target.format));
@@ -268,6 +270,10 @@ namespace ORGPostChain
 		RasterProgram::Desc desc{};
 		desc.pixelSource = std::string(a_source);
 		desc.pixelEntry = std::move(a_entry);
+		if (!a_vertexSource.empty()) {
+			desc.vertexSource = std::string(a_vertexSource);
+			desc.vertexEntry = std::move(a_vertexEntry);
+		}
 		desc.constantWords = a_words;
 		desc.defines = RenderGraph::AnchorPasses::Defines(a_defines);
 		desc.targets = std::move(a_targets);

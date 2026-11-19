@@ -138,6 +138,10 @@ struct RasterProgram
 		// so a kept recording can skip work by its data alone.
 		const org::LatchBlock* indirect = nullptr;
 		std::uint32_t indirectOffset = 0;
+		// Or reads them from this buffer at this offset, which a GPU pass wrote and the pass declares as indirect arguments.
+		// Non-indexed: vertex count, instances, first vertex, first instance.
+		rhi::ResourceHandle indirectBuffer{};
+		std::uint64_t indirectBufferOffset = 0;
 		// An occlusion query around this draw alone. The caller resets it before and resolves it after.
 		rhi::QueryPoolHandle occlusionPool{};
 		std::uint32_t occlusionIndex = 0;
