@@ -519,6 +519,19 @@ D3D12 needs new plugin code. Steps 6 and 7 are independent after step 5; swap th
 - Risks: `VK_NOT_READY` from the plugin if anything still overlaps swap chains; queue reservation (check the BasicRHI line); AMD
   driver quirks (memory notes on RX 6600 miscompiles).
 - Size: L. NVIDIA: no.
+- Done 2026-11-19 (branch `org-native/fg-native-vulkan`, Streamline `org-native/fg-native-vulkan`). Native loads `sl.fsr_g`
+  (BasicRHI: "queues: 3 graphics"); the controller replaces the swap chain through `NativePresenter` with
+  `CompleteSwapchainTeardown` as the torn-down step; the plugin takes `hostRecreatesSwapchain`; a foreign prepared frame is
+  fatal in native (open questions 23 to 30). `native-fg` presents x2: 46 rendered and 92 presented a second (`[FGTEST]`),
+  PresentMon 90 to 91 over the same seconds, as guest's 46 / 91; HDR10 too (`native-vulkan+fg-hdr`, multiplier 1.98). No
+  device loss with `DXVK_DEBUG=hang`. Pacing: no knob was needed; the render thread queues one present at a time and FFX's
+  present runs on the submission thread. `+hdr` keeps only `hdr`'s steps, so the HDR check is `fg-hdr.toml` (shared with step
+  7). Decision 8's run (`native-vulkan+fg-fx`, the graph
+  post chain on): with Physical Lens's image mapping and Camera's distortion and grain on, then off, FSR-FG holds x2 (42 to 43
+  rendered, 84 to 86 presented a second, PresentMon 1.99); how the generated frames look needs the foreground check. Ghosts and
+  the starburst were left out: with them on, native Vulkan lost the device in `cs.pp.physical-lens.request-plans` before frame
+  generation was on (a Physical Lens defect, not frame generation's). The run also found turning Physical Lens off crashed
+  (`MakePipelineFeature` had no case for it), fixed. Open: the foreground eye check (HUD ghosting, pacing, menu and loading-screen passthrough).
 
 ### Step 7: FSR-FG on native D3D12
 - Scope:
@@ -628,6 +641,19 @@ D3D12 needs new plugin code. Steps 6 and 7 are independent after step 5; swap th
 | 20 | The inputs pass is a third client of the UI stage's FrameGeneration step (`cs.upscaling.fg-inputs`, a `repeats` client with its own tap after the hudless copy), not a step of its own. Its pass orders after the copy through the hudless it reads. | A whole anchor's taps all reach its first step (`TapStepAt`), so a second FrameGeneration step would never be tapped |
 | 21 | The inputs pass declares the hudless as a legacy interop use, so it is in the common state (Vulkan GENERAL) from the pass to the present, not shader read. | `DescribeForCommands` describes every image in that state, as for the upscalers' evaluate; nothing touches the hudless before the present |
 | 22 | The plugin logs a present that finds a frame prepared for another frame ID (`sl.fsr_g` branch `org-native/fg-inputs-contract`), first one then one in 600, and passes it through. Making it fatal in native is step 6's. | Guest still discards on the render thread while its prepare records on DXVK's CS thread, so a fatal check there would only measure that race |
+
+**Step 6, decided by the agent, to confirm (2026-11-19).**
+
+| # | Decision | Why |
+|---|---|---|
+| 23 | Native loads `sl.fsr_g` at `slInit` and marks it loaded, as guest does. The controller unloads it at a replacement when the game starts with frame generation off, so every native boot has one replacement (about 90 ms). | One load path for both modes; Streamline wants the plugin present at `slInit` for the device's queues anyway |
+| 24 | Native makes no render-thread discards of FSR-FG's prepared frame (`BeginRenderFrame`, `EnsureFSRFGPresentState`). A present that finds nothing prepared passes the frame through. | The submission thread records the prepare and presents. A discard from the render thread would race with both and drop generated frames |
+| 25 | The fatal check for a foreign prepared frame is the host's. `FSRFrameGenState::foreignPreparedFrames` (appended) counts them, and CS fails (`report_and_fail`) in native when it reads a nonzero count. The plugin still logs and passes through in guest. | The plugin stays the same on both backends (step 7 shares the counter); CS owns "fatal" |
+| 26 | Under a presentation layer, a native present keeps the vsync its swap chain was made with, and the swap chain is made with `allowTearing = tearing && !vsync`, so its first present mode matches. A vsync change is the controller's "FSR-FG vsync change" replacement, a frame later as in guest. BasicRHI is unchanged. | BasicRHI's own recreate inside the present skips the torn-down step; pinning the vsync in CS avoids a BasicRHI change |
+| 27 | `Controller::DesiredMethod` reads `Upscaling::IsFrameGenerationSelected` (no surface readiness), not `IsFrameGenerationActive`. This applies to guest too. | A native replacement lands a frame or more after the request, and the old check took frame generation off again while its own wrap was in flight. Guest `fg` gives the same eight `[FrameGen]` lines and four recreates. A guest surface stuck not ready (the scRGB fallback) now keeps FSR-FG wrapped and passing through instead of off |
+| 28 | A replacement asked for without a torn-down step (HDR's colour space change) runs the presenter's registered one (`Native::SetPresentationTornDown`). | The latest request wins. A feature load change waiting on a superseded request still goes through the one that runs |
+| 29 | `fg.presentmon` reads the PresentMon service through its SDK (`PresentMonAPI2Loader.dll`), not the console PresentMon. | The console PresentMon sees no presents without elevation on this machine; the service does |
+| 30 | With `hostRecreatesSwapchain`, a failed wrap fails the swap chain create (`VK_ERROR_INITIALIZATION_FAILED`), which is fatal in native, instead of falling back to a plain swap chain. | Errors are fatal; a silent plain swap chain would present x1 with frame generation on |
 
 **Step 7, decided by the agent, to confirm (2026-11-19).**
 

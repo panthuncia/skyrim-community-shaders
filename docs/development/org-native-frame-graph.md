@@ -8788,3 +8788,34 @@ Steps 2 and 3 of `plans/native-frame-generation-plan.md`. CS on `org-native/fg-p
   - `guest+fg` with `org.epoch_stats=true` (`stats`): passed; every report `0 not replayable`; no tap or replay error.
   - `d3d11+fg` (`new`): passed; the ring path as in `base` (368 "presenting 2" lines against 391, the known dropouts).
   - `guest-quick`, `guest+hdr`, `d3d11+hdr`, `guest+menu`, `native-quick` (`new`): passed.
+
+## FSR-FG on native Vulkan (2026-11-19)
+
+Step 6 of `plans/native-frame-generation-plan.md`. CS on `org-native/fg-native-vulkan` from `integ/hard-ports` `7bc9b04b3`, Streamline
+`org-native/fg-native-vulkan`.
+
+- **Loading.** `Streamline::Initialize` loads `kFeatureFSR_G` in native as in guest, and `SetNativeDevice` resolves its functions.
+  BasicRHI's union of the features' requirements reserves 3 graphics queues ("queues: 3 graphics"), and `sl.fsr_g` finds its present
+  and acquire queues through the interposer's `kVulkanTable` in manual hooking.
+- **Replacement.** The controller drives `NativePresenter`; the native branch registers `Streamline::CompleteSwapchainTeardown` as the
+  torn-down step, and a request that names none (HDR's colour space) runs it too. Each on/off is two replacements, as guest's two
+  recreates: the load change, then the wrap once the plugin has its options (45 to 300 ms each on the RX 6600; one FFX create took
+  910 ms). A superseded request does nothing, so an HDR toggle under FSR-FG makes one replacement.
+- **Plugin.** `FSRFrameGenOptions::hostRecreatesSwapchain`: no SUBOPTIMAL trigger, no bootstrap recreate, and a failed wrap fails the
+  create. `FSRFrameGenState::foreignPreparedFrames` counts presents that found another frame's prepare; native fails on any.
+- **Submission order.** The prepare (the UI stage's inputs pass) and the present both run on the submission thread, in frame order, so
+  native makes no render-thread discards. No foreign prepared frame in any run.
+- **Vsync.** Under a presentation layer the present keeps the swap chain's vsync, and the swap chain is made with tearing only when
+  vsync is off. A change is the controller's replacement.
+- **Pacing.** No knob added. The render thread queues a present only after the previous one finished, and FFX's present runs on the
+  submission thread, so the queue holds one frame. `native-fg` renders 46 a second with FSR-FG on and presents 92, as guest (46 / 91).
+- **Checks** (RX 6600, background, `DXVK_DEBUG=hang`, stage `fgd`; the fog's volumetric fog off, as saved).
+  - `native-fg` (`b`, `fg.presentmon`): passed, no device loss; "presenting 2 frame(s)"; `[FGTEST]` 46 rendered and 92 FSR-FG presents
+    a second, PresentMon 90.4 to 91.0 presents a second over the same seconds; passthrough (x1) in the pause menu.
+  - `native-vulkan+fg-hdr` (`b`): passed; x2 in SDR and HDR10, one replacement per HDR change; PresentMon multiplier 1.98
+    (45 rendered). Run `a` failed its live-image check on a cold HDR shader cache (10 fps).
+  - `guest+fg` (`a`): passed; the same eight `[FrameGen]` lines and four recreates as before; PresentMon multiplier 1.94.
+  - `d3d11+fg`, `native-quick`, `native-d3d12-quick`, `guest-quick`, `hdr`, `native-vulkan+hdr` (`a`): passed.
+  - `native-vulkan+fg-fx` (`c`, Post Processing mode for the run): passed; x2 with Physical Lens's image mapping and Camera on
+    and off. Run `a` (ghosts and starburst on) lost the device in `cs.pp.physical-lens.request-plans` before frame generation was on;
+    run `b` crashed turning Physical Lens off (`PostProcessing::MakePipelineFeature` had no Physical Lens case, fixed).

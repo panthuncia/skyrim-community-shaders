@@ -10,7 +10,7 @@ import subprocess
 import time
 from pathlib import Path
 
-from . import collect, journal as journal_mod, mo2, procs
+from . import collect, journal as journal_mod, mo2, presentmon, procs
 from .config import diff, resolve
 from .outcome import Final, Watcher, frames_after, read_status, summary_line
 from .paths import CONFIG_DIR, GAME_EXE, LEGACY_ENV_FILE, LOG_FILE, MO2_EXE, STATUS_FILE, TEST_FILE
@@ -87,6 +87,34 @@ def watch(paths, contract, harness, log=print, clock=time.monotonic, sleep=time.
     watcher = Watcher(contract, harness)
     status_path = paths.skse / STATUS_FILE
     start = clock()
+    try:
+        return _watch_loop(paths, contract, harness, log, clock, sleep, watcher, status_path, start)
+    finally:
+        # Stopped before the game is killed. The samples stay for the result.
+        if watch.sampler:
+            watch.sampler.stop()
+
+
+# fg.presentmon's sampler for the run being watched.
+watch.sampler = None
+
+
+def _start_presentmon(contract, harness, games, log):
+    """fg.presentmon: samples the game's presents per second from its first poll on."""
+    if not harness.get("presentmon") or watch.sampler or not games:
+        return
+    pid = games[0]
+    sampler = presentmon.Sampler(pid, Path(contract["run_dir"]) / "presentmon.jsonl")
+    try:
+        sampler.start()
+        watch.sampler = sampler
+        log(f"  PresentMon: sampling process {pid}")
+    except presentmon.PresentMonError as error:
+        log(f"  PresentMon: {error}")
+        harness["presentmon"] = False
+
+
+def _watch_loop(paths, contract, harness, log, clock, sleep, watcher, status_path, start):
     status = None
     focused = False
     last_phase = None
@@ -94,6 +122,7 @@ def watch(paths, contract, harness, log=print, clock=time.monotonic, sleep=time.
         sleep(POLL_S)
         t = clock() - start
         games = procs.find(GAME_EXE)
+        _start_presentmon(contract, harness, games, log)
         fresh = read_status(status_path, contract["run_id"])
         if fresh is not None:
             status = fresh
@@ -268,6 +297,12 @@ def run(paths, spec, sets=(), label=None, stage=None, dry_run=False, lock=None, 
     scan = collect.scan_log(run_dir / LOG_FILE)
     fault = ((status or {}).get("fault") or {}).get("address") or scan["fault_address"]
     shots = collect.shots_in(run_dir)
+    presents = None
+    if watch.sampler:
+        fgtest = collect.fgtest_seconds(run_dir / LOG_FILE, started)
+        presents = {**presentmon.summarize(watch.sampler.samples, fgtest), **collect.fgtest_rates(run_dir / LOG_FILE)}
+        log(f"PresentMon: {presents}")
+        watch.sampler = None
     line = summary_line(contract["name"], harness["label"], final, status, shots, fault)
     result = {
         "run_id": contract["run_id"],
@@ -292,6 +327,7 @@ def run(paths, spec, sets=(), label=None, stage=None, dry_run=False, lock=None, 
         "error_kinds": scan["error_kinds"],
         "warning_kinds": scan["warning_kinds"],
         "collected": collected,
+        "presents": presents,
         "summary": line,
     }
     (run_dir / "result.json").write_text(json.dumps(result, indent=2), encoding="utf-8")

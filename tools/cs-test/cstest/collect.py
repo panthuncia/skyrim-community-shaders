@@ -93,6 +93,46 @@ def scan_log(path, limit_lines=5_000_000):
     }
 
 
+FGTEST = re.compile(r"^\[(?P<time>[0-9:.]+)\] .*\[FGTEST\] (?P<fps>\d+) fps, (?P<presents>\d+) FSR-FG presents")
+
+
+def fgtest_seconds(path, day):
+    """The [FGTEST] seconds in which FSR-FG presented, as (wall time, rendered fps). day: the run's start (epoch seconds)."""
+    import datetime
+
+    base = datetime.datetime.fromtimestamp(day).replace(hour=0, minute=0, second=0, microsecond=0)
+    out = []
+    try:
+        with open(path, encoding="utf-8", errors="replace") as f:
+            for line in f:
+                m = FGTEST.search(line)
+                if m and int(m["presents"]) > 0:
+                    h, mi, s = m["time"].split(":")
+                    when = base + datetime.timedelta(hours=int(h), minutes=int(mi), seconds=float(s))
+                    out.append((when.timestamp(), int(m["fps"])))
+    except OSError:
+        pass
+    return out
+
+
+def fgtest_rates(path):
+    """Median rendered frames and FSR-FG presents per second over the [FGTEST] seconds in which FSR-FG presented."""
+    rows = []
+    try:
+        with open(path, encoding="utf-8", errors="replace") as f:
+            for line in f:
+                m = FGTEST.search(line)
+                if m and int(m["presents"]) > 0:
+                    rows.append((int(m["fps"]), int(m["presents"])))
+    except OSError:
+        pass
+    if not rows:
+        return {"fgtest_seconds": 0}
+    fps = sorted(r[0] for r in rows)
+    presents = sorted(r[1] for r in rows)
+    return {"fgtest_seconds": len(rows), "rendered_fps_median": fps[len(fps) // 2], "fsrfg_presents_median": presents[len(presents) // 2]}
+
+
 def log_contains(path, needles):
     """Which of the substrings appear in the log."""
     found = set()

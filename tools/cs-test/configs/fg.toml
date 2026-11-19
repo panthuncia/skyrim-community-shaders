@@ -1,6 +1,8 @@
 # FSR frame generation switched on mid-session (the fg step), then the CS menu, the pause menu and a loading screen with it on.
-# Driver presents per second are logged (CS_VK_DRIVER_TRACE) next to the [FGTEST] lines. Frame generation runs through DXVK's
-# swap chain only: compose it with guest or d3d11, guest+fg. DLSS-G needs the window in the foreground, FSR does not.
+# Driver presents per second are logged (CS_VK_DRIVER_TRACE) next to the [FGTEST] lines, which count FSR-FG's presents too.
+# --set fg.presentmon=true adds PresentMon's count (result.json "presents"). Compose it with a mode: guest+fg, d3d11+fg,
+# native-fg (native Vulkan). DLSS-G needs the window in the foreground, FSR does not. The saved settings keep the fog's
+# volumetric fog off: keep it off in FG runs, since a non-finite hudless corrupts the generated frames.
 extends = ["base"]
 
 [run]
