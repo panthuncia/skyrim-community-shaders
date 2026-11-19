@@ -8872,3 +8872,36 @@ runs every late version is a new resource (DCLF's buffers, `Engine::3D::VOLUMETR
   "LandscapeDefault EDID texture set from TerrainHelper.esp not found": the shared profile had TerrainHelper.esp switched off by
   then. Each passing run had it on. Shots against the `nfg` stage of the same base: `native-quick` mean channel difference 1.23,
   `guest-quick` 2.5 to 2.7 (eye adaptation; the image matches).
+
+### Step 2: named texture versions (2026-11-19)
+
+Step 2 of the plan: a CS stage can be recorded against texture versions that are not current yet. CS on `org-native/rev-step2`
+from `integ/hard-ports` `2fcb06441`; OMS `rev-step2-named-versions` on `0185120`. ORG unchanged (step 3 runs in parallel).
+
+- **OMS.** `NamedVersions::Textures` makes a set naming texture versions, pending ones included. `FindTexture` answers them,
+  `AdoptAll` adopts them, textures are held weakly. `ComposedVersions` answers from up to four sets, first answer wins. Serials of
+  both come from one sequence. Misses count only the set's own kind, so DCLF's named parity check is not fed CS texture lookups.
+- **CS.** `FrameAnchors.cpp`: `SegmentHostData::versions` is returned for `typeid(org::IResourceVersions)`. `RequestDeclared` takes
+  `RecordVersions { versions, serial }`; the serial is part of the recording cache key. Nothing passes versions yet.
+- **Tests.** `ORGNamedVersionsTests` (WARP): find, miss, serials, errors, `AdoptAll` with textures and an expired one, selection
+  through host data (`VersionedResource::SelectVersion`, pending version bound, then current after adoption), composition order.
+  Passed. `ORGModuleServicesTests`, `ORGGrowthTests`, `ORGBufferPoolTests`, `ORGAsyncPrimitivesTests`, `ORGAsyncRuntimeTests`
+  passed. The texture case in ORG's recording test is left for after step 3 (plan section 9, "Decided by the agent (step 2)").
+
+**Runs** (RX 6600, background, `DXVK_DEBUG=hang`, stage `rv2`; session totals at exit):
+
+| Run | Result | Late versions | New resources made late | Late changes | Late attaches | DCLF (allowed) | At Begin |
+|---|---|---|---|---|---|---|---|
+| `guest-quick` (`b`) | passed | 2 (`twin`) | 137 | 70 | 0 | 61 | 10 |
+| `native-quick` (`b`) | passed | 0 | 90 | 43 | 0 | 60 | 56 |
+| `d3d11+quick` (`b`) | passed | 0 | 0 | 0 | 0 | 0 | 0 |
+| `native-d3d12-quick` (`c`) | passed | 0 | 90 | 43 | 0 | 57 | 56 |
+
+- Same as step 1 except DCLF's allowed adoptions (56 to 59 then, 57 to 61 now), which follow load timing.
+- No `NAMED PARITY` line in any run.
+- Shots against step 1's `rv1` runs: `native-quick` 0.83 to 1.0 mean channel difference, `guest-quick` 1.2 to 1.4,
+  `native-d3d12-quick` 1.1 to 1.9. `d3d11+quick` varies 35 to 109 between any two runs today (exposure; the scene matches) and
+  does not run this code.
+- Cold caches: `guest-quick` `a` and `native-d3d12-quick` `b` stopped while compiling shaders for the new stage (the D3D12 one in a
+  DCLF portal program compile). Each passed after one warm run. Launches: 8.
+
