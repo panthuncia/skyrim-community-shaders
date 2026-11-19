@@ -634,6 +634,9 @@ Known gaps in the ORG ports of Community Shaders features, from the 2026-11-18 h
 -   **Native: the fog volumes hold almost no fog.** With the same settings plain D3D11 shows haze on distant hills; native shows
     none. `CS_ORG_VIEW_ATMOSPHERE_DEBUG=3` reads transmittance near 1 across the screen, so the integrated volumes the post-water
     composite reads are near identity. Before ViewAtmosphere's port native had no fog composite at all, so this was hidden.
+    **Update (2026-11-19, build `0d994ca13`):** native Vulkan now shows the same haze as plain D3D11 at the same spot
+    (`native-vulkan+fog` vs `d3d11+fog`), most likely since the post-water composite flag follows the frame (`b2b46322d`).
+    **Next:** confirm on native D3D12, then close.
 -   **Physical Sky's `PHYSICAL_SKY` define is still stripped from graph builds.** Removing the strip broke DCLF Lighting and
     Effect pipelines (unmapped t63, t69, t110, s3, s4) in native Vulkan, Water's DXIL build (`ApSampler`) in native D3D12, and
     the ORG `ISSAOComposite` build in guest. Reverted on the integration branch; phase 3 of `physical-sky-port.md` maps them.
