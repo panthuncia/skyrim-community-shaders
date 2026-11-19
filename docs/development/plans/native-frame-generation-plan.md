@@ -423,6 +423,12 @@ D3D12 needs new plugin code. Steps 6 and 7 are independent after step 5; swap th
 - Acceptance: same `[FrameGen]` sequence and presented multiplier as before; no new DXVK call outside `DxvkPresenter`.
 - Risks: the DXVK knobs' order is measured and fragile (`StepPhaseCompletion` comments). Move them as a block.
 - Size: M. NVIDIA: no (DLSS-G guest regression check on the 5080 when convenient).
+- Done 2026-11-19 (branch `org-native/fg-presenter-inputs`). `FrameGen::DxvkPresenter` holds DXVK's presenter exports (moved
+  out of `Streamline.cpp`), the sync present, queue depth and tearing knobs, the colour space transition and the torn-down
+  callback. `ActivePresenter()` returns the native presenter when native mode is active. The controller, `Upscaling.cpp`,
+  `HDRDisplay.cpp` and `Hooks.cpp` reach DXVK's presenter only through it; the torn-down step is
+  `Streamline::CompleteSwapchainTeardown`. The interface additions are open question 17. Guest and plain D3D11 `fg` give the
+  same eight `[FrameGen]` lines and the same four recreates as the base build, and presented x2.
 
 ### Step 3: the frame generation inputs pass (FSR-FG), shared by guest and native
 - Purpose: one delivery path in graph modes.
@@ -444,6 +450,12 @@ D3D12 needs new plugin code. Steps 6 and 7 are independent after step 5; swap th
   stage's recording unkeepable and stops the game in a revision (the post stage's open error). Check with a `fg` run that the
   census shows no "not replayable" count for the UI stage.
 - Size: M. NVIDIA: no.
+- Done 2026-11-19 (branch `org-native/fg-presenter-inputs`, Streamline `org-native/fg-inputs-contract`).
+  `ORGUpscaling::QueueFrameGenInputs(label, record, depthCopy)` runs the `cs.upscaling.fg-inputs` client's tap right after the
+  hudless copy's (open question 20); its pass, recorded at execution, takes the run's prepare from a run slot the commit
+  stored and records `cs_RecordFrameGenInputs`'s tags and `slEvaluateFeature(kFeatureFSR_G)` on the stage's list, then restores
+  the graph's heaps. `EvaluateFSRFrameGen` uses it whenever the graph holds the hudless; plain D3D11 keeps the ring. The
+  plugin's contract is open question 22. Render rect: still `Util::ConvertToDynamic`, until `frame-revision-plan.md` step 8.
 
 ### Step 4: BasicRHI, swap chains a presentation layer may wrap
 - Purpose: the generic capability both FFX and DLSS-G need.
@@ -596,6 +608,17 @@ D3D12 needs new plugin code. Steps 6 and 7 are independent after step 5; swap th
 | 11 | **Decided by the agent, to confirm (step 1).** HDR Display's deferred composite runs the present chain suppressed, then composes, then presents, so the UI stage committed before HDR output. Where does the frame end? | (a) `Hooks.cpp` hands HDR Display the frame's end, which it runs at its own present after the composite; (b) keep HDR output on its own ticket | (a): it is the only order in which HDR output can be a UI step. Side effect: a held present (DCLF's load hold) under HDR now holds instead of presenting after the composite |
 | 12 | **Decided by the agent, to confirm (step 1).** A new `cs.hdr`, hudless or clean-scene registration is not in the UI stage's build for a few frames. What do those frames do? | (a) the hudless and clean copies skip (no hudless, the D3D11 snapshot); HDR commits the UI stage early and composes with D3D11; (b) wait for the build | (a): the render thread never waits. A capture in such an HDR frame falls back to D3D11, as before A7 |
 | 13 | **Decided by the agent, to confirm (step 1).** The `Placed` epochs, the anchor part of `AddToFrame` and the late-epoch hook were to go with A7. | (a) keep them; (b) delete | (a): EngineCubeClear is reserved with no stage step, so it still gets a (never run) epoch ranked by `Placed`; the late hook also runs after stage submissions and keeps guest's separator before frame generation's evaluate |
+
+**Steps 2 and 3, decided by the agent, to confirm (2026-11-19).**
+
+| # | Decision | Why |
+|---|---|---|
+| 17 | The interface grew: `RequestConfig` takes a reason (the recreate logs keep theirs), `RequestedSerial()`, and three hooks with no-op defaults: `Settled(owner)` (DXVK relaxes sync present or sets the queue depth), `BeforePresent(method)` (DXVK's per-present depth 2 for FSR-FG) and `Quiesce(leaving)` (DXVK: device idle for DLSS-G, the ring drained for FSR-FG; native: nothing to wait for). DXVK-only plumbing (presets before the first swap chain, the per-frame surface commit, the after-present refresh, HDR's `SetColorSpace1`) are `DxvkPresenter` methods called where the old calls were. | The measured DXVK knob order needs points the step 2 interface did not have; the knobs stay in one file |
+| 18 | Every DXVK request starts a colour space transition that waits for the new swap chain's surface, including the frame-rate setting's present mode change, which did not before. Frame generation's inputs skip until the new surface commits. | One meaning for a request in both backends: the surface is not ready until the replacement is adopted |
+| 19 | The controller finishes a switch when the presenter's adopted serial reaches the request it made, as well as when the feature loads settled. DXVK's adopted serial advances in its torn-down callback. | The plan's "compare desired and adopted"; the loads still gate it so the old sequence holds |
+| 20 | The inputs pass is a third client of the UI stage's FrameGeneration step (`cs.upscaling.fg-inputs`, a `repeats` client with its own tap after the hudless copy), not a step of its own. Its pass orders after the copy through the hudless it reads. | A whole anchor's taps all reach its first step (`TapStepAt`), so a second FrameGeneration step would never be tapped |
+| 21 | The inputs pass declares the hudless as a legacy interop use, so it is in the common state (Vulkan GENERAL) from the pass to the present, not shader read. | `DescribeForCommands` describes every image in that state, as for the upscalers' evaluate; nothing touches the hudless before the present |
+| 22 | The plugin logs a present that finds a frame prepared for another frame ID (`sl.fsr_g` branch `org-native/fg-inputs-contract`), first one then one in 600, and passes it through. Making it fatal in native is step 6's. | Guest still discards on the render thread while its prepare records on DXVK's CS thread, so a fatal check there would only measure that race |
 
 
 1. **Is DLSS-G in native in scope?**

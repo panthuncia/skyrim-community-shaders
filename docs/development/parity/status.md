@@ -141,8 +141,10 @@ To match DXVK, native needs what DXVK's CS thread gives it: the GPU work off the
   steps of the UI stage in both graph modes; no anchor runs an epoch of its own. Guest FSR-FG engages as before (`fg`), and its
   hudless input has no HUD or CS menu. A new registration of any of the three is missing for the few frames before the stage's
   build holds it (no hudless, a D3D11 screenshot, a D3D11 HDR composite).
-- **Frame generation in native**: the native presenter needs the frame-generation controls DXVK exports (swap chain recreate,
-  sync present, queue depth, tearing, the torn-down callback). Until then DLSS-G and FSR-FG stay off in native.
+- **Frame generation's presenter and inputs** (2026-11-19, steps 2 and 3): `FrameGen::Controller` drives DXVK's presenter
+  through `FrameGen::DxvkPresenter` (the native backend is `NativePresenter`). In both graph modes FSR-FG's tags and prepare are a
+  pass of the UI stage after the hudless copy; plain D3D11 keeps the interop ring. Guest `fg` presents x2 as before. DLSS-G and
+  FSR-FG stay off in native until the plan's steps 6 to 8.
 - **Residue:** the reflection cube face draws; load-window shadow draws; the refused occlusion-query draw; the sun occlusion
   draw skipped when its depth is neither kMAIN's nor the Z-prepass copy.
 - **Map:** native shows flat white patches on the world map's terrain. Compare with guest. 2026-11-18 (`map` config, RX 6600):
