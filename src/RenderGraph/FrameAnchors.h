@@ -278,6 +278,13 @@ namespace FrameAnchors
 	*  Run can still fail afterwards. The executed callback confirms submission. */
 	bool Scheduled(std::string_view a_id, Anchor a_anchor);
 
+	/**
+	* @brief Whether this frame's schedule draws a_id's work at a_anchor, from the schedules the stages took at Renderer::Begin.
+	* True when every stage of this frame with a step at a_anchor holding a_id has this registration on, and one such stage exists.
+	* Unlike Scheduled it does not depend on which stage is open, so it gives one answer for the whole frame. Render owner.
+	*/
+	bool ScheduledThisFrame(std::string_view a_id, Anchor a_anchor);
+
 	/** @brief Whether the stage holding a_anchor wholly has a_id's current registration in its last schedule.
 	*  For work queued before the frame's Begin, such as a Bink tick. Render owner. */
 	bool InStage(std::string_view a_id, Anchor a_anchor);
